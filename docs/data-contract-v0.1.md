@@ -120,11 +120,39 @@
 | `revision`, `content` | 현재 상태와 변경 버전 |
 | `origin_execution_id?` | 마지막 변경을 유발한 Tool 실행 |
 
-- Artifact는 Conversation Event가 아니다. 수정 가능한 **현재 상태**다.
-- Plan/Note의 **원본을 Data의 conversation-scoped Artifact에 보존하는 방식은 권고안**, Outside 기본 Workspace를 원본으로 사용할지는 **아직 미결정**.
+- Artifact는 Conversation Event가 아니다. 수정 가능한 **작업 결과·사용자/에이전트 작성 콘텐츠**다. **활성 Workspace/Environment 및 Binding은 Artifact가 아니다.**
+- **확정:** Plan/Note의 원본은 Data의 **conversation-scoped Artifact**로 관리한다. Outside의 기본 Workspace에는 원본을 중복 소유하지 않고 필요시 projection/export를 제공한다.
 - 데이터 접근은 범용 Artifact Read/Write 계약, 의미론적 편집은 각 Internal Tool이 맡는다.
 - Revision CAS 및 동일 Artifact의 수정 충돌 거부를 권고한다.
 - 변경 이력의 보존 정책은 추후 결정. 현재 Revision과 Run/Tool 실행 provenance는 최소 보존을 권고한다.
+
+### 1.6 Operational State와 CurrentStateProjection — 원칙 확정, 필드는 제안
+
+**Artifact는 에이전트가 작성·수정하는 Plan/Note 같은 콘텐츠**다. Workspace의 활성화·연결 관계는 Artifact와 의미와 권한 경계가 다른 **운영 상태(operational state)**다.
+
+| 원천 | Data/Environment 책임 | Prompt로 투영할 정보 |
+| --- | --- | --- |
+| Workspace Registry | Data: 고유 Workspace ID, 유형, 등록 상태, 참조 메타데이터. Workspace 수명은 Environment에 종속되지 않음 | 표시 가능한 이름/ID/유형만 |
+| Environment Activation / Instance | Data: Conversation에서 활성화한 Environment 인스턴스와 설정(정확한 스키마 미결정) | 활성 Environment 식별 및 지원 기능 |
+| Workspace Binding | Data: Environment Instance + Workspace + Conversation의 관계, 활성/철회 상태, 권한 정책 참조 | 사용 가능한 Workspace Binding 식별과 범위 |
+| Default Workspace Selection | Data: 해당 Conversation/Environment의 기본 Binding 선택(스코프 미결정) | 별도 명시가 없을 때 기본 대상 안내 |
+| Artifact | Data: Conversation-scoped Plan/Note 본문과 revision | 현재 Plan/Note 중 Prompt에 필요한 항목 |
+| Live Connectivity | Environment: 대상 Workspace의 온라인/연결/실행 가능 여부 관측 | 필요할 때만 최신 관측을 반영; 저장된 활성 상태로 온라인을 추정 금지 |
+
+`CurrentStateProjection`은 **새로운 authoritative 원본/Workspace 전용 모듈이 아니라 여러 공개 Port의 합성된 읽기 DTO**다. 누가 합성을 수행할지는 Composition Root/Prompt 경계 구현 시 결정하되, 각 원본 소유권은 이전 표에 따른다.
+
+```text
+Data: Registry + Activations + Bindings + Settings + Artifacts
+          \
+           --> CurrentStateProjection --> Prompt --> Provider
+          /
+Environment: optionally observed live connectivity/capabilities
+```
+
+- **Data persisted activation ≠ 실제 온라인 상태 ≠ 현재 실행 권한**이다. Tool을 호출할 때 Environment는 현재 Binding·권한·연결 상태를 별도로 다시 검증한다. Projection의 표시용 정보 또는 Binding ID는 권한 증명이 아니다.
+- Conversation 밖에서도 Workspace 자체는 지속할 수 있지만, 그 Workspace에 접근하는 활성 Binding은 Conversation/Environment 범위에서 관리한다.
+- CurrentState는 Event나 Artifact로 복제할 필요가 없다. 마지막 Run에서 구성된 **전체 프롬프트는 최신 PromptSnapshot**, 실제 송신된 provider-specific 요청은 **각 Run의 raw_request**로 보존한다.
+- 현재 상태의 투영 값이 언제나 원본과 실시간 동기라는 보장은 없다. 요청 생성 시 읽기 버전/기준과 Tool 실행 시 재검증이 필요하다.
 
 ## 2. 관계와 불변식
 
@@ -134,6 +162,8 @@ Conversation(id)
  ├── RunRecord(run_id, raw request/response, trigger_refs)
  │     └── ToolExecutionRecord(call_id, ordinal, result)
  ├── Artifact(artifact_id, revision, content)
+ ├── EnvironmentActivation / WorkspaceBinding / DefaultSelection
+ │      └── Workspace Registry (자원 정체성은 독립)
  └── Latest PromptSnapshot(revision, covers_through_sequence)
 ```
 
@@ -145,6 +175,8 @@ Conversation(id)
 6. **I-06:** Prompt Snapshot은 Conversation당 최신 1개이고, 압축 범위/cursor는 이미 보존된 순서 및 완전한 Tool 그룹과 일치해야 한다.
 7. **I-07:** Run의 Trigger는 기존 Event/Execution 참조다. 다음 Run을 위해 원본을 이동·복제하지 않는다.
 8. **I-08:** Conversation 삭제/비밀 자료 접근은 별도 정책으로 관리한다. 이 문서의 불변은 정상 생애 중 무단 변경 금지이지 영구 삭제 금지가 아니다.
+9. **I-09:** 활성 Workspace/Environment의 authoritative 저장 영역은 Artifact가 아니라 Registry/Activation/Binding/Settings다. 마지막 PromptSnapshot이나 UI projection은 권한 원본이 아니다.
+10. **I-10:** 같은 Conversation에서 Control의 **실행 흐름은 하나만 활성**이고, LLM Run은 동시에 하나만 실행한다. 다만 그 실행 흐름 내 ToolCall 여러 개는 Scheduler가 독립성을 검증하면 병렬로 실행될 수 있다. 다른 Conversation의 실행 흐름은 병렬 가능하다. 구체적인 동기화/lease 메커니즘은 미결정.
 
 ## 3. 영속화 및 원자성 경계 (제안)
 
@@ -167,7 +199,7 @@ If tool calls: persist pending ToolExecutionRecords BEFORE tool execution
 - T3/T4는 별도 트랜잭션일 수 있으나 **T3의 성공 이후 정규화 실패를 복구할 수 있어야** 한다.
 - Call group Event와 그 pending ToolExecutionRecords는 **동일 논리 결과에 기반하고 누락 없이 결합**한다(하나의 DB 트랜잭션 권고).
 - Provider 요청을 기록하는 것과 실제 네트워크 송신은 하나의 DB 트랜잭션으로 보장할 수 없다. crash/retry 정책은 Control + Provider 계약에 남긴다.
-- 사용자 입력에서 실행 중인 병렬 Control 두 개가 같은 Conversation의 Run 경계를 어떻게 정하는지는 추가 결정 필요(Conversation별 실행 lease 또는 순서 정책 권고).
+- **확정:** 같은 Conversation에서는 Run/Control 실행 흐름을 직렬화한다. 한 Run이 ToolCalls를 낸 후 여러 Tool이 병렬 실행되는 동안에도 동일 Conversation에서 다른 Run 흐름을 임의로 시작하지 않는다. 이를 구현하는 lease/lock/queue와 중단 후 소유권 회복 방식은 별도 설계한다.
 
 ### 3.2 Internal Tool의 Artifact 변경
 
@@ -207,6 +239,7 @@ Committed result returned to Control
 | `commit_tool_outcome` | execution ID + actual/model result + optional Conversation event | 결과 및 연결 관계 원자 커밋 |
 | `commit_internal_tool_mutation` | execution + artifact CAS operations + model result + event policy | Artifact / Tool execution / Conversation all-or-none |
 | `read_prompt_basis` | conversation + cursor/boundary + needed artifact refs | 동일한 읽기 기준으로 coherent context input |
+| `read_current_state` (개념적 조회 계약) | conversation + active environment scope | Data의 Registry/Binding/Settings/Artifact 버전과 접근 가능한 상태. Live 관측은 Environment 계약에서 별도 합성 |
 | `get_latest_snapshot` / `replace_latest_snapshot` | conversation + expected revision + coverage + derived content | 최신 1개, conflict 시 명시적 실패 |
 | `get_artifact` / `list_artifacts` | conversation + type/id | current revision + data |
 | `get_workspace_binding` | environment instance + conversation scope + binding | 접근 관계만 조회; **실제 실행 권한 판정은 Environment** |
@@ -245,13 +278,15 @@ Port의 소비자는 DTO/오류 의미만 알아야 하며 내부 SQL·테이블
 
 | ID | 결정 필요 | 초기 추천 |
 | --- | --- | --- |
-| DC-01 | Conversation의 정규화된 이벤트 분류 및 ToolCall 그룹 인코딩 | 별도 `assistant_tool_calls` 이벤트 + ordered calls, call_id 참조 |
-| DC-02 | 하나의 Conversation에 동시 Run을 시작할 수 있는지 | 초기 **단일 진행 중 Run/Control lease**, 다른 Conversation은 병렬 |
+| DC-01 | **확정: 이벤트 유형별 불변 canonical payload**. 구체 event kind enumeration / ToolCall 그룹 wire 표현은 미정 | ordered call group과 call_id 참조를 권고 |
+| DC-02 | **확정: 동일 Conversation의 실행 흐름과 Run은 직렬화**. lease/queue와 재개 구현만 미정 | 한 흐름 내 독립 ToolCall 병렬 실행은 허용 |
 | DC-03 | Raw Provider 요청/응답 저장의 실제 직렬화·비밀·stream 범위 | 원본 body exact, credential 제외, streaming 세부 형식 별도 |
-| DC-04 | ToolResult가 Conversation에 없을 때 정확한 native replay 생성 주체 | Prompt가 출처 선택/정합성, Provider가 wire rendering |
+| DC-04 | **확정: Prompt가 실행 기록에서 소스 선택 및 정합성 확인, Provider가 native wire 직렬화**. 부분 누락·unpaired 결과의 구체 실패 계약 미정 | 불완전 history는 fail closed |
 | DC-05 | **최신 전체 Prompt Snapshot**의 저장 형식, exact coverage/Execution 연결/cursor 원자성 | 압축 + exact tail + current state를 포함한 가장 최근 구성 입력 1개; 완전한 Tool 그룹 경계로 coverage, CAS 갱신 |
-| DC-06 | Artifact의 원본 저장 위치 및 삭제/수정 이력 | Data conversation-scoped artifact 권고, Outside는 projection/export |
+| DC-06 | **확정: Plan/Note 원본은 Data conversation-scoped Artifact**. 삭제·Revision 이력과 Outside export 정책은 미정 | Outside는 원본과 별도 copy of record가 되지 않음 |
 | DC-07 | Run/Tool 결과 불명, 재시도, 취소 및 recovery 상태 전이 | 모호한 외부 효과는 UNKNOWN; 자동 재실행하지 않음 |
 | DC-08 | Public Port granularity와 모듈별 소유 DTO | 도메인별 작은 API 묶음, 내부 repository 직접 참조 불허 |
+| DC-09 | **CurrentStateProjection DTO**의 소유 위치와 갱신 기준 | 원본은 Data Registry/Activation/Binding/Artifact + Environment의 live 관측, 조회모델은 Prompt 입력용 |
+| DC-10 | 동일 Conversation의 **Control lease/queue, crash 후 회수 규칙** | Run 직렬화는 확정, 실행 방식은 별도 결정 |
 
-**이 문서의 제안은 사용자 확정을 기다리는 초안**이다. 결정 기록에 새 Confirmed ID를 추가하지 않는다.
+**기존 확정 원칙 및 DC-01/02/04/06의 명시적으로 채택된 부분 외에**, 이 문서의 타입 이름·실제 DB 스키마·원자성 구현·동기화 메커니즘은 여전히 검토 초안이다.
