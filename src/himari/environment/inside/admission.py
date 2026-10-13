@@ -15,7 +15,16 @@ and the command uses ordinary file access, so the root must not contain:
 The scan walks from the already verified root fd with the same strict
 ``openat2`` resolution as the file Tools (no symlinks, no mount crossing)
 and is bounded: beyond ``max_entries`` the command is refused rather than
-declared safe. The caller keeps the same root fd open through the spawn.
+declared safe. Pending directories are kept as relative paths and reopened
+from the root fd one at a time, so at most two descriptors are open however
+wide the tree is. The caller keeps the same root fd open through the spawn.
+
+This is a point-in-time check. It holds under the P0 assumptions — one
+server process, and Workspace content changed only through Inside Tools
+and commands that run under the same per-Workspace lock. A second writer
+(another worker, an upload path, a host process) could add a link or a
+mount after the check; such paths must take the same lock or this check
+must be revisited (Q-40).
 """
 
 from __future__ import annotations
@@ -69,43 +78,46 @@ def admit_workspace(
 ) -> None:
     """Raise AdmissionError unless the whole root is safe to bind.
     ``mountinfo`` overrides /proc/self/mountinfo (tests only)."""
-    if mounts_below(host_root, mountinfo):
-        raise AdmissionError(AdmissionCategory.NESTED_MOUNT)
     try:
+        nested = mounts_below(host_root, mountinfo)
         device = os.fstat(root_fd).st_dev
-    except OSError:
+    except (OSError, ValueError):
         raise AdmissionError(AdmissionCategory.UNREADABLE) from None
+    if nested:
+        raise AdmissionError(AdmissionCategory.NESTED_MOUNT)
     links: dict[int, list[int]] = {}  # inode -> [st_nlink, links seen inside]
     entries = 0
-    pending = [os.dup(root_fd)]
-    try:
-        while pending:
-            dir_fd = pending.pop()
-            try:
-                with os.scandir(dir_fd) as items:
-                    for item in items:
-                        entries += 1
-                        if entries > max_entries:
-                            raise AdmissionError(AdmissionCategory.TOO_LARGE)
-                        info = item.stat(follow_symlinks=False)
-                        if stat.S_ISDIR(info.st_mode):
-                            if info.st_dev != device:
-                                raise AdmissionError(AdmissionCategory.NESTED_MOUNT)
-                            try:
-                                pending.append(fs.openat2(dir_fd, item.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW))
-                            except fs.FsError as error:
-                                category = (AdmissionCategory.NESTED_MOUNT if error.category is fs.FsCategory.CROSS_DEVICE
-                                            else AdmissionCategory.UNREADABLE)
-                                raise AdmissionError(category) from None
-                        elif stat.S_ISREG(info.st_mode) and info.st_nlink > 1:
-                            seen = links.setdefault(info.st_ino, [info.st_nlink, 0])
-                            seen[1] += 1
-            except OSError:
-                raise AdmissionError(AdmissionCategory.UNREADABLE) from None
-            finally:
-                os.close(dir_fd)
-    finally:
-        for fd in pending:
-            os.close(fd)
+    pending = [""]  # paths relative to the root, never open descriptors
+    while pending:
+        relative = pending.pop()
+        try:
+            dir_fd = (os.dup(root_fd) if not relative
+                      else fs.openat2(root_fd, relative, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW))
+        except fs.FsError as error:
+            category = (AdmissionCategory.NESTED_MOUNT if error.category is fs.FsCategory.CROSS_DEVICE
+                        else AdmissionCategory.UNREADABLE)
+            raise AdmissionError(category) from None
+        except OSError:
+            raise AdmissionError(AdmissionCategory.UNREADABLE) from None
+        try:
+            if os.fstat(dir_fd).st_dev != device:
+                raise AdmissionError(AdmissionCategory.NESTED_MOUNT)
+            with os.scandir(dir_fd) as items:
+                for item in items:
+                    entries += 1
+                    if entries > max_entries:
+                        raise AdmissionError(AdmissionCategory.TOO_LARGE)
+                    info = item.stat(follow_symlinks=False)
+                    if stat.S_ISDIR(info.st_mode):
+                        if info.st_dev != device:
+                            raise AdmissionError(AdmissionCategory.NESTED_MOUNT)
+                        pending.append(f"{relative}/{item.name}" if relative else item.name)
+                    elif stat.S_ISREG(info.st_mode) and info.st_nlink > 1:
+                        seen = links.setdefault(info.st_ino, [info.st_nlink, 0])
+                        seen[1] += 1
+        except OSError:
+            raise AdmissionError(AdmissionCategory.UNREADABLE) from None
+        finally:
+            os.close(dir_fd)
     if any(seen < nlink for nlink, seen in links.values()):
         raise AdmissionError(AdmissionCategory.EXTERNAL_HARDLINK)

@@ -215,3 +215,28 @@ def test_self_test_fails_when_the_view_exposes_host_paths(tmp_path: Path, monkey
     monkeypatch.setattr(sbmod, "bwrap_arguments", leaky)
     report = asyncio.run(probe(SandboxBackend.discover(), (parent,)))
     assert not report.passed and any(f.startswith("mounts:") for f in report.failures), report.failures
+
+
+# --- PR #9 re-review N1: cancellation while bwrap is being created ----------------------
+
+
+def test_cancel_during_bwrap_creation_leaves_nothing_behind(backend: SandboxBackend, tmp_path: Path) -> None:
+    root_fd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+
+    async def scenario() -> None:
+        for _ in range(400):  # before the fix: an orphaned bwrap child and a hang, usually within ~150 tries
+            task = asyncio.create_task(backend.launch(["true"], root_fd=root_fd, cwd="/workspace", timeout=10))
+            await asyncio.sleep(0)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(task, 15)
+
+    before = len(os.listdir("/proc/self/fd"))
+    try:
+        asyncio.run(scenario())
+    finally:
+        os.close(root_fd)
+    assert len(os.listdir("/proc/self/fd")) == before - 1
+    time.sleep(0.5)
+    orphans = subprocess.run(["pgrep", "-x", "-P", "1", "-u", str(os.getuid()), "bwrap"], capture_output=True, text=True)
+    assert orphans.stdout.strip() == "", "an orphaned bwrap survived a cancelled spawn"

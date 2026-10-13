@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -374,3 +375,102 @@ def test_admission_refuses_a_workspace_with_a_mount_below_it(tmp_path: Path) -> 
         admission.admit_workspace(fd, str(root), mountinfo="")  # no mounts below: admitted
     finally:
         os.close(fd)
+
+
+# --- PR #9 re-review N1: cancellation while the process is being created ---------------
+
+
+def _open_fds() -> int:
+    return len(os.listdir("/proc/self/fd"))
+
+
+def test_cancel_during_spawn_closes_the_sync_pipe(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def slow_failing_spawn(*args: object, **kwargs: object) -> asyncio.subprocess.Process:
+        await asyncio.sleep(0.02)
+        raise OSError("spawn did not happen")
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", slow_failing_spawn)
+    backend = sb.SandboxBackend(CAP)
+    root_fd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+
+    async def scenario() -> None:
+        for _ in range(20):
+            task = asyncio.create_task(backend.launch(["x"], root_fd=root_fd, cwd="/workspace", timeout=5))
+            await asyncio.sleep(0)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+    try:
+        before = _open_fds()
+        asyncio.run(scenario())
+        assert _open_fds() == before
+    finally:
+        os.close(root_fd)
+
+
+def test_cancel_during_a_real_spawn_leaves_no_fd_or_process(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    pid_dir = tmp_path / "pids"
+    pid_dir.mkdir()
+    counter = iter(range(1000))
+    monkeypatch.setattr(sb, "bwrap_arguments", lambda cap, root_fd, cwd, sync_fd, argv: [
+        sys.executable, "-c", FAKE_SANDBOX, str(sync_fd), str(pid_dir / str(next(counter))), "sync"])
+    backend = sb.SandboxBackend(CAP)
+    root_fd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+
+    async def scenario() -> None:
+        for delay in [0.0] * 15 + [0.01, 0.03, 0.1, 0.3]:
+            task = asyncio.create_task(backend.launch(["x"], root_fd=root_fd, cwd="/workspace", timeout=60))
+            await asyncio.sleep(delay)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(task, 15)  # a hang here fails as TimeoutError
+
+    try:
+        before = _open_fds()
+        asyncio.run(scenario())
+        assert _open_fds() == before
+    finally:
+        os.close(root_fd)
+    pids = [int(p) for f in pid_dir.iterdir() if f.read_text() for p in f.read_text().split()]
+    deadline = time.monotonic() + 3
+    while any(_alive(p) for p in pids) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert not any(_alive(p) for p in pids)
+
+
+# --- PR #9 re-review N2 + advice: admission descriptor use and error mapping -------------
+
+WIDE_TREE = r"""
+import os, resource, sys
+sys.path.insert(0, sys.argv[2])
+from himari.environment.inside import admission
+root = sys.argv[1]
+for i in range(3000):
+    os.makedirs(f"{root}/d{i}/sub")
+resource.setrlimit(resource.RLIMIT_NOFILE, (128, resource.getrlimit(resource.RLIMIT_NOFILE)[1]))
+fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+admission.admit_workspace(fd, root)
+print("ADMITTED")
+"""
+
+
+def test_admission_of_a_wide_tree_uses_few_descriptors(tmp_path: Path) -> None:
+    src = str(Path(__file__).resolve().parents[2] / "src")
+    done = subprocess.run([sys.executable, "-I", "-c", WIDE_TREE, str(tmp_path), src],
+                          capture_output=True, text=True, timeout=120)
+    assert done.stdout.strip() == "ADMITTED", done.stderr[-2000:]
+
+
+def test_unreadable_mount_table_is_a_typed_refusal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from himari.environment.inside import admission
+
+    def broken(host_root: str, mountinfo: str | None = None) -> list[str]:
+        raise OSError("mountinfo unavailable")
+
+    monkeypatch.setattr(admission, "mounts_below", broken)
+    backend = FakeBackend(sb.SandboxState.ENFORCED)
+    env = make_env(tmp_path, backend)
+    outcome = run_tool(env, {"argv": ["true"]})
+    assert outcome.status is ToolStatus.DENIED and "could not be verified" in text(outcome)
+    assert backend.calls == []

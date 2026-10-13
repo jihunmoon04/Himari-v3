@@ -219,6 +219,22 @@ async def _wait_sync(fd: int, timeout: float) -> bytes:
     return bytes(data)
 
 
+async def _abandon(spawn: asyncio.Future[asyncio.subprocess.Process]) -> None:
+    """After a cancelled spawn: kill the group as soon as it exists (even if
+    that is after this returns), and reap it within a bounded wait."""
+
+    def kill(done: asyncio.Future[asyncio.subprocess.Process]) -> None:
+        if not done.cancelled() and done.exception() is None:
+            _kill_tree(done.result().pid)
+
+    spawn.add_done_callback(kill)
+    try:
+        process = await asyncio.wait_for(asyncio.shield(spawn), _DRAIN_GRACE_SECONDS)
+    except BaseException:
+        return  # the spawn failed (nothing runs), is still pending, or a second cancellation arrived
+    await _reap(process)
+
+
 async def _reap(process: asyncio.subprocess.Process) -> None:
     """Best-effort reap after SIGKILL; survives a second cancellation."""
     try:
@@ -293,10 +309,10 @@ class SandboxBackend:
             raise ValueError("cwd must be under /workspace")
         argv = validate_argv(argv)
         sync_r, sync_w = os.pipe()
-        os.set_blocking(sync_r, False)
-        started = time.monotonic()
         try:
-            process = await asyncio.create_subprocess_exec(
+            os.set_blocking(sync_r, False)
+            started = time.monotonic()
+            spawn = asyncio.ensure_future(asyncio.create_subprocess_exec(
                 *bwrap_arguments(self._capability, root_fd, cwd, sync_w, argv),
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
@@ -304,19 +320,34 @@ class SandboxBackend:
                 env={},
                 pass_fds=(sync_w, root_fd),
                 start_new_session=True,
-            )
-        except OSError as error:
+            ))
+            try:
+                # The spawn itself is never interrupted: asyncio's own cleanup
+                # of a cancelled spawn SIGKILLs only the outer bwrap, which can
+                # orphan its child while that still waits for the uid map
+                # (before --die-with-parent applies) and then hang on the
+                # child's copy of the pipes. Instead let the spawn finish and
+                # kill the whole process group, which the child still shares.
+                process = await asyncio.shield(spawn)
+            except asyncio.CancelledError:
+                await _abandon(spawn)
+                raise
+            except OSError as error:
+                raise SandboxSetupError("bwrap could not start") from error
+            finally:
+                # Both ends are closed on every path, cancellation included.
+                os.close(sync_w)
+            return await self._supervise(process, sync_r, timeout, started)
+        finally:
             os.close(sync_r)
-            os.close(sync_w)
-            raise SandboxSetupError("bwrap could not start") from error
-        os.close(sync_w)
+
+    async def _supervise(
+        self, process: asyncio.subprocess.Process, sync_r: int, timeout: float, started: float
+    ) -> CommandResult:
         tasks: list[asyncio.Task[tuple[bytes, int]]] = []
         finished = False
         try:
-            try:
-                sync = await _wait_sync(sync_r, SETUP_TIMEOUT_SECONDS)
-            finally:
-                os.close(sync_r)
+            sync = await _wait_sync(sync_r, SETUP_TIMEOUT_SECONDS)
             if sync != landlock_helper.SYNC_OK:
                 raise SandboxSetupError("the sandbox did not report enforcement")
 
