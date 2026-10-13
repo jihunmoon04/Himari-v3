@@ -38,6 +38,7 @@
 | V3-026 | Confirmed | Conversation에 기록하지 않은 ToolResult 등은 **Prompt가 원본 Execution 기록에서 선택·정합성을 검증**하고, **Provider가 native wire 구조로 직렬화**한다. 불완전한 호출 그룹을 날조하지 않는다. |
 | V3-027 | Confirmed | **Plan/Note 원본은 Data의 conversation-scoped Artifact**에 보존한다. Outside의 기본 Workspace에 중복 원본을 두지 않으며 외부 노출/export는 별도 계약. |
 | V3-028 | Confirmed | **활성 Workspace 및 Environment는 Artifact가 아니라 운영 상태**다. Workspace Registry/Environment Activation/Workspace Binding 및 설정은 Data에서 관리하고, 실시간 연결 가능 여부는 Environment에서 관측한다. Prompt의 Current State는 이를 합성한 읽기 투영이다. |
+| V3-029 | Confirmed | 모든 모듈의 공개 계약은 **Contract ID/Version/Status, Owner, Provider, Consumer, Source of Truth, Contract Location**을 추적한다. 실제 Input/Output, Guarantees/Errors/Effects, Dependencies/Tests도 계약 의미에 맞게 기록한다. Owner의 공개 Port만 사용하고 현재 미구현 코드 위치는 planned로 구분한다. **통합 인벤토리는 [contracts.md](contracts.md)**에서 관리한다. |
 
 ## B. 현재 채택을 권고하지만 세부 확정 전인 설계
 
@@ -70,7 +71,7 @@
 - **활성 Workspace/Environment 저장 영역과 Artifact의 구분은 확정**. 실제 현재 상태 조회 DTO, 연결상태 갱신 주기, 바인딩 선택 및 기본 Workspace 정책은 미결정.
 - v2 데이터/기능 이식의 범위와 절차.
 
-각 항목의 우선순위와 완료 조건은 [미결정 항목](open-questions.md)에서 관리한다. 상세 흐름은 [Prompt Composition](prompt-composition.md), [Data and Tools](data-and-tools.md), [Data Contract v0.1](data-contract-v0.1.md) 참조.
+각 항목의 우선순위와 완료 조건은 [미결정 항목](open-questions.md)에서 관리한다. 공개 계약의 Owner·Consumer·데이터 출처 지도는 [contracts.md](contracts.md)에서 관리한다. 상세 흐름은 [Prompt Composition](prompt-composition.md), [Data and Tools](data-and-tools.md), [Data Contract v0.1](data-contract-v0.1.md) 참조.
 
 ## D. v2에서 자동 이식하지 않는 구조
 
