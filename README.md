@@ -7,7 +7,7 @@ HIMARI v3의 **아키텍처와 구현 현황**입니다. 2026-10-13 기준 PR #1
 | 영역 | 구현됨 | 아직 미구현 |
 | --- | --- | --- |
 | Control | Run 반복, FINAL, `ask_user`, `resume`, Conversation별 프로세스 내 lock | 정식 Pause/Cancel, 다중 worker |
-| Data | Conversation Event/Run/ToolExecution/Artifact, raw 요청·응답, T3/T6 claim 및 UNKNOWN 복구. 인메모리(테스트) + **SQLite 영속 저장**(WAL·`synchronous=FULL`, 포트 호출당 트랜잭션 1개, 단일 writer 잠금, 0600 파일) | 스키마 마이그레이션, 저장 데이터 암호화·보존/삭제 정책, 백업 |
+| Data | Conversation Event/Run/ToolExecution/Artifact, raw 요청·응답, T3/T6 claim 및 UNKNOWN 복구. 인메모리(테스트) + **SQLite 영속 저장**(WAL·`synchronous=FULL`, 포트 호출당 트랜잭션 1개, 단일 writer 잠금, 0600 파일·비공개 폴더 강제, 스키마 식별 검증) | 스키마 마이그레이션, 저장 데이터 암호화·보존/삭제 정책, 백업 |
 | Prompt | 전체 이력·ToolResult·CurrentState·턴별 continuation 재구성 | Context 압축·예산, Snapshot의 압축 활용 |
 | Provider | Scripted Fake + 실제 OpenRouter, wire-exact 요청 전송·요청/응답 원본 기록, reasoning effort/usage/continuation | 추가 Provider, Streaming |
 | Tool | Registry·Schema 검증·Dispatcher·결과 및 Artifact 커밋, Inside 파일 Tool 5종, `inside/run_command` | Memory·Plan Tool, 병렬 Scheduler(현재 순차 + Workspace별 직렬화) |

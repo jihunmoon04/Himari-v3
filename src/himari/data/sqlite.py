@@ -14,16 +14,26 @@ inside) at the cost of blocking the loop for one commit's fsync.
 Single writer (P0, V3-045): ``SqliteStore`` takes an exclusive ``flock`` on
 ``<path>.lock`` for its whole lifetime, so a second process (or a second
 store in the same process) cannot open the same database; the kernel
-releases it when the process dies. The database and lock files are created
-``0600`` — they hold raw Provider requests and responses.
+releases it when the process dies.
+
+Private files: the database holds raw Provider requests and responses. Its
+directory must belong to this user and not be writable by others; the
+database, lock, WAL, SHM and journal files must be regular files of this
+user with mode 600 and a single name. New files are created 0600 without
+following symlinks; anything else is refused, never silently re-permissioned.
+
+Identity: a database is accepted only with HIMARI's ``application_id``, the
+supported ``user_version`` and exactly the expected tables and indexes.
 """
 
 from __future__ import annotations
 
 import dataclasses
+import errno
 import fcntl
 import os
 import sqlite3
+import stat
 from collections.abc import Iterator, Sequence
 from contextlib import AbstractContextManager, contextmanager
 from datetime import UTC, datetime
@@ -84,6 +94,7 @@ from himari.data.api import (
 )
 
 SCHEMA_VERSION = 1
+APPLICATION_ID = 0x48494D41  # "HIMA": written into the database header (PRAGMA application_id)
 
 _TERMINAL_COMPLETIONS = frozenset(
     {
@@ -204,17 +215,89 @@ class StoreLockedError(RuntimeError):
     """Another live store (this or another process) has the database open."""
 
 
-def _create_private(path: str) -> None:
-    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o600)
-    os.close(fd)
+class StoreSecurityError(RuntimeError):
+    """The database files or their directory are not private to this user."""
+
+
+class StoreSchemaError(RuntimeError):
+    """The file is not a HIMARI database of the supported schema."""
+
+
+def _check_private(path: str, info: os.stat_result) -> None:
+    """A store file must be a regular file of this user, with no group or
+    other permission bits and no second name (hard link)."""
+    if not stat.S_ISREG(info.st_mode):
+        raise StoreSecurityError(f"{path} is not a regular file")
+    if info.st_uid != os.geteuid():
+        raise StoreSecurityError(f"{path} is owned by another user")
+    if info.st_mode & 0o077:
+        raise StoreSecurityError(f"{path} is accessible to other users (mode {stat.S_IMODE(info.st_mode):o}; expected 600)")
+    if info.st_nlink != 1:
+        raise StoreSecurityError(f"{path} has other hard links")
+
+
+def _open_private(path: str) -> int:
+    """Open or create ``path`` (0600) without following a symlink, then
+    verify what was opened. Existing files are never re-permissioned: a
+    file that was readable by others may already have leaked."""
+    try:
+        fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    except OSError as error:
+        if error.errno == errno.ELOOP:
+            raise StoreSecurityError(f"{path} is a symbolic link") from None
+        raise
+    try:
+        _check_private(path, os.fstat(fd))
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def _check_existing_private(path: str) -> None:
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        return
+    if stat.S_ISLNK(info.st_mode):
+        raise StoreSecurityError(f"{path} is a symbolic link")
+    _check_private(path, info)
+
+
+def _check_directory(path: str) -> None:
+    """Only this user may change the directory, so nobody can swap a store
+    file (or pre-create a WAL/SHM file) between these checks and SQLite's
+    own opens by name."""
+    info = os.stat(path)
+    if not stat.S_ISDIR(info.st_mode):
+        raise StoreSecurityError(f"{path} is not a directory")
+    if info.st_uid != os.geteuid() or info.st_mode & 0o022:
+        raise StoreSecurityError(f"{path} must be owned by this user and not writable by others")
+
+
+def _schema_signature(conn: sqlite3.Connection) -> list[tuple[str, str, str, str | None]]:
+    return [tuple(row) for row in conn.execute(
+        "SELECT type, name, tbl_name, sql FROM sqlite_master ORDER BY type, name")]
+
+
+def _expected_signature() -> list[tuple[str, str, str, str | None]]:
+    reference = sqlite3.connect(":memory:")
+    try:
+        for statement in _SCHEMA.split(";"):
+            if statement.strip():
+                reference.execute(statement)
+        return _schema_signature(reference)
+    finally:
+        reference.close()
 
 
 class SqliteStore:
     """Durable storage plus admin helpers (not part of any port)."""
 
     def __init__(self, path: str | os.PathLike[str]) -> None:
-        self.path = os.fspath(path)
-        lock_fd = os.open(f"{self.path}.lock", os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o600)
+        self.path = os.path.abspath(os.fspath(path))
+        _check_directory(os.path.dirname(self.path))
+        lock_fd = _open_private(f"{self.path}.lock")
         try:
             fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
@@ -222,29 +305,43 @@ class SqliteStore:
             raise StoreLockedError(f"{self.path} is in use by another store") from None
         self._lock_fd: int | None = lock_fd
         try:
-            _create_private(self.path)
+            os.close(_open_private(self.path))
+            for suffix in ("-wal", "-shm", "-journal"):  # SQLite creates these with the database's mode
+                _check_existing_private(self.path + suffix)
             self.connection = sqlite3.connect(self.path, isolation_level=None, check_same_thread=True)
+        except BaseException:
+            self._release_lock()
+            raise
+        try:
             self.connection.row_factory = sqlite3.Row
             self._configure()
         except BaseException:
-            self._release_lock()
+            self.close()
             raise
 
     def _configure(self) -> None:
         conn = self.connection
+        application = conn.execute("PRAGMA application_id").fetchone()[0]
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+        empty = conn.execute("SELECT count(*) FROM sqlite_master").fetchone()[0] == 0
+        if not (empty and application == 0 and version == 0):  # an existing database: verify before writing
+            if application != APPLICATION_ID:
+                raise StoreSchemaError(f"{self.path} is not a HIMARI database")
+            if version != SCHEMA_VERSION:
+                raise StoreSchemaError(f"unsupported schema version {version} (expected {SCHEMA_VERSION})")
+            if _schema_signature(conn) != _expected_signature():
+                raise StoreSchemaError(f"{self.path} does not have the HIMARI schema {SCHEMA_VERSION}")
+            if conn.execute("SELECT count(*) FROM meta WHERE key='next_id'").fetchone()[0] != 1:
+                raise StoreSchemaError(f"{self.path} has no id counter")
         if conn.execute("PRAGMA journal_mode=WAL").fetchone()[0] != "wal":
             raise RuntimeError("SQLite WAL mode is unavailable")
         conn.execute("PRAGMA synchronous=FULL")
         conn.execute("PRAGMA foreign_keys=ON")
-        version = conn.execute("PRAGMA user_version").fetchone()[0]
-        if version == 0:
-            if conn.execute("SELECT count(*) FROM sqlite_master").fetchone()[0]:
-                raise RuntimeError(f"{self.path} is not a HIMARI database")
+        if empty:
             with self.transaction() as tx:
                 tx.executescript_parts(_SCHEMA)
+                tx.execute(f"PRAGMA application_id={APPLICATION_ID}")
                 tx.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
-        elif version != SCHEMA_VERSION:
-            raise RuntimeError(f"unsupported schema version {version} (expected {SCHEMA_VERSION})")
 
     def close(self) -> None:
         try:

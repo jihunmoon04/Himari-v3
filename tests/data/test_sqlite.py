@@ -5,6 +5,7 @@ files, schema versioning, and raw-persistence failure before send."""
 from __future__ import annotations
 
 import asyncio
+import fcntl
 import os
 import sqlite3
 import stat
@@ -47,7 +48,15 @@ from himari.data.api import (
     ToolCompletion,
     ToolExecutionStatus,
 )
-from himari.data.sqlite import SCHEMA_VERSION, SqliteData, SqliteStore, StoreLockedError
+from himari.data.sqlite import (
+    APPLICATION_ID,
+    SCHEMA_VERSION,
+    SqliteData,
+    SqliteStore,
+    StoreLockedError,
+    StoreSchemaError,
+    StoreSecurityError,
+)
 from himari.provider.scripted import ScriptedAdapter
 from himari.tool.api import EffectProfile, WorkspaceRequirement
 from himari.tool.dispatcher import UNKNOWN_OUTCOME_RESULT
@@ -176,22 +185,116 @@ def test_only_one_store_may_open_a_database(tmp_path: Path) -> None:
     SqliteStore(path).close()
 
 
-def test_schema_version_and_foreign_files_are_refused(tmp_path: Path) -> None:
+def tamper(path: Path, *statements: str) -> None:
+    conn = sqlite3.connect(path, isolation_level=None)
+    for statement in statements:
+        conn.execute(statement)
+    conn.close()
+
+
+def foreign_database(path: Path, *statements: str) -> None:
+    tamper(path, "CREATE TABLE notes (x)", *statements)
+    path.chmod(0o600)  # private, so only the identity checks can refuse it
+
+
+@pytest.mark.parametrize("change, message", [
+    (f"PRAGMA user_version={SCHEMA_VERSION + 1}", "unsupported schema version"),
+    ("PRAGMA application_id=1", "not a HIMARI database"),
+    ("DROP INDEX runs_by_conversation", "does not have the HIMARI schema"),
+    ("ALTER TABLE runs ADD COLUMN extra TEXT", "does not have the HIMARI schema"),
+    ("CREATE TABLE extra (x)", "does not have the HIMARI schema"),
+    ("DELETE FROM meta", "no id counter"),
+])
+def test_a_changed_himari_database_is_refused(tmp_path: Path, change: str, message: str) -> None:
     path = tmp_path / "h.db"
     SqliteStore(path).close()
-    conn = sqlite3.connect(path)
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
-    conn.execute(f"PRAGMA user_version={SCHEMA_VERSION + 1}")
-    conn.close()
-    with pytest.raises(RuntimeError, match="unsupported schema version"):
+    tamper(path, change)
+    with pytest.raises(StoreSchemaError, match=message):
         SqliteStore(path)
 
-    other = tmp_path / "other.db"
-    conn = sqlite3.connect(other)
-    conn.execute("CREATE TABLE notes (x)")
+
+@pytest.mark.parametrize("statements", [(), (f"PRAGMA user_version={SCHEMA_VERSION}",),
+                                        (f"PRAGMA user_version={SCHEMA_VERSION}", f"PRAGMA application_id={APPLICATION_ID}")])
+def test_a_foreign_database_is_refused_whatever_its_header_says(tmp_path: Path, statements: tuple[str, ...]) -> None:
+    path = tmp_path / "other.db"
+    foreign_database(path, *statements)
+    with pytest.raises(StoreSchemaError):
+        SqliteStore(path)
+    conn = sqlite3.connect(path)
+    assert [r[0] for r in conn.execute("SELECT name FROM sqlite_master")] == ["notes"]  # left untouched
     conn.close()
-    with pytest.raises(RuntimeError, match="not a HIMARI database"):
-        SqliteStore(other)
+
+
+def test_a_failed_open_releases_the_connection_and_the_lock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    path = tmp_path / "other.db"
+    foreign_database(path, f"PRAGMA user_version={SCHEMA_VERSION}")
+    opened: list[sqlite3.Connection] = []
+    real_connect = sqlite3.connect
+
+    def recording_connect(*args: Any, **kwargs: Any) -> sqlite3.Connection:
+        conn: sqlite3.Connection = real_connect(*args, **kwargs)
+        opened.append(conn)
+        return conn
+
+    monkeypatch.setattr(sqlite3, "connect", recording_connect)
+    with pytest.raises(StoreSchemaError):
+        SqliteStore(path)
+    with pytest.raises(sqlite3.ProgrammingError):
+        opened[0].execute("SELECT 1")  # closed
+    lock = os.open(f"{path}.lock", os.O_RDWR)
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)  # released
+    finally:
+        os.close(lock)
+
+
+# --- private files (PR #10 review B1) -------------------------------------------------------
+
+
+@pytest.mark.parametrize("suffix", ["", ".lock", "-wal", "-shm", "-journal"])
+@pytest.mark.parametrize("mode", [0o644, 0o640, 0o604, 0o660])
+def test_existing_files_open_to_others_are_refused_not_repaired(tmp_path: Path, suffix: str, mode: int) -> None:
+    path = tmp_path / "h.db"
+    SqliteStore(path).close()
+    target = Path(f"{path}{suffix}")
+    target.touch()
+    target.chmod(mode)
+    with pytest.raises(StoreSecurityError, match="accessible to other users"):
+        SqliteStore(path)
+    assert stat.S_IMODE(target.stat().st_mode) == mode  # reported, not silently fixed
+
+
+@pytest.mark.parametrize("suffix", ["", ".lock", "-wal"])
+def test_symlinked_store_files_are_refused(tmp_path: Path, suffix: str) -> None:
+    path = tmp_path / "h.db"
+    if suffix:
+        SqliteStore(path).close()
+    target = tmp_path / "elsewhere"
+    target.write_bytes(b"precious")
+    target.chmod(0o644)
+    Path(f"{path}{suffix}").unlink(missing_ok=True)
+    Path(f"{path}{suffix}").symlink_to(target)
+    with pytest.raises(StoreSecurityError, match="symbolic link"):
+        SqliteStore(path)
+    assert target.read_bytes() == b"precious" and stat.S_IMODE(target.stat().st_mode) == 0o644
+
+
+def test_a_hard_linked_database_is_refused(tmp_path: Path) -> None:
+    path = tmp_path / "h.db"
+    SqliteStore(path).close()
+    os.link(path, tmp_path / "copy.db")
+    with pytest.raises(StoreSecurityError, match="hard links"):
+        SqliteStore(path)
+
+
+@pytest.mark.parametrize("mode", [0o770, 0o707, 0o777])
+def test_a_directory_others_can_change_is_refused(tmp_path: Path, mode: int) -> None:
+    folder = tmp_path / "data"
+    folder.mkdir()
+    folder.chmod(mode)
+    with pytest.raises(StoreSecurityError, match="not writable by others"):
+        SqliteStore(folder / "h.db")
+    assert not (folder / "h.db").exists() and not (folder / "h.db.lock").exists()
 
 
 # --- D15: no send when the request cannot be stored ---------------------------------------
