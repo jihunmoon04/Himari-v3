@@ -190,13 +190,41 @@ async def _drain(stream: asyncio.StreamReader | None, limit: int) -> tuple[bytes
     return bytes(kept), total
 
 
-def _read_sync(fd: int) -> bytes:
-    data = b""
-    while chunk := os.read(fd, 64):
-        data += chunk
-        if len(data) > len(landlock_helper.SYNC_OK):
-            break
-    return data
+async def _wait_sync(fd: int, timeout: float) -> bytes:
+    """Read the helper's report from a non-blocking fd via the event loop
+    (no thread left blocked on an fd that is about to be closed). EOF or
+    timeout ends the wait."""
+    loop = asyncio.get_running_loop()
+    data = bytearray()
+    done: asyncio.Future[None] = loop.create_future()
+
+    def readable() -> None:
+        try:
+            chunk = os.read(fd, 64)
+        except BlockingIOError:
+            return
+        except OSError:
+            chunk = b""
+        data.extend(chunk)
+        if (not chunk or len(data) >= len(landlock_helper.SYNC_OK)) and not done.done():
+            done.set_result(None)
+
+    loop.add_reader(fd, readable)
+    try:
+        await asyncio.wait_for(done, timeout)
+    except TimeoutError:
+        pass
+    finally:
+        loop.remove_reader(fd)
+    return bytes(data)
+
+
+async def _reap(process: asyncio.subprocess.Process) -> None:
+    """Best-effort reap after SIGKILL; survives a second cancellation."""
+    try:
+        await asyncio.wait_for(asyncio.shield(process.wait()), _DRAIN_GRACE_SECONDS)
+    except BaseException:
+        pass
 
 
 def _kill_tree(pid: int) -> None:
@@ -208,7 +236,7 @@ def _kill_tree(pid: int) -> None:
         pass
 
 
-SelfTest = Callable[["SandboxBackend"], Awaitable[bool]]
+SelfTest = Callable[["SandboxBackend", tuple[str, ...]], Awaitable[bool]]
 
 
 class SandboxBackend:
@@ -225,9 +253,10 @@ class SandboxBackend:
     def state(self) -> SandboxState:
         return self._state
 
-    async def start(self, self_test: SelfTest | None = None) -> SandboxState:
+    async def start(self, self_test: SelfTest | None = None, *, protected_paths: tuple[str, ...] = ()) -> SandboxState:
         """Once per process (V3-050): ENFORCED only if the real-spawn
-        self-test passes."""
+        self-test passes. ``protected_paths`` are real host roots (Workspace
+        root, data root, ...) the self-test proves invisible inside."""
         if self._started:
             raise RuntimeError("the sandbox backend starts once per process")
         self._started = True
@@ -238,7 +267,7 @@ class SandboxBackend:
 
             self_test = run_self_test
         try:
-            passed = await self_test(self)
+            passed = await self_test(self, tuple(protected_paths))
         except Exception:
             passed = False
         self._state = SandboxState.ENFORCED if passed else SandboxState.SETUP_FAILED
@@ -264,6 +293,7 @@ class SandboxBackend:
             raise ValueError("cwd must be under /workspace")
         argv = validate_argv(argv)
         sync_r, sync_w = os.pipe()
+        os.set_blocking(sync_r, False)
         started = time.monotonic()
         try:
             process = await asyncio.create_subprocess_exec(
@@ -280,35 +310,45 @@ class SandboxBackend:
             os.close(sync_w)
             raise SandboxSetupError("bwrap could not start") from error
         os.close(sync_w)
+        tasks: list[asyncio.Task[tuple[bytes, int]]] = []
+        finished = False
         try:
-            sync = await asyncio.wait_for(asyncio.to_thread(_read_sync, sync_r), SETUP_TIMEOUT_SECONDS)
-        except TimeoutError:
-            sync = b""
-        finally:
-            os.close(sync_r)
-        if sync != landlock_helper.SYNC_OK:
-            _kill_tree(process.pid)
-            await process.wait()
-            raise SandboxSetupError("the sandbox did not report enforcement")
+            try:
+                sync = await _wait_sync(sync_r, SETUP_TIMEOUT_SECONDS)
+            finally:
+                os.close(sync_r)
+            if sync != landlock_helper.SYNC_OK:
+                raise SandboxSetupError("the sandbox did not report enforcement")
 
-        out_task = asyncio.create_task(_drain(process.stdout, MAX_OUTPUT_BYTES))
-        err_task = asyncio.create_task(_drain(process.stderr, MAX_OUTPUT_BYTES))
-        timed_out = False
-        try:
-            await asyncio.wait_for(process.wait(), timeout)
-        except TimeoutError:
-            timed_out = True
-            _kill_tree(process.pid)
-            await process.wait()
-        try:
-            (stdout, stdout_total), (stderr, stderr_total) = await asyncio.wait_for(
-                asyncio.gather(out_task, err_task), _DRAIN_GRACE_SECONDS
-            )
-        except TimeoutError:
-            out_task.cancel()
-            err_task.cancel()
-            stdout = stderr = b""
-            stdout_total = stderr_total = 0
+            tasks = [
+                asyncio.create_task(_drain(process.stdout, MAX_OUTPUT_BYTES)),
+                asyncio.create_task(_drain(process.stderr, MAX_OUTPUT_BYTES)),
+            ]
+            timed_out = False
+            try:
+                await asyncio.wait_for(process.wait(), timeout)
+            except TimeoutError:
+                timed_out = True
+                _kill_tree(process.pid)
+                await process.wait()
+            try:
+                (stdout, stdout_total), (stderr, stderr_total) = await asyncio.wait_for(
+                    asyncio.gather(*tasks), _DRAIN_GRACE_SECONDS
+                )
+            except TimeoutError:
+                stdout = stderr = b""
+                stdout_total = stderr_total = 0
+            finished = True
+        finally:
+            if not finished:
+                # Cancellation, setup failure or any error after spawn: the
+                # command must not outlive this call (it could keep writing
+                # after the Workspace lock is released).
+                _kill_tree(process.pid)
+                await _reap(process)
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
         return CommandResult(
             exit_code=None if timed_out else process.returncode,
             timed_out=timed_out,

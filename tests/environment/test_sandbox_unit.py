@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -73,15 +76,15 @@ def test_no_capability_means_unavailable_and_nothing_runs() -> None:
         asyncio.run(backend.run(["true"], root_fd=0, cwd="/workspace", timeout=5))
 
 
-async def _passing(_: sb.SandboxBackend) -> bool:
+async def _passing(_: sb.SandboxBackend, __: tuple[str, ...] = ()) -> bool:
     return True
 
 
-async def _failing(_: sb.SandboxBackend) -> bool:
+async def _failing(_: sb.SandboxBackend, __: tuple[str, ...] = ()) -> bool:
     return False
 
 
-async def _raising(_: sb.SandboxBackend) -> bool:
+async def _raising(_: sb.SandboxBackend, __: tuple[str, ...] = ()) -> bool:
     raise RuntimeError("probe crashed")
 
 
@@ -234,3 +237,140 @@ def test_commands_on_one_workspace_are_serialized_but_not_across_workspaces(tmp_
 
     assert asyncio.run(scenario(["ws_alice", "ws_alice", "ws_alice"])) == 1
     assert asyncio.run(scenario(["ws_alice", "ws_bob"])) == 2
+
+
+# --- PR #9 review B1: no process outlives launch() on any exit path -------------------
+
+FAKE_SANDBOX = r"""
+import os, sys, time, subprocess
+sync_fd, pid_file, mode = int(sys.argv[1]), sys.argv[2], sys.argv[3]
+child = subprocess.Popen(["sleep", "300"])
+with open(pid_file, "w") as handle:
+    handle.write(f"{os.getpid()} {child.pid}")
+if mode != "no-sync":
+    os.write(sync_fd, b"HIMARI_SANDBOX_ENFORCED\n")
+os.close(sync_fd)
+time.sleep(300)
+"""
+
+
+def _alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    with open(f"/proc/{pid}/stat") as handle:  # a zombie is dead for our purposes
+        return handle.read().split(") ")[1][0] != "Z"
+
+
+@pytest.mark.parametrize("mode", ["cancel", "no-sync", "timeout"])
+def test_no_process_outlives_launch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str) -> None:
+    pid_file = tmp_path / "pids"
+    monkeypatch.setattr(sb, "bwrap_arguments",
+                        lambda cap, root_fd, cwd, sync_fd, argv: [sys.executable, "-c", FAKE_SANDBOX, str(sync_fd), str(pid_file), mode])
+    monkeypatch.setattr(sb, "SETUP_TIMEOUT_SECONDS", 2.0)
+    backend = sb.SandboxBackend(CAP)
+    root_fd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+
+    async def scenario() -> None:
+        task = asyncio.create_task(backend.launch(["x"], root_fd=root_fd, cwd="/workspace", timeout=1 if mode == "timeout" else 60))
+        for _ in range(100):
+            if pid_file.exists() and pid_file.read_text():
+                break
+            await asyncio.sleep(0.05)
+        if mode == "cancel":
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        elif mode == "no-sync":
+            with pytest.raises(sb.SandboxSetupError):
+                await task
+        else:
+            result = await task
+            assert result.timed_out
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        os.close(root_fd)
+    pids = [int(p) for p in pid_file.read_text().split()]
+    deadline = time.monotonic() + 3
+    while any(_alive(p) for p in pids) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert not any(_alive(p) for p in pids), f"{mode}: survivors {pids}"
+
+
+# --- PR #9 review B2: whole-Workspace admission ------------------------------------------
+
+
+def test_admission_refuses_external_hard_links_but_allows_internal_ones(tmp_path: Path) -> None:
+    from himari.environment.inside import admission
+
+    root = tmp_path / "root"
+    (root / "a").mkdir(parents=True)
+    (root / "a/one.txt").write_text("x")
+    os.link(root / "a/one.txt", root / "two.txt")  # both links inside: fine
+    fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        admission.admit_workspace(fd, str(root))
+        outside = tmp_path / "outside.txt"
+        outside.write_text("host")
+        os.link(outside, root / "a/alias.txt")
+        with pytest.raises(admission.AdmissionError) as exc:
+            admission.admit_workspace(fd, str(root))
+        assert exc.value.category is admission.AdmissionCategory.EXTERNAL_HARDLINK
+        with pytest.raises(admission.AdmissionError) as big:
+            admission.admit_workspace(fd, str(root), max_entries=2)
+        assert big.value.category is admission.AdmissionCategory.TOO_LARGE
+    finally:
+        os.close(fd)
+
+
+def test_admission_refuses_nested_mounts_from_mountinfo() -> None:
+    from himari.environment.inside import admission
+
+    info = ("36 35 98:0 / /srv/ws/alice rw - ext4 /dev/x rw\n"
+            "37 36 98:0 /other /srv/ws/alice/conversations/c1/mnt\\040x rw - ext4 /dev/x rw\n"
+            "38 35 98:0 / /srv/ws/alice-other rw - ext4 /dev/x rw\n")
+    assert admission.mounts_below("/srv/ws/alice", info) == ["/srv/ws/alice/conversations/c1/mnt x"]
+    assert admission.mounts_below("/srv/ws/bob", info) == []
+
+
+def test_run_command_is_refused_before_spawning_when_admission_fails(tmp_path: Path) -> None:
+    backend = FakeBackend(sb.SandboxState.ENFORCED)
+    env = make_env(tmp_path, backend)
+    outside = tmp_path / "outside.txt"
+    outside.write_text("host")
+    os.link(outside, tmp_path / "workspaces/ws_alice/conversations/alias.txt")
+    outcome = run_tool(env, {"argv": ["cat", "/workspace/conversations/alias.txt"]})
+    assert outcome.status is ToolStatus.DENIED and "hard-linked from outside" in text(outcome)
+    assert backend.calls == []
+
+
+# --- PR #9 review B3: the self-test's mount allowlist (CI-safe part) ---------------------
+
+
+def test_mount_allowlist_flags_any_extra_mount() -> None:
+    exact, _ = self_test.allowed_mounts()
+    correct = sorted(exact | {"/dev/null", "/dev/pts", "/proc/sys"})
+    assert self_test._unexpected_mounts(correct) == []
+    assert self_test._unexpected_mounts([*correct, "/etc"]) == ["/etc"]
+    assert self_test._unexpected_mounts([*correct, "/srv/workspaces"]) == ["/srv/workspaces"]
+    assert self_test._unexpected_mounts(None) == ["<unreadable>"]
+    assert "/etc/passwd" in self_test.DEFAULT_PROTECTED and "/home" in self_test.DEFAULT_PROTECTED
+
+
+def test_admission_refuses_a_workspace_with_a_mount_below_it(tmp_path: Path) -> None:
+    from himari.environment.inside import admission
+
+    root = tmp_path / "root"
+    root.mkdir()
+    info = f"36 35 98:0 / {root}/conversations/c1/data rw - ext4 /dev/x rw\n"
+    fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        with pytest.raises(admission.AdmissionError) as exc:
+            admission.admit_workspace(fd, str(root), mountinfo=info)
+        assert exc.value.category is admission.AdmissionCategory.NESTED_MOUNT
+        admission.admit_workspace(fd, str(root), mountinfo="")  # no mounts below: admitted
+    finally:
+        os.close(fd)

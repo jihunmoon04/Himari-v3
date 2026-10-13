@@ -46,6 +46,16 @@ r["write_root"] = ok(lambda: write("/probe.txt"))
 r["write_usr"] = ok(lambda: write("/usr/probe.txt"))
 r["sees_other_principal"] = any(os.path.exists(x) for x in p["other_paths"])
 r["sees_home"] = os.path.exists("/home")
+r["sees_protected"] = sorted(x for x in p["protected_paths"] if os.path.lexists(x))
+def mount_points():
+    points = []
+    for line in open("/proc/self/mountinfo"):
+        point = line.split(" ")[4]
+        for code in ("\\040", "\\011", "\\012", "\\134"):
+            point = point.replace(code, chr(int(code[1:], 8)))
+        points.append(point)
+    return sorted(set(points))
+r["mounts"] = mount_points()
 r["tcp_external"] = ok(lambda: connect(socket.AF_INET, ("1.1.1.1", 53)))
 r["tcp_host_loopback"] = ok(lambda: connect(socket.AF_INET, ("127.0.0.1", p["port"])))
 r["tcp6_host_loopback"] = bool(p["port6"]) and ok(lambda: connect(socket.AF_INET6, ("::1", p["port6"])))
@@ -75,6 +85,7 @@ EXPECTED: dict[str, object] = {
     "write_usr": False,
     "sees_other_principal": False,
     "sees_home": False,
+    "sees_protected": [],  # host system paths and the real Workspace/data roots
     "tcp_external": False,
     "tcp_host_loopback": False,
     "tcp6_host_loopback": False,
@@ -97,7 +108,32 @@ class SelfTestReport:
     error: str = ""
 
 
-async def probe(backend: SandboxBackend) -> SelfTestReport:
+# Host paths that must never be visible inside the sandbox; the backend adds
+# the real Workspace root and data roots it was started with.
+DEFAULT_PROTECTED = (
+    "/etc/passwd", "/etc/shadow", "/etc/hostname", "/etc/ssh", "/root", "/home", "/var", "/srv",
+    "/opt", "/mnt", "/media", "/boot", "/snap", "/run/docker.sock", "/run/user",
+)
+
+
+def allowed_mounts() -> tuple[frozenset[str], tuple[str, ...]]:
+    """Exactly the mount points the sandbox view is built from."""
+    from himari.environment.inside.sandbox.backend import HELPER_IN_SANDBOX, WORKSPACE_MOUNT, system_view
+
+    view = system_view()
+    exact = {"/", "/dev", "/proc", "/tmp", HELPER_IN_SANDBOX, WORKSPACE_MOUNT}
+    exact.update(view[i + 2] for i, arg in enumerate(view) if arg == "--ro-bind")
+    return frozenset(exact), ("/dev/", "/proc/")
+
+
+def _unexpected_mounts(mounts: object) -> list[str]:
+    if not isinstance(mounts, list) or not mounts:
+        return ["<unreadable>"]
+    exact, prefixes = allowed_mounts()
+    return [m for m in mounts if m not in exact and not any(str(m).startswith(p) for p in prefixes)]
+
+
+async def probe(backend: SandboxBackend, protected_paths: tuple[str, ...] = ()) -> SelfTestReport:
     with ExitStack() as stack:
         base = stack.enter_context(tempfile.TemporaryDirectory(prefix="himari-sandbox-selftest-"))
         own = os.path.join(base, "principal_a")
@@ -129,6 +165,7 @@ async def probe(backend: SandboxBackend) -> SelfTestReport:
         abstract.listen(1)
 
         params = {
+            "protected_paths": sorted({*DEFAULT_PROTECTED, *protected_paths}),
             "other_paths": [other, secret, base, own],
             "port": tcp.getsockname()[1],
             "port6": port6,
@@ -149,13 +186,18 @@ async def probe(backend: SandboxBackend) -> SelfTestReport:
             observed = json.loads(result.stdout)
         except ValueError:
             return SelfTestReport(False, error="probe output is not JSON")
+        mounts = observed.pop("mounts", None)
         failures = [k for k, v in EXPECTED.items() if observed.get(k) != v]
         failures += [k for k in observed if k not in EXPECTED]
+        unexpected = _unexpected_mounts(mounts)
+        if unexpected:
+            failures.append(f"mounts:{unexpected}")
+        observed["mounts"] = mounts
         return SelfTestReport(not failures, observed, failures)
 
 
-async def run_self_test(backend: SandboxBackend) -> bool:
+async def run_self_test(backend: SandboxBackend, protected_paths: tuple[str, ...] = ()) -> bool:
     try:
-        return (await probe(backend)).passed
+        return (await probe(backend, protected_paths)).passed
     except Exception:
         return False

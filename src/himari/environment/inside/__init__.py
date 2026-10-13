@@ -52,6 +52,13 @@ class InsideEnvironment:
             tools.append(RunCommand(self))
         self._tools = tuple(tools)
 
+    async def start_sandbox(self, *, protected_paths: tuple[str, ...] = ()) -> None:
+        """Start the configured sandbox; the Workspaces root is always among
+        the paths the self-test proves invisible (only one principal root is
+        ever bound, as /workspace)."""
+        if self.sandbox is not None:
+            await self.sandbox.start(protected_paths=(str(self._root), *protected_paths))
+
     def write_lock(self, workspace_id: WorkspaceId) -> asyncio.Lock:
         """One lock per principal Workspace for writes and commands."""
         return self._write_locks.setdefault(workspace_id, asyncio.Lock())

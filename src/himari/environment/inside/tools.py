@@ -351,13 +351,25 @@ class RunCommand:
             cwd_relative = fs.to_relative(ctx.workspace.cwd_relative, ".")
         except fs.FsError as error:
             return _failure(".", error)
+        from himari.environment.inside import admission
+
+        host_root = self._env.host_root(ctx.binding.workspace_id)
         async with self._env.write_lock(ctx.binding.workspace_id):
             try:
-                with fs.open_root(self._env.host_root(ctx.binding.workspace_id)) as root_fd:
+                # The same verified root fd is admitted and then bound; it stays
+                # open from the check through the spawn.
+                with fs.open_root(host_root) as root_fd:
                     fs.ensure_directory(root_fd, cwd_relative)
+                    await asyncio.to_thread(admission.admit_workspace, root_fd, host_root)
                     result = await backend.run(argv, root_fd=root_fd, cwd=fs.display(cwd_relative), timeout=timeout)
             except fs.FsError as error:
                 return _failure(fs.display(cwd_relative), error)
+            except admission.AdmissionError as error:
+                return ToolOutcome(
+                    ToolStatus.DENIED,
+                    _text(f"command not run: {error}", error=True),
+                    raw_result={"admission": error.category.name},
+                )
             except (sb.SandboxUnavailableError, sb.SandboxSetupError):
                 return ToolOutcome(
                     ToolStatus.DENIED,

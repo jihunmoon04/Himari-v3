@@ -158,3 +158,60 @@ def test_full_stack_through_the_driver(tmp_path: Path, backend: SandboxBackend) 
     record = asyncio.run(rt.data.read_tool_executions(SCOPE, result.run_ids[0]))[0]
     assert record.status.value == "succeeded" and record.unknown_outcome is not None  # claimed before running
     assert record.model_result is not None and "42" in str(record.model_result.blocks[0])
+
+
+# --- PR #9 review: cancellation (B1), admission (B2), self-test coverage (B3) --------
+
+
+def test_cancelling_a_running_command_kills_it(env: InsideEnvironment) -> None:
+    marker = "53.1717"
+    handler = next(t for t in env.tools() if t.definition.tool_id == "inside/run_command")
+    binding = BindingAuthority(BindingId("b"), EnvironmentInstanceId("e"), INSIDE, WorkspaceId("ws_alice"), 1, "conversations/c1")
+    ctx = ToolContext(scope=TrustedScope(PrincipalId("alice"), ConversationId("c1")), artifacts=None,  # type: ignore[arg-type]
+                      binding=binding, workspace=ConversationWorkspace(WorkspaceId("ws_alice"), "conversations/c1"))
+
+    async def scenario() -> None:
+        task = asyncio.create_task(handler.run(ToolInvocation(ToolId("x"), CallId("c"), {"argv": ["sleep", marker]}), ctx))
+        await asyncio.sleep(1.5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert not env.write_lock(WorkspaceId("ws_alice")).locked()
+
+    asyncio.run(scenario())
+    time.sleep(0.5)
+    left = subprocess.run(["pgrep", "-f", f"sleep {marker}"], capture_output=True, text=True)
+    assert left.stdout.strip() == "", "a sandboxed process survived cancellation"
+
+
+def test_external_hard_link_blocks_the_command(env: InsideEnvironment, tmp_path: Path) -> None:
+    outside = tmp_path / "outside-secret.txt"
+    outside.write_text("outside data")
+    folder = tmp_path / "workspaces/ws_alice/conversations/c1"
+    folder.mkdir(parents=True, exist_ok=True)
+    os.link(outside, folder / "alias.txt")
+    outcome = run(env, ["sh", "-c", "cat alias.txt; echo changed > alias.txt"])
+    assert outcome.status is ToolStatus.DENIED and "hard-linked from outside" in out(outcome)
+    assert outside.read_text() == "outside data"
+
+
+@pytest.mark.parametrize("extra", [["--ro-bind", "/etc", "/etc"], ["--ro-bind", "{parent}", "/srv/data"],
+                                   ["--ro-bind", "{parent}", "{parent}"]])
+def test_self_test_fails_when_the_view_exposes_host_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                                         extra: list[str]) -> None:
+    from himari.environment.inside.sandbox import backend as sbmod
+    from himari.environment.inside.sandbox.self_test import probe
+
+    parent = str(tmp_path / "production-workspaces")
+    os.makedirs(parent)
+    extra = [x.replace("{parent}", parent) for x in extra]
+    original = sbmod.bwrap_arguments
+
+    def leaky(*args: Any, **kwargs: Any) -> list[str]:
+        argv = original(*args, **kwargs)
+        at = argv.index("--remount-ro")
+        return argv[:at] + extra + argv[at:]
+
+    monkeypatch.setattr(sbmod, "bwrap_arguments", leaky)
+    report = asyncio.run(probe(SandboxBackend.discover(), (parent,)))
+    assert not report.passed and any(f.startswith("mounts:") for f in report.failures), report.failures
