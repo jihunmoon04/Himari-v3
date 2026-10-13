@@ -136,6 +136,7 @@ Environment ─────── Data.read_binding / Registry  (실행 시 다�
 | **PROMPT-04** | CompactAndSnapshot / **Prompt** | Prompt → Control/유지관리 경로 | complete history / DATA-05 | 압축된 부분·exact tail·Snapshot 교체 요청 | 방향 확정, 알고리즘 미정 |
 | **PROVIDER-01** | InvokeModel / **Provider** | 각 Provider Adapter → Control | PROMPT-01 + 호출 모델 설정 | 실제 LLM 호출 1회, raw response + normalized output | Run 원칙 확정, Port 미정 |
 | **PROVIDER-02** | RenderNativeRequest / **Provider** | 각 Provider Adapter → Provider.invoke 경계 | Prompt 중립 입력 + Tool 표면 + continuation | provider-native messages/tools/role/reasoning | 변환 책임 확정, 형식 미정 |
+| **PROVIDER-03** | NormalizeNativeResponse / **Provider** | Provider Adapter → Control/Data projection | 실제 raw native response | final/question/ordered ToolCall discriminant 또는 typed error | PROPOSED; [boundary draft](control-prompt-provider-v0.1.md) |
 | **TOOL-01** | CatalogTools / **Tool** | Tool Registry → Prompt, Control | Tool Registry + Environment capabilities/Policy | 모델 노출 가능한 도구 정의 | 방향 확정, API 미정 |
 | **TOOL-02** | DispatchToolCalls / **Tool** | Tool Dispatcher → Control | Run의 호출 그룹 + 각 Tool 정의/Binding | `call_id`에 연결된 Model ToolResult | 방향 확정, API 미정 |
 | **TOOL-03** | ScheduleConflicts / **Tool** | Tool Scheduler → Tool Dispatcher | verified resource identity & effect metadata | 독립 실행 병렬·충돌 직렬화 | 병렬 원칙 확정, 정책 미정 |
@@ -193,7 +194,7 @@ Environment ─────── Data.read_binding / Registry  (실행 시 다�
 
 ## 6. Data Contract
 
-**Owner/Provider:** Data · **Consumers:** Control, Prompt, Internal Tool, Environment (공개 Port만) · **Source of Truth:** Data에 영속된 각 record/registry · **Location:** 본 문서 §6 + [data-contract-v0.1](data-contract-v0.1.md) / planned `data/api.py`.
+**Owner/Provider:** Data · **Consumers:** Control, Prompt, Internal Tool, Environment (공개 Port만) · **Source of Truth:** Data에 영속된 각 record/registry · **Location:** 본 문서 §6 + **[data-contract-v0.2](data-contract-v0.2.md) (검수 후보)** 및 [v0.1](data-contract-v0.1.md) (초안 근거) / planned `data/api.py`.
 
 ### 6.1 논리 모델
 
@@ -265,7 +266,7 @@ Prompt가 연결 상태를 임의로 `online`으로 채우지 않는다. Current
 
 ## 8. Provider Contract
 
-**Owner:** Provider · **Provider:** OpenAI/기타 Adapter · **Consumers:** Control(호출), Prompt(지원 capability 계약 소비) · **Sources:** PROMPT-01의 중립 입력, 현재 모델 설정, 실제 외부 Provider API 결과 · **Location:** 본 문서 §8 / planned `provider/api.py`.
+**Owner:** Provider · **Provider:** OpenAI/기타 Adapter · **Consumers:** Control(호출), Prompt(지원 capability 계약 소비) · **Sources:** PROMPT-01의 중립 입력, 현재 모델 설정, 실제 외부 Provider API 결과 · **Location:** 본 문서 §8 + [Control–Prompt–Provider v0.1 검수 후보](control-prompt-provider-v0.1.md) / planned `provider/api.py`.
 
 **CONFIRMED**
 
@@ -458,3 +459,14 @@ Inside Environment
 - Resume 시 기존 Run의 Provider 요청을 다시 전송하는 것이 아니라 **완결된 기록에서 다음 작업 지점을 복원**함.
 
 **Contract metadata:** CTRL-03/04, DATA-09/10, TOOL-04 (§4, 상세 [control-pause-v0.1.md](control-pause-v0.1.md)). 실제 status enum, DB lease, Pause timeout 및 Cancel 의미는 검토 후 결정.
+
+## 17. Data v0.2 / Control–Prompt–Provider v0.1 설계 진전 (2026-10-13)
+
+**현 상태: 독립 설계 검수 후보 · 아직 확정/구현 전.** 기존 V3-001~038 원칙을 새 결정을 한 것처럼 바꾸지 않는다.
+
+- **Data:** [v0.2](data-contract-v0.2.md)에 Event kind 후보, Run `PREPARED → DISPATCH_CLAIMED → RECEIVED → PROJECTED`, Tool `PENDING → EXECUTION_CLAIMED → terminal/UNKNOWN`, 단일 PromptSnapshot CAS, 트랜잭션 T0~T10 및 공개 Port를 정의.
+- **Provider 경계:** [Control–Prompt–Provider v0.1](control-prompt-provider-v0.1.md)은 `prepare_native_request`(네트워크 없이 native body 확정)와 `invoke_prepared`(정확히 그 body 송신)를 분리하여 **Data가 실제 송신 요청 원본을 선기록할 수 있게** 설계.
+- **Control:** 같은 Conversation 단일 실행 흐름, final/question 종료, ToolCall 완전 그룹 commit 후 Tool 실행, UNKNOWN/불완전 그룹에서는 다음 Run 거부, Pause 시 미실행 Call만 재개.
+- **Prompt:** complete group/source coverage 검증과 최신 CurrentState 재조회. Native 변환이 Provider 규칙과 충돌하면 전송 전에 거부.
+- **Open:** SDK가 실제 wire body를 제어할 수 있는지, 혼합 final/question/tool output 처리, Provider-native role 배치, 실행 lease, raw 보안, Snapshot–Run prepare 원자성, 스트리밍.
+- **Test selection:** 신규 공개 계약이 실제 구현된 이후 변경된다면 V3-038에 따라 전체 pytest; 문서 초안 작성 자체는 pytest 실행 대상이 아니다.
