@@ -155,7 +155,7 @@ Environment ─────── Data.read_binding / Registry  (실행 시 다�
 | **ENV-04** | SandboxedCommandExecution / **Environment** | Inside Sandbox Backend → Tool | authorized principal root + current Workspace Binding + execution policy | bounded command exit, output, failure; **no unsandboxed fallback** | sandbox requirement CONFIRMED, DTO PROPOSED |
 | **DATA-11** | ResolveConversationWorkingDirectory / **Data** | Data → Environment, Prompt | Data Conversation ↔ user Workspace mapping | per-conversation default cwd, user-authorized cross-folder scope | directory behavior CONFIRMED, mapping PROPOSED |
 | **TOOL-05** | RunCommandTool / **Tool** | Tool registration/dispatch → Control/Provider | ENV-04 execution result, DATA-11 cwd mapping | command request, bounded canonical ToolResult | initial support CONFIRMED, schema PROPOSED |
-| **ENV-05** | SandboxCapabilityActivation / **Environment** | Sandbox validation/self-test → Environment startup/Tool | host capability + validated sandbox policy generation | **isolated-only network enforcement** status; refuse if unavailable | isolated-only profile CONFIRMED (V3-037), implementation PROPOSED |
+| **ENV-05** | SandboxCapabilityActivation / **Environment** | Sandbox validation/self-test → Environment startup/Tool | host capability + validated sandbox policy generation | **isolated-only network enforcement** status; refuse if unavailable | isolated-only profile CONFIRMED (V3-037); spec in [Sandbox Implementation v0.2](sandbox-implementation-v0.2.md), implementation PROPOSED |
 | **TOOL-06** | WebSearch (future) / **Tool** | trusted Web Search adapter → Control/Prompt | external retrieved content, explicitly untrusted | bounded Web Search observations without Sandbox egress grant | OPTIONAL FUTURE |
 | **INTERNAL-01** | MemoryTool / **Tool** | Internal Memory Tool → Tool Dispatcher | Data Memory 저장/검색 계약 | 모델용 검색 결과, Conversation 기록 | 방향 확정, 기능 미정 |
 | **INTERNAL-02** | PlanNoteTool / **Tool** | Internal Plan/Note Tool → Tool Dispatcher | Data conversation-scoped Artifacts | 간결한 complete 결과 + Artifact 갱신 | 저장 위치 확정, 수정 API 미정 |
@@ -367,6 +367,8 @@ Prompt가 연결 상태를 임의로 `online`으로 채우지 않는다. Current
 - 계약 변경 시 **Owner가 version·status·consumer 목록·Source of Truth·테스트 영향**을 먼저 갱신한다. 구현 변경은 같은 공개 의미를 만족하면 다른 소비 모듈 구현의 수정을 요구하지 않아야 한다.
 - Provider Adapter·Data Storage·Environment Adapter를 Fake로 교체해도 Control/Prompt/Tool이 공개 계약만으로 실행되는지 검증한다.
 - **정적 검사:** 금지 import/cyclic dependency, 소비자별 허용 Port만 참조.
+- **V3-038 테스트 실행 정책 (CONFIRMED):** 공개 계약 변경 없음 → 변경한 모듈별 pytest만, 공개 Port/DTO/동작·보안·오류 계약 도입/변경/제거 → 전체 pytest. 여러 모듈의 구현이 바뀌어도 계약이 유지되면 바뀐 모듈만 테스트. 파일 수나 리팩터링 규모로 전체 실행을 결정하지 않는다. 상세 [testing-policy.md](testing-policy.md).
+- **실제 Sandbox 호스트 검증은 별도 게이트**다. Environment 내부 구현만 수정했다면 Environment 모듈 pytest + 필요한 Linux 실호스트 격리 검증이고, 공개 ENV 계약까지 바뀌면 전체 pytest + 실호스트 검증이다.
 - **행동 테스트:** append-only exact Event, raw Run I/O, Snapshot 최신 1개, Plan/Note 원자 커밋, CurrentState scope filtering, binding revoke 시 재검증, Tool group replay, 동일 Workspace conflict, final/question 종료.
 - **호환성 계약:** 데이터 필드 추가/삭제, Error type·retryability, 호출 순서, cancellation semantics, 권한 범위까지 포함. 'signature만 동일'은 충분하지 않다.
 
@@ -441,7 +443,7 @@ Inside Environment
 - 같은 공유 Workspace root를 읽고 쓸 수 있는 임의 명령은 다른 Conversation의 파일도 손상시킬 수 있다. UNKNOWN file effects를 가진 run_command는 같은 Workspace 파일 작업과 기본 충돌하며, 완료/결과 불명은 ToolExecution으로 보존한다.
 - Conversation 삭제가 공유 filesystem 경로와 published files를 어떻게 정리하는지는 OPEN; 다른 Conversation이 사용 중이면 자동 삭제하지 않는다.
 
-**Contract metadata:** FILE-01~05, ENV-04~05, DATA-11, TOOL-05; future TOOL-06 (§4). 세부: [Default Workspace v0.2](default-workspace-files-v0.2.md), [Sandbox Execution v0.1](sandbox-execution-v0.1.md). 이전 [Default Workspace v0.1](default-workspace-files-v0.1.md)은 Superseded.
+**Contract metadata:** FILE-01~05, ENV-04~05, DATA-11, TOOL-05; future TOOL-06 (§4). 세부: [Default Workspace v0.2](default-workspace-files-v0.2.md), [Sandbox Execution v0.1](sandbox-execution-v0.1.md), [Sandbox Implementation Candidate v0.2](sandbox-implementation-v0.2.md). 이전 [Default Workspace v0.1](default-workspace-files-v0.1.md)은 Superseded.
 
 ## 16. Conversation Pause/Resume — 2026-10-13 신규 설계
 
