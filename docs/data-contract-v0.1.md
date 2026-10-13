@@ -1,5 +1,7 @@
 # Data Contract v0.1 — Draft for Review
 
+> **후속 구체화:** [Data Contract v0.2 — Implementable Candidate](data-contract-v0.2.md)에 Event/Run/Tool 상태 전이, raw payload 보존, 트랜잭션·오류·공개 Port 후보가 정리되어 있습니다. 이 v0.1 문서는 초기 설계 근거로 유지합니다.
+
 > 작성: 2026-10-13 · 상태: **PROPOSED / NOT FROZEN**. 이 문서의 타입, 필드 이름, 상태 전이 및 API는 검토 초안이다. 이미 확정된 원칙과 충돌할 경우 [decisions.md](decisions.md)를 우선한다.
 >
 > 관련 문서: [architecture](architecture.md) · [data-and-tools](data-and-tools.md) · [prompt-composition](prompt-composition.md) · [open-questions](open-questions.md).
