@@ -47,6 +47,7 @@
 | V3-035 | Confirmed | 기본 Workspace의 **소유·공유 범위는 사용자/principal별**로 한다. 동일 사용자에 속한 각 Conversation은 별도 기본 cwd 폴더를 갖되 같은 사용자에게 허용된 다른 Conversation 폴더에 접근할 수 있다. 실제 principal 식별/인증/Root 매핑은 별도 계약. |
 | V3-036 | Confirmed | **기본 Workspace Sandbox 안의 네트워크 접근은 기본 차단**한다. 향후 Web Search는 명령 Sandbox와 별도의 Tool/신뢰된 네트워크 경계로 구현할 수 있으며, 이를 이유로 run_command의 네트워크 권한을 자동 부여하지 않는다. |
 | V3-037 | Confirmed | **초기 Sandbox는 네트워크 차단 전용 단일 프로파일**만 제공한다. `connected`/도메인 allowlist/프록시 등 조건부 허용 모드는 초기 범위에서 제외한다. 네트워크 namespace 격리를 검증하지 못하면 `run_command` 실행 거부. 호스트 서비스로 연결되는 Unix 소켓 등 우회 경로도 차단한다. 향후 네트워크 허용은 별도 정책 변경·검증을 요구한다. |
+| V3-038 | Confirmed | **공개 모듈 계약을 생성·변경·제거할 때만 전체 pytest를 실행**한다. 공개 계약을 유지하는 내부 구현 변경·버그 수정·리팩터링에서는 변경된 **모듈별 pytest만 실행**한다(복수 모듈 변경이면 해당 모듈들만). 서명뿐 아니라 오류, 권한, 부작용, 호출 순서·취소 의미 등 계약 보장 변화도 공개 계약 변경이다. Sandbox 실제 호스트 격리 검증은 pytest 범위와 별도의 보안 게이트다. [testing-policy.md](testing-policy.md). |
 
 
 ## B. 현재 채택을 권고하지만 세부 확정 전인 설계
@@ -82,6 +83,7 @@
 - **활성 Workspace/Environment 저장 영역과 Artifact의 구분은 확정**. 실제 현재 상태 조회 DTO, 연결상태 갱신 주기, 바인딩 선택 및 기본 Workspace 정책은 미결정.
 - 기본 Workspace 파일 자체의 저장 형태, 파일 첨부/생성 metadata, 버전·다운로드·삭제·안전한 경로 API·업로드 크기 제한(현행 초안: [default-workspace-files-v0.2.md](default-workspace-files-v0.2.md)).
 - Sandbox는 v2 Phase 3.5의 Bubblewrap/Landlock·기동 인증·워크스페이스 루트 보호·프로세스 제한 설계를 **재사용 대상으로 검토**한다. v3의 Work 부재/사용자별 Root·Conversation cwd·네트워크 차단에 맞춘 수정은 [Sandbox Execution v0.1 초안](sandbox-execution-v0.1.md)에 남긴다.
+- **Sandbox Environment 구현 세부 계약은 [Sandbox Implementation v0.2 검토 초안](sandbox-implementation-v0.2.md)**에 정리한다. V3-032~037 정책 외의 DTO, Admission, Activation, 실행 한도와 Linux 검증 방식은 아직 확정 전이다.
 - Pause/Resume를 위한 ConversationControlState·안전 경계·미완결 ToolCall 복구는 [control-pause-v0.1.md](control-pause-v0.1.md) 검토 초안이며 **현재 확정 정책이 아니다**.
 - v2 데이터/기능 이식의 범위와 절차.
 
