@@ -352,20 +352,31 @@ def test_run_command_is_refused_before_spawning_when_admission_fails(tmp_path: P
 
 
 def test_mount_allowlist_flags_any_extra_mount() -> None:
-    fresh = [[p, t, r, False] for p, (t, r) in self_test.FRESH_MOUNTS.items()]
-    devices = [[p, "devtmpfs", "/" + p.rsplit("/", 1)[1], True] for p in self_test.DEVICE_NODES]
-    binds = [[p, "ext4", p, False] for p in self_test.host_binds()]
-    correct = fresh + devices + binds + [["/proc/sys", "proc", "/sys", False]]
-    unexpected = self_test._unexpected_mounts
+    binds = {p: (64, 100 + n) for n, p in enumerate(sorted(["/usr", "/etc/alternatives", "/run/himari/landlock_helper.py", "/workspace"]))}
+    devices = {p: 0x100 + n for n, p in enumerate(sorted(self_test.DEVICE_NODES))}
+    expected = self_test.ExpectedSources(binds, devices)
+    fresh = [[p, t, r, False, [1, 1, 0]] for p, (t, r) in self_test.FRESH_MOUNTS.items()]
+    nodes = [[p, "devtmpfs", "/" + p.rsplit("/", 1)[1], True, [5, 9, rdev]] for p, rdev in devices.items()]
+    bound = [[p, "ext4", p, False, [dev, ino, 0]] for p, (dev, ino) in binds.items()]
+    correct = fresh + nodes + bound + [["/proc/sys", "proc", "/sys", False, [2, 2, 0]]]
+
+    def unexpected(table: object) -> list[str]:
+        return self_test._unexpected_mounts(table, expected)
+
+    def swap(point: str, entry: list[object]) -> list[list[object]]:
+        return [e if e[0] != point else entry for e in correct]
+
     assert unexpected(correct) == []
-    assert unexpected([*correct, ["/etc", "ext4", "/etc", False]]) == ["/etc"]
-    assert unexpected([*correct, ["/dev/host-data", "ext4", "/etc", False]]) == ["/dev/host-data"]  # B4
-    assert unexpected([*correct, ["/proc/host-data", "ext4", "/srv", False]]) == ["/proc/host-data"]
-    assert unexpected([*correct, ["/usr", "ext4", "/etc", False]]) == ["/usr (stacked)"]
-    swapped = [e if e[0] != "/dev/null" else ["/dev/null", "ext4", "/etc/passwd", False] for e in correct]
-    assert unexpected(swapped) == ["/dev/null"]
-    host_tmp = [e if e[0] != "/tmp" else ["/tmp", "tmpfs", "/user/1000", False] for e in correct]
-    assert unexpected(host_tmp) == ["/tmp"]
+    assert unexpected([*correct, ["/etc", "ext4", "/etc", False, [64, 7, 0]]]) == ["/etc"]
+    assert unexpected([*correct, ["/dev/host-data", "ext4", "/etc", False, [64, 7, 0]]]) == ["/dev/host-data"]  # B4
+    assert unexpected([*correct, ["/proc/host-data", "ext4", "/srv", False, [64, 8, 0]]]) == ["/proc/host-data"]
+    assert unexpected([*correct, ["/usr", "ext4", "/etc", False, [64, 7, 0]]]) == ["/usr (stacked)"]
+    # an allowed point with another source: host /etc bound at /etc/alternatives
+    assert unexpected(swap("/etc/alternatives", ["/etc/alternatives", "ext4", "/etc", False, [64, 7, 0]])) == ["/etc/alternatives"]
+    assert unexpected(swap("/dev/null", ["/dev/null", "ext4", "/etc/passwd", False, [64, 9, 0]])) == ["/dev/null"]
+    other_device = devices["/dev/zero"]
+    assert unexpected(swap("/dev/null", ["/dev/null", "devtmpfs", "/zero", True, [5, 9, other_device]])) == ["/dev/null"]
+    assert unexpected(swap("/tmp", ["/tmp", "tmpfs", "/user/1000", False, [1, 1, 0]])) == ["/tmp"]
     assert unexpected(None) == ["<unreadable>"]
     assert "/etc/passwd" in self_test.DEFAULT_PROTECTED and "/home" in self_test.DEFAULT_PROTECTED
 

@@ -48,17 +48,18 @@ r["sees_other_principal"] = any(os.path.exists(x) for x in p["other_paths"])
 r["sees_home"] = os.path.exists("/home")
 r["sees_protected"] = sorted(x for x in p["protected_paths"] if os.path.lexists(x))
 def mount_table():
-    table = []  # every entry, duplicates kept: [point, fstype, root within its fs, is a char device]
+    table = []  # every entry, duplicates kept: [point, fstype, root within its fs, is a char device, [dev, ino, rdev]]
     for line in open("/proc/self/mountinfo"):
         fields = line.split(" ")
         point = fields[4]
         for code in ("\\040", "\\011", "\\012", "\\134"):
             point = point.replace(code, chr(int(code[1:], 8)))
         try:
-            char_device = stat.S_ISCHR(os.stat(point).st_mode)
+            info = os.stat(point)
+            char_device, identity = stat.S_ISCHR(info.st_mode), [info.st_dev, info.st_ino, info.st_rdev]
         except OSError:
-            char_device = False
-        table.append([point, fields[fields.index("-") + 1], fields[3], char_device])
+            char_device, identity = False, None
+        table.append([point, fields[fields.index("-") + 1], fields[3], char_device, identity])
     return table
 r["mounts"] = mount_table()
 r["tcp_external"] = ok(lambda: connect(socket.AF_INET, ("1.1.1.1", 53)))
@@ -132,26 +133,44 @@ DEVICE_NODES = frozenset({"/dev/null", "/dev/zero", "/dev/full", "/dev/random", 
 PROC_COVERS = frozenset({"/proc/sys", "/proc/sysrq-trigger", "/proc/irq", "/proc/bus"})
 
 
-def host_binds() -> frozenset[str]:
-    """The host paths the view binds on purpose (any filesystem type)."""
+@dataclass(frozen=True)
+class ExpectedSources:
+    """What each intended bind must be, taken from the host side: the
+    (st_dev, st_ino) of every bound host path and the st_rdev of every
+    device node. A bind point is accepted only with its own source, so an
+    alias (e.g. host /etc bound at /etc/alternatives) is caught."""
+
+    binds: dict[str, tuple[int, int]]
+    devices: dict[str, int]
+
+
+def expected_sources(workspace_fd: int) -> ExpectedSources:
+    from himari.environment.inside.sandbox import landlock_helper
     from himari.environment.inside.sandbox.backend import HELPER_IN_SANDBOX, WORKSPACE_MOUNT, system_view
 
+    def identity(info: os.stat_result) -> tuple[int, int]:
+        return info.st_dev, info.st_ino
+
     view = system_view()
-    return frozenset({HELPER_IN_SANDBOX, WORKSPACE_MOUNT, *(view[i + 2] for i, arg in enumerate(view) if arg == "--ro-bind")})
+    binds = {view[i + 2]: identity(os.stat(view[i + 1])) for i, arg in enumerate(view) if arg == "--ro-bind"}
+    binds[HELPER_IN_SANDBOX] = identity(os.stat(os.path.realpath(landlock_helper.__file__)))
+    binds[WORKSPACE_MOUNT] = identity(os.fstat(workspace_fd))
+    devices = {node: os.stat(node).st_rdev for node in DEVICE_NODES if os.path.exists(node)}
+    return ExpectedSources(binds, devices)
 
 
-def _unexpected_mounts(mounts: object) -> list[str]:
+def _unexpected_mounts(mounts: object, expected: ExpectedSources) -> list[str]:
     """Every mount must be one the view creates, appear once (nothing stacked
-    on it) and have the expected kind; no prefix is trusted wholesale."""
+    on it), have the expected kind and — for host binds and device nodes —
+    the expected source; no prefix is trusted wholesale."""
     if not isinstance(mounts, list) or not mounts:
         return ["<unreadable>"]
-    binds = host_binds()
     problems: list[str] = []
     seen: set[str] = set()
     for entry in mounts:
-        if not (isinstance(entry, list) and len(entry) == 4):
+        if not (isinstance(entry, list) and len(entry) == 5):
             return ["<unreadable>"]
-        point, fstype, root, char_device = entry
+        point, fstype, root, char_device, ids = entry
         if point in seen:
             problems.append(f"{point} (stacked)")
             continue
@@ -159,11 +178,13 @@ def _unexpected_mounts(mounts: object) -> list[str]:
         if point in FRESH_MOUNTS:
             ok = (fstype, root) == FRESH_MOUNTS[point]
         elif point in DEVICE_NODES:
-            ok = char_device is True
+            ok = char_device is True and isinstance(ids, list) and ids[2] == expected.devices.get(point)
         elif point in PROC_COVERS:
             ok = fstype == "proc"
+        elif point in expected.binds:
+            ok = isinstance(ids, list) and (ids[0], ids[1]) == expected.binds[point]
         else:
-            ok = point in binds
+            ok = False
         if not ok:
             problems.append(str(point))
     return problems
@@ -225,7 +246,7 @@ async def probe(backend: SandboxBackend, protected_paths: tuple[str, ...] = ()) 
         mounts = observed.pop("mounts", None)
         failures = [k for k, v in EXPECTED.items() if observed.get(k) != v]
         failures += [k for k in observed if k not in EXPECTED]
-        unexpected = _unexpected_mounts(mounts)
+        unexpected = _unexpected_mounts(mounts, expected_sources(root_fd))
         if unexpected:
             failures.append(f"mounts:{unexpected}")
         observed["mounts"] = mounts

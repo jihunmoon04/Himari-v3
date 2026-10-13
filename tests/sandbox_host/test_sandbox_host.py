@@ -248,6 +248,9 @@ def test_cancel_during_bwrap_creation_leaves_nothing_behind(backend: SandboxBack
 @pytest.mark.parametrize("replace", [
     (["--tmpfs", "/tmp"], ["--bind", "{parent}", "/tmp"]),  # a host directory instead of a fresh tmpfs
     (["--dev", "/dev"], ["--tmpfs", "/dev", "--ro-bind", "/etc/passwd", "/dev/null"]),  # a host file as a device node
+    (["--dev", "/dev"], ["--tmpfs", "/dev", "--dev-bind", "/dev/zero", "/dev/null"]),  # another char device
+    (["--ro-bind", "/etc/alternatives"], ["--ro-bind", "/etc"]),  # host /etc behind an allowed point
+    (["--ro-bind", "/etc/ld.so.cache"], ["--ro-bind", "/etc/hostname"]),  # another file behind an allowed point
 ])
 def test_self_test_fails_when_a_created_mount_is_replaced_by_a_host_path(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch, replace: tuple[list[str], list[str]]) -> None:
