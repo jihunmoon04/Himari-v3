@@ -547,7 +547,28 @@ def test_normalize_keeps_reasoning_details_as_opaque_continuation() -> None:
     assert thaw(out.continuation) == {"reasoning_details": GPT_DETAILS}  # details preferred over the plain string
     final = ADAPTER.normalize(received({"content": "ok", "reasoning": "plain only"}))
     assert final.continuation == {"reasoning": "plain only"}
-    assert ADAPTER.normalize(received({"content": "ok", "reasoning_details": []})).continuation is None
+
+
+@pytest.mark.parametrize(
+    ("extra", "expected"),
+    [
+        ({}, None),  # absent → nothing to replay
+        ({"reasoning_details": []}, {"reasoning_details": []}),  # explicit empty is state, not absence
+        ({"reasoning_details": CLAUDE_DETAILS}, {"reasoning_details": CLAUDE_DETAILS}),
+        ({"reasoning_details": [], "reasoning": "plain"}, {"reasoning_details": []}),  # explicit field wins
+        ({"reasoning": "plain"}, {"reasoning": "plain"}),
+    ],
+)
+def test_continuation_extraction_table(extra: dict[str, Any], expected: Any) -> None:
+    out = ADAPTER.normalize(received({"content": "ok", **extra}))
+    assert thaw(out.continuation) == expected
+
+
+def test_empty_details_are_replayed_as_an_empty_array() -> None:
+    turn = dataclasses.replace(group(("a", 0, "echo", "A")),
+                               continuation=ProviderContinuation("openrouter", "openai/gpt-5-nano", {"reasoning_details": []}))
+    assistant = body(ADAPTER, model_input((UserTurn(EventId("e1"), (TextBlock("go"),)), turn)))["messages"][2]
+    assert assistant["tool_calls"] and assistant["reasoning_details"] == []
 
 
 @pytest.mark.parametrize("details", ["x", {"type": "reasoning.text"}, ["x"], [1]])

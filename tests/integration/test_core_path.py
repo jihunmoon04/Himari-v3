@@ -779,3 +779,29 @@ def test_continuation_survives_restart_projection_of_a_stored_response() -> None
     group = provider2.prepared_inputs[0].conversation[1]
     assert isinstance(group, ToolGroupTurn)
     assert group.continuation == ProviderContinuation("scripted", "scripted-model", {"reasoning_details": [{"sig": "C"}]})
+
+
+@pytest.mark.parametrize("details", [[], [{"type": "reasoning.text", "text": "t", "signature": "s"}]])
+def test_reasoning_details_survive_the_full_path_into_the_next_request(details: list[Any]) -> None:
+    """normalize → Data (RunRecord) → Prompt (turn) → prepare: the follow-up
+    request carries exactly what the model returned — including an explicit
+    empty array, which some models require (PR #6 review B1)."""
+    tool_turn = {"choices": [{"finish_reason": "tool_calls", "message": {
+        "role": "assistant", "content": None, "reasoning_details": details,
+        "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "echo", "arguments": "{}"}}]}}]}
+    responses = iter([tool_turn, OK])
+    sent: list[bytes] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent.append(request.content)
+        return httpx.Response(200, json=next(responses))
+
+    rt, _ = runtime(tools=[RecordingTool("echo")],
+                    provider=OpenRouterAdapter("k", transport=httpx.MockTransport(handler)))  # type: ignore[arg-type]
+    result = asyncio.run(rt.driver.drive(SCOPE, user("go")))
+
+    assert result.state is DriveState.COMPLETED and len(sent) == 2
+    stored = asyncio.run(rt.data.read_run(SCOPE, result.run_ids[0])).continuation
+    assert stored is not None and thaw(stored.payload) == {"reasoning_details": details}
+    assistant = next(m for m in json.loads(sent[1])["messages"] if m.get("tool_calls"))
+    assert assistant["reasoning_details"] == details

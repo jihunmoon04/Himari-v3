@@ -390,15 +390,17 @@ class OpenRouterAdapter:
 
 def _continuation(message: dict[str, Any]) -> dict[str, Any] | None:
     """The turn's opaque reasoning state, kept exactly as returned.
-    ``reasoning_details`` (structured, may be encrypted/signed) is preferred;
-    a plain ``reasoning`` string is the fallback. Malformed details are an
-    invalid response: replaying a corrupted signature would fail later."""
+    An explicit ``reasoning_details`` (structured, may be encrypted/signed)
+    wins and is kept **even when empty**: some models (e.g. DeepSeek V4 in
+    thinking mode) return ``[]`` and reject follow-up turns that omit it
+    (OpenRouter ai-sdk-provider 2.8.1). A plain ``reasoning`` string is only
+    the fallback when the field is absent. Malformed details are an invalid
+    response: replaying a corrupted signature would fail later."""
     details = message.get("reasoning_details")
     if details is not None:
         if not isinstance(details, list) or not all(isinstance(d, dict) for d in details):
             raise _invalid("message.reasoning_details must be a list of objects")
-        if details:
-            return {"reasoning_details": details}
+        return {"reasoning_details": details}
     reasoning = message.get("reasoning")
     if isinstance(reasoning, str) and reasoning:
         return {"reasoning": reasoning}
