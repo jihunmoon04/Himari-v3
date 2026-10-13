@@ -101,6 +101,23 @@ def check_tool_input_schema(schema: JsonValue) -> None:
         raise SchemaError("$: a Tool input_schema must have type 'object'")
 
 
+def json_equal(a: object, b: object) -> bool:
+    """Equality with JSON semantics: booleans never equal numbers (Python's
+    ``True == 1`` does not apply), numbers compare by value (``1 == 1.0``),
+    objects and arrays compare structurally."""
+    if isinstance(a, bool) or isinstance(b, bool):
+        return isinstance(a, bool) and isinstance(b, bool) and a == b
+    if isinstance(a, (int, float)) and isinstance(b, (int, float)):
+        return a == b
+    if isinstance(a, Mapping) and isinstance(b, Mapping):
+        return a.keys() == b.keys() and all(json_equal(a[k], b[k]) for k in a)
+    if _is_array(a) and _is_array(b):
+        return len(a) == len(b) and all(json_equal(x, y) for x, y in zip(a, b, strict=True))
+    if _is_array(a) or _is_array(b) or isinstance(a, Mapping) or isinstance(b, Mapping):
+        return False
+    return type(a) is type(b) and a == b  # str / None
+
+
 def _is_array(value: object) -> TypeGuard[Sequence[JsonValue]]:
     return isinstance(value, Sequence) and not isinstance(value, (str, bytes))
 
@@ -118,7 +135,7 @@ def validate(value: JsonValue, schema: Mapping[str, JsonValue], path: str = "$")
         if not ok:
             return [f"{path}: expected {kind}"]
     enum = schema.get("enum")
-    if _is_array(enum) and value not in enum:
+    if _is_array(enum) and not any(json_equal(value, option) for option in enum):
         errors.append(f"{path}: must be one of {list(enum)}")
     if isinstance(value, Mapping):
         properties = schema.get("properties", {})

@@ -8,7 +8,7 @@ from testkit import FAKE, RecordingTool
 from himari.common import JsonValue
 from himari.tool.api import Completion
 from himari.tool.registry import ToolRegistry
-from himari.tool.schema import SchemaError, check_schema, validate
+from himari.tool.schema import SchemaError, check_schema, json_equal, validate
 
 
 def test_only_ask_user_may_suspend() -> None:
@@ -109,3 +109,32 @@ def test_tool_input_schema_must_be_an_object_schema() -> None:
 )
 def test_well_formed_schemas_are_accepted(schema: JsonValue) -> None:
     check_schema(schema)
+
+
+@pytest.mark.parametrize(
+    ("value", "options", "accepted"),
+    [
+        (True, [1], False),  # Python True == 1; JSON true != 1
+        (1, [True], False),
+        (False, [0], False),
+        (0.0, [False], False),
+        ({"a": True}, [{"a": 1}], False),
+        ([1, 0], [[True, False]], False),
+        (None, [0], False),
+        ("1", [1], False),
+        (["a"], ["a"], False),
+        ({"a": 1}, [[("a", 1)]], False),
+        (1.0, [1], True),  # JSON numbers compare by value
+        (True, [True], True),
+        ({"a": [1, {"b": None}]}, [{"a": [1.0, {"b": None}]}], True),
+        ("r", ["r", "w"], True),
+    ],
+)
+def test_enum_uses_json_equality(value: JsonValue, options: list[JsonValue], accepted: bool) -> None:
+    assert (validate(value, {"enum": options}) == []) is accepted
+
+
+def test_enum_type_check_at_registration_uses_json_semantics() -> None:
+    with pytest.raises(SchemaError, match="enum values must match"):
+        check_schema({"type": "integer", "enum": [1, True]})
+    assert json_equal(1, 1.0) and not json_equal(1, True)
