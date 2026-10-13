@@ -43,6 +43,14 @@
 HIMARI_LIVE=1 pytest -s tests/live   # optional HIMARI_LIVE_MODELS="model_a,model_b"
 ~~~
 
+## 2.2 Sandbox host gate (opt-in)
+
+`tests/sandbox_host/` spawns real sandboxes (bubblewrap + Landlock) on the current Linux host: startup self-test, working directory, shared vs foreign Workspaces, host files, network, environment scrubbing, timeout tree kill and output bounds. Required evidence for Sandbox/Environment execution changes (V3-032); skipped unless enabled.
+
+~~~bash
+HIMARI_SANDBOX_HOST=1 pytest tests/sandbox_host
+~~~
+
 ## 3. Test layout (created 2026-10-13 for the api skeleton)
 
 ~~~text

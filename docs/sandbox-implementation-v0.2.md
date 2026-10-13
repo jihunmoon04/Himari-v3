@@ -6,6 +6,8 @@
 >
 > v2 baseline: [sandbox contract](https://github.com/jihunmoon04/HIMARI-v2/blob/main/src/himari/sandbox/contract.py), [protected backend](https://github.com/jihunmoon04/HIMARI-v2/blob/main/src/himari/sandbox/linux_backend.py), [Landlock helper](https://github.com/jihunmoon04/HIMARI-v2/blob/main/src/himari/sandbox/landlock_exec.py), [activation](https://github.com/jihunmoon04/HIMARI-v2/blob/main/src/himari/sandbox/activation.py), [self-test](https://github.com/jihunmoon04/HIMARI-v2/blob/main/src/himari/sandbox/self_test.py), [Workspace admission](https://github.com/jihunmoon04/HIMARI-v2/blob/main/src/himari/workspace/admission.py), [fd-relative filesystem](https://github.com/jihunmoon04/HIMARI-v2/blob/main/src/himari/workspace/direct_fs.py), [run_command executor](https://github.com/jihunmoon04/HIMARI-v2/blob/main/src/himari/tools/executors/command.py).
 
+> **2026-10-13 구현 (PR C2):** S1~S5의 P0 범위를 `src/himari/environment/inside/sandbox/`와 `inside/run_command`로 구현했다. 활성화는 운영자 marker 없이 시작 시 자체 검사(V3-050), 한도는 V3-051, 세부는 V3-P41. 남은 항목: cgroup/rlimit 자원 한도, 다른 호스트에서의 게이트, ManagedProcess.
+
 ## 1. Scope, confirmed constraints, non-goals
 
 **Confirmed:** user/principal-owned managed root, per-Conversation working directory and same-principal cross-Conversation access; no Worktree and no initial human Approval. Built-in `inside/run_command` must execute under OS isolation; network profile is `ISOLATED_ONLY`. The command Sandbox cannot contact internet/host services; future Web Search uses a different trusted Tool. Sandbox not available ⇒ do not run command.

@@ -1,0 +1,320 @@
+"""bubblewrap + Landlock protected spawn (adapted from HIMARI-v2
+``sandbox/linux_backend.py``; no v2 import, no Task/Work authority).
+
+States::
+
+    discover: no capability -> UNAVAILABLE ; capability -> CAPABLE_INACTIVE
+    start():  real-spawn self-test passes -> ENFORCED ; fails -> SETUP_FAILED
+    run():    a setup failure latches SETUP_FAILED
+
+Nothing promotes back to ENFORCED within a process, and there is no
+unsandboxed fallback in any state.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+import signal
+import stat
+import subprocess
+import sys
+import time
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
+from enum import Enum
+
+from himari.environment.inside.sandbox import landlock_helper
+
+BWRAP_CANDIDATES = ("/usr/bin/bwrap", "/bin/bwrap")
+INTERPRETER = "/usr/bin/python3"  # system interpreter, visible inside the /usr view
+HELPER_IN_SANDBOX = "/run/himari/landlock_helper.py"
+WORKSPACE_MOUNT = "/workspace"
+
+# V3-051
+MAX_ARGV = 64
+MAX_ARG_CHARS = 4096
+DEFAULT_TIMEOUT_SECONDS = 120
+MAX_TIMEOUT_SECONDS = 600
+MAX_OUTPUT_BYTES = 256 * 1024  # acquisition per stream
+
+SETUP_TIMEOUT_SECONDS = 15.0
+_DRAIN_GRACE_SECONDS = 5.0
+SANDBOX_ENV = {
+    "PATH": "/usr/local/bin:/usr/bin:/bin",
+    "HOME": "/tmp/home",
+    "TMPDIR": "/tmp",
+    "LANG": "C.UTF-8",
+    "TERM": "dumb",
+}
+
+
+class SandboxState(Enum):
+    UNAVAILABLE = "unavailable"
+    CAPABLE_INACTIVE = "capable_inactive"
+    ENFORCED = "enforced"
+    SETUP_FAILED = "setup_failed"
+
+
+class SandboxUnavailableError(RuntimeError):
+    """Not ENFORCED. Nothing was spawned."""
+
+
+class SandboxSetupError(RuntimeError):
+    """Sandbox construction failed; the requested argv never executed."""
+
+
+@dataclass(frozen=True)
+class HostCapability:
+    bwrap: str
+    landlock_abi: int
+    helper: str
+
+
+@dataclass(frozen=True)
+class CommandResult:
+    exit_code: int | None  # None when killed on timeout
+    timed_out: bool
+    stdout: bytes  # at most MAX_OUTPUT_BYTES
+    stderr: bytes
+    stdout_total: int  # bytes the command actually wrote
+    stderr_total: int
+    elapsed_ms: int
+
+
+def _bwrap_path() -> str | None:
+    for candidate in BWRAP_CANDIDATES:
+        try:
+            info = os.stat(candidate)
+        except OSError:
+            continue
+        if stat.S_ISREG(info.st_mode) and info.st_mode & 0o111 and not info.st_mode & (stat.S_ISUID | stat.S_ISGID):
+            return candidate
+    return None
+
+
+def system_view() -> list[str]:
+    """bwrap arguments for the minimal read-only system: /usr plus the
+    merged-/usr top-level links, and a few /etc files programs need."""
+    args = ["--ro-bind", "/usr", "/usr"]
+    for name in ("bin", "sbin", "lib", "lib64", "lib32", "libx32"):
+        host = f"/{name}"
+        if os.path.islink(host):
+            args += ["--symlink", os.readlink(host), host]
+        elif os.path.isdir(host):
+            args += ["--ro-bind", host, host]
+    for etc in ("/etc/ld.so.cache", "/etc/alternatives", "/etc/localtime"):
+        if os.path.exists(etc):
+            args += ["--ro-bind", etc, etc]
+    return args
+
+
+def bwrap_arguments(capability: HostCapability, root_fd: int, cwd: str, sync_fd: int, argv: list[str]) -> list[str]:
+    """Built from trusted inputs only: the verified Workspace root fd, a cwd
+    under /workspace, and the fixed system view. ``argv`` only appears after
+    the helper's ``--`` separator."""
+    policy = {"read_roots": ["/"], "write_roots": [WORKSPACE_MOUNT, "/tmp"], "device_root": "/dev", "sync_fd": sync_fd}
+    args = [
+        capability.bwrap,
+        "--unshare-all",  # user, ipc, pid, net, uts, cgroup
+        "--unshare-user",  # required, not best-effort
+        "--die-with-parent",
+        "--new-session",
+        "--disable-userns",
+        "--cap-drop", "ALL",
+        "--clearenv",
+    ]
+    for key, value in SANDBOX_ENV.items():
+        args += ["--setenv", key, value]
+    args += system_view()
+    args += [
+        "--dev", "/dev",
+        "--proc", "/proc",
+        "--tmpfs", "/tmp",
+        "--dir", "/tmp/home",
+        "--ro-bind", capability.helper, HELPER_IN_SANDBOX,
+        "--bind-fd", str(root_fd), WORKSPACE_MOUNT,  # the verified directory itself, no path re-resolution
+        "--remount-ro", "/",
+        "--chdir", cwd,
+        "--",
+        INTERPRETER, "-I", "-S", HELPER_IN_SANDBOX, json.dumps(policy, separators=(",", ":")),
+        "--",
+        *argv,
+    ]
+    return args
+
+
+def discover_capability() -> HostCapability | None:
+    """Read-only checks plus one harmless namespace probe. Never activation."""
+    if not sys.platform.startswith("linux"):
+        return None
+    bwrap = _bwrap_path()
+    abi = landlock_helper.landlock_abi()
+    helper = os.path.realpath(landlock_helper.__file__)
+    if bwrap is None or abi < landlock_helper.MIN_LANDLOCK_ABI or not os.path.isfile(helper):
+        return None
+    if not os.path.realpath(INTERPRETER).startswith("/usr/") or not os.access(INTERPRETER, os.X_OK):
+        return None
+    probe = [bwrap, "--unshare-all", "--unshare-user", "--die-with-parent", *system_view(),
+             "--proc", "/proc", "--dev", "/dev", "--", "/usr/bin/true"]
+    try:
+        completed = subprocess.run(probe, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                   stderr=subprocess.DEVNULL, env={}, timeout=10, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return HostCapability(bwrap, abi, helper) if completed.returncode == 0 else None
+
+
+def validate_argv(argv: object) -> list[str]:
+    if (
+        not isinstance(argv, (list, tuple))
+        or not 1 <= len(argv) <= MAX_ARGV
+        or not all(isinstance(a, str) and a and len(a) <= MAX_ARG_CHARS and "\0" not in a for a in argv)
+    ):
+        raise ValueError(f"argv must be 1..{MAX_ARGV} non-empty strings of at most {MAX_ARG_CHARS} characters")
+    return list(argv)
+
+
+async def _drain(stream: asyncio.StreamReader | None, limit: int) -> tuple[bytes, int]:
+    """Keep the first ``limit`` bytes, count (and discard) the rest so the
+    command never blocks on a full pipe."""
+    if stream is None:
+        return b"", 0
+    kept = bytearray()
+    total = 0
+    while chunk := await stream.read(65536):
+        total += len(chunk)
+        if len(kept) < limit:
+            kept += chunk[: limit - len(kept)]
+    return bytes(kept), total
+
+
+def _read_sync(fd: int) -> bytes:
+    data = b""
+    while chunk := os.read(fd, 64):
+        data += chunk
+        if len(data) > len(landlock_helper.SYNC_OK):
+            break
+    return data
+
+
+def _kill_tree(pid: int) -> None:
+    """bwrap leads its own process group; killing it tears down the PID
+    namespace (--die-with-parent), so every descendant dies with it."""
+    try:
+        os.killpg(pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
+SelfTest = Callable[["SandboxBackend"], Awaitable[bool]]
+
+
+class SandboxBackend:
+    def __init__(self, capability: HostCapability | None) -> None:
+        self._capability = capability
+        self._state = SandboxState.UNAVAILABLE if capability is None else SandboxState.CAPABLE_INACTIVE
+        self._started = False
+
+    @classmethod
+    def discover(cls) -> SandboxBackend:
+        return cls(discover_capability())
+
+    @property
+    def state(self) -> SandboxState:
+        return self._state
+
+    async def start(self, self_test: SelfTest | None = None) -> SandboxState:
+        """Once per process (V3-050): ENFORCED only if the real-spawn
+        self-test passes."""
+        if self._started:
+            raise RuntimeError("the sandbox backend starts once per process")
+        self._started = True
+        if self._state is not SandboxState.CAPABLE_INACTIVE:
+            return self._state
+        if self_test is None:
+            from himari.environment.inside.sandbox.self_test import run_self_test
+
+            self_test = run_self_test
+        try:
+            passed = await self_test(self)
+        except Exception:
+            passed = False
+        self._state = SandboxState.ENFORCED if passed else SandboxState.SETUP_FAILED
+        return self._state
+
+    async def run(self, argv: list[str], *, root_fd: int, cwd: str, timeout: float) -> CommandResult:
+        """The runtime entry: refuses unless ENFORCED; never unsandboxed."""
+        if self._state is not SandboxState.ENFORCED:
+            raise SandboxUnavailableError(self._state.value)
+        try:
+            return await self.launch(argv, root_fd=root_fd, cwd=cwd, timeout=timeout)
+        except SandboxSetupError:
+            self._state = SandboxState.SETUP_FAILED  # latched
+            raise
+
+    async def launch(self, argv: list[str], *, root_fd: int, cwd: str, timeout: float) -> CommandResult:
+        """The one protected spawn (used by ``run`` and by the self-test).
+        Returns only after the helper reported enforcement; otherwise the
+        tree is killed and SandboxSetupError raised (argv never ran)."""
+        if self._capability is None:
+            raise SandboxUnavailableError(SandboxState.UNAVAILABLE.value)
+        if not cwd.startswith(WORKSPACE_MOUNT):
+            raise ValueError("cwd must be under /workspace")
+        argv = validate_argv(argv)
+        sync_r, sync_w = os.pipe()
+        started = time.monotonic()
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *bwrap_arguments(self._capability, root_fd, cwd, sync_w, argv),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env={},
+                pass_fds=(sync_w, root_fd),
+                start_new_session=True,
+            )
+        except OSError as error:
+            os.close(sync_r)
+            os.close(sync_w)
+            raise SandboxSetupError("bwrap could not start") from error
+        os.close(sync_w)
+        try:
+            sync = await asyncio.wait_for(asyncio.to_thread(_read_sync, sync_r), SETUP_TIMEOUT_SECONDS)
+        except TimeoutError:
+            sync = b""
+        finally:
+            os.close(sync_r)
+        if sync != landlock_helper.SYNC_OK:
+            _kill_tree(process.pid)
+            await process.wait()
+            raise SandboxSetupError("the sandbox did not report enforcement")
+
+        out_task = asyncio.create_task(_drain(process.stdout, MAX_OUTPUT_BYTES))
+        err_task = asyncio.create_task(_drain(process.stderr, MAX_OUTPUT_BYTES))
+        timed_out = False
+        try:
+            await asyncio.wait_for(process.wait(), timeout)
+        except TimeoutError:
+            timed_out = True
+            _kill_tree(process.pid)
+            await process.wait()
+        try:
+            (stdout, stdout_total), (stderr, stderr_total) = await asyncio.wait_for(
+                asyncio.gather(out_task, err_task), _DRAIN_GRACE_SECONDS
+            )
+        except TimeoutError:
+            out_task.cancel()
+            err_task.cancel()
+            stdout = stderr = b""
+            stdout_total = stderr_total = 0
+        return CommandResult(
+            exit_code=None if timed_out else process.returncode,
+            timed_out=timed_out,
+            stdout=stdout,
+            stderr=stderr,
+            stdout_total=stdout_total,
+            stderr_total=stderr_total,
+            elapsed_ms=int((time.monotonic() - started) * 1000),
+        )
