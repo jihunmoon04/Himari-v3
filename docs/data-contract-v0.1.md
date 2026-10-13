@@ -152,7 +152,7 @@ Environment: optionally observed live connectivity/capabilities
 
 - **Data persisted activation ≠ 실제 온라인 상태 ≠ 현재 실행 권한**이다. Tool을 호출할 때 Environment는 현재 Binding·권한·연결 상태를 별도로 다시 검증한다. Projection의 표시용 정보 또는 Binding ID는 권한 증명이 아니다.
 - Conversation 밖에서도 Workspace 자체는 지속할 수 있지만, 그 Workspace에 접근하는 활성 Binding은 Conversation/Environment 범위에서 관리한다.
-- **V3-032~034 확정:** 기본 Workspace는 Conversation별 기본 cwd를 제공하지만 같은 사용자에게 허용된 다른 Conversation 디렉터리도 접근할 수 있다. `inside/run_command`는 OS Sandbox 실행을 요구한다. WorkingDirectory는 자원 식별과 다른 설정이며 Conversation 폴더는 OS 보안 격리가 아니다. 상세 제안: [Default Workspace v0.2](default-workspace-files-v0.2.md).
+- **V3-032~036 확정:** 기본 Workspace Root는 **신뢰된 사용자/principal별**로 소유한다. Conversation별 기본 cwd와 같은 사용자에게 허용된 다른 Conversation 디렉터리 접근이 가능하다. `inside/run_command`는 OS Sandbox 실행을 요구하며 **네트워크 기본 차단**이다. WorkingDirectory는 자원 식별과 다른 Data 설정이고 Conversation 폴더는 OS 보안 격리가 아니다. 사용자 인증·Root 매핑/지원 여부는 상세 설계 대상. 제안: [Default Workspace v0.2](default-workspace-files-v0.2.md), [Sandbox Execution](sandbox-execution-v0.1.md).
 - CurrentState는 Event나 Artifact로 복제할 필요가 없다. 마지막 Run에서 구성된 **전체 프롬프트는 최신 PromptSnapshot**, 실제 송신된 provider-specific 요청은 **각 Run의 raw_request**로 보존한다.
 - 현재 상태의 투영 값이 언제나 원본과 실시간 동기라는 보장은 없다. 요청 생성 시 읽기 버전/기준과 Tool 실행 시 재검증이 필요하다.
 
