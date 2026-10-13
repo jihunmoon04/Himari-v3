@@ -407,9 +407,11 @@ class ToolOutcome:
 ## 11. 종단 간 하나의 Run 예시 (출처/호출/데이터 구분)
 
 ```text
-0. UI → Control.drive(trusted conversation scope, user event ref)
+0. UI → Control.drive(trusted conversation scope, raw user input)   [UI는 user Event를 직접 기록하지 않음]
 1. Control: Conversation lock 확보 (P0 프로세스 내: 동시 실행만 방지. 크래시 후 중복은 6·8단계 영속 표시가 방지; P2 lease)
-2. Control → Data.ConversationLog.append_event   [user input exact, if not already recorded]
+2. Control: 사용자 입력 기록 (입력당 한 경로, lock 안에서)
+      ask_user 대기 중(find_waiting_call) → answer_pending_call (T7a: user_message + ToolResult + tool_result)
+      그 외                             → append_event (T1: 일반 user_message)
 3. Control → Prompt.build                        [loader: ConversationLog / StateQuery / Tool.catalog / optional ENV observe]
       → compose(PromptInputs)                     [순수 함수]
    Prompt → Control                               [neutral input + source basis]

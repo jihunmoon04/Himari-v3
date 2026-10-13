@@ -10,7 +10,7 @@
 
 | Contract | Owner / implementer | Consumer | Source of truth | Output or effect |
 | --- | --- | --- | --- | --- |
-| CTRL-01 `DriveConversation` | Control | Web/CLI | authenticated User Event + Data Run/Tool state | serialized run loop; final/question stops |
+| CTRL-01 `DriveConversation` | Control | Web/CLI | authenticated user input (Control이 T1 또는 T7a로 기록) + Data Run/Tool state | serialized run loop; final/question stops |
 | PROMPT-01 `ComposeModelInput` | Prompt | Control | exact Data Event/Execution/Artifact/current basis + selected Snapshot + Tool definitions | typed provider-neutral model input + coverage proof |
 | PROVIDER-02 `PrepareNativeRequest` | Provider adapter | Control | Prompt input + actual target model/capabilities | immutable native request body bytes + send descriptor |
 | DATA-02 `PrepareRun` | Data | Control | prepared native bytes, trigger and Prompt basis | one PREPARED RunRecord |
@@ -52,8 +52,11 @@ Constraints:
 ## 3. One Run loop — transaction vs network boundaries
 
 ~~~text
-0) Trusted user event already committed (Data T1)
+0) UI/CLI → Control.drive(trusted scope, raw user input)   # UI는 user Event를 직접 기록하지 않음
 1) Control acquires this Conversation's lock (P0: in-process; P2: Data T10 lease/fencing)
+1a) 사용자 입력 기록 — Control만 기록하며, 입력 하나당 정확히 한 경로:
+      find_waiting_call(scope) 있음 → T7a answer_pending_call   # user_message(answers_call) + ToolResult + tool_result
+      없음                         → T1 append_event            # 일반 user_message
 2) Control → Prompt.compose()
       Data read exact events/latest snapshot, Execution and State basis;
       Prompt verifies coverage, tool groups, latest State.
@@ -81,6 +84,7 @@ Constraints:
 - Per-Conversation Control serialization is confirmed. **P0 uses an in-process lock (V3-045)**; driver claim/lease and epoch fencing are P2. Cancel/User input queue and Pause timing are still proposed.
 - **lock ≠ 크래시 안전성.** in-process lock은 살아 있는 프로세스 안의 동시 driver만 막는다. 프로세스가 죽으면 lock도 사라지므로, 크래시 후 같은 Run 재송신·같은 Tool 재실행은 **Data의 T3/T6 영속 표시와 재시작 정리(T-R)**로 막는다. 재시작 시 `DISPATCH_CLAIMED`(응답 없음) → `OUTCOME_UNKNOWN`, `EXECUTION_CLAIMED`(결과 없음) → `UNKNOWN`이며 자동 재실행하지 않는다.
 - Trigger of next Run after tools is the **already persisted completed tool group**, not a newly synthesized User Event.
+- **사용자 입력 단일 기록 규칙:** user 입력은 step 1a에서 lock 안에서 한 번만 기록된다. ask_user 대기 중이면 T7a가 `user_message`와 ToolResult를 함께 쓰고, T1을 따로 호출하지 않는다. 대기가 아니면 T1만 쓴다. 따라서 같은 입력이 `user_message` 두 개로 남는 경우는 없다. Trigger는 T1이면 그 Event, T7a면 완결된 `ask_user` 그룹이다.
 - Changing current Plan/Note/Workspace state between Run composition and Tool effect is rechecked in Data/Environment, not silently trusted from Prompt.
 
 ## 4. Provider prepare/invoke boundary: raw correctness

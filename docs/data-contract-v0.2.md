@@ -234,7 +234,7 @@ PromptSnapshot:
 | Txn | Boundary / owner | Before / after invariant |
 | --- | --- | --- |
 | T0 | Create Conversation + authorized initial principal/workspace mapping | no orphan owned conversation / wrong-principal root |
-| T1 | Append user or other canonical Event | allocate ordered `sequence` and immutable payload atomically |
+| T1 | Append user or other canonical Event | allocate ordered `sequence` and immutable payload atomically. ask_user 대기 중 들어온 사용자 입력은 T1이 아니라 T7a로만 기록(입력당 한 경로) |
 | T2 | Prepare Run | commit raw native request bytes + trigger/basis + PREPARED *before* any send |
 | T3 | Mark provider send (**P0**: 단일 행 조건부 갱신 / P2: fenced claim) | `PREPARED → DISPATCH_CLAIMED` 영속 후에만 송신. 이미 claim된 Run은 다시 송신 불가 |
 | T4 | Receive raw response | store exact received bytes and `RECEIVED` together |
@@ -301,7 +301,7 @@ All methods take a trusted, authenticated scope or opaque capability created by 
 - D05 received raw response survives projection failure and later idempotent projection; no second Provider invocation.
 - D06 two tool calls project atomically with unique call IDs and stable ordinal; none executes if pending group transaction fails.
 - D07 out-of-order completion keeps Event chronology by sequence but native replay pairs results by original ordinal.
-- D08 a tool completing twice cannot duplicate results; PENDING or effect-claimed after crash never blindly reruns.
+- D08 a tool completing twice cannot duplicate results; a call left `EXECUTION_CLAIMED` after crash is never re-run (becomes `UNKNOWN`, D17). A never-claimed `PENDING` call is not a rerun and may execute once on resume (D20).
 - D09 configured Conversation ToolResult matches committed model_result exactly; omitted Event has still durable Execution source.
 - D10 Internal Plan mutation + ToolResult + Event all commit or all rollback; Artifact revision conflict does not silently report success.
 - D11 replacement of latest full PromptSnapshot keeps **one** row, preserves all historical native Run request bodies and exact Conversation Events.
@@ -313,6 +313,7 @@ All methods take a trusted, authenticated scope or opaque capability created by 
 - D17 crash after `EXECUTION_CLAIMED` → `UNKNOWN` on restart; handler not re-invoked; next Run blocked until explicit resolution.
 - D18 restart while waiting: pending `ask_user` is identified from persisted rows only (`find_waiting_call`); answer commits `user_message` + ToolResult + `tool_result` Event atomically, then exactly one new Run.
 - D19 second answer after the call is completed becomes an ordinary `user_message`; never a second ToolResult for the same `call_id`.
+- D19a one user input produces exactly one `user_message`: T7a while an `ask_user` is waiting, T1 otherwise; never both.
 - D20 Read/Internal Tool left `PENDING` after crash may be re-executed; effectful Tool left `PENDING` (never claimed) may be executed once on resume.
 
 **Test execution policy:** [V3-038](testing-policy.md): public Data contract create/change/remove → full pytest once code exists; Data implementation only with same contract → Data-module pytest. No executable v3 tests yet.
