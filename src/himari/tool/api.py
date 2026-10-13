@@ -87,8 +87,8 @@ class ToolContext(DeepFrozen):
     scope: TrustedScope
     artifacts: ArtifactStore  # read-only use
     binding: BindingAuthority | None = None  # resolved by Dispatcher; re-validate before effects
-    # The Conversation's working directory in that Workspace (DATA-11), resolved
-    # with the Binding for Workspace Tools. Never a host path.
+    # The working directory of *this* Binding (its Workspace + cwd, DATA-11),
+    # so each Environment sees its own. Never a host path.
     workspace: ConversationWorkspace | None = None
 
 

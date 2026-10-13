@@ -329,6 +329,10 @@ class BindingAuthority(DeepFrozen):
     environment_kind: EnvironmentKind
     workspace_id: WorkspaceId
     revision: int
+    # This Conversation's working directory inside *this* Binding's Workspace
+    # (DATA-11). Per Binding, so several Environments with different
+    # Workspaces can be active at once (V3-008). Never a host path.
+    cwd_relative: str | None = None
 
 
 @dataclass(frozen=True)

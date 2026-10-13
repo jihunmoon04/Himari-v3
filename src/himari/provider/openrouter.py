@@ -139,6 +139,8 @@ def _render_state(state: CurrentStateProjection) -> str | None:
                     "workspace_id": binding.workspace_id,
                     "connection": observed.get(binding.binding_id, "unknown"),
                 }
+                if binding.cwd_relative is not None:
+                    entry["default_binding"]["working_directory"] = f"/workspace/{binding.cwd_relative}"  # type: ignore[index]
             environments.append(entry)
         data["environments"] = environments
     if basis.conversation_workspace is not None:

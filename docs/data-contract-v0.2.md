@@ -262,7 +262,7 @@ All methods take a trusted, authenticated scope or opaque capability created by 
 | DATA-07 | `WorkspaceState` | `read_binding_authority(scope,binding_id)` | Environment, Tool Dispatcher | authorized and current Workspace/Environment binding metadata |
 | DATA-08 | `ConversationLog` (+`ArtifactStore` 같은 트랜잭션) | `commit_tool_outcome(scope,run_id,call_id,outcome)` — outcome의 `artifact_mutations`에 expected revision 포함 | **Tool Dispatcher만** | one atomic Artifact+ToolResult+Event transaction. Tool 구현은 직접 호출하지 않음(V3-042) |
 | DATA-09/10 | `ControlState` (**P2**) | `read_control_state(scope)` / `claim_control_execution(scope,expected_generation)` / `transition_control_state(scope,claim,cursor)` | Control | proposed one-writer execution cursor/fencing |
-| DATA-11 | `WorkspaceState` | `resolve_conversation_workspace(scope)` | Environment | principal-owned root record + current Conversation relative cwd |
+| DATA-11 | `WorkspaceState` | `resolve_conversation_workspace(scope)` (대화 기본) + **Binding별 `BindingAuthority.cwd_relative`** | Environment, Tool Dispatcher | principal-owned root record + relative cwd. Tool 실행에는 Binding별 작업 폴더를 쓴다(여러 Environment 동시 활성, PR #8 검수 B1) |
 
 **Module purity:** no other module directly imports Data's DB connection, repository objects, SQL schema or migration helpers. Data DTOs crossing Port boundaries are provider-neutral immutable values. Authenticated Web/CLI read endpoints use deliberately reduced DTO projections rather than raw protected records by default.
 

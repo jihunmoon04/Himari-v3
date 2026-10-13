@@ -24,7 +24,7 @@ from himari.common import (
 from himari.data.api import BindingAuthority, ConversationWorkspace
 from himari.environment.api import ConnectionStatus, EnvironmentPlugin
 from himari.environment.inside import INSIDE, InsideEnvironment
-from himari.environment.inside.tools import MAX_OBSERVATION_BYTES
+from himari.environment.inside.tools import MAX_LIST_ENTRIES, MAX_OBSERVATION_BYTES
 from himari.tool.api import EffectProfile, ToolContext, ToolHandler, ToolInvocation, ToolOutcome, ToolStatus
 from himari.tool.registry import ToolRegistry
 
@@ -53,7 +53,10 @@ def alice_root(env: InsideEnvironment) -> Path:
     return Path(env.host_root(ALICE))
 
 
-SEEN: list[ToolOutcome] = []  # every outcome, for the host-path leak check
+def _assert_no_host_path(env: InsideEnvironment, outcome: ToolOutcome) -> None:
+    """Checked on every call (test-order independent): no host path in any result."""
+    blob = text(outcome) + json.dumps(thaw(outcome.raw_result))
+    assert str(env.host_root(ALICE)).rsplit("/", 2)[0] not in blob and "/tmp/" not in blob, blob
 
 
 def call(env: InsideEnvironment, tool: str, cwd: str = "conversations/c1", workspace: str = ALICE, **args: Any) -> ToolOutcome:
@@ -62,7 +65,7 @@ def call(env: InsideEnvironment, tool: str, cwd: str = "conversations/c1", works
     binding = BindingAuthority(BindingId("b1"), EnvironmentInstanceId("e1"), INSIDE, ws, 1)
     ctx = ToolContext(scope=SCOPE, artifacts=_NoArtifacts(), binding=binding, workspace=ConversationWorkspace(ws, cwd))
     outcome = asyncio.run(handler.run(ToolInvocation(ToolId(f"inside/{tool}"), CallId("c"), args), ctx))
-    SEEN.append(outcome)
+    _assert_no_host_path(env, outcome)
     return outcome
 
 
@@ -260,10 +263,67 @@ def test_writing_or_deleting_a_symlink_entry_is_a_link_refusal(env: InsideEnviro
     assert (folder / "entry").is_symlink() and (folder / "target.txt").read_text() == "keep"
 
 
-def test_no_result_ever_contains_a_host_path(tmp_path: Path) -> None:
-    """Runs last in this module: scans every outcome produced above."""
-    assert SEEN
-    host = str(tmp_path.parent)
-    for outcome in SEEN:
-        blob = text(outcome) + json.dumps(thaw(outcome.raw_result))
-        assert host not in blob and "/tmp/" not in blob, blob
+# --- PR #8 review: bounded listing (B2), concurrent edit (C2) -----------------
+
+
+def test_listing_scan_and_output_are_bounded(env: InsideEnvironment, alice_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    folder = alice_root / "conversations/c1/huge"
+    folder.mkdir(parents=True)
+    for i in range(3000):
+        (folder / f"{'n' * 180}_{i:05d}").touch()
+    scanned = {"items": 0}
+    real_scandir = os.scandir
+
+    class Counting:
+        def __init__(self, fd: int) -> None:
+            self._it = real_scandir(fd)
+
+        def __enter__(self) -> "Counting":
+            return self
+
+        def __exit__(self, *exc: object) -> None:
+            self._it.close()
+
+        def __iter__(self) -> "Counting":
+            return self
+
+        def __next__(self) -> os.DirEntry[str]:
+            entry = next(self._it)
+            scanned["items"] += 1
+            return entry
+
+    monkeypatch.setattr(os, "scandir", Counting)
+    outcome = call(env, "list_files", path="huge")
+    monkeypatch.undo()
+
+    assert outcome.status is ToolStatus.SUCCEEDED
+    assert scanned["items"] <= MAX_LIST_ENTRIES + 1  # not all 3000
+    assert len(text(outcome).encode()) <= MAX_OBSERVATION_BYTES
+    raw = thaw(outcome.raw_result)
+    assert isinstance(raw, dict) and raw["truncated"] is True and raw["count"] < MAX_LIST_ENTRIES
+    assert "[partial listing" in text(outcome)
+
+
+def test_small_directory_listing_is_complete_and_sorted(env: InsideEnvironment, alice_root: Path) -> None:
+    folder = alice_root / "conversations/c1"
+    folder.mkdir(parents=True)
+    for name in ("b.txt", "a.txt", "c"):
+        (folder / name).mkdir() if name == "c" else (folder / name).write_text("x")
+    lines = text(call(env, "list_files")).splitlines()
+    assert lines == ["/workspace/conversations/c1 (3 entries shown)", "a.txt  (1 bytes)", "b.txt  (1 bytes)", "c/"]
+
+
+def test_write_back_refuses_a_file_changed_after_it_was_read(alice_root: Path) -> None:
+    from himari.environment.inside import fs
+
+    folder = alice_root / "conversations/c1"
+    folder.mkdir(parents=True)
+    (folder / "f.txt").write_text("v1")
+    with fs.open_root(str(alice_root)) as root:
+        _, _, identity = fs.read_file_with_identity(root, "conversations/c1/f.txt", 1024)
+        (folder / "f.txt").write_text("v2 from another conversation")
+        with pytest.raises(fs.FsError) as exc:
+            fs.write_file(root, "conversations/c1/f.txt", b"edited v1", create_parents=False, expected=identity)
+    assert exc.value.category is fs.FsCategory.CHANGED
+    assert (folder / "f.txt").read_text() == "v2 from another conversation"
+    assert not [p for p in folder.iterdir() if p.name.startswith(".himari-")]

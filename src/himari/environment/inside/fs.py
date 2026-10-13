@@ -59,6 +59,7 @@ class FsCategory(Enum):
     ACCESS = "permission denied"
     NOT_REGULAR = "not a regular file"
     HARDLINK = "file has multiple hard links"
+    CHANGED = "file changed while it was being edited; nothing written"
     TOO_LARGE = "file is too large"
     UNSUPPORTED = "safe file access is not supported on this host"
     OTHER = "file operation failed"
@@ -242,12 +243,19 @@ class Entry:
 
 
 def list_directory(root_fd: int, relative: str, max_entries: int) -> tuple[list[Entry], bool]:
-    """Entries sorted by name; ``truncated`` if more than ``max_entries``."""
+    """At most ``max_entries`` entries, scanning at most ``max_entries + 1``
+    directory items (bounded I/O and memory, whatever the directory size).
+    ``truncated`` means more entries exist; the returned ones are then the
+    first ones in directory order (sorted for display), not the first by name."""
     entries: list[Entry] = []
+    truncated = False
     with _open_dir(root_fd, relative) as dir_fd:
         try:
             with os.scandir(dir_fd) as it:
                 for item in it:
+                    if len(entries) >= max_entries:
+                        truncated = True
+                        break
                     info = item.stat(follow_symlinks=False)
                     if stat.S_ISREG(info.st_mode):
                         kind, size = "file", info.st_size
@@ -261,7 +269,7 @@ def list_directory(root_fd: int, relative: str, max_entries: int) -> tuple[list[
         except OSError as error:
             raise _categorize(error) from None
     entries.sort(key=lambda e: e.name)
-    return entries[:max_entries], len(entries) > max_entries
+    return entries, truncated
 
 
 def _check_regular(info: os.stat_result) -> None:
@@ -273,8 +281,22 @@ def _check_regular(info: os.stat_result) -> None:
         raise FsError(FsCategory.HARDLINK)
 
 
+Identity = tuple[int, int, int, int]  # (st_dev, st_ino, st_size, st_mtime_ns)
+
+
+def _identity(info: os.stat_result) -> Identity:
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
+
+
 def read_file(root_fd: int, relative: str, max_bytes: int) -> tuple[bytes, int]:
     """Up to ``max_bytes`` of a regular file and its total size."""
+    data, size, _ = read_file_with_identity(root_fd, relative, max_bytes)
+    return data, size
+
+
+def read_file_with_identity(root_fd: int, relative: str, max_bytes: int) -> tuple[bytes, int, Identity]:
+    """Like :func:`read_file`, plus the file's identity for an optimistic
+    write-back check (see ``write_file(expected=...)``)."""
     fd = openat2(root_fd, relative, _READ_FLAGS)
     try:
         info = os.fstat(fd)
@@ -287,15 +309,21 @@ def read_file(root_fd: int, relative: str, max_bytes: int) -> tuple[bytes, int]:
                 break
             chunks.append(chunk)
             remaining -= len(chunk)
-        return b"".join(chunks), info.st_size
+        return b"".join(chunks), info.st_size, _identity(info)
     except OSError as error:
         raise _categorize(error) from None
     finally:
         os.close(fd)
 
 
-def write_file(root_fd: int, relative: str, data: bytes, *, create_parents: bool) -> bool:
-    """Atomically replace or create a regular file. Returns ``True`` if it was created."""
+def write_file(
+    root_fd: int, relative: str, data: bytes, *, create_parents: bool, expected: Identity | None = None
+) -> bool:
+    """Atomically replace or create a regular file. Returns ``True`` if it was
+    created. With ``expected``, the current file must still have that identity
+    right before the rename, otherwise CHANGED and nothing is written. This
+    narrows (does not close) the read-modify-write window; Workspace write
+    serialization is the Scheduler's job (TOOL-03)."""
     parent, name = _split(relative)
     if create_parents:
         ensure_directory(root_fd, parent)
@@ -312,6 +340,8 @@ def write_file(root_fd: int, relative: str, data: bytes, *, create_parents: bool
                 raise FsError(FsCategory.LINK)
             _check_regular(existing)
             created = False
+        if expected is not None and (created or _identity(existing) != expected):
+            raise FsError(FsCategory.CHANGED)
         temp = f".himari-{secrets.token_hex(8)}.tmp"
         try:
             fd = os.open(temp, _CREATE_FLAGS | os.O_CLOEXEC, 0o644, dir_fd=dir_fd)
@@ -326,12 +356,21 @@ def write_file(root_fd: int, relative: str, data: bytes, *, create_parents: bool
                 os.fsync(fd)
             finally:
                 os.close(fd)
+            if expected is not None:
+                try:
+                    now = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+                except OSError:
+                    raise FsError(FsCategory.CHANGED) from None
+                if _identity(now) != expected:
+                    raise FsError(FsCategory.CHANGED)
             os.replace(temp, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)  # replaces the entry; never follows
-        except OSError as error:
+        except (OSError, FsError) as error:
             try:
                 os.unlink(temp, dir_fd=dir_fd)
             except OSError:
                 pass
+            if isinstance(error, FsError):
+                raise
             raise _categorize(error) from None
         return created
 

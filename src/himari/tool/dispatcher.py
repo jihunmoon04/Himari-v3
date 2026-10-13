@@ -157,7 +157,11 @@ class Dispatcher:
             if violations:
                 raise _Denied("invalid arguments: " + "; ".join(violations))
             binding = await self._resolve_binding(scope, d, record)
-            workspace = await self._resolve_workspace(scope, binding) if binding is not None else None
+            workspace = (
+                ConversationWorkspace(binding.workspace_id, binding.cwd_relative)
+                if binding is not None and binding.cwd_relative is not None
+                else None
+            )
         except _Denied as denied:
             await self._commit(scope, record.call, _error(ToolStatus.DENIED, str(denied)), record_event)
             return
@@ -181,17 +185,6 @@ class Dispatcher:
                 raw_result={"error_type": type(exc).__name__, "error": str(exc)},
             )
         await self._commit(scope, record.call, outcome, record_event)
-
-    async def _resolve_workspace(
-        self, scope: TrustedScope, binding: BindingAuthority
-    ) -> ConversationWorkspace:
-        try:
-            workspace = await self._workspaces.resolve_conversation_workspace(scope)
-        except DataError as exc:
-            raise _Denied(f"no working directory: {exc.code.value}") from exc
-        if workspace.workspace_id != binding.workspace_id:
-            raise _Denied("the working directory belongs to a different workspace")
-        return workspace
 
     async def _resolve_binding(
         self, scope: TrustedScope, d: ToolDefinition, record: ToolExecutionRecord

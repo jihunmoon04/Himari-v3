@@ -62,3 +62,34 @@ def test_internal_exception_text_never_reaches_the_model() -> None:
     assert isinstance(block, TextBlock) and block.text == "The tool failed with an internal error."
     assert thaw(record.raw_result) == {"error_type": "RuntimeError", "error": "/srv/himari/secret/path token=abc123"}
     assert b"secret" not in provider.sent[-1].body and b"abc123" not in provider.sent[-1].body
+
+
+
+def test_two_environments_with_different_workspaces_work_independently(tmp_path: Path) -> None:
+    """PR #8 review B1: activating another Environment must not break Inside,
+    and each Environment Tool gets its own Binding's working directory."""
+    from testkit import FAKE, FakeEnvironment
+
+    from himari.tool.api import WorkspaceRequirement
+
+    for inside_first in (True, False):
+        inside = InsideEnvironment(tmp_path / f"ws{inside_first}")
+        inside.provision(WorkspaceId("ws_alice"))
+        remote = RecordingTool("fake/ping", environment_kind=FAKE, workspace=WorkspaceRequirement.DEFAULT)
+        provider = ScriptedAdapter([calls(("inside/write_file", {"path": "a.txt", "content": "hi"}), ("fake/ping", {})),
+                                    final("done")])
+        rt = build_in_memory_runtime(provider, environments=[inside, FakeEnvironment(remote)])
+        rt.store.create_conversation(SCOPE)
+        order = [(INSIDE, "ws_alice", None), (FAKE, "remote_box", "projects/x")]
+        for kind, ws, cwd in (order if inside_first else order[::-1]):
+            rt.store.activate_environment(SCOPE, kind, WorkspaceId(ws), cwd_relative=cwd)
+
+        result = asyncio.run(rt.driver.drive(SCOPE, user("go")))
+
+        assert result.state is DriveState.COMPLETED, inside_first
+        records = asyncio.run(rt.data.read_tool_executions(SCOPE, result.run_ids[0]))
+        assert [r.status for r in records] == [ToolExecutionStatus.SUCCEEDED] * 2, inside_first
+        assert (tmp_path / f"ws{inside_first}/ws_alice/conversations" / SCOPE.conversation_id / "a.txt").read_text() == "hi"
+        remote_ctx = remote.contexts[-1]
+        assert remote_ctx.workspace is not None
+        assert (remote_ctx.workspace.workspace_id, remote_ctx.workspace.cwd_relative) == ("remote_box", "projects/x")

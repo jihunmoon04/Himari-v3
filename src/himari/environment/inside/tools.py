@@ -7,6 +7,7 @@ permission, shared inode) are DENIED; other problems are FAILED.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
@@ -84,12 +85,21 @@ class _InsideTool:
             return ToolOutcome(ToolStatus.DENIED, _text("no workspace is bound to this conversation", error=True))
         args = invocation.arguments
         raw_path = args.get("path", ".")
+        host_root = self._env.host_root(ctx.binding.workspace_id)
+        cwd = ctx.workspace.cwd_relative
+        # Blocking filesystem work runs off the event loop so a large
+        # directory or slow disk cannot stall other Conversations.
+        return await asyncio.to_thread(self._run_sync, host_root, cwd, raw_path, args)
+
+    def _run_sync(self, host_root: str, cwd: str, raw_path: object, args: Mapping[str, Any]) -> ToolOutcome:
         shown = raw_path if isinstance(raw_path, str) else "?"  # the model's own path, until resolved
         try:
-            relative = fs.to_relative(ctx.workspace.cwd_relative, shown)
+            relative = fs.to_relative(cwd, shown)
             shown = fs.display(relative)
-            with fs.open_root(self._env.host_root(ctx.binding.workspace_id)) as root_fd:
-                fs.ensure_directory(root_fd, fs.to_relative(ctx.workspace.cwd_relative, "."))
+            with fs.open_root(host_root) as root_fd:
+                # Idempotent setup: the Conversation's own working directory is
+                # created on first use, by READ Tools too (no file content changes).
+                fs.ensure_directory(root_fd, fs.to_relative(cwd, "."))
                 return self.act(root_fd, relative, args)
         except fs.FsError as error:
             return _failure(shown, error)
@@ -107,19 +117,34 @@ class ListFiles(_InsideTool):
     properties = {"path": {"type": "string", "description": "Directory to list (default: working directory)."}}
 
     def act(self, root_fd: int, relative: str, args: Mapping[str, Any]) -> ToolOutcome:
-        entries, truncated = fs.list_directory(root_fd, relative, MAX_LIST_ENTRIES)
-        lines = [f"{fs.display(relative)} ({len(entries)} entries{', truncated' if truncated else ''})"]
+        entries, more = fs.list_directory(root_fd, relative, MAX_LIST_ENTRIES)
+        lines: list[str] = []
+        size = 0
+        shown_count = 0
         for e in entries:
             if e.kind == "directory":
-                lines.append(f"{e.name}/")
+                line = f"{e.name}/"
             elif e.kind == "file":
-                lines.append(f"{e.name}  ({e.size} bytes)")
+                line = f"{e.name}  ({e.size} bytes)"
             else:
-                lines.append(f"{e.name}  [{e.kind}]")
+                line = f"{e.name}  [{e.kind}]"
+            size += len(line.encode()) + 1
+            if size > MAX_OBSERVATION_BYTES - 512:  # leave room for the header/footer
+                more = True
+                break
+            lines.append(line)
+            shown_count += 1
+        header = f"{fs.display(relative)} ({shown_count} entries shown)"
+        footer = (
+            [f"[partial listing: the directory has more entries than shown (limit {MAX_LIST_ENTRIES} entries, "
+             f"{MAX_OBSERVATION_BYTES // 1024} KiB); entries are not the first by name]"]
+            if more
+            else []
+        )
         return ToolOutcome(
             ToolStatus.SUCCEEDED,
-            _text("\n".join(lines)),
-            raw_result={"path": fs.display(relative), "count": len(entries), "truncated": truncated},
+            _text("\n".join([header, *lines, *footer])),
+            raw_result={"path": fs.display(relative), "count": shown_count, "truncated": more},
         )
 
 
@@ -196,7 +221,7 @@ class EditFile(_InsideTool):
         expected = int(args.get("expected_replacements", 1))
         if not old or expected < 1:
             return ToolOutcome(ToolStatus.FAILED, _text(f"{shown}: old_text must be non-empty and expected_replacements >= 1", error=True))
-        data, size = fs.read_file(root_fd, relative, MAX_WRITE_BYTES + 1)
+        data, size, identity = fs.read_file_with_identity(root_fd, relative, MAX_WRITE_BYTES + 1)
         if size > MAX_WRITE_BYTES:
             raise fs.FsError(fs.FsCategory.TOO_LARGE)
         try:
@@ -213,7 +238,7 @@ class EditFile(_InsideTool):
         updated = text.replace(old, new).encode("utf-8")
         if len(updated) > MAX_WRITE_BYTES:
             raise fs.FsError(fs.FsCategory.TOO_LARGE)
-        fs.write_file(root_fd, relative, updated, create_parents=False)
+        fs.write_file(root_fd, relative, updated, create_parents=False, expected=identity)
         return ToolOutcome(
             ToolStatus.SUCCEEDED,
             _text(f"edited {shown}: replaced {found} occurrence(s)"),
