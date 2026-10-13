@@ -85,6 +85,7 @@ class _Run:
     record: RunRecord
     raw_request_body: bytes
     raw_response_body: bytes | None = None
+    raw_response_content_type: str = ""
     projected_event_id: EventId | None = None
 
 
@@ -149,6 +150,14 @@ class InMemoryStore:
         for iid, act in list(conv.activations.items()):
             if act.default_binding_id == binding_id:
                 conv.activations[iid] = replace(act, default_binding_id=None)
+        conv.state_revision += 1
+
+    def deactivate_environment(self, scope: TrustedScope, kind: EnvironmentKind) -> None:
+        """Ends the activation; Bindings and the Workspace itself remain (V3-009)."""
+        conv = self._authorized(scope)
+        for iid, act in list(conv.activations.items()):
+            if act.environment_kind == kind:
+                del conv.activations[iid]
         conv.state_revision += 1
 
     def raw_request_bodies(self, scope: TrustedScope) -> list[bytes]:
@@ -226,8 +235,11 @@ class InMemoryData:
     ) -> ConversationEvent:
         conv = self._conv(scope)
         if idempotency_key is not None and idempotency_key in conv.idempotency:
-            existing = conv.idempotency[idempotency_key]
-            return next(e for e in conv.events if e.event_id == existing)
+            existing_id = conv.idempotency[idempotency_key]
+            existing = next(e for e in conv.events if e.event_id == existing_id)
+            if existing.payload != message:
+                raise DataError(DataErrorCode.DUPLICATE_IDENTITY, f"idempotency key {idempotency_key!r} reused")
+            return existing
         if message.answers_call is not None:
             raise DataError(DataErrorCode.INVALID_STATE_TRANSITION, "answers go through T7a")
         if self._waiting(conv) is not None:
@@ -276,8 +288,9 @@ class InMemoryData:
         if run.record.status is not RunStatus.DISPATCH_CLAIMED:
             raise DataError(DataErrorCode.INVALID_STATE_TRANSITION, f"{run_id} is {run.record.status.value}")
         match outcome:
-            case RawReceived(body=body, usage=usage):
+            case RawReceived(body=body, content_type=content_type, usage=usage):
                 run.raw_response_body = body
+                run.raw_response_content_type = content_type
                 self._set_status(run, RunStatus.RECEIVED, usage=usage)
             case RawNoResponse(error_code=code):
                 self._set_status(run, RunStatus.FAILED_NO_RESPONSE, error_code=code)
@@ -329,6 +342,12 @@ class InMemoryData:
 
     async def read_run(self, scope: TrustedScope, run_id: RunId) -> RunRecord:
         return self._run(self._conv(scope), run_id).record
+
+    async def read_raw_response(self, scope: TrustedScope, run_id: RunId) -> RawReceived:
+        run = self._run(self._conv(scope), run_id)
+        if run.raw_response_body is None:
+            raise DataError(DataErrorCode.NOT_FOUND, f"{run_id} has no stored response")
+        return RawReceived(run.raw_response_body, run.raw_response_content_type, run.record.usage)
 
     async def read_tool_executions(
         self, scope: TrustedScope, run_id: RunId
@@ -406,6 +425,7 @@ class InMemoryData:
         unknown_runs: list[RunId] = []
         abandoned: list[RunId] = []
         unknown_tools: list[CallRef] = []
+        received: list[RunId] = []
         for run in conv.runs.values():
             if run.record.status is RunStatus.DISPATCH_CLAIMED:
                 self._set_status(run, RunStatus.OUTCOME_UNKNOWN, error_code="interrupted")
@@ -413,11 +433,13 @@ class InMemoryData:
             elif run.record.status is RunStatus.PREPARED:
                 self._set_status(run, RunStatus.ABANDONED_NOT_SENT)
                 abandoned.append(run.record.run_id)
+            elif run.record.status is RunStatus.RECEIVED:
+                received.append(run.record.run_id)
         for ref, record in list(conv.executions.items()):
             if record.status is ToolExecutionStatus.EXECUTION_CLAIMED:
                 conv.executions[ref] = replace(record, status=ToolExecutionStatus.UNKNOWN)
                 unknown_tools.append(ref)
-        return RecoveryReport(tuple(unknown_runs), tuple(abandoned), tuple(unknown_tools))
+        return RecoveryReport(tuple(unknown_runs), tuple(abandoned), tuple(unknown_tools), tuple(received))
 
     async def get_latest_snapshot(self, scope: TrustedScope) -> PromptSnapshot | None:
         return self._conv(scope).snapshot
@@ -473,6 +495,14 @@ class InMemoryData:
             if act.environment_kind == environment_kind and act.default_binding_id is not None:
                 return conv.bindings.get(act.default_binding_id)
         return None
+
+    async def read_activation(
+        self, scope: TrustedScope, environment_kind: EnvironmentKind
+    ) -> EnvironmentActivation | None:
+        return next(
+            (a for a in self._conv(scope).activations.values() if a.environment_kind == environment_kind),
+            None,
+        )
 
     async def resolve_conversation_workspace(self, scope: TrustedScope) -> ConversationWorkspace:
         workspace = self._conv(scope).workspace

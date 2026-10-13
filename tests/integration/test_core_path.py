@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
+from typing import Any
 
 import pytest
 from testkit import (
@@ -26,6 +28,7 @@ from himari.data.api import (
     AssistantToolCalls,
     CompletedGroupRef,
     DataError,
+    EventRef,
     DataErrorCode,
     EventKind,
     RunStatus,
@@ -33,7 +36,13 @@ from himari.data.api import (
     UserMessage,
 )
 from himari.prompt.api import ToolGroupTurn, UserTurn
-from himari.provider.api import NativeNoResponse, NativePreparedRequest, NativeUncertain
+from himari.provider.api import (
+    NativeNoResponse,
+    NativePreparedRequest,
+    NativeReceived,
+    NativeUncertain,
+    NormalizedModelOutput,
+)
 from himari.provider.scripted import RawBody, ScriptedAdapter
 from himari.tool.api import EffectProfile, WorkspaceRequirement
 
@@ -312,3 +321,156 @@ def test_foreign_principal_cannot_drive() -> None:
         asyncio.run(rt.driver.drive(FOREIGN, user("hi")))
     assert exc.value.code is DataErrorCode.NOT_AUTHORIZED
     assert provider.sent == []
+
+
+# --- Review follow-ups: B3-1 stored-response recovery ------------------------
+
+
+class CrashAfterReceive(ScriptedAdapter):
+    """Dies right after the raw response was stored (RECEIVED), before projection."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.crashed = False
+
+    def normalize(self, received: NativeReceived) -> NormalizedModelOutput:
+        if not self.crashed:
+            self.crashed = True
+            raise SimulatedCrash("after RECEIVED")
+        return super().normalize(received)
+
+
+def test_stored_final_response_is_projected_after_restart() -> None:
+    rt, provider = runtime(provider=CrashAfterReceive([final("first answer")]))
+    with pytest.raises(SimulatedCrash):
+        asyncio.run(rt.driver.drive(SCOPE, user("q1")))
+
+    provider2 = ScriptedAdapter([final("second answer")])
+    rt2, _ = runtime(store=rt.store, provider=provider2)
+    result = asyncio.run(rt2.driver.drive(SCOPE, user("q2")))
+
+    assert result.state is DriveState.COMPLETED
+    assert result.recovery is not None and len(result.recovery.runs_received_unprojected) == 1
+    assert len(provider.sent) == 1 and len(provider2.sent) == 1  # no Provider call to recover
+    kinds_ = [e.kind for e in asyncio.run(rt2.data.read_events(SCOPE))]
+    assert kinds_ == [EventKind.USER_MESSAGE, EventKind.ASSISTANT_FINAL, EventKind.USER_MESSAGE, EventKind.ASSISTANT_FINAL]
+    history = provider2.prepared_inputs[0].conversation
+    assert [type(p).__name__ for p in history] == ["UserTurn", "AssistantTurn", "UserTurn"]
+
+
+def test_stored_tool_calls_are_projected_and_run_once_after_restart() -> None:
+    echo = RecordingTool("echo")
+    rt, _ = runtime(provider=CrashAfterReceive([calls(("echo", {}))]), tools=[echo])
+    with pytest.raises(SimulatedCrash):
+        asyncio.run(rt.driver.drive(SCOPE, user("run echo")))
+    assert echo.invocations == []
+
+    provider2 = ScriptedAdapter([final("echo done")])
+    rt2, _ = runtime(store=rt.store, provider=provider2, tools=[echo])
+    result = asyncio.run(rt2.driver.drive(SCOPE, user("status?")))
+
+    assert result.state is DriveState.COMPLETED
+    assert len(echo.invocations) == 1
+    history = provider2.prepared_inputs[0].conversation
+    assert [type(p).__name__ for p in history] == ["UserTurn", "ToolGroupTurn", "UserTurn"]
+
+
+def test_stored_response_from_another_provider_blocks_but_keeps_input() -> None:
+    class OtherProvider(ScriptedAdapter):
+        @property
+        def provider_key(self) -> str:
+            return "other"
+
+    rt, _ = runtime(provider=CrashAfterReceive([final("x")]))
+    with pytest.raises(SimulatedCrash):
+        asyncio.run(rt.driver.drive(SCOPE, user("q1")))
+    provider2 = OtherProvider([final("never")])
+    rt2, _ = runtime(store=rt.store, provider=provider2)
+    result = asyncio.run(rt2.driver.drive(SCOPE, user("q2")))
+
+    assert result.state is DriveState.RECOVERY_REQUIRED
+    assert provider2.sent == []
+    assert [e.kind for e in asyncio.run(rt2.data.read_events(SCOPE))][-1] is EventKind.USER_MESSAGE
+
+
+# --- Review follow-ups: B3-2 activation gate, schema --------------------------
+
+
+def test_environment_tool_without_workspace_is_gated_on_activation() -> None:
+    ping = RecordingTool("fake/ping", environment_kind=FAKE)
+    rt, provider = runtime(
+        [calls(("fake/ping", {})), final("a"), calls(("fake/ping", {})), final("b"),
+         calls(("fake/ping", {})), final("c")],
+        env_tools=[ping],
+    )
+    asyncio.run(rt.driver.drive(SCOPE, user("never activated")))
+    assert ping.invocations == []
+    rt.store.activate_environment(SCOPE, FAKE, WorkspaceId("ws"))
+    asyncio.run(rt.driver.drive(SCOPE, user("active")))
+    assert len(ping.invocations) == 1
+    rt.store.deactivate_environment(SCOPE, FAKE)
+    asyncio.run(rt.driver.drive(SCOPE, user("deactivated")))
+    assert len(ping.invocations) == 1
+    group = provider.prepared_inputs[-1].conversation[-1]
+    assert isinstance(group, ToolGroupTurn) and group.results[CallId("c0")].is_error
+
+
+def test_arguments_failing_schema_are_denied_without_running() -> None:
+    strict = RecordingTool("strict")
+    strict.definition = dataclasses.replace(
+        strict.definition,
+        input_schema={"type": "object", "properties": {"n": {"type": "integer"}},
+                      "required": ["n"], "additionalProperties": False},
+    )
+    rt, provider = runtime([calls(("strict", {"n": "1", "x": 1})), final("ok")], tools=[strict])
+    asyncio.run(rt.driver.drive(SCOPE, user("go")))
+
+    assert strict.invocations == []
+    group = provider.prepared_inputs[-1].conversation[-1]
+    assert isinstance(group, ToolGroupTurn)
+    text = group.results[CallId("c0")].blocks[0]
+    assert isinstance(text, TextBlock) and "$.n: expected integer" in text.text and "$.x: not allowed" in text.text
+
+
+# --- Review follow-ups: resume without a user message --------------------------
+
+
+def test_resume_after_uncertain_send_starts_a_new_run_for_the_same_input() -> None:
+    rt, provider = runtime([NativeUncertain("timeout"), final("answer")])
+    first = asyncio.run(rt.driver.drive(SCOPE, user("question")))
+    assert first.state is DriveState.OUTCOME_UNKNOWN
+
+    resumed = asyncio.run(rt.driver.resume(SCOPE))
+    assert resumed.state is DriveState.COMPLETED
+    assert len(provider.sent) == 2 and resumed.run_ids[0] != first.run_ids[0]
+    user_events = [e for e in asyncio.run(rt.data.read_events(SCOPE)) if e.kind is EventKind.USER_MESSAGE]
+    assert len(user_events) == 1  # no synthetic user message
+    assert provider.prepared_inputs[1].trigger_refs == (EventRef(user_events[0].event_id),)
+
+
+def test_resume_finishes_unclaimed_calls_then_continues() -> None:
+    read = RecordingTool("fake/read", environment_kind=FAKE, workspace=WorkspaceRequirement.DEFAULT)
+    read.crash_next = True
+    rt, _ = runtime([calls(("fake/read", {}))], env_tools=[read])
+    rt.store.activate_environment(SCOPE, FAKE, WorkspaceId("ws"))
+    with pytest.raises(SimulatedCrash):
+        asyncio.run(rt.driver.drive(SCOPE, user("go")))
+
+    provider2 = ScriptedAdapter([final("done")])
+    rt2, _ = runtime(store=rt.store, provider=provider2, env_tools=[read])
+    resumed = asyncio.run(rt2.driver.resume(SCOPE))
+
+    assert resumed.state is DriveState.COMPLETED
+    assert len(read.invocations) == 2
+    (trigger,) = provider2.prepared_inputs[0].trigger_refs
+    assert isinstance(trigger, CompletedGroupRef)
+
+
+def test_resume_is_idle_after_final_and_waits_while_asking() -> None:
+    rt, provider = runtime([final("hi"), calls((ASK_USER_TOOL_ID, {"question": "?"}))])
+    asyncio.run(rt.driver.drive(SCOPE, user("hello")))
+    assert asyncio.run(rt.driver.resume(SCOPE)).state is DriveState.IDLE
+    asyncio.run(rt.driver.drive(SCOPE, user("ask me")))
+    waiting = asyncio.run(rt.driver.resume(SCOPE))
+    assert waiting.state is DriveState.WAITING_FOR_USER and waiting.waiting_call is not None
+    assert len(provider.sent) == 2

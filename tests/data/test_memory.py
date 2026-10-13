@@ -123,3 +123,28 @@ def test_record_event_false_keeps_result_out_of_conversation() -> None:
         assert record.model_result == text_result("ok")
 
     asyncio.run(scenario())
+
+
+def test_idempotency_key_reuse_with_different_message_is_rejected() -> None:
+    async def scenario() -> None:
+        data = fresh()
+        first = await data.append_event(SCOPE, user("A"), idempotency_key="k")
+        assert await data.append_event(SCOPE, user("A"), idempotency_key="k") == first
+        with pytest.raises(DataError) as exc:
+            await data.append_event(SCOPE, user("B"), idempotency_key="k")
+        assert exc.value.code is DataErrorCode.DUPLICATE_IDENTITY
+        assert len(await data.read_events(SCOPE)) == 1
+
+    asyncio.run(scenario())
+
+
+def test_stored_records_are_isolated_from_caller_objects() -> None:
+    async def scenario() -> None:
+        data = fresh()
+        call = await projected_group(data, "echo")
+        (record,) = await data.read_tool_executions(SCOPE, call.run_id)
+        with pytest.raises(TypeError):
+            record.arguments["x"] = 1  # type: ignore[index]
+        assert dict((await data.read_tool_executions(SCOPE, call.run_id))[0].arguments) == {}
+
+    asyncio.run(scenario())

@@ -21,7 +21,6 @@ from enum import Enum
 from typing import Protocol, runtime_checkable
 
 from himari.common import (
-    ASK_USER_TOOL_ID,
     DeepFrozen,
     CallId,
     CallRef,

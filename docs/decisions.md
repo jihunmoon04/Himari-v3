@@ -91,10 +91,14 @@
 | V3-P25 | Proposed | **P0 Tool 실행 순서:** Dispatcher는 그룹을 원래 ordinal 순서로 **순차 실행**한다. 병렬 스케줄링(TOOL-03)은 포트 변경 없이 나중에 추가한다. |
 | V3-P26 | Proposed | **`ToolCompletion.record_event`:** Data가 Tool의 `conversation_record` 정책을 알 수 있도록 Dispatcher가 커밋 시 전달한다(FULL → True). |
 | V3-P27 | Proposed | **불확실한 효과의 판정:** claim된 Environment Tool의 handler가 예외를 던지면 결과를 FAILED로 만들지 않고 `EXECUTION_CLAIMED`로 남긴다(그룹 BLOCKED, 재시작 정리 시 UNKNOWN). claim이 없는 Tool의 예외는 아무 효과도 없었으므로 FAILED 결과로 모델에 전달한다. |
-| V3-P28 | Proposed | **미완결 그룹 재개 시점:** 다음 `drive` 시작 시(재시작 정리 직후, 사용자 입력 기록 전) 최신 그룹의 claim 전 `PENDING` 호출을 먼저 실행한다(D20). 별도 resume 명령은 Pause/Resume 단계에서 정의한다. |
-| V3-P29 | Proposed | **공개 DTO의 깊은 불변성:** 모든 공개 DTO는 `frozen=True` + `DeepFrozen`을 상속한다. 생성 시 모든 필드를 깊게 복사·불변화한다(Mapping → `FrozenDict`, list/tuple → tuple, set → frozenset). 호출자나 Tool handler가 원래 객체나 받은 객체를 바꿔도 기록된 값은 변하지 않는다(V3-003). 테스트(`tests/conftest.py`)는 모든 api 모듈의 dataclass가 `DeepFrozen`을 상속하는지 검사한다. *(독립 검수 B2-1)* |
+| V3-P28 | Proposed | **미완결 그룹 재개 시점:** `drive`와 `resume` 시작 시(재시작 정리와 저장 응답 투영 직후, 사용자 입력 기록 전) 최신 그룹의 claim 전 `PENDING` 호출을 먼저 실행한다(D20). |
 | V3-P29 | Proposed | **공개 DTO의 깊은 불변성:** 모든 공개 DTO는 `frozen=True` + `DeepFrozen`을 상속한다. 생성 시 모든 필드를 깊게 복사·불변화한다(Mapping → `FrozenMap`, list/tuple → tuple, set → frozenset). `FrozenMap`은 **dict를 상속하지 않는** 불변 Mapping이라 `dict.__setitem__` 같은 dict API로도 바꿀 수 없다. JSON 직렬화는 독립 사본을 만드는 `thaw()`로 한다. 그래서 Data는 저장 객체를 그대로 공유·반환해도 된다. `object.__setattr__` 같은 의도적 저수준 조작은 Python에서 막을 수 없으므로 범위 밖이다(영속 DB 백엔드는 직렬화로 자연히 격리됨). *(독립 검수 B2-1, 재검수 B1)* |
 | V3-P30 | Proposed | **ToolCall ordinal 규칙:** 한 그룹의 ordinal은 나열 순서대로 정확히 `0..n-1`이다. 음수·빈 번호·순서 불일치는 `INVALID_MODEL_OUTPUT`으로 거부한다(`validate_tool_calls`). |
+| V3-P31 | Proposed | **저장된 응답의 재시작 투영:** `recover_interrupted`는 `RECEIVED`(투영 전) Run을 상태 변경 없이 보고하고, Control은 새 Run 전에 `read_raw_response`로 저장 응답을 다시 정규화·투영한다(Provider 재호출 없음). 정규화 실패면 `PROJECTION_FAILED`, 저장 당시와 다른 Provider면 `RECOVERY_REQUIRED`(입력은 기록). *(독립 검수 B3-1)* |
+| V3-P32 | Proposed | **Environment 활성화 실행 게이트:** Dispatcher는 모든 Environment Tool 호출에 대해 현재 Conversation에서 그 kind가 활성인지(`read_activation`) 확인하고, Binding이 활성 Instance 소속인지 검사한다. Workspace가 필요 없는 Tool도 예외가 아니다. 카탈로그 노출은 권한이 아니다. *(독립 검수 B3-2)* |
+| V3-P33 | Proposed | **Tool 인자 검증:** 등록 시 `input_schema`가 지원 부분집합(`type/properties/required/additionalProperties/items/enum` + 주석 키워드)만 쓰는지 검사해 부분 검증을 막고, 실행 전 모델 인자를 검증해 실패하면 handler 없이 DENIED 결과를 돌려준다. P0에서 suspending Tool은 `ask_user`만 등록 가능하다. |
+| V3-P34 | Proposed | **`resume(scope)`:** 사용자 메시지 없이 이어 가는 Control 진입점이다. 정리·투영·미실행 호출 처리 후, 영속된 마지막 Event로 다음 trigger를 정한다(FINAL이면 `IDLE`, 대기 중이면 `WAITING_FOR_USER`). 합성 사용자 메시지를 만들지 않는다. |
+| V3-P35 | Proposed | **입력 멱등성:** 같은 `idempotency_key`에 같은 메시지면 기존 Event를 반환하고, 다른 메시지면 `DUPLICATE_IDENTITY`로 거부한다. |
 | V3-P36 | Proposed | **Tool 원본 결과 보존:** `ToolExecutionRecord.raw_result`에 Tool이 반환한 원본 실행 결과를 `model_result`와 따로 저장한다(Data v0.2 §6의 `raw_execution_result`). 모델에는 보내지 않는다. *(재검수 B2)* |
 
 ## C. 명시적으로 미결정인 영역

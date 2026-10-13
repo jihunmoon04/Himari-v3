@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Protocol
 
-from himari.common import CallRef, RunId, TrustedScope
+from himari.common import CallRef, DeepFrozen, RunId, TrustedScope
 from himari.data.api import ConversationEvent, RecoveryReport, UserMessage
 
 
@@ -23,10 +23,11 @@ class DriveState(Enum):
     INVALID_MODEL_OUTPUT = "invalid_model_output"  # raw kept, no effects
     REQUEST_REJECTED = "request_rejected"  # Prompt/Provider refused before send
     RUN_LIMIT_REACHED = "run_limit_reached"
+    IDLE = "idle"  # resume(): nothing to continue (last turn was FINAL)
 
 
 @dataclass(frozen=True)
-class DriveResult:
+class DriveResult(DeepFrozen):
     state: DriveState
     run_ids: tuple[RunId, ...] = ()
     final_event: ConversationEvent | None = None
@@ -51,4 +52,10 @@ class ConversationDriver(Protocol):
         """Record one user input (T7a if an ask_user call is waiting, else T1)
         and run the loop until FINAL, a wait, or a stop condition.
         Raises ControlError(BUSY) if the Conversation is already being driven."""
+        ...
+
+    async def resume(self, scope: TrustedScope) -> DriveResult:
+        """Continue without new user input: restart cleanup, project stored
+        responses, finish never-claimed PENDING calls, then start the next
+        Run if one is due. Same BUSY rule as ``drive``."""
         ...

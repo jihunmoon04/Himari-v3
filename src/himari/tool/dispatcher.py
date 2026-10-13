@@ -10,7 +10,10 @@ P0 scheduling is sequential in original ordinal order; parallel scheduling
 - A handler exception after a claim leaves the call ``EXECUTION_CLAIMED``: the
   effect is uncertain, the group is BLOCKED and restart cleanup marks it UNKNOWN.
   Without a claim nothing happened, so it is committed as FAILED.
-- Unknown tool, missing/revoked/mismatched Binding → DENIED result to the model.
+- Unknown tool, arguments failing ``input_schema``, an Environment Tool whose
+  kind is not active in this Conversation (even with no Workspace requirement:
+  catalog exposure is not authorization), or a missing/revoked/mismatched
+  Binding → DENIED result to the model; the handler never runs.
 - ``ask_user`` (suspending) is never run; it stays PENDING.
 """
 
@@ -43,6 +46,7 @@ from himari.tool.api import (
     WorkspaceRequirement,
 )
 from himari.tool.registry import ToolRegistry
+from himari.tool.schema import validate
 
 _STATUS = {
     ToolStatus.SUCCEEDED: ToolExecutionStatus.SUCCEEDED,
@@ -92,6 +96,9 @@ class Dispatcher:
             return  # stays PENDING; Control turns this into WAITING_FOR_USER
         record_event = d.conversation_record is ConversationRecord.FULL
         try:
+            violations = validate(record.arguments, d.input_schema)
+            if violations:
+                raise _Denied("invalid arguments: " + "; ".join(violations))
             binding = await self._resolve_binding(scope, d, record)
         except _Denied as denied:
             await self._commit(scope, record.call, _error(ToolStatus.DENIED, str(denied)), record_event)
@@ -112,6 +119,11 @@ class Dispatcher:
     async def _resolve_binding(
         self, scope: TrustedScope, d: ToolDefinition, record: ToolExecutionRecord
     ) -> BindingAuthority | None:
+        activation = None
+        if d.environment_kind is not None:
+            activation = await self._workspaces.read_activation(scope, d.environment_kind)
+            if activation is None:
+                raise _Denied(f"environment {d.environment_kind} is not active in this conversation")
         if d.workspace_requirement is WorkspaceRequirement.NONE:
             return None
         try:
@@ -128,8 +140,10 @@ class Dispatcher:
                 raise _Denied("workspace_binding_id is required")
         except DataError as exc:
             raise _Denied(f"binding unavailable: {exc.code.value}") from exc
-        if binding.environment_kind != d.environment_kind:
-            raise _Denied("binding belongs to a different environment")
+        if binding.environment_kind != d.environment_kind or (
+            activation is not None and binding.environment_instance_id != activation.environment_instance_id
+        ):
+            raise _Denied("binding does not belong to the active environment instance")
         return binding
 
     async def _commit(

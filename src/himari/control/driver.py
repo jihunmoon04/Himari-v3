@@ -9,6 +9,8 @@ live process. Crash duplication is prevented by Data's persisted marks
 from __future__ import annotations
 
 import asyncio
+import contextlib
+from collections.abc import AsyncIterator
 
 from himari.common import ASK_USER_TOOL_ID, CallRef, ConversationId, RunId, TrustedScope
 from himari.control.api import ControlError, ControlErrorCode, DriveResult, DriveState
@@ -27,6 +29,7 @@ from himari.data.api import (
     RecoveryReport,
     RunPreparation,
     ToolExecutionStatus,
+    ToolResultRecord,
     TriggerRef,
     UserMessage,
 )
@@ -42,6 +45,7 @@ from himari.provider.api import (
     NativeReceived,
     NativeUncertain,
     NormalizedFinal,
+    NormalizedModelOutput,
     ProviderAdapter,
     ProviderError,
 )
@@ -70,28 +74,104 @@ class Driver:
         self._locks: dict[ConversationId, asyncio.Lock] = {}
 
     async def drive(self, scope: TrustedScope, message: UserMessage) -> DriveResult:
+        async with self._exclusive(scope):
+            return await self._drive_locked(scope, message)
+
+    async def resume(self, scope: TrustedScope) -> DriveResult:
+        async with self._exclusive(scope):
+            return await self._resume_locked(scope)
+
+    @contextlib.asynccontextmanager
+    async def _exclusive(self, scope: TrustedScope) -> AsyncIterator[None]:
         lock = self._locks.setdefault(scope.conversation_id, asyncio.Lock())
         if lock.locked():
             raise ControlError(ControlErrorCode.BUSY, scope.conversation_id)
         async with lock:
-            return await self._drive_locked(scope, message)
+            yield
 
     async def _drive_locked(self, scope: TrustedScope, message: UserMessage) -> DriveResult:
-        recovery = await self._log.recover_interrupted(scope)
+        recovery, stop = await self._prepare(scope)
         triggers: tuple[TriggerRef, ...]
         waiting = await self._log.find_waiting_call(scope)
         if waiting is not None:
             await self._log.answer_pending_call(scope, waiting, message)  # T7a
             triggers = (CompletedGroupRef(waiting.run_id),)
         else:
-            blocked = await self._resume_pending_group(scope)
-            event = await self._log.append_event(scope, message)  # T1
+            blocked = await self._resume_pending_group(scope) if stop is None else None
+            event = await self._log.append_event(scope, message)  # T1: input is never dropped
             if blocked is not None:
-                return DriveResult(
-                    DriveState.RECOVERY_REQUIRED, unknown_calls=blocked, recovery=recovery
-                )
+                return DriveResult(DriveState.RECOVERY_REQUIRED, unknown_calls=blocked, recovery=recovery)
             triggers = (EventRef(event.event_id),)
+        if stop is not None:
+            return stop
         return await self._run_loop(scope, triggers, recovery)
+
+    async def _resume_locked(self, scope: TrustedScope) -> DriveResult:
+        recovery, stop = await self._prepare(scope)
+        if stop is not None:
+            return stop
+        waiting = await self._log.find_waiting_call(scope)
+        if waiting is not None:
+            return DriveResult(DriveState.WAITING_FOR_USER, waiting_call=waiting, recovery=recovery)
+        blocked = await self._resume_pending_group(scope)
+        if blocked is not None:
+            return DriveResult(DriveState.RECOVERY_REQUIRED, unknown_calls=blocked, recovery=recovery)
+        trigger = await self._next_trigger(scope)
+        if trigger is None:
+            return DriveResult(DriveState.IDLE, recovery=recovery)
+        return await self._run_loop(scope, (trigger,), recovery)
+
+    async def _prepare(self, scope: TrustedScope) -> tuple[RecoveryReport, DriveResult | None]:
+        """Restart cleanup (T-R), then project responses that were stored but
+        not projected before a crash — re-normalizing the stored bytes, never
+        calling the Provider again. Returns a stop result if one cannot be
+        projected safely."""
+        recovery = await self._log.recover_interrupted(scope)
+        for run_id in recovery.runs_received_unprojected:
+            problem = await self._project_stored_response(scope, run_id)
+            if problem is not None:
+                return recovery, DriveResult(DriveState.RECOVERY_REQUIRED, recovery=recovery, detail=problem)
+        return recovery, None
+
+    async def _project_stored_response(self, scope: TrustedScope, run_id: RunId) -> str | None:
+        run = await self._log.read_run(scope, run_id)
+        if run.provider_key != self._provider.provider_key:
+            return f"{run_id}: stored {run.provider_key} response cannot be read by {self._provider.provider_key}"
+        raw = await self._log.read_raw_response(scope, run_id)
+        try:
+            normalized = self._provider.normalize(NativeReceived(raw.body, raw.content_type, raw.usage))
+        except ProviderError as exc:
+            await self._log.record_projection_failure(scope, run_id, exc.code.value)
+            return None  # like a live invalid output: raw kept, nothing enters history
+        await self._project(scope, run_id, normalized)
+        return None
+
+    async def _project(
+        self, scope: TrustedScope, run_id: RunId, normalized: NormalizedModelOutput
+    ) -> ConversationEvent:
+        if isinstance(normalized, NormalizedFinal):
+            output: AssistantFinal | AssistantToolCalls = AssistantFinal(normalized.blocks)
+        else:
+            output = AssistantToolCalls(normalized.calls, normalized.commentary)
+        return (await self._log.project_model_output(scope, run_id, output)).event
+
+    async def _next_trigger(self, scope: TrustedScope) -> TriggerRef | None:
+        """What the next Run would answer, from the persisted tail; None if the
+        last turn is already a FINAL (nothing to continue)."""
+        events = await self._log.read_events(scope)
+        if not events:
+            return None
+        last = events[-1]
+        match last.payload:
+            case AssistantFinal():
+                return None
+            case UserMessage(answers_call=None):
+                return EventRef(last.event_id)
+            case UserMessage(answers_call=CallRef(run_id=run_id)) | ToolResultRecord(call=CallRef(run_id=run_id)):
+                return CompletedGroupRef(run_id)
+            case AssistantToolCalls() if last.origin_run_id is not None:
+                return CompletedGroupRef(last.origin_run_id)
+        return None
 
     async def _resume_pending_group(self, scope: TrustedScope) -> tuple[CallRef, ...] | None:
         """Finish never-claimed PENDING calls of the latest group (D20).
@@ -186,15 +266,9 @@ class Driver:
                 await self._log.record_projection_failure(scope, run_id, exc.code.value)
                 return result(DriveState.INVALID_MODEL_OUTPUT, detail=str(exc))
 
+            event = await self._project(scope, run_id, normalized)
             if isinstance(normalized, NormalizedFinal):
-                projection = await self._log.project_model_output(
-                    scope, run_id, AssistantFinal(normalized.blocks)
-                )
-                return result(DriveState.COMPLETED, final_event=projection.event)
-
-            await self._log.project_model_output(
-                scope, run_id, AssistantToolCalls(normalized.calls, normalized.commentary)
-            )
+                return result(DriveState.COMPLETED, final_event=event)
             group = await self._dispatcher.dispatch_group(scope, run_id, normalized.calls)
             if group.state is GroupState.WAITING_FOR_USER:
                 return result(DriveState.WAITING_FOR_USER, waiting_call=group.waiting_call)

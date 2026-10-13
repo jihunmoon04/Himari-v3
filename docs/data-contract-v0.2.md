@@ -242,7 +242,7 @@ PromptSnapshot:
 | T6 | Tool claim before effects (**P0**, `Read`·Internal·`ask_user` 제외) | `PENDING → EXECUTION_CLAIMED` 영속 후에만 handler 호출. 이미 claim된 call은 다시 실행 불가 |
 | T7 | Tool complete | terminal state + truthfully derived `model_result` + configured exact ToolResult Event in one Data transaction |
 | T7a | ask_user 답변 (V3-044 / V3-P17) | `user_message` Event(`answers_call`) + 해당 ToolExecution `PENDING → SUCCEEDED` + 답변에서 파생한 `model_result` + `tool_result` Event를 한 트랜잭션으로. 이미 완결된 call이면 `ALREADY_COMMITTED`이고 입력은 일반 `user_message`로 처리 |
-| T-R | 재시작 정리 (P0, V3-045) | `DISPATCH_CLAIMED`(응답 없음) → `OUTCOME_UNKNOWN`, `EXECUTION_CLAIMED`(terminal 없음) → `UNKNOWN`, claim 전 `PREPARED` → `ABANDONED_NOT_SENT`. 어떤 재실행도 하지 않음 |
+| T-R | 재시작 정리 (P0, V3-045) | `DISPATCH_CLAIMED`(응답 없음) → `OUTCOME_UNKNOWN`, `EXECUTION_CLAIMED`(terminal 없음) → `UNKNOWN`, claim 전 `PREPARED` → `ABANDONED_NOT_SENT`. `RECEIVED`(투영 전)는 보고만 하고 Control이 저장 응답을 투영(V3-P31). 어떤 재실행도 하지 않음 |
 | T8 | Internal Tool Artifact mutation (Dispatcher가 `ToolOutcome`으로 커밋) | CAS Artifact revision + Tool final state + model_result + optional Event as a single transaction |
 | T9 | PromptSnapshot replace | latest-only CAS; no impact on Events, raw Run records or past Tool records |
 | T10 | **(P2)** Control pause/claim cursor (proposal) | Conversation execution state/lease/epoch one-writer proof, separate from Run statuses |
