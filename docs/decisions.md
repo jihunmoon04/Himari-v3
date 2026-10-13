@@ -40,7 +40,10 @@
 | V3-028 | Confirmed | **활성 Workspace 및 Environment는 Artifact가 아니라 운영 상태**다. Workspace Registry/Environment Activation/Workspace Binding 및 설정은 Data에서 관리하고, 실시간 연결 가능 여부는 Environment에서 관측한다. Prompt의 Current State는 이를 합성한 읽기 투영이다. |
 | V3-029 | Confirmed | 모든 모듈의 공개 계약은 **Contract ID/Version/Status, Owner, Provider, Consumer, Source of Truth, Contract Location**을 추적한다. 실제 Input/Output, Guarantees/Errors/Effects, Dependencies/Tests도 계약 의미에 맞게 기록한다. Owner의 공개 Port만 사용하고 현재 미구현 코드 위치는 planned로 구분한다. **통합 인벤토리는 [contracts.md](contracts.md)**에서 관리한다. |
 | V3-030 | Confirmed | **HIMARI 제공 기본 Workspace를 v3 첫 파일 작업 기반으로 우선 구축**한다. 여기에서 파일 첨부, 대화 중 파일 생성·수정·제공 기능을 먼저 설계한다. v2 Phase 4A의 Task/Work 의존 구조를 필수 전제로 이식하지 않는다. |
-| V3-031 | Confirmed | **초기 기본 Workspace 경로에 사용자 Approval, Worktree/Workspace 복제 격리, OS Sandbox를 도입하지 않는다.** 단, 파일 공개 API의 입력/경로 검증·권한 있는 사용자/Conversation 확인·크기 제한·충돌/기록 규칙은 별개의 요구다. 다른 Environment/향후 arbitrary command의 실행 보안까지 면제하는 결정을 의미하지 않는다. |
+| V3-031 | Superseded by V3-032~034 | **과거 결정:** 초기 기본 Workspace는 Approval·Worktree 복제 격리·OS Sandbox 없이 파일 Tool만 제공. **2026-10-13 개정:** Sandbox 및 run_command를 포함하며, Approval 미도입과 Worktree 미사용은 유지. |
+| V3-032 | Confirmed | 초기 기본 Workspace에서 **`inside/run_command` 지원 및 OS Sandbox 적용**을 채택한다. 임의 명령을 Sandbox 없이 실행하는 것은 이 계약을 충족하지 않는다. Sandbox의 기술·기동 게이트·리소스 제한 세부는 미결정. |
+| V3-033 | Confirmed | 기본 Workspace는 **Conversation마다 기본 작업 폴더**를 사용하되 **같은 사용자에게 허용된 다른 Conversation 폴더에도 접근**할 수 있게 설계한다. Conversation 폴더는 기본 cwd/정리 단위이고 보안 격리 단위가 아니다. 사용자별 root·세부 ACL·공유 영역 이름은 추후 결정. |
+| V3-034 | Confirmed | 초기 기본 Workspace에서 별도의 **사용자 Approval·Worktree/Workspace 복제 격리를 요구하지 않는 결정은 유지**한다. 그러나 Sandbox를 통한 호스트/사용자 간 격리 및 파일 접근·실행 자원 검증은 유지한다. |
 
 ## B. 현재 채택을 권고하지만 세부 확정 전인 설계
 
@@ -67,11 +70,12 @@
 - Provider별 request/response 매핑, reasoning continuation 지원 범위, streaming.
 - **병렬 실행 가능 원칙 자체는 확정**. Scheduler의 실제 충돌 판별 알고리즘, 한 Run의 종결 배리어·취소/복구·중복 실행 정책은 미결정.
 - Environment 활성화 단위, Workspace 유형별 연결·권한·삭제 정책, Binding 수명/재사용 정책.
-- **기본 Workspace 파일 기능은 승인/격리/Sandbox 없이 먼저 구현**한다. 향후 Inside 범용 명령 실행·Sandbox·승인·실행 프로세스의 추가 여부와 범위는 별도 정책.
+- **기본 Workspace에서 `run_command` + OS Sandbox를 함께 도입**한다. 초기 Approval과 Worktree 복제 격리는 미도입이며, Sandbox 백엔드/필수 권한/실행 제한과 장기 ManagedProcess는 별도 설계.
+- **Conversation별 기본 폴더와 허용된 다른 Conversation 폴더의 교차 접근**은 확정. 사용자 소유권·ACL·폴더 수명·공유 기록 정책은 미결정.
 - **Memory Tool** 기능·자동화·권한·보존 정책.
 - Plan/Note **원본 저장 위치는 확정**. Artifact의 schema/Revision/삭제·수명/Outside export, `update_plan` 세부 스키마는 미결정.
 - **활성 Workspace/Environment 저장 영역과 Artifact의 구분은 확정**. 실제 현재 상태 조회 DTO, 연결상태 갱신 주기, 바인딩 선택 및 기본 Workspace 정책은 미결정.
-- 기본 Workspace 파일 자체의 저장 형태, 파일 첨부/생성 metadata, 버전·다운로드·삭제·안전한 경로 API·업로드 크기 제한(초안: [default-workspace-files-v0.1.md](default-workspace-files-v0.1.md)).
+- 기본 Workspace 파일 자체의 저장 형태, 파일 첨부/생성 metadata, 버전·다운로드·삭제·안전한 경로 API·업로드 크기 제한(현행 초안: [default-workspace-files-v0.2.md](default-workspace-files-v0.2.md)).
 - Pause/Resume를 위한 ConversationControlState·안전 경계·미완결 ToolCall 복구는 [control-pause-v0.1.md](control-pause-v0.1.md) 검토 초안이며 **현재 확정 정책이 아니다**.
 - v2 데이터/기능 이식의 범위와 절차.
 
