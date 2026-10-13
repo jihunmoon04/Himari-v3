@@ -140,7 +140,7 @@ RunRecord:
 | none | `PREPARED` | native request body is durably recorded and **no dispatch claim yet**. Safe only after authoritative proof of no send; do not blindly resubmit an old Run |
 | PREPARED | `DISPATCH_CLAIMED` | **P0 포함(V3-045).** durable mark immediately **before one external send attempt** (P0: 단일 행 조건부 갱신, P2: fenced claim). Crash after mark means send may or may not have occurred ⇒ 재시작 시 `OUTCOME_UNKNOWN` |
 | DISPATCH_CLAIMED | `RECEIVED` | actual provider response body durably stored, no guarantee normalized/projection complete |
-| DISPATCH_CLAIMED | `FAILED_NO_RESPONSE` or `OUTCOME_UNKNOWN` | known failure class vs uncertain send/response; raw response absent |
+| DISPATCH_CLAIMED | `FAILED_NO_RESPONSE` or `OUTCOME_UNKNOWN` | known failure class vs uncertain send/response. `FAILED_NO_RESPONSE`는 쓸 수 있는 모델 출력이 없다는 뜻이며, Provider가 오류 응답(HTTP 429/5xx, `error` 본문)을 돌려줬다면 **그 수신 원본을 그대로 저장**한다(`RawNoResponse.body`, V3-018). `OUTCOME_UNKNOWN`은 응답 원본 없음 |
 | RECEIVED | `PROJECTED` | normalized assistant Event/tool-group and pending ToolExecution Records committed idempotently |
 | RECEIVED | `PROJECTION_FAILED` | raw body preserved, native or schema error; fix/reconcile without making another Provider call |
 | PREPARED | `ABANDONED_NOT_SENT` | only when no send was ever claimed/proven; control may compose **a new Run**, not reuse attempt ID |

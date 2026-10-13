@@ -57,7 +57,13 @@ class NativeReceived(DeepFrozen):
 
 @dataclass(frozen=True)
 class NativeNoResponse(DeepFrozen):
+    """Definite failure: no usable model output. If the provider did answer
+    (e.g. HTTP 429/500 or an error body), ``body`` is that exact received
+    response so Data can keep it (V3-018); it is never normalized."""
+
     error_code: str
+    body: bytes | None = None
+    content_type: str = ""
 
 
 @dataclass(frozen=True)
