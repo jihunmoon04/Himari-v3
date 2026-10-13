@@ -27,7 +27,8 @@
 | Authorization or Sandbox policy guarantee changes (e.g. network allow, root scope, failure semantics), including behavior with unchanged Python signature | **Full pytest + applicable host security proof** | Semantics are part of the public contract |
 | New/remove/rename Tool exposed schema or Provider wire protocol, Data Event schema, model-facing contract | **Full pytest** | Published interface changed |
 | Adding a new public Port, removing one, or changing contract ownership between modules | **Full pytest** | Dependency graph changes |
-| Docs wording/tests-only changes, *no implemented public contract change* | No required pytest unless changed executable tests require validation | No runtime contract/behavior delta |
+| Documentation-only changes, *no implemented public contract change* | No pytest required | No executable delta |
+| Tests-only changes, *no implemented public contract change* | Changed module's pytest | Validate modified tests without a full suite |
 | Unknown whether contract changed | **Classify against current contracts before test execution**. If still uncertain, treat it as a contract change and run full | Prevent accidental under-testing |
 
 **Semantics include security.** A method name unchanged while the allowed filesystem root, network policy or effects change **is** a contract change. This classification must be explicit in PR/implementation review.
