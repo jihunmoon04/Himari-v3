@@ -17,10 +17,10 @@
 - **Control**: 각 작업의 흐름을 관리하고 Prompt → Provider 1회 → 응답 분기 → Tool 실행 → 다음 Run을 조정.
 - **Prompt**: Data에서 받은 읽기 모델과 현재 노출 가능한 도구 설명을 기반으로 provider용 요청 구성. 자체 영속 저장·전송 금지.
 - **Provider**: 모델별 통신, 지원 기능 협상, 응답·사용량·continuation 형태의 정상화. Run 반복 정책 금지.
-- **Tool**: 도구 정의·인자 검증·결과 형식·호출 연결. Workspace 의존성이 있다면 Environment 계약을 통해 실행.
+- **Tool**: 도구 정의·인자 검증·결과 형식·호출 연결, 충돌 안전성이 입증된 다중 ToolCall의 스케줄링. Internal Tool은 Data의 공개 API, Environment Tool은 Environment Port를 사용.
 - **Environment**: 특정 Workspace 연결/접근 방식, 정책 판정, 실행기 내부 구현. 다른 Environment의 구현을 직접 가져오지 않음.
-- **Data**: 저장/조회 계약, 불변 입력·출력, Registry, Binding, 최신 Prompt Snapshot 저장. Prompt 정책이나 Tool 실행 로직 금지.
-- **Workspace**: 독립 자원/식별 개념. 전역적으로 동일한 실행 가능 환경을 전제하지 않음.
+- **Data**: Execution Records(원본 Provider 요청·응답 포함), Conversation Events, Artifact, Registry, Binding 및 최신 Prompt Snapshot의 저장/조회 계약. Prompt 정책이나 실제 Tool 실행 금지.
+- **Workspace**: 독립 자원/식별 개념. **별도 소프트웨어 모듈을 만들지 않음**; Data Registry와 Environment 연결 계약으로 관리.
 - **Memory Tool (후속)**: Data 조회/수정 계약을 사용하고 Tool 인터페이스에 결과 제공. 특수 직접 결합 금지.
 
 ## 3. 허용하는 의존성의 성격
@@ -29,7 +29,8 @@
 Composition Root (구현 조립/의존성 주입)
    ├── Control      → Prompt Port, Provider Port, Tool Port, Data Port
    ├── Prompt       → Data Read Port, Tool Catalog/Env Description Port
-   ├── Tool         → Environment Execution Port or local tool implementation
+   ├── Tool         → Internal Tool using Data Port OR Environment Execution Port
+   ├── Tool Scheduler → verified resource conflict metadata, never command-string equality alone
    ├── Environment  → Data Binding/Workspace Port
    ├── Provider     → provider-specific SDK/adapter
    └── Data         → persistence backend
@@ -66,6 +67,8 @@ Data를 통한 간접 결합에도 주의한다. 테이블/컬럼을 공개 계�
 - **Environment 계약 테스트:** Fake Workspace에 연결한 Inside 구현에서 권한, 실패, 취소, 작업 결과를 검증.
 - **Data 계약 테스트:** 저장 구현을 교체해도 동일한 exact history, snapshot, registry 조회 의미를 유지.
 - **Control 통합 테스트:** Fake Prompt/Provider/Tool/Data로 final, question, tool-result→next run, tool failure 경로를 검증.
+- **Prompt 계약 테스트:** Stable Prefix → exact Conversation → Current State 순서, Trigger 무복제, native ToolCall/Result 그룹 인접성과 Provider별 합법적인 state/continuation 직렬화를 검증.
+- **Scheduler 교체 테스트:** 동일 Workspace 명령 충돌, 서로 다른 검증된 파일 수정, 다른 Conversation의 동일 자원 충돌을 검증.
 - **교체 테스트:** 모듈의 구체 구현을 최소 Fake/대체 어댑터로 바꿔도 나머지 모듈 코드 수정 없이 핵심 경로가 작동하는지 검증.
 
 테스트는 공통 contract suite를 구현체별로 재사용한다. v2처럼 검증을 위한 중복 계층과 과도한 전체 테스트를 늘리지 않는 것을 목표로 한다.
@@ -81,7 +84,7 @@ src/himari/
     tool/
     environment/
         inside/
-    workspace/          # 독립 Registry API를 별도 모듈로 둘지는 미결정
+    # workspace/ 전용 패키지 없음: Data Registry + Environment Port 사용
     contracts/          # 최소한의 공개 타입 또는 모듈별 ports로 대체 가능
     bootstrap/          # Composition Root
 ```
