@@ -22,7 +22,7 @@ from testkit import (
     user,
 )
 
-from himari.common import ASK_USER_TOOL_ID, CallId, CallRef, TextBlock, WorkspaceId
+from himari.common import ASK_USER_TOOL_ID, CallId, CallRef, JsonValue, TextBlock, WorkspaceId, thaw
 from himari.control.api import ControlError, ControlErrorCode, DriveState
 from himari.data.api import (
     AssistantToolCalls,
@@ -44,7 +44,7 @@ from himari.provider.api import (
     NormalizedModelOutput,
 )
 from himari.provider.scripted import RawBody, ScriptedAdapter
-from himari.tool.api import EffectProfile, WorkspaceRequirement
+from himari.tool.api import EffectProfile, ToolOutcome, ToolStatus, WorkspaceRequirement
 
 
 async def kinds(rt_data: object) -> list[EventKind]:
@@ -312,7 +312,7 @@ def test_concurrent_drive_on_same_conversation_is_busy() -> None:
         gate.set()
         assert (await first).state is DriveState.COMPLETED
 
-    asyncio.run(scenario())
+    asyncio.run(asyncio.wait_for(scenario(), timeout=5))  # fail, never hang
 
 
 def test_foreign_principal_cannot_drive() -> None:
@@ -474,3 +474,22 @@ def test_resume_is_idle_after_final_and_waits_while_asking() -> None:
     waiting = asyncio.run(rt.driver.resume(SCOPE))
     assert waiting.state is DriveState.WAITING_FOR_USER and waiting.waiting_call is not None
     assert len(provider.sent) == 2
+
+
+# --- Re-review B2: raw tool result is preserved, never shown to the model ------
+
+
+def test_raw_tool_result_is_stored_separately_from_model_result() -> None:
+    raw: dict[str, JsonValue] = {"exit_code": 0, "stdout": "RAW-ONLY-MARKER", "argv": ["ls", "-la"]}
+    tool = RecordingTool(
+        "lister",
+        behavior=lambda inv, ctx: ToolOutcome(ToolStatus.SUCCEEDED, text_result("2 files"), raw_result=raw),
+    )
+    rt, provider = runtime([calls(("lister", {})), final("ok")], tools=[tool])
+    result = asyncio.run(rt.driver.drive(SCOPE, user("list")))
+    raw["stdout"] = "mutated after return"  # the record must not follow
+
+    (record,) = asyncio.run(rt.data.read_tool_executions(SCOPE, result.run_ids[0]))
+    assert record.model_result == text_result("2 files")
+    assert thaw(record.raw_result) == {"exit_code": 0, "stdout": "RAW-ONLY-MARKER", "argv": ["ls", "-la"]}
+    assert all(b"RAW-ONLY-MARKER" not in sent.body for sent in provider.sent)

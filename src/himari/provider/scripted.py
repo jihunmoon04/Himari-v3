@@ -15,13 +15,13 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import json
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 from typing import Any
 
-from himari.common import CallId, ContentBlock, RawRepresentation, TextBlock, ToolCall, ToolId
+from himari.common import CallId, ContentBlock, RawRepresentation, TextBlock, ToolCall, ToolId, thaw
 from himari.prompt.api import ModelInput
 from himari.provider.api import (
     NativeInvocationOutcome,
@@ -48,6 +48,10 @@ type ScriptStep = NormalizedModelOutput | NativeNoResponse | NativeUncertain | R
 
 
 def _json_default(value: object) -> object:
+    if isinstance(value, (Mapping, frozenset)):
+        return thaw(value)  # FrozenMap is deliberately not a dict
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        return dataclasses.asdict(value)  # DTOs nested inside a FrozenMap
     if isinstance(value, Enum):
         return value.value
     if isinstance(value, datetime):
@@ -69,7 +73,7 @@ def encode_output(output: NormalizedModelOutput) -> bytes:
             "kind": "tool_calls",
             "commentary": _blocks_to_json(output.commentary),
             "calls": [
-                {"call_id": c.call_id, "ordinal": c.ordinal, "tool_id": c.tool_id, "arguments": dict(c.arguments)}
+                {"call_id": c.call_id, "ordinal": c.ordinal, "tool_id": c.tool_id, "arguments": thaw(c.arguments)}
                 for c in output.calls
             ],
         }

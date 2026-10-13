@@ -59,3 +59,53 @@ SCHEMA: dict[str, JsonValue] = {
 def test_validate_subset(value: JsonValue, expected: list[str]) -> None:
     check_schema(SCHEMA)
     assert validate(value, SCHEMA) == expected
+
+
+@pytest.mark.parametrize(
+    ("schema", "reason"),
+    [
+        # re-review B3: intended "command is required", silently not enforced before
+        ({"type": "object", "properties": {"command": {"type": "string"}}, "required": "command"},
+         "required must be an array of strings"),
+        ({"type": "object", "properties": {"x": {}}, "required": ["x", "x"]}, "duplicates"),
+        ({"type": "object", "properties": {"x": {}}, "required": ["y"]}, "not in properties"),
+        ({"type": "object", "properties": {"x": {}}, "required": [1]}, "array of strings"),
+        ({"type": "object", "additionalProperties": "no"}, "must be a boolean"),
+        ({"type": "object", "properties": ["x"]}, "properties must be an object"),
+        ({"type": ["string", "null"]}, "type must be one of"),
+        ({"type": "str"}, "type must be one of"),
+        ({"enum": "ab"}, "non-empty array"),
+        ({"enum": []}, "non-empty array"),
+        ({"type": "integer", "enum": [1, "2"]}, "enum values must match"),
+        ({"type": "string", "properties": {"x": {}}}, "requires type 'object'"),
+        ({"required": ["x"]}, "requires type 'object'"),
+        ({"type": "object", "items": {}}, "requires type 'array'"),
+        ({"type": "array", "items": "string"}, "schema must be an object"),
+        ({"description": 5}, "description must be a string"),
+        ({"type": "integer", "default": "1"}, "default does not satisfy"),
+        ({"type": "object", "properties": {"n": {"type": "integer", "minimum": 0}}}, "unsupported keywords"),
+    ],
+)
+def test_malformed_schemas_fail_closed(schema: JsonValue, reason: str) -> None:
+    with pytest.raises(SchemaError, match=reason):
+        check_schema(schema)
+
+
+def test_tool_input_schema_must_be_an_object_schema() -> None:
+    tool = RecordingTool("t")
+    tool.definition = dataclasses.replace(tool.definition, input_schema={"type": "string"})
+    with pytest.raises(SchemaError, match="type 'object'"):
+        ToolRegistry([tool])
+
+
+@pytest.mark.parametrize(
+    "schema",
+    [
+        SCHEMA,
+        {"type": "object"},
+        {"type": "object", "properties": {"mode": {"type": "string", "enum": ["r", "w"], "default": "r"}}},
+        {"type": "array", "items": {"type": "integer"}, "description": "ids"},
+    ],
+)
+def test_well_formed_schemas_are_accepted(schema: JsonValue) -> None:
+    check_schema(schema)

@@ -381,7 +381,10 @@ class InMemoryData:
         staged = self._stage_artifacts(conv, completion.artifact_mutations)  # validates CAS first
         conv.artifacts.update(staged)
         conv.executions[call] = replace(
-            record, status=completion.status, model_result=completion.model_result
+            record,
+            status=completion.status,
+            model_result=completion.model_result,
+            raw_result=completion.raw_result,
         )
         if not completion.record_event:
             return None

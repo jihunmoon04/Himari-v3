@@ -6,7 +6,7 @@ from collections.abc import Iterable, Sequence
 
 from himari.common import ASK_USER_TOOL_ID, EnvironmentKind, ToolId
 from himari.tool.api import Completion, ToolDefinition, ToolHandler
-from himari.tool.schema import check_schema
+from himari.tool.schema import check_tool_input_schema
 
 
 class ToolRegistry:
@@ -25,7 +25,7 @@ class ToolRegistry:
             raise ValueError(f"{d.tool_id}: prefix must be its environment_kind {d.environment_kind}")
         if d.completion is Completion.SUSPENDING and d.tool_id != ASK_USER_TOOL_ID:
             raise ValueError(f"{d.tool_id}: only ask_user may be suspending (P0)")
-        check_schema(d.input_schema)
+        check_tool_input_schema(d.input_schema)
         self._handlers[d.tool_id] = handler
 
     def get(self, tool_id: ToolId) -> ToolHandler | None:
