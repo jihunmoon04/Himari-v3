@@ -145,6 +145,8 @@ These new Port identifiers extend [contracts.md](contracts.md); they do not impl
 
 ## 6. Minimal acceptance gates
 
+> **2026-10-13 PR C1 (파일 Tool):** 1·2(작업 폴더 구분, 같은 사용자 교차 접근)·3(다른 사용자 Workspace 미노출)·4(symlink·하드링크 우회 차단, 마운트 넘기는 `NO_XDEV`로 막되 자동 테스트 없음)·10(바깥 경로 거부)은 파일 Tool 범위에서 테스트로 확인했다. 5·6·8(`run_command`·Sandbox·직렬화)은 PR C2, 7·9(게시 버전·삭제 정책)는 이후 단계.
+
 1. Conversation A and B owned by the same user have distinct default working directories and the **same authorized Workspace root**.
 2. `pwd` for A shows `/workspace/conversations/A`; explicit cross-folder access to `B` works (read, and authorized write).
 3. Another user's Conversation directory is **not present/readable/writable** in A's Sandbox.

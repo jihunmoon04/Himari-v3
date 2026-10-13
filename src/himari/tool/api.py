@@ -33,7 +33,7 @@ from himari.common import (
     TrustedScope,
     UnknownOutcomePolicy,
 )
-from himari.data.api import ArtifactMutation, ArtifactStore, BindingAuthority
+from himari.data.api import ArtifactMutation, ArtifactStore, BindingAuthority, ConversationWorkspace
 
 
 class WorkspaceRequirement(Enum):
@@ -87,6 +87,9 @@ class ToolContext(DeepFrozen):
     scope: TrustedScope
     artifacts: ArtifactStore  # read-only use
     binding: BindingAuthority | None = None  # resolved by Dispatcher; re-validate before effects
+    # The working directory of *this* Binding (its Workspace + cwd, DATA-11),
+    # so each Environment sees its own. Never a host path.
+    workspace: ConversationWorkspace | None = None
 
 
 class ToolStatus(Enum):

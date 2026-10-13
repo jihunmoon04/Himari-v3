@@ -16,6 +16,8 @@ P0 scheduling is sequential in original ordinal order; parallel scheduling
   treatment on the next dispatch, judged by the policy **persisted at claim
   time** (an unknown policy counts as REQUIRE_USER), never by the current
   registry. Without a claim nothing happened, so the exception is FAILED.
+- A handler exception is never shown to the model verbatim (Q-39): the model
+  gets a generic message; type and text go to ``raw_result`` only.
 - Unknown tool, arguments failing ``input_schema``, an Environment Tool whose
   kind is not active in this Conversation (even with no Workspace requirement:
   catalog exposure is not authorization), or a missing/revoked/mismatched
@@ -41,6 +43,7 @@ from himari.data.api import (
     ArtifactStore,
     BindingAuthority,
     ConversationLog,
+    ConversationWorkspace,
     DataError,
     ToolCompletion,
     ToolExecutionRecord,
@@ -154,6 +157,11 @@ class Dispatcher:
             if violations:
                 raise _Denied("invalid arguments: " + "; ".join(violations))
             binding = await self._resolve_binding(scope, d, record)
+            workspace = (
+                ConversationWorkspace(binding.workspace_id, binding.cwd_relative)
+                if binding is not None and binding.cwd_relative is not None
+                else None
+            )
         except _Denied as denied:
             await self._commit(scope, record.call, _error(ToolStatus.DENIED, str(denied)), record_event)
             return
@@ -162,14 +170,20 @@ class Dispatcher:
             await self._log.claim_tool_execution(
                 scope, record.call, unknown_outcome=d.unknown_outcome, record_event=record_event
             )
-        ctx = ToolContext(scope=scope, artifacts=self._artifacts, binding=binding)
+        ctx = ToolContext(scope=scope, artifacts=self._artifacts, binding=binding, workspace=workspace)
         invocation = ToolInvocation(record.tool_id, record.call.call_id, record.arguments)
         try:
             outcome = await handler.run(invocation, ctx)
         except Exception as exc:  # noqa: BLE001 — uncertainty is decided by the claim
             if claimed:
                 return  # uncertain; reported or blocking per the persisted policy
-            outcome = _error(ToolStatus.FAILED, f"{type(exc).__name__}: {exc}")
+            # Q-39: exception text may carry host paths or secrets; the model
+            # only learns that the tool failed internally.
+            outcome = ToolOutcome(
+                ToolStatus.FAILED,
+                ModelToolResult((TextBlock("The tool failed with an internal error."),), is_error=True),
+                raw_result={"error_type": type(exc).__name__, "error": str(exc)},
+            )
         await self._commit(scope, record.call, outcome, record_event)
 
     async def _resolve_binding(

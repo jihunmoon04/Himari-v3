@@ -132,17 +132,22 @@ class InMemoryStore:
         if any(a.environment_kind == kind for a in conv.activations.values()):
             raise DataError(DataErrorCode.DUPLICATE_IDENTITY, f"active {kind} exists (P0: one per kind)")
         instance_id = EnvironmentInstanceId(self.new_id("env"))
+        # Each Binding carries its own working directory (default: the
+        # Conversation's own folder, V3-033), so activating another
+        # Environment never changes an existing one's.
+        relative = cwd_relative if cwd_relative is not None else f"conversations/{scope.conversation_id}"
         binding = BindingAuthority(
             binding_id=BindingId(self.new_id("bind")),
             environment_instance_id=instance_id,
             environment_kind=kind,
             workspace_id=workspace_id,
             revision=1,
+            cwd_relative=relative,
         )
         conv.activations[instance_id] = EnvironmentActivation(instance_id, kind, binding.binding_id)
         conv.bindings[binding.binding_id] = binding
-        if cwd_relative is not None:
-            conv.workspace = ConversationWorkspace(workspace_id, cwd_relative)
+        if conv.workspace is None:  # the Conversation's first (default) working directory
+            conv.workspace = ConversationWorkspace(workspace_id, relative)
         conv.state_revision += 1
         return binding
 
