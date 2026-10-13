@@ -187,14 +187,14 @@ Environment Tool 실행 시 `binding_id` → Environment 인스턴스/Conversati
 ### 6.3 초기 기본 Workspace — Conversation별 폴더 + Sandboxed Command (확정 범위)
 
 - **우선순위:** HIMARI 제공 기본 Workspace에 채팅 업로드, 파일 생성·수정·제공과 **`inside/run_command`**를 처음부터 지원한다.
-- **기본 작업 위치:** Conversation마다 자체 기본 디렉터리를 갖는다. **같은 사용자에게 허용된 다른 Conversation 폴더도 접근 가능**하다. Conversation 폴더는 정리/기본 cwd의 개념이며, 서로의 OS 격리 경계가 아니다.
-- **보안:** `run_command`는 **OS Sandbox 안에서 실행**한다. 다른 사용자 Workspace, 앱 Data/secret/호스트 경로 접근은 차단하며 미지원 시 무격리 실행으로 대체하지 않는다. 인간 Approval과 Worktree 복제 격리는 이 초기 환경에서 요구하지 않는다.
+- **기본 작업 위치:** **사용자별 공통 Workspace Root** 아래 Conversation마다 자체 기본 디렉터리를 갖는다. **같은 사용자에게 허용된 다른 Conversation 폴더도 접근 가능**하다. Conversation 폴더는 정리/기본 cwd의 개념이며, 서로의 OS 격리 경계가 아니다.
+- **보안:** `run_command`는 **OS Sandbox 안에서 실행하며 Sandbox 네트워크는 기본 차단**한다. 다른 사용자 Workspace, 앱 Data/secret/호스트 경로 접근은 차단하며 미지원 시 무격리 실행으로 대체하지 않는다. 인간 Approval과 Worktree 복제 격리는 이 초기 환경에서 요구하지 않는다. **향후 Web Search는 Sandbox의 네트워크를 열지 않고 별도 Tool로 설계 가능**하다.
 - **구조:** Data는 Registry/Binding/Conversation working-directory mapping 및 파일 메타데이터, Environment는 Sandbox 및 실제 파일 I/O, Tool은 구조화 파일 및 command Tool을 제공한다. Workspace 전용 소프트웨어 모듈은 없다.
 - **중요한 한계:** Sandbox는 현재 사용자의 Conversation들 간 파일 쓰기를 막지 않는다. `run_command`의 부작용 범위가 불명확하면 같은 Workspace의 다른 파일 작업과 충돌하는 것으로 처리한다.
 - **파일 원본:** 작업 파일의 현재 bytes는 Workspace가 원본이다. 생성/업로드 파일의 다운로드용 immutable published version을 별도로 관리하는 방안은 제안으로 유지한다. Plan/Note는 Data Artifact로 유지한다.
-- **미결정:** 사용자별 root/실제 principal mapping, Sandbox OS 기술 및 실행·네트워크 제한, immutable file 버전 보존, 공유 폴더 삭제.
+- **미결정:** 사용자별 Root 정책 자체는 확정. 신뢰된 principal 식별/경로 매핑, Sandbox 백엔드 이식과 네트워크 차단 강제 검증, 정확한 리소스 제한, immutable file 버전 보존, 공유 폴더 삭제가 남았다.
 
-현행 상세 초안: [Default Workspace v0.2](default-workspace-files-v0.2.md). [v0.1](default-workspace-files-v0.1.md)은 이전 no-sandbox 구상의 기록이다.
+현행 상세 초안: [Default Workspace v0.2](default-workspace-files-v0.2.md), [Sandbox Execution v0.1](sandbox-execution-v0.1.md). [v0.1](default-workspace-files-v0.1.md)은 이전 no-sandbox 구상의 기록이다.
 
 ### 6.4 Pause/Resume 실행 경계 — 제안
 
