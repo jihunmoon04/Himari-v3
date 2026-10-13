@@ -1,4 +1,6 @@
-# Prompt Composition Contract
+# Prompt Composition
+
+> **새 경계 검토 초안:** [Control–Prompt–Provider v0.1](control-prompt-provider-v0.1.md)에서 Prompt의 provider-neutral input/coverage, Provider의 native request preparation과 exact raw 보존, Tool 그룹 배리어를 구체화합니다. 아직 확정된 API는 아닙니다. Contract
 
 > 2026-10-13. **프롬프트의 논리적 순서와 Trigger 처리 규칙은 확정**. Provider별 메시지/캐시 구현과 압축 알고리즘은 미결정.
 >
