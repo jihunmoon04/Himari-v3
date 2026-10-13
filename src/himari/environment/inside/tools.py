@@ -11,6 +11,8 @@ import asyncio
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
+import shlex
+
 from himari.common import EnvironmentKind, JsonValue, ModelToolResult, TextBlock, ToolId
 from himari.environment.inside import fs
 from himari.tool.api import (
@@ -109,7 +111,10 @@ class _InsideTool:
         cwd = ctx.workspace.cwd_relative
         # Blocking filesystem work runs off the event loop so a large
         # directory or slow disk cannot stall other Conversations.
-        return await asyncio.to_thread(self._run_sync, host_root, cwd, raw_path, args)
+        if self.effect is EffectProfile.READ:
+            return await asyncio.to_thread(self._run_sync, host_root, cwd, raw_path, args)
+        async with self._env.write_lock(ctx.binding.workspace_id):
+            return await asyncio.to_thread(self._run_sync, host_root, cwd, raw_path, args)
 
     def _run_sync(self, host_root: str, cwd: str, raw_path: object, args: Mapping[str, Any]) -> ToolOutcome:
         shown = raw_path if isinstance(raw_path, str) else "?"  # the model's own path, until resolved
@@ -291,6 +296,135 @@ class DeleteFile(_InsideTool):
         fs.delete_file(root_fd, relative)
         shown = fs.display(relative)
         return ToolOutcome(ToolStatus.SUCCEEDED, _text(f"deleted {shown}"), raw_result={"path": shown})
+
+
+class RunCommand:
+    """``inside/run_command``: one bounded command inside the OS Sandbox
+    (TOOL-05/ENV-04). argv only — no shell unless argv asks for one; no
+    environment overrides; network isolated; Workspace = the principal root."""
+
+    def __init__(self, env: InsideEnvironment) -> None:
+        from himari.environment.inside.sandbox import backend as sb
+
+        self._env = env
+        self._sb = sb
+        self.definition = ToolDefinition(
+            tool_id=ToolId("inside/run_command"),
+            description=(
+                "Run one command in an isolated Linux sandbox with the workspace mounted at /workspace "
+                "(no network). argv is a list of strings; use [\"sh\", \"-c\", \"...\"] for shell syntax. "
+                f"Runs in the conversation's working directory; timeout {sb.DEFAULT_TIMEOUT_SECONDS}s by default "
+                f"(max {sb.MAX_TIMEOUT_SECONDS}s)."
+            ),
+            input_schema=_schema(
+                {
+                    "argv": {"type": "array", "items": {"type": "string"}, "description": "Program and arguments."},
+                    "timeout_seconds": {"type": "integer", "description": "Optional timeout in seconds."},
+                },
+                ["argv"],
+            ),
+            workspace_requirement=WorkspaceRequirement.DEFAULT,
+            effect_profile=EffectProfile.UNKNOWN,  # may touch any file under /workspace
+            environment_kind=EnvironmentKind("inside"),
+        )
+
+    async def run(self, invocation: ToolInvocation, ctx: ToolContext) -> ToolOutcome:
+        sb = self._sb
+        backend = self._env.sandbox
+        if ctx.binding is None or ctx.workspace is None:
+            return ToolOutcome(ToolStatus.DENIED, _text("no workspace is bound to this conversation", error=True))
+        if backend is None or backend.state is not sb.SandboxState.ENFORCED:
+            state = "not configured" if backend is None else backend.state.value
+            return ToolOutcome(
+                ToolStatus.DENIED,
+                _text(f"command execution is unavailable: the sandbox is not enforced on this host ({state})", error=True),
+                raw_result={"sandbox_state": state},
+            )
+        try:
+            argv = sb.validate_argv(invocation.arguments.get("argv"))
+        except ValueError as error:
+            return ToolOutcome(ToolStatus.DENIED, _text(str(error), error=True))
+        timeout = invocation.arguments.get("timeout_seconds", sb.DEFAULT_TIMEOUT_SECONDS)
+        if not isinstance(timeout, int) or not 1 <= timeout <= sb.MAX_TIMEOUT_SECONDS:
+            return ToolOutcome(ToolStatus.DENIED, _text(f"timeout_seconds must be 1..{sb.MAX_TIMEOUT_SECONDS}", error=True))
+        try:
+            cwd_relative = fs.to_relative(ctx.workspace.cwd_relative, ".")
+        except fs.FsError as error:
+            return _failure(".", error)
+        from himari.environment.inside import admission
+
+        host_root = self._env.host_root(ctx.binding.workspace_id)
+        async with self._env.write_lock(ctx.binding.workspace_id):
+            try:
+                # The same verified root fd is admitted and then bound; it stays
+                # open from the check through the spawn.
+                with fs.open_root(host_root) as root_fd:
+                    fs.ensure_directory(root_fd, cwd_relative)
+                    await asyncio.to_thread(admission.admit_workspace, root_fd, host_root)
+                    result = await backend.run(argv, root_fd=root_fd, cwd=fs.display(cwd_relative), timeout=timeout)
+            except fs.FsError as error:
+                return _failure(fs.display(cwd_relative), error)
+            except admission.AdmissionError as error:
+                return ToolOutcome(
+                    ToolStatus.DENIED,
+                    _text(f"command not run: {error}", error=True),
+                    raw_result={"admission": error.category.name},
+                )
+            except (sb.SandboxUnavailableError, sb.SandboxSetupError):
+                return ToolOutcome(
+                    ToolStatus.DENIED,
+                    _text("command execution is unavailable: the sandbox could not be set up; nothing was run", error=True),
+                    raw_result={"sandbox_state": backend.state.value},
+                )
+        return _command_outcome(argv, timeout, result)
+
+
+def _command_outcome(argv: list[str], timeout: int, result: object) -> ToolOutcome:
+    """Final model text <= MAX_OBSERVATION_BYTES (header, both streams, notices)."""
+    from himari.environment.inside.sandbox.backend import CommandResult
+
+    assert isinstance(result, CommandResult)
+    command = _fit("$ " + shlex.join(argv), 2048)
+    if result.timed_out:
+        status_line = f"timed out after {timeout}s; the command was killed and may have changed files"
+    else:
+        status_line = f"exit code: {result.exit_code}"
+    header = f"{command}\n{status_line}\n"
+    streams = [("stdout", result.stdout, result.stdout_total), ("stderr", result.stderr, result.stderr_total)]
+    labels = {
+        name: f"--- {name} ({total} bytes{', truncated' if total > len(kept) else ''}) ---\n"
+        for name, kept, total in streams
+    }
+    notice = "\n[output truncated]"
+    budget = MAX_OBSERVATION_BYTES - len(header.encode()) - sum(len(v.encode()) for v in labels.values()) - 2 * len(notice.encode())
+    texts = {name: kept.decode("utf-8", errors="replace") for name, kept, _ in streams}
+    shares = {"stdout": budget // 2, "stderr": budget - budget // 2}
+    for name in ("stdout", "stderr"):  # give unused share of one stream to the other
+        other = "stderr" if name == "stdout" else "stdout"
+        need = len(texts[name].encode())
+        if need < shares[name]:
+            shares[other] += shares[name] - need
+            shares[name] = need
+    parts = [header]
+    truncated = {}
+    for name, kept, total in streams:
+        shown = _fit(texts[name], shares[name])
+        truncated[name] = len(shown) < len(texts[name]) or total > len(kept)
+        parts.append(labels[name] + shown + (notice if truncated[name] else "") + "\n")
+    failed = result.timed_out or result.exit_code != 0
+    return ToolOutcome(
+        ToolStatus.FAILED if result.timed_out else ToolStatus.SUCCEEDED,
+        _text("".join(parts).rstrip("\n"), error=failed),
+        raw_result={
+            "exit_code": result.exit_code,
+            "timed_out": result.timed_out,
+            "elapsed_ms": result.elapsed_ms,
+            "stdout_bytes": result.stdout_total,
+            "stderr_bytes": result.stderr_total,
+            "stdout_truncated": truncated["stdout"],
+            "stderr_truncated": truncated["stderr"],
+        },
+    )
 
 
 def file_tools(env: InsideEnvironment) -> list[_InsideTool]:

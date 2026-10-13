@@ -1,8 +1,8 @@
 # HIMARI v3
 
-HIMARI v3의 **아키텍처와 구현 현황**입니다. 2026-10-13 기준 PR #1~#6이 `main`에 병합됐으며, P0 인메모리 실행 엔진과 실제 OpenRouter Provider 및 턴별 reasoning continuation 저장·재생이 구현돼 있습니다. **영속 DB·실제 Inside Environment·OS Sandbox·사용자용 Web/CLI는 아직 없습니다.**
+HIMARI v3의 **아키텍처와 구현 현황**입니다. 2026-10-13 기준 PR #1~#8이 `main`에 병합됐고 PR #9(Sandbox `run_command`)가 검수 중입니다. P0 인메모리 실행 엔진, 실제 OpenRouter Provider, 턴별 reasoning continuation, Inside Environment 파일 Tool이 구현돼 있습니다. **영속 DB·사용자용 Web/CLI·자원 한도(cgroup/rlimit)는 아직 없습니다.**
 
-## 구현 현황 (2026-10-13, PR #6 병합 기준)
+## 구현 현황 (2026-10-13, PR #8 병합 + PR #9 기준)
 
 | 영역 | 구현됨 | 아직 미구현 |
 | --- | --- | --- |
@@ -10,11 +10,11 @@ HIMARI v3의 **아키텍처와 구현 현황**입니다. 2026-10-13 기준 PR #1
 | Data | 인메모리 Conversation Event/Run/ToolExecution/Artifact, raw 요청·응답, T3/T6 claim 및 UNKNOWN 복구 | 실제 영속 DB·프로세스 크래시 내구성 |
 | Prompt | 전체 이력·ToolResult·CurrentState·턴별 continuation 재구성 | Context 압축·예산, Snapshot의 압축 활용 |
 | Provider | Scripted Fake + 실제 OpenRouter, wire-exact 요청 전송·요청/응답 원본 기록, reasoning effort/usage/continuation | 추가 Provider, Streaming |
-| Tool | Registry·Schema 검증·Dispatcher·결과 및 Artifact 커밋 | 실제 파일/명령·Memory·Plan Tool, 충돌 Scheduler |
-| Environment | EnvironmentPlugin SPI, 활성화·Binding P0 계약 | 실제 Inside/Sandbox·네트워크 차단 실호스트 검증 |
+| Tool | Registry·Schema 검증·Dispatcher·결과 및 Artifact 커밋, Inside 파일 Tool 5종, `inside/run_command`(PR #9) | Memory·Plan Tool, 병렬 Scheduler(현재 순차 + Workspace별 직렬화) |
+| Environment | EnvironmentPlugin SPI, Binding별 작업 폴더, Inside(openat2 경계), bubblewrap+Landlock Sandbox·시작 시 탈출 자체 검사·Workspace admission·이 서버 실호스트 게이트(PR #9) | CPU·메모리·프로세스 수 한도, 다른 배포 호스트 검증, 원격·로컬 PC Environment |
 | 인터페이스 | Bootstrap·테스트·선택적 라이브 Provider 호출 | 사용자용 Web·CLI |
 
-**검증 경계:** 재시작 테스트는 동일 `InMemoryStore`를 공유하는 시뮬레이션입니다. 실제 DB의 crash 내구성이나 OS Sandbox 보안 검증이 완료된 것은 아닙니다. 구현된 공개 계약은 각 모듈 `api.py`가 원본입니다.
+**검증 경계:** 재시작 테스트는 동일 `InMemoryStore`를 공유하는 시뮬레이션이라 실제 DB의 crash 내구성을 입증하지 않습니다. OS Sandbox는 이 서버에서 실호스트 게이트(`HIMARI_SANDBOX_HOST=1 pytest tests/sandbox_host`)를 통과했지만 다른 호스트에서는 다시 실행해야 하고, 자원 한도는 아직 없습니다. 구현된 공개 계약은 각 모듈 `api.py`가 원본입니다.
 
 > 설계 원칙: **Contract-based Modular Architecture** — 모듈은 서로의 내부 구현에 의존하지 않고, 명시된 계약을 유지하는 범위에서 독립적으로 수정·교체할 수 있어야 합니다.
 
@@ -78,7 +78,15 @@ HIMARI v3의 **아키텍처와 구현 현황**입니다. 2026-10-13 기준 PR #1
 
 구현(P0): `data/memory.py`(인메모리 Data), `tool/registry.py`·`tool/dispatcher.py`, `prompt/composer.py`(순수)·`prompt/loader.py`, `provider/scripted.py`(Fake), `control/driver.py`·`control/ask_user.py`, `bootstrap/`(조립).
 
-Inside Environment: `environment/inside/`(사용자별 Workspace, 파일 Tool 5종, openat2 경계, V3-P40). `run_command`와 Sandbox는 다음 단계예요.
+Inside Environment: `environment/inside/`(사용자별 Workspace, 파일 Tool 5종, openat2 경계, V3-P40)와 `inside/run_command`(bubblewrap + Landlock Sandbox, 시작 시 탈출 자체 검사, V3-P41).
+
+```python
+sandbox = SandboxBackend.discover()
+await sandbox.start()            # ENFORCED only if the real-spawn self-test passes
+inside = InsideEnvironment(workspaces_root, sandbox=sandbox)
+```
+
+실호스트 Sandbox 검증(선택 실행): `HIMARI_SANDBOX_HOST=1 pytest tests/sandbox_host`.
 
 실제 Provider: `provider/openrouter.py`(OpenRouter, wire-exact V3-048) 및 턴별 continuation 재생(V3-049). 실제 호출 검증은 opt-in입니다: `.env` 또는 환경 변수에 `OPENROUTER_API_KEY` 설정 후 `HIMARI_LIVE=1 python -m pytest -s tests/live`. 일반 pytest/CI에서는 라이브 호출을 건너뜁니다.
 
