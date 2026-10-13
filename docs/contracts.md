@@ -142,6 +142,16 @@ Environment ─────── Data.read_binding / Registry  (실행 시 다�
 | **ENV-01** | ObserveBindings / **Environment** | Environment 구현 → Prompt | 실제 연결·가용성 관측, Data Binding | online/offline/unknown 등 시점 표시 | PROPOSED |
 | **ENV-02** | AuthorizeExecute / **Environment** | Inside 등 Environment 구현 → Tool Dispatcher | Data Binding + 현재 실행 정책 + Workspace | 실행 결과/실패/거부 | 방향 확정, API·Sandbox 미정 |
 | **ENV-03** | ManageActivation / **Environment** | Environment/Control 구현 → 외부 활성화 요청자 | Data Activation/Binding (영속 원본) | 활성화·연결 관계의 생성/변경/비활성화 | 책임 세부 OPEN |
+| **CTRL-03** | RequestPause / **Control** | Control → UI/CLI | Data.ConversationControlState / active Run | durable pause intent, eventual paused boundary | PROPOSED |
+| **CTRL-04** | ResumeExecution / **Control** | Control → UI/CLI | ControlState + completed/partial Run and Tool records | continue pending ToolCall or next Run, without blind replay | PROPOSED |
+| **DATA-09** | ReadWriteControlState / **Data** | Data → Control | Data control cursor/phase/revision | serialized state transition / resumption checkpoint | PROPOSED |
+| **DATA-10** | ClaimControlLease / **Data** | Data → Control | Data owner generation / fence | concurrent resume exclusion | PROPOSED |
+| **TOOL-04** | ResumePendingGroup / **Tool** | Tool → Control | Data ToolExecutionRecords | run only unstarted pending calls, preserve original call IDs | PROPOSED |
+| **FILE-01** | FileOperations / **Environment** | Inside → Tool, file ingress | Default Workspace real file bytes | bounded read/write/inspect with relative-path validation | initial scope CONFIRMED, API PROPOSED |
+| **FILE-02** | FileMetadata / **Data** | Data → Tool, UI, Prompt | Data FileAssetRecord and AttachmentRefs | durable file_id/path/version/digest and conversation linkage | PROPOSED |
+| **FILE-03** | StructuredFileTools / **Tool** | Inside File Tool → Control/Provider | FILE-01 + FILE-02 | create/edit/list/read/delete/publish tool results | PROPOSED |
+| **FILE-04** | UploadDownload / **Interface** | Web/CLI surface → User/Control | FILE-01 bytes + FILE-02 authorized metadata | upload and download bytes without host path disclosure | PROPOSED |
+| **FILE-05** | AttachmentManifest / **Prompt** | Prompt → Control | Data attachment references | model-visible bounded manifest, no unbounded bytes | PROPOSED |
 | **INTERNAL-01** | MemoryTool / **Tool** | Internal Memory Tool → Tool Dispatcher | Data Memory 저장/검색 계약 | 모델용 검색 결과, Conversation 기록 | 방향 확정, 기능 미정 |
 | **INTERNAL-02** | PlanNoteTool / **Tool** | Internal Plan/Note Tool → Tool Dispatcher | Data conversation-scoped Artifacts | 간결한 complete 결과 + Artifact 갱신 | 저장 위치 확정, 수정 API 미정 |
 
@@ -382,7 +392,7 @@ Prompt가 연결 상태를 임의로 `online`으로 채우지 않는다. Current
 7. Environment 인스턴스·Binding·기본 Workspace 선택 스코프 및 활성/철회 권한.
 8. Workspace online observation/timeout/freshness의 책임과 Provider 투영 방법.
 9. Scheduler read/write footprint, 같은 Workspace의 unsafe command 직렬화, cross-conversation alias conflict.
-10. Inside sandbox/승인/실행·취소·외부 부작용 복구.
+10. **초기 기본 Workspace 파일 Tool에는 Approval, Workspace 사본 격리, OS Sandbox를 적용하지 않는다(확정).** 범용 셸 명령/ManagedProcess 추가 시 실행·취소·보안 계약은 별도로 설계한다.
 
 **확장 단계(P2)에서 결정할 것**
 
@@ -400,3 +410,28 @@ Prompt가 연결 상태를 임의로 `online`으로 채우지 않는다. Current
 - **현재 저장소는 설계 문서만 존재**한다. `defined_at`/planned code path가 적혔다고 해당 파일/테스트/구현이 생성됐다는 뜻은 아니다.
 
 > **채택한 새 원칙:** 각 공개 계약의 **정의 책임(Owner), 실제 제공자(Provider), 사용처(Consumer), 데이터 원천(Source of Truth), 선언 위치(Contract Location)**를 추적한다. 이는 모듈 교체 시 영향 범위와 테스트 책임을 확인하기 위한 최소 메타데이터다.
+
+## 15. Default Workspace & Files — 2026-10-13 신규 설계
+
+**CONFIRMED (V3-030~031):** HIMARI 제공 기본 Workspace를 첫 파일 기반으로 구현하여 채팅 첨부/생성/수정/다운로드를 지원할 방향이며, 초기 기본 Workspace 경로에서는 Approval, Worktree·복제 격리, OS Sandbox를 사용하지 않는다. 기존의 Data Registry + Environment 파일 I/O + Tool 인터페이스 구조는 유지한다.
+
+**PROPOSED:** 하나의 지속 기본 Workspace를 다수 Conversation이 Binding을 통해 참조한다. 실제 파일 bytes는 Workspace에, FileAssetRecord/ConversationAttachmentRef는 Data에, Plan/Note는 기존 Data Artifact에 둔다. File-only tool surface를 먼저 열고 `run_command`/ManagedProcess는 처음 범위에서 제외한다. 제한된 구조화 파일 API의 상대 경로/크기/충돌/권한 검증은 Sandbox나 인간 승인 없이도 필요하다.
+
+**Contract metadata:**
+- Owner/Provider/Consumer/Source/Location: FILE-01~05 (§4와 [default-workspace-files-v0.1.md](default-workspace-files-v0.1.md)).
+- 원본 bytes와 Data metadata는 별도 영속 영역. DB와 filesystem 간 원자성/GC, 생성·첨부 파일의 보존 및 변경 버전은 OPEN.
+- Workspace 격리 없음은 호스트 OS 보안 격리가 있다는 뜻이 아니다. 향후 arbitrary shell은 동일 정책으로 자동 활성화하지 않는다.
+
+## 16. Conversation Pause/Resume — 2026-10-13 신규 설계
+
+**CONFIRMED:** Run은 Provider 호출 1회, Run 원본·ToolExecution은 Data에 보존, Conversation별 Control/Run은 직렬화.
+
+**PROPOSED:** Pause는 진행 중 Run을 토큰 단위로 일시 정지하는 기능이 아니라 **새로운 Run/Tool 작업을 시작하지 않고 안전한 경계에서 멈추는 요청**이다. Conversation-scoped `ControlExecutionState`(새 Task 계층 아님)는 `RUNNING/PAUSE_REQUESTED/PAUSED/WAITING_FOR_USER/RECOVERY_REQUIRED` 등 실행 위치/의도를 저장한다.
+
+- Provider 응답 대기 중 Pause: 수신 가능한 실제 결과를 저장하고 새 Run을 시작하지 않음.
+- Provider 응답이 ToolCall 그룹인데 아직 실행 전: `PENDING` 호출을 보존하고 PAUSED; **Resume 시 이 호출들을 먼저 완료**해야 하며 그 전에는 새로운 Provider Run 금지.
+- 일부 Tool만 완료: 완료한 호출은 재실행하지 않고 나머지 `PENDING`만 Resume. 결과 불명인 호출은 자동 재실행하지 않음.
+- final/question terminal의 의미는 Pause 요청으로 덮어쓰지 않음.
+- Resume 시 기존 Run의 Provider 요청을 다시 전송하는 것이 아니라 **완결된 기록에서 다음 작업 지점을 복원**함.
+
+**Contract metadata:** CTRL-03/04, DATA-09/10, TOOL-04 (§4, 상세 [control-pause-v0.1.md](control-pause-v0.1.md)). 실제 status enum, DB lease, Pause timeout 및 Cancel 의미는 검토 후 결정.
