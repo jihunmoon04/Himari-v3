@@ -2,7 +2,7 @@
 
 기준: **2026-10-13**. 이 문서는 아직 확정되지 않은 계약만 관리한다. 이미 합의한 방향은 [Decision Register](decisions.md)에 둔다.
 
-연관: [Prompt Composition](prompt-composition.md) · [Data / Tools / Artifacts](data-and-tools.md) · [Data Contract v0.1 — 검토 초안](data-contract-v0.1.md) · [Module Boundaries](module-boundaries.md)
+연관: [Prompt Composition](prompt-composition.md) · [Data / Tools / Artifacts](data-and-tools.md) · [Data Contract v0.1 — 검토 초안](data-contract-v0.1.md) · [CurrentState Contract v0.1 — 검토 초안](current-state-contract-v0.1.md) · [Module Boundaries](module-boundaries.md)
 
 Data 계약 초안에 **DC-01~DC-08 검토 쟁점**을 정리했다. 기존 Q-01~Q-06은 아직 완료가 아닌 미결정으로 유지한다.
 
@@ -68,13 +68,13 @@ P1은 Workspace 전용 소프트웨어 모듈을 다시 도입하는 단계가 �
 | Q-20 | v2 migration | 데이터/기능 마이그레이션 범위, v2 검증된 Provider replay 규칙 선택적 재사용 |
 | Q-25 | Cache performance | tool schema 안정성, provider별 marker/TTL/히트 관측, 배치 순서에 따른 비용·품질 비교 |
 | Q-26 | Artifact origin atomicity | Internal Tool의 Artifact 변경 + ToolResult/Event 원자 트랜잭션, revision 중복 방지 |
-| Q-27 | CurrentStateProjection | Data activation/binding/settings/artifact와 Environment live 상태의 조합, consistency snapshot, 직렬화/role, 권한 있는 정보만 공개 |
+| Q-27 | CurrentStateProjection | **CS-01~08 초안 작성됨**. 합성 소유 위치, 기본 Binding 선택 스코프, Data consistency/version token, Environment 연결 관측, Provider-native 표현의 최종 검수·확정 필요 |
 | Q-28 | Conversation serialization | 단일 Control 흐름/Run 직렬화를 구현할 lease/queue의 범위, 취소/중단 후 ownership 회수 및 신규 사용자 입력 정책 |
 
 ## 다음 설계 작업 제안
 
 1. **Data Event/Run 원본 계약과 최소 Public Port (Q-01, Q-03, Q-19a)**. 이미 확정된 네 데이터 원칙과 [Data Contract v0.1](data-contract-v0.1.md)의 미정 필드를 구분한다.
-2. **Prompt → Provider 표준 입력 계약 (Q-04, Q-21, Q-22, Q-27)** — 고정된 Prompt 순서와 운영 상태의 CurrentStateProjection을 provider-native 호출로 안전하게 전달.
+2. **Prompt → Provider 표준 입력 계약 (Q-04, Q-21, Q-22, Q-27)** — [CurrentState 초안](current-state-contract-v0.1.md)의 CS-01~08 검토를 전제로 Provider-native 호출의 합법성 검증.
 3. **Control/Tool 계약 (Q-02, Q-05, Q-28)** — 동일 Conversation의 직렬화는 지키되 Tool 병렬성·호출 그룹 종료·오류·실행 기록의 일관성 확인.
 4. 그다음 **Workspace Binding + Inside Scheduler (Q-07~13, Q-23~24)**.
 5. Artifact·Memory·Plan·Compaction과 실제 Provider 캐시 튜닝은 각 기능의 상세 설계 단계에서 결정.
