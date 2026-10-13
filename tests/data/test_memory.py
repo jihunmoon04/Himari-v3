@@ -160,7 +160,7 @@ def test_unknown_outcome_keeps_status_and_commits_once() -> None:
             await data.commit_unknown_outcome(SCOPE, call, notice)
         assert not_claimed.value.code is DataErrorCode.INVALID_STATE_TRANSITION  # PENDING: nothing happened yet
 
-        await data.claim_tool_execution(SCOPE, call, unknown_outcome=UnknownOutcomePolicy.REPORT_TO_MODEL)
+        await data.claim_tool_execution(SCOPE, call, unknown_outcome=UnknownOutcomePolicy.REPORT_TO_MODEL, record_event=True)
         event = await data.commit_unknown_outcome(SCOPE, call, notice)
         assert event is not None
         (record,) = await data.read_tool_executions(SCOPE, call.run_id)
@@ -183,11 +183,11 @@ def test_data_refuses_to_report_unless_policy_allows(policy: UnknownOutcomePolic
         data = fresh()
         call = await projected_group(data, "fake/pay")
         if policy is None:
-            await data.claim_tool_execution(SCOPE, call, unknown_outcome=UnknownOutcomePolicy.REQUIRE_USER)
+            await data.claim_tool_execution(SCOPE, call, unknown_outcome=UnknownOutcomePolicy.REQUIRE_USER, record_event=True)
             conv = data._store._conversations[SCOPE.conversation_id]  # simulate a pre-V3-047 record
             conv.executions[call] = dataclasses.replace(conv.executions[call], unknown_outcome=None)
         else:
-            await data.claim_tool_execution(SCOPE, call, unknown_outcome=policy)
+            await data.claim_tool_execution(SCOPE, call, unknown_outcome=policy, record_event=True)
         await data.recover_interrupted(SCOPE)
         with pytest.raises(DataError) as exc:
             await data.commit_unknown_outcome(SCOPE, call, text_result("outcome unknown", is_error=True))

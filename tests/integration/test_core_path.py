@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 from testkit import (
     FAKE,
+    FakeEnvironment,
     FOREIGN,
     SCOPE,
     RecordingTool,
@@ -54,7 +55,8 @@ from himari.provider.api import (
 )
 from himari.provider.scripted import RawBody, ScriptedAdapter
 from himari.tool.dispatcher import UNKNOWN_OUTCOME_RESULT
-from himari.tool.api import EffectProfile, ToolOutcome, ToolStatus, WorkspaceRequirement
+from himari.bootstrap import build_in_memory_runtime
+from himari.tool.api import ConversationRecord, EffectProfile, ToolOutcome, ToolStatus, WorkspaceRequirement
 
 
 async def kinds(rt_data: object) -> list[EventKind]:
@@ -643,3 +645,35 @@ def test_uncertain_record_with_unknown_policy_blocks_cleanly() -> None:
 
     assert result.state is DriveState.RECOVERY_REQUIRED and result.unknown_calls == (ref,)
     assert provider2.sent == []
+
+
+
+# --- PR #4 follow-ups: C1 claim-time record policy, C2 REQUIRE_USER gate ------
+
+
+@pytest.mark.parametrize("new_build", ["tool-removed", "policy-changed-to-full"])
+def test_unknown_result_event_follows_claim_time_record_policy(new_build: str) -> None:
+    quiet = writer()
+    quiet.definition = dataclasses.replace(quiet.definition, conversation_record=ConversationRecord.OMIT)
+    quiet.crash_next = True
+    rt, _ = runtime([calls(("fake/write", {}))], env_tools=[quiet])
+    rt.store.activate_environment(SCOPE, FAKE, WorkspaceId("ws"))
+    with pytest.raises(SimulatedCrash):
+        asyncio.run(rt.driver.drive(SCOPE, user("write")))
+
+    loud = writer()  # same tool_id, conversation_record=FULL in the new build
+    env_tools = [] if new_build == "tool-removed" else [loud]
+    rt2, provider2 = runtime([final("checked")], store=rt.store, env_tools=env_tools)
+    assert asyncio.run(rt2.driver.drive(SCOPE, user("again"))).state is DriveState.COMPLETED
+
+    kinds_ = [e.kind for e in asyncio.run(rt2.data.read_events(SCOPE))]
+    assert EventKind.TOOL_RESULT not in kinds_  # OMIT applied at claim time still holds
+    group = provider2.prepared_inputs[0].conversation[1]
+    assert isinstance(group, ToolGroupTurn) and group.results[CallId("c0")] == UNKNOWN_OUTCOME_RESULT
+
+
+def test_p0_runtime_refuses_require_user_tools_by_default() -> None:
+    pay = writer(UnknownOutcomePolicy.REQUIRE_USER, "pay")
+    with pytest.raises(ValueError, match="REQUIRE_USER Tools are disabled"):
+        build_in_memory_runtime(ScriptedAdapter(), environments=[FakeEnvironment(pay)])
+    build_in_memory_runtime(ScriptedAdapter(), environments=[FakeEnvironment(pay)], allow_require_user_tools=True)

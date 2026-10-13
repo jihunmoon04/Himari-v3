@@ -227,6 +227,10 @@ class ToolExecutionRecord(DeepFrozen):
     # Persisted at claim time. None on an uncertain record means the policy is
     # not known and must be treated as REQUIRE_USER (never silently relaxed).
     unknown_outcome: UnknownOutcomePolicy | None = None
+    # The Tool's conversation_record policy, persisted at claim time so a later
+    # "outcome unknown" result is recorded the same way whatever the current
+    # build registers. None (not claimed / legacy) → record the Event.
+    record_event: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -405,10 +409,16 @@ class ConversationLog(Protocol):
         ...
 
     async def claim_tool_execution(
-        self, scope: TrustedScope, call: CallRef, *, unknown_outcome: UnknownOutcomePolicy
+        self,
+        scope: TrustedScope,
+        call: CallRef,
+        *,
+        unknown_outcome: UnknownOutcomePolicy,
+        record_event: bool,
     ) -> None:
         """T6: ``PENDING → EXECUTION_CLAIMED`` before an effectful handler runs,
-        persisting the UNKNOWN policy that applies to this effect (V3-047)."""
+        persisting the policies that apply to this effect: its UNKNOWN policy
+        (V3-047) and whether its result is recorded as a Conversation Event."""
         ...
 
     async def commit_tool_outcome(
@@ -421,16 +431,11 @@ class ConversationLog(Protocol):
         ...
 
     async def commit_unknown_outcome(
-        self,
-        scope: TrustedScope,
-        call: CallRef,
-        model_result: ModelToolResult,
-        *,
-        record_event: bool = True,
+        self, scope: TrustedScope, call: CallRef, model_result: ModelToolResult
     ) -> ConversationEvent | None:
         """V3-047: ``EXECUTION_CLAIMED`` or ``UNKNOWN`` → ``UNKNOWN`` with a
-        model-facing "outcome unknown" result (+ ``tool_result`` Event),
-        atomically. The status stays UNKNOWN: the effect is still not known.
+        model-facing "outcome unknown" result (+ ``tool_result`` Event when the
+        claim-time ``record_event`` says so), atomically. The status stays UNKNOWN: the effect is still not known.
         Only for records whose persisted policy is REPORT_TO_MODEL; otherwise
         INVALID_STATE_TRANSITION (a user must resolve it).
         ALREADY_COMMITTED if the call already has a model result."""

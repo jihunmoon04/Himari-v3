@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from himari.bootstrap import InMemoryRuntime, build_in_memory_runtime
 from himari.common import (
     CallId,
+    UnknownOutcomePolicy,
     ConversationId,
     EnvironmentKind,
     JsonValue,
@@ -140,11 +141,17 @@ def runtime(
     """Fresh runtime; pass ``store`` to model a restart over persisted data."""
     adapter = provider if provider is not None else ScriptedAdapter(script)
     env_tools = tuple(env_tools)
+    tools = tuple(tools)
     rt = build_in_memory_runtime(
         adapter,
         tools=tools,
         environments=[FakeEnvironment(*env_tools)] if env_tools else [],
         store=store,
+        # Tests exercising REQUIRE_USER opt in explicitly by using such a Tool;
+        # the production default stays off (see test_registry_schema.py).
+        allow_require_user_tools=any(
+            t.definition.unknown_outcome is UnknownOutcomePolicy.REQUIRE_USER for t in (*tools, *env_tools)
+        ),
     )
     if store is None:
         rt.store.create_conversation(SCOPE)

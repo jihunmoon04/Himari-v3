@@ -42,10 +42,11 @@ def build_in_memory_runtime(
     instructions: Sequence[str] = DEFAULT_INSTRUCTIONS,
     model_id: str = "scripted-model",
     max_runs_per_drive: int = 16,
+    allow_require_user_tools: bool = False,  # keep False in P0 (no resolution API)
 ) -> InMemoryRuntime:
     store = store if store is not None else InMemoryStore()
     data = InMemoryData(store)
-    registry = ToolRegistry([AskUserTool(), *tools])
+    registry = ToolRegistry([AskUserTool(), *tools], allow_require_user=allow_require_user_tools)
     for env in environments:
         for handler in env.tools():
             registry.register(handler)

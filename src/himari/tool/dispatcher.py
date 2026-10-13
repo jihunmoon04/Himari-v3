@@ -136,11 +136,9 @@ class Dispatcher:
     async def _report_reportable(self, scope: TrustedScope, records: Sequence[ToolExecutionRecord]) -> None:
         for record in records:
             if _uncertain(record) and record.unknown_outcome is UnknownOutcomePolicy.REPORT_TO_MODEL:
-                handler = self._registry.get(record.tool_id)
-                record_event = handler is None or handler.definition.conversation_record is ConversationRecord.FULL
-                await self._log.commit_unknown_outcome(
-                    scope, record.call, UNKNOWN_OUTCOME_RESULT, record_event=record_event
-                )
+                # Event recording follows the claim-time policy kept by Data,
+                # never the current registry.
+                await self._log.commit_unknown_outcome(scope, record.call, UNKNOWN_OUTCOME_RESULT)
 
     async def _run_one(self, scope: TrustedScope, record: ToolExecutionRecord) -> None:
         handler = self._registry.get(record.tool_id)
@@ -161,7 +159,9 @@ class Dispatcher:
             return
         claimed = d.environment_kind is not None and d.effect_profile is not EffectProfile.READ
         if claimed:
-            await self._log.claim_tool_execution(scope, record.call, unknown_outcome=d.unknown_outcome)
+            await self._log.claim_tool_execution(
+                scope, record.call, unknown_outcome=d.unknown_outcome, record_event=record_event
+            )
         ctx = ToolContext(scope=scope, artifacts=self._artifacts, binding=binding)
         invocation = ToolInvocation(record.tool_id, record.call.call_id, record.arguments)
         try:
