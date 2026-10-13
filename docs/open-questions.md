@@ -43,7 +43,7 @@ P0 완료 목표: **Fake Data/Provider/Tool로 모델 호출 1회 + tool group +
 
 ## P0-F — 기본 Workspace 파일 기능 (이번에 우선 진행)
 
-**현행 확정 (V3-030 + V3-032~036):** 기본 Workspace에 파일 첨부·생성·수정·다운로드 및 `inside/run_command` 포함. **사용자/principal별 공유 Workspace Root** 아래 Conversation별 cwd, 허용된 같은 사용자 다른 Conversation 폴더 접근. **OS Sandbox + 네트워크 기본 차단**. 인간 Approval 및 Worktree 복제 격리 미도입. V3-031은 Superseded.
+**현행 확정 (V3-030 + V3-032~036):** 기본 Workspace에 파일 첨부·생성·수정·다운로드 및 `inside/run_command` 포함. **사용자/principal별 공유 Workspace Root** 아래 Conversation별 cwd, 허용된 같은 사용자 다른 Conversation 폴더 접근. **OS Sandbox + 초기 차단 전용 네트워크 프로파일(V3-037)**. 인간 Approval 및 Worktree 복제 격리 미도입. V3-031은 Superseded.
 
 **[Default Workspace & Files v0.2](default-workspace-files-v0.2.md) 제안에서 아직 결정할 것:**
 
@@ -76,7 +76,7 @@ P0 완료 목표: **Fake Data/Provider/Tool로 모델 호출 1회 + tool group +
 | Q-09 | Binding | Binding ID·스코프·철회/재연결·공유, Conversation 간 같은 Workspace 참조 |
 | Q-10 | Binding authority | Tool에서 Binding/Workspace 중 어느 ID를 노출할지, 실행 시 권한 검증 |
 | Q-11 | Inside Execution | **기본 파일 I/O와 bounded `run_command`는 P0-F로 선행**. 이후 ManagedProcess 수명/영속 프로세스 복구, 환경 접속 실패 처리 |
-| Q-12 | Safety/Approval | **초기 `run_command` OS Sandbox 및 네트워크 차단 확정**; 인간 Approval/Worktree 복제 격리 미도입. v2 백엔드 수정, net namespace/host socket/네트워크 증명, 기동 게이트와 실행 한도 미결정 |
+| Q-12 | Safety/Approval | **초기 `run_command` OS Sandbox 및 네트워크 차단 전용 프로파일 확정**; 인간 Approval/Worktree 복제 격리 미도입. v2 백엔드 수정, net namespace/host socket 우회 차단 증명, 기동 게이트와 실행 한도 미결정 |
 | Q-13 | Scheduler 상세 | verified read/write footprint, 같은 Workspace 명령 기본 직렬, 다른 Conversation 충돌, 락/종결 배리어/최대 병렬수 |
 | Q-23 | Tool execution durability | Tool 의도 저장·시작/완료·취소, DB 밖에서 발생한 부작용과 중단 후 결과 불명 처리 |
 | Q-24 | Internal vs Environment routing | 실행 유형 등록 계약, `None/Required/Default` Workspace 정책, 외부 서비스 Tool 범주 필요 여부 |
