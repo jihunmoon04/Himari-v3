@@ -136,6 +136,7 @@
 | Environment Activation / Instance | Data: Conversation에서 활성화한 Environment 인스턴스와 설정(정확한 스키마 미결정) | 활성 Environment 식별 및 지원 기능 |
 | Workspace Binding | Data: Environment Instance + Workspace + Conversation의 관계, 활성/철회 상태, 권한 정책 참조 | 사용 가능한 Workspace Binding 식별과 범위 |
 | Default Workspace Selection | Data: 해당 Conversation/Environment의 기본 Binding 선택(스코프 미결정) | 별도 명시가 없을 때 기본 대상 안내 |
+| Conversation Working Directory | Data: 각 Conversation → 기본 Workspace 내 논리적 상대 cwd 매핑(세부 저장 방식 제안) | Sandbox 내부의 기본 경로, 허용된 다른 대화 폴더로의 접근 범위 |
 | Artifact | Data: Conversation-scoped Plan/Note 본문과 revision | 현재 Plan/Note 중 Prompt에 필요한 항목 |
 | Live Connectivity | Environment: 대상 Workspace의 온라인/연결/실행 가능 여부 관측 | 필요할 때만 최신 관측을 반영; 저장된 활성 상태로 온라인을 추정 금지 |
 
@@ -151,6 +152,7 @@ Environment: optionally observed live connectivity/capabilities
 
 - **Data persisted activation ≠ 실제 온라인 상태 ≠ 현재 실행 권한**이다. Tool을 호출할 때 Environment는 현재 Binding·권한·연결 상태를 별도로 다시 검증한다. Projection의 표시용 정보 또는 Binding ID는 권한 증명이 아니다.
 - Conversation 밖에서도 Workspace 자체는 지속할 수 있지만, 그 Workspace에 접근하는 활성 Binding은 Conversation/Environment 범위에서 관리한다.
+- **V3-032~034 확정:** 기본 Workspace는 Conversation별 기본 cwd를 제공하지만 같은 사용자에게 허용된 다른 Conversation 디렉터리도 접근할 수 있다. `inside/run_command`는 OS Sandbox 실행을 요구한다. WorkingDirectory는 자원 식별과 다른 설정이며 Conversation 폴더는 OS 보안 격리가 아니다. 상세 제안: [Default Workspace v0.2](default-workspace-files-v0.2.md).
 - CurrentState는 Event나 Artifact로 복제할 필요가 없다. 마지막 Run에서 구성된 **전체 프롬프트는 최신 PromptSnapshot**, 실제 송신된 provider-specific 요청은 **각 Run의 raw_request**로 보존한다.
 - 현재 상태의 투영 값이 언제나 원본과 실시간 동기라는 보장은 없다. 요청 생성 시 읽기 버전/기준과 Tool 실행 시 재검증이 필요하다.
 
