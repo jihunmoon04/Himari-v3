@@ -184,6 +184,25 @@ Environment Tool 실행 시 `binding_id` → Environment 인스턴스/Conversati
 
 자세한 내용은 [Data, Tool Execution, and Artifacts](data-and-tools.md) 및 [Data Contract v0.1](data-contract-v0.1.md)를 따른다.
 
+### 6.3 초기 기본 Workspace — 파일 첨부·생성 기반 (확정 범위)
+
+- **우선순위:** HIMARI가 제공하는 기본 Workspace를 먼저 만들어 채팅 파일 업로드, 파일 생성·읽기·수정·제공의 기반으로 사용한다.
+- **초기 제외:** 기본 Workspace 파일 작업에는 인간 Approval, Worktree/Workspace 사본 격리, OS Sandbox를 도입하지 않는다. 단, 구조화된 파일 API 자체의 사용자 범위 검사·경로 탈출 방지·용량 제한·중복 편집 충돌 확인은 유지한다.
+- **구조:** Data는 Workspace Registry/Binding 및 파일 참조 메타데이터를 저장하고, Environment의 Inside 파일 실행기가 실제 파일 바이트를 조작하며, Tool은 모델에 파일 Tool을 노출한다. Workspace 전용 소프트웨어 모듈을 추가하지 않는다.
+- **파일 bytes vs Artifact:** 파일의 실제 바이트는 기본 Workspace가 원본이라는 초기 권고. Plan/Note의 원본은 기존대로 Data의 conversation-scoped Artifact이다. 업로드 원본 불변성/버전/GC는 미결정.
+- **범용 명령 실행 `run_command`와 ManagedProcess를 초기 파일 전용 API와 동일시하지 않는다.** OS Sandbox가 없으므로 프로세스 실행을 추가하려면 별도 위험/권한 계약을 검토해야 한다.
+
+관련 상세 초안: [Default Workspace & Chat Files v0.1](default-workspace-files-v0.1.md).
+
+### 6.4 Pause/Resume 실행 경계 — 제안
+
+- 기존 Run raw 요청·응답과 ToolExecution 원본이 보존되어도 Control이 **어느 안전 경계에서 멈췄는지**는 별도 진행 상태가 필요하다.
+- `ConversationControlState`/ExecutionCursor를 Data에 보존하는 권고안에서는 Pause 요청 후 새 Run 또는 Tool 실행을 시작하지 않고, 이미 진행 중인 호출·효과는 가능한 범위에서 결과를 영속화한다.
+- 미실행 ToolCall은 pending 상태로 남아 Resume 시 먼저 처리하고, 완결된 ToolCall/ToolResult 그룹 이후에만 새로운 LLM Run을 호출한다.
+- `PAUSE_REQUESTED`와 실제 `PAUSED`, `WAITING_FOR_USER`, `COMPLETED`, 결과 불명/복구 필요 상태는 혼동하지 않는다. Pause 정책은 아직 사용자 확정이 아니다.
+
+관련 상세 초안: [Control Pause/Resume v0.1](control-pause-v0.1.md).
+
 ## 7. Memory — 방향만 확정
 
 - Memory는 독립적인 특권 하위 시스템이 아니라 **Tool 인터페이스를 통해 호출**하는 방향이다.
