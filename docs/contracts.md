@@ -170,9 +170,9 @@ EnvironmentPlugin ── tools() 제공 · execute 시 Data.WorkspaceState 재�
 | **PROVIDER-SPI** | ProviderAdapter SPI / **Provider** | 각 Provider Adapter → Control | PROVIDER-01~03 + `describe_capabilities` | 새 Provider = Adapter 하나 | **V3-040 CONFIRMED**, 시그니처 PROPOSED |
 | **CTRL-05** | AskUserTool / **Control** | Control이 등록한 suspending ToolHandler → Tool Dispatcher | 모델의 `ask_user` 호출 + 이후 사용자 응답 Event | 그룹 커밋 후 `WAITING_FOR_USER`·lock 해제. 답변 시 원래 `call_id`의 ToolResult를 커밋(T7a)한 뒤 새 Run. 대기 판별은 영속 기록에서 파생 | **V3-044 CONFIRMED**, 메커니즘 V3-P17/P18 |
 
-**Contract Location (예정, 아직 없는 코드):**
+**Contract Location (2026-10-13 갱신):** Data·Tool·Environment·Prompt·Provider의 공개 계약은 **`api.py`로 선언됨(V3-046)** — 이제 코드가 원본이고 아래 문서는 근거다. Control·Bootstrap은 아직 planned. 공용 식별자·값 타입은 `src/himari/common.py`. 모듈 의존 방향은 `scripts/check_imports.py`가 검사한다(layer: common < data < tool < environment < prompt < provider < control < bootstrap).
 
-| Owner | 현재 계약 문서 | 장래 코드 선언 위치 (예시, PROPOSED) |
+| Owner | 현재 계약 문서 | 코드 선언 위치 |
 | --- | --- | --- |
 | Control | 본 문서 §4·§5, [control-prompt-provider-v0.1](control-prompt-provider-v0.1.md) | `src/himari/control/api.py` |
 | Data | 본 문서 §4·§6, [data-contract-v0.2](data-contract-v0.2.md) | `src/himari/data/api.py` (sub-port Protocol: `ConversationLog`, `ArtifactStore`, `WorkspaceState`, `StateQuery`; P2 `ControlState`) |

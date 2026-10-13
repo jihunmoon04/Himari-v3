@@ -35,7 +35,7 @@
 
 **Semantics include security.** A method name unchanged while the allowed filesystem root, network policy or effects change **is** a contract change. This classification must be explicit in PR/implementation review.
 
-## 3. Test layout (PROPOSED)
+## 3. Test layout (created 2026-10-13 for the api skeleton)
 
 ~~~text
 tests/

@@ -253,6 +253,8 @@ PromptSnapshot:
 
 ## 10. Data Public Ports — candidate implementation interface
 
+> **2026-10-13:** 이 표는 [`src/himari/data/api.py`](../src/himari/data/api.py)로 선언되었고 이후 코드가 원본이다(V3-046). 코드 선언 시 정리한 이름: `complete_tool_execution`은 DATA-08 `commit_tool_outcome` 하나로 통합(Artifact 변경이 없는 완료도 같은 경로), 조회용 `read_run`·`read_tool_executions`·`record_projection_failure`, WorkspaceState의 `resolve_default_binding`을 추가했다.
+
 All methods take a trusted, authenticated scope or opaque capability created by the trusted composition root, **not model-provided principal strings**. Port names are PROPOSED:
 
 | Contract ID | Sub-port (V3-039) | Candidate Port | Callers | Effect |

@@ -1,0 +1,22 @@
+# Static checks only. Pytest selection follows docs/testing-policy.md (V3-038):
+# module suites by default, the full suite only for public contract changes.
+name: static-checks
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  static:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dev tools
+        run: pip install "mypy>=1.10" "pytest>=8"
+      - name: Import boundaries (V3-046)
+        run: python -I scripts/check_imports.py
+      - name: mypy --strict
+        run: python -m mypy
