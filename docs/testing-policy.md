@@ -35,6 +35,14 @@
 
 **Semantics include security.** A method name unchanged while the allowed filesystem root, network policy or effects change **is** a contract change. This classification must be explicit in PR/implementation review.
 
+## 2.1 Live provider tests (opt-in gate)
+
+`tests/live/` calls real provider APIs. It runs only with `HIMARI_LIVE=1` and a key (`OPENROUTER_API_KEY` in the environment or the git-ignored `.env`); otherwise it is skipped, so CI and ordinary module/full pytest never touch the network. Like the Sandbox host check, it is a separate evidence gate for Provider Adapter changes, not part of the module/full pytest classification.
+
+~~~bash
+HIMARI_LIVE=1 pytest -s tests/live   # optional HIMARI_LIVE_MODELS="model_a,model_b"
+~~~
+
 ## 3. Test layout (created 2026-10-13 for the api skeleton)
 
 ~~~text

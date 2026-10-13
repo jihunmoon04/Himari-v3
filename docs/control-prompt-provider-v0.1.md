@@ -107,7 +107,7 @@ Provider.invoke_prepared(native_prepared_request) -> NativeInvocationOutcome:
 ~~~
 
 - Native serialization and capability validation happen **before** `Data.prepare_run`.
-- Data persists the prepared request **before** send. **What the stored body is equal to is OPEN for P0 (V3-P14 / CP-02):** wire-exact(송신은 저장 bytes를 그대로 사용) vs adapter-serialized(Adapter가 transport에 넘긴 body). 선택과 무관하게 RunRecord는 `raw_representation`을 기록한다.
+- Data persists the prepared request **before** send. **Wire-exact (V3-048):** 송신은 저장된 bytes를 그대로 사용하고, RunRecord는 `raw_representation = wire_exact`를 기록한다. 첫 구현은 OpenRouter Adapter(httpx 직접 호출, V3-P38).
 - Headers or transport auth are supplied by trusted Provider adapter at send time; they must not be serialized into Data's native body capture.
 - Never claim the stored JSON is byte-exact wire if it is only a semantic equivalent; an SDK with unobservable reserialization is only compatible with the adapter-serialized representation.
 - Disable implicit HTTP retry that might issue multiple LLM requests under one Run ID. If Provider reports error after an uncertain send, Data marks the ambiguity; no blind replay.
@@ -247,7 +247,7 @@ Prompt `compose`가 provider-neutral 이력을 만들 때의 규칙이다. 원�
 ## 10. Decisions required before freeze
 
 - CP-01 ~~question output contract~~ → **`ask_user` Tool로 해결(V3-044)**. 남은 것: `ask_user` 혼합 허용(V3-P15), commentary 처리(V3-P16).
-- CP-02 **P0 raw 보존 기준 미확정(V3-P14 OPEN)**: wire-exact vs adapter-serialized. streaming/chunk boundaries later.
+- CP-02 ~~P0 raw 보존 기준~~ → **V3-048 wire-exact 확정**. streaming/chunk boundaries later.
 - CP-03 Snapshot persistence/version coherence with Run prepare and Source StateBasis.
 - CP-04 Data T5/T6/T7/T7a/T-R semantics: all call IDs/ordinals, concurrency barrier, UNKNOWN 처리는 V3-047로 결정.
 - CP-05 ~~lease/fencing~~ → P2(V3-045). 남은 것: busy/paused 중 사용자 메시지 처리.

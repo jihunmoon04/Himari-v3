@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Sequence
+from typing import Any
 from datetime import UTC, datetime
 
 from himari.bootstrap import InMemoryRuntime, build_in_memory_runtime
@@ -156,3 +157,24 @@ def runtime(
     if store is None:
         rt.store.create_conversation(SCOPE)
     return rt, adapter
+
+
+def assert_chat_structure(messages: list[dict[str, Any]]) -> None:
+    """Minimal codification of the Chat Completions ordering rules."""
+    assert messages and messages[0]["role"] in ("system", "user")
+    non_system = [m for m in messages if m["role"] != "system"]
+    assert non_system[0]["role"] == "user", "first turn must be the user's"
+    i = 0
+    while i < len(messages):
+        m = messages[i]
+        assert m["role"] in ("system", "user", "assistant", "tool")
+        if m["role"] == "tool":
+            raise AssertionError(f"tool message without a preceding tool_calls group at {i}")
+        if m["role"] == "assistant" and m.get("tool_calls"):
+            ids = [tc["id"] for tc in m["tool_calls"]]
+            following = messages[i + 1 : i + 1 + len(ids)]
+            assert [f["role"] for f in following] == ["tool"] * len(ids), "results must follow immediately"
+            assert [f["tool_call_id"] for f in following] == ids, "results in call order, ids paired"
+            i += 1 + len(ids)
+            continue
+        i += 1

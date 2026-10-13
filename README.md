@@ -64,6 +64,8 @@ HIMARI v3의 **아키텍처 결정 기록 및 설계 기준선**입니다. 공�
 
 구현(P0): `data/memory.py`(인메모리 Data), `tool/registry.py`·`tool/dispatcher.py`, `prompt/composer.py`(순수)·`prompt/loader.py`, `provider/scripted.py`(Fake), `control/driver.py`·`control/ask_user.py`, `bootstrap/`(조립).
 
+실제 Provider: `provider/openrouter.py`(OpenRouter, wire-exact, V3-048). 실제 호출 검증은 선택 실행이에요: `.env`에 `OPENROUTER_API_KEY`를 두고 `HIMARI_LIVE=1 pytest -s tests/live`.
+
 ```bash
 uv venv && uv pip install -e ".[dev]"
 python -I scripts/check_imports.py   # 모듈 경계 (정적)
