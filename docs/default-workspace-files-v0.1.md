@@ -1,5 +1,7 @@
 # Default Workspace & Chat Files — v0.1
 
+> **SUPERSEDED (역사적 초안)** — 초기 no-Sandbox/no-run_command 구상은 [Default Workspace v0.2](default-workspace-files-v0.2.md) 및 V3-032~034로 대체되었습니다. 현재 구현 기준으로 사용하지 마세요.
+>
 > 2026-10-13 · **초기 제품 범위는 Confirmed, 내부 스키마·수명·보호 장치는 Proposed**.
 >
 > 통합 문서: [contracts.md](contracts.md). 결정 기록: [decisions.md](decisions.md). v2 Phase 4A 기능을 그대로 이식하지 않고 **v3의 기본 Workspace 파일 기반부터 설계**한다.
