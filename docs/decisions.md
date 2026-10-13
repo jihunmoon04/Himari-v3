@@ -46,6 +46,7 @@
 | V3-034 | Confirmed | 초기 기본 Workspace에서 별도의 **사용자 Approval·Worktree/Workspace 복제 격리를 요구하지 않는 결정은 유지**한다. 그러나 Sandbox를 통한 호스트/사용자 간 격리 및 파일 접근·실행 자원 검증은 유지한다. |
 | V3-035 | Confirmed | 기본 Workspace의 **소유·공유 범위는 사용자/principal별**로 한다. 동일 사용자에 속한 각 Conversation은 별도 기본 cwd 폴더를 갖되 같은 사용자에게 허용된 다른 Conversation 폴더에 접근할 수 있다. 실제 principal 식별/인증/Root 매핑은 별도 계약. |
 | V3-036 | Confirmed | **기본 Workspace Sandbox 안의 네트워크 접근은 기본 차단**한다. 향후 Web Search는 명령 Sandbox와 별도의 Tool/신뢰된 네트워크 경계로 구현할 수 있으며, 이를 이유로 run_command의 네트워크 권한을 자동 부여하지 않는다. |
+| V3-037 | Confirmed | **초기 Sandbox는 네트워크 차단 전용 단일 프로파일**만 제공한다. `connected`/도메인 allowlist/프록시 등 조건부 허용 모드는 초기 범위에서 제외한다. 네트워크 namespace 격리를 검증하지 못하면 `run_command` 실행 거부. 호스트 서비스로 연결되는 Unix 소켓 등 우회 경로도 차단한다. 향후 네트워크 허용은 별도 정책 변경·검증을 요구한다. |
 
 
 ## B. 현재 채택을 권고하지만 세부 확정 전인 설계
