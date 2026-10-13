@@ -8,7 +8,7 @@
 
 - **One default Workspace root per trusted user/principal**; each Conversation has a separate default folder/cwd. Other Conversation directories accessible to that same authorized user (V3-033, V3-035).
 - **run_command supported inside an OS Sandbox**, with no unprotected execution fallback (V3-032).
-- **Network access within the Sandbox denied by default**; future Web Search is an independently authorized Tool outside the command Sandbox and does not grant arbitrary shell network access (V3-036).
+- **Only one Sandbox network profile in the first release: ISOLATED, with no external/host network access** (V3-036~037). There is no runtime `connected` choice, allowlist, proxy or shell exemption. A later separate Web Search Tool is independent of the command Sandbox.
 - **Initial no human Approval and no Worktree/Workspace-copy isolation** decisions retained (V3-034). Sandbox protects host/other users, not the files of other permitted same-user Conversations.
 - Plan/Note remain Data conversation-scoped Artifacts. Default Workspace files are distinct.
 
@@ -84,12 +84,12 @@ Recommended mechanical rules:
 
 ## 5. Network DENY (v3-specific)
 
-- Use **kernel-enforced egress isolation**. Candidate: Bubblewrap --unshare-net (plus host-socket exclusion and appropriate loopback/IPC policy); validate with real-host tests. Merely omitting proxy variables or instructing the LLM to avoid networking is insufficient.
+- **Single initial profile: `network=isolated`.** Proposed concrete implementation: Bubblewrap `--unshare-net` with no routable interface, no host network socket mounts, and real-host validation. `network=connected`, proxy, allowlist, interactive networking overrides and per-Tool exemptions are **out of scope**. Merely clearing proxy variables or instructing the model to avoid networking is insufficient.
 - Reject Sandbox execution if network isolation cannot be enforced. Sandbox activation must include network controls in version/fingerprint and self-test.
-- Deny external TCP/UDP/DNS access by commands; specify Unix-domain and loopback cases at backend freeze. Separate sockets/mounts must not defeat network policy.
+- Deny external TCP/UDP/DNS access by commands and any access to host/other-network-namespace services. Loopback in a private net namespace is **not host localhost**; tests must confirm no host services reachable. Unix-domain sockets/IPC and inherited file descriptors require separate exclusion: a network namespace alone does **not** isolate all local IPC. The precise AF_UNIX/loopback syscall policy remains a backend implementation detail.
 - Provider's own network API access runs in trusted Provider/host service and is **not in the command Sandbox**.
 - Later separate Web Search Tool (TOOL-06 provisional) can call a trusted network service with independent policy. Search results are untrusted content, not authority to execute commands or widen sandbox mounts.
-- A future explicit network-enabled Environment or Tool would need new policy and user decision. The first default Workspace does not silently gain network access.
+- A future explicitly connected Environment or Tool requires a **new approved policy/profile generation and certification**; it cannot be enabled via a boolean switch in the initial profile. Package downloads, `git clone`, `pip install` from remote sources and remote API tests will not work inside the isolated Sandbox. Trusted Provider calls remain outside.
 
 ## 6. Admission, activation and certification (PROPOSED)
 
@@ -138,7 +138,7 @@ File metadata and published file bytes remain separate from mutable workspace by
 ## 10. OPEN (not yet ratified)
 
 - Principal identity/auth in Web+CLI and physical root naming, quota; whether cross-conversation writes ever require optional user warning.
-- Exact Linux bwrap/Landlock executable packages, network namespace policy and host certification; localhost vs socket behavior.
+- Exact Linux bwrap/Landlock executable packages, **verification of the isolated-only network profile** and host certification; loopback/Unix socket bypass implementation tests. Whether to provide connected mode is **not** an initial open question.
 - Preexisting hardlink scan / protected backing overlap checks on large principal root, TOCTOU-resistant cwd pinning after user edits.
 - CPU/memory/PID/time/output, supported commands/toolchains and private writable cache behavior (pip install may not work offline).
 - Sandboxed command changes to working files vs Data FileAsset revisions; published immutable file storage outside RW mount.
