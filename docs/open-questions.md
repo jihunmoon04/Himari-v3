@@ -2,7 +2,9 @@
 
 기준: **2026-10-13**. 이 문서는 아직 확정되지 않은 계약만 관리한다. 이미 합의한 방향은 [Decision Register](decisions.md)에 둔다.
 
-연관: [Prompt Composition](prompt-composition.md) · [Data / Tools / Artifacts](data-and-tools.md) · [Module Boundaries](module-boundaries.md)
+연관: [Prompt Composition](prompt-composition.md) · [Data / Tools / Artifacts](data-and-tools.md) · [Data Contract v0.1 — 검토 초안](data-contract-v0.1.md) · [Module Boundaries](module-boundaries.md)
+
+Data 계약 초안에 **DC-01~DC-08 검토 쟁점**을 정리했다. 기존 Q-01~Q-06은 아직 완료가 아닌 미결정으로 유지한다.
 
 ## 이미 해결된 설계 방향
 
