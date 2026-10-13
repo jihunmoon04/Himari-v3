@@ -152,6 +152,9 @@ Environment ─────── Data.read_binding / Registry  (실행 시 다�
 | **FILE-03** | StructuredFileTools / **Tool** | Inside File Tool → Control/Provider | FILE-01 + FILE-02 | create/edit/list/read/delete/publish tool results | PROPOSED |
 | **FILE-04** | UploadDownload / **Interface** | Web/CLI surface → User/Control | FILE-01 bytes + FILE-02 authorized metadata | upload and download bytes without host path disclosure | PROPOSED |
 | **FILE-05** | AttachmentManifest / **Prompt** | Prompt → Control | Data attachment references | model-visible bounded manifest, no unbounded bytes | PROPOSED |
+| **ENV-04** | SandboxedCommandExecution / **Environment** | Inside Sandbox Backend → Tool | authorized principal root + current Workspace Binding + execution policy | bounded command exit, output, failure; **no unsandboxed fallback** | sandbox requirement CONFIRMED, DTO PROPOSED |
+| **DATA-11** | ResolveConversationWorkingDirectory / **Data** | Data → Environment, Prompt | Data Conversation ↔ user Workspace mapping | per-conversation default cwd, user-authorized cross-folder scope | directory behavior CONFIRMED, mapping PROPOSED |
+| **TOOL-05** | RunCommandTool / **Tool** | Tool registration/dispatch → Control/Provider | ENV-04 execution result, DATA-11 cwd mapping | command request, bounded canonical ToolResult | initial support CONFIRMED, schema PROPOSED |
 | **INTERNAL-01** | MemoryTool / **Tool** | Internal Memory Tool → Tool Dispatcher | Data Memory 저장/검색 계약 | 모델용 검색 결과, Conversation 기록 | 방향 확정, 기능 미정 |
 | **INTERNAL-02** | PlanNoteTool / **Tool** | Internal Plan/Note Tool → Tool Dispatcher | Data conversation-scoped Artifacts | 간결한 complete 결과 + Artifact 갱신 | 저장 위치 확정, 수정 API 미정 |
 
@@ -320,7 +323,7 @@ Prompt가 연결 상태를 임의로 `online`으로 채우지 않는다. Current
 - 기본 Binding 선택은 `(conversation, environment_instance)`당 0~1개로 두는 방향.
 - Data에는 Activation/Binding/Registry가 영속되고, Environment는 실시간 연결 가능 상태를 관측. **Prompt CurrentState는 둘의 읽기 투영**, 새로운 원본이 아님.
 
-**OPEN:** Instance/Binding 생성·철회 주체, default scope, Sandbox/승인, remote/local 종류별 실행, 안전한 상태 관측 API, Environment 권한 계약.
+**OPEN:** Instance/Binding 생성·철회 주체, default scope, Sandbox의 기술/자원/네트워크 정책, remote/local 종류별 실행, 안전한 상태 관측 API, Environment 권한 계약. **기본 Workspace의 run_command에 OS Sandbox를 적용하는 요구사항은 확정(V3-032)**이며, 초기 사용자 Approval은 요구하지 않는다(V3-034).
 
 ## 11. 종단 간 하나의 Run 예시 (출처/호출/데이터 구분)
 
@@ -392,7 +395,7 @@ Prompt가 연결 상태를 임의로 `online`으로 채우지 않는다. Current
 7. Environment 인스턴스·Binding·기본 Workspace 선택 스코프 및 활성/철회 권한.
 8. Workspace online observation/timeout/freshness의 책임과 Provider 투영 방법.
 9. Scheduler read/write footprint, 같은 Workspace의 unsafe command 직렬화, cross-conversation alias conflict.
-10. **초기 기본 Workspace 파일 Tool에는 Approval, Workspace 사본 격리, OS Sandbox를 적용하지 않는다(확정).** 범용 셸 명령/ManagedProcess 추가 시 실행·취소·보안 계약은 별도로 설계한다.
+10. **초기 기본 Workspace에 OS Sandbox + run_command 적용은 확정**. Approval/Worktree 사본 격리는 요구하지 않는다. Sandbox/backend/no unsandboxed execution, command 수명·리소스 및 ManagedProcess 확대는 별도 설계한다.
 
 **확장 단계(P2)에서 결정할 것**
 
@@ -411,16 +414,32 @@ Prompt가 연결 상태를 임의로 `online`으로 채우지 않는다. Current
 
 > **채택한 새 원칙:** 각 공개 계약의 **정의 책임(Owner), 실제 제공자(Provider), 사용처(Consumer), 데이터 원천(Source of Truth), 선언 위치(Contract Location)**를 추적한다. 이는 모듈 교체 시 영향 범위와 테스트 책임을 확인하기 위한 최소 메타데이터다.
 
-## 15. Default Workspace & Files — 2026-10-13 신규 설계
+## 15. Default Workspace & Files / Sandboxed Commands — 2026-10-13 current decision
 
-**CONFIRMED (V3-030~031):** HIMARI 제공 기본 Workspace를 첫 파일 기반으로 구현하여 채팅 첨부/생성/수정/다운로드를 지원할 방향이며, 초기 기본 Workspace 경로에서는 Approval, Worktree·복제 격리, OS Sandbox를 사용하지 않는다. 기존의 Data Registry + Environment 파일 I/O + Tool 인터페이스 구조는 유지한다.
+**CONFIRMED: V3-030 + V3-032~034.** 첫 Workspace를 사용자별 공유 기본 파일 공간으로 구현한다. **Conversation마다 별도 폴더를 기본 cwd로 사용하고, 같은 사용자에게 허용된 다른 Conversation 폴더도 읽고 쓸 수 있다.** 명령 실행 `inside/run_command`를 첫 범위에 포함하고 **OS Sandbox가 반드시 적용**되도록 설계한다. **인간 Approval 및 Git Worktree/복제 Workspace 격리**는 첫 릴리스에서 요구하지 않는다.
 
-**PROPOSED:** 하나의 지속 기본 Workspace를 다수 Conversation이 Binding을 통해 참조한다. 실제 파일 bytes는 Workspace에, FileAssetRecord/ConversationAttachmentRef는 Data에, Plan/Note는 기존 Data Artifact에 둔다. File-only tool surface를 먼저 열고 `run_command`/ManagedProcess는 처음 범위에서 제외한다. 제한된 구조화 파일 API의 상대 경로/크기/충돌/권한 검증은 Sandbox나 인간 승인 없이도 필요하다.
+```text
+Default Workspace for authorized principal  (one workspace_id proposed)
+  /workspace/
+      conversations/<conversation-A>/    ← Conversation A default cwd
+      conversations/<conversation-B>/    ← A can access B if same authorized scope
+      shared/                            ← optional convenience directory
 
-**Contract metadata:**
-- Owner/Provider/Consumer/Source/Location: FILE-01~05 (§4와 [default-workspace-files-v0.1.md](default-workspace-files-v0.1.md)).
-- 원본 bytes와 Data metadata는 별도 영속 영역. DB와 filesystem 간 원자성/GC, 생성·첨부 파일의 보존 및 변경 버전은 OPEN.
-- Workspace 격리 없음은 호스트 OS 보안 격리가 있다는 뜻이 아니다. 향후 arbitrary shell은 동일 정책으로 자동 활성화하지 않는다.
+Inside Environment
+  ├── structured file read/write Tools
+  └── inside/run_command → OS sandbox → only principal-scoped /workspace RW
+                               no host Data Root / other user directories
+```
+
+- **Conversation별 폴더는 사용 편의성 경계일 뿐 OS 보안 경계가 아니다.** 호스트/다른 사용자의 데이터는 Sandbox mount/view 및 사용자 권한 정책으로 별도 보호한다.
+- 원본 소유권: 사용자 현재 파일 bytes는 기본 Workspace filesystem; Data에는 Conversation-folder mapping, Registry, Binding, File metadata 및 attachment refs. Plan/Note는 **Data.Artifact** 원본.
+- 명령이 파일을 임의 변경할 수 있으므로 FileAsset metadata hash를 작업 파일의 영구 immutable 증거로 쓰지 않는다. **working file과 published immutable attachment version 분리는 권고안**이며, 해당 immutable snapshot의 물리적 저장 위치는 OPEN.
+- Model이 제공한 path는 권한이 아니다. 실제 대상 principal/Binding/cwd를 검증하고, 외부 탈출 path/symlink/hardlink/mount alias를 거부한다.
+- Sandbox 미지원 시 **unsandboxed `run_command` fallback을 두지 않는다**. Linux host/backend의 기술·기동 probe, 네트워크·시간·메모리·프로세스·출력 제한은 검토 사항.
+- 같은 공유 Workspace root를 읽고 쓸 수 있는 임의 명령은 다른 Conversation의 파일도 손상시킬 수 있다. UNKNOWN file effects를 가진 run_command는 같은 Workspace 파일 작업과 기본 충돌하며, 완료/결과 불명은 ToolExecution으로 보존한다.
+- Conversation 삭제가 공유 filesystem 경로와 published files를 어떻게 정리하는지는 OPEN; 다른 Conversation이 사용 중이면 자동 삭제하지 않는다.
+
+**Contract metadata:** FILE-01~05, ENV-04, DATA-11, TOOL-05 (§4). 현행 상세 초안: [Default Workspace & Chat Files v0.2](default-workspace-files-v0.2.md). 이전 [v0.1](default-workspace-files-v0.1.md)은 Superseded이며 더 이상 현재 요구사항이 아니다.
 
 ## 16. Conversation Pause/Resume — 2026-10-13 신규 설계
 
