@@ -4,7 +4,7 @@
 
 연관: [Prompt Composition](prompt-composition.md) · [Data / Tools / Artifacts](data-and-tools.md) · [Data Contract v0.1 — 검토 초안](data-contract-v0.1.md) · [CurrentState Contract v0.1 — 검토 초안](current-state-contract-v0.1.md) · [Module Boundaries](module-boundaries.md)
 
-Data 계약 초안에 **DC-01~DC-10 검토 쟁점**을 정리했다. 기존 Q-01~Q-06은 아직 완료가 아닌 미결정으로 유지한다.
+Data [v0.2 구현 가능 후보](data-contract-v0.2.md)에 **DR-01~DR-09 독립 검수 항목**, 이전 [v0.1](data-contract-v0.1.md)에 DC-01~DC-10 설계 쟁점을 정리했다. [Control–Prompt–Provider v0.1](control-prompt-provider-v0.1.md)에 **CP-01~CP-07 경계 검수 항목**이 있다. 기존 Q-01~Q-06은 아직 완료가 아닌 미결정으로 유지한다.
 
 **[통합 모듈 계약 기준서](contracts.md)**에 Owner / Provider / Consumer / Source of Truth / Contract Location 메타데이터가 채워진 **검토용 공개 Port 인벤토리**를 작성했다. **메타데이터 작성 표준 자체는 V3-029로 확정**되었지만 각 함수/DTO 시그니처는 아직 확정되지 않았다.
 
@@ -33,8 +33,8 @@ Data 계약 초안에 **DC-01~DC-10 검토 쟁점**을 정리했다. 기존 Q-01
 | --- | --- | --- | --- |
 | Q-01 | Public Ports / DTO | 모듈별 public API 소유, 정규화된 입력/출력, 오류 모델, 의존성 주입 위치 | **1** |
 | Q-02 | Control / Run | **동일 Conversation 직렬화는 확정**. final/question/tool-call 정규화, 복수 호출 종료 배리어·다음 Run 경계, 사용자 재개 방식과 lock/lease 복구 구현 | **2** |
-| Q-03 | Data schema | **kind별 불변 Payload는 확정**. 종류별 구체 schema, Run·Execution·Event의 원자적 기록 순서, ID/cursor, raw 저장 형식, 조회 API | **1** |
-| Q-04 | Prompt / Provider boundary | provider-neutral 메시지 표현, Current State의 provider별 안전한 role/위치, 누락/불호환 기능 처리 | **2** |
+| Q-03 | Data schema | kind별 불변 Payload 원칙 확정. **[Data v0.2](data-contract-v0.2.md)**에 DTO/state/트랜잭션/Port 후보 구체화; DR-01~09 검수·freeze 필요 | **1** |
+| Q-04 | Prompt / Provider boundary | **[Control–Prompt–Provider v0.1](control-prompt-provider-v0.1.md)**에 중립 입력/native prepare/send/normalize 초안. Provider별 role/SDK exact raw capture 검증 및 CP-01~07 확정 필요 | **2** |
 | Q-05 | Tool API | 스키마/네임스페이스, Internal/Environment 디스패치, Workspace 요구 플래그, 결과 표준형/기록 정책 | **2** |
 | Q-06 | Contract enforcement | Private import 차단, 모듈 교체/계약 테스트, 최소 필수 실패 시나리오 | **3** |
 | Q-19a | Raw retention security | 저장될 원본의 인증/비밀 정보 제외, 접근 권한, 안전한 실패 처리 | **1** |
@@ -103,8 +103,8 @@ P1은 Workspace 전용 소프트웨어 모듈을 다시 도입하는 단계가 �
 
 ## 다음 설계 작업 제안
 
-1. **Data Event/Run 원본 계약과 최소 Public Port (Q-01, Q-03, Q-19a)**. 이미 확정된 네 데이터 원칙과 [Data Contract v0.1](data-contract-v0.1.md)의 미정 필드를 구분한다.
-2. **Prompt → Provider 표준 입력 계약 (Q-04, Q-21, Q-22, Q-27)** — [CurrentState 초안](current-state-contract-v0.1.md)의 CS-01~08 검토를 전제로 Provider-native 호출의 합법성 검증.
+1. **[Data v0.2 독립 설계 검수](data-contract-v0.2.md) (Q-01, Q-03, Q-19a)** — immutable canonical Event kinds, actual transmitted raw bytes, durable once-only send claim, Tool+Artifact 원자성의 DR-01~09 결정.
+2. **[Control–Prompt–Provider v0.1 검수](control-prompt-provider-v0.1.md) (Q-02, Q-04, Q-21~22, Q-27)** — native role/Tool 그룹 합법성, final/question 및 mixed output, API 실제 bytes 송신, Snapshot basis 정합성의 CP-01~07.
 3. **Control/Tool 계약 (Q-02, Q-05, Q-28)** — 동일 Conversation의 직렬화는 지키되 Tool 병렬성·호출 그룹 종료·오류·실행 기록의 일관성 확인.
 4. **사용자별 공유 Root + Conversation별 cwd + OS Sandbox·네트워크 기본 차단 + run_command (P0-F, Q-29~33)** 계약을 상세화한 뒤, **Pause/Resume (P0-C, Q-34~36)**을 Control 계약과 연결한다. 장기 ManagedProcess는 후속 검토.
 5. Artifact·Memory·Plan·Compaction과 실제 Provider 캐시 튜닝은 각 기능의 상세 설계 단계에서 결정.
