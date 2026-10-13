@@ -13,12 +13,18 @@ HIMARI v3의 **아키텍처 결정 기록 및 설계 기준선**입니다. 현�
 - **Environment**는 Workspace의 연결·접근·실행 방식을 규정합니다. 한 Conversation에서 여러 Environment가 활성화될 수 있고, 동일한 Workspace를 Environment마다 다르게 다룰 수 있습니다.
 - **Workspace Registry와 Binding**을 구분합니다. Tool은 Workspace Binding이 필요한 도구와 필요하지 않은 도구로 나뉩니다. 환경 도구의 이름은 `environment/tool` 형태를 고려합니다.
 - **Memory**는 별도 특권 계층이 아니라 Tool 형태로 처리할 방향이며, 세부 설계는 보류합니다.
-- **Provider reasoning** 설정과 사용량/공개된 continuation 정보는 Data에 보존할 수 있고 Prompt가 이를 사용해 모델 요청을 구성합니다. 비공개 내부 추론 원문은 이용 가능하다고 전제하지 않습니다.
+- **Provider reasoning** 설정과 사용량/공개된 continuation 정보는 Data에서 관리하고 Prompt·Provider가 지원 가능한 모델 요청을 구성합니다. 비공개 내부 추론 원문은 이용 가능하다고 전제하지 않습니다.
+- **프롬프트는 Cache-first 순서**: Stable Prefix → 압축 이력 + exact Conversation → Current State. Trigger는 기존 이벤트를 가리킬 뿐 이동/복제하지 않습니다. ToolCall/Result는 provider-native 결합을 유지합니다.
+- **모든 Run의 원본 Provider 요청·응답**을 기록합니다. Execution Records, exact Conversation Events, Plan/Note 등의 Artifacts는 서로 다른 논리 영역으로 구분합니다.
+- **ToolCall은 충돌이 없으면 병렬 실행**할 수 있습니다. 같은 Workspace에서 부작용 범위가 불명확한 명령은 기본 직렬 처리하도록 설계합니다.
+- **Workspace 전용 소프트웨어 모듈은 만들지 않습니다.** Memory 등 Internal Tool은 Data의 공개 API를 직접 사용할 수 있으며, 환경 Tool은 Environment를 경유합니다.
 
 ## 문서
 
 - [아키텍처](docs/architecture.md) — 역할, 데이터 흐름, Run·Prompt·Tool·Environment·Workspace 구조
 - [모듈 경계 및 계약](docs/module-boundaries.md) — 의존성 규칙, 인터페이스, 계약 검증
+- [프롬프트 구성 계약](docs/prompt-composition.md) — Cache-first 순서, Trigger 참조, Tool 그룹, Reasoning/Provider 매핑
+- [데이터·Tool·Artifact 설계](docs/data-and-tools.md) — 원본 실행 기록, Conversation, Artifact, 병렬 실행
 - [결정 기록](docs/decisions.md) — 현재까지 합의한 내용과 설계상 권고 사항
 - [미결정 사항](docs/open-questions.md) — 초기 구현에 앞서 확정할 계약과 후속 결정
 
