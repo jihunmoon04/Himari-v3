@@ -53,8 +53,28 @@ def _schema(properties: dict[str, JsonValue], required: list[str]) -> dict[str, 
     }
 
 
+_CUT_MARK = "\n[cut to the result size limit]"
+
+
+def _fit(text: str, budget: int) -> str:
+    """The longest prefix of ``text`` whose UTF-8 encoding fits ``budget``
+    bytes (never splits a character)."""
+    data = text.encode("utf-8")
+    if len(data) <= budget:
+        return text
+    return data[: max(budget, 0)].decode("utf-8", errors="ignore")
+
+
+def _cap(message: str) -> str:
+    """Last line of defense: every Inside result is at most
+    MAX_OBSERVATION_BYTES of UTF-8, whatever produced it."""
+    if len(message.encode("utf-8")) <= MAX_OBSERVATION_BYTES:
+        return message
+    return _fit(message, MAX_OBSERVATION_BYTES - len(_CUT_MARK.encode())) + _CUT_MARK
+
+
 def _text(message: str, *, error: bool = False) -> ModelToolResult:
-    return ModelToolResult((TextBlock(message),), is_error=error)
+    return ModelToolResult((TextBlock(_cap(message)),), is_error=error)
 
 
 def _failure(path: str, error: fs.FsError) -> ToolOutcome:
@@ -116,11 +136,19 @@ class ListFiles(_InsideTool):
     )
     properties = {"path": {"type": "string", "description": "Directory to list (default: working directory)."}}
 
+    PARTIAL = (
+        f"[partial listing: the directory has more entries than shown (limit {MAX_LIST_ENTRIES} entries, "
+        f"{MAX_OBSERVATION_BYTES // 1024} KiB); entries are not the first by name]"
+    )
+
     def act(self, root_fd: int, relative: str, args: Mapping[str, Any]) -> ToolOutcome:
         entries, more = fs.list_directory(root_fd, relative, MAX_LIST_ENTRIES)
+        shown_path = fs.display(relative)
+        # Budget the final text: the header (with the widest possible count)
+        # and the partial-listing footer are reserved before any entry.
+        widest_header = f"{shown_path} ({MAX_LIST_ENTRIES} entries shown)"
+        budget = MAX_OBSERVATION_BYTES - len(widest_header.encode()) - len(self.PARTIAL.encode()) - 2
         lines: list[str] = []
-        size = 0
-        shown_count = 0
         for e in entries:
             if e.kind == "directory":
                 line = f"{e.name}/"
@@ -128,23 +156,18 @@ class ListFiles(_InsideTool):
                 line = f"{e.name}  ({e.size} bytes)"
             else:
                 line = f"{e.name}  [{e.kind}]"
-            size += len(line.encode()) + 1
-            if size > MAX_OBSERVATION_BYTES - 512:  # leave room for the header/footer
+            cost = len(line.encode()) + 1
+            if cost > budget:
                 more = True
                 break
+            budget -= cost
             lines.append(line)
-            shown_count += 1
-        header = f"{fs.display(relative)} ({shown_count} entries shown)"
-        footer = (
-            [f"[partial listing: the directory has more entries than shown (limit {MAX_LIST_ENTRIES} entries, "
-             f"{MAX_OBSERVATION_BYTES // 1024} KiB); entries are not the first by name]"]
-            if more
-            else []
-        )
+        header = f"{shown_path} ({len(lines)} entries shown)"
+        body = "\n".join([header, *lines, *([self.PARTIAL] if more else [])])
         return ToolOutcome(
             ToolStatus.SUCCEEDED,
-            _text("\n".join([header, *lines, *footer])),
-            raw_result={"path": fs.display(relative), "count": shown_count, "truncated": more},
+            _text(body),
+            raw_result={"path": shown_path, "count": len(lines), "truncated": more},
         )
 
 
@@ -163,16 +186,27 @@ class ReadFile(_InsideTool):
                 _text(f"{shown} ({size} bytes): binary file, content not shown"),
                 raw_result={"path": shown, "size": size, "binary": True},
             )
-        visible = data[:MAX_OBSERVATION_BYTES]
-        truncated = len(visible) < size
-        text = visible.decode("utf-8", errors="replace")
-        body = f"{shown} ({size} bytes)\n{text}"
-        if truncated:
-            body += f"\n[truncated: showing the first {len(visible)} of {size} bytes]"
+        # Invalid UTF-8 policy: decode with U+FFFD replacement (which can
+        # triple the byte count) and say so; the budget applies to the final
+        # encoded text, header and notices included.
+        text = data.decode("utf-8", errors="replace")
+        invalid_utf8 = "\ufffd" in text and "\ufffd".encode() not in data
+        header = f"{shown} ({size} bytes{', not valid UTF-8: invalid bytes shown as U+FFFD' if invalid_utf8 else ''})\n"
+        notice = f"\n[truncated: only the beginning of this {size}-byte file is shown]"
+        budget = MAX_OBSERVATION_BYTES - len(header.encode()) - len(notice.encode())
+        visible = _fit(text, budget)
+        truncated = len(visible) < len(text) or len(data) < size
+        body = header + visible + (notice if truncated else "")
         return ToolOutcome(
             ToolStatus.SUCCEEDED,
             _text(body),
-            raw_result={"path": shown, "size": size, "bytes_shown": len(visible), "truncated": truncated},
+            raw_result={
+                "path": shown,
+                "size": size,
+                "chars_shown": len(visible),
+                "truncated": truncated,
+                "invalid_utf8": invalid_utf8,
+            },
         )
 
 

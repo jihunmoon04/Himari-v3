@@ -144,7 +144,8 @@ def test_large_and_binary_reads(env: InsideEnvironment, alice_root: Path) -> Non
     (folder / "blob.bin").write_bytes(b"\x00\x01\x02")
     big = call(env, "read_file", path="big.txt")
     assert big.raw_result is not None and thaw(big.raw_result)["truncated"] is True  # type: ignore[index]
-    assert text(big).endswith(f"[truncated: showing the first {MAX_OBSERVATION_BYTES} of {MAX_OBSERVATION_BYTES + 10} bytes]")
+    assert text(big).endswith(f"[truncated: only the beginning of this {MAX_OBSERVATION_BYTES + 10}-byte file is shown]")
+    assert len(text(big).encode()) <= MAX_OBSERVATION_BYTES
     assert "binary file" in text(call(env, "read_file", path="blob.bin"))
 
 
@@ -327,3 +328,58 @@ def test_write_back_refuses_a_file_changed_after_it_was_read(alice_root: Path) -
     assert exc.value.category is fs.FsCategory.CHANGED
     assert (folder / "f.txt").read_text() == "v2 from another conversation"
     assert not [p for p in folder.iterdir() if p.name.startswith(".himari-")]
+
+
+
+# --- PR #8 re-review: the 64 KiB bound applies to the final encoded result ----
+
+
+def final_size(outcome: ToolOutcome) -> int:
+    return len(text(outcome).encode("utf-8"))
+
+
+@pytest.mark.parametrize(
+    ("content", "invalid"),
+    [
+        (b"a" * MAX_OBSERVATION_BYTES, False),  # exactly 64 KiB of ASCII: header must not push it over
+        (b"\xff" * MAX_OBSERVATION_BYTES, True),  # each byte becomes a 3-byte U+FFFD
+        ("한".encode() * 30000, False),  # multi-byte, never split mid-character
+    ],
+)
+def test_read_result_never_exceeds_the_limit(env: InsideEnvironment, alice_root: Path, content: bytes, invalid: bool) -> None:
+    folder = alice_root / "conversations/c1"
+    folder.mkdir(parents=True)
+    (folder / "f").write_bytes(content)
+    outcome = call(env, "read_file", path="f")
+    raw = thaw(outcome.raw_result)
+    assert isinstance(raw, dict)
+    assert final_size(outcome) <= MAX_OBSERVATION_BYTES
+    assert raw["truncated"] is True and raw["invalid_utf8"] is invalid
+    assert ("not valid UTF-8" in text(outcome)) is invalid
+
+
+def test_small_file_with_invalid_utf8_is_shown_whole_and_flagged(env: InsideEnvironment, alice_root: Path) -> None:
+    folder = alice_root / "conversations/c1"
+    folder.mkdir(parents=True)
+    (folder / "f").write_bytes(b"ok\xffok")
+    outcome = call(env, "read_file", path="f")
+    assert text(outcome).endswith("ok\ufffdok")
+    raw = thaw(outcome.raw_result)
+    assert isinstance(raw, dict) and raw["truncated"] is False and raw["invalid_utf8"] is True
+
+
+def test_listing_with_long_working_directory_and_names_stays_within_the_limit(env: InsideEnvironment, alice_root: Path) -> None:
+    deep = "conversations/" + "/".join(["d" * 200] * 15)  # ~3 KB working directory path
+    (alice_root / deep).mkdir(parents=True)
+    for i in range(400):
+        (alice_root / deep / f"{'n' * 240}{i:04d}").touch()
+    outcome = call(env, "list_files", cwd=deep)
+    assert outcome.status is ToolStatus.SUCCEEDED
+    assert final_size(outcome) <= MAX_OBSERVATION_BYTES
+    raw = thaw(outcome.raw_result)
+    assert isinstance(raw, dict) and raw["truncated"] is True and "[partial listing" in text(outcome)
+
+
+def test_error_results_are_bounded_too(env: InsideEnvironment) -> None:
+    outcome = call(env, "read_file", path="/etc/" + "x" * 4000)
+    assert outcome.status is ToolStatus.DENIED and final_size(outcome) <= MAX_OBSERVATION_BYTES
