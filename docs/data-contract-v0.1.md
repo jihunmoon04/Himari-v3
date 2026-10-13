@@ -93,17 +93,22 @@
 | --- | --- |
 | `conversation_id` | Snapshot의 단일 소유 대화; **고유 인덱스** |
 | `revision` | Snapshot 갱신 revision |
-| `compressed_context` | 이전 Conversation 내용을 가공한 문맥 |
+| `prepared_prompt` | **가장 최근 구성된 전체 provider-neutral 프롬프트**: Stable Prefix + compressed history + exact Conversation tail + Current State |
+| `compressed_context` | `prepared_prompt` 내부에 포함된 압축된 과거 문맥; 구조화된 부분으로 보존 가능 |
+| `exact_tail_refs` | `prepared_prompt`에 포함한 exact Event/Tool 그룹 참조(누락·중복 검증) |
+| `based_on_run_id?` | 어느 Run의 프롬프트를 마지막으로 구성했는지 추적 (아직 Run 미실행 시 null) |
 | `covers_through_sequence` | 압축이 반영한 Conversation Event 순번 |
 | `replay_coverage?` | Conversation에 생략한 ToolResult를 Execution Record와 함께 재구성할 때 필요한 참조/경계 |
 | `format_version` | 향후 내용 형식 변경 대비 |
 | `updated_at` | 관측용 |
 
 - 최신 **한 row/한 논리 객체**만 교체해 보존. 옛 Snapshot 사본은 유지하지 않는다.
+- **Snapshot은 요약만이 아니라 마지막으로 구성한 프롬프트 전체의 materialized snapshot**이다. 압축된 부분과 exact 부분을 함께 포함하고, 현재 상태 및 고정 부분도 그 시점의 실제 구성에 대응한다. 원본 Run별 provider wire 요청은 RunRecord가 별도로 보존한다.
 - Snapshot은 **원본이 아니고 가공된 컨텍스트**. Coverage에는 완결되지 않은 ToolCall–ToolResult 그룹을 넣지 않는다.
-- Prompt는 `snapshot + covers 이후 exact Event/필요한 Execution Record + 현재 State`를 조립한다. **Current State는 새로 조회**하는 것이 기본.
+- 다음 Run에서 Prompt는 마지막 Snapshot의 **안정적 역사 문맥 부분**을 재사용할 수 있으나, `covers` 이후 exact Event/필요한 Execution Records를 반영하고 **Current State는 최신 값으로 교체**한다. 이때 이미 포함된 `exact_tail_refs`를 중복 편입하지 않는다.
+- 프롬프트를 새로 구성한 경우 최신 Snapshot **하나를 그 프롬프트로 교체**하는 방식이 기본 제안이다. 압축 계산은 매 Run 필수가 아니지만 Snapshot이 단순한 오래된 요약만 저장해서는 안 된다.
 - `replace_snapshot(expected_revision, expected_conversation_boundary, new_content)` 같은 compare-and-swap을 권고한다.
-- 특정 Run에서 실제 전송한 프롬프트는 RunRecord의 **raw_request로 보존**되므로 Snapshot 옛 버전을 별도로 유지하지 않아도 된다.
+- 각 Run이 실제 전송한 provider-specific 요청은 RunRecord의 **raw_request**에 모두 보존된다. 최신 PromptSnapshot은 provider-neutral 구성 상태이므로 두 자료는 목적이 다르다. Snapshot 교체 후에도 과거 Run 요청은 소실되지 않는다.
 - Prompt의 내부 압축 전략/품질/예산과 Snapshot을 작성할 시점은 **Prompt 모듈** 소유이며 Data는 정합성과 보존을 책임진다.
 
 ### 1.5 Artifact (Plan/Note 등) — 별도 현재 상태
@@ -185,9 +190,9 @@ Committed result returned to Control
 
 ### 3.3 Snapshot 갱신
 
-- Prompt 모듈이 압축 대상의 **완전한 기록 prefix**를 결정한다.
+- Prompt 모듈이 새 **전체 Prompt 구성**과 압축 대상의 **완전한 기록 prefix**를 결정한다.
 - Data는 `covers_through_sequence`의 유효성, 적절한 Snapshot revision 및 조회 기준의 변화를 비교한다.
-- 정상 커밋 시 같은 Conversation의 **기존 Snapshot을 원자적으로 대체**한다.
+- 정상 커밋 시 같은 Conversation의 **기존 Snapshot을 원자적으로 대체**한다. 전체 구성 입력과 그에 대응하는 coverage 및 참조 정보가 일관되어야 한다.
 - 압축 중 추가된 Conversation Event를 무조건 삭제/덮어쓰지 않으며 다음 Prompt는 갱신된 Snapshot의 cursor 이후 exact tail을 읽는다.
 
 ## 4. Data 공개 Port (함수명은 예시)
@@ -231,7 +236,7 @@ Port의 소비자는 DTO/오류 의미만 알아야 하며 내부 SQL·테이블
 4. 같은 Run의 2개 ToolCall 병렬 완료 순서가 달라도 ordinal/call_id가 정확함.
 5. Conversation에 결과를 보존한 Memory Tool과 완료만 보존한 Plan Tool 각각의 native replay.
 6. Internal Plan 변경/완료 기록 원자성 + 중복 call_id 방지 + CAS conflict.
-7. Latest Snapshot replace와 tail selection이 같은 Event를 중복/누락하지 않음.
+7. Latest 전체 Prompt Snapshot 교체와 tail selection이 같은 Event를 중복/누락하지 않음.
 8. Tool 그룹이 불완전할 때 provider request 재구성 실패 (가짜 결과 없이).
 9. Fake Data 구현으로 Control/Prompt 코드 변경 없이 public port 준수.
 10. 다른 Conversation/Environment에서 같은 Workspace를 참조해도 ID/Biding 참조 혼동 없음 (권한 집행은 Environment 테스트에서 확인).
@@ -244,7 +249,7 @@ Port의 소비자는 DTO/오류 의미만 알아야 하며 내부 SQL·테이블
 | DC-02 | 하나의 Conversation에 동시 Run을 시작할 수 있는지 | 초기 **단일 진행 중 Run/Control lease**, 다른 Conversation은 병렬 |
 | DC-03 | Raw Provider 요청/응답 저장의 실제 직렬화·비밀·stream 범위 | 원본 body exact, credential 제외, streaming 세부 형식 별도 |
 | DC-04 | ToolResult가 Conversation에 없을 때 정확한 native replay 생성 주체 | Prompt가 출처 선택/정합성, Provider가 wire rendering |
-| DC-05 | PromptSnapshot의 exact coverage/Execution 연결/cursor 원자성 | 완전한 Tool 그룹 경계로 coverage, CAS 갱신 |
+| DC-05 | **최신 전체 Prompt Snapshot**의 저장 형식, exact coverage/Execution 연결/cursor 원자성 | 압축 + exact tail + current state를 포함한 가장 최근 구성 입력 1개; 완전한 Tool 그룹 경계로 coverage, CAS 갱신 |
 | DC-06 | Artifact의 원본 저장 위치 및 삭제/수정 이력 | Data conversation-scoped artifact 권고, Outside는 projection/export |
 | DC-07 | Run/Tool 결과 불명, 재시도, 취소 및 recovery 상태 전이 | 모호한 외부 효과는 UNKNOWN; 자동 재실행하지 않음 |
 | DC-08 | Public Port granularity와 모듈별 소유 DTO | 도메인별 작은 API 묶음, 내부 repository 직접 참조 불허 |
