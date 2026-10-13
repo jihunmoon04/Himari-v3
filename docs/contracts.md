@@ -472,7 +472,7 @@ class ToolOutcome:
 1. `ConversationEvent`, `RunRecord`, `ToolExecutionRecord`, `PromptSnapshot`의 **정확한 불변 DTO와 오류 스키마**.
 2. Provider-neutral `ModelInput / ModelOutput` 및 native Tool 그룹 재생 안전성, CurrentState 메시지의 Provider별 합법성.
 3. Raw request·response 비밀 정보/스트리밍 캡처, Run 기록 영속 순서, 재시도/unknown 상태와 Data transaction 경계.
-4. ~~lease/queue~~ → P0는 프로세스 내 lock + 송신·부작용 직전 영속 표시(V3-045). UNKNOWN 사용자 해소 방식(Q-37). final / `ask_user`(V3-044) / commentary 혼합(V3-P15/P16)의 정확한 경계.
+4. ~~lease/queue~~ → P0는 프로세스 내 lock + 송신·부작용 직전 영속 표시(V3-045). UNKNOWN은 모델에 "결과 불명"으로 알림(V3-047). final / `ask_user`(V3-044) / commentary 혼합(V3-P15/P16)의 정확한 경계.
 5. **최신 전체 Prompt Snapshot**의 cursor, exact-tail coverage 및 source revision 일치 검사.
 6. **SPI 3종(TOOL-07, ENV-06, PROVIDER-SPI)과 Data sub-port를 `api.py` 코드로 선언(V3-046)**, Contract test 및 import-linter 도입.
 

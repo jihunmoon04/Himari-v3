@@ -217,6 +217,19 @@ class TokenUsage(DeepFrozen):
     cached_input_tokens: int | None = None
 
 
+class UnknownOutcomePolicy(Enum):
+    """What happens when a claimed call's effect is uncertain (V3-047).
+
+    Declared on the ToolDefinition and persisted on the ToolExecutionRecord
+    at claim time, so recovery uses the policy that applied when the effect
+    may have happened — not whatever the current build registers.
+    """
+
+    REPORT_TO_MODEL = "report_to_model"  # attach an "outcome unknown" result; the model verifies
+    REQUIRE_USER = "require_user"  # halt the group and block the Conversation for a user
+    # No user-resolution API exists in P0, so P0 must not register REQUIRE_USER Tools.
+
+
 class RawRepresentation(Enum):
     """What a stored raw Provider request is equal to (V3-P14 is OPEN).
 

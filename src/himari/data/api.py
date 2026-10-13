@@ -36,6 +36,7 @@ from himari.common import (
     ToolCall,
     ToolId,
     TrustedScope,
+    UnknownOutcomePolicy,
     WorkspaceId,
 )
 
@@ -208,7 +209,9 @@ class ToolExecutionStatus(Enum):
     FAILED = "failed"
     DENIED = "denied"
     CANCELLED = "cancelled"
-    UNKNOWN = "unknown"  # never a synthetic failure; blocks the next Run
+    # Effect uncertain. Never turned into a synthetic failure. Blocks the next
+    # Run until an "outcome unknown" model_result is attached (V3-047).
+    UNKNOWN = "unknown"
 
 
 @dataclass(frozen=True)
@@ -221,6 +224,13 @@ class ToolExecutionRecord(DeepFrozen):
     model_result: ModelToolResult | None = None  # what the model sees
     raw_result: JsonValue = None  # the Tool's own execution record; never sent to the model
     workspace_binding_id: BindingId | None = None
+    # Persisted at claim time. None on an uncertain record means the policy is
+    # not known and must be treated as REQUIRE_USER (never silently relaxed).
+    unknown_outcome: UnknownOutcomePolicy | None = None
+    # The Tool's conversation_record policy, persisted at claim time so a later
+    # "outcome unknown" result is recorded the same way whatever the current
+    # build registers. None (not claimed / legacy) → record the Event.
+    record_event: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -398,8 +408,17 @@ class ConversationLog(Protocol):
         """Ordered by original ordinal, not completion time."""
         ...
 
-    async def claim_tool_execution(self, scope: TrustedScope, call: CallRef) -> None:
-        """T6: ``PENDING → EXECUTION_CLAIMED`` before an effectful handler runs."""
+    async def claim_tool_execution(
+        self,
+        scope: TrustedScope,
+        call: CallRef,
+        *,
+        unknown_outcome: UnknownOutcomePolicy,
+        record_event: bool,
+    ) -> None:
+        """T6: ``PENDING → EXECUTION_CLAIMED`` before an effectful handler runs,
+        persisting the policies that apply to this effect: its UNKNOWN policy
+        (V3-047) and whether its result is recorded as a Conversation Event."""
         ...
 
     async def commit_tool_outcome(
@@ -409,6 +428,17 @@ class ConversationLog(Protocol):
         Artifact mutations (CAS) + configured ``tool_result`` Event in one
         transaction.
         Called by the Tool Dispatcher only. Returns the Event if recorded."""
+        ...
+
+    async def commit_unknown_outcome(
+        self, scope: TrustedScope, call: CallRef, model_result: ModelToolResult
+    ) -> ConversationEvent | None:
+        """V3-047: ``EXECUTION_CLAIMED`` or ``UNKNOWN`` → ``UNKNOWN`` with a
+        model-facing "outcome unknown" result (+ ``tool_result`` Event when the
+        claim-time ``record_event`` says so), atomically. The status stays UNKNOWN: the effect is still not known.
+        Only for records whose persisted policy is REPORT_TO_MODEL; otherwise
+        INVALID_STATE_TRANSITION (a user must resolve it).
+        ALREADY_COMMITTED if the call already has a model result."""
         ...
 
     async def find_waiting_call(self, scope: TrustedScope) -> CallRef | None:

@@ -27,6 +27,7 @@ from himari.common import (
     PrincipalId,
     RunId,
     TrustedScope,
+    UnknownOutcomePolicy,
     WorkspaceId,
 )
 from himari.data.api import (
@@ -362,12 +363,24 @@ class InMemoryData:
             raise DataError(DataErrorCode.NOT_FOUND, f"{call.run_id}/{call.call_id}")
         return record
 
-    async def claim_tool_execution(self, scope: TrustedScope, call: CallRef) -> None:
+    async def claim_tool_execution(
+        self,
+        scope: TrustedScope,
+        call: CallRef,
+        *,
+        unknown_outcome: UnknownOutcomePolicy,
+        record_event: bool,
+    ) -> None:
         conv = self._conv(scope)
         record = self._execution(conv, call)
         if record.status is not ToolExecutionStatus.PENDING:
             raise DataError(DataErrorCode.INVALID_STATE_TRANSITION, f"{call.call_id} is {record.status.value}")
-        conv.executions[call] = replace(record, status=ToolExecutionStatus.EXECUTION_CLAIMED)
+        conv.executions[call] = replace(
+            record,
+            status=ToolExecutionStatus.EXECUTION_CLAIMED,
+            unknown_outcome=unknown_outcome,
+            record_event=record_event,
+        )
 
     async def commit_tool_outcome(
         self, scope: TrustedScope, call: CallRef, completion: ToolCompletion
@@ -389,6 +402,25 @@ class InMemoryData:
         if not completion.record_event:
             return None
         return self._new_event(conv, scope, ToolResultRecord(call, completion.model_result), call.run_id)
+
+    async def commit_unknown_outcome(
+        self, scope: TrustedScope, call: CallRef, model_result: ModelToolResult
+    ) -> ConversationEvent | None:
+        conv = self._conv(scope)
+        record = self._execution(conv, call)
+        if record.model_result is not None:
+            raise DataError(DataErrorCode.ALREADY_COMMITTED, f"{call.call_id} already has a result")
+        if record.status not in (ToolExecutionStatus.EXECUTION_CLAIMED, ToolExecutionStatus.UNKNOWN):
+            raise DataError(DataErrorCode.INVALID_STATE_TRANSITION, f"{call.call_id} is {record.status.value}")
+        if record.unknown_outcome is not UnknownOutcomePolicy.REPORT_TO_MODEL:
+            raise DataError(
+                DataErrorCode.INVALID_STATE_TRANSITION,
+                f"{call.call_id}: policy {record.unknown_outcome} requires a user",
+            )
+        conv.executions[call] = replace(record, status=ToolExecutionStatus.UNKNOWN, model_result=model_result)
+        if record.record_event is False:  # claim-time policy; None (legacy) records the Event
+            return None
+        return self._new_event(conv, scope, ToolResultRecord(call, model_result), call.run_id)
 
     def _stage_artifacts(
         self, conv: _Conversation, mutations: Sequence[ArtifactMutation]

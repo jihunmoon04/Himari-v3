@@ -31,6 +31,7 @@ from himari.common import (
     ToolCall,
     ToolId,
     TrustedScope,
+    UnknownOutcomePolicy,
 )
 from himari.data.api import ArtifactMutation, ArtifactStore, BindingAuthority
 
@@ -67,6 +68,9 @@ class ToolDefinition(DeepFrozen):
     completion: Completion = Completion.IMMEDIATE
     environment_kind: EnvironmentKind | None = None  # set iff Environment-provided
     conversation_record: ConversationRecord = ConversationRecord.FULL
+    # Use REQUIRE_USER for effects the model cannot verify with other Tools
+    # (e.g. sending a message to a third party).
+    unknown_outcome: UnknownOutcomePolicy = UnknownOutcomePolicy.REPORT_TO_MODEL
 
 
 @dataclass(frozen=True)
@@ -128,9 +132,9 @@ class ToolCatalog(Protocol):
 
 
 class GroupState(Enum):
-    COMPLETED = "completed"  # every call has a definite result → next Run allowed
+    COMPLETED = "completed"  # every call has a model-facing result → next Run allowed
     WAITING_FOR_USER = "waiting_for_user"  # single ask_user left PENDING
-    BLOCKED_UNKNOWN = "blocked_unknown"  # some call UNKNOWN → no next Run
+    BLOCKED_UNKNOWN = "blocked_unknown"  # an uncertain call needs a user (REQUIRE_USER)
 
 
 @dataclass(frozen=True)
@@ -149,5 +153,7 @@ class ToolDispatcher(Protocol):
     ) -> GroupDispatchResult:
         """Runs only never-claimed PENDING calls (so it is also the resume
         path, TOOL-04). Unknown tool / invalid arguments / binding failures
-        become DENIED or FAILED results, not exceptions."""
+        become DENIED or FAILED results, not exceptions. Uncertain calls of
+        REPORT_TO_MODEL Tools get an "outcome unknown" result instead of
+        being re-run (V3-047)."""
         ...

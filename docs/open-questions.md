@@ -68,7 +68,7 @@ P0 완료 목표: **Fake Data/Provider/Tool로 모델 호출 1회 + tool group +
 | Q-34 | Pause semantics | Provider in-flight soft pause 후 Run 응답 저장, ToolCall pending 처리, 요청 지연 한계 |
 | Q-35 | Resume cursor | pending/group-complete 여부, 중복 Tool/Run 재실행 방지, 사용자 입력 큐 |
 | Q-36 | Control state authority | **lease/fence·다중 worker 경합은 P2(V3-045)**. P0 남은 것: cancel / final / `ask_user` 대기 우선순위 |
-| Q-37 | UNKNOWN 해소 (P0) | 재시작 후 `UNKNOWN` Tool이 다음 Run을 막을 때 사용자가 명시적으로 해소하는 최소 방식(예: 결과 불명 사실을 그대로 담은 종결 기록). 자동 해소 금지 |
+| Q-37 | ~~UNKNOWN 해소 (P0)~~ | **해결: V3-047 (2026-10-13).** 모델에게 "결과 불명"으로 알리고 모델이 확인한다. `REQUIRE_USER` Tool의 사용자 해소 UI·API는 그런 Tool이 처음 생길 때 정의 |
 | Q-38 | ask_user 세부 | 대기 취소·만료, 답변 첨부파일의 Provider별 ToolResult 표현, `ask_user` 혼합 허용(V3-P15) |
 
 ## P1 — 첫 Inside Environment 및 실질 Tool 실행 전
