@@ -141,8 +141,10 @@ class InMemoryStore:
         )
         conv.activations[instance_id] = EnvironmentActivation(instance_id, kind, binding.binding_id)
         conv.bindings[binding.binding_id] = binding
-        if cwd_relative is not None:
-            conv.workspace = ConversationWorkspace(workspace_id, cwd_relative)
+        # Every activation gets a working directory (default: the
+        # Conversation's own folder, V3-033).
+        relative = cwd_relative if cwd_relative is not None else f"conversations/{scope.conversation_id}"
+        conv.workspace = ConversationWorkspace(workspace_id, relative)
         conv.state_revision += 1
         return binding
 
