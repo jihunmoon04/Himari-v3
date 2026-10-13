@@ -1,10 +1,10 @@
 # Control–Prompt–Provider Boundary Contract v0.1
 
-> 2026-10-13 · **REVIEW CANDIDATE / NOT FROZEN / NOT IMPLEMENTED**. This is a companion design to [Data v0.2](data-contract-v0.2.md), not an independent new architecture. Previous confirmed principles in [decisions](decisions.md) take precedence.
+> 2026-10-13 · **DESIGN BASELINE / P0 SUBSET IMPLEMENTED**. Control Run loop, Prompt composition, Provider SPI, Tool dispatch and OpenRouter Adapter are implemented (PR #1~#6). The document also contains future Pause/Streaming/Compaction designs **not yet implemented**. Implemented API declarations are authoritative; confirmed [decisions](decisions.md) take precedence.
 >
-> **Scope:** Control's per-Conversation run loop, Prompt provider-neutral input, Provider native serialization/invocation/normalization, Data run/tool group persistence, Tool dispatch barrier. Exact v3 Python DTOs/enum values remain PROPOSED.
+> **Scope:** Control's per-Conversation run loop, Prompt provider-neutral input, Provider native serialization/invocation/normalization, Data Run/Tool group lifecycle, Tool dispatch barrier. Implemented DTOs/enums are defined in code; non-P0 extensions remain proposed.
 
-> **2026-10-13 개정 (V3-042~046, 독립 검수 B1~B3 반영):** question은 suspending Tool `ask_user`로 표현하고 정규화 출력은 `FINAL | TOOL_CALLS` 두 가지다(§5, 대기 계약 §5.1). Prompt 핵심은 순수 `compose(PromptInputs)`(§2). P0는 프로세스 내 Conversation lock으로 **동시 실행**을 막고, **크래시 후 중복**은 Data의 송신·실행 직전 영속 표시(`DISPATCH_CLAIMED`/`EXECUTION_CLAIMED`)와 재시작 시 UNKNOWN 처리로 막는다(§3, §7). 분산 lease·fencing은 P2. native 재생 규칙과 Provider 배열 계약 테스트는 §6.1–6.2. raw 요청 보존 기준은 P0 미확정(§4). Provider 계약은 `ProviderAdapter` SPI로 묶는다.
+> **2026-10-13 개정 (V3-042~046, 독립 검수 B1~B3 반영):** question은 suspending Tool `ask_user`로 표현하고 정규화 출력은 `FINAL | TOOL_CALLS` 두 가지다(§5, 대기 계약 §5.1). Prompt 핵심은 순수 `compose(PromptInputs)`(§2). P0는 프로세스 내 Conversation lock으로 **동시 실행**을 막고, **크래시 후 중복**은 Data의 송신·실행 직전 영속 표시(`DISPATCH_CLAIMED`/`EXECUTION_CLAIMED`)와 재시작 시 UNKNOWN 처리로 막는다(§3, §7). 분산 lease·fencing은 P2. native 재생 규칙과 Provider 배열 계약 테스트는 §6.1–6.2. raw 요청은 V3-048로 wire-exact 확정 및 OpenRouter 구현(§4). Provider 계약은 `ProviderAdapter` SPI로 묶는다.
 
 ## 1. Module responsibility and authoritative sources
 

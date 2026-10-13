@@ -1,6 +1,6 @@
 # HIMARI v3 — 통합 모듈 계약 기준서
 
-> 작성: 2026-10-13 · 문서 버전: **Contract Baseline v0.1** · 구현 상태: **설계 단계 / 코드 없음**
+> 작성: 2026-10-13 · 문서 버전: **Contract Baseline v0.1** · 구현 상태: **P0 계약·실제 Provider 구현됨 / DB·Sandbox 미구현**
 >
 > **이 문서는 지금까지의 모듈 계약을 찾고 비교하는 단일 진입점이다.** 이미 합의한 원칙은 **CONFIRMED**, 그 원칙에 따라 작성한 포트/DTO/함수 이름은 **PROPOSED**, 후속 선택이 필요한 곳은 **OPEN**으로 표시한다.
 >
@@ -33,7 +33,7 @@
 | **Provider (Implementer)** | 해당 인터페이스를 실제 구현하고 응답을 제공하는 모듈/어댑터 |
 | **Consumer** | 해당 공개 인터페이스를 호출하거나 반환 값을 소비하는 모듈 |
 | **Source of Truth** | 반환 데이터의 **authoritative 원천**, 즉 실제 값을 소유/확정하는 곳. 파생값이면 원천들의 목록 |
-| **Contract Location** | 계약 선언 위치. **현재는 문서 위치**, 앞으로의 코드 선언 위치는 `planned`로 별도 표기. 코드 선언(`api.py`의 Protocol + frozen dataclass)이 생기면 **코드가 원본**이고 문서는 근거를 담는다(V3-046) |
+| **Contract Location** | 구현된 공개 계약은 Owner 모듈 `api.py`가 원본(V3-046). 미구현 Port는 `planned`로 구분하고 상세 설계는 근거로 유지한다 |
 | **Input / Output** | provider-neutral 불변 DTO·인자·반환 결과 및 지원 범위 |
 | **Guarantees / Errors / Effects** | 불변식, 실패/취소/시간순서·원자성, 실행 부작용 여부 |
 | **Dependencies / Tests** | 사용하는 하위 공개 계약, 대체 구현 및 계약 검증 범위 |
@@ -43,10 +43,10 @@
 - **Owner ≠ Provider**일 수 있다. 예: Provider 모듈이 정의한 `InvokeModel` 계약을 OpenAI Adapter가 구현한다.
 - **Provider ≠ Source of Truth**일 수 있다. 예: Prompt가 현재 상태를 제공하지만 Workspace Binding의 authoritative 원본은 Data에 있다.
 - **Consumer는 SQL 테이블·내부 구현 대신 공개 Port만 참조**한다.
-- **Contract Location**은 지금 존재하지 않는 Python 파일을 실제 구현된 것처럼 기록하지 않는다.
+- **Contract Location**은 구현된 `api.py`와 미구현 설계상 Port를 구분한다.
 - 데이터 흐름(응답 반환)은 보통 호출 방향과 반대다. `Control → Prompt.compose()`는 호출, `Prompt → Control`은 반환 데이터의 흐름이다.
 
-아래 경로 `src/himari/<module>/api.py`는 **권고되는 장래 코드 선언 위치 예시**다. 실제 파일은 아직 생성되지 않았다. 모든 계약의 **현재 선언 위치**는 이 문서의 4절·5절이다. 인터페이스의 실제 경로/파일 분할은 OPEN이다.
+**코드 원본:** `src/himari/{control,data,prompt,provider,tool,environment}/api.py`와 `src/himari/common.py`. 실제 DTO·시그니처·상태값은 해당 코드가 우선한다(V3-046). 아래 계약 ID/메서드명은 논리적 분류이며 소스 이름과 1:1일 필요가 없다. Sandbox·Scheduler·Streaming·정식 Pause 등 미구현 항목은 제안 상태다.
 
 ### 표준 계약 템플릿 (문서 구조; YAML 파일 생성 의무 없음)
 
@@ -121,29 +121,29 @@ EnvironmentPlugin ── tools() 제공 · execute 시 Data.WorkspaceState 재�
 
 ## 4. 계약 인벤토리 — 공개 Port의 Owner / Provider / Consumer / 원천
 
-모든 `API name`은 **개념적 명칭(PROPOSED)**이다. Owner/Consumer 관계 중 **확정된 모듈 책임은 CONFIRMED**, 세부 호출 결합은 PROPOSED이다.
+아래 `API name`은 개념적 계약 분류다. 현재 구현된 Port의 실제 시그니처는 `api.py`를 따른다. 초기 작성 당시의 상태 문구는 구현 상태와 다를 수 있으므로 다음 표의 상태를 병행 확인한다.
 
 | ID | Contract / Owner | Provider → Consumer | Source of Truth / 입력 | 반환 또는 효과 | 상태 |
 | --- | --- | --- | --- | --- | --- |
-| **CTRL-01** | DriveConversation / **Control** | Control → 외부 UI/CLI 진입점 | 사용자 입력 + 신뢰된 conversation scope | Run 실행, Tool 실행·종료 제어 | 방향 확정, Port 미정 |
-| **CTRL-02** | ResumeConversation / **Control** | Control → 외부 UI/CLI | Data 실행 상태·신규 사용자 응답 | 중단·question 이후 재개 | PROPOSED |
-| **DATA-01** | AppendReadEvents / **Data·ConversationLog** | Data → Control, Prompt | Data.ConversationEvents | immutable event + ordered sequence | 원칙 확정, API 미정 |
-| **DATA-02** | PrepareRecordRun / **Data·ConversationLog** | Data → Control | Data.RunRecords | raw request 영속화, **송신 직전 `DISPATCH_CLAIMED` 표시(P0)**, raw response/실패 기록 | 원칙 확정, API 미정 |
-| **DATA-03** | RecordToolExecution / **Data·ConversationLog** | Data → Control, Tool Dispatcher, Prompt | Data.ToolExecutionRecords | run_id/call_id별 실행 상태·원본/모델 결과, **부작용 Tool 실행 직전 `EXECUTION_CLAIMED`(P0)**, ask_user 대기 판별·답변 커밋(T7a), 재시작 정리(T-R) | 원칙 확정, API 미정 |
-| **DATA-04** | ReadWriteArtifact / **Data·ArtifactStore** | Data → Prompt, Tool Dispatcher (읽기는 Internal ToolHandler 가능) | Data.Artifacts | Plan/Note current content+revision | 원본 위치 확정, API 미정 |
-| **DATA-05** | ReadReplacePromptSnapshot / **Data·ConversationLog** | Data → Prompt, Control | Data.LatestPromptSnapshot | 최신 전체 가공 Prompt 1개 | 원칙 확정, API 미정 |
-| **DATA-06** | ReadCurrentStateBasis / **Data·StateQuery** | Data → Prompt | Data Registry+Activation+Binding+Settings+Artifacts | 일관된 PersistentStateBasis | 원본 소유권 확정, DTO 제안 |
-| **DATA-07** | ReadWorkspaceBinding / **Data·WorkspaceState** | Data → Environment, Tool | Data.WorkspaceRegistry/Binding | Binding/등록·활성 관계 | 방향 확정, API 미정 |
-| **DATA-08** | CommitToolOutcome / **Data·ConversationLog (+ArtifactStore 트랜잭션)** | Data → **Tool Dispatcher** | ToolOutcome의 Artifact 변경 + ToolExecution 종결 + optional ConversationEvent | revision CAS 및 원자 커밋. Tool 구현은 호출하지 않음(V3-042) | PROPOSED |
-| **PROMPT-01** | ComposeModelInput / **Prompt** | Prompt → Control | `PromptInputs` (loader가 DATA-01/03/05/06 + Tool catalog에서 수집) | provider-neutral model input+prompt basis. **순수 함수(V3-043)** | 순서 확정, DTO 미정 |
+| **CTRL-01** | DriveConversation / **Control** | Control → 외부 UI/CLI 진입점 | 사용자 입력 + 신뢰된 conversation scope | Run 실행, Tool 실행·종료 제어 | P0 코드 구현 |
+| **CTRL-02** | ResumeConversation / **Control** | Control → 외부 UI/CLI | Data 실행 상태·신규 사용자 응답 | 중단·question 이후 재개 | resume 구현; 정식 Pause 미구현 |
+| **DATA-01** | AppendReadEvents / **Data·ConversationLog** | Data → Control, Prompt | Data.ConversationEvents | immutable event + ordered sequence | P0 인메모리 구현 |
+| **DATA-02** | PrepareRecordRun / **Data·ConversationLog** | Data → Control | Data.RunRecords | raw request 영속화, **송신 직전 `DISPATCH_CLAIMED` 표시(P0)**, raw response/실패 기록 | P0 인메모리 구현 |
+| **DATA-03** | RecordToolExecution / **Data·ConversationLog** | Data → Control, Tool Dispatcher, Prompt | Data.ToolExecutionRecords | run_id/call_id별 실행 상태·원본/모델 결과, **부작용 Tool 실행 직전 `EXECUTION_CLAIMED`(P0)**, ask_user 대기 판별·답변 커밋(T7a), 재시작 정리(T-R) | P0 인메모리 구현 |
+| **DATA-04** | ReadWriteArtifact / **Data·ArtifactStore** | Data → Prompt, Tool Dispatcher (읽기는 Internal ToolHandler 가능) | Data.Artifacts | Plan/Note current content+revision | P0 인메모리 구현 |
+| **DATA-05** | ReadReplacePromptSnapshot / **Data·ConversationLog** | Data → Prompt, Control | Data.LatestPromptSnapshot | 최신 전체 가공 Prompt 1개 | Snapshot 저장 Port 구현; 압축 미구현 |
+| **DATA-06** | ReadCurrentStateBasis / **Data·StateQuery** | Data → Prompt | Data Registry+Activation+Binding+Settings+Artifacts | 일관된 PersistentStateBasis | P0 인메모리 구현 |
+| **DATA-07** | ReadWorkspaceBinding / **Data·WorkspaceState** | Data → Environment, Tool | Data.WorkspaceRegistry/Binding | Binding/등록·활성 관계 | P0 인메모리 구현 |
+| **DATA-08** | CommitToolOutcome / **Data·ConversationLog (+ArtifactStore 트랜잭션)** | Data → **Tool Dispatcher** | ToolOutcome의 Artifact 변경 + ToolExecution 종결 + optional ConversationEvent | revision CAS 및 원자 커밋. Tool 구현은 호출하지 않음(V3-042) | P0 인메모리 원자 커밋 |
+| **PROMPT-01** | ComposeModelInput / **Prompt** | Prompt → Control | `PromptInputs` (loader가 DATA-01/03/05/06 + Tool catalog에서 수집) | provider-neutral model input+prompt basis. **순수 함수(V3-043)** | P0 순수 Composer 구현 |
 | **PROMPT-02** | ProjectCurrentState / **Prompt** | Prompt → Prompt composition | DATA-06 + optional ENV-01 | CurrentStateProjection | PROPOSED |
-| **PROMPT-03** | ValidateNativeToolGroup (구 ReplayHistory) / **Prompt** | Prompt → Prompt composition | exact Events + non-Conversation Execution Records | 완전한 정규화 Tool 그룹, coverage | 분담 확정, 포맷 미정 |
+| **PROMPT-03** | ValidateNativeToolGroup (구 ReplayHistory) / **Prompt** | Prompt → Prompt composition | exact Events + non-Conversation Execution Records | 완전한 정규화 Tool 그룹, coverage | P0 Tool 그룹 검증 구현 |
 | **PROMPT-04** | CompactAndSnapshot / **Prompt** | Prompt → Control/유지관리 경로 | complete history / DATA-05 | 압축된 부분·exact tail·Snapshot 교체 요청 | 방향 확정, 알고리즘 미정 |
-| **PROVIDER-01** | InvokePreparedRequest / **Provider** | 각 Provider Adapter → Control | PROVIDER-02가 만들고 DATA-02가 보존한 native request | 실제 LLM 호출 1회, raw response 또는 typed 실패 | Run 원칙 확정, Port 미정 |
-| **PROVIDER-02** | PrepareNativeRequest / **Provider** | 각 Provider Adapter → Provider.invoke 경계 | Prompt 중립 입력 + Tool 표면 + continuation | provider-native messages/tools/role/reasoning | 변환 책임 확정, 형식 미정 |
-| **PROVIDER-03** | NormalizeNativeResponse / **Provider** | Provider Adapter → Control/Data projection | 실제 raw native response | final/question/ordered ToolCall discriminant 또는 typed error | PROPOSED; [boundary draft](control-prompt-provider-v0.1.md) |
-| **TOOL-01** | CatalogTools / **Tool** | Tool Registry → Prompt, Control | 등록된 ToolHandler (Internal + `EnvironmentPlugin.tools()` + `ask_user`) + Policy | 모델 노출 가능한 도구 정의 | 방향 확정, API 미정 |
-| **TOOL-02** | DispatchToolCalls / **Tool** | Tool Dispatcher → Control | Run의 호출 그룹 + 각 Tool 정의/Binding | `call_id`별 ToolOutcome을 DATA-08로 커밋, Model ToolResult | 방향 확정, API 미정 |
+| **PROVIDER-01** | InvokePreparedRequest / **Provider** | 각 Provider Adapter → Control | PROVIDER-02가 만들고 DATA-02가 보존한 native request | 실제 LLM 호출 1회, raw response 또는 typed 실패 | Scripted·OpenRouter 구현 |
+| **PROVIDER-02** | PrepareNativeRequest / **Provider** | 각 Provider Adapter → Provider.invoke 경계 | Prompt 중립 입력 + Tool 표면 + continuation | provider-native messages/tools/role/reasoning | Scripted·OpenRouter wire-exact 구현 |
+| **PROVIDER-03** | NormalizeNativeResponse / **Provider** | Provider Adapter → Control/Data projection | 실제 raw native response | **FINAL** / **TOOL_CALLS**(질문은 `ask_user`) 또는 typed error | P0 구현(`provider/api.py`, `provider/openrouter.py`) |
+| **TOOL-01** | CatalogTools / **Tool** | Tool Registry → Prompt, Control | 등록된 ToolHandler (Internal + `EnvironmentPlugin.tools()` + `ask_user`) + Policy | 모델 노출 가능한 도구 정의 | P0 Registry 구현 |
+| **TOOL-02** | DispatchToolCalls / **Tool** | Tool Dispatcher → Control | Run의 호출 그룹 + 각 Tool 정의/Binding | `call_id`별 ToolOutcome을 DATA-08로 커밋, Model ToolResult | P0 Dispatcher 구현 |
 | **TOOL-03** | ScheduleConflicts / **Tool** | Tool Scheduler → Tool Dispatcher | verified resource identity & effect metadata | 독립 실행 병렬·충돌 직렬화 | 병렬 원칙 확정, 정책 미정 |
 | **ENV-01** | ObserveBindings / **Environment** | Environment 구현 → Prompt | 실제 연결·가용성 관측, Data Binding | online/offline/unknown 등 시점 표시 | PROPOSED |
 | **ENV-02** | AuthorizeExecute / **Environment** | Inside 등 Environment 구현 → Tool Dispatcher | Data Binding + 현재 실행 정책 + Workspace | 실행 결과/실패/거부 | 방향 확정, API·Sandbox 미정 |
@@ -165,12 +165,12 @@ EnvironmentPlugin ── tools() 제공 · execute 시 Data.WorkspaceState 재�
 | **TOOL-06** | WebSearch (future) / **Tool** | trusted Web Search adapter → Control/Prompt | external retrieved content, explicitly untrusted | bounded Web Search observations without Sandbox egress grant | OPTIONAL FUTURE |
 | **INTERNAL-01** | MemoryTool / **Tool** | Internal Memory ToolHandler → Tool Dispatcher | Data Memory 저장/검색 계약 (읽기) | ToolOutcome: 모델용 검색 결과, Conversation 기록 | 방향 확정, 기능 미정 |
 | **INTERNAL-02** | PlanNoteTool / **Tool** | Internal Plan/Note ToolHandler → Tool Dispatcher | Data conversation-scoped Artifacts | ToolOutcome: 간결한 complete 결과 + `artifact_mutations` (커밋은 DATA-08) | 저장 위치 확정, 수정 API 미정 |
-| **TOOL-07** | ToolHandler SPI / **Tool** | 모든 Tool 구현(Internal·Environment 제공·Control) → Tool Dispatcher | ToolDefinition + `run(call, ctx) -> ToolOutcome` | 확장 지점. Tool 구현은 ledger·`run_id` 트랜잭션을 모름 | **V3-040/042 CONFIRMED**, 시그니처 PROPOSED |
-| **ENV-06** | EnvironmentPlugin SPI / **Environment** | 각 Environment 구현 → Bootstrap, Tool Registry, Prompt | `kind`, `tools() -> [ToolHandler]`, `observe()` | kind당 1개 등록. Conversation 카탈로그에는 활성 Instance가 있는 kind의 Tool만. 대상 Instance/Workspace는 `workspace_binding_id`로 해석(V3-P19) | **V3-040/041 CONFIRMED**, 시그니처·등록 규칙 PROPOSED |
-| **PROVIDER-SPI** | ProviderAdapter SPI / **Provider** | 각 Provider Adapter → Control | PROVIDER-01~03 + `describe_capabilities` | 새 Provider = Adapter 하나 | **V3-040 CONFIRMED**, 시그니처 PROPOSED |
-| **CTRL-05** | AskUserTool / **Control** | Control이 등록한 suspending ToolHandler → Tool Dispatcher | 모델의 `ask_user` 호출 + 이후 사용자 응답 Event | 그룹 커밋 후 `WAITING_FOR_USER`·lock 해제. 답변 시 원래 `call_id`의 ToolResult를 커밋(T7a)한 뒤 새 Run. 대기 판별은 영속 기록에서 파생 | **V3-044 CONFIRMED**, 메커니즘 V3-P17/P18 |
+| **TOOL-07** | ToolHandler SPI / **Tool** | 모든 Tool 구현(Internal·Environment 제공·Control) → Tool Dispatcher | ToolDefinition + `run(call, ctx) -> ToolOutcome` | 확장 지점. Tool 구현은 ledger·`run_id` 트랜잭션을 모름 | P0 ToolHandler SPI 구현 |
+| **ENV-06** | EnvironmentPlugin SPI / **Environment** | 각 Environment 구현 → Bootstrap, Tool Registry, Prompt | `kind`, `tools() -> [ToolHandler]`, `observe()` | kind당 1개 등록. Conversation 카탈로그에는 활성 Instance가 있는 kind의 Tool만. 대상 Instance/Workspace는 `workspace_binding_id`로 해석(V3-P19) | P0 SPI 구현; Inside 미구현 |
+| **PROVIDER-SPI** | ProviderAdapter SPI / **Provider** | 각 Provider Adapter → Control | PROVIDER-01~03 + `describe_capabilities` | 새 Provider = Adapter 하나 | P0 ProviderAdapter SPI 구현 |
+| **CTRL-05** | AskUserTool / **Control** | Control이 등록한 suspending ToolHandler → Tool Dispatcher | 모델의 `ask_user` 호출 + 이후 사용자 응답 Event | 그룹 커밋 후 `WAITING_FOR_USER`·lock 해제. 답변 시 원래 `call_id`의 ToolResult를 커밋(T7a)한 뒤 새 Run. 대기 판별은 영속 기록에서 파생 | P0 ask_user 구현 |
 
-**Contract Location (2026-10-13 갱신):** Data·Tool·Environment·Prompt·Provider의 공개 계약은 **`api.py`로 선언됨(V3-046)** — 이제 코드가 원본이고 아래 문서는 근거다. Control·Bootstrap은 아직 planned. 공용 식별자·값 타입은 `src/himari/common.py`. 모듈 의존 방향은 `scripts/check_imports.py`가 검사한다(layer: common < data < tool < environment < prompt < provider < control < bootstrap).
+**Contract Location (PR #1~#6 반영):** Control·Data·Tool·Environment·Prompt·Provider 공개 계약은 각각 `api.py`로 선언됐다. Control 실행은 `control/driver.py`, Bootstrap 조립은 `bootstrap/__init__.py`, 공용 DTO는 `src/himari/common.py`에 있다. `scripts/check_imports.py`가 모듈 경계를 검사한다. 실제 Inside/Sandbox·파일 Tool은 아직 미구현이다.
 
 | Owner | 현재 계약 문서 | 코드 선언 위치 |
 | --- | --- | --- |
@@ -467,14 +467,18 @@ class ToolOutcome:
 
 ## 13. 남은 결정 — 이 문서로 확정하지 않는다
 
-**초기 구현(P0) 전에 결정할 것**
+**PR #1~#6으로 구현된 P0 계약**
 
-1. `ConversationEvent`, `RunRecord`, `ToolExecutionRecord`, `PromptSnapshot`의 **정확한 불변 DTO와 오류 스키마**.
-2. Provider-neutral `ModelInput / ModelOutput` 및 native Tool 그룹 재생 안전성, CurrentState 메시지의 Provider별 합법성.
-3. Raw request·response 비밀 정보/스트리밍 캡처, Run 기록 영속 순서, 재시도/unknown 상태와 Data transaction 경계.
-4. ~~lease/queue~~ → P0는 프로세스 내 lock + 송신·부작용 직전 영속 표시(V3-045). UNKNOWN은 모델에 "결과 불명"으로 알림(V3-047). final / `ask_user`(V3-044) / commentary 혼합(V3-P15/P16)의 정확한 경계.
-5. **최신 전체 Prompt Snapshot**의 cursor, exact-tail coverage 및 source revision 일치 검사.
-6. **SPI 3종(TOOL-07, ENV-06, PROVIDER-SPI)과 Data sub-port를 `api.py` 코드로 선언(V3-046)**, Contract test 및 import-linter 도입.
+- `api.py`/공용 DTO, import 검사, Fake 기반 Run–Tool–Run 루프, `FINAL | TOOL_CALLS`와 `ask_user`.
+- T3/T6 claim, UNKNOWN 모델 보고(V3-047), OpenRouter wire-exact 요청(V3-048), 턴별 continuation(V3-049).
+- 인메모리 Event/Run/ToolExecution/Artifact는 구현됐지만 **실제 DB의 트랜잭션·재시작 내구성은 미검증**이다.
+
+**남은 구현 및 검수**
+
+1. 영속 Data, Run/Tool crash 내구성, 원본 저장·권한 관리.
+2. Snapshot coverage, Context 압축·예산, continuation 크기 관리.
+3. Inside Environment·파일/명령 Tool 및 실호스트 Sandbox 검증.
+4. CLI/Web, 정식 Pause/Cancel, Streaming, Memory/Plan 및 충돌 Scheduler.
 
 **Inside/Workspace 연결(P1) 전에 결정할 것**
 
@@ -496,7 +500,7 @@ class ToolOutcome:
 - **이 문서**: 모듈 간 관계·Contract ownership·source map·공개 Port 인벤토리를 한눈에 조회하는 통합 기준선.
 - **decisions.md**: 사용자가 실제로 승인한 **확정 결정**의 원본 이력. 이번에 채택한 계약 메타데이터 형식도 여기 기록한다.
 - **상세 v0.1 초안**: Data, CurrentState, Prompt/Tool의 구현 전 설계 근거. 변경 사항은 통합 기준서에도 반영해 표가 어긋나지 않도록 한다.
-- **현재 저장소는 설계 문서만 존재**한다. `defined_at`/planned code path가 적혔다고 해당 파일/테스트/구현이 생성됐다는 뜻은 아니다.
+- **현재 저장소에는 P0 실행 코드, 테스트 및 실제 OpenRouter Adapter가 있다.** 계약 인벤토리에는 아직 미구현인 장래 기능도 포함된다. 구현 여부는 소스·테스트와 구분해서 확인한다.
 
 > **채택한 새 원칙:** 각 공개 계약의 **정의 책임(Owner), 실제 제공자(Provider), 사용처(Consumer), 데이터 원천(Source of Truth), 선언 위치(Contract Location)**를 추적한다. 이는 모듈 교체 시 영향 범위와 테스트 책임을 확인하기 위한 최소 메타데이터다.
 

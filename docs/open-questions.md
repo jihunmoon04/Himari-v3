@@ -1,6 +1,6 @@
 # 남은 미결정 사항과 구현 선행조건
 
-기준: **2026-10-13**. 이 문서는 아직 확정되지 않은 계약만 관리한다. 이미 합의한 방향은 [Decision Register](decisions.md)에 둔다.
+기준: **2026-10-13**. 이 문서는 구현된 범위와 남은 미결정 계약을 구분해 관리한다. 이미 합의한 방향은 [Decision Register](decisions.md)에 둔다.
 
 연관: [Prompt Composition](prompt-composition.md) · [Data / Tools / Artifacts](data-and-tools.md) · [Data Contract v0.2 — 검수 후보](data-contract-v0.2.md) · [CurrentState Contract v0.1 — 검토 초안](current-state-contract-v0.1.md) · [Module Boundaries](module-boundaries.md)
 
@@ -8,7 +8,7 @@ Data [v0.2 구현 가능 후보](data-contract-v0.2.md)에 **DR-01~DR-09 독립 
 
 **[통합 모듈 계약 기준서](contracts.md)**에 Owner / Provider / Consumer / Source of Truth / Contract Location 메타데이터가 채워진 **검토용 공개 Port 인벤토리**를 작성했다. **메타데이터 작성 표준 자체는 V3-029로 확정**되었지만 각 함수/DTO 시그니처는 아직 확정되지 않았다.
 
-**테스트 범위 정책 V3-038 확정:** 계약 변경 때만 전체 pytest, 그 외 수정된 모듈 pytest만 수행한다. 테스트 구조/명령 예시는 [Testing Policy](testing-policy.md). 실제 Python 테스트 디렉터리는 아직 생성되지 않았다.
+**테스트 범위 정책 V3-038 확정:** 공개 계약 변경 때 전체 pytest, 내부 구현 변경 시 해당 모듈 pytest. 실제 `tests/`와 정적 CI가 존재하며 OpenRouter 라이브 테스트는 opt-in이다([Testing Policy](testing-policy.md)).
 
 ## 이미 해결된 설계 방향
 
@@ -27,21 +27,23 @@ Data [v0.2 구현 가능 후보](data-contract-v0.2.md)에 **DR-01~DR-09 독립 
 - **Plan/Note 원본은 Data의 conversation-scoped Artifact**에 저장한다; Outside의 기본 Workspace는 필요시 projection/export.
 - Tool 실패는 결과로 모델에 반환. Memory는 Data 공개 API를 이용하는 Tool 방향; Plan/Note는 간결한 결과 + 별도 상태.
 
-## P0 — 최소 v3 Skeleton 및 첫 실제 Run 이전
+## P0 — 현재 구현 현황과 잔여 계약
 
-| ID | 주제 | 아직 확정해야 할 계약 | 권장 순서 |
-| --- | --- | --- | --- |
-| Q-01 | Public Ports / DTO | **방향 확정(V3-039/040/046)**: Data sub-port 분리, SPI 3종(`ToolHandler`/`ProviderAdapter`/`EnvironmentPlugin`) 우선, `api.py` 코드 선언. 남은 것: 실제 시그니처·오류 모델 | **1** |
-| Q-02 | Control / Run | **동일 Conversation 직렬화는 확정**. P0는 프로세스 내 lock(동시 실행) + 송신·부작용 직전 영속 표시(크래시 중복)(V3-045). question은 suspending Tool `ask_user`(V3-044), 대기 판별·답변 커밋은 V3-P17. 남은 것: 복수 호출 종료 배리어·`ask_user` 혼합(V3-P15) | **2** |
-| Q-03 | Data schema | kind별 불변 Payload 원칙 확정. **[Data v0.2](data-contract-v0.2.md)**에 DTO/state/트랜잭션/Port 후보 구체화; DR-01~09 검수·freeze 필요 | **1** |
-| Q-04 | Prompt / Provider boundary | **[Control–Prompt–Provider v0.1](control-prompt-provider-v0.1.md)**에 중립 입력/native prepare/send/normalize 초안. Provider별 role/SDK exact raw capture 검증 및 CP-01~07 확정 필요 | **2** |
-| Q-05 | Tool API | **방향 확정(V3-041/042)**: Environment가 `tools()`로 자기 Tool 제공, Tool 구현은 `ToolOutcome` 반환·Dispatcher가 커밋. 남은 것: `ToolDefinition`/`ToolContext`/`ToolOutcome` 필드, 네임스페이스, 결과 기록 정책 | **1** |
-| Q-06 | Contract enforcement | import-linter + SPI conformance suite + Fake 교체 테스트를 첫 Skeleton부터 도입(V3-046). 남은 것: 도구 선택·최소 실패 시나리오 | **2** |
-| Q-19a | Raw retention security | 저장될 원본의 인증/비밀 정보 제외, 접근 권한, 안전한 실패 처리 | **1** |
-| Q-21 | Trigger inclusion | **Prompt의 기록 선택·검증과 Provider의 native 직렬화 소유권은 확정**. ToolCall 그룹 결손 검사·오류 형식, Conversation 밖의 결과 포함 시점 | **2** |
-| Q-22 | Prompt cursor | Latest Snapshot의 coverage/cursor와 Conversation 최신 위치 및 Artifact Revision 정합성 | **3** |
+**PR #1~#6 병합 완료(2026-10-13):** `api.py` 공개 계약, 인메모리 Data, Control Run 반복·`ask_user`·`resume`, Tool Registry/Dispatcher, T3/T6 claim·UNKNOWN 모델 보고, 실제 OpenRouter Provider(wire-exact) 및 턴별 reasoning continuation이 구현됐다. `tests/`·정적 CI도 있다. **영속 DB·실제 Inside/Sandbox·Web/CLI는 미구현**이다.
 
-P0 완료 목표: **Fake Data/Provider/Tool로 모델 호출 1회 + tool group + 다음 Run + final/question** 경로를 검증하고, 저장된 Raw 요청/응답 및 정확한 Conversation을 확인한다. 현재 코드 Skeleton은 아직 생성되지 않았다.
+| ID | 주제 | 현재 상태 / 남은 검수 |
+| --- | --- | --- |
+| Q-01 | Public Ports / DTO | `api.py`·불변 DTO 구현(PR #2), 코드가 원본 |
+| Q-02 | Control / Run | Run·`ask_user`·`resume`·UNKNOWN 처리 P0 구현(PR #3~#4). 정식 Pause/Cancel·lease 미구현 |
+| Q-03 | Data schema | Event/Run/Tool/Artifact 인메모리 구현. 실제 DB 원자성·crash 내구성은 Q-41 |
+| Q-04 | Prompt / Provider | Composer, Tool 그룹 재생, OpenRouter wire-exact·continuation 구현(PR #3/#5/#6). Streaming/타 Provider는 후속 |
+| Q-05 | Tool API | ToolHandler·Registry·Dispatcher·ToolOutcome 구현. 파일/명령 및 Scheduler 후속 |
+| Q-06 | Contract enforcement | `tests/`, `scripts/check_imports.py`, mypy·정적 CI·opt-in 라이브 테스트 구현 |
+| Q-19a | Raw retention security | 본문/인증 헤더 분리 구현. 영속 저장 암호화·권한·삭제 정책 미결정 |
+| Q-21 | Trigger inclusion | 기본 Run/Event 참조와 Tool 그룹 검증 구현. 압축/외부 결과 포함 정책 후속 |
+| Q-22 | Prompt cursor | 최신 Snapshot Port 존재. coverage/cursor 검증·실질 압축 사용 미구현 |
+
+**검증 경계:** 현재 재시작 테스트는 동일한 `InMemoryStore`를 공유하는 시뮬레이션이며, 실제 DB crash 내구성이나 OS Sandbox 보안 검증이 아니다.
 
 ## P0-F — 기본 Workspace 파일 기능 (이번에 우선 진행)
 
@@ -97,7 +99,7 @@ P1은 Workspace 전용 소프트웨어 모듈을 다시 도입하는 단계가 �
 | ID | 주제 | 아직 확정해야 할 계약 |
 | --- | --- | --- |
 | Q-14 | Compaction | 압축 시점, 문맥 예산, 요약 품질, exact tail 경계, Snapshot 교체/복구 |
-| Q-15 | Reasoning / continuation | provider별 opaque 자료 보존/앵커 재구성/교차 모델 호환 및 cache-control |
+| Q-15 | Reasoning / continuation 확장 | **기본 턴별 저장·재생은 PR #6으로 구현(V3-049)**. 남은 것: 타 모델 지원, 압축 시 제외, cache-control·예산(Q-43) |
 | Q-16 | Memory Tool | 기억 생성·조회·삭제 정책, 자동 삽입/검증/권한, Data 읽기 경계 |
 | Q-17 | Plan / Note Artifact | **원본은 Data conversation-scoped Artifact로 확정**. Revision/CAS, schema, 삭제/복구·표시, Outside 노출/export |
 | Q-18 | Streaming / recovery | chunk-level 원본 기록, 스트리밍 UI, 중단된 모델 호출, resume/cancel |
@@ -108,14 +110,12 @@ P1은 Workspace 전용 소프트웨어 모듈을 다시 도입하는 단계가 �
 | Q-27 | CurrentStateProjection | **CS-01~08 초안 작성됨**. 합성 소유 위치, 기본 Binding 선택 스코프, Data consistency/version token, Environment 연결 관측, Provider-native 표현의 최종 검수·확정 필요 |
 | Q-28 | Conversation serialization | **P0는 프로세스 내 lock(V3-045)**. lock은 크래시 후 중복을 막지 않으며 그것은 Data T3/T6/T-R 담당. P2: lease/queue 범위, 취소/중단 후 ownership 회수. 신규 사용자 입력 정책은 P0에서 결정 |
 
-## 다음 설계 작업 제안 (2026-10-13 개정: V3-039~046 반영)
+## 다음 구현 작업 제안 (2026-10-13, PR #1~#6 반영)
 
-문서를 더 늘리기보다 **최소 코드 Skeleton으로 계약을 검증**하는 단계로 넘어간다.
+1. **영속 Data** — SQLite 등으로 Event/Run/ToolExecution/Artifact/Continuation 저장, T2~T7a·T-R 원자성 및 실제 crash 복구 검증(Q-41).
+2. **Inside Environment + Sandbox** — 사용자별 Root와 Conversation cwd, 파일 Tool·bounded `inside/run_command`, Bubblewrap/Landlock·네트워크 차단 실호스트 증거(Q-29~33/Q-39~40).
+3. **최소 CLI** — 실 Provider와 실제 Workspace를 연결한 단대단 사용 경로 검증.
+4. **Context 압축·예산 및 최신 Snapshot 활용** — exact tail, continuation 일괄 조회/크기 예산(Q-14/Q-22/Q-42/Q-43).
+5. **후속 기능** — 정식 Pause/Cancel, Streaming, Web UI, Memory·Plan Tool, 충돌 Scheduler.
 
-1. ✅ (2026-10-13 skeleton 작성) **SPI·Port를 코드로 선언 (Q-01, Q-05, Q-06)** — `tool/api.py`(`ToolHandler`, `ToolOutcome`), `provider/api.py`(`ProviderAdapter`), `environment/api.py`(`EnvironmentPlugin`), `prompt/api.py`(`PromptInputs`, `compose`), `data/api.py`(`ConversationLog`, `ArtifactStore`, `WorkspaceState`, `StateQuery`). import-linter 설정 포함.
-2. ✅ (2026-10-13 구현, PR #3) **Fake로 핵심 경로 검증 (P0 완료 목표)** — Fake Provider/Tool + 인메모리 Data로 `User → Run → ToolCall 그룹 → Run → FINAL`, `ask_user → WAITING_FOR_USER → 응답 → Run` 경로.
-3. **Data v0.2·CPP v0.1 잔여 검수** — P0 범위(V3-045)의 T3/T6/T-R·T7a, raw 보존 기준(V3-P14), 재생 규칙(V3-P18)과 Provider 배열 테스트 R1–R7. fencing/lease는 P2.
-4. **Inside Environment + Sandbox(v2 이식) (P0-F, Q-29~33)** — `EnvironmentPlugin`으로 구현.
-5. Pause/Resume(P0-C)은 P0 lock 위에서 최소 형태로, 영속 ControlState는 P2. Artifact·Memory·Compaction·캐시 튜닝은 각 기능 단계에서 결정.
-
-실제 구현 전까지 '정책 방향 확정'과 '구체 알고리즘·스키마 미결정'을 혼동하지 않는다.
+위 순서는 제안이며 새로운 확정 결정이 아니다. **설계 방향의 확정과 구현·실호스트 검증 완료는 구별한다.**
