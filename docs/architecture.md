@@ -42,33 +42,40 @@ Data는 다음과 같이 서로 다른 성격의 정보를 관리한다.
 | 구분 | 원칙 |
 | --- | --- |
 | Conversation | 사용자 및 에이전트의 입력·출력을 **exact하게 보존**하는 원본 기록 |
-| Run | 모델 호출 1회의 식별 및 실행 기록; 상세 저장 범위는 미결정 |
-| Tool 기록 | Conversation에 포함되는 이벤트와 별도 실행 기록이 존재할 수 있음. 어떤 Tool을 어디에 기록할지는 별도 정의 |
+| Run / Execution Records | **모든 Run의 원본 Provider 요청·응답 전체**를 기본 보존. Tool 실행 원본 기록은 별도로 추적. 직렬화/보안/스트리밍 세부는 미결정 |
+| Conversation Tool Event | Memory 검색 결과 등은 exact ToolResult로, Plan/Note는 간결한 완료 Result로 기록 가능. Tool 실행 원본과 UI 표시는 별도 |
 | 최신 Prompt Snapshot | 압축 문맥과 이후의 exact 입력 데이터를 다음 호출에 사용하기 위한 **최신 상태 1개** |
+| Artifacts | Plan/Note처럼 별도로 조회·수정하는 지속 데이터. **Data의 conversation-scoped Artifact 원본 저장은 권고이며 아직 미확정** |
 | Workspace Registry | 독립적인 Workspace의 식별과 연결에 필요한 메타데이터 |
 | Environment/Binding | Environment 활성화 및 Workspace 접근 관계의 메타데이터 |
 | Model/Reasoning 설정 | 모델·추론 강도 등 다음 요청 구성에 필요한 설정 및 provider가 제공한 사용량/continuation 자료 |
 
 - **원본 Conversation ≠ 가공된 Prompt.** Prompt가 압축/필터링한 데이터는 Conversation 원본을 덮어쓰지 않는다.
 - 최신 Prompt Snapshot은 누적 버전을 보관하는 로그가 아닌 **대체 가능한 단일 최신 상태**이다. 압축 요약과 최근 exact 항목을 포함하는 설계 방향으로 정했다.
-- 모든 과거 Provider 요청을 최신 Snapshot만으로 완전 재현할 수 있다고 가정하지 않는다. 추가적인 감사/재현 자료 보존 범위는 미결정이다.
+- **원본 Provider 요청·응답은 Run별로 모두 보존**한다. Snapshot은 최신 1개만 유지하더라도 Run별 원본 기록은 별도 데이터이며 이전 호출의 감사·재현을 지원한다. 실제 스트림/비밀 데이터 보존 방식은 추후 결정한다.
+- Conversation Events, Execution Records, Artifacts는 논리적으로 별도 계약이다. Data의 DB 엔진 또는 물리 테이블을 반드시 분리할 필요는 없다. [Data/Tool 설계](data-and-tools.md) 참조.
 - 다른 모듈은 DB 테이블을 직접 읽거나 수정하지 않고 **Data의 공개 조회/명령 계약**으로 접근한다.
 
-## 3. Prompt — 확정된 책임, 미정인 세부 계약
-
-Prompt는 Data의 원본 대화, 최신 Prompt Snapshot, 설정 및 노출 가능한 Tool/Environment 정보를 활용하여 **다음 LLM 요청을 구성**한다.
+## 3. Prompt — 캐시 우선 구성 (순서 확정)
 
 ```text
-Conversation exact history ──┐
-Latest Prompt Snapshot ──────┤
-Model / reasoning config ────┼──▶ Prompt ▶ provider request
-Exposed tool & env metadata ─┘
+Stable Prefix             (고정 지시문 / 안정적인 Tool 정의)
+    ↓
+Conversation             (압축된 과거 + 순서 유지한 exact Event / native Tool 그룹)
+    ↓
+Current State             (활성 Environment/Workspace Binding, Plan/Note 등)
+    ↓
+Provider-specific config  (model/reasoning/continuation; 별도 API 필드)
 ```
 
-- 압축 및 컨텍스트 예산 전략은 Prompt의 내부 구현으로 캡슐화한다.
-- 최신 Prompt Snapshot을 갱신할 때 원본 Conversation은 보존한다.
-- 모델별 요청 필드(예: reasoning effort, token budget)는 지원 가능한 Provider 인터페이스를 통해 구성한다. 모든 모델이 같은 옵션을 지원한다고 가정하지 않는다.
-- **Reasoning 구분:** (1) 요청 설정값, (2) provider가 공개하는 reasoning token 사용량, (3) provider가 반환·재사용을 허용하는 opaque reasoning/continuation 자료를 각각 별도로 다룬다. **비공개 내부 추론 원문은 획득·보존 가능하다고 전제하지 않는다.** 실제 보존/전달 가능 범위는 provider 계약에 따른다.
+- **Stable Prefix → Conversation → Current State**를 선택했다. 현재 상태를 마지막에 두어 과거 프롬프트 접두부를 가능한 한 유지한다.
+- **Trigger는 원본 Event/이벤트 그룹에 대한 Run의 참조**이다. User input·ToolResult는 발생할 때부터 Data에 기록되며, 다음 Run에서 '이력으로 이동'시키거나 복제하지 않는다.
+- ToolCall과 대응 ToolResult는 하나의 논리적 그룹으로 인접하게 유지한다. 병렬 호출도 `call_id`와 원래 호출 순서로 구성하며, Provider native tool protocol을 위반하지 않는다.
+- **Reasoning token usage**는 실행 메타데이터다. 모델 설정 및 provider가 실제 반환한 opaque continuation과 분리한다. continuation은 임의의 프롬프트 끝 텍스트가 아니라 Provider Adapter가 네이티브 방식으로 다룬다.
+- 압축·컨텍스트 예산은 Prompt 내부 책임이다. Snapshot은 최신 1개를 대체하며 Conversation 원본과 Run raw 기록은 수정하지 않는다.
+- Provider별 변환과 cache-control, 시스템/사용자 역할 부여, native tool/result 결합, continuation validation은 Provider Adapter 책임이다. **캐시 hit는 기대 효과이지 보장값이 아니다.**
+
+세부 규칙은 [Prompt Composition Contract](prompt-composition.md)에 기록한다.
 
 ## 4. Module 개요 — 확정된 책임 분리
 
@@ -80,7 +87,7 @@ Exposed tool & env metadata ─┘
 | Provider | 모델 API 통신·응답 정규화 | Tool의 환경별 실행, Run 반복 정책 |
 | Tool | 노출된 도구의 등록/호출 계약·결과 형태 | 환경별 Workspace 수명·정책 |
 | Environment | Workspace 접근 방식·실행 정책·환경 전용 Tool 처리 | Workspace 자체의 수명 소유 |
-| Workspace (개념/리소스) | 작업 대상의 지속적인 정체성과 자원 | 특정 Environment 구현 |
+| Workspace (독립 자원, 별도 코드 모듈 아님) | Data의 Registry로 식별, Environment가 접근 | Environment에 수명을 종속시키지 않음 |
 
 모듈의 실제 디렉터리명, 공유 타입의 구체화 및 객체 수명은 [모듈 경계](module-boundaries.md) 문서에서 제안 수준으로 다룬다.
 
@@ -99,6 +106,7 @@ Exposed tool & env metadata ─┘
 - 하나의 Conversation에서 여러 Environment를 활성화할 수 있다.
 - 하나의 Environment는 여러 Workspace를 사용할 수 있다.
 - 하나의 실제 Workspace를 **서로 다른 Environment가 다른 권한/방법으로 다룰 수 있다.**
+- **Workspace 전용 소프트웨어 모듈을 두지 않는다.** Registry/Binding은 Data 계약, 연결/정책/실행은 Environment 계약으로 처리한다.
 - 최초 구체화 대상은 **Inside Environment**이고, Inside의 실행·승인·Sandbox 세부 계약은 아직 확정하지 않았다.
 
 ### 5.3 Registry와 Binding — 채택한 설계 방향
@@ -154,6 +162,22 @@ Workspace를 요구하는 호출은 대상 Workspace를 지정해야 한다. **T
 ```
 
 Environment Tool 실행 시 `binding_id` → Environment 인스턴스/Conversation 적합성 → Workspace 연결·권한 확인 → 실행 → ToolResult 순서로 처리한다.
+
+### 6.1 Internal Tool과 Environment Tool
+
+- Tool은 최소한 **Internal Tool**(Memory/Plan/Note처럼 Data 공개 API 사용)과 **Environment Tool**(Inside 등 Environment의 Workspace 실행 계약 사용)을 구분하는 방향이다.
+- Environment를 거칠 필요가 없는 Memory는 Data API에 직접 접근할 수 있지만 SQL/Repository private 구현에는 접근하지 않는다.
+- Workspace 요구 정책은 `None / Required / Default`로 구분하는 것을 권고한다. Outside 기본 Workspace를 암묵적으로 사용하는 Tool은 `None`과 다르다.
+- 별도의 외부 서비스 Connector Tool 범주는 추후 필요에 따라 정의한다.
+
+### 6.2 복수 ToolCall의 충돌 기준
+
+- 충돌하지 않는 여러 ToolCall은 병렬 실행 가능. 명령 문자열 동일 여부만으로 독립성을 판정하지 않는다.
+- 서로 다른 파일의 **검증된 범위 한정 수정**은 병렬 후보. 동일한 파일에 대한 쓰기 충돌 또는 같은 Workspace의 부작용 범위 불명 `run_command`는 기본 직렬 권고.
+- 병렬성 판단은 Binding ID가 아니라 Workspace/실제 공유 자원에 대한 효과를 기준으로 한다. 다른 Conversation에서도 같은 자원 충돌이 발생할 수 있다.
+- Tool/Environment가 검증 가능한 효과 범위를 제공하며 모델의 미검증 주장에 의존하지 않는다. 상세 Scheduler 계약은 아직 미결정.
+
+자세한 내용은 [Data, Tool Execution, and Artifacts](data-and-tools.md)를 따른다.
 
 ## 7. Memory — 방향만 확정
 
