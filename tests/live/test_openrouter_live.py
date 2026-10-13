@@ -17,7 +17,7 @@ import httpx
 import pytest
 from testkit import SCOPE, assert_chat_structure, user
 
-from himari.bootstrap import build_in_memory_runtime, read_env_file
+from himari.bootstrap import build_runtime, read_env_file
 from himari.common import JsonValue, ModelToolResult, RawRepresentation, TextBlock, ToolId
 from himari.control.api import DriveState
 from himari.provider.openrouter import OpenRouterAdapter
@@ -84,7 +84,7 @@ def final_text(result: Any) -> str:
 @pytest.mark.parametrize("model", MODELS)
 def test_live_final_answer_with_reasoning(model: str) -> None:
     transport = RecordingTransport()
-    rt = build_in_memory_runtime(
+    rt = build_runtime(
         OpenRouterAdapter(KEY, transport=transport), model_id=model, reasoning_effort="low"
     )
     rt.store.create_conversation(SCOPE)
@@ -103,7 +103,7 @@ def test_live_final_answer_with_reasoning(model: str) -> None:
 def test_live_tool_round_trip(model: str) -> None:
     transport = RecordingTransport()
     add = AddTool()
-    rt = build_in_memory_runtime(OpenRouterAdapter(KEY, transport=transport), tools=[add], model_id=model)
+    rt = build_runtime(OpenRouterAdapter(KEY, transport=transport), tools=[add], model_id=model)
     rt.store.create_conversation(SCOPE)
     result = asyncio.run(
         rt.driver.drive(SCOPE, user("Use the add tool to compute 2 + 3, then reply with just the number."))
@@ -127,7 +127,7 @@ def test_live_declared_efforts_are_accepted(model: str) -> None:
         pytest.skip(f"no declared efforts for {model}")
 
     async def one(effort: str) -> str:
-        rt = build_in_memory_runtime(adapter, model_id=model, reasoning_effort=effort)
+        rt = build_runtime(adapter, model_id=model, reasoning_effort=effort)
         rt.store.create_conversation(SCOPE)
         result = await rt.driver.drive(SCOPE, user("What is 17*3? Answer with the number."))
         return f"{effort}:{result.state.value}:{result.detail}"
@@ -149,7 +149,7 @@ def test_live_tool_round_trip_replays_reasoning(model: str) -> None:
     thinking even at "max" (observed live), leaving nothing to replay."""
     transport = RecordingTransport()
     add = AddTool()
-    rt = build_in_memory_runtime(
+    rt = build_runtime(
         OpenRouterAdapter(KEY, transport=transport), tools=[add], model_id=model, reasoning_effort="high"
     )
     rt.store.create_conversation(SCOPE)

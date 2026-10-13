@@ -7,7 +7,7 @@ from pathlib import Path
 
 from testkit import SCOPE, RecordingTool, calls, final, user
 
-from himari.bootstrap import build_in_memory_runtime
+from himari.bootstrap import build_runtime
 from himari.common import CallId, TextBlock, WorkspaceId, thaw
 from himari.control.api import DriveState
 from himari.data.api import ToolExecutionStatus
@@ -24,7 +24,7 @@ def test_model_writes_then_reads_a_file_in_its_working_directory(tmp_path: Path)
         calls(("inside/read_file", {"path": "notes/plan.md"})),
         final("done"),
     ])
-    rt = build_in_memory_runtime(provider, environments=[inside])
+    rt = build_runtime(provider, environments=[inside])
     rt.store.create_conversation(SCOPE)
     catalog_before = rt.registry.catalog(frozenset())
     rt.store.activate_environment(SCOPE, INSIDE, WorkspaceId("ws_alice"))
@@ -78,7 +78,7 @@ def test_two_environments_with_different_workspaces_work_independently(tmp_path:
         remote = RecordingTool("fake/ping", environment_kind=FAKE, workspace=WorkspaceRequirement.DEFAULT)
         provider = ScriptedAdapter([calls(("inside/write_file", {"path": "a.txt", "content": "hi"}), ("fake/ping", {})),
                                     final("done")])
-        rt = build_in_memory_runtime(provider, environments=[inside, FakeEnvironment(remote)])
+        rt = build_runtime(provider, environments=[inside, FakeEnvironment(remote)])
         rt.store.create_conversation(SCOPE)
         order = [(INSIDE, "ws_alice", None), (FAKE, "remote_box", "projects/x")]
         for kind, ws, cwd in (order if inside_first else order[::-1]):

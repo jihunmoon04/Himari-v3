@@ -29,21 +29,21 @@ Data [v0.2 구현 가능 후보](data-contract-v0.2.md)에 **DR-01~DR-09 독립 
 
 ## P0 — 현재 구현 현황과 잔여 계약
 
-**PR #1~#6 병합 완료(2026-10-13):** `api.py` 공개 계약, 인메모리 Data, Control Run 반복·`ask_user`·`resume`, Tool Registry/Dispatcher, T3/T6 claim·UNKNOWN 모델 보고, 실제 OpenRouter Provider(wire-exact) 및 턴별 reasoning continuation이 구현됐다. `tests/`·정적 CI도 있다. **영속 DB·실제 Inside/Sandbox·Web/CLI는 미구현**이다.
+**PR #1~#9 병합 완료(2026-10-13), 영속 Data 검수 중:** `api.py` 공개 계약, 인메모리 Data, Control Run 반복·`ask_user`·`resume`, Tool Registry/Dispatcher, T3/T6 claim·UNKNOWN 모델 보고, 실제 OpenRouter Provider(wire-exact) 및 턴별 reasoning continuation이 구현됐다. Inside 파일 Tool·Sandbox `run_command`(PR #8~#9), SQLite 영속 Data(V3-P42)도 구현됐다. `tests/`·정적 CI도 있다. **Web/CLI는 미구현**이다.
 
 | ID | 주제 | 현재 상태 / 남은 검수 |
 | --- | --- | --- |
 | Q-01 | Public Ports / DTO | `api.py`·불변 DTO 구현(PR #2), 코드가 원본 |
 | Q-02 | Control / Run | Run·`ask_user`·`resume`·UNKNOWN 처리 P0 구현(PR #3~#4). 정식 Pause/Cancel·lease 미구현 |
-| Q-03 | Data schema | Event/Run/Tool/Artifact 인메모리 구현. 실제 DB 원자성·crash 내구성은 Q-41 |
+| Q-03 | Data schema | Event/Run/Tool/Artifact 인메모리 + SQLite 스키마 v1 구현(V3-P42). 마이그레이션 정책 미정 |
 | Q-04 | Prompt / Provider | Composer, Tool 그룹 재생, OpenRouter wire-exact·continuation 구현(PR #3/#5/#6). Streaming/타 Provider는 후속 |
 | Q-05 | Tool API | ToolHandler·Registry·Dispatcher·ToolOutcome 구현. 파일/명령 및 Scheduler 후속 |
 | Q-06 | Contract enforcement | `tests/`, `scripts/check_imports.py`, mypy·정적 CI·opt-in 라이브 테스트 구현 |
-| Q-19a | Raw retention security | 본문/인증 헤더 분리 구현. 영속 저장 암호화·권한·삭제 정책 미결정 |
+| Q-19a | Raw retention security | 본문/인증 헤더 분리 구현. SQLite 파일은 0600(소유자만). 저장 데이터 암호화·보존·삭제 정책 미결정 |
 | Q-21 | Trigger inclusion | 기본 Run/Event 참조와 Tool 그룹 검증 구현. 압축/외부 결과 포함 정책 후속 |
 | Q-22 | Prompt cursor | 최신 Snapshot Port 존재. coverage/cursor 검증·실질 압축 사용 미구현 |
 
-**검증 경계:** 현재 재시작 테스트는 동일한 `InMemoryStore`를 공유하는 시뮬레이션이며, 실제 DB crash 내구성이나 OS Sandbox 보안 검증이 아니다.
+**검증 경계:** Data·통합 테스트는 인메모리와 SQLite 양쪽에서 실행된다. SQLite 재시작은 DB 파일을 닫고 다시 여는 것이며, 실제 `SIGKILL` 크래시 시험이 있다(Q-41). 전원 차단은 직접 시험하지 않았다.
 
 ## P0-F — 기본 Workspace 파일 기능 (이번에 우선 진행)
 
@@ -88,7 +88,7 @@ Data [v0.2 구현 가능 후보](data-contract-v0.2.md)에 **DR-01~DR-09 독립 
 | Q-24 | Internal vs Environment routing | 실행 유형 등록 계약, `None/Required/Default` Workspace 정책, 외부 서비스 Tool 범주 필요 여부 |
 | Q-39 | ~~Tool error disclosure~~ | **해결 (PR C1):** claim 없는 Tool의 예외는 모델에게 "The tool failed with an internal error."만 전달하고, 예외 타입·원문은 `raw_result`에만 남긴다. Inside 파일 Tool은 오류를 분류된 안전한 문구로만 돌려준다. |
 | Q-40 | 실제 OS 권한 검증 | **부분 해결 (PR C2):** 시작 시 실호스트 자체 검사(V3-050/P41)와 선택 실행 호스트 게이트(`HIMARI_SANDBOX_HOST=1 pytest tests/sandbox_host`, 29개)를 이 서버에서 통과. 남은 것: 다른 배포 호스트에서의 게이트 실행, 권한이 필요한 마운트 넘기(`NO_XDEV`) 검증, CPU·메모리·프로세스 수 한도(cgroup/rlimit), Sandbox 생성이 멈췄을 때의 운영자 복구 절차(취소된 호출은 fail closed로 Workspace lock을 계속 잡고 있음), Workspace admission이 시점 검사라는 한계(P0는 단일 서버 프로세스이고 Workspace 변경이 Inside Tool과 같은 Workspace lock 아래에서만 일어난다고 전제한다. 다중 worker, 업로드 경로, 호스트 측 쓰기를 추가하면 같은 lock을 쓰게 하거나 검사를 다시 설계해야 함) |
-| Q-41 | 영속 DB 크래시 내구성 | 현재 재시작 테스트는 같은 인메모리 store를 공유하는 시뮬레이션이다. 실제 DB 백엔드에서 T2~T7a·T-R의 원자성과 크래시 후 복구를 별도로 검증 |
+| Q-41 | 영속 DB 크래시 내구성 | **부분 해결 (V3-P42):** SQLite 백엔드로 T1~T9·T7a·T-R을 포트 호출당 트랜잭션 1개로 구현. Data·통합 테스트를 두 백엔드로 실행(재시작 = DB 다시 열기), 모든 다중 쓰기 연산에 대해 각 쓰기 직후 오류 주입 시 전부 롤백, 실제 `SIGKILL` 시험(송신 중 → `OUTCOME_UNKNOWN`·재송신 없음, 부작용 중 → `UNKNOWN`·재실행 없음, 트랜잭션 도중 → 이전 상태, 커밋 직후 → 커밋 유지). 남은 것: 전원 차단 내구성은 SQLite·파일시스템 fsync 보장에 의존(직접 시험 불가), 스키마 마이그레이션, 백업, 다중 프로세스(P2 lease) |
 | Q-42 | Continuation 일괄 조회 | Prompt loader가 assistant 턴마다 `read_run`을 호출한다. 영속 DB 도입 시 Run continuation을 한 번에 읽는 내부 최적화를 둔다(공개 계약 변경 없이 가능). *(PR #6 검수 C1)* |
 | Q-43 | Continuation 크기 예산 | 암호화 reasoning은 큰 불투명 payload일 수 있고 지금은 모든 과거 턴의 continuation을 재전송한다. 압축(Q-14) 도입 시 턴과 그 continuation을 한 단위로 제외하는 예산 정책을 정한다. *(PR #6 검수 C2)* |
 

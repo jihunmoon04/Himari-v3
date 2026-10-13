@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import dataclasses
 import inspect
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from types import ModuleType
 
 import pytest
+import testkit
 
 from himari.common import DeepFrozen
+from himari.data.sqlite import SqliteStore
 
 
 def _assert_api_dataclasses_frozen(module: ModuleType) -> None:
@@ -28,3 +30,17 @@ def _assert_api_dataclasses_frozen(module: ModuleType) -> None:
 @pytest.fixture
 def assert_api_dataclasses_frozen() -> Callable[[ModuleType], None]:
     return _assert_api_dataclasses_frozen
+
+
+@pytest.fixture(params=["memory", "sqlite"])
+def data_backend(request: pytest.FixtureRequest, tmp_path_factory: pytest.TempPathFactory,
+                 monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
+    """Run the requesting test once per Data backend (tests/data and
+    tests/integration use it for every test)."""
+    if request.param == "sqlite":
+        folder = tmp_path_factory.mktemp("db")
+        counter = iter(range(1000))
+        monkeypatch.setattr(testkit, "STORE_FACTORY", lambda: SqliteStore(folder / f"himari-{next(counter)}.db"))
+    yield request.param
+    while testkit.OPEN_STORES:
+        testkit.OPEN_STORES.pop().close()

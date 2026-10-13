@@ -1,8 +1,9 @@
 """Composition root: the only place that imports concrete implementations.
 
-``build_in_memory_runtime`` wires the P0 in-memory stack. Passing an existing
-``store`` builds a fresh runtime over the same "durable" data — this is how a
-process restart is modelled.
+``build_runtime`` wires the P0 stack over a Data store: ``InMemoryStore``
+(tests; a "restart" is a new runtime over the same object) or the durable
+``SqliteStore`` (a restart is a new process — or a new store — opening the
+same database file).
 """
 
 from __future__ import annotations
@@ -13,6 +14,7 @@ from dataclasses import dataclass
 from himari.control.ask_user import AskUserTool
 from himari.control.driver import Driver
 from himari.data.memory import InMemoryData, InMemoryStore
+from himari.data.sqlite import SqliteData, SqliteStore
 from himari.environment.api import EnvironmentPlugin
 from himari.prompt.api import RequestOptions
 from himari.prompt.composer import Composer
@@ -25,28 +27,31 @@ from himari.tool.registry import ToolRegistry
 DEFAULT_INSTRUCTIONS = ("You are HIMARI, a helpful assistant.",)
 
 
+type Store = InMemoryStore | SqliteStore
+
+
 @dataclass
-class InMemoryRuntime:
-    store: InMemoryStore
-    data: InMemoryData
+class Runtime:
+    store: Store
+    data: InMemoryData | SqliteData
     registry: ToolRegistry
     driver: Driver
 
 
-def build_in_memory_runtime(
+def build_runtime(
     provider: ProviderAdapter,
     *,
     tools: Iterable[ToolHandler] = (),
     environments: Iterable[EnvironmentPlugin] = (),
-    store: InMemoryStore | None = None,
+    store: Store | None = None,
     instructions: Sequence[str] = DEFAULT_INSTRUCTIONS,
     model_id: str = "scripted-model",
     max_runs_per_drive: int = 16,
     allow_require_user_tools: bool = False,  # keep False in P0 (no resolution API)
     reasoning_effort: str | None = None,
-) -> InMemoryRuntime:
+) -> Runtime:
     store = store if store is not None else InMemoryStore()
-    data = InMemoryData(store)
+    data = SqliteData(store) if isinstance(store, SqliteStore) else InMemoryData(store)
     registry = ToolRegistry([AskUserTool(), *tools], allow_require_user=allow_require_user_tools)
     for env in environments:
         for handler in env.tools():
@@ -61,7 +66,7 @@ def build_in_memory_runtime(
         request_options=RequestOptions(model_id=model_id, reasoning_effort=reasoning_effort),
         max_runs_per_drive=max_runs_per_drive,
     )
-    return InMemoryRuntime(store=store, data=data, registry=registry, driver=driver)
+    return Runtime(store=store, data=data, registry=registry, driver=driver)
 
 
 def read_env_file(path: str) -> dict[str, str]:

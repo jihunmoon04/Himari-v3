@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import dataclasses
 from collections.abc import Callable, Iterable, Sequence
 from typing import Any
 from datetime import UTC, datetime
 
-from himari.bootstrap import InMemoryRuntime, build_in_memory_runtime
+from himari.bootstrap import Runtime, Store, build_runtime
 from himari.common import (
     CallId,
+    CallRef,
+    RunId,
     UnknownOutcomePolicy,
     ConversationId,
     EnvironmentKind,
@@ -21,7 +24,8 @@ from himari.common import (
     TrustedScope,
 )
 from himari.data.api import ArtifactMutation, BindingAuthority, UserMessage
-from himari.data.memory import InMemoryStore
+from himari.data.memory import InMemoryData, InMemoryStore
+from himari.data.sqlite import SqliteData, SqliteStore
 from himari.environment.api import BindingObservation, ConnectionStatus
 from himari.provider.api import NormalizedFinal, NormalizedToolCalls
 from himari.provider.scripted import ScriptedAdapter, ScriptStep
@@ -39,6 +43,51 @@ from himari.tool.api import (
 SCOPE = TrustedScope(PrincipalId("alice"), ConversationId("conv_1"))
 FOREIGN = TrustedScope(PrincipalId("mallory"), ConversationId("conv_1"))
 FAKE = EnvironmentKind("fake")
+
+
+# Which Data backend new stores use; the ``data_backend`` fixture
+# (tests/data, tests/integration) switches it to SQLite for one run.
+STORE_FACTORY: Callable[[], Store] = InMemoryStore
+OPEN_STORES: list[SqliteStore] = []
+
+
+def new_store() -> Store:
+    store = STORE_FACTORY()
+    if isinstance(store, SqliteStore):
+        OPEN_STORES.append(store)
+    return store
+
+
+def restart(store: Store) -> Store:
+    """Model a process restart over persisted data: SQLite closes and reopens
+    the database file (nothing survives but what was committed); the
+    in-memory store is shared as is."""
+    if isinstance(store, SqliteStore):
+        store.close()
+        reopened = SqliteStore(store.path)
+        OPEN_STORES.append(reopened)
+        return reopened
+    return store
+
+
+def data_for(store: Store) -> InMemoryData | SqliteData:
+    return SqliteData(store) if isinstance(store, SqliteStore) else InMemoryData(store)
+
+
+def forget_unknown_policy(store: Store) -> list[CallRef]:
+    """Simulate records written before V3-047 (no claim-time policy) for
+    every execution of SCOPE; returns their refs."""
+    if isinstance(store, SqliteStore):
+        rows = store.connection.execute(
+            "SELECT run_id, call_id FROM tool_executions WHERE conversation_id=? ORDER BY seq", (SCOPE.conversation_id,)
+        ).fetchall()
+        store.connection.execute("UPDATE tool_executions SET unknown_outcome=NULL WHERE conversation_id=?",
+                                 (SCOPE.conversation_id,))
+        return [CallRef(RunId(r["run_id"]), CallId(r["call_id"])) for r in rows]
+    conv = store._conversations[SCOPE.conversation_id]
+    for ref in conv.executions:
+        conv.executions[ref] = dataclasses.replace(conv.executions[ref], unknown_outcome=None)
+    return list(conv.executions)
 
 
 class SimulatedCrash(BaseException):
@@ -136,14 +185,16 @@ def runtime(
     *,
     tools: Iterable[ToolHandler] = (),
     env_tools: Iterable[RecordingTool] = (),
-    store: InMemoryStore | None = None,
+    store: Store | None = None,
     provider: ScriptedAdapter | None = None,
-) -> tuple[InMemoryRuntime, ScriptedAdapter]:
-    """Fresh runtime; pass ``store`` to model a restart over persisted data."""
+) -> tuple[Runtime, ScriptedAdapter]:
+    """Fresh runtime; pass ``restart(rt.store)`` to model a process restart."""
     adapter = provider if provider is not None else ScriptedAdapter(script)
+    fresh = store is None
+    store = new_store() if store is None else store
     env_tools = tuple(env_tools)
     tools = tuple(tools)
-    rt = build_in_memory_runtime(
+    rt = build_runtime(
         adapter,
         tools=tools,
         environments=[FakeEnvironment(*env_tools)] if env_tools else [],
@@ -154,7 +205,7 @@ def runtime(
             t.definition.unknown_outcome is UnknownOutcomePolicy.REQUIRE_USER for t in (*tools, *env_tools)
         ),
     )
-    if store is None:
+    if fresh:
         rt.store.create_conversation(SCOPE)
     return rt, adapter
 

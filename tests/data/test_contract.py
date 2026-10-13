@@ -1,10 +1,11 @@
+"""Data port contract, run against every backend (tests/data/conftest.py)."""
+
 from __future__ import annotations
 
 import asyncio
-import dataclasses
 
 import pytest
-from testkit import SCOPE, text_result, user
+from testkit import SCOPE, data_for, forget_unknown_policy, new_store, text_result, user
 
 from himari.common import ASK_USER_TOOL_ID, ProviderContinuation, TextBlock, UnknownOutcomePolicy, ArtifactId, CallId, CallRef, RawRepresentation, ToolCall, ToolId
 from himari.data.api import (
@@ -19,16 +20,17 @@ from himari.data.api import (
     ToolCompletion,
     ToolExecutionStatus,
 )
-from himari.data.memory import InMemoryData, InMemoryStore
+from himari.data.memory import InMemoryData
+from himari.data.sqlite import SqliteData
 
 
-def fresh() -> InMemoryData:
-    store = InMemoryStore()
+def fresh() -> InMemoryData | SqliteData:
+    store = new_store()
     store.create_conversation(SCOPE)
-    return InMemoryData(store)
+    return data_for(store)
 
 
-async def projected_group(data: InMemoryData, *tool_ids: str) -> CallRef:
+async def projected_group(data: InMemoryData | SqliteData, *tool_ids: str) -> CallRef:
     run_id = await data.prepare_run(
         SCOPE,
         RunPreparation(b"{}", "application/json", RawRepresentation.ADAPTER_SERIALIZED, (), PromptBasis(0, 0), "p", "m"),
@@ -185,8 +187,7 @@ def test_data_refuses_to_report_unless_policy_allows(policy: UnknownOutcomePolic
         call = await projected_group(data, "fake/pay")
         if policy is None:
             await data.claim_tool_execution(SCOPE, call, unknown_outcome=UnknownOutcomePolicy.REQUIRE_USER, record_event=True)
-            conv = data._store._conversations[SCOPE.conversation_id]  # simulate a pre-V3-047 record
-            conv.executions[call] = dataclasses.replace(conv.executions[call], unknown_outcome=None)
+            forget_unknown_policy(data._store)  # simulate a pre-V3-047 record
         else:
             await data.claim_tool_execution(SCOPE, call, unknown_outcome=policy, record_event=True)
         await data.recover_interrupted(SCOPE)
