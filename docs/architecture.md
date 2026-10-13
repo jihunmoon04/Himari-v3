@@ -108,7 +108,7 @@ Provider-specific config  (model/reasoning/continuation; 별도 API 필드)
 - 하나의 Environment는 여러 Workspace를 사용할 수 있다.
 - 하나의 실제 Workspace를 **서로 다른 Environment가 다른 권한/방법으로 다룰 수 있다.**
 - **Workspace 전용 소프트웨어 모듈을 두지 않는다.** Registry/Binding은 Data 계약, 연결/정책/실행은 Environment 계약으로 처리한다.
-- 최초 구체화 대상은 **Inside Environment**이고, Inside의 실행·승인·Sandbox 세부 계약은 아직 확정하지 않았다.
+- 최초 구체화 대상은 **Inside Environment**. 기본 Workspace에서 `inside/run_command`와 **OS Sandbox 적용**은 확정했으며, 승인 미도입·Conversation별 폴더 및 같은 사용자에게 허용된 다른 폴더 접근도 확정했다. Sandbox 구현 백엔드/실행 한도/실제 접근 정책은 추가 계약.
 
 ### 5.3 Registry와 Binding — 채택한 설계 방향
 
@@ -184,15 +184,17 @@ Environment Tool 실행 시 `binding_id` → Environment 인스턴스/Conversati
 
 자세한 내용은 [Data, Tool Execution, and Artifacts](data-and-tools.md) 및 [Data Contract v0.1](data-contract-v0.1.md)를 따른다.
 
-### 6.3 초기 기본 Workspace — 파일 첨부·생성 기반 (확정 범위)
+### 6.3 초기 기본 Workspace — Conversation별 폴더 + Sandboxed Command (확정 범위)
 
-- **우선순위:** HIMARI가 제공하는 기본 Workspace를 먼저 만들어 채팅 파일 업로드, 파일 생성·읽기·수정·제공의 기반으로 사용한다.
-- **초기 제외:** 기본 Workspace 파일 작업에는 인간 Approval, Worktree/Workspace 사본 격리, OS Sandbox를 도입하지 않는다. 단, 구조화된 파일 API 자체의 사용자 범위 검사·경로 탈출 방지·용량 제한·중복 편집 충돌 확인은 유지한다.
-- **구조:** Data는 Workspace Registry/Binding 및 파일 참조 메타데이터를 저장하고, Environment의 Inside 파일 실행기가 실제 파일 바이트를 조작하며, Tool은 모델에 파일 Tool을 노출한다. Workspace 전용 소프트웨어 모듈을 추가하지 않는다.
-- **파일 bytes vs Artifact:** 파일의 실제 바이트는 기본 Workspace가 원본이라는 초기 권고. Plan/Note의 원본은 기존대로 Data의 conversation-scoped Artifact이다. 업로드 원본 불변성/버전/GC는 미결정.
-- **범용 명령 실행 `run_command`와 ManagedProcess를 초기 파일 전용 API와 동일시하지 않는다.** OS Sandbox가 없으므로 프로세스 실행을 추가하려면 별도 위험/권한 계약을 검토해야 한다.
+- **우선순위:** HIMARI 제공 기본 Workspace에 채팅 업로드, 파일 생성·수정·제공과 **`inside/run_command`**를 처음부터 지원한다.
+- **기본 작업 위치:** Conversation마다 자체 기본 디렉터리를 갖는다. **같은 사용자에게 허용된 다른 Conversation 폴더도 접근 가능**하다. Conversation 폴더는 정리/기본 cwd의 개념이며, 서로의 OS 격리 경계가 아니다.
+- **보안:** `run_command`는 **OS Sandbox 안에서 실행**한다. 다른 사용자 Workspace, 앱 Data/secret/호스트 경로 접근은 차단하며 미지원 시 무격리 실행으로 대체하지 않는다. 인간 Approval과 Worktree 복제 격리는 이 초기 환경에서 요구하지 않는다.
+- **구조:** Data는 Registry/Binding/Conversation working-directory mapping 및 파일 메타데이터, Environment는 Sandbox 및 실제 파일 I/O, Tool은 구조화 파일 및 command Tool을 제공한다. Workspace 전용 소프트웨어 모듈은 없다.
+- **중요한 한계:** Sandbox는 현재 사용자의 Conversation들 간 파일 쓰기를 막지 않는다. `run_command`의 부작용 범위가 불명확하면 같은 Workspace의 다른 파일 작업과 충돌하는 것으로 처리한다.
+- **파일 원본:** 작업 파일의 현재 bytes는 Workspace가 원본이다. 생성/업로드 파일의 다운로드용 immutable published version을 별도로 관리하는 방안은 제안으로 유지한다. Plan/Note는 Data Artifact로 유지한다.
+- **미결정:** 사용자별 root/실제 principal mapping, Sandbox OS 기술 및 실행·네트워크 제한, immutable file 버전 보존, 공유 폴더 삭제.
 
-관련 상세 초안: [Default Workspace & Chat Files v0.1](default-workspace-files-v0.1.md).
+현행 상세 초안: [Default Workspace v0.2](default-workspace-files-v0.2.md). [v0.1](default-workspace-files-v0.1.md)은 이전 no-sandbox 구상의 기록이다.
 
 ### 6.4 Pause/Resume 실행 경계 — 제안
 
