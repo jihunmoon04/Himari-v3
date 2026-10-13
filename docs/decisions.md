@@ -39,6 +39,8 @@
 | V3-027 | Confirmed | **Plan/Note 원본은 Data의 conversation-scoped Artifact**에 보존한다. Outside의 기본 Workspace에 중복 원본을 두지 않으며 외부 노출/export는 별도 계약. |
 | V3-028 | Confirmed | **활성 Workspace 및 Environment는 Artifact가 아니라 운영 상태**다. Workspace Registry/Environment Activation/Workspace Binding 및 설정은 Data에서 관리하고, 실시간 연결 가능 여부는 Environment에서 관측한다. Prompt의 Current State는 이를 합성한 읽기 투영이다. |
 | V3-029 | Confirmed | 모든 모듈의 공개 계약은 **Contract ID/Version/Status, Owner, Provider, Consumer, Source of Truth, Contract Location**을 추적한다. 실제 Input/Output, Guarantees/Errors/Effects, Dependencies/Tests도 계약 의미에 맞게 기록한다. Owner의 공개 Port만 사용하고 현재 미구현 코드 위치는 planned로 구분한다. **통합 인벤토리는 [contracts.md](contracts.md)**에서 관리한다. |
+| V3-030 | Confirmed | **HIMARI 제공 기본 Workspace를 v3 첫 파일 작업 기반으로 우선 구축**한다. 여기에서 파일 첨부, 대화 중 파일 생성·수정·제공 기능을 먼저 설계한다. v2 Phase 4A의 Task/Work 의존 구조를 필수 전제로 이식하지 않는다. |
+| V3-031 | Confirmed | **초기 기본 Workspace 경로에 사용자 Approval, Worktree/Workspace 복제 격리, OS Sandbox를 도입하지 않는다.** 단, 파일 공개 API의 입력/경로 검증·권한 있는 사용자/Conversation 확인·크기 제한·충돌/기록 규칙은 별개의 요구다. 다른 Environment/향후 arbitrary command의 실행 보안까지 면제하는 결정을 의미하지 않는다. |
 
 ## B. 현재 채택을 권고하지만 세부 확정 전인 설계
 
@@ -65,10 +67,12 @@
 - Provider별 request/response 매핑, reasoning continuation 지원 범위, streaming.
 - **병렬 실행 가능 원칙 자체는 확정**. Scheduler의 실제 충돌 판별 알고리즘, 한 Run의 종결 배리어·취소/복구·중복 실행 정책은 미결정.
 - Environment 활성화 단위, Workspace 유형별 연결·권한·삭제 정책, Binding 수명/재사용 정책.
-- **Inside** 명령 실행·Sandbox·승인·실행 프로세스 정책.
+- **기본 Workspace 파일 기능은 승인/격리/Sandbox 없이 먼저 구현**한다. 향후 Inside 범용 명령 실행·Sandbox·승인·실행 프로세스의 추가 여부와 범위는 별도 정책.
 - **Memory Tool** 기능·자동화·권한·보존 정책.
 - Plan/Note **원본 저장 위치는 확정**. Artifact의 schema/Revision/삭제·수명/Outside export, `update_plan` 세부 스키마는 미결정.
 - **활성 Workspace/Environment 저장 영역과 Artifact의 구분은 확정**. 실제 현재 상태 조회 DTO, 연결상태 갱신 주기, 바인딩 선택 및 기본 Workspace 정책은 미결정.
+- 기본 Workspace 파일 자체의 저장 형태, 파일 첨부/생성 metadata, 버전·다운로드·삭제·안전한 경로 API·업로드 크기 제한(초안: [default-workspace-files-v0.1.md](default-workspace-files-v0.1.md)).
+- Pause/Resume를 위한 ConversationControlState·안전 경계·미완결 ToolCall 복구는 [control-pause-v0.1.md](control-pause-v0.1.md) 검토 초안이며 **현재 확정 정책이 아니다**.
 - v2 데이터/기능 이식의 범위와 절차.
 
 각 항목의 우선순위와 완료 조건은 [미결정 항목](open-questions.md)에서 관리한다. 공개 계약의 Owner·Consumer·데이터 출처 지도는 [contracts.md](contracts.md)에서 관리한다. 상세 흐름은 [Prompt Composition](prompt-composition.md), [Data and Tools](data-and-tools.md), [Data Contract v0.1](data-contract-v0.1.md) 참조.
