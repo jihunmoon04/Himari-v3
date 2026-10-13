@@ -33,6 +33,11 @@
 | V3-021 | Confirmed | Workspace는 독립 자원이지만 **전용 소프트웨어 모듈은 만들지 않는다**. Registry/Binding은 Data가 보유하고 연결·실행 의미는 Environment가 규정한다. |
 | V3-022 | Confirmed | **독립적인 복수 ToolCall은 병렬 실행을 허용**한다. 같은 명령 문자열인지 여부로 독립성을 판정하지 않고 실제 공유 자원/부작용 충돌을 기준으로 한다. |
 | V3-023 | Confirmed | 모델이 가진 의미적 실행 정책과 **Raw Provider 기록을 Prompt 조립 정책과 분리**한다. Provider가 지원하는 reasoning/continuation은 Provider Adapter가 네이티브 배치 규칙을 따른다. |
+| V3-024 | Confirmed | **동일 Conversation에서 Control 실행 흐름 및 Run은 직렬화**한다. 같은 실행 흐름의 독립적인 여러 ToolCall은 병렬 처리 가능하며, 다른 Conversation도 병렬 실행 가능하다. 정확한 lease/queue 구현은 미결정. |
+| V3-025 | Confirmed | **ConversationEvent는 kind별 불변 canonical payload**를 사용한다. 구체 kind 목록과 call-group serialization은 미정. |
+| V3-026 | Confirmed | Conversation에 기록하지 않은 ToolResult 등은 **Prompt가 원본 Execution 기록에서 선택·정합성을 검증**하고, **Provider가 native wire 구조로 직렬화**한다. 불완전한 호출 그룹을 날조하지 않는다. |
+| V3-027 | Confirmed | **Plan/Note 원본은 Data의 conversation-scoped Artifact**에 보존한다. Outside의 기본 Workspace에 중복 원본을 두지 않으며 외부 노출/export는 별도 계약. |
+| V3-028 | Confirmed | **활성 Workspace 및 Environment는 Artifact가 아니라 운영 상태**다. Workspace Registry/Environment Activation/Workspace Binding 및 설정은 Data에서 관리하고, 실시간 연결 가능 여부는 Environment에서 관측한다. Prompt의 Current State는 이를 합성한 읽기 투영이다. |
 
 ## B. 현재 채택을 권고하지만 세부 확정 전인 설계
 
@@ -46,7 +51,7 @@
 | V3-P06 | Proposed | 초기에는 한 프로세스 내 의존성 주입과 계약 테스트를 사용하며, 프로세스 수준 장애 격리는 필요시 확장한다. |
 | V3-P07 | Proposed | Tool의 Workspace 요구 여부와 Environment 소속 여부를 **별개의 메타데이터**로 관리한다. |
 | V3-P08 | Proposed | Tool Dispatcher는 **Internal (Data 공개 API) / Environment (Workspace 실행 Port)**를 분리한다. 필요시 외부 서비스 Connector 유형을 추가한다. |
-| V3-P09 | Proposed | Plan/Note는 Data의 conversation-scoped **Artifact를 원본 저장소**로 사용한다. Outside 기본 Workspace에는 필요시 노출/내보내기 한다. |
+| V3-P09 | Superseded by V3-027 | Plan/Note 원본을 Data에 저장하는 결정으로 승격. Revision/삭제·Outside projection 구현은 여전히 미정. |
 | V3-P10 | Proposed | 같은 Workspace의 범위 불명 `run_command`는 기본 직렬, 서로 다른 검증된 파일 범위 수정은 조건부 병렬. 다른 Conversation의 같은 자원 충돌도 검증한다. |
 | V3-P11 | Proposed | Artifact Revision(CAS) 및 Data 트랜잭션으로 상태 변경 + Tool 완료 기록 + 필요한 Conversation Event를 원자적으로 커밋한다. |
 | V3-P12 | Proposed | 같은 Run의 여러 ToolCall이 모두 terminal 상태에 도달한 뒤 다음 Run을 시작하며, 입력의 원래 Call 순서와 완료 순서를 별도 보존한다. |
@@ -61,10 +66,11 @@
 - Environment 활성화 단위, Workspace 유형별 연결·권한·삭제 정책, Binding 수명/재사용 정책.
 - **Inside** 명령 실행·Sandbox·승인·실행 프로세스 정책.
 - **Memory Tool** 기능·자동화·권한·보존 정책.
-- Plan/Note Artifact의 실제 저장 권한/형식/수명/Workspace 노출 정책, `update_plan`의 세부 스키마.
+- Plan/Note **원본 저장 위치는 확정**. Artifact의 schema/Revision/삭제·수명/Outside export, `update_plan` 세부 스키마는 미결정.
+- **활성 Workspace/Environment 저장 영역과 Artifact의 구분은 확정**. 실제 현재 상태 조회 DTO, 연결상태 갱신 주기, 바인딩 선택 및 기본 Workspace 정책은 미결정.
 - v2 데이터/기능 이식의 범위와 절차.
 
-각 항목의 우선순위와 완료 조건은 [미결정 항목](open-questions.md)에서 관리한다. 상세 흐름은 [Prompt Composition](prompt-composition.md), [Data and Tools](data-and-tools.md) 참조.
+각 항목의 우선순위와 완료 조건은 [미결정 항목](open-questions.md)에서 관리한다. 상세 흐름은 [Prompt Composition](prompt-composition.md), [Data and Tools](data-and-tools.md), [Data Contract v0.1](data-contract-v0.1.md) 참조.
 
 ## D. v2에서 자동 이식하지 않는 구조
 
