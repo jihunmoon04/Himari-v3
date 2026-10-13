@@ -29,11 +29,12 @@
 - **모델에 실제로 반환되는 ToolResult**, **Conversation에 무엇을 저장하는지**, **UI에 어떻게 표시하는지**를 동일한 값으로 강제하지 않는다. 단, Conversation에 저장하기로 한 값은 정확하게 기록한다.
 - ToolCall의 의미 있는 provenance는 `call_id` 등 안정적인 참조로 묶는다.
 - Conversation에서 생략해도 Execution Records에서 정확한 이벤트/결과를 추적할 수 있어야 한다. 다음 모델 입력에 필요한 native Tool 그룹을 재구성할 책임은 Prompt + Provider 경계에 있다.
-- Plan/Note의 원본 저장 위치는 **미결정**. 권고: Data의 conversation-scoped Artifact를 원본으로 두고 Outside Workspace에는 필요시 노출/내보내기만 한다. Outside 기본 Workspace를 직접 기본 저장소로 쓰면 Tool의 Workspace 요구사항이 `None`이 아니라 `Default`가 된다.
+- **확정: Plan/Note의 원본 저장소는 Data의 conversation-scoped Artifact**다. Outside Workspace에는 필요시 projection/export한다. 원본을 Workspace로 옮기지 않으며, Outside 기본 Workspace를 사용해 별도 파일을 수정하는 Tool은 `None`이 아니라 `Default` Workspace 정책을 따른다.
 
 ## 3. Artifact 계약 — 제안
 
 - Artifact ID, owner/scope, kind, content schema, current revision, provenance (originating call/run).
+- **Artifact는 Plan/Note 등의 콘텐츠이며, 활성 Workspace/Environment/Binding은 Artifact가 아니다.** Workspace Registry·Environment Activation·Workspace Binding·기본 선택 설정은 Data의 별도 운영 상태이고, 현재 연결 가능 여부는 Environment에서 확인한다.
 - Artifact 도메인 의미(PlanStep, Note 형식)는 각 Internal Tool이 담당. Data의 범용 저장 API는 내용을 의미론적으로 해석하지 않는다.
 - 같은 Artifact를 동시에 수정하면 revision compare-and-swap으로 충돌을 보고; 서로 다른 Artifact는 별도 부작용이 없을 때 병렬 처리 가능.
 - 가능한 Internal Tool의 **Artifact 변경 + Tool 완료 기록 + 필요한 Conversation Event 기록**은 같은 Data 트랜잭션으로 원자적 커밋하도록 권고.
@@ -75,14 +76,16 @@ Tool/Environment가 검증 가능한 자원 접근 범위(읽기/쓰기/불명)�
 
 Scheduler는 Binding ID만 다르더라도 **실제 Workspace/공유 자원 정체성**으로 충돌을 판단해야 한다. 이종 Workspace 별칭/공유 디렉터리/외부 DB가 존재할 수 있으므로 완벽한 자동 충돌 판정은 전제하지 않는다.
 
-복수 ToolCall의 결과는 각 `call_id`에 귀속한다. 실제 완료 순서와 원래 호출 순서를 보존하고, Provider가 요구하는 native group으로 정규화한다. 같은 Run의 모든 ToolCall 종결을 기다린 뒤 다음 Run을 수행하는 정책은 **권고**, 미확정.
+복수 ToolCall의 결과는 각 `call_id`에 귀속한다. 실제 완료 순서와 원래 호출 순서를 보존하고, Provider가 요구하는 native group으로 정규화한다. **확정: 같은 Conversation의 Control/Run 실행 흐름은 직렬화**한다. 하나의 실행 흐름에서 별도로 독립성이 검증된 ToolCall들은 병렬로 실행할 수 있다. ToolCall의 완료 배리어, lease/queue 구현은 여전히 미결정.
 
 ## 6. 추가로 확정할 계약
 
 - Run/request/response raw serialization 및 실패 전·후 영속 기록 원자성.
 - `ExecutionRecord`와 `ConversationEvent` 간 이벤트 ID, sequence/cursor, 출력 누락과 조회 정책.
-- Conversation에서 결과를 생략한 Tool을 어떻게 Provider가 재구성하는지.
-- Artifact 소유/공유/삭제 범위와 revision 변경 기록 보존.
+- **확정: Prompt는 Conversation과 Execution 기록을 선택하고 완결된 호출 그룹인지 검증, Provider는 native wire 직렬화**한다. 구체 Tool 그룹 데이터 구조와 불완전한 결과의 오류 코드는 미결정.
+- **확정: Event는 kind별 불변 canonical payload**다. 종류별 세부 schema는 미결정.
+- **확정: Plan/Note 원본은 Data conversation-scoped Artifact**. Artifact 삭제/공유 범위와 revision 이력 보존은 미결정.
+- CurrentStateProjection의 데이터 합성 범위, 현재 활성 Environment/Binding 설정의 보존 및 Environment의 실제 온라인 상태 반영 규칙.
 - Data 트랜잭션과 외부 효과의 중복 실행 방지/중단 복구.
 - Tool Scheduler의 충돌 스코프, 읽기와 쓰기의 구별, 동일 자원 alias 검증 및 동시성 한도.
 - Inside의 보호 실행/사용자 승인/Workspace Binding 보안 계약.
