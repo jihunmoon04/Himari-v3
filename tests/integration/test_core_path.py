@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import json
+
+import httpx
 from typing import Any
 
 import pytest
@@ -53,6 +55,7 @@ from himari.provider.api import (
     NativeUncertain,
     NormalizedModelOutput,
 )
+from himari.provider.openrouter import OpenRouterAdapter
 from himari.provider.scripted import RawBody, ScriptedAdapter
 from himari.tool.dispatcher import UNKNOWN_OUTCOME_RESULT
 from himari.bootstrap import build_in_memory_runtime
@@ -677,3 +680,67 @@ def test_p0_runtime_refuses_require_user_tools_by_default() -> None:
     with pytest.raises(ValueError, match="REQUIRE_USER Tools are disabled"):
         build_in_memory_runtime(ScriptedAdapter(), environments=[FakeEnvironment(pay)])
     build_in_memory_runtime(ScriptedAdapter(), environments=[FakeEnvironment(pay)], allow_require_user_tools=True)
+
+
+
+# --- PR #5 review: provider error bodies and malformed stored responses --------
+
+
+def openrouter_runtime(handler: Any, store: Any = None) -> Any:
+    rt, _ = runtime(
+        store=store,
+        provider=OpenRouterAdapter("test-key", transport=httpx.MockTransport(handler)),  # type: ignore[arg-type]
+    )
+    return rt
+
+
+OK = {"choices": [{"message": {"role": "assistant", "content": "fine"}, "finish_reason": "stop"}]}
+
+
+def test_provider_error_response_body_is_kept_on_the_failed_run() -> None:
+    error = {"error": {"code": 429, "message": "rate limited"}}
+    rt = openrouter_runtime(lambda r: httpx.Response(429, json=error))
+    result = asyncio.run(rt.driver.drive(SCOPE, user("hi")))
+
+    assert result.state is DriveState.PROVIDER_FAILED and result.detail == "http_429"
+    run = asyncio.run(rt.data.read_run(SCOPE, result.run_ids[0]))
+    assert run.status is RunStatus.FAILED_NO_RESPONSE
+    assert json.loads(asyncio.run(rt.data.read_raw_response(SCOPE, result.run_ids[0])).body) == error
+
+
+def test_error_finish_with_tool_calls_never_runs_the_tool() -> None:
+    echo = RecordingTool("echo")
+    doc = {"choices": [{"finish_reason": "error", "message": {"content": None, "tool_calls": [
+        {"id": "c", "type": "function", "function": {"name": "echo", "arguments": "{}"}}]}}]}
+    rt, _ = runtime(tools=[echo], provider=OpenRouterAdapter(  # type: ignore[arg-type]
+        "k", transport=httpx.MockTransport(lambda r: httpx.Response(200, json=doc))))
+    result = asyncio.run(rt.driver.drive(SCOPE, user("go")))
+
+    assert result.state is DriveState.INVALID_MODEL_OUTPUT and "finish_reason='error'" in result.detail
+    assert echo.invocations == []
+    assert asyncio.run(rt.data.read_run(SCOPE, result.run_ids[0])).status is RunStatus.PROJECTION_FAILED
+
+
+def test_malformed_stored_response_is_handled_on_restart() -> None:
+    class CrashOnFirstNormalize(OpenRouterAdapter):
+        crashed = False
+
+        def normalize(self, received: NativeReceived) -> NormalizedModelOutput:
+            if not CrashOnFirstNormalize.crashed:
+                CrashOnFirstNormalize.crashed = True
+                raise SimulatedCrash("after RECEIVED")
+            return super().normalize(received)
+
+    bad = {"choices": [{"message": None, "finish_reason": "stop"}]}
+    first, _ = runtime(provider=CrashOnFirstNormalize(  # type: ignore[arg-type]
+        "k", transport=httpx.MockTransport(lambda r: httpx.Response(200, json=bad))))
+    with pytest.raises(SimulatedCrash):
+        asyncio.run(first.driver.drive(SCOPE, user("q1")))
+
+    rt2 = openrouter_runtime(lambda r: httpx.Response(200, json=OK), store=first.store)
+    result = asyncio.run(rt2.driver.drive(SCOPE, user("q2")))  # no AttributeError loop
+
+    assert result.state is DriveState.COMPLETED
+    assert result.recovery is not None
+    (stuck,) = result.recovery.runs_received_unprojected
+    assert asyncio.run(rt2.data.read_run(SCOPE, stuck)).status is RunStatus.PROJECTION_FAILED

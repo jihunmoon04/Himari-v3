@@ -43,6 +43,7 @@ def build_in_memory_runtime(
     model_id: str = "scripted-model",
     max_runs_per_drive: int = 16,
     allow_require_user_tools: bool = False,  # keep False in P0 (no resolution API)
+    reasoning_effort: str | None = None,
 ) -> InMemoryRuntime:
     store = store if store is not None else InMemoryStore()
     data = InMemoryData(store)
@@ -57,7 +58,23 @@ def build_in_memory_runtime(
         composer=Composer(),
         provider=provider,
         dispatcher=dispatcher,
-        request_options=RequestOptions(model_id=model_id),
+        request_options=RequestOptions(model_id=model_id, reasoning_effort=reasoning_effort),
         max_runs_per_drive=max_runs_per_drive,
     )
     return InMemoryRuntime(store=store, data=data, registry=registry, driver=driver)
+
+
+def read_env_file(path: str) -> dict[str, str]:
+    """Minimal ``KEY=value`` reader for a local, git-ignored ``.env``. Values
+    are never logged. Missing file → empty mapping."""
+    values: dict[str, str] = {}
+    try:
+        with open(path, encoding="utf-8") as handle:
+            for line in handle:
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    key, _, value = line.partition("=")
+                    values[key.strip()] = value.strip().strip('"').strip("'")
+    except FileNotFoundError:
+        pass
+    return values

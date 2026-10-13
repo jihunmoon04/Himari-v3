@@ -293,7 +293,9 @@ class InMemoryData:
                 run.raw_response_body = body
                 run.raw_response_content_type = content_type
                 self._set_status(run, RunStatus.RECEIVED, usage=usage)
-            case RawNoResponse(error_code=code):
+            case RawNoResponse(error_code=code, body=body, content_type=content_type):
+                run.raw_response_body = body  # the received error response, if any
+                run.raw_response_content_type = content_type
                 self._set_status(run, RunStatus.FAILED_NO_RESPONSE, error_code=code)
             case RawUncertain(error_code=code):
                 self._set_status(run, RunStatus.OUTCOME_UNKNOWN, error_code=code)

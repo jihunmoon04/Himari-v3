@@ -30,7 +30,7 @@
   - 새 상태 값은 추가하지 않는다. 위 상태는 모두 이 문서의 기존 RunStatus/ToolExecutionStatus다.
 - **ask_user (V3-044):** suspending Tool. 대기 여부는 저장된 상태 값이 아니라 기존 기록에서 파생한다(§6, V3-P17).
 - **유지:** Run별 원본 요청·응답 보존(V3-018), 송신 전 raw 저장, 원자 커밋(T1/T2/T4/T5/T7/T7a/T8/T9), 불완전 그룹 재생 금지.
-- **P0 원본 요청 보존 기준은 미확정**(V3-P14, DR-02). §5 참조.
+- **P0 원본 요청 보존 기준은 wire-exact로 확정**(V3-048). §5 참조.
 
 ## 2. 소유권·연결 관계
 
@@ -140,7 +140,7 @@ RunRecord:
 | none | `PREPARED` | native request body is durably recorded and **no dispatch claim yet**. Safe only after authoritative proof of no send; do not blindly resubmit an old Run |
 | PREPARED | `DISPATCH_CLAIMED` | **P0 포함(V3-045).** durable mark immediately **before one external send attempt** (P0: 단일 행 조건부 갱신, P2: fenced claim). Crash after mark means send may or may not have occurred ⇒ 재시작 시 `OUTCOME_UNKNOWN` |
 | DISPATCH_CLAIMED | `RECEIVED` | actual provider response body durably stored, no guarantee normalized/projection complete |
-| DISPATCH_CLAIMED | `FAILED_NO_RESPONSE` or `OUTCOME_UNKNOWN` | known failure class vs uncertain send/response; raw response absent |
+| DISPATCH_CLAIMED | `FAILED_NO_RESPONSE` or `OUTCOME_UNKNOWN` | known failure class vs uncertain send/response. `FAILED_NO_RESPONSE`는 쓸 수 있는 모델 출력이 없다는 뜻이며, Provider가 오류 응답(HTTP 429/5xx, `error` 본문)을 돌려줬다면 **그 수신 원본을 그대로 저장**한다(`RawNoResponse.body`, V3-018). `OUTCOME_UNKNOWN`은 응답 원본 없음 |
 | RECEIVED | `PROJECTED` | normalized assistant Event/tool-group and pending ToolExecution Records committed idempotently |
 | RECEIVED | `PROJECTION_FAILED` | raw body preserved, native or schema error; fix/reconcile without making another Provider call |
 | PREPARED | `ABANDONED_NOT_SENT` | only when no send was ever claimed/proven; control may compose **a new Run**, not reuse attempt ID |
@@ -149,14 +149,7 @@ RunRecord:
 
 The exact set of provider transport headers that are *not part of raw request body* and streaming semantics must be explicit. API credentials, Authorization headers, secret connection settings and unbounded debug logs are not captured as Run body. **Do not redact bytes *inside* a request and still claim that redacted payload is exact**: confidential model body content must be protected with Data access controls/encryption, and inability to preserve securely must cause the request to fail before dispatch.
 
-**Capture boundary — P0 기준 미확정 (V3-P14 OPEN, DR-02):** Provider는 네트워크 없이 `PrepareNativeRequest`로 송신할 request를 만들고, Data는 그것을 **송신 전에** 영속한다. 저장물이 무엇과 같은지는 아직 정하지 않았다.
-
-| 후보 | 저장물 | 비용 |
-| --- | --- | --- |
-| A. wire-exact | transport가 실제 송신한 body와 바이트 동일. 송신은 저장된 bytes를 그대로 사용 | 공식 SDK의 재직렬화를 우회해야 할 수 있음 |
-| B. adapter-serialized | Adapter가 transport에 넘긴 직렬화 body (semantic 원본) | SDK 사용 가능, wire 바이트 동일성은 보장 안 함 |
-
-불변 규칙: RunRecord는 `raw_representation`(예: `wire_exact` / `adapter_serialized`)을 기록하고 **실제보다 강한 정확성을 주장하지 않는다**. JSON 재직렬화를 물리적 wire bytes라고 표기하지 않는다.
+**Capture boundary — wire-exact (V3-048 확정):** Provider는 네트워크 없이 `PrepareNativeRequest`로 송신할 요청 bytes를 만들고, Data는 그 bytes를 **송신 전에** 영속하며, 송신은 **저장된 bytes를 그대로** 사용한다. RunRecord의 `raw_representation`은 `wire_exact`다. 이 보장을 할 수 없는 Adapter(재직렬화하는 SDK 등)는 `adapter_serialized`로 정직하게 표기해야 하며 V3-048 기준을 충족하지 못한다. JSON 재직렬화를 물리적 wire bytes라고 표기하지 않는다.
 
 **P0 `OUTCOME_UNKNOWN` 처리:** Run의 외부 효과는 Provider 과금뿐이고 Tool은 HIMARI가 실행하므로, `OUTCOME_UNKNOWN` Run은 ToolExecution을 만들지 않는다. 같은 Run은 재송신하지 않으며, **다음 사용자 입력 또는 명시적 재개에서만 새 Run**을 구성한다(자동 재개 없음).
 
@@ -323,7 +316,7 @@ All methods take a trusted, authenticated scope or opaque capability created by 
 ## 13. Decisions still required before freezing
 
 1. **DR-01:** Final EventKind vocabulary (`assistant_question` 폐지, `answers_call` 필드 확정 포함), typed content blocks (text/images/files), exact Assistant question/final semantics and commentary history.
-2. **DR-02:** **P0 raw 보존 기준 선택(V3-P14: wire-exact vs adapter-serialized)**, guarantee of captured Provider request bytes and compatibility with actual chosen SDK/network transport; how to persist model-visible continuation and future streaming raw chunks.
+2. **DR-02:** ~~P0 raw 보존 기준~~ → **V3-048 wire-exact 확정**. Guarantee of captured Provider request bytes and compatibility with actual chosen SDK/network transport; how to persist model-visible continuation and future streaming raw chunks.
 3. **DR-03:** P0의 T3/T6/T-R 트랜잭션 경계. UNKNOWN은 V3-047로 결정(모델에 보고, `REQUIRE_USER`만 사용자 해소). Control lease/fencing·fenced claim은 **P2(V3-045)**.
 4. **DR-04:** Full Tool group commit order, how to treat UNKNOWN and cancellation without inventing results, canonical result/error structures.
 5. **DR-05:** Latest PromptSnapshot CAS with Run prepare and source StateBasis consistency; how exactly native replay coverage and snapshot cursor refer to ToolExecution groups.

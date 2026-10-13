@@ -318,7 +318,7 @@ normalize(raw) -> NormalizedModelOutput                          # FINAL | TOOL_
 describe_capabilities(model) -> ProviderCapabilities
 ```
 
-**P0 원본 요청 보존 기준은 미확정(V3-P14 OPEN, CP-02):** wire-exact vs adapter-serialized. 어느 쪽이든 송신 전 영속과 `raw_representation`의 정직한 표기는 불변이다.
+**P0 원본 요청 보존 기준은 wire-exact로 확정(V3-048).** Adapter가 만든 bytes를 송신 전에 저장하고 그 bytes를 그대로 보낸다. reasoning 책임 분담은 V3-049(설정·continuation 선택은 중립 계층, 네이티브 삽입은 Provider의 `prepare` 단계).
 
 **OPEN:** 실제 API별 Provider 캐싱/continuation, 스트리밍 및 원본 chunk 저장 방식, model option 미지원시 거부·변환 규칙, 에러 taxonomy.
 

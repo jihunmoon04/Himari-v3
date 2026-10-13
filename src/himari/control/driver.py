@@ -286,5 +286,5 @@ def _raw(outcome: NativeReceived | NativeNoResponse | NativeUncertain) -> RawRun
     if isinstance(outcome, NativeReceived):
         return RawReceived(outcome.body, outcome.content_type, outcome.usage)
     if isinstance(outcome, NativeNoResponse):
-        return RawNoResponse(outcome.error_code)
+        return RawNoResponse(outcome.error_code, outcome.body, outcome.content_type)
     return RawUncertain(outcome.error_code)

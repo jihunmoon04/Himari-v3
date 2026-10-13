@@ -170,9 +170,13 @@ class RawReceived(DeepFrozen):
 
 @dataclass(frozen=True)
 class RawNoResponse(DeepFrozen):
-    """Known failure: the Provider certainly produced no response."""
+    """Known failure: no usable model output (``FAILED_NO_RESPONSE``). When the
+    Provider returned an error response, ``body`` is its exact bytes and is
+    stored like any received response (V3-018)."""
 
     error_code: str
+    body: bytes | None = None
+    content_type: str = ""
 
 
 @dataclass(frozen=True)
@@ -398,8 +402,10 @@ class ConversationLog(Protocol):
     async def read_run(self, scope: TrustedScope, run_id: RunId) -> RunRecord: ...
 
     async def read_raw_response(self, scope: TrustedScope, run_id: RunId) -> RawReceived:
-        """The stored response of a ``RECEIVED`` (or later) Run, for
-        re-normalization after a crash. NOT_FOUND if none was received."""
+        """The stored response bytes of a Run (a model response, or the error
+        response of a ``FAILED_NO_RESPONSE`` Run — the RunStatus tells which).
+        Used to re-normalize ``RECEIVED`` Runs after a crash. NOT_FOUND if the
+        Provider returned nothing."""
         ...
 
     async def read_tool_executions(
