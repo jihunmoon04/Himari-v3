@@ -6,6 +6,8 @@
 >
 > [Architecture](architecture.md) · [Decisions](decisions.md) · [Open questions](open-questions.md)
 
+> **모듈 구조 (V3-043 확정):** Prompt 핵심은 I/O 없는 순수 함수 `compose(PromptInputs) -> PreparedModelInput`이고, Data·Tool catalog·Environment 관측 수집은 얇은 `PromptContextLoader`가 맡습니다. 아래 순서·Trigger·그룹 규칙은 모두 `compose`의 계약이며 고정 입력으로 테스트합니다.
+
 ## 1. 확정된 논리적 순서: cache-first
 
 ```text
@@ -43,6 +45,7 @@ Provider-specific request parameters / continuation
 - **Trigger는 다음 Run을 시작하게 한 Event(또는 Event 그룹)를 지칭하는 논리적 역할**이다. 원본 Event를 별도로 복제·이동하지 않는다.
 - 한 Run이 ToolCall 여러 개를 낸 경우, 그 호출 그룹 및 대응하는 결과 그룹이 다음 Run을 촉발할 수 있다. Trigger가 단일 Event라고 고정하지 않는다.
 - 새로운 Run에서 이전 Trigger는 그저 이어진 Conversation의 과거 항목이 된다. Provider request를 구성할 때는 **같은 원본 Event를 한 번만** 전송한다.
+- **ask_user 답변(V3-P18 제안):** `answers_call`이 있는 `user_message`는 해당 `ask_user` call의 ToolResult로만 렌더링하고 독립 user 턴으로 다시 보내지 않는다. 두 원본 Event는 모두 보존한다. 세부 규칙은 [CPP §6.1](control-prompt-provider-v0.1.md).
 - 일부 ToolResult는 Conversation에 기록되지 않을 수 있다. 다음 모델 입력에 반드시 필요한 경우에는 Execution Records를 통해 참조하되, 중복·순서 오류 없이 provider-native history를 완전하게 재구성해야 한다. 재구성 불가능하면 fail closed 한다.
 
 예시:

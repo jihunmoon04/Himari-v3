@@ -6,7 +6,7 @@ HIMARI v3의 **아키텍처 결정 기록 및 설계 기준선**입니다. 현�
 
 ## 결정된 핵심 방향
 
-- **Run = LLM 호출 1회**. Control이 Run 반복을 조정하며, 모델의 final response 또는 question에서 반복을 중단합니다. v2의 Task/ManagerTurn 계층을 v3의 실행 기본 단위로 가져오지 않습니다.
+- **Run = LLM 호출 1회**. Control이 Run 반복을 조정하며, 모델의 final response 또는 question에서 반복을 중단합니다. **question은 suspending Tool `ask_user` 호출**로 표현하고, 대기 중에는 lock을 해제하며 사용자 답변을 원래 call의 ToolResult로 커밋한 뒤 재개합니다. v2의 Task/ManagerTurn 계층을 v3의 실행 기본 단위로 가져오지 않습니다.
 - **Data**는 Conversation의 원본 입력·출력을 exact하게 보존합니다. Prompt는 Data를 가공해 다음 모델 입력을 만들고, **최신 Prompt Snapshot 1개**(압축 문맥 + 최근 exact 입력 데이터)만 유지합니다.
 - **Tool 실패**는 ToolResult로 전달하며, 그 이후의 대응은 다음 Run에서 모델이 판단합니다. Runtime의 숨은 의미론적 자동 복구는 기본 동작이 아닙니다.
 - **Workspace**는 독립적인 수명을 가진 이종 작업 대상입니다(기본 제공 작업 공간, 사용자 로컬 PC, 원격 환경 등). Conversation 사이에서도 참조할 수 있습니다.
@@ -19,6 +19,15 @@ HIMARI v3의 **아키텍처 결정 기록 및 설계 기준선**입니다. 현�
 - **ToolCall은 충돌이 없으면 병렬 실행**할 수 있습니다. 같은 Workspace에서 부작용 범위가 불명확한 명령은 기본 직렬 처리하도록 설계합니다.
 - **Workspace 전용 소프트웨어 모듈은 만들지 않습니다.** Memory 등 Internal Tool은 Data의 공개 API를 직접 사용할 수 있으며, 환경 Tool은 Environment를 경유합니다.
 - **기본 Workspace는 사용자별 공유 Root** 아래 Conversation별 기본 cwd를 사용하며 허용된 같은 사용자 다른 Conversation 폴더에 접근할 수 있습니다. `inside/run_command`는 **OS Sandbox에서 실행하며 초기에는 네트워크 차단 전용 프로파일만 지원**합니다. 인간 Approval/Worktree 복제 격리는 초기 요구사항이 아니며, 향후 Web Search는 별도 Tool로 설계합니다.
+
+### 모듈 경계 개정 (2026-10-13, V3-039~046)
+
+- **확장 SPI 우선:** 새 Tool은 `ToolHandler`, 새 Provider는 `ProviderAdapter`, 새 Environment는 `EnvironmentPlugin` 하나를 구현해 등록합니다. Environment는 자기 Tool을 직접 제공합니다.
+- **Data Port는 Consumer별로 분리:** `ConversationLog` · `ArtifactStore` · `WorkspaceState` · `StateQuery` (P2 `ControlState`). 백엔드는 공유해도 계약 변경 단위는 sub-port입니다.
+- **Tool 구현은 실행 원장을 모릅니다:** `ToolOutcome`을 반환하고 원자 커밋은 Tool Dispatcher가 합니다.
+- **Prompt 핵심은 순수 함수** `compose(PromptInputs)`입니다.
+- **P0는 단일 프로세스 규모:** Conversation별 in-process lock으로 동시 실행을 막고, 크래시 후 중복은 송신·부작용 직전 영속 표시와 UNKNOWN 처리(자동 재실행 없음)로 막습니다. 분산 lease·fencing·다중 worker 복구는 P2로 연기합니다.
+- **계약은 코드로:** 각 모듈 `api.py`의 Protocol + frozen dataclass가 생기면 그것이 원본이고, import-linter로 의존 방향을 강제합니다.
 
 ## 문서
 
@@ -36,7 +45,7 @@ HIMARI v3의 **아키텍처 결정 기록 및 설계 기준선**입니다. 현�
 - [Sandbox Implementation v0.2 검토 초안](docs/sandbox-implementation-v0.2.md) — v2 코드 이식 지도, Environment 공개 계약, Sandbox 활성화·검증 및 bounded 명령 실행
 - **[Pytest 운영 정책](docs/testing-policy.md)** — 계약 변경에만 전체 pytest, 그 외에는 변경 모듈별 pytest (확정 V3-038)
 - [Control Pause/Resume 계약 초안](docs/control-pause-v0.1.md) — Run 간 정지·재개와 미완결 ToolCall 처리
-- [결정 기록](docs/decisions.md) — 현재까지 합의한 내용과 설계상 권고 사항
+- [결정 기록](docs/decisions.md) — 현재까지 합의한 내용과 설계상 권고 사항 (모듈 경계 개정 V3-039~046 포함)
 - [미결정 사항](docs/open-questions.md) — 초기 구현에 앞서 확정할 계약과 후속 결정
 
 ## 상태 및 규칙

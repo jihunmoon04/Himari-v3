@@ -16,32 +16,37 @@
 
 ## 2. 모듈 경계
 
-- **Control**: 각 작업의 흐름을 관리하고 Prompt → Provider 1회 → 응답 분기 → Tool 실행 → 다음 Run을 조정.
-- **Prompt**: Data에서 받은 읽기 모델과 현재 노출 가능한 도구 설명을 기반으로 provider용 요청 구성. 자체 영속 저장·전송 금지.
-- **Provider**: 모델별 통신, 지원 기능 협상, 응답·사용량·continuation 형태의 정상화. Run 반복 정책 금지.
-- **Tool**: 도구 정의·인자 검증·결과 형식·호출 연결, 충돌 안전성이 입증된 다중 ToolCall의 스케줄링. Internal Tool은 Data의 공개 API, Environment Tool은 Environment Port를 사용.
-- **Environment**: 특정 Workspace 연결/접근 방식, 정책 판정, 실행기 내부 구현. 다른 Environment의 구현을 직접 가져오지 않음.
-- **Data**: Execution Records(원본 Provider 요청·응답 포함), Conversation Events, Artifact, Registry, Binding 및 최신 Prompt Snapshot의 저장/조회 계약. Prompt 정책이나 실제 Tool 실행 금지.
+- **Control**: 각 작업의 흐름을 관리하고 Prompt → Provider 1회 → 응답 분기 → Tool 실행 → 다음 Run을 조정. question용 suspending Tool `ask_user`를 등록한다(V3-044). Conversation lock은 동시 실행만 막고, 크래시 후 중복 방지는 Data 영속 표시에 의존한다(V3-045).
+- **Prompt**: 얇은 `PromptContextLoader`가 Data 읽기 모델·Tool catalog를 모으고, **순수 함수 `compose(PromptInputs)`**가 provider-neutral 요청을 구성한다(V3-043). 자체 영속 저장·전송 금지.
+- **Provider**: `ProviderAdapter` SPI(`prepare_native_request`/`invoke_prepared`/`normalize`/`describe_capabilities`)로 모델별 통신, 지원 기능 협상, 응답 정규화. Run 반복 정책 금지.
+- **Tool**: `ToolHandler` SPI 정의, 카탈로그 취합, 인자 검증, 디스패치, 충돌 안전성이 입증된 다중 ToolCall의 스케줄링, **`ToolOutcome`의 원자 커밋**(V3-042). Tool 구현 자체는 Internal 모듈이나 Environment 패키지에 있다.
+- **Environment**: `EnvironmentPlugin` SPI. 특정 Workspace 연결/접근 방식, 정책 판정, 실행기 내부 구현, **자기 Tool(`tools()`) 제공**(V3-041). 다른 Environment의 구현을 직접 가져오지 않음.
+- **Data**: Execution Records(원본 Provider 요청·응답 포함), Conversation Events, Artifact, Registry, Binding 및 최신 Prompt Snapshot의 저장/조회 계약. **공개 Port는 `ConversationLog`/`ArtifactStore`/`WorkspaceState`/`StateQuery`/(P2)`ControlState`로 분리**(V3-039). Prompt 정책이나 실제 Tool 실행 금지.
 - **Workspace**: 독립 자원/식별 개념. **별도 소프트웨어 모듈을 만들지 않음**; Data Registry와 Environment 연결 계약으로 관리.
 - **Memory Tool (후속)**: Data 조회/수정 계약을 사용하고 Tool 인터페이스에 결과 제공. 특수 직접 결합 금지.
 
 ## 3. 허용하는 의존성의 성격
 
 ```text
-Composition Root (구현 조립/의존성 주입)
-   ├── Control      → Prompt Port, Provider Port, Tool Port, Data Port
-   ├── Prompt       → Data Read Port, Tool Catalog/Env Description Port
-   ├── Tool         → Internal Tool using Data Port OR Environment Execution Port
-   ├── Tool Scheduler → verified resource conflict metadata, never command-string equality alone
-   ├── Environment  → Data Binding/Workspace Port
+Composition Root (구현 조립/의존성 주입 + 플러그인 등록)
+   ├── Control      → Prompt Port, ProviderAdapter, Tool Port, Data.ConversationLog
+   ├── Prompt       → (loader만) Data.ConversationLog / StateQuery, Tool Catalog, optional Env observe
+   │                  compose() 는 의존성 없음
+   ├── Tool         → ToolHandler SPI 소유, Dispatcher → Data.ConversationLog(+ArtifactStore) 커밋
+   │                  Scheduler → verified resource conflict metadata, never command-string equality alone
+   ├── Internal Tools (memory/plan/note) → Tool SPI, Data.ArtifactStore 읽기
+   ├── Environment  → Tool SPI(구현해서 제공), Data.WorkspaceState
    ├── Provider     → provider-specific SDK/adapter
    └── Data         → persistence backend
+
+의존 방향: 플러그인(Environment 구현·Internal Tool·Provider Adapter) → 소유 모듈의 api.py.
+소유 모듈은 플러그인 구현을 import하지 않는다. 연결은 Composition Root에서만.
 
 공유: 공개된 작은 타입·프로토콜·에러 의미
 금지: 다른 모듈의 private 구현, Repository/SQL 직접 호출, 역방향 호출·순환 import
 ```
 
-모듈은 상대 모듈의 **public port**를 의존성 주입받는다. Port를 상대 모듈 API에 두거나 소유자별 contracts 패키지에 둘지는 추후 확정한다. 거대한 하나의 공용 DTO 파일에 모든 내부 모델을 밀어 넣지 않는다.
+모듈은 상대 모듈의 **public port**를 의존성 주입받는다. **Port는 Owner 모듈의 `api.py`에 `typing.Protocol` + frozen dataclass로 선언하고, 코드가 생기면 그것이 계약의 원본이다(V3-046).** 거대한 하나의 공용 DTO 파일에 모든 내부 모델을 밀어 넣지 않는다.
 
 Data를 통한 간접 결합에도 주의한다. 테이블/컬럼을 공개 계약으로 삼지 않고, 의미가 안정적인 읽기 모델/명령 API만 노출한다.
 
@@ -64,7 +69,7 @@ Data를 통한 간접 결합에도 주의한다. 테이블/컬럼을 공개 계�
 
 ## 5. 테스트로 경계 강제
 
-- **의존성 규칙:** import graph를 검사해 다른 모듈 private 심볼/역방향 참조/순환 의존을 차단.
+- **의존성 규칙:** import-linter(또는 동등 도구)로 import graph를 검사해 다른 모듈 private 심볼(`api.py` 외)/역방향 참조/순환 의존을 차단. 첫 Skeleton부터 CI에 넣는다(V3-046).
 - **제공자 계약 테스트:** 모든 Provider Adapter가 동일한 공통 성공/오류/취소 계약에 맞게 정규화되는지 검증.
 - **Environment 계약 테스트:** Fake Workspace에 연결한 Inside 구현에서 권한, 실패, 취소, 작업 결과를 검증.
 - **Data 계약 테스트:** 저장 구현을 교체해도 동일한 exact history, snapshot, registry 조회 의미를 유지.
@@ -72,6 +77,7 @@ Data를 통한 간접 결합에도 주의한다. 테이블/컬럼을 공개 계�
 - **Prompt 계약 테스트:** Stable Prefix → exact Conversation → Current State 순서, Trigger 무복제, native ToolCall/Result 그룹 인접성과 Provider별 합법적인 state/continuation 직렬화를 검증.
 - **Scheduler 교체 테스트:** 동일 Workspace 명령 충돌, 서로 다른 검증된 파일 수정, 다른 Conversation의 동일 자원 충돌을 검증.
 - **교체 테스트:** 모듈의 구체 구현을 최소 Fake/대체 어댑터로 바꿔도 나머지 모듈 코드 수정 없이 핵심 경로가 작동하는지 검증.
+- **SPI 적합성 테스트:** `ToolHandler`·`EnvironmentPlugin`·`ProviderAdapter`마다 재사용 가능한 conformance suite를 두고, 새 플러그인은 그 suite만 통과하면 등록 가능하게 한다(V3-040).
 
 테스트는 공통 contract suite를 구현체별로 재사용한다. v2처럼 검증을 위한 중복 계층과 과도한 전체 테스트를 늘리지 않는 것을 목표로 한다.
 
@@ -81,16 +87,18 @@ Data를 통한 간접 결합에도 주의한다. 테이블/컬럼을 공개 계�
 
 ```text
 src/himari/
-    control/
-    data/
-    prompt/
-    provider/
-    tool/
-    environment/
-        inside/
-    # workspace/ 전용 패키지 없음: Data Registry + Environment Port 사용
-    contracts/          # 최소한의 공개 타입 또는 모듈별 ports로 대체 가능
-    bootstrap/          # Composition Root
+    control/        api.py   # drive/resume, ask_user ToolHandler
+    data/           api.py   # ConversationLog, ArtifactStore, WorkspaceState, StateQuery (P2 ControlState)
+    prompt/         api.py   # PromptInputs, compose(), loader
+    provider/       api.py   # ProviderAdapter SPI
+        openai/              # Adapter 구현 (플러그인)
+    tool/           api.py   # ToolHandler SPI, ToolOutcome, Dispatcher/Scheduler
+        internal/            # memory/plan/note ToolHandler (플러그인)
+    environment/    api.py   # EnvironmentPlugin SPI
+        inside/              # Inside 구현 + run_command/파일 ToolHandler + sandbox (플러그인)
+    # workspace/ 전용 패키지 없음: Data.WorkspaceState + EnvironmentPlugin 사용
+    # contracts/ 공용 패키지 없음: 각 Owner의 api.py
+    bootstrap/               # Composition Root
 ```
 
 정확한 경로와 패키지 경계는 첫 최소 실행 경로를 구현하기 전에 확정한다. 문서를 작성했다고 코드 Skeleton이 구현된 것은 아니다.

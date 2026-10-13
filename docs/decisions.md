@@ -11,7 +11,7 @@
 | ID | 상태 | 결정 |
 | --- | --- | --- |
 | V3-001 | Confirmed | **Run = LLM 요청/응답 1회**. 여러 Run의 집합을 Task로 만드는 실행 기본 계층을 사용하지 않는다. |
-| V3-002 | Confirmed | 별도 **Control** 모듈이 Run 반복을 제어하며, 모델의 final response 또는 question 이후 반복을 중단한다. |
+| V3-002 | Confirmed | 별도 **Control** 모듈이 Run 반복을 제어하며, 모델의 final response 또는 question 이후 반복을 중단한다. question은 `ask_user` Tool 호출로 표현한다(V3-044). |
 | V3-003 | Confirmed | Data의 **Conversation 원본 입력/출력은 exact**. Prompt용 가공 데이터와 분리한다. |
 | V3-004 | Confirmed | **Prompt**는 Data의 기록을 이용하여 다음 LLM 입력을 구성한다. 최신 Prompt Snapshot은 **1개**만 보존하며 압축 문맥 + 최근 exact 항목 방식이다. |
 | V3-005 | Confirmed | Tool 실패는 **실패 ToolResult를 모델에 전달(A)**한다. Runtime이 의미론적 자동 복구를 대신하지 않는다. |
@@ -48,7 +48,17 @@
 | V3-036 | Confirmed | **기본 Workspace Sandbox 안의 네트워크 접근은 기본 차단**한다. 향후 Web Search는 명령 Sandbox와 별도의 Tool/신뢰된 네트워크 경계로 구현할 수 있으며, 이를 이유로 run_command의 네트워크 권한을 자동 부여하지 않는다. |
 | V3-037 | Confirmed | **초기 Sandbox는 네트워크 차단 전용 단일 프로파일**만 제공한다. `connected`/도메인 allowlist/프록시 등 조건부 허용 모드는 초기 범위에서 제외한다. 네트워크 namespace 격리를 검증하지 못하면 `run_command` 실행 거부. 호스트 서비스로 연결되는 Unix 소켓 등 우회 경로도 차단한다. 향후 네트워크 허용은 별도 정책 변경·검증을 요구한다. |
 | V3-038 | Confirmed | **공개 모듈 계약을 생성·변경·제거할 때만 전체 pytest를 실행**한다. 공개 계약을 유지하는 내부 구현 변경·버그 수정·리팩터링에서는 변경된 **모듈별 pytest만 실행**한다(복수 모듈 변경이면 해당 모듈들만). 서명뿐 아니라 오류, 권한, 부작용, 호출 순서·취소 의미 등 계약 보장 변화도 공개 계약 변경이다. Sandbox 실제 호스트 격리 검증은 pytest 범위와 별도의 보안 게이트다. [testing-policy.md](testing-policy.md). |
+| V3-039 | Confirmed | **Data 공개 Port를 Consumer별로 분리**한다: `ConversationLog`(Event·Run·ToolExecution·PromptSnapshot), `ArtifactStore`(Plan/Note), `WorkspaceState`(Registry·Activation·Binding·cwd 매핑·FileMetadata), `ControlState`(P2). 저장 백엔드·트랜잭션은 하나로 공유할 수 있으나 **계약 변경의 단위는 sub-port**다. 하나의 거대 Data Port를 모든 모듈이 의존하는 구조를 피한다. |
+| V3-040 | Confirmed | **확장 지점 SPI를 내부 프로토콜보다 먼저, 가장 작게 확정**한다. 대상은 `ToolHandler`, `ProviderAdapter`, `EnvironmentPlugin` 세 가지다. 새 Tool·Provider·Environment 추가가 다른 모듈의 수정 없이 패키지 하나로 끝나는 것을 목표로 한다. |
+| V3-041 | Confirmed | **Environment가 자신의 Tool을 직접 제공**한다(`EnvironmentPlugin.tools()`). Tool 모듈은 카탈로그 취합·인자 검증·디스패치·스케줄링·결과 커밋만 담당한다. `inside/run_command`, Inside 파일 Tool은 Inside Environment 패키지가 소유한다. |
+| V3-042 | Confirmed | **Tool 구현은 실행 원장(ledger)을 알지 않는다.** `ToolHandler.run()`은 `ToolOutcome(model_result, artifact_mutations, …)`을 반환하고, Artifact 변경 + ToolExecution 종결 + Conversation Event의 원자 커밋은 Tool Dispatcher가 Data Port로 수행한다. Tool 구현은 `run_id`/`call_id`로 트랜잭션을 직접 다루지 않는다. |
+| V3-043 | Confirmed | **Prompt 핵심은 I/O 없는 순수 함수** `compose(PromptInputs) -> ModelInput`이다. Data·Tool catalog·Environment 관측 수집은 Prompt 모듈 안의 얇은 `PromptContextLoader`가 담당한다. 압축·캐시 실험은 Fake 없이 입력 데이터만으로 테스트할 수 있어야 한다. |
+| V3-044 | Confirmed | **question은 `ask_user` Control Tool로 표현**한다. 정규화 출력은 `FINAL \| TOOL_CALLS` 두 가지다. `ask_user`는 즉시 완료 Tool과 구분되는 **suspending Tool**이다. 호출 그룹을 커밋한 뒤 Control은 `WAITING_FOR_USER`로 멈추고 **Conversation lock을 해제**한다. 사용자 응답이 오면 **원래 `call_id`에 대응하는 ToolResult를 커밋한 뒤** 새 Run을 시작한다. 재시작 후에도 대기 중인 호출을 Data의 영속 기록만으로 식별할 수 있어야 하며, 새 Task 계층을 도입하지 않는다. 텍스트 휴리스틱으로 question을 추정하지 않는다. *(2026-10-13 독립 검수 B2 반영)* |
+| V3-045 | Confirmed | **P0는 단일 프로세스·단일 사용자 규모로 단순화**하되, **크래시 후 실행 중복 방지는 lock이 아니라 영속 상태로 보장**한다. ① 같은 Conversation 직렬화(V3-024)는 프로세스 내 Conversation별 lock(예: `asyncio.Lock`)으로 실현한다. 이 lock은 **살아 있는 프로세스 안의 동시 실행만** 막으며, 크래시 후 중복 송신·중복 부작용은 막지 못한다. ② **Provider 송신 직전(`DISPATCH_CLAIMED`)과 부작용 있는 Tool 실행 직전(`EXECUTION_CLAIMED`)의 최소 영속 표시는 P0에 둔다.** ③ 표시 후 결과 기록 전에 크래시하면 재시작 시 `OUTCOME_UNKNOWN`(Run) / `UNKNOWN`(Tool)으로 처리하고 **자동 재실행하지 않는다**. ④ 분산 lease, `control_generation` fencing, 다중 worker 경합, UNKNOWN 정밀 reconcile 절차, 복잡한 CAS는 P2로 연기한다. Run별 원본 요청·응답 보존(V3-018)은 유지한다. *(2026-10-13 독립 검수 B1 반영)* |
+| V3-046 | Confirmed | **계약은 코드로 선언**한다. 각 Owner 모듈의 `api.py`(`typing.Protocol` + frozen dataclass)가 생기면 그것이 계약의 원본이고, 문서는 설계 근거·결정 이력을 담는다. 모듈 간 import 방향은 import-linter 등 정적 검사로 강제한다. 문서 간 이름 불일치는 코드 선언 시점에 해소한다. |
 
+
+**V3-039~046 승인 근거 (2026-10-13):** 독립 검수 C3("승인 근거가 대화만으로 확인되지 않음")에 따라 사용자에게 항목별 상태를 다시 물었고, 사용자가 **V3-039~046을 Confirmed로 명시 승인**했다(Claude Code 세션, PR #1 병합 직전). 그 이전 근거: 모듈 설계 검토 직후 "이 방향으로 문서 수정해서 push" 요청, 독립 검수 후 "V3-039~046의 단순화 방향은 유지" 지시. **Confirmed 범위는 각 항목의 방향과 원칙**이다. 함수 시그니처·DTO 필드·구체 메커니즘(ask_user 대기 판정, 답변 재생 규칙, Environment 등록 방식, raw 보존 기준 등)은 V3-P14~P19로 따로 관리하며 Confirmed가 아니다. V3-044·045 본문은 검수 B1·B2에서 사용자가 지시한 요구사항으로 개정했다.
 
 ## B. 현재 채택을 권고하지만 세부 확정 전인 설계
 
@@ -61,12 +71,18 @@
 | V3-P05 | Proposed | public port, 불변 DTO, 명시적 오류/취소 계약, 외부 모듈의 내부 구현 import 금지 및 자동 의존성 검사를 채택한다. |
 | V3-P06 | Proposed | 초기에는 한 프로세스 내 의존성 주입과 계약 테스트를 사용하며, 프로세스 수준 장애 격리는 필요시 확장한다. |
 | V3-P07 | Proposed | Tool의 Workspace 요구 여부와 Environment 소속 여부를 **별개의 메타데이터**로 관리한다. |
-| V3-P08 | Proposed | Tool Dispatcher는 **Internal (Data 공개 API) / Environment (Workspace 실행 Port)**를 분리한다. 필요시 외부 서비스 Connector 유형을 추가한다. |
+| V3-P08 | Refined by V3-041/042 | Tool Dispatcher는 **Internal (Data 공개 API) / Environment (Workspace 실행 Port)**를 분리한다. → Environment Tool은 해당 Environment 패키지가 `ToolHandler`로 제공하고, Internal Tool도 같은 `ToolHandler` SPI를 구현한다. 원자 커밋은 Dispatcher가 수행한다. 필요시 외부 서비스 Connector 유형을 추가한다. |
 | V3-P09 | Superseded by V3-027 | Plan/Note 원본을 Data에 저장하는 결정으로 승격. Revision/삭제·Outside projection 구현은 여전히 미정. |
 | V3-P10 | Proposed | 같은 Workspace의 범위 불명 `run_command`는 기본 직렬, 서로 다른 검증된 파일 범위 수정은 조건부 병렬. 다른 Conversation의 같은 자원 충돌도 검증한다. |
 | V3-P11 | Proposed | Artifact Revision(CAS) 및 Data 트랜잭션으로 상태 변경 + Tool 완료 기록 + 필요한 Conversation Event를 원자적으로 커밋한다. |
 | V3-P12 | Proposed | 같은 Run의 여러 ToolCall이 모두 terminal 상태에 도달한 뒤 다음 Run을 시작하며, 입력의 원래 Call 순서와 완료 순서를 별도 보존한다. |
 | V3-P13 | Proposed | `workspace_requirement`는 `None / Required / Default`로 구분한다. `Default`는 기본 Workspace 사용으로 명시적 권한 검증이 필요하다. |
+| V3-P14 | **Open** | **P0 Provider raw 요청 보존 기준은 미확정**이다. 후보 A: transport가 실제 송신한 body와 바이트 동일(SDK 재직렬화 우회 필요). 후보 B: Adapter가 transport에 넘긴 직렬화 body(semantic 원본). 어느 쪽이든 **송신 전 영속(V3-018)**과, RunRecord에 저장 표현의 종류를 표기해 **실제보다 강한 정확성을 주장하지 않는 것**은 불변이다. CP-02 / DR-02에서 결정. |
+| V3-P15 | Proposed | `ask_user`는 P0에서 **ToolCall 그룹의 유일한 호출**일 때만 허용하고, 다른 호출과 섞이면 `INVALID_MODEL_OUTPUT`으로 거부(raw 보존, 효과 없음)한다. 혼합 허용은 후속 검토. |
+| V3-P16 | Proposed | Tool 노출 텍스트(commentary)와 ToolCall이 함께 오면 `TOOL_CALLS`로 정규화하고 텍스트는 같은 assistant Event의 블록으로 보존한다. final 신호로 해석하지 않는다. |
+| V3-P17 | Proposed | **ask_user 대기의 영속 근거:** 최신 `PROJECTED` Run의 ToolCall 그룹이 단일 `ask_user` 호출이고 그 ToolExecution이 `PENDING`이면 Conversation은 `WAITING_FOR_USER`다. 상태 값·테이블을 추가하지 않는 **파생 상태**다. 답변은 `user_message` Event(`answers_call` 포함) + ToolExecution `PENDING → SUCCEEDED` + `tool_result` Event를 한 트랜잭션(T7a)으로 커밋한다. |
+| V3-P18 | Proposed | **답변 재생 규칙:** `answers_call`이 있는 `user_message`는 native 이력에서 **해당 call의 ToolResult로 한 번만** 렌더링하고 독립 user 턴으로 다시 보내지 않는다. 원본 Event 두 개는 모두 보존한다. ToolCall 그룹은 원래 ordinal 순서로 assistant 호출 바로 뒤에 결과를 붙인다. |
+| V3-P19 | Proposed | **Environment 등록:** `EnvironmentPlugin`은 kind당 하나를 bootstrap에서 등록하고, `tools()`는 kind 수준의 고정 ToolHandler 목록을 반환한다. Conversation의 Tool 카탈로그는 Internal Tool + `ask_user` + **그 Conversation에 활성 Instance가 있는 kind의 Tool**이다. 대상 Instance·Workspace는 호출 인자의 `workspace_binding_id`(또는 `Default` 규칙)로 Dispatcher가 해석해 `ToolContext`에 넣고, Environment는 실행 시 다시 검증한다. P0는 Conversation당 kind별 활성 Instance 최대 1개. |
 
 ## C. 명시적으로 미결정인 영역
 
@@ -86,8 +102,11 @@
 - **Sandbox Environment 구현 세부 계약은 [Sandbox Implementation v0.2 검토 초안](sandbox-implementation-v0.2.md)**에 정리한다. V3-032~037 정책 외의 DTO, Admission, Activation, 실행 한도와 Linux 검증 방식은 아직 확정 전이다.
 - Pause/Resume를 위한 ConversationControlState·안전 경계·미완결 ToolCall 복구는 [control-pause-v0.1.md](control-pause-v0.1.md) 검토 초안이며 **현재 확정 정책이 아니다**.
 - v2 데이터/기능 이식의 범위와 절차.
+- **SPI 세부 시그니처(V3-040)**: `ToolHandler`/`ToolContext`/`ToolOutcome`, `ProviderAdapter`, `EnvironmentPlugin`의 필드·오류 분류는 첫 코드 Skeleton에서 `api.py`로 확정한다.
+- **P0에 남는 내구성 장치(V3-045)**: 송신 직전 `DISPATCH_CLAIMED`, 부작용 Tool 실행 직전 `EXECUTION_CLAIMED`, 재시작 시 `OUTCOME_UNKNOWN`/`UNKNOWN` 처리, 자동 재실행 금지. **UNKNOWN Tool을 사용자가 명시적으로 해소하는 P0 방식**은 미결정(Q-37).
+- **P2로 연기된 내구성 장치(V3-045)**: 분산 lease, `control_generation` fencing, 다중 worker claim 경합, UNKNOWN 정밀 reconcile 절차. 연기일 뿐 폐기가 아니며 도입 시 공개 계약 변경으로 취급한다.
 
-각 항목의 우선순위와 완료 조건은 [미결정 항목](open-questions.md)에서 관리한다. 공개 계약의 Owner·Consumer·데이터 출처 지도는 [contracts.md](contracts.md)에서 관리한다. 상세 흐름은 [Prompt Composition](prompt-composition.md), [Data and Tools](data-and-tools.md), [Data Contract v0.1](data-contract-v0.1.md) 참조.
+각 항목의 우선순위와 완료 조건은 [미결정 항목](open-questions.md)에서 관리한다. 공개 계약의 Owner·Consumer·데이터 출처 지도는 [contracts.md](contracts.md)에서 관리한다. 상세 흐름은 [Prompt Composition](prompt-composition.md), [Data and Tools](data-and-tools.md), [Data Contract v0.2](data-contract-v0.2.md) 참조.
 
 ## D. v2에서 자동 이식하지 않는 구조
 

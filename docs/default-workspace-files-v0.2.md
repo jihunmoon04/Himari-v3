@@ -135,7 +135,7 @@ Immutable published attachment/version (recommended)
 | --- | --- | --- | --- | --- |
 | FILE-01 | Environment | Inside File API → Tool / Upload | current working bytes: default Workspace | 본 문서 §4; planned `environment/api.py` |
 | FILE-02 | Data | File metadata Port → Prompt/UI/Tool | Data FileAssetRecord + attachment association | 본 문서 §4; planned `data/api.py` |
-| FILE-03 | Tool | Structured file tools → Control/Provider | FILE-01 + FILE-02 | 본 문서 §3–4; planned `tool/api.py` |
+| FILE-03 | Environment(Inside) | Inside가 제공하는 structured file ToolHandler → Tool Dispatcher (V3-041) | FILE-01 + FILE-02 | 본 문서 §3–4; SPI `tool/api.py`, 구현 `environment/inside/` |
 | FILE-04 | Interface | Web/CLI upload/download → User/Control | approved immutable published bytes + Data metadata (proposed) | 본 문서 §4; planned interfaces |
 | FILE-05 | Prompt | AttachmentManifest → Control | Data references + included bytes/version | 본 문서 §4; planned `prompt/api.py` |
 | **ENV-04** | Environment | SandboxCommandExecutor → Tool | validated Workspace binding + Sandbox profile + actual process | 본 문서 §3; planned `environment/api.py` |

@@ -2,7 +2,7 @@
 
 기준: **2026-10-13**. 이 문서는 아직 확정되지 않은 계약만 관리한다. 이미 합의한 방향은 [Decision Register](decisions.md)에 둔다.
 
-연관: [Prompt Composition](prompt-composition.md) · [Data / Tools / Artifacts](data-and-tools.md) · [Data Contract v0.1 — 검토 초안](data-contract-v0.1.md) · [CurrentState Contract v0.1 — 검토 초안](current-state-contract-v0.1.md) · [Module Boundaries](module-boundaries.md)
+연관: [Prompt Composition](prompt-composition.md) · [Data / Tools / Artifacts](data-and-tools.md) · [Data Contract v0.2 — 검수 후보](data-contract-v0.2.md) · [CurrentState Contract v0.1 — 검토 초안](current-state-contract-v0.1.md) · [Module Boundaries](module-boundaries.md)
 
 Data [v0.2 구현 가능 후보](data-contract-v0.2.md)에 **DR-01~DR-09 독립 검수 항목**, 이전 [v0.1](data-contract-v0.1.md)에 DC-01~DC-10 설계 쟁점을 정리했다. [Control–Prompt–Provider v0.1](control-prompt-provider-v0.1.md)에 **CP-01~CP-07 경계 검수 항목**이 있다. 기존 Q-01~Q-06은 아직 완료가 아닌 미결정으로 유지한다.
 
@@ -31,12 +31,12 @@ Data [v0.2 구현 가능 후보](data-contract-v0.2.md)에 **DR-01~DR-09 독립 
 
 | ID | 주제 | 아직 확정해야 할 계약 | 권장 순서 |
 | --- | --- | --- | --- |
-| Q-01 | Public Ports / DTO | 모듈별 public API 소유, 정규화된 입력/출력, 오류 모델, 의존성 주입 위치 | **1** |
-| Q-02 | Control / Run | **동일 Conversation 직렬화는 확정**. final/question/tool-call 정규화, 복수 호출 종료 배리어·다음 Run 경계, 사용자 재개 방식과 lock/lease 복구 구현 | **2** |
+| Q-01 | Public Ports / DTO | **방향 확정(V3-039/040/046)**: Data sub-port 분리, SPI 3종(`ToolHandler`/`ProviderAdapter`/`EnvironmentPlugin`) 우선, `api.py` 코드 선언. 남은 것: 실제 시그니처·오류 모델 | **1** |
+| Q-02 | Control / Run | **동일 Conversation 직렬화는 확정**. P0는 프로세스 내 lock(동시 실행) + 송신·부작용 직전 영속 표시(크래시 중복)(V3-045). question은 suspending Tool `ask_user`(V3-044), 대기 판별·답변 커밋은 V3-P17. 남은 것: 복수 호출 종료 배리어·`ask_user` 혼합(V3-P15) | **2** |
 | Q-03 | Data schema | kind별 불변 Payload 원칙 확정. **[Data v0.2](data-contract-v0.2.md)**에 DTO/state/트랜잭션/Port 후보 구체화; DR-01~09 검수·freeze 필요 | **1** |
 | Q-04 | Prompt / Provider boundary | **[Control–Prompt–Provider v0.1](control-prompt-provider-v0.1.md)**에 중립 입력/native prepare/send/normalize 초안. Provider별 role/SDK exact raw capture 검증 및 CP-01~07 확정 필요 | **2** |
-| Q-05 | Tool API | 스키마/네임스페이스, Internal/Environment 디스패치, Workspace 요구 플래그, 결과 표준형/기록 정책 | **2** |
-| Q-06 | Contract enforcement | Private import 차단, 모듈 교체/계약 테스트, 최소 필수 실패 시나리오 | **3** |
+| Q-05 | Tool API | **방향 확정(V3-041/042)**: Environment가 `tools()`로 자기 Tool 제공, Tool 구현은 `ToolOutcome` 반환·Dispatcher가 커밋. 남은 것: `ToolDefinition`/`ToolContext`/`ToolOutcome` 필드, 네임스페이스, 결과 기록 정책 | **1** |
+| Q-06 | Contract enforcement | import-linter + SPI conformance suite + Fake 교체 테스트를 첫 Skeleton부터 도입(V3-046). 남은 것: 도구 선택·최소 실패 시나리오 | **2** |
 | Q-19a | Raw retention security | 저장될 원본의 인증/비밀 정보 제외, 접근 권한, 안전한 실패 처리 | **1** |
 | Q-21 | Trigger inclusion | **Prompt의 기록 선택·검증과 Provider의 native 직렬화 소유권은 확정**. ToolCall 그룹 결손 검사·오류 형식, Conversation 밖의 결과 포함 시점 | **2** |
 | Q-22 | Prompt cursor | Latest Snapshot의 coverage/cursor와 Conversation 최신 위치 및 Artifact Revision 정합성 | **3** |
@@ -67,7 +67,9 @@ P0 완료 목표: **Fake Data/Provider/Tool로 모델 호출 1회 + tool group +
 | --- | --- | --- |
 | Q-34 | Pause semantics | Provider in-flight soft pause 후 Run 응답 저장, ToolCall pending 처리, 요청 지연 한계 |
 | Q-35 | Resume cursor | pending/group-complete 여부, 중복 Tool/Run 재실행 방지, 사용자 입력 큐 |
-| Q-36 | Control state authority | conversation execution state, lease/fence, crash 복구, cancel / final / question 우선순위 |
+| Q-36 | Control state authority | **lease/fence·다중 worker 경합은 P2(V3-045)**. P0 남은 것: cancel / final / `ask_user` 대기 우선순위 |
+| Q-37 | UNKNOWN 해소 (P0) | 재시작 후 `UNKNOWN` Tool이 다음 Run을 막을 때 사용자가 명시적으로 해소하는 최소 방식(예: 결과 불명 사실을 그대로 담은 종결 기록). 자동 해소 금지 |
+| Q-38 | ask_user 세부 | 대기 취소·만료, 답변 첨부파일의 Provider별 ToolResult 표현, `ask_user` 혼합 허용(V3-P15) |
 
 ## P1 — 첫 Inside Environment 및 실질 Tool 실행 전
 
@@ -99,14 +101,16 @@ P1은 Workspace 전용 소프트웨어 모듈을 다시 도입하는 단계가 �
 | Q-25 | Cache performance | tool schema 안정성, provider별 marker/TTL/히트 관측, 배치 순서에 따른 비용·품질 비교 |
 | Q-26 | Artifact origin atomicity | Internal Tool의 Artifact 변경 + ToolResult/Event 원자 트랜잭션, revision 중복 방지 |
 | Q-27 | CurrentStateProjection | **CS-01~08 초안 작성됨**. 합성 소유 위치, 기본 Binding 선택 스코프, Data consistency/version token, Environment 연결 관측, Provider-native 표현의 최종 검수·확정 필요 |
-| Q-28 | Conversation serialization | 단일 Control 흐름/Run 직렬화를 구현할 lease/queue의 범위, 취소/중단 후 ownership 회수 및 신규 사용자 입력 정책 |
+| Q-28 | Conversation serialization | **P0는 프로세스 내 lock(V3-045)**. lock은 크래시 후 중복을 막지 않으며 그것은 Data T3/T6/T-R 담당. P2: lease/queue 범위, 취소/중단 후 ownership 회수. 신규 사용자 입력 정책은 P0에서 결정 |
 
-## 다음 설계 작업 제안
+## 다음 설계 작업 제안 (2026-10-13 개정: V3-039~046 반영)
 
-1. **[Data v0.2 독립 설계 검수](data-contract-v0.2.md) (Q-01, Q-03, Q-19a)** — immutable canonical Event kinds, actual transmitted raw bytes, durable once-only send claim, Tool+Artifact 원자성의 DR-01~09 결정.
-2. **[Control–Prompt–Provider v0.1 검수](control-prompt-provider-v0.1.md) (Q-02, Q-04, Q-21~22, Q-27)** — native role/Tool 그룹 합법성, final/question 및 mixed output, API 실제 bytes 송신, Snapshot basis 정합성의 CP-01~07.
-3. **Control/Tool 계약 (Q-02, Q-05, Q-28)** — 동일 Conversation의 직렬화는 지키되 Tool 병렬성·호출 그룹 종료·오류·실행 기록의 일관성 확인.
-4. **사용자별 공유 Root + Conversation별 cwd + OS Sandbox·네트워크 기본 차단 + run_command (P0-F, Q-29~33)** 계약을 상세화한 뒤, **Pause/Resume (P0-C, Q-34~36)**을 Control 계약과 연결한다. 장기 ManagedProcess는 후속 검토.
-5. Artifact·Memory·Plan·Compaction과 실제 Provider 캐시 튜닝은 각 기능의 상세 설계 단계에서 결정.
+문서를 더 늘리기보다 **최소 코드 Skeleton으로 계약을 검증**하는 단계로 넘어간다.
+
+1. **SPI·Port를 코드로 선언 (Q-01, Q-05, Q-06)** — `tool/api.py`(`ToolHandler`, `ToolOutcome`), `provider/api.py`(`ProviderAdapter`), `environment/api.py`(`EnvironmentPlugin`), `prompt/api.py`(`PromptInputs`, `compose`), `data/api.py`(`ConversationLog`, `ArtifactStore`, `WorkspaceState`, `StateQuery`). import-linter 설정 포함.
+2. **Fake로 핵심 경로 검증 (P0 완료 목표)** — Fake Provider/Tool + 인메모리 Data로 `User → Run → ToolCall 그룹 → Run → FINAL`, `ask_user → WAITING_FOR_USER → 응답 → Run` 경로.
+3. **Data v0.2·CPP v0.1 잔여 검수** — P0 범위(V3-045)의 T3/T6/T-R·T7a, raw 보존 기준(V3-P14), 재생 규칙(V3-P18)과 Provider 배열 테스트 R1–R7. fencing/lease는 P2.
+4. **Inside Environment + Sandbox(v2 이식) (P0-F, Q-29~33)** — `EnvironmentPlugin`으로 구현.
+5. Pause/Resume(P0-C)은 P0 lock 위에서 최소 형태로, 영속 ControlState는 P2. Artifact·Memory·Compaction·캐시 튜닝은 각 기능 단계에서 결정.
 
 실제 구현 전까지 '정책 방향 확정'과 '구체 알고리즘·스키마 미결정'을 혼동하지 않는다.
