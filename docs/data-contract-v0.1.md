@@ -139,7 +139,7 @@
 | Artifact | Data: Conversation-scoped Plan/Note 본문과 revision | 현재 Plan/Note 중 Prompt에 필요한 항목 |
 | Live Connectivity | Environment: 대상 Workspace의 온라인/연결/실행 가능 여부 관측 | 필요할 때만 최신 관측을 반영; 저장된 활성 상태로 온라인을 추정 금지 |
 
-`CurrentStateProjection`은 **새로운 authoritative 원본/Workspace 전용 모듈이 아니라 여러 공개 Port의 합성된 읽기 DTO**다. 누가 합성을 수행할지는 Composition Root/Prompt 경계 구현 시 결정하되, 각 원본 소유권은 이전 표에 따른다.
+`CurrentStateProjection`은 **새로운 authoritative 원본/Workspace 전용 모듈이 아니라 여러 공개 Port의 합성된 읽기 DTO**다. 상세 Port, 필드/상태 범위 및 기본 Binding 정책 초안은 [CurrentState Contract v0.1](current-state-contract-v0.1.md)을 참고한다. 누가 합성을 수행할지는 Composition Root/Prompt 경계 구현 시 결정하되, 각 원본 소유권은 이전 표에 따른다.
 
 ```text
 Data: Registry + Activations + Bindings + Settings + Artifacts
