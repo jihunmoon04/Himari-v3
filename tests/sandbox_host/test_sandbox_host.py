@@ -17,7 +17,7 @@ from typing import Any
 import pytest
 from testkit import SCOPE, calls, final, user
 
-from himari.bootstrap import build_in_memory_runtime
+from himari.bootstrap import build_runtime
 from himari.common import (
     BindingId,
     CallId,
@@ -148,7 +148,7 @@ def test_full_stack_through_the_driver(tmp_path: Path, backend: SandboxBackend) 
     inside.provision(WorkspaceId("ws_alice"))
     provider = ScriptedAdapter([calls(("inside/run_command", {"argv": ["sh", "-c", "echo 6*7 | bc 2>/dev/null || echo 42"]})),
                                 final("42")])
-    rt = build_in_memory_runtime(provider, environments=[inside])
+    rt = build_runtime(provider, environments=[inside])
     rt.store.create_conversation(SCOPE)
     rt.store.activate_environment(SCOPE, INSIDE, WorkspaceId("ws_alice"))
 

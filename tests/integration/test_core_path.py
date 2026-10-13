@@ -11,6 +11,8 @@ from typing import Any
 
 import pytest
 from testkit import (
+    forget_unknown_policy,
+    restart,
     FAKE,
     FakeEnvironment,
     FOREIGN,
@@ -59,7 +61,7 @@ from himari.provider.api import (
 from himari.provider.openrouter import OpenRouterAdapter
 from himari.provider.scripted import RawBody, ScriptedAdapter
 from himari.tool.dispatcher import UNKNOWN_OUTCOME_RESULT
-from himari.bootstrap import build_in_memory_runtime
+from himari.bootstrap import build_runtime
 from himari.tool.api import ConversationRecord, EffectProfile, ToolOutcome, ToolStatus, WorkspaceRequirement
 
 
@@ -129,7 +131,7 @@ def test_ask_user_waits_survives_restart_and_replays_answer_once() -> None:
 
     # Restart: new runtime over the same store. The wait is derived from Data.
     provider2 = ScriptedAdapter([final("editing main.py")])
-    rt2, _ = runtime(store=rt.store, provider=provider2)
+    rt2, _ = runtime(store=restart(rt.store), provider=provider2)
     assert asyncio.run(rt2.data.find_waiting_call(SCOPE)) == first.waiting_call
 
     second = asyncio.run(rt2.driver.drive(SCOPE, user("main.py")))
@@ -171,7 +173,7 @@ def test_crash_after_dispatch_is_outcome_unknown_and_never_resent() -> None:
     assert len(provider.sent) == 1
 
     provider2 = ScriptedAdapter([final("back")])
-    rt2, _ = runtime(store=rt.store, provider=provider2)
+    rt2, _ = runtime(store=restart(rt.store), provider=provider2)
     result = asyncio.run(rt2.driver.drive(SCOPE, user("hello again")))
 
     assert result.state is DriveState.COMPLETED
@@ -191,7 +193,7 @@ def test_never_claimed_pending_calls_resume_exactly_once() -> None:
     with pytest.raises(SimulatedCrash):
         asyncio.run(rt.driver.drive(SCOPE, user("go")))
 
-    rt2, provider2 = runtime([final("done")], store=rt.store, env_tools=[read, write])
+    rt2, provider2 = runtime([final("done")], store=restart(rt.store), env_tools=[read, write])
     result = asyncio.run(rt2.driver.drive(SCOPE, user("resume")))
 
     assert result.state is DriveState.COMPLETED
@@ -321,7 +323,7 @@ def test_stored_final_response_is_projected_after_restart() -> None:
         asyncio.run(rt.driver.drive(SCOPE, user("q1")))
 
     provider2 = ScriptedAdapter([final("second answer")])
-    rt2, _ = runtime(store=rt.store, provider=provider2)
+    rt2, _ = runtime(store=restart(rt.store), provider=provider2)
     result = asyncio.run(rt2.driver.drive(SCOPE, user("q2")))
 
     assert result.state is DriveState.COMPLETED
@@ -341,7 +343,7 @@ def test_stored_tool_calls_are_projected_and_run_once_after_restart() -> None:
     assert echo.invocations == []
 
     provider2 = ScriptedAdapter([final("echo done")])
-    rt2, _ = runtime(store=rt.store, provider=provider2, tools=[echo])
+    rt2, _ = runtime(store=restart(rt.store), provider=provider2, tools=[echo])
     result = asyncio.run(rt2.driver.drive(SCOPE, user("status?")))
 
     assert result.state is DriveState.COMPLETED
@@ -360,7 +362,7 @@ def test_stored_response_from_another_provider_blocks_but_keeps_input() -> None:
     with pytest.raises(SimulatedCrash):
         asyncio.run(rt.driver.drive(SCOPE, user("q1")))
     provider2 = OtherProvider([final("never")])
-    rt2, _ = runtime(store=rt.store, provider=provider2)
+    rt2, _ = runtime(store=restart(rt.store), provider=provider2)
     result = asyncio.run(rt2.driver.drive(SCOPE, user("q2")))
 
     assert result.state is DriveState.RECOVERY_REQUIRED
@@ -432,7 +434,7 @@ def test_resume_finishes_unclaimed_calls_then_continues() -> None:
         asyncio.run(rt.driver.drive(SCOPE, user("go")))
 
     provider2 = ScriptedAdapter([final("done")])
-    rt2, _ = runtime(store=rt.store, provider=provider2, env_tools=[read])
+    rt2, _ = runtime(store=restart(rt.store), provider=provider2, env_tools=[read])
     resumed = asyncio.run(rt2.driver.resume(SCOPE))
 
     assert resumed.state is DriveState.COMPLETED
@@ -490,7 +492,7 @@ def test_crash_during_effectful_tool_is_reported_to_model_after_restart() -> Non
     with pytest.raises(SimulatedCrash):
         asyncio.run(rt.driver.drive(SCOPE, user("write")))
 
-    rt2, provider2 = runtime([final("I checked; it was applied")], store=rt.store, env_tools=[write])
+    rt2, provider2 = runtime([final("I checked; it was applied")], store=restart(rt.store), env_tools=[write])
     result = asyncio.run(rt2.driver.drive(SCOPE, user("continue")))
 
     assert result.state is DriveState.COMPLETED
@@ -548,7 +550,7 @@ def test_require_user_policy_still_blocks(crash: bool) -> None:
     if crash:
         with pytest.raises(SimulatedCrash):
             asyncio.run(rt.driver.drive(SCOPE, user("write")))
-        rt, provider = runtime([final("never")], store=rt.store, env_tools=[write])
+        rt, provider = runtime([final("never")], store=restart(rt.store), env_tools=[write])
         result = asyncio.run(rt.driver.drive(SCOPE, user("continue")))
     else:
         result = asyncio.run(rt.driver.drive(SCOPE, user("write")))
@@ -585,8 +587,10 @@ def test_require_user_uncertainty_halts_the_rest_of_the_group_after_restart() ->
     with pytest.raises(SimulatedCrash):
         asyncio.run(rt.driver.drive(SCOPE, user("buy")))
 
+    store = rt.store
     for entry in ("drive", "resume"):
-        rt2, provider2 = runtime([final("never")], store=rt.store, env_tools=[pay, confirm])
+        store = restart(store)  # each attempt is another process start
+        rt2, provider2 = runtime([final("never")], store=store, env_tools=[pay, confirm])
         result = (
             asyncio.run(rt2.driver.drive(SCOPE, user("again")))
             if entry == "drive"
@@ -611,7 +615,7 @@ def test_claim_time_policy_survives_redeploy(new_build_tools: list[RecordingTool
     with pytest.raises(SimulatedCrash):
         asyncio.run(rt.driver.drive(SCOPE, user("buy")))
 
-    rt2, provider2 = runtime([final("never")], store=rt.store, env_tools=new_build_tools)
+    rt2, provider2 = runtime([final("never")], store=restart(rt.store), env_tools=new_build_tools)
     result = asyncio.run(rt2.driver.drive(SCOPE, user("again")))
 
     assert result.state is DriveState.RECOVERY_REQUIRED
@@ -627,7 +631,7 @@ def test_report_to_model_survives_tool_removal() -> None:
     rt.store.activate_environment(SCOPE, FAKE, WorkspaceId("ws"))
     with pytest.raises(SimulatedCrash):
         asyncio.run(rt.driver.drive(SCOPE, user("write")))
-    rt2, _ = runtime([final("checked")], store=rt.store)  # Tool no longer registered
+    rt2, _ = runtime([final("checked")], store=restart(rt.store))  # Tool no longer registered
     assert asyncio.run(rt2.driver.drive(SCOPE, user("again"))).state is DriveState.COMPLETED
 
 
@@ -640,11 +644,9 @@ def test_uncertain_record_with_unknown_policy_blocks_cleanly() -> None:
     rt.store.activate_environment(SCOPE, FAKE, WorkspaceId("ws"))
     with pytest.raises(SimulatedCrash):
         asyncio.run(rt.driver.drive(SCOPE, user("write")))
-    conv = rt.store._conversations[SCOPE.conversation_id]
-    (ref,) = conv.executions
-    conv.executions[ref] = dataclasses.replace(conv.executions[ref], unknown_outcome=None)
+    (ref,) = forget_unknown_policy(rt.store)
 
-    rt2, provider2 = runtime([final("never")], store=rt.store, env_tools=[write])
+    rt2, provider2 = runtime([final("never")], store=restart(rt.store), env_tools=[write])
     result = asyncio.run(rt2.driver.drive(SCOPE, user("again")))
 
     assert result.state is DriveState.RECOVERY_REQUIRED and result.unknown_calls == (ref,)
@@ -667,7 +669,7 @@ def test_unknown_result_event_follows_claim_time_record_policy(new_build: str) -
 
     loud = writer()  # same tool_id, conversation_record=FULL in the new build
     env_tools = [] if new_build == "tool-removed" else [loud]
-    rt2, provider2 = runtime([final("checked")], store=rt.store, env_tools=env_tools)
+    rt2, provider2 = runtime([final("checked")], store=restart(rt.store), env_tools=env_tools)
     assert asyncio.run(rt2.driver.drive(SCOPE, user("again"))).state is DriveState.COMPLETED
 
     kinds_ = [e.kind for e in asyncio.run(rt2.data.read_events(SCOPE))]
@@ -679,8 +681,8 @@ def test_unknown_result_event_follows_claim_time_record_policy(new_build: str) -
 def test_p0_runtime_refuses_require_user_tools_by_default() -> None:
     pay = writer(UnknownOutcomePolicy.REQUIRE_USER, "pay")
     with pytest.raises(ValueError, match="REQUIRE_USER Tools are disabled"):
-        build_in_memory_runtime(ScriptedAdapter(), environments=[FakeEnvironment(pay)])
-    build_in_memory_runtime(ScriptedAdapter(), environments=[FakeEnvironment(pay)], allow_require_user_tools=True)
+        build_runtime(ScriptedAdapter(), environments=[FakeEnvironment(pay)])
+    build_runtime(ScriptedAdapter(), environments=[FakeEnvironment(pay)], allow_require_user_tools=True)
 
 
 
@@ -738,7 +740,7 @@ def test_malformed_stored_response_is_handled_on_restart() -> None:
     with pytest.raises(SimulatedCrash):
         asyncio.run(first.driver.drive(SCOPE, user("q1")))
 
-    rt2 = openrouter_runtime(lambda r: httpx.Response(200, json=OK), store=first.store)
+    rt2 = openrouter_runtime(lambda r: httpx.Response(200, json=OK), store=restart(first.store))
     result = asyncio.run(rt2.driver.drive(SCOPE, user("q2")))  # no AttributeError loop
 
     assert result.state is DriveState.COMPLETED
@@ -773,7 +775,7 @@ def test_continuation_survives_restart_projection_of_a_stored_response() -> None
         asyncio.run(rt.driver.drive(SCOPE, user("go")))
 
     provider2 = ScriptedAdapter([final("done")])
-    rt2, _ = runtime(store=rt.store, provider=provider2, tools=[RecordingTool("echo")])
+    rt2, _ = runtime(store=restart(rt.store), provider=provider2, tools=[RecordingTool("echo")])
     asyncio.run(rt2.driver.drive(SCOPE, user("status")))
 
     group = provider2.prepared_inputs[0].conversation[1]
