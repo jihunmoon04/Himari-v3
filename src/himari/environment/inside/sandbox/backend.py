@@ -22,6 +22,7 @@ import subprocess
 import sys
 import time
 from collections.abc import Awaitable, Callable
+from typing import Any
 from dataclasses import dataclass
 from enum import Enum
 
@@ -219,28 +220,36 @@ async def _wait_sync(fd: int, timeout: float) -> bytes:
     return bytes(data)
 
 
+async def _settle(future: asyncio.Future[Any]) -> bool:
+    """Wait until ``future`` is done, however long, even if the current task
+    is cancelled meanwhile; returns whether a cancellation arrived."""
+    interrupted = False
+    while not future.done():
+        try:
+            await asyncio.wait([future])  # never cancels ``future`` itself
+        except asyncio.CancelledError:
+            interrupted = True
+    return interrupted
+
+
 async def _abandon(spawn: asyncio.Future[asyncio.subprocess.Process]) -> None:
-    """After a cancelled spawn: kill the group as soon as it exists (even if
-    that is after this returns), and reap it within a bounded wait."""
-
-    def kill(done: asyncio.Future[asyncio.subprocess.Process]) -> None:
-        if not done.cancelled() and done.exception() is None:
-            _kill_tree(done.result().pid)
-
-    spawn.add_done_callback(kill)
-    try:
-        process = await asyncio.wait_for(asyncio.shield(spawn), _DRAIN_GRACE_SECONDS)
-    except BaseException:
-        return  # the spawn failed (nothing runs), is still pending, or a second cancellation arrived
-    await _reap(process)
+    """After a cancelled spawn: wait for the creation to finish (no grace
+    period — returning earlier would release the Workspace lock while the
+    process may still start), then kill the group and reap it. A spawn that
+    never completes keeps the call, and so the lock, held: fail closed."""
+    await _settle(spawn)
+    if not spawn.cancelled() and spawn.exception() is None:
+        process = spawn.result()
+        _kill_tree(process.pid)
+        await _reap(process)
 
 
 async def _reap(process: asyncio.subprocess.Process) -> None:
-    """Best-effort reap after SIGKILL; survives a second cancellation."""
-    try:
-        await asyncio.wait_for(asyncio.shield(process.wait()), _DRAIN_GRACE_SECONDS)
-    except BaseException:
-        pass
+    """Wait, without a time limit and through further cancellations, until
+    the killed process has exited and its pipes are closed (every member of
+    the tree is gone); a cancellation that arrived is re-raised after."""
+    if await _settle(asyncio.ensure_future(process.wait())):
+        raise asyncio.CancelledError
 
 
 def _kill_tree(pid: int) -> None:

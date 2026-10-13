@@ -352,12 +352,21 @@ def test_run_command_is_refused_before_spawning_when_admission_fails(tmp_path: P
 
 
 def test_mount_allowlist_flags_any_extra_mount() -> None:
-    exact, _ = self_test.allowed_mounts()
-    correct = sorted(exact | {"/dev/null", "/dev/pts", "/proc/sys"})
-    assert self_test._unexpected_mounts(correct) == []
-    assert self_test._unexpected_mounts([*correct, "/etc"]) == ["/etc"]
-    assert self_test._unexpected_mounts([*correct, "/srv/workspaces"]) == ["/srv/workspaces"]
-    assert self_test._unexpected_mounts(None) == ["<unreadable>"]
+    fresh = [[p, t, r, False] for p, (t, r) in self_test.FRESH_MOUNTS.items()]
+    devices = [[p, "devtmpfs", "/" + p.rsplit("/", 1)[1], True] for p in self_test.DEVICE_NODES]
+    binds = [[p, "ext4", p, False] for p in self_test.host_binds()]
+    correct = fresh + devices + binds + [["/proc/sys", "proc", "/sys", False]]
+    unexpected = self_test._unexpected_mounts
+    assert unexpected(correct) == []
+    assert unexpected([*correct, ["/etc", "ext4", "/etc", False]]) == ["/etc"]
+    assert unexpected([*correct, ["/dev/host-data", "ext4", "/etc", False]]) == ["/dev/host-data"]  # B4
+    assert unexpected([*correct, ["/proc/host-data", "ext4", "/srv", False]]) == ["/proc/host-data"]
+    assert unexpected([*correct, ["/usr", "ext4", "/etc", False]]) == ["/usr (stacked)"]
+    swapped = [e if e[0] != "/dev/null" else ["/dev/null", "ext4", "/etc/passwd", False] for e in correct]
+    assert unexpected(swapped) == ["/dev/null"]
+    host_tmp = [e if e[0] != "/tmp" else ["/tmp", "tmpfs", "/user/1000", False] for e in correct]
+    assert unexpected(host_tmp) == ["/tmp"]
+    assert unexpected(None) == ["<unreadable>"]
     assert "/etc/passwd" in self_test.DEFAULT_PROTECTED and "/home" in self_test.DEFAULT_PROTECTED
 
 
@@ -474,3 +483,38 @@ def test_unreadable_mount_table_is_a_typed_refusal(tmp_path: Path, monkeypatch: 
     outcome = run_tool(env, {"argv": ["true"]})
     assert outcome.status is ToolStatus.DENIED and "could not be verified" in text(outcome)
     assert backend.calls == []
+
+
+# --- PR #9 re-review B5: a delayed spawn never outlives the cancelled call --------------
+
+
+def test_cancelled_call_returns_only_after_a_late_spawned_process_is_dead(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    real_spawn = asyncio.create_subprocess_exec
+    spawned: list[int] = []
+
+    async def late_spawn(*args: object, **kwargs: Any) -> asyncio.subprocess.Process:
+        await asyncio.sleep(sb._DRAIN_GRACE_SECONDS + 1)  # longer than any grace period
+        process = await real_spawn(sys.executable, "-c", "import time; time.sleep(300)", stdin=subprocess.DEVNULL,
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+        spawned.append(process.pid)
+        return process
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", late_spawn)
+    monkeypatch.setattr(sb, "_DRAIN_GRACE_SECONDS", 0.5)
+    backend = sb.SandboxBackend(CAP)
+    root_fd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+
+    async def scenario() -> None:
+        task = asyncio.create_task(backend.launch(["x"], root_fd=root_fd, cwd="/workspace", timeout=60))
+        await asyncio.sleep(0.1)
+        for _ in range(3):  # repeated cancellation must not cut the wait short
+            task.cancel()
+            await asyncio.sleep(0.2)
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert spawned and not _alive(spawned[0]), "the call returned while its process could still run"
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        os.close(root_fd)

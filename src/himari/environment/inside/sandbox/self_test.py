@@ -22,7 +22,7 @@ if TYPE_CHECKING:
     from himari.environment.inside.sandbox.backend import SandboxBackend
 
 PROBE = r"""
-import json, os, socket, sys
+import json, os, socket, stat, sys
 p = json.loads(sys.argv[1]); r = {}
 def ok(f):
     try:
@@ -47,15 +47,20 @@ r["write_usr"] = ok(lambda: write("/usr/probe.txt"))
 r["sees_other_principal"] = any(os.path.exists(x) for x in p["other_paths"])
 r["sees_home"] = os.path.exists("/home")
 r["sees_protected"] = sorted(x for x in p["protected_paths"] if os.path.lexists(x))
-def mount_points():
-    points = []
+def mount_table():
+    table = []  # every entry, duplicates kept: [point, fstype, root within its fs, is a char device]
     for line in open("/proc/self/mountinfo"):
-        point = line.split(" ")[4]
+        fields = line.split(" ")
+        point = fields[4]
         for code in ("\\040", "\\011", "\\012", "\\134"):
             point = point.replace(code, chr(int(code[1:], 8)))
-        points.append(point)
-    return sorted(set(points))
-r["mounts"] = mount_points()
+        try:
+            char_device = stat.S_ISCHR(os.stat(point).st_mode)
+        except OSError:
+            char_device = False
+        table.append([point, fields[fields.index("-") + 1], fields[3], char_device])
+    return table
+r["mounts"] = mount_table()
 r["tcp_external"] = ok(lambda: connect(socket.AF_INET, ("1.1.1.1", 53)))
 r["tcp_host_loopback"] = ok(lambda: connect(socket.AF_INET, ("127.0.0.1", p["port"])))
 r["tcp6_host_loopback"] = bool(p["port6"]) and ok(lambda: connect(socket.AF_INET6, ("::1", p["port6"])))
@@ -116,21 +121,52 @@ DEFAULT_PROTECTED = (
 )
 
 
-def allowed_mounts() -> tuple[frozenset[str], tuple[str, ...]]:
-    """Exactly the mount points the sandbox view is built from."""
+# Mounts bwrap creates itself: the filesystem type and the root within that
+# filesystem are required (a fresh mount shows "/"; bwrap's own root tmpfs is
+# pivoted from "/newroot"), so a host directory bound there instead is caught.
+FRESH_MOUNTS = {"/": ("tmpfs", "/newroot"), "/dev": ("tmpfs", "/"), "/dev/pts": ("devpts", "/"),
+                "/proc": ("proc", "/"), "/tmp": ("tmpfs", "/")}
+# --dev binds exactly these host device nodes; each must be a char device.
+DEVICE_NODES = frozenset({"/dev/null", "/dev/zero", "/dev/full", "/dev/random", "/dev/urandom", "/dev/tty"})
+# Some bwrap/kernel combinations cover these read-only; they must stay procfs.
+PROC_COVERS = frozenset({"/proc/sys", "/proc/sysrq-trigger", "/proc/irq", "/proc/bus"})
+
+
+def host_binds() -> frozenset[str]:
+    """The host paths the view binds on purpose (any filesystem type)."""
     from himari.environment.inside.sandbox.backend import HELPER_IN_SANDBOX, WORKSPACE_MOUNT, system_view
 
     view = system_view()
-    exact = {"/", "/dev", "/proc", "/tmp", HELPER_IN_SANDBOX, WORKSPACE_MOUNT}
-    exact.update(view[i + 2] for i, arg in enumerate(view) if arg == "--ro-bind")
-    return frozenset(exact), ("/dev/", "/proc/")
+    return frozenset({HELPER_IN_SANDBOX, WORKSPACE_MOUNT, *(view[i + 2] for i, arg in enumerate(view) if arg == "--ro-bind")})
 
 
 def _unexpected_mounts(mounts: object) -> list[str]:
+    """Every mount must be one the view creates, appear once (nothing stacked
+    on it) and have the expected kind; no prefix is trusted wholesale."""
     if not isinstance(mounts, list) or not mounts:
         return ["<unreadable>"]
-    exact, prefixes = allowed_mounts()
-    return [m for m in mounts if m not in exact and not any(str(m).startswith(p) for p in prefixes)]
+    binds = host_binds()
+    problems: list[str] = []
+    seen: set[str] = set()
+    for entry in mounts:
+        if not (isinstance(entry, list) and len(entry) == 4):
+            return ["<unreadable>"]
+        point, fstype, root, char_device = entry
+        if point in seen:
+            problems.append(f"{point} (stacked)")
+            continue
+        seen.add(point)
+        if point in FRESH_MOUNTS:
+            ok = (fstype, root) == FRESH_MOUNTS[point]
+        elif point in DEVICE_NODES:
+            ok = char_device is True
+        elif point in PROC_COVERS:
+            ok = fstype == "proc"
+        else:
+            ok = point in binds
+        if not ok:
+            problems.append(str(point))
+    return problems
 
 
 async def probe(backend: SandboxBackend, protected_paths: tuple[str, ...] = ()) -> SelfTestReport:

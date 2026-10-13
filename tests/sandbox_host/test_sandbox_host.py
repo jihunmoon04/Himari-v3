@@ -196,7 +196,10 @@ def test_external_hard_link_blocks_the_command(env: InsideEnvironment, tmp_path:
 
 
 @pytest.mark.parametrize("extra", [["--ro-bind", "/etc", "/etc"], ["--ro-bind", "{parent}", "/srv/data"],
-                                   ["--ro-bind", "{parent}", "{parent}"]])
+                                   ["--ro-bind", "{parent}", "{parent}"],
+                                   ["--ro-bind", "/etc", "/dev/host-data"], ["--ro-bind", "{parent}", "/dev/ws"],
+                                   ["--ro-bind", "/etc", "/etc/alternatives"], ["--ro-bind", "/etc/passwd", "/dev/null"],
+                                   ["--bind", "{parent}", "/tmp"]])
 def test_self_test_fails_when_the_view_exposes_host_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
                                                          extra: list[str]) -> None:
     from himari.environment.inside.sandbox import backend as sbmod
@@ -240,3 +243,27 @@ def test_cancel_during_bwrap_creation_leaves_nothing_behind(backend: SandboxBack
     time.sleep(0.5)
     orphans = subprocess.run(["pgrep", "-x", "-P", "1", "-u", str(os.getuid()), "bwrap"], capture_output=True, text=True)
     assert orphans.stdout.strip() == "", "an orphaned bwrap survived a cancelled spawn"
+
+
+@pytest.mark.parametrize("replace", [
+    (["--tmpfs", "/tmp"], ["--bind", "{parent}", "/tmp"]),  # a host directory instead of a fresh tmpfs
+    (["--dev", "/dev"], ["--tmpfs", "/dev", "--ro-bind", "/etc/passwd", "/dev/null"]),  # a host file as a device node
+])
+def test_self_test_fails_when_a_created_mount_is_replaced_by_a_host_path(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, replace: tuple[list[str], list[str]]) -> None:
+    from himari.environment.inside.sandbox import backend as sbmod
+    from himari.environment.inside.sandbox.self_test import probe
+
+    parent = str(tmp_path / "production-workspaces")
+    os.makedirs(parent)
+    old, new = replace[0], [x.replace("{parent}", parent) for x in replace[1]]
+    original = sbmod.bwrap_arguments
+
+    def swapped(*args: Any, **kwargs: Any) -> list[str]:
+        argv = original(*args, **kwargs)
+        at = next(i for i in range(len(argv)) if argv[i:i + 2] == old)
+        return argv[:at] + new + argv[at + 2:]
+
+    monkeypatch.setattr(sbmod, "bwrap_arguments", swapped)
+    report = asyncio.run(probe(SandboxBackend.discover(), (parent,)))
+    assert not report.passed and any(f.startswith("mounts:") for f in report.failures), report.failures

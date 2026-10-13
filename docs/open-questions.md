@@ -87,7 +87,7 @@ Data [v0.2 구현 가능 후보](data-contract-v0.2.md)에 **DR-01~DR-09 독립 
 | Q-23 | Tool execution durability | Tool 의도 저장·시작/완료·취소, DB 밖에서 발생한 부작용과 중단 후 결과 불명 처리 |
 | Q-24 | Internal vs Environment routing | 실행 유형 등록 계약, `None/Required/Default` Workspace 정책, 외부 서비스 Tool 범주 필요 여부 |
 | Q-39 | ~~Tool error disclosure~~ | **해결 (PR C1):** claim 없는 Tool의 예외는 모델에게 "The tool failed with an internal error."만 전달하고, 예외 타입·원문은 `raw_result`에만 남긴다. Inside 파일 Tool은 오류를 분류된 안전한 문구로만 돌려준다. |
-| Q-40 | 실제 OS 권한 검증 | **부분 해결 (PR C2):** 시작 시 실호스트 자체 검사(V3-050/P41)와 선택 실행 호스트 게이트(`HIMARI_SANDBOX_HOST=1 pytest tests/sandbox_host`, 19개)를 이 서버에서 통과. 남은 것: 다른 배포 호스트에서의 게이트 실행, 권한이 필요한 마운트 넘기(`NO_XDEV`) 검증, CPU·메모리·프로세스 수 한도(cgroup/rlimit), Workspace admission이 시점 검사라는 한계(P0는 단일 서버 프로세스이고 Workspace 변경이 Inside Tool과 같은 Workspace lock 아래에서만 일어난다고 전제한다. 다중 worker, 업로드 경로, 호스트 측 쓰기를 추가하면 같은 lock을 쓰게 하거나 검사를 다시 설계해야 함) |
+| Q-40 | 실제 OS 권한 검증 | **부분 해결 (PR C2):** 시작 시 실호스트 자체 검사(V3-050/P41)와 선택 실행 호스트 게이트(`HIMARI_SANDBOX_HOST=1 pytest tests/sandbox_host`, 26개)를 이 서버에서 통과. 남은 것: 다른 배포 호스트에서의 게이트 실행, 권한이 필요한 마운트 넘기(`NO_XDEV`) 검증, CPU·메모리·프로세스 수 한도(cgroup/rlimit), Workspace admission이 시점 검사라는 한계(P0는 단일 서버 프로세스이고 Workspace 변경이 Inside Tool과 같은 Workspace lock 아래에서만 일어난다고 전제한다. 다중 worker, 업로드 경로, 호스트 측 쓰기를 추가하면 같은 lock을 쓰게 하거나 검사를 다시 설계해야 함) |
 | Q-41 | 영속 DB 크래시 내구성 | 현재 재시작 테스트는 같은 인메모리 store를 공유하는 시뮬레이션이다. 실제 DB 백엔드에서 T2~T7a·T-R의 원자성과 크래시 후 복구를 별도로 검증 |
 | Q-42 | Continuation 일괄 조회 | Prompt loader가 assistant 턴마다 `read_run`을 호출한다. 영속 DB 도입 시 Run continuation을 한 번에 읽는 내부 최적화를 둔다(공개 계약 변경 없이 가능). *(PR #6 검수 C1)* |
 | Q-43 | Continuation 크기 예산 | 암호화 reasoning은 큰 불투명 payload일 수 있고 지금은 모든 과거 턴의 continuation을 재전송한다. 압축(Q-14) 도입 시 턴과 그 continuation을 한 단위로 제외하는 예산 정책을 정한다. *(PR #6 검수 C2)* |
