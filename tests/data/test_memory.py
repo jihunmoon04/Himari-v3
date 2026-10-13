@@ -148,3 +148,26 @@ def test_stored_records_are_isolated_from_caller_objects() -> None:
         assert dict((await data.read_tool_executions(SCOPE, call.run_id))[0].arguments) == {}
 
     asyncio.run(scenario())
+
+
+def test_unknown_outcome_keeps_status_and_commits_once() -> None:
+    async def scenario() -> None:
+        data = fresh()
+        call = await projected_group(data, "fake/write")
+        notice = text_result("outcome unknown", is_error=True)
+        with pytest.raises(DataError) as not_claimed:
+            await data.commit_unknown_outcome(SCOPE, call, notice)
+        assert not_claimed.value.code is DataErrorCode.INVALID_STATE_TRANSITION  # PENDING: nothing happened yet
+
+        await data.claim_tool_execution(SCOPE, call)
+        event = await data.commit_unknown_outcome(SCOPE, call, notice)
+        assert event is not None
+        (record,) = await data.read_tool_executions(SCOPE, call.run_id)
+        assert record.status is ToolExecutionStatus.UNKNOWN and record.model_result == notice
+        with pytest.raises(DataError) as again:
+            await data.commit_unknown_outcome(SCOPE, call, notice)
+        assert again.value.code is DataErrorCode.ALREADY_COMMITTED
+        with pytest.raises(DataError):
+            await data.commit_tool_outcome(SCOPE, call, ToolCompletion(ToolExecutionStatus.SUCCEEDED, notice))
+
+    asyncio.run(scenario())

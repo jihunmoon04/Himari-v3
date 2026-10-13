@@ -390,6 +390,25 @@ class InMemoryData:
             return None
         return self._new_event(conv, scope, ToolResultRecord(call, completion.model_result), call.run_id)
 
+    async def commit_unknown_outcome(
+        self,
+        scope: TrustedScope,
+        call: CallRef,
+        model_result: ModelToolResult,
+        *,
+        record_event: bool = True,
+    ) -> ConversationEvent | None:
+        conv = self._conv(scope)
+        record = self._execution(conv, call)
+        if record.model_result is not None:
+            raise DataError(DataErrorCode.ALREADY_COMMITTED, f"{call.call_id} already has a result")
+        if record.status not in (ToolExecutionStatus.EXECUTION_CLAIMED, ToolExecutionStatus.UNKNOWN):
+            raise DataError(DataErrorCode.INVALID_STATE_TRANSITION, f"{call.call_id} is {record.status.value}")
+        conv.executions[call] = replace(record, status=ToolExecutionStatus.UNKNOWN, model_result=model_result)
+        if not record_event:
+            return None
+        return self._new_event(conv, scope, ToolResultRecord(call, model_result), call.run_id)
+
     def _stage_artifacts(
         self, conv: _Conversation, mutations: Sequence[ArtifactMutation]
     ) -> dict[ArtifactId, Artifact]:

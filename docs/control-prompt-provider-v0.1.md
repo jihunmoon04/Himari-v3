@@ -167,7 +167,7 @@ User answer → Control.drive(scope, user input)
 
 - The assistant ToolCall group is immutable and contains all original `(call_id,ordinal,tool_id,args)` in original order.
 - Data `ToolExecutionRecords` persist every intent before launch and every truthful result. Different completion orders do not change ordinal.
-- A Tool failure, refusal or cancellation that **produced a definite final ToolResult** is returned for model evaluation. An `UNKNOWN` effect is not an ordinary failure: control must block/fail closed until reconciled, since sending a synthetic result can be wrong.
+- A Tool failure, refusal or cancellation that **produced a definite final ToolResult** is returned for model evaluation. An `UNKNOWN` effect is not an ordinary failure and is never sent as a synthetic success or failure. Per V3-047 the runtime attaches an honest "outcome unknown" result (status stays UNKNOWN) so the model verifies the state before retrying; Tools declaring `REQUIRE_USER` block instead.
 - Prompt may select results not present in Conversation **only from Data ToolExecutionRecords**, verifying group identity/count/ID, Tool result exact content and chronology.
 - Provider adapter renders a **legal native ToolCall/ToolResult group** according to target API. CurrentState and cache-first structure must not violate required adjacency. If no legal provider-native mapping exists, reject before Run send; do not discard or reorder required history to force a request.
 - Multiple ToolCalls may execute in parallel if actual shared-resource effects permit. The barrier requires all original calls to have truthful results before the next LLM Run. Future managed processes may use their own interim read Tools, not an incomplete ToolCall result.
@@ -208,7 +208,7 @@ Prompt `compose`가 provider-neutral 이력을 만들 때의 규칙이다. 원�
 - **(P2, V3-045)** Data `ConversationControlState` + `control_generation` fence stale workers. Only one driver claim writes new Run/Tool stages. A lease expiry alone does not prove a network/OS effect is safe to repeat.
 - Soft Pause: stop beginning new Run or launching additional ToolCalls. Existing Provider response/started bounded Tool finishes if possible; commit truthful records. Distinguish `PAUSE_REQUESTED` from `PAUSED`.
 - On Resume first inspect `RunRecord` and Tool groups: project stored raw response if not projected; complete outstanding **unstarted** PENDING calls after current authorization; only after complete Tool group construct a **new** Run.
-- A crashed tool with `EXECUTION_CLAIMED` and no definite outcome cannot be treated as PENDING; restart cleanup (T-R) classifies it `UNKNOWN`, blocks the next Run and never re-invokes the handler. P0 resolution is an explicit user action (Q-37); precise reconcile is P2.
+- A crashed tool with `EXECUTION_CLAIMED` and no definite outcome cannot be treated as PENDING; restart cleanup (T-R) classifies it `UNKNOWN` and never re-invokes the handler; the next `drive`/`resume` reports it to the model as "outcome unknown" (V3-047), or blocks for `REQUIRE_USER` Tools. Precise reconcile is P2.
 - A crashed Run with `DISPATCH_CLAIMED` and no response becomes `OUTCOME_UNKNOWN`; it is never resent, and a new Run starts only on the next user input or explicit resume.
 - final/question stops the loop; any Race with Pause must not overwrite a durable terminal or waiting-user state.
 - New user input during an active/paused execution: queue/reject/interrupt policy is OPEN, not silently appended into a stale current Prompt.
@@ -234,7 +234,7 @@ Prompt `compose`가 provider-neutral 이력을 만들 때의 규칙이다. 원�
 4. Raw native request persisted **before network** with an honest `raw_representation` (wire-exact 선택 시 송신 bytes 동일성까지); raw response survives normalize failure.
 5. Provider low-level retry suppressed; **process restart** after `DISPATCH_CLAIMED` yields `OUTCOME_UNKNOWN`, never resent (lock alone must not be what makes this pass).
 6. Intent transaction failure prevents **any** Tool launch; Tool failure with certain result is returned to model next Run.
-7. UNKNOWN Tool group prevents next Run and does not invent a ToolResult.
+7. An UNKNOWN call never gets an invented success/failure: it reaches the next Run only as an "outcome unknown" result (V3-047), or blocks the next Run for `REQUIRE_USER` Tools.
 8. Stale Workspace Binding or unsupported Provider native capabilities refuse execution.
 9. Stable Prefix/history/current State compose correctly without illegal tool-result adjacency.
 10. Same Conversation rejects conflicting new driver (P0: in-process lock); different Conversations remain independently eligible to progress.
@@ -249,7 +249,7 @@ Prompt `compose`가 provider-neutral 이력을 만들 때의 규칙이다. 원�
 - CP-01 ~~question output contract~~ → **`ask_user` Tool로 해결(V3-044)**. 남은 것: `ask_user` 혼합 허용(V3-P15), commentary 처리(V3-P16).
 - CP-02 **P0 raw 보존 기준 미확정(V3-P14 OPEN)**: wire-exact vs adapter-serialized. streaming/chunk boundaries later.
 - CP-03 Snapshot persistence/version coherence with Run prepare and Source StateBasis.
-- CP-04 Data T5/T6/T7/T7a/T-R semantics: all call IDs/ordinals, concurrency barrier, P0 UNKNOWN 사용자 해소 방식(Q-37).
+- CP-04 Data T5/T6/T7/T7a/T-R semantics: all call IDs/ordinals, concurrency barrier, UNKNOWN 처리는 V3-047로 결정.
 - CP-05 ~~lease/fencing~~ → P2(V3-045). 남은 것: busy/paused 중 사용자 메시지 처리.
 - CP-06 Provider-native CurrentState role and historical Tool group legal rendering for each target model — §6.1 규칙과 §6.2 R1–R7로 검증. ask_user 답변 첨부파일 표현 OPEN.
 - CP-07 Memory/Plan Internal Tool commits and exact vs omitted Conversation ToolResult policy.

@@ -56,6 +56,7 @@
 | V3-044 | Confirmed | **question은 `ask_user` Control Tool로 표현**한다. 정규화 출력은 `FINAL \| TOOL_CALLS` 두 가지다. `ask_user`는 즉시 완료 Tool과 구분되는 **suspending Tool**이다. 호출 그룹을 커밋한 뒤 Control은 `WAITING_FOR_USER`로 멈추고 **Conversation lock을 해제**한다. 사용자 응답이 오면 **원래 `call_id`에 대응하는 ToolResult를 커밋한 뒤** 새 Run을 시작한다. 재시작 후에도 대기 중인 호출을 Data의 영속 기록만으로 식별할 수 있어야 하며, 새 Task 계층을 도입하지 않는다. 텍스트 휴리스틱으로 question을 추정하지 않는다. *(2026-10-13 독립 검수 B2 반영)* |
 | V3-045 | Confirmed | **P0는 단일 프로세스·단일 사용자 규모로 단순화**하되, **크래시 후 실행 중복 방지는 lock이 아니라 영속 상태로 보장**한다. ① 같은 Conversation 직렬화(V3-024)는 프로세스 내 Conversation별 lock(예: `asyncio.Lock`)으로 실현한다. 이 lock은 **살아 있는 프로세스 안의 동시 실행만** 막으며, 크래시 후 중복 송신·중복 부작용은 막지 못한다. ② **Provider 송신 직전(`DISPATCH_CLAIMED`)과 부작용 있는 Tool 실행 직전(`EXECUTION_CLAIMED`)의 최소 영속 표시는 P0에 둔다.** ③ 표시 후 결과 기록 전에 크래시하면 재시작 시 `OUTCOME_UNKNOWN`(Run) / `UNKNOWN`(Tool)으로 처리하고 **자동 재실행하지 않는다**. ④ 분산 lease, `control_generation` fencing, 다중 worker 경합, UNKNOWN 정밀 reconcile 절차, 복잡한 CAS는 P2로 연기한다. Run별 원본 요청·응답 보존(V3-018)은 유지한다. *(2026-10-13 독립 검수 B1 반영)* |
 | V3-046 | Confirmed | **계약은 코드로 선언**한다. 각 Owner 모듈의 `api.py`(`typing.Protocol` + frozen dataclass)가 생기면 그것이 계약의 원본이고, 문서는 설계 근거·결정 이력을 담는다. 모듈 간 import 방향은 import-linter 등 정적 검사로 강제한다. 문서 간 이름 불일치는 코드 선언 시점에 해소한다. |
+| V3-047 | Confirmed | **UNKNOWN 효과는 모델에게 알리고 모델이 확인한다(Q-37).** 실행 기록(`EXECUTION_CLAIMED`)을 남긴 뒤 효과가 불확실해지면(실행 중 예외, 결과 기록 전 크래시) Runtime은 재실행하지 않고, 그 호출에 **"결과 불명, 재시도 전 상태를 확인할 것"이라는 결과를 붙여** 대화를 이어간다. 모델이 다른 Tool로 상태를 확인하고, 다시 실행할지는 모델이 새 호출로 결정한다. 상태는 **UNKNOWN 그대로** 유지해 성공·실패로 꾸미지 않는다. 다른 Tool로 확인할 수 없는 효과를 가진 Tool은 정의에서 `unknown_outcome = REQUIRE_USER`를 지정하고, 이때만 사용자 해소 전까지 대화를 멈춘다(P0에는 해당 Tool 없음). 사용자 선언 절차는 두지 않는다. *(2026-10-13 사용자 승인: "모델 자동 확인 + Tool별 require_user 예외 + 상태 UNKNOWN 유지")* |
 
 
 **V3-039~046 승인 근거 (2026-10-13):** 독립 검수 C3("승인 근거가 대화만으로 확인되지 않음")에 따라 사용자에게 항목별 상태를 다시 물었고, 사용자가 **V3-039~046을 Confirmed로 명시 승인**했다(Claude Code 세션, PR #1 병합 직전). 그 이전 근거: 모듈 설계 검토 직후 "이 방향으로 문서 수정해서 push" 요청, 독립 검수 후 "V3-039~046의 단순화 방향은 유지" 지시. **Confirmed 범위는 각 항목의 방향과 원칙**이다. 함수 시그니처·DTO 필드·구체 메커니즘(ask_user 대기 판정, 답변 재생 규칙, Environment 등록 방식, raw 보존 기준 등)은 V3-P14~P19로 따로 관리하며 Confirmed가 아니다. V3-044·045 본문은 검수 B1·B2에서 사용자가 지시한 요구사항으로 개정했다.
@@ -90,7 +91,7 @@
 | V3-P24 | Proposed | **동시 drive:** 같은 Conversation을 이미 drive 중이면 대기열에 넣지 않고 `ControlError(BUSY)`로 즉시 거부한다(CP-05의 P0 답). |
 | V3-P25 | Proposed | **P0 Tool 실행 순서:** Dispatcher는 그룹을 원래 ordinal 순서로 **순차 실행**한다. 병렬 스케줄링(TOOL-03)은 포트 변경 없이 나중에 추가한다. |
 | V3-P26 | Proposed | **`ToolCompletion.record_event`:** Data가 Tool의 `conversation_record` 정책을 알 수 있도록 Dispatcher가 커밋 시 전달한다(FULL → True). |
-| V3-P27 | Proposed | **불확실한 효과의 판정:** claim된 Environment Tool의 handler가 예외를 던지면 결과를 FAILED로 만들지 않고 `EXECUTION_CLAIMED`로 남긴다(그룹 BLOCKED, 재시작 정리 시 UNKNOWN). claim이 없는 Tool의 예외는 아무 효과도 없었으므로 FAILED 결과로 모델에 전달한다. |
+| V3-P27 | Superseded by V3-047 | **불확실한 효과의 판정:** claim된 Environment Tool의 handler 예외는 FAILED로 만들지 않는다. → V3-047에 따라 `REPORT_TO_MODEL`이면 UNKNOWN + "결과 불명" 결과로 종결해 모델에 전달하고, `REQUIRE_USER`면 `EXECUTION_CLAIMED`로 남겨 그룹을 BLOCKED로 둔다. claim이 없는 Tool의 예외는 아무 효과도 없었으므로 FAILED 결과로 모델에 전달한다. |
 | V3-P28 | Proposed | **미완결 그룹 재개 시점:** `drive`와 `resume` 시작 시(재시작 정리와 저장 응답 투영 직후, 사용자 입력 기록 전) 최신 그룹의 claim 전 `PENDING` 호출을 먼저 실행한다(D20). |
 | V3-P29 | Proposed | **공개 DTO의 깊은 불변성:** 모든 공개 DTO는 `frozen=True` + `DeepFrozen`을 상속한다. 생성 시 모든 필드를 깊게 복사·불변화한다(Mapping → `FrozenMap`, list/tuple → tuple, set → frozenset). `FrozenMap`은 **dict를 상속하지 않는** 불변 Mapping이라 `dict.__setitem__` 같은 dict API로도 바꿀 수 없다. JSON 직렬화는 독립 사본을 만드는 `thaw()`로 한다. 그래서 Data는 저장 객체를 그대로 공유·반환해도 된다. `object.__setattr__` 같은 의도적 저수준 조작은 Python에서 막을 수 없으므로 범위 밖이다(영속 DB 백엔드는 직렬화로 자연히 격리됨). *(독립 검수 B2-1, 재검수 B1)* |
 | V3-P30 | Proposed | **ToolCall ordinal 규칙:** 한 그룹의 ordinal은 나열 순서대로 정확히 `0..n-1`이다. 음수·빈 번호·순서 불일치는 `INVALID_MODEL_OUTPUT`으로 거부한다(`validate_tool_calls`). |
@@ -100,6 +101,7 @@
 | V3-P34 | Proposed | **`resume(scope)`:** 사용자 메시지 없이 이어 가는 Control 진입점이다. 정리·투영·미실행 호출 처리 후, 영속된 마지막 Event로 다음 trigger를 정한다(FINAL이면 `IDLE`, 대기 중이면 `WAITING_FOR_USER`). 합성 사용자 메시지를 만들지 않는다. |
 | V3-P35 | Proposed | **입력 멱등성:** 같은 `idempotency_key`에 같은 메시지면 기존 Event를 반환하고, 다른 메시지면 `DUPLICATE_IDENTITY`로 거부한다. |
 | V3-P36 | Proposed | **Tool 원본 결과 보존:** `ToolExecutionRecord.raw_result`에 Tool이 반환한 원본 실행 결과를 `model_result`와 따로 저장한다(Data v0.2 §6의 `raw_execution_result`). 모델에는 보내지 않는다. *(재검수 B2)* |
+| V3-P37 | Proposed | **V3-047 구현 방식:** `ToolDefinition.unknown_outcome`(기본 `REPORT_TO_MODEL`), Data `commit_unknown_outcome`(`EXECUTION_CLAIMED`/`UNKNOWN` → UNKNOWN + model_result, 원자적, 1회). 실행 중 예외는 같은 `drive`에서, 재시작 정리로 생긴 UNKNOWN은 다음 `drive`/`resume`의 그룹 마무리 단계에서 처리한다. 안내 문구는 예외 메시지를 포함하지 않는 고정 문구(`tool/dispatcher.py`의 `UNKNOWN_OUTCOME_RESULT`)다. 더 이상 등록되지 않은 Tool의 UNKNOWN은 아무도 재실행할 수 없으므로 모델에 보고한다. Prompt는 상태가 아니라 "모델용 결과의 존재"로 그룹 완결을 판단한다. |
 
 ## C. 명시적으로 미결정인 영역
 
@@ -120,7 +122,7 @@
 - Pause/Resume를 위한 ConversationControlState·안전 경계·미완결 ToolCall 복구는 [control-pause-v0.1.md](control-pause-v0.1.md) 검토 초안이며 **현재 확정 정책이 아니다**.
 - v2 데이터/기능 이식의 범위와 절차.
 - **SPI 세부 시그니처(V3-040)**: `ToolHandler`/`ToolContext`/`ToolOutcome`, `ProviderAdapter`, `EnvironmentPlugin`의 필드·오류 분류는 첫 코드 Skeleton에서 `api.py`로 확정한다.
-- **P0에 남는 내구성 장치(V3-045)**: 송신 직전 `DISPATCH_CLAIMED`, 부작용 Tool 실행 직전 `EXECUTION_CLAIMED`, 재시작 시 `OUTCOME_UNKNOWN`/`UNKNOWN` 처리, 자동 재실행 금지. **UNKNOWN Tool을 사용자가 명시적으로 해소하는 P0 방식**은 미결정(Q-37).
+- **P0에 남는 내구성 장치(V3-045)**: 송신 직전 `DISPATCH_CLAIMED`, 부작용 Tool 실행 직전 `EXECUTION_CLAIMED`, 재시작 시 `OUTCOME_UNKNOWN`/`UNKNOWN` 처리, 자동 재실행 금지. UNKNOWN Tool은 V3-047에 따라 모델에게 "결과 불명"으로 알린다(`REQUIRE_USER` Tool만 대화를 멈춤).
 - **P2로 연기된 내구성 장치(V3-045)**: 분산 lease, `control_generation` fencing, 다중 worker claim 경합, UNKNOWN 정밀 reconcile 절차. 연기일 뿐 폐기가 아니며 도입 시 공개 계약 변경으로 취급한다.
 
 각 항목의 우선순위와 완료 조건은 [미결정 항목](open-questions.md)에서 관리한다. 공개 계약의 Owner·Consumer·데이터 출처 지도는 [contracts.md](contracts.md)에서 관리한다. 상세 흐름은 [Prompt Composition](prompt-composition.md), [Data and Tools](data-and-tools.md), [Data Contract v0.2](data-contract-v0.2.md) 참조.

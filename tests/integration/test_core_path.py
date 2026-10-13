@@ -44,7 +44,8 @@ from himari.provider.api import (
     NormalizedModelOutput,
 )
 from himari.provider.scripted import RawBody, ScriptedAdapter
-from himari.tool.api import EffectProfile, ToolOutcome, ToolStatus, WorkspaceRequirement
+from himari.tool.dispatcher import UNKNOWN_OUTCOME_RESULT
+from himari.tool.api import EffectProfile, ToolOutcome, ToolStatus, UnknownOutcomePolicy, WorkspaceRequirement
 
 
 async def kinds(rt_data: object) -> list[EventKind]:
@@ -163,47 +164,6 @@ def test_crash_after_dispatch_is_outcome_unknown_and_never_resent() -> None:
     unknown_run = result.recovery.runs_outcome_unknown[0]
     assert asyncio.run(rt2.data.read_run(SCOPE, unknown_run)).status is RunStatus.OUTCOME_UNKNOWN
     assert len(provider2.sent) == 1 and unknown_run not in result.run_ids
-
-
-def test_crash_during_effectful_tool_becomes_unknown_and_blocks() -> None:
-    write = RecordingTool("fake/write", effect=EffectProfile.UNKNOWN, environment_kind=FAKE,
-                          workspace=WorkspaceRequirement.DEFAULT)
-    write.crash_next = True
-    rt, provider = runtime([calls(("fake/write", {}))], env_tools=[write])
-    rt.store.activate_environment(SCOPE, FAKE, WorkspaceId("ws_1"))
-    with pytest.raises(SimulatedCrash):
-        asyncio.run(rt.driver.drive(SCOPE, user("write")))
-
-    rt2, provider2 = runtime([final("never")], store=rt.store, env_tools=[write])
-    result = asyncio.run(rt2.driver.drive(SCOPE, user("continue")))
-
-    assert result.state is DriveState.RECOVERY_REQUIRED
-    assert result.recovery is not None and len(result.recovery.tools_unknown) == 1
-    assert len(write.invocations) == 1  # handler never re-invoked
-    assert provider2.sent == []  # no next Run with an incomplete group
-    records = asyncio.run(rt2.data.read_tool_executions(SCOPE, result.recovery.tools_unknown[0].run_id))
-    assert records[0].status is ToolExecutionStatus.UNKNOWN
-
-
-def test_effectful_tool_exception_is_uncertain_not_failed() -> None:
-    write = RecordingTool("fake/write", effect=EffectProfile.UNKNOWN, environment_kind=FAKE,
-                          workspace=WorkspaceRequirement.DEFAULT)
-    write.raise_next = RuntimeError("connection reset mid-command")
-    rt, provider = runtime([calls(("fake/write", {})), final("never")], env_tools=[write])
-    rt.store.activate_environment(SCOPE, FAKE, WorkspaceId("ws_1"))
-    result = asyncio.run(rt.driver.drive(SCOPE, user("write")))
-
-    assert result.state is DriveState.RECOVERY_REQUIRED
-    assert len(provider.sent) == 1  # no Run with a fabricated failure result
-    call = result.unknown_calls[0]
-    records = asyncio.run(rt.data.read_tool_executions(SCOPE, call.run_id))
-    assert records[0].status is ToolExecutionStatus.EXECUTION_CLAIMED
-    assert records[0].model_result is None
-
-    rt2, _ = runtime([final("never")], store=rt.store, env_tools=[write])
-    again = asyncio.run(rt2.driver.drive(SCOPE, user("retry?")))
-    assert again.state is DriveState.RECOVERY_REQUIRED
-    assert len(write.invocations) == 1
 
 
 def test_never_claimed_pending_calls_resume_exactly_once() -> None:
@@ -493,3 +453,91 @@ def test_raw_tool_result_is_stored_separately_from_model_result() -> None:
     assert record.model_result == text_result("2 files")
     assert thaw(record.raw_result) == {"exit_code": 0, "stdout": "RAW-ONLY-MARKER", "argv": ["ls", "-la"]}
     assert all(b"RAW-ONLY-MARKER" not in sent.body for sent in provider.sent)
+
+
+# --- V3-047: uncertain effects are reported to the model, never re-run --------
+
+
+def writer(policy: UnknownOutcomePolicy = UnknownOutcomePolicy.REPORT_TO_MODEL) -> RecordingTool:
+    tool = RecordingTool("fake/write", effect=EffectProfile.UNKNOWN, environment_kind=FAKE,
+                         workspace=WorkspaceRequirement.DEFAULT)
+    tool.definition = dataclasses.replace(tool.definition, unknown_outcome=policy)
+    return tool
+
+
+def test_crash_during_effectful_tool_is_reported_to_model_after_restart() -> None:
+    write = writer()
+    write.crash_next = True
+    rt, _ = runtime([calls(("fake/write", {}))], env_tools=[write])
+    rt.store.activate_environment(SCOPE, FAKE, WorkspaceId("ws_1"))
+    with pytest.raises(SimulatedCrash):
+        asyncio.run(rt.driver.drive(SCOPE, user("write")))
+
+    rt2, provider2 = runtime([final("I checked; it was applied")], store=rt.store, env_tools=[write])
+    result = asyncio.run(rt2.driver.drive(SCOPE, user("continue")))
+
+    assert result.state is DriveState.COMPLETED
+    assert result.recovery is not None and len(result.recovery.tools_unknown) == 1
+    assert len(write.invocations) == 1  # the runtime never re-runs it
+    call = result.recovery.tools_unknown[0]
+    (record,) = asyncio.run(rt2.data.read_tool_executions(SCOPE, call.run_id))
+    assert record.status is ToolExecutionStatus.UNKNOWN  # still truthfully unknown
+    assert record.model_result == UNKNOWN_OUTCOME_RESULT
+    group = provider2.prepared_inputs[0].conversation[1]
+    assert isinstance(group, ToolGroupTurn) and group.results[CallId("c0")] == UNKNOWN_OUTCOME_RESULT
+
+
+def test_live_exception_after_claim_is_unknown_not_failed_and_loop_continues() -> None:
+    write = writer()
+    write.raise_next = RuntimeError("connection reset mid-command")
+    rt, provider = runtime([calls(("fake/write", {})), final("will verify")], env_tools=[write])
+    rt.store.activate_environment(SCOPE, FAKE, WorkspaceId("ws_1"))
+    result = asyncio.run(rt.driver.drive(SCOPE, user("write")))
+
+    assert result.state is DriveState.COMPLETED and len(provider.sent) == 2
+    (record,) = asyncio.run(rt.data.read_tool_executions(SCOPE, result.run_ids[0]))
+    assert record.status is ToolExecutionStatus.UNKNOWN
+    assert record.model_result == UNKNOWN_OUTCOME_RESULT  # no exception text, no fake failure
+    assert len(write.invocations) == 1
+
+
+def test_model_may_verify_then_retry_with_a_new_call() -> None:
+    write = writer()
+    check = RecordingTool("fake/check", environment_kind=FAKE, workspace=WorkspaceRequirement.DEFAULT)
+    write.raise_next = RuntimeError("lost")
+    rt, provider = runtime(
+        [calls(("fake/write", {})), calls(("fake/check", {})), calls(("fake/write", {})), final("done")],
+        env_tools=[write, check],
+    )
+    rt.store.activate_environment(SCOPE, FAKE, WorkspaceId("ws_1"))
+    result = asyncio.run(rt.driver.drive(SCOPE, user("write")))
+
+    assert result.state is DriveState.COMPLETED
+    assert len(check.invocations) == 1 and len(write.invocations) == 2  # retry was the model's new call
+    first, retry = (asyncio.run(rt.data.read_tool_executions(SCOPE, r)) for r in (result.run_ids[0], result.run_ids[2]))
+    assert first[0].status is ToolExecutionStatus.UNKNOWN
+    assert retry[0].status is ToolExecutionStatus.SUCCEEDED
+
+
+@pytest.mark.parametrize("crash", [True, False])
+def test_require_user_policy_still_blocks(crash: bool) -> None:
+    write = writer(UnknownOutcomePolicy.REQUIRE_USER)
+    if crash:
+        write.crash_next = True
+    else:
+        write.raise_next = RuntimeError("lost")
+    rt, provider = runtime([calls(("fake/write", {})), final("never")], env_tools=[write])
+    rt.store.activate_environment(SCOPE, FAKE, WorkspaceId("ws_1"))
+    if crash:
+        with pytest.raises(SimulatedCrash):
+            asyncio.run(rt.driver.drive(SCOPE, user("write")))
+        rt, provider = runtime([final("never")], store=rt.store, env_tools=[write])
+        result = asyncio.run(rt.driver.drive(SCOPE, user("continue")))
+    else:
+        result = asyncio.run(rt.driver.drive(SCOPE, user("write")))
+
+    assert result.state is DriveState.RECOVERY_REQUIRED and len(result.unknown_calls) == 1
+    assert len(write.invocations) == 1
+    assert len(provider.sent) == (0 if crash else 1)  # no Run with an incomplete group
+    (record,) = asyncio.run(rt.data.read_tool_executions(SCOPE, result.unknown_calls[0].run_id))
+    assert record.model_result is None

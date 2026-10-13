@@ -190,7 +190,7 @@ ToolExecutionRecord:
 - **P0 포함(V3-045).** `effect_profile`이 `Read`가 아닌 Tool은 handler 호출 **전에** `PENDING → EXECUTION_CLAIMED`를 영속한다(단일 행 조건부 갱신). 크래시 후 terminal 없이 `EXECUTION_CLAIMED`이면 재시작 시 `UNKNOWN`. 프로세스가 실제로 시작되지 않았어도 `UNKNOWN`이 될 수 있으며, 이 불확실성이 중복 부작용보다 낫다.
 - `Read` Tool과 Internal Tool(효과가 결과와 같은 Data 트랜잭션 T8로 커밋됨)은 claim 없이 `PENDING`에서 바로 terminal로 갈 수 있다. 크래시 후 `PENDING`이면 다시 실행해도 안전하다.
 - **ask_user (suspending, V3-044 / V3-P17):** `ask_user` ToolExecution은 claim하지 않고 `PENDING`으로 남는다(부작용 없음, `UNKNOWN` 불가). **최신 `PROJECTED` Run의 ToolCall 그룹이 단일 `ask_user`이고 그 ToolExecution이 `PENDING`이면 Conversation은 `WAITING_FOR_USER`**다. 저장된 상태 값이 아닌 파생 상태이므로 재시작 후에도 같은 조회로 복원된다. 답변은 T7a로 완결한다.
-- Outcome states: `SUCCEEDED, FAILED, DENIED, CANCELLED` include a completed model-facing ToolResult when the tool contract can truthfully produce one. `UNKNOWN` is **not equivalent to a synthetic failure ToolResult** and blocks native group replay (따라서 다음 Run) until explicitly reconciled. P0에서는 사용자의 명시 조치로만 해소하며 그 방식은 미결정(Q-37), 정밀 reconcile은 P2.
+- Outcome states: `SUCCEEDED, FAILED, DENIED, CANCELLED` include a completed model-facing ToolResult when the tool contract can truthfully produce one. `UNKNOWN` is **not equivalent to a synthetic failure ToolResult**. It blocks native group replay (따라서 다음 Run) **until an "outcome unknown" model result is attached** via `commit_unknown_outcome` (V3-047): the status stays UNKNOWN, the model is told the effect may or may not have happened and verifies before retrying. Tools declaring `unknown_outcome = REQUIRE_USER` stay blocked until a user resolves them. 정밀 reconcile은 P2.
 - The model-facing result is derived **once** from actual execution / deterministic denial and committed alongside terminal state. Optional exact Conversation ToolResult Event is appended in the same transaction; no data may report completed while its configured mandatory Event is absent.
 - Completion time is not native group ordering. Prompt reconstructs native ToolResult ordered by original ToolCall ordinal and Provider requirements, and rejects a missing/unpaired result instead of guessing.
 
@@ -307,12 +307,12 @@ All methods take a trusted, authenticated scope or opaque capability created by 
 - D09 configured Conversation ToolResult matches committed model_result exactly; omitted Event has still durable Execution source.
 - D10 Internal Plan mutation + ToolResult + Event all commit or all rollback; Artifact revision conflict does not silently report success.
 - D11 replacement of latest full PromptSnapshot keeps **one** row, preserves all historical native Run request bodies and exact Conversation Events.
-- D12 incomplete/UNKNOWN tool group cannot be silently passed to Provider as complete.
+- D12 a tool group with a call lacking a model result (PENDING, EXECUTION_CLAIMED, or UNKNOWN without the "outcome unknown" result) cannot be passed to Provider as complete.
 - D13 stored current Workspace Binding ≠ OS permission proof; stale/revoked binding denied at Environment Tool effect boundary.
 - D14 **(P2)** lease/Control generation fencing prevents stale worker from committing after ownership change.
 - D15 raw storage unavailable prevents Provider send.
 - D16 deletion after future purge is separated from normal append-only behavior; no path from model ToolCall into purge.
-- D17 crash after `EXECUTION_CLAIMED` → `UNKNOWN` on restart; handler not re-invoked; next Run blocked until explicit resolution.
+- D17 crash after `EXECUTION_CLAIMED` → `UNKNOWN` on restart; handler not re-invoked; the call gets the "outcome unknown" result (status stays UNKNOWN) and the next Run proceeds — except `REQUIRE_USER` Tools, which keep the next Run blocked (V3-047).
 - D18 restart while waiting: pending `ask_user` is identified from persisted rows only (`find_waiting_call`); answer commits `user_message` + ToolResult + `tool_result` Event atomically, then exactly one new Run.
 - D19 second answer after the call is completed becomes an ordinary `user_message`; never a second ToolResult for the same `call_id`.
 - D19a one user input produces exactly one `user_message`: T7a while an `ask_user` is waiting, T1 otherwise; never both.
@@ -324,7 +324,7 @@ All methods take a trusted, authenticated scope or opaque capability created by 
 
 1. **DR-01:** Final EventKind vocabulary (`assistant_question` 폐지, `answers_call` 필드 확정 포함), typed content blocks (text/images/files), exact Assistant question/final semantics and commentary history.
 2. **DR-02:** **P0 raw 보존 기준 선택(V3-P14: wire-exact vs adapter-serialized)**, guarantee of captured Provider request bytes and compatibility with actual chosen SDK/network transport; how to persist model-visible continuation and future streaming raw chunks.
-3. **DR-03:** P0의 T3/T6/T-R 트랜잭션 경계와 UNKNOWN의 사용자 명시 해소 방식(Q-37). Control lease/fencing·fenced claim은 **P2(V3-045)**.
+3. **DR-03:** P0의 T3/T6/T-R 트랜잭션 경계. UNKNOWN은 V3-047로 결정(모델에 보고, `REQUIRE_USER`만 사용자 해소). Control lease/fencing·fenced claim은 **P2(V3-045)**.
 4. **DR-04:** Full Tool group commit order, how to treat UNKNOWN and cancellation without inventing results, canonical result/error structures.
 5. **DR-05:** Latest PromptSnapshot CAS with Run prepare and source StateBasis consistency; how exactly native replay coverage and snapshot cursor refer to ToolExecution groups.
 6. **DR-06:** Artifact revision/CAS, user mutation and future Memory storage/lifecycle.

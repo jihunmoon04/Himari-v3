@@ -174,8 +174,9 @@ class Driver:
         return None
 
     async def _resume_pending_group(self, scope: TrustedScope) -> tuple[CallRef, ...] | None:
-        """Finish never-claimed PENDING calls of the latest group (D20).
-        Returns the uncertain calls if the group is blocked."""
+        """Finish the latest group: run never-claimed PENDING calls (D20) and
+        report UNKNOWN ones to the model (V3-047). Returns the uncertain calls
+        if a REQUIRE_USER Tool keeps the group blocked."""
         events = await self._log.read_events(scope)
         last_group = next(
             (e for e in reversed(events) if e.kind is EventKind.ASSISTANT_TOOL_CALLS), None
@@ -184,11 +185,13 @@ class Driver:
             return None
         run_id = last_group.origin_run_id
         records = await self._log.read_tool_executions(scope, run_id)
-        statuses = {r.status for r in records}
-        if ToolExecutionStatus.UNKNOWN in statuses:
-            return tuple(r.call for r in records if r.status is ToolExecutionStatus.UNKNOWN)
-        pending = [r for r in records if r.status is ToolExecutionStatus.PENDING]
-        if not pending or (len(records) == 1 and records[0].tool_id == ASK_USER_TOOL_ID):
+        unfinished = [
+            r
+            for r in records
+            if r.status is ToolExecutionStatus.PENDING
+            or (r.status is ToolExecutionStatus.UNKNOWN and r.model_result is None)
+        ]
+        if not unfinished or (len(records) == 1 and records[0].tool_id == ASK_USER_TOOL_ID):
             return None
         if not isinstance(last_group.payload, AssistantToolCalls):
             return None

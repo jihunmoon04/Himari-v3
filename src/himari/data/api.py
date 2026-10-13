@@ -208,7 +208,9 @@ class ToolExecutionStatus(Enum):
     FAILED = "failed"
     DENIED = "denied"
     CANCELLED = "cancelled"
-    UNKNOWN = "unknown"  # never a synthetic failure; blocks the next Run
+    # Effect uncertain. Never turned into a synthetic failure. Blocks the next
+    # Run until an "outcome unknown" model_result is attached (V3-047).
+    UNKNOWN = "unknown"
 
 
 @dataclass(frozen=True)
@@ -409,6 +411,20 @@ class ConversationLog(Protocol):
         Artifact mutations (CAS) + configured ``tool_result`` Event in one
         transaction.
         Called by the Tool Dispatcher only. Returns the Event if recorded."""
+        ...
+
+    async def commit_unknown_outcome(
+        self,
+        scope: TrustedScope,
+        call: CallRef,
+        model_result: ModelToolResult,
+        *,
+        record_event: bool = True,
+    ) -> ConversationEvent | None:
+        """V3-047: ``EXECUTION_CLAIMED`` or ``UNKNOWN`` → ``UNKNOWN`` with a
+        model-facing "outcome unknown" result (+ ``tool_result`` Event),
+        atomically. The status stays UNKNOWN: the effect is still not known.
+        ALREADY_COMMITTED if the call already has a model result."""
         ...
 
     async def find_waiting_call(self, scope: TrustedScope) -> CallRef | None:
