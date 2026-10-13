@@ -11,8 +11,11 @@
   ToolCall group, so call/result adjacency is never broken (CPP §6.1 rule 6).
 - Reasoning: ``RequestOptions.reasoning_effort`` → ``reasoning.effort``, only
   for models whose capabilities are known (unlisted → refused before send);
-  reasoning tokens are recorded from usage. Replaying ``reasoning_details``
-  (continuation) is not implemented yet (PR B, V3-049).
+  reasoning tokens are recorded from usage. Continuation (V3-049): normalize
+  keeps the message's ``reasoning_details`` (or plain ``reasoning``) as the
+  turn's opaque payload; prepare puts it back, unmodified, on that same
+  assistant message — only when provider and model match the request, since
+  signatures/encrypted items are model-bound.
 - Responses: error responses (non-200, or an ``error`` body) are kept as raw
   bytes on the failed Run. ``Accept-Encoding: identity`` is requested so the
   stored response bytes are the HTTP body as sent (no transparent
@@ -37,6 +40,7 @@ from himari.common import (
     AttachmentRef,
     CallId,
     ContentBlock,
+    ProviderContinuation,
     RawRepresentation,
     TextBlock,
     TokenUsage,
@@ -225,7 +229,21 @@ class OpenRouterAdapter:
             digest=hashlib.sha256(raw).hexdigest(),
         )
 
+    def _replay(self, continuation: ProviderContinuation | None, model_id: str) -> dict[str, Any]:
+        """Native reasoning fields for one assistant message, or nothing."""
+        if (
+            continuation is None
+            or continuation.provider_key != self.provider_key
+            or continuation.model_id != model_id
+            or not isinstance(continuation.payload, Mapping)
+        ):
+            return {}
+        payload = thaw(continuation.payload)
+        assert isinstance(payload, dict)
+        return {k: payload[k] for k in ("reasoning", "reasoning_details") if k in payload}
+
     def _messages(self, model_input: ModelInput) -> list[dict[str, Any]]:
+        model_id = model_input.request_options.model_id
         messages: list[dict[str, Any]] = []
         if model_input.stable_prefix:
             messages.append({"role": "system", "content": "\n\n".join(model_input.stable_prefix)})
@@ -233,19 +251,21 @@ class OpenRouterAdapter:
             if isinstance(part, UserTurn):
                 messages.append({"role": "user", "content": _text(part.blocks)})
             elif isinstance(part, AssistantTurn):
-                messages.append({"role": "assistant", "content": _text(part.blocks)})
+                messages.append(
+                    {"role": "assistant", "content": _text(part.blocks), **self._replay(part.continuation, model_id)}
+                )
             elif isinstance(part, CompressedHistory):
                 summary = _text(part.summary)
                 messages.append({"role": "user", "content": f"<earlier_conversation_summary>\n{summary}\n</earlier_conversation_summary>"})
             elif isinstance(part, ToolGroupTurn):
-                messages.extend(self._tool_group(part))
+                messages.extend(self._tool_group(part, self._replay(part.continuation, model_id)))
         state = _render_state(model_input.current_state)
         if state is not None:
             messages.append({"role": "user", "content": state})
         return messages
 
     @staticmethod
-    def _tool_group(group: ToolGroupTurn) -> list[dict[str, Any]]:
+    def _tool_group(group: ToolGroupTurn, reasoning: Mapping[str, Any]) -> list[dict[str, Any]]:
         calls = sorted(group.calls, key=lambda c: c.ordinal)
         missing = [c.call_id for c in calls if c.call_id not in group.results]
         if missing:
@@ -265,6 +285,7 @@ class OpenRouterAdapter:
                 }
                 for c in calls
             ],
+            **reasoning,
         }
         results: list[dict[str, Any]] = []
         for c in calls:
@@ -352,18 +373,38 @@ class OpenRouterAdapter:
         if not isinstance(raw_calls, list):
             raise _invalid("message.tool_calls must be a list")
         calls = tuple(_tool_call(i, raw) for i, raw in enumerate(raw_calls))
+        continuation = _continuation(message)
         # The finish reason must agree with the output (both live-verified
         # models send "tool_calls" for tool turns and "stop" for final ones).
         if calls:
             if finish != "tool_calls":
                 raise _invalid(f"tool calls with finish_reason={finish!r}")
             validate_tool_calls(calls)
-            return NormalizedToolCalls(calls, (TextBlock(text),) if text.strip() else ())
+            return NormalizedToolCalls(calls, (TextBlock(text),) if text.strip() else (), continuation)
         if finish != "stop":
             raise _invalid(f"finish_reason={finish!r} without tool calls")
         if not text.strip():
             raise _invalid("empty response")
-        return NormalizedFinal((TextBlock(text),))
+        return NormalizedFinal((TextBlock(text),), continuation)
+
+
+def _continuation(message: dict[str, Any]) -> dict[str, Any] | None:
+    """The turn's opaque reasoning state, kept exactly as returned.
+    An explicit ``reasoning_details`` (structured, may be encrypted/signed)
+    wins and is kept **even when empty**: some models (e.g. DeepSeek V4 in
+    thinking mode) return ``[]`` and reject follow-up turns that omit it
+    (OpenRouter ai-sdk-provider 2.8.1). A plain ``reasoning`` string is only
+    the fallback when the field is absent. Malformed details are an invalid
+    response: replaying a corrupted signature would fail later."""
+    details = message.get("reasoning_details")
+    if details is not None:
+        if not isinstance(details, list) or not all(isinstance(d, dict) for d in details):
+            raise _invalid("message.reasoning_details must be a list of objects")
+        return {"reasoning_details": details}
+    reasoning = message.get("reasoning")
+    if isinstance(reasoning, str) and reasoning:
+        return {"reasoning": reasoning}
+    return None
 
 
 def _invalid(reason: str) -> ProviderError:

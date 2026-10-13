@@ -17,17 +17,19 @@ from himari.common import (
     ArtifactId,
     AttachmentRef,
     BindingId,
+    CallId,
     EnvironmentInstanceId,
     EnvironmentKind,
-    WorkspaceId,
-    CallId,
     EventId,
     ModelToolResult,
+    ProviderContinuation,
     RawRepresentation,
     RunId,
     TextBlock,
     ToolCall,
     ToolId,
+    WorkspaceId,
+    thaw,
 )
 from himari.data.api import (
     Artifact,
@@ -528,3 +530,83 @@ def test_only_verified_efforts_are_sent() -> None:
     with pytest.raises(ProviderError) as exc:  # live sweep: HTTP 400 for this model
         ADAPTER.prepare_native_request(none_effort)
     assert exc.value.code is ProviderErrorCode.UNSUPPORTED_CAPABILITY
+
+
+# --- PR B: reasoning continuation (V3-049) ------------------------------------
+
+GPT_DETAILS = [
+    {"type": "reasoning.summary", "summary": "s", "format": "openai-responses-v1", "index": 0},
+    {"type": "reasoning.encrypted", "data": "gAAAA-opaque", "id": "rs_1", "format": "openai-responses-v1", "index": 1},
+]
+CLAUDE_DETAILS = [{"type": "reasoning.text", "text": "think", "signature": "sig==", "format": "anthropic-claude-v1", "index": 0}]
+
+
+def test_normalize_keeps_reasoning_details_as_opaque_continuation() -> None:
+    out = ADAPTER.normalize(received(
+        {"content": None, "tool_calls": [TOOL_CALL], "reasoning": "plain", "reasoning_details": GPT_DETAILS}, "tool_calls"))
+    assert thaw(out.continuation) == {"reasoning_details": GPT_DETAILS}  # details preferred over the plain string
+    final = ADAPTER.normalize(received({"content": "ok", "reasoning": "plain only"}))
+    assert final.continuation == {"reasoning": "plain only"}
+
+
+@pytest.mark.parametrize(
+    ("extra", "expected"),
+    [
+        ({}, None),  # absent → nothing to replay
+        ({"reasoning_details": []}, {"reasoning_details": []}),  # explicit empty is state, not absence
+        ({"reasoning_details": CLAUDE_DETAILS}, {"reasoning_details": CLAUDE_DETAILS}),
+        ({"reasoning_details": [], "reasoning": "plain"}, {"reasoning_details": []}),  # explicit field wins
+        ({"reasoning": "plain"}, {"reasoning": "plain"}),
+    ],
+)
+def test_continuation_extraction_table(extra: dict[str, Any], expected: Any) -> None:
+    out = ADAPTER.normalize(received({"content": "ok", **extra}))
+    assert thaw(out.continuation) == expected
+
+
+def test_empty_details_are_replayed_as_an_empty_array() -> None:
+    turn = dataclasses.replace(group(("a", 0, "echo", "A")),
+                               continuation=ProviderContinuation("openrouter", "openai/gpt-5-nano", {"reasoning_details": []}))
+    assistant = body(ADAPTER, model_input((UserTurn(EventId("e1"), (TextBlock("go"),)), turn)))["messages"][2]
+    assert assistant["tool_calls"] and assistant["reasoning_details"] == []
+
+
+@pytest.mark.parametrize("details", ["x", {"type": "reasoning.text"}, ["x"], [1]])
+def test_malformed_reasoning_details_are_invalid(details: Any) -> None:
+    with pytest.raises(ProviderError):
+        ADAPTER.normalize(received({"content": "ok", "reasoning_details": details}))
+
+
+def continued_group(provider: str, model: str, details: Any) -> ToolGroupTurn:
+    return dataclasses.replace(
+        group(("a", 0, "echo", "A")),
+        continuation=ProviderContinuation(provider, model, {"reasoning_details": details}),
+    )
+
+
+@pytest.mark.parametrize("details", [GPT_DETAILS, CLAUDE_DETAILS])
+def test_continuation_is_replayed_unmodified_on_its_own_assistant_message(details: Any) -> None:
+    mi = model_input((UserTurn(EventId("e1"), (TextBlock("go"),)), continued_group("openrouter", "openai/gpt-5-nano", details)))
+    prepared = ADAPTER.prepare_native_request(mi)
+    messages = json.loads(prepared.body)["messages"]
+    assert_chat_structure(messages)
+    assistant = messages[2]
+    assert assistant["tool_calls"] and assistant["reasoning_details"] == details
+    replayed = json.dumps(assistant["reasoning_details"], ensure_ascii=False, separators=(",", ":")).encode()
+    assert replayed in prepared.body  # same keys, same order, same values
+    assert all("reasoning_details" not in m for m in messages if m is not assistant)
+
+
+@pytest.mark.parametrize(("provider", "model"), [("openrouter", "anthropic/claude-haiku-5.5"), ("scripted", "openai/gpt-5-nano")])
+def test_continuation_from_another_model_or_provider_is_not_replayed(provider: str, model: str) -> None:
+    mi = model_input((UserTurn(EventId("e1"), (TextBlock("go"),)), continued_group(provider, model, CLAUDE_DETAILS)))
+    messages = body(ADAPTER, mi)["messages"]  # request model is openai/gpt-5-nano
+    assert all("reasoning_details" not in m and "reasoning" not in m for m in messages)
+
+
+def test_final_turn_continuation_is_replayed_too() -> None:
+    final_turn = AssistantTurn(EventId("e2"), (TextBlock("done"),),
+                               ProviderContinuation("openrouter", "openai/gpt-5-nano", {"reasoning": "why"}))
+    messages = body(ADAPTER, model_input((UserTurn(EventId("e1"), (TextBlock("hi"),)), final_turn,
+                                          UserTurn(EventId("e3"), (TextBlock("more"),)))))["messages"]
+    assert messages[2] == {"role": "assistant", "content": "done", "reasoning": "why"}

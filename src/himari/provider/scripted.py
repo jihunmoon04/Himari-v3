@@ -77,6 +77,8 @@ def encode_output(output: NormalizedModelOutput) -> bytes:
                 for c in output.calls
             ],
         }
+    if output.continuation is not None:
+        doc["continuation"] = thaw(output.continuation)
     return json.dumps(doc, sort_keys=True).encode()
 
 
@@ -125,8 +127,9 @@ class ScriptedAdapter:
     def normalize(self, received: NativeReceived) -> NormalizedModelOutput:
         try:
             doc = json.loads(received.body)
+            continuation = doc.get("continuation")
             if doc["kind"] == "final":
-                return NormalizedFinal(tuple(TextBlock(t) for t in doc["blocks"]))
+                return NormalizedFinal(tuple(TextBlock(t) for t in doc["blocks"]), continuation)
             if doc["kind"] == "tool_calls":
                 calls = tuple(
                     ToolCall(CallId(c["call_id"]), int(c["ordinal"]), ToolId(c["tool_id"]), c["arguments"])
@@ -138,4 +141,4 @@ class ScriptedAdapter:
         except (ValueError, KeyError, TypeError) as exc:
             raise ProviderError(ProviderErrorCode.INVALID_MODEL_OUTPUT, str(exc)) from exc
         validate_tool_calls(calls)
-        return NormalizedToolCalls(calls, commentary)
+        return NormalizedToolCalls(calls, commentary, continuation)

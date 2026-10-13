@@ -87,6 +87,8 @@ P0 완료 목표: **Fake Data/Provider/Tool로 모델 호출 1회 + tool group +
 | Q-39 | Tool error disclosure | 현재 claim 없는 Tool의 예외는 `"{예외 타입}: {메시지}"`를 그대로 `model_result`에 넣는다(`tool/dispatcher.py`). 실제 Environment Tool 도입 전에 호스트 경로·비밀이 모델로 새지 않도록 메시지를 정제하거나 일반화하고, 원문은 `raw_result`/로그에만 남길지 결정 |
 | Q-40 | 실제 OS 권한 검증 | `run_command`·파일 Tool의 권한을 실제 Sandbox 호스트에서 검증(ENV-04/05 게이트). Fake Environment 테스트로 대체할 수 없음 |
 | Q-41 | 영속 DB 크래시 내구성 | 현재 재시작 테스트는 같은 인메모리 store를 공유하는 시뮬레이션이다. 실제 DB 백엔드에서 T2~T7a·T-R의 원자성과 크래시 후 복구를 별도로 검증 |
+| Q-42 | Continuation 일괄 조회 | Prompt loader가 assistant 턴마다 `read_run`을 호출한다. 영속 DB 도입 시 Run continuation을 한 번에 읽는 내부 최적화를 둔다(공개 계약 변경 없이 가능). *(PR #6 검수 C1)* |
+| Q-43 | Continuation 크기 예산 | 암호화 reasoning은 큰 불투명 payload일 수 있고 지금은 모든 과거 턴의 continuation을 재전송한다. 압축(Q-14) 도입 시 턴과 그 continuation을 한 단위로 제외하는 예산 정책을 정한다. *(PR #6 검수 C2)* |
 
 P1은 Workspace 전용 소프트웨어 모듈을 다시 도입하는 단계가 아니다. Data Registry + Environment 접근 계약을 사용한다.
 

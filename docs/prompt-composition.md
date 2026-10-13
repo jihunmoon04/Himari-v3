@@ -78,7 +78,7 @@ Run 2 Provider input:
 2. **실행 측정**: Provider가 보고한 reasoning-token 사용량 등의 Run 메타데이터.
 3. **재사용 가능한 continuation**: Provider가 실제로 돌려준 opaque/encrypted reasoning·continuation 표현.
 
-(2)의 수치를 prompt 텍스트에 붙여 이전 추론을 복원할 수는 없다. (3)은 해당 Provider가 명시적으로 지원하는 API 항목으로 **원래 생성 이력과 호환되는 위치**에 배치한다. Provider가 공개하지 않은 사적 추론 원문은 수집/재현을 전제하지 않는다.
+(2)의 수치를 prompt 텍스트에 붙여 이전 추론을 복원할 수는 없다. (3)은 V3-049에 따라 **턴별로** 저장·전달된다: Data가 그 응답을 낳은 Run에 저장하고, Prompt는 해당 이력 턴에 불투명하게 싣고, Provider가 같은 provider·model일 때만 네이티브 위치에 다시 넣는다. Prompt는 그 내용을 해석하지 않는다. (3)은 해당 Provider가 명시적으로 지원하는 API 항목으로 **원래 생성 이력과 호환되는 위치**에 배치한다. Provider가 공개하지 않은 사적 추론 원문은 수집/재현을 전제하지 않는다.
 
 ## 5. Prefix cache 실무 제약
 

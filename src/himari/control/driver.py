@@ -153,7 +153,10 @@ class Driver:
             output: AssistantFinal | AssistantToolCalls = AssistantFinal(normalized.blocks)
         else:
             output = AssistantToolCalls(normalized.calls, normalized.commentary)
-        return (await self._log.project_model_output(scope, run_id, output)).event
+        projection = await self._log.project_model_output(
+            scope, run_id, output, continuation=normalized.continuation
+        )
+        return projection.event
 
     async def _next_trigger(self, scope: TrustedScope) -> TriggerRef | None:
         """What the next Run would answer, from the persisted tail; None if the

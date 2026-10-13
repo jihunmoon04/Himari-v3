@@ -217,6 +217,22 @@ class TokenUsage(DeepFrozen):
     cached_input_tokens: int | None = None
 
 
+@dataclass(frozen=True)
+class ProviderContinuation(DeepFrozen):
+    """Opaque reasoning state a model returned with one assistant turn (V3-049),
+    e.g. encrypted reasoning items or signed thinking blocks.
+
+    Data stores it on the Run that produced it, taking ``provider_key`` and
+    ``model_id`` from that Run's record; Prompt carries it on the matching
+    history turn without reading it; only a Provider with the same key and
+    model re-inserts ``payload`` into a native request.
+    """
+
+    provider_key: str
+    model_id: str
+    payload: JsonValue
+
+
 class UnknownOutcomePolicy(Enum):
     """What happens when a claimed call's effect is uncertain (V3-047).
 

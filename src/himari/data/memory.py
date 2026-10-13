@@ -25,6 +25,7 @@ from himari.common import (
     JsonValue,
     ModelToolResult,
     PrincipalId,
+    ProviderContinuation,
     RunId,
     TrustedScope,
     UnknownOutcomePolicy,
@@ -301,7 +302,12 @@ class InMemoryData:
                 self._set_status(run, RunStatus.OUTCOME_UNKNOWN, error_code=code)
 
     async def project_model_output(
-        self, scope: TrustedScope, run_id: RunId, output: AssistantOutput
+        self,
+        scope: TrustedScope,
+        run_id: RunId,
+        output: AssistantOutput,
+        *,
+        continuation: JsonValue = None,
     ) -> ProjectionResult:
         conv = self._conv(scope)
         run = self._run(conv, run_id)
@@ -332,7 +338,12 @@ class InMemoryData:
         for record in pending:
             conv.executions[record.call] = record
         run.projected_event_id = event.event_id
-        self._set_status(run, RunStatus.PROJECTED)
+        stamped = (
+            None
+            if continuation is None
+            else ProviderContinuation(run.record.provider_key, run.record.model_id, continuation)
+        )
+        self._set_status(run, RunStatus.PROJECTED, continuation=stamped)
         return ProjectionResult(event=event, pending=tuple(pending))
 
     async def record_projection_failure(
