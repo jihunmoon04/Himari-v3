@@ -44,6 +44,9 @@
 | V3-032 | Confirmed | 초기 기본 Workspace에서 **`inside/run_command` 지원 및 OS Sandbox 적용**을 채택한다. 임의 명령을 Sandbox 없이 실행하는 것은 이 계약을 충족하지 않는다. Sandbox의 기술·기동 게이트·리소스 제한 세부는 미결정. |
 | V3-033 | Confirmed | 기본 Workspace는 **Conversation마다 기본 작업 폴더**를 사용하되 **같은 사용자에게 허용된 다른 Conversation 폴더에도 접근**할 수 있게 설계한다. Conversation 폴더는 기본 cwd/정리 단위이고 보안 격리 단위가 아니다. 사용자별 root·세부 ACL·공유 영역 이름은 추후 결정. |
 | V3-034 | Confirmed | 초기 기본 Workspace에서 별도의 **사용자 Approval·Worktree/Workspace 복제 격리를 요구하지 않는 결정은 유지**한다. 그러나 Sandbox를 통한 호스트/사용자 간 격리 및 파일 접근·실행 자원 검증은 유지한다. |
+| V3-035 | Confirmed | 기본 Workspace의 **소유·공유 범위는 사용자/principal별**로 한다. 동일 사용자에 속한 각 Conversation은 별도 기본 cwd 폴더를 갖되 같은 사용자에게 허용된 다른 Conversation 폴더에 접근할 수 있다. 실제 principal 식별/인증/Root 매핑은 별도 계약. |
+| V3-036 | Confirmed | **기본 Workspace Sandbox 안의 네트워크 접근은 기본 차단**한다. 향후 Web Search는 명령 Sandbox와 별도의 Tool/신뢰된 네트워크 경계로 구현할 수 있으며, 이를 이유로 run_command의 네트워크 권한을 자동 부여하지 않는다. |
+
 
 ## B. 현재 채택을 권고하지만 세부 확정 전인 설계
 
@@ -71,11 +74,13 @@
 - **병렬 실행 가능 원칙 자체는 확정**. Scheduler의 실제 충돌 판별 알고리즘, 한 Run의 종결 배리어·취소/복구·중복 실행 정책은 미결정.
 - Environment 활성화 단위, Workspace 유형별 연결·권한·삭제 정책, Binding 수명/재사용 정책.
 - **기본 Workspace에서 `run_command` + OS Sandbox를 함께 도입**한다. 초기 Approval과 Worktree 복제 격리는 미도입이며, Sandbox 백엔드/필수 권한/실행 제한과 장기 ManagedProcess는 별도 설계.
-- **Conversation별 기본 폴더와 허용된 다른 Conversation 폴더의 교차 접근**은 확정. 사용자 소유권·ACL·폴더 수명·공유 기록 정책은 미결정.
+- **사용자별 기본 Workspace Root + Conversation별 기본 cwd + 같은 사용자 내 교차 접근**은 확정. 실제 principal 인증/ACL·폴더 수명·공유 기록 정책은 미결정.
+- **Sandbox 네트워크 기본 차단**은 확정. v2는 네트워크 격리를 제공하지 않았으므로 별도 Sandbox 검증이 필요하다. 향후 별도 Web Search Tool은 가능하지만 현재 구현 결정은 아니다.
 - **Memory Tool** 기능·자동화·권한·보존 정책.
 - Plan/Note **원본 저장 위치는 확정**. Artifact의 schema/Revision/삭제·수명/Outside export, `update_plan` 세부 스키마는 미결정.
 - **활성 Workspace/Environment 저장 영역과 Artifact의 구분은 확정**. 실제 현재 상태 조회 DTO, 연결상태 갱신 주기, 바인딩 선택 및 기본 Workspace 정책은 미결정.
 - 기본 Workspace 파일 자체의 저장 형태, 파일 첨부/생성 metadata, 버전·다운로드·삭제·안전한 경로 API·업로드 크기 제한(현행 초안: [default-workspace-files-v0.2.md](default-workspace-files-v0.2.md)).
+- Sandbox는 v2 Phase 3.5의 Bubblewrap/Landlock·기동 인증·워크스페이스 루트 보호·프로세스 제한 설계를 **재사용 대상으로 검토**한다. v3의 Work 부재/사용자별 Root·Conversation cwd·네트워크 차단에 맞춘 수정은 [Sandbox Execution v0.1 초안](sandbox-execution-v0.1.md)에 남긴다.
 - Pause/Resume를 위한 ConversationControlState·안전 경계·미완결 ToolCall 복구는 [control-pause-v0.1.md](control-pause-v0.1.md) 검토 초안이며 **현재 확정 정책이 아니다**.
 - v2 데이터/기능 이식의 범위와 절차.
 
