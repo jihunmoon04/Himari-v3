@@ -73,6 +73,7 @@ Provider-specific config  (model/reasoning/continuation; 별도 API 필드)
 - ToolCall과 대응 ToolResult는 하나의 논리적 그룹으로 인접하게 유지한다. 병렬 호출도 `call_id`와 원래 호출 순서로 구성하며, Provider native tool protocol을 위반하지 않는다.
 - **Reasoning token usage**는 실행 메타데이터다. 모델 설정 및 provider가 실제 반환한 opaque continuation과 분리한다. continuation은 임의의 프롬프트 끝 텍스트가 아니라 Provider Adapter가 네이티브 방식으로 다룬다.
 - 압축·컨텍스트 예산은 Prompt 내부 책임이다. Snapshot은 최신 1개를 대체하며 Conversation 원본과 Run raw 기록은 수정하지 않는다.
+- **CurrentState는 저장된 Activation/Binding/Settings, 현재 Plan/Note Artifact, 필요한 Environment 실시간 관측을 합성한 읽기 투영**이다. 자체적인 권한의 원본/Artifact가 아니다.
 - Provider별 변환과 cache-control, 시스템/사용자 역할 부여, native tool/result 결합, continuation validation은 Provider Adapter 책임이다. **캐시 hit는 기대 효과이지 보장값이 아니다.**
 
 세부 규칙은 [Prompt Composition Contract](prompt-composition.md)에 기록한다.
@@ -122,6 +123,7 @@ Binding A (Inside, 접근 방식 A)  Binding B (Analysis, 접근 방식 B)
           └─────── Conversation ─────┘
 ```
 
+- **활성 Workspace/Environment는 Artifact가 아닌 운영 상태다.** Data에 Workspace Registry, Environment Activation/Instance, Workspace Binding, 기본 Workspace 선택 설정을 보관하고, Environment는 실제 연결 가능 여부를 별도로 판단한다.
 - `workspace_id`: Workspace 자체를 식별하는 불투명한 ID.
 - `environment_instance_id`: 활성화된 Environment 인스턴스를 식별하는 ID.
 - `binding_id`: 특정 Environment가 특정 Workspace에 접근하는 관계를 식별하는 ID.
@@ -177,7 +179,10 @@ Environment Tool 실행 시 `binding_id` → Environment 인스턴스/Conversati
 - 병렬성 판단은 Binding ID가 아니라 Workspace/실제 공유 자원에 대한 효과를 기준으로 한다. 다른 Conversation에서도 같은 자원 충돌이 발생할 수 있다.
 - Tool/Environment가 검증 가능한 효과 범위를 제공하며 모델의 미검증 주장에 의존하지 않는다. 상세 Scheduler 계약은 아직 미결정.
 
-자세한 내용은 [Data, Tool Execution, and Artifacts](data-and-tools.md)를 따른다.
+- **동일 Conversation의 실행 흐름과 Run은 직렬화**한다. 내부에서 독립적인 ToolCall의 병렬 처리는 허용된다.
+- Event는 종류별 불변 canonical payload, Plan/Note는 Data conversation-scoped Artifact, 모델 이력 재구성은 Prompt의 원본 선택·검증과 Provider의 native serialization으로 나눈다.
+
+자세한 내용은 [Data, Tool Execution, and Artifacts](data-and-tools.md) 및 [Data Contract v0.1](data-contract-v0.1.md)를 따른다.
 
 ## 7. Memory — 방향만 확정
 
