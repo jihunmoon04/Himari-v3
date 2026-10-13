@@ -20,10 +20,19 @@
 | V3-008 | Confirmed | Conversation에 **여러 Environment**가 동시에 활성화될 수 있다. 환경별 Tool 노출은 `environment/tool` 네임스페이스 형태를 사용한다. |
 | V3-009 | Confirmed | **Environment가 Workspace의 사용 방법을 규정**한다. Workspace는 환경에 종속된 수명을 가지지 않는다. |
 | V3-010 | Confirmed | Workspace는 기본 작업 공간/사용자 로컬 컴퓨터 등 다양한 형태이며, 동일 Workspace를 서로 다른 Environment가 다르게 사용할 수 있다. |
-| V3-011 | Confirmed | Tool은 **Workspace 지정 필수/불필요**로 나뉜다. `run_command`는 전자, `update_plan`은 후자다. |
+| V3-011 | Confirmed | Tool은 **Workspace 지정 필수/불필요**로 나뉜다. `run_command`는 전자, `update_plan`은 후자다. 기본 Workspace를 암묵적으로 선택하는 유형은 별도 정책으로 고려한다. |
 | V3-012 | Confirmed | **Workspace ID로 식별**하며 Workspace Registry와 Environment–Workspace **Binding을 구분**하는 설계 방향을 채택한다. |
 | V3-013 | Confirmed | 모듈 내부 변경이 외부 계약을 지키는 한 다른 모듈의 변경을 요구하지 않도록 **계약 기반 모듈화**를 강제한다. |
 | V3-014 | Confirmed | 먼저 구체화할 환경은 **Inside**. Inside의 실제 실행/승인 정책은 이 단계에서 결정하지 않는다. |
+| V3-015 | Confirmed | **Prompt 순서는 Stable Prefix → Conversation(압축 이력 + 최근 exact) → Current State**로 정한다. Provider-specific 설정 및 Reasoning continuation은 메시지 꼬리의 임의 텍스트가 아니라 전용 API 형식이다. |
+| V3-016 | Confirmed | 다음 Run의 **Trigger는 기존 Event 또는 Event 그룹의 참조**다. 발생 시점부터 Data에 보존되고 이후에 이력으로 이동/복사하지 않는다. |
+| V3-017 | Confirmed | **ToolCall과 대응 ToolResult는 논리적으로 인접한 그룹**을 유지하고 call_id로 연결한다. Provider-native 재구성 규칙을 따른다. |
+| V3-018 | Confirmed | **모든 Run의 원본 Provider request/response를 기본적으로 전부 보존**한다. 비밀 헤더, 미수신 응답, 스트리밍의 정확한 캡처 방식은 별도 정책. |
+| V3-019 | Confirmed | **Execution Records / exact Conversation Events / Artifacts**를 서로 다른 논리 데이터 계약으로 구분한다. Prompt Snapshot은 이들과 분리된 최신 1개이다. |
+| V3-020 | Confirmed | **Memory 검색 ToolResult는 Conversation에 내용 기록**하고, **Plan/Note Tool은 간결한 완료 Result를 Conversation에 남기고 상태를 별도 관리**할 수 있다. 모델 입력/Conversation 기록/UI 표시는 분리한다. |
+| V3-021 | Confirmed | Workspace는 독립 자원이지만 **전용 소프트웨어 모듈은 만들지 않는다**. Registry/Binding은 Data가 보유하고 연결·실행 의미는 Environment가 규정한다. |
+| V3-022 | Confirmed | **독립적인 복수 ToolCall은 병렬 실행을 허용**한다. 같은 명령 문자열인지 여부로 독립성을 판정하지 않고 실제 공유 자원/부작용 충돌을 기준으로 한다. |
+| V3-023 | Confirmed | 모델이 가진 의미적 실행 정책과 **Raw Provider 기록을 Prompt 조립 정책과 분리**한다. Provider가 지원하는 reasoning/continuation은 Provider Adapter가 네이티브 배치 규칙을 따른다. |
 
 ## B. 현재 채택을 권고하지만 세부 확정 전인 설계
 
@@ -36,20 +45,26 @@
 | V3-P05 | Proposed | public port, 불변 DTO, 명시적 오류/취소 계약, 외부 모듈의 내부 구현 import 금지 및 자동 의존성 검사를 채택한다. |
 | V3-P06 | Proposed | 초기에는 한 프로세스 내 의존성 주입과 계약 테스트를 사용하며, 프로세스 수준 장애 격리는 필요시 확장한다. |
 | V3-P07 | Proposed | Tool의 Workspace 요구 여부와 Environment 소속 여부를 **별개의 메타데이터**로 관리한다. |
+| V3-P08 | Proposed | Tool Dispatcher는 **Internal (Data 공개 API) / Environment (Workspace 실행 Port)**를 분리한다. 필요시 외부 서비스 Connector 유형을 추가한다. |
+| V3-P09 | Proposed | Plan/Note는 Data의 conversation-scoped **Artifact를 원본 저장소**로 사용한다. Outside 기본 Workspace에는 필요시 노출/내보내기 한다. |
+| V3-P10 | Proposed | 같은 Workspace의 범위 불명 `run_command`는 기본 직렬, 서로 다른 검증된 파일 범위 수정은 조건부 병렬. 다른 Conversation의 같은 자원 충돌도 검증한다. |
+| V3-P11 | Proposed | Artifact Revision(CAS) 및 Data 트랜잭션으로 상태 변경 + Tool 완료 기록 + 필요한 Conversation Event를 원자적으로 커밋한다. |
+| V3-P12 | Proposed | 같은 Run의 여러 ToolCall이 모두 terminal 상태에 도달한 뒤 다음 Run을 시작하며, 입력의 원래 Call 순서와 완료 순서를 별도 보존한다. |
+| V3-P13 | Proposed | `workspace_requirement`는 `None / Required / Default`로 구분한다. `Default`는 기본 Workspace 사용으로 명시적 권한 검증이 필요하다. |
 
 ## C. 명시적으로 미결정인 영역
 
-- Data 물리 스키마, Run의 request/response/metadata 저장 범위와 영속성.
+- Data 물리 스키마, Run 및 Conversation Event 식별자·cursor·raw 직렬화/스트리밍 보존 방식. **Run별 request/response 전체 보존 범위의 방향 자체는 확정**.
 - 최신 Prompt Snapshot의 구체적 구조, 압축 시점, 예산, 원자적 갱신 규칙.
 - Provider별 request/response 매핑, reasoning continuation 지원 범위, streaming.
-- 복수 ToolCall 처리, 실행 순서/병렬성, 실패/취소/복구 세부 규칙.
+- **병렬 실행 가능 원칙 자체는 확정**. Scheduler의 실제 충돌 판별 알고리즘, 한 Run의 종결 배리어·취소/복구·중복 실행 정책은 미결정.
 - Environment 활성화 단위, Workspace 유형별 연결·권한·삭제 정책, Binding 수명/재사용 정책.
 - **Inside** 명령 실행·Sandbox·승인·실행 프로세스 정책.
 - **Memory Tool** 기능·자동화·권한·보존 정책.
-- `update_plan`의 실질 데이터 구조·노출 방식·수명.
+- Plan/Note Artifact의 실제 저장 권한/형식/수명/Workspace 노출 정책, `update_plan`의 세부 스키마.
 - v2 데이터/기능 이식의 범위와 절차.
 
-각 항목의 우선순위와 완료 조건은 [미결정 항목](open-questions.md)에서 관리한다.
+각 항목의 우선순위와 완료 조건은 [미결정 항목](open-questions.md)에서 관리한다. 상세 흐름은 [Prompt Composition](prompt-composition.md), [Data and Tools](data-and-tools.md) 참조.
 
 ## D. v2에서 자동 이식하지 않는 구조
 
