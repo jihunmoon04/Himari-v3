@@ -8,9 +8,10 @@ here — no module-specific DTOs. Anything owned by one module belongs in that m
 from __future__ import annotations
 
 import dataclasses
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum
+from types import MappingProxyType
 from typing import Any, NewType, NoReturn, cast
 
 # --- Deep immutability (public DTO rule) -----------------------------------
@@ -18,57 +19,75 @@ from typing import Any, NewType, NoReturn, cast
 # inherits ``DeepFrozen``, which replaces each field value with a deep-frozen
 # copy at construction: mutable inputs are copied, so neither the caller nor a
 # Tool handler holding the object can change a recorded value afterwards.
+# Frozen values are shared safely (Data may return the stored objects).
 
 
-class FrozenDict[K, V](dict[K, V]):
-    """Read-only ``dict``. Subclasses dict so ``json`` and ``dataclasses.asdict``
-    keep working; every mutating method raises ``TypeError``."""
+class FrozenMap[K, V](Mapping[K, V]):
+    """Immutable ``Mapping`` that is *not* a ``dict`` subclass, so unbound
+    ``dict`` methods and C-level dict APIs cannot mutate it. Items live in a
+    private ``MappingProxyType`` over a copy. Use ``thaw`` for JSON output.
 
-    __slots__ = ()
+    Python cannot stop deliberate low-level tampering (``object.__setattr__``
+    also bypasses ``frozen=True``); the guarantee is that no public or dict
+    API can change a recorded value.
+    """
 
-    def _readonly(self) -> NoReturn:
-        raise TypeError("FrozenDict is immutable")
+    __slots__ = ("_items", "_hash")
+    _items: Mapping[K, V]
+    _hash: int | None
 
-    def __setitem__(self, key: K, value: V) -> NoReturn:
-        self._readonly()
+    def __init__(self, items: Mapping[K, V] | Iterable[tuple[K, V]] = ()) -> None:
+        object.__setattr__(self, "_items", MappingProxyType(dict(items)))
+        object.__setattr__(self, "_hash", None)
 
-    def __delitem__(self, key: K) -> NoReturn:
-        self._readonly()
+    def __setattr__(self, name: str, value: object) -> NoReturn:
+        raise AttributeError("FrozenMap is immutable")
 
-    def __ior__(self, other: object) -> NoReturn:  # type: ignore[misc]
-        self._readonly()
+    def __delattr__(self, name: str) -> NoReturn:
+        raise AttributeError("FrozenMap is immutable")
 
-    def clear(self) -> NoReturn:
-        self._readonly()
+    def __getitem__(self, key: K) -> V:
+        return self._items[key]
 
-    def pop(self, *args: object) -> NoReturn:
-        self._readonly()
+    def __iter__(self) -> Iterator[K]:
+        return iter(self._items)
 
-    def popitem(self) -> NoReturn:
-        self._readonly()
+    def __len__(self) -> int:
+        return len(self._items)
 
-    def setdefault(self, *args: object) -> NoReturn:
-        self._readonly()
+    def __repr__(self) -> str:
+        return f"FrozenMap({dict(self._items)!r})"
 
-    def update(self, *args: object, **kwargs: object) -> NoReturn:
-        self._readonly()
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, Mapping):
+            return NotImplemented
+        return dict(self._items) == dict(other.items())
 
-    def __hash__(self) -> int:  # type: ignore[override]
-        return hash(frozenset(self.items()))
+    def __hash__(self) -> int:
+        if self._hash is None:
+            object.__setattr__(self, "_hash", hash(frozenset(self._items.items())))
+        assert self._hash is not None
+        return self._hash
 
-    def __reduce__(self) -> tuple[type[FrozenDict[K, V]], tuple[dict[K, V]]]:
-        return (type(self), (dict(self),))  # pickle/deepcopy without __setitem__
+    def __reduce__(self) -> tuple[type[FrozenMap[K, V]], tuple[dict[K, V]]]:
+        return (type(self), (dict(self._items),))
+
+    def __copy__(self) -> FrozenMap[K, V]:
+        return self
+
+    def __deepcopy__(self, memo: dict[int, object]) -> FrozenMap[K, V]:
+        return self
 
 
 def deep_freeze[T](value: T) -> T:
-    """Deep-frozen copy: Mapping → FrozenDict, list/tuple → tuple, set →
+    """Deep-frozen copy: Mapping → FrozenMap, list/tuple → tuple, set →
     frozenset, recursively. Scalars, bytes, enums, datetimes and (already
     frozen) DTO instances are returned as is."""
     result: object
     if _is_frozen(value):
         result = value
     elif isinstance(value, Mapping):
-        result = FrozenDict({k: deep_freeze(v) for k, v in value.items()})
+        result = FrozenMap({k: deep_freeze(v) for k, v in value.items()})
     elif isinstance(value, (list, tuple)):
         result = tuple(deep_freeze(v) for v in cast(Iterable[Any], value))
     elif isinstance(value, (set, frozenset)):
@@ -81,11 +100,21 @@ def deep_freeze[T](value: T) -> T:
 
 
 def _is_frozen(value: object) -> bool:
-    if isinstance(value, FrozenDict):
+    if isinstance(value, FrozenMap):
         return all(_is_frozen(v) for v in value.values())
     if isinstance(value, (tuple, frozenset)) and not isinstance(value, str):
         return all(_is_frozen(v) for v in value)
     return not isinstance(value, (Mapping, list, set, bytearray))
+
+
+def thaw(value: object) -> object:
+    """Plain JSON-compatible copy (dicts and lists) of a frozen value, for
+    serialization boundaries. The result is a fresh, independent object."""
+    if isinstance(value, Mapping):
+        return {k: thaw(v) for k, v in value.items()}
+    if isinstance(value, (tuple, list, frozenset, set)):
+        return [thaw(v) for v in value]
+    return value
 
 
 class DeepFrozen:

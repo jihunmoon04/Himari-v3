@@ -218,7 +218,8 @@ class ToolExecutionRecord(DeepFrozen):
     tool_id: ToolId
     arguments: Mapping[str, JsonValue]
     status: ToolExecutionStatus
-    model_result: ModelToolResult | None = None
+    model_result: ModelToolResult | None = None  # what the model sees
+    raw_result: JsonValue = None  # the Tool's own execution record; never sent to the model
     workspace_binding_id: BindingId | None = None
 
 
@@ -259,7 +260,7 @@ class ToolCompletion(DeepFrozen):
 
     status: ToolExecutionStatus  # SUCCEEDED | FAILED | DENIED | CANCELLED
     model_result: ModelToolResult
-    raw_result: JsonValue = None
+    raw_result: JsonValue = None  # persisted on the ToolExecutionRecord
     artifact_mutations: tuple[ArtifactMutation, ...] = ()
 
 
@@ -393,8 +394,9 @@ class ConversationLog(Protocol):
     async def commit_tool_outcome(
         self, scope: TrustedScope, call: CallRef, completion: ToolCompletion
     ) -> ConversationEvent | None:
-        """T7/T8 (DATA-08): terminal state + model result + Artifact mutations
-        (CAS) + configured ``tool_result`` Event in one transaction.
+        """T7/T8 (DATA-08): terminal state + model result + raw result +
+        Artifact mutations (CAS) + configured ``tool_result`` Event in one
+        transaction.
         Called by the Tool Dispatcher only. Returns the Event if recorded."""
         ...
 
