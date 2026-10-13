@@ -79,7 +79,7 @@ Sandbox Backend (fail-closed)
     ├── RO system runtime tools (minimum)
     ├── No mount: Data Root / Secrets / Other principals
     ├── no privileged elevation, bounded resources, sanitized env
-    └── optional network policy (default disabled is recommended, not decided)
+    └── required isolated-only network namespace (no connected option in v1)
     │
     ▼
 Bounded process: exit code/stdout/stderr + truncation metadata
@@ -95,7 +95,7 @@ ToolExecutionRecord + canonical ToolResult
 - 설치된 툴체인/라이브러리는 **필요 최소한 Read-only**로 매핑한다. 홈 디렉터리, 임의 임시 디렉터리, Docker/호스트 소켓, 인증서·SSH key, 앱 내부 DB는 자동 노출하지 않는다.
 - 프로세스 환경 변수는 allowlist 사용; 호스트의 토큰/secret을 기본적으로 전달하지 않는다.
 - `argv`, cwd, 자원 범위, 최대 실행 시간, 출력 상한, 프로세스 하위 트리 종료, 시스템 콜 제한 등의 구체 정책은 OPEN.
-- **네트워크 기본 차단은 확정(V3-036)**이다. bwrap 네트워크 namespace 등 별도 커널 집행과 네트워크 우회 테스트가 필요하다. 향후 별도 Web Search Tool은 trusted network service 경계에서 구현하며, 이를 이유로 `run_command`에 네트워크를 허용하지 않는다.
+- **네트워크 차단 전용 단일 프로파일은 확정(V3-036~037)**이다. bwrap `--unshare-net` 등 커널 집행과 네트워크/호스트 소켓 우회 테스트가 필요하다. 초기 연결 허용 모드, 프록시, 도메인 allowlist는 구현하지 않는다. 향후 별도 Web Search Tool은 trusted network service 경계에서 구현하며, 이를 이유로 `run_command`에 네트워크를 허용하지 않는다.
 - Sandbox 안에서 `rm -rf /workspace/conversations`를 실행할 수 있다면 **같은 사용자의 파일은 삭제될 수 있다**. Approval을 사용하지 않는 만큼 구조적 보호·버전/스냅샷·사용자 경고는 별도 결정 필요.
 
 ### Process scope and concurrency
