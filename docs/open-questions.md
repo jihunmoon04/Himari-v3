@@ -41,6 +41,32 @@ Data 계약 초안에 **DC-01~DC-10 검토 쟁점**을 정리했다. 기존 Q-01
 
 P0 완료 목표: **Fake Data/Provider/Tool로 모델 호출 1회 + tool group + 다음 Run + final/question** 경로를 검증하고, 저장된 Raw 요청/응답 및 정확한 Conversation을 확인한다. 현재 코드 Skeleton은 아직 생성되지 않았다.
 
+## P0-F — 기본 Workspace 파일 기능 (이번에 우선 진행)
+
+**확정 (V3-030~031):** 기본 Workspace를 파일 첨부·채팅 파일 생성·수정·제공 기반으로 먼저 구축. 이 **초기 Workspace 경로에서는 Approval, Worktree/Workspace 복제 격리, OS Sandbox를 도입하지 않는다**. 파일 API의 기본 검증과 신뢰된 접근 범위는 별개다.
+
+**[Default Workspace & Files v0.1](default-workspace-files-v0.1.md) 제안에서 아직 결정할 것:**
+
+| ID | 항목 | 미결정 |
+| --- | --- | --- |
+| Q-29 | 기본 Workspace 스코프 | 단일 설치 공용 vs 사용자별, 다중 Conversation 공유, 기본 Binding 자동 생성 |
+| Q-30 | 파일 바이트/메타데이터 | FileAssetRecord, upload original, version/digest, Workspace 파일과 Data 참조 정합성 |
+| Q-31 | 첨부·다운로드 | 스트리밍 제한, file_id 기반 다운로드, 접근 권한, Prompt file manifest 및 미디어 처리 |
+| Q-32 | 파일 I/O 계약 | read/write/edit/list/publish/delete, 경로 및 심볼릭링크 우회 차단, 병렬 수정 충돌 |
+| Q-33 | 파일 생명주기 | Conversation 삭제가 공유 Workspace 파일을 어떻게 참조 해제·GC할지 |
+
+**권고:** 파일 Tool surface를 먼저 구현하고, 임의 프로세스 실행 `run_command` 및 ManagedProcess는 별도 추후 승인·실행 정책으로 검토한다.
+
+## P0-C — Control Pause/Resume (설계 초안)
+
+**[Control Pause/Resume v0.1](control-pause-v0.1.md) 제안:** Run raw I/O 보존만으로 정지·재개는 충분하지 않다. Conversation에 `ControlExecutionState` 및 execution cursor를 보존해 PAUSE_REQUESTED → PAUSED의 안전 경계, 미실행 ToolCall 및 부분 완료 결과를 구분해야 한다. **Pause 실행 정책은 아직 확정하지 않았다.**
+
+| ID | 항목 | 미결정 |
+| --- | --- | --- |
+| Q-34 | Pause semantics | Provider in-flight soft pause 후 Run 응답 저장, ToolCall pending 처리, 요청 지연 한계 |
+| Q-35 | Resume cursor | pending/group-complete 여부, 중복 Tool/Run 재실행 방지, 사용자 입력 큐 |
+| Q-36 | Control state authority | conversation execution state, lease/fence, crash 복구, cancel / final / question 우선순위 |
+
 ## P1 — 첫 Inside Environment 및 실질 Tool 실행 전
 
 | ID | 주제 | 아직 확정해야 할 계약 |
@@ -49,8 +75,8 @@ P0 완료 목표: **Fake Data/Provider/Tool로 모델 호출 1회 + tool group +
 | Q-08 | Environment Instance | Conversation 활성화/비활성화, 종류당 여러 Instance 허용 여부, 연결 수명 |
 | Q-09 | Binding | Binding ID·스코프·철회/재연결·공유, Conversation 간 같은 Workspace 참조 |
 | Q-10 | Binding authority | Tool에서 Binding/Workspace 중 어느 ID를 노출할지, 실행 시 권한 검증 |
-| Q-11 | Inside Execution | workspace type별 파일/명령 실행, 프로세스 수명, 연결 실패 처리 |
-| Q-12 | Safety/Approval | OS sandbox, 파일·네트워크 정책, 승인/자동 승인, 실패/권한 우회 차단 |
+| Q-11 | Inside Execution | **기본 파일 I/O는 P0-F로 선행**. 이후 범용 명령 실행/ManagedProcess의 프로세스 수명, 환경 접속 실패 처리 |
+| Q-12 | Safety/Approval | **초기 기본 Workspace 파일 작업에는 Approval·Worktree 격리·OS Sandbox 미도입으로 확정**. 그 밖의 Environment, 범용 명령/네트워크·프로세스 실행 정책은 별도로 설계 |
 | Q-13 | Scheduler 상세 | verified read/write footprint, 같은 Workspace 명령 기본 직렬, 다른 Conversation 충돌, 락/종결 배리어/최대 병렬수 |
 | Q-23 | Tool execution durability | Tool 의도 저장·시작/완료·취소, DB 밖에서 발생한 부작용과 중단 후 결과 불명 처리 |
 | Q-24 | Internal vs Environment routing | 실행 유형 등록 계약, `None/Required/Default` Workspace 정책, 외부 서비스 Tool 범주 필요 여부 |
@@ -78,7 +104,7 @@ P1은 Workspace 전용 소프트웨어 모듈을 다시 도입하는 단계가 �
 1. **Data Event/Run 원본 계약과 최소 Public Port (Q-01, Q-03, Q-19a)**. 이미 확정된 네 데이터 원칙과 [Data Contract v0.1](data-contract-v0.1.md)의 미정 필드를 구분한다.
 2. **Prompt → Provider 표준 입력 계약 (Q-04, Q-21, Q-22, Q-27)** — [CurrentState 초안](current-state-contract-v0.1.md)의 CS-01~08 검토를 전제로 Provider-native 호출의 합법성 검증.
 3. **Control/Tool 계약 (Q-02, Q-05, Q-28)** — 동일 Conversation의 직렬화는 지키되 Tool 병렬성·호출 그룹 종료·오류·실행 기록의 일관성 확인.
-4. 그다음 **Workspace Binding + Inside Scheduler (Q-07~13, Q-23~24)**.
+4. **기본 Workspace 파일 기능(P0-F, Q-29~33)**을 우선 구현하는 계약을 다듬고, **Pause/Resume(P0-C, Q-34~36)**을 Control 계약에 병합한다. 이후 본격적인 Inside 명령 실행/ManagedProcess는 별도 검토.
 5. Artifact·Memory·Plan·Compaction과 실제 Provider 캐시 튜닝은 각 기능의 상세 설계 단계에서 결정.
 
 실제 구현 전까지 '정책 방향 확정'과 '구체 알고리즘·스키마 미결정'을 혼동하지 않는다.
