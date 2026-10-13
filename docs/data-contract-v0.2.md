@@ -23,12 +23,14 @@
 
 - **공개 Port는 Consumer별 sub-port**로 나눈다: `ConversationLog`, `ArtifactStore`, `WorkspaceState`, `StateQuery`, `ControlState`(P2). 저장 백엔드·트랜잭션은 공유할 수 있다. 계약 변경 판정(V3-038)은 sub-port 단위다. 매핑은 §10.
 - **Tool 구현은 Data에 쓰지 않는다.** Internal ToolHandler는 `ToolOutcome`을 반환하고 Tool Dispatcher가 DATA-08로 커밋한다(V3-042).
-- **P0 범위(V3-045):** 단일 프로세스, Conversation별 in-process lock. 아래 항목은 상태 enum·필드 자리만 남기고 **P2로 연기**한다.
-  - T3 dispatch claim CAS와 `DISPATCH_CLAIMED` 상태 → P0는 `PREPARED → RECEIVED | FAILED_NO_RESPONSE → PROJECTED | PROJECTION_FAILED`.
-  - T6 `EXECUTION_CLAIMED` durable claim → P0는 `PENDING → terminal`. 크래시로 결과를 모르면 `UNKNOWN`으로 기록하고 다음 Run을 막는 규칙은 유지하되, 정밀 reconcile 절차는 P2.
-  - T10 `ControlState`, `control_generation` fencing, lease → P2.
-- **유지:** Run별 원본 요청·응답 보존(V3-018), 송신 전 raw 저장, 원자 커밋(T1/T2/T4/T5/T7/T8/T9), 불완전 그룹 재생 금지.
-- 원본 요청 보존 기준을 "Adapter가 transport에 넘긴 직렬화 body"로 완화하는 안은 V3-P14로 검토한다.
+- **P0 범위(V3-045):** 단일 프로세스. Conversation별 in-process lock은 **살아 있는 프로세스 안의 동시 실행만** 막는다. 크래시 후 중복 송신·중복 부작용은 lock이 아니라 **아래 영속 표시**로 막는다.
+  - **P0 유지:** T3 `PREPARED → DISPATCH_CLAIMED`(Provider 송신 직전), T6 `PENDING → EXECUTION_CLAIMED`(부작용 있는 Tool 실행 직전). 둘 다 단일 행의 조건부 갱신(`이전 상태일 때만 갱신`)이면 충분하며 epoch·token·lease는 쓰지 않는다.
+  - **P0 재시작 정리(T-R):** `DISPATCH_CLAIMED`인데 응답 기록이 없는 Run → `OUTCOME_UNKNOWN`. `EXECUTION_CLAIMED`인데 terminal이 없는 Tool → `UNKNOWN`. **둘 다 자동 재송신·재실행하지 않는다.** claim 전 `PREPARED` Run → `ABANDONED_NOT_SENT`, claim 전 `PENDING` Tool → 재개 시 실행 가능.
+  - **P2 연기:** `control_generation` fencing, lease, ControlState(T10), 다중 worker claim 경합, UNKNOWN 정밀 reconcile.
+  - 새 상태 값은 추가하지 않는다. 위 상태는 모두 이 문서의 기존 RunStatus/ToolExecutionStatus다.
+- **ask_user (V3-044):** suspending Tool. 대기 여부는 저장된 상태 값이 아니라 기존 기록에서 파생한다(§6, V3-P17).
+- **유지:** Run별 원본 요청·응답 보존(V3-018), 송신 전 raw 저장, 원자 커밋(T1/T2/T4/T5/T7/T7a/T8/T9), 불완전 그룹 재생 금지.
+- **P0 원본 요청 보존 기준은 미확정**(V3-P14, DR-02). §5 참조.
 
 ## 2. 소유권·연결 관계
 
@@ -96,13 +98,12 @@ ConversationEvent:
 
 | Kind | Minimum canonical payload | Origin |
 | --- | --- | --- |
-| `user_message` | exact text + ordered attachment file/version refs, sender/source identity | trusted UI/CLI |
+| `user_message` | exact text + ordered attachment file/version refs, sender/source identity, **`answers_call?: {run_id, call_id}`**(ask_user 답변일 때, V3-P17) | trusted UI/CLI |
 | `assistant_final` | final content blocks in order, normalized content type | Provider normalized output |
-| `assistant_question` | question content blocks in order | Provider normalized output |
-| `assistant_tool_calls` | ordered ToolCall list `{call_id,ordinal,tool_id,arguments}` | Provider normalized output |
+| `assistant_tool_calls` | ordered ToolCall list `{call_id,ordinal,tool_id,arguments}` + optional commentary blocks (V3-P16). question도 여기에 `ask_user` 호출로 기록 | Provider normalized output |
 | `tool_result` | `{origin_run_id,call_id,model_result}` in exact configured record form | ToolExecution completion |
 
-Comments/partial streaming are **not** silently promoted to final Events; commentary, progress and message editing need separate deliberate event kinds or ephemeral presentation projection. These five kinds are sufficient for the first non-streaming skeleton but **not a confirmed exhaustive enumeration**.
+Commentary text that arrives **with** tool calls is kept as blocks inside the same `assistant_tool_calls` Event (V3-P16) and is never promoted to a final Event. Partial streaming, progress and message editing need separate deliberate event kinds or ephemeral presentation projection. These four kinds are sufficient for the first non-streaming skeleton but **not a confirmed exhaustive enumeration**. **`assistant_question`은 V3-044로 폐지**: question은 `ask_user`를 포함한 `assistant_tool_calls`로 기록되고, 답변은 `answers_call`을 가진 `user_message`와 해당 `tool_result`로 기록된다. 정규화 출력 `FINAL`은 `assistant_final`, `TOOL_CALLS`는 `assistant_tool_calls`에 1:1로 대응한다.
 
 - Event payload is **kind-specific canonical typed value**. Exactness means **once committed the normalized payload is never rewritten**, not that it contains the original Provider wire bytes.
 - Wire-serialization original lives in RunRecord. A Tool's original arguments and original call order must be preserved in ToolExecution and assistant ToolCall Event; normalized JSON must not silently drop fields that Provider native replay requires.
@@ -137,18 +138,27 @@ RunRecord:
 | From | Transition | Meaning / recovery |
 | --- | --- | --- |
 | none | `PREPARED` | native request body is durably recorded and **no dispatch claim yet**. Safe only after authoritative proof of no send; do not blindly resubmit an old Run |
-| PREPARED | `DISPATCH_CLAIMED` | **(P2, V3-045)** durable claim immediately **before one external send attempt**. Crash after claim means send may or may not have occurred. P0는 이 상태 없이 `PREPARED`에서 바로 송신 |
+| PREPARED | `DISPATCH_CLAIMED` | **P0 포함(V3-045).** durable mark immediately **before one external send attempt** (P0: 단일 행 조건부 갱신, P2: fenced claim). Crash after mark means send may or may not have occurred ⇒ 재시작 시 `OUTCOME_UNKNOWN` |
 | DISPATCH_CLAIMED | `RECEIVED` | actual provider response body durably stored, no guarantee normalized/projection complete |
 | DISPATCH_CLAIMED | `FAILED_NO_RESPONSE` or `OUTCOME_UNKNOWN` | known failure class vs uncertain send/response; raw response absent |
 | RECEIVED | `PROJECTED` | normalized assistant Event/tool-group and pending ToolExecution Records committed idempotently |
 | RECEIVED | `PROJECTION_FAILED` | raw body preserved, native or schema error; fix/reconcile without making another Provider call |
 | PREPARED | `ABANDONED_NOT_SENT` | only when no send was ever claimed/proven; control may compose **a new Run**, not reuse attempt ID |
 
-**Critical no-double-call rule:** prepare native Provider bytes before dispatch; persist `PREPARED`; acquire once-only dispatch claim using durable compare-and-set; send at most once per Run. After crash in `DISPATCH_CLAIMED` with no response, **do not resend automatically**, regardless of TCP error appearance. Provider adapter retries must be disabled unless the action is explicitly modelled as a separate new Run with its own persisted raw request and the policy authorizes it.
+**Critical no-double-call rule:** prepare native Provider request before dispatch; persist `PREPARED`; durably mark `DISPATCH_CLAIMED` (P0: single-row conditional update; P2: fenced claim); send at most once per Run. After crash in `DISPATCH_CLAIMED` with no response, **do not resend automatically**, regardless of TCP error appearance. Provider adapter retries must be disabled unless the action is explicitly modelled as a separate new Run with its own persisted raw request and the policy authorizes it.
 
 The exact set of provider transport headers that are *not part of raw request body* and streaming semantics must be explicit. API credentials, Authorization headers, secret connection settings and unbounded debug logs are not captured as Run body. **Do not redact bytes *inside* a request and still claim that redacted payload is exact**: confidential model body content must be protected with Data access controls/encryption, and inability to preserve securely must cause the request to fail before dispatch.
 
-**Capture boundary proposal:** Provider exposes a `PrepareNativeRequest` operation (no network) that returns precisely the body bytes it would send and a trusted opaque transport descriptor. Data persists those bytes *before* Provider performs network I/O. The sending operation must use **the recorded bytes, not rebuild them** after persistence. Transport SDKs unable to guarantee native request body equality require an alternate adapter or declared weaker/raw representation for independent review; do not pretend a JSON re-serialization equals physical wire bytes.
+**Capture boundary — P0 기준 미확정 (V3-P14 OPEN, DR-02):** Provider는 네트워크 없이 `PrepareNativeRequest`로 송신할 request를 만들고, Data는 그것을 **송신 전에** 영속한다. 저장물이 무엇과 같은지는 아직 정하지 않았다.
+
+| 후보 | 저장물 | 비용 |
+| --- | --- | --- |
+| A. wire-exact | transport가 실제 송신한 body와 바이트 동일. 송신은 저장된 bytes를 그대로 사용 | 공식 SDK의 재직렬화를 우회해야 할 수 있음 |
+| B. adapter-serialized | Adapter가 transport에 넘긴 직렬화 body (semantic 원본) | SDK 사용 가능, wire 바이트 동일성은 보장 안 함 |
+
+불변 규칙: RunRecord는 `raw_representation`(예: `wire_exact` / `adapter_serialized`)을 기록하고 **실제보다 강한 정확성을 주장하지 않는다**. JSON 재직렬화를 물리적 wire bytes라고 표기하지 않는다.
+
+**P0 `OUTCOME_UNKNOWN` 처리:** Run의 외부 효과는 Provider 과금뿐이고 Tool은 HIMARI가 실행하므로, `OUTCOME_UNKNOWN` Run은 ToolExecution을 만들지 않는다. 같은 Run은 재송신하지 않으며, **다음 사용자 입력 또는 명시적 재개에서만 새 Run**을 구성한다(자동 재개 없음).
 
 **Provider streaming (future):** final assembled body alone may not represent streamed chunks/trailers. The initial non-streaming Port can store full received body; streaming requires separate ordered raw chunk provenance and a defined terminal marker without modifying earlier raw bytes.
 
@@ -177,8 +187,10 @@ ToolExecutionRecord:
 
 - Unique constraint: **(origin_run_id,call_id)**, plus unique `(origin_run_id,ordinal)`. ToolCall group admission rejects duplicate IDs or ordinals.
 - Intents are inserted as `PENDING` in **the same transaction** as the assistant ToolCall Event. No Tool execution is launched before this transaction commits.
-- **(P2, V3-045)** Proposed dispatch transition `PENDING → EXECUTION_CLAIMED` happens durably **before** handing an effectful call to the Tool adapter. This window may produce `UNKNOWN` after a crash even if process never spawned; that uncertainty is preferred to duplicated side effects.
-- Outcome states: `SUCCEEDED, FAILED, DENIED, CANCELLED` include a completed model-facing ToolResult when the tool contract can truthfully produce one. `UNKNOWN` is **not equivalent to a synthetic failure ToolResult** and blocks native group replay until explicitly reconciled under a later recovery contract.
+- **P0 포함(V3-045).** `effect_profile`이 `Read`가 아닌 Tool은 handler 호출 **전에** `PENDING → EXECUTION_CLAIMED`를 영속한다(단일 행 조건부 갱신). 크래시 후 terminal 없이 `EXECUTION_CLAIMED`이면 재시작 시 `UNKNOWN`. 프로세스가 실제로 시작되지 않았어도 `UNKNOWN`이 될 수 있으며, 이 불확실성이 중복 부작용보다 낫다.
+- `Read` Tool과 Internal Tool(효과가 결과와 같은 Data 트랜잭션 T8로 커밋됨)은 claim 없이 `PENDING`에서 바로 terminal로 갈 수 있다. 크래시 후 `PENDING`이면 다시 실행해도 안전하다.
+- **ask_user (suspending, V3-044 / V3-P17):** `ask_user` ToolExecution은 claim하지 않고 `PENDING`으로 남는다(부작용 없음, `UNKNOWN` 불가). **최신 `PROJECTED` Run의 ToolCall 그룹이 단일 `ask_user`이고 그 ToolExecution이 `PENDING`이면 Conversation은 `WAITING_FOR_USER`**다. 저장된 상태 값이 아닌 파생 상태이므로 재시작 후에도 같은 조회로 복원된다. 답변은 T7a로 완결한다.
+- Outcome states: `SUCCEEDED, FAILED, DENIED, CANCELLED` include a completed model-facing ToolResult when the tool contract can truthfully produce one. `UNKNOWN` is **not equivalent to a synthetic failure ToolResult** and blocks native group replay (따라서 다음 Run) until explicitly reconciled. P0에서는 사용자의 명시 조치로만 해소하며 그 방식은 미결정(Q-37), 정밀 reconcile은 P2.
 - The model-facing result is derived **once** from actual execution / deterministic denial and committed alongside terminal state. Optional exact Conversation ToolResult Event is appended in the same transaction; no data may report completed while its configured mandatory Event is absent.
 - Completion time is not native group ordering. Prompt reconstructs native ToolResult ordered by original ToolCall ordinal and Provider requirements, and rejects a missing/unpaired result instead of guessing.
 
@@ -224,11 +236,13 @@ PromptSnapshot:
 | T0 | Create Conversation + authorized initial principal/workspace mapping | no orphan owned conversation / wrong-principal root |
 | T1 | Append user or other canonical Event | allocate ordered `sequence` and immutable payload atomically |
 | T2 | Prepare Run | commit raw native request bytes + trigger/basis + PREPARED *before* any send |
-| T3 | **(P2)** Claim provider send | one valid `DISPATCH_CLAIMED` CAS per Run; stale Control owner rejected |
+| T3 | Mark provider send (**P0**: 단일 행 조건부 갱신 / P2: fenced claim) | `PREPARED → DISPATCH_CLAIMED` 영속 후에만 송신. 이미 claim된 Run은 다시 송신 불가 |
 | T4 | Receive raw response | store exact received bytes and `RECEIVED` together |
 | T5 | Project response | commit normalized assistant Event, exact ordered ToolCall group, and *all* pending ToolExecution rows atomically; assign `PROJECTED` |
-| T6 | **(P2)** Tool claim before effects | `PENDING → EXECUTION_CLAIMED` claim/epoch in Data; no duplicate dispatch under concurrent workers |
+| T6 | Tool claim before effects (**P0**, `Read`·Internal·`ask_user` 제외) | `PENDING → EXECUTION_CLAIMED` 영속 후에만 handler 호출. 이미 claim된 call은 다시 실행 불가 |
 | T7 | Tool complete | terminal state + truthfully derived `model_result` + configured exact ToolResult Event in one Data transaction |
+| T7a | ask_user 답변 (V3-044 / V3-P17) | `user_message` Event(`answers_call`) + 해당 ToolExecution `PENDING → SUCCEEDED` + 답변에서 파생한 `model_result` + `tool_result` Event를 한 트랜잭션으로. 이미 완결된 call이면 `ALREADY_COMMITTED`이고 입력은 일반 `user_message`로 처리 |
+| T-R | 재시작 정리 (P0, V3-045) | `DISPATCH_CLAIMED`(응답 없음) → `OUTCOME_UNKNOWN`, `EXECUTION_CLAIMED`(terminal 없음) → `UNKNOWN`, claim 전 `PREPARED` → `ABANDONED_NOT_SENT`. 어떤 재실행도 하지 않음 |
 | T8 | Internal Tool Artifact mutation (Dispatcher가 `ToolOutcome`으로 커밋) | CAS Artifact revision + Tool final state + model_result + optional Event as a single transaction |
 | T9 | PromptSnapshot replace | latest-only CAS; no impact on Events, raw Run records or past Tool records |
 | T10 | **(P2)** Control pause/claim cursor (proposal) | Conversation execution state/lease/epoch one-writer proof, separate from Run statuses |
@@ -244,8 +258,8 @@ All methods take a trusted, authenticated scope or opaque capability created by 
 | Contract ID | Sub-port (V3-039) | Candidate Port | Callers | Effect |
 | --- | --- | --- | --- | --- |
 | DATA-01 | `ConversationLog` | `append_event(scope,payload,expected_sequence?,idempotency_key?)` / `read_events(scope,range)` | Control, Prompt loader, UI read | atomic ordered append / scoped immutable read |
-| DATA-02 | `ConversationLog` | `prepare_run(scope,raw_body,trigger_refs,basis,model_config)` / `record_raw_outcome(scope,run_id,body_or_error)`; P2 `claim_dispatch(scope,run_id,control_generation)` | Control | Provider send ledger (P0: in-process lock가 단일 송신 보장) |
-| DATA-03 | `ConversationLog` | `project_model_output(scope,run_id,normalized_output)` / `complete_tool_execution(scope,run_id,call_id,outcome)`; P2 `claim_tool_execution` | Control, Tool Dispatcher | group intent atomic; effect/response provenance |
+| DATA-02 | `ConversationLog` | `prepare_run(scope,raw_body,raw_representation,trigger_refs,basis,model_config)` / `mark_dispatch(scope,run_id)` (P0, T3) / `record_raw_outcome(scope,run_id,body_or_error)`; P2에서 `control_generation` 인자 추가 | Control | Provider send ledger. 크래시 후 중복 송신 방지는 `mark_dispatch` 영속 표시가 담당 |
+| DATA-03 | `ConversationLog` | `project_model_output(scope,run_id,normalized_output)` / `claim_tool_execution(scope,run_id,call_id)` (P0, T6) / `complete_tool_execution(scope,run_id,call_id,outcome)` / `answer_pending_call(scope,run_id,call_id,user_payload)` (T7a) / `find_waiting_call(scope)` / `recover_interrupted(scope)` (T-R) | Control, Tool Dispatcher | group intent atomic; effect/response provenance; ask_user 대기 판별·답변 |
 | DATA-04 | `ArtifactStore` | `read_artifact(scope,artifact_id)` / `list_artifacts(scope)` | Prompt loader, Internal ToolHandler(읽기) | current authoritative Plan/Note |
 | DATA-05 | `ConversationLog` | `get_latest_snapshot(scope)` / `replace_latest_snapshot(scope,expected_revision,basis,input)` | Prompt/Control | one latest full composed provider-neutral prompt |
 | DATA-06 | `StateQuery` | `read_current_state_basis(scope)` | Prompt loader | coherent current authorized persisted projection (읽기 전용 합성) |
@@ -282,8 +296,8 @@ All methods take a trusted, authenticated scope or opaque capability created by 
 
 - D01 same Conversation concurrent append produces unique increasing sequences, immutability.
 - D02 foreign principal cannot read/write Events/Run raw/Bindings/Artifacts even with valid IDs.
-- D03 one `RunRecord` permits **at most one send** (P0: lock 기반; P2: claimed send CAS); uncertain send is not retried silently.
-- D04 raw request bytes recorded before dispatch and transmitted exactly as captured; token/header not logged or embedded in request-body record.
+- D03 one `RunRecord` permits **at most one send**: `DISPATCH_CLAIMED` is persisted before send; crash after it → `OUTCOME_UNKNOWN` on restart, never resent. (lock만으로 통과시키지 않는다: 프로세스 재시작 시나리오로 검증)
+- D04 raw request recorded before dispatch with an honest `raw_representation` (기준은 DR-02에서 결정; wire-exact 선택 시 송신 bytes 동일성까지 검증); token/header not logged or embedded in request-body record.
 - D05 received raw response survives projection failure and later idempotent projection; no second Provider invocation.
 - D06 two tool calls project atomically with unique call IDs and stable ordinal; none executes if pending group transaction fails.
 - D07 out-of-order completion keeps Event chronology by sequence but native replay pairs results by original ordinal.
@@ -296,14 +310,18 @@ All methods take a trusted, authenticated scope or opaque capability created by 
 - D14 **(P2)** lease/Control generation fencing prevents stale worker from committing after ownership change.
 - D15 raw storage unavailable prevents Provider send.
 - D16 deletion after future purge is separated from normal append-only behavior; no path from model ToolCall into purge.
+- D17 crash after `EXECUTION_CLAIMED` → `UNKNOWN` on restart; handler not re-invoked; next Run blocked until explicit resolution.
+- D18 restart while waiting: pending `ask_user` is identified from persisted rows only (`find_waiting_call`); answer commits `user_message` + ToolResult + `tool_result` Event atomically, then exactly one new Run.
+- D19 second answer after the call is completed becomes an ordinary `user_message`; never a second ToolResult for the same `call_id`.
+- D20 Read/Internal Tool left `PENDING` after crash may be re-executed; effectful Tool left `PENDING` (never claimed) may be executed once on resume.
 
 **Test execution policy:** [V3-038](testing-policy.md): public Data contract create/change/remove → full pytest once code exists; Data implementation only with same contract → Data-module pytest. No executable v3 tests yet.
 
 ## 13. Decisions still required before freezing
 
-1. **DR-01:** Final EventKind vocabulary, typed content blocks (text/images/files), exact Assistant question/final semantics and commentary history.
-2. **DR-02:** Guarantee of captured Provider request bytes and compatibility with actual chosen SDK/network transport; how to persist model-visible continuation and future streaming raw chunks.
-3. **DR-03:** ~~durable send claim CAS and Control lease/fencing~~ → **P2 연기(V3-045)**. P0에서는 `PREPARED` 상태에서 크래시한 Run을 재송신하지 않고 새 Run으로 대체하는 규칙만 확정하면 된다.
+1. **DR-01:** Final EventKind vocabulary (`assistant_question` 폐지, `answers_call` 필드 확정 포함), typed content blocks (text/images/files), exact Assistant question/final semantics and commentary history.
+2. **DR-02:** **P0 raw 보존 기준 선택(V3-P14: wire-exact vs adapter-serialized)**, guarantee of captured Provider request bytes and compatibility with actual chosen SDK/network transport; how to persist model-visible continuation and future streaming raw chunks.
+3. **DR-03:** P0의 T3/T6/T-R 트랜잭션 경계와 UNKNOWN의 사용자 명시 해소 방식(Q-37). Control lease/fencing·fenced claim은 **P2(V3-045)**.
 4. **DR-04:** Full Tool group commit order, how to treat UNKNOWN and cancellation without inventing results, canonical result/error structures.
 5. **DR-05:** Latest PromptSnapshot CAS with Run prepare and source StateBasis consistency; how exactly native replay coverage and snapshot cursor refer to ToolExecution groups.
 6. **DR-06:** Artifact revision/CAS, user mutation and future Memory storage/lifecycle.

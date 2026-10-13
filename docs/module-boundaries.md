@@ -16,7 +16,7 @@
 
 ## 2. 모듈 경계
 
-- **Control**: 각 작업의 흐름을 관리하고 Prompt → Provider 1회 → 응답 분기 → Tool 실행 → 다음 Run을 조정. question용 `ask_user` Tool을 등록한다(V3-044).
+- **Control**: 각 작업의 흐름을 관리하고 Prompt → Provider 1회 → 응답 분기 → Tool 실행 → 다음 Run을 조정. question용 suspending Tool `ask_user`를 등록한다(V3-044). Conversation lock은 동시 실행만 막고, 크래시 후 중복 방지는 Data 영속 표시에 의존한다(V3-045).
 - **Prompt**: 얇은 `PromptContextLoader`가 Data 읽기 모델·Tool catalog를 모으고, **순수 함수 `compose(PromptInputs)`**가 provider-neutral 요청을 구성한다(V3-043). 자체 영속 저장·전송 금지.
 - **Provider**: `ProviderAdapter` SPI(`prepare_native_request`/`invoke_prepared`/`normalize`/`describe_capabilities`)로 모델별 통신, 지원 기능 협상, 응답 정규화. Run 반복 정책 금지.
 - **Tool**: `ToolHandler` SPI 정의, 카탈로그 취합, 인자 검증, 디스패치, 충돌 안전성이 입증된 다중 ToolCall의 스케줄링, **`ToolOutcome`의 원자 커밋**(V3-042). Tool 구현 자체는 Internal 모듈이나 Environment 패키지에 있다.

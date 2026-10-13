@@ -4,7 +4,7 @@
 >
 > 범위: 별도 Task/ManagerTurn 계층을 복원하지 않고 **Conversation의 Control 실행 흐름**이 Pause/Resume를 지원할 수 있는 최소 계약.
 
-> **2026-10-13 개정:** P0는 단일 프로세스·Conversation별 in-process lock으로 시작하며, 아래의 영속 `ConversationControlState`·lease·fencing·다중 worker 복구는 **P2**다(V3-045). question 대기는 미완결 `ask_user` call로 표현되므로(V3-044) Pause의 "미완결 call 보존·재개" 메커니즘과 같은 경로를 쓴다.
+> **2026-10-13 개정:** P0는 단일 프로세스·Conversation별 in-process lock으로 시작하며, 아래의 영속 `ConversationControlState`·lease·fencing·다중 worker 복구는 **P2**다(V3-045). 단, lock은 동시 실행만 막으므로 **크래시 후 중복 방지는 P0에서도 Run/Tool의 영속 표시(`DISPATCH_CLAIMED`/`EXECUTION_CLAIMED`)와 재시작 시 UNKNOWN 처리**가 담당한다([Data v0.2 §1.1](data-contract-v0.2.md)). question 대기는 미완결 `ask_user` call로 표현되며 대기 중 lock을 해제한다(V3-044, [CPP §5.1](control-prompt-provider-v0.1.md)). Pause의 "미완결 call 보존·재개"와 같은 경로를 쓴다.
 
 ## 1. 주된 결론
 
@@ -126,7 +126,7 @@ Resume:
 5. Partial tool group: completed call never reruns; pending call only on Resume.
 6. Concurrent Resume attempts: one lease wins, other returns busy/conflict.
 7. Crash with unknown external effect: no blind retry, RECOVERY_REQUIRED.
-8. final/question and pause races: terminal/waiting outcomes remain coherent, no fake PAUSED terminal.
+8. final/`ask_user` 대기 and pause races: terminal/waiting outcomes remain coherent, no fake PAUSED terminal.
 9. PromptSnapshot presence does not authorize replay/Tool execution.
 10. No Task/ManagerTurn table required to pass Resume tests.
 

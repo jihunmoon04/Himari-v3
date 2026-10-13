@@ -31,7 +31,7 @@ Control (application / orchestration)
 
 - **Run은 하나의 LLM 호출**이다. 여러 호출의 집합을 Task로 정의하거나 Runtime이 Task 생명주기를 소유하지 않는다.
 - **Control**은 Run을 이어서 실행할지 결정하는 제어 모듈이다. Prompt, Provider, Tool, Data의 내부 구현은 소유하지 않는다.
-- **final response** 또는 **question**이면 Run 반복을 멈춘다. **question은 `ask_user` Tool 호출**로 표현하며, 사용자 응답이 그 call의 ToolResult가 되어 다음 Run이 이어진다(V3-044). `ask_user`와 다른 호출의 혼합은 P0에서 거부하는 안(V3-P15).
+- **final response** 또는 **question**이면 Run 반복을 멈춘다. **question은 suspending Tool `ask_user` 호출**로 표현한다. 대기 중에는 Conversation lock을 해제하고, 사용자 응답이 원래 `call_id`의 ToolResult로 커밋된 뒤 다음 Run이 이어진다. 대기 여부는 영속 기록에서 파생하며 새 Task 계층은 없다(V3-044). `ask_user`와 다른 호출의 혼합은 P0에서 거부하는 안(V3-P15).
 - Tool 실패는 실패 `ToolResult`로 Data에 남아 다음 모델 입력에 반영된다. 기본 원칙은 **모델에 결과 전달(A)**이다. 모델의 판단을 대신하는 Runtime의 의미론적 자동 재시도/복구를 도입하지 않는다.
 - 호출 취소, 네트워크 단절, 미완료 tool call 재개, 한 Run의 다중 tool call 처리 등 제어의 예외 경로는 추후 계약화한다.
 
@@ -170,6 +170,7 @@ Environment Tool 실행 시 `binding_id` → Environment 인스턴스/Conversati
 ### 6.1 Internal Tool과 Environment Tool
 
 - Tool은 최소한 **Internal Tool**(Memory/Plan/Note처럼 Data 공개 API 사용)과 **Environment Tool**(Inside 등 Environment의 Workspace 실행 계약 사용)을 구분하는 방향이다. 둘 다 같은 `ToolHandler` SPI를 구현하며, **Environment Tool은 해당 Environment 패키지가 `tools()`로 제공**한다(V3-041).
+- Environment 등록(V3-P19 제안): `EnvironmentPlugin`은 kind당 하나, `tools()`는 kind 수준 고정 목록이다. Conversation의 Tool 카탈로그에는 활성 Instance가 있는 kind의 Tool만 들어가고, 대상 Instance·Workspace는 `workspace_binding_id`로 해석해 `ToolContext`로 전달한다.
 - Tool 구현은 `ToolOutcome(model_result, artifact_mutations, …)`만 반환하고, Artifact 변경·ToolExecution 종결·Conversation Event의 원자 커밋은 Tool Dispatcher가 수행한다(V3-042).
 - Environment를 거칠 필요가 없는 Memory는 Data API에 직접 접근할 수 있지만 SQL/Repository private 구현에는 접근하지 않는다.
 - Workspace 요구 정책은 `None / Required / Default`로 구분하는 것을 권고한다. Outside 기본 Workspace를 암묵적으로 사용하는 Tool은 `None`과 다르다.
@@ -182,7 +183,7 @@ Environment Tool 실행 시 `binding_id` → Environment 인스턴스/Conversati
 - 병렬성 판단은 Binding ID가 아니라 Workspace/실제 공유 자원에 대한 효과를 기준으로 한다. 다른 Conversation에서도 같은 자원 충돌이 발생할 수 있다.
 - Tool/Environment가 검증 가능한 효과 범위를 제공하며 모델의 미검증 주장에 의존하지 않는다. 상세 Scheduler 계약은 아직 미결정.
 
-- **동일 Conversation의 실행 흐름과 Run은 직렬화**한다. P0는 프로세스 내 Conversation별 lock으로 충분하며 lease/fencing은 P2다(V3-045). 내부에서 독립적인 ToolCall의 병렬 처리는 허용된다.
+- **동일 Conversation의 실행 흐름과 Run은 직렬화**한다. P0는 프로세스 내 Conversation별 lock으로 **동시 실행**을 막고, **크래시 후 중복 실행**은 Provider 송신·부작용 Tool 실행 직전의 영속 표시와 재시작 시 UNKNOWN 처리(자동 재실행 없음)로 막는다. 분산 lease/fencing은 P2다(V3-045). 내부에서 독립적인 ToolCall의 병렬 처리는 허용된다.
 - Event는 종류별 불변 canonical payload, Plan/Note는 Data conversation-scoped Artifact, 모델 이력 재구성은 Prompt의 원본 선택·검증과 Provider의 native serialization으로 나눈다.
 
 자세한 내용은 [Data, Tool Execution, and Artifacts](data-and-tools.md) 및 [Data Contract v0.2](data-contract-v0.2.md)를 따른다.
