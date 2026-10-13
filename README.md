@@ -18,7 +18,7 @@ HIMARI v3의 **아키텍처 결정 기록 및 설계 기준선**입니다. 현�
 - **모든 Run의 원본 Provider 요청·응답**을 기록합니다. Execution Records, exact Conversation Events, Plan/Note 등의 Artifacts는 서로 다른 논리 영역으로 구분합니다.
 - **ToolCall은 충돌이 없으면 병렬 실행**할 수 있습니다. 같은 Workspace에서 부작용 범위가 불명확한 명령은 기본 직렬 처리하도록 설계합니다.
 - **Workspace 전용 소프트웨어 모듈은 만들지 않습니다.** Memory 등 Internal Tool은 Data의 공개 API를 직접 사용할 수 있으며, 환경 Tool은 Environment를 경유합니다.
-- **기본 Workspace는 사용자별 공유 Root** 아래 Conversation별 기본 cwd를 사용하며 허용된 같은 사용자 다른 Conversation 폴더에 접근할 수 있습니다. `inside/run_command`는 **OS Sandbox에서 실행하고 네트워크를 기본 차단**합니다. 인간 Approval/Worktree 복제 격리는 초기 요구사항이 아니며, 향후 Web Search는 별도 Tool로 설계합니다.
+- **기본 Workspace는 사용자별 공유 Root** 아래 Conversation별 기본 cwd를 사용하며 허용된 같은 사용자 다른 Conversation 폴더에 접근할 수 있습니다. `inside/run_command`는 **OS Sandbox에서 실행하며 초기에는 네트워크 차단 전용 프로파일만 지원**합니다. 인간 Approval/Worktree 복제 격리는 초기 요구사항이 아니며, 향후 Web Search는 별도 Tool로 설계합니다.
 
 ## 문서
 
