@@ -1,6 +1,6 @@
 # HIMARI v3
 
-HIMARI v3의 **아키텍처 결정 기록 및 설계 기준선**입니다. 현재는 설계 단계이며, 이 저장소의 문서는 구현 완료를 의미하지 않습니다.
+HIMARI v3의 **아키텍처 결정 기록 및 설계 기준선**입니다. 현재는 설계 단계이며 공개 계약의 `api.py` skeleton만 있고 구현은 없습니다.
 
 > 설계 원칙: **Contract-based Modular Architecture** — 모듈은 서로의 내부 구현에 의존하지 않고, 명시된 계약을 유지하는 범위에서 독립적으로 수정·교체할 수 있어야 합니다.
 
@@ -47,6 +47,26 @@ HIMARI v3의 **아키텍처 결정 기록 및 설계 기준선**입니다. 현�
 - [Control Pause/Resume 계약 초안](docs/control-pause-v0.1.md) — Run 간 정지·재개와 미완결 ToolCall 처리
 - [결정 기록](docs/decisions.md) — 현재까지 합의한 내용과 설계상 권고 사항 (모듈 경계 개정 V3-039~046 포함)
 - [미결정 사항](docs/open-questions.md) — 초기 구현에 앞서 확정할 계약과 후속 결정
+
+## 코드 (api skeleton)
+
+공개 계약은 각 모듈의 `api.py`가 원본입니다(V3-046). 구현은 아직 없습니다.
+
+| 모듈 | 계약 |
+| --- | --- |
+| `src/himari/common.py` | 공용 식별자·값 타입 (`TrustedScope`, `ToolCall`, `ModelToolResult` …) |
+| `src/himari/data/api.py` | `ConversationLog`, `ArtifactStore`, `WorkspaceState`, `StateQuery` |
+| `src/himari/tool/api.py` | `ToolHandler` SPI, `ToolOutcome`, `ToolCatalog`, `ToolDispatcher` |
+| `src/himari/environment/api.py` | `EnvironmentPlugin` SPI |
+| `src/himari/prompt/api.py` | `PromptComposer`(순수), `PromptContextLoader`, `ModelInput` |
+| `src/himari/provider/api.py` | `ProviderAdapter` SPI, 정규화 출력 `FINAL \| TOOL_CALLS` |
+
+```bash
+uv venv && uv pip install -e ".[dev]"
+python -I scripts/check_imports.py   # 모듈 경계 (정적)
+python -m mypy                       # strict 타입 검사 (정적)
+python -m pytest tests/<module>/     # 변경 모듈만; 공개 계약 변경 시 전체 pytest (V3-038)
+```
 
 ## 상태 및 규칙
 
