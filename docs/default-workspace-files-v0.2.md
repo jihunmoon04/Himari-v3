@@ -2,7 +2,7 @@
 
 > 2026-10-13 · **설계 기준 업데이트 / Detailed Contract PROPOSED**
 >
-> **V3-032~034 명시 결정:** 기본 Workspace에서 `run_command`를 지원하고 OS Sandbox를 도입한다. 사용자별 공통 기본 Workspace에 **Conversation별 디렉터리**를 만들고 **동일 사용자에게 허용된 다른 Conversation 폴더에도 접근 가능**하게 한다. 초기 Approval 미도입은 변경되지 않았다. 이 문서는 [v0.1](default-workspace-files-v0.1.md)을 우선한다.
+> **V3-032~036 명시 결정:** 기본 Workspace에서 `run_command`를 지원하고 OS Sandbox를 도입한다. **사용자별 소유 Root**에 Conversation별 디렉터리를 만들고 같은 사용자에게 허용된 다른 Conversation 폴더에도 접근한다. **Sandbox 네트워크는 기본 차단**. 초기 Approval 미도입은 유지한다. 이 문서는 [v0.1](default-workspace-files-v0.1.md)을 우선하며, Sandbox 상세는 [Sandbox Execution v0.1](sandbox-execution-v0.1.md)을 따른다.
 >
 > **주의:** 동일 사용자 Conversation 폴더 간 격리는 요구하지 않으나 사용자/테넌트 경계, HIMARI Data Root/호스트 파일 보호는 유지한다. 실제 Sandbox 기술·파일 보존·권한/네트워크 정책은 권고안이며 추가 검수 필요.
 
@@ -90,12 +90,12 @@ ToolExecutionRecord + canonical ToolResult
 
 **Sandbox는 `run_command` 및 임의 프로그램 실행에 대한 필수 실행 경계다.** 구조화된 파일 API가 신뢰된 서버 프로세스 안에서 동작하는 경우에도 path/ACL/파일 descriptor 검증이 필요하다. 구조화 API가 별도 자식 프로세스를 실행한다면 동일 Sandbox 조건이 적용된다.
 
-- **Linux 구현 권고:** bubblewrap mount/user/PID namespaces 등의 host-available profile + Landlock 보강·NoNewPrivileges·제한된 mount view·fd-safe structured file access. 특정 기술 선택은 호스트 capability probe 후 확정해야 한다.
+- **Linux 구현 권고:** v2의 Bubblewrap mount/user/PID namespaces + Landlock 보강·NoNewPrivileges·제한된 mount view·fd-safe structured file access를 참조해 재설계한다. 기존 v2 정책은 네트워크 격리가 없고 WorkAuthority·실제 Workspace Root cwd에 결합되어 있어 그대로 옮기지 않는다. [상세 재사용 검토](sandbox-execution-v0.1.md).
 - 샌드박스 실행 전에 지원/활성 상태를 검사하며, 미지원 플랫폼에서 **unsandboxed fallback 금지**. Windows 또는 기타 OS는 동일 계약을 만족하는 구현이 없으면 실행을 지원하지 않는다.
 - 설치된 툴체인/라이브러리는 **필요 최소한 Read-only**로 매핑한다. 홈 디렉터리, 임의 임시 디렉터리, Docker/호스트 소켓, 인증서·SSH key, 앱 내부 DB는 자동 노출하지 않는다.
 - 프로세스 환경 변수는 allowlist 사용; 호스트의 토큰/secret을 기본적으로 전달하지 않는다.
 - `argv`, cwd, 자원 범위, 최대 실행 시간, 출력 상한, 프로세스 하위 트리 종료, 시스템 콜 제한 등의 구체 정책은 OPEN.
-- **네트워크는 별도 권한 차원이다.** OS 파일 Sandbox가 인터넷 차단을 자동 의미하지 않는다. 첫 버전 default deny를 권고하되 사용자가 아직 확정하지 않았다.
+- **네트워크 기본 차단은 확정(V3-036)**이다. bwrap 네트워크 namespace 등 별도 커널 집행과 네트워크 우회 테스트가 필요하다. 향후 별도 Web Search Tool은 trusted network service 경계에서 구현하며, 이를 이유로 `run_command`에 네트워크를 허용하지 않는다.
 - Sandbox 안에서 `rm -rf /workspace/conversations`를 실행할 수 있다면 **같은 사용자의 파일은 삭제될 수 있다**. Approval을 사용하지 않는 만큼 구조적 보호·버전/스냅샷·사용자 경고는 별도 결정 필요.
 
 ### Process scope and concurrency
@@ -158,9 +158,9 @@ These new Port identifiers extend [contracts.md](contracts.md); they do not impl
 
 ## 7. OPEN
 
-- Shared root scope: **user/principal** (recommended) vs single-user installation; how to obtain trusted principal in Web/CLI.
+- Shared root scope: **user/principal별 기본 Root는 확정(V3-035)**. Web/CLI에서 신뢰된 principal을 획득·검증하고 물리 root에 매핑하는 방식은 미결정.
 - Whether default cross-Conversation access includes all owned directories or only explicitly enabled folders. User wants access; permission filtering is still required for multi-user installations.
-- Sandbox implementation/backend/activation probe on actual host; process output/time/memory/network policy.
+- Sandbox 구현/활성화·실제 호스트 기동 검증, 프로세스 출력/시간/메모리 정책. **네트워크 차단 여부는 확정**, 방법과 DNS/loopback/Unix socket 예외 검증은 미결정.
 - How/where to store immutable published file versions outside the writable Sandbox root.
 - Filesystem operations' file-size and edit/version bounds; how to reconcile out-of-band shell writes.
 - Conversation deletion, directory retention, cross-conversation references, shared/ retention policy.
