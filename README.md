@@ -21,6 +21,7 @@ HIMARI v3의 **아키텍처 결정 기록 및 설계 기준선**입니다. 현�
 
 ## 문서
 
+- **[통합 모듈 계약 기준서](docs/contracts.md)** — 모듈별 계약, Owner/Provider/Consumer, Source of Truth, 선언 위치, 상태 및 의존성 (주요 진입점)
 - [아키텍처](docs/architecture.md) — 역할, 데이터 흐름, Run·Prompt·Tool·Environment·Workspace 구조
 - [모듈 경계 및 계약](docs/module-boundaries.md) — 의존성 규칙, 인터페이스, 계약 검증
 - [프롬프트 구성 계약](docs/prompt-composition.md) — Cache-first 순서, Trigger 참조, Tool 그룹, Reasoning/Provider 매핑
