@@ -8,6 +8,8 @@ Data 계약 초안에 **DC-01~DC-10 검토 쟁점**을 정리했다. 기존 Q-01
 
 **[통합 모듈 계약 기준서](contracts.md)**에 Owner / Provider / Consumer / Source of Truth / Contract Location 메타데이터가 채워진 **검토용 공개 Port 인벤토리**를 작성했다. **메타데이터 작성 표준 자체는 V3-029로 확정**되었지만 각 함수/DTO 시그니처는 아직 확정되지 않았다.
 
+**테스트 범위 정책 V3-038 확정:** 계약 변경 때만 전체 pytest, 그 외 수정된 모듈 pytest만 수행한다. 테스트 구조/명령 예시는 [Testing Policy](testing-policy.md). 실제 Python 테스트 디렉터리는 아직 생성되지 않았다.
+
 ## 이미 해결된 설계 방향
 
 - **Run = 모델 호출 1회**, Control이 final/question에서 반복 종료.
@@ -55,7 +57,7 @@ P0 완료 목표: **Fake Data/Provider/Tool로 모델 호출 1회 + tool group +
 | Q-32 | 파일 I/O 계약 | 파일 Tool·`inside/run_command`, 사용자별 Root/cwd에 맞춘 v2 Sandbox 수정, symlink/hardlink/mount 별칭 차단, 명령 효과 충돌, 실행 제한 |
 | Q-33 | 파일 생명주기 | Conversation 삭제가 공유 Workspace 파일을 어떻게 참조 해제·GC할지 |
 
-**권고:** 기본 파일 Tool과 bounded `inside/run_command`를 함께 개발하되, 장기 ManagedProcess는 별도 수명/복구 계약으로 미룬다. **네트워크 기본 차단**과 Sandbox 없는 실행 fallback 금지는 필수 방향. [Sandbox Execution v0.1](sandbox-execution-v0.1.md)에 v2 백엔드 재사용과 v3 변경점의 상세 계약을 정리했다.
+**권고:** 기본 파일 Tool과 bounded `inside/run_command`를 함께 개발하되, 장기 ManagedProcess는 별도 수명/복구 계약으로 미룬다. **네트워크 차단 전용 프로파일**과 Sandbox 없는 실행 fallback 금지는 필수 방향. [Sandbox Execution v0.1](sandbox-execution-v0.1.md)은 정책 원칙, [Sandbox Implementation Candidate v0.2](sandbox-implementation-v0.2.md)는 v2 코드별 이식 경계·기동 검증·실행 결과 계약을 담은 상세 초안이다.
 
 ## P0-C — Control Pause/Resume (설계 초안)
 
@@ -76,7 +78,7 @@ P0 완료 목표: **Fake Data/Provider/Tool로 모델 호출 1회 + tool group +
 | Q-09 | Binding | Binding ID·스코프·철회/재연결·공유, Conversation 간 같은 Workspace 참조 |
 | Q-10 | Binding authority | Tool에서 Binding/Workspace 중 어느 ID를 노출할지, 실행 시 권한 검증 |
 | Q-11 | Inside Execution | **기본 파일 I/O와 bounded `run_command`는 P0-F로 선행**. 이후 ManagedProcess 수명/영속 프로세스 복구, 환경 접속 실패 처리 |
-| Q-12 | Safety/Approval | **초기 `run_command` OS Sandbox 및 네트워크 차단 전용 프로파일 확정**; 인간 Approval/Worktree 복제 격리 미도입. v2 백엔드 수정, net namespace/host socket 우회 차단 증명, 기동 게이트와 실행 한도 미결정 |
+| Q-12 | Safety/Approval | **Sandbox + 네트워크 차단 전용 프로파일 확정**. [v0.2 구현 계약 초안](sandbox-implementation-v0.2.md)의 host gate/원본 Root·cwd 권한/네트워크·Unix socket 테스트 검수 및 실행 제한 값 확정 필요 |
 | Q-13 | Scheduler 상세 | verified read/write footprint, 같은 Workspace 명령 기본 직렬, 다른 Conversation 충돌, 락/종결 배리어/최대 병렬수 |
 | Q-23 | Tool execution durability | Tool 의도 저장·시작/완료·취소, DB 밖에서 발생한 부작용과 중단 후 결과 불명 처리 |
 | Q-24 | Internal vs Environment routing | 실행 유형 등록 계약, `None/Required/Default` Workspace 정책, 외부 서비스 Tool 범주 필요 여부 |
