@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Protocol, runtime_checkable
 
-from himari.common import ContentBlock, RawRepresentation, TokenUsage, ToolCall
+from himari.common import DeepFrozen, ContentBlock, RawRepresentation, TokenUsage, ToolCall
 from himari.prompt.api import ModelInput
 from himari.tool.api import ASK_USER_TOOL_ID
 
@@ -33,7 +33,7 @@ class ProviderError(Exception):
 
 
 @dataclass(frozen=True)
-class ProviderCapabilities:
+class ProviderCapabilities(DeepFrozen):
     model_id: str
     reasoning_efforts: frozenset[str] = frozenset()
     parallel_tool_calls: bool = False
@@ -41,7 +41,7 @@ class ProviderCapabilities:
 
 
 @dataclass(frozen=True)
-class NativePreparedRequest:
+class NativePreparedRequest(DeepFrozen):
     body: bytes
     content_type: str
     raw_representation: RawRepresentation  # what ``body`` equals (V3-P14 OPEN)
@@ -50,19 +50,19 @@ class NativePreparedRequest:
 
 
 @dataclass(frozen=True)
-class NativeReceived:
+class NativeReceived(DeepFrozen):
     body: bytes
     content_type: str
     usage: TokenUsage | None = None
 
 
 @dataclass(frozen=True)
-class NativeNoResponse:
+class NativeNoResponse(DeepFrozen):
     error_code: str
 
 
 @dataclass(frozen=True)
-class NativeUncertain:
+class NativeUncertain(DeepFrozen):
     error_code: str
 
 
@@ -70,13 +70,13 @@ type NativeInvocationOutcome = NativeReceived | NativeNoResponse | NativeUncerta
 
 
 @dataclass(frozen=True)
-class NormalizedFinal:
+class NormalizedFinal(DeepFrozen):
     blocks: tuple[ContentBlock, ...]
     continuation_ref: str | None = None
 
 
 @dataclass(frozen=True)
-class NormalizedToolCalls:
+class NormalizedToolCalls(DeepFrozen):
     calls: tuple[ToolCall, ...]
     commentary: tuple[ContentBlock, ...] = ()  # V3-P16: not a final signal
     continuation_ref: str | None = None
@@ -109,13 +109,14 @@ class ProviderAdapter(Protocol):
 
 
 def validate_tool_calls(calls: Sequence[ToolCall]) -> None:
-    """Shared normalization rule for all adapters: non-empty, unique call ids
-    and ordinals, ``ask_user`` only as the sole call (V3-P15)."""
+    """Shared normalization rule for all adapters: non-empty, unique call ids,
+    ordinals exactly ``0..n-1`` in listed order, ``ask_user`` only as the sole
+    call (V3-P15)."""
     if not calls:
         raise ProviderError(ProviderErrorCode.INVALID_MODEL_OUTPUT, "empty tool call group")
     if len({c.call_id for c in calls}) != len(calls):
         raise ProviderError(ProviderErrorCode.INVALID_MODEL_OUTPUT, "duplicate call_id")
-    if len({c.ordinal for c in calls}) != len(calls):
-        raise ProviderError(ProviderErrorCode.INVALID_MODEL_OUTPUT, "duplicate ordinal")
+    if [c.ordinal for c in calls] != list(range(len(calls))):
+        raise ProviderError(ProviderErrorCode.INVALID_MODEL_OUTPUT, "ordinals must be 0..n-1 in order")
     if len(calls) > 1 and any(c.tool_id == ASK_USER_TOOL_ID for c in calls):
         raise ProviderError(ProviderErrorCode.INVALID_MODEL_OUTPUT, "ask_user mixed with other calls")

@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Protocol
 
-from himari.common import CallId, ContentBlock, EventId, ModelToolResult, RunId, ToolCall, TrustedScope
+from himari.common import DeepFrozen, CallId, ContentBlock, EventId, ModelToolResult, RunId, ToolCall, TrustedScope
 from himari.data.api import (
     ConversationEvent,
     PersistedStateBasis,
@@ -40,7 +40,7 @@ class PromptError(Exception):
 
 
 @dataclass(frozen=True)
-class RequestOptions:
+class RequestOptions(DeepFrozen):
     model_id: str
     reasoning_effort: str | None = None
 
@@ -49,25 +49,25 @@ class RequestOptions:
 
 
 @dataclass(frozen=True)
-class CompressedHistory:
+class CompressedHistory(DeepFrozen):
     summary: tuple[ContentBlock, ...]
     covers_through_sequence: int
 
 
 @dataclass(frozen=True)
-class UserTurn:
+class UserTurn(DeepFrozen):
     event_id: EventId
     blocks: tuple[ContentBlock, ...]
 
 
 @dataclass(frozen=True)
-class AssistantTurn:
+class AssistantTurn(DeepFrozen):
     event_id: EventId
     blocks: tuple[ContentBlock, ...]
 
 
 @dataclass(frozen=True)
-class ToolGroupTurn:
+class ToolGroupTurn(DeepFrozen):
     """An assistant ToolCall group immediately followed by its results in
     original ordinal order. An ask_user answer appears only here, as the
     result of its call — never again as a UserTurn (V3-P18)."""
@@ -82,7 +82,7 @@ type HistoryPart = CompressedHistory | UserTurn | AssistantTurn | ToolGroupTurn
 
 
 @dataclass(frozen=True)
-class CurrentStateProjection:
+class CurrentStateProjection(DeepFrozen):
     """Read projection, not a source of truth or an execution permission."""
 
     basis: PersistedStateBasis
@@ -90,7 +90,7 @@ class CurrentStateProjection:
 
 
 @dataclass(frozen=True)
-class ModelInput:
+class ModelInput(DeepFrozen):
     stable_prefix: tuple[str, ...]
     tool_catalog: tuple[ToolDefinition, ...]
     conversation: tuple[HistoryPart, ...]
@@ -102,7 +102,7 @@ class ModelInput:
 
 
 @dataclass(frozen=True)
-class PromptInputs:
+class PromptInputs(DeepFrozen):
     """Everything ``compose`` needs, gathered by the loader. No I/O handles."""
 
     instructions: tuple[str, ...]

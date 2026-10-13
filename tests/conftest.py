@@ -9,6 +9,8 @@ from types import ModuleType
 
 import pytest
 
+from himari.common import DeepFrozen
+
 
 def _assert_api_dataclasses_frozen(module: ModuleType) -> None:
     defined = [
@@ -19,6 +21,8 @@ def _assert_api_dataclasses_frozen(module: ModuleType) -> None:
     assert defined, f"{module.__name__} defines no dataclasses"
     mutable = [cls.__name__ for cls in defined if not cls.__dataclass_params__.frozen]  # type: ignore[attr-defined]
     assert not mutable, f"public DTOs must be frozen: {mutable}"
+    shallow = [cls.__name__ for cls in defined if not issubclass(cls, DeepFrozen)]
+    assert not shallow, f"public DTOs must inherit DeepFrozen: {shallow}"
 
 
 @pytest.fixture

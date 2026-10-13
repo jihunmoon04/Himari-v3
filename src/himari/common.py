@@ -1,16 +1,100 @@
 """Small public value types shared by several module contracts.
 
-Only identifiers and plain immutable values live here — no behavior, no
-module-specific DTOs. Anything owned by one module belongs in that module's
+Only identifiers, plain immutable values and the deep-immutability rule live
+here — no module-specific DTOs. Anything owned by one module belongs in that module's
 ``api.py`` (V3-046). Every ``himari.<module>.api`` may import this module.
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+import dataclasses
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum
-from typing import NewType
+from typing import Any, NewType, NoReturn, cast
+
+# --- Deep immutability (public DTO rule) -----------------------------------
+# ``frozen=True`` only blocks attribute reassignment. Every public DTO also
+# inherits ``DeepFrozen``, which replaces each field value with a deep-frozen
+# copy at construction: mutable inputs are copied, so neither the caller nor a
+# Tool handler holding the object can change a recorded value afterwards.
+
+
+class FrozenDict[K, V](dict[K, V]):
+    """Read-only ``dict``. Subclasses dict so ``json`` and ``dataclasses.asdict``
+    keep working; every mutating method raises ``TypeError``."""
+
+    __slots__ = ()
+
+    def _readonly(self) -> NoReturn:
+        raise TypeError("FrozenDict is immutable")
+
+    def __setitem__(self, key: K, value: V) -> NoReturn:
+        self._readonly()
+
+    def __delitem__(self, key: K) -> NoReturn:
+        self._readonly()
+
+    def __ior__(self, other: object) -> NoReturn:  # type: ignore[misc]
+        self._readonly()
+
+    def clear(self) -> NoReturn:
+        self._readonly()
+
+    def pop(self, *args: object) -> NoReturn:
+        self._readonly()
+
+    def popitem(self) -> NoReturn:
+        self._readonly()
+
+    def setdefault(self, *args: object) -> NoReturn:
+        self._readonly()
+
+    def update(self, *args: object, **kwargs: object) -> NoReturn:
+        self._readonly()
+
+    def __hash__(self) -> int:  # type: ignore[override]
+        return hash(frozenset(self.items()))
+
+    def __reduce__(self) -> tuple[type[FrozenDict[K, V]], tuple[dict[K, V]]]:
+        return (type(self), (dict(self),))  # pickle/deepcopy without __setitem__
+
+
+def deep_freeze[T](value: T) -> T:
+    """Deep-frozen copy: Mapping → FrozenDict, list/tuple → tuple, set →
+    frozenset, recursively. Scalars, bytes, enums, datetimes and (already
+    frozen) DTO instances are returned as is."""
+    result: object
+    if _is_frozen(value):
+        result = value
+    elif isinstance(value, Mapping):
+        result = FrozenDict({k: deep_freeze(v) for k, v in value.items()})
+    elif isinstance(value, (list, tuple)):
+        result = tuple(deep_freeze(v) for v in cast(Iterable[Any], value))
+    elif isinstance(value, (set, frozenset)):
+        result = frozenset(deep_freeze(v) for v in cast(Iterable[Any], value))
+    elif isinstance(value, bytearray):
+        result = bytes(value)
+    else:
+        result = value  # DTO instances (DeepFrozen), datetimes, service objects
+    return cast(T, result)
+
+
+def _is_frozen(value: object) -> bool:
+    if isinstance(value, FrozenDict):
+        return all(_is_frozen(v) for v in value.values())
+    if isinstance(value, (tuple, frozenset)) and not isinstance(value, str):
+        return all(_is_frozen(v) for v in value)
+    return not isinstance(value, (Mapping, list, set, bytearray))
+
+
+class DeepFrozen:
+    """Mixin for public frozen dataclasses: deep-freezes every field."""
+
+    def __post_init__(self) -> None:
+        for f in dataclasses.fields(cast(Any, self)):
+            object.__setattr__(self, f.name, deep_freeze(getattr(self, f.name)))
+
 
 # --- Opaque identifiers ------------------------------------------------------
 # IDs are references, never authorization (Data v0.2 §3).
@@ -33,7 +117,7 @@ type JsonValue = (
 
 
 @dataclass(frozen=True)
-class TrustedScope:
+class TrustedScope(DeepFrozen):
     """Authenticated principal + Conversation.
 
     Created only by the trusted entry point / composition root from an
@@ -46,7 +130,7 @@ class TrustedScope:
 
 
 @dataclass(frozen=True)
-class CallRef:
+class CallRef(DeepFrozen):
     """Identity of one ToolCall: unique ``(run_id, call_id)``."""
 
     run_id: RunId
@@ -57,12 +141,12 @@ class CallRef:
 
 
 @dataclass(frozen=True)
-class TextBlock:
+class TextBlock(DeepFrozen):
     text: str
 
 
 @dataclass(frozen=True)
-class AttachmentRef:
+class AttachmentRef(DeepFrozen):
     """Immutable reference to a versioned file (FILE-02); never raw bytes."""
 
     file_id: str
@@ -73,7 +157,7 @@ type ContentBlock = TextBlock | AttachmentRef
 
 
 @dataclass(frozen=True)
-class ToolCall:
+class ToolCall(DeepFrozen):
     """One model-issued call, in original order (``ordinal``) within its Run."""
 
     call_id: CallId
@@ -83,7 +167,7 @@ class ToolCall:
 
 
 @dataclass(frozen=True)
-class ModelToolResult:
+class ModelToolResult(DeepFrozen):
     """The ToolResult content the model sees for one call."""
 
     blocks: tuple[ContentBlock, ...]
@@ -91,7 +175,7 @@ class ModelToolResult:
 
 
 @dataclass(frozen=True)
-class TokenUsage:
+class TokenUsage(DeepFrozen):
     """Provider-reported usage. Execution metadata, never prompt text."""
 
     input_tokens: int | None = None

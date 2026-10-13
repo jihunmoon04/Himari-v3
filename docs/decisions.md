@@ -86,6 +86,8 @@
 | V3-P20 | Proposed | **모듈 layer 순서:** `common < data < tool < environment < prompt < provider < control < bootstrap`. 하위 layer만 import할 수 있고, 다른 모듈은 `himari.<module>.api`와 `himari.common`만 import한다(`scripts/check_imports.py`). Provider는 Prompt의 `ModelInput`을, Environment는 Tool의 `ToolHandler`를 소비하므로 이 순서가 된다. bootstrap(Composition Root)만 예외다. |
 | V3-P21 | Proposed | **`himari.common`:** 여러 계약이 공유하는 식별자(NewType)·값 타입(`TrustedScope`, `CallRef`, `ToolCall`, `ContentBlock`, `ModelToolResult`, `TokenUsage`, `RawRepresentation`)만 둔다. 행위·모듈 고유 DTO는 두지 않는다(거대 공용 계약 패키지 금지 원칙 유지). |
 | V3-P22 | Proposed | **코드 선언 시 이름 정리:** Tool 완료는 DATA-08 `commit_tool_outcome` 하나로 통합(구 `complete_tool_execution`). 정규화 공통 규칙 `validate_tool_calls`(빈 그룹·중복 call_id/ordinal·`ask_user` 혼합 거부)는 `provider/api.py`에 두어 모든 Adapter가 공유한다. |
+| V3-P29 | Proposed | **공개 DTO의 깊은 불변성:** 모든 공개 DTO는 `frozen=True` + `DeepFrozen`을 상속한다. 생성 시 모든 필드를 깊게 복사·불변화한다(Mapping → `FrozenDict`, list/tuple → tuple, set → frozenset). 호출자나 Tool handler가 원래 객체나 받은 객체를 바꿔도 기록된 값은 변하지 않는다(V3-003). 테스트(`tests/conftest.py`)는 모든 api 모듈의 dataclass가 `DeepFrozen`을 상속하는지 검사한다. *(독립 검수 B2-1)* |
+| V3-P30 | Proposed | **ToolCall ordinal 규칙:** 한 그룹의 ordinal은 나열 순서대로 정확히 `0..n-1`이다. 음수·빈 번호·순서 불일치는 `INVALID_MODEL_OUTPUT`으로 거부한다(`validate_tool_calls`). |
 
 ## C. 명시적으로 미결정인 영역
 

@@ -74,6 +74,10 @@ def test_valid_tool_call_groups(calls: list[ToolCall]) -> None:
         [],
         [call("a", 0), call("a", 1)],
         [call("a", 0), call("b", 0)],
+        [call("a", -1)],
+        [call("a", 1)],
+        [call("a", 1), call("b", 0)],  # listed order disagrees with ordinal
+        [call("a", 0), call("b", 2)],
         [call("q", 0, ASK_USER_TOOL_ID), call("b", 1)],  # V3-P15
     ],
 )

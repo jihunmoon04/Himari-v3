@@ -20,6 +20,7 @@ from enum import Enum
 from typing import Protocol, runtime_checkable
 
 from himari.common import (
+    DeepFrozen,
     CallId,
     CallRef,
     EnvironmentKind,
@@ -60,7 +61,7 @@ class ConversationRecord(Enum):
 
 
 @dataclass(frozen=True)
-class ToolDefinition:
+class ToolDefinition(DeepFrozen):
     tool_id: ToolId  # "<environment_kind>/<name>" for Environment Tools (V3-008)
     description: str
     input_schema: Mapping[str, JsonValue]  # JSON Schema of arguments
@@ -72,14 +73,14 @@ class ToolDefinition:
 
 
 @dataclass(frozen=True)
-class ToolInvocation:
+class ToolInvocation(DeepFrozen):
     tool_id: ToolId
     call_id: CallId  # for idempotency/logging only; not a ledger handle
     arguments: Mapping[str, JsonValue]
 
 
 @dataclass(frozen=True)
-class ToolContext:
+class ToolContext(DeepFrozen):
     """What a handler may use. Write effects on Data go through ToolOutcome."""
 
     scope: TrustedScope
@@ -95,7 +96,7 @@ class ToolStatus(Enum):
 
 
 @dataclass(frozen=True)
-class ToolOutcome:
+class ToolOutcome(DeepFrozen):
     """A truthful, definite result. A handler that cannot know whether its
     effect happened must raise instead of guessing; the record then stays
     EXECUTION_CLAIMED and becomes UNKNOWN."""
@@ -136,7 +137,7 @@ class GroupState(Enum):
 
 
 @dataclass(frozen=True)
-class GroupDispatchResult:
+class GroupDispatchResult(DeepFrozen):
     run_id: RunId
     state: GroupState
     waiting_call: CallRef | None = None

@@ -17,7 +17,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Protocol, runtime_checkable
 
-from himari.common import BindingId, EnvironmentKind, TrustedScope
+from himari.common import DeepFrozen, BindingId, EnvironmentKind, TrustedScope
 from himari.data.api import BindingAuthority
 from himari.tool.api import ToolHandler
 
@@ -29,7 +29,7 @@ class ConnectionStatus(Enum):
 
 
 @dataclass(frozen=True)
-class BindingObservation:
+class BindingObservation(DeepFrozen):
     """Time-scoped, best-effort observation. Not authorization."""
 
     binding_id: BindingId

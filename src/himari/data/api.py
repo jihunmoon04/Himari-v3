@@ -19,6 +19,7 @@ from enum import Enum
 from typing import Protocol
 
 from himari.common import (
+    DeepFrozen,
     ArtifactId,
     BindingId,
     CallRef,
@@ -71,24 +72,24 @@ class EventKind(Enum):
 
 
 @dataclass(frozen=True)
-class UserMessage:
+class UserMessage(DeepFrozen):
     blocks: tuple[ContentBlock, ...]
     answers_call: CallRef | None = None  # set only via answer_pending_call (T7a)
 
 
 @dataclass(frozen=True)
-class AssistantFinal:
+class AssistantFinal(DeepFrozen):
     blocks: tuple[ContentBlock, ...]
 
 
 @dataclass(frozen=True)
-class AssistantToolCalls:
+class AssistantToolCalls(DeepFrozen):
     calls: tuple[ToolCall, ...]  # original order; ordinals unique
     commentary: tuple[ContentBlock, ...] = ()  # V3-P16
 
 
 @dataclass(frozen=True)
-class ToolResultRecord:
+class ToolResultRecord(DeepFrozen):
     call: CallRef
     model_result: ModelToolResult
 
@@ -98,7 +99,7 @@ type AssistantOutput = AssistantFinal | AssistantToolCalls
 
 
 @dataclass(frozen=True)
-class ConversationEvent:
+class ConversationEvent(DeepFrozen):
     event_id: EventId
     conversation_id: ConversationId
     sequence: int  # per-Conversation, monotonic; the only chronology authority
@@ -124,12 +125,12 @@ class RunStatus(Enum):
 
 
 @dataclass(frozen=True)
-class EventRef:
+class EventRef(DeepFrozen):
     event_id: EventId
 
 
 @dataclass(frozen=True)
-class CompletedGroupRef:
+class CompletedGroupRef(DeepFrozen):
     run_id: RunId
 
 
@@ -137,7 +138,7 @@ type TriggerRef = EventRef | CompletedGroupRef
 
 
 @dataclass(frozen=True)
-class PromptBasis:
+class PromptBasis(DeepFrozen):
     """Versions of the sources a Run's input was composed from."""
 
     event_sequence: int
@@ -147,7 +148,7 @@ class PromptBasis:
 
 
 @dataclass(frozen=True)
-class RunPreparation:
+class RunPreparation(DeepFrozen):
     """Everything persisted by ``prepare_run`` (T2) before any send."""
 
     raw_request_body: bytes
@@ -160,21 +161,21 @@ class RunPreparation:
 
 
 @dataclass(frozen=True)
-class RawReceived:
+class RawReceived(DeepFrozen):
     body: bytes
     content_type: str
     usage: TokenUsage | None = None
 
 
 @dataclass(frozen=True)
-class RawNoResponse:
+class RawNoResponse(DeepFrozen):
     """Known failure: the Provider certainly produced no response."""
 
     error_code: str
 
 
 @dataclass(frozen=True)
-class RawUncertain:
+class RawUncertain(DeepFrozen):
     """Send may or may not have reached the Provider; never resent."""
 
     error_code: str
@@ -184,7 +185,7 @@ type RawRunOutcome = RawReceived | RawNoResponse | RawUncertain
 
 
 @dataclass(frozen=True)
-class RunRecord:
+class RunRecord(DeepFrozen):
     run_id: RunId
     conversation_id: ConversationId
     status: RunStatus
@@ -211,7 +212,7 @@ class ToolExecutionStatus(Enum):
 
 
 @dataclass(frozen=True)
-class ToolExecutionRecord:
+class ToolExecutionRecord(DeepFrozen):
     call: CallRef
     ordinal: int
     tool_id: ToolId
@@ -222,7 +223,7 @@ class ToolExecutionRecord:
 
 
 @dataclass(frozen=True)
-class ProjectionResult:
+class ProjectionResult(DeepFrozen):
     event: ConversationEvent
     pending: tuple[ToolExecutionRecord, ...]  # empty for AssistantFinal
 
@@ -231,7 +232,7 @@ class ProjectionResult:
 
 
 @dataclass(frozen=True)
-class Artifact:
+class Artifact(DeepFrozen):
     artifact_id: ArtifactId
     kind: str  # e.g. "plan", "note"; Data does not interpret content
     revision: int
@@ -239,7 +240,7 @@ class Artifact:
 
 
 @dataclass(frozen=True)
-class ArtifactMutation:
+class ArtifactMutation(DeepFrozen):
     """Requested Plan/Note change carried by a ToolOutcome (V3-042).
 
     ``artifact_id=None`` creates a new Artifact; otherwise ``expected_revision``
@@ -253,7 +254,7 @@ class ArtifactMutation:
 
 
 @dataclass(frozen=True)
-class ToolCompletion:
+class ToolCompletion(DeepFrozen):
     """Terminal outcome committed by the Tool Dispatcher (DATA-08, T7/T8)."""
 
     status: ToolExecutionStatus  # SUCCEEDED | FAILED | DENIED | CANCELLED
@@ -263,13 +264,13 @@ class ToolCompletion:
 
 
 @dataclass(frozen=True)
-class AnswerCommit:
+class AnswerCommit(DeepFrozen):
     user_event: ConversationEvent
     tool_result_event: ConversationEvent | None
 
 
 @dataclass(frozen=True)
-class RecoveryReport:
+class RecoveryReport(DeepFrozen):
     """Result of restart cleanup (T-R). Nothing is re-executed."""
 
     runs_outcome_unknown: tuple[RunId, ...] = ()
@@ -281,7 +282,7 @@ class RecoveryReport:
 
 
 @dataclass(frozen=True)
-class PromptSnapshot:
+class PromptSnapshot(DeepFrozen):
     """Latest full provider-neutral prompt; one per Conversation.
 
     ``body`` is owned and interpreted by Prompt; Data stores it opaquely.
@@ -298,7 +299,7 @@ class PromptSnapshot:
 
 
 @dataclass(frozen=True)
-class BindingAuthority:
+class BindingAuthority(DeepFrozen):
     """Current, authorized Binding metadata. Not an OS permission proof;
     the Environment re-validates before any effect."""
 
@@ -310,20 +311,20 @@ class BindingAuthority:
 
 
 @dataclass(frozen=True)
-class ConversationWorkspace:
+class ConversationWorkspace(DeepFrozen):
     workspace_id: WorkspaceId
     cwd_relative: str  # never an absolute host path
 
 
 @dataclass(frozen=True)
-class EnvironmentActivation:
+class EnvironmentActivation(DeepFrozen):
     environment_instance_id: EnvironmentInstanceId
     environment_kind: EnvironmentKind  # P0: at most one active per kind (V3-P19)
     default_binding_id: BindingId | None = None
 
 
 @dataclass(frozen=True)
-class PersistedStateBasis:
+class PersistedStateBasis(DeepFrozen):
     """One coherent, permission-filtered read (DATA-06)."""
 
     conversation_sequence: int
