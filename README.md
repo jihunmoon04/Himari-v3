@@ -18,6 +18,7 @@ HIMARI v3의 **아키텍처 결정 기록 및 설계 기준선**입니다. 현�
 - **모든 Run의 원본 Provider 요청·응답**을 기록합니다. Execution Records, exact Conversation Events, Plan/Note 등의 Artifacts는 서로 다른 논리 영역으로 구분합니다.
 - **ToolCall은 충돌이 없으면 병렬 실행**할 수 있습니다. 같은 Workspace에서 부작용 범위가 불명확한 명령은 기본 직렬 처리하도록 설계합니다.
 - **Workspace 전용 소프트웨어 모듈은 만들지 않습니다.** Memory 등 Internal Tool은 Data의 공개 API를 직접 사용할 수 있으며, 환경 Tool은 Environment를 경유합니다.
+- **기본 Workspace는 Conversation별 폴더를 기본 cwd로 사용**하며 같은 사용자에게 허용된 다른 Conversation 폴더에도 접근할 수 있습니다. `inside/run_command`는 **OS Sandbox 안에서 실행**하고, 초기 사용자 Approval/Worktree 복제 격리는 요구하지 않습니다.
 
 ## 문서
 
@@ -28,7 +29,7 @@ HIMARI v3의 **아키텍처 결정 기록 및 설계 기준선**입니다. 현�
 - [데이터·Tool·Artifact 설계](docs/data-and-tools.md) — 원본 실행 기록, Conversation, Artifact, 병렬 실행
 - [Data Contract v0.1 초안](docs/data-contract-v0.1.md) — Event·Run·Tool·Snapshot의 제안 모델, 공개 API, 불변식, 트랜잭션 (검토 전)
 - [CurrentState Contract v0.1 초안](docs/current-state-contract-v0.1.md) — 활성 Environment·Workspace Binding·Artifact의 읽기 투영 및 최신 상태 검증 (검토 전)
-- [기본 Workspace·파일 계약 초안](docs/default-workspace-files-v0.1.md) — 초기 파일 작업의 저장·첨부·생성 구조
+- [기본 Workspace·파일/명령 실행 계약 v0.2](docs/default-workspace-files-v0.2.md) — Conversation별 폴더, 다른 대화 폴더 접근, Sandboxed `run_command` 및 파일 생성
 - [Control Pause/Resume 계약 초안](docs/control-pause-v0.1.md) — Run 간 정지·재개와 미완결 ToolCall 처리
 - [결정 기록](docs/decisions.md) — 현재까지 합의한 내용과 설계상 권고 사항
 - [미결정 사항](docs/open-questions.md) — 초기 구현에 앞서 확정할 계약과 후속 결정
