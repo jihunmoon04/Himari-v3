@@ -31,6 +31,8 @@
 | Tests-only changes, *no implemented public contract change* | Changed module's pytest | Validate modified tests without a full suite |
 | Unknown whether contract changed | **Classify against current contracts before test execution**. If still uncertain, treat it as a contract change and run full | Prevent accidental under-testing |
 
+**Contract granularity (V3-039, V3-046):** "public contract" is judged per **sub-port / SPI** declared in each owner's `api.py` — e.g. a change limited to `Data.ArtifactStore` is a contract change of that sub-port. Full-suite trigger rules above still apply to any such change; the benefit of the split is that internal Data changes behind an unchanged sub-port stay module-only. SPI conformance suites (`ToolHandler`, `EnvironmentPlugin`, `ProviderAdapter`) live in the owner module's tests and are reused by each plugin.
+
 **Semantics include security.** A method name unchanged while the allowed filesystem root, network policy or effects change **is** a contract change. This classification must be explicit in PR/implementation review.
 
 ## 3. Test layout (PROPOSED)

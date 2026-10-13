@@ -20,18 +20,18 @@ Control (application / orchestration)
     │
     └── 응답에 따라 분기
          ├── final response ── 반복 종료
-         ├── question       ── 반복 중단, 사용자 입력 대기
          └── tool call      ── Tool 경로로 실행
-                                  │
-                                  ▼
-                               ToolResult
-                                  │
-                                  └── Data 기록 → 다음 Run
+                  │   (ask_user = question: 반복 중단·사용자 입력 대기,
+                  │    사용자 응답이 그 call의 ToolResult가 됨 — V3-044)
+                  ▼
+               ToolResult
+                  │
+                  └── Data 기록 → 다음 Run
 ```
 
 - **Run은 하나의 LLM 호출**이다. 여러 호출의 집합을 Task로 정의하거나 Runtime이 Task 생명주기를 소유하지 않는다.
 - **Control**은 Run을 이어서 실행할지 결정하는 제어 모듈이다. Prompt, Provider, Tool, Data의 내부 구현은 소유하지 않는다.
-- **final response** 또는 **question**이면 Run 반복을 멈춘다. Question 이후 재개 방식 및 혼합 출력 우선순위는 미결정이다.
+- **final response** 또는 **question**이면 Run 반복을 멈춘다. **question은 `ask_user` Tool 호출**로 표현하며, 사용자 응답이 그 call의 ToolResult가 되어 다음 Run이 이어진다(V3-044). `ask_user`와 다른 호출의 혼합은 P0에서 거부하는 안(V3-P15).
 - Tool 실패는 실패 `ToolResult`로 Data에 남아 다음 모델 입력에 반영된다. 기본 원칙은 **모델에 결과 전달(A)**이다. 모델의 판단을 대신하는 Runtime의 의미론적 자동 재시도/복구를 도입하지 않는다.
 - 호출 취소, 네트워크 단절, 미완료 tool call 재개, 한 Run의 다중 tool call 처리 등 제어의 예외 경로는 추후 계약화한다.
 
@@ -82,13 +82,15 @@ Provider-specific config  (model/reasoning/continuation; 별도 API 필드)
 
 | 모듈 | 소유한 책임 | 소유하지 않는 책임 |
 | --- | --- | --- |
-| Control | Run 반복·종료 분기·Tool 호출 오케스트레이션 | Provider 세부 API, DB 스키마, 환경별 실행 메커니즘 |
-| Data | 영속 상태·원본 기록·조회/변경 계약 | 프롬프트 정책, 실제 명령 실행 |
-| Prompt | 모델 요청 입력 조립·컨텍스트 압축 | Conversation 원본 변경, Provider 전송 |
+| Control | Run 반복·종료 분기·Tool 호출 오케스트레이션, `ask_user` | Provider 세부 API, DB 스키마, 환경별 실행 메커니즘 |
+| Data | 영속 상태·원본 기록·조회/변경 계약. 공개 Port는 Consumer별 sub-port(V3-039) | 프롬프트 정책, 실제 명령 실행 |
+| Prompt | 모델 요청 입력 조립·컨텍스트 압축 (순수 `compose` + loader, V3-043) | Conversation 원본 변경, Provider 전송 |
 | Provider | 모델 API 통신·응답 정규화 | Tool의 환경별 실행, Run 반복 정책 |
-| Tool | 노출된 도구의 등록/호출 계약·결과 형태 | 환경별 Workspace 수명·정책 |
-| Environment | Workspace 접근 방식·실행 정책·환경 전용 Tool 처리 | Workspace 자체의 수명 소유 |
+| Tool | `ToolHandler` SPI, 카탈로그·디스패치·스케줄링, `ToolOutcome` 원자 커밋 | 환경별 Workspace 수명·정책, 개별 Tool 구현 |
+| Environment | `EnvironmentPlugin` SPI. Workspace 접근 방식·실행 정책·**환경 전용 Tool 제공**(V3-041) | Workspace 자체의 수명 소유 |
 | Workspace (독립 자원, 별도 코드 모듈 아님) | Data의 Registry로 식별, Environment가 접근 | Environment에 수명을 종속시키지 않음 |
+
+**확장 지점(V3-040):** 새 Tool은 `ToolHandler`, 새 Provider는 `ProviderAdapter`, 새 Environment는 `EnvironmentPlugin` 하나를 구현해 Composition Root에 등록하면 된다. 이 세 SPI를 내부 프로토콜보다 먼저 확정한다.
 
 모듈의 실제 디렉터리명, 공유 타입의 구체화 및 객체 수명은 [모듈 경계](module-boundaries.md) 문서에서 제안 수준으로 다룬다.
 
@@ -167,7 +169,8 @@ Environment Tool 실행 시 `binding_id` → Environment 인스턴스/Conversati
 
 ### 6.1 Internal Tool과 Environment Tool
 
-- Tool은 최소한 **Internal Tool**(Memory/Plan/Note처럼 Data 공개 API 사용)과 **Environment Tool**(Inside 등 Environment의 Workspace 실행 계약 사용)을 구분하는 방향이다.
+- Tool은 최소한 **Internal Tool**(Memory/Plan/Note처럼 Data 공개 API 사용)과 **Environment Tool**(Inside 등 Environment의 Workspace 실행 계약 사용)을 구분하는 방향이다. 둘 다 같은 `ToolHandler` SPI를 구현하며, **Environment Tool은 해당 Environment 패키지가 `tools()`로 제공**한다(V3-041).
+- Tool 구현은 `ToolOutcome(model_result, artifact_mutations, …)`만 반환하고, Artifact 변경·ToolExecution 종결·Conversation Event의 원자 커밋은 Tool Dispatcher가 수행한다(V3-042).
 - Environment를 거칠 필요가 없는 Memory는 Data API에 직접 접근할 수 있지만 SQL/Repository private 구현에는 접근하지 않는다.
 - Workspace 요구 정책은 `None / Required / Default`로 구분하는 것을 권고한다. Outside 기본 Workspace를 암묵적으로 사용하는 Tool은 `None`과 다르다.
 - 별도의 외부 서비스 Connector Tool 범주는 추후 필요에 따라 정의한다.
@@ -179,10 +182,10 @@ Environment Tool 실행 시 `binding_id` → Environment 인스턴스/Conversati
 - 병렬성 판단은 Binding ID가 아니라 Workspace/실제 공유 자원에 대한 효과를 기준으로 한다. 다른 Conversation에서도 같은 자원 충돌이 발생할 수 있다.
 - Tool/Environment가 검증 가능한 효과 범위를 제공하며 모델의 미검증 주장에 의존하지 않는다. 상세 Scheduler 계약은 아직 미결정.
 
-- **동일 Conversation의 실행 흐름과 Run은 직렬화**한다. 내부에서 독립적인 ToolCall의 병렬 처리는 허용된다.
+- **동일 Conversation의 실행 흐름과 Run은 직렬화**한다. P0는 프로세스 내 Conversation별 lock으로 충분하며 lease/fencing은 P2다(V3-045). 내부에서 독립적인 ToolCall의 병렬 처리는 허용된다.
 - Event는 종류별 불변 canonical payload, Plan/Note는 Data conversation-scoped Artifact, 모델 이력 재구성은 Prompt의 원본 선택·검증과 Provider의 native serialization으로 나눈다.
 
-자세한 내용은 [Data, Tool Execution, and Artifacts](data-and-tools.md) 및 [Data Contract v0.1](data-contract-v0.1.md)를 따른다.
+자세한 내용은 [Data, Tool Execution, and Artifacts](data-and-tools.md) 및 [Data Contract v0.2](data-contract-v0.2.md)를 따른다.
 
 ### 6.3 초기 기본 Workspace — Conversation별 폴더 + Sandboxed Command (확정 범위)
 

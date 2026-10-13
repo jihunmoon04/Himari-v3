@@ -19,6 +19,17 @@
 
 **이 v0.2에서 새로 제안하는 내용:** kind enum, 데이터 필드, row/revision 모델, fencing, 원자적 commit Port, error 이름, retention guard, exact raw capture 프로토콜. 이 항목들은 독립 검수 및 결정을 거쳐 Freeze한다.
 
+## 1.1 2026-10-13 개정 — sub-port 분리와 P0 범위 (V3-039, V3-042, V3-045)
+
+- **공개 Port는 Consumer별 sub-port**로 나눈다: `ConversationLog`, `ArtifactStore`, `WorkspaceState`, `StateQuery`, `ControlState`(P2). 저장 백엔드·트랜잭션은 공유할 수 있다. 계약 변경 판정(V3-038)은 sub-port 단위다. 매핑은 §10.
+- **Tool 구현은 Data에 쓰지 않는다.** Internal ToolHandler는 `ToolOutcome`을 반환하고 Tool Dispatcher가 DATA-08로 커밋한다(V3-042).
+- **P0 범위(V3-045):** 단일 프로세스, Conversation별 in-process lock. 아래 항목은 상태 enum·필드 자리만 남기고 **P2로 연기**한다.
+  - T3 dispatch claim CAS와 `DISPATCH_CLAIMED` 상태 → P0는 `PREPARED → RECEIVED | FAILED_NO_RESPONSE → PROJECTED | PROJECTION_FAILED`.
+  - T6 `EXECUTION_CLAIMED` durable claim → P0는 `PENDING → terminal`. 크래시로 결과를 모르면 `UNKNOWN`으로 기록하고 다음 Run을 막는 규칙은 유지하되, 정밀 reconcile 절차는 P2.
+  - T10 `ControlState`, `control_generation` fencing, lease → P2.
+- **유지:** Run별 원본 요청·응답 보존(V3-018), 송신 전 raw 저장, 원자 커밋(T1/T2/T4/T5/T7/T8/T9), 불완전 그룹 재생 금지.
+- 원본 요청 보존 기준을 "Adapter가 transport에 넘긴 직렬화 body"로 완화하는 안은 V3-P14로 검토한다.
+
 ## 2. 소유권·연결 관계
 
 ~~~text
@@ -126,7 +137,7 @@ RunRecord:
 | From | Transition | Meaning / recovery |
 | --- | --- | --- |
 | none | `PREPARED` | native request body is durably recorded and **no dispatch claim yet**. Safe only after authoritative proof of no send; do not blindly resubmit an old Run |
-| PREPARED | `DISPATCH_CLAIMED` | durable claim immediately **before one external send attempt**. Crash after claim means send may or may not have occurred |
+| PREPARED | `DISPATCH_CLAIMED` | **(P2, V3-045)** durable claim immediately **before one external send attempt**. Crash after claim means send may or may not have occurred. P0는 이 상태 없이 `PREPARED`에서 바로 송신 |
 | DISPATCH_CLAIMED | `RECEIVED` | actual provider response body durably stored, no guarantee normalized/projection complete |
 | DISPATCH_CLAIMED | `FAILED_NO_RESPONSE` or `OUTCOME_UNKNOWN` | known failure class vs uncertain send/response; raw response absent |
 | RECEIVED | `PROJECTED` | normalized assistant Event/tool-group and pending ToolExecution Records committed idempotently |
@@ -166,7 +177,7 @@ ToolExecutionRecord:
 
 - Unique constraint: **(origin_run_id,call_id)**, plus unique `(origin_run_id,ordinal)`. ToolCall group admission rejects duplicate IDs or ordinals.
 - Intents are inserted as `PENDING` in **the same transaction** as the assistant ToolCall Event. No Tool execution is launched before this transaction commits.
-- Proposed dispatch transition `PENDING → EXECUTION_CLAIMED` happens durably **before** handing an effectful call to the Tool adapter. This window may produce `UNKNOWN` after a crash even if process never spawned; that uncertainty is preferred to duplicated side effects.
+- **(P2, V3-045)** Proposed dispatch transition `PENDING → EXECUTION_CLAIMED` happens durably **before** handing an effectful call to the Tool adapter. This window may produce `UNKNOWN` after a crash even if process never spawned; that uncertainty is preferred to duplicated side effects.
 - Outcome states: `SUCCEEDED, FAILED, DENIED, CANCELLED` include a completed model-facing ToolResult when the tool contract can truthfully produce one. `UNKNOWN` is **not equivalent to a synthetic failure ToolResult** and blocks native group replay until explicitly reconciled under a later recovery contract.
 - The model-facing result is derived **once** from actual execution / deterministic denial and committed alongside terminal state. Optional exact Conversation ToolResult Event is appended in the same transaction; no data may report completed while its configured mandatory Event is absent.
 - Completion time is not native group ordering. Prompt reconstructs native ToolResult ordered by original ToolCall ordinal and Provider requirements, and rejects a missing/unpaired result instead of guessing.
@@ -213,14 +224,14 @@ PromptSnapshot:
 | T0 | Create Conversation + authorized initial principal/workspace mapping | no orphan owned conversation / wrong-principal root |
 | T1 | Append user or other canonical Event | allocate ordered `sequence` and immutable payload atomically |
 | T2 | Prepare Run | commit raw native request bytes + trigger/basis + PREPARED *before* any send |
-| T3 | Claim provider send | one valid `DISPATCH_CLAIMED` CAS per Run; stale Control owner rejected |
+| T3 | **(P2)** Claim provider send | one valid `DISPATCH_CLAIMED` CAS per Run; stale Control owner rejected |
 | T4 | Receive raw response | store exact received bytes and `RECEIVED` together |
 | T5 | Project response | commit normalized assistant Event, exact ordered ToolCall group, and *all* pending ToolExecution rows atomically; assign `PROJECTED` |
-| T6 | Tool claim before effects | `PENDING → EXECUTION_CLAIMED` claim/epoch in Data; no duplicate dispatch under concurrent workers |
+| T6 | **(P2)** Tool claim before effects | `PENDING → EXECUTION_CLAIMED` claim/epoch in Data; no duplicate dispatch under concurrent workers |
 | T7 | Tool complete | terminal state + truthfully derived `model_result` + configured exact ToolResult Event in one Data transaction |
-| T8 | Internal Tool Artifact mutation | CAS Artifact revision + Tool final state + model_result + optional Event as a single transaction |
+| T8 | Internal Tool Artifact mutation (Dispatcher가 `ToolOutcome`으로 커밋) | CAS Artifact revision + Tool final state + model_result + optional Event as a single transaction |
 | T9 | PromptSnapshot replace | latest-only CAS; no impact on Events, raw Run records or past Tool records |
-| T10 | Control pause/claim cursor (proposal) | Conversation execution state/lease/epoch one-writer proof, separate from Run statuses |
+| T10 | **(P2)** Control pause/claim cursor (proposal) | Conversation execution state/lease/epoch one-writer proof, separate from Run statuses |
 
 **External effects are not SQLite transactions.** T3 and the Provider HTTP call cannot commit atomically; T6 and an OS command cannot commit atomically. Crash recovery must preserve whether effect is proven or uncertain rather than retrying blind.
 
@@ -230,18 +241,18 @@ PromptSnapshot:
 
 All methods take a trusted, authenticated scope or opaque capability created by the trusted composition root, **not model-provided principal strings**. Port names are PROPOSED:
 
-| Contract ID | Candidate Port | Callers | Effect |
-| --- | --- | --- | --- |
-| DATA-01 | `append_event(scope,payload,expected_sequence?,idempotency_key?)` / `read_events(scope,range)` | Control, Prompt, UI read | atomic ordered append / scoped immutable read |
-| DATA-02 | `prepare_run(scope,raw_body,trigger_refs,basis,model_config)` / `claim_dispatch(scope,run_id,control_generation)` / `record_raw_outcome(scope,run_id,body_or_error)` | Control | once-only Provider send ledger |
-| DATA-03 | `project_model_output(scope,run_id,normalized_output)` / `claim_tool_execution(scope,run_id,call_id)` / `complete_tool_execution(scope,run_id,call_id,outcome)` | Control, Tool | group intent atomic; effect/response provenance |
-| DATA-04 | `read_artifact(scope,artifact_id)` / `list_artifacts(scope)` | Prompt, Internal Tool | current authoritative Plan/Note |
-| DATA-05 | `get_latest_snapshot(scope)` / `replace_latest_snapshot(scope,expected_revision,basis,input)` | Prompt/Control | one latest full composed provider-neutral prompt |
-| DATA-06 | `read_current_state_basis(scope)` | Prompt | coherent current authorized persisted projection |
-| DATA-07 | `read_binding_authority(scope,binding_id)` | Environment/Tool | authorized and current Workspace/Environment binding metadata |
-| DATA-08 | `commit_internal_tool_effect(scope,run_id,call_id,artifact_expected_revision,artifact_update,model_result)` | Internal Tool | one atomic Artifact+ToolResult+Event transaction |
-| DATA-09/10 | `read_control_state(scope)` / `claim_control_execution(scope,expected_generation)` / `transition_control_state(scope,claim,cursor)` | Control | proposed one-writer execution cursor/fencing |
-| DATA-11 | `resolve_conversation_workspace(scope)` | Environment | principal-owned root record + current Conversation relative cwd |
+| Contract ID | Sub-port (V3-039) | Candidate Port | Callers | Effect |
+| --- | --- | --- | --- | --- |
+| DATA-01 | `ConversationLog` | `append_event(scope,payload,expected_sequence?,idempotency_key?)` / `read_events(scope,range)` | Control, Prompt loader, UI read | atomic ordered append / scoped immutable read |
+| DATA-02 | `ConversationLog` | `prepare_run(scope,raw_body,trigger_refs,basis,model_config)` / `record_raw_outcome(scope,run_id,body_or_error)`; P2 `claim_dispatch(scope,run_id,control_generation)` | Control | Provider send ledger (P0: in-process lock가 단일 송신 보장) |
+| DATA-03 | `ConversationLog` | `project_model_output(scope,run_id,normalized_output)` / `complete_tool_execution(scope,run_id,call_id,outcome)`; P2 `claim_tool_execution` | Control, Tool Dispatcher | group intent atomic; effect/response provenance |
+| DATA-04 | `ArtifactStore` | `read_artifact(scope,artifact_id)` / `list_artifacts(scope)` | Prompt loader, Internal ToolHandler(읽기) | current authoritative Plan/Note |
+| DATA-05 | `ConversationLog` | `get_latest_snapshot(scope)` / `replace_latest_snapshot(scope,expected_revision,basis,input)` | Prompt/Control | one latest full composed provider-neutral prompt |
+| DATA-06 | `StateQuery` | `read_current_state_basis(scope)` | Prompt loader | coherent current authorized persisted projection (읽기 전용 합성) |
+| DATA-07 | `WorkspaceState` | `read_binding_authority(scope,binding_id)` | Environment, Tool Dispatcher | authorized and current Workspace/Environment binding metadata |
+| DATA-08 | `ConversationLog` (+`ArtifactStore` 같은 트랜잭션) | `commit_tool_outcome(scope,run_id,call_id,outcome)` — outcome의 `artifact_mutations`에 expected revision 포함 | **Tool Dispatcher만** | one atomic Artifact+ToolResult+Event transaction. Tool 구현은 직접 호출하지 않음(V3-042) |
+| DATA-09/10 | `ControlState` (**P2**) | `read_control_state(scope)` / `claim_control_execution(scope,expected_generation)` / `transition_control_state(scope,claim,cursor)` | Control | proposed one-writer execution cursor/fencing |
+| DATA-11 | `WorkspaceState` | `resolve_conversation_workspace(scope)` | Environment | principal-owned root record + current Conversation relative cwd |
 
 **Module purity:** no other module directly imports Data's DB connection, repository objects, SQL schema or migration helpers. Data DTOs crossing Port boundaries are provider-neutral immutable values. Authenticated Web/CLI read endpoints use deliberately reduced DTO projections rather than raw protected records by default.
 
@@ -271,7 +282,7 @@ All methods take a trusted, authenticated scope or opaque capability created by 
 
 - D01 same Conversation concurrent append produces unique increasing sequences, immutability.
 - D02 foreign principal cannot read/write Events/Run raw/Bindings/Artifacts even with valid IDs.
-- D03 one `RunRecord` permits **at most one claimed send**; post-claim crash is UNKNOWN, not retried silently.
+- D03 one `RunRecord` permits **at most one send** (P0: lock 기반; P2: claimed send CAS); uncertain send is not retried silently.
 - D04 raw request bytes recorded before dispatch and transmitted exactly as captured; token/header not logged or embedded in request-body record.
 - D05 received raw response survives projection failure and later idempotent projection; no second Provider invocation.
 - D06 two tool calls project atomically with unique call IDs and stable ordinal; none executes if pending group transaction fails.
@@ -282,7 +293,7 @@ All methods take a trusted, authenticated scope or opaque capability created by 
 - D11 replacement of latest full PromptSnapshot keeps **one** row, preserves all historical native Run request bodies and exact Conversation Events.
 - D12 incomplete/UNKNOWN tool group cannot be silently passed to Provider as complete.
 - D13 stored current Workspace Binding ≠ OS permission proof; stale/revoked binding denied at Environment Tool effect boundary.
-- D14 lease/Control generation fencing prevents stale worker from committing after ownership change.
+- D14 **(P2)** lease/Control generation fencing prevents stale worker from committing after ownership change.
 - D15 raw storage unavailable prevents Provider send.
 - D16 deletion after future purge is separated from normal append-only behavior; no path from model ToolCall into purge.
 
@@ -292,12 +303,12 @@ All methods take a trusted, authenticated scope or opaque capability created by 
 
 1. **DR-01:** Final EventKind vocabulary, typed content blocks (text/images/files), exact Assistant question/final semantics and commentary history.
 2. **DR-02:** Guarantee of captured Provider request bytes and compatibility with actual chosen SDK/network transport; how to persist model-visible continuation and future streaming raw chunks.
-3. **DR-03:** `PREPARED` vs `DISPATCH_CLAIMED` terminal recovery, durable send claim CAS and Control lease/fencing transaction boundaries.
+3. **DR-03:** ~~durable send claim CAS and Control lease/fencing~~ → **P2 연기(V3-045)**. P0에서는 `PREPARED` 상태에서 크래시한 Run을 재송신하지 않고 새 Run으로 대체하는 규칙만 확정하면 된다.
 4. **DR-04:** Full Tool group commit order, how to treat UNKNOWN and cancellation without inventing results, canonical result/error structures.
 5. **DR-05:** Latest PromptSnapshot CAS with Run prepare and source StateBasis consistency; how exactly native replay coverage and snapshot cursor refer to ToolExecution groups.
 6. **DR-06:** Artifact revision/CAS, user mutation and future Memory storage/lifecycle.
 7. **DR-07:** Concrete DB/Blob storage choice, at-rest protection, FileAsset exact immutable publish semantics, delete/purge/retention.
 8. **DR-08:** Scope principal authentication, Conversation owner vs Workspace shared state, single-writer execution claim and cross-Conversation Tool reconciliation.
-9. **DR-09:** Specific public DTO type signatures; Python module layout, migration/bootstrap and fake implementation test contracts.
+9. **DR-09:** Specific public DTO type signatures per **sub-port**(V3-039), declared as code in `data/api.py`(V3-046); migration/bootstrap and fake implementation test contracts.
 
 **Freeze gate:** independently review these nine items, update decisions with only explicitly approved choices, and match [Control–Prompt–Provider](control-prompt-provider-v0.1.md) to this Data Port's exact Run/raw preparation and Tool group barriers.

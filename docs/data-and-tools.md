@@ -2,7 +2,7 @@
 
 > 2026-10-13. **확정된 방향과 세부 권고안을 구분**한다. 이는 구현된 스키마가 아니라 논리적 계약 설계다.
 >
-> 구체적인 구조·저장 순서·공개 Data Port 초안: [Data Contract v0.1 — PROPOSED](data-contract-v0.1.md). 이 초안은 아직 확정된 사양이 아니다.
+> 구체적인 구조·저장 순서·공개 Data Port 초안: [Data Contract v0.2 — 검수 후보](data-contract-v0.2.md) (근거: [v0.1](data-contract-v0.1.md)). 이 초안은 아직 확정된 사양이 아니다.
 
 ## 1. 세 기록의 책임 — 확정 방향
 
@@ -37,7 +37,7 @@
 - **Artifact는 Plan/Note 등의 콘텐츠이며, 활성 Workspace/Environment/Binding은 Artifact가 아니다.** Workspace Registry·Environment Activation·Workspace Binding·기본 선택 설정은 Data의 별도 운영 상태이고, 현재 연결 가능 여부는 Environment에서 확인한다.
 - Artifact 도메인 의미(PlanStep, Note 형식)는 각 Internal Tool이 담당. Data의 범용 저장 API는 내용을 의미론적으로 해석하지 않는다.
 - 같은 Artifact를 동시에 수정하면 revision compare-and-swap으로 충돌을 보고; 서로 다른 Artifact는 별도 부작용이 없을 때 병렬 처리 가능.
-- 가능한 Internal Tool의 **Artifact 변경 + Tool 완료 기록 + 필요한 Conversation Event 기록**은 같은 Data 트랜잭션으로 원자적 커밋하도록 권고.
+- Internal Tool의 **Artifact 변경 + Tool 완료 기록 + 필요한 Conversation Event 기록**은 Dispatcher가 `ToolOutcome`을 받아 같은 Data 트랜잭션으로 원자적 커밋한다(V3-042).
 - 외부 파일/명령 부작용은 DB 트랜잭션으로 롤백할 수 없으며 미확인 완료 시 자동 재실행하지 않는 계약이 필요.
 - 이벤트 / run / artifact 사이의 참조 및 대화 삭제와 Artifact 보존/삭제 정책은 세부 결정 전.
 
@@ -46,10 +46,14 @@
 ```text
 Control
    ↓
-Tool Registry / Dispatcher / Scheduler
-   ├── Internal Tool ── Data public API (Memory, Plan, Note)
-   └── Environment Tool ── Environment public execution API ── Workspace
+Tool Registry / Dispatcher / Scheduler        (ToolHandler SPI 소유, ToolOutcome 원자 커밋)
+   ├── Internal ToolHandler ── Data.ArtifactStore 등 읽기 (Memory, Plan, Note)
+   ├── EnvironmentPlugin.tools() ── Environment 내부 실행 ── Workspace
+   └── Control의 ask_user
 ```
+
+- **V3-041:** Environment Tool은 해당 Environment 패키지가 `tools()`로 제공한다. Tool 모듈은 취합·검증·디스패치·스케줄링만 한다.
+- **V3-042:** 모든 ToolHandler는 `ToolOutcome(model_result, artifact_mutations, …)`을 반환한다. Artifact 변경 + Tool 완료 기록 + Conversation Event 원자 커밋은 Dispatcher가 Data Port로 수행하며, Tool 구현은 `run_id`/`call_id` 트랜잭션을 다루지 않는다.
 
 - **Workspace 전용 소프트웨어 모듈을 만들지 않는다.** Data는 Workspace Registry/Binding을 보관하고 Environment는 연결/실행을 책임진다.
 - Memory는 **Internal Tool → Data 공개 API**로 접근한다. Outside/Inside를 의무적으로 통과하지 않는다. Data 내부 SQL/Repository 직접 접근은 금지한다.

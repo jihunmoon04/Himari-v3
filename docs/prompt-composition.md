@@ -6,6 +6,8 @@
 >
 > [Architecture](architecture.md) · [Decisions](decisions.md) · [Open questions](open-questions.md)
 
+> **모듈 구조 (V3-043 확정):** Prompt 핵심은 I/O 없는 순수 함수 `compose(PromptInputs) -> PreparedModelInput`이고, Data·Tool catalog·Environment 관측 수집은 얇은 `PromptContextLoader`가 맡습니다. 아래 순서·Trigger·그룹 규칙은 모두 `compose`의 계약이며 고정 입력으로 테스트합니다.
+
 ## 1. 확정된 논리적 순서: cache-first
 
 ```text

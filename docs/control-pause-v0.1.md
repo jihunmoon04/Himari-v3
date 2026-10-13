@@ -4,6 +4,8 @@
 >
 > 범위: 별도 Task/ManagerTurn 계층을 복원하지 않고 **Conversation의 Control 실행 흐름**이 Pause/Resume를 지원할 수 있는 최소 계약.
 
+> **2026-10-13 개정:** P0는 단일 프로세스·Conversation별 in-process lock으로 시작하며, 아래의 영속 `ConversationControlState`·lease·fencing·다중 worker 복구는 **P2**다(V3-045). question 대기는 미완결 `ask_user` call로 표현되므로(V3-044) Pause의 "미완결 call 보존·재개" 메커니즘과 같은 경로를 쓴다.
+
 ## 1. 주된 결론
 
 **이전 Run이 보존되는 것만으로 Pause/Resume는 완결되지 않는다.** RunRecord는 한 번의 Provider 호출(요청·응답·실패)을 재현할 수 있지만 다음 정보는 표현하지 못한다.
@@ -52,7 +54,7 @@ RUNNING
 | Provider 호출 진행 중 | **Soft pause**: 기존 요청을 기다려 실제 응답/오류를 RunRecord에 저장; 곧바로 새 Run 시작 금지 | 저장된 결과와 실행 cursor를 보고 다음 행동 결정 |
 | Raw response 저장됐으나 normalize 전 | normalize 단계는 중복 없이 커밋 가능한지 확인하고 정지 | 이미 영속된 raw를 재정규화(새 Provider 호출 아님) |
 | Assistant 결과가 `final` | 원래 Run이 정상 종료되었다면 `COMPLETED`가 우선. 억지로 PAUSED 상태 만들지 않음 | 새로운 사용자 입력에서 새 작업 흐름 |
-| Assistant 결과가 `question` | 질문을 정확히 보존하고 `WAITING_FOR_USER` 처리. Pause에 의한 응답 대기와 구분 | 사용자의 답변 Event 후 다음 새 Run |
+| Assistant 결과가 `ask_user` 호출 | call 그룹을 정확히 보존하고 `WAITING_FOR_USER` 처리. Pause에 의한 응답 대기와 구분 | 사용자 답변 Event로 해당 call을 완결한 뒤 다음 새 Run |
 | ToolCall 그룹 수신 / 실행 전 | **미실행 Tool을 새로 시작하지 않고 PAUSED**, 완전한 호출 group과 `PENDING` 보존 | `PENDING` 작업 실행 후 완전한 ToolResult group 구성; 그다음 새 Run |
 | ToolCall 그룹 일부 실행 중 | 새 Tool launching 중단, **이미 시작한 작업만 종결/확인**; 남은 미실행 호출은 PENDING | 이미 성공한 call은 재실행 금지, 나머지 PENDING만 재개; group 완료 후 다음 Run |
 | ToolCall 결과 모두 저장됨 | 새 Run 호출 전에 PAUSED | 기존 ToolResult를 replay-safe input으로 포함하여 **새 Run** 시작 |
@@ -74,8 +76,8 @@ RUNNING
 | --- | --- | --- | --- |
 | CTRL-03 `RequestPause` | Control → Web/CLI; 내부 Data Port 사용 | Data ConversationControlState | `control/api.py` |
 | CTRL-04 `ResumeExecution` | Control → Web/CLI; 내부 Data Port 사용 | ControlState + Run/Tool/Event originals | `control/api.py` |
-| DATA-09 `ReadWriteControlState` | Data → Control | Data ConversationControlState / execution cursor | `data/api.py` |
-| DATA-10 `ClaimControlLease` | Data → Control | Data owner generation/lease/fencing record | `data/api.py` |
+| DATA-09 `ReadWriteControlState` (**P2**) | Data·ControlState → Control | Data ConversationControlState / execution cursor | `data/api.py` |
+| DATA-10 `ClaimControlLease` (**P2**) | Data·ControlState → Control | Data owner generation/lease/fencing record | `data/api.py` |
 | TOOL-04 `ResumePendingGroup` | Tool → Control | ToolExecutionRecord + verified pending tool requests | `tool/api.py` |
 
 **Contract Location**은 본 문서 및 [contracts.md](contracts.md), code 경로는 전부 planned이다.

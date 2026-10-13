@@ -2,7 +2,7 @@
 
 > 2026-10-13. **REVIEW CANDIDATE; NOT IMPLEMENTED, NOT FROZEN.** Binding decisions V3-030, V3-032~037; all proposed DTO names, activation mechanics, limits, component filenames and packetization below remain design proposals.
 >
-> References: [Sandbox v0.1](sandbox-execution-v0.1.md), [Default Workspace v0.2](default-workspace-files-v0.2.md), [unified contracts](contracts.md), [Data contract](data-contract-v0.1.md), [pytest policy](testing-policy.md).
+> References: [Sandbox v0.1](sandbox-execution-v0.1.md), [Default Workspace v0.2](default-workspace-files-v0.2.md), [unified contracts](contracts.md), [Data contract v0.2](data-contract-v0.2.md), [pytest policy](testing-policy.md).
 >
 > v2 baseline: [sandbox contract](https://github.com/jihunmoon04/HIMARI-v2/blob/main/src/himari/sandbox/contract.py), [protected backend](https://github.com/jihunmoon04/HIMARI-v2/blob/main/src/himari/sandbox/linux_backend.py), [Landlock helper](https://github.com/jihunmoon04/HIMARI-v2/blob/main/src/himari/sandbox/landlock_exec.py), [activation](https://github.com/jihunmoon04/HIMARI-v2/blob/main/src/himari/sandbox/activation.py), [self-test](https://github.com/jihunmoon04/HIMARI-v2/blob/main/src/himari/sandbox/self_test.py), [Workspace admission](https://github.com/jihunmoon04/HIMARI-v2/blob/main/src/himari/workspace/admission.py), [fd-relative filesystem](https://github.com/jihunmoon04/HIMARI-v2/blob/main/src/himari/workspace/direct_fs.py), [run_command executor](https://github.com/jihunmoon04/HIMARI-v2/blob/main/src/himari/tools/executors/command.py).
 
@@ -156,7 +156,7 @@ Classify failure stages: authorization/refusal (no spawn), Sandbox unavailable/s
 | DATA-11 | Data | Data → Environment/Prompt | persisted principal/Conversation/Binding/cwd mapping | `data/api.py` |
 | ENV-04 | Environment | protected spawn adapter → Tool | live kernel-enforced Sandbox process + DATA-11 | `environment/api.py` |
 | ENV-05 | Environment | capability/activation/self-test → Environment startup and Tool | host probe + operator activation/policy generation | `environment/api.py` |
-| TOOL-05 | Tool | command dispatcher → Control/Provider | validated Tool schema + ENV-04 result | `tool/api.py` |
+| TOOL-05 | Environment(Inside) | Inside가 제공하는 `run_command` ToolHandler → Tool Dispatcher (V3-041) | validated Tool schema + ENV-04 result | SPI `tool/api.py`, 구현 `environment/inside/` |
 | FILE-01 | Environment | verified structured filesystem ops → Tool | live authorized Workspace bytes | `environment/api.py` |
 
 Only public DTOs cross module boundaries. Helpers like `bwrap_arguments()`, root-fd wrappers, socket probes and command output pipes stay private to Environment. Tool may not import a Linux Backend private class; Data may not implement mount validation; Prompt may not use a Sandbox capability as an execution grant.
