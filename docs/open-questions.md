@@ -4,7 +4,9 @@
 
 연관: [Prompt Composition](prompt-composition.md) · [Data / Tools / Artifacts](data-and-tools.md) · [Data Contract v0.1 — 검토 초안](data-contract-v0.1.md) · [CurrentState Contract v0.1 — 검토 초안](current-state-contract-v0.1.md) · [Module Boundaries](module-boundaries.md)
 
-Data 계약 초안에 **DC-01~DC-08 검토 쟁점**을 정리했다. 기존 Q-01~Q-06은 아직 완료가 아닌 미결정으로 유지한다.
+Data 계약 초안에 **DC-01~DC-10 검토 쟁점**을 정리했다. 기존 Q-01~Q-06은 아직 완료가 아닌 미결정으로 유지한다.
+
+**[통합 모듈 계약 기준서](contracts.md)**에 Owner / Provider / Consumer / Source of Truth / Contract Location 메타데이터가 채워진 **검토용 공개 Port 인벤토리**를 작성했다. **메타데이터 작성 표준 자체는 V3-029로 확정**되었지만 각 함수/DTO 시그니처는 아직 확정되지 않았다.
 
 ## 이미 해결된 설계 방향
 
