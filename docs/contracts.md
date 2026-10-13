@@ -155,7 +155,7 @@ Environment ─────── Data.read_binding / Registry  (실행 시 다�
 | **ENV-04** | SandboxedCommandExecution / **Environment** | Inside Sandbox Backend → Tool | authorized principal root + current Workspace Binding + execution policy | bounded command exit, output, failure; **no unsandboxed fallback** | sandbox requirement CONFIRMED, DTO PROPOSED |
 | **DATA-11** | ResolveConversationWorkingDirectory / **Data** | Data → Environment, Prompt | Data Conversation ↔ user Workspace mapping | per-conversation default cwd, user-authorized cross-folder scope | directory behavior CONFIRMED, mapping PROPOSED |
 | **TOOL-05** | RunCommandTool / **Tool** | Tool registration/dispatch → Control/Provider | ENV-04 execution result, DATA-11 cwd mapping | command request, bounded canonical ToolResult | initial support CONFIRMED, schema PROPOSED |
-| **ENV-05** | SandboxCapabilityActivation / **Environment** | Sandbox validation/self-test → Environment startup/Tool | host capability + validated sandbox policy generation | enforcement status incl network-deny; refusal if unavailable | network deny CONFIRMED, implementation PROPOSED |
+| **ENV-05** | SandboxCapabilityActivation / **Environment** | Sandbox validation/self-test → Environment startup/Tool | host capability + validated sandbox policy generation | **isolated-only network enforcement** status; refuse if unavailable | isolated-only profile CONFIRMED (V3-037), implementation PROPOSED |
 | **TOOL-06** | WebSearch (future) / **Tool** | trusted Web Search adapter → Control/Prompt | external retrieved content, explicitly untrusted | bounded Web Search observations without Sandbox egress grant | OPTIONAL FUTURE |
 | **INTERNAL-01** | MemoryTool / **Tool** | Internal Memory Tool → Tool Dispatcher | Data Memory 저장/검색 계약 | 모델용 검색 결과, Conversation 기록 | 방향 확정, 기능 미정 |
 | **INTERNAL-02** | PlanNoteTool / **Tool** | Internal Plan/Note Tool → Tool Dispatcher | Data conversation-scoped Artifacts | 간결한 complete 결과 + Artifact 갱신 | 저장 위치 확정, 수정 API 미정 |
@@ -437,7 +437,7 @@ Inside Environment
 - 원본 소유권: 사용자 현재 파일 bytes는 기본 Workspace filesystem; Data에는 Conversation-folder mapping, Registry, Binding, File metadata 및 attachment refs. Plan/Note는 **Data.Artifact** 원본.
 - 명령이 파일을 임의 변경할 수 있으므로 FileAsset metadata hash를 작업 파일의 영구 immutable 증거로 쓰지 않는다. **working file과 published immutable attachment version 분리는 권고안**이며, 해당 immutable snapshot의 물리적 저장 위치는 OPEN.
 - Model이 제공한 path는 권한이 아니다. 실제 대상 principal/Binding/cwd를 검증하고, 외부 탈출 path/symlink/hardlink/mount alias를 거부한다.
-- Sandbox 미지원 시 **unsandboxed `run_command` fallback을 두지 않는다**. **네트워크 기본 차단은 확정**했으며, 구체 Linux 격리 기술·기동 Probe·DNS/loopback/socket 검증 및 시간·메모리·프로세스·출력 한도는 상세 설계 대상이다. 별도 Web Search Tool은 향후 가능하지만 명령 Sandbox의 네트워크 권한을 확대하지 않는다.
+- Sandbox 미지원 시 **unsandboxed `run_command` fallback을 두지 않는다**. **초기에는 네트워크 차단 전용 단일 프로파일만 지원(V3-037)**하며, 네트워크 Namespace·host socket·DNS/loopback 검증이 실패하면 실행을 거부한다. `connected` 모드/프록시/도메인 allowlist는 첫 버전 범위가 아니다. Linux backend와 CPU·메모리·프로세스·출력 한도는 상세 설계 대상이다. 별도 Web Search Tool은 향후 가능하지만 명령 Sandbox의 네트워크 권한을 확대하지 않는다.
 - 같은 공유 Workspace root를 읽고 쓸 수 있는 임의 명령은 다른 Conversation의 파일도 손상시킬 수 있다. UNKNOWN file effects를 가진 run_command는 같은 Workspace 파일 작업과 기본 충돌하며, 완료/결과 불명은 ToolExecution으로 보존한다.
 - Conversation 삭제가 공유 filesystem 경로와 published files를 어떻게 정리하는지는 OPEN; 다른 Conversation이 사용 중이면 자동 삭제하지 않는다.
 
