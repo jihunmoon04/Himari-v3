@@ -1,6 +1,6 @@
 # Pytest Execution Policy — Module-Scoped by Default
 
-> 2026-10-13 · **Confirmed policy V3-038**. Repo v3 is design-only; paths, test names and CI wiring here are implementation proposals.
+> 2026-10-13 · **Confirmed policy V3-038**. Module test directories, import boundary check and static CI now exist. Real Provider live tests are opt-in; Sandbox host security gates remain future work.
 >
 > References: [decisions.md](decisions.md), [contracts.md](contracts.md), [module boundaries](module-boundaries.md), [Sandbox implementation candidate](sandbox-implementation-v0.2.md).
 
@@ -103,6 +103,6 @@ Environment internal modification of Bubblewrap arguments, Landlock policy, moun
 
 ## 6. Open implementation detail
 
-- Actual test directory names and CI ownership mapping are placeholders.
+- Module test directories and static CI exist. Future Sandbox host-test commands and any module-specific CI ownership expansion remain to be implemented.
 - Automatic detection of contracts changed can be implemented later (manifest diff, manual reviewer attestation, semantic contract changes still need review).
 - This testing policy does **not** silently add mandatory full pytest before every merge, release or deployment.

@@ -1,6 +1,20 @@
 # HIMARI v3
 
-HIMARI v3의 **아키텍처 결정 기록 및 설계 기준선**입니다. 공개 계약 `api.py`와 인메모리 P0 핵심 경로가 있고, 실제 Provider·Sandbox·영속 DB 구현은 아직 없습니다.
+HIMARI v3의 **아키텍처와 구현 현황**입니다. 2026-10-13 기준 PR #1~#6이 `main`에 병합됐으며, P0 인메모리 실행 엔진과 실제 OpenRouter Provider 및 턴별 reasoning continuation 저장·재생이 구현돼 있습니다. **영속 DB·실제 Inside Environment·OS Sandbox·사용자용 Web/CLI는 아직 없습니다.**
+
+## 구현 현황 (2026-10-13, PR #6 병합 기준)
+
+| 영역 | 구현됨 | 아직 미구현 |
+| --- | --- | --- |
+| Control | Run 반복, FINAL, `ask_user`, `resume`, Conversation별 프로세스 내 lock | 정식 Pause/Cancel, 다중 worker |
+| Data | 인메모리 Conversation Event/Run/ToolExecution/Artifact, raw 요청·응답, T3/T6 claim 및 UNKNOWN 복구 | 실제 영속 DB·프로세스 크래시 내구성 |
+| Prompt | 전체 이력·ToolResult·CurrentState·턴별 continuation 재구성 | Context 압축·예산, Snapshot의 압축 활용 |
+| Provider | Scripted Fake + 실제 OpenRouter, wire-exact 요청 전송·요청/응답 원본 기록, reasoning effort/usage/continuation | 추가 Provider, Streaming |
+| Tool | Registry·Schema 검증·Dispatcher·결과 및 Artifact 커밋 | 실제 파일/명령·Memory·Plan Tool, 충돌 Scheduler |
+| Environment | EnvironmentPlugin SPI, 활성화·Binding P0 계약 | 실제 Inside/Sandbox·네트워크 차단 실호스트 검증 |
+| 인터페이스 | Bootstrap·테스트·선택적 라이브 Provider 호출 | 사용자용 Web·CLI |
+
+**검증 경계:** 재시작 테스트는 동일 `InMemoryStore`를 공유하는 시뮬레이션입니다. 실제 DB의 crash 내구성이나 OS Sandbox 보안 검증이 완료된 것은 아닙니다. 구현된 공개 계약은 각 모듈 `api.py`가 원본입니다.
 
 > 설계 원칙: **Contract-based Modular Architecture** — 모듈은 서로의 내부 구현에 의존하지 않고, 명시된 계약을 유지하는 범위에서 독립적으로 수정·교체할 수 있어야 합니다.
 
@@ -48,9 +62,9 @@ HIMARI v3의 **아키텍처 결정 기록 및 설계 기준선**입니다. 공�
 - [결정 기록](docs/decisions.md) — 현재까지 합의한 내용과 설계상 권고 사항 (모듈 경계 개정 V3-039~046 포함)
 - [미결정 사항](docs/open-questions.md) — 초기 구현에 앞서 확정할 계약과 후속 결정
 
-## 코드 (api skeleton)
+## 코드 및 실행
 
-공개 계약은 각 모듈의 `api.py`가 원본입니다(V3-046). P0 핵심 경로는 인메모리 구현과 스크립트형 Fake Provider로 동작합니다(실제 LLM·Sandbox 연동은 아직 없음).
+공개 계약은 각 모듈의 `api.py`가 원본입니다(V3-046). P0 실행 경로는 인메모리 Data를 사용하며, Fake Provider뿐 아니라 **실제 OpenRouter LLM**으로도 실행할 수 있습니다. 실제 파일/OS Sandbox는 아직 구현되지 않았습니다.
 
 | 모듈 | 계약 |
 | --- | --- |
@@ -64,7 +78,7 @@ HIMARI v3의 **아키텍처 결정 기록 및 설계 기준선**입니다. 공�
 
 구현(P0): `data/memory.py`(인메모리 Data), `tool/registry.py`·`tool/dispatcher.py`, `prompt/composer.py`(순수)·`prompt/loader.py`, `provider/scripted.py`(Fake), `control/driver.py`·`control/ask_user.py`, `bootstrap/`(조립).
 
-실제 Provider: `provider/openrouter.py`(OpenRouter, wire-exact, V3-048). 실제 호출 검증은 선택 실행이에요: `.env`에 `OPENROUTER_API_KEY`를 두고 `HIMARI_LIVE=1 pytest -s tests/live`.
+실제 Provider: `provider/openrouter.py`(OpenRouter, wire-exact V3-048) 및 턴별 continuation 재생(V3-049). 실제 호출 검증은 opt-in입니다: `.env` 또는 환경 변수에 `OPENROUTER_API_KEY` 설정 후 `HIMARI_LIVE=1 python -m pytest -s tests/live`. 일반 pytest/CI에서는 라이브 호출을 건너뜁니다.
 
 ```bash
 uv venv && uv pip install -e ".[dev]"
