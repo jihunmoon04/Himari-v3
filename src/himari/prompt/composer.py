@@ -8,6 +8,7 @@ snapshot is not consulted.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import replace
 
 from himari.common import CallId, CallRef, ModelToolResult, RunId
 from himari.data.api import (
@@ -44,11 +45,13 @@ class Composer:
                 case UserMessage():
                     pass  # rendered once, as its ask_user call's result (V3-P18)
                 case AssistantFinal(blocks=blocks):
-                    history.append(AssistantTurn(event.event_id, blocks))
+                    continuation = inputs.continuations.get(event.origin_run_id) if event.origin_run_id else None
+                    history.append(AssistantTurn(event.event_id, blocks, continuation))
                 case AssistantToolCalls():
                     if event.origin_run_id is None:
                         raise PromptError(PromptErrorCode.INCOMPLETE_HISTORY, f"{event.event_id} has no run")
-                    history.append(self._group(event.origin_run_id, event.payload, executions))
+                    group = self._group(event.origin_run_id, event.payload, executions)
+                    history.append(replace(group, continuation=inputs.continuations.get(event.origin_run_id)))
                 case ToolResultRecord():
                     pass  # rendered inside its group, in ordinal order
         basis = inputs.state_basis

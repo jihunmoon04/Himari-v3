@@ -138,3 +138,39 @@ def test_live_declared_efforts_are_accepted(model: str) -> None:
     outcomes = asyncio.run(sweep())
     assert all(":completed:" in o for o in outcomes), outcomes
     print(f"\n{model}: {outcomes}")
+
+
+@pytest.mark.parametrize("model", MODELS)
+def test_live_tool_round_trip_replays_reasoning(model: str) -> None:
+    """V3-049 end to end: the tool turn's reasoning_details come back on the
+    same assistant message in the next request, unmodified.
+
+    The task must need reasoning: on a trivial one claude-haiku-5.5 skips
+    thinking even at "max" (observed live), leaving nothing to replay."""
+    transport = RecordingTransport()
+    add = AddTool()
+    rt = build_in_memory_runtime(
+        OpenRouterAdapter(KEY, transport=transport), tools=[add], model_id=model, reasoning_effort="high"
+    )
+    rt.store.create_conversation(SCOPE)
+    result = asyncio.run(
+        rt.driver.drive(
+            SCOPE,
+            user(
+                "A train leaves at 9:40 and arrives at 13:05. How many minutes is the trip? "
+                "Use the add tool at least once (e.g. to add partial minute counts), then answer with the number."
+            ),
+        )
+    )
+
+    assert result.state is DriveState.COMPLETED, result.detail
+    assert add.calls and "205" in final_text(result)
+    first_run = asyncio.run(rt.data.read_run(SCOPE, result.run_ids[0]))
+    assert first_run.continuation is not None, "the tool turn returned no reasoning to replay"
+    second = json.loads(transport.sent[1])["messages"]
+    assert_chat_structure(second)
+    tool_turn = next(m for m in second if m["role"] == "assistant" and m.get("tool_calls"))
+    first_response = json.loads(asyncio.run(rt.data.read_raw_response(SCOPE, result.run_ids[0])).body)
+    assert tool_turn["reasoning_details"] == first_response["choices"][0]["message"]["reasoning_details"]
+    kinds = [(d.get("type"), "signature" in d, "data" in d) for d in tool_turn["reasoning_details"]]
+    print(f"\n{model}: runs={len(result.run_ids)} replayed {kinds}")

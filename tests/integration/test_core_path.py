@@ -30,6 +30,7 @@ from himari.common import (
     CallId,
     CallRef,
     JsonValue,
+    ProviderContinuation,
     TextBlock,
     UnknownOutcomePolicy,
     WorkspaceId,
@@ -47,7 +48,7 @@ from himari.data.api import (
     ToolExecutionStatus,
     UserMessage,
 )
-from himari.prompt.api import ToolGroupTurn, UserTurn
+from himari.prompt.api import AssistantTurn, ToolGroupTurn, UserTurn
 from himari.provider.api import (
     NativeNoResponse,
     NativePreparedRequest,
@@ -744,3 +745,37 @@ def test_malformed_stored_response_is_handled_on_restart() -> None:
     assert result.recovery is not None
     (stuck,) = result.recovery.runs_received_unprojected
     assert asyncio.run(rt2.data.read_run(SCOPE, stuck)).status is RunStatus.PROJECTION_FAILED
+
+
+# --- PR B: continuation flows from the producing Run to the next request ------
+
+
+def test_continuation_is_stored_on_its_run_and_attached_to_its_turn() -> None:
+    first_call = dataclasses.replace(calls(("echo", {})), continuation={"reasoning_details": [{"sig": "A"}]})
+    answer = dataclasses.replace(final("done"), continuation={"reasoning": "B"})
+    rt, provider = runtime([first_call, answer, final("again")], tools=[RecordingTool("echo")])
+    asyncio.run(rt.driver.drive(SCOPE, user("go")))
+    asyncio.run(rt.driver.drive(SCOPE, user("next")))
+
+    run2_input, run3_input = provider.prepared_inputs[1], provider.prepared_inputs[2]
+    group = run2_input.conversation[1]
+    assert isinstance(group, ToolGroupTurn)
+    assert group.continuation == ProviderContinuation("scripted", "scripted-model", {"reasoning_details": [{"sig": "A"}]})
+    turns = [p for p in run3_input.conversation if isinstance(p, AssistantTurn)]
+    assert [t.continuation for t in turns] == [ProviderContinuation("scripted", "scripted-model", {"reasoning": "B"})]
+    assert [p.continuation for p in run3_input.conversation if isinstance(p, ToolGroupTurn)] == [group.continuation]
+
+
+def test_continuation_survives_restart_projection_of_a_stored_response() -> None:
+    with_continuation = dataclasses.replace(calls(("echo", {})), continuation={"reasoning_details": [{"sig": "C"}]})
+    rt, _ = runtime(provider=CrashAfterReceive([with_continuation]), tools=[RecordingTool("echo")])
+    with pytest.raises(SimulatedCrash):
+        asyncio.run(rt.driver.drive(SCOPE, user("go")))
+
+    provider2 = ScriptedAdapter([final("done")])
+    rt2, _ = runtime(store=rt.store, provider=provider2, tools=[RecordingTool("echo")])
+    asyncio.run(rt2.driver.drive(SCOPE, user("status")))
+
+    group = provider2.prepared_inputs[0].conversation[1]
+    assert isinstance(group, ToolGroupTurn)
+    assert group.continuation == ProviderContinuation("scripted", "scripted-model", {"reasoning_details": [{"sig": "C"}]})

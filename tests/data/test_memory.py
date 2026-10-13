@@ -6,9 +6,10 @@ import dataclasses
 import pytest
 from testkit import SCOPE, text_result, user
 
-from himari.common import ASK_USER_TOOL_ID, UnknownOutcomePolicy, ArtifactId, CallId, CallRef, RawRepresentation, ToolCall, ToolId
+from himari.common import ASK_USER_TOOL_ID, ProviderContinuation, TextBlock, UnknownOutcomePolicy, ArtifactId, CallId, CallRef, RawRepresentation, ToolCall, ToolId
 from himari.data.api import (
     ArtifactMutation,
+    AssistantFinal,
     AssistantToolCalls,
     DataError,
     DataErrorCode,
@@ -192,5 +193,22 @@ def test_data_refuses_to_report_unless_policy_allows(policy: UnknownOutcomePolic
         with pytest.raises(DataError) as exc:
             await data.commit_unknown_outcome(SCOPE, call, text_result("outcome unknown", is_error=True))
         assert exc.value.code is DataErrorCode.INVALID_STATE_TRANSITION
+
+    asyncio.run(scenario())
+
+
+def test_projection_stamps_continuation_with_the_runs_provider_and_model() -> None:
+    async def scenario() -> None:
+        data = fresh()
+        run_id = await data.prepare_run(
+            SCOPE,
+            RunPreparation(b"{}", "a", RawRepresentation.WIRE_EXACT, (), PromptBasis(0, 0), "openrouter", "model-x"),
+        )
+        await data.mark_dispatch(SCOPE, run_id)
+        await data.record_raw_outcome(SCOPE, run_id, RawReceived(b"{}", "a"))
+        await data.project_model_output(SCOPE, run_id, AssistantFinal((TextBlock("hi"),)),
+                                        continuation={"reasoning_details": [{"type": "x"}]})
+        run = await data.read_run(SCOPE, run_id)
+        assert run.continuation == ProviderContinuation("openrouter", "model-x", {"reasoning_details": [{"type": "x"}]})
 
     asyncio.run(scenario())

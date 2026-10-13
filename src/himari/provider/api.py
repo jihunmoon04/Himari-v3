@@ -14,7 +14,15 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Protocol, runtime_checkable
 
-from himari.common import ASK_USER_TOOL_ID, ContentBlock, DeepFrozen, RawRepresentation, TokenUsage, ToolCall
+from himari.common import (
+    ASK_USER_TOOL_ID,
+    ContentBlock,
+    DeepFrozen,
+    JsonValue,
+    RawRepresentation,
+    TokenUsage,
+    ToolCall,
+)
 from himari.prompt.api import ModelInput
 
 
@@ -77,14 +85,14 @@ type NativeInvocationOutcome = NativeReceived | NativeNoResponse | NativeUncerta
 @dataclass(frozen=True)
 class NormalizedFinal(DeepFrozen):
     blocks: tuple[ContentBlock, ...]
-    continuation_ref: str | None = None
+    continuation: JsonValue = None  # opaque, provider-format reasoning state (V3-049)
 
 
 @dataclass(frozen=True)
 class NormalizedToolCalls(DeepFrozen):
     calls: tuple[ToolCall, ...]
     commentary: tuple[ContentBlock, ...] = ()  # V3-P16: not a final signal
-    continuation_ref: str | None = None
+    continuation: JsonValue = None  # opaque, provider-format reasoning state (V3-049)
 
 
 type NormalizedModelOutput = NormalizedFinal | NormalizedToolCalls
@@ -100,7 +108,8 @@ class ProviderAdapter(Protocol):
     def prepare_native_request(self, model_input: ModelInput) -> NativePreparedRequest:
         """PROVIDER-02: no network. Validates native ToolCall/ToolResult
         adjacency and Current State placement; raises ProviderError instead of
-        sending an illegal request."""
+        sending an illegal request. Re-inserts a turn's ``continuation`` only
+        when its provider_key and model_id match this request (V3-049)."""
         ...
 
     async def invoke_prepared(self, request: NativePreparedRequest) -> NativeInvocationOutcome:

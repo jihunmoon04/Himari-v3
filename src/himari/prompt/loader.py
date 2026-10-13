@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from himari.common import TrustedScope
+from himari.common import ProviderContinuation, RunId, TrustedScope
 from himari.data.api import ConversationLog, EventKind, StateQuery, ToolExecutionRecord, TriggerRef
 from himari.prompt.api import PromptInputs, RequestOptions
 from himari.tool.api import ToolCatalog
@@ -35,9 +35,16 @@ class ContextLoader:
     ) -> PromptInputs:
         events = tuple(await self._log.read_events(scope))
         executions: list[ToolExecutionRecord] = []
+        continuations: dict[RunId, ProviderContinuation] = {}
         for event in events:
-            if event.kind is EventKind.ASSISTANT_TOOL_CALLS and event.origin_run_id is not None:
+            if event.origin_run_id is None:
+                continue
+            if event.kind is EventKind.ASSISTANT_TOOL_CALLS:
                 executions.extend(await self._log.read_tool_executions(scope, event.origin_run_id))
+            if event.kind in (EventKind.ASSISTANT_TOOL_CALLS, EventKind.ASSISTANT_FINAL):
+                continuation = (await self._log.read_run(scope, event.origin_run_id)).continuation
+                if continuation is not None:
+                    continuations[event.origin_run_id] = continuation
         basis = await self._state.read_current_state_basis(scope)
         active = frozenset(a.environment_kind for a in basis.environments)
         return PromptInputs(
@@ -50,4 +57,5 @@ class ContextLoader:
             observations=(),
             request_options=request_options,
             trigger_refs=tuple(trigger_refs),
+            continuations=continuations,
         )

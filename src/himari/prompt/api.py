@@ -15,7 +15,18 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Protocol
 
-from himari.common import DeepFrozen, CallId, ContentBlock, EventId, ModelToolResult, RunId, ToolCall, TrustedScope
+from himari.common import (
+    CallId,
+    ContentBlock,
+    DeepFrozen,
+    EventId,
+    FrozenMap,
+    ModelToolResult,
+    ProviderContinuation,
+    RunId,
+    ToolCall,
+    TrustedScope,
+)
 from himari.data.api import (
     ConversationEvent,
     PersistedStateBasis,
@@ -64,6 +75,7 @@ class UserTurn(DeepFrozen):
 class AssistantTurn(DeepFrozen):
     event_id: EventId
     blocks: tuple[ContentBlock, ...]
+    continuation: ProviderContinuation | None = None  # opaque; only a Provider reads it
 
 
 @dataclass(frozen=True)
@@ -76,6 +88,7 @@ class ToolGroupTurn(DeepFrozen):
     commentary: tuple[ContentBlock, ...]
     calls: tuple[ToolCall, ...]
     results: Mapping[CallId, ModelToolResult]  # complete: one per call
+    continuation: ProviderContinuation | None = None  # opaque; only a Provider reads it
 
 
 type HistoryPart = CompressedHistory | UserTurn | AssistantTurn | ToolGroupTurn
@@ -98,7 +111,6 @@ class ModelInput(DeepFrozen):
     request_options: RequestOptions
     trigger_refs: tuple[TriggerRef, ...]
     prompt_basis: PromptBasis
-    provider_continuation_ref: str | None = None
 
 
 @dataclass(frozen=True)
@@ -114,6 +126,7 @@ class PromptInputs(DeepFrozen):
     observations: tuple[BindingObservation, ...]
     request_options: RequestOptions
     trigger_refs: tuple[TriggerRef, ...]
+    continuations: Mapping[RunId, ProviderContinuation] = FrozenMap()  # by producing Run
 
 
 class PromptComposer(Protocol):

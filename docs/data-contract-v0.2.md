@@ -129,6 +129,7 @@ RunRecord:
   status: RunStatus
   provider_usage?: ProviderReportedUsage
   normalized_output_ref?: EventRef | ToolCallGroupRef
+  continuation?: ProviderContinuation   # opaque reasoning state of this turn; provider/model stamped from this Run (V3-049, P39)
   error_code?: RunError
   timestamps: {prepared_at, dispatch_marked_at?, received_at?, completed_at?}
 ~~~

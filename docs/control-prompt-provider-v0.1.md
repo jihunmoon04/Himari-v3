@@ -33,7 +33,7 @@ ModelInput:
     trigger_refs: ordered[EventRef | CompletedExecutionGroupRef]
     history_coverage: CoverageProof
     request_options: {model_id, reasoning_effort?, other_supported_options?}
-    provider_continuation_ref?: ProviderOpaqueRef
+    # continuation is per history turn (AssistantTurn/ToolGroupTurn.continuation), not one trailing ref (V3-049)
     prompt_basis: {event_sequence, snapshot_revision?, state_token?, artifact_revisions?}
 ~~~
 
@@ -112,6 +112,7 @@ Provider.invoke_prepared(native_prepared_request) -> NativeInvocationOutcome:
 - Never claim the stored JSON is byte-exact wire if it is only a semantic equivalent; an SDK with unobservable reserialization is only compatible with the adapter-serialized representation.
 - Disable implicit HTTP retry that might issue multiple LLM requests under one Run ID. If Provider reports error after an uncertain send, Data marks the ambiguity; no blind replay.
 - Reasoning effort, native continuation and provider cache options remain separate from history text. Missing capability is a typed request rejection before send, not an arbitrary downgrade.
+- **Continuation (V3-049/P39):** each assistant turn carries its own `ProviderContinuation` (stored on its Run). `prepare_native_request` re-inserts it on that same native assistant message, unmodified, only for the same provider and model; it never reads Data itself.
 - Provider-internal chain-of-thought is not presumed accessible; only actually returned usage/continuation metadata can be recorded.
 
 ## 5. Normalized response discriminant (V3-044 CONFIRMED, 세부 PROPOSED)
@@ -121,7 +122,7 @@ NormalizedModelOutput:
     kind: FINAL | TOOL_CALLS
     blocks: ordered[NormalizedContentBlock]   # FINAL 본문, 또는 TOOL_CALLS와 함께 온 commentary
     tool_calls: ordered[NormalizedToolCall]    # TOOL_CALLS
-    provider_continuation_ref?
+    continuation?                               # opaque payload; Data stamps provider/model from the Run
     usage?
 ~~~
 

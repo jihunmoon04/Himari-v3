@@ -30,6 +30,7 @@ from himari.common import (
     EventId,
     JsonValue,
     ModelToolResult,
+    ProviderContinuation,
     RawRepresentation,
     RunId,
     TokenUsage,
@@ -201,6 +202,7 @@ class RunRecord(DeepFrozen):
     raw_representation: RawRepresentation
     usage: TokenUsage | None = None
     error_code: str | None = None
+    continuation: ProviderContinuation | None = None  # set at projection (V3-049)
 
 
 # --- Tool executions (Data v0.2 §6) ----------------------------------------
@@ -390,9 +392,16 @@ class ConversationLog(Protocol):
         ...
 
     async def project_model_output(
-        self, scope: TrustedScope, run_id: RunId, output: AssistantOutput
+        self,
+        scope: TrustedScope,
+        run_id: RunId,
+        output: AssistantOutput,
+        *,
+        continuation: JsonValue = None,
     ) -> ProjectionResult:
-        """T5: assistant Event + every pending ToolExecution, atomically."""
+        """T5: assistant Event + every pending ToolExecution (+ the turn's
+        opaque reasoning continuation, stamped with this Run's provider_key
+        and model_id), atomically."""
         ...
 
     async def record_projection_failure(
