@@ -1,6 +1,8 @@
 # Data, Tool Execution, and Artifacts
 
 > 2026-10-13. **확정된 방향과 세부 권고안을 구분**한다. 이는 구현된 스키마가 아니라 논리적 계약 설계다.
+>
+> 구체적인 구조·저장 순서·공개 Data Port 초안: [Data Contract v0.1 — PROPOSED](data-contract-v0.1.md). 이 초안은 아직 확정된 사양이 아니다.
 
 ## 1. 세 기록의 책임 — 확정 방향
 
