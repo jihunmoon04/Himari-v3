@@ -262,6 +262,7 @@ class ToolCompletion(DeepFrozen):
     model_result: ModelToolResult
     raw_result: JsonValue = None  # persisted on the ToolExecutionRecord
     artifact_mutations: tuple[ArtifactMutation, ...] = ()
+    record_event: bool = True  # the Tool's conversation_record policy (FULL → True)
 
 
 @dataclass(frozen=True)

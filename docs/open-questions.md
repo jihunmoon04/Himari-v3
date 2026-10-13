@@ -108,7 +108,7 @@ P1은 Workspace 전용 소프트웨어 모듈을 다시 도입하는 단계가 �
 문서를 더 늘리기보다 **최소 코드 Skeleton으로 계약을 검증**하는 단계로 넘어간다.
 
 1. ✅ (2026-10-13 skeleton 작성) **SPI·Port를 코드로 선언 (Q-01, Q-05, Q-06)** — `tool/api.py`(`ToolHandler`, `ToolOutcome`), `provider/api.py`(`ProviderAdapter`), `environment/api.py`(`EnvironmentPlugin`), `prompt/api.py`(`PromptInputs`, `compose`), `data/api.py`(`ConversationLog`, `ArtifactStore`, `WorkspaceState`, `StateQuery`). import-linter 설정 포함.
-2. **Fake로 핵심 경로 검증 (P0 완료 목표)** — Fake Provider/Tool + 인메모리 Data로 `User → Run → ToolCall 그룹 → Run → FINAL`, `ask_user → WAITING_FOR_USER → 응답 → Run` 경로.
+2. ✅ (2026-10-13 구현, PR #3) **Fake로 핵심 경로 검증 (P0 완료 목표)** — Fake Provider/Tool + 인메모리 Data로 `User → Run → ToolCall 그룹 → Run → FINAL`, `ask_user → WAITING_FOR_USER → 응답 → Run` 경로.
 3. **Data v0.2·CPP v0.1 잔여 검수** — P0 범위(V3-045)의 T3/T6/T-R·T7a, raw 보존 기준(V3-P14), 재생 규칙(V3-P18)과 Provider 배열 테스트 R1–R7. fencing/lease는 P2.
 4. **Inside Environment + Sandbox(v2 이식) (P0-F, Q-29~33)** — `EnvironmentPlugin`으로 구현.
 5. Pause/Resume(P0-C)은 P0 lock 위에서 최소 형태로, 영속 ControlState는 P2. Artifact·Memory·Compaction·캐시 튜닝은 각 기능 단계에서 결정.
