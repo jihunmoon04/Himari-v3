@@ -1,62 +1,73 @@
-# 미결정 사항 및 구현 선행조건
+# 남은 미결정 사항과 구현 선행조건
 
-기준: **2026-10-13**. 확정된 방향은 [decisions.md](decisions.md), 전체 맥락은 [architecture.md](architecture.md) 참고.
+기준: **2026-10-13**. 이 문서는 아직 확정되지 않은 계약만 관리한다. 이미 합의한 방향은 [Decision Register](decisions.md)에 둔다.
 
-각 항목의 **우선순위는 설계/구현 순서에 대한 제안**이며 사용자 최종 결정은 아니다.
+연관: [Prompt Composition](prompt-composition.md) · [Data / Tools / Artifacts](data-and-tools.md) · [Module Boundaries](module-boundaries.md)
 
-## P0 — 첫 실행 가능한 v3 Skeleton 이전에 확정할 최소 계약
+## 이미 해결된 설계 방향
 
-| ID | 주제 | 결정해야 할 내용 | 권장 결정 기준 |
+- **Run = 모델 호출 1회**, Control이 final/question에서 반복 종료.
+- **원본 Conversation exact 보존**, 최신 Prompt Snapshot은 1개.
+- **모든 Run의 Raw Provider request/response 보존**(비밀/직렬화 세부 예외는 추가 설계).
+- **Prompt 순서는 Stable Prefix → Conversation → Current State**, Provider 설정 및 Reasoning은 네이티브 API 필드로 전달.
+- **Trigger는 기존 Event의 참조**이며 Run 간 이동하거나 복제하지 않음.
+- **ToolCall ↔ ToolResult는 native group으로 연결**하고 호출 ID를 보존.
+- **충돌이 없는 복수 ToolCall 병렬 실행 허용**. 명령 문자열 같음/다름은 충돌 증명이 아님.
+- **Workspace 전용 코드 모듈 없음**. Workspace ID + Environment Binding, Environment별 접근 계약.
+- Tool 실패는 결과로 모델에 반환. Memory는 Data 공개 API를 이용하는 Tool 방향; Plan/Note는 간결한 결과 + 별도 상태.
+
+## P0 — 최소 v3 Skeleton 및 첫 실제 Run 이전
+
+| ID | 주제 | 아직 확정해야 할 계약 | 권장 순서 |
 | --- | --- | --- | --- |
-| Q-01 | 공개 계약 | 최소 public port, DTO 소유 모듈, 의존성 방향, 오류 타입 | 실제 첫 Run 경로에 필요한 만큼만 정의 |
-| Q-02 | Run / Control | Run의 입력/출력 경계, final/question/tool-call 분기, ToolResult의 다음 Run 편입 | Run = 1회 LLM 호출 원칙 유지 |
-| Q-03 | Data 최소 모델 | Conversation event, Run, ToolCall/ToolResult, 최신 Snapshot의 저장 단위와 원자성 | 원본 exact 기록과 가공된 prompt 상태 분리 |
-| Q-04 | Prompt / Provider | 모델 요청/응답 정규화, 모델/추론 설정, 지원하지 않는 옵션의 처리 | provider별 구현이 Control에 누출되지 않도록 |
-| Q-05 | Tool 최소 계약 | Tool ID, namespace, 인자/결과, 실패 표현, Workspace 필요 메타데이터 | Workspace 비의존 Tool과 환경 Tool 모두 수용 |
-| Q-06 | Dependency Enforcement | private import 차단 범위, 경계 검사 방식, 계약 테스트 책임 | 초기 변경 비용이 낮은 단순한 강제 방법 |
+| Q-01 | Public Ports / DTO | 모듈별 public API 소유, 정규화된 입력/출력, 오류 모델, 의존성 주입 위치 | **1** |
+| Q-02 | Control / Run | final/question/tool-call 정규화, 같은 Run의 다중 호출 결과의 다음 Run 경계, 사용자 재개 방식 | **2** |
+| Q-03 | Data schema | Run·Execution·Conversation Event의 원자적 기록 순서, ID/cursor, raw request/response 저장 형식, 조회 API | **1** |
+| Q-04 | Prompt / Provider boundary | provider-neutral 메시지 표현, Current State의 provider별 안전한 role/위치, 누락/불호환 기능 처리 | **2** |
+| Q-05 | Tool API | 스키마/네임스페이스, Internal/Environment 디스패치, Workspace 요구 플래그, 결과 표준형/기록 정책 | **2** |
+| Q-06 | Contract enforcement | Private import 차단, 모듈 교체/계약 테스트, 최소 필수 실패 시나리오 | **3** |
+| Q-19a | Raw retention security | 저장될 원본의 인증/비밀 정보 제외, 접근 권한, 안전한 실패 처리 | **1** |
+| Q-21 | Trigger inclusion | Conversation에 없는 ToolResult의 Provider-native 재구성, 사용 시점, history group 결손 시 fail-closed | **2** |
+| Q-22 | Prompt cursor | Latest Snapshot의 coverage/cursor와 Conversation 최신 위치 및 Artifact Revision 정합성 | **3** |
 
-**P0의 목표**는 모든 기능을 설계하는 것이 아니라, Fake Tool/Provider와 단일 Run을 이용해 Control → Prompt → Provider → ToolResult → 다음 Run/종료 흐름을 안전하게 검증할 수 있게 하는 것이다.
+P0 완료 목표: **Fake Data/Provider/Tool로 모델 호출 1회 + tool group + 다음 Run + final/question** 경로를 검증하고, 저장된 Raw 요청/응답 및 정확한 Conversation을 확인한다. 현재 코드 Skeleton은 아직 생성되지 않았다.
 
-## P1 — 첫 Inside Environment 연결 전 결정
+## P1 — 첫 Inside Environment 및 실질 Tool 실행 전
 
-| ID | 주제 | 세부 미결정 |
+| ID | 주제 | 아직 확정해야 할 계약 |
 | --- | --- | --- |
-| Q-07 | Workspace Registry | ID 발급·유일성, Workspace type 체계, 실체 주소/비밀 연결정보 처리, 자원 등록·삭제 주체 |
-| Q-08 | Environment Instance | Conversation별 활성화 방식, 같은 종류의 복수 instance 허용 여부, 수명/상태 |
-| Q-09 | Binding | 식별자, Conversation/Environment 스코프, 자원 공유, 중복 생성, 변경/철회, 재연결 상태 |
-| Q-10 | Binding authority | Tool에 binding ID 또는 workspace ID를 노출할지, 스코프 검증 절차, 권한 정책 소유권 |
-| Q-11 | Inside execution | host/local/remote 등 Workspace 종류별 명령 실행, 연결, 파일 도구, 실행 프로세스 상태 |
-| Q-12 | Security | Sandbox 강제 수준, 경로/네트워크 접근, 사용자 승인 및 자동 승인, capability 변경 |
-| Q-13 | Tool call concurrency | 한 Run의 복수 ToolCall, 병렬/순차 실행, 완료 순서 및 중복 실행 방지 |
+| Q-07 | Workspace Registry | ID 발급·유일성, 이종 Workspace 메타데이터/비밀 연결정보, 생성/삭제 소유자 |
+| Q-08 | Environment Instance | Conversation 활성화/비활성화, 종류당 여러 Instance 허용 여부, 연결 수명 |
+| Q-09 | Binding | Binding ID·스코프·철회/재연결·공유, Conversation 간 같은 Workspace 참조 |
+| Q-10 | Binding authority | Tool에서 Binding/Workspace 중 어느 ID를 노출할지, 실행 시 권한 검증 |
+| Q-11 | Inside Execution | workspace type별 파일/명령 실행, 프로세스 수명, 연결 실패 처리 |
+| Q-12 | Safety/Approval | OS sandbox, 파일·네트워크 정책, 승인/자동 승인, 실패/권한 우회 차단 |
+| Q-13 | Scheduler 상세 | verified read/write footprint, 같은 Workspace 명령 기본 직렬, 다른 Conversation 충돌, 락/종결 배리어/최대 병렬수 |
+| Q-23 | Tool execution durability | Tool 의도 저장·시작/완료·취소, DB 밖에서 발생한 부작용과 중단 후 결과 불명 처리 |
+| Q-24 | Internal vs Environment routing | 실행 유형 등록 계약, `None/Required/Default` Workspace 정책, 외부 서비스 Tool 범주 필요 여부 |
 
-**확정 전제:** Workspace 수명은 Environment에 종속되지 않으며, 같은 Workspace에 여러 Environment가 다른 방식으로 접근할 수 있다.
+P1은 Workspace 전용 소프트웨어 모듈을 다시 도입하는 단계가 아니다. Data Registry + Environment 접근 계약을 사용한다.
 
-## P2 — 기능 확장에 맞춰 결정
+## P2 — 이후 기능 확장에 맞춰 결정
 
-| ID | 주제 | 세부 미결정 |
+| ID | 주제 | 아직 확정해야 할 계약 |
 | --- | --- | --- |
-| Q-14 | Prompt compaction | 압축 trigger, 요약 품질, context budget, Snapshot 교체/복구, exact tail 선정 |
-| Q-15 | Reasoning / continuation | provider가 실제로 공개한 usage·reasoning continuation의 저장 범위, 지원 여부 및 비밀 처리 |
-| Q-16 | Memory Tool | 읽기/쓰기 Tool 표면, Data 조회 방식, 기억의 선택·검증·삭제, 자동 컨텍스트 삽입 여부 |
-| Q-17 | Plan Tool | `update_plan` 데이터 모델, 보여줄 상태, 저장/복구 정책, Run과의 관계 |
-| Q-18 | Streaming / recovery | 출력 스트리밍 이벤트, 중단된 LLM 호출/미완료 Tool 처리, resume/cancel 경로 |
-| Q-19 | Retention & privacy | Tool/Prompt 원문 보존 분류, 사용자 파일/비밀 정보, 삭제 및 감사 규칙 |
-| Q-20 | v2 migration | 어떤 사용자 데이터와 구현을 가져올지, 마이그레이션 필요성 및 검증 기준 |
+| Q-14 | Compaction | 압축 시점, 문맥 예산, 요약 품질, exact tail 경계, Snapshot 교체/복구 |
+| Q-15 | Reasoning / continuation | provider별 opaque 자료 보존/앵커 재구성/교차 모델 호환 및 cache-control |
+| Q-16 | Memory Tool | 기억 생성·조회·삭제 정책, 자동 삽입/검증/권한, Data 읽기 경계 |
+| Q-17 | Plan / Note Artifact | **Data conversation Artifact vs Outside 기본 Workspace** 최종 선택, Revision/CAS, schema, 복구·표시 |
+| Q-18 | Streaming / recovery | chunk-level 원본 기록, 스트리밍 UI, 중단된 모델 호출, resume/cancel |
+| Q-19 | Lifecycle/privacy | 보존 기간, 개인 정보 삭제, Conversation·Run·Artifact 연쇄 제거, 접근 감사 |
+| Q-20 | v2 migration | 데이터/기능 마이그레이션 범위, v2 검증된 Provider replay 규칙 선택적 재사용 |
+| Q-25 | Cache performance | tool schema 안정성, provider별 marker/TTL/히트 관측, 배치 순서에 따른 비용·품질 비교 |
+| Q-26 | Artifact origin atomicity | Internal Tool의 Artifact 변경 + ToolResult/Event 원자 트랜잭션, revision 중복 방지 |
 
-## 의도적으로 미리 고정하지 않는 사항
+## 다음 설계 작업 제안
 
-- 특정 Python 패키지 트리 또는 세부 함수 시그니처
-- 범용 Workspace 생성/삭제 API의 단일 구현
-- Inside의 명령 실행 및 자동 승인 정책
-- Memory의 자동 업데이트 알고리즘
-- DB 스키마를 곧바로 공개 API로 취급하는 방식
-- 모든 Environment에 동일한 실행기와 권한 체계를 강요하는 방식
+1. **Data Event/Run 원본 계약과 최소 Public Port (Q-01, Q-03, Q-19a)**.
+2. **Prompt → Provider 표준 입력 계약 (Q-04, Q-21, Q-22)** — 고정된 Prompt 순서를 provider-native 호출로 안전하게 전달.
+3. **Control/Tool 계약 (Q-02, Q-05)** — 호출 그룹/종료/오류·실행 기록의 일관성 확인.
+4. 그다음 **Workspace Binding + Inside Scheduler (Q-07~13, Q-23~24)**.
+5. Artifact·Memory·Plan·Compaction과 실제 Provider 캐시 튜닝은 각 기능의 상세 설계 단계에서 결정.
 
-## 제안하는 다음 단계
-
-1. **Q-01~06을 최소 단위로 설계**: public 계약과 Fake 구현만으로 Run loop 증명.
-2. **Q-07~10의 Workspace/Binding 모델 확정**: 물리 Workspace와 권한 관계의 분리 검증.
-3. **Inside (Q-11~12) 구현**: 첫 구체적인 Environment를 붙여 교체 테스트 수행.
-4. Memory·Plan·압축과 Provider 다변화는 공개 계약을 유지하며 추가.
-
-각 단계에서 모듈 구현은 계약 테스트를 통과해야 하며, 변경이 외부 모듈의 내부 수정까지 요구하는 경우에는 경계 설계를 재검토한다.
+실제 구현 전까지 '정책 방향 확정'과 '구체 알고리즘·스키마 미결정'을 혼동하지 않는다.
