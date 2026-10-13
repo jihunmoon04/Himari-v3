@@ -5,7 +5,7 @@ from types import ModuleType
 
 import pytest
 
-from himari.common import CallId, RawRepresentation, TextBlock, ToolCall, ToolId
+from himari.common import ASK_USER_TOOL_ID, CallId, RawRepresentation, TextBlock, ToolCall, ToolId
 from himari.prompt.api import ModelInput
 from himari.provider import api
 from himari.provider.api import (
@@ -21,7 +21,6 @@ from himari.provider.api import (
     ProviderErrorCode,
     validate_tool_calls,
 )
-from himari.tool.api import ASK_USER_TOOL_ID
 
 
 def call(call_id: str, ordinal: int, tool_id: str = "echo") -> ToolCall:

@@ -84,6 +84,9 @@ P0 완료 목표: **Fake Data/Provider/Tool로 모델 호출 1회 + tool group +
 | Q-13 | Scheduler 상세 | verified read/write footprint, 같은 Workspace 명령 기본 직렬, 다른 Conversation 충돌, 락/종결 배리어/최대 병렬수 |
 | Q-23 | Tool execution durability | Tool 의도 저장·시작/완료·취소, DB 밖에서 발생한 부작용과 중단 후 결과 불명 처리 |
 | Q-24 | Internal vs Environment routing | 실행 유형 등록 계약, `None/Required/Default` Workspace 정책, 외부 서비스 Tool 범주 필요 여부 |
+| Q-39 | Tool error disclosure | 현재 claim 없는 Tool의 예외는 `"{예외 타입}: {메시지}"`를 그대로 `model_result`에 넣는다(`tool/dispatcher.py`). 실제 Environment Tool 도입 전에 호스트 경로·비밀이 모델로 새지 않도록 메시지를 정제하거나 일반화하고, 원문은 `raw_result`/로그에만 남길지 결정 |
+| Q-40 | 실제 OS 권한 검증 | `run_command`·파일 Tool의 권한을 실제 Sandbox 호스트에서 검증(ENV-04/05 게이트). Fake Environment 테스트로 대체할 수 없음 |
+| Q-41 | 영속 DB 크래시 내구성 | 현재 재시작 테스트는 같은 인메모리 store를 공유하는 시뮬레이션이다. 실제 DB 백엔드에서 T2~T7a·T-R의 원자성과 크래시 후 복구를 별도로 검증 |
 
 P1은 Workspace 전용 소프트웨어 모듈을 다시 도입하는 단계가 아니다. Data Registry + Environment 접근 계약을 사용한다.
 
@@ -108,7 +111,7 @@ P1은 Workspace 전용 소프트웨어 모듈을 다시 도입하는 단계가 �
 문서를 더 늘리기보다 **최소 코드 Skeleton으로 계약을 검증**하는 단계로 넘어간다.
 
 1. ✅ (2026-10-13 skeleton 작성) **SPI·Port를 코드로 선언 (Q-01, Q-05, Q-06)** — `tool/api.py`(`ToolHandler`, `ToolOutcome`), `provider/api.py`(`ProviderAdapter`), `environment/api.py`(`EnvironmentPlugin`), `prompt/api.py`(`PromptInputs`, `compose`), `data/api.py`(`ConversationLog`, `ArtifactStore`, `WorkspaceState`, `StateQuery`). import-linter 설정 포함.
-2. **Fake로 핵심 경로 검증 (P0 완료 목표)** — Fake Provider/Tool + 인메모리 Data로 `User → Run → ToolCall 그룹 → Run → FINAL`, `ask_user → WAITING_FOR_USER → 응답 → Run` 경로.
+2. ✅ (2026-10-13 구현, PR #3) **Fake로 핵심 경로 검증 (P0 완료 목표)** — Fake Provider/Tool + 인메모리 Data로 `User → Run → ToolCall 그룹 → Run → FINAL`, `ask_user → WAITING_FOR_USER → 응답 → Run` 경로.
 3. **Data v0.2·CPP v0.1 잔여 검수** — P0 범위(V3-045)의 T3/T6/T-R·T7a, raw 보존 기준(V3-P14), 재생 규칙(V3-P18)과 Provider 배열 테스트 R1–R7. fencing/lease는 P2.
 4. **Inside Environment + Sandbox(v2 이식) (P0-F, Q-29~33)** — `EnvironmentPlugin`으로 구현.
 5. Pause/Resume(P0-C)은 P0 lock 위에서 최소 형태로, 영속 ControlState는 P2. Artifact·Memory·Compaction·캐시 튜닝은 각 기능 단계에서 결정.

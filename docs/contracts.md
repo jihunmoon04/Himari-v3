@@ -362,7 +362,7 @@ class ToolOutcome:
 
 - 등록 경로는 세 가지다: Internal Tool(Memory/Plan/Note), `EnvironmentPlugin.tools()`, Control의 `ask_user`.
 - `completion = suspending`인 Tool(P0에서는 `ask_user`만)은 handler를 실행하지 않고 call을 `PENDING`으로 둔 채 Control에 대기를 알린다.
-- `effect_profile`이 `Read`가 아닌 Tool은 Dispatcher가 handler 호출 전에 `EXECUTION_CLAIMED`를 영속한다(V3-045). Tool 구현은 이를 알 필요가 없다.
+- **Environment가 제공한** Tool 중 `effect_profile`이 `Read`가 아닌 것은 Dispatcher가 handler 호출 전에 `EXECUTION_CLAIMED`를 영속한다(V3-045). Internal Tool은 효과가 ToolOutcome뿐이고 결과와 원자 커밋되므로 claim하지 않는다([Data v0.2 §6](data-contract-v0.2.md)). Tool 구현은 이를 알 필요가 없다.
 - `ToolContext`는 신뢰된 scope, 해석된 Binding, 읽기용 Data sub-port 등 **필요한 것만** 담는다. 쓰기 커밋은 Dispatcher가 DATA-08로 한다.
 
 - 같은 Workspace의 범위 불명 `run_command`는 기본 직렬 후보; 확인된 서로 다른 파일 범위 수정은 공유 부작용이 없으면 병렬 후보.

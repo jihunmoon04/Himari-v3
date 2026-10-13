@@ -262,6 +262,7 @@ class ToolCompletion(DeepFrozen):
     model_result: ModelToolResult
     raw_result: JsonValue = None  # persisted on the ToolExecutionRecord
     artifact_mutations: tuple[ArtifactMutation, ...] = ()
+    record_event: bool = True  # the Tool's conversation_record policy (FULL → True)
 
 
 @dataclass(frozen=True)
@@ -277,6 +278,9 @@ class RecoveryReport(DeepFrozen):
     runs_outcome_unknown: tuple[RunId, ...] = ()
     runs_abandoned_not_sent: tuple[RunId, ...] = ()
     tools_unknown: tuple[CallRef, ...] = ()
+    # Reported, not changed: the response is stored but not yet projected.
+    # Control must project these (no new Provider call) before any new Run.
+    runs_received_unprojected: tuple[RunId, ...] = ()
 
 
 # --- Prompt snapshot (Data v0.2 §7) ----------------------------------------
@@ -346,7 +350,9 @@ class ConversationLog(Protocol):
         self, scope: TrustedScope, message: UserMessage, *, idempotency_key: str | None = None
     ) -> ConversationEvent:
         """T1: ordinary user input. While an ask_user call is waiting, Control
-        must use ``answer_pending_call`` instead (one path per input)."""
+        must use ``answer_pending_call`` instead (one path per input).
+        Same key + same message → the original Event; same key + a different
+        message → DUPLICATE_IDENTITY."""
         ...
 
     async def read_events(
@@ -380,6 +386,11 @@ class ConversationLog(Protocol):
     ) -> None: ...
 
     async def read_run(self, scope: TrustedScope, run_id: RunId) -> RunRecord: ...
+
+    async def read_raw_response(self, scope: TrustedScope, run_id: RunId) -> RawReceived:
+        """The stored response of a ``RECEIVED`` (or later) Run, for
+        re-normalization after a crash. NOT_FOUND if none was received."""
+        ...
 
     async def read_tool_executions(
         self, scope: TrustedScope, run_id: RunId
@@ -416,7 +427,8 @@ class ConversationLog(Protocol):
     async def recover_interrupted(self, scope: TrustedScope) -> RecoveryReport:
         """T-R: DISPATCH_CLAIMED without response → OUTCOME_UNKNOWN,
         EXECUTION_CLAIMED without result → UNKNOWN, unclaimed PREPARED →
-        ABANDONED_NOT_SENT. Never re-executes anything."""
+        ABANDONED_NOT_SENT; RECEIVED Runs are reported for projection.
+        Never re-executes anything."""
         ...
 
     async def get_latest_snapshot(self, scope: TrustedScope) -> PromptSnapshot | None: ...
@@ -461,6 +473,13 @@ class WorkspaceState(Protocol):
     async def resolve_conversation_workspace(
         self, scope: TrustedScope
     ) -> ConversationWorkspace: ...
+
+    async def read_activation(
+        self, scope: TrustedScope, environment_kind: EnvironmentKind
+    ) -> EnvironmentActivation | None:
+        """Current activation of a kind in this Conversation (P0: ≤1).
+        Every Environment Tool call is gated on this, binding or not."""
+        ...
 
 
 class StateQuery(Protocol):

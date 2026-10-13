@@ -140,6 +140,10 @@ BindingId = NewType("BindingId", str)
 ToolId = NewType("ToolId", str)
 EnvironmentKind = NewType("EnvironmentKind", str)
 
+ASK_USER_TOOL_ID = ToolId("ask_user")
+"""The suspending question Tool (V3-044). Control provides its handler; Data
+derives the wait state from it; Provider rejects it mixed with other calls."""
+
 type JsonValue = (
     None | bool | int | float | str | Sequence[JsonValue] | Mapping[str, JsonValue]
 )

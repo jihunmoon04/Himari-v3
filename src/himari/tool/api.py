@@ -8,8 +8,9 @@ V3-040~042, V3-044/045, V3-P13, V3-P17, V3-P19.
   ``ToolHandler``.
 - Tool implementations never touch the execution ledger: they return a
   ``ToolOutcome`` and the Dispatcher commits it (V3-042).
-- For ``effect_profile != READ`` the Dispatcher persists ``EXECUTION_CLAIMED``
-  before calling ``run`` (V3-045). Handlers need not know this.
+- For Environment-provided Tools with ``effect_profile != READ`` the Dispatcher
+  persists ``EXECUTION_CLAIMED`` before calling ``run`` (V3-045). Internal Tools
+  have no effects outside their ToolOutcome, so they are never claimed.
 """
 
 from __future__ import annotations
@@ -32,10 +33,6 @@ from himari.common import (
     TrustedScope,
 )
 from himari.data.api import ArtifactMutation, ArtifactStore, BindingAuthority
-
-
-ASK_USER_TOOL_ID = ToolId("ask_user")
-"""The suspending question Tool (V3-044). Control provides its handler."""
 
 
 class WorkspaceRequirement(Enum):

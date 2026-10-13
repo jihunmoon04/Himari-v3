@@ -1,6 +1,6 @@
 # HIMARI v3
 
-HIMARI v3의 **아키텍처 결정 기록 및 설계 기준선**입니다. 현재는 설계 단계이며 공개 계약의 `api.py` skeleton만 있고 구현은 없습니다.
+HIMARI v3의 **아키텍처 결정 기록 및 설계 기준선**입니다. 공개 계약 `api.py`와 인메모리 P0 핵심 경로가 있고, 실제 Provider·Sandbox·영속 DB 구현은 아직 없습니다.
 
 > 설계 원칙: **Contract-based Modular Architecture** — 모듈은 서로의 내부 구현에 의존하지 않고, 명시된 계약을 유지하는 범위에서 독립적으로 수정·교체할 수 있어야 합니다.
 
@@ -50,7 +50,7 @@ HIMARI v3의 **아키텍처 결정 기록 및 설계 기준선**입니다. 현�
 
 ## 코드 (api skeleton)
 
-공개 계약은 각 모듈의 `api.py`가 원본입니다(V3-046). 구현은 아직 없습니다.
+공개 계약은 각 모듈의 `api.py`가 원본입니다(V3-046). P0 핵심 경로는 인메모리 구현과 스크립트형 Fake Provider로 동작합니다(실제 LLM·Sandbox 연동은 아직 없음).
 
 | 모듈 | 계약 |
 | --- | --- |
@@ -60,6 +60,9 @@ HIMARI v3의 **아키텍처 결정 기록 및 설계 기준선**입니다. 현�
 | `src/himari/environment/api.py` | `EnvironmentPlugin` SPI |
 | `src/himari/prompt/api.py` | `PromptComposer`(순수), `PromptContextLoader`, `ModelInput` |
 | `src/himari/provider/api.py` | `ProviderAdapter` SPI, 정규화 출력 `FINAL \| TOOL_CALLS` |
+| `src/himari/control/api.py` | `ConversationDriver`, `DriveResult` / `DriveState` |
+
+구현(P0): `data/memory.py`(인메모리 Data), `tool/registry.py`·`tool/dispatcher.py`, `prompt/composer.py`(순수)·`prompt/loader.py`, `provider/scripted.py`(Fake), `control/driver.py`·`control/ask_user.py`, `bootstrap/`(조립).
 
 ```bash
 uv venv && uv pip install -e ".[dev]"

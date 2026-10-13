@@ -14,9 +14,8 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Protocol, runtime_checkable
 
-from himari.common import DeepFrozen, ContentBlock, RawRepresentation, TokenUsage, ToolCall
+from himari.common import ASK_USER_TOOL_ID, ContentBlock, DeepFrozen, RawRepresentation, TokenUsage, ToolCall
 from himari.prompt.api import ModelInput
-from himari.tool.api import ASK_USER_TOOL_ID
 
 
 class ProviderErrorCode(Enum):
