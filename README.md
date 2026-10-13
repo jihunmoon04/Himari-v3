@@ -26,6 +26,7 @@ HIMARI v3의 **아키텍처 결정 기록 및 설계 기준선**입니다. 현�
 - [프롬프트 구성 계약](docs/prompt-composition.md) — Cache-first 순서, Trigger 참조, Tool 그룹, Reasoning/Provider 매핑
 - [데이터·Tool·Artifact 설계](docs/data-and-tools.md) — 원본 실행 기록, Conversation, Artifact, 병렬 실행
 - [Data Contract v0.1 초안](docs/data-contract-v0.1.md) — Event·Run·Tool·Snapshot의 제안 모델, 공개 API, 불변식, 트랜잭션 (검토 전)
+- [CurrentState Contract v0.1 초안](docs/current-state-contract-v0.1.md) — 활성 Environment·Workspace Binding·Artifact의 읽기 투영 및 최신 상태 검증 (검토 전)
 - [결정 기록](docs/decisions.md) — 현재까지 합의한 내용과 설계상 권고 사항
 - [미결정 사항](docs/open-questions.md) — 초기 구현에 앞서 확정할 계약과 후속 결정
 
