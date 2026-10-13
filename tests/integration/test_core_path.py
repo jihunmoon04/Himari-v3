@@ -694,7 +694,7 @@ def openrouter_runtime(handler: Any, store: Any = None) -> Any:
     return rt
 
 
-OK = {"choices": [{"message": {"content": "fine"}, "finish_reason": "stop"}]}
+OK = {"choices": [{"message": {"role": "assistant", "content": "fine"}, "finish_reason": "stop"}]}
 
 
 def test_provider_error_response_body_is_kept_on_the_failed_run() -> None:
