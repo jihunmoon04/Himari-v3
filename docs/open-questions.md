@@ -16,6 +16,11 @@ Data 계약 초안에 **DC-01~DC-08 검토 쟁점**을 정리했다. 기존 Q-01
 - **ToolCall ↔ ToolResult는 native group으로 연결**하고 호출 ID를 보존.
 - **충돌이 없는 복수 ToolCall 병렬 실행 허용**. 명령 문자열 같음/다름은 충돌 증명이 아님.
 - **Workspace 전용 코드 모듈 없음**. Workspace ID + Environment Binding, Environment별 접근 계약.
+- **활성 Workspace/Environment는 Artifact가 아닌 Data 운영 상태**(Registry/Activation/Binding/Settings). 실제 온라인/접근 가능 여부는 Environment에서 검증하고, Prompt는 CurrentStateProjection으로 읽는다.
+- **동일 Conversation의 실행 흐름/Run 직렬화**(내부 독립 ToolCall 병렬 허용; 구체 lease/queue 방식만 미정).
+- **ConversationEvent는 kind별 불변 canonical payload**(정확한 enum/schema는 미정).
+- **Prompt가 모델 문맥에 필요한 ToolResult를 Execution Records에서 선택하고 정합성을 검증하며, Provider가 native 구조로 직렬화**한다.
+- **Plan/Note 원본은 Data의 conversation-scoped Artifact**에 저장한다; Outside의 기본 Workspace는 필요시 projection/export.
 - Tool 실패는 결과로 모델에 반환. Memory는 Data 공개 API를 이용하는 Tool 방향; Plan/Note는 간결한 결과 + 별도 상태.
 
 ## P0 — 최소 v3 Skeleton 및 첫 실제 Run 이전
@@ -23,13 +28,13 @@ Data 계약 초안에 **DC-01~DC-08 검토 쟁점**을 정리했다. 기존 Q-01
 | ID | 주제 | 아직 확정해야 할 계약 | 권장 순서 |
 | --- | --- | --- | --- |
 | Q-01 | Public Ports / DTO | 모듈별 public API 소유, 정규화된 입력/출력, 오류 모델, 의존성 주입 위치 | **1** |
-| Q-02 | Control / Run | final/question/tool-call 정규화, 같은 Run의 다중 호출 결과의 다음 Run 경계, 사용자 재개 방식 | **2** |
-| Q-03 | Data schema | Run·Execution·Conversation Event의 원자적 기록 순서, ID/cursor, raw request/response 저장 형식, 조회 API | **1** |
+| Q-02 | Control / Run | **동일 Conversation 직렬화는 확정**. final/question/tool-call 정규화, 복수 호출 종료 배리어·다음 Run 경계, 사용자 재개 방식과 lock/lease 복구 구현 | **2** |
+| Q-03 | Data schema | **kind별 불변 Payload는 확정**. 종류별 구체 schema, Run·Execution·Event의 원자적 기록 순서, ID/cursor, raw 저장 형식, 조회 API | **1** |
 | Q-04 | Prompt / Provider boundary | provider-neutral 메시지 표현, Current State의 provider별 안전한 role/위치, 누락/불호환 기능 처리 | **2** |
 | Q-05 | Tool API | 스키마/네임스페이스, Internal/Environment 디스패치, Workspace 요구 플래그, 결과 표준형/기록 정책 | **2** |
 | Q-06 | Contract enforcement | Private import 차단, 모듈 교체/계약 테스트, 최소 필수 실패 시나리오 | **3** |
 | Q-19a | Raw retention security | 저장될 원본의 인증/비밀 정보 제외, 접근 권한, 안전한 실패 처리 | **1** |
-| Q-21 | Trigger inclusion | Conversation에 없는 ToolResult의 Provider-native 재구성, 사용 시점, history group 결손 시 fail-closed | **2** |
+| Q-21 | Trigger inclusion | **Prompt의 기록 선택·검증과 Provider의 native 직렬화 소유권은 확정**. ToolCall 그룹 결손 검사·오류 형식, Conversation 밖의 결과 포함 시점 | **2** |
 | Q-22 | Prompt cursor | Latest Snapshot의 coverage/cursor와 Conversation 최신 위치 및 Artifact Revision 정합성 | **3** |
 
 P0 완료 목표: **Fake Data/Provider/Tool로 모델 호출 1회 + tool group + 다음 Run + final/question** 경로를 검증하고, 저장된 Raw 요청/응답 및 정확한 Conversation을 확인한다. 현재 코드 Skeleton은 아직 생성되지 않았다.
@@ -57,18 +62,20 @@ P1은 Workspace 전용 소프트웨어 모듈을 다시 도입하는 단계가 �
 | Q-14 | Compaction | 압축 시점, 문맥 예산, 요약 품질, exact tail 경계, Snapshot 교체/복구 |
 | Q-15 | Reasoning / continuation | provider별 opaque 자료 보존/앵커 재구성/교차 모델 호환 및 cache-control |
 | Q-16 | Memory Tool | 기억 생성·조회·삭제 정책, 자동 삽입/검증/권한, Data 읽기 경계 |
-| Q-17 | Plan / Note Artifact | **Data conversation Artifact vs Outside 기본 Workspace** 최종 선택, Revision/CAS, schema, 복구·표시 |
+| Q-17 | Plan / Note Artifact | **원본은 Data conversation-scoped Artifact로 확정**. Revision/CAS, schema, 삭제/복구·표시, Outside 노출/export |
 | Q-18 | Streaming / recovery | chunk-level 원본 기록, 스트리밍 UI, 중단된 모델 호출, resume/cancel |
 | Q-19 | Lifecycle/privacy | 보존 기간, 개인 정보 삭제, Conversation·Run·Artifact 연쇄 제거, 접근 감사 |
 | Q-20 | v2 migration | 데이터/기능 마이그레이션 범위, v2 검증된 Provider replay 규칙 선택적 재사용 |
 | Q-25 | Cache performance | tool schema 안정성, provider별 marker/TTL/히트 관측, 배치 순서에 따른 비용·품질 비교 |
 | Q-26 | Artifact origin atomicity | Internal Tool의 Artifact 변경 + ToolResult/Event 원자 트랜잭션, revision 중복 방지 |
+| Q-27 | CurrentStateProjection | Data activation/binding/settings/artifact와 Environment live 상태의 조합, consistency snapshot, 직렬화/role, 권한 있는 정보만 공개 |
+| Q-28 | Conversation serialization | 단일 Control 흐름/Run 직렬화를 구현할 lease/queue의 범위, 취소/중단 후 ownership 회수 및 신규 사용자 입력 정책 |
 
 ## 다음 설계 작업 제안
 
-1. **Data Event/Run 원본 계약과 최소 Public Port (Q-01, Q-03, Q-19a)**.
-2. **Prompt → Provider 표준 입력 계약 (Q-04, Q-21, Q-22)** — 고정된 Prompt 순서를 provider-native 호출로 안전하게 전달.
-3. **Control/Tool 계약 (Q-02, Q-05)** — 호출 그룹/종료/오류·실행 기록의 일관성 확인.
+1. **Data Event/Run 원본 계약과 최소 Public Port (Q-01, Q-03, Q-19a)**. 이미 확정된 네 데이터 원칙과 [Data Contract v0.1](data-contract-v0.1.md)의 미정 필드를 구분한다.
+2. **Prompt → Provider 표준 입력 계약 (Q-04, Q-21, Q-22, Q-27)** — 고정된 Prompt 순서와 운영 상태의 CurrentStateProjection을 provider-native 호출로 안전하게 전달.
+3. **Control/Tool 계약 (Q-02, Q-05, Q-28)** — 동일 Conversation의 직렬화는 지키되 Tool 병렬성·호출 그룹 종료·오류·실행 기록의 일관성 확인.
 4. 그다음 **Workspace Binding + Inside Scheduler (Q-07~13, Q-23~24)**.
 5. Artifact·Memory·Plan·Compaction과 실제 Provider 캐시 튜닝은 각 기능의 상세 설계 단계에서 결정.
 
