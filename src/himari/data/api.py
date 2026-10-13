@@ -36,6 +36,7 @@ from himari.common import (
     ToolCall,
     ToolId,
     TrustedScope,
+    UnknownOutcomePolicy,
     WorkspaceId,
 )
 
@@ -223,6 +224,9 @@ class ToolExecutionRecord(DeepFrozen):
     model_result: ModelToolResult | None = None  # what the model sees
     raw_result: JsonValue = None  # the Tool's own execution record; never sent to the model
     workspace_binding_id: BindingId | None = None
+    # Persisted at claim time. None on an uncertain record means the policy is
+    # not known and must be treated as REQUIRE_USER (never silently relaxed).
+    unknown_outcome: UnknownOutcomePolicy | None = None
 
 
 @dataclass(frozen=True)
@@ -400,8 +404,11 @@ class ConversationLog(Protocol):
         """Ordered by original ordinal, not completion time."""
         ...
 
-    async def claim_tool_execution(self, scope: TrustedScope, call: CallRef) -> None:
-        """T6: ``PENDING → EXECUTION_CLAIMED`` before an effectful handler runs."""
+    async def claim_tool_execution(
+        self, scope: TrustedScope, call: CallRef, *, unknown_outcome: UnknownOutcomePolicy
+    ) -> None:
+        """T6: ``PENDING → EXECUTION_CLAIMED`` before an effectful handler runs,
+        persisting the UNKNOWN policy that applies to this effect (V3-047)."""
         ...
 
     async def commit_tool_outcome(
@@ -424,6 +431,8 @@ class ConversationLog(Protocol):
         """V3-047: ``EXECUTION_CLAIMED`` or ``UNKNOWN`` → ``UNKNOWN`` with a
         model-facing "outcome unknown" result (+ ``tool_result`` Event),
         atomically. The status stays UNKNOWN: the effect is still not known.
+        Only for records whose persisted policy is REPORT_TO_MODEL; otherwise
+        INVALID_STATE_TRANSITION (a user must resolve it).
         ALREADY_COMMITTED if the call already has a model result."""
         ...
 

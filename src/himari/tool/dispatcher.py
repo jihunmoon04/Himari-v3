@@ -11,9 +11,11 @@ P0 scheduling is sequential in original ordinal order; parallel scheduling
   turned into FAILED and never re-run. With ``unknown_outcome=REPORT_TO_MODEL``
   (default) the call becomes UNKNOWN with an "outcome unknown" result and the
   model verifies the state before deciding to retry (V3-047). With
-  ``REQUIRE_USER`` it stays uncertain and the group is BLOCKED. Calls left
-  UNKNOWN by restart cleanup get the same treatment on the next dispatch.
-  Without a claim nothing happened, so the exception is committed as FAILED.
+  ``REQUIRE_USER`` it stays uncertain, **no further call of the group runs**
+  and the group is BLOCKED. Calls left UNKNOWN by restart cleanup get the same
+  treatment on the next dispatch, judged by the policy **persisted at claim
+  time** (an unknown policy counts as REQUIRE_USER), never by the current
+  registry. Without a claim nothing happened, so the exception is FAILED.
 - Unknown tool, arguments failing ``input_schema``, an Environment Tool whose
   kind is not active in this Conversation (even with no Workspace requirement:
   catalog exposure is not authorization), or a missing/revoked/mismatched
@@ -25,7 +27,16 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from himari.common import BindingId, CallRef, ModelToolResult, RunId, TextBlock, ToolCall, TrustedScope
+from himari.common import (
+    BindingId,
+    CallRef,
+    ModelToolResult,
+    RunId,
+    TextBlock,
+    ToolCall,
+    TrustedScope,
+    UnknownOutcomePolicy,
+)
 from himari.data.api import (
     ArtifactStore,
     BindingAuthority,
@@ -47,7 +58,6 @@ from himari.tool.api import (
     ToolInvocation,
     ToolOutcome,
     ToolStatus,
-    UnknownOutcomePolicy,
     WorkspaceRequirement,
 )
 from himari.tool.registry import ToolRegistry
@@ -71,6 +81,19 @@ UNKNOWN_OUTCOME_RESULT = ModelToolResult(
     ),
     is_error=True,
 )
+
+
+def _uncertain(record: ToolExecutionRecord) -> bool:
+    """Claimed, no definite result, nothing told to the model yet."""
+    return record.model_result is None and record.status in (
+        ToolExecutionStatus.EXECUTION_CLAIMED,
+        ToolExecutionStatus.UNKNOWN,
+    )
+
+
+def _blocks(record: ToolExecutionRecord) -> bool:
+    """Uncertain and not reportable by its persisted policy (None → REQUIRE_USER)."""
+    return _uncertain(record) and record.unknown_outcome is not UnknownOutcomePolicy.REPORT_TO_MODEL
 
 
 class _Denied(Exception):
@@ -97,13 +120,27 @@ class Dispatcher:
     async def dispatch_group(
         self, scope: TrustedScope, run_id: RunId, calls: Sequence[ToolCall]
     ) -> GroupDispatchResult:
-        records = await self._log.read_tool_executions(scope, run_id)  # authoritative, ordinal order
-        for record in records:
-            if record.status is ToolExecutionStatus.PENDING:
-                await self._run_one(scope, record)
-            elif record.status is ToolExecutionStatus.UNKNOWN and record.model_result is None:
-                await self._report_unknown(scope, record)
+        count = len(await self._log.read_tool_executions(scope, run_id))
+        for index in range(count):
+            # Re-read each step: the authoritative state, in original ordinal order.
+            records = await self._log.read_tool_executions(scope, run_id)
+            await self._report_reportable(scope, records)
+            if any(_blocks(r) for r in records):
+                break  # REQUIRE_USER uncertainty: no further effects in this group
+            if records[index].status is ToolExecutionStatus.PENDING:
+                await self._run_one(scope, records[index])
+        records = await self._log.read_tool_executions(scope, run_id)
+        await self._report_reportable(scope, records)
         return self._group_state(run_id, await self._log.read_tool_executions(scope, run_id))
+
+    async def _report_reportable(self, scope: TrustedScope, records: Sequence[ToolExecutionRecord]) -> None:
+        for record in records:
+            if _uncertain(record) and record.unknown_outcome is UnknownOutcomePolicy.REPORT_TO_MODEL:
+                handler = self._registry.get(record.tool_id)
+                record_event = handler is None or handler.definition.conversation_record is ConversationRecord.FULL
+                await self._log.commit_unknown_outcome(
+                    scope, record.call, UNKNOWN_OUTCOME_RESULT, record_event=record_event
+                )
 
     async def _run_one(self, scope: TrustedScope, record: ToolExecutionRecord) -> None:
         handler = self._registry.get(record.tool_id)
@@ -124,27 +161,16 @@ class Dispatcher:
             return
         claimed = d.environment_kind is not None and d.effect_profile is not EffectProfile.READ
         if claimed:
-            await self._log.claim_tool_execution(scope, record.call)
+            await self._log.claim_tool_execution(scope, record.call, unknown_outcome=d.unknown_outcome)
         ctx = ToolContext(scope=scope, artifacts=self._artifacts, binding=binding)
         invocation = ToolInvocation(record.tool_id, record.call.call_id, record.arguments)
         try:
             outcome = await handler.run(invocation, ctx)
         except Exception as exc:  # noqa: BLE001 — uncertainty is decided by the claim
             if claimed:
-                await self._report_unknown(scope, record)
-                return
+                return  # uncertain; reported or blocking per the persisted policy
             outcome = _error(ToolStatus.FAILED, f"{type(exc).__name__}: {exc}")
         await self._commit(scope, record.call, outcome, record_event)
-
-    async def _report_unknown(self, scope: TrustedScope, record: ToolExecutionRecord) -> None:
-        """V3-047. A Tool that is no longer registered cannot be re-run by
-        anyone, so reporting to the model is the safe default for it."""
-        handler = self._registry.get(record.tool_id)
-        d = handler.definition if handler is not None else None
-        if d is not None and d.unknown_outcome is UnknownOutcomePolicy.REQUIRE_USER:
-            return  # stays uncertain → BLOCKED_UNKNOWN
-        record_event = d is None or d.conversation_record is ConversationRecord.FULL
-        await self._log.commit_unknown_outcome(scope, record.call, UNKNOWN_OUTCOME_RESULT, record_event=record_event)
 
     async def _resolve_binding(
         self, scope: TrustedScope, d: ToolDefinition, record: ToolExecutionRecord
@@ -193,12 +219,7 @@ class Dispatcher:
 
     @staticmethod
     def _group_state(run_id: RunId, records: Sequence[ToolExecutionRecord]) -> GroupDispatchResult:
-        uncertain = tuple(
-            r.call
-            for r in records
-            if r.status in (ToolExecutionStatus.UNKNOWN, ToolExecutionStatus.EXECUTION_CLAIMED)
-            and r.model_result is None
-        )
+        uncertain = tuple(r.call for r in records if _blocks(r))
         if uncertain:
             return GroupDispatchResult(run_id, GroupState.BLOCKED_UNKNOWN, unknown_calls=uncertain)
         pending = [r for r in records if r.status is ToolExecutionStatus.PENDING]

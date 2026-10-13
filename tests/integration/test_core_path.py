@@ -22,7 +22,16 @@ from testkit import (
     user,
 )
 
-from himari.common import ASK_USER_TOOL_ID, CallId, CallRef, JsonValue, TextBlock, WorkspaceId, thaw
+from himari.common import (
+    ASK_USER_TOOL_ID,
+    CallId,
+    CallRef,
+    JsonValue,
+    TextBlock,
+    UnknownOutcomePolicy,
+    WorkspaceId,
+    thaw,
+)
 from himari.control.api import ControlError, ControlErrorCode, DriveState
 from himari.data.api import (
     AssistantToolCalls,
@@ -45,7 +54,7 @@ from himari.provider.api import (
 )
 from himari.provider.scripted import RawBody, ScriptedAdapter
 from himari.tool.dispatcher import UNKNOWN_OUTCOME_RESULT
-from himari.tool.api import EffectProfile, ToolOutcome, ToolStatus, UnknownOutcomePolicy, WorkspaceRequirement
+from himari.tool.api import EffectProfile, ToolOutcome, ToolStatus, WorkspaceRequirement
 
 
 async def kinds(rt_data: object) -> list[EventKind]:
@@ -458,8 +467,10 @@ def test_raw_tool_result_is_stored_separately_from_model_result() -> None:
 # --- V3-047: uncertain effects are reported to the model, never re-run --------
 
 
-def writer(policy: UnknownOutcomePolicy = UnknownOutcomePolicy.REPORT_TO_MODEL) -> RecordingTool:
-    tool = RecordingTool("fake/write", effect=EffectProfile.UNKNOWN, environment_kind=FAKE,
+def writer(
+    policy: UnknownOutcomePolicy = UnknownOutcomePolicy.REPORT_TO_MODEL, name: str = "write"
+) -> RecordingTool:
+    tool = RecordingTool(f"fake/{name}", effect=EffectProfile.UNKNOWN, environment_kind=FAKE,
                          workspace=WorkspaceRequirement.DEFAULT)
     tool.definition = dataclasses.replace(tool.definition, unknown_outcome=policy)
     return tool
@@ -541,3 +552,94 @@ def test_require_user_policy_still_blocks(crash: bool) -> None:
     assert len(provider.sent) == (0 if crash else 1)  # no Run with an incomplete group
     (record,) = asyncio.run(rt.data.read_tool_executions(SCOPE, result.unknown_calls[0].run_id))
     assert record.model_result is None
+
+
+# --- PR #4 review: REQUIRE_USER isolation (B1) and claim-time policy (B2) ------
+
+
+def test_require_user_uncertainty_halts_the_rest_of_the_group_live() -> None:
+    pay, confirm = writer(UnknownOutcomePolicy.REQUIRE_USER, "pay"), writer(name="confirm")
+    pay.raise_next = RuntimeError("network")
+    rt, _ = runtime([calls(("fake/pay", {}), ("fake/confirm", {}))], env_tools=[pay, confirm])
+    rt.store.activate_environment(SCOPE, FAKE, WorkspaceId("ws"))
+    result = asyncio.run(rt.driver.drive(SCOPE, user("buy")))
+
+    assert result.state is DriveState.RECOVERY_REQUIRED
+    assert confirm.invocations == []  # no further effect after the blocking uncertainty
+    records = asyncio.run(rt.data.read_tool_executions(SCOPE, result.run_ids[0]))
+    assert [r.status for r in records] == [ToolExecutionStatus.EXECUTION_CLAIMED, ToolExecutionStatus.PENDING]
+    assert result.unknown_calls == (records[0].call,)
+
+
+def test_require_user_uncertainty_halts_the_rest_of_the_group_after_restart() -> None:
+    pay, confirm = writer(UnknownOutcomePolicy.REQUIRE_USER, "pay"), writer(name="confirm")
+    pay.crash_next = True
+    rt, _ = runtime([calls(("fake/pay", {}), ("fake/confirm", {}))], env_tools=[pay, confirm])
+    rt.store.activate_environment(SCOPE, FAKE, WorkspaceId("ws"))
+    with pytest.raises(SimulatedCrash):
+        asyncio.run(rt.driver.drive(SCOPE, user("buy")))
+
+    for entry in ("drive", "resume"):
+        rt2, provider2 = runtime([final("never")], store=rt.store, env_tools=[pay, confirm])
+        result = (
+            asyncio.run(rt2.driver.drive(SCOPE, user("again")))
+            if entry == "drive"
+            else asyncio.run(rt2.driver.resume(SCOPE))
+        )
+        assert result.state is DriveState.RECOVERY_REQUIRED, entry
+        assert confirm.invocations == [] and provider2.sent == [], entry
+
+
+@pytest.mark.parametrize(
+    "new_build_tools",
+    [
+        pytest.param([], id="tool-removed"),
+        pytest.param([writer(UnknownOutcomePolicy.REPORT_TO_MODEL, "pay")], id="policy-relaxed"),
+    ],
+)
+def test_claim_time_policy_survives_redeploy(new_build_tools: list[RecordingTool]) -> None:
+    pay = writer(UnknownOutcomePolicy.REQUIRE_USER, "pay")
+    pay.crash_next = True
+    rt, _ = runtime([calls(("fake/pay", {}))], env_tools=[pay])
+    rt.store.activate_environment(SCOPE, FAKE, WorkspaceId("ws"))
+    with pytest.raises(SimulatedCrash):
+        asyncio.run(rt.driver.drive(SCOPE, user("buy")))
+
+    rt2, provider2 = runtime([final("never")], store=rt.store, env_tools=new_build_tools)
+    result = asyncio.run(rt2.driver.drive(SCOPE, user("again")))
+
+    assert result.state is DriveState.RECOVERY_REQUIRED
+    assert provider2.sent == []
+    (record,) = asyncio.run(rt2.data.read_tool_executions(SCOPE, result.unknown_calls[0].run_id))
+    assert record.unknown_outcome is UnknownOutcomePolicy.REQUIRE_USER and record.model_result is None
+
+
+def test_report_to_model_survives_tool_removal() -> None:
+    write = writer()
+    write.crash_next = True
+    rt, _ = runtime([calls(("fake/write", {}))], env_tools=[write])
+    rt.store.activate_environment(SCOPE, FAKE, WorkspaceId("ws"))
+    with pytest.raises(SimulatedCrash):
+        asyncio.run(rt.driver.drive(SCOPE, user("write")))
+    rt2, _ = runtime([final("checked")], store=rt.store)  # Tool no longer registered
+    assert asyncio.run(rt2.driver.drive(SCOPE, user("again"))).state is DriveState.COMPLETED
+
+
+def test_uncertain_record_with_unknown_policy_blocks_cleanly() -> None:
+    """A record whose claim-time policy is unknown (e.g. written before
+    V3-047) is never relaxed into a model report: it blocks, without errors."""
+    write = writer()
+    write.crash_next = True
+    rt, _ = runtime([calls(("fake/write", {}))], env_tools=[write])
+    rt.store.activate_environment(SCOPE, FAKE, WorkspaceId("ws"))
+    with pytest.raises(SimulatedCrash):
+        asyncio.run(rt.driver.drive(SCOPE, user("write")))
+    conv = rt.store._conversations[SCOPE.conversation_id]
+    (ref,) = conv.executions
+    conv.executions[ref] = dataclasses.replace(conv.executions[ref], unknown_outcome=None)
+
+    rt2, provider2 = runtime([final("never")], store=rt.store, env_tools=[write])
+    result = asyncio.run(rt2.driver.drive(SCOPE, user("again")))
+
+    assert result.state is DriveState.RECOVERY_REQUIRED and result.unknown_calls == (ref,)
+    assert provider2.sent == []

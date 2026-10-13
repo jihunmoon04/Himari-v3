@@ -31,6 +31,7 @@ from himari.common import (
     ToolCall,
     ToolId,
     TrustedScope,
+    UnknownOutcomePolicy,
 )
 from himari.data.api import ArtifactMutation, ArtifactStore, BindingAuthority
 
@@ -50,13 +51,6 @@ class EffectProfile(Enum):
 class Completion(Enum):
     IMMEDIATE = "immediate"
     SUSPENDING = "suspending"  # P0: only ask_user; ``run`` is never called
-
-
-class UnknownOutcomePolicy(Enum):
-    """What happens when a claimed call's effect is uncertain (V3-047)."""
-
-    REPORT_TO_MODEL = "report_to_model"  # commit an "outcome unknown" result; the model verifies
-    REQUIRE_USER = "require_user"  # block the Conversation until a user resolves it
 
 
 class ConversationRecord(Enum):
