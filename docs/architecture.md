@@ -45,7 +45,7 @@ Data는 다음과 같이 서로 다른 성격의 정보를 관리한다.
 | Run / Execution Records | **모든 Run의 원본 Provider 요청·응답 전체**를 기본 보존. Tool 실행 원본 기록은 별도로 추적. 직렬화/보안/스트리밍 세부는 미결정 |
 | Conversation Tool Event | Memory 검색 결과 등은 exact ToolResult로, Plan/Note는 간결한 완료 Result로 기록 가능. Tool 실행 원본과 UI 표시는 별도 |
 | 최신 Prompt Snapshot | 압축 문맥과 이후의 exact 입력 데이터를 다음 호출에 사용하기 위한 **최신 상태 1개** |
-| Artifacts | Plan/Note처럼 별도로 조회·수정하는 지속 데이터. **Data의 conversation-scoped Artifact 원본 저장은 권고이며 아직 미확정** |
+| Artifacts | Plan/Note처럼 별도로 조회·수정하는 지속 데이터. **원본은 Data의 conversation-scoped Artifact로 확정**. Schema/Revision/삭제 세부는 미정 |
 | Workspace Registry | 독립적인 Workspace의 식별과 연결에 필요한 메타데이터 |
 | Environment/Binding | Environment 활성화 및 Workspace 접근 관계의 메타데이터 |
 | Model/Reasoning 설정 | 모델·추론 강도 등 다음 요청 구성에 필요한 설정 및 provider가 제공한 사용량/continuation 자료 |
@@ -73,7 +73,7 @@ Provider-specific config  (model/reasoning/continuation; 별도 API 필드)
 - ToolCall과 대응 ToolResult는 하나의 논리적 그룹으로 인접하게 유지한다. 병렬 호출도 `call_id`와 원래 호출 순서로 구성하며, Provider native tool protocol을 위반하지 않는다.
 - **Reasoning token usage**는 실행 메타데이터다. 모델 설정 및 provider가 실제 반환한 opaque continuation과 분리한다. continuation은 임의의 프롬프트 끝 텍스트가 아니라 Provider Adapter가 네이티브 방식으로 다룬다.
 - 압축·컨텍스트 예산은 Prompt 내부 책임이다. Snapshot은 최신 1개를 대체하며 Conversation 원본과 Run raw 기록은 수정하지 않는다.
-- **CurrentState는 저장된 Activation/Binding/Settings, 현재 Plan/Note Artifact, 필요한 Environment 실시간 관측을 합성한 읽기 투영**이다. 자체적인 권한의 원본/Artifact가 아니다.
+- **CurrentState는 저장된 Activation/Binding/Settings, 현재 Plan/Note Artifact, 필요한 Environment 실시간 관측을 합성한 읽기 투영**이다. 자체적인 권한의 원본/Artifact가 아니다. DTO/일관성·기본 Binding 등 구체 계약은 [CurrentState Contract v0.1 — 검토 초안](current-state-contract-v0.1.md)에 정리했다.
 - Provider별 변환과 cache-control, 시스템/사용자 역할 부여, native tool/result 결합, continuation validation은 Provider Adapter 책임이다. **캐시 hit는 기대 효과이지 보장값이 아니다.**
 
 세부 규칙은 [Prompt Composition Contract](prompt-composition.md)에 기록한다.
