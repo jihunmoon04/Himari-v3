@@ -116,3 +116,25 @@ def test_live_tool_round_trip(model: str) -> None:
     for raw in rt.store.raw_request_bodies(SCOPE):
         assert_chat_structure(json.loads(raw)["messages"])
     print(f"\n{model}: runs={len(result.run_ids)} calls={add.calls}")
+
+
+@pytest.mark.parametrize("model", MODELS)
+def test_live_declared_efforts_are_accepted(model: str) -> None:
+    """Keeps KNOWN_CAPABILITIES honest: every declared effort must be accepted."""
+    adapter = OpenRouterAdapter(KEY)
+    efforts = sorted(adapter.describe_capabilities(model).reasoning_efforts)
+    if not efforts:
+        pytest.skip(f"no declared efforts for {model}")
+
+    async def one(effort: str) -> str:
+        rt = build_in_memory_runtime(adapter, model_id=model, reasoning_effort=effort)
+        rt.store.create_conversation(SCOPE)
+        result = await rt.driver.drive(SCOPE, user("What is 17*3? Answer with the number."))
+        return f"{effort}:{result.state.value}:{result.detail}"
+
+    async def sweep() -> list[str]:
+        return list(await asyncio.gather(*(one(e) for e in efforts)))
+
+    outcomes = asyncio.run(sweep())
+    assert all(":completed:" in o for o in outcomes), outcomes
+    print(f"\n{model}: {outcomes}")

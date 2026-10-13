@@ -72,12 +72,22 @@ DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
 REASONING_EFFORTS = frozenset({"max", "xhigh", "high", "medium", "low", "minimal", "none"})
 ACCEPTED_FINISH_REASONS = frozenset({"stop", "tool_calls"})
 
-# Models whose reasoning support was verified live (tests/live). Others get no
-# assumed reasoning capability: a reasoning_effort for them is refused before
-# send rather than silently ignored or downgraded.
+# Only effort values each model was *verified* to accept, by a live sweep
+# (2026-10-13; re-checked by tests/live test_live_declared_efforts_are_accepted).
+# gpt-5-nano answers "none" with HTTP 400, so it is not declared. Models not
+# listed get no assumed reasoning capability: an effort for them is refused
+# before send rather than silently ignored or downgraded.
 KNOWN_CAPABILITIES: Mapping[str, ProviderCapabilities] = {
-    model: ProviderCapabilities(model_id=model, reasoning_efforts=REASONING_EFFORTS, parallel_tool_calls=True)
-    for model in ("openai/gpt-5-nano", "anthropic/claude-haiku-5.5")
+    "openai/gpt-5-nano": ProviderCapabilities(
+        model_id="openai/gpt-5-nano",
+        reasoning_efforts=frozenset({"minimal", "low", "medium", "high", "xhigh", "max"}),
+        parallel_tool_calls=True,
+    ),
+    "anthropic/claude-haiku-5.5": ProviderCapabilities(
+        model_id="anthropic/claude-haiku-5.5",
+        reasoning_efforts=REASONING_EFFORTS,
+        parallel_tool_calls=True,
+    ),
 }
 _TOOL_ID = re.compile(r"^[A-Za-z0-9-]+(?:_[A-Za-z0-9-]+)*(?:/[A-Za-z0-9-]+(?:_[A-Za-z0-9-]+)*)?$")
 
@@ -301,7 +311,17 @@ class OpenRouterAdapter:
     def normalize(self, received: NativeReceived) -> NormalizedModelOutput:
         """Explicit structural validation; every malformed or incomplete
         response becomes ProviderError(INVALID_MODEL_OUTPUT) — never a
-        partial FINAL, never a Tool call."""
+        partial FINAL, never a Tool call, never an untyped exception (the
+        stored response may be re-normalized after a restart)."""
+        try:
+            return self._normalize(received)
+        except ProviderError:
+            raise
+        except (TypeError, ValueError, KeyError, IndexError, AttributeError) as exc:
+            # Last line of defense for shapes the explicit checks missed.
+            raise _invalid(f"unexpected response structure ({type(exc).__name__})") from exc
+
+    def _normalize(self, received: NativeReceived) -> NormalizedModelOutput:
         try:
             doc = json.loads(received.body)
         except ValueError as exc:
@@ -315,8 +335,8 @@ class OpenRouterAdapter:
         if not isinstance(choice, dict):
             raise _invalid("choice is not an object")
         finish = choice.get("finish_reason")
-        if finish not in ACCEPTED_FINISH_REASONS:
-            raise _invalid(f"finish_reason={finish!r} is not a completed turn")
+        if not isinstance(finish, str) or finish not in ACCEPTED_FINISH_REASONS:
+            raise _invalid(f"missing, malformed or unsupported finish_reason={finish!r}")
         if choice.get("error") is not None:
             raise _invalid("choice carries an error")
         message = _field(choice, "message", dict, "choice")
@@ -391,11 +411,16 @@ def _usage(doc: object) -> TokenUsage | None:
     if not isinstance(doc, dict) or not isinstance(doc.get("usage"), dict):
         return None
     usage = doc["usage"]
-    completion = usage.get("completion_tokens_details") or {}
-    prompt = usage.get("prompt_tokens_details") or {}
+    completion = usage.get("completion_tokens_details")
+    prompt = usage.get("prompt_tokens_details")
     return TokenUsage(
-        input_tokens=usage.get("prompt_tokens"),
-        output_tokens=usage.get("completion_tokens"),
-        reasoning_tokens=completion.get("reasoning_tokens") if isinstance(completion, dict) else None,
-        cached_input_tokens=prompt.get("cached_tokens") if isinstance(prompt, dict) else None,
+        input_tokens=_count(usage.get("prompt_tokens")),
+        output_tokens=_count(usage.get("completion_tokens")),
+        reasoning_tokens=_count(completion.get("reasoning_tokens")) if isinstance(completion, dict) else None,
+        cached_input_tokens=_count(prompt.get("cached_tokens")) if isinstance(prompt, dict) else None,
     )
+
+
+def _count(value: object) -> int | None:
+    """Usage is metadata: a malformed count is dropped, never trusted."""
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None

@@ -454,3 +454,77 @@ def test_no_dynamic_state_value_can_close_the_block() -> None:
     assert data["working_directory"] == f"conversations/c{evil}"
     assert data["artifacts"][0]["kind"] == f"note{evil}"
     assert data["environments"][0]["default_binding"]["workspace_id"] == f"ws{evil}"
+
+
+# --- PR #5 re-review 2: finish_reason types, fuzzing, verified capabilities ---
+
+
+@pytest.mark.parametrize("finish", [[], {}, {"unexpected": 1}, 1, True, ["stop"]])
+def test_malformed_finish_reason_is_a_typed_error(finish: Any) -> None:
+    doc = {"choices": [{"finish_reason": finish, "message": {"role": "assistant", "content": "hello"}}]}
+    with pytest.raises(ProviderError) as exc:
+        ADAPTER.normalize(NativeReceived(json.dumps(doc).encode(), "application/json"))
+    assert exc.value.code is ProviderErrorCode.INVALID_MODEL_OUTPUT
+
+
+VALID_TOOL_RESPONSE = {
+    "choices": [{"finish_reason": "tool_calls", "message": {"role": "assistant", "content": "c", "tool_calls": [
+        {"id": "c1", "type": "function", "function": {"name": "echo", "arguments": '{"a":1}'}}]}}],
+    "usage": {"prompt_tokens": 1},
+}
+ODD_VALUES: list[Any] = [[], {}, {"x": 1}, [1], 0, -1, 1.5, True, None, "", "x", "{", "[]"]
+
+
+def _paths(obj: Any, prefix: tuple[Any, ...] = ()) -> list[tuple[Any, ...]]:
+    found = [prefix]
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            found += _paths(v, prefix + (k,))
+    elif isinstance(obj, list):
+        for i, v in enumerate(obj):
+            found += _paths(v, prefix + (i,))
+    return found
+
+
+def test_any_substituted_value_yields_a_result_or_a_typed_error() -> None:
+    """Fuzz: put every odd JSON value at every position of a valid response.
+    normalize must return a result or raise ProviderError — nothing else."""
+    cases = 0
+    for path in _paths(VALID_TOOL_RESPONSE):
+        for value in ODD_VALUES:
+            doc: Any = json.loads(json.dumps(VALID_TOOL_RESPONSE))
+            if path:
+                target = doc
+                for key in path[:-1]:
+                    target = target[key]
+                target[path[-1]] = value
+            else:
+                doc = value
+            try:
+                ADAPTER.normalize(NativeReceived(json.dumps(doc).encode(), "application/json"))
+            except ProviderError:
+                pass
+            cases += 1
+    assert cases > 200
+
+
+@pytest.mark.parametrize("usage", [
+    {"prompt_tokens": "10", "completion_tokens": [1], "completion_tokens_details": {"reasoning_tokens": True}},
+    {"prompt_tokens": -3, "completion_tokens_details": [], "prompt_tokens_details": "x"},
+])
+def test_malformed_usage_counts_are_dropped(usage: dict[str, Any]) -> None:
+    (outcome, _), _ = run_invoke(lambda r: httpx.Response(200, json={**OK_BODY, "usage": usage}))
+    assert isinstance(outcome, NativeReceived) and outcome.usage is not None
+    assert all(v is None or (isinstance(v, int) and v >= 0) for v in (
+        outcome.usage.input_tokens, outcome.usage.output_tokens,
+        outcome.usage.reasoning_tokens, outcome.usage.cached_input_tokens))
+
+
+def test_only_verified_efforts_are_sent() -> None:
+    none_effort = dataclasses.replace(
+        model_input((UserTurn(EventId("e1"), (TextBlock("hi"),)),)),
+        request_options=RequestOptions("openai/gpt-5-nano", reasoning_effort="none"),
+    )
+    with pytest.raises(ProviderError) as exc:  # live sweep: HTTP 400 for this model
+        ADAPTER.prepare_native_request(none_effort)
+    assert exc.value.code is ProviderErrorCode.UNSUPPORTED_CAPABILITY
