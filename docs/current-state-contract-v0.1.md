@@ -128,7 +128,7 @@ Data는 `read_current_state_basis(conversation_scope)`와 동등한 **하나의 
 
 - `environment_instance_id`는 대화 중 활성화된 **구체 인스턴스**의 정체성이다. `kind`는 구현 유형이고, 여러 인스턴스가 같은 `kind`를 가질 수 있다.
 - `binding_id`는 **Environment와 Workspace 사이 접근 관계**의 식별자다. 모델에게 공개해도 비밀 bearer capability가 아니다.
-- **V3-032~034 확정:** 기본 Workspace에서 `inside/run_command`는 OS Sandbox를 요구하고, 현재 Conversation마다 기본 cwd가 있다. 같은 사용자에게 허용된 다른 Conversation 폴더는 별도 경로로 접근 가능하다. `default_working_directory`는 Sandbox 내 논리 경로이며 호스트 실제 root는 공개하지 않는다. 자세한 실행 범위는 [Default Workspace v0.2](default-workspace-files-v0.2.md) 참조.
+- **V3-032~036 확정:** 기본 Workspace Root는 신뢰된 사용자/principal별이며, 현재 Conversation마다 기본 cwd를 갖는다. 같은 사용자에게 허용된 다른 Conversation 폴더 접근이 가능하다. `inside/run_command`는 OS Sandbox에서 실행하고 **네트워크는 기본 차단**한다. `default_working_directory`는 Sandbox 내 논리 경로이며 실제 호스트 Root 및 인증용 principal ID는 Prompt에 공개하지 않는다. 상세: [Default Workspace v0.2](default-workspace-files-v0.2.md), [Sandbox Execution](sandbox-execution-v0.1.md).
 - `binding_state`는 저장된 관계가 active/disabled/revoked 중 어떤 상태인가를 의미. **`connection.status`와 혼동하지 않는다.**
 - **추천:** 기본 Binding 선택은 `(conversation, environment_instance)`당 0~1개로 두고, 반드시 해당 Environment 소유의 활성 Binding을 가리키게 한다. 대화 전역의 한 기본 Workspace를 가정하지 않는다. 해당 스코프 선택은 확정 전이다.
 - `connection`의 값은 `online`, `offline`, `unknown` 또는 명시적 관측 오류를 고려한다. 관측값이 있다면 `observed_at`과 **근거/신선도**를 함께 보고한다. 초깃값 `unknown`은 연결 불가능을 의미하지 않는다.
