@@ -544,6 +544,13 @@ class ConversationLog(Protocol):
         """T9: latest-only CAS replace; returns the new revision."""
         ...
 
+    async def record_compaction_step(self, scope: TrustedScope, run_id: RunId) -> None:
+        """A RECEIVED COMPACTION Run whose summary was handed on to the next
+        call of the same chain, not committed: ``PROJECTED``, snapshot
+        unchanged (its summary stays in the stored response and in the next
+        Run's request). INVALID_STATE_TRANSITION for any other Run."""
+        ...
+
     async def commit_compaction(
         self,
         scope: TrustedScope,

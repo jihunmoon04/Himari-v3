@@ -83,7 +83,9 @@ class Application:
         tools: Iterable[ToolHandler] = (),
         instructions: Sequence[str] | None = None,
     ) -> Application:
-        budget = ContextBudget(context_limit(provider.describe_capabilities(model_id).context_tokens, context_tokens))
+        window = provider.describe_capabilities(model_id).context_tokens
+        # Compaction works toward the budget; only the model's window refuses a Run.
+        budget = ContextBudget(context_limit(window, context_tokens), hard_limit_tokens=window)
         root = Path(os.path.abspath(data_root))
         ensure_private_dir(str(root))
         workspaces = root / "workspaces"

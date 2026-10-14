@@ -531,6 +531,12 @@ class InMemoryData:
         conv.snapshot = PromptSnapshot(revision, schema_version, body, covers_through_sequence, basis)
         return revision
 
+    async def record_compaction_step(self, scope: TrustedScope, run_id: RunId) -> None:
+        run = self._run(self._conv(scope), run_id)
+        if run.record.status is not RunStatus.RECEIVED or run.record.purpose is not RunPurpose.COMPACTION:
+            raise DataError(DataErrorCode.INVALID_STATE_TRANSITION, f"{run_id} is not a received compaction Run")
+        self._set_status(run, RunStatus.PROJECTED)
+
     async def commit_compaction(
         self,
         scope: TrustedScope,

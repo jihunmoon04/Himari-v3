@@ -159,21 +159,30 @@ class UsageMark(DeepFrozen):
 
 @dataclass(frozen=True)
 class ContextBudget(DeepFrozen):
-    """Token budget of one model request (input side).
+    """Token budget of model requests (input side).
 
-    ``limit_tokens``: an estimate above it is never sent. ``compact_at``: at
-    or above this share of the limit the history is compacted before the
-    Run. ``keep_recent``: the exact tail kept after compaction is at most
-    this share (always at least the latest turn)."""
+    ``limit_tokens``: the working budget. At or above ``compact_at`` of it
+    the history is compacted before the Run; the exact tail kept is at most
+    ``keep_recent`` of it (always at least the latest turn); every
+    summarizing request fits within it. ``hard_limit_tokens``: a Run whose
+    estimate is above it is never sent — the model's context window, or
+    the budget itself when the window is unknown (None)."""
 
     limit_tokens: int
     compact_at: float = 0.8
     keep_recent: float = 0.25
     max_summary_chars: int = 24_000
+    hard_limit_tokens: int | None = None
 
     def __post_init__(self) -> None:
         if self.limit_tokens <= 0 or not (0 < self.keep_recent < self.compact_at <= 1):
             raise ValueError("budget needs limit_tokens > 0 and 0 < keep_recent < compact_at <= 1")
+        if self.hard_limit_tokens is not None and self.hard_limit_tokens < self.limit_tokens:
+            raise ValueError("the hard limit cannot be below the budget")
+
+    @property
+    def ceiling_tokens(self) -> int:
+        return self.limit_tokens if self.hard_limit_tokens is None else self.hard_limit_tokens
 
 
 @dataclass(frozen=True)
@@ -188,15 +197,22 @@ class ContextEstimate(DeepFrozen):
 
 @dataclass(frozen=True)
 class CompactionPlan(DeepFrozen):
-    """One summarizing call: ``request`` has no tools and carries the folded
-    history (and the previous summary) as data. Its summary replaces
-    everything up to ``covers_through_sequence``."""
+    """One compaction: a chain of tool-less summarizing calls, one per
+    piece of the folded history (usually one). Call ``i`` gets the summary
+    so far (``previous_summary`` for the first) and piece ``i`` as data;
+    the last call's summary replaces everything up to
+    ``covers_through_sequence``. Pieces are opaque to Control."""
 
-    request: ModelInput
+    pieces: tuple[JsonValue, ...]
     covers_through_sequence: int
     expected_revision: int | None  # the snapshot this plan extends
     folded_parts: int
-    request_tokens: int  # pessimistic estimate; never over the budget's limit
+    previous_summary: str | None
+    request_options: RequestOptions
+    prompt_basis: PromptBasis
+    # Longest summary any call may return, in characters (and estimated
+    # tokens): the room the next call of the chain reserves for it.
+    summary_limit: int
 
 
 @dataclass(frozen=True)
@@ -218,10 +234,11 @@ class CompactionPlanner(Protocol):
     def decide(self, inputs: PromptInputs, model_input: ModelInput, budget: ContextBudget) -> ContextDecision:
         """Estimate ``model_input`` (composed from ``inputs``) and, if it
         reaches ``budget.compact_at``, plan one compaction — None if there is
-        nothing older than the tail to fold, or if not even the oldest part
-        fits a summarizing request within ``budget.limit_tokens``. A plan
-        may fold less than everything before the tail so that its own
-        request fits; another compaction can then continue from it."""
+        nothing older than the tail to fold, or if not even a chain of
+        pieces of the oldest part fits summarizing requests within
+        ``budget.limit_tokens``. A plan may fold less than everything before
+        the tail so that its requests fit; another compaction can then
+        continue from it."""
         ...
 
     def estimate(self, inputs: PromptInputs, model_input: ModelInput) -> ContextEstimate: ...
@@ -230,10 +247,16 @@ class CompactionPlanner(Protocol):
         """Pessimistic size of exactly this request, from its content alone."""
         ...
 
-    def summary_body(self, blocks: Sequence[ContentBlock], budget: ContextBudget) -> JsonValue:
-        """The snapshot body for a compaction output; PromptError
-        (INVALID_SUMMARY) if it is empty, too long or not plain text."""
+    def step_request(self, plan: CompactionPlan, index: int, summary: str | None) -> ModelInput:
+        """The summarizing request for piece ``index``, given the summary so far."""
         ...
+
+    def summary_text(self, blocks: Sequence[ContentBlock], plan: CompactionPlan) -> str:
+        """A compaction output as summary text; PromptError (INVALID_SUMMARY)
+        if it is empty, over ``plan.summary_limit`` or not plain text."""
+        ...
+
+    def snapshot_body(self, summary: str) -> JsonValue: ...
 
     @property
     def snapshot_schema_version(self) -> int: ...
