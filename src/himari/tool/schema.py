@@ -38,7 +38,7 @@ import json
 import os
 import sys
 from collections.abc import Iterator, Mapping
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import unquote
 
 from jsonschema import Draft7Validator, Draft201909Validator, Draft202012Validator
@@ -49,6 +49,9 @@ from referencing.exceptions import Unresolvable
 from referencing.jsonschema import specification_with
 
 from himari.common import JsonValue, thaw
+
+if TYPE_CHECKING:
+    from referencing._core import Resolver  # the type of Registry().resolver_with_root(...)
 
 MAX_SCHEMA_BYTES = 64 * 1024
 MAX_SCHEMA_DEPTH = 64  # JSON nesting (objects and arrays); each nested property schema takes two
@@ -110,26 +113,34 @@ def _check_shape(value: object) -> None:
         stack.extend((child, depth + 1) for child in children)
 
 
-def _subschemas(schema: object, pointer: str = "", *, ref_overrides: bool = False) -> Iterator[tuple[str, object]]:
+def _subschemas(
+    schema: object, pointer: str = "", *, ref_overrides: bool = False, skip: set[str] | None = None
+) -> Iterator[tuple[str, object]]:
     """(JSON pointer, schema) for the schema and every subschema in it.
+
     ``ref_overrides`` (draft-07): next to ``$ref`` every other keyword is
-    ignored, so a schema with ``$ref`` has no subschemas to follow."""
+    ignored when validating, so a schema with ``$ref`` has no subschemas
+    that *apply*. They are still schemas a ``$ref`` may point to (e.g.
+    ``definitions`` next to a root ``$ref``): walk without it to list every
+    location a reference may target. ``skip``: pointers not to enter."""
+    if skip is not None and pointer in skip:
+        return
     yield pointer, schema
     if not isinstance(schema, dict) or (ref_overrides and "$ref" in schema):
         return  # a boolean schema, or a draft-07 reference
     for key in _ONE:
         if isinstance(schema.get(key), (dict, bool)):
-            yield from _subschemas(schema[key], f"{pointer}/{key}", ref_overrides=ref_overrides)
+            yield from _subschemas(schema[key], f"{pointer}/{key}", ref_overrides=ref_overrides, skip=skip)
     for key in _MANY:
         if isinstance(schema.get(key), list):
             for i, sub in enumerate(schema[key]):
-                yield from _subschemas(sub, f"{pointer}/{key}/{i}", ref_overrides=ref_overrides)
+                yield from _subschemas(sub, f"{pointer}/{key}/{i}", ref_overrides=ref_overrides, skip=skip)
     for key in _NAMED:
         if isinstance(schema.get(key), dict):
             for name, sub in schema[key].items():
                 if isinstance(sub, (dict, bool)):  # draft-07 dependencies may also be arrays of names
                     yield from _subschemas(sub, f"{pointer}/{_escape(key)}/{_escape(name)}",
-                                           ref_overrides=ref_overrides)
+                                           ref_overrides=ref_overrides, skip=skip)
 
 
 def check_schema(schema: JsonValue) -> None:
@@ -159,31 +170,50 @@ def _check_schema(schema: JsonValue) -> None:
     resolver = Registry().resolver_with_root(
         specification_with(cls.META_SCHEMA["$schema"]).create_resource(plain)
     )
-    nodes = list(_subschemas(plain, ref_overrides=cls is Draft7Validator))
-    pointers = {pointer for pointer, _ in nodes}
-    objects = {id(node) for _, node in nodes if isinstance(node, dict)}
-    for pointer, node in nodes:
-        if not isinstance(node, dict):
+    # Where a reference may point: every schema location. What is checked:
+    # the schemas that apply from the root, and — following each reference —
+    # the schemas it reaches (draft-07: a definition next to a $ref applies
+    # only through a reference to it). Each location is checked once.
+    referable = list(_subschemas(plain))
+    pointers = {pointer for pointer, _ in referable}
+    pointer_of = {id(node): pointer for pointer, node in referable if isinstance(node, dict)}
+    ref_overrides = cls is Draft7Validator
+    checked: set[str] = set()
+    pending: list[tuple[str, object]] = [("", plain)]
+    while pending:
+        start, start_node = pending.pop()
+        for pointer, node in _subschemas(start_node, start, ref_overrides=ref_overrides, skip=checked):
+            checked.add(pointer)
+            if isinstance(node, dict):
+                pending.extend(_check_node(pointer, node, resolver, pointers, pointer_of))
+
+
+def _check_node(
+    pointer: str, node: dict[str, Any], resolver: Resolver[Any], pointers: set[str], pointer_of: dict[int, str]
+) -> list[tuple[str, object]]:
+    """Checks one schema's $id and references; returns where they lead."""
+    leads: list[tuple[str, object]] = []
+    if "$id" in node and pointer:
+        raise SchemaError(f"#{pointer}: only the root may set $id")
+    for key in _REF_KEYWORDS:
+        if key not in node:
             continue
-        if "$id" in node and pointer:
-            raise SchemaError(f"#{pointer}: only the root may set $id")
-        for key in _REF_KEYWORDS:
-            if key not in node:
-                continue
-            ref = node[key]
-            if not isinstance(ref, str) or not ref.startswith("#"):
-                raise SchemaError(f"#{pointer}: {key} must be a local reference ('#...'), got {ref!r}")
-            try:
-                target = resolver.lookup(ref).contents
-            except Unresolvable:
-                raise SchemaError(f"#{pointer}: {key} {ref!r} does not resolve") from None
-            fragment = unquote(ref[1:])
-            if fragment == "" or fragment.startswith("/"):
-                ok = fragment in pointers
-            else:  # an anchor
-                ok = isinstance(target, dict) and id(target) in objects
-            if not ok:
-                raise SchemaError(f"#{pointer}: {key} {ref!r} does not point to a schema")
+        ref = node[key]
+        if not isinstance(ref, str) or not ref.startswith("#"):
+            raise SchemaError(f"#{pointer}: {key} must be a local reference ('#...'), got {ref!r}")
+        try:
+            target = resolver.lookup(ref).contents
+        except Unresolvable:
+            raise SchemaError(f"#{pointer}: {key} {ref!r} does not resolve") from None
+        fragment = unquote(ref[1:])
+        if fragment == "" or fragment.startswith("/"):
+            found: str | None = fragment if fragment in pointers else None
+        else:  # an anchor
+            found = pointer_of.get(id(target)) if isinstance(target, dict) else None
+        if found is None:
+            raise SchemaError(f"#{pointer}: {key} {ref!r} does not point to a schema")
+        leads.append((found, target))
+    return leads
 
 
 def check_tool_input_schema(schema: JsonValue) -> None:
