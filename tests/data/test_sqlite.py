@@ -216,41 +216,57 @@ def test_a_changed_himari_database_is_refused(tmp_path: Path, change: str, messa
         SqliteStore(path)
 
 
-def v2_database(path: Path) -> None:
-    """A database as schema 2 wrote it, with one Conversation and one Event."""
+_ADDED_IN = {3: "compaction_runs", 4: "external_settings"}
+
+
+def old_database(path: Path, version: int) -> None:
+    """A database as schema ``version`` wrote it, with one Conversation and one Event."""
     store = SqliteStore(path)
     store.create_conversation(SCOPE)
-    asyncio.run(SqliteData(store).append_event(SCOPE, user("from v2")))
+    asyncio.run(SqliteData(store).append_event(SCOPE, user(f"from v{version}")))
     store.close()
-    tamper(path, "DROP TABLE compaction_runs", "PRAGMA user_version=2")
+    tamper(path, *(f"DROP TABLE {table}" for v, table in _ADDED_IN.items() if v > version),
+           f"PRAGMA user_version={version}")
 
 
-def test_a_v2_database_is_upgraded_in_place_and_keeps_its_data(tmp_path: Path) -> None:
+@pytest.mark.parametrize("version", [2, 3])
+def test_an_older_database_is_upgraded_in_place_and_keeps_its_data(tmp_path: Path, version: int) -> None:
     path = tmp_path / "h.db"
-    v2_database(path)
+    old_database(path, version)
     store = SqliteStore(path)
     try:
-        assert store.connection.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 3
-        events = asyncio.run(SqliteData(store).read_events(SCOPE))
-        assert [e.payload.blocks for e in events] == [(TextBlock("from v2"),)]  # type: ignore[union-attr]
+        assert store.connection.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 4
+        data = SqliteData(store)
+        events = asyncio.run(data.read_events(SCOPE))
+        assert [e.payload.blocks for e in events] == [(TextBlock(f"from v{version}"),)]  # type: ignore[union-attr]
+        asyncio.run(data.set_external_setting(SCOPE, "calliope", False))  # the v4 table works
     finally:
         store.close()
-    SqliteStore(path).close()  # and it opens as a plain v3 database afterwards
+    SqliteStore(path).close()  # and it opens as a plain v4 database afterwards
 
 
+@pytest.mark.parametrize("version", [2, 3])
 @pytest.mark.parametrize("change", ["CREATE TABLE extra (x)", "PRAGMA application_id=1", "DROP TABLE artifacts"])
-def test_only_an_exact_v2_database_is_upgraded(tmp_path: Path, change: str) -> None:
+def test_only_an_exact_older_database_is_upgraded(tmp_path: Path, version: int, change: str) -> None:
     path = tmp_path / "h.db"
-    v2_database(path)
+    old_database(path, version)
     tamper(path, change)
     with pytest.raises(StoreSchemaError):
         SqliteStore(path)
     conn = sqlite3.connect(path)
     try:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 2  # refused, never repaired
-        assert "compaction_runs" not in [r[0] for r in conn.execute("SELECT name FROM sqlite_master")]
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == version  # refused, never repaired
+        assert "external_settings" not in [r[0] for r in conn.execute("SELECT name FROM sqlite_master")]
     finally:
         conn.close()
+
+
+def test_a_database_claiming_an_older_version_with_the_current_shape_is_refused(tmp_path: Path) -> None:
+    path = tmp_path / "h.db"
+    SqliteStore(path).close()
+    tamper(path, "PRAGMA user_version=3")
+    with pytest.raises(StoreSchemaError, match="unsupported schema version 3"):
+        SqliteStore(path)
 
 
 @pytest.mark.parametrize("statements", [(), (f"PRAGMA user_version={SCHEMA_VERSION}",),

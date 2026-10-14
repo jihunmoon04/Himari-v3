@@ -1,12 +1,14 @@
 """``himari`` — the terminal client of the local HIMARI Web server (V3-P47).
 
-    himari chat [ID] [--title T]   interactive; /continue /context /compact /rename /id /exit
+    himari chat [ID] [--title T]   interactive; /continue /context /compact /tools /rename /id /exit
     himari list                    your conversations, most recent first
     himari show ID                 a conversation's transcript and state
     himari new [--title T]         create a conversation, print its id
     himari send ID TEXT|-          send one message (``-`` reads stdin) and follow it
     himari continue ID             continue an accepted but unanswered message
     himari compact ID              summarize the earlier messages now (no model answer)
+    himari tools ID [on|off|default SOURCE]
+                                   the MCP servers this conversation uses; turn one on or off
 
 The server must be running (``python -m himari.interfaces.web``); the CLI
 reads the operator secret from ``HIMARI_DATA_ROOT`` (or ``--data-root``)
@@ -260,6 +262,44 @@ class Session:
         return self.report(detail), after
 
 
+TOOLS_USAGE = "usage: /tools [on|off|default SOURCE]"
+_CHOICES = {"on": True, "off": False, "default": None}
+
+
+def tool_source_line(source: dict[str, Any]) -> str:
+    state = "on" if source.get("enabled") else "off"
+    why = "default" if source.get("choice") is None else "this conversation"
+    line = f"{source.get('source')}: {state} ({why}; default {'on' if source.get('default') else 'off'})"
+    if not source.get("available"):
+        line += " — not connected (restart the server after fixing it)"
+    else:
+        tools = source.get("tools") or []
+        line += f" — {len(tools)} tool{'s' if len(tools) != 1 else ''}"
+    return line
+
+
+def tools_command(session: Session, conversation_id: str, words: list[str]) -> int:
+    """No words: list. ``on|off|default SOURCE``: change, then list."""
+    if words:
+        if len(words) != 2 or words[0] not in _CHOICES:
+            session.note(TOOLS_USAGE)
+            return EXIT_USAGE
+        answer = session.client.put(_path(conversation_id, f"/tools/{quote(words[1], safe='')}"),
+                                    {"enabled": _CHOICES[words[0]]})
+    else:
+        answer = session.client.get(_path(conversation_id, "/tools"))
+    sources = answer.get("sources") if isinstance(answer, dict) else None
+    if not sources:
+        session.note("(no MCP servers are configured)")
+        return EXIT_OK
+    enc = session.printer.encoding
+    for source in sources:
+        session.printer.line(safe_line(tool_source_line(source), encoding=enc))
+        for problem in source.get("problems") or []:
+            session.printer.line(f"  - {safe_line(str(problem), encoding=enc)}")
+    return EXIT_OK
+
+
 # --- commands ----------------------------------------------------------------------------------
 
 
@@ -315,8 +355,13 @@ def cmd_compact(session: Session, args: argparse.Namespace) -> int:
     return code
 
 
+def cmd_tools(session: Session, args: argparse.Namespace) -> int:
+    return tools_command(session, args.id, [w for w in (args.choice, args.source) if w is not None])
+
+
 CHAT_HELP = ("/continue  continue an unanswered message\n/context   context size and the latest summary\n"
              "/compact   summarize the earlier messages now\n"
+             "/tools     MCP servers in use; /tools on|off|default SOURCE to change\n"
              "/rename T  rename\n/id        show the id\n/exit      leave")
 
 
@@ -379,6 +424,12 @@ def cmd_chat(session: Session, args: argparse.Namespace, read: Callable[[str], s
         if text == "/continue":
             _, after = session.submit_and_follow(conversation_id, after, None)
             continue
+        if text == "/tools" or text.startswith("/tools "):
+            try:
+                tools_command(session, conversation_id, text.split()[1:])
+            except ServerRefused as error:
+                session.note(f"refused: {error}")
+            continue
         if text.startswith("/") and not text.startswith("//"):
             session.note("unknown command — /help")
             continue
@@ -410,12 +461,16 @@ def parser() -> argparse.ArgumentParser:
     compact.add_argument("id")
     cont = sub.add_parser("continue", help="continue an unanswered message")
     cont.add_argument("id")
+    tools = sub.add_parser("tools", help="the MCP servers a conversation uses")
+    tools.add_argument("id")
+    tools.add_argument("choice", nargs="?", choices=sorted(_CHOICES))
+    tools.add_argument("source", nargs="?")
     return p
 
 
 COMMANDS: dict[str, Callable[[Session, argparse.Namespace], int]] = {
     "chat": cmd_chat, "list": cmd_list, "show": cmd_show, "new": cmd_new, "send": cmd_send, "continue": cmd_continue,
-    "compact": cmd_compact,
+    "compact": cmd_compact, "tools": cmd_tools,
 }
 
 

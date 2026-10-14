@@ -19,10 +19,13 @@ P0 scheduling is sequential in original ordinal order; parallel scheduling
   registry. Without a claim nothing happened, so the exception is FAILED.
 - A handler exception is never shown to the model verbatim (Q-39): the model
   gets a generic message; type and text go to ``raw_result`` only.
-- Unknown tool, arguments failing ``input_schema``, an Environment Tool whose
-  kind is not active in this Conversation (even with no Workspace requirement:
-  catalog exposure is not authorization), or a missing/revoked/mismatched
-  Binding → DENIED result to the model; the handler never runs.
+- Unknown tool, an External Tool whose source is not enabled for this
+  Conversation (``ExternalAccess``, asked again right before the call;
+  V3-P53), arguments failing ``input_schema``, an Environment Tool whose
+  kind is not active in this Conversation (even with no Workspace
+  requirement: catalog exposure is not authorization), or a
+  missing/revoked/mismatched Binding → DENIED result to the model; the
+  handler never runs.
 - ``ask_user`` (suspending) is never run; it stays PENDING.
 """
 
@@ -51,10 +54,12 @@ from himari.data.api import (
     ToolExecutionStatus,
     WorkspaceState,
 )
+from himari.tool.access import NoExternalAccess
 from himari.tool.api import (
     Completion,
     ConversationRecord,
     EffectProfile,
+    ExternalAccess,
     GroupDispatchResult,
     GroupState,
     ToolContext,
@@ -116,11 +121,13 @@ class Dispatcher:
         log: ConversationLog,
         artifacts: ArtifactStore,
         workspaces: WorkspaceState,
+        external_access: ExternalAccess | None = None,  # None: no External source is enabled
     ) -> None:
         self._registry = registry
         self._log = log
         self._artifacts = artifacts
         self._workspaces = workspaces
+        self._external_access = external_access if external_access is not None else NoExternalAccess()
 
     async def dispatch_group(
         self, scope: TrustedScope, run_id: RunId, calls: Sequence[ToolCall]
@@ -155,6 +162,10 @@ class Dispatcher:
             return  # stays PENDING; Control turns this into WAITING_FOR_USER
         record_event = d.conversation_record is ConversationRecord.FULL
         try:
+            if d.external_source is not None and d.external_source not in await self._external_access.enabled_sources(
+                scope
+            ):
+                raise _Denied(f"tool source {d.external_source} is not enabled in this conversation")
             if d.origin is ToolOrigin.EXTERNAL:  # an untrusted schema runs only in a killable child
                 violations = await validate_isolated(record.arguments, d.input_schema)
             else:

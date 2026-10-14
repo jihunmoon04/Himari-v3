@@ -8,7 +8,7 @@ same database file).
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 
 from himari.control.ask_user import AskUserTool
@@ -22,6 +22,7 @@ from himari.prompt.compaction import Compactor
 from himari.prompt.composer import Composer
 from himari.prompt.loader import ContextLoader
 from himari.provider.api import ProviderAdapter
+from himari.tool.access import ConfiguredExternalAccess
 from himari.tool.api import ToolHandler
 from himari.tool.dispatcher import Dispatcher
 from himari.tool.registry import ToolRegistry
@@ -52,6 +53,9 @@ def build_runtime(
     allow_require_user_tools: bool = False,  # keep False in P0 (no resolution API)
     reasoning_effort: str | None = None,
     context_budget: ContextBudget | None = None,  # None: no compaction or size check
+    # External Tool source → enabled by default (V3-P53); a Conversation's own
+    # choice overrides it. None: every registered source, on by default.
+    external_defaults: Mapping[str, bool] | None = None,
 ) -> Runtime:
     store = store if store is not None else InMemoryStore()
     data = SqliteData(store) if isinstance(store, SqliteStore) else InMemoryData(store)
@@ -59,10 +63,15 @@ def build_runtime(
     for env in environments:
         for handler in env.tools():
             registry.register(handler)
-    dispatcher = Dispatcher(registry, data, data, data)
+    sources = registry.external_sources()
+    defaults = dict.fromkeys(sources, True) if external_defaults is None else dict(external_defaults)
+    if not sources <= defaults.keys():
+        raise ValueError(f"no default for the external sources {sorted(sources - defaults.keys())}")
+    access = ConfiguredExternalAccess(defaults, data)
+    dispatcher = Dispatcher(registry, data, data, data, access)
     driver = Driver(
         log=data,
-        loader=ContextLoader(data, data, registry, instructions),
+        loader=ContextLoader(data, data, registry, instructions, access),
         composer=Composer(),
         provider=provider,
         dispatcher=dispatcher,

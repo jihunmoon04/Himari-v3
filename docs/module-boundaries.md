@@ -35,7 +35,8 @@ Composition Root (구현 조립/의존성 주입 + 플러그인 등록)
    ├── Tool         → ToolHandler SPI 소유, Dispatcher → Data.ConversationLog(+ArtifactStore) 커밋
    │                  Scheduler → verified resource conflict metadata, never command-string equality alone
    ├── Internal Tools (memory/plan/note) → Tool SPI, Data.ArtifactStore 읽기
-   ├── External Tool 커넥터 (예: MCP) → Tool SPI(구현해서 제공), 외부 서버
+   ├── External Tool 커넥터 (예: MCP, `tool/mcp/`) → Tool SPI(구현해서 제공), 외부 서버
+   │                  노출·실행 권한은 Tool의 `ExternalAccess` 포트(V3-P53) → Data.ExternalSourceSettings
    ├── Environment  → Tool SPI(구현해서 제공), Data.WorkspaceState
    ├── Provider     → provider-specific SDK/adapter
    └── Data         → persistence backend

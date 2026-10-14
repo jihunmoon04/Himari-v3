@@ -65,10 +65,11 @@ def test_a_namespace_belongs_to_one_origin(external_first: bool) -> None:
         ToolRegistry(tools if external_first else tools[::-1])
 
 
-def test_external_tools_are_always_in_the_catalog() -> None:
+def test_external_tools_need_their_source_enabled_not_an_environment() -> None:
     registry = ToolRegistry([RecordingTool("remote/x", external_source="remote"),
                              RecordingTool("fake/y", environment_kind=FAKE)])
-    assert [d.tool_id for d in registry.catalog(frozenset())] == ["remote/x"]
+    assert [d.tool_id for d in registry.catalog(frozenset())] == []
+    assert [d.tool_id for d in registry.catalog(frozenset(), frozenset({"remote"}))] == ["remote/x"]
 
 
 @pytest.mark.parametrize(

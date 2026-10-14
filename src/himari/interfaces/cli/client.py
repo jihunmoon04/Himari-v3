@@ -92,6 +92,9 @@ class ServerClient:
     def patch(self, path: str, body: dict[str, Any]) -> Any:
         return self._request("PATCH", path, body=body)
 
+    def put(self, path: str, body: dict[str, Any]) -> Any:
+        return self._request("PUT", path, body=body)
+
     def _request(self, method: str, path: str, *, params: dict[str, Any] | None = None,
                  body: dict[str, Any] | None = None) -> Any:
         mutation = method != "GET"

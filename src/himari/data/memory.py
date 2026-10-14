@@ -48,6 +48,7 @@ from himari.data.api import (
     EnvironmentActivation,
     EventKind,
     EventPayload,
+    ExternalSourceSetting,
     InitialActivation,
     PersistedStateBasis,
     ProjectionResult,
@@ -110,6 +111,7 @@ class _Conversation:
     bindings: dict[BindingId, BindingAuthority] = field(default_factory=dict)
     workspace: ConversationWorkspace | None = None
     idempotency: dict[str, EventId] = field(default_factory=dict)
+    external: dict[str, bool] = field(default_factory=dict)  # V3-P53 choices by source
 
 
 class InMemoryStore:
@@ -191,7 +193,8 @@ class InMemoryStore:
 
 
 class InMemoryData:
-    """Implements ConversationLog, ArtifactStore, WorkspaceState, StateQuery."""
+    """Implements ConversationLog, ArtifactStore, WorkspaceState, StateQuery,
+    ConversationCatalog and ExternalSourceSettings."""
 
     def __init__(self, store: InMemoryStore) -> None:
         self._store = store
@@ -657,6 +660,20 @@ class InMemoryData:
     async def rename_conversation(self, scope: TrustedScope, title: str | None) -> None:
         conv = self._conv(scope)
         conv.title = rules.normalize_title(title)
+
+    # --- ExternalSourceSettings ------------------------------------------------
+
+    async def read_external_settings(self, scope: TrustedScope) -> Sequence[ExternalSourceSetting]:
+        return tuple(ExternalSourceSetting(s, on) for s, on in sorted(self._conv(scope).external.items()))
+
+    async def set_external_setting(self, scope: TrustedScope, source: str, enabled: bool | None) -> None:
+        conv = self._conv(scope)
+        after = len(conv.external) + (enabled is not None and source not in conv.external)
+        rules.check_external_setting(source, enabled, after)
+        if enabled is None:
+            conv.external.pop(source, None)
+        else:
+            conv.external[source] = enabled
 
     # --- StateQuery -------------------------------------------------------------
 

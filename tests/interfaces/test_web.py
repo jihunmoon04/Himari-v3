@@ -15,6 +15,8 @@ import pytest
 pytest.importorskip("fastapi")
 
 from fastapi.testclient import TestClient  # noqa: E402
+from mcp_fake import URL as MCP_URL  # noqa: E402
+from mcp_fake import FakeMcpServer  # noqa: E402
 from testkit import calls, final  # noqa: E402
 
 from himari.bootstrap.application import Application  # noqa: E402
@@ -37,13 +39,15 @@ def config(tmp_path: Path) -> WebConfig:
 
 
 class Server:
-    def __init__(self, tmp_path: Path, script: list[ScriptStep], context_tokens: int | None = None) -> None:
+    def __init__(self, tmp_path: Path, script: list[ScriptStep], context_tokens: int | None = None,
+                 mcp: FakeMcpServer | None = None) -> None:
         self.provider = ScriptedAdapter(script)
         self.application: Application | None = None
 
         async def opener() -> Application:
             self.application = await Application.open(tmp_path / "data", self.provider, model_id="scripted-model",
-                                                      sandbox=False, context_tokens=context_tokens)
+                                                      sandbox=False, context_tokens=context_tokens,
+                                                      mcp_transport=None if mcp is None else mcp.transport())
             return self.application
 
         self.client = TestClient(web.create_app(config(tmp_path), opener))
@@ -146,6 +150,21 @@ def test_the_entry_point_refuses_a_non_loopback_bind_before_listening(monkeypatc
         monkeypatch.setenv(name, value)
     assert main([]) == 2
     assert "not a loopback address" in capsys.readouterr().err
+
+
+def test_the_entry_point_refuses_a_bad_mcp_json_before_listening(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                                                  capsys: pytest.CaptureFixture[str]) -> None:
+    import uvicorn
+
+    from himari.interfaces.web.__main__ import main
+
+    monkeypatch.setattr(uvicorn, "run", lambda *a, **k: pytest.fail("a socket would have been opened"))
+    (tmp_path / "mcp.json").write_text('{"servers": {"calliope": {"url": "http://example.com/mcp", "tools": {}}}}')
+    (tmp_path / "mcp.json").chmod(0o600)
+    monkeypatch.setenv("HIMARI_DATA_ROOT", str(tmp_path))
+    monkeypatch.setenv("OPENROUTER_API_KEY", "x")
+    assert main([]) == 2
+    assert "configuration error" in capsys.readouterr().err
 
 
 # --- envelope ------------------------------------------------------------------------------
@@ -388,3 +407,77 @@ def test_compact_now_through_the_api(server: Server) -> None:
     assert context["summary"] == "S-manual <b>" and context["compactions"] == 1
     assert len(server.client.get(f"/api/conversations/{cid}/events").json()["items"]) == 4  # no new answer
     assert server.client.post(f"/api/conversations/{cid}/compact").status_code == 403  # cookie mutation needs Origin
+
+
+# --- MCP servers (V3-P53) ----------------------------------------------------------------------
+
+
+@pytest.fixture
+def mcp_server(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[tuple[Server, FakeMcpServer]]:
+    monkeypatch.setattr(web, "FAILED_LOGIN_DELAY_SECONDS", 0)
+    data = tmp_path / "data"
+    data.mkdir(mode=0o700)
+    (data / "mcp.json").write_text(
+        '{"servers": {"calliope": {"url": "%s", "default": "off", "tools": {"echo": {"effect": "read"}}}}}' % MCP_URL)
+    (data / "mcp.json").chmod(0o600)
+    fake = FakeMcpServer()
+    s = Server(tmp_path, [], mcp=fake)
+    with s.client:
+        yield s, fake
+
+
+def put_source(server: Server, cid: str, source: str, enabled: Any) -> Any:
+    return server.client.put(f"/api/conversations/{cid}/tools/{source}", json={"enabled": enabled},
+                             headers={"origin": ORIGIN})
+
+
+def test_tool_sources_are_listed_and_chosen_per_conversation(mcp_server: tuple[Server, FakeMcpServer]) -> None:
+    server, fake = mcp_server
+    server.sign_in()
+    cid = server.post("/api/conversations").json()["id"]
+    other = server.post("/api/conversations").json()["id"]
+    (source,) = server.client.get(f"/api/conversations/{cid}/tools").json()["sources"]
+    assert source == {"source": "calliope", "enabled": False, "default": False, "choice": None, "available": True,
+                      "tools": ["calliope/echo"], "problems": []}
+
+    queue(server, calls(("calliope/echo", {"text": "off"})), final("one"))
+    server.post(f"/api/conversations/{cid}/messages", {"text": "try"})
+    server.wait_idle(cid)
+    assert fake.calls == []  # off by default: denied
+    assert "calliope/echo" not in [d.tool_id for d in server.provider.prepared_inputs[0].tool_catalog]
+
+    (source,) = put_source(server, cid, "calliope", True).json()["sources"]
+    assert source["enabled"] is True and source["choice"] is True
+    assert server.client.get(f"/api/conversations/{other}/tools").json()["sources"][0]["enabled"] is False
+    queue(server, calls(("calliope/echo", {"text": "on"})), final("two"))
+    server.post(f"/api/conversations/{cid}/messages", {"text": "again"})
+    server.wait_idle(cid)
+    assert fake.calls == [("echo", {"text": "on"})]
+    events = server.client.get(f"/api/conversations/{cid}/events").json()["items"]
+    assert any(e["kind"] == "tool_result" and e["text"] == "echo: on" for e in events)
+
+    (source,) = put_source(server, cid, "calliope", None).json()["sources"]
+    assert source["enabled"] is False and source["choice"] is None
+
+
+def test_tool_source_changes_are_checked(mcp_server: tuple[Server, FakeMcpServer]) -> None:
+    server, _ = mcp_server
+    server.sign_in()
+    cid = server.post("/api/conversations").json()["id"]
+    unknown = put_source(server, cid, "nope", True)
+    assert unknown.status_code == 404 and unknown.json()["error"]["message"] == "No such tool source."
+    assert put_source(server, cid, "calliope", "yes").status_code == 400
+    assert server.client.put(f"/api/conversations/{cid}/tools/calliope", json={"enabled": True}).status_code == 403
+    application = server.application
+    assert application is not None and server.client.portal is not None
+    foreign = server.client.portal.call(application.create_conversation, PrincipalId("someone-else"))
+    for response in (server.client.get(f"/api/conversations/{foreign}/tools"), put_source(server, foreign, "calliope", True),
+                     put_source(server, foreign, "nope", True)):
+        assert response.status_code == 404 and response.json()["error"]["message"] == "No such conversation."
+
+
+def test_without_mcp_json_there_are_no_tool_sources(server: Server) -> None:
+    server.sign_in()
+    cid = server.post("/api/conversations").json()["id"]
+    assert server.client.get(f"/api/conversations/{cid}/tools").json() == {"sources": []}
+    assert put_source(server, cid, "calliope", True).status_code == 404

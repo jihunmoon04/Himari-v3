@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from himari.common import ContentBlock, TextBlock
+from himari.common import ContentBlock, TextBlock, tool_id_problem
 from himari.data.api import (
+    MAX_EXTERNAL_SETTINGS,
     MAX_LIST_LIMIT,
     MAX_TITLE_CHARS,
     PREVIEW_CHARS,
@@ -35,6 +36,16 @@ def check_activations(activations: Sequence[InitialActivation]) -> None:
     kinds = [a.environment_kind for a in activations]
     if len(set(kinds)) != len(kinds):
         raise DataError(DataErrorCode.INVALID_ARGUMENT, "one activation per Environment kind (P0)")
+
+
+def check_external_setting(source: object, enabled: object, count_after: int) -> None:
+    """A source is one Tool id segment: the namespace of its Tools' ids."""
+    if not isinstance(source, str) or "/" in source or tool_id_problem(source) is not None:
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, "an external source is one Tool id segment")
+    if enabled is not None and not isinstance(enabled, bool):
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, "enabled must be true, false or null")
+    if count_after > MAX_EXTERNAL_SETTINGS:
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, f"at most {MAX_EXTERNAL_SETTINGS} external source settings")
 
 
 def preview(blocks: Sequence[ContentBlock]) -> str:

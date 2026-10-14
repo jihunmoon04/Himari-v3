@@ -142,7 +142,7 @@ EnvironmentPlugin ── tools() 제공 · execute 시 Data.WorkspaceState 재�
 | **PROVIDER-01** | InvokePreparedRequest / **Provider** | 각 Provider Adapter → Control | PROVIDER-02가 만들고 DATA-02가 보존한 native request | 실제 LLM 호출 1회, raw response 또는 typed 실패 | Scripted·OpenRouter 구현 |
 | **PROVIDER-02** | PrepareNativeRequest / **Provider** | 각 Provider Adapter → Provider.invoke 경계 | Prompt 중립 입력 + Tool 표면 + continuation | provider-native messages/tools/role/reasoning | Scripted·OpenRouter wire-exact 구현 |
 | **PROVIDER-03** | NormalizeNativeResponse / **Provider** | Provider Adapter → Control/Data projection | 실제 raw native response | **FINAL** / **TOOL_CALLS**(질문은 `ask_user`) 또는 typed error | P0 구현(`provider/api.py`, `provider/openrouter.py`) |
-| **TOOL-01** | CatalogTools / **Tool** | Tool Registry → Prompt, Control | 등록된 ToolHandler (Internal + `EnvironmentPlugin.tools()` + `ask_user`) + Policy | 모델 노출 가능한 도구 정의 | P0 Registry 구현 |
+| **TOOL-01** | CatalogTools / **Tool** | Tool Registry → Prompt, Control | 등록된 ToolHandler (Internal + `EnvironmentPlugin.tools()` + External + `ask_user`) + Policy(활성 Environment 종류, `ExternalAccess`가 켠 External 출처) | 모델 노출 가능한 도구 정의 | P0 Registry 구현 |
 | **TOOL-02** | DispatchToolCalls / **Tool** | Tool Dispatcher → Control | Run의 호출 그룹 + 각 Tool 정의/Binding | `call_id`별 ToolOutcome을 DATA-08로 커밋, Model ToolResult | P0 Dispatcher 구현 |
 | **TOOL-03** | ScheduleConflicts / **Tool** | Tool Scheduler → Tool Dispatcher | verified resource identity & effect metadata | 독립 실행 병렬·충돌 직렬화 | 병렬 원칙 확정, 정책 미정 |
 | **ENV-01** | ObserveBindings / **Environment** | Environment 구현 → Prompt | 실제 연결·가용성 관측, Data Binding | online/offline/unknown 등 시점 표시 | PROPOSED |
@@ -161,6 +161,7 @@ EnvironmentPlugin ── tools() 제공 · execute 시 Data.WorkspaceState 재�
 | **ENV-04** | SandboxedCommandExecution / **Environment** | Inside Sandbox Backend → Tool | authorized principal root + current Workspace Binding + execution policy | bounded command exit, output, failure; **no unsandboxed fallback** | sandbox requirement CONFIRMED, DTO PROPOSED |
 | **DATA-11** | ResolveConversationWorkingDirectory / **Data·WorkspaceState** | Data → Environment, Prompt | Data Conversation ↔ user Workspace mapping | per-conversation default cwd, user-authorized cross-folder scope | directory behavior CONFIRMED, mapping PROPOSED |
 | **DATA-12** | ConversationCatalog / **Data·ConversationCatalog** | Data → Web/CLI (조립된 Application 경유) | Data Conversation 소유·제목·생성 시각 + Event 요약 | T0 대화 생성(초기 Environment 활성화와 원자적), 본인 대화 목록(최근 활동순)·조회·제목 변경 | P0 코드 구현 (V3-P43) |
+| **DATA-13** | ExternalSourceSettings / **Data·ExternalSourceSettings** | Data → `ExternalAccess`(Tool), Web/CLI (Application 경유) | Data 대화별 External Tool 출처 선택(출처 → 켬/끔) | 운영자 기본값과 다른 선택만 저장·조회·삭제. 기본값은 모름 | P0 코드 구현 (V3-P53, SQLite v4) |
 | **TOOL-05** | RunCommandTool / **Environment(Inside)** | Inside가 제공하는 ToolHandler → Tool Dispatcher | ENV-04 execution result, DATA-11 cwd mapping | command request, bounded canonical ToolResult | initial support CONFIRMED, schema PROPOSED |
 | **ENV-05** | SandboxCapabilityActivation / **Environment** | Sandbox validation/self-test → Environment startup/Tool | host capability + validated sandbox policy generation | **isolated-only network enforcement** status; refuse if unavailable | isolated-only profile CONFIRMED (V3-037); spec in [Sandbox Implementation v0.2](sandbox-implementation-v0.2.md), implementation PROPOSED |
 | **TOOL-06** | WebSearch (future) / **Tool** | trusted Web Search adapter → Control/Prompt | external retrieved content, explicitly untrusted | bounded Web Search observations without Sandbox egress grant | OPTIONAL FUTURE |
@@ -234,6 +235,7 @@ EnvironmentPlugin ── tools() 제공 · execute 시 Data.WorkspaceState 재�
 | `ArtifactStore` | DATA-04 (Plan/Note 읽기·revision) | Prompt loader, Internal ToolHandler(읽기) |
 | `WorkspaceState` | DATA-07/11, FILE-02 (Registry·Binding·cwd·FileMetadata) | Environment, Prompt loader |
 | `StateQuery` | DATA-06 (CurrentStateBasis 합성 일관 조회, 읽기 전용) | Prompt loader |
+| `ExternalSourceSettings` | DATA-13 (대화별 External Tool 출처 선택, V3-P53) | `ExternalAccess`(Prompt loader·Dispatcher), Application |
 | `ControlState` | DATA-09/10 (**P2**) | Control |
 
 하나의 백엔드·트랜잭션을 공유해도 된다(예: DATA-08은 ConversationLog와 ArtifactStore 테이블을 한 트랜잭션으로 묶음). **V3-038의 "공개 계약 변경" 판정은 sub-port 단위**로 한다.
@@ -368,6 +370,7 @@ class ToolOutcome:
 
 - 등록 경로는 네 가지다: Internal Tool(Memory/Plan/Note), `EnvironmentPlugin.tools()`, External Tool(HIMARI 밖 서버, 예: MCP — `external_source`, V3-P52), Control의 `ask_user`.
 - `completion = suspending`인 Tool(P0에서는 `ask_user`만)은 handler를 실행하지 않고 call을 `PENDING`으로 둔 채 Control에 대기를 알린다.
+- **External Tool 노출과 실행 권한(V3-P53):** External Tool은 `ExternalAccess.enabled_sources(scope)`가 켠 출처의 것만 catalog에 보이고, Dispatcher는 실행 직전에 같은 질문을 다시 해서 꺼진 출처의 호출을 `DENIED`로 끝낸다(노출은 권한이 아니다). P0 구현은 운영자 설정(`mcp.json`)의 출처별 기본값 위에 대화별 선택(DATA-13)을 얹는다.
 - **Environment가 제공한 Tool과 External Tool** 중 `effect_profile`이 `Read`가 아닌 것은 Dispatcher가 handler 호출 전에 `EXECUTION_CLAIMED`를 영속한다(V3-045, V3-P52). Internal Tool은 효과가 ToolOutcome뿐이고 결과와 원자 커밋되므로 claim하지 않는다([Data v0.2 §6](data-contract-v0.2.md)). Tool 구현은 이를 알 필요가 없다.
 - `ToolContext`는 신뢰된 scope, 해석된 Binding, 읽기용 Data sub-port 등 **필요한 것만** 담는다. 쓰기 커밋은 Dispatcher가 DATA-08로 한다.
 

@@ -676,6 +676,56 @@ textarea {
   text-align: left;
 }
 
+.chat-menu-tools {
+  border-top: 1px solid var(--border-subtle);
+  padding: var(--space-2) 0;
+}
+
+.chat-menu-tools-heading {
+  margin: 0 0 var(--space-1);
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.chat-menu-tools-list {
+  display: grid;
+  gap: var(--space-1);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.chat-menu-tool {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: var(--space-2);
+  align-items: center;
+  min-height: 32px;
+  font-size: 13px;
+}
+
+.chat-menu-tool input {
+  margin: 0;
+}
+
+.chat-menu-tool-name {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.chat-menu-tool-meta {
+  display: block;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.chat-menu-tool .link-button {
+  font-size: 12px;
+}
+
 /* Every main surface owns its own scrolling; the shell itself never
  * scrolls, so the composer cannot be pushed below the viewport. */
 .surface {
