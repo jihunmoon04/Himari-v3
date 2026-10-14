@@ -243,6 +243,12 @@ class CompactionPlanner(Protocol):
 
     def estimate(self, inputs: PromptInputs, model_input: ModelInput) -> ContextEstimate: ...
 
+    def plan_now(self, inputs: PromptInputs, model_input: ModelInput, budget: ContextBudget) -> CompactionPlan | None:
+        """Like ``decide`` but whatever the size (a manual compaction): None
+        only if there is nothing older than the latest part, or it cannot fit
+        summarizing requests within the budget."""
+        ...
+
     def request_size(self, model_input: ModelInput) -> int:
         """Pessimistic size of exactly this request, from its content alone."""
         ...

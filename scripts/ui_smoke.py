@@ -5,7 +5,8 @@ provider (a file write, an ask_user question, then a final answer that
 contains hostile markup), drives it with headless Chromium and checks:
 sign-in (wrong and right token), new chat, the tool row, the question
 panel, the answer, safe rich text (no script execution, no javascript:
-link), the context size in the conversation menu, rename, reload keeping
+link), the context size in the conversation menu, "Compact now" and its
+divider, rename, reload keeping
 the HttpOnly session, the narrow layout and sign-out. A second server with
 a small context budget compacts a conversation and checks the timeline
 divider and its summary.
@@ -47,6 +48,7 @@ def scripted() -> ScriptedAdapter:
         NormalizedToolCalls((ToolCall(CallId("c0"), 0, ToolId("inside/write_file"), {"path": "plan.txt", "content": "draft"}),)),
         NormalizedToolCalls((ToolCall(CallId("c0"), 0, ASK_USER_TOOL_ID, {"question": "Which **city**?"}),)),
         NormalizedFinal((TextBlock(HOSTILE),)),
+        NormalizedFinal((TextBlock("Manual summary: a trip to Seoul."),)),  # "Compact now"
     ])
 
 
@@ -102,6 +104,14 @@ def run(base: str, token: str, shots: str | None) -> list[str]:
         page.click("#chat-menu-toggle")
         expect(page.locator("#chat-menu-context")).to_contain_text("of 128k tokens · summarizes at 102k")
         expect(page.locator(".context-divider")).to_have_count(0)  # nothing compacted yet
+        page.click("#chat-menu-compact")
+        expect(page.locator("#status-bar")).to_have_text(
+            "Compacted: earlier messages now reach HIMARI as a summary", timeout=10000)
+        expect(page.locator(".context-divider")).to_have_count(1, timeout=10000)
+        page.locator(".context-divider summary").click()
+        expect(page.locator(".context-divider-text")).to_have_text("Manual summary: a trip to Seoul.")
+        page.click("#chat-menu-toggle")
+        expect(page.locator("#chat-menu-context")).to_contain_text("of 128k tokens")
         page.click("#chat-menu-toggle")
         page.once("dialog", lambda d: d.accept("Seoul trip"))
         page.click("#chat-menu-toggle")

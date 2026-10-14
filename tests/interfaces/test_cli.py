@@ -190,6 +190,9 @@ class Gated:
         await asyncio.to_thread(self.release.wait, 10)
         return DriveResult(DriveState.COMPLETED)
 
+    async def compact(self, scope: TrustedScope) -> DriveResult:
+        return await self.resume(scope)
+
 
 def test_busy_and_foreign_conversations_are_refused(harness: Harness) -> None:
     cid = harness.run("new")[1].strip()
@@ -463,3 +466,28 @@ def test_the_context_line_names_the_model_limit_when_it_differs() -> None:
     assert cli.context_line({**base, "hard_limit_tokens": 200_000}) == (
         "context: about 1,234 of 200,000 tokens; summarizes at 160,000")
     assert cli.context_line({**base, "hard_limit_tokens": 400_000}).endswith("; model limit 400,000")
+
+
+def test_compact_now_from_the_cli(harness: Harness) -> None:
+    cid = harness.run("new")[1].strip()
+    harness.queue(final("a1"), final("a2"), final("S-manual"))
+    harness.run("send", cid, "q1")
+    harness.run("send", cid, "q2")
+    code, out, err = harness.run("compact", cid)
+    assert code == 0 and out == "" and "(compacted: earlier messages now reach HIMARI as a summary)" in err
+    assert "compacted 1 time" in err
+    code, _, err = harness.run("compact", "conv_404")
+    assert code == cli.EXIT_FAILED and "refused" in err
+
+    harness.queue(final("a3"), final("S-again"))
+    out_buffer, err_buffer = io.StringIO(), io.StringIO()
+    session = cli.Session(harness.client(), cli.Printer(out_buffer), err_buffer, sleep=lambda s: None)
+    lines = iter(["/compact", "q3", "/compact", "/exit"])  # only the latest answer is left at first
+    assert cli.cmd_chat(session, cli.parser().parse_args(["chat", cid]), read=lambda prompt: next(lines)) == 0
+    assert "(nothing to compact yet)" in err_buffer.getvalue() and "compacted 2 times" in err_buffer.getvalue()
+
+
+def test_compact_with_nothing_to_compact(harness: Harness) -> None:
+    cid = harness.run("new")[1].strip()
+    code, _, err = harness.run("compact", cid)
+    assert code == 0 and "(nothing to compact yet)" in err

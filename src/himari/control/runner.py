@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from datetime import UTC, datetime
 
 from himari.common import ConversationId, PrincipalId, TrustedScope
-from himari.control.api import ControlError, ControlErrorCode, ConversationDriver, JobStatus
+from himari.control.api import ControlError, ControlErrorCode, ConversationDriver, DriveResult, JobStatus
 from himari.data.api import DataError, UserMessage
 
 log = logging.getLogger(__name__)
@@ -43,16 +44,27 @@ class BackgroundRunner:
             await self._driver.accept(scope, message)  # durable before anything is reported
             if self._running_in(scope.conversation_id):  # cannot happen: accept holds the driver lock
                 raise ControlError(ControlErrorCode.BUSY, scope.conversation_id)
+        return self._start(scope, self._driver.resume, "drive")
+
+    async def submit_compaction(self, scope: TrustedScope) -> JobStatus:
+        if self._running_in(scope.conversation_id):
+            raise ControlError(ControlErrorCode.BUSY, scope.conversation_id)
+        return self._start(scope, self._driver.compact, "compact")
+
+    def _start(self, scope: TrustedScope, job: Callable[[TrustedScope], Awaitable[DriveResult]],
+               name: str) -> JobStatus:
+        key = self._key(scope)
         previous = self._status.get(key, JobStatus(running=False))
         status = JobStatus(running=True, generation=previous.generation + 1, started_at=datetime.now(UTC))
         self._status[key] = status
-        self._tasks[key] = asyncio.create_task(self._run(key, scope), name=f"drive:{scope.conversation_id}")
+        self._tasks[key] = asyncio.create_task(self._run(key, scope, job), name=f"{name}:{scope.conversation_id}")
         return status
 
-    async def _run(self, key: _Key, scope: TrustedScope) -> None:
+    async def _run(self, key: _Key, scope: TrustedScope,
+                   job: Callable[[TrustedScope], Awaitable[DriveResult]]) -> None:
         current = self._status[key]
         try:
-            result = await self._driver.resume(scope)
+            result = await job(scope)
         except asyncio.CancelledError:
             self._status[key] = replace(current, running=False, error="cancelled", finished_at=datetime.now(UTC))
             raise
