@@ -17,6 +17,8 @@ from himari.data.memory import InMemoryData, InMemoryStore
 from himari.data.sqlite import SqliteData, SqliteStore
 from himari.environment.api import EnvironmentPlugin
 from himari.prompt.api import RequestOptions
+from himari.prompt.api import ContextBudget
+from himari.prompt.compaction import Compactor
 from himari.prompt.composer import Composer
 from himari.prompt.loader import ContextLoader
 from himari.provider.api import ProviderAdapter
@@ -49,6 +51,7 @@ def build_runtime(
     max_runs_per_drive: int = 16,
     allow_require_user_tools: bool = False,  # keep False in P0 (no resolution API)
     reasoning_effort: str | None = None,
+    context_budget: ContextBudget | None = None,  # None: no compaction or size check
 ) -> Runtime:
     store = store if store is not None else InMemoryStore()
     data = SqliteData(store) if isinstance(store, SqliteStore) else InMemoryData(store)
@@ -65,6 +68,8 @@ def build_runtime(
         dispatcher=dispatcher,
         request_options=RequestOptions(model_id=model_id, reasoning_effort=reasoning_effort),
         max_runs_per_drive=max_runs_per_drive,
+        planner=Compactor() if context_budget is not None else None,
+        budget=context_budget,
     )
     return Runtime(store=store, data=data, registry=registry, driver=driver)
 

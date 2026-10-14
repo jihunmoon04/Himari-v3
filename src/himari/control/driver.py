@@ -4,18 +4,31 @@ The per-Conversation ``asyncio.Lock`` only prevents two drivers inside this
 live process. Crash duplication is prevented by Data's persisted marks
 (``mark_dispatch`` before send, Dispatcher claims before effects) and by
 ``recover_interrupted`` at the start of every drive (V3-045).
+
+Context budget (PROMPT-04): with a ``ContextBudget``, every Run's input is
+estimated first. At ``compact_at`` the older history is summarized by one
+tool-less COMPACTION Run (raw request/response kept like any Run) and the
+summary is committed as the latest snapshot; the input is then composed
+again. A summarizing request is itself never sent over ``limit_tokens``;
+when the whole prefix does not fit one, it is folded in several steps
+(at most ``MAX_COMPACTIONS_PER_RUN`` before a Run). If compaction fails,
+the Run still goes ahead when its input fits ``limit_tokens``; an input
+estimated over the limit is never sent (REQUEST_REJECTED).
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 from collections.abc import AsyncIterator
 
 from himari.common import ASK_USER_TOOL_ID, CallRef, ConversationId, RunId, TrustedScope
 from himari.control.api import ControlError, ControlErrorCode, DriveResult, DriveState
 from himari.data.api import (
     AssistantFinal,
+    DataError,
+    DataErrorCode,
     ConversationEvent,
     AssistantToolCalls,
     CompletedGroupRef,
@@ -28,16 +41,22 @@ from himari.data.api import (
     RawUncertain,
     RecoveryReport,
     RunPreparation,
+    RunPurpose,
     ToolExecutionStatus,
     ToolResultRecord,
     TriggerRef,
     UserMessage,
 )
 from himari.prompt.api import (
+    CompactionPlan,
+    CompactionPlanner,
+    ContextBudget,
+    ModelInput,
     PromptComposer,
     PromptContextLoader,
     PromptError,
     PromptErrorCode,
+    PromptInputs,
     RequestOptions,
 )
 from himari.provider.api import (
@@ -52,6 +71,9 @@ from himari.provider.api import (
 from himari.tool.api import GroupState, ToolDispatcher
 
 
+MAX_COMPACTIONS_PER_RUN = 4
+
+
 class Driver:
     def __init__(
         self,
@@ -63,14 +85,20 @@ class Driver:
         request_options: RequestOptions,
         *,
         max_runs_per_drive: int = 16,
+        planner: CompactionPlanner | None = None,
+        budget: ContextBudget | None = None,
     ) -> None:
+        if (planner is None) != (budget is None):
+            raise ValueError("a context budget needs a compaction planner and vice versa")
         self._log = log
         self._loader = loader
         self._composer = composer
         self._provider = provider
         self._dispatcher = dispatcher
-        self._options = request_options
+        self._options = dataclasses.replace(request_options, provider_key=provider.provider_key)
         self._max_runs = max_runs_per_drive
+        self._planner = planner
+        self._budget = budget
         self._locks: dict[ConversationId, asyncio.Lock] = {}
 
     async def drive(self, scope: TrustedScope, message: UserMessage) -> DriveResult:
@@ -222,6 +250,7 @@ class Driver:
         self, scope: TrustedScope, triggers: tuple[TriggerRef, ...], recovery: RecoveryReport
     ) -> DriveResult:
         run_ids: list[RunId] = []
+        compactions: list[RunId] = []
 
         def result(
             state: DriveState,
@@ -239,12 +268,14 @@ class Driver:
                 unknown_calls=unknown_calls,
                 recovery=recovery,
                 detail=detail,
+                compaction_run_ids=tuple(compactions),
             )
 
         for _ in range(self._max_runs):
             try:
                 inputs = await self._loader.load(scope, triggers, self._options)
                 model_input = self._composer.compose(inputs)
+                model_input, refusal = await self._fit_budget(scope, triggers, inputs, model_input, compactions)
             except PromptError as exc:
                 state = (
                     DriveState.RECOVERY_REQUIRED
@@ -252,6 +283,8 @@ class Driver:
                     else DriveState.REQUEST_REJECTED
                 )
                 return result(state, detail=str(exc))
+            if refusal is not None:
+                return result(DriveState.REQUEST_REJECTED, detail=refusal)
             try:
                 prepared = self._provider.prepare_native_request(model_input)
             except ProviderError as exc:
@@ -298,6 +331,98 @@ class Driver:
             triggers = (CompletedGroupRef(run_id),)
 
         return result(DriveState.RUN_LIMIT_REACHED)
+
+    async def _fit_budget(
+        self,
+        scope: TrustedScope,
+        triggers: tuple[TriggerRef, ...],
+        inputs: PromptInputs,
+        model_input: ModelInput,
+        compactions: list[RunId],
+    ) -> tuple[ModelInput, str | None]:
+        """The input to send (compacted at most once), or a refusal."""
+        if self._planner is None or self._budget is None:
+            return model_input, None
+        decision = self._planner.decide(inputs, model_input, self._budget)
+        failure = None
+        for _ in range(MAX_COMPACTIONS_PER_RUN):
+            if decision.compaction is None:
+                break
+            run_id, failure = await self._compact(scope, decision.compaction, self._planner, self._budget)
+            if run_id is not None:
+                compactions.append(run_id)
+            if failure is not None:
+                break
+            inputs = await self._loader.load(scope, triggers, self._options)
+            model_input = self._composer.compose(inputs)
+            decision = self._planner.decide(inputs, model_input, self._budget)
+        estimate = decision.estimate
+        if estimate.tokens > self._budget.limit_tokens:
+            detail = f"context_budget_exceeded: about {estimate.tokens} tokens > {self._budget.limit_tokens}"
+            if failure is not None:
+                detail += f" (compaction failed: {failure})"
+            elif decision.compaction is None:
+                detail += " (no compaction fits within the limit)"
+            return model_input, detail
+        return model_input, None
+
+    async def _compact(
+        self, scope: TrustedScope, plan: CompactionPlan, planner: CompactionPlanner, budget: ContextBudget
+    ) -> tuple[RunId | None, str | None]:
+        """One summarizing call, recorded as a COMPACTION Run. Returns its
+        Run (if one was prepared) and a failure, or None on success."""
+        size = max(plan.request_tokens, planner.request_size(plan.request))  # re-measured, not just trusted
+        if size > budget.limit_tokens:
+            return None, f"compaction request of about {size} tokens exceeds the limit"
+        try:
+            prepared = self._provider.prepare_native_request(plan.request)
+        except ProviderError as exc:
+            return None, str(exc)
+        run_id = await self._log.prepare_run(
+            scope,
+            RunPreparation(
+                raw_request_body=prepared.body,
+                raw_content_type=prepared.content_type,
+                raw_representation=prepared.raw_representation,
+                trigger_refs=(),
+                prompt_basis=plan.request.prompt_basis,
+                provider_key=self._provider.provider_key,
+                model_id=self._options.model_id,
+                purpose=RunPurpose.COMPACTION,
+            ),
+        )
+        await self._log.mark_dispatch(scope, run_id)
+        try:
+            outcome = await self._provider.invoke_prepared(prepared)
+        except Exception as exc:  # noqa: BLE001 — adapter error after send began
+            outcome = NativeUncertain(type(exc).__name__)
+        await self._log.record_raw_outcome(scope, run_id, _raw(outcome))
+        if not isinstance(outcome, NativeReceived):
+            return run_id, outcome.error_code  # no effects to reconcile: the next Run may try again
+        try:
+            normalized = self._provider.normalize(outcome)
+            if not isinstance(normalized, NormalizedFinal):
+                raise PromptError(PromptErrorCode.INVALID_SUMMARY, "the summary call returned tool calls")
+            body = planner.summary_body(normalized.blocks, budget)
+        except (ProviderError, PromptError) as exc:
+            await self._log.record_projection_failure(scope, run_id, exc.code.value)
+            return run_id, str(exc)
+        try:
+            await self._log.commit_compaction(
+                scope,
+                run_id,
+                expected_revision=plan.expected_revision,
+                schema_version=planner.snapshot_schema_version,
+                body=body,
+                covers_through_sequence=plan.covers_through_sequence,
+                basis=plan.request.prompt_basis,
+            )
+        except DataError as exc:
+            if exc.code not in (DataErrorCode.VERSION_CONFLICT, DataErrorCode.STALE_BASIS):
+                raise
+            await self._log.record_projection_failure(scope, run_id, exc.code.value)
+            return run_id, str(exc)
+        return run_id, None
 
 
 def _raw(outcome: NativeReceived | NativeNoResponse | NativeUncertain) -> RawRunOutcome:

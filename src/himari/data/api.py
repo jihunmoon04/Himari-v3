@@ -128,6 +128,15 @@ class RunStatus(Enum):
     ABANDONED_NOT_SENT = "abandoned_not_sent"
 
 
+class RunPurpose(Enum):
+    """Why a Run called the Provider. A TURN Run's output becomes a
+    Conversation Event; a COMPACTION Run's output becomes only the summary
+    in the latest PromptSnapshot (``commit_compaction``), never an Event."""
+
+    TURN = "turn"
+    COMPACTION = "compaction"
+
+
 @dataclass(frozen=True)
 class EventRef(DeepFrozen):
     event_id: EventId
@@ -149,6 +158,9 @@ class PromptBasis(DeepFrozen):
     state_revision: int
     snapshot_revision: int | None = None
     artifact_revisions: Mapping[ArtifactId, int] = field(default_factory=dict)
+    # Opaque digest of what the input was composed under besides history and
+    # state (model, instructions, Tool catalog); set by Prompt (V3-P48).
+    context_key: str | None = None
 
 
 @dataclass(frozen=True)
@@ -162,6 +174,7 @@ class RunPreparation(DeepFrozen):
     prompt_basis: PromptBasis
     provider_key: str
     model_id: str
+    purpose: RunPurpose = RunPurpose.TURN
 
 
 @dataclass(frozen=True)
@@ -205,6 +218,7 @@ class RunRecord(DeepFrozen):
     usage: TokenUsage | None = None
     error_code: str | None = None
     continuation: ProviderContinuation | None = None  # set at projection (V3-049)
+    purpose: RunPurpose = RunPurpose.TURN
 
 
 # --- Tool executions (Data v0.2 §6) ----------------------------------------
@@ -299,6 +313,10 @@ class RecoveryReport(DeepFrozen):
     # Reported, not changed: the response is stored but not yet projected.
     # Control must project these (no new Provider call) before any new Run.
     runs_received_unprojected: tuple[RunId, ...] = ()
+    # RECEIVED COMPACTION Runs whose summary was never committed: marked
+    # PROJECTION_FAILED. Their basis may be stale, so the next Run compacts
+    # again if it still has to; the stored response stays on the Run.
+    compactions_discarded: tuple[RunId, ...] = ()
 
 
 # --- Prompt snapshot (Data v0.2 §7) ----------------------------------------
@@ -436,7 +454,7 @@ class ConversationLog(Protocol):
     ) -> ProjectionResult:
         """T5: assistant Event + every pending ToolExecution (+ the turn's
         opaque reasoning continuation, stamped with this Run's provider_key
-        and model_id), atomically."""
+        and model_id), atomically. Only a TURN Run can be projected."""
         ...
 
     async def record_projection_failure(
@@ -524,6 +542,25 @@ class ConversationLog(Protocol):
         basis: PromptBasis,
     ) -> int:
         """T9: latest-only CAS replace; returns the new revision."""
+        ...
+
+    async def commit_compaction(
+        self,
+        scope: TrustedScope,
+        run_id: RunId,
+        *,
+        expected_revision: int | None,
+        schema_version: int,
+        body: JsonValue,
+        covers_through_sequence: int,
+        basis: PromptBasis,
+    ) -> int:
+        """T9c: replace the latest snapshot with a COMPACTION Run's summary and
+        mark that Run PROJECTED, atomically. The Run must be a RECEIVED
+        COMPACTION Run (INVALID_STATE_TRANSITION otherwise); the snapshot
+        revision must still be ``expected_revision`` (VERSION_CONFLICT); the
+        new coverage may not move backwards or past the last Event
+        (STALE_BASIS). Events and raw Run records are not touched."""
         ...
 
 

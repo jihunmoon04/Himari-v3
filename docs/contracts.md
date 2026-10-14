@@ -131,14 +131,14 @@ EnvironmentPlugin ── tools() 제공 · execute 시 Data.WorkspaceState 재�
 | **DATA-02** | PrepareRecordRun / **Data·ConversationLog** | Data → Control | Data.RunRecords | raw request 영속화, **송신 직전 `DISPATCH_CLAIMED` 표시(P0)**, raw response/실패 기록 | P0 인메모리 구현 |
 | **DATA-03** | RecordToolExecution / **Data·ConversationLog** | Data → Control, Tool Dispatcher, Prompt | Data.ToolExecutionRecords | run_id/call_id별 실행 상태·원본/모델 결과, **부작용 Tool 실행 직전 `EXECUTION_CLAIMED`(P0)**, ask_user 대기 판별·답변 커밋(T7a), 재시작 정리(T-R) | P0 인메모리 구현 |
 | **DATA-04** | ReadWriteArtifact / **Data·ArtifactStore** | Data → Prompt, Tool Dispatcher (읽기는 Internal ToolHandler 가능) | Data.Artifacts | Plan/Note current content+revision | P0 인메모리 구현 |
-| **DATA-05** | ReadReplacePromptSnapshot / **Data·ConversationLog** | Data → Prompt, Control | Data.LatestPromptSnapshot | 최신 전체 가공 Prompt 1개 | Snapshot 저장 Port 구현; 압축 미구현 |
+| **DATA-05** | ReadReplacePromptSnapshot / **Data·ConversationLog** | Data → Prompt, Control | Data.LatestPromptSnapshot | 최신 전체 가공 Prompt 1개 | Snapshot 저장 Port 구현; 압축 요약 + coverage 저장(T9c `commit_compaction`, V3-P48) |
 | **DATA-06** | ReadCurrentStateBasis / **Data·StateQuery** | Data → Prompt | Data Registry+Activation+Binding+Settings+Artifacts | 일관된 PersistentStateBasis | P0 인메모리 구현 |
 | **DATA-07** | ReadWorkspaceBinding / **Data·WorkspaceState** | Data → Environment, Tool | Data.WorkspaceRegistry/Binding | Binding/등록·활성 관계 | P0 인메모리 구현 |
 | **DATA-08** | CommitToolOutcome / **Data·ConversationLog (+ArtifactStore 트랜잭션)** | Data → **Tool Dispatcher** | ToolOutcome의 Artifact 변경 + ToolExecution 종결 + optional ConversationEvent | revision CAS 및 원자 커밋. Tool 구현은 호출하지 않음(V3-042) | P0 인메모리 원자 커밋 |
 | **PROMPT-01** | ComposeModelInput / **Prompt** | Prompt → Control | `PromptInputs` (loader가 DATA-01/03/05/06 + Tool catalog에서 수집) | provider-neutral model input+prompt basis. **순수 함수(V3-043)** | P0 순수 Composer 구현 |
 | **PROMPT-02** | ProjectCurrentState / **Prompt** | Prompt → Prompt composition | DATA-06 + optional ENV-01 | CurrentStateProjection | PROPOSED |
 | **PROMPT-03** | ValidateNativeToolGroup (구 ReplayHistory) / **Prompt** | Prompt → Prompt composition | exact Events + non-Conversation Execution Records | 완전한 정규화 Tool 그룹, coverage | P0 Tool 그룹 검증 구현 |
-| **PROMPT-04** | CompactAndSnapshot / **Prompt** | Prompt → Control/유지관리 경로 | complete history / DATA-05 | 압축된 부분·exact tail·Snapshot 교체 요청 | 방향 확정, 알고리즘 미정 |
+| **PROMPT-04** | CompactAndSnapshot / **Prompt** | Prompt → Control/유지관리 경로 | complete history / DATA-05 | 압축된 부분·exact tail·Snapshot 교체 요청 | 기본 구현(V3-P48, Proposed): 토큰 기준 80% 자동 압축 |
 | **PROVIDER-01** | InvokePreparedRequest / **Provider** | 각 Provider Adapter → Control | PROVIDER-02가 만들고 DATA-02가 보존한 native request | 실제 LLM 호출 1회, raw response 또는 typed 실패 | Scripted·OpenRouter 구현 |
 | **PROVIDER-02** | PrepareNativeRequest / **Provider** | 각 Provider Adapter → Provider.invoke 경계 | Prompt 중립 입력 + Tool 표면 + continuation | provider-native messages/tools/role/reasoning | Scripted·OpenRouter wire-exact 구현 |
 | **PROVIDER-03** | NormalizeNativeResponse / **Provider** | Provider Adapter → Control/Data projection | 실제 raw native response | **FINAL** / **TOOL_CALLS**(질문은 `ask_user`) 또는 typed error | P0 구현(`provider/api.py`, `provider/openrouter.py`) |

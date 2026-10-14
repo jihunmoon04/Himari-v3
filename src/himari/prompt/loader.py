@@ -2,6 +2,9 @@
 
 P0 does not call ``EnvironmentPlugin.observe`` yet; observations are empty, so
 connection status renders as unknown rather than guessed.
+
+``usage_mark`` is the input size the Provider reported for the latest
+assistant output's Run (compaction Runs produce no Event and are skipped).
 """
 
 from __future__ import annotations
@@ -10,7 +13,7 @@ from collections.abc import Sequence
 
 from himari.common import ProviderContinuation, RunId, TrustedScope
 from himari.data.api import ConversationLog, EventKind, StateQuery, ToolExecutionRecord, TriggerRef
-from himari.prompt.api import PromptInputs, RequestOptions
+from himari.prompt.api import PromptInputs, RequestOptions, UsageMark
 from himari.tool.api import ToolCatalog
 
 
@@ -36,15 +39,20 @@ class ContextLoader:
         events = tuple(await self._log.read_events(scope))
         executions: list[ToolExecutionRecord] = []
         continuations: dict[RunId, ProviderContinuation] = {}
+        usage_mark: UsageMark | None = None
         for event in events:
             if event.origin_run_id is None:
                 continue
             if event.kind is EventKind.ASSISTANT_TOOL_CALLS:
                 executions.extend(await self._log.read_tool_executions(scope, event.origin_run_id))
             if event.kind in (EventKind.ASSISTANT_TOOL_CALLS, EventKind.ASSISTANT_FINAL):
-                continuation = (await self._log.read_run(scope, event.origin_run_id)).continuation
-                if continuation is not None:
-                    continuations[event.origin_run_id] = continuation
+                run = await self._log.read_run(scope, event.origin_run_id)
+                if run.continuation is not None:
+                    continuations[event.origin_run_id] = run.continuation
+                if run.usage is not None and run.usage.input_tokens is not None:
+                    used = run.prompt_basis
+                    usage_mark = UsageMark(run.usage.input_tokens, used.event_sequence, used.snapshot_revision,
+                                           used.context_key, used.state_revision, run.provider_key)
         basis = await self._state.read_current_state_basis(scope)
         active = frozenset(a.environment_kind for a in basis.environments)
         return PromptInputs(
@@ -58,4 +66,5 @@ class ContextLoader:
             request_options=request_options,
             trigger_refs=tuple(trigger_refs),
             continuations=continuations,
+            usage_mark=usage_mark,
         )

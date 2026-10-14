@@ -2,8 +2,9 @@
 
 Configuration comes from the environment (see ``config.py``):
 ``HIMARI_DATA_ROOT`` (required), ``HIMARI_WEB_HOST``/``PORT``,
-``HIMARI_MODEL``, ``HIMARI_REASONING_EFFORT``, ``HIMARI_SANDBOX`` and
-``OPENROUTER_API_KEY``. ``--env-file`` reads ``KEY=value`` lines first;
+``HIMARI_MODEL``, ``HIMARI_REASONING_EFFORT``, ``HIMARI_SANDBOX``,
+``HIMARI_CONTEXT_TOKENS`` (request token budget; compaction starts at 80%)
+and ``OPENROUTER_API_KEY``. ``--env-file`` reads ``KEY=value`` lines first;
 real environment variables win. Secrets are never printed.
 """
 
@@ -47,9 +48,11 @@ def main(argv: list[str] | None = None) -> int:
 
     async def opener() -> Application:
         application = await Application.open(config.data_root, provider(), model_id=config.model_id,
-                                             reasoning_effort=config.reasoning_effort, sandbox=config.sandbox)
+                                             reasoning_effort=config.reasoning_effort, sandbox=config.sandbox,
+                                             context_tokens=config.context_tokens)
         print(f"HIMARI web: http://{config.host}:{config.port}/ — sign in with the token in "
-              f"{application.data_root / 'control' / 'operator.secret'} (sandbox: {application.sandbox_state.value})",
+              f"{application.data_root / 'control' / 'operator.secret'} (sandbox: {application.sandbox_state.value}, "
+              f"context budget: {application.context_tokens} tokens)",
               file=sys.stderr, flush=True)
         return application
 

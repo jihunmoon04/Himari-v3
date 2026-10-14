@@ -7,7 +7,7 @@ import asyncio
 import pytest
 from testkit import SCOPE, data_for, forget_unknown_policy, new_store, text_result, user
 
-from himari.common import ASK_USER_TOOL_ID, ProviderContinuation, TextBlock, UnknownOutcomePolicy, ArtifactId, CallId, CallRef, RawRepresentation, ToolCall, ToolId
+from himari.common import ASK_USER_TOOL_ID, ProviderContinuation, RunId, TextBlock, UnknownOutcomePolicy, ArtifactId, CallId, CallRef, RawRepresentation, ToolCall, ToolId
 from himari.data.api import (
     ArtifactMutation,
     AssistantFinal,
@@ -17,6 +17,8 @@ from himari.data.api import (
     PromptBasis,
     RawReceived,
     RunPreparation,
+    RunPurpose,
+    RunStatus,
     ToolCompletion,
     ToolExecutionStatus,
 )
@@ -211,5 +213,112 @@ def test_projection_stamps_continuation_with_the_runs_provider_and_model() -> No
                                         continuation={"reasoning_details": [{"type": "x"}]})
         run = await data.read_run(SCOPE, run_id)
         assert run.continuation == ProviderContinuation("openrouter", "model-x", {"reasoning_details": [{"type": "x"}]})
+
+    asyncio.run(scenario())
+
+
+# --- compaction Runs (PROMPT-04, T9c) -----------------------------------------
+
+
+async def received_compaction(data: InMemoryData | SqliteData) -> RunId:
+    run_id = await data.prepare_run(
+        SCOPE,
+        RunPreparation(b"{}", "application/json", RawRepresentation.ADAPTER_SERIALIZED, (), PromptBasis(0, 0), "p", "m",
+                       purpose=RunPurpose.COMPACTION),
+    )
+    await data.mark_dispatch(SCOPE, run_id)
+    await data.record_raw_outcome(SCOPE, run_id, RawReceived(b"{}", "application/json"))
+    return run_id
+
+
+def test_compaction_commit_replaces_the_snapshot_and_projects_the_run_atomically() -> None:
+    async def scenario() -> None:
+        data = fresh()
+        for text in ("a", "b", "c"):
+            await data.append_event(SCOPE, user(text))
+        run_id = await received_compaction(data)
+        assert (await data.read_run(SCOPE, run_id)).purpose is RunPurpose.COMPACTION
+        with pytest.raises(DataError) as turn_only:
+            await data.project_model_output(SCOPE, run_id, AssistantFinal((TextBlock("no"),)))
+        assert turn_only.value.code is DataErrorCode.INVALID_STATE_TRANSITION
+        assert await data.read_events(SCOPE, after_sequence=3) == ()
+
+        revision = await data.commit_compaction(SCOPE, run_id, expected_revision=None, schema_version=1,
+                                                body={"summary": "s"}, covers_through_sequence=2, basis=PromptBasis(2, 0))
+        snapshot = await data.get_latest_snapshot(SCOPE)
+        assert revision == 1 and snapshot is not None and snapshot.covers_through_sequence == 2
+        assert (await data.read_run(SCOPE, run_id)).status is RunStatus.PROJECTED
+        assert len(await data.read_events(SCOPE)) == 3
+        with pytest.raises(DataError) as twice:
+            await data.commit_compaction(SCOPE, run_id, expected_revision=1, schema_version=1,
+                                         body={"summary": "s"}, covers_through_sequence=2, basis=PromptBasis(2, 0))
+        assert twice.value.code is DataErrorCode.INVALID_STATE_TRANSITION
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(("expected", "covers", "code"), [
+    (1, 9, DataErrorCode.STALE_BASIS),  # past the last Event
+    (1, 1, DataErrorCode.STALE_BASIS),  # backwards
+    (None, 3, DataErrorCode.VERSION_CONFLICT),  # another snapshot is current
+])
+def test_compaction_commit_refuses_stale_or_conflicting_coverage(expected: int | None, covers: int,
+                                                                 code: DataErrorCode) -> None:
+    async def scenario() -> None:
+        data = fresh()
+        for text in ("a", "b", "c"):
+            await data.append_event(SCOPE, user(text))
+        first = await received_compaction(data)
+        await data.commit_compaction(SCOPE, first, expected_revision=None, schema_version=1,
+                                     body={"summary": "s"}, covers_through_sequence=2, basis=PromptBasis(2, 0))
+        run_id = await received_compaction(data)
+        with pytest.raises(DataError) as refused:
+            await data.commit_compaction(SCOPE, run_id, expected_revision=expected, schema_version=1,
+                                         body={"summary": "t"}, covers_through_sequence=covers, basis=PromptBasis(3, 0))
+        assert refused.value.code is code
+        snapshot = await data.get_latest_snapshot(SCOPE)
+        assert snapshot is not None and snapshot.body == {"summary": "s"}
+        assert (await data.read_run(SCOPE, run_id)).status is RunStatus.RECEIVED
+
+    asyncio.run(scenario())
+
+
+def test_a_turn_run_cannot_commit_a_compaction() -> None:
+    async def scenario() -> None:
+        data = fresh()
+        await data.append_event(SCOPE, user("a"))
+        run_id = await data.prepare_run(
+            SCOPE, RunPreparation(b"{}", "t", RawRepresentation.ADAPTER_SERIALIZED, (), PromptBasis(0, 0), "p", "m"))
+        await data.mark_dispatch(SCOPE, run_id)
+        await data.record_raw_outcome(SCOPE, run_id, RawReceived(b"{}", "t"))
+        with pytest.raises(DataError) as refused:
+            await data.commit_compaction(SCOPE, run_id, expected_revision=None, schema_version=1,
+                                         body={"summary": "s"}, covers_through_sequence=1, basis=PromptBasis(1, 0))
+        assert refused.value.code is DataErrorCode.INVALID_STATE_TRANSITION
+
+    asyncio.run(scenario())
+
+
+def test_restart_discards_an_uncommitted_compaction_instead_of_projecting_it() -> None:
+    async def scenario() -> None:
+        data = fresh()
+        await data.append_event(SCOPE, user("a"))
+        run_id = await received_compaction(data)
+        report = await data.recover_interrupted(SCOPE)
+        assert report.compactions_discarded == (run_id,) and report.runs_received_unprojected == ()
+        run = await data.read_run(SCOPE, run_id)
+        assert run.status is RunStatus.PROJECTION_FAILED and run.error_code == "interrupted"
+
+    asyncio.run(scenario())
+
+
+def test_a_committed_compaction_does_not_hide_a_waiting_question() -> None:
+    async def scenario() -> None:
+        data = fresh()
+        call = await projected_group(data, ASK_USER_TOOL_ID)
+        run_id = await received_compaction(data)
+        await data.commit_compaction(SCOPE, run_id, expected_revision=None, schema_version=1,
+                                     body={"summary": "s"}, covers_through_sequence=0, basis=PromptBasis(0, 0))
+        assert await data.find_waiting_call(SCOPE) == call
 
     asyncio.run(scenario())

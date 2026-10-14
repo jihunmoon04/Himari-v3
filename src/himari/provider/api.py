@@ -45,6 +45,7 @@ class ProviderCapabilities(DeepFrozen):
     reasoning_efforts: frozenset[str] = frozenset()
     parallel_tool_calls: bool = False
     tool_result_attachments: bool = False
+    context_tokens: int | None = None  # the model's context window, if known
 
 
 @dataclass(frozen=True)

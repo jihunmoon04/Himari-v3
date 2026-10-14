@@ -95,6 +95,11 @@ def test_configuration_rules() -> None:
         WebConfig.from_env({})
     with pytest.raises(WebConfigError):
         WebConfig.from_env({**base, "HIMARI_SANDBOX": "maybe"})
+    assert WebConfig.from_env(base).context_tokens is None
+    assert WebConfig.from_env({**base, "HIMARI_CONTEXT_TOKENS": " 120000 "}).context_tokens == 120_000
+    for bad in ("lots", "999", "-5"):
+        with pytest.raises(WebConfigError, match="HIMARI_CONTEXT_TOKENS"):
+            WebConfig.from_env({**base, "HIMARI_CONTEXT_TOKENS": bad})
 
 
 @pytest.mark.parametrize("settings, message", [

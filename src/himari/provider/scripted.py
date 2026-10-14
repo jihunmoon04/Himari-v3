@@ -4,6 +4,7 @@ Each ``invoke_prepared`` consumes one script step:
 - ``NormalizedFinal`` / ``NormalizedToolCalls`` → a received JSON body
 - ``NativeNoResponse`` / ``NativeUncertain`` → returned as the outcome
 - ``RawBody`` → received verbatim (e.g. to exercise invalid output)
+- ``Measured`` → its output, with a Provider-reported input token count
 - a ``BaseException`` instance → raised (e.g. to simulate a process crash)
 
 The request body is ``ModelInput`` serialized to JSON, labelled
@@ -21,7 +22,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Any
 
-from himari.common import CallId, ContentBlock, RawRepresentation, TextBlock, ToolCall, ToolId, thaw
+from himari.common import CallId, ContentBlock, RawRepresentation, TextBlock, TokenUsage, ToolCall, ToolId, thaw
 from himari.prompt.api import ModelInput
 from himari.provider.api import (
     NativeInvocationOutcome,
@@ -44,7 +45,13 @@ class RawBody:
     body: bytes
 
 
-type ScriptStep = NormalizedModelOutput | NativeNoResponse | NativeUncertain | RawBody | BaseException
+@dataclass(frozen=True)
+class Measured:
+    output: NormalizedModelOutput
+    input_tokens: int
+
+
+type ScriptStep = NormalizedModelOutput | NativeNoResponse | NativeUncertain | RawBody | Measured | BaseException
 
 
 def _json_default(value: object) -> object:
@@ -122,6 +129,8 @@ class ScriptedAdapter:
             return step
         if isinstance(step, RawBody):
             return NativeReceived(step.body, "application/json")
+        if isinstance(step, Measured):
+            return NativeReceived(encode_output(step.output), "application/json", TokenUsage(input_tokens=step.input_tokens))
         return NativeReceived(encode_output(step), "application/json")
 
     def normalize(self, received: NativeReceived) -> NormalizedModelOutput:

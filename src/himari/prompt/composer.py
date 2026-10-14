@@ -1,8 +1,10 @@
 """Pure prompt composition (PROMPT-01/03, V3-043, CPP §6.1).
 
 No I/O, no clock, no randomness: same ``PromptInputs`` → same ``ModelInput``.
-P0 has no compaction yet, so the whole history is the exact tail and the
-snapshot is not consulted.
+With a compaction snapshot (``compaction.read_summary``) the history is its
+summary followed by every part that starts after the coverage; without one
+the whole history is exact. Either way every ToolCall group is checked for
+complete results, folded or not.
 """
 
 from __future__ import annotations
@@ -10,7 +12,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import replace
 
-from himari.common import CallId, CallRef, ModelToolResult, RunId
+from himari.common import CallId, CallRef, ModelToolResult, RunId, TextBlock
 from himari.data.api import (
     AssistantFinal,
     AssistantToolCalls,
@@ -21,6 +23,7 @@ from himari.data.api import (
 )
 from himari.prompt.api import (
     AssistantTurn,
+    CompressedHistory,
     CurrentStateProjection,
     HistoryPart,
     ModelInput,
@@ -30,6 +33,7 @@ from himari.prompt.api import (
     ToolGroupTurn,
     UserTurn,
 )
+from himari.prompt.compaction import anchors, context_key, part_anchor, read_summary
 
 
 class Composer:
@@ -54,6 +58,14 @@ class Composer:
                     history.append(replace(group, continuation=inputs.continuations.get(event.origin_run_id)))
                 case ToolResultRecord():
                     pass  # rendered inside its group, in ordinal order
+        summary = read_summary(inputs.snapshot)
+        snapshot_revision = None
+        if summary is not None and inputs.snapshot is not None:
+            covers = inputs.snapshot.covers_through_sequence
+            by_event, by_run = anchors(inputs.events)
+            tail = [p for p in history if part_anchor(p, by_event, by_run) > covers]
+            history = [CompressedHistory((TextBlock(summary),), covers), *tail]
+            snapshot_revision = inputs.snapshot.revision
         basis = inputs.state_basis
         return ModelInput(
             stable_prefix=inputs.instructions,
@@ -65,7 +77,9 @@ class Composer:
             prompt_basis=PromptBasis(
                 event_sequence=max((e.sequence for e in inputs.events), default=0),
                 state_revision=basis.state_revision,
+                snapshot_revision=snapshot_revision,
                 artifact_revisions={a.artifact_id: a.revision for a in basis.artifacts},
+                context_key=context_key(inputs),
             ),
         )
 

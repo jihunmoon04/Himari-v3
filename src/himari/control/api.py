@@ -22,7 +22,7 @@ class DriveState(Enum):
     PROVIDER_FAILED = "provider_failed"  # certain: no response
     OUTCOME_UNKNOWN = "outcome_unknown"  # send uncertain; never resent
     INVALID_MODEL_OUTPUT = "invalid_model_output"  # raw kept, no effects
-    REQUEST_REJECTED = "request_rejected"  # Prompt/Provider refused before send
+    REQUEST_REJECTED = "request_rejected"  # Prompt/Provider/context budget refused before send
     RUN_LIMIT_REACHED = "run_limit_reached"
     IDLE = "idle"  # resume(): nothing to continue (last turn was FINAL)
 
@@ -36,6 +36,7 @@ class DriveResult(DeepFrozen):
     unknown_calls: tuple[CallRef, ...] = ()
     recovery: RecoveryReport | None = None
     detail: str = ""
+    compaction_run_ids: tuple[RunId, ...] = ()  # summarizing calls made before the Runs
 
 
 class ControlErrorCode(Enum):

@@ -24,6 +24,9 @@ following symlinks; anything else is refused, never silently re-permissioned.
 
 Identity: a database is accepted only with HIMARI's ``application_id``, the
 supported ``user_version`` and exactly the expected tables and indexes.
+The one upgrade it performs is v2 → v3 (adds the ``compaction_runs``
+table), and only on a database that matches the v2 schema exactly; any
+other version or shape is refused, never repaired.
 """
 
 from __future__ import annotations
@@ -87,6 +90,7 @@ from himari.data.api import (
     RawUncertain,
     RecoveryReport,
     RunPreparation,
+    RunPurpose,
     RunRecord,
     RunStatus,
     ToolCompletion,
@@ -96,7 +100,7 @@ from himari.data.api import (
     UserMessage,
 )
 
-SCHEMA_VERSION = 2  # v2: Conversation title/created_at (DATA-12); no migration from v1
+SCHEMA_VERSION = 3  # v3: compaction_runs (upgraded in place from v2); v1 is refused
 APPLICATION_ID = 0x48494D41  # "HIMA": written into the database header (PRAGMA application_id)
 
 _TERMINAL_COMPLETIONS = frozenset(
@@ -117,7 +121,7 @@ _KIND_OF: dict[type, EventKind] = {
 
 # ``seq`` columns are rowid aliases: creation order, as dict insertion order
 # is in the in-memory store. Rows are never re-inserted on update.
-_SCHEMA = """
+_SCHEMA_V2 = """
 CREATE TABLE meta (key TEXT PRIMARY KEY, value INTEGER NOT NULL) STRICT;
 INSERT INTO meta VALUES ('next_id', 1);
 CREATE TABLE conversations (
@@ -215,6 +219,13 @@ CREATE TABLE bindings (
     cwd_relative TEXT
 ) STRICT;
 """
+# v3: a Run listed here is a COMPACTION Run (RunPurpose); every other Run is a TURN.
+_V3_ADDITIONS = """
+CREATE TABLE compaction_runs (
+    run_id TEXT PRIMARY KEY REFERENCES runs (run_id)
+) STRICT;
+"""
+_SCHEMA = _SCHEMA_V2 + _V3_ADDITIONS
 
 
 class StoreLockedError(RuntimeError):
@@ -286,10 +297,10 @@ def _schema_signature(conn: sqlite3.Connection) -> list[tuple[str, str, str, str
         "SELECT type, name, tbl_name, sql FROM sqlite_master ORDER BY type, name")]
 
 
-def _expected_signature() -> list[tuple[str, str, str, str | None]]:
+def _expected_signature(schema: str = _SCHEMA) -> list[tuple[str, str, str, str | None]]:
     reference = sqlite3.connect(":memory:")
     try:
-        for statement in _SCHEMA.split(";"):
+        for statement in schema.split(";"):
             if statement.strip():
                 reference.execute(statement)
         return _schema_signature(reference)
@@ -330,12 +341,14 @@ class SqliteStore:
         application = conn.execute("PRAGMA application_id").fetchone()[0]
         version = conn.execute("PRAGMA user_version").fetchone()[0]
         empty = conn.execute("SELECT count(*) FROM sqlite_master").fetchone()[0] == 0
+        upgrade_v2 = False
         if not (empty and application == 0 and version == 0):  # an existing database: verify before writing
             if application != APPLICATION_ID:
                 raise StoreSchemaError(f"{self.path} is not a HIMARI database")
-            if version != SCHEMA_VERSION:
+            upgrade_v2 = version == 2 and _schema_signature(conn) == _expected_signature(_SCHEMA_V2)
+            if version != SCHEMA_VERSION and not upgrade_v2:
                 raise StoreSchemaError(f"unsupported schema version {version} (expected {SCHEMA_VERSION})")
-            if _schema_signature(conn) != _expected_signature():
+            if not upgrade_v2 and _schema_signature(conn) != _expected_signature():
                 raise StoreSchemaError(f"{self.path} does not have the HIMARI schema {SCHEMA_VERSION}")
             if conn.execute("SELECT count(*) FROM meta WHERE key='next_id'").fetchone()[0] != 1:
                 raise StoreSchemaError(f"{self.path} has no id counter")
@@ -343,6 +356,10 @@ class SqliteStore:
             raise RuntimeError("SQLite WAL mode is unavailable")
         conn.execute("PRAGMA synchronous=FULL")
         conn.execute("PRAGMA foreign_keys=ON")
+        if upgrade_v2:  # the one supported upgrade, atomic: v2 → v3
+            with self.transaction() as tx:
+                tx.executescript_parts(_V3_ADDITIONS)
+                tx.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
         if empty:
             with self.transaction() as tx:
                 tx.executescript_parts(_SCHEMA)
@@ -534,6 +551,7 @@ def _run_record(row: sqlite3.Row) -> RunRecord:
         usage=codec.usage_from(row["usage"]),
         error_code=row["error_code"],
         continuation=codec.continuation_from(row["continuation"]),
+        purpose=RunPurpose.COMPACTION if row["compaction"] else RunPurpose.TURN,
     )
 
 
@@ -618,7 +636,11 @@ class SqliteData:
 
     @staticmethod
     def _run_row(tx: _Tx, scope: TrustedScope, run_id: RunId) -> sqlite3.Row:
-        row = tx.one("SELECT * FROM runs WHERE run_id=? AND conversation_id=?", run_id, scope.conversation_id)
+        row = tx.one(
+            "SELECT runs.*, EXISTS (SELECT 1 FROM compaction_runs c WHERE c.run_id=runs.run_id) AS compaction"
+            " FROM runs WHERE run_id=? AND conversation_id=?",
+            run_id, scope.conversation_id,
+        )
         if row is None:
             raise DataError(DataErrorCode.NOT_FOUND, run_id)
         return row
@@ -636,7 +658,8 @@ class SqliteData:
     @staticmethod
     def _waiting(tx: _Tx, scope: TrustedScope) -> CallRef | None:
         latest = tx.one(
-            "SELECT run_id FROM runs WHERE conversation_id=? AND status=? ORDER BY seq DESC LIMIT 1",
+            "SELECT run_id FROM runs WHERE conversation_id=? AND status=? AND projected_event_id IS NOT NULL"
+            " ORDER BY seq DESC LIMIT 1",
             scope.conversation_id, RunStatus.PROJECTED.value,
         )
         if latest is None:
@@ -709,6 +732,8 @@ class SqliteData:
                     preparation.provider_key, preparation.model_id, preparation.raw_representation.value,
                     preparation.raw_request_body, preparation.raw_content_type,
                 )
+                if preparation.purpose is RunPurpose.COMPACTION:
+                    tx.execute("INSERT INTO compaction_runs (run_id) VALUES (?)", run_id)
                 return run_id
         except sqlite3.Error as error:
             # Anything that keeps the request from being stored (read-only or
@@ -754,6 +779,8 @@ class SqliteData:
             run = self._run_row(tx, scope, run_id)
             if run["status"] != RunStatus.RECEIVED.value:
                 raise DataError(DataErrorCode.INVALID_STATE_TRANSITION, f"{run_id} is {run['status']}")
+            if run["compaction"]:
+                raise DataError(DataErrorCode.INVALID_STATE_TRANSITION, f"{run_id} is a compaction Run")
             pending: list[ToolExecutionRecord] = []
             if isinstance(output, AssistantToolCalls):
                 calls = output.calls
@@ -942,7 +969,13 @@ class SqliteData:
             abandoned: list[RunId] = []
             unknown_tools: list[CallRef] = []
             received: list[RunId] = []
-            for run in tx.all("SELECT run_id, status FROM runs WHERE conversation_id=? ORDER BY seq", scope.conversation_id):
+            discarded: list[RunId] = []
+            rows = tx.all(
+                "SELECT run_id, status, EXISTS (SELECT 1 FROM compaction_runs c WHERE c.run_id=runs.run_id) AS compaction"
+                " FROM runs WHERE conversation_id=? ORDER BY seq",
+                scope.conversation_id,
+            )
+            for run in rows:
                 run_id = RunId(run["run_id"])
                 if run["status"] == RunStatus.DISPATCH_CLAIMED.value:
                     self._set_run(tx, run_id, RunStatus.OUTCOME_UNKNOWN, error_code="interrupted")
@@ -950,6 +983,9 @@ class SqliteData:
                 elif run["status"] == RunStatus.PREPARED.value:
                     self._set_run(tx, run_id, RunStatus.ABANDONED_NOT_SENT)
                     abandoned.append(run_id)
+                elif run["status"] == RunStatus.RECEIVED.value and run["compaction"]:
+                    self._set_run(tx, run_id, RunStatus.PROJECTION_FAILED, error_code="interrupted")
+                    discarded.append(run_id)
                 elif run["status"] == RunStatus.RECEIVED.value:
                     received.append(run_id)
             claimed = tx.all(
@@ -959,7 +995,8 @@ class SqliteData:
             for row in claimed:
                 tx.execute("UPDATE tool_executions SET status=? WHERE seq=?", ToolExecutionStatus.UNKNOWN.value, row["seq"])
                 unknown_tools.append(CallRef(RunId(row["run_id"]), CallId(row["call_id"])))
-            return RecoveryReport(tuple(unknown_runs), tuple(abandoned), tuple(unknown_tools), tuple(received))
+            return RecoveryReport(tuple(unknown_runs), tuple(abandoned), tuple(unknown_tools), tuple(received),
+                                  tuple(discarded))
 
     async def get_latest_snapshot(self, scope: TrustedScope) -> PromptSnapshot | None:
         with self._tx() as tx:
@@ -996,6 +1033,42 @@ class SqliteData:
                 revision, schema_version, codec.dump_json(body), covers_through_sequence,
                 codec.prompt_basis(basis), scope.conversation_id,
             )
+            return revision
+
+    async def commit_compaction(
+        self,
+        scope: TrustedScope,
+        run_id: RunId,
+        *,
+        expected_revision: int | None,
+        schema_version: int,
+        body: JsonValue,
+        covers_through_sequence: int,
+        basis: PromptBasis,
+    ) -> int:
+        with self._tx() as tx:
+            conv = tx.authorized(scope)
+            run = self._run_row(tx, scope, run_id)
+            if run["status"] != RunStatus.RECEIVED.value or not run["compaction"]:
+                raise DataError(DataErrorCode.INVALID_STATE_TRANSITION, f"{run_id} is not a received compaction Run")
+            current = conv["snapshot_revision"]
+            if current != expected_revision:
+                raise DataError(DataErrorCode.VERSION_CONFLICT, "snapshot")
+            row = tx.one("SELECT max(sequence) AS s FROM events WHERE conversation_id=?", scope.conversation_id)
+            last = int(row["s"] or 0) if row is not None else 0
+            previous = conv["snapshot_covers_through"]
+            if covers_through_sequence > last or (
+                previous is not None and covers_through_sequence < previous
+            ):
+                raise DataError(DataErrorCode.STALE_BASIS, f"coverage {covers_through_sequence}")
+            revision = int(current or 0) + 1
+            tx.execute(
+                "UPDATE conversations SET snapshot_revision=?, snapshot_schema_version=?, snapshot_body=?,"
+                " snapshot_covers_through=?, snapshot_basis=? WHERE conversation_id=?",
+                revision, schema_version, codec.dump_json(body), covers_through_sequence,
+                codec.prompt_basis(basis), scope.conversation_id,
+            )
+            self._set_run(tx, run_id, RunStatus.PROJECTED)
             return revision
 
     # --- ArtifactStore ---------------------------------------------------------

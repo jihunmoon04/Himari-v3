@@ -59,6 +59,7 @@ from himari.data.api import (
     RawUncertain,
     RecoveryReport,
     RunPreparation,
+    RunPurpose,
     RunRecord,
     RunStatus,
     ToolCompletion,
@@ -227,7 +228,9 @@ class InMemoryData:
         run.record = replace(run.record, status=status, **changes)  # type: ignore[arg-type]
 
     def _waiting(self, conv: _Conversation) -> CallRef | None:
-        projected = [r for r in conv.runs.values() if r.record.status is RunStatus.PROJECTED]
+        projected = [
+            r for r in conv.runs.values() if r.record.status is RunStatus.PROJECTED and r.projected_event_id is not None
+        ]
         if not projected:
             return None
         run_id = projected[-1].record.run_id
@@ -282,6 +285,7 @@ class InMemoryData:
                 provider_key=preparation.provider_key,
                 model_id=preparation.model_id,
                 raw_representation=preparation.raw_representation,
+                purpose=preparation.purpose,
             ),
             raw_request_body=preparation.raw_request_body,
         )
@@ -323,6 +327,8 @@ class InMemoryData:
         run = self._run(conv, run_id)
         if run.record.status is not RunStatus.RECEIVED:
             raise DataError(DataErrorCode.INVALID_STATE_TRANSITION, f"{run_id} is {run.record.status.value}")
+        if run.record.purpose is RunPurpose.COMPACTION:
+            raise DataError(DataErrorCode.INVALID_STATE_TRANSITION, f"{run_id} is a compaction Run")
         pending: list[ToolExecutionRecord] = []
         if isinstance(output, AssistantToolCalls):
             calls = output.calls
@@ -484,6 +490,7 @@ class InMemoryData:
         abandoned: list[RunId] = []
         unknown_tools: list[CallRef] = []
         received: list[RunId] = []
+        discarded: list[RunId] = []
         for run in conv.runs.values():
             if run.record.status is RunStatus.DISPATCH_CLAIMED:
                 self._set_status(run, RunStatus.OUTCOME_UNKNOWN, error_code="interrupted")
@@ -491,13 +498,17 @@ class InMemoryData:
             elif run.record.status is RunStatus.PREPARED:
                 self._set_status(run, RunStatus.ABANDONED_NOT_SENT)
                 abandoned.append(run.record.run_id)
+            elif run.record.status is RunStatus.RECEIVED and run.record.purpose is RunPurpose.COMPACTION:
+                self._set_status(run, RunStatus.PROJECTION_FAILED, error_code="interrupted")
+                discarded.append(run.record.run_id)
             elif run.record.status is RunStatus.RECEIVED:
                 received.append(run.record.run_id)
         for ref, record in list(conv.executions.items()):
             if record.status is ToolExecutionStatus.EXECUTION_CLAIMED:
                 conv.executions[ref] = replace(record, status=ToolExecutionStatus.UNKNOWN)
                 unknown_tools.append(ref)
-        return RecoveryReport(tuple(unknown_runs), tuple(abandoned), tuple(unknown_tools), tuple(received))
+        return RecoveryReport(tuple(unknown_runs), tuple(abandoned), tuple(unknown_tools), tuple(received),
+                              tuple(discarded))
 
     async def get_latest_snapshot(self, scope: TrustedScope) -> PromptSnapshot | None:
         return self._conv(scope).snapshot
@@ -518,6 +529,34 @@ class InMemoryData:
             raise DataError(DataErrorCode.VERSION_CONFLICT, "snapshot")
         revision = (current or 0) + 1
         conv.snapshot = PromptSnapshot(revision, schema_version, body, covers_through_sequence, basis)
+        return revision
+
+    async def commit_compaction(
+        self,
+        scope: TrustedScope,
+        run_id: RunId,
+        *,
+        expected_revision: int | None,
+        schema_version: int,
+        body: JsonValue,
+        covers_through_sequence: int,
+        basis: PromptBasis,
+    ) -> int:
+        conv = self._conv(scope)
+        run = self._run(conv, run_id)
+        if run.record.status is not RunStatus.RECEIVED or run.record.purpose is not RunPurpose.COMPACTION:
+            raise DataError(DataErrorCode.INVALID_STATE_TRANSITION, f"{run_id} is not a received compaction Run")
+        current = conv.snapshot.revision if conv.snapshot else None
+        if current != expected_revision:
+            raise DataError(DataErrorCode.VERSION_CONFLICT, "snapshot")
+        last = conv.events[-1].sequence if conv.events else 0
+        if covers_through_sequence > last or (
+            conv.snapshot is not None and covers_through_sequence < conv.snapshot.covers_through_sequence
+        ):
+            raise DataError(DataErrorCode.STALE_BASIS, f"coverage {covers_through_sequence}")
+        revision = (current or 0) + 1
+        conv.snapshot = PromptSnapshot(revision, schema_version, body, covers_through_sequence, basis)
+        self._set_status(run, RunStatus.PROJECTED)
         return revision
 
     # --- ArtifactStore ---------------------------------------------------------

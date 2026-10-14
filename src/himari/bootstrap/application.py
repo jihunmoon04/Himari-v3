@@ -28,10 +28,27 @@ from himari.data.api import InitialActivation
 from himari.data.sqlite import SqliteData, SqliteStore
 from himari.environment.inside import INSIDE, InsideEnvironment
 from himari.environment.inside.sandbox import SandboxBackend, SandboxState
+from himari.prompt.api import ContextBudget
 from himari.provider.api import ProviderAdapter
 from himari.tool.api import ToolHandler
 
 DATABASE_NAME = "himari.db"
+# Default request budget: the model's window, capped so that a long
+# Conversation is compacted before each request costs a whole large window.
+DEFAULT_CONTEXT_TOKENS = 200_000
+UNKNOWN_WINDOW_TOKENS = 128_000  # a model whose window the Provider does not declare
+
+
+def context_limit(window: int | None, configured: int | None) -> int:
+    """The token limit of one request: ``configured`` if given (it may not
+    exceed a known window), else the window capped at the default."""
+    if configured is not None:
+        if configured <= 0:
+            raise ValueError("the context budget must be positive")
+        if window is not None and configured > window:
+            raise ValueError(f"the context budget {configured} exceeds the model's window of {window} tokens")
+        return configured
+    return min(window, DEFAULT_CONTEXT_TOKENS) if window is not None else UNKNOWN_WINDOW_TOKENS
 
 
 def workspace_for(principal: PrincipalId) -> WorkspaceId:
@@ -50,6 +67,7 @@ class Application:
     inside: InsideEnvironment
     sandbox_state: SandboxState
     model_id: str
+    context_tokens: int  # the request token budget (compaction starts at 80%)
     operator_secret: str = field(repr=False)  # never in reprs, logs or tracebacks
 
     @classmethod
@@ -61,9 +79,11 @@ class Application:
         model_id: str,
         reasoning_effort: str | None = None,
         sandbox: bool = True,
+        context_tokens: int | None = None,
         tools: Iterable[ToolHandler] = (),
         instructions: Sequence[str] | None = None,
     ) -> Application:
+        budget = ContextBudget(context_limit(provider.describe_capabilities(model_id).context_tokens, context_tokens))
         root = Path(os.path.abspath(data_root))
         ensure_private_dir(str(root))
         workspaces = root / "workspaces"
@@ -81,13 +101,14 @@ class Application:
                     backend = candidate  # run_command is offered only when enforcement is proven (V3-050)
             inside = InsideEnvironment(workspaces, sandbox=backend)
             runtime = build_runtime(provider, store=store, environments=[inside], tools=tools, model_id=model_id,
-                                    reasoning_effort=reasoning_effort,
+                                    reasoning_effort=reasoning_effort, context_budget=budget,
                                     instructions=DEFAULT_INSTRUCTIONS if instructions is None else instructions)
         except BaseException:
             store.close()
             raise
         assert isinstance(runtime.data, SqliteData)
-        return cls(root, store, runtime.data, runtime, BackgroundRunner(runtime.driver), inside, state, model_id, secret)
+        return cls(root, store, runtime.data, runtime, BackgroundRunner(runtime.driver), inside, state, model_id,
+                   budget.limit_tokens, secret)
 
     async def create_conversation(self, principal: PrincipalId, *, title: str | None = None) -> ConversationId:
         """T0 with the principal's Inside Workspace activated (provisioned first)."""
