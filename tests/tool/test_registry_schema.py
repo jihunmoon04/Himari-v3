@@ -378,3 +378,50 @@ def test_draft_07_does_not_follow_the_siblings_of_ref() -> None:
     assert validate({"a": 3}, draft7) == ["$.a: 3 is not of type 'string'"]
     with pytest.raises(SchemaError, match="does not resolve"):  # 2020-12 applies the siblings
         check_schema(body)
+
+
+# --- PR #19 re-review B1: where a draft-07 $ref may point vs what applies --------------------
+
+D7 = "http://json-schema.org/draft-07/schema#"
+
+
+@pytest.mark.parametrize("schema, value, violation", [
+    # a root $ref with its definitions beside it
+    ({"$schema": D7, "type": "object", "$ref": "#/definitions/args",
+      "definitions": {"args": {"type": "object", "properties": {"x": {"type": "string"}}}}},
+     {"x": 3}, "$.x: 3 is not of type 'string'"),
+    # the same pattern in a nested schema
+    ({"$schema": D7, "type": "object",
+      "properties": {"p": {"$ref": "#/properties/p/definitions/q", "definitions": {"q": {"type": "string"}}}}},
+     {"p": 3}, "$.p: 3 is not of type 'string'"),
+    # definitions reached through each other, in a cycle: checked once each
+    ({"$schema": D7, "type": "object", "$ref": "#/definitions/a",
+      "definitions": {"a": {"type": "object", "properties": {"b": {"$ref": "#/definitions/b"}}},
+                      "b": {"type": "object", "properties": {"a": {"$ref": "#/definitions/a"}}}}},
+     {"b": {"a": {"b": 3}}}, "$.b.a.b: 3 is not of type 'object'"),
+])
+def test_draft_07_references_to_definitions_beside_a_ref_are_valid(
+        schema: dict[str, JsonValue], value: JsonValue, violation: str) -> None:
+    check_schema(schema)
+    assert validate(value, schema) == [violation]
+
+
+def test_draft_07_checks_what_a_reference_reaches_even_beside_a_ref() -> None:
+    """Not applied by itself, but applied through the root $ref: its own
+    references must resolve like any other."""
+    with pytest.raises(SchemaError, match="#/definitions/a: \\$ref '#/nowhere' does not resolve"):
+        check_schema({"$schema": D7, "type": "object", "$ref": "#/definitions/a",
+                      "definitions": {"a": {"$ref": "#/nowhere"}}})
+    with pytest.raises(SchemaError, match="does not point to a schema"):
+        check_schema({"$schema": D7, "type": "object", "$ref": "#/definitions/a/default",
+                      "definitions": {"a": {"default": {"type": "string"}}}})
+
+
+def test_many_references_to_one_definition_are_checked_once() -> None:
+    schema: dict[str, JsonValue] = {
+        "$schema": D7, "type": "object", "definitions": {"s": {"type": "string"}},
+        "properties": {f"p{i}": {"$ref": "#/definitions/s"} for i in range(1500)},
+    }
+    started = time.monotonic()
+    check_schema(schema)
+    assert time.monotonic() - started < 2
