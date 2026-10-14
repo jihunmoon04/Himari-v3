@@ -81,6 +81,20 @@ class Driver:
         async with self._exclusive(scope):
             return await self._resume_locked(scope)
 
+    async def accept(self, scope: TrustedScope, message: UserMessage) -> None:
+        """Record one user input durably — T7a if an ask_user call is waiting,
+        else T1 — after restart cleanup and projection of stored responses,
+        without running any Tool or calling the Provider. ``resume`` then
+        continues from it (CTRL-06: an interface may report acceptance only
+        once the input is committed)."""
+        async with self._exclusive(scope):
+            await self._prepare(scope)  # a stop is reported by the following resume
+            waiting = await self._log.find_waiting_call(scope)
+            if waiting is not None:
+                await self._log.answer_pending_call(scope, waiting, message)  # T7a
+            else:
+                await self._log.append_event(scope, message)  # T1
+
     @contextlib.asynccontextmanager
     async def _exclusive(self, scope: TrustedScope) -> AsyncIterator[None]:
         lock = self._locks.setdefault(scope.conversation_id, asyncio.Lock())
@@ -116,10 +130,10 @@ class Driver:
         blocked = await self._resume_pending_group(scope)
         if blocked is not None:
             return DriveResult(DriveState.RECOVERY_REQUIRED, unknown_calls=blocked, recovery=recovery)
-        trigger = await self._next_trigger(scope)
-        if trigger is None:
+        triggers = await self._next_triggers(scope)
+        if not triggers:
             return DriveResult(DriveState.IDLE, recovery=recovery)
-        return await self._run_loop(scope, (trigger,), recovery)
+        return await self._run_loop(scope, triggers, recovery)
 
     async def _prepare(self, scope: TrustedScope) -> tuple[RecoveryReport, DriveResult | None]:
         """Restart cleanup (T-R), then project responses that were stored but
@@ -158,23 +172,24 @@ class Driver:
         )
         return projection.event
 
-    async def _next_trigger(self, scope: TrustedScope) -> TriggerRef | None:
-        """What the next Run would answer, from the persisted tail; None if the
-        last turn is already a FINAL (nothing to continue)."""
+    async def _next_triggers(self, scope: TrustedScope) -> tuple[TriggerRef, ...]:
+        """What the next Run would answer, from the persisted tail: the
+        latest tool group (if the tail follows one) and every ordinary user
+        message after the last assistant output — an input accepted before
+        an unfinished group completed still triggers the Run. Empty if the
+        last assistant output is a FINAL with nothing after it."""
         events = await self._log.read_events(scope)
-        if not events:
-            return None
-        last = events[-1]
-        match last.payload:
-            case AssistantFinal():
-                return None
-            case UserMessage(answers_call=None):
-                return EventRef(last.event_id)
-            case UserMessage(answers_call=CallRef(run_id=run_id)) | ToolResultRecord(call=CallRef(run_id=run_id)):
-                return CompletedGroupRef(run_id)
-            case AssistantToolCalls() if last.origin_run_id is not None:
-                return CompletedGroupRef(last.origin_run_id)
-        return None
+        triggers: list[TriggerRef] = []
+        for event in reversed(events):
+            match event.payload:
+                case AssistantFinal():
+                    break
+                case AssistantToolCalls() if event.origin_run_id is not None:
+                    triggers.append(CompletedGroupRef(event.origin_run_id))
+                    break
+                case UserMessage(answers_call=None):
+                    triggers.append(EventRef(event.event_id))
+        return tuple(reversed(triggers))
 
     async def _resume_pending_group(self, scope: TrustedScope) -> tuple[CallRef, ...] | None:
         """Finish the latest group: run never-claimed PENDING calls (D20) and

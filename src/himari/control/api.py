@@ -61,6 +61,12 @@ class ConversationDriver(Protocol):
         Run if one is due. Same BUSY rule as ``drive``."""
         ...
 
+    async def accept(self, scope: TrustedScope, message: UserMessage) -> None:
+        """Commit one user input (T7a if an ask_user call is waiting, else
+        T1) after restart cleanup, without running Tools or the Provider;
+        ``resume`` continues from it. Same BUSY rule as ``drive``."""
+        ...
+
 
 @dataclass(frozen=True)
 class JobStatus(DeepFrozen):
@@ -86,9 +92,12 @@ class ConversationRunner(Protocol):
     (principal, Conversation): another principal sees an idle Conversation."""
 
     async def submit(self, scope: TrustedScope, message: UserMessage | None) -> JobStatus:
-        """Start ``drive(scope, message)`` — or ``resume(scope)`` when
-        ``message`` is None — and return at once. Raises
-        ControlError(BUSY) while this Conversation has a running job."""
+        """Commit ``message`` (``accept``) and only then start ``resume`` in
+        the background; with ``message`` None just start ``resume``. When
+        this returns, the input is durable — a crash before the job runs
+        loses nothing, and a later ``resume`` answers it. Raises
+        ControlError(BUSY) while this Conversation has a running job, and
+        any Data error of the commit (then no job is started)."""
         ...
 
     def status(self, scope: TrustedScope) -> JobStatus: ...

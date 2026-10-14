@@ -807,3 +807,28 @@ def test_reasoning_details_survive_the_full_path_into_the_next_request(details: 
     assert stored is not None and thaw(stored.payload) == {"reasoning_details": details}
     assistant = next(m for m in json.loads(sent[1])["messages"] if m.get("tool_calls"))
     assert assistant["reasoning_details"] == details
+
+
+# --- PR #12 review B1: accept + resume ----------------------------------------------------
+
+
+def test_input_accepted_before_an_unfinished_group_still_triggers_the_run() -> None:
+    read = RecordingTool("fake/read", environment_kind=FAKE, workspace=WorkspaceRequirement.DEFAULT)
+    read.crash_next = True  # the group stays PENDING
+    rt, _ = runtime([calls(("fake/read", {}))], env_tools=[read])
+    rt.store.activate_environment(SCOPE, FAKE, WorkspaceId("ws_1"))
+    with pytest.raises(SimulatedCrash):
+        asyncio.run(rt.driver.drive(SCOPE, user("go")))
+
+    provider2 = ScriptedAdapter([final("done")])
+    rt2, _ = runtime(store=restart(rt.store), provider=provider2, env_tools=[read])
+    asyncio.run(rt2.driver.accept(SCOPE, user("and also this")))
+    result = asyncio.run(rt2.driver.resume(SCOPE))
+
+    assert result.state is DriveState.COMPLETED and len(read.invocations) == 2
+    run = asyncio.run(rt2.data.read_run(SCOPE, result.run_ids[0]))
+    accepted = [e for e in asyncio.run(rt2.data.read_events(SCOPE)) if e.payload == user("and also this")][0]
+    assert EventRef(accepted.event_id) in run.trigger_refs
+    assert any(isinstance(t, CompletedGroupRef) for t in run.trigger_refs)
+    conversation = provider2.prepared_inputs[0].conversation
+    assert isinstance(conversation[-2], ToolGroupTurn) and isinstance(conversation[-1], UserTurn)  # results stay with their group

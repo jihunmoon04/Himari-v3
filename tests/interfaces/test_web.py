@@ -18,8 +18,8 @@ from fastapi.testclient import TestClient  # noqa: E402
 from testkit import calls, final  # noqa: E402
 
 from himari.bootstrap.application import Application  # noqa: E402
-from himari.bootstrap.operator import derive_cli_bearer  # noqa: E402
-from himari.common import ASK_USER_TOOL_ID, PrincipalId, TrustedScope  # noqa: E402
+from himari.bootstrap.operator import OPERATOR, derive_cli_bearer  # noqa: E402
+from himari.common import ASK_USER_TOOL_ID, PrincipalId, TextBlock, TrustedScope  # noqa: E402
 from himari.control.api import DriveResult, DriveState  # noqa: E402
 from himari.control.runner import BackgroundRunner  # noqa: E402
 from himari.data.api import UserMessage  # noqa: E402
@@ -100,6 +100,34 @@ def test_configuration_rules() -> None:
     assert exposed.allowed_origins == {"https://h.example"} and exposed.secure_cookie
     with pytest.raises(WebConfigError):
         WebConfig.from_env({**base, "HIMARI_SANDBOX": "maybe"})
+
+
+@pytest.mark.parametrize("settings, message", [
+    # PR #12 review B2: the operator token must never cross a network in clear text.
+    ({"HIMARI_WEB_HOST": "0.0.0.0", "HIMARI_WEB_ALLOWED_HOSTS": "server.example.com",
+      "HIMARI_WEB_ALLOWED_ORIGINS": "http://server.example.com:8765"}, "clear text"),
+    ({"HIMARI_WEB_ALLOWED_HOSTS": "server.example.com",
+      "HIMARI_WEB_ALLOWED_ORIGINS": "http://server.example.com"}, "clear text"),  # plain-http proxy on loopback
+    ({"HIMARI_WEB_HOST": "0.0.0.0", "HIMARI_WEB_ALLOWED_HOSTS": "server.example.com",
+      "HIMARI_WEB_ALLOWED_ORIGINS": "https://server.example.com", "HIMARI_WEB_SECURE_COOKIE": "0"}, "Secure cookies"),
+    ({"HIMARI_WEB_HOST": "0.0.0.0", "HIMARI_WEB_ALLOWED_HOSTS": "server.example.com",
+      "HIMARI_WEB_ALLOWED_ORIGINS": "https://server.example.com,http://127.0.0.1:8765"}, "only https origins"),
+])
+def test_tokens_never_travel_in_clear_text(settings: dict[str, str], message: str) -> None:
+    with pytest.raises(WebConfigError, match=message):
+        WebConfig.from_env({"HIMARI_DATA_ROOT": "/srv/himari", **settings})
+
+
+def test_remote_access_through_https_is_accepted() -> None:
+    proxied = WebConfig.from_env({"HIMARI_DATA_ROOT": "/srv/himari", "HIMARI_WEB_ALLOWED_HOSTS": "server.example.com",
+                                  "HIMARI_WEB_ALLOWED_ORIGINS": "https://server.example.com"})
+    assert proxied.host == "127.0.0.1" and proxied.secure_cookie  # loopback bind behind a TLS proxy
+    direct = WebConfig.from_env({"HIMARI_DATA_ROOT": "/srv/himari", "HIMARI_WEB_HOST": "0.0.0.0",
+                                 "HIMARI_WEB_ALLOWED_HOSTS": "server.example.com",
+                                 "HIMARI_WEB_ALLOWED_ORIGINS": "https://server.example.com"})
+    assert direct.secure_cookie
+    local = WebConfig.from_env({"HIMARI_DATA_ROOT": "/srv/himari", "HIMARI_WEB_ALLOWED_ORIGINS": "http://[::1]:8765"})
+    assert not local.secure_cookie
 
 
 # --- envelope ------------------------------------------------------------------------------
@@ -236,11 +264,14 @@ class GatedDriver:
         self.release = threading.Event()
 
     async def drive(self, scope: TrustedScope, message: UserMessage) -> DriveResult:
-        await asyncio.to_thread(self.release.wait, 10)
-        return DriveResult(DriveState.COMPLETED)
+        raise AssertionError("the runner accepts, then resumes")
+
+    async def accept(self, scope: TrustedScope, message: UserMessage) -> None:
+        pass
 
     async def resume(self, scope: TrustedScope) -> DriveResult:
-        return DriveResult(DriveState.IDLE)
+        await asyncio.to_thread(self.release.wait, 10)
+        return DriveResult(DriveState.COMPLETED)
 
 
 def test_a_second_message_while_working_is_busy(server: Server) -> None:
@@ -263,3 +294,19 @@ def test_no_response_ever_contains_the_secret_or_the_bearer(server: Server) -> N
     texts.append(server.post("/api/conversations").text)
     bearer = derive_cli_bearer(server.secret)
     assert not any(server.secret in t or bearer in t for t in texts)
+
+
+def test_an_unanswered_accepted_message_is_reported_as_continuable(server: Server) -> None:
+    server.sign_in()
+    cid = server.post("/api/conversations").json()["id"]
+    assert server.client.get(f"/api/conversations/{cid}").json()["continuable"] is False
+    application = server.application
+    assert application is not None and server.client.portal is not None
+    scope = TrustedScope(OPERATOR, cid)  # the signed-in operator
+    server.client.portal.call(application.runtime.driver.accept, scope, UserMessage((TextBlock("pending"),)))
+    detail = server.client.get(f"/api/conversations/{cid}").json()
+    assert detail["continuable"] is True and detail["job"]["running"] is False
+    queue(server, final("answered"))
+    assert server.post(f"/api/conversations/{cid}/resume").status_code == 202
+    detail = server.wait_idle(cid)
+    assert detail["continuable"] is False and detail["job"]["state"] == "completed"

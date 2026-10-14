@@ -205,14 +205,22 @@ async function showHome() {
 }
 
 async function newConversation() {
+  let created;
   try {
-    const created = await api("POST", "/api/conversations", {});
-    await loadList(true);
-    await openConversation(created.id);
-    $("composer-text").focus();
+    created = await api("POST", "/api/conversations", {});
   } catch (error) {
-    status(error.message, "error");
+    if (error.kind === "network") {
+      // The server may have created it: show the list instead of retrying.
+      status("Could not confirm the new conversation; check the list before creating another.", "warn");
+      await loadList(true).then(markSelected).catch(() => {});
+    } else {
+      status(error.message, "error");
+    }
+    return;
   }
+  await loadList(true);
+  await openConversation(created.id);
+  $("composer-text").focus();
 }
 
 /* --------------------------------------------------------------- timeline */
@@ -303,6 +311,10 @@ function describe(detail) {
   const job = detail.job;
   if (job.running) return { text: "Working…", tone: null, active: true };
   if (detail.waiting) return { text: STATE_TEXT.waiting_for_user, tone: "warn", active: false };
+  if (detail.continuable && !job.error && (job.state === null || job.state === "completed")) {
+    return { text: "Not answered yet — choose Continue in the conversation menu.", short: "Not answered yet",
+             tone: "warn", active: false };
+  }
   if (job.error) return { text: ERROR_TEXT[job.error] || `The run failed (${job.error}).`, tone: "error", active: false };
   if (job.state && job.state !== "completed" && job.state !== "idle") {
     return { text: STATE_TEXT[job.state] || job.state, tone: "warn", active: false };
@@ -315,8 +327,8 @@ function applyDetail(detail) {
   $("topbar-title").textContent = name;
   $("chat-menu-title").textContent = name;
   const view = describe(detail);
-  $("topbar-chat-label").textContent = view.text;
-  $("chat-menu-state").textContent = view.text || "Ready";
+  $("topbar-chat-label").textContent = view.short || view.text;
+  $("chat-menu-state").textContent = view.short || view.text || "Ready";
   $("topbar-state-dot").classList.toggle("is-active", view.active);
   status(view.tone ? view.text : "", view.tone);
   $("question-panel").hidden = !detail.waiting;
@@ -324,6 +336,7 @@ function applyDetail(detail) {
   $("composer-text").placeholder = detail.waiting ? "Your answer" : "Message HIMARI";
   $("composer-send").disabled = detail.job.running || app.sending;
   $("composer-hint").textContent = detail.job.running ? "HIMARI is working…" : "";
+  $("chat-menu-resume").hidden = !detail.continuable;
 }
 
 async function refresh(generation) {

@@ -39,16 +39,20 @@ class BackgroundRunner:
         key = self._key(scope)
         if self._running_in(scope.conversation_id):
             raise ControlError(ControlErrorCode.BUSY, scope.conversation_id)
+        if message is not None:
+            await self._driver.accept(scope, message)  # durable before anything is reported
+            if self._running_in(scope.conversation_id):  # cannot happen: accept holds the driver lock
+                raise ControlError(ControlErrorCode.BUSY, scope.conversation_id)
         previous = self._status.get(key, JobStatus(running=False))
         status = JobStatus(running=True, generation=previous.generation + 1, started_at=datetime.now(UTC))
         self._status[key] = status
-        self._tasks[key] = asyncio.create_task(self._run(key, scope, message), name=f"drive:{scope.conversation_id}")
+        self._tasks[key] = asyncio.create_task(self._run(key, scope), name=f"drive:{scope.conversation_id}")
         return status
 
-    async def _run(self, key: _Key, scope: TrustedScope, message: UserMessage | None) -> None:
+    async def _run(self, key: _Key, scope: TrustedScope) -> None:
         current = self._status[key]
         try:
-            result = await (self._driver.resume(scope) if message is None else self._driver.drive(scope, message))
+            result = await self._driver.resume(scope)
         except asyncio.CancelledError:
             self._status[key] = replace(current, running=False, error="cancelled", finished_at=datetime.now(UTC))
             raise

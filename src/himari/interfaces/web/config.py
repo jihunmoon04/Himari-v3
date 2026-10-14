@@ -4,6 +4,13 @@ Plain environment reads. A non-loopback bind is refused unless BOTH
 ``HIMARI_WEB_ALLOWED_HOSTS`` and ``HIMARI_WEB_ALLOWED_ORIGINS`` are set
 explicitly; wildcards are refused in both. Nothing here imports the web
 framework, so a configuration defect fails before any socket is bound.
+
+The operator token and session cookie never cross a network in clear text
+(V3-P46): a plain ``http://`` origin is accepted only for a loopback host
+(the browser on the same machine), and a non-loopback bind requires every
+allowed origin to be ``https://`` with ``Secure`` cookies. The recommended
+remote deployment is a TLS-terminating reverse proxy in front of a
+loopback-bound server, with the public ``https://`` origin configured.
 """
 
 from __future__ import annotations
@@ -28,6 +35,7 @@ DEFAULT_PORT = 8765
 DEFAULT_MODEL = "openai/gpt-5-nano"
 
 _LOOPBACK_BIND_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+_LOOPBACK_ORIGIN_HOSTS = frozenset({"127.0.0.1", "localhost", "[::1]"})
 _DEFAULT_ALLOWED_HOSTS = frozenset({"127.0.0.1", "localhost"})
 _ORIGIN_SCHEMES = frozenset({"http", "https"})
 
@@ -66,6 +74,21 @@ class WebConfig:
                 f"{HOST_VAR}={host!r} is not a loopback host; a non-loopback bind requires both "
                 f"{ALLOWED_HOSTS_VAR} and {ALLOWED_ORIGINS_VAR} to be set explicitly"
             )
+        cleartext = sorted(o for o in allowed_origins
+                           if o.startswith("http://") and o[len("http://"):].rsplit(":", 1)[0] not in _LOOPBACK_ORIGIN_HOSTS)
+        if cleartext:
+            raise WebConfigError(
+                f"{ALLOWED_ORIGINS_VAR} has plain-http origins for other machines {cleartext}: the operator token "
+                "would cross the network in clear text; serve them over https (e.g. a TLS reverse proxy)"
+            )
+        remote = host not in _LOOPBACK_BIND_HOSTS
+        secure_cookie = _flag(source.get(SECURE_COOKIE_VAR), SECURE_COOKIE_VAR,
+                              default=remote or any(o.startswith("https://") for o in allowed_origins))
+        if remote and (not secure_cookie or any(not o.startswith("https://") for o in allowed_origins)):
+            raise WebConfigError(
+                f"a non-loopback bind serves only https origins with Secure cookies; prefer binding to 127.0.0.1 "
+                f"behind a TLS reverse proxy"
+            )
         data_root = source.get(DATA_ROOT_VAR, "").strip()
         if not data_root:
             raise WebConfigError(f"{DATA_ROOT_VAR} must name the private data directory")
@@ -75,8 +98,7 @@ class WebConfig:
             port=port,
             allowed_hosts=allowed_hosts,
             allowed_origins=allowed_origins,
-            secure_cookie=_flag(source.get(SECURE_COOKIE_VAR), SECURE_COOKIE_VAR,
-                                default=any(o.startswith("https://") for o in allowed_origins)),
+            secure_cookie=secure_cookie,
             data_root=os.path.abspath(data_root),
             model_id=source.get(MODEL_VAR, "").strip() or DEFAULT_MODEL,
             reasoning_effort=effort,

@@ -314,8 +314,15 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
                 if record.call == waiting and record.tool_id == ASK_USER_TOOL_ID:
                     asked = record.arguments.get("question")
                     question = {"call_id": waiting.call_id, "question": asked if isinstance(asked, str) else ""}
-        return {"conversation": summary_view(summary), "job": job_view(application.runner.status(scope)),
-                "waiting": question}
+        job = application.runner.status(scope)
+        # An accepted input (or finished Tool results) with no assistant
+        # output after it — e.g. the server stopped before the job ran.
+        last = await application.data.read_events(scope, after_sequence=summary.last_sequence - 1, limit=1) \
+            if summary.last_sequence else ()
+        continuable = (not job.running and question is None and bool(last)
+                       and last[-1].kind.value in ("user_message", "tool_result", "assistant_tool_calls"))
+        return {"conversation": summary_view(summary), "job": job_view(job), "waiting": question,
+                "continuable": continuable}
 
     @app.get("/api/conversations/{conversation_id}")
     async def read_conversation(conversation_id: str, request: Request,
