@@ -56,8 +56,10 @@ gets the summary so far as ``previous_summary`` and the next piece, and
 only the last call's summary is committed (at most ``MAX_STEPS`` calls).
 Every summary a plan asks for is held to ``summary_limit`` — the room the
 next call reserves for it, the smaller of ``max_summary_chars`` and a
-quarter of the limit, counted in characters, which is never fewer than our
-estimated tokens for BMP text — and the request states that limit. The
+quarter of the limit, in characters — and checked both in characters and
+in its size as the next request carries it (JSON-escaped, where ``<`` takes
+six bytes), against the room reserved for it. The request states the
+character limit. The
 coverage still moves by whole parts only. If not even that works, nothing
 is compacted.
 """
@@ -323,6 +325,12 @@ def _escaped_json(value: object) -> str:
 
 
 _EMPTY_ITEMS = len(_escaped_json({"items": []}).encode())
+_ROOM_FILLER = "가"  # reserves the room of a summary_limit-long summary: 3 bytes, no escaping
+
+
+def summary_tokens(summary: str) -> int:
+    """A summary's size inside a summarizing request: JSON-escaped as there."""
+    return tokens_of_text(_escaped_json(summary))
 
 
 def _item_tokens(item: object) -> int:
@@ -420,13 +428,13 @@ class Compactor:
         # Measured, not added up: an empty piece with the existing summary, and
         # with the longest running summary a later call may carry.
         first = request_tokens(self.step_request(plan(1, [[]]), 0, previous))
-        later = request_tokens(self.step_request(plan(1, [[]]), 0, "가" * summary_limit))
+        later = request_tokens(self.step_request(plan(1, [[]]), 0, _ROOM_FILLER * summary_limit))
         room = budget.limit_tokens - max(first, later)
         pieces = _pieces(_items(parts[:1]), room) if room >= MIN_PIECE_TOKENS else None
         if pieces is None:
             return None
         chained = plan(1, pieces)
-        worst = "가" * summary_limit
+        worst = _ROOM_FILLER * summary_limit
         if any(request_tokens(self.step_request(chained, i, worst)) > budget.limit_tokens
                for i in range(len(pieces))):
             return None  # the estimate per item was off; refuse rather than send over the limit
@@ -456,7 +464,10 @@ class Compactor:
         text = _blocks_text(blocks).strip()
         if not text:
             raise PromptError(PromptErrorCode.INVALID_SUMMARY, "the summary is empty")
-        if len(text) > plan.summary_limit or tokens_of_text(text) > plan.summary_limit:
+        # Measured as the next call will carry it — a JSON string, escaped —
+        # against the room reserved for it, not as raw text: "<" is one byte
+        # here but six there.
+        if len(text) > plan.summary_limit or summary_tokens(text) > summary_tokens(_ROOM_FILLER * plan.summary_limit):
             raise PromptError(PromptErrorCode.INVALID_SUMMARY,
                               f"the summary has {len(text)} characters (limit {plan.summary_limit})")
         return text

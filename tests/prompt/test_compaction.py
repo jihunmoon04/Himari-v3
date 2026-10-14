@@ -274,3 +274,24 @@ def test_many_items_needing_too_many_pieces_are_not_planned() -> None:
     items = [{"role": "tool", "tool": "t", "error": False, "text": "가" * 250} for _ in range(MAX_STEPS + 1)]
     assert _pieces(items, room=300) is None  # each piece holds one item
     assert _pieces(items[:MAX_STEPS], room=300) is not None
+
+
+@pytest.mark.parametrize("unit", ["<", ">", "&", "\\", "\x01", '"', "\n", "가", "a", "😀", "<가&"])
+def test_every_accepted_summary_fits_the_room_the_next_call_reserves(unit: str) -> None:
+    # PR #15 re-review B1: checked as the next request carries it (escaped
+    # JSON), not as raw text — "<" is one byte raw but six escaped.
+    budget = ContextBudget(limit_tokens=2000)
+    data = inputs(history("가" * 3000, "a1", "q2"))
+    plan = Compactor().decide(data, Composer().compose(data), budget).compaction
+    assert plan is not None and len(plan.pieces) >= 2
+    compactor, accepted = Compactor(), 0
+    for length in range(1, plan.summary_limit + 1, 7):
+        text = "S" + (unit * plan.summary_limit)[:length]
+        try:
+            summary = compactor.summary_text((TextBlock(text),), plan)
+        except PromptError:
+            continue
+        accepted += 1
+        for index in range(1, len(plan.pieces)):
+            assert request_tokens(compactor.step_request(plan, index, summary)) <= budget.limit_tokens, (unit, length)
+    assert accepted > 0
