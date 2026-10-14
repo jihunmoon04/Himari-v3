@@ -61,7 +61,12 @@ class ContextLoader:
         events: tuple[ConversationEvent, ...] = ()
         if snapshot is not None and read_summary(snapshot) is not None:
             events = tuple(await self._log.read_events(scope, after_sequence=snapshot.covers_through_sequence))
-        if not events:  # no summary, or (never expected) nothing after it: the whole history
+            if not events:
+                # Data lets a summary cover the last Event; until the next one
+                # arrives the composer needs the whole history for the
+                # latest sequence its basis records.
+                events = tuple(await self._log.read_events(scope))
+        else:
             events = tuple(await self._log.read_events(scope))
         executions: list[ToolExecutionRecord] = []
         continuations: dict[RunId, ProviderContinuation] = {}
