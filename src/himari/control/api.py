@@ -1,4 +1,4 @@
-"""Control public contract (CTRL-01, CTRL-05).
+"""Control public contract (CTRL-01, CTRL-05, CTRL-06).
 
 Source documents: docs/control-prompt-provider-v0.1.md §3, §5.1, §7;
 docs/decisions.md V3-024, V3-044, V3-045.
@@ -7,6 +7,7 @@ docs/decisions.md V3-024, V3-044, V3-045.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from enum import Enum
 from typing import Protocol
 
@@ -58,4 +59,45 @@ class ConversationDriver(Protocol):
         """Continue without new user input: restart cleanup, project stored
         responses, finish never-claimed PENDING calls, then start the next
         Run if one is due. Same BUSY rule as ``drive``."""
+        ...
+
+
+@dataclass(frozen=True)
+class JobStatus(DeepFrozen):
+    """The background job of one Conversation, as its owner sees it.
+
+    ``generation`` counts submitted jobs (0 = none since this process
+    started). ``error`` is a short classification of a job that raised
+    (e.g. ``"busy"``, ``"not_authorized"``, ``"internal_error"``); details
+    stay in the server log. Status is process memory: after a restart the
+    Conversation is idle and Data holds everything durable."""
+
+    running: bool
+    generation: int = 0
+    result: DriveResult | None = None
+    error: str | None = None
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+
+
+class ConversationRunner(Protocol):
+    """CTRL-06: runs ``drive``/``resume`` in the background for interfaces
+    (Web/CLI) that must not block on a whole loop. Status is kept per
+    (principal, Conversation): another principal sees an idle Conversation."""
+
+    async def submit(self, scope: TrustedScope, message: UserMessage | None) -> JobStatus:
+        """Start ``drive(scope, message)`` — or ``resume(scope)`` when
+        ``message`` is None — and return at once. Raises
+        ControlError(BUSY) while this Conversation has a running job."""
+        ...
+
+    def status(self, scope: TrustedScope) -> JobStatus: ...
+
+    async def wait(self, scope: TrustedScope) -> JobStatus:
+        """Until the current job (if any) has finished."""
+        ...
+
+    async def shutdown(self, grace_seconds: float) -> None:
+        """Let running jobs finish within the grace period, then cancel the
+        rest (a cancelled job is recovered like a crash, T-R)."""
         ...

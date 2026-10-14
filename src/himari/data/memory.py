@@ -31,6 +31,7 @@ from himari.common import (
     UnknownOutcomePolicy,
     WorkspaceId,
 )
+from himari.data import rules
 from himari.data.api import (
     AnswerCommit,
     Artifact,
@@ -40,12 +41,14 @@ from himari.data.api import (
     AssistantToolCalls,
     BindingAuthority,
     ConversationEvent,
+    ConversationSummary,
     ConversationWorkspace,
     DataError,
     DataErrorCode,
     EnvironmentActivation,
     EventKind,
     EventPayload,
+    InitialActivation,
     PersistedStateBasis,
     ProjectionResult,
     PromptBasis,
@@ -94,6 +97,8 @@ class _Run:
 @dataclass
 class _Conversation:
     owner: PrincipalId
+    title: str | None = None
+    created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     events: list[ConversationEvent] = field(default_factory=list)
     runs: dict[RunId, _Run] = field(default_factory=dict)  # insertion order = creation order
     executions: dict[CallRef, ToolExecutionRecord] = field(default_factory=dict)
@@ -115,10 +120,10 @@ class InMemoryStore:
 
     # --- admin helpers (trusted setup paths, not model-reachable) --------
 
-    def create_conversation(self, scope: TrustedScope) -> None:
+    def create_conversation(self, scope: TrustedScope, *, title: str | None = None) -> None:
         if scope.conversation_id in self._conversations:
             raise DataError(DataErrorCode.DUPLICATE_IDENTITY, scope.conversation_id)
-        self._conversations[scope.conversation_id] = _Conversation(owner=scope.principal_id)
+        self._conversations[scope.conversation_id] = _Conversation(owner=scope.principal_id, title=title)
 
     def activate_environment(
         self,
@@ -562,6 +567,51 @@ class InMemoryData:
         if workspace is None:
             raise DataError(DataErrorCode.NOT_FOUND, "conversation workspace")
         return workspace
+
+    # --- ConversationCatalog ----------------------------------------------------
+
+    async def create_conversation(
+        self,
+        principal: PrincipalId,
+        *,
+        title: str | None = None,
+        activations: Sequence[InitialActivation] = (),
+    ) -> ConversationId:
+        title = rules.normalize_title(title)
+        rules.check_activations(activations)
+        scope = TrustedScope(principal, ConversationId(self._store.new_id("conv")))
+        self._store.create_conversation(scope, title=title)
+        for activation in activations:  # validated above: cannot fail half way
+            self._store.activate_environment(scope, activation.environment_kind, activation.workspace_id)
+        return scope.conversation_id
+
+    def _summary(self, conversation_id: ConversationId, conv: _Conversation) -> ConversationSummary:
+        first_user = next((e for e in conv.events if isinstance(e.payload, UserMessage)), None)
+        return ConversationSummary(
+            conversation_id=conversation_id,
+            title=conv.title,
+            created_at=conv.created_at,
+            last_activity_at=conv.events[-1].created_at if conv.events else conv.created_at,
+            last_sequence=len(conv.events),
+            preview="" if first_user is None else rules.preview(first_user.payload.blocks),  # type: ignore[union-attr]
+        )
+
+    async def list_conversations(
+        self, principal: PrincipalId, *, limit: int = 50, offset: int = 0
+    ) -> Sequence[ConversationSummary]:
+        rules.check_page(limit, offset)
+        owned = [(i, cid, conv) for i, (cid, conv) in enumerate(self._store._conversations.items())
+                 if conv.owner == principal]
+        rows = [(self._summary(cid, conv), i) for i, cid, conv in owned]
+        rows.sort(key=lambda row: (row[0].last_activity_at, row[1]), reverse=True)
+        return tuple(summary for summary, _ in rows[offset : offset + limit])
+
+    async def read_conversation(self, scope: TrustedScope) -> ConversationSummary:
+        return self._summary(scope.conversation_id, self._conv(scope))
+
+    async def rename_conversation(self, scope: TrustedScope, title: str | None) -> None:
+        conv = self._conv(scope)
+        conv.title = rules.normalize_title(title)
 
     # --- StateQuery -------------------------------------------------------------
 

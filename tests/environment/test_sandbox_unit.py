@@ -7,7 +7,9 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -529,3 +531,98 @@ def test_cancelled_call_returns_only_after_a_late_spawned_process_is_dead(tmp_pa
         asyncio.run(scenario())
     finally:
         os.close(root_fd)
+
+
+# --- PR #11 review B1: started blocking work always completes before the call ends -------
+
+
+class Gate:
+    """Blocks a worker thread until opened; records how it ended."""
+
+    def __init__(self) -> None:
+        self.entered, self.release, self.finished = threading.Event(), threading.Event(), threading.Event()
+        self.fd_valid_at_end: bool | None = None
+
+
+async def _cancel_while_blocked(task: asyncio.Task[Any], gate: Gate, check: Callable[[], None]) -> None:
+    while not gate.entered.is_set():
+        await asyncio.sleep(0.01)
+    for _ in range(3):  # repeated cancellation must not cut the wait short
+        task.cancel()
+        await asyncio.sleep(0.05)
+        assert not task.done(), "the call ended while its thread was still working"
+        check()
+    gate.release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert gate.finished.is_set()
+
+
+@pytest.mark.parametrize("tool_id", ["inside/write_file", "inside/read_file"])
+def test_cancelled_file_tool_waits_for_its_thread_and_holds_the_lock(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tool_id: str) -> None:
+    from himari.environment.inside import tools as inside_tools
+
+    env = make_env(tmp_path, None)
+    (tmp_path / "workspaces/ws_alice/conversations/c1").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "workspaces/ws_alice/conversations/c1/f.txt").write_text("x")
+    gate = Gate()
+    cls = inside_tools.WriteFile if tool_id.endswith("write_file") else inside_tools.ReadFile
+    real_act = cls.act
+
+    def slow_act(self: Any, root_fd: int, relative: str, args: Any) -> ToolOutcome:
+        gate.entered.set()
+        gate.release.wait(10)
+        try:
+            return real_act(self, root_fd, relative, args)
+        finally:
+            gate.finished.set()
+
+    monkeypatch.setattr(cls, "act", slow_act)
+    tool = next(t for t in env.tools() if t.definition.tool_id == tool_id)
+    lock = env.write_lock(WorkspaceId("ws_alice"))
+    writes = tool_id.endswith("write_file")
+
+    async def scenario() -> None:
+        task = asyncio.create_task(tool.run(ToolInvocation(ToolId(tool_id), CallId("c"), {"path": "f.txt", "content": "y"}), ctx_for()))
+
+        def held() -> None:
+            assert lock.locked() is writes
+
+        await _cancel_while_blocked(task, gate, held)
+        assert not lock.locked()
+
+    asyncio.run(scenario())
+
+
+def test_cancelled_admission_never_outlives_the_root_descriptor(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from himari.environment.inside import admission
+
+    backend = FakeBackend(sb.SandboxState.ENFORCED)
+    env = make_env(tmp_path, backend)
+    gate = Gate()
+    real_admit = admission.admit_workspace
+
+    def slow_admit(root_fd: int, host_root: str, **kwargs: Any) -> None:
+        gate.entered.set()
+        gate.release.wait(10)
+        try:
+            os.fstat(root_fd)
+            gate.fd_valid_at_end = True
+        except OSError:
+            gate.fd_valid_at_end = False
+        try:
+            real_admit(root_fd, host_root, **kwargs)
+        finally:
+            gate.finished.set()
+
+    monkeypatch.setattr(admission, "admit_workspace", slow_admit)
+    tool = next(t for t in env.tools() if t.definition.tool_id == "inside/run_command")
+    lock = env.write_lock(WorkspaceId("ws_alice"))
+
+    async def scenario() -> None:
+        task = asyncio.create_task(tool.run(ToolInvocation(ToolId("inside/run_command"), CallId("c"), {"argv": ["true"]}), ctx_for()))
+        await _cancel_while_blocked(task, gate, lambda: None if lock.locked() else pytest.fail("lock released"))
+
+    asyncio.run(scenario())
+    assert gate.fd_valid_at_end is True and backend.calls == []  # nothing ran after the cancellation
