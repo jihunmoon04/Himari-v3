@@ -74,3 +74,52 @@ def test_message_accepted_with_202_survives_a_kill_and_is_answered_after_restart
             await app.close()
 
     asyncio.run(after_restart())
+
+
+def _outward_address() -> str | None:
+    """This machine's non-loopback IPv4 address, if it has one (no packet is sent)."""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+            probe.connect(("192.0.2.1", 9))  # TEST-NET-1: routing lookup only
+            address = str(probe.getsockname()[0])
+    except OSError:
+        return None
+    return None if address.startswith("127.") else address
+
+
+@pytest.mark.parametrize("bind", [None, "0.0.0.0"])
+def test_the_real_server_is_unreachable_from_other_addresses(tmp_path: Path, bind: str | None) -> None:
+    """PR #12 re-review B2: with an https origin configured (a proxy setup),
+    the plain-HTTP listener is loopback only; asked to bind everywhere, the
+    server refuses to start instead."""
+    outward = _outward_address()
+    if outward is None:
+        pytest.skip("no non-loopback address on this host")
+    port = free_port()
+    env = {**os.environ, "PYTHONPATH": str(ROOT / "src"), "HIMARI_DATA_ROOT": str(tmp_path / "data"),
+           "HIMARI_WEB_PORT": str(port), "HIMARI_SANDBOX": "0", "OPENROUTER_API_KEY": "not-used",
+           "HIMARI_WEB_ALLOWED_HOSTS": "server.example.com,127.0.0.1",
+           "HIMARI_WEB_ALLOWED_ORIGINS": "https://server.example.com"}
+    if bind is not None:
+        env["HIMARI_WEB_HOST"] = bind
+    server = subprocess.Popen([sys.executable, "-m", "himari.interfaces.web"], env=env,
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        if bind is not None:
+            assert server.wait(30) == 2 and b"not a loopback address" in server.stderr.read()  # type: ignore[union-attr]
+            assert not (tmp_path / "data").exists()  # refused before opening anything
+        else:
+            for _ in range(200):
+                try:
+                    if httpx.get(f"http://127.0.0.1:{port}/api/session", timeout=1).status_code == 200:
+                        break
+                except httpx.HTTPError:
+                    time.sleep(0.05)
+            else:
+                pytest.fail("server did not start")
+        with pytest.raises(OSError):
+            socket.create_connection((outward, port), timeout=2).close()
+    finally:
+        if server.poll() is None:
+            server.terminate()
+            server.wait(10)

@@ -1,16 +1,18 @@
 """Web server configuration (adapted from HIMARI-v2 ``interfaces/web/config.py``).
 
-Plain environment reads. A non-loopback bind is refused unless BOTH
-``HIMARI_WEB_ALLOWED_HOSTS`` and ``HIMARI_WEB_ALLOWED_ORIGINS`` are set
-explicitly; wildcards are refused in both. Nothing here imports the web
-framework, so a configuration defect fails before any socket is bound.
+Plain environment reads; wildcards are refused in the allowed hosts and
+origins. Nothing here imports the web framework, so a configuration
+defect fails before any socket is bound.
 
 The operator token and session cookie never cross a network in clear text
-(V3-P46): a plain ``http://`` origin is accepted only for a loopback host
-(the browser on the same machine), and a non-loopback bind requires every
-allowed origin to be ``https://`` with ``Secure`` cookies. The recommended
-remote deployment is a TLS-terminating reverse proxy in front of a
-loopback-bound server, with the public ``https://`` origin configured.
+(V3-P46). The server itself speaks plain HTTP only, so it binds to a
+loopback address only — a declared ``https://`` Origin proves nothing
+about the connection (any client can send that header, and a browser on a
+plain-HTTP page would already have sent the token). Remote use goes
+through a TLS-terminating reverse proxy on the same machine: configure its
+public name in ``HIMARI_WEB_ALLOWED_HOSTS`` and its ``https://`` origin in
+``HIMARI_WEB_ALLOWED_ORIGINS``. A plain ``http://`` origin is accepted only
+for a loopback host, and any https origin makes the cookie ``Secure``.
 """
 
 from __future__ import annotations
@@ -69,10 +71,10 @@ class WebConfig:
         )
         if any("*" in h for h in allowed_hosts) or any("*" in o for o in allowed_origins):
             raise WebConfigError("allowed hosts and origins must not contain wildcards")
-        if host not in _LOOPBACK_BIND_HOSTS and (hosts_raw is None or origins_raw is None):
+        if host not in _LOOPBACK_BIND_HOSTS:
             raise WebConfigError(
-                f"{HOST_VAR}={host!r} is not a loopback host; a non-loopback bind requires both "
-                f"{ALLOWED_HOSTS_VAR} and {ALLOWED_ORIGINS_VAR} to be set explicitly"
+                f"{HOST_VAR}={host!r} is not a loopback address: HIMARI serves plain HTTP, so it binds to "
+                f"127.0.0.1, ::1 or localhost only; for remote use put a TLS reverse proxy in front"
             )
         cleartext = sorted(o for o in allowed_origins
                            if o.startswith("http://") and o[len("http://"):].rsplit(":", 1)[0] not in _LOOPBACK_ORIGIN_HOSTS)
@@ -81,14 +83,10 @@ class WebConfig:
                 f"{ALLOWED_ORIGINS_VAR} has plain-http origins for other machines {cleartext}: the operator token "
                 "would cross the network in clear text; serve them over https (e.g. a TLS reverse proxy)"
             )
-        remote = host not in _LOOPBACK_BIND_HOSTS
-        secure_cookie = _flag(source.get(SECURE_COOKIE_VAR), SECURE_COOKIE_VAR,
-                              default=remote or any(o.startswith("https://") for o in allowed_origins))
-        if remote and (not secure_cookie or any(not o.startswith("https://") for o in allowed_origins)):
-            raise WebConfigError(
-                f"a non-loopback bind serves only https origins with Secure cookies; prefer binding to 127.0.0.1 "
-                f"behind a TLS reverse proxy"
-            )
+        proxied = any(o.startswith("https://") for o in allowed_origins)
+        secure_cookie = _flag(source.get(SECURE_COOKIE_VAR), SECURE_COOKIE_VAR, default=proxied)
+        if proxied and not secure_cookie:
+            raise WebConfigError(f"{SECURE_COOKIE_VAR}=0 is refused with an https origin: the cookie must stay Secure")
         data_root = source.get(DATA_ROOT_VAR, "").strip()
         if not data_root:
             raise WebConfigError(f"{DATA_ROOT_VAR} must name the private data directory")

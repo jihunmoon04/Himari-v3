@@ -74,7 +74,7 @@ HIMARI_DATA_ROOT=~/.himari python -m himari.interfaces.web --env-file .env
 
 - `.env`(git 제외)에 `OPENROUTER_API_KEY=...`를 둡니다. 선택: `HIMARI_MODEL`(기본 `openai/gpt-5-nano`), `HIMARI_REASONING_EFFORT`, `HIMARI_WEB_PORT`(기본 8765), `HIMARI_SANDBOX=0`(명령 실행 끄기).
 - 브라우저에서 `http://127.0.0.1:8765/`를 열고 `~/.himari/control/operator.secret`의 토큰으로 로그인합니다.
-- 기본은 localhost에서만 열립니다. 다른 기기에서 쓰려면 서버는 `127.0.0.1`에 두고 TLS reverse proxy 뒤에서 `HIMARI_WEB_ALLOWED_HOSTS`·`HIMARI_WEB_ALLOWED_ORIGINS=https://...`를 지정하세요. 평문 `http://`로 다른 기기에 여는 설정은 시작 단계에서 거부됩니다(토큰 보호).
+- 서버는 평문 HTTP라서 loopback 주소(`127.0.0.1`·`::1`·`localhost`)에만 바인딩합니다. 다른 기기에서 쓰려면 같은 기기의 TLS reverse proxy 뒤에 두고 `HIMARI_WEB_ALLOWED_HOSTS=<공개 이름>`·`HIMARI_WEB_ALLOWED_ORIGINS=https://<공개 이름>`을 지정하세요. 외부 주소 바인딩이나 다른 기기용 평문 `http://` Origin은 시작 단계에서 거부됩니다(토큰 보호).
 
 공개 계약은 각 모듈의 `api.py`가 원본입니다(V3-046). P0 실행 경로는 `build_runtime(provider, store=SqliteStore(path))`로 영속 Data를, 저장소를 생략하면 인메모리 Data를 사용하며, Fake Provider뿐 아니라 **실제 OpenRouter LLM**으로도 실행할 수 있습니다.
 
