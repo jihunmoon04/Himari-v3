@@ -233,6 +233,8 @@ def test_conversation_flow_with_a_tool_and_a_question(server: Server) -> None:
                      "user_message", "tool_result", "assistant_final"]
     write_result = events["items"][2]
     assert write_result["is_error"] is False and "plan.txt" in write_result["text"]
+    assert write_result["run_id"] == events["items"][1]["run_id"] != events["items"][3]["run_id"]  # (run, call) identity
+    assert events["items"][4]["answers_run"] == events["items"][3]["run_id"]
     assert events["items"][4]["answers_call"] == events["items"][3]["calls"][0]["call_id"]
     later = server.client.get(f"/api/conversations/{cid}/events?after=5").json()
     assert [e["sequence"] for e in later["items"]] == [6, 7] and later["last_sequence"] == 7

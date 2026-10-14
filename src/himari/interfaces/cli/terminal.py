@@ -19,11 +19,38 @@ from __future__ import annotations
 
 import codecs
 import unicodedata
+from dataclasses import dataclass
 from typing import Any
 
 _UNSAFE_CATEGORIES = frozenset({"Cc", "Cf", "Cs"})
 _ESCAPES = {"\\": "\\\\", "\r": "\\r"}
 INDENT = "  │ "
+ASCII_INDENT = "  | "
+
+
+@dataclass(frozen=True)
+class Symbols:
+    indent: str
+    call: str
+    result: str
+    ok: str
+    failed: str
+    more: str
+
+
+UNICODE_SYMBOLS = Symbols(INDENT, "⚙", "↳", "✓", "✗ failed", "…")
+ASCII_SYMBOLS = Symbols(ASCII_INDENT, "*", "->", "ok", "x failed", "...")
+
+
+def symbols_for(encoding: str | None) -> Symbols:
+    """The CLI's own marks, or ASCII ones where the stream cannot carry them."""
+    if encoding is None:
+        return UNICODE_SYMBOLS
+    try:
+        "".join(vars(UNICODE_SYMBOLS).values()).encode(encoding)
+    except UnicodeEncodeError:
+        return ASCII_SYMBOLS
+    return UNICODE_SYMBOLS
 
 
 def stream_encoding(stream: Any) -> str | None:
@@ -69,9 +96,10 @@ def safe_line(value: str, *, encoding: str | None = None) -> str:
 def safe_block(value: str, *, encoding: str | None = None, max_lines: int | None = None) -> str:
     """A multi-line body: each line made safe and indented; tabs become
     spaces; at most ``max_lines`` lines, then a visible marker."""
+    marks = symbols_for(encoding)
     lines = value.replace("\t", "    ").split("\n")
     shown = lines if max_lines is None else lines[:max_lines]
-    rendered = [INDENT + safe_line(line, encoding=encoding) for line in shown]
+    rendered = [marks.indent + safe_line(line, encoding=encoding) for line in shown]
     if max_lines is not None and len(lines) > max_lines:
-        rendered.append(f"{INDENT}… ({len(lines) - max_lines} more lines)")
+        rendered.append(f"{marks.indent}{marks.more} ({len(lines) - max_lines} more lines)")
     return "\n".join(rendered)

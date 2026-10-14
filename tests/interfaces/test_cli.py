@@ -12,6 +12,7 @@ import threading
 import time
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 
 import pytest
@@ -273,3 +274,107 @@ def test_the_cli_against_a_real_server_process(tmp_path: Path) -> None:
 
 
 
+
+
+# --- PR #13 review --------------------------------------------------------------------------
+
+
+def test_call_ids_repeat_across_runs_without_hiding_results(harness: Harness) -> None:
+    """B1: a call is (run_id, call_id); the scripted provider reuses c0 every Run."""
+    cid = harness.run("new")[1].strip()
+    harness.queue(calls((ASK_USER_TOOL_ID, {"question": "Which file?"})))
+    assert harness.run("send", cid, "write a file")[0] == cli.EXIT_WAITING
+    harness.queue(calls(("inside/write_file", {"path": "x.txt", "content": "hello"})), final("done"))
+    code, out, _ = harness.run("send", cid, "x.txt")
+    assert code == 0 and "  ↳ inside/write_file ✓" in out and "You (answer):" in out
+    shown = harness.run("show", cid)[1]
+    assert shown.count("  ↳ inside/write_file ✓") == 1 and shown.count("x.txt") >= 2
+    assert shown.count(f"{INDENT}x.txt") == 1  # the answer once, not repeated as a tool result
+    events = harness.test_client.get(f"/api/conversations/{cid}/events").json()["items"]
+    runs = [e["run_id"] for e in events if e["kind"] == "assistant_tool_calls"]
+    assert len(set(runs)) == 2 and [e["answers_run"] for e in events if e.get("answers_call")] == [runs[0]]
+
+
+def _mock(handler: Any) -> ServerClient:
+    return ServerClient(httpx.Client(base_url="http://127.0.0.1:1", transport=httpx.MockTransport(handler)))
+
+
+@pytest.mark.parametrize("status, body, expected", [
+    (201, b"not json", cli.EXIT_UNKNOWN),                                   # committed, unreadable
+    (202, b'{"x":"' + b"a" * (9 * 1024 * 1024) + b'"}', cli.EXIT_UNKNOWN),  # committed, too large
+    (500, b'{"error":{"code":"internal_error"}}', cli.EXIT_UNKNOWN),        # may follow a commit
+    (409, b'{"error":{"code":"busy","message":"still working"}}', cli.EXIT_FAILED),  # a definite refusal
+])
+def test_a_mutation_without_a_readable_answer_is_unknown_and_sent_once(status: int, body: bytes, expected: int) -> None:
+    """B2: only a readable answer or a 4xx settles a mutation."""
+    sent: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            sent.append(request.url.path)
+            return httpx.Response(status, content=body)
+        return httpx.Response(200, json={"conversation": {"last_sequence": 0}, "job": {"running": False}})
+
+    for argv in (["send", "conv_1", "hi"], ["new"], ["continue", "conv_1"]):
+        sent.clear()
+        out, err = io.StringIO(), io.StringIO()
+        assert cli.run(argv, environ={}, out=out, err=err, client=_mock(handler)) == expected, (argv, err.getvalue())
+        assert len(sent) == 1
+
+
+def test_large_event_pages_are_read_in_smaller_pages() -> None:
+    """B3: a page over the response bound is read again at half the size."""
+    limits: list[int] = []
+    events: list[dict[str, Any]] = [{"sequence": i, "kind": "assistant_final", "text": f"m{i}"} for i in range(1, 41)]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/events"):
+            limit, after = int(request.url.params["limit"]), int(request.url.params["after"])
+            limits.append(limit)
+            if limit > 4:
+                return httpx.Response(200, content=b'{"pad":"' + b"a" * (9 * 1024 * 1024) + b'"}')
+            items = [e for e in events if e["sequence"] > after][:limit]
+            return httpx.Response(200, json={"items": items, "last_sequence": items[-1]["sequence"] if items else after})
+        return httpx.Response(200, json={"conversation": {"last_sequence": 40}, "job": {"running": False},
+                                         "waiting": None, "continuable": False})
+
+    out, err = io.StringIO(), io.StringIO()
+    assert cli.run(["show", "conv_1"], environ={}, out=out, err=err, client=_mock(handler)) == 0, err.getvalue()
+    assert limits[:4] == [32, 16, 8, 4] and set(limits[4:]) == {4}
+    assert out.getvalue().count("HIMARI:") == 40
+
+
+def test_a_single_oversized_event_is_reported() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/events"):
+            return httpx.Response(200, content=b'{"pad":"' + b"a" * (9 * 1024 * 1024) + b'"}')
+        return httpx.Response(200, json={"conversation": {"last_sequence": 1}, "job": {"running": False}})
+
+    err = io.StringIO()
+    assert cli.run(["show", "conv_1"], environ={}, out=io.StringIO(), err=err, client=_mock(handler)) == cli.EXIT_FAILED
+    assert "larger than the CLI can read" in err.getvalue()
+
+
+def test_show_works_with_a_small_response_bound(harness: Harness, monkeypatch: pytest.MonkeyPatch) -> None:
+    from himari.interfaces.cli import client as cli_client
+
+    cid = harness.run("new")[1].strip()
+    for i in range(6):
+        harness.queue(final(f"answer {i} " + "z" * 3000))
+        assert harness.run("send", cid, f"question {i}")[0] == 0
+    monkeypatch.setattr(cli_client, "MAX_RESPONSE_BYTES", 8000)  # forces smaller pages on a real server
+    code, out, err = harness.run("show", cid)
+    assert code == 0, err
+    assert out.count("You:") == 6 and out.count("HIMARI:") == 6
+
+
+def test_an_ascii_terminal_gets_ascii_marks(harness: Harness) -> None:
+    """C1: the CLI's own marks never raise UnicodeEncodeError."""
+    cid = harness.run("new")[1].strip()
+    harness.queue(calls(("inside/write_file", {"path": "é.txt", "content": "x"})), final("done ✓"))
+    raw = io.BytesIO()
+    out = io.TextIOWrapper(raw, encoding="ascii", errors="strict", write_through=True)
+    code = cli.run(["send", cid, "go"], environ={}, out=out, err=io.StringIO(), client=harness.client())
+    text = raw.getvalue().decode("ascii")
+    assert code == 0 and "  * inside/write_file" in text and "  -> inside/write_file ok" in text
+    assert "  | done \\u2713" in text and "\\u00e9.txt" in text

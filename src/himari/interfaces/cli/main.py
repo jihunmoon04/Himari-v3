@@ -32,14 +32,16 @@ from himari.interfaces.cli.client import (
     BadServerURL,
     ClientError,
     OutcomeUnknown,
+    ResponseTooLarge,
     ServerClient,
     ServerRefused,
     ServerUnavailable,
 )
-from himari.interfaces.cli.terminal import safe_block, safe_line, stream_encoding
+from himari.interfaces.cli.terminal import Symbols, safe_block, safe_line, stream_encoding, symbols_for
 
 EXIT_OK, EXIT_FAILED, EXIT_USAGE, EXIT_WAITING, EXIT_UNKNOWN = 0, 1, 2, 3, 4
 POLL_SECONDS = 0.5
+EVENT_PAGE = 32  # 32 x a 64 KiB Tool result stays well under the 8 MiB response bound
 TOOL_RESULT_LINES = 8
 
 STATE_TEXT = {
@@ -68,8 +70,9 @@ def _path(conversation_id: str, suffix: str = "") -> str:
 class Printer:
     out: TextIO
     verbose: bool = False
-    calls: dict[str, str] = field(default_factory=dict)  # call_id -> tool_id
-    answered: set[str] = field(default_factory=set)  # ask_user calls whose answer was printed
+    # A call is identified by (run_id, call_id): call ids repeat across Runs.
+    calls: dict[tuple[str, str], str] = field(default_factory=dict)  # -> tool_id
+    answered: set[tuple[str, str]] = field(default_factory=set)  # ask_user calls whose answer was printed
 
     @property
     def encoding(self) -> str | None:
@@ -78,6 +81,10 @@ class Printer:
     def line(self, text: str) -> None:
         self.out.write(text + "\n")
         self.out.flush()
+
+    @property
+    def symbols(self) -> Symbols:
+        return symbols_for(self.encoding)
 
     def block(self, header: str, text: str, max_lines: int | None = None) -> None:
         self.line(header)
@@ -89,7 +96,7 @@ class Printer:
         if kind == "user_message":
             answers = event.get("answers_call")
             if answers:
-                self.answered.add(str(answers))  # its tool_result repeats this text
+                self.answered.add((str(event.get("answers_run")), str(answers)))  # its tool_result repeats this text
             self.block("You:" if not answers else "You (answer):", text)
         elif kind == "assistant_final":
             self.block("HIMARI:", text)
@@ -98,7 +105,7 @@ class Printer:
                 self.block("HIMARI:", text)
             for call in event.get("calls", []):
                 tool_id, call_id = str(call.get("tool_id")), str(call.get("call_id"))
-                self.calls[call_id] = tool_id
+                self.calls[(str(event.get("run_id")), call_id)] = tool_id
                 arguments = call.get("arguments") or {}
                 if tool_id == "ask_user":
                     question = arguments.get("question") if isinstance(arguments, dict) else None
@@ -106,15 +113,16 @@ class Printer:
                     continue
                 shown = json.dumps(arguments, ensure_ascii=False, sort_keys=True)
                 if len(shown) > 200 and not self.verbose:
-                    shown = shown[:199] + "…"
-                self.line(f"  ⚙ {safe_line(tool_id, encoding=self.encoding)} {safe_line(shown, encoding=self.encoding)}")
+                    shown = shown[:199] + self.symbols.more
+                self.line(f"  {self.symbols.call} {safe_line(tool_id, encoding=self.encoding)} "
+                          f"{safe_line(shown, encoding=self.encoding)}")
         elif kind == "tool_result":
-            call_id = str(event.get("call_id"))
-            called = self.calls.get(call_id)
-            if called == "ask_user" or call_id in self.answered:
+            key = (str(event.get("run_id")), str(event.get("call_id")))
+            called = self.calls.get(key)
+            if called == "ask_user" or key in self.answered:
                 return  # the answer was already shown as the user's message
-            mark = "✗ failed" if event.get("is_error") else "✓"
-            self.line(f"  ↳ {safe_line(called or 'tool', encoding=self.encoding)} {mark}")
+            mark = self.symbols.failed if event.get("is_error") else self.symbols.ok
+            self.line(f"  {self.symbols.result} {safe_line(called or 'tool', encoding=self.encoding)} {mark}")
             self.line(safe_block(text, encoding=self.encoding, max_lines=None if self.verbose else TOOL_RESULT_LINES))
 
 
@@ -128,12 +136,21 @@ class Session:
         self.err.flush()
 
     def print_events(self, conversation_id: str, after: int) -> int:
+        """Pages of at most EVENT_PAGE events; a page over the response bound
+        is read again at half the size (a read, so safe to repeat)."""
+        limit = EVENT_PAGE
         while True:
-            page = self.client.get(_path(conversation_id, "/events"), {"after": after, "limit": 200})
+            try:
+                page = self.client.get(_path(conversation_id, "/events"), {"after": after, "limit": limit})
+            except ResponseTooLarge:
+                if limit == 1:
+                    raise ClientError(f"event {after + 1} is larger than the CLI can read") from None
+                limit = max(1, limit // 2)
+                continue
             for event in page["items"]:
                 self.printer.event(event)
             after = int(page["last_sequence"])
-            if len(page["items"]) < 200:
+            if len(page["items"]) < limit:
                 return after
 
     def follow(self, conversation_id: str, after: int) -> tuple[dict[str, Any], int]:
