@@ -333,7 +333,11 @@ function applyContext(context) {
   if (context.enabled) {
     const size = context.estimated_tokens === null ? "size unknown while working"
       : `about ${formatTokens(context.estimated_tokens)} of ${formatTokens(context.budget_tokens)} tokens`;
-    $("chat-menu-context").textContent = `${size} · summarizes at ${formatTokens(context.compact_at_tokens)}`;
+    let text = `${size} · summarizes at ${formatTokens(context.compact_at_tokens)}`;
+    if (context.hard_limit_tokens !== context.budget_tokens) {
+      text += ` · model limit ${formatTokens(context.hard_limit_tokens)}`; // the budget is a target, not the refusal point
+    }
+    $("chat-menu-context").textContent = text;
   }
   placeDivider();
 }

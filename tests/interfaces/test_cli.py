@@ -420,3 +420,46 @@ def test_a_compacted_conversation_shows_where_the_summary_takes_over(tmp_path: P
         assert "context: about " in err_buffer.getvalue()
         assert out_buffer.getvalue().splitlines()[-2:] == [
             "Summary the model sees for earlier messages:", f"{INDENT}SUMMARY of the start"]
+
+
+def test_a_compacted_conversation_on_an_ascii_terminal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # PR #16 review B1: the divider is the CLI's own mark too; it never raises.
+    monkeypatch.setattr(cli, "POLL_SECONDS", 0.01)
+    harness = Harness(tmp_path, context_tokens=2000)
+    with harness.test_client:
+        cid = harness.run("new")[1].strip()
+        harness.queue(*[final("SUMMARY 요약 ─ done")] * 12)
+        for text in ("가" * 550, "가" * 550, "가" * 550, "next"):
+            assert harness.run("send", cid, text)[0] == 0
+        for verbose in ([], ["--verbose"]):
+            raw = io.BytesIO()
+            out = io.TextIOWrapper(raw, encoding="ascii", errors="strict", write_through=True)
+            code = cli.run([*verbose, "show", cid], environ={}, out=out, err=io.StringIO(), client=harness.client())
+            text = raw.getvalue().decode("ascii")
+            assert code == 0 and "-- earlier messages reach HIMARI only as a summary" in text
+            if verbose:
+                assert "  | SUMMARY \\uc694\\uc57d \\u2500 done" in text
+
+
+def test_chat_says_when_the_boundary_moved_after_the_history_was_printed(tmp_path: Path,
+                                                                         monkeypatch: pytest.MonkeyPatch) -> None:
+    # PR #16 review C1
+    monkeypatch.setattr(cli, "POLL_SECONDS", 0.01)
+    harness = Harness(tmp_path, context_tokens=2000)
+    with harness.test_client:
+        cid = harness.run("new")[1].strip()
+        harness.queue(*[final("SUMMARY")] * 12)
+        out, err = io.StringIO(), io.StringIO()
+        session = cli.Session(harness.client(), cli.Printer(out), err, sleep=lambda s: None)
+        lines = iter(["가" * 550, "가" * 550, "가" * 550, "next", "/context", "/context", "/exit"])
+        assert cli.cmd_chat(session, cli.parser().parse_args(["chat", cid]), read=lambda prompt: next(lines)) == 0
+        notes = [row for row in err.getvalue().splitlines() if row.startswith("(compacted since")]
+        assert len(notes) == 1 and "events up to #" in notes[0]  # once: the second /context saw nothing new
+
+
+def test_the_context_line_names_the_model_limit_when_it_differs() -> None:
+    # PR #16 review C2: the budget is where compaction aims, not where a request is refused.
+    base = {"estimated_tokens": 1234, "budget_tokens": 200_000, "compact_at_tokens": 160_000, "compactions": 0}
+    assert cli.context_line({**base, "hard_limit_tokens": 200_000}) == (
+        "context: about 1,234 of 200,000 tokens; summarizes at 160,000")
+    assert cli.context_line({**base, "hard_limit_tokens": 400_000}).endswith("; model limit 400,000")

@@ -77,6 +77,7 @@ class Printer:
     # first event it does not cover, with the summary when verbose.
     covered: int | None = None
     summary: str | None = None
+    compactions: int = 0
     divided: bool = False
 
     @property
@@ -98,7 +99,8 @@ class Printer:
     def divider(self) -> None:
         self.divided = True
         hint = "below" if self.verbose else "use --verbose or /context to read it"
-        self.line(f"── earlier messages reach HIMARI only as a summary ({hint}) ──")
+        rule = self.symbols.rule  # ASCII on a stream that cannot carry "─" (like every CLI mark)
+        self.line(f"{rule} earlier messages reach HIMARI only as a summary ({hint}) {rule}")
         if self.verbose and self.summary:
             self.line(safe_block(self.summary, encoding=self.encoding))
 
@@ -147,6 +149,8 @@ def context_line(context: dict[str, Any]) -> str:
     size = ("size unknown while working" if estimated is None
             else f"about {estimated:,} of {context['budget_tokens']:,} tokens")
     line = f"context: {size}; summarizes at {context['compact_at_tokens']:,}"
+    if context.get("hard_limit_tokens") != context.get("budget_tokens"):
+        line += f"; model limit {context['hard_limit_tokens']:,}"  # the budget is a target, not the refusal point
     compactions = int(context.get("compactions") or 0)
     if compactions:
         line += f"; compacted {compactions} time{'s' if compactions > 1 else ''}"
@@ -175,6 +179,8 @@ class Session:
         self.printer.covered = covered if isinstance(covered, int) else None
         summary = context.get("summary")
         self.printer.summary = summary if isinstance(summary, str) else None
+        compactions = context.get("compactions")
+        self.printer.compactions = compactions if isinstance(compactions, int) else 0
         return context
 
     def print_events(self, conversation_id: str, after: int) -> int:
@@ -322,11 +328,16 @@ def cmd_chat(session: Session, args: argparse.Namespace, read: Callable[[str], s
             session.printer.line(conversation_id)
             continue
         if text == "/context":
+            seen = session.printer.compactions
             context = session.context(conversation_id)
             if context is None:
                 session.note("(no context information)")
                 continue
             session.note(context_line(context))
+            if session.printer.compactions > seen and session.printer.covered is not None:
+                # The history above was printed before this compaction: say where the boundary is now.
+                session.note(f"(compacted since the history above was printed: the summary now covers "
+                             f"events up to #{session.printer.covered})")
             if session.printer.summary:
                 session.printer.block("Summary the model sees for earlier messages:", session.printer.summary)
             continue
