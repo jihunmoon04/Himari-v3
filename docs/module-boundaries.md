@@ -19,7 +19,7 @@
 - **Control**: 각 작업의 흐름을 관리하고 Prompt → Provider 1회 → 응답 분기 → Tool 실행 → 다음 Run을 조정. question용 suspending Tool `ask_user`를 등록한다(V3-044). Conversation lock은 동시 실행만 막고, 크래시 후 중복 방지는 Data 영속 표시에 의존한다(V3-045).
 - **Prompt**: 얇은 `PromptContextLoader`가 Data 읽기 모델·Tool catalog를 모으고, **순수 함수 `compose(PromptInputs)`**가 provider-neutral 요청을 구성한다(V3-043). 자체 영속 저장·전송 금지.
 - **Provider**: `ProviderAdapter` SPI(`prepare_native_request`/`invoke_prepared`/`normalize`/`describe_capabilities`)로 모델별 통신, 지원 기능 협상, 응답 정규화. Run 반복 정책 금지.
-- **Tool**: `ToolHandler` SPI 정의, 카탈로그 취합, 인자 검증, 디스패치, 충돌 안전성이 입증된 다중 ToolCall의 스케줄링, **`ToolOutcome`의 원자 커밋**(V3-042). Tool 구현 자체는 Internal 모듈이나 Environment 패키지에 있다.
+- **Tool**: `ToolHandler` SPI 정의, 카탈로그 취합, 인자 검증, 디스패치, 충돌 안전성이 입증된 다중 ToolCall의 스케줄링, **`ToolOutcome`의 원자 커밋**(V3-042). Tool 구현 자체는 Internal 모듈, Environment 패키지, 또는 External Tool 커넥터(예: MCP 클라이언트, V3-P52)에 있다.
 - **Environment**: `EnvironmentPlugin` SPI. 특정 Workspace 연결/접근 방식, 정책 판정, 실행기 내부 구현, **자기 Tool(`tools()`) 제공**(V3-041). 다른 Environment의 구현을 직접 가져오지 않음.
 - **Data**: Execution Records(원본 Provider 요청·응답 포함), Conversation Events, Artifact, Registry, Binding 및 최신 Prompt Snapshot의 저장/조회 계약. **공개 Port는 `ConversationLog`/`ArtifactStore`/`WorkspaceState`/`StateQuery`/(P2)`ControlState`로 분리**(V3-039). Prompt 정책이나 실제 Tool 실행 금지.
 - **Workspace**: 독립 자원/식별 개념. **별도 소프트웨어 모듈을 만들지 않음**; Data Registry와 Environment 연결 계약으로 관리.
@@ -35,11 +35,12 @@ Composition Root (구현 조립/의존성 주입 + 플러그인 등록)
    ├── Tool         → ToolHandler SPI 소유, Dispatcher → Data.ConversationLog(+ArtifactStore) 커밋
    │                  Scheduler → verified resource conflict metadata, never command-string equality alone
    ├── Internal Tools (memory/plan/note) → Tool SPI, Data.ArtifactStore 읽기
+   ├── External Tool 커넥터 (예: MCP) → Tool SPI(구현해서 제공), 외부 서버
    ├── Environment  → Tool SPI(구현해서 제공), Data.WorkspaceState
    ├── Provider     → provider-specific SDK/adapter
    └── Data         → persistence backend
 
-의존 방향: 플러그인(Environment 구현·Internal Tool·Provider Adapter) → 소유 모듈의 api.py.
+의존 방향: 플러그인(Environment 구현·Internal Tool·External 커넥터·Provider Adapter) → 소유 모듈의 api.py.
 소유 모듈은 플러그인 구현을 import하지 않는다. 연결은 Composition Root에서만.
 
 공유: 공개된 작은 타입·프로토콜·에러 의미

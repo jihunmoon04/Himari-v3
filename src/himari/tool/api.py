@@ -4,13 +4,15 @@ Source documents: docs/contracts.md §9 (TOOL-01/02/07), docs/decisions.md
 V3-040~042, V3-044/045, V3-P13, V3-P17, V3-P19.
 
 - Every Tool — Internal (memory/plan/note), Environment-provided
-  (``EnvironmentPlugin.tools()``) or Control's ``ask_user`` — implements
+  (``EnvironmentPlugin.tools()``), External (run by a server outside HIMARI,
+  e.g. an MCP server; V3-P52) or Control's ``ask_user`` — implements
   ``ToolHandler``.
 - Tool implementations never touch the execution ledger: they return a
   ``ToolOutcome`` and the Dispatcher commits it (V3-042).
-- For Environment-provided Tools with ``effect_profile != READ`` the Dispatcher
-  persists ``EXECUTION_CLAIMED`` before calling ``run`` (V3-045). Internal Tools
-  have no effects outside their ToolOutcome, so they are never claimed.
+- For Environment-provided and External Tools with ``effect_profile != READ``
+  the Dispatcher persists ``EXECUTION_CLAIMED`` before calling ``run`` (V3-045,
+  V3-P52). Internal Tools have no effects outside their ToolOutcome, so they
+  are never claimed.
 """
 
 from __future__ import annotations
@@ -48,6 +50,14 @@ class EffectProfile(Enum):
     UNKNOWN = "unknown"  # e.g. run_command: serialized per Workspace
 
 
+class ToolOrigin(Enum):
+    """Who carries out a Tool's effects (V3-P52)."""
+
+    INTERNAL = "internal"  # effects are only its ToolOutcome
+    ENVIRONMENT = "environment"  # an Environment acting on a Workspace
+    EXTERNAL = "external"  # a server outside HIMARI (e.g. MCP); its effects are not visible here
+
+
 class Completion(Enum):
     IMMEDIATE = "immediate"
     SUSPENDING = "suspending"  # P0: only ask_user; ``run`` is never called
@@ -60,17 +70,29 @@ class ConversationRecord(Enum):
 
 @dataclass(frozen=True)
 class ToolDefinition(DeepFrozen):
-    tool_id: ToolId  # "<environment_kind>/<name>" for Environment Tools (V3-008)
+    tool_id: ToolId  # "<environment_kind>/<name>" (V3-008) or "<external_source>/<name>"
     description: str
     input_schema: Mapping[str, JsonValue]  # JSON Schema of arguments
     workspace_requirement: WorkspaceRequirement
     effect_profile: EffectProfile
     completion: Completion = Completion.IMMEDIATE
     environment_kind: EnvironmentKind | None = None  # set iff Environment-provided
+    # Set iff External: the name of the server that runs the Tool (e.g. an
+    # MCP server). An External Tool needs no Workspace and is always in the
+    # catalog; its effect_profile is the operator's judgement, not the server's.
+    external_source: str | None = None
     conversation_record: ConversationRecord = ConversationRecord.FULL
     # Use REQUIRE_USER for effects the model cannot verify with other Tools
     # (e.g. sending a message to a third party).
     unknown_outcome: UnknownOutcomePolicy = UnknownOutcomePolicy.REPORT_TO_MODEL
+
+    @property
+    def origin(self) -> ToolOrigin:
+        if self.environment_kind is not None:
+            return ToolOrigin.ENVIRONMENT
+        if self.external_source is not None:
+            return ToolOrigin.EXTERNAL
+        return ToolOrigin.INTERNAL
 
 
 @dataclass(frozen=True)

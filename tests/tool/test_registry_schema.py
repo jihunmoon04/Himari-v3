@@ -5,10 +5,10 @@ import dataclasses
 import pytest
 from testkit import FAKE, RecordingTool
 
-from himari.common import JsonValue
-from himari.tool.api import Completion
+from himari.common import JsonValue, deep_freeze
+from himari.tool.api import Completion, ToolOrigin, WorkspaceRequirement
 from himari.tool.registry import ToolRegistry
-from himari.tool.schema import SchemaError, check_schema, json_equal, validate
+from himari.tool.schema import MAX_SCHEMA_BYTES, MAX_VIOLATIONS, SchemaError, check_schema, validate
 
 
 def test_only_ask_user_may_suspend() -> None:
@@ -23,11 +23,45 @@ def test_environment_tool_prefix_must_match_kind() -> None:
         ToolRegistry([RecordingTool("other/ping", environment_kind=FAKE)])
 
 
-def test_unsupported_schema_keywords_are_rejected_at_registration() -> None:
-    tool = RecordingTool("t")
-    tool.definition = dataclasses.replace(tool.definition, input_schema={"type": "object", "minLength": 3})
-    with pytest.raises(SchemaError, match="unsupported keywords"):
-        ToolRegistry([tool])
+# --- External Tools (V3-P52) --------------------------------------------------
+
+
+def test_external_tools_are_namespaced_by_their_source() -> None:
+    tool = RecordingTool("calliope/position", external_source="calliope")
+    assert tool.definition.origin is ToolOrigin.EXTERNAL
+    assert RecordingTool("fake/x", environment_kind=FAKE).definition.origin is ToolOrigin.ENVIRONMENT
+    assert RecordingTool("x").definition.origin is ToolOrigin.INTERNAL
+    ToolRegistry([tool])
+    with pytest.raises(ValueError, match="prefix"):
+        ToolRegistry([RecordingTool("other/position", external_source="calliope")])
+    with pytest.raises(ValueError, match="iff"):
+        ToolRegistry([RecordingTool("position", external_source="calliope")])
+
+
+def test_a_tool_is_not_both_environment_and_external() -> None:
+    with pytest.raises(ValueError, match="not both"):
+        ToolRegistry([RecordingTool("fake/x", environment_kind=FAKE, external_source="fake")])
+
+
+def test_external_tools_need_no_workspace() -> None:
+    with pytest.raises(ValueError, match="cannot require a Workspace"):
+        ToolRegistry([RecordingTool("remote/x", external_source="remote", workspace=WorkspaceRequirement.DEFAULT)])
+
+
+@pytest.mark.parametrize("external_first", [True, False])
+def test_a_namespace_belongs_to_one_origin(external_first: bool) -> None:
+    tools = [RecordingTool("fake/remote", external_source="fake"), RecordingTool("fake/env", environment_kind=FAKE)]
+    with pytest.raises(ValueError, match="already belongs"):
+        ToolRegistry(tools if external_first else tools[::-1])
+
+
+def test_external_tools_are_always_in_the_catalog() -> None:
+    registry = ToolRegistry([RecordingTool("remote/x", external_source="remote"),
+                             RecordingTool("fake/y", environment_kind=FAKE)])
+    assert [d.tool_id for d in registry.catalog(frozenset())] == ["remote/x"]
+
+
+# --- Input schemas ------------------------------------------------------------
 
 
 SCHEMA: dict[str, JsonValue] = {
@@ -47,18 +81,68 @@ SCHEMA: dict[str, JsonValue] = {
     ("value", "expected"),
     [
         ({"path": "a", "count": 2, "mode": "r", "tags": ["x"]}, []),
-        ({}, ["$.path: required"]),
-        ({"path": 1}, ["$.path: expected string"]),
-        ({"path": "a", "count": True}, ["$.count: expected integer"]),
-        ({"path": "a", "mode": "x"}, ["$.mode: must be one of ['r', 'w']"]),
-        ({"path": "a", "tags": "x"}, ["$.tags: expected array"]),
-        ({"path": "a", "tags": [1]}, ["$.tags[0]: expected string"]),
-        ({"path": "a", "extra": 1}, ["$.extra: not allowed"]),
+        ({}, ["$: 'path' is a required property"]),
+        ({"path": 1}, ["$.path: 1 is not of type 'string'"]),
+        ({"path": "a", "count": True}, ["$.count: True is not of type 'integer'"]),
+        ({"path": "a", "count": 2.0}, []),  # JSON: 2.0 is an integer
+        ({"path": "a", "mode": "x"}, ["$.mode: 'x' is not one of ['r', 'w']"]),
+        ({"path": "a", "tags": "x"}, ["$.tags: 'x' is not of type 'array'"]),
+        ({"path": "a", "tags": [1]}, ["$.tags[0]: 1 is not of type 'string'"]),
+        ({"path": "a", "extra": 1}, ["$: Additional properties are not allowed ('extra' was unexpected)"]),
     ],
 )
-def test_validate_subset(value: JsonValue, expected: list[str]) -> None:
+def test_validate(value: JsonValue, expected: list[str]) -> None:
     check_schema(SCHEMA)
     assert validate(value, SCHEMA) == expected
+    assert validate(deep_freeze(value), deep_freeze(SCHEMA)) == expected  # frozen values validate as their JSON
+
+
+# What an MCP server built on the Python SDK (pydantic) declares for
+# ``def analyse(fen: str, depth: int = 18, side: Side | None = None, line: list[Move] = [])``.
+PYDANTIC: dict[str, JsonValue] = {
+    "$defs": {
+        "Move": {"type": "object", "properties": {"uci": {"type": "string", "pattern": "^[a-h][1-8][a-h][1-8][qrbn]?$"}},
+                 "required": ["uci"], "title": "Move"},
+        "Side": {"enum": ["white", "black"], "title": "Side", "type": "string"},
+    },
+    "type": "object",
+    "properties": {
+        "fen": {"title": "Fen", "type": "string", "minLength": 1},
+        "depth": {"default": 18, "title": "Depth", "type": "integer", "minimum": 1, "maximum": 30},
+        "side": {"anyOf": [{"$ref": "#/$defs/Side"}, {"type": "null"}], "default": None},
+        "line": {"type": "array", "items": {"$ref": "#/$defs/Move"}, "default": []},
+    },
+    "required": ["fen"],
+    "title": "analyseArguments",
+    "discriminator": {"propertyName": "kind"},  # outside the standard: an annotation
+}
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ({"fen": "x", "depth": 20, "side": None, "line": [{"uci": "e2e4"}]}, []),
+        ({"fen": "x", "side": "white"}, []),
+        ({"fen": ""}, ["$.fen: '' should be non-empty"]),
+        ({"fen": "x", "depth": 99}, ["$.depth: 99 is greater than the maximum of 30"]),
+        ({"fen": "x", "side": "red"}, ["$.side: 'red' is not valid under any of the given schemas"]),
+        ({"fen": "x", "line": [{"uci": "e9"}]}, ["$.line[0].uci: 'e9' does not match '^[a-h][1-8][a-h][1-8][qrbn]?$'"]),
+    ],
+)
+def test_standard_schemas_from_external_servers_are_fully_enforced(value: JsonValue, expected: list[str]) -> None:
+    check_schema(PYDANTIC)
+    assert validate(value, PYDANTIC) == expected
+
+
+def test_draft_07_is_accepted() -> None:
+    schema: dict[str, JsonValue] = {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "definitions": {"n": {"type": "integer"}},
+        "properties": {"n": {"$ref": "#/definitions/n"}},
+    }
+    check_schema(schema)
+    assert validate({"n": "1"}, schema) == ["$.n: '1' is not of type 'integer'"]
 
 
 @pytest.mark.parametrize(
@@ -66,24 +150,22 @@ def test_validate_subset(value: JsonValue, expected: list[str]) -> None:
     [
         # re-review B3: intended "command is required", silently not enforced before
         ({"type": "object", "properties": {"command": {"type": "string"}}, "required": "command"},
-         "required must be an array of strings"),
-        ({"type": "object", "properties": {"x": {}}, "required": ["x", "x"]}, "duplicates"),
-        ({"type": "object", "properties": {"x": {}}, "required": ["y"]}, "not in properties"),
-        ({"type": "object", "properties": {"x": {}}, "required": [1]}, "array of strings"),
-        ({"type": "object", "additionalProperties": "no"}, "must be a boolean"),
-        ({"type": "object", "properties": ["x"]}, "properties must be an object"),
-        ({"type": ["string", "null"]}, "type must be one of"),
-        ({"type": "str"}, "type must be one of"),
-        ({"enum": "ab"}, "non-empty array"),
-        ({"enum": []}, "non-empty array"),
-        ({"type": "integer", "enum": [1, "2"]}, "enum values must match"),
-        ({"type": "string", "properties": {"x": {}}}, "requires type 'object'"),
-        ({"required": ["x"]}, "requires type 'object'"),
-        ({"type": "object", "items": {}}, "requires type 'array'"),
-        ({"type": "array", "items": "string"}, "schema must be an object"),
-        ({"description": 5}, "description must be a string"),
-        ({"type": "integer", "default": "1"}, "default does not satisfy"),
-        ({"type": "object", "properties": {"n": {"type": "integer", "minimum": 0}}}, "unsupported keywords"),
+         "is not of type 'array'"),
+        ({"type": "object", "required": ["x", "x"]}, "non-unique"),
+        ({"type": "object", "additionalProperties": "no"}, "is not of type 'object', 'boolean'"),
+        ({"type": "object", "properties": ["x"]}, "is not of type 'object'"),
+        ({"type": "str"}, "is not valid under any of the given schemas"),
+        ({"type": "array", "items": "string"}, "is not of type 'object', 'boolean'"),
+        ({"description": 5}, "is not of type 'string'"),
+        ({"type": "string", "pattern": "("}, "is not a 'regex'"),
+        ({"$schema": "http://json-schema.org/draft-04/schema#"}, "unsupported \\$schema"),
+        # references stay inside the schema and must resolve: validation never
+        # reaches for the network and never fails later on a dangling one
+        ({"properties": {"a": {"$ref": "https://example.com/a.json"}}}, "must be a local reference"),
+        ({"properties": {"a": {"$ref": "#/$defs/missing"}}}, "does not resolve"),
+        ({"$defs": {"a": {"$id": "https://example.com/a", "type": "string"}}}, "only the root may set \\$id"),
+        ({"description": "x" * MAX_SCHEMA_BYTES}, "bytes \\(at most"),
+        ("object", "schema must be an object"),
     ],
 )
 def test_malformed_schemas_fail_closed(schema: JsonValue, reason: str) -> None:
@@ -91,24 +173,16 @@ def test_malformed_schemas_fail_closed(schema: JsonValue, reason: str) -> None:
         check_schema(schema)
 
 
+def test_data_keywords_are_not_mistaken_for_references() -> None:
+    check_schema({"type": "object", "default": {"$ref": "https://example.com"},
+                  "properties": {"$ref": {"type": "string"}}})
+
+
 def test_tool_input_schema_must_be_an_object_schema() -> None:
     tool = RecordingTool("t")
     tool.definition = dataclasses.replace(tool.definition, input_schema={"type": "string"})
     with pytest.raises(SchemaError, match="type 'object'"):
         ToolRegistry([tool])
-
-
-@pytest.mark.parametrize(
-    "schema",
-    [
-        SCHEMA,
-        {"type": "object"},
-        {"type": "object", "properties": {"mode": {"type": "string", "enum": ["r", "w"], "default": "r"}}},
-        {"type": "array", "items": {"type": "integer"}, "description": "ids"},
-    ],
-)
-def test_well_formed_schemas_are_accepted(schema: JsonValue) -> None:
-    check_schema(schema)
 
 
 @pytest.mark.parametrize(
@@ -122,8 +196,6 @@ def test_well_formed_schemas_are_accepted(schema: JsonValue) -> None:
         ([1, 0], [[True, False]], False),
         (None, [0], False),
         ("1", [1], False),
-        (["a"], ["a"], False),
-        ({"a": 1}, [[("a", 1)]], False),
         (1.0, [1], True),  # JSON numbers compare by value
         (True, [True], True),
         ({"a": [1, {"b": None}]}, [{"a": [1.0, {"b": None}]}], True),
@@ -134,7 +206,12 @@ def test_enum_uses_json_equality(value: JsonValue, options: list[JsonValue], acc
     assert (validate(value, {"enum": options}) == []) is accepted
 
 
-def test_enum_type_check_at_registration_uses_json_semantics() -> None:
-    with pytest.raises(SchemaError, match="enum values must match"):
-        check_schema({"type": "integer", "enum": [1, True]})
-    assert json_equal(1, 1.0) and not json_equal(1, True)
+def test_validation_output_is_bounded() -> None:
+    schema: dict[str, JsonValue] = {"type": "object", "additionalProperties": {"type": "integer"}}
+    violations = validate({f"k{i:02}": "x" * 1000 for i in range(MAX_VIOLATIONS + 3)}, schema)
+    assert len(violations) == MAX_VIOLATIONS + 1 and violations[-1] == "… and 3 more"
+    assert all(len(v) < 400 for v in violations)
+
+
+def test_an_unevaluable_schema_rejects_rather_than_raises() -> None:
+    assert validate({}, {"$schema": "https://example.com/unknown"}) == ["$: the input schema could not be evaluated"]

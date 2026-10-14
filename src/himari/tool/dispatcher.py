@@ -4,9 +4,10 @@ P0 scheduling is sequential in original ordinal order; parallel scheduling
 (TOOL-03) comes later without changing the port. Rules:
 
 - Only never-claimed ``PENDING`` calls run, so the same method is the resume path.
-- Environment-provided Tools with ``effect_profile != READ`` → ``claim_tool_execution``
-  before ``run`` (V3-045). Internal Tools never claim: their only effects are the
-  ToolOutcome, committed atomically with the result (V3-042, Data v0.2 §6).
+- Environment-provided and External Tools with ``effect_profile != READ`` →
+  ``claim_tool_execution`` before ``run`` (V3-045, V3-P52). Internal Tools never
+  claim: their only effects are the ToolOutcome, committed atomically with the
+  result (V3-042, Data v0.2 §6).
 - A handler exception after a claim means the effect is uncertain. It is never
   turned into FAILED and never re-run. With ``unknown_outcome=REPORT_TO_MODEL``
   (default) the call becomes UNKNOWN with an "outcome unknown" result and the
@@ -59,6 +60,7 @@ from himari.tool.api import (
     ToolContext,
     ToolDefinition,
     ToolInvocation,
+    ToolOrigin,
     ToolOutcome,
     ToolStatus,
     WorkspaceRequirement,
@@ -165,7 +167,7 @@ class Dispatcher:
         except _Denied as denied:
             await self._commit(scope, record.call, _error(ToolStatus.DENIED, str(denied)), record_event)
             return
-        claimed = d.environment_kind is not None and d.effect_profile is not EffectProfile.READ
+        claimed = d.origin is not ToolOrigin.INTERNAL and d.effect_profile is not EffectProfile.READ
         if claimed:
             await self._log.claim_tool_execution(
                 scope, record.call, unknown_outcome=d.unknown_outcome, record_event=record_event

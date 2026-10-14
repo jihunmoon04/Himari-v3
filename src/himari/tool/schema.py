@@ -1,96 +1,111 @@
-"""Minimal JSON Schema subset for model-supplied Tool arguments.
+"""JSON Schema for model-supplied Tool arguments (V3-P52).
 
-Supported keywords: ``type``, ``properties``, ``required``,
-``additionalProperties`` (bool), ``items``, ``enum`` plus annotations
-(``description``, ``title``, ``default``). Any other keyword is rejected at
-registration (``check_schema``), and every supported keyword's value is
-checked too (fail closed), so validation is never silently partial or wrong.
-Swap for a full JSON Schema validator later without changing callers.
+A full validator (``jsonschema``): every standard validation keyword is
+enforced, so a Tool's schema — ours, or one an external server such as an
+MCP server declares — is never silently half-checked. Keywords outside the
+standard are annotations, as the standard says; ``format`` is an annotation
+too (not asserted). Draft 2020-12 is the dialect unless ``$schema`` names
+draft-07 or 2019-09; any other ``$schema`` is refused.
+
+Registration (``check_schema``) fails closed beyond the metaschema:
+
+- references (``$ref``/``$dynamicRef``/``$recursiveRef``) must be local
+  (``#...``) and must resolve, so validation never reaches for the network
+  and never fails later on a dangling reference; only the root may set ``$id``;
+- the schema's JSON is at most ``MAX_SCHEMA_BYTES``.
+
+``validate`` returns readable violations and never raises: a schema that
+cannot be evaluated counts as a violation. ``pattern`` uses Python's ``re``
+without a time limit; the risk of a pathological pattern is accepted
+(decisions V3-P52).
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
-from typing import TypeGuard
+import json
+from collections.abc import Iterator, Mapping
+from typing import Any, cast
 
-from himari.common import JsonValue
+from jsonschema import Draft7Validator, Draft201909Validator, Draft202012Validator
+from jsonschema.exceptions import SchemaError as _MetaschemaError
+from jsonschema.protocols import Validator
+from referencing import Registry
+from referencing.exceptions import Unresolvable
+from referencing.jsonschema import specification_with
 
-_KEYWORDS = frozenset(
-    {"type", "properties", "required", "additionalProperties", "items", "enum", "description", "title", "default"}
-)
-_TYPES: dict[str, tuple[type, ...]] = {
-    "object": (Mapping,),
-    "array": (Sequence,),
-    "string": (str,),
-    "integer": (int,),
-    "number": (int, float),
-    "boolean": (bool,),
-    "null": (type(None),),
+from himari.common import JsonValue, thaw
+
+MAX_SCHEMA_BYTES = 64 * 1024
+MAX_VIOLATIONS = 10
+MAX_MESSAGE_CHARS = 300
+
+_DIALECTS: dict[str, type[Validator]] = {
+    cls.META_SCHEMA["$schema"].rstrip("#"): cls
+    for cls in (Draft7Validator, Draft201909Validator, Draft202012Validator)
 }
+_REF_KEYWORDS = ("$ref", "$dynamicRef", "$recursiveRef")
+_DATA_KEYWORDS = frozenset({"enum", "const", "default", "examples"})  # values are instances, not schemas
 
 
 class SchemaError(ValueError):
     pass
 
 
-_OBJECT_ONLY = ("properties", "required", "additionalProperties")
+def _validator_class(schema: Mapping[str, Any]) -> type[Validator]:
+    dialect = schema.get("$schema")
+    if dialect is None:
+        return Draft202012Validator
+    if not isinstance(dialect, str) or dialect.rstrip("#") not in _DIALECTS:
+        raise SchemaError(f"$: unsupported $schema {dialect!r} (draft-07, 2019-09 or 2020-12)")
+    return _DIALECTS[dialect.rstrip("#")]
 
 
-def check_schema(schema: JsonValue, path: str = "$") -> None:
-    """Fail closed: every supported keyword must have a well-formed value, and
-    keywords must fit the declared ``type``. Raises SchemaError otherwise."""
-    if not isinstance(schema, Mapping):
-        raise SchemaError(f"{path}: schema must be an object")
-    unknown = set(schema) - _KEYWORDS
-    if unknown:
-        raise SchemaError(f"{path}: unsupported keywords {sorted(unknown)}")
+def _walk(value: object, path: str) -> Iterator[tuple[str, str, object]]:
+    """(path, keyword, value) for every keyword of every (sub)schema object."""
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            yield path, key, item
+            if key in _DATA_KEYWORDS:
+                continue
+            if key in ("properties", "patternProperties", "$defs", "definitions", "dependentSchemas"):
+                if isinstance(item, Mapping):
+                    for name, sub in item.items():
+                        yield from _walk(sub, f"{path}.{key}.{name}")
+            else:
+                yield from _walk(item, f"{path}.{key}")
+    elif isinstance(value, (list, tuple)):
+        for i, item in enumerate(value):
+            yield from _walk(item, f"{path}[{i}]")
 
-    kind = schema.get("type")
-    if kind is not None and (not isinstance(kind, str) or kind not in _TYPES):
-        raise SchemaError(f"{path}: type must be one of {sorted(_TYPES)}")
-    for key in ("description", "title"):
-        if key in schema and not isinstance(schema[key], str):
-            raise SchemaError(f"{path}: {key} must be a string")
-    for key in _OBJECT_ONLY:
-        if key in schema and kind != "object":
-            raise SchemaError(f"{path}: {key} requires type 'object'")
-    if "items" in schema and kind != "array":
-        raise SchemaError(f"{path}: items requires type 'array'")
 
-    if "enum" in schema:
-        enum = schema["enum"]
-        if not _is_array(enum) or not enum:
-            raise SchemaError(f"{path}: enum must be a non-empty array")
-        if kind is not None and any(validate(v, {"type": kind}) for v in enum):
-            raise SchemaError(f"{path}: enum values must match type {kind!r}")
-
-    properties = schema.get("properties", {})
-    if not isinstance(properties, Mapping):
-        raise SchemaError(f"{path}: properties must be an object")
-    for name, sub in properties.items():
-        check_schema(sub, f"{path}.{name}")
-
-    if "required" in schema:
-        required = schema["required"]
-        if not _is_array(required) or not all(isinstance(n, str) for n in required):
-            raise SchemaError(f"{path}: required must be an array of strings")
-        if len(set(required)) != len(required):
-            raise SchemaError(f"{path}: required has duplicates")
-        undeclared = [n for n in required if n not in properties]
-        if undeclared:
-            raise SchemaError(f"{path}: required names not in properties: {undeclared}")
-
-    if "additionalProperties" in schema and not isinstance(schema["additionalProperties"], bool):
-        raise SchemaError(f"{path}: additionalProperties must be a boolean")
-
-    if "items" in schema:
-        check_schema(schema["items"], f"{path}[]")
-
-    if "default" in schema:
-        without_default = {k: v for k, v in schema.items() if k != "default"}
-        problems = validate(schema["default"], without_default, f"{path}(default)")
-        if problems:
-            raise SchemaError(f"{path}: default does not satisfy the schema: {problems}")
+def check_schema(schema: JsonValue) -> None:
+    """Fail closed: the schema must be valid for its dialect, small enough,
+    and every reference must be local and resolvable. Raises SchemaError."""
+    plain = thaw(schema)
+    if not isinstance(plain, dict):
+        raise SchemaError("$: schema must be an object")
+    size = len(json.dumps(plain, ensure_ascii=False).encode())
+    if size > MAX_SCHEMA_BYTES:
+        raise SchemaError(f"$: schema is {size} bytes (at most {MAX_SCHEMA_BYTES})")
+    cls = _validator_class(plain)
+    try:
+        cls.check_schema(plain)
+    except _MetaschemaError as exc:
+        where = "$" + "".join(f"[{p!r}]" for p in exc.path)
+        raise SchemaError(f"{where}: {exc.message}") from None
+    resolver = Registry().resolver_with_root(
+        specification_with(cls.META_SCHEMA["$schema"]).create_resource(plain)
+    )
+    for path, key, value in _walk(plain, "$"):
+        if key == "$id" and path != "$":
+            raise SchemaError(f"{path}: only the root may set $id")
+        if key in _REF_KEYWORDS:
+            if not isinstance(value, str) or not value.startswith("#"):
+                raise SchemaError(f"{path}: {key} must be a local reference ('#...'), got {value!r}")
+            try:
+                resolver.lookup(value)
+            except Unresolvable:
+                raise SchemaError(f"{path}: {key} {value!r} does not resolve") from None
 
 
 def check_tool_input_schema(schema: JsonValue) -> None:
@@ -101,57 +116,22 @@ def check_tool_input_schema(schema: JsonValue) -> None:
         raise SchemaError("$: a Tool input_schema must have type 'object'")
 
 
-def json_equal(a: object, b: object) -> bool:
-    """Equality with JSON semantics: booleans never equal numbers (Python's
-    ``True == 1`` does not apply), numbers compare by value (``1 == 1.0``),
-    objects and arrays compare structurally."""
-    if isinstance(a, bool) or isinstance(b, bool):
-        return isinstance(a, bool) and isinstance(b, bool) and a == b
-    if isinstance(a, (int, float)) and isinstance(b, (int, float)):
-        return a == b
-    if isinstance(a, Mapping) and isinstance(b, Mapping):
-        return a.keys() == b.keys() and all(json_equal(a[k], b[k]) for k in a)
-    if _is_array(a) and _is_array(b):
-        return len(a) == len(b) and all(json_equal(x, y) for x, y in zip(a, b, strict=True))
-    if _is_array(a) or _is_array(b) or isinstance(a, Mapping) or isinstance(b, Mapping):
-        return False
-    return type(a) is type(b) and a == b  # str / None
-
-
-def _is_array(value: object) -> TypeGuard[Sequence[JsonValue]]:
-    return isinstance(value, Sequence) and not isinstance(value, (str, bytes))
-
-
-def validate(value: JsonValue, schema: Mapping[str, JsonValue], path: str = "$") -> list[str]:
-    """Returns human-readable violations; empty means valid."""
-    errors: list[str] = []
-    kind = schema.get("type")
-    if isinstance(kind, str):
-        ok = isinstance(value, _TYPES[kind])
-        if kind in ("integer", "number") and isinstance(value, bool):
-            ok = False  # bool is an int subclass in Python, not in JSON
-        if kind == "array" and isinstance(value, str):
-            ok = False
-        if not ok:
-            return [f"{path}: expected {kind}"]
-    enum = schema.get("enum")
-    if _is_array(enum) and not any(json_equal(value, option) for option in enum):
-        errors.append(f"{path}: must be one of {list(enum)}")
-    if isinstance(value, Mapping):
-        properties = schema.get("properties", {})
-        assert isinstance(properties, Mapping)
-        required = schema.get("required", ())
-        if _is_array(required):
-            errors.extend(f"{path}.{name}: required" for name in required if name not in value)
-        for name, item in value.items():
-            sub = properties.get(name)
-            if isinstance(sub, Mapping):
-                errors.extend(validate(item, sub, f"{path}.{name}"))
-            elif schema.get("additionalProperties", True) is False:
-                errors.append(f"{path}.{name}: not allowed")
-    elif isinstance(value, Sequence) and not isinstance(value, str):
-        items = schema.get("items")
-        if isinstance(items, Mapping):
-            for i, item in enumerate(value):
-                errors.extend(validate(item, items, f"{path}[{i}]"))
-    return errors
+def validate(value: JsonValue, schema: Mapping[str, JsonValue]) -> list[str]:
+    """Returns readable violations (at most ``MAX_VIOLATIONS``); empty means
+    valid. Frozen values are compared as the JSON they stand for."""
+    plain_schema = thaw(schema)
+    assert isinstance(plain_schema, dict)
+    try:
+        validator = _validator_class(plain_schema)(plain_schema)
+        errors = sorted(validator.iter_errors(cast(Any, thaw(value))), key=lambda e: [str(p) for p in e.absolute_path])
+    except Exception:  # noqa: BLE001 — fail closed: an unevaluable schema rejects the value
+        return ["$: the input schema could not be evaluated"]
+    out: list[str] = []
+    for error in errors[:MAX_VIOLATIONS]:
+        message = error.message
+        if len(message) > MAX_MESSAGE_CHARS:
+            message = message[: MAX_MESSAGE_CHARS - 1] + "…"
+        out.append(f"{error.json_path}: {message}")
+    if len(errors) > MAX_VIOLATIONS:
+        out.append(f"… and {len(errors) - MAX_VIOLATIONS} more")
+    return out
