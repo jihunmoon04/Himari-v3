@@ -20,9 +20,10 @@ purpose: compacting a little early is cheap, sending an oversized request
 is not. No tokenizer is used: one model-independent rule, no new
 dependency, and the measured part is the model's own count anyway.
 
-A measurement is reused only for the same snapshot revision and the same
-``context_key`` — a digest of the model, the instructions and the Tool
-catalog — so a restart with another model, longer instructions or more
+A measurement is reused only from the same Provider, for the same snapshot
+revision and the same ``context_key`` — a digest of the Provider, model,
+reasoning effort, instructions and Tool catalog — so a restart with
+another Provider or model, other options, longer instructions or more
 Tools re-estimates the whole request. If the operational state changed
 since the measurement, the whole current state is added on top (the old
 state's share cannot be separated out, so it is counted twice).
@@ -158,8 +159,11 @@ def request_tokens(model_input: ModelInput) -> int:
 
 def context_key(inputs: PromptInputs) -> str:
     """Digest of what a request is composed under besides history and state."""
+    options = inputs.request_options
     data = {
-        "model": inputs.request_options.model_id,
+        "provider": options.provider_key,
+        "model": options.model_id,
+        "reasoning_effort": options.reasoning_effort,
         "instructions": list(inputs.instructions),
         "tools": [[d.tool_id, d.description, thaw(d.input_schema)] for d in inputs.tool_catalog],
     }
@@ -248,6 +252,7 @@ class Compactor:
         mark, basis = inputs.usage_mark, model_input.prompt_basis
         if (
             mark is None
+            or mark.provider_key != model_input.request_options.provider_key
             or mark.snapshot_revision != basis.snapshot_revision
             or mark.context_key != basis.context_key
         ):
@@ -261,6 +266,9 @@ class Compactor:
         if mark.state_revision != basis.state_revision:
             added += tokens_of_text(repr(model_input.current_state))
         return ContextEstimate(mark.input_tokens + added, measured=True)
+
+    def request_size(self, model_input: ModelInput) -> int:
+        return request_tokens(model_input)
 
     def decide(self, inputs: PromptInputs, model_input: ModelInput, budget: ContextBudget) -> ContextDecision:
         estimate = self.estimate(inputs, model_input)

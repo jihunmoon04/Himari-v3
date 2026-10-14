@@ -52,7 +52,7 @@ class ContextLoader:
                 if run.usage is not None and run.usage.input_tokens is not None:
                     used = run.prompt_basis
                     usage_mark = UsageMark(run.usage.input_tokens, used.event_sequence, used.snapshot_revision,
-                                           used.context_key, used.state_revision)
+                                           used.context_key, used.state_revision, run.provider_key)
         basis = await self._state.read_current_state_basis(scope)
         active = frozenset(a.environment_kind for a in basis.environments)
         return PromptInputs(

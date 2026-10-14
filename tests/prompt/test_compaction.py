@@ -96,7 +96,7 @@ def test_the_estimate_uses_the_measured_size_plus_what_came_after() -> None:
     assert estimate.tokens == 500 + 2 * 4 + tokens_of_text("a1") + tokens_of_text("q2" * 30)
 
 
-@pytest.mark.parametrize("change", ["instructions", "model", "tools", "no key"])
+@pytest.mark.parametrize("change", ["instructions", "model", "tools", "no key", "provider", "effort"])
 def test_a_measurement_under_another_composition_is_not_used(change: str) -> None:
     events = history("q1", "a1", "q2")
     key = Composer().compose(inputs(events)).prompt_basis.context_key
@@ -105,6 +105,10 @@ def test_a_measurement_under_another_composition_is_not_used(change: str) -> Non
         data = dataclasses.replace(data, instructions=("be nice", "and longer"))
     elif change == "model":
         data = dataclasses.replace(data, request_options=RequestOptions("other"))
+    elif change == "provider":  # the mark's own Provider check, and the key
+        data = dataclasses.replace(data, request_options=RequestOptions("m", provider_key="other"))
+    elif change == "effort":
+        data = dataclasses.replace(data, request_options=RequestOptions("m", reasoning_effort="high"))
     elif change == "tools":
         data = dataclasses.replace(data, tool_catalog=(ToolDefinition(ToolId("t"), "d", {}, WorkspaceRequirement.NONE,
                                                                       EffectProfile.READ),))

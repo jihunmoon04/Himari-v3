@@ -277,3 +277,42 @@ async def test_b1_the_driver_never_sends_a_plan_over_the_limit() -> None:
     result = await rt.driver.drive(SCOPE, user("q2"))
     assert result.compaction_run_ids == () and not any(_is_compaction(i) for i in adapter.prepared_inputs)
     assert result.state is DriveState.COMPLETED  # 850 + q2 still fits: the Run itself goes ahead
+
+
+class OtherProvider(ScriptedAdapter):
+    @property
+    def provider_key(self) -> str:
+        return "other-provider"
+
+
+@sync
+async def test_b2_a_measurement_by_another_provider_is_not_reused() -> None:
+    # Same model id, same instructions and Tools; only the Provider differs.
+    rt, _ = runtime([Measured(final("a1"), 100)], context_budget=BUDGET)
+    await rt.driver.drive(SCOPE, user("q1" + "가" * 700))  # ~700 tokens; the Provider "measured" 100
+    other = OtherProvider([final("a2")])
+    rt2, adapter2 = runtime(store=restart(rt.store), provider=other, context_budget=BUDGET)
+    inputs = await rt2.driver._loader.load(SCOPE, (), rt2.driver._options)
+    assert inputs.usage_mark is not None and inputs.usage_mark.provider_key == "scripted"
+    estimate = Compactor().estimate(inputs, Composer().compose(inputs))
+    assert not estimate.measured and estimate.tokens > 700  # not 100 + additions
+
+
+class UnderstatingPlanner(Compactor):
+    """Claims a small request size while its request is large."""
+
+    def decide(self, inputs: PromptInputs, model_input: ModelInput, budget: ContextBudget) -> ContextDecision:
+        decision = super().decide(inputs, model_input, budget)
+        if decision.compaction is None:
+            return decision
+        big = dataclasses.replace(decision.compaction.request, stable_prefix=("x" * 9000,))
+        return dataclasses.replace(decision, compaction=dataclasses.replace(decision.compaction, request=big))
+
+
+@sync
+async def test_the_driver_measures_the_summarizing_request_itself() -> None:
+    rt, adapter = runtime([Measured(final("a1"), 850), final("a2")], context_budget=BUDGET)
+    await rt.driver.drive(SCOPE, user("q1"))
+    rt.driver._planner = UnderstatingPlanner()
+    result = await rt.driver.drive(SCOPE, user("q2"))
+    assert result.compaction_run_ids == () and not any(i.stable_prefix == ("x" * 9000,) for i in adapter.prepared_inputs)

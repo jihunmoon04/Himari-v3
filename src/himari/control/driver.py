@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 from collections.abc import AsyncIterator
 
 from himari.common import ASK_USER_TOOL_ID, CallRef, ConversationId, RunId, TrustedScope
@@ -94,7 +95,7 @@ class Driver:
         self._composer = composer
         self._provider = provider
         self._dispatcher = dispatcher
-        self._options = request_options
+        self._options = dataclasses.replace(request_options, provider_key=provider.provider_key)
         self._max_runs = max_runs_per_drive
         self._planner = planner
         self._budget = budget
@@ -370,8 +371,9 @@ class Driver:
     ) -> tuple[RunId | None, str | None]:
         """One summarizing call, recorded as a COMPACTION Run. Returns its
         Run (if one was prepared) and a failure, or None on success."""
-        if plan.request_tokens > budget.limit_tokens:  # the planner's promise, checked before any send
-            return None, f"compaction request of about {plan.request_tokens} tokens exceeds the limit"
+        size = max(plan.request_tokens, planner.request_size(plan.request))  # re-measured, not just trusted
+        if size > budget.limit_tokens:
+            return None, f"compaction request of about {size} tokens exceeds the limit"
         try:
             prepared = self._provider.prepare_native_request(plan.request)
         except ProviderError as exc:

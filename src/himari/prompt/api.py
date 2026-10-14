@@ -63,6 +63,9 @@ class PromptError(Exception):
 class RequestOptions(DeepFrozen):
     model_id: str
     reasoning_effort: str | None = None
+    # The Provider the request is for, set by the Driver. Prompt never
+    # interprets it; it only decides which earlier measurements still apply.
+    provider_key: str | None = None
 
 
 # --- Provider-neutral history (CPP §6.1) ------------------------------------
@@ -151,6 +154,7 @@ class UsageMark(DeepFrozen):
     snapshot_revision: int | None
     context_key: str | None = None  # PromptBasis.context_key of that Run
     state_revision: int | None = None
+    provider_key: str | None = None  # the Provider that measured it (RunRecord)
 
 
 @dataclass(frozen=True)
@@ -221,6 +225,10 @@ class CompactionPlanner(Protocol):
         ...
 
     def estimate(self, inputs: PromptInputs, model_input: ModelInput) -> ContextEstimate: ...
+
+    def request_size(self, model_input: ModelInput) -> int:
+        """Pessimistic size of exactly this request, from its content alone."""
+        ...
 
     def summary_body(self, blocks: Sequence[ContentBlock], budget: ContextBudget) -> JsonValue:
         """The snapshot body for a compaction output; PromptError
