@@ -12,7 +12,12 @@ Registration (``check_schema``) fails closed beyond the metaschema:
 - references (``$ref``/``$dynamicRef``/``$recursiveRef``) must be local
   (``#...``) and must resolve, so validation never reaches for the network
   and never fails later on a dangling reference; only the root may set ``$id``;
-- the schema's JSON is at most ``MAX_SCHEMA_BYTES``.
+- the schema's JSON is at most ``MAX_SCHEMA_BYTES``, ``MAX_SCHEMA_DEPTH``
+  levels deep and ``MAX_SCHEMA_NODES`` values, checked first by an
+  iterative walk: the metaschema check and the validators recurse, so a
+  deeply nested schema (a few KiB) would otherwise exhaust Python's
+  recursion limit (PR #19 re-review N1). Any resource error during the
+  check is a refusal (``SchemaError``), never a crash.
 
 ``validate`` returns readable violations and never raises: a schema that
 cannot be evaluated counts as a violation. It runs in-process, so it is only
@@ -46,6 +51,8 @@ from referencing.jsonschema import specification_with
 from himari.common import JsonValue, thaw
 
 MAX_SCHEMA_BYTES = 64 * 1024
+MAX_SCHEMA_DEPTH = 64  # JSON nesting (objects and arrays); each nested property schema takes two
+MAX_SCHEMA_NODES = 10_000
 MAX_VIOLATIONS = 10
 MAX_MESSAGE_CHARS = 300
 ISOLATED_SECONDS = 5.0
@@ -83,29 +90,60 @@ def _escape(token: str) -> str:
     return token.replace("~", "~0").replace("/", "~1")
 
 
-def _subschemas(schema: object, pointer: str = "") -> Iterator[tuple[str, object]]:
-    """(JSON pointer, schema) for the schema and every subschema in it."""
+def _check_shape(value: object) -> None:
+    """Depth and size limits, without recursion (the value may be anything)."""
+    stack: list[tuple[object, int]] = [(value, 1)]
+    nodes = 0
+    while stack:
+        node, depth = stack.pop()
+        nodes += 1
+        if nodes > MAX_SCHEMA_NODES:
+            raise SchemaError(f"$: schema has more than {MAX_SCHEMA_NODES} values")
+        if isinstance(node, Mapping):
+            children: list[object] = list(node.values())
+        elif isinstance(node, (list, tuple)):
+            children = list(node)
+        else:
+            continue
+        if children and depth >= MAX_SCHEMA_DEPTH:
+            raise SchemaError(f"$: schema is nested more than {MAX_SCHEMA_DEPTH} levels deep")
+        stack.extend((child, depth + 1) for child in children)
+
+
+def _subschemas(schema: object, pointer: str = "", *, ref_overrides: bool = False) -> Iterator[tuple[str, object]]:
+    """(JSON pointer, schema) for the schema and every subschema in it.
+    ``ref_overrides`` (draft-07): next to ``$ref`` every other keyword is
+    ignored, so a schema with ``$ref`` has no subschemas to follow."""
     yield pointer, schema
-    if not isinstance(schema, dict):
-        return  # a boolean schema
+    if not isinstance(schema, dict) or (ref_overrides and "$ref" in schema):
+        return  # a boolean schema, or a draft-07 reference
     for key in _ONE:
         if isinstance(schema.get(key), (dict, bool)):
-            yield from _subschemas(schema[key], f"{pointer}/{key}")
+            yield from _subschemas(schema[key], f"{pointer}/{key}", ref_overrides=ref_overrides)
     for key in _MANY:
         if isinstance(schema.get(key), list):
             for i, sub in enumerate(schema[key]):
-                yield from _subschemas(sub, f"{pointer}/{key}/{i}")
+                yield from _subschemas(sub, f"{pointer}/{key}/{i}", ref_overrides=ref_overrides)
     for key in _NAMED:
         if isinstance(schema.get(key), dict):
             for name, sub in schema[key].items():
                 if isinstance(sub, (dict, bool)):  # draft-07 dependencies may also be arrays of names
-                    yield from _subschemas(sub, f"{pointer}/{_escape(key)}/{_escape(name)}")
+                    yield from _subschemas(sub, f"{pointer}/{_escape(key)}/{_escape(name)}",
+                                           ref_overrides=ref_overrides)
 
 
 def check_schema(schema: JsonValue) -> None:
     """Fail closed: the schema must be valid for its dialect, small enough,
     and every reference must be local and resolve to a subschema (not to a
-    data value such as a ``default``). Raises SchemaError."""
+    data value such as a ``default``). Raises SchemaError, and only that."""
+    _check_shape(schema)  # first: everything below recurses
+    try:
+        _check_schema(schema)
+    except (RecursionError, MemoryError):
+        raise SchemaError("$: schema is too complex to check") from None
+
+
+def _check_schema(schema: JsonValue) -> None:
     plain = thaw(schema)
     if not isinstance(plain, dict):
         raise SchemaError("$: schema must be an object")
@@ -121,7 +159,7 @@ def check_schema(schema: JsonValue) -> None:
     resolver = Registry().resolver_with_root(
         specification_with(cls.META_SCHEMA["$schema"]).create_resource(plain)
     )
-    nodes = list(_subschemas(plain))
+    nodes = list(_subschemas(plain, ref_overrides=cls is Draft7Validator))
     pointers = {pointer for pointer, _ in nodes}
     objects = {id(node) for _, node in nodes if isinstance(node, dict)}
     for pointer, node in nodes:

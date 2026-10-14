@@ -3,8 +3,10 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import time
+from typing import Any
 
 import pytest
+from jsonschema import Draft202012Validator
 from testkit import FAKE, RecordingTool
 
 from himari.common import JsonValue, deep_freeze
@@ -13,6 +15,8 @@ from himari.tool.registry import ToolRegistry
 from himari.common import MAX_TOOL_NAME_CHARS
 from himari.tool.schema import (
     MAX_SCHEMA_BYTES,
+    MAX_SCHEMA_DEPTH,
+    MAX_SCHEMA_NODES,
     MAX_VIOLATIONS,
     SchemaError,
     check_schema,
@@ -288,3 +292,89 @@ def test_isolated_validation_rejects_rather_than_raises() -> None:
     assert asyncio.run(validate_isolated({}, {"$schema": "https://example.com/unknown"})) == [
         "$: the input schema could not be evaluated"
     ]
+
+
+# --- PR #19 re-review N1: nesting and size, before anything recursive -------------------
+
+
+def nested(levels: int) -> dict[str, JsonValue]:
+    """``levels`` nested object properties: 2 JSON levels each."""
+    schema: dict[str, JsonValue] = {"type": "object"}
+    for _ in range(levels):
+        schema = {"type": "object", "properties": {"x": schema}}
+    return schema
+
+
+def nested_value(levels: int) -> dict[str, JsonValue]:
+    value: dict[str, JsonValue] = {}
+    for _ in range(levels):
+        value = {"x": value}
+    return value
+
+
+def deep_list(levels: int) -> JsonValue:
+    value: JsonValue = 1
+    for _ in range(levels):
+        value = [value]
+    return value
+
+
+def deep_stack(frames: int, call: Any) -> Any:
+    return call() if frames == 0 else deep_stack(frames - 1, call)
+
+
+def test_nesting_up_to_the_limit_is_accepted_and_validated() -> None:
+    deepest = (MAX_SCHEMA_DEPTH - 1) // 2  # 31 property levels: 63 JSON levels
+    for levels in (3, deepest):
+        schema = nested(levels)
+        # with a caller already 300 frames deep, as inside a server
+        deep_stack(300, lambda: check_schema(schema))
+        assert deep_stack(300, lambda: validate(nested_value(levels), schema)) == []
+        assert asyncio.run(validate_isolated(nested_value(levels), schema)) == []
+    assert validate(nested_value(2) | {"x": 3}, nested(3)) == ["$.x: 3 is not of type 'object'"]
+
+
+@pytest.mark.parametrize("schema, reason", [
+    (nested(32), "nested more than"),
+    (nested(100), "nested more than"),  # the reported input: was a RecursionError
+    (nested(5000), "nested more than"),
+    ({"type": "object", "const": nested_value(70)}, "nested more than"),  # data values count too
+    ({"type": "object", "enum": [deep_list(70)]}, "nested more than"),  # arrays count too
+    ({"type": "object", "enum": list(range(MAX_SCHEMA_NODES))}, "more than"),
+])
+def test_too_deep_or_too_large_schemas_are_refused_not_crashed(schema: JsonValue, reason: str) -> None:
+    with pytest.raises(SchemaError, match=reason):
+        check_schema(schema)
+
+
+def test_a_too_deep_tool_schema_is_refused_at_registration() -> None:
+    tool = RecordingTool("remote/x", external_source="remote")
+    tool.definition = dataclasses.replace(tool.definition, input_schema=nested(100))
+    with pytest.raises(SchemaError, match="nested more than"):
+        ToolRegistry([tool])
+
+
+def test_any_resource_error_while_checking_is_a_refusal(monkeypatch: pytest.MonkeyPatch) -> None:
+    def exhausted(*args: Any, **kwargs: Any) -> None:
+        raise RecursionError
+
+    monkeypatch.setattr(Draft202012Validator, "check_schema", exhausted)
+    with pytest.raises(SchemaError, match="too complex"):
+        check_schema({"type": "object"})
+
+
+# --- PR #19 re-review C1: draft-07 ignores the siblings of $ref ---------------------------
+
+
+def test_draft_07_does_not_follow_the_siblings_of_ref() -> None:
+    body: dict[str, JsonValue] = {
+        "type": "object",
+        "definitions": {"s": {"type": "string"}},
+        "properties": {"a": {"$ref": "#/definitions/s", "items": {"$ref": "#/nowhere"}, "minLength": 5}},
+    }
+    draft7 = {"$schema": "http://json-schema.org/draft-07/schema#", **body}
+    check_schema(draft7)
+    assert validate({"a": "ab"}, draft7) == []  # minLength next to $ref is ignored too
+    assert validate({"a": 3}, draft7) == ["$.a: 3 is not of type 'string'"]
+    with pytest.raises(SchemaError, match="does not resolve"):  # 2020-12 applies the siblings
+        check_schema(body)
