@@ -98,7 +98,7 @@ P1은 Workspace 전용 소프트웨어 모듈을 다시 도입하는 단계가 �
 
 | ID | 주제 | 아직 확정해야 할 계약 |
 | --- | --- | --- |
-| Q-14 | Compaction | **기본 구현 (V3-P48):** 토큰 기준 자동 압축(80%), 요약 + exact tail, COMPACTION Run, T9c 원자 교체. 수동 압축(V3-P51)과 압축 표시·문맥 크기(V3-P50) 구현. 남은 것: 요약 품질 평가(gpt-5-nano가 글자 수 상한 때문에 다른 언어로 요약하는 경우 관찰), 측정값 없는 첫 요청의 과대 추정(영어 ~1.4배). 거부 기준(모델 창)과 큰 메시지 연쇄 요약은 V3-P49로 구현. 모델 출력 몫 예약: 입력이 창을 거의 채우면 답변 생성 여유가 없음(지금은 Provider 오류로 Run 실패, PR #15 검수 권고) |
+| Q-14 | Compaction | **기본 구현 (V3-P48):** 토큰 기준 자동 압축(80%), 요약 + exact tail, COMPACTION Run, T9c 원자 교체. 수동 압축(V3-P51)과 압축 표시·문맥 크기(V3-P50) 구현. 남은 것: 요약 품질 평가(gpt-5-nano가 글자 수 상한 때문에 다른 언어로 요약하는 경우 관찰), 측정값 없는 첫 요청의 과대 추정(영어 ~1.4배). 거부 기준(모델 창)과 큰 메시지 연쇄 요약은 V3-P49로 구현. 모델 출력 몫 예약은 V3-P54로 구현(거부 기준 = 창 − 선언된 최대 출력) |
 | Q-15 | Reasoning / continuation 확장 | **기본 턴별 저장·재생은 PR #6으로 구현(V3-049)**, 압축 시 제외는 V3-P48. 남은 것: 타 모델 지원, cache-control |
 | Q-16 | Memory Tool | 기억 생성·조회·삭제 정책, 자동 삽입/검증/권한, Data 읽기 경계 |
 | Q-17 | Plan / Note Artifact | **원본은 Data conversation-scoped Artifact로 확정**. Revision/CAS, schema, 삭제/복구·표시, Outside 노출/export |
@@ -115,7 +115,7 @@ P1은 Workspace 전용 소프트웨어 모듈을 다시 도입하는 단계가 �
 1. **영속 Data** — SQLite 등으로 Event/Run/ToolExecution/Artifact/Continuation 저장, T2~T7a·T-R 원자성 및 실제 crash 복구 검증(Q-41). *(완료: PR #8~#10)*
 2. **Inside Environment + Sandbox** — 사용자별 Root와 Conversation cwd, 파일 Tool·bounded `inside/run_command`, Bubblewrap/Landlock·네트워크 차단 실호스트 증거(Q-29~33/Q-39~40). *(완료: PR #8~#10)*
 3. **Web/CLI (v2 형태 재사용)** — PR A: 대화 목록 포트(V3-P43)·백그라운드 실행(V3-P44)·Application 조립과 로컬 운영자 인증(V3-P45). PR B: Web 서버와 화면(v2 보안 계층·화면 뼈대 재사용, API·데이터 처리는 v3 개념으로 새로 작성, V3-P46). 후속: 실시간 스트리밍(현재 폴링), 파일 업로드·다운로드(FILE-04), 다중 사용자 인증, 재개 가능 여부(`continuable`)를 Web이 마지막 Event 종류로 추정하는 대신 Control이 제공(Pause·Cancel 도입 시, PR #12 재검수 권고). PR C: CLI를 Web 서버의 클라이언트로(SQLite 단일 writer 때문에 CLI가 DB를 직접 열지 않음). *(완료: PR #11~#13 — Web V3-P46, CLI V3-P47)*
-4. **Context 압축·예산 및 최신 Snapshot 활용** — exact tail, continuation 일괄 조회/크기 예산(Q-14/Q-22/Q-42/Q-43). *(기본 구현: V3-P48. Q-42 tail 조회 구현. 남은 것은 Q-14와 Q-42의 일괄 조회)*
+4. **Context 압축·예산 및 최신 Snapshot 활용** — exact tail, continuation 일괄 조회/크기 예산(Q-14/Q-22/Q-42/Q-43). *(기본 구현: V3-P48. Q-42 tail 조회와 출력 몫 예약(V3-P54) 구현. 남은 것은 Q-14 요약 품질과 Q-42의 일괄 조회)*
 5. **후속 기능** — 정식 Pause/Cancel, Streaming, Web UI, Memory·Plan Tool, 충돌 Scheduler.
 
 위 순서는 제안이며 새로운 확정 결정이 아니다. **설계 방향의 확정과 구현·실호스트 검증 완료는 구별한다.**

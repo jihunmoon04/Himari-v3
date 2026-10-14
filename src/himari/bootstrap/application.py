@@ -48,18 +48,38 @@ DATABASE_NAME = "himari.db"
 # Conversation is compacted before each request costs a whole large window.
 DEFAULT_CONTEXT_TOKENS = 200_000
 UNKNOWN_WINDOW_TOKENS = 128_000  # a model whose window the Provider does not declare
+DEFAULT_OUTPUT_TOKENS = 32_000  # room kept for an answer when the model declares no maximum
 
 
-def context_limit(window: int | None, configured: int | None) -> int:
-    """The token limit of one request: ``configured`` if given (it may not
-    exceed a known window), else the window capped at the default."""
+def input_ceiling(window: int | None, max_output: int | None) -> int | None:
+    """The largest input a Run may send: the model's window less a reserve
+    for its answer — the model's declared maximum output, or
+    ``DEFAULT_OUTPUT_TOKENS`` — but never less than half the window. None
+    when the window is unknown (the budget is then the limit).
+
+    A conservative input limit, not a promise of the whole maximum output:
+    a reserve capped at half the window leaves less than that, and the
+    input is an estimate. No output limit is sent, so HIMARI never cuts an
+    answer short; the model may still stop at its own limit."""
+    if (window is not None and window <= 0) or (max_output is not None and max_output <= 0):
+        raise ValueError(f"the Provider declares an invalid window ({window}) or maximum output ({max_output})")
+    if window is None:
+        return None
+    reserve = DEFAULT_OUTPUT_TOKENS if max_output is None else max_output
+    return window - min(reserve, window // 2)
+
+
+def context_limit(ceiling: int | None, configured: int | None) -> int:
+    """The token budget of one request: ``configured`` if given (it may not
+    exceed a known input ceiling), else the ceiling capped at the default."""
     if configured is not None:
         if configured <= 0:
             raise ValueError("the context budget must be positive")
-        if window is not None and configured > window:
-            raise ValueError(f"the context budget {configured} exceeds the model's window of {window} tokens")
+        if ceiling is not None and configured > ceiling:
+            raise ValueError(f"the context budget {configured} exceeds the model's input limit of {ceiling} tokens"
+                             " (its window less the room kept for an answer)")
         return configured
-    return min(window, DEFAULT_CONTEXT_TOKENS) if window is not None else UNKNOWN_WINDOW_TOKENS
+    return min(ceiling, DEFAULT_CONTEXT_TOKENS) if ceiling is not None else UNKNOWN_WINDOW_TOKENS
 
 
 def workspace_for(principal: PrincipalId) -> WorkspaceId:
@@ -120,9 +140,11 @@ class Application:
         environ: Mapping[str, str] | None = None,  # where mcp.json's token variables are read
         mcp_transport: httpx.AsyncBaseTransport | None = None,  # tests: a fake MCP server
     ) -> Application:
-        window = provider.describe_capabilities(model_id).context_tokens
-        # Compaction works toward the budget; only the model's window refuses a Run.
-        budget = ContextBudget(context_limit(window, context_tokens), hard_limit_tokens=window)
+        capabilities = provider.describe_capabilities(model_id)
+        # Compaction works toward the budget; only the model's input ceiling
+        # (its window less the room kept for an answer) refuses a Run.
+        ceiling = input_ceiling(capabilities.context_tokens, capabilities.max_output_tokens)
+        budget = ContextBudget(context_limit(ceiling, context_tokens), hard_limit_tokens=ceiling)
         root = Path(os.path.abspath(data_root))
         ensure_private_dir(str(root))
         workspaces = root / "workspaces"

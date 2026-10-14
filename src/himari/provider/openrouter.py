@@ -88,18 +88,21 @@ KNOWN_CAPABILITIES: Mapping[str, ProviderCapabilities] = {
         reasoning_efforts=REASONING_EFFORTS,
         parallel_tool_calls=True,
         context_tokens=1_050_000,  # OpenRouter /api/v1/models context_length, 2026-10-14
+        max_output_tokens=128_000,  # top_provider.max_completion_tokens, 2026-10-14
     ),
     "openai/gpt-5-nano": ProviderCapabilities(
         model_id="openai/gpt-5-nano",
         reasoning_efforts=frozenset({"minimal", "low", "medium", "high", "xhigh", "max"}),
         parallel_tool_calls=True,
         context_tokens=400_000,  # OpenRouter /api/v1/models context_length, 2026-10-14
+        max_output_tokens=128_000,  # top_provider.max_completion_tokens, 2026-10-14
     ),
     "anthropic/claude-haiku-5.5": ProviderCapabilities(
         model_id="anthropic/claude-haiku-5.5",
         reasoning_efforts=REASONING_EFFORTS,
         parallel_tool_calls=True,
         context_tokens=1_000_000,  # OpenRouter /api/v1/models context_length, 2026-10-14
+        max_output_tokens=128_000,  # top_provider.max_completion_tokens, 2026-10-14
     ),
 }
 

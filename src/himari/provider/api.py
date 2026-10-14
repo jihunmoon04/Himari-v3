@@ -46,6 +46,7 @@ class ProviderCapabilities(DeepFrozen):
     parallel_tool_calls: bool = False
     tool_result_attachments: bool = False
     context_tokens: int | None = None  # the model's context window, if known
+    max_output_tokens: int | None = None  # the most one answer may take of that window, if known
 
 
 @dataclass(frozen=True)

@@ -381,6 +381,27 @@ async def test_only_the_hard_limit_refuses_a_run() -> None:
 
 
 @sync
+async def test_an_estimate_at_the_hard_limit_is_sent_and_one_token_over_is_not() -> None:
+    first, _ = runtime([final("ok")], context_budget=BUDGET)
+    await first.driver.accept(SCOPE, user("가" * 1500))  # one part: nothing to compact
+    status = await first.driver.context_status(SCOPE)
+    assert status is not None and status.estimated_tokens is not None and status.estimated_tokens > BUDGET.limit_tokens
+    at = status.estimated_tokens
+
+    over, over_adapter = runtime([final("ok")], store=restart(first.store),
+                                 context_budget=ContextBudget(limit_tokens=1000, hard_limit_tokens=at - 1))
+    refused = await over.driver.resume(SCOPE)
+    assert refused.state is DriveState.REQUEST_REJECTED and f"about {at} tokens > {at - 1}" in refused.detail
+    assert over_adapter.sent == []  # never handed to the Provider
+
+    exact, exact_adapter = runtime([final("ok")], store=restart(over.store),
+                                   context_budget=ContextBudget(limit_tokens=1000, hard_limit_tokens=at))
+    sent = await exact.driver.resume(SCOPE)
+    assert sent.state is DriveState.COMPLETED, sent.detail
+    assert len(exact_adapter.sent) == 1
+
+
+@sync
 async def test_a_tool_call_with_a_whole_file_is_summarized_in_fragments_without_loss() -> None:
     # PR #15 review B2: the oversized data is a tool call's argument, not a text.
     content = "".join(f"def f{n}(x):\n    return x < {n} and x > -{n}  # \"edge\"\n" for n in range(200))

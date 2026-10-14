@@ -468,7 +468,7 @@ def test_the_context_line_names_the_model_limit_when_it_differs() -> None:
     base = {"estimated_tokens": 1234, "budget_tokens": 200_000, "compact_at_tokens": 160_000, "compactions": 0}
     assert cli.context_line({**base, "hard_limit_tokens": 200_000}) == (
         "context: about 1,234 of 200,000 tokens; summarizes at 160,000")
-    assert cli.context_line({**base, "hard_limit_tokens": 400_000}).endswith("; model limit 400,000")
+    assert cli.context_line({**base, "hard_limit_tokens": 400_000}).endswith("; input limit 400,000")
 
 
 def test_compact_now_from_the_cli(harness: Harness) -> None:

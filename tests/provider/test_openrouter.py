@@ -624,8 +624,11 @@ def test_a_compaction_summary_is_escaped_data_that_cannot_close_its_block() -> N
     assert json.loads(summary.split("\n")[2]) == {"summary": hostile}
 
 
-def test_known_models_declare_their_context_window() -> None:
+def test_known_models_declare_their_context_window_and_maximum_output() -> None:
     assert ADAPTER.describe_capabilities("openai/gpt-5-nano").context_tokens == 400_000
     assert ADAPTER.describe_capabilities("openai/gpt-6-luna").context_tokens == 1_050_000
     assert ADAPTER.describe_capabilities("anthropic/claude-haiku-5.5").context_tokens == 1_000_000
-    assert ADAPTER.describe_capabilities("some/unlisted-model").context_tokens is None
+    for model in ("openai/gpt-5-nano", "openai/gpt-6-luna", "anthropic/claude-haiku-5.5"):
+        assert ADAPTER.describe_capabilities(model).max_output_tokens == 128_000
+    unlisted = ADAPTER.describe_capabilities("some/unlisted-model")
+    assert unlisted.context_tokens is None and unlisted.max_output_tokens is None

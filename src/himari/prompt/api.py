@@ -167,8 +167,9 @@ class ContextBudget(DeepFrozen):
     the history is compacted before the Run; the exact tail kept is at most
     ``keep_recent`` of it (always at least the latest turn); every
     summarizing request fits within it. ``hard_limit_tokens``: a Run whose
-    estimate is above it is never sent — the model's context window, or
-    the budget itself when the window is unknown (None)."""
+    estimate is above it is never sent — the model's context window less
+    the room kept for its answer, or the budget itself when the window is
+    unknown (None)."""
 
     limit_tokens: int
     compact_at: float = 0.8
