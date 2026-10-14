@@ -49,6 +49,7 @@ class Application:
     runner: BackgroundRunner
     inside: InsideEnvironment
     sandbox_state: SandboxState
+    model_id: str
     operator_secret: str = field(repr=False)  # never in reprs, logs or tracebacks
 
     @classmethod
@@ -86,7 +87,7 @@ class Application:
             store.close()
             raise
         assert isinstance(runtime.data, SqliteData)
-        return cls(root, store, runtime.data, runtime, BackgroundRunner(runtime.driver), inside, state, secret)
+        return cls(root, store, runtime.data, runtime, BackgroundRunner(runtime.driver), inside, state, model_id, secret)
 
     async def create_conversation(self, principal: PrincipalId, *, title: str | None = None) -> ConversationId:
         """T0 with the principal's Inside Workspace activated (provisioned first)."""

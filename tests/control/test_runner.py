@@ -21,7 +21,8 @@ class GatedDriver:
     def __init__(self) -> None:
         self.release = asyncio.Event()
         self.outcome: DriveResult | BaseException = DriveResult(DriveState.COMPLETED)
-        self.calls: list[tuple[TrustedScope, UserMessage | None]] = []
+        self.calls: list[tuple[TrustedScope, UserMessage | None]] = []  # accepted inputs, then None per resume
+        self.accept_error: BaseException | None = None
 
     async def _call(self, scope: TrustedScope, message: UserMessage | None) -> DriveResult:
         self.calls.append((scope, message))
@@ -31,7 +32,12 @@ class GatedDriver:
         return self.outcome
 
     async def drive(self, scope: TrustedScope, message: UserMessage) -> DriveResult:
-        return await self._call(scope, message)
+        raise AssertionError("the runner accepts, then resumes")
+
+    async def accept(self, scope: TrustedScope, message: UserMessage) -> None:
+        if self.accept_error is not None:
+            raise self.accept_error
+        self.calls.append((scope, message))
 
     async def resume(self, scope: TrustedScope) -> DriveResult:
         return await self._call(scope, None)
@@ -43,8 +49,9 @@ def test_submit_returns_at_once_and_one_job_runs_per_conversation() -> None:
         runner = BackgroundRunner(driver)
         started = await runner.submit(SCOPE, user("hi"))
         assert started.running and started.generation == 1 and started.started_at is not None
+        assert driver.calls == [(SCOPE, user("hi"))]  # committed before submit returned
         await asyncio.sleep(0)
-        assert driver.calls == [(SCOPE, user("hi"))]
+        assert driver.calls == [(SCOPE, user("hi")), (SCOPE, None)]
         with pytest.raises(ControlError) as busy:
             await runner.submit(SCOPE, user("again"))
         assert busy.value.code is ControlErrorCode.BUSY
@@ -147,3 +154,36 @@ def test_real_driver_question_and_answer_through_the_runner() -> None:
 
     asyncio.run(scenario())
     assert len(provider.sent) == 2
+
+
+# --- PR #12 review B1: an accepted message is committed before submit returns -----------
+
+
+def test_submit_commits_the_input_before_returning() -> None:
+    rt, provider = runtime([calls((ASK_USER_TOOL_ID, {"question": "Which city?"})), final("Seoul it is")])
+    runner = BackgroundRunner(rt.driver)
+
+    async def scenario() -> None:
+        await runner.submit(SCOPE, user("plan a trip"))
+        events = await rt.data.read_events(SCOPE)  # no await has let the job run yet
+        assert [e.payload for e in events] == [user("plan a trip")] and provider.sent == []
+        await runner.wait(SCOPE)
+        await runner.submit(SCOPE, user("Seoul"))
+        answered = (await rt.data.read_events(SCOPE))[-2:]
+        assert answered[0].payload.answers_call is not None  # type: ignore[union-attr]  # T7a, committed already
+        assert (await runner.wait(SCOPE)).result.state is DriveState.COMPLETED  # type: ignore[union-attr]
+
+    asyncio.run(scenario())
+
+
+def test_a_refused_input_starts_no_job_and_records_nothing() -> None:
+    rt, _ = runtime([final("x")])
+    runner = BackgroundRunner(rt.driver)
+
+    async def scenario() -> None:
+        with pytest.raises(DataError) as exc:
+            await runner.submit(FOREIGN, user("not mine"))
+        assert exc.value.code is DataErrorCode.NOT_AUTHORIZED
+        assert runner.status(FOREIGN).generation == 0 and await rt.data.read_events(SCOPE) == ()
+
+    asyncio.run(scenario())

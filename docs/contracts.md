@@ -1,6 +1,6 @@
 # HIMARI v3 — 통합 모듈 계약 기준서
 
-> 작성: 2026-10-13 · 문서 버전: **Contract Baseline v0.1** · 구현 상태: **P0 계약·실제 Provider 구현됨 / DB·Sandbox 미구현**
+> 작성: 2026-10-13 · 문서 버전: **Contract Baseline v0.1** · 구현 상태(2026-10-14): **P0 계약·실제 Provider·Inside 파일 Tool·Sandbox `run_command`·SQLite 영속 Data·Web 서버 구현됨 / CLI·자원 한도 미구현**
 >
 > **이 문서는 지금까지의 모듈 계약을 찾고 비교하는 단일 진입점이다.** 이미 합의한 원칙은 **CONFIRMED**, 그 원칙에 따라 작성한 포트/DTO/함수 이름은 **PROPOSED**, 후속 선택이 필요한 곳은 **OPEN**으로 표시한다.
 >
@@ -171,8 +171,9 @@ EnvironmentPlugin ── tools() 제공 · execute 시 Data.WorkspaceState 재�
 | **PROVIDER-SPI** | ProviderAdapter SPI / **Provider** | 각 Provider Adapter → Control | PROVIDER-01~03 + `describe_capabilities` | 새 Provider = Adapter 하나 | P0 ProviderAdapter SPI 구현 |
 | **CTRL-05** | AskUserTool / **Control** | Control이 등록한 suspending ToolHandler → Tool Dispatcher | 모델의 `ask_user` 호출 + 이후 사용자 응답 Event | 그룹 커밋 후 `WAITING_FOR_USER`·lock 해제. 답변 시 원래 `call_id`의 ToolResult를 커밋(T7a)한 뒤 새 Run. 대기 판별은 영속 기록에서 파생 | P0 ask_user 구현 |
 | **CTRL-06** | ConversationRunner / **Control** | Control → Web/CLI | ConversationDriver + 사용자 입력 | `drive`/`resume`을 백그라운드로 실행, (사용자, 대화)별 상태·완료 대기·종료 처리. 진행 내용은 Data Event로 조회 | P0 코드 구현 (V3-P44) |
+| **UI-01** | WebInterface / **Interface** | Web 서버 → 브라우저·CLI | Application(DATA-12, CTRL-06, ConversationLog 읽기) | 운영자 인증, 대화 목록·생성·이름 변경, 메시지·재개 제출, Event·작업 상태 폴링 | P0 코드 구현 (V3-P46) |
 
-**Contract Location (PR #1~#6 반영):** Control·Data·Tool·Environment·Prompt·Provider 공개 계약은 각각 `api.py`로 선언됐다. Control 실행은 `control/driver.py`, Bootstrap 조립은 `bootstrap/__init__.py`, 공용 DTO는 `src/himari/common.py`에 있다. `scripts/check_imports.py`가 모듈 경계를 검사한다. 실제 Inside/Sandbox·파일 Tool은 아직 미구현이다.
+**Contract Location (PR #1~#12 반영):** Control·Data·Tool·Environment·Prompt·Provider 공개 계약은 각각 `api.py`로 선언됐다. Control 실행은 `control/driver.py`·`control/runner.py`, Bootstrap 조립은 `bootstrap/`(`Application`), 공용 DTO는 `src/himari/common.py`에 있다. Inside 파일 Tool·Sandbox `run_command`는 `environment/inside/`(PR #8~#9), SQLite Data는 `data/sqlite.py`(PR #10), Web은 `interfaces/web/`(PR #12)에 있다. `scripts/check_imports.py`가 모듈 경계를 검사한다.
 
 | Owner | 현재 계약 문서 | 코드 선언 위치 |
 | --- | --- | --- |
@@ -502,7 +503,7 @@ class ToolOutcome:
 - **이 문서**: 모듈 간 관계·Contract ownership·source map·공개 Port 인벤토리를 한눈에 조회하는 통합 기준선.
 - **decisions.md**: 사용자가 실제로 승인한 **확정 결정**의 원본 이력. 이번에 채택한 계약 메타데이터 형식도 여기 기록한다.
 - **상세 v0.1 초안**: Data, CurrentState, Prompt/Tool의 구현 전 설계 근거. 변경 사항은 통합 기준서에도 반영해 표가 어긋나지 않도록 한다.
-- **현재 저장소에는 P0 실행 코드, 테스트 및 실제 OpenRouter Adapter가 있다.** 계약 인벤토리에는 아직 미구현인 장래 기능도 포함된다. 구현 여부는 소스·테스트와 구분해서 확인한다.
+- **현재 저장소에는 P0 실행 코드(영속 Data·Inside/Sandbox·Web 포함), 테스트 및 실제 OpenRouter Adapter가 있다.** 계약 인벤토리에는 아직 미구현인 장래 기능도 포함된다. 구현 여부는 소스·테스트와 구분해서 확인한다.
 
 > **채택한 새 원칙:** 각 공개 계약의 **정의 책임(Owner), 실제 제공자(Provider), 사용처(Consumer), 데이터 원천(Source of Truth), 선언 위치(Contract Location)**를 추적한다. 이는 모듈 교체 시 영향 범위와 테스트 책임을 확인하기 위한 최소 메타데이터다.
 

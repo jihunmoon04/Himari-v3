@@ -6,6 +6,9 @@ Rules:
 3. An ``api`` module imports only stdlib, ``himari.common`` and other ``api``
    modules — never its own package's implementations or plugins.
 4. ``himari.bootstrap`` (composition root) is exempt from rules 1 and 2.
+5. ``himari.interfaces`` (Web/CLI) sits above the composition root: it may
+   import ``himari.common``, ``api`` modules and ``himari.bootstrap``
+   (the assembled Application) — nothing else of another package.
 
 Usage: python -I scripts/check_imports.py [src_root]
 Exit status 1 on any violation. This is a static check, not part of pytest
@@ -27,6 +30,7 @@ LAYERS = {
     "provider": 5,
     "control": 6,
     "bootstrap": 7,
+    "interfaces": 8,
 }
 
 
@@ -86,6 +90,8 @@ def check(src_root: Path) -> list[str]:
                 errors.append(f"{where} (unknown package)")
                 continue
             target_is_public = tpkg == "common" or target == f"himari.{tpkg}.api"
+            if pkg == "interfaces" and tpkg == "bootstrap":
+                target_is_public = True  # the assembled Application is the interfaces' entry point
             if is_api and not target_is_public:
                 errors.append(f"{where} (api modules may import only common and other api modules)")
             if pkg == "bootstrap" or tpkg == pkg:
