@@ -2,9 +2,11 @@
 
 ``connect`` starts every configured server, lists its Tools and registers
 only the ones the operator listed, under the operator's effect profile. A
-server that cannot be reached at startup is left out (its Tools are not
-offered until a restart) and reported in its ``SourceStatus``; so is a
-listed Tool the server does not have or whose input schema HIMARI refuses.
+server that cannot be reached at startup, or whose answers cannot be used,
+is left out (its Tools are not offered until a restart) and reported in its
+``SourceStatus``; so is a listed Tool the server does not have, offers
+twice, or describes in a way HIMARI refuses. Nothing a server sends can
+make ``connect`` — or another server's connection — fail.
 
 What a server says is data, not instructions or trust: its description is
 cut to ``MAX_DESCRIPTION_CHARS``, its schema is checked like any other and
@@ -150,13 +152,29 @@ async def _start(server: McpServerConfig, transport: httpx.AsyncBaseTransport | 
     try:
         async with asyncio.timeout(STARTUP_SECONDS):
             await client.initialize()
-            listed = {t.get("name"): t for t in await client.list_tools()}
-    except (McpError, TimeoutError) as error:
-        reason = "no answer in time" if isinstance(error, TimeoutError) else str(error)
+            listing = await client.list_tools()
+    except Exception as error:  # noqa: BLE001 — whatever the server did, only this server is left out
+        if isinstance(error, TimeoutError):
+            reason = "no answer in time"
+        elif isinstance(error, McpError):
+            reason = str(error)
+        else:
+            reason = f"its answer could not be used ({type(error).__name__})"
         return client, [], SourceStatus(server.name, server.enabled_by_default, False, (), (f"unavailable: {reason}",))
+    listed: dict[str, Mapping[str, Any]] = {}
+    duplicated: set[str] = set()
+    for entry in listing:
+        name = entry.get("name")
+        if isinstance(name, str):
+            if name in listed:
+                duplicated.add(name)
+            listed[name] = entry
     handlers: list[McpTool] = []
     problems: list[str] = []
     for tool in server.tools:
+        if tool.name in duplicated:
+            problems.append(f"{tool.name}: the server offers it more than once")
+            continue
         if tool.name not in listed:
             problems.append(f"{tool.name}: the server does not offer it")
             continue
@@ -164,6 +182,8 @@ async def _start(server: McpServerConfig, transport: httpx.AsyncBaseTransport | 
             handlers.append(McpTool(client, server.name, tool, listed[tool.name]))
         except SchemaError as error:
             problems.append(f"{tool.name}: input schema refused ({error})")
+        except Exception as error:  # noqa: BLE001 — a malformed description leaves out this Tool only
+            problems.append(f"{tool.name}: its description could not be used ({type(error).__name__})")
     status = SourceStatus(server.name, server.enabled_by_default, True,
                           tuple(h.definition.tool_id for h in handlers), tuple(problems))
     return client, handlers, status

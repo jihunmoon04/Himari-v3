@@ -103,11 +103,11 @@ def map_tool_names(source: str, names: list[str]) -> dict[str, ToolId]:
 def check_url(url: str) -> str:
     """``https://``, or ``http://`` to a loopback address; no credentials or
     fragment in it (a token goes in ``token_env``)."""
-    parts = urlsplit(url)
     try:
+        parts = urlsplit(url)
         parts.port
     except ValueError:
-        raise McpConfigError(f"invalid port in the URL {url!r}") from None
+        raise McpConfigError(f"not a valid URL: {url!r}") from None
     host = parts.hostname or ""
     try:
         loopback = host in _LOOPBACK_NAMES or ip_address(host).is_loopback
@@ -153,6 +153,16 @@ def _keys(value: object, where: str, required: set[str], optional: set[str] = se
 
 
 def parse_config(text: bytes | str, environ: Mapping[str, str]) -> McpConfig:
+    """Every mistake is an McpConfigError, whatever its shape."""
+    try:
+        return _parse_config(text, environ)
+    except McpConfigError:
+        raise
+    except (TypeError, ValueError, AttributeError) as error:  # a shape no explicit check foresaw
+        raise McpConfigError(f"the file has an unexpected shape ({type(error).__name__})") from None
+
+
+def _parse_config(text: bytes | str, environ: Mapping[str, str]) -> McpConfig:
     try:
         document = json.loads(text)
     except ValueError as error:
@@ -180,7 +190,7 @@ def parse_config(text: bytes | str, environ: Mapping[str, str]) -> McpConfig:
             if not token:
                 raise McpConfigError(f"{where}: the environment variable {variable} is not set")
         default = entry.get("default", "on")
-        if default not in ("on", "off"):
+        if not isinstance(default, str) or default not in ("on", "off"):
             raise McpConfigError(f"{where}.default must be \"on\" or \"off\"")
         timeout = entry.get("timeout_seconds", DEFAULT_TIMEOUT_SECONDS)
         if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not 1 <= timeout <= MAX_TIMEOUT_SECONDS:
@@ -193,7 +203,7 @@ def parse_config(text: bytes | str, environ: Mapping[str, str]) -> McpConfig:
             if not tool_name or len(tool_name) > 128:
                 raise McpConfigError(f"{where}.tools: a Tool name is 1..128 characters")
             effect = _keys(tool_raw, f"{where}.tools.{tool_name}", {"effect"})["effect"]
-            if effect not in _EFFECTS:
+            if not isinstance(effect, str) or effect not in _EFFECTS:
                 raise McpConfigError(f"{where}.tools.{tool_name}.effect must be one of {sorted(_EFFECTS)}")
             effects[tool_name] = _EFFECTS[effect]
         ids = map_tool_names(name, sorted(effects))

@@ -20,12 +20,17 @@ P0 scheduling is sequential in original ordinal order; parallel scheduling
 - A handler exception is never shown to the model verbatim (Q-39): the model
   gets a generic message; type and text go to ``raw_result`` only.
 - Unknown tool, an External Tool whose source is not enabled for this
-  Conversation (``ExternalAccess``, asked again right before the call;
-  V3-P53), arguments failing ``input_schema``, an Environment Tool whose
-  kind is not active in this Conversation (even with no Workspace
-  requirement: catalog exposure is not authorization), or a
-  missing/revoked/mismatched Binding → DENIED result to the model; the
-  handler never runs.
+  Conversation (``ExternalAccess``; V3-P53), arguments failing
+  ``input_schema``, an Environment Tool whose kind is not active in this
+  Conversation (even with no Workspace requirement: catalog exposure is
+  not authorization), or a missing/revoked/mismatched Binding → DENIED
+  result to the model; the handler never runs.
+- External source check and its concurrency contract (V3-P53): the source
+  is checked before validation (which may take seconds in a child
+  process) and **again after it, as the last step before the claim and
+  ``run``**. A source turned off before that last check denies the call; a
+  call that passed it has started and is not stopped by a later change
+  (as with any Tool already running).
 - ``ask_user`` (suspending) is never run; it stays PENDING.
 """
 
@@ -162,10 +167,7 @@ class Dispatcher:
             return  # stays PENDING; Control turns this into WAITING_FOR_USER
         record_event = d.conversation_record is ConversationRecord.FULL
         try:
-            if d.external_source is not None and d.external_source not in await self._external_access.enabled_sources(
-                scope
-            ):
-                raise _Denied(f"tool source {d.external_source} is not enabled in this conversation")
+            await self._check_source(scope, d)
             if d.origin is ToolOrigin.EXTERNAL:  # an untrusted schema runs only in a killable child
                 violations = await validate_isolated(record.arguments, d.input_schema)
             else:
@@ -178,6 +180,7 @@ class Dispatcher:
                 if binding is not None and binding.cwd_relative is not None
                 else None
             )
+            await self._check_source(scope, d)  # again, last: it may have been turned off while validating
         except _Denied as denied:
             await self._commit(scope, record.call, _error(ToolStatus.DENIED, str(denied)), record_event)
             return
@@ -201,6 +204,12 @@ class Dispatcher:
                 raw_result={"error_type": type(exc).__name__, "error": str(exc)},
             )
         await self._commit(scope, record.call, outcome, record_event)
+
+    async def _check_source(self, scope: TrustedScope, d: ToolDefinition) -> None:
+        if d.external_source is not None and d.external_source not in await self._external_access.enabled_sources(
+            scope
+        ):
+            raise _Denied(f"tool source {d.external_source} is not enabled in this conversation")
 
     async def _resolve_binding(
         self, scope: TrustedScope, d: ToolDefinition, record: ToolExecutionRecord

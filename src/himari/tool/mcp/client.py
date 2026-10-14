@@ -13,13 +13,19 @@ server did not process a request for an unknown session.
 
 Errors say what is known about a ``tools/call``:
 
-- ``McpRefused``: no connection was made, or the server refused the request
-  (HTTP 4xx, or a JSON-RPC parse / invalid request / unknown method /
-  invalid params error): the Tool did not run.
-- ``McpUncertain``: the request was sent and no usable answer came back
-  (timeout, lost connection, HTTP 5xx, an unreadable or oversized
-  response, any other JSON-RPC error such as an internal error): the Tool
-  may have run.
+- ``McpRefused``: no connection was made, or the server rejected the
+  request itself — an HTTP status in ``REFUSED_STATUSES`` (authentication,
+  routing, format: decided before a Tool runs) or a JSON-RPC parse /
+  invalid request / unknown method / invalid params error: the Tool did
+  not run.
+- ``McpUncertain``: anything else after the request was sent — a timeout,
+  a lost connection, any other status (e.g. 408 or 429, which do not prove
+  the Tool did not run, a redirect, 5xx), an unreadable or oversized
+  response, any other JSON-RPC error: the Tool may have run.
+
+Size bounds: one response at most ``MAX_RESPONSE_BYTES``, a whole
+``tools/list`` at most ``MAX_LIST_BYTES`` and ``MAX_LISTED_TOOLS``; a
+notification's response body is never read.
 
 Credentials: the token is sent only as ``Authorization: Bearer`` to the
 configured URL. Redirects are not followed and proxy settings from the
@@ -41,6 +47,10 @@ from himari.common import JsonValue
 PROTOCOL_VERSION = "2025-11-25"  # the newest revision with the initialize handshake
 SUPPORTED_VERSIONS = frozenset({"2025-11-25", "2025-06-18", "2025-03-26"})
 MAX_RESPONSE_BYTES = 4 * 1024 * 1024
+MAX_LIST_BYTES = 8 * 1024 * 1024  # every tools/list page together
+MAX_LISTED_TOOLS = 1000
+# Statuses that reject the request itself, before any Tool could run.
+REFUSED_STATUSES = frozenset({400, 401, 403, 404, 405, 406, 413, 415})
 CONNECT_SECONDS = 5.0
 MAX_TOOL_PAGES = 20
 CLIENT_INFO = {"name": "himari", "version": "3"}
@@ -99,11 +109,15 @@ class McpClient:
     async def list_tools(self) -> list[Mapping[str, Any]]:
         tools: list[Mapping[str, Any]] = []
         cursor: str | None = None
+        size = 0
         for _ in range(MAX_TOOL_PAGES):
             result = await self.request("tools/list", {} if cursor is None else {"cursor": cursor})
             page = result.get("tools")
             if not isinstance(page, list) or not all(isinstance(t, dict) for t in page):
                 raise McpRefused("tools/list answered without a list of tools")
+            size += len(json.dumps(page))
+            if size > MAX_LIST_BYTES or len(tools) + len(page) > MAX_LISTED_TOOLS:
+                raise McpRefused(f"tools/list is larger than {MAX_LISTED_TOOLS} tools or {MAX_LIST_BYTES} bytes")
             tools.extend(page)
             cursor = result.get("nextCursor")
             if not isinstance(cursor, str) or not cursor:
@@ -155,11 +169,12 @@ class McpClient:
     async def _notify(self, method: str) -> None:
         body = json.dumps({"jsonrpc": "2.0", "method": method}).encode()
         try:
-            response = await self._http.post(self._url, content=body, headers=self._headers())
+            async with self._http.stream("POST", self._url, content=body, headers=self._headers()) as response:
+                status = response.status_code  # the body is never read
         except httpx.HTTPError as error:
             raise McpRefused(f"{method}: {type(error).__name__}") from None
-        if response.status_code >= 400:
-            raise McpRefused(f"{method}: HTTP {response.status_code}")
+        if status >= 400:
+            raise McpRefused(f"{method}: HTTP {status}")
 
     async def _rpc(self, method: str, params: Mapping[str, Any], *, initializing: bool = False) -> Mapping[str, Any]:
         self._next_id += 1
@@ -173,12 +188,12 @@ class McpClient:
                 status = response.status_code
                 if status == 404 and sent_session is not None:
                     raise _SessionExpired
-                if 400 <= status < 500:
+                if status in REFUSED_STATUSES:
                     raise McpRefused(f"{method}: HTTP {status}")
-                if status >= 500 or status in (202, 204):
+                if 300 <= status < 400:  # not followed: it could carry the token elsewhere
+                    raise McpUncertain(f"{method}: HTTP {status} (redirects are not followed)")
+                if status != 200:
                     raise McpUncertain(f"{method}: HTTP {status}")
-                if status >= 300:  # a redirect: not followed (it could carry the token elsewhere)
-                    raise McpRefused(f"{method}: HTTP {status} (redirects are not followed)")
                 if initializing:
                     session = response.headers.get("mcp-session-id")
                     self._session = session if session and session.isascii() and session.isprintable() else None

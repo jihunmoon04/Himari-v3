@@ -30,7 +30,9 @@ class FakeMcpServer:
         sse: bool = False,
         page_size: int | None = None,
         protocol_version: str | None = None,
+        url: str = URL,
     ) -> None:
+        self.url = url
         self.tools = tools if tools is not None else [
             {"name": "echo", "description": "Echo the text back.", "inputSchema": ECHO_SCHEMA},
         ]
@@ -48,6 +50,8 @@ class FakeMcpServer:
         self.next_status: int | None = None
         self.next_error: Exception | None = None  # raised after the call ran
         self.next_rpc_error: int | None = None
+        self.list_result: Any = None  # if set: tools/list answers exactly this result
+        self.notification_body_read = False
 
     def transport(self) -> httpx.MockTransport:
         return httpx.MockTransport(self.handle)
@@ -57,13 +61,16 @@ class FakeMcpServer:
 
     async def handle(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
-        if self.down or str(request.url) != URL:  # nothing else listens
+        if self.down or str(request.url) != self.url:  # nothing else listens
             raise httpx.ConnectError("connection refused", request=request)
         if self.token is not None and request.headers.get("authorization") != f"Bearer {self.token}":
             return httpx.Response(401, json={"error": "unauthorized"})
         message = json.loads(request.content)
         if "id" not in message:
-            return httpx.Response(202)
+            async def body() -> Any:  # a huge body; the client must not read it
+                self.notification_body_read = True
+                yield b"x" * (64 * 1024 * 1024)
+            return httpx.Response(202, content=body())
         method, params, request_id = message["method"], message.get("params", {}), message["id"]
         headers: dict[str, str] = {}
         if method == "initialize":
@@ -79,6 +86,8 @@ class FakeMcpServer:
             return self._answer(request_id, result, headers)
         if request.headers.get("mcp-session-id") not in self.sessions:
             return httpx.Response(404 if "mcp-session-id" in request.headers else 400)
+        if method == "tools/list" and self.list_result is not None:
+            return self._answer(request_id, self.list_result)
         if method == "tools/list":
             start = int(params.get("cursor", "0"))
             size = self.page_size or len(self.tools)

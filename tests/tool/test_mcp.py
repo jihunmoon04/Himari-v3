@@ -70,6 +70,19 @@ def test_a_config_mistake_is_refused(change: dict[str, Any], message: str) -> No
         parse_config(config_text(**change), {})
 
 
+@pytest.mark.parametrize("text", [
+    '[]', '{"servers": []}', '{"servers": {"calliope": []}}', '{"servers": {"calliope": {"url": 3, "tools": {}}}}',
+    config_text(url="http://[::1"), config_text(url="http://127.0.0.1:99999/mcp"),
+    config_text(tools={"echo": {"effect": ["read"]}}), config_text(tools={"echo": {"effect": {"a": 1}}}),
+    config_text(tools=["echo"]), config_text(tools={"echo": "read"}), config_text(default=["on"]),
+    config_text(token_env=3), config_text(timeout_seconds="5"), config_text(timeout_seconds=True), "{bad json",
+])
+def test_any_malformed_config_is_a_config_error(text: str) -> None:
+    """PR #20 review C2: never a bare TypeError/ValueError."""
+    with pytest.raises(McpConfigError):
+        parse_config(text, {})
+
+
 @pytest.mark.parametrize("name", ["Calliope", "inside/x", "a_b", "", "x" * 25])
 def test_a_server_name_is_a_short_lowercase_namespace(name: str) -> None:
     with pytest.raises(McpConfigError, match="server name"):
@@ -166,7 +179,15 @@ def test_concurrent_first_calls_share_one_session() -> None:
     (lambda s: setattr(s, "next_status", 403), McpRefused),
     (lambda s: setattr(s, "next_rpc_error", -32602), McpRefused),
     (lambda s: setattr(s, "next_status", 500), McpUncertain),
-    (lambda s: setattr(s, "next_status", 307), McpRefused),  # never followed: the token stays here
+    (lambda s: setattr(s, "next_status", 401), McpRefused),
+    (lambda s: setattr(s, "next_status", 415), McpRefused),
+    # PR #20 review B1: these statuses do not prove the Tool did not run.
+    (lambda s: setattr(s, "next_status", 408), McpUncertain),
+    (lambda s: setattr(s, "next_status", 429), McpUncertain),
+    (lambda s: setattr(s, "next_status", 409), McpUncertain),
+    (lambda s: setattr(s, "next_status", 422), McpUncertain),
+    (lambda s: setattr(s, "next_status", 201), McpUncertain),
+    (lambda s: setattr(s, "next_status", 307), McpUncertain),  # never followed: the token stays here
     (lambda s: setattr(s, "next_rpc_error", -32603), McpUncertain),
     (lambda s: setattr(s, "next_error", httpx.ReadTimeout("slow")), McpUncertain),
     (lambda s: setattr(s, "down", True), McpRefused),
@@ -337,3 +358,88 @@ def test_the_testkit_runtime_still_enables_registered_sources_by_default() -> No
 def test_a_registered_source_without_a_default_is_refused() -> None:
     with pytest.raises(ValueError, match="no default"):
         build_runtime(ScriptedAdapter([]), tools=connected(FakeMcpServer()).handlers, external_defaults={})
+
+
+# --- PR #20 review regressions --------------------------------------------------------------
+
+
+class Router(httpx.AsyncBaseTransport):
+    """Several fake servers behind one transport, by URL."""
+
+    def __init__(self, *servers: FakeMcpServer) -> None:
+        self._by_url = {s.url: s for s in servers}
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        await request.aread()
+        return await self._by_url[str(request.url)].handle(request)
+
+
+@pytest.mark.parametrize("list_result", [
+    {"tools": [{"name": ["echo"], "inputSchema": ECHO_SCHEMA}]},  # an unhashable name
+    {"tools": [{"name": "echo", "description": {"x": 1}, "inputSchema": ECHO_SCHEMA}]},
+    {"tools": [{"name": "echo", "inputSchema": ECHO_SCHEMA}, {"name": "echo", "inputSchema": {"type": "object"}}]},
+    {"tools": [{"name": "echo", "inputSchema": {"type": "object", "properties": {"a": {"pattern": "("}}}}]},
+    {"tools": "echo"},
+    {"tools": [3]},
+    {"tools": [{"name": "echo", "inputSchema": ECHO_SCHEMA}], "nextCursor": ["x"]},
+])
+def test_a_malformed_tools_list_affects_only_its_server(list_result: dict[str, Any]) -> None:
+    """PR #20 review B2: whatever one server lists, connect() returns and
+    every other server is connected as usual."""
+    bad = FakeMcpServer()
+    bad.list_result = list_result
+    good = FakeMcpServer(url="http://127.0.0.1:8791/mcp")
+    config = parse_config(json.dumps({"servers": {
+        "bad": {"url": bad.url, "tools": {"echo": {"effect": "read"}}},
+        "good": {"url": good.url, "tools": {"echo": {"effect": "read"}}},
+    }}), {})
+    connection = asyncio.run(connect(config, transport=Router(bad, good)))
+    statuses = {s.source: s for s in connection.statuses}
+    assert statuses["good"].available and statuses["good"].tool_ids == ("good/echo",)
+    assert [h.definition.tool_id for h in connection.handlers] in (["good/echo"], ["bad/echo", "good/echo"])
+    if "bad/echo" not in [h.definition.tool_id for h in connection.handlers]:
+        assert statuses["bad"].problems  # and it says why
+
+
+def test_a_tools_list_is_bounded_in_total() -> None:
+    """PR #20 review C1: pages under the per-response bound still add up."""
+    server = FakeMcpServer([{"name": f"t{i}", "inputSchema": {"type": "object"}} for i in range(1001)],
+                           page_size=100)
+    connection = connected(server)
+    assert not connection.statuses[0].available and "larger than" in connection.statuses[0].problems[0]
+
+
+def test_a_notification_response_body_is_never_read() -> None:
+    server = FakeMcpServer()
+    connection = connected(server)
+    assert connection.statuses[0].available and not server.notification_body_read
+
+
+def test_a_write_answered_429_is_unknown_not_failed() -> None:
+    """PR #20 review B1 end to end: a claimed write whose answer does not
+    prove it did not run is never recorded as FAILED (which invites a retry)."""
+    server = FakeMcpServer()
+    server.next_status = 429
+    rt, _ = mcp_runtime(server, [calls(("calliope/echo", {"text": "a"})), final("checked")], effect="scoped_write")
+    result = asyncio.run(rt.driver.drive(SCOPE, user("go")))
+    (execution,) = asyncio.run(rt.data.read_tool_executions(SCOPE, result.run_ids[0]))
+    assert execution.status is ToolExecutionStatus.UNKNOWN
+
+
+def test_turning_a_source_off_during_validation_denies_the_call(monkeypatch: pytest.MonkeyPatch) -> None:
+    """PR #20 review B3: the source is checked again after the (slow,
+    isolated) validation, as the last step before the call runs."""
+    from himari.tool import dispatcher as dispatcher_module
+
+    server = FakeMcpServer()
+    rt, _ = mcp_runtime(server, [calls(("calliope/echo", {"text": "a"})), final("ok")])
+
+    async def validate_then_turn_off(value: Any, schema: Any, **_: Any) -> list[str]:
+        await rt.data.set_external_setting(SCOPE, "calliope", False)
+        return []
+
+    monkeypatch.setattr(dispatcher_module, "validate_isolated", validate_then_turn_off)
+    result = asyncio.run(rt.driver.drive(SCOPE, user("go")))
+    (execution,) = asyncio.run(rt.data.read_tool_executions(SCOPE, result.run_ids[0]))
+    assert execution.status is ToolExecutionStatus.DENIED and server.calls == []
+    assert "not enabled" in execution.model_result.blocks[0].text
