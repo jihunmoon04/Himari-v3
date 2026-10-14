@@ -168,6 +168,9 @@ def test_the_input_ceiling_keeps_room_for_the_answer() -> None:
     assert input_ceiling(300_000, None) == 300_000 - DEFAULT_OUTPUT_TOKENS  # no declared maximum: a fixed reserve
     assert input_ceiling(100_000, 100_000) == 50_000  # never less than half the window for the input
     assert input_ceiling(None, 128_000) is None
+    for window, output in ((0, None), (-5, 1000), (100_000, 0), (100_000, -1000), (None, -1)):
+        with pytest.raises(ValueError, match="invalid"):  # never a limit above the window
+            input_ceiling(window, output)
 
 
 def test_the_context_limit_is_the_window_capped_or_the_configured_budget() -> None:
@@ -214,5 +217,30 @@ def test_the_models_window_less_its_output_is_the_hard_limit_and_the_budget_is_c
             assert (budget.limit_tokens, budget.hard_limit_tokens) == (DEFAULT_CONTEXT_TOKENS, 240_000)
         finally:
             await app.close()
+
+    asyncio.run(scenario())
+
+
+def test_an_input_that_leaves_no_room_for_the_answer_is_never_sent(tmp_path: Path) -> None:
+    # Within the 300k window, but over the 240k left after the 60k reserve.
+    async def scenario() -> None:
+        provider = WindowedAdapter([final("unreachable")])
+        app = await Application.open(tmp_path / "root", provider, model_id="m", sandbox=False)
+        try:
+            scope = TrustedScope(ALICE, await app.create_conversation(ALICE))
+            result = await app.runtime.driver.drive(scope, user("가" * 260_000))  # ~260k tokens at 3 bytes each
+            assert result.state is DriveState.REQUEST_REJECTED and "> 240000" in result.detail
+            assert provider.sent == []
+        finally:
+            await app.close()
+
+    asyncio.run(scenario())
+
+
+def test_a_configured_budget_must_leave_room_for_the_answer(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        with pytest.raises(ValueError, match="input limit of 240000"):
+            await Application.open(tmp_path / "root", WindowedAdapter(), model_id="m", sandbox=False,
+                                   context_tokens=250_000)
 
     asyncio.run(scenario())

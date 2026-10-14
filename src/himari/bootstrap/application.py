@@ -52,10 +52,17 @@ DEFAULT_OUTPUT_TOKENS = 32_000  # room kept for an answer when the model declare
 
 
 def input_ceiling(window: int | None, max_output: int | None) -> int | None:
-    """The largest input a Run may send: the model's window less the room its
-    answer may take — the model's declared maximum output, or
+    """The largest input a Run may send: the model's window less a reserve
+    for its answer — the model's declared maximum output, or
     ``DEFAULT_OUTPUT_TOKENS`` — but never less than half the window. None
-    when the window is unknown (the budget is then the limit)."""
+    when the window is unknown (the budget is then the limit).
+
+    A conservative input limit, not a promise of the whole maximum output:
+    a reserve capped at half the window leaves less than that, and the
+    input is an estimate. No output limit is sent, so HIMARI never cuts an
+    answer short; the model may still stop at its own limit."""
+    if (window is not None and window <= 0) or (max_output is not None and max_output <= 0):
+        raise ValueError(f"the Provider declares an invalid window ({window}) or maximum output ({max_output})")
     if window is None:
         return None
     reserve = DEFAULT_OUTPUT_TOKENS if max_output is None else max_output
