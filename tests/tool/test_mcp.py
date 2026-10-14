@@ -443,3 +443,38 @@ def test_turning_a_source_off_during_validation_denies_the_call(monkeypatch: pyt
     (execution,) = asyncio.run(rt.data.read_tool_executions(SCOPE, result.run_ids[0]))
     assert execution.status is ToolExecutionStatus.DENIED and server.calls == []
     assert "not enabled" in execution.model_result.blocks[0].text
+
+
+def test_a_too_deep_schema_from_a_server_leaves_out_only_that_tool() -> None:
+    """PR #19 re-review N1 at the MCP boundary: refused, not a crash."""
+    deep: dict[str, Any] = {"type": "object"}
+    for _ in range(100):
+        deep = {"type": "object", "properties": {"x": deep}}
+    server = FakeMcpServer([{"name": "deep", "inputSchema": deep},
+                            {"name": "echo", "inputSchema": ECHO_SCHEMA}])
+    connection = connected(server, tools={"deep": {"effect": "read"}, "echo": {"effect": "read"}})
+    (status,) = connection.statuses
+    assert status.tool_ids == ("calliope/echo",)
+    assert status.problems == ("deep: input schema refused ($: schema is nested more than 64 levels deep)",)
+
+
+def test_a_result_nested_too_deep_to_parse_is_uncertain() -> None:
+    server = FakeMcpServer()
+    server.handlers["echo"] = lambda args: {"content": []}
+    deep = "[" * 100_000 + "]" * 100_000
+
+    async def scenario() -> None:
+        client = McpClient(URL, None, timeout_seconds=5, transport=server.transport())
+        await client.initialize()
+        original = server._answer
+        server._answer = lambda request_id, result, headers=None: httpx.Response(  # type: ignore[method-assign]
+            200, content=f'{{"jsonrpc": "2.0", "id": {request_id}, "result": {{"x": {deep}}}}}'.encode(),
+            headers={"content-type": "application/json"})
+        try:
+            with pytest.raises(McpUncertain, match="usable JSON"):
+                await client.call_tool("echo", {"text": "x"})
+        finally:
+            server._answer = original  # type: ignore[method-assign]
+            await client.aclose()
+
+    asyncio.run(scenario())

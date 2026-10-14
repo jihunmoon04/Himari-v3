@@ -242,8 +242,8 @@ async def _read_bounded(response: httpx.Response) -> bytes:
 def _parse(data: bytes) -> object:
     try:
         return json.loads(data)
-    except ValueError:
-        raise McpUncertain("the response is not JSON") from None
+    except (ValueError, RecursionError):  # RecursionError: nested deeper than the parser can follow
+        raise McpUncertain("the response is not usable JSON") from None
 
 
 def _result(message: object, request_id: int, method: str) -> Mapping[str, Any]:
