@@ -491,3 +491,24 @@ def test_compact_with_nothing_to_compact(harness: Harness) -> None:
     cid = harness.run("new")[1].strip()
     code, _, err = harness.run("compact", cid)
     assert code == 0 and "(nothing to compact yet)" in err
+
+
+@pytest.mark.parametrize("answers", [["a1", "a2", "S"], []])
+def test_an_unanswered_message_stays_visible_after_compacting(harness: Harness, answers: list[str]) -> None:
+    # PR #17 review B1: compacting (or finding nothing to compact) is not answering.
+    cid = harness.run("new")[1].strip()
+    if answers:
+        harness.queue(*[final(a) for a in answers])
+        harness.run("send", cid, "q1")
+        harness.run("send", cid, "q2")
+    app = harness.application
+    assert app is not None and harness.test_client.portal is not None
+    harness.test_client.portal.call(app.runtime.driver.accept, TrustedScope(OPERATOR, ConversationId(cid)),
+                                    UserMessage((TextBlock("unanswered"),)))
+    code, _, err = harness.run("compact", cid)
+    expected = "(compacted: earlier messages" if answers else "(nothing to compact yet)"
+    assert expected in err and "not answered yet" in err and code == cli.EXIT_FAILED
+    detail = harness.client().get(f"/api/conversations/{cid}")
+    assert detail["continuable"] is True and detail["job"]["state"] in ("compacted", "nothing_to_compact")
+    code, _, err = harness.run("show", cid)
+    assert code == cli.EXIT_FAILED and "not answered yet" in err

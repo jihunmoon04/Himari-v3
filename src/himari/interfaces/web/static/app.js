@@ -375,8 +375,12 @@ function describe(detail) {
   const job = detail.job;
   if (job.running) return { text: "Working…", tone: null, active: true };
   if (detail.waiting) return { text: STATE_TEXT.waiting_for_user, tone: "warn", active: false };
-  if (detail.continuable && !job.error && (job.state === null || job.state === "completed")) {
-    return { text: "Not answered yet — choose Continue in the conversation menu.", short: "Not answered yet",
+  // Compacting (or finding nothing to compact) answers nothing: an unanswered
+  // message still wins, with the compaction result in front of it.
+  const compacted = job.state === "compacted" || job.state === "nothing_to_compact";
+  if (detail.continuable && !job.error && (job.state === null || job.state === "completed" || compacted)) {
+    const done = compacted ? `${STATE_TEXT[job.state]}. ` : "";
+    return { text: `${done}Not answered yet — choose Continue in the conversation menu.`, short: "Not answered yet",
              tone: "warn", active: false };
   }
   if (job.error) return { text: ERROR_TEXT[job.error] || `The run failed (${job.error}).`, tone: "error", active: false };

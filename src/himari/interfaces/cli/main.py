@@ -226,12 +226,12 @@ class Session:
             return EXIT_FAILED
         state = job.get("state")
         if state in DONE_TEXT:
-            self.note(f"({DONE_TEXT[state]})")
-            return EXIT_OK
-        if detail.get("continuable") and state in (None, "completed"):
+            self.note(f"({DONE_TEXT[state]})")  # the job's own result; the conversation's state follows
+        if detail.get("continuable") and state in (None, "completed", *DONE_TEXT):
+            # Compacting (or finding nothing to compact) answers nothing.
             self.note("(not answered yet — use `continue`)")
             return EXIT_FAILED
-        if state not in (None, "completed", "idle"):
+        if state not in (None, "completed", "idle", *DONE_TEXT):
             self.note(f"({STATE_TEXT.get(state, state)})")
             return EXIT_FAILED
         return EXIT_OK
