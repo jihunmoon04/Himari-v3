@@ -5,7 +5,8 @@ provider (a file write, an ask_user question, then a final answer that
 contains hostile markup), drives it with headless Chromium and checks:
 sign-in (wrong and right token), new chat, the tool row, the question
 panel, the answer, safe rich text (no script execution, no javascript:
-link), the context size in the conversation menu, rename, reload keeping
+link), the context size in the conversation menu, "Compact now" and its
+divider, rename, reload keeping
 the HttpOnly session, the narrow layout and sign-out. A second server with
 a small context budget compacts a conversation and checks the timeline
 divider and its summary.
@@ -17,7 +18,9 @@ Usage:    python scripts/ui_smoke.py [--screenshots DIR]
 from __future__ import annotations
 
 import argparse
+import asyncio
 import os
+import re
 import sys
 import tempfile
 import threading
@@ -31,7 +34,9 @@ import uvicorn  # noqa: E402
 from playwright.sync_api import expect, sync_playwright  # noqa: E402
 
 from himari.bootstrap.application import Application  # noqa: E402
-from himari.common import ASK_USER_TOOL_ID, CallId, TextBlock, ToolCall, ToolId  # noqa: E402
+from himari.bootstrap.operator import OPERATOR  # noqa: E402
+from himari.common import ASK_USER_TOOL_ID, CallId, ConversationId, TextBlock, ToolCall, ToolId, TrustedScope  # noqa: E402
+from himari.data.api import UserMessage  # noqa: E402
 from himari.interfaces.web.app import create_app  # noqa: E402
 from himari.interfaces.web.config import WebConfig  # noqa: E402
 from himari.provider.api import NormalizedFinal, NormalizedToolCalls  # noqa: E402
@@ -47,7 +52,11 @@ def scripted() -> ScriptedAdapter:
         NormalizedToolCalls((ToolCall(CallId("c0"), 0, ToolId("inside/write_file"), {"path": "plan.txt", "content": "draft"}),)),
         NormalizedToolCalls((ToolCall(CallId("c0"), 0, ASK_USER_TOOL_ID, {"question": "Which **city**?"}),)),
         NormalizedFinal((TextBlock(HOSTILE),)),
+        NormalizedFinal((TextBlock("Manual summary: a trip to Seoul."),)),  # "Compact now"
     ])
+
+
+OPENED: dict[str, tuple[Application, asyncio.AbstractEventLoop]] = {}  # root -> the server's application and loop
 
 
 def serve(root: str, port: int = PORT, provider: ScriptedAdapter | None = None,
@@ -56,8 +65,10 @@ def serve(root: str, port: int = PORT, provider: ScriptedAdapter | None = None,
                        root, "scripted-model", None, False)
 
     async def opener() -> Application:
-        return await Application.open(root, provider or scripted(), model_id="scripted-model", sandbox=False,
-                                      context_tokens=context_tokens)
+        application = await Application.open(root, provider or scripted(), model_id="scripted-model", sandbox=False,
+                                             context_tokens=context_tokens)
+        OPENED[root] = (application, asyncio.get_running_loop())
+        return application
 
     server = uvicorn.Server(uvicorn.Config(create_app(config, opener), host="127.0.0.1", port=port, log_level="warning"))
     threading.Thread(target=server.run, daemon=True).start()
@@ -102,6 +113,14 @@ def run(base: str, token: str, shots: str | None) -> list[str]:
         page.click("#chat-menu-toggle")
         expect(page.locator("#chat-menu-context")).to_contain_text("of 128k tokens · summarizes at 102k")
         expect(page.locator(".context-divider")).to_have_count(0)  # nothing compacted yet
+        page.click("#chat-menu-compact")
+        expect(page.locator("#status-bar")).to_have_text(
+            "Compacted: earlier messages now reach HIMARI as a summary", timeout=10000)
+        expect(page.locator(".context-divider")).to_have_count(1, timeout=10000)
+        page.locator(".context-divider summary").click()
+        expect(page.locator(".context-divider-text")).to_have_text("Manual summary: a trip to Seoul.")
+        page.click("#chat-menu-toggle")
+        expect(page.locator("#chat-menu-context")).to_contain_text("of 128k tokens")
         page.click("#chat-menu-toggle")
         page.once("dialog", lambda d: d.accept("Seoul trip"))
         page.click("#chat-menu-toggle")
@@ -126,7 +145,15 @@ def run(base: str, token: str, shots: str | None) -> list[str]:
 SUMMARY = "SUMMARY of the start <b>not markup</b>"
 
 
-def run_compaction(base: str, token: str, shots: str | None) -> list[str]:
+def accept_unanswered(root: str, conversation_id: str) -> None:
+    """A message the server committed but never answered (as after a restart)."""
+    application, loop = OPENED[root]
+    scope = TrustedScope(OPERATOR, ConversationId(conversation_id))
+    message = UserMessage((TextBlock("an unanswered question"),))
+    asyncio.run_coroutine_threadsafe(application.runtime.driver.accept(scope, message), loop).result(10)
+
+
+def run_compaction(base: str, token: str, shots: str | None, root: str) -> list[str]:
     errors: list[str] = []
     with sync_playwright() as p:
         browser = p.chromium.launch()
@@ -157,6 +184,18 @@ def run_compaction(base: str, token: str, shots: str | None) -> list[str]:
         expect(page.locator("#chat-menu-context")).to_contain_text("of 2.0k tokens")
         if shots:
             page.screenshot(path=os.path.join(shots, "4-compacted.png"), full_page=True)
+        page.click("#chat-menu-toggle")
+        # Compacting answers nothing: an unanswered message keeps its warning.
+        conversation_id = page.locator(".conv-row.is-selected").get_attribute("data-id")
+        assert conversation_id
+        accept_unanswered(root, conversation_id)
+        page.locator(".conv-row").first.click()
+        expect(page.locator("#status-bar")).to_contain_text("Not answered yet")
+        page.click("#chat-menu-toggle")
+        page.click("#chat-menu-compact")
+        # One message, after the job: the compaction result and the warning together.
+        expect(page.locator("#status-bar")).to_have_text(
+            re.compile(r"^(Compacted|Nothing to compact)[^.]*\. Not answered yet"), timeout=10000)
         browser.close()
     return errors
 
@@ -179,7 +218,8 @@ def main() -> int:
         server = serve(small, PORT + 1, provider, context_tokens=2000)
         try:
             errors += run_compaction(f"http://127.0.0.1:{PORT + 1}",
-                                     Path(small, "control", "operator.secret").read_text().strip(), args.screenshots)
+                                     Path(small, "control", "operator.secret").read_text().strip(), args.screenshots,
+                                     small)
         finally:
             server.should_exit = True
             time.sleep(0.5)

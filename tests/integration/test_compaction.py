@@ -451,3 +451,52 @@ async def test_context_status_without_a_budget_or_with_a_group_open() -> None:
     assert status is not None and status.estimated_tokens is None  # the question is still open
     with pytest.raises(DataError):
         await rt.driver.context_status(FOREIGN)
+
+
+# --- manual compaction (CTRL-08) -----------------------------------------------
+
+
+@sync
+async def test_compact_now_summarizes_whatever_the_size_and_starts_no_run() -> None:
+    rt, adapter = runtime([final("a1"), final("a2"), final("S-manual"), final("a3")], context_budget=BUDGET)
+    await rt.driver.drive(SCOPE, user("q1"))
+    await rt.driver.drive(SCOPE, user("q2"))
+    sent = len(adapter.sent)
+    result = await rt.driver.compact(SCOPE)
+    assert result.state is DriveState.COMPACTED and result.run_ids == () and len(result.compaction_run_ids) == 1
+    assert len(adapter.sent) == sent + 1 and _is_compaction(adapter.prepared_inputs[-1])
+    snapshot = await rt.data.get_latest_snapshot(SCOPE)
+    assert snapshot is not None and snapshot.body == {"summary": "S-manual"}
+    assert snapshot.covers_through_sequence == 3  # q1 a1 q2; the latest part (a2) stays exact
+    await rt.driver.drive(SCOPE, user("q3"))
+    head = adapter.prepared_inputs[-1].conversation[0]
+    assert isinstance(head, CompressedHistory) and head.summary == (TextBlock("S-manual"),)
+
+
+@sync
+async def test_compact_now_with_nothing_to_compact() -> None:
+    rt, adapter = runtime([final("a1")], context_budget=BUDGET)
+    assert (await rt.driver.compact(SCOPE)).state is DriveState.NOTHING_TO_COMPACT  # empty
+    await rt.driver.drive(SCOPE, user("q1"))
+    plain, plain_adapter = runtime([final("a1"), final("a2")])
+    await plain.driver.drive(SCOPE, user("q1"))
+    await plain.driver.drive(SCOPE, user("q2"))
+    result = await plain.driver.compact(SCOPE)
+    assert result.state is DriveState.NOTHING_TO_COMPACT and result.detail == "no context budget"
+    assert len(plain_adapter.sent) == 2
+
+
+@sync
+async def test_compact_now_waits_for_an_open_question_and_reports_failures() -> None:
+    rt, adapter = runtime([calls(("ask_user", {"question": "which?"}))], context_budget=BUDGET)
+    await rt.driver.drive(SCOPE, user("q1"))
+    sent = len(adapter.sent)
+    waiting = await rt.driver.compact(SCOPE)
+    assert waiting.state is DriveState.WAITING_FOR_USER and waiting.waiting_call is not None
+    assert len(adapter.sent) == sent
+    failing, failing_adapter = runtime([final("a1"), final("a2"), NativeNoResponse("http_500")], context_budget=BUDGET)
+    await failing.driver.drive(SCOPE, user("q1"))
+    await failing.driver.drive(SCOPE, user("q2"))
+    failed = await failing.driver.compact(SCOPE)
+    assert failed.state is DriveState.COMPACTION_FAILED and "http_500" in failed.detail
+    assert await failing.data.get_latest_snapshot(SCOPE) is None

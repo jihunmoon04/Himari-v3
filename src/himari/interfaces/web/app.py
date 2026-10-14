@@ -188,6 +188,7 @@ def job_view(status: JobStatus) -> dict[str, Any]:
         "generation": status.generation,
         "state": None if result is None else result.state.value,
         "unknown_calls": 0 if result is None else len(result.unknown_calls),
+        "compactions": 0 if result is None else len(result.compaction_run_ids),
         "error": status.error,
         "started_at": _time(status.started_at),
         "finished_at": _time(status.finished_at),
@@ -389,6 +390,13 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
         application, scope = himari(request), scope_of(conversation_id, who)
         await application.data.read_conversation(scope)
         return job_view(await application.runner.submit(scope, None))
+
+    @app.post("/api/conversations/{conversation_id}/compact", status_code=202)
+    async def compact(conversation_id: str, request: Request, who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+        """Summarize the older history now, whatever its size (no Run)."""
+        application, scope = himari(request), scope_of(conversation_id, who)
+        await application.data.read_conversation(scope)
+        return job_view(await application.runner.submit_compaction(scope))
 
     # -- static UI ----------------------------------------------------------------------------
 

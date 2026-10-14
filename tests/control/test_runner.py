@@ -23,6 +23,7 @@ class GatedDriver:
         self.outcome: DriveResult | BaseException = DriveResult(DriveState.COMPLETED)
         self.calls: list[tuple[TrustedScope, UserMessage | None]] = []  # accepted inputs, then None per resume
         self.accept_error: BaseException | None = None
+        self.compactions: list[TrustedScope] = []
 
     async def _call(self, scope: TrustedScope, message: UserMessage | None) -> DriveResult:
         self.calls.append((scope, message))
@@ -40,6 +41,10 @@ class GatedDriver:
         self.calls.append((scope, message))
 
     async def resume(self, scope: TrustedScope) -> DriveResult:
+        return await self._call(scope, None)
+
+    async def compact(self, scope: TrustedScope) -> DriveResult:
+        self.compactions.append(scope)
         return await self._call(scope, None)
 
 
@@ -185,5 +190,24 @@ def test_a_refused_input_starts_no_job_and_records_nothing() -> None:
             await runner.submit(FOREIGN, user("not mine"))
         assert exc.value.code is DataErrorCode.NOT_AUTHORIZED
         assert runner.status(FOREIGN).generation == 0 and await rt.data.read_events(SCOPE) == ()
+
+    asyncio.run(scenario())
+
+
+def test_a_compaction_runs_in_the_background_and_is_busy_like_any_job() -> None:
+    async def scenario() -> None:
+        driver = GatedDriver()
+        runner = BackgroundRunner(driver)
+        started = await runner.submit_compaction(SCOPE)
+        assert started.running and started.generation == 1
+        with pytest.raises(ControlError) as busy:
+            await runner.submit(SCOPE, None)
+        assert busy.value.code is ControlErrorCode.BUSY
+        with pytest.raises(ControlError):
+            await runner.submit_compaction(SCOPE)
+        driver.outcome = DriveResult(DriveState.COMPACTED)
+        driver.release.set()
+        done = await runner.wait(SCOPE)
+        assert done.result == DriveResult(DriveState.COMPACTED) and driver.compactions == [SCOPE]
 
     asyncio.run(scenario())

@@ -25,6 +25,9 @@ class DriveState(Enum):
     REQUEST_REJECTED = "request_rejected"  # Prompt/Provider/context budget refused before send
     RUN_LIMIT_REACHED = "run_limit_reached"
     IDLE = "idle"  # resume(): nothing to continue (last turn was FINAL)
+    COMPACTED = "compacted"  # compact(): the older history is now a summary
+    NOTHING_TO_COMPACT = "nothing_to_compact"  # compact(): no budget, or nothing older than the latest turn
+    COMPACTION_FAILED = "compaction_failed"  # compact(): a summarizing call failed; nothing committed
 
 
 @dataclass(frozen=True)
@@ -88,6 +91,13 @@ class ConversationDriver(Protocol):
         ``resume`` continues from it. Same BUSY rule as ``drive``."""
         ...
 
+    async def compact(self, scope: TrustedScope) -> DriveResult:
+        """CTRL-08: compact now, whatever the size — everything older than the
+        recent tail becomes the summary (one plan, possibly a chain of calls).
+        Starts no Run. COMPACTED, NOTHING_TO_COMPACT, COMPACTION_FAILED, or
+        WAITING_FOR_USER while a question is open. Same BUSY rule."""
+        ...
+
 
 @dataclass(frozen=True)
 class JobStatus(DeepFrozen):
@@ -126,6 +136,10 @@ class ConversationRunner(Protocol):
         loses nothing, and a later ``resume`` answers it. Raises
         ControlError(BUSY) while this Conversation has a running job, and
         any Data error of the commit (then no job is started)."""
+        ...
+
+    async def submit_compaction(self, scope: TrustedScope) -> JobStatus:
+        """Start ``compact`` in the background. Same BUSY rule as ``submit``."""
         ...
 
     def status(self, scope: TrustedScope) -> JobStatus: ...

@@ -261,7 +261,8 @@ def test_foreign_and_missing_conversations_look_the_same(server: Server) -> None
                       server.post(f"/api/conversations/{cid}/resume"),
                       server.client.patch(f"/api/conversations/{cid}", json={"title": "x"}, headers={"origin": ORIGIN}),
                       server.client.get(f"/api/conversations/{cid}/events"),
-                      server.client.get(f"/api/conversations/{cid}/context")]
+                      server.client.get(f"/api/conversations/{cid}/context"),
+                      server.post(f"/api/conversations/{cid}/compact")]
     assert {r.status_code for r in responses} == {404}
     assert {r.text for r in responses} == {'{"error":{"code":"not_found","message":"No such conversation."}}'}
     assert server.client.get("/api/conversations").json()["items"] == []
@@ -293,6 +294,10 @@ class GatedDriver:
     async def resume(self, scope: TrustedScope) -> DriveResult:
         await asyncio.to_thread(self.release.wait, 10)
         return DriveResult(DriveState.COMPLETED)
+
+    async def compact(self, scope: TrustedScope) -> DriveResult:
+        await asyncio.to_thread(self.release.wait, 10)
+        return DriveResult(DriveState.COMPACTED)
 
 
 def test_a_second_message_while_working_is_busy(server: Server) -> None:
@@ -366,3 +371,20 @@ def test_context_shows_where_the_summary_takes_over(tmp_path: Path, monkeypatch:
         events = server.client.get(f"/api/conversations/{cid}/events").json()["items"]
         assert 0 < covered < events[-1]["sequence"]  # the exact history is all still there
         assert [e["kind"] for e in events] == ["user_message", "assistant_final"] * 4
+
+
+def test_compact_now_through_the_api(server: Server) -> None:
+    server.sign_in()
+    cid = server.post("/api/conversations").json()["id"]
+    queue(server, final("a1"), final("a2"), final("S-manual <b>"))
+    for text in ("q1", "q2"):
+        server.post(f"/api/conversations/{cid}/messages", {"text": text})
+        server.wait_idle(cid)
+    response = server.post(f"/api/conversations/{cid}/compact")
+    assert response.status_code == 202 and response.json()["running"] is True
+    detail = server.wait_idle(cid)
+    assert detail["job"]["state"] == "compacted" and detail["job"]["compactions"] == 1
+    context = server.client.get(f"/api/conversations/{cid}/context").json()
+    assert context["summary"] == "S-manual <b>" and context["compactions"] == 1
+    assert len(server.client.get(f"/api/conversations/{cid}/events").json()["items"]) == 4  # no new answer
+    assert server.client.post(f"/api/conversations/{cid}/compact").status_code == 403  # cookie mutation needs Origin

@@ -1,11 +1,12 @@
 """``himari`` — the terminal client of the local HIMARI Web server (V3-P47).
 
-    himari chat [ID] [--title T]   interactive; answers questions; /continue /context /rename /id /exit
+    himari chat [ID] [--title T]   interactive; /continue /context /compact /rename /id /exit
     himari list                    your conversations, most recent first
     himari show ID                 a conversation's transcript and state
     himari new [--title T]         create a conversation, print its id
     himari send ID TEXT|-          send one message (``-`` reads stdin) and follow it
     himari continue ID             continue an accepted but unanswered message
+    himari compact ID              summarize the earlier messages now (no model answer)
 
 The server must be running (``python -m himari.interfaces.web``); the CLI
 reads the operator secret from ``HIMARI_DATA_ROOT`` (or ``--data-root``)
@@ -54,6 +55,11 @@ STATE_TEXT = {
     "request_rejected": "the request was refused before sending",
     "run_limit_reached": "stopped after the maximum number of steps",
     "idle": "nothing to continue",
+    "compaction_failed": "compaction failed; nothing was changed",
+}
+DONE_TEXT = {  # finished states that are not failures
+    "compacted": "compacted: earlier messages now reach HIMARI as a summary",
+    "nothing_to_compact": "nothing to compact yet",
 }
 ERROR_TEXT = {
     "busy": "this conversation is still working",
@@ -219,20 +225,27 @@ class Session:
             self.note(f"(the run failed: {ERROR_TEXT.get(job['error'], job['error'])})")
             return EXIT_FAILED
         state = job.get("state")
-        if detail.get("continuable") and state in (None, "completed"):
+        if state in DONE_TEXT:
+            self.note(f"({DONE_TEXT[state]})")  # the job's own result; the conversation's state follows
+        if detail.get("continuable") and state in (None, "completed", *DONE_TEXT):
+            # Compacting (or finding nothing to compact) answers nothing.
             self.note("(not answered yet — use `continue`)")
             return EXIT_FAILED
-        if state not in (None, "completed", "idle"):
+        if state not in (None, "completed", "idle", *DONE_TEXT):
             self.note(f"({STATE_TEXT.get(state, state)})")
             return EXIT_FAILED
         return EXIT_OK
 
     def submit_and_follow(self, conversation_id: str, after: int, text: str | None) -> tuple[int, int]:
+        if text is None:
+            return self.post_and_follow(conversation_id, after, "/resume", None)
+        return self.post_and_follow(conversation_id, after, "/messages", {"text": text})
+
+    def post_and_follow(self, conversation_id: str, after: int, suffix: str,
+                        body: dict[str, Any] | None) -> tuple[int, int]:
+        """Start a job (sent once, never resent) and follow it to the end."""
         try:
-            if text is None:
-                self.client.post(_path(conversation_id, "/resume"))
-            else:
-                self.client.post(_path(conversation_id, "/messages"), {"text": text})
+            self.client.post(_path(conversation_id, suffix), body)
         except ServerRefused as error:
             self.note(f"refused: {error}")
             return EXIT_FAILED, after
@@ -293,7 +306,17 @@ def cmd_continue(session: Session, args: argparse.Namespace) -> int:
     return code
 
 
+def cmd_compact(session: Session, args: argparse.Namespace) -> int:
+    detail = session.client.get(_path(args.id))
+    code, _ = session.post_and_follow(args.id, int(detail["conversation"]["last_sequence"]), "/compact", None)
+    context = session.context(args.id)
+    if context is not None:
+        session.note(context_line(context))
+    return code
+
+
 CHAT_HELP = ("/continue  continue an unanswered message\n/context   context size and the latest summary\n"
+             "/compact   summarize the earlier messages now\n"
              "/rename T  rename\n/id        show the id\n/exit      leave")
 
 
@@ -326,6 +349,12 @@ def cmd_chat(session: Session, args: argparse.Namespace, read: Callable[[str], s
             continue
         if text == "/id":
             session.printer.line(conversation_id)
+            continue
+        if text == "/compact":
+            _, after = session.post_and_follow(conversation_id, after, "/compact", None)
+            context = session.context(conversation_id)
+            if context is not None:
+                session.note(context_line(context))
             continue
         if text == "/context":
             seen = session.printer.compactions
@@ -377,6 +406,8 @@ def parser() -> argparse.ArgumentParser:
     send = sub.add_parser("send", help="send one message and follow it")
     send.add_argument("id")
     send.add_argument("text", help="the message, or - to read it from stdin")
+    compact = sub.add_parser("compact", help="summarize the earlier messages now")
+    compact.add_argument("id")
     cont = sub.add_parser("continue", help="continue an unanswered message")
     cont.add_argument("id")
     return p
@@ -384,6 +415,7 @@ def parser() -> argparse.ArgumentParser:
 
 COMMANDS: dict[str, Callable[[Session, argparse.Namespace], int]] = {
     "chat": cmd_chat, "list": cmd_list, "show": cmd_show, "new": cmd_new, "send": cmd_send, "continue": cmd_continue,
+    "compact": cmd_compact,
 }
 
 

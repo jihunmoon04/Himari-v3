@@ -29,6 +29,9 @@ const STATE_TEXT = {
   request_rejected: "The request was refused before sending",
   run_limit_reached: "Stopped after the maximum number of steps",
   idle: "Nothing to continue",
+  compacted: "Compacted: earlier messages now reach HIMARI as a summary",
+  nothing_to_compact: "Nothing to compact yet",
+  compaction_failed: "Compaction failed; nothing was changed",
 };
 const ERROR_TEXT = {
   busy: "This conversation is still working.",
@@ -330,6 +333,7 @@ function applyContext(context) {
   app.context = context;
   const pair = $("chat-menu-context-pair");
   pair.hidden = !context.enabled;
+  $("chat-menu-compact").hidden = !context.enabled;
   if (context.enabled) {
     const size = context.estimated_tokens === null ? "size unknown while working"
       : `about ${formatTokens(context.estimated_tokens)} of ${formatTokens(context.budget_tokens)} tokens`;
@@ -371,11 +375,18 @@ function describe(detail) {
   const job = detail.job;
   if (job.running) return { text: "Working…", tone: null, active: true };
   if (detail.waiting) return { text: STATE_TEXT.waiting_for_user, tone: "warn", active: false };
-  if (detail.continuable && !job.error && (job.state === null || job.state === "completed")) {
-    return { text: "Not answered yet — choose Continue in the conversation menu.", short: "Not answered yet",
+  // Compacting (or finding nothing to compact) answers nothing: an unanswered
+  // message still wins, with the compaction result in front of it.
+  const compacted = job.state === "compacted" || job.state === "nothing_to_compact";
+  if (detail.continuable && !job.error && (job.state === null || job.state === "completed" || compacted)) {
+    const done = compacted ? `${STATE_TEXT[job.state]}. ` : "";
+    return { text: `${done}Not answered yet — choose Continue in the conversation menu.`, short: "Not answered yet",
              tone: "warn", active: false };
   }
   if (job.error) return { text: ERROR_TEXT[job.error] || `The run failed (${job.error}).`, tone: "error", active: false };
+  if (job.state === "compacted" || job.state === "nothing_to_compact") {
+    return { text: STATE_TEXT[job.state], tone: "ok", active: false };
+  }
   if (job.state && job.state !== "completed" && job.state !== "idle") {
     return { text: STATE_TEXT[job.state] || job.state, tone: "warn", active: false };
   }
@@ -397,6 +408,7 @@ function applyDetail(detail) {
   $("composer-send").disabled = detail.job.running || app.sending;
   $("composer-hint").textContent = detail.job.running ? "HIMARI is working…" : "";
   $("chat-menu-resume").hidden = !detail.continuable;
+  $("chat-menu-compact").disabled = detail.job.running;
 }
 
 async function refresh(generation) {
@@ -441,6 +453,7 @@ async function openConversation(id) {
   app.toolRows = new Map();
   app.context = null;
   $("chat-menu-context-pair").hidden = true;
+  $("chat-menu-compact").hidden = true;
   $("timeline").replaceChildren();
   markSelected();
   showSurface("chat");
@@ -496,6 +509,19 @@ async function resumeConversation() {
     status(error.message, "error");
   }
   if (generation === app.generation) poll(generation);
+}
+
+async function compactConversation() {
+  closeChatMenu();
+  if (app.conversationId === null) return;
+  const generation = app.generation;
+  try {
+    await api("POST", `/api/conversations/${encodeURIComponent(app.conversationId)}/compact`);
+    status("Compacting…");
+  } catch (error) {
+    status(error.message, "error");
+  }
+  if (generation === app.generation) poll(generation); // the poll's end reloads the context and divider
 }
 
 async function renameConversation() {
@@ -573,6 +599,7 @@ async function boot() {
   $("chat-menu-toggle").addEventListener("click", toggleChatMenu);
   $("chat-menu-rename").addEventListener("click", renameConversation);
   $("chat-menu-resume").addEventListener("click", resumeConversation);
+  $("chat-menu-compact").addEventListener("click", compactConversation);
   $("sidebar-toggle").addEventListener("click", toggleNav);
   $("sidebar-close").addEventListener("click", closeNav);
   $("nav-backdrop").addEventListener("click", closeNav);

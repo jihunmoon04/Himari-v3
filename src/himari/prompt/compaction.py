@@ -367,6 +367,9 @@ class Compactor:
     def request_size(self, model_input: ModelInput) -> int:
         return request_tokens(model_input)
 
+    def plan_now(self, inputs: PromptInputs, model_input: ModelInput, budget: ContextBudget) -> CompactionPlan | None:
+        return self._plan(inputs, model_input, budget)
+
     def decide(self, inputs: PromptInputs, model_input: ModelInput, budget: ContextBudget) -> ContextDecision:
         estimate = self.estimate(inputs, model_input)
         if estimate.tokens < budget.compact_at * budget.limit_tokens:

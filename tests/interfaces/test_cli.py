@@ -190,6 +190,9 @@ class Gated:
         await asyncio.to_thread(self.release.wait, 10)
         return DriveResult(DriveState.COMPLETED)
 
+    async def compact(self, scope: TrustedScope) -> DriveResult:
+        return await self.resume(scope)
+
 
 def test_busy_and_foreign_conversations_are_refused(harness: Harness) -> None:
     cid = harness.run("new")[1].strip()
@@ -463,3 +466,49 @@ def test_the_context_line_names_the_model_limit_when_it_differs() -> None:
     assert cli.context_line({**base, "hard_limit_tokens": 200_000}) == (
         "context: about 1,234 of 200,000 tokens; summarizes at 160,000")
     assert cli.context_line({**base, "hard_limit_tokens": 400_000}).endswith("; model limit 400,000")
+
+
+def test_compact_now_from_the_cli(harness: Harness) -> None:
+    cid = harness.run("new")[1].strip()
+    harness.queue(final("a1"), final("a2"), final("S-manual"))
+    harness.run("send", cid, "q1")
+    harness.run("send", cid, "q2")
+    code, out, err = harness.run("compact", cid)
+    assert code == 0 and out == "" and "(compacted: earlier messages now reach HIMARI as a summary)" in err
+    assert "compacted 1 time" in err
+    code, _, err = harness.run("compact", "conv_404")
+    assert code == cli.EXIT_FAILED and "refused" in err
+
+    harness.queue(final("a3"), final("S-again"))
+    out_buffer, err_buffer = io.StringIO(), io.StringIO()
+    session = cli.Session(harness.client(), cli.Printer(out_buffer), err_buffer, sleep=lambda s: None)
+    lines = iter(["/compact", "q3", "/compact", "/exit"])  # only the latest answer is left at first
+    assert cli.cmd_chat(session, cli.parser().parse_args(["chat", cid]), read=lambda prompt: next(lines)) == 0
+    assert "(nothing to compact yet)" in err_buffer.getvalue() and "compacted 2 times" in err_buffer.getvalue()
+
+
+def test_compact_with_nothing_to_compact(harness: Harness) -> None:
+    cid = harness.run("new")[1].strip()
+    code, _, err = harness.run("compact", cid)
+    assert code == 0 and "(nothing to compact yet)" in err
+
+
+@pytest.mark.parametrize("answers", [["a1", "a2", "S"], []])
+def test_an_unanswered_message_stays_visible_after_compacting(harness: Harness, answers: list[str]) -> None:
+    # PR #17 review B1: compacting (or finding nothing to compact) is not answering.
+    cid = harness.run("new")[1].strip()
+    if answers:
+        harness.queue(*[final(a) for a in answers])
+        harness.run("send", cid, "q1")
+        harness.run("send", cid, "q2")
+    app = harness.application
+    assert app is not None and harness.test_client.portal is not None
+    harness.test_client.portal.call(app.runtime.driver.accept, TrustedScope(OPERATOR, ConversationId(cid)),
+                                    UserMessage((TextBlock("unanswered"),)))
+    code, _, err = harness.run("compact", cid)
+    expected = "(compacted: earlier messages" if answers else "(nothing to compact yet)"
+    assert expected in err and "not answered yet" in err and code == cli.EXIT_FAILED
+    detail = harness.client().get(f"/api/conversations/{cid}")
+    assert detail["continuable"] is True and detail["job"]["state"] in ("compacted", "nothing_to_compact")
+    code, _, err = harness.run("show", cid)
+    assert code == cli.EXIT_FAILED and "not answered yet" in err

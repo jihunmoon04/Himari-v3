@@ -111,6 +111,35 @@ class Driver:
         async with self._exclusive(scope):
             return await self._resume_locked(scope)
 
+    async def compact(self, scope: TrustedScope) -> DriveResult:
+        async with self._exclusive(scope):
+            recovery, stop = await self._prepare(scope)
+            if stop is not None:
+                return stop
+            if self._planner is None or self._budget is None:
+                return DriveResult(DriveState.NOTHING_TO_COMPACT, recovery=recovery, detail="no context budget")
+            waiting = await self._log.find_waiting_call(scope)
+            if waiting is not None:  # the open group cannot be folded yet
+                return DriveResult(DriveState.WAITING_FOR_USER, waiting_call=waiting, recovery=recovery,
+                                   detail="answer the question before compacting")
+            try:
+                inputs = await self._loader.load(scope, (), self._options)
+                model_input = self._composer.compose(inputs)
+            except PromptError as exc:
+                state = (DriveState.RECOVERY_REQUIRED if exc.code is PromptErrorCode.INCOMPLETE_HISTORY
+                         else DriveState.REQUEST_REJECTED)
+                return DriveResult(state, recovery=recovery, detail=str(exc))
+            plan = self._planner.plan_now(inputs, model_input, self._budget)
+            if plan is None:
+                return DriveResult(DriveState.NOTHING_TO_COMPACT, recovery=recovery,
+                                   detail="nothing older than the latest turn, or too large to summarize")
+            compactions: list[RunId] = []
+            failure = await self._compact(scope, plan, self._planner, self._budget, compactions)
+            return DriveResult(
+                DriveState.COMPACTION_FAILED if failure is not None else DriveState.COMPACTED,
+                recovery=recovery, detail=failure or "", compaction_run_ids=tuple(compactions),
+            )
+
     async def context_status(self, scope: TrustedScope) -> ContextStatus | None:
         """CTRL-07: the size estimate the next Run would start from, and the
         latest compaction. Read-only; no lock (display may be a moment stale)."""
