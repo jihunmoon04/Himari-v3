@@ -14,7 +14,7 @@ from collections.abc import Sequence
 from himari.common import ProviderContinuation, RunId, TrustedScope
 from himari.data.api import ConversationLog, EventKind, StateQuery, ToolExecutionRecord, TriggerRef
 from himari.prompt.api import PromptInputs, RequestOptions, UsageMark
-from himari.tool.api import ToolCatalog
+from himari.tool.api import ExternalAccess, ToolCatalog
 
 
 class ContextLoader:
@@ -24,11 +24,13 @@ class ContextLoader:
         state: StateQuery,
         catalog: ToolCatalog,
         instructions: Sequence[str],
+        external_access: ExternalAccess | None = None,  # None: no External Tools in the catalog
     ) -> None:
         self._log = log
         self._state = state
         self._catalog = catalog
         self._instructions = tuple(instructions)
+        self._external_access = external_access
 
     async def load(
         self,
@@ -55,9 +57,10 @@ class ContextLoader:
                                            used.context_key, used.state_revision, run.provider_key)
         basis = await self._state.read_current_state_basis(scope)
         active = frozenset(a.environment_kind for a in basis.environments)
+        enabled = frozenset() if self._external_access is None else await self._external_access.enabled_sources(scope)
         return PromptInputs(
             instructions=self._instructions,
-            tool_catalog=tuple(self._catalog.catalog(active)),
+            tool_catalog=tuple(self._catalog.catalog(active, enabled)),
             events=events,
             tool_executions=tuple(executions),
             snapshot=await self._log.get_latest_snapshot(scope),

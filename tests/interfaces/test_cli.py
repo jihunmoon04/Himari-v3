@@ -21,6 +21,8 @@ pytest.importorskip("fastapi")
 
 import httpx  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
+from mcp_fake import URL as MCP_URL  # noqa: E402
+from mcp_fake import FakeMcpServer  # noqa: E402
 from testkit import calls, final  # noqa: E402
 
 from himari.bootstrap.application import Application  # noqa: E402
@@ -69,13 +71,14 @@ def test_loopback_urls_are_normalized() -> None:
 
 
 class Harness:
-    def __init__(self, tmp_path: Path, context_tokens: int | None = None) -> None:
+    def __init__(self, tmp_path: Path, context_tokens: int | None = None, mcp: FakeMcpServer | None = None) -> None:
         self.provider = ScriptedAdapter([])
         self.application: Application | None = None
 
         async def opener() -> Application:
             self.application = await Application.open(tmp_path / "data", self.provider, model_id="m", sandbox=False,
-                                                      context_tokens=context_tokens)
+                                                      context_tokens=context_tokens,
+                                                      mcp_transport=None if mcp is None else mcp.transport())
             return self.application
 
         config = WebConfig("127.0.0.1", 8765, frozenset({"testserver"}), frozenset({"http://testserver"}), False,
@@ -512,3 +515,37 @@ def test_an_unanswered_message_stays_visible_after_compacting(harness: Harness, 
     assert detail["continuable"] is True and detail["job"]["state"] in ("compacted", "nothing_to_compact")
     code, _, err = harness.run("show", cid)
     assert code == cli.EXIT_FAILED and "not answered yet" in err
+
+
+def test_tool_sources_from_the_cli(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(cli, "POLL_SECONDS", 0.01)
+    data = tmp_path / "data"
+    data.mkdir(mode=0o700)
+    (data / "mcp.json").write_text(json.dumps({"servers": {
+        "calliope": {"url": MCP_URL, "tools": {"echo": {"effect": "read"}, "gone": {"effect": "read"}}},
+        "lab": {"url": "http://127.0.0.1:1/mcp", "default": "off", "tools": {"x": {"effect": "read"}}},
+    }}))
+    (data / "mcp.json").chmod(0o600)
+    fake = FakeMcpServer()
+    harness = Harness(tmp_path, mcp=fake)
+    with harness.test_client:
+        cid = harness.run("new")[1].strip()
+        code, out, _ = harness.run("tools", cid)
+        assert code == 0 and out.splitlines() == [
+            "calliope: on (default; default on) — 1 tool",
+            "  - gone: the server does not offer it",
+            "lab: off (default; default off) — not connected (restart the server after fixing it)",
+            "  - unavailable: initialize: cannot connect (ConnectError)",
+        ]
+        code, out, _ = harness.run("tools", cid, "off", "calliope")
+        assert code == 0 and out.splitlines()[0] == "calliope: off (this conversation; default on) — 1 tool"
+        code, _, err = harness.run("tools", cid, "on", "nope")
+        assert code == cli.EXIT_FAILED and "No such tool source" in err
+
+        lines = iter(["/tools on calliope", "/tools default", "/tools", "/exit"])
+        out_buffer, err_buffer = io.StringIO(), io.StringIO()
+        session = cli.Session(harness.client(), cli.Printer(out_buffer), err_buffer, sleep=lambda s: None)
+        assert cli.cmd_chat(session, cli.parser().parse_args(["chat", cid]), read=lambda p: next(lines)) == 0
+        shown = out_buffer.getvalue().splitlines()
+        assert shown[0] == "calliope: on (default; default on) — 1 tool"  # same as the default: not kept
+        assert "usage: /tools" in err_buffer.getvalue()

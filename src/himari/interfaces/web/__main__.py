@@ -5,7 +5,9 @@ Configuration comes from the environment (see ``config.py``):
 ``HIMARI_MODEL``, ``HIMARI_REASONING_EFFORT``, ``HIMARI_SANDBOX``,
 ``HIMARI_CONTEXT_TOKENS`` (request token budget; compaction starts at 80%)
 and ``OPENROUTER_API_KEY``. ``--env-file`` reads ``KEY=value`` lines first;
-real environment variables win. Secrets are never printed.
+real environment variables win; the token variables named in
+``<data_root>/mcp.json`` are read from the same place. Secrets are never
+printed.
 """
 
 from __future__ import annotations
@@ -15,7 +17,7 @@ import os
 import sys
 
 from himari.bootstrap import read_env_file
-from himari.bootstrap.application import Application
+from himari.bootstrap.application import Application, check_tool_sources
 from himari.interfaces.web.config import WebConfig, WebConfigError
 
 API_KEY_VAR = "OPENROUTER_API_KEY"
@@ -35,6 +37,11 @@ def main(argv: list[str] | None = None) -> int:
     if not api_key:
         print(f"configuration error: {API_KEY_VAR} is not set", file=sys.stderr)
         return 2
+    try:
+        check_tool_sources(config.data_root, environment)
+    except ValueError as error:
+        print(f"configuration error: {error}", file=sys.stderr)
+        return 2
 
     import uvicorn
 
@@ -49,11 +56,17 @@ def main(argv: list[str] | None = None) -> int:
     async def opener() -> Application:
         application = await Application.open(config.data_root, provider(), model_id=config.model_id,
                                              reasoning_effort=config.reasoning_effort, sandbox=config.sandbox,
-                                             context_tokens=config.context_tokens)
+                                             context_tokens=config.context_tokens, environ=environment)
         print(f"HIMARI web: http://{config.host}:{config.port}/ — sign in with the token in "
               f"{application.data_root / 'control' / 'operator.secret'} (sandbox: {application.sandbox_state.value}, "
               f"context budget: {application.context_tokens} tokens)",
               file=sys.stderr, flush=True)
+        for status in application.tool_source_statuses:
+            count = len(status.tool_ids)
+            state = f"{count} tool{'' if count == 1 else 's'}" if status.available else "not connected"
+            print(f"HIMARI web: MCP server {status.source}: {state}"
+                  f" (default {'on' if status.enabled_by_default else 'off'})"
+                  + "".join(f"\n  - {p}" for p in status.problems), file=sys.stderr, flush=True)
         return application
 
     uvicorn.run(create_app(config, opener), host=config.host, port=config.port, log_level="info",

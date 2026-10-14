@@ -380,6 +380,20 @@ class PersistedStateBasis(DeepFrozen):
     conversation_workspace: ConversationWorkspace | None = None
 
 
+# --- External Tool sources (V3-P53) -----------------------------------------
+
+MAX_EXTERNAL_SETTINGS = 64
+
+
+@dataclass(frozen=True)
+class ExternalSourceSetting(DeepFrozen):
+    """A Conversation's own choice for one External Tool source (e.g. an MCP
+    server): on or off regardless of the operator's default for it."""
+
+    source: str
+    enabled: bool
+
+
 # --- Conversation catalog (DATA-12, T0) -------------------------------------
 
 MAX_TITLE_CHARS = 200
@@ -606,6 +620,26 @@ class WorkspaceState(Protocol):
         ...
 
 
+class ExternalSourceSettings(Protocol):
+    """V3-P53: per-Conversation on/off choices for External Tool sources.
+
+    Data keeps exactly what it is told and knows no defaults: whoever reads
+    the choices applies them over the operator's configuration (a source
+    with no choice follows its default). Changing a choice does not touch
+    ``state_revision``; the Tool catalog it changes is part of the request's
+    ``context_key``."""
+
+    async def read_external_settings(self, scope: TrustedScope) -> Sequence[ExternalSourceSetting]:
+        """This Conversation's choices, ordered by source."""
+        ...
+
+    async def set_external_setting(self, scope: TrustedScope, source: str, enabled: bool | None) -> None:
+        """Records a choice; ``None`` removes it (back to the default).
+        INVALID_ARGUMENT for a source that is not one Tool id segment, or
+        past MAX_EXTERNAL_SETTINGS choices."""
+        ...
+
+
 class ConversationCatalog(Protocol):
     """DATA-12: a principal's Conversations (T0 create, list, rename).
 
@@ -666,7 +700,10 @@ __all__ = [
     "EventKind",
     "EventPayload",
     "EventRef",
+    "ExternalSourceSetting",
+    "ExternalSourceSettings",
     "InitialActivation",
+    "MAX_EXTERNAL_SETTINGS",
     "MAX_LIST_LIMIT",
     "MAX_TITLE_CHARS",
     "PREVIEW_CHARS",

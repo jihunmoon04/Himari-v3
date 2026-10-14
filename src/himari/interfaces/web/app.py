@@ -31,7 +31,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
-from himari.bootstrap.application import Application
+from himari.bootstrap.application import Application, ToolSourceView, UnknownToolSource
 from himari.bootstrap.operator import OPERATOR, derive_cli_bearer, verify_operator_token
 from himari.common import (
     ASK_USER_TOOL_ID,
@@ -135,6 +135,10 @@ class MessageBody(_Body):
     text: str
 
 
+class ToolSourceBody(_Body):
+    enabled: bool | None  # null: follow the source's default
+
+
 # --- JSON views ------------------------------------------------------------------------------
 
 
@@ -213,6 +217,18 @@ def context_view(status: ContextStatus | None) -> dict[str, Any]:
     }
 
 
+def tool_source_view(view: ToolSourceView) -> dict[str, Any]:
+    return {
+        "source": view.source,
+        "enabled": view.enabled,
+        "default": view.enabled_by_default,
+        "choice": view.choice,
+        "available": view.available,
+        "tools": list(view.tool_ids),
+        "problems": list(view.problems),
+    }
+
+
 # --- the application ---------------------------------------------------------------------------
 
 
@@ -270,6 +286,10 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
             return JSONResponse({"error": {"code": "busy", "message": "This conversation is still working."}},
                                 status_code=409)
         return JSONResponse({"error": {"code": "conflict", "message": "Not possible right now."}}, status_code=409)
+
+    @app.exception_handler(UnknownToolSource)
+    async def unknown_source(request: Request, error: UnknownToolSource) -> JSONResponse:
+        return JSONResponse({"error": {"code": "not_found", "message": "No such tool source."}}, status_code=404)
 
     @app.exception_handler(RequestValidationError)
     async def invalid_request(request: Request, error: RequestValidationError) -> JSONResponse:
@@ -374,6 +394,21 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
                            who: PrincipalId = Depends(principal)) -> dict[str, Any]:
         # Composes the whole history like a Run would: fetched on demand, not polled.
         return context_view(await himari(request).context_status(scope_of(conversation_id, who)))
+
+    @app.get("/api/conversations/{conversation_id}/tools")
+    async def read_tool_sources(conversation_id: str, request: Request,
+                                who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+        """The configured MCP servers and whether this conversation uses them."""
+        views = await himari(request).tool_sources(scope_of(conversation_id, who))
+        return {"sources": [tool_source_view(v) for v in views]}
+
+    @app.put("/api/conversations/{conversation_id}/tools/{source}")
+    async def set_tool_source(conversation_id: str, source: str, body: ToolSourceBody, request: Request,
+                              who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+        application, scope = himari(request), scope_of(conversation_id, who)
+        await application.data.read_conversation(scope)  # 404 for a foreign id before anything else
+        await application.set_tool_source(scope, source, body.enabled)
+        return {"sources": [tool_source_view(v) for v in await application.tool_sources(scope)]}
 
     @app.post("/api/conversations/{conversation_id}/messages", status_code=202)
     async def send_message(conversation_id: str, body: MessageBody, request: Request,

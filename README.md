@@ -76,6 +76,23 @@ HIMARI_DATA_ROOT=~/.himari python -m himari.interfaces.web --env-file .env
 - 브라우저에서 `http://127.0.0.1:8765/`를 열고 `~/.himari/control/operator.secret`의 토큰으로 로그인합니다.
 - 서버는 평문 HTTP라서 loopback 주소(`127.0.0.1`·`::1`·`localhost`)에만 바인딩합니다. 다른 기기에서 쓰려면 같은 기기의 TLS reverse proxy 뒤에 두고 `HIMARI_WEB_ALLOWED_HOSTS=<공개 이름>`·`HIMARI_WEB_ALLOWED_ORIGINS=https://<공개 이름>`을 지정하세요. 외부 주소 바인딩이나 다른 기기용 평문 `http://` Origin은 시작 단계에서 거부됩니다(토큰 보호).
 
+### MCP 서버 연결 (V3-P53)
+
+`<HIMARI_DATA_ROOT>/mcp.json`(권한 0600)에 연결할 MCP 서버(Streamable HTTP)를 적으면 시작할 때 연결하고, **목록에 적은 Tool만** External Tool로 등록합니다. `effect`(`read`·`scoped_write`·`unknown`)는 운영자가 정하며 서버가 보내는 힌트는 믿지 않습니다.
+
+```json
+{"servers": {"calliope": {
+  "url": "http://127.0.0.1:8790/mcp",
+  "token_env": "CALLIOPE_MCP_TOKEN",
+  "default": "on",
+  "tools": {"position": {"effect": "read"}, "engine": {"effect": "read"}}
+}}}
+```
+
+- URL은 `https://` 또는 loopback 주소의 `http://`만 허용합니다. 토큰은 파일이 아니라 `token_env`가 가리키는 환경 변수(또는 `--env-file`)에서 읽고, `Authorization: Bearer`로 그 URL에만 보냅니다(리다이렉트를 따라가지 않음).
+- 연결되지 않은 서버는 그 Tool만 빼고 시작하며, 시작 로그와 `/tools`에 이유가 표시됩니다(재시작해야 다시 연결).
+- 대화마다 서버를 켜고 끌 수 있습니다: Web 대화 메뉴의 **Tool servers**, CLI `/tools on|off|default 서버` 또는 `himari tools ID on calliope`. 따로 정하지 않은 대화는 서버의 `default`를 따릅니다.
+
 ### CLI
 
 서버가 실행 중일 때 같은 사용자로 실행합니다(DB를 직접 열지 않고 서버에 접속).
@@ -86,21 +103,23 @@ himari chat                                     # 새 대화 (python -m himari.i
 himari list; himari show conv_1; himari send conv_1 "질문"; himari continue conv_1
 ```
 
-대화형 모드에서는 질문이 오면 `answer>`로 답하고, `/continue`·`/rename 이름`·`/id`·`/exit`를 쓸 수 있습니다. 종료 코드: 0 완료, 3 답변 대기, 1 미완료·거부, 2 설정 오류, 4 결과 불명(다시 보내기 전에 `show`로 확인).
+대화형 모드에서는 질문이 오면 `answer>`로 답하고, `/continue`·`/context`·`/compact`·`/tools`·`/rename 이름`·`/id`·`/exit`를 쓸 수 있습니다. 종료 코드: 0 완료, 3 답변 대기, 1 미완료·거부, 2 설정 오류, 4 결과 불명(다시 보내기 전에 `show`로 확인).
 
 공개 계약은 각 모듈의 `api.py`가 원본입니다(V3-046). P0 실행 경로는 `build_runtime(provider, store=SqliteStore(path))`로 영속 Data를, 저장소를 생략하면 인메모리 Data를 사용하며, Fake Provider뿐 아니라 **실제 OpenRouter LLM**으로도 실행할 수 있습니다.
 
 | 모듈 | 계약 |
 | --- | --- |
 | `src/himari/common.py` | 공용 식별자·값 타입 (`TrustedScope`, `ToolCall`, `ModelToolResult` …) |
-| `src/himari/data/api.py` | `ConversationLog`, `ArtifactStore`, `WorkspaceState`, `StateQuery` |
-| `src/himari/tool/api.py` | `ToolHandler` SPI, `ToolOutcome`, `ToolCatalog`, `ToolDispatcher` |
+| `src/himari/data/api.py` | `ConversationLog`, `ArtifactStore`, `WorkspaceState`, `StateQuery`, `ExternalSourceSettings` |
+| `src/himari/tool/api.py` | `ToolHandler` SPI, `ToolOutcome`, `ToolCatalog`, `ExternalAccess`, `ToolDispatcher` |
 | `src/himari/environment/api.py` | `EnvironmentPlugin` SPI |
 | `src/himari/prompt/api.py` | `PromptComposer`(순수), `PromptContextLoader`, `ModelInput` |
 | `src/himari/provider/api.py` | `ProviderAdapter` SPI, 정규화 출력 `FINAL \| TOOL_CALLS` |
 | `src/himari/control/api.py` | `ConversationDriver`, `DriveResult` / `DriveState` |
 
 구현(P0): `data/memory.py`(인메모리 Data)·`data/sqlite.py`+`data/codec.py`(SQLite 영속 Data, V3-P42), `tool/registry.py`·`tool/dispatcher.py`, `prompt/composer.py`(순수)·`prompt/loader.py`, `provider/scripted.py`(Fake), `control/driver.py`·`control/ask_user.py`, `bootstrap/`(조립).
+
+MCP 클라이언트: `tool/mcp/`(설정 `config.py`, Streamable HTTP `client.py`, Tool 연결 `tools.py`; V3-P52/P53). External Tool 노출·실행 권한은 `tool/access.py`.
 
 Inside Environment: `environment/inside/`(사용자별 Workspace, 파일 Tool 5종, openat2 경계, V3-P40)와 `inside/run_command`(bubblewrap + Landlock Sandbox, 시작 시 탈출 자체 검사, V3-P41).
 

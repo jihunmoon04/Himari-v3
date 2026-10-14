@@ -24,8 +24,9 @@ following symlinks; anything else is refused, never silently re-permissioned.
 
 Identity: a database is accepted only with HIMARI's ``application_id``, the
 supported ``user_version`` and exactly the expected tables and indexes.
-The one upgrade it performs is v2 → v3 (adds the ``compaction_runs``
-table), and only on a database that matches the v2 schema exactly; any
+The upgrades it performs are v2 → v4 and v3 → v4 (v3 added the
+``compaction_runs`` table, v4 ``external_settings``), each only on a
+database that matches the older schema exactly and in one transaction; any
 other version or shape is refused, never repaired.
 """
 
@@ -79,6 +80,7 @@ from himari.data.api import (
     EnvironmentActivation,
     EventKind,
     EventPayload,
+    ExternalSourceSetting,
     InitialActivation,
     PersistedStateBasis,
     ProjectionResult,
@@ -100,7 +102,7 @@ from himari.data.api import (
     UserMessage,
 )
 
-SCHEMA_VERSION = 3  # v3: compaction_runs (upgraded in place from v2); v1 is refused
+SCHEMA_VERSION = 4  # v3: compaction_runs; v4: external_settings (both upgraded in place); v1 is refused
 APPLICATION_ID = 0x48494D41  # "HIMA": written into the database header (PRAGMA application_id)
 
 _TERMINAL_COMPLETIONS = frozenset(
@@ -225,7 +227,21 @@ CREATE TABLE compaction_runs (
     run_id TEXT PRIMARY KEY REFERENCES runs (run_id)
 ) STRICT;
 """
-_SCHEMA = _SCHEMA_V2 + _V3_ADDITIONS
+# v4: a Conversation's own on/off choices for External Tool sources (V3-P53).
+_V4_ADDITIONS = """
+CREATE TABLE external_settings (
+    conversation_id TEXT NOT NULL REFERENCES conversations,
+    source TEXT NOT NULL,
+    enabled INTEGER NOT NULL,
+    PRIMARY KEY (conversation_id, source)
+) STRICT;
+"""
+_SCHEMA = _SCHEMA_V2 + _V3_ADDITIONS + _V4_ADDITIONS
+# An older version → (its exact schema, what brings it to SCHEMA_VERSION).
+_UPGRADES = {
+    2: (_SCHEMA_V2, _V3_ADDITIONS + _V4_ADDITIONS),
+    3: (_SCHEMA_V2 + _V3_ADDITIONS, _V4_ADDITIONS),
+}
 
 
 class StoreLockedError(RuntimeError):
@@ -341,14 +357,15 @@ class SqliteStore:
         application = conn.execute("PRAGMA application_id").fetchone()[0]
         version = conn.execute("PRAGMA user_version").fetchone()[0]
         empty = conn.execute("SELECT count(*) FROM sqlite_master").fetchone()[0] == 0
-        upgrade_v2 = False
+        upgrade: str | None = None
         if not (empty and application == 0 and version == 0):  # an existing database: verify before writing
             if application != APPLICATION_ID:
                 raise StoreSchemaError(f"{self.path} is not a HIMARI database")
-            upgrade_v2 = version == 2 and _schema_signature(conn) == _expected_signature(_SCHEMA_V2)
-            if version != SCHEMA_VERSION and not upgrade_v2:
+            if version in _UPGRADES and _schema_signature(conn) == _expected_signature(_UPGRADES[version][0]):
+                upgrade = _UPGRADES[version][1]
+            if version != SCHEMA_VERSION and upgrade is None:
                 raise StoreSchemaError(f"unsupported schema version {version} (expected {SCHEMA_VERSION})")
-            if not upgrade_v2 and _schema_signature(conn) != _expected_signature():
+            if upgrade is None and _schema_signature(conn) != _expected_signature():
                 raise StoreSchemaError(f"{self.path} does not have the HIMARI schema {SCHEMA_VERSION}")
             if conn.execute("SELECT count(*) FROM meta WHERE key='next_id'").fetchone()[0] != 1:
                 raise StoreSchemaError(f"{self.path} has no id counter")
@@ -356,9 +373,9 @@ class SqliteStore:
             raise RuntimeError("SQLite WAL mode is unavailable")
         conn.execute("PRAGMA synchronous=FULL")
         conn.execute("PRAGMA foreign_keys=ON")
-        if upgrade_v2:  # the one supported upgrade, atomic: v2 → v3
+        if upgrade is not None:  # atomic: to the current version or not at all
             with self.transaction() as tx:
-                tx.executescript_parts(_V3_ADDITIONS)
+                tx.executescript_parts(upgrade)
                 tx.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
         if empty:
             with self.transaction() as tx:
@@ -602,7 +619,8 @@ def _workspace(conv: sqlite3.Row) -> ConversationWorkspace | None:
 
 
 class SqliteData:
-    """Implements ConversationLog, ArtifactStore, WorkspaceState, StateQuery."""
+    """Implements ConversationLog, ArtifactStore, WorkspaceState, StateQuery,
+    ConversationCatalog and ExternalSourceSettings."""
 
     def __init__(self, store: SqliteStore) -> None:
         self._store = store
@@ -1203,6 +1221,29 @@ class SqliteData:
         with self._tx() as tx:
             tx.authorized(scope)
             tx.execute("UPDATE conversations SET title=? WHERE conversation_id=?", title, scope.conversation_id)
+
+    # --- ExternalSourceSettings ------------------------------------------------
+
+    async def read_external_settings(self, scope: TrustedScope) -> Sequence[ExternalSourceSetting]:
+        with self._tx() as tx:
+            tx.authorized(scope)
+            rows = tx.all("SELECT source, enabled FROM external_settings WHERE conversation_id=? ORDER BY source",
+                          scope.conversation_id)
+            return tuple(ExternalSourceSetting(r["source"], bool(r["enabled"])) for r in rows)
+
+    async def set_external_setting(self, scope: TrustedScope, source: str, enabled: bool | None) -> None:
+        with self._tx() as tx:
+            tx.authorized(scope)
+            rows = {r["source"] for r in tx.all("SELECT source FROM external_settings WHERE conversation_id=?",
+                                                 scope.conversation_id)}
+            rules.check_external_setting(source, enabled, len(rows) + (enabled is not None and source not in rows))
+            if enabled is None:
+                tx.execute("DELETE FROM external_settings WHERE conversation_id=? AND source=?",
+                           scope.conversation_id, source)
+            else:
+                tx.execute("INSERT INTO external_settings (conversation_id, source, enabled) VALUES (?, ?, ?)"
+                           " ON CONFLICT (conversation_id, source) DO UPDATE SET enabled=excluded.enabled",
+                           scope.conversation_id, source, int(enabled))
 
     # --- StateQuery -------------------------------------------------------------
 

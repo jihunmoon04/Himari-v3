@@ -355,6 +355,67 @@ async function loadContext(generation) {
   }
 }
 
+/* MCP servers: on/off for this conversation (V3-P53). Changes apply from the
+ * next model request; the server checks again before every call. */
+function toolSourceMeta(source) {
+  const parts = [source.choice === null ? `default (${source.default ? "on" : "off"})` : "set here"];
+  if (!source.available) parts.push("not connected");
+  else parts.push(`${source.tools.length} tool${source.tools.length === 1 ? "" : "s"}`);
+  return parts.join(" · ");
+}
+
+function renderToolSources(sources) {
+  const list = $("chat-menu-tools-list");
+  list.replaceChildren();
+  $("chat-menu-tools").hidden = sources.length === 0;
+  for (const source of sources) {
+    const row = el("li", "chat-menu-tool");
+    const id = `tool-source-${source.source}`;
+    const box = el("input");
+    box.type = "checkbox";
+    box.id = id;
+    box.checked = source.enabled;
+    box.addEventListener("change", () => setToolSource(source.source, box.checked));
+    const label = el("label", "chat-menu-tool-name", source.source);
+    label.htmlFor = id;
+    const meta = el("span", "chat-menu-tool-meta", toolSourceMeta(source));
+    if (source.problems.length) meta.title = source.problems.join("\n");
+    label.append(meta);
+    row.append(box, label);
+    if (source.choice !== null) {
+      const reset = el("button", "link-button", "Use default");
+      reset.type = "button";
+      reset.addEventListener("click", () => setToolSource(source.source, null));
+      row.append(reset);
+    }
+    list.append(row);
+  }
+}
+
+async function loadToolSources(generation) {
+  try {
+    const answer = await api("GET", `/api/conversations/${encodeURIComponent(app.conversationId)}/tools`);
+    if (generation === app.generation) renderToolSources(answer.sources);
+  } catch (ignored) {
+    /* display only: the conversation works without it */
+  }
+}
+
+async function setToolSource(source, enabled) {
+  const generation = app.generation;
+  try {
+    const answer = await api("PUT",
+      `/api/conversations/${encodeURIComponent(app.conversationId)}/tools/${encodeURIComponent(source)}`,
+      { enabled });
+    if (generation === app.generation) renderToolSources(answer.sources);
+  } catch (error) {
+    if (generation === app.generation) {
+      status(error.message, "error");
+      loadToolSources(generation);
+    }
+  }
+}
+
 async function pullEvents(generation) {
   for (;;) {
     const page = await api("GET",
@@ -454,10 +515,12 @@ async function openConversation(id) {
   app.context = null;
   $("chat-menu-context-pair").hidden = true;
   $("chat-menu-compact").hidden = true;
+  $("chat-menu-tools").hidden = true;
   $("timeline").replaceChildren();
   markSelected();
   showSurface("chat");
   closeNav();
+  loadToolSources(generation);
   try {
     const detail = await refresh(generation);
     if (detail && detail.job.running) poll(generation);

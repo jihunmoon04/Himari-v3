@@ -78,8 +78,9 @@ class ToolDefinition(DeepFrozen):
     completion: Completion = Completion.IMMEDIATE
     environment_kind: EnvironmentKind | None = None  # set iff Environment-provided
     # Set iff External: the name of the server that runs the Tool (e.g. an
-    # MCP server). An External Tool needs no Workspace and is always in the
-    # catalog; its effect_profile is the operator's judgement, not the server's.
+    # MCP server). An External Tool needs no Workspace; it is in the catalog
+    # and may run only where its source is enabled (ExternalAccess, V3-P53).
+    # Its effect_profile is the operator's judgement, not the server's.
     external_source: str | None = None
     conversation_record: ConversationRecord = ConversationRecord.FULL
     # Use REQUIRE_USER for effects the model cannot verify with other Tools
@@ -150,10 +151,22 @@ class ToolHandler(Protocol):
 class ToolCatalog(Protocol):
     """TOOL-01."""
 
-    def catalog(self, active_kinds: frozenset[EnvironmentKind]) -> Sequence[ToolDefinition]:
-        """Internal Tools + ask_user + Tools of kinds with an active Instance.
-        Stable order (prefix-cache friendly). Exposure is not authorization."""
+    def catalog(
+        self, active_kinds: frozenset[EnvironmentKind], enabled_sources: frozenset[str] = frozenset()
+    ) -> Sequence[ToolDefinition]:
+        """Internal Tools + ask_user + Tools of kinds with an active Instance
+        + External Tools of enabled sources. Stable order (prefix-cache
+        friendly). Exposure is not authorization."""
         ...
+
+
+class ExternalAccess(Protocol):
+    """V3-P53: the External Tool sources a Conversation may use. The catalog
+    (what the model sees) and the Dispatcher (what runs, checked again right
+    before each call) both ask it, so turning a source off mid-turn denies
+    calls the model already made."""
+
+    async def enabled_sources(self, scope: TrustedScope) -> frozenset[str]: ...
 
 
 class GroupState(Enum):
