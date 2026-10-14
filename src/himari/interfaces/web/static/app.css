@@ -2192,3 +2192,23 @@ details > summary {
 .purge-dialog-actions button {
   min-height: 44px;
 }
+
+/* Compaction divider: events above it reach the model only as the summary. */
+.context-divider {
+  margin: 16px 0;
+  border-top: 1px dashed var(--border-strong);
+  padding-top: 8px;
+  color: var(--text-muted);
+  font-size: 0.875rem;
+}
+.context-divider-label {
+  cursor: pointer;
+}
+.context-divider-text {
+  white-space: pre-wrap;
+  margin: 8px 0 0;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text);
+}

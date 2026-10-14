@@ -474,3 +474,6 @@ class Compactor:
 
     def snapshot_body(self, summary: str) -> JsonValue:
         return {"summary": summary}
+
+    def summary_of(self, snapshot: PromptSnapshot | None) -> str | None:
+        return read_summary(snapshot)

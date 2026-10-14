@@ -69,12 +69,13 @@ def test_loopback_urls_are_normalized() -> None:
 
 
 class Harness:
-    def __init__(self, tmp_path: Path) -> None:
+    def __init__(self, tmp_path: Path, context_tokens: int | None = None) -> None:
         self.provider = ScriptedAdapter([])
         self.application: Application | None = None
 
         async def opener() -> Application:
-            self.application = await Application.open(tmp_path / "data", self.provider, model_id="m", sandbox=False)
+            self.application = await Application.open(tmp_path / "data", self.provider, model_id="m", sandbox=False,
+                                                      context_tokens=context_tokens)
             return self.application
 
         config = WebConfig("127.0.0.1", 8765, frozenset({"testserver"}), frozenset({"http://testserver"}), False,
@@ -378,3 +379,44 @@ def test_an_ascii_terminal_gets_ascii_marks(harness: Harness) -> None:
     text = raw.getvalue().decode("ascii")
     assert code == 0 and "  * inside/write_file" in text and "  -> inside/write_file ok" in text
     assert "  | done \\u2713" in text and "\\u00e9.txt" in text
+
+
+# --- context (compaction visibility) ----------------------------------------------------------
+
+
+def test_show_reports_the_context_size(harness: Harness) -> None:
+    cid = harness.run("new")[1].strip()
+    harness.queue(final("hello"))
+    harness.run("send", cid, "hi")
+    code, out, err = harness.run("show", cid)
+    assert code == 0 and "summary" not in out  # nothing compacted: no divider
+    assert "context: about " in err and "of 128,000 tokens; summarizes at 102,400" in err
+
+
+def test_a_compacted_conversation_shows_where_the_summary_takes_over(tmp_path: Path,
+                                                                      monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(cli, "POLL_SECONDS", 0.01)
+    harness = Harness(tmp_path, context_tokens=2000)
+    with harness.test_client:
+        cid = harness.run("new")[1].strip()
+        harness.queue(*[final("SUMMARY of the start")] * 12)  # every answer and every summary alike
+        for text in ("가" * 550, "가" * 550, "가" * 550, "next"):
+            assert harness.run("send", cid, text)[0] == 0
+        code, out, err = harness.run("show", cid)
+        rows = out.splitlines()
+        divider = [i for i, row in enumerate(rows) if row.startswith("── earlier messages")]
+        assert code == 0 and len(divider) == 1 and "use --verbose or /context" in rows[divider[0]]
+        assert rows[-4:-2] == ["You:", f"{INDENT}next"] and divider[0] < len(rows) - 4
+        assert "compacted" in err
+        code, out, _ = harness.run("--verbose", "show", cid)
+        rows = out.splitlines()
+        at = next(i for i, row in enumerate(rows) if row.startswith("── earlier messages"))
+        assert rows[at + 1] == f"{INDENT}SUMMARY of the start"
+
+        out_buffer, err_buffer = io.StringIO(), io.StringIO()
+        session = cli.Session(harness.client(), cli.Printer(out_buffer), err_buffer, sleep=lambda s: None)
+        lines = iter(["/context", "/exit"])
+        assert cli.cmd_chat(session, cli.parser().parse_args(["chat", cid]), read=lambda prompt: next(lines)) == 0
+        assert "context: about " in err_buffer.getvalue()
+        assert out_buffer.getvalue().splitlines()[-2:] == [
+            "Summary the model sees for earlier messages:", f"{INDENT}SUMMARY of the start"]

@@ -171,6 +171,7 @@ EnvironmentPlugin ── tools() 제공 · execute 시 Data.WorkspaceState 재�
 | **PROVIDER-SPI** | ProviderAdapter SPI / **Provider** | 각 Provider Adapter → Control | PROVIDER-01~03 + `describe_capabilities` | 새 Provider = Adapter 하나 | P0 ProviderAdapter SPI 구현 |
 | **CTRL-05** | AskUserTool / **Control** | Control이 등록한 suspending ToolHandler → Tool Dispatcher | 모델의 `ask_user` 호출 + 이후 사용자 응답 Event | 그룹 커밋 후 `WAITING_FOR_USER`·lock 해제. 답변 시 원래 `call_id`의 ToolResult를 커밋(T7a)한 뒤 새 Run. 대기 판별은 영속 기록에서 파생 | P0 ask_user 구현 |
 | **CTRL-06** | ConversationRunner / **Control** | Control → Web/CLI | ConversationDriver + 사용자 입력 | `drive`/`resume`을 백그라운드로 실행, (사용자, 대화)별 상태·완료 대기·종료 처리. 진행 내용은 Data Event로 조회 | P0 코드 구현 (V3-P44) |
+| **CTRL-07** | ContextInspector / **Control** | Control → Web/CLI(Application 경유) | Prompt loader·composer·planner, ContextBudget | 다음 요청의 예상 토큰(측정/추정), 예산·압축 시작점·거부 한도, 최신 요약과 그 범위. 표시 전용, lock 없음 | P0 코드 구현 (V3-P50) |
 | **UI-01** | WebInterface / **Interface** | Web 서버 → 브라우저·CLI | Application(DATA-12, CTRL-06, ConversationLog 읽기) | 운영자 인증, 대화 목록·생성·이름 변경, 메시지·재개 제출, Event·작업 상태 폴링 | P0 코드 구현 (V3-P46) |
 | **UI-02** | TerminalInterface / **Interface** | CLI → 로컬 Web 서버(UI-01) | UI-01 JSON API + 운영자 비밀값 파생 bearer | 대화형·명령형 대화, 질문 답변, 이어서 실행, 목록·조회 | P0 코드 구현 (V3-P47) |
 

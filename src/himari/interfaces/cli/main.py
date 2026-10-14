@@ -1,6 +1,6 @@
 """``himari`` — the terminal client of the local HIMARI Web server (V3-P47).
 
-    himari chat [ID] [--title T]   interactive; answers questions; /continue /rename /id /exit
+    himari chat [ID] [--title T]   interactive; answers questions; /continue /context /rename /id /exit
     himari list                    your conversations, most recent first
     himari show ID                 a conversation's transcript and state
     himari new [--title T]         create a conversation, print its id
@@ -73,6 +73,11 @@ class Printer:
     # A call is identified by (run_id, call_id): call ids repeat across Runs.
     calls: dict[tuple[str, str], str] = field(default_factory=dict)  # -> tool_id
     answered: set[tuple[str, str]] = field(default_factory=set)  # ask_user calls whose answer was printed
+    # The latest compaction (from /context): a divider is printed before the
+    # first event it does not cover, with the summary when verbose.
+    covered: int | None = None
+    summary: str | None = None
+    divided: bool = False
 
     @property
     def encoding(self) -> str | None:
@@ -90,7 +95,18 @@ class Printer:
         self.line(header)
         self.line(safe_block(text, encoding=self.encoding, max_lines=max_lines))
 
+    def divider(self) -> None:
+        self.divided = True
+        hint = "below" if self.verbose else "use --verbose or /context to read it"
+        self.line(f"── earlier messages reach HIMARI only as a summary ({hint}) ──")
+        if self.verbose and self.summary:
+            self.line(safe_block(self.summary, encoding=self.encoding))
+
     def event(self, event: dict[str, Any]) -> None:
+        sequence = event.get("sequence")
+        if (self.covered is not None and not self.divided and isinstance(sequence, int)
+                and sequence > self.covered):
+            self.divider()
         kind = event.get("kind")
         text = str(event.get("text") or "")
         if kind == "user_message":
@@ -126,6 +142,17 @@ class Printer:
             self.line(safe_block(text, encoding=self.encoding, max_lines=None if self.verbose else TOOL_RESULT_LINES))
 
 
+def context_line(context: dict[str, Any]) -> str:
+    estimated = context.get("estimated_tokens")
+    size = ("size unknown while working" if estimated is None
+            else f"about {estimated:,} of {context['budget_tokens']:,} tokens")
+    line = f"context: {size}; summarizes at {context['compact_at_tokens']:,}"
+    compactions = int(context.get("compactions") or 0)
+    if compactions:
+        line += f"; compacted {compactions} time{'s' if compactions > 1 else ''}"
+    return line
+
+
 class Session:
     def __init__(self, client: ServerClient, printer: Printer, err: TextIO,
                  sleep: Callable[[float], None] = time.sleep) -> None:
@@ -134,6 +161,21 @@ class Session:
     def note(self, text: str) -> None:
         self.err.write(safe_line(text, encoding=stream_encoding(self.err)) + "\n")
         self.err.flush()
+
+    def context(self, conversation_id: str) -> dict[str, Any] | None:
+        """The /context answer, also arming the printer's divider. Display
+        only: a failure to read it never stops a command."""
+        try:
+            context = self.client.get(_path(conversation_id, "/context"))
+        except ClientError:
+            return None
+        if not isinstance(context, dict) or not context.get("enabled"):
+            return None
+        covered = context.get("covered_through_sequence")
+        self.printer.covered = covered if isinstance(covered, int) else None
+        summary = context.get("summary")
+        self.printer.summary = summary if isinstance(summary, str) else None
+        return context
 
     def print_events(self, conversation_id: str, after: int) -> int:
         """Pages of at most EVENT_PAGE events; a page over the response bound
@@ -222,7 +264,10 @@ def cmd_new(session: Session, args: argparse.Namespace) -> int:
 
 def cmd_show(session: Session, args: argparse.Namespace) -> int:
     detail = session.client.get(_path(args.id))
+    context = session.context(args.id)
     session.print_events(args.id, 0)
+    if context is not None:
+        session.note(context_line(context))
     if detail["job"]["running"]:
         session.note("(still working)")
         return EXIT_OK
@@ -242,13 +287,15 @@ def cmd_continue(session: Session, args: argparse.Namespace) -> int:
     return code
 
 
-CHAT_HELP = "/continue  continue an unanswered message\n/rename T  rename\n/id        show the id\n/exit      leave"
+CHAT_HELP = ("/continue  continue an unanswered message\n/context   context size and the latest summary\n"
+             "/rename T  rename\n/id        show the id\n/exit      leave")
 
 
 def cmd_chat(session: Session, args: argparse.Namespace, read: Callable[[str], str] = input) -> int:
     if args.id:
         conversation_id = args.id
         session.client.get(_path(conversation_id))
+        session.context(conversation_id)
         after = session.print_events(conversation_id, 0)
     else:
         conversation_id = str(session.client.post("/api/conversations", {"title": args.title} if args.title else {})["id"])
@@ -273,6 +320,15 @@ def cmd_chat(session: Session, args: argparse.Namespace, read: Callable[[str], s
             continue
         if text == "/id":
             session.printer.line(conversation_id)
+            continue
+        if text == "/context":
+            context = session.context(conversation_id)
+            if context is None:
+                session.note("(no context information)")
+                continue
+            session.note(context_line(context))
+            if session.printer.summary:
+                session.printer.block("Summary the model sees for earlier messages:", session.printer.summary)
             continue
         if text.startswith("/rename"):
             try:
