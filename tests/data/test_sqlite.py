@@ -22,6 +22,8 @@ from himari.bootstrap import build_runtime
 from himari.common import (
     ASK_USER_TOOL_ID,
     ArtifactId,
+    EnvironmentKind,
+    PrincipalId,
     CallId,
     CallRef,
     RawRepresentation,
@@ -40,6 +42,7 @@ from himari.data.api import (
     AssistantToolCalls,
     DataError,
     DataErrorCode,
+    InitialActivation,
     PromptBasis,
     RawNoResponse,
     RawReceived,
@@ -411,8 +414,13 @@ async def op_activate(store: SqliteStore, data: SqliteData) -> Operation:
     return activate
 
 
+async def op_create(store: SqliteStore, data: SqliteData) -> Operation:
+    activations = (InitialActivation(FAKE, WorkspaceId("ws_a")), InitialActivation(EnvironmentKind("other"), WorkspaceId("ws_b")))
+    return lambda: data.create_conversation(PrincipalId("carol"), title="t", activations=activations)
+
+
 @pytest.mark.parametrize("setup", [op_project, op_commit, op_unknown, op_answer, op_recover, op_append, op_final,
-                                   op_activate], ids=lambda f: f.__name__)
+                                   op_activate, op_create], ids=lambda f: f.__name__)
 def test_a_failure_after_any_write_rolls_the_whole_transaction_back(tmp_path: Path, setup: Setup) -> None:
     store, data = open_store(tmp_path / "h.db")
     store.create_conversation(SCOPE)

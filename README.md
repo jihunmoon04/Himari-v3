@@ -12,7 +12,7 @@ HIMARI v3의 **아키텍처와 구현 현황**입니다. 2026-10-13 기준 PR #1
 | Provider | Scripted Fake + 실제 OpenRouter, wire-exact 요청 전송·요청/응답 원본 기록, reasoning effort/usage/continuation | 추가 Provider, Streaming |
 | Tool | Registry·Schema 검증·Dispatcher·결과 및 Artifact 커밋, Inside 파일 Tool 5종, `inside/run_command` | Memory·Plan Tool, 병렬 Scheduler(현재 순차 + Workspace별 직렬화) |
 | Environment | EnvironmentPlugin SPI, Binding별 작업 폴더, Inside(openat2 경계), bubblewrap+Landlock Sandbox·시작 시 탈출 자체 검사·Workspace admission·이 서버 실호스트 게이트 | CPU·메모리·프로세스 수 한도, 다른 배포 호스트 검증, 원격·로컬 PC Environment |
-| 인터페이스 | Bootstrap·테스트·선택적 라이브 Provider 호출 | 사용자용 Web·CLI |
+| 인터페이스 | `Application`(데이터 폴더·SQLite·Sandbox·운영자 비밀값 조립), 대화 목록 포트, 백그라운드 실행기, 테스트·선택적 라이브 Provider 호출 | 사용자용 Web·CLI(진행 중: v2 형태 재사용) |
 
 **검증 경계:** Data·통합 테스트는 인메모리와 SQLite 두 백엔드로 모두 실행되며, SQLite에서는 재시작이 DB 파일을 닫고 다시 여는 것이고 실제 `SIGKILL` 크래시(송신 중·부작용 중·트랜잭션 도중·커밋 직후)도 검증합니다. 전원 차단 내구성은 SQLite·파일시스템의 fsync 보장에 의존하며 직접 시험하지 않았습니다. OS Sandbox는 이 서버에서 실호스트 게이트(`HIMARI_SANDBOX_HOST=1 pytest tests/sandbox_host`)를 통과했지만 다른 호스트에서는 다시 실행해야 하고, 자원 한도는 아직 없습니다. 구현된 공개 계약은 각 모듈 `api.py`가 원본입니다.
 

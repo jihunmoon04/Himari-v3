@@ -110,11 +110,11 @@ P1은 Workspace 전용 소프트웨어 모듈을 다시 도입하는 단계가 �
 | Q-27 | CurrentStateProjection | **CS-01~08 초안 작성됨**. 합성 소유 위치, 기본 Binding 선택 스코프, Data consistency/version token, Environment 연결 관측, Provider-native 표현의 최종 검수·확정 필요 |
 | Q-28 | Conversation serialization | **P0는 프로세스 내 lock(V3-045)**. lock은 크래시 후 중복을 막지 않으며 그것은 Data T3/T6/T-R 담당. P2: lease/queue 범위, 취소/중단 후 ownership 회수. 신규 사용자 입력 정책은 P0에서 결정 |
 
-## 다음 구현 작업 제안 (2026-10-13, PR #1~#6 반영)
+## 다음 구현 작업 제안 (2026-10-14, PR #1~#10 반영)
 
-1. **영속 Data** — SQLite 등으로 Event/Run/ToolExecution/Artifact/Continuation 저장, T2~T7a·T-R 원자성 및 실제 crash 복구 검증(Q-41).
-2. **Inside Environment + Sandbox** — 사용자별 Root와 Conversation cwd, 파일 Tool·bounded `inside/run_command`, Bubblewrap/Landlock·네트워크 차단 실호스트 증거(Q-29~33/Q-39~40).
-3. **최소 CLI** — 실 Provider와 실제 Workspace를 연결한 단대단 사용 경로 검증.
+1. **영속 Data** — SQLite 등으로 Event/Run/ToolExecution/Artifact/Continuation 저장, T2~T7a·T-R 원자성 및 실제 crash 복구 검증(Q-41). *(완료: PR #8~#10)*
+2. **Inside Environment + Sandbox** — 사용자별 Root와 Conversation cwd, 파일 Tool·bounded `inside/run_command`, Bubblewrap/Landlock·네트워크 차단 실호스트 증거(Q-29~33/Q-39~40). *(완료: PR #8~#10)*
+3. **Web/CLI (v2 형태 재사용)** — PR A: 대화 목록 포트(V3-P43)·백그라운드 실행(V3-P44)·Application 조립과 로컬 운영자 인증(V3-P45). PR B: Web 서버와 화면(v2 보안 계층·화면 뼈대 재사용, API·데이터 처리는 v3 개념으로 새로 작성). PR C: CLI를 Web 서버의 클라이언트로(SQLite 단일 writer 때문에 CLI가 DB를 직접 열지 않음).
 4. **Context 압축·예산 및 최신 Snapshot 활용** — exact tail, continuation 일괄 조회/크기 예산(Q-14/Q-22/Q-42/Q-43).
 5. **후속 기능** — 정식 Pause/Cancel, Streaming, Web UI, Memory·Plan Tool, 충돌 Scheduler.
 

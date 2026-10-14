@@ -50,6 +50,7 @@ from himari.common import (
     EventId,
     JsonValue,
     ModelToolResult,
+    PrincipalId,
     ProviderContinuation,
     RawRepresentation,
     RunId,
@@ -58,7 +59,7 @@ from himari.common import (
     UnknownOutcomePolicy,
     WorkspaceId,
 )
-from himari.data import codec
+from himari.data import codec, rules
 from himari.data.api import (
     AnswerCommit,
     Artifact,
@@ -68,12 +69,14 @@ from himari.data.api import (
     AssistantToolCalls,
     BindingAuthority,
     ConversationEvent,
+    ConversationSummary,
     ConversationWorkspace,
     DataError,
     DataErrorCode,
     EnvironmentActivation,
     EventKind,
     EventPayload,
+    InitialActivation,
     PersistedStateBasis,
     ProjectionResult,
     PromptBasis,
@@ -93,7 +96,7 @@ from himari.data.api import (
     UserMessage,
 )
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2  # v2: Conversation title/created_at (DATA-12); no migration from v1
 APPLICATION_ID = 0x48494D41  # "HIMA": written into the database header (PRAGMA application_id)
 
 _TERMINAL_COMPLETIONS = frozenset(
@@ -120,6 +123,8 @@ INSERT INTO meta VALUES ('next_id', 1);
 CREATE TABLE conversations (
     conversation_id TEXT PRIMARY KEY,
     owner TEXT NOT NULL,
+    title TEXT,
+    created_at TEXT NOT NULL,
     state_revision INTEGER NOT NULL DEFAULT 0,
     workspace_id TEXT,
     workspace_cwd TEXT,
@@ -129,6 +134,7 @@ CREATE TABLE conversations (
     snapshot_covers_through INTEGER,
     snapshot_basis TEXT
 ) STRICT;
+CREATE INDEX conversations_by_owner ON conversations (owner);
 CREATE TABLE events (
     conversation_id TEXT NOT NULL REFERENCES conversations,
     sequence INTEGER NOT NULL,
@@ -369,14 +375,9 @@ class SqliteStore:
 
     # --- admin helpers (trusted setup paths, not model-reachable) --------
 
-    def create_conversation(self, scope: TrustedScope) -> None:
+    def create_conversation(self, scope: TrustedScope, *, title: str | None = None) -> None:
         with self.transaction() as tx:
-            if tx.one("SELECT 1 FROM conversations WHERE conversation_id=?", scope.conversation_id):
-                raise DataError(DataErrorCode.DUPLICATE_IDENTITY, scope.conversation_id)
-            tx.execute(
-                "INSERT INTO conversations (conversation_id, owner) VALUES (?, ?)",
-                scope.conversation_id, scope.principal_id,
-            )
+            tx.insert_conversation(scope, title)
 
     def activate_environment(
         self,
@@ -387,36 +388,7 @@ class SqliteStore:
         cwd_relative: str | None = None,
     ) -> BindingAuthority:
         with self.transaction() as tx:
-            conv = tx.authorized(scope)
-            if tx.one("SELECT 1 FROM activations WHERE conversation_id=? AND environment_kind=?", scope.conversation_id, kind):
-                raise DataError(DataErrorCode.DUPLICATE_IDENTITY, f"active {kind} exists (P0: one per kind)")
-            instance_id = EnvironmentInstanceId(tx.new_id("env"))
-            relative = cwd_relative if cwd_relative is not None else f"conversations/{scope.conversation_id}"
-            binding = BindingAuthority(
-                binding_id=BindingId(tx.new_id("bind")),
-                environment_instance_id=instance_id,
-                environment_kind=kind,
-                workspace_id=workspace_id,
-                revision=1,
-                cwd_relative=relative,
-            )
-            tx.execute(
-                "INSERT INTO activations (conversation_id, environment_instance_id, environment_kind, default_binding_id)"
-                " VALUES (?, ?, ?, ?)",
-                scope.conversation_id, instance_id, kind, binding.binding_id,
-            )
-            tx.execute(
-                "INSERT INTO bindings (conversation_id, binding_id, environment_instance_id, environment_kind,"
-                " workspace_id, revision, cwd_relative) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                scope.conversation_id, binding.binding_id, instance_id, kind, workspace_id, 1, relative,
-            )
-            if conv["workspace_id"] is None:  # the Conversation's first (default) working directory
-                tx.execute(
-                    "UPDATE conversations SET workspace_id=?, workspace_cwd=? WHERE conversation_id=?",
-                    workspace_id, relative, scope.conversation_id,
-                )
-            tx.bump_state(scope)
-            return binding
+            return tx.activate(scope, kind, workspace_id, cwd_relative)
 
     def revoke_binding(self, scope: TrustedScope, binding_id: BindingId) -> None:
         with self.transaction() as tx:
@@ -480,6 +452,56 @@ class _Tx:
 
     def bump_state(self, scope: TrustedScope) -> None:
         self.execute("UPDATE conversations SET state_revision=state_revision+1 WHERE conversation_id=?", scope.conversation_id)
+
+    def insert_conversation(self, scope: TrustedScope, title: str | None) -> None:
+        if self.one("SELECT 1 FROM conversations WHERE conversation_id=?", scope.conversation_id):
+            raise DataError(DataErrorCode.DUPLICATE_IDENTITY, scope.conversation_id)
+        self.execute(
+            "INSERT INTO conversations (conversation_id, owner, title, created_at) VALUES (?, ?, ?, ?)",
+            scope.conversation_id, scope.principal_id, title, _timestamp(datetime.now(UTC)),
+        )
+
+    def activate(
+        self, scope: TrustedScope, kind: EnvironmentKind, workspace_id: WorkspaceId, cwd_relative: str | None
+    ) -> BindingAuthority:
+        tx = self
+        conv = tx.authorized(scope)
+        if tx.one("SELECT 1 FROM activations WHERE conversation_id=? AND environment_kind=?", scope.conversation_id, kind):
+            raise DataError(DataErrorCode.DUPLICATE_IDENTITY, f"active {kind} exists (P0: one per kind)")
+        instance_id = EnvironmentInstanceId(tx.new_id("env"))
+        # Each Binding carries its own working directory (default: the
+        # Conversation's own folder, V3-033).
+        relative = cwd_relative if cwd_relative is not None else f"conversations/{scope.conversation_id}"
+        binding = BindingAuthority(
+            binding_id=BindingId(tx.new_id("bind")),
+            environment_instance_id=instance_id,
+            environment_kind=kind,
+            workspace_id=workspace_id,
+            revision=1,
+            cwd_relative=relative,
+        )
+        tx.execute(
+            "INSERT INTO activations (conversation_id, environment_instance_id, environment_kind, default_binding_id)"
+            " VALUES (?, ?, ?, ?)",
+            scope.conversation_id, instance_id, kind, binding.binding_id,
+        )
+        tx.execute(
+            "INSERT INTO bindings (conversation_id, binding_id, environment_instance_id, environment_kind,"
+            " workspace_id, revision, cwd_relative) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            scope.conversation_id, binding.binding_id, instance_id, kind, workspace_id, 1, relative,
+        )
+        if conv["workspace_id"] is None:  # the Conversation's first (default) working directory
+            tx.execute(
+                "UPDATE conversations SET workspace_id=?, workspace_cwd=? WHERE conversation_id=?",
+                workspace_id, relative, scope.conversation_id,
+            )
+        tx.bump_state(scope)
+        return binding
+
+
+def _timestamp(moment: datetime) -> str:
+    """Fixed-width UTC ISO text, so string order is time order."""
+    return moment.astimezone(UTC).isoformat(timespec="microseconds")
 
 
 # --- row decoding ---------------------------------------------------------------------
@@ -590,7 +612,7 @@ class SqliteData:
             "INSERT INTO events (conversation_id, sequence, event_id, kind, payload, payload_schema_version,"
             " created_at, origin_run_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             scope.conversation_id, event.sequence, event.event_id, event.kind.value, codec.payload(payload),
-            event.payload_schema_version, event.created_at.isoformat(), origin,
+            event.payload_schema_version, _timestamp(event.created_at), origin,
         )
         return event
 
@@ -1037,6 +1059,69 @@ class SqliteData:
             if workspace is None:
                 raise DataError(DataErrorCode.NOT_FOUND, "conversation workspace")
             return workspace
+
+    # --- ConversationCatalog ----------------------------------------------------
+
+    async def create_conversation(
+        self,
+        principal: PrincipalId,
+        *,
+        title: str | None = None,
+        activations: Sequence[InitialActivation] = (),
+    ) -> ConversationId:
+        title = rules.normalize_title(title)
+        rules.check_activations(activations)
+        with self._tx() as tx:  # T0: the Conversation and its activations, or nothing
+            scope = TrustedScope(principal, ConversationId(tx.new_id("conv")))
+            tx.insert_conversation(scope, title)
+            for activation in activations:
+                tx.activate(scope, activation.environment_kind, activation.workspace_id, None)
+            return scope.conversation_id
+
+    _SUMMARY = (
+        "SELECT c.conversation_id, c.title, c.created_at,"
+        " COALESCE((SELECT MAX(sequence) FROM events e WHERE e.conversation_id=c.conversation_id), 0) AS last_sequence,"
+        " COALESCE((SELECT created_at FROM events e WHERE e.conversation_id=c.conversation_id"
+        " ORDER BY sequence DESC LIMIT 1), c.created_at) AS last_activity,"
+        " (SELECT payload FROM events e WHERE e.conversation_id=c.conversation_id AND e.kind='user_message'"
+        " ORDER BY sequence LIMIT 1) AS first_user"
+        " FROM conversations c"
+    )
+
+    @staticmethod
+    def _summary(row: sqlite3.Row) -> ConversationSummary:
+        first = row["first_user"]
+        return ConversationSummary(
+            conversation_id=ConversationId(row["conversation_id"]),
+            title=row["title"],
+            created_at=datetime.fromisoformat(row["created_at"]),
+            last_activity_at=datetime.fromisoformat(row["last_activity"]),
+            last_sequence=row["last_sequence"],
+            preview="" if first is None else rules.preview(
+                codec.payload_from(EventKind.USER_MESSAGE, first).blocks),  # type: ignore[union-attr]
+        )
+
+    async def list_conversations(
+        self, principal: PrincipalId, *, limit: int = 50, offset: int = 0
+    ) -> Sequence[ConversationSummary]:
+        rules.check_page(limit, offset)
+        with self._tx() as tx:
+            rows = tx.all(f"{self._SUMMARY} WHERE c.owner=? ORDER BY last_activity DESC, c.rowid DESC LIMIT ? OFFSET ?",
+                          principal, limit, offset)
+            return tuple(self._summary(r) for r in rows)
+
+    async def read_conversation(self, scope: TrustedScope) -> ConversationSummary:
+        with self._tx() as tx:
+            tx.authorized(scope)
+            row = tx.one(f"{self._SUMMARY} WHERE c.conversation_id=?", scope.conversation_id)
+            assert row is not None
+            return self._summary(row)
+
+    async def rename_conversation(self, scope: TrustedScope, title: str | None) -> None:
+        title = rules.normalize_title(title)
+        with self._tx() as tx:
+            tx.authorized(scope)
+            tx.execute("UPDATE conversations SET title=? WHERE conversation_id=?", title, scope.conversation_id)
 
     # --- StateQuery -------------------------------------------------------------
 

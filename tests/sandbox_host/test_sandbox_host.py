@@ -270,3 +270,30 @@ def test_self_test_fails_when_a_created_mount_is_replaced_by_a_host_path(
     monkeypatch.setattr(sbmod, "bwrap_arguments", swapped)
     report = asyncio.run(probe(SandboxBackend.discover(), (parent,)))
     assert not report.passed and any(f.startswith("mounts:") for f in report.failures), report.failures
+
+
+# --- the application composition with the real sandbox ----------------------------------
+
+
+def test_application_offers_run_command_only_when_enforced(tmp_path: Path) -> None:
+    from himari.bootstrap.application import Application, workspace_for
+
+    async def scenario() -> None:
+        provider = ScriptedAdapter([calls(("inside/run_command", {"argv": ["sh", "-c", "pwd; echo made > out.txt"]})),
+                                    final("done")])
+        app = await Application.open(tmp_path / "data", provider, model_id="scripted-model", sandbox=True)
+        try:
+            assert app.sandbox_state is SandboxState.ENFORCED
+            cid = await app.create_conversation(PrincipalId("alice"))
+            scope = TrustedScope(PrincipalId("alice"), cid)
+            await app.runner.submit(scope, user("run it"))
+            status = await app.runner.wait(scope)
+            assert status.result is not None and status.result.state is DriveState.COMPLETED
+            folder = tmp_path / "data/workspaces" / workspace_for(PrincipalId("alice")) / "conversations" / cid
+            assert (folder / "out.txt").read_text() == "made\n"
+            record = (await app.data.read_tool_executions(scope, status.result.run_ids[0]))[0]
+            assert f"/workspace/conversations/{cid}" in str(record.model_result)
+        finally:
+            await app.close()
+
+    asyncio.run(scenario())
