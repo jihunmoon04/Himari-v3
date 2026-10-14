@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import json
 import functools
 from collections.abc import Callable, Coroutine
 from typing import Any
@@ -84,8 +85,9 @@ async def test_a_measured_size_over_the_threshold_compacts_everything_but_the_ta
 
 @sync
 async def test_without_usage_the_utf8_estimate_triggers_compaction() -> None:
-    part = "가" * 250  # 750 bytes → 250 tokens at 3 bytes per token
-    rt, adapter = runtime([final("ok"), final("ok"), final("ok"), final("SUMMARY"), final("done")], context_budget=BUDGET)
+    part = "가" * 550  # 1650 bytes → 550 tokens at 3 bytes per token
+    rt, adapter = runtime([final("ok"), final("ok"), final("ok"), final("SUMMARY"), final("done")],
+                          context_budget=ContextBudget(limit_tokens=2000))
     results = [await rt.driver.drive(SCOPE, user(text)) for text in (part, part, part, "next")]
     assert all(r.state is DriveState.COMPLETED for r in results)
     assert sum(len(r.compaction_run_ids) for r in results) == 1
@@ -311,10 +313,12 @@ class SummarizingAdapter(ScriptedAdapter):
     """Answers each summarizing request with "S1", "S2", … (or a scripted
     failure from ``failures``); other requests follow the script."""
 
-    def __init__(self, script: list[Any], failures: dict[int, NativeNoResponse] | None = None) -> None:
+    def __init__(self, script: list[Any], failures: dict[int, NativeNoResponse] | None = None,
+                 texts: dict[int, str] | None = None) -> None:
         super().__init__(script)
         self.summaries = 0
         self._failures = failures or {}
+        self._texts = texts or {}
 
     async def invoke_prepared(self, request: NativePreparedRequest) -> NativeInvocationOutcome:
         if not _is_compaction(self.prepared_inputs[-1]):
@@ -323,7 +327,8 @@ class SummarizingAdapter(ScriptedAdapter):
         self.summaries += 1
         if self.summaries in self._failures:
             return self._failures[self.summaries]
-        return NativeReceived(encode_output(final(f"S{self.summaries}")), "application/json")
+        text = self._texts.get(self.summaries, f"S{self.summaries}")
+        return NativeReceived(encode_output(final(text)), "application/json")
 
 
 @sync
@@ -372,3 +377,47 @@ async def test_only_the_hard_limit_refuses_a_run() -> None:
     assert result.state is DriveState.COMPLETED, result.detail
     over = await rt.driver.drive(SCOPE, user("가" * 3000))
     assert over.state is DriveState.REQUEST_REJECTED and "> 4000" in over.detail
+
+
+@sync
+async def test_a_tool_call_with_a_whole_file_is_summarized_in_fragments_without_loss() -> None:
+    # PR #15 review B2: the oversized data is a tool call's argument, not a text.
+    content = "".join(f"def f{n}(x):\n    return x < {n} and x > -{n}  # \"edge\"\n" for n in range(200))
+    write = RecordingTool("fake/write", environment_kind=FAKE)
+    adapter = SummarizingAdapter([
+        calls(("fake/write", {"path": "big.py", "content": content})), Measured(final("written"), 1900),
+        final("done"),
+    ])
+    rt, _ = runtime(provider=adapter, env_tools=[write], context_budget=ContextBudget(limit_tokens=2500))
+    await rt.driver.drive(SCOPE, user("write big.py"))
+    result = await rt.driver.drive(SCOPE, user("thanks"))
+    assert result.state is DriveState.COMPLETED, result.detail
+    assert adapter.summaries >= 2
+    documents = []
+    for model_input in adapter.prepared_inputs:
+        if _is_compaction(model_input):
+            text = model_input.conversation[0].blocks[0].text  # type: ignore[union-attr]
+            body = text.split("<conversation_to_summarize>\n")[1].split("\n</conversation_to_summarize>")[0]
+            documents.append(json.loads(body))
+            assert request_tokens(model_input) <= 2500
+    fragments = [i for d in documents for i in d["items"] if "split_item" in i]
+    assert fragments, documents
+    call = next(json.loads("".join(f["json"] for f in fragments[k:]))
+                for k, f in enumerate(fragments) if f["split_item"].startswith("1/"))
+    assert call["tool_calls"] == [{"tool": "fake/write", "arguments": {"path": "big.py", "content": content}}]
+
+
+@sync
+async def test_an_intermediate_summary_over_the_reserved_room_stops_the_chain() -> None:
+    # PR #15 review B1: 600 characters are within max_summary_chars but over the
+    # 500 the next call reserves (a quarter of 2000): refused, nothing committed.
+    budget = ContextBudget(limit_tokens=2000)
+    adapter = SummarizingAdapter([Measured(final("a1"), 1700), final("done")], texts={1: "요" * 600})
+    rt, _ = runtime(provider=adapter, context_budget=budget)
+    await rt.driver.drive(SCOPE, user("가" * 1700))
+    result = await rt.driver.drive(SCOPE, user("q2"))
+    assert adapter.summaries == 1 and len(result.compaction_run_ids) == 1
+    run = await rt.data.read_run(SCOPE, result.compaction_run_ids[0])
+    assert run.status is RunStatus.PROJECTION_FAILED and run.error_code == "invalid_summary"
+    assert await rt.data.get_latest_snapshot(SCOPE) is None
+    assert result.state is DriveState.COMPLETED  # within the budget's ceiling: the Run goes ahead

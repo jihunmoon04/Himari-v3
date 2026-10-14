@@ -385,7 +385,7 @@ class Driver:
             size = planner.request_size(request)  # measured here, not taken from the planner
             if size > budget.limit_tokens:
                 return f"compaction request of about {size} tokens exceeds the limit"
-            run_id, failure, text = await self._summarize(scope, request, planner, budget)
+            run_id, failure, text = await self._summarize(scope, request, planner, plan)
             if run_id is not None:
                 compactions.append(run_id)
             if failure is not None or run_id is None or text is None:
@@ -412,7 +412,7 @@ class Driver:
         return None
 
     async def _summarize(
-        self, scope: TrustedScope, request: ModelInput, planner: CompactionPlanner, budget: ContextBudget
+        self, scope: TrustedScope, request: ModelInput, planner: CompactionPlanner, plan: CompactionPlan
     ) -> tuple[RunId | None, str | None, str | None]:
         """One summarizing call as a COMPACTION Run: (Run, failure, summary)."""
         try:
@@ -444,7 +444,7 @@ class Driver:
             normalized = self._provider.normalize(outcome)
             if not isinstance(normalized, NormalizedFinal):
                 raise PromptError(PromptErrorCode.INVALID_SUMMARY, "the summary call returned tool calls")
-            text = planner.summary_text(normalized.blocks, budget)
+            text = planner.summary_text(normalized.blocks, plan)
         except (ProviderError, PromptError) as exc:
             await self._log.record_projection_failure(scope, run_id, exc.code.value)
             return run_id, str(exc), None

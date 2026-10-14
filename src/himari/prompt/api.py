@@ -210,6 +210,9 @@ class CompactionPlan(DeepFrozen):
     previous_summary: str | None
     request_options: RequestOptions
     prompt_basis: PromptBasis
+    # Longest summary any call may return, in characters (and estimated
+    # tokens): the room the next call of the chain reserves for it.
+    summary_limit: int
 
 
 @dataclass(frozen=True)
@@ -248,9 +251,9 @@ class CompactionPlanner(Protocol):
         """The summarizing request for piece ``index``, given the summary so far."""
         ...
 
-    def summary_text(self, blocks: Sequence[ContentBlock], budget: ContextBudget) -> str:
+    def summary_text(self, blocks: Sequence[ContentBlock], plan: CompactionPlan) -> str:
         """A compaction output as summary text; PromptError (INVALID_SUMMARY)
-        if it is empty, too long or not plain text."""
+        if it is empty, over ``plan.summary_limit`` or not plain text."""
         ...
 
     def snapshot_body(self, summary: str) -> JsonValue: ...

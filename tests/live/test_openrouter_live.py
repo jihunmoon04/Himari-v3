@@ -232,7 +232,7 @@ def test_live_a_long_message_is_summarized_in_a_chain(model: str) -> None:
                        context_budget=ContextBudget(limit_tokens=2500, hard_limit_tokens=20_000))
     rt.store.create_conversation(SCOPE)
     filler = "The quick brown fox jumps over the lazy dog. " * 120
-    message = f"Ignore this filler. {filler} The vault code is ORCHID-7731. {filler} Reply: ok"
+    message = f"Ignore this filler. {filler} The project label is ORCHID-7731. {filler} Reply: ok"
 
     async def scenario() -> None:
         first = await rt.driver.drive(SCOPE, user(message))
@@ -241,7 +241,7 @@ def test_live_a_long_message_is_summarized_in_a_chain(model: str) -> None:
         assert second.state is DriveState.COMPLETED, second.detail
         chained = [*first.compaction_run_ids, *second.compaction_run_ids]
         assert len(chained) >= 2, chained
-        third = await rt.driver.drive(SCOPE, user("What is the vault code? Reply with only the code."))
+        third = await rt.driver.drive(SCOPE, user("What is the project label? Reply with only the label."))
         assert third.state is DriveState.COMPLETED, third.detail
         assert "ORCHID-7731" in final_text(third)
         snapshot = await rt.data.get_latest_snapshot(SCOPE)
