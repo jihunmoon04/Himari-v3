@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import base64
 import errno
+import hashlib
 import hmac
 import os
 import re
@@ -111,3 +112,14 @@ def verify_operator_token(presented: str | None, secret: str) -> bool:
     if not presented:
         return False
     return hmac.compare_digest(presented.encode(), secret.encode())
+
+
+CLI_BEARER_LABEL = b"himari-cli-bearer-v1"
+
+
+def derive_cli_bearer(secret: str) -> str:
+    """The token a CLI sends (``Authorization: Bearer``): HMAC-SHA256 of a
+    fixed label under the secret's bytes. Never equal to the secret, so a
+    leaked bearer is not the root credential (as in HIMARI-v2)."""
+    raw = base64.urlsafe_b64decode(secret + "=")
+    return base64.urlsafe_b64encode(hmac.new(raw, CLI_BEARER_LABEL, hashlib.sha256).digest()).rstrip(b"=").decode()

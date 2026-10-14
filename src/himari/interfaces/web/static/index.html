@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>HIMARI</title>
+    <link rel="stylesheet" href="/assets/app.css" />
+    <script type="module" src="/assets/app.js"></script>
+  </head>
+  <body>
+    <!-- Layout and class names follow the HIMARI-v2 UI so its stylesheet
+         applies unchanged; the surfaces are v3's: sign-in, home, chat. -->
+    <div class="layout" id="layout">
+      <aside class="sidebar" id="sidebar" aria-label="Navigation" hidden>
+        <div class="sidebar-head">
+          <button type="button" id="nav-home" class="brand brand-button">HIMARI</button>
+          <button type="button" id="sidebar-close" class="icon-button sidebar-close">Close</button>
+        </div>
+
+        <button type="button" id="nav-new-chat" class="primary-button sidebar-new-chat">New Chat</button>
+
+        <div class="sidebar-body" id="sidebar-body">
+          <nav aria-label="Conversations">
+            <section class="nav-section">
+              <div class="nav-section-head">
+                <h2 class="nav-title">Conversations</h2>
+              </div>
+              <ul class="tree" id="conversation-list"></ul>
+              <button type="button" id="conversation-load-more" class="link-button" hidden>Load more</button>
+            </section>
+          </nav>
+        </div>
+
+        <nav class="sidebar-utility" aria-label="Utilities">
+          <button type="button" id="nav-sign-out" class="nav-link">Sign out</button>
+        </nav>
+      </aside>
+
+      <button type="button" class="backdrop" id="nav-backdrop" aria-label="Close navigation" hidden></button>
+
+      <main class="main" id="main" aria-label="Main">
+        <div class="topbar" id="topbar">
+          <button
+            type="button"
+            id="sidebar-toggle"
+            class="icon-button topbar-icon-button"
+            aria-expanded="false"
+            aria-controls="sidebar"
+            aria-label="Open navigation"
+            title="Open navigation"
+            hidden
+          >☰</button>
+          <span class="topbar-title" id="topbar-title">HIMARI</span>
+          <div class="topbar-chat-context" id="topbar-chat-context" hidden>
+            <span class="topbar-state-dot" id="topbar-state-dot" aria-hidden="true"></span>
+            <span class="topbar-chat-label" id="topbar-chat-label"></span>
+          </div>
+          <button
+            type="button"
+            id="chat-menu-toggle"
+            class="icon-button topbar-icon-button chat-menu-toggle"
+            aria-expanded="false"
+            aria-controls="chat-menu"
+            aria-label="Conversation menu"
+            title="Conversation menu"
+            hidden
+          >⋮</button>
+          <div class="chat-menu" id="chat-menu" role="group" aria-label="Conversation details and actions" hidden>
+            <dl class="chat-menu-meta">
+              <div class="chat-menu-pair">
+                <dt>Conversation</dt>
+                <dd id="chat-menu-title"></dd>
+              </div>
+              <div class="chat-menu-pair">
+                <dt>State</dt>
+                <dd id="chat-menu-state"></dd>
+              </div>
+            </dl>
+            <div class="chat-menu-actions">
+              <button type="button" id="chat-menu-rename" class="link-button">Rename</button>
+              <button type="button" id="chat-menu-resume" class="link-button">Continue</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="status-bar" id="status-bar" role="status" aria-live="polite"></div>
+
+        <!-- Sign-in: the operator token from <data root>/control/operator.secret -->
+        <section class="surface" id="surface-login" hidden>
+          <h1>Sign in</h1>
+          <p class="hint">Paste the operator token from <code>control/operator.secret</code> in the HIMARI data directory.</p>
+          <form id="login-form" class="stacked-form">
+            <div class="field">
+              <label for="login-token">Operator token</label>
+              <input type="password" id="login-token" name="login-token" autocomplete="current-password" required />
+            </div>
+            <div class="form-actions">
+              <button type="submit" class="primary-button" id="login-submit">Sign in</button>
+            </div>
+          </form>
+        </section>
+
+        <section class="surface home" id="surface-home" hidden>
+          <div class="home-inner">
+            <h1 class="home-brand">HIMARI</h1>
+            <p class="home-prompt">What will we work on?</p>
+            <button type="button" id="home-new-chat" class="primary-button home-new-chat">+ Start a new chat</button>
+            <section class="home-recent" aria-labelledby="home-recent-heading">
+              <h2 class="home-recent-heading" id="home-recent-heading">Recent conversations</h2>
+              <ul class="home-recent-list" id="home-recent-list"></ul>
+              <p class="home-recent-empty" id="home-recent-empty" hidden>No conversations yet.</p>
+            </section>
+          </div>
+        </section>
+
+        <section class="surface chat" id="surface-chat" hidden>
+          <div class="timeline" id="timeline" aria-label="Conversation timeline"></div>
+
+          <div class="composer-wrap">
+            <section class="question-panel" id="question-panel" role="group" aria-labelledby="question-heading" hidden>
+              <h2 class="question-heading" id="question-heading">The assistant has a question</h2>
+              <p class="question-text" id="question-text"></p>
+              <p class="question-hint" id="question-hint">Answer in the message box below.</p>
+            </section>
+
+            <form class="composer" id="composer">
+              <label class="visually-hidden" for="composer-text">Message</label>
+              <textarea id="composer-text" name="composer-text" rows="1" placeholder="Message HIMARI"></textarea>
+              <div class="composer-actions">
+                <span class="composer-hint" id="composer-hint"></span>
+                <button type="submit" id="composer-send" class="primary-button composer-send"
+                        aria-label="Send message" title="Send message">↑</button>
+              </div>
+            </form>
+          </div>
+        </section>
+      </main>
+    </div>
+  </body>
+</html>
