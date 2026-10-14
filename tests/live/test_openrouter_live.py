@@ -245,7 +245,7 @@ def test_live_a_long_message_is_summarized_in_a_chain(model: str) -> None:
         assert third.state is DriveState.COMPLETED, third.detail
         assert "ORCHID-7731" in final_text(third)
         snapshot = await rt.data.get_latest_snapshot(SCOPE)
-        assert snapshot is not None
-        print(f"\n{model}: calls={len(chained)} summary={snapshot.body['summary']!r}"[:600])  # type: ignore[index]
+        assert snapshot is not None and isinstance(snapshot.body, Mapping)
+        print(f"\n{model}: calls={len(chained)} summary={snapshot.body['summary']!r}"[:600])
 
     asyncio.run(scenario())
