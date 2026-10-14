@@ -17,7 +17,7 @@ from __future__ import annotations
 import hashlib
 import os
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from himari.bootstrap import DEFAULT_INSTRUCTIONS, Runtime, build_runtime
@@ -49,7 +49,7 @@ class Application:
     runner: BackgroundRunner
     inside: InsideEnvironment
     sandbox_state: SandboxState
-    operator_secret: str
+    operator_secret: str = field(repr=False)  # never in reprs, logs or tracebacks
 
     @classmethod
     async def open(

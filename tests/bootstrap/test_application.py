@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import stat
+import threading
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Any
 
 import pytest
 from testkit import calls, final, user
@@ -98,3 +100,54 @@ def test_workspace_ids_are_safe_for_any_principal() -> None:
         ws = workspace_for(PrincipalId(principal))
         assert ws.startswith("ws_") and len(ws) == 27 and ws[3:].isalnum()
     assert workspace_for(PrincipalId("a")) != workspace_for(PrincipalId("b"))
+
+
+# --- PR #11 review -------------------------------------------------------------------------
+
+
+def test_the_operator_secret_is_not_in_the_repr(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        app, _ = await open_app(tmp_path / "data")
+        try:
+            assert app.operator_secret not in repr(app)
+        finally:
+            await app.close()
+
+    asyncio.run(scenario())
+
+
+def test_close_waits_for_a_started_file_operation_past_the_grace_period(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from himari.environment.inside import tools as inside_tools
+
+    entered, release, finished = threading.Event(), threading.Event(), threading.Event()
+    real_act = inside_tools.WriteFile.act
+
+    def slow_act(self: Any, root_fd: int, relative: str, args: Any) -> Any:
+        entered.set()
+        release.wait(10)
+        try:
+            return real_act(self, root_fd, relative, args)
+        finally:
+            finished.set()
+
+    monkeypatch.setattr(inside_tools.WriteFile, "act", slow_act)
+    script: list[ScriptStep] = [calls(("inside/write_file", {"path": "slow.txt", "content": "late"})), final("x")]
+
+    async def scenario() -> None:
+        app, _ = await open_app(tmp_path / "data", script)
+        cid = await app.create_conversation(ALICE)
+        scope = TrustedScope(ALICE, cid)
+        await app.runner.submit(scope, user("write slowly"))
+        while not entered.is_set():
+            await asyncio.sleep(0.01)
+        closing = asyncio.create_task(app.close(grace_seconds=0.05))
+        await asyncio.sleep(0.3)  # well past the grace period: the job was cancelled
+        assert not closing.done(), "close() returned while a file write was still running"
+        assert app.inside.write_lock(workspace_for(ALICE)).locked()
+        release.set()
+        await closing
+        assert finished.is_set() and app.runner.status(scope).error == "cancelled"
+        assert not app.inside.write_lock(workspace_for(ALICE)).locked()
+
+    asyncio.run(scenario())

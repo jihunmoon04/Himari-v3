@@ -15,6 +15,7 @@ import shlex
 
 from himari.common import EnvironmentKind, JsonValue, ModelToolResult, TextBlock, ToolId
 from himari.environment.inside import fs
+from himari.environment.inside.blocking import run_blocking
 from himari.tool.api import (
     EffectProfile,
     ToolContext,
@@ -110,11 +111,12 @@ class _InsideTool:
         host_root = self._env.host_root(ctx.binding.workspace_id)
         cwd = ctx.workspace.cwd_relative
         # Blocking filesystem work runs off the event loop so a large
-        # directory or slow disk cannot stall other Conversations.
+        # directory or slow disk cannot stall other Conversations; once
+        # started it always completes before this call (and the lock) ends.
         if self.effect is EffectProfile.READ:
-            return await asyncio.to_thread(self._run_sync, host_root, cwd, raw_path, args)
+            return await run_blocking(self._run_sync, host_root, cwd, raw_path, args)
         async with self._env.write_lock(ctx.binding.workspace_id):
-            return await asyncio.to_thread(self._run_sync, host_root, cwd, raw_path, args)
+            return await run_blocking(self._run_sync, host_root, cwd, raw_path, args)
 
     def _run_sync(self, host_root: str, cwd: str, raw_path: object, args: Mapping[str, Any]) -> ToolOutcome:
         shown = raw_path if isinstance(raw_path, str) else "?"  # the model's own path, until resolved
@@ -360,7 +362,7 @@ class RunCommand:
                 # open from the check through the spawn.
                 with fs.open_root(host_root) as root_fd:
                     fs.ensure_directory(root_fd, cwd_relative)
-                    await asyncio.to_thread(admission.admit_workspace, root_fd, host_root)
+                    await run_blocking(admission.admit_workspace, root_fd, host_root)  # never outlives root_fd
                     result = await backend.run(argv, root_fd=root_fd, cwd=fs.display(cwd_relative), timeout=timeout)
             except fs.FsError as error:
                 return _failure(fs.display(cwd_relative), error)
