@@ -64,7 +64,10 @@ class WebConfig:
         host = _non_empty(source.get(HOST_VAR), DEFAULT_HOST, HOST_VAR)
         port = _port(source.get(PORT_VAR))
         hosts_raw, origins_raw = source.get(ALLOWED_HOSTS_VAR), source.get(ALLOWED_ORIGINS_VAR)
-        allowed_hosts = _hosts(hosts_raw) if hosts_raw is not None else _DEFAULT_ALLOWED_HOSTS
+        # Loopback names are always allowed (a DNS-rebinding attack needs a
+        # name the attacker controls), so the local CLI keeps working when a
+        # reverse proxy's public name is configured.
+        allowed_hosts = (_hosts(hosts_raw) if hosts_raw is not None else frozenset()) | _DEFAULT_ALLOWED_HOSTS
         allowed_origins = (
             _origins(origins_raw) if origins_raw is not None
             else frozenset({f"http://127.0.0.1:{port}", f"http://localhost:{port}"})

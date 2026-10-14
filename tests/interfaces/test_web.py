@@ -121,6 +121,7 @@ def test_remote_use_is_a_loopback_server_behind_a_tls_proxy() -> None:
                                   "HIMARI_WEB_ALLOWED_ORIGINS": "https://server.example.com:443"})
     assert proxied.host == "127.0.0.1" and proxied.secure_cookie
     assert proxied.allowed_origins == {"https://server.example.com"}
+    assert proxied.allowed_hosts == {"server.example.com", "127.0.0.1", "localhost"}  # the local CLI still works
     for host in ("127.0.0.1", "::1", "localhost"):
         assert WebConfig.from_env({"HIMARI_DATA_ROOT": "/srv/himari", "HIMARI_WEB_HOST": host}).host == host
     local = WebConfig.from_env({"HIMARI_DATA_ROOT": "/srv/himari", "HIMARI_WEB_ALLOWED_ORIGINS": "http://[::1]:8765"})
