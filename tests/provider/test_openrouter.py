@@ -626,5 +626,6 @@ def test_a_compaction_summary_is_escaped_data_that_cannot_close_its_block() -> N
 
 def test_known_models_declare_their_context_window() -> None:
     assert ADAPTER.describe_capabilities("openai/gpt-5-nano").context_tokens == 400_000
+    assert ADAPTER.describe_capabilities("openai/gpt-6-luna").context_tokens == 1_050_000
     assert ADAPTER.describe_capabilities("anthropic/claude-haiku-5.5").context_tokens == 1_000_000
     assert ADAPTER.describe_capabilities("some/unlisted-model").context_tokens is None

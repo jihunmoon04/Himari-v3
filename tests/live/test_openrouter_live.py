@@ -36,7 +36,7 @@ from himari.tool.api import (
 
 ROOT = Path(__file__).resolve().parents[2]
 KEY = os.environ.get("OPENROUTER_API_KEY") or read_env_file(str(ROOT / ".env")).get("OPENROUTER_API_KEY", "")
-MODELS = os.environ.get("HIMARI_LIVE_MODELS", "openai/gpt-5-nano,anthropic/claude-haiku-5.5").split(",")
+MODELS = os.environ.get("HIMARI_LIVE_MODELS", "openai/gpt-6-luna,anthropic/claude-haiku-5.5").split(",")
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("HIMARI_LIVE") != "1" or not KEY, reason="live tests are opt-in (HIMARI_LIVE=1 + key)"
@@ -149,27 +149,34 @@ def test_live_tool_round_trip_replays_reasoning(model: str) -> None:
     same assistant message in the next request, unmodified.
 
     The task must need reasoning: on a trivial one claude-haiku-5.5 skips
-    thinking even at "max" (observed live), leaving nothing to replay."""
-    transport = RecordingTransport()
-    add = AddTool()
-    rt = build_runtime(
-        OpenRouterAdapter(KEY, transport=transport), tools=[add], model_id=model, reasoning_effort="high"
-    )
-    rt.store.create_conversation(SCOPE)
-    result = asyncio.run(
-        rt.driver.drive(
-            SCOPE,
-            user(
-                "A train leaves at 9:40 and arrives at 13:05. How many minutes is the trip? "
-                "Use the add tool at least once (e.g. to add partial minute counts), then answer with the number."
-            ),
+    thinking even at "max" (observed live), leaving nothing to replay. Even on
+    a harder one gpt-6-luna sometimes calls the tool without reasoning first
+    (observed live, about one in two), so a fresh conversation is tried up to
+    three times."""
+    for _ in range(3):
+        transport = RecordingTransport()
+        add = AddTool()
+        rt = build_runtime(
+            OpenRouterAdapter(KEY, transport=transport), tools=[add], model_id=model, reasoning_effort="high"
         )
-    )
+        rt.store.create_conversation(SCOPE)
+        result = asyncio.run(
+            rt.driver.drive(
+                SCOPE,
+                user(
+                    "How many positive integers below 1000 are divisible by 7 or 11 but not both? "
+                    "Work out the partial counts, use the add tool at least once to combine them, "
+                    "then answer with the number."
+                ),
+            )
+        )
 
-    assert result.state is DriveState.COMPLETED, result.detail
-    assert add.calls and "205" in final_text(result)
-    first_run = asyncio.run(rt.data.read_run(SCOPE, result.run_ids[0]))
-    assert first_run.continuation is not None, "the tool turn returned no reasoning to replay"
+        assert result.state is DriveState.COMPLETED, result.detail
+        assert add.calls and "208" in final_text(result)
+        first_run = asyncio.run(rt.data.read_run(SCOPE, result.run_ids[0]))
+        if first_run.continuation is not None:
+            break
+    assert first_run.continuation is not None, "no tool turn returned reasoning to replay in three tries"
     second = json.loads(transport.sent[1])["messages"]
     assert_chat_structure(second)
     tool_turn = next(m for m in second if m["role"] == "assistant" and m.get("tool_calls"))
