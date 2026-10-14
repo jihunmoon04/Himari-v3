@@ -14,9 +14,11 @@ from testkit import calls, final, user
 
 from himari.bootstrap.application import (
     DEFAULT_CONTEXT_TOKENS,
+    DEFAULT_OUTPUT_TOKENS,
     UNKNOWN_WINDOW_TOKENS,
     Application,
     context_limit,
+    input_ceiling,
     workspace_for,
 )
 from himari.bootstrap.operator import OperatorSecretError
@@ -160,6 +162,14 @@ def test_close_waits_for_a_started_file_operation_past_the_grace_period(
     asyncio.run(scenario())
 
 
+def test_the_input_ceiling_keeps_room_for_the_answer() -> None:
+    assert input_ceiling(1_050_000, 128_000) == 922_000
+    assert input_ceiling(400_000, 128_000) == 272_000
+    assert input_ceiling(300_000, None) == 300_000 - DEFAULT_OUTPUT_TOKENS  # no declared maximum: a fixed reserve
+    assert input_ceiling(100_000, 100_000) == 50_000  # never less than half the window for the input
+    assert input_ceiling(None, 128_000) is None
+
+
 def test_the_context_limit_is_the_window_capped_or_the_configured_budget() -> None:
     assert context_limit(400_000, None) == DEFAULT_CONTEXT_TOKENS == 200_000
     assert context_limit(100_000, None) == 100_000
@@ -167,6 +177,8 @@ def test_the_context_limit_is_the_window_capped_or_the_configured_budget() -> No
     assert context_limit(400_000, 300_000) == 300_000
     with pytest.raises(ValueError, match="exceeds"):
         context_limit(400_000, 500_000)
+    with pytest.raises(ValueError, match="input limit of 272000"):  # the window, 400k, less 128k for the answer
+        context_limit(input_ceiling(400_000, 128_000), 300_000)
 
 
 def test_the_application_compacts_with_its_budget(tmp_path: Path) -> None:
@@ -190,16 +202,16 @@ def test_the_application_compacts_with_its_budget(tmp_path: Path) -> None:
 
 class WindowedAdapter(ScriptedAdapter):
     def describe_capabilities(self, model_id: str) -> ProviderCapabilities:
-        return ProviderCapabilities(model_id=model_id, context_tokens=300_000)
+        return ProviderCapabilities(model_id=model_id, context_tokens=300_000, max_output_tokens=60_000)
 
 
-def test_the_models_window_is_the_hard_limit_and_the_budget_is_capped(tmp_path: Path) -> None:
+def test_the_models_window_less_its_output_is_the_hard_limit_and_the_budget_is_capped(tmp_path: Path) -> None:
     async def scenario() -> None:
         app = await Application.open(tmp_path / "root", WindowedAdapter(), model_id="m", sandbox=False)
         try:
             budget = app.runtime.driver._budget
             assert budget is not None
-            assert (budget.limit_tokens, budget.hard_limit_tokens) == (DEFAULT_CONTEXT_TOKENS, 300_000)
+            assert (budget.limit_tokens, budget.hard_limit_tokens) == (DEFAULT_CONTEXT_TOKENS, 240_000)
         finally:
             await app.close()
 

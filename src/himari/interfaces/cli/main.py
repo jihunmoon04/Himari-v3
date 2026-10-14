@@ -158,7 +158,7 @@ def context_line(context: dict[str, Any]) -> str:
             else f"about {estimated:,} of {context['budget_tokens']:,} tokens")
     line = f"context: {size}; summarizes at {context['compact_at_tokens']:,}"
     if context.get("hard_limit_tokens") != context.get("budget_tokens"):
-        line += f"; model limit {context['hard_limit_tokens']:,}"  # the budget is a target, not the refusal point
+        line += f"; input limit {context['hard_limit_tokens']:,}"  # the budget is a target, not the refusal point
     compactions = int(context.get("compactions") or 0)
     if compactions:
         line += f"; compacted {compactions} time{'s' if compactions > 1 else ''}"

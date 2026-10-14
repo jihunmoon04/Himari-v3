@@ -339,7 +339,7 @@ function applyContext(context) {
       : `about ${formatTokens(context.estimated_tokens)} of ${formatTokens(context.budget_tokens)} tokens`;
     let text = `${size} · summarizes at ${formatTokens(context.compact_at_tokens)}`;
     if (context.hard_limit_tokens !== context.budget_tokens) {
-      text += ` · model limit ${formatTokens(context.hard_limit_tokens)}`; // the budget is a target, not the refusal point
+      text += ` · input limit ${formatTokens(context.hard_limit_tokens)}`; // the budget is a target, not the refusal point
     }
     $("chat-menu-context").textContent = text;
   }

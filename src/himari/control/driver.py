@@ -14,8 +14,8 @@ when the whole prefix does not fit one, it is folded in several
 compactions (at most ``MAX_COMPACTIONS_PER_RUN`` before a Run), and a
 part too large for one request is summarized in a chain of calls. If
 compaction fails, the Run still goes ahead when its input fits the
-budget's ``ceiling_tokens`` (the model's window); an input estimated over
-it is never sent (REQUEST_REJECTED).
+budget's ``ceiling_tokens`` (the model's window less the room kept for its
+answer); an input estimated over it is never sent (REQUEST_REJECTED).
 """
 
 from __future__ import annotations
