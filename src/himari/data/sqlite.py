@@ -555,6 +555,12 @@ def _event(row: sqlite3.Row) -> ConversationEvent:
     )
 
 
+_RUN_COLUMNS = (
+    "run_id, conversation_id, status, trigger_refs, prompt_basis, provider_key, model_id, raw_representation,"
+    " usage, error_code, continuation, raw_response_content_type, projected_event_id"
+)
+
+
 def _run_record(row: sqlite3.Row) -> RunRecord:
     return RunRecord(
         run_id=RunId(row["run_id"]),
@@ -653,9 +659,13 @@ class SqliteData:
         return event
 
     @staticmethod
-    def _run_row(tx: _Tx, scope: TrustedScope, run_id: RunId) -> sqlite3.Row:
+    def _run_row(tx: _Tx, scope: TrustedScope, run_id: RunId, *, response_body: bool = False) -> sqlite3.Row:
+        # The raw bodies stay on disk unless asked for: a request body holds the
+        # whole prompt of its time, and the Prompt loader reads a Run per turn (Q-42).
+        body = ", raw_response_body" if response_body else ""
         row = tx.one(
-            "SELECT runs.*, EXISTS (SELECT 1 FROM compaction_runs c WHERE c.run_id=runs.run_id) AS compaction"
+            f"SELECT {_RUN_COLUMNS}{body},"
+            " EXISTS (SELECT 1 FROM compaction_runs c WHERE c.run_id=runs.run_id) AS compaction"
             " FROM runs WHERE run_id=? AND conversation_id=?",
             run_id, scope.conversation_id,
         )
@@ -856,7 +866,7 @@ class SqliteData:
     async def read_raw_response(self, scope: TrustedScope, run_id: RunId) -> RawReceived:
         with self._tx() as tx:
             tx.authorized(scope)
-            run = self._run_row(tx, scope, run_id)
+            run = self._run_row(tx, scope, run_id, response_body=True)
             if run["raw_response_body"] is None:
                 raise DataError(DataErrorCode.NOT_FOUND, f"{run_id} has no stored response")
             return RawReceived(bytes(run["raw_response_body"]), run["raw_response_content_type"],

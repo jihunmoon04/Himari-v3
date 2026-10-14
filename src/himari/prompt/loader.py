@@ -3,8 +3,19 @@
 P0 does not call ``EnvironmentPlugin.observe`` yet; observations are empty, so
 connection status renders as unknown rather than guessed.
 
+With a readable compaction snapshot only the Events after its coverage are
+read, with the Runs and Tool records of those Events (Q-42): the composer
+drops every part that starts at or before the coverage anyway, so the cost
+of a request follows the exact tail, not the length of the Conversation.
+A folded ToolCall group is not read again; it was complete when folded, and
+a terminal result never changes. The snapshot is read first, so a
+compaction committed meanwhile only leaves the Events read a superset of
+what that snapshot needs.
+
 ``usage_mark`` is the input size the Provider reported for the latest
 assistant output's Run (compaction Runs produce no Event and are skipped).
+A Run folded into the snapshot never yields a usable one: it was composed
+before that snapshot existed, under another snapshot revision.
 """
 
 from __future__ import annotations
@@ -12,8 +23,16 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 from himari.common import ProviderContinuation, RunId, TrustedScope
-from himari.data.api import ConversationLog, EventKind, StateQuery, ToolExecutionRecord, TriggerRef
+from himari.data.api import (
+    ConversationEvent,
+    ConversationLog,
+    EventKind,
+    StateQuery,
+    ToolExecutionRecord,
+    TriggerRef,
+)
 from himari.prompt.api import PromptInputs, RequestOptions, UsageMark
+from himari.prompt.compaction import read_summary
 from himari.tool.api import ExternalAccess, ToolCatalog
 
 
@@ -38,7 +57,17 @@ class ContextLoader:
         trigger_refs: Sequence[TriggerRef],
         request_options: RequestOptions,
     ) -> PromptInputs:
-        events = tuple(await self._log.read_events(scope))
+        snapshot = await self._log.get_latest_snapshot(scope)
+        events: tuple[ConversationEvent, ...] = ()
+        if snapshot is not None and read_summary(snapshot) is not None:
+            events = tuple(await self._log.read_events(scope, after_sequence=snapshot.covers_through_sequence))
+            if not events:
+                # Data lets a summary cover the last Event; until the next one
+                # arrives the composer needs the whole history for the
+                # latest sequence its basis records.
+                events = tuple(await self._log.read_events(scope))
+        else:
+            events = tuple(await self._log.read_events(scope))
         executions: list[ToolExecutionRecord] = []
         continuations: dict[RunId, ProviderContinuation] = {}
         usage_mark: UsageMark | None = None
@@ -63,7 +92,7 @@ class ContextLoader:
             tool_catalog=tuple(self._catalog.catalog(active, enabled)),
             events=events,
             tool_executions=tuple(executions),
-            snapshot=await self._log.get_latest_snapshot(scope),
+            snapshot=snapshot,
             state_basis=basis,
             observations=(),
             request_options=request_options,

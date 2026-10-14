@@ -131,6 +131,8 @@ class PromptInputs(DeepFrozen):
 
     instructions: tuple[str, ...]
     tool_catalog: tuple[ToolDefinition, ...]
+    # With a readable compaction snapshot, only the Events after its coverage
+    # and their Tool records (Q-42); otherwise the whole history.
     events: tuple[ConversationEvent, ...]
     tool_executions: tuple[ToolExecutionRecord, ...]
     snapshot: PromptSnapshot | None

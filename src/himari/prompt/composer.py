@@ -3,8 +3,9 @@
 No I/O, no clock, no randomness: same ``PromptInputs`` → same ``ModelInput``.
 With a compaction snapshot (``compaction.read_summary``) the history is its
 summary followed by every part that starts after the coverage; without one
-the whole history is exact. Either way every ToolCall group is checked for
-complete results, folded or not.
+the whole history is exact. Every ToolCall group in the inputs is checked
+for complete results. After a compaction the loader passes only the groups
+after the coverage; the folded ones were complete when folded (Q-42).
 """
 
 from __future__ import annotations

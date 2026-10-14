@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import dataclasses
 import json
 import functools
@@ -14,8 +15,8 @@ from testkit import FAKE, FOREIGN, SCOPE, RecordingTool, calls, final, restart, 
 
 from himari.common import TextBlock
 from himari.control.api import DriveState
-from himari.data.api import DataError, RunPurpose, RunStatus
-from himari.prompt.api import CompressedHistory, ContextBudget, ToolGroupTurn, UserTurn
+from himari.data.api import DataError, PromptBasis, RunPurpose, RunStatus
+from himari.prompt.api import AssistantTurn, CompressedHistory, ContextBudget, ToolGroupTurn, UserTurn
 from himari.bootstrap import build_runtime
 from himari.prompt.api import CompactionPlan, ContextDecision, ModelInput, PromptInputs, RequestOptions
 from himari.prompt.compaction import COMPACTION_INSTRUCTIONS, Compactor, request_tokens
@@ -500,3 +501,125 @@ async def test_compact_now_waits_for_an_open_question_and_reports_failures() -> 
     failed = await failing.driver.compact(SCOPE)
     assert failed.state is DriveState.COMPACTION_FAILED and "http_500" in failed.detail
     assert await failing.data.get_latest_snapshot(SCOPE) is None
+
+
+class _ReadSpy:
+    """The Data store as the Prompt loader sees it, recording the history it
+    reads. ``whole`` ignores ``after_sequence``: the loader then sees every
+    Event, as before the tail-only read (Q-42)."""
+
+    def __init__(self, data: Any, *, whole: bool = False) -> None:
+        self._data, self._whole = data, whole
+        self.after: list[int] = []
+        self.runs: list[str] = []
+        self.groups: list[str] = []
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._data, name)
+
+    async def read_events(self, scope: Any, *, after_sequence: int = 0, limit: int | None = None) -> Any:
+        self.after.append(after_sequence)
+        return await self._data.read_events(scope, after_sequence=0 if self._whole else after_sequence, limit=limit)
+
+    async def read_run(self, scope: Any, run_id: Any) -> Any:
+        self.runs.append(run_id)
+        return await self._data.read_run(scope, run_id)
+
+    async def read_tool_executions(self, scope: Any, run_id: Any) -> Any:
+        self.groups.append(run_id)
+        return await self._data.read_tool_executions(scope, run_id)
+
+
+async def _load_with(rt: Any, spy: _ReadSpy) -> tuple[PromptInputs, ModelInput]:
+    loader = copy.copy(rt.driver._loader)
+    loader._log = spy
+    inputs = await loader.load(SCOPE, (), rt.driver._options)
+    return inputs, Composer().compose(inputs)
+
+
+@sync
+async def test_q42_after_a_compaction_only_the_tail_is_read_and_the_request_is_the_same() -> None:
+    tool = RecordingTool("fake/probe", environment_kind=FAKE,
+                         behavior=lambda i, c: ToolOutcome(ToolStatus.SUCCEEDED, text_result("x" * 1500)))
+    rt, adapter = runtime(
+        [calls(("fake/probe", {})), Measured(final("looked"), 900), final("S"), Measured(final("done"), 120)],
+        env_tools=[tool], context_budget=BUDGET,
+    )
+    await rt.driver.drive(SCOPE, user("look"))
+    await rt.driver.drive(SCOPE, user("and now?"))
+    snapshot = await rt.data.get_latest_snapshot(SCOPE)
+    assert snapshot is not None
+
+    tail, whole = _ReadSpy(rt.data), _ReadSpy(rt.data, whole=True)
+    tail_inputs, tail_input = await _load_with(rt, tail)
+    whole_inputs, whole_input = await _load_with(rt, whole)
+
+    assert tail.after == [snapshot.covers_through_sequence]
+    assert all(e.sequence > snapshot.covers_through_sequence for e in tail_inputs.events)
+    done = (await rt.data.read_events(SCOPE))[-1]
+    assert tail.runs == [done.origin_run_id] and tail.groups == []  # the folded group and its turn are not read
+    assert len(whole.runs) == 3 and len(whole.groups) == 1
+    # Nothing the request is made of changes: same input, same measured estimate.
+    assert tail_input == whole_input
+    assert tail_inputs.usage_mark == whole_inputs.usage_mark is not None
+    estimate = Compactor().estimate(tail_inputs, tail_input)
+    assert estimate == Compactor().estimate(whole_inputs, whole_input) and estimate.measured
+
+
+@sync
+async def test_q42_without_a_readable_summary_the_whole_history_is_read() -> None:
+    rt, _ = runtime([final("a1"), final("a2")], context_budget=BUDGET)
+    await rt.driver.drive(SCOPE, user("q1"))
+    await rt.driver.drive(SCOPE, user("q2"))
+    spy = _ReadSpy(rt.data)
+    inputs, _ = await _load_with(rt, spy)
+    assert spy.after == [0] and len(inputs.events) == 4 and len(spy.runs) == 2
+
+
+@sync
+async def test_q42_after_a_second_compaction_the_tail_keeps_its_new_tool_group() -> None:
+    tool = RecordingTool("fake/probe", environment_kind=FAKE,
+                         behavior=lambda i, c: ToolOutcome(ToolStatus.SUCCEEDED, text_result("probed")))
+    rt, _ = runtime(
+        [
+            Measured(final("a1"), 900), final("S1"), Measured(final("a2"), 100),
+            Measured(final("a3"), 950), final("S2"), calls(("fake/probe", {})), Measured(final("a4"), 200),
+        ],
+        env_tools=[tool], context_budget=BUDGET,
+    )
+    for text in ("q1", "q2", "q3", "q4"):
+        await rt.driver.drive(SCOPE, user(text))
+    snapshot = await rt.data.get_latest_snapshot(SCOPE)
+    assert snapshot is not None and snapshot.revision == 2
+
+    tail, whole = _ReadSpy(rt.data), _ReadSpy(rt.data, whole=True)
+    tail_inputs, tail_input = await _load_with(rt, tail)
+    whole_inputs, whole_input = await _load_with(rt, whole)
+
+    events = await rt.data.read_events(SCOPE)
+    group, last = events[-3], events[-1]  # q4, the probe group, its result, a4
+    assert tail.after == [snapshot.covers_through_sequence]
+    assert tail.groups == [group.origin_run_id] and tail.runs == [group.origin_run_id, last.origin_run_id]
+    assert [type(p) for p in tail_input.conversation] == [CompressedHistory, UserTurn, ToolGroupTurn, AssistantTurn]
+    assert tail_input == whole_input and tail_inputs.usage_mark == whole_inputs.usage_mark is not None
+    assert Compactor().estimate(tail_inputs, tail_input) == Compactor().estimate(whole_inputs, whole_input)
+
+
+@sync
+async def test_q42_a_summary_covering_the_last_event_still_records_the_latest_sequence() -> None:
+    rt, _ = runtime([final("a1"), final("a2")], context_budget=BUDGET)
+    await rt.driver.drive(SCOPE, user("q1"))
+    await rt.driver.drive(SCOPE, user("q2"))
+    last = (await rt.data.read_events(SCOPE))[-1].sequence
+    await rt.data.replace_latest_snapshot(
+        SCOPE, expected_revision=None, schema_version=1, body={"summary": "everything"},
+        covers_through_sequence=last, basis=PromptBasis(event_sequence=last, state_revision=0),
+    )
+
+    tail, whole = _ReadSpy(rt.data), _ReadSpy(rt.data, whole=True)
+    _, tail_input = await _load_with(rt, tail)
+    _, whole_input = await _load_with(rt, whole)
+
+    assert tail.after == [last, 0]  # nothing after the coverage: read again from the start
+    assert [type(p) for p in tail_input.conversation] == [CompressedHistory]
+    assert tail_input.prompt_basis.event_sequence == last and tail_input == whole_input
