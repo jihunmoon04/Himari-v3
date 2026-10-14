@@ -31,6 +31,7 @@ DATA_ROOT_VAR = "HIMARI_DATA_ROOT"
 MODEL_VAR = "HIMARI_MODEL"
 REASONING_VAR = "HIMARI_REASONING_EFFORT"
 SANDBOX_VAR = "HIMARI_SANDBOX"
+CONTEXT_TOKENS_VAR = "HIMARI_CONTEXT_TOKENS"
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
@@ -57,6 +58,7 @@ class WebConfig:
     model_id: str
     reasoning_effort: str | None
     sandbox: bool
+    context_tokens: int | None = None  # None: the model's window, capped (Application)
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> WebConfig:
@@ -104,6 +106,7 @@ class WebConfig:
             model_id=source.get(MODEL_VAR, "").strip() or DEFAULT_MODEL,
             reasoning_effort=effort,
             sandbox=_flag(source.get(SANDBOX_VAR), SANDBOX_VAR, default=True),
+            context_tokens=_positive(source.get(CONTEXT_TOKENS_VAR), CONTEXT_TOKENS_VAR),
         )
 
 
@@ -126,6 +129,18 @@ def _port(value: str | None) -> int:
     if not 1 <= port <= 65535:
         raise WebConfigError(f"{PORT_VAR} must be between 1 and 65535")
     return port
+
+
+def _positive(value: str | None, name: str) -> int | None:
+    if value is None or not value.strip():
+        return None
+    try:
+        number = int(value.strip())
+    except ValueError:
+        raise WebConfigError(f"{name} must be an integer") from None
+    if number < 1000:
+        raise WebConfigError(f"{name} must be at least 1000")
+    return number
 
 
 def _flag(value: str | None, name: str, *, default: bool) -> bool:

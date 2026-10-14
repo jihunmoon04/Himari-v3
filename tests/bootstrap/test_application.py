@@ -12,7 +12,13 @@ from typing import Any
 import pytest
 from testkit import calls, final, user
 
-from himari.bootstrap.application import Application, workspace_for
+from himari.bootstrap.application import (
+    DEFAULT_CONTEXT_TOKENS,
+    UNKNOWN_WINDOW_TOKENS,
+    Application,
+    context_limit,
+    workspace_for,
+)
 from himari.bootstrap.operator import OperatorSecretError
 from himari.common import PrincipalId, ToolId, TrustedScope
 from himari.control.api import DriveState
@@ -149,5 +155,31 @@ def test_close_waits_for_a_started_file_operation_past_the_grace_period(
         await closing
         assert finished.is_set() and app.runner.status(scope).error == "cancelled"
         assert not app.inside.write_lock(workspace_for(ALICE)).locked()
+
+    asyncio.run(scenario())
+
+
+def test_the_context_limit_is_the_window_capped_or_the_configured_budget() -> None:
+    assert context_limit(400_000, None) == DEFAULT_CONTEXT_TOKENS == 200_000
+    assert context_limit(100_000, None) == 100_000
+    assert context_limit(None, None) == UNKNOWN_WINDOW_TOKENS
+    assert context_limit(400_000, 300_000) == 300_000
+    with pytest.raises(ValueError, match="exceeds"):
+        context_limit(400_000, 500_000)
+
+
+def test_the_application_compacts_with_its_budget(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        provider = ScriptedAdapter([final("a1"), final("SUMMARY"), final("a2")])
+        app = await Application.open(tmp_path / "root", provider, model_id="scripted-model", sandbox=False,
+                                     context_tokens=5000)
+        try:
+            assert app.context_tokens == 5000
+            scope = TrustedScope(ALICE, await app.create_conversation(ALICE))
+            await app.runtime.driver.drive(scope, user("가" * 3500))
+            result = await app.runtime.driver.drive(scope, user("next"))
+            assert result.state is DriveState.COMPLETED and len(result.compaction_run_ids) == 1
+        finally:
+            await app.close()
 
     asyncio.run(scenario())

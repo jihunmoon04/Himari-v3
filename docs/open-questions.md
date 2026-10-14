@@ -41,7 +41,7 @@ Data [v0.2 구현 가능 후보](data-contract-v0.2.md)에 **DR-01~DR-09 독립 
 | Q-06 | Contract enforcement | `tests/`, `scripts/check_imports.py`, mypy·정적 CI·opt-in 라이브 테스트 구현 |
 | Q-19a | Raw retention security | 본문/인증 헤더 분리 구현. SQLite 파일은 0600(소유자만). 저장 데이터 암호화·보존·삭제 정책 미결정 |
 | Q-21 | Trigger inclusion | 기본 Run/Event 참조와 Tool 그룹 검증 구현. 압축/외부 결과 포함 정책 후속 |
-| Q-22 | Prompt cursor | 최신 Snapshot Port 존재. coverage/cursor 검증·실질 압축 사용 미구현 |
+| Q-22 | Prompt cursor | **부분 해결 (V3-P48):** 압축 Snapshot의 `covers_through_sequence`로 tail을 정하고, 구성한 입력의 `PromptBasis.snapshot_revision`에 사용한 revision을 기록한다. 커밋 시 revision CAS·coverage 범위 검사. 남은 것: Snapshot에 전체 가공 Prompt를 저장할지(지금은 요약만 저장하고 tail은 Event에서 매번 구성) |
 
 **검증 경계:** Data·통합 테스트는 인메모리와 SQLite 양쪽에서 실행된다. SQLite 재시작은 DB 파일을 닫고 다시 여는 것이며, 실제 `SIGKILL` 크래시 시험이 있다(Q-41). 전원 차단은 직접 시험하지 않았다.
 
@@ -89,8 +89,8 @@ Data [v0.2 구현 가능 후보](data-contract-v0.2.md)에 **DR-01~DR-09 독립 
 | Q-39 | ~~Tool error disclosure~~ | **해결 (PR C1):** claim 없는 Tool의 예외는 모델에게 "The tool failed with an internal error."만 전달하고, 예외 타입·원문은 `raw_result`에만 남긴다. Inside 파일 Tool은 오류를 분류된 안전한 문구로만 돌려준다. |
 | Q-40 | 실제 OS 권한 검증 | **부분 해결 (PR C2):** 시작 시 실호스트 자체 검사(V3-050/P41)와 선택 실행 호스트 게이트(`HIMARI_SANDBOX_HOST=1 pytest tests/sandbox_host`, 29개)를 이 서버에서 통과. 남은 것: 다른 배포 호스트에서의 게이트 실행, 권한이 필요한 마운트 넘기(`NO_XDEV`) 검증, CPU·메모리·프로세스 수 한도(cgroup/rlimit), Sandbox 생성이 멈췄을 때의 운영자 복구 절차(취소된 호출은 fail closed로 Workspace lock을 계속 잡고 있음), Workspace admission이 시점 검사라는 한계(P0는 단일 서버 프로세스이고 Workspace 변경이 Inside Tool과 같은 Workspace lock 아래에서만 일어난다고 전제한다. 다중 worker, 업로드 경로, 호스트 측 쓰기를 추가하면 같은 lock을 쓰게 하거나 검사를 다시 설계해야 함) |
 | Q-41 | 영속 DB 크래시 내구성 | **부분 해결 (V3-P42):** SQLite 백엔드로 T1~T9·T7a·T-R을 포트 호출당 트랜잭션 1개로 구현. Data·통합 테스트를 두 백엔드로 실행(재시작 = DB 다시 열기), 모든 다중 쓰기 연산에 대해 각 쓰기 직후 오류 주입 시 전부 롤백, 실제 `SIGKILL` 시험(송신 중 → `OUTCOME_UNKNOWN`·재송신 없음, 부작용 중 → `UNKNOWN`·재실행 없음, 트랜잭션 도중 → 이전 상태, 커밋 직후 → 커밋 유지). 남은 것: 전원 차단 내구성은 SQLite·파일시스템 fsync 보장에 의존(직접 시험 불가), 스키마 마이그레이션, 백업, 다중 프로세스(P2 lease) |
-| Q-42 | Continuation 일괄 조회 | Prompt loader가 assistant 턴마다 `read_run`을 호출한다. 영속 DB 도입 시 Run continuation을 한 번에 읽는 내부 최적화를 둔다(공개 계약 변경 없이 가능). *(PR #6 검수 C1)* |
-| Q-43 | Continuation 크기 예산 | 암호화 reasoning은 큰 불투명 payload일 수 있고 지금은 모든 과거 턴의 continuation을 재전송한다. 압축(Q-14) 도입 시 턴과 그 continuation을 한 단위로 제외하는 예산 정책을 정한다. *(PR #6 검수 C2)* |
+| Q-42 | Continuation 일괄 조회 | Prompt loader가 assistant 턴마다 `read_run`을 호출한다(압축 후에도 접힌 턴까지 읽음). Run continuation·usage를 한 번에 읽는 내부 최적화를 둔다(공개 계약 변경 없이 가능). *(PR #6 검수 C1)* |
+| Q-43 | ~~Continuation 크기 예산~~ | **해결 (V3-P48):** 압축으로 접힌 턴은 continuation도 함께 빠진다. continuation은 토큰 추정에 넣지 않는다(Provider가 거의 입력으로 세지 않음을 라이브로 확인, 세는 만큼은 다음 측정값에 포함됨). *(PR #6 검수 C2)* |
 
 P1은 Workspace 전용 소프트웨어 모듈을 다시 도입하는 단계가 아니다. Data Registry + Environment 접근 계약을 사용한다.
 
@@ -98,8 +98,8 @@ P1은 Workspace 전용 소프트웨어 모듈을 다시 도입하는 단계가 �
 
 | ID | 주제 | 아직 확정해야 할 계약 |
 | --- | --- | --- |
-| Q-14 | Compaction | 압축 시점, 문맥 예산, 요약 품질, exact tail 경계, Snapshot 교체/복구 |
-| Q-15 | Reasoning / continuation 확장 | **기본 턴별 저장·재생은 PR #6으로 구현(V3-049)**. 남은 것: 타 모델 지원, 압축 시 제외, cache-control·예산(Q-43) |
+| Q-14 | Compaction | **기본 구현 (V3-P48):** 토큰 기준 자동 압축(80%), 요약 + exact tail, COMPACTION Run, T9c 원자 교체. 남은 것: 수동 압축 명령(Claude `/compact` 같은), UI에 압축 표시·현재 문맥 크기 노출, 요약 품질 평가, 측정값 없는 첫 요청의 과대 추정(영어 ~1.4배)으로 한도 근처 첫 메시지가 거부될 수 있음, 요청 거부 기준을 예산이 아니라 모델 창으로 둘지 |
+| Q-15 | Reasoning / continuation 확장 | **기본 턴별 저장·재생은 PR #6으로 구현(V3-049)**, 압축 시 제외는 V3-P48. 남은 것: 타 모델 지원, cache-control |
 | Q-16 | Memory Tool | 기억 생성·조회·삭제 정책, 자동 삽입/검증/권한, Data 읽기 경계 |
 | Q-17 | Plan / Note Artifact | **원본은 Data conversation-scoped Artifact로 확정**. Revision/CAS, schema, 삭제/복구·표시, Outside 노출/export |
 | Q-18 | Streaming / recovery | chunk-level 원본 기록, 스트리밍 UI, 중단된 모델 호출, resume/cancel |
@@ -115,7 +115,7 @@ P1은 Workspace 전용 소프트웨어 모듈을 다시 도입하는 단계가 �
 1. **영속 Data** — SQLite 등으로 Event/Run/ToolExecution/Artifact/Continuation 저장, T2~T7a·T-R 원자성 및 실제 crash 복구 검증(Q-41). *(완료: PR #8~#10)*
 2. **Inside Environment + Sandbox** — 사용자별 Root와 Conversation cwd, 파일 Tool·bounded `inside/run_command`, Bubblewrap/Landlock·네트워크 차단 실호스트 증거(Q-29~33/Q-39~40). *(완료: PR #8~#10)*
 3. **Web/CLI (v2 형태 재사용)** — PR A: 대화 목록 포트(V3-P43)·백그라운드 실행(V3-P44)·Application 조립과 로컬 운영자 인증(V3-P45). PR B: Web 서버와 화면(v2 보안 계층·화면 뼈대 재사용, API·데이터 처리는 v3 개념으로 새로 작성, V3-P46). 후속: 실시간 스트리밍(현재 폴링), 파일 업로드·다운로드(FILE-04), 다중 사용자 인증, 재개 가능 여부(`continuable`)를 Web이 마지막 Event 종류로 추정하는 대신 Control이 제공(Pause·Cancel 도입 시, PR #12 재검수 권고). PR C: CLI를 Web 서버의 클라이언트로(SQLite 단일 writer 때문에 CLI가 DB를 직접 열지 않음). *(완료: PR #11~#13 — Web V3-P46, CLI V3-P47)*
-4. **Context 압축·예산 및 최신 Snapshot 활용** — exact tail, continuation 일괄 조회/크기 예산(Q-14/Q-22/Q-42/Q-43).
+4. **Context 압축·예산 및 최신 Snapshot 활용** — exact tail, continuation 일괄 조회/크기 예산(Q-14/Q-22/Q-42/Q-43). *(기본 구현: V3-P48. 남은 것은 Q-14·Q-42)*
 5. **후속 기능** — 정식 Pause/Cancel, Streaming, Web UI, Memory·Plan Tool, 충돌 Scheduler.
 
 위 순서는 제안이며 새로운 확정 결정이 아니다. **설계 방향의 확정과 구현·실호스트 검증 완료는 구별한다.**

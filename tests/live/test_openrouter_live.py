@@ -11,6 +11,7 @@ import asyncio
 import json
 import os
 from pathlib import Path
+from collections.abc import Mapping
 from typing import Any
 
 import httpx
@@ -20,6 +21,8 @@ from testkit import SCOPE, assert_chat_structure, user
 from himari.bootstrap import build_runtime, read_env_file
 from himari.common import JsonValue, ModelToolResult, RawRepresentation, TextBlock, ToolId
 from himari.control.api import DriveState
+from himari.data.api import RunPurpose, RunStatus
+from himari.prompt.api import ContextBudget
 from himari.provider.openrouter import OpenRouterAdapter
 from himari.tool.api import (
     EffectProfile,
@@ -174,3 +177,46 @@ def test_live_tool_round_trip_replays_reasoning(model: str) -> None:
     assert tool_turn["reasoning_details"] == first_response["choices"][0]["message"]["reasoning_details"]
     kinds = [(d.get("type"), "signature" in d, "data" in d) for d in tool_turn["reasoning_details"]]
     print(f"\n{model}: runs={len(result.run_ids)} replayed {kinds}")
+
+
+@pytest.mark.parametrize("model", MODELS)
+def test_live_compaction_keeps_what_matters(model: str) -> None:
+    """A small budget forces one compaction: the Provider-measured size of
+    the first request plus the second message crosses 80%, the model writes
+    the summary, and a later answer still knows a fact that now lives only
+    in that summary (possibly a summary of a summary)."""
+    transport = RecordingTransport()
+    rt = build_runtime(OpenRouterAdapter(KEY, transport=transport), model_id=model, reasoning_effort="low",
+                       context_budget=ContextBudget(limit_tokens=3000))
+    rt.store.create_conversation(SCOPE)
+    filler = "The quick brown fox jumps over the lazy dog. " * 100
+
+    async def say(text: str) -> Any:
+        result = await rt.driver.drive(SCOPE, user(text))
+        assert result.state is DriveState.COMPLETED, result.detail
+        return result
+
+    async def scenario() -> None:  # one event loop: the transport's connections belong to it
+        first = await say(f"My project codename is BLUE-HERON-42. Remember it. Ignore this filler: {filler}\nReply: ok")
+        measured = (await rt.data.read_run(SCOPE, first.run_ids[0])).usage
+        assert measured is not None and (measured.input_tokens or 0) > 900  # the token count the trigger uses
+        second = await say(f"More filler to ignore: {filler}\nReply: ok")
+        assert len(second.compaction_run_ids) == 1
+        compaction = await rt.data.read_run(SCOPE, second.compaction_run_ids[0])
+        assert compaction.purpose is RunPurpose.COMPACTION and compaction.status is RunStatus.PROJECTED
+        assert "BLUE-HERON-42" not in json.dumps(json.loads(transport.sent[-1])["messages"][2:])
+
+        third = await say("What is my project codename? Reply with only the codename.")
+        # A tokenizer that counts the filler higher (claude-haiku: ~2x) is still
+        # over 80% here and compacts again, folding the first summary in.
+        assert len(third.compaction_run_ids) <= 1
+        last_request = json.loads(transport.sent[-1])
+        assert "earlier_conversation_summary" in last_request["messages"][1]["content"]
+        assert "BLUE-HERON-42" in final_text(third)
+        snapshot = await rt.data.get_latest_snapshot(SCOPE)
+        assert snapshot is not None and isinstance(snapshot.body, Mapping)
+        usage = [(await rt.data.read_run(SCOPE, r.run_ids[0])).usage for r in (first, second, third)]
+        print(f"\n{model}: inputs={[u.input_tokens if u else None for u in usage]} compaction={compaction.usage}\n"
+              f"summary={snapshot.body['summary']!r}")
+
+    asyncio.run(scenario())
