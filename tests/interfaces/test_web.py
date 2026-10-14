@@ -21,7 +21,7 @@ from testkit import calls, final  # noqa: E402
 
 from himari.bootstrap.application import Application  # noqa: E402
 from himari.bootstrap.operator import OPERATOR, derive_cli_bearer  # noqa: E402
-from himari.common import ASK_USER_TOOL_ID, PrincipalId, TextBlock, TrustedScope  # noqa: E402
+from himari.common import ASK_USER_TOOL_ID, ConversationId, PrincipalId, TextBlock, TrustedScope  # noqa: E402
 from himari.control.api import DriveResult, DriveState  # noqa: E402
 from himari.control.runner import BackgroundRunner  # noqa: E402
 from himari.data.api import UserMessage  # noqa: E402
@@ -458,6 +458,14 @@ def test_tool_sources_are_listed_and_chosen_per_conversation(mcp_server: tuple[S
 
     (source,) = put_source(server, cid, "calliope", None).json()["sources"]
     assert source["enabled"] is False and source["choice"] is None
+    # re-review C1: a choice equal to the default is not kept, so the
+    # conversation keeps following the default if the operator changes it
+    (source,) = put_source(server, cid, "calliope", False).json()["sources"]
+    assert source["enabled"] is False and source["choice"] is None
+    application = server.application
+    assert application is not None and server.client.portal is not None
+    assert server.client.portal.call(application.data.read_external_settings,
+                                     TrustedScope(OPERATOR, ConversationId(cid))) == ()
 
 
 def test_tool_source_changes_are_checked(mcp_server: tuple[Server, FakeMcpServer]) -> None:

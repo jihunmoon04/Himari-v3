@@ -23,7 +23,11 @@ Errors say what is known about a ``tools/call``:
   the Tool did not run, a redirect, 5xx), an unreadable or oversized
   response, any other JSON-RPC error: the Tool may have run.
 
-Size bounds: one response at most ``MAX_RESPONSE_BYTES``, a whole
+Size bounds are counted on the bytes as they arrive, before any line
+splitting or decoding (an SSE stream is split into lines here, never by a
+buffer that grows until a newline). Responses are asked for uncompressed
+and one that is compressed anyway is not used, so no decompression can
+multiply what arrives. One response is at most ``MAX_RESPONSE_BYTES``, a whole
 ``tools/list`` at most ``MAX_LIST_BYTES`` and ``MAX_LISTED_TOOLS``; a
 notification's response body is never read.
 
@@ -37,7 +41,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Mapping
+from collections.abc import AsyncIterator, Mapping
 from typing import Any
 
 import httpx
@@ -85,7 +89,7 @@ class McpClient:
         timeout_seconds: float,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
-        headers = {"accept": "application/json, text/event-stream"}
+        headers = {"accept": "application/json, text/event-stream", "accept-encoding": "identity"}
         if token:
             headers["authorization"] = f"Bearer {token}"
         self._url = url
@@ -120,8 +124,10 @@ class McpClient:
                 raise McpRefused(f"tools/list is larger than {MAX_LISTED_TOOLS} tools or {MAX_LIST_BYTES} bytes")
             tools.extend(page)
             cursor = result.get("nextCursor")
-            if not isinstance(cursor, str) or not cursor:
+            if cursor is None or cursor == "":
                 return tools
+            if not isinstance(cursor, str):  # a broken cursor must not look like the end of the list
+                raise McpRefused("tools/list answered with an invalid nextCursor")
         raise McpRefused(f"tools/list has more than {MAX_TOOL_PAGES} pages")
 
     async def call_tool(self, name: str, arguments: Mapping[str, JsonValue]) -> Mapping[str, Any]:
@@ -197,6 +203,8 @@ class McpClient:
                 if initializing:
                     session = response.headers.get("mcp-session-id")
                     self._session = session if session and session.isascii() and session.isprintable() else None
+                if response.headers.get("content-encoding", "identity").strip().lower() not in ("", "identity"):
+                    raise McpUncertain(f"{method}: a compressed response was not asked for")
                 kind = response.headers.get("content-type", "").split(";")[0].strip().lower()
                 if kind == "text/event-stream":
                     message = await self._from_stream(response, request_id)
@@ -214,25 +222,43 @@ class McpClient:
 
     async def _from_stream(self, response: httpx.Response, request_id: int) -> object:
         """The first message in the stream that answers ``request_id``."""
-        size = 0
-        data: list[str] = []
-        async for line in response.aiter_lines():
-            size += len(line) + 1
-            if size > MAX_RESPONSE_BYTES:
-                raise McpUncertain("the response stream is too large")
-            if line.startswith("data:"):
-                data.append(line[5:].removeprefix(" "))
-            elif line == "" and data:
-                message = _parse("\n".join(data).encode())
+        data: list[bytes] = []
+        async for line in _bounded_lines(response):
+            if line.startswith(b"data:"):
+                data.append(line[5:].removeprefix(b" "))
+            elif line == b"" and data:
+                message = _parse(b"\n".join(data))
                 data = []
                 if isinstance(message, dict) and message.get("id") == request_id and "method" not in message:
                     return message
         raise McpUncertain("the response stream ended without an answer")
 
 
+async def _bounded_lines(response: httpx.Response) -> AsyncIterator[bytes]:
+    """The stream's lines (without their CR, LF or CRLF ending), reading at
+    most MAX_RESPONSE_BYTES raw bytes in all."""
+    size = 0
+    pending = bytearray()
+    async for chunk in response.aiter_bytes():  # identity only (checked): the bytes as they arrive
+        size += len(chunk)
+        if size > MAX_RESPONSE_BYTES:
+            raise McpUncertain("the response stream is too large")
+        pending.extend(chunk)
+        while True:
+            cut = min((i for i in (pending.find(b"\n"), pending.find(b"\r")) if i >= 0), default=-1)
+            if cut < 0 or (pending[cut] == 0x0D and cut == len(pending) - 1):
+                break  # no line yet, or a CR that may be the start of CRLF
+            line = bytes(pending[:cut])
+            end = cut + 2 if pending[cut : cut + 2] == b"\r\n" else cut + 1
+            del pending[:end]
+            yield line
+    if pending:
+        yield bytes(pending)
+
+
 async def _read_bounded(response: httpx.Response) -> bytes:
     data = bytearray()
-    async for chunk in response.aiter_bytes():
+    async for chunk in response.aiter_bytes():  # identity only (checked): the bytes as they arrive
         data.extend(chunk)
         if len(data) > MAX_RESPONSE_BYTES:
             raise McpUncertain("the response is too large")

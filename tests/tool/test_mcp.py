@@ -478,3 +478,89 @@ def test_a_result_nested_too_deep_to_parse_is_uncertain() -> None:
             await client.aclose()
 
     asyncio.run(scenario())
+
+
+# --- PR #20 re-review: byte-bounded SSE, strict cursors ----------------------------------------
+
+
+def answer_with(server: FakeMcpServer, make: Any) -> None:
+    """From now on every answer is ``make(request_id)`` (after initialize)."""
+    server._answer = lambda request_id, result, headers=None: make(request_id)  # type: ignore[method-assign]
+
+
+def sse(*chunks: bytes) -> Any:
+    def make(request_id: int) -> httpx.Response:
+        async def body() -> Any:
+            for chunk in chunks:
+                yield chunk.replace(b"ID", str(request_id).encode())
+        return httpx.Response(200, content=body(), headers={"content-type": "text/event-stream"})
+    return make
+
+
+async def first_call(server: FakeMcpServer, make: Any) -> Any:
+    client = McpClient(URL, None, timeout_seconds=5, transport=server.transport())
+    await client.initialize()
+    answer_with(server, make)
+    try:
+        return await client.call_tool("echo", {"text": "x"})
+    finally:
+        await client.aclose()
+
+
+def test_a_long_sse_line_without_a_newline_stops_at_the_byte_bound() -> None:
+    """N1: the bound is checked on arriving bytes, not after a line is
+    complete; reading stops right after it."""
+    sent: list[int] = []
+
+    def make(request_id: int) -> httpx.Response:
+        async def body() -> Any:
+            yield b"data: "
+            for i in range(64):  # 64 MiB with no newline
+                sent.append(i)
+                yield b"x" * (1024 * 1024)
+        return httpx.Response(200, content=body(), headers={"content-type": "text/event-stream"})
+
+    with pytest.raises(McpUncertain, match="too large"):
+        asyncio.run(first_call(FakeMcpServer(), make))
+    assert len(sent) <= 5
+
+
+def test_the_bound_counts_utf8_bytes_not_characters() -> None:
+    text = "한" * 1_500_000  # 1.5 M characters, 4.5 MB
+    with pytest.raises(McpUncertain, match="too large"):
+        asyncio.run(first_call(FakeMcpServer(), sse(f'data: {{"x": "{text}"}}\n\n'.encode())))
+
+
+def test_sse_lines_split_anywhere_and_any_line_ending_are_parsed() -> None:
+    message = '{"jsonrpc": "2.0", "id": ID, "result": {"content": [{"type": "text", "text": "체크메이트"}]}}'.encode()
+    cut = message.index("체".encode()) + 1  # inside a multi-byte character
+    for ending in (b"\n", b"\r\n", b"\r"):
+        result = asyncio.run(first_call(FakeMcpServer(), sse(
+            b": comment" + ending + b"event: message" + ending + b"data: " + message[:cut], message[cut:] + ending,
+            b"\r" if ending == b"\r" else b"", ending)))
+        assert result["content"][0]["text"] == "체크메이트", ending
+
+
+def test_a_compressed_response_is_not_used() -> None:
+    def make(request_id: int) -> httpx.Response:
+        return httpx.Response(200, content=b"\x1f\x8b", headers={"content-type": "application/json",
+                                                                 "content-encoding": "gzip"})
+    with pytest.raises(McpUncertain, match="compressed"):
+        asyncio.run(first_call(FakeMcpServer(), make))
+
+
+def test_responses_are_asked_for_uncompressed() -> None:
+    server = FakeMcpServer()
+    connected(server)
+    assert {r.headers["accept-encoding"] for r in server.requests} == {"identity"}
+
+
+@pytest.mark.parametrize("cursor, available", [(["bad"], False), (3, False), (None, True), ("", True)])
+def test_a_broken_page_cursor_is_an_error_not_the_end(cursor: Any, available: bool) -> None:
+    """C2: a present but invalid nextCursor must not silently end the list."""
+    server = FakeMcpServer()
+    server.list_result = {"tools": [{"name": "echo", "inputSchema": ECHO_SCHEMA}], "nextCursor": cursor}
+    (status,) = connected(server).statuses
+    assert status.available is available
+    if not available:
+        assert "invalid nextCursor" in status.problems[0]

@@ -547,5 +547,5 @@ def test_tool_sources_from_the_cli(tmp_path: Path, monkeypatch: pytest.MonkeyPat
         session = cli.Session(harness.client(), cli.Printer(out_buffer), err_buffer, sleep=lambda s: None)
         assert cli.cmd_chat(session, cli.parser().parse_args(["chat", cid]), read=lambda p: next(lines)) == 0
         shown = out_buffer.getvalue().splitlines()
-        assert shown[0] == "calliope: on (this conversation; default on) — 1 tool"
+        assert shown[0] == "calliope: on (default; default on) — 1 tool"  # same as the default: not kept
         assert "usage: /tools" in err_buffer.getvalue()

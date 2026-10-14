@@ -179,11 +179,14 @@ class Application:
 
     async def set_tool_source(self, scope: TrustedScope, source: str, enabled: bool | None) -> None:
         """This Conversation's choice for a configured source; None: follow
-        its default. Takes effect from the next model request, and calls the
-        model already made are checked again before they run."""
-        if source not in self.mcp.defaults:
+        its default. A choice equal to the default is not kept (V3-P53: only
+        differences are), so the Conversation keeps following the default if
+        the operator changes it. Takes effect from the next model request,
+        and calls the model already made are checked again before they run."""
+        default = self.mcp.defaults.get(source)
+        if default is None:
             raise UnknownToolSource(source)
-        await self.data.set_external_setting(scope, source, enabled)
+        await self.data.set_external_setting(scope, source, None if enabled == default else enabled)
 
     async def create_conversation(self, principal: PrincipalId, *, title: str | None = None) -> ConversationId:
         """T0 with the principal's Inside Workspace activated (provisioned first)."""
