@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 import dataclasses
 import json
 
@@ -527,6 +528,26 @@ def test_crash_during_external_tool_is_unknown_and_never_rerun() -> None:
     assert len(send.invocations) == 1  # never re-run
     group = provider2.prepared_inputs[0].conversation[1]
     assert isinstance(group, ToolGroupTurn) and group.results[CallId("c0")] == UNKNOWN_OUTCOME_RESULT
+
+
+def test_external_tool_arguments_are_validated_in_a_killable_child(monkeypatch: pytest.MonkeyPatch) -> None:
+    """PR #19 review B1: a pathological pattern from an external server must
+    not stall the server; the call is denied and the handler never runs."""
+    monkeypatch.setattr("himari.tool.schema.ISOLATED_SECONDS", 1.0)
+    remote = RecordingTool("remote/match", external_source="remote")
+    remote.definition = dataclasses.replace(
+        remote.definition,
+        input_schema={"type": "object", "properties": {"s": {"type": "string", "pattern": "^(a+)+$"}}},
+    )
+    rt, provider = runtime([calls(("remote/match", {"s": "a" * 60 + "!"})), final("ok")], tools=[remote])
+    started = time.monotonic()
+    result = asyncio.run(rt.driver.drive(SCOPE, user("go")))
+
+    assert result.state is DriveState.COMPLETED and time.monotonic() - started < 5
+    assert remote.invocations == []
+    group = provider.prepared_inputs[-1].conversation[-1]
+    assert isinstance(group, ToolGroupTurn)
+    assert group.results[CallId("c0")].blocks == (TextBlock("invalid arguments: $: validating the arguments took too long"),)
 
 
 def test_live_exception_after_claim_is_unknown_not_failed_and_loop_continues() -> None:

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import dataclasses
+import time
 
 import pytest
 from testkit import FAKE, RecordingTool
@@ -8,7 +10,15 @@ from testkit import FAKE, RecordingTool
 from himari.common import JsonValue, deep_freeze
 from himari.tool.api import Completion, ToolOrigin, WorkspaceRequirement
 from himari.tool.registry import ToolRegistry
-from himari.tool.schema import MAX_SCHEMA_BYTES, MAX_VIOLATIONS, SchemaError, check_schema, validate
+from himari.common import MAX_TOOL_NAME_CHARS
+from himari.tool.schema import (
+    MAX_SCHEMA_BYTES,
+    MAX_VIOLATIONS,
+    SchemaError,
+    check_schema,
+    validate,
+    validate_isolated,
+)
 
 
 def test_only_ask_user_may_suspend() -> None:
@@ -59,6 +69,25 @@ def test_external_tools_are_always_in_the_catalog() -> None:
     registry = ToolRegistry([RecordingTool("remote/x", external_source="remote"),
                              RecordingTool("fake/y", environment_kind=FAKE)])
     assert [d.tool_id for d in registry.catalog(frozenset())] == ["remote/x"]
+
+
+@pytest.mark.parametrize(
+    "tool_id",
+    [
+        "calliope/admin.tools.list",  # valid for MCP, not as a function name (PR #19 review B3)
+        "calliope/" + "x" * (MAX_TOOL_NAME_CHARS - len("calliope__") + 1),
+        "calliope/a__b",
+        "calliope/a/b",
+    ],
+)
+def test_ids_no_provider_can_name_are_refused_at_registration(tool_id: str) -> None:
+    with pytest.raises(ValueError, match="tool id"):
+        ToolRegistry([RecordingTool(tool_id, external_source="calliope")])
+
+
+def test_the_longest_nameable_id_is_accepted() -> None:
+    longest = "calliope/" + "x" * (MAX_TOOL_NAME_CHARS - len("calliope__"))
+    ToolRegistry([RecordingTool(longest, external_source="calliope")])
 
 
 # --- Input schemas ------------------------------------------------------------
@@ -163,6 +192,11 @@ def test_draft_07_is_accepted() -> None:
         # reaches for the network and never fails later on a dangling one
         ({"properties": {"a": {"$ref": "https://example.com/a.json"}}}, "must be a local reference"),
         ({"properties": {"a": {"$ref": "#/$defs/missing"}}}, "does not resolve"),
+        # PR #19 review C1: resolves, but to a data value, not a schema
+        ({"type": "object", "properties": {"x": {"$ref": "#/properties/x/default", "default": "hello"}}},
+         "does not point to a schema"),
+        ({"type": "object", "properties": {"x": {"$ref": "#/properties/y/default"},
+                                           "y": {"default": {"type": "string"}}}}, "does not point to a schema"),
         ({"$defs": {"a": {"$id": "https://example.com/a", "type": "string"}}}, "only the root may set \\$id"),
         ({"description": "x" * MAX_SCHEMA_BYTES}, "bytes \\(at most"),
         ("object", "schema must be an object"),
@@ -173,9 +207,22 @@ def test_malformed_schemas_fail_closed(schema: JsonValue, reason: str) -> None:
         check_schema(schema)
 
 
-def test_data_keywords_are_not_mistaken_for_references() -> None:
+def test_only_schema_locations_are_searched_for_references() -> None:
+    """Data keywords and keywords outside the standard are annotations: a
+    ``$ref`` inside them is not a reference (PR #19 review B2)."""
     check_schema({"type": "object", "default": {"$ref": "https://example.com"},
-                  "properties": {"$ref": {"type": "string"}}})
+                  "properties": {"$ref": {"type": "string"}},
+                  "x-vendor": {"$ref": "https://example.com/docs", "$id": "https://example.com/x"}})
+
+
+@pytest.mark.parametrize(
+    "ref",
+    ["#", "#/properties/a~1b", "#/$defs/n", "#num", "#/allOf/0"],
+)
+def test_references_to_subschemas_are_accepted(ref: str) -> None:
+    check_schema({"type": "object", "allOf": [{"type": "object"}],
+                  "$defs": {"n": {"$anchor": "num", "type": "integer"}},
+                  "properties": {"a/b": {"type": "string"}, "r": {"$ref": ref}}})
 
 
 def test_tool_input_schema_must_be_an_object_schema() -> None:
@@ -215,3 +262,29 @@ def test_validation_output_is_bounded() -> None:
 
 def test_an_unevaluable_schema_rejects_rather_than_raises() -> None:
     assert validate({}, {"$schema": "https://example.com/unknown"}) == ["$: the input schema could not be evaluated"]
+
+
+# --- Untrusted schemas run in a killable child (PR #19 review B1) -----------
+
+REDOS: dict[str, JsonValue] = {"type": "object", "properties": {"a": {"type": "string", "pattern": "^(a+)+$"}}}
+
+
+def test_isolated_validation_gives_the_same_answers() -> None:
+    for value in ({"a": "aaa"}, {"a": "b"}, {"a": 1}):
+        assert asyncio.run(validate_isolated(value, REDOS)) == validate(value, REDOS)
+    assert asyncio.run(validate_isolated({"fen": "x", "depth": 99}, PYDANTIC)) == [
+        "$.depth: 99 is greater than the maximum of 30"
+    ]
+
+
+def test_a_runaway_validation_is_killed_and_rejects() -> None:
+    started = time.monotonic()
+    violations = asyncio.run(validate_isolated({"a": "a" * 60 + "!"}, REDOS, timeout=1.0))
+    assert violations == ["$: validating the arguments took too long"]
+    assert time.monotonic() - started < 3
+
+
+def test_isolated_validation_rejects_rather_than_raises() -> None:
+    assert asyncio.run(validate_isolated({}, {"$schema": "https://example.com/unknown"})) == [
+        "$: the input schema could not be evaluated"
+    ]

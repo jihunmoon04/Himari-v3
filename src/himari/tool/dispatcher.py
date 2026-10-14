@@ -66,7 +66,7 @@ from himari.tool.api import (
     WorkspaceRequirement,
 )
 from himari.tool.registry import ToolRegistry
-from himari.tool.schema import validate
+from himari.tool.schema import validate, validate_isolated
 
 _STATUS = {
     ToolStatus.SUCCEEDED: ToolExecutionStatus.SUCCEEDED,
@@ -155,7 +155,10 @@ class Dispatcher:
             return  # stays PENDING; Control turns this into WAITING_FOR_USER
         record_event = d.conversation_record is ConversationRecord.FULL
         try:
-            violations = validate(record.arguments, d.input_schema)
+            if d.origin is ToolOrigin.EXTERNAL:  # an untrusted schema runs only in a killable child
+                violations = await validate_isolated(record.arguments, d.input_schema)
+            else:
+                violations = validate(record.arguments, d.input_schema)
             if violations:
                 raise _Denied("invalid arguments: " + "; ".join(violations))
             binding = await self._resolve_binding(scope, d, record)

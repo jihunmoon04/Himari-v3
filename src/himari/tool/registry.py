@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
 
-from himari.common import ASK_USER_TOOL_ID, EnvironmentKind, ToolId, UnknownOutcomePolicy
+from himari.common import ASK_USER_TOOL_ID, EnvironmentKind, ToolId, UnknownOutcomePolicy, tool_id_problem
 from himari.tool.api import Completion, ToolDefinition, ToolHandler, ToolOrigin, WorkspaceRequirement
 from himari.tool.schema import check_tool_input_schema
 
@@ -23,6 +23,9 @@ class ToolRegistry:
         d = handler.definition
         if d.tool_id in self._handlers:
             raise ValueError(f"duplicate tool_id {d.tool_id}")
+        problem = tool_id_problem(d.tool_id)
+        if problem is not None:  # every Provider must be able to name it (V3-P52)
+            raise ValueError(f"{d.tool_id!r}: tool id {problem}")
         if d.environment_kind is not None and d.external_source is not None:
             raise ValueError(f"{d.tool_id}: a Tool is Environment-provided or External, not both")
         namespace = d.environment_kind if d.environment_kind is not None else d.external_source

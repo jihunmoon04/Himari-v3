@@ -30,7 +30,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 from collections.abc import Mapping, Sequence
 from typing import Any
 
@@ -47,6 +46,7 @@ from himari.common import (
     ToolCall,
     ToolId,
     thaw,
+    tool_id_problem,
 )
 from himari.prompt.api import (
     AssistantTurn,
@@ -102,17 +102,15 @@ KNOWN_CAPABILITIES: Mapping[str, ProviderCapabilities] = {
         context_tokens=1_000_000,  # OpenRouter /api/v1/models context_length, 2026-10-14
     ),
 }
-_TOOL_ID = re.compile(r"^[A-Za-z0-9-]+(?:_[A-Za-z0-9-]+)*(?:/[A-Za-z0-9-]+(?:_[A-Za-z0-9-]+)*)?$")
 
 
 def encode_tool_name(tool_id: str) -> str:
-    """``kind/name`` → ``kind__name``. Rejects ids that could not round-trip."""
-    if not _TOOL_ID.match(tool_id) or "__" in tool_id:
-        raise ProviderError(ProviderErrorCode.UNSUPPORTED_CAPABILITY, f"tool id {tool_id!r} cannot be encoded")
-    name = tool_id.replace("/", "__")
-    if len(name) > 64:
-        raise ProviderError(ProviderErrorCode.UNSUPPORTED_CAPABILITY, f"tool id {tool_id!r} is too long")
-    return name
+    """``kind/name`` → ``kind__name``. The Registry admits only ids that
+    round-trip (``tool_id_problem``); this re-checks, as a last line."""
+    problem = tool_id_problem(tool_id)
+    if problem is not None:
+        raise ProviderError(ProviderErrorCode.UNSUPPORTED_CAPABILITY, f"tool id {tool_id!r} {problem}")
+    return tool_id.replace("/", "__")
 
 
 def decode_tool_name(name: str) -> ToolId:
