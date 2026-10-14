@@ -163,14 +163,18 @@ def event_view(event: ConversationEvent) -> dict[str, Any]:
     payload = event.payload
     if isinstance(payload, UserMessage):
         view["text"] = _text(payload.blocks)
+        # A call is identified by (run_id, call_id): call ids repeat across Runs.
         view["answers_call"] = None if payload.answers_call is None else payload.answers_call.call_id
+        view["answers_run"] = None if payload.answers_call is None else payload.answers_call.run_id
     elif isinstance(payload, AssistantFinal):
         view["text"] = _text(payload.blocks)
     elif isinstance(payload, AssistantToolCalls):
         view["text"] = _text(payload.commentary)
+        view["run_id"] = event.origin_run_id
         view["calls"] = [{"call_id": c.call_id, "tool_id": c.tool_id, "arguments": thaw(c.arguments)}
                          for c in sorted(payload.calls, key=lambda c: c.ordinal)]
     elif isinstance(payload, ToolResultRecord):
+        view["run_id"] = payload.call.run_id
         view["call_id"] = payload.call.call_id
         view["is_error"] = payload.model_result.is_error
         view["text"] = _text(payload.model_result.blocks)

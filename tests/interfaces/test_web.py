@@ -121,6 +121,7 @@ def test_remote_use_is_a_loopback_server_behind_a_tls_proxy() -> None:
                                   "HIMARI_WEB_ALLOWED_ORIGINS": "https://server.example.com:443"})
     assert proxied.host == "127.0.0.1" and proxied.secure_cookie
     assert proxied.allowed_origins == {"https://server.example.com"}
+    assert proxied.allowed_hosts == {"server.example.com", "127.0.0.1", "localhost"}  # the local CLI still works
     for host in ("127.0.0.1", "::1", "localhost"):
         assert WebConfig.from_env({"HIMARI_DATA_ROOT": "/srv/himari", "HIMARI_WEB_HOST": host}).host == host
     local = WebConfig.from_env({"HIMARI_DATA_ROOT": "/srv/himari", "HIMARI_WEB_ALLOWED_ORIGINS": "http://[::1]:8765"})
@@ -232,6 +233,8 @@ def test_conversation_flow_with_a_tool_and_a_question(server: Server) -> None:
                      "user_message", "tool_result", "assistant_final"]
     write_result = events["items"][2]
     assert write_result["is_error"] is False and "plan.txt" in write_result["text"]
+    assert write_result["run_id"] == events["items"][1]["run_id"] != events["items"][3]["run_id"]  # (run, call) identity
+    assert events["items"][4]["answers_run"] == events["items"][3]["run_id"]
     assert events["items"][4]["answers_call"] == events["items"][3]["calls"][0]["call_id"]
     later = server.client.get(f"/api/conversations/{cid}/events?after=5").json()
     assert [e["sequence"] for e in later["items"]] == [6, 7] and later["last_sequence"] == 7

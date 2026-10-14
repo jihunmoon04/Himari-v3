@@ -114,7 +114,7 @@ P1은 Workspace 전용 소프트웨어 모듈을 다시 도입하는 단계가 �
 
 1. **영속 Data** — SQLite 등으로 Event/Run/ToolExecution/Artifact/Continuation 저장, T2~T7a·T-R 원자성 및 실제 crash 복구 검증(Q-41). *(완료: PR #8~#10)*
 2. **Inside Environment + Sandbox** — 사용자별 Root와 Conversation cwd, 파일 Tool·bounded `inside/run_command`, Bubblewrap/Landlock·네트워크 차단 실호스트 증거(Q-29~33/Q-39~40). *(완료: PR #8~#10)*
-3. **Web/CLI (v2 형태 재사용)** — PR A: 대화 목록 포트(V3-P43)·백그라운드 실행(V3-P44)·Application 조립과 로컬 운영자 인증(V3-P45). PR B: Web 서버와 화면(v2 보안 계층·화면 뼈대 재사용, API·데이터 처리는 v3 개념으로 새로 작성, V3-P46). 후속: 실시간 스트리밍(현재 폴링), 파일 업로드·다운로드(FILE-04), 다중 사용자 인증, 재개 가능 여부(`continuable`)를 Web이 마지막 Event 종류로 추정하는 대신 Control이 제공(Pause·Cancel 도입 시, PR #12 재검수 권고). PR C: CLI를 Web 서버의 클라이언트로(SQLite 단일 writer 때문에 CLI가 DB를 직접 열지 않음).
+3. **Web/CLI (v2 형태 재사용)** — PR A: 대화 목록 포트(V3-P43)·백그라운드 실행(V3-P44)·Application 조립과 로컬 운영자 인증(V3-P45). PR B: Web 서버와 화면(v2 보안 계층·화면 뼈대 재사용, API·데이터 처리는 v3 개념으로 새로 작성, V3-P46). 후속: 실시간 스트리밍(현재 폴링), 파일 업로드·다운로드(FILE-04), 다중 사용자 인증, 재개 가능 여부(`continuable`)를 Web이 마지막 Event 종류로 추정하는 대신 Control이 제공(Pause·Cancel 도입 시, PR #12 재검수 권고). PR C: CLI를 Web 서버의 클라이언트로(SQLite 단일 writer 때문에 CLI가 DB를 직접 열지 않음). *(완료: PR #11~#13 — Web V3-P46, CLI V3-P47)*
 4. **Context 압축·예산 및 최신 Snapshot 활용** — exact tail, continuation 일괄 조회/크기 예산(Q-14/Q-22/Q-42/Q-43).
 5. **후속 기능** — 정식 Pause/Cancel, Streaming, Web UI, Memory·Plan Tool, 충돌 Scheduler.
 

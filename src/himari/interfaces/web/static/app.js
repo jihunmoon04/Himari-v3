@@ -259,24 +259,25 @@ function renderEvent(event) {
   if (event.kind === "assistant_tool_calls") {
     if (event.text) timeline.append(renderMessage({ ...event, kind: "assistant_final" }));
     for (const call of event.calls) {
+      const key = `${event.run_id}/${call.call_id}`; // call ids repeat across Runs
       if (call.tool_id === "ask_user") {
         const question = typeof call.arguments.question === "string" ? call.arguments.question : "";
         timeline.append(renderMessage({ kind: "assistant_final", text: question }));
-        app.toolRows.set(call.call_id, null); // the answer appears as the user's message
+        app.toolRows.set(key, null); // the answer appears as the user's message
         continue;
       }
       const node = el("div", "item item-tool-row is-pending");
       const details = el("details", "tool-row-details");
       node.append(details);
       const entry = { node, details, toolId: call.tool_id, args: call.arguments, result: null };
-      app.toolRows.set(call.call_id, entry);
+      app.toolRows.set(key, entry);
       paintToolRow(entry);
       timeline.append(node);
     }
     return;
   }
   if (event.kind === "tool_result") {
-    const entry = app.toolRows.get(event.call_id);
+    const entry = app.toolRows.get(`${event.run_id}/${event.call_id}`);
     if (entry === null) return; // ask_user answer
     if (entry === undefined) {
       const orphan = { node: el("div"), details: el("details", "tool-row-details"), toolId: "tool",
