@@ -22,7 +22,8 @@ from pathlib import Path
 
 from himari.bootstrap import DEFAULT_INSTRUCTIONS, Runtime, build_runtime
 from himari.bootstrap.operator import check_private_dir, ensure_operator_secret, ensure_private_dir
-from himari.common import ConversationId, PrincipalId, WorkspaceId
+from himari.common import ConversationId, PrincipalId, TrustedScope, WorkspaceId
+from himari.control.api import ContextStatus
 from himari.control.runner import BackgroundRunner
 from himari.data.api import InitialActivation
 from himari.data.sqlite import SqliteData, SqliteStore
@@ -111,6 +112,11 @@ class Application:
         assert isinstance(runtime.data, SqliteData)
         return cls(root, store, runtime.data, runtime, BackgroundRunner(runtime.driver), inside, state, model_id,
                    budget.limit_tokens, secret)
+
+    async def context_status(self, scope: TrustedScope) -> ContextStatus | None:
+        """For display (Web/CLI): the next request's estimated size and the
+        latest compaction. Authorizes like any read (NOT_AUTHORIZED)."""
+        return await self.runtime.driver.context_status(scope)
 
     async def create_conversation(self, principal: PrincipalId, *, title: str | None = None) -> ConversationId:
         """T0 with the principal's Inside Workspace activated (provisioned first)."""

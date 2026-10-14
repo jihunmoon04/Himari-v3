@@ -37,13 +37,13 @@ def config(tmp_path: Path) -> WebConfig:
 
 
 class Server:
-    def __init__(self, tmp_path: Path, script: list[ScriptStep]) -> None:
+    def __init__(self, tmp_path: Path, script: list[ScriptStep], context_tokens: int | None = None) -> None:
         self.provider = ScriptedAdapter(script)
         self.application: Application | None = None
 
         async def opener() -> Application:
             self.application = await Application.open(tmp_path / "data", self.provider, model_id="scripted-model",
-                                                      sandbox=False)
+                                                      sandbox=False, context_tokens=context_tokens)
             return self.application
 
         self.client = TestClient(web.create_app(config(tmp_path), opener))
@@ -260,7 +260,8 @@ def test_foreign_and_missing_conversations_look_the_same(server: Server) -> None
                       server.post(f"/api/conversations/{cid}/messages", {"text": "hi"}),
                       server.post(f"/api/conversations/{cid}/resume"),
                       server.client.patch(f"/api/conversations/{cid}", json={"title": "x"}, headers={"origin": ORIGIN}),
-                      server.client.get(f"/api/conversations/{cid}/events")]
+                      server.client.get(f"/api/conversations/{cid}/events"),
+                      server.client.get(f"/api/conversations/{cid}/context")]
     assert {r.status_code for r in responses} == {404}
     assert {r.text for r in responses} == {'{"error":{"code":"not_found","message":"No such conversation."}}'}
     assert server.client.get("/api/conversations").json()["items"] == []
@@ -330,3 +331,38 @@ def test_an_unanswered_accepted_message_is_reported_as_continuable(server: Serve
     assert server.post(f"/api/conversations/{cid}/resume").status_code == 202
     detail = server.wait_idle(cid)
     assert detail["continuable"] is False and detail["job"]["state"] == "completed"
+
+
+# --- context (compaction visibility) ----------------------------------------------------------
+
+
+def test_context_reports_the_estimate_and_the_budget(server: Server) -> None:
+    server.sign_in()
+    cid = server.post("/api/conversations").json()["id"]
+    queue(server, final("hello"))
+    server.post(f"/api/conversations/{cid}/messages", {"text": "hi"})
+    server.wait_idle(cid)
+    context = server.client.get(f"/api/conversations/{cid}/context").json()
+    assert context["enabled"] is True
+    assert context["estimated_tokens"] > 0 and context["measured"] is False  # the scripted model reports no usage
+    assert (context["budget_tokens"], context["compact_at_tokens"]) == (128_000, 102_400)  # unknown window
+    assert context["hard_limit_tokens"] == 128_000
+    assert (context["compactions"], context["covered_through_sequence"], context["summary"]) == (0, None, None)
+
+
+def test_context_shows_where_the_summary_takes_over(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(web, "FAILED_LOGIN_DELAY_SECONDS", 0)
+    server = Server(tmp_path, [], context_tokens=2000)
+    with server.client:
+        server.sign_in()
+        cid = server.post("/api/conversations").json()["id"]
+        queue(server, *[final("SUMMARY <of> the start")] * 12)  # every answer and every summary alike
+        for text in ("가" * 550, "가" * 550, "가" * 550, "next"):
+            server.post(f"/api/conversations/{cid}/messages", {"text": text})
+            server.wait_idle(cid)
+        context = server.client.get(f"/api/conversations/{cid}/context").json()
+        assert context["compactions"] >= 1 and context["summary"] == "SUMMARY <of> the start"
+        covered = context["covered_through_sequence"]
+        events = server.client.get(f"/api/conversations/{cid}/events").json()["items"]
+        assert 0 < covered < events[-1]["sequence"]  # the exact history is all still there
+        assert [e["kind"] for e in events] == ["user_message", "assistant_final"] * 4

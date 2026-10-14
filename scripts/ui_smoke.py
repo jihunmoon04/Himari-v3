@@ -5,8 +5,10 @@ provider (a file write, an ask_user question, then a final answer that
 contains hostile markup), drives it with headless Chromium and checks:
 sign-in (wrong and right token), new chat, the tool row, the question
 panel, the answer, safe rich text (no script execution, no javascript:
-link), rename, reload keeping the HttpOnly session, the narrow layout and
-sign-out.
+link), the context size in the conversation menu, rename, reload keeping
+the HttpOnly session, the narrow layout and sign-out. A second server with
+a small context budget compacts a conversation and checks the timeline
+divider and its summary.
 
 Requires: pip install playwright && playwright install chromium
 Usage:    python scripts/ui_smoke.py [--screenshots DIR]
@@ -48,14 +50,16 @@ def scripted() -> ScriptedAdapter:
     ])
 
 
-def serve(root: str) -> uvicorn.Server:
-    config = WebConfig("127.0.0.1", PORT, frozenset({"127.0.0.1"}), frozenset({f"http://127.0.0.1:{PORT}"}), False,
+def serve(root: str, port: int = PORT, provider: ScriptedAdapter | None = None,
+          context_tokens: int | None = None) -> uvicorn.Server:
+    config = WebConfig("127.0.0.1", port, frozenset({"127.0.0.1"}), frozenset({f"http://127.0.0.1:{port}"}), False,
                        root, "scripted-model", None, False)
 
     async def opener() -> Application:
-        return await Application.open(root, scripted(), model_id="scripted-model", sandbox=False)
+        return await Application.open(root, provider or scripted(), model_id="scripted-model", sandbox=False,
+                                      context_tokens=context_tokens)
 
-    server = uvicorn.Server(uvicorn.Config(create_app(config, opener), host="127.0.0.1", port=PORT, log_level="warning"))
+    server = uvicorn.Server(uvicorn.Config(create_app(config, opener), host="127.0.0.1", port=port, log_level="warning"))
     threading.Thread(target=server.run, daemon=True).start()
     secret = Path(root, "control", "operator.secret")
     for _ in range(100):
@@ -95,6 +99,10 @@ def run(base: str, token: str, shots: str | None) -> list[str]:
         assert "<script>" in final.inner_text() and page.evaluate("window.__pwned") is None
         if shots:
             page.screenshot(path=os.path.join(shots, "2-final.png"), full_page=True)
+        page.click("#chat-menu-toggle")
+        expect(page.locator("#chat-menu-context")).to_contain_text("of 128k tokens · summarizes at 102k")
+        expect(page.locator(".context-divider")).to_have_count(0)  # nothing compacted yet
+        page.click("#chat-menu-toggle")
         page.once("dialog", lambda d: d.accept("Seoul trip"))
         page.click("#chat-menu-toggle")
         page.click("#chat-menu-rename")
@@ -115,6 +123,44 @@ def run(base: str, token: str, shots: str | None) -> list[str]:
     return errors
 
 
+SUMMARY = "SUMMARY of the start <b>not markup</b>"
+
+
+def run_compaction(base: str, token: str, shots: str | None) -> list[str]:
+    errors: list[str] = []
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page(viewport={"width": 1280, "height": 860})
+        page.on("pageerror", lambda e: errors.append(str(e)))
+        page.goto(base)
+        page.fill("#login-token", token)
+        page.click("#login-submit")
+        page.click("#home-new-chat")
+        for n, text in enumerate(("가" * 550, "가" * 550, "가" * 550, "last question")):
+            page.fill("#composer-text", text)
+            page.press("#composer-text", "Enter")
+            expect(page.locator(".item-assistant")).to_have_count(n + 1, timeout=10000)
+            expect(page.locator("#topbar-state-dot")).not_to_have_class("topbar-state-dot is-active", timeout=10000)
+        divider = page.locator(".context-divider")
+        expect(divider).to_have_count(1, timeout=10000)
+        expect(divider.locator(".context-divider-label")).to_contain_text("Earlier messages reach HIMARI as a summary")
+        # It sits above the latest exchange and below what it summarizes.
+        assert page.evaluate("""() => {
+            const d = document.querySelector('.context-divider');
+            const after = d.nextElementSibling, before = d.previousElementSibling;
+            return before !== null && after !== null && Number(after.dataset.sequence) > Number(before.dataset.sequence);
+        }""")
+        divider.locator("summary").click()
+        expect(divider.locator(".context-divider-text")).to_have_text(SUMMARY)  # shown as text, not markup
+        assert divider.locator("b").count() == 0
+        page.click("#chat-menu-toggle")
+        expect(page.locator("#chat-menu-context")).to_contain_text("of 2.0k tokens")
+        if shots:
+            page.screenshot(path=os.path.join(shots, "4-compacted.png"), full_page=True)
+        browser.close()
+    return errors
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--screenshots")
@@ -125,6 +171,15 @@ def main() -> int:
         try:
             errors = run(f"http://127.0.0.1:{PORT}", Path(root, "control", "operator.secret").read_text().strip(),
                          args.screenshots)
+        finally:
+            server.should_exit = True
+            time.sleep(0.5)
+        small = os.path.join(tmp, "small")
+        provider = ScriptedAdapter([NormalizedFinal((TextBlock(SUMMARY),))] * 12)  # every answer and summary alike
+        server = serve(small, PORT + 1, provider, context_tokens=2000)
+        try:
+            errors += run_compaction(f"http://127.0.0.1:{PORT + 1}",
+                                     Path(small, "control", "operator.secret").read_text().strip(), args.screenshots)
         finally:
             server.should_exit = True
             time.sleep(0.5)

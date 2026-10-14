@@ -258,6 +258,10 @@ class CompactionPlanner(Protocol):
 
     def snapshot_body(self, summary: str) -> JsonValue: ...
 
+    def summary_of(self, snapshot: PromptSnapshot | None) -> str | None:
+        """The summary a snapshot holds, if it is a readable compaction snapshot."""
+        ...
+
     @property
     def snapshot_schema_version(self) -> int: ...
 

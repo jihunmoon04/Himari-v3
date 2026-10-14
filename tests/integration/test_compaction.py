@@ -10,11 +10,11 @@ from collections.abc import Callable, Coroutine
 from typing import Any
 
 import pytest
-from testkit import FAKE, SCOPE, RecordingTool, calls, final, restart, runtime, text_result, user
+from testkit import FAKE, FOREIGN, SCOPE, RecordingTool, calls, final, restart, runtime, text_result, user
 
 from himari.common import TextBlock
 from himari.control.api import DriveState
-from himari.data.api import RunPurpose, RunStatus
+from himari.data.api import DataError, RunPurpose, RunStatus
 from himari.prompt.api import CompressedHistory, ContextBudget, ToolGroupTurn, UserTurn
 from himari.bootstrap import build_runtime
 from himari.prompt.api import CompactionPlan, ContextDecision, ModelInput, PromptInputs, RequestOptions
@@ -421,3 +421,33 @@ async def test_an_intermediate_summary_over_the_reserved_room_stops_the_chain() 
     assert run.status is RunStatus.PROJECTION_FAILED and run.error_code == "invalid_summary"
     assert await rt.data.get_latest_snapshot(SCOPE) is None
     assert result.state is DriveState.COMPLETED  # within the budget's ceiling: the Run goes ahead
+
+
+# --- context status (CTRL-07) ---------------------------------------------------
+
+
+@sync
+async def test_context_status_reports_the_estimate_and_the_latest_summary() -> None:
+    rt, _ = runtime([Measured(final("a1"), 900), final("S1"), final("a2")], context_budget=BUDGET)
+    await rt.driver.drive(SCOPE, user("q1"))
+    before = await rt.driver.context_status(SCOPE)
+    assert before is not None and before.measured and before.estimated_tokens is not None
+    assert before.estimated_tokens >= 900 and before.summary is None and before.compactions == 0
+    assert (before.budget_tokens, before.compact_at_tokens, before.hard_limit_tokens) == (1000, 800, 1000)
+    await rt.driver.drive(SCOPE, user("q2"))
+    after = await rt.driver.context_status(SCOPE)
+    assert after is not None and after.summary == "S1" and after.compactions == 1
+    assert after.covered_through_sequence == 2 and after.estimated_tokens is not None
+    assert after.estimated_tokens < before.estimated_tokens
+
+
+@sync
+async def test_context_status_without_a_budget_or_with_a_group_open() -> None:
+    plain, _ = runtime([final("a1")])
+    assert await plain.driver.context_status(SCOPE) is None
+    rt, _ = runtime([calls(("ask_user", {"question": "which?"}))], context_budget=BUDGET)
+    await rt.driver.drive(SCOPE, user("q1"))
+    status = await rt.driver.context_status(SCOPE)
+    assert status is not None and status.estimated_tokens is None  # the question is still open
+    with pytest.raises(DataError):
+        await rt.driver.context_status(FOREIGN)

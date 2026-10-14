@@ -43,7 +43,7 @@ from himari.common import (
     TrustedScope,
     thaw,
 )
-from himari.control.api import ControlError, ControlErrorCode, JobStatus
+from himari.control.api import ContextStatus, ControlError, ControlErrorCode, JobStatus
 from himari.data.api import (
     MAX_LIST_LIMIT,
     AssistantFinal,
@@ -191,6 +191,24 @@ def job_view(status: JobStatus) -> dict[str, Any]:
         "error": status.error,
         "started_at": _time(status.started_at),
         "finished_at": _time(status.finished_at),
+    }
+
+
+def context_view(status: ContextStatus | None) -> dict[str, Any]:
+    """The model's view of a Conversation's size, for display. Events up to
+    ``covered_through_sequence`` reach the model only through ``summary``."""
+    if status is None:
+        return {"enabled": False}
+    return {
+        "enabled": True,
+        "estimated_tokens": status.estimated_tokens,
+        "measured": status.measured,
+        "budget_tokens": status.budget_tokens,
+        "compact_at_tokens": status.compact_at_tokens,
+        "hard_limit_tokens": status.hard_limit_tokens,
+        "compactions": status.compactions,
+        "covered_through_sequence": status.covered_through_sequence,
+        "summary": status.summary,
     }
 
 
@@ -349,6 +367,12 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
                                                          limit=limit)
         return {"items": [event_view(e) for e in events],
                 "last_sequence": events[-1].sequence if events else after}
+
+    @app.get("/api/conversations/{conversation_id}/context")
+    async def read_context(conversation_id: str, request: Request,
+                           who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+        # Composes the whole history like a Run would: fetched on demand, not polled.
+        return context_view(await himari(request).context_status(scope_of(conversation_id, who)))
 
     @app.post("/api/conversations/{conversation_id}/messages", status_code=202)
     async def send_message(conversation_id: str, body: MessageBody, request: Request,

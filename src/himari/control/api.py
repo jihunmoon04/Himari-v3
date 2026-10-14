@@ -39,6 +39,26 @@ class DriveResult(DeepFrozen):
     compaction_run_ids: tuple[RunId, ...] = ()  # summarizing calls made before the Runs
 
 
+@dataclass(frozen=True)
+class ContextStatus(DeepFrozen):
+    """How large the next request would be and what compaction has done —
+    for display only; it decides nothing.
+
+    ``estimated_tokens`` is None when the history cannot be composed right
+    now (e.g. a Tool group is still running). ``summary`` and
+    ``covered_through_sequence`` describe the latest compaction: Events up
+    to that sequence reach the model only through the summary."""
+
+    estimated_tokens: int | None
+    measured: bool
+    budget_tokens: int
+    compact_at_tokens: int
+    hard_limit_tokens: int
+    summary: str | None = None
+    covered_through_sequence: int | None = None
+    compactions: int = 0  # committed compactions (snapshot revision)
+
+
 class ControlErrorCode(Enum):
     BUSY = "busy"  # another driver holds this Conversation in this process
 
@@ -85,6 +105,13 @@ class JobStatus(DeepFrozen):
     error: str | None = None
     started_at: datetime | None = None
     finished_at: datetime | None = None
+
+
+class ContextInspector(Protocol):
+    async def context_status(self, scope: TrustedScope) -> ContextStatus | None:
+        """The current context status; None if no context budget is set.
+        Read-only, takes no Conversation lock: it may be a moment stale."""
+        ...
 
 
 class ConversationRunner(Protocol):

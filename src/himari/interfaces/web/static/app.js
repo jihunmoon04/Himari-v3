@@ -91,6 +91,7 @@ const app = {
   pollTimer: null,
   listOffset: 0,
   sending: false,
+  context: null, // the last /context answer for this conversation
 };
 
 function status(text, tone) {
@@ -251,7 +252,7 @@ function paintToolRow(entry) {
 }
 
 function renderEvent(event) {
-  const timeline = $("timeline");
+  const timeline = tagging($("timeline"), event.sequence);
   if (event.kind === "user_message" || event.kind === "assistant_final") {
     timeline.append(renderMessage(event));
     return;
@@ -289,6 +290,64 @@ function renderEvent(event) {
     }
     entry.result = event;
     paintToolRow(entry);
+  }
+}
+
+/* Every node an event adds carries its sequence, so the compaction divider
+   can be placed before the first event the summary does not cover. */
+function tagging(timeline, sequence) {
+  return {
+    append(...nodes) {
+      for (const node of nodes) node.dataset.sequence = String(sequence);
+      timeline.append(...nodes);
+    },
+  };
+}
+
+function formatTokens(n) {
+  if (n >= 10000) return `${Math.round(n / 1000)}k`;
+  if (n >= 1000) return `${(n / 1000).toFixed(1)}k`;
+  return String(n);
+}
+
+function placeDivider() {
+  const timeline = $("timeline");
+  const old = timeline.querySelector(".context-divider");
+  if (old) old.remove();
+  const context = app.context;
+  if (!context || !context.enabled || context.covered_through_sequence === null || !context.summary) return;
+  const divider = el("details", "context-divider");
+  const label = context.compactions > 1
+    ? `Earlier messages reach HIMARI as a summary (compacted ${context.compactions} times)`
+    : "Earlier messages reach HIMARI as a summary";
+  divider.append(el("summary", "context-divider-label", label), el("p", "context-divider-text", context.summary));
+  const after = [...timeline.children].find((node) => Number(node.dataset.sequence) > context.covered_through_sequence);
+  if (after) timeline.insertBefore(divider, after);
+  else timeline.append(divider);
+}
+
+function applyContext(context) {
+  app.context = context;
+  const pair = $("chat-menu-context-pair");
+  pair.hidden = !context.enabled;
+  if (context.enabled) {
+    const size = context.estimated_tokens === null ? "size unknown while working"
+      : `about ${formatTokens(context.estimated_tokens)} of ${formatTokens(context.budget_tokens)} tokens`;
+    let text = `${size} · summarizes at ${formatTokens(context.compact_at_tokens)}`;
+    if (context.hard_limit_tokens !== context.budget_tokens) {
+      text += ` · model limit ${formatTokens(context.hard_limit_tokens)}`; // the budget is a target, not the refusal point
+    }
+    $("chat-menu-context").textContent = text;
+  }
+  placeDivider();
+}
+
+async function loadContext(generation) {
+  try {
+    const context = await api("GET", `/api/conversations/${encodeURIComponent(app.conversationId)}/context`);
+    if (generation === app.generation) applyContext(context);
+  } catch (ignored) {
+    /* display only: the conversation works without it */
   }
 }
 
@@ -360,7 +419,10 @@ function poll(generation) {
     try {
       const detail = await refresh(generation);
       if (detail && detail.job.running) poll(generation);
-      else if (detail) loadList(true).then(markSelected).catch(() => {});
+      else if (detail) {
+        loadList(true).then(markSelected).catch(() => {});
+        loadContext(generation);
+      }
     } catch (error) {
       if (generation === app.generation && error.status !== 401) {
         status("Lost contact with the server; retrying…", "warn");
@@ -377,6 +439,8 @@ async function openConversation(id) {
   app.conversationId = id;
   app.lastSequence = 0;
   app.toolRows = new Map();
+  app.context = null;
+  $("chat-menu-context-pair").hidden = true;
   $("timeline").replaceChildren();
   markSelected();
   showSurface("chat");
@@ -384,6 +448,7 @@ async function openConversation(id) {
   try {
     const detail = await refresh(generation);
     if (detail && detail.job.running) poll(generation);
+    else if (detail) loadContext(generation);
   } catch (error) {
     if (generation === app.generation) status(error.message, "error");
   }

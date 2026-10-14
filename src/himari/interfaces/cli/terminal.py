@@ -36,10 +36,11 @@ class Symbols:
     ok: str
     failed: str
     more: str
+    rule: str
 
 
-UNICODE_SYMBOLS = Symbols(INDENT, "⚙", "↳", "✓", "✗ failed", "…")
-ASCII_SYMBOLS = Symbols(ASCII_INDENT, "*", "->", "ok", "x failed", "...")
+UNICODE_SYMBOLS = Symbols(INDENT, "⚙", "↳", "✓", "✗ failed", "…", "──")
+ASCII_SYMBOLS = Symbols(ASCII_INDENT, "*", "->", "ok", "x failed", "...", "--")
 
 
 def symbols_for(encoding: str | None) -> Symbols:

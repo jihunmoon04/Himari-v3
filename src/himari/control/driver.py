@@ -26,7 +26,7 @@ import dataclasses
 from collections.abc import AsyncIterator
 
 from himari.common import ASK_USER_TOOL_ID, CallRef, ConversationId, RunId, TrustedScope
-from himari.control.api import ControlError, ControlErrorCode, DriveResult, DriveState
+from himari.control.api import ContextStatus, ControlError, ControlErrorCode, DriveResult, DriveState
 from himari.data.api import (
     AssistantFinal,
     DataError,
@@ -110,6 +110,33 @@ class Driver:
     async def resume(self, scope: TrustedScope) -> DriveResult:
         async with self._exclusive(scope):
             return await self._resume_locked(scope)
+
+    async def context_status(self, scope: TrustedScope) -> ContextStatus | None:
+        """CTRL-07: the size estimate the next Run would start from, and the
+        latest compaction. Read-only; no lock (display may be a moment stale)."""
+        if self._planner is None or self._budget is None:
+            return None
+        inputs = await self._loader.load(scope, (), self._options)
+        summary = self._planner.summary_of(inputs.snapshot)
+        snapshot = inputs.snapshot if summary is not None else None
+        tokens: int | None = None
+        measured = False
+        try:
+            estimate = self._planner.estimate(inputs, self._composer.compose(inputs))
+            tokens, measured = estimate.tokens, estimate.measured
+        except PromptError:
+            pass  # e.g. a Tool group still running: no size to show now
+        budget = self._budget
+        return ContextStatus(
+            estimated_tokens=tokens,
+            measured=measured,
+            budget_tokens=budget.limit_tokens,
+            compact_at_tokens=int(budget.compact_at * budget.limit_tokens),
+            hard_limit_tokens=budget.ceiling_tokens,
+            summary=summary,
+            covered_through_sequence=snapshot.covers_through_sequence if snapshot is not None else None,
+            compactions=snapshot.revision if snapshot is not None else 0,
+        )
 
     async def accept(self, scope: TrustedScope, message: UserMessage) -> None:
         """Record one user input durably — T7a if an ask_user call is waiting,
