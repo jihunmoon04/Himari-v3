@@ -6,6 +6,8 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import random
+import time
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +23,7 @@ from himari.data.api import ToolExecutionStatus, ToolResultRecord
 from himari.data.memory import InMemoryStore
 from himari.provider.scripted import ScriptedAdapter
 from himari.tool.api import EffectProfile, ToolContext, ToolInvocation, ToolStatus
+from himari.tool.mcp import client as client_module
 from himari.tool.mcp.client import McpClient, McpRefused, McpUncertain
 from himari.tool.mcp.config import McpConfigError, load_config, map_tool_names, parse_config
 from himari.tool.mcp.tools import McpConnection, connect, render_result
@@ -564,3 +567,76 @@ def test_a_broken_page_cursor_is_an_error_not_the_end(cursor: Any, available: bo
     assert status.available is available
     if not available:
         assert "invalid nextCursor" in status.problems[0]
+
+
+# --- PR #20 re-review N2/C3: a linear, standard SSE line splitter -----------------------------
+
+
+class Chunks:
+    def __init__(self, chunks: list[bytes]) -> None:
+        self._chunks = chunks
+
+    async def aiter_bytes(self) -> Any:
+        for chunk in self._chunks:
+            yield chunk
+
+
+def split_lines(chunks: list[bytes]) -> list[bytes]:
+    async def collect() -> list[bytes]:
+        return [line async for line in client_module._bounded_lines(Chunks(chunks))]  # type: ignore[arg-type]
+    return asyncio.run(collect())
+
+
+def reference_lines(data: bytes) -> list[bytes]:
+    """The SSE rule on the whole input at once: CRLF, LF or CR end a line."""
+    lines, start, i = [], 0, 0
+    while i < len(data):
+        if data[i : i + 1] in (b"\r", b"\n"):
+            lines.append(data[start:i])
+            i += 2 if data[i : i + 2] == b"\r\n" else 1
+            start = i
+        else:
+            i += 1
+    if start < len(data):
+        lines.append(data[start:])
+    return lines
+
+
+def test_lines_are_the_same_however_the_stream_is_chunked() -> None:
+    data = "data: 체크\r\ndata: a\rdata: b\n\r\n\r\r\nid: 1\n\ndata: tail\r".encode()
+    expected = reference_lines(data)
+    rng = random.Random(7)
+    for _ in range(300):
+        cuts = sorted(rng.sample(range(1, len(data)), rng.randint(0, len(data) - 1)))
+        chunks = [data[a:b] for a, b in zip([0, *cuts], [*cuts, len(data)])]
+        assert split_lines(chunks) == expected, chunks
+    assert split_lines([bytes([b]) for b in data]) == expected  # one byte at a time
+
+
+def test_one_byte_chunks_without_a_newline_cost_linear_time() -> None:
+    """N2: was quadratic (every chunk searched the whole buffer again):
+    about 40 s for this input before, well under a second now."""
+    started = time.monotonic()
+    assert split_lines([b"x"] * 1_000_000) == [b"x" * 1_000_000]
+    assert time.monotonic() - started < 5
+
+
+def test_the_byte_bound_holds_for_one_byte_chunks(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(client_module, "MAX_RESPONSE_BYTES", 1000)
+    with pytest.raises(McpUncertain, match="too large"):
+        split_lines([b"x"] * 1001)
+    assert split_lines([b"x"] * 1000) == [b"x" * 1000]
+
+
+@pytest.mark.parametrize("ending", [b"\r", b"\n", b"\r\n"])
+def test_a_message_ended_by_cr_only_at_the_end_of_the_stream_is_used(ending: bytes) -> None:
+    """C3: ``data: ...\\r\\r`` is a complete SSE event (CR-only lines)."""
+    def make(request_id: int) -> httpx.Response:
+        message = b'{"jsonrpc": "2.0", "id": %d, "result": {"content": [{"type": "text", "text": "ok"}]}}' % request_id
+        async def body() -> Any:
+            for byte in b"data: " + message + ending * 2:  # one byte at a time
+                yield bytes([byte])
+        return httpx.Response(200, content=body(), headers={"content-type": "text/event-stream"})
+
+    result = asyncio.run(first_call(FakeMcpServer(), make))
+    assert result["content"][0]["text"] == "ok"

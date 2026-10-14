@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from collections.abc import AsyncIterator, Mapping
 from typing import Any
 
@@ -53,6 +54,7 @@ SUPPORTED_VERSIONS = frozenset({"2025-11-25", "2025-06-18", "2025-03-26"})
 MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 MAX_LIST_BYTES = 8 * 1024 * 1024  # every tools/list page together
 MAX_LISTED_TOOLS = 1000
+_LINE_END = re.compile(rb"[\r\n]")
 # Statuses that reject the request itself, before any Tool could run.
 REFUSED_STATUSES = frozenset({400, 401, 403, 404, 405, 406, 413, 415})
 CONNECT_SECONDS = 5.0
@@ -235,25 +237,39 @@ class McpClient:
 
 
 async def _bounded_lines(response: httpx.Response) -> AsyncIterator[bytes]:
-    """The stream's lines (without their CR, LF or CRLF ending), reading at
-    most MAX_RESPONSE_BYTES raw bytes in all."""
+    """The stream's lines without their ending (CRLF, LF or CR, as SSE
+    allows), reading at most MAX_RESPONSE_BYTES raw bytes in all.
+
+    Linear in what arrives, however it is chunked: each byte is searched
+    once (``scan`` marks where the last search stopped), and the buffer
+    keeps only the unfinished line. A CR that ends the buffer may be the
+    first half of a CRLF, so it waits for the next byte — or for the end of
+    the stream, where it ends its line."""
     size = 0
     pending = bytearray()
-    async for chunk in response.aiter_bytes():  # identity only (checked): the bytes as they arrive
+    scan = 0  # pending[:scan] holds no line ending
+    async for chunk in response.aiter_bytes():
         size += len(chunk)
         if size > MAX_RESPONSE_BYTES:
             raise McpUncertain("the response stream is too large")
         pending.extend(chunk)
-        while True:
-            cut = min((i for i in (pending.find(b"\n"), pending.find(b"\r")) if i >= 0), default=-1)
-            if cut < 0 or (pending[cut] == 0x0D and cut == len(pending) - 1):
-                break  # no line yet, or a CR that may be the start of CRLF
-            line = bytes(pending[:cut])
-            end = cut + 2 if pending[cut : cut + 2] == b"\r\n" else cut + 1
-            del pending[:end]
-            yield line
-    if pending:
-        yield bytes(pending)
+        start = 0
+        while (found := _LINE_END.search(pending, scan)) is not None:
+            cut = found.start()
+            if pending[cut] == 0x0D and cut == len(pending) - 1:
+                scan = cut  # CR or CRLF: decided by the next byte
+                break
+            yield bytes(pending[start:cut])
+            start = scan = cut + (2 if pending[cut : cut + 2] == b"\r\n" else 1)
+        else:
+            scan = len(pending)
+        if start:
+            del pending[:start]  # only bytes after the last ending, all from this chunk
+            scan -= start
+    if pending.endswith(b"\r"):
+        yield bytes(pending[:-1])  # a CR at the very end ends its line
+    elif pending:
+        yield bytes(pending)  # an unfinished last line (dispatches nothing by itself)
 
 
 async def _read_bounded(response: httpx.Response) -> bytes:
