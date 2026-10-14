@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import functools
 from collections.abc import Callable, Coroutine
 from typing import Any
@@ -14,7 +15,11 @@ from himari.common import TextBlock
 from himari.control.api import DriveState
 from himari.data.api import RunPurpose, RunStatus
 from himari.prompt.api import CompressedHistory, ContextBudget, ToolGroupTurn, UserTurn
-from himari.prompt.compaction import COMPACTION_INSTRUCTIONS
+from himari.bootstrap import build_runtime
+from himari.prompt.api import ContextDecision, ModelInput, PromptInputs, RequestOptions
+from himari.prompt.compaction import COMPACTION_INSTRUCTIONS, Compactor, request_tokens
+from himari.prompt.composer import Composer
+from himari.provider.scripted import ScriptedAdapter
 from himari.provider.api import NativeNoResponse
 from himari.provider.scripted import Measured
 from himari.tool.api import ToolOutcome, ToolStatus
@@ -79,11 +84,11 @@ async def test_a_measured_size_over_the_threshold_compacts_everything_but_the_ta
 
 @sync
 async def test_without_usage_the_utf8_estimate_triggers_compaction() -> None:
-    big = "가" * 900  # 2700 bytes → 900 tokens at 3 bytes per token
-    rt, adapter = runtime([final("ok"), final("SUMMARY"), final("done")], context_budget=BUDGET)
-    await rt.driver.drive(SCOPE, user(big))
-    result = await rt.driver.drive(SCOPE, user("next"))
-    assert result.state is DriveState.COMPLETED and len(result.compaction_run_ids) == 1
+    part = "가" * 250  # 750 bytes → 250 tokens at 3 bytes per token
+    rt, adapter = runtime([final("ok"), final("ok"), final("ok"), final("SUMMARY"), final("done")], context_budget=BUDGET)
+    results = [await rt.driver.drive(SCOPE, user(text)) for text in (part, part, part, "next")]
+    assert all(r.state is DriveState.COMPLETED for r in results)
+    assert sum(len(r.compaction_run_ids) for r in results) == 1
     assert isinstance(adapter.prepared_inputs[-1].conversation[0], CompressedHistory)
 
 
@@ -184,3 +189,91 @@ async def test_the_summary_survives_a_restart() -> None:
     assert result.state is DriveState.COMPLETED
     head = adapter2.prepared_inputs[-1].conversation[0]
     assert isinstance(head, CompressedHistory) and head.summary == (TextBlock("S1"),)
+
+
+# --- PR #14 review -------------------------------------------------------------
+
+
+@sync
+async def test_b1_the_summarizing_request_itself_stays_within_the_limit() -> None:
+    # The turn is just over 80% of the limit, but the summarizer's input adds
+    # the compaction instructions and JSON framing to the same history.
+    rt, adapter = runtime([final("ok"), final("S"), final("done")], context_budget=BUDGET)
+    await rt.driver.drive(SCOPE, user("가" * 800))
+    await rt.driver.drive(SCOPE, user("next"))
+    for sent in adapter.prepared_inputs:
+        assert request_tokens(sent) <= BUDGET.limit_tokens, sent.stable_prefix[0][:40]
+
+
+@sync
+async def test_b2_a_measurement_under_other_instructions_is_not_reused() -> None:
+    rt, _ = runtime([Measured(final("a1"), 100)], context_budget=BUDGET, instructions=("short",))
+    await rt.driver.drive(SCOPE, user("q1"))
+    long = ("You are HIMARI. " + "Follow the house rules carefully. " * 120,)  # ~1400 tokens by itself
+    rt2, adapter2 = runtime([final("a2")], store=restart(rt.store), context_budget=BUDGET, instructions=long)
+    result = await rt2.driver.drive(SCOPE, user("q2"))
+    assert result.state is DriveState.REQUEST_REJECTED and "context_budget_exceeded" in result.detail
+    assert result.run_ids == () and all(_is_compaction(i) for i in adapter2.prepared_inputs)
+
+
+@sync
+async def test_b1_a_prefix_too_large_for_one_summary_is_folded_in_steps() -> None:
+    budget = ContextBudget(limit_tokens=2000)
+    # Ten turns of ~300 tokens each, measured small, then one measured at 1900:
+    # the prefix (~3000 tokens) cannot go into one summarizing request.
+    script = [Measured(final("a"), 100)] * 9 + [Measured(final("a"), 1900)]
+    rt, adapter = runtime([*script, final("S1"), final("S2"), final("done")], context_budget=budget)
+    for _ in range(10):
+        await rt.driver.drive(SCOPE, user("가" * 300))
+    result = await rt.driver.drive(SCOPE, user("last"))
+    assert result.state is DriveState.COMPLETED, result.detail
+    assert len(result.compaction_run_ids) == 2
+    summarizers = [i for i in adapter.prepared_inputs if _is_compaction(i)]
+    assert all(request_tokens(i) <= budget.limit_tokens for i in summarizers)
+    later = summarizers[1].conversation[0].blocks[0].text  # type: ignore[union-attr]
+    assert '"previous_summary": "S1"' in later
+    head = adapter.prepared_inputs[-1].conversation[0]
+    assert isinstance(head, CompressedHistory) and head.summary == (TextBlock("S2"),)
+    assert request_tokens(adapter.prepared_inputs[-1]) <= budget.limit_tokens
+
+
+@sync
+async def test_b1_a_message_too_large_to_summarize_is_refused_explicitly() -> None:
+    rt, adapter = runtime([final("ok")], context_budget=BUDGET)
+    await rt.driver.drive(SCOPE, user("가" * 900))
+    sent = len(adapter.sent)
+    result = await rt.driver.drive(SCOPE, user("next"))
+    assert result.state is DriveState.REQUEST_REJECTED and "no compaction fits" in result.detail
+    assert len(adapter.sent) == sent  # neither a summarizing nor a turn request
+
+
+@sync
+async def test_b2_a_measurement_under_another_model_is_not_reused() -> None:
+    rt, _ = runtime([Measured(final("a1"), 100)], context_budget=BUDGET)
+    await rt.driver.drive(SCOPE, user("q1"))
+    store = restart(rt.store)
+    rt2 = build_runtime(ScriptedAdapter([final("a2")]), store=store, model_id="other-model", context_budget=BUDGET)
+    inputs = await rt2.driver._loader.load(SCOPE, (), RequestOptions("other-model"))
+    composed = Composer().compose(inputs)
+    assert inputs.usage_mark is not None and not Compactor().estimate(inputs, composed).measured
+
+
+class OversizedPlanner(Compactor):
+    """A planner that breaks its promise: its plan is over the limit."""
+
+    def decide(self, inputs: PromptInputs, model_input: ModelInput, budget: ContextBudget) -> ContextDecision:
+        decision = super().decide(inputs, model_input, budget)
+        if decision.compaction is None:
+            return decision
+        return dataclasses.replace(
+            decision, compaction=dataclasses.replace(decision.compaction, request_tokens=budget.limit_tokens + 1))
+
+
+@sync
+async def test_b1_the_driver_never_sends_a_plan_over_the_limit() -> None:
+    rt, adapter = runtime([Measured(final("a1"), 850), final("a2")], context_budget=BUDGET)
+    await rt.driver.drive(SCOPE, user("q1"))
+    rt.driver._planner = OversizedPlanner()
+    result = await rt.driver.drive(SCOPE, user("q2"))
+    assert result.compaction_run_ids == () and not any(_is_compaction(i) for i in adapter.prepared_inputs)
+    assert result.state is DriveState.COMPLETED  # 850 + q2 still fits: the Run itself goes ahead

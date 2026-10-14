@@ -9,9 +9,11 @@ Context budget (PROMPT-04): with a ``ContextBudget``, every Run's input is
 estimated first. At ``compact_at`` the older history is summarized by one
 tool-less COMPACTION Run (raw request/response kept like any Run) and the
 summary is committed as the latest snapshot; the input is then composed
-again. At most one compaction precedes a Run. If compaction fails, the Run
-still goes ahead when its input fits ``limit_tokens``; an input estimated
-over the limit is never sent (REQUEST_REJECTED).
+again. A summarizing request is itself never sent over ``limit_tokens``;
+when the whole prefix does not fit one, it is folded in several steps
+(at most ``MAX_COMPACTIONS_PER_RUN`` before a Run). If compaction fails,
+the Run still goes ahead when its input fits ``limit_tokens``; an input
+estimated over the limit is never sent (REQUEST_REJECTED).
 """
 
 from __future__ import annotations
@@ -66,6 +68,9 @@ from himari.provider.api import (
     ProviderError,
 )
 from himari.tool.api import GroupState, ToolDispatcher
+
+
+MAX_COMPACTIONS_PER_RUN = 4
 
 
 class Driver:
@@ -338,18 +343,26 @@ class Driver:
         if self._planner is None or self._budget is None:
             return model_input, None
         decision = self._planner.decide(inputs, model_input, self._budget)
-        estimate, failure = decision.estimate, None
-        if decision.compaction is not None:
+        failure = None
+        for _ in range(MAX_COMPACTIONS_PER_RUN):
+            if decision.compaction is None:
+                break
             run_id, failure = await self._compact(scope, decision.compaction, self._planner, self._budget)
             if run_id is not None:
                 compactions.append(run_id)
-            if failure is None:
-                inputs = await self._loader.load(scope, triggers, self._options)
-                model_input = self._composer.compose(inputs)
-                estimate = self._planner.estimate(inputs, model_input)
+            if failure is not None:
+                break
+            inputs = await self._loader.load(scope, triggers, self._options)
+            model_input = self._composer.compose(inputs)
+            decision = self._planner.decide(inputs, model_input, self._budget)
+        estimate = decision.estimate
         if estimate.tokens > self._budget.limit_tokens:
             detail = f"context_budget_exceeded: about {estimate.tokens} tokens > {self._budget.limit_tokens}"
-            return model_input, detail + (f" (compaction failed: {failure})" if failure else "")
+            if failure is not None:
+                detail += f" (compaction failed: {failure})"
+            elif decision.compaction is None:
+                detail += " (no compaction fits within the limit)"
+            return model_input, detail
         return model_input, None
 
     async def _compact(
@@ -357,6 +370,8 @@ class Driver:
     ) -> tuple[RunId | None, str | None]:
         """One summarizing call, recorded as a COMPACTION Run. Returns its
         Run (if one was prepared) and a failure, or None on success."""
+        if plan.request_tokens > budget.limit_tokens:  # the planner's promise, checked before any send
+            return None, f"compaction request of about {plan.request_tokens} tokens exceeds the limit"
         try:
             prepared = self._provider.prepare_native_request(plan.request)
         except ProviderError as exc:

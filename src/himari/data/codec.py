@@ -65,6 +65,12 @@ def _obj(value: object) -> Mapping[str, Any]:
     return value
 
 
+def _optional_str(value: object) -> str | None:
+    if value is not None and not isinstance(value, str):
+        raise ValueError(f"expected a string, got {type(value).__name__}")
+    return value
+
+
 # --- content ------------------------------------------------------------------
 
 
@@ -191,6 +197,7 @@ def prompt_basis(basis: PromptBasis) -> str:
         "state_revision": basis.state_revision,
         "snapshot_revision": basis.snapshot_revision,
         "artifact_revisions": dict(basis.artifact_revisions),
+        "context_key": basis.context_key,
     })
 
 
@@ -202,6 +209,7 @@ def prompt_basis_from(text: str) -> PromptBasis:
         int(data["state_revision"]),
         None if snapshot is None else int(snapshot),
         {ArtifactId(k): int(v) for k, v in _obj(data["artifact_revisions"]).items()},
+        _optional_str(data.get("context_key")),  # absent in Runs stored before V3-P48
     )
 
 

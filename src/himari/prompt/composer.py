@@ -33,7 +33,7 @@ from himari.prompt.api import (
     ToolGroupTurn,
     UserTurn,
 )
-from himari.prompt.compaction import anchors, part_anchor, read_summary
+from himari.prompt.compaction import anchors, context_key, part_anchor, read_summary
 
 
 class Composer:
@@ -79,6 +79,7 @@ class Composer:
                 state_revision=basis.state_revision,
                 snapshot_revision=snapshot_revision,
                 artifact_revisions={a.artifact_id: a.revision for a in basis.artifacts},
+                context_key=context_key(inputs),
             ),
         )
 

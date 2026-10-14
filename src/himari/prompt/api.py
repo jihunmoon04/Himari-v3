@@ -149,6 +149,8 @@ class UsageMark(DeepFrozen):
     input_tokens: int
     event_sequence: int
     snapshot_revision: int | None
+    context_key: str | None = None  # PromptBasis.context_key of that Run
+    state_revision: int | None = None
 
 
 @dataclass(frozen=True)
@@ -190,6 +192,7 @@ class CompactionPlan(DeepFrozen):
     covers_through_sequence: int
     expected_revision: int | None  # the snapshot this plan extends
     folded_parts: int
+    request_tokens: int  # pessimistic estimate; never over the budget's limit
 
 
 @dataclass(frozen=True)
@@ -211,7 +214,10 @@ class CompactionPlanner(Protocol):
     def decide(self, inputs: PromptInputs, model_input: ModelInput, budget: ContextBudget) -> ContextDecision:
         """Estimate ``model_input`` (composed from ``inputs``) and, if it
         reaches ``budget.compact_at``, plan one compaction — None if there is
-        nothing older than the tail to fold."""
+        nothing older than the tail to fold, or if not even the oldest part
+        fits a summarizing request within ``budget.limit_tokens``. A plan
+        may fold less than everything before the tail so that its own
+        request fits; another compaction can then continue from it."""
         ...
 
     def estimate(self, inputs: PromptInputs, model_input: ModelInput) -> ContextEstimate: ...

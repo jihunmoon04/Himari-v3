@@ -158,6 +158,9 @@ class PromptBasis(DeepFrozen):
     state_revision: int
     snapshot_revision: int | None = None
     artifact_revisions: Mapping[ArtifactId, int] = field(default_factory=dict)
+    # Opaque digest of what the input was composed under besides history and
+    # state (model, instructions, Tool catalog); set by Prompt (V3-P48).
+    context_key: str | None = None
 
 
 @dataclass(frozen=True)

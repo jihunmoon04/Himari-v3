@@ -7,7 +7,7 @@ from collections.abc import Callable, Iterable, Sequence
 from typing import Any
 from datetime import UTC, datetime
 
-from himari.bootstrap import Runtime, Store, build_runtime
+from himari.bootstrap import DEFAULT_INSTRUCTIONS, Runtime, Store, build_runtime
 from himari.common import (
     CallId,
     CallRef,
@@ -189,6 +189,7 @@ def runtime(
     store: Store | None = None,
     provider: ScriptedAdapter | None = None,
     context_budget: ContextBudget | None = None,
+    instructions: Sequence[str] | None = None,
 ) -> tuple[Runtime, ScriptedAdapter]:
     """Fresh runtime; pass ``restart(rt.store)`` to model a process restart."""
     adapter = provider if provider is not None else ScriptedAdapter(script)
@@ -202,6 +203,7 @@ def runtime(
         environments=[FakeEnvironment(*env_tools)] if env_tools else [],
         store=store,
         context_budget=context_budget,
+        instructions=DEFAULT_INSTRUCTIONS if instructions is None else instructions,
         # Tests exercising REQUIRE_USER opt in explicitly by using such a Tool;
         # the production default stays off (see test_registry_schema.py).
         allow_require_user_tools=any(

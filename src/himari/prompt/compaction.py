@@ -20,6 +20,13 @@ purpose: compacting a little early is cheap, sending an oversized request
 is not. No tokenizer is used: one model-independent rule, no new
 dependency, and the measured part is the model's own count anyway.
 
+A measurement is reused only for the same snapshot revision and the same
+``context_key`` — a digest of the model, the instructions and the Tool
+catalog — so a restart with another model, longer instructions or more
+Tools re-estimates the whole request. If the operational state changed
+since the measurement, the whole current state is added on top (the old
+state's share cannot be separated out, so it is counted twice).
+
 Opaque reasoning continuations are not counted. Their bytes (often
 kilobytes of encrypted data) are not what the Provider bills as input:
 live, replaying a gpt-5-nano turn's encrypted reasoning raised the
@@ -32,13 +39,17 @@ previous summary, if any). The tail is the longest run of recent turns
 within ``keep_recent`` of the limit — always at least the latest part,
 and only the latest part when the whole history would fit (the size is
 then elsewhere, e.g. in measured overhead) — and starts at a user message
-when it contains one. Boundaries fall only
+when it contains one. The summarizing request must itself fit the limit:
+if the whole prefix does not fit, only the oldest parts that do are
+folded, and the Driver compacts again from that summary (a bounded number
+of times per Run). Boundaries fall only
 between whole turns, so a ToolCall group is never split from its results,
 and a folded turn takes its opaque reasoning continuation with it (V3-049).
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 from collections.abc import Mapping, Sequence
@@ -145,6 +156,16 @@ def request_tokens(model_input: ModelInput) -> int:
     return total + tokens_of_text(repr(model_input.current_state))
 
 
+def context_key(inputs: PromptInputs) -> str:
+    """Digest of what a request is composed under besides history and state."""
+    data = {
+        "model": inputs.request_options.model_id,
+        "instructions": list(inputs.instructions),
+        "tools": [[d.tool_id, d.description, thaw(d.input_schema)] for d in inputs.tool_catalog],
+    }
+    return hashlib.sha256(json.dumps(data, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+
+
 def read_summary(snapshot: PromptSnapshot | None) -> str | None:
     """The summary of a compaction snapshot, or None. A snapshot of another
     schema or shape is a stale cache, not an error: it is ignored and the
@@ -224,8 +245,12 @@ class Compactor:
         return SNAPSHOT_SCHEMA_VERSION
 
     def estimate(self, inputs: PromptInputs, model_input: ModelInput) -> ContextEstimate:
-        mark = inputs.usage_mark
-        if mark is None or mark.snapshot_revision != model_input.prompt_basis.snapshot_revision:
+        mark, basis = inputs.usage_mark, model_input.prompt_basis
+        if (
+            mark is None
+            or mark.snapshot_revision != basis.snapshot_revision
+            or mark.context_key != basis.context_key
+        ):
             return ContextEstimate(request_tokens(model_input), measured=False)
         by_event, by_run = anchors(inputs.events)
         added = sum(
@@ -233,6 +258,8 @@ class Compactor:
             for part in model_input.conversation
             if not isinstance(part, CompressedHistory) and part_anchor(part, by_event, by_run) > mark.event_sequence
         )
+        if mark.state_revision != basis.state_revision:
+            added += tokens_of_text(repr(model_input.current_state))
         return ContextEstimate(mark.input_tokens + added, measured=True)
 
     def decide(self, inputs: PromptInputs, model_input: ModelInput, budget: ContextBudget) -> ContextDecision:
@@ -259,27 +286,48 @@ class Compactor:
             start = first_user  # a clean boundary: the tail starts with a user message
         if start == 0:
             return None
-        covers = part_anchor(parts[start], by_event, by_run) - 1
         previous = read_summary(inputs.snapshot)
         revision = inputs.snapshot.revision if inputs.snapshot is not None else None
+        # The summarizing request must fit too: fold only the oldest parts
+        # that do (first guess from per-part sizes, then measured exactly).
+        framing = tokens_of_text(_transcript(None, ()))
+        total = request_tokens(self._request(inputs, model_input, previous, (), 0))
+        count = 0
+        while count < start:
+            size = tokens_of_text(_transcript(None, (parts[count],))) - framing + 1
+            if total + size > budget.limit_tokens:
+                break
+            total += size
+            count += 1
+        while count > 0:
+            covers = part_anchor(parts[count], by_event, by_run) - 1
+            request = self._request(inputs, model_input, previous, parts[:count], covers)
+            size = request_tokens(request)
+            if size <= budget.limit_tokens:
+                return CompactionPlan(request, covers, revision, folded_parts=count, request_tokens=size)
+            count -= 1
+        return None
+
+    @staticmethod
+    def _request(inputs: PromptInputs, model_input: ModelInput, previous: str | None,
+                 folded: Sequence[HistoryPart], covers: int) -> ModelInput:
         empty = PersistedStateBasis(
             conversation_sequence=covers, state_revision=inputs.state_basis.state_revision,
             environments=(), bindings=(), artifacts=(),
         )
-        request = ModelInput(
+        return ModelInput(
             stable_prefix=(COMPACTION_INSTRUCTIONS,),
             tool_catalog=(),
-            conversation=(UserTurn(EventId("compaction-input"), (TextBlock(_transcript(previous, parts[:start])),)),),
+            conversation=(UserTurn(EventId("compaction-input"), (TextBlock(_transcript(previous, folded)),)),),
             current_state=CurrentStateProjection(basis=empty),
             request_options=model_input.request_options,
             trigger_refs=(),
             prompt_basis=PromptBasis(
                 event_sequence=covers,
                 state_revision=inputs.state_basis.state_revision,
-                snapshot_revision=revision,
+                snapshot_revision=inputs.snapshot.revision if inputs.snapshot is not None else None,
             ),
         )
-        return CompactionPlan(request, covers, revision, folded_parts=start)
 
     def summary_body(self, blocks: Sequence[ContentBlock], budget: ContextBudget) -> JsonValue:
         if not blocks or not all(isinstance(b, TextBlock) for b in blocks):
