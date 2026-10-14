@@ -35,7 +35,7 @@ CONTEXT_TOKENS_VAR = "HIMARI_CONTEXT_TOKENS"
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
-DEFAULT_MODEL = "openai/gpt-5-nano"
+DEFAULT_MODEL = "openai/gpt-6-luna"
 
 _LOOPBACK_BIND_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 _LOOPBACK_ORIGIN_HOSTS = frozenset({"127.0.0.1", "localhost", "[::1]"})

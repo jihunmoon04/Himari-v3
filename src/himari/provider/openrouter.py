@@ -77,11 +77,18 @@ REASONING_EFFORTS = frozenset({"max", "xhigh", "high", "medium", "low", "minimal
 ACCEPTED_FINISH_REASONS = frozenset({"stop", "tool_calls"})
 
 # Only effort values each model was *verified* to accept, by a live sweep
-# (2026-10-13; re-checked by tests/live test_live_declared_efforts_are_accepted).
-# gpt-5-nano answers "none" with HTTP 400, so it is not declared. Models not
+# (2026-10-13, gpt-6-luna 2026-10-14; re-checked by tests/live
+# test_live_declared_efforts_are_accepted). gpt-5-nano answers "none" with
+# HTTP 400, so it is not declared. Models not
 # listed get no assumed reasoning capability: an effort for them is refused
 # before send rather than silently ignored or downgraded.
 KNOWN_CAPABILITIES: Mapping[str, ProviderCapabilities] = {
+    "openai/gpt-6-luna": ProviderCapabilities(
+        model_id="openai/gpt-6-luna",
+        reasoning_efforts=REASONING_EFFORTS,
+        parallel_tool_calls=True,
+        context_tokens=1_050_000,  # OpenRouter /api/v1/models context_length, 2026-10-14
+    ),
     "openai/gpt-5-nano": ProviderCapabilities(
         model_id="openai/gpt-5-nano",
         reasoning_efforts=frozenset({"minimal", "low", "medium", "high", "xhigh", "max"}),
