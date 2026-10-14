@@ -322,3 +322,25 @@ def test_a_committed_compaction_does_not_hide_a_waiting_question() -> None:
         assert await data.find_waiting_call(SCOPE) == call
 
     asyncio.run(scenario())
+
+
+def test_a_compaction_step_is_settled_without_touching_the_snapshot() -> None:
+    async def scenario() -> None:
+        data = fresh()
+        await data.append_event(SCOPE, user("a"))
+        run_id = await received_compaction(data)
+        await data.record_compaction_step(SCOPE, run_id)
+        assert (await data.read_run(SCOPE, run_id)).status is RunStatus.PROJECTED
+        assert await data.get_latest_snapshot(SCOPE) is None
+        with pytest.raises(DataError) as again:
+            await data.record_compaction_step(SCOPE, run_id)
+        assert again.value.code is DataErrorCode.INVALID_STATE_TRANSITION
+        turn = await data.prepare_run(
+            SCOPE, RunPreparation(b"{}", "t", RawRepresentation.ADAPTER_SERIALIZED, (), PromptBasis(0, 0), "p", "m"))
+        await data.mark_dispatch(SCOPE, turn)
+        await data.record_raw_outcome(SCOPE, turn, RawReceived(b"{}", "t"))
+        with pytest.raises(DataError) as not_compaction:
+            await data.record_compaction_step(SCOPE, turn)
+        assert not_compaction.value.code is DataErrorCode.INVALID_STATE_TRANSITION
+
+    asyncio.run(scenario())

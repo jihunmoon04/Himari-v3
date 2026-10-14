@@ -1035,6 +1035,14 @@ class SqliteData:
             )
             return revision
 
+    async def record_compaction_step(self, scope: TrustedScope, run_id: RunId) -> None:
+        with self._tx() as tx:
+            tx.authorized(scope)
+            run = self._run_row(tx, scope, run_id)
+            if run["status"] != RunStatus.RECEIVED.value or not run["compaction"]:
+                raise DataError(DataErrorCode.INVALID_STATE_TRANSITION, f"{run_id} is not a received compaction Run")
+            self._set_run(tx, run_id, RunStatus.PROJECTED)
+
     async def commit_compaction(
         self,
         scope: TrustedScope,

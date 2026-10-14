@@ -220,3 +220,32 @@ def test_live_compaction_keeps_what_matters(model: str) -> None:
               f"summary={snapshot.body['summary']!r}")
 
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("model", MODELS)
+def test_live_a_long_message_is_summarized_in_a_chain(model: str) -> None:
+    """A message too long for one summarizing request is summarized in
+    labelled pieces; a fact from its middle survives the chain. The first
+    request is over the working budget but within the hard limit, so it is
+    sent rather than refused."""
+    rt = build_runtime(OpenRouterAdapter(KEY), model_id=model, reasoning_effort="low",
+                       context_budget=ContextBudget(limit_tokens=2500, hard_limit_tokens=20_000))
+    rt.store.create_conversation(SCOPE)
+    filler = "The quick brown fox jumps over the lazy dog. " * 120
+    message = f"Ignore this filler. {filler} The vault code is ORCHID-7731. {filler} Reply: ok"
+
+    async def scenario() -> None:
+        first = await rt.driver.drive(SCOPE, user(message))
+        assert first.state is DriveState.COMPLETED, first.detail
+        second = await rt.driver.drive(SCOPE, user("Reply: ok"))
+        assert second.state is DriveState.COMPLETED, second.detail
+        chained = [*first.compaction_run_ids, *second.compaction_run_ids]
+        assert len(chained) >= 2, chained
+        third = await rt.driver.drive(SCOPE, user("What is the vault code? Reply with only the code."))
+        assert third.state is DriveState.COMPLETED, third.detail
+        assert "ORCHID-7731" in final_text(third)
+        snapshot = await rt.data.get_latest_snapshot(SCOPE)
+        assert snapshot is not None
+        print(f"\n{model}: calls={len(chained)} summary={snapshot.body['summary']!r}"[:600])  # type: ignore[index]
+
+    asyncio.run(scenario())

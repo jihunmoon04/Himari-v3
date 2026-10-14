@@ -98,7 +98,7 @@ P1은 Workspace 전용 소프트웨어 모듈을 다시 도입하는 단계가 �
 
 | ID | 주제 | 아직 확정해야 할 계약 |
 | --- | --- | --- |
-| Q-14 | Compaction | **기본 구현 (V3-P48):** 토큰 기준 자동 압축(80%), 요약 + exact tail, COMPACTION Run, T9c 원자 교체. 남은 것: 수동 압축 명령(Claude `/compact` 같은), UI에 압축 표시·현재 문맥 크기 노출, 요약 품질 평가, 측정값 없는 첫 요청의 과대 추정(영어 ~1.4배)으로 한도 근처 첫 메시지가 거부될 수 있음, 요청 거부 기준을 예산이 아니라 모델 창으로 둘지, 요약 요청에 들어가지 않을 만큼 큰 단일 메시지(지금은 명시적 거부)를 나눠 요약할지 |
+| Q-14 | Compaction | **기본 구현 (V3-P48):** 토큰 기준 자동 압축(80%), 요약 + exact tail, COMPACTION Run, T9c 원자 교체. 남은 것: 수동 압축 명령(Claude `/compact` 같은), UI에 압축 표시·현재 문맥 크기 노출, 요약 품질 평가, 측정값 없는 첫 요청의 과대 추정(영어 ~1.4배). 거부 기준(모델 창)과 큰 메시지 연쇄 요약은 V3-P49로 구현 |
 | Q-15 | Reasoning / continuation 확장 | **기본 턴별 저장·재생은 PR #6으로 구현(V3-049)**, 압축 시 제외는 V3-P48. 남은 것: 타 모델 지원, cache-control |
 | Q-16 | Memory Tool | 기억 생성·조회·삭제 정책, 자동 삽입/검증/권한, Data 읽기 경계 |
 | Q-17 | Plan / Note Artifact | **원본은 Data conversation-scoped Artifact로 확정**. Revision/CAS, schema, 삭제/복구·표시, Outside 노출/export |

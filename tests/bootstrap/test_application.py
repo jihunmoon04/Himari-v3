@@ -25,6 +25,7 @@ from himari.control.api import DriveState
 from himari.data.sqlite import StoreLockedError
 from himari.environment.inside import INSIDE
 from himari.environment.inside.sandbox import SandboxState
+from himari.provider.api import ProviderCapabilities
 from himari.provider.scripted import ScriptedAdapter, ScriptStep
 
 ALICE, BOB = PrincipalId("alice"), PrincipalId("bob")
@@ -175,10 +176,30 @@ def test_the_application_compacts_with_its_budget(tmp_path: Path) -> None:
                                      context_tokens=5000)
         try:
             assert app.context_tokens == 5000
+            budget = app.runtime.driver._budget
+            assert budget is not None and budget.hard_limit_tokens is None  # the scripted model declares no window
             scope = TrustedScope(ALICE, await app.create_conversation(ALICE))
             await app.runtime.driver.drive(scope, user("가" * 3500))
             result = await app.runtime.driver.drive(scope, user("next"))
             assert result.state is DriveState.COMPLETED and len(result.compaction_run_ids) == 1
+        finally:
+            await app.close()
+
+    asyncio.run(scenario())
+
+
+class WindowedAdapter(ScriptedAdapter):
+    def describe_capabilities(self, model_id: str) -> ProviderCapabilities:
+        return ProviderCapabilities(model_id=model_id, context_tokens=300_000)
+
+
+def test_the_models_window_is_the_hard_limit_and_the_budget_is_capped(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        app = await Application.open(tmp_path / "root", WindowedAdapter(), model_id="m", sandbox=False)
+        try:
+            budget = app.runtime.driver._budget
+            assert budget is not None
+            assert (budget.limit_tokens, budget.hard_limit_tokens) == (DEFAULT_CONTEXT_TOKENS, 300_000)
         finally:
             await app.close()
 

@@ -10,10 +10,12 @@ estimated first. At ``compact_at`` the older history is summarized by one
 tool-less COMPACTION Run (raw request/response kept like any Run) and the
 summary is committed as the latest snapshot; the input is then composed
 again. A summarizing request is itself never sent over ``limit_tokens``;
-when the whole prefix does not fit one, it is folded in several steps
-(at most ``MAX_COMPACTIONS_PER_RUN`` before a Run). If compaction fails,
-the Run still goes ahead when its input fits ``limit_tokens``; an input
-estimated over the limit is never sent (REQUEST_REJECTED).
+when the whole prefix does not fit one, it is folded in several
+compactions (at most ``MAX_COMPACTIONS_PER_RUN`` before a Run), and a
+part too large for one request is summarized in a chain of calls. If
+compaction fails, the Run still goes ahead when its input fits the
+budget's ``ceiling_tokens`` (the model's window); an input estimated over
+it is never sent (REQUEST_REJECTED).
 """
 
 from __future__ import annotations
@@ -340,7 +342,8 @@ class Driver:
         model_input: ModelInput,
         compactions: list[RunId],
     ) -> tuple[ModelInput, str | None]:
-        """The input to send (compacted at most once), or a refusal."""
+        """The input to send (after at most MAX_COMPACTIONS_PER_RUN
+        compactions), or a refusal if it is still over the hard limit."""
         if self._planner is None or self._budget is None:
             return model_input, None
         decision = self._planner.decide(inputs, model_input, self._budget)
@@ -348,17 +351,15 @@ class Driver:
         for _ in range(MAX_COMPACTIONS_PER_RUN):
             if decision.compaction is None:
                 break
-            run_id, failure = await self._compact(scope, decision.compaction, self._planner, self._budget)
-            if run_id is not None:
-                compactions.append(run_id)
+            failure = await self._compact(scope, decision.compaction, self._planner, self._budget, compactions)
             if failure is not None:
                 break
             inputs = await self._loader.load(scope, triggers, self._options)
             model_input = self._composer.compose(inputs)
             decision = self._planner.decide(inputs, model_input, self._budget)
-        estimate = decision.estimate
-        if estimate.tokens > self._budget.limit_tokens:
-            detail = f"context_budget_exceeded: about {estimate.tokens} tokens > {self._budget.limit_tokens}"
+        estimate, ceiling = decision.estimate, self._budget.ceiling_tokens
+        if estimate.tokens > ceiling:
+            detail = f"context_budget_exceeded: about {estimate.tokens} tokens > {ceiling}"
             if failure is not None:
                 detail += f" (compaction failed: {failure})"
             elif decision.compaction is None:
@@ -367,17 +368,57 @@ class Driver:
         return model_input, None
 
     async def _compact(
-        self, scope: TrustedScope, plan: CompactionPlan, planner: CompactionPlanner, budget: ContextBudget
-    ) -> tuple[RunId | None, str | None]:
-        """One summarizing call, recorded as a COMPACTION Run. Returns its
-        Run (if one was prepared) and a failure, or None on success."""
-        size = max(plan.request_tokens, planner.request_size(plan.request))  # re-measured, not just trusted
-        if size > budget.limit_tokens:
-            return None, f"compaction request of about {size} tokens exceeds the limit"
+        self,
+        scope: TrustedScope,
+        plan: CompactionPlan,
+        planner: CompactionPlanner,
+        budget: ContextBudget,
+        compactions: list[RunId],
+    ) -> str | None:
+        """One compaction: a chain of summarizing calls, each a COMPACTION
+        Run (appended to ``compactions``). Only the last summary is
+        committed. Returns a failure, or None on success."""
+        summary = plan.previous_summary
+        last = len(plan.pieces) - 1
+        for index in range(len(plan.pieces)):
+            request = planner.step_request(plan, index, summary)
+            size = planner.request_size(request)  # measured here, not taken from the planner
+            if size > budget.limit_tokens:
+                return f"compaction request of about {size} tokens exceeds the limit"
+            run_id, failure, text = await self._summarize(scope, request, planner, budget)
+            if run_id is not None:
+                compactions.append(run_id)
+            if failure is not None or run_id is None or text is None:
+                return failure or "no summary"
+            if index < last:
+                await self._log.record_compaction_step(scope, run_id)
+                summary = text
+                continue
+            try:
+                await self._log.commit_compaction(
+                    scope,
+                    run_id,
+                    expected_revision=plan.expected_revision,
+                    schema_version=planner.snapshot_schema_version,
+                    body=planner.snapshot_body(text),
+                    covers_through_sequence=plan.covers_through_sequence,
+                    basis=plan.prompt_basis,
+                )
+            except DataError as exc:
+                if exc.code not in (DataErrorCode.VERSION_CONFLICT, DataErrorCode.STALE_BASIS):
+                    raise
+                await self._log.record_projection_failure(scope, run_id, exc.code.value)
+                return str(exc)
+        return None
+
+    async def _summarize(
+        self, scope: TrustedScope, request: ModelInput, planner: CompactionPlanner, budget: ContextBudget
+    ) -> tuple[RunId | None, str | None, str | None]:
+        """One summarizing call as a COMPACTION Run: (Run, failure, summary)."""
         try:
-            prepared = self._provider.prepare_native_request(plan.request)
+            prepared = self._provider.prepare_native_request(request)
         except ProviderError as exc:
-            return None, str(exc)
+            return None, str(exc), None
         run_id = await self._log.prepare_run(
             scope,
             RunPreparation(
@@ -385,7 +426,7 @@ class Driver:
                 raw_content_type=prepared.content_type,
                 raw_representation=prepared.raw_representation,
                 trigger_refs=(),
-                prompt_basis=plan.request.prompt_basis,
+                prompt_basis=request.prompt_basis,
                 provider_key=self._provider.provider_key,
                 model_id=self._options.model_id,
                 purpose=RunPurpose.COMPACTION,
@@ -398,31 +439,16 @@ class Driver:
             outcome = NativeUncertain(type(exc).__name__)
         await self._log.record_raw_outcome(scope, run_id, _raw(outcome))
         if not isinstance(outcome, NativeReceived):
-            return run_id, outcome.error_code  # no effects to reconcile: the next Run may try again
+            return run_id, outcome.error_code, None  # no effects to reconcile: the next Run may try again
         try:
             normalized = self._provider.normalize(outcome)
             if not isinstance(normalized, NormalizedFinal):
                 raise PromptError(PromptErrorCode.INVALID_SUMMARY, "the summary call returned tool calls")
-            body = planner.summary_body(normalized.blocks, budget)
+            text = planner.summary_text(normalized.blocks, budget)
         except (ProviderError, PromptError) as exc:
             await self._log.record_projection_failure(scope, run_id, exc.code.value)
-            return run_id, str(exc)
-        try:
-            await self._log.commit_compaction(
-                scope,
-                run_id,
-                expected_revision=plan.expected_revision,
-                schema_version=planner.snapshot_schema_version,
-                body=body,
-                covers_through_sequence=plan.covers_through_sequence,
-                basis=plan.request.prompt_basis,
-            )
-        except DataError as exc:
-            if exc.code not in (DataErrorCode.VERSION_CONFLICT, DataErrorCode.STALE_BASIS):
-                raise
-            await self._log.record_projection_failure(scope, run_id, exc.code.value)
-            return run_id, str(exc)
-        return run_id, None
+            return run_id, str(exc), None
+        return run_id, None, text
 
 
 def _raw(outcome: NativeReceived | NativeNoResponse | NativeUncertain) -> RawRunOutcome:

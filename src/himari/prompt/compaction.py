@@ -43,9 +43,17 @@ then elsewhere, e.g. in measured overhead) — and starts at a user message
 when it contains one. The summarizing request must itself fit the limit:
 if the whole prefix does not fit, only the oldest parts that do are
 folded, and the Driver compacts again from that summary (a bounded number
-of times per Run). Boundaries fall only
-between whole turns, so a ToolCall group is never split from its results,
-and a folded turn takes its opaque reasoning continuation with it (V3-049).
+of times per Run). Boundaries fall only between whole turns, so a ToolCall
+group is never split from its results, and a folded turn takes its opaque
+reasoning continuation with it (V3-049).
+
+Nothing is elided. If even the oldest part alone does not fit one
+summarizing request, its items are split into labelled pieces
+(``"part": "2/5"``) and summarized in a chain: each call gets the summary so
+far as ``previous_summary`` and the next piece, and only the last call's
+summary is committed (at most ``MAX_STEPS`` calls; a quarter of the limit
+is kept free for the running summary). The coverage still moves by whole
+parts only. If not even that works, nothing is compacted.
 """
 
 from __future__ import annotations
@@ -83,7 +91,8 @@ from himari.prompt.api import (
 BYTES_PER_TOKEN = 3
 MESSAGE_OVERHEAD_TOKENS = 4  # role and framing of one native message
 SNAPSHOT_SCHEMA_VERSION = 1  # body: {"summary": str}
-MAX_ITEM_CHARS = 20_000  # one text in the summarizer's input; the middle is elided
+MAX_STEPS = 16  # summarizing calls one plan may need for a single oversized part
+MIN_PIECE_TOKENS = 200  # below this a piece is too small to summarize usefully
 
 COMPACTION_INSTRUCTIONS = """\
 You are compacting the older part of one conversation between a user and \
@@ -94,6 +103,10 @@ You are given, as one JSON document:
 - "previous_summary": a summary of even older history, if one exists, and
 - "items": the exact older conversation items that follow it, in order \
 (user and assistant messages, tool calls and their results).
+
+A very long item may be split for size: each piece carries "part": "i/n" and \
+comes in its own request, with the summary written so far as \
+"previous_summary". Extend that summary with the piece.
 
 Write ONE summary that replaces both. Preserve what the next turns need:
 - what the user is trying to achieve, their preferences and standing constraints;
@@ -205,42 +218,72 @@ def part_anchor(part: HistoryPart, by_event: Mapping[EventId, int], by_run: Mapp
             return covers
 
 
-def _clip(text: str) -> str:
-    if len(text) <= MAX_ITEM_CHARS:
-        return text
-    half = MAX_ITEM_CHARS // 2
-    return f"{text[:half]}\n[… {len(text) - 2 * half} characters omitted …]\n{text[-half:]}"
-
-
-def _transcript(previous: str | None, parts: Sequence[HistoryPart]) -> str:
+def _items(parts: Sequence[HistoryPart]) -> list[dict[str, object]]:
     items: list[dict[str, object]] = []
     for part in parts:
         match part:
             case UserTurn(blocks=blocks):
-                items.append({"role": "user", "text": _clip(_blocks_text(blocks))})
+                items.append({"role": "user", "text": _blocks_text(blocks)})
             case AssistantTurn(blocks=blocks):
-                items.append({"role": "assistant", "text": _clip(_blocks_text(blocks))})
+                items.append({"role": "assistant", "text": _blocks_text(blocks)})
             case ToolGroupTurn():
                 entry: dict[str, object] = {
                     "role": "assistant",
                     "tool_calls": [{"tool": c.tool_id, "arguments": thaw(c.arguments)} for c in part.calls],
                 }
                 if part.commentary:
-                    entry["text"] = _clip(_blocks_text(part.commentary))
+                    entry["text"] = _blocks_text(part.commentary)
                 items.append(entry)
                 for call in part.calls:
                     result = part.results[call.call_id]
                     items.append({"role": "tool", "tool": call.tool_id, "error": result.is_error,
-                                  "text": _clip(_blocks_text(result.blocks))})
+                                  "text": _blocks_text(result.blocks)})
             case CompressedHistory():
                 pass
-    document: dict[str, object] = {"items": items}
+    return items
+
+
+def _transcript(previous: str | None, items: Sequence[object]) -> str:
+    document: dict[str, object] = {"items": list(items)}
     if previous is not None:
         document["previous_summary"] = previous
-    text = json.dumps(document, ensure_ascii=False, indent=1)
+    text = json.dumps(thaw(document), ensure_ascii=False, indent=1)
     # The same data boundary as the runtime state: nothing can close the block.
     text = text.replace("&", "\\u0026").replace("<", "\\u003c").replace(">", "\\u003e")
     return f"<conversation_to_summarize>\n{text}\n</conversation_to_summarize>\n\n{_CUE}"
+
+
+def _pieces(items: Sequence[dict[str, object]], room: int) -> list[list[dict[str, object]]] | None:
+    """Items cut into pieces of at most ``room`` tokens of transcript each,
+    long texts split into labelled parts; None if that takes too many."""
+    flat: list[dict[str, object]] = []
+    for item in items:
+        text = item.get("text")
+        if not isinstance(text, str) or _item_tokens(item) <= room:
+            flat.append(item)
+            continue
+        bare = _item_tokens({**item, "text": ""})
+        width = max(1, room - bare - 8)  # ≤ 1 token per character (≤ 3 UTF-8 bytes) after JSON escaping
+        chunks = [text[i:i + width] for i in range(0, len(text), width)]
+        if len(chunks) > MAX_STEPS:
+            return None
+        flat.extend({**item, "text": c, "part": f"{n}/{len(chunks)}"} for n, c in enumerate(chunks, 1))
+    pieces: list[list[dict[str, object]]] = []
+    used = room + 1
+    for item in flat:
+        size = _item_tokens(item)
+        if size > room:
+            return None
+        if used + size > room:
+            pieces.append([])
+            used = 0
+        pieces[-1].append(item)
+        used += size
+    return pieces if 0 < len(pieces) <= MAX_STEPS else None
+
+
+def _item_tokens(item: object) -> int:
+    return tokens_of_text(json.dumps(thaw(item), ensure_ascii=False, indent=1)) + 2
 
 
 class Compactor:
@@ -296,48 +339,57 @@ class Compactor:
             return None
         previous = read_summary(inputs.snapshot)
         revision = inputs.snapshot.revision if inputs.snapshot is not None else None
-        # The summarizing request must fit too: fold only the oldest parts
-        # that do (first guess from per-part sizes, then measured exactly).
-        framing = tokens_of_text(_transcript(None, ()))
-        total = request_tokens(self._request(inputs, model_input, previous, (), 0))
-        count = 0
+
+        def plan(count: int, pieces: Sequence[Sequence[dict[str, object]]]) -> CompactionPlan:
+            covers = part_anchor(parts[count], by_event, by_run) - 1
+            basis = PromptBasis(event_sequence=covers, state_revision=inputs.state_basis.state_revision,
+                                snapshot_revision=revision)
+            return CompactionPlan(
+                pieces=tuple(thaw(list(p)) for p in pieces),  # type: ignore[misc]
+                covers_through_sequence=covers, expected_revision=revision, folded_parts=count,
+                previous_summary=previous, request_options=model_input.request_options, prompt_basis=basis,
+            )
+
+        # One call if possible: the oldest parts whose summarizing request
+        # fits (first guess from per-part sizes, then measured exactly).
+        base = request_tokens(self.step_request(plan(start, [[]]), 0, previous))
+        count, total = 0, base
         while count < start:
-            size = tokens_of_text(_transcript(None, (parts[count],))) - framing + 1
+            size = sum(_item_tokens(i) for i in _items(parts[count:count + 1]))
             if total + size > budget.limit_tokens:
                 break
             total += size
             count += 1
         while count > 0:
-            covers = part_anchor(parts[count], by_event, by_run) - 1
-            request = self._request(inputs, model_input, previous, parts[:count], covers)
-            size = request_tokens(request)
-            if size <= budget.limit_tokens:
-                return CompactionPlan(request, covers, revision, folded_parts=count, request_tokens=size)
+            candidate = plan(count, [_items(parts[:count])])
+            if request_tokens(self.step_request(candidate, 0, previous)) <= budget.limit_tokens:
+                return candidate
             count -= 1
-        return None
+        # Not even the oldest part fits: summarize it in a chain of pieces.
+        reserve = budget.limit_tokens // 4  # for the running summary
+        first = request_tokens(self.step_request(plan(1, [[]]), 0, previous))
+        room = budget.limit_tokens - max(first, base) - reserve
+        pieces = _pieces(_items(parts[:1]), room) if room >= MIN_PIECE_TOKENS else None
+        return plan(1, pieces) if pieces is not None else None
 
-    @staticmethod
-    def _request(inputs: PromptInputs, model_input: ModelInput, previous: str | None,
-                 folded: Sequence[HistoryPart], covers: int) -> ModelInput:
+    def step_request(self, plan: CompactionPlan, index: int, summary: str | None) -> ModelInput:
         empty = PersistedStateBasis(
-            conversation_sequence=covers, state_revision=inputs.state_basis.state_revision,
+            conversation_sequence=plan.covers_through_sequence, state_revision=plan.prompt_basis.state_revision,
             environments=(), bindings=(), artifacts=(),
         )
+        items = plan.pieces[index]
+        assert isinstance(items, Sequence)
         return ModelInput(
             stable_prefix=(COMPACTION_INSTRUCTIONS,),
             tool_catalog=(),
-            conversation=(UserTurn(EventId("compaction-input"), (TextBlock(_transcript(previous, folded)),)),),
+            conversation=(UserTurn(EventId("compaction-input"), (TextBlock(_transcript(summary, items)),)),),
             current_state=CurrentStateProjection(basis=empty),
-            request_options=model_input.request_options,
+            request_options=plan.request_options,
             trigger_refs=(),
-            prompt_basis=PromptBasis(
-                event_sequence=covers,
-                state_revision=inputs.state_basis.state_revision,
-                snapshot_revision=inputs.snapshot.revision if inputs.snapshot is not None else None,
-            ),
+            prompt_basis=plan.prompt_basis,
         )
 
-    def summary_body(self, blocks: Sequence[ContentBlock], budget: ContextBudget) -> JsonValue:
+    def summary_text(self, blocks: Sequence[ContentBlock], budget: ContextBudget) -> str:
         if not blocks or not all(isinstance(b, TextBlock) for b in blocks):
             raise PromptError(PromptErrorCode.INVALID_SUMMARY, "the summary is not plain text")
         text = _blocks_text(blocks).strip()
@@ -345,4 +397,7 @@ class Compactor:
             raise PromptError(PromptErrorCode.INVALID_SUMMARY, "the summary is empty")
         if len(text) > budget.max_summary_chars:
             raise PromptError(PromptErrorCode.INVALID_SUMMARY, f"the summary has {len(text)} characters")
-        return {"summary": text}
+        return text
+
+    def snapshot_body(self, summary: str) -> JsonValue:
+        return {"summary": summary}

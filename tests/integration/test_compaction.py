@@ -16,11 +16,11 @@ from himari.control.api import DriveState
 from himari.data.api import RunPurpose, RunStatus
 from himari.prompt.api import CompressedHistory, ContextBudget, ToolGroupTurn, UserTurn
 from himari.bootstrap import build_runtime
-from himari.prompt.api import ContextDecision, ModelInput, PromptInputs, RequestOptions
+from himari.prompt.api import CompactionPlan, ContextDecision, ModelInput, PromptInputs, RequestOptions
 from himari.prompt.compaction import COMPACTION_INSTRUCTIONS, Compactor, request_tokens
 from himari.prompt.composer import Composer
-from himari.provider.scripted import ScriptedAdapter
-from himari.provider.api import NativeNoResponse
+from himari.provider.scripted import ScriptedAdapter, encode_output
+from himari.provider.api import NativeInvocationOutcome, NativeNoResponse, NativePreparedRequest, NativeReceived
 from himari.provider.scripted import Measured
 from himari.tool.api import ToolOutcome, ToolStatus
 
@@ -258,27 +258,6 @@ async def test_b2_a_measurement_under_another_model_is_not_reused() -> None:
     assert inputs.usage_mark is not None and not Compactor().estimate(inputs, composed).measured
 
 
-class OversizedPlanner(Compactor):
-    """A planner that breaks its promise: its plan is over the limit."""
-
-    def decide(self, inputs: PromptInputs, model_input: ModelInput, budget: ContextBudget) -> ContextDecision:
-        decision = super().decide(inputs, model_input, budget)
-        if decision.compaction is None:
-            return decision
-        return dataclasses.replace(
-            decision, compaction=dataclasses.replace(decision.compaction, request_tokens=budget.limit_tokens + 1))
-
-
-@sync
-async def test_b1_the_driver_never_sends_a_plan_over_the_limit() -> None:
-    rt, adapter = runtime([Measured(final("a1"), 850), final("a2")], context_budget=BUDGET)
-    await rt.driver.drive(SCOPE, user("q1"))
-    rt.driver._planner = OversizedPlanner()
-    result = await rt.driver.drive(SCOPE, user("q2"))
-    assert result.compaction_run_ids == () and not any(_is_compaction(i) for i in adapter.prepared_inputs)
-    assert result.state is DriveState.COMPLETED  # 850 + q2 still fits: the Run itself goes ahead
-
-
 class OtherProvider(ScriptedAdapter):
     @property
     def provider_key(self) -> str:
@@ -298,21 +277,98 @@ async def test_b2_a_measurement_by_another_provider_is_not_reused() -> None:
     assert not estimate.measured and estimate.tokens > 700  # not 100 + additions
 
 
-class UnderstatingPlanner(Compactor):
-    """Claims a small request size while its request is large."""
+async def _composed(rt: Any) -> tuple[PromptInputs, ModelInput]:
+    inputs = await rt.driver._loader.load(SCOPE, (), rt.driver._options)
+    return inputs, Composer().compose(inputs)
+
+
+class OversizedStepPlanner(Compactor):
+    """Plans honestly, then hands the Driver summarizing requests over the limit."""
 
     def decide(self, inputs: PromptInputs, model_input: ModelInput, budget: ContextBudget) -> ContextDecision:
-        decision = super().decide(inputs, model_input, budget)
-        if decision.compaction is None:
-            return decision
-        big = dataclasses.replace(decision.compaction.request, stable_prefix=("x" * 9000,))
-        return dataclasses.replace(decision, compaction=dataclasses.replace(decision.compaction, request=big))
+        return Compactor().decide(inputs, model_input, budget)
+
+    def step_request(self, plan: CompactionPlan, index: int, summary: str | None) -> ModelInput:
+        return dataclasses.replace(super().step_request(plan, index, summary), stable_prefix=("x" * 9000,))
 
 
 @sync
-async def test_the_driver_measures_the_summarizing_request_itself() -> None:
+async def test_the_driver_measures_every_summarizing_request_itself() -> None:
     rt, adapter = runtime([Measured(final("a1"), 850), final("a2")], context_budget=BUDGET)
     await rt.driver.drive(SCOPE, user("q1"))
-    rt.driver._planner = UnderstatingPlanner()
+    rt.driver._planner = OversizedStepPlanner()
+    planned = Compactor().decide(*(await _composed(rt)), BUDGET)
+    assert planned.compaction is not None  # the Driver really gets a plan
     result = await rt.driver.drive(SCOPE, user("q2"))
     assert result.compaction_run_ids == () and not any(i.stable_prefix == ("x" * 9000,) for i in adapter.prepared_inputs)
+    assert result.state is DriveState.COMPLETED  # 850 + q2 still fits: the Run itself goes ahead
+
+
+# --- hard limit and chained summaries ------------------------------------------
+
+
+class SummarizingAdapter(ScriptedAdapter):
+    """Answers each summarizing request with "S1", "S2", … (or a scripted
+    failure from ``failures``); other requests follow the script."""
+
+    def __init__(self, script: list[Any], failures: dict[int, NativeNoResponse] | None = None) -> None:
+        super().__init__(script)
+        self.summaries = 0
+        self._failures = failures or {}
+
+    async def invoke_prepared(self, request: NativePreparedRequest) -> NativeInvocationOutcome:
+        if not _is_compaction(self.prepared_inputs[-1]):
+            return await super().invoke_prepared(request)
+        self.sent.append(request)
+        self.summaries += 1
+        if self.summaries in self._failures:
+            return self._failures[self.summaries]
+        return NativeReceived(encode_output(final(f"S{self.summaries}")), "application/json")
+
+
+@sync
+async def test_an_oversized_message_is_summarized_in_a_chain() -> None:
+    budget = ContextBudget(limit_tokens=2000)
+    adapter = SummarizingAdapter([Measured(final("a1"), 1700), final("done")])
+    rt, _ = runtime(provider=adapter, context_budget=budget)
+    await rt.driver.drive(SCOPE, user("가" * 1700))
+    result = await rt.driver.drive(SCOPE, user("q2"))
+    assert result.state is DriveState.COMPLETED, result.detail
+    n = adapter.summaries
+    assert n >= 2 and len(result.compaction_run_ids) == n
+    for run_id in result.compaction_run_ids:
+        assert (await rt.data.read_run(SCOPE, run_id)).status is RunStatus.PROJECTED
+    steps = [i.conversation[0].blocks[0].text for i in adapter.prepared_inputs if _is_compaction(i)]  # type: ignore[union-attr]
+    assert '"previous_summary"' not in steps[0] and f'"part": "1/{n}"' in steps[0]
+    assert f'"previous_summary": "S{n - 1}"' in steps[-1] and f'"part": "{n}/{n}"' in steps[-1]
+    snapshot = await rt.data.get_latest_snapshot(SCOPE)
+    assert snapshot is not None and snapshot.body == {"summary": f"S{n}"} and snapshot.revision == 1
+    head = adapter.prepared_inputs[-1].conversation[0]
+    assert isinstance(head, CompressedHistory) and head.summary == (TextBlock(f"S{n}"),)
+
+
+@sync
+async def test_a_chain_that_fails_midway_commits_nothing() -> None:
+    budget = ContextBudget(limit_tokens=2000)
+    adapter = SummarizingAdapter([Measured(final("a1"), 1700), final("done")], {2: NativeNoResponse("http_500")})
+    rt, _ = runtime(provider=adapter, context_budget=budget)
+    await rt.driver.drive(SCOPE, user("가" * 1700))
+    result = await rt.driver.drive(SCOPE, user("q2"))
+    assert result.state is DriveState.COMPLETED  # still within the budget: the Run goes ahead
+    assert len(result.compaction_run_ids) == 2 and adapter.summaries == 2
+    first, failed = [await rt.data.read_run(SCOPE, r) for r in result.compaction_run_ids]
+    assert first.status is RunStatus.PROJECTED and failed.status is RunStatus.FAILED_NO_RESPONSE
+    assert await rt.data.get_latest_snapshot(SCOPE) is None
+    assert not isinstance(adapter.prepared_inputs[-1].conversation[0], CompressedHistory)
+
+
+@sync
+async def test_only_the_hard_limit_refuses_a_run() -> None:
+    # Over the working budget and nothing can be compacted, but within the window.
+    budget = ContextBudget(limit_tokens=1000, hard_limit_tokens=4000)
+    rt, adapter = runtime([final("ok"), final("done")], context_budget=budget)
+    await rt.driver.drive(SCOPE, user("가" * 1200))
+    result = await rt.driver.drive(SCOPE, user("next"))
+    assert result.state is DriveState.COMPLETED, result.detail
+    over = await rt.driver.drive(SCOPE, user("가" * 3000))
+    assert over.state is DriveState.REQUEST_REJECTED and "> 4000" in over.detail
