@@ -345,7 +345,7 @@ describe_capabilities(model) -> ProviderCapabilities
 | Tool 정의 속성 | 이유 |
 | --- | --- |
 | `tool_id / input_schema / output_schema` | 노출 및 인자/응답 검증 |
-| `execution_kind` = Internal / Environment | 실제 실행 Port의 선택 |
+| `origin` = Internal / Environment / External (V3-P52) | 실제 실행 주체의 선택 |
 | `workspace_requirement` = None / Required / Default | 인자 또는 유효한 기본 Binding 해석 |
 | `effect_profile` = Read / Scoped Write / Unknown | 동시 실행의 검증 가능한 충돌 판단 |
 | `conversation_record` / `presentation` | 원본 기록/모델 결과/UI 표시 분리 |
@@ -366,9 +366,9 @@ class ToolOutcome:
     raw_result: RawToolResult | None = None
 ```
 
-- 등록 경로는 세 가지다: Internal Tool(Memory/Plan/Note), `EnvironmentPlugin.tools()`, Control의 `ask_user`.
+- 등록 경로는 네 가지다: Internal Tool(Memory/Plan/Note), `EnvironmentPlugin.tools()`, External Tool(HIMARI 밖 서버, 예: MCP — `external_source`, V3-P52), Control의 `ask_user`.
 - `completion = suspending`인 Tool(P0에서는 `ask_user`만)은 handler를 실행하지 않고 call을 `PENDING`으로 둔 채 Control에 대기를 알린다.
-- **Environment가 제공한** Tool 중 `effect_profile`이 `Read`가 아닌 것은 Dispatcher가 handler 호출 전에 `EXECUTION_CLAIMED`를 영속한다(V3-045). Internal Tool은 효과가 ToolOutcome뿐이고 결과와 원자 커밋되므로 claim하지 않는다([Data v0.2 §6](data-contract-v0.2.md)). Tool 구현은 이를 알 필요가 없다.
+- **Environment가 제공한 Tool과 External Tool** 중 `effect_profile`이 `Read`가 아닌 것은 Dispatcher가 handler 호출 전에 `EXECUTION_CLAIMED`를 영속한다(V3-045, V3-P52). Internal Tool은 효과가 ToolOutcome뿐이고 결과와 원자 커밋되므로 claim하지 않는다([Data v0.2 §6](data-contract-v0.2.md)). Tool 구현은 이를 알 필요가 없다.
 - `ToolContext`는 신뢰된 scope, 해석된 Binding, 읽기용 Data sub-port 등 **필요한 것만** 담는다. 쓰기 커밋은 Dispatcher가 DATA-08로 한다.
 
 - 같은 Workspace의 범위 불명 `run_command`는 기본 직렬 후보; 확인된 서로 다른 파일 범위 수정은 공유 부작용이 없으면 병렬 후보.
@@ -376,7 +376,7 @@ class ToolOutcome:
 - 모델이 주장한 수정 파일명/문자열 동일 여부는 안전성 증명이 아니다.
 - Plan/Note 변경 + Tool 완료 결과 원자 커밋은 **Dispatcher가 ToolOutcome을 받아** DATA-08 복합 API로 실현한다.
 
-**OPEN:** 동시성 limit/locking/resource alias, Internal/Environment dispatcher 세부 구현, 전체 Tool group 완료 배리어, Connector 확장 유형.
+**OPEN:** 동시성 limit/locking/resource alias, Internal/Environment dispatcher 세부 구현, 전체 Tool group 완료 배리어. (Connector 확장 유형은 V3-P52 External Tool로 제안.)
 
 ## 10. Environment Contract (Workspace 자원 접근)
 

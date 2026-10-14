@@ -125,6 +125,7 @@ class RecordingTool:
         *,
         effect: EffectProfile = EffectProfile.READ,
         environment_kind: EnvironmentKind | None = None,
+        external_source: str | None = None,
         workspace: WorkspaceRequirement = WorkspaceRequirement.NONE,
         behavior: Callable[[ToolInvocation, ToolContext], ToolOutcome] | None = None,
     ) -> None:
@@ -135,6 +136,7 @@ class RecordingTool:
             workspace_requirement=workspace,
             effect_profile=effect,
             environment_kind=environment_kind,
+            external_source=external_source,
         )
         self.invocations: list[ToolInvocation] = []
         self.contexts: list[ToolContext] = []

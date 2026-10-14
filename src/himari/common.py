@@ -8,6 +8,7 @@ here — no module-specific DTOs. Anything owned by one module belongs in that m
 from __future__ import annotations
 
 import dataclasses
+import re
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum
@@ -139,6 +140,26 @@ EnvironmentInstanceId = NewType("EnvironmentInstanceId", str)
 BindingId = NewType("BindingId", str)
 ToolId = NewType("ToolId", str)
 EnvironmentKind = NewType("EnvironmentKind", str)
+
+# The Tool ids every Provider can carry as a function name (V3-P52): one or
+# two segments joined by "/" (the namespace of an Environment or External
+# Tool), each made of [A-Za-z0-9-] runs joined by single "_" — so a Provider
+# may encode "/" as "__" reversibly — and at most 64 characters with "/"
+# counted as two (the common function-name limit, ^[A-Za-z0-9_-]{1,64}$).
+# Names from elsewhere (e.g. MCP allows "." and 128 characters) are mapped to
+# such an id by whoever registers them; the Registry refuses any other id.
+_TOOL_ID = re.compile(r"[A-Za-z0-9-]+(?:_[A-Za-z0-9-]+)*(?:/[A-Za-z0-9-]+(?:_[A-Za-z0-9-]+)*)?")
+MAX_TOOL_NAME_CHARS = 64
+
+
+def tool_id_problem(tool_id: str) -> str | None:
+    """Why ``tool_id`` is not a valid Tool id, or None."""
+    if not _TOOL_ID.fullmatch(tool_id):
+        return "must be [A-Za-z0-9-] runs joined by single '_', with at most one '/'"
+    if len(tool_id.replace("/", "__")) > MAX_TOOL_NAME_CHARS:
+        return f"is longer than {MAX_TOOL_NAME_CHARS} characters ('/' counts as two)"
+    return None
+
 
 ASK_USER_TOOL_ID = ToolId("ask_user")
 """The suspending question Tool (V3-044). Control provides its handler; Data

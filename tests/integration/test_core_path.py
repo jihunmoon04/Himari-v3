@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 import dataclasses
 import json
 
@@ -406,7 +407,10 @@ def test_arguments_failing_schema_are_denied_without_running() -> None:
     group = provider.prepared_inputs[-1].conversation[-1]
     assert isinstance(group, ToolGroupTurn)
     text = group.results[CallId("c0")].blocks[0]
-    assert isinstance(text, TextBlock) and "$.n: expected integer" in text.text and "$.x: not allowed" in text.text
+    assert isinstance(text, TextBlock) and text.text == (
+        "invalid arguments: $: Additional properties are not allowed ('x' was unexpected); "
+        "$.n: '1' is not of type 'integer'"
+    )
 
 
 # --- Review follow-ups: resume without a user message --------------------------
@@ -504,6 +508,46 @@ def test_crash_during_effectful_tool_is_reported_to_model_after_restart() -> Non
     assert record.model_result == UNKNOWN_OUTCOME_RESULT
     group = provider2.prepared_inputs[0].conversation[1]
     assert isinstance(group, ToolGroupTurn) and group.results[CallId("c0")] == UNKNOWN_OUTCOME_RESULT
+
+
+def test_crash_during_external_tool_is_unknown_and_never_rerun() -> None:
+    """V3-P52: an External Tool (e.g. MCP) with effects is claimed like an
+    Environment Tool, so a crash mid-call is never silently re-run on restart.
+    It needs no active Environment or Workspace."""
+    send = RecordingTool("remote/send", effect=EffectProfile.UNKNOWN, external_source="remote")
+    send.crash_next = True
+    rt, _ = runtime([calls(("remote/send", {}))], tools=[send])
+    with pytest.raises(SimulatedCrash):
+        asyncio.run(rt.driver.drive(SCOPE, user("send")))
+
+    rt2, provider2 = runtime([final("I checked; it was sent")], store=restart(rt.store), tools=[send])
+    result = asyncio.run(rt2.driver.drive(SCOPE, user("continue")))
+
+    assert result.state is DriveState.COMPLETED
+    assert result.recovery is not None and len(result.recovery.tools_unknown) == 1
+    assert len(send.invocations) == 1  # never re-run
+    group = provider2.prepared_inputs[0].conversation[1]
+    assert isinstance(group, ToolGroupTurn) and group.results[CallId("c0")] == UNKNOWN_OUTCOME_RESULT
+
+
+def test_external_tool_arguments_are_validated_in_a_killable_child(monkeypatch: pytest.MonkeyPatch) -> None:
+    """PR #19 review B1: a pathological pattern from an external server must
+    not stall the server; the call is denied and the handler never runs."""
+    monkeypatch.setattr("himari.tool.schema.ISOLATED_SECONDS", 1.0)
+    remote = RecordingTool("remote/match", external_source="remote")
+    remote.definition = dataclasses.replace(
+        remote.definition,
+        input_schema={"type": "object", "properties": {"s": {"type": "string", "pattern": "^(a+)+$"}}},
+    )
+    rt, provider = runtime([calls(("remote/match", {"s": "a" * 60 + "!"})), final("ok")], tools=[remote])
+    started = time.monotonic()
+    result = asyncio.run(rt.driver.drive(SCOPE, user("go")))
+
+    assert result.state is DriveState.COMPLETED and time.monotonic() - started < 5
+    assert remote.invocations == []
+    group = provider.prepared_inputs[-1].conversation[-1]
+    assert isinstance(group, ToolGroupTurn)
+    assert group.results[CallId("c0")].blocks == (TextBlock("invalid arguments: $: validating the arguments took too long"),)
 
 
 def test_live_exception_after_claim_is_unknown_not_failed_and_loop_continues() -> None:
