@@ -62,6 +62,7 @@ tests/
   tool/                # Tool module tests
   environment/         # Environment module tests, fake protected backend
   mcp/                 # MCP connector tests (fake MCP server: tests/mcp_fake.py)
+  scripts/             # tests of the static checks themselves (import boundaries)
   integration/         # cross-module composition, used during full pytest
 ~~~
 

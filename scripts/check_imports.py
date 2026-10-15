@@ -9,6 +9,9 @@ Rules:
 5. ``himari.interfaces`` (Web/CLI) sits above the composition root: it may
    import ``himari.common``, ``api`` modules and ``himari.bootstrap``
    (the assembled Application) — nothing else of another package.
+6. A package in ``ONLY_FROM`` may import only the listed packages, however
+   low their layer: the MCP connector uses ``common`` and ``tool.api`` and
+   nothing else, Data included (V3-P57, PR #25 review B1).
 
 Usage: python -I scripts/check_imports.py [src_root]
 Exit status 1 on any violation. This is a static check, not part of pytest
@@ -32,6 +35,10 @@ LAYERS = {
     "control": 6,
     "bootstrap": 7,
     "interfaces": 8,
+}
+# Packages whose dependencies are narrower than their layer allows (rule 6).
+ONLY_FROM = {
+    "mcp": frozenset({"common", "tool"}),
 }
 
 
@@ -96,6 +103,10 @@ def check(src_root: Path) -> list[str]:
             if is_api and not target_is_public:
                 errors.append(f"{where} (api modules may import only common and other api modules)")
             if pkg == "bootstrap" or tpkg == pkg:
+                continue
+            if pkg in ONLY_FROM and tpkg not in ONLY_FROM[pkg]:
+                allowed = ", ".join(sorted(ONLY_FROM[pkg]))
+                errors.append(f"{where} ({pkg} may import only {allowed})")
                 continue
             if not target_is_public:
                 errors.append(f"{where} (private import across modules)")
