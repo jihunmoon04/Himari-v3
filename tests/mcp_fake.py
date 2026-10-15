@@ -68,6 +68,7 @@ class FakeMcpServer:
         self.resource_reads: list[str] = []
         self.client_capabilities: dict[str, Any] | None = None
         self.resource_delay = 0.0  # seconds before answering resources/read
+        self.call_delay = 0.0  # seconds before running a tools/call
 
     def transport(self) -> httpx.MockTransport:
         return httpx.MockTransport(self.handle)
@@ -129,6 +130,8 @@ class FakeMcpServer:
                 return self._error(request_id, code)
             if name not in self.handlers:
                 return self._error(request_id, -32602)
+            if self.call_delay:
+                await asyncio.sleep(self.call_delay)
             self.calls.append((name, arguments))
             if self.next_error is not None:
                 error, self.next_error = self.next_error, None

@@ -1,6 +1,6 @@
 # MCP Apps 1단계 — 읽기 전용 화면 표시 v0.1
 
-> 2026-10-15 · **PROPOSED (V3-P58)** · 설계 초안이며 구현 전이다.
+> 2026-10-15 · **PROPOSED (V3-P58)** · 1단계 구현됨(브랜치 `feat/mcp-apps-view`). 설계와 달라진 점은 §10.
 >
 > 기준 사양: MCP Apps 확장 `io.modelcontextprotocol/ui`, **안정판 2026-01-26** ([apps.mdx](https://github.com/modelcontextprotocol/ext-apps/blob/main/specification/2026-01-26/apps.mdx), SEP-1865 Final). `draft`는 따르지 않는다.
 >
@@ -263,7 +263,7 @@ ALTER TABLE tool_executions ADD COLUMN app_payload TEXT;
 ### 6.2 설정과 sandbox 서버
 
 - `HIMARI_WEB_SANDBOX_PORT`(기본 `port + 1`). 메인 서버처럼 loopback에만 bind한다.
-- sandbox origin = 허용된 메인 origin마다 같은 scheme·host에 sandbox 포트를 붙인 것. 역방향 프록시 뒤라면 `HIMARI_WEB_SANDBOX_ORIGINS`로 직접 적는다(메인 origin과 같은 규칙으로 검사).
+- sandbox origin = 허용된 메인 origin마다 같은 scheme·host에 sandbox 포트를 붙인 것. 역방향 프록시 뒤라면 프록시가 이 포트도 같은 호스트로 전달해야 한다(구현: 다른 모양을 적는 설정은 두지 않았다, §10).
 - `/sandbox?p=…&sig=…` 응답 (서명·만료·`v`가 맞지 않으면 400, §3.4):
   - 헤더: CSP(§3.4), `cache-control: no-store`, `referrer-policy: no-referrer`, `x-content-type-options: nosniff`
   - 본문: 고정 HTML. 메인 origin 목록을 `<meta name="himari-host-origins">`로 넣는다. 메인 페이지가 `no-referrer`라 proxy는 referrer로 부모를 확인할 수 없기 때문이다.
@@ -347,3 +347,31 @@ ALTER TABLE tool_executions ADD COLUMN app_payload TEXT;
 
 1. `ui_resources`의 보존과 삭제(Q-19 대화 삭제와 함께).
 2. 2단계 진입 조건: 앱이 시작한 호출의 직렬화 범위(Run 중에 받을지)와 모델이 그 호출을 알지(이 대화의 이전 정리, 결정 2·3).
+
+## 10. 구현 노트 (2026-10-15)
+
+설계대로 구현했고, 다음만 다르거나 구체화했다.
+
+- **sandbox origin 설정:** `HIMARI_WEB_SANDBOX_ORIGINS`(다른 모양을 직접 적는 설정)는 두지 않았다. sandbox origin은 언제나 "페이지 origin의 scheme·host + sandbox 포트"다. 필요해지면 추가한다.
+- **CSP:** 사양 틀에 `form-action 'none'`을 더했다(더 좁힘, 사양이 허용). View에는 `allow-forms`도 없다.
+- **API:** `GET …/calls/{run}/{call}/app?origin=<페이지 origin>`. 같은 origin의 GET에는 브라우저가 `Origin` 헤더를 보내지 않으므로, 페이지가 자기 origin을 알리고 서버는 허용 목록과 대조한다. 그 origin이 서명에 묶이고 `frame-ancestors`가 된다.
+- **같은 ExternalAccess:** 화면의 출처 확인(§3.7)은 catalog·Dispatcher가 쓰는 것과 같은 `ExternalAccess` 인스턴스(`Runtime.access`)에 묻는다.
+- **Dispatcher의 안전장치:** handler가 실행되지 않은 호출에 화면을 붙이면 버린다. Data가 화면을 거부하면(크기·digest 등) 화면 없이 결과만 다시 커밋한다. claim된 호출의 확실한 결과가 화면 때문에 UNKNOWN이 되지 않는다.
+- **화면 읽기 시간:** 서버의 Tool 목록과 별도로, 서버당 15초 안에 화면을 읽는다. 넘으면 남은 화면만 빠진다.
+- **sandbox 서버:** 화면을 켠 서버가 있을 때만 `__main__`이 같은 프로세스에서 띄운다. 신호는 메인 서버가 받고, 메인이 끝나면 함께 끝난다.
+
+**검증 (Chrome for Testing 156, 이 호스트):**
+
+- `scripts/mcp_apps_smoke.py`: 실제 페이지 서버와 sandbox 서버, 가짜 MCP 서버, 기록하는 테스트용 화면으로 15개를 확인했고 모두 통과했다.
+  - 자동 표시와 브리지 왕복(`ui/initialize`·`tool-input`·`tool-result`·`size-changed`)
+  - 화면의 격리: opaque origin, 저장소·부모·top·페이지 API 모두 막힘
+  - `tools/call` 거절(`-32601`)
+  - 실행 중 표시 → 결과
+  - 쓰기 실행 중 Stop → "outcome unknown"으로 닫힘(`tool-cancelled` 없음)
+  - 읽기 실행 중 Stop → `tool-cancelled`
+  - 동시 3개
+  - 출처 끄기 → 닫힘
+- 기존 `scripts/ui_smoke.py`도 통과했다(화면 추가 후 회귀 없음).
+- 이 호스트에서 브라우저를 돌리는 방법: Ubuntu 패키지 4개를 `apt-get download`로 받아 풀고 `LD_LIBRARY_PATH`로 준다(root 불필요).
+- Firefox·Safari는 여전히 확인하지 못했다.
+
