@@ -205,10 +205,12 @@ def run(token: str, fake: FakeMcpServer, chrome: str | None, shots: str | None) 
         send(page, "one")
         expect(page.locator(".app-view-label")).to_have_text("App view from calliope · sandboxed", timeout=10000)
         first = inner(page, 0)
-        lines = wait_logged(first, "result")
+        wait_logged(first, "result")
+        page.wait_for_timeout(1500)  # let any later poll or lookup arrive: the result must still be there once
+        lines = logged(first)
         check("1: the latest call's view opened by itself", page.locator(".app-view-frame").count() == 1)
         check("1: tool-input reached the view", 'input {"text":"one"}' in lines, lines)
-        check("1: tool-result reached the view", 'result {"said":"one"}' in lines, lines)
+        check("1: tool-result reached the view exactly once", lines.count('result {"said":"one"}') == 1, lines)
         init = next((json.loads(line[5:]) for line in lines if line.startswith("init ")), None)
         check("1: ui/initialize answered (2026-01-26, full Tool, links yes, Tools no)",
               init == {"version": "2026-01-26", "tool": "echo", "schema": True, "openLinks": True,
@@ -231,8 +233,10 @@ def run(token: str, fake: FakeMcpServer, chrome: str | None, shots: str | None) 
         lines = wait_logged(second, "input")
         check("2: the view opened while its call ran (input, no result yet)",
               'input {"text":"slow"}' in lines and not any(l.startswith("result") for l in lines), lines)
-        lines = wait_logged(second, "result")
-        check("2: the result reached it once stored", 'result {"said":"slow"}' in lines, lines)
+        wait_logged(second, "result")
+        page.wait_for_timeout(1500)
+        lines = logged(second)
+        check("2: the result reached it once stored, exactly once", lines.count('result {"said":"slow"}') == 1, lines)
 
         # 3. Stop during a write: unknown, so closed with a note, never "cancelled".
         fake.call_delay = 3.0
@@ -254,9 +258,12 @@ def run(token: str, fake: FakeMcpServer, chrome: str | None, shots: str | None) 
         wait_logged(fourth, "input")
         wait_call_started(fake, 4)
         page.click("#composer-cancel")
-        lines = wait_logged(fourth, "cancelled")
-        check("4: a stopped read got tool-cancelled and kept its view",
-              page.locator(".app-view-frame").count() == 3 and not any(l.startswith("result") for l in lines), lines)
+        wait_logged(fourth, "cancelled")
+        page.wait_for_timeout(1500)
+        lines = logged(fourth)
+        check("4: a stopped read got tool-cancelled once and kept its view",
+              page.locator(".app-view-frame").count() == 3 and sum(l.startswith("cancelled") for l in lines) == 1
+              and not any(l.startswith("result") for l in lines), lines)
 
         # 5. At most three: the oldest goes back to "Open view".
         fake.call_delay = 0.0

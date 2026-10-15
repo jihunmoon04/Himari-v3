@@ -10,7 +10,11 @@
  * - A call that did not run gets tool-cancelled; one that ran or may have
  *   run is never called cancelled: the view is closed with a note instead.
  * - Views of a source turned off in this conversation are closed (here, in
- *   other tabs of this browser, and when the server refuses the view).
+ *   other tabs of this browser, and when the server refuses the view), and
+ *   none is opened while it stays off: an answer that was already on its way
+ *   when the source went off is dropped (a revocation count per source).
+ * - A view gets its result (or its cancellation) once: whichever of the view
+ *   API and the tool_result event comes later finds the view settled.
  * - Everything the view sends is checked: it must come from that view's
  *   frame and the sandbox origin, be a JSON-RPC message, and be small. Only
  *   ui/initialize, ui/open-link and ping are answered; every other request
@@ -56,16 +60,22 @@ export class AppViews {
     this.entries = []; // tool rows that may have a view, in timeline order
     this.live = new Map(); // key → live view
     this.closedByUser = new Set();
+    this.off = new Set(); // sources off in this conversation, as last heard
+    this.revocations = new Map(); // source → times turned off: a request from before is stale
     window.addEventListener("message", (event) => this.receive(event));
     if (typeof BroadcastChannel === "function") {
       this.channel = new BroadcastChannel(CHANNEL);
       this.channel.addEventListener("message", (event) => {
         const m = event.data;
         if (m && m.conversation === this.conversation() && typeof m.source === "string") {
-          this.closeSource(m.source);
+          this.revoke(m.source);
         }
       });
     }
+  }
+
+  revoked(source) {
+    return this.revocations.get(source) || 0;
   }
 
   /* A new conversation: tear every view down. */
@@ -74,6 +84,7 @@ export class AppViews {
     for (const view of [...this.live.values()]) this.teardown(view, "The conversation was closed.");
     this.entries = [];
     this.closedByUser = new Set();
+    this.off = new Set();
   }
 
   /* A tool row whose call may show a view (the event's app_view flag). */
@@ -100,7 +111,8 @@ export class AppViews {
 
   /* After a page of events: open the most recent call with a view. */
   autoOpen() {
-    const latest = [...this.entries].reverse().find((entry) => this.viewable(entry));
+    const latest = [...this.entries].reverse()
+      .find((entry) => this.viewable(entry) && !this.off.has(entry.view.source));
     if (latest && !this.live.has(latest.view.key) && !this.closedByUser.has(latest.view.key)) this.open(latest);
   }
 
@@ -108,7 +120,7 @@ export class AppViews {
     const view = entry.view;
     if (this.live.has(view.key)) return;
     view.slot.replaceChildren();
-    if (!this.viewable(entry)) return;
+    if (!this.viewable(entry) || this.off.has(view.source)) return;
     const button = this.el("button", "link-button app-view-open", "Open view");
     button.type = "button";
     button.addEventListener("click", () => {
@@ -130,15 +142,26 @@ export class AppViews {
   }
 
   async open(entry) {
+    const source = entry.view.source;
+    if (this.off.has(source) || entry.view.opening) return;
     const generation = this.generation;
+    const revoked = this.revoked(source);
+    entry.view.opening = true;
     let data;
     try {
       data = await this.api("GET", this.url(entry));
     } catch (error) {
       if (generation === this.generation) this.notice(entry, NOTICE[error.code] || NOTICE.failed);
       return;
+    } finally {
+      entry.view.opening = false;
     }
     if (generation !== this.generation || this.live.has(entry.view.key)) return;
+    if (this.revoked(source) !== revoked || this.off.has(source)) {
+      // Turned off while this answer was on its way: it may not open (PR #28 review B2).
+      if (this.off.has(source)) this.notice(entry, NOTICE.source_disabled);
+      return;
+    }
     if (data.state === "ended") {
       this.notice(entry, NOTICE[data.outcome] || data.reason || NOTICE.failed);
       return;
@@ -166,8 +189,9 @@ export class AppViews {
     const box = this.el("div", data.prefers_border === false ? "app-view is-borderless" : "app-view");
     box.append(header, frame);
     entry.view.slot.replaceChildren(box);
+    // settled: its result or cancellation is delivered (or due at initialized); never twice.
     const view = { entry, data, frame, box, origin: new URL(data.sandbox_url).origin, initialized: false,
-                   pending: null, nextId: 1, waiting: new Map() };
+                   pending: null, nextId: 1, waiting: new Map(), settled: data.state === "done", finishing: false };
     this.live.set(entry.view.key, view);
     close.addEventListener("click", () => {
       this.closedByUser.add(entry.view.key);
@@ -177,9 +201,14 @@ export class AppViews {
     if (data.state === "running" && entry.result !== null) this.finish(view);
   }
 
-  /* The call ended while its view was showing: read what it ended with. */
+  /* The call ended while its view was showing: read what it ended with.
+     Once only: the view may already have its result (PR #28 review B1). */
   async finish(view) {
+    if (view.settled || view.finishing) return;
+    view.finishing = true;
     const generation = this.generation;
+    const source = view.entry.view.source;
+    const revoked = this.revoked(source);
     let data;
     try {
       data = await this.api("GET", this.url(view.entry));
@@ -190,15 +219,21 @@ export class AppViews {
         this.notice(view.entry, NOTICE[code]);
       }
       return;
+    } finally {
+      view.finishing = false;
     }
     if (generation !== this.generation || this.live.get(view.entry.view.key) !== view) return;
+    if (this.revoked(source) !== revoked || this.off.has(source)) return; // revoke() closes it
     if (data.state === "done" && data.digest !== view.data.digest) {
       await this.teardown(view, "The view changed."); // restarted with new HTML meanwhile: show the stored one
-      this.mount(view.entry, data);
+      if (generation === this.generation && this.revoked(source) === revoked) this.mount(view.entry, data);
       return;
     }
-    if (data.state === "done") this.deliver(view, { method: "ui/notifications/tool-result", params: data.result });
-    else if (data.state === "ended" && data.outcome === "not_run") {
+    if (data.state === "done") {
+      view.settled = true;
+      this.deliver(view, { method: "ui/notifications/tool-result", params: data.result });
+    } else if (data.state === "ended" && data.outcome === "not_run") {
+      view.settled = true;
       this.deliver(view, { method: "ui/notifications/tool-cancelled", params: { reason: data.reason || "Not run." } });
     } else if (data.state === "ended") {
       await this.teardown(view, data.outcome);
@@ -229,22 +264,38 @@ export class AppViews {
     if (view.entry.view.slot.contains(view.box)) view.entry.view.slot.replaceChildren();
   }
 
-  /* Turned off here or in another tab of this browser. */
-  closeSource(source) {
+  /* Turned off (here, in another tab, or as last read): close its views,
+     void the requests on their way, and open none while it stays off. */
+  revoke(source) {
+    this.off.add(source);
+    this.revocations.set(source, this.revoked(source) + 1);
     for (const view of [...this.live.values()]) {
       if (view.entry.view.source !== source) continue;
       this.teardown(view, NOTICE.source_disabled).then(() => this.notice(view.entry, NOTICE.source_disabled));
     }
+    for (const entry of this.entries) {
+      if (entry.view.source === source) entry.view.slot.querySelector(".app-view-open")?.remove();
+    }
   }
 
-  sourceTurnedOff(source) {
-    this.closeSource(source);
-    if (this.channel) this.channel.postMessage({ conversation: this.conversation(), source });
+  restore(source) {
+    if (!this.off.delete(source)) return;
+    for (const entry of this.entries) {
+      if (entry.view.source === source && !entry.view.slot.hasChildNodes()) this.paintControl(entry);
+    }
   }
 
-  /* The tool sources as just read (conversation open, job end). */
-  sources(list) {
-    for (const source of list) if (!source.enabled) this.closeSource(source.source);
+  /* The tool sources as just read (conversation open, job end) or just set
+     (broadcast: tell this browser's other tabs which are off). */
+  sources(list, broadcast = false) {
+    for (const source of list) {
+      if (source.enabled) {
+        this.restore(source.source);
+        continue;
+      }
+      this.revoke(source.source);
+      if (broadcast && this.channel) this.channel.postMessage({ conversation: this.conversation(), source: source.source });
+    }
   }
 
   receive(event) {

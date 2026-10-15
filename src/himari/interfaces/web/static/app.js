@@ -430,8 +430,7 @@ async function setToolSource(source, enabled) {
       { enabled });
     if (generation === app.generation) {
       renderToolSources(answer.sources);
-      // Close its views here and in this browser's other tabs (V3-P58 §3.7).
-      for (const s of answer.sources) if (!s.enabled) views.sourceTurnedOff(s.source);
+      views.sources(answer.sources, true); // close its views here and in this browser's other tabs (V3-P58 §3.7)
     }
   } catch (error) {
     if (generation === app.generation) {

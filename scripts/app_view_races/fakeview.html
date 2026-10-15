@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"></head><body><script>
+// Stands in for the proxy and the view together: does the handshake, then
+// counts every notification the host sends it.
+window.received = [];
+const post = (m) => parent.postMessage(m, "*");
+window.addEventListener("message", (e) => {
+  const m = e.data;
+  if (m.method === "ui/notifications/sandbox-resource-ready") {
+    post({ jsonrpc: "2.0", id: 1, method: "ui/initialize", params: {} });
+  } else if (m.id === 1 && m.result) {
+    post({ jsonrpc: "2.0", method: "ui/notifications/initialized", params: {} });
+  } else if (m.method) {
+    window.received.push(m.method);
+    if (m.method === "ui/resource-teardown") post({ jsonrpc: "2.0", id: m.id, result: {} });
+  }
+});
+post({ jsonrpc: "2.0", method: "ui/notifications/sandbox-proxy-ready", params: {} });
+</script></body></html>

@@ -372,6 +372,12 @@ ALTER TABLE tool_executions ADD COLUMN app_payload TEXT;
   - 동시 3개
   - 출처 끄기 → 닫힘
 - 기존 `scripts/ui_smoke.py`도 통과했다(화면 추가 후 회귀 없음).
+- `scripts/app_view_races/run.py`(PR #28 검수 B1·B2): 실제 `app_view.js`를 응답 시점을 테스트가 정하는 가짜 API와 결과를 세는 가짜 화면으로 돌린다. 6개를 확인하고, 모두 통과했다.
+  - 결과는 한 번만 전달된다: 열 때 이미 `done`이고 `tool_result` 이벤트가 늦게 와도, 또는 화면 초기화 전에 와도.
+  - 출처를 끄는 동안 오고 있던 응답(이 탭에서 끈 경우와 다른 탭의 BroadcastChannel로 끈 경우)은 화면을 만들지 않는다.
+  - 결과를 받으러 가던 화면도 다시 올라오지 않는다.
+  - 꺼진 동안에는 요청과 "Open view"가 없다.
+  - 고치기 전 코드로 돌리면 4개가 실패했다(B1 결과 2번, B2 두 경우 화면 생성, 꺼진 동안 요청).
 - 이 호스트에서 브라우저를 돌리는 방법: Ubuntu 패키지 4개를 `apt-get download`로 받아 풀고 `LD_LIBRARY_PATH`로 준다(root 불필요).
 - Firefox·Safari는 여전히 확인하지 못했다.
 

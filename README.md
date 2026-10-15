@@ -103,7 +103,7 @@ HIMARI_DATA_ROOT=~/.himari python -m himari.interfaces.web --env-file .env
 - 두 목록은 화면이 접속할 수 있는 상한입니다. 서버가 선언한 origin 중 여기에도 있는 것만 허용합니다(기본: 외부 접속 없음).
 - 화면은 별도 포트(`HIMARI_WEB_SANDBOX_PORT`, 기본 `HIMARI_WEB_PORT` + 1)의 sandbox origin에서, 저장소 없이 격리되어 돕니다. 역방향 프록시를 쓰면 이 포트도 같은 호스트로 전달해야 합니다.
 - 가장 최근 호출의 화면은 자동으로, 나머지는 "Open view"로 엽니다. 실행 중에도 보이며, 대화에서 서버를 끄면 그 서버의 화면은 닫힙니다. 화면은 1단계라 읽기 전용입니다(화면에서 Tool 호출·메시지 보내기는 안 됨).
-- 브라우저 검증: `python scripts/mcp_apps_smoke.py`(실제 서버, Playwright 필요), 설계 모형은 `python -I scripts/mcp_apps_probe/run.py`.
+- 브라우저 검증: `python scripts/mcp_apps_smoke.py`(실제 서버, Playwright 필요), 비동기 순서는 `python scripts/app_view_races/run.py`, 설계 모형은 `python -I scripts/mcp_apps_probe/run.py`.
 
 ### CLI
 
