@@ -4,17 +4,18 @@
 >
 > 기준 사양: MCP Apps 확장 `io.modelcontextprotocol/ui`, **안정판 2026-01-26** ([apps.mdx](https://github.com/modelcontextprotocol/ext-apps/blob/main/specification/2026-01-26/apps.mdx), SEP-1865 Final). `draft`는 따르지 않는다.
 >
-> 이미 정한 것: 커넥터 패키지 규칙(V3-059), 화면 HTML은 Tool을 실행할 때 스냅샷으로 Data에 저장, sandbox origin은 같은 Web 서버의 별도 포트(2026-10-15 사용자 결정).
+> 이미 정한 것(2026-10-15 사용자 결정): 커넥터 패키지 규칙(V3-059), 화면 HTML은 Tool을 실행할 때 스냅샷으로 Data에 저장, sandbox origin은 같은 Web 서버의 별도 포트, 화면에 저장소 없음(opaque View), 가장 최근 화면은 자동 표시, 실행 중에도 표시.
 
 ## 1. 범위
 
-**1단계는 MCP 서버가 준 화면(View)을 Tool 결과 옆에 보여 주기만 한다.** 실행 경로(Control·Dispatcher·claim·Pause/Cancel)는 바뀌지 않는다.
+**1단계는 MCP 서버가 준 화면(View)을 Tool 호출 옆에 보여 주기만 한다.** 실행 중에는 입력을, 끝나면 결과를 보인다. 실행 경로(Control·Dispatcher·claim·Pause/Cancel)는 바뀌지 않는다.
 
 | 포함 | 제외 (단계) |
 | --- | --- |
 | Tool의 `_meta.ui.resourceUri` 해석, `resources/read`로 HTML 받기 | 화면이 시작하는 `tools/call`·`resources/read` (2단계) |
 | HTML·CSP를 실행 기록과 함께 저장(SQLite v5) | 앱 전용 Tool(`visibility: ["app"]`) (2단계) |
 | Web: sandbox origin의 proxy, 화면 iframe, 호스트 브리지 | `ui/message`, `ui/update-model-context` (3단계) |
+| 가장 최근 화면 자동 표시, 실행 중 표시(입력 → 결과 또는 취소) | |
 | View 메시지: `ui/initialize`, `initialized`, `size-changed`, `ui/open-link`, `ping` | `ui/request-display-mode`(inline만), `tool-input-partial`(스트리밍 없음) |
 | 운영자 설정: 서버별 화면 켜기, CSP 도메인 상한 | 카메라·마이크 등 `permissions` 허용 |
 | | CLI 화면 표시(지금처럼 텍스트) |
@@ -28,7 +29,7 @@
 - **리소스:** `resources/read`의 `contents` 중 요청한 URI와 같은 항목 하나. `mimeType`은 `text/html;profile=mcp-app`, 본문은 `text` 또는 `blob`(base64). `_meta.ui`에 `csp`(`connectDomains`·`resourceDomains`·`frameDomains`·`baseUriDomains`), `permissions`, `domain`, `prefersBorder`가 있다.
 - **CSP:** 호스트는 선언된 도메인으로 CSP를 만들어야 하고(MUST), 선언되지 않은 도메인을 허용하면 안 된다. 더 좁히는 것은 허용된다(MAY). 선언이 없으면 사양의 기본 CSP를 쓴다.
 - **Web 호스트의 이중 iframe:** 호스트와 sandbox는 **origin이 달라야** 하고(MUST), sandbox(바깥 proxy iframe)는 `allow-scripts`·`allow-same-origin`을 가진다. proxy는 `ui/notifications/sandbox-proxy-ready`를 보내고, 호스트는 `ui/notifications/sandbox-resource-ready`로 HTML을 넘긴다. proxy는 `ui/notifications/sandbox-*`를 제외한 모든 메시지를 양방향으로 중계한다. 호스트는 View의 `ui/notifications/initialized` 전에는 View에 아무것도 보내지 않는다.
-- **데이터 전달:** `initialized` 뒤에 `ui/notifications/tool-input {arguments}`를 한 번, 이어서 `ui/notifications/tool-result`(표준 `CallToolResult`)를 보낸다.
+- **데이터 전달:** `initialized` 뒤에 `ui/notifications/tool-input {arguments}`를 한 번 보낸다. 화면이 실행 중에 떠 있었다면, 실행이 끝날 때 `ui/notifications/tool-result`(표준 `CallToolResult`)를 보내야 한다(MUST). 실행이 어떤 이유로든 취소되면 `ui/notifications/tool-cancelled {reason}`을 보내야 한다(MUST).
 - **협상:** 클라이언트는 `initialize`의 `capabilities.extensions["io.modelcontextprotocol/ui"] = {"mimeTypes": ["text/html;profile=mcp-app"]}`로 지원을 알린다. 서버는 이것을 보고 화면이 있는 Tool을 등록할 수 있고, 화면이 없는 호스트를 위해 텍스트 대체를 줘야 한다.
 
 ## 3. 핵심 결정
@@ -67,7 +68,7 @@
 - **별도 포트의 작은 서버:** `/sandbox`(proxy 페이지)와 `/sandbox.js`만 서빙하는 ASGI 앱을 같은 프로세스에서 두 번째 포트로 띄운다. API 경로는 하나도 없고 세션을 모른다. 화면을 켠 서버가 하나도 없으면 띄우지 않는다.
 - **CSP는 proxy 페이지의 응답 헤더로:** `srcdoc` 문서는 부모의 CSP를 물려받는다. 참조 구현처럼 proxy 응답 헤더에 그 화면의 CSP를 넣는다. 사양의 CSP 틀에 §3.3의 도메인을 넣고, `frame-ancestors <메인 origin들>`을 더한다. `meta` 태그와 달리 View가 바꿀 수 없다.
 - **CSP 파라미터는 서명한다:** 메인 API가 `csp`(정규화한 JSON, base64url)와 `sig`(운영자 비밀에서 파생한 키로 계산한 HMAC-SHA256)를 준다. sandbox 서버는 서명이 맞지 않으면 400을 준다. 누군가 HIMARI의 sandbox origin을 느슨한 CSP로 띄워 쓰는 것을 막는다.
-- **View는 opaque origin:** 사양의 proxy와 달리 안쪽 iframe에 `allow-same-origin`을 주지 않는다(`sandbox="allow-scripts"`, 사양이 허용하는 더 좁은 설정). 모든 서버의 화면이 sandbox origin 하나를 같이 쓰므로, 같은 origin을 주면 서로의 localStorage·IndexedDB와 proxy 페이지에 닿는다. 대가: 저장소를 쓰는 앱은 동작하지 않는다(사양은 앱에 기능 감지를 요구한다). 서버별 origin을 둘 수 있을 때 다시 본다.
+- **View는 opaque origin:** 사양의 proxy와 달리 안쪽 iframe에 `allow-same-origin`을 주지 않는다(`sandbox="allow-scripts"`, 사양이 허용하는 더 좁은 설정). 모든 서버의 화면이 sandbox origin 하나를 같이 쓰므로, 같은 origin을 주면 서로의 localStorage·IndexedDB와 proxy 페이지에 닿는다. 대가: 저장소를 쓰는 앱은 동작하지 않는다(사양은 앱에 기능 감지를 요구한다). **사용자 결정(2026-10-15): 이 대가를 받아들인다.** 동시에 띄우는 화면 수를 줄이는 것으로는 대신할 수 없다. 저장소는 화면을 닫아도 남아서 다음에 뜬 다른 서버의 화면이 읽을 수 있고, 같은 origin 권한이면 service worker로 이후의 proxy 요청을 가로챌 수도 있다. 저장소가 필요해지면 서버별 origin(서버마다 포트 또는 하위 도메인)으로 간다. Claude·ChatGPT도 앱마다 origin을 나눈다.
 - **쿠키는 포트로 나뉘지 않는다:** sandbox origin은 메인과 같은 사이트라 `SameSite=Strict` 쿠키도 같이 간다. 그래서 막는 것은 쿠키 속성이 아니라 서버 쪽 규칙이다:
   - 세션 쿠키는 `HttpOnly`라 스크립트로 읽을 수 없다(지금도 그렇다).
   - CORS를 열지 않으므로 다른 origin은 API 응답을 읽을 수 없다.
@@ -77,9 +78,24 @@
   이 네 가지를 각각 테스트로 고정한다(§8).
 - **메인 페이지 CSP:** 지금의 고정 CSP에 `frame-src <sandbox origin들>`을 더한다. 메인의 `frame-ancestors 'none'`과 `X-Frame-Options: DENY`는 그대로다.
 
-### 3.5 화면은 사용자가 열 때만 띄운다
+### 3.5 가장 최근 화면은 자동으로, 실행 중부터 보인다
 
-긴 대화에서 모든 화면을 자동으로 띄우면 브라우저 자원을 많이 쓰고(사양의 "Resource consumption"), 사용자가 보지 않는 코드가 돈다. 화면이 있는 Tool 행에 "Open view" 버튼을 두고, 연 화면만 띄운다. 동시에 살아 있는 화면은 3개까지이고, 넘으면 가장 오래된 것을 닫는다. 대화를 바꾸거나 화면을 닫을 때는 `ui/resource-teardown`을 보내고 최대 1초 기다린다.
+사용자 결정(2026-10-15): 가장 최근 화면 자동 표시, 실행 중 표시.
+
+- **자동 표시:** 대화에서 화면이 있는 **가장 최근 Tool 호출 하나**만 자동으로 띄운다. 대화를 열 때와 새 호출이 나타날 때 다시 고른다. 나머지 호출은 Tool 행의 "Open view" 버튼으로 연다. 모든 화면을 자동으로 띄우지 않는 것은, 긴 대화에서 브라우저 자원을 많이 쓰고(사양의 "Resource consumption") 사용자가 보지 않는 코드가 돌기 때문이다.
+- **동시 3개:** 동시에 살아 있는 화면은 3개까지이고, 넘으면 가장 오래 전에 띄운 것을 닫는다. 대화를 바꾸거나 화면을 닫을 때는 `ui/resource-teardown`을 보내고 최대 1초 기다린다.
+- **실행 중 표시:** 호출이 기록되면(`assistant_tool_calls` 이벤트) 결과를 기다리지 않고 화면을 띄운다. HTML은 연결할 때 받아 둔 것(§3.1)이라 실행 전에도 있다. 결과에 함께 저장되는 것도 같은 리소스다. 화면이 초기화되면 `tool-input`을 보내고, 호출이 끝나면 다음을 보낸다:
+
+  | 호출이 끝난 모양 | 화면에 보내는 것 |
+  | --- | --- |
+  | `SUCCEEDED`·`FAILED`이고, 결과와 함께 화면이 저장됨 | `ui/notifications/tool-result` (저장된 payload) |
+  | 위와 같지만, 저장된 화면의 digest가 띄운 화면과 다름 (그 사이 재시작해서 HTML이 바뀜) | 저장된 화면으로 다시 띄운다 |
+  | `CANCELLED`·`DENIED`·`UNKNOWN`, 서버가 실행하지 않음(화면 없는 `FAILED`), 결과가 너무 커서 화면에 못 넣음 | `ui/notifications/tool-cancelled {reason}` |
+
+  - Pause로 멈춘 호출(`PENDING`)의 화면은 입력만 받은 채 기다린다. Continue로 실행되면 결과를 받고, 새 메시지나 Dismiss로 닫히면 `tool-cancelled`를 받는다.
+  - 결과는 지금처럼 이벤트 폴링(1초)으로 알게 되므로, 화면에 반영되기까지 최대 약 1초 걸린다.
+  - 실행 중인 화면도 저장된 화면과 같은 규칙을 따른다: 서버별 켜짐(§3.2), CSP 교집합(§3.3), sandbox(§3.4).
+  - 실행 중 표시 때문에 `ToolDefinition`을 바꾸지 않는다. Web이 Application을 통해 커넥터에 "이 Tool의 지금 화면"을 묻는다(§4.2).
 
 화면 테두리 위에는 항상 "App view from `<서버 이름>` · sandboxed"를 보인다. `prefersBorder`와 상관없이 보인다(사양의 사회공학 위험 대응).
 
@@ -112,7 +128,9 @@
   - HTML이 2 MiB를 넘거나, 한 서버의 화면 합계가 8 MiB를 넘는 경우
   - `_meta.ui`의 모양이 틀린 경우
 - 받은 리소스는 `UiResource`(§5)로 만들고, digest = SHA-256(정규화한 JSON `{source, uri, html, csp, prefers_border}`)이다.
-- `McpConnection`은 서버별 현재 `ui` 설정(켜짐 여부·도메인 상한)을 Application에 알려 준다. Web이 화면을 열 때 이 값으로 CSP를 계산한다(§3.3).
+- `McpConnection`은 Application에 두 가지를 알려 준다(공개 계약이 아니라 Composition Root 안의 연결):
+  - 서버별 현재 `ui` 설정(켜짐 여부·도메인 상한). Web이 화면을 열 때 이 값으로 CSP를 계산한다(§3.3).
+  - `ui_for(tool_id) -> UiResource | None`: 그 Tool에 연결할 때 받아 둔 리소스. 실행 중 화면(§3.5)에 쓰고, `McpTool`이 결과에 붙이는 것과 같은 객체다.
 
 ### 4.3 실행
 
@@ -136,7 +154,7 @@ app_view=AppView(resource=<연결 때 받은 UiResource>, payload=<CallToolResul
 | **DATA-03** `ConversationLog` | `read_app_view(scope, call: CallRef) -> StoredAppView \| None` | 대화 범위 검사를 거친 읽기. `StoredAppView(tool_id, arguments, resource, payload)` |
 | **TOOL-02** Dispatcher | `outcome.app_view`를 `ToolCompletion`으로 넘긴다 | 원자 커밋은 그대로 |
 | **UI-01** Web | §6 | API 추가, sandbox 서버 |
-| MCP 커넥터 | capability 선언, `resources/read`, `mcp.json`의 `ui` | 공개 계약 아님(V3-059) |
+| MCP 커넥터 | capability 선언, `resources/read`, `mcp.json`의 `ui`, `McpConnection.ui_for` | 공개 계약 아님(V3-059) |
 | 바뀌지 않음 | Control, Prompt, Provider, Environment, `ToolDefinition`, `ToolCatalog` | 화면 정보는 2단계(앱 전용 Tool)에서 `ToolDefinition`에 들어간다 |
 
 **이전 스케치와 다른 점:** 이 대화의 초기 스케치에는 `ToolUiSource` 포트와 별도 Data sub-port(`UiResourceStore`)가 있었다. 둘 다 두지 않는다. HTML은 handler가 결과와 함께 돌려주므로 따로 받는 포트가 필요 없다. 저장은 Tool 결과와 한 트랜잭션이어야 하므로, 다른 sub-port로 나누면 원자 커밋이 두 포트에 걸친다. 읽기는 실행 기록을 통해서만 하므로 ConversationLog에 둔다.
@@ -161,19 +179,23 @@ ALTER TABLE tool_executions ADD COLUMN app_payload TEXT;
 
 ### 6.1 API
 
-- `GET /api/conversations/{id}/events`: `tool_result` 항목에 `app_view: true|false`를 더한다. 그 페이지에 나온 Run들의 실행 기록을 Run마다 한 번씩 읽어 계산한다(Data 이벤트 payload는 바꾸지 않음).
-- `GET /api/conversations/{id}/calls/{run_id}/{call_id}/app` → 200:
+- `GET /api/conversations/{id}/events`에 화면 표시를 더한다(Data 이벤트 payload는 바꾸지 않음):
+  - `assistant_tool_calls`의 각 call에 `app_view: true|false`: 그 Tool에 지금 보일 화면이 있는지(서버 화면 켜짐 + `ui_for` 있음). 실행 중 표시와 자동 표시에 쓴다.
+  - `tool_result`에 `app_view: true|false`: 결과와 함께 화면이 저장됐는지. 그 페이지에 나온 Run들의 실행 기록을 Run마다 한 번씩 읽어 계산한다.
+- `GET /api/conversations/{id}/calls/{run_id}/{call_id}/app` → 200, `state`에 따라 세 모양:
 
   ```json
-  {"source": "calliope", "tool_id": "calliope/position", "tool_name": "position",
-   "html": "<!DOCTYPE html>…", "prefers_border": true,
-   "csp": {"connect_domains": [...], "resource_domains": [...]},
-   "declared_csp": {...},
+  {"state": "done", "source": "calliope", "tool_id": "calliope/position", "tool_name": "position",
+   "digest": "…", "html": "<!DOCTYPE html>…", "prefers_border": true,
+   "csp": {"connect_domains": [...], "resource_domains": [...]}, "declared_csp": {...},
    "sandbox_url": "http://127.0.0.1:8766/sandbox?csp=…&sig=…",
    "arguments": {...}, "result": {...}}
   ```
 
-  - 화면이 없으면 404 `no_app_view`. 그 서버의 화면을 운영자가 껐거나 서버가 설정에서 빠졌으면 404 `app_view_disabled`.
+  - `done`: 결과와 함께 저장된 화면. HTML과 선언 CSP는 저장된 것이다.
+  - `running`: 호출이 아직 끝나지 않음(`PENDING`·`EXECUTION_CLAIMED`). 같은 모양이지만 HTML은 `ui_for`의 지금 리소스이고 `result`는 `null`이다.
+  - `ended`: 끝났지만 화면이 저장되지 않음. `{"state": "ended", "status": "cancelled|denied|unknown|failed", "reason": "…"}`만 준다(HTML 없음). 띄워 둔 화면에 `tool-cancelled`를 보낼 때 쓴다.
+  - 저장된 화면도 지금 화면도 없으면 404 `no_app_view`. 그 서버의 화면을 운영자가 껐거나 서버가 설정에서 빠졌으면 404 `app_view_disabled`.
   - 인증과 대화 범위는 다른 조회와 같다. `cache-control: no-store`는 지금처럼 `/api/`에 붙는다.
   - HTML은 JSON 문자열로만 나간다. 메인 origin에서 `text/html`로 서빙하는 경로는 없다.
 
@@ -198,7 +220,7 @@ ALTER TABLE tool_executions ADD COLUMN app_payload TEXT;
 | View → 호스트 | 처리 |
 | --- | --- |
 | `ui/initialize` (요청) | `{protocolVersion: "2026-01-26", hostInfo: {name: "himari", version: "3"}, hostCapabilities: {openLinks: {}, sandbox: {csp: <실제 CSP>}}, hostContext: {toolInfo: {tool: {name, description}}, theme, displayMode: "inline", availableDisplayModes: ["inline"], containerDimensions: {width: <행 너비>, maxHeight: 800}, locale, timeZone, platform: "web"}}` |
-| `ui/notifications/initialized` | `tool-input {arguments}`, 이어서 `tool-result <payload>` 전송 |
+| `ui/notifications/initialized` | `tool-input {arguments}` 전송. 이미 `done`이면 이어서 `tool-result <payload>`, `ended`이면 `tool-cancelled` |
 | `ui/notifications/size-changed` | iframe 높이를 40~800px로 맞춤 |
 | `ui/open-link` (요청) | `http(s)` URL만, 주소를 보여 주는 확인 창 → `window.open(url, "_blank", "noopener,noreferrer")`, 거절하면 `-32000` |
 | `ping` | `{}` |
@@ -208,6 +230,8 @@ ALTER TABLE tool_executions ADD COLUMN app_payload TEXT;
 
 - 받는 메시지는 `event.source`가 그 화면의 iframe이고 `event.origin`이 sandbox origin일 때만 처리한다. `jsonrpc: "2.0"`인 평범한 객체만 받고, JSON 직렬화 길이가 1 MiB를 넘으면 버린다.
 - `hostCapabilities`에 `serverTools`·`serverResources`가 없으므로, 앱은 호출 기능이 없음을 안다.
+- **실행 중인 화면의 마무리:** 띄워 둔 `running` 화면의 `tool_result` 이벤트가 오면 `…/app`을 다시 읽어 §3.5 표대로 처리한다(`tool-result`, 다시 띄우기, `tool-cancelled`). View의 `initialized` 전에 끝났으면, `initialized` 뒤에 `tool-input`과 함께 보낸다.
+- **자동 표시:** 이벤트를 그린 뒤 `app_view`가 참인 가장 최근 call을 고른다(가장 최근 Run의 가장 큰 ordinal). 아직 띄우지 않았으면 띄운다. 사용자가 닫은 화면은 다시 자동으로 띄우지 않는다(그 대화를 다시 열 때까지).
 
 ### 6.4 CLI
 
@@ -223,7 +247,7 @@ ALTER TABLE tool_executions ADD COLUMN app_payload TEXT;
 | 다른 서버의 화면을 엿봄 | View는 opaque origin(저장소 없음), 화면마다 별도 iframe |
 | HIMARI sandbox origin을 느슨한 CSP로 악용 | CSP 파라미터 HMAC 서명 |
 | 위조된 메시지 | proxy는 메인 origin만, 호스트는 자기 iframe·sandbox origin만, 크기 한도 |
-| 자원 소모 | 열 때만 띄움, 동시 3개, HTML 2 MiB |
+| 자원 소모 | 가장 최근 하나만 자동, 나머지는 열 때만, 동시 3개, HTML 2 MiB |
 | 사회공학 | 항상 보이는 "App view from <서버> · sandboxed" 테두리 |
 | 운영자가 신뢰를 거둠 | CSP와 켜짐 여부는 볼 때의 설정으로 계산, 다시 시작하면 예전 화면에도 적용(§3.3) |
 
@@ -235,20 +259,23 @@ ALTER TABLE tool_executions ADD COLUMN app_payload TEXT;
   - 잘못된 URI·mime·크기·모양이면 화면만 빠진다.
   - payload가 1 MiB를 넘으면 `ui_problem`을 남긴다.
   - 실행 중에는 `resources/read`를 하지 않는다(요청 기록으로 확인).
+  - `ui_for`가 돌려주는 리소스와 결과에 붙는 리소스가 같다.
   - 공식 MCP Python SDK의 MCP Apps 예제 서버와 상호운용을 확인한다(V3-P53과 같은 방식).
 - **Data:** v4 → v5 업그레이드(데이터 유지, 정확한 모양만), 결과와 화면의 원자 커밋, 다른 대화에서는 `read_app_view`를 읽을 수 없음, 상태별 거부, digest 불일치 거부. 같은 계약 테스트를 두 저장소에 돌린다.
 - **Web:**
-  - API 모양, 404 두 종류, `app_view` 플래그
+  - API의 세 상태(`running` → `done`, `running` → `ended`: Pause 후 Dismiss, Cancel, 결과 불명), 404 두 종류, 두 이벤트의 `app_view` 플래그
   - 메인 CSP의 `frame-src`
   - sandbox 응답 헤더(서명된 CSP, 서명이 틀리면 400, `frame-ancestors`), sandbox 서버에 API 경로가 없음
   - sandbox origin의 POST가 쿠키를 가지고도 403
   - 운영자가 도메인을 빼면 예전 화면의 CSP도 줄어듦
-- **브라우저 smoke:** proxy 메시지 흐름, `srcdoc`가 CSP를 물려받는지, proxy 자신의 CSP(`frame-src 'none'`, `frame-ancestors`)가 안쪽 `srcdoc` iframe을 막지 않는지(참조 구현은 `document.write`를 쓰므로 이 경우를 직접 보여 주지 않는다), View가 `parent.parent`와 메인 쿠키에 닿지 못하는지. 이 호스트에는 Chromium 시스템 라이브러리가 없어 지금은 돌릴 수 없다(PR #24와 같음). 구현 PR에서 돌릴 수 있는 곳을 정한다.
+- **브라우저 smoke:** proxy 메시지 흐름, `srcdoc`가 CSP를 물려받는지, proxy 자신의 CSP(`frame-src 'none'`, `frame-ancestors`)가 안쪽 `srcdoc` iframe을 막지 않는지(참조 구현은 `document.write`를 쓰므로 이 경우를 직접 보여 주지 않는다), View가 `parent.parent`와 메인 쿠키에 닿지 못하는지, 자동 표시(가장 최근 하나, 닫은 화면은 다시 띄우지 않음)와 실행 중 → 결과·취소 전환. 이 호스트에는 Chromium 시스템 라이브러리가 없어 지금은 돌릴 수 없다(PR #24와 같음). 구현 PR에서 돌릴 수 있는 곳을 정한다.
 - 공개 계약이 바뀌므로 전체 pytest를 돌린다(V3-038).
 
-## 9. 남은 질문
+## 9. 결정된 것과 남은 질문
 
-1. opaque View(§3.4)로 저장소를 쓰는 앱이 동작하지 않는 것을 받아들일지. 대안은 서버별 sandbox origin(서버마다 포트 또는 하위 도메인)이다.
-2. 화면을 사용자가 열 때만 띄울지(§3.5), 마지막 Tool의 화면은 자동으로 띄울지.
-3. `ui_resources`의 보존과 삭제(Q-19 대화 삭제와 함께).
-4. 2단계 진입 조건: 앱이 시작한 호출의 직렬화 범위(Run 중에 받을지)와 모델이 그 호출을 알지(이 대화의 이전 정리, 결정 2·3).
+**결정됨(2026-10-15 사용자):** 화면에 저장소 없음(§3.4), 가장 최근 화면 자동 표시(§3.5), 실행 중 표시(§3.5).
+
+**남은 질문:**
+
+1. `ui_resources`의 보존과 삭제(Q-19 대화 삭제와 함께).
+2. 2단계 진입 조건: 앱이 시작한 호출의 직렬화 범위(Run 중에 받을지)와 모델이 그 호출을 알지(이 대화의 이전 정리, 결정 2·3).
