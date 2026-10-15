@@ -38,7 +38,7 @@ import fcntl
 import os
 import sqlite3
 import stat
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager, contextmanager
 from datetime import UTC, datetime
 
@@ -66,6 +66,7 @@ from himari.common import (
 from himari.data import codec, rules
 from himari.data.api import (
     AnswerCommit,
+    AppView,
     Artifact,
     ArtifactMutation,
     AssistantFinal,
@@ -95,14 +96,18 @@ from himari.data.api import (
     RunPurpose,
     RunRecord,
     RunStatus,
+    StoredAppView,
     ToolCompletion,
     ToolExecutionRecord,
     ToolExecutionStatus,
     ToolResultRecord,
+    UiCsp,
+    UiResource,
     UserMessage,
 )
 
-SCHEMA_VERSION = 4  # v3: compaction_runs; v4: external_settings (both upgraded in place); v1 is refused
+# v3: compaction_runs; v4: external_settings; v5: ui_resources (all upgraded in place); v1 is refused
+SCHEMA_VERSION = 5
 APPLICATION_ID = 0x48494D41  # "HIMA": written into the database header (PRAGMA application_id)
 
 _TERMINAL_COMPLETIONS = frozenset(
@@ -236,11 +241,26 @@ CREATE TABLE external_settings (
     PRIMARY KEY (conversation_id, source)
 ) STRICT;
 """
-_SCHEMA = _SCHEMA_V2 + _V3_ADDITIONS + _V4_ADDITIONS
+# v5: Tool views (MCP Apps, V3-P58), content-addressed and shared by every
+# Conversation; a call stored with its view names it and keeps its payload.
+# A new database runs the same ALTERs, so its schema matches an upgraded one.
+_V5_ADDITIONS = """
+CREATE TABLE ui_resources (
+    digest TEXT PRIMARY KEY,
+    source TEXT NOT NULL,
+    uri TEXT NOT NULL,
+    html TEXT NOT NULL,
+    meta TEXT NOT NULL
+) STRICT;
+ALTER TABLE tool_executions ADD COLUMN ui_digest TEXT REFERENCES ui_resources (digest);
+ALTER TABLE tool_executions ADD COLUMN app_payload TEXT;
+"""
+_SCHEMA = _SCHEMA_V2 + _V3_ADDITIONS + _V4_ADDITIONS + _V5_ADDITIONS
 # An older version → (its exact schema, what brings it to SCHEMA_VERSION).
 _UPGRADES = {
-    2: (_SCHEMA_V2, _V3_ADDITIONS + _V4_ADDITIONS),
-    3: (_SCHEMA_V2 + _V3_ADDITIONS, _V4_ADDITIONS),
+    2: (_SCHEMA_V2, _V3_ADDITIONS + _V4_ADDITIONS + _V5_ADDITIONS),
+    3: (_SCHEMA_V2 + _V3_ADDITIONS, _V4_ADDITIONS + _V5_ADDITIONS),
+    4: (_SCHEMA_V2 + _V3_ADDITIONS + _V4_ADDITIONS, _V5_ADDITIONS),
 }
 
 
@@ -591,6 +611,36 @@ def _execution(row: sqlite3.Row) -> ToolExecutionRecord:
         workspace_binding_id=None if row["workspace_binding_id"] is None else BindingId(row["workspace_binding_id"]),
         unknown_outcome=None if row["unknown_outcome"] is None else UnknownOutcomePolicy(row["unknown_outcome"]),
         record_event=None if record_event is None else bool(record_event),
+        ui_digest=row["ui_digest"],
+    )
+
+
+def _ui_meta(resource: UiResource) -> str:
+    csp = resource.csp
+    return codec.dump_json({
+        "csp": {"connect_domains": csp.connect_domains, "resource_domains": csp.resource_domains,
+                "frame_domains": csp.frame_domains, "base_uri_domains": csp.base_uri_domains},
+        "prefers_border": resource.prefers_border,
+    })
+
+
+def _ui_resource(row: sqlite3.Row) -> UiResource:
+    meta = codec.load_json(row["meta"])
+    assert isinstance(meta, Mapping)
+    csp = meta["csp"]
+    assert isinstance(csp, Mapping)
+
+    def domains(key: str) -> tuple[str, ...]:
+        value = csp[key]
+        assert isinstance(value, tuple)
+        return tuple(str(d) for d in value)
+
+    prefers_border = meta["prefers_border"]
+    return UiResource(
+        row["digest"], row["source"], row["uri"], row["html"],
+        UiCsp(domains("connect_domains"), domains("resource_domains"), domains("frame_domains"),
+              domains("base_uri_domains")),
+        prefers_border if isinstance(prefers_border, bool) else None,
     )
 
 
@@ -912,15 +962,43 @@ class SqliteData:
                 raise DataError(DataErrorCode.ALREADY_COMMITTED, f"{call.call_id} is {status.value}")
             if completion.status not in _TERMINAL_COMPLETIONS:
                 raise DataError(DataErrorCode.INVALID_STATE_TRANSITION, f"not a definite outcome: {completion.status}")
+            view = rules.check_app_view(completion)
             self._apply_artifacts(tx, scope, completion.artifact_mutations)  # CAS errors roll everything back
+            if view is not None:
+                self._store_ui_resource(tx, view.resource)
             tx.execute(
-                "UPDATE tool_executions SET status=?, model_result=?, raw_result=? WHERE seq=?",
+                "UPDATE tool_executions SET status=?, model_result=?, raw_result=?, ui_digest=?, app_payload=?"
+                " WHERE seq=?",
                 completion.status.value, codec.model_result(completion.model_result),
-                codec.dump_json(completion.raw_result), record["seq"],
+                codec.dump_json(completion.raw_result),
+                None if view is None else view.resource.digest,
+                None if view is None else codec.dump_json(view.payload), record["seq"],
             )
             if not completion.record_event:
                 return None
             return self._new_event(tx, scope, ToolResultRecord(call, completion.model_result), call.run_id)
+
+    @staticmethod
+    def _store_ui_resource(tx: _Tx, resource: UiResource) -> None:
+        """Content-addressed: an existing digest must hold the same view."""
+        known = tx.one("SELECT * FROM ui_resources WHERE digest=?", resource.digest)
+        if known is None:
+            tx.execute("INSERT INTO ui_resources (digest, source, uri, html, meta) VALUES (?, ?, ?, ?, ?)",
+                       resource.digest, resource.source, resource.uri, resource.html, _ui_meta(resource))
+        elif _ui_resource(known) != resource:
+            raise DataError(DataErrorCode.INVALID_ARGUMENT, "another view is stored under this digest")
+
+    async def read_app_view(self, scope: TrustedScope, call: CallRef) -> StoredAppView | None:
+        with self._tx() as tx:
+            tx.authorized(scope)
+            row = self._execution_row(tx, scope, call)
+            if row["ui_digest"] is None:
+                return None
+            resource = tx.one("SELECT * FROM ui_resources WHERE digest=?", row["ui_digest"])
+            assert resource is not None  # REFERENCES
+            record = _execution(row)
+            view = AppView(_ui_resource(resource), codec.load_json(row["app_payload"]))
+            return StoredAppView(call, record.tool_id, record.arguments, record.status, view)
 
     async def commit_unknown_outcome(
         self, scope: TrustedScope, call: CallRef, model_result: ModelToolResult

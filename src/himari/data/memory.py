@@ -34,6 +34,7 @@ from himari.common import (
 from himari.data import rules
 from himari.data.api import (
     AnswerCommit,
+    AppView,
     Artifact,
     ArtifactMutation,
     AssistantFinal,
@@ -63,10 +64,12 @@ from himari.data.api import (
     RunPurpose,
     RunRecord,
     RunStatus,
+    StoredAppView,
     ToolCompletion,
     ToolExecutionRecord,
     ToolExecutionStatus,
     ToolResultRecord,
+    UiResource,
     UserMessage,
 )
 
@@ -112,6 +115,7 @@ class _Conversation:
     workspace: ConversationWorkspace | None = None
     idempotency: dict[str, EventId] = field(default_factory=dict)
     external: dict[str, bool] = field(default_factory=dict)  # V3-P53 choices by source
+    app_payloads: dict[CallRef, JsonValue] = field(default_factory=dict)  # V3-P58, by call
 
 
 class InMemoryStore:
@@ -120,6 +124,7 @@ class InMemoryStore:
     def __init__(self) -> None:
         self._conversations: dict[ConversationId, _Conversation] = {}
         self._ids = itertools.count(1)
+        self.ui_resources: dict[str, UiResource] = {}  # V3-P58: by digest, shared by every Conversation
 
     # --- admin helpers (trusted setup paths, not model-reachable) --------
 
@@ -423,17 +428,33 @@ class InMemoryData:
             raise DataError(DataErrorCode.ALREADY_COMMITTED, f"{call.call_id} is {record.status.value}")
         if completion.status not in _TERMINAL_COMPLETIONS:
             raise DataError(DataErrorCode.INVALID_STATE_TRANSITION, f"not a definite outcome: {completion.status}")
+        view = rules.check_app_view(completion)
+        known = None if view is None else self._store.ui_resources.get(view.resource.digest)
+        if view is not None and known is not None and known != view.resource:
+            raise DataError(DataErrorCode.INVALID_ARGUMENT, "another view is stored under this digest")
         staged = self._stage_artifacts(conv, completion.artifact_mutations)  # validates CAS first
         conv.artifacts.update(staged)
+        if view is not None:
+            self._store.ui_resources.setdefault(view.resource.digest, view.resource)
+            conv.app_payloads[call] = view.payload
         conv.executions[call] = replace(
             record,
             status=completion.status,
             model_result=completion.model_result,
             raw_result=completion.raw_result,
+            ui_digest=None if view is None else view.resource.digest,
         )
         if not completion.record_event:
             return None
         return self._new_event(conv, scope, ToolResultRecord(call, completion.model_result), call.run_id)
+
+    async def read_app_view(self, scope: TrustedScope, call: CallRef) -> StoredAppView | None:
+        conv = self._conv(scope)
+        record = self._execution(conv, call)
+        if record.ui_digest is None:
+            return None
+        view = AppView(self._store.ui_resources[record.ui_digest], conv.app_payloads[call])
+        return StoredAppView(call, record.tool_id, record.arguments, record.status, view)
 
     async def commit_unknown_outcome(
         self, scope: TrustedScope, call: CallRef, model_result: ModelToolResult

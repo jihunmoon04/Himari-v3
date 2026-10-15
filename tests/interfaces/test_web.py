@@ -4,6 +4,7 @@ over a real Application (SQLite, sandbox off, scripted provider)."""
 from __future__ import annotations
 
 import asyncio
+import json
 import threading
 import time
 from collections.abc import Iterator
@@ -16,7 +17,7 @@ pytest.importorskip("fastapi")
 
 from fastapi.testclient import TestClient  # noqa: E402
 from mcp_fake import URL as MCP_URL  # noqa: E402
-from mcp_fake import FakeMcpServer  # noqa: E402
+from mcp_fake import ECHO_SCHEMA, VIEW_HTML, VIEW_URI, FakeMcpServer, view_entry  # noqa: E402
 from testkit import calls, final  # noqa: E402
 
 from himari.bootstrap.application import Application  # noqa: E402
@@ -28,6 +29,7 @@ from himari.control.runner import BackgroundRunner  # noqa: E402
 from himari.data.api import UserMessage  # noqa: E402
 from himari.interfaces.web import app as web  # noqa: E402
 from himari.interfaces.web.config import WebConfig, WebConfigError  # noqa: E402
+from himari.interfaces.web.sandbox import SandboxGrant, SandboxSigner, create_sandbox_app, view_csp  # noqa: E402
 from himari.provider.scripted import ScriptedAdapter, ScriptStep  # noqa: E402
 
 ORIGIN = "http://testserver"
@@ -41,7 +43,7 @@ def config(tmp_path: Path) -> WebConfig:
 
 class Server:
     def __init__(self, tmp_path: Path, script: list[ScriptStep], context_tokens: int | None = None,
-                 mcp: FakeMcpServer | None = None) -> None:
+                 mcp: FakeMcpServer | None = None, signer: SandboxSigner | None = None) -> None:
         self.provider = ScriptedAdapter(script)
         self.application: Application | None = None
 
@@ -51,7 +53,7 @@ class Server:
                                                       mcp_transport=None if mcp is None else mcp.transport())
             return self.application
 
-        self.client = TestClient(web.create_app(config(tmp_path), opener))
+        self.client = TestClient(web.create_app(config(tmp_path), opener, signer))
 
     @property
     def secret(self) -> str:
@@ -176,7 +178,7 @@ def test_static_ui_and_security_headers(server: Server) -> None:
     assert page.status_code == 200 and "/assets/app.js" in page.text
     assert "default-src 'self'" in page.headers["content-security-policy"]
     assert page.headers["x-content-type-options"] == "nosniff" and page.headers["x-frame-options"] == "DENY"
-    for name in ("app.js", "app.css", "rich_text.js"):
+    for name in ("app.js", "app.css", "rich_text.js", "app_view.js"):
         assert server.client.get(f"/assets/{name}").status_code == 200
     assert server.client.get("/assets/../app.py").status_code == 404
     assert server.client.get("/assets/index.html").status_code == 404
@@ -572,3 +574,187 @@ def test_a_finished_job_says_why_as_bounded_text(server: Server) -> None:
     server.post(f"/api/conversations/{cid}/resume")
     detail = server.wait_idle(cid)["job"]["detail"]
     assert len(detail) == web.MAX_DETAIL_CHARS and detail.endswith("…")  # bounded; the page renders it as text
+
+
+# --- Tool views (MCP Apps, V3-P58) --------------------------------------------------------------
+
+VIEW_UI = {"connect_domains": ["https://api.example.com"]}
+
+
+@pytest.fixture
+def view_server(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[tuple[Server, FakeMcpServer, SandboxSigner]]:
+    monkeypatch.setattr(web, "FAILED_LOGIN_DELAY_SECONDS", 0)
+    data = tmp_path / "data"
+    data.mkdir(mode=0o700)
+    (data / "mcp.json").write_text(json.dumps({"servers": {"calliope": {
+        "url": MCP_URL, "tools": {"echo": {"effect": "read"}}, "ui": VIEW_UI}}}))
+    (data / "mcp.json").chmod(0o600)
+    fake = FakeMcpServer([{"name": "echo", "description": "Echo with a view.", "inputSchema": ECHO_SCHEMA,
+                           "_meta": {"ui": {"resourceUri": VIEW_URI}}}])
+    fake.resources = {VIEW_URI: {"contents": [view_entry(_meta={"ui": {
+        "csp": {"connectDomains": ["https://api.example.com", "https://not-allowed.example.com"]},
+        "prefersBorder": False}})]}}
+    signer = SandboxSigner(b"k" * 32)
+    s = Server(tmp_path, [], mcp=fake, signer=signer)
+    with s.client:
+        yield s, fake, signer
+
+
+def app_url(cid: str, run_id: str, call_id: str, origin: str = ORIGIN) -> str:
+    return f"/api/conversations/{cid}/calls/{run_id}/{call_id}/app?origin={origin}"
+
+
+def test_views_have_their_own_port_and_origin() -> None:
+    base = {"HIMARI_DATA_ROOT": "/srv/himari"}
+    default = WebConfig.from_env(base)
+    assert default.view_port == 8766
+    assert default.sandbox_origins == {"http://127.0.0.1:8766", "http://localhost:8766"}
+    proxied = WebConfig.from_env({**base, "HIMARI_WEB_ALLOWED_ORIGINS": "https://h.example",
+                                  "HIMARI_WEB_SANDBOX_PORT": "9443"})
+    assert proxied.sandbox_origin("https://h.example") == "https://h.example:9443"
+    for bad in ("8765", "0", "x"):
+        with pytest.raises(WebConfigError, match="HIMARI_WEB_SANDBOX_PORT"):
+            WebConfig.from_env({**base, "HIMARI_WEB_SANDBOX_PORT": bad})
+    with pytest.raises(WebConfigError, match="HIMARI_WEB_SANDBOX_PORT"):
+        WebConfig.from_env({**base, "HIMARI_WEB_PORT": "65535"})  # no port + 1
+
+
+def test_the_page_may_frame_only_the_sandbox_origin(server: Server) -> None:
+    csp = server.client.get("/").headers["content-security-policy"]
+    assert csp.endswith("; frame-src http://testserver:8766")
+    assert "frame-ancestors 'none'" in csp  # the page itself is still never framed
+
+
+def test_a_call_with_a_view_is_flagged_and_its_view_served_as_json(
+        view_server: tuple[Server, FakeMcpServer, SandboxSigner]) -> None:
+    server, _, signer = view_server
+    server.sign_in()
+    cid = server.post("/api/conversations").json()["id"]
+    queue(server, calls(("calliope/echo", {"text": "hi"})), final("done"))
+    server.post(f"/api/conversations/{cid}/messages", {"text": "go"})
+    server.wait_idle(cid)
+    events = server.client.get(f"/api/conversations/{cid}/events").json()["items"]
+    (call_event,) = [e for e in events if e["kind"] == "assistant_tool_calls"]
+    (result_event,) = [e for e in events if e["kind"] == "tool_result"]
+    assert call_event["calls"][0]["app_view"] is True and result_event["app_view"] is True
+    view = server.client.get(app_url(cid, call_event["run_id"], call_event["calls"][0]["call_id"])).json()
+    assert view["state"] == "done" and view["status"] == "succeeded" and view["source"] == "calliope"
+    assert view["html"] == VIEW_HTML and view["prefers_border"] is False
+    assert view["tool"] == {"name": "echo", "description": "Echo with a view.", "inputSchema": ECHO_SCHEMA}
+    assert view["arguments"] == {"text": "hi"}
+    assert view["result"] == {"content": [{"type": "text", "text": "echo: hi"}]}
+    assert view["csp"] == {"connect_domains": ["https://api.example.com"], "resource_domains": []}
+    assert view["declared_csp"]["connect_domains"] == ["https://api.example.com", "https://not-allowed.example.com"]
+    # The signed URL is the sandbox origin's, framed by this page only, with the allowed CSP.
+    prefix = "http://testserver:8766/sandbox?"
+    assert view["sandbox_url"].startswith(prefix)
+    query = dict(part.split("=", 1) for part in view["sandbox_url"][len(prefix):].split("&"))
+    assert signer.verify(query["p"], query["sig"]) == SandboxGrant(ORIGIN, ("https://api.example.com",), ())
+
+
+def test_a_view_needs_this_pages_origin_and_this_conversation(
+        view_server: tuple[Server, FakeMcpServer, SandboxSigner]) -> None:
+    server, _, _ = view_server
+    server.sign_in()
+    cid = server.post("/api/conversations").json()["id"]
+    queue(server, calls(("calliope/echo", {"text": "hi"})), final("done"))
+    server.post(f"/api/conversations/{cid}/messages", {"text": "go"})
+    server.wait_idle(cid)
+    call_event = next(e for e in server.client.get(f"/api/conversations/{cid}/events").json()["items"]
+                      if e["kind"] == "assistant_tool_calls")
+    run_id, call_id = call_event["run_id"], call_event["calls"][0]["call_id"]
+    assert server.client.get(app_url(cid, run_id, call_id, "http://evil.example")).status_code == 400
+    assert server.client.get(f"/api/conversations/{cid}/calls/{run_id}/{call_id}/app").status_code == 400
+    other = server.post("/api/conversations").json()["id"]
+    assert server.client.get(app_url(other, run_id, call_id)).json()["error"]["code"] == "no_app_view"
+    assert server.client.get(app_url("conv_nope", run_id, call_id)).status_code == 404
+    signed_out = TestClient(server.client.app)
+    assert signed_out.get(app_url(cid, run_id, call_id)).status_code == 401
+
+
+def test_a_source_turned_off_hides_and_refuses_its_views(
+        view_server: tuple[Server, FakeMcpServer, SandboxSigner]) -> None:
+    server, _, _ = view_server
+    server.sign_in()
+    cid = server.post("/api/conversations").json()["id"]
+    queue(server, calls(("calliope/echo", {"text": "hi"})), final("done"))
+    server.post(f"/api/conversations/{cid}/messages", {"text": "go"})
+    server.wait_idle(cid)
+    put_source(server, cid, "calliope", False)
+    events = server.client.get(f"/api/conversations/{cid}/events").json()["items"]
+    call_event = next(e for e in events if e["kind"] == "assistant_tool_calls")
+    assert call_event["calls"][0]["app_view"] is False
+    assert next(e for e in events if e["kind"] == "tool_result")["app_view"] is False
+    answer = server.client.get(app_url(cid, call_event["run_id"], call_event["calls"][0]["call_id"]))
+    assert (answer.status_code, answer.json()["error"]["code"]) == (404, "source_disabled")
+
+
+def test_a_server_without_views_adds_no_flags(mcp_server: tuple[Server, FakeMcpServer]) -> None:
+    server, _ = mcp_server
+    server.sign_in()
+    cid = server.post("/api/conversations").json()["id"]
+    put_source(server, cid, "calliope", True)
+    queue(server, calls(("calliope/echo", {"text": "hi"})), final("done"))
+    server.post(f"/api/conversations/{cid}/messages", {"text": "go"})
+    server.wait_idle(cid)
+    events = server.client.get(f"/api/conversations/{cid}/events").json()["items"]
+    call_event = next(e for e in events if e["kind"] == "assistant_tool_calls")
+    assert call_event["calls"][0]["app_view"] is False
+    answer = server.client.get(app_url(cid, call_event["run_id"], call_event["calls"][0]["call_id"]))
+    assert answer.json()["error"]["code"] == "app_view_disabled"
+
+
+# --- the sandbox origin ---------------------------------------------------------------------------
+
+GRANT = SandboxGrant(ORIGIN, ("https://api.example.com", "wss://live.example.com"), ("https://cdn.example.com",))
+
+
+def sandbox(signer: SandboxSigner) -> TestClient:
+    return TestClient(create_sandbox_app(["testserver"], signer))
+
+
+def test_the_proxy_is_served_with_the_signed_csp() -> None:
+    signer = SandboxSigner(b"k" * 32)
+    page = sandbox(signer).get(f"/sandbox?{signer.query(GRANT)}")
+    assert page.status_code == 200
+    csp = page.headers["content-security-policy"]
+    assert csp == view_csp(GRANT)
+    assert "connect-src 'self' https://api.example.com wss://live.example.com;" in csp
+    assert "script-src 'self' 'unsafe-inline' https://cdn.example.com;" in csp
+    assert "frame-src 'none'" in csp and "object-src 'none'" in csp and csp.endswith(f"frame-ancestors {ORIGIN}")
+    assert page.headers["cache-control"] == "no-store" and page.headers["referrer-policy"] == "no-referrer"
+    assert f'<meta name="himari-host-origin" content="{ORIGIN}">' in page.text
+    assert "x-frame-options" not in page.headers  # it must be framed (by the page only)
+
+
+def test_the_proxy_refuses_what_himari_did_not_sign_now() -> None:
+    now = [1_000_000.0]
+    signer = SandboxSigner(b"k" * 32, clock=lambda: now[0])
+    client = sandbox(signer)
+    query = signer.query(GRANT)
+    p, sig = (part.split("=", 1)[1] for part in query.split("&"))
+    assert client.get(f"/sandbox?{query}").status_code == 200
+    assert client.get(f"/sandbox?p={p}&sig={'0' * 64}").status_code == 400
+    assert client.get(f"/sandbox?p={p[:-2]}xx&sig={sig}").status_code == 400  # tampered payload
+    assert client.get("/sandbox").status_code == 400
+    restarted = SandboxSigner(b"j" * 32)  # a new process: a new key
+    assert sandbox(restarted).get(f"/sandbox?{query}").status_code == 400
+    now[0] += 601  # past its 10 minutes
+    assert client.get(f"/sandbox?{query}").status_code == 400
+
+
+def test_a_grant_with_anything_but_origins_is_refused() -> None:
+    signer = SandboxSigner(b"k" * 32)
+    for grant in [SandboxGrant(ORIGIN, ("https://a.com; script-src *",)), SandboxGrant("javascript:x"),
+                  SandboxGrant(ORIGIN, (), ("'unsafe-eval'",))]:
+        p, sig = (part.split("=", 1)[1] for part in signer.query(grant).split("&"))
+        assert signer.verify(p, sig) is None
+
+
+def test_the_sandbox_serves_only_the_proxy() -> None:
+    client = sandbox(SandboxSigner())
+    script = client.get("/sandbox.js")
+    assert script.status_code == 200 and script.headers["content-type"].startswith("text/javascript")
+    for path in ("/", "/api/session", "/assets/app.js", "/sandbox.html"):
+        assert client.get(path).status_code == 404
+    assert client.get("/sandbox.js", headers={"host": "evil.example"}).status_code == 400

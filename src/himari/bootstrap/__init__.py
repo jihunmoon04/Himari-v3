@@ -39,6 +39,9 @@ class Runtime:
     data: InMemoryData | SqliteData
     registry: ToolRegistry
     driver: Driver
+    # The one ExternalAccess the catalog and Dispatcher ask; Tool views ask it
+    # too (V3-P58 §3.7), so "is this source on here" has one answer.
+    access: ConfiguredExternalAccess
 
 
 def build_runtime(
@@ -80,7 +83,7 @@ def build_runtime(
         planner=Compactor() if context_budget is not None else None,
         budget=context_budget,
     )
-    return Runtime(store=store, data=data, registry=registry, driver=driver)
+    return Runtime(store=store, data=data, registry=registry, driver=driver, access=access)
 
 
 def read_env_file(path: str) -> dict[str, str]:

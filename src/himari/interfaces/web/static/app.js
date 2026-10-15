@@ -11,9 +11,11 @@
  *    (network error) refreshes the view and says so; it is not resent.
  *
  * Progress is read by polling the conversation (job + waiting question)
- * and its events after the last sequence shown.
+ * and its events after the last sequence shown. Tool views (MCP Apps) are
+ * app_view.js's: this file only tells it about rows, results and sources.
  */
 
+import { AppViews } from "/assets/app_view.js";
 import { renderAssistantText } from "/assets/rich_text.js";
 
 const POLL_MS = 1000;
@@ -99,6 +101,8 @@ const app = {
   context: null, // the last /context answer for this conversation
 };
 
+const views = new AppViews(api, el, () => app.conversationId);
+
 function status(text, tone) {
   const bar = $("status-bar");
   bar.textContent = text || "";
@@ -119,6 +123,7 @@ function showSurface(name) {
 
 function showLogin() {
   stopPolling();
+  views.reset();
   app.conversationId = null;
   app.generation += 1;
   showSurface("login");
@@ -279,6 +284,7 @@ function renderEvent(event) {
       const entry = { node, details, toolId: call.tool_id, args: call.arguments, result: null };
       app.toolRows.set(key, entry);
       paintToolRow(entry);
+      if (call.app_view) views.attach(entry, key, event.run_id, call.call_id, true); // shown while it runs
       timeline.append(node);
     }
     return;
@@ -299,8 +305,12 @@ function renderEvent(event) {
       timeline.append(orphan.node);
       return;
     }
+    if (event.app_view && !entry.view) {
+      views.attach(entry, `${event.run_id}/${event.call_id}`, event.run_id, event.call_id, false);
+    }
     entry.result = event;
     paintToolRow(entry);
+    if (entry.view) views.result(entry, Boolean(event.app_view));
   }
 }
 
@@ -403,7 +413,10 @@ function renderToolSources(sources) {
 async function loadToolSources(generation) {
   try {
     const answer = await api("GET", `/api/conversations/${encodeURIComponent(app.conversationId)}/tools`);
-    if (generation === app.generation) renderToolSources(answer.sources);
+    if (generation === app.generation) {
+      renderToolSources(answer.sources);
+      views.sources(answer.sources); // a source off here closes its views
+    }
   } catch (ignored) {
     /* display only: the conversation works without it */
   }
@@ -415,7 +428,10 @@ async function setToolSource(source, enabled) {
     const answer = await api("PUT",
       `/api/conversations/${encodeURIComponent(app.conversationId)}/tools/${encodeURIComponent(source)}`,
       { enabled });
-    if (generation === app.generation) renderToolSources(answer.sources);
+    if (generation === app.generation) {
+      renderToolSources(answer.sources);
+      views.sources(answer.sources, true); // close its views here and in this browser's other tabs (V3-P58 §3.7)
+    }
   } catch (error) {
     if (generation === app.generation) {
       status(error.message, "error");
@@ -434,7 +450,10 @@ async function pullEvents(generation) {
     for (const event of page.items) renderEvent(event);
     app.lastSequence = page.last_sequence;
     if (page.items.length && atBottom) timeline.scrollTop = timeline.scrollHeight;
-    if (page.items.length < 200) return true;
+    if (page.items.length < 200) {
+      views.autoOpen();
+      return true;
+    }
   }
 }
 
@@ -521,6 +540,7 @@ function poll(generation) {
         loadList(true).then(markSelected).catch(() => {});
         loadContext(generation);
         loadServerInfo(); // a command may have found the sandbox broken
+        loadToolSources(generation); // and close the views of a source turned off elsewhere
       }
     } catch (error) {
       if (generation === app.generation && error.status !== 401) {
@@ -535,6 +555,7 @@ async function openConversation(id) {
   stopPolling();
   app.generation += 1;
   const generation = app.generation;
+  views.reset();
   app.conversationId = id;
   app.lastSequence = 0;
   loadServerInfo();

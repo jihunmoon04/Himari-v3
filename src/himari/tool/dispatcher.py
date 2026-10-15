@@ -40,6 +40,7 @@ P0 scheduling is sequential in original ordinal order; parallel scheduling
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
+from dataclasses import replace
 
 from himari.common import (
     BindingId,
@@ -57,6 +58,7 @@ from himari.data.api import (
     ConversationLog,
     ConversationWorkspace,
     DataError,
+    DataErrorCode,
     ToolCompletion,
     ToolExecutionRecord,
     ToolExecutionStatus,
@@ -276,17 +278,23 @@ class Dispatcher:
     async def _commit(
         self, scope: TrustedScope, call: CallRef, outcome: ToolOutcome, record_event: bool
     ) -> None:
-        await self._log.commit_tool_outcome(
-            scope,
-            call,
-            ToolCompletion(
-                status=_STATUS[outcome.status],
-                model_result=outcome.model_result,
-                raw_result=outcome.raw_result,
-                artifact_mutations=outcome.artifact_mutations,
-                record_event=record_event,
-            ),
+        ran = outcome.status in (ToolStatus.SUCCEEDED, ToolStatus.FAILED)
+        completion = ToolCompletion(
+            status=_STATUS[outcome.status],
+            model_result=outcome.model_result,
+            raw_result=outcome.raw_result,
+            artifact_mutations=outcome.artifact_mutations,
+            record_event=record_event,
+            app_view=outcome.app_view if ran else None,  # only a call that ran has a view (V3-P58)
         )
+        try:
+            await self._log.commit_tool_outcome(scope, call, completion)
+        except DataError as error:
+            if completion.app_view is None or error.code is not DataErrorCode.INVALID_ARGUMENT:
+                raise
+            # A view Data refuses must not cost the call its definite result:
+            # the commit is atomic, so commit the result without it.
+            await self._log.commit_tool_outcome(scope, call, replace(completion, app_view=None))
 
     @staticmethod
     def _group_state(run_id: RunId, records: Sequence[ToolExecutionRecord]) -> GroupDispatchResult:

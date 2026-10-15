@@ -1013,6 +1013,69 @@ h3 {
   font-size: 12px;
 }
 
+/* Tool views (MCP Apps, V3-P58). The label above every view is always shown
+ * (a view is the server's code, not HIMARI's), whatever it asks about borders. */
+.app-view-slot:empty {
+  display: none;
+}
+
+.app-view-open {
+  font-size: 12px;
+  padding-left: 0;
+}
+
+.app-view {
+  margin: var(--space-1) 0 var(--space-2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  background: var(--surface-raised);
+  overflow: hidden;
+}
+
+.app-view.is-borderless {
+  border-color: var(--border-subtle);
+  background: transparent;
+}
+
+.app-view-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding: 2px var(--space-2);
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--surface);
+  font-size: 11px;
+}
+
+.app-view-label {
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+
+.app-view-close {
+  font-size: 11px;
+  padding: 2px var(--space-1);
+}
+
+.app-view-frame {
+  display: block;
+  width: 100%;
+  border: 0;
+}
+
+.app-view-notice,
+.app-view-notice-detail {
+  margin: var(--space-1) 0;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.app-view-notice-detail {
+  font-style: italic;
+  overflow-wrap: anywhere;
+}
+
 .item-text,
 .pre {
   white-space: pre-wrap;

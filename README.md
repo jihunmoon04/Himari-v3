@@ -94,6 +94,17 @@ HIMARI_DATA_ROOT=~/.himari python -m himari.interfaces.web --env-file .env
 - 연결되지 않은 서버는 그 Tool만 빼고 시작하며, 시작 로그와 `/tools`에 이유가 표시됩니다(재시작해야 다시 연결).
 - 대화마다 서버를 켜고 끌 수 있습니다: Web 대화 메뉴의 **Tool servers**, CLI `/tools on|off|default 서버` 또는 `himari tools ID on calliope`. 따로 정하지 않은 대화는 서버의 `default`를 따릅니다.
 
+**Tool 화면 (MCP Apps, V3-P58).** 서버 항목에 `"ui"`를 적으면 그 서버가 Tool에 붙인 화면(`ui://`)을 Web에서 보여 줍니다. 적지 않으면 서버에 화면 지원을 알리지 않습니다.
+
+```json
+"ui": {"connect_domains": ["https://api.example.com"], "resource_domains": ["https://cdn.example.com"]}
+```
+
+- 두 목록은 화면이 접속할 수 있는 상한입니다. 서버가 선언한 origin 중 여기에도 있는 것만 허용합니다(기본: 외부 접속 없음).
+- 화면은 별도 포트(`HIMARI_WEB_SANDBOX_PORT`, 기본 `HIMARI_WEB_PORT` + 1)의 sandbox origin에서, 저장소 없이 격리되어 돕니다. 역방향 프록시를 쓰면 이 포트도 같은 호스트로 전달해야 합니다.
+- 가장 최근 호출의 화면은 자동으로, 나머지는 "Open view"로 엽니다. 실행 중에도 보이며, 대화에서 서버를 끄면 그 서버의 화면은 닫힙니다. 화면은 1단계라 읽기 전용입니다(화면에서 Tool 호출·메시지 보내기는 안 됨).
+- 브라우저 검증: `python scripts/mcp_apps_smoke.py`(실제 서버, Playwright 필요), 비동기 순서는 `python scripts/app_view_races/run.py`, 설계 모형은 `python -I scripts/mcp_apps_probe/run.py`.
+
 ### CLI
 
 서버가 실행 중일 때 같은 사용자로 실행합니다(DB를 직접 열지 않고 서버에 접속).

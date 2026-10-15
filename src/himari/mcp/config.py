@@ -7,7 +7,11 @@
         "token_env": "CALLIOPE_MCP_TOKEN",      optional: Bearer token from this variable
         "default": "on",                         optional: "on" (default) or "off" in new Conversations
         "timeout_seconds": 60,                   optional: one tools/call, 1..600
-        "tools": {"position": {"effect": "read"}}
+        "tools": {"position": {"effect": "read"}},
+        "ui": {                                  optional: show this server's Tool views (MCP Apps, V3-P58)
+            "connect_domains": ["https://api.example.com", "wss://live.example.com"],
+            "resource_domains": ["https://cdn.example.com"]
+        }
     }}}
 
 Only the listed Tools are registered, whatever else the server offers, and
@@ -18,6 +22,14 @@ names where credentials go; the token itself stays in the environment.
 Anything unexpected is refused, never guessed: unknown keys, a URL that is
 not ``https://`` (or ``http://`` to a loopback address), a token variable
 that is not set.
+
+``ui`` turns on the server's views and is the upper bound of what they may
+reach: a view's CSP allows only the origins its server declares that are
+also listed here, exactly (V3-P58 §3.3). Without ``ui`` the server is not told
+that HIMARI shows views. An origin is ``https://host[:port]`` or
+``https://*.host[:port]`` (``connect_domains`` also ``wss://``; on a loopback
+host also ``http://`` / ``ws://``); nothing else may appear in it, since it
+goes into a CSP header.
 """
 
 from __future__ import annotations
@@ -47,6 +59,10 @@ HASH_CHARS = 8
 _EFFECTS = {"read": EffectProfile.READ, "scoped_write": EffectProfile.SCOPED_WRITE, "unknown": EffectProfile.UNKNOWN}
 _SOURCE = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
 _LOOPBACK_NAMES = frozenset({"localhost"})
+MAX_UI_DOMAINS = 32
+# An origin as it appears in a CSP source list: scheme, an optional "*."
+# label, a host of DNS labels (or an IPv4 address) and an optional port.
+_ORIGIN = re.compile(r"(https|wss|http|ws)://(\*\.)?([a-z0-9-]+(?:\.[a-z0-9-]+)*)(?::([0-9]{1,5}))?")
 
 
 class McpConfigError(ValueError):
@@ -61,6 +77,14 @@ class McpToolConfig:
 
 
 @dataclass(frozen=True)
+class McpUiPolicy:
+    """What the operator allows this server's views (V3-P58)."""
+
+    connect_domains: frozenset[str] = frozenset()
+    resource_domains: frozenset[str] = frozenset()
+
+
+@dataclass(frozen=True)
 class McpServerConfig:
     name: str  # the External source: the namespace of its Tools' ids
     url: str
@@ -68,6 +92,7 @@ class McpServerConfig:
     enabled_by_default: bool
     timeout_seconds: float
     tools: tuple[McpToolConfig, ...]
+    ui: McpUiPolicy | None = None  # None: the server's views are not shown
 
 
 @dataclass(frozen=True)
@@ -118,6 +143,40 @@ def check_url(url: str) -> str:
     if parts.scheme == "http" and not loopback:
         raise McpConfigError("plain http:// is allowed only to a loopback address (use https://)")
     return url
+
+
+def check_origin(origin: str, *, websocket: bool) -> str:
+    """One CSP origin (see the module doc); returned as given, lowercase."""
+    match = _ORIGIN.fullmatch(origin) if isinstance(origin, str) else None
+    if match is None or origin != origin.lower():
+        raise McpConfigError(f"{origin!r} is not an origin like https://host[:port] or https://*.host")
+    scheme, wildcard, host, port = match.groups()
+    if scheme in ("ws", "wss") and not websocket:
+        raise McpConfigError(f"{origin!r}: only connect_domains may name a WebSocket origin")
+    if port is not None and not 1 <= int(port) <= 65535:
+        raise McpConfigError(f"{origin!r}: not a valid port")
+    if scheme in ("http", "ws"):
+        try:
+            loopback = host in _LOOPBACK_NAMES or ip_address(host).is_loopback
+        except ValueError:
+            loopback = False
+        if not loopback or wildcard:
+            raise McpConfigError(f"{origin!r}: http:// and ws:// are allowed only to a loopback address")
+    return origin
+
+
+def _ui_policy(raw: object, where: str) -> McpUiPolicy:
+    entry = _keys(raw, where, set(), {"connect_domains", "resource_domains"})
+    lists: dict[str, frozenset[str]] = {}
+    for key in ("connect_domains", "resource_domains"):
+        value = entry.get(key, [])
+        if not isinstance(value, list) or len(value) > MAX_UI_DOMAINS:
+            raise McpConfigError(f"{where}.{key} must be a list of at most {MAX_UI_DOMAINS} origins")
+        try:
+            lists[key] = frozenset(check_origin(v, websocket=key == "connect_domains") for v in value)
+        except McpConfigError as error:
+            raise McpConfigError(f"{where}.{key}: {error}") from None
+    return McpUiPolicy(lists["connect_domains"], lists["resource_domains"])
 
 
 def _read_private(path: str) -> bytes | None:
@@ -176,7 +235,7 @@ def _parse_config(text: bytes | str, environ: Mapping[str, str]) -> McpConfig:
         if not _SOURCE.fullmatch(name) or len(name) > MAX_SOURCE_CHARS:
             raise McpConfigError(f"{where}: a server name is lowercase letters, digits and single '-' "
                                  f"(at most {MAX_SOURCE_CHARS})")
-        entry = _keys(raw, where, {"url", "tools"}, {"token_env", "default", "timeout_seconds"})
+        entry = _keys(raw, where, {"url", "tools"}, {"token_env", "default", "timeout_seconds", "ui"})
         url = entry["url"]
         if not isinstance(url, str):
             raise McpConfigError(f"{where}.url must be a string")
@@ -210,6 +269,7 @@ def _parse_config(text: bytes | str, environ: Mapping[str, str]) -> McpConfig:
         out.append(McpServerConfig(
             name=name, url=url, token=token, enabled_by_default=default == "on", timeout_seconds=float(timeout),
             tools=tuple(McpToolConfig(n, ids[n], effects[n]) for n in sorted(effects)),
+            ui=_ui_policy(entry["ui"], f"{where}.ui") if "ui" in entry else None,
         ))
     return McpConfig(tuple(out))
 
