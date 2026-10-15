@@ -39,6 +39,8 @@ from himari.data.api import ArtifactMutation, ArtifactStore, BindingAuthority, C
 # Tool views (MCP Apps, V3-P58): owned by Data, re-exported here so that a
 # Tool implementation (e.g. the MCP connector, which may import only
 # tool.api — V3-059) can build them.
+from himari.data.api import MAX_APP_PAYLOAD_BYTES as MAX_APP_PAYLOAD_BYTES
+from himari.data.api import MAX_UI_HTML_BYTES as MAX_UI_HTML_BYTES
 from himari.data.api import AppView as AppView
 from himari.data.api import UiCsp as UiCsp
 from himari.data.api import UiResource as UiResource

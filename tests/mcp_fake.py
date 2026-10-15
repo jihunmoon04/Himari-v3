@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import Callable
 from typing import Any
@@ -19,6 +20,15 @@ ECHO_SCHEMA: dict[str, Any] = {
 
 def echo(arguments: dict[str, Any]) -> dict[str, Any]:
     return {"content": [{"type": "text", "text": f"echo: {arguments.get('text')}"}]}
+
+
+VIEW_URI = "ui://fake/echo-view"
+VIEW_HTML = "<!DOCTYPE html><html><body><p>echo view</p></body></html>"
+
+
+def view_entry(uri: str = VIEW_URI, html: str = VIEW_HTML, **extra: Any) -> dict[str, Any]:
+    """One ``resources/read`` content entry, as an MCP Apps server gives it."""
+    return {"uri": uri, "mimeType": "text/html;profile=mcp-app", "text": html, **extra}
 
 
 class FakeMcpServer:
@@ -52,6 +62,12 @@ class FakeMcpServer:
         self.next_rpc_error: int | None = None
         self.list_result: Any = None  # if set: tools/list answers exactly this result
         self.notification_body_read = False
+        # MCP Apps: resources/read answers from here (uri → the result); a
+        # missing uri is a JSON-RPC error. What the client declared is kept.
+        self.resources: dict[str, Any] = {}
+        self.resource_reads: list[str] = []
+        self.client_capabilities: dict[str, Any] | None = None
+        self.resource_delay = 0.0  # seconds before answering resources/read
 
     def transport(self) -> httpx.MockTransport:
         return httpx.MockTransport(self.handle)
@@ -74,6 +90,7 @@ class FakeMcpServer:
         method, params, request_id = message["method"], message.get("params", {}), message["id"]
         headers: dict[str, str] = {}
         if method == "initialize":
+            self.client_capabilities = params.get("capabilities")
             self.initializations += 1
             session = f"session-{self.initializations}"
             self.sessions.add(session)
@@ -95,6 +112,13 @@ class FakeMcpServer:
             if start + size < len(self.tools):
                 page["nextCursor"] = str(start + size)
             return self._answer(request_id, page)
+        if method == "resources/read":
+            self.resource_reads.append(params["uri"])
+            if self.resource_delay:
+                await asyncio.sleep(self.resource_delay)
+            if params["uri"] not in self.resources:
+                return self._error(request_id, -32602)
+            return self._answer(request_id, self.resources[params["uri"]])
         if method == "tools/call":
             name, arguments = params["name"], params.get("arguments", {})
             if self.next_status is not None:

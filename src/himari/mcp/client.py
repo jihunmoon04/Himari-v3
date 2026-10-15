@@ -1,9 +1,12 @@
 """A minimal MCP client over Streamable HTTP (the initialize-handshake revisions, 2025-03-26 .. 2025-11-25).
 
-Only what HIMARI uses: ``initialize``, ``tools/list`` and ``tools/call``.
-The client declares no capabilities, so a server has no reason to send
-requests back; any it sends inside a response stream, and every
-notification, is ignored.
+Only what HIMARI uses: ``initialize``, ``tools/list``, ``tools/call`` and
+``resources/read`` (a Tool's view, MCP Apps). The client declares no
+capabilities of its own, so a server has no reason to send requests back;
+any it sends inside a response stream, and every notification, is ignored.
+For a server whose views are shown it declares the MCP Apps extension
+(``capabilities.extensions``), which tells the server it may describe
+views; that asks for nothing back either.
 
 Each JSON-RPC request is one ``POST`` answered by ``application/json`` or
 a ``text/event-stream`` that carries the response. The session id the
@@ -60,6 +63,8 @@ REFUSED_STATUSES = frozenset({400, 401, 403, 404, 405, 406, 413, 415})
 CONNECT_SECONDS = 5.0
 MAX_TOOL_PAGES = 20
 CLIENT_INFO = {"name": "himari", "version": "3"}
+UI_EXTENSION = "io.modelcontextprotocol/ui"  # MCP Apps (V3-P58)
+UI_MIME_TYPE = "text/html;profile=mcp-app"
 
 
 class McpError(Exception):
@@ -90,6 +95,7 @@ class McpClient:
         *,
         timeout_seconds: float,
         transport: httpx.AsyncBaseTransport | None = None,
+        ui: bool = False,  # declare the MCP Apps extension (V3-P58)
     ) -> None:
         headers = {"accept": "application/json, text/event-stream", "accept-encoding": "identity"}
         if token:
@@ -99,6 +105,8 @@ class McpClient:
             headers=headers, timeout=httpx.Timeout(timeout_seconds, connect=CONNECT_SECONDS),
             follow_redirects=False, trust_env=False, transport=transport,
         )
+        self._capabilities: dict[str, Any] = (
+            {"extensions": {UI_EXTENSION: {"mimeTypes": [UI_MIME_TYPE]}}} if ui else {})
         self._session: str | None = None
         self._version: str | None = None
         self._next_id = 0
@@ -135,6 +143,9 @@ class McpClient:
     async def call_tool(self, name: str, arguments: Mapping[str, JsonValue]) -> Mapping[str, Any]:
         return await self.request("tools/call", {"name": name, "arguments": dict(arguments)})
 
+    async def read_resource(self, uri: str) -> Mapping[str, Any]:
+        return await self.request("resources/read", {"uri": uri})
+
     async def request(self, method: str, params: Mapping[str, Any]) -> Mapping[str, Any]:
         if self._version is None:
             async with self._lock:
@@ -157,7 +168,7 @@ class McpClient:
     async def _initialize(self) -> Mapping[str, Any]:
         self._session, self._version = None, None
         result = await self._rpc("initialize", {
-            "protocolVersion": PROTOCOL_VERSION, "capabilities": {}, "clientInfo": CLIENT_INFO,
+            "protocolVersion": PROTOCOL_VERSION, "capabilities": self._capabilities, "clientInfo": CLIENT_INFO,
         }, initializing=True)
         version = result.get("protocolVersion")
         if version not in SUPPORTED_VERSIONS:
