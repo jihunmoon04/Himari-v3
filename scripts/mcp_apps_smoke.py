@@ -15,7 +15,8 @@ what it receives and what it can reach. Headless Chromium drives the UI:
    with a note (never "cancelled");
 4. Stop during a read call: not run, so the view gets tool-cancelled;
 5. at most 3 views at once: the oldest goes back to "Open view";
-6. turning the server off in the conversation closes its views.
+6. turning the server off in the conversation closes its views;
+7. turning it back on offers them again ("Open view"), and one opens.
 
 Requires: pip install playwright (a Chromium for it, or --chrome PATH)
 Usage:    python scripts/mcp_apps_smoke.py [--chrome PATH] [--screenshots DIR]
@@ -283,6 +284,16 @@ def run(token: str, fake: FakeMcpServer, chrome: str | None, shots: str | None) 
         expect(page.locator(".app-view-frame")).to_have_count(0, timeout=10000)
         check("6: turning the server off closed every view",
               page.locator(".app-view-notice", has_text="This server is turned off in this conversation.").count() >= 1)
+
+        # 7. Back on: offered again, and a view opens.
+        page.check("#tool-source-calliope")
+        expect(page.locator(".app-view-open")).not_to_have_count(0, timeout=5000)
+        check("7: turning it back on offered the views again",
+              page.locator(".app-view-notice", has_text="This server is turned off in this conversation.").count() == 0)
+        page.locator(".app-view-open").last.click()
+        expect(page.locator(".app-view-frame")).to_have_count(1, timeout=10000)
+        lines = wait_logged(inner(page, 0), "result")
+        check("7: and a view opens again with its result", any(line.startswith("result ") for line in lines), lines)
         check("no uncaught errors in the page", errors == [], errors)
         browser.close()
     return results

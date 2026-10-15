@@ -12,7 +12,10 @@ window.addEventListener("message", (e) => {
     post({ jsonrpc: "2.0", method: "ui/notifications/initialized", params: {} });
   } else if (m.method) {
     window.received.push(m.method);
-    if (m.method === "ui/resource-teardown") post({ jsonrpc: "2.0", id: m.id, result: {} });
+    // ?noack: never answer the teardown request (the host gives up after its timeout).
+    if (m.method === "ui/resource-teardown" && !location.search.includes("noack")) {
+      post({ jsonrpc: "2.0", id: m.id, result: {} });
+    }
   }
 });
 post({ jsonrpc: "2.0", method: "ui/notifications/sandbox-proxy-ready", params: {} });

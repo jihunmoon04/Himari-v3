@@ -14,7 +14,12 @@ case forces one ordering exactly:
   arrives, no frame may be created.
 - B2: the source is turned off while a running view is asking for its
   result: it must not come back, even with a changed view.
-- Turning the source back on brings "Open view" back.
+- Turning the source back on brings "Open view" back, also on a view that
+  was open when it went off, and also when it comes back on before that
+  view has finished closing (review B3).
+- A view that answers ui/resource-teardown is removed at once, not after
+  the timeout; and while the oldest of three views is closing to make room
+  for a fourth, there are never more than three frames (review B4).
 
 Requires: pip install playwright (a Chromium for it, or --chrome PATH)
 Usage:    python scripts/app_view_races/run.py [--chrome PATH] [--app-view FILE]
@@ -49,7 +54,7 @@ def serve(app_view: Path) -> ThreadingHTTPServer:
             pass
 
         def do_GET(self) -> None:
-            found = files.get(self.path)
+            found = files.get(self.path.split("?", 1)[0])
             self.send_response(200 if found else 404)
             self.send_header("content-type", found[1] if found else "text/plain")
             self.send_header("cache-control", "no-store")
@@ -143,6 +148,65 @@ def back_on(page: Page) -> tuple[bool, object]:
     return off == (0, 0) and on == 1, {"while off (requests, buttons)": off, "buttons when back on": on}
 
 
+def open_running(page: Page, key: str, *, noack: bool = False) -> None:
+    """A row whose running view is open and initialized."""
+    page.evaluate(f"harness.row('{key}'); harness.views.autoOpen()")
+    wait(page, "harness.pending.length === 1")
+    extra = "{sandbox_url: location.origin + '/fakeview.html?noack'}" if noack else "{}"
+    page.evaluate(f"harness.answer('running', {extra})")
+    wait(page, f"harness.initialized('{key}')")
+
+
+def back_on_after_an_open_view(page: Page) -> tuple[bool, object]:
+    open_running(page, "c1")
+    page.evaluate("harness.views.sources([{source: 'calliope', enabled: false}], true)")
+    wait(page, "harness.frames() === 0")
+    off = page.evaluate("harness.notices()")
+    page.evaluate("harness.views.sources([{source: 'calliope', enabled: true}])")
+    button = page.evaluate("harness.openButton('c1') !== null")
+    if button:
+        page.evaluate("harness.openButton('c1').click()")
+        wait(page, "harness.pending.length === 1")
+        page.evaluate("harness.answer('running')")
+        page.wait_for_timeout(300)
+    seen = {"notice while off": off, "button when back on": button, "frames after Open view": page.evaluate("harness.frames()")}
+    return OFF in off and button and seen["frames after Open view"] == 1, seen
+
+
+def back_on_before_it_finished_closing(page: Page) -> tuple[bool, object]:
+    open_running(page, "c1", noack=True)  # its teardown takes the whole timeout
+    page.evaluate("harness.views.sources([{source: 'calliope', enabled: false}], true)")
+    page.wait_for_timeout(100)
+    page.evaluate("harness.views.sources([{source: 'calliope', enabled: true}])")  # back on while it is closing
+    page.wait_for_timeout(1500)  # the teardown finishes: it must not paint "turned off" over the button
+    seen = {"button": page.evaluate("harness.openButton('c1') !== null"), "notices": page.evaluate("harness.notices()"),
+            "frames": page.evaluate("harness.frames()")}
+    return seen["button"] and OFF not in seen["notices"] and seen["frames"] == 0, seen
+
+
+def answered_teardown_is_immediate(page: Page) -> tuple[bool, object]:
+    open_running(page, "c1")
+    started = page.evaluate("performance.now()")
+    page.evaluate("harness.entries.c1.node.querySelector('.app-view-close').click()")
+    wait(page, "harness.frames() === 0", timeout=3000)
+    took = page.evaluate("performance.now()") - started
+    return took < 500, f"{took:.0f} ms"
+
+
+def never_more_than_three_frames(page: Page) -> tuple[bool, object]:
+    for key in ("c1", "c2", "c3"):
+        open_running(page, key, noack=True)  # each takes the whole timeout to close
+    page.evaluate("harness.watchFrames()")
+    page.evaluate("harness.row('c4'); harness.views.autoOpen()")
+    wait(page, "harness.pending.length === 1")
+    page.evaluate("harness.answer('running')")
+    wait(page, "harness.initialized('c4')", timeout=5000)
+    page.wait_for_timeout(300)
+    seen = {"most frames at once": page.evaluate("harness.maxFrames"), "frames now": page.evaluate("harness.frames()"),
+            "oldest has Open view": page.evaluate("harness.openButton('c1') !== null")}
+    return seen["most frames at once"] <= 3 and seen["frames now"] == 3 and seen["oldest has Open view"], seen
+
+
 CASES: list[tuple[str, Callable[[Page], tuple[bool, object]]]] = [
     ("B1: 'done' at open, then the late tool_result event: one tool-result", done_then_late_event),
     ("B1: the event before the view's handshake: one tool-result", done_then_event_before_initialized),
@@ -150,6 +214,10 @@ CASES: list[tuple[str, Callable[[Page], tuple[bool, object]]]] = [
     ("B2: turned off in another tab while it is in flight: no frame", off_in_another_tab_while_opening),
     ("B2: turned off while a running view asks for its result: not mounted again", off_while_finishing),
     ("turned off: no request, no 'Open view'; back on: 'Open view' again", back_on),
+    ("B3: back on after an open view was closed: 'Open view' again, and it opens", back_on_after_an_open_view),
+    ("B3: back on before that view finished closing: its button stays", back_on_before_it_finished_closing),
+    ("B4: a view that answers its teardown is removed at once", answered_teardown_is_immediate),
+    ("B4: making room for a fourth view: never more than three frames", never_more_than_three_frames),
 ]
 
 

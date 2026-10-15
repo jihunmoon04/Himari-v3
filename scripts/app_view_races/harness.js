@@ -50,10 +50,22 @@ window.harness = {
     views.result(entry, stored);
   },
   frames: () => document.querySelectorAll(".app-view-frame").length,
-  received() {
-    const frame = document.querySelector(".app-view-frame");
-    return frame && frame.contentWindow.received ? [...frame.contentWindow.received] : null;
+  received(key) {
+    const scope = key ? window.harness.entries[key].node : document;
+    const frame = scope.querySelector(".app-view-frame");
+    return frame && frame.contentWindow && frame.contentWindow.received ? [...frame.contentWindow.received] : null;
   },
+  initialized(key) {
+    const received = window.harness.received(key);
+    return received !== null && received.includes("ui/notifications/tool-input");
+  },
+  // The most iframes seen at once while sampling every 10 ms.
+  maxFrames: 0,
+  watchFrames() {
+    window.harness.maxFrames = 0;
+    setInterval(() => { window.harness.maxFrames = Math.max(window.harness.maxFrames, window.harness.frames()); }, 10);
+  },
+  openButton(key) { return window.harness.entries[key].node.querySelector(".app-view-open"); },
   notices: () => [...document.querySelectorAll(".app-view-notice")].map((n) => n.textContent),
   broadcastOff(source) { new BroadcastChannel("himari-app-views").postMessage({ conversation: "conv_1", source }); },
 };

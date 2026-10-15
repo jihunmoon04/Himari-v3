@@ -15,6 +15,9 @@
  *   when the source went off is dropped (a revocation count per source).
  * - A view gets its result (or its cancellation) once: whichever of the view
  *   API and the tool_result event comes later finds the view settled.
+ * - A closing view stays in `closing` until its frame is gone: its answer to
+ *   ui/resource-teardown is still received (so it goes at once), and it
+ *   still counts toward MAX_LIVE (a new view waits for the room).
  * - Everything the view sends is checked: it must come from that view's
  *   frame and the sandbox origin, be a JSON-RPC message, and be small. Only
  *   ui/initialize, ui/open-link and ping are answered; every other request
@@ -59,6 +62,7 @@ export class AppViews {
     this.generation = 0;
     this.entries = []; // tool rows that may have a view, in timeline order
     this.live = new Map(); // key → live view
+    this.closing = new Set(); // views whose teardown has started and whose frame is not gone yet
     this.closedByUser = new Set();
     this.off = new Set(); // sources off in this conversation, as last heard
     this.revocations = new Map(); // source → times turned off: a request from before is stale
@@ -120,6 +124,7 @@ export class AppViews {
     const view = entry.view;
     if (this.live.has(view.key)) return;
     view.slot.replaceChildren();
+    view.notice = null;
     if (!this.viewable(entry) || this.off.has(view.source)) return;
     const button = this.el("button", "link-button app-view-open", "Open view");
     button.type = "button";
@@ -130,9 +135,15 @@ export class AppViews {
     view.slot.append(button);
   }
 
-  notice(entry, text, detail) {
+  /* kind: what the note is about ("source_disabled" is undone when the source comes back). */
+  notice(entry, text, detail, kind = null) {
     entry.view.slot.replaceChildren(this.el("p", "app-view-notice", text));
     if (detail) entry.view.slot.append(this.el("p", "app-view-notice-detail", detail));
+    entry.view.notice = kind;
+  }
+
+  sourceOffNotice(entry) {
+    this.notice(entry, NOTICE.source_disabled, null, "source_disabled");
   }
 
   url(entry) {
@@ -144,31 +155,43 @@ export class AppViews {
   async open(entry) {
     const source = entry.view.source;
     if (this.off.has(source) || entry.view.opening) return;
+    entry.view.opening = true;
+    try {
+      await this.opening(entry, source);
+    } finally {
+      entry.view.opening = false;
+    }
+  }
+
+  async opening(entry, source) {
     const generation = this.generation;
     const revoked = this.revoked(source);
-    entry.view.opening = true;
+    // Still valid after an await: same conversation, not opened meanwhile, the
+    // source not turned off since the request (PR #28 review B2).
+    const stale = () => {
+      if (generation !== this.generation || this.live.has(entry.view.key)) return true;
+      if (this.revoked(source) === revoked && !this.off.has(source)) return false;
+      if (this.off.has(source)) this.sourceOffNotice(entry);
+      return true;
+    };
     let data;
     try {
       data = await this.api("GET", this.url(entry));
     } catch (error) {
-      if (generation === this.generation) this.notice(entry, NOTICE[error.code] || NOTICE.failed);
-      return;
-    } finally {
-      entry.view.opening = false;
-    }
-    if (generation !== this.generation || this.live.has(entry.view.key)) return;
-    if (this.revoked(source) !== revoked || this.off.has(source)) {
-      // Turned off while this answer was on its way: it may not open (PR #28 review B2).
-      if (this.off.has(source)) this.notice(entry, NOTICE.source_disabled);
+      if (generation === this.generation) this.notice(entry, NOTICE[error.code] || NOTICE.failed, null, error.code);
       return;
     }
+    if (stale()) return;
     if (data.state === "ended") {
       this.notice(entry, NOTICE[data.outcome] || data.reason || NOTICE.failed);
       return;
     }
-    while (this.live.size >= MAX_LIVE) {
+    // Room first: a closing frame still runs, so it counts (PR #28 review B4).
+    while (this.live.size + this.closing.size >= MAX_LIVE) {
       const oldest = this.live.values().next().value;
-      this.teardown(oldest, "Too many views are open.").then(() => this.paintControl(oldest.entry));
+      if (oldest) await this.teardown(oldest, "Too many views are open.").then(() => this.paintControl(oldest.entry));
+      else await Promise.race([...this.closing].map((view) => view.closed));
+      if (stale()) return;
     }
     this.mount(entry, data);
   }
@@ -216,7 +239,7 @@ export class AppViews {
       if (generation === this.generation && this.live.get(view.entry.view.key) === view) {
         const code = NOTICE[error.code] ? error.code : "failed";
         await this.teardown(view, code);
-        this.notice(view.entry, NOTICE[code]);
+        this.notice(view.entry, NOTICE[code], null, code);
       }
       return;
     } finally {
@@ -251,17 +274,25 @@ export class AppViews {
     if (view.frame.contentWindow) view.frame.contentWindow.postMessage(message, view.origin);
   }
 
-  async teardown(view, reason) {
-    if (this.live.get(view.entry.view.key) !== view) return;
+  /* Asks the view to wrap up (at most TEARDOWN_MS), then removes its frame.
+     Resolves when the frame is gone; a second call gets the same promise. */
+  teardown(view, reason) {
+    if (view.closed) return view.closed;
+    if (this.live.get(view.entry.view.key) !== view) return Promise.resolve();
     this.live.delete(view.entry.view.key);
-    if (view.initialized) {
-      const id = view.nextId++;
-      const answered = new Promise((resolve) => view.waiting.set(id, resolve));
-      this.post(view, { jsonrpc: "2.0", id, method: "ui/resource-teardown", params: { reason } });
-      await Promise.race([answered, new Promise((resolve) => setTimeout(resolve, TEARDOWN_MS))]);
-    }
-    view.frame.remove();
-    if (view.entry.view.slot.contains(view.box)) view.entry.view.slot.replaceChildren();
+    this.closing.add(view);
+    view.closed = (async () => {
+      if (view.initialized) {
+        const id = view.nextId++;
+        const answered = new Promise((resolve) => view.waiting.set(id, resolve));
+        this.post(view, { jsonrpc: "2.0", id, method: "ui/resource-teardown", params: { reason } });
+        await Promise.race([answered, new Promise((resolve) => setTimeout(resolve, TEARDOWN_MS))]);
+      }
+      view.frame.remove();
+      this.closing.delete(view);
+      if (view.entry.view.slot.contains(view.box)) view.entry.view.slot.replaceChildren();
+    })();
+    return view.closed;
   }
 
   /* Turned off (here, in another tab, or as last read): close its views,
@@ -271,17 +302,26 @@ export class AppViews {
     this.revocations.set(source, this.revoked(source) + 1);
     for (const view of [...this.live.values()]) {
       if (view.entry.view.source !== source) continue;
-      this.teardown(view, NOTICE.source_disabled).then(() => this.notice(view.entry, NOTICE.source_disabled));
+      this.teardown(view, NOTICE.source_disabled).then(() => {
+        // It may be back on by now (PR #28 review B3): then offer it again instead.
+        if (this.live.has(view.entry.view.key)) return;
+        if (this.off.has(source)) this.sourceOffNotice(view.entry);
+        else this.paintControl(view.entry);
+      });
     }
     for (const entry of this.entries) {
       if (entry.view.source === source) entry.view.slot.querySelector(".app-view-open")?.remove();
     }
   }
 
+  /* Back on: offer its views again where it was the source being off that
+     took them away. Other notes (e.g. "outcome unknown") stay. */
   restore(source) {
     if (!this.off.delete(source)) return;
     for (const entry of this.entries) {
-      if (entry.view.source === source && !entry.view.slot.hasChildNodes()) this.paintControl(entry);
+      const v = entry.view;
+      if (v.source !== source || this.live.has(v.key) || [...this.closing].some((c) => c.entry === entry)) continue;
+      if (!v.slot.hasChildNodes() || v.notice === "source_disabled") this.paintControl(entry);
     }
   }
 
@@ -299,10 +339,20 @@ export class AppViews {
   }
 
   receive(event) {
-    const view = [...this.live.values()].find((v) => v.frame.contentWindow === event.source);
+    const live = [...this.live.values()].find((v) => v.frame.contentWindow === event.source);
+    const closing = live ? null : [...this.closing].find((v) => v.frame.contentWindow === event.source);
+    const view = live || closing;
     if (!view || event.origin !== view.origin) return;
     const m = event.data;
     if (!isMessage(m) || !small(m)) return;
+    if (closing) {
+      // Only its answer to ui/resource-teardown still matters (PR #28 review B4).
+      if (m.method === undefined && view.waiting.has(m.id)) {
+        view.waiting.get(m.id)();
+        view.waiting.delete(m.id);
+      }
+      return;
+    }
     const request = typeof m.method === "string" && m.id !== undefined && m.id !== null;
     if (m.method === "ui/notifications/sandbox-proxy-ready") {
       this.post(view, { jsonrpc: "2.0", method: "ui/notifications/sandbox-resource-ready",
