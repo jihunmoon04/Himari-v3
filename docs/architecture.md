@@ -174,7 +174,7 @@ Environment Tool 실행 시 `binding_id` → Environment 인스턴스/Conversati
 - Tool 구현은 `ToolOutcome(model_result, artifact_mutations, …)`만 반환하고, Artifact 변경·ToolExecution 종결·Conversation Event의 원자 커밋은 Tool Dispatcher가 수행한다(V3-042).
 - Environment를 거칠 필요가 없는 Memory는 Data API에 직접 접근할 수 있지만 SQL/Repository private 구현에는 접근하지 않는다.
 - Workspace 요구 정책은 `None / Required / Default`로 구분하는 것을 권고한다. Outside 기본 Workspace를 암묵적으로 사용하는 Tool은 `None`과 다르다.
-- 별도의 외부 서비스 Connector Tool 범주는 추후 필요에 따라 정의한다.
+- 외부 서비스 Connector는 세 번째 출처 **External Tool**로 정했다(V3-054). Workspace를 요구하지 않고, 효과 등급은 운영자가 정하며, 커넥터는 `common`·`tool.api`만 쓰는 최상위 플러그인 패키지다(V3-055·059, 첫 구현은 MCP).
 
 ### 6.2 복수 ToolCall의 충돌 기준
 
