@@ -256,7 +256,7 @@ class ProcessLauncher(Protocol):
 
 ### 5.7 Calliope 쪽 변경 (Calliope 저장소, 소유자 허용 2026-10-15)
 
-Calliope를 어느 호스트에서도, 어떤 프로세스 단위로도 같게 동작하게 한다. Calliope의 설계 절차(설계 → 독립 검수 → 구현)로 Calliope 저장소에서 진행하고, 이 문서는 HIMARI가 기대는 결과만 적는다.
+Calliope를 어느 호스트에서도, 어떤 프로세스 단위로도 같게 동작하게 한다. Calliope의 설계 절차(설계 → 독립 검수 → 구현)로 Calliope 저장소에서 진행하고, 이 문서는 HIMARI가 기대는 결과만 적는다. 설계 묶음: Calliope [AG4-D](https://github.com/jihunmoon04/Calliope/pull/101)(`docs/design/agent-ag4-design.md`). 게임 id는 `g-` + `game_key` 앞 16자리이고, `<data>/agent/games/`에 한 번만 쓰는 기록이 있다. 예산은 프로세스의 15분 이동 창(권고)이다.
 
 - **게임 id = 내용 기반.** 지금은 세션마다 `g1`, `g2`처럼 다시 센다. 바꾸면 게임 키(`game_key`, sha256)에서 만든 id가 된다. 같은 게임은 언제 어느 프로세스에서 열어도 같은 id를 받는다. `open_game`은 같은 게임에 같은 id를 돌려준다.
 - **id만으로 다시 열 수 있게.** 연 게임의 이동 기록을 데이터 폴더에 남긴다(파일은 한 번 쓰고 고치지 않음, Calliope §9의 쓰기 규칙). 다른 프로세스에서 받은 id도 그 기록으로 찾는다. 기록이 없는 id는 분명히 거절한다.
