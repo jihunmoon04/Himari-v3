@@ -19,7 +19,6 @@ import json
 import os
 import socket
 import tempfile
-from collections.abc import Sequence
 from contextlib import ExitStack
 from typing import TYPE_CHECKING
 
@@ -148,7 +147,7 @@ def expected_sources(binds: dict[str, int]) -> ExpectedSources:
     return ExpectedSources(found, devices)
 
 
-async def probe(sandbox: ServerSandbox, protected_paths: Sequence[str] = ()) -> SelfTestReport:
+async def probe(sandbox: ServerSandbox) -> SelfTestReport:
     from himari.sandbox.backend import SANDBOX_ENV
 
     with ExitStack() as stack:
@@ -184,13 +183,13 @@ async def probe(sandbox: ServerSandbox, protected_paths: Sequence[str] = ()) -> 
             "read_only": read_only,
             "writable": writable,
             "unbound_paths": [unbound, unix_path],
-            "protected_paths": sorted({*DEFAULT_PROTECTED, *protected_paths}),
+            "protected_paths": sorted({*DEFAULT_PROTECTED, *sandbox.protected}),
             "port": tcp.getsockname()[1],
             "port6": port6,
             "unix_path": unix_path,
             "abstract_name": abstract_name,
         }
-        profile = ServerProfile(read_only=(read_only,), writable=(writable,), protected=tuple(protected_paths))
+        profile = ServerProfile(read_only=(read_only,), writable=(writable,))  # the sandbox's own roots apply
         fds = {path: os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC) for path in (read_only, writable)}
         for fd in fds.values():
             stack.callback(os.close, fd)
@@ -226,8 +225,8 @@ async def probe(sandbox: ServerSandbox, protected_paths: Sequence[str] = ()) -> 
         return SelfTestReport(not failures, observed, failures)
 
 
-async def run_server_self_test(sandbox: ServerSandbox, protected_paths: tuple[str, ...] = ()) -> bool:
+async def run_server_self_test(sandbox: ServerSandbox) -> bool:
     try:
-        return (await probe(sandbox, protected_paths)).passed
+        return (await probe(sandbox)).passed
     except Exception:
         return False

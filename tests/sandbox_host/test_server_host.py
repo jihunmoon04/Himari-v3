@@ -46,9 +46,9 @@ def layout(tmp_path: Path) -> dict[str, Path]:
 def run(layout: dict[str, Path], script: str, scenario: Callable[[ServerProcess], Awaitable[None]], *,
         env: dict[str, str] | None = None, grace: float = 2.0) -> None:
     async def go() -> None:
-        sandbox = ServerSandbox.discover()
-        assert await sandbox.start(protected_paths=(str(layout["data"]),)) is SandboxState.ENFORCED
-        launcher = sandbox.launcher(ServerProfile((str(layout["ro"]),), (str(layout["rw"]),), (str(layout["data"]),)))
+        sandbox = ServerSandbox.discover([str(layout["data"])])
+        assert await sandbox.start() is SandboxState.ENFORCED
+        launcher = sandbox.launcher(ServerProfile((str(layout["ro"]),), (str(layout["rw"]),)))
         process = await launcher.launch([PYTHON, "-I", "-S", "-c", script], env or {}, str(layout["rw"]))
         try:
             await asyncio.wait_for(scenario(process), 60)
@@ -59,7 +59,7 @@ def run(layout: dict[str, Path], script: str, scenario: Callable[[ServerProcess]
 
 
 def test_the_server_self_test_passes_with_every_observation(layout: dict[str, Path]) -> None:
-    report = asyncio.run(probe(ServerSandbox.discover(), (str(layout["data"]),)))
+    report = asyncio.run(probe(ServerSandbox.discover([str(layout["data"])])))
     assert report.passed, (report.failures, report.error)
 
 
@@ -93,9 +93,9 @@ def test_identity_failures_refuse_before_spawning(layout: dict[str, Path]) -> No
     os.link(layout["data"] / "himari.db", layout["rw"] / "db-link")
 
     async def go() -> None:
-        sandbox = ServerSandbox.discover()
-        await sandbox.start(protected_paths=(str(layout["data"]),))
-        launcher = sandbox.launcher(ServerProfile((str(layout["ro"]),), (str(layout["rw"]),), (str(layout["data"]),)))
+        sandbox = ServerSandbox.discover([str(layout["data"])])
+        await sandbox.start()
+        launcher = sandbox.launcher(ServerProfile((str(layout["ro"]),), (str(layout["rw"]),)))
         with pytest.raises(SandboxAdmissionError, match="hard link to HIMARI's data"):
             await launcher.launch([PYTHON, "-c", "open('/tmp/ran', 'w')"], {}, str(layout["rw"]))
         assert sandbox.state is SandboxState.ENFORCED  # a refused launch is not a setup failure

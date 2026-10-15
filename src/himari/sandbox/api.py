@@ -118,9 +118,10 @@ class WorkspaceSandbox(Protocol):
 @dataclass(frozen=True)
 class ServerProfile:
     """What one stdio server's process may reach (V3-P59 §4.1). Paths are
-    absolute host directories, bound at the same paths inside. ``protected``
-    are the roots whose contents must not be reachable (the data root, which
-    holds the Workspaces): checked by identity at every launch."""
+    absolute host directories, bound at the same paths inside. The roots
+    whose contents must not be reachable are fixed by the server sandbox
+    itself (HIMARI's data root, which holds the Workspaces) and checked by
+    identity at every launch; ``protected`` only adds more of them."""
 
     read_only: tuple[str, ...] = ()
     writable: tuple[str, ...] = ()

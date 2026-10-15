@@ -48,8 +48,8 @@ def layout(tmp_path: Path) -> dict[str, Path]:
 
 
 def test_a_profile_of_existing_directories_apart_from_the_data_is_accepted(layout: dict[str, Path]) -> None:
-    profile = ServerProfile((str(layout["ro"]),), (str(layout["rw"]),), (str(layout["data"]),))
-    assert srv.check_profile(profile) == profile
+    profile = ServerProfile((str(layout["ro"]),), (str(layout["rw"]),))
+    assert srv.check_profile(profile, protected=[str(layout["data"])]) == profile
 
 
 @pytest.mark.parametrize("where, path, message", [
@@ -58,7 +58,14 @@ def test_a_profile_of_existing_directories_apart_from_the_data_is_accepted(layou
     ("read_only", "/", "other than /"),
     ("read_only", "{tmp}/missing", "not an existing directory"),
     ("read_only", "{ro}/lib/code.py", "not an existing directory"),
-    ("read_only", "/proc", "builds"),
+    ("read_only", "/proc", "puts /proc in place"),
+    ("read_only", "/proc/sys", "puts /proc in place"),
+    ("read_only", "/run", "puts /run/himari in place"),  # PR #32 review B2: covering the helper
+    ("read_only", "/usr", "puts /usr in place"),
+    ("read_only", "/usr/share", "puts /usr in place"),
+    ("read_only", "/etc", "puts /etc/"),  # covers the system view's /etc files
+    ("read_only", "/tmp", "cover the sandbox's own /tmp"),  # B2: the host's /tmp over the sandbox's tmpfs
+    ("writable", "/tmp/home", "puts /tmp/home in place"),
     ("read_only", "{data}/workspaces", "HIMARI's data"),  # inside the data folder
     ("read_only", "{tmp}", "HIMARI's data"),  # holds the data folder
     ("writable", "{alias}", "HIMARI's data"),  # a symbolic link to it
@@ -71,14 +78,15 @@ def test_a_profile_mistake_is_refused(layout: dict[str, Path], tmp_path: Path, w
     read_only = (str(layout["ro"]), path) if where == "read_only" else (str(layout["ro"]),)
     writable = (path,) if where == "writable" else (str(layout["rw"]),)
     with pytest.raises(SandboxProfileError, match=message):
-        srv.check_profile(ServerProfile(read_only, writable, (str(layout["data"]),)))
+        srv.check_profile(ServerProfile(read_only, writable), protected=[str(layout["data"])])
 
 
 def test_a_writable_directory_must_belong_to_the_server_user(layout: dict[str, Path]) -> None:
-    profile = ServerProfile((), (str(layout["rw"]),), (str(layout["data"]),))
+    profile = ServerProfile((), (str(layout["rw"]),))
     with pytest.raises(SandboxProfileError, match="belong to the user"):
-        srv.check_profile(profile, uid=os.geteuid() + 1)
-    srv.check_profile(ServerProfile((str(layout["rw"]),), (), ()), uid=os.geteuid() + 1)  # read-only: anyone's
+        srv.check_profile(profile, protected=[str(layout["data"])], uid=os.geteuid() + 1)
+    srv.check_profile(ServerProfile((str(layout["rw"]),), ()), protected=[str(layout["data"])],
+                      uid=os.geteuid() + 1)  # read-only: anyone's
 
 
 def test_at_most_16_read_only_and_4_writable(tmp_path: Path) -> None:
@@ -86,9 +94,9 @@ def test_at_most_16_read_only_and_4_writable(tmp_path: Path) -> None:
     for d in dirs:
         d.mkdir()
     with pytest.raises(SandboxProfileError, match="at most"):
-        srv.check_profile(ServerProfile(tuple(map(str, dirs)), (), ()))
+        srv.check_profile(ServerProfile(tuple(map(str, dirs)), ()), protected=["/nonexistent"])
     with pytest.raises(SandboxProfileError, match="at most"):
-        srv.check_profile(ServerProfile((), tuple(map(str, dirs[:5])), ()))
+        srv.check_profile(ServerProfile((), tuple(map(str, dirs[:5]))), protected=["/nonexistent"])
 
 
 @pytest.mark.parametrize("env, cwd, message", [
@@ -215,7 +223,7 @@ def test_the_server_layout_binds_descriptors_at_host_paths_without_network() -> 
 
 
 def test_no_capability_means_unavailable_and_nothing_launches(layout: dict[str, Path]) -> None:
-    sandbox = srv.ServerSandbox(None)
+    sandbox = srv.ServerSandbox(None, [str(layout["data"])])
     assert sandbox.state is SandboxState.UNAVAILABLE
     assert asyncio.run(sandbox.start()) is SandboxState.UNAVAILABLE
     launcher = sandbox.launcher(ServerProfile((str(layout["ro"]),), (), ()))
@@ -225,30 +233,30 @@ def test_no_capability_means_unavailable_and_nothing_launches(layout: dict[str, 
 
 @pytest.mark.parametrize("passed, state", [(True, SandboxState.ENFORCED), (False, SandboxState.SETUP_FAILED)])
 def test_only_a_passing_server_self_test_enforces(passed: bool, state: SandboxState) -> None:
-    async def self_test(sandbox: srv.ServerSandbox, protected: tuple[str, ...]) -> bool:
+    async def self_test(sandbox: srv.ServerSandbox) -> bool:
         return passed
 
-    sandbox = srv.ServerSandbox(CAP)
+    sandbox = srv.ServerSandbox(CAP, ["/nonexistent-data"])
     assert asyncio.run(sandbox.start(self_test)) is state
     with pytest.raises(RuntimeError, match="once"):
         asyncio.run(sandbox.start(self_test))
 
 
 def test_not_started_refuses_without_spawning(layout: dict[str, Path], monkeypatch: pytest.MonkeyPatch) -> None:
-    sandbox = srv.ServerSandbox(CAP)
+    sandbox = srv.ServerSandbox(CAP, ["/nonexistent-data"])
     monkeypatch.setattr(sandbox, "spawn", lambda *a: pytest.fail("spawned"))
     with pytest.raises(SandboxUnavailableError, match="capable_inactive"):
         asyncio.run(sandbox.launcher(ServerProfile((str(layout["ro"]),), (), ())).launch(["x"], {}, str(layout["ro"])))
 
 
 def test_a_setup_failure_at_launch_latches(layout: dict[str, Path]) -> None:
-    async def passing(sandbox: srv.ServerSandbox, protected: tuple[str, ...]) -> bool:
+    async def passing(sandbox: srv.ServerSandbox) -> bool:
         return True
 
     async def failing(*args: Any) -> srv.ServerProcess:
         raise SandboxSetupError("no sync")
 
-    sandbox = srv.ServerSandbox(CAP)
+    sandbox = srv.ServerSandbox(CAP, ["/nonexistent-data"])
     asyncio.run(sandbox.start(passing))
     sandbox.spawn = failing  # type: ignore[method-assign,assignment]
     launcher = sandbox.launcher(ServerProfile((str(layout["ro"]),), (), ()))
@@ -261,9 +269,9 @@ def test_a_setup_failure_at_launch_latches(layout: dict[str, Path]) -> None:
 
 def test_an_identity_failure_spawns_nothing(layout: dict[str, Path], monkeypatch: pytest.MonkeyPatch) -> None:
     os.link(layout["data"] / "himari.db", layout["ro"] / "db-link")
-    sandbox = srv.ServerSandbox(CAP)
+    sandbox = srv.ServerSandbox(CAP, [str(layout["data"])])
     monkeypatch.setattr(sandbox, "_spawn_checked", lambda *a: pytest.fail("spawned"))
-    profile = ServerProfile((str(layout["ro"]),), (), (str(layout["data"]),))
+    profile = ServerProfile((str(layout["ro"]),), ())
     with pytest.raises(SandboxAdmissionError):
         asyncio.run(sandbox.spawn(profile, ["x"], {}, str(layout["ro"])))
 
@@ -374,14 +382,69 @@ def test_shutdown_escalates_from_eof_to_sigterm_to_sigkill(script: str, ends_by:
 
 
 def test_a_bound_directory_gone_since_the_check_refuses_only_that_launch(layout: dict[str, Path]) -> None:
-    async def passing(sandbox: srv.ServerSandbox, protected: tuple[str, ...]) -> bool:
+    async def passing(sandbox: srv.ServerSandbox) -> bool:
         return True
 
-    sandbox = srv.ServerSandbox(CAP)
+    sandbox = srv.ServerSandbox(CAP, ["/nonexistent-data"])
     asyncio.run(sandbox.start(passing))
     launcher = sandbox.launcher(ServerProfile((str(layout["ro"]),), (str(layout["rw"]),), ()))
     layout["ro"].rename(layout["ro"].with_name("moved"))
     with pytest.raises(SandboxAdmissionError, match="could not be opened"):
         asyncio.run(launcher.launch(["x"], {}, str(layout["rw"])))
     assert sandbox.state is SandboxState.ENFORCED  # not a setup failure: other servers still start
+
+
+# --- PR #32 review B1: the sandbox's protected roots apply to every launch ------------
+
+
+def test_a_server_sandbox_needs_its_protected_roots() -> None:
+    with pytest.raises(ValueError, match="roots it protects"):
+        srv.ServerSandbox(CAP, [])
+    with pytest.raises(SandboxProfileError, match="absolute"):
+        srv.ServerSandbox(CAP, ["relative/data"])
+
+
+def test_a_profile_without_protected_roots_still_cannot_bind_the_data(layout: dict[str, Path], tmp_path: Path,
+                                                                      monkeypatch: pytest.MonkeyPatch) -> None:
+    sandbox = srv.ServerSandbox(CAP, [str(layout["data"])])
+    with pytest.raises(SandboxProfileError, match="HIMARI's data"):
+        sandbox.launcher(ServerProfile((str(layout["data"]),), ()))  # the profile names no protected root
+    # The identity check holds on its own too: an alias the string check cannot see.
+    (tmp_path / "alias").symlink_to(layout["data"] / "workspaces")
+    monkeypatch.setattr(sandbox, "_spawn_checked", lambda *a: pytest.fail("spawned"))
+    with pytest.raises(SandboxAdmissionError, match="inside HIMARI's data"):
+        asyncio.run(sandbox.spawn(ServerProfile((str(tmp_path / "alias"),), ()), ["x"], {}, str(tmp_path / "alias")))
+
+
+def test_a_profiles_protected_roots_add_to_the_sandboxs(layout: dict[str, Path]) -> None:
+    sandbox = srv.ServerSandbox(CAP, [str(layout["data"])])
+    with pytest.raises(SandboxProfileError, match="HIMARI's data"):
+        sandbox.launcher(ServerProfile((str(layout["ro"]),), (), (str(layout["ro"] / "lib"),)))
+    with pytest.raises(SandboxProfileError, match="HIMARI's data"):
+        sandbox.launcher(ServerProfile((str(layout["data"] / "workspaces"),), (), (str(layout["other"]),)))
+
+
+def test_a_directory_below_tmp_may_be_bound(tmp_path: Path) -> None:
+    (tmp_path / "server").mkdir()
+    srv.check_profile(ServerProfile((str(tmp_path / "server"),), ()), protected=["/nonexistent"])
+
+
+# --- PR #32 review B3: bound trees are apart by identity, not only by spelling -------
+
+
+def test_r_apart_one_directory_under_two_names_is_refused(layout: dict[str, Path], tmp_path: Path) -> None:
+    (tmp_path / "rw-alias").symlink_to(layout["ro"])
+    (tmp_path / "inner-alias").symlink_to(layout["ro"] / "lib")
+    with pytest.raises(SandboxAdmissionError, match="same directory"):
+        _check([(layout["ro"], False), (tmp_path / "rw-alias", True)], [layout["data"]])
+    with pytest.raises(SandboxAdmissionError, match="holds another"):
+        _check([(layout["ro"], False), (tmp_path / "inner-alias", True)], [layout["data"]])
+    with pytest.raises(SandboxAdmissionError, match="holds another"):
+        _check([(tmp_path / "inner-alias", True), (layout["ro"], False)], [layout["data"]])  # either order
+
+
+def test_a_writable_tree_is_owned_by_the_server_user_on_the_bound_descriptor(layout: dict[str, Path]) -> None:
+    with pytest.raises(SandboxAdmissionError, match="does not belong"):
+        _check([(layout["rw"], True)], [layout["data"]], uid=os.geteuid() + 1)
+    _check([(layout["ro"], False)], [layout["data"]], uid=os.geteuid() + 1)
 

@@ -16,6 +16,11 @@ descriptor (``--ro-bind-fd`` / ``--bind-fd``).
 - **R1:** no file of a bound tree with more than one link is in P.
 - **R2:** a ``writable`` tree's files have no name outside that tree (the
   names found inside equal the link count).
+- **Apart:** no two bound trees are the same directory, and none holds
+  another (PR #32 review B3): spelling them differently — a symbolic link,
+  a bind mount alias — must not expose one directory both read-only and
+  writable. A ``writable`` tree belongs to the user HIMARI runs as, checked
+  on the descriptor that is bound.
 
 A tree is walked one directory at a time, each opened by its name under its
 parent's descriptor with ``O_NOFOLLOW``: no symbolic link is followed, and
@@ -130,15 +135,25 @@ def protected_set(roots: Sequence[str], budget: _Budget) -> set[Identity]:
 
 
 def check_trees(trees: Sequence[BoundTree], protected: Sequence[str], *, limit: int = MAX_IDENTITY_ENTRIES,
-                mountinfo: str | None = None) -> None:
-    """Raise SandboxAdmissionError unless every tree passes M0, R0, R1 and
-    (when writable) R2. ``mountinfo`` overrides /proc/self/mountinfo (tests)."""
+                mountinfo: str | None = None, uid: int | None = None) -> None:
+    """Raise SandboxAdmissionError unless the trees are apart and each passes
+    M0, R0, R1 and (when writable) R2 and ownership. ``mountinfo`` overrides
+    /proc/self/mountinfo (tests)."""
+    uid = os.geteuid() if uid is None else uid
     try:
         if mountinfo is None:
             with open("/proc/self/mountinfo", encoding="utf-8", errors="surrogateescape") as handle:
                 mountinfo = handle.read()
         budget = _Budget(limit)
         guarded = protected_set(protected, budget)
+        roots: set[Identity] = set()
+        for tree in trees:
+            info = os.fstat(tree.fd)
+            if (info.st_dev, info.st_ino) in roots:
+                raise SandboxAdmissionError("two bound directories are the same directory")
+            roots.add((info.st_dev, info.st_ino))
+            if tree.writable and info.st_uid != uid:
+                raise SandboxAdmissionError("a writable directory does not belong to the user HIMARI runs as")
         for tree in trees:
             root = os.fstat(tree.fd)
             if (root.st_dev, root.st_ino) in guarded:
@@ -152,6 +167,8 @@ def check_trees(trees: Sequence[BoundTree], protected: Sequence[str], *, limit: 
                     if stat.S_ISDIR(entry.st_mode):
                         if identity in guarded:
                             raise SandboxAdmissionError("a bound tree contains HIMARI's data")  # R0
+                        if identity in roots:
+                            raise SandboxAdmissionError("a bound directory holds another bound directory")
                     elif entry.st_nlink > 1:
                         if identity in guarded:
                             raise SandboxAdmissionError("a bound tree has a hard link to HIMARI's data")  # R1

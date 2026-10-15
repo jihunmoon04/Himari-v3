@@ -379,10 +379,13 @@ Calliope를 어느 호스트에서도, 어떤 프로세스 단위로도 같게 �
 
 **구체화하거나 더한 것:**
 - **상태:** 서버 프로파일은 `ServerSandbox`라는 별도 객체다. 호스트 능력(bwrap·Landlock)은 Workspace와 같은 것을 쓰고, 상태와 자체 검사는 따로 가진다. 실행 중 Sandbox 구성이 실패하면(`SandboxSetupError`) Workspace처럼 SETUP_FAILED로 굳는다.
+- **보호 루트는 Sandbox가 쥔다 (PR #32 검수 B1):** `ServerSandbox(capability, protected)`는 만들 때 보호 루트(적어도 HIMARI 데이터 폴더)를 받아야 하며, 빈 목록이면 거부한다. 이 루트는 자체 검사와 모든 launcher의 설정 검사, 모든 실행의 정체성 검사에 항상 적용된다. 프로파일의 `protected`는 추가분일 뿐이다. 그래서 Bootstrap이 프로파일에 보호 경로를 빠뜨려도 데이터 폴더는 붙지 않는다.
+- **붙일 트리끼리의 정체성 (B3):** 실행할 때 연 fd로 확인한다. 두 트리가 같은 디렉터리이거나, 한 트리가 다른 트리의 루트를 품으면(심볼릭 링크·bind mount 별칭으로 철자만 달라도) 거부한다. 같은 디렉터리가 읽기 전용과 쓰기로 동시에 보이지 않게 하기 위해서다. 쓰기 폴더의 소유자도 붙일 fd로 다시 확인한다.
 - **굳지 않는 거부:** 설정 검사 실패(`SandboxProfileError`), 정체성 검사 실패, 붙일 폴더를 열 수 없음(`SandboxAdmissionError`)은 그 실행만 거부한다. 폴더 하나가 사라졌다고 다른 서버까지 막히지 않게 하기 위해서다.
 - **설정 검사에 더한 것:**
   - 붙일 폴더끼리 겹치면 거부한다.
-  - Sandbox가 직접 만드는 곳(`/proc`, `/dev`, `/sys`, `/run/himari`)은 붙일 수 없다.
+  - **Sandbox가 직접 놓는 곳 (B2):** `/proc`, `/dev`, `/sys`, `/run/himari`(helper), `/tmp/home`, 시스템 뷰(`/usr`, `/bin`·`/lib` 등, `/etc`의 세 파일). 그 자체, 그 안, **그것을 덮는 상위 경로**(예: `/run`, `/etc`) 모두 거부한다. bwrap은 나중에 붙인 것이 앞의 것을 가리기 때문이다.
+  - **`/tmp` (B2):** `/tmp` 자체나 그 상위는 Sandbox의 tmpfs를 호스트의 `/tmp`로 바꿔 버리므로 거부한다. `/tmp` 아래의 폴더는 tmpfs 위에 붙으므로 허용한다.
   - 작업 위치는 붙인 폴더 안이거나 `/tmp` 자체여야 한다. `/tmp` 아래의 다른 경로는 Sandbox 안에 없기 때문이다.
   - 운영자 환경 변수는 고정 변수(`PATH`·`HOME` 등)와 `PWD`를 덮어쓸 수 없고, 64개·각 4,096자까지다.
 - **종료의 SIGTERM:** 프로세스 구조는 bwrap(HIMARI의 자식) → PID namespace의 init인 bwrap → 서버다.

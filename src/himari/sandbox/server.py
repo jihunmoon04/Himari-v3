@@ -62,6 +62,7 @@ from himari.sandbox.backend import (
     _wait_sync,
     discover_capability,
     sandbox_arguments,
+    system_view,
 )
 from himari.sandbox import landlock_helper
 
@@ -71,39 +72,61 @@ _ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 # asyncio's reader limit: readuntil fails once the newline would sit past
 # it, so a line of MAX_LINE_BYTES is read and one byte more is refused.
 STREAM_LIMIT = MAX_LINE_BYTES
-# Places the sandbox builds itself: an operator directory may not be bound there.
-_RESERVED = ("/proc", "/dev", "/sys", "/run/himari")
+# Places the layout builds itself (PR #32 review B2): a bound directory may
+# not be one of them, lie inside one, or cover one (be an ancestor: bound
+# later, it would hide what the layout put there). The system view's own
+# destinations are added at check time.
+_BUILT = ("/proc", "/dev", "/sys", "/run/himari", "/tmp/home")
+# The sandbox's own tmpfs: a directory below /tmp is bound on top of it, but
+# /tmp itself or an ancestor would replace it with the host's.
+_NOT_COVERED = ("/tmp",)
 
-ServerSelfTest = Callable[["ServerSandbox", tuple[str, ...]], Awaitable[bool]]
+ServerSelfTest = Callable[["ServerSandbox"], Awaitable[bool]]
 
 
 def _inside(path: str, root: str) -> bool:
     return path == root or path.startswith(root.rstrip("/") + "/")
 
 
-def check_profile(profile: ServerProfile, *, uid: int | None = None) -> ServerProfile:
-    """The configuration checks of §4.2. The overlap with the protected
-    roots is compared as strings (written and resolved): an early warning
-    for a configuration mistake. The guarantee is the identity check at
-    every launch."""
+def _layout_destinations() -> tuple[str, ...]:
+    """What the layout itself puts in place: _BUILT and the system view."""
+    view = system_view()
+    found = [view[i + 2] for i, arg in enumerate(view) if arg in ("--ro-bind", "--symlink")]
+    return (*_BUILT, *found)
+
+
+def _absolute_roots(paths: Sequence[str]) -> tuple[str, ...]:
+    if not all(isinstance(p, str) and os.path.isabs(p) for p in paths):
+        raise SandboxProfileError("protected roots are absolute paths")
+    return tuple(paths)
+
+
+def check_profile(profile: ServerProfile, *, protected: Sequence[str], uid: int | None = None) -> ServerProfile:
+    """The configuration checks of §4.2. ``protected`` is every root to keep
+    out: the sandbox's own and the profile's. The overlaps are compared as
+    strings (written and resolved): an early warning for a configuration
+    mistake. The guarantee is the identity check at every launch."""
     uid = os.geteuid() if uid is None else uid
     if len(profile.read_only) > MAX_READ_ONLY or len(profile.writable) > MAX_WRITABLE:
         raise SandboxProfileError(f"at most {MAX_READ_ONLY} read_only and {MAX_WRITABLE} writable directories")
-    protected = [p for p in profile.protected]
-    if not all(isinstance(p, str) and os.path.isabs(p) for p in protected):
-        raise SandboxProfileError("protected roots are absolute paths")
-    guarded = {*protected, *(os.path.realpath(p) for p in protected)}
+    roots = _absolute_roots(protected)
+    guarded = {*roots, *(os.path.realpath(p) for p in roots)}
+    built = _layout_destinations()
     bound = [*profile.read_only, *profile.writable]
     for path in bound:
         if not isinstance(path, str) or not os.path.isabs(path) or os.path.normpath(path) != path or path == "/":
             raise SandboxProfileError(f"{path!r}: a directory is an absolute, normalized path other than /")
-        if not os.path.isdir(path):
-            raise SandboxProfileError(f"{path}: not an existing directory")
         for written in (path, os.path.realpath(path)):
-            if any(_inside(written, r) for r in _RESERVED):
-                raise SandboxProfileError(f"{path}: the sandbox builds {written} itself")
+            for place in _NOT_COVERED:
+                if _inside(place, written):
+                    raise SandboxProfileError(f"{path}: would cover the sandbox's own {place}")
+            for place in built:
+                if _inside(written, place) or _inside(place, written):
+                    raise SandboxProfileError(f"{path}: the sandbox puts {place} in place itself")
             if any(_inside(written, g) or _inside(g, written) for g in guarded):
                 raise SandboxProfileError(f"{path}: overlaps HIMARI's data folder")
+        if not os.path.isdir(path):
+            raise SandboxProfileError(f"{path}: not an existing directory")
     for i, path in enumerate(bound):
         if any(_inside(path, other) or _inside(other, path) for other in bound[i + 1:]):
             raise SandboxProfileError(f"{path}: overlaps another bound directory")
@@ -268,14 +291,22 @@ class ServerLauncher:
 
 
 class ServerSandbox:
-    def __init__(self, capability: HostCapability | None) -> None:
+    """``protected`` are the roots no server may reach — HIMARI's data root
+    (which holds the Workspaces) at least. They are fixed here and apply to
+    every launcher and launch; a profile's own ``protected`` only adds to
+    them (PR #32 review B1)."""
+
+    def __init__(self, capability: HostCapability | None, protected: Sequence[str]) -> None:
+        if not protected:
+            raise ValueError("a server sandbox needs the roots it protects (HIMARI's data root)")
+        self.protected = _absolute_roots(tuple(protected))
         self._capability = capability
         self._state = SandboxState.UNAVAILABLE if capability is None else SandboxState.CAPABLE_INACTIVE
         self._started = False
 
     @classmethod
-    def discover(cls) -> ServerSandbox:
-        return cls(discover_capability())
+    def discover(cls, protected: Sequence[str]) -> ServerSandbox:
+        return cls(discover_capability(), protected)
 
     @property
     def state(self) -> SandboxState:
@@ -284,7 +315,7 @@ class ServerSandbox:
     def setup_failed(self) -> None:
         self._state = SandboxState.SETUP_FAILED  # latched, as for the Workspace backend
 
-    async def start(self, self_test: ServerSelfTest | None = None, *, protected_paths: Sequence[str] = ()) -> SandboxState:
+    async def start(self, self_test: ServerSelfTest | None = None) -> SandboxState:
         """Once per process: ENFORCED only if the server self-test passes."""
         if self._started:
             raise RuntimeError("the server sandbox starts once per process")
@@ -296,7 +327,7 @@ class ServerSandbox:
 
             self_test = run_server_self_test
         try:
-            passed = await self_test(self, tuple(protected_paths))
+            passed = await self_test(self)
         except Exception:
             passed = False
         self._state = SandboxState.ENFORCED if passed else SandboxState.SETUP_FAILED
@@ -304,7 +335,10 @@ class ServerSandbox:
 
     def launcher(self, profile: ServerProfile) -> ServerLauncher:
         """SandboxProfileError when the profile fails §4.2's configuration checks."""
-        return ServerLauncher(self, check_profile(profile))
+        return ServerLauncher(self, check_profile(profile, protected=self._roots(profile)))
+
+    def _roots(self, profile: ServerProfile) -> tuple[str, ...]:
+        return (*self.protected, *_absolute_roots(profile.protected))
 
     async def spawn(self, profile: ServerProfile, argv: Sequence[str], env: Mapping[str, str],
                     cwd: str) -> ServerProcess:
@@ -321,7 +355,7 @@ class ServerSandbox:
                     fds.append(os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC))
                     binds.append((option, fds[-1], path))
             trees = [identity.BoundTree(fd, option == "--bind-fd") for option, fd, _ in binds]
-            check = asyncio.ensure_future(asyncio.to_thread(identity.check_trees, trees, profile.protected))
+            check = asyncio.ensure_future(asyncio.to_thread(identity.check_trees, trees, self._roots(profile)))
             if await _settle(check):  # the thread uses the descriptors: they stay open until it ends
                 raise asyncio.CancelledError
             check.result()
