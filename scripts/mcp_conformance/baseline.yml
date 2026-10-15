@@ -1,0 +1,36 @@
+# Expected failures of HIMARI's MCP client in the official conformance suite
+# (@modelcontextprotocol/conformance, version pinned in run.py; client mode,
+# suite "all"). The suite fails the run on a failure not listed here and on a
+# listed scenario that passes, so remove an entry when its gap is closed.
+client:
+  # HIMARI declares no elicitation capability; this scenario's server asks
+  # for one anyway (V3-059: elicitation waits for a connector SPI).
+  - elicitation-sep1034-client-defaults
+  # No GET reconnection with Last-Event-ID after a server closes a response
+  # stream gracefully (SEP-1699); reconnection is deferred (V3-055, Q-44). The call
+  # is reported as of unknown outcome, never as not run.
+  - sse-retry
+  # No OAuth: a server's token is the operator's static bearer token
+  # (mcp.json token_env); OAuth is deferred (V3-055, Q-45). auth/resource-mismatch
+  # passes only because no token is ever obtained, so it is not listed.
+  - auth/metadata-default
+  - auth/metadata-var1
+  - auth/metadata-var2
+  - auth/metadata-var3
+  - auth/basic-cimd
+  - auth/scope-from-www-authenticate
+  - auth/scope-from-scopes-supported
+  - auth/scope-omitted-when-undefined
+  - auth/scope-step-up
+  - auth/scope-retry-limit
+  - auth/token-endpoint-auth-basic
+  - auth/token-endpoint-auth-post
+  - auth/token-endpoint-auth-none
+  - auth/pre-registration
+  - auth/2025-03-26-oauth-metadata-backcompat
+  - auth/2025-03-26-oauth-endpoint-fallback
+  - auth/offline-access-scope
+  - auth/offline-access-not-supported
+  - auth/client-credentials-jwt
+  - auth/client-credentials-basic
+  - auth/cross-app-access-complete-flow

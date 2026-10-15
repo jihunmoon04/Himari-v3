@@ -109,6 +109,8 @@ P1은 Workspace 전용 소프트웨어 모듈을 다시 도입하는 단계가 �
 | Q-26 | Artifact origin atomicity | Internal Tool의 Artifact 변경 + ToolResult/Event 원자 트랜잭션, revision 중복 방지 |
 | Q-27 | CurrentStateProjection | **CS-01~08 초안 작성됨**. 합성 소유 위치, 기본 Binding 선택 스코프, Data consistency/version token, Environment 연결 관측, Provider-native 표현의 최종 검수·확정 필요 |
 | Q-28 | Conversation serialization | **P0는 프로세스 내 lock(V3-045)**. lock은 크래시 후 중복을 막지 않으며 그것은 Data T3/T6/T-R 담당. P2: lease/queue 범위, 취소/중단 후 ownership 회수. 신규 사용자 입력 정책은 P0에서 결정 |
+| Q-44 | MCP SSE 이어 받기 | 서버가 응답 스트림을 정상적으로 닫은 뒤, 클라이언트가 GET과 `Last-Event-ID`로 이어 받는 기능(SEP-1699)이 없다. 그런 서버를 만나면 호출은 결과 불명이 된다(실행 안 됨으로 바꾸지 않음). 이벤트 저장소를 쓰는 SDK 서버와 맞물리려면 필요하다. 재연결은 V3-055에서 미뤘다. conformance 기준선의 예상 실패 `sse-retry`(testing-policy §2.3). *(2026-10-15 사용자: 나중에 다룸)* |
+| Q-45 | MCP OAuth | 서버 토큰은 운영자가 `mcp.json`의 `token_env`로 주는 고정 bearer 토큰뿐이다. OAuth가 필요한 원격 서버에는 연결할 수 없다. V3-055에서 미뤘다. conformance 기준선의 예상 실패 `auth/*` 21개(testing-policy §2.3). *(2026-10-15 사용자: 나중에 다룸)* |
 
 ## 다음 구현 작업 제안 (2026-10-14, PR #1~#10 반영)
 
