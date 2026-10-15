@@ -58,6 +58,8 @@ STATE_TEXT = {
     "run_limit_reached": "stopped after the maximum number of steps",
     "idle": "nothing to continue",
     "compaction_failed": "compaction failed; nothing was changed",
+    "paused": "paused — `continue` to go on, or send a new message",
+    "cancelled": "stopped",
 }
 DONE_TEXT = {  # finished states that are not failures
     "compacted": "compacted: earlier messages now reach HIMARI as a summary",
@@ -257,9 +259,42 @@ class Session:
         try:
             detail, after = self.follow(conversation_id, after)
         except KeyboardInterrupt:
-            self.note("(stopped following; the server keeps working — `show` to see the result)")
-            return EXIT_FAILED, after
+            # First Ctrl-C: stop the job now (a stop request only; it never
+            # closes what a finished job left waiting). Second: stop following.
+            try:
+                self.client.post(_path(conversation_id, "/cancel"), None)
+                self.note("(stopping — Ctrl-C again to stop following)")
+                detail, after = self.follow(conversation_id, after)
+            except KeyboardInterrupt:
+                self.note("(stopped following; the server keeps working — `show` to see the result)")
+                return EXIT_FAILED, after
         return self.report(detail), after
+
+    def stop(self, conversation_id: str, action: str) -> int:
+        """``pause`` or ``cancel`` the running job and follow it to its end;
+        ``cancel`` with nothing running closes what was left waiting (an
+        open question, or the steps a paused turn left). Stopping as asked
+        is success."""
+        detail = self.client.get(_path(conversation_id))
+        after = int(detail["conversation"]["last_sequence"])
+        job = self.client.post(_path(conversation_id, f"/{action}"), None)
+        if job.get("running"):
+            self.note("(pausing: the current step finishes first)" if action == "pause" else "(stopping)")
+        elif action == "pause":
+            self.note("(nothing is running)")
+            return EXIT_OK
+        else:
+            self.client.post(_path(conversation_id, "/dismiss"), None)
+        try:
+            detail, _ = self.follow(conversation_id, after)
+        except KeyboardInterrupt:
+            self.note("(stopped following; the server keeps working — `show` to see the result)")
+            return EXIT_FAILED
+        job = detail["job"]
+        if not job.get("error") and job.get("state") in ("paused", "cancelled", "idle"):
+            self.note("(nothing was running or waiting)" if job["state"] == "idle" else f"({STATE_TEXT[job['state']]})")
+            return EXIT_OK
+        return self.report(detail)
 
 
 TOOLS_USAGE = "usage: /tools [on|off|default SOURCE]"
@@ -359,7 +394,18 @@ def cmd_tools(session: Session, args: argparse.Namespace) -> int:
     return tools_command(session, args.id, [w for w in (args.choice, args.source) if w is not None])
 
 
-CHAT_HELP = ("/continue  continue an unanswered message\n/context   context size and the latest summary\n"
+def cmd_pause(session: Session, args: argparse.Namespace) -> int:
+    return session.stop(args.id, "pause")
+
+
+def cmd_cancel(session: Session, args: argparse.Namespace) -> int:
+    return session.stop(args.id, "cancel")
+
+
+CHAT_HELP = ("/continue  continue an unanswered message (or a paused turn)\n"
+             "/dismiss   close an open question, or the steps a paused turn left\n"
+             "Ctrl-C     while HIMARI works: stop now (again: stop following)\n"
+             "/context   context size and the latest summary\n"
              "/compact   summarize the earlier messages now\n"
              "/tools     MCP servers in use; /tools on|off|default SOURCE to change\n"
              "/rename T  rename\n/id        show the id\n/exit      leave")
@@ -424,6 +470,9 @@ def cmd_chat(session: Session, args: argparse.Namespace, read: Callable[[str], s
         if text == "/continue":
             _, after = session.submit_and_follow(conversation_id, after, None)
             continue
+        if text == "/dismiss":
+            _, after = session.post_and_follow(conversation_id, after, "/dismiss", None)
+            continue
         if text == "/tools" or text.startswith("/tools "):
             try:
                 tools_command(session, conversation_id, text.split()[1:])
@@ -465,12 +514,16 @@ def parser() -> argparse.ArgumentParser:
     tools.add_argument("id")
     tools.add_argument("choice", nargs="?", choices=sorted(_CHOICES))
     tools.add_argument("source", nargs="?")
+    pause = sub.add_parser("pause", help="finish the current step, then stop")
+    pause.add_argument("id")
+    cancel = sub.add_parser("cancel", help="stop now; when idle, close an open question or a paused turn's steps")
+    cancel.add_argument("id")
     return p
 
 
 COMMANDS: dict[str, Callable[[Session, argparse.Namespace], int]] = {
     "chat": cmd_chat, "list": cmd_list, "show": cmd_show, "new": cmd_new, "send": cmd_send, "continue": cmd_continue,
-    "compact": cmd_compact, "tools": cmd_tools,
+    "compact": cmd_compact, "tools": cmd_tools, "pause": cmd_pause, "cancel": cmd_cancel,
 }
 
 

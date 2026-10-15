@@ -8,7 +8,7 @@ import pytest
 from testkit import SCOPE, calls, final, runtime, user
 
 from himari.common import ASK_USER_TOOL_ID, ConversationId, PrincipalId, TrustedScope
-from himari.control.api import ControlError, ControlErrorCode, DriveResult, DriveState
+from himari.control.api import ControlError, ControlErrorCode, DriveResult, DriveState, JobStatus, StopRequest, StopSignal
 from himari.control.runner import BackgroundRunner
 from himari.data.api import DataError, DataErrorCode, UserMessage
 
@@ -24,6 +24,8 @@ class GatedDriver:
         self.calls: list[tuple[TrustedScope, UserMessage | None]] = []  # accepted inputs, then None per resume
         self.accept_error: BaseException | None = None
         self.compactions: list[TrustedScope] = []
+        self.signals: list[StopSignal | None] = []  # the stop signal each job was given
+        self.cancels: list[TrustedScope] = []
 
     async def _call(self, scope: TrustedScope, message: UserMessage | None) -> DriveResult:
         self.calls.append((scope, message))
@@ -32,7 +34,7 @@ class GatedDriver:
             raise self.outcome
         return self.outcome
 
-    async def drive(self, scope: TrustedScope, message: UserMessage) -> DriveResult:
+    async def drive(self, scope: TrustedScope, message: UserMessage, *, stop: StopSignal | None = None) -> DriveResult:
         raise AssertionError("the runner accepts, then resumes")
 
     async def accept(self, scope: TrustedScope, message: UserMessage) -> None:
@@ -40,12 +42,18 @@ class GatedDriver:
             raise self.accept_error
         self.calls.append((scope, message))
 
-    async def resume(self, scope: TrustedScope) -> DriveResult:
+    async def resume(self, scope: TrustedScope, *, stop: StopSignal | None = None) -> DriveResult:
+        self.signals.append(stop)
         return await self._call(scope, None)
 
-    async def compact(self, scope: TrustedScope) -> DriveResult:
+    async def compact(self, scope: TrustedScope, *, stop: StopSignal | None = None) -> DriveResult:
         self.compactions.append(scope)
+        self.signals.append(stop)
         return await self._call(scope, None)
+
+    async def cancel(self, scope: TrustedScope) -> DriveResult:
+        self.cancels.append(scope)
+        return DriveResult(DriveState.CANCELLED)
 
 
 def test_submit_returns_at_once_and_one_job_runs_per_conversation() -> None:
@@ -209,5 +217,58 @@ def test_a_compaction_runs_in_the_background_and_is_busy_like_any_job() -> None:
         driver.release.set()
         done = await runner.wait(SCOPE)
         assert done.result == DriveResult(DriveState.COMPACTED) and driver.compactions == [SCOPE]
+
+    asyncio.run(scenario())
+
+
+def test_pause_and_cancel_reach_the_running_job_through_its_signal() -> None:
+    async def scenario() -> None:
+        driver = GatedDriver()
+        runner = BackgroundRunner(driver)
+        assert runner.request_pause(SCOPE) == JobStatus(running=False)  # nothing running: nothing to do
+        await runner.submit(SCOPE, None)
+        await asyncio.sleep(0)
+        (signal,) = driver.signals
+        assert signal is not None and signal.request is None
+
+        paused = runner.request_pause(SCOPE)
+        assert signal.pause_requested and not signal.cancel_requested
+        assert paused.running and paused.stop_requested is StopRequest.PAUSE
+        cancelling = runner.cancel(SCOPE)  # a cancel overrides the pause
+        assert signal.cancel_requested and cancelling.stop_requested is StopRequest.CANCEL
+        assert driver.cancels == []  # the running job stops itself; no separate cancel job
+
+        driver.outcome = DriveResult(DriveState.CANCELLED)
+        driver.release.set()
+        done = await runner.wait(SCOPE)
+        assert done.result == DriveResult(DriveState.CANCELLED) and done.stop_requested is StopRequest.CANCEL
+
+        driver.release.clear()
+        await runner.submit(SCOPE, None)
+        await asyncio.sleep(0)
+        assert driver.signals[-1] is not signal and not driver.signals[-1].pause_requested  # a fresh signal per job
+        driver.release.set()
+        await runner.wait(SCOPE)
+
+    asyncio.run(scenario())
+
+
+def test_cancel_with_no_job_running_closes_what_was_left_waiting() -> None:
+    async def scenario() -> None:
+        driver = GatedDriver()
+        runner = BackgroundRunner(driver)
+        assert runner.cancel(SCOPE) == JobStatus(running=False)  # a stop request never closes anything
+        assert driver.cancels == []
+        started = await runner.submit_cancel(SCOPE)
+        assert started.running and started.generation == 1
+        done = await runner.wait(SCOPE)
+        assert driver.cancels == [SCOPE] and done.result == DriveResult(DriveState.CANCELLED)
+        assert done.stop_requested is None
+        await runner.submit(SCOPE, None)
+        with pytest.raises(ControlError) as busy:
+            await runner.submit_cancel(SCOPE)
+        assert busy.value.code is ControlErrorCode.BUSY
+        driver.release.set()
+        await runner.wait(SCOPE)
 
     asyncio.run(scenario())

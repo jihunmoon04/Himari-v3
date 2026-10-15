@@ -192,6 +192,7 @@ def runtime(
     provider: ScriptedAdapter | None = None,
     context_budget: ContextBudget | None = None,
     instructions: Sequence[str] | None = None,
+    max_runs_per_drive: int = 16,
 ) -> tuple[Runtime, ScriptedAdapter]:
     """Fresh runtime; pass ``restart(rt.store)`` to model a process restart."""
     adapter = provider if provider is not None else ScriptedAdapter(script)
@@ -206,6 +207,7 @@ def runtime(
         store=store,
         context_budget=context_budget,
         instructions=DEFAULT_INSTRUCTIONS if instructions is None else instructions,
+        max_runs_per_drive=max_runs_per_drive,
         # Tests exercising REQUIRE_USER opt in explicitly by using such a Tool;
         # the production default stays off (see test_registry_schema.py).
         allow_require_user_tools=any(

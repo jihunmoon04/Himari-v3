@@ -195,11 +195,34 @@ def test_never_claimed_pending_calls_resume_exactly_once() -> None:
         asyncio.run(rt.driver.drive(SCOPE, user("go")))
 
     rt2, provider2 = runtime([final("done")], store=restart(rt.store), env_tools=[read, write])
-    result = asyncio.run(rt2.driver.drive(SCOPE, user("resume")))
+    result = asyncio.run(rt2.driver.resume(SCOPE))
 
     assert result.state is DriveState.COMPLETED
     assert len(read.invocations) == 2  # READ, never claimed: safe to run again
     assert len(write.invocations) == 1
+
+
+def test_a_new_message_closes_never_started_calls_instead_of_running_them() -> None:
+    # V3-P55: a new message redirects; the group left behind (by a pause or,
+    # as here, a crash) is closed with CANCELLED results, never run.
+    read = RecordingTool("fake/read", environment_kind=FAKE, workspace=WorkspaceRequirement.DEFAULT)
+    write = RecordingTool("fake/write", effect=EffectProfile.SCOPED_WRITE, environment_kind=FAKE,
+                          workspace=WorkspaceRequirement.DEFAULT)
+    read.crash_next = True
+    rt, _ = runtime([calls(("fake/read", {}), ("fake/write", {}))], env_tools=[read, write])
+    rt.store.activate_environment(SCOPE, FAKE, WorkspaceId("ws_1"))
+    with pytest.raises(SimulatedCrash):
+        asyncio.run(rt.driver.drive(SCOPE, user("go")))
+
+    rt2, provider2 = runtime([final("ok, something else")], store=restart(rt.store), env_tools=[read, write])
+    result = asyncio.run(rt2.driver.drive(SCOPE, user("never mind, do something else")))
+
+    assert result.state is DriveState.COMPLETED
+    assert len(read.invocations) == 1 and write.invocations == []  # only the attempt before the crash
+    (group, message) = provider2.prepared_inputs[-1].conversation[-2:]
+    assert isinstance(group, ToolGroupTurn) and isinstance(message, UserTurn)
+    assert all(r.is_error and "sent a new message" in r.blocks[0].text  # type: ignore[union-attr]
+               for r in group.results.values())
 
 
 def test_default_binding_resolution_and_revocation() -> None:
@@ -345,12 +368,12 @@ def test_stored_tool_calls_are_projected_and_run_once_after_restart() -> None:
 
     provider2 = ScriptedAdapter([final("echo done")])
     rt2, _ = runtime(store=restart(rt.store), provider=provider2, tools=[echo])
-    result = asyncio.run(rt2.driver.drive(SCOPE, user("status?")))
+    result = asyncio.run(rt2.driver.resume(SCOPE))
 
     assert result.state is DriveState.COMPLETED
     assert len(echo.invocations) == 1
     history = provider2.prepared_inputs[0].conversation
-    assert [type(p).__name__ for p in history] == ["UserTurn", "ToolGroupTurn", "UserTurn"]
+    assert [type(p).__name__ for p in history] == ["UserTurn", "ToolGroupTurn"]
 
 
 def test_stored_response_from_another_provider_blocks_but_keeps_input() -> None:
@@ -856,7 +879,7 @@ def test_reasoning_details_survive_the_full_path_into_the_next_request(details: 
 # --- PR #12 review B1: accept + resume ----------------------------------------------------
 
 
-def test_input_accepted_before_an_unfinished_group_still_triggers_the_run() -> None:
+def test_input_accepted_after_an_unfinished_group_closes_it_and_triggers_the_run() -> None:
     read = RecordingTool("fake/read", environment_kind=FAKE, workspace=WorkspaceRequirement.DEFAULT)
     read.crash_next = True  # the group stays PENDING
     rt, _ = runtime([calls(("fake/read", {}))], env_tools=[read])
@@ -866,10 +889,10 @@ def test_input_accepted_before_an_unfinished_group_still_triggers_the_run() -> N
 
     provider2 = ScriptedAdapter([final("done")])
     rt2, _ = runtime(store=restart(rt.store), provider=provider2, env_tools=[read])
-    asyncio.run(rt2.driver.accept(SCOPE, user("and also this")))
+    asyncio.run(rt2.driver.accept(SCOPE, user("and also this")))  # V3-P55: redirects, the call is closed
     result = asyncio.run(rt2.driver.resume(SCOPE))
 
-    assert result.state is DriveState.COMPLETED and len(read.invocations) == 2
+    assert result.state is DriveState.COMPLETED and len(read.invocations) == 1
     run = asyncio.run(rt2.data.read_run(SCOPE, result.run_ids[0]))
     accepted = [e for e in asyncio.run(rt2.data.read_events(SCOPE)) if e.payload == user("and also this")][0]
     assert EventRef(accepted.event_id) in run.trigger_refs

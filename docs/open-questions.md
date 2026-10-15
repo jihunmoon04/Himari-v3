@@ -61,15 +61,15 @@ Data [v0.2 구현 가능 후보](data-contract-v0.2.md)에 **DR-01~DR-09 독립 
 
 **권고:** 기본 파일 Tool과 bounded `inside/run_command`를 함께 개발하되, 장기 ManagedProcess는 별도 수명/복구 계약으로 미룬다. **네트워크 차단 전용 프로파일**과 Sandbox 없는 실행 fallback 금지는 필수 방향. [Sandbox Execution v0.1](sandbox-execution-v0.1.md)은 정책 원칙, [Sandbox Implementation Candidate v0.2](sandbox-implementation-v0.2.md)는 v2 코드별 이식 경계·기동 검증·실행 결과 계약을 담은 상세 초안이다.
 
-## P0-C — Control Pause/Resume (설계 초안)
+## P0-C — Control Pause/Resume (P0 구현: V3-P55)
 
 **[Control Pause/Resume v0.1](control-pause-v0.1.md) 제안:** Run raw I/O 보존만으로 정지·재개는 충분하지 않다. Conversation에 `ControlExecutionState` 및 execution cursor를 보존해 PAUSE_REQUESTED → PAUSED의 안전 경계, 미실행 ToolCall 및 부분 완료 결과를 구분해야 한다. **Pause 실행 정책은 아직 확정하지 않았다.**
 
 | ID | 항목 | 미결정 |
 | --- | --- | --- |
-| Q-34 | Pause semantics | Provider in-flight soft pause 후 Run 응답 저장, ToolCall pending 처리, 요청 지연 한계 |
-| Q-35 | Resume cursor | pending/group-complete 여부, 중복 Tool/Run 재실행 방지, 사용자 입력 큐 |
-| Q-36 | Control state authority | **lease/fence·다중 worker 경합은 P2(V3-045)**. P0 남은 것: cancel / final / `ask_user` 대기 우선순위 |
+| Q-34 | ~~Pause semantics~~ | **P0 해결 (V3-P55):** 진행 중인 모델·Tool 호출은 끝까지 기다려 기록하고 다음 단계 전에 멈춘다. 시작하지 않은 호출은 PENDING. 남은 것: 오래 걸리는 Tool의 Pause 대기 상한 |
+| Q-35 | ~~Resume cursor~~ | **P0 해결 (V3-P55):** 별도 cursor 없이 Data 기록에서 판단한다(시작하지 않은 PENDING만 `resume`이 실행, claim된 호출은 재실행하지 않음). 새 메시지는 남은 호출을 닫는다(방향 전환). 남은 것: Pause 상태 영속(P2 lease와 함께) |
+| Q-36 | Control state authority | **lease/fence·다중 worker 경합은 P2(V3-045)**. P0 우선순위는 V3-P55로 해결: final·`ask_user`가 Pause보다 우선, Cancel은 진행 중인 호출을 끊음, 작업이 없을 때의 Cancel(dismiss)은 열린 질문·남은 호출을 닫음 |
 | Q-37 | ~~UNKNOWN 해소 (P0)~~ | **해결: V3-047 (2026-10-13).** 모델에게 "결과 불명"으로 알리고 모델이 확인한다. `REQUIRE_USER` Tool의 사용자 해소 UI·API는 그런 Tool이 처음 생길 때 정의 |
 | Q-38 | ask_user 세부 | 대기 취소·만료, 답변 첨부파일의 Provider별 ToolResult 표현, `ask_user` 혼합 허용(V3-P15) |
 

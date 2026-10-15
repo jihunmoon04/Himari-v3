@@ -89,6 +89,7 @@
               <button type="button" id="chat-menu-rename" class="link-button">Rename</button>
               <button type="button" id="chat-menu-resume" class="link-button">Continue</button>
               <button type="button" id="chat-menu-compact" class="link-button" hidden>Compact now</button>
+              <button type="button" id="chat-menu-dismiss" class="link-button" hidden>Dismiss question</button>
             </div>
           </div>
         </div>
@@ -138,6 +139,10 @@
               <textarea id="composer-text" name="composer-text" rows="1" placeholder="Message HIMARI"></textarea>
               <div class="composer-actions">
                 <span class="composer-hint" id="composer-hint"></span>
+                <button type="button" id="composer-pause" class="link-button composer-stop" hidden
+                        title="Finish the current step, then stop">Pause</button>
+                <button type="button" id="composer-cancel" class="link-button composer-stop" hidden
+                        title="Stop now">Stop</button>
                 <button type="submit" id="composer-send" class="primary-button composer-send"
                         aria-label="Send message" title="Send message">↑</button>
               </div>

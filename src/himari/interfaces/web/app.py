@@ -196,6 +196,7 @@ def job_view(status: JobStatus) -> dict[str, Any]:
         "error": status.error,
         "started_at": _time(status.started_at),
         "finished_at": _time(status.finished_at),
+        "stop_requested": None if status.stop_requested is None else status.stop_requested.value,
     }
 
 
@@ -425,6 +426,28 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
         application, scope = himari(request), scope_of(conversation_id, who)
         await application.data.read_conversation(scope)
         return job_view(await application.runner.submit(scope, None))
+
+    @app.post("/api/conversations/{conversation_id}/pause", status_code=202)
+    async def pause(conversation_id: str, request: Request, who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+        """Stop the running job at the next safe boundary (V3-P55); nothing if idle."""
+        application, scope = himari(request), scope_of(conversation_id, who)
+        await application.data.read_conversation(scope)
+        return job_view(application.runner.request_pause(scope))
+
+    @app.post("/api/conversations/{conversation_id}/cancel", status_code=202)
+    async def cancel(conversation_id: str, request: Request, who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+        """Stop the running job now (V3-P55); nothing if idle."""
+        application, scope = himari(request), scope_of(conversation_id, who)
+        await application.data.read_conversation(scope)
+        return job_view(application.runner.cancel(scope))
+
+    @app.post("/api/conversations/{conversation_id}/dismiss", status_code=202)
+    async def dismiss(conversation_id: str, request: Request, who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+        """Close what was left waiting — a question, or never-started steps
+        of a paused or interrupted turn (V3-P55). Busy while a job runs."""
+        application, scope = himari(request), scope_of(conversation_id, who)
+        await application.data.read_conversation(scope)
+        return job_view(await application.runner.submit_cancel(scope))
 
     @app.post("/api/conversations/{conversation_id}/compact", status_code=202)
     async def compact(conversation_id: str, request: Request, who: PrincipalId = Depends(principal)) -> dict[str, Any]:
