@@ -20,6 +20,12 @@ used is left out (the Tool is not). When the Tool runs, its result carries
 that same view (``ToolOutcome.app_view``), so no request is added after
 ``tools/call``. A Tool whose ``visibility`` leaves out ``"model"`` is not
 registered at all, whatever the operator listed: nothing can call it yet.
+
+stdio servers (V3-P59 §5) run only through a launcher Bootstrap gives for
+each one (the server sandbox); without it the server is left out with the
+reason. Their Tools and views are read by a listing session of their own
+at connect; calls then go to the server's processes (``stdio``), keyed by
+the calling Conversation.
 """
 
 from __future__ import annotations
@@ -28,7 +34,7 @@ import asyncio
 import base64
 import binascii
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -36,7 +42,9 @@ import httpx
 
 from himari.common import JsonValue, ModelToolResult, TextBlock
 from himari.mcp.client import UI_MIME_TYPE, McpClient, McpError, McpRefused, http_client
-from himari.mcp.config import McpConfig, McpServerConfig, McpToolConfig, McpUiPolicy
+from himari.mcp.client import capabilities
+from himari.mcp.config import McpConfig, McpServerConfig, McpStdioConfig, McpToolConfig, McpUiPolicy
+from himari.mcp.stdio import RESTART_NOTICE, ListingChannel, ProcessLauncher, StdioChannel, StdioServer
 from himari.tool.api import (
     MAX_APP_PAYLOAD_BYTES,
     MAX_UI_HTML_BYTES,
@@ -108,8 +116,9 @@ class McpTool:
         """A definite answer, or ``McpRefused`` turned into FAILED (the Tool
         did not run). Anything uncertain raises, so a claimed call is never
         reported as failed when it may have taken effect (V3-045/047)."""
+        key = str(ctx.scope.conversation_id)
         try:
-            result = await self._client.call_tool(self._name, invocation.arguments)
+            result = await self._client.call_tool(self._name, invocation.arguments, key=key)
         except McpRefused as refused:
             return ToolOutcome(
                 ToolStatus.FAILED,
@@ -126,9 +135,13 @@ class McpTool:
                 raw["ui_problem"] = f"the result is larger than {MAX_APP_PAYLOAD_BYTES} bytes"
             else:
                 view = AppView(self.ui, payload)
+        text = render_result(result)
+        if self._client.take_restart(key):  # V3-P59 §5.3: the server's earlier identifiers may not hold
+            text = f"{RESTART_NOTICE}\n\n{text}"
+            raw["restarted"] = True
         return ToolOutcome(
             ToolStatus.FAILED if failed else ToolStatus.SUCCEEDED,
-            ModelToolResult((TextBlock(render_result(result)),), is_error=failed),
+            ModelToolResult((TextBlock(text),), is_error=failed),
             raw_result=raw,
             app_view=view,
         )
@@ -266,15 +279,56 @@ class McpConnection:
             await client.aclose()
 
 
-async def _start(server: McpServerConfig, check_schema: InputSchemaCheck,
-                 transport: httpx.AsyncBaseTransport | None) -> tuple[McpClient, list[McpTool], SourceStatus]:
-    client = http_client(server.url, server.token, timeout_seconds=server.timeout_seconds, transport=transport,
-                       ui=server.ui is not None)
+# Bootstrap's launcher for a stdio server; raising says why it cannot run (the reason is shown).
+LauncherFor = Callable[[str, McpStdioConfig], ProcessLauncher]
+
+
+class _Unavailable:
+    """The channel of a server left out at startup: nothing is sent."""
+
+    async def start(self) -> Mapping[str, Any]:
+        raise McpRefused("the server is not available")
+
+    async def request(self, method: str, params: Mapping[str, Any], *, key: str | None = None) -> Mapping[str, Any]:
+        raise McpRefused("the server is not available")
+
+    def take_restart(self, key: str | None) -> bool:
+        return False
+
+    async def aclose(self) -> None:
+        pass
+
+
+def _clients(server: McpServerConfig, transport: httpx.AsyncBaseTransport | None,
+             launcher_for: LauncherFor | None) -> tuple[McpClient, McpClient | None]:
+    """The client for calls, and for a stdio server a listing client."""
+    if server.stdio is None:
+        assert server.url is not None
+        client = http_client(server.url, server.token, timeout_seconds=server.timeout_seconds, transport=transport,
+                             ui=server.ui is not None)
+        return client, None
+    if launcher_for is None:
+        raise McpRefused("stdio servers run only in the server sandbox, which is not available")
+    launcher = launcher_for(server.name, server.stdio)
+    stdio = StdioServer(server.name, server.stdio, launcher, capabilities=capabilities(server.ui is not None),
+                        timeout_seconds=server.timeout_seconds)
+    return McpClient(StdioChannel(stdio)), McpClient(ListingChannel(stdio, server.timeout_seconds))
+
+
+async def _start(server: McpServerConfig, check_schema: InputSchemaCheck, transport: httpx.AsyncBaseTransport | None,
+                 launcher_for: LauncherFor | None) -> tuple[McpClient, list[McpTool], SourceStatus]:
+    lister: McpClient | None = None
+    try:
+        client, lister = _clients(server, transport, launcher_for)
+    except Exception as error:  # noqa: BLE001 — a server that cannot run is left out with the reason
+        return McpClient(_Unavailable()), [], SourceStatus(server.name, server.enabled_by_default, False, (), (f"unavailable: {error}",))
     try:
         async with asyncio.timeout(STARTUP_SECONDS):
-            await client.initialize()
-            listing = await client.list_tools()
+            await (lister or client).initialize()
+            listing = await (lister or client).list_tools()
     except Exception as error:  # noqa: BLE001 — whatever the server did, only this server is left out
+        if lister is not None:
+            await lister.aclose()
         if isinstance(error, TimeoutError):
             reason = "no answer in time"
         elif isinstance(error, McpError):
@@ -325,7 +379,9 @@ async def _start(server: McpServerConfig, check_schema: InputSchemaCheck,
             continue
         wanted.setdefault(uri, []).append(handler)
     if wanted:
-        problems.extend(await _read_views(client, server.name, wanted))
+        problems.extend(await _read_views(lister or client, server.name, wanted))
+    if lister is not None:
+        await lister.aclose()
     status = SourceStatus(server.name, server.enabled_by_default, True,
                           tuple(h.definition.tool_id for h in handlers), tuple(problems))
     return client, handlers, status
@@ -365,12 +421,13 @@ async def _read_views(client: McpClient, source: str, wanted: dict[str, list[Mcp
 
 
 async def connect(config: McpConfig, *, check_schema: InputSchemaCheck,
-                  transport: httpx.AsyncBaseTransport | None = None) -> McpConnection:
+                  transport: httpx.AsyncBaseTransport | None = None,
+                  launcher_for: LauncherFor | None = None) -> McpConnection:
     """Every server at once; never raises for an unreachable server.
     ``check_schema`` is the Registry's own check, so a Tool it would refuse
     is left out here, with the reason, instead of failing the startup."""
     started: Sequence[tuple[McpClient, list[McpTool], SourceStatus]] = await asyncio.gather(
-        *(_start(server, check_schema, transport) for server in config.servers))
+        *(_start(server, check_schema, transport, launcher_for) for server in config.servers))
     return McpConnection(
         handlers=[h for _, handlers, _ in started for h in handlers],
         statuses=tuple(status for _, _, status in started),

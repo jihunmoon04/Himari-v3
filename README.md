@@ -60,7 +60,7 @@ HIMARI v3의 **아키텍처와 구현 현황**입니다. 2026-10-13 기준 PR #1
 - **[Pytest 운영 정책](docs/testing-policy.md)** — 계약 변경에만 전체 pytest, 그 외에는 변경 모듈별 pytest (확정 V3-038)
 - [Control Pause/Resume 계약 초안](docs/control-pause-v0.1.md) — Run 간 정지·재개와 미완결 ToolCall 처리
 - [MCP Apps 1단계 설계 초안](docs/mcp-apps-v0.1.md) — MCP 서버가 준 Tool 화면을 sandbox에서 읽기 전용으로 표시(V3-P58)
-- [MCP stdio 지원 설계 초안](docs/mcp-stdio-v0.1.md) — stdio MCP 서버를 대화당 격리 프로세스로 실행, Sandbox 모듈 분리(V3-P59)
+- [MCP stdio 지원](docs/mcp-stdio-v0.1.md) — stdio MCP 서버를 server sandbox 안의 격리 프로세스로 실행(기본 서버당 하나), Sandbox 모듈 분리(V3-P59)
 - [결정 기록](docs/decisions.md) — 현재까지 합의한 내용과 설계상 권고 사항 (모듈 경계 개정 V3-039~046 포함)
 - [미결정 사항](docs/open-questions.md) — 초기 구현에 앞서 확정할 계약과 후속 결정
 
@@ -94,6 +94,27 @@ HIMARI_DATA_ROOT=~/.himari python -m himari.interfaces.web --env-file .env
 - URL은 `https://` 또는 loopback 주소의 `http://`만 허용합니다. 토큰은 파일이 아니라 `token_env`가 가리키는 환경 변수(또는 `--env-file`)에서 읽고, `Authorization: Bearer`로 그 URL에만 보냅니다(리다이렉트를 따라가지 않음).
 - 연결되지 않은 서버는 그 Tool만 빼고 시작하며, 시작 로그와 `/tools`에 이유가 표시됩니다(재시작해야 다시 연결).
 - 대화마다 서버를 켜고 끌 수 있습니다: Web 대화 메뉴의 **Tool servers**, CLI `/tools on|off|default 서버` 또는 `himari tools ID on calliope`. 따로 정하지 않은 대화는 서버의 `default`를 따릅니다.
+- **`read`의 뜻:** 다시 실행해도, 실행됐는지 몰라도 아무것도 달라지지 않는 Tool입니다. 외부 파일뿐 아니라 서버의 세션 상태(발급한 id, 예산 등)도 포함합니다. `read` 호출은 claim되지 않아서, 요청이 간 뒤 Stop이 오면 "실행 안 됨"으로 보고되기 때문입니다. 그 보고가 해로울 수 있으면 `scoped_write`로 적습니다.
+
+**stdio 서버 (V3-P59).** `url` 대신 `command`를 적으면 HIMARI가 그 서버를 직접 띄워 표준 입출력으로 이야기합니다. 서버는 **server sandbox 안에서만** 돕니다. 네트워크가 없고, 적은 폴더만 호스트와 같은 경로로 보이며, HIMARI 데이터 폴더(DB·비밀값·Workspaces)에는 어떤 경로로도 닿지 못합니다. 이 호스트에서 server sandbox가 시작 시 자체 검사를 통과하지 못하면 stdio 서버는 띄우지 않습니다.
+
+```json
+{"servers": {"calliope": {
+  "command": "/home/coder/Calliope/.venv/bin/python",
+  "args": ["-m", "tools.mcp", "--data", "/home/coder/.local/share/calliope"],
+  "cwd": "/home/coder/Calliope",
+  "env": {"PYTHONPATH": "."},
+  "read_only": ["/home/coder/Calliope", "/home/coder/opt/stockfish"],
+  "writable": ["/home/coder/.local/share/calliope"],
+  "processes": {"scope": "shared"},
+  "tools": {"open_game": {"effect": "scoped_write"}}
+}}}
+```
+
+- `command`는 `read_only` 폴더나 시스템 경로(`/usr` 등) 안에 있어야 합니다(Sandbox 안에서 보이는 곳이 그것뿐). `read_only` 16개·`writable` 4개까지, `writable`은 HIMARI 실행 사용자의 폴더여야 합니다.
+- 환경 변수는 고정된 것(`PATH`, `HOME=/tmp/home` 등)에 `env`와 `env_from`(HIMARI 환경에서 이름으로 복사; 토큰용)만 더합니다. HIMARI 자신의 환경은 넘기지 않습니다.
+- `processes.scope`: `shared`(기본, 서버당 프로세스 하나를 모든 대화가 같이 씀) 또는 `per_conversation`(대화마다 하나, 최대 `max`개). `idle_seconds`(기본 1800) 동안 쓰지 않으면 종료하고, 다음 호출이 새로 띄웁니다. 새로 띄운 뒤의 첫 결과에는 "서버가 다시 시작됐다"는 안내가 붙습니다.
+- Stop이나 시간 초과는 서버에 취소를 알리고, 10초 안에 응답이 없으면 그 프로세스를 끝냅니다(그 프로세스의 다른 진행 중 호출도 결과 불명이 됩니다). 서버가 연결 단위 상태에 기대면 `per_conversation`을 고릅니다.
 
 **Tool 화면 (MCP Apps, V3-P58).** 서버 항목에 `"ui"`를 적으면 그 서버가 Tool에 붙인 화면(`ui://`)을 Web에서 보여 줍니다. 적지 않으면 서버에 화면 지원을 알리지 않습니다.
 
@@ -132,7 +153,7 @@ himari list; himari show conv_1; himari send conv_1 "질문"; himari continue co
 
 구현(P0): `data/memory.py`(인메모리 Data)·`data/sqlite.py`+`data/codec.py`(SQLite 영속 Data, V3-P42), `tool/registry.py`·`tool/dispatcher.py`, `prompt/composer.py`(순수)·`prompt/loader.py`, `provider/scripted.py`(Fake), `control/driver.py`·`control/ask_user.py`, `bootstrap/`(조립).
 
-MCP 클라이언트: `mcp/`(설정 `config.py`, Streamable HTTP `client.py`, Tool 연결 `tools.py`; V3-P52/P53). Environment와 같은 층의 플러그인 패키지로 `tool.api`만 사용한다(V3-P57). External Tool 노출·실행 권한은 `tool/access.py`.
+MCP 클라이언트: `mcp/`(설정 `config.py`, 클라이언트·Streamable HTTP `client.py`, JSON-RPC `jsonrpc.py`, 프로토콜 판 `revision.py`, stdio `stdio.py`, Tool 연결 `tools.py`; V3-P52/P53/P59). stdio 서버는 Bootstrap이 만든 server sandbox(`sandbox/server.py`)의 실행기로만 띄운다. Environment와 같은 층의 플러그인 패키지로 `tool.api`만 사용한다(V3-P57). External Tool 노출·실행 권한은 `tool/access.py`.
 
 Inside Environment: `environment/inside/`(사용자별 Workspace, 파일 Tool 5종, openat2 경계, V3-P40)와 `inside/run_command`(bubblewrap + Landlock Sandbox, 시작 시 탈출 자체 검사, V3-P41).
 

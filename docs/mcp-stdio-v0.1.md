@@ -1,6 +1,6 @@
 # MCP stdio 지원과 Sandbox 모듈 분리 v0.1
 
-> 2026-10-15 · **PROPOSED (V3-P59)** · 1단계(Sandbox 모듈 분리, PR #30)와 2단계(서버 프로파일, 브랜치 `feat/sandbox-server-profile`) 구현됨. 3단계(stdio 전송)는 구현 전이다. 구현 노트는 §10.
+> 2026-10-15 · **PROPOSED (V3-P59)** · 1단계(Sandbox 모듈 분리, PR #30), 2단계(서버 프로파일, PR #32), 3단계(클라이언트 세 층 PR #33, stdio 전송 브랜치 `feat/mcp-stdio`) 구현됨. 구현 노트는 §10.
 >
 > 기준 사양: MCP 2025-11-25 [Transports §stdio](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports), [Lifecycle §Shutdown·Timeouts](https://modelcontextprotocol.io/specification/2025-11-25/basic/lifecycle), [Cancellation](https://modelcontextprotocol.io/specification/2025-11-25/basic/utilities/cancellation).
 >
@@ -401,4 +401,39 @@ Calliope를 어느 호스트에서도, 어떤 프로세스 단위로도 같게 �
 - stdio로 `initialize`·`tools/list`(Tool 9개)·`open_game`이 오갔다.
 - `ply`는 Sandbox 안의 Stockfish로 3.7초에 분석했고, 결과는 쓰기 폴더의 캐시에 저장됐다.
 - stdin을 닫은 뒤 0.2초에 정상 종료했다.
+
+### 10.3 3단계 — stdio 전송
+
+§5대로 구현했다. 두 PR로 나눴다.
+- **3a (PR #33):** 클라이언트를 세 층으로 나눴다. 동작 변경은 없다.
+  - JSON-RPC: `mcp/jsonrpc.py`
+  - 프로토콜 판: `mcp/revision.py`
+  - 채널: `Channel` Protocol과 `HttpChannel`
+- **3b:** `mcp/stdio.py`, `mcp.json`의 stdio 키, Bootstrap 연결.
+
+**구체화하거나 정한 것:**
+- **주입:** Bootstrap은 stdio 서버가 하나라도 있을 때만 `ServerSandbox.discover([데이터 폴더])`를 만들고 자체 검사를 돌린다. 서버마다 `launcher_for(source, stdio)`로 실행기를 준다.
+  - ENFORCED가 아니면 그 서버는 이유와 함께 빠진다.
+  - 프로파일 검사 실패(`SandboxProfileError`, 예: 쓰기 폴더가 데이터 폴더 안)도 그 서버만 뺀다.
+  - MCP 패키지는 실행기의 모양을 자기 Protocol(`stdio.ProcessLauncher`)로 선언하고 `sandbox`를 import하지 않는다(V3-059). 실행기가 던지는 어떤 예외든 "실행 안 됨"이다. `sandbox=False`이면 stdio 서버는 띄우지 않는다.
+- **목록 세션:** 시작할 때 목록용 프로세스로 `initialize`·`tools/list`·화면(`resources/read`)을 읽고 닫는다. 호출은 다른 프로세스로 간다.
+- **대화 키:** `McpTool.run`은 대화 id를 키로 넘긴다(`call_tool(..., key=)`). `per_conversation`은 이 키로 프로세스를 고른다. HTTP 채널은 키를 쓰지 않는다.
+- **재시작 안내의 기준:** 대화가 **요청을 보낸** 프로세스를 기억한다. 답을 받은 프로세스가 아니다. 그래서 응답 전에 프로세스가 끝난 대화도 다음 첫 결과에서 안내를 받는다(테스트 중 발견). 안내는 한 번만 붙고, 실행 기록에 `"restarted": true`를 남긴다.
+- **시작 중의 Stop:** 프로세스를 띄우는 일(`STARTING`)은 서버 관리자의 작업이다. 기다리던 호출의 Stop은 그 기다림만 끝내고, 시작은 계속된다(`shared`에서 다른 대화가 같은 시작을 기다릴 수 있음). `initialize`는 취소하지 않고, 15초 안에 답이 없으면 종료한다.
+- **연속 실패:** 시작에 연속으로 실패하면 1·2·4…60초 동안 새 시작을 하지 않고 바로 "실행 안 됨"으로 거절한다(기다리게 하지 않음).
+- **`per_conversation` 상한:** 자리가 없으면 가장 오래 쉰 유휴 프로세스를 닫는다. 모두 호출 중이면 "this server has no free session; try again"(`FAILED`, 실행 안 됨)이다.
+- **취소된 요청의 응답**은 버린다. 서버가 보낸 `ping`에는 `{}`로, 다른 요청에는 `-32601`로 답하고, 알림은 무시한다.
+- **사양 위반:** JSON이 아닌 줄, JSON-RPC가 아닌 메시지, 보내지 않은 id에 대한 응답은 그 프로세스를 닫는다. 진행 중이던 호출은 결과 불명이다.
+
+**검증:**
+- 가짜 stdio 서버(프로세스 없이)로 34개 테스트.
+- 실제 자식 프로세스로 Application 전체 경로 3개.
+- 실제 server sandbox 안에서 Application 전체 경로(호스트 게이트) 2개: 서버가 본 환경 변수, 종료 후 프로세스가 남지 않음, 데이터 폴더를 쓰기 폴더로 지정하면 거부.
+- conformance 게이트는 HTTP만 본다(§2.3). stdio는 위 테스트가 맡는다.
+
+**Calliope 실측 (이 호스트, 2026-10-15; AG4 전 Calliope, `per_conversation`):**
+- §5.1의 `mcp.json`으로 `Application.open(sandbox=True)`를 했다. 자체 검사와 목록 세션을 포함해 1.7초에 Tool 9개를 등록했고, `show_game` 화면도 읽었다.
+- 각본 모델의 `open_game` → `ply`가 Dispatcher를 거쳐 둘 다 SUCCEEDED였다(3.4초).
+- 닫는 데 0.25초 걸렸다.
+- Calliope의 게임 id 변경(AG4)이 병합되면 `shared`로 수락 테스트를 한다(§8).
 
