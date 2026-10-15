@@ -5,9 +5,15 @@
 > 기준 사양: MCP 2025-11-25 [Transports §stdio](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports), [Lifecycle §Shutdown·Timeouts](https://modelcontextprotocol.io/specification/2025-11-25/basic/lifecycle), [Cancellation](https://modelcontextprotocol.io/specification/2025-11-25/basic/utilities/cancellation).
 >
 > 이미 정한 것(2026-10-15 사용자 결정):
-> - stdio 서버 프로세스는 **대화당 하나**다.
+> - 프로세스 단위는 **기본 서버당 하나**이고, **서버마다 운영자가 "대화별"을 고를 수 있다.** 처음에는 "대화당 하나"로 정했다가, "보편적이고 확장 가능하게"라는 목표에 따라 바꿨다(§5.3).
 > - Sandbox를 쓸 수 없으면 **띄우지 않는다**.
 > - 실행 중 Stop은 **취소 알림 후, 안 끝나면 프로세스를 종료**한다.
+> - 서버가 세션에 기대지 않게 하는 쪽으로 간다. 첫 대상인 **Calliope도 그렇게 고친다**(§5.7, 소유자 허용).
+>
+> **방향 — MCP는 상태 없는 프로토콜로 가고 있다.** 공식 최신판 [2026-07-28](https://modelcontextprotocol.io/specification/2026-07-28/changelog)은 `initialize` 핸드셰이크와 프로토콜 세션을 없앴다. 여러 호출에 걸친 상태는 "서버가 발급한 핸들을 보통 Tool 인자로 주고받는 것"(SEP-2567)으로 다룬다. 이 설계는 그 방향을 따른다.
+> - HIMARI는 서버가 연결 단위로 상태를 가진다고 가정하지 않는다.
+> - 프로세스 단위는 호스트 내부의 일로 다룬다.
+> - 클라이언트는 전송(HTTP/stdio)과 프로토콜 판(2025-11-25/2026-07-28)을 나눠 둔다. 그래서 최신 판 지원(V3-P61 예정)을 나중에 끼울 수 있다.
 >
 > 첫 대상: [Calliope](https://github.com/jihunmoon04/Calliope)의 MCP 서버(`python -m tools.mcp`, stdio 전용, AG-D 결정 O1).
 
@@ -21,7 +27,8 @@ stdio에서는 **클라이언트가 서버를 자기 자식 프로세스로 띄�
 | --- | --- |
 | Sandbox를 독립 모듈 `himari/sandbox/`로 분리, 프로파일로 정책을 나눔 | 네트워크가 필요한 stdio 서버 (V3-037 개정 필요, 별도 결정) |
 | 오래 사는 격리 프로세스(stdin/stdout 파이프) | cgroup·rlimit 자원 제한 (Q-40, 그대로 미결) |
-| stdio 전송, 대화당 세션, 유휴 정리, 취소·종료 | MCP 서버의 안내문·프롬프트·리소스를 모델 문맥에 넣기 (별도 V3-P60) |
+| stdio 전송, 프로세스 단위(서버당/대화별), 유휴 정리, 취소·종료 | MCP 서버의 안내문·프롬프트·리소스를 모델 문맥에 넣기 (별도 V3-P60) |
+| 전송과 프로토콜 판을 나눈 클라이언트 구조 | 2026-07-28판 자체의 지원 (별도 V3-P61) |
 | `mcp.json`의 stdio 항목, Calliope 설정 예 | MCP Apps 2단계 (화면의 Tool 호출) |
 
 ## 2. 사양에서 가져오는 규칙
@@ -148,7 +155,7 @@ class ProcessLauncher(Protocol):
   "env": {"CALLIOPE_STOCKFISH_PATH": "/home/coder/opt/stockfish/stockfish", "PYTHONPATH": "."},
   "read_only": ["/home/coder/Calliope", "/home/coder/opt/stockfish"],
   "writable": ["/home/coder/.local/share/calliope"],
-  "sessions": {"idle_seconds": 1800, "max": 4},
+  "processes": {"scope": "shared", "idle_seconds": 1800, "max": 4},
   "timeout_seconds": 300,
   "tools": {"definitions": {"effect": "read"}, "commentary": {"effect": "read"}, "show_game": {"effect": "read"},
             "open_game": {"effect": "scoped_write"}, "ply": {"effect": "scoped_write"},
@@ -160,12 +167,13 @@ class ProcessLauncher(Protocol):
 
 - `args`는 64개, 각 4,096자까지다(`run_command`와 같음). `env` 값은 문자열이고 32개까지다.
 - `env_from: ["NAME"]`은 HIMARI 환경에서 그 변수만 복사한다. 토큰을 넘길 때 쓰고, `token_env`(HTTP)와 같은 역할이다. 이름이 설정되지 않았으면 거부한다.
-- `sessions.idle_seconds`(기본 1800, 60~86400): 이만큼 쓰지 않은 대화의 프로세스는 종료한다.
-- `sessions.max`(기본 4, 1~16): 그 서버에 동시에 살아 있을 수 있는 프로세스 수.
+- `processes.scope`: `"shared"`(기본)는 서버당 프로세스 하나를 모든 대화가 같이 쓴다. `"per_conversation"`은 대화마다 따로 띄운다(§5.3).
+- `processes.idle_seconds`(기본 1800, 60~86400): 이만큼 쓰지 않은 프로세스는 종료한다. `shared`에서는 서버 전체 기준, `per_conversation`에서는 대화 기준이다.
+- `processes.max`(기본 4, 1~16): `per_conversation`에서 그 서버에 동시에 살아 있을 수 있는 프로세스 수. `shared`에서는 1이다.
 - `token_env`는 stdio에 쓸 수 없다. `ui`·`tools`·`default`·`timeout_seconds`는 HTTP와 같다.
 - 효과(`effect`)는 지금처럼 운영자가 정한다. **`read`의 뜻을 분명히 한다(PR #29 검수 B2):** `read`는 "다시 실행해도, 실행됐는지 몰라도 아무것도 달라지지 않는다"이다. 여기에는 외부 파일뿐 아니라 **서버의 세션 상태(발급한 id, 예산, 세션 트리)**도 들어간다.
   - 이것이 중요한 이유: Dispatcher는 `read` 호출을 claim하지 않는다. 그래서 요청이 서버에 간 뒤 Stop이 와도 그 호출을 "실행 안 됨"(CANCELLED)으로 보고한다. 그 보고가 해롭지 않은 Tool에만 `read`를 줄 수 있다. 이 정의는 HTTP 서버에도 같다. README의 운영 규칙에도 적는다.
-  - Calliope(코드 확인, 2026-10-15)는 아래와 같다. `scoped_write`는 실행 전에 claim되므로, 중간에 끊기면 "결과 불명, 다시 확인할 것"으로 보고되고 다시 실행되지 않는다.
+  - Calliope(코드 확인, 2026-10-15)는 아래와 같다. `scoped_write`는 실행 전에 claim되므로, 중간에 끊기면 "결과 불명, 다시 확인할 것"으로 보고되고 다시 실행되지 않는다. §5.7의 Calliope 변경 뒤에도 분석·탐색은 예산과 캐시를 바꾸므로 분류는 같다.
 
     | Tool | 효과 | 이유 |
     | --- | --- | --- |
@@ -187,21 +195,28 @@ class ProcessLauncher(Protocol):
   - 서버의 요청 중 `ping`에는 `{}`로 답한다. HIMARI는 capability를 선언하지 않으므로 다른 요청은 `-32601`로 답한다.
 - JSON이 아닌 줄, 한도를 넘는 줄, JSON-RPC가 아닌 메시지는 사양 위반이다(서버는 stdout에 MCP 메시지만 써야 한다). 그 프로세스를 종료하고, 진행 중인 요청은 결과 불명으로 처리한다.
 - 세션 id와 `MCP-Protocol-Version` 헤더는 없다(HTTP 전용). 프로토콜 버전 협상은 `initialize`에서 지금처럼 한다.
+- **세 층으로 나눈다 (확장성):**
+  - **전송**(`HttpTransport`·`StdioTransport`): 메시지 하나를 보내고 받는 방법.
+  - **프로토콜 판**(`Revision2025_11_25`; 나중에 `Revision2026_07_28`): 시작 절차(`initialize`나 `server/discover`), 요청마다 붙일 것(`_meta`), 결과 해석(`resultType`).
+  - **JSON-RPC 처리**: id, 짝 맞추기, 결과 확실성.
 
-### 5.3 대화당 세션 (사용자 결정)
+  이번에 구현하는 판은 2025-11-25 하나다. 2026-07-28은 판만 더하면 되게 둔다(V3-P61). Calliope의 MCP SDK 2.3.0은 두 판을 모두 말하므로(`LATEST_PROTOCOL_VERSION = 2026-07-28`, `server/discover` 처리 있음) 지금 판으로 바로 붙는다.
 
-- **키는 (서버, 대화)다.** 대화에서 그 서버의 Tool을 처음 부를 때 프로세스를 띄우고 `initialize`를 한다. 그 뒤로는 같은 프로세스를 쓴다.
-  - Calliope 기준으로 대화마다 예산(분석 16수, 탐색 40회)과 게임 핸들이 따로다.
-  - 같은 대화의 여러 호출은 한 프로세스로 동시에 보낸다(JSON-RPC는 id로 짝을 맞춘다). 서버가 하나씩 처리하는 것은 서버의 일이다.
-- **유휴 정리:** `idle_seconds` 동안 진행 중인 호출이 없으면 종료한다(§5.5). 다음 호출은 새 세션이다.
-- **세션이 바뀐 뒤 옛 id (PR #29 검수 B4).** stdio에는 세션 정체성이 없어서, 옛 세션에서 받은 id가 새 세션에서 무엇을 가리키는지 HIMARI는 알 수 없다.
-  - Calliope(코드 확인)의 인용 핸들은 이미 세션마다 무작위 토큰을 붙여서(`c3.4f2a1b`) 다른 세션의 것을 거절한다. 그런데 **게임 id는 `g1`, `g2`처럼 세션마다 처음부터 다시 센다.** 새 세션에서 연 게임이 옛 대화의 `g1`과 같은 id를 받으면, 모델이 옛 `g1`(다른 게임)에 대해 물어도 새 게임의 분석이 정상처럼 나온다.
-  - **Calliope 쪽 변경 (Calliope 소유자 결정 필요):** 게임 id에도 핸들과 같은 세션 토큰을 붙인다(`g1.4f2a1b`). 옛 세션의 게임 id는 "no game … in this session"으로 거절된다. HIMARI가 Calliope를 연결하기 전 조건으로 둔다.
-  - **HIMARI 쪽 (모든 stdio 서버):** 대화의 세션이 새로 시작되면(유휴 정리, 상한 교체, 프로세스 종료, 취소 후 종료), 그 세션의 첫 결과 앞에 모델용 안내를 붙인다: "This server started a new session: identifiers from its earlier answers (games, handles) no longer apply; open them again." 서버가 id를 세션마다 고유하게 만들지 않더라도 모델이 알 수 있게 하는 장치다. 그래도 서버 쪽 고유 id를 대신하지는 못한다.
-- **상한:** 살아 있는 프로세스가 `max`개면 가장 오래 쉰 것을 종료하고 띄운다. 모두 호출 중이면 그 호출을 "실행하지 않음"으로 거절한다(`FAILED`, "this server has no free session; try again").
-- **프로세스가 죽으면:** 진행 중이던 호출은 결과 불명이다(§5.4). 다음 호출이 새로 띄운다. 연속으로 실패하면 띄우기를 늦춘다(1·2·4초…, 최대 60초).
-- **목록과 화면은 따로 읽는다:** HIMARI가 시작할 때 서버마다 **목록용 세션**을 한 번 띄워 `initialize`·`tools/list`·화면 읽기(`resources/read`, V3-P58)를 하고 종료한다. Tool 정의와 화면은 이것으로 정한다. 대화 세션의 목록이 달라도 다시 읽지 않는다(HTTP와 같이 "다시 연결은 재시작").
-- **기록하지 않는다:** 세션은 프로세스 안에만 있다. HIMARI를 재시작하면 모든 세션이 새로 시작된다. Data는 바뀌지 않는다.
+### 5.3 프로세스 단위 (사용자 결정)
+
+- **`shared`(기본):** 서버당 프로세스 하나를 모든 대화가 같이 쓴다. 다른 MCP 호스트들이 보통 이렇게 하고, 서버도 그것을 전제로 만들어진다. 최신 사양처럼 서버가 연결에 상태를 두지 않으면 이것으로 충분하다.
+- **`per_conversation`(서버마다 선택):** 키가 (서버, 대화)다. 대화에서 그 서버의 Tool을 처음 부를 때 띄우고, 그 뒤로는 같은 프로세스를 쓴다. 연결 단위로 상태를 가진 옛 방식의 서버를 대화끼리 섞이지 않게 할 때 쓴다.
+- **공통:**
+  - 여러 호출은 한 프로세스로 동시에 보낸다(JSON-RPC는 id로 짝을 맞춘다). 서버가 하나씩 처리하는 것은 서버의 일이다.
+  - `idle_seconds` 동안 진행 중인 호출이 없으면 종료한다(§5.5). 다음 호출이 새로 띄운다.
+  - **프로세스가 죽으면:** 진행 중이던 호출은 결과 불명이다(§5.4). 다음 호출이 새로 띄운다. 연속으로 실패하면 띄우기를 늦춘다(1·2·4초…, 최대 60초).
+- **`per_conversation` 상한:** 살아 있는 프로세스가 `max`개면 가장 오래 쉰 것을 종료하고 띄운다. 모두 호출 중이면 그 호출을 "실행하지 않음"으로 거절한다(`FAILED`, "this server has no free session; try again").
+- **`shared`에서 취소 후 종료의 영향:** 취소 뒤 10초 안에 응답이 없어 프로세스를 끝내면(§5.5), 그 프로세스에 걸려 있던 **다른 대화의 호출도** 결과 불명이 된다. 그동안(`DRAINING`) 모든 대화의 새 호출은 기다린다. 서버당 하나를 쓰는 대가이다. 이것이 문제인 서버는 `per_conversation`을 고른다.
+- **목록과 화면은 따로 읽는다:** HIMARI가 시작할 때 서버마다 **목록용 프로세스**를 한 번 띄워 `initialize`·`tools/list`·화면 읽기(`resources/read`, V3-P58)를 하고 종료한다. Tool 정의와 화면은 이것으로 정한다(최신 사양: 목록은 연결마다 달라지지 않는다). 다시 읽는 것은 재시작이다.
+- **기록하지 않는다:** 프로세스 상태는 HIMARI의 Data에 남기지 않는다. HIMARI를 재시작하면 모든 프로세스가 새로 시작된다.
+- **새로 띄운 뒤의 옛 id (PR #29 검수 B4).** 이전 프로세스에서 받은 id가 새 프로세스에서 무엇을 가리키는지 HIMARI는 알 수 없다. 그래서 두 가지를 둔다.
+  - **서버 쪽이 원칙이다.** id는 어느 프로세스·연결에서 받든 같은 대상을 가리키거나, 모르면 분명히 거절해야 한다(최신 사양 SEP-2567의 방향). Calliope는 이렇게 고친다(§5.7).
+  - **HIMARI 쪽 안전장치(모든 stdio 서버):** 어떤 대화가 쓰던 프로세스가 새로 시작되면(유휴 정리, 상한 교체, 프로세스 종료, 취소 후 종료), 그 대화가 새 프로세스에서 받는 첫 결과 앞에 모델용 안내를 붙인다: "This server was restarted: identifiers from its earlier answers may no longer apply; check them before relying on them." 서버가 이미 원칙을 지키면 해가 없고, 옛 서버에서는 모델이 알 수 있다.
 
 ### 5.4 결과의 확실성 (V3-055의 stdio판)
 
@@ -239,6 +254,16 @@ class ProcessLauncher(Protocol):
 
 화면은 목록용 세션에서 읽은 것을 쓴다(§5.3). 그 밖에 바뀌는 것은 없다. Calliope의 `show_game`은 `ui://calliope/viewer.html` 화면을 가지므로 1단계 표시는 그대로 동작한다. 뷰어의 "해설 새로고침"(화면의 `tools/call`)은 2단계 전까지 거절된다.
 
+### 5.7 Calliope 쪽 변경 (Calliope 저장소, 소유자 허용 2026-10-15)
+
+Calliope를 어느 호스트에서도, 어떤 프로세스 단위로도 같게 동작하게 한다. Calliope의 설계 절차(설계 → 독립 검수 → 구현)로 Calliope 저장소에서 진행하고, 이 문서는 HIMARI가 기대는 결과만 적는다.
+
+- **게임 id = 내용 기반.** 지금은 세션마다 `g1`, `g2`처럼 다시 센다. 바꾸면 게임 키(`game_key`, sha256)에서 만든 id가 된다. 같은 게임은 언제 어느 프로세스에서 열어도 같은 id를 받는다. `open_game`은 같은 게임에 같은 id를 돌려준다.
+- **id만으로 다시 열 수 있게.** 연 게임의 이동 기록을 데이터 폴더에 남긴다(파일은 한 번 쓰고 고치지 않음, Calliope §9의 쓰기 규칙). 다른 프로세스에서 받은 id도 그 기록으로 찾는다. 기록이 없는 id는 분명히 거절한다.
+- **예산은 연결 단위에서 뗀다.** 지금의 세션 누적 예산은 호스트마다 다르게 동작한다. 서버당 하나를 쓰는 호스트에서는 금방 바닥나고, 대화별로 띄우면 대화마다 새로 생긴다. 호출 단위 상한과 프로세스 공통의 시간 창 예산 같은 모양으로 바꾸는 안을 Calliope 설계에서 정한다.
+- **인용 핸들은 그대로 둔다.** 이미 프로세스마다 무작위 토큰을 붙여(`c3.4f2a1b`) 다른 프로세스의 핸들을 분명히 거절한다. 세션 트리를 가리키므로 프로세스를 넘어 살리지는 않는다(이번 범위 밖).
+- **HIMARI가 Calliope를 연결하기 전 조건**은 게임 id 변경이다. 예산 변경 전에는 `per_conversation`으로 연결할 수 있다.
+
 ## 6. 계약 변경 (Proposed)
 
 | 계약 | 변경 | 비고 |
@@ -256,11 +281,11 @@ class ProcessLauncher(Protocol):
 | --- | --- |
 | 운영자가 적은 명령이 HIMARI 데이터·비밀에 닿음 | 서버 프로파일 Sandbox: 데이터 폴더·Workspaces는 마운트 자체가 없고, 겹치는 경로는 설정에서 거부 |
 | 하드링크로 HIMARI 파일에 닿거나 쓰기 범위 밖을 고침 | 세션마다 R1(데이터 폴더와 inode 공유 금지)·R2(쓰기 트리의 외부 링크 금지). 서버는 새 교차 링크를 만들 수 없음(EXDEV). 같은 사용자의 격리 안 된 프로세스가 만드는 링크는 다음 세션에서 잡힘(§4.2 한계) |
-| 세션이 바뀐 뒤 옛 id가 다른 대상을 가리킴 | 서버가 id를 세션마다 고유하게(Calliope 변경), HIMARI는 새 세션 안내를 모델에게 |
+| 프로세스가 바뀐 뒤 옛 id가 다른 대상을 가리킴 | 서버의 id를 프로세스와 무관하게(Calliope: 내용 기반 게임 id), HIMARI는 재시작 안내를 모델에게 |
 | 취소 정리가 새 호출을 함께 끝냄 | `DRAINING` 중에는 새 요청을 쓰지 않음 |
 | HIMARI의 API 키·토큰이 서버로 샘 | 환경 변수는 정해진 것과 운영자가 적은 것만 (`env_from`은 이름을 콕 집어 복사) |
 | 서버가 네트워크로 무언가를 보냄 | 네트워크 없음 (V3-037). 필요한 서버는 이 설계로는 쓸 수 없다 |
-| 한 대화의 세션 상태가 다른 대화로 샘 | 대화당 프로세스 |
+| 한 대화의 서버 상태가 다른 대화로 샘 | 서버가 연결에 상태를 두지 않는 것이 원칙(§5.7), 그렇지 않은 서버는 `per_conversation` |
 | 서버가 멈추거나 출력을 쏟아냄 | 시간 제한·줄 한도·stderr 링버퍼, 취소 후 10초면 종료 |
 | 프로세스가 쌓임 | 서버당 `max`, 유휴 정리, 종료 시 프로세스 그룹 전체 종료 |
 | 메모리·CPU 과다 사용 | **대응 없음 (Q-40).** 프로세스 수로만 묶는다 |
@@ -278,25 +303,26 @@ class ProcessLauncher(Protocol):
     - 한 줄 메시지, 응답 짝 맞추기, 알림 무시, `ping` 응답
     - 비 JSON 줄과 한도 초과 줄은 종료와 결과 불명
     - §5.4 표의 모든 경우
-    - 대화별 세션 분리, 유휴 정리, 상한, 재시작 지연
+    - `shared`·`per_conversation` 각각: 프로세스 수, 유휴 정리, 상한, 재시작 지연, 취소 후 종료가 다른 대화 호출에 주는 영향(`shared`)
     - 취소 후 10초 안에 응답이 오면 유지, 안 오면 종료
     - `DRAINING` 중의 새 호출은 쓰지 않고 기다림. 유지되면 같은 세션, 종료되면 새 세션과 안내
     - 종료 시 같은 프로세스의 다른 미응답 요청도 결과 불명
     - `initialize` 중 시간 초과와 Stop에는 취소 알림 없이 종료하고, 기다리던 호출은 실행 안 됨
-    - 새 세션의 첫 결과에 안내가 붙음
+    - 새로 띄운 프로세스의 첫 결과에 안내가 붙음(대화마다 한 번)
     - 목록용 세션, 화면 읽기
   - **Calliope 실제 연결(호스트):** 위 설정으로 `open_game` → `ply` → `show_game`(화면) → `submit_commentary`. 확인할 것:
-    - 두 대화의 예산이 따로인지
+    - Calliope 변경 뒤: 두 대화가 같은 게임을 열면 같은 id, 다른 프로세스에서 받은 게임 id도 통하는지
     - 데이터 폴더를 Calliope HTTP 서버와 같이 쓸 수 있는지(파일 잠금)
     - 하드링크가 있는 venv가 R1·R2를 통과하는지
-    - 세션을 바꾼 뒤 옛 게임 id가 거절되는지(Calliope 변경 후)
+    - 기록이 없는 게임 id는 분명히 거절되는지
 
 ## 9. 남은 질문
 
-1. **Calliope 변경 (소유자 결정):** 게임 id에 세션 토큰을 붙인다(§5.3, B4). HIMARI가 Calliope를 연결하기 전 조건이다.
-2. **네트워크가 필요한 stdio 서버**: V3-037(Confirmed) 개정과 "연결 허용" 프로파일. 이번 범위 밖이다.
-3. **자원 제한**(Q-40): cgroup이나 rlimit. 프로세스가 오래 살게 되면서 중요도가 올라간다.
-4. **운영 권고**(§4.2 한계): 쓰기 폴더를 같이 쓰는, 격리되지 않은 프로세스(Calliope HTTP 서버 등)를 다른 사용자로 돌릴지.
-5. **Calliope 쪽 관찰**(HIMARI가 아니라 Calliope가 정할 것):
-   - Calliope §9의 임시 파일 정리는 PID로 프로세스 생존을 판단한다. Sandbox 안의 PID는 별도 namespace라 바깥 HTTP 서버가 볼 때 다른 프로세스의 PID로 보일 수 있다. 그러면 크래시로 남은 임시 파일이 지워지지 않을 수 있다(해롭지는 않음).
+1. **Calliope 설계**(§5.7): 예산을 어떤 모양으로 할지. 내용 기반 게임 id가 HIMARI 연결의 전제다.
+2. **2026-07-28판 지원**(V3-P61): 핸드셰이크 없이 요청마다 `_meta`, `server/discover`, `resultType`, 목록 캐시(`ttlMs`). 클라이언트의 판 층(§5.2)에 더한다.
+3. **네트워크가 필요한 stdio 서버**: V3-037(Confirmed) 개정과 "연결 허용" 프로파일. 이번 범위 밖이다.
+4. **자원 제한**(Q-40): cgroup이나 rlimit. 프로세스가 오래 살게 되면서 중요도가 올라간다.
+5. **운영 권고**(§4.2 한계): 쓰기 폴더를 같이 쓰는, 격리되지 않은 프로세스(Calliope HTTP 서버 등)를 다른 사용자로 돌릴지.
+6. **Calliope 쪽 관찰**:
+   - Calliope §9의 임시 파일 정리는 PID로 프로세스 생존을 판단한다. Sandbox 안의 PID는 별도 namespace라, 크래시로 남은 임시 파일이 지워지지 않을 수 있다(해롭지는 않음).
    - Calliope HTTP 서버의 예시 포트 8765는 HIMARI 기본 포트와 겹친다.
