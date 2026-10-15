@@ -25,7 +25,11 @@ from typing import Any
 import httpx
 
 from himari.common import JsonValue, ModelToolResult, TextBlock
+from himari.mcp.client import McpClient, McpError, McpRefused
+from himari.mcp.config import McpConfig, McpServerConfig, McpToolConfig
 from himari.tool.api import (
+    InputSchemaCheck,
+    SchemaError,
     ToolContext,
     ToolDefinition,
     ToolInvocation,
@@ -33,9 +37,6 @@ from himari.tool.api import (
     ToolStatus,
     WorkspaceRequirement,
 )
-from himari.tool.mcp.client import McpClient, McpError, McpRefused
-from himari.tool.mcp.config import McpConfig, McpServerConfig, McpToolConfig
-from himari.tool.schema import SchemaError, check_tool_input_schema
 
 MAX_DESCRIPTION_CHARS = 2000
 MAX_RESULT_CHARS = 64 * 1024  # what the model sees of one result
@@ -55,7 +56,8 @@ class SourceStatus:
 
 
 class McpTool:
-    def __init__(self, client: McpClient, source: str, config: McpToolConfig, listed: Mapping[str, Any]) -> None:
+    def __init__(self, client: McpClient, source: str, config: McpToolConfig, listed: Mapping[str, Any],
+                 check_schema: InputSchemaCheck) -> None:
         description = listed.get("description")
         description = description if isinstance(description, str) and description.strip() else config.name
         if len(description) > MAX_DESCRIPTION_CHARS:
@@ -63,7 +65,7 @@ class McpTool:
         schema = listed.get("inputSchema")
         if not isinstance(schema, dict):
             raise SchemaError("$: the server gave no input schema")
-        check_tool_input_schema(schema)
+        check_schema(schema)
         self._client = client
         self._name = config.name
         self.definition = ToolDefinition(
@@ -146,8 +148,8 @@ class McpConnection:
             await client.aclose()
 
 
-async def _start(server: McpServerConfig, transport: httpx.AsyncBaseTransport | None) -> tuple[
-        McpClient, list[McpTool], SourceStatus]:
+async def _start(server: McpServerConfig, check_schema: InputSchemaCheck,
+                 transport: httpx.AsyncBaseTransport | None) -> tuple[McpClient, list[McpTool], SourceStatus]:
     client = McpClient(server.url, server.token, timeout_seconds=server.timeout_seconds, transport=transport)
     try:
         async with asyncio.timeout(STARTUP_SECONDS):
@@ -179,7 +181,7 @@ async def _start(server: McpServerConfig, transport: httpx.AsyncBaseTransport | 
             problems.append(f"{tool.name}: the server does not offer it")
             continue
         try:
-            handlers.append(McpTool(client, server.name, tool, listed[tool.name]))
+            handlers.append(McpTool(client, server.name, tool, listed[tool.name], check_schema))
         except SchemaError as error:
             problems.append(f"{tool.name}: input schema refused ({error})")
         except Exception as error:  # noqa: BLE001 — a malformed description leaves out this Tool only
@@ -189,10 +191,13 @@ async def _start(server: McpServerConfig, transport: httpx.AsyncBaseTransport | 
     return client, handlers, status
 
 
-async def connect(config: McpConfig, *, transport: httpx.AsyncBaseTransport | None = None) -> McpConnection:
-    """Every server at once; never raises for an unreachable server."""
+async def connect(config: McpConfig, *, check_schema: InputSchemaCheck,
+                  transport: httpx.AsyncBaseTransport | None = None) -> McpConnection:
+    """Every server at once; never raises for an unreachable server.
+    ``check_schema`` is the Registry's own check, so a Tool it would refuse
+    is left out here, with the reason, instead of failing the startup."""
     started: Sequence[tuple[McpClient, list[McpTool], SourceStatus]] = await asyncio.gather(
-        *(_start(server, transport) for server in config.servers))
+        *(_start(server, check_schema, transport) for server in config.servers))
     return McpConnection(
         handlers=[h for _, handlers, _ in started for h in handlers],
         statuses=tuple(status for _, _, status in started),

@@ -21,12 +21,13 @@ from himari.common import ToolId, thaw, tool_id_problem
 from himari.control.api import DriveState
 from himari.data.api import ToolExecutionStatus, ToolResultRecord
 from himari.data.memory import InMemoryStore
+from himari.mcp import client as client_module
+from himari.mcp.client import McpClient, McpRefused, McpUncertain
+from himari.mcp.config import McpConfigError, load_config, map_tool_names, parse_config
+from himari.mcp.tools import McpConnection, connect, render_result
 from himari.provider.scripted import ScriptedAdapter
 from himari.tool.api import EffectProfile, ToolContext, ToolInvocation, ToolStatus
-from himari.tool.mcp import client as client_module
-from himari.tool.mcp.client import McpClient, McpRefused, McpUncertain
-from himari.tool.mcp.config import McpConfigError, load_config, map_tool_names, parse_config
-from himari.tool.mcp.tools import McpConnection, connect, render_result
+from himari.tool.schema import check_tool_input_schema
 
 TOKEN = "secret-token-value"
 
@@ -38,7 +39,7 @@ def config_text(**server: Any) -> str:
 
 def connected(server: FakeMcpServer, **entry: Any) -> McpConnection:
     config = parse_config(config_text(**entry), {"CALLIOPE_TOKEN": TOKEN})
-    return asyncio.run(connect(config, transport=server.transport()))
+    return asyncio.run(connect(config, check_schema=check_tool_input_schema, transport=server.transport()))
 
 
 # --- config ------------------------------------------------------------------------------
@@ -396,7 +397,7 @@ def test_a_malformed_tools_list_affects_only_its_server(list_result: dict[str, A
         "bad": {"url": bad.url, "tools": {"echo": {"effect": "read"}}},
         "good": {"url": good.url, "tools": {"echo": {"effect": "read"}}},
     }}), {})
-    connection = asyncio.run(connect(config, transport=Router(bad, good)))
+    connection = asyncio.run(connect(config, check_schema=check_tool_input_schema, transport=Router(bad, good)))
     statuses = {s.source: s for s in connection.statuses}
     assert statuses["good"].available and statuses["good"].tool_ids == ("good/echo",)
     assert [h.definition.tool_id for h in connection.handlers] in (["good/echo"], ["bad/echo", "good/echo"])

@@ -119,7 +119,7 @@ himari list; himari show conv_1; himari send conv_1 "질문"; himari continue co
 
 구현(P0): `data/memory.py`(인메모리 Data)·`data/sqlite.py`+`data/codec.py`(SQLite 영속 Data, V3-P42), `tool/registry.py`·`tool/dispatcher.py`, `prompt/composer.py`(순수)·`prompt/loader.py`, `provider/scripted.py`(Fake), `control/driver.py`·`control/ask_user.py`, `bootstrap/`(조립).
 
-MCP 클라이언트: `tool/mcp/`(설정 `config.py`, Streamable HTTP `client.py`, Tool 연결 `tools.py`; V3-P52/P53). External Tool 노출·실행 권한은 `tool/access.py`.
+MCP 클라이언트: `mcp/`(설정 `config.py`, Streamable HTTP `client.py`, Tool 연결 `tools.py`; V3-P52/P53). Environment와 같은 층의 플러그인 패키지로 `tool.api`만 사용한다(V3-P57). External Tool 노출·실행 권한은 `tool/access.py`.
 
 Inside Environment: `environment/inside/`(사용자별 Workspace, 파일 Tool 5종, openat2 경계, V3-P40)와 `inside/run_command`(bubblewrap + Landlock Sandbox, 시작 시 탈출 자체 검사, V3-P41).
 
