@@ -629,6 +629,11 @@ textarea {
   right: var(--topbar-gutter);
   z-index: 28;
   width: min(88vw, 320px);
+  /* Long content (e.g. several MCP problems) scrolls inside the menu so the
+     actions at its bottom stay reachable; the page itself never scrolls. */
+  max-height: calc(100dvh - 72px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
   padding: var(--space-3);
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-md);

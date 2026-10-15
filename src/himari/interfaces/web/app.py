@@ -322,13 +322,13 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
         application = himari(request)
         signed_in = sessions.principal(request.cookies.get(SESSION_COOKIE)) is not None
         return {"authenticated": signed_in, "model": application.model_id if signed_in else None,
-                "sandbox": application.sandbox_state.value if signed_in else None}
+                "sandbox": application.current_sandbox_state.value if signed_in else None}
 
     @app.get("/api/server")
     async def read_server(request: Request, who: PrincipalId = Depends(principal)) -> dict[str, Any]:
         """What this server runs with: the model, whether commands can run, the budget."""
         application = himari(request)
-        return {"model": application.model_id, "sandbox": application.sandbox_state.value,
+        return {"model": application.model_id, "sandbox": application.current_sandbox_state.value,
                 "context_budget": application.context_tokens}
 
     @app.post("/api/session", status_code=204)

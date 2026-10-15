@@ -22,6 +22,7 @@ from testkit import calls, final  # noqa: E402
 from himari.bootstrap.application import Application  # noqa: E402
 from himari.bootstrap.operator import OPERATOR, derive_cli_bearer  # noqa: E402
 from himari.common import ASK_USER_TOOL_ID, ConversationId, PrincipalId, TextBlock, TrustedScope  # noqa: E402
+from himari.environment.inside.sandbox import SandboxState  # noqa: E402
 from himari.control.api import DriveResult, DriveState, StopSignal  # noqa: E402
 from himari.control.runner import BackgroundRunner  # noqa: E402
 from himari.data.api import UserMessage  # noqa: E402
@@ -217,6 +218,25 @@ def test_the_server_info_is_for_the_signed_in_operator(server: Server) -> None:
     server.sign_in()
     info = server.client.get("/api/server").json()
     assert info == {"model": "scripted-model", "sandbox": "unavailable", "context_budget": 128_000}
+
+
+def test_the_server_info_follows_a_sandbox_that_broke_after_startup(server: Server) -> None:
+    # PR #24 review B1: a setup failure while running a command latches
+    # SETUP_FAILED in the backend; the startup value must not be shown instead.
+    server.sign_in()
+    application = server.application
+    assert application is not None
+
+    class Backend:
+        state = SandboxState.ENFORCED
+
+    backend = Backend()
+    application.inside.sandbox = backend  # type: ignore[assignment]
+    assert server.client.get("/api/server").json()["sandbox"] == "enforced"
+    backend.state = SandboxState.SETUP_FAILED
+    assert server.client.get("/api/server").json()["sandbox"] == "setup_failed"
+    assert server.client.get("/api/session").json()["sandbox"] == "setup_failed"
+    assert application.sandbox_state is SandboxState.UNAVAILABLE  # the startup value is kept as such
 
 
 def test_cookie_mutations_need_an_allowed_origin(server: Server) -> None:

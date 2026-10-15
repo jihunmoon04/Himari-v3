@@ -446,7 +446,12 @@ function describe(detail) {
     const text = job.stop_requested === "cancel" ? "Stopping…" : job.stop_requested === "pause" ? "Pausing…" : "Working…";
     return { text, tone: null, active: true };
   }
-  if (detail.waiting) return { text: STATE_TEXT.waiting_for_user, tone: "warn", active: false };
+  if (detail.waiting) {
+    // e.g. "answer the question before compacting" when Compact now met an open question
+    const why = job.state === "waiting_for_user" && job.detail ? ` (${job.detail})` : "";
+    return { text: `${STATE_TEXT.waiting_for_user}${why}`, short: STATE_TEXT.waiting_for_user, tone: "warn",
+             active: false };
+  }
   // Compacting (or finding nothing to compact) answers nothing: an unanswered
   // message still wins, with the compaction result in front of it.
   const compacted = job.state === "compacted" || job.state === "nothing_to_compact";
@@ -457,7 +462,8 @@ function describe(detail) {
   }
   if (job.error) return { text: ERROR_TEXT[job.error] || `The run failed (${job.error}).`, tone: "error", active: false };
   if (job.state === "compacted" || job.state === "nothing_to_compact") {
-    return { text: STATE_TEXT[job.state], tone: "ok", active: false };
+    const why = job.state === "nothing_to_compact" && job.detail ? ` (${job.detail})` : "";
+    return { text: `${STATE_TEXT[job.state]}${why}`, short: STATE_TEXT[job.state], tone: "ok", active: false };
   }
   if (job.state && job.state !== "completed" && job.state !== "idle") {
     const base = STATE_TEXT[job.state] || job.state;
@@ -514,6 +520,7 @@ function poll(generation) {
       else if (detail) {
         loadList(true).then(markSelected).catch(() => {});
         loadContext(generation);
+        loadServerInfo(); // a command may have found the sandbox broken
       }
     } catch (error) {
       if (generation === app.generation && error.status !== 401) {
@@ -530,6 +537,7 @@ async function openConversation(id) {
   const generation = app.generation;
   app.conversationId = id;
   app.lastSequence = 0;
+  loadServerInfo();
   app.toolRows = new Map();
   app.context = null;
   $("chat-menu-context-pair").hidden = true;

@@ -119,7 +119,7 @@ class Application:
     runtime: Runtime
     runner: BackgroundRunner
     inside: InsideEnvironment
-    sandbox_state: SandboxState
+    sandbox_state: SandboxState  # at startup; ``current_sandbox_state`` follows later changes
     model_id: str
     context_tokens: int  # the request token budget (compaction starts at 80%)
     operator_secret: str = field(repr=False)  # never in reprs, logs or tracebacks
@@ -178,6 +178,12 @@ class Application:
         assert isinstance(runtime.data, SqliteData)
         return cls(root, store, runtime.data, runtime, BackgroundRunner(runtime.driver), inside, state, model_id,
                    budget.limit_tokens, secret, mcp)
+
+    @property
+    def current_sandbox_state(self) -> SandboxState:
+        """The sandbox as it is now: a setup failure while running a command
+        latches SETUP_FAILED after startup, and commands are refused from then on."""
+        return self.inside.sandbox.state if self.inside.sandbox is not None else self.sandbox_state
 
     async def context_status(self, scope: TrustedScope) -> ContextStatus | None:
         """For display (Web/CLI): the next request's estimated size and the
