@@ -16,6 +16,15 @@ import shlex
 from himari.common import EnvironmentKind, JsonValue, ModelToolResult, TextBlock, ToolId
 from himari.environment.inside import fs
 from himari.environment.inside.blocking import run_blocking
+from himari.sandbox.api import (
+    DEFAULT_TIMEOUT_SECONDS,
+    MAX_TIMEOUT_SECONDS,
+    CommandResult,
+    SandboxSetupError,
+    SandboxState,
+    SandboxUnavailableError,
+    validate_argv,
+)
 from himari.tool.api import (
     EffectProfile,
     ToolContext,
@@ -306,17 +315,14 @@ class RunCommand:
     environment overrides; network isolated; Workspace = the principal root."""
 
     def __init__(self, env: InsideEnvironment) -> None:
-        from himari.environment.inside.sandbox import backend as sb
-
         self._env = env
-        self._sb = sb
         self.definition = ToolDefinition(
             tool_id=ToolId("inside/run_command"),
             description=(
                 "Run one command in an isolated Linux sandbox with the workspace mounted at /workspace "
                 "(no network). argv is a list of strings; use [\"sh\", \"-c\", \"...\"] for shell syntax. "
-                f"Runs in the conversation's working directory; timeout {sb.DEFAULT_TIMEOUT_SECONDS}s by default "
-                f"(max {sb.MAX_TIMEOUT_SECONDS}s)."
+                f"Runs in the conversation's working directory; timeout {DEFAULT_TIMEOUT_SECONDS}s by default "
+                f"(max {MAX_TIMEOUT_SECONDS}s)."
             ),
             input_schema=_schema(
                 {
@@ -331,11 +337,10 @@ class RunCommand:
         )
 
     async def run(self, invocation: ToolInvocation, ctx: ToolContext) -> ToolOutcome:
-        sb = self._sb
         backend = self._env.sandbox
         if ctx.binding is None or ctx.workspace is None:
             return ToolOutcome(ToolStatus.DENIED, _text("no workspace is bound to this conversation", error=True))
-        if backend is None or backend.state is not sb.SandboxState.ENFORCED:
+        if backend is None or backend.state is not SandboxState.ENFORCED:
             state = "not configured" if backend is None else backend.state.value
             return ToolOutcome(
                 ToolStatus.DENIED,
@@ -343,12 +348,12 @@ class RunCommand:
                 raw_result={"sandbox_state": state},
             )
         try:
-            argv = sb.validate_argv(invocation.arguments.get("argv"))
+            argv = validate_argv(invocation.arguments.get("argv"))
         except ValueError as error:
             return ToolOutcome(ToolStatus.DENIED, _text(str(error), error=True))
-        timeout = invocation.arguments.get("timeout_seconds", sb.DEFAULT_TIMEOUT_SECONDS)
-        if not isinstance(timeout, int) or not 1 <= timeout <= sb.MAX_TIMEOUT_SECONDS:
-            return ToolOutcome(ToolStatus.DENIED, _text(f"timeout_seconds must be 1..{sb.MAX_TIMEOUT_SECONDS}", error=True))
+        timeout = invocation.arguments.get("timeout_seconds", DEFAULT_TIMEOUT_SECONDS)
+        if not isinstance(timeout, int) or not 1 <= timeout <= MAX_TIMEOUT_SECONDS:
+            return ToolOutcome(ToolStatus.DENIED, _text(f"timeout_seconds must be 1..{MAX_TIMEOUT_SECONDS}", error=True))
         try:
             cwd_relative = fs.to_relative(ctx.workspace.cwd_relative, ".")
         except fs.FsError as error:
@@ -372,7 +377,7 @@ class RunCommand:
                     _text(f"command not run: {error}", error=True),
                     raw_result={"admission": error.category.name},
                 )
-            except (sb.SandboxUnavailableError, sb.SandboxSetupError):
+            except (SandboxUnavailableError, SandboxSetupError):
                 return ToolOutcome(
                     ToolStatus.DENIED,
                     _text("command execution is unavailable: the sandbox could not be set up; nothing was run", error=True),
@@ -383,8 +388,6 @@ class RunCommand:
 
 def _command_outcome(argv: list[str], timeout: int, result: object) -> ToolOutcome:
     """Final model text <= MAX_OBSERVATION_BYTES (header, both streams, notices)."""
-    from himari.environment.inside.sandbox.backend import CommandResult
-
     assert isinstance(result, CommandResult)
     command = _fit("$ " + shlex.join(argv), 2048)
     if result.timed_out:

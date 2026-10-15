@@ -45,7 +45,8 @@ from himari.control.runner import BackgroundRunner
 from himari.data.api import InitialActivation, ToolExecutionRecord, ToolExecutionStatus, UiCsp, UiResource
 from himari.data.sqlite import SqliteData, SqliteStore
 from himari.environment.inside import INSIDE, InsideEnvironment
-from himari.environment.inside.sandbox import SandboxBackend, SandboxState
+from himari.sandbox.api import SandboxState
+from himari.sandbox.backend import SandboxBackend
 from himari.mcp.config import CONFIG_NAME, McpUiPolicy, load_config
 from himari.mcp.tools import McpConnection, SourceStatus, connect
 from himari.prompt.api import ContextBudget

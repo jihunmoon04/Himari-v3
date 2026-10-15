@@ -28,8 +28,8 @@ from himari.common import (
 )
 from himari.data.api import BindingAuthority, ConversationWorkspace
 from himari.environment.inside import INSIDE, InsideEnvironment
-from himari.environment.inside.sandbox import backend as sb
-from himari.environment.inside.sandbox import self_test
+from himari.sandbox import backend as sb
+from himari.sandbox import self_test
 from himari.environment.inside.tools import MAX_OBSERVATION_BYTES
 from himari.tool.api import EffectProfile, ToolContext, ToolInvocation, ToolOutcome, ToolStatus
 from himari.tool.registry import ToolRegistry
