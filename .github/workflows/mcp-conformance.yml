@@ -1,6 +1,7 @@
 # The official MCP conformance suite with HIMARI as the client
 # (docs/testing-policy.md §2.3). Not on every push: on pull requests that
-# change the MCP client or this gate, and when started by hand.
+# change the MCP client, the path a call takes to it (Bootstrap, Tool
+# registry and Dispatcher), the dependencies or this gate; and by hand.
 name: mcp-conformance
 
 on:
@@ -8,6 +9,9 @@ on:
   pull_request:
     paths:
       - "src/himari/mcp/**"
+      - "src/himari/bootstrap/**"
+      - "src/himari/tool/**"
+      - "pyproject.toml"
       - "scripts/mcp_conformance/**"
       - ".github/workflows/mcp-conformance.yml"
 
