@@ -1,0 +1,34 @@
+# The official MCP conformance suite with HIMARI as the client
+# (docs/testing-policy.md §2.3). Not on every push: on pull requests that
+# change the MCP client or this gate, and when started by hand.
+name: mcp-conformance
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "src/himari/mcp/**"
+      - "scripts/mcp_conformance/**"
+      - ".github/workflows/mcp-conformance.yml"
+
+jobs:
+  client:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install HIMARI
+        run: pip install -e .
+      - name: Client suite against the baseline
+        run: python -I scripts/mcp_conformance/run.py -o conformance-results
+      - name: Keep the results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: conformance-results
+          path: conformance-results
