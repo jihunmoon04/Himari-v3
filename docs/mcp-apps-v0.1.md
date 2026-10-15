@@ -66,8 +66,13 @@
 ```
 
 - **별도 포트의 작은 서버:** `/sandbox`(proxy 페이지)와 `/sandbox.js`만 서빙하는 ASGI 앱을 같은 프로세스에서 두 번째 포트로 띄운다. API 경로는 하나도 없고 세션을 모른다. 화면을 켠 서버가 하나도 없으면 띄우지 않는다.
-- **CSP는 proxy 페이지의 응답 헤더로:** `srcdoc` 문서는 부모의 CSP를 물려받는다. 참조 구현처럼 proxy 응답 헤더에 그 화면의 CSP를 넣는다. 사양의 CSP 틀에 §3.3의 도메인을 넣고, `frame-ancestors <메인 origin들>`을 더한다. `meta` 태그와 달리 View가 바꿀 수 없다.
-- **CSP 파라미터는 서명한다:** 메인 API가 `csp`(정규화한 JSON, base64url)와 `sig`(운영자 비밀에서 파생한 키로 계산한 HMAC-SHA256)를 준다. sandbox 서버는 서명이 맞지 않으면 400을 준다. 누군가 HIMARI의 sandbox origin을 느슨한 CSP로 띄워 쓰는 것을 막는다.
+- **CSP는 proxy 페이지의 응답 헤더로:** `srcdoc` 문서는 부모의 CSP를 물려받는다. 참조 구현처럼 proxy 응답 헤더에 그 화면의 CSP를 넣는다. 사양의 CSP 틀에 §3.3의 도메인을 넣고, `frame-ancestors <서명에 묶인 메인 origin>`을 더한다. `meta` 태그와 달리 View가 바꿀 수 없다. 이 구성이 실제 브라우저에서 동작하는지는 §3.6에서 확인했다.
+- **CSP 파라미터는 서명한다(PR #27 검수 B1):** 누군가 HIMARI의 sandbox origin을 느슨한 CSP로 띄워 쓰는 것을 막는다.
+  - **키:** 프로세스가 시작할 때 무작위 32바이트로 만들고 메모리에만 둔다(운영자 비밀에서 파생하지 않는다). 운영자 정책(`mcp.json`)은 시작할 때만 읽으므로, 정책이 바뀌는 때가 곧 키가 바뀌는 때다. 그래서 재시작하면 예전 정책으로 발급한 URL은 모두 무효가 된다. 운영자가 도메인을 거둔 뒤 예전 서명 URL을 다시 쓰는 길이 없다.
+  - **서명하는 것:** 정규화한 JSON `{"v": 1, "csp": <실제 CSP 도메인>, "host": <이 화면을 띄울 메인 origin 하나>, "exp": <발급 시각 + 10분>}`. 메인 API가 이것을 base64url로 `p`에, HMAC-SHA256을 `sig`에 넣어 `sandbox_url`을 준다.
+  - **sandbox 서버:** 서명이 틀리거나, 만료됐거나, `v`를 모르면 400을 준다. `frame-ancestors`에는 `host` 하나만 넣는다. 이미 로드된 화면은 만료 뒤에도 계속 동작한다(검사는 proxy를 로드할 때 한 번). 화면을 다시 열 때는 API에서 새 URL을 받는다.
+  - **묶지 않는 것:** 화면(digest)이나 호출은 묶지 않는다. HTML은 postMessage로 가므로, 서명이 허락하는 것은 "이 CSP의 빈 proxy를 이 메인 origin 아래에서 10분 안에 띄우는 것"뿐이다. proxy 페이지에는 데이터가 없다.
+  - **이후:** 재시작 없이 정책을 바꾸게 되면 정책 세대 번호를 서명에 넣는다.
 - **View는 opaque origin:** 사양의 proxy와 달리 안쪽 iframe에 `allow-same-origin`을 주지 않는다(`sandbox="allow-scripts"`, 사양이 허용하는 더 좁은 설정). 모든 서버의 화면이 sandbox origin 하나를 같이 쓰므로, 같은 origin을 주면 서로의 localStorage·IndexedDB와 proxy 페이지에 닿는다. 대가: 저장소를 쓰는 앱은 동작하지 않는다(사양은 앱에 기능 감지를 요구한다). **사용자 결정(2026-10-15): 이 대가를 받아들인다.** 동시에 띄우는 화면 수를 줄이는 것으로는 대신할 수 없다. 저장소는 화면을 닫아도 남아서 다음에 뜬 다른 서버의 화면이 읽을 수 있고, 같은 origin 권한이면 service worker로 이후의 proxy 요청을 가로챌 수도 있다. 저장소가 필요해지면 서버별 origin(서버마다 포트 또는 하위 도메인)으로 간다. Claude·ChatGPT도 앱마다 origin을 나눈다.
 - **쿠키는 포트로 나뉘지 않는다:** sandbox origin은 메인과 같은 사이트라 `SameSite=Strict` 쿠키도 같이 간다. 그래서 막는 것은 쿠키 속성이 아니라 서버 쪽 규칙이다:
   - 세션 쿠키는 `HttpOnly`라 스크립트로 읽을 수 없다(지금도 그렇다).
@@ -99,6 +104,29 @@
 
 화면 테두리 위에는 항상 "App view from `<서버 이름>` · sandboxed"를 보인다. `prefersBorder`와 상관없이 보인다(사양의 사회공학 위험 대응).
 
+### 3.6 브라우저 검증 (PR #27 검수 B3, 2026-10-15)
+
+§3.4의 이중 iframe 구성을 실제 브라우저에서 확인했다. 환경: **Chrome for Testing 156.0.8078.4 (headless shell)**, 이 호스트에서 loopback 두 포트. 메인 origin은 지금의 HIMARI CSP + `frame-src <sandbox>`, 쿠키는 `HttpOnly; SameSite=Strict`. proxy는 사양 CSP 틀(선언 도메인 없음) + `frame-ancestors <메인>` 헤더, 안쪽 View는 `sandbox="allow-scripts"` + `srcdoc`. 검증 스크립트는 구현 PR에 smoke로 들인다.
+
+| 확인한 것 | 결과 |
+| --- | --- |
+| proxy 로드, `sandbox-proxy-ready` → `sandbox-resource-ready` | 통과 |
+| proxy의 `frame-src 'none'`이 안쪽 `srcdoc` iframe을 막지 않음 | 통과 (View 실행됨) |
+| 물려받은 `frame-ancestors <메인>`이 안쪽 `srcdoc`을 막지 않음 | 통과 |
+| View의 인라인 스크립트 실행, `ui/initialize` 왕복, `initialized` → `tool-input`·`tool-result` 전달 | 통과 |
+| View가 CSP를 물려받음 (자기 CSP 없이 `connect-src`·`frame-src` 위반 발생) | 통과 |
+| View origin이 opaque (`self.origin === "null"`) | 통과 |
+| View에서 메인·proxy DOM 접근, localStorage, `document.cookie` | 모두 `SecurityError` |
+| View의 팝업(`window.open` → `null`), top 이동(`SecurityError`), 중첩 iframe(`frame-src` 위반) | 모두 막힘 |
+| View·proxy의 메인 API 요청 (기본 CSP) | `connect-src` 위반, 메인에 아무 요청도 도착하지 않음 |
+| **대조 실험:** `connect-src`에 메인을 일부러 넣었을 때 | proxy(sandbox origin)의 POST는 **쿠키를 가지고** 도착(Origin = sandbox) → `OriginGuard`가 403. View의 POST는 Origin `null`, 쿠키 없음 |
+
+대조 실험이 §3.4의 판단을 뒷받침한다. 포트만 다른 origin은 같은 사이트라 `SameSite=Strict` 쿠키가 함께 간다. 그래서 막는 것은 `OriginGuard`이고, View를 opaque로 두면 쿠키 자체가 가지 않는다.
+
+**남은 확인:** Firefox·Safari는 이 호스트에서 돌릴 수 없어 확인하지 못했다. 구현 PR에서 돌릴 수 있는 곳을 찾고, 안 되면 지원 브라우저를 Chromium 계열로 적는다.
+
+**대체 구성** (어떤 브라우저가 proxy CSP 아래의 `srcdoc`을 막는 경우): View를 `srcdoc`이 아니라 sandbox 서버가 직접 서빙하는 문서로 띄운다(`/view?p=…&sig=…`). 그 응답에 View 전용 CSP 헤더와 CSP `sandbox allow-scripts` 지시어(속성과 별개로 opaque를 강제)를 넣고, proxy 자신은 `script-src 'self'; frame-src <sandbox>`만 갖는다. 이 경우 sandbox 서버가 서명에 묶인 digest로 HTML을 읽어야 하므로, 서명에 digest를 넣고 sandbox 서버에 Data 읽기를 준다. 1차 구성이 통과했으므로 이것은 쓰지 않는다.
+
 ## 4. MCP 커넥터 (`src/himari/mcp/`)
 
 ### 4.1 `mcp.json` 확장
@@ -113,7 +141,7 @@
 }}}
 ```
 
-- 도메인 항목: `https://host[:port]` 또는 `https://*.host[:port]`. loopback이면 `http://`도 허용한다. 경로·쿼리·공백·`;`·`'`는 거부한다(CSP 주입 방지). 항목은 종류별 32개까지.
+- 도메인 항목: `https://host[:port]` 또는 `https://*.host[:port]`. `connect_domains`는 WebSocket을 위해 `wss://`도 받는다(PR #27 검수 C2, 사양의 `connectDomains` 예시와 같음). loopback이면 `http://`·`ws://`도 허용한다. 경로·쿼리·공백·`;`·`'`는 거부한다(CSP 주입 방지). 항목은 종류별 32개까지.
 - 모르는 키는 지금처럼 거부한다.
 
 ### 4.2 연결
@@ -131,6 +159,7 @@
 - `McpConnection`은 Application에 두 가지를 알려 준다(공개 계약이 아니라 Composition Root 안의 연결):
   - 서버별 현재 `ui` 설정(켜짐 여부·도메인 상한). Web이 화면을 열 때 이 값으로 CSP를 계산한다(§3.3).
   - `ui_for(tool_id) -> UiResource | None`: 그 Tool에 연결할 때 받아 둔 리소스. 실행 중 화면(§3.5)에 쓰고, `McpTool`이 결과에 붙이는 것과 같은 객체다.
+  - `tool_info(tool_id) -> {name, description, inputSchema} | None`: 서버가 `tools/list`에서 준 그대로의 Tool 정보(이름은 서버의 원래 이름). `ui/initialize`의 `hostContext.toolInfo.tool`에 쓴다(§6.3).
 
 ### 4.3 실행
 
@@ -148,6 +177,7 @@ app_view=AppView(resource=<연결 때 받은 UiResource>, payload=<CallToolResul
 | 계약 | 변경 | 비고 |
 | --- | --- | --- |
 | `data.api` 새 값 타입 | `UiCsp(connect_domains, resource_domains, frame_domains, base_uri_domains)`, `UiResource(digest, source, uri, html, csp: UiCsp, prefers_border: bool \| None)`, `AppView(resource: UiResource, payload: JsonValue)` | `ArtifactMutation`처럼 Data 계약에 둔다(Tool·Data·Web이 같이 씀) |
+| **TOOL-07** `tool.api` 재노출 | `UiCsp`·`UiResource`·`AppView`를 `tool.api`가 다시 내보낸다(`from himari.data.api import AppView as AppView` 형식: mypy strict가 인정하는 명시적 재노출. `tool.api`에는 `__all__`이 없다) | Data가 소유하고, MCP 커넥터는 V3-059 규칙 6대로 `tool.api`에서만 가져온다(PR #27 검수 B2). import 검사로 확인 |
 | **TOOL-07** `ToolOutcome` | `app_view: AppView \| None = None` | Tool 구현은 화면을 돌려줄 뿐이고, 저장은 Dispatcher가 한다 |
 | **DATA-08** `ToolCompletion` | `app_view: AppView \| None = None` | `SUCCEEDED`·`FAILED`에서만 허용하고, 그 밖의 상태는 계약 위반으로 거부 |
 | **DATA-03** `ToolExecutionRecord` | `ui_digest: str \| None` | 화면이 있는 호출인지 표시 |
@@ -185,7 +215,8 @@ ALTER TABLE tool_executions ADD COLUMN app_payload TEXT;
 - `GET /api/conversations/{id}/calls/{run_id}/{call_id}/app` → 200, `state`에 따라 세 모양:
 
   ```json
-  {"state": "done", "source": "calliope", "tool_id": "calliope/position", "tool_name": "position",
+  {"state": "done", "source": "calliope", "tool_id": "calliope/position",
+   "tool": {"name": "position", "description": "…", "inputSchema": {...}},
    "digest": "…", "html": "<!DOCTYPE html>…", "prefers_border": true,
    "csp": {"connect_domains": [...], "resource_domains": [...]}, "declared_csp": {...},
    "sandbox_url": "http://127.0.0.1:8766/sandbox?csp=…&sig=…",
@@ -193,6 +224,7 @@ ALTER TABLE tool_executions ADD COLUMN app_payload TEXT;
   ```
 
   - `done`: 결과와 함께 저장된 화면. HTML과 선언 CSP는 저장된 것이다.
+  - `tool`: 지금 연결된 서버가 준 Tool 정보(`tool_info`). 그 Tool이 더 이상 등록돼 있지 않으면 `null`이다.
   - `running`: 호출이 아직 끝나지 않음(`PENDING`·`EXECUTION_CLAIMED`). 같은 모양이지만 HTML은 `ui_for`의 지금 리소스이고 `result`는 `null`이다.
   - `ended`: 끝났지만 화면이 저장되지 않음. `{"state": "ended", "status": "cancelled|denied|unknown|failed", "reason": "…"}`만 준다(HTML 없음). 띄워 둔 화면에 `tool-cancelled`를 보낼 때 쓴다.
   - 저장된 화면도 지금 화면도 없으면 404 `no_app_view`. 그 서버의 화면을 운영자가 껐거나 서버가 설정에서 빠졌으면 404 `app_view_disabled`.
@@ -203,7 +235,7 @@ ALTER TABLE tool_executions ADD COLUMN app_payload TEXT;
 
 - `HIMARI_WEB_SANDBOX_PORT`(기본 `port + 1`). 메인 서버처럼 loopback에만 bind한다.
 - sandbox origin = 허용된 메인 origin마다 같은 scheme·host에 sandbox 포트를 붙인 것. 역방향 프록시 뒤라면 `HIMARI_WEB_SANDBOX_ORIGINS`로 직접 적는다(메인 origin과 같은 규칙으로 검사).
-- `/sandbox` 응답:
+- `/sandbox?p=…&sig=…` 응답 (서명·만료·`v`가 맞지 않으면 400, §3.4):
   - 헤더: CSP(§3.4), `cache-control: no-store`, `referrer-policy: no-referrer`, `x-content-type-options: nosniff`
   - 본문: 고정 HTML. 메인 origin 목록을 `<meta name="himari-host-origins">`로 넣는다. 메인 페이지가 `no-referrer`라 proxy는 referrer로 부모를 확인할 수 없기 때문이다.
 - `/sandbox.js`(proxy):
@@ -219,7 +251,7 @@ ALTER TABLE tool_executions ADD COLUMN app_payload TEXT;
 
 | View → 호스트 | 처리 |
 | --- | --- |
-| `ui/initialize` (요청) | `{protocolVersion: "2026-01-26", hostInfo: {name: "himari", version: "3"}, hostCapabilities: {openLinks: {}, sandbox: {csp: <실제 CSP>}}, hostContext: {toolInfo: {tool: {name, description}}, theme, displayMode: "inline", availableDisplayModes: ["inline"], containerDimensions: {width: <행 너비>, maxHeight: 800}, locale, timeZone, platform: "web"}}` |
+| `ui/initialize` (요청, `tool`이 `null`이면 `toolInfo`를 뺀다. PR #27 검수 C1: 사양의 `Tool`은 `inputSchema`가 필수) | `{protocolVersion: "2026-01-26", hostInfo: {name: "himari", version: "3"}, hostCapabilities: {openLinks: {}, sandbox: {csp: <실제 CSP>}}, hostContext: {toolInfo: {tool: <API의 tool>}, theme, displayMode: "inline", availableDisplayModes: ["inline"], containerDimensions: {width: <행 너비>, maxHeight: 800}, locale, timeZone, platform: "web"}}` |
 | `ui/notifications/initialized` | `tool-input {arguments}` 전송. 이미 `done`이면 이어서 `tool-result <payload>`, `ended`이면 `tool-cancelled` |
 | `ui/notifications/size-changed` | iframe 높이를 40~800px로 맞춤 |
 | `ui/open-link` (요청) | `http(s)` URL만, 주소를 보여 주는 확인 창 → `window.open(url, "_blank", "noopener,noreferrer")`, 거절하면 `-32000` |
@@ -245,7 +277,8 @@ ALTER TABLE tool_executions ADD COLUMN app_payload TEXT;
 | View가 상태를 바꿈 | `OriginGuard`(sandbox origin은 허용 안 됨), View에 `allow-forms` 없음 |
 | 인자·결과를 밖으로 보냄 | `connect-src` = 선언 ∩ 운영자 상한(기본 없음), `allow-popups`·`allow-top-navigation` 없음, 링크는 사용자 확인 |
 | 다른 서버의 화면을 엿봄 | View는 opaque origin(저장소 없음), 화면마다 별도 iframe |
-| HIMARI sandbox origin을 느슨한 CSP로 악용 | CSP 파라미터 HMAC 서명 |
+| HIMARI sandbox origin을 느슨한 CSP로 악용 | 프로세스마다 새로 만드는 키로 HMAC 서명, 메인 origin 하나에 묶음, 10분 만료 |
+| 운영자가 거둔 뒤 예전 서명 URL을 다시 씀 | 정책은 시작할 때만 바뀌고, 시작할 때 키도 바뀐다. 재시작하면 예전 URL은 모두 400 |
 | 위조된 메시지 | proxy는 메인 origin만, 호스트는 자기 iframe·sandbox origin만, 크기 한도 |
 | 자원 소모 | 가장 최근 하나만 자동, 나머지는 열 때만, 동시 3개, HTML 2 MiB |
 | 사회공학 | 항상 보이는 "App view from <서버> · sandboxed" 테두리 |
@@ -268,7 +301,9 @@ ALTER TABLE tool_executions ADD COLUMN app_payload TEXT;
   - sandbox 응답 헤더(서명된 CSP, 서명이 틀리면 400, `frame-ancestors`), sandbox 서버에 API 경로가 없음
   - sandbox origin의 POST가 쿠키를 가지고도 403
   - 운영자가 도메인을 빼면 예전 화면의 CSP도 줄어듦
-- **브라우저 smoke:** proxy 메시지 흐름, `srcdoc`가 CSP를 물려받는지, proxy 자신의 CSP(`frame-src 'none'`, `frame-ancestors`)가 안쪽 `srcdoc` iframe을 막지 않는지(참조 구현은 `document.write`를 쓰므로 이 경우를 직접 보여 주지 않는다), View가 `parent.parent`와 메인 쿠키에 닿지 못하는지, 자동 표시(가장 최근 하나, 닫은 화면은 다시 띄우지 않음)와 실행 중 → 결과·취소 전환. 이 호스트에는 Chromium 시스템 라이브러리가 없어 지금은 돌릴 수 없다(PR #24와 같음). 구현 PR에서 돌릴 수 있는 곳을 정한다.
+- **sandbox 서명:** 예전 프로세스의 서명 URL은 400, 만료된 URL은 400, 다른 메인 origin으로 바꾼 `p`는 400, `wss://` 항목은 `connect-src`에 들어감.
+- **import 검사:** MCP 커넥터가 `UiResource`·`AppView`를 `tool.api`에서 가져오고, `data.api`를 직접 import하면 실패(규칙 6).
+- **브라우저 smoke:** §3.6의 검증을 실제 HIMARI 서버로 다시 돌린다. 여기에 더해 자동 표시(가장 최근 하나, 닫은 화면은 다시 띄우지 않음)와 실행 중 → 결과·취소 전환을 본다. 이 호스트에서는 Playwright의 Chromium에 빠진 시스템 라이브러리 4개(`libatk`, `libatspi`, `libasound`, `libXdamage`)를 Ubuntu 패키지에서 풀어 쓰면 돌아간다. 구현 PR에서 이 절차를 smoke 스크립트에 적는다. Firefox·Safari는 §3.6의 남은 확인.
 - 공개 계약이 바뀌므로 전체 pytest를 돌린다(V3-038).
 
 ## 9. 결정된 것과 남은 질문
