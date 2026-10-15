@@ -722,6 +722,32 @@ textarea {
   font-size: 11px;
 }
 
+.chat-menu-tool-problem {
+  display: block;
+  color: var(--warn);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.server-info {
+  margin: 0 0 var(--space-1);
+  padding: 0 var(--space-3);
+  color: var(--text-muted);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.server-info.is-warn {
+  color: var(--warn);
+}
+
+.item-note {
+  color: var(--text-muted);
+  font-size: 12px;
+  font-style: italic;
+  padding: 0 var(--space-1);
+}
+
 .chat-menu-tool .link-button {
   font-size: 12px;
 }

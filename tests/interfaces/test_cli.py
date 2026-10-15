@@ -617,3 +617,34 @@ def test_cancel_closes_an_open_question_and_pause_with_nothing_running(harness: 
     assert code == cli.EXIT_OK, err
     code, _, err = harness.run("cancel", cid)
     assert code == cli.EXIT_OK and "nothing was running or waiting" in err
+
+
+def test_status_rename_and_a_closed_question_in_the_history(harness: Harness) -> None:
+    code, out, _ = harness.run("status")
+    assert code == cli.EXIT_OK
+    assert out.splitlines() == ["model: m", "commands: unavailable on this host", "context budget: 128,000 tokens"]
+    cid = harness.run("new")[1].strip()
+    assert harness.run("rename", cid, "Trip plans")[0] == cli.EXIT_OK
+    assert "Trip plans" in harness.run("list")[1]
+    assert harness.run("rename", cid)[0] == cli.EXIT_OK  # back to the default name
+    assert "Trip plans" not in harness.run("list")[1]
+
+    harness.queue(calls(("ask_user", {"question": "Which file?"})))
+    harness.run("send", cid, "edit my file")
+    harness.run("cancel", cid)
+    code, out, _ = harness.run("show", cid)
+    assert out.splitlines()[-1] == "  (question closed without an answer)"
+
+
+def test_a_refusal_says_why(harness: Harness) -> None:
+    cid = harness.run("new")[1].strip()
+    assert harness.application is not None
+
+    class Refusing(Gated):
+        async def resume(self, scope: TrustedScope, *, stop: StopSignal | None = None) -> DriveResult:
+            return DriveResult(DriveState.REQUEST_REJECTED, detail="context_budget_exceeded: about 950 tokens > 900")
+
+    harness.application.runner = BackgroundRunner(Refusing())
+    code, _, err = harness.run("send", cid, "hello")
+    assert code == cli.EXIT_FAILED
+    assert "(the request was refused before sending: context_budget_exceeded: about 950 tokens > 900)" in err
