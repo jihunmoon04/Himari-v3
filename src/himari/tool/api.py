@@ -36,6 +36,12 @@ from himari.common import (
     UnknownOutcomePolicy,
 )
 from himari.data.api import ArtifactMutation, ArtifactStore, BindingAuthority, ConversationWorkspace
+# Tool views (MCP Apps, V3-P58): owned by Data, re-exported here so that a
+# Tool implementation (e.g. the MCP connector, which may import only
+# tool.api — V3-059) can build them.
+from himari.data.api import AppView as AppView
+from himari.data.api import UiCsp as UiCsp
+from himari.data.api import UiResource as UiResource
 
 
 class WorkspaceRequirement(Enum):
@@ -142,6 +148,10 @@ class ToolOutcome(DeepFrozen):
     model_result: ModelToolResult
     artifact_mutations: tuple[ArtifactMutation, ...] = ()
     raw_result: JsonValue = None
+    # V3-P58: the call's view, stored with the result by the Dispatcher. Kept
+    # only when the call ran (SUCCEEDED/FAILED); a view Data refuses is
+    # dropped and the result is committed without it.
+    app_view: AppView | None = None
 
 
 @runtime_checkable

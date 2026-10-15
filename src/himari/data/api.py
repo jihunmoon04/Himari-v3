@@ -12,6 +12,8 @@ marks ``DISPATCH_CLAIMED`` (before Provider send) and ``EXECUTION_CLAIMED``
 
 from __future__ import annotations
 
+import hashlib
+import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -253,6 +255,8 @@ class ToolExecutionRecord(DeepFrozen):
     # "outcome unknown" result is recorded the same way whatever the current
     # build registers. None (not claimed / legacy) → record the Event.
     record_event: bool | None = None
+    # Set when the call's view (MCP Apps, V3-P58) was stored with its result.
+    ui_digest: str | None = None
 
 
 @dataclass(frozen=True)
@@ -286,6 +290,76 @@ class ArtifactMutation(DeepFrozen):
     expected_revision: int | None = None
 
 
+# --- Tool views (MCP Apps, V3-P58) -------------------------------------------
+# A view is HTML a Tool's server gives for showing a call (an MCP Apps
+# ``ui://`` resource). It is stored with the call's result, content-addressed,
+# and shown only in a sandbox; it never reaches the model.
+
+MAX_UI_HTML_BYTES = 2 * 1024 * 1024  # UTF-8
+MAX_APP_PAYLOAD_BYTES = 1024 * 1024  # the payload's JSON, UTF-8
+
+
+@dataclass(frozen=True)
+class UiCsp(DeepFrozen):
+    """The origins a view's server declares it needs (MCP Apps ``ui.csp``).
+    A declaration, not a grant: the host allows only what its operator also
+    allows."""
+
+    connect_domains: tuple[str, ...] = ()
+    resource_domains: tuple[str, ...] = ()
+    frame_domains: tuple[str, ...] = ()
+    base_uri_domains: tuple[str, ...] = ()
+
+
+def ui_digest(source: str, uri: str, html: str, csp: UiCsp, prefers_border: bool | None) -> str:
+    """SHA-256 of the canonical JSON of a view: its identity in storage."""
+    canonical = json.dumps(
+        {"source": source, "uri": uri, "html": html, "prefers_border": prefers_border,
+         "csp": {"connect_domains": list(csp.connect_domains), "resource_domains": list(csp.resource_domains),
+                 "frame_domains": list(csp.frame_domains), "base_uri_domains": list(csp.base_uri_domains)}},
+        sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+@dataclass(frozen=True)
+class UiResource(DeepFrozen):
+    """A Tool's view as its server declared it (V3-P58). Build it with
+    ``UiResource.create`` so that ``digest`` matches the content; Data checks."""
+
+    digest: str
+    source: str  # the External source (e.g. MCP server name) whose code it is
+    uri: str  # "ui://…"
+    html: str
+    csp: UiCsp = field(default_factory=UiCsp)
+    prefers_border: bool | None = None
+
+    @classmethod
+    def create(cls, source: str, uri: str, html: str, csp: UiCsp | None = None,
+               prefers_border: bool | None = None) -> UiResource:
+        csp = UiCsp() if csp is None else csp
+        return cls(ui_digest(source, uri, html, csp, prefers_border), source, uri, html, csp, prefers_border)
+
+
+@dataclass(frozen=True)
+class AppView(DeepFrozen):
+    """A call's view and what it shows: the view's code plus the call's
+    result as the view receives it (MCP ``CallToolResult``)."""
+
+    resource: UiResource
+    payload: JsonValue
+
+
+@dataclass(frozen=True)
+class StoredAppView(DeepFrozen):
+    """A view stored with a call's result, read back for display."""
+
+    call: CallRef
+    tool_id: ToolId
+    arguments: Mapping[str, JsonValue]
+    status: ToolExecutionStatus
+    view: AppView
+
+
 @dataclass(frozen=True)
 class ToolCompletion(DeepFrozen):
     """Terminal outcome committed by the Tool Dispatcher (DATA-08, T7/T8)."""
@@ -295,6 +369,9 @@ class ToolCompletion(DeepFrozen):
     raw_result: JsonValue = None  # persisted on the ToolExecutionRecord
     artifact_mutations: tuple[ArtifactMutation, ...] = ()
     record_event: bool = True  # the Tool's conversation_record policy (FULL → True)
+    # V3-P58: the call's view, stored in the same transaction. Only with
+    # SUCCEEDED or FAILED (a call that ran); INVALID_ARGUMENT otherwise.
+    app_view: AppView | None = None
 
 
 @dataclass(frozen=True)
@@ -523,6 +600,12 @@ class ConversationLog(Protocol):
         ALREADY_COMMITTED if the call already has a model result."""
         ...
 
+    async def read_app_view(self, scope: TrustedScope, call: CallRef) -> StoredAppView | None:
+        """V3-P58: the view stored with this call's result, or None if it has
+        none (still running, ended without one, or a Tool without a view).
+        NOT_FOUND for a call this Conversation does not have."""
+        ...
+
     async def find_waiting_call(self, scope: TrustedScope) -> CallRef | None:
         """Derived wait state (V3-P17): the latest PROJECTED Run's group is a
         single ``ask_user`` call still PENDING."""
@@ -681,6 +764,7 @@ class StateQuery(Protocol):
 
 __all__ = [
     "AnswerCommit",
+    "AppView",
     "Artifact",
     "ArtifactMutation",
     "ArtifactStore",
@@ -703,9 +787,11 @@ __all__ = [
     "ExternalSourceSetting",
     "ExternalSourceSettings",
     "InitialActivation",
+    "MAX_APP_PAYLOAD_BYTES",
     "MAX_EXTERNAL_SETTINGS",
     "MAX_LIST_LIMIT",
     "MAX_TITLE_CHARS",
+    "MAX_UI_HTML_BYTES",
     "PREVIEW_CHARS",
     "PersistedStateBasis",
     "ProjectionResult",
@@ -720,11 +806,15 @@ __all__ = [
     "RunRecord",
     "RunStatus",
     "StateQuery",
+    "StoredAppView",
     "ToolCompletion",
     "ToolExecutionRecord",
     "ToolExecutionStatus",
     "ToolResultRecord",
     "TriggerRef",
+    "UiCsp",
+    "UiResource",
     "UserMessage",
     "WorkspaceState",
+    "ui_digest",
 ]
