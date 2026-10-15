@@ -18,14 +18,20 @@ budget's ``ceiling_tokens`` (the model's window less the room kept for its
 answer); an input estimated over it is never sent (REQUEST_REJECTED).
 
 Pause and cancel (V3-P55) come from the ``StopSignal`` of the job. A pause
-is checked at the safe boundaries — before each Run and before each Tool
-call starts — so the model call or Tool call under way finishes and is
-recorded; the drive ends PAUSED and never-started calls stay PENDING for
-``resume``. A cancel interrupts the model call or Tool call under way:
-an interrupted model call is recorded as OUTCOME_UNKNOWN and never resent
-(it may have been processed), an interrupted Tool call is settled by
+is checked at the safe boundaries — before each Run, each summarizing call
+and each Tool call starts — so the model call or Tool call under way
+finishes and is recorded; the drive ends PAUSED, never-started calls stay
+PENDING for ``resume``, and a compaction stopped between its calls commits
+nothing. A cancel interrupts the model call or Tool call under way: an
+interrupted model call is recorded as OUTCOME_UNKNOWN and never resent (it
+may have been processed), an interrupted Tool call is settled by
 ``cancel_group`` (never-started → CANCELLED, claimed → uncertain), and the
-drive ends CANCELLED.
+drive ends CANCELLED. A cancel is checked once more right before each
+commit of a model's output — its projection, a compaction snapshot — and
+before a group's result is returned: a response that arrived together with
+the cancel is kept as raw but never committed. A commit that passed that
+check is atomic (Data commits never yield) and completes; the cancel
+applies after it. Stop requests outrank the Run limit.
 """
 
 from __future__ import annotations
@@ -105,6 +111,10 @@ class _Cancelled(Exception):
     def __init__(self, run_id: RunId | None = None) -> None:
         super().__init__(CANCELLED_BY_USER)
         self.run_id = run_id
+
+
+class _Paused(Exception):
+    """A pause stopped a compaction between its calls (internal to the driver)."""
 
 
 class Driver:
@@ -188,6 +198,9 @@ class Driver:
             except _Cancelled:
                 return DriveResult(DriveState.CANCELLED, recovery=recovery, compaction_run_ids=tuple(compactions),
                                    detail="cancelled while summarizing; nothing was committed")
+            except _Paused:
+                return DriveResult(DriveState.PAUSED, recovery=recovery, compaction_run_ids=tuple(compactions),
+                                   detail="paused between summarizing calls; nothing was committed")
             return DriveResult(
                 DriveState.COMPACTION_FAILED if failure is not None else DriveState.COMPACTED,
                 recovery=recovery, detail=failure or "", compaction_run_ids=tuple(compactions),
@@ -410,11 +423,14 @@ class Driver:
         or BLOCKED_UNKNOWN: the next boundary sees the cancel)."""
         signal = self._stop(scope)
         try:
-            return await self._interruptible(
+            group = await self._interruptible(
                 scope, lambda: self._dispatcher.dispatch_group(scope, run_id, payload.calls,
                                                                pause=lambda: signal.pause_requested))
         except _Cancelled:
             return await self._dispatcher.cancel_group(scope, run_id, CANCELLED_RESULT)
+        if signal.cancel_requested:  # arrived as the group stopped (e.g. PAUSED): close what did not start
+            return await self._dispatcher.cancel_group(scope, run_id, CANCELLED_RESULT)
+        return group
 
     @staticmethod
     def _group_stop(group: GroupDispatchResult, build: Callable[..., DriveResult]) -> DriveResult:
@@ -476,6 +492,8 @@ class Driver:
                 return result(state, detail=str(exc))
             except _Cancelled:
                 return result(DriveState.CANCELLED, detail="cancelled while summarizing; nothing was committed")
+            except _Paused:
+                return result(DriveState.PAUSED, detail="paused between summarizing calls; nothing was committed")
             if refusal is not None:
                 return result(DriveState.REQUEST_REJECTED, detail=refusal)
             if (stopped := boundary()) is not None:  # e.g. paused while compacting
@@ -509,6 +527,10 @@ class Driver:
             except Exception as exc:  # noqa: BLE001 — adapter error after send began
                 outcome = NativeUncertain(type(exc).__name__)
             await self._log.record_raw_outcome(scope, run_id, _raw(outcome))
+            if isinstance(outcome, NativeReceived) and signal.cancel_requested:
+                # Arrived together with the cancel: the raw response is kept, nothing enters history.
+                await self._log.record_projection_failure(scope, run_id, CANCELLED_BY_USER)
+                return result(DriveState.CANCELLED, detail="cancelled as the answer arrived; it was not used")
             if isinstance(outcome, NativeNoResponse):
                 return result(DriveState.PROVIDER_FAILED, detail=outcome.error_code)
             if isinstance(outcome, NativeUncertain):
@@ -528,6 +550,8 @@ class Driver:
                 return self._group_stop(group, result)
             triggers = (CompletedGroupRef(run_id),)
 
+        if (stopped := boundary()) is not None:  # a stop asked during the last step outranks the limit
+            return stopped
         return result(DriveState.RUN_LIMIT_REACHED)
 
     async def _fit_budget(
@@ -576,7 +600,12 @@ class Driver:
         committed. Returns a failure, or None on success."""
         summary = plan.previous_summary
         last = len(plan.pieces) - 1
+        signal = self._stop(scope)
         for index in range(len(plan.pieces)):
+            if signal.cancel_requested:
+                raise _Cancelled()
+            if signal.pause_requested:  # the call under way finished; the next one does not start
+                raise _Paused()
             request = planner.step_request(plan, index, summary)
             size = planner.request_size(request)  # measured here, not taken from the planner
             if size > budget.limit_tokens:
@@ -595,6 +624,9 @@ class Driver:
                 await self._log.record_compaction_step(scope, run_id)
                 summary = text
                 continue
+            if signal.cancel_requested:  # the last check before the atomic commit
+                await self._log.record_projection_failure(scope, run_id, CANCELLED_BY_USER)
+                raise _Cancelled()
             try:
                 await self._log.commit_compaction(
                     scope,
