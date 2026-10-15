@@ -35,7 +35,7 @@ Composition Root (구현 조립/의존성 주입 + 플러그인 등록)
    ├── Tool         → ToolHandler SPI 소유, Dispatcher → Data.ConversationLog(+ArtifactStore) 커밋
    │                  Scheduler → verified resource conflict metadata, never command-string equality alone
    ├── Internal Tools (memory/plan/note) → Tool SPI, Data.ArtifactStore 읽기
-   ├── External Tool 커넥터 (예: MCP, `tool/mcp/`) → Tool SPI(구현해서 제공), 외부 서버
+   ├── External Tool 커넥터 (예: MCP, `mcp/`, V3-P57) → Tool SPI(구현해서 제공), 외부 서버
    │                  노출·실행 권한은 Tool의 `ExternalAccess` 포트(V3-P53) → Data.ExternalSourceSettings
    ├── Environment  → Tool SPI(구현해서 제공), Data.WorkspaceState
    ├── Provider     → provider-specific SDK/adapter
@@ -98,6 +98,7 @@ src/himari/
         internal/            # memory/plan/note ToolHandler (플러그인)
     environment/    api.py   # EnvironmentPlugin SPI
         inside/              # Inside 구현 + run_command/파일 ToolHandler + sandbox (플러그인)
+    mcp/                     # MCP 커넥터: External ToolHandler (플러그인, tool.api만 사용, V3-P57)
     # workspace/ 전용 패키지 없음: Data.WorkspaceState + EnvironmentPlugin 사용
     # contracts/ 공용 패키지 없음: 각 Owner의 api.py
     bootstrap/               # Composition Root

@@ -61,6 +61,7 @@ tests/
   provider/            # Provider module tests + adapter conformance
   tool/                # Tool module tests
   environment/         # Environment module tests, fake protected backend
+  mcp/                 # MCP connector tests (fake MCP server: tests/mcp_fake.py)
   integration/         # cross-module composition, used during full pytest
 ~~~
 

@@ -115,6 +115,16 @@ class ToolContext(DeepFrozen):
     workspace: ConversationWorkspace | None = None
 
 
+class SchemaError(ValueError):
+    """A Tool input schema HIMARI refuses to register (V3-P52)."""
+
+
+# Checks a Tool input schema the way the Registry will (V3-P52); raises
+# SchemaError. Given to a connector (e.g. MCP) by the composition root, so it
+# can leave out one Tool whose schema would be refused, before registering.
+InputSchemaCheck = Callable[[Mapping[str, JsonValue]], None]
+
+
 class ToolStatus(Enum):
     SUCCEEDED = "succeeded"
     FAILED = "failed"

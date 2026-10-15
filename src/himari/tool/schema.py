@@ -49,6 +49,7 @@ from referencing.exceptions import Unresolvable
 from referencing.jsonschema import specification_with
 
 from himari.common import JsonValue, thaw
+from himari.tool.api import SchemaError
 
 if TYPE_CHECKING:
     from referencing._core import Resolver  # the type of Registry().resolver_with_root(...)
@@ -74,10 +75,6 @@ _ONE = ("additionalProperties", "items", "additionalItems", "contains", "propert
         "not", "unevaluatedItems", "unevaluatedProperties", "contentSchema")
 _MANY = ("allOf", "anyOf", "oneOf", "prefixItems", "items")  # items: draft-07's array form
 _NAMED = ("properties", "patternProperties", "$defs", "definitions", "dependentSchemas", "dependencies")
-
-
-class SchemaError(ValueError):
-    pass
 
 
 def _validator_class(schema: Mapping[str, Any]) -> type[Validator]:

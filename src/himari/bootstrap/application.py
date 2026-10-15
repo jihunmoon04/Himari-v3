@@ -37,11 +37,12 @@ from himari.data.api import InitialActivation
 from himari.data.sqlite import SqliteData, SqliteStore
 from himari.environment.inside import INSIDE, InsideEnvironment
 from himari.environment.inside.sandbox import SandboxBackend, SandboxState
+from himari.mcp.config import CONFIG_NAME, load_config
+from himari.mcp.tools import McpConnection, SourceStatus, connect
 from himari.prompt.api import ContextBudget
 from himari.provider.api import ProviderAdapter
 from himari.tool.api import ToolHandler
-from himari.tool.mcp.config import CONFIG_NAME, load_config
-from himari.tool.mcp.tools import McpConnection, SourceStatus, connect
+from himari.tool.schema import check_tool_input_schema
 
 DATABASE_NAME = "himari.db"
 # Default request budget: the model's window, capped so that a long
@@ -155,7 +156,7 @@ class Application:
         store = SqliteStore(root / DATABASE_NAME)  # first: a second server on this root fails here
         mcp: McpConnection | None = None
         try:
-            mcp = await connect(mcp_config, transport=mcp_transport)
+            mcp = await connect(mcp_config, check_schema=check_tool_input_schema, transport=mcp_transport)
             backend: SandboxBackend | None = None
             state = SandboxState.UNAVAILABLE
             if sandbox:

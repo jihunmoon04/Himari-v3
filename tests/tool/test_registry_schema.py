@@ -10,7 +10,7 @@ from jsonschema import Draft202012Validator
 from testkit import FAKE, RecordingTool
 
 from himari.common import JsonValue, deep_freeze
-from himari.tool.api import Completion, ToolOrigin, WorkspaceRequirement
+from himari.tool.api import Completion, SchemaError, ToolOrigin, WorkspaceRequirement
 from himari.tool.registry import ToolRegistry
 from himari.common import MAX_TOOL_NAME_CHARS
 from himari.tool.schema import (
@@ -18,7 +18,6 @@ from himari.tool.schema import (
     MAX_SCHEMA_DEPTH,
     MAX_SCHEMA_NODES,
     MAX_VIOLATIONS,
-    SchemaError,
     check_schema,
     validate,
     validate_isolated,

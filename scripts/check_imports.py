@@ -26,6 +26,7 @@ LAYERS = {
     "data": 1,
     "tool": 2,
     "environment": 3,
+    "mcp": 3,  # a connector plugin: provides Tools through tool.api only, like an Environment
     "prompt": 4,
     "provider": 5,
     "control": 6,
