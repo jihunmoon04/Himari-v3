@@ -147,8 +147,12 @@ class Printer:
         elif kind == "tool_result":
             key = (str(event.get("run_id")), str(event.get("call_id")))
             called = self.calls.get(key)
-            if called == "ask_user" or key in self.answered:
+            if key in self.answered:
                 return  # the answer was already shown as the user's message
+            if called == "ask_user":
+                if event.get("is_error"):  # closed without an answer (dismissed, or its turn cancelled)
+                    self.line("  (question closed without an answer)")
+                return
             mark = self.symbols.failed if event.get("is_error") else self.symbols.ok
             self.line(f"  {self.symbols.result} {safe_line(called or 'tool', encoding=self.encoding)} {mark}")
             self.line(safe_block(text, encoding=self.encoding, max_lines=None if self.verbose else TOOL_RESULT_LINES))
@@ -222,21 +226,23 @@ class Session:
 
     def report(self, detail: dict[str, Any]) -> int:
         job = detail["job"]
+        why = job.get("detail")  # the job's own reason, e.g. the size that was refused
         if detail.get("waiting"):
-            self.note("(waiting for your answer)")
+            asked = f": {why}" if why and job.get("state") == "waiting_for_user" else ""
+            self.note(f"(waiting for your answer{asked})")
             return EXIT_WAITING
         if job.get("error"):
             self.note(f"(the run failed: {ERROR_TEXT.get(job['error'], job['error'])})")
             return EXIT_FAILED
         state = job.get("state")
-        if state in DONE_TEXT:
-            self.note(f"({DONE_TEXT[state]})")  # the job's own result; the conversation's state follows
+        if state in DONE_TEXT:  # the job's own result; the conversation's state follows
+            self.note(f"({DONE_TEXT[state]}{f': {why}' if why and state == 'nothing_to_compact' else ''})")
         if detail.get("continuable") and state in (None, "completed", *DONE_TEXT):
             # Compacting (or finding nothing to compact) answers nothing.
             self.note("(not answered yet — use `continue`)")
             return EXIT_FAILED
         if state not in (None, "completed", "idle", *DONE_TEXT):
-            self.note(f"({STATE_TEXT.get(state, state)})")
+            self.note(f"({STATE_TEXT.get(state, state)}{f': {why}' if why else ''})")
             return EXIT_FAILED
         return EXIT_OK
 
@@ -394,6 +400,28 @@ def cmd_tools(session: Session, args: argparse.Namespace) -> int:
     return tools_command(session, args.id, [w for w in (args.choice, args.source) if w is not None])
 
 
+SANDBOX_TEXT = {
+    "enforced": "ready",
+    "capable_inactive": "off (sandbox disabled)",
+    "unavailable": "unavailable on this host",
+    "setup_failed": "unavailable (sandbox setup failed)",
+}
+
+
+def cmd_status(session: Session, args: argparse.Namespace) -> int:
+    server = session.client.get("/api/server")
+    sandbox = str(server.get("sandbox"))
+    for line in (f"model: {server.get('model')}", f"commands: {SANDBOX_TEXT.get(sandbox, sandbox)}",
+                 f"context budget: {server.get('context_budget'):,} tokens"):
+        session.printer.line(safe_line(line, encoding=session.printer.encoding))
+    return EXIT_OK
+
+
+def cmd_rename(session: Session, args: argparse.Namespace) -> int:
+    session.client.patch(_path(args.id), {"title": args.title or None})  # no title: back to the default name
+    return EXIT_OK
+
+
 def cmd_pause(session: Session, args: argparse.Namespace) -> int:
     return session.stop(args.id, "pause")
 
@@ -518,12 +546,17 @@ def parser() -> argparse.ArgumentParser:
     pause.add_argument("id")
     cancel = sub.add_parser("cancel", help="stop now; when idle, close an open question or a paused turn's steps")
     cancel.add_argument("id")
+    rename = sub.add_parser("rename", help="rename a conversation (no title: the default name)")
+    rename.add_argument("id")
+    rename.add_argument("title", nargs="?")
+    sub.add_parser("status", help="the server's model, whether commands can run, and the context budget")
     return p
 
 
 COMMANDS: dict[str, Callable[[Session, argparse.Namespace], int]] = {
     "chat": cmd_chat, "list": cmd_list, "show": cmd_show, "new": cmd_new, "send": cmd_send, "continue": cmd_continue,
     "compact": cmd_compact, "tools": cmd_tools, "pause": cmd_pause, "cancel": cmd_cancel,
+    "status": cmd_status, "rename": cmd_rename,
 }
 
 

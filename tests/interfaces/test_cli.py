@@ -491,13 +491,13 @@ def test_compact_now_from_the_cli(harness: Harness) -> None:
     session = cli.Session(harness.client(), cli.Printer(out_buffer), err_buffer, sleep=lambda s: None)
     lines = iter(["/compact", "q3", "/compact", "/exit"])  # only the latest answer is left at first
     assert cli.cmd_chat(session, cli.parser().parse_args(["chat", cid]), read=lambda prompt: next(lines)) == 0
-    assert "(nothing to compact yet)" in err_buffer.getvalue() and "compacted 2 times" in err_buffer.getvalue()
+    assert "(nothing to compact yet" in err_buffer.getvalue() and "compacted 2 times" in err_buffer.getvalue()
 
 
 def test_compact_with_nothing_to_compact(harness: Harness) -> None:
     cid = harness.run("new")[1].strip()
     code, _, err = harness.run("compact", cid)
-    assert code == 0 and "(nothing to compact yet)" in err
+    assert code == 0 and "(nothing to compact yet: " in err
 
 
 @pytest.mark.parametrize("answers", [["a1", "a2", "S"], []])
@@ -513,7 +513,7 @@ def test_an_unanswered_message_stays_visible_after_compacting(harness: Harness, 
     harness.test_client.portal.call(app.runtime.driver.accept, TrustedScope(OPERATOR, ConversationId(cid)),
                                     UserMessage((TextBlock("unanswered"),)))
     code, _, err = harness.run("compact", cid)
-    expected = "(compacted: earlier messages" if answers else "(nothing to compact yet)"
+    expected = "(compacted: earlier messages" if answers else "(nothing to compact yet"
     assert expected in err and "not answered yet" in err and code == cli.EXIT_FAILED
     detail = harness.client().get(f"/api/conversations/{cid}")
     assert detail["continuable"] is True and detail["job"]["state"] in ("compacted", "nothing_to_compact")
@@ -617,3 +617,47 @@ def test_cancel_closes_an_open_question_and_pause_with_nothing_running(harness: 
     assert code == cli.EXIT_OK, err
     code, _, err = harness.run("cancel", cid)
     assert code == cli.EXIT_OK and "nothing was running or waiting" in err
+
+
+def test_status_rename_and_a_closed_question_in_the_history(harness: Harness) -> None:
+    code, out, _ = harness.run("status")
+    assert code == cli.EXIT_OK
+    assert out.splitlines() == ["model: m", "commands: unavailable on this host", "context budget: 128,000 tokens"]
+    cid = harness.run("new")[1].strip()
+    assert harness.run("rename", cid, "Trip plans")[0] == cli.EXIT_OK
+    assert "Trip plans" in harness.run("list")[1]
+    assert harness.run("rename", cid)[0] == cli.EXIT_OK  # back to the default name
+    assert "Trip plans" not in harness.run("list")[1]
+
+    harness.queue(calls(("ask_user", {"question": "Which file?"})))
+    harness.run("send", cid, "edit my file")
+    harness.run("cancel", cid)
+    code, out, _ = harness.run("show", cid)
+    assert out.splitlines()[-1] == "  (question closed without an answer)"
+
+
+def test_a_refusal_says_why(harness: Harness) -> None:
+    cid = harness.run("new")[1].strip()
+    assert harness.application is not None
+
+    class Refusing(Gated):
+        async def resume(self, scope: TrustedScope, *, stop: StopSignal | None = None) -> DriveResult:
+            return DriveResult(DriveState.REQUEST_REJECTED, detail="context_budget_exceeded: about 950 tokens > 900")
+
+    harness.application.runner = BackgroundRunner(Refusing())
+    code, _, err = harness.run("send", cid, "hello")
+    assert code == cli.EXIT_FAILED
+    assert "(the request was refused before sending: context_budget_exceeded: about 950 tokens > 900)" in err
+
+
+def test_compacting_with_an_open_question_says_why(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # PR #24 review C1: the reason of WAITING_FOR_USER / NOTHING_TO_COMPACT is shown too.
+    monkeypatch.setattr(cli, "POLL_SECONDS", 0.01)
+    harness = Harness(tmp_path, context_tokens=2000)
+    with harness.test_client:
+        cid = harness.run("new")[1].strip()
+        harness.queue(calls(("ask_user", {"question": "Which file?"})))
+        harness.run("send", cid, "edit my file")
+        code, _, err = harness.run("compact", cid)
+        assert code == cli.EXIT_WAITING
+        assert "(waiting for your answer: answer the question before compacting)" in err

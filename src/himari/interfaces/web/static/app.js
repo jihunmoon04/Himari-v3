@@ -123,6 +123,7 @@ function showLogin() {
   app.generation += 1;
   showSurface("login");
   $("topbar-title").textContent = "HIMARI";
+  $("server-info").hidden = true;
   $("login-token").value = "";
   $("login-token").focus();
 }
@@ -284,7 +285,12 @@ function renderEvent(event) {
   }
   if (event.kind === "tool_result") {
     const entry = app.toolRows.get(`${event.run_id}/${event.call_id}`);
-    if (entry === null) return; // ask_user answer
+    if (entry === null) {
+      // An ask_user answer is shown as the user's message; a question closed
+      // without one (dismissed, or its turn cancelled) gets a note.
+      if (event.is_error) timeline.append(el("div", "item item-note", "Question closed without an answer"));
+      return;
+    }
     if (entry === undefined) {
       const orphan = { node: el("div"), details: el("details", "tool-row-details"), toolId: "tool",
                        args: {}, result: event };
@@ -381,8 +387,8 @@ function renderToolSources(sources) {
     const label = el("label", "chat-menu-tool-name", source.source);
     label.htmlFor = id;
     const meta = el("span", "chat-menu-tool-meta", toolSourceMeta(source));
-    if (source.problems.length) meta.title = source.problems.join("\n");
     label.append(meta);
+    for (const problem of source.problems) label.append(el("span", "chat-menu-tool-problem", problem));
     row.append(box, label);
     if (source.choice !== null) {
       const reset = el("button", "link-button", "Use default");
@@ -440,7 +446,12 @@ function describe(detail) {
     const text = job.stop_requested === "cancel" ? "Stopping…" : job.stop_requested === "pause" ? "Pausing…" : "Working…";
     return { text, tone: null, active: true };
   }
-  if (detail.waiting) return { text: STATE_TEXT.waiting_for_user, tone: "warn", active: false };
+  if (detail.waiting) {
+    // e.g. "answer the question before compacting" when Compact now met an open question
+    const why = job.state === "waiting_for_user" && job.detail ? ` (${job.detail})` : "";
+    return { text: `${STATE_TEXT.waiting_for_user}${why}`, short: STATE_TEXT.waiting_for_user, tone: "warn",
+             active: false };
+  }
   // Compacting (or finding nothing to compact) answers nothing: an unanswered
   // message still wins, with the compaction result in front of it.
   const compacted = job.state === "compacted" || job.state === "nothing_to_compact";
@@ -451,10 +462,13 @@ function describe(detail) {
   }
   if (job.error) return { text: ERROR_TEXT[job.error] || `The run failed (${job.error}).`, tone: "error", active: false };
   if (job.state === "compacted" || job.state === "nothing_to_compact") {
-    return { text: STATE_TEXT[job.state], tone: "ok", active: false };
+    const why = job.state === "nothing_to_compact" && job.detail ? ` (${job.detail})` : "";
+    return { text: `${STATE_TEXT[job.state]}${why}`, short: STATE_TEXT[job.state], tone: "ok", active: false };
   }
   if (job.state && job.state !== "completed" && job.state !== "idle") {
-    return { text: STATE_TEXT[job.state] || job.state, tone: "warn", active: false };
+    const base = STATE_TEXT[job.state] || job.state;
+    // The detail says why (e.g. the size that was refused); shown as plain text.
+    return { text: job.detail ? `${base} (${job.detail})` : base, short: base, tone: "warn", active: false };
   }
   return { text: job.state ? STATE_TEXT[job.state] : "", tone: null, active: false };
 }
@@ -506,6 +520,7 @@ function poll(generation) {
       else if (detail) {
         loadList(true).then(markSelected).catch(() => {});
         loadContext(generation);
+        loadServerInfo(); // a command may have found the sandbox broken
       }
     } catch (error) {
       if (generation === app.generation && error.status !== 401) {
@@ -522,6 +537,7 @@ async function openConversation(id) {
   const generation = app.generation;
   app.conversationId = id;
   app.lastSequence = 0;
+  loadServerInfo();
   app.toolRows = new Map();
   app.context = null;
   $("chat-menu-context-pair").hidden = true;
@@ -668,7 +684,27 @@ function autosize() {
   box.style.height = `${Math.min(box.scrollHeight, 240)}px`;
 }
 
+const SANDBOX_TEXT = {
+  enforced: "commands ready",
+  capable_inactive: "commands off (sandbox disabled)",
+  unavailable: "commands unavailable on this host",
+  setup_failed: "commands unavailable (sandbox setup failed)",
+};
+
+async function loadServerInfo() {
+  const info = $("server-info");
+  try {
+    const server = await api("GET", "/api/server");
+    info.textContent = `${server.model} · ${SANDBOX_TEXT[server.sandbox] || server.sandbox}`;
+    info.classList.toggle("is-warn", server.sandbox !== "enforced");
+    info.hidden = false;
+  } catch (error) {
+    info.hidden = true; // display only
+  }
+}
+
 async function enter() {
+  loadServerInfo();
   await showHome();
 }
 

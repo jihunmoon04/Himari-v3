@@ -629,6 +629,11 @@ textarea {
   right: var(--topbar-gutter);
   z-index: 28;
   width: min(88vw, 320px);
+  /* Long content (e.g. several MCP problems) scrolls inside the menu so the
+     actions at its bottom stay reachable; the page itself never scrolls. */
+  max-height: calc(100dvh - 72px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
   padding: var(--space-3);
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-md);
@@ -720,6 +725,32 @@ textarea {
   display: block;
   color: var(--text-muted);
   font-size: 11px;
+}
+
+.chat-menu-tool-problem {
+  display: block;
+  color: var(--warn);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.server-info {
+  margin: 0 0 var(--space-1);
+  padding: 0 var(--space-3);
+  color: var(--text-muted);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.server-info.is-warn {
+  color: var(--warn);
+}
+
+.item-note {
+  color: var(--text-muted);
+  font-size: 12px;
+  font-style: italic;
+  padding: 0 var(--space-1);
 }
 
 .chat-menu-tool .link-button {

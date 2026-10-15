@@ -22,6 +22,7 @@ from testkit import calls, final  # noqa: E402
 from himari.bootstrap.application import Application  # noqa: E402
 from himari.bootstrap.operator import OPERATOR, derive_cli_bearer  # noqa: E402
 from himari.common import ASK_USER_TOOL_ID, ConversationId, PrincipalId, TextBlock, TrustedScope  # noqa: E402
+from himari.environment.inside.sandbox import SandboxState  # noqa: E402
 from himari.control.api import DriveResult, DriveState, StopSignal  # noqa: E402
 from himari.control.runner import BackgroundRunner  # noqa: E402
 from himari.data.api import UserMessage  # noqa: E402
@@ -210,6 +211,32 @@ def test_sign_in_cookie_and_sign_out(server: Server) -> None:
     assert server.client.get("/api/conversations").status_code == 200
     assert server.client.delete("/api/session", headers={"origin": ORIGIN}).status_code == 204
     assert server.client.get("/api/conversations").status_code == 401
+
+
+def test_the_server_info_is_for_the_signed_in_operator(server: Server) -> None:
+    assert server.client.get("/api/server").status_code == 401
+    server.sign_in()
+    info = server.client.get("/api/server").json()
+    assert info == {"model": "scripted-model", "sandbox": "unavailable", "context_budget": 128_000}
+
+
+def test_the_server_info_follows_a_sandbox_that_broke_after_startup(server: Server) -> None:
+    # PR #24 review B1: a setup failure while running a command latches
+    # SETUP_FAILED in the backend; the startup value must not be shown instead.
+    server.sign_in()
+    application = server.application
+    assert application is not None
+
+    class Backend:
+        state = SandboxState.ENFORCED
+
+    backend = Backend()
+    application.inside.sandbox = backend  # type: ignore[assignment]
+    assert server.client.get("/api/server").json()["sandbox"] == "enforced"
+    backend.state = SandboxState.SETUP_FAILED
+    assert server.client.get("/api/server").json()["sandbox"] == "setup_failed"
+    assert server.client.get("/api/session").json()["sandbox"] == "setup_failed"
+    assert application.sandbox_state is SandboxState.UNAVAILABLE  # the startup value is kept as such
 
 
 def test_cookie_mutations_need_an_allowed_origin(server: Server) -> None:
@@ -520,3 +547,28 @@ def test_without_mcp_json_there_are_no_tool_sources(server: Server) -> None:
     cid = server.post("/api/conversations").json()["id"]
     assert server.client.get(f"/api/conversations/{cid}/tools").json() == {"sources": []}
     assert put_source(server, cid, "calliope", True).status_code == 404
+
+
+class RefusingDriver(GatedDriver):
+    """Ends every job with a refusal that says why."""
+
+    def __init__(self, detail: str) -> None:
+        super().__init__()
+        self.detail = detail
+
+    async def resume(self, scope: TrustedScope, *, stop: StopSignal | None = None) -> DriveResult:
+        return DriveResult(DriveState.REQUEST_REJECTED, detail=self.detail)
+
+
+def test_a_finished_job_says_why_as_bounded_text(server: Server) -> None:
+    server.sign_in()
+    cid = server.post("/api/conversations").json()["id"]
+    assert server.application is not None
+    server.application.runner = BackgroundRunner(RefusingDriver("context_budget_exceeded: about 950 tokens > 900"))
+    server.post(f"/api/conversations/{cid}/messages", {"text": "one"})
+    job = server.wait_idle(cid)["job"]
+    assert job["state"] == "request_rejected" and job["detail"] == "context_budget_exceeded: about 950 tokens > 900"
+    server.application.runner = BackgroundRunner(RefusingDriver("<b>" + "x" * 900))
+    server.post(f"/api/conversations/{cid}/resume")
+    detail = server.wait_idle(cid)["job"]["detail"]
+    assert len(detail) == web.MAX_DETAIL_CHARS and detail.endswith("…")  # bounded; the page renders it as text

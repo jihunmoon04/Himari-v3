@@ -185,12 +185,19 @@ def event_view(event: ConversationEvent) -> dict[str, Any]:
     return view
 
 
+MAX_DETAIL_CHARS = 500  # a job's result detail, as shown to its owner
+
+
 def job_view(status: JobStatus) -> dict[str, Any]:
     result = status.result
+    detail = None if result is None or not result.detail else result.detail
+    if detail is not None and len(detail) > MAX_DETAIL_CHARS:
+        detail = detail[: MAX_DETAIL_CHARS - 1] + "…"
     return {
         "running": status.running,
         "generation": status.generation,
         "state": None if result is None else result.state.value,
+        "detail": detail,  # why it ended so (e.g. the size that was refused); plain text
         "unknown_calls": 0 if result is None else len(result.unknown_calls),
         "compactions": 0 if result is None else len(result.compaction_run_ids),
         "error": status.error,
@@ -315,7 +322,14 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
         application = himari(request)
         signed_in = sessions.principal(request.cookies.get(SESSION_COOKIE)) is not None
         return {"authenticated": signed_in, "model": application.model_id if signed_in else None,
-                "sandbox": application.sandbox_state.value if signed_in else None}
+                "sandbox": application.current_sandbox_state.value if signed_in else None}
+
+    @app.get("/api/server")
+    async def read_server(request: Request, who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+        """What this server runs with: the model, whether commands can run, the budget."""
+        application = himari(request)
+        return {"model": application.model_id, "sandbox": application.current_sandbox_state.value,
+                "context_budget": application.context_tokens}
 
     @app.post("/api/session", status_code=204)
     async def sign_in(body: LoginBody, request: Request, response: Response) -> None:
