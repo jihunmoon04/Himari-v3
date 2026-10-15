@@ -32,11 +32,14 @@ P0 scheduling is sequential in original ordinal order; parallel scheduling
   call that passed it has started and is not stopped by a later change
   (as with any Tool already running).
 - ``ask_user`` (suspending) is never run; it stays PENDING.
+- Pause and cancel (V3-P55): ``pause`` stops the group before the next
+  call starts (PAUSED); ``cancel_group`` closes never-started calls with a
+  CANCELLED result and settles claimed ones as uncertain.
 """
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 
 from himari.common import (
     BindingId,
@@ -135,20 +138,49 @@ class Dispatcher:
         self._external_access = external_access if external_access is not None else NoExternalAccess()
 
     async def dispatch_group(
-        self, scope: TrustedScope, run_id: RunId, calls: Sequence[ToolCall]
+        self,
+        scope: TrustedScope,
+        run_id: RunId,
+        calls: Sequence[ToolCall],
+        *,
+        pause: Callable[[], bool] | None = None,
     ) -> GroupDispatchResult:
         count = len(await self._log.read_tool_executions(scope, run_id))
+        paused = False
         for index in range(count):
             # Re-read each step: the authoritative state, in original ordinal order.
             records = await self._log.read_tool_executions(scope, run_id)
             await self._report_reportable(scope, records)
             if any(_blocks(r) for r in records):
                 break  # REQUIRE_USER uncertainty: no further effects in this group
-            if records[index].status is ToolExecutionStatus.PENDING:
-                await self._run_one(scope, records[index])
+            record = records[index]
+            if record.status is not ToolExecutionStatus.PENDING:
+                continue
+            if pause is not None and not self._suspending(record) and pause():
+                paused = True  # nothing more starts; the rest stays PENDING for resume
+                break
+            await self._run_one(scope, record)
+        records = await self._log.read_tool_executions(scope, run_id)
+        await self._report_reportable(scope, records)
+        state = self._group_state(run_id, await self._log.read_tool_executions(scope, run_id))
+        if paused and state.state is not GroupState.BLOCKED_UNKNOWN:
+            return GroupDispatchResult(run_id, GroupState.PAUSED)
+        return state
+
+    async def cancel_group(self, scope: TrustedScope, run_id: RunId, reason: str) -> GroupDispatchResult:
+        result = ModelToolResult((TextBlock(reason),), is_error=True)
+        for record in await self._log.read_tool_executions(scope, run_id):
+            if record.status is ToolExecutionStatus.PENDING:
+                handler = self._registry.get(record.tool_id)
+                record_event = handler is None or handler.definition.conversation_record is ConversationRecord.FULL
+                await self._commit(scope, record.call, ToolOutcome(ToolStatus.CANCELLED, result), record_event)
         records = await self._log.read_tool_executions(scope, run_id)
         await self._report_reportable(scope, records)
         return self._group_state(run_id, await self._log.read_tool_executions(scope, run_id))
+
+    def _suspending(self, record: ToolExecutionRecord) -> bool:
+        handler = self._registry.get(record.tool_id)
+        return handler is not None and handler.definition.completion is Completion.SUSPENDING
 
     async def _report_reportable(self, scope: TrustedScope, records: Sequence[ToolExecutionRecord]) -> None:
         for record in records:

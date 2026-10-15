@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import io
 import json
 import os
@@ -28,7 +29,7 @@ from testkit import calls, final  # noqa: E402
 from himari.bootstrap.application import Application  # noqa: E402
 from himari.bootstrap.operator import OPERATOR, derive_cli_bearer  # noqa: E402
 from himari.common import ASK_USER_TOOL_ID, ConversationId, TextBlock, TrustedScope  # noqa: E402
-from himari.control.api import DriveResult, DriveState  # noqa: E402
+from himari.control.api import DriveResult, DriveState, StopSignal  # noqa: E402
 from himari.control.runner import BackgroundRunner  # noqa: E402
 from himari.data.api import UserMessage  # noqa: E402
 from himari.interfaces.cli import main as cli  # noqa: E402
@@ -181,20 +182,23 @@ class Gated:
     def __init__(self) -> None:
         self.release = threading.Event()
 
-    async def drive(self, scope: TrustedScope, message: UserMessage) -> DriveResult:
+    async def drive(self, scope: TrustedScope, message: UserMessage, *, stop: StopSignal | None = None) -> DriveResult:
         raise AssertionError
 
     async def accept(self, scope: TrustedScope, message: UserMessage) -> None:
         pass
 
-    async def resume(self, scope: TrustedScope) -> DriveResult:
+    async def resume(self, scope: TrustedScope, *, stop: StopSignal | None = None) -> DriveResult:
         import asyncio
 
         await asyncio.to_thread(self.release.wait, 10)
         return DriveResult(DriveState.COMPLETED)
 
-    async def compact(self, scope: TrustedScope) -> DriveResult:
+    async def compact(self, scope: TrustedScope, *, stop: StopSignal | None = None) -> DriveResult:
         return await self.resume(scope)
+
+    async def cancel(self, scope: TrustedScope) -> DriveResult:
+        return DriveResult(DriveState.IDLE)
 
 
 def test_busy_and_foreign_conversations_are_refused(harness: Harness) -> None:
@@ -549,3 +553,67 @@ def test_tool_sources_from_the_cli(tmp_path: Path, monkeypatch: pytest.MonkeyPat
         shown = out_buffer.getvalue().splitlines()
         assert shown[0] == "calliope: on (default; default on) — 1 tool"  # same as the default: not kept
         assert "usage: /tools" in err_buffer.getvalue()
+
+
+class StopsWhenCancelled:
+    """A running job that ends only when it is cancelled (V3-P55)."""
+
+    async def drive(self, scope: TrustedScope, message: UserMessage, *, stop: StopSignal | None = None) -> DriveResult:
+        raise AssertionError
+
+    async def accept(self, scope: TrustedScope, message: UserMessage) -> None:
+        pass
+
+    async def resume(self, scope: TrustedScope, *, stop: StopSignal | None = None) -> DriveResult:
+        assert stop is not None
+        await asyncio.wait_for(stop.cancelled(), 10)
+        return DriveResult(DriveState.CANCELLED)
+
+    async def compact(self, scope: TrustedScope, *, stop: StopSignal | None = None) -> DriveResult:
+        return await self.resume(scope, stop=stop)
+
+    async def cancel(self, scope: TrustedScope) -> DriveResult:
+        raise AssertionError("Ctrl-C only asks the running job to stop")
+
+
+def test_ctrl_c_stops_the_job_and_a_second_one_stops_following(harness: Harness) -> None:
+    cid = harness.run("new")[1].strip()
+    assert harness.application is not None
+    harness.application.runner = BackgroundRunner(StopsWhenCancelled())
+    presses = iter([KeyboardInterrupt()])
+
+    def sleep(seconds: float) -> None:
+        press = next(presses, None)
+        if press is not None:
+            raise press
+        time.sleep(0.01)
+
+    out, err = io.StringIO(), io.StringIO()
+    session = cli.Session(harness.client(), cli.Printer(out), err, sleep=sleep)
+    code, _ = session.submit_and_follow(cid, 0, "go")
+    assert code == cli.EXIT_FAILED  # the message stays unanswered
+    assert "(stopping — Ctrl-C again to stop following)" in err.getvalue() and "(stopped)" in err.getvalue()
+
+    slow = Gated()  # takes its time to stop
+    harness.application.runner = BackgroundRunner(slow)
+    presses = iter([KeyboardInterrupt(), KeyboardInterrupt()])
+    err = io.StringIO()
+    session = cli.Session(harness.client(), cli.Printer(io.StringIO()), err, sleep=sleep)
+    code, _ = session.submit_and_follow(cid, 0, "again")
+    assert code == cli.EXIT_FAILED and "stopped following" in err.getvalue()
+    slow.release.set()
+
+
+def test_cancel_closes_an_open_question_and_pause_with_nothing_running(harness: Harness) -> None:
+    cid = harness.run("new")[1].strip()
+    code, _, _ = harness.run("pause", cid)
+    assert code == cli.EXIT_OK
+    harness.queue(calls(("ask_user", {"question": "Which file?"})), final("A new topic, then."))
+    code, _, err = harness.run("send", cid, "edit my file")
+    assert code == cli.EXIT_WAITING
+    code, _, err = harness.run("cancel", cid)
+    assert code == cli.EXIT_OK and "(stopped)" in err
+    code, _, err = harness.run("send", cid, "something else")  # a new turn, not an answer
+    assert code == cli.EXIT_OK, err
+    code, _, err = harness.run("cancel", cid)
+    assert code == cli.EXIT_OK and "nothing was running or waiting" in err

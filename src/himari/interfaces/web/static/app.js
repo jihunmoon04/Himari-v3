@@ -32,6 +32,8 @@ const STATE_TEXT = {
   compacted: "Compacted: earlier messages now reach HIMARI as a summary",
   nothing_to_compact: "Nothing to compact yet",
   compaction_failed: "Compaction failed; nothing was changed",
+  paused: "Paused — choose Continue in the conversation menu to go on, or send a new message",
+  cancelled: "Stopped",
 };
 const ERROR_TEXT = {
   busy: "This conversation is still working.",
@@ -434,7 +436,10 @@ async function pullEvents(generation) {
 
 function describe(detail) {
   const job = detail.job;
-  if (job.running) return { text: "Working…", tone: null, active: true };
+  if (job.running) {
+    const text = job.stop_requested === "cancel" ? "Stopping…" : job.stop_requested === "pause" ? "Pausing…" : "Working…";
+    return { text, tone: null, active: true };
+  }
   if (detail.waiting) return { text: STATE_TEXT.waiting_for_user, tone: "warn", active: false };
   // Compacting (or finding nothing to compact) answers nothing: an unanswered
   // message still wins, with the compaction result in front of it.
@@ -470,6 +475,12 @@ function applyDetail(detail) {
   $("composer-hint").textContent = detail.job.running ? "HIMARI is working…" : "";
   $("chat-menu-resume").hidden = !detail.continuable;
   $("chat-menu-compact").disabled = detail.job.running;
+  $("chat-menu-dismiss").hidden = !detail.waiting || detail.job.running;
+  const stopping = detail.job.stop_requested;
+  $("composer-pause").hidden = !detail.job.running;
+  $("composer-pause").disabled = Boolean(stopping);
+  $("composer-cancel").hidden = !detail.job.running;
+  $("composer-cancel").disabled = stopping === "cancel";
 }
 
 async function refresh(generation) {
@@ -574,6 +585,23 @@ async function resumeConversation() {
   if (generation === app.generation) poll(generation);
 }
 
+async function stopConversation(action) {
+  if (app.conversationId === null) return;
+  const generation = app.generation;
+  try {
+    // pause: finish the current step, then stop; cancel: stop now; dismiss: close a waiting question
+    await api("POST", `/api/conversations/${encodeURIComponent(app.conversationId)}/${action}`);
+  } catch (error) {
+    status(error.message, "error");
+  }
+  if (generation === app.generation) poll(generation);
+}
+
+async function dismissQuestion() {
+  closeChatMenu();
+  await stopConversation("dismiss");
+}
+
 async function compactConversation() {
   closeChatMenu();
   if (app.conversationId === null) return;
@@ -663,6 +691,9 @@ async function boot() {
   $("chat-menu-rename").addEventListener("click", renameConversation);
   $("chat-menu-resume").addEventListener("click", resumeConversation);
   $("chat-menu-compact").addEventListener("click", compactConversation);
+  $("chat-menu-dismiss").addEventListener("click", dismissQuestion);
+  $("composer-pause").addEventListener("click", () => stopConversation("pause"));
+  $("composer-cancel").addEventListener("click", () => stopConversation("cancel"));
   $("sidebar-toggle").addEventListener("click", toggleNav);
   $("sidebar-close").addEventListener("click", closeNav);
   $("nav-backdrop").addEventListener("click", closeNav);

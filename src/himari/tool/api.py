@@ -17,7 +17,7 @@ V3-040~042, V3-044/045, V3-P13, V3-P17, V3-P19.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum
 from typing import Protocol, runtime_checkable
@@ -173,6 +173,7 @@ class GroupState(Enum):
     COMPLETED = "completed"  # every call has a model-facing result → next Run allowed
     WAITING_FOR_USER = "waiting_for_user"  # single ask_user left PENDING
     BLOCKED_UNKNOWN = "blocked_unknown"  # an uncertain call needs a user (REQUIRE_USER)
+    PAUSED = "paused"  # a pause stopped it before a call started; the rest stays PENDING (V3-P55)
 
 
 @dataclass(frozen=True)
@@ -187,11 +188,32 @@ class ToolDispatcher(Protocol):
     """TOOL-02/03: validates, schedules, claims, runs and commits a group."""
 
     async def dispatch_group(
-        self, scope: TrustedScope, run_id: RunId, calls: Sequence[ToolCall]
+        self,
+        scope: TrustedScope,
+        run_id: RunId,
+        calls: Sequence[ToolCall],
+        *,
+        pause: Callable[[], bool] | None = None,
     ) -> GroupDispatchResult:
         """Runs only never-claimed PENDING calls (so it is also the resume
         path, TOOL-04). Unknown tool / invalid arguments / binding failures
         become DENIED or FAILED results, not exceptions. Uncertain calls of
         REPORT_TO_MODEL Tools get an "outcome unknown" result instead of
-        being re-run (V3-047)."""
+        being re-run (V3-047).
+
+        ``pause`` is asked before each call starts; once it returns True no
+        further call starts and the group is PAUSED (V3-P55). A suspending
+        call (``ask_user``) is not paused: it waits for the user anyway.
+        Cancelled (asyncio) during a call, the call is left as it is —
+        PENDING if it was not claimed, claimed otherwise — for
+        ``cancel_group`` to settle."""
+        ...
+
+    async def cancel_group(self, scope: TrustedScope, run_id: RunId, reason: str) -> GroupDispatchResult:
+        """V3-P55: settle a group that will not be run further. Every
+        never-claimed PENDING call (a waiting ``ask_user`` included) gets a
+        CANCELLED result telling the model ``reason``; it never runs. Claimed
+        calls are uncertain and are treated as in ``dispatch_group``:
+        REPORT_TO_MODEL ones get "outcome unknown", REQUIRE_USER ones leave
+        the group BLOCKED_UNKNOWN. Otherwise the group is COMPLETED."""
         ...

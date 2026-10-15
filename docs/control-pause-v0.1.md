@@ -1,5 +1,7 @@
 # Control Pause/Resume & Run Continuity — v0.1
 
+> **2026-10-15 · P0 구현: [V3-P55](decisions.md).** 아래는 원래 초안이다. P0는 별도 `ConversationControlState`·cursor 없이 실행 중인 작업의 `StopSignal`(영속하지 않음)과 Data의 Run·Tool 기록으로 구현했다. Pause = §4의 권고(진행 중인 호출은 끝까지, 다음 단계 전에 정지), Cancel = 진행 중인 모델·Tool 호출을 끊음(모델 호출은 OUTCOME_UNKNOWN, 재전송 없음). 새 메시지는 남은 호출을 닫는다. 영속 상태·lease·RECOVERY 전이 세부는 여전히 P2.
+>
 > 2026-10-13 · **PROPOSED**, except prior Confirmed: `Run = exactly one LLM invocation`, `Conversation execution serial`, `raw Run/Tool data durable`, `tool-result group native replay`.
 >
 > 범위: 별도 Task/ManagerTurn 계층을 복원하지 않고 **Conversation의 Control 실행 흐름**이 Pause/Resume를 지원할 수 있는 최소 계약.

@@ -16,6 +16,16 @@ part too large for one request is summarized in a chain of calls. If
 compaction fails, the Run still goes ahead when its input fits the
 budget's ``ceiling_tokens`` (the model's window less the room kept for its
 answer); an input estimated over it is never sent (REQUEST_REJECTED).
+
+Pause and cancel (V3-P55) come from the ``StopSignal`` of the job. A pause
+is checked at the safe boundaries — before each Run and before each Tool
+call starts — so the model call or Tool call under way finishes and is
+recorded; the drive ends PAUSED and never-started calls stay PENDING for
+``resume``. A cancel interrupts the model call or Tool call under way:
+an interrupted model call is recorded as OUTCOME_UNKNOWN and never resent
+(it may have been processed), an interrupted Tool call is settled by
+``cancel_group`` (never-started → CANCELLED, claimed → uncertain), and the
+drive ends CANCELLED.
 """
 
 from __future__ import annotations
@@ -23,10 +33,17 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import dataclasses
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 
 from himari.common import ASK_USER_TOOL_ID, CallRef, ConversationId, RunId, TrustedScope
-from himari.control.api import ContextStatus, ControlError, ControlErrorCode, DriveResult, DriveState
+from himari.control.api import (
+    ContextStatus,
+    ControlError,
+    ControlErrorCode,
+    DriveResult,
+    DriveState,
+    StopSignal,
+)
 from himari.data.api import (
     AssistantFinal,
     DataError,
@@ -70,10 +87,24 @@ from himari.provider.api import (
     ProviderAdapter,
     ProviderError,
 )
-from himari.tool.api import GroupState, ToolDispatcher
+from himari.tool.api import GroupDispatchResult, GroupState, ToolDispatcher
 
 
 MAX_COMPACTIONS_PER_RUN = 4
+CANCELLED_BY_USER = "cancelled_by_user"  # the error code of a model call interrupted by a cancel
+
+# Model-facing results of calls that never ran (V3-P55).
+CANCELLED_RESULT = "Not run: the user cancelled before this call started."
+REDIRECTED_RESULT = "Not run: the user sent a new message before this call started."
+DISMISSED_RESULT = "The user dismissed this question without answering it."
+
+
+class _Cancelled(Exception):
+    """A cancel interrupted the step under way (internal to the driver)."""
+
+    def __init__(self, run_id: RunId | None = None) -> None:
+        super().__init__(CANCELLED_BY_USER)
+        self.run_id = run_id
 
 
 class Driver:
@@ -102,20 +133,38 @@ class Driver:
         self._planner = planner
         self._budget = budget
         self._locks: dict[ConversationId, asyncio.Lock] = {}
+        self._signals: dict[ConversationId, StopSignal] = {}  # of the drive holding the lock
 
-    async def drive(self, scope: TrustedScope, message: UserMessage) -> DriveResult:
-        async with self._exclusive(scope):
+    async def drive(self, scope: TrustedScope, message: UserMessage, *, stop: StopSignal | None = None) -> DriveResult:
+        async with self._exclusive(scope, stop):
             return await self._drive_locked(scope, message)
 
-    async def resume(self, scope: TrustedScope) -> DriveResult:
-        async with self._exclusive(scope):
+    async def resume(self, scope: TrustedScope, *, stop: StopSignal | None = None) -> DriveResult:
+        async with self._exclusive(scope, stop):
             return await self._resume_locked(scope)
 
-    async def compact(self, scope: TrustedScope) -> DriveResult:
+    async def cancel(self, scope: TrustedScope) -> DriveResult:
         async with self._exclusive(scope):
             recovery, stop = await self._prepare(scope)
             if stop is not None:
                 return stop
+            waiting = await self._log.find_waiting_call(scope)
+            if waiting is not None:
+                group: GroupDispatchResult | None = await self._dispatcher.cancel_group(
+                    scope, waiting.run_id, DISMISSED_RESULT)
+            else:
+                group = await self._close_latest_group(scope, CANCELLED_RESULT)
+            if group is None:
+                return DriveResult(DriveState.IDLE, recovery=recovery)
+            if group.state is GroupState.BLOCKED_UNKNOWN:
+                return DriveResult(DriveState.RECOVERY_REQUIRED, unknown_calls=group.unknown_calls, recovery=recovery)
+            return DriveResult(DriveState.CANCELLED, recovery=recovery)
+
+    async def compact(self, scope: TrustedScope, *, stop: StopSignal | None = None) -> DriveResult:
+        async with self._exclusive(scope, stop):
+            recovery, halted = await self._prepare(scope)
+            if halted is not None:
+                return halted
             if self._planner is None or self._budget is None:
                 return DriveResult(DriveState.NOTHING_TO_COMPACT, recovery=recovery, detail="no context budget")
             waiting = await self._log.find_waiting_call(scope)
@@ -134,7 +183,11 @@ class Driver:
                 return DriveResult(DriveState.NOTHING_TO_COMPACT, recovery=recovery,
                                    detail="nothing older than the latest turn, or too large to summarize")
             compactions: list[RunId] = []
-            failure = await self._compact(scope, plan, self._planner, self._budget, compactions)
+            try:
+                failure = await self._compact(scope, plan, self._planner, self._budget, compactions)
+            except _Cancelled:
+                return DriveResult(DriveState.CANCELLED, recovery=recovery, compaction_run_ids=tuple(compactions),
+                                   detail="cancelled while summarizing; nothing was committed")
             return DriveResult(
                 DriveState.COMPACTION_FAILED if failure is not None else DriveState.COMPACTED,
                 recovery=recovery, detail=failure or "", compaction_run_ids=tuple(compactions),
@@ -179,15 +232,49 @@ class Driver:
             if waiting is not None:
                 await self._log.answer_pending_call(scope, waiting, message)  # T7a
             else:
+                await self._close_latest_group(scope, REDIRECTED_RESULT)  # blocked calls: resume reports them
                 await self._log.append_event(scope, message)  # T1
 
     @contextlib.asynccontextmanager
-    async def _exclusive(self, scope: TrustedScope) -> AsyncIterator[None]:
+    async def _exclusive(self, scope: TrustedScope, stop: StopSignal | None = None) -> AsyncIterator[None]:
         lock = self._locks.setdefault(scope.conversation_id, asyncio.Lock())
         if lock.locked():
             raise ControlError(ControlErrorCode.BUSY, scope.conversation_id)
         async with lock:
-            yield
+            self._signals[scope.conversation_id] = stop if stop is not None else StopSignal()
+            try:
+                yield
+            finally:
+                del self._signals[scope.conversation_id]
+
+    def _stop(self, scope: TrustedScope) -> StopSignal:
+        return self._signals[scope.conversation_id]
+
+    async def _interruptible[T](self, scope: TrustedScope, start: Callable[[], Awaitable[T]]) -> T:
+        """Await ``start()`` unless a cancel arrives first; then cancel it,
+        wait until it has cleaned up (a Sandbox kills and reaps its process
+        tree) and raise ``_Cancelled``. A job cancelled from outside
+        (shutdown) cancels it too."""
+        signal = self._stop(scope)
+        if signal.cancel_requested:
+            raise _Cancelled()
+        work = asyncio.ensure_future(start())
+        stopper = asyncio.ensure_future(signal.cancelled())
+        try:
+            await asyncio.wait((work, stopper), return_when=asyncio.FIRST_COMPLETED)
+        except asyncio.CancelledError:
+            work.cancel()
+            await asyncio.wait([work])
+            raise
+        finally:
+            stopper.cancel()
+        if work.done():
+            return work.result()  # finished first: the cancel is noticed at the next boundary
+        work.cancel()
+        await asyncio.wait([work])
+        if not work.cancelled():
+            work.exception()  # retrieved: it failed while being cancelled
+        raise _Cancelled()
 
     async def _drive_locked(self, scope: TrustedScope, message: UserMessage) -> DriveResult:
         recovery, stop = await self._prepare(scope)
@@ -197,10 +284,10 @@ class Driver:
             await self._log.answer_pending_call(scope, waiting, message)  # T7a
             triggers = (CompletedGroupRef(waiting.run_id),)
         else:
-            blocked = await self._resume_pending_group(scope) if stop is None else None
+            group = await self._close_latest_group(scope, REDIRECTED_RESULT) if stop is None else None
             event = await self._log.append_event(scope, message)  # T1: input is never dropped
-            if blocked is not None:
-                return DriveResult(DriveState.RECOVERY_REQUIRED, unknown_calls=blocked, recovery=recovery)
+            if group is not None and group.state is GroupState.BLOCKED_UNKNOWN:
+                return DriveResult(DriveState.RECOVERY_REQUIRED, unknown_calls=group.unknown_calls, recovery=recovery)
             triggers = (EventRef(event.event_id),)
         if stop is not None:
             return stop
@@ -213,9 +300,9 @@ class Driver:
         waiting = await self._log.find_waiting_call(scope)
         if waiting is not None:
             return DriveResult(DriveState.WAITING_FOR_USER, waiting_call=waiting, recovery=recovery)
-        blocked = await self._resume_pending_group(scope)
-        if blocked is not None:
-            return DriveResult(DriveState.RECOVERY_REQUIRED, unknown_calls=blocked, recovery=recovery)
+        group = await self._resume_pending_group(scope)
+        if group is not None and group.state is not GroupState.COMPLETED:
+            return self._group_stop(group, lambda state, **kw: DriveResult(state, recovery=recovery, **kw))
         triggers = await self._next_triggers(scope)
         if not triggers:
             return DriveResult(DriveState.IDLE, recovery=recovery)
@@ -277,18 +364,19 @@ class Driver:
                     triggers.append(EventRef(event.event_id))
         return tuple(reversed(triggers))
 
-    async def _resume_pending_group(self, scope: TrustedScope) -> tuple[CallRef, ...] | None:
-        """Finish the latest group: run never-claimed PENDING calls (D20) and
-        report UNKNOWN ones to the model (V3-047). Returns the uncertain calls
-        if a REQUIRE_USER Tool keeps the group blocked."""
+    async def _unfinished_group(self, scope: TrustedScope) -> tuple[RunId, AssistantToolCalls] | None:
+        """The latest group if it has never-claimed PENDING calls or uncertain
+        ones the model was not told about; a lone waiting ``ask_user`` is
+        not unfinished work (it waits for the user)."""
         events = await self._log.read_events(scope)
         last_group = next(
             (e for e in reversed(events) if e.kind is EventKind.ASSISTANT_TOOL_CALLS), None
         )
         if last_group is None or last_group.origin_run_id is None:
             return None
-        run_id = last_group.origin_run_id
-        records = await self._log.read_tool_executions(scope, run_id)
+        if not isinstance(last_group.payload, AssistantToolCalls):
+            return None
+        records = await self._log.read_tool_executions(scope, last_group.origin_run_id)
         unfinished = [
             r
             for r in records
@@ -297,12 +385,45 @@ class Driver:
         ]
         if not unfinished or (len(records) == 1 and records[0].tool_id == ASK_USER_TOOL_ID):
             return None
-        if not isinstance(last_group.payload, AssistantToolCalls):
+        return last_group.origin_run_id, last_group.payload
+
+    async def _resume_pending_group(self, scope: TrustedScope) -> GroupDispatchResult | None:
+        """Finish the latest group: run never-claimed PENDING calls (D20) and
+        report UNKNOWN ones to the model (V3-047). A pause stops it before
+        the next call (PAUSED); a cancel settles it (``_dispatch``)."""
+        group = await self._unfinished_group(scope)
+        if group is None:
             return None
-        result = await self._dispatcher.dispatch_group(scope, run_id, last_group.payload.calls)
-        if result.state is GroupState.BLOCKED_UNKNOWN:
-            return result.unknown_calls
-        return None
+        return await self._dispatch(scope, *group)
+
+    async def _close_latest_group(self, scope: TrustedScope, reason: str) -> GroupDispatchResult | None:
+        """V3-P55: settle the latest group without running anything more —
+        never-started calls get a CANCELLED result saying ``reason``."""
+        group = await self._unfinished_group(scope)
+        if group is None:
+            return None
+        return await self._dispatcher.cancel_group(scope, group[0], reason)
+
+    async def _dispatch(self, scope: TrustedScope, run_id: RunId, payload: AssistantToolCalls) -> GroupDispatchResult:
+        """Run a group's calls, stopping before the next one on a pause; a
+        cancel interrupts the call under way and closes the rest (COMPLETED
+        or BLOCKED_UNKNOWN: the next boundary sees the cancel)."""
+        signal = self._stop(scope)
+        try:
+            return await self._interruptible(
+                scope, lambda: self._dispatcher.dispatch_group(scope, run_id, payload.calls,
+                                                               pause=lambda: signal.pause_requested))
+        except _Cancelled:
+            return await self._dispatcher.cancel_group(scope, run_id, CANCELLED_RESULT)
+
+    @staticmethod
+    def _group_stop(group: GroupDispatchResult, build: Callable[..., DriveResult]) -> DriveResult:
+        """The result of a drive stopped by a group that is not COMPLETED."""
+        if group.state is GroupState.BLOCKED_UNKNOWN:
+            return build(DriveState.RECOVERY_REQUIRED, unknown_calls=group.unknown_calls)
+        if group.state is GroupState.WAITING_FOR_USER:
+            return build(DriveState.WAITING_FOR_USER, waiting_call=group.waiting_call)
+        return build(DriveState.PAUSED)
 
     async def _run_loop(
         self, scope: TrustedScope, triggers: tuple[TriggerRef, ...], recovery: RecoveryReport
@@ -329,7 +450,19 @@ class Driver:
                 compaction_run_ids=tuple(compactions),
             )
 
+        signal = self._stop(scope)
+
+        def boundary() -> DriveResult | None:
+            """A safe boundary: nothing is under way, nothing new has started."""
+            if signal.cancel_requested:
+                return result(DriveState.CANCELLED)
+            if signal.pause_requested:
+                return result(DriveState.PAUSED)
+            return None
+
         for _ in range(self._max_runs):
+            if (stopped := boundary()) is not None:
+                return stopped
             try:
                 inputs = await self._loader.load(scope, triggers, self._options)
                 model_input = self._composer.compose(inputs)
@@ -341,8 +474,12 @@ class Driver:
                     else DriveState.REQUEST_REJECTED
                 )
                 return result(state, detail=str(exc))
+            except _Cancelled:
+                return result(DriveState.CANCELLED, detail="cancelled while summarizing; nothing was committed")
             if refusal is not None:
                 return result(DriveState.REQUEST_REJECTED, detail=refusal)
+            if (stopped := boundary()) is not None:  # e.g. paused while compacting
+                return stopped
             try:
                 prepared = self._provider.prepare_native_request(model_input)
             except ProviderError as exc:
@@ -363,7 +500,12 @@ class Driver:
             run_ids.append(run_id)
             await self._log.mark_dispatch(scope, run_id)  # T3: persisted before the one send
             try:
-                outcome = await self._provider.invoke_prepared(prepared)
+                outcome = await self._interruptible(scope, lambda: self._provider.invoke_prepared(prepared))
+            except _Cancelled:
+                await self._log.record_raw_outcome(scope, run_id, RawUncertain(CANCELLED_BY_USER))
+                return result(DriveState.CANCELLED,
+                              detail="cancelled while the model was answering; it may have been processed and "
+                                     "is not resent")
             except Exception as exc:  # noqa: BLE001 — adapter error after send began
                 outcome = NativeUncertain(type(exc).__name__)
             await self._log.record_raw_outcome(scope, run_id, _raw(outcome))
@@ -381,11 +523,9 @@ class Driver:
             event = await self._project(scope, run_id, normalized)
             if isinstance(normalized, NormalizedFinal):
                 return result(DriveState.COMPLETED, final_event=event)
-            group = await self._dispatcher.dispatch_group(scope, run_id, normalized.calls)
-            if group.state is GroupState.WAITING_FOR_USER:
-                return result(DriveState.WAITING_FOR_USER, waiting_call=group.waiting_call)
-            if group.state is GroupState.BLOCKED_UNKNOWN:
-                return result(DriveState.RECOVERY_REQUIRED, unknown_calls=group.unknown_calls)
+            group = await self._dispatch(scope, run_id, AssistantToolCalls(normalized.calls, normalized.commentary))
+            if group.state is not GroupState.COMPLETED:
+                return self._group_stop(group, result)
             triggers = (CompletedGroupRef(run_id),)
 
         return result(DriveState.RUN_LIMIT_REACHED)
@@ -441,7 +581,12 @@ class Driver:
             size = planner.request_size(request)  # measured here, not taken from the planner
             if size > budget.limit_tokens:
                 return f"compaction request of about {size} tokens exceeds the limit"
-            run_id, failure, text = await self._summarize(scope, request, planner, plan)
+            try:
+                run_id, failure, text = await self._summarize(scope, request, planner, plan)
+            except _Cancelled as cancelled:
+                if cancelled.run_id is not None:
+                    compactions.append(cancelled.run_id)
+                raise
             if run_id is not None:
                 compactions.append(run_id)
             if failure is not None or run_id is None or text is None:
@@ -490,7 +635,10 @@ class Driver:
         )
         await self._log.mark_dispatch(scope, run_id)
         try:
-            outcome = await self._provider.invoke_prepared(prepared)
+            outcome = await self._interruptible(scope, lambda: self._provider.invoke_prepared(prepared))
+        except _Cancelled:
+            await self._log.record_raw_outcome(scope, run_id, RawUncertain(CANCELLED_BY_USER))
+            raise _Cancelled(run_id) from None
         except Exception as exc:  # noqa: BLE001 — adapter error after send began
             outcome = NativeUncertain(type(exc).__name__)
         await self._log.record_raw_outcome(scope, run_id, _raw(outcome))

@@ -1664,6 +1664,17 @@ details > summary {
   display: none;
 }
 
+/* Pause / Stop while HIMARI works: text buttons at full touch height. */
+.composer-stop {
+  min-height: 44px;
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.composer-stop:disabled {
+  opacity: 0.5;
+}
+
 /* ------------------------------------------------------------- pending work */
 
 .rows > li {

@@ -22,7 +22,7 @@ from testkit import calls, final  # noqa: E402
 from himari.bootstrap.application import Application  # noqa: E402
 from himari.bootstrap.operator import OPERATOR, derive_cli_bearer  # noqa: E402
 from himari.common import ASK_USER_TOOL_ID, ConversationId, PrincipalId, TextBlock, TrustedScope  # noqa: E402
-from himari.control.api import DriveResult, DriveState  # noqa: E402
+from himari.control.api import DriveResult, DriveState, StopSignal  # noqa: E402
 from himari.control.runner import BackgroundRunner  # noqa: E402
 from himari.data.api import UserMessage  # noqa: E402
 from himari.interfaces.web import app as web  # noqa: E402
@@ -281,7 +281,10 @@ def test_foreign_and_missing_conversations_look_the_same(server: Server) -> None
                       server.client.patch(f"/api/conversations/{cid}", json={"title": "x"}, headers={"origin": ORIGIN}),
                       server.client.get(f"/api/conversations/{cid}/events"),
                       server.client.get(f"/api/conversations/{cid}/context"),
-                      server.post(f"/api/conversations/{cid}/compact")]
+                      server.post(f"/api/conversations/{cid}/compact"),
+                      server.post(f"/api/conversations/{cid}/pause"),
+                      server.post(f"/api/conversations/{cid}/cancel"),
+                      server.post(f"/api/conversations/{cid}/dismiss")]
     assert {r.status_code for r in responses} == {404}
     assert {r.text for r in responses} == {'{"error":{"code":"not_found","message":"No such conversation."}}'}
     assert server.client.get("/api/conversations").json()["items"] == []
@@ -304,19 +307,22 @@ class GatedDriver:
     def __init__(self) -> None:
         self.release = threading.Event()
 
-    async def drive(self, scope: TrustedScope, message: UserMessage) -> DriveResult:
+    async def drive(self, scope: TrustedScope, message: UserMessage, *, stop: StopSignal | None = None) -> DriveResult:
         raise AssertionError("the runner accepts, then resumes")
 
     async def accept(self, scope: TrustedScope, message: UserMessage) -> None:
         pass
 
-    async def resume(self, scope: TrustedScope) -> DriveResult:
+    async def resume(self, scope: TrustedScope, *, stop: StopSignal | None = None) -> DriveResult:
         await asyncio.to_thread(self.release.wait, 10)
         return DriveResult(DriveState.COMPLETED)
 
-    async def compact(self, scope: TrustedScope) -> DriveResult:
+    async def compact(self, scope: TrustedScope, *, stop: StopSignal | None = None) -> DriveResult:
         await asyncio.to_thread(self.release.wait, 10)
         return DriveResult(DriveState.COMPACTED)
+
+    async def cancel(self, scope: TrustedScope) -> DriveResult:
+        return DriveResult(DriveState.IDLE)
 
 
 def test_a_second_message_while_working_is_busy(server: Server) -> None:
@@ -331,6 +337,31 @@ def test_a_second_message_while_working_is_busy(server: Server) -> None:
     assert server.client.get(f"/api/conversations/{cid}").json()["job"]["running"] is True
     gated.release.set()
     assert server.wait_idle(cid)["job"]["state"] == "completed"
+
+
+def test_pause_and_cancel_reach_the_running_job_and_cancel_when_idle_starts_one(server: Server) -> None:
+    server.sign_in()
+    cid = server.post("/api/conversations").json()["id"]
+    assert server.application is not None
+    gated = GatedDriver()
+    server.application.runner = BackgroundRunner(gated)
+    idle = server.post(f"/api/conversations/{cid}/pause")
+    assert idle.status_code == 202 and idle.json()["running"] is False  # nothing to pause
+    assert server.post(f"/api/conversations/{cid}/messages", {"text": "one"}).status_code == 202
+    paused = server.post(f"/api/conversations/{cid}/pause").json()
+    assert paused["running"] is True and paused["stop_requested"] == "pause"
+    cancelling = server.post(f"/api/conversations/{cid}/cancel").json()
+    assert cancelling["stop_requested"] == "cancel"
+    assert server.client.get(f"/api/conversations/{cid}").json()["job"]["stop_requested"] == "cancel"
+    gated.release.set()
+    server.wait_idle(cid)
+    late = server.post(f"/api/conversations/{cid}/cancel").json()  # idle: a stop request closes nothing
+    assert late["running"] is False and late["state"] == "completed"
+    started = server.post(f"/api/conversations/{cid}/dismiss")  # closes what was left waiting
+    assert started.status_code == 202 and started.json()["running"] is True
+    assert server.wait_idle(cid)["job"]["state"] == "idle"
+    no_origin = server.client.post(f"/api/conversations/{cid}/dismiss", json={})
+    assert no_origin.status_code == 403  # a cookie request needs the Origin check, like every POST
 
 
 def test_no_response_ever_contains_the_secret_or_the_bearer(server: Server) -> None:
