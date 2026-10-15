@@ -142,7 +142,8 @@
 (B4) Calliope 게임 id를 내용 기반으로 바꾸고 기록으로 다시 열 수 있게 하는 것을 연결 전제로 둔다(Calliope 저장소에서 설계·검수). HIMARI는 프로세스를 다시 띄운 뒤 첫 결과에 안내를 붙인다.
 (C1) 실행기는 Bootstrap이 주입하므로 V3-059는 바뀌지 않는다.
 (C2) `initialize`는 취소하지 않고 바로 종료한다. *범위 밖:* 네트워크가 필요한 stdio 서버(V3-037 개정), 자원 제한(Q-40), 서버 안내문·프롬프트·리소스를 모델 문맥에 넣기(V3-P60 예정).
-*1단계 구현(2026-10-15):* Sandbox를 `src/himari/sandbox/`로 옮겼다. 동작 변경 없음. `sandbox.api`에 상태·오류·결과·한도와 Workspace 프로파일의 `WorkspaceSandbox` Protocol을 두고, import 검사에 `sandbox`(common만 사용) 규칙을 더했다. 세부는 문서 §10.1. |
+*1단계 구현(2026-10-15):* Sandbox를 `src/himari/sandbox/`로 옮겼다. 동작 변경 없음. `sandbox.api`에 상태·오류·결과·한도와 Workspace 프로파일의 `WorkspaceSandbox` Protocol을 두고, import 검사에 `sandbox`(common만 사용) 규칙을 더했다. 세부는 문서 §10.1.
+*2단계 구현(2026-10-15):* 서버 프로파일(`sandbox/server.py`·`identity.py`·`server_self_test.py`). 별도 상태와 자체 검사, 호스트 경로에 fd로 붙이기, 실행마다 정체성 검사(M0·R0·R1·R2), 줄 단위 프로세스 API, 종료 시 SIGTERM은 서버 자신에게(pidfd). Workspace 경로는 바이트 단위로 같다. Calliope를 이 프로파일로 띄워 확인. 세부는 문서 §10.2. |
 
 ## C. 명시적으로 미결정인 영역
 

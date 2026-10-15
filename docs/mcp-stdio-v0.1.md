@@ -1,6 +1,6 @@
 # MCP stdio 지원과 Sandbox 모듈 분리 v0.1
 
-> 2026-10-15 · **PROPOSED (V3-P59)** · 1단계(Sandbox 모듈 분리) 구현됨(브랜치 `refactor/sandbox-module`). 2·3단계는 구현 전이다. 구현 노트는 §10.
+> 2026-10-15 · **PROPOSED (V3-P59)** · 1단계(Sandbox 모듈 분리, PR #30)와 2단계(서버 프로파일, 브랜치 `feat/sandbox-server-profile`) 구현됨. 3단계(stdio 전송)는 구현 전이다. 구현 노트는 §10.
 >
 > 기준 사양: MCP 2025-11-25 [Transports §stdio](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports), [Lifecycle §Shutdown·Timeouts](https://modelcontextprotocol.io/specification/2025-11-25/basic/lifecycle), [Cancellation](https://modelcontextprotocol.io/specification/2025-11-25/basic/utilities/cancellation).
 >
@@ -370,4 +370,35 @@ Calliope를 어느 호스트에서도, 어떤 프로세스 단위로도 같게 �
 - **하위 호환:** `sandbox.backend`는 옮겨 간 이름(`SandboxState`, `validate_argv`, 한도 상수 등)을 그대로 다시 내보낸다. 그래서 기존 테스트가 쓰던 `backend.X`가 그대로 동작한다.
 - **import 검사:** `LAYERS["sandbox"] = 1`, `ONLY_FROM["sandbox"] = {"common"}`. Environment는 `sandbox.api`만 쓸 수 있고(`sandbox.backend`는 거부), MCP 커넥터는 `sandbox`를 아예 쓸 수 없다(V3-059). 이 규칙들의 테스트를 `tests/scripts/test_check_imports.py`에 더했다.
 - **Bootstrap:** `SandboxBackend`를 `himari.sandbox.backend`에서 만들어 Inside에 넘긴다. 하는 일은 전과 같다.
+
+### 10.2 2단계 — 서버 프로파일
+
+§4대로 구현했다. 새 파일은 `sandbox/identity.py`(정체성 검사), `sandbox/server.py`(실행기와 프로세스), `sandbox/server_self_test.py`(자체 검사)이다. `sandbox.api`에는 `ServerProfile`, `IsolatedProcess`·`ProcessLauncher` Protocol, `ProcessGone`, `SandboxAdmissionError`, `SandboxProfileError`와 한도(`MAX_LINE_BYTES` 4 MiB, `STDERR_TAIL_BYTES` 64 KiB, `MAX_READ_ONLY` 16, `MAX_WRITABLE` 4, `MAX_IDENTITY_ENTRIES` 20만)를 더했다. Bootstrap 연결과 MCP 쪽 주입은 3단계에서 한다.
+
+**Workspace 경로는 그대로다.** 두 프로파일이 같은 bwrap 구성 함수(`sandbox_arguments`)를 쓰도록 나눴고, `run_command`의 bwrap 인자는 나누기 전과 바이트 단위로 같다(확인함).
+
+**구체화하거나 더한 것:**
+- **상태:** 서버 프로파일은 `ServerSandbox`라는 별도 객체다. 호스트 능력(bwrap·Landlock)은 Workspace와 같은 것을 쓰고, 상태와 자체 검사는 따로 가진다. 실행 중 Sandbox 구성이 실패하면(`SandboxSetupError`) Workspace처럼 SETUP_FAILED로 굳는다.
+- **보호 루트는 Sandbox가 쥔다 (PR #32 검수 B1):** `ServerSandbox(capability, protected)`는 만들 때 보호 루트(적어도 HIMARI 데이터 폴더)를 받아야 하며, 빈 목록이면 거부한다. 이 루트는 자체 검사와 모든 launcher의 설정 검사, 모든 실행의 정체성 검사에 항상 적용된다. 프로파일의 `protected`는 추가분일 뿐이다. 그래서 Bootstrap이 프로파일에 보호 경로를 빠뜨려도 데이터 폴더는 붙지 않는다.
+- **붙일 트리끼리의 정체성 (B3):** 실행할 때 연 fd로 확인한다. 두 트리가 같은 디렉터리이거나, 한 트리가 다른 트리의 루트를 품으면(심볼릭 링크·bind mount 별칭으로 철자만 달라도) 거부한다. 같은 디렉터리가 읽기 전용과 쓰기로 동시에 보이지 않게 하기 위해서다. 쓰기 폴더의 소유자도 붙일 fd로 다시 확인한다.
+- **굳지 않는 거부:** 설정 검사 실패(`SandboxProfileError`), 정체성 검사 실패, 붙일 폴더를 열 수 없음(`SandboxAdmissionError`)은 그 실행만 거부한다. 폴더 하나가 사라졌다고 다른 서버까지 막히지 않게 하기 위해서다.
+- **설정 검사에 더한 것:**
+  - 붙일 폴더끼리 겹치면 거부한다.
+  - **Sandbox가 직접 놓는 곳 (B2):** `/proc`, `/dev`, `/sys`, `/run/himari`(helper), `/tmp/home`, 시스템 뷰(`/usr`, `/bin`·`/lib` 등, `/etc`의 세 파일). 그 자체, 그 안, **그것을 덮는 상위 경로**(예: `/run`, `/etc`) 모두 거부한다. bwrap은 나중에 붙인 것이 앞의 것을 가리기 때문이다.
+  - **`/tmp` (B2):** `/tmp` 자체나 그 상위는 Sandbox의 tmpfs를 호스트의 `/tmp`로 바꿔 버리므로 거부한다. `/tmp` 아래의 폴더는 tmpfs 위에 붙으므로 허용한다.
+  - 작업 위치는 붙인 폴더 안이거나 `/tmp` 자체여야 한다. `/tmp` 아래의 다른 경로는 Sandbox 안에 없기 때문이다.
+  - 운영자 환경 변수는 고정 변수(`PATH`·`HOME` 등)와 `PWD`를 덮어쓸 수 없고, 64개·각 4,096자까지다.
+- **종료의 SIGTERM:** 프로세스 구조는 bwrap(HIMARI의 자식) → PID namespace의 init인 bwrap → 서버다.
+  - bwrap 그룹에 보낸 SIGTERM은 bwrap만 죽이고, 서버는 `--die-with-parent`로 SIGKILL을 받는다. 실제로 확인했다.
+  - 그래서 SIGTERM은 서버 프로세스에 직접 보낸다. pidfd로 열고 부모가 init인지 확인하므로 pid 재사용으로 엉뚱한 프로세스에 가지 않는다.
+  - 찾지 못하면 그룹에 보낸다. SIGKILL은 그룹에 보내고, Sandbox 안의 모든 프로세스가 함께 끝난다.
+- **한 줄 한도:** asyncio 읽기 한도를 `MAX_LINE_BYTES`로 둔다. 4 MiB 줄은 읽고, 1바이트라도 넘으면 거부한 뒤 프로세스를 종료한다(양쪽 경계를 테스트함).
+- **자체 검사의 임시 폴더**는 `TMPDIR`와 상관없이 `/tmp` 아래에 만든다. 홈 같은 경로가 필요 없는 구성이어야 하기 때문이다.
+
+**실측 (이 호스트, 2026-10-15):** Calliope MCP 서버를 이 프로파일로 띄웠다.
+- 설정: `read_only` `/home/coder/Calliope`·`/home/coder/opt/stockfish`, `writable` `~/.local/share/calliope`, 보호 경로는 임시 데이터 폴더.
+- 정체성 검사를 포함한 실행 0.07초. Calliope 트리의 uv 하드링크는 `read_only`라서 허용된다.
+- stdio로 `initialize`·`tools/list`(Tool 9개)·`open_game`이 오갔다.
+- `ply`는 Sandbox 안의 Stockfish로 3.7초에 분석했고, 결과는 쓰기 폴더의 캐시에 저장됐다.
+- stdin을 닫은 뒤 0.2초에 정상 종료했다.
 

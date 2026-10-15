@@ -1,10 +1,15 @@
-"""Sandbox public contract (ENV-04/05, V3-032, V3-036/037, V3-050/051, V3-P59 §3).
+"""Sandbox public contract (ENV-04/05, V3-032, V3-036/037, V3-050/051, V3-P59 §3, §4).
 
 The isolation mechanism (bubblewrap + Landlock) is one module; what it is
-used for is a profile. Step 1 of V3-P59 has one profile, the Workspace
-(``inside/run_command``): one bounded command with a principal's Workspace
-bound at ``WORKSPACE_MOUNT``. Bootstrap builds the backend and hands it to
-its consumer, which sees only this module.
+used for is a profile. Bootstrap builds the backends and hands them to their
+consumers, which see only this module (or, for the MCP connector, a Protocol
+of their own with the same shape: V3-059).
+
+- **Workspace** (``inside/run_command``): one bounded command with a
+  principal's Workspace bound at ``WORKSPACE_MOUNT``.
+- **Server** (stdio MCP servers, V3-P59 §4): a long-lived process with pipes,
+  the operator's ``read_only`` and ``writable`` directories bound at their
+  host paths, no network. It has its own self-test and state.
 
 States::
 
@@ -18,7 +23,7 @@ There is no unsandboxed fallback in any state.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum
 from typing import Protocol
@@ -31,6 +36,13 @@ MAX_ARG_CHARS = 4096
 DEFAULT_TIMEOUT_SECONDS = 120
 MAX_TIMEOUT_SECONDS = 600
 MAX_OUTPUT_BYTES = 256 * 1024  # acquisition per stream
+
+# V3-P59 §4
+MAX_LINE_BYTES = 4 * 1024 * 1024  # one stdout line of a server process (the MCP HTTP response bound)
+STDERR_TAIL_BYTES = 64 * 1024  # what is kept of a server process's stderr
+MAX_READ_ONLY = 16
+MAX_WRITABLE = 4
+MAX_IDENTITY_ENTRIES = 200_000  # the protected set and every bound tree together (V3-P41's admission bound)
 
 
 class SandboxState(Enum):
@@ -46,6 +58,21 @@ class SandboxUnavailableError(RuntimeError):
 
 class SandboxSetupError(RuntimeError):
     """Sandbox construction failed; the requested argv never executed."""
+
+
+class SandboxAdmissionError(RuntimeError):
+    """A bound tree failed the identity checks (V3-P59 §4.2: M0, R0, R1, R2,
+    or the entry bound). Nothing was spawned."""
+
+
+class SandboxProfileError(ValueError):
+    """A server profile the sandbox refuses (V3-P59 §4.2, checked when the
+    launcher is made: paths, overlaps, ownership, counts)."""
+
+
+class ProcessGone(RuntimeError):
+    """The isolated process has ended or was shut down (or its stdout broke
+    the line bound); no more lines go in or come out."""
 
 
 @dataclass(frozen=True)
@@ -86,3 +113,54 @@ class WorkspaceSandbox(Protocol):
         raises SandboxSetupError and latches SETUP_FAILED. ``cwd`` is under
         ``WORKSPACE_MOUNT``."""
         ...
+
+
+@dataclass(frozen=True)
+class ServerProfile:
+    """What one stdio server's process may reach (V3-P59 §4.1). Paths are
+    absolute host directories, bound at the same paths inside. The roots
+    whose contents must not be reachable are fixed by the server sandbox
+    itself (HIMARI's data root, which holds the Workspaces) and checked by
+    identity at every launch; ``protected`` only adds more of them."""
+
+    read_only: tuple[str, ...] = ()
+    writable: tuple[str, ...] = ()
+    protected: tuple[str, ...] = ()
+
+
+class IsolatedProcess(Protocol):
+    """A long-lived process in the server profile, spoken to by lines."""
+
+    async def write_line(self, data: bytes) -> None:
+        """``data`` (no newline) and a newline to stdin; ProcessGone if it ended."""
+        ...
+
+    async def read_line(self) -> bytes:
+        """The next stdout line without its newline. ProcessGone at EOF, and
+        when a line passes MAX_LINE_BYTES (the process is then shut down)."""
+        ...
+
+    @property
+    def returncode(self) -> int | None: ...
+
+    def stderr_tail(self) -> bytes:
+        """The last STDERR_TAIL_BYTES the process wrote to stderr."""
+        ...
+
+    async def shutdown(self, grace: float) -> None:
+        """Close stdin, wait ``grace``; SIGTERM, wait ``grace``; SIGKILL. The
+        whole sandbox ends with it. Safe to call more than once."""
+        ...
+
+
+class ProcessLauncher(Protocol):
+    """Launches processes in one server profile."""
+
+    async def launch(self, argv: Sequence[str], env: Mapping[str, str], cwd: str) -> IsolatedProcess:
+        """SandboxUnavailableError unless the server profile is ENFORCED,
+        SandboxAdmissionError when a bound tree fails the identity checks,
+        SandboxSetupError when the sandbox could not be built: in every case
+        nothing ran. ``env`` is added to the fixed sandbox environment;
+        ``cwd`` is an absolute path inside a bound tree, or /tmp."""
+        ...
+

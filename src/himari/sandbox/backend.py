@@ -21,7 +21,7 @@ import stat
 import subprocess
 import sys
 import time
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import Any
 from dataclasses import dataclass
 
@@ -91,11 +91,15 @@ def system_view() -> list[str]:
     return args
 
 
-def bwrap_arguments(capability: HostCapability, root_fd: int, cwd: str, sync_fd: int, argv: list[str]) -> list[str]:
-    """Built from trusted inputs only: the verified Workspace root fd, a cwd
-    under /workspace, and the fixed system view. ``argv`` only appears after
-    the helper's ``--`` separator."""
-    policy = {"read_roots": ["/"], "write_roots": [WORKSPACE_MOUNT, "/tmp"], "device_root": "/dev", "sync_fd": sync_fd}
+def sandbox_arguments(capability: HostCapability, *, env: Mapping[str, str], binds: Sequence[tuple[str, int, str]],
+                      write_roots: Sequence[str], cwd: str, sync_fd: int, argv: Sequence[str]) -> list[str]:
+    """The one bwrap layout every profile uses: fresh namespaces (network
+    included), a read-only root with the system view, the helper, fresh
+    /dev, /proc and /tmp; then the profile's ``binds`` — each ``(option,
+    fd, destination)`` with ``--bind-fd`` or ``--ro-bind-fd``, so a verified
+    descriptor is bound and no path is resolved again. ``argv`` only appears
+    after the helper's ``--`` separator."""
+    policy = {"read_roots": ["/"], "write_roots": list(write_roots), "device_root": "/dev", "sync_fd": sync_fd}
     args = [
         capability.bwrap,
         "--unshare-all",  # user, ipc, pid, net, uts, cgroup
@@ -106,7 +110,7 @@ def bwrap_arguments(capability: HostCapability, root_fd: int, cwd: str, sync_fd:
         "--cap-drop", "ALL",
         "--clearenv",
     ]
-    for key, value in SANDBOX_ENV.items():
+    for key, value in env.items():
         args += ["--setenv", key, value]
     args += system_view()
     args += [
@@ -115,7 +119,12 @@ def bwrap_arguments(capability: HostCapability, root_fd: int, cwd: str, sync_fd:
         "--tmpfs", "/tmp",
         "--dir", "/tmp/home",
         "--ro-bind", capability.helper, HELPER_IN_SANDBOX,
-        "--bind-fd", str(root_fd), WORKSPACE_MOUNT,  # the verified directory itself, no path re-resolution
+    ]
+    for option, fd, destination in binds:
+        if option not in ("--bind-fd", "--ro-bind-fd"):
+            raise ValueError(f"not a descriptor bind: {option}")
+        args += [option, str(fd), destination]
+    args += [
         "--remount-ro", "/",
         "--chdir", cwd,
         "--",
@@ -124,6 +133,13 @@ def bwrap_arguments(capability: HostCapability, root_fd: int, cwd: str, sync_fd:
         *argv,
     ]
     return args
+
+
+def bwrap_arguments(capability: HostCapability, root_fd: int, cwd: str, sync_fd: int, argv: list[str]) -> list[str]:
+    """The Workspace profile: the verified Workspace root fd at /workspace,
+    writable with /tmp, a cwd under /workspace, the fixed environment."""
+    return sandbox_arguments(capability, env=SANDBOX_ENV, binds=[("--bind-fd", root_fd, WORKSPACE_MOUNT)],
+                             write_roots=[WORKSPACE_MOUNT, "/tmp"], cwd=cwd, sync_fd=sync_fd, argv=argv)
 
 
 def discover_capability() -> HostCapability | None:
