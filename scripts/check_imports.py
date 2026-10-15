@@ -11,7 +11,8 @@ Rules:
    (the assembled Application) — nothing else of another package.
 6. A package in ``ONLY_FROM`` may import only the listed packages, however
    low their layer: the MCP connector uses ``common`` and ``tool.api`` and
-   nothing else, Data included (V3-P57, PR #25 review B1).
+   nothing else, Data included (V3-P57, PR #25 review B1); the Sandbox uses
+   ``common`` only (V3-P59 §3).
 
 Usage: python -I scripts/check_imports.py [src_root]
 Exit status 1 on any violation. This is a static check, not part of pytest
@@ -26,6 +27,7 @@ from pathlib import Path
 
 LAYERS = {
     "common": 0,
+    "sandbox": 1,  # the isolation mechanism: imports common only (rule 6), used by consumers via its api
     "data": 1,
     "tool": 2,
     "environment": 3,
@@ -39,6 +41,7 @@ LAYERS = {
 # Packages whose dependencies are narrower than their layer allows (rule 6).
 ONLY_FROM = {
     "mcp": frozenset({"common", "tool"}),
+    "sandbox": frozenset({"common"}),
 }
 
 

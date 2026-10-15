@@ -177,7 +177,7 @@ EnvironmentPlugin ── tools() 제공 · execute 시 Data.WorkspaceState 재�
 | **UI-01** | WebInterface / **Interface** | Web 서버 → 브라우저·CLI | Application(DATA-12, CTRL-06, ConversationLog 읽기) | 운영자 인증, 대화 목록·생성·이름 변경, 메시지·재개 제출, Pause·Stop·Dismiss(V3-P55), Event·작업 상태(이유 `detail` 포함) 폴링, 서버 정보 `GET /api/server`(V3-P56), Tool 화면(V3-P58: 이벤트의 `app_view`, `GET …/calls/{run}/{call}/app`, 별도 포트의 sandbox 서버) | P0 코드 구현 (V3-P46) |
 | **UI-02** | TerminalInterface / **Interface** | CLI → 로컬 Web 서버(UI-01) | UI-01 JSON API + 운영자 비밀값 파생 bearer | 대화형·명령형 대화, 질문 답변, 이어서 실행, 목록·조회 | P0 코드 구현 (V3-P47) |
 
-**Contract Location (PR #1~#12 반영):** Control·Data·Tool·Environment·Prompt·Provider 공개 계약은 각각 `api.py`로 선언됐다. Control 실행은 `control/driver.py`·`control/runner.py`, Bootstrap 조립은 `bootstrap/`(`Application`), 공용 DTO는 `src/himari/common.py`에 있다. Inside 파일 Tool·Sandbox `run_command`는 `environment/inside/`(PR #8~#9), SQLite Data는 `data/sqlite.py`(PR #10), Web은 `interfaces/web/`(PR #12)에 있다. `scripts/check_imports.py`가 모듈 경계를 검사한다.
+**Contract Location (PR #1~#12 반영):** Control·Data·Tool·Environment·Prompt·Provider 공개 계약은 각각 `api.py`로 선언됐다. Control 실행은 `control/driver.py`·`control/runner.py`, Bootstrap 조립은 `bootstrap/`(`Application`), 공용 DTO는 `src/himari/common.py`에 있다. Inside 파일 Tool·`run_command`는 `environment/inside/`(PR #8~#9), 격리 장치(Sandbox)는 최상위 모듈 `sandbox/`(V3-P59 1단계; Inside는 `sandbox.api`만 사용), SQLite Data는 `data/sqlite.py`(PR #10), Web은 `interfaces/web/`(PR #12)에 있다. `scripts/check_imports.py`가 모듈 경계를 검사한다.
 
 | Owner | 현재 계약 문서 | 코드 선언 위치 |
 | --- | --- | --- |
@@ -394,7 +394,7 @@ class ToolOutcome:
 
 **PROPOSED**
 
-- **EnvironmentPlugin SPI (V3-040/041 CONFIRMED, 시그니처 PROPOSED):** `kind`, `tools() -> Sequence[ToolHandler]`, `observe(...)`. Environment 전용 Tool(`inside/run_command`, Inside 파일 Tool)은 Environment 패키지가 직접 제공하며, 실행 메커니즘(Sandbox 등)은 그 패키지 내부 구현이다.
+- **EnvironmentPlugin SPI (V3-040/041 CONFIRMED, 시그니처 PROPOSED):** `kind`, `tools() -> Sequence[ToolHandler]`, `observe(...)`. Environment 전용 Tool(`inside/run_command`, Inside 파일 Tool)은 Environment 패키지가 직접 제공한다. 실행 메커니즘 중 Sandbox는 최상위 모듈 `sandbox`가 가지며(V3-P59 1단계), Environment는 Bootstrap이 만들어 준 것을 `sandbox.api`로 쓴다.
 - **Instance·Binding과 ToolHandler 관계 (V3-P19 PROPOSED):**
   ```text
   Bootstrap: EnvironmentPlugin(kind="inside") 1개 등록 → tools() = [inside/run_command, inside/read_file, ...]  (kind 수준, 고정)

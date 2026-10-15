@@ -11,8 +11,8 @@ may read and write each other's folders. The boundary is the principal's
 Workspace root, enforced on every access by :mod:`.fs`.
 
 This package is an EnvironmentPlugin (ENV-06): it provides its own Tools
-(V3-041). ``inside/run_command`` is provided only when a SandboxBackend is
-configured, and refuses to run unless that backend is ENFORCED (V3-032).
+(V3-041). ``inside/run_command`` is provided only when a Workspace sandbox is
+configured (``himari.sandbox``, built by Bootstrap), and refuses to run unless that backend is ENFORCED (V3-032).
 
 Writes and commands on the same Workspace are serialized in-process
 (V3-P10): a command's file effects are unknown, so it conflicts with every
@@ -31,8 +31,8 @@ from pathlib import Path
 from himari.common import EnvironmentKind, TrustedScope, WorkspaceId
 from himari.data.api import BindingAuthority
 from himari.environment.api import BindingObservation, ConnectionStatus
-from himari.environment.inside.sandbox import SandboxBackend
 from himari.environment.inside.tools import RunCommand, file_tools
+from himari.sandbox.api import WorkspaceSandbox
 from himari.tool.api import ToolHandler
 
 INSIDE = EnvironmentKind("inside")
@@ -40,7 +40,7 @@ _WORKSPACE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 
 
 class InsideEnvironment:
-    def __init__(self, workspaces_root: str | Path, *, sandbox: SandboxBackend | None = None) -> None:
+    def __init__(self, workspaces_root: str | Path, *, sandbox: WorkspaceSandbox | None = None) -> None:
         root = Path(workspaces_root)
         if not root.is_absolute():
             raise ValueError("workspaces_root must be an absolute, trusted path")

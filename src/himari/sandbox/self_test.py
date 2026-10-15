@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from himari.environment.inside.sandbox.backend import SandboxBackend
+    from himari.sandbox.backend import SandboxBackend
 
 PROBE = r"""
 import json, os, socket, stat, sys
@@ -145,8 +145,9 @@ class ExpectedSources:
 
 
 def expected_sources(workspace_fd: int) -> ExpectedSources:
-    from himari.environment.inside.sandbox import landlock_helper
-    from himari.environment.inside.sandbox.backend import HELPER_IN_SANDBOX, WORKSPACE_MOUNT, system_view
+    from himari.sandbox import landlock_helper
+    from himari.sandbox.api import WORKSPACE_MOUNT
+    from himari.sandbox.backend import HELPER_IN_SANDBOX, system_view
 
     def identity(info: os.stat_result) -> tuple[int, int]:
         return info.st_dev, info.st_ino

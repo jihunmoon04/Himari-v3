@@ -1,6 +1,6 @@
 # MCP stdio 지원과 Sandbox 모듈 분리 v0.1
 
-> 2026-10-15 · **PROPOSED (V3-P59)** · 설계 초안이며 구현 전이다.
+> 2026-10-15 · **PROPOSED (V3-P59)** · 1단계(Sandbox 모듈 분리) 구현됨(브랜치 `refactor/sandbox-module`). 2·3단계는 구현 전이다. 구현 노트는 §10.
 >
 > 기준 사양: MCP 2025-11-25 [Transports §stdio](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports), [Lifecycle §Shutdown·Timeouts](https://modelcontextprotocol.io/specification/2025-11-25/basic/lifecycle), [Cancellation](https://modelcontextprotocol.io/specification/2025-11-25/basic/utilities/cancellation).
 >
@@ -354,3 +354,20 @@ Calliope를 어느 호스트에서도, 어떤 프로세스 단위로도 같게 �
 6. **Calliope 쪽 관찰**:
    - Calliope §9의 임시 파일 정리는 PID로 프로세스 생존을 판단한다. Sandbox 안의 PID는 별도 namespace라, 크래시로 남은 임시 파일이 지워지지 않을 수 있다(해롭지는 않음).
    - Calliope HTTP 서버의 예시 포트 8765는 HIMARI 기본 포트와 겹친다.
+
+## 10. 구현 노트 (2026-10-15)
+
+### 10.1 1단계 — Sandbox 모듈 분리
+
+설계대로 옮겼고, 동작은 바뀌지 않았다. 다음만 구체화했다.
+
+- **위치:** `environment/inside/sandbox/`의 `backend.py`·`landlock_helper.py`·`self_test.py`를 `src/himari/sandbox/`로 옮겼다. 단위 테스트도 `tests/sandbox/`로 옮겼다. 테스트 내용은 import 경로만 바뀌었다.
+- **`sandbox.api`:** 값 타입과 계약만 둔다.
+  - `SandboxState`, `SandboxUnavailableError`, `SandboxSetupError`, `CommandResult`;
+  - V3-051 한도 상수와 `validate_argv`, `WORKSPACE_MOUNT`;
+  - **`WorkspaceSandbox` Protocol** (`state`, `start`, `run`): Workspace 프로파일의 계약이다. Inside는 이것만 본다.
+- **§6의 `WorkspaceProfile`:** 1단계에서는 위 Protocol과 상수로 나타냈다. 프로파일을 값으로 나누는 일은 두 번째 프로파일이 생기는 2단계에서 `ServerProfile`과 함께 한다.
+- **하위 호환:** `sandbox.backend`는 옮겨 간 이름(`SandboxState`, `validate_argv`, 한도 상수 등)을 그대로 다시 내보낸다. 그래서 기존 테스트가 쓰던 `backend.X`가 그대로 동작한다.
+- **import 검사:** `LAYERS["sandbox"] = 1`, `ONLY_FROM["sandbox"] = {"common"}`. Environment는 `sandbox.api`만 쓸 수 있고(`sandbox.backend`는 거부), MCP 커넥터는 `sandbox`를 아예 쓸 수 없다(V3-059). 이 규칙들의 테스트를 `tests/scripts/test_check_imports.py`에 더했다.
+- **Bootstrap:** `SandboxBackend`를 `himari.sandbox.backend`에서 만들어 Inside에 넘긴다. 하는 일은 전과 같다.
+

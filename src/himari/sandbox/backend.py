@@ -21,24 +21,30 @@ import stat
 import subprocess
 import sys
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from typing import Any
 from dataclasses import dataclass
-from enum import Enum
 
-from himari.environment.inside.sandbox import landlock_helper
+from himari.sandbox import landlock_helper
+# Re-exported: the backend module still answers for the names it held before
+# the move to himari.sandbox (V3-P59 §3: tests change only their imports).
+from himari.sandbox.api import (
+    DEFAULT_TIMEOUT_SECONDS as DEFAULT_TIMEOUT_SECONDS,
+    MAX_ARG_CHARS as MAX_ARG_CHARS,
+    MAX_ARGV as MAX_ARGV,
+    MAX_OUTPUT_BYTES as MAX_OUTPUT_BYTES,
+    MAX_TIMEOUT_SECONDS as MAX_TIMEOUT_SECONDS,
+    WORKSPACE_MOUNT as WORKSPACE_MOUNT,
+    CommandResult as CommandResult,
+    SandboxSetupError as SandboxSetupError,
+    SandboxState as SandboxState,
+    SandboxUnavailableError as SandboxUnavailableError,
+    validate_argv as validate_argv,
+)
 
 BWRAP_CANDIDATES = ("/usr/bin/bwrap", "/bin/bwrap")
 INTERPRETER = "/usr/bin/python3"  # system interpreter, visible inside the /usr view
 HELPER_IN_SANDBOX = "/run/himari/landlock_helper.py"
-WORKSPACE_MOUNT = "/workspace"
-
-# V3-051
-MAX_ARGV = 64
-MAX_ARG_CHARS = 4096
-DEFAULT_TIMEOUT_SECONDS = 120
-MAX_TIMEOUT_SECONDS = 600
-MAX_OUTPUT_BYTES = 256 * 1024  # acquisition per stream
 
 SETUP_TIMEOUT_SECONDS = 15.0
 _DRAIN_GRACE_SECONDS = 5.0
@@ -51,37 +57,11 @@ SANDBOX_ENV = {
 }
 
 
-class SandboxState(Enum):
-    UNAVAILABLE = "unavailable"
-    CAPABLE_INACTIVE = "capable_inactive"
-    ENFORCED = "enforced"
-    SETUP_FAILED = "setup_failed"
-
-
-class SandboxUnavailableError(RuntimeError):
-    """Not ENFORCED. Nothing was spawned."""
-
-
-class SandboxSetupError(RuntimeError):
-    """Sandbox construction failed; the requested argv never executed."""
-
-
 @dataclass(frozen=True)
 class HostCapability:
     bwrap: str
     landlock_abi: int
     helper: str
-
-
-@dataclass(frozen=True)
-class CommandResult:
-    exit_code: int | None  # None when killed on timeout
-    timed_out: bool
-    stdout: bytes  # at most MAX_OUTPUT_BYTES
-    stderr: bytes
-    stdout_total: int  # bytes the command actually wrote
-    stderr_total: int
-    elapsed_ms: int
 
 
 def _bwrap_path() -> str | None:
@@ -165,16 +145,6 @@ def discover_capability() -> HostCapability | None:
     except (OSError, subprocess.SubprocessError):
         return None
     return HostCapability(bwrap, abi, helper) if completed.returncode == 0 else None
-
-
-def validate_argv(argv: object) -> list[str]:
-    if (
-        not isinstance(argv, (list, tuple))
-        or not 1 <= len(argv) <= MAX_ARGV
-        or not all(isinstance(a, str) and a and len(a) <= MAX_ARG_CHARS and "\0" not in a for a in argv)
-    ):
-        raise ValueError(f"argv must be 1..{MAX_ARGV} non-empty strings of at most {MAX_ARG_CHARS} characters")
-    return list(argv)
 
 
 async def _drain(stream: asyncio.StreamReader | None, limit: int) -> tuple[bytes, int]:
@@ -278,7 +248,7 @@ class SandboxBackend:
     def state(self) -> SandboxState:
         return self._state
 
-    async def start(self, self_test: SelfTest | None = None, *, protected_paths: tuple[str, ...] = ()) -> SandboxState:
+    async def start(self, self_test: SelfTest | None = None, *, protected_paths: Sequence[str] = ()) -> SandboxState:
         """Once per process (V3-050): ENFORCED only if the real-spawn
         self-test passes. ``protected_paths`` are real host roots (Workspace
         root, data root, ...) the self-test proves invisible inside."""
@@ -288,7 +258,7 @@ class SandboxBackend:
         if self._state is not SandboxState.CAPABLE_INACTIVE:
             return self._state
         if self_test is None:
-            from himari.environment.inside.sandbox.self_test import run_self_test
+            from himari.sandbox.self_test import run_self_test
 
             self_test = run_self_test
         try:
