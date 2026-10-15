@@ -22,7 +22,7 @@ from himari.control.api import DriveState
 from himari.data.api import ToolExecutionStatus, ToolResultRecord
 from himari.data.memory import InMemoryStore
 from himari.mcp import client as client_module
-from himari.mcp.client import McpClient, McpRefused, McpUncertain
+from himari.mcp.client import McpRefused, McpUncertain, http_client
 from himari.mcp.config import McpConfigError, load_config, map_tool_names, parse_config
 from himari.mcp.tools import McpConnection, connect, render_result
 from himari.provider.scripted import ScriptedAdapter
@@ -133,7 +133,7 @@ def test_the_client_starts_a_session_lists_pages_and_calls(sse: bool) -> None:
                            token=TOKEN, sse=sse, page_size=2)
 
     async def scenario() -> None:
-        client = McpClient(URL, TOKEN, timeout_seconds=5, transport=server.transport())
+        client = http_client(URL, TOKEN, timeout_seconds=5, transport=server.transport())
         try:
             assert [t["name"] for t in await client.list_tools()] == [f"t{i}" for i in range(5)]
             server.handlers["t1"] = lambda args: {"content": [{"type": "text", "text": f"got {args}"}]}
@@ -155,7 +155,7 @@ def test_a_forgotten_session_is_renewed_once_and_the_request_sent_again() -> Non
     server = FakeMcpServer()
 
     async def scenario() -> None:
-        client = McpClient(URL, None, timeout_seconds=5, transport=server.transport())
+        client = http_client(URL, None, timeout_seconds=5, transport=server.transport())
         await client.call_tool("echo", {"text": "one"})
         server.forget_sessions()
         await client.call_tool("echo", {"text": "two"})
@@ -170,7 +170,7 @@ def test_concurrent_first_calls_share_one_session() -> None:
     server = FakeMcpServer()
 
     async def scenario() -> None:
-        client = McpClient(URL, None, timeout_seconds=5, transport=server.transport())
+        client = http_client(URL, None, timeout_seconds=5, transport=server.transport())
         await asyncio.gather(*(client.call_tool("echo", {"text": str(i)}) for i in range(5)))
         await client.aclose()
 
@@ -200,7 +200,7 @@ def test_call_failures_say_whether_the_tool_may_have_run(setup: Any, failure: ty
     server = FakeMcpServer()
 
     async def scenario() -> None:
-        client = McpClient(URL, None, timeout_seconds=5, transport=server.transport())
+        client = http_client(URL, None, timeout_seconds=5, transport=server.transport())
         await client.initialize()
         setup(server)
         with pytest.raises(failure):
@@ -214,7 +214,7 @@ def test_a_server_of_an_unknown_protocol_version_is_refused() -> None:
     server = FakeMcpServer(protocol_version="1999-01-01")
 
     async def scenario() -> None:
-        client = McpClient(URL, None, timeout_seconds=5, transport=server.transport())
+        client = http_client(URL, None, timeout_seconds=5, transport=server.transport())
         with pytest.raises(McpRefused, match="protocol version"):
             await client.initialize()
         await client.aclose()
@@ -468,7 +468,7 @@ def test_a_result_nested_too_deep_to_parse_is_uncertain() -> None:
     deep = "[" * 100_000 + "]" * 100_000
 
     async def scenario() -> None:
-        client = McpClient(URL, None, timeout_seconds=5, transport=server.transport())
+        client = http_client(URL, None, timeout_seconds=5, transport=server.transport())
         await client.initialize()
         original = server._answer
         server._answer = lambda request_id, result, headers=None: httpx.Response(  # type: ignore[method-assign]
@@ -502,7 +502,7 @@ def sse(*chunks: bytes) -> Any:
 
 
 async def first_call(server: FakeMcpServer, make: Any) -> Any:
-    client = McpClient(URL, None, timeout_seconds=5, transport=server.transport())
+    client = http_client(URL, None, timeout_seconds=5, transport=server.transport())
     await client.initialize()
     answer_with(server, make)
     try:

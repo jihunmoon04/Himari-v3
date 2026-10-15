@@ -35,7 +35,7 @@ from typing import Any
 import httpx
 
 from himari.common import JsonValue, ModelToolResult, TextBlock
-from himari.mcp.client import UI_MIME_TYPE, McpClient, McpError, McpRefused
+from himari.mcp.client import UI_MIME_TYPE, McpClient, McpError, McpRefused, http_client
 from himari.mcp.config import McpConfig, McpServerConfig, McpToolConfig, McpUiPolicy
 from himari.tool.api import (
     MAX_APP_PAYLOAD_BYTES,
@@ -268,7 +268,7 @@ class McpConnection:
 
 async def _start(server: McpServerConfig, check_schema: InputSchemaCheck,
                  transport: httpx.AsyncBaseTransport | None) -> tuple[McpClient, list[McpTool], SourceStatus]:
-    client = McpClient(server.url, server.token, timeout_seconds=server.timeout_seconds, transport=transport,
+    client = http_client(server.url, server.token, timeout_seconds=server.timeout_seconds, transport=transport,
                        ui=server.ui is not None)
     try:
         async with asyncio.timeout(STARTUP_SECONDS):
