@@ -95,18 +95,22 @@
   | --- | --- |
   | `SUCCEEDED`·`FAILED`이고, 결과와 함께 화면이 저장됨 | `ui/notifications/tool-result` (저장된 payload) |
   | 위와 같지만, 저장된 화면의 digest가 띄운 화면과 다름 (그 사이 재시작해서 HTML이 바뀜) | 저장된 화면으로 다시 띄운다 |
-  | `CANCELLED`·`DENIED`·`UNKNOWN`, 서버가 실행하지 않음(화면 없는 `FAILED`), 결과가 너무 커서 화면에 못 넣음 | `ui/notifications/tool-cancelled {reason}` |
+  | `CANCELLED`·`DENIED` — 실행되지 않음 (사용자가 멈춤·방향 전환·Dismiss, 권한 거부, 인자 오류) | `ui/notifications/tool-cancelled {reason}` |
+  | `SUCCEEDED`·`FAILED`인데 화면이 저장되지 않음 (결과가 1 MiB를 넘음, 서버가 실행하지 않음 등) | **`tool-cancelled`를 보내지 않는다.** 호스트가 화면을 닫고(`ui/resource-teardown` → iframe 제거), 그 자리에 "This result can't be shown in the view"를 보인다. 결과는 Tool 행의 텍스트로 보인다 |
+  | `UNKNOWN` — 실행됐을 수 있음 (V3-047) | `tool-cancelled`도 결과도 보내지 않는다. 호스트가 화면을 닫고 "The outcome of this call is unknown"을 보인다 |
 
-  - Pause로 멈춘 호출(`PENDING`)의 화면은 입력만 받은 채 기다린다. Continue로 실행되면 결과를 받고, 새 메시지나 Dismiss로 닫히면 `tool-cancelled`를 받는다.
+  **원칙(PR #27 재검수 N1):** 화면에 보내는 알림은 호출의 실제 상태와 맞아야 한다. 사양은 실행이 끝나면 `tool-result`, 취소되면 `tool-cancelled`로 나눈다. 그래서 `tool-cancelled`는 **실행되지 않은 호출**에만 보낸다. 실행된 호출이나 실행됐을 수 있는 호출을 취소됐다고 알리면 안 된다. 결과를 화면에 줄 수 없을 때는, 그것을 호출 상태로 꾸미지 않고 호스트 자신의 표시 실패로 다룬다. 사용자 확인 없이 결과를 성공·실패로 꾸미지 않는다는 V3-047과 같은 원칙이다.
+
+  - Pause로 멈춘 호출(`PENDING`)의 화면은 입력만 받은 채 기다린다. Continue로 실행되면 결과를 받고, 새 메시지나 Dismiss로 닫히면(`CANCELLED`) `tool-cancelled`를 받는다.
   - 결과는 지금처럼 이벤트 폴링(1초)으로 알게 되므로, 화면에 반영되기까지 최대 약 1초 걸린다.
-  - 실행 중인 화면도 저장된 화면과 같은 규칙을 따른다: 서버별 켜짐(§3.2), CSP 교집합(§3.3), sandbox(§3.4).
+  - 실행 중인 화면도 저장된 화면과 같은 규칙을 따른다: 서버별 켜짐(§3.2), CSP 교집합(§3.3), sandbox(§3.4), 그리고 대화별 출처 켜짐(§3.7).
   - 실행 중 표시 때문에 `ToolDefinition`을 바꾸지 않는다. Web이 Application을 통해 커넥터에 "이 Tool의 지금 화면"을 묻는다(§4.2).
 
 화면 테두리 위에는 항상 "App view from `<서버 이름>` · sandboxed"를 보인다. `prefersBorder`와 상관없이 보인다(사양의 사회공학 위험 대응).
 
 ### 3.6 브라우저 검증 (PR #27 검수 B3, 2026-10-15)
 
-§3.4의 이중 iframe 구성을 실제 브라우저에서 확인했다. 환경: **Chrome for Testing 156.0.8078.4 (headless shell)**, 이 호스트에서 loopback 두 포트. 메인 origin은 지금의 HIMARI CSP + `frame-src <sandbox>`, 쿠키는 `HttpOnly; SameSite=Strict`. proxy는 사양 CSP 틀(선언 도메인 없음) + `frame-ancestors <메인>` 헤더, 안쪽 View는 `sandbox="allow-scripts"` + `srcdoc`. 검증 스크립트는 구현 PR에 smoke로 들인다.
+§3.4의 이중 iframe 구성을 실제 브라우저에서 확인했다. 환경: **Chrome for Testing 156.0.8078.4 (headless shell)**, 이 호스트에서 loopback 두 포트. 메인 origin은 지금의 HIMARI CSP + `frame-src <sandbox>`, 쿠키는 `HttpOnly; SameSite=Strict`. proxy는 사양 CSP 틀(선언 도메인 없음) + `frame-ancestors <메인>` 헤더, 안쪽 View는 `sandbox="allow-scripts"` + `srcdoc`. 재현: `python -I scripts/mcp_apps_probe/run.py`(14개 확인, 하나라도 틀리면 종료 코드 1).
 
 | 확인한 것 | 결과 |
 | --- | --- |
@@ -121,11 +125,25 @@
 | View·proxy의 메인 API 요청 (기본 CSP) | `connect-src` 위반, 메인에 아무 요청도 도착하지 않음 |
 | **대조 실험:** `connect-src`에 메인을 일부러 넣었을 때 | proxy(sandbox origin)의 POST는 **쿠키를 가지고** 도착(Origin = sandbox) → `OriginGuard`가 403. View의 POST는 Origin `null`, 쿠키 없음 |
 
+**음성 대조:** 같은 스크립트에서 View에 참조 구현처럼 `allow-same-origin`을 주면 14개 중 5개가 실패한다. View의 origin이 sandbox origin이 되고, proxy DOM과 localStorage에 닿으며, View의 POST가 **세션 쿠키를 가지고** 메인에 도착한다(이 경우 `OriginGuard`만 남는다). 그래서 확인 항목들이 실제로 차이를 잡아낸다는 것과, View를 opaque로 둔 선택(§3.4)의 근거가 함께 확인된다.
+
 대조 실험이 §3.4의 판단을 뒷받침한다. 포트만 다른 origin은 같은 사이트라 `SameSite=Strict` 쿠키가 함께 간다. 그래서 막는 것은 `OriginGuard`이고, View를 opaque로 두면 쿠키 자체가 가지 않는다.
 
 **남은 확인:** Firefox·Safari는 이 호스트에서 돌릴 수 없어 확인하지 못했다. 구현 PR에서 돌릴 수 있는 곳을 찾고, 안 되면 지원 브라우저를 Chromium 계열로 적는다.
 
 **대체 구성** (어떤 브라우저가 proxy CSP 아래의 `srcdoc`을 막는 경우): View를 `srcdoc`이 아니라 sandbox 서버가 직접 서빙하는 문서로 띄운다(`/view?p=…&sig=…`). 그 응답에 View 전용 CSP 헤더와 CSP `sandbox allow-scripts` 지시어(속성과 별개로 opaque를 강제)를 넣고, proxy 자신은 `script-src 'self'; frame-src <sandbox>`만 갖는다. 이 경우 sandbox 서버가 서명에 묶인 digest로 HTML을 읽어야 하므로, 서명에 digest를 넣고 sandbox 서버에 Data 읽기를 준다. 1차 구성이 통과했으므로 이것은 쓰지 않는다.
+
+### 3.7 대화에서 끈 출처의 화면은 띄우지 않는다 (PR #27 재검수 N2)
+
+대화별 External Tool 출처 선택(V3-055, `ExternalAccess`)은 화면에도 적용한다. 출처가 꺼져 있으면 모델이 그 출처의 Tool을 불러도 Dispatcher가 거부한다(`DENIED`). 그런데 실행 중 표시는 호출이 기록되는 즉시 화면을 띄우므로, 확인하지 않으면 **거부될 호출의 화면 코드가 먼저 실행된다.**
+
+- **화면을 보일 수 있는 조건** = 운영자가 그 서버의 화면을 켬(§3.2) **그리고** 이 대화에서 그 출처가 지금 켜져 있음(`ExternalAccess.enabled_sources(scope)`). `running`·`done` 모두, 그리고 이벤트의 `app_view` 플래그도 같은 조건으로 계산한다.
+- 대화에서 출처를 끄면 그 출처의 화면은 예전 것도 띄우지 않는다. 출처를 끈다는 것은 이 대화에서 그 서버의 것을 쓰지 않겠다는 뜻이고, 저장된 화면도 그 서버의 코드다. 결과 텍스트는 지금처럼 보인다.
+- 이미 떠 있는 화면은 다음 때 닫는다(`ui/resource-teardown` → iframe 제거 → "This server is turned off in this conversation"):
+  - 같은 탭에서 사용자가 출처를 끈 직후
+  - Tool 출처 목록을 다시 읽을 때(대화를 열 때, 작업이 끝날 때) 꺼져 있으면
+  - 화면 조회가 `source_disabled`로 거부될 때(예: 실행 중 화면의 결과를 받으러 갈 때)
+- **한계:** 다른 탭에 떠 있는 화면은 그 탭이 위 세 가지 중 하나를 만날 때까지 남는다. 그동안에도 화면은 sandbox 안에 있고, 서버나 HIMARI에 새로 접근할 수 없다(§3.4, §3.6).
 
 ## 4. MCP 커넥터 (`src/himari/mcp/`)
 
@@ -210,8 +228,8 @@ ALTER TABLE tool_executions ADD COLUMN app_payload TEXT;
 ### 6.1 API
 
 - `GET /api/conversations/{id}/events`에 화면 표시를 더한다(Data 이벤트 payload는 바꾸지 않음):
-  - `assistant_tool_calls`의 각 call에 `app_view: true|false`: 그 Tool에 지금 보일 화면이 있는지(서버 화면 켜짐 + `ui_for` 있음). 실행 중 표시와 자동 표시에 쓴다.
-  - `tool_result`에 `app_view: true|false`: 결과와 함께 화면이 저장됐는지. 그 페이지에 나온 Run들의 실행 기록을 Run마다 한 번씩 읽어 계산한다.
+  - `assistant_tool_calls`의 각 call에 `app_view: true|false`: 그 Tool에 지금 보일 화면이 있는지(서버 화면 켜짐 + 이 대화에서 출처 켜짐(§3.7) + `ui_for` 있음). 실행 중 표시와 자동 표시에 쓴다.
+  - `tool_result`에 `app_view: true|false`: 결과와 함께 화면이 저장됐고 지금 보일 수 있는지(서버 화면 켜짐 + 출처 켜짐). 그 페이지에 나온 Run들의 실행 기록을 Run마다 한 번씩 읽어 계산한다.
 - `GET /api/conversations/{id}/calls/{run_id}/{call_id}/app` → 200, `state`에 따라 세 모양:
 
   ```json
@@ -226,8 +244,15 @@ ALTER TABLE tool_executions ADD COLUMN app_payload TEXT;
   - `done`: 결과와 함께 저장된 화면. HTML과 선언 CSP는 저장된 것이다.
   - `tool`: 지금 연결된 서버가 준 Tool 정보(`tool_info`). 그 Tool이 더 이상 등록돼 있지 않으면 `null`이다.
   - `running`: 호출이 아직 끝나지 않음(`PENDING`·`EXECUTION_CLAIMED`). 같은 모양이지만 HTML은 `ui_for`의 지금 리소스이고 `result`는 `null`이다.
-  - `ended`: 끝났지만 화면이 저장되지 않음. `{"state": "ended", "status": "cancelled|denied|unknown|failed", "reason": "…"}`만 준다(HTML 없음). 띄워 둔 화면에 `tool-cancelled`를 보낼 때 쓴다.
-  - 저장된 화면도 지금 화면도 없으면 404 `no_app_view`. 그 서버의 화면을 운영자가 껐거나 서버가 설정에서 빠졌으면 404 `app_view_disabled`.
+  - `ended`: 끝났지만 화면이 저장되지 않음. HTML 없이 다음만 준다:
+
+    ```json
+    {"state": "ended", "status": "succeeded|failed|cancelled|denied|unknown", "outcome": "not_run|view_unavailable|unknown", "reason": "…"}
+    ```
+
+    - `status`: 실행 기록의 실제 상태 그대로다. 성공한 호출도 `succeeded`로 나온다(재검수 N1).
+    - `outcome`: 화면을 어떻게 끝낼지 정한다. `cancelled`·`denied` → `not_run`(브리지가 `tool-cancelled`), `succeeded`·`failed` → `view_unavailable`(호스트가 닫고 안내), `unknown` → `unknown`(호스트가 닫고 안내). §3.5 표와 같다.
+  - 저장된 화면도 지금 화면도 없으면 404 `no_app_view`. 그 서버의 화면을 운영자가 껐거나 서버가 설정에서 빠졌으면 404 `app_view_disabled`. 이 대화에서 그 출처가 꺼져 있으면 404 `source_disabled`(§3.7). 셋 다 상태와 상관없이 같은 순서로 확인한다: 출처 → 운영자 설정 → 화면 유무.
   - 인증과 대화 범위는 다른 조회와 같다. `cache-control: no-store`는 지금처럼 `/api/`에 붙는다.
   - HTML은 JSON 문자열로만 나간다. 메인 origin에서 `text/html`로 서빙하는 경로는 없다.
 
@@ -252,7 +277,7 @@ ALTER TABLE tool_executions ADD COLUMN app_payload TEXT;
 | View → 호스트 | 처리 |
 | --- | --- |
 | `ui/initialize` (요청, `tool`이 `null`이면 `toolInfo`를 뺀다. PR #27 검수 C1: 사양의 `Tool`은 `inputSchema`가 필수) | `{protocolVersion: "2026-01-26", hostInfo: {name: "himari", version: "3"}, hostCapabilities: {openLinks: {}, sandbox: {csp: <실제 CSP>}}, hostContext: {toolInfo: {tool: <API의 tool>}, theme, displayMode: "inline", availableDisplayModes: ["inline"], containerDimensions: {width: <행 너비>, maxHeight: 800}, locale, timeZone, platform: "web"}}` |
-| `ui/notifications/initialized` | `tool-input {arguments}` 전송. 이미 `done`이면 이어서 `tool-result <payload>`, `ended`이면 `tool-cancelled` |
+| `ui/notifications/initialized` | `tool-input {arguments}` 전송. 이미 `done`이면 이어서 `tool-result <payload>`, `ended`이면 `outcome`대로(§3.5) |
 | `ui/notifications/size-changed` | iframe 높이를 40~800px로 맞춤 |
 | `ui/open-link` (요청) | `http(s)` URL만, 주소를 보여 주는 확인 창 → `window.open(url, "_blank", "noopener,noreferrer")`, 거절하면 `-32000` |
 | `ping` | `{}` |
@@ -262,7 +287,8 @@ ALTER TABLE tool_executions ADD COLUMN app_payload TEXT;
 
 - 받는 메시지는 `event.source`가 그 화면의 iframe이고 `event.origin`이 sandbox origin일 때만 처리한다. `jsonrpc: "2.0"`인 평범한 객체만 받고, JSON 직렬화 길이가 1 MiB를 넘으면 버린다.
 - `hostCapabilities`에 `serverTools`·`serverResources`가 없으므로, 앱은 호출 기능이 없음을 안다.
-- **실행 중인 화면의 마무리:** 띄워 둔 `running` 화면의 `tool_result` 이벤트가 오면 `…/app`을 다시 읽어 §3.5 표대로 처리한다(`tool-result`, 다시 띄우기, `tool-cancelled`). View의 `initialized` 전에 끝났으면, `initialized` 뒤에 `tool-input`과 함께 보낸다.
+- **실행 중인 화면의 마무리:** 띄워 둔 `running` 화면의 `tool_result` 이벤트가 오면 `…/app`을 다시 읽어 §3.5 표대로 처리한다: `done` → `tool-result`(digest가 다르면 다시 띄우기), `ended` → `outcome`대로(`not_run`만 `tool-cancelled`, 나머지는 호스트가 닫고 안내), 404 `source_disabled`·`app_view_disabled` → 닫고 안내. View의 `initialized` 전에 끝났으면, `initialized` 뒤에 `tool-input`과 함께 처리한다.
+- **출처를 끌 때:** §3.7의 세 경우에 그 출처의 화면을 모두 닫는다.
 - **자동 표시:** 이벤트를 그린 뒤 `app_view`가 참인 가장 최근 call을 고른다(가장 최근 Run의 가장 큰 ordinal). 아직 띄우지 않았으면 띄운다. 사용자가 닫은 화면은 다시 자동으로 띄우지 않는다(그 대화를 다시 열 때까지).
 
 ### 6.4 CLI
@@ -278,6 +304,7 @@ ALTER TABLE tool_executions ADD COLUMN app_payload TEXT;
 | 인자·결과를 밖으로 보냄 | `connect-src` = 선언 ∩ 운영자 상한(기본 없음), `allow-popups`·`allow-top-navigation` 없음, 링크는 사용자 확인 |
 | 다른 서버의 화면을 엿봄 | View는 opaque origin(저장소 없음), 화면마다 별도 iframe |
 | HIMARI sandbox origin을 느슨한 CSP로 악용 | 프로세스마다 새로 만드는 키로 HMAC 서명, 메인 origin 하나에 묶음, 10분 만료 |
+| 대화에서 끈 출처의 화면 코드가 실행됨 | 화면 조건에 `ExternalAccess`를 넣음, 끄면 떠 있는 화면도 닫음(§3.7) |
 | 운영자가 거둔 뒤 예전 서명 URL을 다시 씀 | 정책은 시작할 때만 바뀌고, 시작할 때 키도 바뀐다. 재시작하면 예전 URL은 모두 400 |
 | 위조된 메시지 | proxy는 메인 origin만, 호스트는 자기 iframe·sandbox origin만, 크기 한도 |
 | 자원 소모 | 가장 최근 하나만 자동, 나머지는 열 때만, 동시 3개, HTML 2 MiB |
@@ -296,14 +323,16 @@ ALTER TABLE tool_executions ADD COLUMN app_payload TEXT;
   - 공식 MCP Python SDK의 MCP Apps 예제 서버와 상호운용을 확인한다(V3-P53과 같은 방식).
 - **Data:** v4 → v5 업그레이드(데이터 유지, 정확한 모양만), 결과와 화면의 원자 커밋, 다른 대화에서는 `read_app_view`를 읽을 수 없음, 상태별 거부, digest 불일치 거부. 같은 계약 테스트를 두 저장소에 돌린다.
 - **Web:**
-  - API의 세 상태(`running` → `done`, `running` → `ended`: Pause 후 Dismiss, Cancel, 결과 불명), 404 두 종류, 두 이벤트의 `app_view` 플래그
+  - API의 세 상태(`running` → `done`, `running` → `ended`: Pause 후 Dismiss, Cancel, 결과 불명), 404 세 종류, 두 이벤트의 `app_view` 플래그
+  - **N1:** 실행 중 화면이 떠 있는 호출이 성공했지만 결과가 1 MiB를 넘을 때 → `ended`의 `status: succeeded`·`outcome: view_unavailable`. 브라우저 smoke에서는 `tool-cancelled`가 가지 않고 화면이 안내로 바뀌는지 본다. `UNKNOWN`·서버가 실행하지 않은 `FAILED`도 `tool-cancelled` 없음. `CANCELLED`·`DENIED`만 `tool-cancelled`
+  - **N2:** 출처가 꺼진 대화에서 모델이 그 출처의 Tool을 부를 때 → `assistant_tool_calls`의 `app_view: false`, `…/app`은 `running`·`done` 모두 404 `source_disabled`, 호출은 `DENIED`. 출처를 켠 상태에서 화면을 띄우고 끄면 → 다음 조회가 `source_disabled`, 브라우저 smoke에서 화면이 닫히는지 본다
   - 메인 CSP의 `frame-src`
   - sandbox 응답 헤더(서명된 CSP, 서명이 틀리면 400, `frame-ancestors`), sandbox 서버에 API 경로가 없음
   - sandbox origin의 POST가 쿠키를 가지고도 403
   - 운영자가 도메인을 빼면 예전 화면의 CSP도 줄어듦
 - **sandbox 서명:** 예전 프로세스의 서명 URL은 400, 만료된 URL은 400, 다른 메인 origin으로 바꾼 `p`는 400, `wss://` 항목은 `connect-src`에 들어감.
 - **import 검사:** MCP 커넥터가 `UiResource`·`AppView`를 `tool.api`에서 가져오고, `data.api`를 직접 import하면 실패(규칙 6).
-- **브라우저 smoke:** §3.6의 검증을 실제 HIMARI 서버로 다시 돌린다. 여기에 더해 자동 표시(가장 최근 하나, 닫은 화면은 다시 띄우지 않음)와 실행 중 → 결과·취소 전환을 본다. 이 호스트에서는 Playwright의 Chromium에 빠진 시스템 라이브러리 4개(`libatk`, `libatspi`, `libasound`, `libXdamage`)를 Ubuntu 패키지에서 풀어 쓰면 돌아간다. 구현 PR에서 이 절차를 smoke 스크립트에 적는다. Firefox·Safari는 §3.6의 남은 확인.
+- **브라우저 smoke:** `scripts/mcp_apps_probe/run.py`(설계 모형)는 이미 있다. 구현 PR에서는 같은 확인을 실제 HIMARI 서버로 다시 돌린다. 여기에 더해 자동 표시(가장 최근 하나, 닫은 화면은 다시 띄우지 않음)와 실행 중 → 결과·취소 전환을 본다. 이 호스트에서는 Playwright의 Chromium에 빠진 시스템 라이브러리 4개(`libatk`, `libatspi`, `libasound`, `libXdamage`)를 Ubuntu 패키지에서 풀어 쓰면 돌아간다. 구현 PR에서 이 절차를 smoke 스크립트에 적는다. Firefox·Safari는 §3.6의 남은 확인.
 - 공개 계약이 바뀌므로 전체 pytest를 돌린다(V3-038).
 
 ## 9. 결정된 것과 남은 질문
