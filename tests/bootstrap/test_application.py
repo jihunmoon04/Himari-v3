@@ -26,7 +26,7 @@ from himari.common import PrincipalId, ToolId, TrustedScope
 from himari.control.api import DriveState
 from himari.data.sqlite import StoreLockedError
 from himari.environment.inside import INSIDE
-from himari.environment.inside.sandbox import SandboxState
+from himari.sandbox.api import SandboxState
 from himari.provider.api import ProviderCapabilities
 from himari.provider.scripted import ScriptedAdapter, ScriptStep
 

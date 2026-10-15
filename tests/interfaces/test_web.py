@@ -23,7 +23,7 @@ from testkit import calls, final  # noqa: E402
 from himari.bootstrap.application import Application  # noqa: E402
 from himari.bootstrap.operator import OPERATOR, derive_cli_bearer  # noqa: E402
 from himari.common import ASK_USER_TOOL_ID, ConversationId, PrincipalId, TextBlock, TrustedScope  # noqa: E402
-from himari.environment.inside.sandbox import SandboxState  # noqa: E402
+from himari.sandbox.api import SandboxState  # noqa: E402
 from himari.control.api import DriveResult, DriveState, StopSignal  # noqa: E402
 from himari.control.runner import BackgroundRunner  # noqa: E402
 from himari.data.api import UserMessage  # noqa: E402

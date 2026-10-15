@@ -33,7 +33,8 @@ from himari.common import (
 from himari.control.api import DriveState
 from himari.data.api import BindingAuthority, ConversationWorkspace
 from himari.environment.inside import INSIDE, InsideEnvironment
-from himari.environment.inside.sandbox import SandboxBackend, SandboxState
+from himari.sandbox.api import SandboxState
+from himari.sandbox.backend import SandboxBackend
 from himari.environment.inside.tools import MAX_OBSERVATION_BYTES
 from himari.provider.scripted import ScriptedAdapter
 from himari.tool.api import ToolContext, ToolInvocation, ToolOutcome, ToolStatus
@@ -202,8 +203,8 @@ def test_external_hard_link_blocks_the_command(env: InsideEnvironment, tmp_path:
                                    ["--bind", "{parent}", "/tmp"]])
 def test_self_test_fails_when_the_view_exposes_host_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
                                                          extra: list[str]) -> None:
-    from himari.environment.inside.sandbox import backend as sbmod
-    from himari.environment.inside.sandbox.self_test import probe
+    from himari.sandbox import backend as sbmod
+    from himari.sandbox.self_test import probe
 
     parent = str(tmp_path / "production-workspaces")
     os.makedirs(parent)
@@ -254,8 +255,8 @@ def test_cancel_during_bwrap_creation_leaves_nothing_behind(backend: SandboxBack
 ])
 def test_self_test_fails_when_a_created_mount_is_replaced_by_a_host_path(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch, replace: tuple[list[str], list[str]]) -> None:
-    from himari.environment.inside.sandbox import backend as sbmod
-    from himari.environment.inside.sandbox.self_test import probe
+    from himari.sandbox import backend as sbmod
+    from himari.sandbox.self_test import probe
 
     parent = str(tmp_path / "production-workspaces")
     os.makedirs(parent)
