@@ -12,6 +12,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+import pytest
 from testkit import calls, final, user
 
 from himari.bootstrap.application import Application
@@ -20,6 +21,8 @@ from himari.common import TrustedScope
 from himari.control.api import DriveState
 from himari.data.api import ToolExecutionStatus
 from himari.mcp.config import McpStdioConfig
+from himari.mcp.jsonrpc import McpUncertain
+from himari.mcp.stdio import StdioServer
 from himari.provider.scripted import ScriptedAdapter
 from himari.sandbox.server import STREAM_LIMIT, ServerProcess
 
@@ -109,6 +112,38 @@ def test_without_the_sandbox_a_stdio_server_is_left_out(tmp_path: Path) -> None:
             assert not status.available and "server sandbox" in status.problems[0]
         finally:
             await app.close()
+
+    asyncio.run(run())
+
+
+def test_a_real_pipe_left_unread_is_bounded_by_the_call_timeout() -> None:
+    """PR #34 review B2 with a real pipe: the server answers initialize and
+    then stops reading; a large request fills the pipe."""
+    script = ("import json, sys, time\n"
+              "init = json.loads(sys.stdin.readline())\n"
+              "print(json.dumps({'jsonrpc': '2.0', 'id': init['id'], 'result': {'protocolVersion': "
+              "init['params']['protocolVersion'], 'capabilities': {}, 'serverInfo': {'name': 'x', 'version': '1'}}}),"
+              " flush=True)\n"
+              "sys.stdin.readline()\n"
+              "time.sleep(600)\n")
+
+    async def run() -> None:
+        launcher = PlainLauncher()
+        server = StdioServer("stuck", McpStdioConfig("/usr/bin/python3", ("-c", script), "/tmp", (), (), (),
+                                                     "shared", 60.0, 1), launcher, capabilities={}, timeout_seconds=1)
+        try:
+            start = asyncio.get_running_loop().time()
+            with pytest.raises(McpUncertain, match="could not be written in 1 s"):
+                await server.request("tools/call", {"name": "echo", "arguments": {"text": "x" * 4_000_000}}, "conv-a")
+            assert asyncio.get_running_loop().time() - start < 2.5
+            await asyncio.sleep(0.1)
+            for _ in range(60):
+                if launcher.launched[0].returncode is not None:
+                    break
+                await asyncio.sleep(0.1)
+            assert launcher.launched[0].returncode is not None  # closed: SIGTERM ends it
+        finally:
+            await server.aclose()
 
     asyncio.run(run())
 

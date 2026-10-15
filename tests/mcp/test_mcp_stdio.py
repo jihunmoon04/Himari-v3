@@ -472,3 +472,97 @@ def test_session_states_follow_the_cancelled_list() -> None:
             await server.aclose()
 
     run(scenario)
+
+
+# --- PR #34 review -------------------------------------------------------------------------
+
+
+def test_b1_concurrent_conversations_never_pass_the_process_limit() -> None:
+    """Two Conversations needing a place at once must not both close the same
+    idle session and both start a process."""
+    async def scenario() -> None:
+        launcher = FakeLauncher()
+        launcher.shutdown_delay = 0.1  # a slow close widens the window
+        event, slow = gate()
+        connection = await connected(launcher, processes={"scope": "per_conversation", "max": 1})
+        handler = connection.handlers[0]
+        try:
+            await call(handler, "a", "conv-a")  # conv-a holds the one place, idle
+            launcher.handlers["echo"] = slow
+            b = asyncio.create_task(call(handler, "b", "conv-b"))
+            c = asyncio.create_task(call(handler, "c", "conv-c"))
+            await asyncio.sleep(0.4)
+            assert launcher.most_alive == 1
+            event.set()
+            outcomes = await asyncio.gather(b, c)
+            assert sorted(o.status.value for o in outcomes) == ["failed", "succeeded"]
+            refused = next(o for o in outcomes if o.status is ToolStatus.FAILED)
+            assert "no free session" in str(refused.raw_result) and "did not run" in text_of(refused)
+            assert launcher.most_alive == 1
+        finally:
+            event.set()
+            await connection.aclose()
+
+    run(scenario)
+
+
+def test_b1_a_session_chosen_to_make_room_admits_no_request() -> None:
+    async def scenario() -> None:
+        launcher = FakeLauncher()
+        server = StdioServer("calliope", McpStdioConfig(COMMAND, (), "/tmp", (), (), (), "per_conversation", 60.0, 1),
+                             launcher, capabilities={}, timeout_seconds=5)
+        try:
+            session = await server._session("conv-a")
+            closing = asyncio.create_task(session.close("its place went to another Conversation"))
+            await asyncio.sleep(0)  # close has begun; the process is still shutting down
+            assert session.process.returncode is None
+            with pytest.raises(McpRefused, match="not ready"):  # CLOSING from the moment close is called
+                await session.request("tools/call", {"name": "echo", "arguments": {}}, 5)
+            await closing
+            assert launcher.calls() == []
+        finally:
+            await server.aclose()
+
+    run(scenario)
+
+
+def test_b2_a_server_that_stops_reading_times_out_and_is_closed() -> None:
+    async def scenario() -> None:
+        launcher = FakeLauncher()
+        connection = await connected(launcher, timeout_seconds=1)
+        try:
+            launcher.stop_reading = True
+            start = asyncio.get_running_loop().time()
+            with pytest.raises(McpUncertain, match="could not be written in 1 s"):
+                await call(connection.handlers[0], "a")
+            assert asyncio.get_running_loop().time() - start < 2
+            await asyncio.sleep(0.05)
+            assert launcher.processes[1].shutdowns == 1  # not used again: part of the request may be in it
+            launcher.stop_reading = False
+            outcome = await call(connection.handlers[0], "b")
+            assert text_of(outcome) == f"{RESTART_NOTICE}\n\necho: b"
+        finally:
+            await connection.aclose()
+
+    run(scenario)
+
+
+def test_b2_a_stop_while_writing_closes_the_session() -> None:
+    async def scenario() -> None:
+        launcher = FakeLauncher()
+        connection = await connected(launcher)
+        try:
+            launcher.stop_reading = True
+            stopped = asyncio.create_task(call(connection.handlers[0], "a"))
+            await asyncio.sleep(0.05)
+            stopped.cancel()
+            await asyncio.gather(stopped, return_exceptions=True)
+            await asyncio.sleep(0.05)
+            assert launcher.processes[1].shutdowns == 1
+            assert not [m for m in launcher.processes[1].server.received
+                        if m.get("method") == "notifications/cancelled"]  # nothing more goes into that stream
+        finally:
+            await connection.aclose()
+
+    run(scenario)
+

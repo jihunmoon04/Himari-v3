@@ -169,27 +169,43 @@ class Session:
             raise McpRefused(f"{method}: the server process is not ready")  # nothing written
         self.last_used = _clock()
         request_id, future = self._register()
+        written = False
         try:
-            await self._write(request(request_id, method, params))
-        except Exception:
-            self._pending.pop(request_id, None)
-            self._spawn(self.close("its input broke"))
-            raise McpUncertain(f"{method}: the request could not be fully written") from None
-        except asyncio.CancelledError:
-            self._cancel(request_id, "cancelled by the user")
-            raise
-        try:
+            # One time limit for writing and waiting (PR #34 review B2): a
+            # server that stops reading its stdin fills the pipe, and the
+            # write would wait for it however long.
             async with asyncio.timeout(timeout):
+                try:
+                    await self._write(request(request_id, method, params))
+                except Exception:
+                    self._pending.pop(request_id, None)
+                    self._spawn(self.close("its input broke"))
+                    raise McpUncertain(f"{method}: the request could not be fully written") from None
+                written = True
                 message = await asyncio.shield(future)
         except TimeoutError:
-            self._cancel(request_id, "timed out")
-            raise McpUncertain(f"{method}: no answer in {timeout:g} s") from None
+            if written:
+                self._cancel(request_id, "timed out")
+                raise McpUncertain(f"{method}: no answer in {timeout:g} s") from None
+            self._unwritten(request_id, "it did not read its input in time")
+            raise McpUncertain(f"{method}: the request could not be written in {timeout:g} s; "
+                               "the server may have read part of it") from None
         except asyncio.CancelledError:
-            self._cancel(request_id, "cancelled by the user")
+            if written:
+                self._cancel(request_id, "cancelled by the user")
+            else:
+                self._unwritten(request_id, "a request was stopped while it was being written")
             raise
         finally:
             self.last_used = _clock()
         return result_of(message, request_id, method)
+
+    def _unwritten(self, request_id: int, reason: str) -> None:
+        """A write that did not finish: the server may have read part of the
+        request, and the stream may hold the rest. The session cannot be
+        trusted again; it is closed (its other requests become uncertain)."""
+        self._pending.pop(request_id, None)
+        self._spawn(self.close(reason))
 
     def _cancel(self, request_id: int, reason: str) -> None:
         future = self._pending.pop(request_id, None)
@@ -270,6 +286,7 @@ class Session:
 
     async def close(self, reason: str) -> None:
         if self._closing is None:
+            self._set(State.CLOSING)  # at once: no request is written from here on
             self._closing = asyncio.create_task(self._close(reason))
         await asyncio.shield(self._closing)
 
@@ -312,6 +329,7 @@ class StdioServer:
         self._seen: dict[str, int] = {}  # Conversation → the generation of its last answer
         self._restarted: set[str] = set()
         self._reaper: asyncio.Task[None] | None = None
+        self._allocating = asyncio.Lock()
         self._closed = False
 
     # --- calls ----------------------------------------------------------------
@@ -345,12 +363,16 @@ class StdioServer:
                     return session
                 await session.settled.wait()  # DRAINING or CLOSING: nothing written while waiting
                 continue
-            task = self._starting.get(slot)
-            if task is None:
-                self._check_backoff(slot)
-                await self._make_room(slot)
-                task = asyncio.create_task(self._start(slot))
-                self._starting[slot] = task
+            async with self._allocating:  # one allocation at a time (PR #34 review B1)
+                session = self._sessions.get(slot)
+                if session is not None and session.state is not State.CLOSED:
+                    continue  # started meanwhile
+                task = self._starting.get(slot)
+                if task is None:
+                    self._check_backoff(slot)
+                    await self._make_room(slot)
+                    task = asyncio.create_task(self._start(slot))
+                    self._starting[slot] = task  # holds its place before the lock is released
             return await asyncio.shield(task)  # a caller's Stop ends its wait, not the start
 
     def _check_backoff(self, slot: str | None) -> None:
@@ -359,15 +381,19 @@ class StdioServer:
             raise McpRefused(f"the server failed to start; trying again in {failed[1] - _clock():.0f} s")
 
     async def _make_room(self, slot: str | None) -> None:
+        """Under the allocation lock: until a place is free, close the least
+        recently used idle session (marked CLOSING at once, so no request
+        is admitted to it meanwhile); with none idle, refuse."""
         if self._config.scope != "per_conversation":
             return
-        live = [s for k, s in self._sessions.items() if k != slot and s.state is not State.CLOSED]
-        if len(live) + len(self._starting) < self._config.max_processes:
-            return
-        idle = sorted((s for s in live if s.state is State.READY and not s.busy), key=lambda s: s.last_used)
-        if not idle:
-            raise McpRefused("this server has no free session; try again")
-        await idle[0].close("its place went to another Conversation")
+        while True:
+            live = [s for k, s in self._sessions.items() if k != slot and s.state is not State.CLOSED]
+            if len(live) + len(self._starting) < self._config.max_processes:
+                return
+            idle = sorted((s for s in live if s.state is State.READY and not s.busy), key=lambda s: s.last_used)
+            if not idle:
+                raise McpRefused("this server has no free session; try again")
+            await idle[0].close("its place went to another Conversation")
 
     async def _start(self, slot: str | None) -> Session:
         try:

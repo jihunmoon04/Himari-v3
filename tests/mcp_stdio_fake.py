@@ -87,6 +87,8 @@ class FakeProcess:
     async def write_line(self, data: bytes) -> None:
         if self.returncode is not None:
             raise Gone("ended")
+        if self.server.launcher.stop_reading and b'"tools/call"' in data:
+            await asyncio.Event().wait()  # a full pipe: the server stopped reading its stdin
         await self.server.receive(data)
 
     async def read_line(self) -> bytes:
@@ -104,6 +106,8 @@ class FakeProcess:
 
     async def shutdown(self, grace: float) -> None:
         self.shutdowns += 1
+        if self.server.launcher.shutdown_delay:
+            await asyncio.sleep(self.server.launcher.shutdown_delay)
         for task in self.server.running.values():
             task.cancel()
         if self.returncode is None:
@@ -125,12 +129,17 @@ class FakeLauncher:
         self.honour_cancel = True  # a cancelled call stops (and, if answer_cancelled, says so)
         self.answer_cancelled = True
         self.initialize_delay = 0.0
+        self.stop_reading = False  # tools/call writes block forever
+        self.shutdown_delay = 0.0
+        self.most_alive = 0  # the most processes alive at once (the listing process aside)
 
     async def launch(self, argv: Sequence[str], env: Mapping[str, str], cwd: str) -> FakeProcess:
         if self.fail_launch is not None:
             raise self.fail_launch
         process = FakeProcess(self, argv, env, cwd)
         self.processes.append(process)
+        alive = sum(1 for p in self.processes[1:] if p.returncode is None)
+        self.most_alive = max(self.most_alive, alive)
         return process
 
     def calls(self) -> list[tuple[int, str, dict[str, Any]]]:
