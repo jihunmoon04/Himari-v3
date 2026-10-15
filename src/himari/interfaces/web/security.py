@@ -13,6 +13,7 @@ automatically.
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable
 from typing import Any
 
 from starlette.datastructures import Headers
@@ -34,6 +35,13 @@ SECURITY_HEADERS: tuple[tuple[bytes, bytes], ...] = (
 )
 
 
+def page_csp(frame_origins: Iterable[str] = ()) -> str:
+    """The page's CSP; ``frame_origins``: where Tool views are framed from
+    (the sandbox origins, V3-P58). Nothing else may be framed."""
+    origins = " ".join(sorted(frame_origins))
+    return f"{_CSP}; frame-src {origins}" if origins else _CSP
+
+
 def error_body(code: str, message: str) -> bytes:
     return json.dumps({"error": {"code": code, "message": message}}).encode("utf-8")
 
@@ -47,8 +55,9 @@ class SecurityHeadersMiddleware:
     """Adds the fixed headers to every response, rejections included; API
     responses are never cached."""
 
-    def __init__(self, app: ASGIApp) -> None:
+    def __init__(self, app: ASGIApp, csp: str = _CSP) -> None:
         self._app = app
+        self._headers = ((b"content-security-policy", csp.encode("latin-1")), *SECURITY_HEADERS[1:])
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
@@ -58,7 +67,7 @@ class SecurityHeadersMiddleware:
 
         async def with_headers(message: Message) -> None:
             if message["type"] == "http.response.start":
-                headers = [*message.get("headers", []), *SECURITY_HEADERS]
+                headers = [*message.get("headers", []), *self._headers]
                 if is_api:
                     headers.append((b"cache-control", b"no-store"))
                 message = {**message, "headers": headers}

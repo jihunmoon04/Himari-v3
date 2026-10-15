@@ -10,6 +10,11 @@ two. Foreign or missing Conversations are indistinguishable (404).
 The browser reads progress by polling: the job status of a Conversation
 and its Events after the last sequence it has. Messages start background
 jobs (202); a second message while one runs is refused (409).
+
+Tool views (MCP Apps, V3-P58): events say which calls have one
+(``app_view``); ``GET …/calls/{run}/{call}/app`` gives a view as JSON with a
+signed URL of the sandbox origin's proxy (``sandbox.py``). The view's HTML
+is never served from this origin.
 """
 
 from __future__ import annotations
@@ -31,14 +36,23 @@ from pydantic import BaseModel, ConfigDict, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
-from himari.bootstrap.application import Application, ToolSourceView, UnknownToolSource
+from himari.bootstrap.application import (
+    Application,
+    AppViewRefused,
+    AppViewState,
+    ToolSourceView,
+    UnknownToolSource,
+)
 from himari.bootstrap.operator import OPERATOR, derive_cli_bearer, verify_operator_token
 from himari.common import (
     ASK_USER_TOOL_ID,
     AttachmentRef,
+    CallId,
+    CallRef,
     ContentBlock,
     ConversationId,
     PrincipalId,
+    RunId,
     TextBlock,
     TrustedScope,
     thaw,
@@ -56,12 +70,14 @@ from himari.data.api import (
     UserMessage,
 )
 from himari.interfaces.web.config import WebConfig
+from himari.interfaces.web.sandbox import SandboxGrant, SandboxSigner
 from himari.interfaces.web.security import (
     SESSION_COOKIE,
     BodyLimitMiddleware,
     OriginGuardMiddleware,
     SecurityHeadersMiddleware,
     error_body,
+    page_csp,
 )
 
 log = logging.getLogger(__name__)
@@ -70,7 +86,8 @@ MAX_MESSAGE_CHARS = 32_000
 MAX_EVENTS_PAGE = 500
 SESSION_SECONDS = 7 * 24 * 3600
 FAILED_LOGIN_DELAY_SECONDS = 1.0
-STATIC_FILES = {"app.css": "text/css", "app.js": "text/javascript", "rich_text.js": "text/javascript"}
+STATIC_FILES = {"app.css": "text/css", "app.js": "text/javascript", "app_view.js": "text/javascript",
+                "rich_text.js": "text/javascript"}
 
 Opener = Callable[[], Awaitable[Application]]
 
@@ -162,7 +179,10 @@ def summary_view(summary: ConversationSummary) -> dict[str, Any]:
     }
 
 
-def event_view(event: ConversationEvent) -> dict[str, Any]:
+def event_view(event: ConversationEvent, views: dict[CallRef, tuple[bool, bool]] | None = None) -> dict[str, Any]:
+    """``views``: Application.view_flags for the page — (shown while it
+    runs, stored with its result) per call with a view that may be shown."""
+    views = {} if views is None else views
     view: dict[str, Any] = {"sequence": event.sequence, "kind": event.kind.value, "created_at": _time(event.created_at)}
     payload = event.payload
     if isinstance(payload, UserMessage):
@@ -175,13 +195,40 @@ def event_view(event: ConversationEvent) -> dict[str, Any]:
     elif isinstance(payload, AssistantToolCalls):
         view["text"] = _text(payload.commentary)
         view["run_id"] = event.origin_run_id
-        view["calls"] = [{"call_id": c.call_id, "tool_id": c.tool_id, "arguments": thaw(c.arguments)}
+        run = event.origin_run_id
+        view["calls"] = [{"call_id": c.call_id, "tool_id": c.tool_id, "arguments": thaw(c.arguments),
+                          "app_view": run is not None and views.get(CallRef(run, c.call_id), (False, False))[0]}
                          for c in sorted(payload.calls, key=lambda c: c.ordinal)]
     elif isinstance(payload, ToolResultRecord):
         view["run_id"] = payload.call.run_id
         view["call_id"] = payload.call.call_id
         view["is_error"] = payload.model_result.is_error
         view["text"] = _text(payload.model_result.blocks)
+        view["app_view"] = views.get(payload.call, (False, False))[1]
+    return view
+
+
+def app_view_view(state: AppViewState, sandbox_url: str | None) -> dict[str, Any]:
+    view: dict[str, Any] = {
+        "state": state.state, "source": state.source, "tool_id": state.tool_id,
+        "tool": None if state.tool is None else thaw(state.tool),
+        "arguments": thaw(state.arguments), "status": state.status.value,
+    }
+    if state.resource is None:  # ended without a view: how to close it, and why
+        view["outcome"], view["reason"] = state.outcome, state.reason
+        return view
+    declared = state.resource.csp
+    view.update({
+        "digest": state.resource.digest, "html": state.resource.html, "prefers_border": state.resource.prefers_border,
+        "csp": {"connect_domains": list(state.csp.connect_domains),
+                "resource_domains": list(state.csp.resource_domains)},
+        "declared_csp": {"connect_domains": list(declared.connect_domains),
+                         "resource_domains": list(declared.resource_domains),
+                         "frame_domains": list(declared.frame_domains),
+                         "base_uri_domains": list(declared.base_uri_domains)},
+        "sandbox_url": sandbox_url,
+        "result": None if state.state != "done" else thaw(state.result),
+    })
     return view
 
 
@@ -240,8 +287,11 @@ def tool_source_view(view: ToolSourceView) -> dict[str, Any]:
 # --- the application ---------------------------------------------------------------------------
 
 
-def create_app(config: WebConfig, opener: Opener) -> FastAPI:
+def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None = None) -> FastAPI:
+    """``signer``: shared with the sandbox server (``sandbox.py``); made here
+    when not given (one per process, so a restart voids old view URLs)."""
     sessions = Sessions()
+    signer = SandboxSigner() if signer is None else signer
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -294,6 +344,11 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
             return JSONResponse({"error": {"code": "busy", "message": "This conversation is still working."}},
                                 status_code=409)
         return JSONResponse({"error": {"code": "conflict", "message": "Not possible right now."}}, status_code=409)
+
+    @app.exception_handler(AppViewRefused)
+    async def no_view(request: Request, error: AppViewRefused) -> JSONResponse:
+        return JSONResponse({"error": {"code": error.code, "message": "No view to show for this call."}},
+                            status_code=404)
 
     @app.exception_handler(UnknownToolSource)
     async def unknown_source(request: Request, error: UnknownToolSource) -> JSONResponse:
@@ -399,10 +454,27 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
                           after: int = 0, limit: int = 200) -> dict[str, Any]:
         if after < 0 or not 1 <= limit <= MAX_EVENTS_PAGE:
             raise ApiError(400, "invalid_argument", f"after >= 0 and limit 1..{MAX_EVENTS_PAGE}")
-        events = await himari(request).data.read_events(scope_of(conversation_id, who), after_sequence=after,
-                                                         limit=limit)
-        return {"items": [event_view(e) for e in events],
+        application, scope = himari(request), scope_of(conversation_id, who)
+        events = await application.data.read_events(scope, after_sequence=after, limit=limit)
+        runs = [e.origin_run_id for e in events if isinstance(e.payload, AssistantToolCalls) and e.origin_run_id]
+        runs += [e.payload.call.run_id for e in events if isinstance(e.payload, ToolResultRecord)]
+        views = await application.view_flags(scope, runs) if runs and application.views_configured else {}
+        return {"items": [event_view(e, views) for e in events],
                 "last_sequence": events[-1].sequence if events else after}
+
+    @app.get("/api/conversations/{conversation_id}/calls/{run_id}/{call_id}/app")
+    async def read_app_view(conversation_id: str, run_id: str, call_id: str, request: Request, origin: str,
+                            who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+        """A call's view (V3-P58 §6.1). ``origin``: the page's own origin,
+        one of the allowed ones; the view is framed only by it."""
+        if origin not in config.allowed_origins:
+            raise ApiError(400, "invalid_argument", "origin must be this page's origin.")
+        state = await himari(request).app_view(scope_of(conversation_id, who), CallRef(RunId(run_id), CallId(call_id)))
+        url = None
+        if state.resource is not None:
+            grant = SandboxGrant(origin, state.csp.connect_domains, state.csp.resource_domains)
+            url = f"{config.sandbox_origin(origin)}/sandbox?{signer.query(grant)}"
+        return app_view_view(state, url)
 
     @app.get("/api/conversations/{conversation_id}/context")
     async def read_context(conversation_id: str, request: Request,
@@ -489,5 +561,5 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
     app.add_middleware(BodyLimitMiddleware)
     app.add_middleware(OriginGuardMiddleware, allowed_origins=config.allowed_origins)
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=sorted(config.allowed_hosts))
-    app.add_middleware(SecurityHeadersMiddleware)
+    app.add_middleware(SecurityHeadersMiddleware, csp=page_csp(config.sandbox_origins))
     return app

@@ -13,6 +13,10 @@ through a TLS-terminating reverse proxy on the same machine: configure its
 public name in ``HIMARI_WEB_ALLOWED_HOSTS`` and its ``https://`` origin in
 ``HIMARI_WEB_ALLOWED_ORIGINS``. A plain ``http://`` origin is accepted only
 for a loopback host, and any https origin makes the cookie ``Secure``.
+
+Tool views (MCP Apps, V3-P58) are framed from a second origin: the same
+scheme and host as the page, on ``HIMARI_WEB_SANDBOX_PORT`` (default: the
+port + 1). A reverse proxy must forward that port too, for the same host.
 """
 
 from __future__ import annotations
@@ -24,6 +28,7 @@ from urllib.parse import urlsplit
 
 HOST_VAR = "HIMARI_WEB_HOST"
 PORT_VAR = "HIMARI_WEB_PORT"
+SANDBOX_PORT_VAR = "HIMARI_WEB_SANDBOX_PORT"
 ALLOWED_HOSTS_VAR = "HIMARI_WEB_ALLOWED_HOSTS"
 ALLOWED_ORIGINS_VAR = "HIMARI_WEB_ALLOWED_ORIGINS"
 SECURE_COOKIE_VAR = "HIMARI_WEB_SECURE_COOKIE"
@@ -59,12 +64,31 @@ class WebConfig:
     reasoning_effort: str | None
     sandbox: bool
     context_tokens: int | None = None  # None: the model's window, capped (Application)
+    sandbox_port: int | None = None  # Tool views' origin (V3-P58); None: port + 1
+
+    @property
+    def view_port(self) -> int:
+        return self.sandbox_port if self.sandbox_port is not None else self.port + 1
+
+    def sandbox_origin(self, origin: str) -> str:
+        """The sandbox origin that pairs with an allowed page origin: its
+        scheme and host on the sandbox port."""
+        parts = urlsplit(origin)
+        host = parts.hostname or ""
+        return f"{parts.scheme}://{f'[{host}]' if ':' in host else host}:{self.view_port}"
+
+    @property
+    def sandbox_origins(self) -> frozenset[str]:
+        return frozenset(self.sandbox_origin(o) for o in self.allowed_origins)
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> WebConfig:
         source: Mapping[str, str] = os.environ if env is None else env
         host = _non_empty(source.get(HOST_VAR), DEFAULT_HOST, HOST_VAR)
         port = _port(source.get(PORT_VAR))
+        sandbox_port = _port(source.get(SANDBOX_PORT_VAR), SANDBOX_PORT_VAR, default=port + 1)
+        if sandbox_port == port or sandbox_port > 65535:
+            raise WebConfigError(f"{SANDBOX_PORT_VAR} must be a port other than {PORT_VAR}: views need their own origin")
         hosts_raw, origins_raw = source.get(ALLOWED_HOSTS_VAR), source.get(ALLOWED_ORIGINS_VAR)
         # Loopback names are always allowed (a DNS-rebinding attack needs a
         # name the attacker controls), so the local CLI keeps working when a
@@ -107,6 +131,7 @@ class WebConfig:
             reasoning_effort=effort,
             sandbox=_flag(source.get(SANDBOX_VAR), SANDBOX_VAR, default=True),
             context_tokens=_positive(source.get(CONTEXT_TOKENS_VAR), CONTEXT_TOKENS_VAR),
+            sandbox_port=sandbox_port,
         )
 
 
@@ -119,15 +144,15 @@ def _non_empty(value: str | None, default: str, name: str) -> str:
     return value
 
 
-def _port(value: str | None) -> int:
+def _port(value: str | None, name: str = PORT_VAR, *, default: int = DEFAULT_PORT) -> int:
     if value is None:
-        return DEFAULT_PORT
+        return default
     try:
         port = int(value.strip())
     except ValueError:
-        raise WebConfigError(f"{PORT_VAR} must be an integer") from None
+        raise WebConfigError(f"{name} must be an integer") from None
     if not 1 <= port <= 65535:
-        raise WebConfigError(f"{PORT_VAR} must be between 1 and 65535")
+        raise WebConfigError(f"{name} must be between 1 and 65535")
     return port
 
 
