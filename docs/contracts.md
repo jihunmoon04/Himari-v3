@@ -379,7 +379,7 @@ class ToolOutcome:
 - 모델이 주장한 수정 파일명/문자열 동일 여부는 안전성 증명이 아니다.
 - Plan/Note 변경 + Tool 완료 결과 원자 커밋은 **Dispatcher가 ToolOutcome을 받아** DATA-08 복합 API로 실현한다.
 
-**OPEN:** 동시성 limit/locking/resource alias, Internal/Environment dispatcher 세부 구현, 전체 Tool group 완료 배리어. (Connector 확장 유형은 V3-P52 External Tool로 제안.)
+**OPEN:** 동시성 limit/locking/resource alias, Internal/Environment dispatcher 세부 구현, 전체 Tool group 완료 배리어. (Connector 확장 유형은 External Tool로 확정: V3-054·055, 커넥터 패키지 규칙 V3-059.)
 
 ## 10. Environment Contract (Workspace 자원 접근)
 
