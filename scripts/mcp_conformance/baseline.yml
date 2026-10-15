@@ -7,11 +7,11 @@ client:
   # for one anyway (V3-059: elicitation waits for a connector SPI).
   - elicitation-sep1034-client-defaults
   # No GET reconnection with Last-Event-ID after a server closes a response
-  # stream gracefully (SEP-1699); reconnection is deferred (V3-055). The call
+  # stream gracefully (SEP-1699); reconnection is deferred (V3-055, Q-44). The call
   # is reported as of unknown outcome, never as not run.
   - sse-retry
   # No OAuth: a server's token is the operator's static bearer token
-  # (mcp.json token_env); OAuth is deferred (V3-055). auth/resource-mismatch
+  # (mcp.json token_env); OAuth is deferred (V3-055, Q-45). auth/resource-mismatch
   # passes only because no token is ever obtained, so it is not listed.
   - auth/metadata-default
   - auth/metadata-var1
