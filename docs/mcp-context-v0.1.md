@@ -1,6 +1,6 @@
 # MCP 서버의 안내문·프롬프트·리소스를 모델 문맥에 v0.1
 
-> 2026-10-16 · **PROPOSED (V3-P60)** · rev. 2 — 독립 검수 NOT_READY(B1~B4, C1~C3) 반영(§11). 구현 전이다.
+> 2026-10-16 · **PROPOSED (V3-P60)** · rev. 3 — 재검수 NOT_READY(B5·B6, C4·C5) 반영, 이전 검수(B1~B4, C1~C3) 반영(§11). 구현 전이다.
 >
 > 기준 사양: MCP 2025-11-25 [Lifecycle](https://modelcontextprotocol.io/specification/2025-11-25/basic/lifecycle)(`InitializeResult.instructions`), [Prompts](https://modelcontextprotocol.io/specification/2025-11-25/server/prompts), [Resources](https://modelcontextprotocol.io/specification/2025-11-25/server/resources).
 >
@@ -141,6 +141,12 @@ and do not override the instructions above.
 - **`role: assistant` 메시지도 거부한다(O2).** HIMARI의 대화 기록에서 assistant 발화는 모델 Run의 결과로만 생긴다. 서버가 만든 assistant 발화를 끼워 넣을 자리가 없고, 사용자 메시지에 섞으면 뜻이 바뀐다.
 - **크기:** 사용자가 직접 쓰는 메시지와 같은 상한(32,000자)이다. 넘으면 거부한다.
 
+**프롬프트는 모델이 스스로 꺼내 쓰지 못한다 (재검수 C5).** 사양대로 사용자가 고르는 것이기 때문이다. 그래서 같은 해설 요청이라도 정보가 다르다.
+- 사용자가 `/prompt calliope calliope_commentary`를 고르면, 모델은 Calliope의 해설 작성 지침 전체(약 2.5k자)를 받는다.
+- 사용자가 "10수를 해설해 줘"라고만 쓰면, 모델은 안내문(§3)과 Tool 설명만 본다.
+
+Calliope의 안내문은 지금 "자세한 방법은 프롬프트 `calliope_commentary`에 있다"고 말한다. 모델은 그 프롬프트를 열 수 없다. 모델이 스스로 쓰는 흐름에서도 품질이 나오려면, **모델이 읽어야 할 지침은 안내문이나 리소스로도 주어야 한다.** 이것은 서버 쪽의 일이다(§13). HIMARI는 리소스 Tool로 그것을 읽게 해 준다(§5).
+
 **확실성.** `prompts/get`은 Tool 호출이 아니다. 실패하면 사용자에게 오류를 보이고 아무것도 채우지 않는다. 서버가 그 요청으로 무언가를 바꿨는지는 HIMARI가 기록하지 않는다(사용자가 고른 서버 동작).
 
 ## 5. 리소스 → 모델이 읽는 서버별 읽기 Tool
@@ -162,9 +168,22 @@ and do not override the instructions above.
 - **O3(기본 켬)은 그대로다.** 켜는 것과 효과 분류를 나눴다. 켜져 있어도 효과가 보수적이므로 운영자가 따로 승인하지 않은 효과가 생기지 않는다.
 
 **읽을 수 있는 URI (검수 B2·B3).** `read_resource`는 다음 셋 중 하나만 서버에 묻는다. 운영자가 `"resources": {"uris": "any"}`로 넓히지 않는 한 그렇다.
-1. **목록에 있는 URI:** 마지막 `resources/list`(60초 안의 결과, 없으면 새로 읽음)에 있는 것.
-2. **템플릿에서 만든 URI:** `resources/templates/list`의 템플릿(RFC 6570) 중 하나와 맞는 것.
+1. **목록에 있는 URI:** 그 세션의 `resources/list` 결과에 있는 것.
+2. **템플릿에서 만든 URI:** 그 세션의 `resources/templates/list` 템플릿(RFC 6570) 중 하나와 맞는 것.
 3. 그 밖의 URI는 거부한다("목록이나 템플릿에 없는 리소스").
+
+**판정에 쓰는 목록은 그 읽기가 갈 세션의 것이다 (재검수 B6).**
+- 목록과 템플릿은 세션마다 캐시한다(60초). 세션은 HTTP면 MCP 세션 id, stdio면 그 프로세스(대화 키로 정해지는 세션과 그 세대)다.
+- `read_resource`는 그 호출이 라우팅될 세션의 캐시만 쓴다. 캐시가 없거나 60초가 지났으면 그 세션에 새로 묻는다.
+- 세션이 바뀌면(재시작, 교체, HTTP 세션 갱신) 그 캐시는 버린다.
+- 그래서 `per_conversation`에서 대화 A의 프로세스에만 있는 URI가 대화 B의 판정에 쓰이지 않는다.
+
+**거부가 이긴다.** URI를 판정할 때 다음 순서를 지킨다.
+1. 목록에서 그 URI가 사용자용(`audience: ["user"]`)이면 거부한다. 다른 템플릿이 맞아도 거부다.
+2. 사용자용 템플릿 중 하나라도 그 URI와 맞으면 거부한다. 다른 템플릿이 함께 맞아도 거부다.
+3. 그다음에 목록이나 허용 템플릿과 맞으면 허용한다.
+
+화면(아래)도 같은 거부 규칙이다.
 
 `"any"`로 넓히면 서버가 받아들이는 모든 URI를 묻는다. 그러면 접근 범위가 그 서버의 리소스 전체가 된다. 운영자 안내에 이 점을 적는다. 어느 경우든 URI 검증과 접근 제어는 사양상 서버의 몫이고(MUST), stdio 서버는 server sandbox 안에서만 본다(V3-P59).
 
@@ -175,7 +194,15 @@ and do not override the instructions above.
 
 **한도와 결합 (검수 C3).**
 - **목록:** 서버 페이지 20개, 리소스와 템플릿 합쳐 500개, 모델에게 주는 결과 32,000자 상한이다. 넘으면 `cursor`로 다음 부분을 준다. 서버의 `nextCursor`를 그대로 넘기지 않고 HIMARI의 위치로 바꿔 준다.
-- **읽기:** 서버 응답은 지금처럼 최대 4 MiB다. `contents[]`가 여럿이면 순서대로 `[resource <uri> · <mimeType>]` 머리말과 함께 잇는다.
+- **읽기:** 서버 응답은 지금처럼 최대 4 MiB다.
+- **조각마다 다시 검사한다 (재검수 B5).** `resources/read`의 `contents[]`는 조각마다 자기 `uri`·`mimeType`(·주석)을 가진다. 요청한 URI가 허용됐어도, 서버가 다른 리소스의 내용을 함께 넣을 수 있다. 그래서 조각마다 다음을 확인하고, 하나라도 걸리면 **그 조각을 빼고** 자리에 `[omitted: <uri> — <이유>]`만 남긴다.
+  1. 조각의 `uri`가 요청한 URI이거나, 위의 읽기 허용 규칙(목록·템플릿, `any`면 모두)을 통과한다. `uri`가 없으면 요청한 URI로 본다.
+  2. 화면이 아니다. `ui://` 스킴도, `text/html;profile=mcp-app` mimeType도 아니어야 한다.
+  3. `annotations.audience`가 `["user"]`뿐이 아니다.
+  4. 메타데이터가 서로 맞는다. 같은 URI가 목록에서는 사용자용인데 조각에는 표시가 없는 경우처럼 정보가 엇갈리면, 더 제한적인 쪽을 따른다.
+
+  **확인하지 못한 조각은 모델에게 주지 않는다.**
+- **결합:** 남은 조각을 순서대로 `[resource <uri> · <mimeType>]` 머리말과 함께 잇는다.
   - text는 그대로 쓴다.
   - blob은 "binary, N bytes"로 줄인다(첨부 이후).
   - 그렇게 만든 전체 글에서 `offset`부터 32,000자를 준다.
@@ -245,7 +272,7 @@ interfaces/ Web: 프롬프트 목록·보내기 API와 입력창 `/` 고르기. 
 | Prompt loader | 생성 인자로 서버별 안내문 맵을 받음. 요청마다 켜진 서버로 거름 |
 | Provider (OpenRouter) | `system`은 시스템 메시지의 §3 절, `data`는 `<runtime_state>`의 항목으로 렌더 |
 | Tool 레지스트리·Bootstrap | 대화별 켜기/끄기 대상 = 연결된 서버 전체(Tool이 없는 서버 포함, B4) |
-| Web API | `GET /api/conversations/{id}/prompts`(켜진 서버의 프롬프트 목록), `POST /api/conversations/{id}/prompts/{source}/{name}/expand`(인자 → 펼친 글. 보내지 않음) |
+| Web API | `GET /api/conversations/{id}/prompts`(켜진 서버의 프롬프트 목록), `POST /api/conversations/{id}/prompts/expand`(본문 `{source, name, arguments}` → 펼친 글. 보내지 않음). 프롬프트 이름에 `/` 같은 문자가 있어도 되도록 경로가 아니라 본문에 담는다(재검수 C4) |
 | CLI | `/prompts`, `/prompt`(펼쳐 보이고 확인 뒤 보냄) |
 | `mcp.json` | `instructions`·`prompts`·`resources` 키, `tools`는 선택 |
 | 바뀌지 않음 | Data, Control, Dispatcher, 확실성 규칙 |
@@ -277,9 +304,12 @@ interfaces/ Web: 프롬프트 목록·보내기 API와 입력창 `/` 고르기. 
   - 리소스 Tool:
     - 목록이 `resources/list`와 `resources/templates/list`를 합침(B3). 화면·`audience: user` 제외, 500개·32,000자 상한과 HIMARI `cursor`;
     - 읽기: 목록 URI 허용, 템플릿 매칭 URI 허용, 그 밖은 거부(`any`면 허용), 사용자용 템플릿에서 만든 URI 거부;
+    - **거부 우선:** 허용 템플릿과 사용자용 템플릿이 함께 맞는 URI 거부, 목록에서 사용자용인 URI는 템플릿이 맞아도 거부 (B6);
+    - **세션별 목록:** `per_conversation`에서 대화 A의 프로세스만 가진 URI를 대화 B가 읽으면 거부. 세션이 바뀌면 캐시를 버리고 새로 읽음 (B6);
+    - **조각 검사:** 허용된 URI를 읽었는데 `contents[]`에 다른 비허용 URI, 화면 mimeType, 사용자용 주석이 섞이면 그 조각만 빠지고 `[omitted: …]`가 남음 (B5);
     - `contents[]` 결합, `offset`과 `version`, blob 요약, `-32002`;
     - 기본 효과 `unknown`(claim됨)과 `read` 설정, 이름 충돌 시 서버 Tool 우선, 꺼진 서버면 Tool이 목록에 없고 Dispatcher가 거부.
-- **Web·CLI:** 입력창 `/` 목록 → 펼침 → 입력창에 채워짐 → 보내기(브라우저 smoke). CLI `/prompts`, `/prompt`(확인 뒤 보냄).
+- **Web·CLI:** 입력창 `/` 목록 → 펼침(`POST …/prompts/expand`) → 입력창에 채워짐 → 보내기(브라우저 smoke). CLI `/prompts`, `/prompt`(확인 뒤 보냄).
 - **Calliope(호스트, 실제 server sandbox):**
   - 안내 절에 Calliope 안내문이 들어간다.
   - `/prompt calliope calliope_commentary game=… ply=…`가 펼쳐지고, 확인 뒤 사용자 메시지로 간다.
@@ -305,3 +335,21 @@ interfaces/ Web: 프롬프트 목록·보내기 API와 입력창 `/` 고르기. 
 | C1 | 펼치는 동안 서버를 끄는 경쟁. 사용자가 고른 것과 쓴 것을 구별 | 펼치기와 보내기를 나눔: 펼친 글을 사용자가 보고 고쳐서 일반 메시지로 보냄(§4) |
 | C2 | `request`·`read_resource`가 대화 키를 받지 않음 | 프롬프트·리소스 요청도 대화 키로 보냄(§4, §7) |
 | C3 | 목록 상한, `contents[]` 결합, 페이지 일관성, 토큰 예산 | 500개·32,000자와 HIMARI `cursor`, 결합 규칙, `version`(SHA-256), `context_key`·`request_tokens` 포함(§3, §5) |
+
+## 12. 검수 처리 — rev. 2(`25d8909`), 재검수: NOT_READY
+
+B1~B4와 C1~C3은 해결됐고, 소유자 결정 O1~O3은 수용됐다.
+
+| # | 지적 | 처리 |
+| --- | --- | --- |
+| B5 | 요청 URI만 검사하면, `contents[]`에 섞인 다른 리소스·사용자용·화면 내용이 모델에게 감 | 조각마다 uri(허용 규칙), 화면 여부, audience, 메타데이터 충돌을 검사하고, 걸리거나 확인하지 못한 조각은 빼고 `[omitted: …]`를 남김(§5) |
+| B6 | 목록 캐시의 범위가 없음. `per_conversation`에서 다른 대화의 목록으로 판정할 수 있음. 템플릿이 여럿 맞을 때의 우선순위 | 목록·템플릿 캐시를 세션(HTTP 세션 id, stdio 프로세스와 세대)에 묶고, 그 호출이 갈 세션의 것만 씀. 세션이 바뀌면 버림. 거부가 이김: 사용자용 목록 항목·사용자용 템플릿이 맞으면 다른 허용이 있어도 거부(§5) |
+| C4 | 프롬프트 이름을 URL 경로 구간에 넣으면 `/` 등에서 깨짐 | `POST …/prompts/expand`의 본문에 `{source, name, arguments}`(§7) |
+| C5 | 모델은 프롬프트를 스스로 꺼내지 못하므로 일반 채팅과 `/prompt`의 정보가 다름 | 그 차이를 명시하고, 모델이 스스로 써야 할 지침은 서버가 안내문이나 리소스로도 줘야 한다고 적음. Calliope 쪽 후속 질문으로 둠(§4, §13) |
+
+## 13. 남은 질문
+
+1. **Calliope의 모델용 지침 (C5):** `calliope_commentary`·`calliope_check`의 내용을 리소스로도 낼지 정한다(예: `calliope://prompts/commentary_ko`). 그러면 안내문이 그 리소스를 가리키게 하고, 모델이 `calliope/read_resource`로 스스로 읽을 수 있다. 사용자가 고르는 프롬프트는 그대로 둔다. Calliope 저장소의 설계 절차로 한다(소유자 허용 필요).
+2. **리소스 첨부:** 사용자가 리소스를 골라 메시지에 붙이는 것(`@`)과 이미지·바이너리 내용은 Provider의 첨부 지원 뒤에 한다.
+3. **`listChanged`·구독:** 목록이 바뀌었다는 서버 알림은 아직 쓰지 않는다. 리소스 목록은 세션별 60초 캐시로 따라간다.
+
