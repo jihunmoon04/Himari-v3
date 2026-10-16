@@ -194,7 +194,7 @@ def runtime(
     instructions: Sequence[str] | None = None,
     max_runs_per_drive: int | None = 16,
     turn_budget: int | None = None,
-    no_progress_runs: int = 3,
+    no_progress_runs: int | None = None,
     external_defaults: Mapping[str, bool] | None = None,
 ) -> tuple[Runtime, ScriptedAdapter]:
     """Fresh runtime; pass ``restart(rt.store)`` to model a process restart."""

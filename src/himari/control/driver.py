@@ -159,7 +159,7 @@ class Driver:
         planner: CompactionPlanner | None = None,
         budget: ContextBudget | None = None,
         turn_budget: int | None = None,
-        no_progress_runs: int = NO_PROGRESS_RUNS,
+        no_progress_runs: int | None = None,  # None: no NO_PROGRESS stop (V3-P62 §4 turns it on with O3)
     ) -> None:
         if (planner is None) != (budget is None):
             raise ValueError("a context budget needs a compaction planner and vice versa")
@@ -167,7 +167,7 @@ class Driver:
             raise ValueError("a turn needs a token budget or a Run limit (V3-P62)")
         if turn_budget is not None and planner is None:
             raise ValueError("a turn token budget needs a context budget: it uses its request estimates")
-        if any(v is not None and v < 1 for v in (max_runs_per_drive, turn_budget)) or no_progress_runs < 1:
+        if any(v is not None and v < 1 for v in (max_runs_per_drive, turn_budget, no_progress_runs)):
             raise ValueError("Run limits, budgets and the no-progress count are positive")
         self._log = log
         self._loader = loader
@@ -319,8 +319,12 @@ class Driver:
         return dataclasses.replace(self._options, session_key=session_key(scope))
 
     def _compose(self, scope: TrustedScope, inputs: PromptInputs) -> ModelInput:
-        """The model's input, with the turn's state as data (V3-P62 §8)."""
-        return dataclasses.replace(self._composer.compose(inputs), turn_state=self._turn(scope).state())
+        """The model's input, with the turn's state as data (V3-P62 §8) — only
+        under a turn budget, where the system instructions carry its rule."""
+        model_input = self._composer.compose(inputs)
+        if self._turn_budget is None:
+            return model_input
+        return dataclasses.replace(model_input, turn_state=self._turn(scope).state())
 
     def _paused_detail(self, scope: TrustedScope, what: str = "") -> str:
         """A pause's detail: its reason when it was not the user's own (V3-P62 §5)."""
@@ -547,7 +551,7 @@ class Driver:
                 return stopped
             if self._max_runs is not None and turn.steps >= self._max_runs:
                 return result(DriveState.RUN_LIMIT_REACHED, detail=f"{turn.steps} steps")
-            if turn.empty_streak >= self._no_progress_runs:
+            if self._no_progress_runs is not None and turn.empty_streak >= self._no_progress_runs:
                 return result(DriveState.NO_PROGRESS,
                               detail=f"the last {turn.empty_streak} steps brought nothing new")
             try:

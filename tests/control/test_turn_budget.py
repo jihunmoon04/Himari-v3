@@ -77,6 +77,23 @@ def test_a_run_limit_when_set_counts_model_runs_and_says_how_many() -> None:
     run(case)
 
 
+def test_the_defaults_keep_todays_policy() -> None:
+    """Review C2: with build_runtime's defaults (a limit of 16, no budget) a
+    READ tool repeating its result runs to the limit, and nothing new reaches
+    the model: no turn state, no guidance. Only the session key is sent."""
+    reader = RecordingTool("reader")  # always "reader ok"
+
+    async def case() -> None:
+        rt, adapter = runtime([calls(("reader", {})) for _ in range(20)], tools=[reader], context_budget=BIG)
+        result = await rt.driver.drive(SCOPE, user("go"))
+        assert result.state is DriveState.RUN_LIMIT_REACHED and len(adapter.prepared_inputs) == 16
+        assert all(i.turn_state is None for i in adapter.prepared_inputs)
+        assert all(TURN_GUIDANCE not in i.stable_prefix for i in adapter.prepared_inputs)
+        assert len(reader.invocations) == 16
+
+    run(case)
+
+
 def test_a_turn_needs_a_budget_or_a_limit() -> None:
     with pytest.raises(ValueError, match="token budget or a Run limit"):
         runtime(context_budget=BIG, max_runs_per_drive=None)
@@ -137,20 +154,22 @@ def test_the_output_reserve() -> None:
 
 
 def test_low_and_last_are_told_as_data_and_the_rule_is_in_the_system_prompt() -> None:
-    turn = Turn(budget=34_200, max_runs=None)
+    # A request is expected to cost the previous input + the 8,192 reserve; low under 3 of them, last under 2.
+    turn = Turn(budget=60_000, max_runs=None)
     assert turn.state() is None  # nothing before the first Run
     turn.charge(TokenUsage(input_tokens=5_000, output_tokens=100), 0, 0, step=True)
-    assert turn.state() is None  # left 29,100: plenty
+    assert turn.state() is None  # left 54,900 ≥ 3 × 13,192
     turn.charge(TokenUsage(input_tokens=10_000, output_tokens=100), 0, 0, step=True)
-    state = turn.state()  # left 19,000: < 2 × 10,000, but ≥ 10,000 + 8,192
+    state = turn.state()  # left 44,800: < 3 × 18,192, ≥ 2 × 18,192
     assert state is not None and state.budget is not None and state.budget.low and not state.budget.last
     turn.charge(TokenUsage(input_tokens=10_000, output_tokens=100), 0, 0, step=True)
-    state = turn.state()  # left 8,900 < 10,000 + 8,192
-    assert state is not None and state.budget is not None and state.budget.last and state.budget.left == 8_900
+    state = turn.state()  # left 34,700 < 2 × 18,192: this request fits (≥ 18,192), the next likely not
+    assert state is not None and state.budget is not None and state.budget.last and state.budget.left == 34_700
+    assert turn.fits(10_000, turn.reserve())  # review C1: `last` is told on a request that is still sent
     block = state_block(CurrentStateProjection(PersistedStateBasis(0, 0, (), (), ())), (), state)
     assert block is not None
     data = json.loads(block.split("\n", 2)[2].rsplit("\n", 1)[0])
-    assert data == {"turn_budget": {"used": 25_300, "budget": 34_200, "left": 8_900, "low": True, "last": True}}
+    assert data == {"turn_budget": {"used": 25_300, "budget": 60_000, "left": 34_700, "low": True, "last": True}}
     assert "finish" not in block  # numbers and flags only; the rule is in the instructions
     limited = Turn(budget=None, max_runs=4)
     limited.charge(None, 0, 0, step=True)
@@ -254,14 +273,15 @@ def test_no_progress_stops_a_read_loop_but_never_a_write_loop() -> None:
 
     async def case() -> None:
         rt, adapter = runtime([calls(("reader", {})) for _ in range(10)], tools=[reader], context_budget=BIG,
-                              max_runs_per_drive=None, turn_budget=10_000_000)
+                              max_runs_per_drive=None, turn_budget=10_000_000, no_progress_runs=3)
         result = await rt.driver.drive(SCOPE, user("go"))
         assert result.state is DriveState.NO_PROGRESS and len(adapter.prepared_inputs) == 4
         assert result.detail == "the last 3 steps brought nothing new"
         told = adapter.prepared_inputs[-1].turn_state
         assert told is not None and told.repeated[-1].tool_id == "reader"
         rt2, adapter2 = runtime([calls(("writer", {})) for _ in range(6)] + [final("done")], tools=[writer],
-                                context_budget=BIG, max_runs_per_drive=None, turn_budget=10_000_000)
+                                context_budget=BIG, max_runs_per_drive=None, turn_budget=10_000_000,
+                                no_progress_runs=3)
         assert (await rt2.driver.drive(SCOPE, user("go"))).state is DriveState.COMPLETED
         assert len(writer.invocations) == 6  # every call ran
 
@@ -274,7 +294,7 @@ def test_a_disabled_source_is_judged_every_call_and_never_counts() -> None:
     async def case() -> None:
         rt, adapter = runtime([calls(("lab/look", {})) for _ in range(5)] + [final("done")], tools=[remote],
                               context_budget=BIG, max_runs_per_drive=None, turn_budget=10_000_000,
-                              external_defaults={"lab": False})
+                              no_progress_runs=3, external_defaults={"lab": False})
         task = asyncio.create_task(rt.driver.drive(SCOPE, user("go")))
         result = await task
         assert result.state is DriveState.COMPLETED  # five DENIED calls, no NO_PROGRESS

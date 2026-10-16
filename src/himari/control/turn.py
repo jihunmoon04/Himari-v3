@@ -116,11 +116,16 @@ class Turn:
     # -- what the model is told (§8) ------------------------------------------------
 
     def state(self) -> TurnState | None:
+        """``low``: fewer than about three more requests fit; ``last``: this one
+        fits but the next likely will not (a request that does not fit is
+        never sent, so ``last`` is seen on the last request sent; review C1).
+        A request is expected to cost the previous one's input and the reserve."""
         budget: TurnBudget | None = None
         if self.budget is not None and self.runs:
             left = self.budget - self.used
-            last = left < self.last_input + self.reserve()
-            if last or left < 2 * self.last_input:
+            request = self.last_input + self.reserve()
+            last = left < 2 * request
+            if left < 3 * request:
                 budget = TurnBudget(low=True, last=last, used=self.used, budget=self.budget, left=max(left, 0))
         if self.max_runs is not None:
             runs_left = self.max_runs - self.steps

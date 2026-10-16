@@ -13,7 +13,7 @@ from dataclasses import dataclass
 
 from himari.control.ask_user import AskUserTool
 from himari.control.api import TURN_GUIDANCE
-from himari.control.driver import NO_PROGRESS_RUNS, Driver
+from himari.control.driver import Driver
 from himari.data.memory import InMemoryData, InMemoryStore
 from himari.data.sqlite import SqliteData, SqliteStore
 from himari.environment.api import EnvironmentPlugin
@@ -55,7 +55,7 @@ def build_runtime(
     model_id: str = "scripted-model",
     max_runs_per_drive: int | None = 16,  # None: no Run limit (then a turn_budget is needed, V3-P62)
     turn_budget: int | None = None,  # tokens a drive may use (V3-P62 §3); None: none
-    no_progress_runs: int = NO_PROGRESS_RUNS,
+    no_progress_runs: int | None = None,  # None: no NO_PROGRESS stop; V3-P62's default is NO_PROGRESS_RUNS
     allow_require_user_tools: bool = False,  # keep False in P0 (no resolution API)
     reasoning_effort: str | None = None,
     context_budget: ContextBudget | None = None,  # None: no compaction or size check
