@@ -122,7 +122,12 @@ def model_input(notes: tuple[SourceNote, ...]) -> ModelInput:
 
 def sent_tokens(model_input: ModelInput) -> int:
     """What the model is sent, message by message, at the estimate's rate."""
-    return sum(tokens_of_text(m["content"]) for m in messages_of(model_input))
+    return sum(tokens_of_text(text_of(m["content"])) for m in messages_of(model_input))
+
+
+def text_of(content: str | list[dict[str, Any]]) -> str:
+    """A message's text: a string, or text parts (the cache breakpoint, V3-P62 §9)."""
+    return content if isinstance(content, str) else "".join(part["text"] for part in content)
 
 
 ESCAPED = "<>&\"\\\n\x01"  # what JSON escapes: six bytes for each of the first three

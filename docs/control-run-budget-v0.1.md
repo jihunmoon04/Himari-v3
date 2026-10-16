@@ -1,6 +1,6 @@
-# 한 턴의 예산과 비용 — v0.1 (V3-P62, 설계 초안)
+# 한 턴의 예산과 비용 — v0.1 (V3-P62)
 
-> 2026-10-16 · **Proposed, rev. 4** — 독립 검수 NOT_READY(B1~B4, C1·C2) 반영(§14), 재검수 NOT_READY(N1~N3) 반영(§15), 재검수 NOT_READY(R1·R2, C3) 반영(§16), 재검수 READY(비차단 권고 둘, §17). V3-P23(drive당 Run 예산 16)을 대신한다. **소유자 방향(2026-10-16):** 다른 에이전트처럼 Run 수 상한 없이 돌게 한다. 그 대신 비용·진척·클라이언트 연결을 지키는 장치를 둔다(§2~§6, 제시한 방법 모두 채택). 수치 기본값은 §11의 O1~O4.
+> 2026-10-16 · **Proposed, rev. 4** — 독립 검수 NOT_READY(B1~B4, C1·C2) 반영(§14), 재검수 NOT_READY(N1~N3) 반영(§15), 재검수 NOT_READY(R1·R2, C3) 반영(§16), 재검수 READY(비차단 권고 둘, §17). 구현: 1단계 §18(PR #47), 2단계와 측정 §13·§19. V3-P23(drive당 Run 예산 16)을 대신한다. **소유자 방향(2026-10-16):** 다른 에이전트처럼 Run 수 상한 없이 돌게 한다. 그 대신 비용·진척·클라이언트 연결을 지키는 장치를 둔다(§2~§6, 제시한 방법 모두 채택). 수치 기본값은 §11의 O1~O4.
 >
 > 관련: [V3-005](decisions.md)(Tool 실패는 모델에게), [V3-047](decisions.md)(결과 불명은 모델이 확인), [V3-P55](decisions.md)(Pause·Cancel·Continue), [prompt-composition](prompt-composition.md) §5(prefix 캐시), [open-questions](open-questions.md) Q-25(캐시 성능), [mcp-context-v0.1](mcp-context-v0.1.md) §14.5(실제 모델 시험).
 
@@ -166,8 +166,8 @@ Run 수 상한은 **기본으로 없다.** 한 턴은 다음 중 하나로 멈�
 - 대화 id 자체는 보내지 않는다. 원본 요청 기록(V3-018)에 이 값이 그대로 남는다.
 - 모르는 공급자 어댑터는 이 값을 무시한다.
 
-**B2. 명시적 캐시 구간 (측정 뒤 O4로 정함).**
-- 대화 기록의 마지막 메시지(`<runtime_state>` 바로 앞)에 캐시 구간 표시를 붙인다. 이것을 지원한다고 등록된 모델에만 한다.
+**B2. 명시적 캐시 구간 (측정으로 넣음, §13; O4 확인 대기).**
+- 대화 기록의 마지막 메시지(`<runtime_state>` 바로 앞)에 캐시 구간 표시를 붙인다. 처음 설계는 지원한다고 등록된 모델에만 하려 했다. 구현은 OpenRouter 요청이면 늘 붙인다(§19).
 - **공급자마다 표현이 다르다.** OpenRouter는 Anthropic식 `cache_control`을 OpenAI의 `prompt_cache_breakpoint`로 바꿔 주지만, 모델과 메시지 구조(내용 블록 배열이어야 하는지 등)마다 지원이 다르다. B2를 정할 때 모델별로 확인해 Provider 능력(`ProviderCapabilities`)에 적는다.
 - 대가: GPT-5.6 이후는 캐시 쓰기가 입력 가격의 1.25배다. 적중률이 낮으면 손해다. 그래서 B1만으로 적중이 충분한지 먼저 잰다.
 
@@ -189,7 +189,7 @@ Run 수 상한은 **기본으로 없다.** 한 턴은 다음 중 하나로 멈�
 | `prompt/api.py` | `ModelInput.turn_state: TurnState \| None`(`turn_budget`, `progress`; 기본 None). `state_block`이 그 항목을 데이터로 그림. `RequestOptions.session_key: str \| None` |
 | `prompt/compaction.py` | 측정 기반 추정이 `turn_state`의 크기 전체를 늘 더함(§8) |
 | Tool (`tool/api.py`, Dispatcher) | `GroupDispatchResult.refusals: Mapping[CallId, RefusalRule]`(Dispatcher가 실행 전에 거부한 호출만); `RefusalRule` 다섯(입력: `unknown_tool`·`invalid_arguments`; 상태: `source_disabled`·`environment_inactive`·`binding`). `dispatch_group`의 인자와 기록(`raw_result` 포함)은 바뀌지 않음 |
-| Provider (OpenRouter) | `session_key` → 본문 `session_id`; usage의 `cache_write_tokens` |
+| Provider (OpenRouter) | `session_key` → 본문 `session_id`; usage의 `cache_write_tokens`; 기록의 마지막 글 메시지에 `cache_control`(B2, §19) |
 | `common.TokenUsage` / Data codec | `cache_write_tokens: int \| None`(선택). 이전 행은 None |
 | Interfaces | Application이 대화 읽기(상세, 이벤트)를 `seen`으로 알림. Web: 사용량 안내, 새 상태 글, 상태 줄 Continue. CLI: 사용량 한 줄, 새 상태 글 |
 | 바뀌지 않음 | Data 스키마(usage는 이미 JSON), 확실성 규칙, Pause·Cancel 의미, 압축의 커밋 규칙 |
@@ -203,7 +203,7 @@ Run 수 상한은 **기본으로 없다.** 한 턴은 다음 중 하나로 멈�
 | O1 | 턴 토큰 예산 기본값 | **1,000,000**(이번 시험 한 턴의 약 5배) |
 | O2 | 연결된 클라이언트 없이 이어 갈 Run 수, 그리고 "연결됨"의 시간 | **20 Run, 60초** |
 | O3 | `NO_PROGRESS`까지의 진척 없는 Run 연속 수 | **3** |
-| O4 | 명시적 캐시 구간(B2) | **B1의 측정을 본 뒤 결정** |
+| O4 | 명시적 캐시 구간(B2) | **B1의 측정을 본 뒤 결정** → 측정(§13): B1은 효과 없음, B2가 원인을 고침. **넣음을 권고**(2단계에 구현, 소유자 확인 대기) |
 
 ## 12. 위협과 대응
 
@@ -252,7 +252,43 @@ Run 수 상한은 **기본으로 없다.** 한 턴은 다음 중 하나로 멈�
 - **Web·CLI:** 사용량 안내, 새 상태와 상태 줄 Continue(브라우저 smoke), CLI 사용량 한 줄과 안내.
 - **실제 모델:** 같은 Calliope 시험을 B1 전후로 3번씩. Run, 반복 차단·알림 발생, 예산 알림 뒤 행동, 입력·캐시 적중·쓰기 토큰을 아래에 적는다.
 
-(측정은 구현 뒤 채운다.)
+### 13.1 측정 기록 — 실제 모델(2026-10-16)
+
+조건:
+- 모델 `openai/gpt-6-luna`(OpenRouter, 응답의 공급자는 모두 OpenAI);
+- Calliope main `1f9ef15`, AG5 시험과 같은 요청("10수(5...h6) 해설을 써서 저장"), 매번 새 대화와 새 Calliope 데이터;
+- 대화 Run 한 번(`drive`), 예산 1,000,000.
+
+비용 단위는 **가정**이다: 캐시 적중 0.1배, 캐시 쓰기 1.25배(GPT-5.6 이후, OpenRouter 문서), 나머지 입력 1배. 실제 단가는 모델마다 다르다.
+
+| 시험 | Run | 입력 | 캐시 적중 | 캐시 쓰기 | 입력 비용(캐시 없음 = 100%) |
+| --- | --- | --- | --- | --- | --- |
+| B1 끔(off3) | 5 | 80,400 | 11,212 (14%) | 69,173 (86%) | 109% |
+| B1 켬(on1) | 5 | 103,559 | 11,212 (11%) | 92,332 (89%) | 113% |
+| B1 켬(on2) | 10 | 219,423 | 28,220 (13%) | 191,173 (87%) | 110% |
+| B1 켬(on3) | 8 | 162,277 | 22,614 (14%) | 139,639 (86%) | 109% |
+| B2, B1 끔(b2off1) | 6 | 139,305 | 104,972 (75%) | 34,315 (25%) | 38% |
+| B2, B1 켬(b2on1) | 8 | 170,311 | 143,363 (84%) | 26,924 (16%) | 28% |
+| B2, B1 켬(b2on2) | 9 | 268,172 | 226,504 (84%) | 41,641 (16%) | 28% |
+
+(B1 끔의 처음 두 시험은 시험 스크립트의 잘못으로 돌지 않았다. B1의 결론은 다섯 시험의 같은 모양에 기댄다.)
+
+- **B1만으로는 아무것도 바뀌지 않았다.** `session_id`를 보내든 안 보내든, 각 Run의 적중은 2,803 토큰(시스템 메시지와 Tool 목록 쯤)에서 멈췄다. 나머지는 Run마다 새로 캐시에 **썼다.** 쓰기가 1.25배라면 캐시가 없을 때보다 약 10% 비쌌다.
+- **원인 (저장된 요청을 다시 보내 확인):**
+  - 요청은 덧붙기만 한다. Run n+1의 메시지는 Run n의 메시지에서 마지막 `<runtime_state>` 메시지만 빼고 같다. 공급자도 같았다.
+  - 같은 요청을 그대로 다시 보내면 26,893/26,896 토큰이 적중했다.
+  - 같은 요청에서 마지막 상태 메시지만 빼고 보내면 2,803만 적중했다. 이전 요청의 **앞부분**은 다시 쓰이지 않는다.
+  - 다음 Run에 이전 Run의 상태 메시지를 남겨 두면 26,386/26,645가 적중했다.
+  - 추론 상태(`reasoning_details`)를 빼도 2,803이었다. 원인이 아니다.
+  - 그러므로 이 공급자는 캐시를 **이전 요청의 끝**(그리고 몇몇 고정점)까지만 다시 쓴다. HIMARI는 상태를 요청의 끝에 두고 다음 요청에서는 빼므로, 이전 요청의 끝이 다음 요청에 없다. 2026-10-16의 첫 진단("Run마다 2,691만 적중, 공급자·경로 쪽 원인")은 틀렸다. 원인은 HIMARI 요청의 모양이었다.
+- **B2로 고쳐짐:** 시스템 메시지에 임의 값을 넣어 캐시가 비어 있는 같은 요청 둘(Run 4, Run 5)을 보냈다. 표시가 없으면 Run 5가 2,815, 기록의 마지막 메시지에 `cache_control`을 붙이면 35,112/36,364가 적중했다. 위 표의 B2 시험이 실제 대화에서 같은 결과를 보인다: 적중 75~84%, 입력 비용 28~38%.
+- **B1은 남긴다.** 비용이 없고, OpenRouter가 권하는 방식이며, 공급자가 여럿인 모델에서 같은 공급자로 보내는 데 쓰인다. 이번 측정에서 그 효과는 보이지 않았다(B2에서 끔 75%, 켬 84%, 표본 하나).
+- **예산 알림(`last`)이 모델에 닿는지(§18.2의 권고):** 예산 100,000으로 한 번 돌렸다(B2 전).
+  - 4번째 요청에서 `low`, 5번째 요청에서 `last`가 모델에 갔다(남은 42,606, 예상 비용 32,404의 두 배 미만).
+  - 모델은 그 요청에서 `submit_commentary`를 불러 해설을 저장했다(저장 확인).
+  - 그 뒤 마지막 답(6번째 요청)은 예산에 들어가지 않아 `BUDGET_REACHED`로 멈췄다. detail: "the turn used 82509 tokens; the next request (about 25041 in, 8192 kept for its answer) would pass the budget of 100000".
+  - `last`는 이번 한 번 모델에 닿았다(1/1). 일은 저장됐지만 사용자에게 줄 답은 없었다. Continue하면 답을 얻는다.
+- **반복 알림·`NO_PROGRESS`:** 이 시험들에서는 일어나지 않았다(`progress.repeated` 0). 모든 턴이 5~10 Run에 끝났다.
 
 ## 14. 검수 처리 — rev. 1(`f4c73ce`), 독립 검수: NOT_READY
 
@@ -368,9 +404,15 @@ V3-P62의 기본값을 켰다. 이제 기본 서버에는 Run 수 상한이 없�
   - 턴이 끝나면 한 줄: `(used 90k in + 2.0k out of 100k tokens in 2 requests)`.
   - 새 상태의 글은 `continue`로 이어 가라고 말한다(`budget_reached`는 새 예산을 받는다는 것도).
 - **시작 줄:** "turn budget: 1000000 tokens, no step limit, pauses after 20 steps unread".
+- **B2 — 캐시 구간 (측정 §13.1 뒤에 넣음):**
+  - OpenRouter 어댑터가 대화 기록의 마지막 글 메시지(시스템 메시지 뒤, `<runtime_state>` 앞)의 `content`를 `[{"type": "text", "text": …, "cache_control": {"type": "ephemeral"}}]`로 보낸다.
+  - 글이 없는 메시지(Tool 호출만 있는 assistant)는 건너뛰고, 그 앞의 글 메시지에 붙인다. 표시는 한 요청에 하나다.
+  - 이전 메시지는 보낸 그대로라서, 표시가 붙은 메시지까지가 다음 요청의 앞부분이다.
+  - 처음 설계(§9)와 다른 점: 모델별 등록 없이 OpenRouter 요청이면 늘 붙인다. OpenRouter는 이 표시를 공급자에 맞게 옮긴다(OpenAI는 `prompt_cache_breakpoint`). 확인한 것은 `openai/gpt-6-luna`뿐이다. 지원하지 않는 공급자에서 어떻게 되는지는 아직 확인하지 않았다. 어떤 모델이 이 모양을 거부하면 그때 `ProviderCapabilities`로 나눈다.
 - **시험:**
   - 설정: 기본값, `0`, 범위, 둘 다 끔;
   - Application: 연결(Driver의 예산·상한·진척, Runner의 연결 없음), 둘 다 끔 거부;
   - Web: `turn_usage`, 예산에서 멈춘 뒤 Continue가 새 예산으로 끝냄, 권한 확인 뒤에만 `seen`;
   - CLI: 토큰 표기, 상태별 안내, 실제 서버로 예산 멈춤과 `continue`.
   - 브라우저 smoke(`scripts/ui_smoke.py`의 세 번째 서버): 작업 중 사용량, 예산에서 멈춤, 패널, 좁은 화면, Continue로 끝냄.
+  - Provider: 기록의 끝이 캐시 구간이고 상태는 그 뒤에 있음, 다음 요청에서 이전 메시지는 보낸 그대로, 글 없는 Tool 호출 메시지는 건너뜀.

@@ -143,6 +143,25 @@ def _render_summary(summary: str) -> str:
     )
 
 
+def _mark_cache_breakpoint(messages: list[dict[str, Any]]) -> None:
+    """Marks the end of the history as a cache breakpoint (V3-P62 §9 B2).
+
+    The provider reuses its cache up to a marked point or to the end of an
+    earlier request, never to some shorter prefix of one. The state message
+    after the history is never sent again, so without a mark each Run read
+    only the system prefix back and wrote the rest anew (measured, §13).
+    The mark goes on the last message with text after the system message;
+    providers without explicit caching ignore it.
+    """
+    for message in reversed(messages):
+        if message["role"] == "system":
+            return
+        content = message.get("content")
+        if isinstance(content, str) and content:
+            message["content"] = [{"type": "text", "text": content, "cache_control": {"type": "ephemeral"}}]
+            return
+
+
 class OpenRouterAdapter:
     def __init__(
         self,
@@ -243,6 +262,7 @@ class OpenRouterAdapter:
                 messages.append({"role": "user", "content": _render_summary(_text(part.summary))})
             elif isinstance(part, ToolGroupTurn):
                 messages.extend(self._tool_group(part, self._replay(part.continuation, model_id)))
+        _mark_cache_breakpoint(messages)
         state = state_block(model_input.current_state, model_input.source_notes, model_input.turn_state)
         if state is not None:
             messages.append({"role": "user", "content": state})
