@@ -1,6 +1,6 @@
 # 한 턴의 예산과 비용 — v0.1 (V3-P62, 설계 초안)
 
-> 2026-10-16 · **Proposed, rev. 4** — 독립 검수 NOT_READY(B1~B4, C1·C2) 반영(§14), 재검수 NOT_READY(N1~N3) 반영(§15), 재검수 NOT_READY(R1·R2, C3) 반영(§16). V3-P23(drive당 Run 예산 16)을 대신한다. **소유자 방향(2026-10-16):** 다른 에이전트처럼 Run 수 상한 없이 돌게 한다. 그 대신 비용·진척·클라이언트 연결을 지키는 장치를 둔다(§2~§6, 제시한 방법 모두 채택). 수치 기본값은 §11의 O1~O4.
+> 2026-10-16 · **Proposed, rev. 4** — 독립 검수 NOT_READY(B1~B4, C1·C2) 반영(§14), 재검수 NOT_READY(N1~N3) 반영(§15), 재검수 NOT_READY(R1·R2, C3) 반영(§16), 재검수 READY(비차단 권고 둘, §17). V3-P23(drive당 Run 예산 16)을 대신한다. **소유자 방향(2026-10-16):** 다른 에이전트처럼 Run 수 상한 없이 돌게 한다. 그 대신 비용·진척·클라이언트 연결을 지키는 장치를 둔다(§2~§6, 제시한 방법 모두 채택). 수치 기본값은 §11의 O1~O4.
 >
 > 관련: [V3-005](decisions.md)(Tool 실패는 모델에게), [V3-047](decisions.md)(결과 불명은 모델이 확인), [V3-P55](decisions.md)(Pause·Cancel·Continue), [prompt-composition](prompt-composition.md) §5(prefix 캐시), [open-questions](open-questions.md) Q-25(캐시 성능), [mcp-context-v0.1](mcp-context-v0.1.md) §14.5(실제 모델 시험).
 
@@ -80,7 +80,7 @@ Run 수 상한은 **기본으로 없다.** 한 턴은 다음 중 하나로 멈�
 1. **입력만으로 정해지는 거부의 반복:** Dispatcher가 실행 전에 규칙 `unknown_tool` 또는 `invalid_arguments`로 거부했고(아래의 기계 판독 출처), 이 drive에서 같은 Tool·같은 인자가 같은 규칙으로 이미 거부됐다. 같은 입력이면 언제나 같은 거부다.
 2. **읽기 Tool의 같은 결과:** Tool의 효과 등급이 `READ`이고, 같은 Tool·같은 인자가 이 drive에서 이미 같은 결과(위의 정의: 상태와 `ModelToolResult` 전체)를 받았다. 새 관찰이 없다.
 
-다음은 "새것 없음"으로 세지 않는다. 그런 호출이 하나라도 있는 Run은 연속을 끊는다.
+다음은 "새것 없음"으로 세지 않는다. 그런 호출이 하나라도 있는 Run은 연속을 끊는다. **이 제외가 위의 1·2보다 먼저다**(§17): 예를 들어 꺼진 MCP 서버의 읽기 Tool이 같은 거부를 되풀이해도, 상태에 따른 거부이므로 세지 않는다.
 - `SCOPED_WRITE`·`UNKNOWN` 효과 Tool의 호출. 같은 성공 글을 돌려주면서 실제로는 매번 다른 효과(파일 추가, 상태 변경)를 낼 수 있다. 반복은 알리지만 멈출 근거로 쓰지 않는다.
 - 상태에 따라 바뀌는 거부: 꺼진 출처, 비활성 Environment, binding. 턴 도중에도 바뀔 수 있다.
 - Handler가 돌려준 거부(`DENIED`)와 실패(`FAILED`)의 반복. 단, `READ` Tool이 같은 결과를 다시 받은 경우는 2에 들어간다.
@@ -284,4 +284,13 @@ N1~N3는 해결로 확인됐다.
 | R1 | 예약 키 `refused_by`를 Handler의 `raw_result`에서 빼면 실제 Tool 출력이 기록에서 달라짐 | §4: 기록은 건드리지 않는다. 거부의 출처는 `dispatch_group`의 결과(`GroupDispatchResult.refusals`)로 Dispatcher가 Control에 직접 돌려준다. drive는 한 프로세스의 루프라 메모리로 충분하다. Data 스키마와 `raw_result`는 그대로다 |
 | R2 | 결과 글만 비교하면 첨부 참조나 `is_error`의 차이를 놓침 | §4: "같은 결과"는 기록 상태와 `ModelToolResult` 전체(블록의 수·순서·종류, 글, 첨부의 `file_id`·`version`, `is_error`)가 같은 것 |
 | C3 | 자동 Pause의 이유를 전달할 계약이 없음 | §5: `StopSignal.pause(reason=)`, `request_pause(scope, reason=)`, Driver가 `PAUSED`의 `detail`에 이유를 넣음. 화면은 끝난 작업의 detail을 이미 보여 준다 |
+
+## 17. 재검수 — rev. 4(`3145b43`): READY
+
+R1·R2·C3는 해결로 확인됐다. 비차단 권고 둘을 구현의 규칙과 시험으로 적는다.
+
+| # | 권고 | 처리 |
+| --- | --- | --- |
+| 1 | 상태에 따른 거부의 제외가 `READ`의 같은 결과보다 먼저임을 분명히 | §4: 제외가 먼저다. 꺼진 서버의 읽기 Tool이 같은 `DENIED`를 되풀이해도 `NO_PROGRESS`의 근거가 아니다. 구현 시험에 넣는다 |
+| 2 | 압축 도중의 Pause에서도 자동 Pause의 이유가 남아야 함 | 지금 Driver는 압축 도중 Pause에 고정 문구를 `detail`로 준다. 이유가 있으면 그것을 앞에 둔다. 구현 시험에 넣는다 |
 
