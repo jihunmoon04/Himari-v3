@@ -53,6 +53,13 @@ class FakeStdioServer:
                     await asyncio.sleep(self.launcher.initialize_delay)
                 result: dict[str, Any] = {"protocolVersion": params["protocolVersion"], "capabilities": {"tools": {}},
                                           "serverInfo": {"name": "fake-stdio", "version": "1"}}
+            elif method == "ping":
+                if not self.launcher.answer_ping:
+                    return  # hung: reads, never answers
+                if self.launcher.ping_error:
+                    await self.send({"jsonrpc": "2.0", "id": request_id, "error": {"code": -32601, "message": "no"}})
+                    return
+                result = {}
             elif method == "tools/list":
                 result = {"tools": self.launcher.tools}
             elif method == "resources/read":
@@ -89,6 +96,9 @@ class FakeProcess:
             raise Gone("ended")
         if self.server.launcher.stop_reading and b'"tools/call"' in data:
             await asyncio.Event().wait()  # a full pipe: the server stopped reading its stdin
+        gate = self.server.launcher.write_gate
+        if gate is not None:
+            await gate.wait()  # a slow pipe: the line goes in once the gate opens
         await self.server.receive(data)
 
     async def read_line(self) -> bytes:
@@ -127,7 +137,10 @@ class FakeLauncher:
         self.processes: list[FakeProcess] = []
         self.fail_launch: Exception | None = None
         self.honour_cancel = True  # a cancelled call stops (and, if answer_cancelled, says so)
-        self.answer_cancelled = True
+        self.answer_cancelled = False  # MCP: a cancelled request gets no answer
+        self.answer_ping = True
+        self.ping_error = False  # answer ping with -32601 (a server without ping)
+        self.write_gate: asyncio.Event | None = None
         self.initialize_delay = 0.0
         self.stop_reading = False  # tools/call writes block forever
         self.shutdown_delay = 0.0
@@ -141,6 +154,10 @@ class FakeLauncher:
         alive = sum(1 for p in self.processes[1:] if p.returncode is None)
         self.most_alive = max(self.most_alive, alive)
         return process
+
+    def lines(self, index: int) -> list[str]:
+        """What process ``index`` received, in order: the method or ``answer``."""
+        return [m.get("method", "answer") for m in self.processes[index].server.received]
 
     def calls(self) -> list[tuple[int, str, dict[str, Any]]]:
         """(process index, tool, arguments) of every tools/call received."""
