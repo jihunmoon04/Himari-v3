@@ -1,6 +1,6 @@
 # 한 턴의 예산과 비용 — v0.1 (V3-P62, 설계 초안)
 
-> 2026-10-16 · **Proposed, rev. 3** — 독립 검수 NOT_READY(B1~B4, C1·C2) 반영(§14), 재검수 NOT_READY(N1~N3) 반영(§15). V3-P23(drive당 Run 예산 16)을 대신한다. **소유자 방향(2026-10-16):** 다른 에이전트처럼 Run 수 상한 없이 돌게 한다. 그 대신 비용·진척·클라이언트 연결을 지키는 장치를 둔다(§2~§6, 제시한 방법 모두 채택). 수치 기본값은 §11의 O1~O4.
+> 2026-10-16 · **Proposed, rev. 4** — 독립 검수 NOT_READY(B1~B4, C1·C2) 반영(§14), 재검수 NOT_READY(N1~N3) 반영(§15), 재검수 NOT_READY(R1·R2, C3) 반영(§16). V3-P23(drive당 Run 예산 16)을 대신한다. **소유자 방향(2026-10-16):** 다른 에이전트처럼 Run 수 상한 없이 돌게 한다. 그 대신 비용·진척·클라이언트 연결을 지키는 장치를 둔다(§2~§6, 제시한 방법 모두 채택). 수치 기본값은 §11의 O1~O4.
 >
 > 관련: [V3-005](decisions.md)(Tool 실패는 모델에게), [V3-047](decisions.md)(결과 불명은 모델이 확인), [V3-P55](decisions.md)(Pause·Cancel·Continue), [prompt-composition](prompt-composition.md) §5(prefix 캐시), [open-questions](open-questions.md) Q-25(캐시 성능), [mcp-context-v0.1](mcp-context-v0.1.md) §14.5(실제 모델 시험).
 
@@ -71,13 +71,14 @@ Run 수 상한은 **기본으로 없다.** 한 턴은 다음 중 하나로 멈�
 - rev. 2의 `dispatch_group(…, refuse=)`는 없앤다.
 
 **반복을 알린다 (성공·실패, 모든 효과).**
-- 같은 Tool·같은 인자(정규 JSON, 키 정렬)의 호출이 이 drive에서 이미 받은 것과 **같은 상태와 같은 결과 글**(모델이 받은 정규화된 `ModelToolResult`의 글)을 다시 받으면, 다음 요청의 `<runtime_state>`에 `progress.repeated` 항목으로 넣는다.
+- 같은 Tool·같은 인자(정규 JSON, 키 정렬)의 호출이 이 drive에서 이미 받은 것과 **같은 결과**를 다시 받으면, 다음 요청의 `<runtime_state>`에 `progress.repeated` 항목으로 넣는다.
+- **"같은 결과"는 기록 상태와 `ModelToolResult` 전체가 같다는 뜻이다 (재검수 R2).** 블록의 수·순서·종류, 글 블록의 글(바이트 그대로), 첨부 참조(`AttachmentRef`)의 `file_id`와 `version`, 그리고 `is_error`가 모두 같아야 한다. 글이 같아도 첨부나 `is_error`가 다르면 새 결과다.
   - 넣는 것: Tool, 몇 번째로 같은 결과인지, 상태, 효과 등급.
 - 결과 자체는 바꾸지 않는다. 결과 불명(`UNKNOWN`)인 호출을 확인하는 일도 그대로다(V3-047).
 
 **새 관찰이 없다는 근거가 분명할 때만 멈춘다 (재검수 N2).** Run 하나가 "새것이 없다"는 것은, 그 Run의 모든 호출이 아래 둘 중 하나일 때뿐이다.
 1. **입력만으로 정해지는 거부의 반복:** Dispatcher가 실행 전에 규칙 `unknown_tool` 또는 `invalid_arguments`로 거부했고(아래의 기계 판독 출처), 이 drive에서 같은 Tool·같은 인자가 같은 규칙으로 이미 거부됐다. 같은 입력이면 언제나 같은 거부다.
-2. **읽기 Tool의 같은 결과:** Tool의 효과 등급이 `READ`이고, 같은 Tool·같은 인자가 이 drive에서 이미 같은 상태와 결과 글을 받았다. 새 관찰이 없다.
+2. **읽기 Tool의 같은 결과:** Tool의 효과 등급이 `READ`이고, 같은 Tool·같은 인자가 이 drive에서 이미 같은 결과(위의 정의: 상태와 `ModelToolResult` 전체)를 받았다. 새 관찰이 없다.
 
 다음은 "새것 없음"으로 세지 않는다. 그런 호출이 하나라도 있는 Run은 연속을 끊는다.
 - `SCOPED_WRITE`·`UNKNOWN` 효과 Tool의 호출. 같은 성공 글을 돌려주면서 실제로는 매번 다른 효과(파일 추가, 상태 변경)를 낼 수 있다. 반복은 알리지만 멈출 근거로 쓰지 않는다.
@@ -87,12 +88,12 @@ Run 수 상한은 **기본으로 없다.** 한 턴은 다음 중 하나로 멈�
 
 그런 Run이 **연달아 O3번(권고 3)** 이면, 다음 Run 전에 `NO_PROGRESS`로 멈춘다. Tool 호출 없는 Run은 답이므로 턴이 끝난다.
 
-**거부의 출처를 기계가 읽게 한다 (재검수 N1).**
-- Dispatcher가 실행 전에 거부할 때, 그 기록의 `raw_result`에 `{"refused_by": "dispatcher", "rule": <규칙>}`을 남긴다. 실행한 Handler가 없으므로 이 자리는 Dispatcher의 것이다.
-  - 규칙 코드는 둘로 나뉜다. **입력으로 정해지는 것:** `unknown_tool`, `invalid_arguments`. **상태에 따라 바뀌는 것:** `source_disabled`, `environment_inactive`, `binding`.
-  - 코드와 모양은 `tool/api.py`에 공개 계약으로 둔다.
-- Handler가 돌려준 결과의 `raw_result`에는 이 키가 없다. 키 `refused_by`는 예약하고, Handler의 `raw_result`에 그 키가 있으면 Dispatcher가 기록 전에 뺀다. 그래서 Handler의 `DENIED`가 Dispatcher의 거부로 읽히는 일은 없다.
-- Control은 이 drive에서 커밋된 실행 기록(상태, `model_result`, `raw_result`의 이 키, Tool 정의의 효과 등급)으로 센다. 새 영속 상태는 없다.
+**거부의 출처는 Dispatcher가 돌려준다 (재검수 N1·R1).**
+- `dispatch_group`의 결과(`GroupDispatchResult`)에 `refusals: Mapping[CallId, RefusalRule]`을 더한다. Dispatcher가 **실행 전에 스스로 거부한 호출**과 그 규칙이다. Handler가 돌려준 `DENIED`는 여기에 없다. 그래서 둘을 혼동할 수 없다.
+  - 규칙(`RefusalRule`, `tool/api.py`)은 둘로 나뉜다. **입력으로 정해지는 것:** `unknown_tool`, `invalid_arguments`. **상태에 따라 바뀌는 것:** `source_disabled`, `environment_inactive`, `binding`.
+- **저장하지 않는다.** Control은 drive 하나를 한 프로세스 안에서 도는 루프로 돌리고, 셈도 그 drive 동안만 쓴다. 그래서 이 정보는 그 루프의 메모리에 두면 충분하다. Data 스키마도, `raw_result`도 바뀌지 않는다. Handler의 `raw_result`는 받은 그대로 기록한다(rev. 3의 예약 키와 그것을 빼는 규칙은 없앤다).
+- 재시작 뒤에는 drive가 없으므로 셀 것도 없다. Continue는 새로 센다.
+- Control은 이 `refusals`와, 이 drive에서 커밋된 실행 기록(상태와 `model_result`), Tool 정의의 효과 등급으로 센다. 새 영속 상태는 없다.
 
 ## 5. 연결된 클라이언트가 없을 때 (기본 켬)
 
@@ -101,6 +102,8 @@ Run 수 상한은 **기본으로 없다.** 한 턴은 다음 중 하나로 멈�
   - 그래서 탭을 열어 둔 채 자리를 떠나면 "연결됨"으로 남는다. 그 경우는 토큰 예산(§3)과 진척 없음(§4)이 막는다.
 - 연결된 클라이언트 없이 **O2번(권고 20)** 의 Run이 지나면, Runner가 그 작업에 Pause를 요청한다(V3-P55와 같은 경로).
   - 다음 안전 경계에서 `PAUSED`로 멈추고, 이유는 "paused: no client was reading this conversation"이다.
+  - **이유가 전달되는 길 (재검수 C3):** `StopSignal.pause(reason=None)`이 이유를 받는다. 이유는 처음 요청한 쪽의 것이 남는다. Runner의 `request_pause(scope, reason=None)`도 그것을 넘긴다. Driver는 `PAUSED`의 `DriveResult.detail`에 그 이유를 넣는다. 사용자가 누른 Pause는 이유가 없고, 지금처럼 detail이 비어 있다.
+  - Web·CLI는 끝난 작업의 detail을 이미 보여 준다(경계 있는 글로). 그래서 화면 계약은 그대로이고, 상태 줄의 Continue와 함께 이유가 보인다.
   - 다시 들어온 사용자가 결과를 보고 Continue로 이어 간다.
   - 클라이언트가 돌아오면 세던 수는 처음부터 다시 센다.
 - Run 수는 §7의 진행 보고로 Runner가 안다.
@@ -181,10 +184,10 @@ Run 수 상한은 **기본으로 없다.** 한 턴은 다음 중 하나로 멈�
 | Control `DriveState` | `BUDGET_REACHED`, `NO_PROGRESS` 추가 |
 | Control (Driver) | 보내는 요청마다 예산 판정(대화 Run, 요약 호출; 출력 예약 포함); 반복 셈과 `NO_PROGRESS` 판정(§4, 실행은 막지 않음); `turn_state`를 `ModelInput`에 넣음; `RequestOptions.session_key`; `max_runs`는 선택(None = 상한 없음) |
 | Control 진행 보고 | `drive`·`resume`·`compact`에 `progress: TurnProgress \| None`. Driver가 Run마다 `report(TurnUsage)`. `TurnUsage`·`TurnProgress`는 `control/api.py`에 |
-| Control (Runner) | `seen(scope)`; 연결된 클라이언트 없이 O2번 Run이 지나면 `request_pause`; `JobStatus.turn_usage`(최신 보고) |
+| Control (Runner, `StopSignal`) | `seen(scope)`; 연결된 클라이언트 없이 O2번 Run이 지나면 `request_pause(scope, reason=…)`; `StopSignal.pause(reason=None)`와 그 이유를 `PAUSED`의 `detail`로; `JobStatus.turn_usage`(최신 보고) |
 | `prompt/api.py` | `ModelInput.turn_state: TurnState \| None`(`turn_budget`, `progress`; 기본 None). `state_block`이 그 항목을 데이터로 그림. `RequestOptions.session_key: str \| None` |
 | `prompt/compaction.py` | 측정 기반 추정이 `turn_state`의 크기 전체를 늘 더함(§8) |
-| Tool (Dispatcher, `tool/api.py`) | 실행 전 거부의 `raw_result` = `{"refused_by": "dispatcher", "rule": …}`, 규칙 코드 다섯(입력: `unknown_tool`·`invalid_arguments`; 상태: `source_disabled`·`environment_inactive`·`binding`). 키 `refused_by`는 예약: Handler의 `raw_result`에서 뺀다. `dispatch_group`의 인자는 바뀌지 않음 |
+| Tool (`tool/api.py`, Dispatcher) | `GroupDispatchResult.refusals: Mapping[CallId, RefusalRule]`(Dispatcher가 실행 전에 거부한 호출만); `RefusalRule` 다섯(입력: `unknown_tool`·`invalid_arguments`; 상태: `source_disabled`·`environment_inactive`·`binding`). `dispatch_group`의 인자와 기록(`raw_result` 포함)은 바뀌지 않음 |
 | Provider (OpenRouter) | `session_key` → 본문 `session_id`; usage의 `cache_write_tokens` |
 | `common.TokenUsage` / Data codec | `cache_write_tokens: int \| None`(선택). 이전 행은 None |
 | Interfaces | Application이 대화 읽기(상세, 이벤트)를 `seen`으로 알림. Web: 사용량 안내, 새 상태 글, 상태 줄 Continue. CLI: 사용량 한 줄, 새 상태 글 |
@@ -208,7 +211,8 @@ Run 수 상한은 **기본으로 없다.** 한 턴은 다음 중 하나로 멈�
 | 상한이 없어 길 잃은 루프가 비용을 냄 | 토큰 예산(보내는 요청마다, 출력 예약 포함), 진척 없음 멈춤, 연결 없음 일시정지. 예산은 추정에 기대므로 마지막 한 Run의 오차만큼 넘을 수 있다 |
 | 반복 판정이 정당한 호출을 막음 | 기록으로는 아무것도 막지 않는다. Dispatcher가 호출마다 그때의 상태를 다시 검사한다 |
 | 진척 판정이 효과 있는 반복을 "새것 없음"으로 봄 | `READ` Tool의 같은 결과와 입력으로 정해지는 거부만 센다. 쓰기·불명 효과 Tool은 세지 않는다 |
-| Handler의 거부가 Dispatcher의 거부로 읽힘 | 출처는 Dispatcher만 쓰는 예약 키로 기록하고, Handler의 결과에서는 그 키를 뺀다 |
+| Handler의 거부가 Dispatcher의 거부로 읽힘 | 출처는 `dispatch_group`의 결과로만 전달된다. Handler의 결과와 기록은 건드리지 않는다 |
+| 글만 같은 다른 결과를 반복으로 봄 | 상태와 `ModelToolResult` 전체(블록·첨부 참조·`is_error`)를 비교한다 |
 | 진척 판정이 탐색 중인 모델을 너무 일찍 멈춤 | 새 결과가 하나라도 있는 Run은 진척으로 본다. 연속 O3번일 때만 멈추고, Continue로 이어 간다 |
 | 연결 판정은 사람의 관찰이 아님(탭을 열어 둔 채 떠남) | 그 경우는 "연결됨"으로 남는다. 토큰 예산과 진척 없음이 여전히 막는다 |
 | 예산 알림이 모델을 일찍 멈추게 함 | 여유가 두 Run 남짓일 때만 알린다 |
@@ -231,7 +235,9 @@ Run 수 상한은 **기본으로 없다.** 한 턴은 다음 중 하나로 멈�
     - 반복 알림: 같은 Tool·인자·상태·결과면 `progress.repeated`에 보이고(성공·실패, 모든 효과 등급) 결과는 그대로다.
     - `NO_PROGRESS`: `READ` Tool의 같은 결과만, 또는 `unknown_tool`·`invalid_arguments` 거부의 반복만 있는 Run이 O3번 연달아일 때 멈춘다.
     - 연속이 끊기는 경우: `SCOPED_WRITE`·`UNKNOWN` Tool의 같은 성공, 상태에 따른 거부, Handler의 `DENIED`·`FAILED`(읽기 Tool의 같은 결과 제외), 결과 불명, 새 결과가 하나라도 있으면 끊긴다.
-    - 출처 기록: Dispatcher의 거부마다 `raw_result`에 `refused_by`와 규칙 코드가 있다. Handler의 결과에 `refused_by`가 있으면 기록에서 빠진다.
+    - 출처: Dispatcher가 실행 전에 거부한 호출만 `refusals`에 규칙과 함께 있다. Handler가 돌려준 `DENIED`는 없다. Handler의 `raw_result`는 받은 그대로 기록된다(`refused_by` 같은 키도 그대로).
+    - 같은 결과: 글이 같아도 첨부 참조(`file_id`·`version`)나 `is_error`가 다르면 새 결과다. 블록 순서가 다르면 새 결과다.
+    - Pause 이유: 연결 없음으로 멈추면 `detail`에 이유가 있고, 사용자의 Pause는 비어 있다. 처음 요청한 이유가 남는다.
   - 연결: 읽기가 없으면 O2번 Run 뒤 `PAUSED`(이유 포함), 읽기가 이어지면 계속, 돌아오면 다시 셈.
   - 진행 보고: Run마다 `report`가 불림(요약 Run 포함), `JobStatus.turn_usage`가 최신 값, 끝난 작업은 마지막 값을 남김, 보고 중 예외가 Driver를 바꾸지 않음.
   - 예산 표시:
@@ -265,7 +271,17 @@ B1~B4, C1·C2는 해결로 확인됐다.
 
 | # | 지적 | 처리 |
 | --- | --- | --- |
-| N1 | `DENIED`만으로는 Dispatcher의 실행 전 거부와 Handler가 돌려준 거부를 구분할 수 없음 | §4: Dispatcher가 자기 거부의 `raw_result`에 `refused_by: dispatcher`와 규칙 코드를 남기고, 그 키를 예약해 Handler의 결과에서 뺀다. 판정은 이 출처와 규칙 코드로 한다 |
+| N1 | `DENIED`만으로는 Dispatcher의 실행 전 거부와 Handler가 돌려준 거부를 구분할 수 없음 | §4: Dispatcher가 자기 거부의 `raw_result`에 `refused_by: dispatcher`와 규칙 코드를 남기고, 그 키를 예약해 Handler의 결과에서 뺀다. 판정은 이 출처와 규칙 코드로 한다. *(rev. 4에서 바꿈: 기록 대신 `dispatch_group`의 결과로, §16)* |
 | N2 | 쓰기 Tool의 같은 성공 글은 진척 없음이 아님 | §4: "새것 없음"은 `READ` Tool의 같은 결과와 입력으로 정해지는 거부(`unknown_tool`, `invalid_arguments`)의 반복뿐이다. `SCOPED_WRITE`·`UNKNOWN`의 반복은 알리지만 멈출 근거로 쓰지 않는다 |
 | N3 | 꺼진 출처·비활성 Environment는 턴 도중에도 바뀜 | §4: 기록을 근거로 실행을 막는 규칙(`refuse`)을 없앴다. Dispatcher가 호출마다 그때 상태를 다시 검사한다. 상태에 따른 거부는 "새것 없음"으로도 세지 않는다 |
+
+## 16. 검수 처리 — rev. 3(`becc3cf`), 재검수: NOT_READY
+
+N1~N3는 해결로 확인됐다.
+
+| # | 지적 | 처리 |
+| --- | --- | --- |
+| R1 | 예약 키 `refused_by`를 Handler의 `raw_result`에서 빼면 실제 Tool 출력이 기록에서 달라짐 | §4: 기록은 건드리지 않는다. 거부의 출처는 `dispatch_group`의 결과(`GroupDispatchResult.refusals`)로 Dispatcher가 Control에 직접 돌려준다. drive는 한 프로세스의 루프라 메모리로 충분하다. Data 스키마와 `raw_result`는 그대로다 |
+| R2 | 결과 글만 비교하면 첨부 참조나 `is_error`의 차이를 놓침 | §4: "같은 결과"는 기록 상태와 `ModelToolResult` 전체(블록의 수·순서·종류, 글, 첨부의 `file_id`·`version`, `is_error`)가 같은 것 |
+| C3 | 자동 Pause의 이유를 전달할 계약이 없음 | §5: `StopSignal.pause(reason=)`, `request_pause(scope, reason=)`, Driver가 `PAUSED`의 `detail`에 이유를 넣음. 화면은 끝난 작업의 detail을 이미 보여 준다 |
 
