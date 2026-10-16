@@ -91,6 +91,7 @@ HIMARI_DATA_ROOT=~/.himari python -m himari.interfaces.web --env-file .env
 }}}
 ```
 
+- Stop이나 응답 시간 초과 때는 서버에 MCP 취소 알림(`notifications/cancelled`)을 보냅니다. 최선 노력이라 서버 안의 작업이 멈췄다고 보장하지는 않습니다(쓰기 Tool의 호출은 결과 불명으로 기록됩니다).
 - URL은 `https://` 또는 loopback 주소의 `http://`만 허용합니다. 토큰은 파일이 아니라 `token_env`가 가리키는 환경 변수(또는 `--env-file`)에서 읽고, `Authorization: Bearer`로 그 URL에만 보냅니다(리다이렉트를 따라가지 않음).
 - 연결되지 않은 서버는 그 Tool만 빼고 시작하며, 시작 로그와 `/tools`에 이유가 표시됩니다(재시작해야 다시 연결).
 - 대화마다 서버를 켜고 끌 수 있습니다: Web 대화 메뉴의 **Tool servers**, CLI `/tools on|off|default 서버` 또는 `himari tools ID on calliope`. 따로 정하지 않은 대화는 서버의 `default`를 따릅니다.
