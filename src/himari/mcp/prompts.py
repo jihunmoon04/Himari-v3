@@ -25,14 +25,20 @@ class PromptContentError(ValueError):
 
 
 def _shown(value: str) -> str:
-    one_line = " ".join(value.split())
+    one_line = " ".join("".join(c if c.isprintable() else " " for c in value).split())
     return one_line if len(one_line) <= MAX_HEADER_VALUE_CHARS else one_line[: MAX_HEADER_VALUE_CHARS - 1] + "…"
 
 
+def _token(value: str) -> str:
+    """A name in the source line: whatever it holds, printable on one line."""
+    return "".join(c if c.isprintable() else "?" for c in value)
+
+
 def header(source: str, name: str, arguments: Sequence[tuple[str, str]]) -> str:
-    """``[MCP prompt calliope/calliope_commentary · game=g-1 ply=10]``."""
-    given = " ".join(f"{key}={_shown(value)}" for key, value in arguments if value != "")
-    return f"[MCP prompt {source}/{name}" + (f" · {given}" if given else "") + "]"
+    """``[MCP prompt calliope/calliope_commentary · game=g-1 ply=10]``: always
+    one line, whatever the names and values hold (PR #43 review B2)."""
+    given = " ".join(f"{_token(key)}={_shown(value)}" for key, value in arguments if value != "")
+    return f"[MCP prompt {_token(source)}/{_token(name)}" + (f" · {given}" if given else "") + "]"
 
 
 def _content(content: object) -> str:

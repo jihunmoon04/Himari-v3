@@ -36,7 +36,7 @@ import binascii
 import json
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, TypeGuard
 
 import httpx
 
@@ -328,6 +328,14 @@ def _text(value: object, limit: int) -> str:
     return value[:limit] if isinstance(value, str) else ""
 
 
+def _prompt_name(value: object) -> TypeGuard[str]:
+    """A prompt's or an argument's name as it is shown in the source line
+    of the user's message: printable (no newline, tab or other control,
+    no line separator) and at most 128 characters (PR #43 review B2: a
+    newline would forge a second line)."""
+    return isinstance(value, str) and 0 < len(value) <= 128 and value.isprintable() and value.strip() == value
+
+
 def _prompt_info(entry: object) -> PromptInfo | None:
     """One ``prompts/list`` entry, or None when it is not usable: whatever a
     server sends, this never raises (PR #40 review B1)."""
@@ -335,13 +343,13 @@ def _prompt_info(entry: object) -> PromptInfo | None:
         return None
     name = entry.get("name")
     raw_arguments = entry.get("arguments", [])
-    if not isinstance(name, str) or not name or len(name) > 128 or not isinstance(raw_arguments, list):
+    if not _prompt_name(name) or not isinstance(raw_arguments, list):
         return None
     arguments = []
     for raw in raw_arguments:
-        if not isinstance(raw, dict) or not isinstance(raw.get("name"), str) or not raw["name"]:
+        if not isinstance(raw, dict) or not _prompt_name(raw.get("name")):
             return None  # a prompt whose arguments cannot be read cannot be filled in
-        arguments.append(PromptArgument(raw["name"][:128], _text(raw.get("description"), 500),
+        arguments.append(PromptArgument(raw["name"], _text(raw.get("description"), 500),
                                         raw.get("required") is True))
     return PromptInfo(name, _text(entry.get("title"), 200), _text(entry.get("description"), 1000), tuple(arguments))
 

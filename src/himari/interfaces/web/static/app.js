@@ -104,6 +104,7 @@ const app = {
   promptSelected: 0,
   promptDismissed: null, // the composer text the picker was closed for (Escape)
   promptOpen: null, // the prompt whose arguments are being filled in
+  promptTicket: 0, // the latest expansion asked for; anything that abandons it moves this on (PR #43 review B1)
 };
 
 const views = new AppViews(api, el, () => app.conversationId);
@@ -513,6 +514,7 @@ function pickerKey(event) {
 
 function choosePrompt(prompt) {
   closePicker();
+  abandonExpansion(); // another choice: an earlier one still on its way is dropped
   if (prompt.arguments.length === 0) {
     expandPrompt(prompt, {});
     return;
@@ -541,7 +543,14 @@ function choosePrompt(prompt) {
   fields.querySelector("input").focus();
 }
 
+/* An expansion still on its way is abandoned: its answer is dropped. */
+function abandonExpansion() {
+  app.promptTicket += 1;
+  $("prompt-form-submit").disabled = false;
+}
+
 function closePromptForm() {
+  abandonExpansion();
   app.promptOpen = null;
   $("prompt-form").hidden = true;
   $("prompt-form-fields").replaceChildren();
@@ -558,15 +567,23 @@ async function submitPromptForm(event) {
   await expandPrompt(prompt, values);
 }
 
+/* The answer fills the composer only if nothing moved on meanwhile: the
+ * same conversation, this still the latest expansion (not cancelled, no
+ * other prompt chosen, no message sent), and the composer as it was when
+ * it was asked for. Otherwise it is dropped: the user's text wins. */
 async function expandPrompt(prompt, values) {
   const generation = app.generation;
+  app.promptTicket += 1;
+  const ticket = app.promptTicket;
+  const box = $("composer-text");
+  const before = box.value;
+  const current = () => generation === app.generation && ticket === app.promptTicket && box.value === before;
   $("prompt-form-submit").disabled = true;
   try {
     const answer = await api("POST", `/api/conversations/${encodeURIComponent(app.conversationId)}/prompts/expand`,
       { source: prompt.source, name: prompt.name, arguments: values });
-    if (generation !== app.generation) return;
+    if (!current()) return;
     closePromptForm();
-    const box = $("composer-text");
     box.value = answer.text;
     app.promptDismissed = answer.text;
     autosize();
@@ -575,9 +592,9 @@ async function expandPrompt(prompt, values) {
     box.scrollTop = 0;
     status("The prompt is in the message box: read it, then send it.");
   } catch (error) {
-    if (generation === app.generation) status(error.message, "error");
+    if (current()) status(error.message, "error");
   } finally {
-    $("prompt-form-submit").disabled = false;
+    if (ticket === app.promptTicket) $("prompt-form-submit").disabled = false;
   }
 }
 
@@ -748,6 +765,7 @@ async function sendMessage(event) {
   const box = $("composer-text");
   const text = box.value.trim();
   if (!text || app.sending || app.conversationId === null) return;
+  abandonExpansion(); // a message sent now is the user's: no prompt answer may replace what follows
   const generation = app.generation;
   app.sending = true;
   $("composer-send").disabled = true;
@@ -920,6 +938,7 @@ async function boot() {
   });
   $("composer-text").addEventListener("keydown", (event) => {
     if (pickerKey(event)) return;
+    if (event.key === "Escape") abandonExpansion(); // like Cancel: a pending prompt will not fill the box
     if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
       event.preventDefault();
       $("composer").requestSubmit();

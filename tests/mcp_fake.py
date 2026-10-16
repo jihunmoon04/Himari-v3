@@ -84,6 +84,7 @@ class FakeMcpServer:
         self.missing_resource_code = -32602  # resources/read of a URI not in ``resources``
         self.on_method: dict[str, Callable[[], None]] = {}  # run once that method is answered
         self.list_errors: dict[tuple[str, int], int] = {}  # (method, page start) → JSON-RPC error code
+        self.prompt_delay: dict[str, float] = {}  # prompt name → seconds before prompts/get answers
 
     def transport(self) -> httpx.MockTransport:
         return httpx.MockTransport(self.handle)
@@ -130,6 +131,8 @@ class FakeMcpServer:
         if method == "prompts/list":
             return self._answer(request_id, {"prompts": self.prompts})
         if method == "prompts/get":
+            if self.prompt_delay.get(params["name"]):
+                await asyncio.sleep(self.prompt_delay[params["name"]])
             if params["name"] not in self.prompt_messages:
                 return self._error(request_id, -32602)
             return self._answer(request_id, {"messages": self.prompt_messages[params["name"]]})

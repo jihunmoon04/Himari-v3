@@ -17,7 +17,10 @@ Headless Chromium drives the composer:
    with the reason, and the composer is left as it was;
 6. with the server off in the conversation, "/" lists nothing;
 7. text that only starts with "//" is a message, not a prompt search;
-8. the narrow layout shows the list and the form without horizontal scroll.
+8. an answer still on its way never replaces what the user did meanwhile
+   (PR #43 review B1): Cancel, editing the message, sending one, or
+   choosing another prompt drops it;
+9. the narrow layout shows the list and the form without horizontal scroll.
 
 Requires: pip install playwright (a Chromium for it, or --chrome PATH)
 Usage:    python scripts/mcp_prompts_smoke.py [--chrome PATH] [--screenshots DIR]
@@ -97,8 +100,7 @@ def options(page: Page) -> list[str]:
 
 
 def run(token: str, fake: FakeMcpServer, provider: ScriptedAdapter, chrome: str | None,
-        shots: str | None) -> list[str]:
-    results: list[str] = []
+        shots: str | None, results: list[str]) -> None:
     errors: list[str] = []
 
     def check(name: str, ok: bool, seen: object = None) -> None:
@@ -201,7 +203,59 @@ def run(token: str, fake: FakeMcpServer, provider: ScriptedAdapter, chrome: str 
         page.wait_for_timeout(200)
         check("7: // does not search prompts", page.locator("#prompt-picker").is_hidden())
 
-        # 8. Narrow layout.
+        # 8. A slow server: what the user did meanwhile wins (PR #43 review B1).
+        def settle() -> None:
+            page.wait_for_timeout(2500)  # past every delayed answer
+
+        fake.prompt_delay = {"calliope_commentary": 1.5, "calliope_check": 1.5}
+        box.fill("/comm")
+        box.press("Enter")
+        page.fill("#prompt-argument-0", "g-1")
+        page.click("#prompt-form-submit")
+        page.click("#prompt-form-cancel")
+        box.fill("my own words")
+        settle()
+        check("8: after Cancel, a late answer does not replace the message", box.input_value() == "my own words",
+              box.input_value())
+        box.fill("/calliope_check")
+        box.press("Enter")
+        box.press("End")
+        box.type(" and more")
+        settle()
+        check("8: after an edit, a late answer does not replace it", box.input_value() == "/calliope_check and more",
+              box.input_value())
+        box.fill("/calliope_check")
+        box.press("Enter")  # chosen: the answer is on its way
+        box.press("Escape")  # abandons it, like Cancel
+        settle()
+        check("8: after Escape, a late answer does not fill the box", box.input_value() == "/calliope_check",
+              box.input_value())
+        expect(page.locator("#composer-send")).to_be_enabled(timeout=10000)
+        box.fill("/calliope_check")
+        box.press("Enter")
+        box.fill("a message of my own")
+        box.press("Enter")
+        settle()
+        check("8: after sending a message, a late answer does not fill the box", box.input_value() == "",
+              box.input_value())
+        given = provider.prepared_inputs[-1].conversation[-1].blocks[0].text if provider.prepared_inputs else None  # type: ignore[union-attr]
+        check("8: the message sent is the user's", given == "a message of my own", given)
+        expect(page.locator("#composer-send")).to_be_enabled(timeout=10000)
+        fake.prompt_delay = {"calliope_check": 2.0, "calliope_commentary": 0.2}
+        box.fill("/calliope_check")
+        box.press("Enter")  # slow
+        box.fill("/comm")
+        box.press("Enter")  # another prompt, answered first
+        page.fill("#prompt-argument-0", "g-2")
+        page.click("#prompt-form-submit")
+        expect(box).to_have_value("[MCP prompt calliope/calliope_commentary · game=g-2]\n\n" + COMMENTARY, timeout=5000)
+        settle()
+        check("8: the earlier prompt's late answer does not replace the later one",
+              box.input_value().startswith("[MCP prompt calliope/calliope_commentary · game=g-2]"), box.input_value())
+        fake.prompt_delay = {}
+        box.fill("")
+
+        # 9. Narrow layout.
         page.set_viewport_size({"width": 380, "height": 800})
         page.wait_for_timeout(800)  # the sidebar becomes a drawer: let it finish closing
         box.fill("/")
@@ -210,12 +264,11 @@ def run(token: str, fake: FakeMcpServer, provider: ScriptedAdapter, chrome: str 
         box.fill("/comm")
         box.press("Enter")
         expect(page.locator("#prompt-form")).to_be_visible(timeout=5000)
-        shot(page, "8-narrow-form")
+        shot(page, "9-narrow-form")
         width = width and page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
-        check("8: the narrow layout has no horizontal scroll", bool(width))
+        check("9: the narrow layout has no horizontal scroll", bool(width))
         check("no uncaught errors in the page", errors == [], errors)
         browser.close()
-    return results
 
 
 def main(argv: list[str]) -> int:
@@ -230,10 +283,16 @@ def main(argv: list[str]) -> int:
         Path(root, "mcp.json").write_text(json.dumps(mcp))
         os.chmod(os.path.join(root, "mcp.json"), 0o600)
         fake = fake_server()
-        provider = ScriptedAdapter([NormalizedFinal((TextBlock("해설을 쓰겠습니다."),))])
+        provider = ScriptedAdapter([NormalizedFinal((TextBlock("해설을 쓰겠습니다."),)),
+                                    NormalizedFinal((TextBlock("네."),))])
         serve(root, fake, provider)
         token = Path(root, "control", "operator.secret").read_text().strip()
-        results = run(token, fake, provider, args.chrome, args.screenshots)
+        results: list[str] = []
+        try:
+            run(token, fake, provider, args.chrome, args.screenshots, results)
+        except Exception as error:  # noqa: BLE001 — a step that could not go on fails; what passed stays shown
+            results.append(f"FAIL  the run stopped after the checks above: {type(error).__name__}: "
+                           f"{str(error).splitlines()[0]}")
     for line in results:
         print(line)
     failed = sum(line.startswith("FAIL") for line in results)
