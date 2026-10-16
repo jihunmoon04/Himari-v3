@@ -239,68 +239,7 @@ def test_a_server_ping_is_answered_and_its_other_requests_refused() -> None:
     run(scenario)
 
 
-# --- cancelling and draining (§5.5) -------------------------------------------------------
-
-
-def test_a_stopped_call_is_cancelled_and_new_calls_wait_until_it_is_answered() -> None:
-    async def scenario() -> None:
-        launcher = FakeLauncher()
-        event, slow = gate()
-        launcher.handlers["echo"] = slow
-        launcher.honour_cancel = False  # the cancelled call finishes on its own, later
-        connection = await connected(launcher)
-        handler = connection.handlers[0]
-        try:
-            stopped = asyncio.create_task(call(handler, "a"))
-            await asyncio.sleep(0.05)
-            stopped.cancel()
-            with pytest.raises(asyncio.CancelledError):
-                await stopped
-            process = launcher.processes[1]
-            note = [m for m in process.server.received if m.get("method") == "notifications/cancelled"]
-            assert len(note) == 1 and note[0]["params"]["reason"] == "cancelled by the user"
-            waiting = asyncio.create_task(call(handler, "b", "conv-b"))
-            await asyncio.sleep(0.05)
-            assert [t for _, _, t in launcher.calls()] == [{"text": "a"}]  # DRAINING: b not written
-            launcher.handlers["echo"] = lambda args: {"content": [{"type": "text", "text": f"now: {args['text']}"}]}
-            event.set()  # the cancelled call answers: back to READY
-            assert text_of(await waiting) == "now: b"
-            assert {p for p, _, _ in launcher.calls()} == {1}  # the same process
-        finally:
-            await connection.aclose()
-
-    run(scenario)
-
-
-def test_an_unanswered_cancellation_closes_the_process_and_takes_its_other_calls(
-        monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(stdio_module, "CANCEL_GRACE_SECONDS", 0.2)
-
-    async def scenario() -> None:
-        launcher = FakeLauncher()
-        event, slow = gate()
-        launcher.handlers["echo"] = slow
-        launcher.honour_cancel = False
-        connection = await connected(launcher)
-        handler = connection.handlers[0]
-        try:
-            other = asyncio.create_task(call(handler, "other", "conv-b"))  # another Conversation's call
-            stopped = asyncio.create_task(call(handler, "a"))
-            await asyncio.sleep(0.05)
-            stopped.cancel()
-            await asyncio.gather(stopped, return_exceptions=True)
-            with pytest.raises(McpUncertain, match="may have run"):  # V3-047: never reported as not run
-                await other
-            assert launcher.processes[1].shutdowns == 1
-            launcher.handlers["echo"] = lambda args: {"content": [{"type": "text", "text": "fresh"}]}
-            outcome = await call(handler, "next", "conv-b")
-            assert text_of(outcome) == f"{RESTART_NOTICE}\n\nfresh" and outcome.raw_result["restarted"] is True  # type: ignore[index,call-overload]
-            assert len(launcher.processes) == 3
-        finally:
-            event.set()
-            await connection.aclose()
-
-    run(scenario)
+# --- cancelling and checking (§5.5, PR #35) ------------------------------------------------
 
 
 def test_a_timeout_cancels_the_request_and_is_uncertain() -> None:
@@ -442,38 +381,6 @@ def test_an_idle_process_is_closed_and_the_next_call_starts_another() -> None:
     run(scenario)
 
 
-def test_session_states_follow_the_cancelled_list() -> None:
-    async def scenario() -> None:
-        launcher = FakeLauncher()
-        event, slow = gate()
-        launcher.handlers["echo"] = slow
-        launcher.honour_cancel = False
-        server = StdioServer("calliope", McpStdioConfig(COMMAND, (), "/tmp", (), (), (), "shared", 60.0, 1),
-                             launcher, capabilities={}, timeout_seconds=5)
-        try:
-            session = await server._session(None)
-
-            def state() -> State:  # read afresh each time
-                return session.state
-
-            assert state() is State.READY
-            calls = [asyncio.create_task(session.request("tools/call", {"name": "echo", "arguments": {"text": t}}, 5))
-                     for t in ("a", "b")]
-            await asyncio.sleep(0.05)
-            calls[0].cancel()
-            await asyncio.sleep(0.01)
-            assert state() is State.DRAINING
-            calls[1].cancel()  # cancelling more while draining
-            await asyncio.gather(*calls, return_exceptions=True)
-            event.set()
-            await asyncio.sleep(0.05)
-            assert state() is State.READY  # both answered
-        finally:
-            await server.aclose()
-
-    run(scenario)
-
-
 # --- PR #34 review -------------------------------------------------------------------------
 
 
@@ -547,26 +454,6 @@ def test_b2_a_server_that_stops_reading_times_out_and_is_closed() -> None:
     run(scenario)
 
 
-def test_b2_a_stop_while_writing_closes_the_session() -> None:
-    async def scenario() -> None:
-        launcher = FakeLauncher()
-        connection = await connected(launcher)
-        try:
-            launcher.stop_reading = True
-            stopped = asyncio.create_task(call(connection.handlers[0], "a"))
-            await asyncio.sleep(0.05)
-            stopped.cancel()
-            await asyncio.gather(stopped, return_exceptions=True)
-            await asyncio.sleep(0.05)
-            assert launcher.processes[1].shutdowns == 1
-            assert not [m for m in launcher.processes[1].server.received
-                        if m.get("method") == "notifications/cancelled"]  # nothing more goes into that stream
-        finally:
-            await connection.aclose()
-
-    run(scenario)
-
-
 def test_b3_closing_the_server_during_an_allocation_leaves_no_process() -> None:
     """aclose while one Conversation is making room (holding the allocation
     lock) and another waits for the lock: nothing starts afterwards and no
@@ -603,6 +490,355 @@ def test_b3_a_launch_finishing_after_close_is_closed_at_once() -> None:
         with pytest.raises(McpRefused):
             await call
         assert all(p.returncode is not None for p in launcher.processes)
+
+    run(scenario)
+
+
+# --- cancelling is best effort; the process is checked with ping (§5.5, PR #35) ------------
+
+
+def test_a_stop_sends_the_cancellation_then_a_ping_and_the_process_stays() -> None:
+    """A server that follows the spec never answers the cancelled request; it
+    answers the ping, so its process stays and the next call goes to it."""
+    async def scenario() -> None:
+        launcher = FakeLauncher()
+        event, slow = gate()
+        launcher.handlers["echo"] = slow
+        launcher.honour_cancel = False  # the work goes on in the server: best effort
+        connection = await connected(launcher)
+        handler = connection.handlers[0]
+        try:
+            stopped = asyncio.create_task(call(handler, "a"))
+            await asyncio.sleep(0.05)
+            stopped.cancel()
+            await asyncio.gather(stopped, return_exceptions=True)
+            await asyncio.sleep(0.05)
+            assert launcher.lines(1)[-3:] == ["tools/call", "notifications/cancelled", "ping"]
+            note = next(m for m in launcher.processes[1].server.received if m.get("method") == "notifications/cancelled")
+            assert note["params"]["reason"] == "cancelled by the user"
+            launcher.handlers["echo"] = lambda args: {"content": [{"type": "text", "text": f"now: {args['text']}"}]}
+            outcome = await call(handler, "b")
+            assert text_of(outcome) == "now: b"  # no restart notice
+            assert {p for p, _, _ in launcher.calls()} == {1} and launcher.processes[1].shutdowns == 0
+            event.set()  # the cancelled work finishes later; its answer (if any) is dropped
+            await asyncio.sleep(0.05)
+        finally:
+            await connection.aclose()
+
+    run(scenario)
+
+
+def test_a_cancelled_call_answered_late_is_dropped() -> None:
+    async def scenario() -> None:
+        launcher = FakeLauncher()
+        launcher.answer_cancelled = True  # some servers still answer a cancelled request
+        event, slow = gate()
+        launcher.handlers["echo"] = slow
+        server = StdioServer("calliope", McpStdioConfig(COMMAND, (), "/tmp", (), (), (), "shared", 60.0, 1),
+                             launcher, capabilities={}, timeout_seconds=5)
+        try:
+            session = await server._session(None)
+            stopped = asyncio.create_task(session.request("tools/call", {"name": "echo", "arguments": {"text": "a"}}, 5))
+            await asyncio.sleep(0.05)
+            stopped.cancel()
+            await asyncio.gather(stopped, return_exceptions=True)
+            await asyncio.sleep(0.05)
+            assert session.state is State.READY and not session.busy
+        finally:
+            event.set()
+            await server.aclose()
+
+    run(scenario)
+
+
+def test_a_server_that_answers_no_ping_is_closed_with_its_other_calls(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(stdio_module, "CHECK_SECONDS", 0.2)
+
+    async def scenario() -> None:
+        launcher = FakeLauncher()
+        event, slow = gate()
+        launcher.handlers["echo"] = slow
+        launcher.honour_cancel = False
+        connection = await connected(launcher)
+        handler = connection.handlers[0]
+        try:
+            launcher.answer_ping = False  # hung
+            other = asyncio.create_task(call(handler, "other", "conv-b"))  # another Conversation's call
+            stopped = asyncio.create_task(call(handler, "a"))
+            await asyncio.sleep(0.05)
+            stopped.cancel()
+            await asyncio.gather(stopped, return_exceptions=True)
+            with pytest.raises(McpUncertain, match="did not answer a ping"):  # V3-047: never reported as not run
+                await other
+            assert launcher.processes[1].shutdowns == 1
+            launcher.answer_ping = True
+            launcher.handlers["echo"] = lambda args: {"content": [{"type": "text", "text": "fresh"}]}
+            outcome = await call(handler, "next", "conv-b")
+            assert text_of(outcome) == f"{RESTART_NOTICE}\n\nfresh" and outcome.raw_result["restarted"] is True  # type: ignore[index,call-overload]
+        finally:
+            event.set()
+            await connection.aclose()
+
+    run(scenario)
+
+
+def test_an_error_answer_to_ping_still_means_alive() -> None:
+    async def scenario() -> None:
+        launcher = FakeLauncher()
+        launcher.ping_error = True  # a server without ping answers -32601
+        event, slow = gate()
+        launcher.handlers["echo"] = slow
+        server = StdioServer("calliope", McpStdioConfig(COMMAND, (), "/tmp", (), (), (), "shared", 60.0, 1),
+                             launcher, capabilities={}, timeout_seconds=5)
+        try:
+            session = await server._session(None)
+            stopped = asyncio.create_task(session.request("tools/call", {"name": "echo", "arguments": {"text": "a"}}, 5))
+            await asyncio.sleep(0.05)
+            stopped.cancel()
+            await asyncio.gather(stopped, return_exceptions=True)
+            await asyncio.sleep(0.05)
+            assert session.state is State.READY
+        finally:
+            event.set()
+            await server.aclose()
+
+    run(scenario)
+
+
+def test_new_calls_wait_unadmitted_while_checking() -> None:
+    async def scenario() -> None:
+        launcher = FakeLauncher()
+        event, slow = gate()
+        launcher.handlers["echo"] = slow
+        launcher.honour_cancel = False
+        server = StdioServer("calliope", McpStdioConfig(COMMAND, (), "/tmp", (), (), (), "shared", 60.0, 1),
+                             launcher, capabilities={}, timeout_seconds=5)
+        try:
+            session = await server._session(None)
+            launcher.answer_ping = False  # hold the check open
+            stopped = asyncio.create_task(session.request("tools/call", {"name": "echo", "arguments": {"text": "a"}}, 5))
+            await asyncio.sleep(0.05)
+            stopped.cancel()
+            await asyncio.gather(stopped, return_exceptions=True)
+            launcher.handlers["echo"] = lambda args: {"content": [{"type": "text", "text": "b"}]}
+            waiting = asyncio.create_task(server.request("tools/call", {"name": "echo", "arguments": {"text": "b"}}, "c"))
+            await asyncio.sleep(0.05)
+            assert [a["text"] for _, _, a in launcher.calls()] == ["a"]  # b not admitted
+            ping = max(m["id"] for m in launcher.processes[0].server.received if m.get("method") == "ping")
+            await launcher.processes[0].server.send({"jsonrpc": "2.0", "id": ping, "result": {}})
+            assert (await waiting)["content"][0]["text"] == "b"
+            assert launcher.lines(0)[-1] == "tools/call"  # written after the ping was answered
+        finally:
+            event.set()
+            await server.aclose()
+
+    run(scenario)
+
+
+def test_further_cancellations_send_a_new_ping_and_only_the_latest_answer_counts(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(stdio_module, "CHECK_SECONDS", 0.5)
+
+    async def scenario() -> None:
+        launcher = FakeLauncher()
+        event, slow = gate()
+        launcher.handlers["echo"] = slow
+        launcher.honour_cancel = False
+        launcher.answer_ping = False
+        server = StdioServer("calliope", McpStdioConfig(COMMAND, (), "/tmp", (), (), (), "shared", 60.0, 1),
+                             launcher, capabilities={}, timeout_seconds=5)
+        try:
+            session = await server._session(None)
+
+            def state() -> State:
+                return session.state
+
+            calls = [asyncio.create_task(session.request("tools/call", {"name": "echo", "arguments": {"text": t}}, 5))
+                     for t in ("a", "b")]
+            await asyncio.sleep(0.05)
+            calls[0].cancel()
+            await asyncio.sleep(0.05)
+            assert state() is State.CHECKING
+            calls[1].cancel()  # while checking
+            await asyncio.gather(*calls, return_exceptions=True)
+            await asyncio.sleep(0.05)
+            received = launcher.processes[0].server.received
+            assert launcher.lines(0)[-4:] == ["notifications/cancelled", "ping", "notifications/cancelled", "ping"]
+            first, latest = [m["id"] for m in received if m.get("method") == "ping"]
+            await launcher.processes[0].server.send({"jsonrpc": "2.0", "id": first, "result": {}})
+            await asyncio.sleep(0.05)
+            assert state() is State.CHECKING  # an earlier ping's answer does not count
+            await launcher.processes[0].server.send({"jsonrpc": "2.0", "id": latest, "result": {}})
+            await asyncio.sleep(0.05)
+            assert state() is State.READY and not session.busy
+        finally:
+            event.set()
+            await server.aclose()
+
+    run(scenario)
+
+
+def test_further_cancellations_do_not_move_the_deadline(monkeypatch: pytest.MonkeyPatch) -> None:
+    """PR #35 re-review N1: one check never lasts past its first 10 s."""
+    monkeypatch.setattr(stdio_module, "CHECK_SECONDS", 0.4)
+
+    async def scenario() -> None:
+        launcher = FakeLauncher()
+        event, slow = gate()
+        launcher.handlers["echo"] = slow
+        launcher.honour_cancel = False
+        launcher.answer_ping = False
+        server = StdioServer("calliope", McpStdioConfig(COMMAND, (), "/tmp", (), (), (), "shared", 60.0, 1),
+                             launcher, capabilities={}, timeout_seconds=5)
+        try:
+            session = await server._session(None)
+            calls = [asyncio.create_task(session.request("tools/call", {"name": "echo", "arguments": {"text": t}}, 5))
+                     for t in ("a", "b", "c")]
+            await asyncio.sleep(0.05)
+            start = asyncio.get_running_loop().time()
+            for task in calls:  # a cancellation every 0.15 s: the last after the first deadline would have moved
+                task.cancel()
+                await asyncio.sleep(0.15)
+            await asyncio.gather(*calls, return_exceptions=True)
+            for _ in range(40):
+                if session.state is State.CLOSED:
+                    break
+                await asyncio.sleep(0.05)
+            assert session.state is State.CLOSED
+            assert session.reason == "it did not answer a ping in time"
+            assert asyncio.get_running_loop().time() - start < 0.4 + 0.35  # not 0.3 + 0.4
+        finally:
+            event.set()
+            await server.aclose()
+
+    run(scenario)
+
+
+def test_an_admitted_request_is_written_in_order_when_a_cancellation_follows() -> None:
+    """PR #35 review B2: a request admitted while READY is written in order
+    even if another is cancelled before its bytes go out; it counts as in
+    flight and answers normally."""
+    async def scenario() -> None:
+        launcher = FakeLauncher()
+        event, slow = gate()
+        launcher.handlers["echo"] = slow
+        launcher.honour_cancel = False
+        server = StdioServer("calliope", McpStdioConfig(COMMAND, (), "/tmp", (), (), (), "shared", 60.0, 1),
+                             launcher, capabilities={}, timeout_seconds=5)
+        try:
+            session = await server._session(None)
+            first = asyncio.create_task(session.request("tools/call", {"name": "echo", "arguments": {"text": "a"}}, 5))
+            await asyncio.sleep(0.05)
+            launcher.write_gate = asyncio.Event()  # the pipe slows down
+            launcher.handlers["echo"] = lambda args: {"content": [{"type": "text", "text": f"done {args['text']}"}]}
+            admitted = asyncio.create_task(session.request("tools/call", {"name": "echo", "arguments": {"text": "b"}}, 5))
+            await asyncio.sleep(0.05)  # admitted, its line waiting in the writer
+            first.cancel()
+            await asyncio.gather(first, return_exceptions=True)
+
+            def state() -> State:
+                return session.state
+
+            assert state() is State.CHECKING
+            launcher.write_gate.set()
+            assert (await admitted)["content"][0]["text"] == "done b"
+            texts = [m["params"]["arguments"]["text"] for m in launcher.processes[0].server.received
+                     if m.get("method") == "tools/call"]
+            assert texts == ["a", "b"] and launcher.lines(0)[-3:] == ["tools/call", "notifications/cancelled", "ping"]
+            await asyncio.sleep(0.05)
+            assert state() is State.READY
+        finally:
+            event.set()
+            await server.aclose()
+
+    run(scenario)
+
+
+def test_a_stuck_pipe_after_a_stop_closes_at_the_deadline(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The cancellation and ping cannot be written either; the deadline runs
+    from queueing, so the session still ends."""
+    monkeypatch.setattr(stdio_module, "CHECK_SECONDS", 0.2)
+
+    async def scenario() -> None:
+        launcher = FakeLauncher()
+        connection = await connected(launcher)
+        try:
+            launcher.stop_reading = True
+            stopped = asyncio.create_task(call(connection.handlers[0], "a"))
+            await asyncio.sleep(0.05)
+            stopped.cancel()
+            await asyncio.gather(stopped, return_exceptions=True)
+            await asyncio.sleep(0.4)
+            assert launcher.processes[1].shutdowns == 1
+        finally:
+            await connection.aclose()
+
+    run(scenario)
+
+
+def test_a_call_stopped_before_admission_sends_nothing() -> None:
+    async def scenario() -> None:
+        launcher = FakeLauncher()
+        event, slow = gate()
+        launcher.handlers["echo"] = slow
+        launcher.honour_cancel = False
+        launcher.answer_ping = False  # hold CHECKING
+        server = StdioServer("calliope", McpStdioConfig(COMMAND, (), "/tmp", (), (), (), "shared", 60.0, 1),
+                             launcher, capabilities={}, timeout_seconds=5)
+        try:
+            session = await server._session(None)
+            first = asyncio.create_task(session.request("tools/call", {"name": "echo", "arguments": {"text": "a"}}, 5))
+            await asyncio.sleep(0.05)
+            first.cancel()
+            await asyncio.gather(first, return_exceptions=True)
+            waiting = asyncio.create_task(server.request("tools/call", {"name": "echo", "arguments": {"text": "b"}}, "c"))
+            await asyncio.sleep(0.05)
+            waiting.cancel()  # not admitted: nothing about it goes to the server
+            await asyncio.gather(waiting, return_exceptions=True)
+            assert launcher.lines(0).count("notifications/cancelled") == 1
+            assert [a["text"] for _, _, a in launcher.calls()] == ["a"]
+        finally:
+            event.set()
+            await server.aclose()
+
+    run(scenario)
+
+
+def test_a_ping_answer_read_after_the_deadline_does_not_count(monkeypatch: pytest.MonkeyPatch) -> None:
+    """PR #36 review B1: the check may run late after its wait timed out; an
+    answer read after the deadline must close the session, not save it."""
+    async def scenario() -> None:
+        launcher = FakeLauncher()
+        event, slow = gate()
+        launcher.handlers["echo"] = slow
+        launcher.honour_cancel = False
+        launcher.answer_ping = False
+        server = StdioServer("calliope", McpStdioConfig(COMMAND, (), "/tmp", (), (), (), "shared", 60.0, 1),
+                             launcher, capabilities={}, timeout_seconds=5)
+        try:
+            session = await server._session(None)
+            stopped = asyncio.create_task(session.request("tools/call", {"name": "echo", "arguments": {"text": "a"}}, 5))
+            await asyncio.sleep(0.05)
+            stopped.cancel()
+            await asyncio.gather(stopped, return_exceptions=True)
+
+            def state() -> State:
+                return session.state
+
+            assert state() is State.CHECKING
+            late = session._deadline + 1  # the answer is read after the deadline
+            monkeypatch.setattr(stdio_module, "_clock", lambda: late)
+            ping = max(m["id"] for m in launcher.processes[0].server.received if m.get("method") == "ping")
+            await launcher.processes[0].server.send({"jsonrpc": "2.0", "id": ping, "result": {}})
+            for _ in range(40):
+                if state() is State.CLOSED:
+                    break
+                await asyncio.sleep(0.02)
+            assert state() is State.CLOSED and session.reason == "it did not answer a ping in time"
+        finally:
+            monkeypatch.undo()
+            event.set()
+            await server.aclose()
 
     run(scenario)
 

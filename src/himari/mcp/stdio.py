@@ -7,20 +7,29 @@ nothing.
 
 **Sessions.** A session is one process after a successful ``initialize``::
 
-    STARTING → READY ⇄ DRAINING → CLOSING → CLOSED
+    STARTING → READY ⇄ CHECKING → CLOSING → CLOSED
 
-New requests are written only while READY. Messages are one JSON object per
-line; answers are matched by id; a server's notifications are ignored, its
-``ping`` answered and any other request it makes refused (HIMARI declares no
-capability that invites one). A line that is not a JSON-RPC message, or one
-past the line bound, breaks the session: it is closed.
+Messages are one JSON object per line; answers are matched by id; a server's
+notifications are ignored, its ``ping`` answered and any other request it
+makes refused (HIMARI declares no capability that invites one). A line that
+is not a JSON-RPC message, or one past the line bound, breaks the session:
+it is closed.
 
-**Cancelling (§5.5).** When a caller stops waiting (Stop, or the call's
-timeout), ``notifications/cancelled`` is sent and the request id goes on the
-session's cancelled list with a deadline 10 s away; the session is DRAINING.
-Answers to cancelled requests are dropped. The session returns to READY only
-when every cancelled request has been answered, and is closed as soon as one
-passes its deadline. Calls that arrive meanwhile wait (unwritten).
+**One ordered writer (§5.5).** Everything written to stdin — requests,
+cancellations, pings, answers to the server's pings — goes through one
+queue, written in order by one task. A request is admitted only when it is
+put on the queue while the session is READY, in the same synchronous step
+as that check; once admitted it is written in order whatever happens next.
+
+**Cancelling is best effort (MCP; §5.5).** When a caller stops waiting
+(Stop, or the call's timeout), ``notifications/cancelled`` and then a
+``ping`` are queued and the session is CHECKING, with a deadline 10 s from
+then. The cancelled request's answer is not awaited — a server following the
+spec sends none — and is dropped if it comes. The session is READY again
+when the latest ping is answered (an error answer counts: the server reads
+and answers), and is closed if that answer has not come by the deadline. A
+further cancellation queues its notification and a new ping without moving
+the deadline. Calls that arrive meanwhile wait, not admitted.
 
 **Closing.** stdin closed, then SIGTERM, then SIGKILL (the launcher's
 ``shutdown``). Every request written to the process and not yet answered is
@@ -55,7 +64,7 @@ from himari.mcp.jsonrpc import McpRefused, McpUncertain, notification, request, 
 from himari.mcp.revision import REVISION
 
 STARTUP_SECONDS = 15.0  # launch and initialize
-CANCEL_GRACE_SECONDS = 10.0
+CHECK_SECONDS = 10.0  # a check after a cancellation: the latest ping must be answered by then
 SHUTDOWN_GRACE_SECONDS = 2.0
 BACKOFF_MAX_SECONDS = 60.0
 RESTART_NOTICE = ("This server was restarted: identifiers from its earlier answers may no longer apply; "
@@ -86,9 +95,13 @@ class ProcessLauncher(Protocol):
 class State(Enum):
     STARTING = "starting"
     READY = "ready"
-    DRAINING = "draining"
+    CHECKING = "checking"
     CLOSING = "closing"
     CLOSED = "closed"
+
+
+class _WriteFailed(Exception):
+    """A queued line was not written: the session's input broke or it closed."""
 
 
 def _clock() -> float:
@@ -104,17 +117,23 @@ class Session:
         self.last_used = _clock()
         self.settled = asyncio.Event()  # set while READY or CLOSED: a waiting call may go on
         self.initialize_result: Mapping[str, Any] = {}
-        self._pending: dict[int, asyncio.Future[object]] = {}
-        self._cancelled: dict[int, float] = {}  # request id → deadline
-        self._drained = asyncio.Event()
+        self._pending: dict[int, asyncio.Future[object]] = {}  # requests and pings awaiting an answer
+        self._pings: set[int] = set()
+        self._answered_at: dict[int, float] = {}  # ping id → when its answer was read
+        self._latest_ping: asyncio.Future[object] | None = None
+        self._latest_ping_id = 0
+        self._ping_changed = asyncio.Event()
+        self._deadline = 0.0
         self._next_id = 0
+        self._queue: asyncio.Queue[tuple[bytes, asyncio.Future[None] | None]] = asyncio.Queue()
         self._tasks: set[asyncio.Task[Any]] = set()
         self._closing: asyncio.Task[None] | None = None
         self._reader = asyncio.create_task(self._read())
+        self._writer = asyncio.create_task(self._write_loop())
 
     @property
     def busy(self) -> bool:
-        return bool(self._pending or self._cancelled)
+        return bool(self._pending)
 
     def _set(self, state: State) -> None:
         self.state = state
@@ -128,6 +147,43 @@ class Session:
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
 
+    # --- the ordered writer -----------------------------------------------------
+
+    def _enqueue(self, message: Mapping[str, Any], *, tracked: bool = False) -> asyncio.Future[None] | None:
+        """Put one line on the queue (synchronously: nothing runs in between);
+        with ``tracked``, a future that ends when it is written (or not)."""
+        line = json.dumps(message, ensure_ascii=False, separators=(",", ":")).encode()
+        written = asyncio.get_running_loop().create_future() if tracked else None
+        self._queue.put_nowait((line, written))
+        return written
+
+    async def _write_loop(self) -> None:
+        while True:
+            line, written = await self._queue.get()
+            try:
+                await self.process.write_line(line)
+            except asyncio.CancelledError:
+                if written is not None and not written.done():
+                    written.set_exception(_WriteFailed())
+                raise
+            except Exception:
+                if written is not None and not written.done():
+                    written.set_exception(_WriteFailed())
+                self._spawn(self.close("its input broke"))
+                return
+            if written is not None and not written.done():
+                written.set_result(None)
+
+    async def _send(self, message: Mapping[str, Any]) -> None:
+        written = self._enqueue(message, tracked=True)
+        assert written is not None
+        try:
+            await asyncio.shield(written)
+        except _WriteFailed:
+            raise McpRefused("the server's input broke") from None
+
+    # --- requests -----------------------------------------------------------------
+
     async def start(self, capabilities: Mapping[str, Any]) -> Mapping[str, Any]:
         """``initialize`` and ``initialized``. Never cancelled (MCP forbids
         it): a failure or a timeout closes the session instead."""
@@ -135,7 +191,7 @@ class Session:
             async with asyncio.timeout(STARTUP_SECONDS):
                 result = await self._exchange(REVISION.initialize, REVISION.initialize_params(capabilities))
                 REVISION.accept(result)
-                await self._write(notification(REVISION.initialized))
+                await self._send(notification(REVISION.initialized))
         except (McpRefused, McpUncertain) as error:
             await self.close("it did not start")
             raise McpRefused(f"initialize: {error}") from None
@@ -152,7 +208,7 @@ class Session:
 
     async def _exchange(self, method: str, params: Mapping[str, Any]) -> Mapping[str, Any]:
         request_id, future = self._register()
-        await self._write(request(request_id, method, params))
+        await self._send(request(request_id, method, params))
         return result_of(await future, request_id, method)
 
     def _register(self) -> tuple[int, asyncio.Future[object]]:
@@ -161,87 +217,101 @@ class Session:
         self._pending[self._next_id] = future
         return self._next_id, future
 
-    async def _write(self, message: Mapping[str, Any]) -> None:
-        await self.process.write_line(json.dumps(message, ensure_ascii=False, separators=(",", ":")).encode())
-
     async def request(self, method: str, params: Mapping[str, Any], timeout: float) -> Mapping[str, Any]:
+        # Admission (§5.5): the check and the queueing are one synchronous step.
         if self.state is not State.READY or self.process.returncode is not None:
-            raise McpRefused(f"{method}: the server process is not ready")  # nothing written
-        self.last_used = _clock()
+            raise McpRefused(f"{method}: the server process is not ready")  # nothing queued
         request_id, future = self._register()
-        written = False
+        written = self._enqueue(request(request_id, method, params), tracked=True)
+        assert written is not None
+        self.last_used = _clock()
+        sent = False
         try:
             # One time limit for writing and waiting (PR #34 review B2): a
-            # server that stops reading its stdin fills the pipe, and the
-            # write would wait for it however long.
+            # server that stops reading its stdin fills the pipe.
             async with asyncio.timeout(timeout):
                 try:
-                    await self._write(request(request_id, method, params))
-                except Exception:
+                    await asyncio.shield(written)
+                except _WriteFailed:
                     self._pending.pop(request_id, None)
-                    self._spawn(self.close("its input broke"))
                     raise McpUncertain(f"{method}: the request could not be fully written") from None
-                written = True
+                sent = True
                 message = await asyncio.shield(future)
         except TimeoutError:
-            if written:
+            if sent:
                 self._cancel(request_id, "timed out")
                 raise McpUncertain(f"{method}: no answer in {timeout:g} s") from None
-            self._unwritten(request_id, "it did not read its input in time")
+            # The pipe is stuck behind or inside this request: the stream cannot be trusted.
+            self._pending.pop(request_id, None)
+            self._spawn(self.close("it did not read its input in time"))
             raise McpUncertain(f"{method}: the request could not be written in {timeout:g} s; "
                                "the server may have read part of it") from None
         except asyncio.CancelledError:
-            if written:
-                self._cancel(request_id, "cancelled by the user")
-            else:
-                self._unwritten(request_id, "a request was stopped while it was being written")
+            # Admitted: it is written in order whatever happens, so it is cancelled like one in flight.
+            self._cancel(request_id, "cancelled by the user")
             raise
         finally:
             self.last_used = _clock()
         return result_of(message, request_id, method)
 
-    def _unwritten(self, request_id: int, reason: str) -> None:
-        """A write that did not finish: the server may have read part of the
-        request, and the stream may hold the rest. The session cannot be
-        trusted again; it is closed (its other requests become uncertain)."""
-        self._pending.pop(request_id, None)
-        self._spawn(self.close(reason))
+    # --- cancelling and checking (§5.5) -----------------------------------------------
 
     def _cancel(self, request_id: int, reason: str) -> None:
+        """Best effort: the cancellation, then a ping, queued in this order and
+        in one synchronous step; the session is CHECKING until the latest ping
+        is answered, or closed at the check's deadline."""
         future = self._pending.pop(request_id, None)
-        if future is None or self.state not in (State.READY, State.DRAINING):
+        if future is None or self.state not in (State.READY, State.CHECKING):
             return
         if not future.done():
             future.cancel()
-        self._cancelled[request_id] = _clock() + CANCEL_GRACE_SECONDS
-        self._spawn(self._notify_cancelled(request_id, reason))
+        self._enqueue(notification("notifications/cancelled", {"requestId": request_id, "reason": reason}))
+        ping_id, ping = self._register()
+        self._pings.add(ping_id)
+        self._enqueue(request(ping_id, "ping", {}))
+        self._latest_ping, self._latest_ping_id = ping, ping_id
+        self._ping_changed.set()
         if self.state is State.READY:
-            self._set(State.DRAINING)
-            self._spawn(self._drain())
-        self._drained.set()  # the watcher recomputes its deadline
+            self._deadline = _clock() + CHECK_SECONDS  # not moved by later cancellations
+            self._set(State.CHECKING)
+            self._spawn(self._check())
 
-    async def _notify_cancelled(self, request_id: int, reason: str) -> None:
-        try:
-            await self._write(notification("notifications/cancelled", {"requestId": request_id, "reason": reason}))
-        except Exception:
-            await self.close("its input broke")
-
-    async def _drain(self) -> None:
-        """READY again once every cancelled request is answered; closed as
-        soon as one passes its deadline."""
-        while self.state is State.DRAINING:
-            if not self._cancelled:
-                self._set(State.READY)
+    async def _check(self) -> None:
+        while self.state is State.CHECKING:
+            ping = self._latest_ping
+            assert ping is not None
+            remaining = self._deadline - _clock()
+            if remaining <= 0:
+                await self.close("it did not answer a ping in time")
                 return
-            wait = min(self._cancelled.values()) - _clock()
-            if wait <= 0:
-                await self.close("a cancelled request was not answered in time")
-                return
-            self._drained.clear()
+            self._ping_changed.clear()
+            changed: asyncio.Future[Any] = asyncio.ensure_future(self._ping_changed.wait())
+            awaited: set[asyncio.Future[Any]] = {ping, changed}
             try:
-                await asyncio.wait_for(self._drained.wait(), wait)
-            except TimeoutError:
-                pass
+                await asyncio.wait(awaited, timeout=remaining, return_when=asyncio.FIRST_COMPLETED)
+            finally:
+                changed.cancel()
+            if self.state is not State.CHECKING or ping is not self._latest_ping or not ping.done():
+                continue
+            # The final gate (PR #36 review B1): only an answer read by the
+            # deadline counts, however late this task runs after it.
+            answered = self._answered_at.get(self._latest_ping_id)
+            if ping.cancelled() or answered is None or answered > self._deadline:
+                await self.close("it did not answer a ping in time")
+                return
+            self._forget_pings()  # answered, result or error: it reads and answers
+            self._set(State.READY)
+            return
+
+    def _forget_pings(self) -> None:
+        for ping_id in self._pings:
+            future = self._pending.pop(ping_id, None)
+            if future is not None and not future.done():
+                future.cancel()
+        self._pings.clear()
+        self._answered_at.clear()
+
+    # --- reading ----------------------------------------------------------------------
 
     async def _read(self) -> None:
         try:
@@ -255,17 +325,17 @@ class Session:
                     raise _Broken("it wrote a message that is not JSON-RPC")
                 if "method" in message:
                     if "id" in message:
-                        self._spawn(self._answer(message))
+                        self._answer(message)
                     continue  # a notification: ignored
                 request_id = message.get("id")
                 if not isinstance(request_id, int) or isinstance(request_id, bool):
                     raise _Broken("it answered a request HIMARI did not send")
-                if self._cancelled.pop(request_id, None) is not None:
-                    self._drained.set()
-                    continue  # the caller is gone; MCP says to ignore it
+                if request_id in self._pings:
+                    self._answered_at[request_id] = _clock()
                 future = self._pending.pop(request_id, None)
                 if future is not None and not future.done():
                     future.set_result(message)
+                # an answer to nothing pending (a cancelled request's, a late ping's) is dropped: MCP says so
         except asyncio.CancelledError:
             raise
         except _Broken as broken:
@@ -273,34 +343,39 @@ class Session:
         except Exception:
             self._spawn(self.close("the server process ended"))
 
-    async def _answer(self, message: Mapping[str, Any]) -> None:
+    def _answer(self, message: Mapping[str, Any]) -> None:
         if message.get("method") == "ping":
             answer: dict[str, Any] = {"jsonrpc": "2.0", "id": message["id"], "result": {}}
         else:
             answer = {"jsonrpc": "2.0", "id": message["id"],
                       "error": {"code": -32601, "message": "HIMARI does not offer this"}}
-        try:
-            await self._write(answer)
-        except Exception:
-            await self.close("its input broke")
+        self._enqueue(answer)  # in order with everything else; a failed write closes the session
+
+    # --- closing ----------------------------------------------------------------------
 
     async def close(self, reason: str) -> None:
         if self._closing is None:
-            self._set(State.CLOSING)  # at once: no request is written from here on
+            self._set(State.CLOSING)  # at once: nothing is admitted from here on
             self._closing = asyncio.create_task(self._close(reason))
         await asyncio.shield(self._closing)
 
     async def _close(self, reason: str) -> None:
         self.reason = reason
         self._set(State.CLOSING)
+        self._forget_pings()
         for future in self._pending.values():
             if not future.done():
                 future.set_exception(McpUncertain(f"the server process was ended ({reason}); the call may have run"))
         self._pending.clear()
-        self._cancelled.clear()
-        self._drained.set()
-        if self._reader is not asyncio.current_task():
-            self._reader.cancel()
+        self._ping_changed.set()
+        current = asyncio.current_task()
+        for task in (self._reader, self._writer):
+            if task is not current:
+                task.cancel()
+        while not self._queue.empty():  # lines never written: their waiters learn it
+            _, written = self._queue.get_nowait()
+            if written is not None and not written.done():
+                written.set_exception(_WriteFailed())
         try:
             await self.process.shutdown(SHUTDOWN_GRACE_SECONDS)
         except Exception:  # noqa: BLE001 — the launcher's own failure must not stop the close
@@ -361,7 +436,7 @@ class StdioServer:
             if session is not None and session.state is not State.CLOSED:
                 if session.state is State.READY:
                     return session
-                await session.settled.wait()  # DRAINING or CLOSING: nothing written while waiting
+                await session.settled.wait()  # CHECKING or CLOSING: not admitted while waiting
                 continue
             async with self._allocating:  # one allocation at a time (PR #34 review B1)
                 if self._closed:  # closed while this call waited for the lock (review B3)
