@@ -25,8 +25,9 @@ Handler = Callable[[dict[str, Any]], Awaitable[dict[str, Any]] | dict[str, Any]]
 
 
 class FakeStdioServer:
-    def __init__(self, launcher: FakeLauncher) -> None:
+    def __init__(self, launcher: FakeLauncher, process: FakeProcess) -> None:
         self.launcher = launcher
+        self.process = process
         self.received: list[dict[str, Any]] = []
         self.out: asyncio.Queue[bytes | None] = asyncio.Queue()
         self.running: dict[int, asyncio.Task[None]] = {}
@@ -51,8 +52,19 @@ class FakeStdioServer:
             if method == "initialize":
                 if self.launcher.initialize_delay:
                     await asyncio.sleep(self.launcher.initialize_delay)
-                result: dict[str, Any] = {"protocolVersion": params["protocolVersion"], "capabilities": {"tools": {}},
+                result: dict[str, Any] = {"protocolVersion": params["protocolVersion"],
+                                          "capabilities": self.launcher.capabilities,
                                           "serverInfo": {"name": "fake-stdio", "version": "1"}}
+                if self.launcher.instructions is not None:
+                    result["instructions"] = self.launcher.instructions
+            elif method == "prompts/list":
+                if self.launcher.hang_prompts_list:
+                    await asyncio.Event().wait()
+                result = {"prompts": self.launcher.prompts}
+            elif method == "prompts/get":
+                index = self.launcher.processes.index(self.process)
+                result = {"messages": [{"role": "user", "content": {
+                    "type": "text", "text": f"prompt {params['name']} from process {index}"}}]}
             elif method == "ping":
                 if not self.launcher.answer_ping:
                     return  # hung: reads, never answers
@@ -86,7 +98,7 @@ class FakeStdioServer:
 
 class FakeProcess:
     def __init__(self, launcher: FakeLauncher, argv: Sequence[str], env: Mapping[str, str], cwd: str) -> None:
-        self.server = FakeStdioServer(launcher)
+        self.server = FakeStdioServer(launcher, self)
         self.argv, self.env, self.cwd = list(argv), dict(env), cwd
         self.returncode: int | None = None
         self.shutdowns = 0
@@ -141,6 +153,10 @@ class FakeLauncher:
         self.answer_ping = True
         self.ping_error = False  # answer ping with -32601 (a server without ping)
         self.write_gate: asyncio.Event | None = None
+        self.capabilities: dict[str, Any] = {"tools": {}}
+        self.instructions: str | None = None
+        self.prompts: list[Any] = []
+        self.hang_prompts_list = False
         self.initialize_delay = 0.0
         self.stop_reading = False  # tools/call writes block forever
         self.shutdown_delay = 0.0

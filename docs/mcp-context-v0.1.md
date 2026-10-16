@@ -1,6 +1,6 @@
 # MCP 서버의 안내문·프롬프트·리소스를 모델 문맥에 v0.1
 
-> 2026-10-16 · **PROPOSED (V3-P60)** · rev. 4 — 재검수 READY_WITH_CORRECTIONS(C6·C7) 반영(§12), 이전 검수 모두 반영(§11, §12). 구현 전이다.
+> 2026-10-16 · **PROPOSED (V3-P60)** · rev. 4 — 재검수 READY_WITH_CORRECTIONS(C6·C7) 반영(§12), 이전 검수 모두 반영(§11, §12). 설계 PR #39 병합. 구현: 1단계 기반 작업(§14.1), 나머지는 다음 PR.
 >
 > 기준 사양: MCP 2025-11-25 [Lifecycle](https://modelcontextprotocol.io/specification/2025-11-25/basic/lifecycle)(`InitializeResult.instructions`), [Prompts](https://modelcontextprotocol.io/specification/2025-11-25/server/prompts), [Resources](https://modelcontextprotocol.io/specification/2025-11-25/server/resources).
 >
@@ -370,4 +370,26 @@ B5·B6, C1~C5는 해결됐다. 새 차단 사항은 없다.
 1. **Calliope의 모델용 지침 (C5):** `calliope_commentary`·`calliope_check`의 내용을 리소스로도 낼지 정한다(예: `calliope://prompts/commentary_ko`). 그러면 안내문이 그 리소스를 가리키게 하고, 모델이 `calliope/read_resource`로 스스로 읽을 수 있다. 사용자가 고르는 프롬프트는 그대로 둔다. Calliope 저장소의 설계 절차로 한다(소유자 허용 필요).
 2. **리소스 첨부:** 사용자가 리소스를 골라 메시지에 붙이는 것(`@`)과 이미지·바이너리 내용은 Provider의 첨부 지원 뒤에 한다.
 3. **`listChanged`·구독:** 목록이 바뀌었다는 서버 알림은 아직 쓰지 않는다. 리소스 목록은 세션별 60초 캐시로 따라간다.
+
+## 14. 구현 노트
+
+### 14.1 기반 작업 (2026-10-16)
+
+§6·§7의 기반을 구현했다. 아직 모델이나 사용자에게 보이는 것은 없다.
+- **`mcp.json`:** `instructions`(`system`·`data`·`off`), `prompts`, `resources`(`false` 또는 `{effect, uris}`)를 읽는다. `tools`는 선택이다.
+- **연결:**
+  - 목록 세션의 `initialize` 결과에서 능력과 안내문을 읽는다.
+  - `tools/list`는 `tools` 능력이 있고 운영자가 Tool을 적었을 때만, `prompts/list`는 `prompts` 능력이 있고 켜졌을 때만 묻는다.
+  - 운영자가 Tool을 적었는데 서버가 `tools`를 선언하지 않으면 문제로 적는다.
+  - 쓸 것이 하나도 없으면 "nothing to use"로 빠진다.
+- **`McpConnection`:** `notes`(서버 → 위치와 안내문, 최대 64 KiB 보관), `prompts`, `capabilities`, `by_source`, 그리고 `get_prompt(source, name, arguments, key)`. `McpClient`의 `request`·`read_resource`·`get_prompt`가 대화 키를 받는다(C2).
+- **프롬프트는 선택 기능이다 (PR #40 검수 B1·B2·C1).** 프롬프트 목록이 잘못돼도 그 서버의 프롬프트만 빠지고, 이미 확인된 Tool·안내문과 다른 서버는 그대로다.
+  - **잘못된 항목:** 객체가 아니거나 이름·인자 목록이 잘못된 항목은 하나씩 빼고 문제 목록에 적는다. 파싱 중 어떤 예외도 `connect` 밖으로 나가지 않는다.
+  - **시간 제한:** `prompts/list`는 `initialize`·`tools/list`와 따로 자기 시간 제한(`PROMPTS_STARTUP_SECONDS`, 10초)을 가진다. 응답이 없으면 "prompts left out: no answer in time"이다.
+  - **순서 (재검수 B3):** `prompts/list`는 목록 세션에서 **마지막**에 묻는다(`initialize` → `tools/list` → Tool 등록과 화면 읽기 → `prompts/list`). stdio에서 시간 초과로 취소되면 그 세션은 확인 상태(`CHECKING`)가 되어 새 요청을 받지 않는다. 그래서 그 뒤에 화면(`resources/read`)을 읽으면 실패한다.
+  - **크기:** 목록 전체는 100개, 1 MiB까지다.
+- **`get_prompt`는 프롬프트가 있는지만 본다 (C2).** 대화에서 그 서버가 켜졌는지와 대화 접근 권한은 4단계에서 `Application`이 확인한다.
+- **대화별 켜기/끄기 대상:** 이미 설정된 서버 전체(`mcp.defaults`)였다. Tool이 없는 서버도 그대로 켜고 끌 수 있어 바꿀 것이 없었다(테스트로 확인).
+- **함께 고친 것:** 세션이 닫힐 때 기다리는 쪽이 이미 없는 Future에 넣은 예외가 asyncio의 "never retrieved" 경고로 가끔 찍혔다. 생성할 때 결과를 거두는 콜백을 붙였다.
+- **실측(이 호스트, 실제 Calliope):** 능력 `prompts`·`resources`·`tools`, 안내문 364자(`system`), 프롬프트 2개(인자 `game`·`ply`)를 읽었다. `get_prompt`가 그 대화의 세션에서 답했다.
 

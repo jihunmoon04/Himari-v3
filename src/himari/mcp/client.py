@@ -87,6 +87,8 @@ SUPPORTED_VERSIONS = REVISION.supported
 MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 MAX_LIST_BYTES = 8 * 1024 * 1024  # every tools/list page together
 MAX_LISTED_TOOLS = 1000
+MAX_LISTED_PROMPTS = 100  # per server (V3-P60 §4)
+MAX_PROMPT_LIST_BYTES = 1024 * 1024  # every prompts/list page together
 _LINE_END = re.compile(rb"[\r\n]")
 # Statuses that reject the request itself, before any Tool could run.
 REFUSED_STATUSES = frozenset({400, 401, 403, 404, 405, 406, 413, 415})
@@ -157,6 +159,31 @@ class McpClient:
                 raise McpRefused("tools/list answered with an invalid nextCursor")
         raise McpRefused(f"tools/list has more than {MAX_TOOL_PAGES} pages")
 
+    async def list_prompts(self) -> list[object]:
+        """Every prompt the server offers (V3-P60 §4), within the bounds."""
+        prompts: list[object] = []
+        cursor: str | None = None
+        size = 0
+        for _ in range(MAX_TOOL_PAGES):
+            result = await self.request("prompts/list", {} if cursor is None else {"cursor": cursor})
+            page = result.get("prompts")
+            if not isinstance(page, list):  # entries are checked one by one by the caller
+                raise McpRefused("prompts/list answered without a list of prompts")
+            size += len(json.dumps(page))
+            if len(prompts) + len(page) > MAX_LISTED_PROMPTS or size > MAX_PROMPT_LIST_BYTES:
+                raise McpRefused(f"prompts/list is larger than {MAX_LISTED_PROMPTS} prompts or {MAX_PROMPT_LIST_BYTES} bytes")
+            prompts.extend(page)
+            cursor = result.get("nextCursor")
+            if cursor is None or cursor == "":
+                return prompts
+            if not isinstance(cursor, str):
+                raise McpRefused("prompts/list answered with an invalid nextCursor")
+        raise McpRefused(f"prompts/list has more than {MAX_TOOL_PAGES} pages")
+
+    async def get_prompt(self, name: str, arguments: Mapping[str, str], *, key: str | None = None) -> Mapping[str, Any]:
+        """``prompts/get`` in the Conversation's session (``key``, V3-P60 C2)."""
+        return await self._channel.request("prompts/get", {"name": name, "arguments": dict(arguments)}, key=key)
+
     async def call_tool(self, name: str, arguments: Mapping[str, JsonValue], *,
                         key: str | None = None) -> Mapping[str, Any]:
         return await self._channel.request("tools/call", {"name": name, "arguments": dict(arguments)}, key=key)
@@ -164,11 +191,11 @@ class McpClient:
     def take_restart(self, key: str | None) -> bool:
         return self._channel.take_restart(key)
 
-    async def read_resource(self, uri: str) -> Mapping[str, Any]:
-        return await self.request("resources/read", {"uri": uri})
+    async def read_resource(self, uri: str, *, key: str | None = None) -> Mapping[str, Any]:
+        return await self.request("resources/read", {"uri": uri}, key=key)
 
-    async def request(self, method: str, params: Mapping[str, Any]) -> Mapping[str, Any]:
-        return await self._channel.request(method, params)
+    async def request(self, method: str, params: Mapping[str, Any], *, key: str | None = None) -> Mapping[str, Any]:
+        return await self._channel.request(method, params, key=key)
 
 
 def http_client(url: str, token: str | None, *, timeout_seconds: float,

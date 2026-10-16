@@ -253,6 +253,19 @@ class McpConnection:
     clients: list[McpClient]
     # V3-P58: what each configured server's views may reach (None: not shown).
     ui_policies: dict[str, McpUiPolicy | None] = field(default_factory=dict)
+    # V3-P60, read once at connect: each server's instructions (where they go)
+    # and prompts, and the capabilities it declared.
+    notes: dict[str, SourceNote] = field(default_factory=dict)
+    prompts: dict[str, tuple[PromptInfo, ...]] = field(default_factory=dict)
+    capabilities: dict[str, frozenset[str]] = field(default_factory=dict)
+    by_source: dict[str, McpClient] = field(default_factory=dict)
+
+    async def get_prompt(self, source: str, name: str, arguments: Mapping[str, str], key: str) -> Mapping[str, Any]:
+        """``prompts/get`` in that Conversation's session; McpRefused if the
+        server offers no such prompt."""
+        if not any(p.name == name for p in self.prompts.get(source, ())):
+            raise McpRefused(f"{source} offers no prompt {name!r}")
+        return await self.by_source[source].get_prompt(name, arguments, key=key)
 
     @property
     def defaults(self) -> dict[str, bool]:
@@ -277,6 +290,67 @@ class McpConnection:
     async def aclose(self) -> None:
         for client in self.clients:
             await client.aclose()
+
+
+PROMPTS_STARTUP_SECONDS = 10.0  # prompts/list, on its own: a broken prompt list never costs the Tools (B2)
+MAX_NOTE_CHARS = 64 * 1024  # kept of a server's instructions; what the model gets is cut further (V3-P60 §3)
+
+
+@dataclass(frozen=True)
+class SourceNote:
+    """A server's ``initialize`` instructions and where the operator puts them."""
+
+    placement: str  # "system" | "data" (never "off": then there is no note)
+    text: str
+
+
+@dataclass(frozen=True)
+class PromptArgument:
+    name: str
+    description: str
+    required: bool
+
+
+@dataclass(frozen=True)
+class PromptInfo:
+    """One prompt a server offers (``prompts/list``), as the user picks it."""
+
+    name: str
+    title: str
+    description: str
+    arguments: tuple[PromptArgument, ...]
+
+
+def _text(value: object, limit: int) -> str:
+    return value[:limit] if isinstance(value, str) else ""
+
+
+def _prompt_info(entry: object) -> PromptInfo | None:
+    """One ``prompts/list`` entry, or None when it is not usable: whatever a
+    server sends, this never raises (PR #40 review B1)."""
+    if not isinstance(entry, dict):
+        return None
+    name = entry.get("name")
+    raw_arguments = entry.get("arguments", [])
+    if not isinstance(name, str) or not name or len(name) > 128 or not isinstance(raw_arguments, list):
+        return None
+    arguments = []
+    for raw in raw_arguments:
+        if not isinstance(raw, dict) or not isinstance(raw.get("name"), str) or not raw["name"]:
+            return None  # a prompt whose arguments cannot be read cannot be filled in
+        arguments.append(PromptArgument(raw["name"][:128], _text(raw.get("description"), 500),
+                                        raw.get("required") is True))
+    return PromptInfo(name, _text(entry.get("title"), 200), _text(entry.get("description"), 1000), tuple(arguments))
+
+
+@dataclass
+class _Started:
+    client: McpClient
+    handlers: list[McpTool]
+    status: SourceStatus
+    note: SourceNote | None = None
+    prompts: tuple[PromptInfo, ...] = ()
+    capabilities: frozenset[str] = frozenset()
 
 
 # Bootstrap's launcher for a stdio server; raising says why it cannot run (the reason is shown).
@@ -316,16 +390,27 @@ def _clients(server: McpServerConfig, transport: httpx.AsyncBaseTransport | None
 
 
 async def _start(server: McpServerConfig, check_schema: InputSchemaCheck, transport: httpx.AsyncBaseTransport | None,
-                 launcher_for: LauncherFor | None) -> tuple[McpClient, list[McpTool], SourceStatus]:
+                 launcher_for: LauncherFor | None) -> _Started:
     lister: McpClient | None = None
     try:
         client, lister = _clients(server, transport, launcher_for)
     except Exception as error:  # noqa: BLE001 — a server that cannot run is left out with the reason
-        return McpClient(_Unavailable()), [], SourceStatus(server.name, server.enabled_by_default, False, (), (f"unavailable: {error}",))
+        return _Started(McpClient(_Unavailable()), [], SourceStatus(server.name, server.enabled_by_default, False, (),
+                                                                    (f"unavailable: {error}",)))
+    problems: list[str] = []
     try:
         async with asyncio.timeout(STARTUP_SECONDS):
-            await (lister or client).initialize()
-            listing = await (lister or client).list_tools()
+            init = await (lister or client).initialize()
+            declared = init.get("capabilities")
+            capabilities = frozenset(k for k, v in declared.items() if isinstance(v, dict)) \
+                if isinstance(declared, dict) else frozenset()
+            # Each list only when the server declares that capability (V3-P60 B4).
+            listing: list[Mapping[str, Any]] = []
+            if server.tools:
+                if "tools" in capabilities:
+                    listing = await (lister or client).list_tools()
+                else:
+                    problems.append("the server declares no tools: the listed Tools are not offered")
     except Exception as error:  # noqa: BLE001 — whatever the server did, only this server is left out
         if lister is not None:
             await lister.aclose()
@@ -335,7 +420,11 @@ async def _start(server: McpServerConfig, check_schema: InputSchemaCheck, transp
             reason = str(error)
         else:
             reason = f"its answer could not be used ({type(error).__name__})"
-        return client, [], SourceStatus(server.name, server.enabled_by_default, False, (), (f"unavailable: {reason}",))
+        return _Started(client, [], SourceStatus(server.name, server.enabled_by_default, False, (),
+                                                 (f"unavailable: {reason}",)))
+    text = init.get("instructions")
+    note = (SourceNote(server.instructions, text[:MAX_NOTE_CHARS])
+            if server.instructions != "off" and isinstance(text, str) and text.strip() else None)
     listed: dict[str, Mapping[str, Any]] = {}
     duplicated: set[str] = set()
     for entry in listing:
@@ -345,7 +434,6 @@ async def _start(server: McpServerConfig, check_schema: InputSchemaCheck, transp
                 duplicated.add(name)
             listed[name] = entry
     handlers: list[McpTool] = []
-    problems: list[str] = []
     wanted: dict[str, list[McpTool]] = {}  # view URI → the Tools showing it
     for tool in server.tools:
         if tool.name in duplicated:
@@ -380,11 +468,34 @@ async def _start(server: McpServerConfig, check_schema: InputSchemaCheck, transp
         wanted.setdefault(uri, []).append(handler)
     if wanted:
         problems.extend(await _read_views(lister or client, server.name, wanted))
+    # Prompts are optional: their failure, however it comes, leaves them out
+    # and nothing else (PR #40 review B1, B2). They are listed last: a timed-out
+    # prompts/list leaves a stdio listing session checking, so nothing may
+    # follow it on that session (B3).
+    prompts: tuple[PromptInfo, ...] = ()
+    if server.prompts and "prompts" in capabilities:
+        try:
+            async with asyncio.timeout(PROMPTS_STARTUP_SECONDS):
+                prompt_entries = await (lister or client).list_prompts()
+            infos = [_prompt_info(e) for e in prompt_entries]
+            prompts = tuple(info for info in infos if info is not None)
+            if len(prompts) < len(infos):
+                problems.append(f"{len(infos) - len(prompts)} prompt(s) left out: their description cannot be used")
+        except TimeoutError:
+            problems.append("prompts left out: no answer in time")
+        except McpError as error:
+            problems.append(f"prompts left out: {error}")
+        except Exception as error:  # noqa: BLE001 — whatever the server sent, only its prompts are left out
+            problems.append(f"prompts left out: the answer could not be used ({type(error).__name__})")
     if lister is not None:
         await lister.aclose()
-    status = SourceStatus(server.name, server.enabled_by_default, True,
+    resources = server.resources is not None and "resources" in capabilities
+    usable = bool(handlers or note or prompts or resources)  # a server may offer no Tools (V3-P60 B4)
+    if not usable:
+        problems.append("nothing to use: no listed Tool, instructions, prompts or resources")
+    status = SourceStatus(server.name, server.enabled_by_default, usable,
                           tuple(h.definition.tool_id for h in handlers), tuple(problems))
-    return client, handlers, status
+    return _Started(client, handlers, status, note if usable else None, prompts if usable else (), capabilities)
 
 
 async def _read_views(client: McpClient, source: str, wanted: dict[str, list[McpTool]]) -> list[str]:
@@ -426,11 +537,16 @@ async def connect(config: McpConfig, *, check_schema: InputSchemaCheck,
     """Every server at once; never raises for an unreachable server.
     ``check_schema`` is the Registry's own check, so a Tool it would refuse
     is left out here, with the reason, instead of failing the startup."""
-    started: Sequence[tuple[McpClient, list[McpTool], SourceStatus]] = await asyncio.gather(
+    started: Sequence[_Started] = await asyncio.gather(
         *(_start(server, check_schema, transport, launcher_for) for server in config.servers))
+    names = [server.name for server in config.servers]
     return McpConnection(
-        handlers=[h for _, handlers, _ in started for h in handlers],
-        statuses=tuple(status for _, _, status in started),
-        clients=[client for client, _, _ in started],
+        handlers=[h for s in started for h in s.handlers],
+        statuses=tuple(s.status for s in started),
+        clients=[s.client for s in started],
         ui_policies={server.name: server.ui for server in config.servers},
+        notes={name: s.note for name, s in zip(names, started, strict=True) if s.note is not None},
+        prompts={name: s.prompts for name, s in zip(names, started, strict=True) if s.prompts},
+        capabilities={name: s.capabilities for name, s in zip(names, started, strict=True)},
+        by_source={name: s.client for name, s in zip(names, started, strict=True)},
     )
