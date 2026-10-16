@@ -347,11 +347,38 @@ def test_a_query_template_does_not_widen_to_other_parameters() -> None:
 def test_a_server_without_templates_still_lists_its_resources() -> None:
     server = FakeMcpServer()
     server.listed = [{"uri": GLOSSARY, "name": "glossary"}]
-    server.templates = None  # resources/templates/list is an unknown method
+    server.templates = None  # resources/templates/list is an unknown method (-32601)
+    server.resources = {GLOSSARY: answer(text_entry(GLOSSARY, "g"))}
 
     async def scenario() -> None:
         connection = await open_http(server)
         assert listing(await use(connection, "list_resources"))["templates"] == []
+        assert (await use(connection, "read_resource", uri=GLOSSARY)).status is ToolStatus.SUCCEEDED
+        await connection.aclose()
+
+    run(scenario)
+
+
+@pytest.mark.parametrize(("start", "code"), [(0, -32602), (0, -32600), (1, -32601), (1, -32602)])
+def test_templates_that_cannot_be_listed_whole_allow_no_read(start: int, code: int) -> None:
+    """PR #42 re-review B3: only "no such method" on the first page means
+    no templates; any other refusal, or one on a later page, may hide a
+    user-only template, so nothing is read."""
+    server = FakeMcpServer()
+    server.listed = [{"uri": "calliope://private/1", "name": "looks public"}]
+    server.templates = [{"uriTemplate": "calliope://games/{game}", "name": "game"},
+                        {"uriTemplate": "calliope://private/{id}", "name": "private", "annotations": {"audience": ["user"]}}]
+    server.list_page_size = 1
+    server.list_errors = {("resources/templates/list", start): code}
+    server.resources = {"calliope://private/1": answer(text_entry("calliope://private/1", "secret"))}
+
+    async def scenario() -> None:
+        connection = await open_http(server)
+        listed = await use(connection, "list_resources")
+        assert listed.status is ToolStatus.FAILED
+        read = await use(connection, "read_resource", uri="calliope://private/1")
+        assert read.status is ToolStatus.FAILED and "secret" not in text_of(read)
+        assert server.resource_reads == []
         await connection.aclose()
 
     run(scenario)

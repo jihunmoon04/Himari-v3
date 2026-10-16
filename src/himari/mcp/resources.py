@@ -68,6 +68,7 @@ MAX_URI_CHARS = 2048
 VERSION_CHARS = 12
 OMITTED = "[omitted: restricted resource]"
 RESOURCE_NOT_FOUND = -32002
+METHOD_NOT_FOUND = -32601
 
 
 def _clock() -> float:
@@ -319,8 +320,11 @@ class ResourceReader:
                         method, {} if cursor is None else {"cursor": cursor}, key=key, session=session)
                 except McpSessionChanged:
                     raise
-                except McpRefused:
-                    if method == "resources/templates/list":  # a server without templates
+                except McpRefused as refused:
+                    # No templates only when the server says it has no such method, at the start: any
+                    # other refusal, or one on a later page, leaves templates unknown that could
+                    # refuse a URI (PR #42 re-review B3).
+                    if method == "resources/templates/list" and cursor is None and refused.code == METHOD_NOT_FOUND:
                         break
                     raise
                 entries = result.get(field_name)

@@ -83,6 +83,7 @@ class FakeMcpServer:
         self.list_page_size: int | None = None
         self.missing_resource_code = -32602  # resources/read of a URI not in ``resources``
         self.on_method: dict[str, Callable[[], None]] = {}  # run once that method is answered
+        self.list_errors: dict[tuple[str, int], int] = {}  # (method, page start) → JSON-RPC error code
 
     def transport(self) -> httpx.MockTransport:
         return httpx.MockTransport(self.handle)
@@ -149,6 +150,8 @@ class FakeMcpServer:
             if entries is None:
                 return self._error(request_id, -32601)
             start = int(params.get("cursor", "0"))
+            if (method, start) in self.list_errors:
+                return self._error(request_id, self.list_errors[(method, start)])
             size = self.list_page_size or max(len(entries), 1)
             name = "resources" if method == "resources/list" else "resourceTemplates"
             listed: dict[str, Any] = {name: entries[start : start + size]}
