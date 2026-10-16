@@ -13,6 +13,8 @@ import pytest
 from mcp_fake import URL, FakeMcpServer
 from mcp_stdio_fake import FakeLauncher
 
+from himari.mcp import tools as tools_module
+
 from himari.bootstrap.application import Application
 from himari.bootstrap.operator import OPERATOR
 from himari.common import TrustedScope
@@ -193,3 +195,78 @@ def test_a_prompt_is_got_from_the_conversations_own_process() -> None:
             await connection.aclose()
 
     asyncio.run(asyncio.wait_for(run(), 20))
+
+
+# --- prompts are optional: their failure costs nothing else (PR #40 review) ----------------
+
+
+@pytest.mark.parametrize("bad", [
+    {"name": "example", "arguments": 123},
+    {"name": "example", "arguments": [{"name": 5}]},
+    {"name": 7},
+    "not an object",
+    {"name": "example", "title": {"x": 1}, "description": ["y"]},  # unusable texts: kept, emptied
+])
+def test_a_malformed_prompt_never_breaks_the_connection(bad: Any) -> None:
+    """B1: a bad prompts/list entry stays with its server; the good one and the Tools stay."""
+    server = FakeMcpServer()
+    server.capabilities = {"tools": {}, "prompts": {}}
+    server.prompts = [bad, PROMPT]
+    connection = connected(server)
+    (status,) = connection.statuses
+    assert status.available and status.tool_ids == ("calliope/echo",)
+    names = [p.name for p in connection.prompts["calliope"]]
+    assert "calliope_commentary" in names
+
+
+def test_one_servers_bad_prompts_do_not_touch_another_server() -> None:
+    async def run() -> None:
+        http = FakeMcpServer()
+        http.capabilities = {"tools": {}, "prompts": {}}
+        http.prompts = [{"name": "broken", "arguments": 123}]
+        launcher = FakeLauncher()
+        entries = {"calliope": {"url": URL, "tools": {"echo": {"effect": "read"}}},
+                   "other": {"command": "/usr/bin/fake-server", "tools": {"echo": {"effect": "read"}}}}
+        config = parse_config(json.dumps({"servers": entries}), {})
+        connection = await connect(config, check_schema=check_tool_input_schema, transport=http.transport(),
+                                   launcher_for=lambda source, stdio: launcher)
+        try:
+            assert [(s.source, s.available) for s in connection.statuses] == [("calliope", True), ("other", True)]
+            assert "left out" in connection.statuses[0].problems[0]
+        finally:
+            await connection.aclose()
+
+    asyncio.run(asyncio.wait_for(run(), 20))
+
+
+def test_a_prompt_list_that_never_answers_keeps_the_tools(monkeypatch: pytest.MonkeyPatch) -> None:
+    """B2: prompts/list has its own time limit; the Tools listed before it stay."""
+    monkeypatch.setattr(tools_module, "PROMPTS_STARTUP_SECONDS", 0.3)
+
+    async def run() -> None:
+        launcher = FakeLauncher()
+        launcher.capabilities = {"tools": {}, "prompts": {}}
+        launcher.hang_prompts_list = True
+        entry = {"command": "/usr/bin/fake-server", "tools": {"echo": {"effect": "read"}}}
+        config = parse_config(json.dumps({"servers": {"calliope": entry}}), {})
+        connection = await connect(config, check_schema=check_tool_input_schema,
+                                   launcher_for=lambda source, stdio: launcher)
+        try:
+            (status,) = connection.statuses
+            assert status.available and status.tool_ids == ("calliope/echo",)
+            assert status.problems == ("prompts left out: no answer in time",)
+            assert connection.prompts == {}
+        finally:
+            await connection.aclose()
+
+    asyncio.run(asyncio.wait_for(run(), 20))
+
+
+def test_a_prompt_list_over_its_byte_bound_is_left_out() -> None:
+    server = FakeMcpServer()
+    server.capabilities = {"tools": {}, "prompts": {}}
+    server.prompts = [{"name": f"p{i}", "description": "x" * 20000} for i in range(60)]  # 1.2 MB
+    (status,) = connected(server).statuses
+    assert status.available and status.tool_ids == ("calliope/echo",)
+    assert "bytes" in status.problems[0]
+

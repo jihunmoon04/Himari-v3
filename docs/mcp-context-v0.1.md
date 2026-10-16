@@ -383,6 +383,11 @@ B5·B6, C1~C5는 해결됐다. 새 차단 사항은 없다.
   - 운영자가 Tool을 적었는데 서버가 `tools`를 선언하지 않으면 문제로 적는다.
   - 쓸 것이 하나도 없으면 "nothing to use"로 빠진다.
 - **`McpConnection`:** `notes`(서버 → 위치와 안내문, 최대 64 KiB 보관), `prompts`, `capabilities`, `by_source`, 그리고 `get_prompt(source, name, arguments, key)`. `McpClient`의 `request`·`read_resource`·`get_prompt`가 대화 키를 받는다(C2).
+- **프롬프트는 선택 기능이다 (PR #40 검수 B1·B2·C1).** 프롬프트 목록이 잘못돼도 그 서버의 프롬프트만 빠지고, 이미 확인된 Tool·안내문과 다른 서버는 그대로다.
+  - **잘못된 항목:** 객체가 아니거나 이름·인자 목록이 잘못된 항목은 하나씩 빼고 문제 목록에 적는다. 파싱 중 어떤 예외도 `connect` 밖으로 나가지 않는다.
+  - **시간 제한:** `prompts/list`는 `initialize`·`tools/list`와 따로 자기 시간 제한(`PROMPTS_STARTUP_SECONDS`, 10초)을 가진다. 응답이 없으면 "prompts left out: no answer in time"이다.
+  - **크기:** 목록 전체는 100개, 1 MiB까지다.
+- **`get_prompt`는 프롬프트가 있는지만 본다 (C2).** 대화에서 그 서버가 켜졌는지와 대화 접근 권한은 4단계에서 `Application`이 확인한다.
 - **대화별 켜기/끄기 대상:** 이미 설정된 서버 전체(`mcp.defaults`)였다. Tool이 없는 서버도 그대로 켜고 끌 수 있어 바꿀 것이 없었다(테스트로 확인).
 - **함께 고친 것:** 세션이 닫힐 때 기다리는 쪽이 이미 없는 Future에 넣은 예외가 asyncio의 "never retrieved" 경고로 가끔 찍혔다. 생성할 때 결과를 거두는 콜백을 붙였다.
 - **실측(이 호스트, 실제 Calliope):** 능력 `prompts`·`resources`·`tools`, 안내문 364자(`system`), 프롬프트 2개(인자 `game`·`ply`)를 읽었다. `get_prompt`가 그 대화의 세션에서 답했다.

@@ -292,6 +292,7 @@ class McpConnection:
             await client.aclose()
 
 
+PROMPTS_STARTUP_SECONDS = 10.0  # prompts/list, on its own: a broken prompt list never costs the Tools (B2)
 MAX_NOTE_CHARS = 64 * 1024  # kept of a server's instructions; what the model gets is cut further (V3-P60 §3)
 
 
@@ -320,18 +321,26 @@ class PromptInfo:
     arguments: tuple[PromptArgument, ...]
 
 
-def _prompt_info(entry: Mapping[str, Any]) -> PromptInfo | None:
+def _text(value: object, limit: int) -> str:
+    return value[:limit] if isinstance(value, str) else ""
+
+
+def _prompt_info(entry: object) -> PromptInfo | None:
+    """One ``prompts/list`` entry, or None when it is not usable: whatever a
+    server sends, this never raises (PR #40 review B1)."""
+    if not isinstance(entry, dict):
+        return None
     name = entry.get("name")
-    if not isinstance(name, str) or not name or len(name) > 128:
+    raw_arguments = entry.get("arguments", [])
+    if not isinstance(name, str) or not name or len(name) > 128 or not isinstance(raw_arguments, list):
         return None
     arguments = []
-    for raw in entry.get("arguments") or ():
-        if isinstance(raw, dict) and isinstance(raw.get("name"), str) and raw["name"]:
-            arguments.append(PromptArgument(raw["name"][:128], str(raw.get("description") or "")[:500],
-                                            raw.get("required") is True))
-    title = entry.get("title")
-    return PromptInfo(name, title[:200] if isinstance(title, str) else "",
-                      str(entry.get("description") or "")[:1000], tuple(arguments))
+    for raw in raw_arguments:
+        if not isinstance(raw, dict) or not isinstance(raw.get("name"), str) or not raw["name"]:
+            return None  # a prompt whose arguments cannot be read cannot be filled in
+        arguments.append(PromptArgument(raw["name"][:128], _text(raw.get("description"), 500),
+                                        raw.get("required") is True))
+    return PromptInfo(name, _text(entry.get("title"), 200), _text(entry.get("description"), 1000), tuple(arguments))
 
 
 @dataclass
@@ -389,7 +398,6 @@ async def _start(server: McpServerConfig, check_schema: InputSchemaCheck, transp
         return _Started(McpClient(_Unavailable()), [], SourceStatus(server.name, server.enabled_by_default, False, (),
                                                                     (f"unavailable: {error}",)))
     problems: list[str] = []
-    prompt_entries: list[Mapping[str, Any]] = []
     try:
         async with asyncio.timeout(STARTUP_SECONDS):
             init = await (lister or client).initialize()
@@ -403,11 +411,6 @@ async def _start(server: McpServerConfig, check_schema: InputSchemaCheck, transp
                     listing = await (lister or client).list_tools()
                 else:
                     problems.append("the server declares no tools: the listed Tools are not offered")
-            if server.prompts and "prompts" in capabilities:
-                try:
-                    prompt_entries = await (lister or client).list_prompts()
-                except McpError as error:
-                    problems.append(f"prompts left out: {error}")
     except Exception as error:  # noqa: BLE001 — whatever the server did, only this server is left out
         if lister is not None:
             await lister.aclose()
@@ -419,10 +422,26 @@ async def _start(server: McpServerConfig, check_schema: InputSchemaCheck, transp
             reason = f"its answer could not be used ({type(error).__name__})"
         return _Started(client, [], SourceStatus(server.name, server.enabled_by_default, False, (),
                                                  (f"unavailable: {reason}",)))
+    # Prompts are optional: their failure, however it comes, leaves them out
+    # and nothing else (PR #40 review B1, B2).
+    prompts: tuple[PromptInfo, ...] = ()
+    if server.prompts and "prompts" in capabilities:
+        try:
+            async with asyncio.timeout(PROMPTS_STARTUP_SECONDS):
+                prompt_entries = await (lister or client).list_prompts()
+            infos = [_prompt_info(e) for e in prompt_entries]
+            prompts = tuple(info for info in infos if info is not None)
+            if len(prompts) < len(infos):
+                problems.append(f"{len(infos) - len(prompts)} prompt(s) left out: their description cannot be used")
+        except TimeoutError:
+            problems.append("prompts left out: no answer in time")
+        except McpError as error:
+            problems.append(f"prompts left out: {error}")
+        except Exception as error:  # noqa: BLE001 — whatever the server sent, only its prompts are left out
+            problems.append(f"prompts left out: the answer could not be used ({type(error).__name__})")
     text = init.get("instructions")
     note = (SourceNote(server.instructions, text[:MAX_NOTE_CHARS])
             if server.instructions != "off" and isinstance(text, str) and text.strip() else None)
-    prompts = tuple(info for info in (_prompt_info(e) for e in prompt_entries) if info is not None)
     listed: dict[str, Mapping[str, Any]] = {}
     duplicated: set[str] = set()
     for entry in listing:

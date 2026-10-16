@@ -73,7 +73,7 @@ class FakeMcpServer:
         # V3-P60: what initialize declares, and the server's prompts.
         self.capabilities: dict[str, Any] = {"tools": {}}
         self.instructions: str | None = None
-        self.prompts: list[dict[str, Any]] = []
+        self.prompts: list[Any] = []
         self.prompt_messages: dict[str, list[dict[str, Any]]] = {}
         self.methods: list[str] = []
         self.initialize_delay = 0.0

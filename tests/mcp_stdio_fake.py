@@ -58,6 +58,8 @@ class FakeStdioServer:
                 if self.launcher.instructions is not None:
                     result["instructions"] = self.launcher.instructions
             elif method == "prompts/list":
+                if self.launcher.hang_prompts_list:
+                    await asyncio.Event().wait()
                 result = {"prompts": self.launcher.prompts}
             elif method == "prompts/get":
                 index = self.launcher.processes.index(self.process)
@@ -153,7 +155,8 @@ class FakeLauncher:
         self.write_gate: asyncio.Event | None = None
         self.capabilities: dict[str, Any] = {"tools": {}}
         self.instructions: str | None = None
-        self.prompts: list[dict[str, Any]] = []
+        self.prompts: list[Any] = []
+        self.hang_prompts_list = False
         self.initialize_delay = 0.0
         self.stop_reading = False  # tools/call writes block forever
         self.shutdown_delay = 0.0

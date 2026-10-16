@@ -88,6 +88,7 @@ MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 MAX_LIST_BYTES = 8 * 1024 * 1024  # every tools/list page together
 MAX_LISTED_TOOLS = 1000
 MAX_LISTED_PROMPTS = 100  # per server (V3-P60 §4)
+MAX_PROMPT_LIST_BYTES = 1024 * 1024  # every prompts/list page together
 _LINE_END = re.compile(rb"[\r\n]")
 # Statuses that reject the request itself, before any Tool could run.
 REFUSED_STATUSES = frozenset({400, 401, 403, 404, 405, 406, 413, 415})
@@ -158,17 +159,19 @@ class McpClient:
                 raise McpRefused("tools/list answered with an invalid nextCursor")
         raise McpRefused(f"tools/list has more than {MAX_TOOL_PAGES} pages")
 
-    async def list_prompts(self) -> list[Mapping[str, Any]]:
+    async def list_prompts(self) -> list[object]:
         """Every prompt the server offers (V3-P60 §4), within the bounds."""
-        prompts: list[Mapping[str, Any]] = []
+        prompts: list[object] = []
         cursor: str | None = None
+        size = 0
         for _ in range(MAX_TOOL_PAGES):
             result = await self.request("prompts/list", {} if cursor is None else {"cursor": cursor})
             page = result.get("prompts")
-            if not isinstance(page, list) or not all(isinstance(p, dict) for p in page):
+            if not isinstance(page, list):  # entries are checked one by one by the caller
                 raise McpRefused("prompts/list answered without a list of prompts")
-            if len(prompts) + len(page) > MAX_LISTED_PROMPTS:
-                raise McpRefused(f"prompts/list is larger than {MAX_LISTED_PROMPTS} prompts")
+            size += len(json.dumps(page))
+            if len(prompts) + len(page) > MAX_LISTED_PROMPTS or size > MAX_PROMPT_LIST_BYTES:
+                raise McpRefused(f"prompts/list is larger than {MAX_LISTED_PROMPTS} prompts or {MAX_PROMPT_LIST_BYTES} bytes")
             prompts.extend(page)
             cursor = result.get("nextCursor")
             if cursor is None or cursor == "":
