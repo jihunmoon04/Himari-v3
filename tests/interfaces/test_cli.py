@@ -29,7 +29,7 @@ from testkit import calls, final  # noqa: E402
 from himari.bootstrap.application import Application  # noqa: E402
 from himari.bootstrap.operator import OPERATOR, derive_cli_bearer  # noqa: E402
 from himari.common import ASK_USER_TOOL_ID, ConversationId, TextBlock, TrustedScope  # noqa: E402
-from himari.control.api import DriveResult, DriveState, StopSignal  # noqa: E402
+from himari.control.api import DriveResult, DriveState, StopSignal, TurnProgress  # noqa: E402
 from himari.control.runner import BackgroundRunner  # noqa: E402
 from himari.data.api import UserMessage  # noqa: E402
 from himari.interfaces.cli import main as cli  # noqa: E402
@@ -182,19 +182,22 @@ class Gated:
     def __init__(self) -> None:
         self.release = threading.Event()
 
-    async def drive(self, scope: TrustedScope, message: UserMessage, *, stop: StopSignal | None = None) -> DriveResult:
+    async def drive(self, scope: TrustedScope, message: UserMessage, *, stop: StopSignal | None = None,
+                     progress: TurnProgress | None = None) -> DriveResult:
         raise AssertionError
 
     async def accept(self, scope: TrustedScope, message: UserMessage) -> None:
         pass
 
-    async def resume(self, scope: TrustedScope, *, stop: StopSignal | None = None) -> DriveResult:
+    async def resume(self, scope: TrustedScope, *, stop: StopSignal | None = None,
+                     progress: TurnProgress | None = None) -> DriveResult:
         import asyncio
 
         await asyncio.to_thread(self.release.wait, 10)
         return DriveResult(DriveState.COMPLETED)
 
-    async def compact(self, scope: TrustedScope, *, stop: StopSignal | None = None) -> DriveResult:
+    async def compact(self, scope: TrustedScope, *, stop: StopSignal | None = None,
+                     progress: TurnProgress | None = None) -> DriveResult:
         return await self.resume(scope)
 
     async def cancel(self, scope: TrustedScope) -> DriveResult:
@@ -604,18 +607,21 @@ def test_server_prompts_from_the_cli(tmp_path: Path, monkeypatch: pytest.MonkeyP
 class StopsWhenCancelled:
     """A running job that ends only when it is cancelled (V3-P55)."""
 
-    async def drive(self, scope: TrustedScope, message: UserMessage, *, stop: StopSignal | None = None) -> DriveResult:
+    async def drive(self, scope: TrustedScope, message: UserMessage, *, stop: StopSignal | None = None,
+                     progress: TurnProgress | None = None) -> DriveResult:
         raise AssertionError
 
     async def accept(self, scope: TrustedScope, message: UserMessage) -> None:
         pass
 
-    async def resume(self, scope: TrustedScope, *, stop: StopSignal | None = None) -> DriveResult:
+    async def resume(self, scope: TrustedScope, *, stop: StopSignal | None = None,
+                     progress: TurnProgress | None = None) -> DriveResult:
         assert stop is not None
         await asyncio.wait_for(stop.cancelled(), 10)
         return DriveResult(DriveState.CANCELLED)
 
-    async def compact(self, scope: TrustedScope, *, stop: StopSignal | None = None) -> DriveResult:
+    async def compact(self, scope: TrustedScope, *, stop: StopSignal | None = None,
+                     progress: TurnProgress | None = None) -> DriveResult:
         return await self.resume(scope, stop=stop)
 
     async def cancel(self, scope: TrustedScope) -> DriveResult:
@@ -687,7 +693,8 @@ def test_a_refusal_says_why(harness: Harness) -> None:
     assert harness.application is not None
 
     class Refusing(Gated):
-        async def resume(self, scope: TrustedScope, *, stop: StopSignal | None = None) -> DriveResult:
+        async def resume(self, scope: TrustedScope, *, stop: StopSignal | None = None,
+                     progress: TurnProgress | None = None) -> DriveResult:
             return DriveResult(DriveState.REQUEST_REJECTED, detail="context_budget_exceeded: about 950 tokens > 900")
 
     harness.application.runner = BackgroundRunner(Refusing())

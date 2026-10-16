@@ -236,6 +236,7 @@ class TokenUsage(DeepFrozen):
     output_tokens: int | None = None
     reasoning_tokens: int | None = None
     cached_input_tokens: int | None = None
+    cache_write_tokens: int | None = None  # input written to the provider's cache (V3-P62 §9)
 
 
 @dataclass(frozen=True)

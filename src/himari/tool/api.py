@@ -18,7 +18,7 @@ V3-040~042, V3-044/045, V3-P13, V3-P17, V3-P19.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Protocol, runtime_checkable
 
@@ -204,6 +204,24 @@ class GroupDispatchResult(DeepFrozen):
     state: GroupState
     waiting_call: CallRef | None = None
     unknown_calls: tuple[CallRef, ...] = ()
+    # The calls the Dispatcher refused before running, by its own rule (V3-P62
+    # §4): returned, never stored. A handler's own DENIED is not here.
+    refusals: Mapping[CallId, RefusalRule] = field(default_factory=dict)
+
+
+class RefusalRule(Enum):
+    """Why the Dispatcher refused a call before running it (V3-P62 §4)."""
+
+    UNKNOWN_TOOL = "unknown_tool"
+    INVALID_ARGUMENTS = "invalid_arguments"
+    SOURCE_DISABLED = "source_disabled"
+    ENVIRONMENT_INACTIVE = "environment_inactive"
+    BINDING = "binding"
+
+    @property
+    def by_input(self) -> bool:
+        """Decided by the call alone: the same call is refused the same way, whatever the state."""
+        return self in (RefusalRule.UNKNOWN_TOOL, RefusalRule.INVALID_ARGUMENTS)
 
 
 class ToolDispatcher(Protocol):

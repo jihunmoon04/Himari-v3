@@ -221,6 +221,7 @@ def usage(value: TokenUsage | None) -> str | None:
         "output_tokens": value.output_tokens,
         "reasoning_tokens": value.reasoning_tokens,
         "cached_input_tokens": value.cached_input_tokens,
+        "cache_write_tokens": value.cache_write_tokens,
     })
 
 
@@ -228,7 +229,8 @@ def usage_from(text: str | None) -> TokenUsage | None:
     if text is None:
         return None
     data = _obj(json.loads(text))
-    return TokenUsage(data["input_tokens"], data["output_tokens"], data["reasoning_tokens"], data["cached_input_tokens"])
+    return TokenUsage(data["input_tokens"], data["output_tokens"], data["reasoning_tokens"], data["cached_input_tokens"],
+                      data.get("cache_write_tokens"))  # absent in rows written before V3-P62
 
 
 def continuation(value: ProviderContinuation | None) -> str | None:

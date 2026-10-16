@@ -49,6 +49,9 @@ class RawBody:
 class Measured:
     output: NormalizedModelOutput
     input_tokens: int
+    output_tokens: int | None = None
+    cached_input_tokens: int | None = None
+    cache_write_tokens: int | None = None
 
 
 type ScriptStep = NormalizedModelOutput | NativeNoResponse | NativeUncertain | RawBody | Measured | BaseException
@@ -130,7 +133,10 @@ class ScriptedAdapter:
         if isinstance(step, RawBody):
             return NativeReceived(step.body, "application/json")
         if isinstance(step, Measured):
-            return NativeReceived(encode_output(step.output), "application/json", TokenUsage(input_tokens=step.input_tokens))
+            return NativeReceived(encode_output(step.output), "application/json",
+                                  TokenUsage(input_tokens=step.input_tokens, output_tokens=step.output_tokens,
+                                             cached_input_tokens=step.cached_input_tokens,
+                                             cache_write_tokens=step.cache_write_tokens))
         return NativeReceived(encode_output(step), "application/json")
 
     def normalize(self, received: NativeReceived) -> NormalizedModelOutput:

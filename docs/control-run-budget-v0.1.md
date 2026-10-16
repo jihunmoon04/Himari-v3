@@ -143,8 +143,9 @@ Run 수 상한은 **기본으로 없다.** 한 턴은 다음 중 하나로 멈�
   ```
 
 - **사실은 `<runtime_state>`에 둔다.** 숫자와 표시만 들어간다: `turn_budget: {"used", "budget", "left", "low", "last"}`, `progress: {"repeated": [...]}`. 문장으로 된 지시는 없다.
-  - `low`는 남은 예산이 직전 요청 입력의 2배보다 작을 때(대략 두 Run 남짓) 참이다.
-  - `last`는 다음 요청 하나를 더하면 예산을 넘을 것으로 보일 때 참이다.
+  - 요청 하나의 예상 비용은 "직전 요청의 입력 + 출력 예약"이다.
+  - `low`는 남은 예산이 그 세 개보다 작을 때 참이다.
+  - `last`는 남은 예산이 그 두 개보다 작을 때 참이다. 이 요청은 들어가지만 다음 요청은 들어가지 않을 것이라는 뜻이다. 들어가지 않는 요청은 보내지 않으므로, `last`는 실제로 보내는 마지막 요청에서 보인다(PR #47 검수 C1).
   - `turn_budget`은 `low`가 참일 때만 넣는다. 매번 예산을 보이면 모델이 일찍 포기할 수 있다.
   - §6이 켜져 있으면 남은 Run이 3 이하일 때 같은 표시를 쓴다.
 - 이 상태는 요청의 맨 끝에 있다. 앞부분을 바꾸지 않으므로 prefix 캐시를 깨지 않고, 문맥 키에도 들어가지 않는다.
@@ -293,4 +294,53 @@ R1·R2·C3는 해결로 확인됐다. 비차단 권고 둘을 구현의 규칙�
 | --- | --- | --- |
 | 1 | 상태에 따른 거부의 제외가 `READ`의 같은 결과보다 먼저임을 분명히 | §4: 제외가 먼저다. 꺼진 서버의 읽기 Tool이 같은 `DENIED`를 되풀이해도 `NO_PROGRESS`의 근거가 아니다. 구현 시험에 넣는다 |
 | 2 | 압축 도중의 Pause에서도 자동 Pause의 이유가 남아야 함 | 지금 Driver는 압축 도중 Pause에 고정 문구를 `detail`로 준다. 이유가 있으면 그것을 앞에 둔다. 구현 시험에 넣는다 |
+
+
+## 18. 구현 노트 — 1단계: Control·Tool·Prompt·Provider (2026-10-16)
+
+계약과 판정을 구현했다. 환경 변수, Application 연결, Web·CLI 표시와 실제 모델 측정은 2단계다. 그래서 이 단계만으로는 기본 동작이 바뀌지 않는다: `build_runtime`의 기본은 여전히 Run 상한 16, 예산 없음이다.
+- **`control/turn.py`(새)의 `Turn`:** drive 하나의 셈(프로세스 메모리). 사용량, 출력 예약, `fits`, `state()`(모델에게 줄 데이터), `observe()`(진척)를 둔다. Driver가 `_exclusive` 안에서 drive마다 하나 만든다.
+- **Driver:**
+  - Run 상한은 선택(`max_runs_per_drive=None`)이다. 상한도 예산도 없으면, 또는 예산은 있는데 문맥 예산(추정의 출처)이 없으면 만들 때 거부한다.
+  - 대화 Run은 `_fit_budget`의 추정으로, 요약 호출은 그 요청의 `request_size`와 요약 상한으로, 보내기 직전에 판정한다.
+  - 보낸 뒤에는 보고된 usage로 센다. 보고가 없으면 추정과 예약으로 센다.
+  - 그룹이 끝나면 그 기록과 `refusals`, Tool 정의의 효과 등급으로 `observe`한다.
+  - 모든 요청에 `RequestOptions.session_key`를 넣는다(요약 호출도 같은 값).
+  - Pause의 이유는 `PAUSED`의 `detail`로 간다. 압축 도중이면 "이유; paused between summarizing calls; nothing was committed"다(§17의 2).
+- **찾은 것 (구현 중):** 출력이 보고되지 않은 Run을 예약만큼 센 뒤 그 값을 "가장 큰 출력"으로 다시 쓰면, 예약이 두 배씩 불어난다(시험에서 8,192 → 8,388,608). 그래서 다음 예약을 정하는 것은 **보고된 출력뿐**이다. 보고가 없는 Run은 그 Run의 예약만큼 셀 뿐이다.
+- **Tool:** `RefusalRule`(다섯)과 `GroupDispatchResult.refusals`. Dispatcher의 각 거부 지점이 규칙을 단다. 기록과 `raw_result`는 그대로다(Handler가 `refused_by` 키를 써도 그대로 남는 것을 시험으로 확인).
+- **Prompt:**
+  - `TurnBudget`·`RepeatedCall`·`TurnState`, `ModelInput.turn_state`.
+  - `turn_state_data`가 숫자와 표시만 만든다. `state_block`이 그것을 상태 JSON에 넣는다.
+  - 측정 기반 추정이 그 크기를 늘 더한다(B4).
+- **Provider·Data:** OpenRouter가 `session_id`를 보내고 `prompt_tokens_details.cache_write_tokens`를 읽는다. `TokenUsage.cache_write_tokens`; codec은 그 키가 없는 이전 행을 None으로 읽는다.
+- **Runner:**
+  - 작업마다 `TurnProgress`를 넘기고, 최신 보고를 `JobStatus.turn_usage`로 둔다.
+  - `seen(scope)`로 클라이언트 연결을 기록한다. 작업을 시작한 클라이언트는 연결된 것으로 본다.
+  - `unattended_runs`(기본 None = 끔)와 `seen_seconds`(60)로, 연결 없이 그만큼의 Run이 지나면 이유와 함께 Pause한다.
+- **Bootstrap:** `build_runtime(max_runs_per_drive=, turn_budget=, no_progress_runs=)`. 예산이 있으면 HIMARI 지시문 끝에 `TURN_GUIDANCE` 절을 더한다.
+- **시험(`tests/control/test_turn_budget.py`, 18개):**
+  - 상한 없이 21 Run, 선택 상한과 그 detail, 설정 거부;
+  - 보내기 전 예산 판정과 Continue의 새 예산, 요약 호출의 판정(아무것도 커밋하지 않음), 출력 예약;
+  - `low`·`last`와 상태 블록의 데이터, 지시문 절의 유무;
+  - 측정 기반 추정이 상태 크기만큼 커짐;
+  - "새것 없음" 판정 규칙: READ, 쓰기, 새 결과, 첨부·`is_error` 차이, 입력 거부, 상태 거부(우선), Handler의 거부, 결과 불명;
+  - 반복 알림, 읽기 루프의 `NO_PROGRESS`와 쓰기 루프의 완료, 꺼진 출처가 매번 판정되고 켠 뒤 실행됨;
+  - Dispatcher의 `refusals`와 Handler 기록 보존;
+  - 대화별 `session_key`와 요청 본문의 `session_id`, 캐시 쓰기 토큰과 이전 행;
+  - Pause 이유(압축 도중 포함, 처음 이유가 남음);
+  - Runner의 사용량과 연결 없음 Pause, 연결된 동안은 계속.
+
+### 18.1 검수 — PR #47(`af5c6e7`): NOT_READY
+
+- **B1 — 1단계만으로도 기본 동작이 바뀜.** `no_progress_runs`의 기본이 3이라 `NO_PROGRESS`가 늘 켜져 있었다. 기본 설정에서도 `progress.repeated`와 남은 Run 수가 요청에 들어갔다.
+  - **고침:** `NO_PROGRESS`는 `no_progress_runs`를 줄 때만 켠다(기본 None). 턴 상태 데이터(`turn_state`)와 지시문 절은 토큰 예산이 켜졌을 때만 넣는다. 둘은 함께 다닌다.
+  - 이제 기본 설정(Run 상한 16, 예산 없음)에서 바뀌는 것은 둘뿐이다: 요청 본문의 `session_id`, usage의 `cache_write_tokens` 기록. 2단계가 V3-P62의 기본값(예산 O1, O2, O3)을 켠다.
+- **C1 — `last`가 모델에 닿지 않을 수 있음.** `last`가 "다음 요청이 들어가지 않음"일 때 켜졌다. 그런데 그 요청은 보내지 않으므로 모델이 볼 수 없었다.
+  - **고침:** §8의 정의를 한 요청 앞당겼다. `low`는 예상 비용 세 개 미만, `last`는 두 개 미만이다.
+- **C2 — 기본 동작 회귀 시험.** 기본 설정에서 같은 결과를 되풀이하는 읽기 Tool이 16번까지 실행되고, 요청에 턴 상태와 지시문이 없음을 시험한다. 고치기 전 코드에서는 실패한다.
+
+### 18.2 재검수 — `a40ce5d`: READY
+
+B1·C2는 해결, C1은 개선으로 확인됐다. 비차단 권고 하나: `last`는 직전 요청의 입력으로 다음 요청의 비용을 어림한다. 그래서 다음 요청이 그보다 크면 모델이 알림을 보기 전에 예산에 닿을 수 있다. 보내기 전 판정은 따로 있으므로 안전에는 영향이 없다. 2단계의 실제 모델 시험에서 알림이 모델에 닿는 비율을 잰다.
 

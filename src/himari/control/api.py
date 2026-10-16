@@ -1,7 +1,8 @@
 """Control public contract (CTRL-01, CTRL-03/04, CTRL-05, CTRL-06).
 
 Source documents: docs/control-prompt-provider-v0.1.md §3, §5.1, §7;
-docs/control-pause-v0.1.md; docs/decisions.md V3-024, V3-044, V3-045, V3-P55.
+docs/control-pause-v0.1.md; docs/control-run-budget-v0.1.md; docs/decisions.md V3-024, V3-044,
+V3-045, V3-P55, V3-P62.
 """
 
 from __future__ import annotations
@@ -24,7 +25,9 @@ class DriveState(Enum):
     OUTCOME_UNKNOWN = "outcome_unknown"  # send uncertain; never resent
     INVALID_MODEL_OUTPUT = "invalid_model_output"  # raw kept, no effects
     REQUEST_REJECTED = "request_rejected"  # Prompt/Provider/context budget refused before send
-    RUN_LIMIT_REACHED = "run_limit_reached"
+    RUN_LIMIT_REACHED = "run_limit_reached"  # an optional Run limit (V3-P62 §6)
+    BUDGET_REACHED = "budget_reached"  # the turn's token budget would be passed by the next request (V3-P62 §3)
+    NO_PROGRESS = "no_progress"  # Runs in a row with nothing new (V3-P62 §4)
     IDLE = "idle"  # resume(): nothing to continue (last turn was FINAL)
     COMPACTED = "compacted"  # compact(): the older history is now a summary
     NOTHING_TO_COMPACT = "nothing_to_compact"  # compact(): no budget, or nothing older than the latest turn
@@ -92,11 +95,19 @@ class StopSignal:
 
     def __init__(self) -> None:
         self._request: StopRequest | None = None
+        self._reason: str | None = None
         self._cancelled = asyncio.Event()
 
-    def pause(self) -> None:
+    def pause(self, reason: str | None = None) -> None:
+        """``reason``: why, when it is not the user's own Pause (V3-P62 §5);
+        the first one asked is kept and ends up in the result's detail."""
         if self._request is None:
             self._request = StopRequest.PAUSE
+            self._reason = reason
+
+    @property
+    def reason(self) -> str | None:
+        return self._reason
 
     def cancel(self) -> None:
         self._request = StopRequest.CANCEL
@@ -118,15 +129,51 @@ class StopSignal:
         await self._cancelled.wait()
 
 
+@dataclass(frozen=True)
+class TurnUsage(DeepFrozen):
+    """What the running drive has used so far (V3-P62 §7): every Run's
+    reported tokens (summarizing calls too), and the budget if there is one."""
+
+    runs: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cached_input_tokens: int = 0
+    cache_write_tokens: int = 0
+    budget: int | None = None
+    max_runs: int | None = None
+
+
+class TurnProgress(Protocol):
+    """Told by the Driver after every Run of a drive (V3-P62 §7). It must not
+    raise and the Driver does not depend on it: whoever started the drive
+    (the Runner) only keeps the value."""
+
+    def report(self, usage: TurnUsage) -> None: ...
+
+
+# The rule for the turn's state, for HIMARI's system instructions when the
+# turn guards are on (V3-P62 §8): fixed text, so the cached prefix stays; the
+# runtime state carries only the numbers and flags it refers to.
+TURN_GUIDANCE = (
+    "Turn budget. The runtime state may carry `turn_budget` and `progress`. When `turn_budget.low` is "
+    "true, finish with what you have, or ask the user (ask_user) whether to go on. When `turn_budget.last` "
+    "is true, this is likely the last step of the turn: tool calls made now run, but you see their results "
+    "only if the user continues, so answer now or ask. `progress.repeated` lists calls that got the same "
+    "result again in this turn: do not repeat them unless something has changed."
+)
+
+
 class ConversationDriver(Protocol):
-    async def drive(self, scope: TrustedScope, message: UserMessage, *, stop: StopSignal | None = None) -> DriveResult:
+    async def drive(self, scope: TrustedScope, message: UserMessage, *, stop: StopSignal | None = None,
+                    progress: TurnProgress | None = None) -> DriveResult:
         """Record one user input (T7a if an ask_user call is waiting, else T1;
         never-started calls of the latest group are closed first, as in
         ``accept``) and run the loop until FINAL, a wait, or a stop condition.
         Raises ControlError(BUSY) if the Conversation is already being driven."""
         ...
 
-    async def resume(self, scope: TrustedScope, *, stop: StopSignal | None = None) -> DriveResult:
+    async def resume(self, scope: TrustedScope, *, stop: StopSignal | None = None,
+                     progress: TurnProgress | None = None) -> DriveResult:
         """Continue without new user input: restart cleanup, project stored
         responses, finish never-claimed PENDING calls, then start the next
         Run if one is due. Same BUSY rule as ``drive``."""
@@ -141,7 +188,8 @@ class ConversationDriver(Protocol):
         user sent a new message instead. Same BUSY rule as ``drive``."""
         ...
 
-    async def compact(self, scope: TrustedScope, *, stop: StopSignal | None = None) -> DriveResult:
+    async def compact(self, scope: TrustedScope, *, stop: StopSignal | None = None,
+                      progress: TurnProgress | None = None) -> DriveResult:
         """CTRL-08: compact now, whatever the size — everything older than the
         recent tail becomes the summary (one plan, possibly a chain of calls).
         Starts no Run. COMPACTED, NOTHING_TO_COMPACT, COMPACTION_FAILED, or
@@ -175,6 +223,7 @@ class JobStatus(DeepFrozen):
     started_at: datetime | None = None
     finished_at: datetime | None = None
     stop_requested: StopRequest | None = None  # asked of the running job (V3-P55)
+    turn_usage: TurnUsage | None = None  # the latest report of the job's drive (V3-P62 §7)
 
 
 class ContextInspector(Protocol):
@@ -202,9 +251,16 @@ class ConversationRunner(Protocol):
         """Start ``compact`` in the background. Same BUSY rule as ``submit``."""
         ...
 
-    def request_pause(self, scope: TrustedScope) -> JobStatus:
+    def request_pause(self, scope: TrustedScope, reason: str | None = None) -> JobStatus:
         """CTRL-03 (V3-P55): ask the running job to stop at the next safe
-        boundary. Nothing to do when no job is running."""
+        boundary. Nothing to do when no job is running. ``reason``: why, for
+        a pause the user did not ask for (V3-P62 §5)."""
+        ...
+
+    def seen(self, scope: TrustedScope) -> None:
+        """A client read this Conversation (V3-P62 §5): a connected client,
+        not a person watching. The runner pauses a drive that has run
+        ``unattended_runs`` Runs without one."""
         ...
 
     def cancel(self, scope: TrustedScope) -> JobStatus:

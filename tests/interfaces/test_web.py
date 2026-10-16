@@ -24,7 +24,7 @@ from himari.bootstrap.application import Application  # noqa: E402
 from himari.bootstrap.operator import OPERATOR, derive_cli_bearer  # noqa: E402
 from himari.common import ASK_USER_TOOL_ID, ConversationId, PrincipalId, TextBlock, TrustedScope  # noqa: E402
 from himari.sandbox.api import SandboxState  # noqa: E402
-from himari.control.api import DriveResult, DriveState, StopSignal  # noqa: E402
+from himari.control.api import DriveResult, DriveState, StopSignal, TurnProgress  # noqa: E402
 from himari.control.runner import BackgroundRunner  # noqa: E402
 from himari.data.api import UserMessage  # noqa: E402
 from himari.interfaces.web import app as web  # noqa: E402
@@ -336,17 +336,20 @@ class GatedDriver:
     def __init__(self) -> None:
         self.release = threading.Event()
 
-    async def drive(self, scope: TrustedScope, message: UserMessage, *, stop: StopSignal | None = None) -> DriveResult:
+    async def drive(self, scope: TrustedScope, message: UserMessage, *, stop: StopSignal | None = None,
+                     progress: TurnProgress | None = None) -> DriveResult:
         raise AssertionError("the runner accepts, then resumes")
 
     async def accept(self, scope: TrustedScope, message: UserMessage) -> None:
         pass
 
-    async def resume(self, scope: TrustedScope, *, stop: StopSignal | None = None) -> DriveResult:
+    async def resume(self, scope: TrustedScope, *, stop: StopSignal | None = None,
+                     progress: TurnProgress | None = None) -> DriveResult:
         await asyncio.to_thread(self.release.wait, 10)
         return DriveResult(DriveState.COMPLETED)
 
-    async def compact(self, scope: TrustedScope, *, stop: StopSignal | None = None) -> DriveResult:
+    async def compact(self, scope: TrustedScope, *, stop: StopSignal | None = None,
+                     progress: TurnProgress | None = None) -> DriveResult:
         await asyncio.to_thread(self.release.wait, 10)
         return DriveResult(DriveState.COMPACTED)
 
@@ -558,7 +561,8 @@ class RefusingDriver(GatedDriver):
         super().__init__()
         self.detail = detail
 
-    async def resume(self, scope: TrustedScope, *, stop: StopSignal | None = None) -> DriveResult:
+    async def resume(self, scope: TrustedScope, *, stop: StopSignal | None = None,
+                     progress: TurnProgress | None = None) -> DriveResult:
         return DriveResult(DriveState.REQUEST_REJECTED, detail=self.detail)
 
 

@@ -197,6 +197,10 @@ class OpenRouterAdapter:
                     f"reasoning_effort {options.reasoning_effort!r} not supported by {options.model_id}",
                 )
             body["reasoning"] = {"effort": options.reasoning_effort}
+        if options.session_key is not None:
+            # V3-P62 §9 B1: OpenRouter keeps one session on one provider from the first request,
+            # so its prompt cache can serve the growing history. An opaque per-Conversation value.
+            body["session_id"] = options.session_key
         raw = json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         return NativePreparedRequest(
             body=raw,
@@ -239,7 +243,7 @@ class OpenRouterAdapter:
                 messages.append({"role": "user", "content": _render_summary(_text(part.summary))})
             elif isinstance(part, ToolGroupTurn):
                 messages.extend(self._tool_group(part, self._replay(part.continuation, model_id)))
-        state = state_block(model_input.current_state, model_input.source_notes)
+        state = state_block(model_input.current_state, model_input.source_notes, model_input.turn_state)
         if state is not None:
             messages.append({"role": "user", "content": state})
         return messages
@@ -439,6 +443,7 @@ def _usage(doc: object) -> TokenUsage | None:
         output_tokens=_count(usage.get("completion_tokens")),
         reasoning_tokens=_count(completion.get("reasoning_tokens")) if isinstance(completion, dict) else None,
         cached_input_tokens=_count(prompt.get("cached_tokens")) if isinstance(prompt, dict) else None,
+        cache_write_tokens=_count(prompt.get("cache_write_tokens")) if isinstance(prompt, dict) else None,
     )
 
 

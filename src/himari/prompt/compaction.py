@@ -94,8 +94,10 @@ from himari.prompt.api import (
     PromptInputs,
     ToolGroupTurn,
     UserTurn,
+    json_data,
     notes_section,
     state_block,
+    turn_state_data,
 )
 
 BYTES_PER_TOKEN = 3
@@ -179,8 +181,15 @@ def state_tokens(model_input: ModelInput) -> int:
     """The current state block as sent — escaped JSON, with the notes placed
     there (``api.state_block``) — not the raw values: ``<`` in an
     artifact or a note is one character there but six in the request."""
-    block = state_block(model_input.current_state, model_input.source_notes)
+    block = state_block(model_input.current_state, model_input.source_notes, model_input.turn_state)
     return 0 if block is None else MESSAGE_OVERHEAD_TOKENS + tokens_of_text(block)
+
+
+def turn_state_tokens(model_input: ModelInput) -> int:
+    """The turn's state as the runtime state carries it, counted whole: the
+    previous request's share of it cannot be separated out (V3-P62 §8, B4)."""
+    data = turn_state_data(model_input.turn_state)
+    return 0 if data is None else tokens_of_text(json_data(data))
 
 
 def request_tokens(model_input: ModelInput) -> int:
@@ -376,6 +385,8 @@ class Compactor:
         )
         if mark.state_revision != basis.state_revision:
             added += state_tokens(model_input)
+        else:
+            added += turn_state_tokens(model_input)  # changes every Run, apart from the state's revision (V3-P62 B4)
         return ContextEstimate(mark.input_tokens + added, measured=True)
 
     def request_size(self, model_input: ModelInput) -> int:

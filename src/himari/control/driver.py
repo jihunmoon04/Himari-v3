@@ -32,6 +32,18 @@ before a group's result is returned: a response that arrived together with
 the cancel is kept as raw but never committed. A commit that passed that
 check is atomic (Data commits never yield) and completes; the cancel
 applies after it. Stop requests outrank the Run limit.
+
+A turn (V3-P62) has no Run limit unless one is set (``max_runs_per_drive``).
+It is guarded instead by a token budget (``turn_budget``, checked before
+every request — model Runs and summarizing calls — against what the drive
+used, the request's estimate and an output reserve: BUDGET_REACHED), by
+progress (``no_progress_runs`` Runs in a row that brought nothing new:
+NO_PROGRESS; nothing is ever kept from running) and, through the Runner, by
+a pause when no client reads the Conversation. Stop requests outrank them
+all. The drive's state (``control.turn``) is told to the model as data in the
+runtime state, and to the Runner after every Run (``TurnProgress``). Every
+request carries a per-Conversation ``session_key`` (OpenRouter
+``session_id``), so the provider's cache can serve the growing history.
 """
 
 from __future__ import annotations
@@ -39,6 +51,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import dataclasses
+import hashlib
 from collections.abc import AsyncIterator, Awaitable, Callable
 
 from himari.common import ASK_USER_TOOL_ID, CallRef, ConversationId, RunId, TrustedScope
@@ -49,7 +62,9 @@ from himari.control.api import (
     DriveResult,
     DriveState,
     StopSignal,
+    TurnProgress,
 )
+from himari.control.turn import Turn
 from himari.data.api import (
     AssistantFinal,
     DataError,
@@ -117,6 +132,19 @@ class _Paused(Exception):
     """A pause stopped a compaction between its calls (internal to the driver)."""
 
 
+class _BudgetReached(Exception):
+    """The next request would pass the turn's token budget (internal to the driver)."""
+
+
+NO_PROGRESS_RUNS = 3  # V3-P62 O3
+PAUSED_COMPACTING = "paused between summarizing calls; nothing was committed"
+
+
+def session_key(scope: TrustedScope) -> str:
+    """V3-P62 §9 B1: an opaque, stable key per Conversation (never its id)."""
+    return hashlib.sha256(f"himari-session:{scope.conversation_id}".encode()).hexdigest()[:32]
+
+
 class Driver:
     def __init__(
         self,
@@ -127,12 +155,20 @@ class Driver:
         dispatcher: ToolDispatcher,
         request_options: RequestOptions,
         *,
-        max_runs_per_drive: int = 16,
+        max_runs_per_drive: int | None = 16,
         planner: CompactionPlanner | None = None,
         budget: ContextBudget | None = None,
+        turn_budget: int | None = None,
+        no_progress_runs: int | None = None,  # None: no NO_PROGRESS stop (V3-P62 §4 turns it on with O3)
     ) -> None:
         if (planner is None) != (budget is None):
             raise ValueError("a context budget needs a compaction planner and vice versa")
+        if max_runs_per_drive is None and turn_budget is None:
+            raise ValueError("a turn needs a token budget or a Run limit (V3-P62)")
+        if turn_budget is not None and planner is None:
+            raise ValueError("a turn token budget needs a context budget: it uses its request estimates")
+        if any(v is not None and v < 1 for v in (max_runs_per_drive, turn_budget, no_progress_runs)):
+            raise ValueError("Run limits, budgets and the no-progress count are positive")
         self._log = log
         self._loader = loader
         self._composer = composer
@@ -140,17 +176,22 @@ class Driver:
         self._dispatcher = dispatcher
         self._options = dataclasses.replace(request_options, provider_key=provider.provider_key)
         self._max_runs = max_runs_per_drive
+        self._turn_budget = turn_budget
+        self._no_progress_runs = no_progress_runs
         self._planner = planner
         self._budget = budget
         self._locks: dict[ConversationId, asyncio.Lock] = {}
         self._signals: dict[ConversationId, StopSignal] = {}  # of the drive holding the lock
+        self._turns: dict[ConversationId, Turn] = {}  # of the drive holding the lock
 
-    async def drive(self, scope: TrustedScope, message: UserMessage, *, stop: StopSignal | None = None) -> DriveResult:
-        async with self._exclusive(scope, stop):
+    async def drive(self, scope: TrustedScope, message: UserMessage, *, stop: StopSignal | None = None,
+                    progress: TurnProgress | None = None) -> DriveResult:
+        async with self._exclusive(scope, stop, progress):
             return await self._drive_locked(scope, message)
 
-    async def resume(self, scope: TrustedScope, *, stop: StopSignal | None = None) -> DriveResult:
-        async with self._exclusive(scope, stop):
+    async def resume(self, scope: TrustedScope, *, stop: StopSignal | None = None,
+                     progress: TurnProgress | None = None) -> DriveResult:
+        async with self._exclusive(scope, stop, progress):
             return await self._resume_locked(scope)
 
     async def cancel(self, scope: TrustedScope) -> DriveResult:
@@ -170,8 +211,9 @@ class Driver:
                 return DriveResult(DriveState.RECOVERY_REQUIRED, unknown_calls=group.unknown_calls, recovery=recovery)
             return DriveResult(DriveState.CANCELLED, recovery=recovery)
 
-    async def compact(self, scope: TrustedScope, *, stop: StopSignal | None = None) -> DriveResult:
-        async with self._exclusive(scope, stop):
+    async def compact(self, scope: TrustedScope, *, stop: StopSignal | None = None,
+                      progress: TurnProgress | None = None) -> DriveResult:
+        async with self._exclusive(scope, stop, progress):
             recovery, halted = await self._prepare(scope)
             if halted is not None:
                 return halted
@@ -182,8 +224,8 @@ class Driver:
                 return DriveResult(DriveState.WAITING_FOR_USER, waiting_call=waiting, recovery=recovery,
                                    detail="answer the question before compacting")
             try:
-                inputs = await self._loader.load(scope, (), self._options)
-                model_input = self._composer.compose(inputs)
+                inputs = await self._loader.load(scope, (), self._options_for(scope))
+                model_input = self._compose(scope, inputs)
             except PromptError as exc:
                 state = (DriveState.RECOVERY_REQUIRED if exc.code is PromptErrorCode.INCOMPLETE_HISTORY
                          else DriveState.REQUEST_REJECTED)
@@ -200,7 +242,10 @@ class Driver:
                                    detail="cancelled while summarizing; nothing was committed")
             except _Paused:
                 return DriveResult(DriveState.PAUSED, recovery=recovery, compaction_run_ids=tuple(compactions),
-                                   detail="paused between summarizing calls; nothing was committed")
+                                   detail=self._paused_detail(scope, PAUSED_COMPACTING))
+            except _BudgetReached as reached:
+                return DriveResult(DriveState.BUDGET_REACHED, recovery=recovery,
+                                   compaction_run_ids=tuple(compactions), detail=f"{reached}; nothing was committed")
             return DriveResult(
                 DriveState.COMPACTION_FAILED if failure is not None else DriveState.COMPACTED,
                 recovery=recovery, detail=failure or "", compaction_run_ids=tuple(compactions),
@@ -211,7 +256,7 @@ class Driver:
         latest compaction. Read-only; no lock (display may be a moment stale)."""
         if self._planner is None or self._budget is None:
             return None
-        inputs = await self._loader.load(scope, (), self._options)
+        inputs = await self._loader.load(scope, (), self._options_for(scope))
         summary = self._planner.summary_of(inputs.snapshot)
         snapshot = inputs.snapshot if summary is not None else None
         tokens: int | None = None
@@ -249,19 +294,42 @@ class Driver:
                 await self._log.append_event(scope, message)  # T1
 
     @contextlib.asynccontextmanager
-    async def _exclusive(self, scope: TrustedScope, stop: StopSignal | None = None) -> AsyncIterator[None]:
+    async def _exclusive(self, scope: TrustedScope, stop: StopSignal | None = None,
+                         progress: TurnProgress | None = None) -> AsyncIterator[None]:
         lock = self._locks.setdefault(scope.conversation_id, asyncio.Lock())
         if lock.locked():
             raise ControlError(ControlErrorCode.BUSY, scope.conversation_id)
         async with lock:
             self._signals[scope.conversation_id] = stop if stop is not None else StopSignal()
+            maximum = self._provider.describe_capabilities(self._options.model_id).max_output_tokens
+            self._turns[scope.conversation_id] = Turn(self._turn_budget, self._max_runs, progress, maximum)
             try:
                 yield
             finally:
                 del self._signals[scope.conversation_id]
+                del self._turns[scope.conversation_id]
 
     def _stop(self, scope: TrustedScope) -> StopSignal:
         return self._signals[scope.conversation_id]
+
+    def _turn(self, scope: TrustedScope) -> Turn:
+        return self._turns[scope.conversation_id]
+
+    def _options_for(self, scope: TrustedScope) -> RequestOptions:
+        return dataclasses.replace(self._options, session_key=session_key(scope))
+
+    def _compose(self, scope: TrustedScope, inputs: PromptInputs) -> ModelInput:
+        """The model's input, with the turn's state as data (V3-P62 §8) — only
+        under a turn budget, where the system instructions carry its rule."""
+        model_input = self._composer.compose(inputs)
+        if self._turn_budget is None:
+            return model_input
+        return dataclasses.replace(model_input, turn_state=self._turn(scope).state())
+
+    def _paused_detail(self, scope: TrustedScope, what: str = "") -> str:
+        """A pause's detail: its reason when it was not the user's own (V3-P62 §5)."""
+        reason = self._stop(scope).reason
+        return "; ".join(part for part in (reason, what) if part)
 
     async def _interruptible[T](self, scope: TrustedScope, start: Callable[[], Awaitable[T]]) -> T:
         """Await ``start()`` unless a cancel arrives first; then cancel it,
@@ -315,7 +383,8 @@ class Driver:
             return DriveResult(DriveState.WAITING_FOR_USER, waiting_call=waiting, recovery=recovery)
         group = await self._resume_pending_group(scope)
         if group is not None and group.state is not GroupState.COMPLETED:
-            return self._group_stop(group, lambda state, **kw: DriveResult(state, recovery=recovery, **kw))
+            return self._group_stop(group, lambda state, **kw: DriveResult(state, recovery=recovery, **kw),
+                                    self._paused_detail(scope))
         triggers = await self._next_triggers(scope)
         if not triggers:
             return DriveResult(DriveState.IDLE, recovery=recovery)
@@ -433,13 +502,13 @@ class Driver:
         return group
 
     @staticmethod
-    def _group_stop(group: GroupDispatchResult, build: Callable[..., DriveResult]) -> DriveResult:
+    def _group_stop(group: GroupDispatchResult, build: Callable[..., DriveResult], paused: str = "") -> DriveResult:
         """The result of a drive stopped by a group that is not COMPLETED."""
         if group.state is GroupState.BLOCKED_UNKNOWN:
             return build(DriveState.RECOVERY_REQUIRED, unknown_calls=group.unknown_calls)
         if group.state is GroupState.WAITING_FOR_USER:
             return build(DriveState.WAITING_FOR_USER, waiting_call=group.waiting_call)
-        return build(DriveState.PAUSED)
+        return build(DriveState.PAUSED, detail=paused)
 
     async def _run_loop(
         self, scope: TrustedScope, triggers: tuple[TriggerRef, ...], recovery: RecoveryReport
@@ -467,22 +536,29 @@ class Driver:
             )
 
         signal = self._stop(scope)
+        turn = self._turn(scope)
 
         def boundary() -> DriveResult | None:
             """A safe boundary: nothing is under way, nothing new has started."""
             if signal.cancel_requested:
                 return result(DriveState.CANCELLED)
             if signal.pause_requested:
-                return result(DriveState.PAUSED)
+                return result(DriveState.PAUSED, detail=self._paused_detail(scope))
             return None
 
-        for _ in range(self._max_runs):
-            if (stopped := boundary()) is not None:
+        while True:
+            if (stopped := boundary()) is not None:  # a stop outranks every limit
                 return stopped
+            if self._max_runs is not None and turn.steps >= self._max_runs:
+                return result(DriveState.RUN_LIMIT_REACHED, detail=f"{turn.steps} steps")
+            if self._no_progress_runs is not None and turn.empty_streak >= self._no_progress_runs:
+                return result(DriveState.NO_PROGRESS,
+                              detail=f"the last {turn.empty_streak} steps brought nothing new")
             try:
-                inputs = await self._loader.load(scope, triggers, self._options)
-                model_input = self._composer.compose(inputs)
-                model_input, refusal = await self._fit_budget(scope, triggers, inputs, model_input, compactions)
+                inputs = await self._loader.load(scope, triggers, self._options_for(scope))
+                model_input = self._compose(scope, inputs)
+                model_input, refusal, estimate = await self._fit_budget(scope, triggers, inputs, model_input,
+                                                                        compactions)
             except PromptError as exc:
                 state = (
                     DriveState.RECOVERY_REQUIRED
@@ -493,11 +569,18 @@ class Driver:
             except _Cancelled:
                 return result(DriveState.CANCELLED, detail="cancelled while summarizing; nothing was committed")
             except _Paused:
-                return result(DriveState.PAUSED, detail="paused between summarizing calls; nothing was committed")
+                return result(DriveState.PAUSED, detail=self._paused_detail(scope, PAUSED_COMPACTING))
+            except _BudgetReached as reached:
+                return result(DriveState.BUDGET_REACHED, detail=f"{reached}; nothing was committed")
             if refusal is not None:
                 return result(DriveState.REQUEST_REJECTED, detail=refusal)
             if (stopped := boundary()) is not None:  # e.g. paused while compacting
                 return stopped
+            reserve = turn.reserve()
+            if estimate is not None and not turn.fits(estimate, reserve):
+                return result(DriveState.BUDGET_REACHED,
+                              detail=f"the turn used {turn.used} tokens; the next request (about {estimate} in, "
+                                     f"{reserve} kept for its answer) would pass the budget of {turn.budget}")
             try:
                 prepared = self._provider.prepare_native_request(model_input)
             except ProviderError as exc:
@@ -521,12 +604,15 @@ class Driver:
                 outcome = await self._interruptible(scope, lambda: self._provider.invoke_prepared(prepared))
             except _Cancelled:
                 await self._log.record_raw_outcome(scope, run_id, RawUncertain(CANCELLED_BY_USER))
+                turn.charge(None, estimate or 0, reserve, step=True)
                 return result(DriveState.CANCELLED,
                               detail="cancelled while the model was answering; it may have been processed and "
                                      "is not resent")
             except Exception as exc:  # noqa: BLE001 — adapter error after send began
                 outcome = NativeUncertain(type(exc).__name__)
             await self._log.record_raw_outcome(scope, run_id, _raw(outcome))
+            turn.charge(outcome.usage if isinstance(outcome, NativeReceived) else None, estimate or 0, reserve,
+                        step=True)
             if isinstance(outcome, NativeReceived) and signal.cancel_requested:
                 # Arrived together with the cancel: the raw response is kept, nothing enters history.
                 await self._log.record_projection_failure(scope, run_id, CANCELLED_BY_USER)
@@ -547,12 +633,10 @@ class Driver:
                 return result(DriveState.COMPLETED, final_event=event)
             group = await self._dispatch(scope, run_id, AssistantToolCalls(normalized.calls, normalized.commentary))
             if group.state is not GroupState.COMPLETED:
-                return self._group_stop(group, result)
+                return self._group_stop(group, result, self._paused_detail(scope))
+            effects = {str(d.tool_id): d.effect_profile for d in model_input.tool_catalog}
+            turn.observe(await self._log.read_tool_executions(scope, run_id), group.refusals, effects)
             triggers = (CompletedGroupRef(run_id),)
-
-        if (stopped := boundary()) is not None:  # a stop asked during the last step outranks the limit
-            return stopped
-        return result(DriveState.RUN_LIMIT_REACHED)
 
     async def _fit_budget(
         self,
@@ -561,11 +645,12 @@ class Driver:
         inputs: PromptInputs,
         model_input: ModelInput,
         compactions: list[RunId],
-    ) -> tuple[ModelInput, str | None]:
+    ) -> tuple[ModelInput, str | None, int | None]:
         """The input to send (after at most MAX_COMPACTIONS_PER_RUN
-        compactions), or a refusal if it is still over the hard limit."""
+        compactions), or a refusal if it is still over the hard limit; and
+        its estimated size (None without a context budget)."""
         if self._planner is None or self._budget is None:
-            return model_input, None
+            return model_input, None, None
         decision = self._planner.decide(inputs, model_input, self._budget)
         failure = None
         for _ in range(MAX_COMPACTIONS_PER_RUN):
@@ -574,8 +659,8 @@ class Driver:
             failure = await self._compact(scope, decision.compaction, self._planner, self._budget, compactions)
             if failure is not None:
                 break
-            inputs = await self._loader.load(scope, triggers, self._options)
-            model_input = self._composer.compose(inputs)
+            inputs = await self._loader.load(scope, triggers, self._options_for(scope))
+            model_input = self._compose(scope, inputs)
             decision = self._planner.decide(inputs, model_input, self._budget)
         estimate, ceiling = decision.estimate, self._budget.ceiling_tokens
         if estimate.tokens > ceiling:
@@ -584,8 +669,8 @@ class Driver:
                 detail += f" (compaction failed: {failure})"
             elif decision.compaction is None:
                 detail += " (no compaction fits within the limit)"
-            return model_input, detail
-        return model_input, None
+            return model_input, detail, estimate.tokens
+        return model_input, None, estimate.tokens
 
     async def _compact(
         self,
@@ -610,8 +695,13 @@ class Driver:
             size = planner.request_size(request)  # measured here, not taken from the planner
             if size > budget.limit_tokens:
                 return f"compaction request of about {size} tokens exceeds the limit"
+            turn = self._turn(scope)
+            reserve = plan.summary_limit  # characters: at least as many tokens as the summary can take
+            if not turn.fits(size, reserve):
+                raise _BudgetReached(f"the turn used {turn.used} tokens; a summarizing call (about {size} in, "
+                                     f"{reserve} kept for the summary) would pass the budget of {turn.budget}")
             try:
-                run_id, failure, text = await self._summarize(scope, request, planner, plan)
+                run_id, failure, text = await self._summarize(scope, request, planner, plan, size, reserve)
             except _Cancelled as cancelled:
                 if cancelled.run_id is not None:
                     compactions.append(cancelled.run_id)
@@ -645,7 +735,8 @@ class Driver:
         return None
 
     async def _summarize(
-        self, scope: TrustedScope, request: ModelInput, planner: CompactionPlanner, plan: CompactionPlan
+        self, scope: TrustedScope, request: ModelInput, planner: CompactionPlanner, plan: CompactionPlan,
+        size: int, reserve: int,
     ) -> tuple[RunId | None, str | None, str | None]:
         """One summarizing call as a COMPACTION Run: (Run, failure, summary)."""
         try:
@@ -670,10 +761,13 @@ class Driver:
             outcome = await self._interruptible(scope, lambda: self._provider.invoke_prepared(prepared))
         except _Cancelled:
             await self._log.record_raw_outcome(scope, run_id, RawUncertain(CANCELLED_BY_USER))
+            self._turn(scope).charge(None, size, reserve, step=False)
             raise _Cancelled(run_id) from None
         except Exception as exc:  # noqa: BLE001 — adapter error after send began
             outcome = NativeUncertain(type(exc).__name__)
         await self._log.record_raw_outcome(scope, run_id, _raw(outcome))
+        self._turn(scope).charge(outcome.usage if isinstance(outcome, NativeReceived) else None, size, reserve,
+                                 step=False)
         if not isinstance(outcome, NativeReceived):
             return run_id, outcome.error_code, None  # no effects to reconcile: the next Run may try again
         try:
