@@ -565,3 +565,19 @@ B5·B6, C1~C5는 해결됐다. 새 차단 사항은 없다.
   - 브라우저 smoke에 느린 서버 경우 6개를 더했다(모두 21개): Cancel 뒤, 고친 뒤, Esc 뒤, 메시지를 보낸 뒤, 다른 프롬프트를 고른 뒤.
   - 이전 `app.js`로는 이 다섯 경우가 모두 실패한다(14/19, 마지막 경우에서 멈춤). 지금은 21/21이다.
 
+
+### 14.5 실제 모델 시험에서 찾은 클라이언트 결함 — 중첩 인자 (2026-10-16)
+
+실제 모델 시험(Calliope, `openai/gpt-6-luna`)에서 `submit_commentary` 두 번이 모두 "결과 불명"으로 기록됐다. Calliope는 같은 요청에 늘 확정 답(`accepted: false`와 위반 목록)을 준다.
+- **원인 (HIMARI):** 모델이 부른 Tool의 인자는 깊게 얼린 값(`FrozenMap`, 튜플)이다. MCP 클라이언트는 맨 위만 `dict`로 바꿨다. 그래서 중첩된 객체나 목록(`propositions`, `sentences`, `agent`)을 JSON으로 만들지 못했다.
+  - 그 예외가 Tool이 claim된 뒤에 나서, Dispatcher는 보내지도 않은 호출을 "결과 불명"으로 남겼다.
+  - 모델은 Calliope의 거부 이유를 받지 못했다. `commentary`로 확인하고 다시 제출하다가 단계 상한에 닿았다.
+  - Calliope만의 문제가 아니다. 중첩 인자를 받는 모든 MCP Tool이 이랬다(HTTP, stdio 모두).
+- **고침:**
+  - JSON-RPC 요청을 만들 때 `params`를 깊이까지 일반 JSON 값으로 바꾼다(`thaw`).
+  - 요청은 엄격한 JSON으로 만든다(NaN·Infinity 불가). 만들 수 없으면 아무것도 보내지 않은 것이므로 **거부(`McpRefused`)**다.
+  - stdio에서는 그때 대기 중인 요청을 남기지 않는다.
+  - claim된 Tool이 예외를 내면 Dispatcher가 Tool id와 예외 종류를 경고 로그로 남긴다(Q-39: 예외의 글은 남기지 않음).
+- **확인:**
+  - 새 테스트 6개(`tests/mcp/test_mcp_arguments.py`): 중첩 인자가 HTTP·stdio 서버에 그대로 도착하고, Application을 거친 claim된 호출이 `SUCCEEDED`이며, 인코딩할 수 없는 요청은 보내지 않고 거부된다. 고치기 전 코드에서는 6개 모두 실패한다.
+  - 실제 Calliope(서버 샌드박스)에 시험의 제출을 그대로 보내면, 모델이 위반 목록(`no proposition kind 'proposition.judgement'`, 기대 종류)을 받는다.
