@@ -1,4 +1,9 @@
-"""A minimal MCP client over Streamable HTTP (the initialize-handshake revisions, 2025-03-26 .. 2025-11-25).
+"""A minimal MCP client (the initialize-handshake revisions, 2025-03-26 .. 2025-11-25).
+
+Three layers (V3-P59 §5.2): ``McpClient`` holds the operations HIMARI uses
+over a ``Channel`` (how messages travel: ``HttpChannel`` here, a stdio
+channel beside it); ``revision`` says how a connection starts; ``jsonrpc``
+matches answers to requests and says what an answer means.
 
 Only what HIMARI uses: ``initialize``, ``tools/list``, ``tools/call`` and
 ``resources/read`` (a Tool's view, MCP Apps). The client declares no
@@ -13,6 +18,8 @@ a ``text/event-stream`` that carries the response. The session id the
 server assigns is sent on later requests; when the server forgets it (404)
 the client starts a new session and sends the request once more — the
 server did not process a request for an unknown session.
+
+The rest of this note is about ``HttpChannel`` (Streamable HTTP).
 
 Errors say what is known about a ``tools/call``:
 
@@ -50,10 +57,18 @@ from typing import Any
 
 import httpx
 
-from himari.common import JsonValue
+from typing import Protocol
 
-PROTOCOL_VERSION = "2025-11-25"  # the newest revision with the initialize handshake
-SUPPORTED_VERSIONS = frozenset({"2025-11-25", "2025-06-18", "2025-03-26"})
+from himari.common import JsonValue
+from himari.mcp.jsonrpc import McpError as McpError
+from himari.mcp.jsonrpc import McpRefused as McpRefused
+from himari.mcp.jsonrpc import McpUncertain as McpUncertain
+from himari.mcp.jsonrpc import notification, parse, request, result_of
+from himari.mcp.revision import CLIENT_INFO as CLIENT_INFO
+from himari.mcp.revision import REVISION
+
+PROTOCOL_VERSION = REVISION.version
+SUPPORTED_VERSIONS = REVISION.supported
 MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 MAX_LIST_BYTES = 8 * 1024 * 1024  # every tools/list page together
 MAX_LISTED_TOOLS = 1000
@@ -62,63 +77,44 @@ _LINE_END = re.compile(rb"[\r\n]")
 REFUSED_STATUSES = frozenset({400, 401, 403, 404, 405, 406, 413, 415})
 CONNECT_SECONDS = 5.0
 MAX_TOOL_PAGES = 20
-CLIENT_INFO = {"name": "himari", "version": "3"}
 UI_EXTENSION = "io.modelcontextprotocol/ui"  # MCP Apps (V3-P58)
 UI_MIME_TYPE = "text/html;profile=mcp-app"
-
-
-class McpError(Exception):
-    pass
-
-
-class McpRefused(McpError):
-    """The server did not run the request."""
-
-
-# JSON-RPC errors that mean the request was not carried out.
-_REFUSALS = frozenset({-32700, -32600, -32601, -32602})
-
-
-class McpUncertain(McpError):
-    """The request was sent; whether it took effect is unknown."""
 
 
 class _SessionExpired(Exception):
     pass
 
 
+def capabilities(ui: bool) -> dict[str, Any]:
+    """What HIMARI declares: nothing, or the MCP Apps extension for a server
+    whose views are shown (V3-P58), which asks for nothing back either."""
+    return {"extensions": {UI_EXTENSION: {"mimeTypes": [UI_MIME_TYPE]}}} if ui else {}
+
+
+class Channel(Protocol):
+    """How one server's messages travel. ``start`` connects (and returns the
+    server's ``initialize`` result); ``request`` sends one request and
+    returns its result, starting or renewing the connection as needed."""
+
+    async def start(self) -> Mapping[str, Any]: ...
+
+    async def request(self, method: str, params: Mapping[str, Any]) -> Mapping[str, Any]: ...
+
+    async def aclose(self) -> None: ...
+
+
 class McpClient:
-    def __init__(
-        self,
-        url: str,
-        token: str | None,
-        *,
-        timeout_seconds: float,
-        transport: httpx.AsyncBaseTransport | None = None,
-        ui: bool = False,  # declare the MCP Apps extension (V3-P58)
-    ) -> None:
-        headers = {"accept": "application/json, text/event-stream", "accept-encoding": "identity"}
-        if token:
-            headers["authorization"] = f"Bearer {token}"
-        self._url = url
-        self._http = httpx.AsyncClient(
-            headers=headers, timeout=httpx.Timeout(timeout_seconds, connect=CONNECT_SECONDS),
-            follow_redirects=False, trust_env=False, transport=transport,
-        )
-        self._capabilities: dict[str, Any] = (
-            {"extensions": {UI_EXTENSION: {"mimeTypes": [UI_MIME_TYPE]}}} if ui else {})
-        self._session: str | None = None
-        self._version: str | None = None
-        self._next_id = 0
-        self._lock = asyncio.Lock()  # one (re)initialization at a time
+    """The operations HIMARI uses, over one channel."""
+
+    def __init__(self, channel: Channel) -> None:
+        self._channel = channel
 
     async def aclose(self) -> None:
-        await self._http.aclose()
+        await self._channel.aclose()
 
     async def initialize(self) -> Mapping[str, Any]:
         """Starts a session; returns the server's ``initialize`` result."""
-        async with self._lock:
-            return await self._initialize()
+        return await self._channel.start()
 
     async def list_tools(self) -> list[Mapping[str, Any]]:
         tools: list[Mapping[str, Any]] = []
@@ -147,6 +143,49 @@ class McpClient:
         return await self.request("resources/read", {"uri": uri})
 
     async def request(self, method: str, params: Mapping[str, Any]) -> Mapping[str, Any]:
+        return await self._channel.request(method, params)
+
+
+def http_client(url: str, token: str | None, *, timeout_seconds: float,
+                transport: httpx.AsyncBaseTransport | None = None, ui: bool = False) -> McpClient:
+    return McpClient(HttpChannel(url, token, timeout_seconds=timeout_seconds, transport=transport, ui=ui))
+
+
+class HttpChannel:
+    """Streamable HTTP: one POST per request; the session id the server
+    assigns is sent on later requests and renewed once when forgotten."""
+
+    def __init__(
+        self,
+        url: str,
+        token: str | None,
+        *,
+        timeout_seconds: float,
+        transport: httpx.AsyncBaseTransport | None = None,
+        ui: bool = False,  # declare the MCP Apps extension (V3-P58)
+    ) -> None:
+        headers = {"accept": "application/json, text/event-stream", "accept-encoding": "identity"}
+        if token:
+            headers["authorization"] = f"Bearer {token}"
+        self._url = url
+        self._http = httpx.AsyncClient(
+            headers=headers, timeout=httpx.Timeout(timeout_seconds, connect=CONNECT_SECONDS),
+            follow_redirects=False, trust_env=False, transport=transport,
+        )
+        self._capabilities = capabilities(ui)
+        self._session: str | None = None
+        self._version: str | None = None
+        self._next_id = 0
+        self._lock = asyncio.Lock()  # one (re)initialization at a time
+
+    async def aclose(self) -> None:
+        await self._http.aclose()
+
+    async def start(self) -> Mapping[str, Any]:
+        async with self._lock:
+            return await self._initialize()
+
+    async def request(self, method: str, params: Mapping[str, Any]) -> Mapping[str, Any]:
         if self._version is None:
             async with self._lock:
                 if self._version is None:  # nobody started it meanwhile
@@ -167,14 +206,10 @@ class McpClient:
 
     async def _initialize(self) -> Mapping[str, Any]:
         self._session, self._version = None, None
-        result = await self._rpc("initialize", {
-            "protocolVersion": PROTOCOL_VERSION, "capabilities": self._capabilities, "clientInfo": CLIENT_INFO,
-        }, initializing=True)
-        version = result.get("protocolVersion")
-        if version not in SUPPORTED_VERSIONS:
-            raise McpRefused(f"unsupported MCP protocol version {version!r}")
-        self._version = version
-        await self._notify("notifications/initialized")
+        result = await self._rpc(REVISION.initialize, REVISION.initialize_params(self._capabilities),
+                                 initializing=True)
+        self._version = REVISION.accept(result)
+        await self._notify(REVISION.initialized)
         return result
 
     def _headers(self) -> dict[str, str]:
@@ -186,7 +221,7 @@ class McpClient:
         return headers
 
     async def _notify(self, method: str) -> None:
-        body = json.dumps({"jsonrpc": "2.0", "method": method}).encode()
+        body = json.dumps(notification(method)).encode()
         try:
             async with self._http.stream("POST", self._url, content=body, headers=self._headers()) as response:
                 status = response.status_code  # the body is never read
@@ -198,7 +233,7 @@ class McpClient:
     async def _rpc(self, method: str, params: Mapping[str, Any], *, initializing: bool = False) -> Mapping[str, Any]:
         self._next_id += 1
         request_id = self._next_id
-        body = json.dumps({"jsonrpc": "2.0", "id": request_id, "method": method, "params": params}).encode()
+        body = json.dumps(request(request_id, method, params)).encode()
         sent_session = self._session
         connected = False
         try:
@@ -222,7 +257,7 @@ class McpClient:
                 if kind == "text/event-stream":
                     message = await self._from_stream(response, request_id)
                 elif kind == "application/json":
-                    message = _parse(await _read_bounded(response))
+                    message = parse(await _read_bounded(response))
                 else:
                     raise McpUncertain(f"{method}: unexpected content type {kind or 'none'}")
         except httpx.ConnectError as error:
@@ -231,7 +266,7 @@ class McpClient:
             if not connected and isinstance(error, httpx.ConnectTimeout):
                 raise McpRefused(f"{method}: cannot connect (timeout)") from None
             raise McpUncertain(f"{method}: no complete answer ({type(error).__name__})") from None
-        return _result(message, request_id, method)
+        return result_of(message, request_id, method)
 
     async def _from_stream(self, response: httpx.Response, request_id: int) -> object:
         """The first message in the stream that answers ``request_id``."""
@@ -240,7 +275,7 @@ class McpClient:
             if line.startswith(b"data:"):
                 data.append(line[5:].removeprefix(b" "))
             elif line == b"" and data:
-                message = _parse(b"\n".join(data))
+                message = parse(b"\n".join(data))
                 data = []
                 if isinstance(message, dict) and message.get("id") == request_id and "method" not in message:
                     return message
@@ -290,25 +325,3 @@ async def _read_bounded(response: httpx.Response) -> bytes:
         if len(data) > MAX_RESPONSE_BYTES:
             raise McpUncertain("the response is too large")
     return bytes(data)
-
-
-def _parse(data: bytes) -> object:
-    try:
-        return json.loads(data)
-    except (ValueError, RecursionError):  # RecursionError: nested deeper than the parser can follow
-        raise McpUncertain("the response is not usable JSON") from None
-
-
-def _result(message: object, request_id: int, method: str) -> Mapping[str, Any]:
-    if not isinstance(message, dict) or message.get("jsonrpc") != "2.0" or message.get("id") != request_id:
-        raise McpUncertain(f"{method}: the response does not answer the request")
-    if "error" in message:
-        error = message["error"]
-        code = error.get("code") if isinstance(error, dict) else None
-        text = error.get("message") if isinstance(error, dict) else None
-        failure = McpRefused if code in _REFUSALS else McpUncertain
-        raise failure(f"{method}: server error {code}: {str(text)[:200]}")
-    result = message.get("result")
-    if not isinstance(result, dict):
-        raise McpUncertain(f"{method}: the response has no result object")
-    return result
