@@ -520,7 +520,7 @@ def _with_page(text: str, where: Mapping[str, Any]) -> str:
 def resource_tools(client: McpClient, source: str, policy: McpResourcePolicy,
                    taken: set[str]) -> tuple[list[ResourceTool], list[str]]:
     """The two Tools for a server whose resources are on, and the problems:
-    an id the server's own Tools already use is left to them (§5)."""
+    an id one of the server's registered Tools has is left to it (§5)."""
     reader = ResourceReader(client, source, policy)
     tools: list[ResourceTool] = []
     problems: list[str] = []

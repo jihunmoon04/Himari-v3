@@ -502,7 +502,9 @@ async def _start(server: McpServerConfig, check_schema: InputSchemaCheck, transp
         await lister.aclose()
     readers: list[ResourceTool] = []
     if server.resources is not None and "resources" in capabilities:
-        readers, clashes = resource_tools(client, server.name, server.resources, {t.tool_id for t in server.tools})
+        # Only a server Tool that is registered takes the name (PR #42 re-review B2).
+        readers, clashes = resource_tools(client, server.name, server.resources,
+                                          {h.definition.tool_id for h in handlers})
         problems.extend(clashes)
     usable = bool(handlers or note or prompts or readers)  # a server may offer no Tools (V3-P60 B4)
     if not usable:

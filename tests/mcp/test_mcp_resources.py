@@ -132,6 +132,22 @@ def matches(template: str, uri: str) -> bool:
     ("x://d{#frag}", "x://d#a/b", True),
     ("x://d{#frag}", "x://dzz", False),
     ("x://{a}{?q}", "x://item?q=1", True),  # "?" cannot be in {a}: a certain boundary
+    # PR #42 re-review B1: a "," only where the expansion can write one
+    ("x://l{?id*}", "x://l?id=a,b", False),  # exploded: items are id=a&id=b
+    ("x://l{?id:3}", "x://l?id=a,b", False),  # a prefix applies to a string; its "," would be encoded
+    ("x://l/{id:3}", "x://l/a,b", False),
+    ("x://l/{+id:3}", "x://l/a,b", True),  # reserved characters pass unencoded
+    ("x://l{#id:2}", "x://l#a,", True),
+    ("x://l{?list}", "x://l?list=a,b,c", True),  # a list not exploded
+    ("x://l/{list}", "x://l/a,b", True),
+    ("x://l/{list*}", "x://l/a,b", True),  # exploded with the "," separator
+    ("x://l/{a,b}", "x://l/1,2", True),  # "," between the variables
+    ("x://l{/list}", "x://l/a,b", True),
+    ("x://l{/list*}", "x://l/a,b", False),  # exploded: items are /a/b
+    ("x://l{/a,b*}", "x://l/1,2", False),  # one of them may not hold ","; which one is not known
+    ("x://l{.x*}", "x://l.a,b", False),
+    ("x://l{;x*}", "x://l;x=a,b", False),
+    ("x://l{;x}", "x://l;x=a,b", True),
 ])
 def test_templates_allow_exactly_what_they_expand_to(template: str, uri: str, expected: bool) -> None:
     parsed = UriTemplate.parse(template)
@@ -546,6 +562,26 @@ def test_effect_is_unknown_by_default_and_the_operators_otherwise() -> None:
         undeclared = await open_http(server, declared=("tools",))  # the server offers no resources
         assert undeclared.resource_tools == [] and "resources/list" not in server.methods
         await undeclared.aclose()
+
+    run(scenario)
+
+
+@pytest.mark.parametrize("tool", [
+    {"name": "other", "description": "the server lacks read_resource", "inputSchema": {"type": "object"}},
+    {"name": "read_resource", "description": "a schema HIMARI refuses", "inputSchema": {"type": "string"}},
+])
+def test_a_listed_server_tool_that_is_not_registered_leaves_the_name_free(tool: dict[str, Any]) -> None:
+    """PR #42 re-review B2: only a registered server Tool takes the name."""
+    server = FakeMcpServer(tools=[tool])
+
+    async def scenario() -> None:
+        connection = await open_http(server, tools={"read_resource": {"effect": "read"}})
+        (status,) = connection.statuses
+        assert status.tool_ids == ("calliope/list_resources", "calliope/read_resource")
+        assert [t.definition.tool_id for t in connection.resource_tools] == [
+            "calliope/list_resources", "calliope/read_resource"]
+        assert any(p.startswith("read_resource: ") and "offered instead" not in p for p in status.problems)
+        await connection.aclose()
 
     run(scenario)
 

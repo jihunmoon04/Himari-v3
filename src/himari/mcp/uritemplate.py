@@ -11,7 +11,10 @@ by structure, not by character ranges alone (PR #42 review B1):
 - ``{/a,b}``, ``{.a}``: at most one segment per variable unless exploded.
 - ``{id:3}``: at most 3 characters (a percent-encoded octet counts as one).
 - Values contain only what the operator lets through unencoded: unreserved
-  characters and ``%XX`` (and reserved characters for ``{+…}``, ``{#…}``).
+  characters and ``%XX`` (and reserved characters for ``{+…}``, ``{#…}``);
+  a ``,`` only where the expansion can write one: between variables or the
+  items of a list that is not exploded, never in a prefixed or exploded
+  (``?``, ``&``, ``;``, ``/``, ``.``) value unless reserved characters pass.
 
 **Bounded time (B2).** Matching walks the template once and never
 backtracks: an expression's expansion ends where the next literal first
@@ -196,9 +199,22 @@ def _encoded_literal(text: str) -> bool:
     return "%" not in text or _encoded(text)
 
 
-def _value(value: str, reserved: bool) -> bool:
-    allowed = _UNRESERVED | {"%", ","} | (_RESERVED if reserved else frozenset())
+def _value(value: str, reserved: bool, comma: bool) -> bool:
+    allowed = _UNRESERVED | {"%"} | (_RESERVED if reserved else frozenset()) | ({","} if comma else frozenset())
     return set(value) <= allowed and _encoded(value)
+
+
+def _comma(variable: _Variable, spec: _Operator) -> bool:
+    """Whether this variable's expansion can hold an unencoded ",": a
+    string's own "," passes only where reserved characters do; otherwise
+    "," joins the items of a list that is not exploded (or, for operators
+    that separate with ",", one that is). A prefix applies to strings only
+    (PR #42 re-review B1)."""
+    if spec.reserved:
+        return True
+    if variable.prefix is not None:
+        return False
+    return not variable.explode or spec.separator == ","
 
 
 def _expansion(expression: _Expression, text: str) -> bool:
@@ -216,7 +232,11 @@ def _expansion(expression: _Expression, text: str) -> bool:
             return False  # more segments than variables
         if len(variables) == 1 and variables[0].prefix is not None and _length(body) > variables[0].prefix:
             return False
-        return all(_value(item, spec.reserved) for item in items)
+        if spec.separator == ",":  # "," also separates the variables
+            comma = len(variables) > 1 or _comma(variables[0], spec)
+        else:  # which variable a segment is of cannot be told: "," only if every one may hold it
+            comma = all(_comma(v, spec) for v in variables)
+        return all(_value(item, spec.reserved, comma) for item in items)
     # name=value pairs: declared names only, in order, repeated only when exploded
     current = 0
     previous: str | None = None
@@ -233,7 +253,7 @@ def _expansion(expression: _Expression, text: str) -> bool:
             return False
         if variable.prefix is not None and _length(value) > variable.prefix:
             return False
-        if not _value(value, False):
+        if not _value(value, False, _comma(variable, spec)):
             return False
         previous = name
         if not variable.explode:
