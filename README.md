@@ -119,6 +119,24 @@ HIMARI_DATA_ROOT=~/.himari python -m himari.interfaces.web --env-file .env
 - **Stop은 최선 노력 취소입니다(MCP 표준).** 서버에 취소를 알리고 기다리기를 멈출 뿐, 서버 안의 작업이 멈췄다고 보장하지 않습니다. 취소된 작업이 서버에서 끝까지 돌아 효과(파일, 캐시 등)를 낼 수 있습니다. 쓰기 Tool의 호출은 "결과 불명"으로 기록되고 다시 실행되지 않습니다. 그래서 `read`는 늦게 끝나도 해가 없는 Tool에만 줍니다.
 - Stop이나 시간 초과 뒤에는 서버에 `ping`을 보내 살아 있는지 확인합니다(그동안 새 호출은 잠깐 기다립니다). 10초 안에 답하지 않을 때만 프로세스를 끝내고 다시 띄웁니다. 그때는 그 프로세스의 다른 진행 중 호출도 결과 불명이 됩니다. 서버가 연결 단위 상태에 기대면 `per_conversation`을 고릅니다.
 
+**서버 안내문과 리소스 (V3-P60).** Tool 말고도 서버가 주는 것을 모델이 쓰게 합니다. `tools`는 선택이라, 안내문이나 리소스만 주는 서버도 연결됩니다.
+
+```json
+"instructions": "system",
+"resources": {"effect": "read", "uris": "listed"}
+```
+
+- **`instructions`**: 서버가 `initialize`에서 준 안내문을 어디에 둘지 정합니다.
+  - `system`(기본): 시스템 메시지의 HIMARI 지시문 뒤에 "Tool server notes" 절로 넣습니다. 내용을 아는, 신뢰하는 서버에만 씁니다.
+  - `data`: 매 요청 끝의 현재 상태 블록 안에 데이터로만 넣습니다. 외부에서 받았거나 내용을 모르는 서버에 씁니다.
+  - `off`: 넣지 않습니다.
+  - 그 대화에서 켜진 서버의 것만, 서버당 4,000자·모두 합쳐 16,000자까지 들어갑니다.
+- **`resources`**: 서버가 리소스를 제공하면 모델에게 `<서버>/list_resources`와 `<서버>/read_resource`(32,000자씩, `offset`으로 이어 읽기)를 줍니다.
+  - `effect`(기본 `unknown`): 다른 Tool과 같은 뜻입니다. 읽기가 서버에서 아무것도 바꾸지 않는다고 확인한 서버만 `read`로 둡니다.
+  - `uris`(기본 `listed`): 서버의 목록에 있거나 URI 템플릿에 맞는 URI만 읽습니다. `any`로 넓히면 서버가 받아들이는 모든 URI를 읽게 되어, 접근 범위가 그 서버의 리소스 전체가 됩니다.
+  - 화면(`ui://`)과 서버가 사용자용(`audience: ["user"]`)으로 표시한 리소스는 목록에서 빠지고 읽지 않습니다. 읽은 결과에 섞여 온 것도 빼고 `[omitted: restricted resource]`만 남깁니다.
+  - `false`로 끕니다. 서버의 Tool에 같은 이름(`list_resources`·`read_resource`)이 있으면 서버의 것이 쓰입니다.
+
 **Tool 화면 (MCP Apps, V3-P58).** 서버 항목에 `"ui"`를 적으면 그 서버가 Tool에 붙인 화면(`ui://`)을 Web에서 보여 줍니다. 적지 않으면 서버에 화면 지원을 알리지 않습니다.
 
 ```json
@@ -156,7 +174,7 @@ himari list; himari show conv_1; himari send conv_1 "질문"; himari continue co
 
 구현(P0): `data/memory.py`(인메모리 Data)·`data/sqlite.py`+`data/codec.py`(SQLite 영속 Data, V3-P42), `tool/registry.py`·`tool/dispatcher.py`, `prompt/composer.py`(순수)·`prompt/loader.py`, `provider/scripted.py`(Fake), `control/driver.py`·`control/ask_user.py`, `bootstrap/`(조립).
 
-MCP 클라이언트: `mcp/`(설정 `config.py`, 클라이언트·Streamable HTTP `client.py`, JSON-RPC `jsonrpc.py`, 프로토콜 판 `revision.py`, stdio `stdio.py`, Tool 연결 `tools.py`; V3-P52/P53/P59). stdio 서버는 Bootstrap이 만든 server sandbox(`sandbox/server.py`)의 실행기로만 띄운다. Environment와 같은 층의 플러그인 패키지로 `tool.api`만 사용한다(V3-P57). External Tool 노출·실행 권한은 `tool/access.py`.
+MCP 클라이언트: `mcp/`(설정 `config.py`, 클라이언트·Streamable HTTP `client.py`, JSON-RPC `jsonrpc.py`, 프로토콜 판 `revision.py`, stdio `stdio.py`, Tool 연결 `tools.py`, 리소스 Tool `resources.py`; V3-P52/P53/P59/P60). stdio 서버는 Bootstrap이 만든 server sandbox(`sandbox/server.py`)의 실행기로만 띄운다. Environment와 같은 층의 플러그인 패키지로 `tool.api`만 사용한다(V3-P57). External Tool 노출·실행 권한은 `tool/access.py`.
 
 Inside Environment: `environment/inside/`(사용자별 Workspace, 파일 Tool 5종, openat2 경계, V3-P40)와 `inside/run_command`(bubblewrap + Landlock Sandbox, 시작 시 탈출 자체 검사, V3-P41).
 

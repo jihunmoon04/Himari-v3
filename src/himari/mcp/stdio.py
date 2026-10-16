@@ -49,6 +49,13 @@ calls move to a new process, its first answer from it carries
 
 **Listing.** At startup a separate session lists the Tools and reads the
 views, then closes (``listing``); calls never use it.
+
+**Which process (V3-P60 C6).** ``current_session`` names the process a
+Conversation's next request goes to; ``request_in`` says which process
+answered and, given one, sends only to it while it is still that
+Conversation's and has not ended (else ``McpSessionChanged``, nothing sent).
+A process that has ended is replaced at the next request, even before its
+reader has noticed.
 """
 
 from __future__ import annotations
@@ -60,7 +67,7 @@ from enum import Enum
 from typing import Any, Protocol
 
 from himari.mcp.config import McpStdioConfig
-from himari.mcp.jsonrpc import McpRefused, McpUncertain, notification, request, result_of
+from himari.mcp.jsonrpc import McpRefused, McpSessionChanged, McpUncertain, notification, request, result_of
 from himari.mcp.revision import REVISION
 
 STARTUP_SECONDS = 15.0  # launch and initialize
@@ -420,13 +427,40 @@ class StdioServer:
     # --- calls ----------------------------------------------------------------
 
     async def request(self, method: str, params: Mapping[str, Any], key: str | None) -> Mapping[str, Any]:
-        session = await self._session(key)
+        return (await self.request_in(method, params, key))[1]
+
+    def current_session(self, key: str | None) -> Session | None:
+        """The process the key's next request would go to, if it has one
+        that is not closing (V3-P60 C6)."""
+        session = self._sessions.get(self._slot(key))
+        if session is None or session.state not in (State.READY, State.CHECKING) or session.process.returncode is not None:
+            return None
+        return session
+
+    async def request_in(self, method: str, params: Mapping[str, Any], key: str | None,
+                         pinned: object | None = None) -> tuple[Session, Mapping[str, Any]]:
+        """``request``, saying which process answered; with ``pinned``, only
+        that process, while it is still the key's (else McpSessionChanged,
+        nothing sent). One that ends mid-request is uncertain, as any call."""
+        if pinned is None:
+            session = await self._session(key)
+        else:
+            while True:
+                if self._closed:
+                    raise McpRefused("the server is shut down")
+                current = self.current_session(key)
+                if current is None or current is not pinned or current.process.returncode is not None:
+                    raise McpSessionChanged(f"{method}: the process it was meant for was replaced")
+                if current.state is State.READY:
+                    session = current
+                    break
+                await current.settled.wait()  # CHECKING: not admitted while waiting
         if key is not None:  # the Conversation used this process: told at its next answer if it is replaced
             seen = self._seen.get(key)
             if seen is not None and seen != session.generation:
                 self._restarted.add(key)
             self._seen[key] = session.generation
-        return await session.request(method, params, self._timeout)
+        return session, await session.request(method, params, self._timeout)
 
     def take_restart(self, key: str | None) -> bool:
         if key is None or key not in self._restarted:
@@ -444,6 +478,9 @@ class StdioServer:
                 raise McpRefused("the server is shut down")
             session = self._sessions.get(slot)
             if session is not None and session.state is not State.CLOSED:
+                if session.process.returncode is not None:  # ended, before its reader noticed: replaced
+                    await session.close("it ended")
+                    continue
                 if session.state is State.READY:
                     return session
                 await session.settled.wait()  # CHECKING or CLOSING: not admitted while waiting
@@ -553,6 +590,13 @@ class StdioChannel:
     async def request(self, method: str, params: Mapping[str, Any], *, key: str | None = None) -> Mapping[str, Any]:
         return await self._server.request(method, params, key)
 
+    async def request_in(self, method: str, params: Mapping[str, Any], *, key: str | None = None,
+                         session: object | None = None) -> tuple[object, Mapping[str, Any]]:
+        return await self._server.request_in(method, params, key, session)
+
+    def current_session(self, key: str | None) -> object | None:
+        return self._server.current_session(key)
+
     def take_restart(self, key: str | None) -> bool:
         return self._server.take_restart(key)
 
@@ -577,6 +621,15 @@ class ListingChannel:
             await self.start()
         assert self._session is not None
         return await self._session.request(method, params, self._timeout)
+
+    async def request_in(self, method: str, params: Mapping[str, Any], *, key: str | None = None,
+                         session: object | None = None) -> tuple[object, Mapping[str, Any]]:
+        if session is not None and session is not self._session:
+            raise McpSessionChanged(f"{method}: the listing session it was meant for is gone")
+        return self._session, await self.request(method, params, key=key)
+
+    def current_session(self, key: str | None) -> object | None:
+        return self._session
 
     def take_restart(self, key: str | None) -> bool:
         return False

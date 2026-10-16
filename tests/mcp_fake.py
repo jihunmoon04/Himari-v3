@@ -77,6 +77,12 @@ class FakeMcpServer:
         self.prompt_messages: dict[str, list[dict[str, Any]]] = {}
         self.methods: list[str] = []
         self.initialize_delay = 0.0
+        # V3-P60 §5: resources/list and resources/templates/list (None: the method is unknown).
+        self.listed: list[Any] = []
+        self.templates: list[Any] | None = []
+        self.list_page_size: int | None = None
+        self.missing_resource_code = -32602  # resources/read of a URI not in ``resources``
+        self.on_method: dict[str, Callable[[], None]] = {}  # run once that method is answered
 
     def transport(self) -> httpx.MockTransport:
         return httpx.MockTransport(self.handle)
@@ -135,12 +141,26 @@ class FakeMcpServer:
             if start + size < len(self.tools):
                 page["nextCursor"] = str(start + size)
             return self._answer(request_id, page)
+        hook = self.on_method.pop(method, None)
+        if hook is not None:
+            hook()
+        if method in ("resources/list", "resources/templates/list"):
+            entries = self.listed if method == "resources/list" else self.templates
+            if entries is None:
+                return self._error(request_id, -32601)
+            start = int(params.get("cursor", "0"))
+            size = self.list_page_size or max(len(entries), 1)
+            name = "resources" if method == "resources/list" else "resourceTemplates"
+            listed: dict[str, Any] = {name: entries[start : start + size]}
+            if start + size < len(entries):
+                listed["nextCursor"] = str(start + size)
+            return self._answer(request_id, listed)
         if method == "resources/read":
             self.resource_reads.append(params["uri"])
             if self.resource_delay:
                 await asyncio.sleep(self.resource_delay)
             if params["uri"] not in self.resources:
-                return self._error(request_id, -32602)
+                return self._error(request_id, self.missing_resource_code)
             return self._answer(request_id, self.resources[params["uri"]])
         if method == "tools/call":
             name, arguments = params["name"], params.get("arguments", {})

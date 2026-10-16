@@ -5,8 +5,10 @@ over a ``Channel`` (how messages travel: ``HttpChannel`` here, a stdio
 channel beside it); ``revision`` says how a connection starts; ``jsonrpc``
 matches answers to requests and says what an answer means.
 
-Only what HIMARI uses: ``initialize``, ``tools/list``, ``tools/call`` and
-``resources/read`` (a Tool's view, MCP Apps). The client declares no
+Only what HIMARI uses: ``initialize``, ``tools/list``, ``tools/call``,
+``prompts/list`` and ``prompts/get``, and ``resources/list``,
+``resources/templates/list`` and ``resources/read`` (a Tool's view, MCP
+Apps, and the resource Tools, V3-P60). The client declares no
 capabilities of its own, so a server has no reason to send requests back;
 any it sends inside a response stream, and every notification, is ignored.
 For a server whose views are shown it declares the MCP Apps extension
@@ -17,7 +19,9 @@ Each JSON-RPC request is one ``POST`` answered by ``application/json`` or
 a ``text/event-stream`` that carries the response. The session id the
 server assigns is sent on later requests; when the server forgets it (404)
 the client starts a new session and sends the request once more — the
-server did not process a request for an unknown session.
+server did not process a request for an unknown session. A request meant
+for one session (``request_in`` with ``session``) is not sent again: it
+fails with ``McpSessionChanged`` and the caller decides (V3-P60 C6).
 
 The rest of this note is about ``HttpChannel`` (Streamable HTTP).
 
@@ -77,6 +81,7 @@ from typing import Protocol
 from himari.common import JsonValue
 from himari.mcp.jsonrpc import McpError as McpError
 from himari.mcp.jsonrpc import McpRefused as McpRefused
+from himari.mcp.jsonrpc import McpSessionChanged as McpSessionChanged
 from himari.mcp.jsonrpc import McpUncertain as McpUncertain
 from himari.mcp.jsonrpc import notification, parse, request, result_of
 from himari.mcp.revision import CLIENT_INFO as CLIENT_INFO
@@ -115,11 +120,23 @@ class Channel(Protocol):
     returns its result, starting or renewing the connection as needed.
     ``key`` is the calling Conversation (a stdio server may run a process
     per Conversation); ``take_restart`` says, once, that the key's calls
-    moved to a new connection since its previous answer."""
+    moved to a new connection since its previous answer.
+
+    Sessions (V3-P60 C6): ``current_session`` names the session the key's
+    next request would go to, without starting one (None: none yet).
+    ``request_in`` says which session answered; given ``session``, it sends
+    only there — ``McpSessionChanged`` if that session is gone or replaced,
+    before sending or by an answer that proves the server did not process
+    it — and never to another session in its place."""
 
     async def start(self) -> Mapping[str, Any]: ...
 
     async def request(self, method: str, params: Mapping[str, Any], *, key: str | None = None) -> Mapping[str, Any]: ...
+
+    async def request_in(self, method: str, params: Mapping[str, Any], *, key: str | None = None,
+                         session: object | None = None) -> tuple[object, Mapping[str, Any]]: ...
+
+    def current_session(self, key: str | None) -> object | None: ...
 
     def take_restart(self, key: str | None) -> bool: ...
 
@@ -197,6 +214,13 @@ class McpClient:
     async def request(self, method: str, params: Mapping[str, Any], *, key: str | None = None) -> Mapping[str, Any]:
         return await self._channel.request(method, params, key=key)
 
+    async def request_in(self, method: str, params: Mapping[str, Any], *, key: str | None = None,
+                         session: object | None = None) -> tuple[object, Mapping[str, Any]]:
+        return await self._channel.request_in(method, params, key=key, session=session)
+
+    def current_session(self, key: str | None) -> object | None:
+        return self._channel.current_session(key)
+
 
 def http_client(url: str, token: str | None, *, timeout_seconds: float,
                 transport: httpx.AsyncBaseTransport | None = None, ui: bool = False) -> McpClient:
@@ -229,6 +253,7 @@ class HttpChannel:
         self._capabilities = capabilities(ui)
         self._session: str | None = None
         self._version: str | None = None
+        self._epoch = 0  # which session: counts (re)initializations (V3-P60 C6)
         self._next_id = 0
         self._lock = asyncio.Lock()  # one (re)initialization at a time
         self._cancelling: set[asyncio.Task[None]] = set()
@@ -245,26 +270,46 @@ class HttpChannel:
         return False  # a renewed HTTP session is the same server process: nothing to tell
 
     async def request(self, method: str, params: Mapping[str, Any], *, key: str | None = None) -> Mapping[str, Any]:
+        return (await self.request_in(method, params, key=key))[1]
+
+    def current_session(self, key: str | None) -> object | None:
+        return None if self._version is None else self._epoch
+
+    async def request_in(self, method: str, params: Mapping[str, Any], *, key: str | None = None,
+                         session: object | None = None) -> tuple[object, Mapping[str, Any]]:
+        if session is not None:
+            if self._version is None or session != self._epoch:
+                raise McpSessionChanged(f"{method}: the session it was meant for was renewed")
+            try:
+                return session, await self._rpc(method, params)
+            except _SessionExpired:  # 404: the server did not process it
+                await self._renew(session)
+                raise McpSessionChanged(f"{method}: the session it was meant for has expired") from None
         if self._version is None:
             async with self._lock:
                 if self._version is None:  # nobody started it meanwhile
                     await self._initialize()
-        session = self._session
+        epoch = self._epoch
         try:
-            return await self._rpc(method, params)
+            return epoch, await self._rpc(method, params)
         except _SessionExpired:
-            async with self._lock:
-                if self._session == session:  # nobody renewed it meanwhile
-                    await self._initialize()
+            await self._renew(epoch)
+            epoch = self._epoch
             try:
-                return await self._rpc(method, params)
+                return epoch, await self._rpc(method, params)
             except _SessionExpired:
                 raise McpRefused("the server does not keep a session") from None
+
+    async def _renew(self, epoch: int) -> None:
+        async with self._lock:
+            if self._epoch == epoch:  # nobody renewed it meanwhile
+                await self._initialize()
 
     # --- internals ---------------------------------------------------------
 
     async def _initialize(self) -> Mapping[str, Any]:
         self._session, self._version = None, None
+        self._epoch += 1
         result = await self._rpc(REVISION.initialize, REVISION.initialize_params(self._capabilities),
                                  initializing=True)
         self._version = REVISION.accept(result)

@@ -255,7 +255,7 @@ class Application:
                 if state is SandboxState.ENFORCED:
                     backend = candidate  # run_command is offered only when enforcement is proven (V3-050)
             inside = InsideEnvironment(workspaces, sandbox=backend)
-            runtime = build_runtime(provider, store=store, environments=[inside], tools=[*tools, *mcp.handlers],
+            runtime = build_runtime(provider, store=store, environments=[inside], tools=[*tools, *mcp.handlers, *mcp.resource_tools],
                                     model_id=model_id, reasoning_effort=reasoning_effort, context_budget=budget,
                                     instructions=DEFAULT_INSTRUCTIONS if instructions is None else instructions,
                                     external_defaults=mcp.defaults,
