@@ -2493,3 +2493,22 @@ details > summary {
   flex-wrap: wrap;
 }
 
+/* -- a turn stopped by a guard (V3-P62 §7): Continue from here -------------- */
+
+.stop-panel {
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  padding: var(--space-2) var(--space-3);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.stop-text {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}

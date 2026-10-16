@@ -344,3 +344,33 @@ R1·R2·C3는 해결로 확인됐다. 비차단 권고 둘을 구현의 규칙�
 
 B1·C2는 해결, C1은 개선으로 확인됐다. 비차단 권고 하나: `last`는 직전 요청의 입력으로 다음 요청의 비용을 어림한다. 그래서 다음 요청이 그보다 크면 모델이 알림을 보기 전에 예산에 닿을 수 있다. 보내기 전 판정은 따로 있으므로 안전에는 영향이 없다. 2단계의 실제 모델 시험에서 알림이 모델에 닿는 비율을 잰다.
 
+
+## 19. 구현 노트 — 2단계: 설정·Application·Web·CLI (2026-10-16)
+
+V3-P62의 기본값을 켰다. 이제 기본 서버에는 Run 수 상한이 없다.
+- **기본값(§11):** O1 1,000,000 토큰, O2 20 Run·60초, O3 3. 권고값 그대로이며, 소유자 확인을 기다린다(바꾸기 쉬운 상수 하나씩이다). O4는 아래 측정을 보고 정한다.
+- **설정(`interfaces/web/config.py`):**
+  - `HIMARI_TURN_TOKEN_BUDGET`(기본 1,000,000, `0` = 끔, 1,000~10⁹);
+  - `HIMARI_UNATTENDED_RUNS`(기본 20, `0` = 끔, 1~1,000);
+  - `HIMARI_MAX_RUNS`(기본 `0` = 없음, 1~1,000).
+  - 예산과 상한을 둘 다 끄면 시작을 거부한다(`WebConfigError`, `Application.open`도 `ValueError`).
+- **Application:**
+  - `Application.open(turn_budget=, unattended_runs=, max_runs=)`가 `build_runtime`(예산, 선택 상한, `no_progress_runs=3`)과 `BackgroundRunner`(`unattended_runs`, `seen_seconds=60`)에 넘긴다.
+  - 쓰인 값은 `Application.turn`(`TurnSettings`)에 있다.
+  - `Application.seen(scope)`는 Runner에 클라이언트 연결을 알린다.
+- **Web:**
+  - 대화 상세(`GET /api/conversations/{id}`)와 이벤트 읽기가, 권한 확인을 통과한 **뒤에만** `seen`을 부른다. 남의 대화나 없는 대화를 읽으면 세지 않는다(시험).
+  - `job.turn_usage`(`runs`, 입력·출력·캐시 적중·캐시 쓰기 토큰, `budget`, `max_runs`). `/api/server`는 `turn`(쓰이는 설정)을 준다.
+  - 작업 중 입력창 아래: "HIMARI is working… · 45k in · 1.0k out / 100k".
+  - 답 없이 멈춘 턴: 입력창 위의 패널에 이번 턴의 사용량과 **Continue** 버튼을 둔다. 가드가 멈췄든, Pause든, 실패든 같다. 멈춘 이유는 상태 줄(live region)에 그대로 둔다. 같은 글을 두 곳에 두지 않으려고 패널에는 사용량만 쓴다. 대화 메뉴의 Continue도 남는다.
+  - 새 상태 `budget_reached`·`no_progress`의 글. Pause와 "Not answered yet"의 안내는 이제 "Continue"만 말한다.
+- **CLI:**
+  - 턴이 끝나면 한 줄: `(used 90k in + 2.0k out of 100k tokens in 2 requests)`.
+  - 새 상태의 글은 `continue`로 이어 가라고 말한다(`budget_reached`는 새 예산을 받는다는 것도).
+- **시작 줄:** "turn budget: 1000000 tokens, no step limit, pauses after 20 steps unread".
+- **시험:**
+  - 설정: 기본값, `0`, 범위, 둘 다 끔;
+  - Application: 연결(Driver의 예산·상한·진척, Runner의 연결 없음), 둘 다 끔 거부;
+  - Web: `turn_usage`, 예산에서 멈춘 뒤 Continue가 새 예산으로 끝냄, 권한 확인 뒤에만 `seen`;
+  - CLI: 토큰 표기, 상태별 안내, 실제 서버로 예산 멈춤과 `continue`.
+  - 브라우저 smoke(`scripts/ui_smoke.py`의 세 번째 서버): 작업 중 사용량, 예산에서 멈춤, 패널, 좁은 화면, Continue로 끝냄.

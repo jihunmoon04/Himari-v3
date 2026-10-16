@@ -41,7 +41,8 @@ from himari.common import (
     WorkspaceId,
 )
 from himari.control.api import ContextStatus
-from himari.control.runner import BackgroundRunner
+from himari.control.driver import NO_PROGRESS_RUNS
+from himari.control.runner import SEEN_SECONDS, BackgroundRunner
 from himari.data.api import InitialActivation, ToolExecutionRecord, ToolExecutionStatus, UiCsp, UiResource
 from himari.data.sqlite import SqliteData, SqliteStore
 from himari.environment.inside import INSIDE, InsideEnvironment
@@ -59,6 +60,23 @@ from himari.tool.api import ToolHandler
 from himari.tool.schema import check_tool_input_schema
 
 DATABASE_NAME = "himari.db"
+# One turn's guards (V3-P62): no Run limit by default; a token budget, a
+# no-progress stop, and a pause when no client reads the Conversation.
+DEFAULT_TURN_BUDGET = 1_000_000  # tokens per drive (O1)
+DEFAULT_UNATTENDED_RUNS = 20  # Runs without a client read in SEEN_SECONDS (O2)
+
+
+@dataclass(frozen=True)
+class TurnSettings:
+    """How a turn is guarded (V3-P62), as this server runs it."""
+
+    turn_budget: int | None  # None: no token budget (then max_runs is set)
+    unattended_runs: int | None  # None: never paused for want of a client
+    max_runs: int | None  # None: no Run limit
+    no_progress_runs: int = NO_PROGRESS_RUNS
+    seen_seconds: float = SEEN_SECONDS
+
+
 # Default request budget: the model's window, capped so that a long
 # Conversation is compacted before each request costs a whole large window.
 DEFAULT_CONTEXT_TOKENS = 200_000
@@ -239,6 +257,8 @@ class Application:
     context_tokens: int  # the request token budget (compaction starts at 80%)
     operator_secret: str = field(repr=False)  # never in reprs, logs or tracebacks
     mcp: McpConnection = field(default_factory=lambda: McpConnection([], (), []))
+    turn: TurnSettings = field(default_factory=lambda: TurnSettings(DEFAULT_TURN_BUDGET, DEFAULT_UNATTENDED_RUNS,
+                                                                    None))
 
     @classmethod
     async def open(
@@ -255,7 +275,13 @@ class Application:
         environ: Mapping[str, str] | None = None,  # where mcp.json's token variables are read
         mcp_transport: httpx.AsyncBaseTransport | None = None,  # tests: a fake MCP server
         mcp_launcher_for: LauncherFor | None = None,  # tests: stdio servers without the server sandbox
+        turn_budget: int | None = DEFAULT_TURN_BUDGET,
+        unattended_runs: int | None = DEFAULT_UNATTENDED_RUNS,
+        max_runs: int | None = None,
     ) -> Application:
+        if turn_budget is None and max_runs is None:
+            raise ValueError("a turn needs a token budget or a Run limit (V3-P62)")
+        turn = TurnSettings(turn_budget, unattended_runs, max_runs)
         capabilities = provider.describe_capabilities(model_id)
         # Compaction works toward the budget; only the model's input ceiling
         # (its window less the room kept for an answer) refuses a Run.
@@ -289,7 +315,9 @@ class Application:
                                     instructions=DEFAULT_INSTRUCTIONS if instructions is None else instructions,
                                     external_defaults=mcp.defaults,
                                     source_notes=[SourceNote(source, note.placement, note.text)
-                                                  for source, note in mcp.notes.items()])
+                                                  for source, note in mcp.notes.items()],
+                                    max_runs_per_drive=max_runs, turn_budget=turn_budget,
+                                    no_progress_runs=turn.no_progress_runs)
         except BaseException:
             try:
                 if mcp is not None:
@@ -298,8 +326,14 @@ class Application:
                 store.close()
             raise
         assert isinstance(runtime.data, SqliteData)
-        return cls(root, store, runtime.data, runtime, BackgroundRunner(runtime.driver), inside, state, model_id,
-                   budget.limit_tokens, secret, mcp)
+        runner = BackgroundRunner(runtime.driver, unattended_runs=unattended_runs, seen_seconds=turn.seen_seconds)
+        return cls(root, store, runtime.data, runtime, runner, inside, state, model_id, budget.limit_tokens, secret, mcp,
+                   turn)
+
+    def seen(self, scope: TrustedScope) -> None:
+        """A client read this Conversation (V3-P62 §5): call only after the
+        read was authorized."""
+        self.runner.seen(scope)
 
     @property
     def current_sandbox_state(self) -> SandboxState:
