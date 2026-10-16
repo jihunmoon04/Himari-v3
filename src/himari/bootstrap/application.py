@@ -49,8 +49,10 @@ from himari.sandbox.api import SandboxState, ServerProfile
 from himari.sandbox.backend import SandboxBackend
 from himari.sandbox.server import ServerSandbox
 from himari.mcp.config import CONFIG_NAME, McpConfig, McpStdioConfig, McpUiPolicy, load_config
+from himari.mcp.jsonrpc import McpError
+from himari.mcp.prompts import PromptContentError, prompt_text
 from himari.mcp.stdio import ProcessLauncher
-from himari.mcp.tools import LauncherFor, McpConnection, SourceStatus, connect
+from himari.mcp.tools import LauncherFor, McpConnection, PromptArgument, SourceStatus, connect
 from himari.prompt.api import ContextBudget, SourceNote
 from himari.provider.api import ProviderAdapter
 from himari.tool.api import ToolHandler
@@ -116,6 +118,33 @@ def tool_views_configured(data_root: str | os.PathLike[str], environ: Mapping[st
 
 class UnknownToolSource(LookupError):
     """No configured External Tool source has this name."""
+
+
+class PromptRefused(LookupError):
+    """A server prompt was not expanded (V3-P60 §4); ``message`` is for the
+    user. ``code``: ``unknown_prompt``, ``source_disabled`` (off in this
+    Conversation), ``invalid_arguments``, ``unsupported_content`` (it cannot
+    be given as text) or ``server_error``."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
+
+
+MAX_PROMPT_ARGUMENT_CHARS = 2_000
+INVALID_PARAMS = -32602
+
+
+@dataclass(frozen=True)
+class PromptView:
+    """One prompt a server on in this Conversation offers, as the user picks it."""
+
+    source: str
+    name: str
+    title: str
+    description: str
+    arguments: tuple[PromptArgument, ...]
 
 
 class AppViewRefused(LookupError):
@@ -308,6 +337,52 @@ class Application:
         if default is None:
             raise UnknownToolSource(source)
         await self.data.set_external_setting(scope, source, None if enabled == default else enabled)
+
+    # --- Server prompts (V3-P60 §4) ------------------------------------------------------
+
+    async def prompts(self, scope: TrustedScope) -> tuple[PromptView, ...]:
+        """The prompts of the servers on in this Conversation, by server.
+        Authorizes like any read (NOT_AUTHORIZED)."""
+        await self.data.read_conversation(scope)
+        enabled = sorted(v.source for v in await self.tool_sources(scope) if v.enabled)
+        return tuple(PromptView(source, p.name, p.title, p.description, p.arguments)
+                     for source in enabled for p in self.mcp.prompts.get(source, ()))
+
+    async def expand_prompt(self, scope: TrustedScope, source: str, name: str,
+                            arguments: Mapping[str, str]) -> str:
+        """The prompt as text for the user to review and send; nothing is
+        sent or recorded here. Checks the caller may read this Conversation
+        and that the server is on in it (PR #40 review C2), then asks the
+        server in this Conversation's session (``prompts/get``)."""
+        await self.data.read_conversation(scope)
+        view = next((v for v in await self.tool_sources(scope) if v.source == source), None)
+        if view is None:
+            raise UnknownToolSource(source)
+        if not view.enabled:
+            raise PromptRefused("source_disabled", "This server is off in this conversation.")
+        info = next((p for p in self.mcp.prompts.get(source, ()) if p.name == name), None)
+        if info is None:
+            raise PromptRefused("unknown_prompt", "This server offers no such prompt.")
+        declared = [a.name for a in info.arguments]
+        if not set(arguments) <= set(declared):
+            takes = ", ".join(declared)[:300] if declared else "no arguments"
+            raise PromptRefused("invalid_arguments", f"This prompt takes: {takes}.")
+        missing = [a.name for a in info.arguments if a.required and not arguments.get(a.name)]
+        if missing:
+            raise PromptRefused("invalid_arguments", f"Required: {', '.join(missing)[:300]}.")
+        if any(len(value) > MAX_PROMPT_ARGUMENT_CHARS for value in arguments.values()):
+            raise PromptRefused("invalid_arguments", f"An argument is at most {MAX_PROMPT_ARGUMENT_CHARS} characters.")
+        given = [(n, arguments[n]) for n in declared if n in arguments]  # in the prompt's own order
+        try:
+            result = await self.mcp.get_prompt(source, name, dict(given), str(scope.conversation_id))
+        except McpError as error:
+            if error.code == INVALID_PARAMS:
+                raise PromptRefused("invalid_arguments", "The server refused these arguments.") from None
+            raise PromptRefused("server_error", "The server could not give this prompt.") from None
+        try:
+            return prompt_text(source, name, given, result)
+        except PromptContentError as error:
+            raise PromptRefused("unsupported_content", f"This prompt cannot be used: {error}.") from None
 
     # --- Tool views (MCP Apps, V3-P58) ---------------------------------------------------
 

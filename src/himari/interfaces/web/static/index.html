@@ -135,6 +135,20 @@
               <p class="question-hint" id="question-hint">Answer in the message box below.</p>
             </section>
 
+            <section class="prompt-picker" id="prompt-picker" hidden>
+              <p class="prompt-picker-heading" id="prompt-picker-heading">Server prompts</p>
+              <ul class="prompt-list" id="prompt-list" role="listbox" aria-labelledby="prompt-picker-heading"></ul>
+            </section>
+            <form class="prompt-form" id="prompt-form" aria-labelledby="prompt-form-title" hidden>
+              <h2 class="prompt-form-title" id="prompt-form-title"></h2>
+              <p class="prompt-form-about" id="prompt-form-about"></p>
+              <div class="prompt-form-fields" id="prompt-form-fields"></div>
+              <p class="prompt-form-note">The filled-in prompt goes into the message box. Read it, change it if you like, then send it.</p>
+              <div class="prompt-form-actions">
+                <button type="button" id="prompt-form-cancel" class="link-button">Cancel</button>
+                <button type="submit" id="prompt-form-submit" class="primary-button">Fill in</button>
+              </div>
+            </form>
             <form class="composer" id="composer">
               <label class="visually-hidden" for="composer-text">Message</label>
               <textarea id="composer-text" name="composer-text" rows="1" placeholder="Message HIMARI"></textarea>

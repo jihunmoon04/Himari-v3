@@ -555,6 +555,52 @@ def test_tool_sources_from_the_cli(tmp_path: Path, monkeypatch: pytest.MonkeyPat
         assert "usage: /tools" in err_buffer.getvalue()
 
 
+def test_server_prompts_from_the_cli(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """V3-P60 §4: /prompts lists, /prompt shows the text and sends it only
+    after the user says yes, as the user's own message."""
+    monkeypatch.setattr(cli, "POLL_SECONDS", 0.01)
+    data = tmp_path / "data"
+    data.mkdir(mode=0o700)
+    (data / "mcp.json").write_text(json.dumps({"servers": {"calliope": {"url": MCP_URL}}}))
+    (data / "mcp.json").chmod(0o600)
+    fake = FakeMcpServer()
+    fake.capabilities = {"prompts": {}}
+    fake.prompts = [{"name": "calliope_commentary", "title": "Commentary", "description": "How to write it.",
+                     "arguments": [{"name": "game", "required": True}, {"name": "note"}]},
+                    {"name": "calliope_check"}]
+    fake.prompt_messages = {"calliope_commentary": [{"role": "user", "content": {"type": "text", "text": "Write it."}}],
+                            "calliope_check": [{"role": "user", "content": {"type": "text", "text": "Check it."}}]}
+    harness = Harness(tmp_path, mcp=fake)
+    with harness.test_client:
+        harness.queue(final("written"))
+        cid = harness.run("new")[1].strip()
+        lines = iter(["/prompts",
+                      '/prompt calliope calliope_commentary game=g-1 "note=a long note"', "y",
+                      "/prompt calliope calliope_check", "n",
+                      "/prompt calliope calliope_commentary", "/prompt calliope", "/prompt calliope x 'unclosed",
+                      "/exit"])
+        out_buffer, err_buffer = io.StringIO(), io.StringIO()
+        session = cli.Session(harness.client(), cli.Printer(out_buffer), err_buffer, sleep=lambda s: None)
+        prompts_asked: list[str] = []
+
+        def read(prompt: str) -> str:
+            prompts_asked.append(prompt)
+            return next(lines)
+
+        assert cli.cmd_chat(session, cli.parser().parse_args(["chat", cid]), read=read) == 0
+        shown, notes = out_buffer.getvalue(), err_buffer.getvalue()
+        assert "calliope calliope_commentary (game*, note): Commentary — How to write it." in shown
+        assert "calliope calliope_check" in shown
+        assert "[MCP prompt calliope/calliope_commentary · game=g-1 note=a long note]" in shown
+        assert prompts_asked.count("Send it? [Y/n] ") == 2
+        assert "(not sent)" in notes and "Required: game." in notes and cli.PROMPT_USAGE in notes
+        (sent,) = [m for m in harness.provider.prepared_inputs[0].conversation]
+        assert sent.blocks[0].text == ("[MCP prompt calliope/calliope_commentary · game=g-1 note=a long note]"  # type: ignore[union-attr]
+                                       "\n\nWrite it.")
+        assert len(harness.provider.prepared_inputs) == 1  # the declined one was never sent
+        assert "written" in shown
+
+
 class StopsWhenCancelled:
     """A running job that ends only when it is cancelled (V3-P55)."""
 

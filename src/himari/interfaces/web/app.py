@@ -40,6 +40,8 @@ from himari.bootstrap.application import (
     Application,
     AppViewRefused,
     AppViewState,
+    PromptRefused,
+    PromptView,
     ToolSourceView,
     UnknownToolSource,
 )
@@ -154,6 +156,14 @@ class MessageBody(_Body):
 
 class ToolSourceBody(_Body):
     enabled: bool | None  # null: follow the source's default
+
+
+class PromptExpandBody(_Body):
+    """In the body, not the path: a prompt's name may hold "/" (V3-P60 C4)."""
+
+    source: str = Field(min_length=1, max_length=64)
+    name: str = Field(min_length=1, max_length=128)
+    arguments: dict[str, str] = Field(default_factory=dict, max_length=64)
 
 
 # --- JSON views ------------------------------------------------------------------------------
@@ -284,6 +294,22 @@ def tool_source_view(view: ToolSourceView) -> dict[str, Any]:
     }
 
 
+def prompt_view(view: PromptView) -> dict[str, Any]:
+    return {
+        "source": view.source,
+        "name": view.name,
+        "title": view.title,
+        "description": view.description,
+        "arguments": [{"name": a.name, "description": a.description, "required": a.required}
+                      for a in view.arguments],
+    }
+
+
+# How a refused prompt answers (V3-P60 §4).
+PROMPT_REFUSAL_STATUS = {"unknown_prompt": 404, "source_disabled": 409, "invalid_arguments": 400,
+                         "unsupported_content": 422, "server_error": 502}
+
+
 # --- the application ---------------------------------------------------------------------------
 
 
@@ -349,6 +375,11 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
     async def no_view(request: Request, error: AppViewRefused) -> JSONResponse:
         return JSONResponse({"error": {"code": error.code, "message": "No view to show for this call."}},
                             status_code=404)
+
+    @app.exception_handler(PromptRefused)
+    async def prompt_refused(request: Request, error: PromptRefused) -> JSONResponse:
+        return JSONResponse({"error": {"code": error.code, "message": error.message}},
+                            status_code=PROMPT_REFUSAL_STATUS.get(error.code, 409))
 
     @app.exception_handler(UnknownToolSource)
     async def unknown_source(request: Request, error: UnknownToolSource) -> JSONResponse:
@@ -496,6 +527,21 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
         await application.data.read_conversation(scope)  # 404 for a foreign id before anything else
         await application.set_tool_source(scope, source, body.enabled)
         return {"sources": [tool_source_view(v) for v in await application.tool_sources(scope)]}
+
+    @app.get("/api/conversations/{conversation_id}/prompts")
+    async def read_prompts(conversation_id: str, request: Request,
+                           who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+        """The prompts of the servers on in this conversation (V3-P60 §4)."""
+        return {"prompts": [prompt_view(v) for v in await himari(request).prompts(scope_of(conversation_id, who))]}
+
+    @app.post("/api/conversations/{conversation_id}/prompts/expand")
+    async def expand_prompt(conversation_id: str, body: PromptExpandBody, request: Request,
+                            who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+        """The prompt as text for the composer; nothing is sent: the user
+        reviews it and sends it as an ordinary message."""
+        text = await himari(request).expand_prompt(scope_of(conversation_id, who), body.source, body.name,
+                                                   body.arguments)
+        return {"text": text}
 
     @app.post("/api/conversations/{conversation_id}/messages", status_code=202)
     async def send_message(conversation_id: str, body: MessageBody, request: Request,

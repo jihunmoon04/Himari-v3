@@ -137,6 +137,10 @@ HIMARI_DATA_ROOT=~/.himari python -m himari.interfaces.web --env-file .env
   - 화면(`ui://`)과 서버가 사용자용(`audience: ["user"]`)으로 표시한 리소스는 목록에서 빠지고 읽지 않습니다. 읽은 결과에 섞여 온 것도 빼고 `[omitted: restricted resource]`만 남깁니다.
   - 서버의 목록이 너무 커서(항목 5,000개, 페이지 20개 또는 2 MiB 초과) 끝까지 읽지 못하면 그 서버의 리소스는 읽지 않습니다. 읽지 못한 부분이 어떤 URI를 사용자용으로 표시했을 수 있기 때문입니다.
   - `false`로 끕니다. 서버의 Tool에 같은 이름(`list_resources`·`read_resource`)이 있으면 서버의 것이 쓰입니다.
+- **`prompts`**(기본 `true`): 서버가 주는 프롬프트를 **사용자가** 골라 씁니다. 모델은 스스로 꺼내 쓰지 못합니다.
+  - Web: 입력창 맨 앞에 `/`를 치면 그 대화에서 켜진 서버의 프롬프트가 나옵니다. 이어 치면 걸러지고, 화살표·Enter로 고르며 Esc로 닫습니다. 인자가 있으면 입력 칸이 뜹니다. **Fill in**을 누르면 서버의 글이 출처 줄(`[MCP prompt 서버/이름 · 인자]`)과 함께 입력창에 채워집니다. 읽고 고친 뒤 보내면 일반 메시지로 갑니다. 고르기만으로는 아무것도 보내지 않습니다.
+  - CLI: `/prompts`로 목록을 보고, `/prompt 서버 이름 인자=값 …`(공백이 있는 값은 따옴표)으로 펼칩니다. 펼친 글을 보여 주고 `Send it? [Y/n]`에 답하면 보냅니다.
+  - assistant 메시지, 이미지·오디오·바이너리 리소스를 담은 프롬프트와 32,000자를 넘는 프롬프트는 거부합니다(무엇도 채우지 않음).
 
 **Tool 화면 (MCP Apps, V3-P58).** 서버 항목에 `"ui"`를 적으면 그 서버가 Tool에 붙인 화면(`ui://`)을 Web에서 보여 줍니다. 적지 않으면 서버에 화면 지원을 알리지 않습니다.
 
@@ -147,7 +151,7 @@ HIMARI_DATA_ROOT=~/.himari python -m himari.interfaces.web --env-file .env
 - 두 목록은 화면이 접속할 수 있는 상한입니다. 서버가 선언한 origin 중 여기에도 있는 것만 허용합니다(기본: 외부 접속 없음).
 - 화면은 별도 포트(`HIMARI_WEB_SANDBOX_PORT`, 기본 `HIMARI_WEB_PORT` + 1)의 sandbox origin에서, 저장소 없이 격리되어 돕니다. 역방향 프록시를 쓰면 이 포트도 같은 호스트로 전달해야 합니다.
 - 가장 최근 호출의 화면은 자동으로, 나머지는 "Open view"로 엽니다. 실행 중에도 보이며, 대화에서 서버를 끄면 그 서버의 화면은 닫힙니다. 화면은 1단계라 읽기 전용입니다(화면에서 Tool 호출·메시지 보내기는 안 됨).
-- 브라우저 검증: `python scripts/mcp_apps_smoke.py`(실제 서버, Playwright 필요), 비동기 순서는 `python scripts/app_view_races/run.py`, 설계 모형은 `python -I scripts/mcp_apps_probe/run.py`.
+- 브라우저 검증: `python scripts/mcp_apps_smoke.py`(실제 서버, Playwright 필요), 비동기 순서는 `python scripts/app_view_races/run.py`, 설계 모형은 `python -I scripts/mcp_apps_probe/run.py`. 서버 프롬프트의 `/` 고르기는 `python scripts/mcp_prompts_smoke.py`.
 
 ### CLI
 
@@ -159,7 +163,7 @@ himari chat                                     # 새 대화 (python -m himari.i
 himari list; himari show conv_1; himari send conv_1 "질문"; himari continue conv_1
 ```
 
-대화형 모드에서는 질문이 오면 `answer>`로 답하고, `/continue`·`/context`·`/compact`·`/tools`·`/rename 이름`·`/id`·`/exit`를 쓸 수 있습니다. 종료 코드: 0 완료, 3 답변 대기, 1 미완료·거부, 2 설정 오류, 4 결과 불명(다시 보내기 전에 `show`로 확인).
+대화형 모드에서는 질문이 오면 `answer>`로 답하고, `/continue`·`/context`·`/compact`·`/tools`·`/prompts`·`/prompt 서버 이름 인자=값`·`/rename 이름`·`/id`·`/exit`를 쓸 수 있습니다. `/`로 시작하는 글을 그대로 보내려면 `//`로 시작합니다. 종료 코드: 0 완료, 3 답변 대기, 1 미완료·거부, 2 설정 오류, 4 결과 불명(다시 보내기 전에 `show`로 확인).
 
 공개 계약은 각 모듈의 `api.py`가 원본입니다(V3-046). P0 실행 경로는 `build_runtime(provider, store=SqliteStore(path))`로 영속 Data를, 저장소를 생략하면 인메모리 Data를 사용하며, Fake Provider뿐 아니라 **실제 OpenRouter LLM**으로도 실행할 수 있습니다.
 
@@ -175,7 +179,7 @@ himari list; himari show conv_1; himari send conv_1 "질문"; himari continue co
 
 구현(P0): `data/memory.py`(인메모리 Data)·`data/sqlite.py`+`data/codec.py`(SQLite 영속 Data, V3-P42), `tool/registry.py`·`tool/dispatcher.py`, `prompt/composer.py`(순수)·`prompt/loader.py`, `provider/scripted.py`(Fake), `control/driver.py`·`control/ask_user.py`, `bootstrap/`(조립).
 
-MCP 클라이언트: `mcp/`(설정 `config.py`, 클라이언트·Streamable HTTP `client.py`, JSON-RPC `jsonrpc.py`, 프로토콜 판 `revision.py`, stdio `stdio.py`, Tool 연결 `tools.py`, 리소스 Tool `resources.py`; V3-P52/P53/P59/P60). stdio 서버는 Bootstrap이 만든 server sandbox(`sandbox/server.py`)의 실행기로만 띄운다. Environment와 같은 층의 플러그인 패키지로 `tool.api`만 사용한다(V3-P57). External Tool 노출·실행 권한은 `tool/access.py`.
+MCP 클라이언트: `mcp/`(설정 `config.py`, 클라이언트·Streamable HTTP `client.py`, JSON-RPC `jsonrpc.py`, 프로토콜 판 `revision.py`, stdio `stdio.py`, Tool 연결 `tools.py`, 리소스 Tool `resources.py`·URI 템플릿 `uritemplate.py`, 프롬프트 글 `prompts.py`; V3-P52/P53/P59/P60). stdio 서버는 Bootstrap이 만든 server sandbox(`sandbox/server.py`)의 실행기로만 띄운다. Environment와 같은 층의 플러그인 패키지로 `tool.api`만 사용한다(V3-P57). External Tool 노출·실행 권한은 `tool/access.py`.
 
 Inside Environment: `environment/inside/`(사용자별 Workspace, 파일 Tool 5종, openat2 경계, V3-P40)와 `inside/run_command`(bubblewrap + Landlock Sandbox, 시작 시 탈출 자체 검사, V3-P41).
 

@@ -505,3 +505,38 @@ B5·B6, C1~C5는 해결됐다. 새 차단 사항은 없다.
   - **고침:** 첫 페이지가 `-32601`(모르는 메서드)일 때만 템플릿이 없다. 그 밖의 거절은 목록 읽기 실패이고, 두 Tool 모두 실패를 돌려준다. 이때 `resources/read`는 보내지 않는다.
   - **회귀 테스트:** `-32601` 서버는 읽기가 된다. 첫 페이지 `-32602`·`-32600`, 둘째 페이지 `-32601`·`-32602`의 네 경우에는 목록과 읽기가 모두 실패하고, `resources/read`가 한 번도 가지 않는다. 이전 코드에서는 네 경우 모두 실패했다.
 
+### 14.4 프롬프트 UI (2026-10-16)
+
+§4를 구현했다.
+- **`Application`:**
+  - `prompts(scope)`: 그 대화에서 켜진 서버의 프롬프트를 서버 이름순으로 준다.
+  - `expand_prompt(scope, source, name, arguments)`: 펼친 글을 준다. 보내거나 기록하지 않는다. 순서는 다음과 같다.
+    1. 대화 접근 권한(`read_conversation`)을 확인한다(PR #40 검수 C2).
+    2. 서버가 설정돼 있고 그 대화에서 켜져 있는지 확인한다.
+    3. 프롬프트가 있는지, 인자가 선언된 이름뿐인지, 필수 인자가 비어 있지 않은지, 값이 2,000자 이하인지 확인한다.
+    4. 대화 키로 `prompts/get`을 보낸다. 그래서 `per_conversation`이면 그 대화의 프로세스가 답한다.
+  - 거부는 `PromptRefused(code)`다. 코드는 `unknown_prompt`, `source_disabled`, `invalid_arguments`(서버의 `-32602` 포함), `unsupported_content`, `server_error`다.
+- **글로 바꾸기 (`mcp/prompts.py`):**
+  - 첫 줄은 `[MCP prompt 서버/이름 · 인자=값 …]`이다. 값은 한 줄로 만들고 80자에서 자른다.
+  - 그 뒤에 `user` 메시지를 차례로 빈 줄로 잇는다. text는 그대로, text 리소스는 `[resource <uri>]` 아래, resource link는 한 줄이다.
+  - assistant 메시지(O2), image·audio·blob 리소스, 모르는 내용 종류, 32,000자 초과는 프롬프트 전체를 거부한다.
+- **Web API:**
+  - `GET /api/conversations/{id}/prompts`.
+  - `POST /api/conversations/{id}/prompts/expand`. 본문은 `{source, name, arguments}`이고 인자는 문자열만 받는다.
+  - 상태 코드: 없음 404, 꺼짐 409, 인자 400, 내용 422, 서버 502. 남의 대화는 다른 API처럼 404다.
+- **Web 입력창:**
+  - 맨 앞이 `/`(그리고 `//`가 아님, 한 줄)이면 목록이 뜬다. 이어 치면 서버·이름·제목으로 걸러진다.
+  - 화살표·Enter·Tab으로 고르고 Esc로 닫는다.
+  - 인자가 있으면 입력 칸(필수 표시, 설명)이 뜬다. **Fill in**을 누르면 펼친 글로 입력창을 바꾼다.
+  - 보내기는 그대로 일반 메시지 제출이다. 대화에서 서버를 켜고 끄면 목록을 다시 읽는다.
+  - 모든 값은 `textContent`로만 그린다.
+- **CLI:**
+  - `/prompts`는 목록을 보여 준다(`*`는 필수).
+  - `/prompt 서버 이름 인자=값 …`은 따옴표를 `shlex`로 읽는다. 펼친 글을 보이고 `Send it? [Y/n]`에 예라고 답하면 일반 메시지로 보낸다.
+- **브라우저 smoke (`scripts/mcp_prompts_smoke.py`, 15개 확인):** 목록, 거르기, 화살표, Esc; 인자 입력과 필수; 채움 뒤 아무것도 보내지 않음; 고친 글이 그대로 모델에게 감; 인자 없는 프롬프트; 거부와 이유; 서버를 끄면 목록 없음; `//`; 좁은 화면.
+- **실측(이 호스트, 실제 Calliope main `dfbf8d7`, 서버 샌드박스, `per_conversation`):**
+  - 프롬프트 두 개(`calliope_commentary`·`calliope_check`, 인자 `game`·`ply`)가 나왔다.
+  - 게임을 연 대화에서 `calliope_commentary`가 2,559자로 펼쳐졌다(`[MCP prompt calliope/calliope_commentary · game=g-9594f0efcd5bf0ca ply=10]`).
+  - `game`이 없으면 거부된다. 펼친 글을 보내면 그대로 사용자 메시지로 모델에게 간다.
+- **알아 둘 것:** 대화 제목은 지금처럼 첫 메시지에서 정해진다. 그래서 프롬프트로 시작한 대화의 제목은 출처 줄로 시작한다.
+

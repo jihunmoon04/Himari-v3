@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
 import sys
 import time
 from collections.abc import Callable
@@ -341,6 +342,51 @@ def tools_command(session: Session, conversation_id: str, words: list[str]) -> i
     return EXIT_OK
 
 
+PROMPT_USAGE = "usage: /prompt SERVER NAME [ARGUMENT=VALUE ...] (quote a value with spaces)"
+
+
+def prompt_line(prompt: dict[str, Any]) -> str:
+    about = " — ".join(part for part in (prompt.get("title"), prompt.get("description")) if part)
+    names = ", ".join(f"{a.get('name')}{'*' if a.get('required') else ''}" for a in prompt.get("arguments") or [])
+    line = f"{prompt.get('source')} {prompt.get('name')}"
+    return line + (f" ({names})" if names else "") + (f": {about}" if about else "")
+
+
+def prompts_command(session: Session, conversation_id: str) -> int:
+    """The prompts of the servers on in this conversation (V3-P60 §4)."""
+    answer = session.client.get(_path(conversation_id, "/prompts"))
+    prompts = answer.get("prompts") if isinstance(answer, dict) else None
+    if not prompts:
+        session.note("(no prompts: no server on in this conversation offers one)")
+        return EXIT_OK
+    enc = session.printer.encoding
+    for prompt in prompts:
+        session.printer.line(safe_line(prompt_line(prompt), encoding=enc))
+    session.note("(* required) use: /prompt SERVER NAME ARGUMENT=VALUE ...")
+    return EXIT_OK
+
+
+def expand_prompt(session: Session, conversation_id: str, words: list[str]) -> str | None:
+    """``SERVER NAME ARGUMENT=VALUE ...`` → the expanded text, shown; None
+    when it cannot be (said why)."""
+    if len(words) < 2 or any("=" not in w or w.startswith("=") for w in words[2:]):
+        session.note(PROMPT_USAGE)
+        return None
+    arguments = dict(w.split("=", 1) for w in words[2:])
+    try:
+        answer = session.client.post(_path(conversation_id, "/prompts/expand"),
+                                     {"source": words[0], "name": words[1], "arguments": arguments})
+    except ServerRefused as error:
+        session.note(f"refused: {error}")
+        return None
+    text = answer.get("text") if isinstance(answer, dict) else None
+    if not isinstance(text, str) or not text:
+        session.note("the server's answer was not readable")
+        return None
+    session.printer.block("This prompt would be sent as your message:", text)
+    return text
+
+
 # --- commands ----------------------------------------------------------------------------------
 
 
@@ -436,6 +482,8 @@ CHAT_HELP = ("/continue  continue an unanswered message (or a paused turn)\n"
              "/context   context size and the latest summary\n"
              "/compact   summarize the earlier messages now\n"
              "/tools     MCP servers in use; /tools on|off|default SOURCE to change\n"
+             "/prompts   prompts the servers in use offer\n"
+             "/prompt S N A=V ...  fill in server S's prompt N, show it, send it if you confirm\n"
              "/rename T  rename\n/id        show the id\n/exit      leave")
 
 
@@ -506,6 +554,31 @@ def cmd_chat(session: Session, args: argparse.Namespace, read: Callable[[str], s
                 tools_command(session, conversation_id, text.split()[1:])
             except ServerRefused as error:
                 session.note(f"refused: {error}")
+            continue
+        if text == "/prompts":
+            try:
+                prompts_command(session, conversation_id)
+            except ServerRefused as error:
+                session.note(f"refused: {error}")
+            continue
+        if text == "/prompt" or text.startswith("/prompt "):
+            try:
+                words = shlex.split(text[len("/prompt"):])
+            except ValueError:
+                session.note(PROMPT_USAGE)
+                continue
+            expanded = expand_prompt(session, conversation_id, words)
+            if expanded is None:
+                continue
+            try:
+                confirm = read("Send it? [Y/n] ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                confirm = "n"
+            if confirm not in ("", "y", "yes"):
+                session.note("(not sent)")
+                continue
+            # The user's own message now, sent as any other (V3-P60 §4).
+            _, after = session.submit_and_follow(conversation_id, after, expanded)
             continue
         if text.startswith("/") and not text.startswith("//"):
             session.note("unknown command — /help")
