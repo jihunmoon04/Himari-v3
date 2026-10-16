@@ -566,3 +566,43 @@ def test_b2_a_stop_while_writing_closes_the_session() -> None:
 
     run(scenario)
 
+
+def test_b3_closing_the_server_during_an_allocation_leaves_no_process() -> None:
+    """aclose while one Conversation is making room (holding the allocation
+    lock) and another waits for the lock: nothing starts afterwards and no
+    process is left alive."""
+    async def scenario() -> None:
+        launcher = FakeLauncher()
+        launcher.shutdown_delay = 0.2
+        server = StdioServer("calliope", McpStdioConfig(COMMAND, (), "/tmp", (), (), (), "per_conversation", 60.0, 1),
+                             launcher, capabilities={}, timeout_seconds=5)
+        await server.request("tools/call", {"name": "echo", "arguments": {"text": "a"}}, "conv-a")
+        b = asyncio.create_task(server.request("tools/call", {"name": "echo", "arguments": {"text": "b"}}, "conv-b"))
+        await asyncio.sleep(0.05)  # b holds the lock, closing conv-a's session slowly
+        c = asyncio.create_task(server.request("tools/call", {"name": "echo", "arguments": {"text": "c"}}, "conv-c"))
+        await asyncio.sleep(0.01)  # c waits for the lock
+        await server.aclose()
+        results = await asyncio.gather(b, c, return_exceptions=True)
+        assert all(isinstance(r, (McpRefused, McpUncertain)) or isinstance(r, dict) for r in results)
+        await asyncio.sleep(0.3)
+        assert [p.returncode is not None for p in launcher.processes] == [True] * len(launcher.processes)
+        assert not any(isinstance(r, dict) for r in results[1:])  # c never ran
+
+    run(scenario)
+
+
+def test_b3_a_launch_finishing_after_close_is_closed_at_once() -> None:
+    async def scenario() -> None:
+        launcher = FakeLauncher()
+        launcher.initialize_delay = 0.2
+        server = StdioServer("calliope", McpStdioConfig(COMMAND, (), "/tmp", (), (), (), "shared", 60.0, 1),
+                             launcher, capabilities={}, timeout_seconds=5)
+        call = asyncio.create_task(server.request("tools/call", {"name": "echo", "arguments": {}}, "conv-a"))
+        await asyncio.sleep(0.05)  # the process is starting
+        await server.aclose()
+        with pytest.raises(McpRefused):
+            await call
+        assert all(p.returncode is not None for p in launcher.processes)
+
+    run(scenario)
+

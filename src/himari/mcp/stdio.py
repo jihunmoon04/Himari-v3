@@ -364,6 +364,8 @@ class StdioServer:
                 await session.settled.wait()  # DRAINING or CLOSING: nothing written while waiting
                 continue
             async with self._allocating:  # one allocation at a time (PR #34 review B1)
+                if self._closed:  # closed while this call waited for the lock (review B3)
+                    raise McpRefused("the server is shut down")
                 session = self._sessions.get(slot)
                 if session is not None and session.state is not State.CLOSED:
                     continue  # started meanwhile
@@ -398,6 +400,9 @@ class StdioServer:
     async def _start(self, slot: str | None) -> Session:
         try:
             session = await self._launch()
+            if self._closed:  # aclose began during the launch: this process must not outlive it
+                await session.close("HIMARI is shutting down")
+                raise McpRefused("the server is shut down")
             self._failures.pop(slot, None)
             self._sessions[slot] = session
             if self._reaper is None:
@@ -435,10 +440,15 @@ class StdioServer:
                     await session.close("it was idle")
 
     async def aclose(self) -> None:
-        self._closed = True
+        """Under the allocation lock, so no start is registered after this
+        (PR #34 review B3): every start already registered is waited for,
+        then every session is closed."""
+        async with self._allocating:
+            self._closed = True
+            starting = list(self._starting.values())
         if self._reaper is not None:
             self._reaper.cancel()
-        for task in list(self._starting.values()):
+        for task in starting:
             try:
                 await asyncio.shield(task)
             except Exception:  # noqa: BLE001 — a start that failed has nothing to close
