@@ -41,6 +41,16 @@ multiply what arrives. One response is at most ``MAX_RESPONSE_BYTES``, a whole
 ``tools/list`` at most ``MAX_LIST_BYTES`` and ``MAX_LISTED_TOOLS``; a
 notification's response body is never read.
 
+Cancelling is best effort (MCP; V3-P59 §5.5): when a caller stops waiting
+for a request that was sent — Stop, or a read or write timeout — the channel
+sends ``notifications/cancelled`` with that request's id, session id and
+protocol version, as they were when it was sent (a renewed session does not
+change them). A background task sends it, bounded by ``CANCEL_SECONDS``, so
+the Stop does not wait; whatever comes of it, the call's verdict stays as
+above. ``initialize`` is never cancelled, nor a request whose connection or
+pool slot was never obtained (it was not sent). The transport spec says a
+dropped connection is not a cancellation: the notification is.
+
 Credentials: the token is sent only as ``Authorization: Bearer`` to the
 configured URL. Redirects are not followed and proxy settings from the
 environment are not used, so the token never goes anywhere else. Nothing
@@ -76,6 +86,7 @@ _LINE_END = re.compile(rb"[\r\n]")
 # Statuses that reject the request itself, before any Tool could run.
 REFUSED_STATUSES = frozenset({400, 401, 403, 404, 405, 406, 413, 415})
 CONNECT_SECONDS = 5.0
+CANCEL_SECONDS = 5.0  # sending one cancellation notification
 MAX_TOOL_PAGES = 20
 UI_EXTENSION = "io.modelcontextprotocol/ui"  # MCP Apps (V3-P58)
 UI_MIME_TYPE = "text/html;profile=mcp-app"
@@ -186,8 +197,10 @@ class HttpChannel:
         self._version: str | None = None
         self._next_id = 0
         self._lock = asyncio.Lock()  # one (re)initialization at a time
+        self._cancelling: set[asyncio.Task[None]] = set()
 
     async def aclose(self) -> None:
+        await asyncio.gather(*self._cancelling, return_exceptions=True)  # each bounded by CANCEL_SECONDS
         await self._http.aclose()
 
     async def start(self) -> Mapping[str, Any]:
@@ -246,7 +259,7 @@ class HttpChannel:
         self._next_id += 1
         request_id = self._next_id
         body = json.dumps(request(request_id, method, params)).encode()
-        sent_session = self._session
+        sent_session, sent_version = self._session, self._version
         connected = False
         try:
             async with self._http.stream("POST", self._url, content=body, headers=self._headers()) as response:
@@ -277,8 +290,35 @@ class HttpChannel:
         except httpx.HTTPError as error:
             if not connected and isinstance(error, httpx.ConnectTimeout):
                 raise McpRefused(f"{method}: cannot connect (timeout)") from None
+            if isinstance(error, (httpx.ReadTimeout, httpx.WriteTimeout)) and not initializing:
+                self._cancel_later(request_id, sent_session, sent_version, "timed out")
             raise McpUncertain(f"{method}: no complete answer ({type(error).__name__})") from None
+        except asyncio.CancelledError:
+            if not initializing:  # MCP: initialize is never cancelled
+                self._cancel_later(request_id, sent_session, sent_version, "cancelled by the user")
+            raise
         return result_of(message, request_id, method)
+
+    def _cancel_later(self, request_id: int, session: str | None, version: str | None, reason: str) -> None:
+        task = asyncio.create_task(self._send_cancelled(request_id, session, version, reason))
+        self._cancelling.add(task)
+        task.add_done_callback(self._cancelling.discard)
+
+    async def _send_cancelled(self, request_id: int, session: str | None, version: str | None, reason: str) -> None:
+        """One best-effort notification, as the request was sent; its outcome
+        changes nothing (202, 404 for a session gone, an error, a timeout)."""
+        headers = {"content-type": "application/json"}
+        if version is not None:
+            headers["mcp-protocol-version"] = version
+        if session is not None:
+            headers["mcp-session-id"] = session
+        body = json.dumps(notification("notifications/cancelled", {"requestId": request_id, "reason": reason})).encode()
+        try:
+            async with asyncio.timeout(CANCEL_SECONDS):
+                async with self._http.stream("POST", self._url, content=body, headers=headers):
+                    pass  # the body is never read
+        except Exception:  # noqa: BLE001 — best effort: nothing to report
+            pass
 
     async def _from_stream(self, response: httpx.Response, request_id: int) -> object:
         """The first message in the stream that answers ``request_id``."""

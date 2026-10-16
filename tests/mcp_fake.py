@@ -69,6 +69,8 @@ class FakeMcpServer:
         self.client_capabilities: dict[str, Any] | None = None
         self.resource_delay = 0.0  # seconds before answering resources/read
         self.call_delay = 0.0  # seconds before running a tools/call
+        self.notification_delay = 0.0  # seconds before accepting a notification
+        self.initialize_delay = 0.0
 
     def transport(self) -> httpx.MockTransport:
         return httpx.MockTransport(self.handle)
@@ -84,6 +86,9 @@ class FakeMcpServer:
             return httpx.Response(401, json={"error": "unauthorized"})
         message = json.loads(request.content)
         if "id" not in message:
+            if self.notification_delay:
+                await asyncio.sleep(self.notification_delay)
+
             async def body() -> Any:  # a huge body; the client must not read it
                 self.notification_body_read = True
                 yield b"x" * (64 * 1024 * 1024)
@@ -91,6 +96,8 @@ class FakeMcpServer:
         method, params, request_id = message["method"], message.get("params", {}), message["id"]
         headers: dict[str, str] = {}
         if method == "initialize":
+            if self.initialize_delay:
+                await asyncio.sleep(self.initialize_delay)
             self.client_capabilities = params.get("capabilities")
             self.initializations += 1
             session = f"session-{self.initializations}"
@@ -154,3 +161,17 @@ class FakeMcpServer:
                   f"data: {text[:half]}\ndata: {text[half:]}\n\n")
         return httpx.Response(200, content=stream.encode(),
                               headers={"content-type": "text/event-stream", **(headers or {})})
+
+    def cancellations(self) -> list[tuple[dict[str, Any], httpx.Headers]]:
+        """Every notifications/cancelled received: (params, headers)."""
+        out = []
+        for request in self.requests:
+            message = json.loads(request.content)
+            if message.get("method") == "notifications/cancelled":
+                out.append((message["params"], request.headers))
+        return out
+
+    def call_ids(self) -> list[int]:
+        return [json.loads(r.content)["id"] for r in self.requests
+                if json.loads(r.content).get("method") == "tools/call"]
+

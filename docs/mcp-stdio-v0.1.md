@@ -2,7 +2,7 @@
 
 > 2026-10-15 · **PROPOSED (V3-P59)** · 1단계(Sandbox 모듈 분리, PR #30), 2단계(서버 프로파일, PR #32), 3단계(클라이언트 세 층 PR #33, stdio 전송 PR #34) 구현됨. 구현 노트는 §10.
 >
-> **2026-10-16 개정 (PR #35; 사용자: 표준 방식과 범용성을 우선해 이전 결정을 고쳐도 된다). stdio 구현됨(§10.4), HTTP 취소 알림은 다음 PR:** Stop은 MCP 표준대로 **최선 노력 취소**다. HTTP와 stdio에 같게 적용한다. stdio 프로세스는 취소 뒤 **`ping`에 답하지 않을 때만** 종료한다. stdin 쓰기는 하나의 순서 있는 큐로만 한다(§5.5, 이유와 근거는 §11).
+> **2026-10-16 개정 (PR #35; 사용자: 표준 방식과 범용성을 우선해 이전 결정을 고쳐도 된다). stdio 구현됨(§10.4), HTTP 취소 알림 구현됨(§10.5):** Stop은 MCP 표준대로 **최선 노력 취소**다. HTTP와 stdio에 같게 적용한다. stdio 프로세스는 취소 뒤 **`ping`에 답하지 않을 때만** 종료한다. stdin 쓰기는 하나의 순서 있는 큐로만 한다(§5.5, 이유와 근거는 §11).
 >
 > 기준 사양: MCP 2025-11-25 [Transports §stdio](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports), [Lifecycle §Shutdown·Timeouts](https://modelcontextprotocol.io/specification/2025-11-25/basic/lifecycle), [Cancellation](https://modelcontextprotocol.io/specification/2025-11-25/basic/utilities/cancellation), [Ping](https://modelcontextprotocol.io/specification/2025-11-25/basic/utilities/ping).
 >
@@ -498,6 +498,25 @@ Calliope를 어느 호스트에서도, 어떤 프로세스 단위로도 같게 �
   - 다음 호출은 같은 프로세스에서 성공했다(재시작 안내 없음). Calliope가 취소된 분석을 끝낸 뒤 처리해서 7.9초 걸렸다.
   - 다른 대화의 진행 중 호출도 정상으로 끝났다.
   - 처음 설계라면 이 프로세스는 10초 뒤 종료되고 두 호출 모두 결과 불명이었다.
+
+### 10.5 개정 구현 — HTTP 취소 알림 (2026-10-16)
+
+§5.5의 HTTP 계약대로 구현했다(`mcp/client.py`의 `HttpChannel`).
+- **언제 보내나:** 요청을 보낸 뒤 Stop(작업 취소)이나 읽기·쓰기 시간 초과(`ReadTimeout`, `WriteTimeout`)로 기다리기를 멈추면 보낸다.
+- **언제 보내지 않나:** 연결이나 연결 풀 자리를 얻지 못한 요청(`ConnectError`, `ConnectTimeout`, `PoolTimeout`)과 `initialize`.
+- **무엇을 담나:** 요청을 보낼 때의 id, 세션 id, 프로토콜 버전을 그대로 담는다.
+- **어떻게 보내나:** 백그라운드 작업이 `CANCEL_SECONDS`(5초) 안에서 보내고 응답 본문은 읽지 않는다. 어떤 결과든 판정에 영향이 없다. 채널을 닫을 때는 남은 알림을 그 제한 안에서 기다린다.
+- **테스트(가짜 HTTP 서버, 7개):**
+  - Stop 때 그 요청의 id·원래 세션·판 헤더로 알림이 간다.
+  - 읽기 시간 초과 때 "timed out" 알림이 간다.
+  - 세션이 갱신돼도 원래 세션으로 간다.
+  - Stop은 느린 알림을 기다리지 않고, 닫기는 제한 시간까지만 기다린다.
+  - 알림이 실패해도 판정이 같다.
+  - `initialize`와 연결하지 못한 요청은 취소하지 않는다.
+- **공식 SDK와의 실측 (이 호스트, MCP Python SDK 2.3의 Streamable HTTP 서버, 느린 Tool):**
+  - HIMARI가 Stop하자 서버의 Tool 작업이 취소됐다(`CancelledError`).
+  - 같은 실험을 알림 없이(변경 전처럼 연결만 끊고) 하면 서버는 Tool을 끝까지 실행했다.
+  - 사양대로, 연결이 끊긴 것은 취소가 아니다.
 
 ## 11. 개정: Stop은 최선 노력 취소, 확인은 `ping`으로 (2026-10-16, PR #35 병합)
 
