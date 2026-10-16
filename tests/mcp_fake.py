@@ -70,6 +70,12 @@ class FakeMcpServer:
         self.resource_delay = 0.0  # seconds before answering resources/read
         self.call_delay = 0.0  # seconds before running a tools/call
         self.notification_delay = 0.0  # seconds before accepting a notification
+        # V3-P60: what initialize declares, and the server's prompts.
+        self.capabilities: dict[str, Any] = {"tools": {}}
+        self.instructions: str | None = None
+        self.prompts: list[dict[str, Any]] = []
+        self.prompt_messages: dict[str, list[dict[str, Any]]] = {}
+        self.methods: list[str] = []
         self.initialize_delay = 0.0
 
     def transport(self) -> httpx.MockTransport:
@@ -105,12 +111,21 @@ class FakeMcpServer:
             headers["mcp-session-id"] = session
             result: dict[str, Any] = {
                 "protocolVersion": self.protocol_version or params["protocolVersion"],
-                "capabilities": {"tools": {}},
+                "capabilities": self.capabilities,
                 "serverInfo": {"name": "fake", "version": "1"},
             }
+            if self.instructions is not None:
+                result["instructions"] = self.instructions
             return self._answer(request_id, result, headers)
         if request.headers.get("mcp-session-id") not in self.sessions:
             return httpx.Response(404 if "mcp-session-id" in request.headers else 400)
+        self.methods.append(method)
+        if method == "prompts/list":
+            return self._answer(request_id, {"prompts": self.prompts})
+        if method == "prompts/get":
+            if params["name"] not in self.prompt_messages:
+                return self._error(request_id, -32602)
+            return self._answer(request_id, {"messages": self.prompt_messages[params["name"]]})
         if method == "tools/list" and self.list_result is not None:
             return self._answer(request_id, self.list_result)
         if method == "tools/list":

@@ -48,6 +48,16 @@ default) or ``per_conversation`` (one per Conversation, at most ``max``);
 only (use ``env_from``). Paths are checked again, by identity, by the
 sandbox at every launch.
 
+**Instructions, prompts and resources (V3-P60).** ``instructions`` places
+the server's ``initialize`` instructions: ``"system"`` (default, a labelled
+section after HIMARI's instructions), ``"data"`` (data in the current-state
+block) or ``"off"``. ``prompts`` (default true) offers the server's prompts
+to the user. ``resources`` (default on) gives the model per-server tools to
+list and read the server's resources: ``false``, or ``{"effect": ...,
+"uris": "listed" | "any"}``; the effect defaults to ``unknown`` and the URIs
+to those the server lists or its templates make. ``tools`` is optional: a
+server may offer only prompts or resources.
+
 ``ui`` turns on the server's views and is the upper bound of what they may
 reach: a view's CSP allows only the origins its server declares that are
 also listed here, exactly (V3-P58 §3.3). Without ``ui`` the server is not told
@@ -135,6 +145,18 @@ class McpStdioConfig:
     max_processes: int  # 1 when shared
 
 
+PLACEMENTS = ("system", "data", "off")
+URI_SCOPES = ("listed", "any")
+
+
+@dataclass(frozen=True)
+class McpResourcePolicy:
+    """How the model may read a server's resources (V3-P60 §5)."""
+
+    effect: EffectProfile = EffectProfile.UNKNOWN  # the operator's judgement; not "read" unless declared
+    uris: str = "listed"  # "listed": listed URIs and template matches; "any": whatever the server accepts
+
+
 @dataclass(frozen=True)
 class McpServerConfig:
     name: str  # the External source: the namespace of its Tools' ids
@@ -145,6 +167,9 @@ class McpServerConfig:
     tools: tuple[McpToolConfig, ...]
     ui: McpUiPolicy | None = None  # None: the server's views are not shown
     stdio: McpStdioConfig | None = None  # set exactly when url is None
+    instructions: str = "system"  # one of PLACEMENTS (V3-P60 §3)
+    prompts: bool = True
+    resources: McpResourcePolicy | None = field(default_factory=McpResourcePolicy)  # None: not offered
 
 
 @dataclass(frozen=True)
@@ -287,17 +312,17 @@ def _parse_config(text: bytes | str, environ: Mapping[str, str]) -> McpConfig:
         if not _SOURCE.fullmatch(name) or len(name) > MAX_SOURCE_CHARS:
             raise McpConfigError(f"{where}: a server name is lowercase letters, digits and single '-' "
                                  f"(at most {MAX_SOURCE_CHARS})")
-        common = {"default", "timeout_seconds", "ui"}
+        common = {"default", "timeout_seconds", "ui", "tools", "instructions", "prompts", "resources"}
         if isinstance(raw, dict) and "command" in raw and "url" in raw:
             raise McpConfigError(f"{where}: a server has either url or command, not both")
         stdio: McpStdioConfig | None = None
         url: str | None = None
         if isinstance(raw, dict) and "command" in raw:
-            entry = _keys(raw, where, {"command", "tools"}, common | {
+            entry = _keys(raw, where, {"command"}, common | {
                 "args", "cwd", "env", "env_from", "read_only", "writable", "processes"})
             stdio = _stdio(entry, where, environ)
         else:
-            entry = _keys(raw, where, {"url", "tools"}, common | {"token_env"})
+            entry = _keys(raw, where, {"url"}, common | {"token_env"})
             if not isinstance(entry["url"], str):
                 raise McpConfigError(f"{where}.url must be a string")
             url = check_url(entry["url"])
@@ -315,9 +340,9 @@ def _parse_config(text: bytes | str, environ: Mapping[str, str]) -> McpConfig:
         timeout = entry.get("timeout_seconds", DEFAULT_TIMEOUT_SECONDS)
         if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not 1 <= timeout <= MAX_TIMEOUT_SECONDS:
             raise McpConfigError(f"{where}.timeout_seconds must be 1..{int(MAX_TIMEOUT_SECONDS)}")
-        tools = entry["tools"]
-        if not isinstance(tools, dict) or not tools or len(tools) > MAX_TOOLS_PER_SERVER:
-            raise McpConfigError(f"{where}.tools must list 1..{MAX_TOOLS_PER_SERVER} Tools")
+        tools = entry.get("tools", {})  # optional: a server may offer only prompts or resources (V3-P60 B4)
+        if not isinstance(tools, dict) or len(tools) > MAX_TOOLS_PER_SERVER:
+            raise McpConfigError(f"{where}.tools must list at most {MAX_TOOLS_PER_SERVER} Tools")
         effects: dict[str, EffectProfile] = {}
         for tool_name, tool_raw in tools.items():
             if not tool_name or len(tool_name) > 128:
@@ -332,8 +357,38 @@ def _parse_config(text: bytes | str, environ: Mapping[str, str]) -> McpConfig:
             tools=tuple(McpToolConfig(n, ids[n], effects[n]) for n in sorted(effects)),
             ui=_ui_policy(entry["ui"], f"{where}.ui") if "ui" in entry else None,
             stdio=stdio,
+            instructions=_placement(entry.get("instructions", "system"), f"{where}.instructions"),
+            prompts=_flag(entry.get("prompts", True), f"{where}.prompts"),
+            resources=_resource_policy(entry.get("resources", True), f"{where}.resources"),
         ))
     return McpConfig(tuple(out))
+
+
+def _placement(value: object, where: str) -> str:
+    if not isinstance(value, str) or value not in PLACEMENTS:
+        raise McpConfigError(f"{where} must be one of {list(PLACEMENTS)}")
+    return value
+
+
+def _flag(value: object, where: str) -> bool:
+    if not isinstance(value, bool):
+        raise McpConfigError(f"{where} must be true or false")
+    return value
+
+
+def _resource_policy(value: object, where: str) -> McpResourcePolicy | None:
+    if value is False:
+        return None
+    if value is True:
+        return McpResourcePolicy()
+    entry = _keys(value, where, set(), {"effect", "uris"})
+    effect = entry.get("effect", "unknown")
+    if not isinstance(effect, str) or effect not in _EFFECTS:
+        raise McpConfigError(f"{where}.effect must be one of {sorted(_EFFECTS)}")
+    uris = entry.get("uris", "listed")
+    if not isinstance(uris, str) or uris not in URI_SCOPES:
+        raise McpConfigError(f"{where}.uris must be one of {list(URI_SCOPES)}")
+    return McpResourcePolicy(_EFFECTS[effect], uris)
 
 
 def _path(value: object, where: str) -> str:

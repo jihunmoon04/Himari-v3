@@ -153,7 +153,10 @@ class Session:
         """Put one line on the queue (synchronously: nothing runs in between);
         with ``tracked``, a future that ends when it is written (or not)."""
         line = json.dumps(message, ensure_ascii=False, separators=(",", ":")).encode()
-        written = asyncio.get_running_loop().create_future() if tracked else None
+        written: asyncio.Future[None] | None = None
+        if tracked:
+            written = asyncio.get_running_loop().create_future()
+            written.add_done_callback(_settled)  # a waiter may be gone by then: nothing left unretrieved
         self._queue.put_nowait((line, written))
         return written
 
@@ -214,6 +217,7 @@ class Session:
     def _register(self) -> tuple[int, asyncio.Future[object]]:
         self._next_id += 1
         future: asyncio.Future[object] = asyncio.get_running_loop().create_future()
+        future.add_done_callback(_settled)
         self._pending[self._next_id] = future
         return self._next_id, future
 
@@ -381,6 +385,12 @@ class Session:
         except Exception:  # noqa: BLE001 — the launcher's own failure must not stop the close
             pass
         self._set(State.CLOSED)
+
+
+def _settled(future: asyncio.Future[Any]) -> None:
+    """Mark an outcome as seen: its caller may have stopped waiting."""
+    if not future.cancelled():
+        future.exception()
 
 
 class _Broken(Exception):

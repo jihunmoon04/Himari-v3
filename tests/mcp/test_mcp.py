@@ -64,7 +64,7 @@ def test_a_config_lists_servers_tools_and_the_operators_effects() -> None:
     ({"token_env": "MISSING_VARIABLE"}, "is not set"),
     ({"default": "yes"}, "default"),
     ({"timeout_seconds": 0}, "timeout_seconds"),
-    ({"tools": {}}, "1..128 Tools"),
+    ({"tools": []}, "at most 128 Tools"),  # an object; empty is allowed (V3-P60 B4)
     ({"tools": {"echo": {"effect": "write"}}}, "effect must be"),
     ({"tools": {"echo": {"effect": "read", "x": 1}}}, "unknown keys"),
     ({"extra": True}, "unknown keys"),
