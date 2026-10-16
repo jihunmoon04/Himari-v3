@@ -39,6 +39,7 @@ P0 scheduling is sequential in original ordinal order; parallel scheduling
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable, Sequence
 from dataclasses import replace
 
@@ -82,6 +83,8 @@ from himari.tool.api import (
 )
 from himari.tool.registry import ToolRegistry
 from himari.tool.schema import validate, validate_isolated
+
+log = logging.getLogger(__name__)
 
 _STATUS = {
     ToolStatus.SUCCEEDED: ToolExecutionStatus.SUCCEEDED,
@@ -229,6 +232,8 @@ class Dispatcher:
             outcome = await handler.run(invocation, ctx)
         except Exception as exc:  # noqa: BLE001 — uncertainty is decided by the claim
             if claimed:
+                # For the operator: which Tool, and the kind of failure (Q-39: never its text).
+                log.warning("%s raised %s after its claim: its outcome is unknown", record.tool_id, type(exc).__name__)
                 return  # uncertain; reported or blocking per the persisted policy
             # Q-39: exception text may carry host paths or secrets; the model
             # only learns that the tool failed internally.

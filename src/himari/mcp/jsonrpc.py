@@ -15,6 +15,8 @@ import json
 from collections.abc import Mapping
 from typing import Any
 
+from himari.common import thaw
+
 
 class McpError(Exception):
     def __init__(self, message: str, code: object = None) -> None:
@@ -40,7 +42,21 @@ REFUSALS = frozenset({-32700, -32600, -32601, -32602})
 
 
 def request(request_id: int, method: str, params: Mapping[str, Any]) -> dict[str, Any]:
-    return {"jsonrpc": "2.0", "id": request_id, "method": method, "params": dict(params)}
+    """A request as plain JSON values: HIMARI keeps a Tool's arguments deep-frozen
+    (``FrozenMap``, tuples), which are thawed here, at every depth."""
+    return {"jsonrpc": "2.0", "id": request_id, "method": method, "params": thaw(dict(params))}
+
+
+def encode(message: Mapping[str, Any], *, compact: bool = False) -> bytes:
+    """One message's bytes, strict JSON (no NaN or Infinity). ``McpRefused``
+    when it cannot be encoded: it was never sent."""
+    try:
+        if compact:
+            return json.dumps(message, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode()
+        return json.dumps(message, allow_nan=False).encode()
+    except (TypeError, ValueError) as error:
+        raise McpRefused(f"{message.get('method', 'the message')}: it could not be encoded as JSON "
+                         f"({type(error).__name__})") from None
 
 
 def notification(method: str, params: Mapping[str, Any] | None = None) -> dict[str, Any]:

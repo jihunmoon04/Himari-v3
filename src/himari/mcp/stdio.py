@@ -67,7 +67,7 @@ from enum import Enum
 from typing import Any, Protocol
 
 from himari.mcp.config import McpStdioConfig
-from himari.mcp.jsonrpc import McpRefused, McpSessionChanged, McpUncertain, notification, request, result_of
+from himari.mcp.jsonrpc import McpRefused, McpSessionChanged, McpUncertain, encode, notification, request, result_of
 from himari.mcp.revision import REVISION
 
 STARTUP_SECONDS = 15.0  # launch and initialize
@@ -159,7 +159,7 @@ class Session:
     def _enqueue(self, message: Mapping[str, Any], *, tracked: bool = False) -> asyncio.Future[None] | None:
         """Put one line on the queue (synchronously: nothing runs in between);
         with ``tracked``, a future that ends when it is written (or not)."""
-        line = json.dumps(message, ensure_ascii=False, separators=(",", ":")).encode()
+        line = encode(message, compact=True)  # McpRefused: nothing is queued
         written: asyncio.Future[None] | None = None
         if tracked:
             written = asyncio.get_running_loop().create_future()
@@ -233,7 +233,11 @@ class Session:
         if self.state is not State.READY or self.process.returncode is not None:
             raise McpRefused(f"{method}: the server process is not ready")  # nothing queued
         request_id, future = self._register()
-        written = self._enqueue(request(request_id, method, params), tracked=True)
+        try:
+            written = self._enqueue(request(request_id, method, params), tracked=True)
+        except McpRefused:
+            self._pending.pop(request_id, None)  # nothing was queued: the session is not left waiting for it
+            raise
         assert written is not None
         self.last_used = _clock()
         sent = False

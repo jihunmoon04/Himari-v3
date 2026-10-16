@@ -83,7 +83,7 @@ from himari.mcp.jsonrpc import McpError as McpError
 from himari.mcp.jsonrpc import McpRefused as McpRefused
 from himari.mcp.jsonrpc import McpSessionChanged as McpSessionChanged
 from himari.mcp.jsonrpc import McpUncertain as McpUncertain
-from himari.mcp.jsonrpc import notification, parse, request, result_of
+from himari.mcp.jsonrpc import encode, notification, parse, request, result_of
 from himari.mcp.revision import CLIENT_INFO as CLIENT_INFO
 from himari.mcp.revision import REVISION
 
@@ -337,7 +337,7 @@ class HttpChannel:
     async def _rpc(self, method: str, params: Mapping[str, Any], *, initializing: bool = False) -> Mapping[str, Any]:
         self._next_id += 1
         request_id = self._next_id
-        body = json.dumps(request(request_id, method, params)).encode()
+        body = encode(request(request_id, method, params))  # McpRefused before anything is sent
         sent_session, sent_version = self._session, self._version
         connected = False
         sending = [not self._traced]  # unknown on an untraced transport: counts as sent
