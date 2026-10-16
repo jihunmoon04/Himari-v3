@@ -114,6 +114,21 @@ class CurrentStateProjection(DeepFrozen):
     observations: tuple[BindingObservation, ...] = ()
 
 
+NOTE_CHARS = 4_000  # one tool server's notes the model gets (V3-P60 §3)
+NOTES_TOTAL_CHARS = 16_000  # every server's notes together
+
+
+@dataclass(frozen=True)
+class SourceNote(DeepFrozen):
+    """A tool server's own instructions (MCP ``initialize``) and where the
+    operator puts them (V3-P60 §3): ``"system"``, a labelled section after
+    HIMARI's instructions, or ``"data"``, an item of the current state."""
+
+    source: str
+    placement: str  # "system" | "data"
+    text: str
+
+
 @dataclass(frozen=True)
 class ModelInput(DeepFrozen):
     stable_prefix: tuple[str, ...]
@@ -123,6 +138,9 @@ class ModelInput(DeepFrozen):
     request_options: RequestOptions
     trigger_refs: tuple[TriggerRef, ...]
     prompt_basis: PromptBasis
+    # Tool server notes of the servers on in this Conversation, by name, cut
+    # to NOTE_CHARS each and NOTES_TOTAL_CHARS together (V3-P60 §3).
+    source_notes: tuple[SourceNote, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -142,6 +160,7 @@ class PromptInputs(DeepFrozen):
     trigger_refs: tuple[TriggerRef, ...]
     continuations: Mapping[RunId, ProviderContinuation] = FrozenMap()  # by producing Run
     usage_mark: UsageMark | None = None
+    source_notes: tuple[SourceNote, ...] = ()  # the servers on in this Conversation, by name, uncut
 
 
 @dataclass(frozen=True)

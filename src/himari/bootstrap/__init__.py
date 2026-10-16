@@ -16,7 +16,7 @@ from himari.control.driver import Driver
 from himari.data.memory import InMemoryData, InMemoryStore
 from himari.data.sqlite import SqliteData, SqliteStore
 from himari.environment.api import EnvironmentPlugin
-from himari.prompt.api import RequestOptions
+from himari.prompt.api import RequestOptions, SourceNote
 from himari.prompt.api import ContextBudget
 from himari.prompt.compaction import Compactor
 from himari.prompt.composer import Composer
@@ -59,6 +59,7 @@ def build_runtime(
     # External Tool source → enabled by default (V3-P53); a Conversation's own
     # choice overrides it. None: every registered source, on by default.
     external_defaults: Mapping[str, bool] | None = None,
+    source_notes: Sequence[SourceNote] = (),  # tool server notes (V3-P60); used for enabled sources only
 ) -> Runtime:
     store = store if store is not None else InMemoryStore()
     data = SqliteData(store) if isinstance(store, SqliteStore) else InMemoryData(store)
@@ -74,7 +75,7 @@ def build_runtime(
     dispatcher = Dispatcher(registry, data, data, data, access)
     driver = Driver(
         log=data,
-        loader=ContextLoader(data, data, registry, instructions, access),
+        loader=ContextLoader(data, data, registry, instructions, access, source_notes),
         composer=Composer(),
         provider=provider,
         dispatcher=dispatcher,

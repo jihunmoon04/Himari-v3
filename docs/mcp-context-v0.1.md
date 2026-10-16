@@ -393,3 +393,16 @@ B5·B6, C1~C5는 해결됐다. 새 차단 사항은 없다.
 - **함께 고친 것:** 세션이 닫힐 때 기다리는 쪽이 이미 없는 Future에 넣은 예외가 asyncio의 "never retrieved" 경고로 가끔 찍혔다. 생성할 때 결과를 거두는 콜백을 붙였다.
 - **실측(이 호스트, 실제 Calliope):** 능력 `prompts`·`resources`·`tools`, 안내문 364자(`system`), 프롬프트 2개(인자 `game`·`ply`)를 읽었다. `get_prompt`가 그 대화의 세션에서 답했다.
 
+
+### 14.2 안내문 절 (2026-10-16)
+
+§3을 구현했다. 서버 안내문이 이제 모델에게 간다.
+- **흐름:** `Application`이 연결의 `notes`를 `SourceNote(source, placement, text)`로 바꿔 `ContextLoader`에 준다. 로더는 이름순으로 정렬해 두고, 요청마다 **그 대화에서 켜진 서버의 것만** `PromptInputs.source_notes`로 넘긴다. `Composer`가 상한대로 잘라(`fit_notes`) `ModelInput.source_notes`에 넣는다.
+- **상한:** 서버당 4,000자(`NOTE_CHARS`), 모두 합쳐 16,000자(`NOTES_TOTAL_CHARS`). 넘으면 자르고 끝에 `\n[… cut]`를 붙인다. 앞 서버들이 합계를 다 쓰면 남은 서버의 안내문은 빠진다.
+- **그리기 (OpenRouter):**
+  - `system`: 시스템 메시지에서 HIMARI 지시문 뒤에 `# Tool server notes` 머리말과 서버별 `## <서버>` 절.
+  - `data`: `<runtime_state>` JSON 안의 `tool_server_notes` 항목(`about`에 같은 설명, `servers`에 서버별 안내문). JSON 전체가 이스케이프되므로 안내문 안의 `</runtime_state>`가 블록을 닫지 못한다(테스트).
+  - 안내문이 없으면 요청은 전과 바이트까지 같다.
+- **문맥 키와 토큰:** `context_key`에 안내문(서버·위치·내용)이 들어간다. `request_tokens`는 안내문마다 본문 토큰과 64토큰의 여유(`NOTE_OVERHEAD_TOKENS`)를 더한다. 위치와 관계없이 같이 센다.
+- **압축 요청:** 압축(요약) 요청의 `ModelInput`은 안내문을 갖지 않는다(기본값 빈 튜플).
+- **실측(이 호스트, 실제 Calliope, 서버 샌드박스):** `system`이면 364자 안내문이 시스템 메시지의 `## calliope` 절로, `data`면 `<runtime_state>`의 `tool_server_notes`로 들어가고, `off`면 어디에도 없다.

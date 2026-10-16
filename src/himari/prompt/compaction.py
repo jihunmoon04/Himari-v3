@@ -173,9 +173,13 @@ def part_tokens(part: HistoryPart) -> int:
             return total
 
 
+NOTE_OVERHEAD_TOKENS = 64  # the notes section's header and a server's heading, generously
+
+
 def request_tokens(model_input: ModelInput) -> int:
     """Pessimistic estimate of a whole request from its UTF-8 size."""
     total = sum(tokens_of_text(text) for text in model_input.stable_prefix)
+    total += sum(tokens_of_text(n.source + n.text) + NOTE_OVERHEAD_TOKENS for n in model_input.source_notes)
     for definition in model_input.tool_catalog:
         total += tokens_of_text(definition.tool_id + definition.description) + _json_tokens(definition.input_schema)
     total += sum(part_tokens(part) for part in model_input.conversation)
@@ -190,6 +194,7 @@ def context_key(inputs: PromptInputs) -> str:
         "model": options.model_id,
         "reasoning_effort": options.reasoning_effort,
         "instructions": list(inputs.instructions),
+        "source_notes": [[n.source, n.placement, n.text] for n in inputs.source_notes],
         "tools": [[d.tool_id, d.description, thaw(d.input_schema)] for d in inputs.tool_catalog],
     }
     return hashlib.sha256(json.dumps(data, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
