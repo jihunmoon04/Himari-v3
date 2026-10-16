@@ -144,7 +144,8 @@
 (C2) `initialize`는 취소하지 않고 바로 종료한다. *범위 밖:* 네트워크가 필요한 stdio 서버(V3-037 개정), 자원 제한(Q-40), 서버 안내문·프롬프트·리소스를 모델 문맥에 넣기(V3-P60 예정).
 *1단계 구현(2026-10-15):* Sandbox를 `src/himari/sandbox/`로 옮겼다. 동작 변경 없음. `sandbox.api`에 상태·오류·결과·한도와 Workspace 프로파일의 `WorkspaceSandbox` Protocol을 두고, import 검사에 `sandbox`(common만 사용) 규칙을 더했다. 세부는 문서 §10.1.
 *2단계 구현(2026-10-15):* 서버 프로파일(`sandbox/server.py`·`identity.py`·`server_self_test.py`). 별도 상태와 자체 검사, 호스트 경로에 fd로 붙이기, 실행마다 정체성 검사(M0·R0·R1·R2), 줄 단위 프로세스 API, 종료 시 SIGTERM은 서버 자신에게(pidfd). Workspace 경로는 바이트 단위로 같다. Calliope를 이 프로파일로 띄워 확인. 세부는 문서 §10.2.
-*3단계 구현(2026-10-15):* 클라이언트 세 층(채널·프로토콜 판·JSON-RPC, PR #33)과 stdio 전송(`mcp/stdio.py`: shared/per_conversation, READY⇄DRAINING 취소 목록, 10초 후 종료, 유휴 정리, 연속 실패 지연, 재시작 안내). Bootstrap이 데이터 폴더를 보호 루트로 한 server sandbox의 실행기를 서버마다 주입하고, ENFORCED가 아니면 stdio 서버는 빠진다. 실제 Calliope를 이 경로로 연결해 확인. 세부는 문서 §10.3. |
+*3단계 구현(2026-10-15):* 클라이언트 세 층(채널·프로토콜 판·JSON-RPC, PR #33)과 stdio 전송(`mcp/stdio.py`: shared/per_conversation, READY⇄DRAINING 취소 목록, 10초 후 종료, 유휴 정리, 연속 실패 지연, 재시작 안내). Bootstrap이 데이터 폴더를 보호 루트로 한 server sandbox의 실행기를 서버마다 주입하고, ENFORCED가 아니면 stdio 서버는 빠진다. 실제 Calliope를 이 경로로 연결해 확인. 세부는 문서 §10.3.
+*개정안(2026-10-16, 검수 대기):* 취소 뒤의 확인을 "취소한 요청의 응답"에서 `ping` 응답으로 바꾼다. 사양을 지키는 서버는 취소된 요청에 응답하지 않으므로(Cancellation 4항), 지금 방식은 Stop마다 10초 뒤 프로세스를 종료한다(Calliope로 확인). `ping`에 10초 안에 답하지 않을 때만 종료하고, 확인 중에는 새 요청을 쓰지 않는다(B3 유지). 문서 §5.5·§11. |
 
 ## C. 명시적으로 미결정인 영역
 
