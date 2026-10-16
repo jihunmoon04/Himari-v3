@@ -99,6 +99,12 @@ const app = {
   listOffset: 0,
   sending: false,
   context: null, // the last /context answer for this conversation
+  prompts: null, // the prompts of the servers on in this conversation (V3-P60 §4), once read
+  promptChoices: [], // what the picker shows now
+  promptSelected: 0,
+  promptDismissed: null, // the composer text the picker was closed for (Escape)
+  promptOpen: null, // the prompt whose arguments are being filled in
+  promptTicket: 0, // the latest expansion asked for; anything that abandons it moves this on (PR #43 review B1)
 };
 
 const views = new AppViews(api, el, () => app.conversationId);
@@ -422,6 +428,176 @@ async function loadToolSources(generation) {
   }
 }
 
+/* ------------------------------------------------------- server prompts */
+/* V3-P60 §4: "/" at the start of the composer lists the prompts of the
+ * servers on here. Choosing one asks for its arguments, then fills the
+ * composer with the server's text: the user reads it, may change it, and
+ * sends it as an ordinary message. Nothing is sent by choosing. */
+
+async function loadPrompts(generation) {
+  try {
+    const answer = await api("GET", `/api/conversations/${encodeURIComponent(app.conversationId)}/prompts`);
+    if (generation === app.generation) {
+      app.prompts = answer.prompts;
+      updatePicker();
+    }
+  } catch (ignored) {
+    if (generation === app.generation) app.prompts = [];
+  }
+}
+
+function promptQuery() {
+  const text = $("composer-text").value;
+  if (!text.startsWith("/") || text.startsWith("//") || text.includes("\n")) return null;
+  return text.slice(1).trim().toLowerCase();
+}
+
+function closePicker() {
+  $("prompt-picker").hidden = true;
+  $("composer-text").removeAttribute("aria-activedescendant");
+  app.promptChoices = [];
+}
+
+function updatePicker() {
+  const query = promptQuery();
+  if (query === null || app.prompts === null || app.promptOpen !== null
+      || $("composer-text").value === app.promptDismissed) {
+    closePicker();
+    return;
+  }
+  const words = query.split(/\s+/).filter(Boolean);
+  const choices = app.prompts.filter((p) => {
+    const hay = `${p.source} ${p.name} ${p.title}`.toLowerCase();
+    return words.every((w) => hay.includes(w));
+  });
+  if (choices.length === 0) {
+    closePicker();
+    return;
+  }
+  app.promptChoices = choices;
+  app.promptSelected = Math.min(app.promptSelected, choices.length - 1);
+  const list = $("prompt-list");
+  list.replaceChildren();
+  choices.forEach((prompt, index) => {
+    const option = el("li", "prompt-option");
+    option.id = `prompt-option-${index}`;
+    option.setAttribute("role", "option");
+    option.setAttribute("aria-selected", String(index === app.promptSelected));
+    option.append(el("span", "prompt-option-name", `${prompt.source} · ${prompt.title || prompt.name}`));
+    const about = [prompt.title ? prompt.name : "", prompt.description].filter(Boolean).join(" — ");
+    if (about) option.append(el("span", "prompt-option-about", about));
+    option.addEventListener("mousedown", (event) => event.preventDefault()); // keep the composer focused
+    option.addEventListener("click", () => choosePrompt(prompt));
+    list.append(option);
+  });
+  $("prompt-picker").hidden = false;
+  $("composer-text").setAttribute("aria-activedescendant", `prompt-option-${app.promptSelected}`);
+}
+
+function pickerKey(event) {
+  if ($("prompt-picker").hidden || app.promptChoices.length === 0) return false;
+  const count = app.promptChoices.length;
+  if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+    app.promptSelected = (app.promptSelected + (event.key === "ArrowDown" ? 1 : count - 1)) % count;
+    updatePicker();
+  } else if ((event.key === "Enter" && !event.shiftKey && !event.isComposing) || event.key === "Tab") {
+    choosePrompt(app.promptChoices[app.promptSelected]);
+  } else if (event.key === "Escape") {
+    app.promptDismissed = $("composer-text").value;
+    closePicker();
+  } else {
+    return false;
+  }
+  event.preventDefault();
+  return true;
+}
+
+function choosePrompt(prompt) {
+  closePicker();
+  abandonExpansion(); // another choice: an earlier one still on its way is dropped
+  if (prompt.arguments.length === 0) {
+    expandPrompt(prompt, {});
+    return;
+  }
+  app.promptOpen = prompt;
+  $("prompt-form-title").textContent = `${prompt.source} · ${prompt.title || prompt.name}`;
+  $("prompt-form-about").textContent = prompt.description || "";
+  const fields = $("prompt-form-fields");
+  fields.replaceChildren();
+  prompt.arguments.forEach((argument, index) => {
+    const field = el("div", "prompt-field");
+    const id = `prompt-argument-${index}`;
+    const label = el("label", null, argument.required ? `${argument.name} (required)` : argument.name);
+    label.htmlFor = id;
+    const input = el("input");
+    input.id = id;
+    input.name = argument.name;
+    input.required = Boolean(argument.required);
+    input.autocomplete = "off";
+    field.append(label);
+    if (argument.description) field.append(el("span", "prompt-field-hint", argument.description));
+    field.append(input);
+    fields.append(field);
+  });
+  $("prompt-form").hidden = false;
+  fields.querySelector("input").focus();
+}
+
+/* An expansion still on its way is abandoned: its answer is dropped. */
+function abandonExpansion() {
+  app.promptTicket += 1;
+  $("prompt-form-submit").disabled = false;
+}
+
+function closePromptForm() {
+  abandonExpansion();
+  app.promptOpen = null;
+  $("prompt-form").hidden = true;
+  $("prompt-form-fields").replaceChildren();
+}
+
+async function submitPromptForm(event) {
+  event.preventDefault();
+  const prompt = app.promptOpen;
+  if (prompt === null) return;
+  const values = {};
+  for (const input of $("prompt-form-fields").querySelectorAll("input")) {
+    if (input.value !== "") values[input.name] = input.value;
+  }
+  await expandPrompt(prompt, values);
+}
+
+/* The answer fills the composer only if nothing moved on meanwhile: the
+ * same conversation, this still the latest expansion (not cancelled, no
+ * other prompt chosen, no message sent), and the composer as it was when
+ * it was asked for. Otherwise it is dropped: the user's text wins. */
+async function expandPrompt(prompt, values) {
+  const generation = app.generation;
+  app.promptTicket += 1;
+  const ticket = app.promptTicket;
+  const box = $("composer-text");
+  const before = box.value;
+  const current = () => generation === app.generation && ticket === app.promptTicket && box.value === before;
+  $("prompt-form-submit").disabled = true;
+  try {
+    const answer = await api("POST", `/api/conversations/${encodeURIComponent(app.conversationId)}/prompts/expand`,
+      { source: prompt.source, name: prompt.name, arguments: values });
+    if (!current()) return;
+    closePromptForm();
+    box.value = answer.text;
+    app.promptDismissed = answer.text;
+    autosize();
+    box.focus();
+    box.setSelectionRange(0, 0);
+    box.scrollTop = 0;
+    status("The prompt is in the message box: read it, then send it.");
+  } catch (error) {
+    if (current()) status(error.message, "error");
+  } finally {
+    if (ticket === app.promptTicket) $("prompt-form-submit").disabled = false;
+  }
+}
+
 async function setToolSource(source, enabled) {
   const generation = app.generation;
   try {
@@ -431,6 +607,7 @@ async function setToolSource(source, enabled) {
     if (generation === app.generation) {
       renderToolSources(answer.sources);
       views.sources(answer.sources, true); // close its views here and in this browser's other tabs (V3-P58 §3.7)
+      loadPrompts(generation); // the servers on here changed
     }
   } catch (error) {
     if (generation === app.generation) {
@@ -564,11 +741,16 @@ async function openConversation(id) {
   $("chat-menu-context-pair").hidden = true;
   $("chat-menu-compact").hidden = true;
   $("chat-menu-tools").hidden = true;
+  app.prompts = null;
+  app.promptDismissed = null;
+  closePicker();
+  closePromptForm();
   $("timeline").replaceChildren();
   markSelected();
   showSurface("chat");
   closeNav();
   loadToolSources(generation);
+  loadPrompts(generation);
   try {
     const detail = await refresh(generation);
     if (detail && detail.job.running) poll(generation);
@@ -583,6 +765,7 @@ async function sendMessage(event) {
   const box = $("composer-text");
   const text = box.value.trim();
   if (!text || app.sending || app.conversationId === null) return;
+  abandonExpansion(); // a message sent now is the user's: no prompt answer may replace what follows
   const generation = app.generation;
   app.sending = true;
   $("composer-send").disabled = true;
@@ -737,8 +920,25 @@ async function boot() {
   $("home-new-chat").addEventListener("click", newConversation);
   $("conversation-load-more").addEventListener("click", () => loadList(false).then(markSelected));
   $("composer").addEventListener("submit", sendMessage);
-  $("composer-text").addEventListener("input", autosize);
+  $("composer-text").addEventListener("input", () => {
+    autosize();
+    updatePicker();
+  });
+  $("composer-text").addEventListener("blur", () => setTimeout(closePicker, 150));
+  $("prompt-form").addEventListener("submit", submitPromptForm);
+  $("prompt-form-cancel").addEventListener("click", () => {
+    closePromptForm();
+    $("composer-text").focus();
+  });
+  $("prompt-form").addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      closePromptForm();
+      $("composer-text").focus();
+    }
+  });
   $("composer-text").addEventListener("keydown", (event) => {
+    if (pickerKey(event)) return;
+    if (event.key === "Escape") abandonExpansion(); // like Cancel: a pending prompt will not fill the box
     if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
       event.preventDefault();
       $("composer").requestSubmit();
