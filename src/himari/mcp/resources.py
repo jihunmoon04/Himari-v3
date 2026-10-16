@@ -13,7 +13,10 @@ Refusals win: a URI the list marks for the user only (``annotations.audience``
 without ``"assistant"``), a URI any user-only template could describe, and
 any view (``ui://``, ``text/html;profile=mcp-app``) is never read, whatever
 else matches. A user-only template is matched loosely (its text up to the
-first expression, then anything), an allowing one strictly.
+first expression, then anything), an allowing one strictly and in linear
+time (``uritemplate``). A list HIMARI could not read whole (past
+``MAX_LIST_PAGES``, ``MAX_LIST_ENTRIES`` or ``MAX_LIST_BYTES``) allows no
+read at all: what was not read could restrict any URI (PR #42 review B3).
 
 **Per session (§5 B6, C6).** The list a URI is judged by is the one of the
 session the read goes to: the lists are cached per session
@@ -34,7 +37,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
@@ -43,6 +45,7 @@ from himari.common import JsonValue, ModelToolResult, TextBlock, ToolId, tool_id
 from himari.mcp.client import UI_MIME_TYPE, McpClient, McpRefused, McpSessionChanged, McpUncertain
 from himari.mcp.config import McpResourcePolicy
 from himari.mcp.stdio import RESTART_NOTICE
+from himari.mcp.uritemplate import UriTemplate
 from himari.tool.api import (
     ToolContext,
     ToolDefinition,
@@ -57,7 +60,7 @@ READ_NAME = "read_resource"
 CACHE_SECONDS = 60.0
 MAX_CACHED_SESSIONS = 64
 MAX_LIST_PAGES = 20
-MAX_LIST_ENTRIES = 500  # resources and templates together
+MAX_LIST_ENTRIES = 5_000  # resources and templates together, kept to judge reads (the model sees them in parts)
 MAX_LIST_BYTES = 2 * 1024 * 1024
 LIST_CHARS = 32_000  # one list_resources result
 PAGE_CHARS = 32_000  # one read_resource page
@@ -66,56 +69,9 @@ VERSION_CHARS = 12
 OMITTED = "[omitted: restricted resource]"
 RESOURCE_NOT_FOUND = -32002
 
-_EXPRESSION = re.compile(r"\{([^{}]*)\}")
-_VARIABLE = re.compile(r"[A-Za-z0-9_%.]+(\*|:[1-9][0-9]{0,3})?")
-# What one expression may expand to, by operator (RFC 6570 §3.2): a simple
-# value cannot contain "/", "?" or "#" (they are percent-encoded).
-_OPERATORS = {
-    "": r"[^/?#]*",
-    "+": r"[^#]*",
-    "#": r"(?:#.*)?",
-    ".": r"(?:\.[^/?#]*)*",
-    "/": r"(?:/[^/?#]*)*",
-    ";": r"(?:;[^/?#]*)*",
-    "?": r"(?:\?[^#]*)?",
-    "&": r"(?:&[^#]*)?",
-}
-
 
 def _clock() -> float:
     return asyncio.get_running_loop().time()
-
-
-def strict_pattern(template: str) -> re.Pattern[str] | None:
-    """The URIs ``template`` describes, or None when it cannot be read."""
-    parts: list[str] = []
-    position = 0
-    for match in _EXPRESSION.finditer(template):
-        literal = template[position:match.start()]
-        if "{" in literal or "}" in literal:
-            return None
-        parts.append(re.escape(literal))
-        body = match.group(1)
-        operator = body[:1] if body[:1] in "+#./;?&" else ""
-        names = body[len(operator):]
-        if not names or not all(_VARIABLE.fullmatch(v) for v in names.split(",")):
-            return None
-        parts.append(_OPERATORS[operator])
-        position = match.end()
-    tail = template[position:]
-    if "{" in tail or "}" in tail:
-        return None
-    parts.append(re.escape(tail))
-    return re.compile("".join(parts), re.DOTALL)
-
-
-def loose_pattern(template: str) -> re.Pattern[str]:
-    """Every URI that could come from ``template``, generously: its text up
-    to the first expression, then anything. Used where matching refuses."""
-    brace = template.find("{")
-    if brace < 0:
-        return re.compile(re.escape(template), re.DOTALL)
-    return re.compile(re.escape(template[:brace]) + ".*", re.DOTALL)
 
 
 def is_view(uri: object, mime_type: object) -> bool:
@@ -171,8 +127,13 @@ class Template:
     description: str
     mime_type: str
     shown: bool
-    strict: re.Pattern[str] | None = field(compare=False)
-    loose: re.Pattern[str] = field(compare=False)
+    matcher: UriTemplate | None = field(compare=False)  # None: not usable for allowing
+
+    def may_describe(self, uri: str) -> bool:
+        """Loosely, for refusing: the template's text up to its first
+        expression, then anything (linear time; nothing to backtrack)."""
+        brace = self.template.find("{")
+        return uri == self.template if brace < 0 else uri.startswith(self.template[:brace])
 
     def entry(self) -> dict[str, JsonValue]:
         out: dict[str, JsonValue] = {"uriTemplate": self.template, "name": self.name}
@@ -197,18 +158,16 @@ class Index:
             return f"the URI is longer than {MAX_URI_CHARS} characters"
         if is_view(uri, None):
             return "it is a view, shown to the user rather than read"
+        if not self.complete:  # what was not read may restrict this URI, or list it again for the user (B3)
+            return "the server lists more resources than HIMARI reads, so none of them can be read safely"
         listed = self.resources.get(uri)
         if listed is not None and not listed.shown:
             return "the server marks it for the user, or as a view"
-        if any(not t.shown and t.loose.fullmatch(uri) for t in self.templates):
+        if any(not t.shown and t.may_describe(uri) for t in self.templates):
             return "the server marks resources like it for the user, or as views"
-        if listed is not None:
+        if listed is not None or any_uri:
             return None
-        if not self.complete:  # a refusing template or entry may be in the part not read
-            return "the server lists more than HIMARI reads, so only URIs in the part read can be read"
-        if any_uri:
-            return None
-        if any(t.shown and t.strict is not None and t.strict.fullmatch(uri) for t in self.templates):
+        if any(t.shown and t.matcher is not None and t.matcher.matches(uri) for t in self.templates):
             return None
         return "the server neither lists it nor describes it with a URI template"
 
@@ -236,7 +195,7 @@ def _template(entry: object) -> Template | None:
     mime = entry.get("mimeType")
     return Template(template, _text(entry.get("name"), 200), _text(entry.get("description"), 1000),
                     _text(mime, 200), for_model(entry) and not is_view(template, mime),
-                    strict_pattern(template), loose_pattern(template))
+                    UriTemplate.parse(template))
 
 
 class _Unusable(Exception):
@@ -434,8 +393,9 @@ class ResourceReader:
         if position < len(items):
             result["next_cursor"] = str(position)
         if not index.complete:
-            result["note"] = (f"the server lists more than HIMARI reads ({MAX_LIST_ENTRIES} entries or "
-                              f"{MAX_LIST_PAGES} pages); resources past that are not shown")
+            result["note"] = (f"the server lists more than HIMARI reads ({MAX_LIST_ENTRIES} entries, "
+                              f"{MAX_LIST_PAGES} pages or {MAX_LIST_BYTES} bytes): resources past that are not "
+                              "shown, and none can be read")
         text = json.dumps(result, ensure_ascii=False)  # measured as above: compact
         return text, {"listed": len(index.resources), "templates": len(index.templates), "shown": len(items),
                       "from": start, "to": position, "complete": index.complete}

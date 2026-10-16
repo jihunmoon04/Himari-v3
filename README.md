@@ -135,6 +135,7 @@ HIMARI_DATA_ROOT=~/.himari python -m himari.interfaces.web --env-file .env
   - `effect`(기본 `unknown`): 다른 Tool과 같은 뜻입니다. 읽기가 서버에서 아무것도 바꾸지 않는다고 확인한 서버만 `read`로 둡니다.
   - `uris`(기본 `listed`): 서버의 목록에 있거나 URI 템플릿에 맞는 URI만 읽습니다. `any`로 넓히면 서버가 받아들이는 모든 URI를 읽게 되어, 접근 범위가 그 서버의 리소스 전체가 됩니다.
   - 화면(`ui://`)과 서버가 사용자용(`audience: ["user"]`)으로 표시한 리소스는 목록에서 빠지고 읽지 않습니다. 읽은 결과에 섞여 온 것도 빼고 `[omitted: restricted resource]`만 남깁니다.
+  - 서버의 목록이 너무 커서(항목 5,000개, 페이지 20개 또는 2 MiB 초과) 끝까지 읽지 못하면 그 서버의 리소스는 읽지 않습니다. 읽지 못한 부분이 어떤 URI를 사용자용으로 표시했을 수 있기 때문입니다.
   - `false`로 끕니다. 서버의 Tool에 같은 이름(`list_resources`·`read_resource`)이 있으면 서버의 것이 쓰입니다.
 
 **Tool 화면 (MCP Apps, V3-P58).** 서버 항목에 `"ui"`를 적으면 그 서버가 Tool에 붙인 화면(`ui://`)을 Web에서 보여 줍니다. 적지 않으면 서버에 화면 지원을 알리지 않습니다.

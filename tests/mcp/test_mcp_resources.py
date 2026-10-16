@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
@@ -23,9 +24,10 @@ from himari.control.api import DriveState
 from himari.data.api import ToolExecutionStatus
 from himari.mcp import resources as resources_module
 from himari.mcp.config import parse_config
-from himari.mcp.resources import OMITTED, PAGE_CHARS, ResourceTool, loose_pattern, strict_pattern
+from himari.mcp.resources import OMITTED, PAGE_CHARS, ResourceTool
 from himari.mcp.stdio import RESTART_NOTICE
 from himari.mcp.tools import McpConnection, connect
+from himari.mcp.uritemplate import UriTemplate
 from himari.provider.scripted import ScriptedAdapter
 from himari.tool.api import EffectProfile, ToolContext, ToolInvocation, ToolOutcome, ToolStatus
 from himari.tool.schema import check_tool_input_schema
@@ -92,17 +94,77 @@ def listing(outcome: ToolOutcome) -> dict[str, Any]:
 # --- URI templates ----------------------------------------------------------------------------
 
 
-def test_templates_match_the_uris_they_describe() -> None:
-    simple = strict_pattern("calliope://games/{game}/plies/{ply}")
-    assert simple is not None and simple.fullmatch("calliope://games/g1/plies/10")
-    assert not simple.fullmatch("calliope://games/g1/../../x/plies/10")  # a simple value has no "/"
-    reserved = strict_pattern("file:///{+path}")
-    assert reserved is not None and reserved.fullmatch("file:///a/b/c.txt")
-    query = strict_pattern("search://q{?term,page}")
-    assert query is not None and query.fullmatch("search://q?term=e4&page=2") and query.fullmatch("search://q")
-    assert strict_pattern("broken://{unclosed") is None and strict_pattern("bad://{}") is None
-    assert loose_pattern("calliope://private/{id}").fullmatch("calliope://private/a/b?c")
-    assert loose_pattern("broken://{unclosed").fullmatch("broken://anything")
+def matches(template: str, uri: str) -> bool:
+    parsed = UriTemplate.parse(template)
+    assert parsed is not None, template
+    return parsed.matches(uri)
+
+
+@pytest.mark.parametrize(("template", "uri", "expected"), [
+    ("calliope://games/{game}/plies/{ply}", "calliope://games/g1/plies/10", True),
+    ("calliope://games/{game}/plies/{ply}", "calliope://games/g1/../../x/plies/10", False),  # no "/" in a value
+    ("calliope://games/{game}.json", "calliope://games/g1.json", True),
+    ("calliope://games/{game}", "calliope://games/g%201", True),
+    ("calliope://games/{game}", "calliope://games/g%2", False),  # a broken octet
+    ("calliope://games/{game}", "calliope://games/g 1", False),  # would have been encoded
+    ("file:///{+path}", "file:///a/b/c.txt", True),
+    ("calliope://lookup{?id}", "calliope://lookup", True),
+    ("calliope://lookup{?id}", "calliope://lookup?id=42", True),
+    # PR #42 review B1: a query template allows its own names only
+    ("calliope://lookup{?id}", "calliope://lookup?secret=42", False),
+    ("calliope://lookup{?id}", "calliope://lookup?admin_token=abc", False),
+    ("calliope://lookup{?id}", "calliope://lookup?id=42&admin=1", False),
+    ("calliope://lookup{?id}", "calliope://lookup?id=1&id=2", False),  # once, unless exploded
+    ("calliope://lookup{?id}", "calliope://lookup?id", False),  # "?" always writes "id="
+    ("calliope://lookup{?id*}", "calliope://lookup?id=1&id=2", True),
+    ("calliope://lookup{?keys*}", "calliope://lookup?x=1&y=2", False),  # associative names are not accepted
+    ("search://q{?term,page}", "search://q?term=e4&page=2", True),
+    ("search://q{?term,page}", "search://q?page=2", True),
+    ("search://q{?term,page}", "search://q?page=2&term=e4", False),  # out of order
+    ("search://q{?term}{&page}", "search://q?term=e4&page=2", False),  # unusable: see below
+    ("x://m{;a,b}", "x://m;a=1;b", True),
+    ("x://m{;a,b}", "x://m;c=1", False),
+    ("x://p{/a,b}", "x://p/1/2", True),
+    ("x://p{/a,b}", "x://p/1/2/3", False),  # more segments than variables
+    ("x://p{/list*}", "x://p/1/2/3", True),
+    ("x://id/{id:3}", "x://id/123", True),
+    ("x://id/{id:3}", "x://id/1234", False),
+    ("x://d{#frag}", "x://d#a/b", True),
+    ("x://d{#frag}", "x://dzz", False),
+    ("x://{a}{?q}", "x://item?q=1", True),  # "?" cannot be in {a}: a certain boundary
+])
+def test_templates_allow_exactly_what_they_expand_to(template: str, uri: str, expected: bool) -> None:
+    parsed = UriTemplate.parse(template)
+    if parsed is None:
+        assert not expected
+        return
+    assert parsed.matches(uri) is expected
+
+
+@pytest.mark.parametrize("template", [
+    "broken://{unclosed", "bad://{}", "bad://}{a}", "x://{a}{b}", "x://{a}{.b}", "x://{+a}{?b}",
+    "x://{?a}{&b}", "x://{a:3,b}", "x://{a:0}", "x://{a:10000}", "x://{=a}", "x://{a b}", "x://{a*:3}",
+])
+def test_templates_without_a_certain_reading_allow_nothing(template: str) -> None:
+    assert UriTemplate.parse(template) is None
+
+
+def test_matching_takes_bounded_time() -> None:
+    """PR #42 review B2: adjacent variables, long URIs, a mismatch at the end."""
+    assert UriTemplate.parse("calliope://{a}{b}{c}{d}{e}{f}{g}{h}Z") is None  # ambiguous: never matched
+    worst = [
+        ("calliope://" + "{a}-" * 200 + "Z", "calliope://" + "x-" * 1000),
+        ("calliope://{a}/{b}/{c}{?q,r}", "calliope://" + "a" * 2000 + "/b/c?q=1&r=2X"),
+        ("x://{+p}.json", "x://" + ".jso" * 500),
+        ("x://{/a*}{?q*}", "x://" + "/s" * 1000 + "?q=" + "1" * 20),
+    ]
+    start = time.perf_counter()
+    for _ in range(50):
+        for template, uri in worst:
+            parsed = UriTemplate.parse(template)
+            assert parsed is not None
+            parsed.matches(uri)
+    assert time.perf_counter() - start < 2.0  # 200 matches of ~2,000-character URIs
 
 
 # --- listing -----------------------------------------------------------------------------------
@@ -163,20 +225,34 @@ def test_a_long_list_is_given_in_parts_with_himaris_cursor() -> None:
     run(scenario)
 
 
-def test_a_list_past_the_bound_is_cut_and_then_only_listed_uris_are_read() -> None:
+def test_a_list_past_the_bound_is_cut_and_then_nothing_is_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    """PR #42 review B3: the part not read could list the same URI again,
+    for the user only; a cut list cannot show that it does not."""
+    monkeypatch.setattr(resources_module, "MAX_LIST_ENTRIES", 100)
     server = FakeMcpServer()
-    server.listed = [{"uri": f"calliope://r/{i}", "name": "r"} for i in range(600)]
+    server.listed = ([{"uri": SECRET, "name": "looks public"}]
+                     + [{"uri": f"calliope://r/{i}", "name": "r"} for i in range(149)]
+                     + [{"uri": SECRET, "name": "for the user", "annotations": {"audience": ["user"]}}])
     server.templates = [{"uriTemplate": "calliope://games/{game}", "name": "game"}]
-    server.resources = {"calliope://r/1": answer(text_entry("calliope://r/1", "one"))}
+    server.resources = {uri: answer(text_entry(uri, "x")) for uri in (SECRET, "calliope://r/1", "calliope://games/g1")}
 
     async def scenario() -> None:
         connection = await open_http(server)
         part = listing(await use(connection, "list_resources"))
-        assert "more than HIMARI reads" in part["note"]
-        assert (await use(connection, "read_resource", uri="calliope://r/1")).status is ToolStatus.SUCCEEDED
-        refused = await use(connection, "read_resource", uri="calliope://games/g1")
-        assert refused.status is ToolStatus.FAILED and "only URIs in the part read" in text_of(refused)
+        assert "none can be read" in part["note"]
+        for uri in (SECRET, "calliope://r/1", "calliope://games/g1"):
+            refused = await use(connection, "read_resource", uri=uri)
+            assert refused.status is ToolStatus.FAILED and "none of them can be read" in text_of(refused), uri
         await connection.aclose()
+        wide = await open_http(server, resources={"uris": "any"})
+        assert (await use(wide, "read_resource", uri="calliope://other")).status is ToolStatus.FAILED
+        await wide.aclose()
+        assert server.resource_reads == []
+        monkeypatch.setattr(resources_module, "MAX_LIST_ENTRIES", 5_000)  # read whole: the restricted entry wins
+        whole = await open_http(server)
+        assert "the server marks it for the user" in text_of(await use(whole, "read_resource", uri=SECRET))
+        assert (await use(whole, "read_resource", uri="calliope://r/1")).status is ToolStatus.SUCCEEDED
+        await whole.aclose()
 
     run(scenario)
 
@@ -230,6 +306,24 @@ def test_refusals_win_over_matches() -> None:
             assert (await use(connection, "read_resource", uri="calliope://games/g1")).status is ToolStatus.SUCCEEDED
             await connection.aclose()
         assert server.resource_reads == ["calliope://games/g1", "calliope://games/g1"]
+
+    run(scenario)
+
+
+def test_a_query_template_does_not_widen_to_other_parameters() -> None:
+    """PR #42 review B1 through the Tool: only what the template expands to."""
+    server = FakeMcpServer()
+    server.templates = [{"uriTemplate": "calliope://lookup{?id}", "name": "lookup"}]
+    server.resources = {uri: answer(text_entry(uri, "x")) for uri in
+                        ("calliope://lookup?id=42", "calliope://lookup?secret=42")}
+
+    async def scenario() -> None:
+        connection = await open_http(server)
+        assert (await use(connection, "read_resource", uri="calliope://lookup?id=42")).status is ToolStatus.SUCCEEDED
+        refused = await use(connection, "read_resource", uri="calliope://lookup?secret=42")
+        assert refused.status is ToolStatus.FAILED and "neither lists it" in text_of(refused)
+        assert server.resource_reads == ["calliope://lookup?id=42"]
+        await connection.aclose()
 
     run(scenario)
 
