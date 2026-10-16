@@ -422,23 +422,6 @@ async def _start(server: McpServerConfig, check_schema: InputSchemaCheck, transp
             reason = f"its answer could not be used ({type(error).__name__})"
         return _Started(client, [], SourceStatus(server.name, server.enabled_by_default, False, (),
                                                  (f"unavailable: {reason}",)))
-    # Prompts are optional: their failure, however it comes, leaves them out
-    # and nothing else (PR #40 review B1, B2).
-    prompts: tuple[PromptInfo, ...] = ()
-    if server.prompts and "prompts" in capabilities:
-        try:
-            async with asyncio.timeout(PROMPTS_STARTUP_SECONDS):
-                prompt_entries = await (lister or client).list_prompts()
-            infos = [_prompt_info(e) for e in prompt_entries]
-            prompts = tuple(info for info in infos if info is not None)
-            if len(prompts) < len(infos):
-                problems.append(f"{len(infos) - len(prompts)} prompt(s) left out: their description cannot be used")
-        except TimeoutError:
-            problems.append("prompts left out: no answer in time")
-        except McpError as error:
-            problems.append(f"prompts left out: {error}")
-        except Exception as error:  # noqa: BLE001 — whatever the server sent, only its prompts are left out
-            problems.append(f"prompts left out: the answer could not be used ({type(error).__name__})")
     text = init.get("instructions")
     note = (SourceNote(server.instructions, text[:MAX_NOTE_CHARS])
             if server.instructions != "off" and isinstance(text, str) and text.strip() else None)
@@ -485,6 +468,25 @@ async def _start(server: McpServerConfig, check_schema: InputSchemaCheck, transp
         wanted.setdefault(uri, []).append(handler)
     if wanted:
         problems.extend(await _read_views(lister or client, server.name, wanted))
+    # Prompts are optional: their failure, however it comes, leaves them out
+    # and nothing else (PR #40 review B1, B2). They are listed last: a timed-out
+    # prompts/list leaves a stdio listing session checking, so nothing may
+    # follow it on that session (B3).
+    prompts: tuple[PromptInfo, ...] = ()
+    if server.prompts and "prompts" in capabilities:
+        try:
+            async with asyncio.timeout(PROMPTS_STARTUP_SECONDS):
+                prompt_entries = await (lister or client).list_prompts()
+            infos = [_prompt_info(e) for e in prompt_entries]
+            prompts = tuple(info for info in infos if info is not None)
+            if len(prompts) < len(infos):
+                problems.append(f"{len(infos) - len(prompts)} prompt(s) left out: their description cannot be used")
+        except TimeoutError:
+            problems.append("prompts left out: no answer in time")
+        except McpError as error:
+            problems.append(f"prompts left out: {error}")
+        except Exception as error:  # noqa: BLE001 — whatever the server sent, only its prompts are left out
+            problems.append(f"prompts left out: the answer could not be used ({type(error).__name__})")
     if lister is not None:
         await lister.aclose()
     resources = server.resources is not None and "resources" in capabilities

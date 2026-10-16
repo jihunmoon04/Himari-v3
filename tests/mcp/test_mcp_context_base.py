@@ -270,3 +270,31 @@ def test_a_prompt_list_over_its_byte_bound_is_left_out() -> None:
     assert status.available and status.tool_ids == ("calliope/echo",)
     assert "bytes" in status.problems[0]
 
+
+
+def test_a_prompt_list_that_never_answers_keeps_the_tools_views(monkeypatch: pytest.MonkeyPatch) -> None:
+    """PR #40 re-review B3: a timed-out prompts/list leaves a stdio listing
+    session checking; the views are read before it, so they stay."""
+    monkeypatch.setattr(tools_module, "PROMPTS_STARTUP_SECONDS", 0.3)
+    from mcp_fake import ECHO_SCHEMA, VIEW_URI, view_entry
+
+    async def run() -> None:
+        launcher = FakeLauncher()
+        launcher.capabilities = {"tools": {}, "prompts": {}, "resources": {}}
+        launcher.tools = [{"name": "echo", "description": "Echo.", "inputSchema": ECHO_SCHEMA,
+                           "_meta": {"ui": {"resourceUri": VIEW_URI}}}]
+        launcher.resources = {VIEW_URI: {"contents": [view_entry()]}}
+        launcher.hang_prompts_list = True
+        entry = {"command": "/usr/bin/fake-server", "tools": {"echo": {"effect": "read"}}, "ui": {}}
+        config = parse_config(json.dumps({"servers": {"calliope": entry}}), {})
+        connection = await connect(config, check_schema=check_tool_input_schema,
+                                   launcher_for=lambda source, stdio: launcher)
+        try:
+            (status,) = connection.statuses
+            assert status.available and status.tool_ids == ("calliope/echo",)
+            assert connection.ui_for("calliope/echo") is not None  # the view was read
+            assert status.problems == ("prompts left out: no answer in time",)
+        finally:
+            await connection.aclose()
+
+    asyncio.run(asyncio.wait_for(run(), 20))
