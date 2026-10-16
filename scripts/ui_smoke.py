@@ -9,7 +9,9 @@ link), the context size in the conversation menu, "Compact now" and its
 divider, rename, reload keeping
 the HttpOnly session, the narrow layout and sign-out. A second server with
 a small context budget compacts a conversation and checks the timeline
-divider and its summary.
+divider and its summary. A third server with a small turn token budget
+(V3-P62) shows the turn's usage while it works, stops it at the budget
+with a Continue button, and finishes it with that button.
 
 Requires: pip install playwright && playwright install chromium
 Usage:    python scripts/ui_smoke.py [--screenshots DIR]
@@ -40,7 +42,8 @@ from himari.data.api import UserMessage  # noqa: E402
 from himari.interfaces.web.app import create_app  # noqa: E402
 from himari.interfaces.web.config import WebConfig  # noqa: E402
 from himari.provider.api import NormalizedFinal, NormalizedToolCalls  # noqa: E402
-from himari.provider.scripted import ScriptedAdapter  # noqa: E402
+from himari.provider.api import NativeInvocationOutcome, NativePreparedRequest  # noqa: E402
+from himari.provider.scripted import Measured, ScriptedAdapter  # noqa: E402
 
 PORT = 8799
 HOSTILE = ("# Plan for Seoul\n\n**Day 1**: walk <script>window.__pwned = 1</script> "
@@ -60,13 +63,13 @@ OPENED: dict[str, tuple[Application, asyncio.AbstractEventLoop]] = {}  # root ->
 
 
 def serve(root: str, port: int = PORT, provider: ScriptedAdapter | None = None,
-          context_tokens: int | None = None) -> uvicorn.Server:
+          context_tokens: int | None = None, turn_budget: int = 3_000_000) -> uvicorn.Server:
     config = WebConfig("127.0.0.1", port, frozenset({"127.0.0.1"}), frozenset({f"http://127.0.0.1:{port}"}), False,
                        root, "scripted-model", None, False)
 
     async def opener() -> Application:
         application = await Application.open(root, provider or scripted(), model_id="scripted-model", sandbox=False,
-                                             context_tokens=context_tokens)
+                                             context_tokens=context_tokens, turn_budget=turn_budget)
         OPENED[root] = (application, asyncio.get_running_loop())
         return application
 
@@ -200,6 +203,59 @@ def run_compaction(base: str, token: str, shots: str | None, root: str) -> list[
     return errors
 
 
+class SlowAdapter(ScriptedAdapter):
+    """Each answer takes a moment, so the page shows a turn while it works."""
+
+    async def invoke_prepared(self, request: NativePreparedRequest) -> NativeInvocationOutcome:
+        await asyncio.sleep(1.0)
+        return await super().invoke_prepared(request)
+
+
+def budget_script() -> SlowAdapter:
+    def write(n: int) -> Measured:
+        call = ToolCall(CallId("c0"), 0, ToolId("inside/write_file"), {"path": f"{n}.txt", "content": "x"})
+        return Measured(NormalizedToolCalls((call,)), input_tokens=45_000, output_tokens=1_000)
+
+    # Two Runs use 92k of 100k: a third (its input and the 8,192 reserve) would not fit.
+    return SlowAdapter([write(0), write(1), write(2),
+                        Measured(NormalizedFinal((TextBlock("All three files are written."),)), 1_000, 100)])
+
+
+def run_turn_budget(base: str, token: str, shots: str | None) -> list[str]:
+    errors: list[str] = []
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page(viewport={"width": 1280, "height": 860})
+        page.on("pageerror", lambda e: errors.append(str(e)))
+        page.goto(base)
+        page.fill("#login-token", token)
+        page.click("#login-submit")
+        page.click("#home-new-chat")
+        page.fill("#composer-text", "Write three files")
+        page.press("#composer-text", "Enter")
+        expect(page.locator("#composer-hint")).to_have_text("HIMARI is working… · 45k in · 1.0k out / 100k",
+                                                            timeout=10000)
+        expect(page.locator("#stop-panel")).to_be_visible(timeout=10000)
+        expect(page.locator("#status-bar")).to_contain_text(  # and why: what the next request would need
+            "Stopped: this turn's token budget is used (the turn used 92000 tokens;")
+        expect(page.locator("#stop-text")).to_have_text("This turn · 90k in · 2.0k out / 100k")
+        expect(page.locator("#composer-hint")).to_have_text("")
+        if shots:
+            page.screenshot(path=os.path.join(shots, "5-budget.png"))
+        page.set_viewport_size({"width": 390, "height": 800})
+        page.wait_for_timeout(300)
+        assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
+        if shots:
+            page.screenshot(path=os.path.join(shots, "6-budget-narrow.png"))
+        page.set_viewport_size({"width": 1280, "height": 860})
+        page.click("#stop-continue")
+        expect(page.locator(".item-assistant").last).to_contain_text("All three files are written.", timeout=10000)
+        expect(page.locator("#stop-panel")).to_be_hidden()
+        expect(page.locator("#status-bar")).to_have_text("")
+        browser.close()
+    return errors
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--screenshots")
@@ -220,6 +276,14 @@ def main() -> int:
             errors += run_compaction(f"http://127.0.0.1:{PORT + 1}",
                                      Path(small, "control", "operator.secret").read_text().strip(), args.screenshots,
                                      small)
+        finally:
+            server.should_exit = True
+            time.sleep(0.5)
+        budget = os.path.join(tmp, "budget")
+        server = serve(budget, PORT + 2, budget_script(), turn_budget=100_000)
+        try:
+            errors += run_turn_budget(f"http://127.0.0.1:{PORT + 2}",
+                                      Path(budget, "control", "operator.secret").read_text().strip(), args.screenshots)
         finally:
             server.should_exit = True
             time.sleep(0.5)

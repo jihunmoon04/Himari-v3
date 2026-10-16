@@ -56,7 +56,9 @@ STATE_TEXT = {
     "outcome_unknown": "the request may not have reached the model; it was not resent",
     "invalid_model_output": "the model's reply could not be used",
     "request_rejected": "the request was refused before sending",
-    "run_limit_reached": "stopped after the maximum number of steps",
+    "run_limit_reached": "stopped after the maximum number of steps — `continue` to go on",
+    "budget_reached": "stopped: this turn's token budget is used — `continue` to go on with a new one",
+    "no_progress": "stopped: the last steps brought nothing new — `continue` to go on",
     "idle": "nothing to continue",
     "compaction_failed": "compaction failed; nothing was changed",
     "paused": "paused — `continue` to go on, or send a new message",
@@ -71,6 +73,28 @@ ERROR_TEXT = {
     "cancelled": "the run was stopped when the server shut down",
     "internal_error": "something went wrong on the server",
 }
+
+
+def format_tokens(n: int) -> str:
+    """As the Web client shows them: 950, 2.9k, 132k, 1M."""
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.1f}".removesuffix(".0") + "M"
+    if n >= 10_000:
+        return f"{round(n / 1000)}k"
+    if n >= 1000:
+        return f"{n / 1000:.1f}k"
+    return str(n)
+
+
+def usage_line(usage: dict[str, Any] | None) -> str | None:
+    """What a turn used (V3-P62 §7): ``used 132k in + 2.9k out of 1M tokens in 7 requests``."""
+    if not usage or not usage.get("runs"):
+        return None
+    runs = int(usage["runs"])
+    budget = usage.get("budget")
+    of = f" of {format_tokens(int(budget))}" if budget else ""
+    return (f"used {format_tokens(int(usage['input_tokens']))} in + {format_tokens(int(usage['output_tokens']))} out"
+            f"{of} tokens in {runs} request{'s' if runs != 1 else ''}")
 
 
 def _path(conversation_id: str, suffix: str = "") -> str:
@@ -228,6 +252,9 @@ class Session:
     def report(self, detail: dict[str, Any]) -> int:
         job = detail["job"]
         why = job.get("detail")  # the job's own reason, e.g. the size that was refused
+        used = usage_line(job.get("turn_usage"))
+        if used:
+            self.note(f"({used})")
         if detail.get("waiting"):
             asked = f": {why}" if why and job.get("state") == "waiting_for_user" else ""
             self.note(f"(waiting for your answer{asked})")

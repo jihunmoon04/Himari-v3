@@ -30,11 +30,13 @@ const STATE_TEXT = {
   invalid_model_output: "The model's reply could not be used",
   request_rejected: "The request was refused before sending",
   run_limit_reached: "Stopped after the maximum number of steps",
+  budget_reached: "Stopped: this turn's token budget is used",
+  no_progress: "Stopped: the last steps brought nothing new",
   idle: "Nothing to continue",
   compacted: "Compacted: earlier messages now reach HIMARI as a summary",
   nothing_to_compact: "Nothing to compact yet",
   compaction_failed: "Compaction failed; nothing was changed",
-  paused: "Paused — choose Continue in the conversation menu to go on, or send a new message",
+  paused: "Paused — Continue to go on, or send a new message",
   cancelled: "Stopped",
 };
 const ERROR_TEXT = {
@@ -332,6 +334,7 @@ function tagging(timeline, sequence) {
 }
 
 function formatTokens(n) {
+  if (n >= 1000000) return `${Number((n / 1000000).toFixed(1))}M`;
   if (n >= 10000) return `${Math.round(n / 1000)}k`;
   if (n >= 1000) return `${(n / 1000).toFixed(1)}k`;
   return String(n);
@@ -653,7 +656,7 @@ function describe(detail) {
   const compacted = job.state === "compacted" || job.state === "nothing_to_compact";
   if (detail.continuable && !job.error && (job.state === null || job.state === "completed" || compacted)) {
     const done = compacted ? `${STATE_TEXT[job.state]}. ` : "";
-    return { text: `${done}Not answered yet — choose Continue in the conversation menu.`, short: "Not answered yet",
+    return { text: `${done}Not answered yet — Continue to answer it.`, short: "Not answered yet",
              tone: "warn", active: false };
   }
   if (job.error) return { text: ERROR_TEXT[job.error] || `The run failed (${job.error}).`, tone: "error", active: false };
@@ -669,6 +672,13 @@ function describe(detail) {
   return { text: job.state ? STATE_TEXT[job.state] : "", tone: null, active: false };
 }
 
+/* This turn's tokens against its budget (V3-P62 §7), as " · 132k in · 2.9k out / 1M". */
+function usageText(usage) {
+  if (!usage || !usage.runs) return "";
+  const of = usage.budget ? ` / ${formatTokens(usage.budget)}` : "";
+  return ` · ${formatTokens(usage.input_tokens)} in · ${formatTokens(usage.output_tokens)} out${of}`;
+}
+
 function applyDetail(detail) {
   const name = conversationName(detail.conversation);
   $("topbar-title").textContent = name;
@@ -677,12 +687,19 @@ function applyDetail(detail) {
   $("topbar-chat-label").textContent = view.short || view.text;
   $("chat-menu-state").textContent = view.short || view.text || "Ready";
   $("topbar-state-dot").classList.toggle("is-active", view.active);
+  // V3-P62 §7: a turn that stopped before its answer (a guard, a pause, a
+  // failure) goes on with Continue, offered right where it stopped.
+  const stopped = !detail.job.running && detail.continuable && !detail.waiting;
+  $("stop-panel").hidden = !stopped;
+  $("stop-continue").disabled = false;
+  const used = usageText(detail.job.turn_usage);
+  $("stop-text").textContent = stopped ? (used ? `This turn${used}` : "Continue where it stopped") : "";
   status(view.tone ? view.text : "", view.tone);
   $("question-panel").hidden = !detail.waiting;
   $("question-text").textContent = detail.waiting ? detail.waiting.question : "";
   $("composer-text").placeholder = detail.waiting ? "Your answer" : "Message HIMARI";
   $("composer-send").disabled = detail.job.running || app.sending;
-  $("composer-hint").textContent = detail.job.running ? "HIMARI is working…" : "";
+  $("composer-hint").textContent = detail.job.running ? `HIMARI is working…${usageText(detail.job.turn_usage)}` : "";
   $("chat-menu-resume").hidden = !detail.continuable;
   $("chat-menu-compact").disabled = detail.job.running;
   $("chat-menu-dismiss").hidden = !detail.waiting || detail.job.running;
@@ -950,6 +967,10 @@ async function boot() {
   $("chat-menu-compact").addEventListener("click", compactConversation);
   $("chat-menu-dismiss").addEventListener("click", dismissQuestion);
   $("composer-pause").addEventListener("click", () => stopConversation("pause"));
+  $("stop-continue").addEventListener("click", () => {
+    $("stop-continue").disabled = true;  // one Continue per click; the next detail enables it again
+    resumeConversation();
+  });
   $("composer-cancel").addEventListener("click", () => stopConversation("cancel"));
   $("sidebar-toggle").addEventListener("click", toggleNav);
   $("sidebar-close").addEventListener("click", closeNav);

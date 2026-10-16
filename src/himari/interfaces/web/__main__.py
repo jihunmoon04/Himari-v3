@@ -21,10 +21,18 @@ import sys
 from collections.abc import Iterator
 
 from himari.bootstrap import read_env_file
-from himari.bootstrap.application import Application, check_tool_sources, tool_views_configured
+from himari.bootstrap.application import Application, TurnSettings, check_tool_sources, tool_views_configured
 from himari.interfaces.web.config import WebConfig, WebConfigError
 
 API_KEY_VAR = "OPENROUTER_API_KEY"
+
+
+def turn_text(turn: TurnSettings) -> str:
+    """One turn's guards (V3-P62), for the startup line."""
+    budget = f"turn budget: {turn.turn_budget} tokens" if turn.turn_budget else "no turn budget"
+    limit = f"at most {turn.max_runs} steps" if turn.max_runs else "no step limit"
+    pause = f"pauses after {turn.unattended_runs} steps unread" if turn.unattended_runs else "never pauses unread"
+    return f"{budget}, {limit}, {pause}"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -62,10 +70,12 @@ def main(argv: list[str] | None = None) -> int:
     async def opener() -> Application:
         application = await Application.open(config.data_root, provider(), model_id=config.model_id,
                                              reasoning_effort=config.reasoning_effort, sandbox=config.sandbox,
-                                             context_tokens=config.context_tokens, environ=environment)
+                                             context_tokens=config.context_tokens, environ=environment,
+                                             turn_budget=config.turn_budget, unattended_runs=config.unattended_runs,
+                                             max_runs=config.max_runs)
         print(f"HIMARI web: http://{config.host}:{config.port}/ — sign in with the token in "
               f"{application.data_root / 'control' / 'operator.secret'} (sandbox: {application.sandbox_state.value}, "
-              f"context budget: {application.context_tokens} tokens)",
+              f"context budget: {application.context_tokens} tokens; {turn_text(application.turn)})",
               file=sys.stderr, flush=True)
         for status in application.tool_source_statuses:
             count = len(status.tool_ids)

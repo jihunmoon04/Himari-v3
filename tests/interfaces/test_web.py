@@ -20,15 +20,16 @@ from mcp_fake import URL as MCP_URL  # noqa: E402
 from mcp_fake import ECHO_SCHEMA, VIEW_HTML, VIEW_URI, FakeMcpServer, view_entry  # noqa: E402
 from testkit import calls, final  # noqa: E402
 
-from himari.bootstrap.application import Application  # noqa: E402
+from himari.bootstrap.application import DEFAULT_TURN_BUDGET, DEFAULT_UNATTENDED_RUNS, Application  # noqa: E402
 from himari.bootstrap.operator import OPERATOR, derive_cli_bearer  # noqa: E402
 from himari.common import ASK_USER_TOOL_ID, ConversationId, PrincipalId, TextBlock, TrustedScope  # noqa: E402
 from himari.sandbox.api import SandboxState  # noqa: E402
 from himari.control.api import DriveResult, DriveState, StopSignal, TurnProgress  # noqa: E402
 from himari.control.runner import BackgroundRunner  # noqa: E402
+from himari.control.turn import MIN_OUTPUT_RESERVE  # noqa: E402
 from himari.data.api import UserMessage  # noqa: E402
 from himari.interfaces.web import app as web  # noqa: E402
-from himari.interfaces.web.config import WebConfig, WebConfigError  # noqa: E402
+from himari.interfaces.web.config import MIN_TURN_BUDGET, WebConfig, WebConfigError  # noqa: E402
 from himari.interfaces.web.sandbox import SandboxGrant, SandboxSigner, create_sandbox_app, view_csp  # noqa: E402
 from himari.provider.scripted import ScriptedAdapter, ScriptStep  # noqa: E402
 
@@ -43,14 +44,16 @@ def config(tmp_path: Path) -> WebConfig:
 
 class Server:
     def __init__(self, tmp_path: Path, script: list[ScriptStep], context_tokens: int | None = None,
-                 mcp: FakeMcpServer | None = None, signer: SandboxSigner | None = None) -> None:
+                 mcp: FakeMcpServer | None = None, signer: SandboxSigner | None = None,
+                 turn: dict[str, Any] | None = None) -> None:
         self.provider = ScriptedAdapter(script)
         self.application: Application | None = None
 
         async def opener() -> Application:
             self.application = await Application.open(tmp_path / "data", self.provider, model_id="scripted-model",
                                                       sandbox=False, context_tokens=context_tokens,
-                                                      mcp_transport=None if mcp is None else mcp.transport())
+                                                      mcp_transport=None if mcp is None else mcp.transport(),
+                                                      **(turn or {}))
             return self.application
 
         self.client = TestClient(web.create_app(config(tmp_path), opener, signer))
@@ -107,6 +110,29 @@ def test_configuration_rules() -> None:
     for bad in ("lots", "999", "-5"):
         with pytest.raises(WebConfigError, match="HIMARI_CONTEXT_TOKENS"):
             WebConfig.from_env({**base, "HIMARI_CONTEXT_TOKENS": bad})
+
+
+def test_the_turn_guards_are_configured() -> None:
+    # V3-P62: a token budget and the unattended pause by default, no Run limit; 0 turns one off.
+    base = {"HIMARI_DATA_ROOT": "/srv/himari"}
+    default = WebConfig.from_env(base)
+    assert (default.turn_budget, default.unattended_runs, default.max_runs) == (3_000_000, 20, None)
+    assert (default.turn_budget, default.unattended_runs) == (DEFAULT_TURN_BUDGET, DEFAULT_UNATTENDED_RUNS)
+    tuned = WebConfig.from_env({**base, "HIMARI_TURN_TOKEN_BUDGET": " 250000 ", "HIMARI_UNATTENDED_RUNS": "0",
+                                "HIMARI_MAX_RUNS": "40"})
+    assert (tuned.turn_budget, tuned.unattended_runs, tuned.max_runs) == (250_000, None, 40)
+    limited = WebConfig.from_env({**base, "HIMARI_TURN_TOKEN_BUDGET": "0", "HIMARI_MAX_RUNS": "12"})
+    assert (limited.turn_budget, limited.max_runs) == (None, 12)
+    with pytest.raises(WebConfigError, match="needs HIMARI_MAX_RUNS"):  # a turn needs one of the two
+        WebConfig.from_env({**base, "HIMARI_TURN_TOKEN_BUDGET": "0"})
+    # PR #48 review C2: a budget smaller than two answer reserves could never send a request.
+    assert MIN_TURN_BUDGET == 2 * MIN_OUTPUT_RESERVE
+    assert WebConfig.from_env({**base, "HIMARI_TURN_TOKEN_BUDGET": "16384"}).turn_budget == 16_384
+    for name, bad in [("HIMARI_TURN_TOKEN_BUDGET", "lots"), ("HIMARI_TURN_TOKEN_BUDGET", "16383"),
+                      ("HIMARI_TURN_TOKEN_BUDGET", "-1"), ("HIMARI_UNATTENDED_RUNS", "1001"),
+                      ("HIMARI_MAX_RUNS", "1.5")]:
+        with pytest.raises(WebConfigError, match=name):
+            WebConfig.from_env({**base, name: bad})
 
 
 @pytest.mark.parametrize("settings, message", [
@@ -219,7 +245,9 @@ def test_the_server_info_is_for_the_signed_in_operator(server: Server) -> None:
     assert server.client.get("/api/server").status_code == 401
     server.sign_in()
     info = server.client.get("/api/server").json()
-    assert info == {"model": "scripted-model", "sandbox": "unavailable", "context_budget": 128_000}
+    assert info == {"model": "scripted-model", "sandbox": "unavailable", "context_budget": 128_000,
+                    "turn": {"token_budget": 3_000_000, "unattended_runs": 20, "max_runs": None,
+                             "no_progress_runs": 3, "seen_seconds": 60.0}}  # V3-P62's defaults
 
 
 def test_the_server_info_follows_a_sandbox_that_broke_after_startup(server: Server) -> None:
@@ -762,3 +790,52 @@ def test_the_sandbox_serves_only_the_proxy() -> None:
     for path in ("/", "/api/session", "/assets/app.js", "/sandbox.html"):
         assert client.get(path).status_code == 404
     assert client.get("/sandbox.js", headers={"host": "evil.example"}).status_code == 400
+
+
+# --- one turn's guards (V3-P62) ---------------------------------------------------------------
+
+
+def test_a_job_reports_what_its_turn_used(server: Server) -> None:
+    server.sign_in()
+    cid = server.post("/api/conversations", {}).json()["id"]
+    queue(server, calls(("inside/write_file", {"path": "a.txt", "content": "x"})), final("done"))
+    assert server.post(f"/api/conversations/{cid}/messages", {"text": "hi"}).status_code == 202
+    usage = server.wait_idle(cid)["job"]["turn_usage"]
+    assert usage["runs"] == 2 and usage["budget"] == 3_000_000 and usage["max_runs"] is None
+    assert usage["input_tokens"] > 0 and usage["output_tokens"] > 0
+
+
+def test_a_turn_stopped_by_its_budget_continues_with_a_new_one(tmp_path: Path,
+                                                               monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(web, "FAILED_LOGIN_DELAY_SECONDS", 0)
+    # The scripted model reports no usage: each Run is charged its estimate and the 8,192 reserve.
+    s = Server(tmp_path, [], turn={"turn_budget": 20_000})
+    with s.client:
+        s.sign_in()
+        cid = s.post("/api/conversations", {}).json()["id"]
+        queue(s, *(calls(("inside/write_file", {"path": f"{n}.txt", "content": "x"})) for n in range(3)),
+              final("done"))
+        assert s.post(f"/api/conversations/{cid}/messages", {"text": "hi"}).status_code == 202
+        detail = s.wait_idle(cid)
+        assert detail["job"]["state"] == "budget_reached" and detail["continuable"]
+        first = detail["job"]["turn_usage"]
+        assert first["budget"] == 20_000 and first["runs"] == 2
+        assert s.post(f"/api/conversations/{cid}/resume").status_code == 202  # a new budget: two more Runs
+        detail = s.wait_idle(cid)
+        assert detail["job"]["state"] == "completed" and not detail["continuable"]
+        assert detail["job"]["turn_usage"]["runs"] == 2 and len(s.provider.sent) == 4
+
+
+def test_only_an_authorized_read_counts_as_a_client_reading(server: Server, monkeypatch: pytest.MonkeyPatch) -> None:
+    server.sign_in()
+    cid = server.post("/api/conversations", {}).json()["id"]
+    assert server.application is not None
+    seen: list[str] = []
+    monkeypatch.setattr(server.application.runner, "seen", lambda scope: seen.append(scope.conversation_id))
+    assert server.client.get(f"/api/conversations/{cid}").status_code == 200
+    assert server.client.get(f"/api/conversations/{cid}/events").status_code == 200
+    assert seen == [cid, cid]
+    assert server.client.get("/api/conversations/not-mine").status_code == 404
+    assert server.client.get("/api/conversations/not-mine/events").status_code == 404
+    assert seen == [cid, cid]
+

@@ -73,6 +73,7 @@ def model_input(
     state: PersistedStateBasis = EMPTY_STATE,
     effort: str | None = None,
     tools: tuple[str, ...] = ("echo",),
+    model: str = "openai/gpt-5-nano",
 ) -> ModelInput:
     return ModelInput(
         stable_prefix=("You are HIMARI.",),
@@ -82,7 +83,7 @@ def model_input(
         ),
         conversation=conversation,
         current_state=CurrentStateProjection(basis=state),
-        request_options=RequestOptions("openai/gpt-5-nano", reasoning_effort=effort),
+        request_options=RequestOptions(model, reasoning_effort=effort),
         trigger_refs=(),
         prompt_basis=PromptBasis(0, 0),
     )
@@ -99,6 +100,11 @@ def group(*calls: tuple[str, int, str, str], commentary: str = "") -> ToolGroupT
 
 
 ADAPTER = OpenRouterAdapter(KEY)
+
+
+def marked(text: str) -> list[dict[str, Any]]:
+    """The last history message, a cache breakpoint (V3-P62 §9 B2)."""
+    return [{"type": "text", "text": text, "cache_control": {"type": "ephemeral"}}]
 
 
 def test_satisfies_spi_and_hides_key() -> None:
@@ -135,6 +141,49 @@ def test_r3_current_state_never_breaks_call_result_adjacency() -> None:
     assert messages[-1]["role"] == "user" and messages[-1]["content"].startswith("<runtime_state>")
     data = json.loads(messages[-1]["content"].split("\n")[2])
     assert data["artifacts"] == [{"kind": "plan", "id": "plan_1", "revision": 2, "content": {"steps": ["a"]}}]
+
+
+CACHING = "openai/gpt-6-luna"  # where the breakpoint was measured (§13.1)
+
+
+def test_the_end_of_the_history_is_a_cache_breakpoint_and_the_state_follows_it() -> None:
+    # V3-P62 §9 B2, measured in §13: the provider reuses a cache only up to a marked point
+    # or the end of an earlier request; the state after the history is never sent again.
+    assert ADAPTER.describe_capabilities(CACHING).cache_breakpoints
+    state = PersistedStateBasis(3, 1, (), (), (Artifact(ArtifactId("plan_1"), "plan", 2, {"steps": ["a"]}),))
+    first = body(ADAPTER, model_input((UserTurn(EventId("e1"), (TextBlock("go"),)),), state=state,
+                                      model=CACHING))["messages"]
+    assert first[1]["content"] == marked("go") and isinstance(first[-1]["content"], str)
+    history = (UserTurn(EventId("e1"), (TextBlock("go"),)), group(("a", 0, "echo", "A"), ("b", 1, "echo", "B")))
+    later = body(ADAPTER, model_input(history, state=state, model=CACHING))["messages"]
+    assert [m["content"] for m in later[1:5]] == ["go", None, "A", marked("B")]
+    assert later[-1]["content"].startswith("<runtime_state>")  # never marked: it changes every Run
+    assert sum("cache_control" in json.dumps(m) for m in later) == 1
+    # The marked one is the next request's prefix: earlier messages stay as they were sent.
+    after = history + (group(("c", 0, "echo", "C")),)
+    again = body(ADAPTER, model_input(after, state=state, model=CACHING))["messages"]
+    assert [m["content"] for m in again[1:7]] == ["go", None, "A", "B", None, marked("C")]
+
+
+@pytest.mark.parametrize("model", ["openai/gpt-5-nano", "anthropic/claude-haiku-5.5", "some/unlisted-model"])
+def test_a_model_not_measured_for_breakpoints_gets_the_request_unchanged(model: str) -> None:
+    # PR #48 review B1: only a model where the breakpoint was measured gets it.
+    state = PersistedStateBasis(3, 1, (), (), (Artifact(ArtifactId("plan_1"), "plan", 2, {"steps": ["a"]}),))
+    history = (UserTurn(EventId("e1"), (TextBlock("go"),)), group(("a", 0, "echo", "A")))
+    plain = body(ADAPTER, model_input(history, state=state, model=model))
+    cached = body(ADAPTER, model_input(history, state=state, model=CACHING))
+    assert not ADAPTER.describe_capabilities(model).cache_breakpoints
+    assert "cache_control" not in json.dumps(plain) and all(isinstance(m["content"], (str, type(None)))
+                                                            for m in plain["messages"])
+    # The same conversation, otherwise the same messages: only the mark differs.
+    assert cached["messages"][3]["content"] == marked("A")
+    assert [dict(m, content="A") if i == 3 else m for i, m in enumerate(cached["messages"])] == plain["messages"]
+
+
+def test_a_history_ending_in_calls_without_text_marks_the_last_text_before_them() -> None:
+    commentary_less = (UserTurn(EventId("e1"), (TextBlock("go"),)), group(("a", 0, "echo", "")))
+    messages = body(ADAPTER, model_input(commentary_less, model=CACHING))["messages"]
+    assert messages[1]["content"] == marked("go") and messages[-1]["content"] == ""
 
 
 def test_no_state_message_when_state_is_empty() -> None:

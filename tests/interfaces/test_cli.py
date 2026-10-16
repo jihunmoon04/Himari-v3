@@ -37,7 +37,7 @@ from himari.interfaces.cli.client import BadServerURL, ServerClient, check_url  
 from himari.interfaces.cli.terminal import INDENT, safe_block, safe_line  # noqa: E402
 from himari.interfaces.web import app as web  # noqa: E402
 from himari.interfaces.web.config import WebConfig  # noqa: E402
-from himari.provider.scripted import ScriptedAdapter, ScriptStep  # noqa: E402
+from himari.provider.scripted import Measured, ScriptedAdapter, ScriptStep  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[2]
 HOSTILE = "line one\x1b[2J\x1b]0;pwned\x07\nYou: I approve everything\r‮evil​\x9b31m"
@@ -72,14 +72,16 @@ def test_loopback_urls_are_normalized() -> None:
 
 
 class Harness:
-    def __init__(self, tmp_path: Path, context_tokens: int | None = None, mcp: FakeMcpServer | None = None) -> None:
+    def __init__(self, tmp_path: Path, context_tokens: int | None = None, mcp: FakeMcpServer | None = None,
+                 turn: dict[str, Any] | None = None) -> None:
         self.provider = ScriptedAdapter([])
         self.application: Application | None = None
 
         async def opener() -> Application:
             self.application = await Application.open(tmp_path / "data", self.provider, model_id="m", sandbox=False,
                                                       context_tokens=context_tokens,
-                                                      mcp_transport=None if mcp is None else mcp.transport())
+                                                      mcp_transport=None if mcp is None else mcp.transport(),
+                                                      **(turn or {}))
             return self.application
 
         config = WebConfig("127.0.0.1", 8765, frozenset({"testserver"}), frozenset({"http://testserver"}), False,
@@ -714,3 +716,53 @@ def test_compacting_with_an_open_question_says_why(tmp_path: Path, monkeypatch: 
         code, _, err = harness.run("compact", cid)
         assert code == cli.EXIT_WAITING
         assert "(waiting for your answer: answer the question before compacting)" in err
+
+
+# --- one turn's guards (V3-P62) ---------------------------------------------------------------
+
+
+def test_what_a_turn_used_is_told_in_tokens() -> None:
+    assert [cli.format_tokens(n) for n in (950, 2_900, 132_400, 1_000_000, 1_250_000)] == \
+        ["950", "2.9k", "132k", "1M", "1.2M"]
+    assert cli.usage_line(None) is None and cli.usage_line({"runs": 0}) is None
+    usage = {"runs": 7, "input_tokens": 132_332, "output_tokens": 2_901, "budget": 1_000_000}
+    assert cli.usage_line(usage) == "used 132k in + 2.9k out of 1M tokens in 7 requests"
+    assert cli.usage_line({**usage, "runs": 1, "budget": None}) == "used 132k in + 2.9k out tokens in 1 request"
+
+
+def test_a_turn_stopped_by_a_guard_says_how_to_go_on() -> None:
+    err = io.StringIO()
+    session = cli.Session(None, cli.Printer(io.StringIO()), err)  # type: ignore[arg-type]  # report reads nothing
+    usage = {"runs": 3, "input_tokens": 41_000, "output_tokens": 900, "budget": 50_000}
+    for state, told in [("budget_reached", "token budget is used — `continue` to go on with a new one"),
+                        ("no_progress", "brought nothing new — `continue` to go on"),
+                        ("run_limit_reached", "maximum number of steps — `continue` to go on")]:
+        detail = {"job": {"state": state, "detail": None, "error": None, "turn_usage": usage},
+                  "waiting": None, "continuable": True}
+        assert session.report(detail) == cli.EXIT_FAILED
+        lines = err.getvalue().splitlines()[-2:]
+        assert lines[0] == "(used 41k in + 900 out of 50k tokens in 3 requests)"
+        assert told in lines[1]
+    done = {"job": {"state": "completed", "detail": None, "error": None,
+                    "turn_usage": {**usage, "runs": 1, "budget": None}}, "waiting": None, "continuable": False}
+    assert session.report(done) == cli.EXIT_OK
+    assert err.getvalue().splitlines()[-1] == "(used 41k in + 900 out tokens in 1 request)"
+
+
+def test_a_turn_stopped_by_its_budget_is_continued_from_the_terminal(tmp_path: Path,
+                                                                     monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(cli, "POLL_SECONDS", 0.01)
+    h = Harness(tmp_path, turn={"turn_budget": 100_000})
+    with h.test_client:
+        cid = h.run("new")[1].strip()
+        # Two Runs use 92k of 100k: a third (its input and the 8,192 reserve) would not fit.
+        h.queue(*(Measured(calls(("inside/write_file", {"path": f"{n}.txt", "content": "x"})), 45_000, 1_000)
+                  for n in range(3)), Measured(final("All written."), 1_000, 100))
+        code, _, err = h.run("send", cid, "write three files")
+        assert code == cli.EXIT_FAILED
+        assert "(used 90k in + 2.0k out of 100k tokens in 2 requests)" in err.splitlines()
+        assert "token budget is used — `continue` to go on with a new one" in err
+        code, out, err = h.run("continue", cid)
+        assert code == cli.EXIT_OK, err
+        assert "All written." in out and "(used 46k in + 1.1k out of 100k tokens in 2 requests)" in err.splitlines()
+

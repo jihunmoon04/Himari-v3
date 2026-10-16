@@ -91,6 +91,7 @@ KNOWN_CAPABILITIES: Mapping[str, ProviderCapabilities] = {
         parallel_tool_calls=True,
         context_tokens=1_050_000,  # OpenRouter /api/v1/models context_length, 2026-10-14
         max_output_tokens=128_000,  # top_provider.max_completion_tokens, 2026-10-14
+        cache_breakpoints=True,  # measured 2026-10-16: hits 75-84% with, ~13% without (V3-P62 §13.1)
     ),
     "openai/gpt-5-nano": ProviderCapabilities(
         model_id="openai/gpt-5-nano",
@@ -143,6 +144,25 @@ def _render_summary(summary: str) -> str:
     )
 
 
+def _mark_cache_breakpoint(messages: list[dict[str, Any]]) -> None:
+    """Marks the end of the history as a cache breakpoint (V3-P62 §9 B2).
+
+    The provider reuses its cache up to a marked point or to the end of an
+    earlier request, never to some shorter prefix of one. The state message
+    after the history is never sent again, so without a mark each Run read
+    only the system prefix back and wrote the rest anew (measured, §13).
+    The mark goes on the last message with text after the system message,
+    only for models where it was measured (``cache_breakpoints``).
+    """
+    for message in reversed(messages):
+        if message["role"] == "system":
+            return
+        content = message.get("content")
+        if isinstance(content, str) and content:
+            message["content"] = [{"type": "text", "text": content, "cache_control": {"type": "ephemeral"}}]
+            return
+
+
 class OpenRouterAdapter:
     def __init__(
         self,
@@ -177,7 +197,8 @@ class OpenRouterAdapter:
     def prepare_native_request(self, model_input: ModelInput) -> NativePreparedRequest:
         options = model_input.request_options
         caps = self.describe_capabilities(options.model_id)
-        body: dict[str, Any] = {"model": options.model_id, "messages": self._messages(model_input)}
+        body: dict[str, Any] = {"model": options.model_id,
+                                "messages": self._messages(model_input, breakpoint=caps.cache_breakpoints)}
         if model_input.tool_catalog:
             body["tools"] = [
                 {
@@ -223,7 +244,7 @@ class OpenRouterAdapter:
         assert isinstance(payload, dict)
         return {k: payload[k] for k in ("reasoning", "reasoning_details") if k in payload}
 
-    def _messages(self, model_input: ModelInput) -> list[dict[str, Any]]:
+    def _messages(self, model_input: ModelInput, *, breakpoint: bool) -> list[dict[str, Any]]:
         model_id = model_input.request_options.model_id
         messages: list[dict[str, Any]] = []
         system = [*model_input.stable_prefix]
@@ -243,6 +264,8 @@ class OpenRouterAdapter:
                 messages.append({"role": "user", "content": _render_summary(_text(part.summary))})
             elif isinstance(part, ToolGroupTurn):
                 messages.extend(self._tool_group(part, self._replay(part.continuation, model_id)))
+        if breakpoint:
+            _mark_cache_breakpoint(messages)
         state = state_block(model_input.current_state, model_input.source_notes, model_input.turn_state)
         if state is not None:
             messages.append({"role": "user", "content": state})

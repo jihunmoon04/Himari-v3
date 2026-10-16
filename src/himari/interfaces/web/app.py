@@ -59,7 +59,7 @@ from himari.common import (
     TrustedScope,
     thaw,
 )
-from himari.control.api import ContextStatus, ControlError, ControlErrorCode, JobStatus
+from himari.control.api import ContextStatus, ControlError, ControlErrorCode, JobStatus, TurnUsage
 from himari.data.api import (
     MAX_LIST_LIMIT,
     AssistantFinal,
@@ -261,7 +261,15 @@ def job_view(status: JobStatus) -> dict[str, Any]:
         "started_at": _time(status.started_at),
         "finished_at": _time(status.finished_at),
         "stop_requested": None if status.stop_requested is None else status.stop_requested.value,
+        "turn_usage": None if status.turn_usage is None else turn_usage_view(status.turn_usage),
     }
+
+
+def turn_usage_view(usage: TurnUsage) -> dict[str, Any]:
+    """What the job's drive used so far (V3-P62 §7)."""
+    return {"runs": usage.runs, "input_tokens": usage.input_tokens, "output_tokens": usage.output_tokens,
+            "cached_input_tokens": usage.cached_input_tokens, "cache_write_tokens": usage.cache_write_tokens,
+            "budget": usage.budget, "max_runs": usage.max_runs}
 
 
 def context_view(status: ContextStatus | None) -> dict[str, Any]:
@@ -414,8 +422,12 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
     async def read_server(request: Request, who: PrincipalId = Depends(principal)) -> dict[str, Any]:
         """What this server runs with: the model, whether commands can run, the budget."""
         application = himari(request)
+        turn = application.turn
         return {"model": application.model_id, "sandbox": application.current_sandbox_state.value,
-                "context_budget": application.context_tokens}
+                "context_budget": application.context_tokens,
+                "turn": {"token_budget": turn.turn_budget, "unattended_runs": turn.unattended_runs,
+                         "max_runs": turn.max_runs, "no_progress_runs": turn.no_progress_runs,
+                         "seen_seconds": turn.seen_seconds}}
 
     @app.post("/api/session", status_code=204)
     async def sign_in(body: LoginBody, request: Request, response: Response) -> None:
@@ -451,6 +463,7 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
 
     async def _detail(application: Application, scope: TrustedScope) -> dict[str, Any]:
         summary = await application.data.read_conversation(scope)  # authorizes first
+        application.seen(scope)  # a client is reading (V3-P62 §5)
         waiting = await application.data.find_waiting_call(scope)
         question = None
         if waiting is not None:
@@ -487,6 +500,7 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
             raise ApiError(400, "invalid_argument", f"after >= 0 and limit 1..{MAX_EVENTS_PAGE}")
         application, scope = himari(request), scope_of(conversation_id, who)
         events = await application.data.read_events(scope, after_sequence=after, limit=limit)
+        application.seen(scope)  # a client is reading (V3-P62 §5): only after the read was authorized
         runs = [e.origin_run_id for e in events if isinstance(e.payload, AssistantToolCalls) and e.origin_run_id]
         runs += [e.payload.call.run_id for e in events if isinstance(e.payload, ToolResultRecord)]
         views = await application.view_flags(scope, runs) if runs and application.views_configured else {}

@@ -37,6 +37,14 @@ MODEL_VAR = "HIMARI_MODEL"
 REASONING_VAR = "HIMARI_REASONING_EFFORT"
 SANDBOX_VAR = "HIMARI_SANDBOX"
 CONTEXT_TOKENS_VAR = "HIMARI_CONTEXT_TOKENS"
+TURN_BUDGET_VAR = "HIMARI_TURN_TOKEN_BUDGET"  # V3-P62: 0 turns it off
+UNATTENDED_RUNS_VAR = "HIMARI_UNATTENDED_RUNS"  # 0 turns it off
+MAX_RUNS_VAR = "HIMARI_MAX_RUNS"  # 0 (default): no Run limit
+DEFAULT_TURN_BUDGET = 3_000_000
+# Each request keeps 8,192 tokens for its answer (control.turn.MIN_OUTPUT_RESERVE),
+# so a smaller budget could refuse even the first request (PR #48 review C2).
+MIN_TURN_BUDGET = 16_384
+DEFAULT_UNATTENDED_RUNS = 20
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
@@ -65,6 +73,10 @@ class WebConfig:
     sandbox: bool
     context_tokens: int | None = None  # None: the model's window, capped (Application)
     sandbox_port: int | None = None  # Tool views' origin (V3-P58); None: port + 1
+    # One turn's guards (V3-P62); None turns one off.
+    turn_budget: int | None = DEFAULT_TURN_BUDGET
+    unattended_runs: int | None = DEFAULT_UNATTENDED_RUNS
+    max_runs: int | None = None
 
     @property
     def view_port(self) -> int:
@@ -120,6 +132,12 @@ class WebConfig:
         if not data_root:
             raise WebConfigError(f"{DATA_ROOT_VAR} must name the private data directory")
         effort = source.get(REASONING_VAR, "").strip() or None
+        turn_budget = _optional(source.get(TURN_BUDGET_VAR), TURN_BUDGET_VAR, DEFAULT_TURN_BUDGET, MIN_TURN_BUDGET,
+                                10**9)
+        unattended = _optional(source.get(UNATTENDED_RUNS_VAR), UNATTENDED_RUNS_VAR, DEFAULT_UNATTENDED_RUNS, 1, 1000)
+        max_runs = _optional(source.get(MAX_RUNS_VAR), MAX_RUNS_VAR, None, 1, 1000)
+        if turn_budget is None and max_runs is None:
+            raise WebConfigError(f"{TURN_BUDGET_VAR}=0 needs {MAX_RUNS_VAR}: a turn needs a token budget or a Run limit")
         return cls(
             host=host,
             port=port,
@@ -132,6 +150,9 @@ class WebConfig:
             sandbox=_flag(source.get(SANDBOX_VAR), SANDBOX_VAR, default=True),
             context_tokens=_positive(source.get(CONTEXT_TOKENS_VAR), CONTEXT_TOKENS_VAR),
             sandbox_port=sandbox_port,
+            turn_budget=turn_budget,
+            unattended_runs=unattended,
+            max_runs=max_runs,
         )
 
 
@@ -165,6 +186,21 @@ def _positive(value: str | None, name: str) -> int | None:
         raise WebConfigError(f"{name} must be an integer") from None
     if number < 1000:
         raise WebConfigError(f"{name} must be at least 1000")
+    return number
+
+
+def _optional(value: str | None, name: str, default: int | None, low: int, high: int) -> int | None:
+    """An integer setting where 0 turns the guard off; unset: ``default``."""
+    if value is None or not value.strip():
+        return default
+    try:
+        number = int(value.strip())
+    except ValueError:
+        raise WebConfigError(f"{name} must be an integer") from None
+    if number == 0:
+        return None
+    if not low <= number <= high:
+        raise WebConfigError(f"{name} must be 0 (off) or between {low} and {high}")
     return number
 
 
