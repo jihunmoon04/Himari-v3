@@ -62,6 +62,7 @@ HIMARI v3의 **아키텍처와 구현 현황**입니다. 2026-10-13 기준 PR #1
 - [MCP Apps 1단계 설계 초안](docs/mcp-apps-v0.1.md) — MCP 서버가 준 Tool 화면을 sandbox에서 읽기 전용으로 표시(V3-P58)
 - [MCP stdio 지원](docs/mcp-stdio-v0.1.md) — stdio MCP 서버를 server sandbox 안의 격리 프로세스로 실행(기본 서버당 하나), Sandbox 모듈 분리(V3-P59)
 - [MCP 서버의 안내문·프롬프트·리소스](docs/mcp-context-v0.1.md) — 서버 안내문을 시스템 영역에, 프롬프트는 사용자가 `/`로, 리소스는 모델용 읽기 Tool로(V3-P60, 설계 초안)
+- [한 턴의 Run 예산과 비용](docs/control-run-budget-v0.1.md) — 운영자가 정하는 상한, 같은 실패의 반복 차단, 남은 예산 알림, 대화별 캐시 경로(V3-P62, 설계 초안)
 - [결정 기록](docs/decisions.md) — 현재까지 합의한 내용과 설계상 권고 사항 (모듈 경계 개정 V3-039~046 포함)
 - [미결정 사항](docs/open-questions.md) — 초기 구현에 앞서 확정할 계약과 후속 결정
 
