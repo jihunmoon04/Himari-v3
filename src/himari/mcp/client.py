@@ -94,11 +94,16 @@ def capabilities(ui: bool) -> dict[str, Any]:
 class Channel(Protocol):
     """How one server's messages travel. ``start`` connects (and returns the
     server's ``initialize`` result); ``request`` sends one request and
-    returns its result, starting or renewing the connection as needed."""
+    returns its result, starting or renewing the connection as needed.
+    ``key`` is the calling Conversation (a stdio server may run a process
+    per Conversation); ``take_restart`` says, once, that the key's calls
+    moved to a new connection since its previous answer."""
 
     async def start(self) -> Mapping[str, Any]: ...
 
-    async def request(self, method: str, params: Mapping[str, Any]) -> Mapping[str, Any]: ...
+    async def request(self, method: str, params: Mapping[str, Any], *, key: str | None = None) -> Mapping[str, Any]: ...
+
+    def take_restart(self, key: str | None) -> bool: ...
 
     async def aclose(self) -> None: ...
 
@@ -136,8 +141,12 @@ class McpClient:
                 raise McpRefused("tools/list answered with an invalid nextCursor")
         raise McpRefused(f"tools/list has more than {MAX_TOOL_PAGES} pages")
 
-    async def call_tool(self, name: str, arguments: Mapping[str, JsonValue]) -> Mapping[str, Any]:
-        return await self.request("tools/call", {"name": name, "arguments": dict(arguments)})
+    async def call_tool(self, name: str, arguments: Mapping[str, JsonValue], *,
+                        key: str | None = None) -> Mapping[str, Any]:
+        return await self._channel.request("tools/call", {"name": name, "arguments": dict(arguments)}, key=key)
+
+    def take_restart(self, key: str | None) -> bool:
+        return self._channel.take_restart(key)
 
     async def read_resource(self, uri: str) -> Mapping[str, Any]:
         return await self.request("resources/read", {"uri": uri})
@@ -185,7 +194,10 @@ class HttpChannel:
         async with self._lock:
             return await self._initialize()
 
-    async def request(self, method: str, params: Mapping[str, Any]) -> Mapping[str, Any]:
+    def take_restart(self, key: str | None) -> bool:
+        return False  # a renewed HTTP session is the same server process: nothing to tell
+
+    async def request(self, method: str, params: Mapping[str, Any], *, key: str | None = None) -> Mapping[str, Any]:
         if self._version is None:
             async with self._lock:
                 if self._version is None:  # nobody started it meanwhile

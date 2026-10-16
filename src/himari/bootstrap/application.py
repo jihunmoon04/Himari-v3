@@ -45,10 +45,12 @@ from himari.control.runner import BackgroundRunner
 from himari.data.api import InitialActivation, ToolExecutionRecord, ToolExecutionStatus, UiCsp, UiResource
 from himari.data.sqlite import SqliteData, SqliteStore
 from himari.environment.inside import INSIDE, InsideEnvironment
-from himari.sandbox.api import SandboxState
+from himari.sandbox.api import SandboxState, ServerProfile
 from himari.sandbox.backend import SandboxBackend
-from himari.mcp.config import CONFIG_NAME, McpUiPolicy, load_config
-from himari.mcp.tools import McpConnection, SourceStatus, connect
+from himari.sandbox.server import ServerSandbox
+from himari.mcp.config import CONFIG_NAME, McpConfig, McpStdioConfig, McpUiPolicy, load_config
+from himari.mcp.stdio import ProcessLauncher
+from himari.mcp.tools import LauncherFor, McpConnection, SourceStatus, connect
 from himari.prompt.api import ContextBudget
 from himari.provider.api import ProviderAdapter
 from himari.tool.api import ToolHandler
@@ -177,6 +179,24 @@ class ToolSourceView:
     problems: tuple[str, ...]
 
 
+async def _server_launchers(config: McpConfig, root: Path) -> LauncherFor | None:
+    """The server sandbox for stdio servers (V3-P59 §4), made only when one is
+    configured. HIMARI's data root — the database, the operator secret,
+    mcp.json and every Workspace — is the root it protects, fixed for every
+    launch. Not ENFORCED: no stdio server starts (the reason is shown)."""
+    if not any(server.stdio is not None for server in config.servers):
+        return None
+    sandbox = ServerSandbox.discover([str(root)])
+    state = await sandbox.start()
+
+    def launcher_for(source: str, stdio: McpStdioConfig) -> ProcessLauncher:
+        if state is not SandboxState.ENFORCED:
+            raise RuntimeError(f"stdio servers run only in the server sandbox, which is {state.value} on this host")
+        return sandbox.launcher(ServerProfile(stdio.read_only, stdio.writable))
+
+    return launcher_for
+
+
 @dataclass
 class Application:
     data_root: Path
@@ -205,6 +225,7 @@ class Application:
         instructions: Sequence[str] | None = None,
         environ: Mapping[str, str] | None = None,  # where mcp.json's token variables are read
         mcp_transport: httpx.AsyncBaseTransport | None = None,  # tests: a fake MCP server
+        mcp_launcher_for: LauncherFor | None = None,  # tests: stdio servers without the server sandbox
     ) -> Application:
         capabilities = provider.describe_capabilities(model_id)
         # Compaction works toward the budget; only the model's input ceiling
@@ -221,7 +242,11 @@ class Application:
         store = SqliteStore(root / DATABASE_NAME)  # first: a second server on this root fails here
         mcp: McpConnection | None = None
         try:
-            mcp = await connect(mcp_config, check_schema=check_tool_input_schema, transport=mcp_transport)
+            launcher_for = mcp_launcher_for
+            if launcher_for is None and sandbox:
+                launcher_for = await _server_launchers(mcp_config, root)
+            mcp = await connect(mcp_config, check_schema=check_tool_input_schema, transport=mcp_transport,
+                                launcher_for=launcher_for)
             backend: SandboxBackend | None = None
             state = SandboxState.UNAVAILABLE
             if sandbox:
