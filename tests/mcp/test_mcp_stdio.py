@@ -803,3 +803,42 @@ def test_a_call_stopped_before_admission_sends_nothing() -> None:
 
     run(scenario)
 
+
+def test_a_ping_answer_read_after_the_deadline_does_not_count(monkeypatch: pytest.MonkeyPatch) -> None:
+    """PR #36 review B1: the check may run late after its wait timed out; an
+    answer read after the deadline must close the session, not save it."""
+    async def scenario() -> None:
+        launcher = FakeLauncher()
+        event, slow = gate()
+        launcher.handlers["echo"] = slow
+        launcher.honour_cancel = False
+        launcher.answer_ping = False
+        server = StdioServer("calliope", McpStdioConfig(COMMAND, (), "/tmp", (), (), (), "shared", 60.0, 1),
+                             launcher, capabilities={}, timeout_seconds=5)
+        try:
+            session = await server._session(None)
+            stopped = asyncio.create_task(session.request("tools/call", {"name": "echo", "arguments": {"text": "a"}}, 5))
+            await asyncio.sleep(0.05)
+            stopped.cancel()
+            await asyncio.gather(stopped, return_exceptions=True)
+
+            def state() -> State:
+                return session.state
+
+            assert state() is State.CHECKING
+            late = session._deadline + 1  # the answer is read after the deadline
+            monkeypatch.setattr(stdio_module, "_clock", lambda: late)
+            ping = max(m["id"] for m in launcher.processes[0].server.received if m.get("method") == "ping")
+            await launcher.processes[0].server.send({"jsonrpc": "2.0", "id": ping, "result": {}})
+            for _ in range(40):
+                if state() is State.CLOSED:
+                    break
+                await asyncio.sleep(0.02)
+            assert state() is State.CLOSED and session.reason == "it did not answer a ping in time"
+        finally:
+            monkeypatch.undo()
+            event.set()
+            await server.aclose()
+
+    run(scenario)
+

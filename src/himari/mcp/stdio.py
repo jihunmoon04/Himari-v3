@@ -119,7 +119,9 @@ class Session:
         self.initialize_result: Mapping[str, Any] = {}
         self._pending: dict[int, asyncio.Future[object]] = {}  # requests and pings awaiting an answer
         self._pings: set[int] = set()
+        self._answered_at: dict[int, float] = {}  # ping id → when its answer was read
         self._latest_ping: asyncio.Future[object] | None = None
+        self._latest_ping_id = 0
         self._ping_changed = asyncio.Event()
         self._deadline = 0.0
         self._next_id = 0
@@ -267,7 +269,7 @@ class Session:
         ping_id, ping = self._register()
         self._pings.add(ping_id)
         self._enqueue(request(ping_id, "ping", {}))
-        self._latest_ping = ping
+        self._latest_ping, self._latest_ping_id = ping, ping_id
         self._ping_changed.set()
         if self.state is State.READY:
             self._deadline = _clock() + CHECK_SECONDS  # not moved by later cancellations
@@ -289,10 +291,17 @@ class Session:
                 await asyncio.wait(awaited, timeout=remaining, return_when=asyncio.FIRST_COMPLETED)
             finally:
                 changed.cancel()
-            if self.state is State.CHECKING and ping is self._latest_ping and ping.done() and not ping.cancelled():
-                self._forget_pings()  # answered, result or error: it reads and answers
-                self._set(State.READY)
+            if self.state is not State.CHECKING or ping is not self._latest_ping or not ping.done():
+                continue
+            # The final gate (PR #36 review B1): only an answer read by the
+            # deadline counts, however late this task runs after it.
+            answered = self._answered_at.get(self._latest_ping_id)
+            if ping.cancelled() or answered is None or answered > self._deadline:
+                await self.close("it did not answer a ping in time")
                 return
+            self._forget_pings()  # answered, result or error: it reads and answers
+            self._set(State.READY)
+            return
 
     def _forget_pings(self) -> None:
         for ping_id in self._pings:
@@ -300,6 +309,7 @@ class Session:
             if future is not None and not future.done():
                 future.cancel()
         self._pings.clear()
+        self._answered_at.clear()
 
     # --- reading ----------------------------------------------------------------------
 
@@ -321,7 +331,7 @@ class Session:
                 if not isinstance(request_id, int) or isinstance(request_id, bool):
                     raise _Broken("it answered a request HIMARI did not send")
                 if request_id in self._pings:
-                    self._pings.discard(request_id)
+                    self._answered_at[request_id] = _clock()
                 future = self._pending.pop(request_id, None)
                 if future is not None and not future.done():
                     future.set_result(message)
