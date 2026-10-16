@@ -1,16 +1,26 @@
-# The official MCP conformance suite with HIMARI as the client
-# (docs/testing-policy.md §2.3). Not on every push: on pull requests that
-# change the MCP client, the path a call takes to it (Bootstrap, Tool
-# registry and Dispatcher), the dependencies or this gate; and by hand.
+# The official MCP conformance suite with HIMARI as the client, and the MCP
+# client's own tests (docs/testing-policy.md §2.3). Not on every push: on
+# pull requests that change the MCP client, the path a call takes to it
+# (Bootstrap, Tool registry and Dispatcher), the dependencies or this gate;
+# weekly, since dependencies are installed at their newest allowed versions
+# (the HTTP cancellation relies on httpcore's trace events, PR #37); and by
+# hand.
 name: mcp-conformance
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: "17 4 * * 1"  # Mondays
   pull_request:
     paths:
       - "src/himari/mcp/**"
       - "src/himari/bootstrap/**"
       - "src/himari/tool/**"
+      - "src/himari/sandbox/**"
+      - "tests/mcp/**"
+      - "tests/mcp_fake.py"
+      - "tests/mcp_stdio_fake.py"
+      - "tests/bootstrap/test_stdio_application.py"
       - "pyproject.toml"
       - "scripts/mcp_conformance/**"
       - ".github/workflows/mcp-conformance.yml"
@@ -36,3 +46,21 @@ jobs:
         with:
           name: conformance-results
           path: conformance-results
+
+  tests:
+    # The MCP client's tests at the newest allowed dependencies, among them a
+    # real-socket HTTP test that fails if httpcore stops reporting when a
+    # request is sent (tests/mcp/test_mcp_http_cancel.py).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install HIMARI with its dev tools
+        run: pip install -e ".[dev]"
+      - name: Show the HTTP stack it got
+        run: pip show httpx httpcore | grep -E "^(Name|Version)"
+      - name: MCP tests
+        run: python -m pytest -q tests/mcp tests/bootstrap/test_stdio_application.py tests/scripts/test_mcp_conformance_client.py
+
