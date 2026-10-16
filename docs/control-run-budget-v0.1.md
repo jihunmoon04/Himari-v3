@@ -1,6 +1,6 @@
 # 한 턴의 예산과 비용 — v0.1 (V3-P62, 설계 초안)
 
-> 2026-10-16 · **Proposed, rev. 2** — 독립 검수 NOT_READY(B1~B4, C1·C2) 반영(§14). V3-P23(drive당 Run 예산 16)을 대신한다. **소유자 방향(2026-10-16):** 다른 에이전트처럼 Run 수 상한 없이 돌게 한다. 그 대신 비용·진척·클라이언트 연결을 지키는 장치를 둔다(§2~§6, 제시한 방법 모두 채택). 수치 기본값은 §11의 O1~O4.
+> 2026-10-16 · **Proposed, rev. 3** — 독립 검수 NOT_READY(B1~B4, C1·C2) 반영(§14), 재검수 NOT_READY(N1~N3) 반영(§15). V3-P23(drive당 Run 예산 16)을 대신한다. **소유자 방향(2026-10-16):** 다른 에이전트처럼 Run 수 상한 없이 돌게 한다. 그 대신 비용·진척·클라이언트 연결을 지키는 장치를 둔다(§2~§6, 제시한 방법 모두 채택). 수치 기본값은 §11의 O1~O4.
 >
 > 관련: [V3-005](decisions.md)(Tool 실패는 모델에게), [V3-047](decisions.md)(결과 불명은 모델이 확인), [V3-P55](decisions.md)(Pause·Cancel·Continue), [prompt-composition](prompt-composition.md) §5(prefix 캐시), [open-questions](open-questions.md) Q-25(캐시 성능), [mcp-context-v0.1](mcp-context-v0.1.md) §14.5(실제 모델 시험).
 
@@ -32,7 +32,7 @@ Run 수 상한은 **기본으로 없다.** 한 턴은 다음 중 하나로 멈�
 | 모델의 답(final) 또는 질문(`ask_user`) | `COMPLETED` / `WAITING_FOR_USER` | 새 메시지 | 늘 |
 | 사용자의 Pause·Stop(V3-P55) | `PAUSED` / `CANCELLED` | Continue / 새 메시지 | 늘 |
 | **토큰 예산**(§3) — 대화 Run과 압축 Run 모두, 보내기 전 | `BUDGET_REACHED` (새) | Continue: 새 예산 | 켬 |
-| **진척 없음**(§4) | `NO_PROGRESS` (새) | Continue | 켬 |
+| **진척 없음**(§4) — 새 관찰이 없다는 근거가 분명한 Run이 연달아 | `NO_PROGRESS` (새) | Continue | 켬 |
 | **연결된 클라이언트 없음**(§5) | `PAUSED`(이유: 대화를 읽는 클라이언트가 없음) | Continue | 켬 |
 | Run 수 상한(선택, §6) | `RUN_LIMIT_REACHED` | Continue | 끔 |
 | 문맥 한도(지금처럼, 압축으로 못 줄일 때) | `REQUEST_REJECTED` | — | 늘 |
@@ -62,26 +62,37 @@ Run 수 상한은 **기본으로 없다.** 한 턴은 다음 중 하나로 멈�
 
 ## 4. 진척 없음 (기본 켬)
 
-**규칙으로 거부된 호출의 세 번째는 실행하지 않는다 (검수 C1).**
-- 막는 것은 **HIMARI가 실행 전에 규칙으로 거부한 호출(`DENIED`)** 뿐이다: 모르는 Tool, 스키마에 맞지 않는 인자, 대화에서 꺼진 출처, 활성이 아닌 Environment 등. 같은 턴 안에서 같은 인자로 다시 불러도 같은 거부가 나오는 실패다.
-- 한 drive에서 같은 Tool·같은 인자(정규 JSON, 키 정렬)의 호출이 같은 이유로 두 번 `DENIED`였으면, 세 번째는 실행하지 않는다.
-  - `DENIED`로 기록하고, 모델에게는 다음을 준다: "Not run: this exact call (same tool and arguments) was refused twice in this turn for the same reason. Change the arguments or use another tool."
-  - "같은 이유"는 모델이 받은 결과 글(정규화된 `ModelToolResult`의 글)로 비교한다. 원본 응답은 보지 않는다.
-- **`FAILED`는 막지 않는다.** Tool이나 그 서버가 실행했거나 그쪽에서 거절한 실패다. 일시적일 수 있다(서버 장애, 연결 실패, 시간 초과). 그러므로 실행은 하고, 반복은 아래처럼 알린다.
-- 결과 불명(`UNKNOWN`)·취소·성공도 막지 않는다. 결과를 모르는 호출을 확인하는 일은 막지 않는다(V3-047).
+세 가지 원칙을 따른다(재검수 권고). **기록을 근거로 실행을 막지 않는다.** 반복은 데이터로 알리되 결과는 그대로 둔다. 멈추는 것은 새 관찰이 없다는 근거가 분명할 때만이다.
 
-**반복을 알린다.**
-- 같은 Tool·같은 인자의 호출이 이 drive에서 이미 받은 것과 **같은 상태와 같은 결과 글**을 다시 받으면, 다음 요청의 `<runtime_state>`에 `progress.repeated` 항목으로 넣는다(Tool, 몇 번째, 상태). `FAILED`의 반복도 여기에 들어간다.
-- 결과 자체는 바꾸지 않는다. 상태가 변하는 조회(목록, 진행 상황)는 같은 인자로 다른 답을 줄 수 있으므로, 실행을 막지 않는다.
+**실행을 막지 않는다 (재검수 N1·N3).**
+- 모든 호출은 지금처럼 Dispatcher를 거친다. Dispatcher는 호출마다 그때의 상태를 다시 검사한다: 출처가 켜졌는지, Environment가 활성인지, Workspace binding이 있는지.
+  - 그래서 사용자가 턴 도중 MCP 서버를 켜면, 다음 호출은 켜진 상태로 판정된다.
+- 이미 실행 전에 거부되는 호출(모르는 Tool, 스키마에 맞지 않는 인자)은 기록 없이도 늘 거부되고, 서버에 가지 않는다. 기록을 근거로 따로 막아도 얻는 것은 안내 문구 하나뿐이다. 반면 거부가 어느 단계에서 났는지(Dispatcher인지 Handler인지), 상태에 따라 바뀌는지를 잘못 읽을 위험이 있다. 그래서 막지 않는다.
+- rev. 2의 `dispatch_group(…, refuse=)`는 없앤다.
 
-**진척 없는 Run이 이어지면 멈춘다.**
-- "새것이 없는 Run": 그 Run의 모든 호출이 위의 반복(같은 상태와 결과)이거나, 실행하지 않은 세 번째 거부다.
-- 그런 Run이 **연달아 O3번(권고 3)** 이면, 다음 Run 전에 `NO_PROGRESS`로 멈춘다.
-- Tool 호출 없는 Run은 답이므로 턴이 끝난다.
+**반복을 알린다 (성공·실패, 모든 효과).**
+- 같은 Tool·같은 인자(정규 JSON, 키 정렬)의 호출이 이 drive에서 이미 받은 것과 **같은 상태와 같은 결과 글**(모델이 받은 정규화된 `ModelToolResult`의 글)을 다시 받으면, 다음 요청의 `<runtime_state>`에 `progress.repeated` 항목으로 넣는다.
+  - 넣는 것: Tool, 몇 번째로 같은 결과인지, 상태, 효과 등급.
+- 결과 자체는 바꾸지 않는다. 결과 불명(`UNKNOWN`)인 호출을 확인하는 일도 그대로다(V3-047).
 
-**어디서.** Control(Driver)이 이 drive에서 커밋된 실행 기록(상태와 `model_result`)으로 센다. 새 영속 상태는 없다.
-- 실행하지 않을 호출과 그 이유는 Tool 모듈의 `dispatch_group(…, refuse=)`에 넘긴다. Dispatcher는 그 호출을 검증·claim 없이 `DENIED`로 커밋하고, 같은 그룹의 다른 호출은 그대로 실행한다.
-- 이것은 의미론적 복구가 아니라 "실행하지 않음"과 "알림"이다(V3-005).
+**새 관찰이 없다는 근거가 분명할 때만 멈춘다 (재검수 N2).** Run 하나가 "새것이 없다"는 것은, 그 Run의 모든 호출이 아래 둘 중 하나일 때뿐이다.
+1. **입력만으로 정해지는 거부의 반복:** Dispatcher가 실행 전에 규칙 `unknown_tool` 또는 `invalid_arguments`로 거부했고(아래의 기계 판독 출처), 이 drive에서 같은 Tool·같은 인자가 같은 규칙으로 이미 거부됐다. 같은 입력이면 언제나 같은 거부다.
+2. **읽기 Tool의 같은 결과:** Tool의 효과 등급이 `READ`이고, 같은 Tool·같은 인자가 이 drive에서 이미 같은 상태와 결과 글을 받았다. 새 관찰이 없다.
+
+다음은 "새것 없음"으로 세지 않는다. 그런 호출이 하나라도 있는 Run은 연속을 끊는다.
+- `SCOPED_WRITE`·`UNKNOWN` 효과 Tool의 호출. 같은 성공 글을 돌려주면서 실제로는 매번 다른 효과(파일 추가, 상태 변경)를 낼 수 있다. 반복은 알리지만 멈출 근거로 쓰지 않는다.
+- 상태에 따라 바뀌는 거부: 꺼진 출처, 비활성 Environment, binding. 턴 도중에도 바뀔 수 있다.
+- Handler가 돌려준 거부(`DENIED`)와 실패(`FAILED`)의 반복. 단, `READ` Tool이 같은 결과를 다시 받은 경우는 2에 들어간다.
+- 결과 불명, 취소, 새 결과.
+
+그런 Run이 **연달아 O3번(권고 3)** 이면, 다음 Run 전에 `NO_PROGRESS`로 멈춘다. Tool 호출 없는 Run은 답이므로 턴이 끝난다.
+
+**거부의 출처를 기계가 읽게 한다 (재검수 N1).**
+- Dispatcher가 실행 전에 거부할 때, 그 기록의 `raw_result`에 `{"refused_by": "dispatcher", "rule": <규칙>}`을 남긴다. 실행한 Handler가 없으므로 이 자리는 Dispatcher의 것이다.
+  - 규칙 코드는 둘로 나뉜다. **입력으로 정해지는 것:** `unknown_tool`, `invalid_arguments`. **상태에 따라 바뀌는 것:** `source_disabled`, `environment_inactive`, `binding`.
+  - 코드와 모양은 `tool/api.py`에 공개 계약으로 둔다.
+- Handler가 돌려준 결과의 `raw_result`에는 이 키가 없다. 키 `refused_by`는 예약하고, Handler의 `raw_result`에 그 키가 있으면 Dispatcher가 기록 전에 뺀다. 그래서 Handler의 `DENIED`가 Dispatcher의 거부로 읽히는 일은 없다.
+- Control은 이 drive에서 커밋된 실행 기록(상태, `model_result`, `raw_result`의 이 키, Tool 정의의 효과 등급)으로 센다. 새 영속 상태는 없다.
 
 ## 5. 연결된 클라이언트가 없을 때 (기본 켬)
 
@@ -128,7 +139,7 @@ Run 수 상한은 **기본으로 없다.** 한 턴은 다음 중 하나로 멈�
   again in this turn: do not repeat them unless something has changed.
   ```
 
-- **사실은 `<runtime_state>`에 둔다.** 숫자와 표시만 들어간다: `turn_budget: {"used", "budget", "left", "low", "last"}`, `progress: {"repeated": [...], "not_run": [...]}`. 문장으로 된 지시는 없다.
+- **사실은 `<runtime_state>`에 둔다.** 숫자와 표시만 들어간다: `turn_budget: {"used", "budget", "left", "low", "last"}`, `progress: {"repeated": [...]}`. 문장으로 된 지시는 없다.
   - `low`는 남은 예산이 직전 요청 입력의 2배보다 작을 때(대략 두 Run 남짓) 참이다.
   - `last`는 다음 요청 하나를 더하면 예산을 넘을 것으로 보일 때 참이다.
   - `turn_budget`은 `low`가 참일 때만 넣는다. 매번 예산을 보이면 모델이 일찍 포기할 수 있다.
@@ -168,12 +179,12 @@ Run 수 상한은 **기본으로 없다.** 한 턴은 다음 중 하나로 멈�
 | --- | --- |
 | Web 설정 → `bootstrap` | `HIMARI_TURN_TOKEN_BUDGET`(기본 O1), `HIMARI_UNATTENDED_RUNS`(기본 O2), `HIMARI_MAX_RUNS`(기본 0 = 끔). 예산 0과 상한 0을 함께 두면 시작 거부. `Application.open(turn_budget=, unattended_runs=, max_runs=)` → `build_runtime`. 장치가 켜져 있으면 §8의 지시문 절을 더함. `GET /api/server`에 알림 |
 | Control `DriveState` | `BUDGET_REACHED`, `NO_PROGRESS` 추가 |
-| Control (Driver) | 보내는 요청마다 예산 판정(대화 Run, 요약 호출; 출력 예약 포함); 진척 셈과 `refuse`; `turn_state`를 `ModelInput`에 넣음; `RequestOptions.session_key`; `max_runs`는 선택(None = 상한 없음) |
+| Control (Driver) | 보내는 요청마다 예산 판정(대화 Run, 요약 호출; 출력 예약 포함); 반복 셈과 `NO_PROGRESS` 판정(§4, 실행은 막지 않음); `turn_state`를 `ModelInput`에 넣음; `RequestOptions.session_key`; `max_runs`는 선택(None = 상한 없음) |
 | Control 진행 보고 | `drive`·`resume`·`compact`에 `progress: TurnProgress \| None`. Driver가 Run마다 `report(TurnUsage)`. `TurnUsage`·`TurnProgress`는 `control/api.py`에 |
 | Control (Runner) | `seen(scope)`; 연결된 클라이언트 없이 O2번 Run이 지나면 `request_pause`; `JobStatus.turn_usage`(최신 보고) |
 | `prompt/api.py` | `ModelInput.turn_state: TurnState \| None`(`turn_budget`, `progress`; 기본 None). `state_block`이 그 항목을 데이터로 그림. `RequestOptions.session_key: str \| None` |
 | `prompt/compaction.py` | 측정 기반 추정이 `turn_state`의 크기 전체를 늘 더함(§8) |
-| Tool (`dispatch_group`) | `refuse: Mapping[CallId, str]`(기본 빈 것): 그 호출은 검증·claim 없이 `DENIED`로 커밋 |
+| Tool (Dispatcher, `tool/api.py`) | 실행 전 거부의 `raw_result` = `{"refused_by": "dispatcher", "rule": …}`, 규칙 코드 다섯(입력: `unknown_tool`·`invalid_arguments`; 상태: `source_disabled`·`environment_inactive`·`binding`). 키 `refused_by`는 예약: Handler의 `raw_result`에서 뺀다. `dispatch_group`의 인자는 바뀌지 않음 |
 | Provider (OpenRouter) | `session_key` → 본문 `session_id`; usage의 `cache_write_tokens` |
 | `common.TokenUsage` / Data codec | `cache_write_tokens: int \| None`(선택). 이전 행은 None |
 | Interfaces | Application이 대화 읽기(상세, 이벤트)를 `seen`으로 알림. Web: 사용량 안내, 새 상태 글, 상태 줄 Continue. CLI: 사용량 한 줄, 새 상태 글 |
@@ -195,7 +206,9 @@ Run 수 상한은 **기본으로 없다.** 한 턴은 다음 중 하나로 멈�
 | 위협 | 대응 |
 | --- | --- |
 | 상한이 없어 길 잃은 루프가 비용을 냄 | 토큰 예산(보내는 요청마다, 출력 예약 포함), 진척 없음 멈춤, 연결 없음 일시정지. 예산은 추정에 기대므로 마지막 한 Run의 오차만큼 넘을 수 있다 |
-| 반복 차단이 정당한 재시도를 막음 | HIMARI의 규칙 거부(`DENIED`)만 막는다. Tool·서버의 실패(`FAILED`, 일시적일 수 있음)와 성공은 실행하고 알리기만 한다. 결과 불명은 세지 않는다 |
+| 반복 판정이 정당한 호출을 막음 | 기록으로는 아무것도 막지 않는다. Dispatcher가 호출마다 그때의 상태를 다시 검사한다 |
+| 진척 판정이 효과 있는 반복을 "새것 없음"으로 봄 | `READ` Tool의 같은 결과와 입력으로 정해지는 거부만 센다. 쓰기·불명 효과 Tool은 세지 않는다 |
+| Handler의 거부가 Dispatcher의 거부로 읽힘 | 출처는 Dispatcher만 쓰는 예약 키로 기록하고, Handler의 결과에서는 그 키를 뺀다 |
 | 진척 판정이 탐색 중인 모델을 너무 일찍 멈춤 | 새 결과가 하나라도 있는 Run은 진척으로 본다. 연속 O3번일 때만 멈추고, Continue로 이어 간다 |
 | 연결 판정은 사람의 관찰이 아님(탭을 열어 둔 채 떠남) | 그 경우는 "연결됨"으로 남는다. 토큰 예산과 진척 없음이 여전히 막는다 |
 | 예산 알림이 모델을 일찍 멈추게 함 | 여유가 두 Run 남짓일 때만 알린다 |
@@ -214,10 +227,11 @@ Run 수 상한은 **기본으로 없다.** 한 턴은 다음 중 하나로 멈�
     - Continue가 새 예산을 줌;
     - 예산 0과 상한 0을 함께 두면 시작 거부.
   - 진척:
-    - 같은 이유의 `DENIED` 두 번 뒤 세 번째는 실행하지 않고 안내를 받음;
-    - `FAILED`의 반복은 실행되고 `progress.repeated`에 보임;
-    - 결과 글이 다르거나, 인자가 다르거나, `UNKNOWN`이거나, 다른 drive면 막지 않음;
-    - 진척 없는 Run이 O3번 연달아면 `NO_PROGRESS`이고, 새 결과가 하나라도 있으면 다시 셈.
+    - 기록으로 막지 않음: 같은 호출이 몇 번 거부·실패했든 다음 호출은 Dispatcher가 그때 상태로 판정한다. 출처를 켠 뒤의 같은 호출은 실행된다.
+    - 반복 알림: 같은 Tool·인자·상태·결과면 `progress.repeated`에 보이고(성공·실패, 모든 효과 등급) 결과는 그대로다.
+    - `NO_PROGRESS`: `READ` Tool의 같은 결과만, 또는 `unknown_tool`·`invalid_arguments` 거부의 반복만 있는 Run이 O3번 연달아일 때 멈춘다.
+    - 연속이 끊기는 경우: `SCOPED_WRITE`·`UNKNOWN` Tool의 같은 성공, 상태에 따른 거부, Handler의 `DENIED`·`FAILED`(읽기 Tool의 같은 결과 제외), 결과 불명, 새 결과가 하나라도 있으면 끊긴다.
+    - 출처 기록: Dispatcher의 거부마다 `raw_result`에 `refused_by`와 규칙 코드가 있다. Handler의 결과에 `refused_by`가 있으면 기록에서 빠진다.
   - 연결: 읽기가 없으면 O2번 Run 뒤 `PAUSED`(이유 포함), 읽기가 이어지면 계속, 돌아오면 다시 셈.
   - 진행 보고: Run마다 `report`가 불림(요약 Run 포함), `JobStatus.turn_usage`가 최신 값, 끝난 작업은 마지막 값을 남김, 보고 중 예외가 Driver를 바꾸지 않음.
   - 예산 표시:
@@ -241,7 +255,17 @@ Run 수 상한은 **기본으로 없다.** 한 턴은 다음 중 하나로 멈�
 | B2 | `<runtime_state>`(데이터, 지시 무시)에 행동 지시를 넣음 | §8: 행동 규칙은 시스템 메시지의 HIMARI 지시문에 고정된 절로(prefix 캐시 유지), 상태에는 숫자와 표시(`low`, `last`, `repeated`)만 |
 | B3 | Driver → Runner 진행 보고 계약이 없음 | §7: `drive`·`resume`·`compact`의 `progress: TurnProgress`, Run마다 `report(TurnUsage)`, Runner가 `JobStatus.turn_usage`로 줌; 연결 판정의 Run 수도 같은 보고로 |
 | B4 | Run마다 바뀌는 항목이 측정 기반 추정에 빠짐 | §8: `turn_state`가 있으면 측정 기반 추정에 그 크기 전체를 늘 더한다(보수적; 항목은 수백 토큰 이내) |
-| C1 | `FAILED`는 일시적일 수 있음 | §4: 실행을 막는 것은 HIMARI의 규칙 거부(`DENIED`)뿐. `FAILED`는 실행하고 `progress.repeated`로 알린다. 비교는 상태와 모델이 받은 정규화된 결과 글로 |
+| C1 | `FAILED`는 일시적일 수 있음 | §4: 실행을 막는 것은 HIMARI의 규칙 거부(`DENIED`)뿐. `FAILED`는 실행하고 `progress.repeated`로 알린다. 비교는 상태와 모델이 받은 정규화된 결과 글로. *(rev. 3에서 기록에 따른 실행 차단 자체를 없앴다, §15)* |
 | C2 | "자리 비움"은 사람의 관찰이 아님 | §5: "연결된 클라이언트가 없을 때"로 이름과 설명을 고쳤다(`seen`) |
 | — | `session_id`는 적중을 보장하지 않음; B2의 공급자별 표현 | §9에 적었다 |
+
+## 15. 검수 처리 — rev. 2(`a7f5a3b`), 재검수: NOT_READY
+
+B1~B4, C1·C2는 해결로 확인됐다.
+
+| # | 지적 | 처리 |
+| --- | --- | --- |
+| N1 | `DENIED`만으로는 Dispatcher의 실행 전 거부와 Handler가 돌려준 거부를 구분할 수 없음 | §4: Dispatcher가 자기 거부의 `raw_result`에 `refused_by: dispatcher`와 규칙 코드를 남기고, 그 키를 예약해 Handler의 결과에서 뺀다. 판정은 이 출처와 규칙 코드로 한다 |
+| N2 | 쓰기 Tool의 같은 성공 글은 진척 없음이 아님 | §4: "새것 없음"은 `READ` Tool의 같은 결과와 입력으로 정해지는 거부(`unknown_tool`, `invalid_arguments`)의 반복뿐이다. `SCOPED_WRITE`·`UNKNOWN`의 반복은 알리지만 멈출 근거로 쓰지 않는다 |
+| N3 | 꺼진 출처·비활성 Environment는 턴 도중에도 바뀜 | §4: 기록을 근거로 실행을 막는 규칙(`refuse`)을 없앴다. Dispatcher가 호출마다 그때 상태를 다시 검사한다. 상태에 따른 거부는 "새것 없음"으로도 세지 않는다 |
 
