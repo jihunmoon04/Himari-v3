@@ -26,11 +26,14 @@ from himari.prompt.api import (
     AssistantTurn,
     CompressedHistory,
     CurrentStateProjection,
+    NOTE_CHARS,
+    NOTES_TOTAL_CHARS,
     HistoryPart,
     ModelInput,
     PromptError,
     PromptErrorCode,
     PromptInputs,
+    SourceNote,
     ToolGroupTurn,
     UserTurn,
 )
@@ -82,6 +85,7 @@ class Composer:
                 artifact_revisions={a.artifact_id: a.revision for a in basis.artifacts},
                 context_key=context_key(inputs),
             ),
+            source_notes=fit_notes(inputs.source_notes),
         )
 
     @staticmethod
@@ -101,3 +105,21 @@ class Composer:
                 )
             results[call.call_id] = record.model_result
         return ToolGroupTurn(run_id, payload.commentary, calls, results)
+
+
+CUT = "\n[… cut]"
+
+
+def fit_notes(notes: tuple[SourceNote, ...]) -> tuple[SourceNote, ...]:
+    """Each server's notes cut to NOTE_CHARS, and all of them together to
+    NOTES_TOTAL_CHARS (V3-P60 §3); a note left with no room is dropped."""
+    out: list[SourceNote] = []
+    room = NOTES_TOTAL_CHARS
+    for note in notes:
+        limit = min(NOTE_CHARS, room)
+        if limit <= len(CUT):
+            break
+        text = note.text if len(note.text) <= limit else note.text[: limit - len(CUT)] + CUT
+        out.append(SourceNote(note.source, note.placement, text))
+        room -= len(text)
+    return tuple(out)

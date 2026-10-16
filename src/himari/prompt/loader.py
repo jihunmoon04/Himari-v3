@@ -31,7 +31,7 @@ from himari.data.api import (
     ToolExecutionRecord,
     TriggerRef,
 )
-from himari.prompt.api import PromptInputs, RequestOptions, UsageMark
+from himari.prompt.api import PromptInputs, RequestOptions, UsageMark, SourceNote
 from himari.prompt.compaction import read_summary
 from himari.tool.api import ExternalAccess, ToolCatalog
 
@@ -44,12 +44,14 @@ class ContextLoader:
         catalog: ToolCatalog,
         instructions: Sequence[str],
         external_access: ExternalAccess | None = None,  # None: no External Tools in the catalog
+        source_notes: Sequence[SourceNote] = (),  # every server's notes; only enabled ones are used (V3-P60)
     ) -> None:
         self._log = log
         self._state = state
         self._catalog = catalog
         self._instructions = tuple(instructions)
         self._external_access = external_access
+        self._source_notes = tuple(sorted(source_notes, key=lambda n: n.source))
 
     async def load(
         self,
@@ -99,4 +101,5 @@ class ContextLoader:
             trigger_refs=tuple(trigger_refs),
             continuations=continuations,
             usage_mark=usage_mark,
+            source_notes=tuple(n for n in self._source_notes if n.source in enabled),
         )

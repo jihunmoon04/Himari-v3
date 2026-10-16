@@ -8,8 +8,9 @@ from datetime import UTC, datetime
 
 import pytest
 
-from himari.common import ConversationId, EventId, RunId, TextBlock
+from himari.common import ArtifactId, ConversationId, EventId, RunId, TextBlock
 from himari.data.api import (
+    Artifact,
     AssistantFinal,
     ConversationEvent,
     EventKind,
@@ -126,12 +127,13 @@ def test_a_measurement_under_another_composition_is_not_used(change: str) -> Non
 def test_a_state_change_since_the_measurement_adds_the_whole_state() -> None:
     events = history("q1", "a1", "q2")
     key = Composer().compose(inputs(events)).prompt_basis.context_key
-    same = inputs(events, mark=UsageMark(500, 3, None, key, 0))
-    changed = inputs(events, mark=UsageMark(500, 3, None, key, -1))
+    note = PersistedStateBasis(len(events), 0, (), (), (Artifact(ArtifactId("a1"), "note", 1, "<" * 300),))
+    same = dataclasses.replace(inputs(events, mark=UsageMark(500, 3, None, key, 0)), state_basis=note)
+    changed = dataclasses.replace(inputs(events, mark=UsageMark(500, 3, None, key, -1)), state_basis=note)
     compactor, composer = Compactor(), Composer()
     assert compactor.estimate(same, composer.compose(same)).tokens == 500
     grown = compactor.estimate(changed, composer.compose(changed))
-    assert grown.measured and grown.tokens > 500
+    assert grown.measured and grown.tokens >= 500 + 6 * 300 // 3  # the state block as sent: "<" escaped
 
 
 def test_a_measurement_from_another_snapshot_is_not_used() -> None:

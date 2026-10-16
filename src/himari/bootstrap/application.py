@@ -51,7 +51,7 @@ from himari.sandbox.server import ServerSandbox
 from himari.mcp.config import CONFIG_NAME, McpConfig, McpStdioConfig, McpUiPolicy, load_config
 from himari.mcp.stdio import ProcessLauncher
 from himari.mcp.tools import LauncherFor, McpConnection, SourceStatus, connect
-from himari.prompt.api import ContextBudget
+from himari.prompt.api import ContextBudget, SourceNote
 from himari.provider.api import ProviderAdapter
 from himari.tool.api import ToolHandler
 from himari.tool.schema import check_tool_input_schema
@@ -258,7 +258,9 @@ class Application:
             runtime = build_runtime(provider, store=store, environments=[inside], tools=[*tools, *mcp.handlers],
                                     model_id=model_id, reasoning_effort=reasoning_effort, context_budget=budget,
                                     instructions=DEFAULT_INSTRUCTIONS if instructions is None else instructions,
-                                    external_defaults=mcp.defaults)
+                                    external_defaults=mcp.defaults,
+                                    source_notes=[SourceNote(source, note.placement, note.text)
+                                                  for source, note in mcp.notes.items()])
         except BaseException:
             try:
                 if mcp is not None:
