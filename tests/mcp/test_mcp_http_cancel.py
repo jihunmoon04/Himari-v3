@@ -150,3 +150,108 @@ def test_a_request_that_could_not_connect_is_not_cancelled() -> None:
         assert server.cancellations() == []
 
     run(scenario)
+
+
+# --- a real HTTP transport: what was not sent is not cancelled (PR #37 review B1, C1) -------
+
+
+class LiveServer:
+    """A minimal MCP endpoint (JSON answers) on a real socket, in a thread."""
+
+    def __init__(self) -> None:
+        import socket
+        import threading
+
+        import uvicorn
+        from starlette.applications import Starlette
+        from starlette.requests import Request
+        from starlette.responses import JSONResponse, Response
+        from starlette.routing import Route
+
+        self.cancelled: list[dict[str, object]] = []
+
+        async def mcp(request: Request) -> Response:
+            message = await request.json()
+            if "id" not in message:
+                if message.get("method") == "notifications/cancelled":
+                    self.cancelled.append(message["params"])
+                return Response(status_code=202)
+            if message["method"] == "initialize":
+                result = {"protocolVersion": message["params"]["protocolVersion"], "capabilities": {"tools": {}},
+                          "serverInfo": {"name": "live", "version": "1"}}
+                return JSONResponse({"jsonrpc": "2.0", "id": message["id"], "result": result},
+                                    headers={"mcp-session-id": "live-1"})
+            await asyncio.sleep(float(message["params"]["arguments"].get("seconds", 0)))
+            return JSONResponse({"jsonrpc": "2.0", "id": message["id"],
+                                 "result": {"content": [{"type": "text", "text": "done"}]}})
+
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            self.port = probe.getsockname()[1]
+        config = uvicorn.Config(Starlette(routes=[Route("/mcp", mcp, methods=["POST"])]), host="127.0.0.1",
+                                port=self.port, log_level="error")
+        self.server = uvicorn.Server(config)
+        self.thread = threading.Thread(target=self.server.run, daemon=True)
+
+    def __enter__(self) -> LiveServer:
+        import time
+
+        self.thread.start()
+        for _ in range(100):
+            if self.server.started:
+                return self
+            time.sleep(0.05)
+        raise RuntimeError("the live server did not start")
+
+    def __exit__(self, *exc: object) -> None:
+        self.server.should_exit = True
+        self.thread.join(5)
+
+
+def test_a_stop_while_waiting_for_a_connection_sends_nothing_and_a_sent_one_is_cancelled() -> None:
+    with LiveServer() as live:
+        async def go() -> None:
+            transport = httpx.AsyncHTTPTransport(limits=httpx.Limits(max_connections=1))
+            client = http_client(f"http://127.0.0.1:{live.port}/mcp", None, timeout_seconds=30, transport=transport)
+            try:
+                await client.initialize()
+                first = asyncio.create_task(client.call_tool("slow", {"seconds": 5}))  # holds the one connection
+                await asyncio.sleep(0.3)
+                waiting = asyncio.create_task(client.call_tool("slow", {"seconds": 0}))  # waits for the pool
+                await asyncio.sleep(0.3)
+                waiting.cancel()
+                await asyncio.gather(waiting, return_exceptions=True)
+                await asyncio.sleep(0.3)
+                assert live.cancelled == []  # never sent: nothing to cancel
+                first.cancel()
+                await asyncio.gather(first, return_exceptions=True)
+                for _ in range(40):
+                    if live.cancelled:
+                        break
+                    await asyncio.sleep(0.05)
+                assert live.cancelled == [{"requestId": 2, "reason": "cancelled by the user"}]  # 1 was initialize
+            finally:
+                await client.aclose()
+
+        asyncio.run(asyncio.wait_for(go(), 30))
+
+
+def test_a_pool_timeout_was_never_sent() -> None:
+    server = FakeMcpServer()
+    original = server.handle
+
+    async def handle(request: httpx.Request) -> httpx.Response:
+        if b"tools/call" in request.content:
+            raise httpx.PoolTimeout("no free connection")
+        return await original(request)
+
+    server.handle = handle  # type: ignore[method-assign]
+
+    async def scenario(server: FakeMcpServer, client: McpClient) -> None:
+        await client.initialize()
+        with pytest.raises(McpRefused, match="no free connection"):  # not uncertain: it never left
+            await client.call_tool("echo", {"text": "x"})
+        await asyncio.sleep(0.05)
+        assert server.cancellations() == []
+
+    run(scenario, server)

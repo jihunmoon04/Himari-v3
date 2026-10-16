@@ -47,9 +47,14 @@ sends ``notifications/cancelled`` with that request's id, session id and
 protocol version, as they were when it was sent (a renewed session does not
 change them). A background task sends it, bounded by ``CANCEL_SECONDS``, so
 the Stop does not wait; whatever comes of it, the call's verdict stays as
-above. ``initialize`` is never cancelled, nor a request whose connection or
-pool slot was never obtained (it was not sent). The transport spec says a
-dropped connection is not a cancellation: the notification is.
+above. ``initialize`` is never cancelled. Neither is a request that was not
+sent: the HTTP transport reports, through httpcore's trace events, when it
+starts sending a request's headers; a Stop before that (waiting for a pool
+slot, connecting, TLS) sends nothing. A transport that reports no such
+events (one passed in, as in tests) cannot say, and its requests count as
+sent. The transport spec says a dropped connection is not a cancellation:
+the notification is. A request that timed out waiting for a pool slot was
+never sent: refused, not uncertain.
 
 Credentials: the token is sent only as ``Authorization: Bearer`` to the
 configured URL. Redirects are not followed and proxy settings from the
@@ -188,6 +193,8 @@ class HttpChannel:
         if token:
             headers["authorization"] = f"Bearer {token}"
         self._url = url
+        # httpx's own transport (httpcore) reports when a request starts going out.
+        self._traced = transport is None or isinstance(transport, httpx.AsyncHTTPTransport)
         self._http = httpx.AsyncClient(
             headers=headers, timeout=httpx.Timeout(timeout_seconds, connect=CONNECT_SECONDS),
             follow_redirects=False, trust_env=False, transport=transport,
@@ -261,8 +268,15 @@ class HttpChannel:
         body = json.dumps(request(request_id, method, params)).encode()
         sent_session, sent_version = self._session, self._version
         connected = False
+        sending = [not self._traced]  # unknown on an untraced transport: counts as sent
+
+        async def trace(event: str, info: Mapping[str, Any]) -> None:
+            if event.endswith("send_request_headers.started"):
+                sending[0] = True
+
         try:
-            async with self._http.stream("POST", self._url, content=body, headers=self._headers()) as response:
+            async with self._http.stream("POST", self._url, content=body, headers=self._headers(),
+                                         extensions={"trace": trace}) as response:
                 connected = True
                 status = response.status_code
                 if status == 404 and sent_session is not None:
@@ -290,11 +304,13 @@ class HttpChannel:
         except httpx.HTTPError as error:
             if not connected and isinstance(error, httpx.ConnectTimeout):
                 raise McpRefused(f"{method}: cannot connect (timeout)") from None
+            if isinstance(error, httpx.PoolTimeout):  # never left the client (PR #37 review C1)
+                raise McpRefused(f"{method}: no free connection in time") from None
             if isinstance(error, (httpx.ReadTimeout, httpx.WriteTimeout)) and not initializing:
                 self._cancel_later(request_id, sent_session, sent_version, "timed out")
             raise McpUncertain(f"{method}: no complete answer ({type(error).__name__})") from None
         except asyncio.CancelledError:
-            if not initializing:  # MCP: initialize is never cancelled
+            if not initializing and sending[0]:  # MCP: initialize is never cancelled; nor what was not sent
                 self._cancel_later(request_id, sent_session, sent_version, "cancelled by the user")
             raise
         return result_of(message, request_id, method)
