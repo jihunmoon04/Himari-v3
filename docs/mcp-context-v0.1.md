@@ -1,6 +1,6 @@
 # MCP 서버의 안내문·프롬프트·리소스를 모델 문맥에 v0.1
 
-> 2026-10-16 · **PROPOSED (V3-P60)** · rev. 3 — 재검수 NOT_READY(B5·B6, C4·C5) 반영, 이전 검수(B1~B4, C1~C3) 반영(§11). 구현 전이다.
+> 2026-10-16 · **PROPOSED (V3-P60)** · rev. 4 — 재검수 READY_WITH_CORRECTIONS(C6·C7) 반영(§12), 이전 검수 모두 반영(§11, §12). 구현 전이다.
 >
 > 기준 사양: MCP 2025-11-25 [Lifecycle](https://modelcontextprotocol.io/specification/2025-11-25/basic/lifecycle)(`InitializeResult.instructions`), [Prompts](https://modelcontextprotocol.io/specification/2025-11-25/server/prompts), [Resources](https://modelcontextprotocol.io/specification/2025-11-25/server/resources).
 >
@@ -177,6 +177,12 @@ Calliope의 안내문은 지금 "자세한 방법은 프롬프트 `calliope_comm
 - `read_resource`는 그 호출이 라우팅될 세션의 캐시만 쓴다. 캐시가 없거나 60초가 지났으면 그 세션에 새로 묻는다.
 - 세션이 바뀌면(재시작, 교체, HTTP 세션 갱신) 그 캐시는 버린다.
 - 그래서 `per_conversation`에서 대화 A의 프로세스에만 있는 URI가 대화 B의 판정에 쓰이지 않는다.
+- **판정과 읽기는 같은 세션에서 한다 (C6).** 판정에 쓴 세션과 `resources/read`를 보낼 세션이 같아야 한다. 클라이언트는 스스로 세션을 바꿀 수 있다. HTTP는 404면 세션을 새로 만들어 다시 보내고, stdio는 프로세스가 바뀔 수 있다. 그래서 리소스 읽기는 다음과 같이 한다.
+  1. 그 호출의 세션을 먼저 정한다.
+  2. 그 세션의 목록으로 판정한다(없으면 그 세션에 묻는다).
+  3. 같은 세션에 `resources/read`를 보낸다.
+  4. 보내기 전이나 보내는 중에 세션이 바뀌면(HTTP 404 갱신, stdio 재시작) 결과를 쓰지 않는다. 새 세션의 목록으로 **판정부터 다시** 한 뒤 읽는다. 한 번만 다시 하고, 또 바뀌면 Tool 오류다.
+  - HTTP 404 재시도와 stdio 재시작은 구현 테스트에 포함한다.
 
 **거부가 이긴다.** URI를 판정할 때 다음 순서를 지킨다.
 1. 목록에서 그 URI가 사용자용(`audience: ["user"]`)이면 거부한다. 다른 템플릿이 맞아도 거부다.
@@ -195,7 +201,9 @@ Calliope의 안내문은 지금 "자세한 방법은 프롬프트 `calliope_comm
 **한도와 결합 (검수 C3).**
 - **목록:** 서버 페이지 20개, 리소스와 템플릿 합쳐 500개, 모델에게 주는 결과 32,000자 상한이다. 넘으면 `cursor`로 다음 부분을 준다. 서버의 `nextCursor`를 그대로 넘기지 않고 HIMARI의 위치로 바꿔 준다.
 - **읽기:** 서버 응답은 지금처럼 최대 4 MiB다.
-- **조각마다 다시 검사한다 (재검수 B5).** `resources/read`의 `contents[]`는 조각마다 자기 `uri`·`mimeType`(·주석)을 가진다. 요청한 URI가 허용됐어도, 서버가 다른 리소스의 내용을 함께 넣을 수 있다. 그래서 조각마다 다음을 확인하고, 하나라도 걸리면 **그 조각을 빼고** 자리에 `[omitted: <uri> — <이유>]`만 남긴다.
+- **조각마다 다시 검사한다 (재검수 B5).** `resources/read`의 `contents[]`는 조각마다 자기 `uri`·`mimeType`(·주석)을 가진다. 요청한 URI가 허용됐어도, 서버가 다른 리소스의 내용을 함께 넣을 수 있다. 그래서 조각마다 다음을 확인하고, 하나라도 걸리면 **그 조각을 빼고** 자리에 `[omitted: restricted resource]`만 남긴다.
+  - 막힌 조각의 URI와 이유는 모델에게 보이지 않는다(C7). URI 자체에 경로나 식별자처럼 드러내지 않으려는 정보가 있을 수 있기 때문이다.
+  - URI와 이유는 그 실행의 내부 기록(`raw_result`, 모델에게 가지 않음)에만 남긴다.
   1. 조각의 `uri`가 요청한 URI이거나, 위의 읽기 허용 규칙(목록·템플릿, `any`면 모두)을 통과한다. `uri`가 없으면 요청한 URI로 본다.
   2. 화면이 아니다. `ui://` 스킴도, `text/html;profile=mcp-app` mimeType도 아니어야 한다.
   3. `annotations.audience`가 `["user"]`뿐이 아니다.
@@ -306,7 +314,8 @@ interfaces/ Web: 프롬프트 목록·보내기 API와 입력창 `/` 고르기. 
     - 읽기: 목록 URI 허용, 템플릿 매칭 URI 허용, 그 밖은 거부(`any`면 허용), 사용자용 템플릿에서 만든 URI 거부;
     - **거부 우선:** 허용 템플릿과 사용자용 템플릿이 함께 맞는 URI 거부, 목록에서 사용자용인 URI는 템플릿이 맞아도 거부 (B6);
     - **세션별 목록:** `per_conversation`에서 대화 A의 프로세스만 가진 URI를 대화 B가 읽으면 거부. 세션이 바뀌면 캐시를 버리고 새로 읽음 (B6);
-    - **조각 검사:** 허용된 URI를 읽었는데 `contents[]`에 다른 비허용 URI, 화면 mimeType, 사용자용 주석이 섞이면 그 조각만 빠지고 `[omitted: …]`가 남음 (B5);
+    - **조각 검사:** 허용된 URI를 읽었는데 `contents[]`에 다른 비허용 URI, 화면 mimeType, 사용자용 주석이 섞이면 그 조각만 빠지고 `[omitted: restricted resource]`가 남음. 모델 출력에는 그 URI가 없고 `raw_result`에만 있음 (B5, C7);
+    - **세션 원자성:** 판정한 세션과 다른 세션으로 읽게 되는 경우(HTTP 404 갱신, stdio 재시작)에 새 세션의 목록으로 다시 판정함. 새 세션에 없는 URI는 거부 (C6);
     - `contents[]` 결합, `offset`과 `version`, blob 요약, `-32002`;
     - 기본 효과 `unknown`(claim됨)과 `read` 설정, 이름 충돌 시 서버 Tool 우선, 꺼진 서버면 Tool이 목록에 없고 Dispatcher가 거부.
 - **Web·CLI:** 입력창 `/` 목록 → 펼침(`POST …/prompts/expand`) → 입력창에 채워짐 → 보내기(브라우저 smoke). CLI `/prompts`, `/prompt`(확인 뒤 보냄).
@@ -342,10 +351,19 @@ B1~B4와 C1~C3은 해결됐고, 소유자 결정 O1~O3은 수용됐다.
 
 | # | 지적 | 처리 |
 | --- | --- | --- |
-| B5 | 요청 URI만 검사하면, `contents[]`에 섞인 다른 리소스·사용자용·화면 내용이 모델에게 감 | 조각마다 uri(허용 규칙), 화면 여부, audience, 메타데이터 충돌을 검사하고, 걸리거나 확인하지 못한 조각은 빼고 `[omitted: …]`를 남김(§5) |
+| B5 | 요청 URI만 검사하면, `contents[]`에 섞인 다른 리소스·사용자용·화면 내용이 모델에게 감 | 조각마다 uri(허용 규칙), 화면 여부, audience, 메타데이터 충돌을 검사하고, 걸리거나 확인하지 못한 조각은 빼고 `[omitted: restricted resource]`를 남김(§5) |
 | B6 | 목록 캐시의 범위가 없음. `per_conversation`에서 다른 대화의 목록으로 판정할 수 있음. 템플릿이 여럿 맞을 때의 우선순위 | 목록·템플릿 캐시를 세션(HTTP 세션 id, stdio 프로세스와 세대)에 묶고, 그 호출이 갈 세션의 것만 씀. 세션이 바뀌면 버림. 거부가 이김: 사용자용 목록 항목·사용자용 템플릿이 맞으면 다른 허용이 있어도 거부(§5) |
 | C4 | 프롬프트 이름을 URL 경로 구간에 넣으면 `/` 등에서 깨짐 | `POST …/prompts/expand`의 본문에 `{source, name, arguments}`(§7) |
 | C5 | 모델은 프롬프트를 스스로 꺼내지 못하므로 일반 채팅과 `/prompt`의 정보가 다름 | 그 차이를 명시하고, 모델이 스스로 써야 할 지침은 서버가 안내문이나 리소스로도 줘야 한다고 적음. Calliope 쪽 후속 질문으로 둠(§4, §13) |
+
+### 12.1 재검수 — rev. 3(`97ee16d`): READY_WITH_CORRECTIONS
+
+B5·B6, C1~C5는 해결됐다. 새 차단 사항은 없다.
+
+| # | 지적 | 처리 |
+| --- | --- | --- |
+| C6 | 판정한 세션과 실제 읽기 세션이 달라질 수 있음(HTTP 404 갱신, stdio 세션 교체) | 세션을 먼저 정하고, 그 세션의 목록으로 판정하고, 같은 세션에 읽기. 세션이 바뀌면 새 세션에서 판정부터 다시(한 번). 테스트에 포함(§5, §9) |
+| C7 | 막힌 조각의 URI를 모델에게 보임 | `[omitted: restricted resource]`로 일반화. URI와 이유는 `raw_result`에만(§5) |
 
 ## 13. 남은 질문
 
