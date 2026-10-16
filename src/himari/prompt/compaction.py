@@ -94,6 +94,8 @@ from himari.prompt.api import (
     PromptInputs,
     ToolGroupTurn,
     UserTurn,
+    notes_section,
+    state_block,
 )
 
 BYTES_PER_TOKEN = 3
@@ -173,17 +175,24 @@ def part_tokens(part: HistoryPart) -> int:
             return total
 
 
-NOTE_OVERHEAD_TOKENS = 64  # the notes section's header and a server's heading, generously
+def state_tokens(model_input: ModelInput) -> int:
+    """The current state block as sent — escaped JSON, with the notes placed
+    there (``api.state_block``) — not the raw values: ``<`` in an
+    artifact or a note is one character there but six in the request."""
+    block = state_block(model_input.current_state, model_input.source_notes)
+    return 0 if block is None else MESSAGE_OVERHEAD_TOKENS + tokens_of_text(block)
 
 
 def request_tokens(model_input: ModelInput) -> int:
     """Pessimistic estimate of a whole request from its UTF-8 size."""
     total = sum(tokens_of_text(text) for text in model_input.stable_prefix)
-    total += sum(tokens_of_text(n.source + n.text) + NOTE_OVERHEAD_TOKENS for n in model_input.source_notes)
+    section = notes_section(model_input.source_notes)
+    if section is not None:
+        total += tokens_of_text(section)
     for definition in model_input.tool_catalog:
         total += tokens_of_text(definition.tool_id + definition.description) + _json_tokens(definition.input_schema)
     total += sum(part_tokens(part) for part in model_input.conversation)
-    return total + tokens_of_text(repr(model_input.current_state))
+    return total + state_tokens(model_input)
 
 
 def context_key(inputs: PromptInputs) -> str:
@@ -366,7 +375,7 @@ class Compactor:
             if not isinstance(part, CompressedHistory) and part_anchor(part, by_event, by_run) > mark.event_sequence
         )
         if mark.state_revision != basis.state_revision:
-            added += tokens_of_text(repr(model_input.current_state))
+            added += state_tokens(model_input)
         return ContextEstimate(mark.input_tokens + added, measured=True)
 
     def request_size(self, model_input: ModelInput) -> int:

@@ -15,10 +15,12 @@ from testkit import final, user
 
 from himari.bootstrap.application import Application
 from himari.bootstrap.operator import OPERATOR
-from himari.common import EventId, TextBlock, TrustedScope
-from himari.data.api import PersistedStateBasis, PromptBasis
+from himari.common import ArtifactId, EventId, TextBlock, TrustedScope
+from himari.control.api import DriveState
+from himari.data.api import Artifact, PersistedStateBasis, PromptBasis
 from himari.prompt.api import (
     NOTE_CHARS,
+    NOTES_HEADER,
     NOTES_TOTAL_CHARS,
     CurrentStateProjection,
     ModelInput,
@@ -26,9 +28,9 @@ from himari.prompt.api import (
     SourceNote,
     UserTurn,
 )
-from himari.prompt.compaction import context_key, request_tokens
+from himari.prompt.compaction import context_key, request_tokens, tokens_of_text
 from himari.prompt.composer import CUT, fit_notes
-from himari.provider.openrouter import NOTES_HEADER, OpenRouterAdapter
+from himari.provider.openrouter import OpenRouterAdapter
 from himari.provider.scripted import ScriptedAdapter
 
 EMPTY_STATE = PersistedStateBasis(0, 0, (), (), ())
@@ -62,37 +64,44 @@ def open_app(tmp_path: Path, **entry: Any) -> tuple[Path, FakeMcpServer]:
     return root, server
 
 
-def drive(root: Path, server: FakeMcpServer, *, enabled: bool) -> ModelInput:
+def drive(root: Path, server: FakeMcpServer, *, enabled: bool, context_tokens: int | None = None,
+          ) -> tuple[DriveState, ModelInput | None]:
     script = ScriptedAdapter([final("ok")])
 
-    async def run() -> ModelInput:
+    async def run() -> tuple[DriveState, ModelInput | None]:
         app = await Application.open(root, script, model_id="scripted-model", sandbox=False,
-                                     mcp_transport=server.transport())
+                                     mcp_transport=server.transport(), context_tokens=context_tokens)
         try:
             scope = TrustedScope(OPERATOR, await app.create_conversation(OPERATOR))
             await app.set_tool_source(scope, "calliope", enabled)
-            await app.runtime.driver.drive(scope, user("go"))
-            return script.prepared_inputs[-1]
+            result = await app.runtime.driver.drive(scope, user("go"))
+            return result.state, (script.prepared_inputs[-1] if script.prepared_inputs else None)
         finally:
             await app.close()
 
     return asyncio.run(run())
 
 
+def sent_input(root: Path, server: FakeMcpServer, *, enabled: bool) -> ModelInput:
+    state, model_input = drive(root, server, enabled=enabled)
+    assert state is DriveState.COMPLETED and model_input is not None
+    return model_input
+
+
 def test_a_servers_notes_reach_the_model_only_while_it_is_on(tmp_path: Path) -> None:
     root, server = open_app(tmp_path)
-    on = drive(root, server, enabled=True)
+    on = sent_input(root, server, enabled=True)
     assert on.source_notes == (SourceNote("calliope", "system", server.instructions or ""),)
     root2, _ = open_app(tmp_path / "off")
-    off = drive(root2, server, enabled=False)
+    off = sent_input(root2, server, enabled=False)
     assert off.source_notes == ()
 
 
 def test_the_operator_places_them_as_data_or_not_at_all(tmp_path: Path) -> None:
     root, server = open_app(tmp_path, instructions="data")
-    assert drive(root, server, enabled=True).source_notes[0].placement == "data"
+    assert sent_input(root, server, enabled=True).source_notes[0].placement == "data"
     root2, _ = open_app(tmp_path / "off", instructions="off")
-    assert drive(root2, server, enabled=True).source_notes == ()
+    assert sent_input(root2, server, enabled=True).source_notes == ()
 
 
 # --- context key and token estimate --------------------------------------------------------
@@ -111,10 +120,46 @@ def model_input(notes: tuple[SourceNote, ...]) -> ModelInput:
     )
 
 
-def test_notes_count_in_the_token_estimate() -> None:
+def sent_tokens(model_input: ModelInput) -> int:
+    """What the model is sent, message by message, at the estimate's rate."""
+    return sum(tokens_of_text(m["content"]) for m in messages_of(model_input))
+
+
+ESCAPED = "<>&\"\\\n\x01"  # what JSON escapes: six bytes for each of the first three
+
+
+def test_notes_count_in_the_token_estimate_as_they_are_sent() -> None:
+    """PR #41 review B1: a "data" note is measured escaped, as sent."""
     plain = request_tokens(model_input(()))
-    noted = request_tokens(model_input((SourceNote("calliope", "system", "n" * 4000),)))
-    assert noted > plain + 4000 // 4
+    for placement in ("system", "data"):
+        for text in ("n" * NOTE_CHARS, ESCAPED * (NOTE_CHARS // len(ESCAPED)), "<" * NOTE_CHARS):
+            noted = model_input(fit_notes((SourceNote("calliope", placement, text),)))
+            assert request_tokens(noted) >= sent_tokens(noted) > sent_tokens(model_input(()))
+            assert request_tokens(noted) > plain + len(text.encode()) // 3
+    every = model_input(fit_notes(tuple(SourceNote(f"s{i}", "data", "<" * NOTE_CHARS) for i in range(4))))
+    assert request_tokens(every) >= sent_tokens(every) >= 4 * 6 * NOTE_CHARS // 3  # 16,000 chars, six bytes each
+
+
+def test_the_state_is_measured_as_sent_too() -> None:
+    """The same rule for the rest of the state block: an artifact of "<"."""
+    basis = dataclasses.replace(EMPTY_STATE, artifacts=(Artifact(ArtifactId("a1"), "note", 1, "<" * 3000),))
+    noted = dataclasses.replace(model_input(()), current_state=CurrentStateProjection(basis=basis))
+    assert request_tokens(noted) >= sent_tokens(noted) >= 6 * 3000 // 3
+
+
+def test_a_data_note_over_the_hard_limit_is_not_sent(tmp_path: Path) -> None:
+    """Near the limit: what fits raw but not escaped is refused, not sent."""
+    root, server = open_app(tmp_path, instructions="data")
+    server.instructions = "<" * NOTE_CHARS
+    sent = sent_input(root, server, enabled=True)
+    escaped = request_tokens(sent)
+    raw = request_tokens(dataclasses.replace(sent, source_notes=(SourceNote("calliope", "system", "<" * NOTE_CHARS),)))
+    assert raw < escaped - 4000  # the raw text would have looked like it fits
+    state, _ = drive(root, server, enabled=True, context_tokens=(raw + escaped) // 2)
+    assert state is DriveState.REQUEST_REJECTED
+    root2, _ = open_app(tmp_path / "system", instructions="system")
+    state, _ = drive(root2, server, enabled=True, context_tokens=(raw + escaped) // 2)
+    assert state is DriveState.COMPLETED  # the same text unescaped, in the system message, fits
 
 
 def test_notes_are_part_of_the_context_key(tmp_path: Path) -> None:
@@ -132,9 +177,13 @@ def test_notes_are_part_of_the_context_key(tmp_path: Path) -> None:
 # --- rendering (OpenRouter) ----------------------------------------------------------------
 
 
-def messages(notes: tuple[SourceNote, ...]) -> list[dict[str, Any]]:
-    body = json.loads(OpenRouterAdapter("sk-test").prepare_native_request(model_input(notes)).body)
+def messages_of(model_input: ModelInput) -> list[dict[str, Any]]:
+    body = json.loads(OpenRouterAdapter("sk-test").prepare_native_request(model_input).body)
     return body["messages"]  # type: ignore[no-any-return]
+
+
+def messages(notes: tuple[SourceNote, ...]) -> list[dict[str, Any]]:
+    return messages_of(model_input(notes))
 
 
 def test_system_notes_are_a_labelled_section_after_himaris_instructions() -> None:
