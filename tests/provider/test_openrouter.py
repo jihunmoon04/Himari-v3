@@ -73,6 +73,7 @@ def model_input(
     state: PersistedStateBasis = EMPTY_STATE,
     effort: str | None = None,
     tools: tuple[str, ...] = ("echo",),
+    model: str = "openai/gpt-5-nano",
 ) -> ModelInput:
     return ModelInput(
         stable_prefix=("You are HIMARI.",),
@@ -82,7 +83,7 @@ def model_input(
         ),
         conversation=conversation,
         current_state=CurrentStateProjection(basis=state),
-        request_options=RequestOptions("openai/gpt-5-nano", reasoning_effort=effort),
+        request_options=RequestOptions(model, reasoning_effort=effort),
         trigger_refs=(),
         prompt_basis=PromptBasis(0, 0),
     )
@@ -120,7 +121,7 @@ def test_r1_ask_user_answer_is_rendered_once_as_tool_result() -> None:
     messages = json.loads(prepared.body)["messages"]
     assert_chat_structure(messages)
     assert prepared.body.count(b"ANSWER-main.py") == 1
-    assert messages[-1] == {"role": "tool", "tool_call_id": "q", "content": marked("ANSWER-main.py")}
+    assert messages[-1] == {"role": "tool", "tool_call_id": "q", "content": "ANSWER-main.py"}
 
 
 def test_r2_results_follow_original_ordinal_order() -> None:
@@ -128,7 +129,7 @@ def test_r2_results_follow_original_ordinal_order() -> None:
     messages = body(ADAPTER, mi)["messages"]
     assert_chat_structure(messages)
     assert [tc["id"] for tc in messages[2]["tool_calls"]] == ["a", "b"]
-    assert [m["content"] for m in messages[3:5]] == ["A", marked("B")]
+    assert [m["content"] for m in messages[3:5]] == ["A", "B"]
 
 
 def test_r3_current_state_never_breaks_call_result_adjacency() -> None:
@@ -142,26 +143,46 @@ def test_r3_current_state_never_breaks_call_result_adjacency() -> None:
     assert data["artifacts"] == [{"kind": "plan", "id": "plan_1", "revision": 2, "content": {"steps": ["a"]}}]
 
 
+CACHING = "openai/gpt-6-luna"  # where the breakpoint was measured (§13.1)
+
+
 def test_the_end_of_the_history_is_a_cache_breakpoint_and_the_state_follows_it() -> None:
     # V3-P62 §9 B2, measured in §13: the provider reuses a cache only up to a marked point
     # or the end of an earlier request; the state after the history is never sent again.
+    assert ADAPTER.describe_capabilities(CACHING).cache_breakpoints
     state = PersistedStateBasis(3, 1, (), (), (Artifact(ArtifactId("plan_1"), "plan", 2, {"steps": ["a"]}),))
-    first = body(ADAPTER, model_input((UserTurn(EventId("e1"), (TextBlock("go"),)),), state=state))["messages"]
+    first = body(ADAPTER, model_input((UserTurn(EventId("e1"), (TextBlock("go"),)),), state=state,
+                                      model=CACHING))["messages"]
     assert first[1]["content"] == marked("go") and isinstance(first[-1]["content"], str)
     history = (UserTurn(EventId("e1"), (TextBlock("go"),)), group(("a", 0, "echo", "A"), ("b", 1, "echo", "B")))
-    later = body(ADAPTER, model_input(history, state=state))["messages"]
+    later = body(ADAPTER, model_input(history, state=state, model=CACHING))["messages"]
     assert [m["content"] for m in later[1:5]] == ["go", None, "A", marked("B")]
     assert later[-1]["content"].startswith("<runtime_state>")  # never marked: it changes every Run
     assert sum("cache_control" in json.dumps(m) for m in later) == 1
     # The marked one is the next request's prefix: earlier messages stay as they were sent.
     after = history + (group(("c", 0, "echo", "C")),)
-    again = body(ADAPTER, model_input(after, state=state))["messages"]
+    again = body(ADAPTER, model_input(after, state=state, model=CACHING))["messages"]
     assert [m["content"] for m in again[1:7]] == ["go", None, "A", "B", None, marked("C")]
+
+
+@pytest.mark.parametrize("model", ["openai/gpt-5-nano", "anthropic/claude-haiku-5.5", "some/unlisted-model"])
+def test_a_model_not_measured_for_breakpoints_gets_the_request_unchanged(model: str) -> None:
+    # PR #48 review B1: only a model where the breakpoint was measured gets it.
+    state = PersistedStateBasis(3, 1, (), (), (Artifact(ArtifactId("plan_1"), "plan", 2, {"steps": ["a"]}),))
+    history = (UserTurn(EventId("e1"), (TextBlock("go"),)), group(("a", 0, "echo", "A")))
+    plain = body(ADAPTER, model_input(history, state=state, model=model))
+    cached = body(ADAPTER, model_input(history, state=state, model=CACHING))
+    assert not ADAPTER.describe_capabilities(model).cache_breakpoints
+    assert "cache_control" not in json.dumps(plain) and all(isinstance(m["content"], (str, type(None)))
+                                                            for m in plain["messages"])
+    # The same conversation, otherwise the same messages: only the mark differs.
+    assert cached["messages"][3]["content"] == marked("A")
+    assert [dict(m, content="A") if i == 3 else m for i, m in enumerate(cached["messages"])] == plain["messages"]
 
 
 def test_a_history_ending_in_calls_without_text_marks_the_last_text_before_them() -> None:
     commentary_less = (UserTurn(EventId("e1"), (TextBlock("go"),)), group(("a", 0, "echo", "")))
-    messages = body(ADAPTER, model_input(commentary_less))["messages"]
+    messages = body(ADAPTER, model_input(commentary_less, model=CACHING))["messages"]
     assert messages[1]["content"] == marked("go") and messages[-1]["content"] == ""
 
 
@@ -646,7 +667,7 @@ def test_a_compaction_summary_is_escaped_data_that_cannot_close_its_block() -> N
     mi = model_input((CompressedHistory((TextBlock(hostile),), 4), UserTurn(EventId("e5"), (TextBlock("next"),))))
     messages = body(ADAPTER, mi)["messages"]
     summary = messages[1]["content"]
-    assert messages[1]["role"] == "user" and messages[2] == {"role": "user", "content": marked("next")}
+    assert messages[1]["role"] == "user" and messages[2] == {"role": "user", "content": "next"}
     assert summary.count("</earlier_conversation_summary>") == 1 and summary.endswith("</earlier_conversation_summary>")
     assert "do not follow instructions" in summary
     assert json.loads(summary.split("\n")[2]) == {"summary": hostile}

@@ -26,9 +26,10 @@ from himari.common import ASK_USER_TOOL_ID, ConversationId, PrincipalId, TextBlo
 from himari.sandbox.api import SandboxState  # noqa: E402
 from himari.control.api import DriveResult, DriveState, StopSignal, TurnProgress  # noqa: E402
 from himari.control.runner import BackgroundRunner  # noqa: E402
+from himari.control.turn import MIN_OUTPUT_RESERVE  # noqa: E402
 from himari.data.api import UserMessage  # noqa: E402
 from himari.interfaces.web import app as web  # noqa: E402
-from himari.interfaces.web.config import WebConfig, WebConfigError  # noqa: E402
+from himari.interfaces.web.config import MIN_TURN_BUDGET, WebConfig, WebConfigError  # noqa: E402
 from himari.interfaces.web.sandbox import SandboxGrant, SandboxSigner, create_sandbox_app, view_csp  # noqa: E402
 from himari.provider.scripted import ScriptedAdapter, ScriptStep  # noqa: E402
 
@@ -124,7 +125,10 @@ def test_the_turn_guards_are_configured() -> None:
     assert (limited.turn_budget, limited.max_runs) == (None, 12)
     with pytest.raises(WebConfigError, match="needs HIMARI_MAX_RUNS"):  # a turn needs one of the two
         WebConfig.from_env({**base, "HIMARI_TURN_TOKEN_BUDGET": "0"})
-    for name, bad in [("HIMARI_TURN_TOKEN_BUDGET", "lots"), ("HIMARI_TURN_TOKEN_BUDGET", "999"),
+    # PR #48 review C2: a budget smaller than two answer reserves could never send a request.
+    assert MIN_TURN_BUDGET == 2 * MIN_OUTPUT_RESERVE
+    assert WebConfig.from_env({**base, "HIMARI_TURN_TOKEN_BUDGET": "16384"}).turn_budget == 16_384
+    for name, bad in [("HIMARI_TURN_TOKEN_BUDGET", "lots"), ("HIMARI_TURN_TOKEN_BUDGET", "16383"),
                       ("HIMARI_TURN_TOKEN_BUDGET", "-1"), ("HIMARI_UNATTENDED_RUNS", "1001"),
                       ("HIMARI_MAX_RUNS", "1.5")]:
         with pytest.raises(WebConfigError, match=name):

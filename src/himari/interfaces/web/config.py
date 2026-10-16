@@ -41,6 +41,9 @@ TURN_BUDGET_VAR = "HIMARI_TURN_TOKEN_BUDGET"  # V3-P62: 0 turns it off
 UNATTENDED_RUNS_VAR = "HIMARI_UNATTENDED_RUNS"  # 0 turns it off
 MAX_RUNS_VAR = "HIMARI_MAX_RUNS"  # 0 (default): no Run limit
 DEFAULT_TURN_BUDGET = 3_000_000
+# Each request keeps 8,192 tokens for its answer (control.turn.MIN_OUTPUT_RESERVE),
+# so a smaller budget could refuse even the first request (PR #48 review C2).
+MIN_TURN_BUDGET = 16_384
 DEFAULT_UNATTENDED_RUNS = 20
 
 DEFAULT_HOST = "127.0.0.1"
@@ -129,7 +132,8 @@ class WebConfig:
         if not data_root:
             raise WebConfigError(f"{DATA_ROOT_VAR} must name the private data directory")
         effort = source.get(REASONING_VAR, "").strip() or None
-        turn_budget = _optional(source.get(TURN_BUDGET_VAR), TURN_BUDGET_VAR, DEFAULT_TURN_BUDGET, 1000, 10**9)
+        turn_budget = _optional(source.get(TURN_BUDGET_VAR), TURN_BUDGET_VAR, DEFAULT_TURN_BUDGET, MIN_TURN_BUDGET,
+                                10**9)
         unattended = _optional(source.get(UNATTENDED_RUNS_VAR), UNATTENDED_RUNS_VAR, DEFAULT_UNATTENDED_RUNS, 1, 1000)
         max_runs = _optional(source.get(MAX_RUNS_VAR), MAX_RUNS_VAR, None, 1, 1000)
         if turn_budget is None and max_runs is None:

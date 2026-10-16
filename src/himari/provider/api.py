@@ -47,6 +47,9 @@ class ProviderCapabilities(DeepFrozen):
     tool_result_attachments: bool = False
     context_tokens: int | None = None  # the model's context window, if known
     max_output_tokens: int | None = None  # the most one answer may take of that window, if known
+    # A marked cache breakpoint is accepted and honoured (V3-P62 §9 B2); only
+    # where it was measured — unverified models get the request unchanged.
+    cache_breakpoints: bool = False
 
 
 @dataclass(frozen=True)
