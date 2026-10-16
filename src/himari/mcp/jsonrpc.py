@@ -17,7 +17,9 @@ from typing import Any
 
 
 class McpError(Exception):
-    pass
+    def __init__(self, message: str, code: object = None) -> None:
+        super().__init__(message)
+        self.code = code  # the JSON-RPC error code, when the server answered with one
 
 
 class McpRefused(McpError):
@@ -26,6 +28,11 @@ class McpRefused(McpError):
 
 class McpUncertain(McpError):
     """The request was sent; whether it took effect is unknown."""
+
+
+class McpSessionChanged(McpRefused):
+    """A request meant for one session was not sent: that session is gone
+    or replaced (V3-P60 C6). Nothing went to another session in its place."""
 
 
 # JSON-RPC errors that mean the request was not carried out.
@@ -59,7 +66,7 @@ def result_of(message: object, request_id: int, method: str) -> Mapping[str, Any
         code = error.get("code") if isinstance(error, dict) else None
         text = error.get("message") if isinstance(error, dict) else None
         failure = McpRefused if code in REFUSALS else McpUncertain
-        raise failure(f"{method}: server error {code}: {str(text)[:200]}")
+        raise failure(f"{method}: server error {code}: {str(text)[:200]}", code)
     result = message.get("result")
     if not isinstance(result, dict):
         raise McpUncertain(f"{method}: the response has no result object")

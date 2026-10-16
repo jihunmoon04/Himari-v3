@@ -44,6 +44,7 @@ from himari.common import JsonValue, ModelToolResult, TextBlock
 from himari.mcp.client import UI_MIME_TYPE, McpClient, McpError, McpRefused, http_client
 from himari.mcp.client import capabilities
 from himari.mcp.config import McpConfig, McpServerConfig, McpStdioConfig, McpToolConfig, McpUiPolicy
+from himari.mcp.resources import ResourceTool, resource_tools
 from himari.mcp.stdio import RESTART_NOTICE, ListingChannel, ProcessLauncher, StdioChannel, StdioServer
 from himari.tool.api import (
     MAX_APP_PAYLOAD_BYTES,
@@ -259,6 +260,8 @@ class McpConnection:
     prompts: dict[str, tuple[PromptInfo, ...]] = field(default_factory=dict)
     capabilities: dict[str, frozenset[str]] = field(default_factory=dict)
     by_source: dict[str, McpClient] = field(default_factory=dict)
+    # V3-P60 §5: each server's list_resources and read_resource, when its resources are on.
+    resource_tools: list[ResourceTool] = field(default_factory=list)
 
     async def get_prompt(self, source: str, name: str, arguments: Mapping[str, str], key: str) -> Mapping[str, Any]:
         """``prompts/get`` in that Conversation's session; McpRefused if the
@@ -351,6 +354,7 @@ class _Started:
     note: SourceNote | None = None
     prompts: tuple[PromptInfo, ...] = ()
     capabilities: frozenset[str] = frozenset()
+    resource_tools: list[ResourceTool] = field(default_factory=list)
 
 
 # Bootstrap's launcher for a stdio server; raising says why it cannot run (the reason is shown).
@@ -365,6 +369,13 @@ class _Unavailable:
 
     async def request(self, method: str, params: Mapping[str, Any], *, key: str | None = None) -> Mapping[str, Any]:
         raise McpRefused("the server is not available")
+
+    async def request_in(self, method: str, params: Mapping[str, Any], *, key: str | None = None,
+                         session: object | None = None) -> tuple[object, Mapping[str, Any]]:
+        raise McpRefused("the server is not available")
+
+    def current_session(self, key: str | None) -> object | None:
+        return None
 
     def take_restart(self, key: str | None) -> bool:
         return False
@@ -489,13 +500,20 @@ async def _start(server: McpServerConfig, check_schema: InputSchemaCheck, transp
             problems.append(f"prompts left out: the answer could not be used ({type(error).__name__})")
     if lister is not None:
         await lister.aclose()
-    resources = server.resources is not None and "resources" in capabilities
-    usable = bool(handlers or note or prompts or resources)  # a server may offer no Tools (V3-P60 B4)
+    readers: list[ResourceTool] = []
+    if server.resources is not None and "resources" in capabilities:
+        # Only a server Tool that is registered takes the name (PR #42 re-review B2).
+        readers, clashes = resource_tools(client, server.name, server.resources,
+                                          {h.definition.tool_id for h in handlers})
+        problems.extend(clashes)
+    usable = bool(handlers or note or prompts or readers)  # a server may offer no Tools (V3-P60 B4)
     if not usable:
         problems.append("nothing to use: no listed Tool, instructions, prompts or resources")
     status = SourceStatus(server.name, server.enabled_by_default, usable,
-                          tuple(h.definition.tool_id for h in handlers), tuple(problems))
-    return _Started(client, handlers, status, note if usable else None, prompts if usable else (), capabilities)
+                          tuple(h.definition.tool_id for h in handlers) + tuple(r.definition.tool_id for r in readers),
+                          tuple(problems))
+    return _Started(client, handlers, status, note if usable else None, prompts if usable else (), capabilities,
+                    readers)
 
 
 async def _read_views(client: McpClient, source: str, wanted: dict[str, list[McpTool]]) -> list[str]:
@@ -549,4 +567,5 @@ async def connect(config: McpConfig, *, check_schema: InputSchemaCheck,
         prompts={name: s.prompts for name, s in zip(names, started, strict=True) if s.prompts},
         capabilities={name: s.capabilities for name, s in zip(names, started, strict=True)},
         by_source={name: s.client for name, s in zip(names, started, strict=True)},
+        resource_tools=[t for s in started for t in s.resource_tools],
     )

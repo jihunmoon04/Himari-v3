@@ -74,7 +74,17 @@ class FakeStdioServer:
                 result = {}
             elif method == "tools/list":
                 result = {"tools": self.launcher.tools}
+            elif method in ("resources/list", "resources/templates/list"):
+                index = self.launcher.processes.index(self.process)
+                if method == "resources/list":
+                    listed = self.launcher.listed_for(index) if self.launcher.listed_for else self.launcher.listed
+                    result = {"resources": listed}
+                else:
+                    result = {"resourceTemplates": self.launcher.templates}
             elif method == "resources/read":
+                if params["uri"] not in self.launcher.resources:
+                    await self.send({"jsonrpc": "2.0", "id": request_id, "error": {"code": -32002, "message": "no"}})
+                    return
                 result = self.launcher.resources[params["uri"]]
             elif method == "tools/call":
                 handler = self.launcher.handlers[params["name"]]
@@ -88,6 +98,9 @@ class FakeStdioServer:
                 await self.send({"jsonrpc": "2.0", "id": request_id, "error": {"code": -32800, "message": "cancelled"}})
             return
         await self.send({"jsonrpc": "2.0", "id": request_id, "result": result})
+        hook = self.launcher.after_method.pop(method, None)
+        if hook is not None:
+            hook(self.process)
 
     async def send(self, message: Mapping[str, Any]) -> None:
         await self.out.put(json.dumps(message).encode())
@@ -161,6 +174,11 @@ class FakeLauncher:
         self.stop_reading = False  # tools/call writes block forever
         self.shutdown_delay = 0.0
         self.most_alive = 0  # the most processes alive at once (the listing process aside)
+        # V3-P60 §5: the resources each process lists (by its index), and a hook run once a method is answered.
+        self.listed: list[Any] = []
+        self.listed_for: Callable[[int], list[Any]] | None = None
+        self.templates: list[Any] = []
+        self.after_method: dict[str, Callable[[FakeProcess], None]] = {}
 
     async def launch(self, argv: Sequence[str], env: Mapping[str, str], cwd: str) -> FakeProcess:
         if self.fail_launch is not None:

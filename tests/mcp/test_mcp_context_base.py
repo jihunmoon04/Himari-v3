@@ -291,7 +291,7 @@ def test_a_prompt_list_that_never_answers_keeps_the_tools_views(monkeypatch: pyt
                                    launcher_for=lambda source, stdio: launcher)
         try:
             (status,) = connection.statuses
-            assert status.available and status.tool_ids == ("calliope/echo",)
+            assert status.available and status.tool_ids == ("calliope/echo", "calliope/list_resources", "calliope/read_resource")
             assert connection.ui_for("calliope/echo") is not None  # the view was read
             assert status.problems == ("prompts left out: no answer in time",)
         finally:
