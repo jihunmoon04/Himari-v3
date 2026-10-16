@@ -62,7 +62,7 @@ from himari.tool.schema import check_tool_input_schema
 DATABASE_NAME = "himari.db"
 # One turn's guards (V3-P62): no Run limit by default; a token budget, a
 # no-progress stop, and a pause when no client reads the Conversation.
-DEFAULT_TURN_BUDGET = 1_000_000  # tokens per drive (O1)
+DEFAULT_TURN_BUDGET = 3_000_000  # tokens per drive (O1: the owner's choice, 2026-10-16)
 DEFAULT_UNATTENDED_RUNS = 20  # Runs without a client read in SEEN_SECONDS (O2)
 
 

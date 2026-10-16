@@ -78,7 +78,7 @@ HIMARI_DATA_ROOT=~/.himari python -m himari.interfaces.web --env-file .env
 
 - `.env`(git 제외)에 `OPENROUTER_API_KEY=...`를 둡니다. 선택: `HIMARI_MODEL`(기본 `openai/gpt-6-luna`), `HIMARI_REASONING_EFFORT`, `HIMARI_WEB_PORT`(기본 8765), `HIMARI_SANDBOX=0`(명령 실행 끄기).
 - 한 턴(메시지 하나에 대한 작업)은 Run 수 상한 없이 돕니다(V3-P62). 대신 세 가지가 턴을 지킵니다.
-  - 토큰 예산 `HIMARI_TURN_TOKEN_BUDGET`(기본 1,000,000, `0`이면 끔): 쓴 토큰과 다음 요청의 추정을 더해 예산을 넘으면 그 요청을 보내지 않고 멈춥니다.
+  - 토큰 예산 `HIMARI_TURN_TOKEN_BUDGET`(기본 3,000,000, `0`이면 끔): 쓴 토큰과 다음 요청의 추정을 더해 예산을 넘으면 그 요청을 보내지 않고 멈춥니다.
   - 진척 없음: 같은 결과만 되풀이하는 Run이 3번 이어지면 멈춥니다.
   - 자리 비움 `HIMARI_UNATTENDED_RUNS`(기본 20, `0`이면 끔): 60초 안에 대화를 읽은 클라이언트가 없는 채로 그만큼 Run이 지나면 일시정지합니다.
   - `HIMARI_MAX_RUNS`(기본 `0` = 없음)로 Run 수 상한을 더할 수 있습니다. 예산과 상한을 둘 다 끄면 시작이 거부됩니다.

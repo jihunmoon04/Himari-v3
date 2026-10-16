@@ -257,7 +257,7 @@ def test_a_turn_is_guarded_as_configured(tmp_path: Path) -> None:
             assert app.turn == TurnSettings(DEFAULT_TURN_BUDGET, DEFAULT_UNATTENDED_RUNS, None)
             assert (app.turn.no_progress_runs, app.turn.seen_seconds) == (3, 60.0)
             driver = app.runtime.driver
-            assert (driver._turn_budget, driver._max_runs, driver._no_progress_runs) == (1_000_000, None, 3)
+            assert (driver._turn_budget, driver._max_runs, driver._no_progress_runs) == (3_000_000, None, 3)
             assert app.runner._unattended_runs == 20
         finally:
             await app.close()

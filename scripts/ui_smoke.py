@@ -63,7 +63,7 @@ OPENED: dict[str, tuple[Application, asyncio.AbstractEventLoop]] = {}  # root ->
 
 
 def serve(root: str, port: int = PORT, provider: ScriptedAdapter | None = None,
-          context_tokens: int | None = None, turn_budget: int = 1_000_000) -> uvicorn.Server:
+          context_tokens: int | None = None, turn_budget: int = 3_000_000) -> uvicorn.Server:
     config = WebConfig("127.0.0.1", port, frozenset({"127.0.0.1"}), frozenset({f"http://127.0.0.1:{port}"}), False,
                        root, "scripted-model", None, False)
 

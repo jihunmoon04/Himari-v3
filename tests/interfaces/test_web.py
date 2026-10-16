@@ -115,7 +115,7 @@ def test_the_turn_guards_are_configured() -> None:
     # V3-P62: a token budget and the unattended pause by default, no Run limit; 0 turns one off.
     base = {"HIMARI_DATA_ROOT": "/srv/himari"}
     default = WebConfig.from_env(base)
-    assert (default.turn_budget, default.unattended_runs, default.max_runs) == (1_000_000, 20, None)
+    assert (default.turn_budget, default.unattended_runs, default.max_runs) == (3_000_000, 20, None)
     assert (default.turn_budget, default.unattended_runs) == (DEFAULT_TURN_BUDGET, DEFAULT_UNATTENDED_RUNS)
     tuned = WebConfig.from_env({**base, "HIMARI_TURN_TOKEN_BUDGET": " 250000 ", "HIMARI_UNATTENDED_RUNS": "0",
                                 "HIMARI_MAX_RUNS": "40"})
@@ -242,7 +242,7 @@ def test_the_server_info_is_for_the_signed_in_operator(server: Server) -> None:
     server.sign_in()
     info = server.client.get("/api/server").json()
     assert info == {"model": "scripted-model", "sandbox": "unavailable", "context_budget": 128_000,
-                    "turn": {"token_budget": 1_000_000, "unattended_runs": 20, "max_runs": None,
+                    "turn": {"token_budget": 3_000_000, "unattended_runs": 20, "max_runs": None,
                              "no_progress_runs": 3, "seen_seconds": 60.0}}  # V3-P62's defaults
 
 
@@ -797,7 +797,7 @@ def test_a_job_reports_what_its_turn_used(server: Server) -> None:
     queue(server, calls(("inside/write_file", {"path": "a.txt", "content": "x"})), final("done"))
     assert server.post(f"/api/conversations/{cid}/messages", {"text": "hi"}).status_code == 202
     usage = server.wait_idle(cid)["job"]["turn_usage"]
-    assert usage["runs"] == 2 and usage["budget"] == 1_000_000 and usage["max_runs"] is None
+    assert usage["runs"] == 2 and usage["budget"] == 3_000_000 and usage["max_runs"] is None
     assert usage["input_tokens"] > 0 and usage["output_tokens"] > 0
 
 
