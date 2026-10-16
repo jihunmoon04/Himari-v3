@@ -236,6 +236,10 @@ def test_a_long_list_is_given_in_parts_with_himaris_cursor() -> None:
         assert server.methods.count("resources/list") == 7  # one listing (cached), seven server pages
         bad = await use(connection, "list_resources", cursor="999")
         assert bad.status is ToolStatus.FAILED and "cursor" in text_of(bad)
+        # a live model sent "" and "start" (2026-10-16 trial): "" is the first page; "start" is refused, saying how
+        assert listing(await use(connection, "list_resources", cursor=""))["resources"][0]["uri"] == "calliope://r/0"
+        start = await use(connection, "list_resources", cursor="start")
+        assert start.status is ToolStatus.FAILED and "leave cursor out to list from the start" in text_of(start)
         await connection.aclose()
 
     run(scenario)

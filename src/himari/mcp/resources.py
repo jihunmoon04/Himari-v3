@@ -372,15 +372,18 @@ class ResourceReader:
             except McpSessionChanged:
                 if attempt == 2:
                     raise
+        # The cursor is this tool's own token, as MCP's are the server's: left
+        # out (or empty — models often send "") it means the first page.
         try:
-            start = 0 if cursor is None else int(cursor)
+            start = 0 if cursor is None or cursor == "" else int(cursor)
         except ValueError:
             start = -1
         shown: list[dict[str, JsonValue]] = [r.entry() for r in index.resources.values() if r.shown]
         shown_templates = [t.entry() for t in index.templates if t.shown]
         items = [("resources", e) for e in shown] + [("templates", e) for e in shown_templates]
         if not 0 <= start <= len(items):
-            raise ValueError("the cursor is not one this tool gave")
+            raise ValueError("the cursor is not one this tool gave: leave cursor out to list from the start, "
+                             "and to go on pass exactly the next_cursor of the previous result")
         out: dict[str, list[JsonValue]] = {"resources": [], "templates": []}
         position = start
         budget = LIST_CHARS - 400  # room for the cursor and the note
@@ -430,7 +433,8 @@ class ResourceReader:
 
 LIST_SCHEMA: dict[str, JsonValue] = {
     "type": "object",
-    "properties": {"cursor": {"type": "string", "description": "next_cursor from the previous result"}},
+    "properties": {"cursor": {"type": "string", "description": "Leave out on the first call. To go on, the "
+                                                               "next_cursor of the previous result, exactly."}},
     "additionalProperties": False,
 }
 READ_SCHEMA: dict[str, JsonValue] = {
@@ -453,8 +457,8 @@ class ResourceTool:
         source = reader.source
         if name == LIST_NAME:
             description = (f"List the resources the {source} server offers to read: their URIs, and URI templates "
-                           f"(RFC 6570) describing more. Read one with {source}/{READ_NAME}. When the result has "
-                           "next_cursor, call again with it for the rest.")
+                           f"(RFC 6570) describing more. Read one with {source}/{READ_NAME}. Call it without cursor "
+                           "first; when the result has next_cursor, call again with exactly that for the rest.")
             schema = LIST_SCHEMA
         else:
             description = (f"Read a resource of the {source} server: a URI from {source}/{LIST_NAME}, or one a "
