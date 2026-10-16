@@ -12,7 +12,8 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 
 from himari.control.ask_user import AskUserTool
-from himari.control.driver import Driver
+from himari.control.api import TURN_GUIDANCE
+from himari.control.driver import NO_PROGRESS_RUNS, Driver
 from himari.data.memory import InMemoryData, InMemoryStore
 from himari.data.sqlite import SqliteData, SqliteStore
 from himari.environment.api import EnvironmentPlugin
@@ -52,7 +53,9 @@ def build_runtime(
     store: Store | None = None,
     instructions: Sequence[str] = DEFAULT_INSTRUCTIONS,
     model_id: str = "scripted-model",
-    max_runs_per_drive: int = 16,
+    max_runs_per_drive: int | None = 16,  # None: no Run limit (then a turn_budget is needed, V3-P62)
+    turn_budget: int | None = None,  # tokens a drive may use (V3-P62 §3); None: none
+    no_progress_runs: int = NO_PROGRESS_RUNS,
     allow_require_user_tools: bool = False,  # keep False in P0 (no resolution API)
     reasoning_effort: str | None = None,
     context_budget: ContextBudget | None = None,  # None: no compaction or size check
@@ -73,6 +76,8 @@ def build_runtime(
         raise ValueError(f"no default for the external sources {sorted(sources - defaults.keys())}")
     access = ConfiguredExternalAccess(defaults, data)
     dispatcher = Dispatcher(registry, data, data, data, access)
+    if turn_budget is not None:  # the rule for the turn's state, fixed in the system prompt (V3-P62 §8)
+        instructions = (*instructions, TURN_GUIDANCE)
     driver = Driver(
         log=data,
         loader=ContextLoader(data, data, registry, instructions, access, source_notes),
@@ -83,6 +88,8 @@ def build_runtime(
         max_runs_per_drive=max_runs_per_drive,
         planner=Compactor() if context_budget is not None else None,
         budget=context_budget,
+        turn_budget=turn_budget,
+        no_progress_runs=no_progress_runs,
     )
     return Runtime(store=store, data=data, registry=registry, driver=driver, access=access)
 

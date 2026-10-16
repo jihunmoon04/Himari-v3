@@ -8,7 +8,8 @@ import pytest
 from testkit import SCOPE, calls, final, runtime, user
 
 from himari.common import ASK_USER_TOOL_ID, ConversationId, PrincipalId, TrustedScope
-from himari.control.api import ControlError, ControlErrorCode, DriveResult, DriveState, JobStatus, StopRequest, StopSignal
+from himari.control.api import (ControlError, ControlErrorCode, DriveResult, DriveState, JobStatus, StopRequest,
+                                StopSignal, TurnProgress)
 from himari.control.runner import BackgroundRunner
 from himari.data.api import DataError, DataErrorCode, UserMessage
 
@@ -34,7 +35,8 @@ class GatedDriver:
             raise self.outcome
         return self.outcome
 
-    async def drive(self, scope: TrustedScope, message: UserMessage, *, stop: StopSignal | None = None) -> DriveResult:
+    async def drive(self, scope: TrustedScope, message: UserMessage, *, stop: StopSignal | None = None,
+                     progress: TurnProgress | None = None) -> DriveResult:
         raise AssertionError("the runner accepts, then resumes")
 
     async def accept(self, scope: TrustedScope, message: UserMessage) -> None:
@@ -42,11 +44,13 @@ class GatedDriver:
             raise self.accept_error
         self.calls.append((scope, message))
 
-    async def resume(self, scope: TrustedScope, *, stop: StopSignal | None = None) -> DriveResult:
+    async def resume(self, scope: TrustedScope, *, stop: StopSignal | None = None,
+                     progress: TurnProgress | None = None) -> DriveResult:
         self.signals.append(stop)
         return await self._call(scope, None)
 
-    async def compact(self, scope: TrustedScope, *, stop: StopSignal | None = None) -> DriveResult:
+    async def compact(self, scope: TrustedScope, *, stop: StopSignal | None = None,
+                     progress: TurnProgress | None = None) -> DriveResult:
         self.compactions.append(scope)
         self.signals.append(stop)
         return await self._call(scope, None)

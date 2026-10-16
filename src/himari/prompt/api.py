@@ -68,6 +68,9 @@ class RequestOptions(DeepFrozen):
     # The Provider the request is for, set by the Driver. Prompt never
     # interprets it; it only decides which earlier measurements still apply.
     provider_key: str | None = None
+    # An opaque per-Conversation key, set by the Driver, for a Provider that
+    # routes a session's requests together (OpenRouter `session_id`, V3-P62 §9).
+    session_key: str | None = None
 
 
 # --- Provider-neutral history (CPP §6.1) ------------------------------------
@@ -143,6 +146,38 @@ class ModelInput(DeepFrozen):
     # Tool server notes of the servers on in this Conversation, by name, cut
     # to NOTE_CHARS each and NOTES_TOTAL_CHARS together (V3-P60 §3).
     source_notes: tuple[SourceNote, ...] = ()
+    # Control's view of this turn, set by the Driver for each request (V3-P62 §8):
+    # data only, rendered in the runtime state, never instructions.
+    turn_state: TurnState | None = None
+
+
+@dataclass(frozen=True)
+class TurnBudget(DeepFrozen):
+    """How much of the turn is left (V3-P62 §8), given only once it is low.
+    Token figures under a token budget; ``runs_left`` under a Run limit."""
+
+    low: bool
+    last: bool
+    used: int | None = None
+    budget: int | None = None
+    left: int | None = None
+    runs_left: int | None = None
+
+
+@dataclass(frozen=True)
+class RepeatedCall(DeepFrozen):
+    """A call that got the same result again in this turn (V3-P62 §4)."""
+
+    tool_id: str
+    times: int  # the how-many-th time with this same result
+    status: str
+    effect: str
+
+
+@dataclass(frozen=True)
+class TurnState(DeepFrozen):
+    budget: TurnBudget | None = None
+    repeated: tuple[RepeatedCall, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -337,7 +372,24 @@ def notes_section(notes: Sequence[SourceNote]) -> str | None:
     return NOTES_HEADER + "".join(f"\n\n## {n.source}\n{n.text}" for n in shown)
 
 
-def state_block(state: CurrentStateProjection, notes: Sequence[SourceNote] = ()) -> str | None:
+def turn_state_data(turn: TurnState | None) -> dict[str, object] | None:
+    """The turn's state as runtime-state data (V3-P62 §8): numbers and flags only."""
+    if turn is None:
+        return None
+    data: dict[str, object] = {}
+    if turn.budget is not None:
+        b = turn.budget
+        data["turn_budget"] = {k: v for k, v in (("used", b.used), ("budget", b.budget), ("left", b.left),
+                                                 ("runs_left", b.runs_left), ("low", b.low), ("last", b.last))
+                               if v is not None}
+    if turn.repeated:
+        data["progress"] = {"repeated": [{"tool": r.tool_id, "times": r.times, "status": r.status,
+                                          "effect": r.effect} for r in turn.repeated]}
+    return data or None
+
+
+def state_block(state: CurrentStateProjection, notes: Sequence[SourceNote] = (),
+                turn: TurnState | None = None) -> str | None:
     """The whole state is one JSON document, escaped by ``json_data``, so no
     dynamic value (ids, kinds, paths, content) can close the block or pass as
     markup. Escaping keeps the data boundary intact; it does not make prompt
@@ -375,6 +427,7 @@ def state_block(state: CurrentStateProjection, notes: Sequence[SourceNote] = ())
             "about": NOTES_ABOUT,
             "servers": [{"server": n.source, "notes": n.text} for n in shown],
         }
+    data.update(turn_state_data(turn) or {})
     if not data:
         return None
     return (

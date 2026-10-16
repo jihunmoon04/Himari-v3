@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import Any
 from datetime import UTC, datetime
 
@@ -192,7 +192,10 @@ def runtime(
     provider: ScriptedAdapter | None = None,
     context_budget: ContextBudget | None = None,
     instructions: Sequence[str] | None = None,
-    max_runs_per_drive: int = 16,
+    max_runs_per_drive: int | None = 16,
+    turn_budget: int | None = None,
+    no_progress_runs: int = 3,
+    external_defaults: Mapping[str, bool] | None = None,
 ) -> tuple[Runtime, ScriptedAdapter]:
     """Fresh runtime; pass ``restart(rt.store)`` to model a process restart."""
     adapter = provider if provider is not None else ScriptedAdapter(script)
@@ -208,6 +211,9 @@ def runtime(
         context_budget=context_budget,
         instructions=DEFAULT_INSTRUCTIONS if instructions is None else instructions,
         max_runs_per_drive=max_runs_per_drive,
+        turn_budget=turn_budget,
+        no_progress_runs=no_progress_runs,
+        external_defaults=external_defaults,
         # Tests exercising REQUIRE_USER opt in explicitly by using such a Tool;
         # the production default stays off (see test_registry_schema.py).
         allow_require_user_tools=any(

@@ -24,7 +24,9 @@ P0 scheduling is sequential in original ordinal order; parallel scheduling
   ``input_schema``, an Environment Tool whose kind is not active in this
   Conversation (even with no Workspace requirement: catalog exposure is
   not authorization), or a missing/revoked/mismatched Binding → DENIED
-  result to the model; the handler never runs.
+  result to the model; the handler never runs. The group's result names
+  these calls and the rule (``refusals``, V3-P62 §4); the records stay as
+  they are (a handler's own DENIED is never among them).
 - External source check and its concurrency contract (V3-P53): the source
   is checked before validation (which may take seconds in a child
   process) and **again after it, as the last step before the claim and
@@ -45,6 +47,7 @@ from dataclasses import replace
 
 from himari.common import (
     BindingId,
+    CallId,
     CallRef,
     ModelToolResult,
     RunId,
@@ -73,6 +76,7 @@ from himari.tool.api import (
     ExternalAccess,
     GroupDispatchResult,
     GroupState,
+    RefusalRule,
     ToolContext,
     ToolDefinition,
     ToolInvocation,
@@ -120,7 +124,11 @@ def _blocks(record: ToolExecutionRecord) -> bool:
 
 
 class _Denied(Exception):
-    pass
+    """A refusal before running, with the rule that made it (V3-P62 §4)."""
+
+    def __init__(self, message: str, rule: RefusalRule = RefusalRule.BINDING) -> None:
+        super().__init__(message)
+        self.rule = rule
 
 
 def _error(status: ToolStatus, message: str) -> ToolOutcome:
@@ -152,6 +160,7 @@ class Dispatcher:
     ) -> GroupDispatchResult:
         count = len(await self._log.read_tool_executions(scope, run_id))
         paused = False
+        refusals: dict[CallId, RefusalRule] = {}
         for index in range(count):
             # Re-read each step: the authoritative state, in original ordinal order.
             records = await self._log.read_tool_executions(scope, run_id)
@@ -164,13 +173,15 @@ class Dispatcher:
             if pause is not None and not self._suspending(record) and pause():
                 paused = True  # nothing more starts; the rest stays PENDING for resume
                 break
-            await self._run_one(scope, record)
+            rule = await self._run_one(scope, record)
+            if rule is not None:
+                refusals[record.call.call_id] = rule
         records = await self._log.read_tool_executions(scope, run_id)
         await self._report_reportable(scope, records)
         state = self._group_state(run_id, await self._log.read_tool_executions(scope, run_id))
         if paused and state.state is not GroupState.BLOCKED_UNKNOWN:
-            return GroupDispatchResult(run_id, GroupState.PAUSED)
-        return state
+            return GroupDispatchResult(run_id, GroupState.PAUSED, refusals=refusals)
+        return replace(state, refusals=refusals)
 
     async def cancel_group(self, scope: TrustedScope, run_id: RunId, reason: str) -> GroupDispatchResult:
         result = ModelToolResult((TextBlock(reason),), is_error=True)
@@ -194,14 +205,15 @@ class Dispatcher:
                 # never the current registry.
                 await self._log.commit_unknown_outcome(scope, record.call, UNKNOWN_OUTCOME_RESULT)
 
-    async def _run_one(self, scope: TrustedScope, record: ToolExecutionRecord) -> None:
+    async def _run_one(self, scope: TrustedScope, record: ToolExecutionRecord) -> RefusalRule | None:
+        """Runs one call; the rule if the Dispatcher refused it before running."""
         handler = self._registry.get(record.tool_id)
         if handler is None:
             await self._commit(scope, record.call, _error(ToolStatus.DENIED, f"unknown tool {record.tool_id}"), True)
-            return
+            return RefusalRule.UNKNOWN_TOOL
         d = handler.definition
         if d.completion is Completion.SUSPENDING:
-            return  # stays PENDING; Control turns this into WAITING_FOR_USER
+            return None  # stays PENDING; Control turns this into WAITING_FOR_USER
         record_event = d.conversation_record is ConversationRecord.FULL
         try:
             await self._check_source(scope, d)
@@ -210,7 +222,7 @@ class Dispatcher:
             else:
                 violations = validate(record.arguments, d.input_schema)
             if violations:
-                raise _Denied("invalid arguments: " + "; ".join(violations))
+                raise _Denied("invalid arguments: " + "; ".join(violations), RefusalRule.INVALID_ARGUMENTS)
             binding = await self._resolve_binding(scope, d, record)
             workspace = (
                 ConversationWorkspace(binding.workspace_id, binding.cwd_relative)
@@ -220,7 +232,7 @@ class Dispatcher:
             await self._check_source(scope, d)  # again, last: it may have been turned off while validating
         except _Denied as denied:
             await self._commit(scope, record.call, _error(ToolStatus.DENIED, str(denied)), record_event)
-            return
+            return denied.rule
         claimed = d.origin is not ToolOrigin.INTERNAL and d.effect_profile is not EffectProfile.READ
         if claimed:
             await self._log.claim_tool_execution(
@@ -234,7 +246,7 @@ class Dispatcher:
             if claimed:
                 # For the operator: which Tool, and the kind of failure (Q-39: never its text).
                 log.warning("%s raised %s after its claim: its outcome is unknown", record.tool_id, type(exc).__name__)
-                return  # uncertain; reported or blocking per the persisted policy
+                return None  # uncertain; reported or blocking per the persisted policy
             # Q-39: exception text may carry host paths or secrets; the model
             # only learns that the tool failed internally.
             outcome = ToolOutcome(
@@ -243,12 +255,14 @@ class Dispatcher:
                 raw_result={"error_type": type(exc).__name__, "error": str(exc)},
             )
         await self._commit(scope, record.call, outcome, record_event)
+        return None
 
     async def _check_source(self, scope: TrustedScope, d: ToolDefinition) -> None:
         if d.external_source is not None and d.external_source not in await self._external_access.enabled_sources(
             scope
         ):
-            raise _Denied(f"tool source {d.external_source} is not enabled in this conversation")
+            raise _Denied(f"tool source {d.external_source} is not enabled in this conversation",
+                          RefusalRule.SOURCE_DISABLED)
 
     async def _resolve_binding(
         self, scope: TrustedScope, d: ToolDefinition, record: ToolExecutionRecord
@@ -257,7 +271,8 @@ class Dispatcher:
         if d.environment_kind is not None:
             activation = await self._workspaces.read_activation(scope, d.environment_kind)
             if activation is None:
-                raise _Denied(f"environment {d.environment_kind} is not active in this conversation")
+                raise _Denied(f"environment {d.environment_kind} is not active in this conversation",
+                              RefusalRule.ENVIRONMENT_INACTIVE)
         if d.workspace_requirement is WorkspaceRequirement.NONE:
             return None
         try:
