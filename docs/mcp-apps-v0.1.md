@@ -16,7 +16,7 @@
 | HTML·CSP를 실행 기록과 함께 저장(SQLite v5) | 앱 전용 Tool(`visibility: ["app"]`) (2단계) |
 | Web: sandbox origin의 proxy, 화면 iframe, 호스트 브리지 | `ui/message`, `ui/update-model-context` (3단계) |
 | 가장 최근 화면 자동 표시, 실행 중 표시(입력 → 결과 또는 취소) | |
-| View 메시지: `ui/initialize`, `initialized`, `size-changed`, `ui/open-link`, `ping` | `ui/request-display-mode`(inline만), `tool-input-partial`(스트리밍 없음) |
+| View 메시지: `ui/initialize`, `initialized`, `size-changed`, `ui/open-link`, `ping`, `ui/request-display-mode`(inline·fullscreen, V3-P63 §11) | `pip` 표시, `tool-input-partial`(스트리밍 없음) |
 | 운영자 설정: 서버별 화면 켜기, CSP 도메인 상한 | 카메라·마이크 등 `permissions` 허용 |
 | | CLI 화면 표시(지금처럼 텍스트) |
 
@@ -280,13 +280,14 @@ ALTER TABLE tool_executions ADD COLUMN app_payload TEXT;
 
 | View → 호스트 | 처리 |
 | --- | --- |
-| `ui/initialize` (요청, `tool`이 `null`이면 `toolInfo`를 뺀다. PR #27 검수 C1: 사양의 `Tool`은 `inputSchema`가 필수) | `{protocolVersion: "2026-01-26", hostInfo: {name: "himari", version: "3"}, hostCapabilities: {openLinks: {}, sandbox: {csp: <실제 CSP>}}, hostContext: {toolInfo: {tool: <API의 tool>}, theme, displayMode: "inline", availableDisplayModes: ["inline"], containerDimensions: {width: <행 너비>, maxHeight: 800}, locale, timeZone, platform: "web"}}` |
+| `ui/initialize` (요청, `tool`이 `null`이면 `toolInfo`를 뺀다. PR #27 검수 C1: 사양의 `Tool`은 `inputSchema`가 필수) | `{protocolVersion: "2026-01-26", hostInfo: {name: "himari", version: "3"}, hostCapabilities: {openLinks: {}, sandbox: {csp: <실제 CSP>}}, hostContext: {toolInfo: {tool: <API의 tool>}, theme, displayMode: "inline", availableDisplayModes: ["inline", "fullscreen"], containerDimensions: {width: <행 너비>, maxHeight: 800}, locale, timeZone, platform: "web"}}` |
 | `ui/notifications/initialized` | `tool-input {arguments}` 전송. 이미 `done`이면 이어서 `tool-result <payload>`, `ended`이면 `outcome`대로(§3.5) |
-| `ui/notifications/size-changed` | iframe 높이를 40~800px로 맞춤 |
+| `ui/notifications/size-changed` | iframe 높이를 40~800px로 맞춤(전체화면 중에는 기억만 하고, 인라인으로 돌아올 때 적용) |
+| `ui/request-display-mode` (요청, V3-P63) | §11대로 바꾸고 결과 모드 `{mode}`를 답한다. 바뀌지 않았어도 지금 모드를 답한다(사양 MUST) |
 | `ui/open-link` (요청) | `http(s)` URL만, 주소를 보여 주는 확인 창 → `window.open(url, "_blank", "noopener,noreferrer")`, 거절하면 `-32000` |
 | `ping` | `{}` |
 | `notifications/message` | 무시 |
-| 그 밖의 요청 (`tools/call`, `resources/read`, `ui/message`, `ui/update-model-context`, `ui/request-display-mode` …) | `-32601` "not supported by this host" |
+| 그 밖의 요청 (`tools/call`, `resources/read`, `ui/message`, `ui/update-model-context` …) | `-32601` "not supported by this host" |
 | 그 밖의 알림 | 무시 |
 
 - 받는 메시지는 `event.source`가 그 화면의 iframe이고 `event.origin`이 sandbox origin일 때만 처리한다. `jsonrpc: "2.0"`인 평범한 객체만 받고, JSON 직렬화 길이가 1 MiB를 넘으면 버린다.
@@ -383,3 +384,40 @@ ALTER TABLE tool_executions ADD COLUMN app_payload TEXT;
 - 이 호스트에서 브라우저를 돌리는 방법: Ubuntu 패키지 4개를 `apt-get download`로 받아 풀고 `LD_LIBRARY_PATH`로 준다(root 불필요).
 - Firefox·Safari는 여전히 확인하지 못했다.
 
+## 11. 전체화면 (V3-P63, 2026-10-18)
+
+> **PROPOSED (V3-P63)** · 구현은 `feat/app-view-fullscreen`. 사용자 결정(2026-10-18): 클릭으로 열고, 뒤로가기나 Esc 같은 것으로 나간다.
+
+화면을 페이지 전체로 키우는 표시 모드 `fullscreen`을 지원한다. `pip`은 지원하지 않는다.
+
+**사양에서 가져오는 규칙**(안정판 2026-01-26, Display Modes):
+
+- 호스트는 지원하는 모드를 `hostContext.availableDisplayModes`로, 화면은 지원하는 모드를 `ui/initialize`의 `appCapabilities.availableDisplayModes`로 알린다(화면 MUST).
+- 호스트는 화면이 선언하지 않은 모드로 그 화면을 바꾸면 안 된다(MUST NOT).
+- `ui/request-display-mode {mode}`에는 결과 모드 `{mode}`를 답한다(MUST). 바꿀 수 없으면 지금 모드를 답한다(SHOULD).
+- 바뀐 문맥은 `ui/notifications/host-context-changed`(`Partial<HostContext>`)로 알릴 수 있다(MAY). 화면은 받은 필드를 합친다.
+- 사용자가 시작하는 모드 변경과 전체화면에서 나가는 방법은 사양에 규칙이 없다.
+
+**HIMARI의 동작:**
+
+| 항목 | 동작 |
+| --- | --- |
+| 알리는 모드 | `availableDisplayModes: ["inline", "fullscreen"]`. 처음은 언제나 `inline` |
+| 버튼 | 화면이 `initialized`를 보낸 뒤, 그 화면이 `fullscreen`을 선언했을 때만 머리줄에 "Full screen"이 보인다. 전체화면 중에는 "Exit full screen" |
+| 화면의 요청 | `fullscreen`: 선언했고 초기화됐으면 들어간다. `inline`: 나온다. 그 밖(`pip`, 선언 안 함, 초기화 전): 바꾸지 않는다. 언제나 결과 모드를 답한다 |
+| 덮는 범위 | 페이지 전체(`position: fixed; inset: 0`). 확인 창(z-index 60)보다 아래, 사이드바·메뉴보다 위(50). 페이지 스크롤은 막는다 |
+| 머리줄 | 전체화면에서도 "App view from … · sandboxed"와 버튼이 그대로 보인다. 화면이 HIMARI 화면을 흉내 내도 출처가 보인다 |
+| 한 번에 하나 | 다른 화면이 전체화면이면 그 화면을 먼저 인라인으로 돌린다 |
+| 나가기 | Esc(호스트 페이지에 포커스가 있을 때), 버튼, 브라우저 뒤로가기. 닫기·화면 수 제한·서버 끄기·대화 전환으로 화면이 없어질 때도 먼저 인라인으로 돌린다 |
+| 크기 알림 | 들어가고 나올 때, 전체화면 중 창 크기가 바뀔 때 `host-context-changed {displayMode, containerDimensions}`. 전체화면은 `{width, height}`(고정, 화면이 채운다), 인라인은 `{width, maxHeight: 800}`(처음과 같음) |
+| `size-changed` | 전체화면 중에는 높이를 기억만 하고, 인라인으로 돌아올 때 적용한다 |
+
+**뒤로가기:** 들어갈 때 `history.pushState({himariAppView: <id>})`로 같은 URL에 항목 하나를 더한다. 뒤로가기(`popstate`)가 그 항목을 빼면 인라인으로 돌아간다. Esc나 버튼으로 나가면 그 항목을 `history.back()`으로 뺀다. 다른 화면으로 바로 넘어가면 항목을 새로 더하지 않고 `replaceState`로 넘겨준다. 뒤로가기와 새 항목이 한꺼번에 일어나면 순서가 엇갈리기 때문이다.
+
+사용자 활성화 없이 더한 항목은 브라우저가 뒤로가기에서 건너뛸 수 있다(Chrome의 history manipulation intervention). 그러면 뒤로가기가 HIMARI를 떠난다. 그래서 그때(`navigator.userActivation.isActive`가 거짓)는 항목을 더하지 않고 Esc와 버튼으로만 나간다. 화면 안을 클릭한 직후의 요청은 활성화가 상위 프레임으로 전파되므로 항목을 더한다.
+
+**Esc의 한계:** 키 입력은 포커스가 있는 문서로 간다. 전체화면에 들어갈 때 포커스를 "Exit full screen" 버튼으로 옮기므로 그때는 Esc가 듣는다. 사용자가 화면 안을 클릭하면 키는 화면(다른 origin)으로 가서 호스트가 받을 수 없다. 그때는 버튼이나 뒤로가기로 나간다. 브라우저의 Fullscreen API는 쓰지 않는다. 화면이 postMessage로 보낸 요청은 호스트 문서의 사용자 제스처가 아니어서 거부될 수 있고, 페이지 안 오버레이로 충분하기 때문이다.
+
+**검증:** `scripts/mcp_apps_smoke.py` 8번(선언한 화면에만 버튼, 클릭으로 페이지를 덮음, 화면이 받은 문맥, Esc·버튼·뒤로가기로 복귀, 인라인 높이 복원, 화면의 요청과 결과 모드, 선언하지 않은 화면은 버튼도 전환도 없음). 29/29, Chromium 156 headless. `scripts/app_view_races/run.py` 10/10, `scripts/ui_smoke.py` OK.
+
+Calliope 뷰어는 이미 `availableDisplayModes: ["inline", "fullscreen"]`을 선언한다. 고정 크기(`height`가 있는 `containerDimensions`)를 받으면 `100vh`로 채우고, `host-context-changed`를 합친다. 그래서 Calliope 쪽 변경은 없다.
