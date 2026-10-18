@@ -18,9 +18,12 @@ what it receives and what it can reach. Headless Chromium drives the UI:
 6. turning the server off in the conversation closes its views;
 7. turning it back on offers them again ("Open view"), and one opens;
 8. full screen (V3-P63): a view that declared it gets the button; a click
-   covers the page, Esc, the button and Back return it inline, the view
-   hears each change (host-context-changed) and may ask for it itself; a
-   view that did not declare it has no button and is never switched.
+   covers the page, Esc, the button and Back return it inline, Forward
+   brings it back, the view hears each change (host-context-changed); it
+   may ask for it itself only right after the user clicked into it (not at
+   start, not without a click); leaving and entering again at once, or
+   going from one view to another, keeps the new full screen and its Back;
+   a view that did not declare it has no button and is never switched.
 
 Requires: pip install playwright (a Chromium for it, or --chrome PATH)
 Usage:    python scripts/mcp_apps_smoke.py [--chrome PATH] [--screenshots DIR]
@@ -62,7 +65,7 @@ VIEW_URI = "ui://calliope/probe"
 PLAIN_URI = "ui://calliope/plain"  # the same probe, without "fullscreen" in its appCapabilities
 
 # A minimal MCP App: logs what it receives, probes what it can reach.
-VIEW_HTML = """<!DOCTYPE html><html><body style="margin:0"><pre id="log"></pre><script>
+VIEW_HTML = """<!DOCTYPE html><html><body style="margin:0"><button id="ask" onclick="requestMode('fullscreen')">ask</button><pre id="log"></pre><script>
 const log = (k, v) => { const d = document.createElement("div"); d.dataset.k = k;
   d.textContent = k + " " + JSON.stringify(v); document.getElementById("log").append(d); };
 let next = 0; const waiting = new Map();
@@ -100,6 +103,8 @@ window.requestMode = async (mode) => {
   const call = await request("tools/call", { name: "echo", arguments: { text: "from the view" } });
   log("tools/call", call.error ? call.error.code : "answered");
   parent.postMessage({ jsonrpc: "2.0", method: "ui/notifications/initialized", params: {} }, "*");
+  const auto = await request("ui/request-display-mode", { mode: "fullscreen" });  // with no click: refused
+  log("auto", auto.result ? auto.result.mode : auto.error.code);
   parent.postMessage({ jsonrpc: "2.0", method: "ui/notifications/size-changed", params: { width: 300, height: 321 } }, "*");
 })();
 </script></body></html>"""
@@ -248,14 +253,65 @@ def full_screen(page: Page, view: Frame, check, shots: str | None) -> None:
     expect(box).to_have_class("app-view", timeout=5000)
     check("8: the button leaves it too", button.text_content() == "Full screen", button.text_content())
     wait_contexts(view, 6)
+    page.keyboard.press("Escape")  # nothing to leave: Esc does nothing
+    page.go_forward()  # back to the entry the button left
+    expect(box).to_have_class("app-view is-fullscreen", timeout=5000)
+    check("8: Forward brings it back to full screen", page.evaluate("history.state") is not None)
+    page.keyboard.press("Escape")
+    expect(box).to_have_class("app-view", timeout=5000)
+    lines = logged(view)
+    check("8: a view's request at start, with no click, is refused (answered inline)",
+          'auto "inline"' in lines, lines)
     view.evaluate("requestMode('fullscreen')")
     lines = wait_logged(view, "mode")
+    page.wait_for_timeout(300)
+    check("8: a view's request without the user's click is refused (answered inline)",
+          'mode "inline"' in lines and "is-fullscreen" not in (box.get_attribute("class") or ""), lines)
+    view.click("#ask")  # the user clicks into the view, which asks
     expect(box).to_have_class("app-view is-fullscreen", timeout=5000)
-    check("8: the view may ask for full screen, and is answered with the mode it got",
+    lines = logged(view)
+    check("8: right after a click into it, the view's request is followed and answered fullscreen",
           'mode "fullscreen"' in lines, lines)
-    page.keyboard.press("Escape")  # the host page still has the focus (the button)
+    page.keyboard.press("Escape")  # entering moved the focus to the host's button
     expect(box).to_have_class("app-view", timeout=5000)
     check("8: Esc leaves a full screen the view asked for", True)
+    # Review B1: leave and enter again before the Back's popstate arrives.
+    page.wait_for_timeout(300)
+    button.click()
+    expect(box).to_have_class("app-view is-fullscreen", timeout=5000)
+    page.evaluate("(() => { const b = document.querySelector('.app-view-full'); b.click(); b.click(); })()")
+    page.wait_for_timeout(800)
+    check("8: leaving and entering again at once keeps full screen",
+          "is-fullscreen" in (box.get_attribute("class") or ""), box.get_attribute("class"))
+    state = page.evaluate("history.state")
+    check("8: ... and its history entry, added once the Back landed", bool(state and state.get("himariAppView")), state)
+    page.go_back()
+    expect(box).to_have_class("app-view", timeout=5000)
+    check("8: ... so Back still leaves it, on the page", page.url == url, page.url)
+
+
+def full_screen_two(page: Page, check) -> None:
+    """8: from one view's full screen straight to another's, and leave-then-enter across two views."""
+    boxes, buttons = page.locator(".app-view"), page.locator(".app-view-full")
+    url = page.url
+    buttons.nth(0).click()
+    expect(boxes.nth(0)).to_have_class("app-view is-fullscreen", timeout=5000)
+    page.evaluate("document.querySelectorAll('.app-view-full')[1].click()")  # the other view's button
+    page.wait_for_timeout(500)
+    check("8: entering a second view returns the first inline: one at a time",
+          boxes.nth(0).get_attribute("class") == "app-view"
+          and boxes.nth(1).get_attribute("class") == "app-view is-fullscreen",
+          [boxes.nth(0).get_attribute("class"), boxes.nth(1).get_attribute("class")])
+    page.evaluate("(() => { const b = document.querySelectorAll('.app-view-full'); b[1].click(); b[0].click(); })()")
+    page.wait_for_timeout(800)
+    check("8: leaving one view and entering another at once keeps the new full screen",
+          boxes.nth(0).get_attribute("class") == "app-view is-fullscreen"
+          and boxes.nth(1).get_attribute("class") == "app-view",
+          [boxes.nth(0).get_attribute("class"), boxes.nth(1).get_attribute("class")])
+    page.go_back()
+    expect(boxes.nth(0)).to_have_class("app-view", timeout=5000)
+    check("8: ... and Back leaves it, on the page", page.url == url and page.locator(".app-view-frame").count() == 2,
+          page.url)
 
 
 def send(page: Page, text: str) -> None:
@@ -316,6 +372,7 @@ def run(token: str, fake: FakeMcpServer, chrome: str | None, shots: str | None) 
         page.wait_for_timeout(1500)
         lines = logged(second)
         check("2: the result reached it once stored, exactly once", lines.count('result {"said":"slow"}') == 1, lines)
+        full_screen_two(page, check)
 
         # 3. Stop during a write: unknown, so closed with a note, never "cancelled".
         fake.call_delay = 3.0

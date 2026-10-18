@@ -24,11 +24,16 @@
  *   answered; every other request is refused (-32601). The view cannot call
  *   Tools or send messages here.
  * - Full screen (V3-P63): a view that declared "fullscreen" in its
- *   appCapabilities gets a "Full screen" button and may ask for it; one view
- *   at a time covers the page below the confirmation layer, its label still
- *   shown. Esc, the button, or the browser's Back returns it inline; each
- *   change reaches the view as host-context-changed (displayMode and its
- *   container). A view that did not declare it is never switched (spec MUST).
+ *   appCapabilities gets a "Full screen" button, and may ask for it right
+ *   after the user clicked into it (focus in its frame and the page's user
+ *   activation); one view at a time covers the page below the confirmation
+ *   layer, its label still shown. Esc, the button, or the browser's Back
+ *   returns it inline, Forward brings it back; each change reaches the view
+ *   as host-context-changed (displayMode and its container). A view that did
+ *   not declare it is never switched (spec MUST NOT).
+ * - History: one same-URL entry per full screen. While our own Back is on its
+ *   way (popstate is asynchronous) no entry is added: a view entering then
+ *   gets its entry when the Back lands (PR #50 review B1).
  * - Same rules as app.js: textContent only, generation checks after awaits.
  */
 
@@ -76,6 +81,8 @@ export class AppViews {
     this.revocations = new Map(); // source → times turned off: a request from before is stale
     this.fullscreen = null; // the view covering the page, if any
     this.entered = 0; // full-screen entries made: a history entry names its own
+    this.leaving = null; // the entry our history.back() leaves, until its popstate
+    this.historyViews = new Map(); // history entry → its view (Forward re-enters it)
     window.addEventListener("message", (event) => this.receive(event));
     // Capture: Esc leaves full screen before the composer or a picker sees it.
     document.addEventListener("keydown", (event) => {
@@ -84,10 +91,7 @@ export class AppViews {
       event.stopPropagation();
       this.inline(this.fullscreen);
     }, true);
-    window.addEventListener("popstate", () => {
-      const view = this.fullscreen;
-      if (view && !(history.state && history.state.himariAppView === view.history)) this.inline(view, true);
-    });
+    window.addEventListener("popstate", () => this.popped());
     window.addEventListener("resize", () => {
       if (this.fullscreen) this.context(this.fullscreen);
     });
@@ -314,6 +318,7 @@ export class AppViews {
     if (view.closed) return view.closed;
     if (this.live.get(view.entry.view.key) !== view) return Promise.resolve();
     if (view.mode === "fullscreen") this.inline(view);
+    for (const [entry, owner] of this.historyViews) if (owner === view) this.historyViews.delete(entry);
     this.live.delete(view.entry.view.key);
     this.closing.add(view);
     view.closed = (async () => {
@@ -416,7 +421,7 @@ export class AppViews {
       }
     } else if (m.method === "ui/request-display-mode" && request) {
       const mode = m.params && m.params.mode;
-      if (mode === "fullscreen") this.enter(view);
+      if (mode === "fullscreen" && this.clickedInto(view)) this.enter(view);
       else if (mode === "inline") this.inline(view);
       this.answer(view, m.id, { mode: view.mode }); // the resulting mode, changed or not (spec MUST)
     } else if (m.method === "ui/open-link" && request) {
@@ -454,8 +459,16 @@ export class AppViews {
     };
   }
 
-  /* Full screen: only for a live, initialized view that declared it; one at a time. */
-  enter(view) {
+  /* A view's own request for full screen is followed only right after the user
+     clicked into it (PR #50 review B2): the focus is in its frame, and the
+     click's activation (passed up from the frame) is still on this page. */
+  clickedInto(view) {
+    return document.activeElement === view.frame && (!navigator.userActivation || navigator.userActivation.isActive);
+  }
+
+  /* Full screen: only for a live, initialized view that declared it; one at a time.
+     entry: Forward came back to this view's history entry (no new one). */
+  enter(view, entry = null) {
     if (view.mode === "fullscreen" || !view.initialized || !view.modes.includes("fullscreen")) return;
     if (this.live.get(view.entry.view.key) !== view) return;
     // Another view in full screen gives its history entry to this one (a Back
@@ -470,15 +483,49 @@ export class AppViews {
     view.full.textContent = "Exit full screen";
     // Back leaves full screen. Without a user's activation the browser may skip
     // such an entry on Back (and leave the page), so then Esc and the button only.
-    const ours = previous !== null && history.state && history.state.himariAppView === previous;
-    if (ours || !navigator.userActivation || navigator.userActivation.isActive) {
-      this.entered += 1;
-      view.history = `view-${this.entered}`;
-      if (ours) history.replaceState({ himariAppView: view.history }, "");
-      else history.pushState({ himariAppView: view.history }, "");
-    }
+    const ours = previous !== null && this.state() === previous;
+    const wanted = ours || !navigator.userActivation || navigator.userActivation.isActive;
+    if (entry !== null) view.history = entry;
+    else if (this.leaving !== null) view.wantsEntry = wanted; // added when our Back lands
+    else if (wanted) this.addEntry(view, ours ? previous : null);
     view.full.focus(); // so Esc reaches this page until the user clicks into the view
     this.context(view);
+  }
+
+  /* replacing: the entry of the view this one took over from (no Back in between). */
+  addEntry(view, replacing) {
+    this.entered += 1;
+    view.history = `view-${this.entered}`;
+    view.wantsEntry = false;
+    this.historyViews.set(view.history, view);
+    if (replacing !== null) {
+      this.historyViews.delete(replacing);
+      history.replaceState({ himariAppView: view.history }, "");
+    } else {
+      history.pushState({ himariAppView: view.history }, "");
+    }
+  }
+
+  state() {
+    const state = history.state;
+    return state && typeof state.himariAppView === "string" ? state.himariAppView : null;
+  }
+
+  /* Back or Forward moved through the history, or our own Back landed. */
+  popped() {
+    const state = this.state();
+    if (this.leaving !== null && state !== this.leaving) {
+      this.leaving = null; // our Back landed: a view that entered meanwhile gets its entry now
+      const view = this.fullscreen;
+      if (view && view.wantsEntry) this.addEntry(view, null);
+      return;
+    }
+    const view = this.fullscreen;
+    if (view && state !== view.history) this.inline(view, true); // Back (or Forward) left its entry
+    if (state === null || this.fullscreen) return;
+    const again = this.historyViews.get(state);
+    if (again && this.live.get(again.entry.view.key) === again) this.enter(again, state); // Forward
+    else history.replaceState(null, ""); // its view is gone: a plain entry now
   }
 
   /* Back inline. popped: Back already removed its history entry. */
@@ -490,8 +537,12 @@ export class AppViews {
     document.body.classList.remove("has-fullscreen-view");
     view.frame.style.height = view.inlineHeight;
     view.full.textContent = "Full screen";
-    if (!popped && view.history && history.state && history.state.himariAppView === view.history) history.back();
+    if (!popped && view.history !== null && this.state() === view.history) {
+      this.leaving = view.history;
+      history.back();
+    }
     view.history = null;
+    view.wantsEntry = false;
     this.context(view);
   }
 
