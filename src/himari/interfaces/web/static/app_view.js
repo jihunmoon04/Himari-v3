@@ -20,8 +20,20 @@
  *   still counts toward MAX_LIVE (a new view waits for the room).
  * - Everything the view sends is checked: it must come from that view's
  *   frame and the sandbox origin, be a JSON-RPC message, and be small. Only
- *   ui/initialize, ui/open-link and ping are answered; every other request
- *   is refused (-32601). The view cannot call Tools or send messages here.
+ *   ui/initialize, ui/open-link, ui/request-display-mode and ping are
+ *   answered; every other request is refused (-32601). The view cannot call
+ *   Tools or send messages here.
+ * - Full screen (V3-P63): a view that declared "fullscreen" in its
+ *   appCapabilities gets a "Full screen" button, and may ask for it right
+ *   after the user clicked into it (focus in its frame and the page's user
+ *   activation); one view at a time covers the page below the confirmation
+ *   layer, its label still shown. Esc, the button, or the browser's Back
+ *   returns it inline, Forward brings it back; each change reaches the view
+ *   as host-context-changed (displayMode and its container). A view that did
+ *   not declare it is never switched (spec MUST NOT).
+ * - History: one same-URL entry per full screen. While our own Back is on its
+ *   way (popstate is asynchronous) no entry is added: a view entering then
+ *   gets its entry when the Back lands (PR #50 review B1).
  * - Same rules as app.js: textContent only, generation checks after awaits.
  */
 
@@ -32,6 +44,7 @@ const MIN_HEIGHT = 40;
 const MAX_HEIGHT = 800;
 const TEARDOWN_MS = 1000;
 const CHANNEL = "himari-app-views";
+const MODES = ["inline", "fullscreen"]; // the host's availableDisplayModes
 
 const NOTICE = {
   view_unavailable: "This result can't be shown in the view.",
@@ -66,7 +79,22 @@ export class AppViews {
     this.closedByUser = new Set();
     this.off = new Set(); // sources off in this conversation, as last heard
     this.revocations = new Map(); // source → times turned off: a request from before is stale
+    this.fullscreen = null; // the view covering the page, if any
+    this.entered = 0; // full-screen entries made: a history entry names its own
+    this.leaving = null; // the entry our history.back() leaves, until its popstate
+    this.historyViews = new Map(); // history entry → its view (Forward re-enters it)
     window.addEventListener("message", (event) => this.receive(event));
+    // Capture: Esc leaves full screen before the composer or a picker sees it.
+    document.addEventListener("keydown", (event) => {
+      if (event.key !== "Escape" || !this.fullscreen) return;
+      event.preventDefault();
+      event.stopPropagation();
+      this.inline(this.fullscreen);
+    }, true);
+    window.addEventListener("popstate", () => this.popped());
+    window.addEventListener("resize", () => {
+      if (this.fullscreen) this.context(this.fullscreen);
+    });
     if (typeof BroadcastChannel === "function") {
       this.channel = new BroadcastChannel(CHANNEL);
       this.channel.addEventListener("message", (event) => {
@@ -207,15 +235,25 @@ export class AppViews {
     frame.src = data.sandbox_url;
     const close = this.el("button", "link-button app-view-close", "Close view");
     close.type = "button";
+    const full = this.el("button", "link-button app-view-full", "Full screen");
+    full.type = "button";
+    full.hidden = true; // until the view is initialized and declared it
+    const actions = this.el("span", "app-view-actions");
+    actions.append(full, close);
     const header = this.el("div", "app-view-header");
-    header.append(this.el("span", "app-view-label", `App view from ${data.source} · sandboxed`), close);
+    header.append(this.el("span", "app-view-label", `App view from ${data.source} · sandboxed`), actions);
     const box = this.el("div", data.prefers_border === false ? "app-view is-borderless" : "app-view");
     box.append(header, frame);
     entry.view.slot.replaceChildren(box);
     // settled: its result or cancellation is delivered (or due at initialized); never twice.
-    const view = { entry, data, frame, box, origin: new URL(data.sandbox_url).origin, initialized: false,
-                   pending: null, nextId: 1, waiting: new Map(), settled: data.state === "done", finishing: false };
+    const view = { entry, data, frame, box, full, origin: new URL(data.sandbox_url).origin, initialized: false,
+                   pending: null, nextId: 1, waiting: new Map(), settled: data.state === "done", finishing: false,
+                   modes: [], mode: "inline", inlineHeight: frame.style.height, history: null };
     this.live.set(entry.view.key, view);
+    full.addEventListener("click", () => {
+      if (view.mode === "fullscreen") this.inline(view);
+      else this.enter(view);
+    });
     close.addEventListener("click", () => {
       this.closedByUser.add(entry.view.key);
       this.teardown(view, "The user closed the view.").then(() => this.paintControl(entry));
@@ -279,6 +317,8 @@ export class AppViews {
   teardown(view, reason) {
     if (view.closed) return view.closed;
     if (this.live.get(view.entry.view.key) !== view) return Promise.resolve();
+    if (view.mode === "fullscreen") this.inline(view);
+    for (const [entry, owner] of this.historyViews) if (owner === view) this.historyViews.delete(entry);
     this.live.delete(view.entry.view.key);
     this.closing.add(view);
     view.closed = (async () => {
@@ -358,9 +398,12 @@ export class AppViews {
       this.post(view, { jsonrpc: "2.0", method: "ui/notifications/sandbox-resource-ready",
                         params: { html: view.data.html } });
     } else if (m.method === "ui/initialize" && request) {
+      const declared = m.params && m.params.appCapabilities && m.params.appCapabilities.availableDisplayModes;
+      view.modes = Array.isArray(declared) ? MODES.filter((mode) => declared.includes(mode)) : [];
       this.answer(view, m.id, this.initializeResult(view));
     } else if (m.method === "ui/notifications/initialized" && !view.initialized) {
       view.initialized = true;
+      view.full.hidden = !view.modes.includes("fullscreen");
       this.post(view, { jsonrpc: "2.0", method: "ui/notifications/tool-input",
                         params: { arguments: view.data.arguments } });
       if (view.data.state === "done") {
@@ -372,8 +415,15 @@ export class AppViews {
     } else if (m.method === "ui/notifications/size-changed") {
       const height = m.params && Number(m.params.height);
       if (Number.isFinite(height)) {
-        view.frame.style.height = `${Math.min(MAX_HEIGHT, Math.max(MIN_HEIGHT, Math.ceil(height)))}px`;
+        // In full screen the host sets the size: kept for when the view is back inline.
+        view.inlineHeight = `${Math.min(MAX_HEIGHT, Math.max(MIN_HEIGHT, Math.ceil(height)))}px`;
+        if (view.mode === "inline") view.frame.style.height = view.inlineHeight;
       }
+    } else if (m.method === "ui/request-display-mode" && request) {
+      const mode = m.params && m.params.mode;
+      if (mode === "fullscreen" && this.clickedInto(view)) this.enter(view);
+      else if (mode === "inline") this.inline(view);
+      this.answer(view, m.id, { mode: view.mode }); // the resulting mode, changed or not (spec MUST)
     } else if (m.method === "ui/open-link" && request) {
       this.openLink(view, m);
     } else if (m.method === "ping" && request) {
@@ -391,7 +441,7 @@ export class AppViews {
     const context = {
       theme: "light",
       displayMode: "inline",
-      availableDisplayModes: ["inline"],
+      availableDisplayModes: MODES,
       containerDimensions: { width: view.frame.clientWidth || view.entry.node.clientWidth, maxHeight: MAX_HEIGHT },
       locale: navigator.language,
       timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
@@ -407,6 +457,103 @@ export class AppViews {
       },
       hostContext: context,
     };
+  }
+
+  /* A view's own request for full screen is followed only right after the user
+     clicked into it (PR #50 review B2): the focus is in its frame, and the
+     click's activation (passed up from the frame) is still on this page. */
+  clickedInto(view) {
+    return document.activeElement === view.frame && (!navigator.userActivation || navigator.userActivation.isActive);
+  }
+
+  /* Full screen: only for a live, initialized view that declared it; one at a time.
+     entry: Forward came back to this view's history entry (no new one). */
+  enter(view, entry = null) {
+    if (view.mode === "fullscreen" || !view.initialized || !view.modes.includes("fullscreen")) return;
+    if (this.live.get(view.entry.view.key) !== view) return;
+    // Another view in full screen gives its history entry to this one (a Back
+    // and a new entry in one go would race).
+    const previous = this.fullscreen ? this.fullscreen.history : null;
+    if (this.fullscreen) this.inline(this.fullscreen, true);
+    view.mode = "fullscreen";
+    this.fullscreen = view;
+    view.box.classList.add("is-fullscreen");
+    document.body.classList.add("has-fullscreen-view");
+    view.frame.style.height = "";
+    view.full.textContent = "Exit full screen";
+    // Back leaves full screen. Without a user's activation the browser may skip
+    // such an entry on Back (and leave the page), so then Esc and the button only.
+    const ours = previous !== null && this.state() === previous;
+    const wanted = ours || !navigator.userActivation || navigator.userActivation.isActive;
+    if (entry !== null) view.history = entry;
+    else if (this.leaving !== null) view.wantsEntry = wanted; // added when our Back lands
+    else if (wanted) this.addEntry(view, ours ? previous : null);
+    view.full.focus(); // so Esc reaches this page until the user clicks into the view
+    this.context(view);
+  }
+
+  /* replacing: the entry of the view this one took over from (no Back in between). */
+  addEntry(view, replacing) {
+    this.entered += 1;
+    view.history = `view-${this.entered}`;
+    view.wantsEntry = false;
+    this.historyViews.set(view.history, view);
+    if (replacing !== null) {
+      this.historyViews.delete(replacing);
+      history.replaceState({ himariAppView: view.history }, "");
+    } else {
+      history.pushState({ himariAppView: view.history }, "");
+    }
+  }
+
+  state() {
+    const state = history.state;
+    return state && typeof state.himariAppView === "string" ? state.himariAppView : null;
+  }
+
+  /* Back or Forward moved through the history, or our own Back landed. */
+  popped() {
+    const state = this.state();
+    if (this.leaving !== null && state !== this.leaving) {
+      this.leaving = null; // our Back landed: a view that entered meanwhile gets its entry now
+      const view = this.fullscreen;
+      if (view && view.wantsEntry) this.addEntry(view, null);
+      return;
+    }
+    const view = this.fullscreen;
+    if (view && state !== view.history) this.inline(view, true); // Back (or Forward) left its entry
+    if (state === null || this.fullscreen) return;
+    const again = this.historyViews.get(state);
+    if (again && this.live.get(again.entry.view.key) === again) this.enter(again, state); // Forward
+    else history.replaceState(null, ""); // its view is gone: a plain entry now
+  }
+
+  /* Back inline. popped: Back already removed its history entry. */
+  inline(view, popped = false) {
+    if (view.mode !== "fullscreen") return;
+    view.mode = "inline";
+    if (this.fullscreen === view) this.fullscreen = null;
+    view.box.classList.remove("is-fullscreen");
+    document.body.classList.remove("has-fullscreen-view");
+    view.frame.style.height = view.inlineHeight;
+    view.full.textContent = "Full screen";
+    if (!popped && view.history !== null && this.state() === view.history) {
+      this.leaving = view.history;
+      history.back();
+    }
+    view.history = null;
+    view.wantsEntry = false;
+    this.context(view);
+  }
+
+  /* The view's display mode and container, after each change (host-context-changed). */
+  context(view) {
+    if (!view.initialized) return;
+    const width = view.frame.clientWidth;
+    const containerDimensions = view.mode === "fullscreen"
+      ? { width, height: view.frame.clientHeight } : { width, maxHeight: MAX_HEIGHT };
+    this.post(view, { jsonrpc: "2.0", method: "ui/notifications/host-context-changed",
+                      params: { displayMode: view.mode, containerDimensions } });
   }
 
   openLink(view, m) {
