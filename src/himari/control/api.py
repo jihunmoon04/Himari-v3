@@ -1,8 +1,8 @@
 """Control public contract (CTRL-01, CTRL-03/04, CTRL-05, CTRL-06).
 
 Source documents: docs/control-prompt-provider-v0.1.md §3, §5.1, §7;
-docs/control-pause-v0.1.md; docs/control-run-budget-v0.1.md; docs/decisions.md V3-024, V3-044,
-V3-045, V3-P55, V3-P62.
+docs/control-pause-v0.1.md; docs/control-run-budget-v0.1.md; docs/conversation-model-v0.1.md;
+docs/decisions.md V3-024, V3-044, V3-045, V3-P55, V3-P62, V3-P64.
 """
 
 from __future__ import annotations
@@ -14,7 +14,8 @@ from enum import Enum
 from typing import Protocol
 
 from himari.common import CallRef, DeepFrozen, RunId, TrustedScope
-from himari.data.api import ConversationEvent, RecoveryReport, UserMessage
+from himari.data.api import ConversationEvent, ModelSetting, RecoveryReport, UserMessage
+from himari.prompt.api import ContextBudget
 
 
 class DriveState(Enum):
@@ -66,6 +67,83 @@ class ContextStatus(DeepFrozen):
     summary: str | None = None
     covered_through_sequence: int | None = None
     compactions: int = 0  # committed compactions (snapshot revision)
+
+
+@dataclass(frozen=True)
+class ModelOffer(DeepFrozen):
+    """One model the operator offers (V3-P64 §3), with what a turn on it uses."""
+
+    model_id: str
+    default_effort: str | None = None
+    efforts: frozenset[str] = frozenset()  # the efforts the Provider declares for it
+    budget: ContextBudget | None = None  # None: no compaction or size check
+    max_output_tokens: int | None = None  # caps a turn's output reserve (V3-P62)
+
+
+@dataclass(frozen=True)
+class ResolvedModel(DeepFrozen):
+    """What one turn uses (V3-P64 §4.2): fixed when the turn starts.
+    ``fallback`` says why a stored choice was not used as made."""
+
+    offer: ModelOffer
+    reasoning_effort: str | None
+    fallback: str | None = None
+
+    @property
+    def model_id(self) -> str:
+        return self.offer.model_id
+
+
+@dataclass(frozen=True)
+class ModelCatalog(DeepFrozen):
+    """The offered models, in the operator's order, and the default one.
+    Raises ValueError on duplicate ids, a default that is not offered, or a
+    default effort the model does not declare (V3-P64 §3: refused at start,
+    not before a send)."""
+
+    offers: tuple[ModelOffer, ...]
+    default_model: str
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        ids = [o.model_id for o in self.offers]
+        if len(set(ids)) != len(ids):
+            raise ValueError(f"a model is offered twice: {sorted({i for i in ids if ids.count(i) > 1})}")
+        if self.default_model not in ids:
+            raise ValueError(f"the default model {self.default_model!r} is not offered")
+        for offer in self.offers:
+            if offer.default_effort is not None and offer.default_effort not in offer.efforts:
+                raise ValueError(f"the reasoning effort {offer.default_effort!r} is not supported by "
+                                 f"{offer.model_id}")
+
+    def offer(self, model_id: str) -> ModelOffer | None:
+        return next((o for o in self.offers if o.model_id == model_id), None)
+
+    @property
+    def default(self) -> ModelOffer:
+        offer = self.offer(self.default_model)
+        assert offer is not None
+        return offer
+
+    def resolve(self, setting: ModelSetting | None) -> ResolvedModel:
+        """A stored choice → the model and effort a turn uses. A model no
+        longer offered falls back to the default model, an effort no longer
+        declared to the model's default effort; ``fallback`` says so."""
+        if setting is None:
+            return ResolvedModel(self.default, self.default.default_effort)
+        offer = self.offer(setting.model_id)
+        if offer is None:
+            default = self.default
+            return ResolvedModel(default, default.default_effort,
+                                 f"{setting.model_id} is no longer offered; using the default model {default.model_id}")
+        effort = setting.reasoning_effort
+        if effort is None:
+            return ResolvedModel(offer, offer.default_effort)
+        if effort not in offer.efforts:
+            return ResolvedModel(offer, offer.default_effort,
+                                 f"the reasoning effort {effort!r} is no longer offered for {offer.model_id}; "
+                                 "using its default")
+        return ResolvedModel(offer, effort)
 
 
 class ControlErrorCode(Enum):

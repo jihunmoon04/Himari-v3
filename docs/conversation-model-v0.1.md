@@ -1,6 +1,8 @@
 # 대화별 모델 선택 v0.1
 
-> 2026-10-20 · **PROPOSED (V3-P64)** · rev. 2 — 검수 NOT_READY(B1; C1·C2) 반영(§12), 재검수 READY(§13). 설계 PR #51.
+> 2026-10-20 · **PROPOSED (V3-P64)** · rev. 2 — 검수 NOT_READY(B1; C1·C2) 반영(§12), 재검수 READY(§13). 설계 PR #51 병합. 구현: 1단계 Data·Control·Bootstrap 핵심(§14), 2단계 운영자 목록·Web·CLI는 다음 PR.
+>
+> **정정(2026-10-20, 구현 중 발견):** §6.2의 "결함"은 없었다. 측정값은 이미 모델이 같을 때만 쓰인다(§6.2, §14).
 >
 > 소유자 결정(2026-10-20): **Q1~Q4 모두 권고대로**(§9). 운영자 목록, 고른 것을 그대로 저장하고 빠진 모델은 기본 모델 + 표시, 추론 강도도 대화별, 다음 턴부터 적용.
 >
@@ -19,7 +21,7 @@
 | 캐시 breakpoint는 측정된 모델에만(`ProviderCapabilities.cache_breakpoints`) | Driver가 대화마다 다른 요청 옵션·예산을 쓰는 것 |
 | 창·최대 출력은 모델별로 선언(`describe_capabilities`) | Web·CLI의 모델 선택 |
 
-**결함 하나:** 크기 측정값(`UsageMark`)은 `provider_key`만 비교한다(`prompt/api.py` `UsageMark.provider_key`, `compaction.py` `Compactor.estimate`). 같은 OpenRouter 안에서 모델을 바꾸면, 이전 모델의 토크나이저로 잰 값을 새 모델 요청의 크기로 쓴다. 지금은 모델이 하나라 드러나지 않았다. 이 설계에서 고친다(§6.2).
+~~**결함 하나:** 크기 측정값(`UsageMark`)은 `provider_key`만 비교한다. 같은 OpenRouter 안에서 모델을 바꾸면 이전 모델로 잰 값을 새 모델 요청의 크기로 쓴다.~~ *정정(2026-10-20): 결함이 아니다. 측정값은 `context_key`도 같아야 쓰이고, `context_key`에는 모델 id가 들어 있다(§6.2).*
 
 | 포함 | 제외 (이후) |
 | --- | --- |
@@ -27,7 +29,7 @@
 | 대화별 모델·추론 강도 선택, Web·CLI | Provider 여러 개 동시 사용(OpenRouter 하나로 시작; 구조는 막지 않음) |
 | 모델별 문맥 예산·입력 한도·출력 예약 | 모델별 가격·비용 표시 |
 | 답변마다 그것을 쓴 모델 표시 | 같은 질문을 다른 모델로 다시 생성(regenerate) |
-| `UsageMark` 모델 일치 검사 | 운영 중 모델 목록 다시 읽기(재시작으로 바꿈) |
+| (~~`UsageMark` 모델 일치 검사~~ — 이미 됨, §6.2) | 운영 중 모델 목록 다시 읽기(재시작으로 바꿈) |
 
 ## 2. 다른 호스트들
 
@@ -147,9 +149,11 @@ Driver는 대화별 모델을 따로 저장하지 않는다. 턴 상태는 잠�
 
 이전 모델로 돌아오면, **지금 Prompt에 남아 있고** provider·model이 일치하는 continuation만 다시 싣는다. 압축 요약에 들어간 부분은 Prompt가 그 Event를 읽지 않으므로(`prompt/loader.py` `load`: 요약 범위 다음부터 읽음), 그 부분의 continuation은 돌아오지 않는다. 이것은 모델 전환과 무관하게 지금 압축이 하는 일이다(V3-P48).
 
-### 6.2 크기 측정 — 모델도 일치해야 (결함 수정)
+### 6.2 크기 측정 — 이미 모델별 (바꿀 것 없음)
 
-`UsageMark`에 `model_id`를 더하고(`RunRecord.model_id`에서), `Compactor.estimate`는 provider와 **model이 모두 같을 때만** 측정값을 쓴다. 다르면 지금처럼 바이트 기반 추정(`measured=False`)이다. 모델을 바꾼 첫 요청은 크게 추정될 수 있다(영어 약 1.4배, Q-14). 그 요청 응답으로 다시 측정되면 정확해진다.
+*정정(2026-10-20, 구현 중 발견).* rev. 2까지 이 절은 `UsageMark`가 provider만 비교하는 결함이 있다고 적었다. 사실이 아니다. `Compactor.estimate`는 측정값의 `context_key`가 지금 요청의 것과 같을 때만 그 값을 쓴다. `context_key`(`compaction.py` `context_key`)는 provider, **model id**, 추론 강도, 지시문, 서버 안내문, Tool 목록의 digest다. 그래서 다른 모델(그리고 다른 추론 강도)로 잰 값은 이미 쓰이지 않는다. 기존 테스트 `test_a_measurement_under_another_composition_is_not_used`의 `model`·`effort` 경우가 이것을 확인한다. `UsageMark`는 바꾸지 않는다.
+
+모델이 바뀌면 바이트 기반 추정(`measured=False`)이다. 모델을 바꾼 첫 요청은 크게 추정될 수 있다(영어 약 1.4배, Q-14). 그 요청 응답으로 다시 측정되면 정확해진다.
 
 ### 6.3 예산과 입력 한도 — 모델마다
 
@@ -195,7 +199,7 @@ Tool 목록, 서버 안내문, 지시문은 모델과 무관하다. 모델이 �
 | 모듈 | 변경 |
 | --- | --- |
 | Data | `ModelSetting`, `ConversationModelSettings` 포트(인메모리·SQLite). SQLite v6 `model_settings` |
-| Prompt | `UsageMark.model_id`; `Compactor.estimate`가 model까지 비교. 로더가 `RunRecord.model_id`로 채움 |
+| Prompt | 없음. 측정값은 이미 `context_key`(모델 포함)로 구별된다(§6.2 정정) |
 | Control | `ModelCatalog`·`ModelOffer`·`ResolvedModel`. Driver는 `request_options`·`budget` 하나 대신 catalog를 받고, 턴 시작 때 resolve한 값으로 불변의 턴 상태를 만든다(§5 1~4). `compact`는 같은 절차, `context_status`는 잠금 없이 resolve |
 | Provider | 없음. continuation·캐시 규칙은 이미 모델별 |
 | Bootstrap | `HIMARI_MODELS` 해석, 모델별 시작 검사(§3), `Application.models`·`model_setting`·`set_model` |
@@ -221,14 +225,14 @@ Tool 목록, 서버 안내문, 지시문은 모델과 무관하다. 모델이 �
 | 사용자가 운영자가 허용하지 않은 모델(비싼 모델)을 고름 | 제공 목록 밖은 저장 전에 거부(Application). Data는 길이·문자만 검사 |
 | 저장된 값이 목록에서 빠진 뒤 그대로 보내짐 | 턴마다 `resolve`가 목록과 대조. 목록 밖은 보내지 않고 기본 모델로 돌며, 화면이 그 사실을 보인다(Q2) |
 | 다른 모델의 서명된 추론 블록이 섞여 공급자 오류 | 이미 provider·model 일치만 재생(V3-049). 회귀 테스트로 고정 |
-| 다른 모델의 측정값으로 크기를 잘못 잡아 한도를 넘김 | `UsageMark.model_id` 비교(§6.2). 넘어도 공급자 오류는 Run 실패로 남고 재전송하지 않음 |
+| 다른 모델의 측정값으로 크기를 잘못 잡아 한도를 넘김 | 측정값은 `context_key`(모델 포함)가 같을 때만 쓴다(§6.2). 넘어도 공급자 오류는 Run 실패로 남고 재전송하지 않음 |
 | 작은 모델로 바꾸자 요약이 반복되거나 실패 | 기존 압축 규칙과 한도 거부를 그대로 탄다. 요약 요청은 예산 안에서만(V3-P48/P49) |
 | 다른 사용자의 대화 설정을 읽거나 바꿈 | 모든 읽기·쓰기가 `TrustedScope` 권한 검사를 거친다(다른 대화 설정과 같음) |
 
 ## 11. 검증 계획
 
 - **Data:** 인메모리·SQLite 양쪽 계약 테스트(저장·지우기·잘못된 값), v5 → v6 업그레이드.
-- **Prompt:** 같은 provider, 다른 model의 `UsageMark`는 `measured=False`.
+- **Prompt:** 같은 provider, 다른 model의 측정값은 `measured=False`(기존 테스트가 확인, §6.2). 통합: 모델을 바꾼 뒤 문맥 크기 표시가 `measured=False`.
 - **Control:** 턴 시작 때 resolve. 실행 중 바꾸면 그 턴은 이전 모델, 다음 턴은 새 모델(Run 기록의 `model_id`). 압축 Run의 모델. 작은 모델로 바꾼 뒤 자동 압축과 한도 거부. 목록에서 빠진 모델(Q2).
 - **Provider·Prompt:** 모델 A → B → A 순서에서 A의 continuation만 A 요청에 실리는 것(OpenRouter, 실제 바이트 비교). 압축 전과 후로 나눈다. 압축 뒤에는 요약에 들어간 A 턴의 continuation이 실리지 않고, 요약 뒤에 남은 A 턴의 것만 실린다.
 - **Tool 호출 미지원 모델(B1):** 가짜 Provider가 404 오류 본문을 주면 턴은 `PROVIDER_FAILED`, Run에 본문이 남고, 다시 보내지 않는다. 선언되지 않은 모델이 목록에 있으면 시작 로그에 경고가 남는다.
@@ -247,3 +251,25 @@ Tool 목록, 서버 안내문, 지시문은 모델과 무관하다. 모델이 �
 ## 13. 재검수 — rev. 2(`27e89fb`): READY
 
 소유자가 전달한 재검수 판정(2026-10-20). 추가 지적 없음.
+
+## 14. 구현 노트 — 1단계: Data·Control·Bootstrap 핵심 (2026-10-20)
+
+| 모듈 | 구현 |
+| --- | --- |
+| Data | `ModelSetting`, `ConversationModelSettings`(인메모리·SQLite). 모양만 검사한다: 모델 id 1~200자, 강도 1~32자, 보이는 ASCII(`!`~`~`). SQLite v6 `model_settings`. v2~v5에서 제자리 업그레이드(업그레이드 목록을 버전별 추가분에서 만든다) |
+| Control | `control/api.py`: `ModelOffer`, `ResolvedModel`, `ModelCatalog`(시작 검사: 중복 id, 목록에 없는 기본 모델, 선언되지 않은 기본 강도 → `ValueError`; `resolve`는 §4.2 표대로). Driver는 `request_options`·`budget` 대신 `models`·`settings`를 받는다. `_exclusive`가 잠금을 잡은 뒤 한 번 resolve해 `_turn_models`에 두고, 턴이 끝나면 지운다(§5 1~4). Run 기록의 `model_id`는 준비한 요청의 `request_options.model_id`에서 가져온다(보낸 것과 기록이 같다). `context_status`는 잠금 없이 resolve |
+| Bootstrap | `build_runtime(models=...)`. 없으면 지금처럼 `model_id`·`reasoning_effort`·`context_budget` 하나로 목록을 만든다. 이 경우에도 `ModelCatalog` 검사를 거치므로, 모델이 선언하지 않은 `HIMARI_REASONING_EFFORT`는 이제 보내기 직전이 아니라 **시작할 때** 거부된다(§3). `Runtime.models` |
+| Prompt·Provider | 바꾸지 않음(§6.1, §6.2 정정) |
+
+**테스트**(`tests/data/test_model_settings.py`, `tests/control/test_api.py`, `tests/integration/test_conversation_model.py`, SQLite 업그레이드 v5 포함):
+- 대화마다 자기 모델·강도. Run 기록이 그 모델이다.
+- 턴 중간에 바꾸면 그 턴의 두 Run은 이전 모델, 다음 턴부터 새 모델.
+- 큰 모델 → 작은 모델: 다음 턴 앞에서 자동 압축. 요약 요청이 한도에 맞지 않아 두 번의 연쇄 요약이 되었고, 모든 압축 Run이 작은 모델이다. 바꾼 직후 크기 표시는 `measured=False`.
+- 목록에서 빠진 모델·강도: 기본으로 돌고 `fallback`이 이유를 말한다. 저장된 선택은 그대로다.
+- OpenRouter 바이트(가짜 전송): nano → nano → (압축) → haiku → nano. haiku 요청에는 nano의 추론이 없다. 마지막 nano 요청에는 Prompt에 남은 nano 턴의 것만 실린다. 압축하지 않으면 q1·q2, 압축하면 q2만(C1).
+- B1: Tool 호출을 거부하는 모델(404)은 `PROVIDER_FAILED`. 오류 본문이 Run에 남고, 한 번만 보내며, 기본 모델로 돌리면 다음 턴이 된다.
+
+검증: 전체 pytest 1386 passed·51 skipped, mypy --strict, import 검사 통과.
+
+**남은 것(2단계):** `HIMARI_MODELS` 해석과 모델별 예산(Application), 확인되지 않은 모델의 시작 경고(B1), `Application.set_model`과 거부 규칙(§4.3), Web API·화면, CLI `/model`, 답변의 모델 표시.
+

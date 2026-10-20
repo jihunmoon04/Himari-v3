@@ -194,7 +194,7 @@ def test_the_application_compacts_with_its_budget(tmp_path: Path) -> None:
                                      context_tokens=5000)
         try:
             assert app.context_tokens == 5000
-            budget = app.runtime.driver._budget
+            budget = app.runtime.models.default.budget
             assert budget is not None and budget.hard_limit_tokens is None  # the scripted model declares no window
             scope = TrustedScope(ALICE, await app.create_conversation(ALICE))
             await app.runtime.driver.drive(scope, user("가" * 3500))
@@ -215,7 +215,7 @@ def test_the_models_window_less_its_output_is_the_hard_limit_and_the_budget_is_c
     async def scenario() -> None:
         app = await Application.open(tmp_path / "root", WindowedAdapter(), model_id="m", sandbox=False)
         try:
-            budget = app.runtime.driver._budget
+            budget = app.runtime.models.default.budget
             assert budget is not None
             assert (budget.limit_tokens, budget.hard_limit_tokens) == (DEFAULT_CONTEXT_TOKENS, 240_000)
         finally:

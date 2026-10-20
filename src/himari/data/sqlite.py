@@ -83,6 +83,7 @@ from himari.data.api import (
     EventPayload,
     ExternalSourceSetting,
     InitialActivation,
+    ModelSetting,
     PersistedStateBasis,
     ProjectionResult,
     PromptBasis,
@@ -106,8 +107,9 @@ from himari.data.api import (
     UserMessage,
 )
 
-# v3: compaction_runs; v4: external_settings; v5: ui_resources (all upgraded in place); v1 is refused
-SCHEMA_VERSION = 5
+# v3: compaction_runs; v4: external_settings; v5: ui_resources; v6: model_settings (all upgraded in place);
+# v1 is refused
+SCHEMA_VERSION = 6
 APPLICATION_ID = 0x48494D41  # "HIMA": written into the database header (PRAGMA application_id)
 
 _TERMINAL_COMPLETIONS = frozenset(
@@ -255,12 +257,20 @@ CREATE TABLE ui_resources (
 ALTER TABLE tool_executions ADD COLUMN ui_digest TEXT REFERENCES ui_resources (digest);
 ALTER TABLE tool_executions ADD COLUMN app_payload TEXT;
 """
-_SCHEMA = _SCHEMA_V2 + _V3_ADDITIONS + _V4_ADDITIONS + _V5_ADDITIONS
+# v6: a Conversation's model choice (V3-P64), kept as made.
+_V6_ADDITIONS = """
+CREATE TABLE model_settings (
+    conversation_id TEXT PRIMARY KEY REFERENCES conversations,
+    model_id TEXT NOT NULL,
+    reasoning_effort TEXT
+) STRICT;
+"""
+_ADDITIONS = (_V3_ADDITIONS, _V4_ADDITIONS, _V5_ADDITIONS, _V6_ADDITIONS)  # what each version from v3 added
+_SCHEMA = _SCHEMA_V2 + "".join(_ADDITIONS)
 # An older version → (its exact schema, what brings it to SCHEMA_VERSION).
 _UPGRADES = {
-    2: (_SCHEMA_V2, _V3_ADDITIONS + _V4_ADDITIONS + _V5_ADDITIONS),
-    3: (_SCHEMA_V2 + _V3_ADDITIONS, _V4_ADDITIONS + _V5_ADDITIONS),
-    4: (_SCHEMA_V2 + _V3_ADDITIONS + _V4_ADDITIONS, _V5_ADDITIONS),
+    version: (_SCHEMA_V2 + "".join(_ADDITIONS[: version - 2]), "".join(_ADDITIONS[version - 2:]))
+    for version in range(2, SCHEMA_VERSION)
 }
 
 
@@ -1332,6 +1342,27 @@ class SqliteData:
                 tx.execute("INSERT INTO external_settings (conversation_id, source, enabled) VALUES (?, ?, ?)"
                            " ON CONFLICT (conversation_id, source) DO UPDATE SET enabled=excluded.enabled",
                            scope.conversation_id, source, int(enabled))
+
+    # --- ConversationModelSettings ----------------------------------------------
+
+    async def read_model_setting(self, scope: TrustedScope) -> ModelSetting | None:
+        with self._tx() as tx:
+            tx.authorized(scope)
+            row = tx.one("SELECT model_id, reasoning_effort FROM model_settings WHERE conversation_id=?",
+                         scope.conversation_id)
+            return ModelSetting(row["model_id"], row["reasoning_effort"]) if row is not None else None
+
+    async def set_model_setting(self, scope: TrustedScope, setting: ModelSetting | None) -> None:
+        with self._tx() as tx:
+            tx.authorized(scope)
+            rules.check_model_setting(setting)
+            if setting is None:
+                tx.execute("DELETE FROM model_settings WHERE conversation_id=?", scope.conversation_id)
+            else:
+                tx.execute("INSERT INTO model_settings (conversation_id, model_id, reasoning_effort) VALUES (?, ?, ?)"
+                           " ON CONFLICT (conversation_id) DO UPDATE SET model_id=excluded.model_id,"
+                           " reasoning_effort=excluded.reasoning_effort",
+                           scope.conversation_id, setting.model_id, setting.reasoning_effort)
 
     # --- StateQuery -------------------------------------------------------------
 

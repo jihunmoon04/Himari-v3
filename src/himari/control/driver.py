@@ -44,6 +44,13 @@ all. The drive's state (``control.turn``) is told to the model as data in the
 runtime state, and to the Runner after every Run (``TurnProgress``). Every
 request carries a per-Conversation ``session_key`` (OpenRouter
 ``session_id``), so the provider's cache can serve the growing history.
+
+The model (V3-P64 §5) is fixed for a turn: once the Conversation's lock is
+held, its stored choice is read and resolved against the ``ModelCatalog``
+into one ``ResolvedModel`` — request options, context budget, output
+reserve — which every Run and summarizing call of the turn uses. A choice
+changed meanwhile applies from the next turn. ``context_status`` resolves
+without the lock: it shows what the next turn would use.
 """
 
 from __future__ import annotations
@@ -61,6 +68,8 @@ from himari.control.api import (
     ControlErrorCode,
     DriveResult,
     DriveState,
+    ModelCatalog,
+    ResolvedModel,
     StopSignal,
     TurnProgress,
 )
@@ -73,6 +82,7 @@ from himari.data.api import (
     AssistantToolCalls,
     CompletedGroupRef,
     ConversationLog,
+    ConversationModelSettings,
     EventKind,
     EventRef,
     RawNoResponse,
@@ -153,16 +163,16 @@ class Driver:
         composer: PromptComposer,
         provider: ProviderAdapter,
         dispatcher: ToolDispatcher,
-        request_options: RequestOptions,
+        models: ModelCatalog,
         *,
+        settings: ConversationModelSettings | None = None,  # None: every Conversation uses the default model
         max_runs_per_drive: int | None = 16,
         planner: CompactionPlanner | None = None,
-        budget: ContextBudget | None = None,
         turn_budget: int | None = None,
         no_progress_runs: int | None = None,  # None: no NO_PROGRESS stop (V3-P62 §4 turns it on with O3)
     ) -> None:
-        if (planner is None) != (budget is None):
-            raise ValueError("a context budget needs a compaction planner and vice versa")
+        if any((planner is None) != (offer.budget is None) for offer in models.offers):
+            raise ValueError("a context budget needs a compaction planner and vice versa, for every model")
         if max_runs_per_drive is None and turn_budget is None:
             raise ValueError("a turn needs a token budget or a Run limit (V3-P62)")
         if turn_budget is not None and planner is None:
@@ -174,15 +184,16 @@ class Driver:
         self._composer = composer
         self._provider = provider
         self._dispatcher = dispatcher
-        self._options = dataclasses.replace(request_options, provider_key=provider.provider_key)
+        self._models = models
+        self._settings = settings
         self._max_runs = max_runs_per_drive
         self._turn_budget = turn_budget
         self._no_progress_runs = no_progress_runs
         self._planner = planner
-        self._budget = budget
         self._locks: dict[ConversationId, asyncio.Lock] = {}
         self._signals: dict[ConversationId, StopSignal] = {}  # of the drive holding the lock
         self._turns: dict[ConversationId, Turn] = {}  # of the drive holding the lock
+        self._turn_models: dict[ConversationId, ResolvedModel] = {}  # of the drive holding the lock
 
     async def drive(self, scope: TrustedScope, message: UserMessage, *, stop: StopSignal | None = None,
                     progress: TurnProgress | None = None) -> DriveResult:
@@ -217,7 +228,8 @@ class Driver:
             recovery, halted = await self._prepare(scope)
             if halted is not None:
                 return halted
-            if self._planner is None or self._budget is None:
+            budget = self._turn_model(scope).offer.budget
+            if self._planner is None or budget is None:
                 return DriveResult(DriveState.NOTHING_TO_COMPACT, recovery=recovery, detail="no context budget")
             waiting = await self._log.find_waiting_call(scope)
             if waiting is not None:  # the open group cannot be folded yet
@@ -230,13 +242,13 @@ class Driver:
                 state = (DriveState.RECOVERY_REQUIRED if exc.code is PromptErrorCode.INCOMPLETE_HISTORY
                          else DriveState.REQUEST_REJECTED)
                 return DriveResult(state, recovery=recovery, detail=str(exc))
-            plan = self._planner.plan_now(inputs, model_input, self._budget)
+            plan = self._planner.plan_now(inputs, model_input, budget)
             if plan is None:
                 return DriveResult(DriveState.NOTHING_TO_COMPACT, recovery=recovery,
                                    detail="nothing older than the latest turn, or too large to summarize")
             compactions: list[RunId] = []
             try:
-                failure = await self._compact(scope, plan, self._planner, self._budget, compactions)
+                failure = await self._compact(scope, plan, self._planner, budget, compactions)
             except _Cancelled:
                 return DriveResult(DriveState.CANCELLED, recovery=recovery, compaction_run_ids=tuple(compactions),
                                    detail="cancelled while summarizing; nothing was committed")
@@ -253,10 +265,13 @@ class Driver:
 
     async def context_status(self, scope: TrustedScope) -> ContextStatus | None:
         """CTRL-07: the size estimate the next Run would start from, and the
-        latest compaction. Read-only; no lock (display may be a moment stale)."""
-        if self._planner is None or self._budget is None:
+        latest compaction, for the model the next turn would use (V3-P64 §5).
+        Read-only; no lock (display may be a moment stale)."""
+        model = await self._resolve_model(scope)
+        budget = model.offer.budget
+        if self._planner is None or budget is None:
             return None
-        inputs = await self._loader.load(scope, (), self._options_for(scope))
+        inputs = await self._loader.load(scope, (), self._request_options(scope, model))
         summary = self._planner.summary_of(inputs.snapshot)
         snapshot = inputs.snapshot if summary is not None else None
         tokens: int | None = None
@@ -266,7 +281,6 @@ class Driver:
             tokens, measured = estimate.tokens, estimate.measured
         except PromptError:
             pass  # e.g. a Tool group still running: no size to show now
-        budget = self._budget
         return ContextStatus(
             estimated_tokens=tokens,
             measured=measured,
@@ -300,14 +314,17 @@ class Driver:
         if lock.locked():
             raise ControlError(ControlErrorCode.BUSY, scope.conversation_id)
         async with lock:
+            model = await self._resolve_model(scope)  # once per turn (V3-P64 §5)
+            self._turn_models[scope.conversation_id] = model
             self._signals[scope.conversation_id] = stop if stop is not None else StopSignal()
-            maximum = self._provider.describe_capabilities(self._options.model_id).max_output_tokens
-            self._turns[scope.conversation_id] = Turn(self._turn_budget, self._max_runs, progress, maximum)
+            self._turns[scope.conversation_id] = Turn(self._turn_budget, self._max_runs, progress,
+                                                      model.offer.max_output_tokens)
             try:
                 yield
             finally:
                 del self._signals[scope.conversation_id]
                 del self._turns[scope.conversation_id]
+                del self._turn_models[scope.conversation_id]
 
     def _stop(self, scope: TrustedScope) -> StopSignal:
         return self._signals[scope.conversation_id]
@@ -315,8 +332,21 @@ class Driver:
     def _turn(self, scope: TrustedScope) -> Turn:
         return self._turns[scope.conversation_id]
 
+    async def _resolve_model(self, scope: TrustedScope) -> ResolvedModel:
+        """The model a turn starting now would use: the stored choice,
+        resolved against the catalog. Authorizes like any read."""
+        setting = await self._settings.read_model_setting(scope) if self._settings is not None else None
+        return self._models.resolve(setting)
+
+    def _turn_model(self, scope: TrustedScope) -> ResolvedModel:
+        return self._turn_models[scope.conversation_id]
+
+    def _request_options(self, scope: TrustedScope, model: ResolvedModel) -> RequestOptions:
+        return RequestOptions(model.model_id, model.reasoning_effort, provider_key=self._provider.provider_key,
+                              session_key=session_key(scope))
+
     def _options_for(self, scope: TrustedScope) -> RequestOptions:
-        return dataclasses.replace(self._options, session_key=session_key(scope))
+        return self._request_options(scope, self._turn_model(scope))
 
     def _compose(self, scope: TrustedScope, inputs: PromptInputs) -> ModelInput:
         """The model's input, with the turn's state as data (V3-P62 §8) — only
@@ -595,7 +625,7 @@ class Driver:
                     trigger_refs=triggers,
                     prompt_basis=model_input.prompt_basis,
                     provider_key=self._provider.provider_key,
-                    model_id=self._options.model_id,
+                    model_id=model_input.request_options.model_id,  # what was prepared, so what is sent
                 ),
             )
             run_ids.append(run_id)
@@ -649,20 +679,21 @@ class Driver:
         """The input to send (after at most MAX_COMPACTIONS_PER_RUN
         compactions), or a refusal if it is still over the hard limit; and
         its estimated size (None without a context budget)."""
-        if self._planner is None or self._budget is None:
+        budget = self._turn_model(scope).offer.budget
+        if self._planner is None or budget is None:
             return model_input, None, None
-        decision = self._planner.decide(inputs, model_input, self._budget)
+        decision = self._planner.decide(inputs, model_input, budget)
         failure = None
         for _ in range(MAX_COMPACTIONS_PER_RUN):
             if decision.compaction is None:
                 break
-            failure = await self._compact(scope, decision.compaction, self._planner, self._budget, compactions)
+            failure = await self._compact(scope, decision.compaction, self._planner, budget, compactions)
             if failure is not None:
                 break
             inputs = await self._loader.load(scope, triggers, self._options_for(scope))
             model_input = self._compose(scope, inputs)
-            decision = self._planner.decide(inputs, model_input, self._budget)
-        estimate, ceiling = decision.estimate, self._budget.ceiling_tokens
+            decision = self._planner.decide(inputs, model_input, budget)
+        estimate, ceiling = decision.estimate, budget.ceiling_tokens
         if estimate.tokens > ceiling:
             detail = f"context_budget_exceeded: about {estimate.tokens} tokens > {ceiling}"
             if failure is not None:
@@ -752,7 +783,7 @@ class Driver:
                 trigger_refs=(),
                 prompt_basis=request.prompt_basis,
                 provider_key=self._provider.provider_key,
-                model_id=self._options.model_id,
+                model_id=request.request_options.model_id,
                 purpose=RunPurpose.COMPACTION,
             ),
         )

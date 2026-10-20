@@ -12,13 +12,12 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 
 from himari.control.ask_user import AskUserTool
-from himari.control.api import TURN_GUIDANCE
+from himari.control.api import TURN_GUIDANCE, ModelCatalog, ModelOffer
 from himari.control.driver import Driver
 from himari.data.memory import InMemoryData, InMemoryStore
 from himari.data.sqlite import SqliteData, SqliteStore
 from himari.environment.api import EnvironmentPlugin
-from himari.prompt.api import RequestOptions, SourceNote
-from himari.prompt.api import ContextBudget
+from himari.prompt.api import ContextBudget, SourceNote
 from himari.prompt.compaction import Compactor
 from himari.prompt.composer import Composer
 from himari.prompt.loader import ContextLoader
@@ -43,6 +42,7 @@ class Runtime:
     # The one ExternalAccess the catalog and Dispatcher ask; Tool views ask it
     # too (V3-P58 §3.7), so "is this source on here" has one answer.
     access: ConfiguredExternalAccess
+    models: ModelCatalog  # the offered models (V3-P64)
 
 
 def build_runtime(
@@ -59,6 +59,9 @@ def build_runtime(
     allow_require_user_tools: bool = False,  # keep False in P0 (no resolution API)
     reasoning_effort: str | None = None,
     context_budget: ContextBudget | None = None,  # None: no compaction or size check
+    # The offered models (V3-P64). None: ``model_id`` alone, with
+    # ``reasoning_effort`` and ``context_budget``; given, those three are unused.
+    models: ModelCatalog | None = None,
     # External Tool source → enabled by default (V3-P53); a Conversation's own
     # choice overrides it. None: every registered source, on by default.
     external_defaults: Mapping[str, bool] | None = None,
@@ -76,6 +79,10 @@ def build_runtime(
         raise ValueError(f"no default for the external sources {sorted(sources - defaults.keys())}")
     access = ConfiguredExternalAccess(defaults, data)
     dispatcher = Dispatcher(registry, data, data, data, access)
+    if models is None:
+        capabilities = provider.describe_capabilities(model_id)
+        models = ModelCatalog((ModelOffer(model_id, reasoning_effort, capabilities.reasoning_efforts, context_budget,
+                                          capabilities.max_output_tokens),), model_id)
     if turn_budget is not None:  # the rule for the turn's state, fixed in the system prompt (V3-P62 §8)
         instructions = (*instructions, TURN_GUIDANCE)
     driver = Driver(
@@ -84,14 +91,14 @@ def build_runtime(
         composer=Composer(),
         provider=provider,
         dispatcher=dispatcher,
-        request_options=RequestOptions(model_id=model_id, reasoning_effort=reasoning_effort),
+        models=models,
+        settings=data,
         max_runs_per_drive=max_runs_per_drive,
-        planner=Compactor() if context_budget is not None else None,
-        budget=context_budget,
+        planner=Compactor() if any(o.budget is not None for o in models.offers) else None,
         turn_budget=turn_budget,
         no_progress_runs=no_progress_runs,
     )
-    return Runtime(store=store, data=data, registry=registry, driver=driver, access=access)
+    return Runtime(store=store, data=data, registry=registry, driver=driver, access=access, models=models)
 
 
 def read_env_file(path: str) -> dict[str, str]:
