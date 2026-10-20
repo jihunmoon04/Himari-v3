@@ -31,6 +31,7 @@ from himari.data.api import UserMessage  # noqa: E402
 from himari.interfaces.web import app as web  # noqa: E402
 from himari.interfaces.web.config import MIN_TURN_BUDGET, WebConfig, WebConfigError  # noqa: E402
 from himari.interfaces.web.sandbox import SandboxGrant, SandboxSigner, create_sandbox_app, view_csp  # noqa: E402
+from himari.provider.api import ProviderCapabilities  # noqa: E402
 from himari.provider.scripted import ScriptedAdapter, ScriptStep  # noqa: E402
 
 ORIGIN = "http://testserver"
@@ -45,15 +46,16 @@ def config(tmp_path: Path) -> WebConfig:
 class Server:
     def __init__(self, tmp_path: Path, script: list[ScriptStep], context_tokens: int | None = None,
                  mcp: FakeMcpServer | None = None, signer: SandboxSigner | None = None,
-                 turn: dict[str, Any] | None = None) -> None:
-        self.provider = ScriptedAdapter(script)
+                 turn: dict[str, Any] | None = None, provider: ScriptedAdapter | None = None,
+                 models: tuple[tuple[str, str | None], ...] = ()) -> None:
+        self.provider = ScriptedAdapter(script) if provider is None else provider
         self.application: Application | None = None
 
         async def opener() -> Application:
             self.application = await Application.open(tmp_path / "data", self.provider, model_id="scripted-model",
                                                       sandbox=False, context_tokens=context_tokens,
                                                       mcp_transport=None if mcp is None else mcp.transport(),
-                                                      **(turn or {}))
+                                                      models=models, **(turn or {}))
             return self.application
 
         self.client = TestClient(web.create_app(config(tmp_path), opener, signer))
@@ -110,6 +112,22 @@ def test_configuration_rules() -> None:
     for bad in ("lots", "999", "-5"):
         with pytest.raises(WebConfigError, match="HIMARI_CONTEXT_TOKENS"):
             WebConfig.from_env({**base, "HIMARI_CONTEXT_TOKENS": bad})
+
+
+def test_the_offered_models_are_configured() -> None:
+    # V3-P64 §3: HIMARI_MODEL is the default; HIMARI_MODELS lists every offered model, id[=effort].
+    base = {"HIMARI_DATA_ROOT": "/srv/himari"}
+    assert WebConfig.from_env(base).models == ()  # unset: the default model alone
+    assert WebConfig.from_env({**base, "HIMARI_MODELS": "  "}).models == ()
+    config = WebConfig.from_env({**base, "HIMARI_MODEL": "a/one", "HIMARI_REASONING_EFFORT": "high",
+                                 "HIMARI_MODELS": " b/two:free = low , a/one,c/three=  "})
+    assert config.models == (("b/two:free", "low"), ("a/one", None), ("c/three", None))
+    assert (config.model_id, config.reasoning_effort) == ("a/one", "high")  # applied to a/one by Application
+    for raw, message in [("b/two", "must list the default model"), ("a/one,a/one=low", "twice"),
+                         ("a/one,=low", "not model\\[=effort\\]"), ("a/one,b two", "not model"),
+                         ("a/one,b=lo w", "not model")]:
+        with pytest.raises(WebConfigError, match=message):
+            WebConfig.from_env({**base, "HIMARI_MODEL": "a/one", "HIMARI_MODELS": raw})
 
 
 def test_the_turn_guards_are_configured() -> None:
@@ -246,6 +264,8 @@ def test_the_server_info_is_for_the_signed_in_operator(server: Server) -> None:
     server.sign_in()
     info = server.client.get("/api/server").json()
     assert info == {"model": "scripted-model", "sandbox": "unavailable", "context_budget": 128_000,
+                    "models": [{"id": "scripted-model", "default_effort": None, "efforts": [], "window_known": False,
+                                "default": True}],
                     "turn": {"token_budget": 3_000_000, "unattended_runs": 20, "max_runs": None,
                              "no_progress_runs": 3, "seen_seconds": 60.0}}  # V3-P62's defaults
 
@@ -341,7 +361,10 @@ def test_foreign_and_missing_conversations_look_the_same(server: Server) -> None
                       server.post(f"/api/conversations/{cid}/compact"),
                       server.post(f"/api/conversations/{cid}/pause"),
                       server.post(f"/api/conversations/{cid}/cancel"),
-                      server.post(f"/api/conversations/{cid}/dismiss")]
+                      server.post(f"/api/conversations/{cid}/dismiss"),
+                      server.client.get(f"/api/conversations/{cid}/model"),
+                      server.client.put(f"/api/conversations/{cid}/model", json={"model": "scripted-model"},
+                                        headers={"origin": ORIGIN})]
     assert {r.status_code for r in responses} == {404}
     assert {r.text for r in responses} == {'{"error":{"code":"not_found","message":"No such conversation."}}'}
     assert server.client.get("/api/conversations").json()["items"] == []
@@ -839,3 +862,88 @@ def test_only_an_authorized_read_counts_as_a_client_reading(server: Server, monk
     assert server.client.get("/api/conversations/not-mine/events").status_code == 404
     assert seen == [cid, cid]
 
+
+# --- the model (V3-P64 §7) ----------------------------------------------------------------------
+
+
+class TwoModels(ScriptedAdapter):
+    """"big" declares its window and efforts; "small" is unknown to the Provider."""
+
+    def describe_capabilities(self, model_id: str) -> ProviderCapabilities:
+        if model_id == "big":
+            return ProviderCapabilities(model_id, frozenset({"low", "high", "max"}), True, context_tokens=300_000,
+                                        max_output_tokens=60_000)
+        return super().describe_capabilities(model_id)
+
+
+@pytest.fixture
+def model_server(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Server]:
+    monkeypatch.setattr(web, "FAILED_LOGIN_DELAY_SECONDS", 0)
+    s = Server(tmp_path, [], provider=TwoModels([]), models=(("big", "low"), ("scripted-model", None)))
+    with s.client:
+        yield s
+
+
+def put_model(server: Server, cid: str, body: dict[str, Any]) -> Any:
+    return server.client.put(f"/api/conversations/{cid}/model", json=body, headers={"origin": ORIGIN})
+
+
+def test_the_offered_models_and_a_conversations_choice(model_server: Server) -> None:
+    server = model_server
+    server.sign_in()
+    assert server.client.get("/api/server").json()["models"] == [
+        {"id": "big", "default_effort": "low", "efforts": ["low", "high", "max"], "window_known": True,
+         "default": False},
+        {"id": "scripted-model", "default_effort": None, "efforts": [], "window_known": False, "default": True},
+    ]
+    cid = server.post("/api/conversations").json()["id"]
+    assert server.client.get(f"/api/conversations/{cid}/model").json() == {
+        "model": "scripted-model", "effort": None, "chosen": None, "fallback": None}
+    assert put_model(server, cid, {"model": "big", "effort": "high"}).json() == {
+        "model": "big", "effort": "high", "chosen": {"model": "big", "effort": "high"}, "fallback": None}
+    # the default model, chosen: kept as made (Q2)
+    assert put_model(server, cid, {"model": "scripted-model"}).json()["chosen"] == {"model": "scripted-model",
+                                                                                     "effort": None}
+    assert put_model(server, cid, {"model": None}).json()["chosen"] is None
+
+
+@pytest.mark.parametrize("body, status, code", [
+    ({"model": "gpt-unknown"}, 404, "unknown_model"),
+    ({"model": "big", "effort": "minimal"}, 422, "invalid_effort"),
+    ({"model": "scripted-model", "effort": "low"}, 422, "invalid_effort"),
+    ({"model": None, "effort": "low"}, 400, "invalid_argument"),
+    ({"effort": "low"}, 400, "invalid_request"),  # "model" must be given (null: the default)
+    ({"model": "big", "extra": 1}, 400, "invalid_request"),
+    ({"model": "x" * 201}, 400, "invalid_request"),
+])
+def test_a_refused_model_choice_changes_nothing(model_server: Server, body: dict[str, Any], status: int,
+                                                code: str) -> None:
+    server = model_server
+    server.sign_in()
+    cid = server.post("/api/conversations").json()["id"]
+    put_model(server, cid, {"model": "big"})
+    response = put_model(server, cid, body)
+    assert response.status_code == status and response.json()["error"]["code"] == code
+    assert server.client.get(f"/api/conversations/{cid}/model").json()["chosen"] == {"model": "big", "effort": None}
+
+
+def test_answers_carry_their_model_and_a_change_applies_from_the_next_turn(model_server: Server) -> None:
+    server = model_server
+    server.sign_in()
+    cid = server.post("/api/conversations").json()["id"]
+    queue(server, final("one"))
+    server.post(f"/api/conversations/{cid}/messages", {"text": "first"})
+    server.wait_idle(cid)
+    put_model(server, cid, {"model": "big", "effort": "max"})
+    queue(server, calls(("ask_user", {"question": "sure?"})))
+    server.post(f"/api/conversations/{cid}/messages", {"text": "second"})
+    server.wait_idle(cid)
+    sent = server.provider.prepared_inputs
+    assert [(i.request_options.model_id, i.request_options.reasoning_effort) for i in sent] == [
+        ("scripted-model", None), ("big", "max")]
+    items = server.client.get(f"/api/conversations/{cid}/events").json()["items"]
+    assert [(e["kind"], e.get("model")) for e in items if e["kind"].startswith("assistant")] == [
+        ("assistant_final", "scripted-model"), ("assistant_tool_calls", "big")]
+    assert all("model" not in e for e in items if not e["kind"].startswith("assistant"))
+    context = server.client.get(f"/api/conversations/{cid}/context").json()
+    assert context["hard_limit_tokens"] == 240_000  # the chosen model's window less its output

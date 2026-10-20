@@ -17,6 +17,11 @@ for a loopback host, and any https origin makes the cookie ``Secure``.
 Tool views (MCP Apps, V3-P58) are framed from a second origin: the same
 scheme and host as the page, on ``HIMARI_WEB_SANDBOX_PORT`` (default: the
 port + 1). A reverse proxy must forward that port too, for the same host.
+
+Models (V3-P64 §3): ``HIMARI_MODEL`` is the default; ``HIMARI_MODELS``
+optionally lists every offered model as ``id[=effort]`` (comma-separated;
+an id may hold ``:``, so the effort follows ``=``). The default must be
+listed. Unset, the default model is the only one offered.
 """
 
 from __future__ import annotations
@@ -34,6 +39,7 @@ ALLOWED_ORIGINS_VAR = "HIMARI_WEB_ALLOWED_ORIGINS"
 SECURE_COOKIE_VAR = "HIMARI_WEB_SECURE_COOKIE"
 DATA_ROOT_VAR = "HIMARI_DATA_ROOT"
 MODEL_VAR = "HIMARI_MODEL"
+MODELS_VAR = "HIMARI_MODELS"  # V3-P64: the offered models
 REASONING_VAR = "HIMARI_REASONING_EFFORT"
 SANDBOX_VAR = "HIMARI_SANDBOX"
 CONTEXT_TOKENS_VAR = "HIMARI_CONTEXT_TOKENS"
@@ -77,6 +83,8 @@ class WebConfig:
     turn_budget: int | None = DEFAULT_TURN_BUDGET
     unattended_runs: int | None = DEFAULT_UNATTENDED_RUNS
     max_runs: int | None = None
+    # The offered models and their default efforts (V3-P64); empty: model_id alone.
+    models: tuple[tuple[str, str | None], ...] = ()
 
     @property
     def view_port(self) -> int:
@@ -138,6 +146,9 @@ class WebConfig:
         max_runs = _optional(source.get(MAX_RUNS_VAR), MAX_RUNS_VAR, None, 1, 1000)
         if turn_budget is None and max_runs is None:
             raise WebConfigError(f"{TURN_BUDGET_VAR}=0 needs {MAX_RUNS_VAR}: a turn needs a token budget or a Run limit")
+        model_id = source.get(MODEL_VAR, "").strip() or DEFAULT_MODEL
+        models_raw = source.get(MODELS_VAR)
+        models = _models(models_raw, model_id) if models_raw is not None and models_raw.strip() else ()
         return cls(
             host=host,
             port=port,
@@ -145,7 +156,7 @@ class WebConfig:
             allowed_origins=allowed_origins,
             secure_cookie=secure_cookie,
             data_root=os.path.abspath(data_root),
-            model_id=source.get(MODEL_VAR, "").strip() or DEFAULT_MODEL,
+            model_id=model_id,
             reasoning_effort=effort,
             sandbox=_flag(source.get(SANDBOX_VAR), SANDBOX_VAR, default=True),
             context_tokens=_positive(source.get(CONTEXT_TOKENS_VAR), CONTEXT_TOKENS_VAR),
@@ -153,6 +164,7 @@ class WebConfig:
             turn_budget=turn_budget,
             unattended_runs=unattended,
             max_runs=max_runs,
+            models=models,
         )
 
 
@@ -213,6 +225,22 @@ def _flag(value: str | None, name: str, *, default: bool) -> bool:
     if normalized in ("0", "false", "no", "off"):
         return False
     raise WebConfigError(f"{name} must be a boolean (1/0, true/false)")
+
+
+def _models(raw: str, default: str) -> tuple[tuple[str, str | None], ...]:
+    """``id[=effort]`` entries. Only the shape is checked here; whether the
+    Provider supports an effort is checked when the server starts."""
+    models: list[tuple[str, str | None]] = []
+    for entry in _split(raw):
+        model, _, effort = (part.strip() for part in entry.partition("="))
+        if not model or any(c.isspace() for c in model) or (effort and any(c.isspace() for c in effort)):
+            raise WebConfigError(f"{MODELS_VAR} entry {entry!r} is not model[=effort]")
+        if model in (m for m, _ in models):
+            raise WebConfigError(f"{MODELS_VAR} lists {model} twice")
+        models.append((model, effort or None))
+    if default not in (m for m, _ in models):
+        raise WebConfigError(f"{MODELS_VAR} must list the default model {default} ({MODEL_VAR})")
+    return tuple(models)
 
 
 def _split(raw: str) -> list[str]:

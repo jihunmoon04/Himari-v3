@@ -81,6 +81,19 @@
                 <dd id="chat-menu-context"></dd>
               </div>
             </dl>
+            <!-- The model (V3-P64): this conversation's choice, used from its next turn. -->
+            <section class="chat-menu-tools chat-menu-model" id="chat-menu-model" aria-labelledby="chat-menu-model-heading" hidden>
+              <h2 class="chat-menu-tools-heading" id="chat-menu-model-heading">Model</h2>
+              <label class="chat-menu-model-field">
+                <span class="chat-menu-tool-meta">Model</span>
+                <select id="chat-menu-model-select"></select>
+              </label>
+              <label class="chat-menu-model-field" id="chat-menu-effort-field" hidden>
+                <span class="chat-menu-tool-meta">Reasoning</span>
+                <select id="chat-menu-effort-select"></select>
+              </label>
+              <p class="chat-menu-tool-meta" id="chat-menu-model-note" hidden></p>
+            </section>
             <!-- MCP servers (V3-P53): on/off for this conversation; "default" follows the server's setting. -->
             <section class="chat-menu-tools" id="chat-menu-tools" aria-labelledby="chat-menu-tools-heading" hidden>
               <h2 class="chat-menu-tools-heading" id="chat-menu-tools-heading">Tool servers</h2>

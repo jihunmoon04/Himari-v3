@@ -1,6 +1,6 @@
 """``himari`` — the terminal client of the local HIMARI Web server (V3-P47).
 
-    himari chat [ID] [--title T]   interactive; /continue /context /compact /tools /rename /id /exit
+    himari chat [ID] [--title T]   interactive; /continue /context /compact /tools /model /rename /id /exit
     himari list                    your conversations, most recent first
     himari show ID                 a conversation's transcript and state
     himari new [--title T]         create a conversation, print its id
@@ -9,6 +9,8 @@
     himari compact ID              summarize the earlier messages now (no model answer)
     himari tools ID [on|off|default SOURCE]
                                    the MCP servers this conversation uses; turn one on or off
+    himari model ID [MODEL [EFFORT]|default]
+                                   the model this conversation uses; choose another (next turn)
 
 The server must be running (``python -m himari.interfaces.web``); the CLI
 reads the operator secret from ``HIMARI_DATA_ROOT`` (or ``--data-root``)
@@ -114,6 +116,7 @@ class Printer:
     summary: str | None = None
     compactions: int = 0
     divided: bool = False
+    last_model: str | None = None  # of the latest answer printed: a change is named (V3-P64 §7)
 
     @property
     def encoding(self) -> str | None:
@@ -139,6 +142,21 @@ class Printer:
         if self.verbose and self.summary:
             self.line(safe_block(self.summary, encoding=self.encoding))
 
+    def changed_model(self, event: dict[str, Any]) -> str | None:
+        """The step's model when it changed since the step before, else None.
+        Called once per step, which then shows it (PR #53 review B1)."""
+        model = event.get("model")
+        if not isinstance(model, str) or not model:
+            return None
+        changed = model if self.last_model is not None and model != self.last_model else None
+        self.last_model = model
+        return changed
+
+    def speaker(self, model: str | None, verb: str = "") -> str:
+        """``HIMARI:``, or ``HIMARI (model):`` for a changed model."""
+        named = f" ({safe_line(model, encoding=self.encoding)})" if model else ""
+        return f"HIMARI{named}{verb}:"
+
     def event(self, event: dict[str, Any]) -> None:
         sequence = event.get("sequence")
         if (self.covered is not None and not self.divided and isinstance(sequence, int)
@@ -152,18 +170,24 @@ class Printer:
                 self.answered.add((str(event.get("answers_run")), str(answers)))  # its tool_result repeats this text
             self.block("You:" if not answers else "You (answer):", text)
         elif kind == "assistant_final":
-            self.block("HIMARI:", text)
+            self.block(self.speaker(self.changed_model(event)), text)
         elif kind == "assistant_tool_calls":
+            model = self.changed_model(event)  # named on the first thing this step prints
             if text:
-                self.block("HIMARI:", text)
+                self.block(self.speaker(model), text)
+                model = None
             for call in event.get("calls", []):
                 tool_id, call_id = str(call.get("tool_id")), str(call.get("call_id"))
                 self.calls[(str(event.get("run_id")), call_id)] = tool_id
                 arguments = call.get("arguments") or {}
                 if tool_id == "ask_user":
                     question = arguments.get("question") if isinstance(arguments, dict) else None
-                    self.block("HIMARI asks:", question if isinstance(question, str) else "")
+                    self.block(self.speaker(model, " asks"), question if isinstance(question, str) else "")
+                    model = None
                     continue
+                if model:  # a step of calls only: its model above them
+                    self.line(self.speaker(model))
+                    model = None
                 shown = json.dumps(arguments, ensure_ascii=False, sort_keys=True)
                 if len(shown) > 200 and not self.verbose:
                     shown = shown[:199] + self.symbols.more
@@ -239,6 +263,19 @@ class Session:
             after = int(page["last_sequence"])
             if len(page["items"]) < limit:
                 return after
+
+    def seed_model(self, conversation_id: str, after: int) -> None:
+        """The model of the latest answer among the last events before
+        ``after``, so a one-shot command can name a change (display only)."""
+        try:
+            page = self.client.get(_path(conversation_id, "/events"),
+                                   {"after": max(0, after - EVENT_PAGE), "limit": EVENT_PAGE})
+        except ClientError:
+            return
+        for event in page.get("items") or []:
+            model = event.get("model")
+            if isinstance(model, str) and model and int(event.get("sequence") or 0) <= after:
+                self.printer.last_model = model
 
     def follow(self, conversation_id: str, after: int) -> tuple[dict[str, Any], int]:
         """Print new events until the job is no longer running."""
@@ -369,6 +406,48 @@ def tools_command(session: Session, conversation_id: str, words: list[str]) -> i
     return EXIT_OK
 
 
+MODEL_USAGE = "usage: /model [MODEL [EFFORT] | default]"
+
+
+def model_line(choice: dict[str, Any]) -> str:
+    effort = choice.get("effort")
+    chosen = choice.get("chosen")
+    line = f"model: {choice.get('model')}{f' (reasoning {effort})' if effort else ''}"
+    return line + (" — the server's default" if chosen is None else " — chosen here")
+
+
+def model_command(session: Session, conversation_id: str, words: list[str]) -> int:
+    """No words: this conversation's model and the offered ones. ``default``:
+    follow the server's default. ``MODEL [EFFORT]``: choose (next turn)."""
+    if len(words) > 2 or (words and words[0] == "default" and len(words) > 1):
+        session.note(MODEL_USAGE)
+        return EXIT_USAGE
+    if words:
+        model = None if words[0] == "default" else words[0]
+        choice = session.client.put(_path(conversation_id, "/model"),
+                                    {"model": model, "effort": words[1] if len(words) == 2 else None})
+    else:
+        choice = session.client.get(_path(conversation_id, "/model"))
+    enc = session.printer.encoding
+    session.printer.line(safe_line(model_line(choice), encoding=enc))
+    if choice.get("fallback"):
+        session.note(f"({choice['fallback']})")
+    if words:
+        detail = session.client.get(_path(conversation_id))
+        if detail["job"]["running"]:
+            session.note("(applies from the next message)")
+        return EXIT_OK
+    for model in session.client.get("/api/server").get("models") or []:
+        efforts = model.get("efforts") or []
+        about = [part for part in ("default" if model.get("default") else None,
+                                   f"reasoning: {', '.join(efforts)} (default {model.get('default_effort') or 'none'})"
+                                   if efforts else None,
+                                   None if model.get("window_known") else "unverified") if part]
+        session.printer.line(safe_line(f"  {model.get('id')}{f' ({'; '.join(about)})' if about else ''}",
+                                       encoding=enc))
+    return EXIT_OK
+
+
 PROMPT_USAGE = "usage: /prompt SERVER NAME [ARGUMENT=VALUE ...] (quote a value with spaces)"
 
 
@@ -450,13 +529,17 @@ def cmd_show(session: Session, args: argparse.Namespace) -> int:
 def cmd_send(session: Session, args: argparse.Namespace) -> int:
     text = sys.stdin.read() if args.text == "-" else args.text
     detail = session.client.get(_path(args.id))
-    code, _ = session.submit_and_follow(args.id, int(detail["conversation"]["last_sequence"]), text)
+    after = int(detail["conversation"]["last_sequence"])
+    session.seed_model(args.id, after)
+    code, _ = session.submit_and_follow(args.id, after, text)
     return code
 
 
 def cmd_continue(session: Session, args: argparse.Namespace) -> int:
     detail = session.client.get(_path(args.id))
-    code, _ = session.submit_and_follow(args.id, int(detail["conversation"]["last_sequence"]), None)
+    after = int(detail["conversation"]["last_sequence"])
+    session.seed_model(args.id, after)
+    code, _ = session.submit_and_follow(args.id, after, None)
     return code
 
 
@@ -473,6 +556,10 @@ def cmd_tools(session: Session, args: argparse.Namespace) -> int:
     return tools_command(session, args.id, [w for w in (args.choice, args.source) if w is not None])
 
 
+def cmd_model(session: Session, args: argparse.Namespace) -> int:
+    return model_command(session, args.id, [w for w in (args.model, args.effort) if w is not None])
+
+
 SANDBOX_TEXT = {
     "enforced": "ready",
     "capable_inactive": "off (sandbox disabled)",
@@ -484,7 +571,9 @@ SANDBOX_TEXT = {
 def cmd_status(session: Session, args: argparse.Namespace) -> int:
     server = session.client.get("/api/server")
     sandbox = str(server.get("sandbox"))
-    for line in (f"model: {server.get('model')}", f"commands: {SANDBOX_TEXT.get(sandbox, sandbox)}",
+    offered = [str(m.get("id")) for m in server.get("models") or [] if not m.get("default")]
+    for line in (f"model: {server.get('model')}" + (f" (also offered: {', '.join(offered)})" if offered else ""),
+                 f"commands: {SANDBOX_TEXT.get(sandbox, sandbox)}",
                  f"context budget: {server.get('context_budget'):,} tokens"):
         session.printer.line(safe_line(line, encoding=session.printer.encoding))
     return EXIT_OK
@@ -509,6 +598,7 @@ CHAT_HELP = ("/continue  continue an unanswered message (or a paused turn)\n"
              "/context   context size and the latest summary\n"
              "/compact   summarize the earlier messages now\n"
              "/tools     MCP servers in use; /tools on|off|default SOURCE to change\n"
+             "/model     the model; /model MODEL [EFFORT] or /model default to change (next message)\n"
              "/prompts   prompts the servers in use offer\n"
              "/prompt S N A=V ...  fill in server S's prompt N, show it, send it if you confirm\n"
              "/rename T  rename\n/id        show the id\n/exit      leave")
@@ -524,6 +614,11 @@ def cmd_chat(session: Session, args: argparse.Namespace, read: Callable[[str], s
         conversation_id = str(session.client.post("/api/conversations", {"title": args.title} if args.title else {})["id"])
         after = 0
     session.note(f"conversation {conversation_id} — /help for commands, Ctrl-D to leave")
+    try:
+        choice = session.client.get(_path(conversation_id, "/model"))
+        session.note(model_line(choice) + (f" ({choice['fallback']})" if choice.get("fallback") else ""))
+    except ClientError:
+        pass  # display only
     while True:
         detail = session.client.get(_path(conversation_id))
         if detail.get("continuable") and not detail["job"]["running"]:
@@ -579,6 +674,12 @@ def cmd_chat(session: Session, args: argparse.Namespace, read: Callable[[str], s
         if text == "/tools" or text.startswith("/tools "):
             try:
                 tools_command(session, conversation_id, text.split()[1:])
+            except ServerRefused as error:
+                session.note(f"refused: {error}")
+            continue
+        if text == "/model" or text.startswith("/model "):
+            try:
+                model_command(session, conversation_id, text.split()[1:])
             except ServerRefused as error:
                 session.note(f"refused: {error}")
             continue
@@ -642,6 +743,10 @@ def parser() -> argparse.ArgumentParser:
     tools.add_argument("id")
     tools.add_argument("choice", nargs="?", choices=sorted(_CHOICES))
     tools.add_argument("source", nargs="?")
+    model = sub.add_parser("model", help="the model a conversation uses; choose another from its next turn")
+    model.add_argument("id")
+    model.add_argument("model", nargs="?", help="a model the server offers, or 'default'")
+    model.add_argument("effort", nargs="?", help="a reasoning effort the model offers")
     pause = sub.add_parser("pause", help="finish the current step, then stop")
     pause.add_argument("id")
     cancel = sub.add_parser("cancel", help="stop now; when idle, close an open question or a paused turn's steps")
@@ -649,13 +754,13 @@ def parser() -> argparse.ArgumentParser:
     rename = sub.add_parser("rename", help="rename a conversation (no title: the default name)")
     rename.add_argument("id")
     rename.add_argument("title", nargs="?")
-    sub.add_parser("status", help="the server's model, whether commands can run, and the context budget")
+    sub.add_parser("status", help="the server's models, whether commands can run, and the context budget")
     return p
 
 
 COMMANDS: dict[str, Callable[[Session, argparse.Namespace], int]] = {
     "chat": cmd_chat, "list": cmd_list, "show": cmd_show, "new": cmd_new, "send": cmd_send, "continue": cmd_continue,
-    "compact": cmd_compact, "tools": cmd_tools, "pause": cmd_pause, "cancel": cmd_cancel,
+    "compact": cmd_compact, "tools": cmd_tools, "model": cmd_model, "pause": cmd_pause, "cancel": cmd_cancel,
     "status": cmd_status, "rename": cmd_rename,
 }
 

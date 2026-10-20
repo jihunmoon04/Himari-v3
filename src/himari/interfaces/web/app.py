@@ -40,6 +40,9 @@ from himari.bootstrap.application import (
     Application,
     AppViewRefused,
     AppViewState,
+    ModelChoiceView,
+    ModelRefused,
+    ModelView,
     PromptRefused,
     PromptView,
     ToolSourceView,
@@ -154,6 +157,11 @@ class MessageBody(_Body):
     text: str
 
 
+class ModelBody(_Body):
+    model: str | None = Field(max_length=200)  # null: follow the default model
+    effort: str | None = Field(default=None, max_length=32)  # null: the model's default effort
+
+
 class ToolSourceBody(_Body):
     enabled: bool | None  # null: follow the source's default
 
@@ -189,10 +197,13 @@ def summary_view(summary: ConversationSummary) -> dict[str, Any]:
     }
 
 
-def event_view(event: ConversationEvent, views: dict[CallRef, tuple[bool, bool]] | None = None) -> dict[str, Any]:
+def event_view(event: ConversationEvent, views: dict[CallRef, tuple[bool, bool]] | None = None,
+               models: dict[RunId, str] | None = None) -> dict[str, Any]:
     """``views``: Application.view_flags for the page — (shown while it
-    runs, stored with its result) per call with a view that may be shown."""
+    runs, stored with its result) per call with a view that may be shown.
+    ``models``: the model of each Run that wrote an assistant event (V3-P64 §7)."""
     views = {} if views is None else views
+    models = {} if models is None else models
     view: dict[str, Any] = {"sequence": event.sequence, "kind": event.kind.value, "created_at": _time(event.created_at)}
     payload = event.payload
     if isinstance(payload, UserMessage):
@@ -202,8 +213,10 @@ def event_view(event: ConversationEvent, views: dict[CallRef, tuple[bool, bool]]
         view["answers_run"] = None if payload.answers_call is None else payload.answers_call.run_id
     elif isinstance(payload, AssistantFinal):
         view["text"] = _text(payload.blocks)
+        view["model"] = models.get(event.origin_run_id) if event.origin_run_id else None
     elif isinstance(payload, AssistantToolCalls):
         view["text"] = _text(payload.commentary)
+        view["model"] = models.get(event.origin_run_id) if event.origin_run_id else None
         view["run_id"] = event.origin_run_id
         run = event.origin_run_id
         view["calls"] = [{"call_id": c.call_id, "tool_id": c.tool_id, "arguments": thaw(c.arguments),
@@ -288,6 +301,22 @@ def context_view(status: ContextStatus | None) -> dict[str, Any]:
         "covered_through_sequence": status.covered_through_sequence,
         "summary": status.summary,
     }
+
+
+def model_view(view: ModelView) -> dict[str, Any]:
+    return {"id": view.model_id, "default_effort": view.default_effort, "efforts": list(view.efforts),
+            "window_known": view.window_known, "default": view.is_default}
+
+
+def model_choice_view(view: ModelChoiceView) -> dict[str, Any]:
+    chosen = view.chosen
+    return {"model": view.model_id, "effort": view.effort,
+            "chosen": None if chosen is None else {"model": chosen.model_id, "effort": chosen.reasoning_effort},
+            "fallback": view.fallback}
+
+
+# How a refused model choice answers (V3-P64 §4.3).
+MODEL_REFUSAL_STATUS = {"unknown_model": 404, "invalid_effort": 422, "invalid_argument": 400}
 
 
 def tool_source_view(view: ToolSourceView) -> dict[str, Any]:
@@ -389,6 +418,11 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
         return JSONResponse({"error": {"code": error.code, "message": error.message}},
                             status_code=PROMPT_REFUSAL_STATUS.get(error.code, 409))
 
+    @app.exception_handler(ModelRefused)
+    async def model_refused(request: Request, error: ModelRefused) -> JSONResponse:
+        return JSONResponse({"error": {"code": error.code, "message": error.message}},
+                            status_code=MODEL_REFUSAL_STATUS.get(error.code, 400))
+
     @app.exception_handler(UnknownToolSource)
     async def unknown_source(request: Request, error: UnknownToolSource) -> JSONResponse:
         return JSONResponse({"error": {"code": "not_found", "message": "No such tool source."}}, status_code=404)
@@ -424,7 +458,8 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
         application = himari(request)
         turn = application.turn
         return {"model": application.model_id, "sandbox": application.current_sandbox_state.value,
-                "context_budget": application.context_tokens,
+                "models": [model_view(m) for m in application.models],
+                "context_budget": application.context_tokens,  # the default model's
                 "turn": {"token_budget": turn.turn_budget, "unattended_runs": turn.unattended_runs,
                          "max_runs": turn.max_runs, "no_progress_runs": turn.no_progress_runs,
                          "seen_seconds": turn.seen_seconds}}
@@ -504,7 +539,10 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
         runs = [e.origin_run_id for e in events if isinstance(e.payload, AssistantToolCalls) and e.origin_run_id]
         runs += [e.payload.call.run_id for e in events if isinstance(e.payload, ToolResultRecord)]
         views = await application.view_flags(scope, runs) if runs and application.views_configured else {}
-        return {"items": [event_view(e, views) for e in events],
+        writers = [e.origin_run_id for e in events
+                   if isinstance(e.payload, (AssistantFinal, AssistantToolCalls)) and e.origin_run_id]
+        models = await application.run_models(scope, writers) if writers else {}
+        return {"items": [event_view(e, views, models) for e in events],
                 "last_sequence": events[-1].sequence if events else after}
 
     @app.get("/api/conversations/{conversation_id}/calls/{run_id}/{call_id}/app")
@@ -526,6 +564,19 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
                            who: PrincipalId = Depends(principal)) -> dict[str, Any]:
         # Composes the whole history like a Run would: fetched on demand, not polled.
         return context_view(await himari(request).context_status(scope_of(conversation_id, who)))
+
+    @app.get("/api/conversations/{conversation_id}/model")
+    async def read_model(conversation_id: str, request: Request,
+                         who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+        """The model and effort the next turn uses, and the stored choice (V3-P64 §7)."""
+        return model_choice_view(await himari(request).model_choice(scope_of(conversation_id, who)))
+
+    @app.put("/api/conversations/{conversation_id}/model")
+    async def set_model(conversation_id: str, body: ModelBody, request: Request,
+                        who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+        """Saved at once, used from the next turn (one under way keeps its model)."""
+        view = await himari(request).set_model(scope_of(conversation_id, who), body.model, body.effort)
+        return model_choice_view(view)
 
     @app.get("/api/conversations/{conversation_id}/tools")
     async def read_tool_sources(conversation_id: str, request: Request,

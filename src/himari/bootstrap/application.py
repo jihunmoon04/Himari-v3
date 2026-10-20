@@ -16,6 +16,9 @@ MCP servers in ``mcp.json`` are connected at startup; one that cannot be
 reached is left out until a restart (``tool_sources`` says so). Which
 servers a Conversation uses follows each server's default unless the
 Conversation chose otherwise (``set_tool_source``).
+
+The operator offers one or more models (V3-P64 §3); each Conversation uses
+the default one unless it chose another (``set_model``), from its next turn.
 """
 
 from __future__ import annotations
@@ -40,10 +43,17 @@ from himari.common import (
     TrustedScope,
     WorkspaceId,
 )
-from himari.control.api import ContextStatus
+from himari.control.api import ContextStatus, ModelCatalog, ModelOffer, ResolvedModel
 from himari.control.driver import NO_PROGRESS_RUNS
 from himari.control.runner import SEEN_SECONDS, BackgroundRunner
-from himari.data.api import InitialActivation, ToolExecutionRecord, ToolExecutionStatus, UiCsp, UiResource
+from himari.data.api import (
+    InitialActivation,
+    ModelSetting,
+    ToolExecutionRecord,
+    ToolExecutionStatus,
+    UiCsp,
+    UiResource,
+)
 from himari.data.sqlite import SqliteData, SqliteStore
 from himari.environment.inside import INSIDE, InsideEnvironment
 from himari.sandbox.api import SandboxState, ServerProfile
@@ -148,6 +158,47 @@ class PromptRefused(LookupError):
         super().__init__(message)
         self.code = code
         self.message = message
+
+
+class ModelRefused(LookupError):
+    """A model choice was not recorded (V3-P64 §4.3); ``message`` is for the
+    user. ``code``: ``unknown_model`` (not offered), ``invalid_effort`` (not
+    one the model declares) or ``invalid_argument``."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
+
+
+# The order efforts are listed in; any other a Provider declares follows, sorted.
+EFFORT_ORDER = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
+
+
+def ordered_efforts(efforts: Iterable[str]) -> tuple[str, ...]:
+    known = [e for e in EFFORT_ORDER if e in efforts]
+    return (*known, *sorted(set(efforts) - set(EFFORT_ORDER)))
+
+
+@dataclass(frozen=True)
+class ModelView:
+    """One offered model, as a client lists it."""
+
+    model_id: str
+    default_effort: str | None
+    efforts: tuple[str, ...]
+    window_known: bool  # the Provider declares its window (an unknown model's is not checked)
+    is_default: bool
+
+
+@dataclass(frozen=True)
+class ModelChoiceView:
+    """What a Conversation's next turn uses, and what it chose (V3-P64 §7)."""
+
+    model_id: str
+    effort: str | None
+    chosen: ModelSetting | None  # as stored; None: the default model
+    fallback: str | None  # why the choice is not used as made
 
 
 MAX_PROMPT_ARGUMENT_CHARS = 2_000
@@ -259,6 +310,9 @@ class Application:
     mcp: McpConnection = field(default_factory=lambda: McpConnection([], (), []))
     turn: TurnSettings = field(default_factory=lambda: TurnSettings(DEFAULT_TURN_BUDGET, DEFAULT_UNATTENDED_RUNS,
                                                                     None))
+    # Offered models whose window, efforts and Tool calling the Provider does
+    # not declare (V3-P64 §3, review B1): told at startup, used as configured.
+    unverified_models: tuple[str, ...] = ()
 
     @classmethod
     async def open(
@@ -278,15 +332,34 @@ class Application:
         turn_budget: int | None = DEFAULT_TURN_BUDGET,
         unattended_runs: int | None = DEFAULT_UNATTENDED_RUNS,
         max_runs: int | None = None,
+        # The offered models with their default efforts (V3-P64 §3), in the
+        # operator's order; empty: ``model_id`` alone. The default model's
+        # effort, when its entry has none, is ``reasoning_effort``.
+        models: Sequence[tuple[str, str | None]] = (),
     ) -> Application:
         if turn_budget is None and max_runs is None:
             raise ValueError("a turn needs a token budget or a Run limit (V3-P62)")
         turn = TurnSettings(turn_budget, unattended_runs, max_runs)
-        capabilities = provider.describe_capabilities(model_id)
-        # Compaction works toward the budget; only the model's input ceiling
-        # (its window less the room kept for an answer) refuses a Run.
-        ceiling = input_ceiling(capabilities.context_tokens, capabilities.max_output_tokens)
-        budget = ContextBudget(context_limit(ceiling, context_tokens), hard_limit_tokens=ceiling)
+        offers: list[ModelOffer] = []
+        unverified: list[str] = []
+        for offered, effort in models or ((model_id, None),):
+            if offered == model_id and effort is None:
+                effort = reasoning_effort
+            capabilities = provider.describe_capabilities(offered)
+            # Compaction works toward the budget; only the model's input ceiling
+            # (its window less the room kept for an answer) refuses a Run.
+            ceiling = input_ceiling(capabilities.context_tokens, capabilities.max_output_tokens)
+            try:
+                limit = ContextBudget(context_limit(ceiling, context_tokens), hard_limit_tokens=ceiling)
+            except ValueError as error:
+                raise ValueError(f"{offered}: {error}") from None
+            offers.append(ModelOffer(offered, effort, capabilities.reasoning_efforts, limit,
+                                     capabilities.max_output_tokens))
+            if capabilities.context_tokens is None:
+                unverified.append(offered)
+        catalog = ModelCatalog(tuple(offers), model_id)  # duplicates, the default, efforts (§3)
+        default_budget = catalog.default.budget
+        assert default_budget is not None
         root = Path(os.path.abspath(data_root))
         ensure_private_dir(str(root))
         workspaces = root / "workspaces"
@@ -311,7 +384,7 @@ class Application:
                     backend = candidate  # run_command is offered only when enforcement is proven (V3-050)
             inside = InsideEnvironment(workspaces, sandbox=backend)
             runtime = build_runtime(provider, store=store, environments=[inside], tools=[*tools, *mcp.handlers, *mcp.resource_tools],
-                                    model_id=model_id, reasoning_effort=reasoning_effort, context_budget=budget,
+                                    models=catalog,
                                     instructions=DEFAULT_INSTRUCTIONS if instructions is None else instructions,
                                     external_defaults=mcp.defaults,
                                     source_notes=[SourceNote(source, note.placement, note.text)
@@ -327,8 +400,8 @@ class Application:
             raise
         assert isinstance(runtime.data, SqliteData)
         runner = BackgroundRunner(runtime.driver, unattended_runs=unattended_runs, seen_seconds=turn.seen_seconds)
-        return cls(root, store, runtime.data, runtime, runner, inside, state, model_id, budget.limit_tokens, secret, mcp,
-                   turn)
+        return cls(root, store, runtime.data, runtime, runner, inside, state, model_id, default_budget.limit_tokens, secret, mcp,
+                   turn, tuple(unverified))
 
     def seen(self, scope: TrustedScope) -> None:
         """A client read this Conversation (V3-P62 §5): call only after the
@@ -371,6 +444,50 @@ class Application:
         if default is None:
             raise UnknownToolSource(source)
         await self.data.set_external_setting(scope, source, None if enabled == default else enabled)
+
+    # --- Models (V3-P64) ---------------------------------------------------------------
+
+    @property
+    def models(self) -> tuple[ModelView, ...]:
+        """The offered models, in the operator's order."""
+        catalog = self.runtime.models
+        return tuple(ModelView(o.model_id, o.default_effort, ordered_efforts(o.efforts),
+                               o.model_id not in self.unverified_models, o.model_id == catalog.default_model)
+                     for o in catalog.offers)
+
+    def _choice_view(self, setting: ModelSetting | None, resolved: ResolvedModel) -> ModelChoiceView:
+        return ModelChoiceView(resolved.model_id, resolved.reasoning_effort, setting, resolved.fallback)
+
+    async def model_choice(self, scope: TrustedScope) -> ModelChoiceView:
+        """What this Conversation's next turn would use. Authorizes like any
+        read (NOT_AUTHORIZED)."""
+        setting = await self.data.read_model_setting(scope)
+        return self._choice_view(setting, self.runtime.models.resolve(setting))
+
+    async def set_model(self, scope: TrustedScope, model_id: str | None, effort: str | None) -> ModelChoiceView:
+        """This Conversation's choice, kept as made even if it is the default
+        model (V3-P64 Q2); ``model_id`` None: follow the default. No effort:
+        the model's default effort. Saved at once, used from the next turn
+        (the one under way keeps its model)."""
+        await self.data.read_conversation(scope)  # NOT_AUTHORIZED before anything else
+        if model_id is None:
+            if effort is not None:
+                raise ModelRefused("invalid_argument", "Choose a model to set its reasoning effort.")
+            setting = None
+        else:
+            offer = self.runtime.models.offer(model_id)
+            if offer is None:
+                raise ModelRefused("unknown_model", "This server does not offer that model.")
+            if effort is not None and effort not in offer.efforts:
+                offered = ", ".join(ordered_efforts(offer.efforts)) or "none"
+                raise ModelRefused("invalid_effort", f"Reasoning efforts for this model: {offered}.")
+            setting = ModelSetting(model_id, effort)
+        await self.data.set_model_setting(scope, setting)
+        return await self.model_choice(scope)
+
+    async def run_models(self, scope: TrustedScope, run_ids: Iterable[RunId]) -> dict[RunId, str]:
+        """The model each of these Runs was sent to (its record)."""
+        return {run_id: (await self.data.read_run(scope, run_id)).model_id for run_id in dict.fromkeys(run_ids)}
 
     # --- Server prompts (V3-P60 §4) ------------------------------------------------------
 
