@@ -772,6 +772,11 @@ textarea {
   color: var(--warn);
 }
 
+/* A step of calls only, by another model than the step before: its header alone. */
+.item-step .item-kind {
+  margin-bottom: 0;
+}
+
 /* The model that wrote an answer, shown when it differs from the one before (V3-P64 §7). */
 .item-model {
   margin-left: var(--space-1);

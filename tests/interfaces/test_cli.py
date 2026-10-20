@@ -818,3 +818,24 @@ def test_the_model_from_the_cli(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
         assert "model: m — the server's default" in out_buffer.getvalue().splitlines()
         assert "usage: /model" in err_buffer.getvalue()
 
+
+
+def test_a_step_of_calls_only_names_the_changed_model(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # PR #53 review B1: A FINAL → B TOOL_CALLS (no commentary) → B FINAL shows B once, on the step.
+    monkeypatch.setattr(cli, "POLL_SECONDS", 0.01)
+    harness = Harness(tmp_path, provider=EffortAdapter([]), models=(("m", None), ("big", "low")))
+    with harness.test_client:
+        cid = harness.run("new")[1].strip()
+        harness.queue(final("from m"))
+        harness.run("send", cid, "one")
+        harness.run("model", cid, "big")
+        harness.queue(calls(("inside/write_file", {"path": "a.txt", "content": "hi"})), final("saved"))
+        code, out, _ = harness.run("send", cid, "two")
+        rows = out.splitlines()
+        assert code == cli.EXIT_OK and rows[2:4] == ["HIMARI (big):", '  ⚙ inside/write_file {"content": "hi", "path": "a.txt"}']
+        assert rows[-2:] == ["HIMARI:", f"{INDENT}saved"]
+        assert sum("(big)" in row for row in harness.run("show", cid)[1].splitlines()) == 1
+        harness.run("model", cid, "m")
+        harness.queue(calls((ASK_USER_TOOL_ID, {"question": "Which file?"})))
+        code, out, _ = harness.run("send", cid, "three")
+        assert code == cli.EXIT_WAITING and "HIMARI (m) asks:" in out.splitlines()

@@ -142,14 +142,20 @@ class Printer:
         if self.verbose and self.summary:
             self.line(safe_block(self.summary, encoding=self.encoding))
 
-    def speaker(self, event: dict[str, Any]) -> str:
-        """``HIMARI:``, or ``HIMARI (model):`` when the model changed since the answer before."""
+    def changed_model(self, event: dict[str, Any]) -> str | None:
+        """The step's model when it changed since the step before, else None.
+        Called once per step, which then shows it (PR #53 review B1)."""
         model = event.get("model")
         if not isinstance(model, str) or not model:
-            return "HIMARI:"
-        changed = self.last_model is not None and model != self.last_model
+            return None
+        changed = model if self.last_model is not None and model != self.last_model else None
         self.last_model = model
-        return f"HIMARI ({safe_line(model, encoding=self.encoding)}):" if changed else "HIMARI:"
+        return changed
+
+    def speaker(self, model: str | None, verb: str = "") -> str:
+        """``HIMARI:``, or ``HIMARI (model):`` for a changed model."""
+        named = f" ({safe_line(model, encoding=self.encoding)})" if model else ""
+        return f"HIMARI{named}{verb}:"
 
     def event(self, event: dict[str, Any]) -> None:
         sequence = event.get("sequence")
@@ -164,19 +170,24 @@ class Printer:
                 self.answered.add((str(event.get("answers_run")), str(answers)))  # its tool_result repeats this text
             self.block("You:" if not answers else "You (answer):", text)
         elif kind == "assistant_final":
-            self.block(self.speaker(event), text)
+            self.block(self.speaker(self.changed_model(event)), text)
         elif kind == "assistant_tool_calls":
-            speaker = self.speaker(event)  # a step without text still says who took it
+            model = self.changed_model(event)  # named on the first thing this step prints
             if text:
-                self.block(speaker, text)
+                self.block(self.speaker(model), text)
+                model = None
             for call in event.get("calls", []):
                 tool_id, call_id = str(call.get("tool_id")), str(call.get("call_id"))
                 self.calls[(str(event.get("run_id")), call_id)] = tool_id
                 arguments = call.get("arguments") or {}
                 if tool_id == "ask_user":
                     question = arguments.get("question") if isinstance(arguments, dict) else None
-                    self.block("HIMARI asks:", question if isinstance(question, str) else "")
+                    self.block(self.speaker(model, " asks"), question if isinstance(question, str) else "")
+                    model = None
                     continue
+                if model:  # a step of calls only: its model above them
+                    self.line(self.speaker(model))
+                    model = None
                 shown = json.dumps(arguments, ensure_ascii=False, sort_keys=True)
                 if len(shown) > 200 and not self.verbose:
                     shown = shown[:199] + self.symbols.more

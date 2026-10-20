@@ -110,6 +110,7 @@ const app = {
   models: [], // the models this server offers (V3-P64), from /api/server
   modelChoice: null, // this conversation's /model answer
   running: false, // the last detail's job state: a model change then applies from the next turn
+  changedWhileRunning: false, // the model was changed during the turn under way (PR #53 review C1)
   lastModel: null, // the model of the latest answer shown, for the label on a change
 };
 
@@ -253,16 +254,26 @@ function speaker(kind) {
   return kind === "user_message" ? "You" : "HIMARI";
 }
 
-function renderMessage(event) {
+/* V3-P64 §7: the model that took a step, to be shown when it changed since
+ * the step before; null when unchanged. Call it once per step, where the
+ * step is shown: the label must not be lost (PR #53 review B1). */
+function changedModel(model) {
+  if (!model) return null;
+  const changed = app.lastModel !== null && model !== app.lastModel ? model : null;
+  app.lastModel = model;
+  return changed;
+}
+
+function assistantHeader(model) {
+  const kind = el("div", "item-kind", speaker("assistant_final"));
+  if (model) kind.append(el("span", "item-model", model));
+  return kind;
+}
+
+function renderMessage(event, model = null) {
   const user = event.kind === "user_message";
   const node = el("div", user ? "item item-user" : "item item-assistant");
-  const kind = el("div", "item-kind", speaker(event.kind));
-  // V3-P64 §7: which model wrote it, only when it changed since the answer before.
-  if (!user && event.model) {
-    if (app.lastModel !== null && event.model !== app.lastModel) kind.append(el("span", "item-model", event.model));
-    app.lastModel = event.model;
-  }
-  node.append(kind);
+  node.append(user ? el("div", "item-kind", speaker(event.kind)) : assistantHeader(model));
   node.append(user ? el("p", "item-text", event.text) : renderAssistantText(document, event.text || ""));
   return node;
 }
@@ -282,20 +293,34 @@ function paintToolRow(entry) {
 
 function renderEvent(event) {
   const timeline = tagging($("timeline"), event.sequence);
-  if (event.kind === "user_message" || event.kind === "assistant_final") {
+  if (event.kind === "user_message") {
     timeline.append(renderMessage(event));
     return;
   }
+  if (event.kind === "assistant_final") {
+    timeline.append(renderMessage(event, changedModel(event.model)));
+    return;
+  }
   if (event.kind === "assistant_tool_calls") {
-    if (event.text) timeline.append(renderMessage({ ...event, kind: "assistant_final" }));
-    else if (event.model) app.lastModel = event.model; // a step without text still says who took it
+    let model = changedModel(event.model); // shown on the first thing this step shows
+    if (event.text) {
+      timeline.append(renderMessage({ ...event, kind: "assistant_final" }, model));
+      model = null;
+    }
     for (const call of event.calls) {
       const key = `${event.run_id}/${call.call_id}`; // call ids repeat across Runs
       if (call.tool_id === "ask_user") {
         const question = typeof call.arguments.question === "string" ? call.arguments.question : "";
-        timeline.append(renderMessage({ kind: "assistant_final", text: question }));
+        timeline.append(renderMessage({ kind: "assistant_final", text: question }, model));
+        model = null;
         app.toolRows.set(key, null); // the answer appears as the user's message
         continue;
+      }
+      if (model) { // a step of calls only: its header names the model above them
+        const header = el("div", "item item-assistant item-step");
+        header.append(assistantHeader(model));
+        timeline.append(header);
+        model = null;
       }
       const node = el("div", "item item-tool-row is-pending");
       const details = el("details", "tool-row-details");
@@ -471,7 +496,7 @@ function renderModel() {
   if (chosenEffort && !efforts.includes(chosenEffort)) effort.append(option(chosenEffort, `${chosenEffort} (not offered)`));
   effort.value = chosenEffort;
   const note = $("chat-menu-model-note");
-  const text = choice.fallback || (app.running ? "Applies from the next message." : "");
+  const text = choice.fallback || (app.running && app.changedWhileRunning ? "Applies from the next message." : "");
   note.textContent = text;
   note.classList.toggle("is-warn", Boolean(choice.fallback));
   note.hidden = !text;
@@ -496,6 +521,7 @@ async function setModel(model, effort) {
       { model, effort });
     if (generation === app.generation) {
       app.modelChoice = choice;
+      app.changedWhileRunning = app.running;
       renderModel();
       loadContext(generation); // the budget is the new model's
     }
@@ -786,7 +812,8 @@ function applyDetail(detail) {
   $("composer-cancel").disabled = stopping === "cancel";
   if (app.running !== detail.job.running) {
     app.running = detail.job.running;
-    renderModel(); // "applies from the next message" while a turn runs
+    app.changedWhileRunning = false; // a new turn, or the end of the one it was changed in
+    renderModel(); // "applies from the next message" only while that turn runs
   }
 }
 
@@ -842,6 +869,7 @@ async function openConversation(id) {
   $("chat-menu-model").hidden = true;
   app.modelChoice = null;
   app.running = false;
+  app.changedWhileRunning = false;
   app.lastModel = null;
   app.prompts = null;
   app.promptDismissed = null;

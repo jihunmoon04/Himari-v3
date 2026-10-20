@@ -13,7 +13,12 @@ efforts) and "big" (low/high). Headless Chromium drives the conversation menu:
 4. a change while a turn runs says it applies from the next message, and
    the running turn keeps its model;
 5. "Default" follows the server's default model again;
-6. the narrow layout shows the menu without horizontal scroll.
+6. a step of Tool calls without text, by a changed model, names it above
+   the calls, and the answer after it does not (PR #53 review B1);
+7. the narrow layout shows the menu without horizontal scroll.
+
+Step 4 also checks that the note shows only after a change made during the
+turn (PR #53 review C1).
 
 Requires: pip install playwright (a Chromium for it, or --chrome PATH)
 Usage:    python scripts/model_smoke.py [--chrome PATH] [--screenshots DIR]
@@ -39,10 +44,11 @@ import uvicorn  # noqa: E402
 from playwright.sync_api import Page, expect, sync_playwright  # noqa: E402
 
 from himari.bootstrap.application import Application  # noqa: E402
-from himari.common import TextBlock  # noqa: E402
+from himari.common import CallId, TextBlock, ToolCall, ToolId  # noqa: E402
 from himari.interfaces.web.app import create_app  # noqa: E402
 from himari.interfaces.web.config import WebConfig  # noqa: E402
 from himari.provider.api import NativeInvocationOutcome, NativePreparedRequest, NormalizedFinal  # noqa: E402
+from himari.provider.api import NormalizedToolCalls  # noqa: E402
 from himari.provider.api import ProviderCapabilities  # noqa: E402
 from himari.provider.scripted import ScriptedAdapter  # noqa: E402
 
@@ -54,7 +60,9 @@ class TwoModels(ScriptedAdapter):
     """"big" declares efforts; every answer can be held back to keep a turn running."""
 
     def __init__(self) -> None:
-        super().__init__([NormalizedFinal((TextBlock(f"answer {i}"),)) for i in range(1, 8)])
+        write = ToolCall(CallId("c0"), 0, ToolId("inside/write_file"), {"path": "a.txt", "content": "hi"})
+        super().__init__([*(NormalizedFinal((TextBlock(f"answer {i}"),)) for i in range(1, 6)),
+                          NormalizedToolCalls((write,)), NormalizedFinal((TextBlock("saved"),))])
         self.hold = threading.Event()
         self.hold.set()
 
@@ -109,11 +117,11 @@ def run(token: str, provider: TwoModels, chrome: str | None, shots: str | None, 
     def stored(cid: str) -> object:
         return httpx.get(f"{BASE}/api/conversations/{cid}/model", headers=cookie()).json()["chosen"]
 
-    def send(text: str) -> None:
+    def send(text: str, added: int = 1) -> None:
         count = page.locator(".item-assistant").count()
         box.fill(text)
         box.press("Enter")
-        expect(page.locator(".item-assistant")).to_have_count(count + 1, timeout=10000)
+        expect(page.locator(".item-assistant")).to_have_count(count + added, timeout=10000)
         expect(page.locator("#composer-send")).to_be_enabled(timeout=10000)
 
     with sync_playwright() as p:
@@ -170,6 +178,8 @@ def run(token: str, provider: TwoModels, chrome: str | None, shots: str | None, 
         box.press("Enter")
         expect(page.locator("#composer-send")).to_be_disabled(timeout=5000)
         page.click("#chat-menu-toggle")
+        page.wait_for_timeout(300)
+        check("4: running without a change, no note", page.locator("#chat-menu-model-note").is_hidden())
         model.select_option("scripted-model")
         expect(page.locator("#chat-menu-model-note")).to_have_text("Applies from the next message.", timeout=5000)
         shot(page, "4-running")
@@ -188,15 +198,30 @@ def run(token: str, provider: TwoModels, chrome: str | None, shots: str | None, 
         page.wait_for_timeout(300)
         check("5: Default follows the server's default again", stored(cid) is None, stored(cid))
 
-        # 6. Narrow layout.
+        # 6. A step of calls only, by a changed model (B1).
+        model.select_option("big")
+        page.wait_for_timeout(300)
+        page.click("#chat-menu-toggle")
+        send("six", added=2)  # the step's header, then the answer
+        last = page.locator(".item-step").last
+        check("6: a step of calls only names its changed model",
+              page.locator(".item-step").count() == 1 and last.text_content() == "HIMARIbig"
+              and last.evaluate("n => n.nextElementSibling.classList.contains('item-tool-row')"),
+              page.locator(".item-step").all_text_contents())
+        labels = page.locator(".item-assistant .item-kind").all_text_contents()
+        check("6: the answer after it does not", labels[-1] == "HIMARI", labels)
+        shot(page, "6-step")
+
+        # 7. Narrow layout.
         page.set_viewport_size({"width": 380, "height": 800})
         page.wait_for_timeout(800)
         if page.locator("#chat-menu").is_hidden():
             page.click("#chat-menu-toggle")
+        model.select_option("scripted-model")
         model.select_option("big")
         expect(page.locator("#chat-menu-effort-field")).to_be_visible(timeout=5000)
-        shot(page, "6-narrow")
-        check("6: the narrow layout has no horizontal scroll",
+        shot(page, "7-narrow")
+        check("7: the narrow layout has no horizontal scroll",
               bool(page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")))
         check("no uncaught errors in the page", errors == [], errors)
         browser.close()

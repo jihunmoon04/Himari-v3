@@ -288,3 +288,12 @@ Tool 목록, 서버 안내문, 지시문은 모델과 무관하다. 모델이 �
 - 새 테스트: 설정 해석, Application(모델별 예산, 시작 검사 6가지, 선택과 거부, 재시작 후 빠진 모델의 대체), Web API(목록·선택·거부 7가지·이벤트의 모델·다음 턴부터), CLI(`model`·`/model`·답변 머리).
 - 브라우저 스모크 `scripts/model_smoke.py`: 11/11(Chrome headless shell 156). 기본 표시, 강도 선택과 저장, 바뀐 답에만 모델 이름, 실행 중 변경 안내와 그 턴의 모델 유지, Default로 되돌리기, 좁은 화면 가로 스크롤 없음, 페이지 오류 없음.
 
+### 15.1 검수 — PR #52(`ee3ef32`) READY, PR #53(`6e55316`) NOT_READY
+
+| # | 지적 | 처리 |
+| --- | --- | --- |
+| B1 | 텍스트 없는 Tool 호출 Run이 "앞 답의 모델"을 B로 바꾸면서 B를 보이지 않는다. 그래서 A FINAL → B TOOL_CALLS(빈 commentary) → B FINAL에서 B가 한 번도 보이지 않는다(Web `renderEvent`, CLI `Printer.event`) | 검수 권고대로 그 단계가 B를 **보이게** 했다. 모델 변경 판정(`changedModel`/`changed_model`)은 단계마다 한 번이고, 그 단계가 처음 보이는 것에 붙는다: 텍스트, `ask_user` 질문(`HIMARI (B) asks:`), 또는 Tool 호출만 있으면 그 위의 머리줄(Web `.item-step`, CLI `HIMARI (B):`). 회귀: CLI 테스트 `test_a_step_of_calls_only_names_the_changed_model`(위 순서와 `ask_user`), 브라우저 스모크 6단계 |
+| C1 | 실행 중이면 바꾸지 않았어도 "Applies from the next message."가 보인다 | 실행 중인 그 턴에서 바꾼 경우에만 보인다(`changedWhileRunning`; 턴이 시작하거나 끝나면 지운다). 스모크 4단계에 "바꾸기 전에는 안내 없음" 확인을 더했다 |
+
+검증: interfaces pytest 통과, mypy --strict, 브라우저 스모크 14/14.
+
