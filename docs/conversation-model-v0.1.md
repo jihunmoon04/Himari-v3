@@ -1,6 +1,6 @@
 # 대화별 모델 선택 v0.1
 
-> 2026-10-20 · **PROPOSED (V3-P64)** · rev. 1. 설계 초안. 설계 PR #51.
+> 2026-10-20 · **PROPOSED (V3-P64)** · rev. 2 — 검수 NOT_READY(B1; C1·C2) 반영(§12). 설계 PR #51.
 >
 > 소유자 결정(2026-10-20): **Q1~Q4 모두 권고대로**(§9). 운영자 목록, 고른 것을 그대로 저장하고 빠진 모델은 기본 모델 + 표시, 추론 강도도 대화별, 다음 턴부터 적용.
 >
@@ -54,7 +54,10 @@ HIMARI_MODELS=openai/gpt-6-luna,anthropic/claude-haiku-5.5=medium,openai/gpt-5-n
   - 기본 강도가 그 모델이 선언한 강도(`reasoning_efforts`)에 없음. 지금은 보내기 직전에 거부되는 것을 시작 시점으로 당긴다.
   - 운영자 예산(`HIMARI_CONTEXT_TOKENS`)이 그 모델의 입력 한도를 넘음(V3-056의 규칙을 모델마다).
   - 중복된 모델 id.
-- 선언되지 않은 모델(창을 모름)도 목록에 넣을 수 있다. 지금 `HIMARI_MODEL`과 같은 규칙: 예산 `UNKNOWN_WINDOW_TOKENS`, 추론 강도 없음. 시작 로그에 "창을 모름"이라고 적는다.
+- **목록의 모델은 Tool 호출을 지원해야 한다(운영자 계약).** HIMARI의 요청에는 항상 Tool 목록이 실린다. 사용자에게 묻는 `ask_user`가 늘 카탈로그에 있기 때문이다(`openrouter.py` `prepare_native_request`의 `tools`). Tool 호출을 지원하지 않는 모델은 OpenRouter가 거부한다(404). 그래서 그런 모델로는 대화가 한 번도 돌지 않는다.
+- 선언되지 않은 모델(Provider가 기능을 모름)도 목록에 넣을 수 있다. 지금 `HIMARI_MODEL`과 같은 규칙: 예산 `UNKNOWN_WINDOW_TOKENS`, 추론 강도 없음. 시작 로그에 경고를 남긴다: "창·추론 강도·Tool 호출 지원을 확인하지 않은 모델". 선언된 모델(`KNOWN_CAPABILITIES`)은 모두 Tool 호출을 실제로 확인한 모델이다.
+- 그런 모델이 요청을 거부하면 지금의 실패 경로를 그대로 탄다. 응답이 비정상(200이 아님)이면 `NativeNoResponse` → 턴은 `PROVIDER_FAILED`이고 다시 보내지 않는다. 받은 오류 본문은 Run에 남는다(V3-018). 사용자는 그 대화의 모델을 다른 모델로 바꿔 다음 턴을 보낼 수 있다.
+- 이번에는 Tool 호출 지원을 기능 선언으로 두지 않는다. 모델별 자동 확인(OpenRouter `/models`의 `supported_parameters`)도 하지 않는다. 필요해지면 `ProviderCapabilities`에 `tool_calls`를 더하고 시작 검사로 올린다.
 
 ## 4. 대화별 선택
 
@@ -119,20 +122,30 @@ class ModelCatalog:
 
 ## 5. 언제 적용되나: 턴이 시작할 때
 
-**턴 = Driver의 `drive`·`resume` 한 번**(V3-P62의 턴과 같다). 턴이 시작할 때(`_exclusive`가 대화 잠금을 잡은 직후) 설정을 한 번 읽어 `ResolvedModel`을 정하고, 그 턴의 모든 Run이 그것을 쓴다. 턴 안의 압축 Run(COMPACTION)도 같은 모델이다.
+**턴 = Driver의 `drive`·`resume` 한 번**(V3-P62의 턴과 같다). 턴이 시작할 때 모델을 한 번 정하고, 그 턴이 끝날 때까지 바꾸지 않는다. 순서는 다음과 같다.
+
+1. 대화 잠금을 잡는다(`_exclusive`).
+2. Data에서 그 대화의 선택을 읽고(`read_model_setting`), `ModelCatalog.resolve`로 `ResolvedModel`을 만든다.
+3. 그 값으로 턴 상태를 만든다: 요청 옵션(모델·강도·`provider_key`·`session_key`), 문맥 예산, 출력 예약. 지금 `Turn`이 `max_output_tokens`를 받는 자리에서 함께 만든다. 이 턴 상태 하나는 바뀌지 않는다(불변).
+4. 그 턴의 모든 Run과 압축 Run(COMPACTION)은 이 턴 상태에서 옵션과 예산을 꺼내 쓴다. 지금 Driver의 고정 필드 `_options`·`_budget`을 읽는 곳(`_options_for`, `_fit_budget`, `_compact`, Run 준비의 `model_id`)이 모두 턴 상태를 읽도록 바뀐다.
+
+Driver는 대화별 모델을 따로 저장하지 않는다. 턴 상태는 잠금을 가진 동안만 있고, 지금의 `_turns`처럼 턴이 끝나면 지운다.
 
 - 실행 중에 바꾸면 지금 턴은 그대로 끝나고, **다음 턴**(다음 메시지, 멈춘 뒤 Continue, `ask_user` 답변)부터 새 모델이다.
 - 턴 중간에 바꾸지 않는 이유:
   - 턴의 출력 예약(`Turn`의 `max_output_tokens`)과 예산 검사가 한 모델을 전제로 한다.
   - Tool 호출 묶음 사이에 모델이 바뀌면, 앞 모델의 추론(continuation)이 빠진 채 뒷 모델이 그 Tool 결과를 이어받는다. 턴 경계에서 바꾸면 이 일이 사용자가 고른 시점에만 생긴다.
 - 화면은 "다음 메시지부터 적용"이라고 알린다(실행 중일 때).
-- `context_status`(문맥 크기 표시)와 수동 압축(`compact`)도 같은 `resolve`를 쓴다. 표시는 **지금 선택된 모델 기준**이다.
+- `context_status`(문맥 크기 표시)는 실행 중인 턴의 값이 아니라, **지금 저장된 선택으로 다음 턴이 쓸 모델·예산**을 보인다. 잠금 없이 같은 `resolve`를 부른다. 실행 중에 모델을 바꾸면 표시는 바로 새 모델 기준이 되고, 실행 중인 턴은 이전 모델로 끝난다.
+- 수동 압축(`compact`)은 잠금을 잡는 하나의 턴이다. 위 1~3을 똑같이 거쳐 그때 선택된 모델로 요약한다.
 
 ## 6. 모델이 바뀌면 대화 기록은
 
 ### 6.1 추론 continuation — 바꿀 것 없음
 
-이미 provider·model이 같을 때만 다시 싣는다(V3-049). 다른 모델이 쓴 턴은 텍스트·Tool 호출·결과만 간다. 서명·암호화 추론 블록이 다른 모델로 가지 않는다. 다시 원래 모델로 돌아가면, 그 모델이 썼던 턴의 continuation은 다시 실린다(기록에 남아 있으므로).
+이미 provider·model이 같을 때만 다시 싣는다(V3-049). 다른 모델이 쓴 턴은 텍스트·Tool 호출·결과만 간다. 서명·암호화 추론 블록이 다른 모델로 가지 않는다.
+
+이전 모델로 돌아오면, **지금 Prompt에 남아 있고** provider·model이 일치하는 continuation만 다시 싣는다. 압축 요약에 들어간 부분은 Prompt가 그 Event를 읽지 않으므로(`prompt/loader.py` `load`: 요약 범위 다음부터 읽음), 그 부분의 continuation은 돌아오지 않는다. 이것은 모델 전환과 무관하게 지금 압축이 하는 일이다(V3-P48).
 
 ### 6.2 크기 측정 — 모델도 일치해야 (결함 수정)
 
@@ -156,7 +169,7 @@ class ModelCatalog:
 
 ### 6.5 Tool·안내문 — 바꿀 것 없음
 
-Tool 목록, 서버 안내문, 지시문은 모델과 무관하다. 모델이 병렬 Tool 호출을 선언하지 않아도 지금처럼 Provider가 처리한다.
+Tool 목록, 서버 안내문, 지시문은 모델과 무관하다. 모델이 병렬 Tool 호출을 선언하지 않아도 지금처럼 Provider가 처리한다. Tool 호출 자체를 지원하지 않는 모델은 §3의 운영자 계약으로 막는다.
 
 ## 7. Web·CLI
 
@@ -183,7 +196,7 @@ Tool 목록, 서버 안내문, 지시문은 모델과 무관하다. 모델이 �
 | --- | --- |
 | Data | `ModelSetting`, `ConversationModelSettings` 포트(인메모리·SQLite). SQLite v6 `model_settings` |
 | Prompt | `UsageMark.model_id`; `Compactor.estimate`가 model까지 비교. 로더가 `RunRecord.model_id`로 채움 |
-| Control | `ModelCatalog`·`ModelOffer`·`ResolvedModel`. Driver는 `request_options`·`budget` 하나 대신 catalog를 받고, 턴 시작 때 resolve한 값을 턴 상태(`Turn` 곁)에 둔다. `context_status`·`compact`도 resolve |
+| Control | `ModelCatalog`·`ModelOffer`·`ResolvedModel`. Driver는 `request_options`·`budget` 하나 대신 catalog를 받고, 턴 시작 때 resolve한 값으로 불변의 턴 상태를 만든다(§5 1~4). `compact`는 같은 절차, `context_status`는 잠금 없이 resolve |
 | Provider | 없음. continuation·캐시 규칙은 이미 모델별 |
 | Bootstrap | `HIMARI_MODELS` 해석, 모델별 시작 검사(§3), `Application.models`·`model_setting`·`set_model` |
 | Web·CLI | §7 |
@@ -217,7 +230,16 @@ Tool 목록, 서버 안내문, 지시문은 모델과 무관하다. 모델이 �
 - **Data:** 인메모리·SQLite 양쪽 계약 테스트(저장·지우기·잘못된 값), v5 → v6 업그레이드.
 - **Prompt:** 같은 provider, 다른 model의 `UsageMark`는 `measured=False`.
 - **Control:** 턴 시작 때 resolve. 실행 중 바꾸면 그 턴은 이전 모델, 다음 턴은 새 모델(Run 기록의 `model_id`). 압축 Run의 모델. 작은 모델로 바꾼 뒤 자동 압축과 한도 거부. 목록에서 빠진 모델(Q2).
-- **Provider:** 모델 A → B → A 순서에서 A의 continuation만 A 요청에 실리는 것(OpenRouter, 실제 바이트 비교).
+- **Provider·Prompt:** 모델 A → B → A 순서에서 A의 continuation만 A 요청에 실리는 것(OpenRouter, 실제 바이트 비교). 압축 전과 후로 나눈다. 압축 뒤에는 요약에 들어간 A 턴의 continuation이 실리지 않고, 요약 뒤에 남은 A 턴의 것만 실린다.
+- **Tool 호출 미지원 모델(B1):** 가짜 Provider가 404 오류 본문을 주면 턴은 `PROVIDER_FAILED`, Run에 본문이 남고, 다시 보내지 않는다. 선언되지 않은 모델이 목록에 있으면 시작 로그에 경고가 남는다.
 - **Bootstrap:** `HIMARI_MODELS` 해석(`:` 포함 id, `=` 강도, 중복, 기본 모델 없음), 모델별 시작 검사, `HIMARI_MODELS` 없을 때 지금과 같음.
 - **Web·CLI:** API 계약, 권한, 브라우저 스모크(선택 → 메시지 → 답변의 모델 표시).
 - **실제 모델(opt-in live):** 한 대화에서 gpt-6-luna → claude-haiku-5.5 → gpt-6-luna. Tool 호출이 있는 턴을 사이에 두고 공급자 오류가 없는 것.
+
+## 12. 검수 처리 — rev. 1(`de0b837`), 독립 검수: NOT_READY
+
+| # | 지적 | 처리 |
+| --- | --- | --- |
+| B1 | 모델의 Tool 호출 지원 여부를 다루지 않음. 요청에는 Tool 목록이 실리고, 지원하지 않는 모델은 OpenRouter가 거부(404) | §3에 운영자 계약(목록의 모델은 Tool 호출 지원)을 명시했다. `ask_user`가 늘 카탈로그에 있어서 모든 요청에 `tools`가 실린다는 근거도 적었다. 선언되지 않은 모델은 시작 로그에 경고하고, 거부되면 기존 `PROVIDER_FAILED` 경로를 타며 다시 보내지 않는다. 기능 선언(`ProviderCapabilities.tool_calls`)은 필요할 때 더한다. §6.5·§11 보완 |
+| C1 | A → B → A에서 continuation이 돌아온다는 설명은 압축된 부분에는 맞지 않음 | §6.1을 "지금 Prompt에 남은 것만" 실린다로 고쳤다. 압축된 부분은 돌아오지 않는다(`loader.py`). §11 테스트를 압축 전·후로 나눴다 |
+| C2 | 턴 시작 시 모델을 정하는 절차가 불명확 | §5에 잠금 → 설정 읽기·resolve → 불변 턴 상태 → 모든 Run·압축이 사용하는 순서를 적었다. 고정 필드를 읽던 곳이 턴 상태를 읽도록 바뀐다는 점도 적었다. `context_status`는 저장된 선택 기준 다음 턴 값(잠금 없음), `compact`는 같은 절차. §8 갱신 |
