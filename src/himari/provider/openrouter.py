@@ -107,6 +107,45 @@ KNOWN_CAPABILITIES: Mapping[str, ProviderCapabilities] = {
         context_tokens=1_000_000,  # OpenRouter /api/v1/models context_length, 2026-10-14
         max_output_tokens=128_000,  # top_provider.max_completion_tokens, 2026-10-14
     ),
+    # OpenRouter catalog and live tool-result continuation checks, 2026-10-20.
+    # Only low/medium/high were swept; no effort is assumed for MiMo or MiniMax.
+    # Use the smaller of the model and top-provider windows. In particular,
+    # MiniMax advertises 1M globally but its top provider declares 512K.
+    "openai/gpt-6.1-sol": ProviderCapabilities(
+        model_id="openai/gpt-6.1-sol",
+        reasoning_efforts=frozenset({"low", "medium", "high"}),
+        context_tokens=1_050_000,
+        max_output_tokens=128_000,
+    ),
+    "anthropic/claude-sonnet-5.5": ProviderCapabilities(
+        model_id="anthropic/claude-sonnet-5.5",
+        reasoning_efforts=frozenset({"low", "medium", "high"}),
+        context_tokens=1_000_000,
+        max_output_tokens=128_000,
+    ),
+    "xiaomi/mimo-v2.6-pro": ProviderCapabilities(
+        model_id="xiaomi/mimo-v2.6-pro",
+        context_tokens=1_048_576,
+        max_output_tokens=131_072,
+    ),
+    "z-ai/glm-5.3": ProviderCapabilities(
+        model_id="z-ai/glm-5.3",
+        reasoning_efforts=frozenset({"low", "medium", "high"}),
+        parallel_tool_calls=True,
+        context_tokens=1_048_576,
+        max_output_tokens=943_718,
+    ),
+    "deepseek/deepseek-v4.1-flash": ProviderCapabilities(
+        model_id="deepseek/deepseek-v4.1-flash",
+        reasoning_efforts=frozenset({"low", "medium", "high"}),
+        context_tokens=1_048_576,
+        max_output_tokens=943_718,
+    ),
+    "minimax/minimax-m3": ProviderCapabilities(
+        model_id="minimax/minimax-m3",
+        context_tokens=524_288,
+        max_output_tokens=512_000,
+    ),
 }
 
 
