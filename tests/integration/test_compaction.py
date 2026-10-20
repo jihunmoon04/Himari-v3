@@ -274,14 +274,15 @@ async def test_b2_a_measurement_by_another_provider_is_not_reused() -> None:
     await rt.driver.drive(SCOPE, user("q1" + "가" * 700))  # ~700 tokens; the Provider "measured" 100
     other = OtherProvider([final("a2")])
     rt2, adapter2 = runtime(store=restart(rt.store), provider=other, context_budget=BUDGET)
-    inputs = await rt2.driver._loader.load(SCOPE, (), rt2.driver._options)
+    inputs = await rt2.driver._loader.load(
+        SCOPE, (), rt2.driver._request_options(SCOPE, await rt2.driver._resolve_model(SCOPE)))
     assert inputs.usage_mark is not None and inputs.usage_mark.provider_key == "scripted"
     estimate = Compactor().estimate(inputs, Composer().compose(inputs))
     assert not estimate.measured and estimate.tokens > 700  # not 100 + additions
 
 
 async def _composed(rt: Any) -> tuple[PromptInputs, ModelInput]:
-    inputs = await rt.driver._loader.load(SCOPE, (), rt.driver._options)
+    inputs = await rt.driver._loader.load(SCOPE, (), rt.driver._request_options(SCOPE, await rt.driver._resolve_model(SCOPE)))
     return inputs, Composer().compose(inputs)
 
 
@@ -554,7 +555,7 @@ class _ReadSpy:
 async def _load_with(rt: Any, spy: _ReadSpy) -> tuple[PromptInputs, ModelInput]:
     loader = copy.copy(rt.driver._loader)
     loader._log = spy
-    inputs = await loader.load(SCOPE, (), rt.driver._options)
+    inputs = await loader.load(SCOPE, (), rt.driver._request_options(SCOPE, await rt.driver._resolve_model(SCOPE)))
     return inputs, Composer().compose(inputs)
 
 

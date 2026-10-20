@@ -471,6 +471,21 @@ class ExternalSourceSetting(DeepFrozen):
     enabled: bool
 
 
+# --- A Conversation's model (V3-P64) ----------------------------------------
+
+MAX_MODEL_ID_CHARS = 200
+MAX_EFFORT_CHARS = 32
+
+
+@dataclass(frozen=True)
+class ModelSetting(DeepFrozen):
+    """A Conversation's own model choice, kept exactly as made: whether the
+    model is still offered is decided when it is used (V3-P64 §4.2)."""
+
+    model_id: str
+    reasoning_effort: str | None = None  # None: the model's default effort
+
+
 # --- Conversation catalog (DATA-12, T0) -------------------------------------
 
 MAX_TITLE_CHARS = 200
@@ -723,6 +738,25 @@ class ExternalSourceSettings(Protocol):
         ...
 
 
+class ConversationModelSettings(Protocol):
+    """V3-P64: a Conversation's model choice.
+
+    Like ``ExternalSourceSettings``, Data keeps exactly what it is told and
+    knows no defaults or offered models; Control resolves the choice when a
+    turn starts. Changing it does not touch ``state_revision``: the model is
+    not part of the Prompt (V3-049)."""
+
+    async def read_model_setting(self, scope: TrustedScope) -> ModelSetting | None:
+        """This Conversation's choice; None: none made (the default model)."""
+        ...
+
+    async def set_model_setting(self, scope: TrustedScope, setting: ModelSetting | None) -> None:
+        """Records the choice, replacing any earlier one; ``None`` removes it.
+        INVALID_ARGUMENT for a model id of 1..MAX_MODEL_ID_CHARS visible ASCII
+        characters, or an effort of 1..MAX_EFFORT_CHARS, it is not."""
+        ...
+
+
 class ConversationCatalog(Protocol):
     """DATA-12: a principal's Conversations (T0 create, list, rename).
 
@@ -776,6 +810,7 @@ __all__ = [
     "ConversationCatalog",
     "ConversationEvent",
     "ConversationLog",
+    "ConversationModelSettings",
     "ConversationSummary",
     "ConversationWorkspace",
     "DataError",
@@ -788,10 +823,13 @@ __all__ = [
     "ExternalSourceSettings",
     "InitialActivation",
     "MAX_APP_PAYLOAD_BYTES",
+    "MAX_EFFORT_CHARS",
     "MAX_EXTERNAL_SETTINGS",
     "MAX_LIST_LIMIT",
+    "MAX_MODEL_ID_CHARS",
     "MAX_TITLE_CHARS",
     "MAX_UI_HTML_BYTES",
+    "ModelSetting",
     "PREVIEW_CHARS",
     "PersistedStateBasis",
     "ProjectionResult",

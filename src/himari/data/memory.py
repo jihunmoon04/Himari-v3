@@ -51,6 +51,7 @@ from himari.data.api import (
     EventPayload,
     ExternalSourceSetting,
     InitialActivation,
+    ModelSetting,
     PersistedStateBasis,
     ProjectionResult,
     PromptBasis,
@@ -115,6 +116,7 @@ class _Conversation:
     workspace: ConversationWorkspace | None = None
     idempotency: dict[str, EventId] = field(default_factory=dict)
     external: dict[str, bool] = field(default_factory=dict)  # V3-P53 choices by source
+    model: ModelSetting | None = None  # V3-P64
     app_payloads: dict[CallRef, JsonValue] = field(default_factory=dict)  # V3-P58, by call
 
 
@@ -695,6 +697,16 @@ class InMemoryData:
             conv.external.pop(source, None)
         else:
             conv.external[source] = enabled
+
+    # --- ConversationModelSettings ----------------------------------------------
+
+    async def read_model_setting(self, scope: TrustedScope) -> ModelSetting | None:
+        return self._conv(scope).model
+
+    async def set_model_setting(self, scope: TrustedScope, setting: ModelSetting | None) -> None:
+        conv = self._conv(scope)
+        rules.check_model_setting(setting)
+        conv.model = setting
 
     # --- StateQuery -------------------------------------------------------------
 

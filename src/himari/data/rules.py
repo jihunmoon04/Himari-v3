@@ -8,8 +8,10 @@ from collections.abc import Sequence
 from himari.common import ContentBlock, TextBlock, thaw, tool_id_problem
 from himari.data.api import (
     MAX_APP_PAYLOAD_BYTES,
+    MAX_EFFORT_CHARS,
     MAX_EXTERNAL_SETTINGS,
     MAX_LIST_LIMIT,
+    MAX_MODEL_ID_CHARS,
     MAX_TITLE_CHARS,
     MAX_UI_HTML_BYTES,
     PREVIEW_CHARS,
@@ -17,6 +19,7 @@ from himari.data.api import (
     DataError,
     DataErrorCode,
     InitialActivation,
+    ModelSetting,
     ToolCompletion,
     ToolExecutionStatus,
     UiResource,
@@ -54,6 +57,23 @@ def check_external_setting(source: object, enabled: object, count_after: int) ->
         raise DataError(DataErrorCode.INVALID_ARGUMENT, "enabled must be true, false or null")
     if count_after > MAX_EXTERNAL_SETTINGS:
         raise DataError(DataErrorCode.INVALID_ARGUMENT, f"at most {MAX_EXTERNAL_SETTINGS} external source settings")
+
+
+def _visible_ascii(value: object, limit: int) -> bool:
+    return isinstance(value, str) and 1 <= len(value) <= limit and all("!" <= c <= "~" for c in value)
+
+
+def check_model_setting(setting: object) -> None:
+    """Shape only: whether the model is offered is Control's to decide."""
+    if setting is None:
+        return
+    if not isinstance(setting, ModelSetting) or not _visible_ascii(setting.model_id, MAX_MODEL_ID_CHARS):
+        raise DataError(DataErrorCode.INVALID_ARGUMENT,
+                        f"a model id is 1..{MAX_MODEL_ID_CHARS} visible ASCII characters")
+    effort = setting.reasoning_effort
+    if effort is not None and not _visible_ascii(effort, MAX_EFFORT_CHARS):
+        raise DataError(DataErrorCode.INVALID_ARGUMENT,
+                        f"a reasoning effort is 1..{MAX_EFFORT_CHARS} visible ASCII characters")
 
 
 def preview(blocks: Sequence[ContentBlock]) -> str:

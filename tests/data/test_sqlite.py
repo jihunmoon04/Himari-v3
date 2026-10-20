@@ -43,6 +43,7 @@ from himari.data.api import (
     DataError,
     DataErrorCode,
     InitialActivation,
+    ModelSetting,
     PromptBasis,
     RawNoResponse,
     RawReceived,
@@ -223,6 +224,7 @@ _ADDED_IN = {
     4: ("DROP TABLE external_settings",),
     5: ("ALTER TABLE tool_executions DROP COLUMN app_payload", "ALTER TABLE tool_executions DROP COLUMN ui_digest",
         "DROP TABLE ui_resources"),
+    6: ("DROP TABLE model_settings",),
 }
 
 
@@ -236,25 +238,26 @@ def old_database(path: Path, version: int) -> None:
            f"PRAGMA user_version={version}")
 
 
-@pytest.mark.parametrize("version", [2, 3, 4])
+@pytest.mark.parametrize("version", [2, 3, 4, 5])
 def test_an_older_database_is_upgraded_in_place_and_keeps_its_data(tmp_path: Path, version: int) -> None:
     path = tmp_path / "h.db"
     old_database(path, version)
     store = SqliteStore(path)
     try:
-        assert store.connection.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 5
+        assert store.connection.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 6
         data = SqliteData(store)
         events = asyncio.run(data.read_events(SCOPE))
         assert [e.payload.blocks for e in events] == [(TextBlock(f"from v{version}"),)]  # type: ignore[union-attr]
         asyncio.run(data.set_external_setting(SCOPE, "calliope", False))  # the v4 table works
         columns = [r[1] for r in store.connection.execute("PRAGMA table_info(tool_executions)")]
         assert columns[-2:] == ["ui_digest", "app_payload"]  # and the v5 ones
+        asyncio.run(data.set_model_setting(SCOPE, ModelSetting("openai/gpt-6-luna", "high")))  # and the v6 one
     finally:
         store.close()
-    SqliteStore(path).close()  # and it opens as a plain v5 database afterwards
+    SqliteStore(path).close()  # and it opens as a plain v6 database afterwards
 
 
-@pytest.mark.parametrize("version", [2, 3, 4])
+@pytest.mark.parametrize("version", [2, 3, 4, 5])
 @pytest.mark.parametrize("change", ["CREATE TABLE extra (x)", "PRAGMA application_id=1", "DROP TABLE artifacts"])
 def test_only_an_exact_older_database_is_upgraded(tmp_path: Path, version: int, change: str) -> None:
     path = tmp_path / "h.db"
@@ -265,7 +268,7 @@ def test_only_an_exact_older_database_is_upgraded(tmp_path: Path, version: int, 
     conn = sqlite3.connect(path)
     try:
         assert conn.execute("PRAGMA user_version").fetchone()[0] == version  # refused, never repaired
-        assert "ui_resources" not in [r[0] for r in conn.execute("SELECT name FROM sqlite_master")]
+        assert "model_settings" not in [r[0] for r in conn.execute("SELECT name FROM sqlite_master")]
     finally:
         conn.close()
 
