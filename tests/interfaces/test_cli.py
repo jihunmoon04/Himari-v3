@@ -37,6 +37,7 @@ from himari.interfaces.cli.client import BadServerURL, ServerClient, check_url  
 from himari.interfaces.cli.terminal import INDENT, safe_block, safe_line  # noqa: E402
 from himari.interfaces.web import app as web  # noqa: E402
 from himari.interfaces.web.config import WebConfig  # noqa: E402
+from himari.provider.api import ProviderCapabilities  # noqa: E402
 from himari.provider.scripted import Measured, ScriptedAdapter, ScriptStep  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -73,15 +74,16 @@ def test_loopback_urls_are_normalized() -> None:
 
 class Harness:
     def __init__(self, tmp_path: Path, context_tokens: int | None = None, mcp: FakeMcpServer | None = None,
-                 turn: dict[str, Any] | None = None) -> None:
-        self.provider = ScriptedAdapter([])
+                 turn: dict[str, Any] | None = None, provider: ScriptedAdapter | None = None,
+                 models: tuple[tuple[str, str | None], ...] = ()) -> None:
+        self.provider = ScriptedAdapter([]) if provider is None else provider
         self.application: Application | None = None
 
         async def opener() -> Application:
             self.application = await Application.open(tmp_path / "data", self.provider, model_id="m", sandbox=False,
                                                       context_tokens=context_tokens,
                                                       mcp_transport=None if mcp is None else mcp.transport(),
-                                                      **(turn or {}))
+                                                      models=models, **(turn or {}))
             return self.application
 
         config = WebConfig("127.0.0.1", 8765, frozenset({"testserver"}), frozenset({"http://testserver"}), False,
@@ -765,4 +767,54 @@ def test_a_turn_stopped_by_its_budget_is_continued_from_the_terminal(tmp_path: P
         code, out, err = h.run("continue", cid)
         assert code == cli.EXIT_OK, err
         assert "All written." in out and "(used 46k in + 1.1k out of 100k tokens in 2 requests)" in err.splitlines()
+
+
+# --- the model (V3-P64 §7) ----------------------------------------------------------------------
+
+
+class EffortAdapter(ScriptedAdapter):
+    def describe_capabilities(self, model_id: str) -> ProviderCapabilities:
+        if model_id == "big":
+            return ProviderCapabilities(model_id, frozenset({"low", "high"}), context_tokens=300_000,
+                                        max_output_tokens=60_000)
+        return super().describe_capabilities(model_id)
+
+
+def test_the_model_from_the_cli(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(cli, "POLL_SECONDS", 0.01)
+    harness = Harness(tmp_path, provider=EffortAdapter([]), models=(("m", None), ("big", "low")))
+    with harness.test_client:
+        code, out, _ = harness.run("status")
+        assert code == cli.EXIT_OK and out.splitlines()[0] == "model: m (also offered: big)"
+        cid = harness.run("new")[1].strip()
+        code, out, _ = harness.run("model", cid)
+        assert code == cli.EXIT_OK and out.splitlines() == [
+            "model: m — the server's default",
+            "  m (default; unverified)",
+            "  big (reasoning: low, high (default low))",
+        ]
+        harness.queue(final("from m"))
+        harness.run("send", cid, "one")
+        code, out, _ = harness.run("model", cid, "big", "high")
+        assert code == cli.EXIT_OK and out.splitlines() == ["model: big (reasoning high) — chosen here"]
+        code, _, err = harness.run("model", cid, "big", "max")
+        assert code == cli.EXIT_FAILED and "Reasoning efforts for this model: low, high." in err
+        code, _, err = harness.run("model", cid, "nope")
+        assert code == cli.EXIT_FAILED and "does not offer that model" in err
+        harness.queue(final("from big"))
+        code, out, _ = harness.run("send", cid, "two")
+        assert out.splitlines()[-2:] == ["HIMARI (big):", f"{INDENT}from big"]  # the model changed
+        harness.queue(final("big again"))
+        code, out, _ = harness.run("send", cid, "three")
+        assert out.splitlines()[-2:] == ["HIMARI:", f"{INDENT}big again"]  # unchanged since the answer before
+        code, out, _ = harness.run("show", cid)
+        assert [row for row in out.splitlines() if row.startswith("HIMARI")] == ["HIMARI:", "HIMARI (big):", "HIMARI:"]
+
+        lines = iter(["/model default", "/model a b c", "/exit"])
+        out_buffer, err_buffer = io.StringIO(), io.StringIO()
+        session = cli.Session(harness.client(), cli.Printer(out_buffer), err_buffer, sleep=lambda s: None)
+        assert cli.cmd_chat(session, cli.parser().parse_args(["chat", cid]), read=lambda p: next(lines)) == 0
+        assert "model: big (reasoning high) — chosen here" in err_buffer.getvalue()  # said on opening
+        assert "model: m — the server's default" in out_buffer.getvalue().splitlines()
+        assert "usage: /model" in err_buffer.getvalue()
 

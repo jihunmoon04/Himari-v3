@@ -1,6 +1,6 @@
 # 대화별 모델 선택 v0.1
 
-> 2026-10-20 · **PROPOSED (V3-P64)** · rev. 2 — 검수 NOT_READY(B1; C1·C2) 반영(§12), 재검수 READY(§13). 설계 PR #51 병합. 구현: 1단계 Data·Control·Bootstrap 핵심(§14), 2단계 운영자 목록·Web·CLI는 다음 PR.
+> 2026-10-20 · **PROPOSED (V3-P64)** · rev. 2 — 검수 NOT_READY(B1; C1·C2) 반영(§12), 재검수 READY(§13). 설계 PR #51 병합. 구현: 1단계 Data·Control·Bootstrap 핵심(§14, PR #52), 2단계 운영자 목록·Web·CLI(§15).
 >
 > **정정(2026-10-20, 구현 중 발견):** §6.2의 "결함"은 없었다. 측정값은 이미 모델이 같을 때만 쓰인다(§6.2, §14).
 >
@@ -272,4 +272,19 @@ Tool 목록, 서버 안내문, 지시문은 모델과 무관하다. 모델이 �
 검증: 전체 pytest 1386 passed·51 skipped, mypy --strict, import 검사 통과.
 
 **남은 것(2단계):** `HIMARI_MODELS` 해석과 모델별 예산(Application), 확인되지 않은 모델의 시작 경고(B1), `Application.set_model`과 거부 규칙(§4.3), Web API·화면, CLI `/model`, 답변의 모델 표시.
+
+## 15. 구현 노트 — 2단계: 운영자 목록·Application·Web·CLI (2026-10-20)
+
+| 곳 | 구현 |
+| --- | --- |
+| Web 설정 | `HIMARI_MODELS`: `id[=강도]`를 쉼표로. 모양만 검사한다(빈 id, 공백, 중복, 기본 모델 빠짐 → 설정 오류). 지원 여부는 시작할 때 Application이 검사한다 |
+| Application | `open(models=...)`: 모델마다 Provider 기능으로 예산·입력 한도·출력 몫을 만든다(V3-056 규칙, 위반이면 모델 이름과 함께 거부). 기본 모델 항목에 강도가 없으면 `HIMARI_REASONING_EFFORT`. 모두 store를 열기 전에 검사한다. Provider가 창을 선언하지 않은 모델은 `unverified_models`이고, 시작 로그에 경고한다(B1). `models`·`model_choice`·`set_model`(§4.3 거부: `unknown_model` 404, `invalid_effort` 422, `invalid_argument` 400)·`run_models` |
+| Web API | §7대로. `/api/server`의 `models`, `GET`·`PUT /api/conversations/{id}/model`, 이벤트의 `model`(답변과 Tool 호출 묶음만). 다른 사용자의 대화는 다른 API와 같은 404 |
+| Web 화면 | 대화 메뉴의 Model(“Default (기본 모델)” + 제공 모델)과 Reasoning(그 모델이 강도를 선언할 때만, “Default (기본 강도)” + 강도). 실행 중이면 “Applies from the next message.”, 대체되었으면 그 이유(경고색). 목록에 없는 저장값은 “(not offered)”로 보인다. 답변 머리의 모델 이름은 바로 앞 답변과 다를 때만. 바꾸면 문맥 크기 표시를 다시 읽는다(새 모델의 예산) |
+| CLI | `himari model ID [MODEL [EFFORT] | default]`, 대화 안 `/model`, 대화를 열 때 모델 한 줄, `status`에 다른 제공 모델. 답변의 `HIMARI (모델):` 규칙은 Web과 같다. 한 번 보내는 `send`·`continue`는 앞 답변의 모델을 최근 이벤트 한 쪽(32개)에서 읽어 둔다(표시용; 그 안에 답이 없으면 이름을 붙이지 않는다) |
+
+**검증:**
+- 전체 pytest 1406 passed·51 skipped, mypy --strict, import 검사.
+- 새 테스트: 설정 해석, Application(모델별 예산, 시작 검사 6가지, 선택과 거부, 재시작 후 빠진 모델의 대체), Web API(목록·선택·거부 7가지·이벤트의 모델·다음 턴부터), CLI(`model`·`/model`·답변 머리).
+- 브라우저 스모크 `scripts/model_smoke.py`: 11/11(Chrome headless shell 156). 기본 표시, 강도 선택과 저장, 바뀐 답에만 모델 이름, 실행 중 변경 안내와 그 턴의 모델 유지, Default로 되돌리기, 좁은 화면 가로 스크롤 없음, 페이지 오류 없음.
 

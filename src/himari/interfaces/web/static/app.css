@@ -757,6 +757,30 @@ textarea {
   font-size: 12px;
 }
 
+.chat-menu-model {
+  display: grid;
+  gap: var(--space-1);
+}
+
+.chat-menu-model-field {
+  display: grid;
+  gap: 2px;
+  font-size: 13px;
+}
+
+#chat-menu-model-note.is-warn {
+  color: var(--warn);
+}
+
+/* The model that wrote an answer, shown when it differs from the one before (V3-P64 §7). */
+.item-model {
+  margin-left: var(--space-1);
+  font-weight: 400;
+  letter-spacing: 0;
+  text-transform: none;
+  overflow-wrap: anywhere;
+}
+
 /* Every main surface owns its own scrolling; the shell itself never
  * scrolls, so the composer cannot be pushed below the viewport. */
 .surface {

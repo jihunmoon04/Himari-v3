@@ -107,6 +107,10 @@ const app = {
   promptDismissed: null, // the composer text the picker was closed for (Escape)
   promptOpen: null, // the prompt whose arguments are being filled in
   promptTicket: 0, // the latest expansion asked for; anything that abandons it moves this on (PR #43 review B1)
+  models: [], // the models this server offers (V3-P64), from /api/server
+  modelChoice: null, // this conversation's /model answer
+  running: false, // the last detail's job state: a model change then applies from the next turn
+  lastModel: null, // the model of the latest answer shown, for the label on a change
 };
 
 const views = new AppViews(api, el, () => app.conversationId);
@@ -252,7 +256,13 @@ function speaker(kind) {
 function renderMessage(event) {
   const user = event.kind === "user_message";
   const node = el("div", user ? "item item-user" : "item item-assistant");
-  node.append(el("div", "item-kind", speaker(event.kind)));
+  const kind = el("div", "item-kind", speaker(event.kind));
+  // V3-P64 §7: which model wrote it, only when it changed since the answer before.
+  if (!user && event.model) {
+    if (app.lastModel !== null && event.model !== app.lastModel) kind.append(el("span", "item-model", event.model));
+    app.lastModel = event.model;
+  }
+  node.append(kind);
   node.append(user ? el("p", "item-text", event.text) : renderAssistantText(document, event.text || ""));
   return node;
 }
@@ -278,6 +288,7 @@ function renderEvent(event) {
   }
   if (event.kind === "assistant_tool_calls") {
     if (event.text) timeline.append(renderMessage({ ...event, kind: "assistant_final" }));
+    else if (event.model) app.lastModel = event.model; // a step without text still says who took it
     for (const call of event.calls) {
       const key = `${event.run_id}/${call.call_id}`; // call ids repeat across Runs
       if (call.tool_id === "ask_user") {
@@ -428,6 +439,71 @@ async function loadToolSources(generation) {
     }
   } catch (ignored) {
     /* display only: the conversation works without it */
+  }
+}
+
+/* The model (V3-P64): this conversation's choice, kept as made; "Default"
+ * follows the server's default model. Saved at once, used from the next turn. */
+function option(value, text) {
+  const node = el("option", null, text);
+  node.value = value;
+  return node;
+}
+
+function renderModel() {
+  const choice = app.modelChoice;
+  $("chat-menu-model").hidden = choice === null || app.models.length === 0;
+  if (choice === null) return;
+  const select = $("chat-menu-model-select");
+  const fallback = app.models.find((m) => m.default);
+  select.replaceChildren(option("", `Default${fallback ? ` (${fallback.id})` : ""}`));
+  for (const model of app.models) select.append(option(model.id, model.id));
+  const chosen = choice.chosen ? choice.chosen.model : "";
+  if (chosen && !app.models.some((m) => m.id === chosen)) select.append(option(chosen, `${chosen} (not offered)`));
+  select.value = chosen;
+  const offered = app.models.find((m) => m.id === chosen);
+  const effort = $("chat-menu-effort-select");
+  const efforts = offered ? offered.efforts : [];
+  $("chat-menu-effort-field").hidden = efforts.length === 0;
+  effort.replaceChildren(option("", `Default (${offered && offered.default_effort ? offered.default_effort : "none"})`));
+  for (const name of efforts) effort.append(option(name, name));
+  const chosenEffort = choice.chosen && choice.chosen.effort ? choice.chosen.effort : "";
+  if (chosenEffort && !efforts.includes(chosenEffort)) effort.append(option(chosenEffort, `${chosenEffort} (not offered)`));
+  effort.value = chosenEffort;
+  const note = $("chat-menu-model-note");
+  const text = choice.fallback || (app.running ? "Applies from the next message." : "");
+  note.textContent = text;
+  note.classList.toggle("is-warn", Boolean(choice.fallback));
+  note.hidden = !text;
+}
+
+async function loadModel(generation) {
+  try {
+    const choice = await api("GET", `/api/conversations/${encodeURIComponent(app.conversationId)}/model`);
+    if (generation === app.generation) {
+      app.modelChoice = choice;
+      renderModel();
+    }
+  } catch (ignored) {
+    /* display only: the conversation works without it */
+  }
+}
+
+async function setModel(model, effort) {
+  const generation = app.generation;
+  try {
+    const choice = await api("PUT", `/api/conversations/${encodeURIComponent(app.conversationId)}/model`,
+      { model, effort });
+    if (generation === app.generation) {
+      app.modelChoice = choice;
+      renderModel();
+      loadContext(generation); // the budget is the new model's
+    }
+  } catch (error) {
+    if (generation === app.generation) {
+      status(error.message, "error");
+      renderModel(); // back to what is stored
+    }
   }
 }
 
@@ -708,6 +784,10 @@ function applyDetail(detail) {
   $("composer-pause").disabled = Boolean(stopping);
   $("composer-cancel").hidden = !detail.job.running;
   $("composer-cancel").disabled = stopping === "cancel";
+  if (app.running !== detail.job.running) {
+    app.running = detail.job.running;
+    renderModel(); // "applies from the next message" while a turn runs
+  }
 }
 
 async function refresh(generation) {
@@ -735,6 +815,7 @@ function poll(generation) {
         loadContext(generation);
         loadServerInfo(); // a command may have found the sandbox broken
         loadToolSources(generation); // and close the views of a source turned off elsewhere
+        loadModel(generation); // a stored choice may have been changed elsewhere
       }
     } catch (error) {
       if (generation === app.generation && error.status !== 401) {
@@ -758,6 +839,10 @@ async function openConversation(id) {
   $("chat-menu-context-pair").hidden = true;
   $("chat-menu-compact").hidden = true;
   $("chat-menu-tools").hidden = true;
+  $("chat-menu-model").hidden = true;
+  app.modelChoice = null;
+  app.running = false;
+  app.lastModel = null;
   app.prompts = null;
   app.promptDismissed = null;
   closePicker();
@@ -767,6 +852,7 @@ async function openConversation(id) {
   showSurface("chat");
   closeNav();
   loadToolSources(generation);
+  loadModel(generation);
   loadPrompts(generation);
   try {
     const detail = await refresh(generation);
@@ -917,6 +1003,8 @@ async function loadServerInfo() {
   try {
     const server = await api("GET", "/api/server");
     info.textContent = `${server.model} · ${SANDBOX_TEXT[server.sandbox] || server.sandbox}`;
+    app.models = Array.isArray(server.models) ? server.models : [];
+    renderModel();
     info.classList.toggle("is-warn", server.sandbox !== "enforced");
     info.hidden = false;
   } catch (error) {
@@ -966,6 +1054,9 @@ async function boot() {
   $("chat-menu-resume").addEventListener("click", resumeConversation);
   $("chat-menu-compact").addEventListener("click", compactConversation);
   $("chat-menu-dismiss").addEventListener("click", dismissQuestion);
+  $("chat-menu-model-select").addEventListener("change", (event) => setModel(event.target.value || null, null));
+  $("chat-menu-effort-select").addEventListener("change", (event) =>
+    setModel($("chat-menu-model-select").value || null, event.target.value || null));
   $("composer-pause").addEventListener("click", () => stopConversation("pause"));
   $("stop-continue").addEventListener("click", () => {
     $("stop-continue").disabled = true;  // one Continue per click; the next detail enables it again

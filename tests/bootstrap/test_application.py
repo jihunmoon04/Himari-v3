@@ -19,6 +19,8 @@ from himari.bootstrap.application import (
     DEFAULT_UNATTENDED_RUNS,
     UNKNOWN_WINDOW_TOKENS,
     Application,
+    ModelChoiceView,
+    ModelRefused,
     TurnSettings,
     context_limit,
     input_ceiling,
@@ -27,6 +29,7 @@ from himari.bootstrap.application import (
 from himari.bootstrap.operator import OperatorSecretError
 from himari.common import PrincipalId, ToolId, TrustedScope
 from himari.control.api import DriveState
+from himari.data.api import DataError, ModelSetting
 from himari.data.sqlite import StoreLockedError
 from himari.environment.inside import INSIDE
 from himari.sandbox.api import SandboxState
@@ -245,6 +248,106 @@ def test_a_configured_budget_must_leave_room_for_the_answer(tmp_path: Path) -> N
         with pytest.raises(ValueError, match="input limit of 240000"):
             await Application.open(tmp_path / "root", WindowedAdapter(), model_id="m", sandbox=False,
                                    context_tokens=250_000)
+
+    asyncio.run(scenario())
+
+
+# --- offered models (V3-P64 §3) --------------------------------------------------------------
+
+
+class MixedAdapter(ScriptedAdapter):
+    """"w" declares a 300k window and efforts; "n" a 100k window; anything else is unknown."""
+
+    def describe_capabilities(self, model_id: str) -> ProviderCapabilities:
+        if model_id == "w":
+            return ProviderCapabilities(model_id, frozenset({"low", "high"}), context_tokens=300_000,
+                                        max_output_tokens=60_000)
+        if model_id == "n":
+            return ProviderCapabilities(model_id, context_tokens=100_000, max_output_tokens=20_000)
+        return super().describe_capabilities(model_id)
+
+
+def test_each_offered_model_has_its_own_budget_and_the_default_its_effort(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        app = await Application.open(tmp_path / "root", MixedAdapter(), model_id="w", reasoning_effort="high",
+                                     sandbox=False, models=[("n", None), ("w", None), ("other/unknown:free", None)])
+        try:
+            offers = {o.model_id: o for o in app.runtime.models.offers}
+            assert list(offers) == ["n", "w", "other/unknown:free"]  # the operator's order
+            assert offers["w"].default_effort == "high"  # HIMARI_REASONING_EFFORT: the default model's, when unset
+            assert offers["n"].default_effort is None
+            budgets = {m: (o.budget.limit_tokens, o.budget.hard_limit_tokens) for m, o in offers.items()
+                       if o.budget is not None}
+            assert budgets == {"n": (80_000, 80_000), "w": (200_000, 240_000), "other/unknown:free": (128_000, None)}
+            assert app.context_tokens == 200_000 and app.model_id == "w"  # the default model's
+            assert app.unverified_models == ("other/unknown:free",)
+            assert [(m.model_id, m.is_default, m.window_known, m.efforts) for m in app.models] == [
+                ("n", False, True, ()), ("w", True, True, ("low", "high")), ("other/unknown:free", False, False, ())]
+        finally:
+            await app.close()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("models, options, message", [
+    ([("n", None)], {}, "the default model 'w' is not offered"),
+    ([("w", "max")], {}, "'max' is not supported by w"),
+    ([("w", None), ("n", "low")], {}, "'low' is not supported by n"),
+    ([("w", None), ("w", "low")], {}, "offered twice"),
+    ([("w", None), ("n", None)], {"context_tokens": 90_000}, "n: the context budget 90000 exceeds"),
+    ([], {"reasoning_effort": "max"}, "'max' is not supported by w"),  # refused at start, not before a send
+])
+def test_offered_models_are_checked_before_anything_is_opened(tmp_path: Path, models: list[tuple[str, str | None]],
+                                                              options: dict[str, Any], message: str) -> None:
+    async def scenario() -> None:
+        with pytest.raises(ValueError, match=message):
+            await Application.open(tmp_path / "root", MixedAdapter(), model_id="w", sandbox=False, models=models,
+                                   **options)
+        assert not (tmp_path / "root" / "himari.db").exists()
+
+    asyncio.run(scenario())
+
+
+def test_a_conversation_chooses_its_model_and_the_choice_is_checked(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        provider = MixedAdapter([final("one"), final("two")])
+        app = await Application.open(tmp_path / "root", provider, model_id="w", sandbox=False,
+                                     models=[("w", "low"), ("n", None)])
+        try:
+            scope = TrustedScope(ALICE, await app.create_conversation(ALICE))
+            assert await app.model_choice(scope) == ModelChoiceView("w", "low", None, None)
+            for model, effort, code in [("x", None, "unknown_model"), ("n", "low", "invalid_effort"),
+                                        (None, "low", "invalid_argument")]:
+                with pytest.raises(ModelRefused) as refused:
+                    await app.set_model(scope, model, effort)
+                assert refused.value.code == code
+            assert await app.set_model(scope, "n", None) == ModelChoiceView("n", None, ModelSetting("n"), None)
+            first = await app.runtime.driver.drive(scope, user("hi"))
+            await app.set_model(scope, "w", "high")
+            second = await app.runtime.driver.drive(scope, user("again"))
+            assert await app.run_models(scope, first.run_ids + second.run_ids) == {
+                first.run_ids[0]: "n", second.run_ids[0]: "w"}
+            with pytest.raises(DataError):  # another principal's conversation
+                await app.set_model(TrustedScope(BOB, scope.conversation_id), "n", None)
+        finally:
+            await app.close()
+
+    asyncio.run(scenario())
+
+
+def test_a_stored_model_no_longer_offered_falls_back_after_a_restart(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        app = await Application.open(tmp_path / "root", MixedAdapter(), model_id="w", sandbox=False,
+                                     models=[("w", None), ("n", None)])
+        scope = TrustedScope(ALICE, await app.create_conversation(ALICE))
+        await app.set_model(scope, "n", None)
+        await app.close()
+        app = await Application.open(tmp_path / "root", MixedAdapter(), model_id="w", sandbox=False)  # n removed
+        try:
+            assert await app.model_choice(scope) == ModelChoiceView(
+                "w", None, ModelSetting("n"), "n is no longer offered; using the default model w")
+        finally:
+            await app.close()
 
     asyncio.run(scenario())
 
