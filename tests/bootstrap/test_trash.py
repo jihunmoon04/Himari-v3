@@ -13,7 +13,7 @@ from testkit import RecordingTool, calls, final, text_result, user
 
 from himari.bootstrap import application as application_module
 from himari.bootstrap.application import Application, ConversationStillStopping, workspace_for
-from himari.common import CallId, CallRef, PrincipalId, RawRepresentation, ToolCall, ToolId, TrustedScope
+from himari.common import CallId, CallRef, ConversationId, PrincipalId, RawRepresentation, ToolCall, ToolId, TrustedScope
 from himari.control.api import ControlError, ControlErrorCode
 from himari.data.api import (
     AssistantToolCalls,
@@ -148,6 +148,58 @@ def test_a_job_that_will_not_stop_refuses_the_trash_and_changes_nothing(tmp_path
             assert (await app.runner.submit(scope, None)).running  # reopened
             await app.runner.wait(scope)
         finally:
+            hold.release.set()  # a stubborn job would hold close() forever
+            await app.close()
+
+    asyncio.run(scenario())
+
+
+def test_pr56_b1_a_cancelled_trash_leaves_the_conversation_open(tmp_path: Path) -> None:
+    hold = HoldingTool()
+    hold.stubborn = True  # the job outlives the cancelled trash
+
+    async def scenario() -> None:
+        app = await open_app(tmp_path / "data", [calls(("hold", {})), final("done")], tools=[hold])
+        try:
+            scope, _ = await conversation(app)
+            await app.runner.submit(scope, user("hold on"))
+            await hold.entered.wait()
+            trashing = asyncio.create_task(app.trash(scope))
+            await asyncio.sleep(0.05)
+            assert scope.conversation_id in app.runner._closed  # waiting in close for the job
+            trashing.cancel()  # the request went away
+            with pytest.raises(asyncio.CancelledError):
+                await trashing
+            assert (await app.data.read_conversation(scope)).trashed_at is None  # still active
+            assert scope.conversation_id not in app.runner._closed  # and open again
+            hold.release.set()
+            await app.runner.wait(scope)
+            assert (await app.runner.submit(scope, user("still here"))).running
+            await app.runner.wait(scope)
+            assert app._lifecycle == {}
+        finally:
+            hold.release.set()  # a stubborn job would hold close() forever
+            await app.close()
+
+    asyncio.run(scenario())
+
+
+def test_pr56_c1_lifecycle_locks_are_kept_only_while_used(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        app = await open_app(tmp_path / "data")
+        try:
+            scope, _ = await conversation(app)
+            for n in range(20):  # ids that are not there, or not the caller's
+                missing = TrustedScope(ALICE, ConversationId(f"conv_missing_{n}"))
+                for attempt in (app.trash, app.restore, app.purge):
+                    with pytest.raises(DataError):
+                        await attempt(missing)
+            await app.trash(scope)
+            await app.restore(scope)
+            await app.trash(scope)
+            await app.purge(scope)
+            assert app._lifecycle == {}
+        finally:
             await app.close()
 
     asyncio.run(scenario())
@@ -212,13 +264,20 @@ def test_b1_a_purge_waiting_behind_a_restore_leaves_the_files(tmp_path: Path) ->
         try:
             scope, folder = await conversation(app)
             await app.trash(scope)
-            lock = app._lock(scope.conversation_id)
-            await lock.acquire()
+            gate = asyncio.Event()
+
+            async def hold() -> None:
+                async with app._exclusive(scope.conversation_id):
+                    await gate.wait()
+
+            holder = asyncio.create_task(hold())
+            await asyncio.sleep(0)
             restoring = asyncio.create_task(app.restore(scope))
             await asyncio.sleep(0)
             purging = asyncio.create_task(app.purge(scope))  # queued after the restore
             await asyncio.sleep(0.05)
-            lock.release()
+            gate.set()
+            await holder
             await restoring
             with pytest.raises(DataError) as refused:
                 await purging

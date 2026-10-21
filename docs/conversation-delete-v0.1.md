@@ -412,3 +412,12 @@ B4·C2·C3 PASS. 차단 0건, 비차단 0건. 전체 재점검(상태 전이, �
   - Web 설정 `HIMARI_TRASH_DAYS`(1~365, 0은 거부: 무기한 보관은 없음).
 - **검증:** 전체 1502 passed, 51 skipped. import 경계 검사 OK, mypy OK.
   - 새 테스트: Data 양쪽 백엔드 `tests/data/test_trash.py`, SQLite `tests/data/test_sqlite_trash.py`, 롤백 `op_purge`, 폴더 `tests/environment/test_remove_folder.py`, MCP `release`, Runner 닫기(B2 회귀 포함), Application `tests/bootstrap/test_trash.py`(B1·B4 회귀 포함).
+
+### 17.1 검수 — PR #56(`6c5f12c`): NOT_READY
+
+| # | 지적 | 처리 |
+| --- | --- | --- |
+| B1 | `trash`가 `runner.close`를 기다리는 중에 취소되면, 대화는 ACTIVE인데 Runner만 닫힌 채 남는다 | `trash_conversation` 전의 모든 실패와 취소에서 `reopen`한다. 시간 초과는 그대로 `ConversationStillStopping`이다. 회귀 테스트: 멈추지 않는 Tool을 돌리는 중에 `trash`를 취소하면, 대화는 ACTIVE이고 Runner는 열려 있으며, 작업이 끝난 뒤 새 메시지를 받는다 |
+| C1 | 수명주기 잠금이 실패한 요청에서도 남아 쌓인다 | 잠금마다 잡거나 기다리는 수를 세고, 0이 되면 지운다. 기다리는 쪽이 있는 잠금은 지우지 않는다. 영구 삭제의 따로 지우던 코드는 없앴다. 회귀 테스트: 없는 대화 id로 60번 요청하고 정상 전이를 한 뒤 잠금이 남지 않음 |
+
+두 회귀 테스트는 고치기 전 코드에서 실패하는 것을 확인했다. 취소를 무시하는 시험용 Tool은 정리 단계에서 먼저 풀어, 실패가 멈춤으로 바뀌지 않게 했다.

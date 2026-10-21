@@ -33,7 +33,8 @@ import asyncio
 import hashlib
 import logging
 import os
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import AsyncIterator, Iterable, Mapping, Sequence
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -325,6 +326,12 @@ async def _server_launchers(config: McpConfig, root: Path) -> LauncherFor | None
 
 
 @dataclass
+class _Lifecycle:
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    users: int = 0  # holding or waiting
+
+
+@dataclass
 class Application:
     data_root: Path
     store: SqliteStore
@@ -343,8 +350,9 @@ class Application:
     # not declare (V3-P64 §3, review B1): told at startup, used as configured.
     unverified_models: tuple[str, ...] = ()
     trash_days: int = DEFAULT_TRASH_DAYS
-    # V3-P65 §7.3: one lifecycle lock per Conversation (P0: one server process).
-    _lifecycle: dict[ConversationId, asyncio.Lock] = field(default_factory=dict, repr=False)
+    # V3-P65 §7.3: one lifecycle lock per Conversation (P0: one server process),
+    # kept only while some call holds or waits for it (PR #56 review C1).
+    _lifecycle: dict[ConversationId, _Lifecycle] = field(default_factory=dict, repr=False)
     _cleanup: asyncio.Task[None] | None = field(default=None, repr=False)
 
     @classmethod
@@ -642,8 +650,21 @@ class Application:
 
     # --- the trash (V3-P65 §7) --------------------------------------------------------
 
-    def _lock(self, conversation_id: ConversationId) -> asyncio.Lock:
-        return self._lifecycle.setdefault(conversation_id, asyncio.Lock())
+    @asynccontextmanager
+    async def _exclusive(self, conversation_id: ConversationId) -> AsyncIterator[None]:
+        """The Conversation's lifecycle lock; dropped when its last user is
+        done, so ids that were never (or are no longer) there leave nothing."""
+        entry = self._lifecycle.get(conversation_id)
+        if entry is None:
+            entry = self._lifecycle[conversation_id] = _Lifecycle()
+        entry.users += 1
+        try:
+            async with entry.lock:
+                yield
+        finally:
+            entry.users -= 1
+            if not entry.users:
+                del self._lifecycle[conversation_id]
 
     async def delete_notice(self, scope: TrustedScope) -> DeleteNotice:
         """For the delete confirmation: the external servers this Conversation
@@ -661,13 +682,15 @@ class Application:
         touched), then the Conversation closed to new work and a running job
         stopped (ConversationStillStopping after TRASH_STOP_SECONDS; nothing
         moved), then moved. Its own MCP processes are ended."""
-        async with self._lock(scope.conversation_id):
+        async with self._exclusive(scope.conversation_id):
             await self.data.read_conversation(scope)  # NOT_AUTHORIZED: the Runner stays as it is
             try:
                 await self.runner.close(scope, TRASH_STOP_SECONDS)
-            except TimeoutError:
+            except BaseException as error:  # a timeout, or this call cancelled (PR #56 review B1): not moved
                 self.runner.reopen(scope)
-                raise ConversationStillStopping(scope.conversation_id) from None
+                if isinstance(error, TimeoutError):
+                    raise ConversationStillStopping(scope.conversation_id) from None
+                raise
             try:
                 moved = await self.data.trash_conversation(scope)
             except BaseException:
@@ -681,14 +704,14 @@ class Application:
             return moved
 
     async def restore(self, scope: TrustedScope) -> None:
-        async with self._lock(scope.conversation_id):
+        async with self._exclusive(scope.conversation_id):
             await self.data.restore_conversation(scope)  # owner and state first
             self.runner.reopen(scope)
 
     async def purge(self, scope: TrustedScope) -> None:
         """§7.2: PURGING recorded (no restore from here on), the
         Conversation's own folder removed, then every Data row."""
-        async with self._lock(scope.conversation_id):
+        async with self._exclusive(scope.conversation_id):
             trashed = await self.data.begin_purge(scope)  # owner and state first
             workspace = trashed.workspace
             if workspace is not None:
@@ -696,8 +719,6 @@ class Application:
             await self.data.purge_conversation(scope)
             self.runner.forget(scope)
             self.runner.reopen(scope)
-            # Anyone still waiting on this lock finds the Conversation gone (NOT_AUTHORIZED).
-            self._lifecycle.pop(scope.conversation_id, None)
 
     async def purge_due(self, now: datetime | None = None) -> int:
         """Purge what was trashed more than ``trash_days`` before ``now``,
