@@ -19,14 +19,23 @@ Conversation chose otherwise (``set_tool_source``).
 
 The operator offers one or more models (V3-P64 §3); each Conversation uses
 the default one unless it chose another (``set_model``), from its next turn.
+
+The trash (V3-P65 §7): ``trash`` closes the Conversation to new work and
+stops a running job before moving it; ``restore`` brings it back;
+``purge`` deletes it for good — its own folder first, then every Data row.
+These three run one at a time per Conversation (§7.3). Conversations
+trashed more than ``trash_days`` ago are purged at startup and every hour.
 """
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
+import logging
 import os
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import httpx
@@ -70,6 +79,12 @@ from himari.tool.api import ToolHandler
 from himari.tool.schema import check_tool_input_schema
 
 DATABASE_NAME = "himari.db"
+DEFAULT_TRASH_DAYS = 30  # V3-P65 Q1 (the owner's choice, 2026-10-21)
+CLEANUP_SECONDS = 3600.0  # how often trash past its days is purged
+TRASH_STOP_SECONDS = 30.0  # how long a running job may take to stop before a trash is refused (§7.1)
+BUILT_IN_NAMESPACES = frozenset({"inside"})  # Tool ids that are HIMARI's own, not an external server's
+
+log = logging.getLogger(__name__)
 # One turn's guards (V3-P62): no Run limit by default; a token budget, a
 # no-progress stop, and a pause when no client reads the Conversation.
 DEFAULT_TURN_BUDGET = 3_000_000  # tokens per drive (O1: the owner's choice, 2026-10-16)
@@ -158,6 +173,20 @@ class PromptRefused(LookupError):
         super().__init__(message)
         self.code = code
         self.message = message
+
+
+class ConversationStillStopping(RuntimeError):
+    """V3-P65 §7.1: the running job did not stop in time; nothing was moved."""
+
+
+@dataclass(frozen=True)
+class DeleteNotice:
+    """What the delete confirmation tells (V3-P65 §6.1)."""
+
+    servers: tuple[str, ...]  # external servers this Conversation called, by name
+    unconfigured: tuple[str, ...]  # of them, the ones no longer configured
+    running: bool  # a job runs now: it is stopped first
+    trash_days: int
 
 
 class ModelRefused(LookupError):
@@ -313,6 +342,10 @@ class Application:
     # Offered models whose window, efforts and Tool calling the Provider does
     # not declare (V3-P64 §3, review B1): told at startup, used as configured.
     unverified_models: tuple[str, ...] = ()
+    trash_days: int = DEFAULT_TRASH_DAYS
+    # V3-P65 §7.3: one lifecycle lock per Conversation (P0: one server process).
+    _lifecycle: dict[ConversationId, asyncio.Lock] = field(default_factory=dict, repr=False)
+    _cleanup: asyncio.Task[None] | None = field(default=None, repr=False)
 
     @classmethod
     async def open(
@@ -336,9 +369,13 @@ class Application:
         # operator's order; empty: ``model_id`` alone. The default model's
         # effort, when its entry has none, is ``reasoning_effort``.
         models: Sequence[tuple[str, str | None]] = (),
+        trash_days: int = DEFAULT_TRASH_DAYS,  # V3-P65: 1..365
+        cleanup_seconds: float | None = CLEANUP_SECONDS,  # None: no periodic purge (tests call purge_due)
     ) -> Application:
         if turn_budget is None and max_runs is None:
             raise ValueError("a turn needs a token budget or a Run limit (V3-P62)")
+        if not 1 <= trash_days <= 365:
+            raise ValueError("trash_days is 1..365 (V3-P65)")
         turn = TurnSettings(turn_budget, unattended_runs, max_runs)
         offers: list[ModelOffer] = []
         unverified: list[str] = []
@@ -400,8 +437,12 @@ class Application:
             raise
         assert isinstance(runtime.data, SqliteData)
         runner = BackgroundRunner(runtime.driver, unattended_runs=unattended_runs, seen_seconds=turn.seen_seconds)
-        return cls(root, store, runtime.data, runtime, runner, inside, state, model_id, default_budget.limit_tokens, secret, mcp,
-                   turn, tuple(unverified))
+        application = cls(root, store, runtime.data, runtime, runner, inside, state, model_id,
+                          default_budget.limit_tokens, secret, mcp, turn, tuple(unverified), trash_days)
+        if cleanup_seconds is not None:
+            application._cleanup = asyncio.create_task(application._purge_periodically(cleanup_seconds),
+                                                       name="trash-cleanup")
+        return application
 
     def seen(self, scope: TrustedScope) -> None:
         """A client read this Conversation (V3-P62 §5): call only after the
@@ -599,7 +640,91 @@ class Application:
             principal, title=title, activations=(InitialActivation(INSIDE, workspace),)
         )
 
+    # --- the trash (V3-P65 §7) --------------------------------------------------------
+
+    def _lock(self, conversation_id: ConversationId) -> asyncio.Lock:
+        return self._lifecycle.setdefault(conversation_id, asyncio.Lock())
+
+    async def delete_notice(self, scope: TrustedScope) -> DeleteNotice:
+        """For the delete confirmation: the external servers this Conversation
+        called, named by the recorded Tool ids (``<server>/<tool>``), not by
+        what is configured now (review C1). Authorizes like any read."""
+        used = await self.data.used_tool_ids(scope)
+        configured = {status.source for status in self.mcp.statuses}
+        servers = sorted({tool_id.split("/", 1)[0] for tool_id in used if "/" in tool_id}
+                         - (BUILT_IN_NAMESPACES - configured))
+        return DeleteNotice(tuple(servers), tuple(s for s in servers if s not in configured),
+                            self.runner.status(scope).running, self.trash_days)
+
+    async def trash(self, scope: TrustedScope) -> datetime:
+        """§7.1: the owner checked first (review B4: before the Runner is
+        touched), then the Conversation closed to new work and a running job
+        stopped (ConversationStillStopping after TRASH_STOP_SECONDS; nothing
+        moved), then moved. Its own MCP processes are ended."""
+        async with self._lock(scope.conversation_id):
+            await self.data.read_conversation(scope)  # NOT_AUTHORIZED: the Runner stays as it is
+            try:
+                await self.runner.close(scope, TRASH_STOP_SECONDS)
+            except TimeoutError:
+                self.runner.reopen(scope)
+                raise ConversationStillStopping(scope.conversation_id) from None
+            try:
+                moved = await self.data.trash_conversation(scope)
+            except BaseException:
+                self.runner.reopen(scope)
+                raise
+            self.runner.forget(scope)  # stays closed while in the trash
+            try:
+                await self.mcp.release(scope.conversation_id)
+            except Exception:  # noqa: BLE001 — the move stands; an idle process ends by itself
+                log.exception("could not end the MCP processes of %s", scope.conversation_id)
+            return moved
+
+    async def restore(self, scope: TrustedScope) -> None:
+        async with self._lock(scope.conversation_id):
+            await self.data.restore_conversation(scope)  # owner and state first
+            self.runner.reopen(scope)
+
+    async def purge(self, scope: TrustedScope) -> None:
+        """§7.2: PURGING recorded (no restore from here on), the
+        Conversation's own folder removed, then every Data row."""
+        async with self._lock(scope.conversation_id):
+            trashed = await self.data.begin_purge(scope)  # owner and state first
+            workspace = trashed.workspace
+            if workspace is not None:
+                await self.inside.remove_conversation_folder(workspace.workspace_id, scope, workspace.cwd_relative)
+            await self.data.purge_conversation(scope)
+            self.runner.forget(scope)
+            self.runner.reopen(scope)
+            # Anyone still waiting on this lock finds the Conversation gone (NOT_AUTHORIZED).
+            self._lifecycle.pop(scope.conversation_id, None)
+
+    async def purge_due(self, now: datetime | None = None) -> int:
+        """Purge what was trashed more than ``trash_days`` before ``now``,
+        and every purge cut short; how many were purged. One that fails is
+        logged and tried again next time."""
+        cutoff = (datetime.now(UTC) if now is None else now) - timedelta(days=self.trash_days)
+        purged = 0
+        for scope in await self.data.due_purges(cutoff):
+            try:
+                await self.purge(scope)
+                purged += 1
+            except Exception:  # noqa: BLE001 — the others still go
+                log.exception("could not purge %s; it is tried again later", scope.conversation_id)
+        return purged
+
+    async def _purge_periodically(self, seconds: float) -> None:
+        while True:
+            try:
+                await self.purge_due()
+            except Exception:  # noqa: BLE001 — the next round tries again
+                log.exception("trash cleanup failed")
+            await asyncio.sleep(seconds)
+
     async def close(self, grace_seconds: float = 30.0) -> None:
+        if self._cleanup is not None:
+            self._cleanup.cancel()
+            await asyncio.gather(self._cleanup, return_exceptions=True)  # its own cancellation, not ours
         try:
             await self.runner.shutdown(grace_seconds)
         finally:

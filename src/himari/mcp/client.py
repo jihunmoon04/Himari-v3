@@ -140,6 +140,11 @@ class Channel(Protocol):
 
     def take_restart(self, key: str | None) -> bool: ...
 
+    async def release(self, key: str) -> None:
+        """The Conversation is gone (V3-P65 §6.3): end a connection that is
+        its alone. Nothing for a connection every Conversation shares."""
+        ...
+
     async def aclose(self) -> None: ...
 
 
@@ -208,6 +213,9 @@ class McpClient:
     def take_restart(self, key: str | None) -> bool:
         return self._channel.take_restart(key)
 
+    async def release(self, key: str) -> None:
+        await self._channel.release(key)
+
     async def read_resource(self, uri: str, *, key: str | None = None) -> Mapping[str, Any]:
         return await self.request("resources/read", {"uri": uri}, key=key)
 
@@ -268,6 +276,9 @@ class HttpChannel:
 
     def take_restart(self, key: str | None) -> bool:
         return False  # a renewed HTTP session is the same server process: nothing to tell
+
+    async def release(self, key: str) -> None:
+        pass  # one session for every Conversation: not this one's to end
 
     async def request(self, method: str, params: Mapping[str, Any], *, key: str | None = None) -> Mapping[str, Any]:
         return (await self.request_in(method, params, key=key))[1]

@@ -37,6 +37,7 @@ from himari.common import (
 )
 from himari.control.api import DriveState
 from himari.data.api import (
+    AppView,
     ArtifactMutation,
     AssistantFinal,
     AssistantToolCalls,
@@ -51,6 +52,8 @@ from himari.data.api import (
     RunStatus,
     ToolCompletion,
     ToolExecutionStatus,
+    UiCsp,
+    UiResource,
 )
 from himari.data.sqlite import (
     APPLICATION_ID,
@@ -225,6 +228,7 @@ _ADDED_IN = {
     5: ("ALTER TABLE tool_executions DROP COLUMN app_payload", "ALTER TABLE tool_executions DROP COLUMN ui_digest",
         "DROP TABLE ui_resources"),
     6: ("DROP TABLE model_settings",),
+    7: ("ALTER TABLE conversations DROP COLUMN purge_started_at", "ALTER TABLE conversations DROP COLUMN trashed_at"),
 }
 
 
@@ -238,13 +242,13 @@ def old_database(path: Path, version: int) -> None:
            f"PRAGMA user_version={version}")
 
 
-@pytest.mark.parametrize("version", [2, 3, 4, 5])
+@pytest.mark.parametrize("version", [2, 3, 4, 5, 6])
 def test_an_older_database_is_upgraded_in_place_and_keeps_its_data(tmp_path: Path, version: int) -> None:
     path = tmp_path / "h.db"
     old_database(path, version)
     store = SqliteStore(path)
     try:
-        assert store.connection.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 6
+        assert store.connection.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 7
         data = SqliteData(store)
         events = asyncio.run(data.read_events(SCOPE))
         assert [e.payload.blocks for e in events] == [(TextBlock(f"from v{version}"),)]  # type: ignore[union-attr]
@@ -252,12 +256,13 @@ def test_an_older_database_is_upgraded_in_place_and_keeps_its_data(tmp_path: Pat
         columns = [r[1] for r in store.connection.execute("PRAGMA table_info(tool_executions)")]
         assert columns[-2:] == ["ui_digest", "app_payload"]  # and the v5 ones
         asyncio.run(data.set_model_setting(SCOPE, ModelSetting("openai/gpt-6-luna", "high")))  # and the v6 one
+        asyncio.run(data.trash_conversation(SCOPE))  # and the v7 columns
     finally:
         store.close()
-    SqliteStore(path).close()  # and it opens as a plain v6 database afterwards
+    SqliteStore(path).close()  # and it opens as a plain v7 database afterwards
 
 
-@pytest.mark.parametrize("version", [2, 3, 4, 5])
+@pytest.mark.parametrize("version", [2, 3, 4, 5, 6])
 @pytest.mark.parametrize("change", ["CREATE TABLE extra (x)", "PRAGMA application_id=1", "DROP TABLE artifacts"])
 def test_only_an_exact_older_database_is_upgraded(tmp_path: Path, version: int, change: str) -> None:
     path = tmp_path / "h.db"
@@ -268,9 +273,10 @@ def test_only_an_exact_older_database_is_upgraded(tmp_path: Path, version: int, 
     conn = sqlite3.connect(path)
     try:
         assert conn.execute("PRAGMA user_version").fetchone()[0] == version  # refused, never repaired
-        assert "model_settings" not in [r[0] for r in conn.execute("SELECT name FROM sqlite_master")]
+        assert "trashed_at" not in [r[1] for r in conn.execute("PRAGMA table_info(conversations)")]
     finally:
         conn.close()
+    assert not list(tmp_path.glob("*.bak*"))  # refused before any backup
 
 
 def test_a_database_claiming_an_older_version_with_the_current_shape_is_refused(tmp_path: Path) -> None:
@@ -484,8 +490,21 @@ async def op_create(store: SqliteStore, data: SqliteData) -> Operation:
     return lambda: data.create_conversation(PrincipalId("carol"), title="t", activations=activations)
 
 
+async def op_purge(store: SqliteStore, data: SqliteData) -> Operation:
+    run_id = await _received(data)
+    await data.project_model_output(SCOPE, run_id, AssistantToolCalls(GROUP))
+    view = AppView(UiResource.create("fake", "ui://fake/v", "<!DOCTYPE html><p>v</p>", UiCsp()), {"v": 1})
+    await data.commit_tool_outcome(SCOPE, CallRef(run_id, CallId("c2")), ToolCompletion(
+        ToolExecutionStatus.SUCCEEDED, text_result("v"), app_view=view, artifact_mutations=(ArtifactMutation("note", "n"),)))
+    await data.set_external_setting(SCOPE, "fake", False)
+    await data.set_model_setting(SCOPE, ModelSetting("m", None))
+    await data.trash_conversation(SCOPE)
+    await data.begin_purge(SCOPE)
+    return lambda: data.purge_conversation(SCOPE)
+
+
 @pytest.mark.parametrize("setup", [op_project, op_commit, op_unknown, op_answer, op_recover, op_append, op_final,
-                                   op_activate, op_create], ids=lambda f: f.__name__)
+                                   op_activate, op_create, op_purge], ids=lambda f: f.__name__)
 def test_a_failure_after_any_write_rolls_the_whole_transaction_back(tmp_path: Path, setup: Setup) -> None:
     store, data = open_store(tmp_path / "h.db")
     store.create_conversation(SCOPE)

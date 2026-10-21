@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 
 import pytest
 from testkit import SCOPE, calls, final, runtime, user
@@ -274,5 +275,121 @@ def test_cancel_with_no_job_running_closes_what_was_left_waiting() -> None:
         assert busy.value.code is ControlErrorCode.BUSY
         driver.release.set()
         await runner.wait(SCOPE)
+
+    asyncio.run(scenario())
+
+
+# --- closing a Conversation for the trash (V3-P65 §7.1) ------------------------------------
+
+
+class GatedAccept(GatedDriver):
+    """``accept`` waits for ``accepting`` too: an input still being accepted."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.accepting = asyncio.Event()
+        self.in_accept = asyncio.Event()
+
+    async def accept(self, scope: TrustedScope, message: UserMessage) -> None:
+        self.in_accept.set()
+        await self.accepting.wait()
+        await super().accept(scope, message)
+
+
+def closed(error: pytest.ExceptionInfo[ControlError]) -> bool:
+    return error.value.code is ControlErrorCode.CLOSED
+
+
+def test_b2_close_waits_for_an_input_being_accepted_and_no_job_starts_after() -> None:
+    async def scenario() -> None:
+        driver = GatedAccept()
+        runner = BackgroundRunner(driver)
+        submitting = asyncio.create_task(runner.submit(SCOPE, user("sent just before")))
+        await driver.in_accept.wait()
+        closing = asyncio.create_task(runner.close(SCOPE, timeout=5))
+        await asyncio.sleep(0.02)
+        assert not closing.done()  # waits for the input inside accept
+        driver.accepting.set()
+        with pytest.raises(ControlError) as refused:
+            await submitting
+        assert closed(refused)
+        await closing
+        assert driver.calls == [(SCOPE, user("sent just before"))]  # recorded, and no job was started
+        assert not runner.status(SCOPE).running
+
+    asyncio.run(scenario())
+
+
+def test_close_cancels_the_running_job_and_waits_for_it() -> None:
+    async def scenario() -> None:
+        driver = GatedDriver()
+        runner = BackgroundRunner(driver)
+        await runner.submit(SCOPE, None)
+        await asyncio.sleep(0)
+        closing = asyncio.create_task(runner.close(SCOPE, timeout=5))
+        await asyncio.sleep(0.02)
+        (signal,) = driver.signals
+        assert signal is not None and signal.request is StopRequest.CANCEL and not closing.done()
+        driver.release.set()  # the job ends at the cancel
+        await closing
+        assert not runner.status(SCOPE).running
+
+    asyncio.run(scenario())
+
+
+def test_a_closed_conversation_takes_no_work_until_reopened() -> None:
+    async def scenario() -> None:
+        driver = GatedDriver()
+        driver.release.set()
+        runner = BackgroundRunner(driver)
+        await runner.close(SCOPE, timeout=5)
+        submits: list[Callable[[], Awaitable[JobStatus]]] = [
+            lambda: runner.submit(SCOPE, user("x")), lambda: runner.submit(SCOPE, None),
+            lambda: runner.submit_compaction(SCOPE), lambda: runner.submit_cancel(SCOPE)]
+        for submit in submits:
+            with pytest.raises(ControlError) as refused:
+                await submit()
+            assert closed(refused)
+        assert driver.calls == [] and driver.cancels == []  # nothing accepted, nothing run
+        other = TrustedScope(SCOPE.principal_id, ConversationId("conv_2"))
+        assert (await runner.submit(other, None)).running  # other Conversations are not affected
+        runner.reopen(SCOPE)
+        assert (await runner.submit(SCOPE, None)).running
+
+    asyncio.run(scenario())
+
+
+def test_close_gives_up_at_its_timeout_and_stays_closed() -> None:
+    async def scenario() -> None:
+        driver = GatedDriver()  # never released: the job ignores the cancel
+        runner = BackgroundRunner(driver)
+        await runner.submit(SCOPE, None)
+        await asyncio.sleep(0)
+        with pytest.raises(TimeoutError):
+            await runner.close(SCOPE, timeout=0.05)
+        assert runner.status(SCOPE).running  # the job itself was not cancelled by the timeout
+        with pytest.raises(ControlError) as refused:
+            await runner.submit(SCOPE, None)
+        assert closed(refused)
+        runner.reopen(SCOPE)
+        driver.release.set()
+        await runner.wait(SCOPE)
+
+    asyncio.run(scenario())
+
+
+def test_forget_drops_the_last_job_but_not_a_running_one() -> None:
+    async def scenario() -> None:
+        driver = GatedDriver()
+        runner = BackgroundRunner(driver)
+        await runner.submit(SCOPE, None)
+        await asyncio.sleep(0)
+        with pytest.raises(ControlError) as busy:
+            runner.forget(SCOPE)
+        assert busy.value.code is ControlErrorCode.BUSY
+        driver.release.set()
+        assert (await runner.wait(SCOPE)).generation == 1
+        runner.forget(SCOPE)
+        assert runner.status(SCOPE) == JobStatus(running=False)
 
     asyncio.run(scenario())

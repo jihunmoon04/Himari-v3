@@ -24,10 +24,17 @@ following symlinks; anything else is refused, never silently re-permissioned.
 
 Identity: a database is accepted only with HIMARI's ``application_id``, the
 supported ``user_version`` and exactly the expected tables and indexes.
-The upgrades it performs are v2 → v4 and v3 → v4 (v3 added the
-``compaction_runs`` table, v4 ``external_settings``), each only on a
-database that matches the older schema exactly and in one transaction; any
-other version or shape is refused, never repaired.
+An older version (v2 and later) is upgraded only when it matches that
+version's schema exactly, in one transaction; any other version or shape is
+refused, never repaired.
+
+Backup before upgrade (V3-P65 §8.1): the upgrade runs only after a copy of
+the older database is written as ``<name>.v<old>-<UTC time>.bak`` (private,
+like the database), checked, and made durable — the file and its directory
+entry. Any failure refuses the open and leaves the database as it was.
+
+Deleted content (V3-P65): ``secure_delete`` overwrites freed pages, so a
+purged Conversation does not linger in the database file.
 """
 
 from __future__ import annotations
@@ -35,6 +42,7 @@ from __future__ import annotations
 import dataclasses
 import errno
 import fcntl
+import logging
 import os
 import sqlite3
 import stat
@@ -102,14 +110,15 @@ from himari.data.api import (
     ToolExecutionRecord,
     ToolExecutionStatus,
     ToolResultRecord,
+    TrashedConversation,
     UiCsp,
     UiResource,
     UserMessage,
 )
 
-# v3: compaction_runs; v4: external_settings; v5: ui_resources; v6: model_settings (all upgraded in place);
-# v1 is refused
-SCHEMA_VERSION = 6
+# v3: compaction_runs; v4: external_settings; v5: ui_resources; v6: model_settings;
+# v7: the trash (all upgraded in place); v1 is refused
+SCHEMA_VERSION = 7
 APPLICATION_ID = 0x48494D41  # "HIMA": written into the database header (PRAGMA application_id)
 
 _TERMINAL_COMPLETIONS = frozenset(
@@ -265,7 +274,12 @@ CREATE TABLE model_settings (
     reasoning_effort TEXT
 ) STRICT;
 """
-_ADDITIONS = (_V3_ADDITIONS, _V4_ADDITIONS, _V5_ADDITIONS, _V6_ADDITIONS)  # what each version from v3 added
+# v7: the trash (V3-P65). purge_started_at is set only with trashed_at.
+_V7_ADDITIONS = """
+ALTER TABLE conversations ADD COLUMN trashed_at TEXT;
+ALTER TABLE conversations ADD COLUMN purge_started_at TEXT;
+"""
+_ADDITIONS = (_V3_ADDITIONS, _V4_ADDITIONS, _V5_ADDITIONS, _V6_ADDITIONS, _V7_ADDITIONS)  # what each version from v3 added
 _SCHEMA = _SCHEMA_V2 + "".join(_ADDITIONS)
 # An older version → (its exact schema, what brings it to SCHEMA_VERSION).
 _UPGRADES = {
@@ -284,6 +298,13 @@ class StoreSecurityError(RuntimeError):
 
 class StoreSchemaError(RuntimeError):
     """The file is not a HIMARI database of the supported schema."""
+
+
+class StoreBackupError(RuntimeError):
+    """The backup an upgrade needs first could not be made (nothing upgraded)."""
+
+
+log = logging.getLogger(__name__)
 
 
 def _check_private(path: str, info: os.stat_result) -> None:
@@ -367,6 +388,7 @@ class SqliteStore:
             os.close(lock_fd)
             raise StoreLockedError(f"{self.path} is in use by another store") from None
         self._lock_fd: int | None = lock_fd
+        self.backup_path: str | None = None  # the backup made before an upgrade at this open
         try:
             os.close(_open_private(self.path))
             for suffix in ("-wal", "-shm", "-journal"):  # SQLite creates these with the database's mode
@@ -403,7 +425,12 @@ class SqliteStore:
             raise RuntimeError("SQLite WAL mode is unavailable")
         conn.execute("PRAGMA synchronous=FULL")
         conn.execute("PRAGMA foreign_keys=ON")
+        conn.execute("PRAGMA secure_delete=ON")
         if upgrade is not None:  # atomic: to the current version or not at all
+            self.backup_path = self._back_up(version)
+            log.warning("backed up %s (schema v%d) to %s before upgrading to v%d; delete the backup once it is"
+                        " not needed: it keeps every Conversation as it was", self.path, version,
+                        self.backup_path, SCHEMA_VERSION)
             with self.transaction() as tx:
                 tx.executescript_parts(upgrade)
                 tx.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
@@ -412,6 +439,63 @@ class SqliteStore:
                 tx.executescript_parts(_SCHEMA)
                 tx.execute(f"PRAGMA application_id={APPLICATION_ID}")
                 tx.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+
+    def _back_up(self, version: int) -> str:
+        """V3-P65 §8.1: copy, check and make durable a backup of this v``version``
+        database before it is upgraded; its path. Any failure removes what it
+        made and raises StoreBackupError."""
+        stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
+        final = f"{self.path}.v{version}-{stamp}.bak"
+        partial = f"{final}.partial"
+        made: list[str] = []
+        try:
+            fd = os.open(partial, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+            made.append(partial)
+            try:
+                _check_private(partial, os.fstat(fd))
+            finally:
+                os.close(fd)
+            target = sqlite3.connect(partial)
+            try:
+                self.connection.backup(target)
+                target.execute("PRAGMA journal_mode=DELETE")  # one self-contained file, no -wal/-shm
+            finally:
+                target.close()
+            _check_existing_private(f"{partial}-journal")
+            check = sqlite3.connect(f"file:{partial}?mode=ro", uri=True)
+            try:
+                if (check.execute("PRAGMA integrity_check").fetchone()[0] != "ok"
+                        or check.execute("PRAGMA application_id").fetchone()[0] != APPLICATION_ID
+                        or check.execute("PRAGMA user_version").fetchone()[0] != version
+                        or _schema_signature(check) != _expected_signature(_UPGRADES[version][0])):
+                    raise StoreBackupError("the copy does not read back as the database")
+            finally:
+                check.close()
+            fd = os.open(partial, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            os.link(partial, final)  # never replaces an existing file
+            made.append(final)
+            os.unlink(partial)
+            made.remove(partial)
+            directory = os.open(os.path.dirname(self.path), os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+            try:
+                os.fsync(directory)  # the new name survives power loss too
+            finally:
+                os.close(directory)
+            return final
+        except (OSError, sqlite3.Error, StoreBackupError, StoreSecurityError) as error:
+            left = []
+            for path in made:
+                try:
+                    os.unlink(path)
+                except OSError:
+                    left.append(path)
+            note = f"; could not remove {', '.join(left)}" if left else ""
+            raise StoreBackupError(f"could not back up {self.path} before upgrading it from schema v{version}"
+                                   f" (nothing was upgraded): {error}{note}") from error
 
     def close(self) -> None:
         try:
@@ -508,6 +592,13 @@ class _Tx:
         return f"{prefix}_{row['value']}"
 
     def authorized(self, scope: TrustedScope) -> sqlite3.Row:
+        conv = self.owned(scope)
+        if conv["trashed_at"] is not None:  # V3-P65: a trashed Conversation is a missing one
+            raise DataError(DataErrorCode.NOT_AUTHORIZED, scope.conversation_id)
+        return conv
+
+    def owned(self, scope: TrustedScope) -> sqlite3.Row:
+        """The owner check alone (the trash methods, V3-P65)."""
         conv = self.one("SELECT * FROM conversations WHERE conversation_id=?", scope.conversation_id)
         if conv is None or conv["owner"] != scope.principal_id:
             # Same error for foreign and missing (indistinguishability).
@@ -686,7 +777,7 @@ def _workspace(conv: sqlite3.Row) -> ConversationWorkspace | None:
 
 class SqliteData:
     """Implements ConversationLog, ArtifactStore, WorkspaceState, StateQuery,
-    ConversationCatalog and ExternalSourceSettings."""
+    ConversationCatalog, ConversationRetention and ExternalSourceSettings."""
 
     def __init__(self, store: SqliteStore) -> None:
         self._store = store
@@ -1276,7 +1367,7 @@ class SqliteData:
             return scope.conversation_id
 
     _SUMMARY = (
-        "SELECT c.conversation_id, c.title, c.created_at,"
+        "SELECT c.conversation_id, c.title, c.created_at, c.trashed_at,"
         " COALESCE((SELECT MAX(sequence) FROM events e WHERE e.conversation_id=c.conversation_id), 0) AS last_sequence,"
         " COALESCE((SELECT created_at FROM events e WHERE e.conversation_id=c.conversation_id"
         " ORDER BY sequence DESC LIMIT 1), c.created_at) AS last_activity,"
@@ -1296,14 +1387,17 @@ class SqliteData:
             last_sequence=row["last_sequence"],
             preview="" if first is None else rules.preview(
                 codec.payload_from(EventKind.USER_MESSAGE, first).blocks),  # type: ignore[union-attr]
+            trashed_at=None if row["trashed_at"] is None else datetime.fromisoformat(row["trashed_at"]),
         )
 
     async def list_conversations(
-        self, principal: PrincipalId, *, limit: int = 50, offset: int = 0
+        self, principal: PrincipalId, *, limit: int = 50, offset: int = 0, trashed: bool = False
     ) -> Sequence[ConversationSummary]:
         rules.check_page(limit, offset)
+        where = ("c.trashed_at IS NOT NULL ORDER BY c.trashed_at DESC" if trashed
+                 else "c.trashed_at IS NULL ORDER BY last_activity DESC")
         with self._tx() as tx:
-            rows = tx.all(f"{self._SUMMARY} WHERE c.owner=? ORDER BY last_activity DESC, c.rowid DESC LIMIT ? OFFSET ?",
+            rows = tx.all(f"{self._SUMMARY} WHERE c.owner=? AND {where}, c.rowid DESC LIMIT ? OFFSET ?",
                           principal, limit, offset)
             return tuple(self._summary(r) for r in rows)
 
@@ -1319,6 +1413,78 @@ class SqliteData:
         with self._tx() as tx:
             tx.authorized(scope)
             tx.execute("UPDATE conversations SET title=? WHERE conversation_id=?", title, scope.conversation_id)
+
+    async def trash_conversation(self, scope: TrustedScope) -> datetime:
+        with self._tx() as tx:
+            if tx.owned(scope)["trashed_at"] is not None:
+                raise DataError(DataErrorCode.INVALID_STATE_TRANSITION, f"{scope.conversation_id} is in the trash")
+            now = datetime.now(UTC)
+            tx.execute("UPDATE conversations SET trashed_at=? WHERE conversation_id=?", _timestamp(now),
+                       scope.conversation_id)
+            return now
+
+    async def restore_conversation(self, scope: TrustedScope) -> None:
+        with self._tx() as tx:
+            conv = tx.owned(scope)
+            if conv["trashed_at"] is None or conv["purge_started_at"] is not None:
+                raise DataError(DataErrorCode.INVALID_STATE_TRANSITION, f"{scope.conversation_id} cannot be restored")
+            tx.execute("UPDATE conversations SET trashed_at=NULL WHERE conversation_id=?", scope.conversation_id)
+
+    async def begin_purge(self, scope: TrustedScope) -> TrashedConversation:
+        with self._tx() as tx:
+            conv = tx.owned(scope)
+            if conv["trashed_at"] is None:
+                raise DataError(DataErrorCode.INVALID_STATE_TRANSITION, f"{scope.conversation_id} is not in the trash")
+            if conv["purge_started_at"] is None:
+                tx.execute("UPDATE conversations SET purge_started_at=? WHERE conversation_id=?",
+                           _timestamp(datetime.now(UTC)), scope.conversation_id)
+            row = tx.one(f"{self._SUMMARY} WHERE c.conversation_id=?", scope.conversation_id)
+            assert row is not None
+            return TrashedConversation(self._summary(row), _workspace(conv))
+
+    # Every table holding a Conversation's rows, children first (foreign keys
+    # check the order). The tests find every table with a conversation_id.
+    _PURGE = (
+        "DELETE FROM compaction_runs WHERE run_id IN (SELECT run_id FROM runs WHERE conversation_id=?)",
+        "DELETE FROM tool_executions WHERE conversation_id=?",
+        "DELETE FROM runs WHERE conversation_id=?",
+        "DELETE FROM events WHERE conversation_id=?",
+        "DELETE FROM idempotency WHERE conversation_id=?",
+        "DELETE FROM artifacts WHERE conversation_id=?",
+        "DELETE FROM bindings WHERE conversation_id=?",
+        "DELETE FROM activations WHERE conversation_id=?",
+        "DELETE FROM external_settings WHERE conversation_id=?",
+        "DELETE FROM model_settings WHERE conversation_id=?",
+        "DELETE FROM conversations WHERE conversation_id=?",
+    )
+
+    async def purge_conversation(self, scope: TrustedScope) -> None:
+        with self._tx() as tx:
+            if tx.owned(scope)["purge_started_at"] is None:
+                raise DataError(DataErrorCode.INVALID_STATE_TRANSITION, f"{scope.conversation_id} is not being deleted")
+            digests = [r["ui_digest"] for r in tx.all(
+                "SELECT DISTINCT ui_digest FROM tool_executions WHERE conversation_id=? AND ui_digest IS NOT NULL",
+                scope.conversation_id)]
+            for statement in self._PURGE:
+                tx.execute(statement, scope.conversation_id)
+            for digest in digests:  # a view another call still names stays
+                tx.execute("DELETE FROM ui_resources WHERE digest=?"
+                           " AND NOT EXISTS (SELECT 1 FROM tool_executions WHERE ui_digest=?)", digest, digest)
+
+    async def used_tool_ids(self, scope: TrustedScope) -> frozenset[ToolId]:
+        with self._tx() as tx:
+            tx.authorized(scope)
+            rows = tx.all("SELECT DISTINCT tool_id FROM tool_executions WHERE conversation_id=?", scope.conversation_id)
+            return frozenset(ToolId(r["tool_id"]) for r in rows)
+
+    # --- ConversationRetention --------------------------------------------------
+
+    async def due_purges(self, cutoff: datetime) -> Sequence[TrustedScope]:
+        with self._tx() as tx:
+            rows = tx.all("SELECT owner, conversation_id FROM conversations WHERE trashed_at IS NOT NULL"
+                          " AND (purge_started_at IS NOT NULL OR trashed_at < ?) ORDER BY trashed_at, rowid",
+                          _timestamp(cutoff))
+            return tuple(TrustedScope(PrincipalId(r["owner"]), ConversationId(r["conversation_id"])) for r in rows)
 
     # --- ExternalSourceSettings ------------------------------------------------
 

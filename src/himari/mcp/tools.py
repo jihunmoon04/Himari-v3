@@ -290,6 +290,12 @@ class McpConnection:
     def ui_policy(self, source: str) -> McpUiPolicy | None:
         return self.ui_policies.get(source)
 
+    async def release(self, key: str) -> None:
+        """V3-P65 §6.3: end what only this Conversation used (its own stdio
+        processes); servers shared by every Conversation are untouched."""
+        for client in self.clients:
+            await client.release(key)
+
     async def aclose(self) -> None:
         for client in self.clients:
             await client.aclose()
@@ -387,6 +393,9 @@ class _Unavailable:
 
     def take_restart(self, key: str | None) -> bool:
         return False
+
+    async def release(self, key: str) -> None:
+        pass
 
     async def aclose(self) -> None:
         pass

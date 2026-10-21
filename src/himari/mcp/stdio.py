@@ -472,6 +472,24 @@ class StdioServer:
         self._restarted.discard(key)
         return True
 
+    async def release(self, key: str) -> None:
+        """V3-P65 §6.3: the Conversation was moved to the trash: end its own
+        process (``per_conversation`` only), freeing its place. If it is
+        restored, its next call starts a new process and is told so
+        (``RESTART_NOTICE``), as after any restart."""
+        if self._config.scope != "per_conversation":
+            return
+        starting = self._starting.get(key)
+        if starting is not None:
+            try:
+                await asyncio.shield(starting)
+            except Exception:  # noqa: BLE001 — a start that failed has nothing to close
+                pass
+        self._failures.pop(key, None)
+        session = self._sessions.get(key)
+        if session is not None:
+            await session.close("its Conversation was deleted")
+
     def _slot(self, key: str | None) -> str | None:
         return key if self._config.scope == "per_conversation" else None
 
@@ -604,6 +622,9 @@ class StdioChannel:
     def take_restart(self, key: str | None) -> bool:
         return self._server.take_restart(key)
 
+    async def release(self, key: str) -> None:
+        await self._server.release(key)
+
     async def aclose(self) -> None:
         await self._server.aclose()
 
@@ -637,6 +658,9 @@ class ListingChannel:
 
     def take_restart(self, key: str | None) -> bool:
         return False
+
+    async def release(self, key: str) -> None:
+        pass  # the listing session is no Conversation's
 
     async def aclose(self) -> None:
         if self._session is not None:
