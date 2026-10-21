@@ -1,6 +1,6 @@
 # 대화 삭제와 업그레이드 백업 v0.1
 
-> 2026-10-21 · **PROPOSED (V3-P65)** · rev. 2 — 검수 NOT_READY(B1~B3; C1) 반영(§14). 구현 없음.
+> 2026-10-21 · **PROPOSED (V3-P65)** · rev. 3 — 검수 NOT_READY(B1~B3; C1) 반영(§14), 재검수 NOT_READY(B4; C2·C3) 반영(§15). 구현 없음.
 >
 > 소유자 결정(2026-10-21): **Q1~Q3 모두 권고대로**(§11). 휴지통 30일(운영자가 바꿈), 휴지통은 목록만, 업그레이드 백업은 자동으로 지우지 않음.
 >
@@ -175,8 +175,9 @@ v6 → v7 제자리 업그레이드(지금 방식과 같음). 업그레이드 �
 
 ### 7.1 휴지통으로 옮기기
 
-`Application.trash(scope) -> datetime`:
+`Application.trash(scope) -> datetime`. 대화의 수명주기 잠금(§7.3)을 잡은 채로:
 
+0. **먼저 권한을 확인한다**(검수 B4): Data `read_conversation(scope)`. 다른 사용자의 대화나 없는 대화면 NOT_AUTHORIZED(Web 404)로 끝나고, **Runner에는 아무것도 하지 않는다.**
 1. **Runner에서 그 대화를 닫는다**(`BackgroundRunner.close(scope, timeout)`, 새 메서드, 아래 계약).
 2. `close`가 상한(30초) 안에 끝나지 않으면 닫힘을 되돌리고(`reopen`) 거부한다("아직 멈추는 중입니다. 잠시 후 다시 시도하세요"). Sandbox가 멈춘 경우 등이다(Q-40).
 3. Data `trash_conversation`.
@@ -200,11 +201,12 @@ v6 → v7 제자리 업그레이드(지금 방식과 같음). 업그레이드 �
   3. 실행 중인 작업이 있으면 Cancel 신호를 보내고(V3-P55: 진행 중인 호출을 끊는다) 끝나기를 기다린다.
   4. 2와 3을 합쳐 `timeout` 안에 끝나지 않으면 `TimeoutError`를 낸다(닫힘은 유지되고, Application이 `reopen`한다).
 - 닫히기 직전에 `accept`가 끝난 메시지는 이미 기록되어 있다(CTRL-06: 기록된 뒤에만 접수를 알린다). 그 요청은 `CLOSED` 오류를 받는다. 메시지는 대화에 남고, 복원하면 답이 없는 메시지로 보여 Continue로 이어 간다. 이미 휴지통이면 `accept` 자체가 NOT_AUTHORIZED로 실패한다(§4.2).
-- `ControlErrorCode.CLOSED`(새 값)는 Web에서 409 `{"error": "conversation_closed"}`이다.
+- `ControlErrorCode.CLOSED`(새 값)는 Web에서 409이고, 지금의 오류 형식을 따른다: `{"error": {"code": "conversation_closed", "message": "This conversation is being deleted."}}`(검수 C2).
+- **Runner는 권한을 검사하지 않는다**(지금도 그렇다). `_closed`·`_admitting`은 지금의 `_running_in`처럼 **대화 id**로 묶는다. 대화 id는 Data가 만들고 주인이 하나뿐이다. 그래서 `close`·`reopen`·`forget`은 Application이 그 대화의 권한을 확인한 뒤에만 부른다: `trash`는 0단계, `restore`는 Data `restore_conversation`이 성공한 뒤, `purge`는 Data `begin_purge`가 성공한 뒤.
 
 ### 7.2 복원·영구 삭제
 
-- `Application.restore(scope)`: Data `restore_conversation`, 그리고 Runner의 닫힘을 푼다(`reopen`).
+- `Application.restore(scope)`: Data `restore_conversation`(권한·상태 검사), 그것이 성공한 뒤에만 Runner의 닫힘을 푼다(`reopen`).
 - `Application.purge(scope)`:
   1. Data `begin_purge`: PURGING으로 바꾸고 폴더(§5)를 얻는다. 이 순간부터 복원은 거부된다.
   2. 폴더를 지운다.
@@ -233,7 +235,7 @@ v6 → v7 제자리 업그레이드(지금 방식과 같음). 업그레이드 �
 - 파일: DB와 같은 디렉터리의 `himari.db.v<이전 버전>-<UTC 시각>.bak`.
 - 단일 writer 잠금(`flock`)을 잡은 뒤에 만든다. 그래서 복사 중에 DB가 바뀌지 않는다.
 
-**업그레이드 트랜잭션에 들어가기 전에 다음이 모두 끝나야 한다(검수 B3).** 하나라도 실패하면 임시 파일을 지우고, **업그레이드하지 않고 시작을 거부한다.** 오류에 경로와 이유를 담고, DB는 이전 버전 그대로다.
+**업그레이드 트랜잭션에 들어가기 전에 다음이 모두 끝나야 한다(검수 B3).** 하나라도 실패하면 **업그레이드하지 않고 시작을 거부한다.** 오류에 경로와 이유를 담고, DB는 이전 버전 그대로다. 실패하면 만든 파일을 지운다. 1~5에서 실패하면 `.partial`을 지운다. 6에서 실패하면 이미 이름이 바뀌었으므로 최종 이름의 파일을 지운다(검수 C3). DB가 업그레이드되지 않았으니 그 백업은 필요 없고, 다음 시작에서 새 시각의 이름으로 다시 만든다. 지우기마저 실패하면 남은 파일의 경로를 오류에 함께 적는다.
 1. 임시 이름 `<백업 이름>.partial`을 지금의 비공개 파일 규칙으로 새로 만든다(0600, 이 사용자 소유, `O_EXCL | O_NOFOLLOW`).
 2. SQLite 온라인 백업 API(`Connection.backup`)로 그 파일에 복사하고 닫는다.
 3. 그 파일을 읽기 전용으로 다시 연다. 그리고 다음을 확인한다: `PRAGMA integrity_check`가 `ok`, `application_id`가 HIMARI, `user_version`이 이전 버전, 스키마가 이전 버전과 정확히 같음(지금의 서명 검사).
@@ -319,6 +321,7 @@ sudo systemctl start himari-v3
 | 자동 정리와 복원이 겹쳐 복원된 대화의 폴더가 지워짐 | 대화별 수명주기 잠금으로 전이를 하나씩(§7.3, B1). 폴더를 지우기 전에 PURGING을 기록해 복원 거부(§3) |
 | 폴더를 지운 직후 서버가 죽고, 재시작 뒤 그 대화를 복원 | PURGING이면 복원 거부, 다음 정리가 끝냄(§7.2) |
 | 업그레이드는 끝났는데 전원 차단으로 백업 파일이 사라짐 | 내용·디렉터리 모두 `fsync`하고 검증한 뒤에만 업그레이드(§8.1, B3) |
+| 다른 사용자가 남의 대화 id로 삭제를 요청해 주인의 작업 접수를 막음 | 수명주기 잠금 뒤 Runner를 건드리기 전에 Data로 권한 확인(§7.1의 0, B4) |
 | 쓴 서버가 설정에서 빠져 외부 데이터 안내가 사라짐 | 기록된 Tool id의 앞부분(서버 이름)으로 알리고, 일반 문구는 늘 보임(§6.1, C1) |
 | 진행 중인 Tool이 취소를 무시해 영원히 기다림 | 30초 상한 뒤 거부, 상태는 그대로(§7.1의 2) |
 | 폴더 안의 심볼릭 링크를 따라가 Root 밖이나 다른 대화의 파일을 지움 | `RESOLVE_BENEATH`·`NO_SYMLINKS`·`NO_XDEV`, 링크는 링크만 지움(§5) |
@@ -340,14 +343,15 @@ sudo systemctl start himari-v3
   - 각 쓰기 직후 오류를 주입하면 purge 전체가 롤백.
   - `due_purges`: 기간이 지난 휴지통 대화와 PURGING 대화 전부, 다른 사용자의 것도 포함.
   - `used_tool_ids`: 서버를 설정에서 뺀 뒤에도 그 이름이 나옴.
-- **SQLite 업그레이드:** v6 → v7. 백업 파일이 원본과 같은 내용이고 0600이다. 백업이 실패하면(쓰기 금지 디렉터리, 검증 실패, 같은 이름의 파일이 이미 있음) 시작을 거부하고, DB는 v6 그대로이며 `.partial`이 남지 않는다. `fsync`가 파일과 부모 디렉터리에 불리는지 확인한다(`os.fsync`를 감싸 기록). 같은 버전과 새 DB에서는 백업하지 않는다.
+- **SQLite 업그레이드:** v6 → v7. 백업 파일이 원본과 같은 내용이고 0600이다. 백업이 실패하면(쓰기 금지 디렉터리, 검증 실패, 같은 이름의 파일이 이미 있음) 시작을 거부하고, DB는 v6 그대로이며 `.partial`이 남지 않는다. `fsync`가 파일과 부모 디렉터리에 불리는지 확인한다(`os.fsync`를 감싸 기록). 부모 디렉터리 `fsync` 실패를 주입하면 최종 이름의 백업도 남지 않는다(C3). 같은 버전과 새 DB에서는 백업하지 않는다.
 - **fs.remove_tree:**
   - Root 밖을 가리키는 링크와 다른 대화 폴더를 가리키는 링크는 대상이 남음.
   - 깊은 트리, 권한 500 디렉터리, 이미 없는 폴더.
   - 마운트 경계(`HIMARI_SANDBOX_HOST=1` 게이트에서).
 - **Application·Control:**
   - 실행 중인 대화를 휴지통으로 옮기면 작업이 취소되고 Run·Tool 기록이 종결된 뒤 옮겨짐.
-  - 옮기는 중의 submit은 CLOSED.
+  - **B4 회귀:** 다른 사용자가 실행 중인 대화를 휴지통으로 옮기려 하면 404다. 원래 주인의 작업은 계속 돌고, 그 사이 주인의 submit도 CLOSED를 받지 않으며, Runner 상태(`JobStatus`, 닫힘, 접수 수)가 그대로다. 복원과 영구 삭제도 같은 방식으로 확인한다.
+  - 옮기는 중의 submit은 CLOSED이고, 응답은 지금의 오류 형식이다.
   - **B2 회귀:** `driver.accept`를 멈춰 둔 채 `trash`를 부른다. `trash`는 `accept`가 끝날 때까지 기다리고, 그 submit은 작업을 시작하지 않고 CLOSED를 받는다. 메시지는 기록되어 있고, 복원 뒤 Continue로 이어진다.
   - `submit_compaction`·`submit_cancel`도 닫힌 뒤에는 시작되지 않음.
   - **B1 회귀:** 폴더 삭제를 멈춰 둔 채 `restore`를 부르면, `restore`는 잠금을 기다린 뒤 거부된다(대화는 이미 PURGING). 반대로 `restore`가 먼저 잡으면 `purge`는 `begin_purge`에서 거부되고 폴더는 남는다.
@@ -368,3 +372,13 @@ sudo systemctl start himari-v3
 | B3 | 백업 파일의 `fsync`만으로는 디렉터리 항목이 남는다고 보장되지 않는다 | 업그레이드 전의 완료 조건을 정했다: `.partial`에 쓰기 → 다시 열어 검증 → 파일 `fsync` → 덮어쓰지 않는 `rename` → 부모 디렉터리 `fsync`. 하나라도 실패하면 업그레이드하지 않는다(§8.1) |
 | C1 | 지금 연결된 서버 목록과만 대조하면, 설정에서 빠진 서버의 안내가 사라진다 | 기록된 Tool id의 앞부분(`<서버>/…`)을 서버 이름으로 쓰고 지금 설정과 대조하지 않는다. 일반 문구는 늘 보인다(§6.1) |
 | Q3 의견 | 영구 삭제한 대화가 이전 백업에는 남는다 | §8.1과 §12에 적고, 운영 문서에 넣는다 |
+
+## 15. 재검수 — rev. 2(`8e4c920`): NOT_READY
+
+B1~B3, C1은 PASS다. 새로 나온 지적과 처리는 다음과 같다.
+
+| # | 지적 | 처리 |
+| --- | --- | --- |
+| B4 | `trash`가 Data로 권한을 확인하기 전에 Runner를 닫는다. Runner는 대화 id로 묶으므로, 남의 대화 id로 온 요청이 주인의 접수를 막을 수 있다 | 수명주기 잠금 → Data `read_conversation`으로 권한 확인 → Runner `close` → Data `trash_conversation` 순서(§7.1의 0). Runner는 권한을 검사하지 않고, Application이 권한을 확인한 뒤에만 `close`·`reopen`·`forget`을 부른다고 계약에 적었다(복원·영구 삭제도). 회귀 테스트 추가(§13) |
+| C2 | `CLOSED`의 오류 예시가 지금의 Web 오류 형식과 다르다 | `{"error": {"code": "conversation_closed", "message": …}}`로 통일(§7.1) |
+| C3 | 부모 디렉터리 `fsync`가 실패할 때는 이미 최종 이름이다 | 그 단계에서 실패하면 최종 이름의 파일을 지우고, 지우기도 실패하면 경로를 오류에 적는다(§8.1). 테스트 추가(§13) |
