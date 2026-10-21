@@ -57,7 +57,7 @@ Data [v0.2 구현 가능 후보](data-contract-v0.2.md)에 **DR-01~DR-09 독립 
 | Q-30 | 파일 바이트/메타데이터 | FileAssetRecord, upload original, version/digest, Workspace 파일과 Data 참조 정합성 |
 | Q-31 | 첨부·다운로드 | 스트리밍 제한, file_id 기반 다운로드, 접근 권한, Prompt file manifest 및 미디어 처리 |
 | Q-32 | 파일 I/O 계약 | 파일 Tool·`inside/run_command`, 사용자별 Root/cwd에 맞춘 v2 Sandbox 수정, symlink/hardlink/mount 별칭 차단, 명령 효과 충돌, 실행 제한 |
-| Q-33 | 파일 생명주기 | Conversation 삭제가 공유 Workspace 파일을 어떻게 참조 해제·GC할지 |
+| Q-33 | 파일 생명주기 | Conversation 삭제가 공유 Workspace 파일을 어떻게 참조 해제·GC할지. 대화 삭제 자체는 V3-P65(대화 폴더는 같이 지움, Root의 다른 파일은 남음); 첨부 파일 기록은 FILE-04에서 같은 영구 삭제 트랜잭션에 넣는다 |
 
 **권고:** 기본 파일 Tool과 bounded `inside/run_command`를 함께 개발하되, 장기 ManagedProcess는 별도 수명/복구 계약으로 미룬다. **네트워크 차단 전용 프로파일**과 Sandbox 없는 실행 fallback 금지는 필수 방향. [Sandbox Execution v0.1](sandbox-execution-v0.1.md)은 정책 원칙, [Sandbox Implementation Candidate v0.2](sandbox-implementation-v0.2.md)는 v2 코드별 이식 경계·기동 검증·실행 결과 계약을 담은 상세 초안이다.
 
@@ -88,7 +88,7 @@ Data [v0.2 구현 가능 후보](data-contract-v0.2.md)에 **DR-01~DR-09 독립 
 | Q-24 | Internal vs Environment routing | 실행 유형 등록 계약, `None/Required/Default` Workspace 정책, 외부 서비스 Tool 범주 필요 여부 |
 | Q-39 | ~~Tool error disclosure~~ | **해결 (PR C1):** claim 없는 Tool의 예외는 모델에게 "The tool failed with an internal error."만 전달하고, 예외 타입·원문은 `raw_result`에만 남긴다. Inside 파일 Tool은 오류를 분류된 안전한 문구로만 돌려준다. |
 | Q-40 | 실제 OS 권한 검증 | **부분 해결 (PR C2):** 시작 시 실호스트 자체 검사(V3-050/P41)와 선택 실행 호스트 게이트(`HIMARI_SANDBOX_HOST=1 pytest tests/sandbox_host`, 29개)를 이 서버에서 통과. 남은 것: 다른 배포 호스트에서의 게이트 실행, 권한이 필요한 마운트 넘기(`NO_XDEV`) 검증, CPU·메모리·프로세스 수 한도(cgroup/rlimit), Sandbox 생성이 멈췄을 때의 운영자 복구 절차(취소된 호출은 fail closed로 Workspace lock을 계속 잡고 있음), Workspace admission이 시점 검사라는 한계(P0는 단일 서버 프로세스이고 Workspace 변경이 Inside Tool과 같은 Workspace lock 아래에서만 일어난다고 전제한다. 다중 worker, 업로드 경로, 호스트 측 쓰기를 추가하면 같은 lock을 쓰게 하거나 검사를 다시 설계해야 함) |
-| Q-41 | 영속 DB 크래시 내구성 | **부분 해결 (V3-P42):** SQLite 백엔드로 T1~T9·T7a·T-R을 포트 호출당 트랜잭션 1개로 구현. Data·통합 테스트를 두 백엔드로 실행(재시작 = DB 다시 열기), 모든 다중 쓰기 연산에 대해 각 쓰기 직후 오류 주입 시 전부 롤백, 실제 `SIGKILL` 시험(송신 중 → `OUTCOME_UNKNOWN`·재송신 없음, 부작용 중 → `UNKNOWN`·재실행 없음, 트랜잭션 도중 → 이전 상태, 커밋 직후 → 커밋 유지). 남은 것: 전원 차단 내구성은 SQLite·파일시스템 fsync 보장에 의존(직접 시험 불가), 스키마 마이그레이션, 백업, 다중 프로세스(P2 lease) |
+| Q-41 | 영속 DB 크래시 내구성 | **부분 해결 (V3-P42):** SQLite 백엔드로 T1~T9·T7a·T-R을 포트 호출당 트랜잭션 1개로 구현. Data·통합 테스트를 두 백엔드로 실행(재시작 = DB 다시 열기), 모든 다중 쓰기 연산에 대해 각 쓰기 직후 오류 주입 시 전부 롤백, 실제 `SIGKILL` 시험(송신 중 → `OUTCOME_UNKNOWN`·재송신 없음, 부작용 중 → `UNKNOWN`·재실행 없음, 트랜잭션 도중 → 이전 상태, 커밋 직후 → 커밋 유지). 남은 것: 전원 차단 내구성은 SQLite·파일시스템 fsync 보장에 의존(직접 시험 불가), 스키마 마이그레이션, 백업(업그레이드 전 백업은 V3-P65 초안), 다중 프로세스(P2 lease) |
 | Q-42 | Continuation 일괄 조회 | **부분 해결:** 읽을 수 있는 압축 Snapshot이 있으면 Prompt loader는 Snapshot을 먼저 읽고 coverage 이후의 Event(`read_events(after_sequence=...)`)와 그 Event의 Run·Tool 기록만 읽는다. 접힌 Tool 그룹은 접힐 때 완결됐고 종결된 결과는 바뀌지 않으므로 다시 읽지 않는다. 접힌 Run의 측정값은 다른 Snapshot revision에서 만들어져 어차피 재사용되지 않는다. 요청 내용은 전체를 읽을 때와 같다(통합 테스트로 두 백엔드에서 확인). SQLite `read_run`은 더 이상 요청·응답 원문 BLOB을 읽지 않는다. 공개 포트 변경 없음. 남은 것: 첫 압축 전에는 여전히 턴마다 `read_run`·`read_tool_executions`를 한 번씩 호출한다(SQLite, 300턴·DB 145 MB에서 load 약 100 ms. 호출당 트랜잭션·권한 확인·DTO 변환 비용). 이를 묶으려면 Data 포트에 일괄 조회 메서드가 필요하다(공개 계약 변경). Control의 `_next_triggers`·`_resume_pending_group`도 매번 전체 Event를 읽는다. *(PR #6 검수 C1, PR #14 검수 권고)* |
 | Q-43 | ~~Continuation 크기 예산~~ | **해결 (V3-P48):** 압축으로 접힌 턴은 continuation도 함께 빠진다. continuation은 토큰 추정에 넣지 않는다(Provider가 거의 입력으로 세지 않음을 라이브로 확인, 세는 만큼은 다음 측정값에 포함됨). *(PR #6 검수 C2)* |
 
@@ -103,7 +103,7 @@ P1은 Workspace 전용 소프트웨어 모듈을 다시 도입하는 단계가 �
 | Q-16 | Memory Tool | 기억 생성·조회·삭제 정책, 자동 삽입/검증/권한, Data 읽기 경계 |
 | Q-17 | Plan / Note Artifact | **원본은 Data conversation-scoped Artifact로 확정**. Revision/CAS, schema, 삭제/복구·표시, Outside 노출/export |
 | Q-18 | Streaming / recovery | chunk-level 원본 기록, 스트리밍 UI, 중단된 모델 호출, resume/cancel |
-| Q-19 | Lifecycle/privacy | 보존 기간, 개인 정보 삭제, Conversation·Run·Artifact 연쇄 제거, 접근 감사 |
+| Q-19 | Lifecycle/privacy | **설계 초안 (V3-P65, [conversation-delete-v0.1.md](conversation-delete-v0.1.md)):** 휴지통 → 보관 기간 뒤 영구 삭제, Conversation의 모든 행 연쇄 제거, 대화 폴더 정리. 남은 것: 접근 감사, 외부 서버 데이터 삭제 훅 |
 | Q-20 | v2 migration | 데이터/기능 마이그레이션 범위, v2 검증된 Provider replay 규칙 선택적 재사용 |
 | Q-25 | Cache performance | tool schema 안정성, provider별 marker/TTL/히트 관측, 배치 순서에 따른 비용·품질 비교 |
 | Q-26 | Artifact origin atomicity | Internal Tool의 Artifact 변경 + ToolResult/Event 원자 트랜잭션, revision 중복 방지 |
