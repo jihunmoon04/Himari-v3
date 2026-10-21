@@ -194,6 +194,43 @@ def test_per_conversation_gives_each_conversation_its_process_within_the_limit()
     run(scenario)
 
 
+def test_releasing_a_conversation_ends_only_its_own_process() -> None:
+    async def scenario() -> None:
+        launcher = FakeLauncher()
+        connection = await connected(launcher, processes={"scope": "per_conversation", "max": 2})
+        handler = connection.handlers[0]
+        try:
+            await call(handler, "a1", "conv-a")
+            await call(handler, "b1", "conv-b")
+            await connection.release("conv-a")  # V3-P65: conv-a was moved to the trash
+            assert launcher.processes[1].shutdowns == 1 and launcher.processes[2].shutdowns == 0  # [0]: the listing
+            await connection.release("conv-a")  # nothing left to end
+            await connection.release("conv-never")
+            outcome = await call(handler, "a2", "conv-a")  # restored: a new process, and it is told so
+            assert text_of(outcome).startswith(RESTART_NOTICE) and len(launcher.processes) == 4
+            assert text_of(await call(handler, "b2", "conv-b")) == "echo: b2"  # untouched
+        finally:
+            await connection.aclose()
+
+    run(scenario)
+
+
+def test_releasing_a_conversation_leaves_a_shared_process_running() -> None:
+    async def scenario() -> None:
+        launcher = FakeLauncher()
+        connection = await connected(launcher)
+        handler = connection.handlers[0]
+        try:
+            await call(handler, "a1", "conv-a")
+            await connection.release("conv-a")
+            assert launcher.processes[1].shutdowns == 0  # [0]: the listing
+            assert text_of(await call(handler, "b1", "conv-b")) == "echo: b1" and len(launcher.processes) == 2
+        finally:
+            await connection.aclose()
+
+    run(scenario)
+
+
 def test_per_conversation_with_every_process_busy_refuses_without_running() -> None:
     async def scenario() -> None:
         launcher = FakeLauncher()

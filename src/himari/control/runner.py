@@ -1,7 +1,13 @@
 """Background ConversationRunner (CTRL-06) over a ConversationDriver.
 
 Each job's drive reports its usage after every Run (``TurnProgress``,
-V3-P62 §7); the latest report is the job's ``turn_usage``. With
+V3-P62 §7); the latest report is the job's ``turn_usage``.
+
+Closing (V3-P65 §7.1): ``close`` stops a Conversation from taking work —
+every later submit, and every start after an input already being accepted,
+is refused with CLOSED — then waits for those inputs to be accepted and for
+a running job, cancelled, to end. The runner checks no permission: it is
+told to close only a Conversation whose owner was checked. With
 ``unattended_runs``, a drive that has run that many Runs while no client
 read the Conversation (``seen`` within ``seen_seconds``) is asked to pause,
 with the reason (§5). Seen means a connected client, not a person watching.
@@ -69,6 +75,9 @@ class BackgroundRunner:
         self._seen: dict[ConversationId, float] = {}
         self._runs: dict[_Key, int] = {}  # Runs reported by the running job
         self._unattended: dict[_Key, int] = {}  # of them, run while no client read the Conversation
+        self._closed: set[ConversationId] = set()  # V3-P65: taking no work
+        self._admitting: dict[ConversationId, int] = {}  # inputs inside driver.accept
+        self._admitted: dict[ConversationId, asyncio.Event] = {}  # set when the last one is done
 
     @staticmethod
     def _key(scope: TrustedScope) -> _Key:
@@ -78,15 +87,63 @@ class BackgroundRunner:
         return any(key[1] == conversation_id and not task.done() for key, task in self._tasks.items())
 
     async def submit(self, scope: TrustedScope, message: UserMessage | None) -> JobStatus:
-        key = self._key(scope)
+        self._check_open(scope)
         if self._running_in(scope.conversation_id):
             raise ControlError(ControlErrorCode.BUSY, scope.conversation_id)
         if message is not None:
-            await self._driver.accept(scope, message)  # durable before anything is reported
+            self._admit(scope.conversation_id)
+            try:
+                await self._driver.accept(scope, message)  # durable before anything is reported
+            finally:
+                self._admit(scope.conversation_id, -1)
             if self._running_in(scope.conversation_id):  # cannot happen: accept holds the driver lock
                 raise ControlError(ControlErrorCode.BUSY, scope.conversation_id)
+        # Closed meanwhile: the input stays recorded, unanswered; _start refuses.
         return self._start(scope, lambda s, stop, progress: self._driver.resume(s, stop=stop, progress=progress),
                            "drive")
+
+    def _check_open(self, scope: TrustedScope) -> None:
+        if scope.conversation_id in self._closed:
+            raise ControlError(ControlErrorCode.CLOSED, scope.conversation_id)
+
+    def _admit(self, conversation_id: ConversationId, change: int = 1) -> None:
+        count = self._admitting.get(conversation_id, 0) + change
+        if count:
+            self._admitting[conversation_id] = count
+            self._admitted.setdefault(conversation_id, asyncio.Event())
+        else:  # none left: wake whoever waits in close, keep nothing
+            self._admitting.pop(conversation_id, None)
+            self._admitted.pop(conversation_id).set()
+
+    async def close(self, scope: TrustedScope, timeout: float) -> None:
+        """V3-P65 §7.1: take no more work for this Conversation, wait for the
+        inputs being accepted, then cancel a running job and wait for it to
+        end. TimeoutError after ``timeout`` (it stays closed: ``reopen``)."""
+        conversation_id = scope.conversation_id
+        self._closed.add(conversation_id)
+
+        async def settle() -> None:
+            while self._admitting.get(conversation_id):  # its event exists while any is inside
+                await self._admitted[conversation_id].wait()
+            if self._running(self._key(scope)):
+                self.cancel(scope)
+                await self.wait(scope)  # never cancels the job itself
+
+        await asyncio.wait_for(settle(), timeout)
+
+    def reopen(self, scope: TrustedScope) -> None:
+        """Take work again (a restore, or a trash that did not happen)."""
+        self._closed.discard(scope.conversation_id)
+
+    def forget(self, scope: TrustedScope) -> None:
+        """Drop what is kept of the Conversation's last job (it is in the
+        trash or gone); whether it is closed is unchanged."""
+        key = self._key(scope)
+        if self._running(key):
+            raise ControlError(ControlErrorCode.BUSY, scope.conversation_id)
+        for kept in (self._status, self._tasks, self._signals, self._runs, self._unattended):
+            kept.pop(key, None)
+        self._seen.pop(scope.conversation_id, None)
 
     async def submit_compaction(self, scope: TrustedScope) -> JobStatus:
         if self._running_in(scope.conversation_id):
@@ -125,6 +182,8 @@ class BackgroundRunner:
     def _start(self, scope: TrustedScope,
                job: Callable[[TrustedScope, StopSignal, TurnProgress], Awaitable[DriveResult]],
                name: str) -> JobStatus:
+        """Synchronous: nothing closes the Conversation between this check and the start."""
+        self._check_open(scope)
         key = self._key(scope)
         previous = self._status.get(key, JobStatus(running=False))
         status = JobStatus(running=True, generation=previous.generation + 1, started_at=datetime.now(UTC))

@@ -148,6 +148,7 @@ class ModelCatalog(DeepFrozen):
 
 class ControlErrorCode(Enum):
     BUSY = "busy"  # another driver holds this Conversation in this process
+    CLOSED = "closed"  # the Conversation is being moved to the trash, or is there (V3-P65)
 
 
 class ControlError(Exception):

@@ -27,6 +27,7 @@ from himari.common import (
     PrincipalId,
     ProviderContinuation,
     RunId,
+    ToolId,
     TrustedScope,
     UnknownOutcomePolicy,
     WorkspaceId,
@@ -70,6 +71,7 @@ from himari.data.api import (
     ToolExecutionRecord,
     ToolExecutionStatus,
     ToolResultRecord,
+    TrashedConversation,
     UiResource,
     UserMessage,
 )
@@ -118,6 +120,8 @@ class _Conversation:
     external: dict[str, bool] = field(default_factory=dict)  # V3-P53 choices by source
     model: ModelSetting | None = None  # V3-P64
     app_payloads: dict[CallRef, JsonValue] = field(default_factory=dict)  # V3-P58, by call
+    trashed_at: datetime | None = None  # V3-P65
+    purge_started_at: datetime | None = None
 
 
 class InMemoryStore:
@@ -192,6 +196,13 @@ class InMemoryStore:
         return f"{prefix}_{next(self._ids)}"
 
     def _authorized(self, scope: TrustedScope) -> _Conversation:
+        conv = self._owned(scope)
+        if conv.trashed_at is not None:  # V3-P65: a trashed Conversation is a missing one
+            raise DataError(DataErrorCode.NOT_AUTHORIZED, scope.conversation_id)
+        return conv
+
+    def _owned(self, scope: TrustedScope) -> _Conversation:
+        """The owner check alone (the trash methods, V3-P65)."""
         conv = self._conversations.get(scope.conversation_id)
         if conv is None or conv.owner != scope.principal_id:
             # Same error for foreign and missing (indistinguishability).
@@ -201,7 +212,7 @@ class InMemoryStore:
 
 class InMemoryData:
     """Implements ConversationLog, ArtifactStore, WorkspaceState, StateQuery,
-    ConversationCatalog and ExternalSourceSettings."""
+    ConversationCatalog, ConversationRetention and ExternalSourceSettings."""
 
     def __init__(self, store: InMemoryStore) -> None:
         self._store = store
@@ -665,16 +676,17 @@ class InMemoryData:
             last_activity_at=conv.events[-1].created_at if conv.events else conv.created_at,
             last_sequence=len(conv.events),
             preview="" if first_user is None else rules.preview(first_user.payload.blocks),  # type: ignore[union-attr]
+            trashed_at=conv.trashed_at,
         )
 
     async def list_conversations(
-        self, principal: PrincipalId, *, limit: int = 50, offset: int = 0
+        self, principal: PrincipalId, *, limit: int = 50, offset: int = 0, trashed: bool = False
     ) -> Sequence[ConversationSummary]:
         rules.check_page(limit, offset)
         owned = [(i, cid, conv) for i, (cid, conv) in enumerate(self._store._conversations.items())
-                 if conv.owner == principal]
+                 if conv.owner == principal and (conv.trashed_at is not None) == trashed]
         rows = [(self._summary(cid, conv), i) for i, cid, conv in owned]
-        rows.sort(key=lambda row: (row[0].last_activity_at, row[1]), reverse=True)
+        rows.sort(key=lambda row: (row[0].trashed_at if trashed else row[0].last_activity_at, row[1]), reverse=True)
         return tuple(summary for summary, _ in rows[offset : offset + limit])
 
     async def read_conversation(self, scope: TrustedScope) -> ConversationSummary:
@@ -683,6 +695,48 @@ class InMemoryData:
     async def rename_conversation(self, scope: TrustedScope, title: str | None) -> None:
         conv = self._conv(scope)
         conv.title = rules.normalize_title(title)
+
+    async def trash_conversation(self, scope: TrustedScope) -> datetime:
+        conv = self._store._owned(scope)
+        if conv.trashed_at is not None:
+            raise DataError(DataErrorCode.INVALID_STATE_TRANSITION, f"{scope.conversation_id} is in the trash")
+        conv.trashed_at = datetime.now(UTC)
+        return conv.trashed_at
+
+    async def restore_conversation(self, scope: TrustedScope) -> None:
+        conv = self._store._owned(scope)
+        if conv.trashed_at is None or conv.purge_started_at is not None:
+            raise DataError(DataErrorCode.INVALID_STATE_TRANSITION, f"{scope.conversation_id} cannot be restored")
+        conv.trashed_at = None
+
+    async def begin_purge(self, scope: TrustedScope) -> TrashedConversation:
+        conv = self._store._owned(scope)
+        if conv.trashed_at is None:
+            raise DataError(DataErrorCode.INVALID_STATE_TRANSITION, f"{scope.conversation_id} is not in the trash")
+        if conv.purge_started_at is None:
+            conv.purge_started_at = datetime.now(UTC)
+        return TrashedConversation(self._summary(scope.conversation_id, conv), conv.workspace)
+
+    async def purge_conversation(self, scope: TrustedScope) -> None:
+        conv = self._store._owned(scope)
+        if conv.purge_started_at is None:
+            raise DataError(DataErrorCode.INVALID_STATE_TRANSITION, f"{scope.conversation_id} is not being deleted")
+        del self._store._conversations[scope.conversation_id]
+        used = {e.ui_digest for c in self._store._conversations.values() for e in c.executions.values()}
+        for digest in {e.ui_digest for e in conv.executions.values()} - used:
+            if digest is not None:
+                del self._store.ui_resources[digest]
+
+    async def used_tool_ids(self, scope: TrustedScope) -> frozenset[ToolId]:
+        return frozenset(e.tool_id for e in self._conv(scope).executions.values())
+
+    # --- ConversationRetention --------------------------------------------------
+
+    async def due_purges(self, cutoff: datetime) -> Sequence[TrustedScope]:
+        due = [(conv.trashed_at, i, TrustedScope(conv.owner, cid))
+               for i, (cid, conv) in enumerate(self._store._conversations.items())
+               if conv.trashed_at is not None and (conv.purge_started_at is not None or conv.trashed_at < cutoff)]
+        return tuple(scope for _, _, scope in sorted(due, key=lambda row: (row[0], row[1])))
 
     # --- ExternalSourceSettings ------------------------------------------------
 

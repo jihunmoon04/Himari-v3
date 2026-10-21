@@ -513,6 +513,15 @@ class ConversationSummary(DeepFrozen):
     last_activity_at: datetime  # the latest Event's time, else created_at
     last_sequence: int
     preview: str
+    trashed_at: datetime | None = None  # V3-P65: when it was moved to the trash
+
+
+@dataclass(frozen=True)
+class TrashedConversation(DeepFrozen):
+    """V3-P65: what a permanent delete must clean up outside Data."""
+
+    summary: ConversationSummary
+    workspace: ConversationWorkspace | None  # the Conversation's own folder (§5)
 
 
 # --- Sub-ports ---------------------------------------------------------------
@@ -758,10 +767,16 @@ class ConversationModelSettings(Protocol):
 
 
 class ConversationCatalog(Protocol):
-    """DATA-12: a principal's Conversations (T0 create, list, rename).
+    """DATA-12: a principal's Conversations (T0 create, list, rename, and the
+    trash of V3-P65).
 
     The principal comes from the trusted entry point, never from model
-    output. Listing only ever returns the caller's own Conversations."""
+    output. Listing only ever returns the caller's own Conversations.
+
+    Trash (V3-P65): ACTIVE → TRASHED → PURGING → gone; TRASHED → ACTIVE is
+    restore. Every other port treats a trashed Conversation as a missing
+    one (NOT_AUTHORIZED). The trash methods check only the owner; a wrong
+    state is INVALID_STATE_TRANSITION."""
 
     async def create_conversation(
         self,
@@ -777,10 +792,11 @@ class ConversationCatalog(Protocol):
         ...
 
     async def list_conversations(
-        self, principal: PrincipalId, *, limit: int = 50, offset: int = 0
+        self, principal: PrincipalId, *, limit: int = 50, offset: int = 0, trashed: bool = False
     ) -> Sequence[ConversationSummary]:
-        """Most recent activity first (ties: newest id first). ``limit`` is
-        1..MAX_LIST_LIMIT, else INVALID_ARGUMENT."""
+        """Active ones: most recent activity first (ties: newest id first).
+        ``trashed``: the trash instead (PURGING included), most recently
+        trashed first. ``limit`` is 1..MAX_LIST_LIMIT, else INVALID_ARGUMENT."""
         ...
 
     async def read_conversation(self, scope: TrustedScope) -> ConversationSummary:
@@ -788,6 +804,39 @@ class ConversationCatalog(Protocol):
         ...
 
     async def rename_conversation(self, scope: TrustedScope, title: str | None) -> None: ...
+
+    async def trash_conversation(self, scope: TrustedScope) -> datetime:
+        """ACTIVE → TRASHED; returns the time recorded."""
+        ...
+
+    async def restore_conversation(self, scope: TrustedScope) -> None:
+        """TRASHED → ACTIVE. Refused once a permanent delete has begun."""
+        ...
+
+    async def begin_purge(self, scope: TrustedScope) -> TrashedConversation:
+        """TRASHED → PURGING (or already PURGING: unchanged); what is left to
+        clean up. Recorded before anything outside Data is deleted, so a
+        Conversation whose files may be gone is never restored."""
+        ...
+
+    async def purge_conversation(self, scope: TrustedScope) -> None:
+        """PURGING → gone: every row of the Conversation, and each Tool view
+        no other call refers to, in one transaction."""
+        ...
+
+    async def used_tool_ids(self, scope: TrustedScope) -> frozenset[ToolId]:
+        """Every Tool this (active) Conversation called."""
+        ...
+
+
+class ConversationRetention(Protocol):
+    """V3-P65: the one read across principals, for the composition root's
+    clean-up only (never given to Web, Control or Tools)."""
+
+    async def due_purges(self, cutoff: datetime) -> Sequence[TrustedScope]:
+        """Conversations trashed before ``cutoff``, and every PURGING one,
+        oldest first."""
+        ...
 
 
 class StateQuery(Protocol):
@@ -811,6 +860,7 @@ __all__ = [
     "ConversationEvent",
     "ConversationLog",
     "ConversationModelSettings",
+    "ConversationRetention",
     "ConversationSummary",
     "ConversationWorkspace",
     "DataError",
@@ -849,6 +899,7 @@ __all__ = [
     "ToolExecutionRecord",
     "ToolExecutionStatus",
     "ToolResultRecord",
+    "TrashedConversation",
     "TriggerRef",
     "UiCsp",
     "UiResource",

@@ -5,6 +5,7 @@ Configuration comes from the environment (see ``config.py``):
 ``HIMARI_MODEL`` (the default model), ``HIMARI_MODELS`` (the offered models, ``id[=effort]``),
 ``HIMARI_REASONING_EFFORT``, ``HIMARI_SANDBOX``,
 ``HIMARI_CONTEXT_TOKENS`` (request token budget; compaction starts at 80%),
+``HIMARI_TRASH_DAYS`` (days a deleted Conversation stays in the trash, default 30),
 ``HIMARI_WEB_SANDBOX_PORT`` (Tool views' origin; started only when some
 MCP server's views are shown) and ``OPENROUTER_API_KEY``. ``--env-file`` reads ``KEY=value`` lines first;
 real environment variables win; the token variables named in
@@ -73,7 +74,8 @@ def main(argv: list[str] | None = None) -> int:
                                              reasoning_effort=config.reasoning_effort, sandbox=config.sandbox,
                                              context_tokens=config.context_tokens, environ=environment,
                                              turn_budget=config.turn_budget, unattended_runs=config.unattended_runs,
-                                             max_runs=config.max_runs, models=config.models)
+                                             max_runs=config.max_runs, models=config.models,
+                                             trash_days=config.trash_days)
         print(f"HIMARI web: http://{config.host}:{config.port}/ — sign in with the token in "
               f"{application.data_root / 'control' / 'operator.secret'} (sandbox: {application.sandbox_state.value}, "
               f"context budget: {application.context_tokens} tokens; {turn_text(application.turn)})",
@@ -92,6 +94,10 @@ def main(argv: list[str] | None = None) -> int:
             print(f"HIMARI web: MCP server {status.source}: {state}"
                   f" (default {'on' if status.enabled_by_default else 'off'})"
                   + "".join(f"\n  - {p}" for p in status.problems), file=sys.stderr, flush=True)
+        if application.store.backup_path is not None:  # V3-P65 §8.1
+            print(f"HIMARI web: the database was upgraded; its previous version is kept in "
+                  f"{application.store.backup_path} (delete it once a rollback is no longer needed: it keeps every "
+                  "Conversation as it was, including ones deleted since)", file=sys.stderr, flush=True)
         return application
 
     # One key per process: a restart (the only way the MCP policy changes)

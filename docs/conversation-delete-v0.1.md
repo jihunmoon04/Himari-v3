@@ -1,6 +1,6 @@
 # 대화 삭제와 업그레이드 백업 v0.1
 
-> 2026-10-21 · **PROPOSED (V3-P65)** · rev. 3 — 검수 NOT_READY(B1~B3; C1) 반영(§14), 재검수 NOT_READY(B4; C2·C3) 반영(§15), 2차 재검수 READY(§16). 구현 없음.
+> 2026-10-21 · **PROPOSED (V3-P65)** · rev. 3 — 검수 NOT_READY(B1~B3; C1) 반영(§14), 재검수 NOT_READY(B4; C2·C3) 반영(§15), 2차 재검수 READY(§16), 설계 PR #55 병합. 구현: 1단계 Data·Environment·MCP·Control·Bootstrap(§17).
 >
 > 소유자 결정(2026-10-21): **Q1~Q3 모두 권고대로**(§11). 휴지통 30일(운영자가 바꿈), 휴지통은 목록만, 업그레이드 백업은 자동으로 지우지 않음.
 >
@@ -386,3 +386,38 @@ B1~B3, C1은 PASS다. 새로 나온 지적과 처리는 다음과 같다.
 ## 16. 2차 재검수 — rev. 3(`0a01c11`): READY
 
 B4·C2·C3 PASS. 차단 0건, 비차단 0건. 전체 재점검(상태 전이, 삭제·복원 경쟁, 재시작 뒤 영구 삭제 재개, 접수 차단, 권한, 삭제 트랜잭션, 뷰 HTML 정리, 폴더 삭제, 외부 데이터 안내, 백업의 검증·내구성, 되돌리기)도 모두 PASS. 수명주기 잠금은 동시 실행을 막고, PURGING 기록은 재시작 뒤의 안전을 맡는다는 책임 분리가 확인됐다. 구현은 이 문서의 계약과 §13 검증 계획을 기준으로 한다.
+
+## 17. 구현 노트 — 1단계: Data·Environment·MCP·Control·Bootstrap (2026-10-21)
+
+설계대로 구현했다. Web·CLI(§9)는 2단계다. 설계와 다르거나 더 정한 것은 다음과 같다.
+
+- **Data**
+  - `TrashedConversation`에는 `tool_ids`를 두지 않았다. 확인 창은 휴지통으로 옮기기 전에 열리므로, 활성 대화에서 읽는 `used_tool_ids`로 충분하다.
+  - 휴지통 목록은 휴지통으로 옮긴 시각이 최근인 것부터 보여 준다(같으면 새 대화부터). PURGING도 목록에 남는다.
+  - `secure_delete`는 연결마다 켜는 PRAGMA라 DB를 열 때마다 켠다.
+- **백업 (§8.1)**
+  - SQLite 백업 API는 WAL 모드까지 복사한다. 그래서 백업 연결을 닫기 전에 `journal_mode=DELETE`로 바꿔 `-wal`·`-shm` 없는 파일 하나로 만든다. 되돌릴 때 HIMARI가 다시 WAL로 연다.
+  - "덮어쓰지 않는 이름 변경"은 `link` 뒤에 `unlink`로 했다.
+  - 시작할 때 Web 서버가 백업 경로를 출력하고, 백업이 그 시점의 모든 대화(그 뒤에 지운 것 포함)를 담는다고 알린다.
+- **폴더 삭제 (§5)**
+  - `InsideEnvironment.remove_conversation_folder(workspace_id, scope, cwd)`가 cwd가 `conversations/<scope의 id>`인지 직접 확인한다.
+  - `fs.remove_tree`는 깊이 64를 넘는 디렉터리를 대화 폴더 바로 아래로 옮긴 뒤 다음 차례에 지운다(같은 파일시스템 안의 `rename`). 아주 깊은 트리에서도 열린 fd와 재귀 깊이가 일정하다.
+  - 이 호스트에서는 권한 없는 사용자가 마운트 네임스페이스를 만들 수 없다(`unshare -r`가 거부됨). 그래서 마운트 경계는 `openat2`가 `CROSS_DEVICE`를 내는 경우를 흉내 내어 시험했다. 실제 마운트로 하는 시험은 하지 못했다.
+- **Runner (§7.1)**
+  - `forget`은 마지막 작업의 기록만 지우고 닫힘은 그대로 둔다. 실행 중이면 BUSY다. 영구 삭제는 `forget`과 `reopen`을 함께 부른다.
+- **외부 서버 안내 (§6.1)**
+  - Tool 등록 규칙상 `/`가 있는 Tool id는 Environment가 제공한 Tool(`inside/…`)이거나 외부 Tool이다. 그래서 `inside`만 HIMARI 자체로 뺀다. 같은 이름의 MCP 서버가 설정에 있으면 서버로 센다.
+- **자동 정리**
+  - `Application.open`이 정리 작업(`cleanup_seconds`, 기본 3600초)을 띄우고, `close`가 멈춘다. 테스트는 `cleanup_seconds=None`으로 끄고 `purge_due`를 직접 부른다.
+  - Web 설정 `HIMARI_TRASH_DAYS`(1~365, 0은 거부: 무기한 보관은 없음).
+- **검증:** 전체 1502 passed, 51 skipped. import 경계 검사 OK, mypy OK.
+  - 새 테스트: Data 양쪽 백엔드 `tests/data/test_trash.py`, SQLite `tests/data/test_sqlite_trash.py`, 롤백 `op_purge`, 폴더 `tests/environment/test_remove_folder.py`, MCP `release`, Runner 닫기(B2 회귀 포함), Application `tests/bootstrap/test_trash.py`(B1·B4 회귀 포함).
+
+### 17.1 검수 — PR #56(`6c5f12c`): NOT_READY
+
+| # | 지적 | 처리 |
+| --- | --- | --- |
+| B1 | `trash`가 `runner.close`를 기다리는 중에 취소되면, 대화는 ACTIVE인데 Runner만 닫힌 채 남는다 | `trash_conversation` 전의 모든 실패와 취소에서 `reopen`한다. 시간 초과는 그대로 `ConversationStillStopping`이다. 회귀 테스트: 멈추지 않는 Tool을 돌리는 중에 `trash`를 취소하면, 대화는 ACTIVE이고 Runner는 열려 있으며, 작업이 끝난 뒤 새 메시지를 받는다 |
+| C1 | 수명주기 잠금이 실패한 요청에서도 남아 쌓인다 | 잠금마다 잡거나 기다리는 수를 세고, 0이 되면 지운다. 기다리는 쪽이 있는 잠금은 지우지 않는다. 영구 삭제의 따로 지우던 코드는 없앴다. 회귀 테스트: 없는 대화 id로 60번 요청하고 정상 전이를 한 뒤 잠금이 남지 않음 |
+
+두 회귀 테스트는 고치기 전 코드에서 실패하는 것을 확인했다. 취소를 무시하는 시험용 Tool은 정리 단계에서 먼저 풀어, 실패가 멈춤으로 바뀌지 않게 했다.

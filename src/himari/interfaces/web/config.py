@@ -22,6 +22,9 @@ Models (V3-P64 §3): ``HIMARI_MODEL`` is the default; ``HIMARI_MODELS``
 optionally lists every offered model as ``id[=effort]`` (comma-separated;
 an id may hold ``:``, so the effort follows ``=``). The default must be
 listed. Unset, the default model is the only one offered.
+
+Trash (V3-P65): ``HIMARI_TRASH_DAYS`` (1..365, default 30) is how long a
+deleted Conversation stays in the trash before it is deleted for good.
 """
 
 from __future__ import annotations
@@ -46,11 +49,13 @@ CONTEXT_TOKENS_VAR = "HIMARI_CONTEXT_TOKENS"
 TURN_BUDGET_VAR = "HIMARI_TURN_TOKEN_BUDGET"  # V3-P62: 0 turns it off
 UNATTENDED_RUNS_VAR = "HIMARI_UNATTENDED_RUNS"  # 0 turns it off
 MAX_RUNS_VAR = "HIMARI_MAX_RUNS"  # 0 (default): no Run limit
+TRASH_DAYS_VAR = "HIMARI_TRASH_DAYS"  # V3-P65: days in the trash before a permanent delete
 DEFAULT_TURN_BUDGET = 3_000_000
 # Each request keeps 8,192 tokens for its answer (control.turn.MIN_OUTPUT_RESERVE),
 # so a smaller budget could refuse even the first request (PR #48 review C2).
 MIN_TURN_BUDGET = 16_384
 DEFAULT_UNATTENDED_RUNS = 20
+DEFAULT_TRASH_DAYS = 30  # as bootstrap.application.DEFAULT_TRASH_DAYS
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
@@ -85,6 +90,7 @@ class WebConfig:
     max_runs: int | None = None
     # The offered models and their default efforts (V3-P64); empty: model_id alone.
     models: tuple[tuple[str, str | None], ...] = ()
+    trash_days: int = DEFAULT_TRASH_DAYS
 
     @property
     def view_port(self) -> int:
@@ -144,6 +150,9 @@ class WebConfig:
                                 10**9)
         unattended = _optional(source.get(UNATTENDED_RUNS_VAR), UNATTENDED_RUNS_VAR, DEFAULT_UNATTENDED_RUNS, 1, 1000)
         max_runs = _optional(source.get(MAX_RUNS_VAR), MAX_RUNS_VAR, None, 1, 1000)
+        trash_days = _optional(source.get(TRASH_DAYS_VAR), TRASH_DAYS_VAR, DEFAULT_TRASH_DAYS, 1, 365)
+        if trash_days is None:
+            raise WebConfigError(f"{TRASH_DAYS_VAR} must be between 1 and 365 (there is no keeping forever)")
         if turn_budget is None and max_runs is None:
             raise WebConfigError(f"{TURN_BUDGET_VAR}=0 needs {MAX_RUNS_VAR}: a turn needs a token budget or a Run limit")
         model_id = source.get(MODEL_VAR, "").strip() or DEFAULT_MODEL
@@ -165,6 +174,7 @@ class WebConfig:
             unattended_runs=unattended,
             max_runs=max_runs,
             models=models,
+            trash_days=trash_days,
         )
 
 

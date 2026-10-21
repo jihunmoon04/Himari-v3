@@ -31,6 +31,8 @@ from pathlib import Path
 from himari.common import EnvironmentKind, TrustedScope, WorkspaceId
 from himari.data.api import BindingAuthority
 from himari.environment.api import BindingObservation, ConnectionStatus
+from himari.environment.inside import fs
+from himari.environment.inside.blocking import run_blocking
 from himari.environment.inside.tools import RunCommand, file_tools
 from himari.sandbox.api import WorkspaceSandbox
 from himari.tool.api import ToolHandler
@@ -82,6 +84,28 @@ class InsideEnvironment:
         root = Path(self.host_root(workspace_id))
         (root / "conversations").mkdir(mode=0o700, parents=True, exist_ok=True)
         os.chmod(root, 0o700)
+
+    async def remove_conversation_folder(self, workspace_id: WorkspaceId, scope: TrustedScope,
+                                         cwd_relative: str) -> bool:
+        """V3-P65 §5: remove the Conversation's own folder, under the
+        Workspace's write lock (no Inside Tool or command runs in that root
+        meanwhile). Only its default folder ``conversations/<id>``; any other
+        cwd is not the Conversation's and is left (False). Idempotent."""
+        if cwd_relative != f"conversations/{scope.conversation_id}":
+            return False
+        host_root = self.host_root(workspace_id)
+        async with self.write_lock(workspace_id):
+            return await run_blocking(self._remove_folder, host_root, cwd_relative)
+
+    @staticmethod
+    def _remove_folder(host_root: str, relative: str) -> bool:
+        try:
+            with fs.open_root(host_root) as root_fd:
+                return fs.remove_tree(root_fd, relative)
+        except fs.FsError as error:
+            if error.category is fs.FsCategory.NOT_FOUND:  # the principal's root itself is gone
+                return False
+            raise
 
     async def observe(
         self, scope: TrustedScope, bindings: Sequence[BindingAuthority]

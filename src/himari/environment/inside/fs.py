@@ -390,3 +390,85 @@ def delete_file(root_fd: int, relative: str) -> None:
             os.unlink(name, dir_fd=dir_fd)
         except OSError as error:
             raise _categorize(error) from None
+
+
+# --- removing a Conversation's folder (V3-P65 §5) ------------------------------
+
+_MAX_DEPTH = 64  # deeper directories are moved up first, so descriptors and recursion stay bounded
+
+
+def remove_tree(root_fd: int, relative: str) -> bool:
+    """Remove ``relative`` and everything beneath it; False if it was not
+    there. Never follows a symbolic link (a link is removed, its target
+    stays) and never crosses a mount (CROSS_DEVICE, nothing more removed
+    beneath it). Directories this user owns but cannot change (``chmod
+    500``) are made writable first. A directory deeper than ``_MAX_DEPTH``
+    is renamed to the top of the tree and cleared on a later pass."""
+    parent, name = _split(relative)
+    try:
+        parent_fd = openat2(root_fd, parent, _DIRECTORY_FLAGS)
+    except FsError as error:
+        if error.category is FsCategory.NOT_FOUND:
+            return False
+        raise
+    try:
+        try:
+            info = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return False
+        if not stat.S_ISDIR(info.st_mode):
+            os.unlink(name, dir_fd=parent_fd)  # a link or a file in the folder's place
+            return True
+        top_fd = _open_child(parent_fd, name)
+        try:
+            while _empty(top_fd, top_fd, 0):  # True: something deep was moved up; another pass
+                pass
+        finally:
+            os.close(top_fd)
+        os.rmdir(name, dir_fd=parent_fd)
+        return True
+    except OSError as error:
+        raise _categorize(error) from None
+    finally:
+        os.close(parent_fd)
+
+
+def _open_child(dir_fd: int, name: str) -> int:
+    try:
+        return openat2(dir_fd, name, _DIRECTORY_FLAGS)
+    except FsError as error:
+        if error.category is not FsCategory.ACCESS:
+            raise
+        info = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid():
+            raise
+        # The caller holds the Workspace lock: nothing in the Workspace swaps
+        # this directory for a link meanwhile.
+        os.chmod(name, 0o700, dir_fd=dir_fd)
+        return openat2(dir_fd, name, _DIRECTORY_FLAGS)
+
+
+def _empty(dir_fd: int, top_fd: int, depth: int) -> bool:
+    """Remove every entry of the open directory; True if a directory was
+    moved up to ``top_fd`` instead (it still has to be cleared)."""
+    info = os.fstat(dir_fd)
+    if info.st_uid == os.geteuid() and stat.S_IMODE(info.st_mode) & 0o700 != 0o700:
+        os.fchmod(dir_fd, stat.S_IMODE(info.st_mode) | 0o700)
+    with os.scandir(dir_fd) as it:
+        entries = [(entry.name, entry.is_dir(follow_symlinks=False)) for entry in it]
+    moved = False
+    for name, is_dir in entries:
+        if not is_dir:
+            os.unlink(name, dir_fd=dir_fd)
+        elif depth >= _MAX_DEPTH:
+            os.rename(name, f".himari-removing-{secrets.token_hex(8)}", src_dir_fd=dir_fd, dst_dir_fd=top_fd)
+            moved = True
+        else:
+            child = _open_child(dir_fd, name)
+            try:
+                moved |= _empty(child, top_fd, depth + 1)
+            finally:
+                os.close(child)
+            os.rmdir(name, dir_fd=dir_fd)
+    return moved
+
