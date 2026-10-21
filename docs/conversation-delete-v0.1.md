@@ -1,6 +1,8 @@
 # 대화 삭제와 업그레이드 백업 v0.1
 
-> 2026-10-21 · **PROPOSED (V3-P65)** · rev. 1 — 설계 초안. 구현 없음.
+> 2026-10-21 · **PROPOSED (V3-P65)** · rev. 2 — 검수 NOT_READY(B1~B3; C1) 반영(§14). 구현 없음.
+>
+> 소유자 결정(2026-10-21): **Q1~Q3 모두 권고대로**(§11). 휴지통 30일(운영자가 바꿈), 휴지통은 목록만, 업그레이드 백업은 자동으로 지우지 않음.
 >
 > 소유자 방향(2026-10-21):
 > - 대화 삭제와 DB 업그레이드 안전장치(업그레이드 전 백업, 되돌리기 절차)를 한 묶음으로 만든다. 지금 DB에는 중요한 것이 없으므로 첫 v7 업그레이드가 백업을 시험하기에 좋다.
@@ -45,16 +47,18 @@
 ## 3. 상태와 전이
 
 ```
-          trash (실행 중이면 먼저 취소)          purge (지금 / 보관 기간 지남)
- ACTIVE ───────────────────────────────▶ TRASHED ───────────────────────────────▶ (없음)
-        ◀─────────────────────────────── 
-                    restore
+          trash (실행 중이면 먼저 취소)        begin_purge              purge
+ ACTIVE ─────────────────────────────▶ TRASHED ────────────▶ PURGING ──────────▶ (없음)
+        ◀───────────────────────────── 
+                   restore
 ```
 
 - **휴지통(TRASHED)** 상태는 `conversations.trashed_at`(UTC 시각) 하나로 나타낸다. 다른 행은 그대로 둔다. 그래서 복원은 이 값을 지우는 것뿐이다.
 - 휴지통의 대화는 **아무도 쓸 수 없다**. 목록(제목·미리보기·옮긴 시각), 복원, 영구 삭제만 된다. 다른 모든 Data 포트는 그 대화를 없는 대화처럼 다룬다(NOT_AUTHORIZED, §4.2). 그래서 휴지통으로 옮긴 뒤 늦게 도착한 쓰기는 기록되지 않고 실패한다.
+- **영구 삭제 중(PURGING)** 은 `conversations.purge_started_at`으로 나타낸다. 폴더를 지우기 전에 기록한다(§7.2). 이 상태에서는 복원할 수 없고, 남은 일은 영구 삭제를 끝내는 것뿐이다. 서버가 폴더를 지운 직후 죽어도, 재시작 뒤 폴더 없는 대화가 복원되지 않는다.
 - **영구 삭제(purge)** 는 휴지통에 있는 대화만 된다. 활성 대화를 바로 영구 삭제하려면 휴지통을 거친다(Web·CLI의 "지금 영구 삭제"는 두 단계를 차례로 부른다).
-- 보관 기간: 운영자 설정 `HIMARI_TRASH_DAYS`(기본 30, 1~365; Q1). 서버가 시작할 때와 그 뒤 1시간마다, 보관 기간이 지난 대화를 영구 삭제한다.
+- 보관 기간: 운영자 설정 `HIMARI_TRASH_DAYS`(기본 30, 1~365; Q1). 서버가 시작할 때와 그 뒤 1시간마다, 보관 기간이 지난 대화와 영구 삭제가 중간에 끊긴 대화(PURGING)를 영구 삭제한다.
+- 세 전이(trash·restore·purge)는 대화마다 하나씩만 돈다(§7.3).
 
 ## 4. Data
 
@@ -79,20 +83,23 @@ class ConversationCatalog(Protocol):
     async def trash_conversation(self, scope: TrustedScope) -> datetime:
         """ACTIVE → TRASHED. 옮긴 시각을 돌려준다. 이미 휴지통이면 INVALID_STATE_TRANSITION."""
     async def restore_conversation(self, scope: TrustedScope) -> None:
-        """TRASHED → ACTIVE. 휴지통이 아니면 INVALID_STATE_TRANSITION."""
-    async def read_trashed(self, scope: TrustedScope) -> TrashedConversation:
-        """영구 삭제 전에 정리할 것. 휴지통이 아니면 INVALID_STATE_TRANSITION."""
+        """TRASHED → ACTIVE. TRASHED가 아니면(ACTIVE, PURGING) INVALID_STATE_TRANSITION."""
+    async def begin_purge(self, scope: TrustedScope) -> TrashedConversation:
+        """TRASHED → PURGING(purge_started_at 기록), 또는 이미 PURGING이면 그대로.
+        영구 삭제 전에 정리할 것을 돌려준다. ACTIVE면 INVALID_STATE_TRANSITION."""
     async def purge_conversation(self, scope: TrustedScope) -> None:
-        """TRASHED → 없음. 한 트랜잭션(§4.3). 휴지통이 아니면 INVALID_STATE_TRANSITION."""
+        """PURGING → 없음. 한 트랜잭션(§4.3). PURGING이 아니면 INVALID_STATE_TRANSITION."""
     async def used_tool_ids(self, scope: TrustedScope) -> frozenset[ToolId]:
         """활성 대화에서 부른 Tool id들(삭제 확인 창, §6.1). 다른 읽기와 같은 권한 검사."""
 
 class ConversationRetention(Protocol):
     """Bootstrap 전용(Web·Control에 주지 않음): 모든 principal에 걸친 정리."""
-    async def trashed_before(self, cutoff: datetime) -> Sequence[TrustedScope]: ...
+    async def due_purges(self, cutoff: datetime) -> Sequence[TrustedScope]:
+        """cutoff 전에 휴지통에 옮긴 대화와, PURGING인 대화 전부."""
 ```
 
 - 이 포트들은 휴지통의 대화에 대해 **owner 검사만** 한다. 다른 사용자의 대화와 없는 대화는 지금처럼 같은 NOT_AUTHORIZED다.
+- 상태 전이는 Data가 한 트랜잭션 안에서 검사한다. 그래서 Application의 잠금(§7.3)이 없더라도 잘못된 전이가 기록되지는 않는다. 잠금이 막는 것은 Data 밖의 일(폴더 삭제, Runner)과 전이 사이의 경쟁이다.
 - `ConversationRetention`은 principal 범위를 넘는 유일한 읽기다. 그래서 공개 포트 묶음과 분리하고, 조립(Bootstrap)만 받는다. 돌려주는 것은 id뿐이고 내용이 아니다.
 
 ### 4.2 휴지통의 대화는 없는 대화처럼
@@ -118,6 +125,7 @@ SQLite의 모든 포트는 `_Tx.authorized(scope)`를 거친다(인메모리도 
 
 ```sql
 ALTER TABLE conversations ADD COLUMN trashed_at TEXT;
+ALTER TABLE conversations ADD COLUMN purge_started_at TEXT;  -- NULL이 아니면 trashed_at도 NULL이 아니다
 ```
 
 v6 → v7 제자리 업그레이드(지금 방식과 같음). 업그레이드 전에 백업한다(§8).
@@ -144,9 +152,11 @@ v6 → v7 제자리 업그레이드(지금 방식과 같음). 업그레이드 �
 ### 6.1 알리기
 
 삭제 확인 창은 이 대화가 쓴 외부 서버를 보여 준다.
-- `Data.used_tool_ids(scope)`로 이 대화에서 부른 Tool id들을 읽고, 시작 때 연결한 서버별 Tool 목록(`SourceStatus.tool_ids`)과 맞춰 서버 이름을 얻는다(Application).
+- `Data.used_tool_ids(scope)`로 이 대화에서 부른 Tool id들을 읽는다. MCP Tool id는 `<서버 이름>/<이름>`이다(`mcp/config.py`). 그래서 **기록된 id의 앞부분이 곧 서버 이름이다.** 지금 설정이나 연결 상태와 대조하지 않는다. 대화에서 쓴 뒤 운영자가 그 서버를 설정에서 빼도 이름은 남는다(검수 C1).
+- HIMARI 자체 Tool은 뺀다: `ask_user`(앞부분 없음)와 `inside/…`(Inside Environment).
+- 그 이름이 지금 설정에 없으면 "(지금은 설정에 없음)"을 붙인다.
 - 문구: "이 대화에서 쓴 외부 서버(Calliope)에 저장된 데이터는 지워지지 않습니다."
-- 쓴 서버가 없으면 이 문구는 없다.
+- 외부 Tool을 쓴 기록이 없을 때도 짧은 일반 문구는 늘 보인다: "외부 서비스에 저장된 데이터는 지워지지 않습니다." Tool 기록 밖의 경로(앞으로 생길 연결 방식 등)로 남은 데이터가 있을 수 있기 때문이다.
 
 ### 6.2 지우지 않는 이유와 나중의 훅
 
@@ -167,35 +177,74 @@ v6 → v7 제자리 업그레이드(지금 방식과 같음). 업그레이드 �
 
 `Application.trash(scope) -> datetime`:
 
-1. **Runner에서 그 대화를 닫는다**(`BackgroundRunner.close(scope)`, 새 메서드). 그 뒤의 `submit`·`submit_compaction`·`submit_cancel`은 BUSY로 거부된다. 그래서 2와 4 사이에 다른 탭에서 새 작업이 시작되지 않는다.
-2. 실행 중인 작업이 있으면 Cancel 신호를 보내고(V3-P55: 진행 중인 호출을 끊는다) 그 작업이 끝나기를 기다린다. 상한은 30초다. 넘으면 1을 되돌리고 거부한다("아직 멈추는 중입니다. 잠시 후 다시 시도하세요"). Sandbox가 멈춘 경우 등이다(Q-40).
+1. **Runner에서 그 대화를 닫는다**(`BackgroundRunner.close(scope, timeout)`, 새 메서드, 아래 계약).
+2. `close`가 상한(30초) 안에 끝나지 않으면 닫힘을 되돌리고(`reopen`) 거부한다("아직 멈추는 중입니다. 잠시 후 다시 시도하세요"). Sandbox가 멈춘 경우 등이다(Q-40).
 3. Data `trash_conversation`.
 4. MCP `release(key)`(§6.3). 실패해도 휴지통 이동은 유지하고 로그만 남긴다. 프로세스는 어차피 idle 종료된다.
-5. Runner의 그 대화 상태를 지운다. 3이 실패하면 1을 되돌린다.
+5. Runner의 작업 상태(`JobStatus`)를 지운다. 닫힘은 휴지통에 있는 동안 유지한다(복원 때 `reopen`, 영구 삭제 때 `forget`). 3이 실패하면 `reopen`한다.
+
+서버를 다시 시작하면 Runner의 닫힘은 메모리에서 사라진다. 그래도 휴지통의 대화에 대한 `accept`는 Data가 NOT_AUTHORIZED로 거부하므로(§4.2), 작업이 시작되지 않는다.
 
 열린 질문(`ask_user`)이나 멈춘 턴(PAUSED)은 그대로 남는다. 복원하면 그 상태 그대로 돌아온다.
 
+**`BackgroundRunner.close`의 계약 (검수 B2).** 지금 `submit`은 "실행 중인지 검사 → `await driver.accept()` → `_start()`" 순서다. `accept`가 기다리는 동안 닫힐 수 있으므로, 입구에서 한 번 검사하는 것으로는 부족하다. 그래서 Runner는 대화마다 다음 두 가지를 둔다.
+- `_closed`: 닫힌 대화.
+- `_admitting`: `accept`에 들어갔지만 아직 끝나지 않은 접수 수.
+
+규칙은 다음과 같다.
+- `submit`은 들어올 때 닫혔으면 `ControlError(CLOSED)`로 거부한다. 아니면 `_admitting`을 하나 올리고 `accept`를 부르고, 끝나면(성공이든 실패든) 내린다.
+- **`_start`는 항상 `_closed`를 다시 확인한다**(`submit`, `submit_compaction`, `submit_cancel` 모두). 닫혔으면 작업을 시작하지 않고 `ControlError(CLOSED)`를 낸다. `_start`는 `await`가 없는 동기 함수라, 이 확인과 시작 사이에 닫힘이 끼어들 수 없다.
+- `close(scope, timeout)`는 다음을 차례로 한다. 끝나면 그 대화에는 접수 중인 요청도 실행 중인 작업도 없고, 이후의 어떤 `_start`도 성공하지 않는다.
+  1. `_closed`에 넣는다.
+  2. `_admitting`이 0이 될 때까지 기다린다.
+  3. 실행 중인 작업이 있으면 Cancel 신호를 보내고(V3-P55: 진행 중인 호출을 끊는다) 끝나기를 기다린다.
+  4. 2와 3을 합쳐 `timeout` 안에 끝나지 않으면 `TimeoutError`를 낸다(닫힘은 유지되고, Application이 `reopen`한다).
+- 닫히기 직전에 `accept`가 끝난 메시지는 이미 기록되어 있다(CTRL-06: 기록된 뒤에만 접수를 알린다). 그 요청은 `CLOSED` 오류를 받는다. 메시지는 대화에 남고, 복원하면 답이 없는 메시지로 보여 Continue로 이어 간다. 이미 휴지통이면 `accept` 자체가 NOT_AUTHORIZED로 실패한다(§4.2).
+- `ControlErrorCode.CLOSED`(새 값)는 Web에서 409 `{"error": "conversation_closed"}`이다.
+
 ### 7.2 복원·영구 삭제
 
-- `Application.restore(scope)`: Data `restore_conversation`, 그리고 Runner의 닫힘을 푼다.
+- `Application.restore(scope)`: Data `restore_conversation`, 그리고 Runner의 닫힘을 푼다(`reopen`).
 - `Application.purge(scope)`:
-  1. Data `read_trashed`로 폴더(§5)를 얻는다.
+  1. Data `begin_purge`: PURGING으로 바꾸고 폴더(§5)를 얻는다. 이 순간부터 복원은 거부된다.
   2. 폴더를 지운다.
   3. Data `purge_conversation`.
+  4. Runner의 그 대화 기록(닫힘·상태)을 지운다(`forget`).
 
-  **폴더를 먼저 지운다.** 2와 3 사이에 서버가 죽으면 대화는 휴지통에 남고 폴더만 없다. 다음 정리 때 다시 돌아 끝난다(2는 멱등). 반대 순서면 Data 기록 없이 폴더만 남아 아무도 찾지 못한다.
-- **자동 정리:** 시작할 때와 1시간마다 `trashed_before(now − HIMARI_TRASH_DAYS)`의 대화를 하나씩 `purge`한다. 하나가 실패하면(폴더 삭제 실패 등) 로그를 남기고 다음 대화로 넘어간다. 다음 차례에 다시 시도한다.
+  **폴더를 먼저 지운다.** 2와 3 사이에 서버가 죽으면 대화는 PURGING으로 남고 폴더만 없다. 재시작 뒤 복원은 거부되고(1의 기록), 다음 정리가 다시 돌아 끝낸다(1과 2는 멱등). 반대 순서면 Data 기록 없이 폴더만 남아 아무도 찾지 못한다.
+- **자동 정리:** 시작할 때와 1시간마다 `due_purges(now − HIMARI_TRASH_DAYS)`의 대화를 하나씩 `purge`한다. 하나가 실패하면(폴더 삭제 실패 등) 로그를 남기고 다음 대화로 넘어간다. 다음 차례에 다시 시도한다.
+
+### 7.3 전이는 대화마다 하나씩 (검수 B1)
+
+`trash`, `restore`, `purge`(자동 정리 포함)는 **대화마다 하나인 수명주기 잠금**(`Application._lifecycle[conversation_id]`, `asyncio.Lock`)을 잡고 돈다. `purge`는 1~4 동안 잠금을 놓지 않는다.
+
+이 잠금이 없으면 다음 일이 생긴다. 자동 정리가 휴지통 상태를 확인한 뒤 사용자가 복원하고, 그 뒤 정리가 폴더를 지운다. 대화는 복원되었는데 파일이 없다.
+
+- P0는 서버 프로세스가 하나다(V3-045, SQLite 단일 writer 잠금). 그래서 프로세스 안의 잠금으로 충분하다. 다중 worker(P2)에서는 lease와 함께 다시 설계한다.
+- 서버가 죽는 경우는 잠금이 아니라 PURGING 기록이 막는다(§3).
+- 잠금은 대화 하나의 전이끼리만 막는다. 다른 대화와 다른 작업(메시지, 읽기)은 막지 않는다. 메시지와의 경쟁은 Runner의 닫힘(§7.1)과 Data의 상태 검사(§4.2)가 맡는다.
+- 다 쓴 잠금(그 대화를 영구 삭제함)은 사전에서 지운다.
 
 ## 8. 업그레이드 전 백업과 되돌리기
 
 ### 8.1 자동 백업
 
 `SqliteStore`가 DB를 열 때 **업그레이드가 필요하면**(이전 버전이고 그 스키마와 정확히 같을 때, 지금 규칙) 업그레이드 트랜잭션 전에 백업을 만든다.
-- 파일: DB와 같은 디렉터리의 `himari.db.v<이전 버전>-<UTC 시각>.bak`. 지금의 비공개 파일 규칙(0600, 이 사용자 소유, 링크 따라가지 않음)으로 새로 만든다.
-- 방법: SQLite 온라인 백업 API(`Connection.backup`)로 그 파일에 복사한 뒤 `fsync`한다. 단일 writer 잠금(`flock`)을 잡은 뒤라 복사 중에 바뀌지 않는다.
-- 백업이 실패하면(디스크 부족 등) **업그레이드하지 않고 시작을 거부한다**. 오류에 경로와 이유를 담는다. DB는 이전 버전 그대로다.
+- 파일: DB와 같은 디렉터리의 `himari.db.v<이전 버전>-<UTC 시각>.bak`.
+- 단일 writer 잠금(`flock`)을 잡은 뒤에 만든다. 그래서 복사 중에 DB가 바뀌지 않는다.
+
+**업그레이드 트랜잭션에 들어가기 전에 다음이 모두 끝나야 한다(검수 B3).** 하나라도 실패하면 임시 파일을 지우고, **업그레이드하지 않고 시작을 거부한다.** 오류에 경로와 이유를 담고, DB는 이전 버전 그대로다.
+1. 임시 이름 `<백업 이름>.partial`을 지금의 비공개 파일 규칙으로 새로 만든다(0600, 이 사용자 소유, `O_EXCL | O_NOFOLLOW`).
+2. SQLite 온라인 백업 API(`Connection.backup`)로 그 파일에 복사하고 닫는다.
+3. 그 파일을 읽기 전용으로 다시 연다. 그리고 다음을 확인한다: `PRAGMA integrity_check`가 `ok`, `application_id`가 HIMARI, `user_version`이 이전 버전, 스키마가 이전 버전과 정확히 같음(지금의 서명 검사).
+4. 파일을 `fsync`한다.
+5. 최종 이름으로 `rename`한다. 같은 이름이 이미 있으면 덮어쓰지 않고 실패한다(`link` 후 `unlink`, 또는 `renameat2(RENAME_NOREPLACE)`).
+6. **부모 디렉터리를 `fsync`한다.** 파일 내용의 `fsync`만으로는 새 디렉터리 항목이 전원 차단 뒤에 남는다고 보장되지 않는다.
+
+- 백업 연결이 만드는 `-journal` 파일도 지금 규칙대로 비공개인지 확인한다.
 - 새 DB(빈 파일)나 같은 버전이면 백업하지 않는다.
 - 백업은 자동으로 지우지 않는다(Q3). 시작 로그에 경로를 남긴다.
+- **백업에는 그 시점의 모든 대화가 들어 있다.** 그 뒤에 영구 삭제한 대화도 백업에는 남는다. 운영 문서에 이 사실과 함께, 되돌릴 필요가 없어지면 백업을 지우라고 적는다(검수 Q3 의견).
 
 ### 8.2 되돌리기 절차 (운영자)
 
@@ -241,11 +290,11 @@ sudo systemctl start himari-v3
 
 | 모듈 | 변경 |
 | --- | --- |
-| Data | `ConversationSummary.trashed_at`, `TrashedConversation`, `ConversationCatalog`의 trash·restore·read_trashed·purge·used_tool_ids, `list_conversations(trashed=)`, Bootstrap 전용 `ConversationRetention`. 휴지통 대화는 다른 포트에서 NOT_AUTHORIZED. SQLite v7 `trashed_at`, `secure_delete`, 업그레이드 전 백업 |
+| Data | `ConversationSummary.trashed_at`, `TrashedConversation`, `ConversationCatalog`의 trash·restore·begin_purge·purge·used_tool_ids, `list_conversations(trashed=)`, Bootstrap 전용 `ConversationRetention.due_purges`. 휴지통 대화는 다른 포트에서 NOT_AUTHORIZED. SQLite v7 `trashed_at`·`purge_started_at`, `secure_delete`, 검증·`fsync`한 업그레이드 전 백업 |
 | Environment (Inside) | `remove_conversation_folder`, `fs.remove_tree` |
 | MCP | `McpConnection.release(key)` |
-| Control | `BackgroundRunner.close`·`reopen`·`forget` |
-| Bootstrap | `HIMARI_TRASH_DAYS`, `Application.trash`·`restore`·`purge`·`delete_notice`, 자동 정리 작업 |
+| Control | `BackgroundRunner.close(scope, timeout)`·`reopen`·`forget`(§7.1 계약), `ControlErrorCode.CLOSED` |
+| Bootstrap | `HIMARI_TRASH_DAYS`, `Application.trash`·`restore`·`purge`·`delete_notice`, 대화별 수명주기 잠금(§7.3), 자동 정리 작업 |
 | Web·CLI | §9 |
 | Prompt·Provider·Tool | 없음 |
 
@@ -257,6 +306,8 @@ sudo systemctl start himari-v3
 | Q2 | 휴지통의 대화 보기 | (a) 목록만(제목·미리보기·시각). 내용은 복원해서 본다 (b) 읽기 전용으로 내용까지 | **(a)** — 휴지통 대화를 모든 포트에서 없는 대화로 다루는 단순한 규칙(§4.2)을 지킨다. (b)는 읽기 포트마다 예외가 필요하다 |
 | Q3 | 업그레이드 백업 보관 | (a) 자동으로 지우지 않음(운영자가 지움) (b) 최근 3개만 남기고 자동 삭제 | **(a)** — 업그레이드는 드물고, 백업을 자동으로 지우는 장치가 오히려 위험하다. 경로는 시작 로그에 남긴다 |
 
+**소유자 결정(2026-10-21): Q1 (a), Q2 (a), Q3 (a) — 모두 권고대로.**
+
 **이미 정해진 것(2026-10-21, 소유자):** 휴지통 → N일 뒤 영구 삭제. 대화 폴더는 같이 지움. 외부 서버 데이터는 지우지 않고 알림. 실행 중이면 먼저 취소. 삭제와 백업을 한 묶음으로.
 
 ## 12. 위협과 대응
@@ -264,37 +315,56 @@ sudo systemctl start himari-v3
 | 위협 | 대응 |
 | --- | --- |
 | 다른 사용자의 대화를 지움 | 모든 휴지통 포트가 owner를 검사하고, 다른 사용자·없는 대화는 같은 NOT_AUTHORIZED |
-| 휴지통으로 옮기는 중에 다른 탭이 새 작업을 시작 | Runner를 먼저 닫는다(§7.1의 1). 그래도 늦게 온 쓰기는 Data가 거부(§4.2) |
+| 휴지통으로 옮기는 중에 다른 탭이 새 작업을 시작 | Runner를 먼저 닫는다. `accept` 중이던 요청은 끝날 때까지 기다리고, `_start`가 닫힘을 다시 확인한다(§7.1 계약, B2). 그래도 늦게 온 쓰기는 Data가 거부(§4.2) |
+| 자동 정리와 복원이 겹쳐 복원된 대화의 폴더가 지워짐 | 대화별 수명주기 잠금으로 전이를 하나씩(§7.3, B1). 폴더를 지우기 전에 PURGING을 기록해 복원 거부(§3) |
+| 폴더를 지운 직후 서버가 죽고, 재시작 뒤 그 대화를 복원 | PURGING이면 복원 거부, 다음 정리가 끝냄(§7.2) |
+| 업그레이드는 끝났는데 전원 차단으로 백업 파일이 사라짐 | 내용·디렉터리 모두 `fsync`하고 검증한 뒤에만 업그레이드(§8.1, B3) |
+| 쓴 서버가 설정에서 빠져 외부 데이터 안내가 사라짐 | 기록된 Tool id의 앞부분(서버 이름)으로 알리고, 일반 문구는 늘 보임(§6.1, C1) |
 | 진행 중인 Tool이 취소를 무시해 영원히 기다림 | 30초 상한 뒤 거부, 상태는 그대로(§7.1의 2) |
 | 폴더 안의 심볼릭 링크를 따라가 Root 밖이나 다른 대화의 파일을 지움 | `RESOLVE_BENEATH`·`NO_SYMLINKS`·`NO_XDEV`, 링크는 링크만 지움(§5) |
 | 같은 Root의 명령이 실행 중인 폴더를 지움 | Workspace 쓰기 잠금 아래에서만 지움(§5) |
 | 다른 대화가 여전히 보는 MCP 뷰 HTML을 지움 | 참조가 없는 digest만, 같은 트랜잭션에서 확인(§4.3) |
 | 대화 테이블을 더하고 삭제 목록에 빠뜨림 | 외래 키로 트랜잭션 실패 + `conversation_id` 열이 있는 모든 테이블을 확인하는 테스트(§4.3) |
 | 영구 삭제 중 서버가 죽음 | 폴더 먼저, Data 나중. 다음 정리 때 다시 돈다(§7.2) |
-| 지운 내용이 DB 파일에 남음 | `secure_delete=ON`(§4.3). 백업 파일에는 남는다. 백업은 업그레이드 시점의 것이고 운영자가 지운다(Q3) |
+| 지운 내용이 DB 파일에 남음 | `secure_delete=ON`(§4.3). 백업 파일에는 남는다. 백업은 업그레이드 시점의 것이고 운영자가 지운다(Q3, 운영 문서에 명시) |
 | 업그레이드가 중간에 실패해 DB가 망가짐 | 업그레이드는 지금도 한 트랜잭션. 그 앞에 백업, 백업 실패면 시작 거부(§8.1) |
 | 되돌린 이전 릴리스가 새 DB를 열지 못함 | 백업으로 DB도 되돌리는 절차(§8.2), 이번 배포에서 실제로 시험 |
 
 ## 13. 검증 계획
 
 - **Data (인메모리·SQLite 양쪽):**
-  - 상태 전이: trash·restore·purge, 잘못된 전이의 INVALID_STATE_TRANSITION.
+  - 상태 전이: trash·restore·begin_purge·purge, 잘못된 전이의 INVALID_STATE_TRANSITION. PURGING이면 복원 거부, `begin_purge`는 다시 불러도 같음.
   - 휴지통 대화에 대한 모든 다른 포트의 NOT_AUTHORIZED(포트 목록을 돌며).
   - purge 뒤 `conversation_id` 열이 있는 모든 테이블에 그 대화 행이 없음.
   - 공유 `ui_digest`는 다른 대화가 참조하면 남고, 아무도 참조하지 않으면 지워짐.
   - 각 쓰기 직후 오류를 주입하면 purge 전체가 롤백.
-  - `trashed_before`.
-- **SQLite 업그레이드:** v6 → v7. 백업 파일이 원본과 같은 내용이고 0600이다. 백업 실패(쓰기 금지 디렉터리 등)면 시작을 거부하고 DB는 v6 그대로다. 같은 버전과 새 DB에서는 백업하지 않는다.
+  - `due_purges`: 기간이 지난 휴지통 대화와 PURGING 대화 전부, 다른 사용자의 것도 포함.
+  - `used_tool_ids`: 서버를 설정에서 뺀 뒤에도 그 이름이 나옴.
+- **SQLite 업그레이드:** v6 → v7. 백업 파일이 원본과 같은 내용이고 0600이다. 백업이 실패하면(쓰기 금지 디렉터리, 검증 실패, 같은 이름의 파일이 이미 있음) 시작을 거부하고, DB는 v6 그대로이며 `.partial`이 남지 않는다. `fsync`가 파일과 부모 디렉터리에 불리는지 확인한다(`os.fsync`를 감싸 기록). 같은 버전과 새 DB에서는 백업하지 않는다.
 - **fs.remove_tree:**
   - Root 밖을 가리키는 링크와 다른 대화 폴더를 가리키는 링크는 대상이 남음.
   - 깊은 트리, 권한 500 디렉터리, 이미 없는 폴더.
   - 마운트 경계(`HIMARI_SANDBOX_HOST=1` 게이트에서).
 - **Application·Control:**
   - 실행 중인 대화를 휴지통으로 옮기면 작업이 취소되고 Run·Tool 기록이 종결된 뒤 옮겨짐.
-  - 옮기는 중의 submit은 BUSY.
+  - 옮기는 중의 submit은 CLOSED.
+  - **B2 회귀:** `driver.accept`를 멈춰 둔 채 `trash`를 부른다. `trash`는 `accept`가 끝날 때까지 기다리고, 그 submit은 작업을 시작하지 않고 CLOSED를 받는다. 메시지는 기록되어 있고, 복원 뒤 Continue로 이어진다.
+  - `submit_compaction`·`submit_cancel`도 닫힌 뒤에는 시작되지 않음.
+  - **B1 회귀:** 폴더 삭제를 멈춰 둔 채 `restore`를 부르면, `restore`는 잠금을 기다린 뒤 거부된다(대화는 이미 PURGING). 반대로 `restore`가 먼저 잡으면 `purge`는 `begin_purge`에서 거부되고 폴더는 남는다.
+  - 폴더 삭제 뒤 `purge_conversation` 전에 실패를 주입하면, 재시작 뒤 복원은 거부되고 다음 정리가 끝낸다.
   - 30초 상한.
   - purge의 순서와 중간 실패 뒤 재시도.
   - 자동 정리.
   - `per_conversation` 프로세스가 종료되고, 복원 뒤 새 프로세스와 `RESTART_NOTICE`.
 - **Web·CLI:** API 계약과 권한(다른 사용자, 휴지통 대화에 대한 다른 요청 404). 브라우저 스모크: 삭제 확인 창(외부 서버 문구) → 목록에서 사라짐 → 휴지통에서 복원 → 다시 삭제 → 지금 영구 삭제.
 - **배포:** v7 배포 때 백업 생성 확인 → 되돌리기 절차를 한 번 실제로 수행 → 다시 v7로.
+
+## 14. 검수 처리 — rev. 1(`14f3d79`), 독립 검수: NOT_READY
+
+| # | 지적 | 처리 |
+| --- | --- | --- |
+| B1 | 영구 삭제가 휴지통 상태를 확인한 뒤 복원이 끼어들면, 복원된 대화의 폴더가 지워진다 | 대화별 수명주기 잠금으로 trash·restore·purge를 하나씩 돌리고, purge는 끝까지 잠금을 쥔다(§7.3). 서버가 죽는 경우를 위해 폴더 삭제 전에 PURGING(`purge_started_at`)을 기록하고, 그 상태에서는 복원을 거부한다(§3, §4.1, §7.2) |
+| B2 | `submit`의 `await driver.accept()` 동안 Runner가 닫히면, 닫힌 뒤에 `_start`가 돈다 | `close`의 계약을 정했다: 접수 중인 요청 수를 세어 끝나기를 기다리고, `_start`가 매번 닫힘을 다시 확인한다(동기 함수라 끼어들 틈이 없음). 닫히기 직전에 기록된 메시지는 남고, 그 요청은 CLOSED를 받는다(§7.1). 회귀 테스트 추가(§13) |
+| B3 | 백업 파일의 `fsync`만으로는 디렉터리 항목이 남는다고 보장되지 않는다 | 업그레이드 전의 완료 조건을 정했다: `.partial`에 쓰기 → 다시 열어 검증 → 파일 `fsync` → 덮어쓰지 않는 `rename` → 부모 디렉터리 `fsync`. 하나라도 실패하면 업그레이드하지 않는다(§8.1) |
+| C1 | 지금 연결된 서버 목록과만 대조하면, 설정에서 빠진 서버의 안내가 사라진다 | 기록된 Tool id의 앞부분(`<서버>/…`)을 서버 이름으로 쓰고 지금 설정과 대조하지 않는다. 일반 문구는 늘 보인다(§6.1) |
+| Q3 의견 | 영구 삭제한 대화가 이전 백업에는 남는다 | §8.1과 §12에 적고, 운영 문서에 넣는다 |
