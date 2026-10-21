@@ -839,3 +839,113 @@ def test_a_step_of_calls_only_names_the_changed_model(tmp_path: Path, monkeypatc
         harness.queue(calls((ASK_USER_TOOL_ID, {"question": "Which file?"})))
         code, out, _ = harness.run("send", cid, "three")
         assert code == cli.EXIT_WAITING and "HIMARI (m) asks:" in out.splitlines()
+
+
+# --- the trash (V3-P65 §9) ---------------------------------------------------------------------
+
+
+def test_delete_trash_and_restore_from_the_cli(harness: Harness) -> None:
+    cid = harness.run("new", "--title", "Trip")[1].strip()
+    harness.queue(final("hello"))
+    harness.run("send", cid, "hi")
+    code, _, err = harness.run("delete", cid, stdin="n\n")
+    assert code == 0 and "(nothing was deleted)" in err and cid in harness.run("list")[1]
+    assert err.splitlines()[:2] == ['Move "Trip" to the trash? It is deleted for good after 30 days.',
+                                    "Data stored by external services is not deleted."]
+    code, _, err = harness.run("delete", cid)  # no answer (EOF) is no
+    assert code == 0 and "(nothing was deleted)" in err
+
+    code, _, err = harness.run("delete", cid, stdin="y\n")
+    assert code == 0 and "(moved to the trash; deleted for good on 20" in err and f"himari restore {cid}" in err
+    assert cid not in harness.run("list")[1]
+    code, out, _ = harness.run("trash")
+    assert code == 0 and out.startswith(f"{cid}  trashed 20") and "deleted 20" in out and out.rstrip().endswith("Trip")
+    code, _, err = harness.run("show", cid)
+    assert code == cli.EXIT_FAILED and "not_found" in err  # a trashed conversation is a missing one
+
+    code, _, err = harness.run("restore", cid)
+    assert code == 0 and "(restored)" in err and cid in harness.run("list")[1]
+    code, _, err = harness.run("restore", cid)
+    assert code == cli.EXIT_FAILED and "not_restorable" in err
+
+    code, _, err = harness.run("delete", cid, "--now", "--yes")
+    assert code == 0 and err.splitlines()[0] == 'Delete "Trip" for good? This cannot be undone.'
+    assert "(deleted for good)" in err
+    assert "(the trash is empty)" in harness.run("trash")[2]
+    code, _, err = harness.run("restore", cid)
+    assert code == cli.EXIT_FAILED and "not_found" in err
+
+
+def test_the_trash_and_the_list_page_on(harness: Harness) -> None:
+    cids = [harness.run("new", "--title", f"T{n}")[1].strip() for n in range(3)]
+    for cid in cids:
+        harness.run("delete", cid, "--yes")
+    code, out, err = harness.run("trash", "--limit", "2")
+    assert code == 0 and len(out.splitlines()) == 2 and "(more: --offset 2)" in err
+    code, out, err = harness.run("trash", "--limit", "2", "--offset", "2")
+    assert code == 0 and len(out.splitlines()) == 1 and "(more:" not in err
+    assert "(nothing more in the trash)" in harness.run("trash", "--offset", "3")[2]
+    harness.run("restore", cids[0])
+    harness.run("restore", cids[1])
+    code, out, err = harness.run("list", "--limit", "1", "--offset", "1")
+    assert code == 0 and len(out.splitlines()) == 1 and "(more: --offset 2)" in err
+    assert "(no more conversations)" in harness.run("list", "--offset", "2")[2]
+
+
+def test_the_delete_question_says_what_stays_and_what_stops() -> None:
+    notice = {"servers": ["calliope", "old"], "unconfigured": ["old"], "running": True, "trash_days": 7}
+    assert cli.delete_question("Trip", notice, now=False) == [
+        'Move "Trip" to the trash? It is deleted for good after 7 days.',
+        "The work under way is stopped first.",
+        "Data stored by the external servers this conversation used (calliope, old (no longer configured))"
+        " is not deleted."]
+    assert len(cli.delete_question("a\nb", notice, now=True)) == 3  # a title's own line breaks are escaped later
+
+
+def test_delete_in_a_chat_moves_it_and_leaves(harness: Harness) -> None:
+    cid = harness.run("new")[1].strip()
+    lines = iter(["/delete", "n", "/delete", "y", "never read"])
+    out, err = io.StringIO(), io.StringIO()
+    session = cli.Session(harness.client(), cli.Printer(out), err, sleep=lambda s: None)
+    assert cli.cmd_chat(session, cli.parser().parse_args(["chat", cid]), read=lambda p: next(lines)) == 0
+    assert next(lines) == "never read"  # the chat ended once it was moved
+    assert err.getvalue().count("(nothing was deleted)") == 1 and "moved to the trash" in err.getvalue()
+    assert cid in harness.run("trash")[1]
+
+
+def test_a_trash_waits_longer_than_other_requests() -> None:
+    seen: list[Any] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((request.method, request.url.path, request.extensions["timeout"]["read"]))
+        if request.url.path.endswith("/delete-notice"):
+            return httpx.Response(200, json={"servers": [], "unconfigured": [], "running": True, "trash_days": 30})
+        if request.url.path.endswith("/trash"):
+            return httpx.Response(200, json={"trashed_at": "2026-10-21T00:00:00+00:00",
+                                             "purge_after": "2026-11-20T00:00:00+00:00"})
+        return httpx.Response(200, json={"conversation": {"title": "T", "last_sequence": 0}, "job": {"running": True}})
+
+    client = ServerClient(httpx.Client(base_url="http://127.0.0.1:1", transport=httpx.MockTransport(handler),
+                                       timeout=30.0))
+    out, err = io.StringIO(), io.StringIO()
+    assert cli.run(["delete", "conv_1", "--yes"], environ={}, out=out, err=err, client=client) == 0
+    assert "The work under way is stopped first." in err.getvalue() and "2026-11-20" in err.getvalue()
+    assert seen[-1] == ("POST", "/api/conversations/conv_1/trash", cli.TRASH_SECONDS)
+    assert {timeout for method, _, timeout in seen if method == "GET"} == {30.0}
+
+
+def test_a_refused_delete_for_good_says_it_stays_in_the_trash() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "DELETE":
+            return httpx.Response(409, json={"error": {"code": "not_in_trash", "message": "no"}})
+        if request.url.path.endswith("/delete-notice"):
+            return httpx.Response(200, json={"servers": [], "unconfigured": [], "running": False, "trash_days": 30})
+        if request.url.path.endswith("/trash"):
+            return httpx.Response(200, json={"trashed_at": "2026-10-21T00:00:00+00:00",
+                                             "purge_after": "2026-11-20T00:00:00+00:00"})
+        return httpx.Response(200, json={"conversation": {"title": "T", "last_sequence": 0}, "job": {"running": False}})
+
+    client = ServerClient(httpx.Client(base_url="http://127.0.0.1:1", transport=httpx.MockTransport(handler)))
+    out, err = io.StringIO(), io.StringIO()
+    assert cli.run(["delete", "conv_1", "--now", "--yes"], environ={}, out=out, err=err, client=client) == 1
+    assert "moved to the trash, but not deleted for good" in err.getvalue() and "not_in_trash" in err.getvalue()

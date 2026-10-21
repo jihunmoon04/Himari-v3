@@ -63,6 +63,7 @@ HIMARI v3의 **아키텍처와 구현 현황**입니다. 2026-10-13 기준 PR #1
 - [MCP stdio 지원](docs/mcp-stdio-v0.1.md) — stdio MCP 서버를 server sandbox 안의 격리 프로세스로 실행(기본 서버당 하나), Sandbox 모듈 분리(V3-P59)
 - [MCP 서버의 안내문·프롬프트·리소스](docs/mcp-context-v0.1.md) — 서버 안내문을 시스템 영역에, 프롬프트는 사용자가 `/`로, 리소스는 모델용 읽기 Tool로(V3-P60, 설계 초안)
 - [한 턴의 예산과 비용](docs/control-run-budget-v0.1.md) — Run 수 상한 없이, 토큰 예산·진척 없음·자리 비움이 한 턴을 지킴; 남은 예산 알림, 사용량 표시, 대화별 캐시 경로(V3-P62)
+- [대화 삭제와 업그레이드 백업](docs/conversation-delete-v0.1.md) — 휴지통 → N일 뒤 영구 삭제, 대화 폴더도 함께, 외부 서버 데이터는 알림만; DB 업그레이드 전 백업과 되돌리기(V3-P65)
 - [결정 기록](docs/decisions.md) — 현재까지 합의한 내용과 설계상 권고 사항 (모듈 경계 개정 V3-039~046 포함)
 - [미결정 사항](docs/open-questions.md) — 초기 구현에 앞서 확정할 계약과 후속 결정
 
@@ -83,6 +84,8 @@ HIMARI_DATA_ROOT=~/.himari python -m himari.interfaces.web --env-file .env
   - 자리 비움 `HIMARI_UNATTENDED_RUNS`(기본 20, `0`이면 끔): 60초 안에 대화를 읽은 클라이언트가 없는 채로 그만큼 Run이 지나면 일시정지합니다.
   - `HIMARI_MAX_RUNS`(기본 `0` = 없음)로 Run 수 상한을 더할 수 있습니다. 예산과 상한을 둘 다 끄면 시작이 거부됩니다.
   - 멈춘 턴은 Web의 **Continue** 버튼(입력창 위)이나 CLI의 `continue`로 이어 가며, 이어 갈 때 새 예산을 받습니다. 쓴 토큰은 Web 입력창 아래(작업 중)와 CLI 턴 끝에 보입니다.
+- **대화 삭제 (V3-P65):** Web 대화 메뉴의 **Delete conversation**이나 CLI `himari delete ID`는 대화를 휴지통으로 옮깁니다(실행 중이면 먼저 멈춤). 휴지통(Web 사이드바 **Trash**, CLI `himari trash`)에서 복원하거나 바로 영구 삭제할 수 있고, `HIMARI_TRASH_DAYS`(기본 30, 1~365)일이 지나면 서버가 영구 삭제합니다. 영구 삭제는 대화의 모든 기록과 대화 폴더(`conversations/<id>`)를 지웁니다. MCP 서버가 자기 쪽에 저장한 데이터는 지우지 않으며, 확인 창이 그 서버 이름을 알려 줍니다.
+- **DB 업그레이드 전 백업:** 새 릴리스가 DB 스키마를 올릴 때는 먼저 `himari.db.v<이전 버전>-<시각>.bak`(0600)을 만들고 검증한 뒤에만 올립니다. 백업에 실패하면 시작하지 않습니다. 경로는 시작 로그에 나오며, 백업은 자동으로 지우지 않습니다(그 시점의 모든 대화가 들어 있으니 필요 없어지면 운영자가 지웁니다). 되돌리는 절차는 [설계 §8.2](docs/conversation-delete-v0.1.md#82-되돌리기-절차-운영자)에 있습니다.
 - 브라우저에서 `http://127.0.0.1:8765/`를 열고 `~/.himari/control/operator.secret`의 토큰으로 로그인합니다.
 - 서버는 평문 HTTP라서 loopback 주소(`127.0.0.1`·`::1`·`localhost`)에만 바인딩합니다. 다른 기기에서 쓰려면 같은 기기의 TLS reverse proxy 뒤에 두고 `HIMARI_WEB_ALLOWED_HOSTS=<공개 이름>`·`HIMARI_WEB_ALLOWED_ORIGINS=https://<공개 이름>`을 지정하세요. 외부 주소 바인딩이나 다른 기기용 평문 `http://` Origin은 시작 단계에서 거부됩니다(토큰 보호).
 
@@ -168,9 +171,12 @@ HIMARI_DATA_ROOT=~/.himari python -m himari.interfaces.web --env-file .env
 export HIMARI_DATA_ROOT=~/.himari               # 운영자 토큰을 읽을 데이터 폴더
 himari chat                                     # 새 대화 (python -m himari.interfaces.cli chat)
 himari list; himari show conv_1; himari send conv_1 "질문"; himari continue conv_1
+himari delete conv_1 [--now] [--yes]            # 휴지통으로 (--now: 바로 영구 삭제, --yes: 묻지 않음)
+himari trash; himari restore conv_1             # 휴지통 목록, 복원
+himari list --offset 50; himari trash --offset 50  # 다음 쪽 (더 있으면 "(more: --offset N)")
 ```
 
-대화형 모드에서는 질문이 오면 `answer>`로 답하고, `/continue`·`/context`·`/compact`·`/tools`·`/prompts`·`/prompt 서버 이름 인자=값`·`/rename 이름`·`/id`·`/exit`를 쓸 수 있습니다. `/`로 시작하는 글을 그대로 보내려면 `//`로 시작합니다. 종료 코드: 0 완료, 3 답변 대기, 1 미완료·거부, 2 설정 오류, 4 결과 불명(다시 보내기 전에 `show`로 확인).
+대화형 모드에서는 질문이 오면 `answer>`로 답하고, `/continue`·`/context`·`/compact`·`/tools`·`/prompts`·`/prompt 서버 이름 인자=값`·`/rename 이름`·`/delete`(확인 뒤 휴지통으로 옮기고 나감)·`/id`·`/exit`를 쓸 수 있습니다. `/`로 시작하는 글을 그대로 보내려면 `//`로 시작합니다. 종료 코드: 0 완료, 3 답변 대기, 1 미완료·거부, 2 설정 오류, 4 결과 불명(다시 보내기 전에 `show`로 확인).
 
 공개 계약은 각 모듈의 `api.py`가 원본입니다(V3-046). P0 실행 경로는 `build_runtime(provider, store=SqliteStore(path))`로 영속 Data를, 저장소를 생략하면 인메모리 Data를 사용하며, Fake Provider뿐 아니라 **실제 OpenRouter LLM**으로도 실행할 수 있습니다.
 

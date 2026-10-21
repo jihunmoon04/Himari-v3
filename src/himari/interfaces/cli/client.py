@@ -86,8 +86,9 @@ class ServerClient:
     def get(self, path: str, params: dict[str, Any] | None = None) -> Any:
         return self._request("GET", path, params=params)
 
-    def post(self, path: str, body: dict[str, Any] | None = None) -> Any:
-        return self._request("POST", path, body=body if body is not None else {})
+    def post(self, path: str, body: dict[str, Any] | None = None, *, timeout: float | None = None) -> Any:
+        """``timeout``: for a request the server may take longer to answer."""
+        return self._request("POST", path, body=body if body is not None else {}, timeout=timeout)
 
     def patch(self, path: str, body: dict[str, Any]) -> Any:
         return self._request("PATCH", path, body=body)
@@ -95,13 +96,17 @@ class ServerClient:
     def put(self, path: str, body: dict[str, Any]) -> Any:
         return self._request("PUT", path, body=body)
 
+    def delete(self, path: str) -> Any:
+        return self._request("DELETE", path)
+
     def _request(self, method: str, path: str, *, params: dict[str, Any] | None = None,
-                 body: dict[str, Any] | None = None) -> Any:
+                 body: dict[str, Any] | None = None, timeout: float | None = None) -> Any:
         mutation = method != "GET"
         unknown = "the request was sent but its answer {}; it may have been applied"
         too_large = False
         try:
-            with self._http.stream(method, path, params=params, json=body) as response:
+            with self._http.stream(method, path, params=params, json=body,
+                                   timeout=httpx.USE_CLIENT_DEFAULT if timeout is None else timeout) as response:
                 status = response.status_code
                 data = bytearray()
                 for chunk in response.iter_bytes():

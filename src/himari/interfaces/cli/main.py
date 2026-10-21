@@ -1,7 +1,11 @@
 """``himari`` — the terminal client of the local HIMARI Web server (V3-P47).
 
-    himari chat [ID] [--title T]   interactive; /continue /context /compact /tools /model /rename /id /exit
-    himari list                    your conversations, most recent first
+    himari chat [ID] [--title T]   interactive; /continue /context /compact /tools /model /rename /delete /id /exit
+    himari list [--offset N]       your conversations, most recent first
+    himari delete ID [--now] [--yes]
+                                   move a conversation to the trash (--now: delete it for good)
+    himari trash [--offset N]      the conversations in the trash
+    himari restore ID              bring a conversation back from the trash
     himari show ID                 a conversation's transcript and state
     himari new [--title T]         create a conversation, print its id
     himari send ID TEXT|-          send one message (``-`` reads stdin) and follow it
@@ -48,6 +52,7 @@ from himari.interfaces.cli.terminal import Symbols, safe_block, safe_line, strea
 EXIT_OK, EXIT_FAILED, EXIT_USAGE, EXIT_WAITING, EXIT_UNKNOWN = 0, 1, 2, 3, 4
 POLL_SECONDS = 0.5
 EVENT_PAGE = 32  # 32 x a 64 KiB Tool result stays well under the 8 MiB response bound
+TRASH_SECONDS = 90.0  # the server waits up to 30 s for a running job to stop (V3-P65 §7.1)
 TOOL_RESULT_LINES = 8
 
 STATE_TEXT = {
@@ -493,18 +498,95 @@ def expand_prompt(session: Session, conversation_id: str, words: list[str]) -> s
     return text
 
 
+def delete_question(name: str, notice: dict[str, Any], now: bool) -> list[str]:
+    """The delete confirmation (V3-P65 §9), with what it does not delete
+    (§6.1); one line each."""
+    days = int(notice.get("trash_days") or 0)
+    lines = [f"Delete \"{name}\" for good? This cannot be undone." if now
+             else f"Move \"{name}\" to the trash? It is deleted for good after {days} days."]
+    if notice.get("running"):
+        lines.append("The work under way is stopped first.")
+    unconfigured = set(notice.get("unconfigured") or [])
+    servers = [f"{s} (no longer configured)" if s in unconfigured else str(s) for s in notice.get("servers") or []]
+    lines.append(f"Data stored by the external servers this conversation used ({', '.join(servers)}) is not deleted."
+                 if servers else "Data stored by external services is not deleted.")
+    return lines
+
+
+def delete_conversation(session: Session, conversation_id: str, *, now: bool, yes: bool,
+                        read: Callable[[str], str]) -> bool:
+    """Asks first (unless ``yes``), then moves it to the trash; ``now``:
+    deletes it for good right after. Whether it was moved."""
+    detail = session.client.get(_path(conversation_id))
+    notice = session.client.get(_path(conversation_id, "/delete-notice"))
+    name = detail["conversation"].get("title") or detail["conversation"].get("preview") or "(new conversation)"
+    for line in delete_question(name, notice, now):
+        session.note(line)
+    if not yes:
+        try:
+            answer = read("Delete? [y/N] " if now else "Move to the trash? [y/N] ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            answer = ""
+        if answer not in ("y", "yes"):
+            session.note("(nothing was deleted)")
+            return False
+    moved = session.client.post(_path(conversation_id, "/trash"), None, timeout=TRASH_SECONDS)
+    if not now:
+        until = str(moved.get("purge_after") or "")[:10]
+        session.note(f"(moved to the trash; deleted for good on {until} — "
+                     f"`himari restore {conversation_id}` brings it back)")
+        return True
+    try:
+        session.client.delete(_path(conversation_id))
+    except ClientError:
+        session.note("(moved to the trash, but not deleted for good: `himari trash` shows it)")
+        raise
+    session.note("(deleted for good)")
+    return True
+
+
 # --- commands ----------------------------------------------------------------------------------
 
 
+def _more(session: Session, page: dict[str, Any]) -> None:
+    if page.get("next_offset") is not None:
+        session.note(f"(more: --offset {page['next_offset']})")
+
+
 def cmd_list(session: Session, args: argparse.Namespace) -> int:
-    page = session.client.get("/api/conversations", {"limit": args.limit})
+    page = session.client.get("/api/conversations", {"limit": args.limit, "offset": args.offset})
     enc = session.printer.encoding
     for item in page["items"]:
         name = item.get("title") or item.get("preview") or "(new conversation)"
         session.printer.line(f"{safe_line(item['id'], encoding=enc)}  {item['last_activity_at'][:19]}  "
                              f"{safe_line(name, encoding=enc)}")
     if not page["items"]:
-        session.note("(no conversations yet)")
+        session.note("(no conversations yet)" if not args.offset else "(no more conversations)")
+    _more(session, page)
+    return EXIT_OK
+
+
+def cmd_trash(session: Session, args: argparse.Namespace) -> int:
+    page = session.client.get("/api/conversations", {"limit": args.limit, "offset": args.offset, "trashed": "true"})
+    enc = session.printer.encoding
+    for item in page["items"]:
+        name = item.get("title") or item.get("preview") or "(new conversation)"
+        session.printer.line(f"{safe_line(item['id'], encoding=enc)}  trashed {item['trashed_at'][:19]}  "
+                             f"deleted {item['purge_after'][:10]}  {safe_line(name, encoding=enc)}")
+    if not page["items"]:
+        session.note("(the trash is empty)" if not args.offset else "(nothing more in the trash)")
+    _more(session, page)
+    return EXIT_OK
+
+
+def cmd_delete(session: Session, args: argparse.Namespace, read: Callable[[str], str] = input) -> int:
+    delete_conversation(session, args.id, now=args.now, yes=args.yes, read=read)
+    return EXIT_OK
+
+
+def cmd_restore(session: Session, args: argparse.Namespace) -> int:
+    session.client.post(_path(args.id, "/restore"))
+    session.note("(restored)")
     return EXIT_OK
 
 
@@ -601,7 +683,8 @@ CHAT_HELP = ("/continue  continue an unanswered message (or a paused turn)\n"
              "/model     the model; /model MODEL [EFFORT] or /model default to change (next message)\n"
              "/prompts   prompts the servers in use offer\n"
              "/prompt S N A=V ...  fill in server S's prompt N, show it, send it if you confirm\n"
-             "/rename T  rename\n/id        show the id\n/exit      leave")
+             "/rename T  rename\n/delete    move this conversation to the trash, then leave\n"
+             "/id        show the id\n/exit      leave")
 
 
 def cmd_chat(session: Session, args: argparse.Namespace, read: Callable[[str], str] = input) -> int:
@@ -668,6 +751,13 @@ def cmd_chat(session: Session, args: argparse.Namespace, read: Callable[[str], s
         if text == "/continue":
             _, after = session.submit_and_follow(conversation_id, after, None)
             continue
+        if text == "/delete":
+            try:
+                if delete_conversation(session, conversation_id, now=False, yes=False, read=read):
+                    return EXIT_OK  # in the trash: nothing more to say in it
+            except ServerRefused as error:
+                session.note(f"refused: {error}")
+            continue
         if text == "/dismiss":
             _, after = session.post_and_follow(conversation_id, after, "/dismiss", None)
             continue
@@ -728,8 +818,18 @@ def parser() -> argparse.ArgumentParser:
     chat.add_argument("--title")
     lst = sub.add_parser("list", help="list conversations")
     lst.add_argument("--limit", type=int, default=50)
+    lst.add_argument("--offset", type=int, default=0)
     show = sub.add_parser("show", help="show a conversation")
     show.add_argument("id")
+    delete = sub.add_parser("delete", help="move a conversation to the trash; deleted for good after the server's days")
+    delete.add_argument("id")
+    delete.add_argument("--now", action="store_true", help="delete it for good right away")
+    delete.add_argument("--yes", action="store_true", help="do not ask first")
+    trash = sub.add_parser("trash", help="the conversations in the trash")
+    trash.add_argument("--limit", type=int, default=50)
+    trash.add_argument("--offset", type=int, default=0)
+    restore = sub.add_parser("restore", help="bring a conversation back from the trash")
+    restore.add_argument("id")
     new = sub.add_parser("new", help="create a conversation")
     new.add_argument("--title")
     send = sub.add_parser("send", help="send one message and follow it")
@@ -761,7 +861,7 @@ def parser() -> argparse.ArgumentParser:
 COMMANDS: dict[str, Callable[[Session, argparse.Namespace], int]] = {
     "chat": cmd_chat, "list": cmd_list, "show": cmd_show, "new": cmd_new, "send": cmd_send, "continue": cmd_continue,
     "compact": cmd_compact, "tools": cmd_tools, "model": cmd_model, "pause": cmd_pause, "cancel": cmd_cancel,
-    "status": cmd_status, "rename": cmd_rename,
+    "status": cmd_status, "rename": cmd_rename, "delete": cmd_delete, "trash": cmd_trash, "restore": cmd_restore,
 }
 
 

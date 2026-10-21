@@ -10,6 +10,10 @@
  * 3. Mutations are never replayed. A message whose outcome is unknown
  *    (network error) refreshes the view and says so; it is not resent.
  *
+ * The trash (V3-P65 §9): "Delete conversation" moves it there after a
+ * confirmation; the Trash surface lists what is there, to restore or to
+ * delete for good. A trashed conversation is a missing one (404) elsewhere.
+ *
  * Progress is read by polling the conversation (job + waiting question)
  * and its events after the last sequence shown. Tool views (MCP Apps) are
  * app_view.js's: this file only tells it about rows, results and sources.
@@ -112,6 +116,8 @@ const app = {
   running: false, // the last detail's job state: a model change then applies from the next turn
   changedWhileRunning: false, // the model was changed during the turn under way (PR #53 review C1)
   lastModel: null, // the model of the latest answer shown, for the label on a change
+  trashOffset: 0,
+  trashDays: null, // from /api/server
 };
 
 const views = new AppViews(api, el, () => app.conversationId);
@@ -123,7 +129,7 @@ function status(text, tone) {
 }
 
 function showSurface(name) {
-  for (const surface of ["login", "home", "chat"]) $(`surface-${surface}`).hidden = surface !== name;
+  for (const surface of ["login", "home", "chat", "trash"]) $(`surface-${surface}`).hidden = surface !== name;
   const signedIn = name !== "login";
   $("sidebar").hidden = !signedIn;
   $("sidebar-toggle").hidden = !signedIn;
@@ -845,10 +851,14 @@ function poll(generation) {
         loadModel(generation); // a stored choice may have been changed elsewhere
       }
     } catch (error) {
-      if (generation === app.generation && error.status !== 401) {
-        status("Lost contact with the server; retrying…", "warn");
-        poll(generation);
+      if (generation !== app.generation || error.status === 401) return;
+      if (error.status === 404) { // moved to the trash elsewhere (V3-P65): it is gone from here
+        await showHome().catch(() => {});
+        status("That conversation is no longer here; it may have been moved to the trash.", "warn");
+        return;
       }
+      status("Lost contact with the server; retrying…", "warn");
+      poll(generation);
     }
   }, POLL_MS);
 }
@@ -982,6 +992,176 @@ async function renameConversation() {
   }
 }
 
+/* ---------------------------------------------------------------- trash */
+
+/* A confirmation over everything else; resolves true only for the action
+ * button. Escape, Cancel or the backdrop: false. */
+function confirmAction(title, lines, action) {
+  const dialog = $("confirm-dialog");
+  const before = document.activeElement;
+  $("confirm-title").textContent = title;
+  $("confirm-body").replaceChildren(...lines.map((line) => el("p", null, line)));
+  $("confirm-ok").textContent = action;
+  dialog.hidden = false;
+  $("confirm-cancel").focus();
+  return new Promise((resolve) => {
+    const done = (answer) => {
+      dialog.hidden = true;
+      dialog.removeEventListener("keydown", key);
+      dialog.removeEventListener("click", outside);
+      $("confirm-ok").onclick = null;
+      $("confirm-cancel").onclick = null;
+      if (before && typeof before.focus === "function") before.focus();
+      resolve(answer);
+    };
+    const key = (event) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        done(false);
+      } else if (event.key === "Tab") { // the focus stays in the dialog
+        const first = $("confirm-cancel");
+        const last = $("confirm-ok");
+        if (event.shiftKey && document.activeElement === first) {
+          event.preventDefault();
+          last.focus();
+        } else if (!event.shiftKey && document.activeElement === last) {
+          event.preventDefault();
+          first.focus();
+        }
+      }
+    };
+    const outside = (event) => {
+      if (event.target === dialog) done(false);
+    };
+    dialog.addEventListener("keydown", key);
+    dialog.addEventListener("click", outside);
+    $("confirm-ok").onclick = () => done(true);
+    $("confirm-cancel").onclick = () => done(false);
+  });
+}
+
+function localDate(iso) {
+  return new Date(iso).toLocaleDateString();
+}
+
+/* V3-P65 §6.1: what deleting does not reach. */
+function externalLine(notice) {
+  if (!notice.servers.length) return "Data stored by external services is not deleted.";
+  const names = notice.servers.map((s) => (notice.unconfigured.includes(s) ? `${s} (no longer configured)` : s));
+  return `Data stored by the external servers this conversation used (${names.join(", ")}) is not deleted.`;
+}
+
+async function deleteConversation() {
+  closeChatMenu();
+  const id = app.conversationId;
+  if (id === null) return;
+  const name = $("topbar-title").textContent;
+  const generation = app.generation;
+  const still = () => generation === app.generation && app.conversationId === id; // not left for another
+  let notice;
+  try {
+    notice = await api("GET", `/api/conversations/${encodeURIComponent(id)}/delete-notice`);
+  } catch (error) {
+    if (still()) status(error.message, "error");
+    return;
+  }
+  if (!still()) return;
+  const lines = [`It moves to the trash and is deleted for good after ${notice.trash_days} days. `
+                 + "Until then you can restore it from the trash."];
+  if (notice.running) lines.push("The work under way is stopped first.");
+  lines.push(externalLine(notice));
+  if (!(await confirmAction(`Delete “${name}”?`, lines, "Move to trash")) || !still()) return;
+  $("chat-menu-delete").disabled = true;
+  status(notice.running ? "Stopping the work under way, then moving it to the trash…" : "Moving it to the trash…");
+  try {
+    const moved = await api("POST", `/api/conversations/${encodeURIComponent(id)}/trash`);
+    // Moved: a list that fails to load now must not read as a failed move.
+    await (app.conversationId === id ? showHome() : loadList(true).then(markSelected)).catch(() => {});
+    status(`Moved “${name}” to the trash. It is deleted for good on ${localDate(moved.purge_after)}.`, "ok");
+  } catch (error) {
+    if (error.kind === "network") {
+      status("Could not confirm the move; check the trash before trying again.", "warn");
+    } else {
+      status(error.message, "error");
+    }
+  } finally {
+    $("chat-menu-delete").disabled = false;
+  }
+}
+
+function renderTrashRow(item) {
+  const li = el("li", "trash-row");
+  const main = el("div", "trash-row-main");
+  main.append(el("span", "row-title", conversationName(item)),
+              el("span", "row-meta", `Moved ${new Date(item.trashed_at).toLocaleString()}`
+                 + ` · deleted for good on ${localDate(item.purge_after)}`));
+  const actions = el("div", "trash-row-actions");
+  const restore = el("button", null, "Restore");
+  restore.type = "button";
+  restore.addEventListener("click", () => restoreConversation(item, restore));
+  const purge = el("button", "danger-button", "Delete now");
+  purge.type = "button";
+  purge.addEventListener("click", () => purgeConversation(item, purge));
+  actions.append(restore, purge);
+  li.append(main, actions);
+  return li;
+}
+
+async function loadTrash(reset) {
+  if (reset) app.trashOffset = 0;
+  const generation = app.generation;
+  const page = await api("GET", `/api/conversations?trashed=1&limit=${PAGE}&offset=${app.trashOffset}`);
+  if (generation !== app.generation) return;
+  const list = $("trash-list");
+  if (reset) list.replaceChildren();
+  for (const item of page.items) list.append(renderTrashRow(item));
+  app.trashOffset = page.next_offset ?? app.trashOffset + page.items.length;
+  $("trash-load-more").hidden = page.next_offset === null;
+  $("trash-empty").hidden = list.children.length > 0;
+}
+
+async function showTrash() {
+  stopPolling();
+  views.reset();
+  app.conversationId = null;
+  app.generation += 1;
+  markSelected();
+  showSurface("trash");
+  closeNav();
+  $("topbar-title").textContent = "Trash";
+  $("trash-hint").textContent = (app.trashDays ? `Conversations here are deleted for good ${app.trashDays} days`
+    + " after they were moved. " : "") + "Restore one to read it again.";
+  status("");
+  await loadTrash(true);
+}
+
+async function restoreConversation(item, button) {
+  button.disabled = true;
+  try {
+    await api("POST", `/api/conversations/${encodeURIComponent(item.id)}/restore`);
+    status(`Restored “${conversationName(item)}”.`, "ok");
+  } catch (error) {
+    status(error.message, "error");
+  }
+  await Promise.all([loadTrash(true), loadList(true).then(markSelected)]).catch(() => {});
+}
+
+async function purgeConversation(item, button) {
+  const name = conversationName(item);
+  const lines = ["This cannot be undone. Its messages, its records and its files are deleted.",
+                 "Data stored by external services is not deleted."];
+  if (!(await confirmAction(`Delete “${name}” for good?`, lines, "Delete for good"))) return;
+  button.disabled = true;
+  try {
+    await api("DELETE", `/api/conversations/${encodeURIComponent(item.id)}`);
+    status(`Deleted “${name}” for good.`, "ok");
+  } catch (error) {
+    status(error.kind === "network" ? "Could not confirm the deletion; check the trash again." : error.message,
+           error.kind === "network" ? "warn" : "error");
+  }
+  await loadTrash(true).catch(() => {});
+}
+
 /* --------------------------------------------------------------- chrome */
 
 function closeChatMenu() {
@@ -1032,6 +1212,7 @@ async function loadServerInfo() {
     const server = await api("GET", "/api/server");
     info.textContent = `${server.model} · ${SANDBOX_TEXT[server.sandbox] || server.sandbox}`;
     app.models = Array.isArray(server.models) ? server.models : [];
+    app.trashDays = Number.isInteger(server.trash_days) ? server.trash_days : null;
     renderModel();
     info.classList.toggle("is-warn", server.sandbox !== "enforced");
     info.hidden = false;
@@ -1048,6 +1229,9 @@ async function enter() {
 async function boot() {
   $("login-form").addEventListener("submit", signIn);
   $("nav-sign-out").addEventListener("click", signOut);
+  $("nav-trash").addEventListener("click", () => showTrash().catch((e) => status(e.message, "error")));
+  $("trash-load-more").addEventListener("click", () => loadTrash(false).catch((e) => status(e.message, "error")));
+  $("chat-menu-delete").addEventListener("click", deleteConversation);
   $("nav-home").addEventListener("click", () => showHome().catch((e) => status(e.message, "error")));
   $("nav-new-chat").addEventListener("click", newConversation);
   $("home-new-chat").addEventListener("click", newConversation);

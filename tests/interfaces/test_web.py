@@ -8,6 +8,7 @@ import json
 import threading
 import time
 from collections.abc import Iterator
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -20,7 +21,13 @@ from mcp_fake import URL as MCP_URL  # noqa: E402
 from mcp_fake import ECHO_SCHEMA, VIEW_HTML, VIEW_URI, FakeMcpServer, view_entry  # noqa: E402
 from testkit import calls, final  # noqa: E402
 
-from himari.bootstrap.application import DEFAULT_TURN_BUDGET, DEFAULT_UNATTENDED_RUNS, Application  # noqa: E402
+from himari.bootstrap import application as bootstrap  # noqa: E402
+from himari.bootstrap.application import (  # noqa: E402
+    DEFAULT_TURN_BUDGET,
+    DEFAULT_UNATTENDED_RUNS,
+    Application,
+    workspace_for,
+)
 from himari.bootstrap.operator import OPERATOR, derive_cli_bearer  # noqa: E402
 from himari.common import ASK_USER_TOOL_ID, ConversationId, PrincipalId, TextBlock, TrustedScope  # noqa: E402
 from himari.sandbox.api import SandboxState  # noqa: E402
@@ -263,7 +270,7 @@ def test_the_server_info_is_for_the_signed_in_operator(server: Server) -> None:
     assert server.client.get("/api/server").status_code == 401
     server.sign_in()
     info = server.client.get("/api/server").json()
-    assert info == {"model": "scripted-model", "sandbox": "unavailable", "context_budget": 128_000,
+    assert info == {"model": "scripted-model", "sandbox": "unavailable", "context_budget": 128_000, "trash_days": 30,
                     "models": [{"id": "scripted-model", "default_effort": None, "efforts": [], "window_known": False,
                                 "default": True}],
                     "turn": {"token_budget": 3_000_000, "unattended_runs": 20, "max_runs": None,
@@ -947,3 +954,148 @@ def test_answers_carry_their_model_and_a_change_applies_from_the_next_turn(model
     assert all("model" not in e for e in items if not e["kind"].startswith("assistant"))
     context = server.client.get(f"/api/conversations/{cid}/context").json()
     assert context["hard_limit_tokens"] == 240_000  # the chosen model's window less its output
+
+
+# --- the trash (V3-P65 §9) ---------------------------------------------------------------------
+
+
+def test_trash_restore_and_delete_for_good(server: Server) -> None:
+    server.sign_in()
+    cid = server.post("/api/conversations", {"title": "Trip"}).json()["id"]
+    queue(server, calls(("inside/write_file", {"path": "plan.txt", "content": "draft"})), final("written"))
+    server.post(f"/api/conversations/{cid}/messages", {"text": "write it down"})
+    server.wait_idle(cid)
+    assert server.application is not None
+    folder = Path(server.application.inside.host_root(workspace_for(OPERATOR))) / "conversations" / cid
+    assert (folder / "plan.txt").read_text() == "draft"
+    assert server.client.get(f"/api/conversations/{cid}/delete-notice").json() == {
+        "servers": [], "unconfigured": [], "running": False, "trash_days": 30}  # inside/… is HIMARI's own
+
+    for refused, code in [(server.client.delete(f"/api/conversations/{cid}", headers={"origin": ORIGIN}),
+                           "not_in_trash"),
+                          (server.post(f"/api/conversations/{cid}/restore"), "not_restorable")]:
+        assert refused.status_code == 409 and refused.json()["error"]["code"] == code
+
+    moved = server.post(f"/api/conversations/{cid}/trash")
+    assert moved.status_code == 200, moved.text
+    trashed_at = datetime.fromisoformat(moved.json()["trashed_at"])
+    assert datetime.fromisoformat(moved.json()["purge_after"]) == trashed_at + timedelta(days=30)
+    assert server.client.get("/api/conversations").json()["items"] == []
+    (item,) = server.client.get("/api/conversations?trashed=1").json()["items"]
+    assert (item["id"], item["title"], item["trashed_at"]) == (cid, "Trip", moved.json()["trashed_at"])
+    gone = [server.client.get(f"/api/conversations/{cid}"), server.client.get(f"/api/conversations/{cid}/events"),
+            server.post(f"/api/conversations/{cid}/messages", {"text": "hi"}),
+            server.post(f"/api/conversations/{cid}/trash"),
+            server.client.get(f"/api/conversations/{cid}/delete-notice")]
+    assert {r.status_code for r in gone} == {404}  # a trashed conversation is a missing one
+
+    assert server.post(f"/api/conversations/{cid}/restore").status_code == 204
+    assert [e["kind"] for e in server.client.get(f"/api/conversations/{cid}/events").json()["items"]][-1] == \
+        "assistant_final"
+    queue(server, final("back"))
+    assert server.post(f"/api/conversations/{cid}/messages", {"text": "again"}).status_code == 202
+    assert server.wait_idle(cid)["job"]["state"] == "completed"
+
+    assert server.post(f"/api/conversations/{cid}/trash").status_code == 200
+    assert server.client.delete(f"/api/conversations/{cid}", headers={"origin": ORIGIN}).status_code == 204
+    assert not folder.exists()
+    assert server.client.get("/api/conversations?trashed=1").json()["items"] == []
+    after = [server.client.get(f"/api/conversations/{cid}"), server.post(f"/api/conversations/{cid}/restore"),
+             server.client.delete(f"/api/conversations/{cid}", headers={"origin": ORIGIN})]
+    assert {r.status_code for r in after} == {404}
+    assert server.client.delete(f"/api/conversations/{cid}").status_code == 403  # the Origin check, like every mutation
+
+
+def test_someone_elses_conversation_cannot_be_trashed_or_deleted(server: Server) -> None:
+    server.sign_in()
+    application = server.application
+    assert application is not None and server.client.portal is not None
+    foreign = server.client.portal.call(application.create_conversation, PrincipalId("someone-else"))
+    responses = []
+    for cid in (foreign, "conv_404"):
+        responses += [server.client.get(f"/api/conversations/{cid}/delete-notice"),
+                      server.post(f"/api/conversations/{cid}/trash"),
+                      server.post(f"/api/conversations/{cid}/restore"),
+                      server.client.delete(f"/api/conversations/{cid}", headers={"origin": ORIGIN})]
+    assert {r.status_code for r in responses} == {404}
+    assert {r.text for r in responses} == {'{"error":{"code":"not_found","message":"No such conversation."}}'}
+    owner = TrustedScope(PrincipalId("someone-else"), foreign)
+    assert server.client.portal.call(application.data.read_conversation, owner).trashed_at is None
+
+
+def test_trashing_a_running_conversation_stops_its_job_first(server: Server) -> None:
+    server.sign_in()
+    cid = server.post("/api/conversations").json()["id"]
+    assert server.application is not None
+    gated = GatedDriver()
+    server.application.runner = BackgroundRunner(gated)
+    try:
+        assert server.post(f"/api/conversations/{cid}/messages", {"text": "one"}).status_code == 202
+        assert server.client.get(f"/api/conversations/{cid}/delete-notice").json()["running"] is True
+        assert server.post(f"/api/conversations/{cid}/trash").status_code == 200
+        assert server.application.runner.status(TrustedScope(OPERATOR, ConversationId(cid))).running is False
+        assert server.post(f"/api/conversations/{cid}/restore").status_code == 204
+        gated.release.set()
+        assert server.post(f"/api/conversations/{cid}/resume").status_code == 202
+        assert server.wait_idle(cid)["job"]["state"] == "completed"
+    finally:
+        gated.release.set()
+
+
+class StubbornDriver(GatedDriver):
+    """A job that ignores being stopped until released (Q-40: a stuck command)."""
+
+    async def resume(self, scope: TrustedScope, *, stop: StopSignal | None = None,
+                     progress: TurnProgress | None = None) -> DriveResult:
+        while not self.release.is_set():
+            try:
+                await asyncio.sleep(0.01)
+            except asyncio.CancelledError:
+                pass
+        return DriveResult(DriveState.COMPLETED)
+
+
+def test_a_job_that_does_not_stop_in_time_leaves_the_conversation_where_it_was(
+        server: Server, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(bootstrap, "TRASH_STOP_SECONDS", 0.1)
+    server.sign_in()
+    cid = server.post("/api/conversations").json()["id"]
+    assert server.application is not None
+    stubborn = StubbornDriver()
+    server.application.runner = BackgroundRunner(stubborn)
+    try:
+        assert server.post(f"/api/conversations/{cid}/messages", {"text": "one"}).status_code == 202
+        refused = server.post(f"/api/conversations/{cid}/trash")
+        assert refused.status_code == 409 and refused.json() == {"error": {
+            "code": "still_stopping", "message": "The current work is still stopping; try again shortly."}}
+        assert [i["id"] for i in server.client.get("/api/conversations").json()["items"]] == [cid]
+    finally:
+        stubborn.release.set()
+    assert server.wait_idle(cid)["job"]["state"] == "completed"
+    assert server.post(f"/api/conversations/{cid}/trash").status_code == 200  # stopped now: it moves
+
+
+def test_a_conversation_being_trashed_refuses_new_work(server: Server) -> None:
+    server.sign_in()
+    cid = server.post("/api/conversations").json()["id"]
+    application = server.application
+    assert application is not None and server.client.portal is not None
+    scope = TrustedScope(OPERATOR, ConversationId(cid))
+    server.client.portal.call(application.runner.close, scope, 1.0)  # what trash does first (§7.1)
+    refused = server.post(f"/api/conversations/{cid}/messages", {"text": "late"})
+    assert refused.status_code == 409 and refused.json() == {"error": {
+        "code": "conversation_closed", "message": "This conversation is being deleted."}}
+    application.runner.reopen(scope)
+
+
+def test_the_delete_notice_names_the_external_servers_used(mcp_server: tuple[Server, FakeMcpServer]) -> None:
+    server, fake = mcp_server
+    server.sign_in()
+    cid = server.post("/api/conversations").json()["id"]
+    put_source(server, cid, "calliope", True)
+    queue(server, calls(("calliope/echo", {"text": "hi"})), final("done"))
+    server.post(f"/api/conversations/{cid}/messages", {"text": "echo"})
+    server.wait_idle(cid)
+    assert fake.calls
+    notice = server.client.get(f"/api/conversations/{cid}/delete-notice").json()
+    assert (notice["servers"], notice["unconfigured"]) == (["calliope"], [])
