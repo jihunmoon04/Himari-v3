@@ -33,6 +33,7 @@
 
         <nav class="sidebar-utility" aria-label="Utilities">
           <p class="server-info" id="server-info" hidden></p>
+          <button type="button" id="nav-trash" class="nav-link">Trash</button>
           <button type="button" id="nav-sign-out" class="nav-link">Sign out</button>
         </nav>
       </aside>
@@ -104,6 +105,7 @@
               <button type="button" id="chat-menu-resume" class="link-button">Continue</button>
               <button type="button" id="chat-menu-compact" class="link-button" hidden>Compact now</button>
               <button type="button" id="chat-menu-dismiss" class="link-button" hidden>Dismiss question</button>
+              <button type="button" id="chat-menu-delete" class="link-button chat-menu-delete">Delete conversation</button>
             </div>
           </div>
         </div>
@@ -136,6 +138,15 @@
               <p class="home-recent-empty" id="home-recent-empty" hidden>No conversations yet.</p>
             </section>
           </div>
+        </section>
+
+        <!-- The trash (V3-P65 §9): titles only; a conversation is read again once restored. -->
+        <section class="surface trash" id="surface-trash" hidden>
+          <h1>Trash</h1>
+          <p class="hint" id="trash-hint"></p>
+          <ul class="rows" id="trash-list"></ul>
+          <p class="hint" id="trash-empty" hidden>The trash is empty.</p>
+          <button type="button" id="trash-load-more" class="link-button trash-load-more" hidden>Load more</button>
         </section>
 
         <section class="surface chat" id="surface-chat" hidden>
@@ -182,6 +193,18 @@
           </div>
         </section>
       </main>
+    </div>
+
+    <div class="purge-dialog" id="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="confirm-title"
+         aria-describedby="confirm-body" hidden>
+      <div class="purge-dialog-panel">
+        <h2 class="purge-dialog-title" id="confirm-title"></h2>
+        <div class="purge-dialog-body" id="confirm-body"></div>
+        <div class="purge-dialog-actions">
+          <button type="button" id="confirm-cancel">Cancel</button>
+          <button type="button" id="confirm-ok" class="danger-button"></button>
+        </div>
+      </div>
     </div>
   </body>
 </html>

@@ -11,6 +11,12 @@ The browser reads progress by polling: the job status of a Conversation
 and its Events after the last sequence it has. Messages start background
 jobs (202); a second message while one runs is refused (409).
 
+The trash (V3-P65 §9): ``POST …/trash`` moves a Conversation there (a
+running job is stopped first), ``POST …/restore`` brings it back, and
+``DELETE`` deletes one in the trash for good. A trashed Conversation is
+missing (404) to every other route; ``GET /api/conversations?trashed=1``
+lists the trash.
+
 Tool views (MCP Apps, V3-P58): events say which calls have one
 (``app_view``); ``GET …/calls/{run}/{call}/app`` gives a view as JSON with a
 signed URL of the sandbox origin's proxy (``sandbox.py``). The view's HTML
@@ -25,7 +31,7 @@ import secrets
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 from importlib import resources
 from typing import Any
 
@@ -40,6 +46,8 @@ from himari.bootstrap.application import (
     Application,
     AppViewRefused,
     AppViewState,
+    ConversationStillStopping,
+    DeleteNotice,
     ModelChoiceView,
     ModelRefused,
     ModelView,
@@ -195,6 +203,19 @@ def summary_view(summary: ConversationSummary) -> dict[str, Any]:
         "last_activity_at": _time(summary.last_activity_at),
         "last_sequence": summary.last_sequence,
     }
+
+
+def trashed_view(summary: ConversationSummary, trash_days: int) -> dict[str, Any]:
+    """A Conversation in the trash, with when it is deleted for good (V3-P65 §9)."""
+    trashed_at = summary.trashed_at
+    assert trashed_at is not None
+    return {**summary_view(summary), "trashed_at": _time(trashed_at),
+            "purge_after": _time(trashed_at + timedelta(days=trash_days))}
+
+
+def delete_notice_view(notice: DeleteNotice) -> dict[str, Any]:
+    return {"servers": list(notice.servers), "unconfigured": list(notice.unconfigured), "running": notice.running,
+            "trash_days": notice.trash_days}
 
 
 def event_view(event: ConversationEvent, views: dict[CallRef, tuple[bool, bool]] | None = None,
@@ -406,7 +427,16 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
         if error.code is ControlErrorCode.BUSY:
             return JSONResponse({"error": {"code": "busy", "message": "This conversation is still working."}},
                                 status_code=409)
+        if error.code is ControlErrorCode.CLOSED:  # V3-P65 §7.1: it is being moved to the trash
+            return JSONResponse({"error": {"code": "conversation_closed",
+                                           "message": "This conversation is being deleted."}}, status_code=409)
         return JSONResponse({"error": {"code": "conflict", "message": "Not possible right now."}}, status_code=409)
+
+    @app.exception_handler(ConversationStillStopping)
+    async def still_stopping(request: Request, error: ConversationStillStopping) -> JSONResponse:
+        return JSONResponse({"error": {"code": "still_stopping",
+                                       "message": "The current work is still stopping; try again shortly."}},
+                            status_code=409)
 
     @app.exception_handler(AppViewRefused)
     async def no_view(request: Request, error: AppViewRefused) -> JSONResponse:
@@ -460,6 +490,7 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
         return {"model": application.model_id, "sandbox": application.current_sandbox_state.value,
                 "models": [model_view(m) for m in application.models],
                 "context_budget": application.context_tokens,  # the default model's
+                "trash_days": application.trash_days,  # V3-P65: then a trashed conversation is deleted for good
                 "turn": {"token_budget": turn.turn_budget, "unattended_runs": turn.unattended_runs,
                          "max_runs": turn.max_runs, "no_progress_runs": turn.no_progress_runs,
                          "seen_seconds": turn.seen_seconds}}
@@ -482,11 +513,13 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
 
     @app.get("/api/conversations")
     async def list_conversations(request: Request, who: PrincipalId = Depends(principal),
-                                 limit: int = 50, offset: int = 0) -> dict[str, Any]:
+                                 limit: int = 50, offset: int = 0, trashed: bool = False) -> dict[str, Any]:
+        """``trashed``: the trash instead, most recently trashed first."""
         if not 1 <= limit <= MAX_LIST_LIMIT or offset < 0:
             raise ApiError(400, "invalid_argument", f"limit must be 1..{MAX_LIST_LIMIT}, offset >= 0")
-        page = await himari(request).data.list_conversations(who, limit=limit, offset=offset)
-        return {"items": [summary_view(s) for s in page],
+        application = himari(request)
+        page = await application.data.list_conversations(who, limit=limit, offset=offset, trashed=trashed)
+        return {"items": [trashed_view(s, application.trash_days) if trashed else summary_view(s) for s in page],
                 "next_offset": offset + limit if len(page) == limit else None}  # may lead to an empty page
 
     @app.post("/api/conversations", status_code=201)
@@ -527,6 +560,44 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
         application, scope = himari(request), scope_of(conversation_id, who)
         await application.data.rename_conversation(scope, body.title)
         return summary_view(await application.data.read_conversation(scope))
+
+    @app.get("/api/conversations/{conversation_id}/delete-notice")
+    async def read_delete_notice(conversation_id: str, request: Request,
+                                 who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+        """What the delete confirmation tells (V3-P65 §6.1): the external
+        servers this conversation called, whose own data stays."""
+        return delete_notice_view(await himari(request).delete_notice(scope_of(conversation_id, who)))
+
+    @app.post("/api/conversations/{conversation_id}/trash")
+    async def trash_conversation(conversation_id: str, request: Request,
+                                 who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+        """A running job is stopped first; 409 ``still_stopping`` when it does
+        not stop in time (nothing was moved)."""
+        application = himari(request)
+        trashed_at = await application.trash(scope_of(conversation_id, who))
+        return {"trashed_at": _time(trashed_at),
+                "purge_after": _time(trashed_at + timedelta(days=application.trash_days))}
+
+    @app.post("/api/conversations/{conversation_id}/restore", status_code=204)
+    async def restore_conversation(conversation_id: str, request: Request,
+                                   who: PrincipalId = Depends(principal)) -> None:
+        try:
+            await himari(request).restore(scope_of(conversation_id, who))
+        except DataError as error:
+            if error.code is not DataErrorCode.INVALID_STATE_TRANSITION:
+                raise
+            raise ApiError(409, "not_restorable", "Only a conversation in the trash can be restored.") from None
+
+    @app.delete("/api/conversations/{conversation_id}", status_code=204)
+    async def purge_conversation(conversation_id: str, request: Request,
+                                 who: PrincipalId = Depends(principal)) -> None:
+        """For good: only a conversation in the trash."""
+        try:
+            await himari(request).purge(scope_of(conversation_id, who))
+        except DataError as error:
+            if error.code is not DataErrorCode.INVALID_STATE_TRANSITION:
+                raise
+            raise ApiError(409, "not_in_trash", "Move the conversation to the trash first.") from None
 
     @app.get("/api/conversations/{conversation_id}/events")
     async def read_events(conversation_id: str, request: Request, who: PrincipalId = Depends(principal),

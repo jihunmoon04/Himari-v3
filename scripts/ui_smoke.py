@@ -11,7 +11,10 @@ the HttpOnly session, the narrow layout and sign-out. A second server with
 a small context budget compacts a conversation and checks the timeline
 divider and its summary. A third server with a small turn token budget
 (V3-P62) shows the turn's usage while it works, stops it at the budget
-with a Continue button, and finishes it with that button.
+with a Continue button, and finishes it with that button. A fourth
+(V3-P65) deletes a conversation: the confirmation (what stays, the work it
+stops; Cancel and Escape change nothing), the move to the trash, restore,
+delete for good, and a page whose conversation was trashed elsewhere.
 
 Requires: pip install playwright && playwright install chromium
 Usage:    python scripts/ui_smoke.py [--screenshots DIR]
@@ -256,6 +259,97 @@ def run_turn_budget(base: str, token: str, shots: str | None) -> list[str]:
     return errors
 
 
+def run_trash(base: str, token: str, shots: str | None, root: str) -> list[str]:
+    errors: list[str] = []
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page(viewport={"width": 1280, "height": 860})
+        page.on("console", lambda m: errors.append(m.text) if m.type == "error" and "404" not in m.text else None)
+        page.on("pageerror", lambda e: errors.append(str(e)))
+        page.goto(base)
+        page.fill("#login-token", token)
+        page.click("#login-submit")
+        page.click("#home-new-chat")
+        page.fill("#composer-text", "hello")
+        page.press("#composer-text", "Enter")
+        expect(page.locator("#composer-hint")).to_contain_text("HIMARI is working", timeout=5000)
+        dialog = page.locator("#confirm-dialog")
+        page.click("#chat-menu-toggle")
+        page.click("#chat-menu-delete")
+        expect(dialog).to_be_visible()
+        expect(dialog).to_contain_text("The work under way is stopped first.")
+        page.click("#confirm-cancel")  # nothing changes
+        expect(dialog).to_be_hidden()
+        expect(page.locator(".item-assistant").last).to_contain_text("first answer", timeout=10000)
+
+        page.click("#chat-menu-toggle")
+        page.click("#chat-menu-delete")
+        expect(page.locator("#confirm-title")).to_have_text("Delete “hello”?")
+        expect(dialog).to_contain_text("deleted for good after 30 days")
+        expect(dialog).to_contain_text("Data stored by external services is not deleted.")
+        expect(dialog).not_to_contain_text("stopped first")
+        assert page.evaluate("document.activeElement.id") == "confirm-cancel"  # the safe choice has the focus
+        if shots:
+            page.screenshot(path=os.path.join(shots, "7-delete-confirm.png"))
+        page.click("#confirm-ok")
+        expect(page.locator("#surface-home")).to_be_visible(timeout=10000)
+        expect(page.locator("#status-bar")).to_contain_text("Moved “hello” to the trash.")
+        expect(page.locator("#conversation-list .conv-row")).to_have_count(0)
+
+        page.click("#nav-trash")
+        row = page.locator("#trash-list .trash-row")
+        expect(row).to_have_count(1)
+        expect(row.locator(".row-title")).to_have_text("hello")
+        expect(row.locator(".row-meta")).to_contain_text("deleted for good on")
+        expect(page.locator("#trash-hint")).to_contain_text("deleted for good 30 days after")
+        if shots:
+            page.screenshot(path=os.path.join(shots, "8-trash.png"))
+        row.get_by_text("Restore").click()
+        expect(page.locator("#status-bar")).to_have_text("Restored “hello”.")
+        expect(page.locator("#trash-empty")).to_be_visible()
+        expect(page.locator("#conversation-list .conv-row")).to_have_count(1)
+
+        page.locator("#conversation-list .conv-row").click()
+        expect(page.locator(".item-assistant").last).to_contain_text("first answer")  # all of it came back
+        page.click("#chat-menu-toggle")
+        page.click("#chat-menu-delete")
+        page.click("#confirm-ok")
+        expect(page.locator("#surface-home")).to_be_visible(timeout=10000)
+        page.click("#nav-trash")
+        expect(row).to_have_count(1)
+        row.get_by_text("Delete now").click()
+        expect(page.locator("#confirm-title")).to_have_text("Delete “hello” for good?")
+        page.keyboard.press("Escape")  # nothing changes
+        expect(dialog).to_be_hidden()
+        expect(row).to_have_count(1)
+        page.set_viewport_size({"width": 390, "height": 800})
+        page.wait_for_timeout(300)
+        assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
+        if shots:
+            page.screenshot(path=os.path.join(shots, "9-trash-narrow.png"))
+        page.set_viewport_size({"width": 1280, "height": 860})
+        row.get_by_text("Delete now").click()
+        page.click("#confirm-ok")
+        expect(page.locator("#status-bar")).to_have_text("Deleted “hello” for good.")
+        expect(page.locator("#trash-empty")).to_be_visible()
+
+        # Trashed elsewhere while this page follows its work: it says so and goes home.
+        page.click("#nav-new-chat")
+        page.fill("#composer-text", "second")
+        page.press("#composer-text", "Enter")
+        expect(page.locator("#composer-hint")).to_contain_text("HIMARI is working", timeout=5000)
+        conversation_id = page.locator(".conv-row.is-selected").get_attribute("data-id")
+        assert conversation_id
+        application, loop = OPENED[root]
+        scope = TrustedScope(OPERATOR, ConversationId(conversation_id))
+        asyncio.run_coroutine_threadsafe(application.trash(scope), loop).result(40)
+        expect(page.locator("#status-bar")).to_have_text(
+            "That conversation is no longer here; it may have been moved to the trash.", timeout=10000)
+        expect(page.locator("#surface-home")).to_be_visible()
+        browser.close()
+    return errors
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--screenshots")
@@ -284,6 +378,15 @@ def main() -> int:
         try:
             errors += run_turn_budget(f"http://127.0.0.1:{PORT + 2}",
                                       Path(budget, "control", "operator.secret").read_text().strip(), args.screenshots)
+        finally:
+            server.should_exit = True
+            time.sleep(0.5)
+        trash = os.path.join(tmp, "trash")
+        server = serve(trash, PORT + 3, SlowAdapter([NormalizedFinal((TextBlock("first answer"),)),
+                                                     NormalizedFinal((TextBlock("second answer"),))]))
+        try:
+            errors += run_trash(f"http://127.0.0.1:{PORT + 3}",
+                                Path(trash, "control", "operator.secret").read_text().strip(), args.screenshots, trash)
         finally:
             server.should_exit = True
             time.sleep(0.5)
