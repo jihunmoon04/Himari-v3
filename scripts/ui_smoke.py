@@ -31,6 +31,7 @@ import tempfile
 import threading
 import time
 from pathlib import Path
+from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
@@ -281,6 +282,21 @@ def run_trash(base: str, token: str, shots: str | None, root: str) -> list[str]:
         page.click("#confirm-cancel")  # nothing changes
         expect(dialog).to_be_hidden()
         expect(page.locator(".item-assistant").last).to_contain_text("first answer", timeout=10000)
+
+        held: list[Any] = []  # a notice that comes back after the user left the conversation asks nothing
+        page.route("**/delete-notice", lambda route: held.append(route))
+        page.click("#chat-menu-toggle")
+        page.click("#chat-menu-delete")
+        while not held:
+            page.wait_for_timeout(50)
+        page.click("#nav-home")
+        expect(page.locator("#surface-home")).to_be_visible()
+        held[0].continue_()
+        page.wait_for_timeout(500)
+        expect(dialog).to_be_hidden()
+        page.unroute("**/delete-notice")
+        page.locator("#conversation-list .conv-row").click()
+        expect(page.locator(".item-assistant").last).to_contain_text("first answer")
 
         page.click("#chat-menu-toggle")
         page.click("#chat-menu-delete")

@@ -876,6 +876,22 @@ def test_delete_trash_and_restore_from_the_cli(harness: Harness) -> None:
     assert code == cli.EXIT_FAILED and "not_found" in err
 
 
+def test_the_trash_and_the_list_page_on(harness: Harness) -> None:
+    cids = [harness.run("new", "--title", f"T{n}")[1].strip() for n in range(3)]
+    for cid in cids:
+        harness.run("delete", cid, "--yes")
+    code, out, err = harness.run("trash", "--limit", "2")
+    assert code == 0 and len(out.splitlines()) == 2 and "(more: --offset 2)" in err
+    code, out, err = harness.run("trash", "--limit", "2", "--offset", "2")
+    assert code == 0 and len(out.splitlines()) == 1 and "(more:" not in err
+    assert "(nothing more in the trash)" in harness.run("trash", "--offset", "3")[2]
+    harness.run("restore", cids[0])
+    harness.run("restore", cids[1])
+    code, out, err = harness.run("list", "--limit", "1", "--offset", "1")
+    assert code == 0 and len(out.splitlines()) == 1 and "(more: --offset 2)" in err
+    assert "(no more conversations)" in harness.run("list", "--offset", "2")[2]
+
+
 def test_the_delete_question_says_what_stays_and_what_stops() -> None:
     notice = {"servers": ["calliope", "old"], "unconfigured": ["old"], "running": True, "trash_days": 7}
     assert cli.delete_question("Trip", notice, now=False) == [

@@ -1056,18 +1056,21 @@ async function deleteConversation() {
   const id = app.conversationId;
   if (id === null) return;
   const name = $("topbar-title").textContent;
+  const generation = app.generation;
+  const still = () => generation === app.generation && app.conversationId === id; // not left for another
   let notice;
   try {
     notice = await api("GET", `/api/conversations/${encodeURIComponent(id)}/delete-notice`);
   } catch (error) {
-    status(error.message, "error");
+    if (still()) status(error.message, "error");
     return;
   }
+  if (!still()) return;
   const lines = [`It moves to the trash and is deleted for good after ${notice.trash_days} days. `
                  + "Until then you can restore it from the trash."];
   if (notice.running) lines.push("The work under way is stopped first.");
   lines.push(externalLine(notice));
-  if (!(await confirmAction(`Delete “${name}”?`, lines, "Move to trash"))) return;
+  if (!(await confirmAction(`Delete “${name}”?`, lines, "Move to trash")) || !still()) return;
   $("chat-menu-delete").disabled = true;
   status(notice.running ? "Stopping the work under way, then moving it to the trash…" : "Moving it to the trash…");
   try {

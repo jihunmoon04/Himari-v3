@@ -1,10 +1,10 @@
 """``himari`` — the terminal client of the local HIMARI Web server (V3-P47).
 
     himari chat [ID] [--title T]   interactive; /continue /context /compact /tools /model /rename /delete /id /exit
-    himari list                    your conversations, most recent first
+    himari list [--offset N]       your conversations, most recent first
     himari delete ID [--now] [--yes]
                                    move a conversation to the trash (--now: delete it for good)
-    himari trash                   the conversations in the trash
+    himari trash [--offset N]      the conversations in the trash
     himari restore ID              bring a conversation back from the trash
     himari show ID                 a conversation's transcript and state
     himari new [--title T]         create a conversation, print its id
@@ -548,27 +548,34 @@ def delete_conversation(session: Session, conversation_id: str, *, now: bool, ye
 # --- commands ----------------------------------------------------------------------------------
 
 
+def _more(session: Session, page: dict[str, Any]) -> None:
+    if page.get("next_offset") is not None:
+        session.note(f"(more: --offset {page['next_offset']})")
+
+
 def cmd_list(session: Session, args: argparse.Namespace) -> int:
-    page = session.client.get("/api/conversations", {"limit": args.limit})
+    page = session.client.get("/api/conversations", {"limit": args.limit, "offset": args.offset})
     enc = session.printer.encoding
     for item in page["items"]:
         name = item.get("title") or item.get("preview") or "(new conversation)"
         session.printer.line(f"{safe_line(item['id'], encoding=enc)}  {item['last_activity_at'][:19]}  "
                              f"{safe_line(name, encoding=enc)}")
     if not page["items"]:
-        session.note("(no conversations yet)")
+        session.note("(no conversations yet)" if not args.offset else "(no more conversations)")
+    _more(session, page)
     return EXIT_OK
 
 
 def cmd_trash(session: Session, args: argparse.Namespace) -> int:
-    page = session.client.get("/api/conversations", {"limit": args.limit, "trashed": "true"})
+    page = session.client.get("/api/conversations", {"limit": args.limit, "offset": args.offset, "trashed": "true"})
     enc = session.printer.encoding
     for item in page["items"]:
         name = item.get("title") or item.get("preview") or "(new conversation)"
         session.printer.line(f"{safe_line(item['id'], encoding=enc)}  trashed {item['trashed_at'][:19]}  "
                              f"deleted {item['purge_after'][:10]}  {safe_line(name, encoding=enc)}")
     if not page["items"]:
-        session.note("(the trash is empty)")
+        session.note("(the trash is empty)" if not args.offset else "(nothing more in the trash)")
+    _more(session, page)
     return EXIT_OK
 
 
@@ -811,6 +818,7 @@ def parser() -> argparse.ArgumentParser:
     chat.add_argument("--title")
     lst = sub.add_parser("list", help="list conversations")
     lst.add_argument("--limit", type=int, default=50)
+    lst.add_argument("--offset", type=int, default=0)
     show = sub.add_parser("show", help="show a conversation")
     show.add_argument("id")
     delete = sub.add_parser("delete", help="move a conversation to the trash; deleted for good after the server's days")
@@ -819,6 +827,7 @@ def parser() -> argparse.ArgumentParser:
     delete.add_argument("--yes", action="store_true", help="do not ask first")
     trash = sub.add_parser("trash", help="the conversations in the trash")
     trash.add_argument("--limit", type=int, default=50)
+    trash.add_argument("--offset", type=int, default=0)
     restore = sub.add_parser("restore", help="bring a conversation back from the trash")
     restore.add_argument("id")
     new = sub.add_parser("new", help="create a conversation")

@@ -173,6 +173,7 @@ himari chat                                     # 새 대화 (python -m himari.i
 himari list; himari show conv_1; himari send conv_1 "질문"; himari continue conv_1
 himari delete conv_1 [--now] [--yes]            # 휴지통으로 (--now: 바로 영구 삭제, --yes: 묻지 않음)
 himari trash; himari restore conv_1             # 휴지통 목록, 복원
+himari list --offset 50; himari trash --offset 50  # 다음 쪽 (더 있으면 "(more: --offset N)")
 ```
 
 대화형 모드에서는 질문이 오면 `answer>`로 답하고, `/continue`·`/context`·`/compact`·`/tools`·`/prompts`·`/prompt 서버 이름 인자=값`·`/rename 이름`·`/delete`(확인 뒤 휴지통으로 옮기고 나감)·`/id`·`/exit`를 쓸 수 있습니다. `/`로 시작하는 글을 그대로 보내려면 `//`로 시작합니다. 종료 코드: 0 완료, 3 답변 대기, 1 미완료·거부, 2 설정 오류, 4 결과 불명(다시 보내기 전에 `show`로 확인).
