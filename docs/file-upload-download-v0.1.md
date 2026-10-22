@@ -208,7 +208,7 @@ CREATE INDEX blobs_by_use ON blobs (last_used_at);
 - `put`: `staging/`에 `O_EXCL | O_NOFOLLOW`로 만들고, 받으면서 SHA-256과 크기를 잰다. 한도를 넘으면 그 자리에서 멈추고 지운다(`TOO_LARGE`). 다 받으면 `fsync`한 뒤 **보관본 잠금** 아래에서 다음을 한다. `key` = SHA-256(principal ‖ 0x00 ‖ 내용 SHA-256).
   1. **행과 파일을 함께 본다(검수 B1).** `blobs` 행이 살아 있고(만료 아님), 대상 경로를 `lstat`해서 일반 파일·0600·같은 크기면 같은 내용이 이미 있다. 새 파일을 지우고 3으로 간다.
   2. 그 밖의 경우는 모두 "없음"으로 다룬다. 행이 없거나 만료됨, 파일이 없음, 크기가 다름, 일반 파일이 아님이 여기에 든다.
-     - **자리 확인(검수 B2):** 넣으면 1 GiB를 넘는 경우, 만료시킬 수 있는 것을 먼저 센다. 지난 1시간 안에 쓰이지 않았고 대기 업로드가 참조하지 않는 보관본을 오래된 것부터 더한다(§8.5). 그 합으로 모자라면 **아무것도 만료시키지 않고** `STORE_FULL`로 새 파일을 지우고 끝낸다. 충분하면 필요한 만큼만 만료시킨다. 행이 살아 있는데 파일만 없던 경우(DB를 백업에서 되돌림, §8.4)는 이미 크기에 들어 있으므로 더 세지 않는다.
+     - **자리 확인(검수 B2, 소유자 검수 B2):** 아래 고르기·만료·새 행 등록은 **DB 트랜잭션 하나**(`BlobRows.reserve`)다. 그래서 고른 뒤에 대기 업로드가 그 보관본을 쓰기 시작해도 만료로 세지 않고, 보관소 크기는 상한을 넘지 않는다. 이 트랜잭션은 **새 파일을 최종 이름에 내구성 있게 놓은 뒤에** 돈다(소유자 재검수 B3). 그 사이에 프로세스가 죽으면 행 없는 파일만 남고 정리가 지운다. 더 오래된 보관본이 헛되이 만료되지 않는다. 트랜잭션이 거부되면(`STORE_FULL`) 놓은 새 파일만 지운다. 살아 있는 행이 그 주소를 가리키지 않으므로 지워도 된다. 넣으면 1 GiB를 넘는 경우, 만료시킬 수 있는 것을 먼저 센다. 지난 1시간 안에 쓰이지 않았고 대기 업로드가 참조하지 않는 보관본을 오래된 것부터 더한다(§8.5). 그 합으로 모자라면 **아무것도 만료시키지 않고** `STORE_FULL`로 새 파일을 지우고 끝낸다. 충분하면 필요한 만큼만 만료시킨다. 행이 살아 있는데 파일만 없던 경우(DB를 백업에서 되돌림, §8.4)는 이미 크기에 들어 있으므로 더 세지 않는다.
      - **놓기:** 대상 경로에 무언가 있으면 지운다. 행이 없거나 만료된 주소의 남은 파일이거나, 크기가 다른 파일이다. 그다음 덮어쓰지 않는 이름 변경(`link` 후 `unlink`, V3-P65 백업과 같음)을 하고 부모 디렉터리를 `fsync`한다. 잠금 안이므로 지우기와 `link` 사이에 다른 `put`이 끼지 않는다.
   3. `blobs` 행을 쓴다: `last_used_at`=지금, `expired_at`=NULL. 만료됐던 같은 내용이면 이것으로 되살아난다.
 - **보관본 잠금**은 BlobStore의 프로세스 안 잠금 하나다. `put`의 위 1~3과 모든 보관본 삭제(§8.2·§8.5)의 "확인 → `blobs` 갱신 → 파일 지우기"가 이 잠금 아래에서 돈다. 그래서 삭제가 조건을 확인한 뒤 같은 내용의 새 `put`이 끼어드는 일이 없다(P0는 서버 프로세스 하나, V3-045).
@@ -233,8 +233,8 @@ CREATE INDEX blobs_by_use ON blobs (last_used_at);
    │ ───────────────────────▶ (대화의 수명주기 잠금을 1~4 동안 잡음)
    │                          1 대화 권한, check_attachments(§4.2) ─▶ 읽기
    │                          2 실행 중이면 409 (Runner 상태)
-   │                          3 아직 놓지 않은 파일을 Workspace에 놓음 ───▶ Inside place_uploads
-   │                            set_placement ─────────────────────▶ files.workspace_path
+   │                          3 파일마다: 복사 → 이름 고르기 → set_placement ─▶ files.workspace_path
+   │                            → 이름 붙이기(renameat2)  (소유자 검수 B1)
    │                          4 runner.submit(UserMessage(블록)) ──▶ T1/T7a + 첨부 확인(§4.2)
    │ ◀── 202 (지금과 같음)
 ```
@@ -249,8 +249,9 @@ CREATE INDEX blobs_by_use ON blobs (last_used_at);
 
 ### 5.2 Workspace에 놓기
 
-`InsideEnvironment.place_uploads(workspace_id, cwd_relative, items: Sequence[tuple[name, source: BinaryIO, already: str | None]], deadline) -> Sequence[str]`
+`InsideEnvironment`의 `copy_in`(임시 복사본) → `free_path`(이름 고르기) → Application이 `set_placement`로 기록 → `commit_copy`(이름 붙이기) → `discard_copy`, 그리고 `holds`(그 경로에 같은 바이트가 있는지).
 - 한 메시지의 첨부를 **쓰기 잠금 한 번 안에서 모두** 놓는다(최종 확인 C1). 잠금을 기다리는 상한 60초는 메시지 하나에 한 번이다(§5.1).
+- **경로는 이름을 붙이기 전에 기록한다(소유자 검수 B1).** 이름을 붙인 직후 서버가 죽어도, 기록이 그 경로를 가리킨다. 다시 보낼 때 기록된 경로에 같은 크기·SHA-256의 파일이 있으면 놓인 것으로 보고 그대로 쓴다. 없으면 그 경로가 비어 있는 한 그 경로에 다시 놓는다. 다른 내용이 있으면(누가 고쳤음) 새 이름을 고르고 다시 기록한다.
 - 놓는 곳: 대화 폴더의 `uploads/<name>`. 모델에게는 `/workspace/conversations/<id>/uploads/<name>`로 보인다.
 - Workspace 쓰기 잠금(`write_lock`) 아래에서 한다. 같은 Root의 명령·쓰기 Tool과 겹치지 않는다.
 - **다시 놓지 않기(검수 C4).** 잠금을 잡은 **뒤에** 기록의 `workspace_path`를 다시 읽는다. 값이 있고 그 경로에 일반 파일이 있으면 놓지 않고 그 경로를 쓴다. 두 탭이 동시에 보내도 한 번만 놓인다. 그 파일을 그 사이 모델이 바꿨는지는 보지 않는다. 놓은 파일은 모델 것이다.
@@ -467,7 +468,7 @@ V3-P65의 자동 정리(시작 때와 1시간마다)에 셋을 더한다.
 | common | `FileId`. `AttachmentRef`는 그대로 |
 | Data | `DataErrorCode.LIMIT_EXCEEDED`·`TOO_LARGE`·`STORE_FULL`·`BLOB_MISSING`·`BLOB_EXPIRED`·`ATTACHMENT_REFUSED`, `FileRecord`(`expired`·`call` 포함)·`FileOrigin`·`StoredBlob`(principal별 `key`), `FileCatalog`(stage_upload·set_placement·check_attachments·read_files·read_file_records·read_call_files·presented_bytes_since), Bootstrap 전용 `FileRetention`, `BlobStore`. T1·T7a의 첨부 확인과 상태 변경(§4.2). `ToolCompletion.presented_files`(T7에서 기록·버전·건네기 한도). SQLite v8 `blobs`·`files`. 영구 삭제 목록에 `files`(`runs` 앞), 커밋 뒤 보관본 삭제(실패는 로그만). 정리(대기 기록, 참조 없는 보관본, staging), 만료(30일, 용량; §8.5) |
 | Tool | `ToolOutcome.presented_files`. Dispatcher가 `ToolCompletion`으로 넘기고, Data가 파일을 거부하면 FAILED로 다시 기록(§7.1) |
-| Environment (Inside) | `place_uploads`(메시지 하나의 첨부를 쓰기 잠금 한 번에, 임시 파일 → `renameat2(RENAME_NOREPLACE)` → 디렉터리 `fsync`, 잠금 대기 60초), `inside/present_file`(BlobStore와 `presented_bytes_since`를 Bootstrap이 넣어 줌), `inside/read_file`의 `offset` |
+| Environment (Inside) | 놓기 단계 `copy_in`·`free_path`·`commit_copy`·`discard_copy`·`holds`(메시지 하나의 첨부를 쓰기 잠금 한 번에, 임시 파일 → 경로 기록 → `renameat2(RENAME_NOREPLACE)` → 디렉터리 `fsync`, 새 폴더는 상위까지 `fsync`, 잠금 대기 60초), `inside/present_file`(BlobStore와 `presented_bytes_since`를 Bootstrap이 넣어 줌), `inside/read_file`의 `offset` |
 | Prompt | loader가 첨부 기록을 읽어 `PromptInputs.attachments` → `compose`가 `ModelInput.attachments`로. `attachment_line` 하나를 Provider·크기 추정·압축 입력이 함께 씀 |
 | Provider | `AttachmentRef`를 첨부 목록 한 줄로(§6). 거부 없앰 |
 | Bootstrap | `HIMARI_FILE_MAX_BYTES`·`HIMARI_FILE_STORE_MAX_BYTES`·`HIMARI_FILE_KEEP_DAYS`, `<data_root>/files` 배치 검사, 첨부 안내 고정 문장(§6), `Application.upload`·`send(text, attachments)`·`download`(업로드 기록과 보내기 1~4는 수명주기 잠금 아래), 정리 작업 확장 |
@@ -561,8 +562,8 @@ V3-P65의 자동 정리(시작 때와 1시간마다)에 셋을 더한다.
 - **정리:** 24시간 지난 대기 기록, 1시간 지난 참조 없는 보관본만 지움. 막 쓴 보관본과 참조된 보관본은 남음. 오래된 보관본과 같은 내용을 `put`한 직후(기록 전)에 정리·영구 삭제가 돌아도 그 보관본은 남음.
 - **만료:** 30일 지난 것만 만료, 1 GiB를 넘기는 `put`은 오래된 것부터 만료시켜 자리를 만듦, 1시간 안의 것은 남음(그것만으로 차면 `STORE_FULL`). 만료 뒤 기록은 남고 내려받기 410 `file_expired`, 모델 요청 바이트는 그대로. 같은 내용을 다시 올리면 되살아나고 예전 기록도 다시 내려받힘. `expired_at` 커밋 뒤 파일 삭제 전에 실패를 주입하면 다음 정리가 파일을 지움. 대기 중 만료된 업로드로 보내면 거부.
 - **Inside:**
-  - `place_uploads`: 이름 충돌(`name (2).ext`), `uploads`가 링크·파일이면 거부, 큰 파일 스트리밍.
-  - `place_uploads`: 두 탭이 동시에 보내도 한 번만 놓임, 쓰다가 실패하면 임시 파일만 남고 다시 보내면 원래 이름, `uploads`가 링크·파일이면 `uploads_folder_unusable`.
+  - 놓기: 이름 충돌(`name (2).ext`), `uploads`가 링크·파일이면 거부, 큰 파일 스트리밍.
+  - 놓기: 두 탭이 동시에 보내도 한 번만 놓임, 쓰다가 실패하면 임시 파일만 남고 다시 보내면 원래 이름, `uploads`가 링크·파일이면 `uploads_folder_unusable`. 이름 붙이기 직전·직후에 서버가 죽은 뒤 다시 보내도 한 번만 놓임(소유자 검수 B1).
   - `present_file`: 링크·하드링크·Root 밖 거부, 다른 대화 폴더 허용, 한도 초과 FAILED, 읽는 도중 바뀌면 FAILED.
   - **N1:** 지난 1시간 256 MiB를 채운 뒤의 `present_file`은 `put`하지 않음(보관소 크기와 다른 보관본의 만료가 그대로).
   - **N2:** `renameat2` 직전·직후 실패를 주입해도 링크 수가 1이고, 다시 보내면 원래 이름, 남은 `.tmp`는 다음 놓기에서 지워짐(같은 이름의 디렉터리는 남음). 이름 변경 뒤 `uploads/` 디렉터리 `fsync`가 불림.
@@ -624,3 +625,85 @@ N1~N7 모두 PASS. 확인을 부탁한 세 가지도 문제없음: 한 대화의
 | --- | --- | --- |
 | C1 | 60초 상한이 파일마다라서 첨부 10개면 10 × 60초가 될 수 있다 | 메시지 하나의 첨부를 쓰기 잠금 한 번에 놓는 `place_uploads`(§5.2) |
 | C2 | 이름 변경 뒤 `uploads/` 디렉터리 `fsync`가 없다. `.tmp` 정리가 무엇을 지우는지 정해지지 않았다 | 디렉터리 `fsync`, 일반 파일만 지움(§5.2) |
+
+## 19. 구현 노트 — 1단계: Data·보관소·Tool·Inside·Prompt·Provider·Bootstrap (2026-10-22)
+
+설계대로 구현했다. Web·CLI(§9)는 2단계다. 그때까지 Web의 메시지 경로는 지금처럼 글만 보낸다. 설계와 다르거나 더 정한 것은 다음과 같다.
+
+- **Data**
+  - 보관소는 `data/blobs.py`의 `FileStore`다. 바이트가 있는 곳(`BlobFiles`)과 `blobs` 행(`BlobRows`)을 백엔드가 준다. SQLite는 `<DB 폴더>/files`(`SqliteStore(files_dir=)`로 바꿀 수 있음), 인메모리 백엔드는 메모리에 둔다. 두 백엔드의 `blobs`(`data.blobs`)가 `BlobStore` 포트다.
+  - 대기 업로드 수를 바이트를 받기 전에 세려고 `FileCatalog.count_staged`를 더했다(검수 C10).
+  - 보관소 크기와 보관 기간은 `FileStore.configure`로 정한다. Application이 시작할 때 운영자 설정으로 부른다.
+  - `blobs` 행이 없거나 만료된 주소에 파일이 남아 있으면 `put`이 지우고 다시 놓는다(B1). 그래서 `link`는 덮어쓰지 않는 그대로 쓴다.
+- **Tool**: Data가 건넨 파일을 거부해 FAILED로 다시 기록할 때, 같은 결과의 Plan/Note 변경도 함께 뺀다. 실패한 호출은 효과가 없어야 하기 때문이다.
+- **Inside**
+  - 놓기 API는 `locked(workspace_id, timeout)`(쓰기 잠금을 상한까지만 기다림, `WorkspaceBusy`)과 `place_uploads(workspace_id, cwd, [Upload])`(잠금을 잡은 쪽이 부름)로 나눴다. Application이 그 사이에 기록을 다시 읽기 위해서다(C4).
+  - `renameat2`가 되는지는 시작할 때 Workspaces 폴더에서 한 번 시험한다(`placement_works`). 안 되면 경고를 남기고 업로드를 받지 않는다. 첨부 안내 문장도 지시문에 넣지 않는다.
+  - `inside/read_file`의 잘림 안내 문구가 바뀌었다: "[truncated: only the first N bytes of this M-byte file are shown; read on with offset=N]". 이어 읽을 위치는 보인 글이 덮는 원래 바이트 수다. 잘못된 UTF-8 바이트도 하나씩 센다.
+  - 링크를 건네려 하면 LINK로 거부한다(DENIED). 지금의 다른 파일 Tool과 같다.
+- **Prompt·Provider**: 첨부 안내 문장(`ATTACHMENT_NOTE`, 약 90토큰)이 지시문에 붙는다. 문맥 예산을 2000토큰으로 둔 시험 몇 개는 2100으로 올렸다.
+- **Bootstrap**: `Application.upload`·`send`·`files`·`call_files`·`attachment_records`·`download`·`clean_files`. 업로드 설정은 `Application.open(file_max_bytes=, file_store_max_bytes=, file_keep_days=)`이고, Web 설정(`HIMARI_FILE_*`)은 2단계에서 잇는다.
+- **검증:** 전체 1628 passed, 51 skipped. import 경계 검사 OK, mypy OK.
+  - 새 시험:
+    - Data 양쪽 백엔드 `tests/data/test_files.py`: 대기·첨부, 건넨 파일 버전, 한도, B1·B2 회귀, 만료, 정리, 영구 삭제.
+    - Inside `tests/environment/test_inside_files.py`: `present_file`, N1, `offset`, 놓기, N2.
+    - Dispatcher B3 회귀(`tests/tool/test_dispatcher.py`).
+    - Prompt `tests/prompt/test_attachments.py`(C1).
+    - Provider 첨부 줄(`tests/provider/test_openrouter.py`).
+    - Application `tests/bootstrap/test_files.py`: 보내기와 놓기, 다시 보내기, C3·C5·N4, 정리.
+  - 휴지통 시험의 "모든 포트" 목록과 "모든 테이블" 시험에도 파일 포트와 `files`·`blobs`를 더했다.
+
+### 19.1 검수 — PR #59(`83fbeee`): READY, 비차단 C1~C12
+
+| # | 지적 | 처리 |
+| --- | --- | --- |
+| C1 | 여러 파일 중 하나에서 놓기가 멈추면 앞의 것은 놓였는데 기록되지 않아, 다시 보낼 때 `a (2).txt`가 생긴다 | `PartlyPlaced`가 놓인 경로를 넘기고, Application이 기록한 뒤 원래 오류를 낸다 |
+| C2 | `blobs/<xx>/`의 키가 아닌 이름 하나가 매시간 정리를 멈춘다 | 목록에서 64자리 16진수 이름만 다룬다 |
+| C3 | Sandbox가 없을 때의 시작 로그가 없다(§5.2) | 시작 로그를 남긴다. 업로드 응답의 안내는 2단계 |
+| C4 | 검증 계획 대비 빈 시험 | 더한 시험: 멈춘 턴이 있는 C5, 영구 삭제의 해제 실패, `expired_at` 뒤 파일이 남는 경우, 쉬는 `.partial`, 0600, 이름 변경 뒤 디렉터리 `fsync`, Dispatcher의 한도 거부. 이름 변경 바로 뒤의 중단은 시험하지 않았다(링크 수가 1이라는 것은 `renameat2`의 성질) |
+| C5 | `put`이 설치 중에 취소되면 잠금이 먼저 풀린다 | 설치는 취소되어도 끝날 때까지 기다린다(`_finish`) |
+| C6 | 정리가 지운 `.partial`의 설치가 날 OSError | `BLOB_MISSING`("업로드가 끊김") |
+| C7 | 짝 없는 서로게이트, 줄인 뒤 끝의 `.`·공백 | 서로게이트도 `_`로, 줄인 뒤 다시 다듬는다 |
+| C8 | 만료된 보관본마다 매시간 지우기를 시도한다 | 디스크 목록에 있는 것만 지운다 |
+| C9 | 설치 전에 만료시켜, 설치가 실패하면 헛되다 | 고르기만 먼저 하고, 만료는 설치 뒤 |
+| C10 | 화면 거부 뒤의 재시도에서 파일 거부가 처리되지 않는다 | 화면을 뺀 재시도도 파일 거부 경로로 간다 |
+| C11 | 이미 놓인 업로드도 보관본을 연다 | 이미 놓였고 그 파일이 있으면 보관본이 없어도 된다 |
+| C12 | "not valid UTF-8"을 읽은 범위 전체로 판단한다 | 보인 부분으로만 판단한다 |
+
+검증: 전체 1651 passed, 51 skipped. import 경계 검사 OK, mypy OK.
+
+### 19.2 재검수 — `eb72421`: READY
+
+C1~C12 PASS(C7은 절반). 남은 것과 새 비차단 지적의 처리:
+
+| # | 지적 | 처리 |
+| --- | --- | --- |
+| C7 나머지 | 업로드의 이름 길이 검사가 짝 없는 서로게이트에서 500 | 길이는 `surrogatepass`로 센다 |
+| N1 | `put`이 `finish` 중에 취소되면 `discard`가 그 fd를 닫는다 | `finish`도 끝날 때까지 기다린다(`_finish`) |
+| N2 | 취소된 뒤의 실패가 "never retrieved"로 남는다 | 꺼내서 경고로 남긴다 |
+| N3 | 고르기와 만료 사이(설치 동안)에 대기 업로드가 그 보관본을 쓰기 시작할 수 있다 | `expire_blobs`가 대기 참조를 다시 보고, 실제로 만료한 것만 돌려준다. 파일은 그것만 지운다 |
+
+검증: 전체 1654 passed, 51 skipped. import 경계 검사 OK, mypy OK.
+
+### 19.3 소유자 검수 — `9748b1e`: NOT_READY (B1·B2; N1·N2)
+
+PR #58 설계는 READY(설계 유지, B1·B2 보완을 문서에 반영).
+
+| # | 지적 | 처리 |
+| --- | --- | --- |
+| B1 | 이름을 붙인 직후 `set_placement` 전에 프로세스가 죽으면, 다시 보낼 때 `report (2).pdf`가 생긴다. `PartlyPlaced`는 예외만 다루고 프로세스 종료는 못 다룬다 | 놓기를 단계로 나눴다: 복사 → 이름 고르기 → **경로 기록** → 이름 붙이기. 다시 보낼 때 기록된 경로의 파일을 크기·SHA-256으로 확인해 그대로 쓴다(§5.2). `PartlyPlaced`는 없앴다. 회귀 시험: 이름 붙이기 직후와 직전에 죽이고, 서버를 다시 연 뒤 보내면 파일이 한 번씩만 있다 |
+| B2 | 후보를 고른 뒤 만료하기 전에 대기 업로드가 그 후보를 쓰기 시작하면, 확보하지 못한 용량을 다시 보지 않아 상한을 넘을 수 있다 | 고르기·만료·새 행 등록을 한 트랜잭션(`reserve`)으로, 설치 실패는 `unreserve`로 되돌린다(§4.5; 재검수 B3에서 설치를 먼저 하는 순서로 바뀌고 `unreserve`는 없어짐, §19.4). 설치는 잠금 안에서 이벤트 루프에서 한다(링크·지우기·작은 디렉터리 `fsync`; 바이트는 이미 `fsync`됨). 그래서 설치 중 취소로 되돌리기가 어긋나는 일도 없다. 회귀 시험: 만료 후보를 대기 업로드가 쓰면 `STORE_FULL`이고 상한을 넘지 않음, 설치 실패 뒤 새 행이 남지 않음. 고르기와 만료 사이에 끼어들 틈 자체가 없어서, 그 틈에 끼우는 시험은 만들 수 없다 |
+| N1 | 새로 만든 `uploads/`가 상위 디렉터리에 영속화되지 않는다 | 놓기에서 새로 만든 폴더마다 상위를 `fsync`한다(`ensure_directory(durable=True)`). 보관소의 새 폴더도 같다. 시험: 새 대화 폴더와 `uploads`의 상위, 복사본, 이름 붙인 뒤의 디렉터리 순으로 `fsync` |
+| N2 | 1단계만 배포하면 모델은 파일을 건넸다고 하지만 받을 길(다운로드 카드)이 없다 | **배포 메모:** 1단계는 2단계(Web·CLI)와 함께 배포한다. 코드로 막지는 않았다 |
+
+검증: 관련 모듈 시험(Data·Environment·Bootstrap·Tool) 621 passed. 전체 1659 passed, 51 skipped. import 경계 검사 OK, mypy OK.
+
+### 19.4 소유자 재검수 — `4b37745`: NOT_READY (B3)
+
+B1·B2·N1 PASS, N2 조건부 PASS(2단계와 함께 배포).
+
+| # | 지적 | 처리 |
+| --- | --- | --- |
+| B3 | `reserve`가 오래된 보관본의 만료와 새 행 등록을 커밋한 뒤 설치 전에 프로세스가 죽으면, `unreserve`가 돌지 않는다. 그러면 새 업로드는 실패했는데 오래된 원본이 만료되어 정리가 지운다 | 순서를 바꿨다: 새 파일을 최종 이름에 놓고(바이트는 이미 `fsync`, 디렉터리도 `fsync`) → `reserve`(고르기·만료·등록을 한 트랜잭션) → 만료된 파일 지우기. `reserve`가 `STORE_FULL`이면 새 파일만 지운다. 살아 있는 행이 가리키는 주소는 이 분기에 오지 않는다(파일만 없어진 경우는 그대로 다시 놓는 분기). `unreserve`는 없앴다. 회귀 시험(SQLite, 별도 프로세스 SIGKILL): 설치 직전과 `reserve` 직전에 죽인 뒤 다시 열면, 오래된 보관본은 살아 있고 새 행이 없다. 정리 뒤에는 행 없는 새 파일도 없다. 같은 시나리오를 죽이지 않고 돌리면 실제로 오래된 것이 만료된다(시나리오 검증). 이전 순서에서는 설치 직전 경우가 실패하는 것을 확인했다 |
+
+검증: 관련 모듈 시험(Data·Bootstrap·Environment·Tool) 627 passed. import 경계 검사 OK, mypy OK.

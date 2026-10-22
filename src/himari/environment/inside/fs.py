@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import ctypes
 import errno
+import hashlib
 import os
 import posixpath
 import secrets
@@ -30,6 +31,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum
+from typing import BinaryIO
 
 RESOLVE_NO_XDEV = 0x01
 RESOLVE_NO_MAGICLINKS = 0x02
@@ -210,8 +212,9 @@ def _open_dir(root_fd: int, relative: str) -> Iterator[int]:
         os.close(fd)
 
 
-def ensure_directory(root_fd: int, relative: str) -> None:
-    """``mkdir -p`` beneath the root, one verified component at a time."""
+def ensure_directory(root_fd: int, relative: str, *, durable: bool = False) -> None:
+    """``mkdir -p`` beneath the root, one verified component at a time.
+    ``durable``: a directory it creates is made durable in its parent too."""
     if relative == ".":
         return
     fd = os.dup(root_fd)
@@ -221,6 +224,8 @@ def ensure_directory(root_fd: int, relative: str) -> None:
                 raise FsError(FsCategory.INVALID)
             try:
                 os.mkdir(component, 0o755, dir_fd=fd)
+                if durable:
+                    os.fsync(fd)  # the new entry survives power loss (V3-P66 owner review N1)
             except FileExistsError:
                 pass
             except OSError as error:
@@ -288,19 +293,23 @@ def _identity(info: os.stat_result) -> Identity:
     return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
 
 
-def read_file(root_fd: int, relative: str, max_bytes: int) -> tuple[bytes, int]:
-    """Up to ``max_bytes`` of a regular file and its total size."""
-    data, size, _ = read_file_with_identity(root_fd, relative, max_bytes)
+def read_file(root_fd: int, relative: str, max_bytes: int, offset: int = 0) -> tuple[bytes, int]:
+    """Up to ``max_bytes`` of a regular file from ``offset`` on, and its total size."""
+    data, size, _ = read_file_with_identity(root_fd, relative, max_bytes, offset)
     return data, size
 
 
-def read_file_with_identity(root_fd: int, relative: str, max_bytes: int) -> tuple[bytes, int, Identity]:
+def read_file_with_identity(root_fd: int, relative: str, max_bytes: int,
+                            offset: int = 0) -> tuple[bytes, int, Identity]:
     """Like :func:`read_file`, plus the file's identity for an optimistic
-    write-back check (see ``write_file(expected=...)``)."""
+    write-back check (see ``write_file(expected=...)``). ``offset``: read
+    from that byte on (V3-P66 §5.2)."""
     fd = openat2(root_fd, relative, _READ_FLAGS)
     try:
         info = os.fstat(fd)
         _check_regular(info)
+        if offset:
+            os.lseek(fd, offset, os.SEEK_SET)
         chunks: list[bytes] = []
         remaining = max_bytes
         while remaining > 0:
@@ -373,6 +382,153 @@ def write_file(
                 raise
             raise _categorize(error) from None
         return created
+
+
+def identity(root_fd: int, relative: str) -> Identity:
+    """The file's identity now, without opening it for reading."""
+    fd = openat2(root_fd, relative, _PATH_FLAGS)
+    try:
+        info = os.fstat(fd)
+    finally:
+        os.close(fd)
+    if stat.S_ISLNK(info.st_mode):
+        raise FsError(FsCategory.LINK)
+    _check_regular(info)
+    return _identity(info)
+
+
+# --- placing an upload (V3-P66 §5.2) --------------------------------------------
+
+RENAME_NOREPLACE = 1
+_renameat2: object = None
+MAX_NAME_TRIES = 100
+
+
+def rename_noreplace(dir_fd: int, old: str, new: str) -> None:
+    """``renameat2(dir_fd, old, dir_fd, new, RENAME_NOREPLACE)``: atomic, one
+    link at every moment (review N2); EXISTS if ``new`` is taken."""
+    global _renameat2
+    if _renameat2 is None:
+        libc = ctypes.CDLL(None, use_errno=True)
+        _renameat2 = libc.renameat2
+        _renameat2.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+        _renameat2.restype = ctypes.c_int
+    if _renameat2(dir_fd, os.fsencode(old), dir_fd, os.fsencode(new), RENAME_NOREPLACE) != 0:  # type: ignore[operator]
+        err = ctypes.get_errno()
+        if err in (errno.EINVAL, errno.ENOSYS):
+            raise FsError(FsCategory.UNSUPPORTED)
+        raise _categorize(OSError(err, os.strerror(err)))
+
+
+def _candidates(name: str) -> Iterator[str]:
+    yield name
+    stem, dot, ext = name.rpartition(".")
+    if not dot or not stem:
+        stem, ext = name, ""
+    for n in range(2, MAX_NAME_TRIES + 1):
+        yield f"{stem} ({n}).{ext}" if ext else f"{stem} ({n})"
+
+
+def clear_temps(root_fd: int, folder: str, temp_prefix: str) -> None:
+    """Remove leftover temporary files (regular files only, links not
+    followed). The caller holds the Workspace write lock, so none belongs
+    to a live write."""
+    with _open_dir(root_fd, folder) as dir_fd:
+        for entry in os.listdir(dir_fd):
+            if entry.startswith(temp_prefix) and entry.endswith(".tmp"):
+                try:
+                    if stat.S_ISREG(os.stat(entry, dir_fd=dir_fd, follow_symlinks=False).st_mode):
+                        os.unlink(entry, dir_fd=dir_fd)
+                except OSError:
+                    pass
+
+
+def write_temp(root_fd: int, folder: str, source: BinaryIO, temp_prefix: str) -> str:
+    """Copy ``source`` into a new durable temporary file in ``folder``; its name."""
+    with _open_dir(root_fd, folder) as dir_fd:
+        temp = f"{temp_prefix}{secrets.token_hex(8)}.tmp"
+        try:
+            fd = os.open(temp, _CREATE_FLAGS | os.O_CLOEXEC, 0o644, dir_fd=dir_fd)
+        except OSError as error:
+            raise _categorize(error) from None
+        try:
+            try:
+                while chunk := source.read(1 << 20):
+                    view = memoryview(chunk)
+                    while view:
+                        view = view[os.write(fd, view):]
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+        except BaseException as error:
+            try:
+                os.unlink(temp, dir_fd=dir_fd)
+            except OSError:
+                pass
+            if isinstance(error, OSError):
+                raise _categorize(error) from None
+            raise
+        return temp
+
+
+def free_name(root_fd: int, folder: str, name: str, preferred: str | None = None) -> str:
+    """``preferred`` (a name in ``folder``) if nothing is there, else the
+    first of ``name``, ``name (2)``… that is free."""
+    with _open_dir(root_fd, folder) as dir_fd:
+        def taken(candidate: str) -> bool:
+            try:
+                os.stat(candidate, dir_fd=dir_fd, follow_symlinks=False)
+                return True
+            except FileNotFoundError:
+                return False
+            except OSError as error:
+                raise _categorize(error) from None
+        for candidate in ([preferred] if preferred else []) + list(_candidates(name)):
+            if not taken(candidate):
+                return candidate
+    raise FsError(FsCategory.EXISTS)
+
+
+def commit_temp(root_fd: int, folder: str, temp: str, target: str) -> bool:
+    """Give the temporary file its name, never replacing anything, then make
+    the directory durable; False if ``target`` is taken."""
+    with _open_dir(root_fd, folder) as dir_fd:
+        try:
+            rename_noreplace(dir_fd, temp, target)
+        except FsError as error:
+            if error.category is FsCategory.EXISTS:
+                return False
+            raise
+        os.fsync(dir_fd)
+        return True
+
+
+def remove_temp(root_fd: int, folder: str, temp: str) -> None:
+    try:
+        with _open_dir(root_fd, folder) as dir_fd:
+            os.unlink(temp, dir_fd=dir_fd)
+    except (OSError, FsError):
+        pass
+
+
+def same_content(root_fd: int, relative: str, size: int, sha256: str) -> bool:
+    """Whether a regular file is there with exactly these bytes."""
+    try:
+        fd = openat2(root_fd, relative, _READ_FLAGS)
+    except FsError:
+        return False
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_size != size:
+            return False
+        digest = hashlib.sha256()
+        while chunk := os.read(fd, 1 << 20):
+            digest.update(chunk)
+        return digest.hexdigest() == sha256
+    except OSError:
+        return False
+    finally:
+        os.close(fd)
 
 
 def delete_file(root_fd: int, relative: str) -> None:

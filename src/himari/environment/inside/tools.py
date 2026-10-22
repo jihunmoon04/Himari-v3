@@ -8,12 +8,23 @@ permission, shared inode) are DENIED; other problems are FAILED.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping
+import posixpath
+from collections.abc import AsyncIterator, Mapping
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 import shlex
 
 from himari.common import EnvironmentKind, JsonValue, ModelToolResult, TextBlock, ToolId
+from himari.data.api import (
+    PRESENT_LIMIT_BYTES,
+    PRESENT_WINDOW,
+    DataError,
+    DataErrorCode,
+    PresentedFile,
+    clean_file_name,
+    clean_media_type,
+)
 from himari.environment.inside import fs
 from himari.environment.inside.blocking import run_blocking
 from himari.sandbox.api import (
@@ -187,38 +198,80 @@ class ListFiles(_InsideTool):
         )
 
 
+def _visible(data: bytes, budget: int) -> tuple[str, int]:
+    """The longest prefix of ``data`` whose shown text (invalid UTF-8 bytes
+    as U+FFFD) fits ``budget`` bytes, and how many bytes of ``data`` it
+    covers — so the next ``offset`` continues exactly where it stopped."""
+    shown: list[str] = []
+    used = covered = 0
+    for char in data.decode("utf-8", errors="surrogateescape"):
+        if "\udc80" <= char <= "\udcff":
+            text, raw = "\ufffd", 1
+        else:
+            text = char
+            raw = len(char.encode("utf-8"))
+        cost = len(text.encode("utf-8"))
+        if used + cost > budget:
+            break
+        shown.append(text)
+        used += cost
+        covered += raw
+    return "".join(shown), covered
+
+
 class ReadFile(_InsideTool):
     name = "read_file"
-    description = "Read a UTF-8 text file from the workspace (large files are truncated)."
-    properties = {"path": {"type": "string", "description": "File to read."}}
+    description = ("Read a UTF-8 text file from the workspace. Large files are shown in parts: "
+                   "the result says which bytes it shows and the offset to read on from.")
+    properties = {
+        "path": {"type": "string", "description": "File to read."},
+        "offset": {"type": "integer", "minimum": 0, "description": "Byte to start at (default 0)."},
+    }
     required = ["path"]
 
+    @staticmethod
+    def _notice(offset: int, end: int, size: int) -> str:
+        if offset == 0:
+            return f"\n[truncated: only the first {end} bytes of this {size}-byte file are shown; read on with offset={end}]"
+        return f"\n[truncated: shown bytes {offset}-{end} of {size}; read on with offset={end}]"
+
     def act(self, root_fd: int, relative: str, args: Mapping[str, Any]) -> ToolOutcome:
-        data, size = fs.read_file(root_fd, relative, MAX_READ_BYTES)
+        offset = args.get("offset", 0)
+        offset = offset if isinstance(offset, int) and not isinstance(offset, bool) and offset > 0 else 0
+        data, size = fs.read_file(root_fd, relative, MAX_READ_BYTES, offset)
         shown = fs.display(relative)
+        if offset >= size and size:
+            return ToolOutcome(ToolStatus.SUCCEEDED, _text(f"{shown} ({size} bytes): offset {offset} is past the end"),
+                               raw_result={"path": shown, "size": size, "offset": offset, "chars_shown": 0})
         if b"\0" in data:
             return ToolOutcome(
                 ToolStatus.SUCCEEDED,
                 _text(f"{shown} ({size} bytes): binary file, content not shown"),
                 raw_result={"path": shown, "size": size, "binary": True},
             )
-        # Invalid UTF-8 policy: decode with U+FFFD replacement (which can
-        # triple the byte count) and say so; the budget applies to the final
-        # encoded text, header and notices included.
-        text = data.decode("utf-8", errors="replace")
-        invalid_utf8 = "\ufffd" in text and "\ufffd".encode() not in data
-        header = f"{shown} ({size} bytes{', not valid UTF-8: invalid bytes shown as U+FFFD' if invalid_utf8 else ''})\n"
-        notice = f"\n[truncated: only the beginning of this {size}-byte file is shown]"
-        budget = MAX_OBSERVATION_BYTES - len(header.encode()) - len(notice.encode())
-        visible = _fit(text, budget)
-        truncated = len(visible) < len(text) or len(data) < size
-        body = header + visible + (notice if truncated else "")
+        # Invalid UTF-8 policy: show invalid bytes as U+FFFD (which can triple
+        # the byte count) and say so; the budget applies to the final encoded
+        # text, header and notices included. Judged on the part shown, so a
+        # read window ending inside a character is not "invalid" (PR #59 C12).
+        def header(invalid: bool) -> str:
+            return (f"{shown} ({size} bytes" + (f", from byte {offset}" if offset else "")
+                    + (", not valid UTF-8: invalid bytes shown as U+FFFD" if invalid else "") + ")\n")
+
+        budget = MAX_OBSERVATION_BYTES - len(header(True).encode()) - len(self._notice(offset, size, size).encode())
+        visible, covered = _visible(data, budget)
+        part = data[:covered]
+        invalid_utf8 = "\ufffd" in part.decode("utf-8", errors="replace") and "\ufffd".encode() not in part
+        end = offset + covered
+        truncated = end < size
+        notice = self._notice(offset, end, size) if truncated else ""
         return ToolOutcome(
             ToolStatus.SUCCEEDED,
-            _text(body),
+            _text(header(invalid_utf8) + visible + notice),
             raw_result={
                 "path": shown,
                 "size": size,
+                "offset": offset,
+                "next_offset": end if truncated else None,
                 "chars_shown": len(visible),
                 "truncated": truncated,
                 "invalid_utf8": invalid_utf8,
@@ -432,5 +485,90 @@ def _command_outcome(argv: list[str], timeout: int, result: object) -> ToolOutco
     )
 
 
+def _size(n: int) -> str:
+    for unit, scale in (("GB", 1 << 30), ("MB", 1 << 20), ("KB", 1 << 10)):
+        if n >= scale:
+            return f"{n / scale:.1f} {unit}"
+    return f"{n} bytes"
+
+
+async def _once(data: bytes) -> AsyncIterator[bytes]:
+    yield data
+
+
+class PresentFile(_InsideTool):
+    """``inside/present_file`` (V3-P66 §7.1): give the user a Workspace file.
+    Its bytes at this moment go to the file store; the result carries them
+    as a presented file, recorded with the result. READ: it changes no
+    Workspace file, and running it again only stores the same bytes."""
+
+    name = "present_file"
+    description = ("Give a workspace file to the user: they get a download card in the conversation. "
+                   "The file's bytes at this moment are kept; later edits need another call.")
+    properties = {"path": {"type": "string", "description": "File to give to the user."}}
+    required = ["path"]
+
+    async def run(self, invocation: ToolInvocation, ctx: ToolContext) -> ToolOutcome:
+        files = self._env.files
+        if files is None:
+            return ToolOutcome(ToolStatus.DENIED, _text("files cannot be given on this server", error=True))
+        if ctx.binding is None or ctx.workspace is None:
+            return ToolOutcome(ToolStatus.DENIED, _text("no workspace is bound to this conversation", error=True))
+        # Checked before anything is stored (review N1): one Conversation's
+        # Tools run one at a time, so the sum cannot change before the commit.
+        given = await files.catalog.presented_bytes_since(ctx.scope, datetime.now(UTC) - PRESENT_WINDOW)
+        loaded = await run_blocking(self._load, self._env.host_root(ctx.binding.workspace_id),
+                                    ctx.workspace.cwd_relative, invocation.arguments.get("path"),
+                                    files.max_bytes, PRESENT_LIMIT_BYTES - given)
+        if isinstance(loaded, ToolOutcome):
+            return loaded
+        shown, data = loaded
+        try:
+            blob = await files.blobs.put(ctx.scope.principal_id, _once(data), files.max_bytes)
+        except DataError as error:
+            if error.code is DataErrorCode.STORE_FULL:
+                return ToolOutcome(ToolStatus.FAILED, _text(f"{shown}: the file store is full; nothing was given",
+                                                            error=True), raw_result={"refused": "store_full"})
+            if error.code is DataErrorCode.TOO_LARGE:
+                return ToolOutcome(ToolStatus.FAILED, _text(f"{shown}: larger than {_size(files.max_bytes)}",
+                                                            error=True), raw_result={"refused": "too_large"})
+            raise
+        name = clean_file_name(posixpath.basename(shown))
+        presented = PresentedFile(blob, name, clean_media_type(None, name), shown)
+        return ToolOutcome(ToolStatus.SUCCEEDED, _text(f"Presented {name} to the user ({_size(blob.size)})."),
+                           raw_result={"path": shown, "size": blob.size, "sha256": blob.sha256},
+                           presented_files=(presented,))
+
+    @staticmethod
+    def _load(host_root: str, cwd: str, raw_path: object, max_bytes: int,
+              allowance: int) -> tuple[str, bytes] | ToolOutcome:
+        shown = raw_path if isinstance(raw_path, str) else "?"
+        try:
+            relative = fs.to_relative(cwd, shown)
+            shown = fs.display(relative)
+            with fs.open_root(host_root) as root_fd:
+                before = fs.identity(root_fd, relative)  # regular, one link
+                size = before[2]
+                if size > max_bytes:
+                    return ToolOutcome(ToolStatus.FAILED, _text(
+                        f"{shown}: {_size(size)}, larger than the {_size(max_bytes)} a file may be", error=True),
+                        raw_result={"refused": "too_large", "size": size})
+                if size > allowance:
+                    return ToolOutcome(ToolStatus.FAILED, _text(
+                        f"{shown}: too much was given in the last hour (limit {_size(PRESENT_LIMIT_BYTES)}); "
+                        "nothing was given", error=True), raw_result={"refused": "limit", "size": size})
+                data, total, opened = fs.read_file_with_identity(root_fd, relative, size + 1)
+                if opened != before or fs.identity(root_fd, relative) != before or len(data) != total:
+                    return ToolOutcome(ToolStatus.FAILED, _text(
+                        f"{shown}: the file changed while it was being read; nothing was given", error=True),
+                        raw_result={"refused": "changed"})
+                return shown, data
+        except fs.FsError as error:
+            return _failure(shown, error)
+
+
 def file_tools(env: InsideEnvironment) -> list[_InsideTool]:
-    return [ListFiles(env), ReadFile(env), WriteFile(env), EditFile(env), DeleteFile(env)]
+    tools: list[_InsideTool] = [ListFiles(env), ReadFile(env), WriteFile(env), EditFile(env), DeleteFile(env)]
+    if env.files is not None:
+        tools.append(PresentFile(env))
+    return tools

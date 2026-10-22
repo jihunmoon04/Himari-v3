@@ -36,9 +36,9 @@ from typing import Any
 import httpx
 
 from himari.common import (
-    AttachmentRef,
     CallId,
     ContentBlock,
+    FrozenMap,
     ProviderContinuation,
     RawRepresentation,
     TextBlock,
@@ -50,10 +50,12 @@ from himari.common import (
 )
 from himari.prompt.api import (
     AssistantTurn,
+    AttachmentInfo,
     CompressedHistory,
     ModelInput,
     ToolGroupTurn,
     UserTurn,
+    blocks_text,
     json_data,
     notes_section,
     state_block,
@@ -162,13 +164,9 @@ def decode_tool_name(name: str) -> ToolId:
     return ToolId(name.replace("__", "/", 1))
 
 
-def _text(blocks: Sequence[ContentBlock]) -> str:
-    parts: list[str] = []
-    for block in blocks:
-        if isinstance(block, AttachmentRef):
-            raise ProviderError(ProviderErrorCode.UNSUPPORTED_CAPABILITY, "attachments are not supported yet")
-        parts.append(block.text)
-    return "\n".join(parts)
+def _text(blocks: Sequence[ContentBlock], attachments: Mapping[str, AttachmentInfo] = FrozenMap()) -> str:
+    """Text as it is; an attachment as its line (V3-P66 §6, ``prompt.api.blocks_text``)."""
+    return blocks_text(blocks, attachments)
 
 
 def _render_summary(summary: str) -> str:
@@ -292,17 +290,19 @@ class OpenRouterAdapter:
             system.append(notes)
         if system:
             messages.append({"role": "system", "content": "\n\n".join(system)})
+        attachments = model_input.attachments
         for part in model_input.conversation:
             if isinstance(part, UserTurn):
-                messages.append({"role": "user", "content": _text(part.blocks)})
+                messages.append({"role": "user", "content": _text(part.blocks, attachments)})
             elif isinstance(part, AssistantTurn):
                 messages.append(
-                    {"role": "assistant", "content": _text(part.blocks), **self._replay(part.continuation, model_id)}
+                    {"role": "assistant", "content": _text(part.blocks, attachments),
+                     **self._replay(part.continuation, model_id)}
                 )
             elif isinstance(part, CompressedHistory):
                 messages.append({"role": "user", "content": _render_summary(_text(part.summary))})
             elif isinstance(part, ToolGroupTurn):
-                messages.extend(self._tool_group(part, self._replay(part.continuation, model_id)))
+                messages.extend(self._tool_group(part, self._replay(part.continuation, model_id), attachments))
         if breakpoint:
             _mark_cache_breakpoint(messages)
         state = state_block(model_input.current_state, model_input.source_notes, model_input.turn_state)
@@ -311,7 +311,8 @@ class OpenRouterAdapter:
         return messages
 
     @staticmethod
-    def _tool_group(group: ToolGroupTurn, reasoning: Mapping[str, Any]) -> list[dict[str, Any]]:
+    def _tool_group(group: ToolGroupTurn, reasoning: Mapping[str, Any],
+                    attachments: Mapping[str, AttachmentInfo] = FrozenMap()) -> list[dict[str, Any]]:
         calls = sorted(group.calls, key=lambda c: c.ordinal)
         missing = [c.call_id for c in calls if c.call_id not in group.results]
         if missing:
@@ -336,7 +337,7 @@ class OpenRouterAdapter:
         results: list[dict[str, Any]] = []
         for c in calls:
             result = group.results[c.call_id]
-            text = _text(result.blocks)
+            text = _text(result.blocks, attachments)
             results.append(
                 {"role": "tool", "tool_call_id": c.call_id, "content": f"[tool error] {text}" if result.is_error else text}
             )

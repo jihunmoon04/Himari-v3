@@ -229,6 +229,7 @@ _ADDED_IN = {
         "DROP TABLE ui_resources"),
     6: ("DROP TABLE model_settings",),
     7: ("ALTER TABLE conversations DROP COLUMN purge_started_at", "ALTER TABLE conversations DROP COLUMN trashed_at"),
+    8: ("DROP TABLE files", "DROP TABLE blobs"),
 }
 
 
@@ -242,13 +243,13 @@ def old_database(path: Path, version: int) -> None:
            f"PRAGMA user_version={version}")
 
 
-@pytest.mark.parametrize("version", [2, 3, 4, 5, 6])
+@pytest.mark.parametrize("version", [2, 3, 4, 5, 6, 7])
 def test_an_older_database_is_upgraded_in_place_and_keeps_its_data(tmp_path: Path, version: int) -> None:
     path = tmp_path / "h.db"
     old_database(path, version)
     store = SqliteStore(path)
     try:
-        assert store.connection.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 7
+        assert store.connection.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 8
         data = SqliteData(store)
         events = asyncio.run(data.read_events(SCOPE))
         assert [e.payload.blocks for e in events] == [(TextBlock(f"from v{version}"),)]  # type: ignore[union-attr]
@@ -256,13 +257,14 @@ def test_an_older_database_is_upgraded_in_place_and_keeps_its_data(tmp_path: Pat
         columns = [r[1] for r in store.connection.execute("PRAGMA table_info(tool_executions)")]
         assert columns[-2:] == ["ui_digest", "app_payload"]  # and the v5 ones
         asyncio.run(data.set_model_setting(SCOPE, ModelSetting("openai/gpt-6-luna", "high")))  # and the v6 one
+        assert asyncio.run(data.count_staged(SCOPE)) == 0  # the v8 tables
         asyncio.run(data.trash_conversation(SCOPE))  # and the v7 columns
     finally:
         store.close()
-    SqliteStore(path).close()  # and it opens as a plain v7 database afterwards
+    SqliteStore(path).close()  # and it opens as a plain v8 database afterwards
 
 
-@pytest.mark.parametrize("version", [2, 3, 4, 5, 6])
+@pytest.mark.parametrize("version", [2, 3, 4, 5, 6, 7])
 @pytest.mark.parametrize("change", ["CREATE TABLE extra (x)", "PRAGMA application_id=1", "DROP TABLE artifacts"])
 def test_only_an_exact_older_database_is_upgraded(tmp_path: Path, version: int, change: str) -> None:
     path = tmp_path / "h.db"
@@ -273,7 +275,7 @@ def test_only_an_exact_older_database_is_upgraded(tmp_path: Path, version: int, 
     conn = sqlite3.connect(path)
     try:
         assert conn.execute("PRAGMA user_version").fetchone()[0] == version  # refused, never repaired
-        assert "trashed_at" not in [r[1] for r in conn.execute("PRAGMA table_info(conversations)")]
+        assert not conn.execute("SELECT 1 FROM sqlite_master WHERE name='files'").fetchall()
     finally:
         conn.close()
     assert not list(tmp_path.glob("*.bak*"))  # refused before any backup

@@ -19,6 +19,7 @@ from himari.data.api import (
     ArtifactMutation,
     AssistantToolCalls,
     ModelSetting,
+    PresentedFile,
     PromptBasis,
     RawReceived,
     RunPreparation,
@@ -43,16 +44,24 @@ def preparation(purpose: RunPurpose = RunPurpose.TURN) -> RunPreparation:
                           purpose)
 
 
+async def chunks(data: bytes):  # type: ignore[no-untyped-def]
+    yield data
+
+
 async def fill(data: SqliteData, scope: TrustedScope) -> None:
     """A row in every table a Conversation can have."""
+    upload = await data.blobs.put(scope.principal_id, chunks(f"up {scope.conversation_id}".encode()), 1000)
+    await data.stage_upload(scope, upload, "u.txt", "text/plain")
     await data.append_event(scope, user("hello"), idempotency_key="k")
     run_id = await data.prepare_run(scope, preparation())
     await data.mark_dispatch(scope, run_id)
     await data.record_raw_outcome(scope, run_id, RawReceived(b"r", "application/json"))
     await data.project_model_output(scope, run_id, AssistantToolCalls((ToolCall(CallId("c"), 0, ToolId("fake/v"), {}),)))
     view = AppView(UiResource.create("fake", f"ui://fake/{scope.conversation_id}", "<!DOCTYPE html>", UiCsp()), {})
+    given = await data.blobs.put(scope.principal_id, chunks(f"out {scope.conversation_id}".encode()), 1000)
     await data.commit_tool_outcome(scope, CallRef(run_id, CallId("c")), ToolCompletion(
-        ToolExecutionStatus.SUCCEEDED, text_result("v"), app_view=view, artifact_mutations=(ArtifactMutation("note", "n"),)))
+        ToolExecutionStatus.SUCCEEDED, text_result("v"), app_view=view, artifact_mutations=(ArtifactMutation("note", "n"),),
+        presented_files=(PresentedFile(given, "o.txt", "text/plain", "/workspace/o.txt"),)))
     await data.prepare_run(scope, preparation(RunPurpose.COMPACTION))
     await data.set_external_setting(scope, "fake", False)
     await data.set_model_setting(scope, ModelSetting("m", None))
@@ -111,7 +120,7 @@ def v6_database(path: Path) -> None:
     store.close()
     conn = sqlite3.connect(path, isolation_level=None)
     try:
-        for statement in ("ALTER TABLE conversations DROP COLUMN purge_started_at",
+        for statement in ("DROP TABLE files", "DROP TABLE blobs", "ALTER TABLE conversations DROP COLUMN purge_started_at",
                           "ALTER TABLE conversations DROP COLUMN trashed_at", "PRAGMA user_version=6"):
             conn.execute(statement)
     finally:

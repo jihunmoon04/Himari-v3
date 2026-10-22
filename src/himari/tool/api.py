@@ -42,6 +42,7 @@ from himari.data.api import ArtifactMutation, ArtifactStore, BindingAuthority, C
 from himari.data.api import MAX_APP_PAYLOAD_BYTES as MAX_APP_PAYLOAD_BYTES
 from himari.data.api import MAX_UI_HTML_BYTES as MAX_UI_HTML_BYTES
 from himari.data.api import AppView as AppView
+from himari.data.api import PresentedFile as PresentedFile
 from himari.data.api import UiCsp as UiCsp
 from himari.data.api import UiResource as UiResource
 
@@ -154,6 +155,10 @@ class ToolOutcome(DeepFrozen):
     # only when the call ran (SUCCEEDED/FAILED); a view Data refuses is
     # dropped and the result is committed without it.
     app_view: AppView | None = None
+    # V3-P66 §7.1: files given to the user, recorded with the result (SUCCEEDED
+    # only). If Data refuses them the call is committed FAILED instead: the
+    # result said they were given, so it cannot stand without them.
+    presented_files: tuple[PresentedFile, ...] = ()
 
 
 @runtime_checkable
