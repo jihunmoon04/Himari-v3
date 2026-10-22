@@ -17,6 +17,14 @@ running job is stopped first), ``POST …/restore`` brings it back, and
 missing (404) to every other route; ``GET /api/conversations?trashed=1``
 lists the trash.
 
+Files (V3-P66 §9): ``POST …/uploads?name=`` takes one file's bytes as the
+body (outside the general body limit, held to the file limit) and stages
+it; a message names staged uploads in ``attachments``. ``GET …/files`` lists
+a Conversation's files and ``GET …/files/{id}/{version}`` downloads one —
+always as an attachment of type octet-stream, sandboxed, so nothing a user
+or the model made opens on this origin. Events carry their attachments and
+the files a call presented.
+
 Tool views (MCP Apps, V3-P58): events say which calls have one
 (``app_view``); ``GET …/calls/{run}/{call}/app`` gives a view as JSON with a
 signed URL of the sandbox origin's proxy (``sandbox.py``). The view's HTML
@@ -27,9 +35,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import secrets
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable
+from urllib.parse import quote
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from importlib import resources
@@ -37,7 +47,7 @@ from typing import Any
 
 from fastapi import Depends, FastAPI, Request, Response
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.trustedhost import TrustedHostMiddleware
@@ -48,6 +58,8 @@ from himari.bootstrap.application import (
     AppViewState,
     ConversationStillStopping,
     DeleteNotice,
+    FileNameRefused,
+    FilesUnavailable,
     ModelChoiceView,
     ModelRefused,
     ModelView,
@@ -55,6 +67,8 @@ from himari.bootstrap.application import (
     PromptView,
     ToolSourceView,
     UnknownToolSource,
+    UploadsFolderUnusable,
+    WorkspaceBusy,
 )
 from himari.bootstrap.operator import OPERATOR, derive_cli_bearer, verify_operator_token
 from himari.common import (
@@ -64,6 +78,7 @@ from himari.common import (
     CallRef,
     ContentBlock,
     ConversationId,
+    FileId,
     PrincipalId,
     RunId,
     TextBlock,
@@ -72,6 +87,7 @@ from himari.common import (
 )
 from himari.control.api import ContextStatus, ControlError, ControlErrorCode, JobStatus, TurnUsage
 from himari.data.api import (
+    MAX_ATTACHMENTS,
     MAX_LIST_LIMIT,
     AssistantFinal,
     AssistantToolCalls,
@@ -79,10 +95,12 @@ from himari.data.api import (
     ConversationSummary,
     DataError,
     DataErrorCode,
+    FileRecord,
     ToolResultRecord,
     UserMessage,
 )
 from himari.interfaces.web.config import WebConfig
+from himari.sandbox.api import SandboxState
 from himari.interfaces.web.sandbox import SandboxGrant, SandboxSigner
 from himari.interfaces.web.security import (
     SESSION_COOKIE,
@@ -163,6 +181,7 @@ class RenameBody(_Body):
 
 class MessageBody(_Body):
     text: str
+    attachments: list[str] = Field(default_factory=list)  # staged uploads' file ids (V3-P66)
 
 
 class ModelBody(_Body):
@@ -190,8 +209,27 @@ def _time(value: datetime | None) -> str | None:
 
 
 def _text(blocks: tuple[ContentBlock, ...]) -> str:
-    return "\n\n".join(b.text if isinstance(b, TextBlock) else f"[attachment {b.file_id}]"
-                       for b in blocks if isinstance(b, (TextBlock, AttachmentRef)))
+    """The text blocks; attachments are listed apart (``attachments``)."""
+    return "\n\n".join(b.text for b in blocks if isinstance(b, TextBlock))
+
+
+def file_view(record: FileRecord) -> dict[str, Any]:
+    return {"file_id": record.file_id, "version": record.version, "origin": record.origin.value,
+            "name": record.name, "media_type": record.media_type, "size": record.size,
+            "created_at": _time(record.created_at), "workspace_path": record.workspace_path,
+            "expired": record.expired}
+
+
+_DOWNLOAD_SAFE = "!#$&+-.^_`|~"  # RFC 5987 attr-char besides letters and digits
+
+
+def content_disposition(name: str) -> str:
+    """V3-P66 §7.2 (review C9): an ASCII stand-in name and the exact one."""
+    fallback = "".join(c if " " <= c <= "~" and c not in '"\\;' else "_" for c in name) or "file"
+    return f'attachment; filename="{fallback}"; filename*=UTF-8\'\'{quote(name, safe=_DOWNLOAD_SAFE)}'
+
+
+type Files = dict[tuple[str, int], FileRecord]
 
 
 def summary_view(summary: ConversationSummary) -> dict[str, Any]:
@@ -219,12 +257,17 @@ def delete_notice_view(notice: DeleteNotice) -> dict[str, Any]:
 
 
 def event_view(event: ConversationEvent, views: dict[CallRef, tuple[bool, bool]] | None = None,
-               models: dict[RunId, str] | None = None) -> dict[str, Any]:
+               models: dict[RunId, str] | None = None, files: Files | None = None,
+               presented: dict[CallRef, list[FileRecord]] | None = None) -> dict[str, Any]:
     """``views``: Application.view_flags for the page — (shown while it
     runs, stored with its result) per call with a view that may be shown.
-    ``models``: the model of each Run that wrote an assistant event (V3-P64 §7)."""
+    ``models``: the model of each Run that wrote an assistant event (V3-P64 §7).
+    ``files``: the page's attachments by (id, version); ``presented``: the
+    files each call gave the user (V3-P66 §7.3)."""
     views = {} if views is None else views
     models = {} if models is None else models
+    files = {} if files is None else files
+    presented = {} if presented is None else presented
     view: dict[str, Any] = {"sequence": event.sequence, "kind": event.kind.value, "created_at": _time(event.created_at)}
     payload = event.payload
     if isinstance(payload, UserMessage):
@@ -232,6 +275,9 @@ def event_view(event: ConversationEvent, views: dict[CallRef, tuple[bool, bool]]
         # A call is identified by (run_id, call_id): call ids repeat across Runs.
         view["answers_call"] = None if payload.answers_call is None else payload.answers_call.call_id
         view["answers_run"] = None if payload.answers_call is None else payload.answers_call.run_id
+        view["attachments"] = [file_view(files[(b.file_id, b.version)]) if (b.file_id, b.version) in files
+                               else {"file_id": b.file_id, "version": b.version, "name": None, "expired": True}
+                               for b in payload.blocks if isinstance(b, AttachmentRef)]
     elif isinstance(payload, AssistantFinal):
         view["text"] = _text(payload.blocks)
         view["model"] = models.get(event.origin_run_id) if event.origin_run_id else None
@@ -249,6 +295,7 @@ def event_view(event: ConversationEvent, views: dict[CallRef, tuple[bool, bool]]
         view["is_error"] = payload.model_result.is_error
         view["text"] = _text(payload.model_result.blocks)
         view["app_view"] = views.get(payload.call, (False, False))[1]
+        view["presented_files"] = [file_view(f) for f in presented.get(payload.call, [])]
     return view
 
 
@@ -363,6 +410,18 @@ def prompt_view(view: PromptView) -> dict[str, Any]:
     }
 
 
+# How a file refusal from Data answers (V3-P66 §9): status, code, message.
+FILE_REFUSALS: dict[DataErrorCode, tuple[int, str, str]] = {
+    DataErrorCode.TOO_LARGE: (413, "file_too_large", "The file is larger than this server takes."),
+    DataErrorCode.LIMIT_EXCEEDED: (409, "too_many_pending",
+                                   "Too many uploads wait to be sent here; send or drop some first."),
+    DataErrorCode.STORE_FULL: (507, "storage_full", "The file store is full. Uploads not sent yet may be "
+                               "taking the room; try again later or send them."),
+    DataErrorCode.BLOB_MISSING: (410, "file_missing", "The file's stored copy is gone."),
+    DataErrorCode.BLOB_EXPIRED: (410, "file_expired", "The file has expired: it was not used for a long time."),
+}
+UPLOAD_PATH = re.compile(r"^/api/conversations/[^/]+/uploads$")
+
 # How a refused prompt answers (V3-P60 §4).
 PROMPT_REFUSAL_STATUS = {"unknown_prompt": 404, "source_disabled": 409, "invalid_arguments": 400,
                          "unsupported_content": 422, "server_error": 502}
@@ -418,6 +477,12 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
             return JSONResponse({"error": {"code": "not_found", "message": "No such conversation."}}, status_code=404)
         if error.code is DataErrorCode.INVALID_ARGUMENT:
             return JSONResponse({"error": {"code": "invalid_argument", "message": str(error)}}, status_code=400)
+        if error.code is DataErrorCode.ATTACHMENT_REFUSED:  # V3-P66 §9: which chip to mark
+            return JSONResponse({"error": {"code": "attachment_refused", "message": str(error).split(": ", 1)[-1],
+                                           "file_id": error.file_id}}, status_code=400)
+        if error.code in FILE_REFUSALS:
+            status, code, message = FILE_REFUSALS[error.code]
+            return JSONResponse({"error": {"code": code, "message": message}}, status_code=status)
         log.error("unexpected data error: %s", error.code.value)
         return JSONResponse({"error": {"code": "conflict", "message": "The request conflicts with the current state."}},
                             status_code=409)
@@ -437,6 +502,27 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
         return JSONResponse({"error": {"code": "still_stopping",
                                        "message": "The current work is still stopping; try again shortly."}},
                             status_code=409)
+
+    @app.exception_handler(FilesUnavailable)
+    async def files_unavailable(request: Request, error: FilesUnavailable) -> JSONResponse:
+        return JSONResponse({"error": {"code": "files_unavailable",
+                                       "message": "Files cannot be attached in this conversation."}}, status_code=409)
+
+    @app.exception_handler(FileNameRefused)
+    async def bad_name(request: Request, error: FileNameRefused) -> JSONResponse:
+        return JSONResponse({"error": {"code": "invalid_name", "message": "A file needs a name of at most 1000 bytes."}},
+                            status_code=400)
+
+    @app.exception_handler(WorkspaceBusy)
+    async def workspace_busy(request: Request, error: WorkspaceBusy) -> JSONResponse:
+        return JSONResponse({"error": {"code": "workspace_busy", "message": "A command is running in the workspace; "
+                                       "send again shortly."}}, status_code=409)
+
+    @app.exception_handler(UploadsFolderUnusable)
+    async def uploads_unusable(request: Request, error: UploadsFolderUnusable) -> JSONResponse:
+        return JSONResponse({"error": {"code": "uploads_folder_unusable",
+                                       "message": "The conversation's uploads is not a folder. Ask the model to tidy "
+                                                  "it up, or remove it yourself."}}, status_code=409)
 
     @app.exception_handler(AppViewRefused)
     async def no_view(request: Request, error: AppViewRefused) -> JSONResponse:
@@ -613,7 +699,14 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
         writers = [e.origin_run_id for e in events
                    if isinstance(e.payload, (AssistantFinal, AssistantToolCalls)) and e.origin_run_id]
         models = await application.run_models(scope, writers) if writers else {}
-        return {"items": [event_view(e, views, models) for e in events],
+        refs = [(FileId(b.file_id), b.version) for e in events if isinstance(e.payload, UserMessage)
+                for b in e.payload.blocks if isinstance(b, AttachmentRef)]
+        files: Files = ({(r.file_id, r.version): r for r in await application.attachment_records(scope, refs)}
+                        if refs else {})
+        calls = [e.payload.call for e in events if isinstance(e.payload, ToolResultRecord)]
+        given = await application.call_files(scope, calls) if calls else {}
+        presented = {call: list(records) for call, records in given.items()}
+        return {"items": [event_view(e, views, models, files, presented) for e in events],
                 "last_sequence": events[-1].sequence if events else after}
 
     @app.get("/api/conversations/{conversation_id}/calls/{run_id}/{call_id}/app")
@@ -683,11 +776,65 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
     async def send_message(conversation_id: str, body: MessageBody, request: Request,
                            who: PrincipalId = Depends(principal)) -> dict[str, Any]:
         text = body.text.strip()
-        if not text or len(text) > MAX_MESSAGE_CHARS:
-            raise ApiError(400, "invalid_argument", f"A message is 1..{MAX_MESSAGE_CHARS} characters.")
+        if len(body.attachments) > MAX_ATTACHMENTS:
+            raise ApiError(400, "too_many_attachments", f"A message carries at most {MAX_ATTACHMENTS} files.")
+        if (not text and not body.attachments) or len(text) > MAX_MESSAGE_CHARS:
+            raise ApiError(400, "invalid_argument", f"A message is 1..{MAX_MESSAGE_CHARS} characters, or files.")
         application, scope = himari(request), scope_of(conversation_id, who)
-        await application.data.read_conversation(scope)  # 404 before a job is started for a foreign id
-        return job_view(await application.runner.submit(scope, UserMessage((TextBlock(text),))))
+        return job_view(await application.send(scope, text, [FileId(f) for f in body.attachments]))
+
+    # -- files (V3-P66 §9) ---------------------------------------------------------------------
+
+    @app.post("/api/conversations/{conversation_id}/uploads", status_code=201)
+    async def upload_file(conversation_id: str, request: Request, name: str = "",
+                          who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+        """The body is the file. Received as it streams, held to the file
+        limit (not the general body limit); refused at once when its declared
+        length is over."""
+        application, scope = himari(request), scope_of(conversation_id, who)
+        declared = request.headers.get("content-length", "")
+        if declared.isdigit() and int(declared) > application.file_max_bytes:
+            raise ApiError(413, "file_too_large", "The file is larger than this server takes.")
+
+        async def body() -> AsyncIterator[bytes]:
+            async for chunk in request.stream():
+                if chunk:
+                    yield chunk
+
+        try:
+            record = await application.upload(scope, name, request.headers.get("content-type"), body())
+        except DataError as error:
+            if error.code is DataErrorCode.BLOB_MISSING:  # swept while it stalled (§8.2)
+                raise ApiError(503, "upload_interrupted", "The upload was interrupted; upload it again.") from None
+            raise
+        # §5.2 (review C2): without commands the model reads text files only.
+        return {**file_view(record), "commands": application.current_sandbox_state is SandboxState.ENFORCED}
+
+    @app.get("/api/conversations/{conversation_id}/files")
+    async def list_files(conversation_id: str, request: Request, who: PrincipalId = Depends(principal),
+                         limit: int = 50, offset: int = 0) -> dict[str, Any]:
+        if not 1 <= limit <= MAX_LIST_LIMIT or offset < 0:
+            raise ApiError(400, "invalid_argument", f"limit must be 1..{MAX_LIST_LIMIT}, offset >= 0")
+        page = await himari(request).files(scope_of(conversation_id, who), limit=limit, offset=offset)
+        return {"items": [file_view(f) for f in page], "next_offset": offset + limit if len(page) == limit else None}
+
+    @app.get("/api/conversations/{conversation_id}/files/{file_id}/{version}")
+    async def download_file(conversation_id: str, file_id: str, version: int, request: Request,
+                            who: PrincipalId = Depends(principal)) -> Response:
+        """Always an attachment of type octet-stream, sandboxed (§7.2): an
+        HTML or SVG file never opens on this origin."""
+        record, handle = await himari(request).download(scope_of(conversation_id, who), FileId(file_id), version)
+
+        def chunks() -> Iterator[bytes]:
+            with handle:
+                while data := handle.read(1 << 16):
+                    yield data
+
+        return StreamingResponse(chunks(), media_type="application/octet-stream", headers={
+            "Content-Disposition": content_disposition(record.name),
+            "Content-Length": str(record.size),
+            "Content-Security-Policy": "sandbox",
+        })
 
     @app.post("/api/conversations/{conversation_id}/resume", status_code=202)
     async def resume(conversation_id: str, request: Request, who: PrincipalId = Depends(principal)) -> dict[str, Any]:
@@ -740,7 +887,7 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
         return Response((static / name).read_bytes(), media_type=f"{media}; charset=utf-8")
 
     # Outer → inner: headers, Host, Origin, body size, routes.
-    app.add_middleware(BodyLimitMiddleware)
+    app.add_middleware(BodyLimitMiddleware, exempt=lambda method, path: method == "POST" and bool(UPLOAD_PATH.match(path)))
     app.add_middleware(OriginGuardMiddleware, allowed_origins=config.allowed_origins)
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=sorted(config.allowed_hosts))
     app.add_middleware(SecurityHeadersMiddleware, csp=page_csp(config.sandbox_origins))

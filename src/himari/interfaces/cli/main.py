@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import mimetypes
 import os
 import shlex
 import sys
@@ -120,6 +121,7 @@ class Printer:
     covered: int | None = None
     summary: str | None = None
     compactions: int = 0
+    conversation_id: str | None = None  # named in the download hint of a file (V3-P66)
     divided: bool = False
     last_model: str | None = None  # of the latest answer printed: a change is named (V3-P64 §7)
 
@@ -174,6 +176,7 @@ class Printer:
             if answers:
                 self.answered.add((str(event.get("answers_run")), str(answers)))  # its tool_result repeats this text
             self.block("You:" if not answers else "You (answer):", text)
+            self.files(event.get("attachments") or [])
         elif kind == "assistant_final":
             self.block(self.speaker(self.changed_model(event)), text)
         elif kind == "assistant_tool_calls":
@@ -210,6 +213,23 @@ class Printer:
             mark = self.symbols.failed if event.get("is_error") else self.symbols.ok
             self.line(f"  {self.symbols.result} {safe_line(called or 'tool', encoding=self.encoding)} {mark}")
             self.line(safe_block(text, encoding=self.encoding, max_lines=None if self.verbose else TOOL_RESULT_LINES))
+            self.files(event.get("presented_files") or [])
+
+    def files(self, files: list[dict[str, Any]]) -> None:
+        """One line a file: ``[file] report.pdf (1.2 MB) — himari download c_12 file_40`` (V3-P66 §9)."""
+        for file in files:
+            name = safe_line(str(file.get("name") or "(unknown)"), encoding=self.encoding)
+            version = int(file.get("version") or 1)
+            shown = f"{name} v{version}" if version > 1 else name
+            if file.get("expired"):
+                self.line(f"  [file] {shown} (expired)")
+                continue
+            how = f"himari download {self.conversation_id} {file.get('file_id')}" if self.conversation_id else str(
+                file.get("file_id"))
+            if version > 1:
+                how += f" --version {version}"
+            self.line(safe_line(f"  [file] {shown} ({human_size(int(file.get('size') or 0))}) — {how}",
+                                encoding=self.encoding))
 
 
 def context_line(context: dict[str, Any]) -> str:
@@ -254,6 +274,7 @@ class Session:
     def print_events(self, conversation_id: str, after: int) -> int:
         """Pages of at most EVENT_PAGE events; a page over the response bound
         is read again at half the size (a read, so safe to repeat)."""
+        self.printer.conversation_id = conversation_id
         limit = EVENT_PAGE
         while True:
             try:
@@ -316,10 +337,32 @@ class Session:
             return EXIT_FAILED
         return EXIT_OK
 
-    def submit_and_follow(self, conversation_id: str, after: int, text: str | None) -> tuple[int, int]:
-        if text is None:
+    def submit_and_follow(self, conversation_id: str, after: int, text: str | None,
+                          attachments: list[str] | None = None) -> tuple[int, int]:
+        if text is None and not attachments:
             return self.post_and_follow(conversation_id, after, "/resume", None)
-        return self.post_and_follow(conversation_id, after, "/messages", {"text": text})
+        return self.post_and_follow(conversation_id, after, "/messages",
+                                    {"text": text or "", "attachments": list(attachments or [])})
+
+    def upload(self, conversation_id: str, paths: list[str]) -> list[dict[str, Any]]:
+        """Upload each file; the ones the server took. A refusal is told and
+        the rest still go (V3-P66 §9)."""
+        taken: list[dict[str, Any]] = []
+        for path in paths:
+            name = os.path.basename(path)
+            try:
+                with open(path, "rb") as source:
+                    kind = mimetypes.guess_type(name)[0] or "application/octet-stream"
+                    taken.append(self.client.upload(_path(conversation_id, "/uploads"), name, source, kind))
+            except OSError as error:
+                self.note(f"cannot read {path}: {error.strerror or error}")
+                continue
+            except ServerRefused as error:
+                self.note(f"{path}: refused ({error.code}): {error}")
+                continue
+            if taken[-1].get("commands") is False:
+                self.note("(commands cannot run on this server: the model reads text files only)")
+        return taken
 
     def post_and_follow(self, conversation_id: str, after: int, suffix: str,
                         body: dict[str, Any] | None) -> tuple[int, int]:
@@ -610,11 +653,62 @@ def cmd_show(session: Session, args: argparse.Namespace) -> int:
 
 def cmd_send(session: Session, args: argparse.Namespace) -> int:
     text = sys.stdin.read() if args.text == "-" else args.text
+    if not text and not args.attach:
+        session.note("send needs a message or --attach")
+        return EXIT_USAGE
     detail = session.client.get(_path(args.id))
     after = int(detail["conversation"]["last_sequence"])
     session.seed_model(args.id, after)
-    code, _ = session.submit_and_follow(args.id, after, text)
+    attachments: list[str] = []
+    if args.attach:
+        taken = session.upload(args.id, args.attach)
+        if len(taken) < len(args.attach):
+            session.note("(not sent: not every file was taken)")
+            return EXIT_FAILED
+        attachments = [str(f["file_id"]) for f in taken]
+    # With files, an empty text still sends a message (never /resume).
+    code, _ = session.submit_and_follow(args.id, after, text or ("" if attachments else None), attachments)
     return code
+
+
+def human_size(n: int) -> str:
+    for unit, scale in (("GB", 1 << 30), ("MB", 1 << 20), ("KB", 1 << 10)):
+        if n >= scale:
+            return f"{n / scale:.1f} {unit}"
+    return f"{n} bytes"
+
+
+def cmd_files(session: Session, args: argparse.Namespace) -> int:
+    page = session.client.get(_path(args.id, "/files"), {"limit": args.limit, "offset": args.offset})
+    for file in page["items"]:
+        version = int(file["version"])
+        name = safe_line(str(file["name"]), encoding=session.printer.encoding)
+        state = " expired" if file["expired"] else ""
+        session.printer.line(f"{file['file_id']}  v{version}  {file['origin']:<9}  {human_size(int(file['size'])):>9}"
+                             f"{state}  {name}")
+    _more(session, page)
+    return EXIT_OK
+
+
+def cmd_download(session: Session, args: argparse.Namespace) -> int:
+    def target(name: str | None) -> tuple[str, Any]:
+        if args.output:
+            path = args.output
+        else:
+            if not name or name.startswith(".") or "/" in name or "\0" in name:
+                # V3-P66 review C9: never a dot-file (.npmrc, .gitconfig) chosen by the model.
+                raise ClientError(f"the file's name {name!r} is not used as is; give one with -o")
+            path = name
+        try:
+            return path, open(path, "wb" if args.force else "xb")
+        except FileExistsError:
+            raise ClientError(f"{path} exists; use --force to overwrite it, or -o") from None
+        except OSError as error:
+            raise ClientError(f"cannot write {path}: {error.strerror or error}") from None
+
+    written = session.client.download(_path(args.id, f"/files/{quote(args.file_id, safe='')}/{args.version}"), target)
+    session.note(f"saved {written}")
+    return EXIT_OK
 
 
 def cmd_continue(session: Session, args: argparse.Namespace) -> int:
@@ -683,6 +777,9 @@ CHAT_HELP = ("/continue  continue an unanswered message (or a paused turn)\n"
              "/model     the model; /model MODEL [EFFORT] or /model default to change (next message)\n"
              "/prompts   prompts the servers in use offer\n"
              "/prompt S N A=V ...  fill in server S's prompt N, show it, send it if you confirm\n"
+             "/attach F...  upload files for the next message; /attach alone lists them, /detach drops them\n"
+             "/send      send the attached files without text\n"
+             "/files     the conversation's files (download with: himari download ID FILE_ID)\n"
              "/rename T  rename\n/delete    move this conversation to the trash, then leave\n"
              "/id        show the id\n/exit      leave")
 
@@ -697,6 +794,8 @@ def cmd_chat(session: Session, args: argparse.Namespace, read: Callable[[str], s
         conversation_id = str(session.client.post("/api/conversations", {"title": args.title} if args.title else {})["id"])
         after = 0
     session.note(f"conversation {conversation_id} — /help for commands, Ctrl-D to leave")
+    session.printer.conversation_id = conversation_id
+    pending: list[dict[str, Any]] = []  # uploaded for the next message (V3-P66 §9)
     try:
         choice = session.client.get(_path(conversation_id, "/model"))
         session.note(model_line(choice) + (f" ({choice['fallback']})" if choice.get("fallback") else ""))
@@ -751,6 +850,37 @@ def cmd_chat(session: Session, args: argparse.Namespace, read: Callable[[str], s
         if text == "/continue":
             _, after = session.submit_and_follow(conversation_id, after, None)
             continue
+        if text == "/attach" or text.startswith("/attach "):
+            try:
+                paths = shlex.split(text[len("/attach"):])
+            except ValueError:
+                session.note("usage: /attach FILE...")
+                continue
+            if paths:
+                pending.extend(session.upload(conversation_id, paths))
+            for file in pending:
+                session.note(f"attached: {file['name']} ({human_size(int(file['size']))})")
+            if not pending:
+                session.note("(nothing attached)")
+            continue
+        if text == "/detach":
+            pending.clear()
+            session.note("(nothing attached)")
+            continue
+        if text == "/files":
+            try:
+                cmd_files(session, argparse.Namespace(id=conversation_id, limit=50, offset=0))
+            except ServerRefused as error:
+                session.note(f"refused: {error}")
+            continue
+        if text == "/send":
+            if not pending:
+                session.note("(nothing attached)")
+                continue
+            code, after = session.submit_and_follow(conversation_id, after, "", [str(f["file_id"]) for f in pending])
+            if code != EXIT_FAILED:
+                pending.clear()
+            continue
         if text == "/delete":
             try:
                 if delete_conversation(session, conversation_id, now=False, yes=False, read=read):
@@ -801,7 +931,10 @@ def cmd_chat(session: Session, args: argparse.Namespace, read: Callable[[str], s
         if text.startswith("/") and not text.startswith("//"):
             session.note("unknown command — /help")
             continue
-        _, after = session.submit_and_follow(conversation_id, after, text[1:] if text.startswith("//") else text)
+        code, after = session.submit_and_follow(conversation_id, after, text[1:] if text.startswith("//") else text,
+                                                [str(f["file_id"]) for f in pending])
+        if code != EXIT_FAILED:
+            pending.clear()  # sent (or maybe sent): they cannot be attached again
 
 
 # --- entry point ----------------------------------------------------------------------------
@@ -834,7 +967,18 @@ def parser() -> argparse.ArgumentParser:
     new.add_argument("--title")
     send = sub.add_parser("send", help="send one message and follow it")
     send.add_argument("id")
-    send.add_argument("text", help="the message, or - to read it from stdin")
+    send.add_argument("text", nargs="?", help="the message, or - to read it from stdin")
+    send.add_argument("--attach", action="append", metavar="FILE", help="upload and attach a file (repeatable)")
+    files = sub.add_parser("files", help="a conversation's files")
+    files.add_argument("id")
+    files.add_argument("--limit", type=int, default=50)
+    files.add_argument("--offset", type=int, default=0)
+    download = sub.add_parser("download", help="download a file of a conversation")
+    download.add_argument("id")
+    download.add_argument("file_id")
+    download.add_argument("--version", type=int, default=1)
+    download.add_argument("-o", "--output", help="where to write it (default: its name, here)")
+    download.add_argument("--force", action="store_true", help="overwrite an existing file")
     compact = sub.add_parser("compact", help="summarize the earlier messages now")
     compact.add_argument("id")
     cont = sub.add_parser("continue", help="continue an unanswered message")
@@ -862,6 +1006,7 @@ COMMANDS: dict[str, Callable[[Session, argparse.Namespace], int]] = {
     "chat": cmd_chat, "list": cmd_list, "show": cmd_show, "new": cmd_new, "send": cmd_send, "continue": cmd_continue,
     "compact": cmd_compact, "tools": cmd_tools, "model": cmd_model, "pause": cmd_pause, "cancel": cmd_cancel,
     "status": cmd_status, "rename": cmd_rename, "delete": cmd_delete, "trash": cmd_trash, "restore": cmd_restore,
+    "files": cmd_files, "download": cmd_download,
 }
 
 

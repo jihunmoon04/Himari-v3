@@ -6,6 +6,7 @@ Configuration comes from the environment (see ``config.py``):
 ``HIMARI_REASONING_EFFORT``, ``HIMARI_SANDBOX``,
 ``HIMARI_CONTEXT_TOKENS`` (request token budget; compaction starts at 80%),
 ``HIMARI_TRASH_DAYS`` (days a deleted Conversation stays in the trash, default 30),
+``HIMARI_FILE_MAX_BYTES``, ``HIMARI_FILE_STORE_MAX_BYTES``, ``HIMARI_FILE_KEEP_DAYS`` (files, V3-P66),
 ``HIMARI_WEB_SANDBOX_PORT`` (Tool views' origin; started only when some
 MCP server's views are shown) and ``OPENROUTER_API_KEY``. ``--env-file`` reads ``KEY=value`` lines first;
 real environment variables win; the token variables named in
@@ -75,7 +76,9 @@ def main(argv: list[str] | None = None) -> int:
                                              context_tokens=config.context_tokens, environ=environment,
                                              turn_budget=config.turn_budget, unattended_runs=config.unattended_runs,
                                              max_runs=config.max_runs, models=config.models,
-                                             trash_days=config.trash_days)
+                                             trash_days=config.trash_days, file_max_bytes=config.file_max_bytes,
+                                             file_store_max_bytes=config.file_store_max_bytes,
+                                             file_keep_days=config.file_keep_days)
         print(f"HIMARI web: http://{config.host}:{config.port}/ — sign in with the token in "
               f"{application.data_root / 'control' / 'operator.secret'} (sandbox: {application.sandbox_state.value}, "
               f"context budget: {application.context_tokens} tokens; {turn_text(application.turn)})",

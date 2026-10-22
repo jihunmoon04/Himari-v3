@@ -1812,6 +1812,118 @@ details > summary {
   line-height: 1;
 }
 
+/* -- files (V3-P66 §9) ---------------------------------------------------- */
+
+.attach-list {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+  list-style: none;
+  margin: 4px 0 0;
+  padding: 0;
+}
+
+.attach-chip {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  min-width: 0;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-pill);
+  padding: 2px 4px 2px 10px;
+  font-size: 12px;
+  background: var(--surface-raised);
+}
+
+.attach-chip.is-uploading {
+  color: var(--text-muted);
+}
+
+.attach-chip.is-failed {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.attach-chip-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.attach-chip-remove {
+  border: none;
+  background: transparent;
+  color: inherit;
+  min-width: 28px;
+  min-height: 28px;
+  font-size: 16px;
+  cursor: pointer;
+}
+
+.composer-attach {
+  min-width: 44px;
+  min-height: 44px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+}
+
+.composer-attach:hover {
+  color: var(--accent);
+}
+
+.surface-chat.is-dropping .composer,
+.chat.is-dropping .composer {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.file-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0;
+}
+
+.file-chip,
+.file-card {
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-pill);
+  padding: 3px 10px;
+  font-size: 12px;
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.file-chip.is-expired,
+.file-card.is-expired {
+  color: var(--text-muted);
+  border-style: dashed;
+}
+
+.item-file {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.item-file-note {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
 .composer-hint {
   color: var(--text-muted);
   font-size: 11px;

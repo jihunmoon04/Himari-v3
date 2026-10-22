@@ -707,3 +707,32 @@ B1·B2·N1 PASS, N2 조건부 PASS(2단계와 함께 배포).
 | B3 | `reserve`가 오래된 보관본의 만료와 새 행 등록을 커밋한 뒤 설치 전에 프로세스가 죽으면, `unreserve`가 돌지 않는다. 그러면 새 업로드는 실패했는데 오래된 원본이 만료되어 정리가 지운다 | 순서를 바꿨다: 새 파일을 최종 이름에 놓고(바이트는 이미 `fsync`, 디렉터리도 `fsync`) → `reserve`(고르기·만료·등록을 한 트랜잭션) → 만료된 파일 지우기. `reserve`가 `STORE_FULL`이면 새 파일만 지운다. 살아 있는 행이 가리키는 주소는 이 분기에 오지 않는다(파일만 없어진 경우는 그대로 다시 놓는 분기). `unreserve`는 없앴다. 회귀 시험(SQLite, 별도 프로세스 SIGKILL): 설치 직전과 `reserve` 직전에 죽인 뒤 다시 열면, 오래된 보관본은 살아 있고 새 행이 없다. 정리 뒤에는 행 없는 새 파일도 없다. 같은 시나리오를 죽이지 않고 돌리면 실제로 오래된 것이 만료된다(시나리오 검증). 이전 순서에서는 설치 직전 경우가 실패하는 것을 확인했다 |
 
 검증: 관련 모듈 시험(Data·Bootstrap·Environment·Tool) 627 passed. import 경계 검사 OK, mypy OK.
+
+## 20. 구현 노트 — 2단계: Web·CLI (2026-10-22)
+
+§9대로 구현했다. 1단계와 함께 배포한다(N2). 설계와 다르거나 더 정한 것은 다음과 같다.
+
+- **Web API**
+  - `POST …/uploads?name=`의 응답은 파일 보기(`file_id, version, origin, name, media_type, size, created_at, workspace_path, expired`)에 `commands`(명령을 실행할 수 있는지)를 더한 것이다. 화면은 `false`일 때 "명령을 실행할 수 없어 텍스트 파일만 읽는다"를 알린다(§5.2 C2의 응답 쪽).
+  - 일반 본문 한도(256 KiB)는 `POST /api/conversations/<id>/uploads`에만 적용하지 않는다(`BodyLimitMiddleware(exempt=)`). 그 경로는 선언된 `Content-Length`가 파일 한도를 넘으면 바로 413이고, 받는 중에도 한도에서 끊는다.
+  - `DataError`의 새 코드는 `FILE_REFUSALS` 표로 HTTP에 대응한다(§9 표). `ATTACHMENT_REFUSED`는 400 `attachment_refused`에 `file_id`를 담는다. 업로드 중의 `BLOB_MISSING`만 503 `upload_interrupted`이고, 그 밖의 `BLOB_MISSING`은 410 `file_missing`이다.
+  - 사용자 메시지 이벤트의 `text`에는 이제 글만 있고(예전의 `[attachment …]` 표시는 없앰), 첨부는 `attachments`에 따로 있다.
+- **Web 화면**
+  - 클립 버튼(인라인 SVG: 이모지는 글꼴이 없으면 빈 네모로 보임), 파일 고르기, 대화 화면에 끌어 놓기. 업로드는 파일마다 `XMLHttpRequest`라 진행률이 보인다.
+  - 올리는 중에는 보내기가 막힌다. 글 없이 파일만 보낼 수 있다.
+  - 메시지의 첨부와 모델이 건넨 파일(카드 "HIMARI gave you a file")은 `download` 링크다. 만료되면 "expired"로 보이고 링크가 아니다.
+  - 다른 대화로 가면 첨부 목록은 비고 진행 중인 업로드는 끊는다. 늦게 끝난 업로드는 칩을 붙이지 않는다.
+- **CLI**
+  - 대화 안에서 `/send`를 더했다. 첨부만 보내는 방법이다(빈 줄은 지금처럼 무시하기 때문).
+  - `/files`도 더했다.
+  - `send`의 메시지는 이제 생략할 수 있다(`--attach`가 있으면).
+  - 업로드의 503·507은 서버가 밝힌 거부이므로 "결과 불명"으로 다루지 않는다.
+  - `download`는 서버의 `filename*`로 이름을 정한다. `.`으로 시작하거나 경로가 든 이름은 `-o` 없이는 받지 않는다. 쓰다가 실패하면 만든 파일을 지운다.
+- **브라우저 스모크**(`scripts/ui_smoke.py`의 다섯 번째 서버, 헤드리스 Chromium): OK. 확인한 흐름은 다음과 같다.
+  1. 두 파일을 고르면 칩과 크기가 보이고, 명령이 없다는 안내가 나온다. 하나를 빼고 파일만 보낸다.
+  2. 메시지 칩에서 내려받은 내용이 원본과 같고 이름도 같다.
+  3. 모델이 건넨 파일의 카드에서 내려받은 내용도 같다. HTML을 올렸지만 스크립트는 실행되지 않았다.
+  4. 끌어 놓은 파일이 칩이 된다. 390px 화면에서 가로 스크롤이 없다.
+  5. 업로드 응답을 붙잡아 둔 채 홈으로 갔다 오면 칩이 붙지 않는다.
+  - 압축 시나리오의 문맥 예산은 1단계의 시험과 같은 이유(첨부 안내 문장)로 2000에서 2100으로 올렸다.
+- **검증:** 전체 1679 passed, 51 skipped. import 경계 검사 OK, mypy OK. 새 시험은 `tests/interfaces/test_web_files.py`(API·오류 표·머리글·권한·본문 한도·설정)와 `tests/interfaces/test_cli_files.py`(`send --attach`, `/attach`·`/send`·`/detach`, `files`, `download`의 이름 규칙, 확실한 거부)다.
