@@ -14,7 +14,11 @@ divider and its summary. A third server with a small turn token budget
 with a Continue button, and finishes it with that button. A fourth
 (V3-P65) deletes a conversation: the confirmation (what stays, the work it
 stops; Cancel and Escape change nothing), the move to the trash, restore,
-delete for good, and a page whose conversation was trashed elsewhere.
+delete for good, and a page whose conversation was trashed elsewhere. A
+fifth (V3-P66) attaches files: chips with their state, removing one, a
+message of files, downloading an attachment and a file the model gave,
+dropping a file, an upload that ends after the user left, and the narrow
+layout.
 
 Requires: pip install playwright && playwright install chromium
 Usage:    python scripts/ui_smoke.py [--screenshots DIR]
@@ -188,7 +192,7 @@ def run_compaction(base: str, token: str, shots: str | None, root: str) -> list[
         expect(divider.locator(".context-divider-text")).to_have_text(SUMMARY)  # shown as text, not markup
         assert divider.locator("b").count() == 0
         page.click("#chat-menu-toggle")
-        expect(page.locator("#chat-menu-context")).to_contain_text("of 2.0k tokens")
+        expect(page.locator("#chat-menu-context")).to_contain_text("of 2.1k tokens")
         if shots:
             page.screenshot(path=os.path.join(shots, "4-compacted.png"), full_page=True)
         page.click("#chat-menu-toggle")
@@ -366,6 +370,84 @@ def run_trash(base: str, token: str, shots: str | None, root: str) -> list[str]:
     return errors
 
 
+def run_files(base: str, token: str, shots: str | None, tmp: str) -> list[str]:
+    errors: list[str] = []
+    a_txt, b_html = Path(tmp, "a.txt"), Path(tmp, "b.html")
+    a_txt.write_text("hello")
+    b_html.write_text("<script>window.__pwned = 3</script>")
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page(viewport={"width": 1280, "height": 860}, accept_downloads=True)
+        page.on("console", lambda m: errors.append(m.text) if m.type == "error" else None)
+        page.on("pageerror", lambda e: errors.append(str(e)))
+        page.goto(base)
+        page.fill("#login-token", token)
+        page.click("#login-submit")
+        page.click("#home-new-chat")
+        page.set_input_files("#composer-files", [str(a_txt), str(b_html)])
+        chips = page.locator("#attach-list .attach-chip")
+        expect(chips).to_have_count(2)
+        expect(chips.nth(0)).to_have_text(re.compile(r"a\.txt · 5 bytes"), timeout=10000)
+        expect(chips.nth(1)).to_contain_text("b.html", timeout=10000)
+        expect(page.locator("#status-bar")).to_contain_text("Commands cannot run on this server")
+        chips.nth(1).get_by_role("button").click()  # removed from this message only
+        expect(chips).to_have_count(1)
+        if shots:
+            page.screenshot(path=os.path.join(shots, "10-attach.png"))
+        page.press("#composer-text", "Enter")  # files alone make a message
+        user = page.locator(".item-user").last
+        expect(user.locator(".file-chip")).to_have_text("a.txt · 5 bytes", timeout=10000)
+        expect(page.locator("#attach-list")).to_be_hidden()
+        expect(page.locator(".item-assistant").last).to_contain_text("got the files", timeout=10000)
+        with page.expect_download() as done:
+            user.locator(".file-chip").click()
+        assert Path(done.value.path()).read_text() == "hello", "the attachment downloads as sent"
+        assert done.value.suggested_filename == "a.txt"
+
+        page.fill("#composer-text", "give it back")
+        page.press("#composer-text", "Enter")
+        card = page.locator(".item-file").last
+        expect(card).to_contain_text("HIMARI gave you a file", timeout=10000)
+        expect(card.locator(".file-card")).to_have_text("a.txt · 5 bytes")
+        with page.expect_download() as given:
+            card.locator(".file-card").click()
+        assert Path(given.value.path()).read_text() == "hello"
+        assert page.evaluate("window.__pwned === undefined")
+
+        page.evaluate("""() => {
+          const data = new DataTransfer();
+          data.items.add(new File(["dropped"], "d.txt", { type: "text/plain" }));
+          const zone = document.getElementById("surface-chat");
+          zone.dispatchEvent(new DragEvent("dragover", { dataTransfer: data, bubbles: true, cancelable: true }));
+          zone.dispatchEvent(new DragEvent("drop", { dataTransfer: data, bubbles: true, cancelable: true }));
+        }""")
+        expect(chips).to_have_count(1)
+        expect(chips.nth(0)).to_have_text(re.compile(r"d\.txt · 7 bytes"), timeout=10000)
+        page.set_viewport_size({"width": 390, "height": 800})
+        page.wait_for_timeout(300)
+        assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
+        if shots:
+            page.screenshot(path=os.path.join(shots, "11-files-narrow.png"))
+        page.set_viewport_size({"width": 1280, "height": 860})
+
+        held: list[Any] = []  # an upload that ends after the user left attaches nothing
+        page.route("**/uploads?*", lambda route: held.append(route))
+        page.set_input_files("#composer-files", [str(a_txt)])
+        while not held:
+            page.wait_for_timeout(50)
+        conversation_id = page.locator(".conv-row.is-selected").get_attribute("data-id")
+        page.click("#nav-home")
+        expect(page.locator("#surface-home")).to_be_visible()
+        held[0].continue_()
+        page.wait_for_timeout(500)
+        page.unroute("**/uploads?*")
+        page.locator(f'#conversation-list .conv-row[data-id="{conversation_id}"]').click()
+        expect(page.locator(".item-file").last).to_be_visible(timeout=10000)
+        expect(page.locator("#attach-list")).to_be_hidden()
+        browser.close()
+    return errors
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--screenshots")
@@ -381,7 +463,7 @@ def main() -> int:
             time.sleep(0.5)
         small = os.path.join(tmp, "small")
         provider = ScriptedAdapter([NormalizedFinal((TextBlock(SUMMARY),))] * 12)  # every answer and summary alike
-        server = serve(small, PORT + 1, provider, context_tokens=2000)
+        server = serve(small, PORT + 1, provider, context_tokens=2100)
         try:
             errors += run_compaction(f"http://127.0.0.1:{PORT + 1}",
                                      Path(small, "control", "operator.secret").read_text().strip(), args.screenshots,
@@ -403,6 +485,19 @@ def main() -> int:
         try:
             errors += run_trash(f"http://127.0.0.1:{PORT + 3}",
                                 Path(trash, "control", "operator.secret").read_text().strip(), args.screenshots, trash)
+        finally:
+            server.should_exit = True
+            time.sleep(0.5)
+        files = os.path.join(tmp, "files")
+        server = serve(files, PORT + 4, ScriptedAdapter([
+            NormalizedFinal((TextBlock("got the files"),)),
+            NormalizedToolCalls((ToolCall(CallId("c0"), 0, ToolId("inside/present_file"),
+                                          {"path": "uploads/a.txt"}),)),
+            NormalizedFinal((TextBlock("here it is"),)),
+        ]))
+        try:
+            errors += run_files(f"http://127.0.0.1:{PORT + 4}",
+                                Path(files, "control", "operator.secret").read_text().strip(), args.screenshots, tmp)
         finally:
             server.should_exit = True
             time.sleep(0.5)

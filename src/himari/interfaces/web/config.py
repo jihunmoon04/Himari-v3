@@ -25,6 +25,11 @@ listed. Unset, the default model is the only one offered.
 
 Trash (V3-P65): ``HIMARI_TRASH_DAYS`` (1..365, default 30) is how long a
 deleted Conversation stays in the trash before it is deleted for good.
+
+Files (V3-P66 §8.3): ``HIMARI_FILE_MAX_BYTES`` (one file, default 32 MiB),
+``HIMARI_FILE_STORE_MAX_BYTES`` (the file store, default 1 GiB; past it the
+least recently used files expire) and ``HIMARI_FILE_KEEP_DAYS`` (1..365,
+default 30: a file unused this long expires). None of them can be turned off.
 """
 
 from __future__ import annotations
@@ -50,6 +55,12 @@ TURN_BUDGET_VAR = "HIMARI_TURN_TOKEN_BUDGET"  # V3-P62: 0 turns it off
 UNATTENDED_RUNS_VAR = "HIMARI_UNATTENDED_RUNS"  # 0 turns it off
 MAX_RUNS_VAR = "HIMARI_MAX_RUNS"  # 0 (default): no Run limit
 TRASH_DAYS_VAR = "HIMARI_TRASH_DAYS"  # V3-P65: days in the trash before a permanent delete
+FILE_MAX_VAR = "HIMARI_FILE_MAX_BYTES"  # V3-P66: one uploaded or presented file
+FILE_STORE_MAX_VAR = "HIMARI_FILE_STORE_MAX_BYTES"  # V3-P66: the whole file store
+FILE_KEEP_DAYS_VAR = "HIMARI_FILE_KEEP_DAYS"  # V3-P66: unused this long, a stored file expires
+DEFAULT_FILE_MAX_BYTES = 32 * 1024 * 1024  # as data.api
+DEFAULT_FILE_STORE_MAX_BYTES = 1024 * 1024 * 1024
+DEFAULT_FILE_KEEP_DAYS = 30
 DEFAULT_TURN_BUDGET = 3_000_000
 # Each request keeps 8,192 tokens for its answer (control.turn.MIN_OUTPUT_RESERVE),
 # so a smaller budget could refuse even the first request (PR #48 review C2).
@@ -91,6 +102,9 @@ class WebConfig:
     # The offered models and their default efforts (V3-P64); empty: model_id alone.
     models: tuple[tuple[str, str | None], ...] = ()
     trash_days: int = DEFAULT_TRASH_DAYS
+    file_max_bytes: int = DEFAULT_FILE_MAX_BYTES
+    file_store_max_bytes: int = DEFAULT_FILE_STORE_MAX_BYTES
+    file_keep_days: int = DEFAULT_FILE_KEEP_DAYS
 
     @property
     def view_port(self) -> int:
@@ -153,6 +167,11 @@ class WebConfig:
         trash_days = _optional(source.get(TRASH_DAYS_VAR), TRASH_DAYS_VAR, DEFAULT_TRASH_DAYS, 1, 365)
         if trash_days is None:
             raise WebConfigError(f"{TRASH_DAYS_VAR} must be between 1 and 365 (there is no keeping forever)")
+        file_max = _required(source.get(FILE_MAX_VAR), FILE_MAX_VAR, DEFAULT_FILE_MAX_BYTES, 1, 2**40)
+        store_max = _required(source.get(FILE_STORE_MAX_VAR), FILE_STORE_MAX_VAR, DEFAULT_FILE_STORE_MAX_BYTES, 1, 2**50)
+        keep_days = _required(source.get(FILE_KEEP_DAYS_VAR), FILE_KEEP_DAYS_VAR, DEFAULT_FILE_KEEP_DAYS, 1, 365)
+        if file_max > store_max:
+            raise WebConfigError(f"{FILE_MAX_VAR} must not be larger than {FILE_STORE_MAX_VAR}")
         if turn_budget is None and max_runs is None:
             raise WebConfigError(f"{TURN_BUDGET_VAR}=0 needs {MAX_RUNS_VAR}: a turn needs a token budget or a Run limit")
         model_id = source.get(MODEL_VAR, "").strip() or DEFAULT_MODEL
@@ -175,6 +194,9 @@ class WebConfig:
             max_runs=max_runs,
             models=models,
             trash_days=trash_days,
+            file_max_bytes=file_max,
+            file_store_max_bytes=store_max,
+            file_keep_days=keep_days,
         )
 
 
@@ -208,6 +230,19 @@ def _positive(value: str | None, name: str) -> int | None:
         raise WebConfigError(f"{name} must be an integer") from None
     if number < 1000:
         raise WebConfigError(f"{name} must be at least 1000")
+    return number
+
+
+def _required(value: str | None, name: str, default: int, low: int, high: int) -> int:
+    """An integer setting that cannot be turned off; unset: ``default``."""
+    if value is None or not value.strip():
+        return default
+    try:
+        number = int(value.strip())
+    except ValueError:
+        raise WebConfigError(f"{name} must be an integer") from None
+    if not low <= number <= high:
+        raise WebConfigError(f"{name} must be between {low} and {high}")
     return number
 
 

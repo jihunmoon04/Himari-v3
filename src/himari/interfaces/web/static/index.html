@@ -178,9 +178,15 @@
               <button type="button" id="stop-continue" class="primary-button">Continue</button>
             </section>
             <form class="composer" id="composer">
+              <ul class="attach-list" id="attach-list" aria-label="Files to send" hidden></ul>
+              <input type="file" id="composer-files" multiple hidden>
               <label class="visually-hidden" for="composer-text">Message</label>
               <textarea id="composer-text" name="composer-text" rows="1" placeholder="Message HIMARI"></textarea>
               <div class="composer-actions">
+                <button type="button" id="composer-attach" class="link-button composer-attach"
+                        aria-label="Attach files" title="Attach files (or drop them here)"><svg class="icon" viewBox="0 0 24 24"
+                        width="20" height="20" aria-hidden="true" focusable="false"><path fill="none" stroke="currentColor"
+                        stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M21 11.5 12.4 20a5.5 5.5 0 0 1-7.8-7.8l8.9-8.8a3.7 3.7 0 0 1 5.2 5.2l-8.9 8.8a1.8 1.8 0 0 1-2.6-2.6l8.2-8.1"/></svg></button>
                 <span class="composer-hint" id="composer-hint"></span>
                 <button type="button" id="composer-pause" class="link-button composer-stop" hidden
                         title="Finish the current step, then stop">Pause</button>

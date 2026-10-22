@@ -13,7 +13,7 @@ automatically.
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from typing import Any
 
 from starlette.datastructures import Headers
@@ -101,12 +101,18 @@ class BodyLimitMiddleware:
     """Starlette's own body limit, with its 413 rewritten into the JSON
     error envelope."""
 
-    def __init__(self, app: ASGIApp, max_body_size: int = MAX_REQUEST_BODY_BYTES) -> None:
+    def __init__(self, app: ASGIApp, max_body_size: int = MAX_REQUEST_BODY_BYTES,
+                 exempt: Callable[[str, str], bool] | None = None) -> None:
+        self._app = app
         self._inner = RequestBodyLimitMiddleware(app, max_body_size)
+        self._exempt = exempt  # (method, path) → the route holds the body to its own limit (e.g. uploads)
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
             await self._inner(scope, receive, send)
+            return
+        if self._exempt is not None and self._exempt(scope.get("method", ""), scope.get("path", "")):
+            await self._app(scope, receive, send)
             return
         state: dict[str, Any] = {"rewriting": False}
 

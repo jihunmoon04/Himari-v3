@@ -87,6 +87,9 @@ from himari.data.api import (
 )
 from himari.data.sqlite import SqliteData, SqliteStore
 from himari.environment.inside import INSIDE, InsideEnvironment, InsideFiles
+# For the interfaces (V3-P66 §9): how placing an upload can be refused.
+from himari.environment.inside import UploadsFolderUnusable as UploadsFolderUnusable
+from himari.environment.inside import WorkspaceBusy as WorkspaceBusy
 from himari.sandbox.api import SandboxState, ServerProfile
 from himari.sandbox.backend import SandboxBackend
 from himari.sandbox.server import ServerSandbox

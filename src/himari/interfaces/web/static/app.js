@@ -89,7 +89,9 @@ async function api(method, path, body) {
   if (!response.ok) {
     const error = data && data.error ? data.error : {};
     if (response.status === 401 && error.code === "unauthenticated") showLogin();
-    throw new ApiError("http", response.status, error.code || "http_error", error.message || "Request failed.");
+    const failure = new ApiError("http", response.status, error.code || "http_error", error.message || "Request failed.");
+    failure.fileId = typeof error.file_id === "string" ? error.file_id : null; // attachment_refused (V3-P66 §9)
+    throw failure;
   }
   return data;
 }
@@ -118,6 +120,9 @@ const app = {
   lastModel: null, // the model of the latest answer shown, for the label on a change
   trashOffset: 0,
   trashDays: null, // from /api/server
+  attachments: [], // files for the next message (V3-P66 §9): {key, name, size, state, fileId, progress, xhr, note}
+  jobRunning: false, // for the Send button only: set as soon as a send is taken (PR #60 review C5)
+  attachKeys: 0,
 };
 
 const views = new AppViews(api, el, () => app.conversationId);
@@ -145,6 +150,7 @@ function showLogin() {
   views.reset();
   app.conversationId = null;
   app.generation += 1;
+  clearAttachments();
   showSurface("login");
   $("topbar-title").textContent = "HIMARI";
   $("server-info").hidden = true;
@@ -216,6 +222,7 @@ async function showHome() {
   stopPolling();
   app.conversationId = null;
   app.generation += 1;
+  clearAttachments();
   markSelected();
   showSurface("home");
   $("topbar-title").textContent = "HIMARI";
@@ -280,8 +287,139 @@ function renderMessage(event, model = null) {
   const user = event.kind === "user_message";
   const node = el("div", user ? "item item-user" : "item item-assistant");
   node.append(user ? el("div", "item-kind", speaker(event.kind)) : assistantHeader(model));
-  node.append(user ? el("p", "item-text", event.text) : renderAssistantText(document, event.text || ""));
+  if (!user) node.append(renderAssistantText(document, event.text || ""));
+  else if (event.text) node.append(el("p", "item-text", event.text));
+  if (user && event.attachments && event.attachments.length) node.append(fileChips(event.attachments));
   return node;
+}
+
+/* ------------------------------------------------------------------ files */
+
+function humanSize(n) {
+  if (n >= 1 << 30) return `${(n / (1 << 30)).toFixed(1)} GB`;
+  if (n >= 1 << 20) return `${(n / (1 << 20)).toFixed(1)} MB`;
+  if (n >= 1 << 10) return `${(n / (1 << 10)).toFixed(1)} KB`;
+  return `${n} bytes`;
+}
+
+/* A file of this conversation: a download link, or "expired" (V3-P66 §8.5).
+ * The server sends it as an attachment of type octet-stream: it never opens here. */
+function fileLink(file, className) {
+  const label = `${file.name || "file"}${file.version > 1 ? ` (v${file.version})` : ""}`;
+  if (file.expired || !file.name) {
+    const gone = el("span", `${className} is-expired`, `${label} · expired`);
+    gone.title = "This file expired: it was not used for a long time.";
+    return gone;
+  }
+  const link = el("a", className, `${label} · ${humanSize(file.size)}`);
+  link.href = `/api/conversations/${encodeURIComponent(app.conversationId)}/files/` +
+    `${encodeURIComponent(file.file_id)}/${encodeURIComponent(file.version)}`;
+  link.setAttribute("download", file.name);
+  return link;
+}
+
+function fileChips(files) {
+  const list = el("ul", "file-chips");
+  for (const file of files) {
+    const item = el("li");
+    item.append(fileLink(file, "file-chip"));
+    list.append(item);
+  }
+  return list;
+}
+
+function presentedCard(file) {
+  const card = el("div", "item item-file");
+  card.append(el("span", "item-file-note", "HIMARI gave you a file"), fileLink(file, "file-card"));
+  return card;
+}
+
+function uploading() {
+  return app.attachments.some((a) => a.state === "uploading");
+}
+
+function clearAttachments() {
+  for (const entry of app.attachments) if (entry.xhr) entry.xhr.abort();
+  app.attachments = [];
+  app.jobRunning = false; // another page: its own detail sets it (PR #60 re-review N1)
+  renderAttachments();
+}
+
+function renderAttachments() {
+  const list = $("attach-list");
+  list.replaceChildren();
+  for (const entry of app.attachments) {
+    const item = el("li", `attach-chip is-${entry.state}`);
+    const text = entry.state === "uploading" ? `${entry.name} · ${entry.progress}%`
+      : entry.state === "ready" ? `${entry.name} · ${humanSize(entry.size)}` : `${entry.name} · ${entry.note}`;
+    item.append(el("span", "attach-chip-text", text));
+    const remove = el("button", "attach-chip-remove", "×");
+    remove.type = "button";
+    remove.setAttribute("aria-label", `Remove ${entry.name}`);
+    remove.addEventListener("click", () => {
+      if (entry.xhr) entry.xhr.abort();
+      app.attachments = app.attachments.filter((a) => a !== entry);
+      renderAttachments();
+    });
+    item.append(remove);
+    list.append(item);
+  }
+  list.hidden = app.attachments.length === 0;
+  $("composer-send").disabled = app.jobRunning || app.sending || uploading();
+}
+
+/* One request per file, with progress. Uploaded files are staged on the
+ * server; the next message names them. A result that comes back after the
+ * user left the conversation attaches nothing (the stale-answer rule). */
+function uploadFile(file) {
+  const conversationId = app.conversationId;
+  if (conversationId === null) return;
+  const generation = app.generation;
+  const entry = { key: (app.attachKeys += 1), name: file.name, size: file.size, state: "uploading", fileId: null,
+                  progress: 0, xhr: new XMLHttpRequest(), note: "" };
+  app.attachments.push(entry);
+  renderAttachments();
+  const xhr = entry.xhr;
+  xhr.open("POST", `/api/conversations/${encodeURIComponent(conversationId)}/uploads?name=` +
+    encodeURIComponent(file.name));
+  xhr.setRequestHeader("content-type", file.type || "application/octet-stream");
+  xhr.upload.addEventListener("progress", (event) => {
+    if (!event.lengthComputable || generation !== app.generation) return;
+    entry.progress = Math.min(99, Math.floor((event.loaded / event.total) * 100));
+    renderAttachments();
+  });
+  xhr.addEventListener("load", () => {
+    entry.xhr = null;
+    if (generation !== app.generation || !app.attachments.includes(entry)) return;
+    let data = null;
+    try {
+      data = JSON.parse(xhr.responseText);
+    } catch (ignored) {
+      /* reported below */
+    }
+    if (xhr.status === 201 && data) {
+      Object.assign(entry, { state: "ready", fileId: data.file_id, size: data.size });
+      if (data.commands === false) {
+        status("Commands cannot run on this server: HIMARI can read text files, but not PDFs or images.", "warn");
+      }
+    } else {
+      const error = data && data.error ? data.error : {};
+      if (xhr.status === 401 && error.code === "unauthenticated") showLogin();
+      Object.assign(entry, { state: "failed", note: error.message || "Upload failed" });
+    }
+    renderAttachments();
+  });
+  xhr.addEventListener("error", () => {
+    entry.xhr = null;
+    if (generation !== app.generation || !app.attachments.includes(entry)) return;
+    Object.assign(entry, { state: "failed", note: "The upload did not finish" });
+    renderAttachments();
+  });
+  xhr.send(file);
+}
+
+function addFiles(files) {
+  for (const file of files) uploadFile(file);
 }
 
 function paintToolRow(entry) {
@@ -353,11 +491,13 @@ function renderEvent(event) {
       orphan.node.append(orphan.details);
       paintToolRow(orphan);
       timeline.append(orphan.node);
+      for (const file of event.presented_files || []) timeline.append(presentedCard(file)); // PR #60 review C4
       return;
     }
     if (event.app_view && !entry.view) {
       views.attach(entry, `${event.run_id}/${event.call_id}`, event.run_id, event.call_id, false);
     }
+    for (const file of event.presented_files || []) timeline.append(presentedCard(file)); // V3-P66 §9
     entry.result = event;
     paintToolRow(entry);
     if (entry.view) views.result(entry, Boolean(event.app_view));
@@ -806,7 +946,8 @@ function applyDetail(detail) {
   $("question-panel").hidden = !detail.waiting;
   $("question-text").textContent = detail.waiting ? detail.waiting.question : "";
   $("composer-text").placeholder = detail.waiting ? "Your answer" : "Message HIMARI";
-  $("composer-send").disabled = detail.job.running || app.sending;
+  app.jobRunning = detail.job.running;
+  $("composer-send").disabled = detail.job.running || app.sending || uploading();
   $("composer-hint").textContent = detail.job.running ? `HIMARI is working…${usageText(detail.job.turn_usage)}` : "";
   $("chat-menu-resume").hidden = !detail.continuable;
   $("chat-menu-compact").disabled = detail.job.running;
@@ -866,6 +1007,7 @@ function poll(generation) {
 async function openConversation(id) {
   stopPolling();
   app.generation += 1;
+  clearAttachments();
   const generation = app.generation;
   views.reset();
   app.conversationId = id;
@@ -905,18 +1047,30 @@ async function sendMessage(event) {
   event.preventDefault();
   const box = $("composer-text");
   const text = box.value.trim();
-  if (!text || app.sending || app.conversationId === null) return;
+  const ready = app.attachments.filter((a) => a.state === "ready");
+  if ((!text && !ready.length) || app.sending || uploading() || app.conversationId === null) return;
   abandonExpansion(); // a message sent now is the user's: no prompt answer may replace what follows
   const generation = app.generation;
   app.sending = true;
   $("composer-send").disabled = true;
   try {
-    await api("POST", `/api/conversations/${encodeURIComponent(app.conversationId)}/messages`, { text });
+    await api("POST", `/api/conversations/${encodeURIComponent(app.conversationId)}/messages`,
+      { text, attachments: ready.map((a) => a.fileId) });
     box.value = "";
     autosize();
+    if (generation === app.generation) {
+      app.jobRunning = true; // a job starts with this message; the next detail says when it ends
+      app.attachments = app.attachments.filter((a) => !ready.includes(a));
+      renderAttachments();
+    }
     status("");
   } catch (error) {
-    if (error.kind === "network") {
+    if (error.code === "attachment_refused" && error.fileId) { // which chip (V3-P66 §9)
+      const refused = app.attachments.find((a) => a.fileId === error.fileId);
+      if (refused) Object.assign(refused, { state: "failed", note: `${error.message} — upload it again` });
+      renderAttachments();
+      status(error.message, "error");
+    } else if (error.kind === "network") {
       status("The message may or may not have been received; check the conversation before sending again.", "warn");
     } else {
       status(error.message, "error");
@@ -1125,6 +1279,7 @@ async function showTrash() {
   views.reset();
   app.conversationId = null;
   app.generation += 1;
+  clearAttachments();
   markSelected();
   showSurface("trash");
   closeNav();
@@ -1237,6 +1392,26 @@ async function boot() {
   $("home-new-chat").addEventListener("click", newConversation);
   $("conversation-load-more").addEventListener("click", () => loadList(false).then(markSelected));
   $("composer").addEventListener("submit", sendMessage);
+  $("composer-attach").addEventListener("click", () => $("composer-files").click());
+  $("composer-files").addEventListener("change", (event) => {
+    addFiles(Array.from(event.target.files || []));
+    event.target.value = ""; // the same file may be chosen again
+  });
+  const dropZone = $("surface-chat");
+  dropZone.addEventListener("dragover", (event) => {
+    if (app.conversationId === null || !event.dataTransfer || !event.dataTransfer.types.includes("Files")) return;
+    event.preventDefault();
+    dropZone.classList.add("is-dropping");
+  });
+  dropZone.addEventListener("dragleave", (event) => {
+    if (event.target === dropZone) dropZone.classList.remove("is-dropping");
+  });
+  dropZone.addEventListener("drop", (event) => {
+    dropZone.classList.remove("is-dropping");
+    if (app.conversationId === null || !event.dataTransfer || !event.dataTransfer.files.length) return;
+    event.preventDefault();
+    addFiles(Array.from(event.dataTransfer.files));
+  });
   $("composer-text").addEventListener("input", () => {
     autosize();
     updatePicker();

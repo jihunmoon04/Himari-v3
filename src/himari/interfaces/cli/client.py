@@ -17,18 +17,36 @@ and never falls back to running HIMARI itself. Rules carried over from v2:
 
 Authentication is the bearer derived from the operator secret, which the
 CLI reads from the private data directory it shares with the server.
+
+Files (V3-P66 §9): ``upload`` sends one file as the request body (a refusal
+the server states — even with a 5xx such as ``storage_full`` — is definite);
+``download`` streams a file into a target the caller names from the
+server's ``Content-Disposition``.
 """
 
 from __future__ import annotations
 
 import json
-from typing import Any
-from urllib.parse import urlsplit
+import os
+from collections.abc import Callable
+from typing import Any, BinaryIO
+from urllib.parse import unquote, urlsplit
 
 import httpx
 
 MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 TIMEOUT_SECONDS = 30.0
+UPLOAD_TIMEOUT_SECONDS = 300.0  # a file of tens of MB, on a slow disk
+DEFINITE_FILE_REFUSALS = frozenset({503, 507})  # upload_interrupted, storage_full: nothing was kept
+
+
+def disposition_name(header: str) -> str | None:
+    """The exact name in ``filename*=UTF-8''…`` (V3-P66 §7.2), if any."""
+    for part in header.split(";"):
+        key, _, value = part.strip().partition("=")
+        if key.lower() == "filename*" and value.lower().startswith("utf-8''"):
+            return unquote(value[len("utf-8''"):]) or None
+    return None
 _LOOPBACK = frozenset({"127.0.0.1", "localhost", "::1"})
 
 
@@ -53,9 +71,10 @@ class ResponseTooLarge(ClientError):
 
 
 class ServerRefused(ClientError):
-    def __init__(self, status: int, code: str, message: str) -> None:
+    def __init__(self, status: int, code: str, message: str, file_id: str | None = None) -> None:
         super().__init__(message)
         self.status, self.code = status, code
+        self.file_id = file_id  # attachment_refused: the file refused (V3-P66 §9)
 
 
 def check_url(url: str) -> str:
@@ -99,13 +118,54 @@ class ServerClient:
     def delete(self, path: str) -> Any:
         return self._request("DELETE", path)
 
+    def upload(self, path: str, name: str, source: BinaryIO, content_type: str) -> Any:
+        """One file as the body. 503 ``upload_interrupted`` and 507
+        ``storage_full`` are refusals the server states: nothing was kept."""
+        return self._request("POST", path, params={"name": name}, content=source,
+                             headers={"content-type": content_type}, timeout=UPLOAD_TIMEOUT_SECONDS,
+                             definite=DEFINITE_FILE_REFUSALS)
+
+    def download(self, path: str, target: Callable[[str | None], tuple[str, BinaryIO]]) -> str:
+        """Stream a file into ``target(name)``'s file (name from the server's
+        ``filename*``); the path written. A failure part way removes it."""
+        try:
+            with self._http.stream("GET", path, timeout=UPLOAD_TIMEOUT_SECONDS) as response:
+                if response.status_code != 200:
+                    data = response.read()[:MAX_RESPONSE_BYTES]
+                    try:
+                        error = json.loads(data).get("error", {})
+                    except (ValueError, AttributeError):
+                        error = {}
+                    raise ServerRefused(response.status_code, str(error.get("code", "http_error")),
+                                        str(error.get("message", "refused")))
+                written, sink = target(disposition_name(response.headers.get("content-disposition", "")))
+                try:
+                    with sink:
+                        for chunk in response.iter_bytes():
+                            sink.write(chunk)
+                except BaseException as error:
+                    try:
+                        os.unlink(written)
+                    except OSError:
+                        pass
+                    if isinstance(error, OSError):  # e.g. a full disk: said, not a traceback
+                        raise ClientError(f"cannot write the file: {error.strerror or error}") from None
+                    raise
+                return written
+        except httpx.ConnectError:
+            raise ServerUnavailable("the HIMARI server is not reachable (is it running?)") from None
+        except httpx.HTTPError:
+            raise ServerUnavailable("no complete answer from the server") from None
+
     def _request(self, method: str, path: str, *, params: dict[str, Any] | None = None,
-                 body: dict[str, Any] | None = None, timeout: float | None = None) -> Any:
+                 body: dict[str, Any] | None = None, timeout: float | None = None, content: Any = None,
+                 headers: dict[str, str] | None = None, definite: frozenset[int] = frozenset()) -> Any:
         mutation = method != "GET"
         unknown = "the request was sent but its answer {}; it may have been applied"
         too_large = False
         try:
-            with self._http.stream(method, path, params=params, json=body,
+            with self._http.stream(method, path, params=params, json=body if content is None else None,
+                                   content=content, headers=headers,
                                    timeout=httpx.USE_CLIENT_DEFAULT if timeout is None else timeout) as response:
                 status = response.status_code
                 data = bytearray()
@@ -120,7 +180,7 @@ class ServerClient:
             if not mutation:
                 raise ServerUnavailable("no complete answer from the server") from None
             raise OutcomeUnknown(unknown.format("was lost")) from None
-        if mutation and status >= 500:
+        if mutation and status >= 500 and status not in definite:
             raise OutcomeUnknown(unknown.format(f"was a server error (HTTP {status})"))
         if too_large:
             if mutation:
@@ -136,5 +196,7 @@ class ServerClient:
             raise ClientError(f"unreadable answer from the server (HTTP {status})") from None
         if status >= 400:
             error = parsed.get("error", {}) if isinstance(parsed, dict) else {}
-            raise ServerRefused(status, str(error.get("code", "http_error")), str(error.get("message", "refused")))
+            file_id = error.get("file_id")
+            raise ServerRefused(status, str(error.get("code", "http_error")), str(error.get("message", "refused")),
+                                file_id if isinstance(file_id, str) else None)
         return parsed

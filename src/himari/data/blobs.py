@@ -155,7 +155,8 @@ def _private_dir(path: str) -> None:
         pass
     info = os.lstat(path)
     if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
-        raise DataError(DataErrorCode.BLOB_MISSING, f"{path} is not a private directory")
+        # A broken setup, not a lost upload (PR #60 review C6): an internal error.
+        raise RuntimeError(f"{path} is not a private directory")
     if stat.S_IMODE(info.st_mode) != _DIR_MODE:
         os.chmod(path, _DIR_MODE)
 
