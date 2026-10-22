@@ -1,6 +1,6 @@
 # 이미지를 모델 입력으로 v0.1
 
-> 2026-10-22 · **PROPOSED (V3-P67)** · rev. 2 — 소유자 결정 반영(§12): Q1·Q3·Q4·Q5 권고대로, Q2는 (b) 줄임(§3.1).
+> 2026-10-22 · **PROPOSED (V3-P67)** · rev. 3 — 소유자 설계 검수 NOT_READY(B1~B3; N1·N2) 반영(§15). rev. 2: 소유자 결정(§12) — Q1·Q3·Q4·Q5 권고대로, Q2는 (b) 줄임(§3.1).
 >
 > 소유자 방향(2026-10-22): 기본 에이전트 기능을 먼저 갖춘다. 파일(V3-P66) 다음에 이미지를 한다. 이미지는 "첨부 파일이 모델 입력으로 들어가는 경우"이므로 V3-P66의 파일 기록 위에 얹는다([file-upload-download-v0.1.md](file-upload-download-v0.1.md) §14).
 >
@@ -63,9 +63,11 @@
 - **언제:** 파일 기록을 만들 때 한 번 만든다. 사용자 업로드(`Application.upload`가 `stage_upload` 전에)와 Tool 이미지(Dispatcher가 대기 기록 전에, §4.2)다. 건넨 파일은 모델 입력이 아니므로 만들지 않는다. 한 번 만든 사본이 늘 쓰이므로, 다시 보낼 때 같은 바이트이고 캐시가 유지된다.
 - **어디서(보안):** 이미지 디코드는 신뢰할 수 없는 입력을 다루는 공격 면이다(압축 폭탄, 코덱 취약점). 그래서 다음을 지킨다.
   - 헤더로 픽셀 수를 먼저 확인해 5,000만을 넘으면 디코드하지 않는다(§3).
-  - 디코드와 인코딩은 **서버 프로세스 밖의 자식 프로세스**에서 한다. 입력은 표준 입력, 출력은 표준 출력이다. 한도는 메모리(`RLIMIT_AS`) 512 MiB, CPU 10초, 출력 8 MiB, 벽시계 30초다. 넘으면 죽이고 실패로 다룬다.
-  - 서버의 Sandbox(bubblewrap, V3-P41)가 ENFORCED면 그 안에서 띄운다(네트워크 없음, 파일시스템은 읽기 전용 실행 환경만). 아니면 위 한도만으로 띄운다. Pillow의 `MAX_IMAGE_PIXELS`도 같은 값으로 둔다.
-- **실패:** 디코드할 수 없거나 한도를 넘으면 사본이 없다. 그 파일은 이미지 정보 없이 지금의 한 줄로 간다(`"not_shown": "could not be prepared"`). 업로드나 Tool 결과 자체는 실패로 만들지 않는다.
+  - 디코드와 인코딩은 **서버 프로세스 밖의 자식 프로세스**에서, **늘 Sandbox 안에서** 한다(소유자 검수 B1). 자원 한도는 격리가 아니다. 디코더가 뚫려도 서버 계정의 파일과 네트워크에 닿지 않아야 한다.
+    - **이미지 프로파일**(`himari.sandbox`의 새 프로파일, V3-P59의 서버 프로파일과 같은 틀): 네트워크 없음(`--unshare-net`). 쓰기 가능한 경로 없음. 읽기는 Python 실행 환경과 Pillow만. 데이터 루트·Workspaces·`/home`·비밀은 보이지 않음. 환경 변수는 정해진 것만. 입력은 표준 입력, 출력은 표준 출력뿐이다.
+    - 이 프로파일의 자체 검사(시작할 때, V3-P59처럼)가 ENFORCED가 아니면 **사본을 만들지 않는다**(fail-closed). 그러면 모든 이미지는 지금의 한 줄로 간다(`"not_shown": "images cannot be prepared on this server"`). 시작 로그와 `/api/server`가 이를 알린다.
+    - 그 위에 자원 한도를 더한다: 메모리(`RLIMIT_AS`) 512 MiB, CPU 10초, 벽시계 30초, 출력 8 MiB. 넘으면 죽이고 실패로 다룬다. Pillow의 `MAX_IMAGE_PIXELS`도 5,000만으로 둔다.
+- **실패:** 디코드할 수 없거나 한도를 넘으면 사본이 없다. 그 파일은 지금의 한 줄로 가고, 이유가 기록에 남는다(§4.1의 `image_status`). 업로드나 Tool 결과 자체는 실패로 만들지 않는다.
 - **의존성:** Pillow를 기본 의존성에 더한다(`pyproject.toml`). 판정(§3)은 Pillow 없이 순수 Python으로 한다. 그래서 Pillow를 쓰는 곳은 자식 프로세스뿐이다.
 
 ## 4. Data
@@ -73,21 +75,33 @@
 ### 4.1 파일 기록에 이미지 정보
 
 ```python
+class ImageStatus(Enum):          # 기록을 만들 때 정해지고 바뀌지 않는다 (소유자 검수 N1)
+    NOT_IMAGE = "not_image"       # 네 형식이 아니거나 헤더를 읽지 못함 (v9 이전 파일도)
+    TOO_LARGE = "too_large"       # 5,000만 픽셀 초과: 디코드하지 않음
+    UNPREPARED = "unprepared"     # 디코드·인코딩 실패, 한도 초과
+    NO_SANDBOX = "no_sandbox"     # 이미지 프로파일을 쓸 수 없어 만들지 않음 (B1)
+    READY = "ready"               # 사본이 있음
+
 @dataclass(frozen=True)
-class ImageInfo(DeepFrozen):
-    media_type: str   # 원본: image/png | image/jpeg | image/gif | image/webp (바이트로 판정)
+class ImageView(DeepFrozen):      # READY일 때만
+    blob: StoredBlob              # 모델용 사본(§3.1)
+    media_type: str               # image/jpeg | image/png
     width: int
     height: int
-    view: StoredBlob           # 모델용 사본(§3.1)
-    view_media_type: str       # image/jpeg | image/png
-    view_width: int
-    view_height: int
+    expired: bool                 # 사본 보관본의 만료 (원본의 FileRecord.expired와 따로, B2)
 
-FileRecord.image: ImageInfo | None   # 판정을 통과하고 사본을 만든 파일만
+FileRecord.image_status: ImageStatus
+FileRecord.image_type: str | None   # 원본의 판정 형식 (READY·TOO_LARGE·UNPREPARED·NO_SANDBOX)
+FileRecord.view: ImageView | None
 ```
 
+**모델에게 이미지로 갈 수 있는가는 함수 하나가 정한다(B2).** `data/api.py`의 `view_state(record) -> ViewState`이고, 값은 `READY`, `VIEW_EXPIRED`, 또는 위의 실패 상태다. `READY`는 `image_status == READY`이고 `view.expired`가 거짓일 때다. Prompt의 이미지 판단(§6), Provider의 표지 바꾸기(§7.4), Web 미리보기(§8)가 모두 이 값만 본다.
+- 원본이 살아 있고 사본만 만료됐으면, 내려받기는 되고 이미지 입력과 미리보기는 안 된다(`VIEW_EXPIRED`).
+- 반대로 원본만 만료되고 사본이 살아 있으면, 내려받기는 410이고 이미지 입력과 미리보기는 된다. 사본만으로 모델이 보던 것을 계속 본다.
+- 사본이 만료되면 그 첨부는 그 뒤로 늘 줄로 간다. 그래서 Provider가 같은 사본 때문에 보내기 전 실패를 되풀이하지 않는다. 그 실패는 기록을 읽은 뒤 보내기 전에 만료된 한 번뿐이다(§7.4).
+
 - 판정과 사본은 기록을 만들 때 한 번 한다: 업로드(`stage_upload`에 넘김)와 Tool 이미지(§4.2). 건넨 파일은 하지 않는다. 판정은 Data의 순수 함수(`data/api.py` `sniff_image(head: bytes)`)다. 사본은 §3.1의 자식 프로세스가 만들고, 부르는 쪽(Application, Dispatcher)이 보관소에 넣는다.
-- SQLite v9: `files`에 `image_type`, `image_width`, `image_height`, `view_blob_key`(`REFERENCES blobs`), `view_type`, `view_width`, `view_height`(모두 NULL 가능). v8 → v9 업그레이드 때 이미 있는 파일은 판정하지 않고 NULL로 둔다. 그래서 그 파일들은 이미지로 보이지 않는다. 지금 배포 전이라 이미 있는 파일이 거의 없다.
+- SQLite v9: `files`에 `image_status`, `image_type`, `image_width`, `image_height`, `view_blob_key`(`REFERENCES blobs`), `view_type`, `view_width`, `view_height`(모두 NULL 가능, `image_status` NULL은 `NOT_IMAGE`). v8 → v9 업그레이드 때 이미 있는 파일은 판정하지 않고 NULL로 둔다. 그래서 그 파일들은 이미지로 보이지 않는다. 지금 배포 전이라 이미 있는 파일이 거의 없다. `ImageView.expired`는 사본 보관본 행의 `expired_at`에서 읽는다(원본과 같은 방식).
 - **사본도 보관본이다.** 참조를 세는 모든 곳은 `blob_key`와 `view_blob_key`를 함께 본다: 참조 없는 보관본 지우기, 대기 업로드의 만료 제외, 영구 삭제 뒤 해제(V3-P66 §8). 사본이 만료되면 모델에게는 그 첨부가 `"expired"` 줄로 간다. 원본만 남아 있어도 사본을 다시 만들지 않는다(같은 바이트 원칙).
 
 ### 4.2 Tool이 돌려준 이미지
@@ -103,7 +117,7 @@ Tool 결과의 이미지도 보관소에 남는 파일이다(`FileOrigin.TOOL`).
 3. T7(`commit_tool_outcome`)이 `model_result`의 `AttachmentRef`를 같은 트랜잭션에서 확인하고 첨부 상태로 바꾼다. 조건은 같은 대화, `origin=tool`, 대기 상태, 그 호출(`call`)의 것이다. 업로드의 T1 확인(V3-P66 §4.2)과 같은 자리이고, 어긋나면 `INVALID_ARGUMENT`다.
 4. 대기 상태로 남은 Tool 이미지는 업로드처럼 24시간 뒤 정리된다. 기록 전에 서버가 죽은 경우다.
 
-- 한도: 호출 하나에 이미지 8개, 이미지 하나 `HIMARI_FILE_MAX_BYTES`(32 MiB)까지 보관한다. 넘는 것은 글 한 줄로 바꾼다. 모델에게 보일지는 §3의 픽셀 규칙과 사본(§3.1)이 따로 정한다.
+- 한도: 호출 하나에 이미지 8개, 이미지 하나 `HIMARI_FILE_MAX_BYTES`(32 MiB)까지 보관한다. 넘는 것은 글 한 줄로 바꾼다. **MCP 커넥터는 base64를 풀기 전에 길이를 본다(B3):** 글자 수가 `ceil(32 MiB × 4 / 3)`을 넘으면 풀지 않고 한 줄로 바꾼다. 결과 전체의 크기는 지금의 MCP 응답 한도가 막는다. 모델에게 보일지는 §3의 픽셀 규칙과 사본(§3.1)이 따로 정한다.
 - 건네기 한도(1시간 256 MiB, V3-P66 §7.1)와는 별개다. Tool 이미지는 사용자에게 건넨 파일이 아니다. 다만 같은 보관소 용량을 쓴다.
 
 ## 5. 이미지를 내는 곳
@@ -123,9 +137,8 @@ Tool 결과의 이미지도 보관소에 남는 파일이다(`FileOrigin.TOOL`).
 ### 6.1 첨부 정보
 
 ```python
-AttachmentInfo.image: ImageInfo | None   # 기록의 판정(§4.1)
-AttachmentInfo.blob_key: str            # 보관본 주소: Provider가 바이트를 넣을 때 쓴다(§7.4)
-AttachmentInfo.expired: bool
+AttachmentInfo.view_state: ViewState      # §4.1의 view_state(record)
+AttachmentInfo.view: ImageView | None     # 사본의 주소·형식·크기·바이트 수(blob.size)
 ```
 
 - loader는 지금처럼 기록을 한 번에 읽는다(`read_file_records`). 바이트는 읽지 않는다. `ModelInput`이 가볍게 남는다.
@@ -137,7 +150,13 @@ AttachmentInfo.expired: bool
 - OpenAI 방식(high detail): 2,048×2,048 안으로 줄이고, 짧은 변을 768로 줄인 뒤 `85 + 170 × (512 타일 수)`.
 - 가로·세로는 사본의 값이다(이미 1,568픽셀 이하).
 - 이미지로 보내지 않는 첨부(모델이 못 봄, 너무 큼, 사본 없음, 만료)는 지금처럼 그 한 줄의 글로 센다.
-- 이 셈은 `prompt/api.py`의 `image_tokens(info)` 하나로 하고, Provider가 이미지로 보내는지와 같은 판단(`shown_as_image(info, capabilities)`)을 따른다. "세는 것이 보내는 것"(V3-P66 C1)을 지킨다.
+- 이 셈은 `prompt/api.py`의 `image_tokens(info)` 하나로 한다. 어느 첨부를 이미지로 보낼지는 `image_plan(model_input, image_input) -> frozenset[str]`(첨부 키의 집합) 하나가 정한다. 크기 추정과 Provider가 같은 계획을 쓴다. "세는 것이 보내는 것"(V3-P66 C1)을 지킨다.
+
+**`image_plan`의 규칙:**
+- 모델이 이미지를 받고(`image_input`), `view_state`가 `READY`인 첨부만 후보다.
+- 후보를 대화의 **최신 것부터** 센다. 이미지 수 `MAX_IMAGES_PER_REQUEST`(100)과 사본 바이트 합 `MAX_IMAGE_BYTES_PER_REQUEST`(32 MiB, B3)를 둘 다 넘지 않는 데까지만 이미지로 보낸다. 나머지는 줄로 간다(`"not_shown": "too many images in this request"`).
+- 바이트 합은 기록의 사본 크기(`view.blob.size`)로 센다. 그래서 base64로 바꾸기 전에, 바이트를 읽지 않고 정해진다. 보낼 때의 메모리는 이 한도의 base64(약 43 MiB)를 넘지 않는다.
+- 이 한도를 넘는 대화에서는 새 이미지가 올 때마다 가장 오래된 이미지가 줄로 바뀌어 그 지점부터 캐시가 깨진다. 이미지가 32 MiB를 넘게 쌓인 대화에서만 생기고, 보통은 그 전에 압축이 오래된 부분을 접는다.
 
 ### 6.3 압축
 
@@ -164,29 +183,29 @@ AttachmentInfo.expired: bool
 - 픽셀 수가 5,000만을 넘음: `"too large to show"`
 - 사본을 만들지 못함: `"could not be prepared"`
 - 보관본이 만료됨: `"expired"` (V3-P66 §8.5에서 예고한 대로, 그 지점부터 캐시가 한 번 깨진다)
-- 이 요청에서 이미지가 이미 `MAX_IMAGES_PER_REQUEST`(100)개: 가장 오래된 것부터 줄로 간다. 공급자의 요청당 상한을 넘지 않기 위한 안전장치다(Q5).
+- 이 요청의 이미지가 `MAX_IMAGES_PER_REQUEST`(100)개 또는 사본 합 `MAX_IMAGE_BYTES_PER_REQUEST`(32 MiB)를 넘음: 가장 오래된 것부터 줄로 간다(`image_plan`, §6.2). 공급자의 요청당 상한과 서버 메모리를 위한 안전장치다(Q5, B3).
 
 ### 7.4 원문 저장 (Q1)
 
 이미지 바이트를 base64로 넣으면, 요청 원문이 Run마다 그 이미지를 통째로 담는다. V3-048에 따라 그 원문을 그대로 DB에 저장하므로, 이미지 하나 500 KB면 그 대화의 Run마다 0.7 MB씩 쌓인다.
 
-권고는 **(a) 저장하는 원문에서 이미지 부분을 보관본 참조로 바꾸는 것**이다.
+결정은 **(a) 저장하는 원문에서 이미지 부분을 보관본 참조로 바꾸는 것**이다(Q1, 소유자 승인 2026-10-22).
 - Provider는 요청 본문을 만들 때 이미지 URL 자리에 사본의 `himari-blob:<view_blob_key>:<view_media_type>` 표지를 넣는다. 이 본문이 저장된다(`RawRepresentation.WIRE_EXACT_BLOB_REFS`, 새 값).
 - 보낼 때(`invoke_prepared`) 표지를 보관본 바이트의 data URI로 바꿔 보낸다. 바꾸기는 결정적이다(같은 보관본 → 같은 바이트). 그래서 저장된 원문과 보관소가 있으면 보낸 바이트를 정확히 다시 만들 수 있다.
 - 보관본이 만료된 뒤에는 정확히 다시 만들 수 없다. 기록은 이 한계를 명시한다. Run 기록은 그 이상을 주장하지 않는다(`RawRepresentation`의 원칙).
-- 표지를 바꿀 때 보관본이 없으면(만료가 요청 준비와 보내기 사이에 일어남) 보내지 않는다. 그 Run은 지금의 "보내기 전 실패"로 끝난다(`FAILED_NO_RESPONSE`, 결과 확실). 다음 Run은 그 첨부를 줄로 보낸다.
+- 표지를 바꿀 때 사본 보관본이 없거나 만료됐으면(기록을 읽은 뒤 보내기 전에 만료됨) 보내지 않는다. 그 Run은 지금의 "보내기 전 실패"로 끝난다(`FAILED_NO_RESPONSE`, 결과 확실). 다음 Run은 그 첨부를 줄로 보낸다.
 - 표지 문자열은 이미지 URL 자리에만 쓴다. 사용자의 글이나 Tool 결과 글에 같은 문자열이 있어도 바꾸지 않는다. 바꾸기는 JSON 구조의 `image_url.url` 값에만 하고, 문자열 치환을 하지 않는다.
-- 이것은 Confirmed 결정(V3-048)의 개정이므로 소유자의 명시 승인이 필요하다.
+- 이것은 Confirmed 결정(V3-048)의 개정이다. 소유자가 명시 승인했고, V3-048에 개정 메모를 남겼다(§12).
 
 (b)는 지금처럼 전체 바이트를 저장하는 것이다. 단순하지만 DB가 빨리 커진다. 업그레이드 전 백업(V3-P65)과 `secure_delete`의 비용도 함께 커진다.
 
 ## 8. Web·CLI
 
-- **미리보기(Q4):** `GET …/files/{id}/{version}/view`. 기록에 `image`가 있는 파일만 된다(그 밖은 404). 보내는 것은 **모델용 사본**이다. 모델이 본 것과 같고, 작고, 메타데이터가 없다.
+- **미리보기(Q4):** `GET …/files/{id}/{version}/view`. `view_state`가 `READY`인 파일만 된다. 사본이 만료됐으면 410 `file_expired`, 그 밖은 404다. 보내는 것은 **모델용 사본**이다. 모델이 본 것과 같고, 작고, 메타데이터가 없다.
   - 응답의 `Content-Type`은 사본의 형식이다(`image/jpeg` 또는 `image/png`, 우리가 만든 것). 그 밖의 머리글: `Content-Disposition: inline`, `X-Content-Type-Options: nosniff`, `Content-Security-Policy: default-src 'none'; sandbox`.
   - 화면은 `<img>`로만 쓴다. 메시지의 이미지 첨부와 Tool 결과의 이미지는 썸네일(최대 높이 240px)이고, 누르면 지금처럼 내려받는다.
   - 만료된 파일은 썸네일 대신 "expired"를 보인다.
-- 이벤트 응답의 파일 보기에 `image: {media_type, width, height} | null`을 더한다. Tool 결과 이벤트에는 `images: [파일 보기]`를 더한다.
+- 이벤트 응답의 파일 보기에 `image: {state, media_type, width, height}`를 더한다. `state`는 `view_state`의 값이고, 화면은 `ready`일 때만 썸네일을 보인다. Tool 결과 이벤트에는 `images: [파일 보기]`를 더한다.
 - **CLI:** 파일 줄에 `[image 800×600]`을 붙인다. Tool 결과의 이미지도 `[file]` 줄로 보이고 `himari download`로 받는다.
 
 ## 9. 수명주기와 한도
@@ -196,7 +215,8 @@ AttachmentInfo.expired: bool
 | 모델에게 보일 이미지 하나 | 원본 5,000만 픽셀 이하. 사본은 긴 변 1,568픽셀 이하 |
 | 사본 만들기 | 자식 프로세스, 메모리 512 MiB, CPU 10초, 벽시계 30초, 출력 8 MiB |
 | 호출 하나가 돌려줄 이미지 | 8개 (넘으면 글 한 줄) |
-| 요청 하나의 이미지 | 100개 (넘으면 오래된 것부터 줄, Q5) |
+| 요청 하나의 이미지 | 100개, 사본 바이트 합 32 MiB (넘으면 오래된 것부터 줄, Q5·B3) |
+| MCP 이미지 하나의 base64 | `ceil(32 MiB × 4 / 3)` 글자 (넘으면 풀지 않음, B3) |
 | Tool 이미지 보관 | 다른 파일과 같은 보관소, 같은 만료(1 GiB, 30일) |
 
 - 이미지가 만료되면 그 첨부는 줄로 바뀐다. 그 지점부터 캐시가 한 번 깨진다(V3-P66 §8.5에서 예고).
@@ -206,12 +226,13 @@ AttachmentInfo.expired: bool
 
 | 모듈 | 변경 |
 | --- | --- |
-| Data | `ImageInfo`(사본 포함), `sniff_image`, `FileRecord.image`, `FileOrigin.TOOL`, `stage_tool_file`, T7의 Tool 이미지 첨부 확인. 참조 세기에 `view_blob_key`. SQLite v9(`files`의 이미지·사본 열) |
-| 새 모듈 `himari/imaging/` | 사본을 만드는 자식 프로세스와 그 실행기(한도, Sandbox가 있으면 그 안). Pillow는 이 자식 프로세스에서만 import. `common`만 쓴다 |
+| Data | `ImageStatus`, `ImageView`, `view_state`, `sniff_image`, `FileRecord.image_status`·`image_type`·`view`, `FileOrigin.TOOL`, `stage_tool_file`, T7의 Tool 이미지 첨부 확인. 참조 세기에 `view_blob_key`. SQLite v9(`files`의 이미지·사본 열) |
+| Sandbox | 이미지 프로파일(네트워크 없음, 쓰기 없음, 실행 환경만 읽기)과 그 자체 검사 |
+| 새 모듈 `himari/imaging/` | 사본을 만드는 자식 프로세스(Pillow는 여기서만 import)와 그 실행기. 이미지 프로파일 Sandbox 안에서만 띄우고, 쓸 수 없으면 만들지 않음. `common`과 `sandbox.api`만 쓴다 |
 | Tool | `ResultImage`, `ToolOutcome.result_images`. Dispatcher의 보관·대기 기록·블록 붙이기(§4.2) |
 | MCP | `render_result`가 이미지를 `result_images`로 |
 | Environment (Inside) | `read_file`이 이미지면 이미지를(Q3) |
-| Prompt | `AttachmentInfo.image`·`blob_key`·`expired`, `image_tokens`, `shown_as_image`, 고정 문장 하나 |
+| Prompt | `AttachmentInfo.view_state`·`view`, `image_tokens`, `image_plan`(수·바이트 한도), 고정 문장 하나 |
 | Provider | `ProviderCapabilities.image_input`, 선언 목록, 메시지 내용 배열, Tool 결과 이미지 메시지, 표지와 보낼 때의 바꾸기(Q1), `RawRepresentation.WIRE_EXACT_BLOB_REFS` |
 | Bootstrap | Provider에 보관본 읽기(`invoke_prepared`의 바꾸기용), Dispatcher에 BlobStore와 사본 만들기, `Application.upload`에서 사본 만들기. 의존성 Pillow |
 | Web·CLI | 미리보기 경로(Q4), 이미지 썸네일, 파일 보기의 `image`, CLI의 `[image W×H]` |
@@ -248,7 +269,9 @@ AttachmentInfo.expired: bool
 | --- | --- |
 | 이미지라고 선언한 HTML·SVG가 미리보기로 이 출처에서 열림 | 형식은 바이트로 판정한 네 래스터만, 응답 형식도 판정값, `nosniff`, `CSP: default-src 'none'; sandbox`, `<img>`로만 씀(§8) |
 | 조작한 헤더(거대한 가로·세로)로 추정이나 서버가 무너짐 | 판정은 헤더만 읽음, 5,000만 픽셀을 넘으면 디코드하지 않음(§3) |
-| 압축 폭탄·코덱 취약점으로 서버가 멈추거나 뚫림 | 디코드는 자식 프로세스에서만, 메모리·CPU·시간·출력 한도, Sandbox가 있으면 그 안(§3.1). 실패는 "사본 없음"일 뿐 |
+| 압축 폭탄·코덱 취약점으로 서버가 멈추거나 뚫림 | 디코드는 이미지 프로파일 Sandbox 안의 자식 프로세스에서만(네트워크·쓰기 없음, 데이터 루트 안 보임). 쓸 수 없으면 만들지 않음(B1). 그 위에 메모리·CPU·시간·출력 한도. 실패는 "사본 없음"일 뿐 |
+| 사본만 만료되어 Provider가 보내기 전 실패를 되풀이함 | 원본과 사본의 만료를 따로 두고, `view_state` 하나로 Prompt·Provider·Web이 판단(B2) |
+| 많은 이미지로 요청 하나가 메모리를 채움 | 사본 바이트 합 32 MiB, 기록의 크기로 base64 전에 정함. MCP base64는 풀기 전에 길이 확인(B3) |
 | 사진의 위치 정보가 공급자에게 감 | 사본은 메타데이터 없이 다시 인코딩(§3.1). 원본은 내려받기에만 |
 | 사용자의 글에 표지 문자열을 넣어 보관본을 끌어옴 | 바꾸기는 JSON의 `image_url.url` 자리에만, 문자열 치환 없음(§7.4) |
 | 다른 사용자의 보관본을 표지로 가리킴 | 표지는 Provider가 이 대화의 기록에서만 만듦. 주소에 principal이 들어 있음(V3-P66 C11) |
@@ -261,12 +284,25 @@ AttachmentInfo.expired: bool
 ## 14. 검증 계획
 
 - **판정:** 네 형식의 실제 파일과 잘린 헤더, 형식은 맞는데 크기가 0인 것, 확장자만 png인 HTML, SVG, 거대한 가로·세로 값.
+- **이미지 프로파일:** 자체 검사가 네트워크·쓰기·데이터 루트 접근이 막혔음을 증명. 막지 못하는 환경(검사 실패)이면 사본을 만들지 않고 모든 이미지가 `NO_SANDBOX`. 자식 프로세스 안에서 파일 쓰기와 네트워크 연결 시도가 실패함.
 - **사본:** 큰 사진은 긴 변 1,568로 줄고, 작은 것은 크기 그대로. EXIF 회전이 적용되고 메타데이터(위치 포함)가 사라짐. 투명 PNG·GIF는 PNG, 나머지는 JPEG. 움직이는 GIF는 첫 프레임. 압축 폭탄(헤더는 작게 속이고 실제는 큼)은 한도에 걸려 "사본 없음". 자식 프로세스가 한도를 넘으면 죽고 서버는 그대로. 같은 원본이면 같은 사본이 쓰임(다시 만들지 않음).
 - **Data:** `stage_tool_file`과 T7 첨부(같은 호출의 것만, 다른 호출·다른 대화·업로드면 `INVALID_ARGUMENT`), v8 → v9 업그레이드, 양쪽 백엔드. 사본 보관본이 참조로 세어짐: 정리·만료 제외·영구 삭제 해제.
 - **Dispatcher:** 이미지가 보관되고 결과 끝에 첨부로 붙음. 이미지가 아니면 줄, 보관소가 가득 차면 줄이고 결과는 성공. 9개째부터 줄.
 - **MCP:** `image` 항목이 `result_images`로, 잘못된 base64는 줄로.
 - **`read_file`:** 이미지 파일이면 이미지와 글. 이미지가 아니면 지금처럼.
+- **`view_state`:** 원본만 만료(내려받기 410, 이미지와 미리보기는 됨), 사본만 만료(내려받기 됨, 이미지는 줄, 미리보기 410), 둘 다 만료, 실패 상태 각각.
+- **`image_plan`:** 101번째 이미지와 32 MiB를 넘기는 이미지는 줄, 최신 것부터 남음. 바이트를 읽지 않고 정해짐. 크기 추정과 Provider가 같은 집합을 씀.
 - **Prompt:** `image_tokens`가 두 공식의 큰 값. 이미지를 볼 수 있는 모델과 없는 모델의 추정이 각각 보내는 것과 맞음. 압축 입력에는 줄만.
 - **Provider:** 사용자 메시지의 내용 배열(글, 줄, 이미지 순서). Tool 그룹 뒤의 이미지 메시지 하나(호출과 결과 사이에는 없음). 못 보는 모델·너무 큼·만료·100개 초과는 줄과 이유. 저장 원문은 표지이고 보내는 바이트는 data URI이며, 같은 입력이면 둘 다 같은 바이트. 사용자 글 속의 표지 문자열은 바뀌지 않음. 보관본이 없으면 보내지 않음.
 - **실시간 확인(opt-in, `tests/live`):** 이미지를 받는다고 선언된 모델마다 두 가지를 실제 요청으로 확인한다. ① 사용자 메시지의 이미지를 읽어 그 안의 글자나 색을 답하는지 ② Tool 그룹 뒤 이미지 메시지 방식의 이미지를 읽고 이어서 답하는지. 통과한 모델만 `image_input`을 켠다. 결과는 `docs/openrouter-model-catalog.md`에 적는다.
 - **Web·CLI:** 미리보기 머리글(HTML을 PNG로 속여 올려도 판정에서 이미지가 아님 → 404), 썸네일, CLI 줄. 브라우저 스모크에 이미지 첨부와 Tool 이미지의 썸네일.
+
+## 15. 소유자 설계 검수 — rev. 2(`c577a59`): NOT_READY
+
+| # | 지적 | 처리 |
+| --- | --- | --- |
+| B1 | 디코더 격리가 선택 사항이다. Sandbox가 없으면 자원 한도만 두는데, 자원 한도는 격리가 아니다. 디코더가 뚫리면 서버 계정의 파일·네트워크에 닿는다 | 사본은 **늘** 이미지 프로파일 Sandbox 안에서만 만든다(네트워크·쓰기 없음, 실행 환경만 읽기). 쓸 수 없으면 만들지 않고 이미지는 한 줄로(`NO_SANDBOX`, fail-closed). 자원 한도는 그 위에 더하는 방어로 남긴다(§3.1) |
+| B2 | 원본과 사본이 따로 만료되는데, 만료 표시는 하나뿐이다 | `FileRecord.expired`(원본)와 `ImageView.expired`(사본)를 따로 두고, `view_state` 하나로 Prompt·Provider·Web이 판단한다. 사본이 만료되면 그 뒤로 늘 줄이라 보내기 전 실패가 되풀이되지 않는다(§4.1) |
+| B3 | 요청 전체의 이미지 바이트 한도가 없다(100개 × 8 MiB = 800 MiB) | 요청당 사본 바이트 합 32 MiB. 기록의 크기로 base64 전에 정한다(`image_plan`). MCP base64는 풀기 전에 길이를 본다(§4.2, §6.2) |
+| N1 | 이미지가 아닌 이유를 기록할 수 없다 | `ImageStatus`(`NOT_IMAGE`·`TOO_LARGE`·`UNPREPARED`·`NO_SANDBOX`·`READY`)를 기록에 둔다(§4.1) |
+| N2 | decisions.md의 V3-P67 행이 이전 한도(5 MiB·8,000픽셀)를 말한다 | 지금 정책(5,000만 픽셀, 사본 1,568픽셀, 늘 Sandbox, 요청당 32 MiB)으로 고쳤다 |
