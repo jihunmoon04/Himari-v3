@@ -337,7 +337,7 @@ function fileThumb(file, className) {
   if (preview && preview.width > 0 && preview.height > 0) {
     // Its box is kept before it loads, so the timeline stays at the bottom.
     const height = Math.min(THUMB_HEIGHT, preview.height);
-    image.width = Math.round((preview.width * height) / preview.height);
+    image.width = Math.max(1, Math.round((preview.width * height) / preview.height)); // never a 0 px box
     image.height = height;
   }
   const holder = file.expired ? el("span", "file-thumb") : el("a", "file-thumb");
@@ -673,10 +673,10 @@ function option(value, text) {
   return node;
 }
 
-/* Whether this conversation's model (the default before a choice is read) gets images (V3-P67 §7.1). */
+/* Whether this conversation's model gets images (V3-P67 §7.1); not known yet: no. */
 function modelTakesImages() {
-  const id = app.modelChoice ? app.modelChoice.model : (app.models.find((m) => m.default) || {}).id;
-  return Boolean((app.models.find((m) => m.id === id) || {}).images);
+  if (!app.modelChoice) return false;
+  return Boolean((app.models.find((m) => m.id === app.modelChoice.model) || {}).images);
 }
 
 function renderModel() {
