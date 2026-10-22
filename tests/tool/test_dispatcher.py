@@ -254,3 +254,37 @@ def test_presented_files_recorded_when_the_blob_is_there() -> None:
         assert [(f.name, f.version) for f in files[record.call]] == [("x", 1)]
 
     asyncio.run(scenario())
+
+
+def test_presented_files_over_the_hours_limit_fail_the_call() -> None:
+    from himari.data.api import PRESENT_LIMIT_BYTES
+    from himari.tool.api import PresentedFile
+    holder: dict[str, object] = {}
+
+    def behavior(invocation, ctx):  # type: ignore[no-untyped-def]
+        return ToolOutcome(ToolStatus.SUCCEEDED, text_result("given"),
+                           presented_files=(PresentedFile(holder["blob"], "big", "text/plain", "/workspace/big"),))  # type: ignore[arg-type]
+
+    async def scenario() -> None:
+        store = InMemoryStore()
+        store.create_conversation(SCOPE)
+        store.blobs.configure(max_bytes=PRESENT_LIMIT_BYTES * 2, keep_days=30)
+        data = InMemoryData(store)
+
+        async def chunks() -> AsyncIterator[bytes]:
+            yield b"b" * (PRESENT_LIMIT_BYTES + 1)
+        holder["blob"] = await store.blobs.put(SCOPE.principal_id, chunks(), PRESENT_LIMIT_BYTES * 2)
+        tool = RecordingTool("remote/give", external_source="remote", behavior=behavior)
+        dispatcher = Dispatcher(ToolRegistry([tool]), data, data, data, ConfiguredExternalAccess({"remote": True}, data))
+        run_id = await data.prepare_run(
+            SCOPE, RunPreparation(b"", "t", RawRepresentation.ADAPTER_SERIALIZED, (), PromptBasis(0, 0), "p", "m"))
+        await data.mark_dispatch(SCOPE, run_id)
+        await data.record_raw_outcome(SCOPE, run_id, RawReceived(b"", "t"))
+        call = ToolCall(CallId("a"), 0, ToolId("remote/give"), {})
+        await data.project_model_output(SCOPE, run_id, AssistantToolCalls((call,)))
+        await dispatcher.dispatch_group(SCOPE, run_id, (call,))
+        (record,) = await data.read_tool_executions(SCOPE, run_id)
+        assert record.status is ToolExecutionStatus.FAILED
+        assert "last hour" in record.model_result.blocks[0].text  # type: ignore[union-attr]
+
+    asyncio.run(scenario())

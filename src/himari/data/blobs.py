@@ -25,6 +25,7 @@ import hashlib
 import io
 import logging
 import os
+import re
 import secrets
 import stat
 import time
@@ -128,6 +129,7 @@ class BlobFiles(Protocol):
 # --- bytes in a private directory -------------------------------------------------
 
 _DIR_MODE = 0o700
+_KEY = re.compile(r"^[0-9a-f]{64}$")
 
 
 def _private_dir(path: str) -> None:
@@ -197,7 +199,7 @@ class DirectoryBlobFiles:
             _private_dir(path)
 
     def _path(self, key: str) -> str:
-        if len(key) != 64 or any(c not in "0123456789abcdef" for c in key):
+        if not _KEY.match(key):
             raise ValueError("not a blob key")
         return os.path.join(self._blobs, key[:2], key)
 
@@ -214,7 +216,10 @@ class DirectoryBlobFiles:
             os.unlink(target)  # a leftover of a crash, or a wrong file (review B1)
         except FileNotFoundError:
             pass
-        os.link(staging.path, target)  # never replaces: the lock keeps others out
+        try:
+            os.link(staging.path, target)  # never replaces: the lock keeps others out
+        except FileNotFoundError:  # the sweep took it: idle for the whole grace (PR #59 review C6)
+            raise DataError(DataErrorCode.BLOB_MISSING, "the upload was interrupted") from None
         os.unlink(staging.path)
         _fsync_dir(folder)
 
@@ -245,7 +250,8 @@ class DirectoryBlobFiles:
             if not folder.is_dir(follow_symlinks=False):
                 continue
             for entry in os.scandir(folder.path):
-                found.append((entry.name, entry.stat(follow_symlinks=False).st_mtime))
+                if _KEY.match(entry.name):  # anything else is not ours to judge (PR #59 review C2)
+                    found.append((entry.name, entry.stat(follow_symlinks=False).st_mtime))
         return found
 
     def remove_stale_staging(self, before: float) -> None:
@@ -324,6 +330,21 @@ class MemoryBlobFiles:
 # --- the store ---------------------------------------------------------------------------
 
 
+async def _finish(function: Callable[..., None], *args: object) -> None:
+    """Run in a worker thread and wait until it is done, even if cancelled
+    meanwhile; a cancellation that arrived is re-raised afterwards."""
+    work = asyncio.ensure_future(asyncio.to_thread(function, *args))
+    interrupted = False
+    while not work.done():
+        try:
+            await asyncio.wait([work])
+        except asyncio.CancelledError:
+            interrupted = True
+    if interrupted:
+        raise asyncio.CancelledError
+    work.result()
+
+
 class FileStore:
     """``BlobStore`` plus the removals the Data backend and the cleanup ask for."""
 
@@ -343,7 +364,6 @@ class FileStore:
 
     async def put(self, principal: PrincipalId, chunks: AsyncIterator[bytes], max_bytes: int) -> StoredBlob:
         staging = self.files.stage()
-        installed = False
         try:
             async for chunk in chunks:
                 if staging.size + len(chunk) > max_bytes:
@@ -357,21 +377,22 @@ class FileStore:
                 row = self.rows.blob_row(key)
                 alive = row is not None and row.expired_at is None
                 if not (alive and self.files.inspect(key) == size):
-                    if not alive:
-                        self._make_room(size, now)
-                    await asyncio.to_thread(self.files.install, staging, key)
-                    installed = True
+                    making_room = [] if alive else self._room(size, now)
+                    # Finished even if this call is cancelled: the lock must not be
+                    # released while the thread still installs (PR #59 review C5).
+                    await _finish(self.files.install, staging, key)
+                    self._expire(making_room, now)  # only once the new blob is in (review C9)
                 self.rows.touch_blob(BlobRow(key, principal, sha256, size, now))
             return StoredBlob(key, sha256, size)
         finally:
-            if not installed:
-                staging.discard()
+            staging.discard()  # a no-op once installed: the staged name was moved
 
-    def _make_room(self, size: int, now: datetime) -> None:
-        """Expire just enough, or nothing at all (review B2). Under the lock."""
+    def _room(self, size: int, now: datetime) -> list[BlobRow]:
+        """What to expire to fit ``size``: just enough, or STORE_FULL with
+        nothing chosen (review B2). Under the lock."""
         need = self.rows.live_total() + size - self.max_bytes
         if need <= 0:
-            return
+            return []
         chosen: list[BlobRow] = []
         freed = 0
         for candidate in self.rows.expirable(now - BLOB_GRACE):
@@ -381,7 +402,7 @@ class FileStore:
                 break
         if freed < need:
             raise DataError(DataErrorCode.STORE_FULL, f"needs {need} more bytes")
-        self._expire(chosen, now)
+        return chosen
 
     def _expire(self, rows: Sequence[BlobRow], now: datetime) -> None:
         if not rows:
@@ -443,8 +464,12 @@ class FileStore:
                 self.files.remove(key)
 
     def _remove_expired_files(self) -> None:
-        for key in self.rows.expired_keys():
-            self.files.remove(key)
+        """Files left by an expiry cut short; looked up on disk, so an expired
+        blob costs nothing once its file is gone (PR #59 review C8)."""
+        expired = set(self.rows.expired_keys())
+        for key, _ in self.files.listing():
+            if key in expired:
+                self.files.remove(key)
 
     def _remove_strays(self, used_before: datetime) -> None:
         known = self.rows.known_keys()

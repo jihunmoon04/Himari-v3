@@ -29,6 +29,7 @@ from himari.environment.inside import (
     INSIDE,
     InsideEnvironment,
     InsideFiles,
+    PartlyPlaced,
     Upload,
     UploadsFolderUnusable,
     WorkspaceBusy,
@@ -225,8 +226,9 @@ def test_a_failed_copy_leaves_only_a_temporary_file_that_the_next_placing_remove
         def read(self, size: int | None = -1) -> bytes:
             raise OSError(28, "No space left on device")
 
-    with pytest.raises(fs.FsError):
+    with pytest.raises(PartlyPlaced) as stopped:
         place(env, Upload("a.txt", lambda: Broken()))
+    assert stopped.value.placed == [] and isinstance(stopped.value.cause, fs.FsError)
     assert list((folder / "uploads").iterdir()) == []  # the temporary file was removed too
     (folder / "uploads/.himari-left.tmp").write_bytes(b"crash")  # a crash leaves one
     (folder / "uploads/.himari-dir.tmp").mkdir()  # not a regular file: left alone
@@ -257,3 +259,36 @@ def test_placing_waits_for_the_write_lock_only_so_long(env: InsideEnvironment, f
 def test_placement_works_here(env: InsideEnvironment) -> None:
     assert env.placement_works()
     assert not [p for p in Path(env.host_root(ALICE)).parent.iterdir() if p.name.startswith(".himari-")]
+
+
+def test_a_stop_part_way_says_what_was_placed(env: InsideEnvironment, folder: Path) -> None:
+    def broken() -> io.BytesIO:
+        raise OSError(28, "No space left on device")
+
+    with pytest.raises(PartlyPlaced) as stopped:
+        place(env, upload("a.txt", b"a"), Upload("b.txt", broken))
+    assert stopped.value.placed == ["/workspace/conversations/c1/uploads/a.txt"]  # PR #59 review C1
+
+
+def test_the_directory_is_made_durable_after_the_rename(env: InsideEnvironment, folder: Path,
+                                                         monkeypatch: pytest.MonkeyPatch) -> None:
+    import stat as stat_module
+    synced: list[bool] = []
+    real = os.fsync
+
+    def recording(fd: int) -> None:
+        synced.append(stat_module.S_ISDIR(os.fstat(fd).st_mode))
+        real(fd)
+
+    monkeypatch.setattr(os, "fsync", recording)
+    place(env, upload("a.txt", b"a"))
+    assert synced == [False, True]  # the file, then its directory (review N2, C2)
+
+
+def test_a_read_window_ending_inside_a_character_is_not_invalid(env: InsideEnvironment, folder: Path) -> None:
+    from himari.environment.inside.tools import MAX_READ_BYTES
+    (folder / "k.txt").write_bytes("한".encode() * (MAX_READ_BYTES // 3 + 5))
+    outcome = run(env, "read_file", path="k.txt", offset=1)  # starts inside a character: that byte is shown as U+FFFD
+    assert "not valid UTF-8" in text(outcome)
+    outcome = run(env, "read_file", path="k.txt", offset=3)
+    assert "not valid UTF-8" not in text(outcome)  # PR #59 review C12

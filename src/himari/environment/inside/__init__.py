@@ -77,6 +77,16 @@ class UploadsFolderUnusable(Exception):
     """The Conversation's ``uploads`` is not a folder (a link, a file) (§5.2)."""
 
 
+class PartlyPlaced(Exception):
+    """Placing stopped at one upload; ``placed`` are the paths of the ones
+    before it, already in ``uploads/`` (PR #59 review C1). ``cause`` is why."""
+
+    def __init__(self, placed: list[str], cause: BaseException) -> None:
+        super().__init__(str(cause))
+        self.placed = placed
+        self.cause = cause
+
+
 class InsideEnvironment:
     def __init__(self, workspaces_root: str | Path, *, sandbox: WorkspaceSandbox | None = None,
                  files: InsideFiles | None = None) -> None:
@@ -186,8 +196,11 @@ class InsideEnvironment:
                         continue
                     except fs.FsError:
                         pass  # gone since: place it again
-                with upload.open() as source:
-                    placed.append(fs.display(fs.place_file(root_fd, folder, upload.name, source, TEMP_PREFIX)))
+                try:
+                    with upload.open() as source:
+                        placed.append(fs.display(fs.place_file(root_fd, folder, upload.name, source, TEMP_PREFIX)))
+                except Exception as error:  # the earlier ones stay placed: say which
+                    raise PartlyPlaced(placed, error) from error
         return placed
 
     def placement_works(self) -> bool:

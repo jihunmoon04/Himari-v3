@@ -442,7 +442,7 @@ class PresentedFile(DeepFrozen):
     workspace_path: str
 
 
-_FORMAT = {"Cc", "Cf", "Zl", "Zp"}  # control, format (bidi, zero width), line and paragraph separators
+_FORMAT = {"Cc", "Cf", "Cs", "Zl", "Zp"}  # control, format (bidi, zero width), lone surrogates, separators
 
 
 def clean_file_name(raw: str) -> str:
@@ -460,7 +460,7 @@ def clean_file_name(raw: str) -> str:
         stem = name[: len(name) - len(suffix)] if suffix else name
         budget = MAX_FILE_NAME_BYTES - len(suffix.encode("utf-8"))
         stem = stem.encode("utf-8")[:budget].decode("utf-8", errors="ignore")
-        name = stem + suffix
+        name = (stem + suffix).strip().rstrip(".").strip() or "file"  # a cut may end in "." or space
     return name
 
 

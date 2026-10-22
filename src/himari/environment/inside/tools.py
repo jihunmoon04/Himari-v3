@@ -251,18 +251,22 @@ class ReadFile(_InsideTool):
             )
         # Invalid UTF-8 policy: show invalid bytes as U+FFFD (which can triple
         # the byte count) and say so; the budget applies to the final encoded
-        # text, header and notices included.
-        invalid_utf8 = "\ufffd" in data.decode("utf-8", errors="replace") and "\ufffd".encode() not in data
-        header = (f"{shown} ({size} bytes" + (f", from byte {offset}" if offset else "")
-                  + (", not valid UTF-8: invalid bytes shown as U+FFFD" if invalid_utf8 else "") + ")\n")
-        budget = MAX_OBSERVATION_BYTES - len(header.encode()) - len(self._notice(offset, size, size).encode())
+        # text, header and notices included. Judged on the part shown, so a
+        # read window ending inside a character is not "invalid" (PR #59 C12).
+        def header(invalid: bool) -> str:
+            return (f"{shown} ({size} bytes" + (f", from byte {offset}" if offset else "")
+                    + (", not valid UTF-8: invalid bytes shown as U+FFFD" if invalid else "") + ")\n")
+
+        budget = MAX_OBSERVATION_BYTES - len(header(True).encode()) - len(self._notice(offset, size, size).encode())
         visible, covered = _visible(data, budget)
+        part = data[:covered]
+        invalid_utf8 = "\ufffd" in part.decode("utf-8", errors="replace") and "\ufffd".encode() not in part
         end = offset + covered
         truncated = end < size
         notice = self._notice(offset, end, size) if truncated else ""
         return ToolOutcome(
             ToolStatus.SUCCEEDED,
-            _text(header + visible + notice),
+            _text(header(invalid_utf8) + visible + notice),
             raw_result={
                 "path": shown,
                 "size": size,

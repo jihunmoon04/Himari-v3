@@ -279,3 +279,102 @@ def test_files_are_kept_next_to_the_database(tmp_path: Path) -> None:
 
     asyncio.run(scenario())
 
+
+
+# --- PR #59 review --------------------------------------------------------------------------
+
+
+def test_a_send_stopped_part_way_records_what_was_placed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from himari.environment.inside import fs
+
+    async def scenario() -> None:
+        app = await open_app(tmp_path / "data", ScriptedAdapter([final("ok")]))
+        try:
+            scope, folder = await conversation(app)
+            a = await app.upload(scope, "a.txt", None, chunks(b"a"))
+            b = await app.upload(scope, "b.txt", None, chunks(b"b"))
+            real = fs.place_file
+            seen: list[str] = []
+
+            def full_disk(root_fd, folder_, name, source, prefix):  # type: ignore[no-untyped-def]
+                seen.append(name)
+                if name == "b.txt" and len(seen) == 2:
+                    raise fs.FsError(fs.FsCategory.OTHER)
+                return real(root_fd, folder_, name, source, prefix)
+
+            monkeypatch.setattr(fs, "place_file", full_disk)
+            with pytest.raises(fs.FsError):
+                await app.send(scope, "two", [a.file_id, b.file_id])
+            await app.send(scope, "two", [a.file_id, b.file_id])
+            await app.runner.wait(scope)
+            assert sorted(p.name for p in (folder / "uploads").iterdir()) == ["a.txt", "b.txt"]  # no "a (2).txt"
+        finally:
+            await app.close()
+
+    asyncio.run(scenario())
+
+
+def test_an_already_placed_upload_needs_no_stored_bytes(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        app = await open_app(tmp_path / "data", ScriptedAdapter([final("ok")]))
+        try:
+            scope, folder = await conversation(app)
+            record = await app.upload(scope, "a.txt", None, chunks(b"a"))
+            real_submit = app.runner.submit
+
+            async def busy(scope: TrustedScope, message: UserMessage | None) -> JobStatus:
+                raise ControlError(ControlErrorCode.BUSY, "x")
+
+            app.runner.submit = busy  # type: ignore[method-assign]
+            with pytest.raises(ControlError):
+                await app.send(scope, "x", [record.file_id])
+            app.runner.submit = real_submit  # type: ignore[method-assign]
+            app.data.blobs.files.remove(record.blob.key)  # e.g. a restored database (review C11)
+            await app.send(scope, "x", [record.file_id])
+            await app.runner.wait(scope)
+            assert (folder / "uploads/a.txt").read_bytes() == b"a"
+        finally:
+            await app.close()
+
+    asyncio.run(scenario())
+
+
+def test_a_refused_attachment_leaves_a_paused_turn_as_it_was(tmp_path: Path) -> None:
+    from testkit import RecordingTool
+
+    from himari.data.api import ToolExecutionStatus
+
+    hold = asyncio.Event()
+
+    class Slow(RecordingTool):
+        async def run(self, invocation, ctx):  # type: ignore[no-untyped-def]
+            await hold.wait()
+            return await super().run(invocation, ctx)
+
+    async def scenario() -> None:
+        adapter = ScriptedAdapter([calls(("slow", {}), ("later", {}))])
+        app = await open_app(tmp_path / "data", adapter, tools=[Slow("slow"), RecordingTool("later")])
+        try:
+            scope, _ = await conversation(app)
+            other, _ = await conversation(app)
+            await app.send(scope, "go")
+            while not adapter.sent:
+                await asyncio.sleep(0.01)
+            await asyncio.sleep(0.05)
+            app.runner.request_pause(scope)
+            hold.set()
+            await app.runner.wait(scope)
+            events = await app.data.read_events(scope)
+            run_id = events[1].origin_run_id
+            assert run_id is not None
+            before = [e.status for e in await app.data.read_tool_executions(scope, run_id)]
+            assert ToolExecutionStatus.PENDING in before  # a paused turn with a call not started
+            foreign = await app.upload(other, "a.txt", None, chunks(b"a"))
+            with pytest.raises(DataError):
+                await app.send(scope, "x", [foreign.file_id])
+            after = [e.status for e in await app.data.read_tool_executions(scope, run_id)]
+            assert after == before and len(await app.data.read_events(scope)) == len(events)  # review C5
+        finally:
+            await app.close()
+
+    asyncio.run(scenario())

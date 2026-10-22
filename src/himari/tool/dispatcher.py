@@ -316,17 +316,24 @@ class Dispatcher:
         )
         try:
             await self._log.commit_tool_outcome(scope, call, completion)
-        except DataError as error:
-            if completion.presented_files and error.code in _FILES_REFUSED:
-                # V3-P66 §7.1 (review B3): the result says the files were given;
-                # without them it would be a false success, so the call fails.
-                await self._commit_unpresented(scope, call, completion, error)
-                return
-            if completion.app_view is None or error.code is not DataErrorCode.INVALID_ARGUMENT:
-                raise
+            return
+        except DataError as first:
+            error = first
+        if completion.app_view is not None and error.code is DataErrorCode.INVALID_ARGUMENT:
             # A view Data refuses must not cost the call its definite result:
             # the commit is atomic, so commit the result without it.
-            await self._log.commit_tool_outcome(scope, call, replace(completion, app_view=None))
+            completion = replace(completion, app_view=None)
+            try:
+                await self._log.commit_tool_outcome(scope, call, completion)
+                return
+            except DataError as again:
+                error = again
+        if completion.presented_files and error.code in _FILES_REFUSED:
+            # V3-P66 §7.1 (review B3): the result says the files were given;
+            # without them it would be a false success, so the call fails.
+            await self._commit_unpresented(scope, call, completion, error)
+            return
+        raise error
 
     async def _commit_unpresented(self, scope: TrustedScope, call: CallRef, completion: ToolCompletion,
                                   error: DataError) -> None:

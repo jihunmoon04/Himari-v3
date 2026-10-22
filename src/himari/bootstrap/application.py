@@ -86,7 +86,7 @@ from himari.data.api import (
     clean_media_type,
 )
 from himari.data.sqlite import SqliteData, SqliteStore
-from himari.environment.inside import INSIDE, InsideEnvironment, InsideFiles, Upload
+from himari.environment.inside import INSIDE, InsideEnvironment, InsideFiles, PartlyPlaced, Upload
 from himari.sandbox.api import SandboxState, ServerProfile
 from himari.sandbox.backend import SandboxBackend
 from himari.sandbox.server import ServerSandbox
@@ -471,6 +471,9 @@ class Application:
             if not uploads_work:
                 log.warning("this filesystem cannot place uploads without replacing files (renameat2); "
                             "attaching files is off")
+            elif state is not SandboxState.ENFORCED:  # V3-P66 §5.2 (review C2)
+                log.warning("commands cannot run (sandbox %s): the model can read attached text files, "
+                            "but cannot open other files such as PDFs or images", state.value)
             base = DEFAULT_INSTRUCTIONS if instructions is None else instructions
             runtime = build_runtime(provider, store=store, environments=[inside], tools=[*tools, *mcp.handlers, *mcp.resource_tools],
                                     models=catalog,
@@ -738,19 +741,48 @@ class Application:
             async with self.inside.locked(workspace_id, PLACE_LOCK_SECONDS):
                 # Read again under the lock: another tab may have placed them (review C4).
                 fresh = await self.data.read_file_records(scope, [(r.file_id, r.version) for r in records])
-                handles = [self.data.blobs.open(r.blob) for r in fresh]  # here: the store is not thread-safe
+                uploads, handles = self._uploads(fresh)  # opened here: the store is not thread-safe
                 try:
-                    placed = await self.inside.place_uploads(workspace_id, cwd, [
-                        Upload(r.name, (lambda h=h: h), r.workspace_path)  # type: ignore[misc]
-                        for r, h in zip(fresh, handles, strict=True)])
+                    placed = await self.inside.place_uploads(workspace_id, cwd, uploads)
+                except PartlyPlaced as partly:  # record what is in uploads/ already (PR #59 review C1)
+                    await self._record_placements(scope, fresh, partly.placed)
+                    raise partly.cause from None
                 finally:
                     for handle in handles:
                         handle.close()
-                for record, path in zip(fresh, placed, strict=True):
-                    if record.workspace_path != path:
-                        await self.data.set_placement(scope, record.file_id, path)
+                await self._record_placements(scope, fresh, placed)
             blocks = ((TextBlock(text),) if text else ()) + tuple(AttachmentRef(r.file_id, r.version) for r in records)
             return await self.runner.submit(scope, UserMessage(blocks))
+
+    def _uploads(self, records: Sequence[FileRecord]) -> tuple[list[Upload], list[BinaryIO]]:
+        """Each record's bytes, opened now. A record already placed whose
+        bytes are gone is still fine while its Workspace copy is there; the
+        error is raised only if it has to be placed again (PR #59 review C11)."""
+        uploads: list[Upload] = []
+        handles: list[BinaryIO] = []
+        for record in records:
+            try:
+                handle = self.data.blobs.open(record.blob)
+            except DataError as error:
+                if record.workspace_path is None:
+                    for opened in handles:
+                        opened.close()
+                    raise
+
+                def missing(error: DataError = error) -> BinaryIO:
+                    raise error
+
+                uploads.append(Upload(record.name, missing, record.workspace_path))
+                continue
+            handles.append(handle)
+            uploads.append(Upload(record.name, (lambda h=handle: h), record.workspace_path))  # type: ignore[misc]
+        return uploads, handles
+
+    async def _record_placements(self, scope: TrustedScope, records: Sequence[FileRecord],
+                                 placed: Sequence[str]) -> None:
+        for record, path in zip(records, placed):  # ``placed`` may be shorter: the ones before a failure
+            if record.workspace_path != path:
+                await self.data.set_placement(scope, record.file_id, path)
 
     async def files(self, scope: TrustedScope, *, limit: int = 50, offset: int = 0) -> Sequence[FileRecord]:
         return await self.data.read_files(scope, limit=limit, offset=offset)

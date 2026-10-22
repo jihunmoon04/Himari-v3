@@ -505,3 +505,133 @@ def test_records_survive_a_restart() -> None:
 
 def test_the_grace_is_an_hour() -> None:
     assert BLOB_GRACE == timedelta(hours=1)
+
+
+# --- PR #59 review --------------------------------------------------------------------------
+
+
+def test_a_purge_stands_when_releasing_its_blobs_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def scenario() -> None:
+        data = data_for(new_store())
+        scope = await conversation(data)
+        file_id = await upload(data, scope)
+        await data.append_event(scope, message(file_id))
+        await data.trash_conversation(scope)
+        await data.begin_purge(scope)
+
+        def broken(*args: object) -> bool:
+            raise OSError("disk gone")
+
+        monkeypatch.setattr(data.blobs.rows, "drop_unreferenced", broken)
+        await data.purge_conversation(scope)  # review C13: logged, not raised
+        assert await data.due_purges(datetime.now(UTC) + timedelta(days=99)) == ()
+
+    run(scenario())
+
+
+def test_an_expiry_cut_short_leaves_a_file_the_sweep_removes() -> None:
+    async def scenario() -> None:
+        data = data_for(new_store())
+        blob = await data.blobs.put(ALICE, chunks(b"half done"), 100)
+        data.blobs.rows.expire_blobs([blob.key], datetime.now(UTC))  # the crash: the file is still there
+        assert data.blobs.files.inspect(blob.key) == 9
+        await data.sweep_blobs(datetime.now(UTC))
+        assert data.blobs.files.inspect(blob.key) is None
+
+    run(scenario())
+
+
+def test_an_expired_blob_costs_the_sweep_nothing_once_its_file_is_gone(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def scenario() -> None:
+        data = data_for(new_store())
+        scope = await conversation(data)
+        file_id = await upload(data, scope, b"old")
+        await data.append_event(scope, message(file_id))
+        blob = (await data.read_file_records(scope, [(file_id, 1)]))[0].blob
+        aged(data, blob, 24 * 40)
+        await data.sweep_blobs(datetime.now(UTC))
+        removed: list[str] = []
+        monkeypatch.setattr(data.blobs.files, "remove", removed.append)
+        await data.sweep_blobs(datetime.now(UTC))
+        assert removed == []  # PR #59 review C8
+
+    run(scenario())
+
+
+def test_a_failed_install_expires_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def scenario() -> None:
+        data = data_for(new_store())
+        data.blobs.configure(max_bytes=10, keep_days=30)
+        old = await data.blobs.put(ALICE, chunks(b"o" * 10), 100)
+        aged(data, old, 5)
+
+        def broken(*args: object) -> None:
+            raise OSError("no space")
+
+        monkeypatch.setattr(data.blobs.files, "install", broken)
+        with pytest.raises(OSError):
+            await data.blobs.put(ALICE, chunks(b"n" * 5), 100)
+        assert data.blobs.rows.blob_row(old.key).expired_at is None  # type: ignore[union-attr]  # review C9
+
+    run(scenario())
+
+
+def test_names_are_cleaned_whatever_they_hold() -> None:
+    from himari.data.api import MAX_FILE_NAME_BYTES, clean_file_name
+    assert clean_file_name("a\udcffb.txt") == "a_b.txt"  # a lone surrogate (review C7)
+    long_ext = clean_file_name("x" * 190 + ". ." + "y" * 40)
+    assert len(long_ext.encode()) <= MAX_FILE_NAME_BYTES and not long_ext.endswith((".", " "))
+    for name in ("../../etc/passwd", "a‮gnp.exe", "​zero", ".himari-tmp", "", "  .  "):
+        cleaned = clean_file_name(name)
+        assert "/" not in cleaned and "‮" not in cleaned and "​" not in cleaned and cleaned
+        cleaned.encode("utf-8")
+
+
+@pytest.fixture
+def disk(tmp_path):  # type: ignore[no-untyped-def]
+    from himari.data.sqlite import SqliteData, SqliteStore
+    store = SqliteStore(tmp_path / "h.db")
+    yield SqliteData(store), tmp_path / "files"
+    store.close()
+
+
+def test_blob_files_are_private(disk) -> None:  # type: ignore[no-untyped-def]
+    data, root = disk
+    blob = run_value(data.blobs.put(ALICE, chunks(b"secret"), 100))
+    path = root / "blobs" / blob.key[:2] / blob.key
+    assert oct(path.stat().st_mode & 0o777) == "0o600" and oct(root.stat().st_mode & 0o777) == "0o700"
+
+
+def test_a_stray_name_does_not_stop_the_sweep(disk) -> None:  # type: ignore[no-untyped-def]
+    import os
+    data, root = disk
+    run_value(data.blobs.put(ALICE, chunks(b"x"), 100))
+    folder = next((root / "blobs").iterdir())
+    (folder / "notes.bak").write_text("someone's")
+    (root / "blobs" / "ff").mkdir(mode=0o700, exist_ok=True)
+    stray = root / "blobs" / "ff" / ("f" * 64)
+    stray.write_bytes(b"stray")
+    os.utime(stray, (0, 0))
+    run_value(data.sweep_blobs(datetime.now(UTC)))
+    assert not stray.exists() and (folder / "notes.bak").exists()  # PR #59 review C2
+
+
+def test_an_idle_partial_goes_and_a_live_one_stays(disk) -> None:  # type: ignore[no-untyped-def]
+    import os
+    data, root = disk
+    staging = data.blobs.files.stage()
+    staging.write(b"slow upload")
+    old = data.blobs.files.stage()
+    old.write(b"abandoned")
+    os.utime(old.path, (0, 0))
+    run_value(data.sweep_blobs(datetime.now(UTC)))
+    assert os.path.exists(staging.path) and not os.path.exists(old.path)  # review C14
+    old_sha = old.finish  # the abandoned upload now finishes: its install is refused cleanly (C6)
+    with pytest.raises(DataError) as refused:
+        data.blobs.files.install(old, "a" * 64)
+    assert refused.value.code is DataErrorCode.BLOB_MISSING and old_sha
+    staging.discard()
+
+
+def run_value[T](coro: Coroutine[Any, Any, T]) -> T:
+    return asyncio.run(coro)
