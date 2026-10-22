@@ -301,3 +301,19 @@ def test_a_read_window_ending_inside_a_character_is_not_invalid(env: InsideEnvir
     assert "not valid UTF-8" in text(outcome)
     outcome = run(env, "read_file", path="k.txt", offset=3)
     assert "not valid UTF-8" not in text(outcome)  # PR #59 review C12
+
+
+# --- read_file and images (V3-P67 §5, Q3) --------------------------------------------------
+
+
+def test_read_file_returns_an_image_for_an_image_file(env: InsideEnvironment, folder: Path) -> None:
+    from PIL import Image
+    out = io.BytesIO()
+    Image.new("RGB", (40, 30)).save(out, "PNG")
+    (folder / "chart.png").write_bytes(out.getvalue())
+    outcome = run(env, "read_file", path="chart.png")
+    assert text(outcome) == f"/workspace/conversations/c1/chart.png ({len(out.getvalue())} bytes): image/png 40×30"
+    image, = outcome.result_images
+    assert image.data == out.getvalue() and image.media_type == "image/png"
+    (folder / "notes.svg").write_text("<svg/>")
+    assert not run(env, "read_file", path="notes.svg").result_images  # SVG is text, not an image

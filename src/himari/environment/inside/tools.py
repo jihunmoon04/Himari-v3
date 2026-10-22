@@ -17,13 +17,17 @@ import shlex
 
 from himari.common import EnvironmentKind, JsonValue, ModelToolResult, TextBlock, ToolId
 from himari.data.api import (
+    DEFAULT_FILE_MAX_BYTES,
+    IMAGE_HEAD_BYTES,
     PRESENT_LIMIT_BYTES,
     PRESENT_WINDOW,
     DataError,
     DataErrorCode,
     PresentedFile,
+    SniffedImage,
     clean_file_name,
     clean_media_type,
+    sniff_image,
 )
 from himari.environment.inside import fs
 from himari.environment.inside.blocking import run_blocking
@@ -42,6 +46,7 @@ from himari.tool.api import (
     ToolDefinition,
     ToolInvocation,
     ToolOutcome,
+    ResultImage,
     ToolStatus,
     WorkspaceRequirement,
 )
@@ -229,6 +234,17 @@ class ReadFile(_InsideTool):
     }
     required = ["path"]
 
+    def _image(self, root_fd: int, relative: str, shown: str, size: int, sniffed: SniffedImage) -> ToolOutcome:
+        limit = self._env.files.max_bytes if self._env.files is not None else DEFAULT_FILE_MAX_BYTES
+        line = f"{shown} ({size} bytes): {sniffed.media_type} {sniffed.width}×{sniffed.height}"
+        raw: dict[str, JsonValue] = {"path": shown, "size": size, "image": sniffed.media_type,
+                                     "width": sniffed.width, "height": sniffed.height}
+        if size > limit:
+            return ToolOutcome(ToolStatus.SUCCEEDED, _text(f"{line}; too large to show"), raw_result=raw)
+        data, _ = fs.read_file(root_fd, relative, limit)
+        return ToolOutcome(ToolStatus.SUCCEEDED, _text(line), raw_result=raw,
+                           result_images=(ResultImage(data, sniffed.media_type),))
+
     @staticmethod
     def _notice(offset: int, end: int, size: int) -> str:
         if offset == 0:
@@ -243,6 +259,9 @@ class ReadFile(_InsideTool):
         if offset >= size and size:
             return ToolOutcome(ToolStatus.SUCCEEDED, _text(f"{shown} ({size} bytes): offset {offset} is past the end"),
                                raw_result={"path": shown, "size": size, "offset": offset, "chars_shown": 0})
+        sniffed = sniff_image(data[:IMAGE_HEAD_BYTES]) if offset == 0 else None
+        if sniffed is not None:  # V3-P67 §5 (Q3): the image itself, for a model that sees images
+            return self._image(root_fd, relative, shown, size, sniffed)
         if b"\0" in data:
             return ToolOutcome(
                 ToolStatus.SUCCEEDED,

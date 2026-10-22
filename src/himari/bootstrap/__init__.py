@@ -21,10 +21,12 @@ from himari.prompt.api import ContextBudget, SourceNote
 from himari.prompt.compaction import Compactor
 from himari.prompt.composer import Composer
 from himari.prompt.loader import ContextLoader
-from himari.provider.api import ProviderAdapter
+from himari.provider.api import ProviderAdapter, ReadsImageCopies
+from himari.data.api import DEFAULT_FILE_MAX_BYTES, ViewMaker
 from himari.tool.access import ConfiguredExternalAccess
 from himari.tool.api import ToolHandler
 from himari.tool.dispatcher import Dispatcher
+from himari.tool.images import StoredResultImages
 from himari.tool.registry import ToolRegistry
 
 DEFAULT_INSTRUCTIONS = ("You are HIMARI, a helpful assistant.",)
@@ -66,6 +68,8 @@ def build_runtime(
     # choice overrides it. None: every registered source, on by default.
     external_defaults: Mapping[str, bool] | None = None,
     source_notes: Sequence[SourceNote] = (),  # tool server notes (V3-P60); used for enabled sources only
+    image_views: ViewMaker | None = None,  # model copies of images (V3-P67); None: images are not prepared
+    file_max_bytes: int = DEFAULT_FILE_MAX_BYTES,
 ) -> Runtime:
     store = store if store is not None else InMemoryStore()
     data = SqliteData(store) if isinstance(store, SqliteStore) else InMemoryData(store)
@@ -78,7 +82,10 @@ def build_runtime(
     if not sources <= defaults.keys():
         raise ValueError(f"no default for the external sources {sorted(sources - defaults.keys())}")
     access = ConfiguredExternalAccess(defaults, data)
-    dispatcher = Dispatcher(registry, data, data, data, access)
+    dispatcher = Dispatcher(registry, data, data, data, access,
+                            images=StoredResultImages(data.blobs, data, image_views, file_max_bytes))
+    if isinstance(provider, ReadsImageCopies):  # V3-P67 §7.4: image copies are read when a request is sent
+        provider.use_blobs(data.blobs.read_bytes)
     if models is None:
         capabilities = provider.describe_capabilities(model_id)
         models = ModelCatalog((ModelOffer(model_id, reasoning_effort, capabilities.reasoning_efforts, context_budget,

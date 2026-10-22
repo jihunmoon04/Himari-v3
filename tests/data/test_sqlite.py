@@ -230,6 +230,9 @@ _ADDED_IN = {
     6: ("DROP TABLE model_settings",),
     7: ("ALTER TABLE conversations DROP COLUMN purge_started_at", "ALTER TABLE conversations DROP COLUMN trashed_at"),
     8: ("DROP TABLE files", "DROP TABLE blobs"),
+    9: ("DROP INDEX files_by_view", *(f"ALTER TABLE files DROP COLUMN {c}" for c in (
+        "view_height", "view_width", "view_type", "view_blob_key", "image_height", "image_width", "image_type",
+        "image_status"))),
 }
 
 
@@ -239,17 +242,18 @@ def old_database(path: Path, version: int) -> None:
     store.create_conversation(SCOPE)
     asyncio.run(SqliteData(store).append_event(SCOPE, user(f"from v{version}")))
     store.close()
-    tamper(path, *(statement for v, statements in _ADDED_IN.items() if v > version for statement in statements),
+    tamper(path, *(statement for v, statements in sorted(_ADDED_IN.items(), reverse=True) if v > version
+                   for statement in statements),
            f"PRAGMA user_version={version}")
 
 
-@pytest.mark.parametrize("version", [2, 3, 4, 5, 6, 7])
+@pytest.mark.parametrize("version", [2, 3, 4, 5, 6, 7, 8])
 def test_an_older_database_is_upgraded_in_place_and_keeps_its_data(tmp_path: Path, version: int) -> None:
     path = tmp_path / "h.db"
     old_database(path, version)
     store = SqliteStore(path)
     try:
-        assert store.connection.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 8
+        assert store.connection.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 9
         data = SqliteData(store)
         events = asyncio.run(data.read_events(SCOPE))
         assert [e.payload.blocks for e in events] == [(TextBlock(f"from v{version}"),)]  # type: ignore[union-attr]
@@ -261,10 +265,10 @@ def test_an_older_database_is_upgraded_in_place_and_keeps_its_data(tmp_path: Pat
         asyncio.run(data.trash_conversation(SCOPE))  # and the v7 columns
     finally:
         store.close()
-    SqliteStore(path).close()  # and it opens as a plain v8 database afterwards
+    SqliteStore(path).close()  # and it opens as a plain v9 database afterwards
 
 
-@pytest.mark.parametrize("version", [2, 3, 4, 5, 6, 7])
+@pytest.mark.parametrize("version", [2, 3, 4, 5, 6, 7, 8])
 @pytest.mark.parametrize("change", ["CREATE TABLE extra (x)", "PRAGMA application_id=1", "DROP TABLE artifacts"])
 def test_only_an_exact_older_database_is_upgraded(tmp_path: Path, version: int, change: str) -> None:
     path = tmp_path / "h.db"
@@ -275,7 +279,7 @@ def test_only_an_exact_older_database_is_upgraded(tmp_path: Path, version: int, 
     conn = sqlite3.connect(path)
     try:
         assert conn.execute("PRAGMA user_version").fetchone()[0] == version  # refused, never repaired
-        assert not conn.execute("SELECT 1 FROM sqlite_master WHERE name='files'").fetchall()
+        assert not conn.execute("SELECT 1 FROM sqlite_master WHERE name='files_by_view'").fetchall()
     finally:
         conn.close()
     assert not list(tmp_path.glob("*.bak*"))  # refused before any backup

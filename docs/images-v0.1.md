@@ -306,3 +306,17 @@ AttachmentInfo.view: ImageView | None     # 사본의 주소·형식·크기·�
 | B3 | 요청 전체의 이미지 바이트 한도가 없다(100개 × 8 MiB = 800 MiB) | 요청당 사본 바이트 합 32 MiB. 기록의 크기로 base64 전에 정한다(`image_plan`). MCP base64는 풀기 전에 길이를 본다(§4.2, §6.2) |
 | N1 | 이미지가 아닌 이유를 기록할 수 없다 | `ImageStatus`(`NOT_IMAGE`·`TOO_LARGE`·`UNPREPARED`·`NO_SANDBOX`·`READY`)를 기록에 둔다(§4.1) |
 | N2 | decisions.md의 V3-P67 행이 이전 한도(5 MiB·8,000픽셀)를 말한다 | 지금 정책(5,000만 픽셀, 사본 1,568픽셀, 늘 Sandbox, 요청당 32 MiB)으로 고쳤다 |
+
+## 16. 구현 노트 — 1단계: Data·이미지 Sandbox·Tool·MCP·Inside·Prompt·Provider·Bootstrap (2026-10-23)
+
+설계대로 구현했다. Web 미리보기·썸네일·CLI 줄(§8)은 2단계다. 설계와 다르거나 더 정한 것은 다음과 같다.
+
+- **이미지 Sandbox(§3.1, B1):** 새 프로파일을 따로 만들지 않고 V3-P59의 서버 Sandbox를 그대로 쓴다. 프로파일은 `ServerProfile(read_only=runtime_roots())`이다: Python 환경(가상환경이 `/usr` 밖이면 그 폴더)과 작업자 폴더만 읽기 전용이고, 쓰기 가능한 경로는 없다(샌드박스 자체의 `/tmp` tmpfs뿐). 네트워크 차단, 데이터 루트가 보이지 않음, 환경 변수 고정은 서버 Sandbox의 시작 자체 검사와 실행마다의 신원 검사가 맡는다. Application이 시작할 때 이 Sandbox를 따로 띄우고(MCP용과 별개), 1×1 PNG를 작업자에 통과시켜 확인한다. 실패하면 `NO_SANDBOX`다.
+- **작업자(`imaging/worker.py`):** 표준 라이브러리와 Pillow만 쓰는 단독 스크립트다. 줄 하나(JSON, base64)로 받고 줄 하나로 답한다. Pillow를 import하기 전에 스스로 `RLIMIT_AS`(512 MiB)와 `RLIMIT_CPU`(10초)를 건다. 서버 Sandbox의 출력 한 줄 한도(4 MiB)에 맞춰 사본은 3 MiB 이하로 한다. 투명 PNG가 넘으면 흰 바탕의 JPEG로 바꾼다. 부르는 쪽은 실행마다 벽시계 30초를 둔다.
+- **Data:** 원본 판정(`sniff_image`)은 앞 256 KiB를 읽는다(EXIF가 큰 JPEG). 사본은 업로드와 Tool 이미지에만 만든다. `FileStore.prepare_image`가 보관본을 읽어 작업자에 넘기고 사본을 보관한다. 보관소가 가득하면 `UNPREPARED`다.
+- **Tool:** `ResultImageStore`(`tool/images.py`의 `StoredResultImages`)가 Dispatcher의 이미지 보관을 맡는다. 그래서 MCP 커넥터와 Inside는 바이트만 넘긴다.
+- **Prompt:** 요청 옵션에 `image_input`이 생겼다(Driver가 Provider의 선언에서 채움). 첨부 안내 고정 문장에 Tool 이미지 메시지에 대한 문장이 붙었다.
+- **Provider:** 이미지를 하나도 보내지 않는 요청은 지금과 같은 바이트다(사용자 메시지 내용이 문자열, 원문 `WIRE_EXACT`). 보관본 표지는 이미지가 있을 때만 생기고, 그때 원문은 `WIRE_EXACT_BLOB_REFS`다.
+- **실시간 확인(§14):** 이미지를 받는다고 선언된 여덟 모델 모두, 사용자 메시지의 이미지와 Tool 그룹 뒤 메시지의 이미지를 읽었다(16/16). 그래서 여덟 모델에 `image_input`을 켰다(`docs/openrouter-model-catalog.md`). `z-ai/glm-5.3`은 끄고 한 줄만 간다.
+- **검증:** 전체 1785 passed, 55 skipped. 호스트 Sandbox 게이트 41 passed(이미지 프로파일: 런타임 경로 쓰기·네트워크·데이터 루트 접근이 막힘, 그 안에서 사본이 만들어짐). import 경계 검사 OK(`imaging`은 `common`·`sandbox`·`data`만), mypy OK.
+  - 새 시험: Data `tests/data/test_images.py`(양쪽 백엔드), 작업자·`ImageViews` `tests/imaging/`, 호스트 게이트 `tests/sandbox_host/test_image_host.py`, Dispatcher·MCP·`read_file`, Prompt `tests/prompt/test_images_prompt.py`, Provider `tests/provider/test_openrouter_images.py`, Application `tests/bootstrap/test_images_app.py`, 실시간 `tests/live/test_openrouter_images_live.py`.

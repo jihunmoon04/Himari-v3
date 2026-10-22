@@ -396,6 +396,7 @@ TEMP_PREFIX = ".himari-"  # the Workspace write Tools' temporary names
 class FileOrigin(Enum):
     UPLOAD = "upload"  # the user sent it
     PRESENTED = "presented"  # the model gave it with inside/present_file
+    TOOL = "tool"  # an image a Tool returned (V3-P67 §4.2)
 
 
 @dataclass(frozen=True)
@@ -413,6 +414,143 @@ def blob_key(principal: PrincipalId, sha256: str) -> str:
     return hashlib.sha256(principal.encode("utf-8") + b"\0" + sha256.encode("ascii")).hexdigest()
 
 
+# --- Images (V3-P67, docs/images-v0.1.md) ----------------------------------------
+# A file is an image only by its bytes (PNG, JPEG, GIF, WebP); the model sees
+# a copy made once in the image sandbox, never the original (§3.1).
+
+MAX_IMAGE_PIXELS = 50_000_000  # over it nothing is decoded
+IMAGE_HEAD_BYTES = 256 * 1024  # what sniff_image may need (a JPEG's frame header can follow large EXIF)
+MAX_IMAGES_PER_REQUEST = 100
+MAX_IMAGE_BYTES_PER_REQUEST = 32 * 1024 * 1024  # model copies, before base64 (review B3)
+MAX_RESULT_IMAGES = 8  # images one call may return
+
+
+class ImageStatus(Enum):
+    """Set when the record is made; never changes (review N1)."""
+
+    NOT_IMAGE = "not_image"
+    TOO_LARGE = "too_large"  # over MAX_IMAGE_PIXELS: never decoded
+    UNPREPARED = "unprepared"  # decoding or encoding failed, or a limit was hit
+    NO_SANDBOX = "no_sandbox"  # the image sandbox is not available: nothing decoded (review B1)
+    READY = "ready"
+
+
+class ViewState(Enum):
+    """Whether the model (and a preview) may get an image now (review B2)."""
+
+    READY = "ready"
+    VIEW_EXPIRED = "view_expired"
+    NOT_IMAGE = "not_image"
+    TOO_LARGE = "too_large"
+    UNPREPARED = "unprepared"
+    NO_SANDBOX = "no_sandbox"
+
+
+@dataclass(frozen=True)
+class SniffedImage(DeepFrozen):
+    media_type: str
+    width: int
+    height: int
+
+
+@dataclass(frozen=True)
+class PreparedView(DeepFrozen):
+    """A model copy as the image sandbox made it (not yet stored)."""
+
+    data: bytes
+    media_type: str  # image/jpeg | image/png
+    width: int
+    height: int
+
+
+@dataclass(frozen=True)
+class ImageView(DeepFrozen):
+    blob: StoredBlob
+    media_type: str
+    width: int
+    height: int
+    expired: bool = False  # the copy's own expiry, apart from the original's
+
+
+@dataclass(frozen=True)
+class ImageSetup(DeepFrozen):
+    """What a new record says of its image (V3-P67 §4.1)."""
+
+    status: ImageStatus
+    image_type: str | None = None  # the original's sniffed type
+    width: int | None = None
+    height: int | None = None
+    view: ImageView | None = None  # READY only
+
+
+NO_IMAGE = ImageSetup(ImageStatus.NOT_IMAGE)
+
+
+def sniff_image(head: bytes) -> SniffedImage | None:
+    """PNG, JPEG, GIF or WebP by their bytes, with the size their header
+    says; None for anything else or a header that cannot be read. Pure:
+    nothing is decoded (§3)."""
+    try:
+        if head.startswith(b"\x89PNG\r\n\x1a\n") and head[12:16] == b"IHDR":
+            width, height = int.from_bytes(head[16:20], "big"), int.from_bytes(head[20:24], "big")
+            return _sized("image/png", width, height)
+        if head[:6] in (b"GIF87a", b"GIF89a"):
+            return _sized("image/gif", int.from_bytes(head[6:8], "little"), int.from_bytes(head[8:10], "little"))
+        if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+            return _webp(head)
+        if head[:3] == b"\xff\xd8\xff":
+            return _jpeg(head)
+    except (IndexError, ValueError):
+        return None
+    return None
+
+
+def _sized(media_type: str, width: int, height: int) -> SniffedImage | None:
+    return SniffedImage(media_type, width, height) if width > 0 and height > 0 else None
+
+
+def _webp(head: bytes) -> SniffedImage | None:
+    chunk = head[12:16]
+    if chunk == b"VP8X":
+        return _sized("image/webp", int.from_bytes(head[24:27], "little") + 1, int.from_bytes(head[27:30], "little") + 1)
+    if chunk == b"VP8L" and head[20] == 0x2F:
+        bits = int.from_bytes(head[21:25], "little")
+        return _sized("image/webp", (bits & 0x3FFF) + 1, ((bits >> 14) & 0x3FFF) + 1)
+    if chunk == b"VP8 " and head[23:26] == b"\x9d\x01\x2a":
+        return _sized("image/webp", int.from_bytes(head[26:28], "little") & 0x3FFF,
+                      int.from_bytes(head[28:30], "little") & 0x3FFF)
+    return None
+
+
+_JPEG_FRAMES = frozenset(range(0xC0, 0xD0)) - {0xC4, 0xC8, 0xCC}
+
+
+def _jpeg(head: bytes) -> SniffedImage | None:
+    at = 2
+    while at + 4 <= len(head):
+        if head[at] != 0xFF:
+            return None
+        marker = head[at + 1]
+        if marker == 0xFF:  # fill byte
+            at += 1
+            continue
+        if marker in (0xD8, 0x01) or 0xD0 <= marker <= 0xD7:  # no length
+            at += 2
+            continue
+        length = int.from_bytes(head[at + 2:at + 4], "big")
+        if marker in _JPEG_FRAMES:
+            return _sized("image/jpeg", int.from_bytes(head[at + 7:at + 9], "big"),
+                          int.from_bytes(head[at + 5:at + 7], "big"))
+        if marker == 0xDA or length < 2:  # image data before any frame header
+            return None
+        at += 2 + length
+    return None
+
+
+def image_extension(media_type: str) -> str:
+    return {"image/png": "png", "image/jpeg": "jpg", "image/gif": "gif", "image/webp": "webp"}.get(media_type, "bin")
+
+
 @dataclass(frozen=True)
 class FileRecord(DeepFrozen):
     file_id: FileId
@@ -425,11 +563,24 @@ class FileRecord(DeepFrozen):
     workspace_path: str | None  # "/workspace/…": where an upload was placed, or what was presented
     attached: bool  # a message or a Tool result refers to it (§4.2)
     expired: bool  # its bytes expired (§8.5)
-    call: CallRef | None = None  # a presented file: its call
+    call: CallRef | None = None  # a presented file, or a Tool image: its call
+    image_status: ImageStatus = ImageStatus.NOT_IMAGE  # V3-P67 §4.1
+    image_type: str | None = None  # the original's sniffed type
+    image_width: int | None = None
+    image_height: int | None = None
+    view: ImageView | None = None  # the model copy (READY)
 
     @property
     def size(self) -> int:
         return self.blob.size
+
+
+def view_state(record: FileRecord) -> ViewState:
+    """The one answer to "may the model see this image now" (review B2): a
+    ready copy that has not expired. The original's expiry does not matter."""
+    if record.image_status is not ImageStatus.READY or record.view is None:
+        return ViewState(record.image_status.value)
+    return ViewState.VIEW_EXPIRED if record.view.expired else ViewState.READY
 
 
 @dataclass(frozen=True)
@@ -482,9 +633,16 @@ def clean_media_type(declared: str | None, name: str) -> str:
 class FileCatalog(Protocol):
     """FILE-02: a Conversation's file records. Authorizes like every port."""
 
-    async def stage_upload(self, scope: TrustedScope, blob: StoredBlob, name: str, media_type: str) -> FileRecord:
+    async def stage_upload(self, scope: TrustedScope, blob: StoredBlob, name: str, media_type: str,
+                           image: ImageSetup = NO_IMAGE) -> FileRecord:
         """A staged upload (§4.2). LIMIT_EXCEEDED at MAX_STAGED_UPLOADS;
-        BLOB_MISSING if the blob is gone or expired."""
+        BLOB_MISSING if the blob (or the image's copy) is gone or expired."""
+        ...
+
+    async def stage_tool_file(self, scope: TrustedScope, call: CallRef, blob: StoredBlob, name: str,
+                              media_type: str, image: ImageSetup) -> FileRecord:
+        """A staged image a Tool returned (V3-P67 §4.2); the call's result
+        attaches it (T7). BLOB_MISSING as for uploads."""
         ...
 
     async def count_staged(self, scope: TrustedScope) -> int:
@@ -530,6 +688,28 @@ class BlobStore(Protocol):
         """Read-only. BLOB_EXPIRED, or BLOB_MISSING if gone or of another size."""
         ...
 
+    async def prepare_image(self, principal: PrincipalId, blob: StoredBlob, views: ViewMaker | None) -> ImageSetup:
+        """V3-P67 §3, §3.1: sniff the stored bytes; for an image the model may
+        see, have ``views`` make the copy and store it. Never raises for the
+        image's sake: the status says what became of it."""
+        ...
+
+    def read_bytes(self, key: str) -> bytes:
+        """A whole blob by its address (a model copy when a request is sent,
+        §7.4). BLOB_EXPIRED or BLOB_MISSING."""
+        ...
+
+
+class ViewMaker(Protocol):
+    """Makes model copies in the image sandbox (V3-P67 §3.1)."""
+
+    @property
+    def available(self) -> bool: ...
+
+    async def make(self, original: bytes) -> PreparedView | str:
+        """The copy, or a short reason why there is none."""
+        ...
+
 
 class FileRetention(Protocol):
     """Bootstrap only, like ConversationRetention: cleanup across principals."""
@@ -554,6 +734,9 @@ class ToolCompletion(DeepFrozen):
     # V3-P58: the call's view, stored in the same transaction. Only with
     # SUCCEEDED or FAILED (a call that ran); INVALID_ARGUMENT otherwise.
     app_view: AppView | None = None
+    # V3-P67 §4.2: the model result's attachments that are this call's staged
+    # Tool images get attached in the same transaction (INVALID_ARGUMENT for
+    # any other attachment). Nothing to set: Data finds them in model_result.
     # V3-P66 §7.1: files given to the user, recorded in the same transaction.
     # Only with SUCCEEDED (INVALID_ARGUMENT otherwise); BLOB_MISSING when a
     # blob is gone or expired, LIMIT_EXCEEDED past the hour's limit.

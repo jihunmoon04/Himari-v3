@@ -28,14 +28,16 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 import httpx
 
 from himari.common import (
+    AttachmentRef,
     CallId,
     ContentBlock,
     FrozenMap,
@@ -49,13 +51,19 @@ from himari.common import (
     tool_id_problem,
 )
 from himari.prompt.api import (
+    TOOL_IMAGES_HEADER,
     AssistantTurn,
     AttachmentInfo,
     CompressedHistory,
+    ImagePlan,
     ModelInput,
     ToolGroupTurn,
     UserTurn,
+    attachment_key,
+    attachment_line,
     blocks_text,
+    image_plan,
+    tool_images,
     json_data,
     notes_section,
     state_block,
@@ -86,9 +94,13 @@ ACCEPTED_FINISH_REASONS = frozenset({"stop", "tool_calls"})
 # HTTP 400, so it is not declared. Models not
 # listed get no assumed reasoning capability: an effort for them is refused
 # before send rather than silently ignored or downgraded.
+# image_input: only models that read an image back in a user message and in the
+# message after a Tool group (tests/live/test_openrouter_images_live.py, 2026-10-22);
+# z-ai/glm-5.3 takes text only.
 KNOWN_CAPABILITIES: Mapping[str, ProviderCapabilities] = {
     "openai/gpt-6-luna": ProviderCapabilities(
         model_id="openai/gpt-6-luna",
+        image_input=True,  # V3-P67: user-message and after-group images read back, live 2026-10-22
         reasoning_efforts=REASONING_EFFORTS,
         parallel_tool_calls=True,
         context_tokens=1_050_000,  # OpenRouter /api/v1/models context_length, 2026-10-14
@@ -97,6 +109,7 @@ KNOWN_CAPABILITIES: Mapping[str, ProviderCapabilities] = {
     ),
     "openai/gpt-5-nano": ProviderCapabilities(
         model_id="openai/gpt-5-nano",
+        image_input=True,  # V3-P67: user-message and after-group images read back, live 2026-10-22
         reasoning_efforts=frozenset({"minimal", "low", "medium", "high", "xhigh", "max"}),
         parallel_tool_calls=True,
         context_tokens=400_000,  # OpenRouter /api/v1/models context_length, 2026-10-14
@@ -104,6 +117,7 @@ KNOWN_CAPABILITIES: Mapping[str, ProviderCapabilities] = {
     ),
     "anthropic/claude-haiku-5.5": ProviderCapabilities(
         model_id="anthropic/claude-haiku-5.5",
+        image_input=True,  # V3-P67: user-message and after-group images read back, live 2026-10-22
         reasoning_efforts=REASONING_EFFORTS,
         parallel_tool_calls=True,
         context_tokens=1_000_000,  # OpenRouter /api/v1/models context_length, 2026-10-14
@@ -115,18 +129,21 @@ KNOWN_CAPABILITIES: Mapping[str, ProviderCapabilities] = {
     # MiniMax advertises 1M globally but its top provider declares 512K.
     "openai/gpt-6.1-sol": ProviderCapabilities(
         model_id="openai/gpt-6.1-sol",
+        image_input=True,  # V3-P67: user-message and after-group images read back, live 2026-10-22
         reasoning_efforts=frozenset({"low", "medium", "high"}),
         context_tokens=1_050_000,
         max_output_tokens=128_000,
     ),
     "anthropic/claude-sonnet-5.5": ProviderCapabilities(
         model_id="anthropic/claude-sonnet-5.5",
+        image_input=True,  # V3-P67: user-message and after-group images read back, live 2026-10-22
         reasoning_efforts=frozenset({"low", "medium", "high"}),
         context_tokens=1_000_000,
         max_output_tokens=128_000,
     ),
     "xiaomi/mimo-v2.6-pro": ProviderCapabilities(
         model_id="xiaomi/mimo-v2.6-pro",
+        image_input=True,  # V3-P67: user-message and after-group images read back, live 2026-10-22
         context_tokens=1_048_576,
         max_output_tokens=131_072,
     ),
@@ -139,12 +156,14 @@ KNOWN_CAPABILITIES: Mapping[str, ProviderCapabilities] = {
     ),
     "deepseek/deepseek-v4.1-flash": ProviderCapabilities(
         model_id="deepseek/deepseek-v4.1-flash",
+        image_input=True,  # V3-P67: user-message and after-group images read back, live 2026-10-22
         reasoning_efforts=frozenset({"low", "medium", "high"}),
         context_tokens=1_048_576,
         max_output_tokens=943_718,
     ),
     "minimax/minimax-m3": ProviderCapabilities(
         model_id="minimax/minimax-m3",
+        image_input=True,  # V3-P67: user-message and after-group images read back, live 2026-10-22
         context_tokens=524_288,
         max_output_tokens=512_000,
     ),
@@ -164,9 +183,45 @@ def decode_tool_name(name: str) -> ToolId:
     return ToolId(name.replace("__", "/", 1))
 
 
-def _text(blocks: Sequence[ContentBlock], attachments: Mapping[str, AttachmentInfo] = FrozenMap()) -> str:
+def _text(blocks: Sequence[ContentBlock], attachments: Mapping[str, AttachmentInfo] = FrozenMap(),
+          plan: ImagePlan | None = None) -> str:
     """Text as it is; an attachment as its line (V3-P66 §6, ``prompt.api.blocks_text``)."""
-    return blocks_text(blocks, attachments)
+    return blocks_text(blocks, attachments, plan)
+
+
+MARKER = "himari-blob:"  # an image copy's place in a stored request (V3-P67 §7.4)
+
+
+def _dump(body: Mapping[str, Any]) -> bytes:
+    """The one serialization: what is stored, and what an expansion re-makes."""
+    return json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+
+
+def _image_part(info: AttachmentInfo) -> dict[str, Any]:
+    return {"type": "image_url", "image_url": {"url": f"{MARKER}{info.view_key}:{info.view_media_type}"}}
+
+
+def _user_content(blocks: Sequence[ContentBlock], attachments: Mapping[str, AttachmentInfo],
+                  plan: ImagePlan) -> str | list[dict[str, Any]]:
+    """A plain string as before, unless an image is shown: then parts — the
+    text and lines as text, each shown image right after its line (§7.2)."""
+    if not any(isinstance(b, AttachmentRef) and attachment_key(b) in plan.shown for b in blocks):
+        return _text(blocks, attachments, plan)
+    parts: list[dict[str, Any]] = []
+    pending: list[str] = []
+    for block in blocks:
+        if isinstance(block, TextBlock):
+            pending.append(block.text)
+            continue
+        pending.append(attachment_line(block, attachments, plan))
+        key = attachment_key(block)
+        if key in plan.shown:
+            parts.append({"type": "text", "text": "\n".join(pending)})
+            pending = []
+            parts.append(_image_part(attachments[key]))
+    if pending:
+        parts.append({"type": "text", "text": "\n".join(pending)})
+    return parts
 
 
 def _render_summary(summary: str) -> str:
@@ -209,7 +264,9 @@ class OpenRouterAdapter:
         timeout: float = 120.0,
         transport: httpx.AsyncBaseTransport | None = None,
         capabilities: Mapping[str, ProviderCapabilities] | None = None,
+        blobs: Callable[[str], bytes] | None = None,  # a stored image copy by address (V3-P67 §7.4)
     ) -> None:
+        self._blobs = blobs
         if not api_key:
             raise ValueError("OpenRouter API key is required")
         self._api_key = api_key
@@ -259,11 +316,12 @@ class OpenRouterAdapter:
             # V3-P62 §9 B1: OpenRouter keeps one session on one provider from the first request,
             # so its prompt cache can serve the growing history. An opaque per-Conversation value.
             body["session_id"] = options.session_key
-        raw = json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        raw = _dump(body)
         return NativePreparedRequest(
             body=raw,
             content_type="application/json",
-            raw_representation=RawRepresentation.WIRE_EXACT,
+            raw_representation=(RawRepresentation.WIRE_EXACT_BLOB_REFS if MARKER.encode() in raw
+                                else RawRepresentation.WIRE_EXACT),
             endpoint=self._endpoint,
             digest=hashlib.sha256(raw).hexdigest(),
         )
@@ -291,9 +349,10 @@ class OpenRouterAdapter:
         if system:
             messages.append({"role": "system", "content": "\n\n".join(system)})
         attachments = model_input.attachments
+        plan = image_plan(model_input)
         for part in model_input.conversation:
             if isinstance(part, UserTurn):
-                messages.append({"role": "user", "content": _text(part.blocks, attachments)})
+                messages.append({"role": "user", "content": _user_content(part.blocks, attachments, plan)})
             elif isinstance(part, AssistantTurn):
                 messages.append(
                     {"role": "assistant", "content": _text(part.blocks, attachments),
@@ -302,7 +361,7 @@ class OpenRouterAdapter:
             elif isinstance(part, CompressedHistory):
                 messages.append({"role": "user", "content": _render_summary(_text(part.summary))})
             elif isinstance(part, ToolGroupTurn):
-                messages.extend(self._tool_group(part, self._replay(part.continuation, model_id), attachments))
+                messages.extend(self._tool_group(part, self._replay(part.continuation, model_id), attachments, plan))
         if breakpoint:
             _mark_cache_breakpoint(messages)
         state = state_block(model_input.current_state, model_input.source_notes, model_input.turn_state)
@@ -312,7 +371,8 @@ class OpenRouterAdapter:
 
     @staticmethod
     def _tool_group(group: ToolGroupTurn, reasoning: Mapping[str, Any],
-                    attachments: Mapping[str, AttachmentInfo] = FrozenMap()) -> list[dict[str, Any]]:
+                    attachments: Mapping[str, AttachmentInfo] = FrozenMap(),
+                    plan: ImagePlan | None = None) -> list[dict[str, Any]]:
         calls = sorted(group.calls, key=lambda c: c.ordinal)
         missing = [c.call_id for c in calls if c.call_id not in group.results]
         if missing:
@@ -337,15 +397,27 @@ class OpenRouterAdapter:
         results: list[dict[str, Any]] = []
         for c in calls:
             result = group.results[c.call_id]
-            text = _text(result.blocks, attachments)
+            text = _text(result.blocks, attachments, plan)
             results.append(
                 {"role": "tool", "tool_call_id": c.call_id, "content": f"[tool error] {text}" if result.is_error else text}
             )
+        images = [] if plan is None else tool_images(group, attachments, plan)
+        if images:  # after the whole group, never between a call and its result (§7.2)
+            content: list[dict[str, Any]] = [{"type": "text", "text": TOOL_IMAGES_HEADER}]
+            for label, info in images:
+                content += [{"type": "text", "text": label}, _image_part(info)]
+            results.append({"role": "user", "content": content})
         return [assistant, *results]
 
     # --- PROVIDER-01: exactly one send -----------------------------------------------
 
     async def invoke_prepared(self, request: NativePreparedRequest) -> NativeInvocationOutcome:
+        content = request.body
+        if request.raw_representation is RawRepresentation.WIRE_EXACT_BLOB_REFS:
+            expanded = self._expand(request.body)
+            if expanded is None:  # a copy expired since the request was made: nothing is sent (§7.4)
+                return NativeNoResponse("image_missing")
+            content = expanded
         headers = {
             "Authorization": f"Bearer {self._api_key}",
             "Content-Type": request.content_type,
@@ -353,7 +425,7 @@ class OpenRouterAdapter:
         }
         try:
             async with httpx.AsyncClient(transport=self._transport, timeout=self._timeout) as client:
-                response = await client.post(request.endpoint, content=request.body, headers=headers)
+                response = await client.post(request.endpoint, content=content, headers=headers)
         except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
             return NativeNoResponse(f"connect_failed:{type(exc).__name__}")  # nothing was sent
         except httpx.TransportError as exc:
@@ -373,6 +445,30 @@ class OpenRouterAdapter:
             code = error.get("code") if isinstance(error, dict) else None
             return NativeNoResponse(f"provider_error_{code}", body, content_type)
         return NativeReceived(body, content_type or "application/json", _usage(doc))
+
+    def use_blobs(self, read: Callable[[str], bytes]) -> None:
+        self._blobs = read
+
+    def _expand(self, stored: bytes) -> bytes | None:
+        """The stored body with each image marker replaced by its copy's data
+        URI — only in ``image_url.url`` values, never by text replacement, so a
+        marker someone typed stays text. None if a copy cannot be read."""
+        body = json.loads(stored)
+        for message in body.get("messages", []):
+            content = message.get("content")
+            for part in content if isinstance(content, list) else ():
+                url = part.get("image_url", {}).get("url") if part.get("type") == "image_url" else None
+                if not isinstance(url, str) or not url.startswith(MARKER):
+                    continue
+                key, _, media_type = url[len(MARKER):].partition(":")
+                try:
+                    data = self._blobs(key) if self._blobs is not None else None
+                except Exception:  # noqa: BLE001 — expired or gone: the Run is not sent
+                    data = None
+                if data is None:
+                    return None
+                part["image_url"]["url"] = f"data:{media_type};base64,{base64.b64encode(data).decode('ascii')}"
+        return _dump(body)
 
     # --- PROVIDER-03 ------------------------------------------------------------------
 

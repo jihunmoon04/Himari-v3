@@ -12,7 +12,8 @@ Rules:
 6. A package in ``ONLY_FROM`` may import only the listed packages, however
    low their layer: the MCP connector uses ``common`` and ``tool.api`` and
    nothing else, Data included (V3-P57, PR #25 review B1); the Sandbox uses
-   ``common`` only (V3-P59 §3).
+   ``common`` only (V3-P59 §3); the image copies use ``common``,
+   ``sandbox`` and ``data`` (V3-P67).
 
 Usage: python -I scripts/check_imports.py [src_root]
 Exit status 1 on any violation. This is a static check, not part of pytest
@@ -30,6 +31,7 @@ LAYERS = {
     "sandbox": 1,  # the isolation mechanism: imports common only (rule 6), used by consumers via its api
     "data": 1,
     "tool": 2,
+    "imaging": 2,  # model copies of images (V3-P67): the sandbox and Data's file types, nothing else
     "environment": 3,
     "mcp": 3,  # a connector plugin: provides Tools through tool.api only, like an Environment
     "prompt": 4,
@@ -42,6 +44,7 @@ LAYERS = {
 ONLY_FROM = {
     "mcp": frozenset({"common", "tool"}),
     "sandbox": frozenset({"common"}),
+    "imaging": frozenset({"common", "sandbox", "data"}),
 }
 
 

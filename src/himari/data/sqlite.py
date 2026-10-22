@@ -100,8 +100,12 @@ from himari.data.api import (
     DataErrorCode,
     EnvironmentActivation,
     EventKind,
+    NO_IMAGE,
     FileOrigin,
     FileRecord,
+    ImageSetup,
+    ImageStatus,
+    ImageView,
     PresentedFile,
     StoredBlob,
     EventPayload,
@@ -134,7 +138,7 @@ from himari.data.api import (
 
 # v3: compaction_runs; v4: external_settings; v5: ui_resources; v6: model_settings;
 # v7: the trash (all upgraded in place); v1 is refused
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 APPLICATION_ID = 0x48494D41  # "HIMA": written into the database header (PRAGMA application_id)
 
 _TERMINAL_COMPLETIONS = frozenset(
@@ -327,8 +331,21 @@ CREATE TABLE files (
 CREATE INDEX files_by_conversation ON files (conversation_id, seq);
 CREATE INDEX files_by_blob ON files (blob_key);
 """
+# v9: images (V3-P67 §4.1). image_status NULL: not an image (files made
+# before v9 included). view_blob_key: the model copy, a blob of its own.
+_V9_ADDITIONS = """
+ALTER TABLE files ADD COLUMN image_status TEXT;
+ALTER TABLE files ADD COLUMN image_type TEXT;
+ALTER TABLE files ADD COLUMN image_width INTEGER;
+ALTER TABLE files ADD COLUMN image_height INTEGER;
+ALTER TABLE files ADD COLUMN view_blob_key TEXT REFERENCES blobs (blob_key);
+ALTER TABLE files ADD COLUMN view_type TEXT;
+ALTER TABLE files ADD COLUMN view_width INTEGER;
+ALTER TABLE files ADD COLUMN view_height INTEGER;
+CREATE INDEX files_by_view ON files (view_blob_key);
+"""
 _ADDITIONS = (_V3_ADDITIONS, _V4_ADDITIONS, _V5_ADDITIONS, _V6_ADDITIONS, _V7_ADDITIONS,
-              _V8_ADDITIONS)  # what each version from v3 added
+              _V8_ADDITIONS, _V9_ADDITIONS)  # what each version from v3 added
 _SCHEMA = _SCHEMA_V2 + "".join(_ADDITIONS)
 # An older version → (its exact schema, what brings it to SCHEMA_VERSION).
 _UPGRADES = {
@@ -733,7 +750,8 @@ class _SqliteBlobRows:
     def expirable(self, used_before: datetime) -> Sequence[BlobRow]:
         with self._store.transaction() as tx:
             rows = tx.all("SELECT * FROM blobs b WHERE expired_at IS NULL AND last_used_at < ?"
-                          " AND NOT EXISTS (SELECT 1 FROM files f WHERE f.blob_key=b.blob_key AND f.attached_at IS NULL)"
+                          " AND NOT EXISTS (SELECT 1 FROM files f WHERE (f.blob_key=b.blob_key OR f.view_blob_key=b.blob_key)"
+                          " AND f.attached_at IS NULL)"
                           " ORDER BY last_used_at, blob_key", _timestamp(used_before))
             return [self._row(r) for r in rows]
 
@@ -742,10 +760,11 @@ class _SqliteBlobRows:
         with self._store.transaction() as tx:
             for key in keys:
                 # A staged upload may have come to refer to it meanwhile (re-review N3).
-                tx.execute("UPDATE blobs SET expired_at=? WHERE blob_key=? AND expired_at IS NULL AND NOT EXISTS"
-                           " (SELECT 1 FROM files f WHERE f.blob_key=blobs.blob_key AND f.attached_at IS NULL)",
+                changed = tx.execute("UPDATE blobs SET expired_at=? WHERE blob_key=? AND expired_at IS NULL AND NOT EXISTS"
+                           " (SELECT 1 FROM files f WHERE (f.blob_key=blobs.blob_key OR f.view_blob_key=blobs.blob_key)"
+                           " AND f.attached_at IS NULL)",
                            _timestamp(now), key)
-                if tx.one("SELECT changes() AS n")["n"]:  # type: ignore[index]
+                if changed.rowcount:
                     expired.append(key)
         return expired
 
@@ -766,7 +785,8 @@ class _SqliteBlobRows:
                 freed = 0
                 for candidate in tx.all(
                         "SELECT blob_key, size FROM blobs b WHERE expired_at IS NULL AND last_used_at < ?"
-                        " AND NOT EXISTS (SELECT 1 FROM files f WHERE f.blob_key=b.blob_key AND f.attached_at IS NULL)"
+                        " AND NOT EXISTS (SELECT 1 FROM files f WHERE (f.blob_key=b.blob_key OR f.view_blob_key=b.blob_key)"
+                          " AND f.attached_at IS NULL)"
                         " ORDER BY last_used_at, blob_key", _timestamp(used_before)):
                     if freed >= need:
                         break
@@ -785,14 +805,15 @@ class _SqliteBlobRows:
     def drop_unreferenced(self, key: str, used_before: datetime) -> bool:
         with self._store.transaction() as tx:
             cursor = tx.execute("DELETE FROM blobs WHERE blob_key=? AND (expired_at IS NOT NULL OR last_used_at < ?)"
-                                " AND NOT EXISTS (SELECT 1 FROM files f WHERE f.blob_key=blobs.blob_key)",
+                                " AND NOT EXISTS (SELECT 1 FROM files f WHERE f.blob_key=blobs.blob_key OR f.view_blob_key=blobs.blob_key)",
                                 key, _timestamp(used_before))
             return cursor.rowcount > 0
 
     def unreferenced_keys(self, used_before: datetime) -> Sequence[str]:
         with self._store.transaction() as tx:
             rows = tx.all("SELECT blob_key FROM blobs b WHERE (expired_at IS NOT NULL OR last_used_at < ?)"
-                          " AND NOT EXISTS (SELECT 1 FROM files f WHERE f.blob_key=b.blob_key)", _timestamp(used_before))
+                          " AND NOT EXISTS (SELECT 1 FROM files f WHERE f.blob_key=b.blob_key OR f.view_blob_key=b.blob_key)",
+                          _timestamp(used_before))
             return [r["blob_key"] for r in rows]
 
     def expired_keys(self) -> Sequence[str]:
@@ -926,8 +947,12 @@ def _workspace(conv: sqlite3.Row) -> ConversationWorkspace | None:
 
 
 _FILE_COLUMNS = ("f.file_id, f.version, f.origin, f.name, f.media_type, f.created_at, f.workspace_path,"
-                 " f.attached_at, f.run_id, f.call_id, b.blob_key, b.sha256, b.size, b.expired_at")
-_FILE_FROM = "FROM files f JOIN blobs b ON b.blob_key=f.blob_key"
+                 " f.attached_at, f.run_id, f.call_id, b.blob_key, b.sha256, b.size, b.expired_at,"
+                 " f.image_status, f.image_type, f.image_width, f.image_height, f.view_type, f.view_width,"
+                 " f.view_height, v.blob_key AS view_key, v.sha256 AS view_sha256, v.size AS view_size,"
+                 " v.expired_at AS view_expired_at")
+_FILE_FROM = ("FROM files f JOIN blobs b ON b.blob_key=f.blob_key"
+              " LEFT JOIN blobs v ON v.blob_key=f.view_blob_key")
 
 
 def _file(row: sqlite3.Row) -> FileRecord:
@@ -938,7 +963,27 @@ def _file(row: sqlite3.Row) -> FileRecord:
         created_at=datetime.fromisoformat(row["created_at"]), workspace_path=row["workspace_path"],
         attached=row["attached_at"] is not None, expired=row["expired_at"] is not None,
         call=None if row["run_id"] is None else CallRef(RunId(row["run_id"]), CallId(row["call_id"])),
+        image_status=ImageStatus(row["image_status"] or ImageStatus.NOT_IMAGE.value),
+        image_type=row["image_type"], image_width=row["image_width"], image_height=row["image_height"],
+        view=None if row["view_key"] is None else ImageView(
+            StoredBlob(row["view_key"], row["view_sha256"], row["view_size"]), row["view_type"], row["view_width"],
+            row["view_height"], expired=row["view_expired_at"] is not None),
     )
+
+
+def _image_columns(image: ImageSetup) -> tuple[object, ...]:
+    view = image.view
+    return (image.status.value, image.image_type, image.width, image.height,
+            None if view is None else view.blob.key, None if view is None else view.media_type,
+            None if view is None else view.width, None if view is None else view.height)
+
+
+_IMAGE_COLUMNS = "image_status, image_type, image_width, image_height, view_blob_key, view_type, view_width, view_height"
+
+
+def _alive(tx: _Tx, blob: StoredBlob) -> bool:
+    row = tx.one("SELECT size, expired_at FROM blobs WHERE blob_key=?", blob.key)
+    return row is not None and row["expired_at"] is None and row["size"] == blob.size
 
 
 def _refused(file_id: str, why: str) -> DataError:
@@ -1065,6 +1110,18 @@ class SqliteData:
         rows = self._check_attachments(tx, scope, [r.file_id for r in refs], cutoff=None)
         now = _timestamp(datetime.now(UTC))
         for row in rows:
+            tx.execute("UPDATE files SET attached_at=? WHERE seq=?", now, row["seq"])
+
+    @staticmethod
+    def _attach_tool_images(tx: _Tx, scope: TrustedScope, call: CallRef, blocks: Sequence[object]) -> None:
+        """V3-P67 §4.2: a result's attachments are this call's staged Tool images."""
+        now = _timestamp(datetime.now(UTC))
+        for ref in (b for b in blocks if isinstance(b, AttachmentRef)):
+            row = tx.one("SELECT seq, origin, attached_at, run_id, call_id FROM files WHERE file_id=? AND version=?"
+                         " AND conversation_id=?", ref.file_id, ref.version, scope.conversation_id)
+            if (row is None or row["origin"] != FileOrigin.TOOL.value or row["attached_at"] is not None
+                    or (row["run_id"], row["call_id"]) != (call.run_id, call.call_id)):
+                raise DataError(DataErrorCode.INVALID_ARGUMENT, f"{ref.file_id} is not an image of this call")
             tx.execute("UPDATE files SET attached_at=? WHERE seq=?", now, row["seq"])
 
     def _present(self, tx: _Tx, scope: TrustedScope, call: CallRef, files: Sequence[PresentedFile]) -> None:
@@ -1311,6 +1368,7 @@ class SqliteData:
                 self._store_ui_resource(tx, view.resource)
             if completion.presented_files:
                 self._present(tx, scope, call, completion.presented_files)
+            self._attach_tool_images(tx, scope, call, completion.model_result.blocks)
             tx.execute(
                 "UPDATE tool_executions SET status=?, model_result=?, raw_result=?, ui_digest=?, app_payload=?"
                 " WHERE seq=?",
@@ -1711,8 +1769,10 @@ class SqliteData:
             digests = [r["ui_digest"] for r in tx.all(
                 "SELECT DISTINCT ui_digest FROM tool_executions WHERE conversation_id=? AND ui_digest IS NOT NULL",
                 scope.conversation_id)]
-            keys = [r["blob_key"] for r in tx.all("SELECT DISTINCT blob_key FROM files WHERE conversation_id=?",
-                                                   scope.conversation_id)]
+            keys = [r["k"] for r in tx.all("SELECT blob_key AS k FROM files WHERE conversation_id=? UNION"
+                                           " SELECT view_blob_key FROM files WHERE conversation_id=?"
+                                           " AND view_blob_key IS NOT NULL", scope.conversation_id,
+                                           scope.conversation_id)]
             for statement in self._PURGE:
                 tx.execute(statement, scope.conversation_id)
             for digest in digests:  # a view another call still names stays
@@ -1737,22 +1797,36 @@ class SqliteData:
 
     # --- FileCatalog (V3-P66) ----------------------------------------------------------
 
-    async def stage_upload(self, scope: TrustedScope, blob: StoredBlob, name: str, media_type: str) -> FileRecord:
+    async def stage_upload(self, scope: TrustedScope, blob: StoredBlob, name: str, media_type: str,
+                           image: ImageSetup = NO_IMAGE) -> FileRecord:
         with self._tx() as tx:
             tx.authorized(scope)
             if self._staged(tx, scope) >= MAX_STAGED_UPLOADS:
                 raise DataError(DataErrorCode.LIMIT_EXCEEDED, f"{MAX_STAGED_UPLOADS} uploads wait to be sent")
-            row = tx.one("SELECT * FROM blobs WHERE blob_key=?", blob.key)
-            if row is None or row["expired_at"] is not None or row["size"] != blob.size:
-                raise DataError(DataErrorCode.BLOB_MISSING, blob.key)
-            file_id = tx.new_id("file")
-            tx.execute("INSERT INTO files (conversation_id, file_id, version, origin, name, media_type, blob_key,"
-                       " created_at) VALUES (?, ?, 1, ?, ?, ?, ?, ?)",
-                       scope.conversation_id, file_id, FileOrigin.UPLOAD.value, name, media_type, blob.key,
-                       _timestamp(datetime.now(UTC)))
-            stored = tx.one(f"SELECT {_FILE_COLUMNS} {_FILE_FROM} WHERE f.file_id=?", file_id)
-            assert stored is not None
-            return _file(stored)
+            return self._stage(tx, scope, FileOrigin.UPLOAD, None, blob, name, media_type, image)
+
+    async def stage_tool_file(self, scope: TrustedScope, call: CallRef, blob: StoredBlob, name: str,
+                              media_type: str, image: ImageSetup) -> FileRecord:
+        with self._tx() as tx:
+            tx.authorized(scope)
+            self._execution_row(tx, scope, call)  # a call of this Conversation
+            return self._stage(tx, scope, FileOrigin.TOOL, call, blob, name, media_type, image)
+
+    @staticmethod
+    def _stage(tx: _Tx, scope: TrustedScope, origin: FileOrigin, call: CallRef | None, blob: StoredBlob, name: str,
+               media_type: str, image: ImageSetup) -> FileRecord:
+        if not _alive(tx, blob) or (image.view is not None and not _alive(tx, image.view.blob)):
+            raise DataError(DataErrorCode.BLOB_MISSING, blob.key)
+        file_id = tx.new_id("file")
+        tx.execute("INSERT INTO files (conversation_id, file_id, version, origin, name, media_type, blob_key,"
+                   f" created_at, run_id, call_id, {_IMAGE_COLUMNS}) VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?,"
+                   " ?, ?, ?, ?, ?, ?, ?, ?)",
+                   scope.conversation_id, file_id, origin.value, name, media_type, blob.key,
+                   _timestamp(datetime.now(UTC)), None if call is None else call.run_id,
+                   None if call is None else call.call_id, *_image_columns(image))
+        stored = tx.one(f"SELECT {_FILE_COLUMNS} {_FILE_FROM} WHERE f.file_id=?", file_id)
+        assert stored is not None
+        return _file(stored)
 
     @staticmethod
     def _staged(tx: _Tx, scope: TrustedScope) -> int:

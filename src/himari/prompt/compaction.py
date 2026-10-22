@@ -71,7 +71,7 @@ import json
 import math
 from collections.abc import Callable, Mapping, Sequence
 
-from himari.common import ContentBlock, EventId, FrozenMap, JsonValue, RunId, TextBlock, thaw
+from himari.common import AttachmentRef, ContentBlock, EventId, FrozenMap, JsonValue, RunId, TextBlock, thaw
 from himari.data.api import (
     AssistantToolCalls,
     ConversationEvent,
@@ -80,6 +80,7 @@ from himari.data.api import (
     PromptSnapshot,
 )
 from himari.prompt.api import (
+    TOOL_IMAGES_HEADER,
     AttachmentInfo,
     AssistantTurn,
     CompactionPlan,
@@ -89,13 +90,18 @@ from himari.prompt.api import (
     ContextEstimate,
     CurrentStateProjection,
     HistoryPart,
+    ImagePlan,
     ModelInput,
     PromptError,
     PromptErrorCode,
     PromptInputs,
     ToolGroupTurn,
     UserTurn,
+    attachment_key,
     blocks_text,
+    image_plan,
+    image_tokens,
+    tool_images,
     json_data,
     notes_section,
     state_block,
@@ -107,6 +113,7 @@ MESSAGE_OVERHEAD_TOKENS = 4  # role and framing of one native message
 SNAPSHOT_SCHEMA_VERSION = 1  # body: {"summary": str}
 MAX_STEPS = 16  # summarizing calls one plan may need for a single oversized part
 MIN_PIECE_TOKENS = 200  # below this a piece is too small to summarize usefully
+NO_IMAGES = ImagePlan(False)
 
 COMPACTION_INSTRUCTIONS = """\
 You are compacting the older part of one conversation between a user and \
@@ -162,12 +169,21 @@ def _blocks_text(blocks: Sequence[ContentBlock], attachments: Mapping[str, Attac
     return blocks_text(blocks, attachments)
 
 
-def part_tokens(part: HistoryPart, attachments: Mapping[str, AttachmentInfo] = FrozenMap()) -> int:
+def _shown_tokens(blocks: Sequence[ContentBlock], attachments: Mapping[str, AttachmentInfo], plan: ImagePlan) -> int:
+    return sum(image_tokens(attachments[attachment_key(b)]) for b in blocks
+               if isinstance(b, AttachmentRef) and attachment_key(b) in plan.shown)
+
+
+def part_tokens(part: HistoryPart, attachments: Mapping[str, AttachmentInfo] = FrozenMap(),
+                plan: ImagePlan = NO_IMAGES) -> int:
+    """As the Provider sends it: attachments as their lines, and the images
+    of ``plan`` (V3-P67 §6.2) — a group's in one message after it."""
     match part:
         case CompressedHistory(summary=summary):
             return MESSAGE_OVERHEAD_TOKENS + tokens_of_text(_blocks_text(summary, attachments))
         case UserTurn(blocks=blocks):
-            return MESSAGE_OVERHEAD_TOKENS + tokens_of_text(_blocks_text(blocks, attachments))
+            return (MESSAGE_OVERHEAD_TOKENS + tokens_of_text(blocks_text(blocks, attachments, plan))
+                    + _shown_tokens(blocks, attachments, plan))
         case AssistantTurn(blocks=blocks):
             return MESSAGE_OVERHEAD_TOKENS + tokens_of_text(_blocks_text(blocks, attachments))
         case ToolGroupTurn():
@@ -176,7 +192,11 @@ def part_tokens(part: HistoryPart, attachments: Mapping[str, AttachmentInfo] = F
                 total += MESSAGE_OVERHEAD_TOKENS + tokens_of_text(call.tool_id) + _json_tokens(call.arguments)
                 result = part.results.get(call.call_id)
                 if result is not None:
-                    total += tokens_of_text(_blocks_text(result.blocks, attachments))
+                    total += tokens_of_text(blocks_text(result.blocks, attachments, plan))
+            images = tool_images(part, attachments, plan)
+            if images:
+                total += MESSAGE_OVERHEAD_TOKENS + tokens_of_text(TOOL_IMAGES_HEADER)
+                total += sum(tokens_of_text(label) + image_tokens(info) for label, info in images)
             return total
 
 
@@ -203,7 +223,8 @@ def request_tokens(model_input: ModelInput) -> int:
         total += tokens_of_text(section)
     for definition in model_input.tool_catalog:
         total += tokens_of_text(definition.tool_id + definition.description) + _json_tokens(definition.input_schema)
-    total += sum(part_tokens(part, model_input.attachments) for part in model_input.conversation)
+    plan = image_plan(model_input)
+    total += sum(part_tokens(part, model_input.attachments, plan) for part in model_input.conversation)
     return total + state_tokens(model_input)
 
 
@@ -382,8 +403,9 @@ class Compactor:
         ):
             return ContextEstimate(request_tokens(model_input), measured=False)
         by_event, by_run = anchors(inputs.events)
+        plan = image_plan(model_input)
         added = sum(
-            part_tokens(part, model_input.attachments)
+            part_tokens(part, model_input.attachments, plan)
             for part in model_input.conversation
             if not isinstance(part, CompressedHistory) and part_anchor(part, by_event, by_run) > mark.event_sequence
         )
@@ -410,7 +432,8 @@ class Compactor:
         parts = [p for p in model_input.conversation if not isinstance(p, CompressedHistory)]
         if len(parts) < 2:
             return None
-        sizes = [part_tokens(p, model_input.attachments) for p in parts]
+        images = image_plan(model_input)
+        sizes = [part_tokens(p, model_input.attachments, images) for p in parts]
         keep = budget.keep_recent * budget.limit_tokens
         start, kept = len(parts) - 1, sizes[-1]
         while start > 0 and kept + sizes[start - 1] <= keep:

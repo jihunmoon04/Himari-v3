@@ -33,3 +33,15 @@ HIMARI_MODELS=openai/gpt-6-luna,xiaomi/mimo-v2.6-pro,z-ai/glm-5.3=medium,deepsee
 The live checks do not establish comparative quality or reliable Korean chess
 commentary. Sonnet rejected the probe's forced named `tool_choice`; continuation
 passed with the automatic tool selection HIMARI actually uses.
+
+## Images (V3-P67, 2026-10-22)
+
+`architecture.input_modalities` lists `image` for every model above except `z-ai/glm-5.3`.
+Each of those models was then checked with `tests/live/test_openrouter_images_live.py`
+(a 256×256 JPEG of one colour): it named the colour of ① an image in a user message
+and ② an image in the user message HIMARI puts after a Tool group. All eight passed
+both, so `image_input` is declared for `openai/gpt-6-luna`, `openai/gpt-6.1-sol`,
+`anthropic/claude-sonnet-5.5`, `anthropic/claude-haiku-5.5`, `openai/gpt-5-nano`,
+`xiaomi/mimo-v2.6-pro`, `deepseek/deepseek-v4.1-flash` and `minimax/minimax-m3`.
+`z-ai/glm-5.3` gets attachment lines only. The checks say the models read the image;
+they do not measure how well they describe real pictures.

@@ -343,7 +343,8 @@ class Driver:
 
     def _request_options(self, scope: TrustedScope, model: ResolvedModel) -> RequestOptions:
         return RequestOptions(model.model_id, model.reasoning_effort, provider_key=self._provider.provider_key,
-                              session_key=session_key(scope))
+                              session_key=session_key(scope),
+                              image_input=self._provider.describe_capabilities(model.model_id).image_input)
 
     def _options_for(self, scope: TrustedScope) -> RequestOptions:
         return self._request_options(scope, self._turn_model(scope))
