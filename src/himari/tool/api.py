@@ -50,7 +50,7 @@ from himari.data.api import UiResource as UiResource
 from himari.data.api import DEFAULT_FILE_MAX_BYTES
 
 # An image content item's base64, checked before it is decoded (V3-P67 review B3): one stored file.
-MAX_IMAGE_BASE64_CHARS = -(-DEFAULT_FILE_MAX_BYTES * 4 // 3)
+MAX_IMAGE_BASE64_CHARS = 4 * ((DEFAULT_FILE_MAX_BYTES + 2) // 3)  # padded base64 of that many bytes
 
 
 class WorkspaceRequirement(Enum):
