@@ -19,17 +19,20 @@ Writes and commands on the same Workspace are serialized in-process
 write to that principal root, across Conversations too. Reads do not wait.
 
 Files (V3-P66): with ``files`` given, ``inside/present_file`` gives the user
-a Workspace file, and ``place_uploads`` copies a message's uploads into the
-Conversation's ``uploads/`` folder under the write lock (§5.2).
+a Workspace file. A message's uploads are copied into the Conversation's
+``uploads/`` folder under the write lock (§5.2), in steps — copy, choose a
+name, (the caller records it), rename — so a crash never leaves a placed
+file its record does not name.
 """
 
 from __future__ import annotations
 
 import asyncio
 import os
+import posixpath
 import re
 import secrets
-from collections.abc import AsyncIterator, Callable, Sequence
+from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -59,32 +62,12 @@ class InsideFiles:
     max_bytes: int = DEFAULT_FILE_MAX_BYTES
 
 
-@dataclass(frozen=True)
-class Upload:
-    """One upload to place: its shown name, how to read its bytes, and where
-    it was placed before (a retry keeps that file if it is still there)."""
-
-    name: str
-    open: Callable[[], BinaryIO]
-    placed_at: str | None = None
-
-
 class WorkspaceBusy(Exception):
     """The Workspace write lock was not free in time (§5.1, review N4)."""
 
 
 class UploadsFolderUnusable(Exception):
     """The Conversation's ``uploads`` is not a folder (a link, a file) (§5.2)."""
-
-
-class PartlyPlaced(Exception):
-    """Placing stopped at one upload; ``placed`` are the paths of the ones
-    before it, already in ``uploads/`` (PR #59 review C1). ``cause`` is why."""
-
-    def __init__(self, placed: list[str], cause: BaseException) -> None:
-        super().__init__(str(cause))
-        self.placed = placed
-        self.cause = cause
 
 
 class InsideEnvironment:
@@ -170,38 +153,85 @@ class InsideEnvironment:
         finally:
             lock.release()
 
-    async def place_uploads(self, workspace_id: WorkspaceId, cwd_relative: str,
-                            uploads: Sequence[Upload]) -> list[str]:
-        """Copy uploads into ``<cwd>/uploads`` (never replacing a file);
-        the ``/workspace/…`` path of each. The caller holds ``locked``."""
-        host_root = self.host_root(workspace_id)
-        return await run_blocking(self._place, host_root, cwd_relative, list(uploads))
+    # Placing one upload, in steps, so the caller can record where it goes
+    # before it gets there (V3-P66 owner review B1). The caller holds ``locked``.
+
+    async def copy_in(self, workspace_id: WorkspaceId, cwd_relative: str, source: BinaryIO, *,
+                      clear: bool = False) -> str:
+        """A durable temporary copy of ``source`` in ``<cwd>/uploads`` (made
+        if missing, durably); its name. ``clear``: leftovers go first."""
+        return await run_blocking(self._copy_in, self.host_root(workspace_id), cwd_relative, source, clear)
 
     @staticmethod
-    def _place(host_root: str, cwd: str, uploads: list[Upload]) -> list[str]:
+    def _copy_in(host_root: str, cwd: str, source: BinaryIO, clear: bool) -> str:
         folder = fs.to_relative(cwd, UPLOADS)
-        placed: list[str] = []
         with fs.open_root(host_root) as root_fd:
             try:
-                fs.ensure_directory(root_fd, folder)
+                fs.ensure_directory(root_fd, folder, durable=True)
             except fs.FsError as error:
                 if error.category in (fs.FsCategory.LINK, fs.FsCategory.NOT_DIRECTORY, fs.FsCategory.EXISTS):
                     raise UploadsFolderUnusable(fs.display(folder)) from None
                 raise
-            for upload in uploads:
-                if upload.placed_at is not None:
-                    try:
-                        fs.identity(root_fd, fs.to_relative(cwd, upload.placed_at))
-                        placed.append(upload.placed_at)  # placed by an earlier try: kept as it is
-                        continue
-                    except fs.FsError:
-                        pass  # gone since: place it again
-                try:
-                    with upload.open() as source:
-                        placed.append(fs.display(fs.place_file(root_fd, folder, upload.name, source, TEMP_PREFIX)))
-                except Exception as error:  # the earlier ones stay placed: say which
-                    raise PartlyPlaced(placed, error) from error
-        return placed
+            if clear:
+                fs.clear_temps(root_fd, folder, TEMP_PREFIX)
+            with source:
+                return fs.write_temp(root_fd, folder, source, TEMP_PREFIX)
+
+    async def free_path(self, workspace_id: WorkspaceId, cwd_relative: str, name: str,
+                        preferred: str | None) -> str:
+        """The ``/workspace/…`` path to give an upload: ``preferred`` if it is
+        in ``uploads`` and free, else the first free of ``name``, ``name (2)``…"""
+        return await run_blocking(self._free_path, self.host_root(workspace_id), cwd_relative, name, preferred)
+
+    @staticmethod
+    def _free_path(host_root: str, cwd: str, name: str, preferred: str | None) -> str:
+        folder = fs.to_relative(cwd, UPLOADS)
+        wanted = None
+        if preferred is not None:
+            try:
+                relative = fs.to_relative(cwd, preferred)
+                if posixpath.dirname(relative) == folder:
+                    wanted = posixpath.basename(relative)
+            except fs.FsError:
+                pass
+        with fs.open_root(host_root) as root_fd:
+            return fs.display(posixpath.join(folder, fs.free_name(root_fd, folder, name, wanted)))
+
+    async def commit_copy(self, workspace_id: WorkspaceId, cwd_relative: str, temp: str, path: str) -> bool:
+        """Give the copy ``path`` (never replacing); False if it is taken."""
+        return await run_blocking(self._commit_copy, self.host_root(workspace_id), cwd_relative, temp, path)
+
+    @staticmethod
+    def _commit_copy(host_root: str, cwd: str, temp: str, path: str) -> bool:
+        folder = fs.to_relative(cwd, UPLOADS)
+        relative = fs.to_relative(cwd, path)
+        if posixpath.dirname(relative) != folder:
+            raise fs.FsError(fs.FsCategory.INVALID)
+        with fs.open_root(host_root) as root_fd:
+            return fs.commit_temp(root_fd, folder, temp, posixpath.basename(relative))
+
+    async def discard_copy(self, workspace_id: WorkspaceId, cwd_relative: str, temp: str) -> None:
+        """Remove the copy if it was not given a name (idempotent)."""
+        await run_blocking(self._discard_copy, self.host_root(workspace_id), cwd_relative, temp)
+
+    @staticmethod
+    def _discard_copy(host_root: str, cwd: str, temp: str) -> None:
+        with fs.open_root(host_root) as root_fd:
+            fs.remove_temp(root_fd, fs.to_relative(cwd, UPLOADS), temp)
+
+    async def holds(self, workspace_id: WorkspaceId, cwd_relative: str, path: str, size: int, sha256: str) -> bool:
+        """Whether ``path`` is a regular file with exactly these bytes: an
+        earlier try placed it there (owner review B1)."""
+        return await run_blocking(self._holds, self.host_root(workspace_id), cwd_relative, path, size, sha256)
+
+    @staticmethod
+    def _holds(host_root: str, cwd: str, path: str, size: int, sha256: str) -> bool:
+        try:
+            relative = fs.to_relative(cwd, path)
+            with fs.open_root(host_root) as root_fd:
+                return fs.same_content(root_fd, relative, size, sha256)
+        except fs.FsError:
+            return False
 
     def placement_works(self) -> bool:
         """Whether this filesystem has the atomic no-replace rename placing

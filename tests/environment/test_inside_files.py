@@ -29,8 +29,6 @@ from himari.environment.inside import (
     INSIDE,
     InsideEnvironment,
     InsideFiles,
-    PartlyPlaced,
-    Upload,
     UploadsFolderUnusable,
     WorkspaceBusy,
 )
@@ -191,48 +189,67 @@ def test_read_file_past_the_end(env: InsideEnvironment, folder: Path) -> None:
 # --- placing uploads (§5.2) -----------------------------------------------------------------
 
 
-def place(env: InsideEnvironment, *uploads: Upload) -> list[str]:
-    async def go() -> list[str]:
+def place(env: InsideEnvironment, name: str, data: bytes, preferred: str | None = None, *,
+          clear: bool = False) -> str:
+    """The steps the Application takes for one upload, without recording."""
+    async def go() -> str:
         async with env.locked(ALICE, 1):
-            return await env.place_uploads(ALICE, "conversations/c1", uploads)
+            temp = await env.copy_in(ALICE, "conversations/c1", io.BytesIO(data), clear=clear)
+            try:
+                path = await env.free_path(ALICE, "conversations/c1", name, preferred)
+                assert await env.commit_copy(ALICE, "conversations/c1", temp, path)
+                return path
+            finally:
+                await env.discard_copy(ALICE, "conversations/c1", temp)
     return asyncio.run(go())
 
 
-def upload(name: str, data: bytes, placed_at: str | None = None) -> Upload:
-    return Upload(name, lambda: io.BytesIO(data), placed_at)
-
-
 def test_uploads_go_under_uploads_and_never_replace(env: InsideEnvironment, folder: Path) -> None:
-    first = place(env, upload("r.pdf", b"one"), upload("r.pdf", b"two"), upload("notes", b"n"))
-    assert first == ["/workspace/conversations/c1/uploads/r.pdf", "/workspace/conversations/c1/uploads/r (2).pdf",
-                     "/workspace/conversations/c1/uploads/notes"]
-    again = place(env, upload("notes", b"m"))
-    assert again == ["/workspace/conversations/c1/uploads/notes (2)"]
+    paths = [place(env, "r.pdf", b"one"), place(env, "r.pdf", b"two"), place(env, "notes", b"n"),
+             place(env, "notes", b"m")]
+    base = "/workspace/conversations/c1/uploads/"
+    assert paths == [base + "r.pdf", base + "r (2).pdf", base + "notes", base + "notes (2)"]
     assert (folder / "uploads/r.pdf").read_bytes() == b"one" and (folder / "uploads/r (2).pdf").read_bytes() == b"two"
     assert all(os.stat(p).st_nlink == 1 for p in (folder / "uploads").iterdir())
 
 
-def test_a_retry_keeps_what_was_placed(env: InsideEnvironment, folder: Path) -> None:
-    path, = place(env, upload("a.txt", b"a"))
-    assert place(env, upload("a.txt", b"a", placed_at=path)) == [path]
-    (folder / "uploads/a.txt").unlink()
-    assert place(env, upload("a.txt", b"a", placed_at=path)) == [path]  # gone since: placed again
-    assert sorted(p.name for p in (folder / "uploads").iterdir()) == ["a.txt"]
+def test_a_recorded_path_is_used_while_it_is_free(env: InsideEnvironment, folder: Path) -> None:
+    base = "/workspace/conversations/c1/uploads/"
+    assert place(env, "a.txt", b"a", base + "a (7).txt") == base + "a (7).txt"
+    assert place(env, "a.txt", b"b", base + "a (7).txt") == base + "a.txt"  # taken: the first free one
+    assert place(env, "a.txt", b"c", "/workspace/elsewhere/a.txt") == base + "a (2).txt"  # never outside uploads
 
 
-def test_a_failed_copy_leaves_only_a_temporary_file_that_the_next_placing_removes(
-        env: InsideEnvironment, folder: Path) -> None:
+def test_holds_finds_an_earlier_placement_by_its_bytes(env: InsideEnvironment, folder: Path) -> None:
+    import hashlib
+    path = place(env, "a.txt", b"abc")
+    digest = hashlib.sha256(b"abc").hexdigest()
+
+    def holds(path: str, size: int, sha: str) -> bool:
+        return asyncio.run(env.holds(ALICE, "conversations/c1", path, size, sha))
+
+    assert holds(path, 3, digest)
+    assert not holds(path, 3, hashlib.sha256(b"xyz").hexdigest())
+    assert not holds(path + ".gone", 3, digest)
+    (folder / "uploads/a.txt").write_text("edited")
+    assert not holds(path, 3, digest)
+
+
+def test_a_failed_copy_leaves_nothing_and_leftovers_are_cleared(env: InsideEnvironment, folder: Path) -> None:
     class Broken(io.BytesIO):
         def read(self, size: int | None = -1) -> bytes:
             raise OSError(28, "No space left on device")
 
-    with pytest.raises(PartlyPlaced) as stopped:
-        place(env, Upload("a.txt", lambda: Broken()))
-    assert stopped.value.placed == [] and isinstance(stopped.value.cause, fs.FsError)
+    async def broken_copy() -> None:
+        async with env.locked(ALICE, 1):
+            await env.copy_in(ALICE, "conversations/c1", Broken())
+
+    with pytest.raises(fs.FsError):
+        asyncio.run(broken_copy())
     assert list((folder / "uploads").iterdir()) == []  # the temporary file was removed too
     (folder / "uploads/.himari-left.tmp").write_bytes(b"crash")  # a crash leaves one
     (folder / "uploads/.himari-dir.tmp").mkdir()  # not a regular file: left alone
-    assert place(env, upload("a.txt", b"a")) == ["/workspace/conversations/c1/uploads/a.txt"]
+    place(env, "a.txt", b"a", clear=True)
     assert sorted(p.name for p in (folder / "uploads").iterdir()) == [".himari-dir.tmp", "a.txt"]
 
 
@@ -241,7 +258,7 @@ def test_a_failed_copy_leaves_only_a_temporary_file_that_the_next_placing_remove
 def test_an_uploads_that_is_not_a_folder_is_refused(env: InsideEnvironment, folder: Path, make: Any) -> None:
     make(folder)
     with pytest.raises(UploadsFolderUnusable):
-        place(env, upload("a.txt", b"a"))
+        place(env, "a.txt", b"a")
 
 
 def test_placing_waits_for_the_write_lock_only_so_long(env: InsideEnvironment, folder: Path) -> None:
@@ -261,28 +278,20 @@ def test_placement_works_here(env: InsideEnvironment) -> None:
     assert not [p for p in Path(env.host_root(ALICE)).parent.iterdir() if p.name.startswith(".himari-")]
 
 
-def test_a_stop_part_way_says_what_was_placed(env: InsideEnvironment, folder: Path) -> None:
-    def broken() -> io.BytesIO:
-        raise OSError(28, "No space left on device")
-
-    with pytest.raises(PartlyPlaced) as stopped:
-        place(env, upload("a.txt", b"a"), Upload("b.txt", broken))
-    assert stopped.value.placed == ["/workspace/conversations/c1/uploads/a.txt"]  # PR #59 review C1
-
-
-def test_the_directory_is_made_durable_after_the_rename(env: InsideEnvironment, folder: Path,
-                                                         monkeypatch: pytest.MonkeyPatch) -> None:
+def test_placing_is_durable_down_to_new_folders(env: InsideEnvironment, monkeypatch: pytest.MonkeyPatch) -> None:
     import stat as stat_module
-    synced: list[bool] = []
+    synced: list[str] = []
     real = os.fsync
 
     def recording(fd: int) -> None:
-        synced.append(stat_module.S_ISDIR(os.fstat(fd).st_mode))
+        info = os.fstat(fd)
+        synced.append("dir" if stat_module.S_ISDIR(info.st_mode) else "file")
         real(fd)
 
     monkeypatch.setattr(os, "fsync", recording)
-    place(env, upload("a.txt", b"a"))
-    assert synced == [False, True]  # the file, then its directory (review N2, C2)
+    place(env, "a.txt", b"a")  # conversations/c1 and its uploads are both new
+    # each new folder in its parent (owner review N1), the copy, then its directory after the rename
+    assert synced == ["dir", "dir", "file", "dir"]
 
 
 def test_a_read_window_ending_inside_a_character_is_not_invalid(env: InsideEnvironment, folder: Path) -> None:

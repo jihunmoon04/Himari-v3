@@ -275,6 +275,32 @@ class _MemoryBlobRows:
     def touch_blob(self, row: BlobRow) -> None:
         self._store.blob_rows[row.key] = replace(row, expired_at=None)
 
+    def reserve(self, row: BlobRow, max_bytes: int, used_before: datetime) -> Sequence[str]:
+        need = self.live_total() + row.size - max_bytes
+        chosen: list[str] = []
+        if need > 0:
+            freed = 0
+            for candidate in self.expirable(used_before):
+                if freed >= need:
+                    break
+                chosen.append(candidate.key)
+                freed += candidate.size
+            if freed < need:
+                raise DataError(DataErrorCode.STORE_FULL, f"needs {need} more bytes")
+            for key in chosen:
+                self._store.blob_rows[key] = replace(self._store.blob_rows[key], expired_at=row.last_used_at)
+        self._store.blob_rows[row.key] = replace(row, expired_at=None)
+        return chosen
+
+    def unreserve(self, key: str, expired: Sequence[str], previous: BlobRow | None) -> None:
+        for other in expired:
+            self._store.blob_rows[other] = replace(self._store.blob_rows[other], expired_at=None)
+        if previous is None:
+            if key not in {f.blob_key for f in self._files()}:
+                self._store.blob_rows.pop(key, None)
+        else:
+            self._store.blob_rows[key] = previous
+
     def drop_unreferenced(self, key: str, used_before: datetime) -> bool:
         if key in self.unreferenced_keys(used_before):
             del self._store.blob_rows[key]

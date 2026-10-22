@@ -284,32 +284,44 @@ def test_files_are_kept_next_to_the_database(tmp_path: Path) -> None:
 # --- PR #59 review --------------------------------------------------------------------------
 
 
-def test_a_send_stopped_part_way_records_what_was_placed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from himari.environment.inside import fs
+class Crash(BaseException):
+    """The process dying at that point: nothing after it runs."""
 
+
+@pytest.mark.parametrize("when", ["after the rename", "before the rename"])
+def test_a_crash_around_placing_never_places_a_file_twice(tmp_path: Path, when: str) -> None:
+    """Owner review B1: the path is recorded before the rename, and a retry
+    finds an earlier placement by its bytes — across a restart too."""
     async def scenario() -> None:
-        app = await open_app(tmp_path / "data", ScriptedAdapter([final("ok")]))
-        try:
-            scope, folder = await conversation(app)
-            a = await app.upload(scope, "a.txt", None, chunks(b"a"))
-            b = await app.upload(scope, "b.txt", None, chunks(b"b"))
-            real = fs.place_file
-            seen: list[str] = []
+        app = await open_app(tmp_path / "data")
+        scope, folder = await conversation(app)
+        a = await app.upload(scope, "a.txt", None, chunks(b"a"))
+        b = await app.upload(scope, "b.txt", None, chunks(b"b"))
+        real = app.inside.commit_copy
 
-            def full_disk(root_fd, folder_, name, source, prefix):  # type: ignore[no-untyped-def]
-                seen.append(name)
-                if name == "b.txt" and len(seen) == 2:
-                    raise fs.FsError(fs.FsCategory.OTHER)
-                return real(root_fd, folder_, name, source, prefix)
+        async def dying(workspace_id, cwd, temp, path):  # type: ignore[no-untyped-def]
+            if path.endswith("/b.txt"):
+                if when == "after the rename":
+                    await real(workspace_id, cwd, temp, path)
+                raise Crash
+            return await real(workspace_id, cwd, temp, path)
 
-            monkeypatch.setattr(fs, "place_file", full_disk)
-            with pytest.raises(fs.FsError):
-                await app.send(scope, "two", [a.file_id, b.file_id])
+        app.inside.commit_copy = dying  # type: ignore[method-assign]
+        with pytest.raises(Crash):
             await app.send(scope, "two", [a.file_id, b.file_id])
-            await app.runner.wait(scope)
-            assert sorted(p.name for p in (folder / "uploads").iterdir()) == ["a.txt", "b.txt"]  # no "a (2).txt"
+        app.runner._tasks.clear()  # the process is gone: nothing of it is waited for
+        app.store.close()
+
+        again = await open_app(tmp_path / "data", ScriptedAdapter([final("ok")]))
+        try:
+            await again.send(scope, "two", [a.file_id, b.file_id])
+            await again.runner.wait(scope)
+            placed = sorted(p.name for p in (folder / "uploads").iterdir())
+            assert placed == ["a.txt", "b.txt"], placed  # no "b (2).txt", no leftover temporary file
+            records = await again.attachment_records(scope, [(a.file_id, 1), (b.file_id, 1)])
+            assert [r.workspace_path.rsplit("/", 1)[1] for r in records] == ["a.txt", "b.txt"]  # type: ignore[union-attr]
         finally:
-            await app.close()
+            await again.close()
 
     asyncio.run(scenario())
 

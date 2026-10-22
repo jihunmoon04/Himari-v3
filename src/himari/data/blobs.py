@@ -12,7 +12,10 @@ Rules:
   right size; anything else is absent and the file is (re)installed (review B1).
 - Room is made by expiring the least recently put blobs, but only blobs not
   put within ``BLOB_GRACE`` and not referenced by a staged upload; when those
-  cannot cover the shortfall nothing is expired (review B2).
+  cannot cover the shortfall nothing is expired (review B2). Choosing them,
+  expiring them and registering the new blob is one transaction
+  (``BlobRows.reserve``), so the store never ends up over its size (owner
+  review B2); a failed install undoes it (``unreserve``).
 - Expiry commits ``expired_at`` before the file goes; removing an
   unreferenced blob deletes its row first. A crash in between leaves a file
   the next sweep removes.
@@ -78,6 +81,19 @@ class BlobRows(Protocol):
         """Insert or revive: alive, ``last_used_at`` from ``row``."""
         ...
 
+    def reserve(self, row: BlobRow, max_bytes: int, used_before: datetime) -> Sequence[str]:
+        """In one transaction: room for ``row`` within ``max_bytes`` — the
+        least recently put alive blobs, put before ``used_before`` and not
+        referenced by a staged upload, expired just enough — and ``row``
+        registered alive. STORE_FULL with nothing changed if they cannot make
+        the room. The keys it expired."""
+        ...
+
+    def unreserve(self, key: str, expired: Sequence[str], previous: BlobRow | None) -> None:
+        """Undo a ``reserve`` whose install failed: the expired ones alive
+        again (their files are still there), ``key`` as it was before."""
+        ...
+
     def drop_unreferenced(self, key: str, used_before: datetime) -> bool:
         """Delete the row if no file record refers to it and it is expired or
         was put before ``used_before``; whether it was deleted."""
@@ -137,6 +153,7 @@ _KEY = re.compile(r"^[0-9a-f]{64}$")
 def _private_dir(path: str) -> None:
     try:
         os.mkdir(path, _DIR_MODE)
+        _fsync_dir(os.path.dirname(path))  # the new entry survives power loss (owner review N1)
     except FileExistsError:
         pass
     info = os.lstat(path)
@@ -380,42 +397,37 @@ class FileStore:
                 now = self._clock()
                 row = self.rows.blob_row(key)
                 alive = row is not None and row.expired_at is None
-                if not (alive and self.files.inspect(key) == size):
-                    making_room = [] if alive else self._room(size, now)
-                    # Finished even if this call is cancelled: the lock must not be
-                    # released while the thread still installs (PR #59 review C5).
-                    await _finish(self.files.install, staging, key)
-                    self._expire(making_room, now)  # only once the new blob is in (review C9)
-                self.rows.touch_blob(BlobRow(key, principal, sha256, size, now))
+                fresh = BlobRow(key, principal, sha256, size, now)
+                if alive and self.files.inspect(key) == size:
+                    self.rows.touch_blob(fresh)
+                elif alive:  # its file is gone (e.g. a restored database): put back, counted already
+                    self.files.install(staging, key)
+                    self.rows.touch_blob(fresh)
+                else:
+                    expired = self.rows.reserve(fresh, self.max_bytes, now - BLOB_GRACE)
+                    try:
+                        # On the loop, under the lock: a link, an unlink and an
+                        # fsync of a small directory. The bytes are durable already.
+                        self.files.install(staging, key)
+                    except BaseException:
+                        self.rows.unreserve(key, expired, row)  # nothing expired for nothing (review C9)
+                        raise
+                    self._remove(expired)
             return StoredBlob(key, sha256, size)
         finally:
             staging.discard()  # a no-op once installed: the staged name was moved
 
-    def _room(self, size: int, now: datetime) -> list[BlobRow]:
-        """What to expire to fit ``size``: just enough, or STORE_FULL with
-        nothing chosen (review B2). Under the lock."""
-        need = self.rows.live_total() + size - self.max_bytes
-        if need <= 0:
-            return []
-        chosen: list[BlobRow] = []
-        freed = 0
-        for candidate in self.rows.expirable(now - BLOB_GRACE):
-            chosen.append(candidate)
-            freed += candidate.size
-            if freed >= need:
-                break
-        if freed < need:
-            raise DataError(DataErrorCode.STORE_FULL, f"needs {need} more bytes")
-        return chosen
-
-    def _expire(self, rows: Sequence[BlobRow], now: datetime) -> None:
-        if not rows:
-            return
-        for key in self.rows.expire_blobs([r.key for r in rows], now):  # committed before the bytes go
+    def _remove(self, keys: Sequence[str]) -> None:
+        for key in keys:
             try:
                 self.files.remove(key)
             except OSError:
                 log.exception("could not remove expired blob %s; the next sweep tries again", key)
+
+    def _expire(self, rows: Sequence[BlobRow], now: datetime) -> None:
+        if not rows:
+            return
+        self._remove(self.rows.expire_blobs([r.key for r in rows], now))  # committed before the bytes go
 
     def open(self, blob: StoredBlob) -> BinaryIO:
         row = self.rows.blob_row(blob.key)

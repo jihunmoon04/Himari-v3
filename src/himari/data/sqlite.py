@@ -756,6 +756,44 @@ class _SqliteBlobRows:
                        " last_used_at=excluded.last_used_at, expired_at=NULL",
                        row.key, row.owner, row.sha256, row.size, _timestamp(row.last_used_at))
 
+    def reserve(self, row: BlobRow, max_bytes: int, used_before: datetime) -> Sequence[str]:
+        with self._store.transaction() as tx:
+            live = tx.one("SELECT COALESCE(SUM(size), 0) AS total FROM blobs WHERE expired_at IS NULL")
+            assert live is not None
+            need = int(live["total"]) + row.size - max_bytes
+            chosen: list[str] = []
+            if need > 0:
+                freed = 0
+                for candidate in tx.all(
+                        "SELECT blob_key, size FROM blobs b WHERE expired_at IS NULL AND last_used_at < ?"
+                        " AND NOT EXISTS (SELECT 1 FROM files f WHERE f.blob_key=b.blob_key AND f.attached_at IS NULL)"
+                        " ORDER BY last_used_at, blob_key", _timestamp(used_before)):
+                    if freed >= need:
+                        break
+                    chosen.append(candidate["blob_key"])
+                    freed += candidate["size"]
+                if freed < need:
+                    raise DataError(DataErrorCode.STORE_FULL, f"needs {need} more bytes")  # rolls back: nothing changed
+                for key in chosen:
+                    tx.execute("UPDATE blobs SET expired_at=? WHERE blob_key=?", _timestamp(row.last_used_at), key)
+            tx.execute("INSERT INTO blobs (blob_key, owner, sha256, size, last_used_at, expired_at)"
+                       " VALUES (?, ?, ?, ?, ?, NULL) ON CONFLICT (blob_key) DO UPDATE SET"
+                       " last_used_at=excluded.last_used_at, expired_at=NULL",
+                       row.key, row.owner, row.sha256, row.size, _timestamp(row.last_used_at))
+            return chosen
+
+    def unreserve(self, key: str, expired: Sequence[str], previous: BlobRow | None) -> None:
+        with self._store.transaction() as tx:
+            for other in expired:
+                tx.execute("UPDATE blobs SET expired_at=NULL WHERE blob_key=?", other)
+            if previous is None:
+                tx.execute("DELETE FROM blobs WHERE blob_key=? AND NOT EXISTS"
+                           " (SELECT 1 FROM files f WHERE f.blob_key=blobs.blob_key)", key)
+            else:
+                tx.execute("UPDATE blobs SET last_used_at=?, expired_at=? WHERE blob_key=?",
+                           _timestamp(previous.last_used_at),
+                           None if previous.expired_at is None else _timestamp(previous.expired_at), key)
+
     def drop_unreferenced(self, key: str, used_before: datetime) -> bool:
         with self._store.transaction() as tx:
             cursor = tx.execute("DELETE FROM blobs WHERE blob_key=? AND (expired_at IS NOT NULL OR last_used_at < ?)"

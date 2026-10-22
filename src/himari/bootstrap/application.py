@@ -86,7 +86,7 @@ from himari.data.api import (
     clean_media_type,
 )
 from himari.data.sqlite import SqliteData, SqliteStore
-from himari.environment.inside import INSIDE, InsideEnvironment, InsideFiles, PartlyPlaced, Upload
+from himari.environment.inside import INSIDE, InsideEnvironment, InsideFiles
 from himari.sandbox.api import SandboxState, ServerProfile
 from himari.sandbox.backend import SandboxBackend
 from himari.sandbox.server import ServerSandbox
@@ -741,48 +741,37 @@ class Application:
             async with self.inside.locked(workspace_id, PLACE_LOCK_SECONDS):
                 # Read again under the lock: another tab may have placed them (review C4).
                 fresh = await self.data.read_file_records(scope, [(r.file_id, r.version) for r in records])
-                uploads, handles = self._uploads(fresh)  # opened here: the store is not thread-safe
-                try:
-                    placed = await self.inside.place_uploads(workspace_id, cwd, uploads)
-                except PartlyPlaced as partly:  # record what is in uploads/ already (PR #59 review C1)
-                    await self._record_placements(scope, fresh, partly.placed)
-                    raise partly.cause from None
-                finally:
-                    for handle in handles:
-                        handle.close()
-                await self._record_placements(scope, fresh, placed)
+                for index, record in enumerate(fresh):
+                    await self._place(scope, workspace_id, cwd, record, first=index == 0)
             blocks = ((TextBlock(text),) if text else ()) + tuple(AttachmentRef(r.file_id, r.version) for r in records)
             return await self.runner.submit(scope, UserMessage(blocks))
 
-    def _uploads(self, records: Sequence[FileRecord]) -> tuple[list[Upload], list[BinaryIO]]:
-        """Each record's bytes, opened now. A record already placed whose
-        bytes are gone is still fine while its Workspace copy is there; the
-        error is raised only if it has to be placed again (PR #59 review C11)."""
-        uploads: list[Upload] = []
-        handles: list[BinaryIO] = []
-        for record in records:
-            try:
-                handle = self.data.blobs.open(record.blob)
-            except DataError as error:
-                if record.workspace_path is None:
-                    for opened in handles:
-                        opened.close()
-                    raise
+    async def _place(self, scope: TrustedScope, workspace_id: WorkspaceId, cwd: str, record: FileRecord, *,
+                     first: bool) -> None:
+        """One upload into ``uploads/`` (§5.2), its path recorded before it is
+        given (owner review B1): a crash after the rename leaves a file its
+        record names, and a retry finds it there by its bytes.
 
-                def missing(error: DataError = error) -> BinaryIO:
-                    raise error
-
-                uploads.append(Upload(record.name, missing, record.workspace_path))
-                continue
-            handles.append(handle)
-            uploads.append(Upload(record.name, (lambda h=handle: h), record.workspace_path))  # type: ignore[misc]
-        return uploads, handles
-
-    async def _record_placements(self, scope: TrustedScope, records: Sequence[FileRecord],
-                                 placed: Sequence[str]) -> None:
-        for record, path in zip(records, placed):  # ``placed`` may be shorter: the ones before a failure
-            if record.workspace_path != path:
-                await self.data.set_placement(scope, record.file_id, path)
+        Already there with its bytes: nothing to do, and its stored bytes are
+        not needed (PR #59 review C11). Otherwise: a durable copy, a free name
+        (the recorded one if it is free), the name recorded, then the rename."""
+        if record.workspace_path is not None and await self.inside.holds(
+                workspace_id, cwd, record.workspace_path, record.size, record.blob.sha256):
+            return
+        source = self.data.blobs.open(record.blob)  # here: the store is not thread-safe
+        temp = await self.inside.copy_in(workspace_id, cwd, source, clear=first)
+        recorded = record.workspace_path
+        try:
+            for _ in range(3):  # a name is taken only if something outside the lock wrote it
+                path = await self.inside.free_path(workspace_id, cwd, record.name, recorded)
+                if path != recorded:
+                    await self.data.set_placement(scope, record.file_id, path)
+                    recorded = path
+                if await self.inside.commit_copy(workspace_id, cwd, temp, path):
+                    return
+            raise FilesUnavailable(f"no free name for {record.name}")
+        finally:
+            await self.inside.discard_copy(workspace_id, cwd, temp)
 
     async def files(self, scope: TrustedScope, *, limit: int = 50, offset: int = 0) -> Sequence[FileRecord]:
         return await self.data.read_files(scope, limit=limit, offset=offset)

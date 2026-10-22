@@ -647,3 +647,39 @@ def test_a_blob_a_staged_upload_came_to_use_is_not_expired() -> None:
         assert data.blobs.rows.blob_row(blob.key).expired_at is None  # type: ignore[union-attr]
 
     run(scenario())
+
+
+def test_the_store_never_ends_over_its_size_when_a_candidate_becomes_staged() -> None:
+    """Owner review B2: room is chosen, expired and registered in one step,
+    so a blob a staged upload starts to use is never counted as freed."""
+    async def scenario() -> None:
+        data = data_for(new_store())
+        data.blobs.configure(max_bytes=20, keep_days=30)
+        scope = await conversation(data)
+        sent = await upload(data, scope, b"o" * 15)
+        await data.append_event(scope, message(sent))
+        old = (await data.read_file_records(scope, [(sent, 1)]))[0].blob
+        aged(data, old, 5)  # expirable
+        await data.stage_upload(scope, old, "again.bin", "x")  # now a staged upload uses it
+        with pytest.raises(DataError) as full:
+            await data.blobs.put(ALICE, chunks(b"n" * 10), 100)
+        assert full.value.code is DataErrorCode.STORE_FULL
+        assert data.blobs.rows.live_total() <= 20
+        assert data.blobs.rows.blob_row(old.key).expired_at is None  # type: ignore[union-attr]
+
+    run(scenario())
+
+
+def test_a_failed_install_leaves_no_row_of_the_new_blob(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def scenario() -> None:
+        data = data_for(new_store())
+
+        def broken(*args: object) -> None:
+            raise OSError("no space")
+
+        monkeypatch.setattr(data.blobs.files, "install", broken)
+        with pytest.raises(OSError):
+            await data.blobs.put(ALICE, chunks(b"new"), 100)
+        assert data.blobs.rows.known_keys() == frozenset() and data.blobs.rows.live_total() == 0
+
+    run(scenario())

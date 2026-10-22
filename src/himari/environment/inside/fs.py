@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import ctypes
 import errno
+import hashlib
 import os
 import posixpath
 import secrets
@@ -211,8 +212,9 @@ def _open_dir(root_fd: int, relative: str) -> Iterator[int]:
         os.close(fd)
 
 
-def ensure_directory(root_fd: int, relative: str) -> None:
-    """``mkdir -p`` beneath the root, one verified component at a time."""
+def ensure_directory(root_fd: int, relative: str, *, durable: bool = False) -> None:
+    """``mkdir -p`` beneath the root, one verified component at a time.
+    ``durable``: a directory it creates is made durable in its parent too."""
     if relative == ".":
         return
     fd = os.dup(root_fd)
@@ -222,6 +224,8 @@ def ensure_directory(root_fd: int, relative: str) -> None:
                 raise FsError(FsCategory.INVALID)
             try:
                 os.mkdir(component, 0o755, dir_fd=fd)
+                if durable:
+                    os.fsync(fd)  # the new entry survives power loss (V3-P66 owner review N1)
             except FileExistsError:
                 pass
             except OSError as error:
@@ -425,13 +429,10 @@ def _candidates(name: str) -> Iterator[str]:
         yield f"{stem} ({n}).{ext}" if ext else f"{stem} ({n})"
 
 
-def place_file(root_fd: int, folder: str, name: str, source: BinaryIO, temp_prefix: str) -> str:
-    """Copy ``source`` into ``folder/<name>`` (or ``name (2)``…), never
-    replacing anything: a temporary file first, made durable, then an
-    atomic no-replace rename, then the directory made durable (review C2).
-    The relative path it got. Stale temporary files are removed first; the
-    caller holds the Workspace write lock, so none belongs to a live write."""
-    ensure_directory(root_fd, folder)
+def clear_temps(root_fd: int, folder: str, temp_prefix: str) -> None:
+    """Remove leftover temporary files (regular files only, links not
+    followed). The caller holds the Workspace write lock, so none belongs
+    to a live write."""
     with _open_dir(root_fd, folder) as dir_fd:
         for entry in os.listdir(dir_fd):
             if entry.startswith(temp_prefix) and entry.endswith(".tmp"):
@@ -440,6 +441,11 @@ def place_file(root_fd: int, folder: str, name: str, source: BinaryIO, temp_pref
                         os.unlink(entry, dir_fd=dir_fd)
                 except OSError:
                     pass
+
+
+def write_temp(root_fd: int, folder: str, source: BinaryIO, temp_prefix: str) -> str:
+    """Copy ``source`` into a new durable temporary file in ``folder``; its name."""
+    with _open_dir(root_fd, folder) as dir_fd:
         temp = f"{temp_prefix}{secrets.token_hex(8)}.tmp"
         try:
             fd = os.open(temp, _CREATE_FLAGS | os.O_CLOEXEC, 0o644, dir_fd=dir_fd)
@@ -454,16 +460,6 @@ def place_file(root_fd: int, folder: str, name: str, source: BinaryIO, temp_pref
                 os.fsync(fd)
             finally:
                 os.close(fd)
-            for candidate in _candidates(name):
-                try:
-                    rename_noreplace(dir_fd, temp, candidate)
-                except FsError as error:
-                    if error.category is FsCategory.EXISTS:
-                        continue
-                    raise
-                os.fsync(dir_fd)
-                return posixpath.join(folder, candidate)
-            raise FsError(FsCategory.EXISTS)
         except BaseException as error:
             try:
                 os.unlink(temp, dir_fd=dir_fd)
@@ -472,6 +468,67 @@ def place_file(root_fd: int, folder: str, name: str, source: BinaryIO, temp_pref
             if isinstance(error, OSError):
                 raise _categorize(error) from None
             raise
+        return temp
+
+
+def free_name(root_fd: int, folder: str, name: str, preferred: str | None = None) -> str:
+    """``preferred`` (a name in ``folder``) if nothing is there, else the
+    first of ``name``, ``name (2)``… that is free."""
+    with _open_dir(root_fd, folder) as dir_fd:
+        def taken(candidate: str) -> bool:
+            try:
+                os.stat(candidate, dir_fd=dir_fd, follow_symlinks=False)
+                return True
+            except FileNotFoundError:
+                return False
+            except OSError as error:
+                raise _categorize(error) from None
+        for candidate in ([preferred] if preferred else []) + list(_candidates(name)):
+            if not taken(candidate):
+                return candidate
+    raise FsError(FsCategory.EXISTS)
+
+
+def commit_temp(root_fd: int, folder: str, temp: str, target: str) -> bool:
+    """Give the temporary file its name, never replacing anything, then make
+    the directory durable; False if ``target`` is taken."""
+    with _open_dir(root_fd, folder) as dir_fd:
+        try:
+            rename_noreplace(dir_fd, temp, target)
+        except FsError as error:
+            if error.category is FsCategory.EXISTS:
+                return False
+            raise
+        os.fsync(dir_fd)
+        return True
+
+
+def remove_temp(root_fd: int, folder: str, temp: str) -> None:
+    try:
+        with _open_dir(root_fd, folder) as dir_fd:
+            os.unlink(temp, dir_fd=dir_fd)
+    except (OSError, FsError):
+        pass
+
+
+def same_content(root_fd: int, relative: str, size: int, sha256: str) -> bool:
+    """Whether a regular file is there with exactly these bytes."""
+    try:
+        fd = openat2(root_fd, relative, _READ_FLAGS)
+    except FsError:
+        return False
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_size != size:
+            return False
+        digest = hashlib.sha256()
+        while chunk := os.read(fd, 1 << 20):
+            digest.update(chunk)
+        return digest.hexdigest() == sha256
+    except OSError:
+        return False
+    finally:
+        os.close(fd)
 
 
 def delete_file(root_fd: int, relative: str) -> None:
