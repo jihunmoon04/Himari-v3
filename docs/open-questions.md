@@ -54,10 +54,10 @@ Data [v0.2 구현 가능 후보](data-contract-v0.2.md)에 **DR-01~DR-09 독립 
 | ID | 항목 | 미결정 |
 | --- | --- | --- |
 | Q-29 | 기본 Workspace 스코프 | **사용자별 공유 Root + Conversation별 기본 폴더 + 같은 사용자 간 교차 접근 확정**. 정확한 principal 인증/경로 매핑·Binding 자동 등록 구현 미결정 |
-| Q-30 | 파일 바이트/메타데이터 | FileAssetRecord, upload original, version/digest, Workspace 파일과 Data 참조 정합성 |
-| Q-31 | 첨부·다운로드 | 스트리밍 제한, file_id 기반 다운로드, 접근 권한, Prompt file manifest 및 미디어 처리 |
+| Q-30 | 파일 바이트/메타데이터 | FileAssetRecord, upload original, version/digest, Workspace 파일과 Data 참조 정합성. **설계 초안 (V3-P66, [file-upload-download-v0.1.md](file-upload-download-v0.1.md))** |
+| Q-31 | 첨부·다운로드 | 스트리밍 제한, file_id 기반 다운로드, 접근 권한, Prompt file manifest 및 미디어 처리. **설계 초안 (V3-P66, [file-upload-download-v0.1.md](file-upload-download-v0.1.md))** |
 | Q-32 | 파일 I/O 계약 | 파일 Tool·`inside/run_command`, 사용자별 Root/cwd에 맞춘 v2 Sandbox 수정, symlink/hardlink/mount 별칭 차단, 명령 효과 충돌, 실행 제한 |
-| Q-33 | 파일 생명주기 | Conversation 삭제가 공유 Workspace 파일을 어떻게 참조 해제·GC할지. 대화 삭제 자체는 V3-P65(대화 폴더는 같이 지움, Root의 다른 파일은 남음); 첨부 파일 기록은 FILE-04에서 같은 영구 삭제 트랜잭션에 넣는다 |
+| Q-33 | 파일 생명주기 | Conversation 삭제가 공유 Workspace 파일을 어떻게 참조 해제·GC할지. 대화 삭제 자체는 V3-P65(대화 폴더는 같이 지움, Root의 다른 파일은 남음); 첨부 파일 기록은 FILE-04에서 같은 영구 삭제 트랜잭션에 넣는다. 첨부 기록과 보관본 정리: V3-P66 §8 |
 
 **권고:** 기본 파일 Tool과 bounded `inside/run_command`를 함께 개발하되, 장기 ManagedProcess는 별도 수명/복구 계약으로 미룬다. **네트워크 차단 전용 프로파일**과 Sandbox 없는 실행 fallback 금지는 필수 방향. [Sandbox Execution v0.1](sandbox-execution-v0.1.md)은 정책 원칙, [Sandbox Implementation Candidate v0.2](sandbox-implementation-v0.2.md)는 v2 코드별 이식 경계·기동 검증·실행 결과 계약을 담은 상세 초안이다.
 
