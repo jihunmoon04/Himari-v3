@@ -340,3 +340,34 @@ def test_a_copy_that_fails_part_way_leaves_no_file(harness: Harness, tmp_path: P
     assert code == cli.EXIT_FAILED and "No space left" in err
     assert not (tmp_path / "copy.txt").exists()
     assert not [p for p in tmp_path.iterdir() if p.name.endswith(".part")]
+
+
+def test_images_say_their_size_and_a_tools_images_are_listed(harness: Harness, tmp_path: Path,
+                                                             monkeypatch: pytest.MonkeyPatch) -> None:
+    """V3-P67 §8: ``[image W×H]`` on a file line; a tool result's images are ``[file]`` lines too."""
+    from PIL import Image
+
+    from himari.data.api import PreparedView
+
+    class Views:
+        available = True
+
+        async def make(self, original: bytes) -> PreparedView | str:
+            return PreparedView(b"COPY", "image/jpeg", 20, 15)
+
+    assert harness.application is not None
+    harness.application.views = Views()  # the upload's copy; the sandbox is off here
+    cid = harness.run("new")[1].strip()
+    Image.new("RGB", (40, 30)).save(tmp_path / "photo.png")
+    harness.queue(final("seen"))
+    code, out, err = harness.run("send", cid, "--attach", "photo.png")
+    assert code == 0, err
+    assert f"  [file] photo.png [image 40×30] (" in out and f"— himari download {cid} " in out
+    code, out, _ = harness.run("files", cid)
+    assert code == 0 and out.rstrip().endswith("  [image 40×30]  photo.png")
+    folder = Path(harness.application.inside.host_root(workspace_for(OPERATOR))) / "conversations" / cid
+    Image.new("RGB", (64, 48)).save(folder / "chart.png")
+    harness.queue(calls(("inside/read_file", {"path": "chart.png"})), final("a chart"))
+    code, out, err = harness.run("send", cid, "what is in chart.png?")
+    assert code == 0, err
+    assert "  [file] image-1.png [image 64×48] (" in out

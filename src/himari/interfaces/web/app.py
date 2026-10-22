@@ -23,7 +23,10 @@ it; a message names staged uploads in ``attachments``. ``GET …/files`` lists
 a Conversation's files and ``GET …/files/{id}/{version}`` downloads one —
 always as an attachment of type octet-stream, sandboxed, so nothing a user
 or the model made opens on this origin. Events carry their attachments and
-the files a call presented.
+the files a call presented. An image's model copy (V3-P67 §8) is shown
+inline from ``GET …/files/{id}/{version}/view``: a JPEG or PNG HIMARI made,
+never the uploaded bytes; file views say whether there is one (``image``)
+and tool results list the images the call returned (``images``).
 
 Tool views (MCP Apps, V3-P58): events say which calls have one
 (``app_view``); ``GET …/calls/{run}/{call}/app`` gives a view as JSON with a
@@ -95,9 +98,12 @@ from himari.data.api import (
     ConversationSummary,
     DataError,
     DataErrorCode,
+    FileOrigin,
     FileRecord,
+    ImageStatus,
     ToolResultRecord,
     UserMessage,
+    view_state,
 )
 from himari.interfaces.web.config import WebConfig
 from himari.sandbox.api import SandboxState
@@ -213,11 +219,29 @@ def _text(blocks: tuple[ContentBlock, ...]) -> str:
     return "\n\n".join(b.text for b in blocks if isinstance(b, TextBlock))
 
 
+def image_view(record: FileRecord) -> dict[str, Any] | None:
+    """V3-P67 §8: the original's judged type and size, and ``state`` (the
+    ``view_state``): a preview exists only when it is ``ready``."""
+    if record.image_status is ImageStatus.NOT_IMAGE:
+        return None
+    view = record.view
+    return {"state": view_state(record).value, "media_type": record.image_type, "width": record.image_width,
+            "height": record.image_height,
+            # The copy's size (orientation applied): the page keeps its box before it loads (PR #63 review C1).
+            "preview": None if view is None else {"width": view.width, "height": view.height}}
+
+
 def file_view(record: FileRecord) -> dict[str, Any]:
     return {"file_id": record.file_id, "version": record.version, "origin": record.origin.value,
             "name": record.name, "media_type": record.media_type, "size": record.size,
             "created_at": _time(record.created_at), "workspace_path": record.workspace_path,
-            "expired": record.expired}
+            "expired": record.expired, "image": image_view(record)}
+
+
+def _attachment(ref: AttachmentRef, files: Files) -> dict[str, Any]:
+    found = files.get((ref.file_id, ref.version))
+    return (file_view(found) if found is not None
+            else {"file_id": ref.file_id, "version": ref.version, "name": None, "expired": True, "image": None})
 
 
 _DOWNLOAD_SAFE = "!#$&+-.^_`|~"  # RFC 5987 attr-char besides letters and digits
@@ -275,9 +299,7 @@ def event_view(event: ConversationEvent, views: dict[CallRef, tuple[bool, bool]]
         # A call is identified by (run_id, call_id): call ids repeat across Runs.
         view["answers_call"] = None if payload.answers_call is None else payload.answers_call.call_id
         view["answers_run"] = None if payload.answers_call is None else payload.answers_call.run_id
-        view["attachments"] = [file_view(files[(b.file_id, b.version)]) if (b.file_id, b.version) in files
-                               else {"file_id": b.file_id, "version": b.version, "name": None, "expired": True}
-                               for b in payload.blocks if isinstance(b, AttachmentRef)]
+        view["attachments"] = [_attachment(b, files) for b in payload.blocks if isinstance(b, AttachmentRef)]
     elif isinstance(payload, AssistantFinal):
         view["text"] = _text(payload.blocks)
         view["model"] = models.get(event.origin_run_id) if event.origin_run_id else None
@@ -296,6 +318,11 @@ def event_view(event: ConversationEvent, views: dict[CallRef, tuple[bool, bool]]
         view["text"] = _text(payload.model_result.blocks)
         view["app_view"] = views.get(payload.call, (False, False))[1]
         view["presented_files"] = [file_view(f) for f in presented.get(payload.call, [])]
+        # V3-P67 §8: the images the call returned (kept as files of the call) — never an
+        # ask_user answer's attachments, which are its result too (PR #63 review C2).
+        view["images"] = [file_view(found) for b in payload.model_result.blocks if isinstance(b, AttachmentRef)
+                          if (found := files.get((b.file_id, b.version))) is not None
+                          and found.origin is FileOrigin.TOOL]
     return view
 
 
@@ -373,7 +400,7 @@ def context_view(status: ContextStatus | None) -> dict[str, Any]:
 
 def model_view(view: ModelView) -> dict[str, Any]:
     return {"id": view.model_id, "default_effort": view.default_effort, "efforts": list(view.efforts),
-            "window_known": view.window_known, "default": view.is_default}
+            "window_known": view.window_known, "default": view.is_default, "images": view.images}
 
 
 def model_choice_view(view: ModelChoiceView) -> dict[str, Any]:
@@ -579,6 +606,7 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
                 "models": [model_view(m) for m in application.models],
                 "context_budget": application.context_tokens,  # the default model's
                 "trash_days": application.trash_days,  # V3-P65: then a trashed conversation is deleted for good
+                "images": application.images_available,  # V3-P67 §3.1: model copies can be made here
                 "turn": {"token_budget": turn.turn_budget, "unattended_runs": turn.unattended_runs,
                          "max_runs": turn.max_runs, "no_progress_runs": turn.no_progress_runs,
                          "seen_seconds": turn.seen_seconds}}
@@ -701,8 +729,10 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
         writers = [e.origin_run_id for e in events
                    if isinstance(e.payload, (AssistantFinal, AssistantToolCalls)) and e.origin_run_id]
         models = await application.run_models(scope, writers) if writers else {}
-        refs = [(FileId(b.file_id), b.version) for e in events if isinstance(e.payload, UserMessage)
-                for b in e.payload.blocks if isinstance(b, AttachmentRef)]
+        refs = [(FileId(b.file_id), b.version) for e in events
+                for b in (e.payload.blocks if isinstance(e.payload, UserMessage)
+                          else e.payload.model_result.blocks if isinstance(e.payload, ToolResultRecord) else ())
+                if isinstance(b, AttachmentRef)]
         files: Files = ({(r.file_id, r.version): r for r in await application.attachment_records(scope, refs)}
                         if refs else {})
         calls = [e.payload.call for e in events if isinstance(e.payload, ToolResultRecord)]
@@ -837,6 +867,27 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
             "Content-Disposition": content_disposition(record.name),
             "Content-Length": str(record.size),
             "Content-Security-Policy": "sandbox",
+        })
+
+    @app.get("/api/conversations/{conversation_id}/files/{file_id}/{version}/view")
+    async def preview_file(conversation_id: str, file_id: str, request: Request,
+                           version: int = Path(ge=1, le=2**31),
+                           who: PrincipalId = Depends(principal)) -> Response:
+        """V3-P67 §8: an image's model copy, shown inline in an ``<img>``. Its
+        type is the copy's, made by HIMARI from bytes judged an image; the
+        browser may not guess another (nosniff) and nothing in it can run
+        (CSP). 404 unless the file is an image with a copy; 410 once it expired."""
+        view, handle = await himari(request).preview(scope_of(conversation_id, who), FileId(file_id), version)
+
+        def chunks() -> Iterator[bytes]:
+            with handle:
+                while data := handle.read(1 << 16):
+                    yield data
+
+        return StreamingResponse(chunks(), media_type=view.media_type, headers={
+            "Content-Disposition": "inline",
+            "Content-Length": str(view.blob.size),
+            "Content-Security-Policy": "default-src 'none'; sandbox",  # nosniff and no-store: the middleware
         })
 
     @app.post("/api/conversations/{conversation_id}/resume", status_code=202)

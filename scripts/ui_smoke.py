@@ -18,7 +18,10 @@ delete for good, and a page whose conversation was trashed elsewhere. A
 fifth (V3-P66) attaches files: chips with their state, removing one, a
 message of files, downloading an attachment and a file the model gave,
 dropping a file, an upload that ends after the user left, and the narrow
-layout.
+layout. A sixth (V3-P67) shows images: the thumbnail of an attached photo
+(its model copy, loaded from the preview route), the images a tool
+returned, downloading the original by pressing a thumbnail, an HTML file
+named .png that stays a plain file chip, and the narrow layout.
 
 Requires: pip install playwright && playwright install chromium
 Usage:    python scripts/ui_smoke.py [--screenshots DIR]
@@ -448,6 +451,102 @@ def run_files(base: str, token: str, shots: str | None, tmp: str) -> list[str]:
     return errors
 
 
+class InProcessViews:
+    """Model copies made here with Pillow: the smoke checks the pages, not
+    the image sandbox (that is tests/sandbox_host's job)."""
+
+    available = True
+
+    async def make(self, original: bytes) -> Any:
+        import io
+
+        from PIL import Image
+
+        from himari.data.api import PreparedView
+
+        with Image.open(io.BytesIO(original)) as opened:
+            image = opened.convert("RGB")
+        image.thumbnail((1568, 1568))
+        out = io.BytesIO()
+        image.save(out, "JPEG", quality=85)
+        return PreparedView(out.getvalue(), "image/jpeg", image.width, image.height)
+
+
+class SeeingAdapter(ScriptedAdapter):
+    """A scripted model that takes images (V3-P67 §7.1)."""
+
+    def describe_capabilities(self, model_id: str) -> Any:
+        from himari.provider.api import ProviderCapabilities
+
+        return ProviderCapabilities(model_id=model_id, parallel_tool_calls=True, image_input=True)
+
+
+def run_images(base: str, token: str, shots: str | None, tmp: str) -> list[str]:
+    from PIL import Image
+
+    errors: list[str] = []
+    photo, fake = Path(tmp, "photo.png"), Path(tmp, "fake.png")
+    Image.new("RGB", (800, 600), (30, 110, 200)).save(photo)
+    fake.write_text("<html><script>window.__pwned = 4</script></html>")
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page(viewport={"width": 1280, "height": 860}, accept_downloads=True)
+        page.on("console", lambda m: errors.append(m.text) if m.type == "error" else None)
+        page.on("pageerror", lambda e: errors.append(str(e)))
+        page.goto(base)
+        page.fill("#login-token", token)
+        page.click("#login-submit")
+        page.click("#home-new-chat")
+        page.set_input_files("#composer-files", [str(photo)])
+        expect(page.locator("#attach-list .attach-chip").nth(0)).to_have_text(  # uploaded: its size is shown
+            re.compile(r"photo\.png · [0-9.]+ KB"), timeout=10000)
+        expect(page.locator("#status-bar")).not_to_contain_text("Commands cannot run")  # an image needs none
+        page.fill("#composer-text", "what is this?")
+        page.press("#composer-text", "Enter")
+        user = page.locator(".item-user").last
+        thumb = user.locator(".file-thumb img")
+        expect(thumb).to_be_visible(timeout=10000)
+        page.wait_for_function("img => img.complete && img.naturalWidth > 0", arg=thumb.element_handle())
+        assert thumb.evaluate("img => img.naturalWidth") == 800, "the copy of an 800 px photo keeps its size"
+        assert "800×600" in (user.locator(".file-thumb").get_attribute("title") or "")
+        assert (thumb.bounding_box() or {}).get("height", 999) <= 240.5, "a thumbnail is at most 240 px high"
+        expect(page.locator(".item-assistant").last).to_contain_text("a blue photo", timeout=10000)
+        page.wait_for_timeout(300)
+        assert page.evaluate("""() => { const t = document.getElementById("timeline");
+          return t.scrollHeight - t.scrollTop - t.clientHeight < 80; }"""), "the answer below a photo is in view"
+        with page.expect_download() as done:
+            user.locator(".file-thumb").click()
+        assert Path(done.value.path()).read_bytes() == photo.read_bytes(), "pressed, the original downloads"
+
+        page.fill("#composer-text", "look at it with the tool")
+        page.press("#composer-text", "Enter")
+        returned = page.locator(".item-tool-images").last
+        expect(returned).to_contain_text("Image from the tool", timeout=10000)
+        returned_thumb = returned.locator(".file-thumb img")
+        page.wait_for_function("img => img.complete && img.naturalWidth > 0", arg=returned_thumb.element_handle())
+        expect(page.locator(".item-assistant").last).to_contain_text("still blue", timeout=10000)
+        if shots:
+            page.screenshot(path=os.path.join(shots, "12-images.png"))
+
+        page.set_input_files("#composer-files", [str(fake)])
+        expect(page.locator("#attach-list .attach-chip").nth(0)).to_have_text(
+            re.compile(r"fake\.png · 48 bytes"), timeout=10000)
+        page.press("#composer-text", "Enter")
+        user = page.locator(".item-user").last
+        expect(user.locator(".file-chip")).to_contain_text("fake.png", timeout=10000)
+        expect(user.locator(".file-thumb")).to_have_count(0)  # bytes decide, not the name or the type
+        expect(page.locator(".item-assistant").last).to_contain_text("not an image", timeout=10000)
+        assert page.evaluate("window.__pwned === undefined")
+
+        page.set_viewport_size({"width": 390, "height": 800})
+        page.wait_for_timeout(300)
+        assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
+        if shots:
+            page.screenshot(path=os.path.join(shots, "13-images-narrow.png"))
+        browser.close()
+    return errors
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--screenshots")
@@ -499,6 +598,28 @@ def main() -> int:
             errors += run_files(f"http://127.0.0.1:{PORT + 4}",
                                 Path(files, "control", "operator.secret").read_text().strip(), args.screenshots, tmp)
         finally:
+            server.should_exit = True
+            time.sleep(0.5)
+        from himari.bootstrap import application as application_module
+
+        async def in_process(root: Path, sandbox: bool) -> InProcessViews:
+            return InProcessViews()
+
+        real = application_module._image_views
+        application_module._image_views = in_process  # type: ignore[assignment]
+        images = os.path.join(tmp, "images")
+        server = serve(images, PORT + 5, SeeingAdapter([
+            NormalizedFinal((TextBlock("a blue photo"),)),
+            NormalizedToolCalls((ToolCall(CallId("c0"), 0, ToolId("inside/read_file"),
+                                          {"path": "uploads/photo.png"}),)),
+            NormalizedFinal((TextBlock("still blue"),)),
+            NormalizedFinal((TextBlock("not an image"),)),
+        ]))
+        try:
+            errors += run_images(f"http://127.0.0.1:{PORT + 5}",
+                                 Path(images, "control", "operator.secret").read_text().strip(), args.screenshots, tmp)
+        finally:
+            application_module._image_views = real  # type: ignore[assignment]
             server.should_exit = True
             time.sleep(0.5)
     print("UI smoke: OK" if not errors else f"UI smoke: console errors {errors}")

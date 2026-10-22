@@ -87,6 +87,9 @@ def main(argv: list[str] | None = None) -> int:
             effort = f", reasoning {model.default_effort}" if model.default_effort else ""
             print(f"HIMARI web: model {model.model_id}{' (default)' if model.is_default else ''}{effort}",
                   file=sys.stderr, flush=True)
+        if not application.images_available:  # V3-P67 §3.1: fail-closed, said once at startup
+            print("HIMARI web: images are not shown to models on this server (the image sandbox is unavailable): "
+                  "an image is attached as a file line only", file=sys.stderr, flush=True)
         for unverified in application.unverified_models:  # V3-P64 §3, review B1
             print(f"HIMARI web: warning: model {unverified} is not declared by the provider: its window, reasoning "
                   "efforts and Tool calling are unverified (a model without Tool calling fails every request)",

@@ -219,13 +219,18 @@ class Printer:
             self.line(f"  {self.symbols.result} {safe_line(called or 'tool', encoding=self.encoding)} {mark}")
             self.line(safe_block(text, encoding=self.encoding, max_lines=None if self.verbose else TOOL_RESULT_LINES))
             self.files(event.get("presented_files") or [])
+            self.files(event.get("images") or [])  # V3-P67 §8: the images the call returned
 
     def files(self, files: list[dict[str, Any]]) -> None:
-        """One line a file: ``[file] report.pdf (1.2 MB) — himari download c_12 file_40`` (V3-P66 §9)."""
+        """One line a file: ``[file] report.pdf (1.2 MB) — himari download c_12 file_40`` (V3-P66 §9);
+        an image says its size: ``[file] photo.jpg [image 800×600] (1.2 MB) — …`` (V3-P67 §8)."""
         for file in files:
             name = safe_line(str(file.get("name") or "(unknown)"), encoding=self.encoding)
             version = int(file.get("version") or 1)
             shown = f"{name} v{version}" if version > 1 else name
+            image = file.get("image")
+            if isinstance(image, dict) and isinstance(image.get("width"), int) and isinstance(image.get("height"), int):
+                shown += f" [image {image['width']}{self.symbols.times}{image['height']}]"
             if file.get("expired"):
                 self.line(f"  [file] {shown} (expired)")
                 continue
@@ -697,6 +702,10 @@ def cmd_files(session: Session, args: argparse.Namespace) -> int:
         version = int(file["version"])
         name = safe_line(str(file["name"]), encoding=session.printer.encoding)
         state = " expired" if file["expired"] else ""
+        image = file.get("image")
+        if isinstance(image, dict) and isinstance(image.get("width"), int) and isinstance(image.get("height"), int):
+            # Before the name, which is the user's text (PR #63 review N2).
+            state += f"  [image {image['width']}{session.printer.symbols.times}{image['height']}]"
         session.printer.line(f"{file['file_id']}  v{version}  {file['origin']:<9}  {human_size(int(file['size'])):>9}"
                              f"{state}  {name}")
     _more(session, page)

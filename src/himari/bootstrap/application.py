@@ -75,7 +75,9 @@ from himari.data.api import (
     DataError,
     DataErrorCode,
     FileRecord,
+    ImageView,
     ViewMaker,
+    ViewState,
     InitialActivation,
     ModelSetting,
     ToolExecutionRecord,
@@ -85,6 +87,7 @@ from himari.data.api import (
     UserMessage,
     clean_file_name,
     clean_media_type,
+    view_state,
 )
 from himari.data.sqlite import SqliteData, SqliteStore
 from himari.environment.inside import INSIDE, InsideEnvironment, InsideFiles
@@ -254,6 +257,7 @@ class ModelView:
     efforts: tuple[str, ...]
     window_known: bool  # the Provider declares its window (an unknown model's is not checked)
     is_default: bool
+    images: bool = False  # the Provider sends it images (V3-P67 §7.1)
 
 
 @dataclass(frozen=True)
@@ -415,6 +419,7 @@ class Application:
     file_max_bytes: int = DEFAULT_FILE_MAX_BYTES  # V3-P66 §8.3
     uploads_work: bool = True  # the no-replace rename placing needs works here (review N2)
     views: ViewMaker | None = None  # model copies of images (V3-P67 §3.1); None or unavailable: no copies
+    image_models: tuple[str, ...] = ()  # offered models that get images (V3-P67 §7.1)
     # V3-P65 §7.3: one lifecycle lock per Conversation (P0: one server process),
     # kept only while some call holds or waits for it (PR #56 review C1).
     _lifecycle: dict[ConversationId, _Lifecycle] = field(default_factory=dict, repr=False)
@@ -457,6 +462,7 @@ class Application:
         turn = TurnSettings(turn_budget, unattended_runs, max_runs)
         offers: list[ModelOffer] = []
         unverified: list[str] = []
+        image_models: list[str] = []
         for offered, effort in models or ((model_id, None),):
             if offered == model_id and effort is None:
                 effort = reasoning_effort
@@ -472,6 +478,8 @@ class Application:
                                      capabilities.max_output_tokens))
             if capabilities.context_tokens is None:
                 unverified.append(offered)
+            if capabilities.image_input:
+                image_models.append(offered)
         catalog = ModelCatalog(tuple(offers), model_id)  # duplicates, the default, efforts (§3)
         default_budget = catalog.default.budget
         assert default_budget is not None
@@ -530,7 +538,7 @@ class Application:
         runner = BackgroundRunner(runtime.driver, unattended_runs=unattended_runs, seen_seconds=turn.seen_seconds)
         application = cls(root, store, runtime.data, runtime, runner, inside, state, model_id,
                           default_budget.limit_tokens, secret, mcp, turn, tuple(unverified), trash_days,
-                          file_max_bytes, uploads_work, views)
+                          file_max_bytes, uploads_work, views, tuple(image_models))
         if cleanup_seconds is not None:
             application._cleanup = asyncio.create_task(application._purge_periodically(cleanup_seconds),
                                                        name="trash-cleanup")
@@ -585,7 +593,8 @@ class Application:
         """The offered models, in the operator's order."""
         catalog = self.runtime.models
         return tuple(ModelView(o.model_id, o.default_effort, ordered_efforts(o.efforts),
-                               o.model_id not in self.unverified_models, o.model_id == catalog.default_model)
+                               o.model_id not in self.unverified_models, o.model_id == catalog.default_model,
+                               o.model_id in self.image_models)
                      for o in catalog.offers)
 
     def _choice_view(self, setting: ModelSetting | None, resolved: ResolvedModel) -> ModelChoiceView:
@@ -823,6 +832,19 @@ class Application:
 
     async def attachment_records(self, scope: TrustedScope, refs: Sequence[tuple[FileId, int]]) -> Sequence[FileRecord]:
         return await self.data.read_file_records(scope, refs)
+
+    async def preview(self, scope: TrustedScope, file_id: FileId, version: int) -> tuple[ImageView, BinaryIO]:
+        """V3-P67 §8: an image's model copy — what the model saw, small and
+        without metadata. NOT_FOUND unless ``view_state`` is READY or the
+        copy expired (BLOB_EXPIRED); BLOB_MISSING when its bytes are gone."""
+        found = await self.data.read_file_records(scope, [(file_id, version)])
+        state = view_state(found[0]) if found else None
+        if state is ViewState.VIEW_EXPIRED:
+            raise DataError(DataErrorCode.BLOB_EXPIRED, file_id)
+        if state is not ViewState.READY or found[0].view is None:
+            raise DataError(DataErrorCode.NOT_FOUND, file_id)
+        view = found[0].view
+        return view, self.data.blobs.open(view.blob)
 
     async def download(self, scope: TrustedScope, file_id: FileId, version: int) -> tuple[FileRecord, BinaryIO]:
         """§7.2: a file's stored bytes. NOT_FOUND for a file this Conversation

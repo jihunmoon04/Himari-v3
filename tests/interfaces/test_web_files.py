@@ -269,4 +269,4 @@ def test_an_attachment_without_a_readable_record_shows_as_expired() -> None:
                               UserMessage((TextBlock("t"), AttachmentRef(FileId("file_9"), 1))), 1, datetime.now(UTC))
     view = web.event_view(event)
     assert view["text"] == "t" and view["attachments"] == [
-        {"file_id": "file_9", "version": 1, "name": None, "expired": True}]
+        {"file_id": "file_9", "version": 1, "name": None, "expired": True, "image": None}]
