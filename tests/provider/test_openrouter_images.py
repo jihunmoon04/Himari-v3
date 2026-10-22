@@ -130,3 +130,23 @@ def test_an_expired_copy_is_a_line_from_then_on() -> None:
     prepared = adapter().prepare_native_request(model_input)
     assert prepared.raw_representation is RawRepresentation.WIRE_EXACT
     assert '"not_shown": "expired"' in body(prepared)["messages"][1]["content"]
+
+
+def test_marker_text_without_an_image_is_plain_wire_exact() -> None:
+    """Review N1: the label follows the image parts put in, not text someone typed."""
+    model_input = image_model_input([user(TextBlock(f"himari-blob:{KEY}:image/png"))], {}, image_input=True,
+                                    model="sees")
+    prepared = adapter().prepare_native_request(model_input)
+    assert prepared.raw_representation is RawRepresentation.WIRE_EXACT
+    assert body(prepared)["messages"][1]["content"] == f"himari-blob:{KEY}:image/png"
+
+
+def test_the_cache_mark_goes_on_the_last_text_part_of_a_message_with_images() -> None:
+    """Review N6: a last message with images is still the one marked."""
+    caps = ProviderCapabilities("sees", image_input=True, cache_breakpoints=True)
+    model_input = image_model_input([user(TextBlock("look"), AttachmentRef(FileId("f"), 1))], {"f#1": READY},
+                                    image_input=True, model="sees")
+    prepared = OpenRouterAdapter("k", capabilities={"sees": caps}).prepare_native_request(model_input)
+    marked = [(i, p["type"]) for i, m in enumerate(body(prepared)["messages"]) if isinstance(m["content"], list)
+              for p in m["content"] if "cache_control" in p]
+    assert marked == [(1, "text")]

@@ -349,3 +349,53 @@ def test_more_than_eight_images_become_a_line() -> None:
     blocks = record.model_result.blocks
     assert sum(isinstance(b, AttachmentRef) for b in blocks) == 8
     assert blocks[-1].text == "[2 more images were returned; only the first 8 are kept]"  # type: ignore[union-attr]
+
+
+def test_a_cancel_while_images_are_kept_still_commits_the_result() -> None:
+    """Review B1: the call ran, so a cancel during the copies stops them, not the commit."""
+    from himari.common import AttachmentRef
+    from himari.data.api import DEFAULT_FILE_MAX_BYTES
+    from himari.tool.api import ResultImage
+    from himari.tool.images import StoredResultImages
+
+    async def scenario() -> None:
+        store = InMemoryStore()
+        store.create_conversation(SCOPE)
+        data = InMemoryData(store)
+        kept = StoredResultImages(data.blobs, data, None, DEFAULT_FILE_MAX_BYTES)
+        second = asyncio.Event()
+
+        class Slow:
+            async def keep(self, scope, call, image, number):  # type: ignore[no-untyped-def]
+                if number == 1:
+                    return await kept.keep(scope, call, image, number)
+                second.set()
+                await asyncio.Event().wait()  # a copy that never ends
+
+        images = tuple(ResultImage(_png(), "image/png") for _ in range(3))
+        tool = RecordingTool("remote/read", external_source="remote", effect=EffectProfile.READ,
+                             behavior=lambda i, c: ToolOutcome(ToolStatus.SUCCEEDED, text_result("shot"),
+                                                               result_images=images))
+        dispatcher = Dispatcher(ToolRegistry([tool]), data, data, data, ConfiguredExternalAccess({"remote": True}, data),
+                                images=Slow())
+        run_id = await data.prepare_run(
+            SCOPE, RunPreparation(b"", "t", RawRepresentation.ADAPTER_SERIALIZED, (), PromptBasis(0, 0), "p", "m"))
+        await data.mark_dispatch(SCOPE, run_id)
+        await data.record_raw_outcome(SCOPE, run_id, RawReceived(b"", "t"))
+        call = ToolCall(CallId("a"), 0, ToolId("remote/read"), {})
+        await data.project_model_output(SCOPE, run_id, AssistantToolCalls((call,)))
+        task = asyncio.ensure_future(dispatcher.dispatch_group(SCOPE, run_id, (call,)))
+        await second.wait()
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        else:
+            raise AssertionError("the cancel is passed on after the commit")
+        (record,) = await data.read_tool_executions(SCOPE, run_id)
+        assert record.status is ToolExecutionStatus.SUCCEEDED and record.model_result is not None
+        _, first, *rest = record.model_result.blocks
+        assert isinstance(first, AttachmentRef)
+        assert [b.text for b in rest] == ["[an image was returned but not kept: the user cancelled]"] * 2  # type: ignore[union-attr]
+    asyncio.run(scenario())

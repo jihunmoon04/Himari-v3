@@ -419,6 +419,7 @@ def blob_key(principal: PrincipalId, sha256: str) -> str:
 # a copy made once in the image sandbox, never the original (§3.1).
 
 MAX_IMAGE_PIXELS = 50_000_000  # over it nothing is decoded
+MAX_IMAGE_SOURCE_BYTES = 32 * 1024 * 1024  # a larger original gets no copy, whatever the file limit (review C1)
 IMAGE_HEAD_BYTES = 256 * 1024  # what sniff_image may need (a JPEG's frame header can follow large EXIF)
 MAX_IMAGES_PER_REQUEST = 100
 MAX_IMAGE_BYTES_PER_REQUEST = 32 * 1024 * 1024  # model copies, before base64 (review B3)
@@ -429,7 +430,7 @@ class ImageStatus(Enum):
     """Set when the record is made; never changes (review N1)."""
 
     NOT_IMAGE = "not_image"
-    TOO_LARGE = "too_large"  # over MAX_IMAGE_PIXELS: never decoded
+    TOO_LARGE = "too_large"  # over MAX_IMAGE_PIXELS or MAX_IMAGE_SOURCE_BYTES: never decoded
     UNPREPARED = "unprepared"  # decoding or encoding failed, or a limit was hit
     NO_SANDBOX = "no_sandbox"  # the image sandbox is not available: nothing decoded (review B1)
     READY = "ready"
@@ -670,7 +671,8 @@ class FileCatalog(Protocol):
 
     async def read_call_files(self, scope: TrustedScope, calls: Sequence[CallRef]
                               ) -> Mapping[CallRef, Sequence[FileRecord]]:
-        """The files each call presented (calls without any are left out)."""
+        """The files each call presented (calls without any are left out);
+        never its Tool images (V3-P67, review C4)."""
         ...
 
     async def presented_bytes_since(self, scope: TrustedScope, since: datetime) -> int: ...

@@ -1830,8 +1830,8 @@ class SqliteData:
 
     @staticmethod
     def _staged(tx: _Tx, scope: TrustedScope) -> int:
-        row = tx.one("SELECT count(*) AS n FROM files WHERE conversation_id=? AND attached_at IS NULL",
-                     scope.conversation_id)
+        row = tx.one("SELECT count(*) AS n FROM files WHERE conversation_id=? AND attached_at IS NULL AND origin=?",
+                     scope.conversation_id, FileOrigin.UPLOAD.value)  # a Tool's images are not the user's (review N9)
         assert row is not None
         return int(row["n"])
 
@@ -1884,7 +1884,8 @@ class SqliteData:
             found: dict[CallRef, list[FileRecord]] = {}
             for call in dict.fromkeys(calls):
                 rows = tx.all(f"SELECT {_FILE_COLUMNS} {_FILE_FROM} WHERE f.conversation_id=? AND f.run_id=?"
-                              " AND f.call_id=? ORDER BY f.seq", scope.conversation_id, call.run_id, call.call_id)
+                              " AND f.call_id=? AND f.origin=? ORDER BY f.seq", scope.conversation_id, call.run_id,
+                              call.call_id, FileOrigin.PRESENTED.value)
                 if rows:
                     found[call] = [_file(r) for r in rows]
             return {call: tuple(files) for call, files in found.items()}

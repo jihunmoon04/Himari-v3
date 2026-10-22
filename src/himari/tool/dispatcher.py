@@ -41,6 +41,7 @@ P0 scheduling is sequential in original ordinal order; parallel scheduling
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Callable, Sequence
 from dataclasses import replace
@@ -107,6 +108,8 @@ _FILES_REFUSED = {
     DataErrorCode.BLOB_MISSING: "its stored copy is gone",
     DataErrorCode.LIMIT_EXCEEDED: "too much was presented in the last hour",
 }
+
+_NOT_KEPT_CANCELLED = "[an image was returned but not kept: the user cancelled]"
 
 UNKNOWN_OUTCOME_RESULT = ModelToolResult(
     blocks=(
@@ -307,25 +310,42 @@ class Dispatcher:
             raise _Denied("binding does not belong to the active environment instance")
         return binding
 
-    async def _keep_images(self, scope: TrustedScope, call: CallRef, outcome: ToolOutcome) -> ToolOutcome:
+    async def _keep_images(self, scope: TrustedScope, call: CallRef, outcome: ToolOutcome) -> tuple[ToolOutcome, bool]:
         """V3-P67 §4.2: each returned image kept and staged, an attachment at
-        the end of the result for it — or a line saying why not."""
+        the end of the result for it — or a line saying why not. A cancel
+        while copies are made stops making them, never the commit: the call
+        ran, so its result is kept (review B1); True says to re-raise it."""
         if not outcome.result_images:
-            return outcome
+            return outcome, False
         blocks: list[ContentBlock] = list(outcome.model_result.blocks)
+        cancelled = False
         for number, image in enumerate(outcome.result_images[:MAX_RESULT_IMAGES], start=1):
-            kept = (await self._images.keep(scope, call, image, number) if self._images is not None
-                    else "[an image was returned but could not be kept]")
+            kept: AttachmentRef | str = "[an image was returned but could not be kept]"
+            if cancelled:
+                kept = _NOT_KEPT_CANCELLED
+            elif self._images is not None:
+                try:
+                    kept = await self._images.keep(scope, call, image, number)
+                except asyncio.CancelledError:
+                    cancelled, kept = True, _NOT_KEPT_CANCELLED
             blocks.append(TextBlock(kept) if isinstance(kept, str) else kept)
         extra = len(outcome.result_images) - MAX_RESULT_IMAGES
         if extra > 0:
             blocks.append(TextBlock(f"[{extra} more images were returned; only the first {MAX_RESULT_IMAGES} are kept]"))
-        return replace(outcome, model_result=replace(outcome.model_result, blocks=tuple(blocks)), result_images=())
+        model_result = replace(outcome.model_result, blocks=tuple(blocks))
+        return replace(outcome, model_result=model_result, result_images=()), cancelled
 
     async def _commit(
         self, scope: TrustedScope, call: CallRef, outcome: ToolOutcome, record_event: bool
     ) -> None:
-        outcome = await self._keep_images(scope, call, outcome)
+        outcome, cancelled = await self._keep_images(scope, call, outcome)
+        await self._commit_kept(scope, call, outcome, record_event)
+        if cancelled:
+            raise asyncio.CancelledError
+
+    async def _commit_kept(
+        self, scope: TrustedScope, call: CallRef, outcome: ToolOutcome, record_event: bool
+    ) -> None:
         ran = outcome.status in (ToolStatus.SUCCEEDED, ToolStatus.FAILED)
         completion = ToolCompletion(
             status=_STATUS[outcome.status],

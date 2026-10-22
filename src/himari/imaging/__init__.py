@@ -4,7 +4,9 @@
 server-profile sandbox that binds the Python runtime and that file read-only
 and nothing writable: no network, HIMARI's data root invisible (the server
 sandbox's own checks, V3-P59). One process per image; a wall-clock bound
-on top of the worker's own memory and CPU limits.
+on top of the worker's own memory and CPU limits, and at most
+``MAX_WORKERS`` at once. What a worker answers is judged again here from
+its bytes (type and size), never taken on its word.
 
 When the sandbox is not ENFORCED, or the startup check (a tiny image
 through the worker) fails, nothing is decoded at all: ``available`` is
@@ -21,13 +23,14 @@ import os
 import sys
 from pathlib import Path
 
-from himari.data.api import PreparedView
+from himari.data.api import IMAGE_HEAD_BYTES, PreparedView, sniff_image
 from himari.sandbox.api import ProcessLauncher
 
 log = logging.getLogger(__name__)
 
 WORKER = Path(__file__).with_name("worker.py")
 WALL_SECONDS = 30.0
+MAX_WORKERS = 2  # each may take 512 MiB (review C1)
 # The smallest PNG (1×1, opaque): what the startup check sends through.
 _PROBE = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==")
@@ -38,9 +41,9 @@ def runtime_roots() -> tuple[str, ...]:
     under /usr, which the sandbox shows anyway) and the worker's folder
     (unless it is inside that environment)."""
     roots: list[str] = []
-    prefix = os.path.realpath(sys.prefix)
-    if not (prefix == "/usr" or prefix.startswith("/usr/")):
-        roots.append(prefix)
+    for prefix in dict.fromkeys(os.path.realpath(p) for p in (sys.prefix, sys.base_prefix)):
+        if not (prefix == "/usr" or prefix.startswith("/usr/")):
+            roots.append(prefix)  # a virtual environment, and a Python installed outside /usr (review N4)
     folder = str(WORKER.parent.resolve())
     if not any(folder == r or folder.startswith(r.rstrip("/") + "/") for r in roots):
         roots.append(folder)
@@ -56,6 +59,7 @@ class ImageViews:
         self._python = python or sys.executable
         self._wall = wall_seconds
         self._available = False
+        self._places = asyncio.Semaphore(MAX_WORKERS)
 
     @property
     def available(self) -> bool:
@@ -76,18 +80,10 @@ class ImageViews:
         """The copy, or why there is none (a short reason)."""
         if not self._available or self._launcher is None:
             return "no sandbox"
-        try:
-            process = await self._launcher.launch([self._python, "-I", str(WORKER)], {}, "/tmp")
-        except Exception as error:  # noqa: BLE001 — unavailable, refused, setup failed: no copy
-            return f"the sandbox did not start ({type(error).__name__})"
-        try:
-            request = json.dumps({"data": base64.b64encode(original).decode("ascii")}).encode("ascii")
-            await asyncio.wait_for(process.write_line(request), self._wall)
-            line = await asyncio.wait_for(process.read_line(), self._wall)
-        except (TimeoutError, Exception) as error:  # noqa: BLE001 — a timeout, a crash, a line too long
-            return f"the worker failed ({type(error).__name__})"
-        finally:
-            await process.shutdown(0.5)
+        async with self._places:
+            line = await self._run(self._launcher, original)
+        if isinstance(line, str):
+            return line
         try:
             reply = json.loads(line)
             if not reply.get("ok"):
@@ -96,6 +92,24 @@ class ImageViews:
             media_type, width, height = reply["media_type"], int(reply["width"]), int(reply["height"])
         except (ValueError, KeyError, TypeError):
             return "a bad answer"
-        if media_type not in ("image/png", "image/jpeg") or not (0 < width <= 1568 and 0 < height <= 1568):
+        made = sniff_image(data[:IMAGE_HEAD_BYTES])
+        if (media_type not in ("image/png", "image/jpeg") or not (0 < width <= 1568 and 0 < height <= 1568)
+                or made is None or (made.media_type, made.width, made.height) != (media_type, width, height)):
             return "a bad answer"
         return PreparedView(data, media_type, width, height)
+
+    async def _run(self, launcher: ProcessLauncher, original: bytes) -> bytes | str:
+        """The worker's one line, or why there is none."""
+        try:
+            process = await launcher.launch([self._python, "-I", str(WORKER)], {}, "/tmp")
+        except Exception as error:  # noqa: BLE001 — unavailable, refused, setup failed: no copy
+            return f"the sandbox did not start ({type(error).__name__})"
+        try:
+            request = json.dumps({"data": base64.b64encode(original).decode("ascii")}).encode("ascii")
+            async with asyncio.timeout(self._wall):  # one bound for the whole run (review N3)
+                await process.write_line(request)
+                return await process.read_line()
+        except (TimeoutError, Exception) as error:  # noqa: BLE001 — a timeout, a crash, a line too long
+            return f"the worker failed ({type(error).__name__})"
+        finally:
+            await process.shutdown(0.5)

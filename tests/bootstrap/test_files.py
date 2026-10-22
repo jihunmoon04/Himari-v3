@@ -22,7 +22,7 @@ from himari.common import AttachmentRef, PrincipalId, TextBlock, TrustedScope
 from himari.control.api import ControlError, ControlErrorCode, JobStatus
 from himari.data.api import MAX_STAGED_UPLOADS, DataError, DataErrorCode, UserMessage
 from himari.environment.inside import WorkspaceBusy
-from himari.prompt.api import ATTACHMENT_NOTE
+from himari.prompt.api import ATTACHMENT_NOTE, TOOL_IMAGES_NOTE
 from himari.provider.scripted import ScriptedAdapter
 
 ALICE, BOB = PrincipalId("alice"), PrincipalId("bob")
@@ -56,7 +56,7 @@ def test_a_sent_attachment_is_placed_and_the_model_is_told_where(tmp_path: Path)
             await app.runner.wait(scope)
             assert (folder / "uploads/notes.txt").read_bytes() == b"hello there"
             first = adapter.prepared_inputs[0]
-            assert ATTACHMENT_NOTE in first.stable_prefix
+            assert ATTACHMENT_NOTE in first.stable_prefix and TOOL_IMAGES_NOTE in first.stable_prefix
             info = first.attachments[f"{record.file_id}#1"]
             assert info.path == f"/workspace/conversations/{scope.conversation_id}/uploads/notes.txt"
             events = await app.data.read_events(scope)

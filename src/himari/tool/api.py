@@ -45,10 +45,12 @@ from himari.data.api import MAX_UI_HTML_BYTES as MAX_UI_HTML_BYTES
 from himari.data.api import AppView as AppView
 from himari.data.api import PresentedFile as PresentedFile
 from himari.data.api import MAX_RESULT_IMAGES as MAX_RESULT_IMAGES
-# An image content item's base64, checked before it is decoded (V3-P67 review B3): one stored file.
-MAX_IMAGE_BASE64_CHARS = -(-32 * 1024 * 1024 * 4 // 3)
 from himari.data.api import UiCsp as UiCsp
 from himari.data.api import UiResource as UiResource
+from himari.data.api import DEFAULT_FILE_MAX_BYTES
+
+# An image content item's base64, checked before it is decoded (V3-P67 review B3): one stored file.
+MAX_IMAGE_BASE64_CHARS = -(-DEFAULT_FILE_MAX_BYTES * 4 // 3)
 
 
 class WorkspaceRequirement(Enum):

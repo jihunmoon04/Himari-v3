@@ -622,3 +622,27 @@ def test_d17_process_killed_during_an_effect_never_reruns_it(tmp_path: Path) -> 
     assert record.status is ToolExecutionStatus.UNKNOWN and record.model_result == UNKNOWN_OUTCOME_RESULT
     assert dict(record.arguments) == {"v": 1}
     store.close()
+
+
+def test_files_of_a_v8_database_read_as_not_images(tmp_path: Path) -> None:
+    """V3-P67: a file recorded before v9 has no image fields; it reads as a plain file."""
+    from himari.data.api import ImageStatus, ViewState, view_state
+
+    async def chunks() -> Any:
+        yield b"\x89PNG\r\n\x1a\n" + bytes(40)
+
+    path = tmp_path / "h.db"
+    store = SqliteStore(path)
+    store.create_conversation(SCOPE)
+    data = SqliteData(store)
+    blob = asyncio.run(data.blobs.put(SCOPE.principal_id, chunks(), 1 << 20))
+    record = asyncio.run(data.stage_upload(SCOPE, blob, "old.png", "image/png"))
+    store.close()
+    tamper(path, *_ADDED_IN[9], "PRAGMA user_version=8")
+    store = SqliteStore(path)
+    try:
+        again, = asyncio.run(SqliteData(store).read_file_records(SCOPE, [(record.file_id, 1)]))
+        assert (again.name, again.image_status, again.view) == ("old.png", ImageStatus.NOT_IMAGE, None)
+        assert view_state(again) is ViewState.NOT_IMAGE
+    finally:
+        store.close()

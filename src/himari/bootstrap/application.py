@@ -100,7 +100,7 @@ from himari.mcp.jsonrpc import McpError
 from himari.mcp.prompts import PromptContentError, prompt_text
 from himari.mcp.stdio import ProcessLauncher
 from himari.mcp.tools import LauncherFor, McpConnection, PromptArgument, SourceStatus, connect
-from himari.prompt.api import ATTACHMENT_NOTE, ContextBudget, SourceNote
+from himari.prompt.api import ATTACHMENT_NOTE, TOOL_IMAGES_NOTE, ContextBudget, SourceNote
 from himari.provider.api import ProviderAdapter
 from himari.tool.api import ToolHandler
 from himari.tool.schema import check_tool_input_schema
@@ -505,7 +505,8 @@ class Application:
             base = DEFAULT_INSTRUCTIONS if instructions is None else instructions
             runtime = build_runtime(provider, store=store, environments=[inside], tools=[*tools, *mcp.handlers, *mcp.resource_tools],
                                     models=catalog,
-                                    instructions=(*base, ATTACHMENT_NOTE) if uploads_work else base,
+                                    instructions=(*base, *((ATTACHMENT_NOTE,) if uploads_work else ()),
+                                                  TOOL_IMAGES_NOTE),
                                     external_defaults=mcp.defaults,
                                     source_notes=[SourceNote(source, note.placement, note.text)
                                                   for source, note in mcp.notes.items()],

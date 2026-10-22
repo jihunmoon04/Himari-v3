@@ -43,6 +43,6 @@ class StoredResultImages:
             setup = await self._blobs.prepare_image(scope.principal_id, blob, self._views)
             record = await self._files.stage_tool_file(
                 scope, call, blob, f"image-{number}.{image_extension(sniffed.media_type)}", sniffed.media_type, setup)
-        except DataError:  # e.g. the file store is full
+        except (DataError, OSError):  # e.g. the file store is full, a disk error (review N10)
             return "[an image was returned but could not be kept]"
         return AttachmentRef(record.file_id, record.version)

@@ -27,7 +27,8 @@ import sys
 
 LONG_EDGE = 1568
 MAX_PIXELS = 50_000_000
-MAX_OUTPUT_BYTES = 3 * 1024 * 1024  # its base64 and the JSON around it fit one 4 MiB line
+MAX_OUTPUT_BYTES = 3 * 1024 * 1024 - 4096  # its base64 and the JSON around it fit one 4 MiB line
+FORMATS = ("PNG", "JPEG", "GIF", "WEBP")  # the types sniffed by HIMARI; no other decoder is tried
 MEMORY_BYTES = 512 * 1024 * 1024
 CPU_SECONDS = 10
 
@@ -46,15 +47,18 @@ def convert(original: bytes) -> dict[str, object]:
     from PIL import Image, ImageOps  # after the limits: decoding starts here
 
     Image.MAX_IMAGE_PIXELS = MAX_PIXELS  # Pillow's own bomb check, besides the one below
-    with Image.open(io.BytesIO(original)) as opened:
+    with Image.open(io.BytesIO(original), formats=FORMATS) as opened:
         if opened.width * opened.height > MAX_PIXELS:
             return {"ok": False, "reason": "too many pixels"}
         opened.seek(0)  # the first frame of an animation
-        image = ImageOps.exif_transpose(opened.copy())
-    alpha = image.mode in ("RGBA", "LA") or (image.mode == "P" and "transparency" in image.info)
-    image = image.convert("RGBA" if alpha else "RGB")
-    if max(image.size) > LONG_EDGE:
+        alpha = opened.mode in ("RGBA", "LA", "PA") or "transparency" in opened.info
+        # Never a full-size copy: a palette image is converted first (it would
+        # be resized pixel by pixel), anything else is made small first — an
+        # unread JPEG then decodes at a reduced scale, so a 50M-pixel photo
+        # fits the memory limit (review C3).
+        image = opened.convert("RGBA" if alpha else "RGB") if opened.mode in ("1", "P", "PA") else opened
         image.thumbnail((LONG_EDGE, LONG_EDGE), Image.Resampling.LANCZOS)
+        image = ImageOps.exif_transpose(image).convert("RGBA" if alpha else "RGB")
     out = io.BytesIO()
     if alpha:
         image.save(out, "PNG", optimize=True)

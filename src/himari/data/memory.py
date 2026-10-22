@@ -405,10 +405,11 @@ class InMemoryData:
 
     def _tool_images(self, conv: _Conversation, call: CallRef, blocks: Sequence[object]) -> list[_File]:
         """V3-P67 §4.2: a result's attachments are this call's staged Tool images."""
-        found = []
+        found: list[_File] = []
         for ref in (b for b in blocks if isinstance(b, AttachmentRef)):
             file = next((f for f in conv.files if f.file_id == ref.file_id and f.version == ref.version), None)
-            if file is None or file.origin is not FileOrigin.TOOL or file.attached_at is not None or file.call != call:
+            if (file is None or file.origin is not FileOrigin.TOOL or file.attached_at is not None or file.call != call
+                    or any(f is file for f in found)):  # twice in one result: refused, as in SQLite (review N8)
                 raise DataError(DataErrorCode.INVALID_ARGUMENT, f"{ref.file_id} is not an image of this call")
             found.append(file)
         return found
@@ -965,7 +966,7 @@ class InMemoryData:
     async def stage_upload(self, scope: TrustedScope, blob: StoredBlob, name: str, media_type: str,
                            image: ImageSetup = NO_IMAGE) -> FileRecord:
         conv = self._conv(scope)
-        if sum(1 for f in conv.files if f.attached_at is None) >= MAX_STAGED_UPLOADS:
+        if sum(1 for f in conv.files if f.attached_at is None and f.origin is FileOrigin.UPLOAD) >= MAX_STAGED_UPLOADS:
             raise DataError(DataErrorCode.LIMIT_EXCEEDED, f"{MAX_STAGED_UPLOADS} uploads wait to be sent")
         return self._new_file(conv, FileOrigin.UPLOAD, None, blob, name, media_type, image)
 
@@ -976,7 +977,7 @@ class InMemoryData:
         return self._new_file(conv, FileOrigin.TOOL, call, blob, name, media_type, image)
 
     async def count_staged(self, scope: TrustedScope) -> int:
-        return sum(1 for f in self._conv(scope).files if f.attached_at is None)
+        return sum(1 for f in self._conv(scope).files if f.attached_at is None and f.origin is FileOrigin.UPLOAD)
 
     async def set_placement(self, scope: TrustedScope, file_id: FileId, workspace_path: str) -> None:
         conv = self._conv(scope)
@@ -1012,7 +1013,7 @@ class InMemoryData:
         conv = self._conv(scope)
         found = {}
         for call in dict.fromkeys(calls):
-            files = [self._record(f) for f in conv.files if f.call == call]
+            files = [self._record(f) for f in conv.files if f.call == call and f.origin is FileOrigin.PRESENTED]
             if files:
                 found[call] = tuple(files)
         return found

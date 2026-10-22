@@ -50,6 +50,15 @@ def test_a_large_photo_is_scaled_to_the_long_edge_and_loses_its_metadata() -> No
     assert copy.size == (1568, 1176) and not copy.getexif() and "exif" not in copy.info
 
 
+@pytest.mark.parametrize("fmt", ["JPEG", "PNG"], ids=["jpeg", "png"])
+def test_a_photo_of_nearly_fifty_million_pixels_fits_the_limits(fmt: str) -> None:
+    """Review C3: a 50 MP phone photo (8160×6120) is made small without a full-size copy."""
+    photo = Image.linear_gradient("L").resize((8160, 6120)).convert("RGB")
+    reply = convert(encoded(photo, fmt))
+    assert reply["ok"], reply
+    assert (reply["width"], reply["height"]) == (1568, 1176)
+
+
 def test_the_orientation_is_applied() -> None:
     portrait = Image.new("RGB", (300, 200), (0, 0, 0))
     exif = portrait.getexif()
@@ -122,9 +131,10 @@ class Launcher:
         return self.process
 
 
-def good(width: int = 1, height: int = 1) -> bytes:
-    return json.dumps({"ok": True, "media_type": "image/png", "width": width, "height": height,
-                       "data": base64.b64encode(b"png").decode()}).encode()
+def good(width: int = 1, height: int = 1, media_type: str = "image/png") -> bytes:
+    data = encoded(Image.new("RGB", (width, height)), "PNG")
+    return json.dumps({"ok": True, "media_type": media_type, "width": width, "height": height,
+                       "data": base64.b64encode(data).decode()}).encode()
 
 
 def test_views_need_a_passing_check() -> None:
@@ -137,7 +147,7 @@ def test_views_need_a_passing_check() -> None:
         views = ImageViews(launcher)
         assert await views.check()
         made = await views.make(b"original")
-        assert made == PreparedView(b"png", "image/png", 1, 1)
+        assert made == PreparedView(encoded(Image.new("RGB", (1, 1)), "PNG"), "image/png", 1, 1)
         assert launcher.argv[1:] == ["-I", str(WORKER)] and launcher.process.shut
 
     asyncio.run(scenario())
@@ -145,8 +155,9 @@ def test_views_need_a_passing_check() -> None:
 
 @pytest.mark.parametrize("reply", [b"not json", json.dumps({"ok": False, "reason": "bad"}).encode(),
                                    good(2000, 10), json.dumps({"ok": True, "media_type": "image/svg+xml",
-                                                               "width": 1, "height": 1, "data": ""}).encode()],
-                         ids=["not json", "refused", "too wide", "svg"])
+                                                               "width": 1, "height": 1, "data": ""}).encode(),
+                                   good(1, 1, "image/jpeg"), good(1, 1).replace(b'"width": 1', b'"width": 2')],
+                         ids=["not json", "refused", "too wide", "svg", "not its type", "not its size"])
 def test_a_bad_or_refusing_answer_is_no_copy(reply: bytes) -> None:
     async def scenario() -> None:
         launcher = Launcher(Process(good()))
@@ -165,6 +176,38 @@ def test_a_worker_that_hangs_is_shut_down() -> None:
         await views.check()
         launcher.process = Process(None, hang=True)
         assert "TimeoutError" in str(await views.make(b"x")) and launcher.process.shut
+
+    asyncio.run(scenario())
+
+
+def test_at_most_two_workers_run_at_once() -> None:
+    """Review C1: each worker may take 512 MiB, so copies wait for a free place."""
+    class Counting(Launcher):
+        def __init__(self) -> None:
+            super().__init__(Process(good()))
+            self.running = self.most = 0
+
+        async def launch(self, argv: Sequence[str], env: Mapping[str, str], cwd: str) -> Process:
+            self.running += 1
+            self.most = max(self.most, self.running)
+            launcher = self
+
+            class Slow(Process):
+                async def read_line(self) -> bytes:
+                    await asyncio.sleep(0.01)
+                    return await super().read_line()
+
+                async def shutdown(self, grace: float) -> None:
+                    launcher.running -= 1
+
+            return Slow(good())
+
+    async def scenario() -> None:
+        launcher = Counting()
+        views = ImageViews(launcher)
+        await views.check()
+        made = await asyncio.gather(*(views.make(b"x") for _ in range(6)))
+        assert all(isinstance(m, PreparedView) for m in made) and launcher.most == 2
 
     asyncio.run(scenario())
 

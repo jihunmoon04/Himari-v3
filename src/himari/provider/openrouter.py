@@ -197,6 +197,14 @@ def _dump(body: Mapping[str, Any]) -> bytes:
     return json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
 
 
+def _has_images(body: Mapping[str, Any]) -> bool:
+    """Whether an image part was put in — not whether marker text appears,
+    which a user or a Tool may write (review N1)."""
+    return any(part.get("type") == "image_url"
+               for message in body.get("messages", ()) if isinstance(message.get("content"), list)
+               for part in message["content"])
+
+
 def _image_part(info: AttachmentInfo) -> dict[str, Any]:
     return {"type": "image_url", "image_url": {"url": f"{MARKER}{info.view_key}:{info.view_media_type}"}}
 
@@ -244,7 +252,10 @@ def _mark_cache_breakpoint(messages: list[dict[str, Any]]) -> None:
     after the history is never sent again, so without a mark each Run read
     only the system prefix back and wrote the rest anew (measured, §13).
     The mark goes on the last message with text after the system message,
-    only for models where it was measured (``cache_breakpoints``).
+    only for models where it was measured (``cache_breakpoints``). In a
+    message of parts (one with images) it goes on its last text part, so
+    the images before it are cached too (review N6); the measured form is
+    a text part's mark, so an image part is never marked.
     """
     for message in reversed(messages):
         if message["role"] == "system":
@@ -252,6 +263,10 @@ def _mark_cache_breakpoint(messages: list[dict[str, Any]]) -> None:
         content = message.get("content")
         if isinstance(content, str) and content:
             message["content"] = [{"type": "text", "text": content, "cache_control": {"type": "ephemeral"}}]
+            return
+        texts = [part for part in content if part.get("type") == "text"] if isinstance(content, list) else []
+        if texts:
+            texts[-1]["cache_control"] = {"type": "ephemeral"}
             return
 
 
@@ -320,7 +335,7 @@ class OpenRouterAdapter:
         return NativePreparedRequest(
             body=raw,
             content_type="application/json",
-            raw_representation=(RawRepresentation.WIRE_EXACT_BLOB_REFS if MARKER.encode() in raw
+            raw_representation=(RawRepresentation.WIRE_EXACT_BLOB_REFS if _has_images(body)
                                 else RawRepresentation.WIRE_EXACT),
             endpoint=self._endpoint,
             digest=hashlib.sha256(raw).hexdigest(),

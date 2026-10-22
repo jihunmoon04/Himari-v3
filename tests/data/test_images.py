@@ -246,3 +246,87 @@ def test_a_result_may_attach_only_its_own_tool_images(which: str) -> None:
         assert refused.value.code is DataErrorCode.INVALID_ARGUMENT
 
     run(scenario())
+
+
+def test_a_result_may_not_attach_its_image_twice() -> None:
+    """Review N8: the same on both backends."""
+    async def scenario() -> None:
+        store = data_for(new_store())
+        scope = await conversation(store)
+        ref = await call(store, scope)
+        blob = await store.blobs.put(ALICE, chunks(picture()), 1 << 20)
+        record = await store.stage_tool_file(scope, ref, blob, "i.png", "image/png",
+                                             await store.blobs.prepare_image(ALICE, blob, None))
+        twice = ModelToolResult((AttachmentRef(record.file_id, 1), AttachmentRef(record.file_id, 1)))
+        with pytest.raises(DataError) as refused:
+            await store.commit_tool_outcome(scope, ref, ToolCompletion(ToolExecutionStatus.SUCCEEDED, twice))
+        assert refused.value.code is DataErrorCode.INVALID_ARGUMENT
+
+    run(scenario())
+
+
+def test_an_image_of_another_conversation_cannot_be_attached() -> None:
+    async def scenario() -> None:
+        store = data_for(new_store())
+        scope, elsewhere = await conversation(store), await conversation(store)
+        ref, theirs = await call(store, scope), await call(store, elsewhere)
+        blob = await store.blobs.put(ALICE, chunks(picture()), 1 << 20)
+        record = await store.stage_tool_file(elsewhere, theirs, blob, "i.png", "image/png",
+                                             await store.blobs.prepare_image(ALICE, blob, None))
+        result = ModelToolResult((AttachmentRef(record.file_id, 1),))
+        with pytest.raises(DataError) as refused:
+            await store.commit_tool_outcome(scope, ref, ToolCompletion(ToolExecutionStatus.SUCCEEDED, result))
+        assert refused.value.code is DataErrorCode.INVALID_ARGUMENT
+
+    run(scenario())
+
+
+def test_tool_images_are_neither_presented_files_nor_waiting_uploads() -> None:
+    """Review C4, N9: a call's images are not files it gave the user, and do not count as staged uploads."""
+    async def scenario() -> None:
+        store = data_for(new_store())
+        scope = await conversation(store)
+        ref = await call(store, scope)
+        blob = await store.blobs.put(ALICE, chunks(picture()), 1 << 20)
+        record = await store.stage_tool_file(scope, ref, blob, "i.png", "image/png",
+                                             await store.blobs.prepare_image(ALICE, blob, None))
+        assert await store.count_staged(scope) == 0
+        result = ModelToolResult((AttachmentRef(record.file_id, 1),))
+        await store.commit_tool_outcome(scope, ref, ToolCompletion(ToolExecutionStatus.SUCCEEDED, result))
+        assert await store.read_call_files(scope, [ref]) == {}
+
+    run(scenario())
+
+
+def test_a_copy_gone_from_disk_is_expired_when_read() -> None:
+    """Review C2: the next Run sends a line instead of failing again."""
+    async def scenario() -> None:
+        store = data_for(new_store())
+        scope = await conversation(store)
+        blob = await store.blobs.put(ALICE, chunks(picture()), 1 << 20)
+        record = await store.stage_upload(scope, blob, "p.png", "image/png",
+                                          await store.blobs.prepare_image(ALICE, blob, FakeViews()))
+        await store.append_event(scope, UserMessage((AttachmentRef(record.file_id, 1),)))
+        assert record.view is not None
+        store.blobs.files.remove(record.view.blob.key)
+        with pytest.raises(DataError) as missing:
+            store.blobs.read_bytes(record.view.blob.key)
+        assert missing.value.code is DataErrorCode.BLOB_MISSING
+        again, = await store.read_file_records(scope, [(record.file_id, 1)])
+        assert view_state(again) is ViewState.VIEW_EXPIRED and not again.expired
+
+    run(scenario())
+
+
+def test_an_original_over_the_source_limit_gets_no_copy() -> None:
+    """Review C1: whatever the file limit, a copy is made only of an original up to 32 MiB."""
+    from himari.data.api import MAX_IMAGE_SOURCE_BYTES
+
+    async def scenario() -> None:
+        store = data_for(new_store())
+        blob = await store.blobs.put(ALICE, chunks(picture() + bytes(MAX_IMAGE_SOURCE_BYTES)), 1 << 26)
+        views = FakeViews()
+        setup = await store.blobs.prepare_image(ALICE, blob, views)
+        assert setup.status is ImageStatus.TOO_LARGE and views.calls == 0
+
+    run(scenario())

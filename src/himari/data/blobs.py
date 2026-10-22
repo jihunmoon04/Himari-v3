@@ -44,6 +44,7 @@ from himari.data.api import (
     BLOB_GRACE,
     IMAGE_HEAD_BYTES,
     MAX_IMAGE_PIXELS,
+    MAX_IMAGE_SOURCE_BYTES,
     NO_IMAGE,
     DEFAULT_KEEP_DAYS,
     DEFAULT_STORE_MAX_BYTES,
@@ -459,11 +460,20 @@ class FileStore:
             raise DataError(DataErrorCode.BLOB_MISSING, blob.key) from None
 
     def read_bytes(self, key: str) -> bytes:
+        """A blob's bytes. One whose row is alive but whose file is gone or
+        damaged is expired here, so its record says so from now on and a
+        model copy turns into a line instead of failing every Run (review C2)."""
         row = self.rows.blob_row(key)
         if row is None:
             raise DataError(DataErrorCode.BLOB_MISSING, key)
-        with self.open(StoredBlob(key, row.sha256, row.size)) as handle:
-            return handle.read()
+        try:
+            with self.open(StoredBlob(key, row.sha256, row.size)) as handle:
+                return handle.read()
+        except DataError as error:
+            if error.code is DataErrorCode.BLOB_MISSING:
+                log.warning("blob %s is gone from disk: marked expired", key[:12])
+                self._expire([row], self._clock())
+            raise
 
     async def prepare_image(self, principal: PrincipalId, blob: StoredBlob, views: ViewMaker | None) -> ImageSetup:
         """V3-P67 §3–§3.1. The original is read here only to be handed to the
@@ -471,16 +481,19 @@ class FileStore:
         try:
             with self.open(blob) as handle:
                 sniffed = sniff_image(handle.read(IMAGE_HEAD_BYTES))
-                if sniffed is None:
-                    return NO_IMAGE
-                found = ImageSetup(ImageStatus.TOO_LARGE, sniffed.media_type, sniffed.width, sniffed.height)
-                if sniffed.width * sniffed.height > MAX_IMAGE_PIXELS:
-                    return found
-                if views is None or not views.available:
-                    return ImageSetup(ImageStatus.NO_SANDBOX, *_sizes(found))
-                handle.seek(0)
-                original = handle.read()
         except DataError:
+            return NO_IMAGE
+        if sniffed is None:
+            return NO_IMAGE
+        found = ImageSetup(ImageStatus.TOO_LARGE, sniffed.media_type, sniffed.width, sniffed.height)
+        if sniffed.width * sniffed.height > MAX_IMAGE_PIXELS or blob.size > MAX_IMAGE_SOURCE_BYTES:
+            return found
+        if views is None or not views.available:
+            return ImageSetup(ImageStatus.NO_SANDBOX, *_sizes(found))
+        try:
+            with self.open(blob) as handle:  # the rows are read here, the bytes (up to 32 MiB) in a thread
+                original = await asyncio.to_thread(handle.read)
+        except (DataError, OSError):
             return NO_IMAGE
         made = await views.make(original)
         if not isinstance(made, PreparedView):
