@@ -312,20 +312,58 @@ function fileLink(file, className) {
     return gone;
   }
   const link = el("a", className, `${label} · ${humanSize(file.size)}`);
-  link.href = `/api/conversations/${encodeURIComponent(app.conversationId)}/files/` +
-    `${encodeURIComponent(file.file_id)}/${encodeURIComponent(file.version)}`;
+  link.href = fileUrl(file);
   link.setAttribute("download", file.name);
   return link;
+}
+
+function fileUrl(file) {
+  return `/api/conversations/${encodeURIComponent(app.conversationId)}/files/` +
+    `${encodeURIComponent(file.file_id)}/${encodeURIComponent(file.version)}`;
+}
+
+/* An image with a copy (V3-P67 §8): a thumbnail of that copy — what the
+ * model saw, made by HIMARI — pressed, it downloads the file as before.
+ * Only an <img>: the server sends it inline with its own type, nosniff. */
+function fileThumb(file, className) {
+  const label = `${file.name || "image"}${file.version > 1 ? ` (v${file.version})` : ""}`;
+  const image = el("img", "file-thumb-image");
+  image.alt = label;
+  image.loading = "lazy";
+  image.decoding = "async";
+  const holder = file.expired ? el("span", "file-thumb") : el("a", "file-thumb");
+  if (!file.expired) {
+    holder.href = fileUrl(file);
+    holder.setAttribute("download", file.name);
+  }
+  holder.title = `${label} · ${file.image.width}×${file.image.height} · ${humanSize(file.size)}`;
+  // Gone since the page was read (the copy expired): the plain file instead.
+  image.addEventListener("error", () => holder.replaceWith(fileLink(file, className)), { once: true });
+  image.src = `${fileUrl(file)}/view`;
+  holder.append(image);
+  return holder;
+}
+
+function fileItem(file, className) {
+  return file.image && file.image.state === "ready" ? fileThumb(file, className) : fileLink(file, className);
 }
 
 function fileChips(files) {
   const list = el("ul", "file-chips");
   for (const file of files) {
     const item = el("li");
-    item.append(fileLink(file, "file-chip"));
+    item.append(fileItem(file, "file-chip"));
     list.append(item);
   }
   return list;
+}
+
+/* The images a tool returned (V3-P67 §8): the model got them too. */
+function toolImages(files) {
+  const node = el("div", "item item-tool-images");
+  node.append(el("span", "item-file-note", files.length === 1 ? "Image from the tool" : "Images from the tool"),
+              fileChips(files));
+  return node;
 }
 
 function presentedCard(file) {
@@ -399,7 +437,8 @@ function uploadFile(file) {
     }
     if (xhr.status === 201 && data) {
       Object.assign(entry, { state: "ready", fileId: data.file_id, size: data.size });
-      if (data.commands === false) {
+      // An image with a copy reaches the model as an image (V3-P67): no command needed.
+      if (data.commands === false && !(data.image && data.image.state === "ready")) {
         status("Commands cannot run on this server: HIMARI can read text files, but not PDFs or images.", "warn");
       }
     } else {
@@ -492,12 +531,14 @@ function renderEvent(event) {
       paintToolRow(orphan);
       timeline.append(orphan.node);
       for (const file of event.presented_files || []) timeline.append(presentedCard(file)); // PR #60 review C4
+      if (event.images && event.images.length) timeline.append(toolImages(event.images));
       return;
     }
     if (event.app_view && !entry.view) {
       views.attach(entry, `${event.run_id}/${event.call_id}`, event.run_id, event.call_id, false);
     }
     for (const file of event.presented_files || []) timeline.append(presentedCard(file)); // V3-P66 §9
+    if (event.images && event.images.length) timeline.append(toolImages(event.images)); // V3-P67 §8
     entry.result = event;
     paintToolRow(entry);
     if (entry.view) views.result(entry, Boolean(event.app_view));

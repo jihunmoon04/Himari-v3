@@ -1911,6 +1911,31 @@ details > summary {
   border-style: dashed;
 }
 
+.file-thumb {
+  display: inline-block;
+  max-width: 100%;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  line-height: 0;
+  background: var(--surface);
+}
+
+.file-thumb-image {
+  display: block;
+  max-width: 100%;
+  max-height: 240px;
+  width: auto;
+  height: auto;
+}
+
+.item-tool-images {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
 .item-file {
   display: flex;
   flex-wrap: wrap;
