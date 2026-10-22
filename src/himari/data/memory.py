@@ -38,6 +38,7 @@ from himari.data import rules
 from himari.data.blobs import BlobRow, FileStore, MemoryBlobFiles
 from himari.data.api import (
     MAX_ATTACHMENTS,
+    NO_IMAGE,
     MAX_STAGED_UPLOADS,
     PRESENT_LIMIT_BYTES,
     PRESENT_WINDOW,
@@ -59,6 +60,7 @@ from himari.data.api import (
     EventKind,
     FileOrigin,
     FileRecord,
+    ImageSetup,
     PresentedFile,
     StoredBlob,
     EventPayload,
@@ -128,6 +130,11 @@ class _File:
     workspace_path: str | None = None
     attached_at: datetime | None = None
     call: CallRef | None = None
+    image: ImageSetup = NO_IMAGE  # V3-P67
+
+    def keys(self) -> set[str]:
+        """The blobs it refers to: the file, and its model copy."""
+        return {self.blob_key} | ({self.image.view.blob.key} if self.image.view is not None else set())
 
 
 @dataclass
@@ -257,13 +264,13 @@ class _MemoryBlobRows:
         return sum(r.size for r in self._store.blob_rows.values() if r.expired_at is None)
 
     def expirable(self, used_before: datetime) -> Sequence[BlobRow]:
-        staged = {f.blob_key for f in self._files() if f.attached_at is None}
+        staged = {k for f in self._files() if f.attached_at is None for k in f.keys()}
         rows = [r for r in self._store.blob_rows.values()
                 if r.expired_at is None and r.last_used_at < used_before and r.key not in staged]
         return sorted(rows, key=lambda r: (r.last_used_at, r.key))
 
     def expire_blobs(self, keys: Sequence[str], now: datetime) -> Sequence[str]:
-        staged = {f.blob_key for f in self._files() if f.attached_at is None}  # as in SQLite (re-review N3)
+        staged = {k for f in self._files() if f.attached_at is None for k in f.keys()}  # as in SQLite (re-review N3)
         expired = []
         for key in keys:
             row = self._store.blob_rows.get(key)
@@ -299,7 +306,7 @@ class _MemoryBlobRows:
         return False
 
     def unreferenced_keys(self, used_before: datetime) -> Sequence[str]:
-        used = {f.blob_key for f in self._files()}
+        used = {k for f in self._files() for k in f.keys()}
         return [r.key for r in self._store.blob_rows.values()
                 if r.key not in used and (r.expired_at is not None or r.last_used_at < used_before)]
 
@@ -374,9 +381,38 @@ class InMemoryData:
 
     def _record(self, file: _File) -> FileRecord:
         row = self._store.blob_rows[file.blob_key]
+        image, view = file.image, file.image.view
+        if view is not None:
+            view_row = self._store.blob_rows[view.blob.key]
+            view = replace(view, expired=view_row.expired_at is not None)
         return FileRecord(file.file_id, file.version, file.origin, file.name, file.media_type,
                           StoredBlob(row.key, row.sha256, row.size), file.created_at, file.workspace_path,
-                          file.attached_at is not None, row.expired_at is not None, file.call)
+                          file.attached_at is not None, row.expired_at is not None, file.call,
+                          image.status, image.image_type, image.width, image.height, view)
+
+    def _alive(self, blob: StoredBlob) -> bool:
+        row = self._store.blob_rows.get(blob.key)
+        return row is not None and row.expired_at is None and row.size == blob.size
+
+    def _new_file(self, conv: _Conversation, origin: FileOrigin, call: CallRef | None, blob: StoredBlob,
+                  name: str, media_type: str, image: ImageSetup) -> FileRecord:
+        if not self._alive(blob) or (image.view is not None and not self._alive(image.view.blob)):
+            raise DataError(DataErrorCode.BLOB_MISSING, blob.key)
+        file = _File(FileId(self._store.new_id("file")), 1, origin, name, media_type, blob.key, datetime.now(UTC),
+                     call=call, image=image)
+        conv.files.append(file)
+        return self._record(file)
+
+    def _tool_images(self, conv: _Conversation, call: CallRef, blocks: Sequence[object]) -> list[_File]:
+        """V3-P67 §4.2: a result's attachments are this call's staged Tool images."""
+        found: list[_File] = []
+        for ref in (b for b in blocks if isinstance(b, AttachmentRef)):
+            file = next((f for f in conv.files if f.file_id == ref.file_id and f.version == ref.version), None)
+            if (file is None or file.origin is not FileOrigin.TOOL or file.attached_at is not None or file.call != call
+                    or any(f is file for f in found)):  # twice in one result: refused, as in SQLite (review N8)
+                raise DataError(DataErrorCode.INVALID_ARGUMENT, f"{ref.file_id} is not an image of this call")
+            found.append(file)
+        return found
 
     def _check_attachments(self, conv: _Conversation, file_ids: Sequence[str], *,
                            cutoff: datetime | None) -> list[_File]:
@@ -628,8 +664,10 @@ class InMemoryData:
             raise DataError(DataErrorCode.INVALID_ARGUMENT, "only a succeeded call presents files")
         staged = self._stage_artifacts(conv, completion.artifact_mutations)  # validates CAS first
         presented = self._stage_presented(conv, call, completion.presented_files)
+        images = self._tool_images(conv, call, completion.model_result.blocks)
         conv.artifacts.update(staged)
         conv.files.extend(presented)
+        self._mark_attached(images)
         if view is not None:
             self._store.ui_resources.setdefault(view.resource.digest, view.resource)
             conv.app_payloads[call] = view.payload
@@ -910,7 +948,7 @@ class InMemoryData:
         for digest in {e.ui_digest for e in conv.executions.values()} - used:
             if digest is not None:
                 del self._store.ui_resources[digest]
-        await self.blobs.release({f.blob_key for f in conv.files})  # never fails the purge (V3-P66 §8.1)
+        await self.blobs.release({k for f in conv.files for k in f.keys()})  # never fails the purge (V3-P66 §8.1)
 
     async def used_tool_ids(self, scope: TrustedScope) -> frozenset[ToolId]:
         return frozenset(e.tool_id for e in self._conv(scope).executions.values())
@@ -925,20 +963,21 @@ class InMemoryData:
 
     # --- FileCatalog (V3-P66) ----------------------------------------------------------
 
-    async def stage_upload(self, scope: TrustedScope, blob: StoredBlob, name: str, media_type: str) -> FileRecord:
+    async def stage_upload(self, scope: TrustedScope, blob: StoredBlob, name: str, media_type: str,
+                           image: ImageSetup = NO_IMAGE) -> FileRecord:
         conv = self._conv(scope)
-        if sum(1 for f in conv.files if f.attached_at is None) >= MAX_STAGED_UPLOADS:
+        if sum(1 for f in conv.files if f.attached_at is None and f.origin is FileOrigin.UPLOAD) >= MAX_STAGED_UPLOADS:
             raise DataError(DataErrorCode.LIMIT_EXCEEDED, f"{MAX_STAGED_UPLOADS} uploads wait to be sent")
-        row = self._store.blob_rows.get(blob.key)
-        if row is None or row.expired_at is not None or row.size != blob.size:
-            raise DataError(DataErrorCode.BLOB_MISSING, blob.key)
-        file = _File(FileId(self._store.new_id("file")), 1, FileOrigin.UPLOAD, name, media_type, blob.key,
-                     datetime.now(UTC))
-        conv.files.append(file)
-        return self._record(file)
+        return self._new_file(conv, FileOrigin.UPLOAD, None, blob, name, media_type, image)
+
+    async def stage_tool_file(self, scope: TrustedScope, call: CallRef, blob: StoredBlob, name: str,
+                              media_type: str, image: ImageSetup) -> FileRecord:
+        conv = self._conv(scope)
+        self._execution(conv, call)  # a call of this Conversation
+        return self._new_file(conv, FileOrigin.TOOL, call, blob, name, media_type, image)
 
     async def count_staged(self, scope: TrustedScope) -> int:
-        return sum(1 for f in self._conv(scope).files if f.attached_at is None)
+        return sum(1 for f in self._conv(scope).files if f.attached_at is None and f.origin is FileOrigin.UPLOAD)
 
     async def set_placement(self, scope: TrustedScope, file_id: FileId, workspace_path: str) -> None:
         conv = self._conv(scope)
@@ -974,7 +1013,7 @@ class InMemoryData:
         conv = self._conv(scope)
         found = {}
         for call in dict.fromkeys(calls):
-            files = [self._record(f) for f in conv.files if f.call == call]
+            files = [self._record(f) for f in conv.files if f.call == call and f.origin is FileOrigin.PRESENTED]
             if files:
                 found[call] = tuple(files)
         return found

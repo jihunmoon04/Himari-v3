@@ -288,3 +288,114 @@ def test_presented_files_over_the_hours_limit_fail_the_call() -> None:
         assert "last hour" in record.model_result.blocks[0].text  # type: ignore[union-attr]
 
     asyncio.run(scenario())
+
+
+# --- Tool images (V3-P67 §4.2) ------------------------------------------------
+
+
+def _png(size: tuple[int, int] = (8, 6)) -> bytes:
+    import io
+
+    from PIL import Image
+    out = io.BytesIO()
+    Image.new("RGB", size).save(out, "PNG")
+    return out.getvalue()
+
+
+def _dispatch_images(images: tuple[object, ...]) -> tuple[InMemoryData, ToolExecutionRecord]:
+    from himari.data.api import DEFAULT_FILE_MAX_BYTES
+    from himari.tool.images import StoredResultImages
+
+    async def scenario() -> tuple[InMemoryData, ToolExecutionRecord]:
+        store = InMemoryStore()
+        store.create_conversation(SCOPE)
+        data = InMemoryData(store)
+        tool = RecordingTool("remote/chart", external_source="remote",
+                             behavior=lambda i, c: ToolOutcome(ToolStatus.SUCCEEDED, text_result("chart"),
+                                                               result_images=images))  # type: ignore[arg-type]
+        dispatcher = Dispatcher(ToolRegistry([tool]), data, data, data, ConfiguredExternalAccess({"remote": True}, data),
+                                images=StoredResultImages(data.blobs, data, None, DEFAULT_FILE_MAX_BYTES))
+        run_id = await data.prepare_run(
+            SCOPE, RunPreparation(b"", "t", RawRepresentation.ADAPTER_SERIALIZED, (), PromptBasis(0, 0), "p", "m"))
+        await data.mark_dispatch(SCOPE, run_id)
+        await data.record_raw_outcome(SCOPE, run_id, RawReceived(b"", "t"))
+        call = ToolCall(CallId("a"), 0, ToolId("remote/chart"), {})
+        await data.project_model_output(SCOPE, run_id, AssistantToolCalls((call,)))
+        await dispatcher.dispatch_group(SCOPE, run_id, (call,))
+        (record,) = await data.read_tool_executions(SCOPE, run_id)
+        return data, record
+    return asyncio.run(scenario())
+
+
+def test_returned_images_are_kept_and_attached_after_the_text() -> None:
+    from himari.common import AttachmentRef, FileId
+    from himari.data.api import FileOrigin, ImageStatus
+    from himari.tool.api import ResultImage
+    data, record = _dispatch_images((ResultImage(_png(), "image/png"), ResultImage(b"<svg/>", "image/svg+xml")))
+    assert record.status is ToolExecutionStatus.SUCCEEDED and record.model_result is not None
+    first, kept, refused = record.model_result.blocks
+    assert first == text_result("chart").blocks[0] and isinstance(kept, AttachmentRef)
+    assert refused.text == "[an image of an unsupported type was returned]"  # type: ignore[union-attr]
+    file, = asyncio.run(data.read_file_records(SCOPE, [(FileId(kept.file_id), 1)]))
+    assert (file.origin, file.name, file.attached, file.call) == (FileOrigin.TOOL, "image-1.png", True, record.call)
+    assert file.image_status is ImageStatus.NO_SANDBOX  # no image sandbox here: kept, not prepared
+
+
+def test_more_than_eight_images_become_a_line() -> None:
+    from himari.common import AttachmentRef
+    from himari.tool.api import ResultImage
+    _, record = _dispatch_images(tuple(ResultImage(_png((i + 1, 1)), "image/png") for i in range(10)))
+    assert record.model_result is not None
+    blocks = record.model_result.blocks
+    assert sum(isinstance(b, AttachmentRef) for b in blocks) == 8
+    assert blocks[-1].text == "[2 more images were returned; only the first 8 are kept]"  # type: ignore[union-attr]
+
+
+def test_a_cancel_while_images_are_kept_still_commits_the_result() -> None:
+    """Review B1: the call ran, so a cancel during the copies stops them, not the commit."""
+    from himari.common import AttachmentRef
+    from himari.data.api import DEFAULT_FILE_MAX_BYTES
+    from himari.tool.api import ResultImage
+    from himari.tool.images import StoredResultImages
+
+    async def scenario() -> None:
+        store = InMemoryStore()
+        store.create_conversation(SCOPE)
+        data = InMemoryData(store)
+        kept = StoredResultImages(data.blobs, data, None, DEFAULT_FILE_MAX_BYTES)
+        second = asyncio.Event()
+
+        class Slow:
+            async def keep(self, scope, call, image, number):  # type: ignore[no-untyped-def]
+                if number == 1:
+                    return await kept.keep(scope, call, image, number)
+                second.set()
+                await asyncio.Event().wait()  # a copy that never ends
+
+        images = tuple(ResultImage(_png(), "image/png") for _ in range(3))
+        tool = RecordingTool("remote/read", external_source="remote", effect=EffectProfile.READ,
+                             behavior=lambda i, c: ToolOutcome(ToolStatus.SUCCEEDED, text_result("shot"),
+                                                               result_images=images))
+        dispatcher = Dispatcher(ToolRegistry([tool]), data, data, data, ConfiguredExternalAccess({"remote": True}, data),
+                                images=Slow())
+        run_id = await data.prepare_run(
+            SCOPE, RunPreparation(b"", "t", RawRepresentation.ADAPTER_SERIALIZED, (), PromptBasis(0, 0), "p", "m"))
+        await data.mark_dispatch(SCOPE, run_id)
+        await data.record_raw_outcome(SCOPE, run_id, RawReceived(b"", "t"))
+        call = ToolCall(CallId("a"), 0, ToolId("remote/read"), {})
+        await data.project_model_output(SCOPE, run_id, AssistantToolCalls((call,)))
+        task = asyncio.ensure_future(dispatcher.dispatch_group(SCOPE, run_id, (call,)))
+        await second.wait()
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        else:
+            raise AssertionError("the cancel is passed on after the commit")
+        (record,) = await data.read_tool_executions(SCOPE, run_id)
+        assert record.status is ToolExecutionStatus.SUCCEEDED and record.model_result is not None
+        _, first, *rest = record.model_result.blocks
+        assert isinstance(first, AttachmentRef)
+        assert [b.text for b in rest] == ["[an image was returned but not kept: the call was cancelled]"] * 2  # type: ignore[union-attr]
+    asyncio.run(scenario())

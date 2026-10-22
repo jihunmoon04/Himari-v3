@@ -409,3 +409,50 @@ def test_b4_a_cancel_right_after_a_pause_closes_the_calls_left() -> None:
         assert statuses == [ToolExecutionStatus.SUCCEEDED, ToolExecutionStatus.CANCELLED]  # nothing left for Continue
 
     asyncio.run(scenario())
+
+
+def test_a_cancel_while_a_writes_images_are_kept_keeps_its_definite_result() -> None:
+    """V3-P67 (PR #62 review B1): the write ran and returned; a cancel while
+    its image copies are made never makes it uncertain."""
+    import io
+
+    from PIL import Image
+
+    from himari.data.api import PreparedView
+    from himari.tool.api import ResultImage
+
+    out = io.BytesIO()
+    Image.new("RGB", (4, 3)).save(out, "PNG")
+
+    class Hanging:
+        available = True
+
+        def __init__(self) -> None:
+            self.entered = asyncio.Event()
+
+        async def make(self, original: bytes) -> PreparedView | str:
+            self.entered.set()
+            await asyncio.Event().wait()
+            return "never"
+
+    async def scenario() -> None:
+        views = Hanging()
+        write = RecordingTool("fake/shot", effect=EffectProfile.SCOPED_WRITE, environment_kind=FAKE,
+                              workspace=WorkspaceRequirement.DEFAULT,
+                              behavior=lambda i, c: ToolOutcome(ToolStatus.SUCCEEDED, text_result("shot"),
+                                                                result_images=(ResultImage(out.getvalue(), "image/png"),)))
+        rt, _ = runtime([calls(("fake/shot", {})), final("done")], env_tools=[write], image_views=views)
+        rt.store.activate_environment(SCOPE, FAKE, WorkspaceId("ws_1"))
+        stop = StopSignal()
+        job = asyncio.create_task(rt.driver.drive(SCOPE, user("take it"), stop=stop))
+        await views.entered.wait()
+        stop.cancel()
+        cancelled = await job
+
+        assert cancelled.state is DriveState.CANCELLED
+        (record,) = await _records(rt, cancelled.run_ids[0])
+        assert record.status is ToolExecutionStatus.SUCCEEDED  # committed; cancel_group left it alone
+        assert record.model_result.blocks[-1].text == "[an image was returned but not kept: the call was cancelled]"
+        assert len(write.invocations) == 1
+
+    asyncio.run(scenario())

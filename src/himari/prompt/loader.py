@@ -31,9 +31,11 @@ from himari.data.api import (
     ConversationLog,
     EventKind,
     FileCatalog,
+    FileRecord,
     StateQuery,
     ToolExecutionRecord,
     TriggerRef,
+    view_state,
 )
 from himari.prompt.api import AttachmentInfo, PromptInputs, RequestOptions, SourceNote, UsageMark, attachment_key
 from himari.prompt.compaction import read_summary
@@ -125,5 +127,14 @@ class ContextLoader:
         if not refs or self._files is None:
             return {}
         records = await self._files.read_file_records(scope, refs)
-        return {attachment_key(AttachmentRef(r.file_id, r.version)):
-                AttachmentInfo(r.name, r.workspace_path, r.media_type, r.size) for r in records}
+        return {attachment_key(AttachmentRef(r.file_id, r.version)): _info(r) for r in records}
+
+
+def _info(record: FileRecord) -> AttachmentInfo:
+    view = record.view
+    return AttachmentInfo(record.name, record.workspace_path, record.media_type, record.size,
+                          view_state=view_state(record).value,
+                          view_key=None if view is None else view.blob.key,
+                          view_media_type=None if view is None else view.media_type,
+                          view_width=0 if view is None else view.width, view_height=0 if view is None else view.height,
+                          view_bytes=0 if view is None else view.blob.size)

@@ -277,3 +277,7 @@ class RawRepresentation(Enum):
 
     WIRE_EXACT = "wire_exact"
     ADAPTER_SERIALIZED = "adapter_serialized"
+    # V3-P67 §7.4 (V3-048 amended): wire-exact but for image data, stored as
+    # ``himari-blob:`` markers that the adapter expands when it sends: the
+    # sent bytes can be rebuilt exactly while the blobs remain.
+    WIRE_EXACT_BLOB_REFS = "wire_exact_blob_refs"

@@ -41,14 +41,17 @@ P0 scheduling is sequential in original ordinal order; parallel scheduling
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Callable, Sequence
 from dataclasses import replace
 
 from himari.common import (
+    AttachmentRef,
     BindingId,
     CallId,
     CallRef,
+    ContentBlock,
     ModelToolResult,
     RunId,
     TextBlock,
@@ -70,6 +73,7 @@ from himari.data.api import (
 )
 from himari.tool.access import NoExternalAccess
 from himari.tool.api import (
+    MAX_RESULT_IMAGES,
     Completion,
     ConversationRecord,
     EffectProfile,
@@ -83,6 +87,7 @@ from himari.tool.api import (
     ToolOrigin,
     ToolOutcome,
     ToolStatus,
+    ResultImageStore,
     WorkspaceRequirement,
 )
 from himari.tool.registry import ToolRegistry
@@ -103,6 +108,8 @@ _FILES_REFUSED = {
     DataErrorCode.BLOB_MISSING: "its stored copy is gone",
     DataErrorCode.LIMIT_EXCEEDED: "too much was presented in the last hour",
 }
+
+_NOT_KEPT_CANCELLED = "[an image was returned but not kept: the call was cancelled]"
 
 UNKNOWN_OUTCOME_RESULT = ModelToolResult(
     blocks=(
@@ -149,12 +156,14 @@ class Dispatcher:
         artifacts: ArtifactStore,
         workspaces: WorkspaceState,
         external_access: ExternalAccess | None = None,  # None: no External source is enabled
+        images: ResultImageStore | None = None,  # None: Tool images become lines (V3-P67 §4.2)
     ) -> None:
         self._registry = registry
         self._log = log
         self._artifacts = artifacts
         self._workspaces = workspaces
         self._external_access = external_access if external_access is not None else NoExternalAccess()
+        self._images = images
 
     async def dispatch_group(
         self,
@@ -301,7 +310,40 @@ class Dispatcher:
             raise _Denied("binding does not belong to the active environment instance")
         return binding
 
+    async def _keep_images(self, scope: TrustedScope, call: CallRef, outcome: ToolOutcome) -> tuple[ToolOutcome, bool]:
+        """V3-P67 §4.2: each returned image kept and staged, an attachment at
+        the end of the result for it — or a line saying why not. A cancel
+        while copies are made stops making them, never the commit: the call
+        ran, so its result is kept (review B1); True says to re-raise it."""
+        if not outcome.result_images:
+            return outcome, False
+        blocks: list[ContentBlock] = list(outcome.model_result.blocks)
+        cancelled = False
+        for number, image in enumerate(outcome.result_images[:MAX_RESULT_IMAGES], start=1):
+            kept: AttachmentRef | str = "[an image was returned but could not be kept]"
+            if cancelled:
+                kept = _NOT_KEPT_CANCELLED
+            elif self._images is not None:
+                try:
+                    kept = await self._images.keep(scope, call, image, number)
+                except asyncio.CancelledError:
+                    cancelled, kept = True, _NOT_KEPT_CANCELLED
+            blocks.append(TextBlock(kept) if isinstance(kept, str) else kept)
+        extra = len(outcome.result_images) - MAX_RESULT_IMAGES
+        if extra > 0:
+            blocks.append(TextBlock(f"[{extra} more images were returned; only the first {MAX_RESULT_IMAGES} are kept]"))
+        model_result = replace(outcome.model_result, blocks=tuple(blocks))
+        return replace(outcome, model_result=model_result, result_images=()), cancelled
+
     async def _commit(
+        self, scope: TrustedScope, call: CallRef, outcome: ToolOutcome, record_event: bool
+    ) -> None:
+        outcome, cancelled = await self._keep_images(scope, call, outcome)
+        await self._commit_kept(scope, call, outcome, record_event)
+        if cancelled:
+            raise asyncio.CancelledError
+
+    async def _commit_kept(
         self, scope: TrustedScope, call: CallRef, outcome: ToolOutcome, record_event: bool
     ) -> None:
         ran = outcome.status in (ToolStatus.SUCCEEDED, ToolStatus.FAILED)

@@ -34,7 +34,7 @@ import asyncio
 import base64
 import binascii
 import json
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, TypeGuard
 
@@ -48,8 +48,10 @@ from himari.mcp.resources import ResourceTool, resource_tools
 from himari.mcp.stdio import RESTART_NOTICE, ListingChannel, ProcessLauncher, StdioChannel, StdioServer
 from himari.tool.api import (
     MAX_APP_PAYLOAD_BYTES,
+    MAX_IMAGE_BASE64_CHARS,
     MAX_UI_HTML_BYTES,
     AppView,
+    ResultImage,
     InputSchemaCheck,
     SchemaError,
     ToolContext,
@@ -136,7 +138,8 @@ class McpTool:
                 raw["ui_problem"] = f"the result is larger than {MAX_APP_PAYLOAD_BYTES} bytes"
             else:
                 view = AppView(self.ui, payload)
-        text = render_result(result)
+        images = result_images(result)
+        text = render_result(result, shown=images.keys())
         if self._client.take_restart(key):  # V3-P59 §5.3: the server's earlier identifiers may not hold
             text = f"{RESTART_NOTICE}\n\n{text}"
             raw["restarted"] = True
@@ -145,6 +148,7 @@ class McpTool:
             ModelToolResult((TextBlock(text),), is_error=failed),
             raw_result=raw,
             app_view=view,
+            result_images=tuple(images.values()),
         )
 
 
@@ -211,14 +215,39 @@ def ui_resource(source: str, uri: str, answer: Mapping[str, Any]) -> UiResource:
     )
 
 
-def render_result(result: Mapping[str, Any]) -> str:
+def _image(item: Mapping[str, Any]) -> ResultImage | None:
+    """An ``image`` content item's bytes (V3-P67 §4.2), the base64 length
+    checked before it is decoded (review B3); None if it cannot be used."""
+    data = item.get("data")
+    if not isinstance(data, str) or len(data) > MAX_IMAGE_BASE64_CHARS:
+        return None
+    try:
+        decoded = base64.b64decode(data, validate=True)
+    except ValueError:
+        return None
+    mime = item.get("mimeType")
+    return ResultImage(decoded, mime if isinstance(mime, str) else "") if decoded else None
+
+
+def result_images(result: Mapping[str, Any]) -> dict[int, ResultImage]:
+    """The usable images of a result by their place in its content, in
+    order: the model sees them (as the Dispatcher keeps them) instead of a
+    placeholder."""
+    content = result.get("content")
+    found = {index: _image(item) for index, item in enumerate(content if isinstance(content, list) else ())
+             if isinstance(item, dict) and item.get("type") == "image"}
+    return {index: image for index, image in found.items() if image is not None}
+
+
+def render_result(result: Mapping[str, Any], shown: Collection[int] = ()) -> str:
     """The model's view of a ``tools/call`` result: its text content, a
     placeholder for content it cannot read here, else the structured
-    content as JSON; cut to MAX_RESULT_CHARS."""
+    content as JSON; cut to MAX_RESULT_CHARS. The items at ``shown`` are
+    left out: they reach the model as images."""
     parts: list[str] = []
     content = result.get("content")
-    for item in content if isinstance(content, list) else ():
-        if not isinstance(item, dict):
+    for index, item in enumerate(content if isinstance(content, list) else ()):
+        if not isinstance(item, dict) or index in shown:
             continue
         kind = item.get("type")
         if kind == "text" and isinstance(item.get("text"), str):

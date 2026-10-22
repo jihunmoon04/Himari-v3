@@ -42,12 +42,22 @@ from typing import BinaryIO, Protocol
 from himari.common import PrincipalId
 from himari.data.api import (
     BLOB_GRACE,
+    IMAGE_HEAD_BYTES,
+    MAX_IMAGE_PIXELS,
+    MAX_IMAGE_SOURCE_BYTES,
+    NO_IMAGE,
     DEFAULT_KEEP_DAYS,
     DEFAULT_STORE_MAX_BYTES,
     DataError,
     DataErrorCode,
+    ImageSetup,
+    ImageStatus,
+    ImageView,
+    PreparedView,
     StoredBlob,
+    ViewMaker,
     blob_key,
+    sniff_image,
 )
 
 log = logging.getLogger(__name__)
@@ -347,6 +357,14 @@ class MemoryBlobFiles:
 # --- the store ---------------------------------------------------------------------------
 
 
+def _sizes(found: ImageSetup) -> tuple[str | None, int | None, int | None]:
+    return found.image_type, found.width, found.height
+
+
+async def _once(data: bytes) -> AsyncIterator[bytes]:
+    yield data
+
+
 async def _finish[T](function: Callable[..., T], *args: object) -> T:
     """Run in a worker thread and wait until it is done, even if cancelled
     meanwhile; a cancellation that arrived is re-raised afterwards."""
@@ -440,6 +458,56 @@ class FileStore:
             return self.files.open(blob.key)
         except OSError:
             raise DataError(DataErrorCode.BLOB_MISSING, blob.key) from None
+
+    def read_bytes(self, key: str) -> bytes:
+        """A blob's bytes. One whose row is alive but whose file is gone or
+        damaged (checked again) is expired here, so its record says so from now on and a
+        model copy turns into a line instead of failing every Run (review C2)."""
+        row = self.rows.blob_row(key)
+        if row is None:
+            raise DataError(DataErrorCode.BLOB_MISSING, key)
+        try:
+            with self.open(StoredBlob(key, row.sha256, row.size)) as handle:
+                return handle.read()
+        except DataError as error:
+            # Only a file really gone or damaged — never one that could not be
+            # opened just now (out of descriptors, an I/O error: re-review C1).
+            if error.code is DataErrorCode.BLOB_MISSING and self.files.inspect(key) != row.size:
+                log.warning("blob %s is gone from disk: marked expired", key[:12])
+                self._expire([row], self._clock())
+            raise
+
+    async def prepare_image(self, principal: PrincipalId, blob: StoredBlob, views: ViewMaker | None) -> ImageSetup:
+        """V3-P67 §3–§3.1. The original is read here only to be handed to the
+        image sandbox; nothing in this process decodes it."""
+        try:
+            with self.open(blob) as handle:
+                sniffed = sniff_image(handle.read(IMAGE_HEAD_BYTES))
+        except DataError:
+            return NO_IMAGE
+        if sniffed is None:
+            return NO_IMAGE
+        found = ImageSetup(ImageStatus.TOO_LARGE, sniffed.media_type, sniffed.width, sniffed.height)
+        if sniffed.width * sniffed.height > MAX_IMAGE_PIXELS or blob.size > MAX_IMAGE_SOURCE_BYTES:
+            return found
+        if views is None or not views.available:
+            return ImageSetup(ImageStatus.NO_SANDBOX, *_sizes(found))
+        try:
+            with self.open(blob) as handle:  # the rows are read here, the bytes (up to 32 MiB) in a thread
+                original = await asyncio.to_thread(handle.read)
+        except (DataError, OSError):
+            return NO_IMAGE
+        made = await views.make(original)
+        if not isinstance(made, PreparedView):
+            log.info("no model copy of an image: %s", made)
+            return ImageSetup(ImageStatus.UNPREPARED, *_sizes(found))
+        try:
+            stored = await self.put(principal, _once(made.data), len(made.data))
+        except DataError as error:  # e.g. STORE_FULL: the image is kept, without a copy
+            log.info("no room for a model copy of an image: %s", error.code.value)
+            return ImageSetup(ImageStatus.UNPREPARED, *_sizes(found))
+        return ImageSetup(ImageStatus.READY, *_sizes(found),
+                          view=ImageView(stored, made.media_type, made.width, made.height))
 
     async def release(self, keys: Iterable[str]) -> None:
         """After a purge commits (§8.1): blobs nothing refers to any more go,

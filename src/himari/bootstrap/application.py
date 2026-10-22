@@ -75,6 +75,7 @@ from himari.data.api import (
     DataError,
     DataErrorCode,
     FileRecord,
+    ViewMaker,
     InitialActivation,
     ModelSetting,
     ToolExecutionRecord,
@@ -87,6 +88,7 @@ from himari.data.api import (
 )
 from himari.data.sqlite import SqliteData, SqliteStore
 from himari.environment.inside import INSIDE, InsideEnvironment, InsideFiles
+from himari.imaging import ImageViews, runtime_roots
 # For the interfaces (V3-P66 §9): how placing an upload can be refused.
 from himari.environment.inside import UploadsFolderUnusable as UploadsFolderUnusable
 from himari.environment.inside import WorkspaceBusy as WorkspaceBusy
@@ -98,7 +100,7 @@ from himari.mcp.jsonrpc import McpError
 from himari.mcp.prompts import PromptContentError, prompt_text
 from himari.mcp.stdio import ProcessLauncher
 from himari.mcp.tools import LauncherFor, McpConnection, PromptArgument, SourceStatus, connect
-from himari.prompt.api import ATTACHMENT_NOTE, ContextBudget, SourceNote
+from himari.prompt.api import ATTACHMENT_NOTE, TOOL_IMAGES_NOTE, ContextBudget, SourceNote
 from himari.provider.api import ProviderAdapter
 from himari.tool.api import ToolHandler
 from himari.tool.schema import check_tool_input_schema
@@ -340,6 +342,33 @@ class ToolSourceView:
     problems: tuple[str, ...]
 
 
+async def _image_views(root: Path, sandbox: bool) -> ImageViews:
+    """V3-P67 §3.1 (review B1): model copies only inside the image profile —
+    the server sandbox with the Python runtime read-only and nothing
+    writable. Not ENFORCED, or the check fails: no copies at all."""
+    if not sandbox:
+        return ImageViews(None)
+    server = ServerSandbox.discover([str(root)])
+    state = await server.start()
+    if state is not SandboxState.ENFORCED:
+        log.warning("images cannot be prepared on this server: the image sandbox is %s", state.value)
+        return ImageViews(None)
+    home = Path.home().resolve()
+    broad = [r for r in runtime_roots() if home.is_relative_to(r)]
+    if broad:  # Python installed with the home directory (or more) as its prefix (re-review N5)
+        log.warning("images cannot be prepared on this server: the Python runtime %s would show the home "
+                    "directory to the image sandbox", broad[0])
+        return ImageViews(None)
+    try:
+        launcher = server.launcher(ServerProfile(read_only=runtime_roots()))
+    except Exception as error:  # noqa: BLE001 — a profile the sandbox refuses: no copies
+        log.warning("images cannot be prepared on this server: %s", error)
+        return ImageViews(None)
+    views = ImageViews(launcher)
+    await views.check()
+    return views
+
+
 async def _server_launchers(config: McpConfig, root: Path) -> LauncherFor | None:
     """The server sandbox for stdio servers (V3-P59 §4), made only when one is
     configured. HIMARI's data root — the database, the operator secret,
@@ -385,6 +414,7 @@ class Application:
     trash_days: int = DEFAULT_TRASH_DAYS
     file_max_bytes: int = DEFAULT_FILE_MAX_BYTES  # V3-P66 §8.3
     uploads_work: bool = True  # the no-replace rename placing needs works here (review N2)
+    views: ViewMaker | None = None  # model copies of images (V3-P67 §3.1); None or unavailable: no copies
     # V3-P65 §7.3: one lifecycle lock per Conversation (P0: one server process),
     # kept only while some call holds or waits for it (PR #56 review C1).
     _lifecycle: dict[ConversationId, _Lifecycle] = field(default_factory=dict, repr=False)
@@ -477,15 +507,18 @@ class Application:
             elif state is not SandboxState.ENFORCED:  # V3-P66 §5.2 (review C2)
                 log.warning("commands cannot run (sandbox %s): the model can read attached text files, "
                             "but cannot open other files such as PDFs or images", state.value)
+            views = await _image_views(root, sandbox)
             base = DEFAULT_INSTRUCTIONS if instructions is None else instructions
             runtime = build_runtime(provider, store=store, environments=[inside], tools=[*tools, *mcp.handlers, *mcp.resource_tools],
                                     models=catalog,
-                                    instructions=(*base, ATTACHMENT_NOTE) if uploads_work else base,
+                                    instructions=(*base, *((ATTACHMENT_NOTE,) if uploads_work else ()),
+                                                  TOOL_IMAGES_NOTE),
                                     external_defaults=mcp.defaults,
                                     source_notes=[SourceNote(source, note.placement, note.text)
                                                   for source, note in mcp.notes.items()],
                                     max_runs_per_drive=max_runs, turn_budget=turn_budget,
-                                    no_progress_runs=turn.no_progress_runs)
+                                    no_progress_runs=turn.no_progress_runs, image_views=views,
+                                    file_max_bytes=file_max_bytes)
         except BaseException:
             try:
                 if mcp is not None:
@@ -497,7 +530,7 @@ class Application:
         runner = BackgroundRunner(runtime.driver, unattended_runs=unattended_runs, seen_seconds=turn.seen_seconds)
         application = cls(root, store, runtime.data, runtime, runner, inside, state, model_id,
                           default_budget.limit_tokens, secret, mcp, turn, tuple(unverified), trash_days,
-                          file_max_bytes, uploads_work)
+                          file_max_bytes, uploads_work, views)
         if cleanup_seconds is not None:
             application._cleanup = asyncio.create_task(application._purge_periodically(cleanup_seconds),
                                                        name="trash-cleanup")
@@ -714,8 +747,14 @@ class Application:
         if await self.data.count_staged(scope) >= MAX_STAGED_UPLOADS:
             raise DataError(DataErrorCode.LIMIT_EXCEEDED, f"{MAX_STAGED_UPLOADS} uploads wait to be sent")
         blob = await self.data.blobs.put(scope.principal_id, chunks, self.file_max_bytes)
+        image = await self.data.blobs.prepare_image(scope.principal_id, blob, self.views)  # V3-P67 §3.1
         async with self._exclusive(scope.conversation_id):
-            return await self.data.stage_upload(scope, blob, cleaned, clean_media_type(media_type, cleaned))
+            return await self.data.stage_upload(scope, blob, cleaned, clean_media_type(media_type, cleaned), image)
+
+    @property
+    def images_available(self) -> bool:
+        """Whether model copies of images can be made here (V3-P67 §3.1)."""
+        return self.views is not None and self.views.available
 
     async def _workspace(self, scope: TrustedScope) -> tuple[WorkspaceId, str]:
         if not self.uploads_work:

@@ -7,7 +7,7 @@ name = "himari"
 version = "0.0.0"
 description = "HIMARI v3 — contract-based modular agent runtime"
 requires-python = ">=3.12"
-dependencies = ["httpx>=0.27", "jsonschema>=4.18"]
+dependencies = ["httpx>=0.27", "jsonschema>=4.18", "pillow>=12"]  # Pillow: only in the image sandbox (V3-P67)
 
 [project.scripts]
 himari = "himari.interfaces.cli.main:main"

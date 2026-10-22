@@ -23,6 +23,7 @@ from enum import Enum
 from typing import Protocol, runtime_checkable
 
 from himari.common import (
+    AttachmentRef,
     DeepFrozen,
     CallId,
     CallRef,
@@ -43,8 +44,13 @@ from himari.data.api import MAX_APP_PAYLOAD_BYTES as MAX_APP_PAYLOAD_BYTES
 from himari.data.api import MAX_UI_HTML_BYTES as MAX_UI_HTML_BYTES
 from himari.data.api import AppView as AppView
 from himari.data.api import PresentedFile as PresentedFile
+from himari.data.api import MAX_RESULT_IMAGES as MAX_RESULT_IMAGES
 from himari.data.api import UiCsp as UiCsp
 from himari.data.api import UiResource as UiResource
+from himari.data.api import DEFAULT_FILE_MAX_BYTES
+
+# An image content item's base64, checked before it is decoded (V3-P67 review B3): one stored file.
+MAX_IMAGE_BASE64_CHARS = 4 * ((DEFAULT_FILE_MAX_BYTES + 2) // 3)  # padded base64 of that many bytes
 
 
 class WorkspaceRequirement(Enum):
@@ -142,6 +148,25 @@ class ToolStatus(Enum):
 
 
 @dataclass(frozen=True)
+class ResultImage(DeepFrozen):
+    """An image a Tool returns for the model to see (V3-P67 §4.2): bytes as
+    the Tool got them. The Dispatcher keeps it in the file store and puts an
+    attachment for it at the end of the result; the type is judged from the
+    bytes, never from ``media_type``."""
+
+    data: bytes
+    media_type: str = ""
+
+
+class ResultImageStore(Protocol):
+    """Keeps a Tool's images (V3-P67 §4.2), given to the Dispatcher by Bootstrap."""
+
+    async def keep(self, scope: TrustedScope, call: CallRef, image: ResultImage, number: int) -> AttachmentRef | str:
+        """The staged image's attachment, or a line saying why it was not kept."""
+        ...
+
+
+@dataclass(frozen=True)
 class ToolOutcome(DeepFrozen):
     """A truthful, definite result. A handler that cannot know whether its
     effect happened must raise instead of guessing; the record then stays
@@ -159,6 +184,8 @@ class ToolOutcome(DeepFrozen):
     # only). If Data refuses them the call is committed FAILED instead: the
     # result said they were given, so it cannot stand without them.
     presented_files: tuple[PresentedFile, ...] = ()
+    # V3-P67 §4.2: images for the model, at most MAX_RESULT_IMAGES (more become a line).
+    result_images: tuple[ResultImage, ...] = ()
 
 
 @runtime_checkable

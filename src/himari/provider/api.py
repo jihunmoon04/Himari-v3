@@ -9,7 +9,7 @@ the prepared body that Data stores.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from enum import Enum
 from typing import Protocol, runtime_checkable
@@ -50,6 +50,17 @@ class ProviderCapabilities(DeepFrozen):
     # A marked cache breakpoint is accepted and honoured (V3-P62 §9 B2); only
     # where it was measured — unverified models get the request unchanged.
     cache_breakpoints: bool = False
+    # Images in user messages are read (V3-P67 §7.1): only for models checked
+    # with real requests; unlisted models do not get images.
+    image_input: bool = False
+
+
+@runtime_checkable
+class ReadsImageCopies(Protocol):
+    """A Provider that sends stored image copies (V3-P67 §7.4) is given a
+    reader of them by the composition root once the file store exists."""
+
+    def use_blobs(self, read: Callable[[str], bytes]) -> None: ...
 
 
 @dataclass(frozen=True)
