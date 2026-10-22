@@ -313,3 +313,30 @@ def test_a_refusal_without_a_file_says_how_to_go_on(harness: Harness, tmp_path: 
     monkeypatch.setattr(harness.application, "send", gone)
     _, err = chat(harness, "/attach a.txt", "look")
     assert "/detach drops them" in err  # PR #60 re-review N3
+
+
+def test_a_copy_that_fails_part_way_leaves_no_file(harness: Harness, tmp_path: Path,
+                                                   monkeypatch: pytest.MonkeyPatch) -> None:
+    """Owner review B1: without hard links the download is copied; a copy
+    that fails part way leaves neither the new file nor the temporary one."""
+    import errno
+    import shutil
+    cid = harness.run("new")[1].strip()
+    (tmp_path / "a.txt").write_text("content")
+    harness.queue(final("ok"))
+    harness.run("send", cid, "--attach", "a.txt")
+    file_id = harness.client().get(f"/api/conversations/{cid}/files")["items"][0]["file_id"]
+
+    def no_links(*args: Any, **kwargs: Any) -> None:
+        raise OSError(errno.EPERM, "Operation not permitted")
+
+    def full_disk(source: Any, sink: Any, *args: Any) -> None:
+        sink.write(source.read(3))  # some bytes, then the disk is full
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(os, "link", no_links)
+    monkeypatch.setattr(shutil, "copyfileobj", full_disk)
+    code, _, err = harness.run("download", cid, file_id, "-o", "copy.txt")
+    assert code == cli.EXIT_FAILED and "No space left" in err
+    assert not (tmp_path / "copy.txt").exists()
+    assert not [p for p in tmp_path.iterdir() if p.name.endswith(".part")]

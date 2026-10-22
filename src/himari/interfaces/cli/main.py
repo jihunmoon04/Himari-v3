@@ -703,6 +703,23 @@ def cmd_files(session: Session, args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def copy_new(source_path: str, path: str) -> None:
+    """Copy into a new file at ``path`` (never replacing one); if the copy
+    fails part way, the new file goes too (owner review B1): a failed
+    download never leaves half a file."""
+    with open(source_path, "rb") as source:
+        sink = open(path, "xb")
+        try:
+            with sink:
+                shutil.copyfileobj(source, sink)
+        except BaseException:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+            raise
+
+
 def cmd_download(session: Session, args: argparse.Namespace) -> int:
     """Into a temporary file next to the target, which takes its name only
     when complete: a failure never leaves half a file, nor costs an existing
@@ -737,8 +754,7 @@ def cmd_download(session: Session, args: argparse.Namespace) -> int:
             except OSError as error:
                 if error.errno not in (errno.EPERM, errno.ENOTSUP, errno.EXDEV, errno.EMLINK):
                     raise
-                with open(temp, "rb") as source, open(path, "xb") as sink:  # no hard links here (re-review N2)
-                    shutil.copyfileobj(source, sink)
+                copy_new(temp, path)  # no hard links here (re-review N2)
             os.unlink(temp)
     except FileExistsError:
         os.unlink(temp)
