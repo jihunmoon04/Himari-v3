@@ -378,3 +378,16 @@ def test_a_refused_attachment_leaves_a_paused_turn_as_it_was(tmp_path: Path) -> 
             await app.close()
 
     asyncio.run(scenario())
+
+
+def test_a_name_with_a_lone_surrogate_is_cleaned_not_an_error(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        app = await open_app(tmp_path / "data")
+        try:
+            scope, _ = await conversation(app)
+            record = await app.upload(scope, "a\ud800b.txt", None, chunks(b"a"))
+            assert record.name == "a_b.txt"  # PR #59 re-review C7
+        finally:
+            await app.close()
+
+    asyncio.run(scenario())

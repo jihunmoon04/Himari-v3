@@ -635,3 +635,15 @@ def test_an_idle_partial_goes_and_a_live_one_stays(disk) -> None:  # type: ignor
 
 def run_value[T](coro: Coroutine[Any, Any, T]) -> T:
     return asyncio.run(coro)
+
+
+def test_a_blob_a_staged_upload_came_to_use_is_not_expired() -> None:
+    async def scenario() -> None:
+        data = data_for(new_store())
+        scope = await conversation(data)
+        file_id = await upload(data, scope, b"staged now")
+        blob = (await data.read_file_records(scope, [(file_id, 1)]))[0].blob
+        assert data.blobs.rows.expire_blobs([blob.key], datetime.now(UTC)) == []  # re-review N3
+        assert data.blobs.rows.blob_row(blob.key).expired_at is None  # type: ignore[union-attr]
+
+    run(scenario())

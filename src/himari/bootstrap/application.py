@@ -704,7 +704,7 @@ class Application:
         Conversation. The staged count is checked before the bytes are read
         (review C10); the lifecycle lock is held only while recording, never
         while the body streams (review N4)."""
-        if not name or len(name.encode("utf-8")) > MAX_RAW_NAME_BYTES:
+        if not name or len(name.encode("utf-8", "surrogatepass")) > MAX_RAW_NAME_BYTES:
             raise FileNameRefused(name[:40])
         cleaned = clean_file_name(name)
         await self._workspace(scope)  # authorizes; FilesUnavailable without a place for uploads

@@ -70,7 +70,9 @@ class BlobRows(Protocol):
         to, least recently put first."""
         ...
 
-    def expire_blobs(self, keys: Sequence[str], now: datetime) -> None: ...
+    def expire_blobs(self, keys: Sequence[str], now: datetime) -> Sequence[str]:
+        """Expire those still alive and not referenced by a staged upload; the keys expired."""
+        ...
 
     def touch_blob(self, row: BlobRow) -> None:
         """Insert or revive: alive, ``last_used_at`` from ``row``."""
@@ -330,7 +332,7 @@ class MemoryBlobFiles:
 # --- the store ---------------------------------------------------------------------------
 
 
-async def _finish(function: Callable[..., None], *args: object) -> None:
+async def _finish[T](function: Callable[..., T], *args: object) -> T:
     """Run in a worker thread and wait until it is done, even if cancelled
     meanwhile; a cancellation that arrived is re-raised afterwards."""
     work = asyncio.ensure_future(asyncio.to_thread(function, *args))
@@ -341,8 +343,10 @@ async def _finish(function: Callable[..., None], *args: object) -> None:
         except asyncio.CancelledError:
             interrupted = True
     if interrupted:
+        if not work.cancelled() and work.exception() is not None:  # retrieved, so not logged as lost (N2)
+            log.warning("work finished with %r after its caller was cancelled", work.exception())
         raise asyncio.CancelledError
-    work.result()
+    return work.result()
 
 
 class FileStore:
@@ -369,7 +373,7 @@ class FileStore:
                 if staging.size + len(chunk) > max_bytes:
                     raise DataError(DataErrorCode.TOO_LARGE, f"over {max_bytes} bytes")
                 staging.write(chunk)
-            sha256 = await asyncio.to_thread(staging.finish)
+            sha256 = await _finish(staging.finish)  # discard must not close the fd under it (re-review N1)
             size = staging.size
             key = blob_key(principal, sha256)
             async with self._lock:
@@ -407,12 +411,11 @@ class FileStore:
     def _expire(self, rows: Sequence[BlobRow], now: datetime) -> None:
         if not rows:
             return
-        self.rows.expire_blobs([r.key for r in rows], now)  # committed before the bytes go
-        for row in rows:
+        for key in self.rows.expire_blobs([r.key for r in rows], now):  # committed before the bytes go
             try:
-                self.files.remove(row.key)
+                self.files.remove(key)
             except OSError:
-                log.exception("could not remove expired blob %s; the next sweep tries again", row.key)
+                log.exception("could not remove expired blob %s; the next sweep tries again", key)
 
     def open(self, blob: StoredBlob) -> BinaryIO:
         row = self.rows.blob_row(blob.key)

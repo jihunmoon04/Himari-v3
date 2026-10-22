@@ -262,11 +262,15 @@ class _MemoryBlobRows:
                 if r.expired_at is None and r.last_used_at < used_before and r.key not in staged]
         return sorted(rows, key=lambda r: (r.last_used_at, r.key))
 
-    def expire_blobs(self, keys: Sequence[str], now: datetime) -> None:
+    def expire_blobs(self, keys: Sequence[str], now: datetime) -> Sequence[str]:
+        staged = {f.blob_key for f in self._files() if f.attached_at is None}  # as in SQLite (re-review N3)
+        expired = []
         for key in keys:
             row = self._store.blob_rows.get(key)
-            if row is not None and row.expired_at is None:
+            if row is not None and row.expired_at is None and key not in staged:
                 self._store.blob_rows[key] = replace(row, expired_at=now)
+                expired.append(key)
+        return expired
 
     def touch_blob(self, row: BlobRow) -> None:
         self._store.blob_rows[row.key] = replace(row, expired_at=None)

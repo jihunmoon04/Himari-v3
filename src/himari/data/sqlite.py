@@ -737,10 +737,17 @@ class _SqliteBlobRows:
                           " ORDER BY last_used_at, blob_key", _timestamp(used_before))
             return [self._row(r) for r in rows]
 
-    def expire_blobs(self, keys: Sequence[str], now: datetime) -> None:
+    def expire_blobs(self, keys: Sequence[str], now: datetime) -> Sequence[str]:
+        expired: list[str] = []
         with self._store.transaction() as tx:
             for key in keys:
-                tx.execute("UPDATE blobs SET expired_at=? WHERE blob_key=? AND expired_at IS NULL", _timestamp(now), key)
+                # A staged upload may have come to refer to it meanwhile (re-review N3).
+                tx.execute("UPDATE blobs SET expired_at=? WHERE blob_key=? AND expired_at IS NULL AND NOT EXISTS"
+                           " (SELECT 1 FROM files f WHERE f.blob_key=blobs.blob_key AND f.attached_at IS NULL)",
+                           _timestamp(now), key)
+                if tx.one("SELECT changes() AS n")["n"]:  # type: ignore[index]
+                    expired.append(key)
+        return expired
 
     def touch_blob(self, row: BlobRow) -> None:
         with self._store.transaction() as tx:
