@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterator
 from dataclasses import replace
 
 from testkit import FAKE, SCOPE, RecordingTool, text_result
@@ -197,3 +198,59 @@ def test_a_view_data_refuses_does_not_cost_the_call_its_result() -> None:
     _, record = dispatch_one(ToolOutcome(ToolStatus.SUCCEEDED, text_result("ok"), app_view=AppView(forged, {})))
     # Claimed (SCOPED_WRITE), yet definite: not UNKNOWN because of the view.
     assert (record.status, record.model_result, record.ui_digest) == (ToolExecutionStatus.SUCCEEDED, text_result("ok"), None)
+
+
+# --- presented files (V3-P66 §7.1) ------------------------------------------------
+
+
+def _blob(store: InMemoryStore, content: bytes):  # type: ignore[no-untyped-def]
+    async def chunks() -> AsyncIterator[bytes]:
+        yield content
+    return asyncio.run(store.blobs.put(SCOPE.principal_id, chunks(), 1000))
+
+
+def test_presented_files_are_committed_with_the_result() -> None:
+    from himari.tool.api import PresentedFile
+    store_for_blob = InMemoryStore()
+    blob = _blob(store_for_blob, b"x")
+    # A blob of another store is missing in the dispatching one: refused below.
+    data, record = dispatch_one(ToolOutcome(ToolStatus.SUCCEEDED, text_result("Presented x to the user."),
+                                            presented_files=(PresentedFile(blob, "x", "text/plain", "/workspace/x"),)))
+    # review B3: never a success without the file
+    assert record.status is ToolExecutionStatus.FAILED
+    assert record.model_result is not None and record.model_result.is_error
+    assert "could not be kept" in record.model_result.blocks[0].text  # type: ignore[union-attr]
+    assert asyncio.run(data.read_call_files(SCOPE, [record.call])) == {}
+
+
+def test_presented_files_recorded_when_the_blob_is_there() -> None:
+    from himari.tool.api import PresentedFile
+    blob_holder: dict[str, object] = {}
+
+    def behavior(invocation, ctx):  # type: ignore[no-untyped-def]
+        return ToolOutcome(ToolStatus.SUCCEEDED, text_result("given"),
+                           presented_files=(PresentedFile(blob_holder["blob"], "x", "text/plain", "/workspace/x"),))  # type: ignore[arg-type]
+
+    async def scenario() -> None:
+        store = InMemoryStore()
+        store.create_conversation(SCOPE)
+        data = InMemoryData(store)
+
+        async def chunks() -> AsyncIterator[bytes]:
+            yield b"bytes"
+        blob_holder["blob"] = await store.blobs.put(SCOPE.principal_id, chunks(), 100)
+        tool = RecordingTool("remote/give", external_source="remote", behavior=behavior)
+        dispatcher = Dispatcher(ToolRegistry([tool]), data, data, data, ConfiguredExternalAccess({"remote": True}, data))
+        run_id = await data.prepare_run(
+            SCOPE, RunPreparation(b"", "t", RawRepresentation.ADAPTER_SERIALIZED, (), PromptBasis(0, 0), "p", "m"))
+        await data.mark_dispatch(SCOPE, run_id)
+        await data.record_raw_outcome(SCOPE, run_id, RawReceived(b"", "t"))
+        call = ToolCall(CallId("a"), 0, ToolId("remote/give"), {})
+        await data.project_model_output(SCOPE, run_id, AssistantToolCalls((call,)))
+        await dispatcher.dispatch_group(SCOPE, run_id, (call,))
+        (record,) = await data.read_tool_executions(SCOPE, run_id)
+        assert record.status is ToolExecutionStatus.SUCCEEDED, record
+        files = await data.read_call_files(SCOPE, [record.call])
+        assert [(f.name, f.version) for f in files[record.call]] == [("x", 1)]
+
+    asyncio.run(scenario())

@@ -86,6 +86,7 @@ class Composer:
                 context_key=context_key(inputs),
             ),
             source_notes=fit_notes(inputs.source_notes),
+            attachments=inputs.attachments,
         )
 
     @staticmethod

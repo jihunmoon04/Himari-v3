@@ -14,11 +14,14 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Mapping, Sequence
+import mimetypes
+import re
+import unicodedata
+from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from enum import Enum
-from typing import Protocol
+from typing import BinaryIO, Protocol
 
 from himari.common import (
     DeepFrozen,
@@ -30,6 +33,7 @@ from himari.common import (
     EnvironmentInstanceId,
     EnvironmentKind,
     EventId,
+    FileId,
     JsonValue,
     ModelToolResult,
     PrincipalId,
@@ -59,12 +63,20 @@ class DataErrorCode(Enum):
     RAW_PERSISTENCE_UNAVAILABLE = "raw_persistence_unavailable"
     INVALID_STATE_TRANSITION = "invalid_state_transition"
     INVALID_ARGUMENT = "invalid_argument"
+    # V3-P66: files
+    LIMIT_EXCEEDED = "limit_exceeded"  # too many staged uploads, or too much presented in the hour
+    TOO_LARGE = "too_large"  # one file over the operator's limit
+    STORE_FULL = "store_full"  # no room in the file store, even after expiring what may expire
+    BLOB_MISSING = "blob_missing"  # the stored bytes are gone (or expired, on a recording path)
+    BLOB_EXPIRED = "blob_expired"  # the stored bytes expired (§8.5); the record stays
+    ATTACHMENT_REFUSED = "attachment_refused"  # an attachment a message may not carry (§4.2)
 
 
 class DataError(Exception):
-    def __init__(self, code: DataErrorCode, message: str = "") -> None:
+    def __init__(self, code: DataErrorCode, message: str = "", *, file_id: FileId | None = None) -> None:
         super().__init__(f"{code.value}: {message}" if message else code.value)
         self.code = code
+        self.file_id = file_id  # ATTACHMENT_REFUSED: the attachment refused
 
 
 # --- Conversation Events (Data v0.2 §4) ---------------------------------------
@@ -360,6 +372,176 @@ class StoredAppView(DeepFrozen):
     view: AppView
 
 
+# --- Files (V3-P66, docs/file-upload-download-v0.1.md) -------------------------
+# An uploaded or presented file keeps its bytes in the file store, outside
+# every Workspace: written once, addressed per principal, expired when the
+# store is full or after the keep days (§8.5) — bytes only, the record stays.
+
+MAX_FILE_NAME_BYTES = 200  # UTF-8, after cleaning (§5.3)
+MAX_RAW_NAME_BYTES = 1000  # a name given longer than this is refused
+MAX_MEDIA_TYPE_CHARS = 127
+MAX_STAGED_UPLOADS = 50  # per Conversation
+MAX_ATTACHMENTS = 10  # per message (T1 and T7a)
+STAGED_KEEP = timedelta(hours=24)  # staged records older than this are dropped
+STAGED_SEND_CUTOFF = timedelta(hours=23)  # sending refuses older staged uploads (§4.2)
+BLOB_GRACE = timedelta(hours=1)  # a blob put this recently never expires or goes (§8.2, §8.5)
+PRESENT_WINDOW = timedelta(hours=1)
+PRESENT_LIMIT_BYTES = 256 * 1024 * 1024  # presented per Conversation per PRESENT_WINDOW (§7.1)
+DEFAULT_FILE_MAX_BYTES = 32 * 1024 * 1024
+DEFAULT_STORE_MAX_BYTES = 1024 * 1024 * 1024
+DEFAULT_KEEP_DAYS = 30
+TEMP_PREFIX = ".himari-"  # the Workspace write Tools' temporary names
+
+
+class FileOrigin(Enum):
+    UPLOAD = "upload"  # the user sent it
+    PRESENTED = "presented"  # the model gave it with inside/present_file
+
+
+@dataclass(frozen=True)
+class StoredBlob(DeepFrozen):
+    """Bytes in the file store. ``key`` is the address: SHA-256 of the
+    principal and the content hash, so equal content is shared only within
+    one principal (review C11)."""
+
+    key: str
+    sha256: str
+    size: int
+
+
+def blob_key(principal: PrincipalId, sha256: str) -> str:
+    return hashlib.sha256(principal.encode("utf-8") + b"\0" + sha256.encode("ascii")).hexdigest()
+
+
+@dataclass(frozen=True)
+class FileRecord(DeepFrozen):
+    file_id: FileId
+    version: int  # uploads: always 1; presenting the same path again: +1
+    origin: FileOrigin
+    name: str  # cleaned (§5.3)
+    media_type: str  # display and model note only; never trusted for serving
+    blob: StoredBlob
+    created_at: datetime
+    workspace_path: str | None  # "/workspace/…": where an upload was placed, or what was presented
+    attached: bool  # a message or a Tool result refers to it (§4.2)
+    expired: bool  # its bytes expired (§8.5)
+    call: CallRef | None = None  # a presented file: its call
+
+    @property
+    def size(self) -> int:
+        return self.blob.size
+
+
+@dataclass(frozen=True)
+class PresentedFile(DeepFrozen):
+    """A file a Tool gives the user, stored with its result (§7.1)."""
+
+    blob: StoredBlob
+    name: str
+    media_type: str
+    workspace_path: str
+
+
+_FORMAT = {"Cc", "Cf", "Zl", "Zp"}  # control, format (bidi, zero width), line and paragraph separators
+
+
+def clean_file_name(raw: str) -> str:
+    """A shown name from an untrusted one (§5.3): never a path."""
+    name = "".join("_" if c in "/\\" or unicodedata.category(c) in _FORMAT else c
+                   for c in unicodedata.normalize("NFC", raw))
+    name = name.strip().rstrip(".").strip()
+    if name in ("", ".", ".."):
+        name = "file"
+    if name.startswith(TEMP_PREFIX):
+        name = "_" + name
+    if len(name.encode("utf-8")) > MAX_FILE_NAME_BYTES:
+        stem, dot, ext = name.rpartition(".")
+        suffix = f".{ext}" if dot and stem and len(ext.encode("utf-8")) <= 16 else ""
+        stem = name[: len(name) - len(suffix)] if suffix else name
+        budget = MAX_FILE_NAME_BYTES - len(suffix.encode("utf-8"))
+        stem = stem.encode("utf-8")[:budget].decode("utf-8", errors="ignore")
+        name = stem + suffix
+    return name
+
+
+_MEDIA_TYPE = re.compile(r"^[a-z0-9][a-z0-9!#$&^_.+-]{0,62}/[a-z0-9][a-z0-9!#$&^_.+-]{0,62}$")
+OCTET_STREAM = "application/octet-stream"
+
+
+def clean_media_type(declared: str | None, name: str) -> str:
+    """``type/subtype`` from a declared Content-Type (parameters dropped), else
+    from the name's extension, else octet-stream (review C9)."""
+    if declared:
+        candidate = declared.split(";", 1)[0].strip().lower()
+        if len(candidate) <= MAX_MEDIA_TYPE_CHARS and _MEDIA_TYPE.match(candidate):
+            return candidate
+    guessed, _ = mimetypes.guess_type(name, strict=False)
+    return guessed if guessed and _MEDIA_TYPE.match(guessed) else OCTET_STREAM
+
+
+class FileCatalog(Protocol):
+    """FILE-02: a Conversation's file records. Authorizes like every port."""
+
+    async def stage_upload(self, scope: TrustedScope, blob: StoredBlob, name: str, media_type: str) -> FileRecord:
+        """A staged upload (§4.2). LIMIT_EXCEEDED at MAX_STAGED_UPLOADS;
+        BLOB_MISSING if the blob is gone or expired."""
+        ...
+
+    async def count_staged(self, scope: TrustedScope) -> int:
+        """Staged uploads, counted before the bytes are received (review C10)."""
+        ...
+
+    async def set_placement(self, scope: TrustedScope, file_id: FileId, workspace_path: str) -> None:
+        """Where a staged upload was placed (§5.2). INVALID_STATE_TRANSITION once attached."""
+        ...
+
+    async def check_attachments(self, scope: TrustedScope, file_ids: Sequence[FileId], *,
+                                now: datetime | None = None) -> Sequence[FileRecord]:
+        """The T1 checks (§4.2) as a read, plus the STAGED_SEND_CUTOFF;
+        ATTACHMENT_REFUSED naming the file, or the records in order."""
+        ...
+
+    async def read_files(self, scope: TrustedScope, *, limit: int = 50, offset: int = 0) -> Sequence[FileRecord]:
+        """Attached files, one per version, newest first."""
+        ...
+
+    async def read_file_records(self, scope: TrustedScope, refs: Sequence[tuple[FileId, int]]
+                                ) -> Sequence[FileRecord]:
+        """The given versions (staged ones too); unknown ones are left out."""
+        ...
+
+    async def read_call_files(self, scope: TrustedScope, calls: Sequence[CallRef]
+                              ) -> Mapping[CallRef, Sequence[FileRecord]]:
+        """The files each call presented (calls without any are left out)."""
+        ...
+
+    async def presented_bytes_since(self, scope: TrustedScope, since: datetime) -> int: ...
+
+
+class BlobStore(Protocol):
+    """The file store's bytes (§4.5), owned by Data."""
+
+    async def put(self, principal: PrincipalId, chunks: AsyncIterator[bytes], max_bytes: int) -> StoredBlob:
+        """Store the bytes; TOO_LARGE past ``max_bytes`` (reading stops there),
+        STORE_FULL when no room can be made (nothing is expired then)."""
+        ...
+
+    def open(self, blob: StoredBlob) -> BinaryIO:
+        """Read-only. BLOB_EXPIRED, or BLOB_MISSING if gone or of another size."""
+        ...
+
+
+class FileRetention(Protocol):
+    """Bootstrap only, like ConversationRetention: cleanup across principals."""
+
+    async def drop_stale_staged(self, cutoff: datetime) -> int: ...
+
+    async def sweep_blobs(self, now: datetime) -> None:
+        """Unreferenced blobs (§8.2), the keep-days expiry (§8.5), files
+        without a row, stale staging; failures are logged, not raised."""
+        ...
+
+
 @dataclass(frozen=True)
 class ToolCompletion(DeepFrozen):
     """Terminal outcome committed by the Tool Dispatcher (DATA-08, T7/T8)."""
@@ -372,6 +554,10 @@ class ToolCompletion(DeepFrozen):
     # V3-P58: the call's view, stored in the same transaction. Only with
     # SUCCEEDED or FAILED (a call that ran); INVALID_ARGUMENT otherwise.
     app_view: AppView | None = None
+    # V3-P66 §7.1: files given to the user, recorded in the same transaction.
+    # Only with SUCCEEDED (INVALID_ARGUMENT otherwise); BLOB_MISSING when a
+    # blob is gone or expired, LIMIT_EXCEEDED past the hour's limit.
+    presented_files: tuple[PresentedFile, ...] = ()
 
 
 @dataclass(frozen=True)

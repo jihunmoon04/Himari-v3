@@ -35,6 +35,10 @@ entry. Any failure refuses the open and leaves the database as it was.
 
 Deleted content (V3-P65): ``secure_delete`` overwrites freed pages, so a
 purged Conversation does not linger in the database file.
+
+Files (V3-P66): the bytes of uploaded and presented files live in the file
+store next to the database (``<dir>/files``, ``data.blobs``); the ``blobs``
+and ``files`` rows here say what they are and who refers to them.
 """
 
 from __future__ import annotations
@@ -48,11 +52,12 @@ import sqlite3
 import stat
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager, contextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from himari.common import (
     ASK_USER_TOOL_ID,
     ArtifactId,
+    AttachmentRef,
     BindingId,
     CallId,
     CallRef,
@@ -60,6 +65,7 @@ from himari.common import (
     EnvironmentInstanceId,
     EnvironmentKind,
     EventId,
+    FileId,
     JsonValue,
     ModelToolResult,
     PrincipalId,
@@ -72,7 +78,13 @@ from himari.common import (
     WorkspaceId,
 )
 from himari.data import codec, rules
+from himari.data.blobs import BlobRow, DirectoryBlobFiles, FileStore
 from himari.data.api import (
+    MAX_ATTACHMENTS,
+    MAX_STAGED_UPLOADS,
+    PRESENT_LIMIT_BYTES,
+    PRESENT_WINDOW,
+    STAGED_SEND_CUTOFF,
     AnswerCommit,
     AppView,
     Artifact,
@@ -88,6 +100,10 @@ from himari.data.api import (
     DataErrorCode,
     EnvironmentActivation,
     EventKind,
+    FileOrigin,
+    FileRecord,
+    PresentedFile,
+    StoredBlob,
     EventPayload,
     ExternalSourceSetting,
     InitialActivation,
@@ -118,7 +134,7 @@ from himari.data.api import (
 
 # v3: compaction_runs; v4: external_settings; v5: ui_resources; v6: model_settings;
 # v7: the trash (all upgraded in place); v1 is refused
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 APPLICATION_ID = 0x48494D41  # "HIMA": written into the database header (PRAGMA application_id)
 
 _TERMINAL_COMPLETIONS = frozenset(
@@ -279,7 +295,40 @@ _V7_ADDITIONS = """
 ALTER TABLE conversations ADD COLUMN trashed_at TEXT;
 ALTER TABLE conversations ADD COLUMN purge_started_at TEXT;
 """
-_ADDITIONS = (_V3_ADDITIONS, _V4_ADDITIONS, _V5_ADDITIONS, _V6_ADDITIONS, _V7_ADDITIONS)  # what each version from v3 added
+# v8: files (V3-P66). A blob row is shared by one principal's Conversations;
+# expired_at set: its bytes are gone, the records stay. attached_at NULL: a
+# staged upload. run_id/call_id: the call that presented the file.
+_V8_ADDITIONS = """
+CREATE TABLE blobs (
+    blob_key TEXT PRIMARY KEY,
+    owner TEXT NOT NULL,
+    sha256 TEXT NOT NULL,
+    size INTEGER NOT NULL,
+    last_used_at TEXT NOT NULL,
+    expired_at TEXT
+) STRICT;
+CREATE INDEX blobs_by_use ON blobs (last_used_at);
+CREATE TABLE files (
+    seq INTEGER PRIMARY KEY,
+    conversation_id TEXT NOT NULL REFERENCES conversations,
+    file_id TEXT NOT NULL,
+    version INTEGER NOT NULL,
+    origin TEXT NOT NULL,
+    name TEXT NOT NULL,
+    media_type TEXT NOT NULL,
+    blob_key TEXT NOT NULL REFERENCES blobs,
+    created_at TEXT NOT NULL,
+    workspace_path TEXT,
+    attached_at TEXT,
+    run_id TEXT REFERENCES runs (run_id),
+    call_id TEXT,
+    UNIQUE (file_id, version)
+) STRICT;
+CREATE INDEX files_by_conversation ON files (conversation_id, seq);
+CREATE INDEX files_by_blob ON files (blob_key);
+"""
+_ADDITIONS = (_V3_ADDITIONS, _V4_ADDITIONS, _V5_ADDITIONS, _V6_ADDITIONS, _V7_ADDITIONS,
+              _V8_ADDITIONS)  # what each version from v3 added
 _SCHEMA = _SCHEMA_V2 + "".join(_ADDITIONS)
 # An older version → (its exact schema, what brings it to SCHEMA_VERSION).
 _UPGRADES = {
@@ -378,8 +427,12 @@ def _expected_signature(schema: str = _SCHEMA) -> list[tuple[str, str, str, str 
 class SqliteStore:
     """Durable storage plus admin helpers (not part of any port)."""
 
-    def __init__(self, path: str | os.PathLike[str]) -> None:
+    def __init__(self, path: str | os.PathLike[str], *, files_dir: str | os.PathLike[str] | None = None) -> None:
         self.path = os.path.abspath(os.fspath(path))
+        # V3-P66: the file store's bytes; ``<dir>/files`` unless given.
+        self.blobs = FileStore(DirectoryBlobFiles(files_dir if files_dir is not None
+                                                  else os.path.join(os.path.dirname(self.path), "files")),
+                               _SqliteBlobRows(self))
         _check_directory(os.path.dirname(self.path))
         lock_fd = _open_private(f"{self.path}.lock")
         try:
@@ -654,6 +707,70 @@ class _Tx:
         return binding
 
 
+class _SqliteBlobRows:
+    """The ``blobs`` rows for the file store (V3-P66 §4.5); each call one transaction."""
+
+    def __init__(self, store: SqliteStore) -> None:
+        self._store = store
+
+    @staticmethod
+    def _row(row: sqlite3.Row) -> BlobRow:
+        return BlobRow(row["blob_key"], row["owner"], row["sha256"], row["size"],
+                       datetime.fromisoformat(row["last_used_at"]),
+                       None if row["expired_at"] is None else datetime.fromisoformat(row["expired_at"]))
+
+    def blob_row(self, key: str) -> BlobRow | None:
+        with self._store.transaction() as tx:
+            row = tx.one("SELECT * FROM blobs WHERE blob_key=?", key)
+            return None if row is None else self._row(row)
+
+    def live_total(self) -> int:
+        with self._store.transaction() as tx:
+            row = tx.one("SELECT COALESCE(SUM(size), 0) AS total FROM blobs WHERE expired_at IS NULL")
+            assert row is not None
+            return int(row["total"])
+
+    def expirable(self, used_before: datetime) -> Sequence[BlobRow]:
+        with self._store.transaction() as tx:
+            rows = tx.all("SELECT * FROM blobs b WHERE expired_at IS NULL AND last_used_at < ?"
+                          " AND NOT EXISTS (SELECT 1 FROM files f WHERE f.blob_key=b.blob_key AND f.attached_at IS NULL)"
+                          " ORDER BY last_used_at, blob_key", _timestamp(used_before))
+            return [self._row(r) for r in rows]
+
+    def expire_blobs(self, keys: Sequence[str], now: datetime) -> None:
+        with self._store.transaction() as tx:
+            for key in keys:
+                tx.execute("UPDATE blobs SET expired_at=? WHERE blob_key=? AND expired_at IS NULL", _timestamp(now), key)
+
+    def touch_blob(self, row: BlobRow) -> None:
+        with self._store.transaction() as tx:
+            tx.execute("INSERT INTO blobs (blob_key, owner, sha256, size, last_used_at, expired_at)"
+                       " VALUES (?, ?, ?, ?, ?, NULL) ON CONFLICT (blob_key) DO UPDATE SET"
+                       " last_used_at=excluded.last_used_at, expired_at=NULL",
+                       row.key, row.owner, row.sha256, row.size, _timestamp(row.last_used_at))
+
+    def drop_unreferenced(self, key: str, used_before: datetime) -> bool:
+        with self._store.transaction() as tx:
+            cursor = tx.execute("DELETE FROM blobs WHERE blob_key=? AND (expired_at IS NOT NULL OR last_used_at < ?)"
+                                " AND NOT EXISTS (SELECT 1 FROM files f WHERE f.blob_key=blobs.blob_key)",
+                                key, _timestamp(used_before))
+            return cursor.rowcount > 0
+
+    def unreferenced_keys(self, used_before: datetime) -> Sequence[str]:
+        with self._store.transaction() as tx:
+            rows = tx.all("SELECT blob_key FROM blobs b WHERE (expired_at IS NOT NULL OR last_used_at < ?)"
+                          " AND NOT EXISTS (SELECT 1 FROM files f WHERE f.blob_key=b.blob_key)", _timestamp(used_before))
+            return [r["blob_key"] for r in rows]
+
+    def expired_keys(self) -> Sequence[str]:
+        with self._store.transaction() as tx:
+            return [r["blob_key"] for r in tx.all("SELECT blob_key FROM blobs WHERE expired_at IS NOT NULL")]
+
+    def known_keys(self) -> frozenset[str]:
+        with self._store.transaction() as tx:
+            return frozenset(r["blob_key"] for r in tx.all("SELECT blob_key FROM blobs"))
+
+
 def _timestamp(moment: datetime) -> str:
     """Fixed-width UTC ISO text, so string order is time order."""
     return moment.astimezone(UTC).isoformat(timespec="microseconds")
@@ -775,12 +892,34 @@ def _workspace(conv: sqlite3.Row) -> ConversationWorkspace | None:
     return ConversationWorkspace(WorkspaceId(conv["workspace_id"]), conv["workspace_cwd"])
 
 
+_FILE_COLUMNS = ("f.file_id, f.version, f.origin, f.name, f.media_type, f.created_at, f.workspace_path,"
+                 " f.attached_at, f.run_id, f.call_id, b.blob_key, b.sha256, b.size, b.expired_at")
+_FILE_FROM = "FROM files f JOIN blobs b ON b.blob_key=f.blob_key"
+
+
+def _file(row: sqlite3.Row) -> FileRecord:
+    return FileRecord(
+        file_id=FileId(row["file_id"]), version=row["version"], origin=FileOrigin(row["origin"]),
+        name=row["name"], media_type=row["media_type"],
+        blob=StoredBlob(row["blob_key"], row["sha256"], row["size"]),
+        created_at=datetime.fromisoformat(row["created_at"]), workspace_path=row["workspace_path"],
+        attached=row["attached_at"] is not None, expired=row["expired_at"] is not None,
+        call=None if row["run_id"] is None else CallRef(RunId(row["run_id"]), CallId(row["call_id"])),
+    )
+
+
+def _refused(file_id: str, why: str) -> DataError:
+    return DataError(DataErrorCode.ATTACHMENT_REFUSED, f"{file_id}: {why}", file_id=FileId(file_id))
+
+
 class SqliteData:
     """Implements ConversationLog, ArtifactStore, WorkspaceState, StateQuery,
-    ConversationCatalog, ConversationRetention and ExternalSourceSettings."""
+    ConversationCatalog, ConversationRetention, ExternalSourceSettings,
+    FileCatalog and FileRetention; ``blobs`` is the BlobStore (V3-P66)."""
 
     def __init__(self, store: SqliteStore) -> None:
         self._store = store
+        self.blobs = store.blobs
 
     # --- helpers -------------------------------------------------------------
 
@@ -857,6 +996,73 @@ class SqliteData:
         assignments = ", ".join(["status=?", *(f"{name}=?" for name in columns)])
         tx.execute(f"UPDATE runs SET {assignments} WHERE run_id=?", status.value, *columns.values(), run_id)
 
+    @staticmethod
+    def _check_attachments(tx: _Tx, scope: TrustedScope, file_ids: Sequence[str], *,
+                           cutoff: datetime | None) -> list[sqlite3.Row]:
+        """V3-P66 §4.2: staged uploads of this Conversation, each once, at most
+        MAX_ATTACHMENTS, bytes not expired; ``cutoff``: none staged before it."""
+        if len(file_ids) > MAX_ATTACHMENTS:
+            raise DataError(DataErrorCode.ATTACHMENT_REFUSED, f"more than {MAX_ATTACHMENTS} attachments")
+        rows: list[sqlite3.Row] = []
+        for file_id in file_ids:
+            if any(r["file_id"] == file_id for r in rows):
+                raise _refused(file_id, "attached twice")
+            row = tx.one(f"SELECT f.seq, {_FILE_COLUMNS} {_FILE_FROM} WHERE f.file_id=? AND f.conversation_id=?"
+                         " ORDER BY f.version DESC LIMIT 1", file_id, scope.conversation_id)
+            if row is None:
+                raise _refused(file_id, "no such upload")
+            if row["origin"] != FileOrigin.UPLOAD.value or row["version"] != 1:
+                raise _refused(file_id, "not an upload")
+            if row["attached_at"] is not None:
+                raise _refused(file_id, "already sent")
+            if row["expired_at"] is not None:
+                raise _refused(file_id, "expired")
+            if cutoff is not None and datetime.fromisoformat(row["created_at"]) < cutoff:
+                raise _refused(file_id, "too old; upload it again")
+            rows.append(row)
+        return rows
+
+    def _attach(self, tx: _Tx, scope: TrustedScope, blocks: Sequence[object]) -> None:
+        """T1/T7a: check and attach the message's uploads in its transaction."""
+        refs = [b for b in blocks if isinstance(b, AttachmentRef)]
+        if not refs:
+            return
+        if any(r.version != 1 for r in refs):
+            raise _refused(next(r.file_id for r in refs if r.version != 1), "not an upload")
+        rows = self._check_attachments(tx, scope, [r.file_id for r in refs], cutoff=None)
+        now = _timestamp(datetime.now(UTC))
+        for row in rows:
+            tx.execute("UPDATE files SET attached_at=? WHERE seq=?", now, row["seq"])
+
+    def _present(self, tx: _Tx, scope: TrustedScope, call: CallRef, files: Sequence[PresentedFile]) -> None:
+        """T7: record what the call presented (§7.1), each path's next version."""
+        now = datetime.now(UTC)
+        since = self._presented_since(tx, scope, now - PRESENT_WINDOW)
+        if since + sum(f.blob.size for f in files) > PRESENT_LIMIT_BYTES:
+            raise DataError(DataErrorCode.LIMIT_EXCEEDED, f"over {PRESENT_LIMIT_BYTES} bytes presented in the hour")
+        for presented in files:
+            blob = tx.one("SELECT * FROM blobs WHERE blob_key=?", presented.blob.key)
+            if blob is None or blob["expired_at"] is not None or blob["size"] != presented.blob.size:
+                raise DataError(DataErrorCode.BLOB_MISSING, presented.blob.key)
+            known = tx.one("SELECT file_id, MAX(version) AS version FROM files WHERE conversation_id=?"
+                           " AND origin=? AND workspace_path=? GROUP BY file_id ORDER BY MAX(seq) DESC LIMIT 1",
+                           scope.conversation_id, FileOrigin.PRESENTED.value, presented.workspace_path)
+            file_id, version = (known["file_id"], known["version"] + 1) if known else (tx.new_id("file"), 1)
+            tx.execute("INSERT INTO files (conversation_id, file_id, version, origin, name, media_type, blob_key,"
+                       " created_at, workspace_path, attached_at, run_id, call_id)"
+                       " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                       scope.conversation_id, file_id, version, FileOrigin.PRESENTED.value, presented.name,
+                       presented.media_type, presented.blob.key, _timestamp(now), presented.workspace_path,
+                       _timestamp(now), call.run_id, call.call_id)
+
+    @staticmethod
+    def _presented_since(tx: _Tx, scope: TrustedScope, since: datetime) -> int:
+        row = tx.one("SELECT COALESCE(SUM(b.size), 0) AS total FROM files f JOIN blobs b ON b.blob_key=f.blob_key"
+                     " WHERE f.conversation_id=? AND f.origin=? AND f.created_at >= ?",
+                     scope.conversation_id, FileOrigin.PRESENTED.value, _timestamp(since))
+        assert row is not None
+        return int(row["total"])
+
     # --- ConversationLog --------------------------------------------------
 
     async def append_event(
@@ -879,6 +1085,7 @@ class SqliteData:
                 raise DataError(
                     DataErrorCode.INVALID_STATE_TRANSITION, "an ask_user call is waiting; use answer_pending_call"
                 )
+            self._attach(tx, scope, message.blocks)
             event = self._new_event(tx, scope, message, None)
             if idempotency_key is not None:
                 tx.execute(
@@ -1064,9 +1271,13 @@ class SqliteData:
             if completion.status not in _TERMINAL_COMPLETIONS:
                 raise DataError(DataErrorCode.INVALID_STATE_TRANSITION, f"not a definite outcome: {completion.status}")
             view = rules.check_app_view(completion)
+            if completion.presented_files and completion.status is not ToolExecutionStatus.SUCCEEDED:
+                raise DataError(DataErrorCode.INVALID_ARGUMENT, "only a succeeded call presents files")
             self._apply_artifacts(tx, scope, completion.artifact_mutations)  # CAS errors roll everything back
             if view is not None:
                 self._store_ui_resource(tx, view.resource)
+            if completion.presented_files:
+                self._present(tx, scope, call, completion.presented_files)
             tx.execute(
                 "UPDATE tool_executions SET status=?, model_result=?, raw_result=?, ui_digest=?, app_payload=?"
                 " WHERE seq=?",
@@ -1160,6 +1371,7 @@ class SqliteData:
             if self._waiting(tx, scope) != call:
                 raise DataError(DataErrorCode.ALREADY_COMMITTED, f"{call.call_id} is not waiting")
             record = self._execution_row(tx, scope, call)
+            self._attach(tx, scope, answer.blocks)
             result = ModelToolResult(blocks=answer.blocks)
             user_event = self._new_event(tx, scope, dataclasses.replace(answer, answers_call=call), None)
             tx.execute(
@@ -1445,6 +1657,7 @@ class SqliteData:
     # Every table holding a Conversation's rows, children first (foreign keys
     # check the order). The tests find every table with a conversation_id.
     _PURGE = (
+        "DELETE FROM files WHERE conversation_id=?",  # before runs: files.run_id (V3-P66 review C13)
         "DELETE FROM compaction_runs WHERE run_id IN (SELECT run_id FROM runs WHERE conversation_id=?)",
         "DELETE FROM tool_executions WHERE conversation_id=?",
         "DELETE FROM runs WHERE conversation_id=?",
@@ -1465,11 +1678,14 @@ class SqliteData:
             digests = [r["ui_digest"] for r in tx.all(
                 "SELECT DISTINCT ui_digest FROM tool_executions WHERE conversation_id=? AND ui_digest IS NOT NULL",
                 scope.conversation_id)]
+            keys = [r["blob_key"] for r in tx.all("SELECT DISTINCT blob_key FROM files WHERE conversation_id=?",
+                                                   scope.conversation_id)]
             for statement in self._PURGE:
                 tx.execute(statement, scope.conversation_id)
             for digest in digests:  # a view another call still names stays
                 tx.execute("DELETE FROM ui_resources WHERE digest=?"
                            " AND NOT EXISTS (SELECT 1 FROM tool_executions WHERE ui_digest=?)", digest, digest)
+        await self.blobs.release(keys)  # after the commit, never failing the purge (V3-P66 §8.1)
 
     async def used_tool_ids(self, scope: TrustedScope) -> frozenset[ToolId]:
         with self._tx() as tx:
@@ -1485,6 +1701,101 @@ class SqliteData:
                           " AND (purge_started_at IS NOT NULL OR trashed_at < ?) ORDER BY trashed_at, rowid",
                           _timestamp(cutoff))
             return tuple(TrustedScope(PrincipalId(r["owner"]), ConversationId(r["conversation_id"])) for r in rows)
+
+    # --- FileCatalog (V3-P66) ----------------------------------------------------------
+
+    async def stage_upload(self, scope: TrustedScope, blob: StoredBlob, name: str, media_type: str) -> FileRecord:
+        with self._tx() as tx:
+            tx.authorized(scope)
+            if self._staged(tx, scope) >= MAX_STAGED_UPLOADS:
+                raise DataError(DataErrorCode.LIMIT_EXCEEDED, f"{MAX_STAGED_UPLOADS} uploads wait to be sent")
+            row = tx.one("SELECT * FROM blobs WHERE blob_key=?", blob.key)
+            if row is None or row["expired_at"] is not None or row["size"] != blob.size:
+                raise DataError(DataErrorCode.BLOB_MISSING, blob.key)
+            file_id = tx.new_id("file")
+            tx.execute("INSERT INTO files (conversation_id, file_id, version, origin, name, media_type, blob_key,"
+                       " created_at) VALUES (?, ?, 1, ?, ?, ?, ?, ?)",
+                       scope.conversation_id, file_id, FileOrigin.UPLOAD.value, name, media_type, blob.key,
+                       _timestamp(datetime.now(UTC)))
+            stored = tx.one(f"SELECT {_FILE_COLUMNS} {_FILE_FROM} WHERE f.file_id=?", file_id)
+            assert stored is not None
+            return _file(stored)
+
+    @staticmethod
+    def _staged(tx: _Tx, scope: TrustedScope) -> int:
+        row = tx.one("SELECT count(*) AS n FROM files WHERE conversation_id=? AND attached_at IS NULL",
+                     scope.conversation_id)
+        assert row is not None
+        return int(row["n"])
+
+    async def count_staged(self, scope: TrustedScope) -> int:
+        with self._tx() as tx:
+            tx.authorized(scope)
+            return self._staged(tx, scope)
+
+    async def set_placement(self, scope: TrustedScope, file_id: FileId, workspace_path: str) -> None:
+        with self._tx() as tx:
+            tx.authorized(scope)
+            row = tx.one("SELECT seq, attached_at FROM files WHERE file_id=? AND conversation_id=? AND origin=?",
+                         file_id, scope.conversation_id, FileOrigin.UPLOAD.value)
+            if row is None:
+                raise DataError(DataErrorCode.NOT_FOUND, file_id)
+            if row["attached_at"] is not None:
+                raise DataError(DataErrorCode.INVALID_STATE_TRANSITION, f"{file_id} was already sent")
+            tx.execute("UPDATE files SET workspace_path=? WHERE seq=?", workspace_path, row["seq"])
+
+    async def check_attachments(self, scope: TrustedScope, file_ids: Sequence[FileId], *,
+                                now: datetime | None = None) -> Sequence[FileRecord]:
+        with self._tx() as tx:
+            tx.authorized(scope)
+            cutoff = (datetime.now(UTC) if now is None else now) - STAGED_SEND_CUTOFF
+            return tuple(_file(r) for r in self._check_attachments(tx, scope, file_ids, cutoff=cutoff))
+
+    async def read_files(self, scope: TrustedScope, *, limit: int = 50, offset: int = 0) -> Sequence[FileRecord]:
+        with self._tx() as tx:
+            tx.authorized(scope)
+            rows = tx.all(f"SELECT {_FILE_COLUMNS} {_FILE_FROM} WHERE f.conversation_id=? AND f.attached_at IS NOT NULL"
+                          " ORDER BY f.seq DESC LIMIT ? OFFSET ?", scope.conversation_id, limit, offset)
+            return tuple(_file(r) for r in rows)
+
+    async def read_file_records(self, scope: TrustedScope, refs: Sequence[tuple[FileId, int]]
+                                ) -> Sequence[FileRecord]:
+        with self._tx() as tx:
+            tx.authorized(scope)
+            found: list[FileRecord] = []
+            for file_id, version in dict.fromkeys(refs):
+                row = tx.one(f"SELECT {_FILE_COLUMNS} {_FILE_FROM} WHERE f.file_id=? AND f.version=?"
+                             " AND f.conversation_id=?", file_id, version, scope.conversation_id)
+                if row is not None:
+                    found.append(_file(row))
+            return tuple(found)
+
+    async def read_call_files(self, scope: TrustedScope, calls: Sequence[CallRef]
+                              ) -> Mapping[CallRef, Sequence[FileRecord]]:
+        with self._tx() as tx:
+            tx.authorized(scope)
+            found: dict[CallRef, list[FileRecord]] = {}
+            for call in dict.fromkeys(calls):
+                rows = tx.all(f"SELECT {_FILE_COLUMNS} {_FILE_FROM} WHERE f.conversation_id=? AND f.run_id=?"
+                              " AND f.call_id=? ORDER BY f.seq", scope.conversation_id, call.run_id, call.call_id)
+                if rows:
+                    found[call] = [_file(r) for r in rows]
+            return {call: tuple(files) for call, files in found.items()}
+
+    async def presented_bytes_since(self, scope: TrustedScope, since: datetime) -> int:
+        with self._tx() as tx:
+            tx.authorized(scope)
+            return self._presented_since(tx, scope, since)
+
+    # --- FileRetention (V3-P66 §8.2) ------------------------------------------------------
+
+    async def drop_stale_staged(self, cutoff: datetime) -> int:
+        with self._tx() as tx:
+            return tx.execute("DELETE FROM files WHERE attached_at IS NULL AND created_at < ?",
+                              _timestamp(cutoff)).rowcount
+
+    async def sweep_blobs(self, now: datetime) -> None:
+        await self.blobs.sweep(now)
 
     # --- ExternalSourceSettings ------------------------------------------------
 

@@ -144,7 +144,7 @@ def test_large_and_binary_reads(env: InsideEnvironment, alice_root: Path) -> Non
     (folder / "blob.bin").write_bytes(b"\x00\x01\x02")
     big = call(env, "read_file", path="big.txt")
     assert big.raw_result is not None and thaw(big.raw_result)["truncated"] is True  # type: ignore[index]
-    assert text(big).endswith(f"[truncated: only the beginning of this {MAX_OBSERVATION_BYTES + 10}-byte file is shown]")
+    assert f"of this {MAX_OBSERVATION_BYTES + 10}-byte file are shown; read on with offset=" in text(big)
     assert len(text(big).encode()) <= MAX_OBSERVATION_BYTES
     assert "binary file" in text(call(env, "read_file", path="blob.bin"))
 

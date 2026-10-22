@@ -25,6 +25,12 @@ stops a running job before moving it; ``restore`` brings it back;
 ``purge`` deletes it for good — its own folder first, then every Data row.
 These three run one at a time per Conversation (§7.3). Conversations
 trashed more than ``trash_days`` ago are purged at startup and every hour.
+
+Files (V3-P66): ``upload`` stores a file and stages it; ``send`` with
+attachments places them in the Conversation's ``uploads/`` folder and
+records the message (both under the lifecycle lock, §5.1); ``download``
+opens a file's stored bytes. The hourly cleanup also drops stale staged
+uploads and sweeps the file store (§8.2, §8.5).
 """
 
 from __future__ import annotations
@@ -38,14 +44,17 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import BinaryIO
 
 import httpx
 
 from himari.bootstrap import DEFAULT_INSTRUCTIONS, Runtime, build_runtime
 from himari.bootstrap.operator import check_private_dir, ensure_operator_secret, ensure_private_dir
 from himari.common import (
+    AttachmentRef,
     CallRef,
     ConversationId,
+    FileId,
     JsonValue,
     PrincipalId,
     RunId,
@@ -53,19 +62,31 @@ from himari.common import (
     TrustedScope,
     WorkspaceId,
 )
-from himari.control.api import ContextStatus, ModelCatalog, ModelOffer, ResolvedModel
+from himari.control.api import ContextStatus, ControlError, ControlErrorCode, JobStatus, ModelCatalog, ModelOffer, ResolvedModel
 from himari.control.driver import NO_PROGRESS_RUNS
 from himari.control.runner import SEEN_SECONDS, BackgroundRunner
 from himari.data.api import (
+    DEFAULT_FILE_MAX_BYTES,
+    DEFAULT_KEEP_DAYS,
+    DEFAULT_STORE_MAX_BYTES,
+    MAX_RAW_NAME_BYTES,
+    MAX_STAGED_UPLOADS,
+    STAGED_KEEP,
+    DataError,
+    DataErrorCode,
+    FileRecord,
     InitialActivation,
     ModelSetting,
     ToolExecutionRecord,
     ToolExecutionStatus,
     UiCsp,
     UiResource,
+    UserMessage,
+    clean_file_name,
+    clean_media_type,
 )
 from himari.data.sqlite import SqliteData, SqliteStore
-from himari.environment.inside import INSIDE, InsideEnvironment
+from himari.environment.inside import INSIDE, InsideEnvironment, InsideFiles, Upload
 from himari.sandbox.api import SandboxState, ServerProfile
 from himari.sandbox.backend import SandboxBackend
 from himari.sandbox.server import ServerSandbox
@@ -74,7 +95,7 @@ from himari.mcp.jsonrpc import McpError
 from himari.mcp.prompts import PromptContentError, prompt_text
 from himari.mcp.stdio import ProcessLauncher
 from himari.mcp.tools import LauncherFor, McpConnection, PromptArgument, SourceStatus, connect
-from himari.prompt.api import ContextBudget, SourceNote
+from himari.prompt.api import ATTACHMENT_NOTE, ContextBudget, SourceNote
 from himari.provider.api import ProviderAdapter
 from himari.tool.api import ToolHandler
 from himari.tool.schema import check_tool_input_schema
@@ -84,6 +105,7 @@ DEFAULT_TRASH_DAYS = 30  # V3-P65 Q1 (the owner's choice, 2026-10-21)
 CLEANUP_SECONDS = 3600.0  # how often trash past its days is purged
 TRASH_STOP_SECONDS = 30.0  # how long a running job may take to stop before a trash is refused (§7.1)
 BUILT_IN_NAMESPACES = frozenset({"inside"})  # Tool ids that are HIMARI's own, not an external server's
+PLACE_LOCK_SECONDS = 60.0  # how long sending waits for the Workspace write lock (V3-P66 review N4)
 
 log = logging.getLogger(__name__)
 # One turn's guards (V3-P62): no Run limit by default; a token budget, a
@@ -178,6 +200,14 @@ class PromptRefused(LookupError):
 
 class ConversationStillStopping(RuntimeError):
     """V3-P65 §7.1: the running job did not stop in time; nothing was moved."""
+
+
+class FilesUnavailable(RuntimeError):
+    """V3-P66 §5.2: this Conversation (or server) has no place for uploads."""
+
+
+class FileNameRefused(ValueError):
+    """V3-P66 §5.3: no name, or a name longer than MAX_RAW_NAME_BYTES."""
 
 
 @dataclass(frozen=True)
@@ -350,6 +380,8 @@ class Application:
     # not declare (V3-P64 §3, review B1): told at startup, used as configured.
     unverified_models: tuple[str, ...] = ()
     trash_days: int = DEFAULT_TRASH_DAYS
+    file_max_bytes: int = DEFAULT_FILE_MAX_BYTES  # V3-P66 §8.3
+    uploads_work: bool = True  # the no-replace rename placing needs works here (review N2)
     # V3-P65 §7.3: one lifecycle lock per Conversation (P0: one server process),
     # kept only while some call holds or waits for it (PR #56 review C1).
     _lifecycle: dict[ConversationId, _Lifecycle] = field(default_factory=dict, repr=False)
@@ -379,7 +411,12 @@ class Application:
         models: Sequence[tuple[str, str | None]] = (),
         trash_days: int = DEFAULT_TRASH_DAYS,  # V3-P65: 1..365
         cleanup_seconds: float | None = CLEANUP_SECONDS,  # None: no periodic purge (tests call purge_due)
+        file_max_bytes: int = DEFAULT_FILE_MAX_BYTES,  # V3-P66 §8.3: one file
+        file_store_max_bytes: int = DEFAULT_STORE_MAX_BYTES,  # the file store, before expiring the oldest
+        file_keep_days: int = DEFAULT_KEEP_DAYS,  # unused this long, a stored file expires (§8.5)
     ) -> Application:
+        if file_max_bytes < 1 or file_max_bytes > file_store_max_bytes:
+            raise ValueError("a file's limit must be positive and within the file store's (V3-P66)")
         if turn_budget is None and max_runs is None:
             raise ValueError("a turn needs a token budget or a Run limit (V3-P62)")
         if not 1 <= trash_days <= 365:
@@ -415,6 +452,7 @@ class Application:
         store = SqliteStore(root / DATABASE_NAME)  # first: a second server on this root fails here
         mcp: McpConnection | None = None
         try:
+            store.blobs.configure(max_bytes=file_store_max_bytes, keep_days=file_keep_days)
             launcher_for = mcp_launcher_for
             if launcher_for is None and sandbox:
                 launcher_for = await _server_launchers(mcp_config, root)
@@ -427,10 +465,16 @@ class Application:
                 state = await candidate.start(protected_paths=(str(root), str(workspaces)))
                 if state is SandboxState.ENFORCED:
                     backend = candidate  # run_command is offered only when enforcement is proven (V3-050)
-            inside = InsideEnvironment(workspaces, sandbox=backend)
+            inside = InsideEnvironment(workspaces, sandbox=backend,
+                                       files=InsideFiles(store.blobs, SqliteData(store), file_max_bytes))
+            uploads_work = inside.placement_works()
+            if not uploads_work:
+                log.warning("this filesystem cannot place uploads without replacing files (renameat2); "
+                            "attaching files is off")
+            base = DEFAULT_INSTRUCTIONS if instructions is None else instructions
             runtime = build_runtime(provider, store=store, environments=[inside], tools=[*tools, *mcp.handlers, *mcp.resource_tools],
                                     models=catalog,
-                                    instructions=DEFAULT_INSTRUCTIONS if instructions is None else instructions,
+                                    instructions=(*base, ATTACHMENT_NOTE) if uploads_work else base,
                                     external_defaults=mcp.defaults,
                                     source_notes=[SourceNote(source, note.placement, note.text)
                                                   for source, note in mcp.notes.items()],
@@ -446,7 +490,8 @@ class Application:
         assert isinstance(runtime.data, SqliteData)
         runner = BackgroundRunner(runtime.driver, unattended_runs=unattended_runs, seen_seconds=turn.seen_seconds)
         application = cls(root, store, runtime.data, runtime, runner, inside, state, model_id,
-                          default_budget.limit_tokens, secret, mcp, turn, tuple(unverified), trash_days)
+                          default_budget.limit_tokens, secret, mcp, turn, tuple(unverified), trash_days,
+                          file_max_bytes, uploads_work)
         if cleanup_seconds is not None:
             application._cleanup = asyncio.create_task(application._purge_periodically(cleanup_seconds),
                                                        name="trash-cleanup")
@@ -648,6 +693,83 @@ class Application:
             principal, title=title, activations=(InitialActivation(INSIDE, workspace),)
         )
 
+    # --- files (V3-P66) ----------------------------------------------------------------
+
+    async def upload(self, scope: TrustedScope, name: str, media_type: str | None,
+                     chunks: AsyncIterator[bytes]) -> FileRecord:
+        """§5.1: store the bytes, then stage them for a message of this
+        Conversation. The staged count is checked before the bytes are read
+        (review C10); the lifecycle lock is held only while recording, never
+        while the body streams (review N4)."""
+        if not name or len(name.encode("utf-8")) > MAX_RAW_NAME_BYTES:
+            raise FileNameRefused(name[:40])
+        cleaned = clean_file_name(name)
+        await self._workspace(scope)  # authorizes; FilesUnavailable without a place for uploads
+        if await self.data.count_staged(scope) >= MAX_STAGED_UPLOADS:
+            raise DataError(DataErrorCode.LIMIT_EXCEEDED, f"{MAX_STAGED_UPLOADS} uploads wait to be sent")
+        blob = await self.data.blobs.put(scope.principal_id, chunks, self.file_max_bytes)
+        async with self._exclusive(scope.conversation_id):
+            return await self.data.stage_upload(scope, blob, cleaned, clean_media_type(media_type, cleaned))
+
+    async def _workspace(self, scope: TrustedScope) -> tuple[WorkspaceId, str]:
+        if not self.uploads_work:
+            raise FilesUnavailable(scope.conversation_id)
+        try:
+            workspace = await self.data.resolve_conversation_workspace(scope)
+        except DataError as error:
+            if error.code is DataErrorCode.NOT_FOUND:
+                raise FilesUnavailable(scope.conversation_id) from None
+            raise
+        return workspace.workspace_id, workspace.cwd_relative
+
+    async def send(self, scope: TrustedScope, text: str, attachments: Sequence[FileId] = ()) -> JobStatus:
+        """A user message. With attachments (§5.1, under the lifecycle lock):
+        1 the T1 checks as a read; 2 refused while a job runs; 3 the uploads
+        placed in ``uploads/`` under the Workspace write lock (waited for at
+        most PLACE_LOCK_SECONDS); 4 the message submitted, attaching them."""
+        if not attachments:
+            await self.data.read_conversation(scope)  # 404 before a job is started for a foreign id
+            return await self.runner.submit(scope, UserMessage((TextBlock(text),)))
+        async with self._exclusive(scope.conversation_id):
+            records = await self.data.check_attachments(scope, attachments)
+            if self.runner.status(scope).running:
+                raise ControlError(ControlErrorCode.BUSY, scope.conversation_id)
+            workspace_id, cwd = await self._workspace(scope)
+            async with self.inside.locked(workspace_id, PLACE_LOCK_SECONDS):
+                # Read again under the lock: another tab may have placed them (review C4).
+                fresh = await self.data.read_file_records(scope, [(r.file_id, r.version) for r in records])
+                handles = [self.data.blobs.open(r.blob) for r in fresh]  # here: the store is not thread-safe
+                try:
+                    placed = await self.inside.place_uploads(workspace_id, cwd, [
+                        Upload(r.name, (lambda h=h: h), r.workspace_path)  # type: ignore[misc]
+                        for r, h in zip(fresh, handles, strict=True)])
+                finally:
+                    for handle in handles:
+                        handle.close()
+                for record, path in zip(fresh, placed, strict=True):
+                    if record.workspace_path != path:
+                        await self.data.set_placement(scope, record.file_id, path)
+            blocks = ((TextBlock(text),) if text else ()) + tuple(AttachmentRef(r.file_id, r.version) for r in records)
+            return await self.runner.submit(scope, UserMessage(blocks))
+
+    async def files(self, scope: TrustedScope, *, limit: int = 50, offset: int = 0) -> Sequence[FileRecord]:
+        return await self.data.read_files(scope, limit=limit, offset=offset)
+
+    async def call_files(self, scope: TrustedScope, calls: Sequence[CallRef]) -> Mapping[CallRef, Sequence[FileRecord]]:
+        return await self.data.read_call_files(scope, calls)
+
+    async def attachment_records(self, scope: TrustedScope, refs: Sequence[tuple[FileId, int]]) -> Sequence[FileRecord]:
+        return await self.data.read_file_records(scope, refs)
+
+    async def download(self, scope: TrustedScope, file_id: FileId, version: int) -> tuple[FileRecord, BinaryIO]:
+        """§7.2: a file's stored bytes. NOT_FOUND for a file this Conversation
+        does not have; BLOB_EXPIRED or BLOB_MISSING when its bytes are gone."""
+        found = await self.data.read_file_records(scope, [(file_id, version)])
+        if not found:
+            raise DataError(DataErrorCode.NOT_FOUND, file_id)
+        record = found[0]
+        return record, self.data.blobs.open(record.blob)
+
     # --- the trash (V3-P65 §7) --------------------------------------------------------
 
     @asynccontextmanager
@@ -734,12 +856,26 @@ class Application:
                 log.exception("could not purge %s; it is tried again later", scope.conversation_id)
         return purged
 
+    async def clean_files(self, now: datetime | None = None) -> None:
+        """V3-P66 §8.2: staged uploads never sent go after STAGED_KEEP; then
+        the file store's sweep (unreferenced blobs, the keep days, leftovers)."""
+        now = datetime.now(UTC) if now is None else now
+        try:
+            await self.data.drop_stale_staged(now - STAGED_KEEP)
+        except Exception:  # noqa: BLE001 — the sweep still runs
+            log.exception("could not drop stale staged uploads")
+        await self.data.sweep_blobs(now)
+
     async def _purge_periodically(self, seconds: float) -> None:
         while True:
             try:
                 await self.purge_due()
             except Exception:  # noqa: BLE001 — the next round tries again
                 log.exception("trash cleanup failed")
+            try:
+                await self.clean_files()
+            except Exception:  # noqa: BLE001 — the next round tries again
+                log.exception("file cleanup failed")
             await asyncio.sleep(seconds)
 
     async def close(self, grace_seconds: float = 30.0) -> None:

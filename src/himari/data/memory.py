@@ -9,19 +9,21 @@ single-threaded asyncio (the transaction boundaries T1–T9, T7a, T-R).
 from __future__ import annotations
 
 import itertools
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 
 from himari.common import (
     ASK_USER_TOOL_ID,
     ArtifactId,
+    AttachmentRef,
     BindingId,
     CallRef,
     ConversationId,
     EnvironmentInstanceId,
     EnvironmentKind,
     EventId,
+    FileId,
     JsonValue,
     ModelToolResult,
     PrincipalId,
@@ -33,7 +35,13 @@ from himari.common import (
     WorkspaceId,
 )
 from himari.data import rules
+from himari.data.blobs import BlobRow, FileStore, MemoryBlobFiles
 from himari.data.api import (
+    MAX_ATTACHMENTS,
+    MAX_STAGED_UPLOADS,
+    PRESENT_LIMIT_BYTES,
+    PRESENT_WINDOW,
+    STAGED_SEND_CUTOFF,
     AnswerCommit,
     AppView,
     Artifact,
@@ -49,6 +57,10 @@ from himari.data.api import (
     DataErrorCode,
     EnvironmentActivation,
     EventKind,
+    FileOrigin,
+    FileRecord,
+    PresentedFile,
+    StoredBlob,
     EventPayload,
     ExternalSourceSetting,
     InitialActivation,
@@ -103,6 +115,22 @@ class _Run:
 
 
 @dataclass
+class _File:
+    """A ``files`` row (V3-P66): mutable only in ``workspace_path`` and ``attached_at``."""
+
+    file_id: FileId
+    version: int
+    origin: FileOrigin
+    name: str
+    media_type: str
+    blob_key: str
+    created_at: datetime
+    workspace_path: str | None = None
+    attached_at: datetime | None = None
+    call: CallRef | None = None
+
+
+@dataclass
 class _Conversation:
     owner: PrincipalId
     title: str | None = None
@@ -122,6 +150,7 @@ class _Conversation:
     app_payloads: dict[CallRef, JsonValue] = field(default_factory=dict)  # V3-P58, by call
     trashed_at: datetime | None = None  # V3-P65
     purge_started_at: datetime | None = None
+    files: list[_File] = field(default_factory=list)  # V3-P66, in creation order
 
 
 class InMemoryStore:
@@ -131,6 +160,8 @@ class InMemoryStore:
         self._conversations: dict[ConversationId, _Conversation] = {}
         self._ids = itertools.count(1)
         self.ui_resources: dict[str, UiResource] = {}  # V3-P58: by digest, shared by every Conversation
+        self.blob_rows: dict[str, BlobRow] = {}  # V3-P66: by key, shared by a principal's Conversations
+        self.blobs = FileStore(MemoryBlobFiles(), _MemoryBlobRows(self))
 
     # --- admin helpers (trusted setup paths, not model-reachable) --------
 
@@ -210,12 +241,66 @@ class InMemoryStore:
         return conv
 
 
-class InMemoryData:
-    """Implements ConversationLog, ArtifactStore, WorkspaceState, StateQuery,
-    ConversationCatalog, ConversationRetention and ExternalSourceSettings."""
+class _MemoryBlobRows:
+    """The ``blobs`` rows for the file store (V3-P66 §4.5)."""
 
     def __init__(self, store: InMemoryStore) -> None:
         self._store = store
+
+    def _files(self) -> list[_File]:
+        return [f for conv in self._store._conversations.values() for f in conv.files]
+
+    def blob_row(self, key: str) -> BlobRow | None:
+        return self._store.blob_rows.get(key)
+
+    def live_total(self) -> int:
+        return sum(r.size for r in self._store.blob_rows.values() if r.expired_at is None)
+
+    def expirable(self, used_before: datetime) -> Sequence[BlobRow]:
+        staged = {f.blob_key for f in self._files() if f.attached_at is None}
+        rows = [r for r in self._store.blob_rows.values()
+                if r.expired_at is None and r.last_used_at < used_before and r.key not in staged]
+        return sorted(rows, key=lambda r: (r.last_used_at, r.key))
+
+    def expire_blobs(self, keys: Sequence[str], now: datetime) -> None:
+        for key in keys:
+            row = self._store.blob_rows.get(key)
+            if row is not None and row.expired_at is None:
+                self._store.blob_rows[key] = replace(row, expired_at=now)
+
+    def touch_blob(self, row: BlobRow) -> None:
+        self._store.blob_rows[row.key] = replace(row, expired_at=None)
+
+    def drop_unreferenced(self, key: str, used_before: datetime) -> bool:
+        if key in self.unreferenced_keys(used_before):
+            del self._store.blob_rows[key]
+            return True
+        return False
+
+    def unreferenced_keys(self, used_before: datetime) -> Sequence[str]:
+        used = {f.blob_key for f in self._files()}
+        return [r.key for r in self._store.blob_rows.values()
+                if r.key not in used and (r.expired_at is not None or r.last_used_at < used_before)]
+
+    def expired_keys(self) -> Sequence[str]:
+        return [r.key for r in self._store.blob_rows.values() if r.expired_at is not None]
+
+    def known_keys(self) -> frozenset[str]:
+        return frozenset(self._store.blob_rows)
+
+
+def _refused(file_id: str, why: str) -> DataError:
+    return DataError(DataErrorCode.ATTACHMENT_REFUSED, f"{file_id}: {why}", file_id=FileId(file_id))
+
+
+class InMemoryData:
+    """Implements ConversationLog, ArtifactStore, WorkspaceState, StateQuery,
+    ConversationCatalog, ConversationRetention, ExternalSourceSettings,
+    FileCatalog and FileRetention; ``blobs`` is the BlobStore (V3-P66)."""
+
+    def __init__(self, store: InMemoryStore) -> None:
+        self._store = store
+        self.blobs = store.blobs
 
     # --- helpers -------------------------------------------------------------
 
@@ -264,6 +349,77 @@ class InMemoryData:
             return group[0].call
         return None
 
+    # --- files (V3-P66) ---------------------------------------------------------------
+
+    def _record(self, file: _File) -> FileRecord:
+        row = self._store.blob_rows[file.blob_key]
+        return FileRecord(file.file_id, file.version, file.origin, file.name, file.media_type,
+                          StoredBlob(row.key, row.sha256, row.size), file.created_at, file.workspace_path,
+                          file.attached_at is not None, row.expired_at is not None, file.call)
+
+    def _check_attachments(self, conv: _Conversation, file_ids: Sequence[str], *,
+                           cutoff: datetime | None) -> list[_File]:
+        """V3-P66 §4.2, as in SQLite."""
+        if len(file_ids) > MAX_ATTACHMENTS:
+            raise DataError(DataErrorCode.ATTACHMENT_REFUSED, f"more than {MAX_ATTACHMENTS} attachments")
+        chosen: list[_File] = []
+        for file_id in file_ids:
+            if any(f.file_id == file_id for f in chosen):
+                raise _refused(file_id, "attached twice")
+            versions = [f for f in conv.files if f.file_id == file_id]
+            if not versions:
+                raise _refused(file_id, "no such upload")
+            file = max(versions, key=lambda f: f.version)
+            if file.origin is not FileOrigin.UPLOAD or file.version != 1:
+                raise _refused(file_id, "not an upload")
+            if file.attached_at is not None:
+                raise _refused(file_id, "already sent")
+            if self._store.blob_rows[file.blob_key].expired_at is not None:
+                raise _refused(file_id, "expired")
+            if cutoff is not None and file.created_at < cutoff:
+                raise _refused(file_id, "too old; upload it again")
+            chosen.append(file)
+        return chosen
+
+    def _attach(self, conv: _Conversation, blocks: Sequence[object]) -> list[_File]:
+        """Checks only; the caller sets ``attached_at`` once nothing else can fail."""
+        refs = [b for b in blocks if isinstance(b, AttachmentRef)]
+        if not refs:
+            return []
+        if any(r.version != 1 for r in refs):
+            raise _refused(next(r.file_id for r in refs if r.version != 1), "not an upload")
+        return self._check_attachments(conv, [r.file_id for r in refs], cutoff=None)
+
+    @staticmethod
+    def _mark_attached(files: Sequence[_File]) -> None:
+        now = datetime.now(UTC)
+        for file in files:
+            file.attached_at = now
+
+    def _presented_since(self, conv: _Conversation, since: datetime) -> int:
+        return sum(self._store.blob_rows[f.blob_key].size for f in conv.files
+                   if f.origin is FileOrigin.PRESENTED and f.created_at >= since)
+
+    def _stage_presented(self, conv: _Conversation, call: CallRef, files: Sequence[PresentedFile]) -> list[_File]:
+        now = datetime.now(UTC)
+        if self._presented_since(conv, now - PRESENT_WINDOW) + sum(f.blob.size for f in files) > PRESENT_LIMIT_BYTES:
+            raise DataError(DataErrorCode.LIMIT_EXCEEDED, f"over {PRESENT_LIMIT_BYTES} bytes presented in the hour")
+        staged: list[_File] = []
+        for presented in files:
+            row = self._store.blob_rows.get(presented.blob.key)
+            if row is None or row.expired_at is not None or row.size != presented.blob.size:
+                raise DataError(DataErrorCode.BLOB_MISSING, presented.blob.key)
+            earlier = [f for f in [*conv.files, *staged]
+                       if f.origin is FileOrigin.PRESENTED and f.workspace_path == presented.workspace_path]
+            if earlier:
+                file_id, version = earlier[-1].file_id, max(f.version for f in earlier
+                                                            if f.file_id == earlier[-1].file_id) + 1
+            else:
+                file_id, version = FileId(self._store.new_id("file")), 1
+            staged.append(_File(file_id, version, FileOrigin.PRESENTED, presented.name, presented.media_type,
+                                presented.blob.key, now, presented.workspace_path, now, call))
+        return staged
+
     # --- ConversationLog --------------------------------------------------
 
     async def append_event(
@@ -282,6 +438,8 @@ class InMemoryData:
             raise DataError(
                 DataErrorCode.INVALID_STATE_TRANSITION, "an ask_user call is waiting; use answer_pending_call"
             )
+        attached = self._attach(conv, message.blocks)
+        self._mark_attached(attached)
         event = self._new_event(conv, scope, message, None)
         if idempotency_key is not None:
             conv.idempotency[idempotency_key] = event.event_id
@@ -445,8 +603,12 @@ class InMemoryData:
         known = None if view is None else self._store.ui_resources.get(view.resource.digest)
         if view is not None and known is not None and known != view.resource:
             raise DataError(DataErrorCode.INVALID_ARGUMENT, "another view is stored under this digest")
+        if completion.presented_files and completion.status is not ToolExecutionStatus.SUCCEEDED:
+            raise DataError(DataErrorCode.INVALID_ARGUMENT, "only a succeeded call presents files")
         staged = self._stage_artifacts(conv, completion.artifact_mutations)  # validates CAS first
+        presented = self._stage_presented(conv, call, completion.presented_files)
         conv.artifacts.update(staged)
+        conv.files.extend(presented)
         if view is not None:
             self._store.ui_resources.setdefault(view.resource.digest, view.resource)
             conv.app_payloads[call] = view.payload
@@ -515,6 +677,7 @@ class InMemoryData:
         if self._waiting(conv) != call:
             raise DataError(DataErrorCode.ALREADY_COMMITTED, f"{call.call_id} is not waiting")
         record = self._execution(conv, call)
+        self._mark_attached(self._attach(conv, answer.blocks))
         result = ModelToolResult(blocks=answer.blocks)
         user_event = self._new_event(conv, scope, replace(answer, answers_call=call), None)
         conv.executions[call] = replace(record, status=ToolExecutionStatus.SUCCEEDED, model_result=result)
@@ -726,6 +889,7 @@ class InMemoryData:
         for digest in {e.ui_digest for e in conv.executions.values()} - used:
             if digest is not None:
                 del self._store.ui_resources[digest]
+        await self.blobs.release({f.blob_key for f in conv.files})  # never fails the purge (V3-P66 §8.1)
 
     async def used_tool_ids(self, scope: TrustedScope) -> frozenset[ToolId]:
         return frozenset(e.tool_id for e in self._conv(scope).executions.values())
@@ -737,6 +901,78 @@ class InMemoryData:
                for i, (cid, conv) in enumerate(self._store._conversations.items())
                if conv.trashed_at is not None and (conv.purge_started_at is not None or conv.trashed_at < cutoff)]
         return tuple(scope for _, _, scope in sorted(due, key=lambda row: (row[0], row[1])))
+
+    # --- FileCatalog (V3-P66) ----------------------------------------------------------
+
+    async def stage_upload(self, scope: TrustedScope, blob: StoredBlob, name: str, media_type: str) -> FileRecord:
+        conv = self._conv(scope)
+        if sum(1 for f in conv.files if f.attached_at is None) >= MAX_STAGED_UPLOADS:
+            raise DataError(DataErrorCode.LIMIT_EXCEEDED, f"{MAX_STAGED_UPLOADS} uploads wait to be sent")
+        row = self._store.blob_rows.get(blob.key)
+        if row is None or row.expired_at is not None or row.size != blob.size:
+            raise DataError(DataErrorCode.BLOB_MISSING, blob.key)
+        file = _File(FileId(self._store.new_id("file")), 1, FileOrigin.UPLOAD, name, media_type, blob.key,
+                     datetime.now(UTC))
+        conv.files.append(file)
+        return self._record(file)
+
+    async def count_staged(self, scope: TrustedScope) -> int:
+        return sum(1 for f in self._conv(scope).files if f.attached_at is None)
+
+    async def set_placement(self, scope: TrustedScope, file_id: FileId, workspace_path: str) -> None:
+        conv = self._conv(scope)
+        file = next((f for f in conv.files if f.file_id == file_id and f.origin is FileOrigin.UPLOAD), None)
+        if file is None:
+            raise DataError(DataErrorCode.NOT_FOUND, file_id)
+        if file.attached_at is not None:
+            raise DataError(DataErrorCode.INVALID_STATE_TRANSITION, f"{file_id} was already sent")
+        file.workspace_path = workspace_path
+
+    async def check_attachments(self, scope: TrustedScope, file_ids: Sequence[FileId], *,
+                                now: datetime | None = None) -> Sequence[FileRecord]:
+        conv = self._conv(scope)
+        cutoff = (datetime.now(UTC) if now is None else now) - STAGED_SEND_CUTOFF
+        return tuple(self._record(f) for f in self._check_attachments(conv, file_ids, cutoff=cutoff))
+
+    async def read_files(self, scope: TrustedScope, *, limit: int = 50, offset: int = 0) -> Sequence[FileRecord]:
+        attached = [f for f in reversed(self._conv(scope).files) if f.attached_at is not None]
+        return tuple(self._record(f) for f in attached[offset: offset + limit])
+
+    async def read_file_records(self, scope: TrustedScope, refs: Sequence[tuple[FileId, int]]
+                                ) -> Sequence[FileRecord]:
+        conv = self._conv(scope)
+        found = []
+        for file_id, version in dict.fromkeys(refs):
+            file = next((f for f in conv.files if f.file_id == file_id and f.version == version), None)
+            if file is not None:
+                found.append(self._record(file))
+        return tuple(found)
+
+    async def read_call_files(self, scope: TrustedScope, calls: Sequence[CallRef]
+                              ) -> Mapping[CallRef, Sequence[FileRecord]]:
+        conv = self._conv(scope)
+        found = {}
+        for call in dict.fromkeys(calls):
+            files = [self._record(f) for f in conv.files if f.call == call]
+            if files:
+                found[call] = tuple(files)
+        return found
+
+    async def presented_bytes_since(self, scope: TrustedScope, since: datetime) -> int:
+        return self._presented_since(self._conv(scope), since)
+
+    # --- FileRetention (V3-P66 §8.2) ------------------------------------------------------
+
+    async def drop_stale_staged(self, cutoff: datetime) -> int:
+        dropped = 0
+        for conv in self._store._conversations.values():
+            keep = [f for f in conv.files if f.attached_at is not None or f.created_at >= cutoff]
+            dropped += len(conv.files) - len(keep)
+            conv.files[:] = keep
+        return dropped
+
+    async def sweep_blobs(self, now: datetime) -> None:
+        await self.blobs.sweep(now)
 
     # --- ExternalSourceSettings ------------------------------------------------
 

@@ -98,6 +98,12 @@ _STATUS = {
 }
 
 
+# Why Data refused a call's presented files (V3-P66 §7.1), as the model is told.
+_FILES_REFUSED = {
+    DataErrorCode.BLOB_MISSING: "its stored copy is gone",
+    DataErrorCode.LIMIT_EXCEEDED: "too much was presented in the last hour",
+}
+
 UNKNOWN_OUTCOME_RESULT = ModelToolResult(
     blocks=(
         TextBlock(
@@ -306,15 +312,36 @@ class Dispatcher:
             artifact_mutations=outcome.artifact_mutations,
             record_event=record_event,
             app_view=outcome.app_view if ran else None,  # only a call that ran has a view (V3-P58)
+            presented_files=outcome.presented_files if outcome.status is ToolStatus.SUCCEEDED else (),
         )
         try:
             await self._log.commit_tool_outcome(scope, call, completion)
         except DataError as error:
+            if completion.presented_files and error.code in _FILES_REFUSED:
+                # V3-P66 §7.1 (review B3): the result says the files were given;
+                # without them it would be a false success, so the call fails.
+                await self._commit_unpresented(scope, call, completion, error)
+                return
             if completion.app_view is None or error.code is not DataErrorCode.INVALID_ARGUMENT:
                 raise
             # A view Data refuses must not cost the call its definite result:
             # the commit is atomic, so commit the result without it.
             await self._log.commit_tool_outcome(scope, call, replace(completion, app_view=None))
+
+    async def _commit_unpresented(self, scope: TrustedScope, call: CallRef, completion: ToolCompletion,
+                                  error: DataError) -> None:
+        reason = _FILES_REFUSED[error.code]
+        failed = replace(
+            completion, status=ToolExecutionStatus.FAILED, presented_files=(), artifact_mutations=(),
+            model_result=ModelToolResult((TextBlock(f"The file could not be kept for the user ({reason}). "
+                                                    "Nothing was presented."),), is_error=True),
+            raw_result={"presented": False, "refused": error.code.value})
+        try:
+            await self._log.commit_tool_outcome(scope, call, failed)
+        except DataError as again:
+            if failed.app_view is None or again.code is not DataErrorCode.INVALID_ARGUMENT:
+                raise
+            await self._log.commit_tool_outcome(scope, call, replace(failed, app_view=None))
 
     @staticmethod
     def _group_state(run_id: RunId, records: Sequence[ToolExecutionRecord]) -> GroupDispatchResult:

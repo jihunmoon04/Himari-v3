@@ -497,7 +497,7 @@ def test_context_reports_the_estimate_and_the_budget(server: Server) -> None:
 
 def test_context_shows_where_the_summary_takes_over(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(web, "FAILED_LOGIN_DELAY_SECONDS", 0)
-    server = Server(tmp_path, [], context_tokens=2000)
+    server = Server(tmp_path, [], context_tokens=2100)
     with server.client:
         server.sign_in()
         cid = server.post("/api/conversations").json()["id"]

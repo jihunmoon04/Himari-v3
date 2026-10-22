@@ -16,22 +16,26 @@ what that snapshot needs.
 assistant output's Run (compaction Runs produce no Event and are skipped).
 A Run folded into the snapshot never yields a usable one: it was composed
 before that snapshot existed, under another snapshot revision.
+
+Attachments (FILE-05, V3-P66 §6): the file records of every attachment the
+loaded Events and Tool results refer to, read in one call.
 """
 
 from __future__ import annotations
 
 from collections.abc import Sequence
 
-from himari.common import ProviderContinuation, RunId, TrustedScope
+from himari.common import AttachmentRef, ContentBlock, FileId, ProviderContinuation, RunId, TrustedScope
 from himari.data.api import (
     ConversationEvent,
     ConversationLog,
     EventKind,
+    FileCatalog,
     StateQuery,
     ToolExecutionRecord,
     TriggerRef,
 )
-from himari.prompt.api import PromptInputs, RequestOptions, UsageMark, SourceNote
+from himari.prompt.api import AttachmentInfo, PromptInputs, RequestOptions, SourceNote, UsageMark, attachment_key
 from himari.prompt.compaction import read_summary
 from himari.tool.api import ExternalAccess, ToolCatalog
 
@@ -45,7 +49,9 @@ class ContextLoader:
         instructions: Sequence[str],
         external_access: ExternalAccess | None = None,  # None: no External Tools in the catalog
         source_notes: Sequence[SourceNote] = (),  # every server's notes; only enabled ones are used (V3-P60)
+        files: FileCatalog | None = None,  # None: attachments render as unavailable (V3-P66)
     ) -> None:
+        self._files = files
         self._log = log
         self._state = state
         self._catalog = catalog
@@ -86,6 +92,7 @@ class ContextLoader:
                     used = run.prompt_basis
                     usage_mark = UsageMark(run.usage.input_tokens, used.event_sequence, used.snapshot_revision,
                                            used.context_key, used.state_revision, run.provider_key)
+        attachments = await self._attachments(scope, events, executions)
         basis = await self._state.read_current_state_basis(scope)
         active = frozenset(a.environment_kind for a in basis.environments)
         enabled = frozenset() if self._external_access is None else await self._external_access.enabled_sources(scope)
@@ -102,4 +109,21 @@ class ContextLoader:
             continuations=continuations,
             usage_mark=usage_mark,
             source_notes=tuple(n for n in self._source_notes if n.source in enabled),
+            attachments=attachments,
         )
+
+    async def _attachments(self, scope: TrustedScope, events: Sequence[ConversationEvent],
+                           executions: Sequence[ToolExecutionRecord]) -> dict[str, AttachmentInfo]:
+        blocks: list[ContentBlock] = []
+        for event in events:
+            blocks.extend(getattr(event.payload, "blocks", ()))
+            blocks.extend(getattr(event.payload, "commentary", ()))
+        for execution in executions:
+            if execution.model_result is not None:
+                blocks.extend(execution.model_result.blocks)
+        refs = [(FileId(b.file_id), b.version) for b in blocks if isinstance(b, AttachmentRef)]
+        if not refs or self._files is None:
+            return {}
+        records = await self._files.read_file_records(scope, refs)
+        return {attachment_key(AttachmentRef(r.file_id, r.version)):
+                AttachmentInfo(r.name, r.workspace_path, r.media_type, r.size) for r in records}

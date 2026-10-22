@@ -71,7 +71,7 @@ import json
 import math
 from collections.abc import Callable, Mapping, Sequence
 
-from himari.common import ContentBlock, EventId, JsonValue, RunId, TextBlock, thaw
+from himari.common import ContentBlock, EventId, FrozenMap, JsonValue, RunId, TextBlock, thaw
 from himari.data.api import (
     AssistantToolCalls,
     ConversationEvent,
@@ -80,6 +80,7 @@ from himari.data.api import (
     PromptSnapshot,
 )
 from himari.prompt.api import (
+    AttachmentInfo,
     AssistantTurn,
     CompactionPlan,
     CompressedHistory,
@@ -94,6 +95,7 @@ from himari.prompt.api import (
     PromptInputs,
     ToolGroupTurn,
     UserTurn,
+    blocks_text,
     json_data,
     notes_section,
     state_block,
@@ -155,25 +157,26 @@ def _json_tokens(value: object) -> int:
     return tokens_of_text(json.dumps(thaw(value), ensure_ascii=False, separators=(",", ":")))
 
 
-def _blocks_text(blocks: Sequence[ContentBlock]) -> str:
-    return "\n".join(b.text if isinstance(b, TextBlock) else f"[attachment {b.file_id} v{b.version}]" for b in blocks)
+def _blocks_text(blocks: Sequence[ContentBlock], attachments: Mapping[str, AttachmentInfo] = FrozenMap()) -> str:
+    """As the Provider renders them (``api.blocks_text``): attachments as their lines (V3-P66 C1)."""
+    return blocks_text(blocks, attachments)
 
 
-def part_tokens(part: HistoryPart) -> int:
+def part_tokens(part: HistoryPart, attachments: Mapping[str, AttachmentInfo] = FrozenMap()) -> int:
     match part:
         case CompressedHistory(summary=summary):
-            return MESSAGE_OVERHEAD_TOKENS + tokens_of_text(_blocks_text(summary))
+            return MESSAGE_OVERHEAD_TOKENS + tokens_of_text(_blocks_text(summary, attachments))
         case UserTurn(blocks=blocks):
-            return MESSAGE_OVERHEAD_TOKENS + tokens_of_text(_blocks_text(blocks))
+            return MESSAGE_OVERHEAD_TOKENS + tokens_of_text(_blocks_text(blocks, attachments))
         case AssistantTurn(blocks=blocks):
-            return MESSAGE_OVERHEAD_TOKENS + tokens_of_text(_blocks_text(blocks))
+            return MESSAGE_OVERHEAD_TOKENS + tokens_of_text(_blocks_text(blocks, attachments))
         case ToolGroupTurn():
-            total = MESSAGE_OVERHEAD_TOKENS + tokens_of_text(_blocks_text(part.commentary))
+            total = MESSAGE_OVERHEAD_TOKENS + tokens_of_text(_blocks_text(part.commentary, attachments))
             for call in part.calls:
                 total += MESSAGE_OVERHEAD_TOKENS + tokens_of_text(call.tool_id) + _json_tokens(call.arguments)
                 result = part.results.get(call.call_id)
                 if result is not None:
-                    total += tokens_of_text(_blocks_text(result.blocks))
+                    total += tokens_of_text(_blocks_text(result.blocks, attachments))
             return total
 
 
@@ -200,7 +203,7 @@ def request_tokens(model_input: ModelInput) -> int:
         total += tokens_of_text(section)
     for definition in model_input.tool_catalog:
         total += tokens_of_text(definition.tool_id + definition.description) + _json_tokens(definition.input_schema)
-    total += sum(part_tokens(part) for part in model_input.conversation)
+    total += sum(part_tokens(part, model_input.attachments) for part in model_input.conversation)
     return total + state_tokens(model_input)
 
 
@@ -253,26 +256,27 @@ def part_anchor(part: HistoryPart, by_event: Mapping[EventId, int], by_run: Mapp
             return covers
 
 
-def _items(parts: Sequence[HistoryPart]) -> list[dict[str, object]]:
+def _items(parts: Sequence[HistoryPart], attachments: Mapping[str, AttachmentInfo] = FrozenMap()
+           ) -> list[dict[str, object]]:
     items: list[dict[str, object]] = []
     for part in parts:
         match part:
             case UserTurn(blocks=blocks):
-                items.append({"role": "user", "text": _blocks_text(blocks)})
+                items.append({"role": "user", "text": _blocks_text(blocks, attachments)})
             case AssistantTurn(blocks=blocks):
-                items.append({"role": "assistant", "text": _blocks_text(blocks)})
+                items.append({"role": "assistant", "text": _blocks_text(blocks, attachments)})
             case ToolGroupTurn():
                 entry: dict[str, object] = {
                     "role": "assistant",
                     "tool_calls": [{"tool": c.tool_id, "arguments": thaw(c.arguments)} for c in part.calls],
                 }
                 if part.commentary:
-                    entry["text"] = _blocks_text(part.commentary)
+                    entry["text"] = _blocks_text(part.commentary, attachments)
                 items.append(entry)
                 for call in part.calls:
                     result = part.results[call.call_id]
                     items.append({"role": "tool", "tool": call.tool_id, "error": result.is_error,
-                                  "text": _blocks_text(result.blocks)})
+                                  "text": _blocks_text(result.blocks, attachments)})
             case CompressedHistory():
                 pass
     return items
@@ -379,7 +383,7 @@ class Compactor:
             return ContextEstimate(request_tokens(model_input), measured=False)
         by_event, by_run = anchors(inputs.events)
         added = sum(
-            part_tokens(part)
+            part_tokens(part, model_input.attachments)
             for part in model_input.conversation
             if not isinstance(part, CompressedHistory) and part_anchor(part, by_event, by_run) > mark.event_sequence
         )
@@ -406,7 +410,7 @@ class Compactor:
         parts = [p for p in model_input.conversation if not isinstance(p, CompressedHistory)]
         if len(parts) < 2:
             return None
-        sizes = [part_tokens(p) for p in parts]
+        sizes = [part_tokens(p, model_input.attachments) for p in parts]
         keep = budget.keep_recent * budget.limit_tokens
         start, kept = len(parts) - 1, sizes[-1]
         while start > 0 and kept + sizes[start - 1] <= keep:
@@ -442,13 +446,13 @@ class Compactor:
         base = request_tokens(self.step_request(plan(start, [[]]), 0, previous))
         count, total = 0, base
         while count < start:
-            size = sum(_item_tokens(i) for i in _items(parts[count:count + 1]))
+            size = sum(_item_tokens(i) for i in _items(parts[count:count + 1], model_input.attachments))
             if total + size > budget.limit_tokens:
                 break
             total += size
             count += 1
         while count > 0:
-            candidate = plan(count, [_items(parts[:count])])
+            candidate = plan(count, [_items(parts[:count], model_input.attachments)])
             if request_tokens(self.step_request(candidate, 0, previous)) <= budget.limit_tokens:
                 return candidate
             count -= 1
@@ -458,7 +462,7 @@ class Compactor:
         first = request_tokens(self.step_request(plan(1, [[]]), 0, previous))
         later = request_tokens(self.step_request(plan(1, [[]]), 0, _ROOM_FILLER * summary_limit))
         room = budget.limit_tokens - max(first, later)
-        pieces = _pieces(_items(parts[:1]), room) if room >= MIN_PIECE_TOKENS else None
+        pieces = _pieces(_items(parts[:1], model_input.attachments), room) if room >= MIN_PIECE_TOKENS else None
         if pieces is None:
             return None
         chained = plan(1, pieces)

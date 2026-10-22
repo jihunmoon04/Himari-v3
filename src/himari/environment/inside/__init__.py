@@ -17,6 +17,10 @@ configured (``himari.sandbox``, built by Bootstrap), and refuses to run unless t
 Writes and commands on the same Workspace are serialized in-process
 (V3-P10): a command's file effects are unknown, so it conflicts with every
 write to that principal root, across Conversations too. Reads do not wait.
+
+Files (V3-P66): with ``files`` given, ``inside/present_file`` gives the user
+a Workspace file, and ``place_uploads`` copies a message's uploads into the
+Conversation's ``uploads/`` folder under the write lock (§5.2).
 """
 
 from __future__ import annotations
@@ -24,12 +28,16 @@ from __future__ import annotations
 import asyncio
 import os
 import re
-from collections.abc import Sequence
+import secrets
+from collections.abc import AsyncIterator, Callable, Sequence
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import BinaryIO
 
 from himari.common import EnvironmentKind, TrustedScope, WorkspaceId
-from himari.data.api import BindingAuthority
+from himari.data.api import DEFAULT_FILE_MAX_BYTES, TEMP_PREFIX, BindingAuthority, BlobStore, FileCatalog
 from himari.environment.api import BindingObservation, ConnectionStatus
 from himari.environment.inside import fs
 from himari.environment.inside.blocking import run_blocking
@@ -39,15 +47,45 @@ from himari.tool.api import ToolHandler
 
 INSIDE = EnvironmentKind("inside")
 _WORKSPACE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
+UPLOADS = "uploads"
+
+
+@dataclass(frozen=True)
+class InsideFiles:
+    """What ``inside/present_file`` needs from Data (V3-P66 §7.1)."""
+
+    blobs: BlobStore
+    catalog: FileCatalog
+    max_bytes: int = DEFAULT_FILE_MAX_BYTES
+
+
+@dataclass(frozen=True)
+class Upload:
+    """One upload to place: its shown name, how to read its bytes, and where
+    it was placed before (a retry keeps that file if it is still there)."""
+
+    name: str
+    open: Callable[[], BinaryIO]
+    placed_at: str | None = None
+
+
+class WorkspaceBusy(Exception):
+    """The Workspace write lock was not free in time (§5.1, review N4)."""
+
+
+class UploadsFolderUnusable(Exception):
+    """The Conversation's ``uploads`` is not a folder (a link, a file) (§5.2)."""
 
 
 class InsideEnvironment:
-    def __init__(self, workspaces_root: str | Path, *, sandbox: WorkspaceSandbox | None = None) -> None:
+    def __init__(self, workspaces_root: str | Path, *, sandbox: WorkspaceSandbox | None = None,
+                 files: InsideFiles | None = None) -> None:
         root = Path(workspaces_root)
         if not root.is_absolute():
             raise ValueError("workspaces_root must be an absolute, trusted path")
         self._root = root
         self.sandbox = sandbox
+        self.files = files
         self._write_locks: dict[str, asyncio.Lock] = {}
         tools: list[ToolHandler] = list(file_tools(self))
         if sandbox is not None:
@@ -106,6 +144,71 @@ class InsideEnvironment:
             if error.category is fs.FsCategory.NOT_FOUND:  # the principal's root itself is gone
                 return False
             raise
+
+    # --- uploads (V3-P66 §5.2) --------------------------------------------------------
+
+    @asynccontextmanager
+    async def locked(self, workspace_id: WorkspaceId, timeout: float) -> AsyncIterator[None]:
+        """The Workspace write lock, waited for at most ``timeout`` seconds."""
+        lock = self.write_lock(workspace_id)
+        try:
+            await asyncio.wait_for(lock.acquire(), timeout)
+        except TimeoutError:
+            raise WorkspaceBusy(workspace_id) from None
+        try:
+            yield
+        finally:
+            lock.release()
+
+    async def place_uploads(self, workspace_id: WorkspaceId, cwd_relative: str,
+                            uploads: Sequence[Upload]) -> list[str]:
+        """Copy uploads into ``<cwd>/uploads`` (never replacing a file);
+        the ``/workspace/…`` path of each. The caller holds ``locked``."""
+        host_root = self.host_root(workspace_id)
+        return await run_blocking(self._place, host_root, cwd_relative, list(uploads))
+
+    @staticmethod
+    def _place(host_root: str, cwd: str, uploads: list[Upload]) -> list[str]:
+        folder = fs.to_relative(cwd, UPLOADS)
+        placed: list[str] = []
+        with fs.open_root(host_root) as root_fd:
+            try:
+                fs.ensure_directory(root_fd, folder)
+            except fs.FsError as error:
+                if error.category in (fs.FsCategory.LINK, fs.FsCategory.NOT_DIRECTORY, fs.FsCategory.EXISTS):
+                    raise UploadsFolderUnusable(fs.display(folder)) from None
+                raise
+            for upload in uploads:
+                if upload.placed_at is not None:
+                    try:
+                        fs.identity(root_fd, fs.to_relative(cwd, upload.placed_at))
+                        placed.append(upload.placed_at)  # placed by an earlier try: kept as it is
+                        continue
+                    except fs.FsError:
+                        pass  # gone since: place it again
+                with upload.open() as source:
+                    placed.append(fs.display(fs.place_file(root_fd, folder, upload.name, source, TEMP_PREFIX)))
+        return placed
+
+    def placement_works(self) -> bool:
+        """Whether this filesystem has the atomic no-replace rename placing
+        needs (review N2); checked once at startup."""
+        os.makedirs(self._root, mode=0o700, exist_ok=True)
+        try:
+            with fs.open_root(str(self._root)) as root_fd:
+                first, second = f"{TEMP_PREFIX}check-{secrets.token_hex(4)}", f"{TEMP_PREFIX}check-{secrets.token_hex(4)}"
+                os.close(os.open(first, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600, dir_fd=root_fd))
+                try:
+                    fs.rename_noreplace(root_fd, first, second)
+                    os.unlink(second, dir_fd=root_fd)
+                finally:
+                    try:
+                        os.unlink(first, dir_fd=root_fd)
+                    except OSError:
+                        pass
+            return True
+        except (fs.FsError, OSError):
+            return False
 
     async def observe(
         self, scope: TrustedScope, bindings: Sequence[BindingAuthority]

@@ -30,6 +30,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum
+from typing import BinaryIO
 
 RESOLVE_NO_XDEV = 0x01
 RESOLVE_NO_MAGICLINKS = 0x02
@@ -288,19 +289,23 @@ def _identity(info: os.stat_result) -> Identity:
     return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
 
 
-def read_file(root_fd: int, relative: str, max_bytes: int) -> tuple[bytes, int]:
-    """Up to ``max_bytes`` of a regular file and its total size."""
-    data, size, _ = read_file_with_identity(root_fd, relative, max_bytes)
+def read_file(root_fd: int, relative: str, max_bytes: int, offset: int = 0) -> tuple[bytes, int]:
+    """Up to ``max_bytes`` of a regular file from ``offset`` on, and its total size."""
+    data, size, _ = read_file_with_identity(root_fd, relative, max_bytes, offset)
     return data, size
 
 
-def read_file_with_identity(root_fd: int, relative: str, max_bytes: int) -> tuple[bytes, int, Identity]:
+def read_file_with_identity(root_fd: int, relative: str, max_bytes: int,
+                            offset: int = 0) -> tuple[bytes, int, Identity]:
     """Like :func:`read_file`, plus the file's identity for an optimistic
-    write-back check (see ``write_file(expected=...)``)."""
+    write-back check (see ``write_file(expected=...)``). ``offset``: read
+    from that byte on (V3-P66 §5.2)."""
     fd = openat2(root_fd, relative, _READ_FLAGS)
     try:
         info = os.fstat(fd)
         _check_regular(info)
+        if offset:
+            os.lseek(fd, offset, os.SEEK_SET)
         chunks: list[bytes] = []
         remaining = max_bytes
         while remaining > 0:
@@ -373,6 +378,100 @@ def write_file(
                 raise
             raise _categorize(error) from None
         return created
+
+
+def identity(root_fd: int, relative: str) -> Identity:
+    """The file's identity now, without opening it for reading."""
+    fd = openat2(root_fd, relative, _PATH_FLAGS)
+    try:
+        info = os.fstat(fd)
+    finally:
+        os.close(fd)
+    if stat.S_ISLNK(info.st_mode):
+        raise FsError(FsCategory.LINK)
+    _check_regular(info)
+    return _identity(info)
+
+
+# --- placing an upload (V3-P66 §5.2) --------------------------------------------
+
+RENAME_NOREPLACE = 1
+_renameat2: object = None
+MAX_NAME_TRIES = 100
+
+
+def rename_noreplace(dir_fd: int, old: str, new: str) -> None:
+    """``renameat2(dir_fd, old, dir_fd, new, RENAME_NOREPLACE)``: atomic, one
+    link at every moment (review N2); EXISTS if ``new`` is taken."""
+    global _renameat2
+    if _renameat2 is None:
+        libc = ctypes.CDLL(None, use_errno=True)
+        _renameat2 = libc.renameat2
+        _renameat2.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+        _renameat2.restype = ctypes.c_int
+    if _renameat2(dir_fd, os.fsencode(old), dir_fd, os.fsencode(new), RENAME_NOREPLACE) != 0:  # type: ignore[operator]
+        err = ctypes.get_errno()
+        if err in (errno.EINVAL, errno.ENOSYS):
+            raise FsError(FsCategory.UNSUPPORTED)
+        raise _categorize(OSError(err, os.strerror(err)))
+
+
+def _candidates(name: str) -> Iterator[str]:
+    yield name
+    stem, dot, ext = name.rpartition(".")
+    if not dot or not stem:
+        stem, ext = name, ""
+    for n in range(2, MAX_NAME_TRIES + 1):
+        yield f"{stem} ({n}).{ext}" if ext else f"{stem} ({n})"
+
+
+def place_file(root_fd: int, folder: str, name: str, source: BinaryIO, temp_prefix: str) -> str:
+    """Copy ``source`` into ``folder/<name>`` (or ``name (2)``…), never
+    replacing anything: a temporary file first, made durable, then an
+    atomic no-replace rename, then the directory made durable (review C2).
+    The relative path it got. Stale temporary files are removed first; the
+    caller holds the Workspace write lock, so none belongs to a live write."""
+    ensure_directory(root_fd, folder)
+    with _open_dir(root_fd, folder) as dir_fd:
+        for entry in os.listdir(dir_fd):
+            if entry.startswith(temp_prefix) and entry.endswith(".tmp"):
+                try:
+                    if stat.S_ISREG(os.stat(entry, dir_fd=dir_fd, follow_symlinks=False).st_mode):
+                        os.unlink(entry, dir_fd=dir_fd)
+                except OSError:
+                    pass
+        temp = f"{temp_prefix}{secrets.token_hex(8)}.tmp"
+        try:
+            fd = os.open(temp, _CREATE_FLAGS | os.O_CLOEXEC, 0o644, dir_fd=dir_fd)
+        except OSError as error:
+            raise _categorize(error) from None
+        try:
+            try:
+                while chunk := source.read(1 << 20):
+                    view = memoryview(chunk)
+                    while view:
+                        view = view[os.write(fd, view):]
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            for candidate in _candidates(name):
+                try:
+                    rename_noreplace(dir_fd, temp, candidate)
+                except FsError as error:
+                    if error.category is FsCategory.EXISTS:
+                        continue
+                    raise
+                os.fsync(dir_fd)
+                return posixpath.join(folder, candidate)
+            raise FsError(FsCategory.EXISTS)
+        except BaseException as error:
+            try:
+                os.unlink(temp, dir_fd=dir_fd)
+            except OSError:
+                pass
+            if isinstance(error, OSError):
+                raise _categorize(error) from None
+            raise
 
 
 def delete_file(root_fd: int, relative: str) -> None:

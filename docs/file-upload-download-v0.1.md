@@ -624,3 +624,30 @@ N1~N7 모두 PASS. 확인을 부탁한 세 가지도 문제없음: 한 대화의
 | --- | --- | --- |
 | C1 | 60초 상한이 파일마다라서 첨부 10개면 10 × 60초가 될 수 있다 | 메시지 하나의 첨부를 쓰기 잠금 한 번에 놓는 `place_uploads`(§5.2) |
 | C2 | 이름 변경 뒤 `uploads/` 디렉터리 `fsync`가 없다. `.tmp` 정리가 무엇을 지우는지 정해지지 않았다 | 디렉터리 `fsync`, 일반 파일만 지움(§5.2) |
+
+## 19. 구현 노트 — 1단계: Data·보관소·Tool·Inside·Prompt·Provider·Bootstrap (2026-10-22)
+
+설계대로 구현했다. Web·CLI(§9)는 2단계다. 그때까지 Web의 메시지 경로는 지금처럼 글만 보낸다. 설계와 다르거나 더 정한 것은 다음과 같다.
+
+- **Data**
+  - 보관소는 `data/blobs.py`의 `FileStore`다. 바이트가 있는 곳(`BlobFiles`)과 `blobs` 행(`BlobRows`)을 백엔드가 준다. SQLite는 `<DB 폴더>/files`(`SqliteStore(files_dir=)`로 바꿀 수 있음), 인메모리 백엔드는 메모리에 둔다. 두 백엔드의 `blobs`(`data.blobs`)가 `BlobStore` 포트다.
+  - 대기 업로드 수를 바이트를 받기 전에 세려고 `FileCatalog.count_staged`를 더했다(검수 C10).
+  - 보관소 크기와 보관 기간은 `FileStore.configure`로 정한다. Application이 시작할 때 운영자 설정으로 부른다.
+  - `blobs` 행이 없거나 만료된 주소에 파일이 남아 있으면 `put`이 지우고 다시 놓는다(B1). 그래서 `link`는 덮어쓰지 않는 그대로 쓴다.
+- **Tool**: Data가 건넨 파일을 거부해 FAILED로 다시 기록할 때, 같은 결과의 Plan/Note 변경도 함께 뺀다. 실패한 호출은 효과가 없어야 하기 때문이다.
+- **Inside**
+  - 놓기 API는 `locked(workspace_id, timeout)`(쓰기 잠금을 상한까지만 기다림, `WorkspaceBusy`)과 `place_uploads(workspace_id, cwd, [Upload])`(잠금을 잡은 쪽이 부름)로 나눴다. Application이 그 사이에 기록을 다시 읽기 위해서다(C4).
+  - `renameat2`가 되는지는 시작할 때 Workspaces 폴더에서 한 번 시험한다(`placement_works`). 안 되면 경고를 남기고 업로드를 받지 않는다. 첨부 안내 문장도 지시문에 넣지 않는다.
+  - `inside/read_file`의 잘림 안내 문구가 바뀌었다: "[truncated: only the first N bytes of this M-byte file are shown; read on with offset=N]". 이어 읽을 위치는 보인 글이 덮는 원래 바이트 수다. 잘못된 UTF-8 바이트도 하나씩 센다.
+  - 링크를 건네려 하면 LINK로 거부한다(DENIED). 지금의 다른 파일 Tool과 같다.
+- **Prompt·Provider**: 첨부 안내 문장(`ATTACHMENT_NOTE`, 약 90토큰)이 지시문에 붙는다. 문맥 예산을 2000토큰으로 둔 시험 몇 개는 2100으로 올렸다.
+- **Bootstrap**: `Application.upload`·`send`·`files`·`call_files`·`attachment_records`·`download`·`clean_files`. 업로드 설정은 `Application.open(file_max_bytes=, file_store_max_bytes=, file_keep_days=)`이고, Web 설정(`HIMARI_FILE_*`)은 2단계에서 잇는다.
+- **검증:** 전체 1628 passed, 51 skipped. import 경계 검사 OK, mypy OK.
+  - 새 시험:
+    - Data 양쪽 백엔드 `tests/data/test_files.py`: 대기·첨부, 건넨 파일 버전, 한도, B1·B2 회귀, 만료, 정리, 영구 삭제.
+    - Inside `tests/environment/test_inside_files.py`: `present_file`, N1, `offset`, 놓기, N2.
+    - Dispatcher B3 회귀(`tests/tool/test_dispatcher.py`).
+    - Prompt `tests/prompt/test_attachments.py`(C1).
+    - Provider 첨부 줄(`tests/provider/test_openrouter.py`).
+    - Application `tests/bootstrap/test_files.py`: 보내기와 놓기, 다시 보내기, C3·C5·N4, 정리.
+  - 휴지통 시험의 "모든 포트" 목록과 "모든 테이블" 시험에도 파일 포트와 `files`·`blobs`를 더했다.

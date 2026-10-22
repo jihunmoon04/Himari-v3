@@ -93,6 +93,12 @@ OTHER_PORTS: list[tuple[str, Port]] = [
     ("set_model_setting", lambda d, s: d.set_model_setting(s, ModelSetting("m", None))),
     ("read_current_state_basis", lambda d, s: d.read_current_state_basis(s)),
     ("used_tool_ids", lambda d, s: d.used_tool_ids(s)),
+    ("count_staged", lambda d, s: d.count_staged(s)),
+    ("read_files", lambda d, s: d.read_files(s)),
+    ("read_file_records", lambda d, s: d.read_file_records(s, [])),
+    ("read_call_files", lambda d, s: d.read_call_files(s, [])),
+    ("check_attachments", lambda d, s: d.check_attachments(s, [])),
+    ("presented_bytes_since", lambda d, s: d.presented_bytes_since(s, datetime.now(UTC))),
 ]
 
 

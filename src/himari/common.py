@@ -138,6 +138,7 @@ ArtifactId = NewType("ArtifactId", str)
 WorkspaceId = NewType("WorkspaceId", str)
 EnvironmentInstanceId = NewType("EnvironmentInstanceId", str)
 BindingId = NewType("BindingId", str)
+FileId = NewType("FileId", str)  # V3-P66: one uploaded or presented file of a Conversation
 ToolId = NewType("ToolId", str)
 EnvironmentKind = NewType("EnvironmentKind", str)
 

@@ -87,7 +87,7 @@ def build_runtime(
         instructions = (*instructions, TURN_GUIDANCE)
     driver = Driver(
         log=data,
-        loader=ContextLoader(data, data, registry, instructions, access, source_notes),
+        loader=ContextLoader(data, data, registry, instructions, access, source_notes, files=data),
         composer=Composer(),
         provider=provider,
         dispatcher=dispatcher,
