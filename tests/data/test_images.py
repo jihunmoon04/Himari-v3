@@ -330,3 +330,30 @@ def test_an_original_over_the_source_limit_gets_no_copy() -> None:
         assert setup.status is ImageStatus.TOO_LARGE and views.calls == 0
 
     run(scenario())
+
+
+def test_a_copy_that_cannot_be_opened_just_now_is_not_expired() -> None:
+    """Re-review C1: out of descriptors is not "gone"; the copy stays."""
+    import errno
+
+    async def scenario() -> None:
+        store = data_for(new_store())
+        scope = await conversation(store)
+        blob = await store.blobs.put(ALICE, chunks(picture()), 1 << 20)
+        record = await store.stage_upload(scope, blob, "p.png", "image/png",
+                                          await store.blobs.prepare_image(ALICE, blob, FakeViews()))
+        assert record.view is not None
+
+        def busy(key: str) -> Any:
+            raise OSError(errno.EMFILE, "Too many open files")
+
+        files = store.blobs.files
+        opened, files.open = files.open, busy  # type: ignore[method-assign]
+        with pytest.raises(DataError):
+            store.blobs.read_bytes(record.view.blob.key)
+        files.open = opened  # type: ignore[method-assign]
+        again, = await store.read_file_records(scope, [(record.file_id, 1)])
+        assert view_state(again) is ViewState.READY
+        assert store.blobs.read_bytes(record.view.blob.key).startswith(b"copy:")
+
+    run(scenario())

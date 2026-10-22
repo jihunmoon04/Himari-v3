@@ -397,5 +397,5 @@ def test_a_cancel_while_images_are_kept_still_commits_the_result() -> None:
         assert record.status is ToolExecutionStatus.SUCCEEDED and record.model_result is not None
         _, first, *rest = record.model_result.blocks
         assert isinstance(first, AttachmentRef)
-        assert [b.text for b in rest] == ["[an image was returned but not kept: the user cancelled]"] * 2  # type: ignore[union-attr]
+        assert [b.text for b in rest] == ["[an image was returned but not kept: the call was cancelled]"] * 2  # type: ignore[union-attr]
     asyncio.run(scenario())

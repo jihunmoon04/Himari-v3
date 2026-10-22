@@ -353,6 +353,12 @@ async def _image_views(root: Path, sandbox: bool) -> ImageViews:
     if state is not SandboxState.ENFORCED:
         log.warning("images cannot be prepared on this server: the image sandbox is %s", state.value)
         return ImageViews(None)
+    home = Path.home().resolve()
+    broad = [r for r in runtime_roots() if home.is_relative_to(r)]
+    if broad:  # Python installed with the home directory (or more) as its prefix (re-review N5)
+        log.warning("images cannot be prepared on this server: the Python runtime %s would show the home "
+                    "directory to the image sandbox", broad[0])
+        return ImageViews(None)
     try:
         launcher = server.launcher(ServerProfile(read_only=runtime_roots()))
     except Exception as error:  # noqa: BLE001 — a profile the sandbox refuses: no copies

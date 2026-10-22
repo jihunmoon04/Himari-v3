@@ -461,7 +461,7 @@ class FileStore:
 
     def read_bytes(self, key: str) -> bytes:
         """A blob's bytes. One whose row is alive but whose file is gone or
-        damaged is expired here, so its record says so from now on and a
+        damaged (checked again) is expired here, so its record says so from now on and a
         model copy turns into a line instead of failing every Run (review C2)."""
         row = self.rows.blob_row(key)
         if row is None:
@@ -470,7 +470,9 @@ class FileStore:
             with self.open(StoredBlob(key, row.sha256, row.size)) as handle:
                 return handle.read()
         except DataError as error:
-            if error.code is DataErrorCode.BLOB_MISSING:
+            # Only a file really gone or damaged — never one that could not be
+            # opened just now (out of descriptors, an I/O error: re-review C1).
+            if error.code is DataErrorCode.BLOB_MISSING and self.files.inspect(key) != row.size:
                 log.warning("blob %s is gone from disk: marked expired", key[:12])
                 self._expire([row], self._clock())
             raise

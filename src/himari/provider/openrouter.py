@@ -253,9 +253,9 @@ def _mark_cache_breakpoint(messages: list[dict[str, Any]]) -> None:
     only the system prefix back and wrote the rest anew (measured, §13).
     The mark goes on the last message with text after the system message,
     only for models where it was measured (``cache_breakpoints``). In a
-    message of parts (one with images) it goes on its last text part, so
-    the images before it are cached too (review N6); the measured form is
-    a text part's mark, so an image part is never marked.
+    message of parts (one with images) it goes on its last text part
+    (review N6): only a text part's mark was measured, so an image part is
+    never marked, and an image after that text is cached one Run later.
     """
     for message in reversed(messages):
         if message["role"] == "system":

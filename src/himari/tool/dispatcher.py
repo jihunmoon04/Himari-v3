@@ -109,7 +109,7 @@ _FILES_REFUSED = {
     DataErrorCode.LIMIT_EXCEEDED: "too much was presented in the last hour",
 }
 
-_NOT_KEPT_CANCELLED = "[an image was returned but not kept: the user cancelled]"
+_NOT_KEPT_CANCELLED = "[an image was returned but not kept: the call was cancelled]"
 
 UNKNOWN_OUTCOME_RESULT = ModelToolResult(
     blocks=(

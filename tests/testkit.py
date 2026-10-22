@@ -24,7 +24,7 @@ from himari.common import (
     TrustedScope,
 )
 from himari.control.api import ModelCatalog
-from himari.data.api import ArtifactMutation, BindingAuthority, UserMessage
+from himari.data.api import ArtifactMutation, BindingAuthority, UserMessage, ViewMaker
 from himari.data.memory import InMemoryData, InMemoryStore
 from himari.data.sqlite import SqliteData, SqliteStore
 from himari.environment.api import BindingObservation, ConnectionStatus
@@ -198,6 +198,7 @@ def runtime(
     no_progress_runs: int | None = None,
     external_defaults: Mapping[str, bool] | None = None,
     models: ModelCatalog | None = None,
+    image_views: ViewMaker | None = None,
 ) -> tuple[Runtime, ScriptedAdapter]:
     """Fresh runtime; pass ``restart(rt.store)`` to model a process restart."""
     adapter = provider if provider is not None else ScriptedAdapter(script)
@@ -217,6 +218,7 @@ def runtime(
         no_progress_runs=no_progress_runs,
         external_defaults=external_defaults,
         models=models,
+        image_views=image_views,
         # Tests exercising REQUIRE_USER opt in explicitly by using such a Tool;
         # the production default stays off (see test_registry_schema.py).
         allow_require_user_tools=any(
