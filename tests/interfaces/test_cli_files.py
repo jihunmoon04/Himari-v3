@@ -8,6 +8,7 @@ import os
 import sys
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -150,3 +151,131 @@ def test_an_upload_refusal_is_definite(harness: Harness, tmp_path: Path) -> None
     code, _, err = harness.run("send", cid, "--attach", "big.bin")
     assert code == cli.EXIT_FAILED and "storage_full" in err and "may have been applied" not in err
 
+
+
+def chat(harness: Harness, *typed: str) -> tuple[str, str]:
+    lines = iter([*typed, "/exit"])
+    out, err = io.StringIO(), io.StringIO()
+    session = cli.Session(harness.client(), cli.Printer(out), err, sleep=lambda s: None)
+    assert cli.cmd_chat(session, cli.parser().parse_args(["chat"]), read=lambda prompt: next(lines)) == 0
+    return out.getvalue(), err.getvalue()
+
+
+def test_files_sent_with_a_turn_that_fails_are_not_attached_again(harness: Harness, tmp_path: Path) -> None:
+    """PR #60 review B1: the message was taken, its turn then failed (the
+    provider has nothing to say); the next message carries no file."""
+    (tmp_path / "a.txt").write_text("a")
+    out, err = chat(harness, "/attach a.txt", "look", "/attach", "again")
+    assert "already sent" not in err and "refused" not in err
+    assert out.count("[file] a.txt") == 1 and "again" in out
+    assert err.count("(nothing attached)") == 1  # /attach after the failed turn: the list is empty
+
+
+def test_a_refused_file_is_dropped_and_the_others_stay(harness: Harness, tmp_path: Path) -> None:
+    """PR #60 review C1: an attachment the server refuses leaves the pending list."""
+    other = harness.run("new")[1].strip()
+    (tmp_path / "a.txt").write_text("a")
+    (tmp_path / "b.txt").write_text("b")
+    harness.queue(final("ok"))
+    foreign = harness.client().upload(f"/api/conversations/{other}/uploads", "f.txt", io.BytesIO(b"f"), "text/plain")
+    lines = iter(["/attach a.txt", "/attach", "send it", "/attach", "/exit"])
+    out, err = io.StringIO(), io.StringIO()
+    session = cli.Session(harness.client(), cli.Printer(out), err, sleep=lambda s: None)
+    real = session.client.post
+
+    def with_foreign(path: str, body: dict[str, Any] | None = None, **kwargs: Any) -> Any:
+        if body and body.get("attachments"):
+            body = {**body, "attachments": [*body["attachments"], foreign["file_id"]]}
+        return real(path, body, **kwargs)
+
+    session.client.post = with_foreign  # type: ignore[method-assign]
+    assert cli.cmd_chat(session, cli.parser().parse_args(["chat"]), read=lambda prompt: next(lines)) == 0
+    notes = err.getvalue()
+    assert "refused" in notes and "attached: a.txt" in notes
+    assert "dropped" not in notes  # the refused id was not in the list; a.txt stays for the next message
+    assert notes.count("attached: a.txt") == 3
+
+
+def test_a_files_only_message_prints_no_empty_box(harness: Harness, tmp_path: Path) -> None:
+    (tmp_path / "a.txt").write_text("a")
+    harness.queue(final("ok"))
+    out, _ = chat(harness, "/attach a.txt", "/send")
+    rows = out.splitlines()
+    you = rows.index("You:")
+    assert rows[you + 1].startswith("  [file] a.txt")  # PR #60 review C7
+
+
+def test_an_upload_lost_in_transit_does_not_end_the_chat(harness: Harness, tmp_path: Path,
+                                                          monkeypatch: pytest.MonkeyPatch) -> None:
+    from himari.interfaces.cli.client import OutcomeUnknown
+    (tmp_path / "a.txt").write_text("a")
+
+    def lost(*args: Any, **kwargs: Any) -> Any:
+        raise OutcomeUnknown("the request was sent but its answer was lost; it may have been applied")
+
+    monkeypatch.setattr(ServerClient, "upload", lost)
+    _, err = chat(harness, "/attach a.txt", "/id")
+    assert "it is not attached" in err  # PR #60 review C8: the chat went on to /id and /exit
+
+
+def test_only_503_and_507_uploads_are_definite(harness: Harness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from himari.interfaces.cli.client import OutcomeUnknown, ServerRefused
+    cid = harness.run("new")[1].strip()
+    assert harness.application is not None
+    for status, code, expected in ((503, "upload_interrupted", ServerRefused), (500, "internal_error", OutcomeUnknown)):
+        async def failing(*args: Any, status: int = status, code: str = code) -> Any:
+            raise web.ApiError(status, code, "no")
+
+        monkeypatch.setattr(harness.application, "upload", failing)
+        with pytest.raises(expected):
+            harness.client().upload(f"/api/conversations/{cid}/uploads", "a.txt", io.BytesIO(b"a"), "text/plain")
+
+
+def test_a_failed_forced_download_keeps_the_existing_file(harness: Harness, tmp_path: Path,
+                                                          monkeypatch: pytest.MonkeyPatch) -> None:
+    cid = harness.run("new")[1].strip()
+    (tmp_path / "a.txt").write_text("new content")
+    harness.queue(final("ok"))
+    harness.run("send", cid, "--attach", "a.txt")
+    file_id = harness.client().get(f"/api/conversations/{cid}/files")["items"][0]["file_id"]
+    (tmp_path / "a.txt").write_text("mine")
+    real = ServerClient.download
+
+    def broken(self: ServerClient, path: str, target: Any) -> str:
+        def failing(name: str | None) -> Any:
+            written, sink = target(name)
+
+            class Half:
+                def __enter__(self) -> Any:
+                    return self
+
+                def __exit__(self, *exc: Any) -> None:
+                    sink.close()
+
+                def write(self, data: bytes) -> None:
+                    sink.write(data[:1])
+                    raise OSError(28, "No space left on device")
+            return written, Half()
+        return real(self, path, failing)
+
+    monkeypatch.setattr(ServerClient, "download", broken)
+    code, _, err = harness.run("download", cid, file_id, "--force")
+    assert code != 0 and (tmp_path / "a.txt").read_text() == "mine"  # PR #60 review C3
+    assert not [p for p in tmp_path.iterdir() if p.name.endswith(".part")]
+
+
+@pytest.mark.parametrize("name", ["a/b.txt", "a\0b", ".hidden"])
+def test_unsafe_names_need_o(harness: Harness, monkeypatch: pytest.MonkeyPatch, name: str) -> None:
+    calls_made: list[str | None] = []
+
+    def fake(self: ServerClient, path: str, target: Any) -> str:
+        try:
+            target(name)
+        except Exception as error:
+            calls_made.append(str(error))
+            raise
+        return "unused"
+
+    monkeypatch.setattr(ServerClient, "download", fake)
+    code, _, err = harness.run("download", "conv_1", "file_1")
+    assert code == cli.EXIT_FAILED and "give one with -o" in err

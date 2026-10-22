@@ -121,6 +121,7 @@ const app = {
   trashOffset: 0,
   trashDays: null, // from /api/server
   attachments: [], // files for the next message (V3-P66 §9): {key, name, size, state, fileId, progress, xhr, note}
+  jobRunning: false, // for the Send button only: set as soon as a send is taken (PR #60 review C5)
   attachKeys: 0,
 };
 
@@ -363,7 +364,7 @@ function renderAttachments() {
     list.append(item);
   }
   list.hidden = app.attachments.length === 0;
-  $("composer-send").disabled = app.running || app.sending || uploading();
+  $("composer-send").disabled = app.jobRunning || app.sending || uploading();
 }
 
 /* One request per file, with progress. Uploaded files are staged on the
@@ -489,6 +490,7 @@ function renderEvent(event) {
       orphan.node.append(orphan.details);
       paintToolRow(orphan);
       timeline.append(orphan.node);
+      for (const file of event.presented_files || []) timeline.append(presentedCard(file)); // PR #60 review C4
       return;
     }
     if (event.app_view && !entry.view) {
@@ -943,6 +945,7 @@ function applyDetail(detail) {
   $("question-panel").hidden = !detail.waiting;
   $("question-text").textContent = detail.waiting ? detail.waiting.question : "";
   $("composer-text").placeholder = detail.waiting ? "Your answer" : "Message HIMARI";
+  app.jobRunning = detail.job.running;
   $("composer-send").disabled = detail.job.running || app.sending || uploading();
   $("composer-hint").textContent = detail.job.running ? `HIMARI is working…${usageText(detail.job.turn_usage)}` : "";
   $("chat-menu-resume").hidden = !detail.continuable;
@@ -1054,6 +1057,7 @@ async function sendMessage(event) {
       { text, attachments: ready.map((a) => a.fileId) });
     box.value = "";
     autosize();
+    app.jobRunning = true; // a job starts with this message; the next detail says when it ends
     if (generation === app.generation) {
       app.attachments = app.attachments.filter((a) => !ready.includes(a));
       renderAttachments();

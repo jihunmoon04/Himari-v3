@@ -45,7 +45,7 @@ from datetime import datetime, timedelta
 from importlib import resources
 from typing import Any
 
-from fastapi import Depends, FastAPI, Request, Response
+from fastapi import Depends, FastAPI, Path, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
@@ -482,6 +482,8 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
                                            "file_id": error.file_id}}, status_code=400)
         if error.code in FILE_REFUSALS:
             status, code, message = FILE_REFUSALS[error.code]
+            if error.code is DataErrorCode.BLOB_MISSING:  # §7.2: bytes gone or of another size
+                log.warning("file store: %s on %s", error, request.url.path)
             return JSONResponse({"error": {"code": code, "message": message}}, status_code=status)
         log.error("unexpected data error: %s", error.code.value)
         return JSONResponse({"error": {"code": "conflict", "message": "The request conflicts with the current state."}},
@@ -819,7 +821,8 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
         return {"items": [file_view(f) for f in page], "next_offset": offset + limit if len(page) == limit else None}
 
     @app.get("/api/conversations/{conversation_id}/files/{file_id}/{version}")
-    async def download_file(conversation_id: str, file_id: str, version: int, request: Request,
+    async def download_file(conversation_id: str, file_id: str, request: Request,
+                            version: int = Path(ge=1, le=2**31),  # SQLite's integers (PR #60 review C2)
                             who: PrincipalId = Depends(principal)) -> Response:
         """Always an attachment of type octet-stream, sandboxed (§7.2): an
         HTML or SVG file never opens on this origin."""

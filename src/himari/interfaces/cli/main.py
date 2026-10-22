@@ -175,7 +175,10 @@ class Printer:
             answers = event.get("answers_call")
             if answers:
                 self.answered.add((str(event.get("answers_run")), str(answers)))  # its tool_result repeats this text
-            self.block("You:" if not answers else "You (answer):", text)
+            if text or not event.get("attachments"):
+                self.block("You:" if not answers else "You (answer):", text)
+            else:  # files only: no empty box (PR #60 review C7)
+                self.line("You:" if not answers else "You (answer):")
             self.files(event.get("attachments") or [])
         elif kind == "assistant_final":
             self.block(self.speaker(self.changed_model(event)), text)
@@ -249,6 +252,9 @@ class Session:
     def __init__(self, client: ServerClient, printer: Printer, err: TextIO,
                  sleep: Callable[[float], None] = time.sleep) -> None:
         self.client, self.printer, self.err, self.sleep = client, printer, err, sleep
+        # The last post_and_follow's request itself: None if it was taken (or
+        # may have been: its answer was lost), else the server's refusal.
+        self.refused: ServerRefused | None = None
 
     def note(self, text: str) -> None:
         self.err.write(safe_line(text, encoding=stream_encoding(self.err)) + "\n")
@@ -360,6 +366,9 @@ class Session:
             except ServerRefused as error:
                 self.note(f"{path}: refused ({error.code}): {error}")
                 continue
+            except (OutcomeUnknown, ServerUnavailable) as error:  # the chat goes on (PR #60 review C8)
+                self.note(f"{path}: {error}; it is not attached")
+                continue
             if taken[-1].get("commands") is False:
                 self.note("(commands cannot run on this server: the model reads text files only)")
         return taken
@@ -367,9 +376,11 @@ class Session:
     def post_and_follow(self, conversation_id: str, after: int, suffix: str,
                         body: dict[str, Any] | None) -> tuple[int, int]:
         """Start a job (sent once, never resent) and follow it to the end."""
+        self.refused = None
         try:
             self.client.post(_path(conversation_id, suffix), body)
         except ServerRefused as error:
+            self.refused = error
             self.note(f"refused: {error}")
             return EXIT_FAILED, after
         except OutcomeUnknown as error:
@@ -691,6 +702,11 @@ def cmd_files(session: Session, args: argparse.Namespace) -> int:
 
 
 def cmd_download(session: Session, args: argparse.Namespace) -> int:
+    """Into a temporary file next to the target, which takes its name only
+    when complete: a failure never leaves half a file, nor costs an existing
+    one under --force (PR #60 review C3)."""
+    chosen: list[str] = []
+
     def target(name: str | None) -> tuple[str, Any]:
         if args.output:
             path = args.output
@@ -699,15 +715,30 @@ def cmd_download(session: Session, args: argparse.Namespace) -> int:
                 # V3-P66 review C9: never a dot-file (.npmrc, .gitconfig) chosen by the model.
                 raise ClientError(f"the file's name {name!r} is not used as is; give one with -o")
             path = name
+        if not args.force and os.path.lexists(path):
+            raise ClientError(f"{path} exists; use --force to overwrite it, or -o")
+        chosen.append(path)
+        temp = os.path.join(os.path.dirname(path) or ".", f".{os.path.basename(path)}.{os.getpid()}.part")
         try:
-            return path, open(path, "wb" if args.force else "xb")
-        except FileExistsError:
-            raise ClientError(f"{path} exists; use --force to overwrite it, or -o") from None
+            return temp, open(temp, "xb")
         except OSError as error:
             raise ClientError(f"cannot write {path}: {error.strerror or error}") from None
 
-    written = session.client.download(_path(args.id, f"/files/{quote(args.file_id, safe='')}/{args.version}"), target)
-    session.note(f"saved {written}")
+    temp = session.client.download(_path(args.id, f"/files/{quote(args.file_id, safe='')}/{args.version}"), target)
+    path = chosen[0]
+    try:
+        if args.force:
+            os.replace(temp, path)
+        else:
+            os.link(temp, path)  # never replaces: something may have appeared meanwhile
+            os.unlink(temp)
+    except FileExistsError:
+        os.unlink(temp)
+        raise ClientError(f"{path} exists; use --force to overwrite it, or -o") from None
+    except OSError as error:
+        os.unlink(temp)
+        raise ClientError(f"cannot write {path}: {error.strerror or error}") from None
+    session.note(f"saved {path}")
     return EXIT_OK
 
 
@@ -782,6 +813,21 @@ CHAT_HELP = ("/continue  continue an unanswered message (or a paused turn)\n"
              "/files     the conversation's files (download with: himari download ID FILE_ID)\n"
              "/rename T  rename\n/delete    move this conversation to the trash, then leave\n"
              "/id        show the id\n/exit      leave")
+
+
+def settle_pending(session: Session, pending: list[dict[str, Any]]) -> None:
+    """After a message with ``pending`` files (PR #60 review B1, C1): taken
+    (whatever became of its turn), or maybe taken — they are the message's
+    now, so none is attached again. Refused — they stay for the next one,
+    except a file the server refused, which is dropped with a word."""
+    refused = session.refused
+    if refused is None:
+        pending.clear()
+        return
+    if refused.code == "attachment_refused" and refused.file_id:
+        for file in [f for f in pending if f.get("file_id") == refused.file_id]:
+            pending.remove(file)
+            session.note(f"dropped {file.get('name')}: upload it again (/attach)")
 
 
 def cmd_chat(session: Session, args: argparse.Namespace, read: Callable[[str], str] = input) -> int:
@@ -877,9 +923,8 @@ def cmd_chat(session: Session, args: argparse.Namespace, read: Callable[[str], s
             if not pending:
                 session.note("(nothing attached)")
                 continue
-            code, after = session.submit_and_follow(conversation_id, after, "", [str(f["file_id"]) for f in pending])
-            if code != EXIT_FAILED:
-                pending.clear()
+            _, after = session.submit_and_follow(conversation_id, after, "", [str(f["file_id"]) for f in pending])
+            settle_pending(session, pending)
             continue
         if text == "/delete":
             try:
@@ -931,10 +976,9 @@ def cmd_chat(session: Session, args: argparse.Namespace, read: Callable[[str], s
         if text.startswith("/") and not text.startswith("//"):
             session.note("unknown command — /help")
             continue
-        code, after = session.submit_and_follow(conversation_id, after, text[1:] if text.startswith("//") else text,
-                                                [str(f["file_id"]) for f in pending])
-        if code != EXIT_FAILED:
-            pending.clear()  # sent (or maybe sent): they cannot be attached again
+        _, after = session.submit_and_follow(conversation_id, after, text[1:] if text.startswith("//") else text,
+                                             [str(f["file_id"]) for f in pending])
+        settle_pending(session, pending)
 
 
 # --- entry point ----------------------------------------------------------------------------

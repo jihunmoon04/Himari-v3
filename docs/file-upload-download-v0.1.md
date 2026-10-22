@@ -736,3 +736,21 @@ B1·B2·N1 PASS, N2 조건부 PASS(2단계와 함께 배포).
   5. 업로드 응답을 붙잡아 둔 채 홈으로 갔다 오면 칩이 붙지 않는다.
   - 압축 시나리오의 문맥 예산은 1단계의 시험과 같은 이유(첨부 안내 문장)로 2000에서 2100으로 올렸다.
 - **검증:** 전체 1679 passed, 51 skipped. import 경계 검사 OK, mypy OK. 새 시험은 `tests/interfaces/test_web_files.py`(API·오류 표·머리글·권한·본문 한도·설정)와 `tests/interfaces/test_cli_files.py`(`send --attach`, `/attach`·`/send`·`/detach`, `files`, `download`의 이름 규칙, 확실한 거부)다.
+
+### 20.1 검수 — PR #60(`2045573`): NOT_READY (B1; C1~C10)
+
+| # | 지적 | 처리 |
+| --- | --- | --- |
+| B1 | CLI 대화에서 메시지는 받아들여졌는데 그 턴이 실패·멈춤으로 끝나면, 이미 보낸 파일이 다음 메시지에 다시 붙어 `attachment_refused`가 반복된다 | 첨부 목록은 메시지 요청 자체로 정한다(`settle_pending`). 받아들여졌거나 결과 불명이면 비우고, 거부됐을 때만 남긴다. 회귀 시험은 고치기 전 코드에서 실패한다 |
+| C1 | CLI가 `attachment_refused`의 `file_id`를 쓰지 않는다 | `ServerRefused.file_id`. 그 파일만 목록에서 빼고 "다시 올리세요"를 알린다 |
+| C2 | 아주 큰 `version`이 500 | 경로 값 1..2³¹, 밖이면 400 `invalid_request` |
+| C3 | `download --force`가 실패하면 원래 파일을 잃는다 | 옆의 임시 파일에 받고, 다 받은 뒤에만 이름을 준다(`--force`는 `os.replace`, 아니면 덮어쓰지 않는 `link`). 쓰다 실패(디스크 가득)하면 `ClientError`이고 원래 파일은 그대로다 |
+| C4 | 화면이 모르는 호출의 결과에 건넨 파일 카드가 빠진다 | 그 경우에도 카드를 보인다 |
+| C5 | 보낸 직후 업로드 진행 이벤트가 보내기 버튼을 잠깐 살린다 | 버튼용 `jobRunning`을 보내기가 받아들여지는 순간 켠다. `app.running`과 모델 표시 논리는 그대로 |
+| C6 | `file_missing`이 로그에 남지 않는다(§7.2). 보관소 폴더 문제가 503 "다시 올리세요"가 된다 | `BLOB_MISSING` 응답마다 경고 로그. 보관소 폴더가 비공개 폴더가 아니면 내부 오류(500, 로그) |
+| C7 | 파일만 보낸 메시지에 CLI가 빈 상자를 그린다 | "You:" 한 줄과 파일 줄만 |
+| C8 | 대화 중 업로드의 전송 실패가 대화를 끝낸다 | 알리고("붙지 않았음") 대화를 잇는다 |
+| C9 | 파이프·자라는 파일의 업로드가 결과 불명이 될 수 있다 | 기록만 한다. 보통 파일을 올리라고 안내하는 것으로 충분하다 |
+| C10 | 시험 빈칸 | 더함: 길이 없는(chunked) 업로드의 한도, 본문 한도 예외가 그 경로만인지, 큰 버전, `too_many_pending`·`workspace_busy`·`uploads_folder_unusable`·`file_missing`·`upload_interrupted`, 읽지 못한 첨부의 이벤트, CLI B1·C1·C7·C8, 업로드의 503(확실)과 500(불명), 실패한 `--force`, 위험한 이름 |
+
+검증: 전체 1699 passed, 51 skipped. import 경계 검사 OK, mypy OK. 브라우저 스모크(다섯 서버) OK.

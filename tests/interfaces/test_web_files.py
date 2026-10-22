@@ -196,3 +196,77 @@ def test_file_settings_are_configured() -> None:
                 {"HIMARI_FILE_MAX_BYTES": "9", "HIMARI_FILE_STORE_MAX_BYTES": "8"}, {"HIMARI_FILE_MAX_BYTES": "lots"}):
         with pytest.raises(WebConfigError):
             WebConfig.from_env({**base, **env})
+
+
+def test_a_chunked_upload_is_cut_at_the_limit(server: Server) -> None:
+    cid = server.new()
+    assert server.application is not None
+    server.application.file_max_bytes = 1000
+
+    def body() -> Iterator[bytes]:
+        for _ in range(5):
+            yield b"c" * 300  # no Content-Length: the route still counts
+
+    response = server.client.post(f"/api/conversations/{cid}/uploads", params={"name": "big.bin"}, content=body(),
+                                  headers={"origin": ORIGIN, "content-type": "application/octet-stream"})
+    assert error(response) == (413, "file_too_large")
+    assert server.client.get(f"/api/conversations/{cid}/files").json()["items"] == []
+
+
+@pytest.mark.parametrize("path, method", [("/uploads/", "POST"), ("//uploads", "POST"), ("/uploads", "PUT")])
+def test_only_the_upload_route_is_outside_the_body_limit(server: Server, path: str, method: str) -> None:
+    cid = server.new()
+    response = server.client.request(method, f"/api/conversations/{cid}{path}", content=b"x" * 300_000,
+                                     headers={"origin": ORIGIN})
+    assert error(response) == (413, "request_too_large")
+
+
+def test_a_huge_version_is_refused_not_a_crash(server: Server) -> None:
+    cid = server.new()
+    response = server.client.get(f"/api/conversations/{cid}/files/file_1/99999999999999999999999")
+    assert error(response) == (400, "invalid_request")  # PR #60 review C2
+    assert error(server.client.get(f"/api/conversations/{cid}/files/file_1/0")) == (400, "invalid_request")
+
+
+@pytest.mark.parametrize("raised, expected", [
+    ("too_many", (409, "too_many_pending")),
+    ("busy", (409, "workspace_busy")),
+    ("folder", (409, "uploads_folder_unusable")),
+    ("missing", (410, "file_missing")),
+])
+def test_more_of_the_error_table(server: Server, monkeypatch: pytest.MonkeyPatch, raised: str,
+                                 expected: tuple[int, str]) -> None:
+    from himari.bootstrap.application import UploadsFolderUnusable, WorkspaceBusy
+    cid = server.new()
+    up = server.upload(cid, "a.txt", b"a").json()
+    assert server.application is not None
+    errors = {"too_many": DataError(DataErrorCode.LIMIT_EXCEEDED, "x"), "busy": WorkspaceBusy("ws"),
+              "folder": UploadsFolderUnusable("/workspace/x/uploads"), "missing": DataError(DataErrorCode.BLOB_MISSING, "k")}
+
+    async def refuse(*args: Any, **kwargs: Any) -> Any:
+        raise errors[raised]
+
+    monkeypatch.setattr(server.application, "send", refuse)
+    assert error(server.send(cid, "x", up["file_id"])) == expected
+
+
+def test_an_upload_whose_bytes_went_meanwhile_says_upload_again(server: Server, monkeypatch: pytest.MonkeyPatch) -> None:
+    cid = server.new()
+    assert server.application is not None
+
+    async def swept(*args: Any, **kwargs: Any) -> Any:
+        raise DataError(DataErrorCode.BLOB_MISSING, "k")
+
+    monkeypatch.setattr(server.application, "upload", swept)
+    assert error(server.upload(cid, "a.txt", b"a")) == (503, "upload_interrupted")
+
+
+def test_an_attachment_without_a_readable_record_shows_as_expired() -> None:
+    from himari.common import AttachmentRef, ConversationId, EventId, FileId, TextBlock
+    from himari.data.api import ConversationEvent, EventKind, UserMessage
+    from datetime import UTC, datetime
+    event = ConversationEvent(EventId("e"), ConversationId("c"), 1, EventKind.USER_MESSAGE,
+                              UserMessage((TextBlock("t"), AttachmentRef(FileId("file_9"), 1))), 1, datetime.now(UTC))
+    view = web.event_view(event)
+    assert view["text"] == "t" and view["attachments"] == [
+        {"file_id": "file_9", "version": 1, "name": None, "expired": True}]

@@ -71,9 +71,10 @@ class ResponseTooLarge(ClientError):
 
 
 class ServerRefused(ClientError):
-    def __init__(self, status: int, code: str, message: str) -> None:
+    def __init__(self, status: int, code: str, message: str, file_id: str | None = None) -> None:
         super().__init__(message)
         self.status, self.code = status, code
+        self.file_id = file_id  # attachment_refused: the file refused (V3-P66 §9)
 
 
 def check_url(url: str) -> str:
@@ -142,11 +143,13 @@ class ServerClient:
                     with sink:
                         for chunk in response.iter_bytes():
                             sink.write(chunk)
-                except BaseException:
+                except BaseException as error:
                     try:
                         os.unlink(written)
                     except OSError:
                         pass
+                    if isinstance(error, OSError):  # e.g. a full disk: said, not a traceback
+                        raise ClientError(f"cannot write the file: {error.strerror or error}") from None
                     raise
                 return written
         except httpx.ConnectError:
@@ -193,5 +196,7 @@ class ServerClient:
             raise ClientError(f"unreadable answer from the server (HTTP {status})") from None
         if status >= 400:
             error = parsed.get("error", {}) if isinstance(parsed, dict) else {}
-            raise ServerRefused(status, str(error.get("code", "http_error")), str(error.get("message", "refused")))
+            file_id = error.get("file_id")
+            raise ServerRefused(status, str(error.get("code", "http_error")), str(error.get("message", "refused")),
+                                file_id if isinstance(file_id, str) else None)
         return parsed
