@@ -1,6 +1,6 @@
 # 파일 업로드·다운로드 v0.1
 
-> 2026-10-22 · **PROPOSED (V3-P66)** · rev. 4 — 독립 검수 NOT_READY(B1~B3; C1~C15) 반영(§16), 재검수 READY와 비차단 N1~N7 반영(§17). rev. 2: 소유자 결정(§12) — Q1 불변 보관소, 보관소 1 GiB, Q5 넘을 때와 30일 뒤 자동 만료(§8.5), Q2·Q4와 나머지 한도는 권고대로.
+> 2026-10-22 · **PROPOSED (V3-P66)** · rev. 4 — 독립 검수 NOT_READY(B1~B3; C1~C15) 반영(§16), 재검수 READY와 비차단 N1~N7 반영(§17), 최종 확인 READY와 비차단 2건 반영(§18). rev. 2: 소유자 결정(§12) — Q1 불변 보관소, 보관소 1 GiB, Q5 넘을 때와 30일 뒤 자동 만료(§8.5), Q2·Q4와 나머지 한도는 권고대로.
 >
 > 소유자 방향(2026-10-22):
 > - HIMARI의 기본 에이전트 기능을 먼저 갖춘다. 후보는 고정 프롬프트, comment, plan·note, 메모리, 이미지, 파일 업로드·다운로드다. **파일부터 하고, 이미지는 그다음에 한다.**
@@ -233,7 +233,7 @@ CREATE INDEX blobs_by_use ON blobs (last_used_at);
    │ ───────────────────────▶ (대화의 수명주기 잠금을 1~4 동안 잡음)
    │                          1 대화 권한, check_attachments(§4.2) ─▶ 읽기
    │                          2 실행 중이면 409 (Runner 상태)
-   │                          3 아직 놓지 않은 파일을 Workspace에 놓음 ───▶ Inside place_upload
+   │                          3 아직 놓지 않은 파일을 Workspace에 놓음 ───▶ Inside place_uploads
    │                            set_placement ─────────────────────▶ files.workspace_path
    │                          4 runner.submit(UserMessage(블록)) ──▶ T1/T7a + 첨부 확인(§4.2)
    │ ◀── 202 (지금과 같음)
@@ -243,13 +243,14 @@ CREATE INDEX blobs_by_use ON blobs (last_used_at);
 - 첨부만 있고 글이 없는 메시지도 된다. 블록 순서는 글 → 첨부(올린 순서)다.
 - 2와 4 사이에 다른 탭이 작업을 시작하면 4가 지금처럼 409(`busy`)다. 3에서 놓은 파일은 남는다. 다시 보내면 이미 놓은 파일은 다시 놓지 않는다(§5.2). 그래서 다시 시도해도 `report (2).pdf`가 생기지 않는다.
 - **수명주기 잠금(검수 C3).** 1~4 동안 그 대화의 수명주기 잠금(V3-P65 §7.3)을 잡는다. 그래서 보내기와 휴지통 이동·영구 삭제가 겹치지 않는다. 겹치면 3이 영구 삭제로 지운 대화 폴더를 다시 만들어, 지운 대화의 파일이 Workspace에 남을 수 있다. 잠금 순서는 영구 삭제와 같다(수명주기 잠금 → Workspace 쓰기 잠금). Tool은 쓰기 잠금만, `submit`·`accept`는 수명주기 잠금을 잡지 않으므로 순환이 없다.
-- **잡는 시간에 상한을 둔다(재검수 N4).** 3의 쓰기 잠금은 같은 사용자의 다른 대화에서 도는 `run_command`(최대 600초, 여러 개가 줄 설 수 있음)가 쥐고 있을 수 있다. 그동안 이 대화의 휴지통 이동과 영구 삭제가 기다린다. 그래서 3은 쓰기 잠금을 **60초까지만** 기다리고, 넘으면 409 `workspace_busy`("작업 공간에서 명령이 실행 중입니다. 잠시 후 다시 보내세요")로 끝낸다. 놓은 것은 그대로 두고 다시 보내면 이어서 놓는다. 그래서 1~4는 대략 60초 + 복사 시간(32 MiB × 10개) 안에 끝나고, 휴지통 이동이 기다리는 시간도 그만큼이다. 이것이 1단계와 T1 사이가 1시간보다 훨씬 짧다는 가정(§4.2)의 근거이기도 하다.
+- **잡는 시간에 상한을 둔다(재검수 N4).** 3의 쓰기 잠금은 같은 사용자의 다른 대화에서 도는 `run_command`(최대 600초, 여러 개가 줄 설 수 있음)가 쥐고 있을 수 있다. 그동안 이 대화의 휴지통 이동과 영구 삭제가 기다린다. 그래서 3은 쓰기 잠금을 메시지 하나에 한 번, **60초까지만** 기다리고, 넘으면 409 `workspace_busy`("작업 공간에서 명령이 실행 중입니다. 잠시 후 다시 보내세요")로 끝낸다. 놓은 것은 그대로 두고 다시 보내면 이어서 놓는다. 그래서 1~4는 대략 60초 + 복사 시간(32 MiB × 10개) 안에 끝나고, 휴지통 이동이 기다리는 시간도 그만큼이다. 이것이 1단계와 T1 사이가 1시간보다 훨씬 짧다는 가정(§4.2)의 근거이기도 하다.
 - 업로드(`POST …/uploads`)는 **본문을 받는 동안에는 잠금을 잡지 않고**, `stage_upload`로 기록을 쓰는 동안만 잡는다. 휴지통으로 옮기는 중에 대기 기록이 생기지 않는다(옮긴 뒤면 404).
 - **1과 T1의 확인(재검수 N3).** T1은 같은 대화, 업로드·대기 상태, 같은 id 두 번, 10개, 보관본이 살아 있음만 본다. **23시간 기준은 1(`check_attachments`)에만 있다.** 대기 기록이 실제로 지워지는 것은 24시간 뒤이고(§8.2), 1~4는 N4의 상한 안에 끝난다. 그래서 1을 통과하면 T1에서 거부되지 않고, Driver가 멈춘 턴의 호출을 닫은 뒤 메시지 없이 끝나는 일이 없다(검수 C5).
 
 ### 5.2 Workspace에 놓기
 
-`InsideEnvironment.place_upload(workspace_id, cwd_relative, name, source: BinaryIO) -> str`
+`InsideEnvironment.place_uploads(workspace_id, cwd_relative, items: Sequence[tuple[name, source: BinaryIO, already: str | None]], deadline) -> Sequence[str]`
+- 한 메시지의 첨부를 **쓰기 잠금 한 번 안에서 모두** 놓는다(최종 확인 C1). 잠금을 기다리는 상한 60초는 메시지 하나에 한 번이다(§5.1).
 - 놓는 곳: 대화 폴더의 `uploads/<name>`. 모델에게는 `/workspace/conversations/<id>/uploads/<name>`로 보인다.
 - Workspace 쓰기 잠금(`write_lock`) 아래에서 한다. 같은 Root의 명령·쓰기 Tool과 겹치지 않는다.
 - **다시 놓지 않기(검수 C4).** 잠금을 잡은 **뒤에** 기록의 `workspace_path`를 다시 읽는다. 값이 있고 그 경로에 일반 파일이 있으면 놓지 않고 그 경로를 쓴다. 두 탭이 동시에 보내도 한 번만 놓인다. 그 파일을 그 사이 모델이 바꿨는지는 보지 않는다. 놓은 파일은 모델 것이다.
@@ -257,7 +258,8 @@ CREATE INDEX blobs_by_use ON blobs (last_used_at);
 - **임시 파일 → 이름 붙이기(검수 C4).** 먼저 `uploads/.himari-<임의>.tmp`에 보관본을 나눠 읽어 쓰고 `fsync`한다. 큰 파일도 메모리에 다 올리지 않고, 워커 스레드에서 돈다(`run_blocking`). 다 쓴 뒤 `name`, `name (2).ext`, `name (3).ext`… 순서로 **`renameat2(RENAME_NOREPLACE)`**를 시도한다(재검수 N2). 처음 성공한 이름이 놓은 곳이다. 100번 안에 못 찾으면 실패한다.
   - `link` 후 `unlink`를 쓰지 않는 이유: 그 사이에 서버가 죽으면 링크가 둘인 파일이 남는다. 파일 Tool은 그런 파일을 `HARDLINK`로 거부하므로 모델이 첨부를 읽지 못한다. `renameat2`는 원자적이고 링크가 늘 하나다. ext4는 지원하고, `openat2`처럼 `ctypes`로 부른다. 지원하지 않는 파일시스템(`EINVAL`·`ENOSYS`)이면 시작할 때 알리고 놓기를 거부한다.
   - 쓰다가 실패하거나 서버가 죽으면 임시 파일만 남는다. 그래서 다시 보낼 때 `name (2)`가 생기지 않는다.
-  - **남은 임시 파일:** 놓기는 쓰기 잠금 안에서 시작할 때 `uploads/`의 `.himari-*.tmp`를 먼저 지운다. 쓰기 잠금 안이므로 진행 중인 다른 쓰기의 임시 파일은 없다.
+  - **이름이 정해지면 `uploads/` 디렉터리를 `fsync`한다(최종 확인 C2).** 기록(`set_placement` → T1)이 가리키는 경로가 전원 차단 뒤에도 남게 하기 위해서다. 보관소의 `put`과 같다.
+  - **남은 임시 파일:** 놓기는 쓰기 잠금 안에서 시작할 때 `uploads/`의 `.himari-*.tmp`를 먼저 지운다. 링크를 따라가지 않고(`lstat`) 일반 파일만 지우며, 같은 이름의 디렉터리 등은 그대로 둔다. 쓰기 잠금 안이므로 진행 중인 다른 쓰기의 임시 파일은 없다.
 - **`uploads`를 쓸 수 없을 때(검수 C4).** 모델이나 명령이 `uploads`를 링크나 일반 파일로 바꿔 두었으면 거부한다. 409 `uploads_folder_unusable`이고, 메시지에 "대화 폴더의 uploads가 폴더가 아닙니다. 모델에게 정리를 부탁하거나 직접 지우세요"를 담는다. 다른 폴더로 대신 놓지 않는다. 모델이 볼 경로가 대화마다 달라지지 않게 하기 위해서다.
 - 놓은 파일은 모델 것이다. 모델이 고치거나 지워도 보관본과 기록은 그대로다.
 - 대화에 활성 Inside Environment(기본 Binding)가 없으면 올리기를 받지 않는다(409 `files_unavailable`). 파일을 둘 곳이 없으면 모델이 읽을 방법이 없기 때문이다.
@@ -465,7 +467,7 @@ V3-P65의 자동 정리(시작 때와 1시간마다)에 셋을 더한다.
 | common | `FileId`. `AttachmentRef`는 그대로 |
 | Data | `DataErrorCode.LIMIT_EXCEEDED`·`TOO_LARGE`·`STORE_FULL`·`BLOB_MISSING`·`BLOB_EXPIRED`·`ATTACHMENT_REFUSED`, `FileRecord`(`expired`·`call` 포함)·`FileOrigin`·`StoredBlob`(principal별 `key`), `FileCatalog`(stage_upload·set_placement·check_attachments·read_files·read_file_records·read_call_files·presented_bytes_since), Bootstrap 전용 `FileRetention`, `BlobStore`. T1·T7a의 첨부 확인과 상태 변경(§4.2). `ToolCompletion.presented_files`(T7에서 기록·버전·건네기 한도). SQLite v8 `blobs`·`files`. 영구 삭제 목록에 `files`(`runs` 앞), 커밋 뒤 보관본 삭제(실패는 로그만). 정리(대기 기록, 참조 없는 보관본, staging), 만료(30일, 용량; §8.5) |
 | Tool | `ToolOutcome.presented_files`. Dispatcher가 `ToolCompletion`으로 넘기고, Data가 파일을 거부하면 FAILED로 다시 기록(§7.1) |
-| Environment (Inside) | `place_upload`(임시 파일 → `renameat2(RENAME_NOREPLACE)`, 쓰기 잠금 대기 60초), `inside/present_file`(BlobStore와 `presented_bytes_since`를 Bootstrap이 넣어 줌), `inside/read_file`의 `offset` |
+| Environment (Inside) | `place_uploads`(메시지 하나의 첨부를 쓰기 잠금 한 번에, 임시 파일 → `renameat2(RENAME_NOREPLACE)` → 디렉터리 `fsync`, 잠금 대기 60초), `inside/present_file`(BlobStore와 `presented_bytes_since`를 Bootstrap이 넣어 줌), `inside/read_file`의 `offset` |
 | Prompt | loader가 첨부 기록을 읽어 `PromptInputs.attachments` → `compose`가 `ModelInput.attachments`로. `attachment_line` 하나를 Provider·크기 추정·압축 입력이 함께 씀 |
 | Provider | `AttachmentRef`를 첨부 목록 한 줄로(§6). 거부 없앰 |
 | Bootstrap | `HIMARI_FILE_MAX_BYTES`·`HIMARI_FILE_STORE_MAX_BYTES`·`HIMARI_FILE_KEEP_DAYS`, `<data_root>/files` 배치 검사, 첨부 안내 고정 문장(§6), `Application.upload`·`send(text, attachments)`·`download`(업로드 기록과 보내기 1~4는 수명주기 잠금 아래), 정리 작업 확장 |
@@ -563,7 +565,7 @@ V3-P65의 자동 정리(시작 때와 1시간마다)에 셋을 더한다.
   - `place_upload`: 두 탭이 동시에 보내도 한 번만 놓임, 쓰다가 실패하면 임시 파일만 남고 다시 보내면 원래 이름, `uploads`가 링크·파일이면 `uploads_folder_unusable`.
   - `present_file`: 링크·하드링크·Root 밖 거부, 다른 대화 폴더 허용, 한도 초과 FAILED, 읽는 도중 바뀌면 FAILED.
   - **N1:** 지난 1시간 256 MiB를 채운 뒤의 `present_file`은 `put`하지 않음(보관소 크기와 다른 보관본의 만료가 그대로).
-  - **N2:** `renameat2` 직전·직후 실패를 주입해도 링크 수가 1이고, 다시 보내면 원래 이름, 남은 `.tmp`는 다음 놓기에서 지워짐.
+  - **N2:** `renameat2` 직전·직후 실패를 주입해도 링크 수가 1이고, 다시 보내면 원래 이름, 남은 `.tmp`는 다음 놓기에서 지워짐(같은 이름의 디렉터리는 남음). 이름 변경 뒤 `uploads/` 디렉터리 `fsync`가 불림.
   - **B3 회귀:** 결과 글에 버전이 없음. 보관본을 `put`한 뒤 기록 전에 사라지게 하거나 건네기 한도를 넘기면, 호출은 FAILED이고 모델에게 "건네지 못함"이 가며 파일 기록이 없음.
   - `read_file`의 `offset`: 이어 읽기, 범위 머리줄, 파일 끝 너머.
 - **이름 규칙:** `../x`, NUL, 제어 문자, 양방향·폭 없는 문자, `.himari-` 접두사, 긴 이름(문자를 자르지 않음), 빈 이름. `media_type` 정리(매개변수 버림, 잘못된 모양은 확장자 추정). `filename=`의 `"`·`\`.
@@ -572,7 +574,7 @@ V3-P65의 자동 정리(시작 때와 1시간마다)에 셋을 더한다.
   - **C5 회귀:** 멈춘 턴이 있는 대화에 거부될 첨부로 보내면 400이고, 멈춘 호출은 닫히지 않은 채 그대로.
   - **C3 회귀:** 놓기를 멈춰 둔 채 `delete --now`를 부르면 영구 삭제는 잠금을 기다리고, 보내기가 끝난 뒤 폴더째 지워짐. 지운 대화의 파일이 남지 않음.
   - 대기 50개는 바이트를 받기 전에 거부.
-  - **N4:** 쓰기 잠금을 60초 넘게 쥐고 있으면 보내기가 `workspace_busy`로 끝나고 수명주기 잠금을 놓음. 그 사이 기다리던 휴지통 이동이 이어서 됨.
+  - **N4:** 쓰기 잠금을 60초 넘게 쥐고 있으면 보내기가 `workspace_busy`로 끝나고 수명주기 잠금을 놓음. 첨부가 10개여도 기다림은 한 번(최종 확인 C1). 그 사이 기다리던 휴지통 이동이 이어서 됨.
   - **N3:** T1은 23시간 기준을 쓰지 않음(22시간 59분 59초에 1을 통과한 보내기가 T1에서 거부되지 않음).
 - **Web·CLI:** 업로드 한도(받는 중에 413, `Content-Length` 미리), 메시지당 10개, §9 오류 표의 코드와 HTTP 상태 전부, 다른 사용자 404, 휴지통 404, 내려받기 머리글(HTML을 올려도 `octet-stream`·`attachment`·`CSP: sandbox`), 다시 보내기에서 놓기가 한 번만, CLI `download`가 덮어쓰지 않고 `.` 이름을 거부, `send`가 글 없이 첨부만 보냄.
 - **브라우저 스모크:** 파일 두 개 첨부(진행률, 빼기) → 보냄 → 모델이 `read_file`로 읽음(시험용 Provider) → 메시지 칩으로 내려받기가 원본과 같음 → 모델이 `present_file` → 카드로 내려받기 → 다른 대화로 간 뒤 늦게 끝난 업로드는 칩을 붙이지 않음 → 좁은 화면(390px).
@@ -613,3 +615,12 @@ B1~B3 PASS, C1~C15 중 C10은 FAIL(N1), C4·C5는 부분(N2·N3), 나머지 PASS
 | N5 | 대기 업로드의 보관본은 만료되지 않아 최대 24시간 보관소가 찰 수 있다 | 받아들임, 화면 안내(§8.5, §13) |
 | N6 | 만료된 보관본을 다시 기록하기 경로가 받지 않는다 | 사라짐과 만료를 모두 `BLOB_MISSING`으로(§7.1, §8.2) |
 | N7 | `blob_key`로 바꾼 뒤 남은 옛 표현 | §4.1, §3 그림, §8.1, decisions.md |
+
+## 18. 최종 확인 — rev. 4(`4238656`): READY
+
+N1~N7 모두 PASS. 확인을 부탁한 세 가지도 문제없음: 한 대화의 Tool은 Driver 잠금 아래에서 하나씩 돈다(`dispatch_group`·`cancel_group`은 `_exclusive` 안에서만 불리고, 취소도 처리 중인 일이 끝날 때까지 기다림). 놓기 중의 `.tmp` 정리는 안전하다. 60초 상한의 잠금 대기는 Python 3.12에서 취소되어도 잠금을 남기지 않는다. 비차단 2건과 처리:
+
+| # | 지적 | 처리 |
+| --- | --- | --- |
+| C1 | 60초 상한이 파일마다라서 첨부 10개면 10 × 60초가 될 수 있다 | 메시지 하나의 첨부를 쓰기 잠금 한 번에 놓는 `place_uploads`(§5.2) |
+| C2 | 이름 변경 뒤 `uploads/` 디렉터리 `fsync`가 없다. `.tmp` 정리가 무엇을 지우는지 정해지지 않았다 | 디렉터리 `fsync`, 일반 파일만 지움(§5.2) |
