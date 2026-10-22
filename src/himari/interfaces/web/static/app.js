@@ -341,6 +341,7 @@ function uploading() {
 function clearAttachments() {
   for (const entry of app.attachments) if (entry.xhr) entry.xhr.abort();
   app.attachments = [];
+  app.jobRunning = false; // another page: its own detail sets it (PR #60 re-review N1)
   renderAttachments();
 }
 
@@ -1057,8 +1058,8 @@ async function sendMessage(event) {
       { text, attachments: ready.map((a) => a.fileId) });
     box.value = "";
     autosize();
-    app.jobRunning = true; // a job starts with this message; the next detail says when it ends
     if (generation === app.generation) {
+      app.jobRunning = true; // a job starts with this message; the next detail says when it ends
       app.attachments = app.attachments.filter((a) => !ready.includes(a));
       renderAttachments();
     }

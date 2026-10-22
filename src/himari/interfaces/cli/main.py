@@ -27,10 +27,12 @@ complete or the server refused, 2 usage/configuration, 4 outcome unknown.
 from __future__ import annotations
 
 import argparse
+import errno
 import json
 import mimetypes
 import os
 import shlex
+import shutil
 import sys
 import time
 from collections.abc import Callable
@@ -730,7 +732,13 @@ def cmd_download(session: Session, args: argparse.Namespace) -> int:
         if args.force:
             os.replace(temp, path)
         else:
-            os.link(temp, path)  # never replaces: something may have appeared meanwhile
+            try:
+                os.link(temp, path)  # never replaces: something may have appeared meanwhile
+            except OSError as error:
+                if error.errno not in (errno.EPERM, errno.ENOTSUP, errno.EXDEV, errno.EMLINK):
+                    raise
+                with open(temp, "rb") as source, open(path, "xb") as sink:  # no hard links here (re-review N2)
+                    shutil.copyfileobj(source, sink)
             os.unlink(temp)
     except FileExistsError:
         os.unlink(temp)
@@ -815,6 +823,10 @@ CHAT_HELP = ("/continue  continue an unanswered message (or a paused turn)\n"
              "/id        show the id\n/exit      leave")
 
 
+FILE_REFUSAL_CODES = frozenset({"attachment_refused", "too_many_attachments", "file_missing", "file_expired",
+                                "files_unavailable", "uploads_folder_unusable"})
+
+
 def settle_pending(session: Session, pending: list[dict[str, Any]]) -> None:
     """After a message with ``pending`` files (PR #60 review B1, C1): taken
     (whatever became of its turn), or maybe taken — they are the message's
@@ -828,6 +840,8 @@ def settle_pending(session: Session, pending: list[dict[str, Any]]) -> None:
         for file in [f for f in pending if f.get("file_id") == refused.file_id]:
             pending.remove(file)
             session.note(f"dropped {file.get('name')}: upload it again (/attach)")
+    elif pending and refused.code in FILE_REFUSAL_CODES:  # not one file: say how to go on (re-review N3)
+        session.note("(the attached files stay attached; /detach drops them)")
 
 
 def cmd_chat(session: Session, args: argparse.Namespace, read: Callable[[str], str] = input) -> int:

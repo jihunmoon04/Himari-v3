@@ -754,3 +754,15 @@ B1·B2·N1 PASS, N2 조건부 PASS(2단계와 함께 배포).
 | C10 | 시험 빈칸 | 더함: 길이 없는(chunked) 업로드의 한도, 본문 한도 예외가 그 경로만인지, 큰 버전, `too_many_pending`·`workspace_busy`·`uploads_folder_unusable`·`file_missing`·`upload_interrupted`, 읽지 못한 첨부의 이벤트, CLI B1·C1·C7·C8, 업로드의 503(확실)과 500(불명), 실패한 `--force`, 위험한 이름 |
 
 검증: 전체 1699 passed, 51 skipped. import 경계 검사 OK, mypy OK. 브라우저 스모크(다섯 서버) OK.
+
+### 20.2 재검수 — `56ec186`: READY
+
+B1, C1~C10 PASS. 새 비차단 지적과 처리:
+
+| # | 지적 | 처리 |
+| --- | --- | --- |
+| N1 | 첨부를 놓느라 오래 걸린 보내기가 다른 대화로 옮긴 뒤 돌아오면, 그 대화에서 `jobRunning`이 켜진 채 남아 보내기 버튼이 막힌다 | 같은 화면일 때만 켜고, 화면을 옮길 때마다(`clearAttachments`) 끈다 |
+| N2 | 하드 링크가 안 되는 파일시스템에서 `--force` 없는 내려받기가 늘 실패한다 | `EPERM`·`ENOTSUP`·`EXDEV`·`EMLINK`이면 덮어쓰지 않는 생성(`xb`)과 복사로 대신한다. 시험 추가 |
+| N3 | 파일 하나를 짚지 않는 거부(`file_missing`, `too_many_attachments` 등)면 CLI 첨부 목록이 그대로라 같은 거부가 반복된다 | 그때 "/detach로 뺄 수 있다"를 알린다. 시험 추가 |
+
+검증: 인터페이스 시험 153 passed, import 경계 검사 OK, mypy OK, 브라우저 스모크 OK.

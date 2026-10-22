@@ -279,3 +279,37 @@ def test_unsafe_names_need_o(harness: Harness, monkeypatch: pytest.MonkeyPatch, 
     monkeypatch.setattr(ServerClient, "download", fake)
     code, _, err = harness.run("download", "conv_1", "file_1")
     assert code == cli.EXIT_FAILED and "give one with -o" in err
+
+
+def test_a_download_where_hard_links_fail_still_lands(harness: Harness, tmp_path: Path,
+                                                      monkeypatch: pytest.MonkeyPatch) -> None:
+    import errno
+    cid = harness.run("new")[1].strip()
+    (tmp_path / "a.txt").write_text("content")
+    harness.queue(final("ok"))
+    harness.run("send", cid, "--attach", "a.txt")
+    file_id = harness.client().get(f"/api/conversations/{cid}/files")["items"][0]["file_id"]
+
+    def no_links(*args: Any, **kwargs: Any) -> None:
+        raise OSError(errno.EPERM, "Operation not permitted")
+
+    monkeypatch.setattr(os, "link", no_links)
+    code, _, err = harness.run("download", cid, file_id, "-o", "copy.txt")
+    assert code == 0, err  # PR #60 re-review N2
+    assert (tmp_path / "copy.txt").read_text() == "content"
+    assert not [p for p in tmp_path.iterdir() if p.name.endswith(".part")]
+    code, _, err = harness.run("download", cid, file_id, "-o", "copy.txt")
+    assert code == cli.EXIT_FAILED and "exists" in err
+
+
+def test_a_refusal_without_a_file_says_how_to_go_on(harness: Harness, tmp_path: Path,
+                                                    monkeypatch: pytest.MonkeyPatch) -> None:
+    (tmp_path / "a.txt").write_text("a")
+    assert harness.application is not None
+
+    async def gone(*args: Any, **kwargs: Any) -> Any:
+        raise web.ApiError(410, "file_missing", "The file's stored copy is gone.")
+
+    monkeypatch.setattr(harness.application, "send", gone)
+    _, err = chat(harness, "/attach a.txt", "look")
+    assert "/detach drops them" in err  # PR #60 re-review N3
