@@ -10,7 +10,7 @@ from typing import Any
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from testkit import FAKE, data_for, new_store, restart, text_result, user
+from testkit import FAKE, SCOPE, data_for, new_store, restart, text_result, user
 
 from himari.common import (
     AttachmentRef,
@@ -683,3 +683,57 @@ def test_a_failed_install_leaves_no_row_of_the_new_blob(monkeypatch: pytest.Monk
         assert data.blobs.rows.known_keys() == frozenset() and data.blobs.rows.live_total() == 0
 
     run(scenario())
+
+
+@pytest.mark.parametrize("point", ["before_install", "before_reserve"])
+def test_a_put_killed_before_its_row_expires_nothing(tmp_path, point: str) -> None:  # type: ignore[no-untyped-def]
+    """Owner re-review B3: the new file is installed before the transaction
+    that expires older blobs and registers it, so a process killed anywhere
+    in between leaves the older blob alive and only a stray file."""
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    from himari.data.sqlite import SqliteData, SqliteStore
+    here = Path(__file__).parent
+    env = {**os.environ, "PYTHONPATH": os.pathsep.join([str(here.parent.parent / "src"), str(here.parent)])}
+    db = tmp_path / "h.db"
+    killed = subprocess.run([sys.executable, str(here / "blob_crash_child.py"), str(db), point],
+                            capture_output=True, text=True, timeout=120, env=env)
+    assert killed.returncode == -9, killed.stderr
+    store = SqliteStore(db)
+    try:
+        data = SqliteData(store)
+        rows = store.connection.execute("SELECT blob_key, size, expired_at FROM blobs").fetchall()
+        assert [(r["size"], r["expired_at"]) for r in rows] == [(15, None)]  # the older one, alive; no new row
+        old = rows[0]["blob_key"]
+        asyncio.run(data.sweep_blobs(datetime.now(UTC) + timedelta(hours=2)))  # past the grace
+        listed = [key for key, _ in store.blobs.files.listing()]
+        assert listed == [old]  # a stray new file is gone; the older one is there
+        file_id = store.connection.execute("SELECT file_id FROM files").fetchone()["file_id"]
+        record, = asyncio.run(data.read_file_records(SCOPE, [(file_id, 1)]))
+        with store.blobs.open(record.blob) as handle:
+            assert handle.read() == b"o" * 15
+    finally:
+        store.close()
+
+
+def test_the_crash_child_expires_the_older_blob_when_it_is_not_killed(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    from himari.data.sqlite import SqliteStore
+    here = Path(__file__).parent
+    env = {**os.environ, "PYTHONPATH": os.pathsep.join([str(here.parent.parent / "src"), str(here.parent)])}
+    done = subprocess.run([sys.executable, str(here / "blob_crash_child.py"), str(tmp_path / "h.db"), "none"],
+                          capture_output=True, text=True, timeout=120, env=env)
+    assert done.returncode == 0, done.stderr
+    store = SqliteStore(tmp_path / "h.db")
+    try:
+        rows = {r["size"]: r["expired_at"] for r in store.connection.execute("SELECT size, expired_at FROM blobs")}
+        assert rows[15] is not None and rows[10] is None  # the scenario does make room
+    finally:
+        store.close()

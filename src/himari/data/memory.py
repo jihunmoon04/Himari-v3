@@ -292,15 +292,6 @@ class _MemoryBlobRows:
         self._store.blob_rows[row.key] = replace(row, expired_at=None)
         return chosen
 
-    def unreserve(self, key: str, expired: Sequence[str], previous: BlobRow | None) -> None:
-        for other in expired:
-            self._store.blob_rows[other] = replace(self._store.blob_rows[other], expired_at=None)
-        if previous is None:
-            if key not in {f.blob_key for f in self._files()}:
-                self._store.blob_rows.pop(key, None)
-        else:
-            self._store.blob_rows[key] = previous
-
     def drop_unreferenced(self, key: str, used_before: datetime) -> bool:
         if key in self.unreferenced_keys(used_before):
             del self._store.blob_rows[key]

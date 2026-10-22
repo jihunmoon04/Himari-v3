@@ -782,18 +782,6 @@ class _SqliteBlobRows:
                        row.key, row.owner, row.sha256, row.size, _timestamp(row.last_used_at))
             return chosen
 
-    def unreserve(self, key: str, expired: Sequence[str], previous: BlobRow | None) -> None:
-        with self._store.transaction() as tx:
-            for other in expired:
-                tx.execute("UPDATE blobs SET expired_at=NULL WHERE blob_key=?", other)
-            if previous is None:
-                tx.execute("DELETE FROM blobs WHERE blob_key=? AND NOT EXISTS"
-                           " (SELECT 1 FROM files f WHERE f.blob_key=blobs.blob_key)", key)
-            else:
-                tx.execute("UPDATE blobs SET last_used_at=?, expired_at=? WHERE blob_key=?",
-                           _timestamp(previous.last_used_at),
-                           None if previous.expired_at is None else _timestamp(previous.expired_at), key)
-
     def drop_unreferenced(self, key: str, used_before: datetime) -> bool:
         with self._store.transaction() as tx:
             cursor = tx.execute("DELETE FROM blobs WHERE blob_key=? AND (expired_at IS NOT NULL OR last_used_at < ?)"

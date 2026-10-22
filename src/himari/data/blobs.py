@@ -15,7 +15,9 @@ Rules:
   cannot cover the shortfall nothing is expired (review B2). Choosing them,
   expiring them and registering the new blob is one transaction
   (``BlobRows.reserve``), so the store never ends up over its size (owner
-  review B2); a failed install undoes it (``unreserve``).
+  review B2). It runs only once the new file is durable at its final name
+  (owner re-review B3): a process that dies in between leaves a file without
+  a row, which the sweep removes — never an older blob expired for nothing.
 - Expiry commits ``expired_at`` before the file goes; removing an
   unreferenced blob deletes its row first. A crash in between leaves a file
   the next sweep removes.
@@ -87,11 +89,6 @@ class BlobRows(Protocol):
         referenced by a staged upload, expired just enough — and ``row``
         registered alive. STORE_FULL with nothing changed if they cannot make
         the room. The keys it expired."""
-        ...
-
-    def unreserve(self, key: str, expired: Sequence[str], previous: BlobRow | None) -> None:
-        """Undo a ``reserve`` whose install failed: the expired ones alive
-        again (their files are still there), ``key`` as it was before."""
         ...
 
     def drop_unreferenced(self, key: str, used_before: datetime) -> bool:
@@ -404,13 +401,14 @@ class FileStore:
                     self.files.install(staging, key)
                     self.rows.touch_blob(fresh)
                 else:
-                    expired = self.rows.reserve(fresh, self.max_bytes, now - BLOB_GRACE)
+                    # The file first, then its row (owner re-review B3). On the loop,
+                    # under the lock: a link, an unlink and an fsync of a small
+                    # directory; the bytes are durable already.
+                    self.files.install(staging, key)
                     try:
-                        # On the loop, under the lock: a link, an unlink and an
-                        # fsync of a small directory. The bytes are durable already.
-                        self.files.install(staging, key)
+                        expired = self.rows.reserve(fresh, self.max_bytes, now - BLOB_GRACE)
                     except BaseException:
-                        self.rows.unreserve(key, expired, row)  # nothing expired for nothing (review C9)
+                        self.files.remove(key)  # no live row names it: ours alone (STORE_FULL, review C9)
                         raise
                     self._remove(expired)
             return StoredBlob(key, sha256, size)
