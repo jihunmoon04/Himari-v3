@@ -98,6 +98,7 @@ from himari.data.api import (
     ConversationSummary,
     DataError,
     DataErrorCode,
+    FileOrigin,
     FileRecord,
     ImageStatus,
     ToolResultRecord,
@@ -223,8 +224,11 @@ def image_view(record: FileRecord) -> dict[str, Any] | None:
     ``view_state``): a preview exists only when it is ``ready``."""
     if record.image_status is ImageStatus.NOT_IMAGE:
         return None
+    view = record.view
     return {"state": view_state(record).value, "media_type": record.image_type, "width": record.image_width,
-            "height": record.image_height}
+            "height": record.image_height,
+            # The copy's size (orientation applied): the page keeps its box before it loads (PR #63 review C1).
+            "preview": None if view is None else {"width": view.width, "height": view.height}}
 
 
 def file_view(record: FileRecord) -> dict[str, Any]:
@@ -314,8 +318,11 @@ def event_view(event: ConversationEvent, views: dict[CallRef, tuple[bool, bool]]
         view["text"] = _text(payload.model_result.blocks)
         view["app_view"] = views.get(payload.call, (False, False))[1]
         view["presented_files"] = [file_view(f) for f in presented.get(payload.call, [])]
-        # V3-P67 §8: the images the call returned (kept as files of the call).
-        view["images"] = [_attachment(b, files) for b in payload.model_result.blocks if isinstance(b, AttachmentRef)]
+        # V3-P67 §8: the images the call returned (kept as files of the call) — never an
+        # ask_user answer's attachments, which are its result too (PR #63 review C2).
+        view["images"] = [file_view(found) for b in payload.model_result.blocks if isinstance(b, AttachmentRef)
+                          if (found := files.get((b.file_id, b.version))) is not None
+                          and found.origin is FileOrigin.TOOL]
     return view
 
 

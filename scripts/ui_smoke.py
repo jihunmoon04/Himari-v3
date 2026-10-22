@@ -472,6 +472,15 @@ class InProcessViews:
         return PreparedView(out.getvalue(), "image/jpeg", image.width, image.height)
 
 
+class SeeingAdapter(ScriptedAdapter):
+    """A scripted model that takes images (V3-P67 §7.1)."""
+
+    def describe_capabilities(self, model_id: str) -> Any:
+        from himari.provider.api import ProviderCapabilities
+
+        return ProviderCapabilities(model_id=model_id, parallel_tool_calls=True, image_input=True)
+
+
 def run_images(base: str, token: str, shots: str | None, tmp: str) -> list[str]:
     from PIL import Image
 
@@ -502,6 +511,9 @@ def run_images(base: str, token: str, shots: str | None, tmp: str) -> list[str]:
         assert "800×600" in (user.locator(".file-thumb").get_attribute("title") or "")
         assert (thumb.bounding_box() or {}).get("height", 999) <= 240.5, "a thumbnail is at most 240 px high"
         expect(page.locator(".item-assistant").last).to_contain_text("a blue photo", timeout=10000)
+        page.wait_for_timeout(300)
+        assert page.evaluate("""() => { const t = document.getElementById("timeline");
+          return t.scrollHeight - t.scrollTop - t.clientHeight < 80; }"""), "the answer below a photo is in view"
         with page.expect_download() as done:
             user.locator(".file-thumb").click()
         assert Path(done.value.path()).read_bytes() == photo.read_bytes(), "pressed, the original downloads"
@@ -596,7 +608,7 @@ def main() -> int:
         real = application_module._image_views
         application_module._image_views = in_process  # type: ignore[assignment]
         images = os.path.join(tmp, "images")
-        server = serve(images, PORT + 5, ScriptedAdapter([
+        server = serve(images, PORT + 5, SeeingAdapter([
             NormalizedFinal((TextBlock("a blue photo"),)),
             NormalizedToolCalls((ToolCall(CallId("c0"), 0, ToolId("inside/read_file"),
                                           {"path": "uploads/photo.png"}),)),

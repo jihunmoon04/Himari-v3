@@ -21,7 +21,7 @@ from testkit import calls, final  # noqa: E402
 from himari.bootstrap import application as application_module  # noqa: E402
 from himari.bootstrap.application import Application, workspace_for  # noqa: E402
 from himari.bootstrap.operator import OPERATOR  # noqa: E402
-from himari.common import ConversationId, FileId, TrustedScope  # noqa: E402
+from himari.common import ASK_USER_TOOL_ID, ConversationId, FileId, TrustedScope  # noqa: E402
 from himari.data.api import PreparedView  # noqa: E402
 from himari.interfaces.web import app as web  # noqa: E402
 from himari.interfaces.web.config import WebConfig  # noqa: E402
@@ -99,7 +99,8 @@ def server(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Server]:
 def test_an_uploaded_image_has_a_preview_of_its_copy(server: Server) -> None:
     cid = server.new()
     up = server.upload(cid, "photo.png", encoded((40, 30), "PNG"), "image/png")
-    assert up["image"] == {"state": "ready", "media_type": "image/png", "width": 40, "height": 30}
+    assert up["image"] == {"state": "ready", "media_type": "image/png", "width": 40, "height": 30,
+                           "preview": {"width": 20, "height": 15}}
     shown = server.preview(cid, up)
     assert shown.status_code == 200 and shown.content == COPY  # the copy, never the uploaded bytes
     assert shown.headers["content-type"] == "image/jpeg"
@@ -165,6 +166,109 @@ def test_a_tool_results_images_come_with_it(server: Server) -> None:
     result = next(e for e in server.events(cid) if e["kind"] == "tool_result")
     image, = result["images"]
     assert (image["origin"], image["image"]) == (
-        "tool", {"state": "ready", "media_type": "image/png", "width": 64, "height": 48})
+        "tool", {"state": "ready", "media_type": "image/png", "width": 64, "height": 48,
+                 "preview": {"width": 20, "height": 15}})
     assert result["presented_files"] == []
     assert server.preview(cid, image).content == COPY
+
+
+def on_server(server: Server, step: Any) -> Any:
+    """Runs ``step(application)`` on the server's own thread: the database is used there only."""
+    assert server.application is not None and server.client.portal is not None
+    application = server.application
+
+    async def go() -> Any:
+        return await step(application)
+
+    return server.client.portal.call(go)
+
+
+def sent_photo(server: Server) -> tuple[str, dict[str, Any], Any]:
+    cid = server.new()
+    up = server.upload(cid, "photo.png", encoded((40, 30), "PNG"), "image/png")
+    server.provider.extend([final("ok")])
+    server.client.post(f"/api/conversations/{cid}/messages", json={"text": "", "attachments": [up["file_id"]]},
+                       headers={"origin": ORIGIN})
+    server.events(cid)
+
+    async def record(application: Application) -> Any:
+        found, = await application.attachment_records(TrustedScope(OPERATOR, ConversationId(cid)),
+                                                      [(FileId(up["file_id"]), 1)])
+        return found
+
+    return cid, up, on_server(server, record)
+
+
+def test_a_preview_is_only_for_its_own_conversation_and_signed_in_user(server: Server) -> None:
+    cid, up, _ = sent_photo(server)
+    other = server.new()
+    assert server.client.get(f"/api/conversations/{other}/files/{up['file_id']}/1/view").status_code == 404
+    assert server.client.get(f"/api/conversations/{cid}/files/{up['file_id']}/2/view").status_code == 404
+    server.client.cookies.clear()
+    assert server.client.get(f"/api/conversations/{cid}/files/{up['file_id']}/1/view").status_code == 401
+
+
+def test_a_copy_whose_file_is_gone_is_410_missing(server: Server) -> None:
+    cid, up, record = sent_photo(server)
+    on_server(server, lambda application: _remove(application, record.view.blob.key))
+    gone = server.preview(cid, up)
+    assert (gone.status_code, gone.json()["error"]["code"]) == (410, "file_missing")
+
+
+async def _remove(application: Application, key: str) -> None:
+    application.data.blobs.files.remove(key)
+
+
+def test_with_the_original_expired_the_copy_is_still_shown(server: Server) -> None:
+    """Review B2 (part 1): the original may expire first; the model and the preview keep the copy."""
+    cid, up, record = sent_photo(server)
+
+    async def expire(application: Application) -> None:
+        application.data.blobs.rows.expire_blobs([record.blob.key], datetime.now(UTC))
+
+    on_server(server, expire)
+    assert server.preview(cid, up).status_code == 200
+    attachment, = server.events(cid)[0]["attachments"]
+    assert attachment["expired"] and attachment["image"]["state"] == "ready"
+    listed, = server.client.get(f"/api/conversations/{cid}/files").json()["items"]
+    assert listed["image"]["state"] == "ready"
+
+
+@pytest.mark.parametrize("views, state", [(None, "no_sandbox"), ("refuses", "unprepared")],
+                         ids=["no sandbox", "unprepared"])
+def test_an_image_without_a_copy_says_why_and_has_no_preview(server: Server, views: str | None,
+                                                             state: str) -> None:
+    class Refusing:
+        available = True
+
+        async def make(self, original: bytes) -> str:
+            return "DecompressionBombError"
+
+    assert server.application is not None
+    server.application.views = Refusing() if views else None
+    cid = server.new()
+    up = server.upload(cid, "photo.png", encoded((40, 30), "PNG"), "image/png")
+    assert up["image"] == {"state": state, "media_type": "image/png", "width": 40, "height": 30, "preview": None}
+    assert server.preview(cid, up).status_code == 404
+
+
+def test_too_many_pixels_have_no_preview(server: Server) -> None:
+    huge = bytearray(encoded((10, 10), "PNG"))
+    huge[16:24] = (10_000).to_bytes(4, "big") + (6_000).to_bytes(4, "big")  # the header claims 60M pixels
+    cid = server.new()
+    up = server.upload(cid, "huge.png", bytes(huge), "image/png")
+    assert up["image"]["state"] == "too_large" and server.preview(cid, up).status_code == 404
+
+
+def test_an_answers_attachments_are_not_tool_images(server: Server) -> None:
+    """PR #63 review C2: an ask_user answer is stored as that call's result, with its attachments."""
+    cid = server.new()
+    server.provider.extend([calls((ASK_USER_TOOL_ID, {"question": "Which file?"})), final("thanks")])
+    server.client.post(f"/api/conversations/{cid}/messages", json={"text": "help"}, headers={"origin": ORIGIN})
+    server.events(cid)
+    up = server.upload(cid, "photo.png", encoded((40, 30), "PNG"), "image/png")
+    answered = server.client.post(f"/api/conversations/{cid}/messages",  # a message while asked is the answer
+                                  json={"text": "this one", "attachments": [up["file_id"]]}, headers={"origin": ORIGIN})
+    assert answered.status_code == 202, answered.text
+    result = next(e for e in server.events(cid) if e["kind"] == "tool_result")
+    assert result["images"] == []

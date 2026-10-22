@@ -322,6 +322,8 @@ function fileUrl(file) {
     `${encodeURIComponent(file.file_id)}/${encodeURIComponent(file.version)}`;
 }
 
+const THUMB_HEIGHT = 240; // as .file-thumb-image's max-height
+
 /* An image with a copy (V3-P67 §8): a thumbnail of that copy — what the
  * model saw, made by HIMARI — pressed, it downloads the file as before.
  * Only an <img>: the server sends it inline with its own type, nosniff. */
@@ -331,13 +333,21 @@ function fileThumb(file, className) {
   image.alt = label;
   image.loading = "lazy";
   image.decoding = "async";
+  const preview = file.image.preview;
+  if (preview && preview.width > 0 && preview.height > 0) {
+    // Its box is kept before it loads, so the timeline stays at the bottom.
+    const height = Math.min(THUMB_HEIGHT, preview.height);
+    image.width = Math.round((preview.width * height) / preview.height);
+    image.height = height;
+  }
   const holder = file.expired ? el("span", "file-thumb") : el("a", "file-thumb");
   if (!file.expired) {
     holder.href = fileUrl(file);
     holder.setAttribute("download", file.name);
   }
-  holder.title = `${label} · ${file.image.width}×${file.image.height} · ${humanSize(file.size)}`;
-  // Gone since the page was read (the copy expired): the plain file instead.
+  holder.title = `${label} · ${file.image.width}×${file.image.height} · ` +
+    (file.expired ? "the original expired" : humanSize(file.size));
+  // Not loaded (the copy expired since the page was read, or the request failed): the plain file instead.
   image.addEventListener("error", () => holder.replaceWith(fileLink(file, className)), { once: true });
   image.src = `${fileUrl(file)}/view`;
   holder.append(image);
@@ -437,8 +447,9 @@ function uploadFile(file) {
     }
     if (xhr.status === 201 && data) {
       Object.assign(entry, { state: "ready", fileId: data.file_id, size: data.size });
-      // An image with a copy reaches the model as an image (V3-P67): no command needed.
-      if (data.commands === false && !(data.image && data.image.state === "ready")) {
+      // An image with a copy reaches a model that takes images as an image (V3-P67): no command needed.
+      const seen = data.image && data.image.state === "ready" && modelTakesImages();
+      if (data.commands === false && !seen) {
         status("Commands cannot run on this server: HIMARI can read text files, but not PDFs or images.", "warn");
       }
     } else {
@@ -660,6 +671,12 @@ function option(value, text) {
   const node = el("option", null, text);
   node.value = value;
   return node;
+}
+
+/* Whether this conversation's model (the default before a choice is read) gets images (V3-P67 §7.1). */
+function modelTakesImages() {
+  const id = app.modelChoice ? app.modelChoice.model : (app.models.find((m) => m.default) || {}).id;
+  return Boolean((app.models.find((m) => m.id === id) || {}).images);
 }
 
 function renderModel() {

@@ -366,9 +366,24 @@ AttachmentInfo.view: ImageView | None     # 사본의 주소·형식·크기·�
 
 - **미리보기 경로:** `GET …/files/{id}/{version}/view`. `Application.preview`가 `view_state`만 보고 정한다. `READY`면 사본, `VIEW_EXPIRED`면 410 `file_expired`, 그 밖(이미지가 아님, 사본 없음, 다른 대화의 파일)은 404다. 사본의 파일이 없으면 내려받기와 같이 410 `file_missing`이다.
   - 머리글: `Content-Type`은 사본의 형식, `Content-Disposition: inline`, `Content-Security-Policy: default-src 'none'; sandbox`. `X-Content-Type-Options: nosniff`와 `Cache-Control: no-store`는 모든 API 응답에 붙는 보안 미들웨어가 붙인다(경로가 따로 붙이면 머리글이 두 번 간다).
-- **파일 보기의 `image`:** `{state, media_type, width, height}`. `media_type`과 크기는 **원본**의 판정 값이다(사용자에게 의미 있는 크기). `state`는 `view_state`의 값이다. 이미지가 아닌 파일(`NOT_IMAGE`, v9 이전 파일 포함)은 `image: null`이다.
-- **Tool 결과 이벤트의 `images`:** 결과에 붙은 첨부(Tool 이미지)의 파일 보기다. 사용자 메시지의 첨부와 같은 한 번의 읽기(`attachment_records`)로 읽는다. 건넨 파일(`presented_files`)과는 따로다(1단계 검수 C4).
+- **파일 보기의 `image`:** `{state, media_type, width, height, preview}`. `media_type`과 크기는 **원본**의 판정 값이다(사용자에게 의미 있는 크기). `state`는 `view_state`의 값이다. `preview`는 사본의 크기(방향 적용 뒤)이고 사본이 없으면 `null`이다. 화면이 썸네일의 자리를 로드 전에 잡는 데 쓴다(휴대폰 사진은 EXIF 회전으로 원본과 가로·세로가 바뀐다). 이미지가 아닌 파일(`NOT_IMAGE`, v9 이전 파일 포함)은 `image: null`이다.
+- **Tool 결과 이벤트의 `images`:** 결과에 붙은 첨부 중 `FileOrigin.TOOL`인 것의 파일 보기다. `ask_user`의 답도 그 호출의 결과로 저장되므로, 답에 붙은 업로드는 여기에 넣지 않는다. 사용자 메시지의 첨부와 같은 한 번의 읽기(`attachment_records`)로 읽는다. 건넨 파일(`presented_files`)과는 따로다(1단계 검수 C4).
 - **`/api/server`:** `images`(이 서버에서 사본을 만들 수 있는가)와 모델마다 `images`(그 모델이 이미지를 받는가). 서버를 시작할 때 사본을 만들 수 없으면 한 줄로 알린다.
-- **Web:** `image.state`가 `ready`인 파일은 칩 대신 썸네일이다(`<img>`만, 최대 높이 240px, 지연 로드). 누르면 지금처럼 원본을 내려받는다. 원본이 만료됐으면 썸네일만 보이고 눌러도 내려받지 않는다. 그 사이 사본이 만료되어 `<img>`가 실패하면 보통의 파일 칩으로 바뀐다. Tool 결과의 이미지는 Tool 줄 아래에 "Image(s) from the tool"과 함께 보인다. 사본이 있는 이미지를 올리면 "명령을 실행할 수 없어 PDF·이미지를 읽지 못함" 경고를 띄우지 않는다.
-- **CLI:** 파일 줄과 `himari files`에 `[image 800×600]`(ASCII 터미널은 `800x600`). Tool 결과의 이미지도 `[file]` 줄이고 `himari download`로 받는다.
-- **검증:** 전체 1815 passed, 55 skipped, mypy·import 경계 OK. 새 시험: `tests/interfaces/test_web_images.py`(미리보기 머리글, PNG로 속인 HTML·글·SVG는 404, 사본 만료는 410과 `view_expired`이고 원본은 내려받힘, Tool 결과의 `images`), CLI 파일 줄 시험. 브라우저 스모크(`scripts/ui_smoke.py`의 여섯 번째, 헤드리스 Chromium): 첨부 사진의 썸네일이 사본으로 로드되고 240px 이하, 썸네일을 누르면 원본이 내려받힘, Tool 이미지의 썸네일, `.png`라는 이름의 HTML은 보통 칩이고 스크립트가 돌지 않음, 좁은 화면에서 가로 넘침 없음 — 통과. 스모크의 사본은 화면을 보는 것이라 Pillow로 그 자리에서 만든다(이미지 Sandbox는 호스트 게이트가 본다).
+- **Web:** `image.state`가 `ready`인 파일은 칩 대신 썸네일이다(`<img>`만, 최대 높이 240px, 지연 로드). 누르면 지금처럼 원본을 내려받는다. 썸네일의 자리는 `preview` 크기로 미리 잡는다. 그래서 이미지가 나중에 로드돼도 타임라인이 맨 아래에 머문다. 원본이 만료됐으면 썸네일만 보이고, 눌러도 내려받지 않으며, 제목에 그렇게 적힌다. `<img>`가 로드되지 않으면(그 사이 사본이 만료됨, 요청 실패) 보통의 파일 칩으로 바뀐다. Tool 결과의 이미지는 Tool 줄 아래에 "Image(s) from the tool"과 함께 보인다. 사본이 있는 이미지를 이미지를 받는 모델(이 대화의 모델, 고르기 전이면 기본 모델)의 대화에 올리면 "명령을 실행할 수 없어 PDF·이미지를 읽지 못함" 경고를 띄우지 않는다.
+- **CLI:** 파일 줄과 `himari files`에 `[image 800×600]`(ASCII 터미널은 `800x600`). `himari files`에서는 이름(사용자의 글) 앞에 둔다. Tool 결과의 이미지도 `[file]` 줄이고 `himari download`로 받는다.
+- **검증:** 전체 1822 passed, 55 skipped, mypy·import 경계 OK. 새 시험: `tests/interfaces/test_web_images.py`(미리보기 머리글, PNG로 속인 HTML·글·SVG는 404, 사본 만료는 410과 `view_expired`이고 원본은 내려받힘, Tool 결과의 `images`, 다른 대화·다른 버전은 404·로그인 없으면 401, 사본 파일이 없으면 410 `file_missing`, 원본만 만료되면 미리보기는 됨, `no_sandbox`·`unprepared`·`too_large`는 404와 그 상태, `ask_user` 답의 첨부는 `images`가 아님), CLI 파일 줄 시험. 브라우저 스모크(`scripts/ui_smoke.py`의 여섯 번째, 헤드리스 Chromium): 첨부 사진의 썸네일이 사본으로 로드되고 240px 이하, 썸네일을 누르면 원본이 내려받힘, Tool 이미지의 썸네일, `.png`라는 이름의 HTML은 보통 칩이고 스크립트가 돌지 않음, 좁은 화면에서 가로 넘침 없음, 사진 아래의 답이 화면 안(타임라인이 맨 아래) — 통과. 스모크의 모델은 이미지를 받는다고 선언한다. 스모크의 사본은 화면을 보는 것이라 Pillow로 그 자리에서 만든다(이미지 Sandbox는 호스트 게이트가 본다).
+
+### 17.1 구현 검수 (PR #63)
+
+독립 검수: READY(차단 없음). 반영한 것.
+
+| 번호 | 지적 | 반영 |
+|---|---|---|
+| C1 | 썸네일이 로드되며 자라 새 답이 화면 아래로 밀리고 타임라인이 따라가지 않는다 | 사본 크기(`image.preview`)로 자리를 미리 잡음. 스모크에서 맨 아래인지 확인 |
+| C2 | `ask_user` 답의 첨부가 Tool 결과의 `images`에 들어간다 | `FileOrigin.TOOL`만. 시험 추가 |
+| C3 | 모델이 이미지를 받지 않아도 업로드 경고가 사라진다 | 이 대화의 모델이 이미지를 받을 때만 경고를 생략 |
+| N1 | 원본이 만료된 썸네일이 그 사실을 말하지 않는다 | 제목에 "the original expired" |
+| N2 | `himari files`에서 이미지 표시가 이름 뒤에 붙어 이름과 섞일 수 있다 | 이름 앞으로 |
+| N3 | 로드 실패를 늘 만료로 설명한다 | 설명을 "로드되지 않으면"으로 고침 |
+| N4 | `/api/server`의 `images`를 화면이 쓰지 않는다 | 모델마다의 `images`를 C3에서 씀 |
+| 시험 | 빠진 경우들 | 위 검증 항목에 추가 |

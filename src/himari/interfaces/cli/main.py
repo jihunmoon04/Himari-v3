@@ -704,7 +704,8 @@ def cmd_files(session: Session, args: argparse.Namespace) -> int:
         state = " expired" if file["expired"] else ""
         image = file.get("image")
         if isinstance(image, dict) and isinstance(image.get("width"), int) and isinstance(image.get("height"), int):
-            name += f"  [image {image['width']}{session.printer.symbols.times}{image['height']}]"
+            # Before the name, which is the user's text (PR #63 review N2).
+            state += f"  [image {image['width']}{session.printer.symbols.times}{image['height']}]"
         session.printer.line(f"{file['file_id']}  v{version}  {file['origin']:<9}  {human_size(int(file['size'])):>9}"
                              f"{state}  {name}")
     _more(session, page)

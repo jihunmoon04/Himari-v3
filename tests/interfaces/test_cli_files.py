@@ -364,7 +364,7 @@ def test_images_say_their_size_and_a_tools_images_are_listed(harness: Harness, t
     assert code == 0, err
     assert f"  [file] photo.png [image 40×30] (" in out and f"— himari download {cid} " in out
     code, out, _ = harness.run("files", cid)
-    assert code == 0 and out.rstrip().endswith("photo.png  [image 40×30]")
+    assert code == 0 and out.rstrip().endswith("  [image 40×30]  photo.png")
     folder = Path(harness.application.inside.host_root(workspace_for(OPERATOR))) / "conversations" / cid
     Image.new("RGB", (64, 48)).save(folder / "chart.png")
     harness.queue(calls(("inside/read_file", {"path": "chart.png"})), final("a chart"))
