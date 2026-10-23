@@ -1,6 +1,6 @@
 # 문서 읽기·만들기 v0.1
 
-> 2026-10-23 · **PROPOSED (V3-P70)** · rev. 3 — 재검수 NOT_READY(C1~C3, N1~N7) 반영(§18). rev. 2: 독립 검수 NOT_READY(B1~B3, C1~C10, N1~N8) 반영(§17). rev. 1: 설계 초안.
+> 2026-10-23 · **PROPOSED (V3-P70)** · rev. 4 — 최종 확인 READY(C1 반영 조건, N1~N6) 반영(§19). rev. 3: 재검수 NOT_READY(C1~C3, N1~N7) 반영(§18). rev. 2: 독립 검수 NOT_READY(B1~B3, C1~C10, N1~N8) 반영(§17). rev. 1: 설계 초안.
 >
 > **소유자 방향(2026-10-23):**
 > - plan·note보다 기능성 도구가 지금 더 필요하다. PDF·Word처럼 자주 쓰는 파일을 읽고 쓰게 한다.
@@ -82,7 +82,7 @@
     "path": {"type": "string", "description": "Document to read."},
     "pages": {"type": "string", "description": "Units to read, like \"1-5,8\" or \"12-\" (default: from the first)."},
     "view": {"type": "boolean", "description": "Return the first 4 selected units as images too (default false)."},
-    "pictures": {"type": "string", "description": "Non-PDF documents: picture numbers to return as images, like \"5-8\" (at most 4 per call)."},
+    "pictures": {"type": "string", "description": "Non-PDF documents: picture numbers to return as images, like \"5-8\" (at most 4 per call); when given, pages and view are ignored."},
     "workspace_binding_id": {"type": "string"}
   },
   "required": ["path"]
@@ -101,6 +101,10 @@
   - 글은 그림마다 한 줄(`=== picture 5 (part 1) ===`)만 준다.
   - PDF에서는 FAILED "pictures is for non-PDF documents; use pages with view"다.
   - 이것이 없으면 사진이 20장 든 보고서처럼 한 단위에 그림이 4개를 넘을 때 5번째부터 볼 길이 없다.
+  - **이어 보기(최종 확인 N1):** 4개는 **돌려준** 이미지의 수다. 건너뛴 그림(EMF 등, 줄이지 못한 것)은 세지 않는다. 그 그림들은 끝줄에 적힌다.
+    - 나머지가 있으면 끝줄에 `[view: pictures 9-20 not shown; call again with pictures="9-12"]`를 적는다.
+    - `raw_result`에는 `next_pictures: "9-20" | null`을 둔다.
+  - XLSX 시트의 글에도 그림이 놓인 셀 자리에 `[picture K]`를 적는다(표 아래 줄에 `[picture K at C5]`). 모델이 시트의 그림 번호를 글에서 안다.
 
 ### 4.1 단위
 
@@ -153,6 +157,11 @@
     - 논문의 `[1] Smith et al.` 같은 줄도 `\`가 붙는다. 이는 받아들인다.
   - **서버는 뒷받침으로 한 번 더 본다.** 단위 글 안에서 줄이 Tool의 구조 줄 모양(`===`, `[shown`, `[view`, `[images`)으로 시작하면 `\`를 붙인다. 작업자는 그런 줄을 단위 글 안에 쓰지 않는다. 그래서 정상 응답에서는 아무것도 바뀌지 않는다.
   - 그 결과 글이 예산을 넘으면 서버는 뒤의 단위를 빼고 `next`를 다시 계산한다. 끝줄은 자르지 않는다. 마지막 방어선 `_cap`(끝을 자름)에 끝줄이 걸리지 않게 하기 위해서다.
+    - 빼고 나서 남는 단위가 없으면 FAILED "a bad answer"다(최종 확인 N3). 정상 작업자는 단위 하나를 예산에 맞게 자르므로 이 경우는 뚫린 작업자뿐이다. 그대로 두면 `next`가 같은 단위를 끝없이 되풀이한다.
+  - **줄의 정의(최종 확인 N2):** 이스케이프에서 "줄"은 Python `str.splitlines`의 경계로 나뉜 조각이다. 경계에는 `\n`, `\r`, `\v`, `\f`, `\x1c`~`\x1e`, `\x85`, U+2028, U+2029가 있다. 작업자와 서버가 같은 정의를 쓴다.
+    - 작업자는 문서 글을 배치한 **뒤에** 이스케이프한다. 예를 들어 줄바꿈이 든 표 칸을 마크다운 표로 옮긴 다음이다.
+    - 표 칸 안의 줄바꿈 문자는 공백으로 바꾼다.
+    - CR이나 U+2028로 가짜 `=== page 9 ===`를 끼워 넣을 수 없다.
 - `raw_result`: `{"path", "size", "format", "units", "shown": [번호…], "next": "13-42" | null, "pictures": 수, "images": 돌려준 이미지 수}`. `next`가 이어 읽을 정본이다.
 
 ### 4.3 `view`
@@ -199,6 +208,10 @@
 - **쓰기·네트워크(N3, 재검수 N1):**
   - 쓰기 가능한 곳은 Sandbox 자신의 `/tmp` tmpfs뿐이다. 이것은 `RLIMIT_AS`에 잡히지 않는다.
   - 그래서 `ServerProfile`에 `/tmp` 크기 항목(`tmp_bytes`, bwrap `--size`)을 더하고, 문서 프로파일은 64 MiB로 둔다. 다른 프로파일(MCP 서버·이미지)은 지금처럼 정하지 않는다.
+  - **오래된 bwrap(최종 확인 N4):** `--size`는 bwrap 0.9.0(이 호스트)에는 있지만 오래된 bwrap(Ubuntu 22.04의 0.6.x)에는 없다.
+    - 문서용 Sandbox를 시작할 때 `bwrap --help`에 `--size`가 있는지 본다.
+    - 없으면 문서 기능을 끄고 이유를 로그에 남긴다. 실행하다가 SETUP_FAILED로 고정되지 않게 한다.
+    - `tmp_bytes`가 쓰이는 길은 `probe`뿐이므로 따로 시험한다.
   - 작업자는 그 위에 `RLIMIT_FSIZE` 16 MiB를 건다. 이것은 파일 하나의 한도다.
   - 네트워크는 없다.
   - 데이터 루트는 보이지 않는다(서버 Sandbox의 자체 검사).
@@ -208,7 +221,7 @@
   - `-S`로 Debian의 시스템 `dist-packages`가 경로에 들어오지 않는다. 작업자가 넘겨받은 경로 하나만 `sys.path` 앞에 넣는다.
   - `/usr`는 Sandbox가 늘 보인다. 그래서 HIMARI 가상환경의 위치와 상관없다.
 - **입출력:** 한 줄씩이다.
-  - 요청: `{"op": "read", "data": <base64>, "pages": [[1,5],[8,8]], "view": bool, "text_budget": <UTF-8 바이트>}`. `pages`는 서버가 파싱하고 정규화한 구간이다.
+  - 요청: `{"op": "read", "data": <base64>, "pages": [[1,5],[8,8]], "view": bool, "pictures": [[5,8]] | null, "text_budget": <UTF-8 바이트>}`. `pages`·`pictures`는 서버가 파싱하고 정규화한 구간이다(최종 확인 C1).
   - 첫 응답 줄: `{"ok": true, "format": "pdf", "units": 42, "unit_name": "page", "parts": [{"n": 1, "flags": [...], "label": "iv"?, "text": "...", "cut": {...}?}...], "pictures": 3, "images": 2, "skipped": [...]}`. 또는 `{"ok": false, "reason": "encrypted" | "not_a_document" | "legacy" | …}`.
   - 이어서 이미지 하나에 한 줄: `{"unit": 3, "picture": null | K, "data": <base64>}`.
   - 줄 하나는 `MAX_LINE_BYTES`(4 MiB)를 넘지 않는다(§4.3).
@@ -221,7 +234,10 @@
   - `flags`: 정해진 집합의 값만.
   - `text`: 문자열, 합계가 예산 이하.
   - `units`·`pictures`: 0 이상의 정수.
-  - 이미지: 바이트로 판정해 JPEG·PNG이고 긴 변 1,568 이하, `view`일 때만, 4개 이하, 가리키는 단위가 보인 단위 중 하나.
+  - 이미지 공통: 바이트로 판정해 JPEG·PNG이고, 긴 변 1,568 이하이며, 4개 이하.
+  - `view` 모드의 이미지: 가리키는 단위가 보인 단위 중 하나.
+  - `pictures` 모드의 이미지: 각 이미지의 `picture`가 요청한 집합 안에 있고, 오름차순이다. `unit`은 이름 붙이기에만 쓴다(최종 확인 C1).
+  - 둘 다 아닌 호출에서는 이미지가 없어야 한다.
   - 어긋나면 FAILED "could not read this document (a bad answer)".
 - **파일 읽기:** Tool이 Workspace에서 파일 바이트를 읽는다(`fs`, 한도 `MAX_DOCUMENT_BYTES`). 쓰기 잠금은 잡지 않는다(`read_file`과 같음). 작업자를 기다리는 동안 Workspace를 붙잡지 않는다.
 - **물려받는 비용(C5):** 서버 Sandbox는 띄울 때마다 데이터 루트 전체를 걸어 보호 집합을 만든다(`identity.protected_set`, 항목 200,000개 예산). V3-P67 이미지 사본도 같은 비용을 낸다.
@@ -298,6 +314,7 @@
   - 버전 폴더는 설치한 뒤 바뀌지 않으므로, 같은 폴더를 다시 여는 것은 같은 내용이다.
 - **시작할 때 확인(C3):** 연 fd에서 버전 폴더 전체를 걷는다.
   - 모든 항목의 주인은 root다(재검수 N3). 서버가 쓸 수 있는 라이브러리를 모델의 Sandbox가 실행하지 않게 한다(Q3의 이유).
+  - `HIMARI_DOCUMENTS_DIR`, `current` 링크, 그 조상 폴더들도 root 소유이고 그룹·다른 사용자가 쓸 수 없어야 한다(최종 확인 N5). 그렇지 않으면 `current`를 바꿀 수 있는 사람이 root 소유의 아무 트리나 도구 모음으로 고를 수 있다.
   - 시험과 개발에서는 `Application.open`의 인자로 허용할 소유자를 따로 줄 수 있다. 환경 변수로는 열지 않는다.
   - 그룹·다른 사용자가 쓸 수 있는 항목이 없다.
   - 폴더 밖을 가리키는 심볼릭 링크가 없다.
@@ -318,6 +335,8 @@
   - `expected_sources`에 `/run/himari/documents` → 그 fd의 (장치, inode)를 더한다.
   - 검사 항목에 "도구 모음에 쓰기가 실패함"을 더한다. 자체 검사의 `EXPECTED`에 이 키는 도구 모음을 묶었을 때만 넣는다. 지금 검사는 `EXPECTED`에 없는 키를 실패로 본다(재검수 N7).
   - 검사 프로세스의 `/proc/self/fd`에 0~2 말고 다른 fd가 없음을 확인한다. 이제 호스트 디렉터리 fd가 둘(Workspace 루트, 도구 모음)이므로 새는 fd를 막는다(재검수 N6).
+    - 목록을 읽는 동안 열린 fd 하나는 빼고 본다. 그 fd는 `/proc/self/fd` 자신을 가리킨다(최종 확인 N6).
+    - Landlock 도우미가 이미 3 이상의 fd를 닫고 실행한다(`landlock_helper.py`). 이 항목은 그것을 뒷받침한다.
 - Landlock 정책의 쓰기 가능 경로는 그대로 `/workspace`와 `/tmp`다.
 - 도구 모음이 없거나 확인에 실패하면 지금과 똑같은 인자다.
 - 모델의 스크립트는 도구 모음 전체를 읽을 수 있다. 공개 라이브러리와 글꼴뿐이고 비밀은 없다.
@@ -390,7 +409,7 @@ V3-P66의 "명령을 실행할 수 없어 PDF·이미지를 열지 못함" 로�
 | 모듈 | 변경 |
 | --- | --- |
 | 새 모듈 `himari/documents/` | 작업자(`worker.py`, 도구 모음만 import)와 실행기 `DocumentReader`(검사, 읽기, 응답 재판정, 버전 폴더 정체 확인) |
-| Sandbox | `ServerProfile`의 `/tmp` 크기 항목(`tmp_bytes`). Workspace 프로파일: 도구 모음 fd를 `/run/himari/documents`에 읽기 전용으로 묶기, 환경 변수 둘(`bwrap_arguments`에서만). `SandboxBackend`가 도구 모음 fd를 받음. 자체 검사의 `expected_sources`, 검사 항목 하나(묶었을 때만), 새는 fd 없음(V3-050 개정, Q4). 서버 프로파일은 그대로 씀 |
+| Sandbox | `ServerProfile`의 `/tmp` 크기 항목(`tmp_bytes`). Workspace 프로파일: 도구 모음 fd를 `/run/himari/documents`에 읽기 전용으로 묶기, 환경 변수 둘(`bwrap_arguments`에서만). `SandboxBackend`가 도구 모음 fd를 받음. 자체 검사의 `expected_sources`, 검사 항목 하나(묶었을 때만), 새는 fd 없음(V3-050 개정, Q4). 서버 프로파일의 나머지 규칙은 그대로 |
 | Environment (Inside) | `inside/read_document`(시작 검사가 통과한 경우만 목록에), `read_file`의 이진 파일 힌트 |
 | Data | 상수 `MAX_DOCUMENT_BYTES`만. 스키마 변경 없음 |
 | Prompt | `DOCUMENTS_READ_NOTE`, `DOCUMENTS_SCRIPT_NOTE` |
@@ -473,7 +492,10 @@ V3-P66의 "명령을 실행할 수 없어 PDF·이미지를 열지 못함" 로�
 - **`view`:**
   - PDF 페이지가 긴 변 1,568 JPEG로 돌아오고, 그 4개 페이지의 글만 들어 있음. 5개를 넘게 고르면 `next`가 나머지임
   - DOCX의 큰 사진(4000×3000)이 줄어서 돌아옴. EMF는 건너뛰고 적힘. 깨진 그림 하나가 호출을 실패시키지 않음
-  - 사진 20장이 한 부분에 든 DOCX: `view`는 앞의 4장과 `pictures="5-8"` 안내를 줌. `pictures`로 5~20을 모두 볼 수 있음. PDF에 `pictures`는 FAILED
+  - 사진 20장이 한 부분에 든 DOCX: `view`는 앞의 4장과 `pictures="5-8"` 안내를 줌. `pictures="5-20"`은 5~8과 `pictures="9-12"` 안내, `next_pictures: "9-20"`을 줌. EMF가 섞여도 돌려준 이미지가 4개. PDF에 `pictures`는 FAILED
+  - XLSX 그림이 `[picture K at C5]`로 글에 보임
+  - 거짓 응답: `pictures` 모드에서 요청하지 않은 그림 번호, 줄지 않는 번호, `view`도 `pictures`도 아닌 호출의 이미지는 FAILED. 단위를 다 빼야 하는 응답은 FAILED
+  - 표 칸에 CR·U+2028과 `=== page 9 ===`를 넣은 문서에서 가짜 머리줄이 생기지 않음
   - 4개 페이지의 글이 64 KiB를 넘으면 들어가는 페이지까지만 글과 이미지가 오고 나머지는 `next`
   - 결과 글의 `[images: …]` 줄이 이미지 순서와 맞음
   - Dispatcher 보관을 거쳐, 이미지를 받는 모델에게는 이미지로, 받지 않는 모델에게는 줄로 감
@@ -489,6 +511,8 @@ V3-P66의 "명령을 실행할 수 없어 PDF·이미지를 열지 못함" 로�
 - **도구 모음:**
   - 제공 조건: `HIMARI_DOCUMENTS_DIR` 없음 / 데이터 루트 안 / `/usr` 아래 / 깊은 폴더 하나가 그룹 쓰기 가능 / 밖을 가리키는 링크 / root가 아닌 소유자 / `probe` 실패 / 문서용 Sandbox만 ENFORCED가 아님. 각각 Tool·묶기·문장이 맞게 꺼지고, 로그에 이유가 남음
   - 서버가 도는 중에 `current`를 바꿔도 그 서버는 시작 때의 버전을 씀. 버전 폴더를 지우고 다시 만들면 DENIED
+  - `HIMARI_DOCUMENTS_DIR`이나 `current`가 그룹 쓰기 가능이거나 root 소유가 아니면 꺼짐
+  - `--size`가 없는 bwrap(가짜 `--help`)이면 문서 기능이 꺼지고, 다른 Sandbox는 그대로
 - **`run_command`:**
   - `python3 -c "import docx, openpyxl, pptx, reportlab, pypdf, pypdfium2"`가 됨
   - `$HIMARI_FONTS`에 글꼴이 있음
@@ -570,3 +594,22 @@ V3-P66의 "명령을 실행할 수 없어 PDF·이미지를 열지 못함" 로�
 | N5 | 잘린 단위의 안내, 문단 하나가 예산을 넘을 때, `view`의 글이 넘칠 때 | 형식별 안내(스크립트가 켜졌을 때만), 문자 경계, 들어가는 단위까지만 글과 이미지(§4.2) |
 | N6 | 새는 fd | 자체 검사가 0~2 말고 없음을 확인(§6.3) |
 | N7 | 설정 경로, fd 주인, 시작 시간, `EXPECTED` 키 | §6.4 "구현에서 정할 자리", §6.3 |
+
+## 19. 최종 확인 — rev. 3(`9c1a1fd`): READY (C1을 반영하는 조건)
+
+최종 확인이 확인한 것:
+- `pictures` 인자가 Tool 설명·§4.3·시험과 맞는다.
+- 이스케이프 규칙이 스스로 맞다. 첫 줄을 빼면 Tool이 쓰는 줄은 모두 `===`·`[`로 시작하고, 정상 응답에서는 서버 뒷받침이 아무것도 바꾸지 않는다.
+- `--prune`은 도는 서버의 버전을 지우지 않는다. 서버가 그 버전 폴더의 fd를 쥐고 있기 때문이다.
+- Landlock 도우미가 이미 fd를 닫는다.
+- bwrap 0.9.0에 `--size`가 있다.
+
+| # | 지적 | 반영 |
+| --- | --- | --- |
+| C1 | 작업자 요청과 응답 재판정에 `pictures` 모드가 없음 | 요청에 `pictures`, 모드별 이미지 재판정(§5) |
+| N1 | `pictures`의 이어 보기, 건너뛴 그림의 셈, XLSX 그림 번호 | 끝줄과 `next_pictures`, 돌려준 것만 셈, 스키마 설명에 무시 규칙, 시트에 `[picture K at C5]`(§4, §15) |
+| N2 | 줄의 정의 | `str.splitlines` 경계, 배치 뒤 이스케이프, 표 칸 줄바꿈은 공백(§4.2) |
+| N3 | 뒷받침이 단위를 다 뺄 수 있음 | FAILED "a bad answer"(§4.2) |
+| N4 | 오래된 bwrap의 `--size`, §11 문구 | 시작할 때 확인하고 없으면 끔, 시험, §11 고침(§5) |
+| N5 | `current`와 조상 폴더 확인 | root 소유·쓰기 불가(§6.2) |
+| N6 | fd 목록을 읽는 fd | 빼고 봄(§6.3) |
