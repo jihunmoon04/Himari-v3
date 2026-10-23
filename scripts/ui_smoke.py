@@ -199,7 +199,7 @@ def run_compaction(base: str, token: str, shots: str | None, root: str) -> list[
         expect(divider.locator(".context-divider-text")).to_have_text(SUMMARY)  # shown as text, not markup
         assert divider.locator("b").count() == 0
         page.click("#chat-menu-toggle")
-        expect(page.locator("#chat-menu-context")).to_contain_text("of 2.4k tokens")
+        expect(page.locator("#chat-menu-context")).to_contain_text("of 2.8k tokens")
         if shots:
             page.screenshot(path=os.path.join(shots, "4-compacted.png"), full_page=True)
         page.click("#chat-menu-toggle")
@@ -673,7 +673,7 @@ def main() -> int:
             time.sleep(0.5)
         small = os.path.join(tmp, "small")
         provider = ScriptedAdapter([NormalizedFinal((TextBlock(SUMMARY),))] * 12)  # every answer and summary alike
-        server = serve(small, PORT + 1, provider, context_tokens=2400)
+        server = serve(small, PORT + 1, provider, context_tokens=2800)
         try:
             errors += run_compaction(f"http://127.0.0.1:{PORT + 1}",
                                      Path(small, "control", "operator.secret").read_text().strip(), args.screenshots,

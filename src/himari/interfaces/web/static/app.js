@@ -503,7 +503,7 @@ function coveredThrough() {
 function newWorkBlock() {
   const block = el("details", "item item-work");
   block.append(el("summary", "work-summary"), el("div", "work-body"));
-  block.outside = 0; // its calls whose rows are outside (they have an app view)
+  block.outsideRows = []; // its calls' rows shown outside (they have an app view), each with data-call
   return block;
 }
 
@@ -513,15 +513,33 @@ function workBody(block) {
 
 function lastSequence(block) {
   const last = workBody(block).lastElementChild;
-  return Number((last || block).dataset.sequence);
+  return Math.max(Number((last || block).dataset.sequence), ...block.outsideRows.map((row) => Number(row.dataset.call)));
+}
+
+/* The block a row outside belongs to, or the block a row is in. */
+function workOf(row) {
+  return row.closest(".item-work")
+    || [...$("timeline").querySelectorAll(":scope > .item-work")].find((block) => block.outsideRows.includes(row))
+    || null;
+}
+
+/* Its latest progress line, or the one of the block it went on from (§5.6). */
+function progressLine(block) {
+  const notes = block.querySelectorAll(":scope > .work-body > .work-progress");
+  return notes.length ? notes[notes.length - 1].dataset.line : block.dataset.line || "";
 }
 
 /* The block the steps of this event go into: the open one, or a new one. */
 function workBlock(sequence) {
   const covered = coveredThrough();
-  if (app.work && covered !== null && lastSequence(app.work) <= covered && sequence > covered) closeWork();
+  let line = "";
+  if (app.work && covered !== null && lastSequence(app.work) <= covered && sequence > covered) {
+    line = progressLine(app.work); // the block after the boundary goes on with it
+    closeWork();
+  }
   if (!app.work) {
     app.work = newWorkBlock();
+    if (line) app.work.dataset.line = line;
     tagging($("timeline"), sequence).append(app.work);
   }
   return app.work;
@@ -538,33 +556,51 @@ function closeWork() {
 
 function paintWork(block) {
   const body = workBody(block);
-  const count = body.querySelectorAll(".item-tool-row").length + block.outside;
-  const calls = count === 1 ? "1 tool call" : `${count} tool calls`;
+  const rows = [...body.querySelectorAll(".item-tool-row"), ...block.outsideRows];
+  const calls = rows.length === 1 ? "1 tool call" : `${rows.length} tool calls`;
+  // The latest model change in it goes on its summary, so a fold never hides one (§5.5).
+  const changes = body.querySelectorAll(":scope > .work-model");
+  const model = changes.length ? changes[changes.length - 1].textContent : block.dataset.model || "";
+  const live = block === app.work && app.jobRunning;
+  // Calls left without a result while the turn is stopped (a pause) did not run (§5.4).
+  const waiting = live ? 0 : rows.filter((row) => row.classList.contains("is-pending")).length;
+  const line = live ? progressLine(block) || "Working" : "";
+  const key = JSON.stringify([model, live, line, calls, waiting]);
+  if (block.dataset.painted === key) return; // repainted each poll, the dot's pulse would restart
+  block.dataset.painted = key;
   const summary = block.querySelector(":scope > .work-summary");
   summary.replaceChildren();
-  if (block.dataset.model) summary.append(el("span", "work-model-name", block.dataset.model)); // §5.5
-  if (block === app.work && app.jobRunning) {
-    const progress = [...body.querySelectorAll(":scope > .work-progress")].pop();
-    summary.append(el("span", "work-dot"), el("span", "work-line", progress ? progress.dataset.line : "Working"),
-                   el("span", "work-count", ` · ${calls}`));
-    return;
+  if (model) summary.append(el("span", "work-model-name", model));
+  if (live) {
+    summary.append(el("span", "work-dot"), el("span", "work-line", line), el("span", "work-count", ` · ${calls}`));
+  } else {
+    summary.append(el("span", "work-count", waiting ? `${calls} · ${waiting} not run` : calls));
   }
-  // Calls left without a result while the turn is stopped (a pause) did not run (§5.4).
-  const waiting = body.querySelectorAll(".item-tool-row.is-pending").length;
-  summary.append(el("span", "work-count", waiting ? `${calls} · ${waiting} not run` : calls));
 }
 
-/* §5.6: the part of a block after the compaction boundary becomes a block of
-   its own, placed before the first node after the boundary. */
+/* §5.6: the part of a block after the compaction boundary (its steps and
+   their rows outside) becomes a block of its own, placed before the first
+   node after the boundary; it goes on with the progress line. */
 function splitWork(block, covered) {
   if (Number(block.dataset.sequence) > covered) return;
   const first = [...workBody(block).children].find((node) => Number(node.dataset.sequence) > covered);
-  if (!first) return;
+  const outside = block.outsideRows.filter((row) => Number(row.dataset.call) > covered);
+  if (!first && !outside.length) return;
   const rest = newWorkBlock();
-  rest.dataset.sequence = first.dataset.sequence;
   const moved = [];
   for (let node = first; node; node = node.nextElementSibling) moved.push(node);
+  rest.dataset.sequence = String(Math.min(...moved.map((node) => Number(node.dataset.sequence)),
+                                          ...outside.map((row) => Number(row.dataset.call))));
+  if (moved.length && moved[0].matches(".work-model")) { // the change is named on its summary, as when live
+    const label = moved.shift();
+    rest.dataset.model = label.textContent;
+    label.remove();
+  }
   workBody(rest).append(...moved);
+  rest.outsideRows = outside;
+  block.outsideRows = block.outsideRows.filter((row) => !outside.includes(row));
+  const line = progressLine(block);
+  if (line) rest.dataset.line = line;
   let next = block.nextElementSibling;
   while (next && !(Number(next.dataset.sequence) > covered)) next = next.nextElementSibling;
   block.parentElement.insertBefore(rest, next);
@@ -600,12 +636,14 @@ function renderEvent(event) {
     const block = workBlock(event.sequence);
     const inside = tagging(workBody(block), event.sequence);
     if (model) {
-      if (!workBody(block).childElementCount && !block.outside) block.dataset.model = model; // on its summary
+      if (!workBody(block).childElementCount && !block.outsideRows.length) block.dataset.model = model; // on its summary
       else inside.append(el("div", "work-model", model)); // before this step, inside (§5.5)
     }
     if (event.text && event.text.trim()) {
       const note = el("div", "work-progress");
-      note.dataset.line = event.text.trim().split("\n")[0];
+      // The summary shows its first line as text: "**Plan:**" reads "Plan:".
+      const first = event.text.split(/\r?\n/).find((line) => line.trim()) || "";
+      note.dataset.line = renderAssistantText(document, first).textContent.trim() || first.trim();
       note.append(renderAssistantText(document, event.text));
       inside.append(note);
     }
@@ -619,7 +657,8 @@ function renderEvent(event) {
       paintToolRow(entry);
       if (call.app_view) { // shown while it runs: the row stays outside the block (§5.3)
         views.attach(entry, key, event.run_id, call.call_id, true);
-        block.outside += 1;
+        node.dataset.call = String(event.sequence);
+        block.outsideRows.push(node);
         timeline.append(node);
       } else {
         inside.append(node);
@@ -646,10 +685,11 @@ function renderEvent(event) {
       if (event.images && event.images.length) timeline.append(toolImages(event.images));
       return;
     }
-    const block = entry.node.closest(".item-work");
+    const block = workOf(entry.node);
     if (event.app_view && !entry.view) {
-      if (block) { // its view is known from its result: the row moves out of the block (§5.3)
-        block.outside += 1;
+      if (block && entry.node.closest(".item-work")) { // its view is known from its result: the row moves out (§5.3)
+        entry.node.dataset.call = entry.node.dataset.sequence;
+        block.outsideRows.push(entry.node);
         timeline.append(entry.node); // tagged with the result's sequence: where it now stands
       }
       views.attach(entry, `${event.run_id}/${event.call_id}`, event.run_id, event.call_id, false);
@@ -659,9 +699,7 @@ function renderEvent(event) {
     entry.result = event;
     paintToolRow(entry);
     if (entry.view) views.result(entry, Boolean(event.app_view));
-    const now = entry.node.closest(".item-work");
-    if (now) paintWork(now);
-    else if (block) paintWork(block);
+    if (block) paintWork(block);
   }
 }
 

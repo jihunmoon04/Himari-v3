@@ -57,6 +57,7 @@ POLL_SECONDS = 0.5
 EVENT_PAGE = 32  # 32 x a 64 KiB Tool result stays well under the 8 MiB response bound
 TRASH_SECONDS = 90.0  # the server waits up to 30 s for a running job to stop (V3-P65 §7.1)
 TOOL_RESULT_LINES = 8
+PROGRESS_CHARS = 200  # a progress line, like a call's arguments (V3-P68 §6)
 
 STATE_TEXT = {
     "completed": "done",
@@ -229,10 +230,15 @@ class Printer:
 
     def progress(self, text: str) -> None:
         """Commentary as one progress line, ``  » Looking through the code`` (V3-P68 §6):
-        its first line and a marker when there is more; all of it when verbose."""
+        its first line (at most ``PROGRESS_CHARS``) and a marker when there is more;
+        all of it when verbose."""
         first, _, rest = text.strip().partition("\n")
-        more = self.symbols.more if rest.strip() and not self.verbose else ""
-        self.line(f"  {self.symbols.progress} {safe_line(first.strip(), encoding=self.encoding)}{more}")
+        first = first.strip()
+        cut = len(first) > PROGRESS_CHARS and not self.verbose  # a long paragraph from before V3-P68
+        if cut:
+            first = first[:PROGRESS_CHARS - 1]
+        more = self.symbols.more if cut or (rest.strip() and not self.verbose) else ""
+        self.line(f"  {self.symbols.progress} {safe_line(first, encoding=self.encoding)}{more}")
         if rest.strip() and self.verbose:
             self.line(safe_block(rest.strip("\n"), encoding=self.encoding))
 

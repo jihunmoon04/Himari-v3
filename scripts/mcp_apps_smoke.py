@@ -343,6 +343,12 @@ def run(token: str, fake: FakeMcpServer, chrome: str | None, shots: str | None) 
         page.wait_for_timeout(1500)  # let any later poll or lookup arrive: the result must still be there once
         lines = logged(first)
         check("1: the latest call's view opened by itself", page.locator(".app-view-frame").count() == 1)
+        # V3-P68 §5.3: a call with a view keeps its row outside the folded work block, and is counted there.
+        check("1: the row with the view is outside the work block",
+              page.locator("#timeline > .item-tool-row .app-view-slot").count() == 1
+              and page.locator(".item-work .app-view-slot").count() == 0)
+        check("1: the work block counts it", page.locator(".item-work .work-count").first.inner_text().endswith(
+            "1 tool call"), page.locator(".item-work .work-count").first.inner_text())
         check("1: tool-input reached the view", 'input {"text":"one"}' in lines, lines)
         check("1: tool-result reached the view exactly once", lines.count('result {"said":"one"}') == 1, lines)
         init = next((json.loads(line[5:]) for line in lines if line.startswith("init ")), None)

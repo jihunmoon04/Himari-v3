@@ -413,7 +413,7 @@ def test_show_reports_the_context_size(harness: Harness) -> None:
 def test_a_compacted_conversation_shows_where_the_summary_takes_over(tmp_path: Path,
                                                                       monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(cli, "POLL_SECONDS", 0.01)
-    harness = Harness(tmp_path, context_tokens=2400)
+    harness = Harness(tmp_path, context_tokens=2800)
     with harness.test_client:
         cid = harness.run("new")[1].strip()
         harness.queue(*[final("SUMMARY of the start")] * 12)  # every answer and every summary alike
@@ -442,7 +442,7 @@ def test_a_compacted_conversation_shows_where_the_summary_takes_over(tmp_path: P
 def test_a_compacted_conversation_on_an_ascii_terminal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # PR #16 review B1: the divider is the CLI's own mark too; it never raises.
     monkeypatch.setattr(cli, "POLL_SECONDS", 0.01)
-    harness = Harness(tmp_path, context_tokens=2400)
+    harness = Harness(tmp_path, context_tokens=2800)
     with harness.test_client:
         cid = harness.run("new")[1].strip()
         harness.queue(*[final("SUMMARY 요약 ─ done")] * 12)
@@ -462,7 +462,7 @@ def test_chat_says_when_the_boundary_moved_after_the_history_was_printed(tmp_pat
                                                                          monkeypatch: pytest.MonkeyPatch) -> None:
     # PR #16 review C1
     monkeypatch.setattr(cli, "POLL_SECONDS", 0.01)
-    harness = Harness(tmp_path, context_tokens=2400)
+    harness = Harness(tmp_path, context_tokens=2800)
     with harness.test_client:
         cid = harness.run("new")[1].strip()
         harness.queue(*[final("SUMMARY")] * 12)
@@ -710,7 +710,7 @@ def test_a_refusal_says_why(harness: Harness) -> None:
 def test_compacting_with_an_open_question_says_why(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # PR #24 review C1: the reason of WAITING_FOR_USER / NOTHING_TO_COMPACT is shown too.
     monkeypatch.setattr(cli, "POLL_SECONDS", 0.01)
-    harness = Harness(tmp_path, context_tokens=2400)
+    harness = Harness(tmp_path, context_tokens=2800)
     with harness.test_client:
         cid = harness.run("new")[1].strip()
         harness.queue(calls(("ask_user", {"question": "Which file?"})))
@@ -860,8 +860,15 @@ def test_commentary_is_a_progress_line() -> None:
         "  » Looking through the code", "  » Designing…", "HIMARI (big):", "  » Implementing"]
 
     out = io.StringIO()
-    cli.Printer(out, verbose=True).event(step("Designing\nthe parser"))
-    assert out.getvalue().splitlines()[:2] == ["  » Designing", f"{INDENT}the parser"]
+    cli.Printer(out).event(step("x" * 300))  # a long paragraph from before the note: cut
+    assert out.getvalue().splitlines()[0] == "  » " + "x" * 199 + "…"
+
+    out = io.StringIO()
+    printer = cli.Printer(out, verbose=True)
+    printer.event(step("Designing\nthe parser"))
+    printer.event(step("y" * 300))
+    rows = out.getvalue().splitlines()
+    assert rows[:2] == ["  » Designing", f"{INDENT}the parser"] and "  » " + "y" * 300 in rows
 
     class Ascii(io.StringIO):
         encoding = "ascii"
