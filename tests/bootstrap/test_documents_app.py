@@ -141,7 +141,9 @@ def test_any_startup_failure_closes_the_toolkit(tmp_path: Path, monkeypatch: pyt
         raise Stop
 
     monkeypatch.setattr(boot, "open_toolkit", lambda *a, **k: kit)
-    monkeypatch.setattr(boot.identity, "check_trees", lambda *a, **k: None)
+    from himari.sandbox import identity
+
+    monkeypatch.setattr(identity, "check_trees", lambda *a, **k: None)
     monkeypatch.setattr(boot, "discover_capability", stop)
     with pytest.raises(Stop):
         asyncio.run(boot._documents(tmp_path, True, "/opt/x", frozenset()))
