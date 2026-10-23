@@ -99,6 +99,7 @@ async function api(method, path, body) {
 /* ------------------------------------------------------------------ state */
 
 const app = {
+  startingConversation: null,
   conversationId: null,
   generation: 0,
   lastSequence: 0,
@@ -152,9 +153,16 @@ function showSurface(name) {
   const signedIn = name !== "login";
   $("sidebar").hidden = !signedIn;
   $("sidebar-toggle").hidden = !signedIn;
+  syncNavigation();
   $("topbar-chat-context").hidden = name !== "chat";
   $("chat-menu-toggle").hidden = name !== "chat";
   if (name !== "chat") closeChatMenu();
+  $("chat-menu-model").hidden = name !== "chat" || app.modelChoice === null || app.models.length === 0;
+  // One composer, including its draft and staged files, on either surface.
+  if (name === "home" || name === "chat") {
+    (name === "home" ? $("home-composer-slot") : $("surface-chat")).append($("composer-wrap"));
+    autosize();
+  }
 }
 
 /* ------------------------------------------------------------- sign-in */
@@ -168,6 +176,9 @@ function showLogin() {
   showSurface("login");
   $("topbar-title").textContent = "HIMARI";
   $("server-info").hidden = true;
+  $("server-details").hidden = true;
+  $("server-details").open = false;
+  $("appearance-dialog").close();
   $("login-token").value = "";
   $("login-token").focus();
 }
@@ -205,14 +216,32 @@ function conversationName(item) {
 }
 
 function renderListRow(item) {
-  const li = el("li");
+  const li = el("li", "conversation-row");
   const button = el("button", "conv-row", conversationName(item));
   button.type = "button";
   button.dataset.id = item.id;
   button.title = conversationName(item);
   if (item.id === app.conversationId) button.classList.add("is-selected");
+  if (item.id === app.conversationId) button.setAttribute("aria-current", "page");
   button.addEventListener("click", () => openConversation(item.id));
-  li.append(button);
+  const actions = el("details", "conversation-actions");
+  const toggle = el("summary", null, "⋯");
+  toggle.setAttribute("aria-label", `Actions for ${conversationName(item)}`);
+  toggle.title = `Actions for ${conversationName(item)}`;
+  const menu = el("div", "conversation-action-list");
+  for (const [label, action] of [["Rename", () => renameConversation(item)], ["Move to trash", () => deleteConversation(item)]]) {
+    const control = el("button", "link-button", label);
+    control.type = "button";
+    control.addEventListener("click", () => { actions.open = false; action(); });
+    menu.append(control);
+  }
+  actions.append(toggle, menu);
+  actions.addEventListener("toggle", () => {
+    if (actions.open) for (const other of $("conversation-list").querySelectorAll("details[open]")) {
+      if (other !== actions) other.open = false;
+    }
+  });
+  li.append(button, actions);
   return li;
 }
 
@@ -230,6 +259,8 @@ async function loadList(reset) {
 function markSelected() {
   for (const button of $("conversation-list").querySelectorAll(".conv-row")) {
     button.classList.toggle("is-selected", button.dataset.id === app.conversationId);
+    if (button.dataset.id === app.conversationId) button.setAttribute("aria-current", "page");
+    else button.removeAttribute("aria-current");
   }
 }
 
@@ -241,16 +272,27 @@ async function showHome() {
   clearAttachments();
   markSelected();
   showSurface("home");
+  $("composer-send").disabled = false;
+  $("composer-pause").hidden = true;
+  $("composer-cancel").hidden = true;
+  $("question-panel").hidden = true;
+  $("stop-panel").hidden = true;
+  $("composer-hint").textContent = "";
+  $("composer-text").placeholder = "Ask HIMARI anything…";
+  closePicker();
+  closePromptForm();
+  status("");
+  app.prompts = null;
   $("topbar-title").textContent = "HIMARI";
   const items = await loadList(true);
   const recent = $("home-recent-list");
   recent.replaceChildren();
-  for (const item of items.slice(0, 5)) {
+  for (const item of items.slice(0, 3)) {
     const li = el("li");
     const card = el("button", "home-recent-card");
     card.type = "button";
     card.append(el("span", "home-recent-title", conversationName(item)),
-                el("span", "home-recent-activity", new Date(item.last_activity_at).toLocaleString()));
+                el("span", "home-recent-activity", new Date(item.last_activity_at).toLocaleDateString()));
     card.addEventListener("click", () => openConversation(item.id));
     li.append(card);
     recent.append(li);
@@ -259,7 +301,23 @@ async function showHome() {
 }
 
 async function newConversation() {
-  if (!(await mayLeave())) return;
+  if (app.startingConversation) return app.startingConversation;
+  // Lock before even the leave/save check: repeated clicks may be waiting on
+  // the same instruction save, and must not each create a conversation.
+  const pending = (async () => {
+    if (!(await mayLeave())) return false;
+    return createConversation();
+  })();
+  app.startingConversation = pending;
+  try { return await pending; }
+  finally { if (app.startingConversation === pending) app.startingConversation = null; }
+}
+
+async function createConversation() {
+  const generation = app.generation;
+  $("nav-new-chat").disabled = true;
+  $("home-new-chat").disabled = true;
+  $("composer-send").disabled = true;
   let created;
   try {
     created = await api("POST", "/api/conversations", {});
@@ -271,11 +329,18 @@ async function newConversation() {
     } else {
       status(error.message, "error");
     }
-    return;
+    return false;
+  } finally {
+    $("nav-new-chat").disabled = false;
+    $("home-new-chat").disabled = false;
+    if (generation === app.generation) $("composer-send").disabled = false;
   }
-  await loadList(true);
+  if (generation !== app.generation) return false; // navigation while creating never sends a draft elsewhere
+  await loadList(true).catch(() => {});
+  if (generation !== app.generation) return false;
   await openConversation(created.id);
   $("composer-text").focus();
+  return app.conversationId === created.id && app.generation === generation + 1;
 }
 
 /* --------------------------------------------------------------- timeline */
@@ -328,7 +393,10 @@ function fileLink(file, className) {
     gone.title = "This file expired: it was not used for a long time.";
     return gone;
   }
-  const link = el("a", className, `${label} · ${humanSize(file.size)}`);
+  const link = el("a", className);
+  const extension = (file.name.split(".").pop() || "FILE").slice(0, 8).toUpperCase();
+  link.append(el("span", "file-type", extension), el("span", "file-name", label),
+              el("span", "file-meta", `${humanSize(file.size)} · Download`));
   link.href = fileUrl(file);
   link.setAttribute("download", file.name);
   return link;
@@ -357,17 +425,27 @@ function fileThumb(file, className) {
     image.width = Math.max(1, Math.round((preview.width * height) / preview.height)); // never a 0 px box
     image.height = height;
   }
-  const holder = file.expired ? el("span", "file-thumb") : el("a", "file-thumb");
-  if (!file.expired) {
-    holder.href = fileUrl(file);
-    holder.setAttribute("download", file.name);
-  }
+  const holder = el("div", "file-thumb");
+  const previewButton = el("button", "file-preview-button");
+  previewButton.type = "button";
+  previewButton.setAttribute("aria-label", `Preview ${label}`);
+  previewButton.addEventListener("click", () => {
+    $("image-dialog-title").textContent = label;
+    $("image-dialog-image").src = image.src;
+    $("image-dialog-image").alt = label;
+    const download = $("image-dialog-download");
+    download.hidden = Boolean(file.expired);
+    download.href = fileUrl(file);
+    download.setAttribute("download", file.name);
+    if (!$("image-dialog").open) $("image-dialog").showModal();
+  });
   holder.title = `${label} · ${file.image.width}×${file.image.height} · ` +
     (file.expired ? "the original expired" : humanSize(file.size));
   // Not loaded (the copy expired since the page was read, or the request failed): the plain file instead.
   image.addEventListener("error", () => holder.replaceWith(fileLink(file, className)), { once: true });
   image.src = `${fileUrl(file)}/view`;
-  holder.append(image);
+  previewButton.append(image);
+  holder.append(previewButton, fileLink(file, "file-thumb-download"));
   return holder;
 }
 
@@ -485,7 +563,11 @@ function uploadFile(file) {
   xhr.send(file);
 }
 
-function addFiles(files) {
+async function addFiles(files) {
+  if (!files.length) return;
+  if (app.conversationId === null && !$("surface-home").hidden) {
+    if (!(await newConversation())) return;
+  }
   for (const file of files) uploadFile(file);
 }
 
@@ -576,7 +658,7 @@ function closeWork() {
 function paintWork(block) {
   const body = workBody(block);
   const rows = [...body.querySelectorAll(".item-tool-row"), ...block.outsideRows];
-  const calls = rows.length === 1 ? "1 tool call" : `${rows.length} tool calls`;
+  const calls = rows.length === 1 ? "1 step" : `${rows.length} steps`;
   // The latest model change in it goes on its summary, so a fold never hides one (§5.5).
   const changes = body.querySelectorAll(":scope > .work-model");
   const model = changes.length ? changes[changes.length - 1].textContent : block.dataset.model || "";
@@ -594,7 +676,7 @@ function paintWork(block) {
   if (live) {
     summary.append(el("span", "work-dot"), el("span", "work-line", line), el("span", "work-count", ` · ${calls}`));
   } else {
-    summary.append(el("span", "work-count", waiting ? `${calls} · ${waiting} without result` : calls));
+    summary.append(el("span", "work-count", waiting ? `${calls} · ${waiting} ${waiting === 1 ? "result" : "results"} unavailable` : `Activity · ${calls}`));
   }
 }
 
@@ -850,12 +932,12 @@ function modelTakesImages() {
 
 function renderModel() {
   const choice = app.modelChoice;
-  $("chat-menu-model").hidden = choice === null || app.models.length === 0;
+  $("chat-menu-model").hidden = $("surface-chat").hidden || choice === null || app.models.length === 0;
   if (choice === null) return;
   const select = $("chat-menu-model-select");
   const fallback = app.models.find((m) => m.default);
   select.replaceChildren(option("", `Default${fallback ? ` (${fallback.id})` : ""}`));
-  for (const model of app.models) select.append(option(model.id, model.id));
+  for (const model of app.models) select.append(option(model.id, model.id.split("/").pop()));
   const chosen = choice.chosen ? choice.chosen.model : "";
   if (chosen && !app.models.some((m) => m.id === chosen)) select.append(option(chosen, `${chosen} (not offered)`));
   select.value = chosen;
@@ -1280,8 +1362,13 @@ async function openConversation(id) {
 
 async function sendMessage(event) {
   event.preventDefault();
+  if (app.startingConversation) return;
   const box = $("composer-text");
-  const text = box.value.trim();
+  const draft = box.value;
+  const text = draft.trim();
+  if (app.conversationId === null && !$("surface-home").hidden && text) {
+    if (!(await newConversation())) return;
+  }
   const ready = app.attachments.filter((a) => a.state === "ready");
   if ((!text && !ready.length) || app.sending || uploading() || app.conversationId === null) return;
   abandonExpansion(); // a message sent now is the user's: no prompt answer may replace what follows
@@ -1291,15 +1378,20 @@ async function sendMessage(event) {
   try {
     await api("POST", `/api/conversations/${encodeURIComponent(app.conversationId)}/messages`,
       { text, attachments: ready.map((a) => a.fileId) });
-    box.value = "";
-    autosize();
     if (generation === app.generation) {
+      // A user can navigate or type again while this request is in flight.
+      // Only clear the exact draft accepted for this conversation.
+      if (box.value === draft) {
+        box.value = "";
+        autosize();
+      }
       app.jobRunning = true; // a job starts with this message; the next detail says when it ends
       app.attachments = app.attachments.filter((a) => !ready.includes(a));
       renderAttachments();
+      status("");
     }
-    status("");
   } catch (error) {
+    if (generation !== app.generation) return;
     if (error.code === "attachment_refused" && error.fileId) { // which chip (V3-P66 §9)
       const refused = app.attachments.find((a) => a.fileId === error.fileId);
       if (refused) Object.assign(refused, { state: "failed", note: `${error.message} — upload it again` });
@@ -1365,17 +1457,27 @@ async function compactConversation() {
   if (generation === app.generation) poll(generation); // the poll's end reloads the context and divider
 }
 
-async function renameConversation() {
+async function renameConversation(item = null) {
   closeChatMenu();
-  if (app.conversationId === null) return;
-  const title = window.prompt("Conversation name", $("topbar-title").textContent);
-  if (title === null) return;
+  const id = item ? item.id : app.conversationId;
+  if (id === null) return;
   const generation = app.generation;
+  const dialog = $("rename-dialog");
+  if (dialog.open) return;
+  $("rename-name").value = item ? conversationName(item) : $("topbar-title").textContent;
+  dialog.returnValue = "";
+  const title = await new Promise((resolve) => {
+    dialog.addEventListener("close", () => resolve(dialog.returnValue === "save" ? $("rename-name").value.trim() : null), { once: true });
+    dialog.showModal();
+    $("rename-name").select();
+  });
+  if (title === null || !title || generation !== app.generation) return;
   try {
-    await api("PATCH", `/api/conversations/${encodeURIComponent(app.conversationId)}`, { title });
-    if (generation === app.generation) await refresh(generation);
+    await api("PATCH", `/api/conversations/${encodeURIComponent(id)}`, { title });
+    if (generation === app.generation && app.conversationId === id) await refresh(generation);
     await loadList(true);
     markSelected();
+    if (!$("surface-home").hidden) await showHome();
   } catch (error) {
     status(error.message, "error");
   }
@@ -1440,13 +1542,13 @@ function externalLine(notice) {
   return `Data stored by the external servers this conversation used (${names.join(", ")}) is not deleted.`;
 }
 
-async function deleteConversation() {
+async function deleteConversation(item = null) {
   closeChatMenu();
-  const id = app.conversationId;
+  const id = item ? item.id : app.conversationId;
   if (id === null) return;
-  const name = $("topbar-title").textContent;
+  const name = item ? conversationName(item) : $("topbar-title").textContent;
   const generation = app.generation;
-  const still = () => generation === app.generation && app.conversationId === id; // not left for another
+  const still = () => generation === app.generation; // not left for another surface
   let notice;
   try {
     notice = await api("GET", `/api/conversations/${encodeURIComponent(id)}/delete-notice`);
@@ -1465,7 +1567,7 @@ async function deleteConversation() {
   try {
     const moved = await api("POST", `/api/conversations/${encodeURIComponent(id)}/trash`);
     // Moved: a list that fails to load now must not read as a failed move.
-    await (app.conversationId === id ? showHome() : loadList(true).then(markSelected)).catch(() => {});
+    await (app.conversationId === id || !$("surface-home").hidden ? showHome() : loadList(true).then(markSelected)).catch(() => {});
     status(`Moved “${name}” to the trash. It is deleted for good on ${localDate(moved.purge_after)}.`, "ok");
   } catch (error) {
     if (error.kind === "network") {
@@ -1744,21 +1846,36 @@ function toggleChatMenu() {
 }
 
 function closeNav() {
+  const wasOpen = $("layout").classList.contains("is-nav-open");
   $("layout").classList.remove("is-nav-open");
   $("nav-backdrop").hidden = true;
-  $("sidebar-toggle").setAttribute("aria-expanded", "false");
+  syncNavigation();
+  if (wasOpen) $("sidebar-toggle").focus();
+}
+
+function syncNavigation() {
+  const desktop = window.matchMedia("(min-width: 1100px)").matches;
+  const layout = $("layout");
+  const open = !$("sidebar").hidden && (desktop ? !layout.classList.contains("is-nav-collapsed") : layout.classList.contains("is-nav-open"));
+  $("sidebar-toggle").setAttribute("aria-expanded", String(open));
+  $("sidebar-toggle").setAttribute("aria-label", open ? "Collapse navigation" : "Open navigation");
+  $("sidebar-toggle").title = open ? "Collapse navigation" : "Open navigation";
 }
 
 function toggleNav() {
   const layout = $("layout");
   if (window.matchMedia("(min-width: 1100px)").matches) {
     layout.classList.toggle("is-nav-collapsed");
+    syncNavigation();
+    if (layout.classList.contains("is-nav-collapsed")) $("sidebar-toggle").focus();
+    else $("sidebar-close").focus();
     return;
   }
   const open = !layout.classList.contains("is-nav-open");
   layout.classList.toggle("is-nav-open", open);
   $("nav-backdrop").hidden = !open;
-  $("sidebar-toggle").setAttribute("aria-expanded", String(open));
+  syncNavigation();
+  if (!open) $("sidebar-toggle").focus();
 }
 
 function autosize() {
@@ -1783,9 +1900,13 @@ async function loadServerInfo() {
     app.trashDays = Number.isInteger(server.trash_days) ? server.trash_days : null;
     renderModel();
     info.classList.toggle("is-warn", server.sandbox !== "enforced");
+    $("server-details").classList.toggle("is-warn", server.sandbox !== "enforced");
+    $("server-status-label").textContent = server.sandbox === "enforced" ? "Connected" : "Limited tools";
     info.hidden = false;
+    $("server-details").hidden = $("sidebar").hidden;
   } catch (error) {
     info.hidden = true; // display only
+    $("server-details").hidden = true;
   }
 }
 
@@ -1802,9 +1923,12 @@ async function enter() {
 
 async function boot() {
   $("login-form").addEventListener("submit", signIn);
-  $("nav-sign-out").addEventListener("click", signOut);
+  $("nav-sign-out").addEventListener("click", () => { $("appearance-dialog").close(); signOut(); });
   $("nav-trash").addEventListener("click", () => showTrash().catch((e) => status(e.message, "error")));
-  $("nav-instructions").addEventListener("click", () => showInstructions().catch((e) => status(e.message, "error")));
+  $("nav-instructions").addEventListener("click", () => {
+    $("appearance-dialog").close();
+    showInstructions().catch((e) => status(e.message, "error"));
+  });
   $("instructions-text").addEventListener("input", () => {
     app.leaveAgreed = false; // edited again: leaving asks again
     paintInstructions();
@@ -1820,7 +1944,7 @@ async function boot() {
     event.returnValue = ""; // older Chrome and some webviews ask only with this
   });
   $("trash-load-more").addEventListener("click", () => loadTrash(false).catch((e) => status(e.message, "error")));
-  $("chat-menu-delete").addEventListener("click", deleteConversation);
+  $("chat-menu-delete").addEventListener("click", () => deleteConversation());
   $("nav-home").addEventListener("click", () => showHome().catch((e) => status(e.message, "error")));
   $("nav-new-chat").addEventListener("click", newConversation);
   $("home-new-chat").addEventListener("click", newConversation);
@@ -1831,9 +1955,9 @@ async function boot() {
     addFiles(Array.from(event.target.files || []));
     event.target.value = ""; // the same file may be chosen again
   });
-  const dropZone = $("surface-chat");
+  for (const dropZone of [$("surface-chat"), $("surface-home")]) {
   dropZone.addEventListener("dragover", (event) => {
-    if (app.conversationId === null || !event.dataTransfer || !event.dataTransfer.types.includes("Files")) return;
+    if (!event.dataTransfer || !event.dataTransfer.types.includes("Files")) return;
     event.preventDefault();
     dropZone.classList.add("is-dropping");
   });
@@ -1842,10 +1966,11 @@ async function boot() {
   });
   dropZone.addEventListener("drop", (event) => {
     dropZone.classList.remove("is-dropping");
-    if (app.conversationId === null || !event.dataTransfer || !event.dataTransfer.files.length) return;
+    if (!event.dataTransfer || !event.dataTransfer.files.length) return;
     event.preventDefault();
     addFiles(Array.from(event.dataTransfer.files));
   });
+  }
   $("composer-text").addEventListener("input", () => {
     autosize();
     updatePicker();
@@ -1871,7 +1996,22 @@ async function boot() {
     }
   });
   $("chat-menu-toggle").addEventListener("click", toggleChatMenu);
-  $("chat-menu-rename").addEventListener("click", renameConversation);
+  $("chat-menu-rename").addEventListener("click", () => renameConversation());
+  $("image-dialog-close").addEventListener("click", () => $("image-dialog").close());
+  $("image-dialog").addEventListener("close", () => $("image-dialog-image").removeAttribute("src"));
+  document.addEventListener("click", (event) => {
+    for (const menu of $("conversation-list").querySelectorAll("details[open]")) {
+      if (!menu.contains(event.target)) menu.open = false;
+    }
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape") return;
+    closeChatMenu();
+    for (const menu of $("conversation-list").querySelectorAll("details[open]")) {
+      menu.open = false;
+      menu.querySelector("summary").focus();
+    }
+  });
   $("chat-menu-resume").addEventListener("click", resumeConversation);
   $("chat-menu-compact").addEventListener("click", compactConversation);
   $("chat-menu-dismiss").addEventListener("click", dismissQuestion);
@@ -1885,8 +2025,12 @@ async function boot() {
   });
   $("composer-cancel").addEventListener("click", () => stopConversation("cancel"));
   $("sidebar-toggle").addEventListener("click", toggleNav);
-  $("sidebar-close").addEventListener("click", closeNav);
+  $("sidebar-close").addEventListener("click", toggleNav);
   $("nav-backdrop").addEventListener("click", closeNav);
+  window.matchMedia("(min-width: 1100px)").addEventListener("change", () => {
+    closeNav();
+    $("server-details").open = false;
+  });
   try {
     const session = await api("GET", "/api/session");
     if (session.authenticated) await enter();

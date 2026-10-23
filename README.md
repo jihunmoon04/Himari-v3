@@ -87,6 +87,8 @@ HIMARI_DATA_ROOT=~/.himari python -m himari.interfaces.web --env-file .env
 - **대화 삭제 (V3-P65):** Web 대화 메뉴의 **Delete conversation**이나 CLI `himari delete ID`는 대화를 휴지통으로 옮깁니다(실행 중이면 먼저 멈춤). 휴지통(Web 사이드바 **Trash**, CLI `himari trash`)에서 복원하거나 바로 영구 삭제할 수 있고, `HIMARI_TRASH_DAYS`(기본 30, 1~365)일이 지나면 서버가 영구 삭제합니다. 영구 삭제는 대화의 모든 기록과 대화 폴더(`conversations/<id>`)를 지웁니다. MCP 서버가 자기 쪽에 저장한 데이터는 지우지 않으며, 확인 창이 그 서버 이름을 알려 줍니다.
 - **DB 업그레이드 전 백업:** 새 릴리스가 DB 스키마를 올릴 때는 먼저 `himari.db.v<이전 버전>-<시각>.bak`(0600)을 만들고 검증한 뒤에만 올립니다. 백업에 실패하면 시작하지 않습니다. 경로는 시작 로그에 나오며, 백업은 자동으로 지우지 않습니다(그 시점의 모든 대화가 들어 있으니 필요 없어지면 운영자가 지웁니다). 되돌리는 절차는 [설계 §8.2](docs/conversation-delete-v0.1.md#82-되돌리기-절차-운영자)에 있습니다.
 - 브라우저에서 `http://127.0.0.1:8765/`를 열고 `~/.himari/control/operator.secret`의 토큰으로 로그인합니다.
+- Web 사이드바의 **Settings → Appearance**에서 **Classic · 담백한**(흰색·차콜·고딕체)과 **Warm · 차분한**(미색·테라코타·답변 명조체)을 즉시 전환합니다. 선택은 이 브라우저에 저장하며, 새로고침 후에도 유지됩니다. 브라우저 저장소를 사용할 수 없으면 현재 페이지만 적용하고 저장하지 못했다는 안내를 표시합니다. **Instructions**와 **Sign out**도 Settings에 있습니다. 사이드바 하단 상태를 펼치면 모델·명령 실행 상태를 확인합니다.
+- 홈 입력창에서 바로 질문하거나 파일을 첨부할 수 있습니다(첫 전송·첨부 때 대화 생성). 모델·Reasoning 선택은 대화 상단, 이름 변경·휴지통 이동은 사이드바 항목별 **⋯**에서도 제공합니다. 이미지 썸네일은 확대 보기를 열며 원본 다운로드는 별도 파일 카드에서 합니다.
 - 서버는 평문 HTTP라서 loopback 주소(`127.0.0.1`·`::1`·`localhost`)에만 바인딩합니다. 다른 기기에서 쓰려면 같은 기기의 TLS reverse proxy 뒤에 두고 `HIMARI_WEB_ALLOWED_HOSTS=<공개 이름>`·`HIMARI_WEB_ALLOWED_ORIGINS=https://<공개 이름>`을 지정하세요. 외부 주소 바인딩이나 다른 기기용 평문 `http://` Origin은 시작 단계에서 거부됩니다(토큰 보호).
 
 ### MCP 서버 연결 (V3-P53)
