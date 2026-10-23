@@ -772,11 +772,6 @@ textarea {
   color: var(--warn);
 }
 
-/* A step of calls only, by another model than the step before: its header alone. */
-.item-step .item-kind {
-  margin-bottom: 0;
-}
-
 /* The model that wrote an answer, shown when it differs from the one before (V3-P64 §7). */
 .item-model {
   margin-left: var(--space-1);
@@ -1001,6 +996,89 @@ h3 {
 
 .tool-row-details {
   width: 100%;
+}
+
+/* V3-P68 §5: the tool steps between visible messages, folded into one block.
+ * Its summary is the latest progress line, dimmed, while the turn runs. */
+.item-work {
+  background: transparent;
+  padding: 0 var(--space-1);
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.work-summary {
+  min-height: 28px;
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: 2px 0;
+  cursor: pointer;
+  line-height: 1.35;
+}
+
+/* It opens: the same marks as the compaction divider's summary. */
+.work-summary::before {
+  content: "▸";
+  flex: 0 0 auto;
+}
+
+.item-work[open] > .work-summary::before {
+  content: "▾";
+}
+
+.work-line {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.work-count {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+.work-model-name {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.work-dot {
+  width: 6px;
+  height: 6px;
+  flex: 0 0 6px;
+  border-radius: 50%;
+  background: var(--ok);
+  animation: work-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes work-pulse {
+  50% {
+    opacity: 0.3;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .work-dot {
+    animation: none;
+  }
+}
+
+.work-body {
+  padding: 0 0 var(--space-2) var(--space-3);
+  border-left: 1px solid var(--border);
+}
+
+.work-progress,
+.work-model {
+  padding: 2px var(--space-1);
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+
+.work-model {
+  font-weight: 600;
 }
 
 .tool-row-summary {

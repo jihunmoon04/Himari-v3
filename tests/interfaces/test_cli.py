@@ -413,7 +413,7 @@ def test_show_reports_the_context_size(harness: Harness) -> None:
 def test_a_compacted_conversation_shows_where_the_summary_takes_over(tmp_path: Path,
                                                                       monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(cli, "POLL_SECONDS", 0.01)
-    harness = Harness(tmp_path, context_tokens=2100)
+    harness = Harness(tmp_path, context_tokens=2800)
     with harness.test_client:
         cid = harness.run("new")[1].strip()
         harness.queue(*[final("SUMMARY of the start")] * 12)  # every answer and every summary alike
@@ -442,7 +442,7 @@ def test_a_compacted_conversation_shows_where_the_summary_takes_over(tmp_path: P
 def test_a_compacted_conversation_on_an_ascii_terminal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # PR #16 review B1: the divider is the CLI's own mark too; it never raises.
     monkeypatch.setattr(cli, "POLL_SECONDS", 0.01)
-    harness = Harness(tmp_path, context_tokens=2100)
+    harness = Harness(tmp_path, context_tokens=2800)
     with harness.test_client:
         cid = harness.run("new")[1].strip()
         harness.queue(*[final("SUMMARY 요약 ─ done")] * 12)
@@ -462,7 +462,7 @@ def test_chat_says_when_the_boundary_moved_after_the_history_was_printed(tmp_pat
                                                                          monkeypatch: pytest.MonkeyPatch) -> None:
     # PR #16 review C1
     monkeypatch.setattr(cli, "POLL_SECONDS", 0.01)
-    harness = Harness(tmp_path, context_tokens=2100)
+    harness = Harness(tmp_path, context_tokens=2800)
     with harness.test_client:
         cid = harness.run("new")[1].strip()
         harness.queue(*[final("SUMMARY")] * 12)
@@ -710,7 +710,7 @@ def test_a_refusal_says_why(harness: Harness) -> None:
 def test_compacting_with_an_open_question_says_why(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # PR #24 review C1: the reason of WAITING_FOR_USER / NOTHING_TO_COMPACT is shown too.
     monkeypatch.setattr(cli, "POLL_SECONDS", 0.01)
-    harness = Harness(tmp_path, context_tokens=2100)
+    harness = Harness(tmp_path, context_tokens=2800)
     with harness.test_client:
         cid = harness.run("new")[1].strip()
         harness.queue(calls(("ask_user", {"question": "Which file?"})))
@@ -839,6 +839,47 @@ def test_a_step_of_calls_only_names_the_changed_model(tmp_path: Path, monkeypatc
         harness.queue(calls((ASK_USER_TOOL_ID, {"question": "Which file?"})))
         code, out, _ = harness.run("send", cid, "three")
         assert code == cli.EXIT_WAITING and "HIMARI (m) asks:" in out.splitlines()
+
+
+def test_commentary_is_a_progress_line() -> None:
+    # V3-P68 §6: not an answer block; its first line and a marker, all of it when verbose;
+    # with ask_user it is the question's lead-in (§5.1).
+    def step(text: str, tool_id: str = "inside/read_file", model: str = "m") -> dict[str, object]:
+        return {"sequence": 2, "kind": "assistant_tool_calls", "text": text, "model": model, "run_id": "r",
+                "calls": [{"call_id": "c", "tool_id": tool_id, "arguments": {"question": "Which?"}}]}
+
+    out = io.StringIO()
+    printer = cli.Printer(out)
+    printer.event(step("Looking through the code"))
+    printer.event(step("Designing\nthe parser\n"))
+    printer.event(step(" \n"))
+    printer.event(step("Implementing", model="big"))
+    rows = out.getvalue().splitlines()
+    assert rows[0] == "  » Looking through the code" and rows[2] == "  » Designing…"
+    assert [row for row in rows if "»" in row or row.startswith("HIMARI")] == [
+        "  » Looking through the code", "  » Designing…", "HIMARI (big):", "  » Implementing"]
+
+    out = io.StringIO()
+    cli.Printer(out).event(step("x" * 300))  # a long paragraph from before the note: cut
+    assert out.getvalue().splitlines()[0] == "  » " + "x" * 199 + "…"
+
+    out = io.StringIO()
+    printer = cli.Printer(out, verbose=True)
+    printer.event(step("Designing\nthe parser"))
+    printer.event(step("y" * 300))
+    rows = out.getvalue().splitlines()
+    assert rows[:2] == ["  » Designing", f"{INDENT}the parser"] and "  » " + "y" * 300 in rows
+
+    class Ascii(io.StringIO):
+        encoding = "ascii"
+
+    out = Ascii()
+    cli.Printer(out).event(step("Looking"))
+    assert out.getvalue().splitlines()[0] == "  > Looking"
+
+    out = io.StringIO()
+    cli.Printer(out).event(step("I found two configs.", tool_id=ASK_USER_TOOL_ID))
+    assert out.getvalue().splitlines()[:3] == ["HIMARI:", f"{INDENT}I found two configs.", "HIMARI asks:"]
 
 
 # --- the trash (V3-P65 §9) ---------------------------------------------------------------------

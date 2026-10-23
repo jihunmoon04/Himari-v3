@@ -122,6 +122,8 @@ const app = {
   trashDays: null, // from /api/server
   attachments: [], // files for the next message (V3-P66 §9): {key, name, size, state, fileId, progress, xhr, note}
   jobRunning: false, // for the Send button only: set as soon as a send is taken (PR #60 review C5)
+  work: null, // the work block the next tool step goes into (V3-P68 §5.1)
+  rowsRunning: null, // the job state the rows without a result were last painted for
   attachKeys: 0,
 };
 
@@ -481,50 +483,193 @@ function paintToolRow(entry) {
   if (entry.result !== null) {
     body.append(el("p", "tool-row-heading", "Result"), el("pre", "pre-code", entry.result.text));
   }
-  const state = tone === "pending" ? "running" : tone === "success" ? "done" : "failed";
+  // Without a result once the turn stopped: it may not have started, its outcome may be
+  // unknown, or its result may be kept out of the conversation — the page cannot tell (V3-P68).
+  const pending = app.jobRunning ? "running" : "no result";
+  const state = tone === "pending" ? pending : tone === "success" ? "done" : "failed";
   entry.details.replaceChildren(el("summary", "tool-row-summary", `${mark} ${entry.toolId} · ${state}`), body);
+}
+
+/* ------------------------------------------------------------ work blocks */
+
+/* V3-P68 §5: the tool steps between visible messages fold into one block. Its
+   summary is the latest progress line while the turn runs, then "N tool calls";
+   the calls and progress lines are inside, in order. What a step gives the user
+   (a row with an app view, a presented file, tool images) stays outside, right
+   after it. A block never spans the compaction boundary (§5.6). */
+
+function coveredThrough() {
+  const context = app.context;
+  if (!context || !context.enabled || context.covered_through_sequence === null || !context.summary) return null;
+  return context.covered_through_sequence;
+}
+
+function newWorkBlock() {
+  const block = el("details", "item item-work");
+  block.append(el("summary", "work-summary"), el("div", "work-body"));
+  block.outsideRows = []; // its calls' rows shown outside (they have an app view), each with data-call
+  return block;
+}
+
+function workBody(block) {
+  return block.querySelector(":scope > .work-body");
+}
+
+function lastSequence(block) {
+  const last = workBody(block).lastElementChild;
+  return Math.max(Number((last || block).dataset.sequence), ...block.outsideRows.map((row) => Number(row.dataset.call)));
+}
+
+/* The block a row outside belongs to, or the block a row is in. */
+function workOf(row) {
+  return row.closest(".item-work")
+    || [...$("timeline").querySelectorAll(":scope > .item-work")].find((block) => block.outsideRows.includes(row))
+    || null;
+}
+
+/* Its latest progress line, or the one of the block it went on from (§5.6). */
+function progressLine(block) {
+  const notes = block.querySelectorAll(":scope > .work-body > .work-progress");
+  return notes.length ? notes[notes.length - 1].dataset.line : block.dataset.line || "";
+}
+
+/* The block the steps of this event go into: the open one, or a new one. */
+function workBlock(sequence) {
+  const covered = coveredThrough();
+  let line = "";
+  if (app.work && covered !== null && lastSequence(app.work) <= covered && sequence > covered) {
+    line = progressLine(app.work); // the block after the boundary goes on with it
+    closeWork();
+  }
+  if (!app.work) {
+    app.work = newWorkBlock();
+    if (line) app.work.dataset.line = line;
+    tagging($("timeline"), sequence).append(app.work);
+  }
+  return app.work;
+}
+
+/* A visible message ends the block; it folds, even if it was opened (§5.4). */
+function closeWork() {
+  const block = app.work;
+  if (!block) return;
+  app.work = null;
+  block.open = false;
+  paintWork(block);
+}
+
+function paintWork(block) {
+  const body = workBody(block);
+  const rows = [...body.querySelectorAll(".item-tool-row"), ...block.outsideRows];
+  const calls = rows.length === 1 ? "1 tool call" : `${rows.length} tool calls`;
+  // The latest model change in it goes on its summary, so a fold never hides one (§5.5).
+  const changes = body.querySelectorAll(":scope > .work-model");
+  const model = changes.length ? changes[changes.length - 1].textContent : block.dataset.model || "";
+  const live = block === app.work && app.jobRunning;
+  // Calls without a result once the turn stopped: never "not run" — a call whose outcome is
+  // unknown (recovery) or whose result is kept out of the conversation has none either (§5.4).
+  const waiting = live ? 0 : rows.filter((row) => row.classList.contains("is-pending")).length;
+  const line = live ? progressLine(block) || "Working" : "";
+  const key = JSON.stringify([model, live, line, calls, waiting]);
+  if (block.painted === key) return; // repainted each poll, the dot's pulse would restart
+  block.painted = key;
+  const summary = block.querySelector(":scope > .work-summary");
+  summary.replaceChildren();
+  if (model) summary.append(el("span", "work-model-name", model));
+  if (live) {
+    summary.append(el("span", "work-dot"), el("span", "work-line", line), el("span", "work-count", ` · ${calls}`));
+  } else {
+    summary.append(el("span", "work-count", waiting ? `${calls} · ${waiting} without result` : calls));
+  }
+}
+
+/* §5.6: the part of a block after the compaction boundary (its steps and
+   their rows outside) becomes a block of its own, placed before the first
+   node after the boundary; it goes on with the progress line. */
+function splitWork(block, covered) {
+  if (Number(block.dataset.sequence) > covered) return;
+  const first = [...workBody(block).children].find((node) => Number(node.dataset.sequence) > covered);
+  const outside = block.outsideRows.filter((row) => Number(row.dataset.call) > covered);
+  if (!first && !outside.length) return;
+  const rest = newWorkBlock();
+  const moved = [];
+  for (let node = first; node; node = node.nextElementSibling) moved.push(node);
+  rest.dataset.sequence = String(Math.min(...moved.map((node) => Number(node.dataset.sequence)),
+                                          ...outside.map((row) => Number(row.dataset.call))));
+  if (moved.length && moved[0].matches(".work-model")) { // the change is named on its summary, as when live
+    const label = moved.shift();
+    rest.dataset.model = label.textContent;
+    label.remove();
+  }
+  workBody(rest).append(...moved);
+  rest.outsideRows = outside;
+  block.outsideRows = block.outsideRows.filter((row) => !outside.includes(row));
+  const line = progressLine(block);
+  if (line) rest.dataset.line = line;
+  let next = block.nextElementSibling;
+  while (next && !(Number(next.dataset.sequence) > covered)) next = next.nextElementSibling;
+  block.parentElement.insertBefore(rest, next);
+  if (app.work === block) app.work = rest;
+  block.open = false;
+  paintWork(block);
+  paintWork(rest);
 }
 
 function renderEvent(event) {
   const timeline = tagging($("timeline"), event.sequence);
   if (event.kind === "user_message") {
+    closeWork();
     timeline.append(renderMessage(event));
     return;
   }
   if (event.kind === "assistant_final") {
+    closeWork();
     timeline.append(renderMessage(event, changedModel(event.model)));
     return;
   }
   if (event.kind === "assistant_tool_calls") {
-    let model = changedModel(event.model); // shown on the first thing this step shows
-    if (event.text) {
-      timeline.append(renderMessage({ ...event, kind: "assistant_final" }, model));
-      model = null;
+    const model = changedModel(event.model); // shown on the first thing this step shows
+    const question = event.calls.find((call) => call.tool_id === "ask_user");
+    if (question) { // always the only call (V3-P15); its text is the question's lead-in (V3-P68 §5.1)
+      closeWork();
+      if (event.text) timeline.append(renderMessage({ ...event, kind: "assistant_final" }, model));
+      const text = typeof question.arguments.question === "string" ? question.arguments.question : "";
+      timeline.append(renderMessage({ kind: "assistant_final", text }, event.text ? null : model));
+      app.toolRows.set(`${event.run_id}/${question.call_id}`, null); // the answer appears as the user's message
+      return;
+    }
+    const block = workBlock(event.sequence);
+    const inside = tagging(workBody(block), event.sequence);
+    if (model) {
+      if (!workBody(block).childElementCount && !block.outsideRows.length) block.dataset.model = model; // on its summary
+      else inside.append(el("div", "work-model", model)); // before this step, inside (§5.5)
+    }
+    if (event.text && event.text.trim()) {
+      const note = el("div", "work-progress");
+      // The summary shows its first line as text: "**Plan:**" reads "Plan:".
+      const first = event.text.split(/\r?\n/).find((line) => line.trim()) || "";
+      note.dataset.line = renderAssistantText(document, first).textContent.trim() || first.trim();
+      note.append(renderAssistantText(document, event.text));
+      inside.append(note);
     }
     for (const call of event.calls) {
       const key = `${event.run_id}/${call.call_id}`; // call ids repeat across Runs
-      if (call.tool_id === "ask_user") {
-        const question = typeof call.arguments.question === "string" ? call.arguments.question : "";
-        timeline.append(renderMessage({ kind: "assistant_final", text: question }, model));
-        model = null;
-        app.toolRows.set(key, null); // the answer appears as the user's message
-        continue;
-      }
-      if (model) { // a step of calls only: its header names the model above them
-        const header = el("div", "item item-assistant item-step");
-        header.append(assistantHeader(model));
-        timeline.append(header);
-        model = null;
-      }
       const node = el("div", "item item-tool-row is-pending");
       const details = el("details", "tool-row-details");
       node.append(details);
       const entry = { node, details, toolId: call.tool_id, args: call.arguments, result: null };
       app.toolRows.set(key, entry);
       paintToolRow(entry);
-      if (call.app_view) views.attach(entry, key, event.run_id, call.call_id, true); // shown while it runs
-      timeline.append(node);
+      if (call.app_view) { // shown while it runs: the row stays outside the block (§5.3)
+        views.attach(entry, key, event.run_id, call.call_id, true);
+        node.dataset.call = String(event.sequence);
+        block.outsideRows.push(node);
+        timeline.append(node);
+      } else {
+        inside.append(node);
+      }
     }
+    paintWork(block);
     return;
   }
   if (event.kind === "tool_result") {
@@ -545,7 +690,13 @@ function renderEvent(event) {
       if (event.images && event.images.length) timeline.append(toolImages(event.images));
       return;
     }
+    const block = workOf(entry.node);
     if (event.app_view && !entry.view) {
+      if (block && entry.node.closest(".item-work")) { // its view is known from its result: the row moves out (§5.3)
+        entry.node.dataset.call = entry.node.dataset.sequence;
+        block.outsideRows.push(entry.node);
+        timeline.append(entry.node); // tagged with the result's sequence: where it now stands
+      }
       views.attach(entry, `${event.run_id}/${event.call_id}`, event.run_id, event.call_id, false);
     }
     for (const file of event.presented_files || []) timeline.append(presentedCard(file)); // V3-P66 §9
@@ -553,6 +704,7 @@ function renderEvent(event) {
     entry.result = event;
     paintToolRow(entry);
     if (entry.view) views.result(entry, Boolean(event.app_view));
+    if (block) paintWork(block);
   }
 }
 
@@ -585,7 +737,9 @@ function placeDivider() {
     ? `Earlier messages reach HIMARI as a summary (compacted ${context.compactions} times)`
     : "Earlier messages reach HIMARI as a summary";
   divider.append(el("summary", "context-divider-label", label), el("p", "context-divider-text", context.summary));
-  const after = [...timeline.children].find((node) => Number(node.dataset.sequence) > context.covered_through_sequence);
+  const covered = context.covered_through_sequence;
+  for (const block of timeline.querySelectorAll(":scope > .item-work")) splitWork(block, covered);
+  const after = [...timeline.children].find((node) => Number(node.dataset.sequence) > covered);
   if (after) timeline.insertBefore(divider, after);
   else timeline.append(divider);
 }
@@ -1005,6 +1159,11 @@ function applyDetail(detail) {
   $("question-text").textContent = detail.waiting ? detail.waiting.question : "";
   $("composer-text").placeholder = detail.waiting ? "Your answer" : "Message HIMARI";
   app.jobRunning = detail.job.running;
+  if (app.work) paintWork(app.work); // its progress line while the turn runs (V3-P68 §5.2)
+  if (app.rowsRunning !== detail.job.running) { // a row without a result: "running" or "no result"
+    app.rowsRunning = detail.job.running;
+    for (const entry of app.toolRows.values()) if (entry && entry.result === null) paintToolRow(entry);
+  }
   $("composer-send").disabled = detail.job.running || app.sending || uploading();
   $("composer-hint").textContent = detail.job.running ? `HIMARI is working…${usageText(detail.job.turn_usage)}` : "";
   $("chat-menu-resume").hidden = !detail.continuable;
@@ -1072,6 +1231,8 @@ async function openConversation(id) {
   app.lastSequence = 0;
   loadServerInfo();
   app.toolRows = new Map();
+  app.work = null;
+  app.rowsRunning = null;
   app.context = null;
   $("chat-menu-context-pair").hidden = true;
   $("chat-menu-compact").hidden = true;

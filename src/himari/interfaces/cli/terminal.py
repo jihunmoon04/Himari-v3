@@ -38,10 +38,11 @@ class Symbols:
     more: str
     rule: str
     times: str  # an image's size, 800×600 (V3-P67 §8)
+    progress: str  # the model's progress line (V3-P68 §6)
 
 
-UNICODE_SYMBOLS = Symbols(INDENT, "⚙", "↳", "✓", "✗ failed", "…", "──", "×")
-ASCII_SYMBOLS = Symbols(ASCII_INDENT, "*", "->", "ok", "x failed", "...", "--", "x")
+UNICODE_SYMBOLS = Symbols(INDENT, "⚙", "↳", "✓", "✗ failed", "…", "──", "×", "»")
+ASCII_SYMBOLS = Symbols(ASCII_INDENT, "*", "->", "ok", "x failed", "...", "--", "x", ">")
 
 
 def symbols_for(encoding: str | None) -> Symbols:

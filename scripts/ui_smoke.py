@@ -21,7 +21,12 @@ dropping a file, an upload that ends after the user left, and the narrow
 layout. A sixth (V3-P67) shows images: the thumbnail of an attached photo
 (its model copy, loaded from the preview route), the images a tool
 returned, downloading the original by pressing a thumbnail, an HTML file
-named .png that stays a plain file chip, and the narrow layout.
+named .png that stays a plain file chip, and the narrow layout. A seventh
+(V3-P68) folds tool steps into work blocks: the latest progress line while
+the turn runs, a presented file outside the block, a question's lead-in,
+calls without a result after a pause (never "not run": a recovery or an
+omitted result looks the same), "N tool calls" once answered, the same after
+a reload, and a block split at the compaction boundary.
 
 Requires: pip install playwright && playwright install chromium
 Usage:    python scripts/ui_smoke.py [--screenshots DIR]
@@ -195,7 +200,7 @@ def run_compaction(base: str, token: str, shots: str | None, root: str) -> list[
         expect(divider.locator(".context-divider-text")).to_have_text(SUMMARY)  # shown as text, not markup
         assert divider.locator("b").count() == 0
         page.click("#chat-menu-toggle")
-        expect(page.locator("#chat-menu-context")).to_contain_text("of 2.1k tokens")
+        expect(page.locator("#chat-menu-context")).to_contain_text("of 2.8k tokens")
         if shots:
             page.screenshot(path=os.path.join(shots, "4-compacted.png"), full_page=True)
         page.click("#chat-menu-toggle")
@@ -547,6 +552,150 @@ def run_images(base: str, token: str, shots: str | None, tmp: str) -> list[str]:
     return errors
 
 
+class SlowerAdapter(ScriptedAdapter):
+    """Long enough between steps that a 1 s poll sees each one live."""
+
+    async def invoke_prepared(self, request: NativePreparedRequest) -> NativeInvocationOutcome:
+        await asyncio.sleep(2.5)
+        return await super().invoke_prepared(request)
+
+
+def work_script() -> SlowerAdapter:
+    def step(commentary: str | None, *calls: tuple[str, dict[str, Any]]) -> NormalizedToolCalls:
+        return NormalizedToolCalls(tuple(ToolCall(CallId(f"c{n}"), n, ToolId(tool), arguments)
+                                         for n, (tool, arguments) in enumerate(calls)),
+                                   (TextBlock(commentary),) if commentary else ())
+
+    return SlowerAdapter([
+        step("Looking through the code", ("inside/write_file", {"path": "a.txt", "content": "a"})),
+        step(None, ("inside/write_file", {"path": "b.txt", "content": "b"})),
+        step("Implementing\nthe parser", ("inside/present_file", {"path": "a.txt"})),
+        step("I found two configs.", (ASK_USER_TOOL_ID, {"question": "Which config?"})),
+        step("Testing", ("inside/write_file", {"path": "c.txt", "content": "c"}),
+             ("inside/write_file", {"path": "d.txt", "content": "d"})),
+        NormalizedFinal((TextBlock("All done."),)),
+    ])
+
+
+def run_work_progress(base: str, token: str, shots: str | None) -> list[str]:
+    errors: list[str] = []
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page(viewport={"width": 1280, "height": 860})
+        page.on("pageerror", lambda e: errors.append(str(e)))
+        page.goto(base)
+        page.fill("#login-token", token)
+        page.click("#login-submit")
+        page.click("#home-new-chat")
+        page.fill("#composer-text", "Build it")
+        page.press("#composer-text", "Enter")
+        blocks = page.locator("#timeline > .item-work")
+        first = blocks.first
+        # While it runs: one dim line, the latest progress, in a closed block.
+        expect(first.locator(".work-line")).to_have_text("Looking through the code", timeout=10000)
+        expect(first.locator(".work-dot")).to_have_count(1)
+        expect(first.locator(".work-line")).to_have_text("Implementing", timeout=10000)  # its first line only
+        expect(first.locator(".work-count")).to_have_text(" · 3 tool calls")
+        assert first.evaluate("b => !b.open")
+        if shots:
+            page.screenshot(path=os.path.join(shots, "13-work-live.png"))
+        expect(page.locator("#timeline > .item-file")).to_have_count(1)  # the presented file stays outside
+        expect(first.locator(".item-file")).to_have_count(0)
+        # The question ends the block; the text that came with it is its lead-in.
+        expect(page.locator("#question-text")).to_have_text("Which config?", timeout=10000)
+        expect(page.locator(".item-assistant").filter(has_text="I found two configs.")).to_have_count(1)
+        expect(first.locator(".work-count")).to_have_text("3 tool calls")
+        expect(first.locator(".work-dot")).to_have_count(0)
+        expect(blocks).to_have_count(1)
+        # Answer, then pause while the model answers: its two calls do not run.
+        page.fill("#composer-text", "the first")
+        page.press("#composer-text", "Enter")
+        expect(page.locator("#composer-pause")).to_be_visible(timeout=5000)
+        page.click("#composer-pause")
+        expect(page.locator("#stop-panel")).to_be_visible(timeout=10000)
+        expect(blocks).to_have_count(2)
+        expect(blocks.last.locator(".work-count")).to_have_text("2 tool calls · 2 without result")
+        expect(blocks.last.locator(".work-line")).to_have_count(0)
+        expect(blocks.last.locator(".tool-row-summary").first).to_have_text("… inside/write_file · no result")
+        page.click("#stop-continue")
+        expect(page.locator(".item-assistant").last).to_contain_text("All done.", timeout=15000)
+        expect(blocks.last.locator(".work-count")).to_have_text("2 tool calls")
+        expect(page.locator(".work-dot")).to_have_count(0)
+        if shots:
+            page.screenshot(path=os.path.join(shots, "14-work-done.png"))
+        # The same after a reload; opened, a block shows its steps.
+        page.reload()
+        page.locator(".conv-row").first.click()
+        expect(blocks).to_have_count(2, timeout=10000)
+        assert [blocks.nth(n).locator(".work-count").inner_text() for n in range(2)] == ["3 tool calls", "2 tool calls"]
+        assert page.evaluate("[...document.querySelectorAll('.item-work')].every(b => !b.open)")
+        first.locator(".work-summary").click()
+        expect(first.locator(".work-progress")).to_have_count(2)
+        expect(first.locator(".item-tool-row")).to_have_count(3)
+        expect(first.locator(".tool-row-summary").first).to_have_text("✓ inside/write_file · done")
+        # V3-P68 §5.6: a compaction boundary inside a block splits it, the divider between.
+        covered = int(first.locator(".item-tool-row").nth(1).get_attribute("data-sequence") or 0) - 1
+
+        def summarized(route: Any) -> None:
+            body = route.fetch().json()
+            body.update(covered_through_sequence=covered, summary="Earlier work, summarized.", compactions=1)
+            route.fulfill(json=body)
+
+        page.route("**/context", summarized)
+        page.locator(".conv-row").first.click()
+        expect(blocks).to_have_count(3, timeout=10000)
+        expect(page.locator(".context-divider")).to_have_count(1)
+        assert page.evaluate("""() => {
+            const d = document.querySelector('.context-divider');
+            return d.previousElementSibling.matches('.item-work') && d.nextElementSibling.matches('.item-work');
+        }""")
+        assert [blocks.nth(n).locator(".work-count").inner_text() for n in range(3)] == [
+            "1 tool call", "2 tool calls", "2 tool calls"]
+        page.set_viewport_size({"width": 390, "height": 800})
+        page.wait_for_timeout(300)
+        assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
+        if shots:
+            page.screenshot(path=os.path.join(shots, "15-work-narrow.png"))
+        page.set_viewport_size({"width": 1280, "height": 860})
+        page.unroute("**/context")
+        # PR #65 owner review B1: a call without a result is never "not run" — its outcome may be
+        # unknown (recovery) or its result kept out of the conversation (ConversationRecord.OMIT).
+        cid = page.locator(".conv-row.is-selected").get_attribute("data-id")
+        call = {"sequence": 2, "kind": "assistant_tool_calls", "created_at": None, "text": "", "model": None,
+                "run_id": "r1", "calls": [{"call_id": "c0", "tool_id": "calliope/stamp", "arguments": {},
+                                           "app_view": False}]}
+        asked = {"sequence": 1, "kind": "user_message", "created_at": None, "text": "Stamp it", "answers_call": None,
+                 "answers_run": None, "attachments": []}
+        answer = {"sequence": 3, "kind": "assistant_final", "created_at": None, "text": "Stamped.", "model": None}
+        def events_of(items: list[dict[str, Any]]) -> Any:
+            def events(route: Any) -> None:
+                first_page = "after=0" in route.request.url
+                route.fulfill(json={"items": items if first_page else [], "last_sequence": len(items)})
+            return events
+
+        def detail_of(state: str) -> Any:
+            def detail(route: Any) -> None:
+                body = route.fetch().json()
+                body["job"].update(running=False, state=state, error=None, stop_requested=None)
+                body.update(continuable=False, waiting=None)
+                route.fulfill(json=body)
+            return detail
+
+        for items, state in (([asked, call], "recovery_required"), ([asked, call, answer], "completed")):
+            events, detail = events_of(items), detail_of(state)
+            page.route(re.compile(rf"/api/conversations/{cid}/events\?"), events)
+            page.route(re.compile(rf"/api/conversations/{cid}$"), detail)
+            page.locator(".conv-row").first.click()
+            expect(blocks).to_have_count(1, timeout=10000)
+            expect(blocks.first.locator(".work-count")).to_have_text("1 tool call · 1 without result")
+            expect(blocks.first.locator(".tool-row-summary")).to_have_text("… calliope/stamp · no result")
+            assert "not run" not in page.locator("#timeline").inner_text()
+            page.unroute(re.compile(rf"/api/conversations/{cid}/events\?"))
+            page.unroute(re.compile(rf"/api/conversations/{cid}$"))
+        browser.close()
+    return errors
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--screenshots")
@@ -562,7 +711,7 @@ def main() -> int:
             time.sleep(0.5)
         small = os.path.join(tmp, "small")
         provider = ScriptedAdapter([NormalizedFinal((TextBlock(SUMMARY),))] * 12)  # every answer and summary alike
-        server = serve(small, PORT + 1, provider, context_tokens=2100)
+        server = serve(small, PORT + 1, provider, context_tokens=2800)
         try:
             errors += run_compaction(f"http://127.0.0.1:{PORT + 1}",
                                      Path(small, "control", "operator.secret").read_text().strip(), args.screenshots,
@@ -620,6 +769,14 @@ def main() -> int:
                                  Path(images, "control", "operator.secret").read_text().strip(), args.screenshots, tmp)
         finally:
             application_module._image_views = real  # type: ignore[assignment]
+            server.should_exit = True
+            time.sleep(0.5)
+        work = os.path.join(tmp, "work")
+        server = serve(work, PORT + 6, work_script())
+        try:
+            errors += run_work_progress(f"http://127.0.0.1:{PORT + 6}",
+                                        Path(work, "control", "operator.secret").read_text().strip(), args.screenshots)
+        finally:
             server.should_exit = True
             time.sleep(0.5)
     print("UI smoke: OK" if not errors else f"UI smoke: console errors {errors}")

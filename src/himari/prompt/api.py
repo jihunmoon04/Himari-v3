@@ -410,6 +410,16 @@ TOOL_IMAGES_NOTE = (
     "A user message that starts with 'Images from the tool results above:' only carries images the tools "
     "returned; it is not written by the user."
 )
+# V3-P68 §3: one line when the short-term goal changes, kept as commentary
+# (V3-P16); the Web shows the latest as the progress line and folds it away
+# once the answer arrives.
+PROGRESS_NOTE = (
+    "While you work with tools, let the user follow your current short-term goal. When you start a new stage "
+    "of the task (for example: looking through the code, designing, implementing, testing), write one short "
+    "sentence about it, in the user's language, in the same reply as that stage's first tool calls. Do not "
+    "write anything with tool calls that keep working toward the same goal. These lines are hidden once you "
+    "give your final answer, so put everything the user needs to know in that answer."
+)
 
 
 def attachment_line(ref: AttachmentRef, attachments: Mapping[str, AttachmentInfo],

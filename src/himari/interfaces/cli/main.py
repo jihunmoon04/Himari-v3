@@ -57,6 +57,7 @@ POLL_SECONDS = 0.5
 EVENT_PAGE = 32  # 32 x a 64 KiB Tool result stays well under the 8 MiB response bound
 TRASH_SECONDS = 90.0  # the server waits up to 30 s for a running job to stop (V3-P65 §7.1)
 TOOL_RESULT_LINES = 8
+PROGRESS_CHARS = 200  # a progress line, like a call's arguments (V3-P68 §6)
 
 STATE_TEXT = {
     "completed": "done",
@@ -186,9 +187,15 @@ class Printer:
             self.block(self.speaker(self.changed_model(event)), text)
         elif kind == "assistant_tool_calls":
             model = self.changed_model(event)  # named on the first thing this step prints
-            if text:
+            asks = any(call.get("tool_id") == "ask_user" for call in event.get("calls", []))
+            if text and asks:  # the question's lead-in, not progress (V3-P68 §5.1)
                 self.block(self.speaker(model), text)
                 model = None
+            elif text.strip():
+                if model:
+                    self.line(self.speaker(model))
+                    model = None
+                self.progress(text)
             for call in event.get("calls", []):
                 tool_id, call_id = str(call.get("tool_id")), str(call.get("call_id"))
                 self.calls[(str(event.get("run_id")), call_id)] = tool_id
@@ -220,6 +227,20 @@ class Printer:
             self.line(safe_block(text, encoding=self.encoding, max_lines=None if self.verbose else TOOL_RESULT_LINES))
             self.files(event.get("presented_files") or [])
             self.files(event.get("images") or [])  # V3-P67 §8: the images the call returned
+
+    def progress(self, text: str) -> None:
+        """Commentary as one progress line, ``  » Looking through the code`` (V3-P68 §6):
+        its first line (at most ``PROGRESS_CHARS``) and a marker when there is more;
+        all of it when verbose."""
+        first, _, rest = text.strip().partition("\n")
+        first = first.strip()
+        cut = len(first) > PROGRESS_CHARS and not self.verbose  # a long paragraph from before V3-P68
+        if cut:
+            first = first[:PROGRESS_CHARS - 1]
+        more = self.symbols.more if cut or (rest.strip() and not self.verbose) else ""
+        self.line(f"  {self.symbols.progress} {safe_line(first, encoding=self.encoding)}{more}")
+        if rest.strip() and self.verbose:
+            self.line(safe_block(rest.strip("\n"), encoding=self.encoding))
 
     def files(self, files: list[dict[str, Any]]) -> None:
         """One line a file: ``[file] report.pdf (1.2 MB) — himari download c_12 file_40`` (V3-P66 §9);
