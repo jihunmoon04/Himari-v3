@@ -363,3 +363,28 @@ def test_hwpx_empty_and_table_only_paragraphs() -> None:
     # Re-review 2 B-new-2.
     data = hwpx({"section0": para(text("one")) + para() + para(table(["a"])) + para(text("two"))}, ["section0"])
     assert worker(data)[0]["parts"][0]["text"] == "one\n| a |\n| --- |\ntwo\n"
+
+
+def test_a_text_box_at_a_line_end_leaves_no_space_and_marks_after_it_stay() -> None:
+    # Re-review 3 N-a: only the space a box's gap adds is dropped at a line end; a mark after it stays.
+    def box(*texts: str) -> str:
+        return ('<hp:run charPrIDRef="0"><hp:rect id="5"><hp:drawText><hp:subList>'
+                + "".join(para(text(t)) for t in texts) + "</hp:subList></hp:drawText></hp:rect></hp:run>")
+
+    data = hwpx({"section0": para(text("a"), box("in box")) + para(box("only box"))
+                 + para(text("b"), box("bx"), picture()) + para(text("c"), box("one", "two"))},
+                ["section0"], {"image1": png()})
+    assert worker(data)[0]["parts"][0]["text"] == "a in box\nonly box\nb bx [picture 1]\nc one two\n"
+
+
+def test_a_formula_openpyxl_cannot_read_costs_only_its_display(tmp_path: Path) -> None:
+    # Re-review 3 N-b: a shared formula's own cell openpyxl cannot tokenize no longer refuses the workbook.
+    data = make(tmp_path, "f.xlsx", """
+import openpyxl
+book = openpyxl.Workbook()
+book.active.append(["x", 1])
+book.save(OUT)
+""")
+    data = rewritten(data, "xl/worksheets/sheet1.xml", lambda xml: xml.replace(
+        "</row>", '<c r="C1"><f t="shared" ref="C1:C2" si="0">"abc</f><v>1</v></c></row>', 1))
+    assert worker(data)[0]["parts"][0]["text"].splitlines()[3] == "| 1 | x | 1 | 1 |"

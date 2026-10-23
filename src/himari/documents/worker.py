@@ -757,7 +757,10 @@ class Xlsx(Document):
             found = element.find(FORMULA_TAG)
             if found is None or (cell["value"] is not None and not found.text):
                 return cell
-            formula = parser.parse_formula(element)  # also a shared formula's own cell, so the others translate
+            try:
+                formula = parser.parse_formula(element)  # also a shared formula's own cell, so the others translate
+            except Exception:  # noqa: BLE001 — a formula openpyxl cannot tokenize costs only its own display
+                formula = "=" + (found.text or "")
             text = formula if isinstance(formula, str) else getattr(formula, "text", None)
             # A text formula whose stored value is "" says so with an empty <v> (re-review N-new-4).
             stored = cell["value"] is not None or (element.get("t") == "str" and element.find(VALUE_TAG) is not None)
