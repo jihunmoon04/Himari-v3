@@ -186,9 +186,15 @@ class Printer:
             self.block(self.speaker(self.changed_model(event)), text)
         elif kind == "assistant_tool_calls":
             model = self.changed_model(event)  # named on the first thing this step prints
-            if text:
+            asks = any(call.get("tool_id") == "ask_user" for call in event.get("calls", []))
+            if text and asks:  # the question's lead-in, not progress (V3-P68 §5.1)
                 self.block(self.speaker(model), text)
                 model = None
+            elif text.strip():
+                if model:
+                    self.line(self.speaker(model))
+                    model = None
+                self.progress(text)
             for call in event.get("calls", []):
                 tool_id, call_id = str(call.get("tool_id")), str(call.get("call_id"))
                 self.calls[(str(event.get("run_id")), call_id)] = tool_id
@@ -220,6 +226,15 @@ class Printer:
             self.line(safe_block(text, encoding=self.encoding, max_lines=None if self.verbose else TOOL_RESULT_LINES))
             self.files(event.get("presented_files") or [])
             self.files(event.get("images") or [])  # V3-P67 §8: the images the call returned
+
+    def progress(self, text: str) -> None:
+        """Commentary as one progress line, ``  » Looking through the code`` (V3-P68 §6):
+        its first line and a marker when there is more; all of it when verbose."""
+        first, _, rest = text.strip().partition("\n")
+        more = self.symbols.more if rest.strip() and not self.verbose else ""
+        self.line(f"  {self.symbols.progress} {safe_line(first.strip(), encoding=self.encoding)}{more}")
+        if rest.strip() and self.verbose:
+            self.line(safe_block(rest.strip("\n"), encoding=self.encoding))
 
     def files(self, files: list[dict[str, Any]]) -> None:
         """One line a file: ``[file] report.pdf (1.2 MB) — himari download c_12 file_40`` (V3-P66 §9);

@@ -21,7 +21,11 @@ dropping a file, an upload that ends after the user left, and the narrow
 layout. A sixth (V3-P67) shows images: the thumbnail of an attached photo
 (its model copy, loaded from the preview route), the images a tool
 returned, downloading the original by pressing a thumbnail, an HTML file
-named .png that stays a plain file chip, and the narrow layout.
+named .png that stays a plain file chip, and the narrow layout. A seventh
+(V3-P68) folds tool steps into work blocks: the latest progress line while
+the turn runs, a presented file outside the block, a question's lead-in,
+"not run" calls after a pause, "N tool calls" once answered, the same after
+a reload, and a block split at the compaction boundary.
 
 Requires: pip install playwright && playwright install chromium
 Usage:    python scripts/ui_smoke.py [--screenshots DIR]
@@ -195,7 +199,7 @@ def run_compaction(base: str, token: str, shots: str | None, root: str) -> list[
         expect(divider.locator(".context-divider-text")).to_have_text(SUMMARY)  # shown as text, not markup
         assert divider.locator("b").count() == 0
         page.click("#chat-menu-toggle")
-        expect(page.locator("#chat-menu-context")).to_contain_text("of 2.1k tokens")
+        expect(page.locator("#chat-menu-context")).to_contain_text("of 2.4k tokens")
         if shots:
             page.screenshot(path=os.path.join(shots, "4-compacted.png"), full_page=True)
         page.click("#chat-menu-toggle")
@@ -547,6 +551,113 @@ def run_images(base: str, token: str, shots: str | None, tmp: str) -> list[str]:
     return errors
 
 
+class SlowerAdapter(ScriptedAdapter):
+    """Long enough between steps that a 1 s poll sees each one live."""
+
+    async def invoke_prepared(self, request: NativePreparedRequest) -> NativeInvocationOutcome:
+        await asyncio.sleep(2.5)
+        return await super().invoke_prepared(request)
+
+
+def work_script() -> SlowerAdapter:
+    def step(commentary: str | None, *calls: tuple[str, dict[str, Any]]) -> NormalizedToolCalls:
+        return NormalizedToolCalls(tuple(ToolCall(CallId(f"c{n}"), n, ToolId(tool), arguments)
+                                         for n, (tool, arguments) in enumerate(calls)),
+                                   (TextBlock(commentary),) if commentary else ())
+
+    return SlowerAdapter([
+        step("Looking through the code", ("inside/write_file", {"path": "a.txt", "content": "a"})),
+        step(None, ("inside/write_file", {"path": "b.txt", "content": "b"})),
+        step("Implementing\nthe parser", ("inside/present_file", {"path": "a.txt"})),
+        step("I found two configs.", (ASK_USER_TOOL_ID, {"question": "Which config?"})),
+        step("Testing", ("inside/write_file", {"path": "c.txt", "content": "c"}),
+             ("inside/write_file", {"path": "d.txt", "content": "d"})),
+        NormalizedFinal((TextBlock("All done."),)),
+    ])
+
+
+def run_work_progress(base: str, token: str, shots: str | None) -> list[str]:
+    errors: list[str] = []
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page(viewport={"width": 1280, "height": 860})
+        page.on("pageerror", lambda e: errors.append(str(e)))
+        page.goto(base)
+        page.fill("#login-token", token)
+        page.click("#login-submit")
+        page.click("#home-new-chat")
+        page.fill("#composer-text", "Build it")
+        page.press("#composer-text", "Enter")
+        blocks = page.locator("#timeline > .item-work")
+        first = blocks.first
+        # While it runs: one dim line, the latest progress, in a closed block.
+        expect(first.locator(".work-line")).to_have_text("Looking through the code", timeout=10000)
+        expect(first.locator(".work-dot")).to_have_count(1)
+        expect(first.locator(".work-line")).to_have_text("Implementing", timeout=10000)  # its first line only
+        expect(first.locator(".work-count")).to_have_text(" · 3 tool calls")
+        assert first.evaluate("b => !b.open")
+        if shots:
+            page.screenshot(path=os.path.join(shots, "13-work-live.png"))
+        expect(page.locator("#timeline > .item-file")).to_have_count(1)  # the presented file stays outside
+        expect(first.locator(".item-file")).to_have_count(0)
+        # The question ends the block; the text that came with it is its lead-in.
+        expect(page.locator("#question-text")).to_have_text("Which config?", timeout=10000)
+        expect(page.locator(".item-assistant").filter(has_text="I found two configs.")).to_have_count(1)
+        expect(first.locator(".work-count")).to_have_text("3 tool calls")
+        expect(first.locator(".work-dot")).to_have_count(0)
+        expect(blocks).to_have_count(1)
+        # Answer, then pause while the model answers: its two calls do not run.
+        page.fill("#composer-text", "the first")
+        page.press("#composer-text", "Enter")
+        expect(page.locator("#composer-pause")).to_be_visible(timeout=5000)
+        page.click("#composer-pause")
+        expect(page.locator("#stop-panel")).to_be_visible(timeout=10000)
+        expect(blocks).to_have_count(2)
+        expect(blocks.last.locator(".work-count")).to_have_text("2 tool calls · 2 not run")
+        expect(blocks.last.locator(".work-line")).to_have_count(0)
+        page.click("#stop-continue")
+        expect(page.locator(".item-assistant").last).to_contain_text("All done.", timeout=15000)
+        expect(blocks.last.locator(".work-count")).to_have_text("2 tool calls")
+        expect(page.locator(".work-dot")).to_have_count(0)
+        if shots:
+            page.screenshot(path=os.path.join(shots, "14-work-done.png"))
+        # The same after a reload; opened, a block shows its steps.
+        page.reload()
+        page.locator(".conv-row").first.click()
+        expect(blocks).to_have_count(2, timeout=10000)
+        assert [blocks.nth(n).locator(".work-count").inner_text() for n in range(2)] == ["3 tool calls", "2 tool calls"]
+        assert page.evaluate("[...document.querySelectorAll('.item-work')].every(b => !b.open)")
+        first.locator(".work-summary").click()
+        expect(first.locator(".work-progress")).to_have_count(2)
+        expect(first.locator(".item-tool-row")).to_have_count(3)
+        expect(first.locator(".tool-row-summary").first).to_have_text("✓ inside/write_file · done")
+        # V3-P68 §5.6: a compaction boundary inside a block splits it, the divider between.
+        covered = int(first.locator(".item-tool-row").nth(1).get_attribute("data-sequence") or 0) - 1
+
+        def summarized(route: Any) -> None:
+            body = route.fetch().json()
+            body.update(covered_through_sequence=covered, summary="Earlier work, summarized.", compactions=1)
+            route.fulfill(json=body)
+
+        page.route("**/context", summarized)
+        page.locator(".conv-row").first.click()
+        expect(blocks).to_have_count(3, timeout=10000)
+        expect(page.locator(".context-divider")).to_have_count(1)
+        assert page.evaluate("""() => {
+            const d = document.querySelector('.context-divider');
+            return d.previousElementSibling.matches('.item-work') && d.nextElementSibling.matches('.item-work');
+        }""")
+        assert [blocks.nth(n).locator(".work-count").inner_text() for n in range(3)] == [
+            "1 tool call", "2 tool calls", "2 tool calls"]
+        page.set_viewport_size({"width": 390, "height": 800})
+        page.wait_for_timeout(300)
+        assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
+        if shots:
+            page.screenshot(path=os.path.join(shots, "15-work-narrow.png"))
+        browser.close()
+    return errors
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--screenshots")
@@ -562,7 +673,7 @@ def main() -> int:
             time.sleep(0.5)
         small = os.path.join(tmp, "small")
         provider = ScriptedAdapter([NormalizedFinal((TextBlock(SUMMARY),))] * 12)  # every answer and summary alike
-        server = serve(small, PORT + 1, provider, context_tokens=2100)
+        server = serve(small, PORT + 1, provider, context_tokens=2400)
         try:
             errors += run_compaction(f"http://127.0.0.1:{PORT + 1}",
                                      Path(small, "control", "operator.secret").read_text().strip(), args.screenshots,
@@ -620,6 +731,14 @@ def main() -> int:
                                  Path(images, "control", "operator.secret").read_text().strip(), args.screenshots, tmp)
         finally:
             application_module._image_views = real  # type: ignore[assignment]
+            server.should_exit = True
+            time.sleep(0.5)
+        work = os.path.join(tmp, "work")
+        server = serve(work, PORT + 6, work_script())
+        try:
+            errors += run_work_progress(f"http://127.0.0.1:{PORT + 6}",
+                                        Path(work, "control", "operator.secret").read_text().strip(), args.screenshots)
+        finally:
             server.should_exit = True
             time.sleep(0.5)
     print("UI smoke: OK" if not errors else f"UI smoke: console errors {errors}")
