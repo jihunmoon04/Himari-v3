@@ -852,7 +852,7 @@ rev. 7(`c10ea25`) 확인: **READY**.
 
 **확인**
 - 전체 시험 2,019건 통과(94건 건너뜀). mypy, 경계 검사 통과.
-- opt-in(`tests/documents tests/sandbox_host`) 145건 통과: Sandbox 실호스트와 문서. 끝에서 끝 시험은 Application과 대본 모델로 확인한다.
+- opt-in(`tests/documents tests/sandbox_host`) 148건 통과: Sandbox 실호스트와 문서. 끝에서 끝 시험은 Application과 대본 모델로 확인한다.
   - DOCX: 만들기 → 읽기 → 스크립트로 고치기 → 다시 읽기 → 건네기.
   - 한글 PDF: 나눔고딕으로 만들기 → `view`.
 - 실시간 1건 통과.
