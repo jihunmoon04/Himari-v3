@@ -219,7 +219,7 @@ def test_two_principals_running_at_once_each_get_their_own(tmp_path: Path) -> No
             assert len(seen) == 4 and all(text == owner[key] for key, text in seen)  # type: ignore[index]
             assert loader._instructions is shared  # type: ignore[attr-defined]
         finally:
-            await app.close()
+            await app.close(grace_seconds=0)  # a failure here ends at once, not after the shutdown grace
 
     asyncio.run(scenario())
 

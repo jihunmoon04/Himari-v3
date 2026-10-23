@@ -103,6 +103,30 @@ def test_a_terminal_sees_unsafe_characters_escaped(harness: Harness) -> None:
     assert out.getvalue() == "left\\u202eright\n\tmore\n"  # for reading: shown, not acted on
 
 
+def test_shown_as_utf_8_bytes_whatever_the_locale(harness: Harness) -> None:
+    # PR #67 re-review N1: an ASCII or Latin-1 stdout still gets the exact text, as UTF-8, no newline translation.
+    harness.run("instructions", "set", "-", stdin="한국어로 답해.\né\n")
+    raw = io.BytesIO()
+    out = io.TextIOWrapper(raw, encoding="ascii", newline="\r\n", write_through=True)
+    session = cli.Session(ServerClient(harness.authorized()), cli.Printer(out), io.StringIO())
+    assert cli.cmd_instructions(session, cli.parser().parse_args(["instructions"])) == cli.EXIT_OK
+    assert raw.getvalue() == "한국어로 답해.\né\n".encode()
+
+
+def test_invalid_utf_8_on_standard_input_is_not_a_crash(harness: Harness) -> None:
+    # PR #67 re-review N2: read as bytes, so bad bytes are "cannot read", never lone surrogates sent on.
+    old = sys.stdin
+    sys.stdin = io.TextIOWrapper(io.BytesIO(b"bad\xffbyte"), encoding="utf-8", errors="surrogateescape")
+    try:
+        out, err = io.StringIO(), io.StringIO()
+        code = cli.run(["instructions", "set", "-"], environ={}, out=out, err=err,
+                       client=ServerClient(harness.authorized()))
+    finally:
+        sys.stdin = old
+    assert code == cli.EXIT_USAGE and "cannot read -" in err.getvalue()
+    assert harness.text() == ""
+
+
 def test_a_file_with_a_byte_order_mark(harness: Harness, tmp_path: Path) -> None:
     (tmp_path / "notepad.txt").write_bytes("\ufeffAnswer in Korean.".encode())  # PR #67 review N4
     assert harness.run("instructions", "set", "notepad.txt")[0] == cli.EXIT_OK

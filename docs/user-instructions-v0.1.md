@@ -147,7 +147,7 @@ CREATE TABLE instructions (
 
 ## 8. CLI
 
-- `himari instructions` — 지금 글을 찍는다. 비었으면 `(no instructions)`를 stderr로. 파일이나 파이프로 보내면 저장된 글 그대로(바이트 단위로 같게) 쓰고, 터미널이면 위험한 글자를 이스케이프해 보인다(구현 검수 B1).
+- `himari instructions` — 지금 글을 찍는다. 비었으면 `(no instructions)`를 stderr로. 파일이나 파이프로 보내면 저장된 글 그대로 UTF-8 바이트로(로캘·줄바꿈 변환과 상관없이 바이트 단위로 같게) 쓰고, 터미널이면 위험한 글자를 이스케이프해 보인다(구현 검수 B1).
 - `himari instructions set FILE` 또는 `-`(stdin) — 파일의 글로 바꾼다. 읽은 리비전으로 저장하므로, 그 사이 Web에서 바뀌었으면 충돌로 실패하고 다시 하라고 알린다.
 - `himari instructions clear` — 묻고(`y`) 비운다. `--yes`면 묻지 않는다.
 - 저장 뒤 stderr: `(saved; applies from the next message)`.
@@ -251,3 +251,8 @@ CREATE TABLE instructions (
 | N8 | 문서의 옛 줄(닫는 태그 거부, 413) | 고쳤다 |
 
 Web 화면의 글자 수(2단계)는 서버처럼 코드 포인트로 센다(`[...text].length`).
+
+재검수(`49726c2`): READY. 비차단 반영:
+- N1 — 보이기는 스트림의 바이트 버퍼에 UTF-8로 쓴다. ASCII·Latin-1 로캘에서도 죽지 않고, Windows 줄바꿈 변환도 없다.
+- N2 — `set -`는 표준 입력을 바이트로 읽어 UTF-8로 푼다. 잘못된 바이트는 "cannot read -"이고, 짝 없는 서로게이트로 보내지 않는다.
+- 맞물림 테스트는 실패 시 바로 끝나게 `grace_seconds=0`으로 닫는다.

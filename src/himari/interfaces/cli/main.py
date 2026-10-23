@@ -843,6 +843,20 @@ def _is_terminal(stream: Any) -> bool:
         return False
 
 
+def write_exactly(out: TextIO, text: str) -> None:
+    """The text as stored, as UTF-8 bytes where the stream has them: no
+    newline translation, and any locale's encoding (Data refuses control
+    characters, so nothing in it acts on a terminal it is piped to)."""
+    raw = getattr(out, "buffer", None)
+    if raw is None:
+        out.write(text)
+    else:
+        out.flush()
+        raw.write(text.encode("utf-8"))
+        raw.flush()
+    out.flush()
+
+
 INSTRUCTIONS_USAGE = "usage: himari instructions [set FILE|- | clear [--yes]]"
 
 
@@ -860,7 +874,8 @@ def cmd_instructions(session: Session, args: argparse.Namespace, read: Callable[
             if args.file == "-":
                 if _is_terminal(sys.stdin):
                     session.note("(reading the instructions from standard input; end with Ctrl-D)")
-                text = sys.stdin.read().removeprefix("\ufeff")
+                raw = getattr(sys.stdin, "buffer", None)  # bytes: invalid UTF-8 is "cannot read", not a crash
+                text = raw.read().decode("utf-8-sig") if raw is not None else sys.stdin.read().removeprefix("\ufeff")
             else:
                 with open(args.file, encoding="utf-8-sig") as handle:  # a BOM (e.g. from Notepad) is not text
                     text = handle.read()
@@ -874,8 +889,7 @@ def cmd_instructions(session: Session, args: argparse.Namespace, read: Callable[
         elif _is_terminal(session.printer.out):
             session.printer.line(instructions_text(current["text"], session.printer.encoding))
         else:
-            session.printer.out.write(current["text"])  # exactly as stored (Data refuses control characters)
-            session.printer.out.flush()
+            write_exactly(session.printer.out, current["text"])
         return EXIT_OK
     if args.action == "clear":
         if not current["text"]:
