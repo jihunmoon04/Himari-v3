@@ -120,3 +120,29 @@ def test_a_refused_toolkit_bind_costs_the_scripts_not_run_command(tmp_path: Path
         assert DOCUMENTS_READ_NOTE in notes and not any("run_command as `python3" in n for n in notes)
     finally:
         asyncio.run(app.close())
+
+
+def test_any_startup_failure_closes_the_toolkit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Re-review N1 (P8): whatever stops the documents startup, the descriptor is closed.
+    from himari.bootstrap import application as boot
+
+    class Kit:
+        fd = 7
+
+        def close(self) -> None:
+            self.fd = -1
+
+    class Stop(BaseException):
+        pass
+
+    kit = Kit()
+
+    def stop() -> None:
+        raise Stop
+
+    monkeypatch.setattr(boot, "open_toolkit", lambda *a, **k: kit)
+    monkeypatch.setattr(boot.identity, "check_trees", lambda *a, **k: None)
+    monkeypatch.setattr(boot, "discover_capability", stop)
+    with pytest.raises(Stop):
+        asyncio.run(boot._documents(tmp_path, True, "/opt/x", frozenset()))
+    assert kit.fd == -1

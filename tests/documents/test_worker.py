@@ -206,8 +206,9 @@ A_NS = 'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"'
 REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 
 
-def raw_docx(body: str, *, footnotes: str = "", image: bytes | None = None) -> bytes:
-    """A minimal Word file with ``body`` as its body XML, optional footnotes and one image part."""
+def raw_docx(body: str, *, footnotes: str = "", image: bytes | None = None, images: tuple[bytes, ...] = ()) -> bytes:
+    """A minimal Word file with ``body`` as its body XML, optional footnotes and image parts
+    (``image`` as rIdImg, ``images`` as rIdImg1, rIdImg2, ...)."""
     import io
     import zipfile
 
@@ -224,6 +225,9 @@ def raw_docx(body: str, *, footnotes: str = "", image: bytes | None = None) -> b
         if image is not None:
             archive.writestr("word/media/image1.png", image)
             rels.append(f'<Relationship Id="rIdImg" Type="{REL}/image" Target="media/image1.png"/>')
+        for number, data in enumerate(images, start=1):
+            archive.writestr(f"word/media/pic{number}.png", data)
+            rels.append(f'<Relationship Id="rIdImg{number}" Type="{REL}/image" Target="media/pic{number}.png"/>')
         archive.writestr("[Content_Types].xml", (
             '<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/'
             'content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.'
@@ -285,3 +289,38 @@ def test_many_blank_pages_stop_at_the_budget(tmp_path: Path) -> None:
     started = time.monotonic()
     head, _ = worker(data)
     assert head["units"] == 3000 and len(head["parts"]) == 60000 // 256 and time.monotonic() - started < 15
+
+
+def png(size: tuple[int, int] = (40, 30)) -> bytes:
+    import io
+    from PIL import Image
+
+    out = io.BytesIO()
+    Image.new("RGB", size).save(out, "PNG")
+    return out.getvalue()
+
+
+def drawing(number: int) -> str:
+    return f'<w:r><w:drawing><a:blip r:embed="rIdImg{number}"/></w:drawing></w:r>'
+
+
+def test_view_makes_four_pictures_and_leaves_the_rest_undecoded() -> None:
+    # Re-review C1: six pictures in one part; the fifth is broken but is never decoded, so never skipped.
+    pictures = (png(), png(), png(), png(), png()[:60], png())
+    body = "<w:p>" + "".join(drawing(n) for n in range(1, 7)) + "</w:p>"
+    head, images = worker(raw_docx(body, images=pictures), view=True)
+    assert [i["picture"] for i in images] == [1, 2, 3, 4] and head["images"] == 4
+    assert head["more"] == [5, 6] and head["skipped"] == []
+    head, images = worker(raw_docx(body, images=pictures), pages=None, pictures=[[5, None]])
+    assert [i["picture"] for i in images] == [6] and head["skipped"][0]["picture"] == 5
+
+
+def test_a_repeated_table_header_carries_no_marks() -> None:
+    # Re-review N1 (P13): a table split over parts repeats its header without [picture K] or [^n].
+    header = f'<w:tr><w:tc><w:p><w:r><w:t>Head</w:t></w:r>{drawing(1)}</w:p></w:tc></w:tr>'
+    row = '<w:tr><w:tc><w:p><w:r><w:t>{}</w:t></w:r></w:p></w:tc></w:tr>'
+    rows = "".join(row.format(f"row {n} " + "x" * 90) for n in range(200))
+    head, _ = worker(raw_docx(f"<w:tbl>{header}{rows}</w:tbl>", images=(png(),)))
+    first, second = head["parts"][0]["text"], head["parts"][1]["text"]
+    assert first.startswith("| Head[picture 1] |\n| --- |\n")
+    assert second.startswith("| Head |\n| --- |\n")

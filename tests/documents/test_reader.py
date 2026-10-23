@@ -232,3 +232,18 @@ def test_no_progress_on_a_unit_of_unknown_length() -> None:
 def test_odd_entries_are_a_bad_answer_not_a_crash() -> None:
     with pytest.raises(AttributeError):  # read() turns this into "a bad answer" (review N2)
         _checked(lines(head([], skipped=["x"])), ALL, None, False, 1000)
+
+
+def test_only_an_ancestor_may_be_a_sticky_root_folder() -> None:
+    # Re-review N1 (P10): /tmp-like folders are fine above the toolkit, never inside it.
+    import stat as st
+
+    from himari.documents import _trusted
+
+    sticky = os.stat_result((st.S_IFDIR | 0o1777, 1, 1, 2, 0, 0, 4096, 0, 0, 0))
+    _trusted(sticky, frozenset(), "/tmp", ancestor=True)
+    with pytest.raises(ToolkitRefused):
+        _trusted(sticky, frozenset(), "site-packages/x")
+    open_dir = os.stat_result((st.S_IFDIR | 0o777, 1, 1, 2, 0, 0, 4096, 0, 0, 0))
+    with pytest.raises(ToolkitRefused):
+        _trusted(open_dir, frozenset(), "/opt", ancestor=True)  # not sticky: refused even above

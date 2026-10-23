@@ -33,7 +33,7 @@ import zipfile
 from collections.abc import Iterator
 from typing import Any
 
-SPLIT_RULE = 1  # bump whenever the layout or the part split changes: positions and numbers move with it
+SPLIT_RULE = 2  # bump whenever the layout or the part split changes: positions and numbers move with it
 PART_CHARS = 8000  # a DOCX/HWPX part ends at the first block boundary past this
 VIEW_UNITS = 4  # §4.3 (Q2)
 PART_OVERHEAD = 256  # bytes kept per part for the header line the server writes (= documents.api.PART_OVERHEAD)

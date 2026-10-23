@@ -28,6 +28,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import time
 import urllib.request
 from pathlib import Path
 
@@ -149,7 +150,8 @@ def prune(base: Path, procs: Path = Path("/proc")) -> list[str]:
     current = os.readlink(base / "current") if (base / "current").is_symlink() else None
     removed = []
     for folder in sorted(base.iterdir()):
-        leftover = folder.name.startswith(".new-")  # an install that stopped: never a finished version
+        # An install that stopped: never a finished version. One under an hour old may still be running.
+        leftover = folder.name.startswith(".new-") and time.time() - folder.stat().st_mtime > 3600
         if folder.name == current or (folder.name.startswith(".") and not leftover) or folder.is_symlink() \
                 or not folder.is_dir():
             continue

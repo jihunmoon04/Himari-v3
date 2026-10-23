@@ -86,3 +86,16 @@ def test_the_requirements_pin_every_package_with_hashes() -> None:
     assert {pin.split("==")[0].lower() for pin in pins} >= {"pypdfium2", "pypdf", "python-docx", "openpyxl",
                                                            "python-pptx", "reportlab", "pillow", "lxml"}
     assert all(line.strip().startswith("--hash=sha256:") for line in lines if line.startswith(" "))
+
+
+def test_prune_leaves_a_fresh_install_in_progress(tmp_path: Path) -> None:
+    # Re-review N3: a .new-* folder under an hour old may be an install still running.
+    base = tmp_path / "documents"
+    versions(base, "a")
+    installer.switch(base, "a")
+    (base / ".new-b-1").mkdir()
+    old = base / ".new-c-2"
+    old.mkdir()
+    os.utime(old, (0, 0))
+    assert installer.prune(base, fake_proc(tmp_path, {})) == [".new-c-2"]
+    assert (base / ".new-b-1").exists()
