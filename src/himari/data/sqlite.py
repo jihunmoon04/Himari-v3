@@ -106,6 +106,8 @@ from himari.data.api import (
     ImageSetup,
     ImageStatus,
     ImageView,
+    Instructions,
+    InstructionScope,
     PresentedFile,
     StoredBlob,
     EventPayload,
@@ -138,7 +140,7 @@ from himari.data.api import (
 
 # v3: compaction_runs; v4: external_settings; v5: ui_resources; v6: model_settings;
 # v7: the trash (all upgraded in place); v1 is refused
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 APPLICATION_ID = 0x48494D41  # "HIMA": written into the database header (PRAGMA application_id)
 
 _TERMINAL_COMPLETIONS = frozenset(
@@ -344,8 +346,19 @@ ALTER TABLE files ADD COLUMN view_width INTEGER;
 ALTER TABLE files ADD COLUMN view_height INTEGER;
 CREATE INDEX files_by_view ON files (view_blob_key);
 """
+# v10: the instructions a user writes (V3-P69), by principal and scope ('user' only for now).
+_V10_ADDITIONS = """
+CREATE TABLE instructions (
+    owner TEXT NOT NULL,
+    scope TEXT NOT NULL,
+    text TEXT NOT NULL,
+    revision INTEGER NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (owner, scope)
+) STRICT;
+"""
 _ADDITIONS = (_V3_ADDITIONS, _V4_ADDITIONS, _V5_ADDITIONS, _V6_ADDITIONS, _V7_ADDITIONS,
-              _V8_ADDITIONS, _V9_ADDITIONS)  # what each version from v3 added
+              _V8_ADDITIONS, _V9_ADDITIONS, _V10_ADDITIONS)  # what each version from v3 added
 _SCHEMA = _SCHEMA_V2 + "".join(_ADDITIONS)
 # An older version → (its exact schema, what brings it to SCHEMA_VERSION).
 _UPGRADES = {
@@ -825,6 +838,12 @@ class _SqliteBlobRows:
             return frozenset(r["blob_key"] for r in tx.all("SELECT blob_key FROM blobs"))
 
 
+def _instructions(row: sqlite3.Row | None) -> Instructions:
+    if row is None:
+        return Instructions("", 0)
+    return Instructions(row["text"], row["revision"], datetime.fromisoformat(row["updated_at"]))
+
+
 def _timestamp(moment: datetime) -> str:
     """Fixed-width UTC ISO text, so string order is time order."""
     return moment.astimezone(UTC).isoformat(timespec="microseconds")
@@ -993,7 +1012,8 @@ def _refused(file_id: str, why: str) -> DataError:
 class SqliteData:
     """Implements ConversationLog, ArtifactStore, WorkspaceState, StateQuery,
     ConversationCatalog, ConversationRetention, ExternalSourceSettings,
-    FileCatalog and FileRetention; ``blobs`` is the BlobStore (V3-P66)."""
+    FileCatalog, FileRetention and InstructionsStore (V3-P69); ``blobs`` is the
+    BlobStore (V3-P66)."""
 
     def __init__(self, store: SqliteStore) -> None:
         self._store = store
@@ -1948,6 +1968,29 @@ class SqliteData:
                            " ON CONFLICT (conversation_id) DO UPDATE SET model_id=excluded.model_id,"
                            " reasoning_effort=excluded.reasoning_effort",
                            scope.conversation_id, setting.model_id, setting.reasoning_effort)
+
+    # --- InstructionsStore (V3-P69) ----------------------------------------------
+
+    async def read_instructions(self, principal: PrincipalId, scope: InstructionScope) -> Instructions:
+        rules.check_instruction_scope(scope)
+        with self._tx() as tx:
+            return _instructions(tx.one("SELECT text, revision, updated_at FROM instructions WHERE owner=? AND scope=?",
+                                        principal, scope.value))
+
+    async def write_instructions(self, principal: PrincipalId, scope: InstructionScope, text: str,
+                                 expected_revision: int) -> Instructions:
+        text = rules.check_instructions(scope, text)
+        with self._tx() as tx:
+            current = _instructions(tx.one("SELECT text, revision, updated_at FROM instructions"
+                                           " WHERE owner=? AND scope=?", principal, scope.value))
+            if expected_revision != current.revision:
+                raise DataError(DataErrorCode.VERSION_CONFLICT, f"instructions are at revision {current.revision}")
+            now = datetime.now(UTC)
+            tx.execute("INSERT INTO instructions (owner, scope, text, revision, updated_at) VALUES (?, ?, ?, ?, ?)"
+                       " ON CONFLICT (owner, scope) DO UPDATE SET text=excluded.text, revision=excluded.revision,"
+                       " updated_at=excluded.updated_at",
+                       principal, scope.value, text, current.revision + 1, _timestamp(now))
+            return Instructions(text, current.revision + 1, now)
 
     # --- StateQuery -------------------------------------------------------------
 

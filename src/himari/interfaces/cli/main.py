@@ -829,6 +829,92 @@ SANDBOX_TEXT = {
 }
 
 
+def instructions_text(text: str, encoding: str | None) -> str:
+    """For a terminal: lines and tabs kept, anything a terminal could act on
+    or hide (e.g. bidi controls) escaped — for reading, not for setting again."""
+    return "\n".join("\t".join(safe_line(part, encoding=encoding) for part in line.split("\t"))
+                     for line in text.split("\n"))
+
+
+def _is_terminal(stream: Any) -> bool:
+    try:
+        return bool(stream.isatty())
+    except (AttributeError, ValueError):
+        return False
+
+
+def write_exactly(out: TextIO, text: str) -> None:
+    """The text as stored, as UTF-8 bytes where the stream has them: no
+    newline translation, and any locale's encoding (Data refuses control
+    characters, so nothing in it acts on a terminal it is piped to)."""
+    raw = getattr(out, "buffer", None)
+    if raw is None:
+        out.write(text)
+    else:
+        out.flush()
+        raw.write(text.encode("utf-8"))
+        raw.flush()
+    out.flush()
+
+
+INSTRUCTIONS_USAGE = "usage: himari instructions [set FILE|- | clear [--yes]]"
+
+
+def cmd_instructions(session: Session, args: argparse.Namespace, read: Callable[[str], str] = input) -> int:
+    """V3-P69 §8: show, ``set FILE|-``, or ``clear`` the user's instructions.
+    Shown into a file or a pipe, the text is written exactly as stored, so
+    ``himari instructions > f; himari instructions set f`` changes nothing."""
+    if ((args.action is None and args.file is not None) or (args.action == "set" and args.file is None)
+            or (args.action == "clear" and args.file is not None) or (args.yes and args.action != "clear")):
+        session.note(INSTRUCTIONS_USAGE)
+        return EXIT_USAGE
+    text = ""
+    if args.action == "set":
+        try:
+            if args.file == "-":
+                if _is_terminal(sys.stdin):
+                    session.note("(reading the instructions from standard input; end with Ctrl-D)")
+                raw = getattr(sys.stdin, "buffer", None)  # bytes: invalid UTF-8 is "cannot read", not a crash
+                text = raw.read().decode("utf-8-sig") if raw is not None else sys.stdin.read().removeprefix("\ufeff")
+            else:
+                with open(args.file, encoding="utf-8-sig") as handle:  # a BOM (e.g. from Notepad) is not text
+                    text = handle.read()
+        except (OSError, UnicodeDecodeError) as error:
+            session.note(f"cannot read {safe_line(args.file)}: {safe_line(str(error))}")
+            return EXIT_USAGE
+    current = session.client.get("/api/instructions")
+    if args.action is None:
+        if not current["text"]:
+            session.note("(no instructions)")
+        elif _is_terminal(session.printer.out):
+            session.printer.line(instructions_text(current["text"], session.printer.encoding))
+        else:
+            write_exactly(session.printer.out, current["text"])
+        return EXIT_OK
+    if args.action == "clear":
+        if not current["text"]:
+            session.note("(no instructions)")
+            return EXIT_OK
+        if not args.yes:
+            try:
+                answer = read("Clear your instructions for every conversation? [y/N] ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                answer = ""
+            if answer not in ("y", "yes"):
+                session.note("(nothing was changed)")
+                return EXIT_OK
+    # Saved from the revision just read: a change made elsewhere since is refused, never overwritten.
+    try:
+        session.client.put("/api/instructions", {"text": text, "revision": current["revision"]})
+    except ServerRefused as error:
+        if error.code != "revision_conflict":
+            raise
+        session.note(f"refused ({error.code}): {error} Run the command again to replace them.")
+        return EXIT_FAILED
+    session.note("(saved; applies from the next message)" if text.strip() else "(cleared; applies from the next message)")
+    return EXIT_OK
+
+
 def cmd_status(session: Session, args: argparse.Namespace) -> int:
     server = session.client.get("/api/server")
     sandbox = str(server.get("sandbox"))
@@ -861,6 +947,7 @@ CHAT_HELP = ("/continue  continue an unanswered message (or a paused turn)\n"
              "/tools     MCP servers in use; /tools on|off|default SOURCE to change\n"
              "/model     the model; /model MODEL [EFFORT] or /model default to change (next message)\n"
              "/prompts   prompts the servers in use offer\n"
+             "/instructions  your instructions for every conversation (change: himari instructions set FILE)\n"
              "/prompt S N A=V ...  fill in server S's prompt N, show it, send it if you confirm\n"
              "/attach F...  upload files for the next message; /attach alone lists them, /detach drops them\n"
              "/send      send the attached files without text\n"
@@ -932,6 +1019,17 @@ def cmd_chat(session: Session, args: argparse.Namespace, read: Callable[[str], s
             context = session.context(conversation_id)
             if context is not None:
                 session.note(context_line(context))
+            continue
+        if text == "/instructions":  # V3-P69 §8: shown here; changed with `himari instructions set`
+            try:
+                current = session.client.get("/api/instructions")
+            except ClientError as error:
+                session.note(f"refused: {error}" if isinstance(error, ServerRefused) else str(error))
+                continue
+            if not current["text"]:
+                session.note("(no instructions; set them with `himari instructions set FILE`)")
+            else:
+                session.printer.block("Your instructions (every conversation):", current["text"])
             continue
         if text == "/context":
             seen = session.printer.compactions
@@ -1103,6 +1201,10 @@ def parser() -> argparse.ArgumentParser:
     rename.add_argument("id")
     rename.add_argument("title", nargs="?")
     sub.add_parser("status", help="the server's models, whether commands can run, and the context budget")
+    instructions = sub.add_parser("instructions", help="your instructions for every conversation: show, set or clear")
+    instructions.add_argument("action", nargs="?", choices=["set", "clear"])
+    instructions.add_argument("file", nargs="?", help="set: a UTF-8 text file, or - for standard input")
+    instructions.add_argument("--yes", action="store_true", help="clear without asking")
     return p
 
 
@@ -1110,7 +1212,7 @@ COMMANDS: dict[str, Callable[[Session, argparse.Namespace], int]] = {
     "chat": cmd_chat, "list": cmd_list, "show": cmd_show, "new": cmd_new, "send": cmd_send, "continue": cmd_continue,
     "compact": cmd_compact, "tools": cmd_tools, "model": cmd_model, "pause": cmd_pause, "cancel": cmd_cancel,
     "status": cmd_status, "rename": cmd_rename, "delete": cmd_delete, "trash": cmd_trash, "restore": cmd_restore,
-    "files": cmd_files, "download": cmd_download,
+    "files": cmd_files, "download": cmd_download, "instructions": cmd_instructions,
 }
 
 

@@ -68,7 +68,7 @@
 ```text
 You are HIMARI, a helpful assistant.            ← 운영자 지시문
 <ATTACHMENT_NOTE> <TOOL_IMAGES_NOTE> <PROGRESS_NOTE>   ← 시스템 안내
-The user's standing instructions follow, between <user_instructions> tags. The user wrote them for
+The user's standing instructions follow, inside the user_instructions element. The user wrote them for
 every conversation; follow them unless they conflict with the instructions above. In them, the
 characters <, > and & are written as &lt;, &gt; and &amp;.
 <user_instructions>
@@ -141,13 +141,13 @@ CREATE TABLE instructions (
 - `GET /api/instructions` → `{text, revision, updated_at, max_chars}`
 - `PUT /api/instructions` `{text, revision}` → 200 `{…}`. 오류는 다음과 같다.
   - 409 `revision_conflict`
-  - 413 `too_large`
+  - 422 `too_large` (구현: 413이 아님 — 본문 크기 미들웨어가 모든 413을 `request_too_large`로 바꾸므로, §13)
   - 422 `invalid_instructions`
 - 인증·CSRF·Origin 검사는 다른 쓰기 API와 같다.
 
 ## 8. CLI
 
-- `himari instructions` — 지금 글을 그대로 찍는다. 비었으면 `(no instructions)`를 stderr로.
+- `himari instructions` — 지금 글을 찍는다. 비었으면 `(no instructions)`를 stderr로. 파일이나 파이프로 보내면 저장된 글 그대로 UTF-8 바이트로(로캘·줄바꿈 변환과 상관없이 바이트 단위로 같게) 쓰고, 터미널이면 위험한 글자를 이스케이프해 보인다(구현 검수 B1).
 - `himari instructions set FILE` 또는 `-`(stdin) — 파일의 글로 바꾼다. 읽은 리비전으로 저장하므로, 그 사이 Web에서 바뀌었으면 충돌로 실패하고 다시 하라고 알린다.
 - `himari instructions clear` — 묻고(`y`) 비운다. `--yes`면 묻지 않는다.
 - 저장 뒤 stderr: `(saved; applies from the next message)`.
@@ -176,7 +176,7 @@ CREATE TABLE instructions (
 
 - **Data(`tests/data`):** 메모리·SQLite가 같은 계약을 지킨다. `USER` 밖의 범위는 거부한다.
   - 비었을 때 리비전 0이다. 쓰면 리비전이 오르고, 리비전이 틀리면 충돌이다.
-  - 상한과 제어 문자, 닫는 태그를 거부한다. 줄바꿈을 맞춘다.
+  - 상한, 제어 문자, 짝 없는 서로게이트를 거부한다. 태그 표기는 거부하지 않는다(보낼 때 이스케이프). 줄바꿈을 맞춘다.
   - 주체별로 따로 다룬다. v9 → v10 업그레이드에서 기존 데이터가 남는다.
 - **Prompt/Bootstrap:** 지시문의 자리를 확인한다(시스템 안내 뒤, MCP 안내문 앞). 비면 머리말도 없다.
   - 턴 중간에 바꾸면 그 턴의 다음 요청은 옛 글이고, 다음 턴은 새 글이다.
@@ -184,7 +184,7 @@ CREATE TABLE instructions (
   - 이스케이프: `</user_instructions>`, `</USER_INSTRUCTIONS >`, `<system>`, `&lt;` 같은 글이 모두 `&lt;…`·`&amp;lt;`로 가서 경계가 하나뿐이다. 저장된 글은 원래대로다.
   - 동시성(검수 N1): 두 대화가 동시에 돌고 있을 때 지시문을 바꾸면 둘 다 그 턴은 옛 글, 다음 턴은 새 글이다. 다른 주체의 글이 섞이지 않는다. 서버 공유 상태(`PromptContextLoader`)는 바뀌지 않는다.
   - `context_status()`는 진행 중인 턴과 상관없이 최신 지시문으로 크기를 계산한다.
-- **Web API(`tests/interfaces`):** GET·PUT, 409·413·422, 인증 없으면 401, Origin 검사.
+- **Web API(`tests/interfaces`):** GET·PUT, 409·422, 인증 없으면 401, Origin 검사.
 - **CLI:** 보기, `set FILE`·`set -`, `clear`(묻기·`--yes`), 충돌 안내, `/instructions`.
 - **브라우저 스모크:** 설정 화면에서 쓰고 저장하면 그 다음 메시지의 요청에 글이 들어간다(대본 모델이 받은 앞부분 확인). 다른 탭에서 바뀐 뒤 저장하면 충돌 안내가 나오고 내 글이 남는다. 저장하지 않고 떠나면 묻는다. 좁은 화면을 본다.
 
@@ -194,3 +194,65 @@ CREATE TABLE instructions (
 | --- | --- | --- |
 | N1 | `PromptContextLoader._instructions`는 서버가 공유한다. 이를 바꾸면 동시에 도는 대화의 지시문이 섞인다. 턴을 시작할 때 읽어 그 턴의 상태로 두고 `PromptInputs`에 넘겨야 한다. `context_status()`는 다음 턴의 문맥이므로 최신 지시문을 읽어야 한다 | §5에 구현 자리를 적었다(`Driver._exclusive`에서 한 번 읽어 턴 상태로 두기, 공유 상태는 그대로). 동시성 테스트를 §11에 더했다 |
 | N2 | 닫는 태그만 거부하면 변형 표기를 다 막지 못한다. 이스케이프해 넣는 편이 명확하다. 태그가 우선순위를 강제한다고 가정하면 안 된다 | 모델에게 보낼 때 `&`·`<`·`>`를 이스케이프하고 머리말에 알린다. 저장 때의 태그 거부는 없앴다(§4·§6). 태그와 머리말은 표시일 뿐이고, 지켜야 하는 것은 코드가 지킨다고 적었다(§4·§10) |
+
+## 13. 구현 노트 — 1단계: Data·Prompt·Control·Bootstrap·Web API·CLI (2026-10-23)
+
+- **Data:**
+  - `data/api.py`에 `MAX_INSTRUCTIONS_CHARS = 10_000`, `InstructionScope`(`USER`), `Instructions(text, revision, updated_at)`, `InstructionsStore` 포트를 두었다.
+  - `data/rules.py`의 `check_instructions`가 줄바꿈을 맞추고, 공백뿐이면 빈 글로 하고, 길이(코드 포인트)를 보고, `Cc` 제어 문자를 거부한다. 줄바꿈·탭은 허용한다. 범위 검사(`check_instruction_scope`)는 읽기에도 쓴다.
+  - 메모리 백엔드는 `InMemoryStore.instructions`, SQLite는 v10 `instructions` 표를 쓴다. 키는 `(owner, scope)`이다. 리비전이 다르면 `VERSION_CONFLICT`이다.
+  - 업그레이드 테스트는 v2~v9 → v10 모두다.
+- **Prompt:**
+  - `USER_INSTRUCTIONS_HEADER`와 `user_instructions_section`(`&` → `<` → `>` 순으로 이스케이프)을 두었다. 공백뿐이면 `None`이다.
+  - `PromptInputs.user_instructions`가 있고, `Composer`의 `stable_prefix`가 고정 지시문 뒤에 그 구획을 붙인다. Provider는 지금처럼 `stable_prefix` 뒤에 MCP 안내문을 붙이므로 §4의 순서가 된다.
+  - `context_key`에 `user_instructions`가 들어간다.
+  - `PromptContextLoader.load`는 `user_instructions` 인자를 받는다. 공유 상태(`_instructions`)는 그대로다.
+- **Control:**
+  - `Driver(user_instructions=…)`가 `_exclusive`에서 모델과 함께 한 번 읽어 `_turn_instructions`에 둔다. 턴 안의 모든 `load`(Run 두 곳, 수동 압축)는 이 값을 쓴다.
+  - `context_status`는 다음 턴을 보므로 DB의 최신 값을 읽는다.
+- **Bootstrap:** `build_runtime`이 Data를 넘긴다. `Application.instructions(principal)`과 `set_instructions(principal, text, revision)`를 두었다.
+- **Web API:**
+  - `GET`·`PUT /api/instructions`를 두었다. 거절은 409 `revision_conflict`, 422 `too_large`, 422 `invalid_instructions`이고, 메시지에 입력을 담지 않는다. 형식이 틀린 본문은 400/422(다른 API와 같은 검증)이다.
+  - **설계와 다른 점:** `too_large`는 413이 아니라 422다. `BodyLimitMiddleware`가 모든 413 응답을 `request_too_large`로 바꾸기 때문이다(업로드 경로는 그래서 예외로 둔다). 보안 미들웨어를 넓히지 않고 상태 코드를 바꿨다. 10,000자 한국어(약 30 KB)는 본문 상한 256 KiB 안이다(테스트).
+- **CLI:**
+  - `himari instructions [set FILE|- | clear [--yes]]`를 두었다.
+  - 보이기: 파일이나 파이프로는 저장된 글을 그대로 쓴다. 그래서 `himari instructions > f; himari instructions set f`가 아무것도 바꾸지 않는다. 터미널에는 줄과 탭을 두고 위험한 글자(bidi 제어 등)를 이스케이프해 읽기용으로 보인다.
+  - 파일은 `utf-8-sig`로 읽고, 표준 입력의 BOM은 떼어 낸다. 사용법 검사는 서버에 묻기 전에 한다. 충돌이면 다시 하라고 알린다.
+  - 저장은 방금 읽은 리비전으로 한다. 그 사이 바뀌었으면 `refused (revision_conflict)`이다.
+  - 채팅의 `/instructions`는 보이기만 한다.
+- **테스트:**
+  - `tests/data/test_instructions.py`(두 백엔드), `tests/data/test_sqlite.py`(v10 업그레이드), `tests/prompt/test_composer.py`(자리·이스케이프·빈 글·`context_key`).
+  - `tests/bootstrap/test_instructions_app.py`:
+    - 턴 중간에 바꿔도 그 턴은 옛 글, 다음 턴은 새 글이다.
+    - 두 대화가 동시에 돌 때 둘 다 옛 글이다.
+    - 주체별로 따로이고, 없으면 구획이 없다.
+    - `context_status`는 최신 글로 계산한다.
+    - 요청 원문에 남는다.
+  - `tests/interfaces/test_web_instructions.py`, `tests/interfaces/test_cli_instructions.py`.
+- **2단계:** Web 설정 화면(`surface-instructions`)과 브라우저 스모크.
+
+### 13.1 구현 검수 (PR #67)
+
+독립 검수: NOT_READY(B1; C1~C3; N1~N8). 아래와 같이 반영했다.
+
+| # | 지적 | 반영 |
+| --- | --- | --- |
+| B1 | `himari instructions`가 `safe_line`으로 백슬래시·서식 문자를 이스케이프하고 줄바꿈을 더해, 보이고 다시 `set`하면 글이 망가지고 반복할수록 커진다. 테스트가 그 결과를 굳혔다 | 파일·파이프에는 저장된 글을 그대로 쓰고, 터미널에만 이스케이프해 보인다. 왕복 테스트(백슬래시, ZWJ 이모지, 끝 줄바꿈 있음·없음, bidi; 두 번 반복)와 터미널 테스트를 두었다 |
+| C1 | 짝 없는 서로게이트가 SQLite에서는 500, 메모리에서는 저장된다 | `check_instructions`가 `Cs`를 거부한다(422). 두 백엔드와 Web 테스트를 두었다 |
+| C2 | 턴 스냅샷이 대화별인지 증명하는 테스트가 없다(한 칸 공유로 바꿔도 통과) | 두 주체가 동시에 도는 테스트를 두었다. 두 턴이 요청마다 맞물려 진행하므로, 한쪽이 글을 읽을 때 다른 쪽 턴이 늘 진행 중이다. 공유 로더 상태가 그대로인지도 본다. 한 칸 공유 변이체가 매번 실패하는 것을 확인했다 |
+| C3 | MCP 안내문과의 순서(실제 Provider 메시지)와 압축 요청 제외가 테스트되지 않았다 | OpenRouter 요청의 시스템 메시지에서 운영자 → 시스템 안내 → 사용자 구획 → MCP 안내문 순서를 확인한다. 실제 압축을 일으켜 요약 요청에는 글이 없고 턴 요청에는 있음을 확인한다 |
+| N1 | `clear FILE`, `set … --yes`가 조용히 받아들여진다 | 사용법 오류로 한다 |
+| N2 | 사용법 검사 전에 서버에 묻는다 | 검사를 먼저 한다(테스트) |
+| N3 | 터미널에서 `set -`가 안내 없이 기다리고, 충돌에 다시 하라는 말이 없다 | 둘 다 한 줄로 알린다 |
+| N4 | 메모장의 BOM이 글이 된다 | 파일은 `utf-8-sig`, 표준 입력은 앞 BOM을 뗀다(테스트) |
+| N5 | `str.strip()`이 일부 제어 문자를 공백으로 보아 거부 대신 비운다 | 제어 문자 검사를 공백 검사보다 먼저 한다(테스트) |
+| N6 | 지시문 읽기가 실패하면 `_turn_models`가 남는다 | 둘 다 읽은 뒤에 넣는다 |
+| N7 | 머리말에 태그가 한 번 더 나온다 | "inside the user_instructions element"로 바꿨다. 경계 태그는 이제 한 번씩만 나온다 |
+| N8 | 문서의 옛 줄(닫는 태그 거부, 413) | 고쳤다 |
+
+Web 화면의 글자 수(2단계)는 서버처럼 코드 포인트로 센다(`[...text].length`).
+
+재검수(`49726c2`): READY. 비차단 반영:
+- N1 — 보이기는 스트림의 바이트 버퍼에 UTF-8로 쓴다. ASCII·Latin-1 로캘에서도 죽지 않고, Windows 줄바꿈 변환도 없다.
+- N2 — `set -`는 표준 입력을 바이트로 읽어 UTF-8로 푼다. 잘못된 바이트는 "cannot read -"이고, 짝 없는 서로게이트로 보내지 않는다.
+- 맞물림 테스트는 실패 시 바로 끝나게 `grace_seconds=0`으로 닫는다.

@@ -38,6 +38,7 @@ from himari.common import (
 from himari.control.api import DriveState
 from himari.data.api import (
     AppView,
+    InstructionScope,
     ArtifactMutation,
     AssistantFinal,
     AssistantToolCalls,
@@ -233,6 +234,7 @@ _ADDED_IN = {
     9: ("DROP INDEX files_by_view", *(f"ALTER TABLE files DROP COLUMN {c}" for c in (
         "view_height", "view_width", "view_type", "view_blob_key", "image_height", "image_width", "image_type",
         "image_status"))),
+    10: ("DROP TABLE instructions",),
 }
 
 
@@ -247,13 +249,13 @@ def old_database(path: Path, version: int) -> None:
            f"PRAGMA user_version={version}")
 
 
-@pytest.mark.parametrize("version", [2, 3, 4, 5, 6, 7, 8])
+@pytest.mark.parametrize("version", [2, 3, 4, 5, 6, 7, 8, 9])
 def test_an_older_database_is_upgraded_in_place_and_keeps_its_data(tmp_path: Path, version: int) -> None:
     path = tmp_path / "h.db"
     old_database(path, version)
     store = SqliteStore(path)
     try:
-        assert store.connection.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 9
+        assert store.connection.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 10
         data = SqliteData(store)
         events = asyncio.run(data.read_events(SCOPE))
         assert [e.payload.blocks for e in events] == [(TextBlock(f"from v{version}"),)]  # type: ignore[union-attr]
@@ -262,13 +264,15 @@ def test_an_older_database_is_upgraded_in_place_and_keeps_its_data(tmp_path: Pat
         assert columns[-2:] == ["ui_digest", "app_payload"]  # and the v5 ones
         asyncio.run(data.set_model_setting(SCOPE, ModelSetting("openai/gpt-6-luna", "high")))  # and the v6 one
         assert asyncio.run(data.count_staged(SCOPE)) == 0  # the v8 tables
+        assert asyncio.run(data.write_instructions(SCOPE.principal_id, InstructionScope.USER, "Be brief.", 0)
+                           ).revision == 1  # the v10 table
         asyncio.run(data.trash_conversation(SCOPE))  # and the v7 columns
     finally:
         store.close()
-    SqliteStore(path).close()  # and it opens as a plain v9 database afterwards
+    SqliteStore(path).close()  # and it opens as a plain v10 database afterwards
 
 
-@pytest.mark.parametrize("version", [2, 3, 4, 5, 6, 7, 8])
+@pytest.mark.parametrize("version", [2, 3, 4, 5, 6, 7, 8, 9])
 @pytest.mark.parametrize("change", ["CREATE TABLE extra (x)", "PRAGMA application_id=1", "DROP TABLE artifacts"])
 def test_only_an_exact_older_database_is_upgraded(tmp_path: Path, version: int, change: str) -> None:
     path = tmp_path / "h.db"
@@ -279,7 +283,7 @@ def test_only_an_exact_older_database_is_upgraded(tmp_path: Path, version: int, 
     conn = sqlite3.connect(path)
     try:
         assert conn.execute("PRAGMA user_version").fetchone()[0] == version  # refused, never repaired
-        assert not conn.execute("SELECT 1 FROM sqlite_master WHERE name='files_by_view'").fetchall()
+        assert not conn.execute("SELECT 1 FROM sqlite_master WHERE name='instructions'").fetchall()  # v10's
     finally:
         conn.close()
     assert not list(tmp_path.glob("*.bak*"))  # refused before any backup
@@ -638,7 +642,7 @@ def test_files_of_a_v8_database_read_as_not_images(tmp_path: Path) -> None:
     blob = asyncio.run(data.blobs.put(SCOPE.principal_id, chunks(), 1 << 20))
     record = asyncio.run(data.stage_upload(SCOPE, blob, "old.png", "image/png"))
     store.close()
-    tamper(path, *_ADDED_IN[9], "PRAGMA user_version=8")
+    tamper(path, *_ADDED_IN[10], *_ADDED_IN[9], "PRAGMA user_version=8")
     store = SqliteStore(path)
     try:
         again, = asyncio.run(SqliteData(store).read_file_records(SCOPE, [(record.file_id, 1)]))

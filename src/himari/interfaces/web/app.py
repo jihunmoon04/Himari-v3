@@ -91,6 +91,7 @@ from himari.common import (
 from himari.control.api import ContextStatus, ControlError, ControlErrorCode, JobStatus, TurnUsage
 from himari.data.api import (
     MAX_ATTACHMENTS,
+    MAX_INSTRUCTIONS_CHARS,
     MAX_LIST_LIMIT,
     AssistantFinal,
     AssistantToolCalls,
@@ -101,6 +102,7 @@ from himari.data.api import (
     FileOrigin,
     FileRecord,
     ImageStatus,
+    Instructions,
     ToolResultRecord,
     UserMessage,
     view_state,
@@ -193,6 +195,11 @@ class MessageBody(_Body):
 class ModelBody(_Body):
     model: str | None = Field(max_length=200)  # null: follow the default model
     effort: str | None = Field(default=None, max_length=32)  # null: the model's default effort
+
+
+class InstructionsBody(_Body):
+    text: str  # its limit is Data's (V3-P69 §6), counted after newlines are normalized
+    revision: int = Field(ge=0)  # the revision the text was edited from
 
 
 class ToolSourceBody(_Body):
@@ -401,6 +408,22 @@ def context_view(status: ContextStatus | None) -> dict[str, Any]:
 def model_view(view: ModelView) -> dict[str, Any]:
     return {"id": view.model_id, "default_effort": view.default_effort, "efforts": list(view.efforts),
             "window_known": view.window_known, "default": view.is_default, "images": view.images}
+
+
+def instructions_view(record: Instructions) -> dict[str, Any]:
+    """V3-P69 §7: the user's instructions and what a save needs."""
+    return {"text": record.text, "revision": record.revision, "updated_at": _time(record.updated_at),
+            "max_chars": MAX_INSTRUCTIONS_CHARS}
+
+
+# How a refused save of the instructions answers (V3-P69 §7): status, code, message.
+INSTRUCTIONS_REFUSALS: dict[DataErrorCode, tuple[int, str, str]] = {
+    DataErrorCode.VERSION_CONFLICT: (409, "revision_conflict", "The instructions were changed elsewhere since "
+                                     "they were opened."),
+    # 422, not 413: the body limit middleware turns every 413 into "request_too_large".
+    DataErrorCode.TOO_LARGE: (422, "too_large", f"Instructions are at most {MAX_INSTRUCTIONS_CHARS:,} characters."),
+    DataErrorCode.INVALID_ARGUMENT: (422, "invalid_instructions", "Instructions may not contain control characters."),
+}
 
 
 def model_choice_view(view: ModelChoiceView) -> dict[str, Any]:
@@ -773,6 +796,24 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
         """Saved at once, used from the next turn (one under way keeps its model)."""
         view = await himari(request).set_model(scope_of(conversation_id, who), body.model, body.effort)
         return model_choice_view(view)
+
+    @app.get("/api/instructions")
+    async def read_instructions(request: Request, who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+        """The instructions the user wrote for every conversation (V3-P69)."""
+        return instructions_view(await himari(request).instructions(who))
+
+    @app.put("/api/instructions")
+    async def write_instructions(body: InstructionsBody, request: Request,
+                                 who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+        """Saved at once, used from each conversation's next turn."""
+        try:
+            saved = await himari(request).set_instructions(who, body.text, body.revision)
+        except DataError as error:
+            if error.code not in INSTRUCTIONS_REFUSALS:
+                raise
+            status, code, message = INSTRUCTIONS_REFUSALS[error.code]
+            raise ApiError(status, code, message) from None
+        return instructions_view(saved)
 
     @app.get("/api/conversations/{conversation_id}/tools")
     async def read_tool_sources(conversation_id: str, request: Request,

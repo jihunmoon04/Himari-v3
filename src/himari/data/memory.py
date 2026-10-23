@@ -61,6 +61,8 @@ from himari.data.api import (
     FileOrigin,
     FileRecord,
     ImageSetup,
+    Instructions,
+    InstructionScope,
     PresentedFile,
     StoredBlob,
     EventPayload,
@@ -169,6 +171,7 @@ class InMemoryStore:
         self.ui_resources: dict[str, UiResource] = {}  # V3-P58: by digest, shared by every Conversation
         self.blob_rows: dict[str, BlobRow] = {}  # V3-P66: by key, shared by a principal's Conversations
         self.blobs = FileStore(MemoryBlobFiles(), _MemoryBlobRows(self))
+        self.instructions: dict[tuple[PrincipalId, InstructionScope], Instructions] = {}  # V3-P69
 
     # --- admin helpers (trusted setup paths, not model-reachable) --------
 
@@ -324,7 +327,8 @@ def _refused(file_id: str, why: str) -> DataError:
 class InMemoryData:
     """Implements ConversationLog, ArtifactStore, WorkspaceState, StateQuery,
     ConversationCatalog, ConversationRetention, ExternalSourceSettings,
-    FileCatalog and FileRetention; ``blobs`` is the BlobStore (V3-P66)."""
+    FileCatalog, FileRetention and InstructionsStore (V3-P69); ``blobs`` is the
+    BlobStore (V3-P66)."""
 
     def __init__(self, store: InMemoryStore) -> None:
         self._store = store
@@ -1057,6 +1061,22 @@ class InMemoryData:
         conv = self._conv(scope)
         rules.check_model_setting(setting)
         conv.model = setting
+
+    # --- InstructionsStore (V3-P69) ----------------------------------------------
+
+    async def read_instructions(self, principal: PrincipalId, scope: InstructionScope) -> Instructions:
+        rules.check_instruction_scope(scope)
+        return self._store.instructions.get((principal, scope), Instructions("", 0))
+
+    async def write_instructions(self, principal: PrincipalId, scope: InstructionScope, text: str,
+                                 expected_revision: int) -> Instructions:
+        text = rules.check_instructions(scope, text)
+        current = self._store.instructions.get((principal, scope), Instructions("", 0))
+        if expected_revision != current.revision:
+            raise DataError(DataErrorCode.VERSION_CONFLICT, f"instructions are at revision {current.revision}")
+        record = Instructions(text, current.revision + 1, datetime.now(UTC))
+        self._store.instructions[(principal, scope)] = record
+        return record
 
     # --- StateQuery -------------------------------------------------------------
 
