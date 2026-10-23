@@ -1548,6 +1548,36 @@ details > summary {
   white-space: pre;
 }
 
+/* Formulas: KaTeX's own stylesheet (loaded with the first one) sets the
+ * glyphs; these only place them. Until it loads, and when KaTeX refuses
+ * one, the formula shows as written. */
+.rich-text .rich-math .katex {
+  overflow-wrap: normal;
+}
+
+.rich-text .rich-math-display {
+  display: block;
+  margin: 0 0 0.8em;
+  overflow-x: auto;
+  overflow-y: hidden;
+  max-width: 100%;
+}
+
+.rich-text .rich-math-display .katex-display {
+  margin: 0.2em 0;
+}
+
+.rich-text .rich-math.is-pending,
+.rich-text .rich-math.is-refused {
+  font-family: var(--mono);
+  font-size: 0.88em;
+  white-space: pre-wrap;
+}
+
+.rich-text .rich-math.is-refused {
+  color: var(--text-muted);
+}
+
 .rich-text .rich-link {
   color: var(--accent);
   text-decoration: underline;

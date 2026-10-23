@@ -5,7 +5,8 @@ provider (a file write, an ask_user question, then a final answer that
 contains hostile markup), drives it with headless Chromium and checks:
 sign-in (wrong and right token), new chat, the tool row, the question
 panel, the answer, safe rich text (no script execution, no javascript:
-link), the context size in the conversation menu, "Compact now" and its
+link), formulas drawn by KaTeX (prices and a broken formula left as
+written), the context size in the conversation menu, "Compact now" and its
 divider, rename, reload keeping
 the HttpOnly session, the narrow layout and sign-out. A second server with
 a small context budget compacts a conversation and checks the timeline
@@ -67,7 +68,9 @@ from himari.provider.scripted import Measured, ScriptedAdapter  # noqa: E402
 
 PORT = 8799
 HOSTILE = ("# Plan for Seoul\n\n**Day 1**: walk <script>window.__pwned = 1</script> "
-           "[bad](javascript:window.__pwned=2) and [good](https://example.com)\n\n- palace\n- market")
+           "[bad](javascript:window.__pwned=2) and [good](https://example.com)\n\n- palace\n- market\n\n"
+           "Area $\\pi r_1^2$ with \\(x_1 + y_1\\), tickets $5 and $10, and\n$$\n\\frac{a}{b} = \\sum_{i=1}^{n} x_i\n$$\n"
+           "and $\\frac{a$ left as written.")
 
 
 def scripted() -> ScriptedAdapter:
@@ -130,6 +133,13 @@ def run(base: str, token: str, shots: str | None) -> list[str]:
         expect(page.locator("#question-panel")).to_be_hidden()
         assert final.locator("a").count() == 1 and final.locator("a").get_attribute("href") == "https://example.com/"
         assert "<script>" in final.inner_text() and page.evaluate("window.__pwned") is None
+        # Formulas: KaTeX (loaded with the first one) draws three, the prices stay text.
+        expect(final.locator(".rich-math .katex")).to_have_count(3, timeout=10000)
+        expect(final.locator("div.rich-math-display .katex-display")).to_have_count(1)
+        expect(final.locator(".rich-math.is-refused")).to_have_text("$\\frac{a$")
+        assert "tickets $5 and $10, and" in final.inner_text()
+        assert page.evaluate("document.fonts.ready.then(() => document.fonts.check('16px KaTeX_Main'))")
+        assert final.locator("a").count() == 1
         if shots:
             page.screenshot(path=os.path.join(shots, "2-final.png"), full_page=True)
         page.click("#chat-menu-toggle")
