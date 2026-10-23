@@ -721,3 +721,47 @@ rev. 7(`c10ea25`) 확인: **READY**.
 - C1·C2·N1·N2가 맞게 고쳐졌다.
 - `next` 한도는 거듭 이어 읽어도 조각 22개·약 142자 안이다.
 - 비차단 N1(`dimension` 없는 시트는 `of ?`)을 반영했다.
+
+## 23. 구현 노트 — 1단계 (2026-10-23)
+
+**들어간 것**
+- **도구 모음:**
+  - `scripts/install_documents.py`와 `scripts/documents-requirements.txt`(12개 묶음, cp312 aarch64·x86_64 휠 해시).
+  - 나눔고딕 Regular·Bold와 OFL은 google/fonts `133ccbee`에서 받는다.
+  - 이 호스트에서 설치는 10초, 73 MB다.
+- **작업자 `himari/documents/worker.py`:** 판정(PDF·OOXML 3종·HWPX·OLE2 암호/구형), PDF·DOCX 배치, `view`, `pictures`, 이어 읽기, `probe`.
+- **실행기와 확인:** `himari/documents/__init__.py`의 `open_toolkit`(트리 확인), `DocumentReader`(재판정), 시작 검사용 PDF·DOCX(코드로 만듦).
+- **Tool:** `inside/read_document`(`environment/inside/documents.py`). 문법·지문·`next`·머리줄과 끝줄·뒷받침·크기 한도를 여기서 처리한다. `read_file`의 이진 파일 힌트도 넣었다.
+- **Sandbox:**
+  - `ServerProfile.tmp_bytes`(bwrap `--size`)와 `supports_tmp_size`.
+  - Workspace 프로파일의 `/run/himari/documents` 읽기 전용 묶기와 환경 변수 둘.
+  - 자체 검사의 `expected(toolkit)`·`expected_sources(…, toolkit_fd)`·`extra_fds`.
+- **Bootstrap:** 시작 순서(§6.4), `_documents_notes`, 로그 한 줄, `Application.open(documents_dir=…, documents_owners=…)`, 설정 `HIMARI_DOCUMENTS_DIR`.
+- **Prompt:** `DOCUMENTS_READ_NOTE`, `documents_script_note`.
+
+**설계와 달라진 점·정한 점**
+- **1단계의 범위:** Tool 설명과 지시 문장은 PDF와 Word만 말한다.
+  - XLSX·PPTX·HWPX는 판정만 하고 FAILED "reading … files is not available yet"를 돌려준다. 스크립트가 켜져 있으면 쓸 라이브러리를 덧붙인다.
+  - 2단계에서 읽기를 넣고 문장을 넓힌다.
+- **데이터 루트와의 겹침:** `open_toolkit`이 아니라 Bootstrap이 `identity.check_trees`로 확인한다. `documents`는 `sandbox.api`만 쓴다(경계 규칙).
+- **소유자:**
+  - root 소유는 늘 믿는다. 그 밖의 소유자는 `documents_owners` 인자로만 더한다(시험).
+  - 조상 폴더가 그룹·다른 사용자 쓰기 가능이면 거부한다. 단, root 소유의 sticky 폴더(`/tmp` 등)는 받아들인다. 남이 그 안의 우리 항목을 바꾸거나 지울 수 없기 때문이다.
+- **링크:** 도구 모음 안의 심볼릭 링크는 밖을 가리키든 아니든 모두 거부한다. 설치한 휠에는 링크가 없다.
+- **Workspace 자체 검사가 도구 모음 묶기를 거부할 때:** 묶지 않은 새 백엔드로 다시 검사한다. 도구 모음 문제로 `run_command` 전체를 잃지 않게 하기 위해서다. 스크립트 문장은 붙지 않고, 로그에 이유가 남는다.
+- **글의 정규화:**
+  - 작업자는 문서 글의 모든 줄 경계(`str.splitlines`의 것)를 `\n`으로 바꾼다.
+  - 탭이 아닌 제어 문자는 공백으로, 외톨이 서로게이트는 U+FFFD로 바꾼다.
+  - 그래서 작업자와 서버의 "줄"이 늘 같다(최종 확인 N2).
+- **Word 서식·매크로 파일(.dotx·.docm·.dotm):** python-docx가 여는 형식으로 `[Content_Types].xml`만 바꾼 메모리 사본을 읽는다.
+- **목록:** `numPr`가 있거나 스타일 이름이 `List`로 시작하는 문단은 `- `로 시작한다.
+- **1단계 DOCX·PDF는 단위 전체를 배치한다.** 그래서 `length`가 늘 있다. 일부만 배치해 `length: null`을 내는 경우는 2단계 시트의 몫이다.
+
+**확인**
+- 전체 시험 1,998건 통과(71건 건너뜀). mypy, 경계 검사 통과.
+- opt-in 시험(`HIMARI_SANDBOX_HOST=1`, `HIMARI_DOCUMENTS_TOOLKIT`) 117건 통과.
+  - 실제 문서 Sandbox에서 네트워크·쓰기·데이터 루트 접근이 막히고, `/tmp`가 64 MiB에서 멈춘다.
+  - 실제 Workspace Sandbox에서 `python3`이 도구 모음을 import하고, 글꼴이 보이고, 도구 모음에 쓸 수 없고, DOCX를 만든다.
+  - 도구 모음을 켠 Application이 Tool과 두 문장을 제공한다.
+- 시작 검사는 0.65초, DOCX 한 부분 읽기와 그림 한 장 처리는 0.9초다.
+- `tests/bootstrap/test_trash.py::test_the_startup_purges_what_is_due`는 main에서도 가끔 실패한다(1초 안에 폴더가 지워지기를 기다림). 이 묶음과는 상관없다.

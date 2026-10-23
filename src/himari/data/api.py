@@ -420,6 +420,7 @@ def blob_key(principal: PrincipalId, sha256: str) -> str:
 
 MAX_IMAGE_PIXELS = 50_000_000  # over it nothing is decoded
 MAX_IMAGE_SOURCE_BYTES = 32 * 1024 * 1024  # a larger original gets no copy, whatever the file limit (review C1)
+MAX_DOCUMENT_BYTES = 32 * 1024 * 1024  # read_document's input, whatever the file limit (V3-P70 §4.4, C4)
 IMAGE_HEAD_BYTES = 256 * 1024  # what sniff_image may need (a JPEG's frame header can follow large EXIF)
 MAX_IMAGES_PER_REQUEST = 100
 MAX_IMAGE_BYTES_PER_REQUEST = 32 * 1024 * 1024  # model copies, before base64 (review B3)

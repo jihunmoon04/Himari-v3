@@ -78,7 +78,8 @@ def main(argv: list[str] | None = None) -> int:
                                              max_runs=config.max_runs, models=config.models,
                                              trash_days=config.trash_days, file_max_bytes=config.file_max_bytes,
                                              file_store_max_bytes=config.file_store_max_bytes,
-                                             file_keep_days=config.file_keep_days)
+                                             file_keep_days=config.file_keep_days,
+                                             documents_dir=config.documents_dir)
         print(f"HIMARI web: http://{config.host}:{config.port}/ — sign in with the token in "
               f"{application.data_root / 'control' / 'operator.secret'} (sandbox: {application.sandbox_state.value}, "
               f"context budget: {application.context_tokens} tokens; {turn_text(application.turn)})",

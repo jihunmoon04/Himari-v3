@@ -198,6 +198,15 @@ def test_file_settings_are_configured() -> None:
             WebConfig.from_env({**base, **env})
 
 
+
+def test_the_documents_folder_is_configured() -> None:
+    base = {"HIMARI_DATA_ROOT": "/srv/himari"}
+    assert WebConfig.from_env(base).documents_dir is None  # V3-P70 §6.2: no default
+    assert WebConfig.from_env({**base, "HIMARI_DOCUMENTS_DIR": " /opt/himari-v3/documents "}).documents_dir == (
+        "/opt/himari-v3/documents")
+    with pytest.raises(WebConfigError):
+        WebConfig.from_env({**base, "HIMARI_DOCUMENTS_DIR": "documents"})
+
 def test_a_chunked_upload_is_cut_at_the_limit(server: Server) -> None:
     cid = server.new()
     assert server.application is not None

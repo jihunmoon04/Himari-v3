@@ -299,6 +299,31 @@ def read_file(root_fd: int, relative: str, max_bytes: int, offset: int = 0) -> t
     return data, size
 
 
+def read_whole(root_fd: int, relative: str, max_bytes: int) -> tuple[bytes | None, int]:
+    """A whole regular file and its size, or None and its size when it is
+    larger than ``max_bytes`` (judged on the open file before reading, V3-P70 §4.4)."""
+    fd = openat2(root_fd, relative, _READ_FLAGS)
+    try:
+        info = os.fstat(fd)
+        _check_regular(info)
+        if info.st_size > max_bytes:
+            return None, info.st_size
+        chunks: list[bytes] = []
+        remaining = max_bytes + 1  # a file that grew meanwhile is caught, not cut
+        while remaining > 0:
+            chunk = os.read(fd, min(remaining, 1 << 20))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        data = b"".join(chunks)
+        return (None, len(data)) if len(data) > max_bytes else (data, len(data))
+    except OSError as error:
+        raise _categorize(error) from None
+    finally:
+        os.close(fd)
+
+
 def read_file_with_identity(root_fd: int, relative: str, max_bytes: int,
                             offset: int = 0) -> tuple[bytes, int, Identity]:
     """Like :func:`read_file`, plus the file's identity for an optimistic

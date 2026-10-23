@@ -32,6 +32,7 @@ LAYERS = {
     "data": 1,
     "tool": 2,
     "imaging": 2,  # model copies of images (V3-P67): the sandbox and Data's file types, nothing else
+    "documents": 2,  # reading documents (V3-P70): the sandbox and Data's file types, nothing else
     "environment": 3,
     "mcp": 3,  # a connector plugin: provides Tools through tool.api only, like an Environment
     "prompt": 4,
@@ -45,6 +46,7 @@ ONLY_FROM = {
     "mcp": frozenset({"common", "tool"}),
     "sandbox": frozenset({"common"}),
     "imaging": frozenset({"common", "sandbox", "data"}),
+    "documents": frozenset({"common", "sandbox", "data"}),
 }
 
 

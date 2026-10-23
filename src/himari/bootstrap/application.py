@@ -38,6 +38,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import re
 import os
 from collections.abc import AsyncIterator, Iterable, Mapping, Sequence
 from contextlib import asynccontextmanager
@@ -92,20 +93,30 @@ from himari.data.api import (
     view_state,
 )
 from himari.data.sqlite import SqliteData, SqliteStore
+from himari.documents import TMP_BYTES, DocumentReader, Toolkit, ToolkitRefused, open_toolkit, worker_roots
 from himari.environment.inside import INSIDE, InsideEnvironment, InsideFiles
 from himari.imaging import ImageViews, runtime_roots
 # For the interfaces (V3-P66 §9): how placing an upload can be refused.
 from himari.environment.inside import UploadsFolderUnusable as UploadsFolderUnusable
 from himari.environment.inside import WorkspaceBusy as WorkspaceBusy
-from himari.sandbox.api import SandboxState, ServerProfile
-from himari.sandbox.backend import SandboxBackend
+from himari.sandbox import identity
+from himari.sandbox.api import SandboxAdmissionError, SandboxState, ServerProfile
+from himari.sandbox.backend import SandboxBackend, discover_capability, supports_tmp_size
 from himari.sandbox.server import ServerSandbox
 from himari.mcp.config import CONFIG_NAME, McpConfig, McpStdioConfig, McpUiPolicy, load_config
 from himari.mcp.jsonrpc import McpError
 from himari.mcp.prompts import PromptContentError, prompt_text
 from himari.mcp.stdio import ProcessLauncher
 from himari.mcp.tools import LauncherFor, McpConnection, PromptArgument, SourceStatus, connect
-from himari.prompt.api import ATTACHMENT_NOTE, PROGRESS_NOTE, TOOL_IMAGES_NOTE, ContextBudget, SourceNote
+from himari.prompt.api import (
+    ATTACHMENT_NOTE,
+    DOCUMENTS_READ_NOTE,
+    PROGRESS_NOTE,
+    TOOL_IMAGES_NOTE,
+    ContextBudget,
+    SourceNote,
+    documents_script_note,
+)
 from himari.provider.api import ProviderAdapter
 from himari.tool.api import ToolHandler
 from himari.tool.schema import check_tool_input_schema
@@ -375,6 +386,67 @@ async def _image_views(root: Path, sandbox: bool) -> ImageViews:
     return views
 
 
+# The toolkit's dist names and what a script imports (V3-P70 §7).
+_MODULES = {"pypdf": "pypdf", "pypdfium2": "pypdfium2", "python-docx": "docx", "openpyxl": "openpyxl",
+            "python-pptx": "pptx", "reportlab": "reportlab", "pillow": "PIL"}
+
+
+async def _documents(root: Path, sandbox: bool, documents_dir: str | None,
+                     owners: frozenset[int]) -> tuple[Toolkit | None, DocumentReader | None, str]:
+    """V3-P70 §6.4 steps 1-2: the toolkit checked on its descriptor, then
+    the reader in its own server sandbox, checked with the probe documents.
+    The toolkit comes back only with a working reader (run_command binds it
+    only then); the text says why there is none."""
+    if not documents_dir:
+        return None, None, "HIMARI_DOCUMENTS_DIR is not set"
+    if not sandbox:
+        return None, None, "the sandbox is off"
+    try:
+        toolkit = open_toolkit(documents_dir, owners=owners)
+    except ToolkitRefused as refused:
+        return None, None, str(refused)
+    try:
+        try:  # apart from HIMARI's data, by what the descriptor is (§6.2, review C3)
+            await asyncio.to_thread(identity.check_trees, [identity.BoundTree(toolkit.fd, False)], [str(root)])
+        except SandboxAdmissionError:
+            raise ToolkitRefused("the toolkit overlaps HIMARI's data") from None
+        capability = discover_capability()
+        if capability is None:
+            raise ToolkitRefused("this host cannot run sandboxes")
+        if not supports_tmp_size(capability):
+            raise ToolkitRefused("this bwrap cannot size /tmp (--size, bwrap 0.9 or later)")
+        server = ServerSandbox(capability, [str(root)])  # its own: an image sandbox failure does not turn this off
+        state = await server.start()
+        if state is not SandboxState.ENFORCED:
+            raise ToolkitRefused(f"the documents sandbox is {state.value}")
+        try:
+            launcher = server.launcher(ServerProfile(read_only=worker_roots(toolkit), tmp_bytes=TMP_BYTES))
+        except Exception as error:  # noqa: BLE001 — a profile the sandbox refuses
+            raise ToolkitRefused(str(error)) from None
+        reader = DocumentReader(launcher, toolkit)
+        why = await reader.check()
+        if why is not None:
+            raise ToolkitRefused(f"the startup check failed ({why})")
+    except ToolkitRefused as refused:
+        toolkit.close()
+        return None, None, str(refused)
+    return toolkit, reader, "on"
+
+
+def _documents_notes(reader: DocumentReader | None, toolkit: Toolkit | None, scripts: bool) -> tuple[str, ...]:
+    """V3-P70 §6.4 step 5: each sentence only while its tool can do it."""
+    if reader is None or toolkit is None:
+        return ()
+    notes = [DOCUMENTS_READ_NOTE]
+    if scripts:
+        modules = [_MODULES[name] for name in _MODULES if name in reader.versions]
+        fonts = toolkit.manifest.get("fonts")
+        fonts = [f for f in fonts if isinstance(f, str) and re.fullmatch(r"[\w.-]{1,60}\.ttf", f)] if isinstance(
+            fonts, list) else []
+        notes.append(documents_script_note(modules, fonts))
+    return tuple(notes)
+
+
 async def _server_launchers(config: McpConfig, root: Path) -> LauncherFor | None:
     """The server sandbox for stdio servers (V3-P59 §4), made only when one is
     configured. HIMARI's data root — the database, the operator secret,
@@ -422,6 +494,8 @@ class Application:
     uploads_work: bool = True  # the no-replace rename placing needs works here (review N2)
     views: ViewMaker | None = None  # model copies of images (V3-P67 §3.1); None or unavailable: no copies
     image_models: tuple[str, ...] = ()  # offered models that get images (V3-P67 §7.1)
+    documents: DocumentReader | None = None  # read_document's reader (V3-P70); None: not offered
+    toolkit: Toolkit | None = field(default=None, repr=False)  # its checked folder, open until close()
     # V3-P65 §7.3: one lifecycle lock per Conversation (P0: one server process),
     # kept only while some call holds or waits for it (PR #56 review C1).
     _lifecycle: dict[ConversationId, _Lifecycle] = field(default_factory=dict, repr=False)
@@ -454,6 +528,8 @@ class Application:
         file_max_bytes: int = DEFAULT_FILE_MAX_BYTES,  # V3-P66 §8.3: one file
         file_store_max_bytes: int = DEFAULT_STORE_MAX_BYTES,  # the file store, before expiring the oldest
         file_keep_days: int = DEFAULT_KEEP_DAYS,  # unused this long, a stored file expires (§8.5)
+        documents_dir: str | None = None,  # V3-P70 §6.2: HIMARI_DOCUMENTS_DIR; None: no documents
+        documents_owners: frozenset[int] = frozenset({0}),  # who may own the toolkit: root (tests add their user)
     ) -> Application:
         if file_max_bytes < 1 or file_max_bytes > file_store_max_bytes:
             raise ValueError("a file's limit must be positive and within the file store's (V3-P66)")
@@ -494,6 +570,7 @@ class Application:
 
         store = SqliteStore(root / DATABASE_NAME)  # first: a second server on this root fails here
         mcp: McpConnection | None = None
+        toolkit: Toolkit | None = None
         try:
             store.blobs.configure(max_bytes=file_store_max_bytes, keep_days=file_keep_days)
             launcher_for = mcp_launcher_for
@@ -501,28 +578,46 @@ class Application:
                 launcher_for = await _server_launchers(mcp_config, root)
             mcp = await connect(mcp_config, check_schema=check_tool_input_schema, transport=mcp_transport,
                                 launcher_for=launcher_for)
+            toolkit, reader, documents_reason = await _documents(root, sandbox, documents_dir, documents_owners)
             backend: SandboxBackend | None = None
             state = SandboxState.UNAVAILABLE
+            scripts = "off"
             if sandbox:
-                candidate = SandboxBackend.discover()
-                state = await candidate.start(protected_paths=(str(root), str(workspaces)))
+                protected = (str(root), str(workspaces))
+                candidate = SandboxBackend.discover(toolkit_fd=None if toolkit is None else toolkit.fd)
+                state = await candidate.start(protected_paths=protected)
+                if state is SandboxState.SETUP_FAILED and toolkit is not None:
+                    # A toolkit the self-test does not accept costs the scripts, never run_command (§6.4).
+                    scripts = f"the self-test refused the toolkit bind ({state.value})"
+                    candidate = SandboxBackend.discover()
+                    state = await candidate.start(protected_paths=protected)
                 if state is SandboxState.ENFORCED:
                     backend = candidate  # run_command is offered only when enforcement is proven (V3-050)
+                    if backend.toolkit_fd is not None:
+                        scripts = "on"
+            if reader is not None:
+                reader.scripts = scripts == "on"
+            log.info("documents: read_document %s; run_command toolkit %s%s", documents_reason,
+                     scripts if reader is not None else "off",
+                     f"; libraries {', '.join(f'{k} {v}' for k, v in reader.versions.items())}" if reader else "")
             inside = InsideEnvironment(workspaces, sandbox=backend,
-                                       files=InsideFiles(store.blobs, SqliteData(store), file_max_bytes))
+                                       files=InsideFiles(store.blobs, SqliteData(store), file_max_bytes),
+                                       documents=reader)
             uploads_work = inside.placement_works()
             if not uploads_work:
                 log.warning("this filesystem cannot place uploads without replacing files (renameat2); "
                             "attaching files is off")
-            elif state is not SandboxState.ENFORCED:  # V3-P66 §5.2 (review C2)
-                log.warning("commands cannot run (sandbox %s): the model can read attached text files, "
-                            "but cannot open other files such as PDFs or images", state.value)
+            elif state is not SandboxState.ENFORCED:  # V3-P66 §5.2 (review C2), V3-P70 review N8
+                log.warning("commands cannot run (sandbox %s): the model can read attached text files%s, "
+                            "but cannot run scripts on other files", state.value,
+                            " and PDF and Word documents" if reader is not None else "")
             views = await _image_views(root, sandbox)
             base = DEFAULT_INSTRUCTIONS if instructions is None else instructions
             runtime = build_runtime(provider, store=store, environments=[inside], tools=[*tools, *mcp.handlers, *mcp.resource_tools],
                                     models=catalog,
                                     instructions=(*base, *((ATTACHMENT_NOTE,) if uploads_work else ()),
-                                                  TOOL_IMAGES_NOTE, PROGRESS_NOTE),
+                                                  TOOL_IMAGES_NOTE, PROGRESS_NOTE,
+                                                  *_documents_notes(reader, toolkit, scripts == "on")),
                                     external_defaults=mcp.defaults,
                                     source_notes=[SourceNote(source, note.placement, note.text)
                                                   for source, note in mcp.notes.items()],
@@ -534,13 +629,15 @@ class Application:
                 if mcp is not None:
                     await mcp.aclose()
             finally:
+                if toolkit is not None:
+                    toolkit.close()
                 store.close()
             raise
         assert isinstance(runtime.data, SqliteData)
         runner = BackgroundRunner(runtime.driver, unattended_runs=unattended_runs, seen_seconds=turn.seen_seconds)
         application = cls(root, store, runtime.data, runtime, runner, inside, state, model_id,
                           default_budget.limit_tokens, secret, mcp, turn, tuple(unverified), trash_days,
-                          file_max_bytes, uploads_work, views, tuple(image_models))
+                          file_max_bytes, uploads_work, views, tuple(image_models), reader, toolkit)
         if cleanup_seconds is not None:
             application._cleanup = asyncio.create_task(application._purge_periodically(cleanup_seconds),
                                                        name="trash-cleanup")
@@ -987,6 +1084,8 @@ class Application:
             try:
                 await self.mcp.aclose()
             finally:
+                if self.toolkit is not None:
+                    self.toolkit.close()
                 self.store.close()
 
     def check_layout(self) -> None:

@@ -35,3 +35,8 @@ strict = true
 mypy_path = "src:tests"
 files = ["src", "tests"]
 explicit_package_bases = true
+
+[[tool.mypy.overrides]]
+# The documents worker imports the documents toolkit, which lives outside HIMARI's environment (V3-P70 §6).
+module = ["pypdfium2", "pypdfium2.*", "docx", "docx.*", "lxml", "lxml.*"]
+ignore_missing_imports = true

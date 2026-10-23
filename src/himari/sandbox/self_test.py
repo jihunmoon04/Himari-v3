@@ -44,6 +44,20 @@ r["write_sibling_conversation"] = ok(lambda: write("/workspace/conversations/b/p
 r["write_tmp"] = ok(lambda: write("/tmp/probe.txt"))
 r["write_root"] = ok(lambda: write("/probe.txt"))
 r["write_usr"] = ok(lambda: write("/usr/probe.txt"))
+if p["toolkit"]:
+    r["write_toolkit"] = ok(lambda: write("/run/himari/documents/probe.txt"))
+    r["toolkit_env"] = [os.environ.get("PYTHONPATH"), os.environ.get("HIMARI_FONTS")]
+def held():
+    # The listing's own descriptor is closed by the time it is looked up, so it drops out.
+    found = []
+    for name in os.listdir("/proc/self/fd"):
+        if int(name) > 2:
+            try:
+                os.readlink("/proc/self/fd/" + name); found.append(int(name))
+            except OSError:
+                pass
+    return found
+r["extra_fds"] = held()
 r["sees_other_principal"] = any(os.path.exists(x) for x in p["other_paths"])
 r["sees_home"] = os.path.exists("/home")
 r["sees_protected"] = sorted(x for x in p["protected_paths"] if os.path.lexists(x))
@@ -103,7 +117,17 @@ EXPECTED: dict[str, object] = {
     "nested_userns": False,
     "no_new_privs": True,
     "cap_eff_zero": True,
+    "extra_fds": [],  # the command inherits fds 0-2 only (V3-P70 re-review N6)
 }
+# With the documents toolkit bound (V3-P70 §6.3, V3-050 amended): read-only there, its two variables set.
+TOOLKIT_EXPECTED: dict[str, object] = {
+    "write_toolkit": False,
+    "toolkit_env": ["/run/himari/documents/site-packages", "/run/himari/documents/fonts"],
+}
+
+
+def expected(toolkit: bool) -> dict[str, object]:
+    return {**EXPECTED, **(TOOLKIT_EXPECTED if toolkit else {})}
 
 
 @dataclass
@@ -144,9 +168,9 @@ class ExpectedSources:
     devices: dict[str, int]
 
 
-def expected_sources(workspace_fd: int) -> ExpectedSources:
+def expected_sources(workspace_fd: int, toolkit_fd: int | None = None) -> ExpectedSources:
     from himari.sandbox import landlock_helper
-    from himari.sandbox.api import WORKSPACE_MOUNT
+    from himari.sandbox.api import TOOLKIT_MOUNT, WORKSPACE_MOUNT
     from himari.sandbox.backend import HELPER_IN_SANDBOX, system_view
 
     def identity(info: os.stat_result) -> tuple[int, int]:
@@ -156,6 +180,8 @@ def expected_sources(workspace_fd: int) -> ExpectedSources:
     binds = {view[i + 2]: identity(os.stat(view[i + 1])) for i, arg in enumerate(view) if arg == "--ro-bind"}
     binds[HELPER_IN_SANDBOX] = identity(os.stat(os.path.realpath(landlock_helper.__file__)))
     binds[WORKSPACE_MOUNT] = identity(os.fstat(workspace_fd))
+    if toolkit_fd is not None:
+        binds[TOOLKIT_MOUNT] = identity(os.fstat(toolkit_fd))
     devices = {node: os.stat(node).st_rdev for node in DEVICE_NODES if os.path.exists(node)}
     return ExpectedSources(binds, devices)
 
@@ -229,6 +255,7 @@ async def probe(backend: SandboxBackend, protected_paths: tuple[str, ...] = ()) 
             "port6": port6,
             "unix_path": unix_path,
             "abstract_name": abstract_name,
+            "toolkit": backend.toolkit_fd is not None,
         }
         root_fd = os.open(own, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
         stack.callback(os.close, root_fd)
@@ -245,9 +272,10 @@ async def probe(backend: SandboxBackend, protected_paths: tuple[str, ...] = ()) 
         except ValueError:
             return SelfTestReport(False, error="probe output is not JSON")
         mounts = observed.pop("mounts", None)
-        failures = [k for k, v in EXPECTED.items() if observed.get(k) != v]
-        failures += [k for k in observed if k not in EXPECTED]
-        unexpected = _unexpected_mounts(mounts, expected_sources(root_fd))
+        wanted = expected(backend.toolkit_fd is not None)
+        failures = [k for k, v in wanted.items() if observed.get(k) != v]
+        failures += [k for k in observed if k not in wanted]
+        unexpected = _unexpected_mounts(mounts, expected_sources(root_fd, backend.toolkit_fd))
         if unexpected:
             failures.append(f"mounts:{unexpected}")
         observed["mounts"] = mounts

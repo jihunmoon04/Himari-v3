@@ -107,6 +107,8 @@ def check_profile(profile: ServerProfile, *, protected: Sequence[str], uid: int 
     strings (written and resolved): an early warning for a configuration
     mistake. The guarantee is the identity check at every launch."""
     uid = os.geteuid() if uid is None else uid
+    if profile.tmp_bytes is not None and (not isinstance(profile.tmp_bytes, int) or profile.tmp_bytes < 1 << 20):
+        raise SandboxProfileError("tmp_bytes is at least 1 MiB")
     if len(profile.read_only) > MAX_READ_ONLY or len(profile.writable) > MAX_WRITABLE:
         raise SandboxProfileError(f"at most {MAX_READ_ONLY} read_only and {MAX_WRITABLE} writable directories")
     roots = _absolute_roots(protected)
@@ -359,7 +361,8 @@ class ServerSandbox:
             if await _settle(check):  # the thread uses the descriptors: they stay open until it ends
                 raise asyncio.CancelledError
             check.result()
-            return await self._spawn_checked(checked, {**SANDBOX_ENV, **env}, binds, profile.writable, cwd)
+            return await self._spawn_checked(checked, {**SANDBOX_ENV, **env}, binds, profile.writable, cwd,
+                                             profile.tmp_bytes)
         except OSError as error:  # e.g. removed since the profile was checked: this launch only, no latch
             raise SandboxAdmissionError(f"a bound directory could not be opened ({type(error).__name__})") from None
         finally:
@@ -367,14 +370,14 @@ class ServerSandbox:
                 os.close(fd)
 
     async def _spawn_checked(self, argv: list[str], env: Mapping[str, str], binds: list[tuple[str, int, str]],
-                             writable: Sequence[str], cwd: str) -> ServerProcess:
+                             writable: Sequence[str], cwd: str, tmp_bytes: int | None = None) -> ServerProcess:
         assert self._capability is not None
         sync_r, sync_w = os.pipe()
         try:
             os.set_blocking(sync_r, False)
             try:
                 args = sandbox_arguments(self._capability, env=env, binds=binds, write_roots=[*writable, "/tmp"],
-                                         cwd=cwd, sync_fd=sync_w, argv=argv)
+                                         cwd=cwd, sync_fd=sync_w, argv=argv, tmp_bytes=tmp_bytes)
             except BaseException:
                 os.close(sync_w)
                 raise
