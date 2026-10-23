@@ -272,6 +272,7 @@ def test_the_server_info_is_for_the_signed_in_operator(server: Server) -> None:
     info = server.client.get("/api/server").json()
     assert info == {"model": "scripted-model", "sandbox": "unavailable", "context_budget": 128_000, "trash_days": 30,
                     "images": False,  # V3-P67: no image sandbox in this test
+                    "documents": {"read": False, "scripts": False, "libraries": {}},  # V3-P70: no toolkit
                     "models": [{"id": "scripted-model", "default_effort": None, "efforts": [], "window_known": False,
                                 "default": True, "images": False}],
                     "turn": {"token_budget": 3_000_000, "unattended_runs": 20, "max_runs": None,

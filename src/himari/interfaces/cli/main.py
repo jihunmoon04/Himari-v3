@@ -915,13 +915,23 @@ def cmd_instructions(session: Session, args: argparse.Namespace, read: Callable[
     return EXIT_OK
 
 
+def documents_line(documents: object) -> str:
+    """V3-P70 §9: whether documents are read here, whether scripts can make them, with which libraries."""
+    if not isinstance(documents, dict) or not documents.get("read"):
+        return "documents: off"
+    libraries = documents.get("libraries") if isinstance(documents.get("libraries"), dict) else {}
+    named = ", ".join(f"{name} {version}" for name, version in (libraries or {}).items())
+    return (f"documents: read on, scripts {'on' if documents.get('scripts') else 'off'}"
+            + (f" ({named})" if named else ""))
+
+
 def cmd_status(session: Session, args: argparse.Namespace) -> int:
     server = session.client.get("/api/server")
     sandbox = str(server.get("sandbox"))
     offered = [str(m.get("id")) for m in server.get("models") or [] if not m.get("default")]
     for line in (f"model: {server.get('model')}" + (f" (also offered: {', '.join(offered)})" if offered else ""),
                  f"commands: {SANDBOX_TEXT.get(sandbox, sandbox)}",
-                 f"context budget: {server.get('context_budget'):,} tokens"):
+                 f"context budget: {server.get('context_budget'):,} tokens", documents_line(server.get("documents"))):
         session.printer.line(safe_line(line, encoding=session.printer.encoding))
     return EXIT_OK
 

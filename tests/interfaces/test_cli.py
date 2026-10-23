@@ -678,7 +678,8 @@ def test_cancel_closes_an_open_question_and_pause_with_nothing_running(harness: 
 def test_status_rename_and_a_closed_question_in_the_history(harness: Harness) -> None:
     code, out, _ = harness.run("status")
     assert code == cli.EXIT_OK
-    assert out.splitlines() == ["model: m", "commands: unavailable on this host", "context budget: 128,000 tokens"]
+    assert out.splitlines() == ["model: m", "commands: unavailable on this host", "context budget: 128,000 tokens",
+                                "documents: off"]
     cid = harness.run("new")[1].strip()
     assert harness.run("rename", cid, "Trip plans")[0] == cli.EXIT_OK
     assert "Trip plans" in harness.run("list")[1]
@@ -990,3 +991,12 @@ def test_a_refused_delete_for_good_says_it_stays_in_the_trash() -> None:
     out, err = io.StringIO(), io.StringIO()
     assert cli.run(["delete", "conv_1", "--now", "--yes"], environ={}, out=out, err=err, client=client) == 1
     assert "moved to the trash, but not deleted for good" in err.getvalue() and "not_in_trash" in err.getvalue()
+
+
+def test_the_documents_line() -> None:
+    # V3-P70 §9 (review N9): what /api/server says about documents, in one line.
+    assert cli.documents_line(None) == cli.documents_line({"read": False}) == "documents: off"
+    assert cli.documents_line({"read": True, "scripts": False, "libraries": {}}) == "documents: read on, scripts off"
+    assert (cli.documents_line({"read": True, "scripts": True, "libraries": {"openpyxl": "3.1.5", "pypdf": "6"}})
+            == "documents: read on, scripts on (openpyxl 3.1.5, pypdf 6)")
+    assert cli.documents_line({"read": True, "libraries": "not a dict"}) == "documents: read on, scripts off"

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import bisect
 import hashlib
+import posixpath
 import re
 from typing import TYPE_CHECKING
 
@@ -50,19 +51,22 @@ _PIECE = re.compile(r"(\d{1,10})(?::(\d{1,10})|-(\d{0,10}))?")
 _FINGERPRINT = re.compile(r"[0-9a-f]{%d}" % FINGERPRINT_CHARS)
 _STRUCTURE = ("===", "[shown", "[view", "[images", "[note", "[not shown")  # every tail line's start (review B3)
 _FORMAT_NAMES = {"pdf": "PDF", "docx": "Word", "xlsx": "Excel", "pptx": "PowerPoint", "hwpx": "HWPX"}
-_LATER = {"xlsx": ("Excel (.xlsx)", "openpyxl"), "pptx": ("PowerPoint (.pptx)", "python-pptx"),
-          "hwpx": ("HWPX", "zipfile and xml.etree")}
+_AT_A_LIMIT = ("timed_out", "out_of_memory", "worker_processgone")  # the worker's time, memory or CPU ran out
+_LIBRARIES = {".pdf": "pypdf", **dict.fromkeys((".docx", ".docm", ".dotx", ".dotm"), "python-docx"),
+              **dict.fromkeys((".xlsx", ".xlsm", ".xltx", ".xltm"), "openpyxl"),
+              **dict.fromkeys((".pptx", ".pptm", ".potx", ".potm", ".ppsx", ".ppsm"), "python-pptx"),
+              ".hwpx": "zipfile and xml.etree"}
 GRAMMAR = ('use unit numbers like "1-5,8" or "12-", or pass the next value of an earlier result as given')
 
 DESCRIPTION = (
-    "Read a PDF or Word (.docx) file from the workspace as text, split into numbered units: pages (PDF) or "
-    "parts (Word). Large documents are shown in parts: the result ends with what to read next, which may hold a "
+    "Read a PDF, Word (.docx), Excel (.xlsx), PowerPoint (.pptx) or HWPX file from the workspace as text, split "
+    "into numbered units: pages (PDF), slides (PowerPoint), sheets (Excel) or parts (Word, HWPX). Large documents are shown in parts: the result ends with what to read next, which may hold a "
     "position inside a unit (\"9:61234\") and the document's fingerprint (\"@3f9a1c0b7e2d\"); pass it back as "
     "pages exactly as given. Each PDF page says whether it has pictures or drawings, or no text; these marks are "
     "a guess, so a page without them may still hold a chart. Content hidden in the document is marked [hidden]. "
     "With view=true it returns at most the first 4 selected units with only their text: PDF pages rendered as "
-    "images, or up to 4 of the pictures inside a Word part. To see other pictures of a Word file, pass their "
-    "numbers (from [picture K]) in pictures. Only models that see images can use the images. Lines the tool "
+    "images, or up to 4 of the pictures inside other documents' units. To see other pictures of a document that "
+    "is not a PDF, pass their numbers (from [picture K]) in pictures. Only models that see images can use the images. Lines the tool "
     "writes start with '===' or '['; a document line that starts with '===', '[' or '\\' is shown with a "
     "leading '\\'."
 )
@@ -228,7 +232,7 @@ def _part_block(part: Part, unit_name: str) -> str:
         marks += f" (characters {part.start:,}-{part.end:,} of {of})"
     if part.mid_line:
         marks += " (continues mid-line)"
-    body = ("…" if part.mid_line else "") + part.text
+    body = (part.header or "") + ("…" if part.mid_line else "") + part.text
     if body and not body.endswith("\n"):
         body += "\n"
     return f"=== {unit_name} {part.n}{marks} ===\n" + backstop(body)
@@ -249,7 +253,7 @@ class ReadDocument:
                                                            "from the first), or the next value of an earlier result."},
                 "view": {"type": "boolean", "description": "Return the first 4 selected units as images too "
                                                           "(default false)."},
-                "pictures": {"type": "string", "description": "Word files: picture numbers to return as images, "
+                "pictures": {"type": "string", "description": "Not for PDFs: picture numbers to return as images, "
                                                               "like \"5-8\" (at most 4 per call); when given, pages "
                                                               "and view are ignored."},
             }, ["path"]),
@@ -262,9 +266,12 @@ class ReadDocument:
         if ctx.binding is None or ctx.workspace is None:
             return ToolOutcome(ToolStatus.DENIED, _text("no workspace is bound to this conversation", error=True))
         args = invocation.arguments
+        # An optional argument a model fills with "" means it is not given: models often send every property
+        # of the schema (seen live with openai/gpt-6-luna, which then never saw the page). A null never gets
+        # here: the Dispatcher checks the arguments against the schema first.
+        raw_pictures, raw_pages = (_given(args.get(name)) for name in ("pictures", "pages"))
         try:
-            pictures = None if args.get("pictures") is None else parse_selection(args["pictures"], positions=False)
-            raw_pages = args.get("pages")
+            pictures = None if raw_pictures is None else parse_selection(raw_pictures, positions=False)
             pages = (parse_selection("1-" if raw_pages is None else raw_pages, positions=True)
                      if pictures is None else None)
         except SelectionError as error:
@@ -291,7 +298,7 @@ class ReadDocument:
             return ToolOutcome(ToolStatus.DENIED, _text(f"{shown}: documents cannot be read on this server now",
                                                         error=True))
         except DocumentRefused as refused:
-            return _refused(f"{shown}: {self._why(refused.reason)}")
+            return _refused(f"{shown}: {self._why(refused.reason, shown)}")
         head = (f"{shown} ({_FORMAT_NAMES.get(reading.format, reading.format)}, {reading.units:,} "
                 f"{_plural(reading.unit_name, reading.units)}, {_size(len(data))})")
         if pictures is not None:
@@ -299,21 +306,21 @@ class ReadDocument:
         assert pages is not None
         return self._pages(head, shown, reading, pages[0], view, fingerprint, len(data))
 
-    def _why(self, reason: str) -> str:
+    def _why(self, reason: str, shown: str) -> str:
         if reason == "encrypted":
             return "password-protected; ask the user for an unprotected copy"
         if reason == "legacy":
             return ("an old binary Office or HWP file (.doc, .xls, .ppt, .hwp), which read_document cannot read; "
                     "ask the user to save it as .docx or .pdf")
         if reason == "not_a_document":
-            return "not a PDF or Word document; if it is text, use read_file"
-        if reason.startswith("later:"):
-            name, library = _LATER.get(reason[6:], (reason[6:], ""))
-            hint = f"; use run_command with {library}" if self._reader.scripts and library else ""
-            return f"reading {name} files is not available yet{hint}"
+            return "not a PDF, Word, Excel, PowerPoint or HWPX document; if it is text, use read_file"
         if reason in ("position_past_end", "bad_position"):
             return "not a valid position; pass the next value of an earlier result as given"
-        return f"could not read this document ({reason.replace('_', ' ')})"
+        why = f"could not read this document ({reason.replace('_', ' ')})"
+        if reason in _AT_A_LIMIT and self._reader.scripts:  # §4.2: a huge sheet read on from far into it
+            library = _LIBRARIES.get(posixpath.splitext(shown)[1].lower(), "a Python script")
+            why += f"; it may be too large to read this way: use run_command with {library}"
+        return why
 
     def _pages(self, head: str, shown: str, reading: Reading, pieces: tuple[Piece, ...], view: bool,
                fingerprint: str, size: int) -> ToolOutcome:
@@ -386,7 +393,7 @@ class ReadDocument:
     def _pictures(self, head: str, shown: str, reading: Reading, pieces: tuple[Piece, ...], fingerprint: str,
                   size: int) -> ToolOutcome:
         if reading.format == "pdf":
-            return _refused(f"{shown}: pictures is for Word files; for a PDF use pages with view")
+            return _refused(f"{shown}: pictures is not for PDFs; for a PDF use pages with view")
         if not clip(pieces, 0, reading.picture_total):
             return _refused(f"{shown}: the document has {reading.picture_total:,} "
                             f"{_plural('picture', reading.picture_total)}")
@@ -409,6 +416,11 @@ class ReadDocument:
         images = tuple(ResultImage(i.data, i.media_type) for i in reading.images)
         return ToolOutcome(ToolStatus.SUCCEEDED, _text("".join(blocks).rstrip("\n")), raw_result=raw,
                            result_images=images)
+
+
+def _given(value: object) -> object:
+    """None for an argument left out or empty ("", whitespace); the value otherwise."""
+    return None if value is None or (isinstance(value, str) and not value.strip()) else value
 
 
 def _budget(shown: str) -> int:

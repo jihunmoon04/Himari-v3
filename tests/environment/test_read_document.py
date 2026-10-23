@@ -201,8 +201,7 @@ def test_document_text_cannot_fake_the_structure(env: InsideEnvironment, reader:
 @pytest.mark.parametrize(("reason", "words"), [
     ("encrypted", "password-protected"),
     ("legacy", "old binary Office or HWP"),
-    ("not_a_document", "not a PDF or Word document"),
-    ("later:xlsx", "reading Excel (.xlsx) files is not available yet; use run_command with openpyxl"),
+    ("not_a_document", "not a PDF, Word, Excel, PowerPoint or HWPX document"),
     ("position_past_end", "not a valid position"),
     ("broken", "could not read this document (broken)"),
 ])
@@ -210,6 +209,27 @@ def test_refusals_say_why(env: InsideEnvironment, reader: Scripted, doc: bytes, 
     reader.answer = DocumentRefused(reason)
     outcome = run(env, path="report.pdf")
     assert outcome.status is ToolStatus.FAILED and words in text(outcome)
+
+
+@pytest.mark.parametrize("scripts", [True, False])
+def test_a_worker_out_of_time_points_to_run_command(env: InsideEnvironment, reader: Scripted, scripts: bool) -> None:
+    # §4.2 (review N2): a huge sheet read on from far into it can use up the worker's CPU; the hint only when
+    # run_command has the toolkit.
+    (Path(env.host_root(ALICE)) / "conversations/c1/big.xlsx").write_bytes(b"PK a workbook")
+    reader.scripts = scripts
+    for reason in ("worker_processgone", "timed_out", "out_of_memory"):
+        reader.answer = DocumentRefused(reason)
+        body = text(run(env, path="big.xlsx"))
+        assert "/big.xlsx: could not read this document (" in body
+        assert ("; it may be too large to read this way: use run_command with openpyxl" in body) is scripts
+    reader.answer = DocumentRefused("broken")
+    assert "run_command" not in text(run(env, path="big.xlsx"))
+    if scripts:  # review 2 N-new-5: templates, slideshows and macro files too
+        for name, library in (("t.xltm", "openpyxl"), ("s.ppsx", "python-pptx"), ("d.dotx", "python-docx"),
+                              ("h.hwpx", "zipfile and xml.etree"), ("x.bin", "a Python script")):
+            (Path(env.host_root(ALICE)) / "conversations/c1" / name).write_bytes(b"PK a document")
+            reader.answer = DocumentRefused("timed_out")
+            assert text(run(env, path=name)).endswith(f"use run_command with {library}")
 
 
 def test_unavailable_is_denied_and_large_files_are_not_read(env: InsideEnvironment, reader: Scripted,
@@ -235,7 +255,7 @@ def test_read_file_points_binary_documents_here(env: InsideEnvironment, doc: byt
                       workspace=ConversationWorkspace(ALICE, "conversations/c1"))
     outcome = asyncio.run(handler.run(ToolInvocation(ToolId("inside/read_file"), CallId("c"), {"path": "b.bin"}),
                                       ctx))
-    assert "read PDF and Word documents with read_document" in text(outcome)
+    assert "read PDF, Office and HWPX documents with read_document" in text(outcome)
 
 
 def test_a_huge_range_past_the_end_is_answered_at_once(env: InsideEnvironment, reader: Scripted, doc: bytes) -> None:
@@ -275,4 +295,29 @@ def test_tail_shaped_document_lines_are_escaped(env: InsideEnvironment, reader: 
 def test_pages_null_is_the_default(env: InsideEnvironment, reader: Scripted, doc: bytes) -> None:
     reader.answer = reading([whole(1)], units=1)
     assert run(env, path="report.pdf", pages=None).status is ToolStatus.SUCCEEDED
+    assert reader.calls[-1]["pages"] == (Piece(1, None),)
+
+
+def test_a_resumed_sheet_shows_its_column_row_again(env: InsideEnvironment, reader: Scripted) -> None:
+    # §4.2 (re-check N2): the header goes before the text and is not part of the positions.
+    data = b"PK sheet"
+    (Path(env.host_root(ALICE)) / "conversations/c1/s.xlsx").write_bytes(data)
+    f = fingerprint_of(data, SALT)
+    reader.answer = reading([Part(1, (), 0, 500, 520, None, "| 40 | x |\n| 41 | y |\n",
+                                  header="| row | A |\n| --- | --- |\n")], fmt="xlsx", unit_name="sheet", units=1)
+    body = text(run(env, path="s.xlsx", pages=f"1:500@{f}"))
+    assert ("=== sheet 1 (characters 500-520 of ?) ===\n| row | A |\n| --- | --- |\n| 40 | x |\n| 41 | y |\n"
+            in body)
+    assert f'read on with pages="1:520@{f}"' in body
+
+
+def test_empty_optional_arguments_are_not_given(env: InsideEnvironment, reader: Scripted, doc: bytes) -> None:
+    # Seen live: a model sent pictures="" with pages and view; every such call failed and it never saw the page.
+    image = jpeg()
+    reader.answer = reading([whole(3)], images=(Picture(3, None, "image/jpeg", image),))
+    outcome = run(env, path="report.pdf", pages="3", view=True, pictures="")
+    assert outcome.status is ToolStatus.SUCCEEDED and len(outcome.result_images) == 1
+    assert reader.calls[-1]["pages"] == (Piece(3, 3),) and reader.calls[-1]["pictures"] is None
+    reader.answer = reading([whole(1)], units=1)
+    assert run(env, path="report.pdf", pages="  ", pictures=None).status is ToolStatus.SUCCEEDED
     assert reader.calls[-1]["pages"] == (Piece(1, None),)

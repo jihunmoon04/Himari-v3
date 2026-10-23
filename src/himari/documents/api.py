@@ -39,6 +39,7 @@ class Part:
     text: str
     label: str | None = None
     mid_line: bool = False
+    header: str | None = None  # a sheet resumed at a row: its column row and rule again, not in the positions
 
     @property
     def cut(self) -> bool:
@@ -75,7 +76,7 @@ class Reading:
 
 class DocumentRefused(Exception):
     """The document cannot be read; ``reason`` is the worker's word
-    (encrypted, legacy, not_a_document, broken, later:<format>,
+    (encrypted, legacy, not_a_document, broken,
     position_past_end, bad_position, ...) or "a bad answer"."""
 
     def __init__(self, reason: str) -> None:

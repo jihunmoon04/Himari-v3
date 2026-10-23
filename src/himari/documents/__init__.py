@@ -388,11 +388,17 @@ def _checked(lines: list[bytes], pages: tuple[Piece, ...] | None, pictures: tupl
                 raise ValueError("flags")
             if label is not None and not (isinstance(label, str) and _LABEL.fullmatch(label)):
                 raise ValueError("label")
+            header = raw.get("header")
+            if header is not None and not (
+                    isinstance(header, str) and begin > 0 and raw.get("mid_line") is not True
+                    and len(heading := header.splitlines(keepends=True)) == 2
+                    and all(line.startswith("|") and line.endswith("|\n") for line in heading)):
+                raise ValueError("header")  # the column row and its rule, only where a sheet resumes at a row
             part = Part(n, tuple(flags), _int(raw["pictures"]), begin, end, length, text, label,
-                        raw.get("mid_line") is True)
+                        raw.get("mid_line") is True, header)
             if part.cut and index != len(raw_parts) - 1:
                 raise ValueError("a cut part is not last")
-            used += len(text.encode("utf-8"))
+            used += len(text.encode("utf-8")) + len((header or "").encode("utf-8"))
             parts.append(part)
         if used > text_budget:
             raise ValueError("text over budget")

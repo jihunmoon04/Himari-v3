@@ -15,28 +15,9 @@ from typing import Any
 
 import pytest
 
-from himari.documents import PYTHON, WORKER
+from documents_kit import PYTHON, SITE, TOOLKIT, WORKER, make, worker
 
-TOOLKIT = os.environ.get("HIMARI_DOCUMENTS_TOOLKIT", "")
 pytestmark = pytest.mark.skipif(not TOOLKIT, reason="needs an installed documents toolkit (opt-in)")
-SITE = os.path.join(TOOLKIT, "site-packages")
-
-
-def make(tmp_path: Path, name: str, script: str) -> bytes:
-    """A document made by ``script`` with the toolkit; ``OUT`` is its path."""
-    out = tmp_path / name
-    code = f"import sys; sys.path.insert(0, {SITE!r}); OUT = {str(out)!r}\n" + textwrap.dedent(script)
-    subprocess.run([PYTHON, "-I", "-S", "-c", code], check=True)
-    return out.read_bytes()
-
-
-def worker(data: bytes, **request: Any) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    body = {"op": "read", "data": base64.b64encode(data).decode(), "pages": [{"first": 1, "last": None, "start": 0}],
-            "pictures": None, "view": False, "text_budget": 60000, **request}
-    done = subprocess.run([PYTHON, "-I", "-S", str(WORKER), SITE], input=json.dumps(body).encode() + b"\n",
-                          capture_output=True, timeout=120, check=True)
-    lines = [json.loads(line) for line in done.stdout.splitlines()]
-    return lines[0], lines[1:]
 
 
 PDF_PAGES = """
@@ -165,17 +146,12 @@ def test_a_cut_unit_is_read_on_exactly(tmp_path: Path) -> None:
     assert past == {"ok": False, "reason": "position_past_end"}
 
 
-@pytest.mark.parametrize(("name", "script", "reason"), [
-    ("a.xlsx", "import openpyxl; w = openpyxl.Workbook(); w.active['A1'] = 1; w.save(OUT)", "later:xlsx"),
-    ("a.pptx", "import pptx; pptx.Presentation().save(OUT)", "later:pptx"),
-    ("enc.pdf", """
-from pypdf import PdfWriter
-w = PdfWriter(); w.add_blank_page(100, 100); w.encrypt("secret"); w.write(OUT)
-""", "encrypted"),
-])
-def test_formats_not_read_now(tmp_path: Path, name: str, script: str, reason: str) -> None:
-    head, _ = worker(make(tmp_path, name, script))
-    assert head == {"ok": False, "reason": reason}
+def test_an_encrypted_pdf(tmp_path: Path) -> None:
+    data = make(tmp_path, "enc.pdf", """
+        from pypdf import PdfWriter
+        w = PdfWriter(); w.add_blank_page(100, 100); w.encrypt("secret"); w.write(OUT)
+    """)
+    assert worker(data)[0] == {"ok": False, "reason": "encrypted"}
 
 
 @pytest.mark.parametrize(("data", "reason"), [
@@ -186,16 +162,6 @@ def test_formats_not_read_now(tmp_path: Path, name: str, script: str, reason: st
 ])
 def test_what_is_not_a_document_now(data: bytes, reason: str) -> None:
     assert worker(data)[0] == {"ok": False, "reason": reason}
-
-
-def test_hwpx_is_detected_by_its_mimetype(tmp_path: Path) -> None:
-    import zipfile
-
-    path = tmp_path / "a.hwpx"
-    with zipfile.ZipFile(path, "w") as archive:
-        archive.writestr("mimetype", "application/hwp+zip")
-        archive.writestr("Contents/section0.xml", "<x/>")
-    assert worker(path.read_bytes())[0] == {"ok": False, "reason": "later:hwpx"}
 
 
 # --- review of PR #70 ------------------------------------------------------------------------
