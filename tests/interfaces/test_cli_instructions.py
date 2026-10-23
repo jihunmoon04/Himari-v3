@@ -72,16 +72,43 @@ def test_show_set_from_a_file_and_from_stdin(harness: Harness, tmp_path: Path) -
     (tmp_path / "rules.md").write_text("# Rules\n\tAnswer in Korean.\n- 짧게\n", encoding="utf-8")
     code, out, err = harness.run("instructions", "set", "rules.md")
     assert (code, out, err) == (cli.EXIT_OK, "", "(saved; applies from the next message)\n")
-    code, out, _ = harness.run("instructions")
-    assert code == cli.EXIT_OK and out == "# Rules\n\tAnswer in Korean.\n- 짧게\n\n"  # as written: it can be set again
+    assert harness.run("instructions")[1] == "# Rules\n\tAnswer in Korean.\n- 짧게\n"  # exactly as stored
     assert harness.run("instructions", "set", "-", stdin="from stdin\r\n")[0] == cli.EXIT_OK
     assert harness.text() == "from stdin\n"
 
 
-def test_unsafe_characters_are_escaped_when_shown(harness: Harness) -> None:
-    harness.run("instructions", "set", "-", stdin="left‮right")  # a bidi override is stored, not shown raw
-    out = harness.run("instructions")[1]
-    assert "‮" not in out and "\\u202e" in out
+@pytest.mark.parametrize("text", [
+    "Use regex \\d+ and C:\\Users.\nFamily 👨\u200d👩\u200d👧\n",  # backslashes, a ZWJ emoji, a final newline
+    "no final newline",
+    "bidi \u202e kept\n\n",
+])
+def test_show_into_a_file_then_set_changes_nothing(harness: Harness, tmp_path: Path, text: str) -> None:
+    # PR #67 review B1: shown into a file or a pipe, the text is the stored one, so it can be set again.
+    harness.run("instructions", "set", "-", stdin=text)
+    for _ in range(2):  # and again: nothing compounds
+        (tmp_path / "f.md").write_text(harness.run("instructions")[1], encoding="utf-8")
+        assert harness.run("instructions", "set", "f.md")[0] == cli.EXIT_OK
+        assert harness.text() == text
+
+
+def test_a_terminal_sees_unsafe_characters_escaped(harness: Harness) -> None:
+    class Terminal(io.StringIO):
+        def isatty(self) -> bool:
+            return True
+
+    harness.run("instructions", "set", "-", stdin="left\u202eright\n\tmore")
+    out = Terminal()
+    session = cli.Session(ServerClient(harness.authorized()), cli.Printer(out), io.StringIO())
+    assert cli.cmd_instructions(session, cli.parser().parse_args(["instructions"])) == cli.EXIT_OK
+    assert out.getvalue() == "left\\u202eright\n\tmore\n"  # for reading: shown, not acted on
+
+
+def test_a_file_with_a_byte_order_mark(harness: Harness, tmp_path: Path) -> None:
+    (tmp_path / "notepad.txt").write_bytes("\ufeffAnswer in Korean.".encode())  # PR #67 review N4
+    assert harness.run("instructions", "set", "notepad.txt")[0] == cli.EXIT_OK
+    assert harness.text() == "Answer in Korean."
+    assert harness.run("instructions", "set", "-", stdin="\ufeffFrom a pipe.")[0] == cli.EXIT_OK
+    assert harness.text() == "From a pipe."
 
 
 def test_clear_asks_first(harness: Harness) -> None:
@@ -97,8 +124,9 @@ def test_clear_asks_first(harness: Harness) -> None:
 
 
 def test_usage_and_refusals(harness: Harness) -> None:
-    code, _, err = harness.run("instructions", "set")
-    assert code == cli.EXIT_USAGE and "himari instructions set FILE" in err
+    for argv in (("set",), ("clear", "f.md"), ("clear", "f.md", "--yes"), ("set", "f.md", "--yes"), ("--yes",)):
+        code, _, err = harness.run("instructions", *argv)
+        assert code == cli.EXIT_USAGE and "usage: himari instructions" in err, argv
     code, _, err = harness.run("instructions", "set", "missing.md")
     assert code == cli.EXIT_USAGE and "cannot read missing.md" in err
     code, _, err = harness.run("instructions", "set", "-", stdin="x" * (MAX_INSTRUCTIONS_CHARS + 1))
@@ -106,6 +134,19 @@ def test_usage_and_refusals(harness: Harness) -> None:
     code, _, err = harness.run("instructions", "set", "-", stdin="bell\a")
     assert code == cli.EXIT_FAILED and "refused (invalid_instructions)" in err
     assert harness.text() == ""
+
+
+def test_usage_is_checked_before_the_server_is_asked(tmp_path: Path) -> None:
+    class Down(ServerClient):  # PR #67 review N2: no server needed to say how to use it
+        def __init__(self) -> None:
+            pass
+
+        def get(self, path: str, params: dict[str, Any] | None = None) -> Any:
+            raise AssertionError("asked the server")
+
+    out, err = io.StringIO(), io.StringIO()
+    code = cli.run(["instructions", "set"], environ={}, out=out, err=err, client=Down())
+    assert code == cli.EXIT_USAGE and "usage: himari instructions" in err.getvalue()
 
 
 def test_a_change_made_elsewhere_meanwhile_is_not_overwritten(harness: Harness) -> None:
@@ -120,7 +161,7 @@ def test_a_change_made_elsewhere_meanwhile_is_not_overwritten(harness: Harness) 
 
     code, _, err = harness.run("instructions", "set", "-", stdin="from the cli",
                                client=Racing(harness.authorized()))
-    assert code == cli.EXIT_FAILED and "refused (revision_conflict)" in err
+    assert code == cli.EXIT_FAILED and "refused (revision_conflict)" in err and "Run the command again" in err
     assert harness.text() == "from the web"
 
 

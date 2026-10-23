@@ -66,6 +66,9 @@ class _Other(Enum):
     (USER, "a\x00b", DataErrorCode.INVALID_ARGUMENT),
     (USER, "bell\x07", DataErrorCode.INVALID_ARGUMENT),
     (USER, "esc\x1b[31m", DataErrorCode.INVALID_ARGUMENT),
+    (USER, "a\ud800b", DataErrorCode.INVALID_ARGUMENT),  # a lone surrogate is not text (PR #67 review C1)
+    (USER, " \x0b\x0c ", DataErrorCode.INVALID_ARGUMENT),  # control characters str.strip() takes as blanks (N5)
+    (USER, "\u2028\x85", DataErrorCode.INVALID_ARGUMENT),
     (USER, 3, DataErrorCode.INVALID_ARGUMENT),
     (_Other.PROJECT, "x", DataErrorCode.INVALID_ARGUMENT),  # only the user's own is offered (§3.1)
     ("user", "x", DataErrorCode.INVALID_ARGUMENT),

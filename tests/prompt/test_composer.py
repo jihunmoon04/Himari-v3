@@ -110,7 +110,7 @@ def test_the_users_instructions_follow_the_operators_escaped(text: str, body: st
     first, section = composed.stable_prefix
     assert first == "be nice"
     assert section == f"{USER_INSTRUCTIONS_HEADER}\n<user_instructions>\n{body}\n</user_instructions>"
-    assert section.count("\n<user_instructions>\n") == 1 and section.count("</user_instructions>") == 1
+    assert section.count("<user_instructions>") == 1 and section.count("</user_instructions>") == 1  # one each
 
 
 @pytest.mark.parametrize("text", ["", "  \n\t"])

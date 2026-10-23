@@ -90,12 +90,14 @@ def check_instructions(scope: object, text: object) -> str:
     if not isinstance(text, str):
         raise DataError(DataErrorCode.INVALID_ARGUMENT, "instructions are text")
     text = text.replace("\r\n", "\n").replace("\r", "\n")
+    # Before the blank check: str.strip() would take some control characters as blanks. A lone
+    # surrogate (Cs) is not text either, and SQLite could not store it.
+    if any(unicodedata.category(c) in ("Cc", "Cs") and c not in "\n\t" for c in text):
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, "instructions may not contain control characters")
     if not text.strip():
         return ""
     if len(text) > MAX_INSTRUCTIONS_CHARS:
         raise DataError(DataErrorCode.TOO_LARGE, f"instructions are at most {MAX_INSTRUCTIONS_CHARS} characters")
-    if any(unicodedata.category(c) == "Cc" and c not in "\n\t" for c in text):
-        raise DataError(DataErrorCode.INVALID_ARGUMENT, "instructions may not contain control characters")
     return text
 
 

@@ -181,3 +181,93 @@ def test_the_request_records_what_was_used(tmp_path: Path) -> None:
             await app.close()
 
     asyncio.run(scenario())
+
+
+def test_two_principals_running_at_once_each_get_their_own(tmp_path: Path) -> None:
+    # PR #67 review C2: a snapshot shared by every Conversation would hand one principal's text to the other.
+    from himari.control.driver import session_key
+
+    async def scenario() -> None:
+        adapter = Reactive()
+        app = await opened(tmp_path, adapter)
+        try:
+            loader = app.runtime.driver._loader  # the server's shared loader state never changes
+            shared = loader._instructions  # type: ignore[attr-defined]
+            await app.set_instructions(ALICE, "Alice's rules.", 0)
+            await app.set_instructions(BOB, "Bob's rules.", 0)
+            alice = TrustedScope(ALICE, await app.create_conversation(ALICE))
+            bob = TrustedScope(BOB, await app.create_conversation(BOB))
+            owner = {session_key(alice): "Alice's rules.", session_key(bob): "Bob's rules."}
+            seen: list[tuple[str | None, str | None]] = []
+            made: dict[str | None, int] = {key: 0 for key in owner}
+            step = asyncio.Condition()
+
+            async def hold(model_input: ModelInput) -> None:
+                # Lockstep: no request is answered until the other turn has made as many, so each turn
+                # is still running whenever the other one reads its text.
+                key = model_input.request_options.session_key
+                seen.append((key, text_in(model_input)))
+                async with step:
+                    made[key] += 1
+                    step.notify_all()
+                    await step.wait_for(lambda: min(made.values()) >= made[key])
+
+            adapter.hold = hold
+            await app.send(alice, "one")
+            await app.send(bob, "two")
+            await asyncio.wait_for(asyncio.gather(app.runner.wait(alice), app.runner.wait(bob)), 10)
+            assert len(seen) == 4 and all(text == owner[key] for key, text in seen)  # type: ignore[index]
+            assert loader._instructions is shared  # type: ignore[attr-defined]
+        finally:
+            await app.close()
+
+    asyncio.run(scenario())
+
+
+def test_in_the_provider_request_they_come_before_the_server_notes() -> None:
+    # PR #67 review C3: operator instructions and notes, then the user's, then the MCP servers' notes.
+    import json
+    from dataclasses import replace
+
+    from himari.data.api import PersistedStateBasis
+    from himari.prompt.api import NOTES_HEADER, PromptInputs, RequestOptions, SourceNote
+    from himari.prompt.composer import Composer
+    from himari.provider.openrouter import OpenRouterAdapter
+
+    inputs = PromptInputs(instructions=("You are HIMARI.", "A system note."), tool_catalog=(), events=(),
+                          tool_executions=(), snapshot=None, state_basis=PersistedStateBasis(0, 0, (), (), ()),
+                          observations=(), request_options=RequestOptions("m"), trigger_refs=(),
+                          source_notes=(SourceNote("calliope", "system", "Calliope's notes."),))
+    model_input = Composer().compose(replace(inputs, user_instructions="Answer in Korean."))
+    body = json.loads(OpenRouterAdapter("sk-test").prepare_native_request(model_input).body)
+    system = body["messages"][0]
+    assert system["role"] == "system"
+    content = system["content"]
+    order = [content.index(part) for part in ("You are HIMARI.", "A system note.", USER_INSTRUCTIONS_HEADER,
+                                              "Answer in Korean.", NOTES_HEADER, "Calliope's notes.")]
+    assert order == sorted(order)
+
+
+def test_a_compaction_request_does_not_carry_them(tmp_path: Path) -> None:
+    # PR #67 review C3: the summary request has its own instructions; the user's are not in it.
+    from himari.prompt.compaction import COMPACTION_INSTRUCTIONS
+
+    async def scenario() -> None:
+        adapter = ScriptedAdapter([NormalizedFinal((TextBlock("SUMMARY"),))] * 12)
+        app = await opened(tmp_path, adapter, context_tokens=2800)
+        try:
+            await app.set_instructions(ALICE, "ZQX rule.", 0)
+            scope = TrustedScope(ALICE, await app.create_conversation(ALICE))
+            for text in ("가" * 550, "가" * 550, "가" * 550, "next"):
+                await app.send(scope, text)
+                await app.runner.wait(scope)
+            pairs = list(zip(adapter.prepared_inputs, adapter.sent, strict=True))
+            summaries = [sent for model_input, sent in pairs if model_input.stable_prefix == (COMPACTION_INSTRUCTIONS,)]
+            turns = [sent for model_input, sent in pairs if model_input.stable_prefix != (COMPACTION_INSTRUCTIONS,)]
+            assert summaries and turns  # it did compact
+            assert all(b"ZQX rule." not in sent.body for sent in summaries)
+            assert all(b"ZQX rule." in sent.body for sent in turns)
+        finally:
+            await app.close()
+
+    asyncio.run(scenario())

@@ -324,8 +324,9 @@ class Driver:
             raise ControlError(ControlErrorCode.BUSY, scope.conversation_id)
         async with lock:
             model = await self._resolve_model(scope)  # once per turn (V3-P64 §5)
+            text = await self._read_user_instructions(scope)  # and the user's instructions (V3-P69 §5)
             self._turn_models[scope.conversation_id] = model
-            self._turn_instructions[scope.conversation_id] = await self._read_user_instructions(scope)
+            self._turn_instructions[scope.conversation_id] = text
             self._signals[scope.conversation_id] = stop if stop is not None else StopSignal()
             self._turns[scope.conversation_id] = Turn(self._turn_budget, self._max_runs, progress,
                                                       model.offer.max_output_tokens)

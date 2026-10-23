@@ -830,38 +830,54 @@ SANDBOX_TEXT = {
 
 
 def instructions_text(text: str, encoding: str | None) -> str:
-    """The user's instructions as written, lines and tabs kept (so the output
-    can be saved and set again); anything unsafe on a terminal escaped."""
+    """For a terminal: lines and tabs kept, anything a terminal could act on
+    or hide (e.g. bidi controls) escaped — for reading, not for setting again."""
     return "\n".join("\t".join(safe_line(part, encoding=encoding) for part in line.split("\t"))
                      for line in text.split("\n"))
 
 
+def _is_terminal(stream: Any) -> bool:
+    try:
+        return bool(stream.isatty())
+    except (AttributeError, ValueError):
+        return False
+
+
+INSTRUCTIONS_USAGE = "usage: himari instructions [set FILE|- | clear [--yes]]"
+
+
 def cmd_instructions(session: Session, args: argparse.Namespace, read: Callable[[str], str] = input) -> int:
-    """V3-P69 §8: show, ``set FILE|-``, or ``clear`` the user's instructions."""
-    current = session.client.get("/api/instructions")
-    if args.action is None:
-        if args.file is not None:
-            session.note("usage: himari instructions [set FILE|- | clear [--yes]]")
-            return EXIT_USAGE
-        if not current["text"]:
-            session.note("(no instructions)")
-        else:
-            session.printer.line(instructions_text(current["text"], session.printer.encoding))
-        return EXIT_OK
+    """V3-P69 §8: show, ``set FILE|-``, or ``clear`` the user's instructions.
+    Shown into a file or a pipe, the text is written exactly as stored, so
+    ``himari instructions > f; himari instructions set f`` changes nothing."""
+    if ((args.action is None and args.file is not None) or (args.action == "set" and args.file is None)
+            or (args.action == "clear" and args.file is not None) or (args.yes and args.action != "clear")):
+        session.note(INSTRUCTIONS_USAGE)
+        return EXIT_USAGE
+    text = ""
     if args.action == "set":
-        if args.file is None:
-            session.note("usage: himari instructions set FILE (or - for standard input)")
-            return EXIT_USAGE
         try:
             if args.file == "-":
-                text = sys.stdin.read()
+                if _is_terminal(sys.stdin):
+                    session.note("(reading the instructions from standard input; end with Ctrl-D)")
+                text = sys.stdin.read().removeprefix("\ufeff")
             else:
-                with open(args.file, encoding="utf-8") as handle:
+                with open(args.file, encoding="utf-8-sig") as handle:  # a BOM (e.g. from Notepad) is not text
                     text = handle.read()
         except (OSError, UnicodeDecodeError) as error:
             session.note(f"cannot read {safe_line(args.file)}: {safe_line(str(error))}")
             return EXIT_USAGE
-    else:
+    current = session.client.get("/api/instructions")
+    if args.action is None:
+        if not current["text"]:
+            session.note("(no instructions)")
+        elif _is_terminal(session.printer.out):
+            session.printer.line(instructions_text(current["text"], session.printer.encoding))
+        else:
+            session.printer.out.write(current["text"])  # exactly as stored (Data refuses control characters)
+            session.printer.out.flush()
+        return EXIT_OK
+    if args.action == "clear":
         if not current["text"]:
             session.note("(no instructions)")
             return EXIT_OK
@@ -873,9 +889,14 @@ def cmd_instructions(session: Session, args: argparse.Namespace, read: Callable[
             if answer not in ("y", "yes"):
                 session.note("(nothing was changed)")
                 return EXIT_OK
-        text = ""
     # Saved from the revision just read: a change made elsewhere since is refused, never overwritten.
-    session.client.put("/api/instructions", {"text": text, "revision": current["revision"]})
+    try:
+        session.client.put("/api/instructions", {"text": text, "revision": current["revision"]})
+    except ServerRefused as error:
+        if error.code != "revision_conflict":
+            raise
+        session.note(f"refused ({error.code}): {error} Run the command again to replace them.")
+        return EXIT_FAILED
     session.note("(saved; applies from the next message)" if text.strip() else "(cleared; applies from the next message)")
     return EXIT_OK
 

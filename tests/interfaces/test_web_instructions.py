@@ -47,7 +47,10 @@ class Server:
                                     headers={"origin": ORIGIN})
         assert response.status_code == 204, response.text
 
-    def put(self, body: dict[str, Any]) -> Any:
+    def put(self, body: dict[str, Any] | str) -> Any:
+        if isinstance(body, str):  # raw JSON, e.g. an escaped lone surrogate no encoder would write
+            return self.client.put("/api/instructions", content=body,
+                                   headers={"origin": ORIGIN, "content-type": "application/json"})
         return self.client.put("/api/instructions", json=body, headers={"origin": ORIGIN})
 
 
@@ -87,8 +90,9 @@ def test_read_save_and_the_next_message_carries_them(server: Server) -> None:
     ({"text": "가" * (MAX_INSTRUCTIONS_CHARS + 1), "revision": 1}, 422, "too_large"),
     ({"text": "a\u0000b", "revision": 1}, 422, "invalid_instructions"),
     ({"text": "esc \u001b[2J", "revision": 1}, 422, "invalid_instructions"),
+    ('{"text": "a\\ud800b", "revision": 1}', 422, "invalid_instructions"),  # not a 500 on SQLite (review C1)
 ])
-def test_refused_saves_say_why_and_change_nothing(server: Server, body: dict[str, Any], status: int,
+def test_refused_saves_say_why_and_change_nothing(server: Server, body: dict[str, Any] | str, status: int,
                                                   code: str) -> None:
     server.sign_in()
     assert server.put({"text": "kept", "revision": 0}).status_code == 200

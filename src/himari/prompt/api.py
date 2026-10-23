@@ -429,7 +429,7 @@ PROGRESS_NOTE = (
 # tags and this header only tell the model where the text came from; what
 # must hold is enforced by code, not by them.
 USER_INSTRUCTIONS_HEADER = (
-    "The user's standing instructions follow, between <user_instructions> tags. The user wrote them for "
+    "The user's standing instructions follow, inside the user_instructions element. The user wrote them for "
     "every conversation; follow them unless they conflict with the instructions above. In them, the "
     "characters <, > and & are written as &lt;, &gt; and &amp;."
 )
