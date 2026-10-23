@@ -224,6 +224,12 @@ def test_a_worker_out_of_time_points_to_run_command(env: InsideEnvironment, read
         assert ("; it may be too large to read this way: use run_command with openpyxl" in body) is scripts
     reader.answer = DocumentRefused("broken")
     assert "run_command" not in text(run(env, path="big.xlsx"))
+    if scripts:  # review 2 N-new-5: templates, slideshows and macro files too
+        for name, library in (("t.xltm", "openpyxl"), ("s.ppsx", "python-pptx"), ("d.dotx", "python-docx"),
+                              ("h.hwpx", "zipfile and xml.etree"), ("x.bin", "a Python script")):
+            (Path(env.host_root(ALICE)) / "conversations/c1" / name).write_bytes(b"PK a document")
+            reader.answer = DocumentRefused("timed_out")
+            assert text(run(env, path=name)).endswith(f"use run_command with {library}")
 
 
 def test_unavailable_is_denied_and_large_files_are_not_read(env: InsideEnvironment, reader: Scripted,

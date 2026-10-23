@@ -110,7 +110,7 @@ class Lines:
         self.out: list[str] = []
         self._pending: list[str] = []
         self._at_start = True
-        self._gap = -1  # where gap() put its last space
+        self._gapped = False  # the last piece is the space gap() added
 
     def text(self, value: str) -> None:
         self._pending.append(value)
@@ -119,6 +119,7 @@ class Lines:
         self._flush()
         self.out.append(value)
         self._at_start = value.endswith("\n")
+        self._gapped = False
 
     def _flush(self) -> None:
         if not self._pending:
@@ -130,18 +131,20 @@ class Lines:
                 line = "\\" + line
             self.out.append(line)
             self._at_start = line.endswith("\n")
+            self._gapped = False
 
     def gap(self) -> None:
         """A space between pieces of a line, none at its start or after another."""
         self._flush()
         if not self._at_start and not self.out[-1][-1:].isspace():
-            self._gap = len(self.out)
             self.out.append(" ")
+            self._gapped = True
 
     def end_line(self) -> None:
         self._flush()
-        if self._gap == len(self.out) - 1:  # a gap that ended the line; other spaces stay (SPLIT_RULE)
+        if self._gapped:  # a gap that ended the line; other spaces stay (SPLIT_RULE)
             self.out.pop()
+            self._gapped = False
             self._at_start = not self.out or self.out[-1].endswith("\n")
         if not self._at_start:
             self.out.append("\n")
@@ -752,14 +755,14 @@ class Xlsx(Document):
         def parse_cell(element: Any) -> dict[str, Any]:
             cell: dict[str, Any] = read_cell(element)
             found = element.find(FORMULA_TAG)
-            # A text formula whose stored value is "" says so with an empty <v> (re-review N-new-4).
-            if found is None or (element.get("t") == "str" and element.find(VALUE_TAG) is not None):
+            if found is None or (cell["value"] is not None and not found.text):
                 return cell
-            if cell["value"] is None or found.text:  # a shared formula's own cell, so the others translate
-                formula = parser.parse_formula(element)
-                text = formula if isinstance(formula, str) else getattr(formula, "text", None)
-                if cell["value"] is None and isinstance(text, str) and text != "=":
-                    cell["formula"] = cell_text(text)
+            formula = parser.parse_formula(element)  # also a shared formula's own cell, so the others translate
+            text = formula if isinstance(formula, str) else getattr(formula, "text", None)
+            # A text formula whose stored value is "" says so with an empty <v> (re-review N-new-4).
+            stored = cell["value"] is not None or (element.get("t") == "str" and element.find(VALUE_TAG) is not None)
+            if not stored and isinstance(text, str) and text != "=":
+                cell["formula"] = cell_text(text)
             return cell
 
         parser.parse_cell = parse_cell
