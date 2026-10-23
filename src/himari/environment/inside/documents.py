@@ -52,8 +52,10 @@ _FINGERPRINT = re.compile(r"[0-9a-f]{%d}" % FINGERPRINT_CHARS)
 _STRUCTURE = ("===", "[shown", "[view", "[images", "[note", "[not shown")  # every tail line's start (review B3)
 _FORMAT_NAMES = {"pdf": "PDF", "docx": "Word", "xlsx": "Excel", "pptx": "PowerPoint", "hwpx": "HWPX"}
 _AT_A_LIMIT = ("timed_out", "out_of_memory", "worker_processgone")  # the worker's time, memory or CPU ran out
-_LIBRARIES = {".pdf": "pypdf", ".docx": "python-docx", ".docm": "python-docx", ".xlsx": "openpyxl", ".xlsm": "openpyxl",
-              ".pptx": "python-pptx", ".pptm": "python-pptx", ".hwpx": "zipfile and xml.etree"}
+_LIBRARIES = {".pdf": "pypdf", **dict.fromkeys((".docx", ".docm", ".dotx", ".dotm"), "python-docx"),
+              **dict.fromkeys((".xlsx", ".xlsm", ".xltx", ".xltm"), "openpyxl"),
+              **dict.fromkeys((".pptx", ".pptm", ".potx", ".potm", ".ppsx", ".ppsm"), "python-pptx"),
+              ".hwpx": "zipfile and xml.etree"}
 GRAMMAR = ('use unit numbers like "1-5,8" or "12-", or pass the next value of an earlier result as given')
 
 DESCRIPTION = (

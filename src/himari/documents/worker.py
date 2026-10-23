@@ -110,6 +110,7 @@ class Lines:
         self.out: list[str] = []
         self._pending: list[str] = []
         self._at_start = True
+        self._gap = -1  # where gap() put its last space
 
     def text(self, value: str) -> None:
         self._pending.append(value)
@@ -134,11 +135,12 @@ class Lines:
         """A space between pieces of a line, none at its start or after another."""
         self._flush()
         if not self._at_start and not self.out[-1][-1:].isspace():
+            self._gap = len(self.out)
             self.out.append(" ")
 
     def end_line(self) -> None:
         self._flush()
-        if self.out and self.out[-1] == " ":  # a gap that ended the line
+        if self._gap == len(self.out) - 1:  # a gap that ended the line; other spaces stay (SPLIT_RULE)
             self.out.pop()
             self._at_start = not self.out or self.out[-1].endswith("\n")
         if not self._at_start:
@@ -643,6 +645,27 @@ def _value(value: object) -> str:
     return "\\" + text if text.startswith(("=", "\\")) else text
 
 
+def _sheet_size(sheet: Any) -> None:
+    """openpyxl's ReadOnlyWorksheet._get_size, stopping where the rows
+    start: with no <dimension> openpyxl reads every row to find it
+    (re-review N-new-2); the sheet is then of a size not given."""
+    import xml.etree.ElementTree as ET
+
+    from openpyxl.utils.cell import range_boundaries
+
+    with sheet._get_source() as source:
+        for _, element in ET.iterparse(source, events=("start",)):
+            if element.tag == SML + "dimension":
+                try:
+                    sheet._min_column, sheet._min_row, sheet._max_column, sheet._max_row = range_boundaries(
+                        element.get("ref") or "")
+                except (TypeError, ValueError):
+                    pass
+                return
+            if element.tag == SML + "sheetData":
+                return
+
+
 class Xlsx(Document):
     """Sheets, each a table of its stored values laid out row by row and
     only as far as asked (§4.2: the rest is not looked at)."""
@@ -653,6 +676,9 @@ class Xlsx(Document):
         super().__init__()
         import openpyxl
 
+        from openpyxl.worksheet._read_only import ReadOnlyWorksheet
+
+        ReadOnlyWorksheet._get_size = _sheet_size  # one document per worker process
         try:
             self._book = openpyxl.load_workbook(io.BytesIO(data), read_only=True, data_only=True)
             self._zip = zipfile.ZipFile(io.BytesIO(data))
@@ -716,7 +742,7 @@ class Xlsx(Document):
     def _parser(self, sheet: Any, source: Any) -> Any:
         """openpyxl's own sheet parser, as its read-only sheets use it, that
         also keeps the formula of a cell with no stored value."""
-        from openpyxl.worksheet._reader import FORMULA_TAG, WorkSheetParser
+        from openpyxl.worksheet._reader import FORMULA_TAG, VALUE_TAG, WorkSheetParser
 
         book = self._book
         parser = WorkSheetParser(source, sheet._shared_strings, data_only=True, epoch=book.epoch,
@@ -725,11 +751,15 @@ class Xlsx(Document):
 
         def parse_cell(element: Any) -> dict[str, Any]:
             cell: dict[str, Any] = read_cell(element)
-            if element.find(FORMULA_TAG) is not None:
-                formula = parser.parse_formula(element)  # every formula, so that shared ones translate
+            found = element.find(FORMULA_TAG)
+            # A text formula whose stored value is "" says so with an empty <v> (re-review N-new-4).
+            if found is None or (element.get("t") == "str" and element.find(VALUE_TAG) is not None):
+                return cell
+            if cell["value"] is None or found.text:  # a shared formula's own cell, so the others translate
+                formula = parser.parse_formula(element)
                 text = formula if isinstance(formula, str) else getattr(formula, "text", None)
                 if cell["value"] is None and isinstance(text, str) and text != "=":
-                    cell["formula"] = one_line(text)
+                    cell["formula"] = cell_text(text)
             return cell
 
         parser.parse_cell = parse_cell
@@ -782,8 +812,10 @@ class Xlsx(Document):
                 low, high = attrs.get("min") or "", attrs.get("max") or ""
                 if attrs.get("hidden") in hidden and low.isdigit() and high.isdigit():
                     hidden_columns.update(range(int(low), min(int(high), MAX_COLUMNS) + 1))
-            # The heading row's width: the declared size, else the first row's (never a later row: §4.2).
+            # The heading row's width: the declared size, else the first row's (never a later row: §4.2),
+            # and as far as the hidden columns, so that none is shown unmarked (re-review B-new-1).
             width = sheet.max_column if known and sheet.max_column else len(peeked[1]) if peeked else 1
+            width = max(width, max(hidden_columns, default=0))
             columns = max(1, min(width, MAX_COLUMNS))
             names = [f"{_letters(c)} [hidden]" if c in hidden_columns else _letters(c) for c in range(1, columns + 1)]
             yield "| row | " + " | ".join(names) + " |\n", "header"
