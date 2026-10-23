@@ -760,6 +760,12 @@ def run_instructions(base: str, token: str, shots: str | None, root: str, provid
         set_elsewhere(root, "Theirs again.")
         save.click()
         expect(page.locator("#instructions-conflict")).to_be_visible(timeout=5000)
+        expect(page.locator("#instructions-load")).to_be_focused()  # the keyboard lands on a choice
+        set_elsewhere(root, "Theirs a third time.")  # changed again after the user was told: not overwritten
+        page.click("#instructions-overwrite")
+        expect(page.locator("#status-bar")).to_have_text("Changed again elsewhere; choose again.", timeout=5000)
+        expect(page.locator("#instructions-load")).to_be_focused()
+        expect(text).to_have_value("Mine again.")
         page.click("#instructions-overwrite")
         expect(page.locator("#status-bar")).to_have_text("Saved. Applies from the next message.", timeout=5000)
         expect(text).to_have_value("Mine again.")
@@ -784,6 +790,7 @@ def run_instructions(base: str, token: str, shots: str | None, root: str, provid
         page.context.clear_cookies()
         save.click()
         expect(page.locator("#surface-login")).to_be_visible(timeout=5000)
+        expect(page.locator("#status-bar")).to_have_text("Signed out; your instructions are kept. Sign in to continue.")
         page.fill("#login-token", token)
         page.click("#login-submit")
         expect(page.locator("#surface-instructions")).to_be_visible(timeout=5000)
