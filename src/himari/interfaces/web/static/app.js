@@ -125,6 +125,8 @@ const app = {
   work: null, // the work block the next tool step goes into (V3-P68 §5.1)
   rowsRunning: null, // the job state the rows without a result were last painted for
   attachKeys: 0,
+  instructions: null, // the saved instructions (V3-P69 §7): {text, revision, updated_at, max_chars}
+  savingInstructions: false,
 };
 
 const views = new AppViews(api, el, () => app.conversationId);
@@ -136,7 +138,9 @@ function status(text, tone) {
 }
 
 function showSurface(name) {
-  for (const surface of ["login", "home", "chat", "trash"]) $(`surface-${surface}`).hidden = surface !== name;
+  for (const surface of ["login", "home", "chat", "trash", "instructions"]) {
+    $(`surface-${surface}`).hidden = surface !== name;
+  }
   const signedIn = name !== "login";
   $("sidebar").hidden = !signedIn;
   $("sidebar-toggle").hidden = !signedIn;
@@ -178,6 +182,7 @@ async function signIn(event) {
 }
 
 async function signOut() {
+  if (!(await mayLeave())) return;
   try {
     await api("DELETE", "/api/session");
   } finally {
@@ -221,6 +226,7 @@ function markSelected() {
 }
 
 async function showHome() {
+  if (!(await mayLeave())) return;
   stopPolling();
   app.conversationId = null;
   app.generation += 1;
@@ -245,6 +251,7 @@ async function showHome() {
 }
 
 async function newConversation() {
+  if (!(await mayLeave())) return;
   let created;
   try {
     created = await api("POST", "/api/conversations", {});
@@ -1222,6 +1229,7 @@ function poll(generation) {
 }
 
 async function openConversation(id) {
+  if (!(await mayLeave())) return;
   stopPolling();
   app.generation += 1;
   clearAttachments();
@@ -1494,6 +1502,7 @@ async function loadTrash(reset) {
 }
 
 async function showTrash() {
+  if (!(await mayLeave())) return;
   stopPolling();
   views.reset();
   app.conversationId = null;
@@ -1507,6 +1516,99 @@ async function showTrash() {
     + " after they were moved. " : "") + "Restore one to read it again.";
   status("");
   await loadTrash(true);
+}
+
+/* ------------------------------------------------------------ instructions */
+
+/* V3-P69 §7: the user's instructions for every conversation. A save sends the
+   revision the text was edited from; one made elsewhere since is never
+   overwritten without the user choosing to. */
+
+function characters(text) {
+  return [...text].length; // code points, as the server counts
+}
+
+function instructionsDirty() {
+  return app.instructions !== null && $("instructions-text").value !== app.instructions.text;
+}
+
+function paintInstructions() {
+  const saved = app.instructions;
+  const text = $("instructions-text").value;
+  const max = saved ? saved.max_chars : 0;
+  const count = characters(text);
+  const counter = $("instructions-count");
+  counter.textContent = `${count.toLocaleString()} / ${max.toLocaleString()}`;
+  counter.classList.toggle("is-over", count > max);
+  const dirty = instructionsDirty();
+  $("instructions-save").disabled = !saved || !dirty || count > max || app.savingInstructions;
+  $("instructions-discard").disabled = !dirty || app.savingInstructions;
+  $("instructions-text").readOnly = app.savingInstructions;
+  $("instructions-saved").textContent = !saved || saved.updated_at === null ? ""
+    : `Saved ${new Date(saved.updated_at).toLocaleString()}`;
+}
+
+async function loadInstructions() {
+  const saved = await api("GET", "/api/instructions");
+  app.instructions = saved;
+  $("instructions-text").value = saved.text;
+  $("instructions-conflict").hidden = true;
+  paintInstructions();
+}
+
+async function showInstructions() {
+  if (!$("surface-instructions").hidden) return;
+  if (!(await mayLeave())) return;
+  stopPolling();
+  views.reset();
+  app.conversationId = null;
+  app.generation += 1;
+  clearAttachments();
+  markSelected();
+  app.instructions = null;
+  $("instructions-text").value = "";
+  showSurface("instructions");
+  closeNav();
+  $("topbar-title").textContent = "Instructions";
+  status("");
+  paintInstructions();
+  await loadInstructions();
+  $("instructions-text").focus();
+}
+
+/* ``over``: the user chose to replace a version saved elsewhere with theirs. */
+async function saveInstructions(over) {
+  if (app.savingInstructions || app.instructions === null) return;
+  app.savingInstructions = true;
+  paintInstructions();
+  try {
+    const text = $("instructions-text").value;
+    const revision = over ? (await api("GET", "/api/instructions")).revision : app.instructions.revision;
+    const saved = await api("PUT", "/api/instructions", { text, revision });
+    app.instructions = saved;
+    $("instructions-text").value = saved.text; // as stored: newlines and blank text normalized
+    $("instructions-conflict").hidden = true;
+    status("Saved. Applies from the next message.", "ok");
+  } catch (error) {
+    if (error.code === "revision_conflict") {
+      $("instructions-conflict").hidden = false; // the user chooses; nothing is overwritten
+      status("");
+    } else {
+      status(error.message, "error");
+    }
+  } finally {
+    app.savingInstructions = false;
+    paintInstructions();
+  }
+}
+
+/* Leaving the instructions with unsaved changes asks first; leaving drops them. */
+async function mayLeave() {
+  if ($("surface-instructions").hidden || !instructionsDirty()) return true;
+  const leave = await confirmAction("Leave without saving?", ["Your changes to the instructions are not saved."],
+                                    "Leave");
+  if (leave) $("instructions-text").value = app.instructions.text;
+  return leave;
 }
 
 async function restoreConversation(item, button) {
@@ -1604,6 +1706,18 @@ async function boot() {
   $("login-form").addEventListener("submit", signIn);
   $("nav-sign-out").addEventListener("click", signOut);
   $("nav-trash").addEventListener("click", () => showTrash().catch((e) => status(e.message, "error")));
+  $("nav-instructions").addEventListener("click", () => showInstructions().catch((e) => status(e.message, "error")));
+  $("instructions-text").addEventListener("input", paintInstructions);
+  $("instructions-save").addEventListener("click", () => saveInstructions(false));
+  $("instructions-overwrite").addEventListener("click", () => saveInstructions(true));
+  $("instructions-discard").addEventListener("click", () => {
+    $("instructions-text").value = app.instructions ? app.instructions.text : "";
+    paintInstructions();
+  });
+  $("instructions-load").addEventListener("click", () => loadInstructions().catch((e) => status(e.message, "error")));
+  window.addEventListener("beforeunload", (event) => {
+    if (!$("surface-instructions").hidden && instructionsDirty()) event.preventDefault(); // unsaved: the browser asks
+  });
   $("trash-load-more").addEventListener("click", () => loadTrash(false).catch((e) => status(e.message, "error")));
   $("chat-menu-delete").addEventListener("click", deleteConversation);
   $("nav-home").addEventListener("click", () => showHome().catch((e) => status(e.message, "error")));

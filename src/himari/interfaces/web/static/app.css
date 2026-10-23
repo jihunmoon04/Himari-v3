@@ -791,6 +791,74 @@ textarea {
   padding: var(--space-4);
 }
 
+/* The user's instructions (V3-P69 §7): one wide text box in the reading column. */
+.instructions > .hint,
+.instructions-text,
+.instructions-bar,
+.instructions-conflict {
+  max-width: var(--reading-max);
+  margin-left: auto;
+  margin-right: auto;
+}
+
+.instructions-text {
+  display: block;
+  width: 100%;
+  min-height: 320px;
+  margin-top: var(--space-3);
+  padding: var(--space-3);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  background: var(--surface-raised);
+  color: var(--text);
+  font: 14px/1.6 var(--mono);
+  resize: vertical;
+  box-sizing: border-box;
+}
+
+.instructions-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+}
+
+.instructions-bar .hint {
+  margin: 0;
+}
+
+.instructions-bar .instructions-saved {
+  margin-right: auto; /* the buttons go to the end */
+}
+
+.instructions-count.is-over {
+  color: var(--danger);
+  font-weight: 600;
+}
+
+.instructions-conflict {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--warn-edge);
+  border-radius: var(--radius-md);
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+
+.instructions-conflict[hidden] {
+  display: none;
+}
+
+.instructions-conflict p {
+  flex: 1 1 100%;
+  margin: 0;
+}
+
 .surface > h1 {
   max-width: var(--reading-max);
   margin-left: auto;
