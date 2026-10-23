@@ -201,6 +201,7 @@
 | 경로 문제(밖, 링크, 없음) | `read_file`과 같음 | 같음 |
 | 파일이 `MAX_DOCUMENT_BYTES`보다 큼(C4, 아래) | FAILED | "too large for read_document (… MB, limit … MB); use run_command" |
 | `pages` 문법 오류, 0, 거꾸로 된 범위, 범위 밖뿐 | FAILED | 문법과 문서의 단위 수 |
+| 지문 없는 `N:K`, 지문이 지금 파일과 다름(파일·도구 모음이 바뀜), K가 단위 길이 이상 | FAILED | 결과의 `next`를 그대로 넘기라는 안내, 또는 "the document changed …; read it again from the start" |
 | 문서가 아님, 구형 형식 | FAILED | §3의 글 |
 | 암호가 걸린 PDF, 암호가 걸린 Office 문서(OLE2 `EncryptedPackage`) | FAILED | "password-protected; ask the user for an unprotected copy" |
 | 깨진 파일, 작업자 실패(한도 초과 포함), 거짓 응답 | FAILED | "could not read this document (…)": 짧은 이유 한 마디 |
