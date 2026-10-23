@@ -436,7 +436,8 @@ DOCUMENTS_READ_NOTE = (
 def documents_script_note(modules: Sequence[str], fonts: Sequence[str]) -> str:
     """The run_command sentence, naming only what the toolkit's check found."""
     note = ("To create or change documents, write a Python script and run it with run_command as `python3 "
-            f"script.py` (not with -I or -E): it can import {', '.join(modules)}.")
+            f"script.py` (not with -I or -E): it can import {', '.join(modules)}, which PYTHONPATH puts ahead of "
+            "packages in any virtual environment you make.")
     if fonts:
         note += (f" For Korean or other non-Latin text in a PDF, register {' and '.join(fonts)} from the folder in "
                  "$HIMARI_FONTS with reportlab.")

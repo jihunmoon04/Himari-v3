@@ -55,8 +55,68 @@ def test_the_sentences() -> None:
     assert read_only == (DOCUMENTS_READ_NOTE,)
     read, script = _documents_notes(Reader(), kit, True)  # type: ignore[arg-type]
     assert read == DOCUMENTS_READ_NOTE
-    assert "it can import pypdfium2, docx, reportlab, PIL." in script  # the toolkit's order, known names only
+    assert "it can import pypdfium2, docx, reportlab, PIL, which PYTHONPATH" in script  # known names, in order
     assert "register NanumGothic-Regular.ttf and NanumGothic-Bold.ttf from the folder in $HIMARI_FONTS" in script
     assert "evil" not in script and "not with -I or -E" in script and script.endswith("with present_file.")
     _, no_fonts = _documents_notes(Reader(), Kit(None), True)  # type: ignore[arg-type]
     assert "HIMARI_FONTS" not in no_fonts
+
+
+def test_a_refused_toolkit_bind_costs_the_scripts_not_run_command(tmp_path: Path,
+                                                                  monkeypatch: pytest.MonkeyPatch) -> None:
+    # Review C6: the Workspace self-test refuses the bind; run_command stays, without the toolkit.
+    from himari.bootstrap import application as boot
+    from himari.sandbox.api import SandboxState
+
+    class Kit:
+        fd = 99
+        manifest: dict[str, Any] = {}
+
+        def close(self) -> None:
+            self.fd = -1
+
+    class Reading:
+        versions = {"python-docx": "1"}
+        scripts = False
+
+    class Backend:
+        def __init__(self, toolkit_fd: int | None) -> None:
+            self.toolkit_fd = toolkit_fd
+            self.state = SandboxState.CAPABLE_INACTIVE
+
+        @classmethod
+        def discover(cls, *, toolkit_fd: int | None = None) -> Backend:
+            return cls(toolkit_fd)
+
+        async def start(self, **_: Any) -> SandboxState:
+            self.state = SandboxState.SETUP_FAILED if self.toolkit_fd is not None else SandboxState.ENFORCED
+            return self.state
+
+    kit, reader = Kit(), Reading()
+
+    async def documents(*_: Any) -> tuple[Any, Any, str]:
+        return kit, reader, "on"
+
+    async def no_views(*_: Any) -> Any:
+        from himari.imaging import ImageViews
+
+        return ImageViews(None)
+
+    async def no_servers(*_: Any) -> None:
+        return None
+
+    monkeypatch.setattr(boot, "_documents", documents)
+    monkeypatch.setattr(boot, "SandboxBackend", Backend)
+    monkeypatch.setattr(boot, "_image_views", no_views)
+    monkeypatch.setattr(boot, "_server_launchers", no_servers)
+    app = asyncio.run(Application.open(tmp_path / "data", ScriptedAdapter([]), model_id="m", sandbox=True,
+                                       cleanup_seconds=None))
+    try:
+        tools = {t.definition.tool_id for t in app.inside.tools()}
+        assert {"inside/run_command", "inside/read_document"} <= tools
+        assert app.inside.sandbox is not None and app.inside.sandbox.toolkit_fd is None  # type: ignore[attr-defined]
+        assert reader.scripts is False
+        notes = instructions(app)
+        assert DOCUMENTS_READ_NOTE in notes and not any("run_command as `python3" in n for n in notes)
+    finally:
+        asyncio.run(app.close())

@@ -413,7 +413,7 @@ async def _documents(root: Path, sandbox: bool, documents_dir: str | None,
         capability = discover_capability()
         if capability is None:
             raise ToolkitRefused("this host cannot run sandboxes")
-        if not supports_tmp_size(capability):
+        if not await asyncio.to_thread(supports_tmp_size, capability):
             raise ToolkitRefused("this bwrap cannot size /tmp (--size, bwrap 0.9 or later)")
         server = ServerSandbox(capability, [str(root)])  # its own: an image sandbox failure does not turn this off
         state = await server.start()
@@ -430,6 +430,9 @@ async def _documents(root: Path, sandbox: bool, documents_dir: str | None,
     except ToolkitRefused as refused:
         toolkit.close()
         return None, None, str(refused)
+    except BaseException:  # nothing else may cost the startup, nor leak the descriptor (review N3)
+        toolkit.close()
+        raise
     return toolkit, reader, "on"
 
 
@@ -1085,6 +1088,8 @@ class Application:
                 await self.mcp.aclose()
             finally:
                 if self.toolkit is not None:
+                    if isinstance(self.inside.sandbox, SandboxBackend):
+                        self.inside.sandbox.toolkit_fd = None  # the number may be reused once closed (review N8)
                     self.toolkit.close()
                 self.store.close()
 

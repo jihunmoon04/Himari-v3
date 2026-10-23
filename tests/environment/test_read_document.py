@@ -236,3 +236,43 @@ def test_read_file_points_binary_documents_here(env: InsideEnvironment, doc: byt
     outcome = asyncio.run(handler.run(ToolInvocation(ToolId("inside/read_file"), CallId("c"), {"path": "b.bin"}),
                                       ctx))
     assert "read PDF and Word documents with read_document" in text(outcome)
+
+
+def test_a_huge_range_past_the_end_is_answered_at_once(env: InsideEnvironment, reader: Scripted, doc: bytes) -> None:
+    # Review B1: "1-9999999999" on 3 pages must not walk ten billion numbers.
+    import time
+
+    reader.answer = reading([whole(1), whole(2), whole(3)], units=3)
+    started = time.monotonic()
+    body = text(run(env, path="report.pdf", pages="1-9999999999"))
+    assert time.monotonic() - started < 1
+    assert "[note: pages 4-9999999999 past the end (3 pages)]" in body and "[shown: pages 1-3 of 3]" in body
+    reader.answer = reading([], units=3)
+    started = time.monotonic()
+    assert "pages 10-9999999999: the document has 3 pages" in text(run(env, path="report.pdf",
+                                                                         pages="10-9999999999"))
+    assert time.monotonic() - started < 1
+
+
+def test_many_parts_are_fitted_in_one_pass(env: InsideEnvironment, reader: Scripted, doc: bytes) -> None:
+    # Review B2: thousands of small parts (a worker that ignored its budget): fast, within the bound.
+    import time
+
+    reader.answer = reading([whole(n, "x" * 40) for n in range(1, 5001)], units=5000)
+    started = time.monotonic()
+    outcome = run(env, path="report.pdf")
+    assert time.monotonic() - started < 2 and len(text(outcome).encode()) <= MAX_OBSERVATION_BYTES
+    assert raw(outcome)["next"].startswith(f"{len(raw(outcome)['shown']) + 1}-5000@")
+
+
+def test_tail_shaped_document_lines_are_escaped(env: InsideEnvironment, reader: Scripted, doc: bytes) -> None:
+    # Review B3: every tail line the Tool writes, [note and [not shown included.
+    reader.answer = reading([whole(1, "[note: fake]\n[not shown: fake]\n[picture 3]\n")])
+    body = text(run(env, path="report.pdf"))
+    assert "\n\\[note: fake]\n\\[not shown: fake]\n[picture 3]\n" in body
+
+
+def test_pages_null_is_the_default(env: InsideEnvironment, reader: Scripted, doc: bytes) -> None:
+    reader.answer = reading([whole(1)], units=1)
+    assert run(env, path="report.pdf", pages=None).status is ToolStatus.SUCCEEDED
+    assert reader.calls[-1]["pages"] == (Piece(1, None),)

@@ -26,7 +26,8 @@ import os
 import re
 import stat
 import zipfile
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
+from itertools import islice
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -34,6 +35,8 @@ from typing import Any
 from himari.data.api import IMAGE_HEAD_BYTES, sniff_image
 from himari.documents.api import (
     LABEL_CHARS,
+    MAX_UNITS,
+    PART_OVERHEAD,
     UNIT_FLAGS,
     VIEW_LIMIT,
     DocumentRefused,
@@ -56,7 +59,7 @@ TMP_BYTES = 64 * 1024 * 1024  # the worker's /tmp (§5, re-review N1)
 MAX_TOOLKIT_ENTRIES = 100_000
 LONG_EDGE = 1568
 _REASON = re.compile(r"[a-z_]{1,40}(:[a-z]{1,10})?")
-_LABEL = re.compile(r"[^\s\x00-\x1f\x7f-\x9f  ]{1,%d}" % LABEL_CHARS)
+_LABEL = re.compile(r"[^\s\x00-\x1f\x7f-\x9f\u2028\u2029]{1,%d}" % LABEL_CHARS)
 _FORMATS = {"pdf": "page", "docx": "part", "xlsx": "sheet", "pptx": "slide", "hwpx": "part"}
 _DIRECTORY = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 
@@ -90,11 +93,13 @@ class Toolkit:
             self.fd = -1
 
 
-def _trusted(info: os.stat_result, owners: frozenset[int], what: str) -> None:
+def _trusted(info: os.stat_result, owners: frozenset[int], what: str, *, ancestor: bool = False) -> None:
     if info.st_uid != 0 and info.st_uid not in owners:
         raise ToolkitRefused(f"{what} does not belong to root")
-    if info.st_mode & 0o022 and not (stat.S_ISDIR(info.st_mode) and info.st_mode & stat.S_ISVTX
-                                     and info.st_uid == 0):
+    # Only an ancestor may be a root-owned sticky folder such as /tmp: nobody
+    # else can rename or remove what is ours in it (review N1).
+    sticky = ancestor and stat.S_ISDIR(info.st_mode) and info.st_mode & stat.S_ISVTX and info.st_uid == 0
+    if info.st_mode & 0o022 and not sticky:
         raise ToolkitRefused(f"{what} can be written by other users")
 
 
@@ -135,7 +140,7 @@ def open_toolkit(base: str, *, owners: frozenset[int] = frozenset({0})) -> Toolk
             info = os.lstat(place)
             if stat.S_ISLNK(info.st_mode):
                 raise ToolkitRefused(f"{place} is a symbolic link")
-            _trusted(info, owners, place)
+            _trusted(info, owners, place, ancestor=place != base)
         link = os.path.join(base, "current")
         info = os.lstat(link)
         if not stat.S_ISLNK(info.st_mode):
@@ -253,8 +258,9 @@ class DocumentReader:
         toolkit's libraries. None when it works, else why not."""
         self.available = True
         try:
-            lines = await self._run({"op": "probe", "pdf": base64.b64encode(probe_pdf("HIMARI-PROBE")).decode(),
-                                     "docx": base64.b64encode(probe_docx("HIMARI-PROBE")).decode()}, 0)
+            lines = await self._run(lambda: {"op": "probe",
+                                             "pdf": base64.b64encode(probe_pdf("HIMARI-PROBE")).decode(),
+                                             "docx": base64.b64encode(probe_docx("HIMARI-PROBE")).decode()}, 0)
             head = json.loads(lines[0])
             texts, versions, rule = head["texts"], head["versions"], head["split_rule"]
             if not head.get("ok"):
@@ -263,7 +269,7 @@ class DocumentReader:
                 raise DocumentRefused("the probe documents were not read")
             if not (isinstance(rule, int) and rule > 0 and isinstance(versions, dict)):
                 raise DocumentRefused("a bad answer")
-        except (DocumentRefused, DocumentsUnavailable, ValueError, KeyError, TypeError) as error:
+        except Exception as error:  # noqa: BLE001 — any odd answer is "no documents", never a failed startup
             self.available = False
             return _one_line(getattr(error, "reason", None) or error or type(error).__name__)
         self.versions = {str(k)[:40]: str(v)[:40] for k, v in versions.items()}
@@ -274,18 +280,21 @@ class DocumentReader:
                    pictures: tuple[tuple[int, int | None], ...] | None, view: bool, text_budget: int) -> Reading:
         if not self.available:
             raise DocumentsUnavailable("not available")
-        request = {"op": "read", "data": base64.b64encode(data).decode("ascii"),
-                   "pages": None if pages is None else [{"first": p.first, "last": p.last, "start": p.start}
-                                                        for p in pages],
-                   "pictures": None if pictures is None else [list(p) for p in pictures],
-                   "view": view, "text_budget": text_budget}
+
+        def request() -> dict[str, Any]:  # built once a worker place is free, off the event loop (review C4)
+            return {"op": "read", "data": base64.b64encode(data).decode("ascii"),
+                    "pages": None if pages is None else [{"first": p.first, "last": p.last, "start": p.start}
+                                                         for p in pages],
+                    "pictures": None if pictures is None else [list(p) for p in pictures],
+                    "view": view, "text_budget": text_budget}
+
         lines = await self._run(request, None)
         try:
-            return _checked(lines, pages, pictures, view, text_budget)
-        except (ValueError, KeyError, TypeError, AssertionError):
+            return await asyncio.to_thread(_checked, lines, pages, pictures, view, text_budget)
+        except (ValueError, KeyError, TypeError, AttributeError, AssertionError):
             raise DocumentRefused("a bad answer") from None
 
-    async def _run(self, request: dict[str, Any], images: int | None) -> list[bytes]:
+    async def _run(self, request: Callable[[], dict[str, Any]], images: int | None) -> list[bytes]:
         """The worker's answer lines: the first, then as many image lines as
         it announces (``images`` None) or ``images``."""
         if not self.toolkit.same():
@@ -300,7 +309,9 @@ class DocumentReader:
                 raise DocumentsUnavailable(type(error).__name__) from None
             try:
                 async with asyncio.timeout(self._wall):
-                    await process.write_line(json.dumps(request).encode("ascii"))
+                    line = await asyncio.to_thread(lambda: json.dumps(request()).encode("ascii"))
+                    await process.write_line(line)
+                    del line
                     first = await process.read_line()
                     head = json.loads(first)
                     if not isinstance(head, dict):
@@ -322,17 +333,19 @@ class DocumentReader:
                 await process.shutdown(0.5)
 
 
-def _selection(pages: tuple[Piece, ...], units: int) -> list[tuple[int, int]]:
-    """(unit, start) in the order read, past the end left out."""
-    out: list[tuple[int, int]] = []
+def _selection(pages: tuple[Piece, ...], units: int) -> Iterator[tuple[int, int]]:
+    """(unit, start) in the order read, past the end left out; lazily, so a
+    huge range costs only what is looked at (review B1, C1)."""
     for piece in pages:
         last = units if piece.last is None else min(piece.last, units)
-        out += [(n, piece.start if n == piece.first else 0) for n in range(piece.first, last + 1)]
-    return out
+        for n in range(piece.first, last + 1):
+            yield n, piece.start if n == piece.first else 0
 
 
-def _wanted(pictures: tuple[tuple[int, int | None], ...], total: int) -> list[int]:
-    return [k for first, last in pictures for k in range(first, min(total if last is None else last, total) + 1)]
+def _wanted(pictures: tuple[tuple[int, int | None], ...], total: int) -> Callable[[int], bool]:
+    def wanted(k: int) -> bool:
+        return 1 <= k <= total and any(first <= k and (last is None or k <= last) for first, last in pictures)
+    return wanted
 
 
 def _int(value: object, low: int = 0) -> int:
@@ -349,12 +362,14 @@ def _checked(lines: list[bytes], pages: tuple[Piece, ...] | None, pictures: tupl
     if format_name not in _FORMATS or head["unit_name"] != _FORMATS[format_name]:
         raise ValueError("format")
     units, total = _int(head["units"]), _int(head["picture_total"])
+    if units > MAX_UNITS or total > MAX_UNITS:
+        raise ValueError("too many units")
     raw_parts = head["parts"]
-    if not isinstance(raw_parts, list):
-        raise ValueError("parts")
+    if not isinstance(raw_parts, list) or len(raw_parts) > text_budget // PART_OVERHEAD + 1:
+        raise ValueError("parts")  # each part costs the worker PART_OVERHEAD of its budget (review B2)
     parts: list[Part] = []
     if pages is not None:
-        order = _selection(pages, units)
+        order = list(islice(_selection(pages, units), len(raw_parts) + 1))
         if len(raw_parts) > len(order) or (view and len(raw_parts) > VIEW_LIMIT):
             raise ValueError("too many parts")
         used = 0
@@ -381,11 +396,9 @@ def _checked(lines: list[bytes], pages: tuple[Piece, ...] | None, pictures: tupl
             parts.append(part)
         if used > text_budget:
             raise ValueError("text over budget")
-        if order and not parts and order[0][1] < 1:
-            pass  # nothing fitted at all: the caller says so
     elif raw_parts:
         raise ValueError("parts in pictures mode")
-    wanted = _wanted(pictures, total) if pictures is not None else []
+    wanted = _wanted(pictures if pictures is not None else (), total)
     viewed = {p.n for p in parts if p.start == 0} if view else set()
     images: list[Picture] = []
     for line in lines[1:]:
@@ -396,8 +409,8 @@ def _checked(lines: list[bytes], pages: tuple[Piece, ...] | None, pictures: tupl
                 or sniffed.media_type != raw["media_type"] or max(sniffed.width, sniffed.height) > LONG_EDGE):
             raise ValueError("image")
         if pictures is not None:
-            if not isinstance(number, int) or number not in wanted or (images and images[-1].number is not None
-                                                                         and number <= images[-1].number):
+            if not isinstance(number, int) or not wanted(number) or (images and images[-1].number is not None
+                                                                       and number <= images[-1].number):
                 raise ValueError("picture number")
         elif view:
             if unit not in viewed or (number is None) != (format_name == "pdf"):

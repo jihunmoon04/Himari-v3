@@ -204,3 +204,31 @@ def test_closing_twice_is_fine(tmp_path: Path) -> None:
     toolkit.close()
     toolkit.close()
     assert isinstance(toolkit, Toolkit) and toolkit.fd == -1
+
+
+def test_more_parts_than_the_budget_pays_for() -> None:
+    # Review B2: each part costs PART_OVERHEAD of the budget; an answer with more is bad.
+    many = [part(n, 0, 0, 0, flags=["no_text"]) for n in range(1, 6)]
+    _checked(lines(head(many)), ALL, None, False, 4 * 256)
+    with pytest.raises(ValueError):
+        _checked(lines(head(many)), ALL, None, False, 3 * 256)
+
+
+def test_units_and_pictures_are_bounded() -> None:
+    # Review C1: a claimed count drives loops: past MAX_UNITS it is a bad answer.
+    with pytest.raises(ValueError):
+        _checked(lines(head([], units=10**12)), ALL, None, False, 1000)
+    with pytest.raises(ValueError):
+        _checked(lines(head([], picture_total=10**12)), None, ((1, None),), False, 1000)
+
+
+def test_no_progress_on_a_unit_of_unknown_length() -> None:
+    # Re-check N1 (the earlier case failed on its start first): same start, no progress, length unknown.
+    with pytest.raises(ValueError, match="no progress"):
+        _checked(lines(head([part(1, 2, 2, None)])), (Piece(1, 1, 2),), None, False, 1000)
+    _checked(lines(head([part(1, 2, 3, None)])), (Piece(1, 1, 2),), None, False, 1000)
+
+
+def test_odd_entries_are_a_bad_answer_not_a_crash() -> None:
+    with pytest.raises(AttributeError):  # read() turns this into "a bad answer" (review N2)
+        _checked(lines(head([], skipped=["x"])), ALL, None, False, 1000)

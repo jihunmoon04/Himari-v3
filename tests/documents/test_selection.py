@@ -12,7 +12,8 @@ from himari.environment.inside.documents import (
     compress,
     fingerprint_of,
     next_value,
-    order_of,
+    past_end,
+    spans_text,
     parse_selection,
 )
 
@@ -68,21 +69,30 @@ def test_a_full_selection_still_takes_its_next() -> None:
     pieces, _ = parse_selection(raw, positions=True)
     parts = (Part(1, (), 0, 0, 1, 1, "a"), Part(2, (), 0, 0, 1, 1, "b"),
              Part(3, (), 0, 0, 1234567890, 99999999999, ""))
-    rest = next_value(order_of(pieces, 400), parts)
+    rest = next_value(pieces, 400, parts)
     assert rest is not None and rest.startswith("3:1234567890,4-99,200,") and rest.endswith(",300-400")
     again, _ = parse_selection(rest + F, positions=True)
     assert again[0] == Piece(3, 3, 1234567890) and again[-1] == Piece(300, 400)
 
 
 def test_next_is_the_rest_of_the_selection() -> None:
-    order = order_of((Piece(1, 5), Piece(8, 8)), 42)
+    pieces = (Piece(1, 5), Piece(8, 8))
     whole = tuple(Part(n, (), 0, 0, 1, 1, "x") for n in (1, 2, 3))
-    assert next_value(order, whole) == "4-5,8"
-    assert next_value(order, whole[:2] + (Part(3, (), 0, 0, 7, 20, "x" * 7),)) == "3:7,4-5,8"
-    assert next_value(order_of((Piece(40, None),), 42), tuple(Part(n, (), 0, 0, 1, 1, "x") for n in (40, 41))) == "42"
-    assert next_value(order_of((Piece(1, 2),), 42), tuple(Part(n, (), 0, 0, 1, 1, "x") for n in (1, 2))) is None
-    assert order_of((Piece(40, 60),), 42) == [(40, 0), (41, 0), (42, 0)]  # past the end left out
-    assert order_of((Piece(9, 9, 100), Piece(10, 11)), 42) == [(9, 100), (10, 0), (11, 0)]
+    assert next_value(pieces, 42, whole) == "4-5,8"
+    assert next_value(pieces, 42, whole[:2] + (Part(3, (), 0, 0, 7, 20, "x" * 7),)) == "3:7,4-5,8"
+    assert next_value((Piece(40, None),), 42, tuple(Part(n, (), 0, 0, 1, 1, "x") for n in (40, 41))) == "42"
+    assert next_value((Piece(1, 2),), 42, tuple(Part(n, (), 0, 0, 1, 1, "x") for n in (1, 2))) is None
+    assert next_value((Piece(40, 60),), 42, ()) == "40-42"  # past the end left out
+    assert next_value((Piece(9, 9, 100), Piece(10, 11)), 42, ()) == "9:100,10-11"
+    assert next_value((Piece(9, 9, 100), Piece(10, 11)), 42, (Part(9, (), 0, 100, 120, 120, "x" * 20),)) == "10-11"
+
+
+def test_huge_ranges_stay_ranges() -> None:
+    # B1: "1-9999999999" on a 3-page document is ranges all the way, never one entry per number.
+    pieces, _ = parse_selection("1-9999999999", positions=True)
+    assert past_end(pieces, 3) == [(4, 9999999999, 0)]
+    assert next_value(pieces, 3, (Part(1, (), 0, 0, 1, 1, "x"),)) == "2-3"
+    assert spans_text(past_end(parse_selection("50-", positions=True)[0], 42)) == "50-"
 
 
 def test_compress() -> None:
@@ -114,3 +124,21 @@ def test_unit_headers() -> None:
                                         "…=== tail\nrest\n")
     open_ended = Part(1, (), 0, 0, 10, None, "0123456789")
     assert "(characters 0-10 of ?)" in _part_block(open_ended, "sheet")
+
+
+def test_the_worker_never_cuts_between_an_escape_and_its_character() -> None:
+    # Review C6: the guard in cut_at, not only the refusal of such a position.
+    from himari.documents import worker
+
+    text = "ab\n\\[x" + "y" * 50
+    for budget in range(1, 12):
+        end = worker.cut_at(text, 3, budget)
+        assert end != 4, budget  # 4 is right after the escaping backslash
+    assert worker.cut_at("\\[q", 0, 1) == 0 and worker.cut_at("\\[q", 0, 2) == 2
+
+
+def test_the_overhead_matches_the_worker() -> None:
+    from himari.documents import worker
+    from himari.documents.api import PART_OVERHEAD, VIEW_LIMIT
+
+    assert worker.PART_OVERHEAD == PART_OVERHEAD and worker.VIEW_UNITS == VIEW_LIMIT

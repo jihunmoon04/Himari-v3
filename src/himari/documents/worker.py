@@ -30,12 +30,13 @@ import re
 import resource
 import sys
 import zipfile
+from collections.abc import Iterator
 from typing import Any
 
 SPLIT_RULE = 1  # bump whenever the layout or the part split changes: positions and numbers move with it
 PART_CHARS = 8000  # a DOCX/HWPX part ends at the first block boundary past this
 VIEW_UNITS = 4  # §4.3 (Q2)
-PART_OVERHEAD = 256  # bytes kept per part for the header line the server writes
+PART_OVERHEAD = 256  # bytes kept per part for the header line the server writes (= documents.api.PART_OVERHEAD)
 MID_LINE_BYTES = len("…".encode())
 LONG_EDGE = 1568
 MAX_PIXELS = 50_000_000
@@ -60,10 +61,12 @@ _MAIN_TYPES = {
 }
 _DOCX_MAIN = "application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"
 # Every line boundary str.splitlines knows becomes "\n"; other control characters but tab become a space.
-_BREAKS = re.compile("\r\n|[\r\x0b\x0c\x1c\x1d\x1e\x85  ]")
+_BREAKS = re.compile("\r\n|[\r\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029]")
 _CONTROLS = re.compile("[\x00-\x08\x0e-\x1f\x7f-\x84\x86-\x9f]")
 _SURROGATES = re.compile("[\ud800-\udfff]")
-_LABEL = re.compile(r"[^\s\x00-\x1f\x7f-\x9f  ]{1,20}")
+_LABEL = re.compile(r"[^\s\x00-\x1f\x7f-\x9f\u2028\u2029]{1,20}")
+_NOTE_ID = re.compile(r"-?\d{1,10}")  # a footnote id goes into a mark: digits only (review B3)
+_MARKS = re.compile(r"\[picture \d+\]|\[\^-?\d+\]")
 
 
 def limit() -> None:
@@ -239,18 +242,31 @@ class Document:
     unit_name = "unit"
 
     def __init__(self) -> None:
-        self.units: list[dict[str, Any]] = []  # {"text", "flags", "pictures": n, "label"?}
         self.pictures: list[tuple[int, Any]] = []  # (unit, loader) by picture number - 1
 
-    def text(self, n: int) -> str:
-        return str(self.units[n - 1]["text"])
+    def count(self) -> int:
+        raise NotImplementedError
 
-    def view(self, n: int) -> list[tuple[int | None, str | tuple[str, int, int, bytes]]]:
-        """Images for unit ``n``: (picture number or None, made image or why not)."""
+    def unit(self, n: int) -> dict[str, Any]:
+        """{"text", "flags", "pictures": n, "label"?} of unit ``n``."""
+        raise NotImplementedError
+
+    def text(self, n: int) -> str:
+        return str(self.unit(n)["text"])
+
+    def view(self, n: int, room: int) -> tuple[list[tuple[int | None, str | tuple[str, int, int, bytes]]], list[int]]:
+        """Images for unit ``n``, at most ``room`` made: (picture number or
+        None, made image or why not), and the picture numbers left unmade."""
         raise NotImplementedError
 
     def picture(self, number: int) -> tuple[str, int, int, bytes] | str:
-        return shrink(self.pictures[number - 1][1]())
+        """A picture made ready, or why not: one broken picture never fails the call (review C2)."""
+        try:
+            return shrink(self.pictures[number - 1][1]())
+        except MemoryError:
+            return "out of memory"
+        except Exception as error:  # noqa: BLE001 — truncated, a decompression bomb, a codec error
+            return f"could not be decoded ({type(error).__name__})"
 
 
 class Pdf(Document):
@@ -265,34 +281,50 @@ class Pdf(Document):
             self._doc = pdfium.PdfDocument(data)
         except pdfium.PdfiumError as error:
             raise Refused("encrypted" if "password" in str(error).lower() else "broken") from None
-        for index in range(len(self._doc)):
-            page = self._doc[index]
+        self._raw = raw
+        self._units: dict[int, dict[str, Any]] = {}  # laid out only when read (review C3)
+
+    def count(self) -> int:
+        return len(self._doc)
+
+    def unit(self, n: int) -> dict[str, Any]:
+        if n not in self._units:
+            page = self._doc[n - 1]
             text = escape(clean(page.get_textpage().get_text_bounded())).rstrip()
             images = paths = seen = 0
             for obj in page.get_objects():
                 seen += 1
                 if seen > MAX_PAGE_OBJECTS:
                     break
-                images += obj.type == raw.FPDF_PAGEOBJ_IMAGE
-                paths += obj.type == raw.FPDF_PAGEOBJ_PATH
+                images += obj.type == self._raw.FPDF_PAGEOBJ_IMAGE
+                paths += obj.type == self._raw.FPDF_PAGEOBJ_PATH
             flags = (["drawings"] if paths >= DRAWINGS else []) + ([] if text.strip() else ["no_text"])
             unit: dict[str, Any] = {"text": text + "\n" if text else "", "flags": flags, "pictures": images}
             try:
-                label = self._doc.get_page_label(index)
+                label = self._doc.get_page_label(n - 1)
             except Exception:  # noqa: BLE001 — a page without a readable label just has none
                 label = ""
-            if label and label != str(index + 1) and _LABEL.fullmatch(label):
+            if label and label != str(n) and _LABEL.fullmatch(label):
                 unit["label"] = label
-            self.units.append(unit)
+            self._units[n] = unit
+        return self._units[n]
 
-    def view(self, n: int) -> list[tuple[int | None, str | tuple[str, int, int, bytes]]]:
-        page = self._doc[n - 1]
-        width, height = page.get_size()
-        scale = LONG_EDGE / max(width, height, 1)
-        image = page.render(scale=scale).to_pil().convert("RGB")
-        if max(image.size) > LONG_EDGE:  # rounding: never past the long edge
-            image.thumbnail((LONG_EDGE, LONG_EDGE))
-        return [(None, encode(image, False))]
+    def view(self, n: int, room: int) -> tuple[list[tuple[int | None, str | tuple[str, int, int, bytes]]], list[int]]:
+        if room <= 0:
+            return [], []
+        try:
+            page = self._doc[n - 1]
+            width, height = page.get_size()
+            scale = LONG_EDGE / max(width, height, 1)
+            image = page.render(scale=scale).to_pil().convert("RGB")
+            if max(image.size) > LONG_EDGE:  # rounding: never past the long edge
+                image.thumbnail((LONG_EDGE, LONG_EDGE))
+            made: str | tuple[str, int, int, bytes] = encode(image, False)
+        except MemoryError:
+            made = "out of memory"
+        except Exception as error:  # noqa: BLE001 — a page that does not render costs its image only
+            made = f"could not be rendered ({type(error).__name__})"
+        return [(None, made)], []
 
 
 W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
@@ -332,13 +364,26 @@ class Docx(Document):
         self._part = self._doc.part
         self._styles = {s.style_id: str(s.name or "") for s in self._doc.styles}
         self._notes = self._footnotes()
+        self._list: list[dict[str, Any]] = []
         blocks: list[tuple[str, list[str], list[int]]] = []  # (text, footnote lines, picture numbers)
-        for child in self._doc.element.body.iterchildren():
+        self._blocks(self._doc.element.body, blocks)
+        self._split(blocks)
+
+    def count(self) -> int:
+        return len(self._list)
+
+    def unit(self, n: int) -> dict[str, Any]:
+        return self._list[n - 1]
+
+    def _blocks(self, container: Any, blocks: list[tuple[str, list[str], list[int]]]) -> None:
+        """Paragraphs and tables in order, inside content controls and custom XML too (review C5)."""
+        for child in container.iterchildren():
             if child.tag == W + "p":
                 blocks.append(self._paragraph(child))
             elif child.tag == W + "tbl":
                 blocks.extend(self._table(child))
-        self._split(blocks)
+            elif child.tag in (W + "sdt", W + "sdtContent", W + "customXml"):
+                self._blocks(child, blocks)
 
     def _footnotes(self) -> dict[str, str]:
         found: dict[str, str] = {}
@@ -349,7 +394,7 @@ class Docx(Document):
                 root = etree.fromstring(rel.target_part.blob)
                 for note in root.iter(W + "footnote"):
                     ident = note.get(W + "id")
-                    if ident is not None and note.get(W + "type") is None:
+                    if ident is not None and _NOTE_ID.fullmatch(ident) and note.get(W + "type") is None:
                         found[ident] = one_line("".join(t.text or "" for t in note.iter(W + "t")))
         return found
 
@@ -379,7 +424,7 @@ class Docx(Document):
                         (hidden.append if gone else lines.text)("\n")
                     elif part.tag == W + "footnoteReference":
                         ident = part.get(W + "id")
-                        if ident in self._notes:
+                        if ident is not None and _NOTE_ID.fullmatch(ident) and ident in self._notes:
                             lines.mark(f"[^{ident}]")
                             notes.append(f"[^{ident}]: {self._notes[ident]}")
                     elif part.tag in (W + "drawing", W + "pict", W + "object"):
@@ -388,8 +433,8 @@ class Docx(Document):
                             if number is not None:
                                 pictures.append(number)
                                 lines.mark(f"[picture {number}]")
-            elif tag in (W + "ins", W + "hyperlink", W + "smartTag", W + "sdt", W + "sdtContent", W + "fldSimple",
-                         W + "customXml"):
+            elif tag in (W + "ins", W + "moveTo", W + "hyperlink", W + "smartTag", W + "sdt", W + "sdtContent",
+                         W + "fldSimple", W + "customXml"):
                 self._runs(node, lines, notes, pictures, hidden)
         if hidden:
             self._hidden(lines, hidden)
@@ -437,11 +482,12 @@ class Docx(Document):
             return []
         width = len(list(next(element.iterchildren(W + "tr")).iterchildren(W + "tc"))) or 1
         header = rows[0][0] + "|" + " --- |" * width + "\n"
+        repeated = _MARKS.sub("", header)  # a repeated header carries no picture or note marks (review N5)
         blocks: list[tuple[str, list[str], list[int]]] = [(header, list(rows[0][1]), list(rows[0][2]))]
         for text, notes, pictures in rows[1:]:
             current = blocks[-1]
-            if len(current[0]) + len(text) > PART_CHARS and current[0] != header:
-                blocks.append((header, [], []))  # the next piece is its own part, its header repeated
+            if len(current[0]) + len(text) > PART_CHARS and current[0] not in (header, repeated):
+                blocks.append((repeated, [], []))  # the next piece is its own part, its header repeated
                 current = blocks[-1]
             blocks[-1] = (current[0] + text, current[1] + notes, current[2] + pictures)
         return blocks
@@ -457,20 +503,29 @@ class Docx(Document):
             text += block
             notes += block_notes
             pictures += block_pictures
-        if text or not self.units:
+        if text or not self._list:
             self._unit(text, notes, pictures)
 
     def _unit(self, text: str, notes: list[str], pictures: list[int]) -> None:
-        number = len(self.units) + 1
+        number = len(self._list) + 1
         for picture in pictures:
             self.pictures[picture - 1] = (number, self.pictures[picture - 1][1])
         if notes:
             text += "".join(note.replace("\n", " ") + "\n" for note in notes)
-        self.units.append({"text": text, "flags": [] if text.strip() else ["no_text"], "pictures": len(pictures),
+        self._list.append({"text": text, "flags": [] if text.strip() else ["no_text"], "pictures": len(pictures),
                            "picture_numbers": pictures})
 
-    def view(self, n: int) -> list[tuple[int | None, str | tuple[str, int, int, bytes]]]:
-        return [(number, self.picture(number)) for number in self.units[n - 1]["picture_numbers"]]
+    def view(self, n: int, room: int) -> tuple[list[tuple[int | None, str | tuple[str, int, int, bytes]]], list[int]]:
+        made_list: list[tuple[int | None, str | tuple[str, int, int, bytes]]] = []
+        more: list[int] = []
+        for number in self._list[n - 1]["picture_numbers"]:
+            if room <= 0:
+                more.append(number)  # not decoded: the model asks for it with pictures (review C2)
+                continue
+            made = self.picture(number)
+            made_list.append((number, made))
+            room -= not isinstance(made, str)
+        return made_list, more
 
 
 def _heading(name: str) -> int:
@@ -493,21 +548,19 @@ def open_document(data: bytes) -> Document:
 # --- requests -----------------------------------------------------------------------------
 
 
-def selected(pieces: list[dict[str, Any]], units: int) -> list[tuple[int, int]]:
+def selected(pieces: list[dict[str, Any]], units: int) -> Iterator[tuple[int, int]]:
     """(unit, start) in order, past the end left out; pieces come normalized from the server."""
-    out: list[tuple[int, int]] = []
     for piece in pieces:
         first, last, start = int(piece["first"]), piece.get("last"), int(piece.get("start", 0))
         last = units if last is None else min(int(last), units)
         for n in range(first, last + 1):
-            out.append((n, start if n == first else 0))
-    return out
+            yield n, start if n == first else 0
 
 
 def read(request: dict[str, Any]) -> None:
     data = base64.b64decode(request["data"], validate=True)
     document = open_document(data)
-    units = len(document.units)
+    units = document.count()
     head = {"ok": True, "format": type(document).__name__.lower(), "units": units,
             "unit_name": document.unit_name, "picture_total": len(document.pictures)}
     if request.get("pictures") is not None:
@@ -543,7 +596,7 @@ def read_pictures(document: Document, pieces: list[list[int | None]], head: dict
 
 
 def read_pages(document: Document, request: dict[str, Any], head: dict[str, Any]) -> None:
-    units = len(document.units)
+    units = document.count()
     view = bool(request.get("view"))
     budget = int(request["text_budget"])
     parts: list[dict[str, Any]] = []
@@ -557,10 +610,12 @@ def read_pages(document: Document, request: dict[str, Any], head: dict[str, Any]
         if start > len(text) or (start and start < len(text) and text[start - 1] == "\\"
                                  and (start == 1 or text[start - 2] == "\n")):
             raise Refused("position_past_end" if start > len(text) else "bad_position")
-        unit = document.units[n - 1]
+        unit = document.unit(n)
         middle = mid_line(text, start)
         room = budget - PART_OVERHEAD - (MID_LINE_BYTES if middle else 0)
-        end = cut_at(text, start, room) if room > 0 else start
+        if room <= 0:
+            break  # no room for even a header: empty units stop here too (review B2)
+        end = cut_at(text, start, room)
         if end == start and start < len(text):
             break  # nothing of it fits: it is where the next call starts
         budget = room - len(text[start:end].encode("utf-8", "surrogatepass"))
@@ -572,14 +627,13 @@ def read_pages(document: Document, request: dict[str, Any], head: dict[str, Any]
             part["mid_line"] = True
         parts.append(part)
         if view and start == 0:
-            made_list = document.view(n)
+            made_list, left = document.view(n, VIEW_UNITS - len(images))
             for number, made in made_list:
                 if isinstance(made, str):
                     skipped.append({"unit": n, "picture": number, "reason": made})
-                elif len(images) < VIEW_UNITS:
+                else:
                     images.append((n, number, made))
-                elif number is not None:
-                    more.append(number)
+            more += left
         if end < len(text):
             break
     answer(**head, parts=parts, images=len(images), skipped=skipped, examined=0, more=more)
@@ -598,7 +652,7 @@ def probe(request: dict[str, Any]) -> None:
     texts = {}
     for kind in ("pdf", "docx"):
         document = open_document(base64.b64decode(request[kind], validate=True))
-        texts[kind] = "".join(document.text(n + 1) for n in range(len(document.units)))
+        texts[kind] = "".join(document.text(n + 1) for n in range(document.count()))
     answer(ok=True, versions=versions, split_rule=SPLIT_RULE, texts=texts)
 
 

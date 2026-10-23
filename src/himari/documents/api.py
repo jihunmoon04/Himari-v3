@@ -14,6 +14,8 @@ from typing import Protocol
 VIEW_LIMIT = 4  # units (view) or pictures (pictures) per call: Q2
 UNIT_FLAGS = frozenset({"drawings", "no_text", "hidden"})
 LABEL_CHARS = 20
+PART_OVERHEAD = 256  # bytes the worker keeps per part for its header line (worker.PART_OVERHEAD)
+MAX_UNITS = 1_000_000  # units or pictures an answer may claim: more is a bad answer (review C1)
 
 
 @dataclass(frozen=True)

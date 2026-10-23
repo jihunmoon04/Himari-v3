@@ -9,6 +9,7 @@ result stays within MAX_OBSERVATION_BYTES: units at the end are dropped
 
 from __future__ import annotations
 
+import bisect
 import hashlib
 import re
 from typing import TYPE_CHECKING
@@ -47,7 +48,7 @@ GIVEN_PIECES, GIVEN_CHARS = 22, 200  # one carrying a fingerprint: what the Tool
 FINGERPRINT_CHARS = 12
 _PIECE = re.compile(r"(\d{1,10})(?::(\d{1,10})|-(\d{0,10}))?")
 _FINGERPRINT = re.compile(r"[0-9a-f]{%d}" % FINGERPRINT_CHARS)
-_STRUCTURE = ("===", "[shown", "[view", "[images")
+_STRUCTURE = ("===", "[shown", "[view", "[images", "[note", "[not shown")  # every tail line's start (review B3)
 _FORMAT_NAMES = {"pdf": "PDF", "docx": "Word", "xlsx": "Excel", "pptx": "PowerPoint", "hwpx": "HWPX"}
 _LATER = {"xlsx": ("Excel (.xlsx)", "openpyxl"), "pptx": ("PowerPoint (.pptx)", "python-pptx"),
           "hwpx": ("HWPX", "zipfile and xml.etree")}
@@ -149,33 +150,59 @@ def _ranges_text(name: str, numbers: list[int]) -> str:
     return f"{_plural(name, len(numbers))} {text}"
 
 
-def order_of(pieces: tuple[Piece, ...], units: int) -> list[tuple[int, int]]:
-    out: list[tuple[int, int]] = []
+Span = tuple[int, int | None, int]  # first, last (None: open), start inside the first
+
+
+def clip(pieces: tuple[Piece, ...], after: int, top: int) -> list[Span]:
+    """What the pieces hold past unit ``after`` up to ``top``, still as
+    ranges: never one entry per unit (review B1)."""
+    out: list[Span] = []
     for piece in pieces:
-        last = units if piece.last is None else min(piece.last, units)
-        out += [(n, piece.start if n == piece.first else 0) for n in range(piece.first, last + 1)]
+        last = top if piece.last is None else min(piece.last, top)
+        first, start = (piece.first, piece.start) if piece.first > after else (after + 1, 0)
+        if first <= last:
+            out.append((first, last, start))
     return out
 
 
-def next_value(order: list[tuple[int, int]], parts: tuple[Part, ...]) -> str | None:
-    """What is left of the selection after ``parts``, in the grammar (without the fingerprint)."""
-    pieces = [f"{parts[-1].n}:{parts[-1].end}"] if parts and parts[-1].cut else []
-    run: list[int] = []
-    for n, start in order[len(parts):]:
-        if start > 0:
-            if run:
-                pieces.append(compress(run))
-                run = []
-            pieces.append(f"{n}:{start}")
-        else:
-            run.append(n)
-    if run:
-        pieces.append(compress(run))
-    return ",".join(pieces) or None
+def spans_text(spans: list[Span]) -> str:
+    """Spans in the selection grammar."""
+    return ",".join(f"{a}:{s}" if s else f"{a}" if a == b else f"{a}-" if b is None else f"{a}-{b}"
+                    for a, b, s in spans)
+
+
+def spans_words(name: str, spans: list[Span]) -> str:
+    count = sum(2 if b is None else b - a + 1 for a, b, _ in spans)
+    return f"{_plural(name, count)} {spans_text(spans).replace(',', ', ')}"
+
+
+def first_numbers(spans: list[Span], count: int) -> list[int]:
+    out: list[int] = []
+    for a, b, _ in spans:
+        n = a
+        while len(out) < count and (b is None or n <= b):
+            out.append(n)
+            n += 1
+    return out
+
+
+def past_end(pieces: tuple[Piece, ...], units: int) -> list[Span]:
+    """The parts of the selection after the last unit, as ranges."""
+    return [(max(p.first, units + 1), p.last, 0) for p in pieces if p.last is None and p.first > units
+            or p.last is not None and p.last > units]
+
+
+def next_value(pieces: tuple[Piece, ...], units: int, parts: tuple[Part, ...]) -> str | None:
+    """What is left of the selection after ``parts`` (a prefix of it, the
+    reader checked), in the grammar, without the fingerprint."""
+    head = [(parts[-1].n, parts[-1].n, parts[-1].end)] if parts and parts[-1].cut else []
+    return spans_text(head + clip(pieces, parts[-1].n if parts else 0, units)) or None
 
 
 def fingerprint_of(data: bytes, salt: bytes) -> str:
-    return hashlib.sha256(data + b"\0" + salt).hexdigest()[:FINGERPRINT_CHARS]
+    digest = hashlib.sha256(data)  # no copy of the document (review C4)
+    digest.update(b"\0" + salt)
+    return digest.hexdigest()[:FINGERPRINT_CHARS]
 
 
 def backstop(body: str) -> str:
@@ -237,7 +264,9 @@ class ReadDocument:
         args = invocation.arguments
         try:
             pictures = None if args.get("pictures") is None else parse_selection(args["pictures"], positions=False)
-            pages = parse_selection(args.get("pages", "1-"), positions=True) if pictures is None else None
+            raw_pages = args.get("pages")
+            pages = (parse_selection("1-" if raw_pages is None else raw_pages, positions=True)
+                     if pictures is None else None)
         except SelectionError as error:
             return _refused(f"{args.get('path', '?')}: {error}")
         view = args.get("view") is True
@@ -248,7 +277,7 @@ class ReadDocument:
         if isinstance(loaded, ToolOutcome):
             return loaded
         shown, data = loaded
-        fingerprint = fingerprint_of(data, self._reader.salt)
+        fingerprint = await run_blocking(fingerprint_of, data, self._reader.salt)
         given = (pictures or pages or ((), None))[1]
         if given is not None and given != fingerprint:
             return _refused(f"{shown}: the document changed since that position was given (now @{fingerprint}); "
@@ -288,31 +317,36 @@ class ReadDocument:
 
     def _pages(self, head: str, shown: str, reading: Reading, pieces: tuple[Piece, ...], view: bool,
                fingerprint: str, size: int) -> ToolOutcome:
-        order = order_of(pieces, reading.units)
-        past = sorted({n for p in pieces for n in range(max(p.first, reading.units + 1),
-                                                         (p.last or p.first) + 1) if n > reading.units})
-        if not order:
-            return _refused(f"{shown}: {_ranges_text(reading.unit_name, past or [p.first for p in pieces])}: "
-                            f"the document has {reading.units:,} {_plural(reading.unit_name, reading.units)}")
-        parts = reading.parts
-        if not parts:
+        name, units = reading.unit_name, reading.units
+        past = past_end(pieces, units)
+        if not any(p.first <= units for p in pieces):
+            return _refused(f"{shown}: {spans_words(name, past)}: the document has {units:,} {_plural(name, units)}")
+        if not reading.parts:
             return _refused(f"{shown}: could not read this document (a bad answer)")
-        while True:
-            text, raw = self._compose(head, reading, order, parts, past, view, fingerprint, size)
-            if len(text.encode("utf-8")) <= MAX_OBSERVATION_BYTES:
+        # §4.2: the units that fit with their tail lines, chosen in one pass (review B2): units go, the tail stays.
+        blocks = [_part_block(p, name).encode("utf-8") for p in reading.parts]
+        start = len(head.encode("utf-8")) + 1
+        used = [start]
+        for block in blocks:
+            used.append(used[-1] + len(block))
+        # The tail is a few lines (TAIL_RESERVE): start from the most that fit with it, then confirm.
+        most = max(1, bisect.bisect_right(used, MAX_OBSERVATION_BYTES - TAIL_RESERVE) - 1)
+        for keep in range(min(most, len(blocks)), 0, -1):
+            parts = reading.parts[:keep]
+            tail, raw = self._tail(reading, pieces, parts, past, view, fingerprint, size, head)
+            if used[keep] + len(tail.encode("utf-8")) <= MAX_OBSERVATION_BYTES:
                 break
-            if len(parts) <= 1:
-                return _refused(f"{shown}: could not read this document (a bad answer)")
-            parts = parts[:-1]  # §4.2: units go, the tail lines stay
+        else:
+            return _refused(f"{shown}: could not read this document (a bad answer)")
+        text = head + "\n" + b"".join(blocks[:keep]).decode("utf-8") + tail
         kept = {p.n for p in parts}
         images = tuple(ResultImage(i.data, i.media_type) for i in reading.images if i.unit in kept)
-        return ToolOutcome(ToolStatus.SUCCEEDED, _text(text), raw_result=raw, result_images=images)
+        return ToolOutcome(ToolStatus.SUCCEEDED, _text(text.rstrip("\n")), raw_result=raw, result_images=images)
 
-    def _compose(self, head: str, reading: Reading, order: list[tuple[int, int]], parts: tuple[Part, ...],
-                 past: list[int], view: bool, fingerprint: str, size: int) -> tuple[str, dict[str, JsonValue]]:
+    def _tail(self, reading: Reading, pieces: tuple[Piece, ...], parts: tuple[Part, ...], past: list[Span],
+              view: bool, fingerprint: str, size: int, head: str) -> tuple[str, dict[str, JsonValue]]:
         name = reading.unit_name
-        blocks = [head + "\n", *(_part_block(p, name) for p in parts)]
-        rest = next_value(order, parts)
+        rest = next_value(pieces, reading.units, parts)
         whole = [p.n for p in parts if not p.cut]
         shown_bits = [_ranges_text(name, whole)] if whole else []
         if parts and parts[-1].cut:
@@ -320,28 +354,26 @@ class ReadDocument:
             of = "?" if last.length is None else f"{last.length:,}"
             shown_bits.append(f"{name} {last.n} characters {last.start:,}-{last.end:,} of {of}")
         shown_text = ", ".join(shown_bits) or "nothing"
-        if rest is None:
-            blocks.append(f"[shown: {shown_text} of {reading.units:,}]\n")
-        else:
-            blocks.append(f'[shown: {shown_text}; read on with pages="{rest}@{fingerprint}"]\n')
+        lines = [f"[shown: {shown_text} of {reading.units:,}]" if rest is None
+                 else f'[shown: {shown_text}; read on with pages="{rest}@{fingerprint}"]']
         if past:
-            blocks.append(f"[note: {_ranges_text(name, past)} past the end ({reading.units:,} "
-                          f"{_plural(name, reading.units)})]\n")
+            lines.append(f"[note: {spans_words(name, past)} past the end ({reading.units:,} "
+                         f"{_plural(name, reading.units)})]")
         kept = {p.n for p in parts}
         images = [i for i in reading.images if i.unit in kept]
         if images:
             labels = [f"{name} {i.unit}" if i.number is None else f"picture {i.number} ({name} {i.unit})"
                       for i in images]
-            blocks.append(f"[images: {', '.join(labels)}]\n")
+            lines.append(f"[images: {', '.join(labels)}]")
         skipped = [s for s in reading.skipped if s.unit is None or s.unit in kept][:10]
         if skipped:
-            blocks.append("[not shown: " + "; ".join(
+            lines.append("[not shown: " + "; ".join(
                 (f"picture {s.number}" if s.number is not None else f"{name} {s.unit}") + f": {s.reason}"
-                for s in skipped) + "]\n")
+                for s in skipped) + "]")
         if view and reading.more:
             more = sorted(reading.more)
-            blocks.append(f"[view: {_ranges_text('picture', more)} in these {_plural(name, 2)} not shown; call "
-                          f'again with pictures="{compress(more[:VIEW_LIMIT])}@{fingerprint}"]\n')
+            lines.append(f"[view: {_ranges_text('picture', more)} in these {_plural(name, 2)} not shown; call "
+                         f'again with pictures="{compress(more[:VIEW_LIMIT])}@{fingerprint}"]')
         raw: dict[str, JsonValue] = {
             "path": head.split(" (", 1)[0], "size": size, "format": reading.format, "units": reading.units,
             "fingerprint": fingerprint,
@@ -349,29 +381,28 @@ class ReadDocument:
             "next": None if rest is None else f"{rest}@{fingerprint}",
             "pictures": sum(p.pictures for p in parts), "images": len(images),
         }
-        return "".join(blocks).rstrip("\n"), raw
+        return "".join(line + "\n" for line in lines), raw
 
     def _pictures(self, head: str, shown: str, reading: Reading, pieces: tuple[Piece, ...], fingerprint: str,
                   size: int) -> ToolOutcome:
         if reading.format == "pdf":
             return _refused(f"{shown}: pictures is for Word files; for a PDF use pages with view")
-        wanted = [k for p in pieces for k in range(p.first, min(p.last or reading.picture_total,
-                                                                reading.picture_total) + 1)]
-        if not wanted:
+        if not clip(pieces, 0, reading.picture_total):
             return _refused(f"{shown}: the document has {reading.picture_total:,} "
                             f"{_plural('picture', reading.picture_total)}")
         blocks = [head + "\n"]
         blocks += [f"=== picture {i.number} ({reading.unit_name} {i.unit}) ===\n" for i in reading.images]
-        rest = [k for k in wanted if k > reading.examined]
+        rest = clip(pieces, max(reading.examined, max((i.number or 0 for i in reading.images), default=0)),
+                    reading.picture_total)
         if reading.images:
             blocks.append("[images: " + ", ".join(f"picture {i.number}" for i in reading.images) + "]\n")
         if reading.skipped:
             blocks.append("[not shown: " + "; ".join(f"picture {s.number}: {s.reason}"
                                                      for s in reading.skipped[:10]) + "]\n")
-        next_pictures = f"{compress(rest)}@{fingerprint}" if rest else None
+        next_pictures = f"{spans_text(rest)}@{fingerprint}" if rest else None
         if rest:
-            blocks.append(f"[view: {_ranges_text('picture', rest)} not shown; call again with "
-                          f'pictures="{compress(rest[:VIEW_LIMIT])}@{fingerprint}"]\n')
+            blocks.append(f"[view: {spans_words('picture', rest)} not shown; call again with "
+                          f'pictures="{compress(first_numbers(rest, VIEW_LIMIT))}@{fingerprint}"]\n')
         raw: dict[str, JsonValue] = {"path": shown, "size": size, "format": reading.format,
                                      "fingerprint": fingerprint, "images": len(reading.images),
                                      "next_pictures": next_pictures}

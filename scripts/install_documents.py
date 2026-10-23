@@ -149,7 +149,9 @@ def prune(base: Path, procs: Path = Path("/proc")) -> list[str]:
     current = os.readlink(base / "current") if (base / "current").is_symlink() else None
     removed = []
     for folder in sorted(base.iterdir()):
-        if folder.name == current or folder.name.startswith(".") or folder.is_symlink() or not folder.is_dir():
+        leftover = folder.name.startswith(".new-")  # an install that stopped: never a finished version
+        if folder.name == current or (folder.name.startswith(".") and not leftover) or folder.is_symlink() \
+                or not folder.is_dir():
             continue
         if not in_use(folder, procs):
             shutil.rmtree(folder)
@@ -162,9 +164,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("base", help="the toolkit folder, e.g. /opt/himari-v3/documents (HIMARI_DOCUMENTS_DIR)")
     parser.add_argument("--prune", action="store_true", help="remove versions other than current no process uses")
     args = parser.parse_args(argv)
-    base = Path(args.base)
-    if not base.is_absolute():
+    if not Path(args.base).is_absolute():
         parser.error("the folder must be an absolute path")
+    base = Path(args.base).resolve()  # /proc shows resolved paths: compare like with like (review N7)
+    os.umask(0o022)  # readable by the service user whatever root's umask is
     if os.geteuid() != 0:
         print("note: not root — the server accepts only a toolkit owned by root", file=sys.stderr)
     try:

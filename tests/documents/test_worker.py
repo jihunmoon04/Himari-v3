@@ -196,3 +196,92 @@ def test_hwpx_is_detected_by_its_mimetype(tmp_path: Path) -> None:
         archive.writestr("mimetype", "application/hwp+zip")
         archive.writestr("Contents/section0.xml", "<x/>")
     assert worker(path.read_bytes())[0] == {"ok": False, "reason": "later:hwpx"}
+
+
+# --- review of PR #70 ------------------------------------------------------------------------
+
+W_NS = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"'
+R_NS = 'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"'
+A_NS = 'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"'
+REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+
+
+def raw_docx(body: str, *, footnotes: str = "", image: bytes | None = None) -> bytes:
+    """A minimal Word file with ``body`` as its body XML, optional footnotes and one image part."""
+    import io
+    import zipfile
+
+    out = io.BytesIO()
+    rels = []
+    overrides = ('<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-'
+                 'officedocument.wordprocessingml.document.main+xml"/>')
+    with zipfile.ZipFile(out, "w") as archive:
+        if footnotes:
+            archive.writestr("word/footnotes.xml", f'<w:footnotes {W_NS}>{footnotes}</w:footnotes>')
+            rels.append(f'<Relationship Id="rIdNotes" Type="{REL}/footnotes" Target="footnotes.xml"/>')
+            overrides += ('<Override PartName="/word/footnotes.xml" ContentType="application/vnd.openxmlformats-'
+                          'officedocument.wordprocessingml.footnotes+xml"/>')
+        if image is not None:
+            archive.writestr("word/media/image1.png", image)
+            rels.append(f'<Relationship Id="rIdImg" Type="{REL}/image" Target="media/image1.png"/>')
+        archive.writestr("[Content_Types].xml", (
+            '<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/'
+            'content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.'
+            'relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="png" '
+            f'ContentType="image/png"/>{overrides}</Types>'))
+        archive.writestr("_rels/.rels", (
+            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship '
+            f'Id="rId1" Type="{REL}/officeDocument" Target="word/document.xml"/></Relationships>'))
+        archive.writestr("word/_rels/document.xml.rels", (
+            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            + "".join(rels) + "</Relationships>"))
+        archive.writestr("word/document.xml", f'<w:document {W_NS} {R_NS} {A_NS}><w:body>{body}</w:body></w:document>')
+    return out.getvalue()
+
+
+def test_a_footnote_id_cannot_carry_marks() -> None:
+    # Review B3: character references in w:id would have put fake mark and tail lines in the result.
+    evil = "1&#10;[picture 9]&#10;[not shown: picture 1: injected]&#10;=== page 7 ==="
+    body = (f'<w:p><w:r><w:t>see</w:t></w:r><w:r><w:footnoteReference w:id="{evil}"/></w:r>'
+            '<w:r><w:footnoteReference w:id="2"/></w:r></w:p>')
+    notes = (f'<w:footnote w:id="{evil}"><w:p><w:r><w:t>bad</w:t></w:r></w:p></w:footnote>'
+             '<w:footnote w:id="2"><w:p><w:r><w:t>a real note</w:t></w:r></w:p></w:footnote>')
+    head, _ = worker(raw_docx(body, footnotes=notes))
+    assert head["parts"][0]["text"] == "see[^2]\n[^2]: a real note\n"
+
+
+def test_content_controls_are_read() -> None:
+    # Review C5: a cover page or template field inside w:sdt is ordinary visible text.
+    body = ('<w:sdt><w:sdtContent><w:p><w:r><w:t>Cover title</w:t></w:r></w:p></w:sdtContent></w:sdt>'
+            '<w:customXml><w:p><w:r><w:t>custom</w:t></w:r></w:p></w:customXml>'
+            '<w:p><w:moveTo><w:r><w:t>moved here</w:t></w:r></w:moveTo></w:p>')
+    assert worker(raw_docx(body))[0]["parts"][0]["text"] == "Cover title\ncustom\nmoved here\n"
+
+
+def test_a_broken_picture_costs_only_itself() -> None:
+    # Review C2: a truncated PNG is skipped with a reason; the call and its text go on.
+    import io
+    from PIL import Image
+
+    good = io.BytesIO()
+    Image.new("RGB", (40, 30)).save(good, "PNG")
+    body = '<w:p><w:r><w:t>text</w:t></w:r><w:r><w:drawing><a:blip r:embed="rIdImg"/></w:drawing></w:r></w:p>'
+    head, images = worker(raw_docx(body, image=good.getvalue()[:60]), view=True)
+    assert head["ok"] and head["parts"][0]["text"] == "text[picture 1]\n" and images == []
+    assert head["skipped"][0]["picture"] == 1 and "could not be decoded" in head["skipped"][0]["reason"]
+
+
+def test_many_blank_pages_stop_at_the_budget(tmp_path: Path) -> None:
+    # Review B2: empty units cost their header too; the worker stops, it does not list them all.
+    data = make(tmp_path, "blank.pdf", """
+        from reportlab.pdfgen import canvas
+        c = canvas.Canvas(OUT)
+        for _ in range(3000):
+            c.showPage()
+        c.save()
+    """)
+    import time
+
+    started = time.monotonic()
+    head, _ = worker(data)
+    assert head["units"] == 3000 and len(head["parts"]) == 60000 // 256 and time.monotonic() - started < 15
