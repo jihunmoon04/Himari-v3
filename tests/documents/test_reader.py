@@ -247,3 +247,21 @@ def test_only_an_ancestor_may_be_a_sticky_root_folder() -> None:
     open_dir = os.stat_result((st.S_IFDIR | 0o777, 1, 1, 2, 0, 0, 4096, 0, 0, 0))
     with pytest.raises(ToolkitRefused):
         _trusted(open_dir, frozenset(), "/opt", ancestor=True)  # not sticky: refused even above
+
+
+def test_a_repeated_sheet_header() -> None:
+    sheet = {"format": "xlsx", "unit_name": "sheet"}
+    good = part(1, 10, 12, None, header="| row | A |\n| --- | --- |\n")
+    pieces = (Piece(1, 1, 10),)
+    assert _checked(lines(head([good], **sheet)), pieces, None, False, 1000).parts[0].header == (
+        "| row | A |\n| --- | --- |\n")
+    for bad in ({"header": "| row |\n"}, {"header": "x\n| --- |\n"}, {"header": "| a |\n| b |\n| c |\n"},
+                {"header": "| row | A |\n| --- | --- |\n", "mid_line": True}):
+        with pytest.raises(ValueError):
+            _checked(lines(head([{**good, **bad}], **sheet)), pieces, None, False, 1000)
+    with pytest.raises(ValueError):  # not at the start of a unit
+        _checked(lines(head([part(1, 0, 2, None, header="| row | A |\n| --- | --- |\n")], **sheet)), ALL, None,
+                 False, 1000)
+    with pytest.raises(ValueError):  # the header counts toward the budget
+        _checked(lines(head([{**good, "header": "| " + "x" * 2000 + " |\n| --- |\n"}], **sheet)), pieces, None,
+                 False, 1000)

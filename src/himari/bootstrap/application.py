@@ -45,7 +45,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import BinaryIO
+from typing import Any, BinaryIO
 
 import httpx
 
@@ -613,7 +613,7 @@ class Application:
             elif state is not SandboxState.ENFORCED:  # V3-P66 §5.2 (review C2), V3-P70 review N8
                 log.warning("commands cannot run (sandbox %s): the model can read attached text files%s, "
                             "but cannot run scripts on other files", state.value,
-                            " and PDF and Word documents" if reader is not None else "")
+                            " and PDF, Office and HWPX documents" if reader is not None else "")
             views = await _image_views(root, sandbox)
             base = DEFAULT_INSTRUCTIONS if instructions is None else instructions
             runtime = build_runtime(provider, store=store, environments=[inside], tools=[*tools, *mcp.handlers, *mcp.resource_tools],
@@ -878,6 +878,15 @@ class Application:
     def images_available(self) -> bool:
         """Whether model copies of images can be made here (V3-P67 §3.1)."""
         return self.views is not None and self.views.available
+
+    @property
+    def documents_status(self) -> dict[str, Any]:
+        """V3-P70 §9: read_document offered, run_command with the toolkit, and the toolkit's libraries."""
+        reader = self.documents
+        read = reader is not None and reader.available
+        return {"read": read, "scripts": read and reader is not None and reader.scripts
+                and self.current_sandbox_state is SandboxState.ENFORCED,
+                "libraries": dict(reader.versions) if read and reader is not None else {}}
 
     async def _workspace(self, scope: TrustedScope) -> tuple[WorkspaceId, str]:
         if not self.uploads_work:

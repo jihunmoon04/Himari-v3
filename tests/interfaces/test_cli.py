@@ -678,7 +678,8 @@ def test_cancel_closes_an_open_question_and_pause_with_nothing_running(harness: 
 def test_status_rename_and_a_closed_question_in_the_history(harness: Harness) -> None:
     code, out, _ = harness.run("status")
     assert code == cli.EXIT_OK
-    assert out.splitlines() == ["model: m", "commands: unavailable on this host", "context budget: 128,000 tokens"]
+    assert out.splitlines() == ["model: m", "commands: unavailable on this host", "context budget: 128,000 tokens",
+                                "documents: off"]
     cid = harness.run("new")[1].strip()
     assert harness.run("rename", cid, "Trip plans")[0] == cli.EXIT_OK
     assert "Trip plans" in harness.run("list")[1]

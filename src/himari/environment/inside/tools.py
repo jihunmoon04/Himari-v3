@@ -266,7 +266,7 @@ class ReadFile(_InsideTool):
             return ToolOutcome(
                 ToolStatus.SUCCEEDED,
                 _text(f"{shown} ({size} bytes): binary file, content not shown"
-                      + ("; read PDF and Word documents with read_document" if self._env.documents is not None
+                      + ("; read PDF, Office and HWPX documents with read_document" if self._env.documents is not None
                          else "")),
                 raw_result={"path": shown, "size": size, "binary": True},
             )

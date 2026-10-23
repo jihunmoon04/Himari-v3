@@ -146,3 +146,50 @@ def test_the_application_offers_documents(tmp_path: Path) -> None:
         assert app.toolkit is not None and app.toolkit.fd == -1  # closed with the Application
 
     asyncio.run(go())
+
+
+def test_end_to_end_a_model_reads_edits_and_hands_back_documents(tmp_path: Path) -> None:
+    # §15: a scripted model makes a Word file, reads it, changes it with a script, gives it to the user; then
+    # makes a Korean PDF with NanumGothic and looks at it.
+    from testkit import calls, final
+
+    from himari.common import TextBlock
+    from himari.prompt.api import ToolGroupTurn
+
+    make_docx = ("import docx; d = docx.Document(); d.add_heading('보고서', 1); d.add_paragraph('초안 문장'); "
+                 "d.save('report.docx')")
+    edit_docx = ("import docx; d = docx.Document('report.docx'); d.paragraphs[1].text = '고친 문장'; "
+                 "d.save('report.docx')")
+    make_pdf = ("import os; from reportlab.pdfgen import canvas; from reportlab.pdfbase import pdfmetrics; "
+                "from reportlab.pdfbase.ttfonts import TTFont; "
+                "pdfmetrics.registerFont(TTFont('Nanum', os.path.join(os.environ['HIMARI_FONTS'], "
+                "'NanumGothic-Regular.ttf'))); c = canvas.Canvas('hello.pdf'); c.setFont('Nanum', 20); "
+                "c.drawString(72, 760, '안녕하세요 문서'); c.showPage(); c.save()")
+    adapter = ScriptedAdapter([
+        calls(("inside/run_command", {"argv": ["python3", "-c", make_docx]})),
+        calls(("inside/read_document", {"path": "report.docx"})),
+        calls(("inside/run_command", {"argv": ["python3", "-c", edit_docx]})),
+        calls(("inside/read_document", {"path": "report.docx"}), ("inside/present_file", {"path": "report.docx"})),
+        calls(("inside/run_command", {"argv": ["python3", "-c", make_pdf]})),
+        calls(("inside/read_document", {"path": "hello.pdf", "view": True})),
+        final("done"),
+    ])
+
+    async def go() -> list[str]:
+        app = await Application.open(tmp_path / "data", adapter, model_id="m", cleanup_seconds=None,
+                                     documents_dir=BASE, documents_owners=ME)
+        try:
+            scope = TrustedScope(PrincipalId("alice"), await app.create_conversation(PrincipalId("alice")))
+            await app.send(scope, "go")
+            await asyncio.wait_for(app.runner.wait(scope), 300)
+            last = adapter.prepared_inputs[-1].conversation
+            return [str(block.text) for part in last if isinstance(part, ToolGroupTurn)
+                    for result in part.results.values() for block in result.blocks if isinstance(block, TextBlock)]
+        finally:
+            await app.close()
+
+    texts = asyncio.run(go())
+    reads = [t for t in texts if "(Word," in t or "(PDF," in t]
+    assert "# 보고서\n초안 문장" in reads[0] and "# 보고서\n고친 문장" in reads[1], texts
+    assert any(t.startswith("Presented report.docx") for t in texts), texts
+    assert "안녕하세요 문서" in reads[2] and "[images: page 1]" in reads[2], texts

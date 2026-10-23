@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import base64
 import io
+import itertools
 import json
 import re
 import resource
@@ -254,10 +255,37 @@ class Document:
     def text(self, n: int) -> str:
         return str(self.unit(n)["text"])
 
+    def slice(self, n: int, start: int, room: int) -> dict[str, Any] | None:
+        """Unit ``n`` from ``start``, within ``room`` UTF-8 bytes (its
+        "…" and repeated header included): {"from", "to", "length",
+        "text", "mid_line", "header"}; None when nothing of it fits."""
+        text = self.text(n)
+        if start > len(text):
+            raise Refused("position_past_end")
+        if 0 < start < len(text) and text[start - 1] == "\\" and (start == 1 or text[start - 2] == "\n"):
+            raise Refused("bad_position")
+        middle = mid_line(text, start)
+        room -= MID_LINE_BYTES if middle else 0
+        end = cut_at(text, start, room) if room > 0 else start
+        if end == start and start < len(text):
+            return None
+        return {"from": start, "to": end, "length": len(text), "text": text[start:end], "mid_line": middle,
+                "header": None}
+
     def view(self, n: int, room: int) -> tuple[list[tuple[int | None, str | tuple[str, int, int, bytes]]], list[int]]:
         """Images for unit ``n``, at most ``room`` made: (picture number or
-        None, made image or why not), and the picture numbers left unmade."""
-        raise NotImplementedError
+        None, made image or why not), and the picture numbers left unmade.
+        This one: the unit's pictures, in order."""
+        made_list: list[tuple[int | None, str | tuple[str, int, int, bytes]]] = []
+        more: list[int] = []
+        for number in self.unit(n)["picture_numbers"]:
+            if room <= 0:
+                more.append(number)  # not decoded: the model asks for it with pictures (review C2)
+                continue
+            made = self.picture(number)
+            made_list.append((number, made))
+            room -= not isinstance(made, str)
+        return made_list, more
 
     def picture(self, number: int) -> tuple[str, int, int, bytes] | str:
         """A picture made ready, or why not: one broken picture never fails the call (review C2)."""
@@ -267,6 +295,71 @@ class Document:
             return "out of memory"
         except Exception as error:  # noqa: BLE001 — truncated, a decompression bomb, a codec error
             return f"could not be decoded ({type(error).__name__})"
+
+
+def table_blocks(rows: list[tuple[list[str], list[str], list[int]]]) -> list[tuple[str, list[str], list[int]]]:
+    """A markdown table from cells already cleaned; one too large for a part
+    is split at rows, its header row repeated without marks (review N5)."""
+    if not rows:
+        return []
+
+    def line(cells: list[str]) -> str:
+        return "| " + " | ".join(cells) + " |\n"
+
+    header = line(rows[0][0]) + "|" + " --- |" * max(1, len(rows[0][0])) + "\n"
+    repeated = _MARKS.sub("", header)
+    blocks: list[tuple[str, list[str], list[int]]] = [(header, list(rows[0][1]), list(rows[0][2]))]
+    for cells, notes, pictures in rows[1:]:
+        text, current = line(cells), blocks[-1]
+        if len(current[0]) + len(text) > PART_CHARS and current[0] not in (header, repeated):
+            blocks.append((repeated, [], []))  # the next piece is its own part, its header repeated
+            current = blocks[-1]
+        blocks[-1] = (current[0] + text, current[1] + notes, current[2] + pictures)
+    return blocks
+
+
+def cell_text(value: str) -> str:
+    return one_line(value).replace("|", "\\|")
+
+
+class Flowing(Document):
+    """A document without pages (DOCX, HWPX): its blocks cut into parts of
+    about PART_CHARS at block boundaries, footnotes at the end of the part."""
+
+    unit_name = "part"
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._list: list[dict[str, Any]] = []
+
+    def count(self) -> int:
+        return len(self._list)
+
+    def unit(self, n: int) -> dict[str, Any]:
+        return self._list[n - 1]
+
+    def _split(self, blocks: list[tuple[str, list[str], list[int]]]) -> None:
+        text, notes, pictures = "", list[str](), list[int]()
+        for block, block_notes, block_pictures in blocks:
+            if not block:
+                continue
+            if text and len(text) + len(block) > PART_CHARS:
+                self._unit(text, notes, pictures)
+                text, notes, pictures = "", [], []
+            text += block
+            notes += block_notes
+            pictures += block_pictures
+        if text or not self._list:
+            self._unit(text, notes, pictures)
+
+    def _unit(self, text: str, notes: list[str], pictures: list[int]) -> None:
+        number = len(self._list) + 1
+        for picture in pictures:
+            self.pictures[picture - 1] = (number, self.pictures[picture - 1][1])
+        if notes:
+            text += "".join(note.replace("\n", " ") + "\n" for note in notes)
+        self._list.append({"text": text, "flags": [] if text.strip() else ["no_text"], "pictures": len(pictures),
+                           "picture_numbers": pictures})
 
 
 class Pdf(Document):
@@ -350,9 +443,7 @@ def _as_document_type(data: bytes) -> bytes:
     return out.getvalue()
 
 
-class Docx(Document):
-    unit_name = "part"
-
+class Docx(Flowing):
     def __init__(self, data: bytes) -> None:
         super().__init__()
         import docx
@@ -364,16 +455,9 @@ class Docx(Document):
         self._part = self._doc.part
         self._styles = {s.style_id: str(s.name or "") for s in self._doc.styles}
         self._notes = self._footnotes()
-        self._list: list[dict[str, Any]] = []
         blocks: list[tuple[str, list[str], list[int]]] = []  # (text, footnote lines, picture numbers)
         self._blocks(self._doc.element.body, blocks)
         self._split(blocks)
-
-    def count(self) -> int:
-        return len(self._list)
-
-    def unit(self, n: int) -> dict[str, Any]:
-        return self._list[n - 1]
 
     def _blocks(self, container: Any, blocks: list[tuple[str, list[str], list[int]]]) -> None:
         """Paragraphs and tables in order, inside content controls and custom XML too (review C5)."""
@@ -467,65 +551,15 @@ class Docx(Document):
         for paragraph in cell.iter(W + "p"):
             self._runs(paragraph, lines, notes, pictures, [])
             lines.mark(" ")
-        return one_line(lines.result()).replace("|", "\\|")
+        return cell_text(lines.result())
 
     def _table(self, element: Any) -> list[tuple[str, list[str], list[int]]]:
-        """A markdown table; one too large for a part is split at rows, its
-        header row repeated."""
-        rows: list[tuple[str, list[str], list[int]]] = []
+        rows: list[tuple[list[str], list[str], list[int]]] = []
         for row in element.iterchildren(W + "tr"):
             notes: list[str] = []
             pictures: list[int] = []
-            cells = [self._cell(cell, notes, pictures) for cell in row.iterchildren(W + "tc")]
-            rows.append(("| " + " | ".join(cells) + " |\n", notes, pictures))
-        if not rows:
-            return []
-        width = len(list(next(element.iterchildren(W + "tr")).iterchildren(W + "tc"))) or 1
-        header = rows[0][0] + "|" + " --- |" * width + "\n"
-        repeated = _MARKS.sub("", header)  # a repeated header carries no picture or note marks (review N5)
-        blocks: list[tuple[str, list[str], list[int]]] = [(header, list(rows[0][1]), list(rows[0][2]))]
-        for text, notes, pictures in rows[1:]:
-            current = blocks[-1]
-            if len(current[0]) + len(text) > PART_CHARS and current[0] not in (header, repeated):
-                blocks.append((repeated, [], []))  # the next piece is its own part, its header repeated
-                current = blocks[-1]
-            blocks[-1] = (current[0] + text, current[1] + notes, current[2] + pictures)
-        return blocks
-
-    def _split(self, blocks: list[tuple[str, list[str], list[int]]]) -> None:
-        text, notes, pictures = "", list[str](), list[int]()
-        for block, block_notes, block_pictures in blocks:
-            if not block:
-                continue
-            if text and len(text) + len(block) > PART_CHARS:
-                self._unit(text, notes, pictures)
-                text, notes, pictures = "", [], []
-            text += block
-            notes += block_notes
-            pictures += block_pictures
-        if text or not self._list:
-            self._unit(text, notes, pictures)
-
-    def _unit(self, text: str, notes: list[str], pictures: list[int]) -> None:
-        number = len(self._list) + 1
-        for picture in pictures:
-            self.pictures[picture - 1] = (number, self.pictures[picture - 1][1])
-        if notes:
-            text += "".join(note.replace("\n", " ") + "\n" for note in notes)
-        self._list.append({"text": text, "flags": [] if text.strip() else ["no_text"], "pictures": len(pictures),
-                           "picture_numbers": pictures})
-
-    def view(self, n: int, room: int) -> tuple[list[tuple[int | None, str | tuple[str, int, int, bytes]]], list[int]]:
-        made_list: list[tuple[int | None, str | tuple[str, int, int, bytes]]] = []
-        more: list[int] = []
-        for number in self._list[n - 1]["picture_numbers"]:
-            if room <= 0:
-                more.append(number)  # not decoded: the model asks for it with pictures (review C2)
-                continue
-            made = self.picture(number)
-            made_list.append((number, made))
-            room -= not isinstance(made, str)
-        return made_list, more
+            rows.append(([self._cell(cell, notes, pictures) for cell in row.iterchildren(W + "tc")], notes, pictures))
+        return table_blocks(rows)
 
 
 def _heading(name: str) -> int:
@@ -536,13 +570,484 @@ def _heading(name: str) -> int:
     return int(match.group(1)) if match else 0
 
 
+# --- XLSX --------------------------------------------------------------------------------
+
+SML = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
+XDR = "{http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing}"
+PKG = "{http://schemas.openxmlformats.org/package/2006/relationships}"
+MAX_COLUMNS = 100  # columns shown per sheet; the rest is said, for run_command
+_CELL = re.compile(r"([A-Z]{1,3})(\d{1,7})")
+
+
+def _relationships(archive: zipfile.ZipFile, part: str) -> dict[str, tuple[str, str]]:
+    """{Id: (Type, target part)} of an OPC part; external targets left out."""
+    import posixpath
+    import xml.etree.ElementTree as ET
+
+    folder, name = posixpath.split(part)
+    try:
+        root = ET.fromstring(archive.read(posixpath.join(folder, "_rels", name + ".rels")))
+    except KeyError:
+        return {}
+    found = {}
+    for rel in root.iter(PKG + "Relationship"):
+        target, kind = rel.get("Target") or "", rel.get("Type") or ""
+        if rel.get("TargetMode") == "External" or not target:
+            continue
+        path = target.lstrip("/") if target.startswith("/") else posixpath.normpath(posixpath.join(folder, target))
+        found[rel.get("Id") or ""] = (kind, path)
+    return found
+
+
+def _column(letters: str) -> int:
+    number = 0
+    for letter in letters:
+        number = number * 26 + ord(letter) - 64
+    return number
+
+
+def _letters(number: int) -> str:
+    out = ""
+    while number:
+        number, rest = divmod(number - 1, 26)
+        out = chr(65 + rest) + out
+    return out
+
+
+def _value(value: object) -> str:
+    import datetime
+
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "TRUE" if value else "FALSE"
+    if isinstance(value, datetime.datetime):
+        return value.date().isoformat() if value.time() == datetime.time() else value.isoformat(sep=" ")
+    if isinstance(value, (datetime.date, datetime.time)):
+        return value.isoformat()
+    if isinstance(value, float):
+        return repr(value)
+    return cell_text(str(value))
+
+
+class Xlsx(Document):
+    """Sheets, each a table of its stored values laid out row by row and
+    only as far as asked (§4.2: the rest is not looked at)."""
+
+    unit_name = "sheet"
+
+    def __init__(self, data: bytes) -> None:
+        super().__init__()
+        import openpyxl
+
+        try:
+            self._book = openpyxl.load_workbook(io.BytesIO(data), read_only=True, data_only=True)
+            self._zip = zipfile.ZipFile(io.BytesIO(data))
+        except Exception:  # noqa: BLE001 — anything openpyxl cannot open
+            raise Refused("broken") from None
+        self._sheets = list(self._book._sheets)  # worksheets and chart sheets, in the workbook's order
+        self._placed: list[list[tuple[str, int]]] = []  # per sheet: (cell, picture number)
+        for index, sheet in enumerate(self._sheets, start=1):
+            placed = []
+            for cell, target in self._drawn(sheet):
+                self.pictures.append((index, lambda target=target: self._zip.read(target)))
+                placed.append((cell, len(self.pictures)))
+            self._placed.append(placed)
+
+    def _path(self, sheet: Any) -> str | None:
+        path = getattr(sheet, "_worksheet_path", None)
+        return str(path).lstrip("/") if path else None
+
+    def _drawn(self, sheet: Any) -> list[tuple[str, str]]:
+        """The pictures anchored on a sheet: (top-left cell, media part), in drawing order."""
+        import xml.etree.ElementTree as ET
+
+        path = self._path(sheet)
+        if path is None:
+            return []
+        found = []
+        for kind, drawing in _relationships(self._zip, path).values():
+            if not kind.endswith("/drawing"):
+                continue
+            media = _relationships(self._zip, drawing)
+            try:
+                root = ET.fromstring(self._zip.read(drawing))
+            except (KeyError, ET.ParseError):
+                continue
+            for anchor in root:
+                start = anchor.find(XDR + "from")
+                blip = anchor.find(".//" + A + "blip")
+                if blip is None or (blip.get(R + "embed") or "") not in media:
+                    continue
+                cell = "?"
+                if start is not None:
+                    column, row = start.findtext(XDR + "col"), start.findtext(XDR + "row")
+                    if column and row and column.isdigit() and row.isdigit():
+                        cell = f"{_letters(int(column) + 1)}{int(row) + 1}"
+                found.append((cell, media[blip.get(R + "embed") or ""][1]))
+        return found
+
+    def count(self) -> int:
+        return len(self._sheets)
+
+    def unit(self, n: int) -> dict[str, Any]:
+        sheet = self._sheets[n - 1]
+        flags = ["hidden"] if getattr(sheet, "sheet_state", "visible") != "visible" else []
+        if not hasattr(sheet, "iter_rows"):
+            flags.append("no_text")
+        return {"flags": flags, "pictures": len(self._placed[n - 1]),
+                "picture_numbers": [number for _, number in self._placed[n - 1]]}
+
+    def text(self, n: int) -> str:
+        return "".join(line for line, _ in self._lines(n))
+
+    def _scan(self, sheet: Any) -> tuple[set[int], set[int], dict[tuple[int, int], str]]:
+        """Hidden rows and columns, and formulas with no stored value, from the sheet's XML."""
+        import xml.etree.ElementTree as ET
+
+        rows: set[int] = set()
+        columns: set[int] = set()
+        formulas: dict[tuple[int, int], str] = {}
+        path = self._path(sheet)
+        if path is None:
+            return rows, columns, formulas
+        hidden = ("1", "true")
+        with self._zip.open(path) as stream:
+            for _, element in ET.iterparse(stream):
+                tag = element.tag
+                if tag == SML + "c":
+                    formula, value = element.find(SML + "f"), element.find(SML + "v")
+                    match = _CELL.fullmatch(element.get("r") or "")
+                    if formula is not None and formula.text and (value is None or not value.text) and match:
+                        formulas[(int(match.group(2)), _column(match.group(1)))] = one_line(formula.text)
+                    element.clear()
+                elif tag == SML + "row":
+                    if element.get("hidden") in hidden and (element.get("r") or "").isdigit():
+                        rows.add(int(element.get("r") or 0))
+                    element.clear()
+                elif tag == SML + "col" and element.get("hidden") in hidden:
+                    low, high = element.get("min") or "", element.get("max") or ""
+                    if low.isdigit() and high.isdigit():
+                        columns.update(range(int(low), min(int(high), MAX_COLUMNS) + 1))
+        return rows, columns, formulas
+
+    def _lines(self, n: int) -> Iterator[tuple[str, str]]:
+        """(line, kind) of sheet ``n``: "head", "header" (the table's
+        column row and rule), "row", "end"; nothing in a line depends on
+        a later row (§4.2's invariant)."""
+        sheet = self._sheets[n - 1]
+        if not hasattr(sheet, "iter_rows"):
+            yield "[chart sheet: no cells]\n", "end"
+            return
+        hidden_rows, hidden_columns, formulas = self._scan(sheet)
+        try:
+            size = str(sheet.calculate_dimension())
+        except Exception:  # noqa: BLE001 — a sheet that does not say its size
+            size = ""
+        known = bool(size) and size not in ("A1", "A1:A1")
+        yield f'Sheet "{one_line(sheet.title)}" ({size if known else "size not given"})\n', "head"
+        rows = sheet.iter_rows(values_only=True)
+        peeked = next(rows, None)
+        width = len([v for v in peeked or ()]) if peeked is not None else 1
+        while width > 1 and peeked is not None and peeked[width - 1] is None:
+            width -= 1
+        # The heading row's width: the declared size, else the first row's (never a later row: §4.2).
+        columns = min(sheet.max_column if known and sheet.max_column else width, MAX_COLUMNS)
+        names = [f"{_letters(c)} [hidden]" if c in hidden_columns else _letters(c) for c in range(1, columns + 1)]
+        yield "| row | " + " | ".join(names) + " |\n", "header"
+        yield "| --- |" + " --- |" * columns + "\n", "header"
+        first = sheet.min_row if known and sheet.min_row else 1
+        wider = False
+        for offset, values in enumerate(itertools.chain([peeked] if peeked is not None else [], rows)):
+            row = first + offset
+            cells = list(values)
+            wider = wider or len(cells) > MAX_COLUMNS
+            cells = cells[:MAX_COLUMNS]
+            while cells and cells[-1] is None and (row, len(cells)) not in formulas:
+                cells.pop()
+            shown = ["=" + formulas[(row, c)] if value is None and (row, c) in formulas else _value(value)
+                     for c, value in enumerate(cells, start=1)]
+            mark = f"{row} [hidden]" if row in hidden_rows else str(row)
+            yield "| " + " | ".join([mark, *shown]) + " |\n", "row"
+        if wider:
+            yield f"[columns after {_letters(MAX_COLUMNS)} not shown]\n", "end"
+        for cell, number in self._placed[n - 1]:
+            yield f"[picture {number} at {cell}]\n", "end"
+
+    def slice(self, n: int, start: int, room: int) -> dict[str, Any] | None:
+        """Laid out only as far as the room goes: length is known only when
+        the sheet ended within it (§4.2, re-check N3)."""
+        header: list[str] = []
+        taken: list[str] = []
+        pos = used = 0
+        middle = begun = False
+        repeat = ""
+        ended = True
+        for line, kind in self._lines(n):
+            if kind == "header":
+                header.append(line)
+            if not begun:
+                if pos + len(line) <= start and not (pos == start and start == 0):
+                    pos += len(line)
+                    continue
+                begun = True
+                if start > pos:
+                    middle, line, pos = True, line[start - pos:], start
+                elif start > 0 and kind == "row":
+                    repeat = "".join(header)  # resumed at a row: the column row and rule again
+                room -= (MID_LINE_BYTES if middle else 0) + len(repeat.encode("utf-8"))
+                if room <= 0:
+                    return None
+            size = len(line.encode("utf-8", "surrogatepass"))
+            if used + size <= room:
+                taken.append(line)
+                used += size
+                pos += len(line)
+                continue
+            if not taken:  # one line larger than the room: cut at a character, the rest read on mid-line
+                end = cut_at(line, 0, room)
+                if end == 0:
+                    return None
+                taken.append(line[:end])
+                pos += end
+            ended = False
+            break
+        if not begun:
+            if start > pos:
+                raise Refused("position_past_end")
+            middle = False  # at the very end: an empty slice
+        text = "".join(taken)
+        return {"from": start, "to": start + len(text), "length": pos if ended else None, "text": text,
+                "mid_line": middle, "header": repeat or None}
+
+
+# --- PPTX --------------------------------------------------------------------------------
+
+
+class Pptx(Document):
+    """Slides, each its shapes' text in reading order (top to bottom, left
+    to right), tables and charts as tables, pictures marked, notes last."""
+
+    unit_name = "slide"
+
+    def __init__(self, data: bytes) -> None:
+        super().__init__()
+        import pptx
+        from pptx.shapes.picture import Picture
+
+        try:
+            self._deck = pptx.Presentation(io.BytesIO(data))
+        except Exception:  # noqa: BLE001 — anything python-pptx cannot open
+            raise Refused("broken") from None
+        self._picture_type = Picture
+        self._slides = list(self._deck.slides)
+        self._size = (self._deck.slide_width or 0, self._deck.slide_height or 0)
+        self._numbers: list[list[int]] = []
+        for index, slide in enumerate(self._slides, start=1):
+            numbers = []
+            for shape in self._ordered(slide.shapes):
+                if isinstance(shape, Picture):
+                    self.pictures.append((index, lambda shape=shape: shape.image.blob))
+                    numbers.append(len(self.pictures))
+            self._numbers.append(numbers)
+        self._units: dict[int, dict[str, Any]] = {}
+
+    def _ordered(self, shapes: Any) -> list[Any]:
+        found: list[Any] = []
+        for shape in sorted(shapes, key=lambda s: (s.top or 0, s.left or 0)):
+            if shape.shape_type is not None and int(shape.shape_type) == 6:  # MSO_SHAPE_TYPE.GROUP
+                found += self._ordered(shape.shapes)
+            else:
+                found.append(shape)
+        return found
+
+    def _off(self, shape: Any) -> bool:
+        width, height = self._size
+        left, top = shape.left, shape.top
+        if None in (left, top, shape.width, shape.height) or not width or not height:
+            return False
+        return bool(left >= width or top >= height or left + shape.width <= 0 or top + shape.height <= 0)
+
+    def count(self) -> int:
+        return len(self._slides)
+
+    def unit(self, n: int) -> dict[str, Any]:
+        if n not in self._units:
+            slide = self._slides[n - 1]
+            lines = Lines()
+            numbers = iter(self._numbers[n - 1])
+            for shape in self._ordered(slide.shapes):
+                if isinstance(shape, self._picture_type):
+                    lines.mark(f"[picture {next(numbers)}]\n")
+                    continue
+                off = self._off(shape)
+                if getattr(shape, "has_chart", False):
+                    lines.mark(self._chart(shape.chart))
+                if getattr(shape, "has_table", False):
+                    rows: list[tuple[list[str], list[str], list[int]]] = [
+                        ([cell_text(cell.text) for cell in row.cells], [], []) for row in shape.table.rows]
+                    lines.mark("".join(block for block, _, _ in table_blocks(rows)))
+                if getattr(shape, "has_text_frame", False):
+                    for paragraph in shape.text_frame.paragraphs:
+                        text = "".join(run.text for run in paragraph.runs)
+                        if not text.strip():
+                            continue
+                        if off:
+                            lines.mark("[hidden: off the slide] ")
+                        lines.text(text)
+                        lines.end_line()
+            if slide.has_notes_slide and slide.notes_slide.notes_text_frame is not None:
+                notes = slide.notes_slide.notes_text_frame.text
+                if notes.strip():
+                    lines.mark("Notes: ")
+                    lines.text(notes)
+                    lines.end_line()
+            text = lines.result()
+            flags = ["hidden"] if slide._element.get("show") in ("0", "false") else []
+            if not text.strip():
+                flags.append("no_text")
+            self._units[n] = {"text": text, "flags": flags, "pictures": len(self._numbers[n - 1]),
+                              "picture_numbers": self._numbers[n - 1]}
+        return self._units[n]
+
+    @staticmethod
+    def _chart(chart: Any) -> str:
+        try:
+            title = one_line(chart.chart_title.text_frame.text) if chart.has_title else ""
+            plot = chart.plots[0]
+            categories = [cell_text(str(c)) for c in plot.categories]
+            rows: list[tuple[list[str], list[str], list[int]]] = [(["series", *categories], [], [])]
+            for series in plot.series:
+                rows.append(([cell_text(series.name or ""), *(_value(v) for v in series.values)], [], []))
+            table = "".join(block for block, _, _ in table_blocks(rows))
+        except Exception:  # noqa: BLE001 — a chart whose data cannot be read is still a chart
+            return "[chart]\n"
+        return f"[chart: {title.replace(']', ')')}]\n" + table if title else "[chart]\n" + table
+
+
+# --- HWPX --------------------------------------------------------------------------------
+
+
+def _local(tag: object) -> str:
+    return str(tag).rsplit("}", 1)[-1]
+
+
+class Hwpx(Flowing):
+    """Hancom's open format: the sections the package's spine lists, their
+    paragraphs and tables laid out like a Word file's."""
+
+    def __init__(self, data: bytes) -> None:
+        super().__init__()
+        import xml.etree.ElementTree as ET
+
+        try:
+            self._zip = zipfile.ZipFile(io.BytesIO(data))
+            package = ET.fromstring(self._zip.read("Contents/content.hpf"))
+        except (KeyError, zipfile.BadZipFile, ET.ParseError):
+            raise Refused("broken") from None
+        items = {item.get("id") or "": item.get("href") or "" for item in package.iter()
+                 if _local(item.tag) == "item"}
+        self._items = items
+        spine = [items.get(ref.get("idref") or "", "") for ref in package.iter() if _local(ref.tag) == "itemref"]
+        sections = [href for href in spine if re.fullmatch(r"Contents/section\d+\.xml", href)]
+        if not sections:  # no spine: the section parts by their number, never by name (re-review N6)
+            sections = sorted((n for n in self._zip.namelist() if re.fullmatch(r"Contents/section\d+\.xml", n)),
+                              key=lambda n: int(re.sub(r"\D", "", n)))
+        self._note = 0
+        blocks: list[tuple[str, list[str], list[int]]] = []
+        try:
+            for section in sections:
+                for child in ET.fromstring(self._zip.read(section)):
+                    if _local(child.tag) == "p":
+                        self._paragraph(child, blocks)
+        except (KeyError, ET.ParseError):
+            raise Refused("broken") from None
+        self._split(blocks)
+
+    def _picture(self, element: Any) -> int | None:
+        for node in element.iter():
+            ref = node.get("binaryItemIDRef")
+            if ref and self._items.get(ref) in self._zip.namelist():
+                href = self._items[ref]
+                self.pictures.append((0, lambda href=href: self._zip.read(href)))
+                return len(self.pictures)
+        return None
+
+    def _inline(self, run: Any, lines: Lines, notes: list[str],
+                pictures: list[int]) -> list[tuple[str, list[str], list[int]]]:
+        """One run's text, pictures and notes into ``lines``; tables it holds
+        come back (in a table cell they are flattened into the cell)."""
+        tables: list[tuple[str, list[str], list[int]]] = []
+        for item in run:
+            name = _local(item.tag)
+            if name == "t":
+                lines.text(item.text or "")
+                for part in item:
+                    lines.text({"tab": "\t", "lineBreak": "\n"}.get(_local(part.tag), "") + (part.tail or ""))
+            elif name == "tbl":
+                tables += self._table(item)
+            elif name == "pic":
+                number = self._picture(item)
+                if number is not None:
+                    pictures.append(number)
+                    lines.mark(f"[picture {number}]")
+            elif name == "ctrl":
+                for control in item:
+                    if _local(control.tag) in ("footNote", "endNote"):
+                        self._note += 1
+                        texts = [t.text or "" for t in control.iter() if _local(t.tag) == "t"]
+                        lines.mark(f"[^{self._note}]")
+                        notes.append(f"[^{self._note}]: {one_line(' '.join(texts))}")
+        return tables
+
+    def _paragraph(self, element: Any, blocks: list[tuple[str, list[str], list[int]]]) -> None:
+        lines, notes, pictures = Lines(), list[str](), list[int]()
+        for run in element:
+            if _local(run.tag) != "run":
+                continue
+            tables = self._inline(run, lines, notes, pictures)
+            if tables:  # a table sits in the text: the paragraph so far, then the table
+                lines.end_line()
+                text = lines.result()
+                if text.strip():
+                    blocks.append((text, notes, pictures))
+                blocks.extend(tables)
+                lines, notes, pictures = Lines(), [], []
+        lines.end_line()
+        text = lines.result()
+        if text.strip():
+            blocks.append((text, notes, pictures))
+
+    def _table(self, element: Any) -> list[tuple[str, list[str], list[int]]]:
+        rows: list[tuple[list[str], list[str], list[int]]] = []
+        for row in element:
+            if _local(row.tag) != "tr":
+                continue
+            cells: list[str] = []
+            notes: list[str] = []
+            pictures: list[int] = []
+            for cell in row:
+                if _local(cell.tag) != "tc":
+                    continue
+                lines = Lines()
+                for paragraph in cell.iter():
+                    if _local(paragraph.tag) == "run":
+                        for block, _, _ in self._inline(paragraph, lines, notes, pictures):  # a table in a cell
+                            lines.mark(" " + _MARKS.sub("", block).replace("\n", " ") + " ")
+                    elif _local(paragraph.tag) == "p":
+                        lines.mark(" ")
+                cells.append(cell_text(lines.result()))
+            rows.append((cells, notes, pictures))
+        return table_blocks(rows)
+
+
 def open_document(data: bytes) -> Document:
     kind = detect(data)
     if kind == "pdf":
         return Pdf(data)
     if kind == "docx":
         return Docx(data)
-    raise Refused(f"later:{kind}")  # V3-P70 §16: XLSX, PPTX and HWPX come in part 2
+    return {"xlsx": Xlsx, "pptx": Pptx, "hwpx": Hwpx}[kind](data)
 
 
 # --- requests -----------------------------------------------------------------------------
@@ -606,25 +1111,23 @@ def read_pages(document: Document, request: dict[str, Any], head: dict[str, Any]
     for count, (n, start) in enumerate(selected(request["pages"], units)):
         if view and count == VIEW_UNITS:
             break
-        text = document.text(n)
-        if start > len(text) or (start and start < len(text) and text[start - 1] == "\\"
-                                 and (start == 1 or text[start - 2] == "\n")):
-            raise Refused("position_past_end" if start > len(text) else "bad_position")
-        unit = document.unit(n)
-        middle = mid_line(text, start)
-        room = budget - PART_OVERHEAD - (MID_LINE_BYTES if middle else 0)
+        room = budget - PART_OVERHEAD
         if room <= 0:
             break  # no room for even a header: empty units stop here too (review B2)
-        end = cut_at(text, start, room)
-        if end == start and start < len(text):
+        piece = document.slice(n, start, room)
+        if piece is None:
             break  # nothing of it fits: it is where the next call starts
-        budget = room - len(text[start:end].encode("utf-8", "surrogatepass"))
-        part = {"n": n, "flags": unit["flags"], "pictures": unit["pictures"], "from": start, "to": end,
-                "length": len(text), "text": text[start:end]}
+        budget = room - len(piece["text"].encode("utf-8", "surrogatepass")) - len(
+            (piece["header"] or "").encode("utf-8")) - (MID_LINE_BYTES if piece["mid_line"] else 0)
+        unit = document.unit(n)
+        part = {"n": n, "flags": unit["flags"], "pictures": unit["pictures"], "from": piece["from"],
+                "to": piece["to"], "length": piece["length"], "text": piece["text"]}
         if "label" in unit:
             part["label"] = unit["label"]
-        if middle:
+        if piece["mid_line"]:
             part["mid_line"] = True
+        if piece["header"]:
+            part["header"] = piece["header"]
         parts.append(part)
         if view and start == 0:
             made_list, left = document.view(n, VIEW_UNITS - len(images))
@@ -634,7 +1137,7 @@ def read_pages(document: Document, request: dict[str, Any], head: dict[str, Any]
                 else:
                     images.append((n, number, made))
             more += left
-        if end < len(text):
+        if piece["length"] is None or piece["to"] < piece["length"]:
             break
     answer(**head, parts=parts, images=len(images), skipped=skipped, examined=0, more=more)
     send_images(images)

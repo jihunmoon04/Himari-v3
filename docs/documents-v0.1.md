@@ -801,3 +801,52 @@ rev. 7(`c10ea25`) 확인: **READY**.
   - **N2:** 배치가 바뀌었으므로 `SPLIT_RULE`을 2로 올렸다.
   - **N3:** `--prune`은 한 시간이 안 된 `.new-*`는 지우지 않는다. 진행 중인 설치일 수 있기 때문이다.
   - **N4:** 100만 단위를 넘는 문서를 "a bad answer"로 거절하는 것은 받아들인다.
+
+## 24. 구현 노트 — 2단계 (2026-10-23)
+
+**들어간 것**
+- **Excel(`Xlsx`):**
+  - openpyxl 읽기 전용(저장된 계산값)으로 행을 읽는다. 단위는 시트이고, 차트 시트도 단위다.
+  - 첫 줄은 `Sheet "이름" (A1:D30)`이다. 크기를 밝히지 않은 시트는 `(size not given)`.
+  - 그다음 열 문자 머리(`| row | A | B … |`)와 구분 줄, 그리고 행마다 `| 행번호 | 값 … |`.
+  - 시트 XML을 한 번 훑어 다음을 찾는다: 숨긴 행(`| 2 [hidden] |`), 숨긴 열(머리에 `C [hidden]`), 계산값이 없는 수식(`=B2*2`).
+  - 그림은 드로잉 관계를 따라 찾고, 표 아래에 `[picture K at F2]`로 적는다.
+  - 열은 100개까지만 보이고, 넘으면 `[columns after CV not shown]`이라고 적는다.
+  - 날짜는 ISO, 실수는 `repr`, 참거짓은 `TRUE`·`FALSE`로 적는다.
+- **시트는 필요한 만큼만 배치한다(§4.2):**
+  - `Xlsx.slice`는 행을 차례로 만들다가 예산이 차면 멈춘다. 시트가 그 안에서 끝나야 `length`를 알리고, 아니면 `null`이다.
+  - 행 경계에서 이어 읽으면 열 머리 두 줄을 `header`로 따로 보낸다. 서버는 그것이 `|`로 시작하는 두 줄인지 확인하고, 예산에 셈한다.
+  - 줄은 뒤쪽 행에 기대지 않는다. 머리 폭은 선언된 크기를, 없으면 첫 행을 쓴다.
+- **PowerPoint(`Pptx`):**
+  - 도형을 위→아래, 왼→오른 순으로 읽는다. 그룹은 펼친다.
+  - 글은 문단마다 한 줄이다. 표는 마크다운으로, 그림은 `[picture K]`로 적는다.
+  - 차트는 `[chart: 제목]`과 계열·분류 표로 적는다.
+  - 슬라이드 밖 도형의 글은 `[hidden: off the slide]`, 노트는 `Notes:`로 적는다. 숨긴 슬라이드는 단위 표시 `[hidden]`이다.
+- **HWPX(`Hwpx`):**
+  - `Contents/content.hpf`의 spine 순서로 `Contents/sectionN.xml`을 읽는다. spine이 없으면 번호순이다(`section10`이 `section2` 뒤).
+  - 문단(`hp:p`/`hp:run`/`hp:t`, `hp:tab`·`hp:lineBreak`)을 읽는다.
+  - 글 속의 표(`hp:tbl`)는 그 자리에서 문단을 끊고 마크다운 표로 적는다.
+  - 그림(`hp:pic`의 `binaryItemIDRef` → 매니페스트 → `BinData/…`)과 각주·미주(`hp:ctrl`/`hp:footNote`)를 읽는다.
+  - 구조는 python-hwpx(Apache-2.0)의 `Skeleton.hwpx`로 확인했다. 시험용 패키지는 `tests/documents_kit.py`가 만든다.
+- **공통 정리:** DOCX와 HWPX는 `Flowing`(부분 나누기·각주)과 `table_blocks`(표 나누기·머리 반복)를 함께 쓴다. `Document.slice`·`Document.view`는 기본 구현으로 올렸다.
+- **Tool·문장:** 설명, 지시 문장, `read_file` 힌트, 시작 로그를 다섯 형식으로 넓혔다. "not available yet" 길은 없앴다.
+- **상태 표시:**
+  - `GET /api/server`에 `documents: {read, scripts, libraries}`를 더했다. `scripts`는 `run_command` Sandbox가 지금 ENFORCED일 때만 참이다.
+  - `himari status`는 `documents: read on, scripts on (…)` 또는 `documents: off`를 보인다.
+- **`SPLIT_RULE`은 2 그대로다.** 1단계 배포 전이라 기존 `next` 값이 없고, PDF·DOCX 배치는 바뀌지 않았다.
+
+**실제 모델 확인에서 찾은 것**
+- `tests/live/test_documents_live.py`(opt-in)로 확인했다. 쓴 PDF는 세 쪽이다: 글이 있는 페이지, 벡터 차트, 글자를 그림으로만 담은 스캔 페이지.
+- 처음에 `openai/gpt-6-luna`가 "PELICAN" 대신 엉뚱한 단어를 답했다.
+  - 기록을 보니 모델이 쓰지 않는 선택 인자를 `pictures: ""`로 채워 보냈다. Tool은 이를 문법 오류로 거절했다.
+  - 그래서 `view`가 한 번도 되지 않았고, 모델은 `run_command`로 ASCII 그림을 그려 글자를 추측했다.
+- 고친 것: 빈 문자열·공백·null인 선택 인자는 주지 않은 것으로 본다.
+- 고친 뒤 모델은 `read_document`(`pages="1-"`, `view=true`) 한 번으로 "PELICAN"을 답한다.
+- 이 경우를 시험에 넣었다.
+
+**확인**
+- 전체 시험 2,015건 통과(82건 건너뜀). mypy, 경계 검사 통과.
+- opt-in 136건 통과: Sandbox 실호스트와 문서. 끝에서 끝 시험은 Application과 대본 모델로 확인한다.
+  - DOCX: 만들기 → 읽기 → 스크립트로 고치기 → 다시 읽기 → 건네기.
+  - 한글 PDF: 나눔고딕으로 만들기 → `view`.
+- 실시간 1건 통과.
