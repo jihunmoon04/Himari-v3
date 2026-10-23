@@ -125,6 +125,15 @@ const app = {
   work: null, // the work block the next tool step goes into (V3-P68 §5.1)
   rowsRunning: null, // the job state the rows without a result were last painted for
   attachKeys: 0,
+  instructions: null, // the saved instructions (V3-P69 §7): {text, revision, updated_at, max_chars}
+  savingInstructions: false,
+  instructionsSave: null, // the save under way, for a leave to wait on
+  conflictRevision: null, // shown a conflict: the version "save mine" replaces
+  instructionsDraft: null, // {text, base}: a save that met a signed-out session, restored after sign-in
+  leaveAgreed: false, // "Leave without saving?" answered yes, until the surface changes
+  leaveAsked: false, // that question is open
+  instructionsTicket: 0, // the latest load: an older answer is not applied
+  instructionsLoading: false,
 };
 
 const views = new AppViews(api, el, () => app.conversationId);
@@ -136,7 +145,10 @@ function status(text, tone) {
 }
 
 function showSurface(name) {
-  for (const surface of ["login", "home", "chat", "trash"]) $(`surface-${surface}`).hidden = surface !== name;
+  for (const surface of ["login", "home", "chat", "trash", "instructions"]) {
+    $(`surface-${surface}`).hidden = surface !== name;
+  }
+  app.leaveAgreed = false;
   const signedIn = name !== "login";
   $("sidebar").hidden = !signedIn;
   $("sidebar-toggle").hidden = !signedIn;
@@ -178,6 +190,7 @@ async function signIn(event) {
 }
 
 async function signOut() {
+  if (!(await mayLeave())) return;
   try {
     await api("DELETE", "/api/session");
   } finally {
@@ -221,6 +234,7 @@ function markSelected() {
 }
 
 async function showHome() {
+  if (!(await mayLeave())) return;
   stopPolling();
   app.conversationId = null;
   app.generation += 1;
@@ -245,6 +259,7 @@ async function showHome() {
 }
 
 async function newConversation() {
+  if (!(await mayLeave())) return;
   let created;
   try {
     created = await api("POST", "/api/conversations", {});
@@ -1222,6 +1237,7 @@ function poll(generation) {
 }
 
 async function openConversation(id) {
+  if (!(await mayLeave())) return;
   stopPolling();
   app.generation += 1;
   clearAttachments();
@@ -1494,6 +1510,7 @@ async function loadTrash(reset) {
 }
 
 async function showTrash() {
+  if (!(await mayLeave())) return;
   stopPolling();
   views.reset();
   app.conversationId = null;
@@ -1507,6 +1524,183 @@ async function showTrash() {
     + " after they were moved. " : "") + "Restore one to read it again.";
   status("");
   await loadTrash(true);
+}
+
+/* ------------------------------------------------------------ instructions */
+
+/* V3-P69 §7: the user's instructions for every conversation. A save sends the
+   revision the text was edited from; one made elsewhere since is never
+   overwritten without the user choosing to, against the version they were
+   told about (PR #68 review C1). */
+
+function characters(text) {
+  return [...text].length; // code points, as the server counts
+}
+
+function instructionsDirty() {
+  return app.instructions !== null && $("instructions-text").value !== app.instructions.text;
+}
+
+function paintInstructions() {
+  const saved = app.instructions;
+  const text = $("instructions-text").value;
+  const busy = app.savingInstructions;
+  const counter = $("instructions-count");
+  if (saved === null) { // not loaded (yet): nothing to edit against
+    counter.textContent = "Loading…";
+    counter.classList.remove("is-over");
+  } else {
+    const count = characters(text);
+    counter.textContent = `${count.toLocaleString()} / ${saved.max_chars.toLocaleString()}`;
+    counter.classList.toggle("is-over", count > saved.max_chars);
+  }
+  const over = saved !== null && characters(text) > saved.max_chars;
+  const dirty = instructionsDirty();
+  $("instructions-text").readOnly = busy || saved === null;
+  $("instructions-save").disabled = saved === null || !dirty || over || busy;
+  $("instructions-discard").disabled = busy || (!dirty && app.conflictRevision === null);
+  $("instructions-load").disabled = busy;
+  $("instructions-overwrite").disabled = busy;
+  $("instructions-saved").textContent = !saved || saved.updated_at === null ? ""
+    : `Saved ${new Date(saved.updated_at).toLocaleString()}`;
+}
+
+/* Called with the panel's buttons enabled (after a save's repaint), so the focus can land (review C2). */
+function showConflict(revision, again) {
+  app.conflictRevision = revision; // "save mine" replaces this version, the one the user is told about
+  const panel = $("instructions-conflict");
+  panel.hidden = false;
+  status(again ? "Changed again elsewhere; choose again." : "Changed elsewhere since you opened it. Choose below.",
+         "warn");
+  paintInstructions();
+  panel.scrollIntoView({ block: "nearest" });
+  $("instructions-load").focus();
+}
+
+/* The saved version; a draft kept from a save that met a signed-out session comes back on top (review C2).
+   Only the latest load, and only while the surface is shown, is applied: a late answer never replaces
+   what was typed since, and the draft is used only when applied (PR #68 re-review C1). */
+async function loadInstructions() {
+  const ticket = ++app.instructionsTicket;
+  const saved = await api("GET", "/api/instructions");
+  if (ticket !== app.instructionsTicket || $("surface-instructions").hidden) return;
+  app.instructions = saved;
+  app.conflictRevision = null;
+  $("instructions-conflict").hidden = true;
+  const draft = app.instructionsDraft;
+  app.instructionsDraft = null;
+  $("instructions-text").value = draft ? draft.text : saved.text;
+  if (draft && draft.base !== saved.revision) showConflict(saved.revision, false);
+  else if (draft) status("Your unsaved instructions are back; save them when ready.", "warn");
+  paintInstructions();
+}
+
+async function showInstructions() {
+  if (!$("surface-instructions").hidden && (app.instructions !== null || app.instructionsLoading)) {
+    closeNav(); // shown, and loaded or loading: nothing to start again
+    return;
+  }
+  if ($("surface-instructions").hidden) {
+    if (!(await mayLeave())) return;
+    stopPolling();
+    views.reset();
+    app.conversationId = null;
+    app.generation += 1;
+    clearAttachments();
+    markSelected();
+    app.instructions = null;
+    app.conflictRevision = null;
+    $("instructions-conflict").hidden = true;
+    $("instructions-text").value = "";
+    showSurface("instructions");
+    $("topbar-title").textContent = "Instructions";
+    status("");
+  }
+  closeNav();
+  paintInstructions();
+  app.instructionsLoading = true;
+  try {
+    await loadInstructions(); // a failure says so; clicking Instructions again retries (review C3)
+  } finally {
+    app.instructionsLoading = false;
+  }
+  if (!$("surface-instructions").hidden && window.matchMedia("(min-width: 768px)").matches) {
+    $("instructions-text").focus(); // no keyboard pop on phones
+  }
+}
+
+/* ``over``: the user chose to replace the version they were shown with theirs. */
+async function saveInstructions(over) {
+  if (app.savingInstructions || app.instructions === null) return;
+  app.savingInstructions = true;
+  paintInstructions();
+  let finished;
+  app.instructionsSave = new Promise((resolve) => { finished = resolve; });
+  const text = $("instructions-text").value;
+  const base = app.instructions.revision;
+  let conflict = null; // {revision, again}: shown once the buttons are enabled again
+  try {
+    const revision = over ? app.conflictRevision : base;
+    const saved = await api("PUT", "/api/instructions", { text, revision });
+    app.instructions = saved;
+    app.conflictRevision = null;
+    $("instructions-text").value = saved.text; // as stored: newlines and blank text normalized
+    $("instructions-conflict").hidden = true;
+    status("Saved. Applies from the next message.", "ok");
+    $("instructions-text").focus(); // the Save button is disabled now: keep the keyboard somewhere useful
+  } catch (error) {
+    if (error.code === "revision_conflict") {
+      try {
+        conflict = { revision: (await api("GET", "/api/instructions")).revision, again: over }; // what "mine" replaces
+      } catch (reading) {
+        if (reading.status === 401) keepDraft(text, base);
+        else status("Changed elsewhere since you opened it, and the saved version could not be read.", "error");
+      }
+    } else if (error.status === 401) {
+      keepDraft(text, base);
+    } else {
+      status(error.message, "error");
+    }
+  } finally {
+    app.savingInstructions = false;
+    app.instructionsSave = null;
+    finished();
+    paintInstructions();
+  }
+  if (conflict && !$("surface-instructions").hidden) showConflict(conflict.revision, conflict.again);
+}
+
+/* Signed out mid-save (e.g. a server restart): the text is kept for after sign-in (review C2, re-review N2). */
+function keepDraft(text, base) {
+  app.instructionsDraft = { text, base };
+  status("Signed out; your instructions are kept. Sign in to continue.", "warn");
+}
+
+async function discardInstructions() {
+  if (app.conflictRevision !== null) { // what to go back to is the saved version, not the one edited from
+    await loadInstructions();
+    return;
+  }
+  $("instructions-text").value = app.instructions ? app.instructions.text : "";
+  paintInstructions();
+}
+
+/* Leaving the instructions with unsaved changes asks first. An answered "Leave"
+   holds until the surface changes, so a navigation that goes on to open a
+   conversation does not ask twice, and one that fails keeps the text (N2). */
+async function mayLeave() {
+  if ($("surface-instructions").hidden) return true;
+  if (app.instructionsSave) await app.instructionsSave; // a save under way ends first (N1)
+  if (!instructionsDirty() || app.leaveAgreed) return true;
+  if (app.leaveAsked) return false; // one question at a time; a second navigation waits for none (re-review N4)
+  app.leaveAsked = true;
+  try {
+    app.leaveAgreed = await confirmAction("Leave without saving?",
+                                          ["Your changes to the instructions are not saved."], "Leave");
+  } finally {
+    app.leaveAsked = false;
+  }
+  return app.leaveAgreed;
 }
 
 async function restoreConversation(item, button) {
@@ -1597,13 +1791,34 @@ async function loadServerInfo() {
 
 async function enter() {
   loadServerInfo();
-  await showHome();
+  // A save that met a signed-out session goes back to its draft (PR #68 review C2).
+  if (!app.instructionsDraft) {
+    await showHome();
+    return;
+  }
+  loadList(true).then(markSelected).catch(() => {}); // as Home would (re-review N3)
+  await showInstructions();
 }
 
 async function boot() {
   $("login-form").addEventListener("submit", signIn);
   $("nav-sign-out").addEventListener("click", signOut);
   $("nav-trash").addEventListener("click", () => showTrash().catch((e) => status(e.message, "error")));
+  $("nav-instructions").addEventListener("click", () => showInstructions().catch((e) => status(e.message, "error")));
+  $("instructions-text").addEventListener("input", () => {
+    app.leaveAgreed = false; // edited again: leaving asks again
+    paintInstructions();
+  });
+  $("instructions-save").addEventListener("click", () => saveInstructions(false));
+  $("instructions-overwrite").addEventListener("click", () => saveInstructions(true));
+  $("instructions-discard").addEventListener("click", () => discardInstructions().catch((e) => status(e.message, "error")));
+  $("instructions-load").addEventListener("click", () => loadInstructions().catch((e) => status(e.message, "error")));
+  window.addEventListener("beforeunload", (event) => {
+    const unsaved = app.instructionsDraft !== null || (!$("surface-instructions").hidden && instructionsDirty());
+    if (!unsaved) return;
+    event.preventDefault(); // unsaved: the browser asks
+    event.returnValue = ""; // older Chrome and some webviews ask only with this
+  });
   $("trash-load-more").addEventListener("click", () => loadTrash(false).catch((e) => status(e.message, "error")));
   $("chat-menu-delete").addEventListener("click", deleteConversation);
   $("nav-home").addEventListener("click", () => showHome().catch((e) => status(e.message, "error")));

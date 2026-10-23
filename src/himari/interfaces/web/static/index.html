@@ -33,6 +33,7 @@
 
         <nav class="sidebar-utility" aria-label="Utilities">
           <p class="server-info" id="server-info" hidden></p>
+          <button type="button" id="nav-instructions" class="nav-link">Instructions</button>
           <button type="button" id="nav-trash" class="nav-link">Trash</button>
           <button type="button" id="nav-sign-out" class="nav-link">Sign out</button>
         </nav>
@@ -147,6 +148,27 @@
           <ul class="rows" id="trash-list"></ul>
           <p class="hint" id="trash-empty" hidden>The trash is empty.</p>
           <button type="button" id="trash-load-more" class="link-button trash-load-more" hidden>Load more</button>
+        </section>
+
+        <!-- The user's instructions (V3-P69 §7): what HIMARI follows in every conversation. -->
+        <section class="surface instructions" id="surface-instructions" hidden>
+          <h1>Instructions</h1>
+          <p class="hint">HIMARI follows these in every conversation. Changes apply from the next message.</p>
+          <textarea id="instructions-text" class="instructions-text" rows="16" spellcheck="false"
+                    aria-label="Instructions for every conversation"
+                    aria-describedby="instructions-count instructions-saved"
+                    placeholder="For example: Answer in Korean. Keep answers short. I write Python."></textarea>
+          <div class="instructions-bar">
+            <span class="hint instructions-count" id="instructions-count"></span>
+            <span class="hint instructions-saved" id="instructions-saved"></span>
+            <button type="button" id="instructions-discard" class="link-button">Discard changes</button>
+            <button type="button" id="instructions-save" class="primary-button">Save</button>
+          </div>
+          <div class="instructions-conflict" id="instructions-conflict" hidden>
+            <p>These instructions were changed elsewhere since you opened them. Your text is still here.</p>
+            <button type="button" id="instructions-load" class="link-button">Load the saved version</button>
+            <button type="button" id="instructions-overwrite" class="link-button">Save mine over it</button>
+          </div>
         </section>
 
         <section class="surface chat" id="surface-chat" hidden>

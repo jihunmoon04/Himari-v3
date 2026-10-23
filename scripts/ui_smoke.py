@@ -26,7 +26,11 @@ named .png that stays a plain file chip, and the narrow layout. A seventh
 the turn runs, a presented file outside the block, a question's lead-in,
 calls without a result after a pause (never "not run": a recovery or an
 omitted result looks the same), "N tool calls" once answered, the same after
-a reload, and a block split at the compaction boundary.
+a reload, and a block split at the compaction boundary. An eighth (V3-P69)
+edits the user's instructions: the count and limit, a save that the next
+message's request carries, a save refused after a change made elsewhere
+(the text kept; load theirs or save mine), leaving with unsaved changes,
+and the narrow layout.
 
 Requires: pip install playwright && playwright install chromium
 Usage:    python scripts/ui_smoke.py [--screenshots DIR]
@@ -696,6 +700,113 @@ def run_work_progress(base: str, token: str, shots: str | None) -> list[str]:
     return errors
 
 
+def set_elsewhere(root: str, text: str) -> None:
+    """A save made somewhere else (another tab, the CLI) while the page edits."""
+    application, loop = OPENED[root]
+    current = asyncio.run_coroutine_threadsafe(application.instructions(OPERATOR), loop).result(10)
+    asyncio.run_coroutine_threadsafe(application.set_instructions(OPERATOR, text, current.revision), loop).result(10)
+
+
+def run_instructions(base: str, token: str, shots: str | None, root: str, provider: ScriptedAdapter) -> list[str]:
+    errors: list[str] = []
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page(viewport={"width": 1280, "height": 860}, locale="en-US")  # "10,000"
+        page.on("pageerror", lambda e: errors.append(str(e)))
+        page.goto(base)
+        page.fill("#login-token", token)
+        page.click("#login-submit")
+        page.click("#nav-instructions")
+        text, save = page.locator("#instructions-text"), page.locator("#instructions-save")
+        expect(page.locator("#instructions-count")).to_have_text("0 / 10,000", timeout=5000)
+        expect(save).to_be_disabled()
+        text.fill("가" * 10_001)  # counted in characters, not bytes: over the limit, no save
+        expect(page.locator("#instructions-count")).to_have_class(re.compile(r"\bis-over\b"))
+        expect(save).to_be_disabled()
+        text.fill("😀" * 5_001)  # 10,002 UTF-16 units but 5,001 code points, as the server counts: allowed
+        expect(page.locator("#instructions-count")).to_have_text("5,001 / 10,000")
+        expect(save).to_be_enabled()
+        page.click("#instructions-discard")  # back to the saved (empty) text
+        expect(text).to_have_value("")
+        expect(page.locator("#instructions-discard")).to_be_disabled()
+        text.fill("Answer in Korean.\nKeep it short.")
+        expect(save).to_be_enabled()
+        save.click()
+        expect(page.locator("#status-bar")).to_have_text("Saved. Applies from the next message.", timeout=5000)
+        expect(page.locator("#instructions-saved")).to_contain_text("Saved ")
+        expect(save).to_be_disabled()  # nothing left to save
+        if shots:
+            page.screenshot(path=os.path.join(shots, "16-instructions.png"))
+        # The next message's request carries them, after the operator's instructions.
+        page.click("#nav-new-chat")
+        page.fill("#composer-text", "hi")
+        page.press("#composer-text", "Enter")
+        expect(page.locator(".item-assistant").last).to_contain_text("네, 알겠습니다.", timeout=10000)
+        assert "<user_instructions>\nAnswer in Korean.\nKeep it short.\n</user_instructions>" in \
+            provider.prepared_inputs[-1].stable_prefix[-1]
+        # Changed elsewhere meanwhile: refused, the text kept, the user chooses.
+        page.click("#nav-instructions")
+        expect(text).to_have_value("Answer in Korean.\nKeep it short.", timeout=5000)
+        text.fill("Mine.")
+        set_elsewhere(root, "Theirs.")
+        save.click()
+        expect(page.locator("#instructions-conflict")).to_be_visible(timeout=5000)
+        expect(page.locator("#status-bar")).to_have_text("Changed elsewhere since you opened it. Choose below.")
+        expect(text).to_have_value("Mine.")
+        page.click("#instructions-load")
+        expect(text).to_have_value("Theirs.", timeout=5000)
+        expect(page.locator("#instructions-conflict")).to_be_hidden()
+        text.fill("Mine again.")
+        set_elsewhere(root, "Theirs again.")
+        save.click()
+        expect(page.locator("#instructions-conflict")).to_be_visible(timeout=5000)
+        expect(page.locator("#instructions-load")).to_be_focused()  # the keyboard lands on a choice
+        set_elsewhere(root, "Theirs a third time.")  # changed again after the user was told: not overwritten
+        page.click("#instructions-overwrite")
+        expect(page.locator("#status-bar")).to_have_text("Changed again elsewhere; choose again.", timeout=5000)
+        expect(page.locator("#instructions-load")).to_be_focused()
+        expect(text).to_have_value("Mine again.")
+        page.click("#instructions-overwrite")
+        expect(page.locator("#status-bar")).to_have_text("Saved. Applies from the next message.", timeout=5000)
+        expect(text).to_have_value("Mine again.")
+        application, loop = OPENED[root]
+        assert asyncio.run_coroutine_threadsafe(application.instructions(OPERATOR), loop).result(10).text == \
+            "Mine again."
+        # Leaving with unsaved changes asks first: from Home and from a conversation in the list.
+        text.fill("Not saved.")
+        page.click("#nav-home")
+        expect(page.locator("#confirm-dialog")).to_be_visible(timeout=5000)
+        page.click("#confirm-cancel")
+        expect(page.locator("#surface-instructions")).to_be_visible()
+        expect(text).to_have_value("Not saved.")
+        page.locator(".conv-row").first.click()
+        expect(page.locator("#confirm-dialog")).to_be_visible(timeout=5000)
+        page.click("#confirm-ok")
+        expect(page.locator("#surface-chat")).to_be_visible(timeout=5000)
+        page.click("#nav-instructions")
+        expect(text).to_have_value("Mine again.", timeout=5000)
+        # A save that meets a signed-out session (e.g. a server restart) keeps the draft for after sign-in.
+        text.fill("Draft kept.")
+        page.context.clear_cookies()
+        save.click()
+        expect(page.locator("#surface-login")).to_be_visible(timeout=5000)
+        expect(page.locator("#status-bar")).to_have_text("Signed out; your instructions are kept. Sign in to continue.")
+        page.fill("#login-token", token)
+        page.click("#login-submit")
+        expect(page.locator("#surface-instructions")).to_be_visible(timeout=5000)
+        expect(text).to_have_value("Draft kept.")
+        expect(save).to_be_enabled()
+        save.click()
+        expect(page.locator("#status-bar")).to_have_text("Saved. Applies from the next message.", timeout=5000)
+        page.set_viewport_size({"width": 390, "height": 800})
+        page.wait_for_timeout(300)
+        assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
+        if shots:
+            page.screenshot(path=os.path.join(shots, "17-instructions-narrow.png"))
+        browser.close()
+    return errors
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--screenshots")
@@ -776,6 +887,16 @@ def main() -> int:
         try:
             errors += run_work_progress(f"http://127.0.0.1:{PORT + 6}",
                                         Path(work, "control", "operator.secret").read_text().strip(), args.screenshots)
+        finally:
+            server.should_exit = True
+            time.sleep(0.5)
+        instructions = os.path.join(tmp, "instructions")
+        provider = ScriptedAdapter([NormalizedFinal((TextBlock("네, 알겠습니다."),))])
+        server = serve(instructions, PORT + 7, provider)
+        try:
+            errors += run_instructions(f"http://127.0.0.1:{PORT + 7}",
+                                       Path(instructions, "control", "operator.secret").read_text().strip(),
+                                       args.screenshots, instructions, provider)
         finally:
             server.should_exit = True
             time.sleep(0.5)
