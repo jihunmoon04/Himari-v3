@@ -270,7 +270,8 @@ def _alive(pid: int) -> bool:
 def test_no_process_outlives_launch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str) -> None:
     pid_file = tmp_path / "pids"
     monkeypatch.setattr(sb, "bwrap_arguments",
-                        lambda cap, root_fd, cwd, sync_fd, argv: [sys.executable, "-c", FAKE_SANDBOX, str(sync_fd), str(pid_file), mode])
+                        lambda cap, root_fd, cwd, sync_fd, argv, toolkit_fd=None: [
+                            sys.executable, "-c", FAKE_SANDBOX, str(sync_fd), str(pid_file), mode])
     monkeypatch.setattr(sb, "SETUP_TIMEOUT_SECONDS", 2.0)
     backend = sb.SandboxBackend(CAP)
     root_fd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
@@ -435,7 +436,7 @@ def test_cancel_during_a_real_spawn_leaves_no_fd_or_process(tmp_path: Path, monk
     pid_dir = tmp_path / "pids"
     pid_dir.mkdir()
     counter = iter(range(1000))
-    monkeypatch.setattr(sb, "bwrap_arguments", lambda cap, root_fd, cwd, sync_fd, argv: [
+    monkeypatch.setattr(sb, "bwrap_arguments", lambda cap, root_fd, cwd, sync_fd, argv, toolkit_fd=None: [
         sys.executable, "-c", FAKE_SANDBOX, str(sync_fd), str(pid_dir / str(next(counter))), "sync"])
     backend = sb.SandboxBackend(CAP)
     root_fd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)

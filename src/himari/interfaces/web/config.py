@@ -30,6 +30,10 @@ Files (V3-P66 §8.3): ``HIMARI_FILE_MAX_BYTES`` (one file, default 32 MiB),
 ``HIMARI_FILE_STORE_MAX_BYTES`` (the file store, default 1 GiB; past it the
 least recently used files expire) and ``HIMARI_FILE_KEEP_DAYS`` (1..365,
 default 30: a file unused this long expires). None of them can be turned off.
+
+Documents (V3-P70 §6.2): ``HIMARI_DOCUMENTS_DIR`` names the documents
+toolkit's folder (installed by root with scripts/install_documents.py). Unset,
+read_document is not offered and run_command has no document libraries.
 """
 
 from __future__ import annotations
@@ -58,6 +62,7 @@ TRASH_DAYS_VAR = "HIMARI_TRASH_DAYS"  # V3-P65: days in the trash before a perma
 FILE_MAX_VAR = "HIMARI_FILE_MAX_BYTES"  # V3-P66: one uploaded or presented file
 FILE_STORE_MAX_VAR = "HIMARI_FILE_STORE_MAX_BYTES"  # V3-P66: the whole file store
 FILE_KEEP_DAYS_VAR = "HIMARI_FILE_KEEP_DAYS"  # V3-P66: unused this long, a stored file expires
+DOCUMENTS_DIR_VAR = "HIMARI_DOCUMENTS_DIR"  # V3-P70: the documents toolkit; unset: no documents
 DEFAULT_FILE_MAX_BYTES = 32 * 1024 * 1024  # as data.api
 DEFAULT_FILE_STORE_MAX_BYTES = 1024 * 1024 * 1024
 DEFAULT_FILE_KEEP_DAYS = 30
@@ -105,6 +110,7 @@ class WebConfig:
     file_max_bytes: int = DEFAULT_FILE_MAX_BYTES
     file_store_max_bytes: int = DEFAULT_FILE_STORE_MAX_BYTES
     file_keep_days: int = DEFAULT_FILE_KEEP_DAYS
+    documents_dir: str | None = None
 
     @property
     def view_port(self) -> int:
@@ -177,6 +183,9 @@ class WebConfig:
         model_id = source.get(MODEL_VAR, "").strip() or DEFAULT_MODEL
         models_raw = source.get(MODELS_VAR)
         models = _models(models_raw, model_id) if models_raw is not None and models_raw.strip() else ()
+        documents_dir = source.get(DOCUMENTS_DIR_VAR, "").strip() or None
+        if documents_dir is not None and not os.path.isabs(documents_dir):
+            raise WebConfigError(f"{DOCUMENTS_DIR_VAR} must be an absolute path")
         return cls(
             host=host,
             port=port,
@@ -197,6 +206,7 @@ class WebConfig:
             file_max_bytes=file_max,
             file_store_max_bytes=store_max,
             file_keep_days=keep_days,
+            documents_dir=documents_dir,
         )
 
 

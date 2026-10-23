@@ -34,6 +34,7 @@ from himari.sandbox.api import (
     MAX_ARGV as MAX_ARGV,
     MAX_OUTPUT_BYTES as MAX_OUTPUT_BYTES,
     MAX_TIMEOUT_SECONDS as MAX_TIMEOUT_SECONDS,
+    TOOLKIT_MOUNT as TOOLKIT_MOUNT,
     WORKSPACE_MOUNT as WORKSPACE_MOUNT,
     CommandResult as CommandResult,
     SandboxSetupError as SandboxSetupError,
@@ -92,7 +93,8 @@ def system_view() -> list[str]:
 
 
 def sandbox_arguments(capability: HostCapability, *, env: Mapping[str, str], binds: Sequence[tuple[str, int, str]],
-                      write_roots: Sequence[str], cwd: str, sync_fd: int, argv: Sequence[str]) -> list[str]:
+                      write_roots: Sequence[str], cwd: str, sync_fd: int, argv: Sequence[str],
+                      tmp_bytes: int | None = None) -> list[str]:
     """The one bwrap layout every profile uses: fresh namespaces (network
     included), a read-only root with the system view, the helper, fresh
     /dev, /proc and /tmp; then the profile's ``binds`` — each ``(option,
@@ -116,6 +118,7 @@ def sandbox_arguments(capability: HostCapability, *, env: Mapping[str, str], bin
     args += [
         "--dev", "/dev",
         "--proc", "/proc",
+        *(("--size", str(tmp_bytes)) if tmp_bytes is not None else ()),
         "--tmpfs", "/tmp",
         "--dir", "/tmp/home",
         "--ro-bind", capability.helper, HELPER_IN_SANDBOX,
@@ -135,11 +138,36 @@ def sandbox_arguments(capability: HostCapability, *, env: Mapping[str, str], bin
     return args
 
 
-def bwrap_arguments(capability: HostCapability, root_fd: int, cwd: str, sync_fd: int, argv: list[str]) -> list[str]:
+def toolkit_env() -> dict[str, str]:
+    """What the Workspace profile adds when the documents toolkit is bound
+    (V3-P70 §6.3) — never part of SANDBOX_ENV, which server profiles may
+    not override (review N1)."""
+    return {"PYTHONPATH": f"{TOOLKIT_MOUNT}/site-packages", "HIMARI_FONTS": f"{TOOLKIT_MOUNT}/fonts"}
+
+
+def bwrap_arguments(capability: HostCapability, root_fd: int, cwd: str, sync_fd: int, argv: list[str],
+                    toolkit_fd: int | None = None) -> list[str]:
     """The Workspace profile: the verified Workspace root fd at /workspace,
-    writable with /tmp, a cwd under /workspace, the fixed environment."""
-    return sandbox_arguments(capability, env=SANDBOX_ENV, binds=[("--bind-fd", root_fd, WORKSPACE_MOUNT)],
-                             write_roots=[WORKSPACE_MOUNT, "/tmp"], cwd=cwd, sync_fd=sync_fd, argv=argv)
+    writable with /tmp, a cwd under /workspace, the fixed environment; with
+    the documents toolkit, its folder read-only at TOOLKIT_MOUNT and the two
+    variables that point there."""
+    binds = [("--bind-fd", root_fd, WORKSPACE_MOUNT)]
+    env = dict(SANDBOX_ENV)
+    if toolkit_fd is not None:
+        binds.append(("--ro-bind-fd", toolkit_fd, TOOLKIT_MOUNT))
+        env.update(toolkit_env())
+    return sandbox_arguments(capability, env=env, binds=binds, write_roots=[WORKSPACE_MOUNT, "/tmp"], cwd=cwd,
+                             sync_fd=sync_fd, argv=argv)
+
+
+def supports_tmp_size(capability: HostCapability) -> bool:
+    """Whether this bwrap knows --size (0.9.0 does, 0.6 does not: V3-P70 re-review N4)."""
+    try:
+        completed = subprocess.run([capability.bwrap, "--help"], stdin=subprocess.DEVNULL, capture_output=True,
+                                   env={}, timeout=10, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return b"--size" in completed.stdout + completed.stderr
 
 
 def discover_capability() -> HostCapability | None:
@@ -251,14 +279,17 @@ SelfTest = Callable[["SandboxBackend", tuple[str, ...]], Awaitable[bool]]
 
 
 class SandboxBackend:
-    def __init__(self, capability: HostCapability | None) -> None:
+    def __init__(self, capability: HostCapability | None, *, toolkit_fd: int | None = None) -> None:
         self._capability = capability
+        # V3-P70 §6.3: the documents toolkit's checked folder, bound read-only
+        # in every command and the self-test alike; its owner closes it.
+        self.toolkit_fd = toolkit_fd
         self._state = SandboxState.UNAVAILABLE if capability is None else SandboxState.CAPABLE_INACTIVE
         self._started = False
 
     @classmethod
-    def discover(cls) -> SandboxBackend:
-        return cls(discover_capability())
+    def discover(cls, *, toolkit_fd: int | None = None) -> SandboxBackend:
+        return cls(discover_capability(), toolkit_fd=toolkit_fd)
 
     @property
     def state(self) -> SandboxState:
@@ -308,12 +339,12 @@ class SandboxBackend:
             os.set_blocking(sync_r, False)
             started = time.monotonic()
             spawn = asyncio.ensure_future(asyncio.create_subprocess_exec(
-                *bwrap_arguments(self._capability, root_fd, cwd, sync_w, argv),
+                *bwrap_arguments(self._capability, root_fd, cwd, sync_w, argv, self.toolkit_fd),
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 env={},
-                pass_fds=(sync_w, root_fd),
+                pass_fds=(sync_w, root_fd, *(() if self.toolkit_fd is None else (self.toolkit_fd,))),
                 start_new_session=True,
             ))
             try:

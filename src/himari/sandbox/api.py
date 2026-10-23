@@ -29,6 +29,7 @@ from enum import Enum
 from typing import Protocol
 
 WORKSPACE_MOUNT = "/workspace"
+TOOLKIT_MOUNT = "/run/himari/documents"  # the documents toolkit, read-only (V3-P70 §6.3)
 
 # V3-051
 MAX_ARGV = 64
@@ -126,6 +127,7 @@ class ServerProfile:
     read_only: tuple[str, ...] = ()
     writable: tuple[str, ...] = ()
     protected: tuple[str, ...] = ()
+    tmp_bytes: int | None = None  # the size of /tmp (bwrap --size); None: not set (V3-P70 §5)
 
 
 class IsolatedProcess(Protocol):

@@ -41,6 +41,7 @@ from typing import BinaryIO
 
 from himari.common import EnvironmentKind, TrustedScope, WorkspaceId
 from himari.data.api import DEFAULT_FILE_MAX_BYTES, TEMP_PREFIX, BindingAuthority, BlobStore, FileCatalog
+from himari.documents.api import DocumentReading
 from himari.environment.api import BindingObservation, ConnectionStatus
 from himari.environment.inside import fs
 from himari.environment.inside.blocking import run_blocking
@@ -72,17 +73,22 @@ class UploadsFolderUnusable(Exception):
 
 class InsideEnvironment:
     def __init__(self, workspaces_root: str | Path, *, sandbox: WorkspaceSandbox | None = None,
-                 files: InsideFiles | None = None) -> None:
+                 files: InsideFiles | None = None, documents: DocumentReading | None = None) -> None:
         root = Path(workspaces_root)
         if not root.is_absolute():
             raise ValueError("workspaces_root must be an absolute, trusted path")
         self._root = root
         self.sandbox = sandbox
         self.files = files
+        self.documents = documents  # V3-P70: only a reader that passed its startup check
         self._write_locks: dict[str, asyncio.Lock] = {}
         tools: list[ToolHandler] = list(file_tools(self))
         if sandbox is not None:
             tools.append(RunCommand(self))
+        if documents is not None:
+            from himari.environment.inside.documents import ReadDocument
+
+            tools.append(ReadDocument(self, documents))
         self._tools = tuple(tools)
 
     async def start_sandbox(self, *, protected_paths: tuple[str, ...] = ()) -> None:

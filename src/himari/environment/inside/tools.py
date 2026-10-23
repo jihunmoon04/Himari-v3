@@ -265,7 +265,9 @@ class ReadFile(_InsideTool):
         if b"\0" in data:
             return ToolOutcome(
                 ToolStatus.SUCCEEDED,
-                _text(f"{shown} ({size} bytes): binary file, content not shown"),
+                _text(f"{shown} ({size} bytes): binary file, content not shown"
+                      + ("; read PDF and Word documents with read_document" if self._env.documents is not None
+                         else "")),
                 raw_result={"path": shown, "size": size, "binary": True},
             )
         # Invalid UTF-8 policy: show invalid bytes as U+FFFD (which can triple

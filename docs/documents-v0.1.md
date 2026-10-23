@@ -721,3 +721,83 @@ rev. 7(`c10ea25`) 확인: **READY**.
 - C1·C2·N1·N2가 맞게 고쳐졌다.
 - `next` 한도는 거듭 이어 읽어도 조각 22개·약 142자 안이다.
 - 비차단 N1(`dimension` 없는 시트는 `of ?`)을 반영했다.
+
+## 23. 구현 노트 — 1단계 (2026-10-23)
+
+**들어간 것**
+- **도구 모음:**
+  - `scripts/install_documents.py`와 `scripts/documents-requirements.txt`(12개 묶음, cp312 aarch64·x86_64 휠 해시).
+  - 나눔고딕 Regular·Bold와 OFL은 google/fonts `133ccbee`에서 받는다.
+  - 이 호스트에서 설치는 10초, 73 MB다.
+- **작업자 `himari/documents/worker.py`:** 판정(PDF·OOXML 3종·HWPX·OLE2 암호/구형), PDF·DOCX 배치, `view`, `pictures`, 이어 읽기, `probe`.
+- **실행기와 확인:** `himari/documents/__init__.py`의 `open_toolkit`(트리 확인), `DocumentReader`(재판정), 시작 검사용 PDF·DOCX(코드로 만듦).
+- **Tool:** `inside/read_document`(`environment/inside/documents.py`). 문법·지문·`next`·머리줄과 끝줄·뒷받침·크기 한도를 여기서 처리한다. `read_file`의 이진 파일 힌트도 넣었다.
+- **Sandbox:**
+  - `ServerProfile.tmp_bytes`(bwrap `--size`)와 `supports_tmp_size`.
+  - Workspace 프로파일의 `/run/himari/documents` 읽기 전용 묶기와 환경 변수 둘.
+  - 자체 검사의 `expected(toolkit)`·`expected_sources(…, toolkit_fd)`·`extra_fds`.
+- **Bootstrap:** 시작 순서(§6.4), `_documents_notes`, 로그 한 줄, `Application.open(documents_dir=…, documents_owners=…)`, 설정 `HIMARI_DOCUMENTS_DIR`.
+- **Prompt:** `DOCUMENTS_READ_NOTE`, `documents_script_note`.
+
+**설계와 달라진 점·정한 점**
+- **1단계의 범위:** Tool 설명과 지시 문장은 PDF와 Word만 말한다.
+  - XLSX·PPTX·HWPX는 판정만 하고 FAILED "reading … files is not available yet"를 돌려준다. 스크립트가 켜져 있으면 쓸 라이브러리를 덧붙인다.
+  - 2단계에서 읽기를 넣고 문장을 넓힌다.
+- **데이터 루트와의 겹침:** `open_toolkit`이 아니라 Bootstrap이 `identity.check_trees`로 확인한다. `documents`는 `sandbox.api`만 쓴다(경계 규칙).
+- **소유자:**
+  - root 소유는 늘 믿는다. 그 밖의 소유자는 `documents_owners` 인자로만 더한다(시험).
+  - 조상 폴더가 그룹·다른 사용자 쓰기 가능이면 거부한다. 단, root 소유의 sticky 폴더(`/tmp` 등)는 받아들인다. 남이 그 안의 우리 항목을 바꾸거나 지울 수 없기 때문이다.
+- **링크:** 도구 모음 안의 심볼릭 링크는 밖을 가리키든 아니든 모두 거부한다. 설치한 휠에는 링크가 없다.
+- **Workspace 자체 검사가 도구 모음 묶기를 거부할 때:** 묶지 않은 새 백엔드로 다시 검사한다. 도구 모음 문제로 `run_command` 전체를 잃지 않게 하기 위해서다. 스크립트 문장은 붙지 않고, 로그에 이유가 남는다.
+- **글의 정규화:**
+  - 작업자는 문서 글의 모든 줄 경계(`str.splitlines`의 것)를 `\n`으로 바꾼다.
+  - 탭이 아닌 제어 문자는 공백으로, 외톨이 서로게이트는 U+FFFD로 바꾼다.
+  - 그래서 작업자와 서버의 "줄"이 늘 같다(최종 확인 N2).
+- **Word 서식·매크로 파일(.dotx·.docm·.dotm):** python-docx가 여는 형식으로 `[Content_Types].xml`만 바꾼 메모리 사본을 읽는다.
+- **목록:** `numPr`가 있거나 스타일 이름이 `List`로 시작하는 문단은 `- `로 시작한다.
+- **1단계 DOCX·PDF는 단위 전체를 배치한다.** 그래서 `length`가 늘 있다. 일부만 배치해 `length: null`을 내는 경우는 2단계 시트의 몫이다.
+
+**확인**
+- 전체 시험 1,998건 통과(71건 건너뜀). mypy, 경계 검사 통과.
+- opt-in 시험(`HIMARI_SANDBOX_HOST=1`, `HIMARI_DOCUMENTS_TOOLKIT`) 117건 통과.
+  - 실제 문서 Sandbox에서 네트워크·쓰기·데이터 루트 접근이 막히고, `/tmp`가 64 MiB에서 멈춘다.
+  - 실제 Workspace Sandbox에서 `python3`이 도구 모음을 import하고, 글꼴이 보이고, 도구 모음에 쓸 수 없고, DOCX를 만든다.
+  - 도구 모음을 켠 Application이 Tool과 두 문장을 제공한다.
+- 시작 검사는 0.65초, DOCX 한 부분 읽기와 그림 한 장 처리는 0.9초다.
+- `tests/bootstrap/test_trash.py::test_the_startup_purges_what_is_due`는 main에서도 가끔 실패한다(1초 안에 폴더가 지워지기를 기다림). 이 묶음과는 상관없다.
+
+### 23.1 구현 검수 — PR #70(`1502134`): NOT_READY
+
+| # | 지적 | 반영 |
+| --- | --- | --- |
+| B1 | `pages="1-9999999999"`이면 끝을 넘은 번호를 하나씩 모아 이벤트 루프가 멈춤 | 선택을 끝까지 범위로 다룸(`clip`·`past_end`·`next_value`가 조각 단위). 작업자와 재판정도 지연 생성으로 본 만큼만 셈 |
+| B2 | 빈 페이지 수천 장의 PDF는 예산이 다 떨어져도 빈 단위를 끝없이 넣고, 서버가 단위를 하나씩 빼며 다시 조립해 O(n²) | 작업자는 머리줄 자리(`PART_OVERHEAD`)가 없으면 빈 단위에서도 멈춤. 재판정은 단위 수를 `예산 // PART_OVERHEAD + 1`로 제한. Tool은 바이트 누계와 `bisect`로 한 번에 고르고 끝줄만 확인 |
+| B3 | DOCX 각주 id(`&#10;` 포함)로 `[picture 9]`·`[not shown: …]` 같은 줄을 흉내 냄 | 각주 id는 `-?\d{1,10}`만. 서버 뒷받침에 `[note`·`[not shown`을 더함(Tool이 쓰는 모든 끝줄) |
+| C1 | 뚫린 작업자가 `units`·`picture_total`을 터무니없이 크게 답함 | `MAX_UNITS`(1,000,000)를 넘으면 거짓 응답 |
+| C2 | 그림 하나가 깨지면 `view` 호출 전체가 실패 | 그림·페이지마다 예외를 잡아 이유만 적음. 4개를 넘는 그림은 디코드하지 않고 `more`로 |
+| C3 | PDF는 부를 때마다 모든 페이지의 글과 객체를 훑음 | 페이지는 읽을 때만 배치(캐시) |
+| C4 | 요청(base64·JSON)을 자리를 얻기 전에 만들고, 해시·인코딩이 이벤트 루프에서 돎 | 요청은 자리를 얻은 뒤 스레드에서 만듦. 지문은 사본 없이 증분 해시를 `run_blocking`에서, 재판정은 스레드에서 |
+| C5 | 본문 수준의 `w:sdt`·`w:customXml` 글이 빠짐 | 재귀로 읽음. `w:moveTo`도 읽음(N9) |
+| C6 | 살아남은 변이: `cut_at`의 이스케이프 보호, `length: null` 진전 없음, `run_command` 대체 재검사 | 각각 시험을 더함(`cut_at` 직접, 시작이 맞는 진전 없음, 묶기를 거부하는 가짜 백엔드) |
+| N1 | root 소유 sticky 폴더 예외가 도구 모음 안에도 적용됨 | 조상 폴더에만 |
+| N2·N3 | 이상한 응답이 AttributeError로 "internal error"가 되거나, 시작 검사가 시작을 실패시키고 fd를 남김 | 읽기는 AttributeError도 거짓 응답으로. 시작 검사는 모든 예외를 "문서 없음"으로. `_documents`는 어떤 예외에도 도구 모음을 닫음 |
+| N4 | 잘린 조각 뒤에 Tool이 줄바꿈을 붙임 | 그대로 둔다. 끝줄이 줄 처음에 와야 하기 때문이다. §4.2의 이어 붙이기 보장은 `…`·시트 머리, 그리고 줄바꿈 없이 끝난 조각 뒤에 Tool이 붙인 줄바꿈을 뺀 글로 정의한다. 정본은 `raw_result.shown`의 위치다 |
+| N5 | 다시 적는 표 머리 행이 `[picture K]`·`[^n]` 표시를 끌고 감 | 다시 적는 머리에서는 그 표시를 지움 |
+| N6 | `pages: null`이 문법 오류 | 기본값(`"1-"`) |
+| N7 | 설치기: 경로를 풀지 않고 `/proc`와 비교, `.new-*` 잔여물, umask | `resolve()`, `--prune`이 쓰이지 않는 잔여물도 지움, umask 022 |
+| N8 | `supports_tmp_size`가 이벤트 루프를 막음, 닫은 fd 번호가 백엔드에 남음 | 스레드에서, 닫을 때 `toolkit_fd = None` |
+| N9 | `w:moveTo`가 빠짐. 문자 스타일로 숨긴 글은 `[hidden]`이 아님 | `moveTo`는 읽음. 스타일로 숨긴 글은 이번에는 표시하지 않고 남김(직접 `w:vanish`만) |
+| N10 | `PYTHONPATH`가 모델이 만든 가상환경의 패키지보다 앞섬 | 스크립트 문장에 밝힘 |
+
+### 23.2 재검수 — `bc92ab2`: READY
+
+- B1~B3, C1~C6, N1~N10이 반영됐다.
+  - 빈 페이지 2만 장 PDF가 0.18초 걸린다.
+  - `1-9999999999`는 3 ms 안에 끝난다.
+  - 깨진 그림이 든 DOCX도 `view`가 된다.
+- 남은 것도 반영했다.
+  - **C1(시험):** 한 부분에 그림 6개가 든 DOCX로 확인한다. `view`는 4장과 `more` 5·6을 주고, 깨진 5번은 디코드하지 않는다(건너뜀 목록에 없음). `pictures`로 5번부터 부르면 5번은 건너뛰고 6번을 준다.
+  - **N1:** 시험을 더했다. `_documents`가 어떤 예외에도 도구 모음을 닫는지, sticky 예외가 조상에만 적용되는지, 다시 적는 표 머리에 표시가 없는지.
+  - **N2:** 배치가 바뀌었으므로 `SPLIT_RULE`을 2로 올렸다.
+  - **N3:** `--prune`은 한 시간이 안 된 `.new-*`는 지우지 않는다. 진행 중인 설치일 수 있기 때문이다.
+  - **N4:** 100만 단위를 넘는 문서를 "a bad answer"로 거절하는 것은 받아들인다.
