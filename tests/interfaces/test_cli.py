@@ -991,3 +991,12 @@ def test_a_refused_delete_for_good_says_it_stays_in_the_trash() -> None:
     out, err = io.StringIO(), io.StringIO()
     assert cli.run(["delete", "conv_1", "--now", "--yes"], environ={}, out=out, err=err, client=client) == 1
     assert "moved to the trash, but not deleted for good" in err.getvalue() and "not_in_trash" in err.getvalue()
+
+
+def test_the_documents_line() -> None:
+    # V3-P70 §9 (review N9): what /api/server says about documents, in one line.
+    assert cli.documents_line(None) == cli.documents_line({"read": False}) == "documents: off"
+    assert cli.documents_line({"read": True, "scripts": False, "libraries": {}}) == "documents: read on, scripts off"
+    assert (cli.documents_line({"read": True, "scripts": True, "libraries": {"openpyxl": "3.1.5", "pypdf": "6"}})
+            == "documents: read on, scripts on (openpyxl 3.1.5, pypdf 6)")
+    assert cli.documents_line({"read": True, "libraries": "not a dict"}) == "documents: read on, scripts off"

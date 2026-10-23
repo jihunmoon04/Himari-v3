@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import bisect
 import hashlib
+import posixpath
 import re
 from typing import TYPE_CHECKING
 
@@ -50,6 +51,9 @@ _PIECE = re.compile(r"(\d{1,10})(?::(\d{1,10})|-(\d{0,10}))?")
 _FINGERPRINT = re.compile(r"[0-9a-f]{%d}" % FINGERPRINT_CHARS)
 _STRUCTURE = ("===", "[shown", "[view", "[images", "[note", "[not shown")  # every tail line's start (review B3)
 _FORMAT_NAMES = {"pdf": "PDF", "docx": "Word", "xlsx": "Excel", "pptx": "PowerPoint", "hwpx": "HWPX"}
+_AT_A_LIMIT = ("timed_out", "out_of_memory", "worker_processgone")  # the worker's time, memory or CPU ran out
+_LIBRARIES = {".pdf": "pypdf", ".docx": "python-docx", ".docm": "python-docx", ".xlsx": "openpyxl", ".xlsm": "openpyxl",
+              ".pptx": "python-pptx", ".pptm": "python-pptx", ".hwpx": "zipfile and xml.etree"}
 GRAMMAR = ('use unit numbers like "1-5,8" or "12-", or pass the next value of an earlier result as given')
 
 DESCRIPTION = (
@@ -260,8 +264,9 @@ class ReadDocument:
         if ctx.binding is None or ctx.workspace is None:
             return ToolOutcome(ToolStatus.DENIED, _text("no workspace is bound to this conversation", error=True))
         args = invocation.arguments
-        # An optional argument a model fills with "" (or null) means it is not given: models often send
-        # every property of the schema (seen live with openai/gpt-6-luna, which then never saw the page).
+        # An optional argument a model fills with "" means it is not given: models often send every property
+        # of the schema (seen live with openai/gpt-6-luna, which then never saw the page). A null never gets
+        # here: the Dispatcher checks the arguments against the schema first.
         raw_pictures, raw_pages = (_given(args.get(name)) for name in ("pictures", "pages"))
         try:
             pictures = None if raw_pictures is None else parse_selection(raw_pictures, positions=False)
@@ -291,7 +296,7 @@ class ReadDocument:
             return ToolOutcome(ToolStatus.DENIED, _text(f"{shown}: documents cannot be read on this server now",
                                                         error=True))
         except DocumentRefused as refused:
-            return _refused(f"{shown}: {self._why(refused.reason)}")
+            return _refused(f"{shown}: {self._why(refused.reason, shown)}")
         head = (f"{shown} ({_FORMAT_NAMES.get(reading.format, reading.format)}, {reading.units:,} "
                 f"{_plural(reading.unit_name, reading.units)}, {_size(len(data))})")
         if pictures is not None:
@@ -299,7 +304,7 @@ class ReadDocument:
         assert pages is not None
         return self._pages(head, shown, reading, pages[0], view, fingerprint, len(data))
 
-    def _why(self, reason: str) -> str:
+    def _why(self, reason: str, shown: str) -> str:
         if reason == "encrypted":
             return "password-protected; ask the user for an unprotected copy"
         if reason == "legacy":
@@ -309,7 +314,11 @@ class ReadDocument:
             return "not a PDF, Word, Excel, PowerPoint or HWPX document; if it is text, use read_file"
         if reason in ("position_past_end", "bad_position"):
             return "not a valid position; pass the next value of an earlier result as given"
-        return f"could not read this document ({reason.replace('_', ' ')})"
+        why = f"could not read this document ({reason.replace('_', ' ')})"
+        if reason in _AT_A_LIMIT and self._reader.scripts:  # §4.2: a huge sheet read on from far into it
+            library = _LIBRARIES.get(posixpath.splitext(shown)[1].lower(), "a Python script")
+            why += f"; it may be too large to read this way: use run_command with {library}"
+        return why
 
     def _pages(self, head: str, shown: str, reading: Reading, pieces: tuple[Piece, ...], view: bool,
                fingerprint: str, size: int) -> ToolOutcome:
@@ -408,7 +417,7 @@ class ReadDocument:
 
 
 def _given(value: object) -> object:
-    """None for an argument left empty ("", whitespace, null); the value otherwise."""
+    """None for an argument left out or empty ("", whitespace); the value otherwise."""
     return None if value is None or (isinstance(value, str) and not value.strip()) else value
 
 

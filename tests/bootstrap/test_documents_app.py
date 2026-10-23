@@ -148,3 +148,24 @@ def test_any_startup_failure_closes_the_toolkit(tmp_path: Path, monkeypatch: pyt
     with pytest.raises(Stop):
         asyncio.run(boot._documents(tmp_path, True, "/opt/x", frozenset()))
     assert kit.fd == -1
+
+
+def test_the_documents_status(tmp_path: Path) -> None:
+    # V3-P70 §9 (review N9): scripts only while run_command's sandbox is enforced.
+    from himari.sandbox.api import SandboxState
+
+    class On:
+        available = True
+        scripts = True
+        versions = {"openpyxl": "3.1.5"}
+
+    app = open_app(tmp_path)
+    try:
+        assert app.documents_status == {"read": False, "scripts": False, "libraries": {}}
+        app.documents = On()  # type: ignore[assignment]
+        assert app.documents_status == {"read": True, "scripts": False, "libraries": {"openpyxl": "3.1.5"}}
+        app.sandbox_state = SandboxState.ENFORCED
+        assert app.current_sandbox_state is SandboxState.ENFORCED and app.documents_status["scripts"] is True
+    finally:
+        app.documents = None
+        asyncio.run(app.close())
