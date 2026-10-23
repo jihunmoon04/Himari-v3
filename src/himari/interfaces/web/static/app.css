@@ -850,10 +850,6 @@ textarea {
   color: var(--warn);
 }
 
-.instructions-conflict[hidden] {
-  display: none;
-}
-
 .instructions-conflict p {
   flex: 1 1 100%;
   margin: 0;

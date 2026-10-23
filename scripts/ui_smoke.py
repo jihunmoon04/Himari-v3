@@ -711,7 +711,7 @@ def run_instructions(base: str, token: str, shots: str | None, root: str, provid
     errors: list[str] = []
     with sync_playwright() as p:
         browser = p.chromium.launch()
-        page = browser.new_page(viewport={"width": 1280, "height": 860})
+        page = browser.new_page(viewport={"width": 1280, "height": 860}, locale="en-US")  # "10,000"
         page.on("pageerror", lambda e: errors.append(str(e)))
         page.goto(base)
         page.fill("#login-token", token)
@@ -723,6 +723,12 @@ def run_instructions(base: str, token: str, shots: str | None, root: str, provid
         text.fill("가" * 10_001)  # counted in characters, not bytes: over the limit, no save
         expect(page.locator("#instructions-count")).to_have_class(re.compile(r"\bis-over\b"))
         expect(save).to_be_disabled()
+        text.fill("😀" * 5_001)  # 10,002 UTF-16 units but 5,001 code points, as the server counts: allowed
+        expect(page.locator("#instructions-count")).to_have_text("5,001 / 10,000")
+        expect(save).to_be_enabled()
+        page.click("#instructions-discard")  # back to the saved (empty) text
+        expect(text).to_have_value("")
+        expect(page.locator("#instructions-discard")).to_be_disabled()
         text.fill("Answer in Korean.\nKeep it short.")
         expect(save).to_be_enabled()
         save.click()
@@ -745,6 +751,7 @@ def run_instructions(base: str, token: str, shots: str | None, root: str, provid
         set_elsewhere(root, "Theirs.")
         save.click()
         expect(page.locator("#instructions-conflict")).to_be_visible(timeout=5000)
+        expect(page.locator("#status-bar")).to_have_text("Changed elsewhere since you opened it. Choose below.")
         expect(text).to_have_value("Mine.")
         page.click("#instructions-load")
         expect(text).to_have_value("Theirs.", timeout=5000)
@@ -759,18 +766,31 @@ def run_instructions(base: str, token: str, shots: str | None, root: str, provid
         application, loop = OPENED[root]
         assert asyncio.run_coroutine_threadsafe(application.instructions(OPERATOR), loop).result(10).text == \
             "Mine again."
-        # Leaving with unsaved changes asks first.
+        # Leaving with unsaved changes asks first: from Home and from a conversation in the list.
         text.fill("Not saved.")
         page.click("#nav-home")
         expect(page.locator("#confirm-dialog")).to_be_visible(timeout=5000)
         page.click("#confirm-cancel")
         expect(page.locator("#surface-instructions")).to_be_visible()
         expect(text).to_have_value("Not saved.")
-        page.click("#nav-home")
+        page.locator(".conv-row").first.click()
+        expect(page.locator("#confirm-dialog")).to_be_visible(timeout=5000)
         page.click("#confirm-ok")
-        expect(page.locator("#surface-home")).to_be_visible(timeout=5000)
+        expect(page.locator("#surface-chat")).to_be_visible(timeout=5000)
         page.click("#nav-instructions")
         expect(text).to_have_value("Mine again.", timeout=5000)
+        # A save that meets a signed-out session (e.g. a server restart) keeps the draft for after sign-in.
+        text.fill("Draft kept.")
+        page.context.clear_cookies()
+        save.click()
+        expect(page.locator("#surface-login")).to_be_visible(timeout=5000)
+        page.fill("#login-token", token)
+        page.click("#login-submit")
+        expect(page.locator("#surface-instructions")).to_be_visible(timeout=5000)
+        expect(text).to_have_value("Draft kept.")
+        expect(save).to_be_enabled()
+        save.click()
+        expect(page.locator("#status-bar")).to_have_text("Saved. Applies from the next message.", timeout=5000)
         page.set_viewport_size({"width": 390, "height": 800})
         page.wait_for_timeout(300)
         assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")

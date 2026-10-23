@@ -127,6 +127,10 @@ const app = {
   attachKeys: 0,
   instructions: null, // the saved instructions (V3-P69 §7): {text, revision, updated_at, max_chars}
   savingInstructions: false,
+  instructionsSave: null, // the save under way, for a leave to wait on
+  conflictRevision: null, // shown a conflict: the version "save mine" replaces
+  instructionsDraft: null, // {text, base}: a save that met a signed-out session, restored after sign-in
+  leaveAgreed: false, // "Leave without saving?" answered yes, until the surface changes
 };
 
 const views = new AppViews(api, el, () => app.conversationId);
@@ -141,6 +145,7 @@ function showSurface(name) {
   for (const surface of ["login", "home", "chat", "trash", "instructions"]) {
     $(`surface-${surface}`).hidden = surface !== name;
   }
+  app.leaveAgreed = false;
   const signedIn = name !== "login";
   $("sidebar").hidden = !signedIn;
   $("sidebar-toggle").hidden = !signedIn;
@@ -1522,7 +1527,8 @@ async function showTrash() {
 
 /* V3-P69 §7: the user's instructions for every conversation. A save sends the
    revision the text was edited from; one made elsewhere since is never
-   overwritten without the user choosing to. */
+   overwritten without the user choosing to, against the version they were
+   told about (PR #68 review C1). */
 
 function characters(text) {
   return [...text].length; // code points, as the server counts
@@ -1535,80 +1541,133 @@ function instructionsDirty() {
 function paintInstructions() {
   const saved = app.instructions;
   const text = $("instructions-text").value;
-  const max = saved ? saved.max_chars : 0;
-  const count = characters(text);
+  const busy = app.savingInstructions;
   const counter = $("instructions-count");
-  counter.textContent = `${count.toLocaleString()} / ${max.toLocaleString()}`;
-  counter.classList.toggle("is-over", count > max);
+  if (saved === null) { // not loaded (yet): nothing to edit against
+    counter.textContent = "Loading…";
+    counter.classList.remove("is-over");
+  } else {
+    const count = characters(text);
+    counter.textContent = `${count.toLocaleString()} / ${saved.max_chars.toLocaleString()}`;
+    counter.classList.toggle("is-over", count > saved.max_chars);
+  }
+  const over = saved !== null && characters(text) > saved.max_chars;
   const dirty = instructionsDirty();
-  $("instructions-save").disabled = !saved || !dirty || count > max || app.savingInstructions;
-  $("instructions-discard").disabled = !dirty || app.savingInstructions;
-  $("instructions-text").readOnly = app.savingInstructions;
+  $("instructions-text").readOnly = busy || saved === null;
+  $("instructions-save").disabled = saved === null || !dirty || over || busy;
+  $("instructions-discard").disabled = busy || (!dirty && app.conflictRevision === null);
+  $("instructions-load").disabled = busy;
+  $("instructions-overwrite").disabled = busy;
   $("instructions-saved").textContent = !saved || saved.updated_at === null ? ""
     : `Saved ${new Date(saved.updated_at).toLocaleString()}`;
 }
 
+function showConflict(revision, again) {
+  app.conflictRevision = revision; // "save mine" replaces this version, the one the user is told about
+  const panel = $("instructions-conflict");
+  panel.hidden = false;
+  status(again ? "Changed again elsewhere; choose again." : "Changed elsewhere since you opened it. Choose below.",
+         "warn");
+  panel.scrollIntoView({ block: "nearest" });
+  $("instructions-load").focus();
+}
+
+/* The saved version; a draft kept from a save that met a signed-out session comes back on top (review C2). */
 async function loadInstructions() {
   const saved = await api("GET", "/api/instructions");
   app.instructions = saved;
-  $("instructions-text").value = saved.text;
+  app.conflictRevision = null;
   $("instructions-conflict").hidden = true;
+  const draft = app.instructionsDraft;
+  app.instructionsDraft = null;
+  $("instructions-text").value = draft ? draft.text : saved.text;
+  if (draft && draft.base !== saved.revision) showConflict(saved.revision, false);
+  else if (draft) status("Your unsaved instructions are back; save them when ready.", "warn");
   paintInstructions();
 }
 
 async function showInstructions() {
-  if (!$("surface-instructions").hidden) return;
-  if (!(await mayLeave())) return;
-  stopPolling();
-  views.reset();
-  app.conversationId = null;
-  app.generation += 1;
-  clearAttachments();
-  markSelected();
-  app.instructions = null;
-  $("instructions-text").value = "";
-  showSurface("instructions");
+  if (!$("surface-instructions").hidden && app.instructions !== null) {
+    closeNav();
+    return;
+  }
+  if ($("surface-instructions").hidden) {
+    if (!(await mayLeave())) return;
+    stopPolling();
+    views.reset();
+    app.conversationId = null;
+    app.generation += 1;
+    clearAttachments();
+    markSelected();
+    app.instructions = null;
+    app.conflictRevision = null;
+    $("instructions-conflict").hidden = true;
+    $("instructions-text").value = "";
+    showSurface("instructions");
+    $("topbar-title").textContent = "Instructions";
+    status("");
+  }
   closeNav();
-  $("topbar-title").textContent = "Instructions";
-  status("");
   paintInstructions();
-  await loadInstructions();
-  $("instructions-text").focus();
+  await loadInstructions(); // a failure says so; clicking Instructions again retries (review C3)
+  if (window.matchMedia("(min-width: 768px)").matches) $("instructions-text").focus(); // no keyboard pop on phones
 }
 
-/* ``over``: the user chose to replace a version saved elsewhere with theirs. */
+/* ``over``: the user chose to replace the version they were shown with theirs. */
 async function saveInstructions(over) {
   if (app.savingInstructions || app.instructions === null) return;
   app.savingInstructions = true;
   paintInstructions();
+  let finished;
+  app.instructionsSave = new Promise((resolve) => { finished = resolve; });
+  const text = $("instructions-text").value;
+  const base = app.instructions.revision;
   try {
-    const text = $("instructions-text").value;
-    const revision = over ? (await api("GET", "/api/instructions")).revision : app.instructions.revision;
+    const revision = over ? app.conflictRevision : base;
     const saved = await api("PUT", "/api/instructions", { text, revision });
     app.instructions = saved;
+    app.conflictRevision = null;
     $("instructions-text").value = saved.text; // as stored: newlines and blank text normalized
     $("instructions-conflict").hidden = true;
     status("Saved. Applies from the next message.", "ok");
+    $("instructions-text").focus(); // the Save button is disabled now: keep the keyboard somewhere useful
   } catch (error) {
     if (error.code === "revision_conflict") {
-      $("instructions-conflict").hidden = false; // the user chooses; nothing is overwritten
-      status("");
+      const latest = await api("GET", "/api/instructions").catch(() => null); // the version "save mine" replaces
+      if (latest) showConflict(latest.revision, over);
+      else status("Changed elsewhere since you opened it, and the saved version could not be read.", "error");
+    } else if (error.status === 401) {
+      app.instructionsDraft = { text, base }; // signed out (e.g. a server restart): kept for after sign-in
     } else {
       status(error.message, "error");
     }
   } finally {
     app.savingInstructions = false;
+    app.instructionsSave = null;
+    finished();
     paintInstructions();
   }
 }
 
-/* Leaving the instructions with unsaved changes asks first; leaving drops them. */
+async function discardInstructions() {
+  if (app.conflictRevision !== null) { // what to go back to is the saved version, not the one edited from
+    await loadInstructions();
+    return;
+  }
+  $("instructions-text").value = app.instructions ? app.instructions.text : "";
+  paintInstructions();
+}
+
+/* Leaving the instructions with unsaved changes asks first. An answered "Leave"
+   holds until the surface changes, so a navigation that goes on to open a
+   conversation does not ask twice, and one that fails keeps the text (N2). */
 async function mayLeave() {
-  if ($("surface-instructions").hidden || !instructionsDirty()) return true;
-  const leave = await confirmAction("Leave without saving?", ["Your changes to the instructions are not saved."],
-                                    "Leave");
-  if (leave) $("instructions-text").value = app.instructions.text;
-  return leave;
+  if ($("surface-instructions").hidden) return true;
+  if (app.instructionsSave) await app.instructionsSave; // a save under way ends first (N1)
+  if (!instructionsDirty() || app.leaveAgreed) return true;
+  app.leaveAgreed = await confirmAction("Leave without saving?",
+                                        ["Your changes to the instructions are not saved."], "Leave");
+  return app.leaveAgreed;
 }
 
 async function restoreConversation(item, button) {
@@ -1699,7 +1758,8 @@ async function loadServerInfo() {
 
 async function enter() {
   loadServerInfo();
-  await showHome();
+  // A save that met a signed-out session goes back to its draft (PR #68 review C2).
+  await (app.instructionsDraft ? showInstructions() : showHome());
 }
 
 async function boot() {
@@ -1707,16 +1767,18 @@ async function boot() {
   $("nav-sign-out").addEventListener("click", signOut);
   $("nav-trash").addEventListener("click", () => showTrash().catch((e) => status(e.message, "error")));
   $("nav-instructions").addEventListener("click", () => showInstructions().catch((e) => status(e.message, "error")));
-  $("instructions-text").addEventListener("input", paintInstructions);
-  $("instructions-save").addEventListener("click", () => saveInstructions(false));
-  $("instructions-overwrite").addEventListener("click", () => saveInstructions(true));
-  $("instructions-discard").addEventListener("click", () => {
-    $("instructions-text").value = app.instructions ? app.instructions.text : "";
+  $("instructions-text").addEventListener("input", () => {
+    app.leaveAgreed = false; // edited again: leaving asks again
     paintInstructions();
   });
+  $("instructions-save").addEventListener("click", () => saveInstructions(false));
+  $("instructions-overwrite").addEventListener("click", () => saveInstructions(true));
+  $("instructions-discard").addEventListener("click", () => discardInstructions().catch((e) => status(e.message, "error")));
   $("instructions-load").addEventListener("click", () => loadInstructions().catch((e) => status(e.message, "error")));
   window.addEventListener("beforeunload", (event) => {
-    if (!$("surface-instructions").hidden && instructionsDirty()) event.preventDefault(); // unsaved: the browser asks
+    if ($("surface-instructions").hidden || !instructionsDirty()) return;
+    event.preventDefault(); // unsaved: the browser asks
+    event.returnValue = ""; // older Chrome and some webviews ask only with this
   });
   $("trash-load-more").addEventListener("click", () => loadTrash(false).catch((e) => status(e.message, "error")));
   $("chat-menu-delete").addEventListener("click", deleteConversation);
