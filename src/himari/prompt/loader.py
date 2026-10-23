@@ -66,6 +66,7 @@ class ContextLoader:
         scope: TrustedScope,
         trigger_refs: Sequence[TriggerRef],
         request_options: RequestOptions,
+        user_instructions: str = "",  # the turn's, read by Control when it started (V3-P69 §5)
     ) -> PromptInputs:
         snapshot = await self._log.get_latest_snapshot(scope)
         events: tuple[ConversationEvent, ...] = ()
@@ -112,6 +113,7 @@ class ContextLoader:
             usage_mark=usage_mark,
             source_notes=tuple(n for n in self._source_notes if n.source in enabled),
             attachments=attachments,
+            user_instructions=user_instructions,
         )
 
     async def _attachments(self, scope: TrustedScope, events: Sequence[ConversationEvent],

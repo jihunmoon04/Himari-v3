@@ -231,6 +231,7 @@ class PromptInputs(DeepFrozen):
     usage_mark: UsageMark | None = None
     source_notes: tuple[SourceNote, ...] = ()  # the servers on in this Conversation, by name, uncut
     attachments: Mapping[str, AttachmentInfo] = FrozenMap()  # by attachment_key (V3-P66 §6)
+    user_instructions: str = ""  # the user's own text, read when the turn started (V3-P69 §5)
 
 
 @dataclass(frozen=True)
@@ -372,6 +373,7 @@ class PromptContextLoader(Protocol):
         scope: TrustedScope,
         trigger_refs: Sequence[TriggerRef],
         request_options: RequestOptions,
+        user_instructions: str = "",  # the turn's (V3-P69 §5)
     ) -> PromptInputs: ...
 
 
@@ -420,6 +422,25 @@ PROGRESS_NOTE = (
     "write anything with tool calls that keep working toward the same goal. These lines are hidden once you "
     "give your final answer, so put everything the user needs to know in that answer."
 )
+
+
+# V3-P69 §4: the user's instructions go after the operator's and the notes
+# above, escaped, so no spelling of a tag in them can fake the boundary. The
+# tags and this header only tell the model where the text came from; what
+# must hold is enforced by code, not by them.
+USER_INSTRUCTIONS_HEADER = (
+    "The user's standing instructions follow, between <user_instructions> tags. The user wrote them for "
+    "every conversation; follow them unless they conflict with the instructions above. In them, the "
+    "characters <, > and & are written as &lt;, &gt; and &amp;."
+)
+
+
+def user_instructions_section(text: str) -> str | None:
+    """The section the user's instructions become; None when there are none."""
+    if not text.strip():
+        return None
+    escaped = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    return f"{USER_INSTRUCTIONS_HEADER}\n<user_instructions>\n{escaped}\n</user_instructions>"
 
 
 def attachment_line(ref: AttachmentRef, attachments: Mapping[str, AttachmentInfo],

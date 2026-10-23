@@ -36,6 +36,7 @@ from himari.prompt.api import (
     SourceNote,
     ToolGroupTurn,
     UserTurn,
+    user_instructions_section,
 )
 from himari.prompt.compaction import anchors, context_key, part_anchor, read_summary
 
@@ -72,7 +73,7 @@ class Composer:
             snapshot_revision = inputs.snapshot.revision
         basis = inputs.state_basis
         return ModelInput(
-            stable_prefix=inputs.instructions,
+            stable_prefix=stable_prefix(inputs),
             tool_catalog=inputs.tool_catalog,
             conversation=tuple(history),
             current_state=CurrentStateProjection(basis=basis, observations=inputs.observations),
@@ -109,6 +110,12 @@ class Composer:
 
 
 CUT = "\n[… cut]"
+
+
+def stable_prefix(inputs: PromptInputs) -> tuple[str, ...]:
+    """The operator's instructions and notes, then the user's (V3-P69 §4)."""
+    section = user_instructions_section(inputs.user_instructions)
+    return inputs.instructions if section is None else (*inputs.instructions, section)
 
 
 def fit_notes(notes: tuple[SourceNote, ...]) -> tuple[SourceNote, ...]:

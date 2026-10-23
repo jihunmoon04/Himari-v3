@@ -100,6 +100,7 @@ def build_runtime(
         dispatcher=dispatcher,
         models=models,
         settings=data,
+        user_instructions=data,
         max_runs_per_drive=max_runs_per_drive,
         planner=Compactor() if any(o.budget is not None for o in models.offers) else None,
         turn_budget=turn_budget,

@@ -236,6 +236,7 @@ def context_key(inputs: PromptInputs) -> str:
         "model": options.model_id,
         "reasoning_effort": options.reasoning_effort,
         "instructions": list(inputs.instructions),
+        "user_instructions": inputs.user_instructions,  # V3-P69: a change re-estimates
         "source_notes": [[n.source, n.placement, n.text] for n in inputs.source_notes],
         "tools": [[d.tool_id, d.description, thaw(d.input_schema)] for d in inputs.tool_catalog],
     }

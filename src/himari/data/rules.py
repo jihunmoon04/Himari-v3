@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import unicodedata
 from collections.abc import Sequence
 
 from himari.common import ContentBlock, TextBlock, thaw, tool_id_problem
@@ -10,6 +11,7 @@ from himari.data.api import (
     MAX_APP_PAYLOAD_BYTES,
     MAX_EFFORT_CHARS,
     MAX_EXTERNAL_SETTINGS,
+    MAX_INSTRUCTIONS_CHARS,
     MAX_LIST_LIMIT,
     MAX_MODEL_ID_CHARS,
     MAX_TITLE_CHARS,
@@ -19,6 +21,7 @@ from himari.data.api import (
     DataError,
     DataErrorCode,
     InitialActivation,
+    InstructionScope,
     ModelSetting,
     ToolCompletion,
     ToolExecutionStatus,
@@ -74,6 +77,26 @@ def check_model_setting(setting: object) -> None:
     if effort is not None and not _visible_ascii(effort, MAX_EFFORT_CHARS):
         raise DataError(DataErrorCode.INVALID_ARGUMENT,
                         f"a reasoning effort is 1..{MAX_EFFORT_CHARS} visible ASCII characters")
+
+
+def check_instruction_scope(scope: object) -> None:
+    if scope is not InstructionScope.USER:
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, "only the user's own instructions are offered")
+
+
+def check_instructions(scope: object, text: object) -> str:
+    """V3-P69 §6: the text as stored, or why not."""
+    check_instruction_scope(scope)
+    if not isinstance(text, str):
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, "instructions are text")
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    if not text.strip():
+        return ""
+    if len(text) > MAX_INSTRUCTIONS_CHARS:
+        raise DataError(DataErrorCode.TOO_LARGE, f"instructions are at most {MAX_INSTRUCTIONS_CHARS} characters")
+    if any(unicodedata.category(c) == "Cc" and c not in "\n\t" for c in text):
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, "instructions may not contain control characters")
+    return text
 
 
 def preview(blocks: Sequence[ContentBlock]) -> str:

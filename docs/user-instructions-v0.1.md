@@ -141,7 +141,7 @@ CREATE TABLE instructions (
 - `GET /api/instructions` → `{text, revision, updated_at, max_chars}`
 - `PUT /api/instructions` `{text, revision}` → 200 `{…}`. 오류는 다음과 같다.
   - 409 `revision_conflict`
-  - 413 `too_large`
+  - 422 `too_large` (구현: 413이 아님 — 본문 크기 미들웨어가 모든 413을 `request_too_large`로 바꾸므로, §13)
   - 422 `invalid_instructions`
 - 인증·CSRF·Origin 검사는 다른 쓰기 API와 같다.
 
@@ -194,3 +194,38 @@ CREATE TABLE instructions (
 | --- | --- | --- |
 | N1 | `PromptContextLoader._instructions`는 서버가 공유한다. 이를 바꾸면 동시에 도는 대화의 지시문이 섞인다. 턴을 시작할 때 읽어 그 턴의 상태로 두고 `PromptInputs`에 넘겨야 한다. `context_status()`는 다음 턴의 문맥이므로 최신 지시문을 읽어야 한다 | §5에 구현 자리를 적었다(`Driver._exclusive`에서 한 번 읽어 턴 상태로 두기, 공유 상태는 그대로). 동시성 테스트를 §11에 더했다 |
 | N2 | 닫는 태그만 거부하면 변형 표기를 다 막지 못한다. 이스케이프해 넣는 편이 명확하다. 태그가 우선순위를 강제한다고 가정하면 안 된다 | 모델에게 보낼 때 `&`·`<`·`>`를 이스케이프하고 머리말에 알린다. 저장 때의 태그 거부는 없앴다(§4·§6). 태그와 머리말은 표시일 뿐이고, 지켜야 하는 것은 코드가 지킨다고 적었다(§4·§10) |
+
+## 13. 구현 노트 — 1단계: Data·Prompt·Control·Bootstrap·Web API·CLI (2026-10-23)
+
+- **Data:**
+  - `data/api.py`에 `MAX_INSTRUCTIONS_CHARS = 10_000`, `InstructionScope`(`USER`), `Instructions(text, revision, updated_at)`, `InstructionsStore` 포트를 두었다.
+  - `data/rules.py`의 `check_instructions`가 줄바꿈을 맞추고, 공백뿐이면 빈 글로 하고, 길이(코드 포인트)를 보고, `Cc` 제어 문자를 거부한다. 줄바꿈·탭은 허용한다. 범위 검사(`check_instruction_scope`)는 읽기에도 쓴다.
+  - 메모리 백엔드는 `InMemoryStore.instructions`, SQLite는 v10 `instructions` 표를 쓴다. 키는 `(owner, scope)`이다. 리비전이 다르면 `VERSION_CONFLICT`이다.
+  - 업그레이드 테스트는 v2~v9 → v10 모두다.
+- **Prompt:**
+  - `USER_INSTRUCTIONS_HEADER`와 `user_instructions_section`(`&` → `<` → `>` 순으로 이스케이프)을 두었다. 공백뿐이면 `None`이다.
+  - `PromptInputs.user_instructions`가 있고, `Composer`의 `stable_prefix`가 고정 지시문 뒤에 그 구획을 붙인다. Provider는 지금처럼 `stable_prefix` 뒤에 MCP 안내문을 붙이므로 §4의 순서가 된다.
+  - `context_key`에 `user_instructions`가 들어간다.
+  - `PromptContextLoader.load`는 `user_instructions` 인자를 받는다. 공유 상태(`_instructions`)는 그대로다.
+- **Control:**
+  - `Driver(user_instructions=…)`가 `_exclusive`에서 모델과 함께 한 번 읽어 `_turn_instructions`에 둔다. 턴 안의 모든 `load`(Run 두 곳, 수동 압축)는 이 값을 쓴다.
+  - `context_status`는 다음 턴을 보므로 DB의 최신 값을 읽는다.
+- **Bootstrap:** `build_runtime`이 Data를 넘긴다. `Application.instructions(principal)`과 `set_instructions(principal, text, revision)`를 두었다.
+- **Web API:**
+  - `GET`·`PUT /api/instructions`를 두었다. 거절은 409 `revision_conflict`, 422 `too_large`, 422 `invalid_instructions`이고, 메시지에 입력을 담지 않는다. 형식이 틀린 본문은 400/422(다른 API와 같은 검증)이다.
+  - **설계와 다른 점:** `too_large`는 413이 아니라 422다. `BodyLimitMiddleware`가 모든 413 응답을 `request_too_large`로 바꾸기 때문이다(업로드 경로는 그래서 예외로 둔다). 보안 미들웨어를 넓히지 않고 상태 코드를 바꿨다. 10,000자 한국어(약 30 KB)는 본문 상한 256 KiB 안이다(테스트).
+- **CLI:**
+  - `himari instructions [set FILE|- | clear [--yes]]`를 두었다.
+  - 보이기는 줄과 탭을 그대로 두고 터미널에 위험한 글자만 이스케이프한다. 그래서 출력한 것을 다시 `set`할 수 있다.
+  - 저장은 방금 읽은 리비전으로 한다. 그 사이 바뀌었으면 `refused (revision_conflict)`이다.
+  - 채팅의 `/instructions`는 보이기만 한다.
+- **테스트:**
+  - `tests/data/test_instructions.py`(두 백엔드), `tests/data/test_sqlite.py`(v10 업그레이드), `tests/prompt/test_composer.py`(자리·이스케이프·빈 글·`context_key`).
+  - `tests/bootstrap/test_instructions_app.py`:
+    - 턴 중간에 바꿔도 그 턴은 옛 글, 다음 턴은 새 글이다.
+    - 두 대화가 동시에 돌 때 둘 다 옛 글이다.
+    - 주체별로 따로이고, 없으면 구획이 없다.
+    - `context_status`는 최신 글로 계산한다.
+    - 요청 원문에 남는다.
+  - `tests/interfaces/test_web_instructions.py`, `tests/interfaces/test_cli_instructions.py`.
+- **2단계:** Web 설정 화면(`surface-instructions`)과 브라우저 스모크.

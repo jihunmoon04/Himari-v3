@@ -857,6 +857,47 @@ class ModelSetting(DeepFrozen):
     reasoning_effort: str | None = None  # None: the model's default effort
 
 
+# --- User instructions (V3-P69) ----------------------------------------------
+
+MAX_INSTRUCTIONS_CHARS = 10_000  # code points, after newlines are normalized (Q3)
+
+
+class InstructionScope(Enum):
+    """Whose conversations a text applies to. Only USER now; a project or lab
+    scope is added by its packet (V3-P69 §3.1)."""
+
+    USER = "user"  # every Conversation of the principal
+
+
+@dataclass(frozen=True)
+class Instructions(DeepFrozen):
+    text: str  # "" when there are none
+    revision: int  # 0: never written
+    updated_at: datetime | None = None
+
+
+class InstructionsStore(Protocol):
+    """V3-P69: the instructions a user writes for their conversations.
+
+    The principal comes from the trusted entry point (a signed-in user),
+    never from model output: no Tool reaches this port (§3). Writes are
+    compare-and-set on ``revision`` so two editors never silently overwrite
+    each other."""
+
+    async def read_instructions(self, principal: PrincipalId, scope: InstructionScope) -> Instructions:
+        """The current text; none written: ``Instructions("", 0)``."""
+        ...
+
+    async def write_instructions(self, principal: PrincipalId, scope: InstructionScope, text: str,
+                                 expected_revision: int) -> Instructions:
+        """Replaces the text when ``expected_revision`` is the current one and
+        returns the new record (revision + 1). Newlines become ``\n``; only
+        whitespace is no text. VERSION_CONFLICT for another revision,
+        TOO_LARGE past MAX_INSTRUCTIONS_CHARS, INVALID_ARGUMENT for a control
+        character other than newline and tab, or a scope not offered."""
+        ...
+
+
 # --- Conversation catalog (DATA-12, T0) -------------------------------------
 
 MAX_TITLE_CHARS = 200

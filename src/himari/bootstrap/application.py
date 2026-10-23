@@ -76,6 +76,8 @@ from himari.data.api import (
     DataErrorCode,
     FileRecord,
     ImageView,
+    Instructions,
+    InstructionScope,
     ViewMaker,
     ViewState,
     InitialActivation,
@@ -732,6 +734,18 @@ class Application:
         if record.status in _RUNNING:
             return replace(ended, state="running", resource=current, csp=_allowed(current.csp, policy))
         return replace(ended, outcome=_ENDED_OUTCOME[record.status], reason=_ended_reason(record))
+
+    # --- the user's instructions (V3-P69) ----------------------------------------------
+
+    async def instructions(self, principal: PrincipalId) -> Instructions:
+        """The instructions the user wrote for every Conversation."""
+        return await self.data.read_instructions(principal, InstructionScope.USER)
+
+    async def set_instructions(self, principal: PrincipalId, text: str, revision: int) -> Instructions:
+        """Saved at once, used from each Conversation's next turn (§5); a turn
+        under way keeps the text it started with. DataError VERSION_CONFLICT
+        (written since ``revision`` was read), TOO_LARGE or INVALID_ARGUMENT."""
+        return await self.data.write_instructions(principal, InstructionScope.USER, text, revision)
 
     async def create_conversation(self, principal: PrincipalId, *, title: str | None = None) -> ConversationId:
         """T0 with the principal's Inside Workspace activated (provisioned first)."""
