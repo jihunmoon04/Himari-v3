@@ -4,20 +4,49 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <title>HIMARI</title>
+    <script src="/assets/appearance.js"></script>
     <link rel="stylesheet" href="/assets/app.css" />
     <script type="module" src="/assets/app.js"></script>
   </head>
   <body>
+    <svg class="sidebar-symbols" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false">
+      <defs>
+        <symbol id="side-halo" viewBox="0 0 32 32">
+          <g transform="translate(16 16) scale(1 .72) rotate(-18)" stroke-width="1.1">
+            <g opacity=".75">
+              <ellipse cx="9" cy="0" rx="6.4" ry="2.6"/>
+              <ellipse cx="9" cy="0" rx="6.4" ry="2.6" transform="rotate(60)"/>
+              <ellipse cx="9" cy="0" rx="6.4" ry="2.6" transform="rotate(120)"/>
+              <ellipse cx="9" cy="0" rx="6.4" ry="2.6" transform="rotate(180)"/>
+              <ellipse cx="9" cy="0" rx="6.4" ry="2.6" transform="rotate(240)"/>
+              <ellipse cx="9" cy="0" rx="6.4" ry="2.6" transform="rotate(300)"/>
+            </g>
+            <g fill="currentColor" stroke="none">
+              <rect x="10.5" y="-1.4" width="4" height="2.8" rx=".4" transform="rotate(30)"/>
+              <rect x="10.5" y="-1.4" width="4" height="2.8" rx=".4" transform="rotate(120)"/>
+              <rect x="10.5" y="-1.4" width="4" height="2.8" rx=".4" transform="rotate(210)"/>
+              <rect x="10.5" y="-1.4" width="4" height="2.8" rx=".4" transform="rotate(300)"/>
+            </g>
+          </g>
+        </symbol>
+        <symbol id="side-panel" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M9 4v16"/></symbol>
+        <symbol id="side-pen" viewBox="0 0 24 24"><path d="m14 5 5 5M4 20l4.5-1L20 7.5 16.5 4 5 15.5 4 20ZM12 4H6a2 2 0 0 0-2 2v5M13 20h5a2 2 0 0 0 2-2v-5"/></symbol>
+        <symbol id="side-settings" viewBox="0 0 24 24"><path d="M4 7h16M4 17h16"/><circle cx="9" cy="7" r="3"/><circle cx="15" cy="17" r="3"/></symbol>
+        <symbol id="side-trash" viewBox="0 0 24 24"><path d="M4 6h16M9 6V3h6v3M6 6l1 15h10l1-15M10 10v7M14 10v7"/></symbol>
+        <symbol id="side-chevron" viewBox="0 0 24 24"><path d="m9 5 7 7-7 7"/></symbol>
+        <symbol id="side-note" viewBox="0 0 24 24"><rect x="5" y="3" width="14" height="18" rx="2"/><path d="M9 8h6M9 12h6M9 16h3"/></symbol>
+      </defs>
+    </svg>
     <!-- Layout and class names follow the HIMARI-v2 UI so its stylesheet
          applies unchanged; the surfaces are v3's: sign-in, home, chat. -->
     <div class="layout" id="layout">
       <aside class="sidebar" id="sidebar" aria-label="Navigation" hidden>
         <div class="sidebar-head">
-          <button type="button" id="nav-home" class="brand brand-button">HIMARI</button>
-          <button type="button" id="sidebar-close" class="icon-button sidebar-close">Close</button>
+          <button type="button" id="nav-home" class="brand brand-button" aria-label="HIMARI"><span class="sidebar-brand-mark"><svg class="side-icon" aria-hidden="true"><use href="#side-halo"/></svg></span><span>HIMARI</span></button>
+          <button type="button" id="sidebar-close" class="icon-button sidebar-close" aria-label="Collapse navigation" title="Collapse navigation"><svg class="side-icon" aria-hidden="true"><use href="#side-panel"/></svg></button>
         </div>
 
-        <button type="button" id="nav-new-chat" class="primary-button sidebar-new-chat">New Chat</button>
+        <button type="button" id="nav-new-chat" class="primary-button sidebar-new-chat"><svg class="side-icon" aria-hidden="true"><use href="#side-pen"/></svg><span>New Chat</span></button>
 
         <div class="sidebar-body" id="sidebar-body">
           <nav aria-label="Conversations">
@@ -32,10 +61,9 @@
         </div>
 
         <nav class="sidebar-utility" aria-label="Utilities">
-          <p class="server-info" id="server-info" hidden></p>
-          <button type="button" id="nav-instructions" class="nav-link">Instructions</button>
-          <button type="button" id="nav-trash" class="nav-link">Trash</button>
-          <button type="button" id="nav-sign-out" class="nav-link">Sign out</button>
+          <details class="sidebar-server" id="server-details" hidden><summary><span class="sidebar-status-dot" aria-hidden="true"></span><span id="server-status-label">Connected</span><svg class="side-icon sidebar-status-chevron" aria-hidden="true"><use href="#side-chevron"/></svg></summary><p class="server-info" id="server-info" hidden></p></details>
+          <button type="button" id="nav-trash" class="nav-link sidebar-utility-link"><svg class="side-icon" aria-hidden="true"><use href="#side-trash"/></svg><span>Trash</span></button>
+          <button type="button" id="nav-appearance" class="nav-link sidebar-utility-link" aria-haspopup="dialog"><svg class="side-icon" aria-hidden="true"><use href="#side-settings"/></svg><span>Settings</span></button>
         </nav>
       </aside>
 
@@ -52,12 +80,17 @@
             aria-label="Open navigation"
             title="Open navigation"
             hidden
-          >☰</button>
+          ><svg class="side-icon" aria-hidden="true"><use href="#side-panel"/></svg></button>
           <span class="topbar-title" id="topbar-title">HIMARI</span>
           <div class="topbar-chat-context" id="topbar-chat-context" hidden>
             <span class="topbar-state-dot" id="topbar-state-dot" aria-hidden="true"></span>
             <span class="topbar-chat-label" id="topbar-chat-label"></span>
           </div>
+          <section class="model-controls" id="chat-menu-model" aria-label="Conversation model" hidden>
+            <label class="model-control"><span>Model</span><select id="chat-menu-model-select"></select></label>
+            <label class="model-control" id="chat-menu-effort-field" hidden><span>Reasoning</span><select id="chat-menu-effort-select"></select></label>
+            <p class="model-note" id="chat-menu-model-note" hidden></p>
+          </section>
           <button
             type="button"
             id="chat-menu-toggle"
@@ -83,19 +116,6 @@
                 <dd id="chat-menu-context"></dd>
               </div>
             </dl>
-            <!-- The model (V3-P64): this conversation's choice, used from its next turn. -->
-            <section class="chat-menu-tools chat-menu-model" id="chat-menu-model" aria-labelledby="chat-menu-model-heading" hidden>
-              <h2 class="chat-menu-tools-heading" id="chat-menu-model-heading">Model</h2>
-              <label class="chat-menu-model-field">
-                <span class="chat-menu-tool-meta">Model</span>
-                <select id="chat-menu-model-select"></select>
-              </label>
-              <label class="chat-menu-model-field" id="chat-menu-effort-field" hidden>
-                <span class="chat-menu-tool-meta">Reasoning</span>
-                <select id="chat-menu-effort-select"></select>
-              </label>
-              <p class="chat-menu-tool-meta" id="chat-menu-model-note" hidden></p>
-            </section>
             <!-- MCP servers (V3-P53): on/off for this conversation; "default" follows the server's setting. -->
             <section class="chat-menu-tools" id="chat-menu-tools" aria-labelledby="chat-menu-tools-heading" hidden>
               <h2 class="chat-menu-tools-heading" id="chat-menu-tools-heading">Tool servers</h2>
@@ -132,7 +152,8 @@
           <div class="home-inner">
             <h1 class="home-brand">HIMARI</h1>
             <p class="home-prompt">What will we work on?</p>
-            <button type="button" id="home-new-chat" class="primary-button home-new-chat">+ Start a new chat</button>
+            <div id="home-composer-slot"></div>
+            <button type="button" id="home-new-chat" class="link-button home-new-chat">Start an empty chat</button>
             <section class="home-recent" aria-labelledby="home-recent-heading">
               <h2 class="home-recent-heading" id="home-recent-heading">Recent conversations</h2>
               <ul class="home-recent-list" id="home-recent-list"></ul>
@@ -174,7 +195,7 @@
         <section class="surface chat" id="surface-chat" hidden>
           <div class="timeline" id="timeline" aria-label="Conversation timeline"></div>
 
-          <div class="composer-wrap">
+          <div class="composer-wrap" id="composer-wrap">
             <section class="question-panel" id="question-panel" role="group" aria-labelledby="question-heading" hidden>
               <h2 class="question-heading" id="question-heading">The assistant has a question</h2>
               <p class="question-text" id="question-text"></p>
@@ -203,13 +224,12 @@
               <ul class="attach-list" id="attach-list" aria-label="Files to send" hidden></ul>
               <input type="file" id="composer-files" multiple hidden>
               <label class="visually-hidden" for="composer-text">Message</label>
-              <textarea id="composer-text" name="composer-text" rows="1" placeholder="Message HIMARI"></textarea>
-              <div class="composer-actions">
                 <button type="button" id="composer-attach" class="link-button composer-attach"
                         aria-label="Attach files" title="Attach files (or drop them here)"><svg class="icon" viewBox="0 0 24 24"
                         width="20" height="20" aria-hidden="true" focusable="false"><path fill="none" stroke="currentColor"
                         stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M21 11.5 12.4 20a5.5 5.5 0 0 1-7.8-7.8l8.9-8.8a3.7 3.7 0 0 1 5.2 5.2l-8.9 8.8a1.8 1.8 0 0 1-2.6-2.6l8.2-8.1"/></svg></button>
-                <span class="composer-hint" id="composer-hint"></span>
+              <textarea id="composer-text" name="composer-text" rows="1" placeholder="Message HIMARI"></textarea>
+              <div class="composer-actions">
                 <button type="button" id="composer-pause" class="link-button composer-stop" hidden
                         title="Finish the current step, then stop">Pause</button>
                 <button type="button" id="composer-cancel" class="link-button composer-stop" hidden
@@ -217,11 +237,61 @@
                 <button type="submit" id="composer-send" class="primary-button composer-send"
                         aria-label="Send message" title="Send message">↑</button>
               </div>
+              <span class="composer-hint" id="composer-hint"></span>
             </form>
           </div>
         </section>
       </main>
     </div>
+
+    <dialog id="rename-dialog" class="appearance-dialog" aria-labelledby="rename-dialog-title">
+      <form method="dialog">
+        <h2 id="rename-dialog-title">Rename conversation</h2>
+        <label class="field">Conversation name<input id="rename-name" name="title" maxlength="1000" required /></label>
+        <div class="form-actions"><button type="submit" value="cancel" formnovalidate>Cancel</button><button type="submit" value="save" class="primary-button">Save name</button></div>
+      </form>
+    </dialog>
+
+    <dialog id="image-dialog" class="image-dialog" aria-labelledby="image-dialog-title">
+      <div class="appearance-heading"><h2 id="image-dialog-title">Image preview</h2><button type="button" id="image-dialog-close" class="icon-button" aria-label="Close image preview">×</button></div>
+      <img id="image-dialog-image" alt="" />
+      <a id="image-dialog-download" class="link-button">Download original</a>
+    </dialog>
+
+    <dialog class="appearance-dialog" id="appearance-dialog" aria-labelledby="appearance-title" aria-describedby="appearance-description">
+      <div class="appearance-heading">
+        <h2 id="appearance-title">Settings</h2>
+        <button type="button" id="appearance-close" class="icon-button" aria-label="Close settings">×</button>
+      </div>
+      <h3 class="settings-section-title">Appearance</h3>
+      <p class="hint" id="appearance-description">Choose a theme. Changes apply immediately and are saved in this browser.</p>
+      <fieldset class="theme-options">
+        <legend class="visually-hidden">Theme</legend>
+        <label class="theme-option">
+          <input type="radio" name="appearance-theme" value="classic" />
+          <span class="theme-preview theme-preview-classic" aria-hidden="true">
+            <span class="theme-preview-sidebar"></span>
+            <span class="theme-preview-content"><span class="theme-preview-title">HIMARI</span><span>함께 생각해 볼까요?</span><span class="theme-preview-composer"><span></span></span></span>
+          </span>
+          <span class="theme-option-title">Classic · 담백한</span>
+          <span class="theme-option-description">White and charcoal, with a clean sans serif font.</span>
+        </label>
+        <label class="theme-option">
+          <input type="radio" name="appearance-theme" value="warm" />
+          <span class="theme-preview theme-preview-warm" aria-hidden="true">
+            <span class="theme-preview-sidebar"></span>
+            <span class="theme-preview-content"><span class="theme-preview-title">HIMARI</span><span>함께 생각해 볼까요?</span><span class="theme-preview-composer"><span></span></span></span>
+          </span>
+          <span class="theme-option-title">Warm · 차분한</span>
+          <span class="theme-option-description">Warm ivory and terracotta, with serif text for reading.</span>
+        </label>
+      </fieldset>
+      <p class="hint appearance-feedback" id="appearance-feedback" role="status" aria-live="polite"></p>
+      <div class="settings-links">
+        <button type="button" id="nav-instructions" class="settings-instructions"><svg class="side-icon" aria-hidden="true"><use href="#side-note"/></svg><span><span class="settings-link-title">Instructions</span><span class="settings-link-hint">How HIMARI responds in every conversation</span></span><svg class="side-icon" aria-hidden="true"><use href="#side-chevron"/></svg></button>
+        <button type="button" id="nav-sign-out" class="link-button">Sign out</button>
+      </div>
+    </dialog>
 
     <div class="purge-dialog" id="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="confirm-title"
          aria-describedby="confirm-body" hidden>

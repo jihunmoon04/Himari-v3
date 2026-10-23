@@ -126,7 +126,7 @@ MAX_EVENTS_PAGE = 500
 SESSION_SECONDS = 7 * 24 * 3600
 FAILED_LOGIN_DELAY_SECONDS = 1.0
 STATIC_FILES = {"app.css": "text/css", "app.js": "text/javascript", "app_view.js": "text/javascript",
-                "rich_text.js": "text/javascript"}
+                "rich_text.js": "text/javascript", "appearance.js": "text/javascript"}
 
 Opener = Callable[[], Awaitable[Application]]
 

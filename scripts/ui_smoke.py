@@ -25,7 +25,7 @@ named .png that stays a plain file chip, and the narrow layout. A seventh
 (V3-P68) folds tool steps into work blocks: the latest progress line while
 the turn runs, a presented file outside the block, a question's lead-in,
 calls without a result after a pause (never "not run": a recovery or an
-omitted result looks the same), "N tool calls" once answered, the same after
+omitted result looks the same), "Activity · N steps" once answered, the same after
 a reload, and a block split at the compaction boundary. An eighth (V3-P69)
 edits the user's instructions: the count and limit, a save that the next
 message's request carries, a save refused after a change made elsewhere
@@ -117,7 +117,6 @@ def run(base: str, token: str, shots: str | None) -> list[str]:
         page.fill("#login-token", token)
         page.click("#login-submit")
         expect(page.locator("#home-recent-empty")).to_be_visible()
-        page.click("#home-new-chat")
         page.fill("#composer-text", "Plan a trip")
         page.press("#composer-text", "Enter")
         expect(page.locator("#question-text")).to_have_text("Which **city**?", timeout=10000)
@@ -145,9 +144,10 @@ def run(base: str, token: str, shots: str | None) -> list[str]:
         page.click("#chat-menu-toggle")
         expect(page.locator("#chat-menu-context")).to_contain_text("of 128k tokens")
         page.click("#chat-menu-toggle")
-        page.once("dialog", lambda d: d.accept("Seoul trip"))
         page.click("#chat-menu-toggle")
         page.click("#chat-menu-rename")
+        page.fill("#rename-name", "Seoul trip")
+        page.get_by_role("button", name="Save name", exact=True).click()
         expect(page.locator(".conv-row")).to_have_text("Seoul trip")
         page.reload()
         expect(page.locator(".home-recent-title")).to_have_text("Seoul trip")
@@ -159,6 +159,7 @@ def run(base: str, token: str, shots: str | None) -> list[str]:
         if shots:
             page.screenshot(path=os.path.join(shots, "3-narrow.png"))
         page.click("#sidebar-toggle")
+        page.click("#nav-appearance")
         page.click("#nav-sign-out")
         expect(page.locator("#surface-login")).to_be_visible()
         browser.close()
@@ -523,8 +524,12 @@ def run_images(base: str, token: str, shots: str | None, tmp: str) -> list[str]:
         page.wait_for_timeout(300)
         assert page.evaluate("""() => { const t = document.getElementById("timeline");
           return t.scrollHeight - t.scrollTop - t.clientHeight < 80; }"""), "the answer below a photo is in view"
+        user.locator(".file-preview-button").click()
+        expect(page.locator("#image-dialog")).to_be_visible()
+        expect(page.locator("#image-dialog-image")).to_have_attribute("alt", "photo.png")
+        page.click("#image-dialog-close")
         with page.expect_download() as done:
-            user.locator(".file-thumb").click()
+            user.locator(".file-thumb-download").click()
         assert Path(done.value.path()).read_bytes() == photo.read_bytes(), "pressed, the original downloads"
 
         page.fill("#composer-text", "look at it with the tool")
@@ -599,7 +604,7 @@ def run_work_progress(base: str, token: str, shots: str | None) -> list[str]:
         expect(first.locator(".work-line")).to_have_text("Looking through the code", timeout=10000)
         expect(first.locator(".work-dot")).to_have_count(1)
         expect(first.locator(".work-line")).to_have_text("Implementing", timeout=10000)  # its first line only
-        expect(first.locator(".work-count")).to_have_text(" · 3 tool calls")
+        expect(first.locator(".work-count")).to_have_text(" · 3 steps")
         assert first.evaluate("b => !b.open")
         if shots:
             page.screenshot(path=os.path.join(shots, "13-work-live.png"))
@@ -608,7 +613,7 @@ def run_work_progress(base: str, token: str, shots: str | None) -> list[str]:
         # The question ends the block; the text that came with it is its lead-in.
         expect(page.locator("#question-text")).to_have_text("Which config?", timeout=10000)
         expect(page.locator(".item-assistant").filter(has_text="I found two configs.")).to_have_count(1)
-        expect(first.locator(".work-count")).to_have_text("3 tool calls")
+        expect(first.locator(".work-count")).to_have_text("Activity · 3 steps")
         expect(first.locator(".work-dot")).to_have_count(0)
         expect(blocks).to_have_count(1)
         # Answer, then pause while the model answers: its two calls do not run.
@@ -618,12 +623,12 @@ def run_work_progress(base: str, token: str, shots: str | None) -> list[str]:
         page.click("#composer-pause")
         expect(page.locator("#stop-panel")).to_be_visible(timeout=10000)
         expect(blocks).to_have_count(2)
-        expect(blocks.last.locator(".work-count")).to_have_text("2 tool calls · 2 without result")
+        expect(blocks.last.locator(".work-count")).to_have_text("2 steps · 2 results unavailable")
         expect(blocks.last.locator(".work-line")).to_have_count(0)
         expect(blocks.last.locator(".tool-row-summary").first).to_have_text("… inside/write_file · no result")
         page.click("#stop-continue")
         expect(page.locator(".item-assistant").last).to_contain_text("All done.", timeout=15000)
-        expect(blocks.last.locator(".work-count")).to_have_text("2 tool calls")
+        expect(blocks.last.locator(".work-count")).to_have_text("Activity · 2 steps")
         expect(page.locator(".work-dot")).to_have_count(0)
         if shots:
             page.screenshot(path=os.path.join(shots, "14-work-done.png"))
@@ -631,7 +636,7 @@ def run_work_progress(base: str, token: str, shots: str | None) -> list[str]:
         page.reload()
         page.locator(".conv-row").first.click()
         expect(blocks).to_have_count(2, timeout=10000)
-        assert [blocks.nth(n).locator(".work-count").inner_text() for n in range(2)] == ["3 tool calls", "2 tool calls"]
+        assert [blocks.nth(n).locator(".work-count").inner_text() for n in range(2)] == ["Activity · 3 steps", "Activity · 2 steps"]
         assert page.evaluate("[...document.querySelectorAll('.item-work')].every(b => !b.open)")
         first.locator(".work-summary").click()
         expect(first.locator(".work-progress")).to_have_count(2)
@@ -654,7 +659,7 @@ def run_work_progress(base: str, token: str, shots: str | None) -> list[str]:
             return d.previousElementSibling.matches('.item-work') && d.nextElementSibling.matches('.item-work');
         }""")
         assert [blocks.nth(n).locator(".work-count").inner_text() for n in range(3)] == [
-            "1 tool call", "2 tool calls", "2 tool calls"]
+            "Activity · 1 step", "Activity · 2 steps", "Activity · 2 steps"]
         page.set_viewport_size({"width": 390, "height": 800})
         page.wait_for_timeout(300)
         assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
@@ -691,7 +696,7 @@ def run_work_progress(base: str, token: str, shots: str | None) -> list[str]:
             page.route(re.compile(rf"/api/conversations/{cid}$"), detail)
             page.locator(".conv-row").first.click()
             expect(blocks).to_have_count(1, timeout=10000)
-            expect(blocks.first.locator(".work-count")).to_have_text("1 tool call · 1 without result")
+            expect(blocks.first.locator(".work-count")).to_have_text("1 step · 1 result unavailable")
             expect(blocks.first.locator(".tool-row-summary")).to_have_text("… calliope/stamp · no result")
             assert "not run" not in page.locator("#timeline").inner_text()
             page.unroute(re.compile(rf"/api/conversations/{cid}/events\?"))
@@ -716,6 +721,7 @@ def run_instructions(base: str, token: str, shots: str | None, root: str, provid
         page.goto(base)
         page.fill("#login-token", token)
         page.click("#login-submit")
+        page.click("#nav-appearance")
         page.click("#nav-instructions")
         text, save = page.locator("#instructions-text"), page.locator("#instructions-save")
         expect(page.locator("#instructions-count")).to_have_text("0 / 10,000", timeout=5000)
@@ -745,6 +751,7 @@ def run_instructions(base: str, token: str, shots: str | None, root: str, provid
         assert "<user_instructions>\nAnswer in Korean.\nKeep it short.\n</user_instructions>" in \
             provider.prepared_inputs[-1].stable_prefix[-1]
         # Changed elsewhere meanwhile: refused, the text kept, the user chooses.
+        page.click("#nav-appearance")
         page.click("#nav-instructions")
         expect(text).to_have_value("Answer in Korean.\nKeep it short.", timeout=5000)
         text.fill("Mine.")
@@ -783,6 +790,7 @@ def run_instructions(base: str, token: str, shots: str | None, root: str, provid
         expect(page.locator("#confirm-dialog")).to_be_visible(timeout=5000)
         page.click("#confirm-ok")
         expect(page.locator("#surface-chat")).to_be_visible(timeout=5000)
+        page.click("#nav-appearance")
         page.click("#nav-instructions")
         expect(text).to_have_value("Mine again.", timeout=5000)
         # A save that meets a signed-out session (e.g. a server restart) keeps the draft for after sign-in.
