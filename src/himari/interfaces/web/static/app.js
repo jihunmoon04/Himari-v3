@@ -566,8 +566,8 @@ function paintWork(block) {
   const waiting = live ? 0 : rows.filter((row) => row.classList.contains("is-pending")).length;
   const line = live ? progressLine(block) || "Working" : "";
   const key = JSON.stringify([model, live, line, calls, waiting]);
-  if (block.dataset.painted === key) return; // repainted each poll, the dot's pulse would restart
-  block.dataset.painted = key;
+  if (block.painted === key) return; // repainted each poll, the dot's pulse would restart
+  block.painted = key;
   const summary = block.querySelector(":scope > .work-summary");
   summary.replaceChildren();
   if (model) summary.append(el("span", "work-model-name", model));
