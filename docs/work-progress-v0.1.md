@@ -89,7 +89,7 @@ hidden once you give your final answer, so put everything the user needs to know
 
 - **최종 답이 오면:** 요약 줄이 `7 tool calls`로 바뀌고 진행 글은 요약에서 사라진다. 묶음은 닫힌다(사용자가 연 것이라도 — 최종 답이 화면의 중심). 펼치면 진행 글과 Tool 줄이 그대로 있다.
 - **최종 답 없이 멈추면**(일시정지·취소·예산·오류): 요약 줄은 같은 `7 tool calls`가 되고 진행 줄은 사라진다. 왜 멈췄는지는 지금처럼 멈춤 패널과 상태 줄이 말한다. Continue하면 그 묶음이 다시 실행 중이 된다(§5.1).
-- **실행되지 않은 호출(검수 C1):** 일시정지로 결과 없이 남은 호출이 있고 작업이 멈춰 있으면, 요약 줄에 그 수를 붙인다: `4 tool calls · 2 not run`. 취소로 닫힌 호출은 결과(`cancelled`)가 있으므로 그 Tool 줄이 `failed`로 말한다.
+- **결과 없는 호출(검수 C1, 구현 소유자 검수 B1로 고침):** 작업이 멈췄는데 결과 Event가 없는 호출이 있으면 요약 줄에 그 수를 붙인다: `4 tool calls · 2 without result`. 그 Tool 줄도 `running`이 아니라 `no result`다. **"실행되지 않음"이라고 단정하지 않는다.** 결과 Event가 없는 경우는 셋이고 Web은 이를 구분하지 못한다: 일시정지로 시작하지 않은 호출(`PENDING`), 실행을 시작했으나 결과가 불명인 호출(`EXECUTION_CLAIMED`/`UNKNOWN`, `recovery_required` — 부작용이 있었을 수 있음), 결과를 대화에 남기지 않는 Tool(`ConversationRecord.OMIT`, 실행은 끝남). 취소로 닫힌 호출은 결과(`cancelled`)가 있으므로 그 Tool 줄이 `failed`로 말한다.
 - **`ask_user` 질문이 오면:** 앞 묶음은 끝난 것으로 접히고 질문(앞말 포함, §5.1)이 보인다. 답 뒤의 Tool 단계는 새 묶음이다.
 - **최종 답이 비었으면:** 접은 뒤 보일 새 글이 없다. 묶음은 펼칠 수 있게 남는다.
 - **Tool 하나 없이 진행 글만 있는 단계는 없다:** commentary는 늘 Tool 호출과 함께 온다(V3-P16).
@@ -168,7 +168,7 @@ V3-P64 §7의 "단계마다 한 번, 처음 보이는 것에" 규칙에서, 처�
   - 끝난 뒤: `N tool calls`, 진행 글이 요약에 없음, 건넨 파일 카드는 묶음 밖.
   - 새로고침해도 같음. 모델이 바뀐 단계의 이름이 요약 줄에.
   - `ask_user`(검수 C2): 글과 함께 온 질문 단계는 묶음 없이 앞말 + 질문으로 보이고, 앞뒤 묶음이 나뉜다.
-  - 실행되지 않은 호출(검수 C1): Tool 호출 둘 중 하나를 실행하는 동안 일시정지 → `2 tool calls · 1 not run`. Continue 뒤 끝나면 `· not run`이 사라짐. 취소로 닫힌 호출은 그 Tool 줄이 `failed`.
+  - 결과 없는 호출(검수 C1, 구현 소유자 검수 B1): 일시정지 → `2 tool calls · 2 without result`, 그 줄은 `no result`. Continue 뒤 끝나면 `· without result`가 사라짐. 결과가 불명인 호출(`recovery_required`)과 결과를 남기지 않은 호출(최종 답 뒤)도 `without result`이고 `not run`은 어디에도 없음. 취소로 닫힌 호출은 그 Tool 줄이 `failed`.
   - 압축 경계(검수 B1): 첫 Tool 단계 뒤에 압축되는 대본(작은 문맥 예산) — 구분선이 두 묶음 사이에 있음. 새로고침·대화 다시 열기·추가 압축 뒤에도 구분선이 묶음 안에 있지 않음.
   - 앱 화면이 있는 Tool 줄은 묶음 밖(기존 MCP 앱 시나리오에 확인 추가).
 - **실모델 확인(배포 뒤 소유자):** 코드 작업 하나를 시켜 단계마다 한 줄이 오는지, 호출마다 오지는 않는지 본다. 잘 따르지 않는 모델이 많으면 §8의 B를 다시 본다.
@@ -194,7 +194,7 @@ Q1·Q2는 검수에서 "권고대로 해도 기술적 문제 없음, 구현 전 
 - **Prompt:** `prompt/api.py` `PROGRESS_NOTE`(§3 그대로). `bootstrap/application.py`가 `ATTACHMENT_NOTE`·`TOOL_IMAGES_NOTE` 뒤에 늘 붙인다. 고정 앞부분이 약 100토큰 늘어, 문맥·예산 경계에 맞춘 테스트 수치를 옮겼다(CLI·Web 압축 테스트와 스모크 2단계 `context_tokens` 2100 → 2800, Web 예산 테스트 `turn_budget` 20,000 → 24,000). 통과 범위(검수 측정: 2300~4000 이상, 21,000~28,000 이상) 안에서 아래 끝과 거리를 두었다. 단정은 그대로라 압축과 `runs == 2`는 여전히 확인된다.
 - **CLI:** `Symbols.progress`(`»`, ASCII `>`). `Printer.progress`가 첫 줄(최대 `PROGRESS_CHARS` 200자)과 `…`, `--verbose`면 전부와 나머지를 들여써서 찍는다. `ask_user` 단계의 글은 지금처럼 `HIMARI:` 블록이다(질문의 앞말). 공백뿐인 글은 찍지 않는다.
 - **Web(`app.js`):** `app.work`가 다음 Tool 단계가 들어갈 묶음이다. 보이는 메시지(사용자 메시지, 최종 답, 질문)가 `closeWork()`로 묶음을 닫고 접는다.
-  - 요약 줄(`paintWork`)은 그 묶음이 `app.work`이고 작업이 실행 중이면 점 + 마지막 진행 글의 첫 줄 + `· N tool calls`이다. 아니면 `N tool calls`이고, 결과 없는 호출이 있으면 `· k not run`을 붙인다.
+  - 요약 줄(`paintWork`)은 그 묶음이 `app.work`이고 작업이 실행 중이면 점 + 마지막 진행 글의 첫 줄 + `· N tool calls`이다. 아니면 `N tool calls`이고, 결과 없는 호출이 있으면 `· k without result`를 붙인다. 결과 없는 Tool 줄은 작업이 실행 중이면 `running`, 아니면 `no result`이고, 실행 상태가 바뀌면 `applyDetail`이 그 줄들을 다시 칠한다.
   - 실행 상태가 바뀌면 `applyDetail`이 다시 칠한다. Event를 그릴 때의 실행 상태는 앞 detail의 것이기 때문이다.
   - 수와 `not run`은 묶음 안 Tool 줄과, 앱 화면 때문에 밖에 둔 줄(`block.outsideRows`, 각 줄의 `data-call`은 호출 Event의 sequence)을 함께 센다. 결과 때 앱 화면을 알게 된 줄은 밖으로 옮기고 결과의 sequence로 다시 단다. 그래서 구분선 배치의 DOM 순서가 sequence 순서와 맞는다.
   - 요약 줄은 내용(모델, 실행 중, 진행 글, 수, 미실행)이 같으면 다시 그리지 않는다. 매초 poll마다 다시 그리면 점의 깜빡임이 처음부터 다시 시작한다.
@@ -202,9 +202,9 @@ Q1·Q2는 검수에서 "권고대로 해도 기술적 문제 없음, 구현 전 
   - `placeDivider`가 구분선을 놓기 전에 `splitWork`로 경계에 걸린 묶음을 나눈다. 뒤 묶음은 경계 뒤 첫 최상위 노드 앞에 놓이고, 경계 뒤 호출의 밖 줄도 가져간다. 실행 중 새 Event가 오면 `workBlock`이 경계 앞 묶음을 닫고 새로 연다.
   - 어느 경우든 뒤 묶음은 앞 묶음의 마지막 진행 글을 이어받는다(`dataset.line`, §5.6). 뒤 묶음 첫 단계의 모델 이름은 처음 그릴 때처럼 요약 줄로 간다.
   - 기존 `.item-step` 머리줄은 없어지고 모델 이름은 요약 줄에 있다(§5.5). 요약 줄 앞의 `▸`/`▾`는 펼칠 수 있음을 알린다(구분선 요약과 같은 뜻).
-- **스모크(`scripts/ui_smoke.py`) 7단계(PORT+6):** 단계마다 2.5초 걸리는 대본 모델로 §11의 실행 중·끝난 뒤·질문·일시정지(`2 tool calls · 2 not run`)·Continue·새로고침을 확인한다. 압축 경계는 `/context` 응답의 `covered_through_sequence`를 묶음 안 두 번째 Tool 줄 바로 앞으로 바꿔 확인한다(묶음 3개, 구분선 앞뒤가 묶음). 좁은 화면에서는 가로 스크롤이 없다.
+- **스모크(`scripts/ui_smoke.py`) 7단계(PORT+6):** 단계마다 2.5초 걸리는 대본 모델로 §11의 실행 중·끝난 뒤·질문·일시정지(`2 tool calls · 2 without result`, 줄은 `no result`)·Continue·새로고침을 확인한다. 결과가 불명인 호출(`recovery_required`)과 결과를 남기지 않은 호출은 Event와 detail 응답을 바꿔 확인한다(`1 tool call · 1 without result`, `not run` 없음). 압축 경계는 `/context` 응답의 `covered_through_sequence`를 묶음 안 두 번째 Tool 줄 바로 앞으로 바꿔 확인한다(묶음 3개, 구분선 앞뒤가 묶음). 좁은 화면에서는 가로 스크롤이 없다.
 - **MCP 앱 스모크(`scripts/mcp_apps_smoke.py`):** 화면이 있는 호출의 줄이 묶음 밖에 있고 묶음 수에 들어가는지 확인한다(호출 때 화면을 아는 경로, 40/40).
-- **확인하지 못한 것:** 모델 이름이 요약 줄에 붙는 것(§5.5)은 스모크 서버가 모델 하나뿐이라 브라우저로 확인하지 못했다. 결과 때 화면을 알게 되어 줄이 밖으로 옮겨지는 경로, 경계에서 진행 글을 이어받는 것, 둘 중 하나만 실행된 일시정지(`· 1 not run`)도 브라우저로는 확인하지 않았다. CLI는 기존 테스트(`test_a_step_of_calls_only_names_the_changed_model`)와 새 테스트(`test_commentary_is_a_progress_line`)가 확인한다. 실모델이 지시를 따르는지는 배포 뒤 소유자가 확인한다(§11).
+- **확인하지 못한 것:** 모델 이름이 요약 줄에 붙는 것(§5.5)은 스모크 서버가 모델 하나뿐이라 브라우저로 확인하지 못했다. 결과 때 화면을 알게 되어 줄이 밖으로 옮겨지는 경로, 경계에서 진행 글을 이어받는 것, 둘 중 하나만 실행된 일시정지(`· 1 without result`)도 브라우저로는 확인하지 않았다. 결과 불명과 결과 생략은 실제 서버 상태가 아니라 바꾼 응답으로 확인했다(Web의 표시 규칙 확인). CLI는 기존 테스트(`test_a_step_of_calls_only_names_the_changed_model`)와 새 테스트(`test_commentary_is_a_progress_line`)가 확인한다. 실모델이 지시를 따르는지는 배포 뒤 소유자가 확인한다(§11).
 
 ### 13.1 구현 검수 (PR #65)
 
@@ -212,7 +212,7 @@ Q1·Q2는 검수에서 "권고대로 해도 기술적 문제 없음, 구현 전 
 
 | # | 지적 | 반영 |
 | --- | --- | --- |
-| C1 | 밖 줄 수가 숫자(`block.outside`)라 나눌 때 옮겨지지 않고, 밖 줄의 미실행이 `not run`에 빠진다 | 밖 줄 자체를 `outsideRows`로 두고 `data-call`로 나눌 때 함께 옮긴다. 수와 `not run` 모두 센다 |
+| C1 | 밖 줄 수가 숫자(`block.outside`)라 나눌 때 옮겨지지 않고, 밖 줄의 미실행이 `not run`(이후 `without result`)에 빠진다 | 밖 줄 자체를 `outsideRows`로 두고 `data-call`로 나눌 때 함께 옮긴다. 수와 `not run` 모두 센다 |
 | C2 | 화면이 있는 줄이 묶음 밖에 남는지 지키는 테스트가 없다 | MCP 앱 스모크에 두 확인을 더했다(§13) |
 | C3 | 나뉜 뒤 묶음이 진행 글을 이어받지 않는다(§5.6) | `splitWork`와 `workBlock`의 경계 분기가 앞 묶음의 마지막 진행 글을 넘긴다 |
 | N1 | 매 poll 다시 그려 점의 깜빡임이 끊긴다 | 내용이 같으면 다시 그리지 않는다 |
@@ -227,3 +227,9 @@ Q1·Q2는 검수에서 "권고대로 해도 기술적 문제 없음, 구현 전 
 | N10 | 하나만 실행된 일시정지와 취소된 호출의 `failed`는 스모크에 없다 | 같은 코드 경로라 더하지 않고 §13의 확인하지 못한 것에 적었다 |
 
 재검수(`300801a`): READY. 비차단 N1 반영: 요약 줄의 그리기 키를 DOM 속성(`data-painted`)이 아니라 JS 속성(`block.painted`)에 둔다(진행 글이 DOM에 두 번 남지 않음). N2(결과 때 밖으로 옮겨지는 경로의 브라우저 확인)는 §13에 적은 대로 남긴다.
+
+### 13.2 소유자 구현 검수 — `ec64395`: NOT_READY
+
+| # | 지적 | 반영 |
+| --- | --- | --- |
+| B1 | 결과 Event가 없다는 것만으로 `not run`이라 한다. 결과 불명(`EXECUTION_CLAIMED`/`UNKNOWN`, `recovery_required`)은 부작용이 있었을 수 있고, `ConversationRecord.OMIT` Tool은 실행이 끝나도 결과 Event가 없다. 같은 작업을 다시 해도 된다고 오해하게 한다 | Web은 셋을 구분할 정보가 없으므로 단정하지 않는다: 요약 줄은 `k without result`, 결과 없는 Tool 줄은 작업이 멈추면 `running` 대신 `no result`(§5.4). 스모크에 일시정지·`recovery_required`·결과 생략 확인을 더했다(§11). 지금 `OMIT`을 쓰는 Tool은 없다(`tool/api.py` 기본값 `FULL`) |

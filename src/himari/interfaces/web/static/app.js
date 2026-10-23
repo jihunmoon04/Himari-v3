@@ -123,6 +123,7 @@ const app = {
   attachments: [], // files for the next message (V3-P66 §9): {key, name, size, state, fileId, progress, xhr, note}
   jobRunning: false, // for the Send button only: set as soon as a send is taken (PR #60 review C5)
   work: null, // the work block the next tool step goes into (V3-P68 §5.1)
+  rowsRunning: null, // the job state the rows without a result were last painted for
   attachKeys: 0,
 };
 
@@ -482,7 +483,10 @@ function paintToolRow(entry) {
   if (entry.result !== null) {
     body.append(el("p", "tool-row-heading", "Result"), el("pre", "pre-code", entry.result.text));
   }
-  const state = tone === "pending" ? "running" : tone === "success" ? "done" : "failed";
+  // Without a result once the turn stopped: it may not have started, its outcome may be
+  // unknown, or its result may be kept out of the conversation — the page cannot tell (V3-P68).
+  const pending = app.jobRunning ? "running" : "no result";
+  const state = tone === "pending" ? pending : tone === "success" ? "done" : "failed";
   entry.details.replaceChildren(el("summary", "tool-row-summary", `${mark} ${entry.toolId} · ${state}`), body);
 }
 
@@ -562,7 +566,8 @@ function paintWork(block) {
   const changes = body.querySelectorAll(":scope > .work-model");
   const model = changes.length ? changes[changes.length - 1].textContent : block.dataset.model || "";
   const live = block === app.work && app.jobRunning;
-  // Calls left without a result while the turn is stopped (a pause) did not run (§5.4).
+  // Calls without a result once the turn stopped: never "not run" — a call whose outcome is
+  // unknown (recovery) or whose result is kept out of the conversation has none either (§5.4).
   const waiting = live ? 0 : rows.filter((row) => row.classList.contains("is-pending")).length;
   const line = live ? progressLine(block) || "Working" : "";
   const key = JSON.stringify([model, live, line, calls, waiting]);
@@ -574,7 +579,7 @@ function paintWork(block) {
   if (live) {
     summary.append(el("span", "work-dot"), el("span", "work-line", line), el("span", "work-count", ` · ${calls}`));
   } else {
-    summary.append(el("span", "work-count", waiting ? `${calls} · ${waiting} not run` : calls));
+    summary.append(el("span", "work-count", waiting ? `${calls} · ${waiting} without result` : calls));
   }
 }
 
@@ -1155,6 +1160,10 @@ function applyDetail(detail) {
   $("composer-text").placeholder = detail.waiting ? "Your answer" : "Message HIMARI";
   app.jobRunning = detail.job.running;
   if (app.work) paintWork(app.work); // its progress line while the turn runs (V3-P68 §5.2)
+  if (app.rowsRunning !== detail.job.running) { // a row without a result: "running" or "no result"
+    app.rowsRunning = detail.job.running;
+    for (const entry of app.toolRows.values()) if (entry && entry.result === null) paintToolRow(entry);
+  }
   $("composer-send").disabled = detail.job.running || app.sending || uploading();
   $("composer-hint").textContent = detail.job.running ? `HIMARI is working…${usageText(detail.job.turn_usage)}` : "";
   $("chat-menu-resume").hidden = !detail.continuable;
@@ -1223,6 +1232,7 @@ async function openConversation(id) {
   loadServerInfo();
   app.toolRows = new Map();
   app.work = null;
+  app.rowsRunning = null;
   app.context = null;
   $("chat-menu-context-pair").hidden = true;
   $("chat-menu-compact").hidden = true;

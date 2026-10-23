@@ -24,7 +24,8 @@ returned, downloading the original by pressing a thumbnail, an HTML file
 named .png that stays a plain file chip, and the narrow layout. A seventh
 (V3-P68) folds tool steps into work blocks: the latest progress line while
 the turn runs, a presented file outside the block, a question's lead-in,
-"not run" calls after a pause, "N tool calls" once answered, the same after
+calls without a result after a pause (never "not run": a recovery or an
+omitted result looks the same), "N tool calls" once answered, the same after
 a reload, and a block split at the compaction boundary.
 
 Requires: pip install playwright && playwright install chromium
@@ -613,8 +614,9 @@ def run_work_progress(base: str, token: str, shots: str | None) -> list[str]:
         page.click("#composer-pause")
         expect(page.locator("#stop-panel")).to_be_visible(timeout=10000)
         expect(blocks).to_have_count(2)
-        expect(blocks.last.locator(".work-count")).to_have_text("2 tool calls · 2 not run")
+        expect(blocks.last.locator(".work-count")).to_have_text("2 tool calls · 2 without result")
         expect(blocks.last.locator(".work-line")).to_have_count(0)
+        expect(blocks.last.locator(".tool-row-summary").first).to_have_text("… inside/write_file · no result")
         page.click("#stop-continue")
         expect(page.locator(".item-assistant").last).to_contain_text("All done.", timeout=15000)
         expect(blocks.last.locator(".work-count")).to_have_text("2 tool calls")
@@ -654,6 +656,42 @@ def run_work_progress(base: str, token: str, shots: str | None) -> list[str]:
         assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
         if shots:
             page.screenshot(path=os.path.join(shots, "15-work-narrow.png"))
+        page.set_viewport_size({"width": 1280, "height": 860})
+        page.unroute("**/context")
+        # PR #65 owner review B1: a call without a result is never "not run" — its outcome may be
+        # unknown (recovery) or its result kept out of the conversation (ConversationRecord.OMIT).
+        cid = page.locator(".conv-row.is-selected").get_attribute("data-id")
+        call = {"sequence": 2, "kind": "assistant_tool_calls", "created_at": None, "text": "", "model": None,
+                "run_id": "r1", "calls": [{"call_id": "c0", "tool_id": "calliope/stamp", "arguments": {},
+                                           "app_view": False}]}
+        asked = {"sequence": 1, "kind": "user_message", "created_at": None, "text": "Stamp it", "answers_call": None,
+                 "answers_run": None, "attachments": []}
+        answer = {"sequence": 3, "kind": "assistant_final", "created_at": None, "text": "Stamped.", "model": None}
+        def events_of(items: list[dict[str, Any]]) -> Any:
+            def events(route: Any) -> None:
+                first_page = "after=0" in route.request.url
+                route.fulfill(json={"items": items if first_page else [], "last_sequence": len(items)})
+            return events
+
+        def detail_of(state: str) -> Any:
+            def detail(route: Any) -> None:
+                body = route.fetch().json()
+                body["job"].update(running=False, state=state, error=None, stop_requested=None)
+                body.update(continuable=False, waiting=None)
+                route.fulfill(json=body)
+            return detail
+
+        for items, state in (([asked, call], "recovery_required"), ([asked, call, answer], "completed")):
+            events, detail = events_of(items), detail_of(state)
+            page.route(re.compile(rf"/api/conversations/{cid}/events\?"), events)
+            page.route(re.compile(rf"/api/conversations/{cid}$"), detail)
+            page.locator(".conv-row").first.click()
+            expect(blocks).to_have_count(1, timeout=10000)
+            expect(blocks.first.locator(".work-count")).to_have_text("1 tool call · 1 without result")
+            expect(blocks.first.locator(".tool-row-summary")).to_have_text("… calliope/stamp · no result")
+            assert "not run" not in page.locator("#timeline").inner_text()
+            page.unroute(re.compile(rf"/api/conversations/{cid}/events\?"))
+            page.unroute(re.compile(rf"/api/conversations/{cid}$"))
         browser.close()
     return errors
 
