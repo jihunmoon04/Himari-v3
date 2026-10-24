@@ -19,6 +19,8 @@ jobs:
           node-version: "22"
       - name: UI async regressions
         run: node scripts/ui_state_smoke.mjs
+      - name: Assistant text formulas
+        run: node scripts/rich_text_smoke.mjs
       - name: Install dev tools
         run: pip install -e ".[dev]"
       - name: Import boundaries (V3-046)

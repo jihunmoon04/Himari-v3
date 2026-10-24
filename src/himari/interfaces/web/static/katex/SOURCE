@@ -1,0 +1,7 @@
+KaTeX 0.18.11 (MIT, see LICENSE), from the npm package katex@0.18.11
+(dist.integrity sha512-yvyz/2VMKqoho/35Hat5w37wIEdWJ5ElVMidTAlWrxr5uW4aBGsEpveTmKh18/zw08v/7lGswCPon4OhqmqrTA==).
+
+Copied unchanged: dist/katex.min.js, dist/katex.min.css and the twenty
+dist/fonts/*.woff2. The .woff and .ttf fonts the stylesheet also names are
+left out: every browser the UI supports takes the woff2 that comes first.
+The Web server serves only these files (STATIC_FILES in app.py).

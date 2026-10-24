@@ -232,6 +232,14 @@ def test_static_ui_and_security_headers(server: Server) -> None:
     for name in ("app.js", "app.css", "rich_text.js", "app_view.js", "appearance.js"):
         assert server.client.get(f"/assets/{name}").status_code == 200
     assert server.client.get("/assets/../app.py").status_code == 404
+    script = server.client.get("/assets/katex/katex.min.js")
+    assert script.status_code == 200 and script.headers["content-type"] == "text/javascript; charset=utf-8"
+    assert server.client.get("/assets/katex/katex.min.css").headers["content-type"] == "text/css; charset=utf-8"
+    font = server.client.get("/assets/katex/fonts/KaTeX_Main-Regular.woff2")
+    assert font.status_code == 200 and font.headers["content-type"] == "font/woff2" and font.content[:4] == b"wOF2"
+    for unlisted in ("katex/SOURCE", "katex/LICENSE", "katex/fonts/KaTeX_Main-Regular.ttf", "katex%2F..%2Fapp.js",
+                     "katex/fonts%2F..%2F..%2Fapp.js"):
+        assert server.client.get(f"/assets/{unlisted}").status_code == 404
     assert server.client.get("/assets/index.html").status_code == 404
     api = server.client.get("/api/session")
     assert api.headers["cache-control"] == "no-store" and api.json()["authenticated"] is False

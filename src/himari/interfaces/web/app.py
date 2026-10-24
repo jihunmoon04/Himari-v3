@@ -126,7 +126,14 @@ MAX_EVENTS_PAGE = 500
 SESSION_SECONDS = 7 * 24 * 3600
 FAILED_LOGIN_DELAY_SECONDS = 1.0
 STATIC_FILES = {"app.css": "text/css", "app.js": "text/javascript", "app_view.js": "text/javascript",
-                "rich_text.js": "text/javascript", "appearance.js": "text/javascript"}
+                "rich_text.js": "text/javascript", "appearance.js": "text/javascript",
+                # KaTeX for the formulas in assistant text, loaded by rich_text.js on the first one.
+                "katex/katex.min.js": "text/javascript", "katex/katex.min.css": "text/css"}
+KATEX_FONTS = ("AMS-Regular", "Caligraphic-Bold", "Caligraphic-Regular", "Fraktur-Bold", "Fraktur-Regular",
+               "Main-Bold", "Main-BoldItalic", "Main-Italic", "Main-Regular", "Math-BoldItalic", "Math-Italic",
+               "SansSerif-Bold", "SansSerif-Italic", "SansSerif-Regular", "Script-Regular", "Size1-Regular",
+               "Size2-Regular", "Size3-Regular", "Size4-Regular", "Typewriter-Regular")
+STATIC_FILES.update({f"katex/fonts/KaTeX_{name}.woff2": "font/woff2" for name in KATEX_FONTS})
 
 Opener = Callable[[], Awaitable[Application]]
 
@@ -975,12 +982,13 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
     async def index() -> Response:
         return Response((static / "index.html").read_bytes(), media_type="text/html; charset=utf-8")
 
-    @app.get("/assets/{name}")
+    @app.get("/assets/{name:path}")
     async def asset(name: str) -> Response:
-        media = STATIC_FILES.get(name)
+        media = STATIC_FILES.get(name)  # only the listed names: never a path into the package
         if media is None:
             raise ApiError(404, "not_found", "Not available.")
-        return Response((static / name).read_bytes(), media_type=f"{media}; charset=utf-8")
+        charset = "" if media.startswith("font/") else "; charset=utf-8"
+        return Response((static / name).read_bytes(), media_type=f"{media}{charset}")
 
     # Outer → inner: headers, Host, Origin, body size, routes.
     app.add_middleware(BodyLimitMiddleware, exempt=lambda method, path: method == "POST" and bool(UPLOAD_PATH.match(path)))

@@ -20,7 +20,7 @@
  */
 
 import { AppViews } from "/assets/app_view.js";
-import { renderAssistantText } from "/assets/rich_text.js";
+import { assistantTextLine, renderAssistantText } from "/assets/rich_text.js";
 
 const POLL_MS = 1000;
 const PAGE = 50;
@@ -745,7 +745,7 @@ function renderEvent(event) {
       const note = el("div", "work-progress");
       // The summary shows its first line as text: "**Plan:**" reads "Plan:".
       const first = event.text.split(/\r?\n/).find((line) => line.trim()) || "";
-      note.dataset.line = renderAssistantText(document, first).textContent.trim() || first.trim();
+      note.dataset.line = assistantTextLine(document, first).trim() || first.trim();
       note.append(renderAssistantText(document, event.text));
       inside.append(note);
     }

@@ -5,7 +5,8 @@ provider (a file write, an ask_user question, then a final answer that
 contains hostile markup), drives it with headless Chromium and checks:
 sign-in (wrong and right token), new chat, the tool row, the question
 panel, the answer, safe rich text (no script execution, no javascript:
-link), the context size in the conversation menu, "Compact now" and its
+link), formulas drawn by KaTeX (prices and a broken formula left as
+written), the context size in the conversation menu, "Compact now" and its
 divider, rename, reload keeping
 the HttpOnly session, the narrow layout and sign-out. A second server with
 a small context budget compacts a conversation and checks the timeline
@@ -67,7 +68,10 @@ from himari.provider.scripted import Measured, ScriptedAdapter  # noqa: E402
 
 PORT = 8799
 HOSTILE = ("# Plan for Seoul\n\n**Day 1**: walk <script>window.__pwned = 1</script> "
-           "[bad](javascript:window.__pwned=2) and [good](https://example.com)\n\n- palace\n- market")
+           "[bad](javascript:window.__pwned=2) and [good](https://example.com)\n\n- palace\n- market\n\n"
+           "Area $\\pi r_1^2$ with \\(x_1 + y_1\\), tickets $5 and $10, and\n$$\n\\frac{a}{b} = \\sum_{i=1}^{n} x_i\n$$\n"
+           "and $\\frac{a$ left as written. Too wide for a phone: "
+           "$\\left(\\sum_{i=1}^{n} x_i y_i + \\sum_{j=1}^{m} z_j w_j + \\sum_{k=1}^{p} u_k v_k + \\sum_{l=1}^{q} s_l t_l\\right)^2$.")
 
 
 def scripted() -> ScriptedAdapter:
@@ -138,6 +142,14 @@ def run(base: str, token: str, shots: str | None) -> list[str]:
         expect(page.locator("#question-panel")).to_be_hidden()
         assert final.locator("a").count() == 1 and final.locator("a").get_attribute("href") == "https://example.com/"
         assert "<script>" in final.inner_text() and page.evaluate("window.__pwned") is None
+        # Formulas: KaTeX (loaded with the first one) draws four, the prices stay text.
+        expect(final.locator(".rich-math .katex")).to_have_count(4, timeout=10000)
+        expect(final.locator(".rich-math.is-wide")).to_have_count(0)
+        expect(final.locator("div.rich-math-display .katex-display")).to_have_count(1)
+        expect(final.locator(".rich-math.is-refused")).to_have_text("$\\frac{a$")
+        assert "tickets $5 and $10, and" in final.inner_text()
+        assert page.evaluate("document.fonts.ready.then(() => document.fonts.check('16px KaTeX_Main'))")
+        assert final.locator("a").count() == 1
         if shots:
             page.screenshot(path=os.path.join(shots, "2-final.png"), full_page=True)
         page.click("#chat-menu-toggle")
@@ -163,6 +175,16 @@ def run(base: str, token: str, shots: str | None) -> list[str]:
         page.set_viewport_size({"width": 390, "height": 800})
         page.locator(".home-recent-card").click()
         expect(page.locator("#surface-chat")).to_be_visible()
+        # The formula too wide for the phone gets its own line and scrolls;
+        # the conversation itself does not scroll sideways.
+        wide = page.locator(".item-assistant .rich-math.is-wide")
+        expect(wide).to_have_count(1, timeout=10000)
+        assert wide.evaluate("n => n.scrollWidth > n.clientWidth")
+        assert page.evaluate("(t => t.scrollWidth <= t.clientWidth)(document.getElementById('timeline'))")
+        page.set_viewport_size({"width": 1280, "height": 860})
+        expect(wide).to_have_count(0)
+        page.set_viewport_size({"width": 390, "height": 800})
+        expect(wide).to_have_count(1)
         page.wait_for_timeout(400)
         if shots:
             page.screenshot(path=os.path.join(shots, "3-narrow.png"))

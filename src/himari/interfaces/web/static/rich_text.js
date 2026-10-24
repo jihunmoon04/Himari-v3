@@ -12,12 +12,24 @@
  *  in the text is just characters inside a text node, and there is still
  *  no `innerHTML`-style sink anywhere in this file.
  *
- *  The only attribute a model value can reach is a link `href`, and only
- *  after `new URL()` -- the browser's own parser, not a regex -- has proven
- *  the scheme is in SAFE_LINK_PROTOCOLS. Relative, protocol-relative,
- *  `javascript:`, `data:` and `vbscript:` targets stay plain text. No image
- *  is ever created (so rendering never fetches anything), and bare URLs
- *  are not auto-linked.
+ *  The only attribute this file sets from a model value is a link `href`,
+ *  and only after `new URL()` -- the browser's own parser, not a regex --
+ *  has proven the scheme is in SAFE_LINK_PROTOCOLS. Relative,
+ *  protocol-relative, `javascript:`, `data:` and `vbscript:` targets stay
+ *  plain text. No image is ever created (so rendering fetches nothing but
+ *  HIMARI's own KaTeX files), and bare URLs are not auto-linked.
+ *
+ *  Formulas -- `$...$` and `\(...\)` inline, `$$...$$` and `\[...\]`
+ *  displayed -- are cut out before any other inline form, so `_`, `*` and
+ *  the backslashes in TeX reach KaTeX as written. A formula KaTeX refuses
+ *  shows as the text it was. KaTeX builds the formula with DOM calls too
+ *  (never HTML) and with `trust: false`, so `\href`, `\url`,
+ *  `\includegraphics` and `\html...` make no link, image, id or data
+ *  attribute. What it does build from the TeX: text nodes (glyphs, and
+ *  the TeX itself in the MathML annotation), and `class`/`style` values
+ *  it computes, with sizes and colours it has parsed and checked
+ *  (scripts/rich_text_smoke.mjs lists what it may emit). The TeX is kept
+ *  in `mathSources` rather than a data attribute.
  *
  *  Used for ASSISTANT_MESSAGE / ASSISTANT_COMMENTARY / ASSISTANT_QUESTION
  *  timeline items only. User text, tool output, approval arguments, diffs
@@ -29,7 +41,112 @@ export const SAFE_LINK_PROTOCOLS = Object.freeze(["http:", "https:", "mailto:"])
 const RICH_TEXT_MAX_DEPTH = 12;
 const RICH_LINK_LABEL_MAX = 1000;
 const RICH_LINK_DEST_MAX = 2048;
-const RICH_ESCAPABLE = "\\`*_{}[]()#+-.!|~<>\"'";
+const RICH_ESCAPABLE = "\\`*_{}[]()#+-.!|~<>\"'$";
+
+/* -- formulas (KaTeX) ------------------------------------------------- */
+
+const KATEX_SCRIPT = "/assets/katex/katex.min.js";
+const KATEX_STYLE = "/assets/katex/katex.min.css";
+/** A longer formula is shown as written, never handed to KaTeX. */
+const MATH_MAX_CHARS = 4000;
+const KATEX_OPTIONS = Object.freeze({
+  throwOnError: true, // a refused formula falls back to its own text
+  trust: false,
+  strict: "ignore", // Korean or other text in math mode is not an error
+  maxSize: 20,
+  maxExpand: 500,
+  output: "htmlAndMathml",
+});
+
+/** Each formula node -> { tex, display, source }. A WeakMap rather than a
+ *  data attribute, so no attribute this file sets carries model text
+ *  except a link href. */
+const mathSources = new WeakMap();
+let katexLoad = null;
+let mathWidths = null;
+
+/** window.katex, loading the script and stylesheet with the first formula
+ *  (most answers have none). Resolves null if they cannot load; the
+ *  formulas then stay as written until the page is opened again. */
+function loadKatex(doc) {
+  const view = doc.defaultView;
+  if (view?.katex) return Promise.resolve(view.katex);
+  if (katexLoad === null) {
+    katexLoad = new Promise((resolve) => {
+      if (!doc.head) {
+        resolve(null);
+        return;
+      }
+      const style = doc.createElement("link");
+      style.rel = "stylesheet";
+      style.href = KATEX_STYLE;
+      const script = doc.createElement("script");
+      script.src = KATEX_SCRIPT;
+      script.onload = () => resolve(view?.katex ?? null);
+      script.onerror = () => resolve(null);
+      doc.head.append(style, script);
+    });
+  }
+  return katexLoad;
+}
+
+function paintMath(node, katex) {
+  const math = mathSources.get(node);
+  node.classList.remove("is-pending");
+  try {
+    katex.render(math.tex, node, { ...KATEX_OPTIONS, displayMode: math.display });
+  } catch (refused) {
+    node.textContent = math.source;
+    node.classList.add("is-refused");
+  }
+}
+
+/** An inline formula with a part wider than its line -- a group KaTeX
+ *  cannot break, such as a long `\left( ... \right)` -- is marked
+ *  `is-wide`: it then takes a line of its own and scrolls sideways, as a
+ *  displayed one does. Breakable formulas still wrap with the text. */
+function fitMath(node) {
+  const view = node.ownerDocument.defaultView;
+  const parts = node.querySelectorAll(".katex-html > .katex-base");
+  let line = node.parentElement;
+  while (line && view.getComputedStyle(line).display === "inline") line = line.parentElement;
+  if (!parts.length || !line) return;
+  const style = view.getComputedStyle(line);
+  const room = line.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
+  const widest = Math.max(...Array.from(parts, (part) => part.getBoundingClientRect().width));
+  node.classList.toggle("is-wide", widest > room + 0.5);
+}
+
+/** Fit an answer's inline formulas when it is first laid out and whenever
+ *  its width changes (window, sidebar). An answer taken off the page is
+ *  no longer watched. */
+function watchMathWidth(doc, container) {
+  const view = doc.defaultView;
+  if (!view?.ResizeObserver) return;
+  if (mathWidths === null) {
+    mathWidths = new view.ResizeObserver((entries) => {
+      for (const { target } of entries) {
+        if (!target.isConnected) {
+          mathWidths.unobserve(target);
+          continue;
+        }
+        for (const node of target.querySelectorAll(".rich-math:not(.rich-math-display)")) fitMath(node);
+      }
+    });
+  }
+  mathWidths.observe(container);
+}
+
+/** The text of `renderAssistantText(doc, text)` with each formula as it
+ *  was written: for a one-line summary, where KaTeX's glyphs and MathML
+ *  would read as noise. */
+export function assistantTextLine(doc, text) {
+  const node = renderAssistantText(doc, text);
+  for (const math of node.querySelectorAll(".rich-math")) {
+    math.replaceWith(doc.createTextNode(mathSources.get(math).source));
+  }
+  return node.textContent;
+}
 
 const RICH_FENCE = /^ {0,3}(`{3,}|~{3,})(.*)$/;
 const RICH_FENCE_CLOSE = /^ {0,3}(`{3,}|~{3,})[ \t]*$/;
@@ -99,9 +216,88 @@ export function renderAssistantText(doc, text) {
     return -1;
   }
 
-  /** Advance past an escape or a whole code span starting at `index`, so
-   *  closer searches never see delimiters that are really literal code. */
+  const opensMath = (source, index) =>
+    source[index] === "$" || (source[index] === "\\" && (source[index + 1] === "(" || source[index + 1] === "["));
+
+  /** Index of `closer` at or after `from`, stepping over `\x` pairs, or -1. */
+  function mathClose(source, from, closer, memo) {
+    const key = `math${closer}`;
+    if (memo[key] !== undefined && from >= memo[key]) return -1;
+    let index = from;
+    while (index < source.length) {
+      if (source.startsWith(closer, index)) return index;
+      index += source[index] === "\\" ? 2 : 1;
+    }
+    memo[key] = from;
+    return -1;
+  }
+
+  /** A formula opening at `index` (see `opensMath`), or null.
+   *
+   *  `$` follows Pandoc: the opening one has a non-space on its right, the
+   *  closing one a non-space on its left and no digit after it, so "$5 and
+   *  $10" and "$5-$10" stay prices. The first `$` after the opening one has
+   *  to be the closing one, so "$5, or $x$" is a price and then x. */
+  function matchMath(source, index, memo) {
+    const key = `math@${index}`;
+    if (memo[key] === undefined) memo[key] = findMath(source, index, memo);
+    return memo[key];
+  }
+
+  function findMath(source, index, memo) {
+    const pairs = [["$$", "$$", true], ["\\[", "\\]", true], ["\\(", "\\)", false]];
+    for (const [open, closer, display] of pairs) {
+      if (!source.startsWith(open, index)) continue;
+      const close = mathClose(source, index + open.length, closer, memo);
+      if (close < 0) return null;
+      const tex = source.slice(index + open.length, close);
+      if (!tex.trim()) return null;
+      const end = close + closer.length;
+      return { tex, display, source: source.slice(index, end), end };
+    }
+    if (source[index] !== "$" || isSpace(source[index + 1])) return null;
+    let cursor = index + 1;
+    while (cursor < source.length && source[cursor] !== "$") cursor += source[cursor] === "\\" ? 2 : 1;
+    if (cursor >= source.length || isSpace(source[cursor - 1]) || /[0-9]/.test(source[cursor + 1] ?? "")) {
+      return null;
+    }
+    return { tex: source.slice(index + 1, cursor), display: false, source: source.slice(index, cursor + 1), end: cursor + 1 };
+  }
+
+  let inlineMath = false;
+
+  /** The node for one formula: its own text until KaTeX is there. */
+  function appendMath(parent, math, tag = "span") {
+    const node = el(tag, math.display ? "rich-math rich-math-display" : "rich-math");
+    mathSources.set(node, math);
+    node.append(textNode(math.source));
+    parent.append(node);
+    if (math.tex.length > MATH_MAX_CHARS) {
+      node.classList.add("is-refused");
+      return;
+    }
+    if (!math.display) inlineMath = true;
+    const katex = doc.defaultView?.katex;
+    if (katex) {
+      paintMath(node, katex);
+      return;
+    }
+    node.classList.add("is-pending");
+    loadKatex(doc).then((loaded) => {
+      if (loaded) paintMath(node, loaded);
+      else node.classList.remove("is-pending");
+      if (loaded && !math.display && node.isConnected) fitMath(node);
+    });
+  }
+
+  /** Advance past an escape, a whole code span or a whole formula starting
+   *  at `index`, so closer searches never see delimiters that are really
+   *  literal code or TeX. */
   function skipLiteral(source, index, memo) {
+    if (opensMath(source, index)) {
+      const math = matchMath(source, index, memo);
+      if (math) return math.end;
+    }
     if (source[index] === "\\") return index + 2;
     if (source[index] === "`") {
       const run = runLength(source, index, "`");
@@ -234,6 +430,15 @@ export function renderAssistantText(doc, text) {
     let index = 0;
     while (index < source.length) {
       const character = source[index];
+      if (opensMath(source, index)) {
+        const math = matchMath(source, index, memo);
+        if (math) {
+          flush();
+          appendMath(parent, math);
+          index = math.end;
+          continue;
+        }
+      }
       if (character === "\\" && RICH_ESCAPABLE.includes(source[index + 1] ?? "\n")) {
         buffer += source[index + 1];
         index += 2;
@@ -304,6 +509,42 @@ export function renderAssistantText(doc, text) {
 
   /* -- blocks -------------------------------------------------------- */
 
+  /** A displayed formula on lines of its own -- a line starting with `$$`
+   *  or `\\[` up to the line ending with its closer, with no blank line
+   *  between -- or null. Its lines never reach the block rules, so TeX
+   *  lines that start with `-` or `|` stay TeX. `misses` keeps, per closer,
+   *  the lines a search already ran through without finding it. */
+  function mathBlock(lines, index, misses) {
+    const first = lines[index].trimStart();
+    const opener = first.startsWith("$$") ? "$$" : first.startsWith("\\[") ? "\\[" : null;
+    if (opener === null) return null;
+    const closer = opener === "$$" ? "$$" : "\\]";
+    const miss = misses[closer];
+    if (miss && index >= miss.from && index < miss.to) return null;
+    const body = [];
+    let rest = first.slice(opener.length);
+    let cursor = index;
+    for (; cursor < lines.length; cursor += 1) {
+      if (cursor > index) {
+        rest = lines[cursor];
+        if (isBlank(rest)) break;
+      }
+      let close = 0;
+      while (close < rest.length && !rest.startsWith(closer, close)) close += rest[close] === "\\" ? 2 : 1;
+      if (close >= rest.length) {
+        body.push(rest);
+        continue;
+      }
+      if (!isBlank(rest.slice(close + closer.length))) return null;
+      body.push(rest.slice(0, close));
+      const tex = body.join("\n");
+      if (!tex.trim()) return null;
+      return { tex, display: true, source: `${opener}${tex}${closer}`, end: cursor + 1 };
+    }
+    misses[closer] = { from: index, to: cursor };
+    return null;
+  }
+
   const listKind = (marker) => (/\d/.test(marker[0]) ? `ol${marker.slice(-1)}` : `ul${marker}`);
 
   function startsBlock(line, next) {
@@ -319,14 +560,21 @@ export function renderAssistantText(doc, text) {
     return isTableStart(line, next);
   }
 
+  /** A formula is kept whole and as written: `$P(A|B)$` stays one cell, and
+   *  the `\|` in `$\|x\|$` is TeX's norm, not an escaped column bar. */
   function splitRow(line) {
     let body = line.trim();
     if (body.startsWith("|")) body = body.slice(1);
     if (body.endsWith("|") && !body.endsWith("\\|")) body = body.slice(0, -1);
     const cells = [];
+    const memo = Object.create(null);
     let current = "";
     for (let index = 0; index < body.length; index += 1) {
-      if (body[index] === "\\" && body[index + 1] === "|") {
+      const math = opensMath(body, index) ? matchMath(body, index, memo) : null;
+      if (math) {
+        current += math.source;
+        index = math.end - 1;
+      } else if (body[index] === "\\" && body[index + 1] === "|") {
         current += "|";
         index += 1;
       } else if (body[index] === "|") {
@@ -443,6 +691,7 @@ export function renderAssistantText(doc, text) {
       parent.append(paragraph);
       return;
     }
+    const misses = Object.create(null);
     let index = 0;
     while (index < lines.length) {
       const line = lines[index];
@@ -470,6 +719,13 @@ export function renderAssistantText(doc, text) {
         code.append(textNode(body.join("\n")));
         pre.append(code);
         parent.append(pre);
+        continue;
+      }
+
+      const formula = mathBlock(lines, index, misses);
+      if (formula) {
+        appendMath(parent, formula, "div");
+        index = formula.end;
         continue;
       }
 
@@ -513,7 +769,8 @@ export function renderAssistantText(doc, text) {
 
       const paragraph = [line.trim()];
       index += 1;
-      while (index < lines.length && !isBlank(lines[index]) && !startsBlock(lines[index], lines[index + 1])) {
+      while (index < lines.length && !isBlank(lines[index]) && !startsBlock(lines[index], lines[index + 1]) &&
+             !mathBlock(lines, index, misses)) {
         paragraph.push(lines[index].trim());
         index += 1;
       }
@@ -529,5 +786,6 @@ export function renderAssistantText(doc, text) {
     .split("\n")
     .map((line) => line.replace(/^\t+/, (tabs) => "    ".repeat(tabs.length)));
   appendBlocks(container, lines, 0);
+  if (inlineMath) watchMathWidth(doc, container);
   return container;
 }

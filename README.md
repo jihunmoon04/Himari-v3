@@ -89,6 +89,7 @@ HIMARI_DATA_ROOT=~/.himari python -m himari.interfaces.web --env-file .env
 - 브라우저에서 `http://127.0.0.1:8765/`를 열고 `~/.himari/control/operator.secret`의 토큰으로 로그인합니다.
 - Web 사이드바의 **Settings → Appearance**에서 **Classic · 담백한**(흰색·차콜·고딕체)과 **Warm · 차분한**(미색·테라코타·답변 명조체)을 즉시 전환합니다. 선택은 이 브라우저에 저장하며, 새로고침 후에도 유지됩니다. 브라우저 저장소를 사용할 수 없으면 현재 페이지만 적용하고 저장하지 못했다는 안내를 표시합니다. **Instructions**와 **Sign out**도 Settings에 있습니다. 사이드바 하단 상태를 펼치면 모델·명령 실행 상태를 확인합니다.
 - 홈 입력창에서 바로 질문하거나 파일을 첨부할 수 있습니다(첫 전송·첨부 때 대화 생성). 모델·Reasoning 선택은 대화 상단, 이름 변경·휴지통 이동은 사이드바 항목별 **⋯**에서도 제공합니다. 이미지 썸네일은 확대 보기를 열며 원본 다운로드는 별도 파일 카드에서 합니다.
+- 답변의 수식(`$…$`·`\(…\)` 인라인, `$$…$$`·`\[…\]` 블록)은 KaTeX로 그립니다. KaTeX(0.18.11, MIT)는 서버가 직접 서빙하고(`static/katex`, 외부 CDN 없음) 첫 수식이 나올 때만 불러옵니다. `$5 and $10` 같은 금액과 코드 안의 `$`는 글자 그대로이고, KaTeX가 거부한 수식은 쓰인 그대로 보입니다.
 - 서버는 평문 HTTP라서 loopback 주소(`127.0.0.1`·`::1`·`localhost`)에만 바인딩합니다. 다른 기기에서 쓰려면 같은 기기의 TLS reverse proxy 뒤에 두고 `HIMARI_WEB_ALLOWED_HOSTS=<공개 이름>`·`HIMARI_WEB_ALLOWED_ORIGINS=https://<공개 이름>`을 지정하세요. 외부 주소 바인딩이나 다른 기기용 평문 `http://` Origin은 시작 단계에서 거부됩니다(토큰 보호).
 
 ### MCP 서버 연결 (V3-P53)
