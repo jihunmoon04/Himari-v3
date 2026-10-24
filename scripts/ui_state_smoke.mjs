@@ -108,4 +108,33 @@ for (const scenario of ["same", "edited", "navigated", "failed", "stale-failure"
   assert.equal(p.node("composer-text").value, "next draft");
 }
 
-console.log("UI async regression checks: 10 passed");
+// Enter right after New chat waits for the new conversation and goes there,
+// once even when pressed twice; the one before never gets it.
+{
+  const p = page(), created = deferred();
+  p.context.created = created.promise;
+  p.node("composer-text").value = "right after new chat";
+  p.run("app.conversationId = 'before'; var sent = []; mayLeave = async () => true; createConversation = async () => { await created; app.conversationId = 'new'; return true; }; api = async (method, path, body) => { sent.push([path, body.text]); };");
+  p.run("newConversation()");
+  const first = p.run("sendMessage({ preventDefault() {} })");
+  const second = p.run("sendMessage({ preventDefault() {} })");
+  await second;
+  assert.equal(p.run("sent.length"), 0);
+  created.resolve();
+  await first;
+  assert.equal(p.run("JSON.stringify(sent)"), JSON.stringify([["/api/conversations/new/messages", "right after new chat"]]));
+  assert.equal(p.run("app.sendWaiting"), false);
+}
+
+// When that creation fails, or the user goes elsewhere meanwhile, nothing is sent.
+{
+  const p = page();
+  p.node("composer-text").value = "kept";
+  p.run("app.conversationId = 'before'; var sent = 0; mayLeave = async () => true; createConversation = async () => false; api = async () => { sent++; };");
+  p.run("newConversation()");
+  await p.run("sendMessage({ preventDefault() {} })");
+  assert.equal(p.run("sent"), 0);
+  assert.equal(p.node("composer-text").value, "kept");
+}
+
+console.log("UI async regression checks: 12 passed");

@@ -119,8 +119,8 @@ def serve(root: str, port: int = PORT, provider: ScriptedAdapter | None = None,
 
 def new_chat(page: Any, button: str = "#home-new-chat") -> None:
     """Start a conversation and wait until it is open: the page focuses its
-    composer last. A message sent while it is still being created is not
-    sent (the draft stays in the box), which is how a fast test lost one."""
+    composer last. (A message sent while it is being created waits for it;
+    run_trash checks that.)"""
     page.click(button)
     expect(page.locator("#composer-text")).to_be_focused(timeout=10000)
 
@@ -407,10 +407,28 @@ def run_trash(base: str, token: str, shots: str | None, root: str) -> list[str]:
         expect(page.locator("#status-bar")).to_have_text("Deleted “hello” for good.")
         expect(page.locator("#trash-empty")).to_be_visible()
 
-        # Trashed elsewhere while this page follows its work: it says so and goes home.
-        new_chat(page, "#nav-new-chat")
+        # Enter while New chat is still creating the conversation: the message
+        # waits and goes to the new one, once even when Enter is pressed twice.
+        new_chat(page, "#nav-new-chat")  # in a chat, as the user is when pressing New chat
+        held: list[Any] = []
+        page.route("**/api/conversations",
+                   lambda route: held.append(route) if route.request.method == "POST" else route.continue_())
+        page.click("#nav-new-chat")
+        for _ in range(100):
+            if held:
+                break
+            page.wait_for_timeout(50)
+        assert held
         page.fill("#composer-text", "second")
         page.press("#composer-text", "Enter")
+        page.press("#composer-text", "Enter")
+        held[0].continue_()
+        expect(page.locator(".item-user")).to_have_count(1, timeout=10000)
+        expect(page.locator(".item-user")).to_contain_text("second")
+        expect(page.locator("#composer-text")).to_have_value("")
+        page.unroute("**/api/conversations")
+
+        # Trashed elsewhere while this page follows its work: it says so and goes home.
         expect(page.locator("#composer-hint")).to_contain_text("HIMARI is working", timeout=5000)
         conversation_id = page.locator(".conv-row.is-selected").get_attribute("data-id")
         assert conversation_id
