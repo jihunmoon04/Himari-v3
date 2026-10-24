@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
@@ -289,3 +290,102 @@ def test_begin_shutdown_sets_the_closing_event(tmp_path: Path) -> None:
                 break
             asyncio.run(asyncio.sleep(0.01))
         assert app.state.closing.is_set()  # type: ignore[attr-defined]
+
+
+def test_a_slot_is_taken_with_its_check_and_given_back_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    # PR #83 review B1: requests arriving together each take a slot before any stream starts.
+    monkeypatch.setattr(live, "PER_PRINCIPAL", 2)
+    slots = live.Slots()
+    first, second = slots.take("me"), slots.take("me")
+    assert first is not None and second is not None
+    assert slots.take("me") is None and slots.take("you") is not None  # per principal
+    first()
+    first()  # given back once, however often it is released
+    assert slots.open("me") == 1
+    assert slots.take("me") is not None and slots.take("me") is None
+
+
+def test_an_open_stream_holds_its_slot_until_it_ends(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Over a real server: TestClient returns a response only once the app is done with it.
+    uvicorn = pytest.importorskip("uvicorn")
+    import httpx
+
+    from himari.provider.scripted import StreamCut
+
+    monkeypatch.setattr(web, "FAILED_LOGIN_DELAY_SECONDS", 0)
+    monkeypatch.setattr(live, "PER_PRINCIPAL", 1)
+    provider = ScriptedAdapter([StreamCut(("held ",), asyncio.Event())], streaming=True)
+    holder = Server(tmp_path, provider)  # its opener and config; served by uvicorn below
+    config = WebConfig(host="127.0.0.1", port=8765, allowed_hosts=frozenset({"127.0.0.1"}),
+                       allowed_origins=frozenset({ORIGIN}), secure_cookie=False,
+                       data_root=str(tmp_path / "data"), model_id="scripted-model", reasoning_effort=None,
+                       sandbox=False)
+
+    async def opener() -> Application:
+        holder.application = await Application.open(tmp_path / "data", provider, model_id="scripted-model",
+                                                    sandbox=False, cleanup_seconds=None)
+        return holder.application
+
+    server = uvicorn.Server(uvicorn.Config(web.create_app(config, opener), host="127.0.0.1", port=0,
+                                           log_level="warning"))
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+    for _ in range(200):
+        if server.started:
+            break
+        time.sleep(0.02)
+    port = server.servers[0].sockets[0].getsockname()[1]
+    try:
+        with httpx.Client(base_url=f"http://127.0.0.1:{port}", timeout=10) as client:
+            assert holder.application is not None
+            token = holder.application.operator_secret
+            assert client.post("/api/session", json={"token": token}, headers=SEND).status_code == 204
+            cid = client.post("/api/conversations", json={}, headers=SEND).json()["id"]
+            assert client.post(f"/api/conversations/{cid}/messages", json={"text": "go"}, headers=SEND).status_code == 202
+            seen: list[str] = []
+            with client.stream("GET", f"/api/conversations/{cid}/live") as held:
+                lines = held.iter_lines()
+                for line in lines:
+                    if line.startswith("event: "):
+                        seen.append(line[len("event: "):])
+                        if line == "event: snapshot":
+                            break
+                assert client.get(f"/api/conversations/{cid}/live").status_code == 429  # its one slot is held
+                assert client.post(f"/api/conversations/{cid}/cancel", headers=SEND).status_code == 202
+                seen += [line[len("event: "):] for line in lines if line.startswith("event: ")]
+            assert seen[-1] == "done"
+            again = client.get(f"/api/conversations/{cid}/live")  # the slot came back
+            assert again.status_code == 200 and "event: done" in again.text
+    finally:
+        server.should_exit = True
+        thread.join(10)
+
+
+def test_requests_arriving_together_cannot_pass_the_limit(streaming_server: Server,
+                                                         monkeypatch: pytest.MonkeyPatch) -> None:
+    # PR #83 review B1: two requests whose responses have not started yet. Counting when a
+    # stream began let both through; the slot is now taken with the check.
+    from starlette.requests import Request
+
+    from himari.bootstrap.operator import OPERATOR
+
+    server = streaming_server
+    server.sign_in()
+    cid = server.post("/api/conversations").json()["id"]
+    monkeypatch.setattr(live, "PER_PRINCIPAL", 1)
+    app = server.client.app
+    endpoint = next(r.endpoint for r in app.routes  # type: ignore[attr-defined]
+                    if getattr(r, "path", "") == "/api/conversations/{conversation_id}/live")
+    request = Request({"type": "http", "app": app, "headers": [], "method": "GET", "path": "/"})
+
+    async def together() -> tuple[Any, int | None]:
+        first = await endpoint(cid, request, who=OPERATOR)  # not started: no stream has begun
+        try:
+            await endpoint(cid, request, who=OPERATOR)
+        except web.ApiError as error:
+            return first, error.status
+        return first, None
+
+    first, refused = server.client.portal.call(together)  # type: ignore[union-attr]
+    assert refused == 429
+    first._release()  # it never ran: give its slot back by hand

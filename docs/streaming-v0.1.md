@@ -443,6 +443,12 @@ CLI는 Web 서버의 클라이언트다(V3-P47). 이 패킷에서는 바꾸지 �
   - 대화 읽기로 권한을 먼저 확인한다(남의 대화는 404).
   - 주체당 8개(`live.PER_PRINCIPAL`), 넘으면 429 `too_many_streams`.
   - `X-Accel-Buffering: no`. `no-store`와 `nosniff`는 기존 미들웨어가 붙인다.
+- **PR #83 검수 B1:** 연결 수 한도를 검사하는 같은 동기 단계에서 슬롯을 잡는다(`live.Slots.take`).
+  - 전에는 스트림 제너레이터가 시작될 때 셌다. 그래서 응답이 아직 시작되지 않은 요청들이 모두 한도를 통과할 수 있었다.
+  - 반납은 응답의 `__call__`을 감싼 `finally`에서 한 번만 한다(`_LiveResponse`). 끝남, 취소, 클라이언트 연결 끊김에서 모두 반납하고, 본문이 시작되지 않았어도 반납한다.
+  - 테스트:
+    - 시작하지 않은 응답 두 개로 경쟁을 재현한다. 예전 코드에서는 실패한다.
+    - 실제 uvicorn 서버에서 열린 스트림이 슬롯을 쥐고 있다가 끝나면 돌려준다. TestClient는 앱이 응답을 다 끝내야 돌려주므로 열린 스트림을 볼 수 없다.
 - `LiveOutput.chars`와 `live_output(text=False)`: 조각마다 깨어날 때 글 전체를 합치지 않는다. `snapshot`에만 전체 글을 쓴다.
 - 최종 답 Event의 화면용 값에 `run_id`를 더했다. 쓰는 중 항목이 어느 Event로 바뀌는지 안다.
 
@@ -473,7 +479,8 @@ CLI는 Web 서버의 클라이언트다(V3-P47). 이 패킷에서는 바꾸지 �
 - CSS 토큰: `:root`에 `--thinking-style: sun`과 `--thinking-shine`. `warm` 테마는 빛 색만 다르다. 어두운 테마를 더할 때 `--thinking-style: hidamari`를 적는다.
 
 **테스트**
-- 서버 10개:
+- 서버 13개:
+  - 슬롯 3개(검수 B1)
   - 스트림 7개(가짜 상태 소스): 합쳐진 깨우기, Run 바뀜, 끝난 뒤 연결, 상태 없음, keep-alive, 시간 상한, 종료 신호
   - 경로 3개: 권한·`run_id`, 429, `begin_shutdown`
 - Node `scripts/live_smoke.mjs` 8개(CI의 static-checks에 추가): 상태 갱신, 단어·기호·시간, 흐름에서 Event로 바뀜, 멈춘 항목이 자리를 지킴, 아무것도 쓰지 않은 Run, 테마 전환, reduced motion, 거부된 연결.

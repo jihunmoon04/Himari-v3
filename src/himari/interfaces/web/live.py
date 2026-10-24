@@ -38,6 +38,37 @@ PER_PRINCIPAL = 8  # open streams of one principal
 RETRY_MS = 1000  # how soon a browser reconnects after a stream ends without ``done``
 
 
+class Slots:
+    """Open live streams per principal, at most ``PER_PRINCIPAL``. A slot is
+    taken in the same synchronous step as the check, before the response
+    starts (PR #83 review B1: counting when the stream began let requests
+    arriving together all pass), and given back exactly once."""
+
+    def __init__(self) -> None:
+        self._open: dict[Any, int] = {}
+
+    def take(self, who: Any) -> Callable[[], None] | None:
+        """A release for a new slot of ``who``; None when all are taken."""
+        if self._open.get(who, 0) >= PER_PRINCIPAL:
+            return None
+        self._open[who] = self._open.get(who, 0) + 1
+        released = False
+
+        def release() -> None:
+            nonlocal released
+            if released:
+                return
+            released = True
+            self._open[who] -= 1
+            if not self._open[who]:
+                del self._open[who]
+
+        return release
+
+    def open(self, who: Any) -> int:
+        return self._open.get(who, 0)
+
+
 class LiveSource(Protocol):
     """The Runner's live output (control.runner.BackgroundRunner)."""
 

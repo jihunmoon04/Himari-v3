@@ -535,6 +535,21 @@ PROMPT_REFUSAL_STATUS = {"unknown_prompt": 404, "source_disabled": 409, "invalid
 # --- the application ---------------------------------------------------------------------------
 
 
+class _LiveResponse(StreamingResponse):
+    """A live stream that gives its slot back however it ends — finished,
+    cancelled, the client gone — even when its body never started."""
+
+    def __init__(self, content: AsyncIterator[str], release: Callable[[], None], **options: Any) -> None:
+        super().__init__(content, **options)
+        self._release = release
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            self._release()
+
+
 def begin_shutdown(app: FastAPI) -> None:
     """The server got its exit signal: end the live streams now, so that
     uvicorn, which waits for open responses before it stops the application,
@@ -550,7 +565,7 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
     sessions = Sessions()
     signer = SandboxSigner() if signer is None else signer
     closing = asyncio.Event()  # set as the server begins to shut down: the live streams end
-    live_streams: dict[PrincipalId, int] = {}  # open live streams of each principal
+    live_slots = live.Slots()  # open live streams of each principal
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -845,20 +860,11 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
         """What the running job's model is writing, as it writes (V3-P73 §6.1)."""
         application, scope = himari(request), scope_of(conversation_id, who)
         await application.data.read_conversation(scope)  # authorizes first: another's is 404
-        if live_streams.get(who, 0) >= live.PER_PRINCIPAL:
+        release = live_slots.take(who)  # checked and taken in one step (PR #83 review B1)
+        if release is None:
             raise ApiError(429, "too_many_streams", "Too many live views are open; close one and try again.")
-
-        async def frames() -> AsyncIterator[str]:
-            live_streams[who] = live_streams.get(who, 0) + 1
-            try:
-                async for frame in live.stream(application.runner, scope, closing):
-                    yield frame
-            finally:
-                live_streams[who] -= 1
-                if not live_streams[who]:
-                    del live_streams[who]
-
-        return StreamingResponse(frames(), media_type="text/event-stream", headers={"X-Accel-Buffering": "no"})
+        return _LiveResponse(live.stream(application.runner, scope, closing), release,
+                             media_type="text/event-stream", headers={"X-Accel-Buffering": "no"})
 
     @app.get("/api/conversations/{conversation_id}/calls/{run_id}/{call_id}/app")
     async def read_app_view(conversation_id: str, run_id: str, call_id: str, request: Request, origin: str,
