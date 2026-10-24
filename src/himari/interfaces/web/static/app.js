@@ -100,6 +100,7 @@ async function api(method, path, body) {
 
 const app = {
   startingConversation: null,
+  sendWaiting: false, // a send waits for the conversation being created
   conversationId: null,
   generation: 0,
   lastSequence: 0,
@@ -1402,12 +1403,19 @@ async function openConversation(id) {
 
 async function sendMessage(event) {
   event.preventDefault();
-  if (app.startingConversation) return;
   const box = $("composer-text");
   const draft = box.value;
   const text = draft.trim();
-  if (app.conversationId === null && !$("surface-home").hidden && text) {
-    if (!(await newConversation())) return;
+  if (app.startingConversation || (app.conversationId === null && !$("surface-home").hidden && text)) {
+    // Sent while a conversation is being created (from Home, or right after
+    // New chat): it goes to that one once it opens, not to the one before.
+    // One send waits; a second Enter meanwhile is the same message.
+    if (app.sendWaiting) return;
+    app.sendWaiting = true;
+    let opened;
+    try { opened = await newConversation(); }
+    finally { app.sendWaiting = false; }
+    if (!opened) return; // it failed, or the user went elsewhere meanwhile
   }
   const ready = app.attachments.filter((a) => a.state === "ready");
   if ((!text && !ready.length) || app.sending || uploading() || app.conversationId === null) return;
