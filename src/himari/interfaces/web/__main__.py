@@ -90,8 +90,8 @@ def main(argv: list[str] | None = None) -> int:
             print(f"HIMARI web: model {model.model_id}{' (default)' if model.is_default else ''}{effort}",
                   file=sys.stderr, flush=True)
         if not application.memory_enabled:  # V3-P71 §9
-            print("HIMARI web: memory is off (HIMARI_MEMORY=0): no notes are saved or given to models",
-                  file=sys.stderr, flush=True)
+            print("HIMARI web: memory is off (HIMARI_MEMORY=0): models neither save nor see notes; "
+                  "you can still manage them", file=sys.stderr, flush=True)
         if not application.images_available:  # V3-P67 §3.1: fail-closed, said once at startup
             print("HIMARI web: images are not shown to models on this server (the image sandbox is unavailable): "
                   "an image is attached as a file line only", file=sys.stderr, flush=True)

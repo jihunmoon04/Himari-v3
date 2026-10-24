@@ -378,7 +378,7 @@ D1~D5는 위 머리말대로 정해졌다(2026-10-24). 아래는 이 문서에�
 - Driver는 턴을 시작할 때 지시문과 기억을 함께 읽어(`_UserContext`) 그 턴 내내 쓴다. 다음 턴의 크기 표시는 최신 값을 읽는다.
 
 **Bootstrap·Web·CLI**
-- `Application.open(memory=True)`, `HIMARI_MEMORY=0`이면 끈다. 꺼져 있으면 시작할 때 한 줄로 알린다. `/api/server`의 `memory`. 꺼져 있어도 Web API·CLI의 기억 관리는 그대로 된다(§9).
+- `Application.open(memory=True)`, `HIMARI_MEMORY=0`이면 끈다. 꺼져 있으면 시작할 때 한 줄로 알린다. `/api/server`의 `memory`. 꺼져 있어도 Web API·CLI의 기억 관리는 그대로 된다(§9). 시작 줄과 `himari memory`의 안내도 "모델이 저장하지도 보지도 않는다, 관리는 된다"로 맞췄다(재검수 C1).
 - `GET/POST /api/memories`, `PUT/DELETE /api/memories/{id}`(§7.2). 출처 대화가 휴지통에 있으면 `in_trash`. delete notice의 `memory_count`.
 - CLI `himari memory [add|edit|rm]`, `himari status`의 `memory: on|off`, 삭제 확인의 기억 개수. 대화 출력에서 `memory_save`·`memory_forget`은 호출 줄 없이 `  ◆ remembered m15: …`처럼 결과와 함께 한 줄로 찍는다.
 - 빠듯한 문맥 예산(2,800 토큰)으로 압축을 시험하던 테스트 넷은 기억 Tool이 없는 프롬프트에 맞춰져 있어 `memory=False`로 연다.

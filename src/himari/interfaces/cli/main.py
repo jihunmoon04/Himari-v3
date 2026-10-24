@@ -999,7 +999,7 @@ def cmd_memory(session: Session, args: argparse.Namespace, read: Callable[[str],
         listing = session.client.get("/api/memories")
         notes = listing.get("memories") or []
         if not listing.get("enabled"):
-            session.note("(memory is off on this server: notes are kept but not saved or used)")
+            session.note("(memory is off on this server: HIMARI neither saves nor uses notes; you can still manage them)")
         if not notes:
             session.note("(no notes)")
             return EXIT_OK
