@@ -12,19 +12,24 @@
  *  in the text is just characters inside a text node, and there is still
  *  no `innerHTML`-style sink anywhere in this file.
  *
- *  The only attribute a model value can reach is a link `href`, and only
- *  after `new URL()` -- the browser's own parser, not a regex -- has proven
- *  the scheme is in SAFE_LINK_PROTOCOLS. Relative, protocol-relative,
- *  `javascript:`, `data:` and `vbscript:` targets stay plain text. No image
- *  is ever created (so rendering never fetches anything), and bare URLs
- *  are not auto-linked.
+ *  The only attribute this file sets from a model value is a link `href`,
+ *  and only after `new URL()` -- the browser's own parser, not a regex --
+ *  has proven the scheme is in SAFE_LINK_PROTOCOLS. Relative,
+ *  protocol-relative, `javascript:`, `data:` and `vbscript:` targets stay
+ *  plain text. No image is ever created (so rendering fetches nothing but
+ *  HIMARI's own KaTeX files), and bare URLs are not auto-linked.
  *
  *  Formulas -- `$...$` and `\(...\)` inline, `$$...$$` and `\[...\]`
  *  displayed -- are cut out before any other inline form, so `_`, `*` and
- *  the backslashes in TeX reach KaTeX as written. KaTeX builds the formula
- *  with DOM calls too (never HTML), with `trust: false` (no `\href`,
- *  `\url` or `\html...`), and the TeX itself is kept off the DOM in
- *  `mathSources`. A formula KaTeX refuses shows as the text it was.
+ *  the backslashes in TeX reach KaTeX as written. A formula KaTeX refuses
+ *  shows as the text it was. KaTeX builds the formula with DOM calls too
+ *  (never HTML) and with `trust: false`, so `\href`, `\url`,
+ *  `\includegraphics` and `\html...` make no link, image, id or data
+ *  attribute. What it does build from the TeX: text nodes (glyphs, and
+ *  the TeX itself in the MathML annotation), and `class`/`style` values
+ *  it computes, with sizes and colours it has parsed and checked
+ *  (scripts/rich_text_smoke.mjs lists what it may emit). The TeX is kept
+ *  in `mathSources` rather than a data attribute.
  *
  *  Used for ASSISTANT_MESSAGE / ASSISTANT_COMMENTARY / ASSISTANT_QUESTION
  *  timeline items only. User text, tool output, approval arguments, diffs
@@ -54,10 +59,11 @@ const KATEX_OPTIONS = Object.freeze({
 });
 
 /** Each formula node -> { tex, display, source }. A WeakMap rather than a
- *  data attribute, so the only attribute model text can reach is still a
- *  link href. */
+ *  data attribute, so no attribute this file sets carries model text
+ *  except a link href. */
 const mathSources = new WeakMap();
 let katexLoad = null;
+let mathWidths = null;
 
 /** window.katex, loading the script and stylesheet with the first formula
  *  (most answers have none). Resolves null if they cannot load; the
@@ -93,6 +99,42 @@ function paintMath(node, katex) {
     node.textContent = math.source;
     node.classList.add("is-refused");
   }
+}
+
+/** An inline formula with a part wider than its line -- a group KaTeX
+ *  cannot break, such as a long `\left( ... \right)` -- is marked
+ *  `is-wide`: it then takes a line of its own and scrolls sideways, as a
+ *  displayed one does. Breakable formulas still wrap with the text. */
+function fitMath(node) {
+  const view = node.ownerDocument.defaultView;
+  const parts = node.querySelectorAll(".katex-html > .katex-base");
+  let line = node.parentElement;
+  while (line && view.getComputedStyle(line).display === "inline") line = line.parentElement;
+  if (!parts.length || !line) return;
+  const style = view.getComputedStyle(line);
+  const room = line.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
+  const widest = Math.max(...Array.from(parts, (part) => part.getBoundingClientRect().width));
+  node.classList.toggle("is-wide", widest > room + 0.5);
+}
+
+/** Fit an answer's inline formulas when it is first laid out and whenever
+ *  its width changes (window, sidebar). An answer taken off the page is
+ *  no longer watched. */
+function watchMathWidth(doc, container) {
+  const view = doc.defaultView;
+  if (!view?.ResizeObserver) return;
+  if (mathWidths === null) {
+    mathWidths = new view.ResizeObserver((entries) => {
+      for (const { target } of entries) {
+        if (!target.isConnected) {
+          mathWidths.unobserve(target);
+          continue;
+        }
+        for (const node of target.querySelectorAll(".rich-math:not(.rich-math-display)")) fitMath(node);
+      }
+    });
+  }
+  mathWidths.observe(container);
 }
 
 /** The text of `renderAssistantText(doc, text)` with each formula as it
@@ -222,6 +264,8 @@ export function renderAssistantText(doc, text) {
     return { tex: source.slice(index + 1, cursor), display: false, source: source.slice(index, cursor + 1), end: cursor + 1 };
   }
 
+  let inlineMath = false;
+
   /** The node for one formula: its own text until KaTeX is there. */
   function appendMath(parent, math, tag = "span") {
     const node = el(tag, math.display ? "rich-math rich-math-display" : "rich-math");
@@ -232,6 +276,7 @@ export function renderAssistantText(doc, text) {
       node.classList.add("is-refused");
       return;
     }
+    if (!math.display) inlineMath = true;
     const katex = doc.defaultView?.katex;
     if (katex) {
       paintMath(node, katex);
@@ -241,6 +286,7 @@ export function renderAssistantText(doc, text) {
     loadKatex(doc).then((loaded) => {
       if (loaded) paintMath(node, loaded);
       else node.classList.remove("is-pending");
+      if (loaded && !math.display && node.isConnected) fitMath(node);
     });
   }
 
@@ -514,14 +560,21 @@ export function renderAssistantText(doc, text) {
     return isTableStart(line, next);
   }
 
+  /** A formula is kept whole and as written: `$P(A|B)$` stays one cell, and
+   *  the `\|` in `$\|x\|$` is TeX's norm, not an escaped column bar. */
   function splitRow(line) {
     let body = line.trim();
     if (body.startsWith("|")) body = body.slice(1);
     if (body.endsWith("|") && !body.endsWith("\\|")) body = body.slice(0, -1);
     const cells = [];
+    const memo = Object.create(null);
     let current = "";
     for (let index = 0; index < body.length; index += 1) {
-      if (body[index] === "\\" && body[index + 1] === "|") {
+      const math = opensMath(body, index) ? matchMath(body, index, memo) : null;
+      if (math) {
+        current += math.source;
+        index = math.end - 1;
+      } else if (body[index] === "\\" && body[index + 1] === "|") {
         current += "|";
         index += 1;
       } else if (body[index] === "|") {
@@ -733,5 +786,6 @@ export function renderAssistantText(doc, text) {
     .split("\n")
     .map((line) => line.replace(/^\t+/, (tabs) => "    ".repeat(tabs.length)));
   appendBlocks(container, lines, 0);
+  if (inlineMath) watchMathWidth(doc, container);
   return container;
 }

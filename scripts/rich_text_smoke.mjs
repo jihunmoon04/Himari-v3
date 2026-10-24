@@ -77,6 +77,16 @@ assert.equal(shown("- item $x_1$\n- next"), "item <I:x_1>next");
 // A blank line ends the search: an unclosed $$ does not swallow what follows.
 assert.equal(formulas("$$\na\n\nb $$ c").length, 0);
 
+// In a table a formula is one cell, written as it was: its `|` and `\|` are TeX.
+{
+  const cells = (text) => render(text).all().filter((n) => n.tagName === "td" || n.tagName === "th")
+    .map((n) => n.textContent);
+  assert.deepEqual(cells("| 수식 | 값 |\n| --- | --- |\n| $P(A|B)$ | 0.4 |"), ["수식", "값", "<I:P(A|B)>", "0.4"]);
+  assert.deepEqual(cells("| a | b |\n| --- | --- |\n| $\\|x\\|$ | p \\| q |"), ["a", "b", "<I:\\|x\\|>", "p | q"]);
+  assert.deepEqual(cells("| $a|b$ | c |\n| --- | --- |\n| 1 | 2 |"), ["<I:a|b>", "c", "1", "2"]);
+  assert.deepEqual(cells("| from | to |\n| --- | --- |\n| $5 | $10 |"), ["from", "to", "$5", "$10"]);
+}
+
 // Prices, code and escapes stay text.
 assert.equal(shown("costs $5 and $10"), "costs $5 and $10");
 assert.equal(shown("from $5-$10 a day"), "from $5-$10 a day");
@@ -158,6 +168,48 @@ for (const math of formulas("$x$ \\(y\\) $$z$$")) assert.deepEqual(math.attribut
   assert.ok(katex.renderToString("\\text{넓이} = \\pi r^2", options).includes("넓이"));
   assert.throws(() => katex.renderToString("\\frac{a", options));
   assert.throws(() => katex.renderToString("\\def\\a{\\a\\a}\\a", options));
+
+  // What KaTeX itself builds from hostile TeX, with the page's options: model
+  // text only in text nodes, and attributes from a known set whose values it
+  // computes. A KaTeX upgrade that emits anything else fails here.
+  const TAGS = new Set(("span math semantics mrow mtext mi mo mn annotation mstyle mpadded mspace msqrt mroot " +
+    "mover munder munderover msup msub msubsup mfrac menclose mtable mtr mtd svg path line").split(" "));
+  const ATTRIBUTES = new Set(("class style aria-hidden xmlns encoding mathvariant mathcolor mathbackground width " +
+    "height lspace rspace voffset scriptlevel displaystyle accent accentunder stretchy minsize maxsize notation " +
+    "fence separator linethickness rowspacing columnalign columnspacing columnlines viewBox preserveAspectRatio " +
+    "d stroke-width x1 x2 y1 y2").split(" "));
+  const hostile = [
+    "\\text{<img src=x onerror=alert(1)>} \"onmouseover=\"a",
+    "\\href{javascript:alert(1)}{x} \\url{https://a.example} \\includegraphics{https://a.example/x.png}",
+    "\\htmlClass{evil}{x} \\htmlId{evil}{x} \\htmlStyle{background:url(https://a.example)}{x} \\htmlData{evil=1}{x}",
+    "\\color{red} x \\textcolor{#f00}{y} \\colorbox{blue}{z} \\fcolorbox{red}{blue}{w}",
+    "\\color{red;background:url(https://a.example)}{x}",
+    "\\rule{100em}{100em} \\kern{50em} \\hspace{9999em} \\raisebox{2em}{x}",
+    "\\sqrt{x} \\sqrt[3]{y} \\overrightarrow{AB} \\widehat{xyz} \\underbrace{a+b}_{n} \\xrightarrow{f} \\cancel{x} \\boxed{y}",
+    "\\begin{pmatrix} a & b \\\\ c & d \\end{pmatrix} \\begin{array}{|c|c|} 1 & 2 \\end{array} \\frac{a}{b}",
+    "\\mathrm{x} \\mathbb{R} \\operatorname{evil\"x} \\verb|<b>|",
+  ];
+  let checked = 0;
+  for (const tex of hostile) {
+    let html;
+    try {
+      html = katex.renderToString(tex, { ...options, output: "htmlAndMathml" });
+    } catch (refused) {
+      continue; // shown as written (see above)
+    }
+    checked += 1;
+    for (const [, tag, rest] of html.matchAll(/<([a-zA-Z]+)([^>]*)>/g)) {
+      assert.ok(TAGS.has(tag), `${tex}: <${tag}>`);
+      const attributes = [...rest.matchAll(/([^\s=]+)="([^"]*)"/g)];
+      assert.equal(rest.replace(/([^\s=]+)="([^"]*)"/g, "").trim().replace(/\/$/, ""), "", `${tex}: ${rest}`);
+      for (const [, name, value] of attributes) {
+        assert.ok(ATTRIBUTES.has(name), `${tex}: ${name}=`);
+        assert.ok(!/url\(|javascript:|expression\(|evil|&lt;|&quot;/i.test(value), `${tex}: ${name}="${value}"`);
+        if (name === "class") assert.match(value, /^[a-z0-9 -]*$/, tex);
+      }
+    }
+  }
+  assert.ok(checked >= 7, `only ${checked} hostile formulas rendered`);
 }
 
 console.log("rich_text formulas: ok");

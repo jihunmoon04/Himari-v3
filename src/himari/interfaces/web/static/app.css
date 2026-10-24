@@ -1567,6 +1567,15 @@ details > summary {
   margin: 0.2em 0;
 }
 
+/* An inline formula wider than its line (fitMath in rich_text.js). */
+.rich-text .rich-math.is-wide {
+  display: block;
+  margin: 0.2em 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  max-width: 100%;
+}
+
 .rich-text .rich-math.is-pending,
 .rich-text .rich-math.is-refused {
   font-family: var(--mono);
