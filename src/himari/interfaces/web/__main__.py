@@ -82,7 +82,8 @@ def main(argv: list[str] | None = None) -> int:
                                              file_store_max_bytes=config.file_store_max_bytes,
                                              file_keep_days=config.file_keep_days,
                                              documents_dir=config.documents_dir, memory=config.memory,
-                                             conversation_search=config.conversation_search)
+                                             conversation_search=config.conversation_search,
+                                             streaming=config.streaming)
         print(f"HIMARI web: http://{config.host}:{config.port}/ — sign in with the token in "
               f"{application.data_root / 'control' / 'operator.secret'} (sandbox: {application.sandbox_state.value}, "
               f"context budget: {application.context_tokens} tokens; {turn_text(application.turn)})",
@@ -96,6 +97,9 @@ def main(argv: list[str] | None = None) -> int:
                   "you can still manage them", file=sys.stderr, flush=True)
         if not application.conversation_search_enabled:  # V3-P72 §9
             print("HIMARI web: conversation search is off (HIMARI_CONVERSATION_SEARCH=0)", file=sys.stderr, flush=True)
+        if not application.streaming_enabled:  # V3-P73 §9
+            print("HIMARI web: streaming is off (HIMARI_STREAMING=0): answers arrive whole", file=sys.stderr,
+                  flush=True)
         if not application.images_available:  # V3-P67 §3.1: fail-closed, said once at startup
             print("HIMARI web: images are not shown to models on this server (the image sandbox is unavailable): "
                   "an image is attached as a file line only", file=sys.stderr, flush=True)

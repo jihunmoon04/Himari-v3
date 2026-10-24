@@ -75,6 +75,7 @@ def build_runtime(
     file_max_bytes: int = DEFAULT_FILE_MAX_BYTES,
     memory: bool = False,  # V3-P71: the memory Tools, MEMORY_NOTE and the notes in the state
     conversation_search: bool = False,  # V3-P72: conversation_search and conversation_read
+    streaming: bool = False,  # V3-P73: answering Runs ask for a stream (models that declare it)
 ) -> Runtime:
     store = store if store is not None else InMemoryStore()
     data = SqliteData(store) if isinstance(store, SqliteStore) else InMemoryData(store)
@@ -122,6 +123,7 @@ def build_runtime(
         planner=Compactor() if any(o.budget is not None for o in models.offers) else None,
         turn_budget=turn_budget,
         no_progress_runs=no_progress_runs,
+        streaming=streaming,
     )
     return Runtime(store=store, data=data, registry=registry, driver=driver, access=access, models=models)
 

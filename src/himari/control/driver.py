@@ -51,6 +51,15 @@ into one ``ResolvedModel`` — request options, context budget, output
 reserve — which every Run and summarizing call of the turn uses. A choice
 changed meanwhile applies from the next turn. ``context_status`` resolves
 without the lock: it shows what the next turn would use.
+
+Streaming (V3-P73 §5): with ``streaming``, a Run that answers the user asks
+for a stream (summarizing calls never do); the Provider streams it only for
+a model that declares it. A streamed Run gets a ``RawCapture`` the Driver
+owns and an ``OutputProgress`` sink (when the job's progress is one).
+However the invocation ends — a cancel, an exception, shutdown — the Driver
+reads the capture only after the Provider's task has ended and records what
+arrived with the outcome, in one ``record_raw_outcome``; ``output_ended``
+follows it. Only a process crash loses the part that arrived.
 """
 
 from __future__ import annotations
@@ -70,6 +79,7 @@ from himari.control.api import (
     DriveResult,
     DriveState,
     ModelCatalog,
+    OutputProgress,
     ResolvedModel,
     StopSignal,
     TurnProgress,
@@ -115,19 +125,24 @@ from himari.prompt.api import (
     RequestOptions,
 )
 from himari.provider.api import (
+    NativeInvocationOutcome,
     NativeNoResponse,
+    NativePreparedRequest,
     NativeReceived,
     NativeUncertain,
     NormalizedFinal,
     NormalizedModelOutput,
+    OutputDelta,
     ProviderAdapter,
     ProviderError,
+    RawCapture,
 )
 from himari.tool.api import GroupDispatchResult, GroupState, ToolDispatcher
 
 
 MAX_COMPACTIONS_PER_RUN = 4
 CANCELLED_BY_USER = "cancelled_by_user"  # the error code of a model call interrupted by a cancel
+SHUTDOWN = "shutdown"  # of a streamed model call the server stopped (V3-P73 §5.3)
 
 # Model-facing results of calls that never ran (V3-P55).
 CANCELLED_RESULT = "Not run: the user cancelled before this call started."
@@ -184,6 +199,7 @@ class Driver:
         planner: CompactionPlanner | None = None,
         turn_budget: int | None = None,
         no_progress_runs: int | None = None,  # None: no NO_PROGRESS stop (V3-P62 §4 turns it on with O3)
+        streaming: bool = False,  # V3-P73: answering Runs ask for a stream
     ) -> None:
         if any((planner is None) != (offer.budget is None) for offer in models.offers):
             raise ValueError("a context budget needs a compaction planner and vice versa, for every model")
@@ -206,6 +222,8 @@ class Driver:
         self._turn_budget = turn_budget
         self._no_progress_runs = no_progress_runs
         self._planner = planner
+        self._streaming = streaming
+        self._outputs: dict[ConversationId, OutputProgress | None] = {}  # of the drive holding the lock
         self._locks: dict[ConversationId, asyncio.Lock] = {}
         self._signals: dict[ConversationId, StopSignal] = {}  # of the drive holding the lock
         self._turns: dict[ConversationId, Turn] = {}  # of the drive holding the lock
@@ -342,9 +360,11 @@ class Driver:
             self._signals[scope.conversation_id] = stop if stop is not None else StopSignal()
             self._turns[scope.conversation_id] = Turn(self._turn_budget, self._max_runs, progress,
                                                       model.offer.max_output_tokens)
+            self._outputs[scope.conversation_id] = progress if isinstance(progress, OutputProgress) else None
             try:
                 yield
             finally:
+                del self._outputs[scope.conversation_id]
                 del self._signals[scope.conversation_id]
                 del self._turns[scope.conversation_id]
                 del self._turn_models[scope.conversation_id]
@@ -394,6 +414,18 @@ class Driver:
         """A pause's detail: its reason when it was not the user's own (V3-P62 §5)."""
         reason = self._stop(scope).reason
         return "; ".join(part for part in (reason, what) if part)
+
+    def _invocation(self, prepared: NativePreparedRequest, run_id: RunId, capture: RawCapture | None,
+                    live: OutputProgress | None) -> Callable[[], Awaitable[NativeInvocationOutcome]]:
+        """The one send of a Run; a streamed one with its capture and sink."""
+        if not prepared.streamed:
+            return lambda: self._provider.invoke_prepared(prepared)
+
+        def show(delta: OutputDelta) -> None:
+            if live is not None:
+                live.output(run_id, delta)
+
+        return lambda: self._provider.invoke_prepared(prepared, show, capture)
 
     async def _interruptible[T](self, scope: TrustedScope, start: Callable[[], Awaitable[T]]) -> T:
         """Await ``start()`` unless a cancel arrives first; then cancel it,
@@ -645,6 +677,9 @@ class Driver:
                 return result(DriveState.BUDGET_REACHED,
                               detail=f"the turn used {turn.used} tokens; the next request (about {estimate} in, "
                                      f"{reserve} kept for its answer) would pass the budget of {turn.budget}")
+            if self._streaming:  # V3-P73 §5.1: this Run answers the user
+                options = dataclasses.replace(model_input.request_options, stream=True)
+                model_input = dataclasses.replace(model_input, request_options=options)
             try:
                 prepared = self._provider.prepare_native_request(model_input)
             except ProviderError as exc:
@@ -664,17 +699,30 @@ class Driver:
             )
             run_ids.append(run_id)
             await self._log.mark_dispatch(scope, run_id)  # T3: persisted before the one send
+            capture = RawCapture() if prepared.streamed else None
+            live = self._outputs.get(scope.conversation_id) if prepared.streamed else None
+            if live is not None:
+                live.output_started(run_id)
             try:
-                outcome = await self._interruptible(scope, lambda: self._provider.invoke_prepared(prepared))
-            except _Cancelled:
-                await self._log.record_raw_outcome(scope, run_id, RawUncertain(CANCELLED_BY_USER))
-                turn.charge(None, estimate or 0, reserve, step=True)
-                return result(DriveState.CANCELLED,
-                              detail="cancelled while the model was answering; it may have been processed and "
-                                     "is not resent")
-            except Exception as exc:  # noqa: BLE001 — adapter error after send began
-                outcome = NativeUncertain(type(exc).__name__)
-            await self._log.record_raw_outcome(scope, run_id, _raw(outcome))
+                try:
+                    outcome = await self._interruptible(scope, self._invocation(prepared, run_id, capture, live))
+                except _Cancelled:
+                    await self._log.record_raw_outcome(scope, run_id, _uncertain(CANCELLED_BY_USER, capture))
+                    turn.charge(None, estimate or 0, reserve, step=True)
+                    return result(DriveState.CANCELLED,
+                                  detail="cancelled while the model was answering; it may have been processed and "
+                                         "is not resent")
+                except asyncio.CancelledError:
+                    if capture is not None:  # V3-P73 §5.3: shutdown keeps what arrived; else restart recovery
+                        with contextlib.suppress(Exception):
+                            await self._log.record_raw_outcome(scope, run_id, _uncertain(SHUTDOWN, capture))
+                    raise
+                except Exception as exc:  # noqa: BLE001 — adapter error after send began
+                    outcome = NativeUncertain(type(exc).__name__)
+                await self._log.record_raw_outcome(scope, run_id, _raw(outcome, capture))
+            finally:
+                if live is not None:
+                    live.output_ended(run_id)
             turn.charge(outcome.usage if isinstance(outcome, NativeReceived) else None, estimate or 0, reserve,
                         step=True)
             if isinstance(outcome, NativeReceived) and signal.cancel_requested:
@@ -846,9 +894,16 @@ class Driver:
         return run_id, None, text
 
 
-def _raw(outcome: NativeReceived | NativeNoResponse | NativeUncertain) -> RawRunOutcome:
+def _raw(outcome: NativeReceived | NativeNoResponse | NativeUncertain,
+         capture: RawCapture | None = None) -> RawRunOutcome:
     if isinstance(outcome, NativeReceived):
         return RawReceived(outcome.body, outcome.content_type, outcome.usage)
     if isinstance(outcome, NativeNoResponse):
         return RawNoResponse(outcome.error_code, outcome.body, outcome.content_type)
-    return RawUncertain(outcome.error_code)
+    return _uncertain(outcome.error_code, capture)
+
+
+def _uncertain(error_code: str, capture: RawCapture | None) -> RawUncertain:
+    """An uncertain outcome with what arrived of a stream, if anything (V3-P73 §5.3)."""
+    body = capture.body() if capture is not None else None
+    return RawUncertain(error_code, body, capture.content_type if body is not None and capture else "")

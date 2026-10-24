@@ -80,6 +80,9 @@ class RequestOptions(DeepFrozen):
     session_key: str | None = None
     # The model takes images (V3-P67 §7.1), as its Provider declares; set by the Driver.
     image_input: bool = False
+    # Ask for the answer as a stream (V3-P73 §3.1); set by the Driver right before
+    # the request is prepared, only for a Run that answers the user.
+    stream: bool = False
 
 
 # --- Provider-neutral history (CPP §6.1) ------------------------------------

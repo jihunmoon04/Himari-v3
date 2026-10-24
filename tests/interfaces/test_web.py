@@ -283,6 +283,7 @@ def test_the_server_info_is_for_the_signed_in_operator(server: Server) -> None:
                     "documents": {"read": False, "scripts": False, "libraries": {}},  # V3-P70: no toolkit
                     "memory": True,  # V3-P71 §9: on unless HIMARI_MEMORY=0
                     "conversation_search": True,  # V3-P72 §9: on unless HIMARI_CONVERSATION_SEARCH=0
+                    "streaming": True,  # V3-P73 §9: on unless HIMARI_STREAMING=0
                     "models": [{"id": "scripted-model", "default_effort": None, "efforts": [], "window_known": False,
                                 "default": True, "images": False}],
                     "turn": {"token_budget": 3_000_000, "unattended_runs": 20, "max_runs": None,

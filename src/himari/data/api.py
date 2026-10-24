@@ -211,9 +211,13 @@ class RawNoResponse(DeepFrozen):
 
 @dataclass(frozen=True)
 class RawUncertain(DeepFrozen):
-    """Send may or may not have reached the Provider; never resent."""
+    """Send may or may not have reached the Provider; never resent. ``body``
+    is what arrived of a streamed response before it ended (V3-P73 §4):
+    stored as received, never normalized."""
 
     error_code: str
+    body: bytes | None = None
+    content_type: str = ""
 
 
 type RawRunOutcome = RawReceived | RawNoResponse | RawUncertain

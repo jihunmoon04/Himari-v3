@@ -11,11 +11,12 @@ import asyncio
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 from himari.common import CallRef, DeepFrozen, RunId, TrustedScope
 from himari.data.api import ConversationEvent, ModelSetting, RecoveryReport, UserMessage
 from himari.prompt.api import ContextBudget
+from himari.provider.api import OutputDelta
 
 
 class DriveState(Enum):
@@ -228,6 +229,38 @@ class TurnProgress(Protocol):
     (the Runner) only keeps the value."""
 
     def report(self, usage: TurnUsage) -> None: ...
+
+
+@runtime_checkable
+class OutputProgress(Protocol):
+    """Told by the Driver what a streamed Run writes (V3-P73 §5.2), for
+    display only; same rules as TurnProgress. ``output_ended`` follows every
+    ``output_started``, after the Run's outcome is recorded, however it ended."""
+
+    def output_started(self, run_id: RunId) -> None: ...
+
+    def output(self, run_id: RunId, delta: OutputDelta) -> None: ...
+
+    def output_ended(self, run_id: RunId) -> None: ...
+
+
+LIVE_TEXT_CHARS = 512 * 1024  # of one Run's text kept for display (V3-P73 §5.2)
+
+
+@dataclass(frozen=True)
+class LiveOutput(DeepFrozen):
+    """What a streamed Run of a Conversation's job has written so far
+    (V3-P73 §5.2): display only, process memory, never a record. ``version``
+    changes with every change of the Conversation's live state; ``ended``
+    stays until the next Run starts or the next job does."""
+
+    run_id: RunId
+    text: str = ""
+    tools: tuple[str, ...] = ()
+    thinking: bool = False
+    truncated: bool = False
+    ended: bool = False
+    version: int = 0
 
 
 # The rule for the turn's state, for HIMARI's system instructions when the

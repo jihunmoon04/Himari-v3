@@ -1085,7 +1085,8 @@ def cmd_status(session: Session, args: argparse.Namespace) -> int:
                  f"commands: {SANDBOX_TEXT.get(sandbox, sandbox)}",
                  f"context budget: {server.get('context_budget'):,} tokens", documents_line(server.get("documents")),
                  f"memory: {'on' if server.get('memory') else 'off'}",
-                 f"conversation search: {'on' if server.get('conversation_search') else 'off'}"):
+                 f"conversation search: {'on' if server.get('conversation_search') else 'off'}",
+                 f"streaming: {'on' if server.get('streaming') else 'off'}"):
         session.printer.line(safe_line(line, encoding=session.printer.encoding))
     return EXIT_OK
 

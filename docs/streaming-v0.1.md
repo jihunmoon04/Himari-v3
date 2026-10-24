@@ -1,6 +1,6 @@
 # 스트리밍 v0.1
 
-> 2026-10-24 · **PROPOSED (V3-P73)** · rev. 3 — 소유자 결정 Q1~Q6 권고대로(§11). rev. 2 — 설계 검수 B1(취소된 스트림의 받은 부분, §3.5·§5.3)·B2(놓친 조각 없는 구독, §5.2·§6.1)·N1(continuation 합치기를 보수적으로, §3.3) 반영, 소유자 결정 Q7(생각 중 표시, §7.4). rev. 1: 설계 초안.
+> 2026-10-24 · **PROPOSED (V3-P73)** · 1단계 구현(§14). rev. 3 — 소유자 결정 Q1~Q6 권고대로(§11). rev. 2 — 설계 검수 B1(취소된 스트림의 받은 부분, §3.5·§5.3)·B2(놓친 조각 없는 구독, §5.2·§6.1)·N1(continuation 합치기를 보수적으로, §3.3) 반영, 소유자 결정 Q7(생각 중 표시, §7.4). rev. 1: 설계 초안.
 >
 > 배경: 지금은 모델이 답을 다 쓴 뒤에야 화면에 나온다. 긴 답이나 추론이 긴 모델은 수십 초 동안 "HIMARI is working…"만 보인다. 소유자 방향(2026-10-24): 작은 후속 수정 다음으로 스트리밍을 진행한다.
 >
@@ -347,3 +347,81 @@ CLI는 Web 서버의 클라이언트다(V3-P47). 이 패킷에서는 바꾸지 �
 2. **2단계: Web.** `/live`, 쓰는 중 항목, 끝나지 않은 답 표시, 스모크.
 
 1단계만 배포하면 화면은 지금과 같고, 중지가 과금을 멈추는 효과만 생긴다. 두 단계를 함께 배포하기를 권한다.
+
+## 14. 구현 노트 (2026-10-24, 1단계)
+
+**Provider**
+- `provider/api.py`:
+  - `ProviderCapabilities.streaming`, `NativePreparedRequest.streamed`
+  - `OutputDelta`·`OutputSink`
+  - `RawCapture`: `append`는 32 MiB(`MAX_CAPTURE_BYTES`)를 넘으면 `False`를 돌려준다.
+  - `invoke_prepared(request, sink=None, capture=None)`
+- `prompt/api.py`의 `RequestOptions.stream`은 Driver가 보내기 직전에만 켠다. 그래서 Prompt와 압축 요약 요청에는 들어가지 않는다.
+- `provider/openrouter_stream.py`(새 모듈):
+  - `SseReader`: 바이트 단위로 줄을 나눈다. CR이 조각 끝에 오면 다음 조각을 기다린다. 닫히지 않은 마지막 이벤트는 버린다.
+  - `StreamView`: 받는 동안 sink에 보이는 것을 맡는다. 예외를 던지지 않는다.
+  - `assemble`: 저장된 스트림을 JSON 응답 모양으로 합친다. 그 뒤 판정은 기존 `_normalize` 그대로다. §3.3.1의 규칙이 여기 있다.
+- `OpenRouterAdapter._invoke_stream`:
+  - 받은 바이트를 해석하기 전에 `capture`에 넣는다.
+  - 연결 제한은 10초, 바이트 사이 간격은 기존 timeout(120초)이다.
+  - 결과 분류:
+
+| 상황 | 결과 |
+| --- | --- |
+| 200이 아님 | `NativeNoResponse(http_N, 본문)` |
+| 200인데 JSON 본문 | 지금과 같은 판정(`_whole`) |
+| 오류 조각 | `NativeNoResponse(provider_error_코드, 본문)` |
+| `[DONE]` 없이 끝남 | `NativeUncertain("stream_incomplete")` |
+| 연결 끊김 | `NativeUncertain("transport:…")` |
+| 32 MiB 초과 | `NativeUncertain("response_too_large")` |
+
+- 저장된 스트림을 다시 정규화할 때도 `[DONE]`이 없으면 닫힘 실패다(§3.3).
+- 설계와 다른 점:
+  - **스트리밍하는 요청에만 `sink`·`capture`를 넘긴다.** 비스트리밍 응답은 본문이 한 번에 오므로 남길 "받은 부분"이 없다. 이렇게 하면 기존 Provider 대역(테스트 7곳)도 시그니처만 넓히면 된다.
+  - 서버 종료 때의 `RawUncertain("shutdown")` 기록도 스트리밍 Run에만 한다. 비스트리밍 Run은 지금처럼 재시작 복구가 처리한다.
+- `ScriptedAdapter(streaming=True, piece_delay=…)`는 답을 4자씩 sink에 넘긴다. `StreamCut(pieces, end)`은 중간에 멈추는 스트림이다(끝: 결과 불명, 예외, 또는 기다리기). 테스트와 2단계 스모크가 쓴다.
+
+**Control**
+- `OutputProgress`(`output_started`·`output`·`output_ended`)는 `TurnProgress`와 따로 둔 runtime-checkable Protocol이다. Driver는 job의 progress가 이것일 때만 조각을 넘긴다. Runner의 `_JobProgress`가 구현한다.
+- Driver(`streaming=`):
+  - Run 단계를 `try/finally`로 감싸, 어떻게 끝나든 기록한 뒤 `output_ended`를 부른다.
+  - 사용자 중지·Provider 예외·Provider가 돌려준 결과 불명·서버 종료에서 `capture`의 바이트를 결과와 함께 기록한다(`_uncertain`).
+- Runner:
+  - `_Live`는 조각 목록과 끝 위치를 둔다. 작은 조각마다 문자열 전체를 복사하지 않고, 어느 글자부터든 읽는다.
+  - API: `live_output`, `live_text(run_id, start)`, `live_version`, `wait_live(after_version, timeout)`.
+  - 깨우기는 바뀔 때마다 `asyncio.Event`를 세우고 버린다. job이 끝날 때도 깨운다.
+  - 512 KiB를 넘으면 `truncated`이고, **그 뒤로는 아무것도 붙이지 않는다.** 뒤의 작은 조각이 붙으면 글 중간이 빈다.
+
+**설정·화면**
+- `HIMARI_STREAMING`(기본 켬): `Application.open(streaming=True)`, `build_runtime(streaming=)`.
+- 꺼져 있으면 시작 로그에 한 줄을 남긴다.
+- `/api/server`의 `streaming`, `himari status`의 `streaming: on|off`.
+
+**모델 확인 (실제 요청, 2026-10-24)** — `tests/live/test_openrouter_stream_live.py`(6/6 통과), 탐색 스크립트로 비스트리밍과 비교했다.
+
+| 확인 | `openai/gpt-6-luna` | `anthropic/claude-haiku-5.5` |
+| --- | --- | --- |
+| 긴 답 | 43조각 | 37조각 |
+| 저장한 스트림을 정규화한 글 | 흘린 글과 같음 | 흘린 글과 같음 |
+| Tool 턴 continuation | `reasoning.summary`+`reasoning.encrypted`(서명 없음) | `reasoning.text`+서명 |
+| 비스트리밍과 비교 | 같은 모양 | 같은 모양 |
+| 다음 요청에 다시 실음 | 그대로 실림, 턴 완료(208) | 그대로 실림, 턴 완료(208) |
+| `[REDACTED]` | 없음 | 없음 |
+| 중간 중지 | 74자 뒤 끊김, 원본 47 KB 보존 | 89자 뒤 끊김, 원본 4.3 KB 보존 |
+
+- 두 모델만 `streaming=True`다. 다른 모델은 같은 live 테스트를 통과한 뒤에 더한다(`test_only_the_models_checked_live_declare_streaming`).
+- **저장 크기:** 같은 Tool 턴을 비교했다. luna는 4.8 KB → 46.8 KB(약 10배), haiku는 3.7 KB → 12.3 KB(약 3배). 조각마다 id·model 같은 머리가 붙기 때문이다. 개인 서버 규모에서는 받아들인다(§4).
+- `Application` 기본값으로 luna에 물었다. 답이 쓰이는 동안 Runner의 글 길이가 네 번 바뀌었고, job이 끝난 뒤 `ended`, 최종 답과 흘린 글이 같았다.
+
+**테스트**
+- Provider 32개: SSE 읽기(한 바이트씩, LF·CRLF·CR), 받기·결과 분류, sink, 정규화와 닫힘 실패, continuation 규칙, 선언한 모델 고정.
+- Driver·Runner 9개(두 백엔드 18개):
+  - 흘림
+  - 켜는 조건
+  - 요약 호출은 흘리지 않음
+  - 중지·결과 불명·예외·서버 종료에서 받은 부분 보존
+  - 누적 상태와 늦게 깨어난 읽기
+  - 글 길이 상한
+- Application 2개, SQLite 재시작 1개, 설정 1개.
+- 전체 pytest 2,254개, mypy, import 경계, Node 검사 12개, 브라우저 스모크 전체(화면은 바뀌지 않음).
+- 실제 모델 확인용 공용 도우미는 `tests/livekit.py`로 옮겼다. 테스트 모듈끼리는 import할 수 없기 때문이다.

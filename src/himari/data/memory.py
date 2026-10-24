@@ -563,7 +563,9 @@ class InMemoryData:
                 run.raw_response_body = body  # the received error response, if any
                 run.raw_response_content_type = content_type
                 self._set_status(run, RunStatus.FAILED_NO_RESPONSE, error_code=code)
-            case RawUncertain(error_code=code):
+            case RawUncertain(error_code=code, body=body, content_type=content_type):
+                run.raw_response_body = body  # what arrived of a stream before it ended (V3-P73 §4)
+                run.raw_response_content_type = content_type
                 self._set_status(run, RunStatus.OUTCOME_UNKNOWN, error_code=code)
 
     async def project_model_output(
