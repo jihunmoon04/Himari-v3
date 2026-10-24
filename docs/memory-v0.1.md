@@ -1,6 +1,6 @@
 # 메모리 v0.1
 
-> 2026-10-24 · **PROPOSED (V3-P71)** · rev. 3 — 소유자 결정 Q4(`conversation_search`는 따로)·Q5(분류 넷) 권고대로, 소유자 결정 모두 끝(§12). rev. 2 — 소유자 검토: 핵심 기억은 시스템 메시지가 아니라 Current State에, 턴마다 읽음, 블록 2,000자(Q1~Q3, §5·§12). V3-P69 §3.2의 자리를 그대로 따르게 되어 그 문서를 고치지 않는다. rev. 1: 설계 초안.
+> 2026-10-24 · **PROPOSED (V3-P71)** · rev. 4 — 외부 재검수 반영: 꺼짐은 모델의 기억 사용만 멈추고 화면·CLI 관리는 그대로(§7.2·§9), Undo는 글·분류·출처까지 호출 전 상태로 되돌림(§7.1), 1단계만 배포하지 않음(§14). rev. 3 — 소유자 결정 Q4(`conversation_search`는 따로)·Q5(분류 넷) 권고대로, 소유자 결정 모두 끝(§12). rev. 2 — 소유자 검토: 핵심 기억은 시스템 메시지가 아니라 Current State에, 턴마다 읽음, 블록 2,000자(Q1~Q3, §5·§12). V3-P69 §3.2의 자리를 그대로 따르게 되어 그 문서를 고치지 않는다. rev. 1: 설계 초안.
 >
 > 소유자 방향(2026-10-24): 기억할 항목을 나누고, 대화에서 기억할 만한 것을 명제처럼 추출한다. 의논 끝에 아래를 "추천대로" 정했다.
 > - **D1 저장 단위:** 요약문이 아니라 명제. 맥락이 담긴 1~2문장 메모를 한 단위로 하고, 분류는 작은 고정 목록으로 둔다.
@@ -93,6 +93,7 @@ CREATE INDEX memories_source ON memories (owner, source_conversation);
   - `replaces`가 있으면 그 기억의 글·분류를 바꾸고 리비전을 1 올린다. 출처는 바꾼 쪽의 것으로 바뀐다. 모델이 고치면 이번 호출, 사용자가 고치면 원래 출처를 유지한다(§4.3).
   - `expected_revision`이 틀리면 `REVISION_CONFLICT`(화면의 동시 수정).
 - `delete_memory(principal, id, *, expected_revision=None)`: 행을 지운다. 되살리는 자리는 두지 않는다(§7.2).
+- `restore_memory(principal, before, *, expected_revision)`(2단계, Undo 전용): 기억을 `before`의 글·분류·쓴 이·출처로 되돌린다. 지운 기억이면 같은 번호로 다시 만든다. 리비전은 지금 리비전 + 1이다(되돌려도 리비전은 줄지 않는다). `expected_revision`이 틀리면 `REVISION_CONFLICT`(§7.1).
 - **저장 전 검사:**
   - 줄바꿈을 `\n`으로 맞추고 앞뒤 공백을 지운다. 빈 글은 `INVALID_ARGUMENT`.
   - 글은 500자까지(Q3). 넘으면 `TOO_LARGE`.
@@ -213,7 +214,11 @@ CREATE INDEX memories_source ON memories (owner, source_conversation);
   - `Forgot · 글`
 - **Undo:**
   - 저장한 줄: 그 기억이 아직 있고 리비전이 그 호출 때와 같으면 `Undo` 버튼이 있다. 누르면 그 기억을 지운다(새로 만든 경우).
-  - 고친 줄: 누르면 고치기 전 글로 되돌린다. 되돌릴 글은 그 호출의 원시 결과(`raw_result`)에 저장해 둔다.
+  - 고친 줄: 누르면 그 기억을 **호출 전 상태 그대로** 되돌린다. 글·분류만이 아니라 쓴 이(`origin`)와 출처(대화·호출)도 되돌린다(rev. 4).
+    - 이유: 대화 A에서 저장한 `m7`을 대화 B에서 모델이 고치면 출처가 B로 바뀐다(§4.2). 글만 되돌리면 출처가 B로 남아, 나중에 B를 영구 삭제할 때 되찾은 `m7`까지 지워진다. 출처까지 되돌리면 `m7`은 다시 A를 따른다.
+    - 호출 전 상태는 그 호출의 원시 결과(`raw_result.previous`)에 쓴다. 글·분류·리비전과 함께 쓴 이와 출처(대화, run, call)를 담는다. 1단계부터 남긴다.
+  - 서버가 되돌릴 상태를 정한다. 요청은 호출(`run_id`, `call_id`)만 가리키고, 서버가 그 호출의 저장된 원시 결과에서 이전 상태를 읽어 `restore_memory`(§4.2)로 쓴다. 요청 본문의 글이나 출처는 받지 않는다.
+  - 지금 리비전이 그 호출이 쓴 리비전과 다르면 되돌리지 않고 409를 돌려준다.
   - 그 뒤 화면에서 그 기억을 고쳤거나 지웠으면 버튼이 없다. 상태는 따로 저장하지 않고 지금의 기억에서 정한다.
   - 지운 줄에는 Undo가 없다. 글이 줄에 보이므로 사용자가 기억 화면에서 다시 쓸 수 있다.
 - 줄의 글은 텍스트 노드로만 그린다.
@@ -228,7 +233,7 @@ CREATE INDEX memories_source ON memories (owner, source_conversation);
 - `Edit`은 그 자리에서 입력란과 분류 선택으로 바뀌고 `Save`·`Cancel`이 나온다. 리비전 충돌이면 "Changed elsewhere"와 함께 새 글을 보이고 내 글은 입력란에 남긴다.
 - `Delete`는 확인 창을 띄운다: "Delete this memory? Conversations that already used it still show it." 사용자가 지우면 바로 지워진다(되살리기 없음).
 - 분류마다 `Add` 버튼이 있다. 상단에 `N of 1,000` 개수를 보인다.
-- 기억 기능이 꺼져 있으면(§9) 화면에 "Memory is off on this server."를 보이고 목록은 읽기만 한다.
+- 기억 기능이 꺼져 있으면(§9) 화면 위에 "Memory is off on this server: HIMARI does not read or save notes."를 보인다. 보기·더하기·고치기·지우기는 그대로 된다(rev. 4). 꺼 둔 채 기억을 정리하거나 지울 수 있어야 하기 때문이다.
 - 좁은 화면에서 가로 스크롤이 없다.
 
 **API** (인증·CSRF·Origin 검사는 다른 쓰기 API와 같음)
@@ -236,6 +241,7 @@ CREATE INDEX memories_source ON memories (owner, source_conversation);
 - `POST /api/memories` `{category, text}` → 201
 - `PUT /api/memories/{id}` `{category, text, revision}` → 200. 오류: 404, 409 `revision_conflict`, 422 `too_large`·`invalid_memory`·`memory_full`
 - `DELETE /api/memories/{id}?revision=N` → 204. 오류: 404, 409
+- `POST /api/memories/undo` `{run_id, call_id}`(2단계) → 200(되돌린 기억) 또는 204(새 기억을 지움). 오류: 404(그런 기억 호출이 없음), 409(그 뒤 바뀜)
 - 삭제 확인에 쓰는 `GET /api/conversations/{id}/delete-notice`(V3-P65, `DeleteNotice`)에 `memory_count`를 더한다.
 
 ## 8. CLI
@@ -248,7 +254,7 @@ CREATE INDEX memories_source ON memories (owner, source_conversation);
 
 ## 9. 운영자 설정
 
-- `HIMARI_MEMORY=0`: 기억 기능을 끈다. Tool 셋이 목록에서 빠지고, `MEMORY_NOTE`와 `user_memory`를 넣지 않는다. 저장된 기억은 남고 화면에서 볼 수 있다. 기본은 켜짐이다.
+- `HIMARI_MEMORY=0`: **모델이 기억을 쓰는 것만** 끈다. Tool 셋이 목록에서 빠지고, `MEMORY_NOTE`와 `user_memory`를 넣지 않는다. 저장된 기억은 남고, 화면·CLI·API에서 보기·더하기·고치기·지우기는 그대로 된다(rev. 4). 기본은 켜짐이다.
 - `/api/server`와 `himari status`에 `memory: on|off`를 보인다.
 
 ## 10. 위협과 대응
@@ -310,10 +316,11 @@ D1~D5는 위 머리말대로 정해졌다(2026-10-24). 아래는 이 문서에�
   - 세 Tool의 성공·실패 결과 글, `replaces`의 원래 글이 `raw_result`에 남는 것.
   - 검색 순서(맞은 낱말 수, 최신순), 20개 상한, NFKC, 질의 없음.
   - `HIMARI_MEMORY=0`에서 목록에 없다.
-- **Web API·CLI:** GET·POST·PUT·DELETE, 404·409·422, 인증 없으면 401, Origin 검사. CLI의 목록·add·edit(충돌)·rm(묻기·`--yes`).
+- **Web API·CLI:** GET·POST·PUT·DELETE, 404·409·422, 인증 없으면 401, Origin 검사. `HIMARI_MEMORY=0`에서도 쓰기가 된다. CLI의 목록·add·edit(충돌)·rm(묻기·`--yes`).
 - **브라우저 스모크:**
   - 대본 모델이 `memory_save`를 부르면 묶음 밖에 `Remembered` 줄이 생기고, 다음 메시지의 요청의 Current State에 그 기억이 들어간다.
   - `Undo`하면 줄의 버튼이 사라지고 기억 화면에서도 없다.
+  - 다른 대화에서 고친 기억을 `Undo`하면 출처가 원래 대화로 돌아오고, 고친 대화를 영구 삭제해도 그 기억이 남는다.
   - 기억 화면에서 더하기·고치기(충돌 안내)·지우기를 한다.
   - 대화를 지울 때 확인 창이 기억 개수를 알리고, 영구 삭제한 뒤 그 기억이 없다.
   - 좁은 화면을 본다.
@@ -329,6 +336,7 @@ D1~D5는 위 머리말대로 정해졌다(2026-10-24). 아래는 이 문서에�
   - CLI `himari memory`와 `himari chat`의 기억 줄
 - **2단계 (Web 화면):**
   - 기억 화면(§7.2)
-  - 대화 안의 기억 줄과 Undo(§7.1)
+  - 대화 안의 기억 줄과 Undo(§7.1), `restore_memory`(§4.2)와 `POST /api/memories/undo`
   - 삭제 확인 창의 기억 개수 문구
   - 브라우저 스모크
+- **배포:** 1단계만 배포하지 않는다(rev. 4). 1단계의 Web은 `memory_save`를 다른 Tool 호출과 함께 작업 묶음에 접어, 기억이 생긴 것이 눈에 띄지 않고 Undo도 없다(§7.1, §10). 2단계와 함께 배포한다. 그 전에 배포해야 하면 `HIMARI_MEMORY=0`으로 띄운다.
