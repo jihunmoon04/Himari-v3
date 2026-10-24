@@ -282,6 +282,7 @@ def test_the_server_info_is_for_the_signed_in_operator(server: Server) -> None:
                     "images": False,  # V3-P67: no image sandbox in this test
                     "documents": {"read": False, "scripts": False, "libraries": {}},  # V3-P70: no toolkit
                     "memory": True,  # V3-P71 §9: on unless HIMARI_MEMORY=0
+                    "conversation_search": True,  # V3-P72 §9: on unless HIMARI_CONVERSATION_SEARCH=0
                     "models": [{"id": "scripted-model", "default_effort": None, "efforts": [], "window_known": False,
                                 "default": True, "images": False}],
                     "turn": {"token_budget": 3_000_000, "unattended_runs": 20, "max_runs": None,
@@ -508,7 +509,7 @@ def test_context_reports_the_estimate_and_the_budget(server: Server) -> None:
 
 def test_context_shows_where_the_summary_takes_over(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(web, "FAILED_LOGIN_DELAY_SECONDS", 0)
-    server = Server(tmp_path, [], context_tokens=2800, turn={"memory": False})  # sized without the memory Tools
+    server = Server(tmp_path, [], context_tokens=2800, turn={"memory": False, "conversation_search": False})  # sized without the memory and search Tools
     with server.client:
         server.sign_in()
         cid = server.post("/api/conversations").json()["id"]

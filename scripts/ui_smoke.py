@@ -95,13 +95,15 @@ OPENED: dict[str, tuple[Application, asyncio.AbstractEventLoop]] = {}  # root ->
 
 
 def serve(root: str, port: int = PORT, provider: ScriptedAdapter | None = None,
-          context_tokens: int | None = None, turn_budget: int = 3_000_000, memory: bool = True) -> uvicorn.Server:
+          context_tokens: int | None = None, turn_budget: int = 3_000_000, memory: bool = True,
+          conversation_search: bool = True) -> uvicorn.Server:
     config = WebConfig("127.0.0.1", port, frozenset({"127.0.0.1"}), frozenset({f"http://127.0.0.1:{port}"}), False,
                        root, "scripted-model", None, False)
 
     async def opener() -> Application:
         application = await Application.open(root, provider or scripted(), model_id="scripted-model", sandbox=False,
-                                             context_tokens=context_tokens, turn_budget=turn_budget, memory=memory)
+                                             context_tokens=context_tokens, turn_budget=turn_budget, memory=memory,
+                                             conversation_search=conversation_search)
         OPENED[root] = (application, asyncio.get_running_loop())
         return application
 
@@ -390,6 +392,7 @@ def run_trash(base: str, token: str, shots: str | None, root: str) -> list[str]:
         expect(row).to_have_count(1)
         row.get_by_text("Delete now").click()
         expect(page.locator("#confirm-title")).to_have_text("Delete “hello” for good?")
+        expect(dialog).to_contain_text("Text that other conversations found with search stays in them.")  # V3-P72
         page.keyboard.press("Escape")  # nothing changes
         expect(dialog).to_be_hidden()
         expect(row).to_have_count(1)
@@ -1096,8 +1099,8 @@ def main() -> int:
         if "compaction" in only:
             small = os.path.join(tmp, "small")
             provider = ScriptedAdapter([NormalizedFinal((TextBlock(SUMMARY),))] * 12)  # every answer and summary alike
-            # memory off: the budget was fitted to a prompt without the memory Tools (V3-P71)
-            server = serve(small, PORT + 1, provider, context_tokens=2800, memory=False)
+            # memory and search off: the budget was fitted to a prompt without their Tools (V3-P71, V3-P72)
+            server = serve(small, PORT + 1, provider, context_tokens=2800, memory=False, conversation_search=False)
             try:
                 errors += run_compaction(f"http://127.0.0.1:{PORT + 1}",
                                          Path(small, "control", "operator.secret").read_text().strip(), args.screenshots,

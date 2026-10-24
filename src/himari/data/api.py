@@ -1008,6 +1008,64 @@ class MemoryStore(Protocol):
         ...
 
 
+# --- Conversation search (V3-P72) -------------------------------------------
+
+SEARCH_KINDS = frozenset({EventKind.USER_MESSAGE, EventKind.ASSISTANT_FINAL})  # what is searched (§3.3)
+MAX_SEARCH_WORDS = 8
+MAX_SEARCH_WORD_CHARS = 200
+
+
+@dataclass(frozen=True)
+class EventText(DeepFrozen):
+    """A user message or final answer as searched and read (V3-P72 §4.4):
+    its text blocks joined by newlines."""
+
+    conversation_id: ConversationId
+    sequence: int
+    kind: EventKind
+    created_at: datetime
+    text: str
+    matched: int = 0  # how many of the search's words it holds (search only)
+
+
+@dataclass(frozen=True)
+class EventSearch(DeepFrozen):
+    hits: tuple[EventText, ...]  # most words first, then newest; at most per_conversation of each
+    total: int  # every match, of which ``hits`` are the first
+    conversations: tuple[ConversationSummary, ...]  # those the hits are in
+
+
+@dataclass(frozen=True)
+class EventPage(DeepFrozen):
+    conversation: ConversationSummary
+    items: tuple[EventText, ...]  # in order, from the sequence asked for
+    more: bool  # searchable Events follow the last one
+
+
+class ConversationSearch(Protocol):
+    """V3-P72: the text of a principal's past Conversations — their user
+    messages and final answers (SEARCH_KINDS) — outside the trash. Of the
+    ``current`` Conversation only Events up to ``current_through`` count (the
+    part a compaction summary covers; None: none of it). A word matches when
+    the folded text (NFKC, case-folded) contains it."""
+
+    async def search_events(self, principal: PrincipalId, words: Sequence[str], *, current: ConversationId,
+                            current_through: int | None, conversation: ConversationId | None = None,
+                            per_conversation: int, limit: int) -> EventSearch:
+        """Events holding any of ``words`` (folded here; repeats count once;
+        1..MAX_SEARCH_WORDS of 1..MAX_SEARCH_WORD_CHARS characters, else
+        INVALID_ARGUMENT). ``conversation``: only that one (NOT_AUTHORIZED when
+        it is not the principal's or is in the trash, as for any read)."""
+        ...
+
+    async def read_event_texts(self, principal: PrincipalId, conversation: ConversationId, *, from_sequence: int,
+                               current: ConversationId, current_through: int | None, limit: int) -> EventPage:
+        """Up to ``limit`` searchable Events from ``from_sequence`` on.
+        NOT_AUTHORIZED: not the principal's, or in the trash. INVALID_ARGUMENT:
+        the part of the current Conversation past ``current_through``."""
+        ...
+
+
 # --- Conversation catalog (DATA-12, T0) -------------------------------------
 
 MAX_TITLE_CHARS = 200

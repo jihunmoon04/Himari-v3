@@ -22,6 +22,7 @@ from himari.bootstrap import build_runtime
 from himari.common import (
     ASK_USER_TOOL_ID,
     ArtifactId,
+    ConversationId,
     EnvironmentKind,
     PrincipalId,
     CallId,
@@ -237,6 +238,7 @@ _ADDED_IN = {
         "image_status"))),
     10: ("DROP TABLE instructions",),
     11: ("DROP TABLE memory_ids", "DROP INDEX memories_by_source", "DROP TABLE memories"),
+    12: ("DROP TABLE event_text",),
 }
 
 
@@ -251,13 +253,13 @@ def old_database(path: Path, version: int) -> None:
            f"PRAGMA user_version={version}")
 
 
-@pytest.mark.parametrize("version", [2, 3, 4, 5, 6, 7, 8, 9, 10])
+@pytest.mark.parametrize("version", [2, 3, 4, 5, 6, 7, 8, 9, 10, 11])
 def test_an_older_database_is_upgraded_in_place_and_keeps_its_data(tmp_path: Path, version: int) -> None:
     path = tmp_path / "h.db"
     old_database(path, version)
     store = SqliteStore(path)
     try:
-        assert store.connection.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 11
+        assert store.connection.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 12
         data = SqliteData(store)
         events = asyncio.run(data.read_events(SCOPE))
         assert [e.payload.blocks for e in events] == [(TextBlock(f"from v{version}"),)]  # type: ignore[union-attr]
@@ -270,13 +272,16 @@ def test_an_older_database_is_upgraded_in_place_and_keeps_its_data(tmp_path: Pat
                            ).revision == 1  # the v10 table
         assert asyncio.run(data.save_memory(SCOPE.principal_id, MemoryCategory.USER, "Writes Python.")
                            ).memory_id == 1  # the v11 tables
+        found = asyncio.run(data.search_events(SCOPE.principal_id, ["FROM V"], current=ConversationId("conv_none"),
+                                               current_through=None, per_conversation=3, limit=10))
+        assert [h.text for h in found.hits] == [f"from v{version}"]  # v12: the Events already there were filled
         asyncio.run(data.trash_conversation(SCOPE))  # and the v7 columns
     finally:
         store.close()
-    SqliteStore(path).close()  # and it opens as a plain v11 database afterwards
+    SqliteStore(path).close()  # and it opens as a plain v12 database afterwards
 
 
-@pytest.mark.parametrize("version", [2, 3, 4, 5, 6, 7, 8, 9, 10])
+@pytest.mark.parametrize("version", [2, 3, 4, 5, 6, 7, 8, 9, 10, 11])
 @pytest.mark.parametrize("change", ["CREATE TABLE extra (x)", "PRAGMA application_id=1", "DROP TABLE artifacts"])
 def test_only_an_exact_older_database_is_upgraded(tmp_path: Path, version: int, change: str) -> None:
     path = tmp_path / "h.db"
@@ -287,7 +292,7 @@ def test_only_an_exact_older_database_is_upgraded(tmp_path: Path, version: int, 
     conn = sqlite3.connect(path)
     try:
         assert conn.execute("PRAGMA user_version").fetchone()[0] == version  # refused, never repaired
-        assert not conn.execute("SELECT 1 FROM sqlite_master WHERE name='memories'").fetchall()  # v11's
+        assert not conn.execute("SELECT 1 FROM sqlite_master WHERE name='event_text'").fetchall()  # v12's
     finally:
         conn.close()
     assert not list(tmp_path.glob("*.bak*"))  # refused before any backup
@@ -646,7 +651,7 @@ def test_files_of_a_v8_database_read_as_not_images(tmp_path: Path) -> None:
     blob = asyncio.run(data.blobs.put(SCOPE.principal_id, chunks(), 1 << 20))
     record = asyncio.run(data.stage_upload(SCOPE, blob, "old.png", "image/png"))
     store.close()
-    tamper(path, *_ADDED_IN[11], *_ADDED_IN[10], *_ADDED_IN[9], "PRAGMA user_version=8")
+    tamper(path, *_ADDED_IN[12], *_ADDED_IN[11], *_ADDED_IN[10], *_ADDED_IN[9], "PRAGMA user_version=8")
     store = SqliteStore(path)
     try:
         again, = asyncio.run(SqliteData(store).read_file_records(SCOPE, [(record.file_id, 1)]))

@@ -1,6 +1,6 @@
 # 대화 검색 v0.1
 
-> 2026-10-24 · **PROPOSED (V3-P72)** · rev. 2 — 소유자 결정 Q1~Q5 권고대로(§11). rev. 1: 설계 초안.
+> 2026-10-24 · **PROPOSED (V3-P72)** · 구현(§14). rev. 2 — 소유자 결정 Q1~Q5 권고대로(§11). rev. 1: 설계 초안.
 >
 > 배경: 메모리 패킷(V3-P71)의 Q4에서 소유자가 "지난 대화 검색은 따로 작은 패킷으로"를 권고대로 정했다(memory-v0.1 §11·§12). 기억은 저장된 1~2문장뿐이라, 모델이 기억하지 않기로 한 것은 남지 않는다. 그 나머지는 대화 원문에 있다.
 >
@@ -218,3 +218,37 @@ CREATE TABLE event_text (
 - `HIMARI_CONVERSATION_SEARCH`, `/api/server`·`himari status`
 - 영구 삭제 확인 창의 한 줄(Web·CLI)
 - 테스트와 스모크
+
+## 14. 구현 노트 (2026-10-24)
+
+**Data (v12)**
+- `event_text`(§4.1). `_new_event`가 사용자 메시지·최종 답이면 같은 트랜잭션에서 접은 글을 쓴다. 메모리 백엔드는 따로 두지 않고 검색할 때 이벤트에서 접는다(같은 계약, `tests/data/test_conversation_search.py`).
+- `ConversationSearch`: `search_events`·`read_event_texts`, `EventText`·`EventSearch`·`EventPage`. 접기·낱말 검사·순위(`pick_hits`)·읽기 경계(`check_read`)는 `rules`에 두어 두 백엔드가 같이 쓴다.
+- 설계(§4.4)의 `NOT_FOUND` 대신 **`NOT_AUTHORIZED`**다. 남의 대화·없는 대화·휴지통 대화를 같은 오류로 다루는 Data의 기존 규칙을 따랐다.
+- **업그레이드의 채우기는 파이썬 단계다**(`_fill_event_text`, v11 이하에서 올릴 때만). 스키마 스크립트는 DDL만 둔다. 업그레이드 전 서명 검사가 그 스크립트를 빈 DB에서 실행해 보기 때문이다. 같은 업그레이드 트랜잭션 안이라 채우다 실패하면 v11로 남는다.
+- `_PURGE`에 `event_text`를 `events` 앞에 지운다.
+
+**Tool** (`himari/tool/conversation_search.py`)
+- 결과 줄의 대화 이름은 **제목, 없으면 `(untitled)`**다. 설계(§6.1)는 미리보기를 쓰려 했지만, `ConversationSummary.preview`는 "화면 전용, 모델 입력이 아님"이라는 Data 계약이 있어 따랐다. 지금 대화의 압축된 부분은 `this conversation, before its summary`로 부른다.
+- Tool 계층은 `data.rules`를 가져올 수 없어 조각 위치를 찾는 접기를 모듈 안에 같은 규칙으로 둔다(메모리 Tool과 같다).
+- 선택 인자(`conversation`, `from`)는 스키마에서 `null`도 받는다.
+- 압축 경계는 Bootstrap의 `compacted_through`가 스냅숏과 `read_summary`로 답한다(ContextStatus와 같은 값).
+
+**설정·화면**
+- `HIMARI_CONVERSATION_SEARCH`, `Application.open(conversation_search=True)`, `/api/server`의 `conversation_search`, `himari status`의 `conversation search: on|off`, 꺼져 있으면 시작 줄 하나.
+- 영구 삭제 확인 창(Web 휴지통의 `Delete now`, CLI `delete --now`)에 "Text that other conversations found with search stays in them."
+
+**테스트·스모크**
+- 새 테스트: Data 13개(두 백엔드 26개), Tool 14개, Application 3개(Dispatcher를 거친 검색·읽기, "Compact now" 뒤 지금 대화의 앞부분만 찾기, 끄기), 설정 1개. 전체 pytest 2,194개, mypy, import 경계, node 스모크.
+- 빠듯한 예산(2,800 토큰)의 압축 테스트와 스모크의 압축 시나리오는 기억과 함께 이 기능도 끈다. 그 밖에 압축 요청 테스트 하나(`test_a_compaction_request_does_not_carry_them`)도 끈다.
+- 브라우저 스모크 9개 시나리오 통과. 휴지통 시나리오가 영구 삭제 확인 창의 새 줄을 확인한다.
+
+**PR #79 검수 반영**
+- B1: 업그레이드의 채우기는 이벤트를 키 순서로 500개씩(`FILL_BATCH`) 읽는다. 전에는 기존 이벤트를 한 번에 메모리에 올렸다. 같은 업그레이드 트랜잭션은 그대로다. 이벤트 10만 개 측정: 최대 메모리(tracemalloc) 75 MB → 1.3 MB(이벤트 수와 상관없이 일정), 시간 9.5초 → 8.9초.
+- B2: 순위와 상한(맞은 낱말 수 → 최신, 대화당 3개, 전체 10개, 전체 개수)을 SQL 창 함수(`ROW_NUMBER`·`COUNT(*) OVER`)로 정한다. 전에는 맞은 행을 모두 파이썬으로 가져와 정렬했다. 메모리 백엔드는 같은 순서를 `rules.pick_hits`로 지킨다. 10만 개가 모두 맞는 낱말: 1.66초 → 0.56초(맞는 것이 없을 때 0.11초).
+- 재검수 C1: 조각은 맞은 위치를 접은 글에서 찾아 원문 위치로 옮긴다(글자마다 접어 길이를 쌓음). NFKC가 길이를 바꾸는 글자(`ﬃ` → `ffi`)가 앞에 많으면, 전에는 조각에 맞은 낱말이 빠졌다.
+- C1(고치지 않음, 후속): `conversation_read`는 메시지 하나를 처음 2,000자까지만 보인다. 긴 메시지의 뒷부분에서 맞은 내용은 검색 조각으로만 보인다. 메시지 안의 위치부터 읽는 방법은 필요해지면 더한다.
+
+**실제 모델 확인 (2026-10-24, gpt-6-luna, 로컬 임시 서버)**
+- 대화 1에서 배포 순서와 롤백 순서를 정하고, 대화 2에서 점심 이야기를 한 뒤, 대화 3에서 "지난번에 정한 배포 롤백 순서가 뭐였지? 어느 대화였는지도 알려줘."라고 물었다.
+- 모델이 `conversation_search {"query": "배포 롤백 순서", "conversation": null}`을 불렀다(`null`이 스키마를 통과함). 대화 1의 두 메시지만 찾았고, "롤백은 웹 정적 파일 → API 서버 → DB 마이그레이션, 2026년 10월 24일 제목 없는 대화(conv_1)의 #1·#2"라고 출처를 밝혀 답했다.

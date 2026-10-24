@@ -254,7 +254,7 @@ def test_a_compaction_request_does_not_carry_them(tmp_path: Path) -> None:
 
     async def scenario() -> None:
         adapter = ScriptedAdapter([NormalizedFinal((TextBlock("SUMMARY"),))] * 12)
-        app = await opened(tmp_path, adapter, context_tokens=2800)
+        app = await opened(tmp_path, adapter, context_tokens=2800, conversation_search=False)  # sized without the search Tools
         try:
             await app.set_instructions(ALICE, "ZQX rule.", 0)
             scope = TrustedScope(ALICE, await app.create_conversation(ALICE))

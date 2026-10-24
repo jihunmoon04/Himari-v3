@@ -9,7 +9,7 @@ single-threaded asyncio (the transaction boundaries T1–T9, T7a, T-R).
 from __future__ import annotations
 
 import itertools
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 
@@ -37,6 +37,9 @@ from himari.common import (
 from himari.data import rules
 from himari.data.blobs import BlobRow, FileStore, MemoryBlobFiles
 from himari.data.api import (
+    EventPage,
+    EventSearch,
+    EventText,
     MAX_ATTACHMENTS,
     NO_IMAGE,
     MAX_STAGED_UPLOADS,
@@ -1191,6 +1194,44 @@ class InMemoryData:
         self._store._owned(scope)
         return sum(1 for (owner, _), m in self._store.memories.items()
                    if owner == scope.principal_id and m.source_conversation == scope.conversation_id)
+
+    # --- ConversationSearch (V3-P72) --------------------------------------------------
+
+    def _searchable(self, principal: PrincipalId, current: ConversationId, current_through: int | None,
+                    only: ConversationId | None) -> Iterator[tuple[ConversationId, ConversationEvent, str]]:
+        """(Conversation, Event, text) for each searchable Event (§3)."""
+        for cid, conv in self._store._conversations.items():
+            if conv.owner != principal or conv.trashed_at is not None or (only is not None and cid != only):
+                continue
+            for event in conv.events:
+                text = rules.event_text(event.payload)
+                if text is None or (cid == current and (current_through is None or event.sequence > current_through)):
+                    continue
+                yield cid, event, text
+
+    async def search_events(self, principal: PrincipalId, words: Sequence[str], *, current: ConversationId,
+                            current_through: int | None, conversation: ConversationId | None = None,
+                            per_conversation: int, limit: int) -> EventSearch:
+        folded = rules.search_words(words)
+        if conversation is not None:
+            self._store._authorized(TrustedScope(principal, conversation))
+        found = []
+        for cid, event, text in self._searchable(principal, current, current_through, conversation):
+            count = rules.matched(rules.fold(text), folded)
+            if count:
+                found.append(EventText(cid, event.sequence, event.kind, event.created_at, text, count))
+        hits, total = rules.pick_hits(found, per_conversation, limit)
+        ids = dict.fromkeys(h.conversation_id for h in hits)
+        return EventSearch(hits, total, tuple(self._summary(cid, self._store._conversations[cid]) for cid in ids))
+
+    async def read_event_texts(self, principal: PrincipalId, conversation: ConversationId, *, from_sequence: int,
+                               current: ConversationId, current_through: int | None, limit: int) -> EventPage:
+        conv = self._store._authorized(TrustedScope(principal, conversation))
+        last = rules.check_read(conversation, from_sequence, current, current_through)
+        items = [EventText(conversation, e.sequence, e.kind, e.created_at, text)
+                 for cid, e, text in self._searchable(principal, current, current_through, conversation)
+                 if e.sequence >= from_sequence and (last < 0 or e.sequence <= last)]
+        return EventPage(self._summary(conversation, conv), tuple(items[:limit]), len(items) > limit)
 
     # --- StateQuery -------------------------------------------------------------
 

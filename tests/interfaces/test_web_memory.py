@@ -240,3 +240,14 @@ def test_undo_of_a_new_note_deletes_it(server: Server) -> None:
     assert server.client.post(path, headers=SEND).json() == {"memory": None}
     assert server.listing()["memories"] == []
     assert server.client.post(path, headers=SEND).status_code == 404
+
+
+def test_himari_conversation_search_turns_it_off() -> None:  # V3-P72 §9, beside memory's own switch
+    from himari.interfaces.web.config import WebConfigError
+
+    base = {"HIMARI_DATA_ROOT": "/srv/himari"}
+    assert WebConfig.from_env(base).conversation_search is True
+    off = WebConfig.from_env({**base, "HIMARI_CONVERSATION_SEARCH": "0"})
+    assert (off.conversation_search, off.memory) == (False, True)
+    with pytest.raises(WebConfigError):
+        WebConfig.from_env({**base, "HIMARI_CONVERSATION_SEARCH": "maybe"})

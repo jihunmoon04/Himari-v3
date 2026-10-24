@@ -13,14 +13,18 @@ from himari.data.api import (
     MAX_EXTERNAL_SETTINGS,
     MAX_INSTRUCTIONS_CHARS,
     MAX_MEMORY_CHARS,
+    MAX_SEARCH_WORD_CHARS,
+    MAX_SEARCH_WORDS,
     MAX_LIST_LIMIT,
     MAX_MODEL_ID_CHARS,
     MAX_TITLE_CHARS,
     MAX_UI_HTML_BYTES,
     PREVIEW_CHARS,
     AppView,
+    AssistantFinal,
     DataError,
     DataErrorCode,
+    EventText,
     InitialActivation,
     InstructionScope,
     Memory,
@@ -31,6 +35,7 @@ from himari.data.api import (
     ToolCompletion,
     ToolExecutionStatus,
     UiResource,
+    UserMessage,
     ui_digest,
 )
 
@@ -148,6 +153,58 @@ def order_memories(memories: Iterable[Memory]) -> tuple[Memory, ...]:
     """By category, newest first within each (V3-P71 §4.2)."""
     return tuple(sorted(memories, key=lambda m: (_CATEGORY_ORDER[m.category], -m.updated_at.timestamp(),
                                                  -m.memory_id)))
+
+
+def fold(text: str) -> str:
+    """V3-P72 §5.1 (as V3-P71 §6.3): how searched text and words are compared."""
+    return unicodedata.normalize("NFKC", text).casefold()
+
+
+def event_text(payload: object) -> str | None:
+    """V3-P72 §3.3: the searchable text of an Event's payload — a user
+    message's or final answer's text blocks, joined by newlines — or None."""
+    if not isinstance(payload, (UserMessage, AssistantFinal)):
+        return None
+    return "\n".join(b.text for b in payload.blocks if isinstance(b, TextBlock))
+
+
+def search_words(words: object) -> tuple[str, ...]:
+    """The folded words of a search, each once (V3-P72 §5.2), or INVALID_ARGUMENT."""
+    if not isinstance(words, (list, tuple)) or not all(isinstance(w, str) for w in words):
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, "words are text")
+    folded = tuple(dict.fromkeys(fold(w) for w in words if w.strip()))
+    if not 1 <= len(folded) <= MAX_SEARCH_WORDS or any(len(w) > MAX_SEARCH_WORD_CHARS for w in folded):
+        raise DataError(DataErrorCode.INVALID_ARGUMENT,
+                        f"1 to {MAX_SEARCH_WORDS} words of at most {MAX_SEARCH_WORD_CHARS} characters")
+    return folded
+
+
+def matched(folded: str, words: Sequence[str]) -> int:
+    return sum(1 for w in words if w in folded)
+
+
+def pick_hits(found: Iterable[EventText], per_conversation: int, limit: int) -> tuple[tuple[EventText, ...], int]:
+    """V3-P72 §5.2: most words first, then newest; at most ``per_conversation``
+    of one Conversation and ``limit`` in all. Also how many matched."""
+    ordered = sorted(found, key=lambda e: (e.matched, e.created_at, e.sequence), reverse=True)
+    taken: list[EventText] = []
+    per: dict[str, int] = {}
+    for hit in ordered:
+        if len(taken) < limit and per.get(hit.conversation_id, 0) < per_conversation:
+            taken.append(hit)
+            per[hit.conversation_id] = per.get(hit.conversation_id, 0) + 1
+    return tuple(taken), len(ordered)
+
+
+def check_read(conversation: str, from_sequence: object, current: str, current_through: int | None) -> int:
+    """V3-P72 §4.4: the last sequence a read of ``conversation`` may reach (None: no limit → -1)."""
+    if not isinstance(from_sequence, int) or from_sequence < 1:
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, "from_sequence is 1 or more")
+    if conversation != current:
+        return -1
+    if current_through is None or from_sequence > current_through:
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, "that part of the current conversation is not searchable")
+    return current_through
 
 
 def preview(blocks: Sequence[ContentBlock]) -> str:
