@@ -63,6 +63,12 @@ from himari.data.api import (
     ImageSetup,
     Instructions,
     InstructionScope,
+    MAX_MEMORIES,
+    Memory,
+    MemoryCategory,
+    MemoryChange,
+    MemoryChangeKind,
+    MemoryOrigin,
     PresentedFile,
     StoredBlob,
     EventPayload,
@@ -172,6 +178,8 @@ class InMemoryStore:
         self.blob_rows: dict[str, BlobRow] = {}  # V3-P66: by key, shared by a principal's Conversations
         self.blobs = FileStore(MemoryBlobFiles(), _MemoryBlobRows(self))
         self.instructions: dict[tuple[PrincipalId, InstructionScope], Instructions] = {}  # V3-P69
+        self.memories: dict[tuple[PrincipalId, int], Memory] = {}  # V3-P71
+        self.memory_ids: dict[PrincipalId, int] = {}  # the last id given out, per principal
 
     # --- admin helpers (trusted setup paths, not model-reachable) --------
 
@@ -327,8 +335,8 @@ def _refused(file_id: str, why: str) -> DataError:
 class InMemoryData:
     """Implements ConversationLog, ArtifactStore, WorkspaceState, StateQuery,
     ConversationCatalog, ConversationRetention, ExternalSourceSettings,
-    FileCatalog, FileRetention and InstructionsStore (V3-P69); ``blobs`` is the
-    BlobStore (V3-P66)."""
+    FileCatalog, FileRetention, InstructionsStore (V3-P69) and MemoryStore
+    (V3-P71); ``blobs`` is the BlobStore (V3-P66)."""
 
     def __init__(self, store: InMemoryStore) -> None:
         self._store = store
@@ -666,9 +674,19 @@ class InMemoryData:
             raise DataError(DataErrorCode.INVALID_ARGUMENT, "another view is stored under this digest")
         if completion.presented_files and completion.status is not ToolExecutionStatus.SUCCEEDED:
             raise DataError(DataErrorCode.INVALID_ARGUMENT, "only a succeeded call presents files")
+        if completion.memory_change is not None and completion.status is not ToolExecutionStatus.SUCCEEDED:
+            raise DataError(DataErrorCode.INVALID_ARGUMENT, "only a succeeded call changes memory")
         staged = self._stage_artifacts(conv, completion.artifact_mutations)  # validates CAS first
         presented = self._stage_presented(conv, call, completion.presented_files)
         images = self._tool_images(conv, call, completion.model_result.blocks)
+        memory = (None if completion.memory_change is None
+                  else self._stage_memory(scope, call, completion.memory_change))
+        if memory is not None:
+            key, note = memory
+            if note is None:
+                del self._store.memories[key]
+            else:
+                self._store.memories[key] = note
         conv.artifacts.update(staged)
         conv.files.extend(presented)
         self._mark_attached(images)
@@ -948,6 +966,9 @@ class InMemoryData:
         if conv.purge_started_at is None:
             raise DataError(DataErrorCode.INVALID_STATE_TRANSITION, f"{scope.conversation_id} is not being deleted")
         del self._store._conversations[scope.conversation_id]
+        for key in [k for k, m in self._store.memories.items()
+                    if k[0] == scope.principal_id and m.source_conversation == scope.conversation_id]:
+            del self._store.memories[key]  # D5: the notes its calls wrote go with it
         used = {e.ui_digest for c in self._store._conversations.values() for e in c.executions.values()}
         for digest in {e.ui_digest for e in conv.executions.values()} - used:
             if digest is not None:
@@ -1077,6 +1098,83 @@ class InMemoryData:
         record = Instructions(text, current.revision + 1, datetime.now(UTC))
         self._store.instructions[(principal, scope)] = record
         return record
+
+    # --- MemoryStore (V3-P71) ---------------------------------------------------------
+
+    def _memory(self, principal: PrincipalId, memory_id: object) -> Memory:
+        note = self._store.memories.get((principal, memory_id)) if isinstance(memory_id, int) else None
+        if note is None:
+            raise DataError(DataErrorCode.NOT_FOUND, f"no note m{memory_id}")
+        return note
+
+    def _memory_count(self, principal: PrincipalId) -> int:
+        return sum(1 for owner, _ in self._store.memories if owner == principal)
+
+    def _new_memory_id(self, principal: PrincipalId) -> int:
+        self._store.memory_ids[principal] = self._store.memory_ids.get(principal, 0) + 1
+        return self._store.memory_ids[principal]
+
+    def _stage_memory(self, scope: TrustedScope, call: CallRef,
+                      change: MemoryChange) -> tuple[tuple[PrincipalId, int], Memory | None]:
+        """The note a Tool's change leaves (None: deleted), checked, not yet applied."""
+        change = rules.check_memory_change(change)
+        principal, key, now = scope.principal_id, (scope.principal_id, change.memory_id), datetime.now(UTC)
+        if change.kind is MemoryChangeKind.SAVE and change.expected_revision is None:
+            if change.memory_id > self._store.memory_ids.get(principal, 0) or key in self._store.memories:
+                raise DataError(DataErrorCode.INVALID_ARGUMENT, f"m{change.memory_id} was not given out for a new note")
+            if self._memory_count(principal) >= MAX_MEMORIES:
+                raise DataError(DataErrorCode.LIMIT_EXCEEDED, f"{MAX_MEMORIES} notes are kept at most")
+            assert change.category is not None and change.text is not None
+            return key, Memory(change.memory_id, change.category, change.text, MemoryOrigin.MODEL,
+                               scope.conversation_id, call, 1, now, now)
+        note = self._memory(principal, change.memory_id)
+        if change.expected_revision != note.revision:
+            raise DataError(DataErrorCode.VERSION_CONFLICT, f"m{note.memory_id} is at revision {note.revision}")
+        if change.kind is MemoryChangeKind.FORGET:
+            return key, None
+        assert change.category is not None and change.text is not None
+        return key, replace(note, category=change.category, text=change.text, origin=MemoryOrigin.MODEL,
+                            source_conversation=scope.conversation_id, source_call=call,
+                            revision=note.revision + 1, updated_at=now)
+
+    async def list_memories(self, principal: PrincipalId) -> tuple[Memory, ...]:
+        return rules.order_memories(m for (owner, _), m in self._store.memories.items() if owner == principal)
+
+    async def read_memory(self, principal: PrincipalId, memory_id: int) -> Memory:
+        return self._memory(principal, memory_id)
+
+    async def allocate_memory_id(self, principal: PrincipalId) -> int:
+        return self._new_memory_id(principal)
+
+    async def save_memory(self, principal: PrincipalId, category: MemoryCategory, text: str, *,
+                          memory_id: int | None = None, expected_revision: int | None = None) -> Memory:
+        category, text, now = rules.check_memory_category(category), rules.check_memory_text(text), datetime.now(UTC)
+        if memory_id is None:
+            if self._memory_count(principal) >= MAX_MEMORIES:
+                raise DataError(DataErrorCode.LIMIT_EXCEEDED, f"{MAX_MEMORIES} notes are kept at most")
+            new_id = self._new_memory_id(principal)
+            note = Memory(new_id, category, text, MemoryOrigin.USER, None, None, 1, now, now)
+        else:
+            current = self._memory(principal, memory_id)
+            if expected_revision != current.revision:
+                raise DataError(DataErrorCode.VERSION_CONFLICT, f"m{memory_id} is at revision {current.revision}")
+            note = replace(current, category=category, text=text, origin=MemoryOrigin.USER,
+                           revision=current.revision + 1, updated_at=now)
+        self._store.memories[(principal, note.memory_id)] = note
+        return note
+
+    async def delete_memory(self, principal: PrincipalId, memory_id: int,
+                            expected_revision: int | None = None) -> Memory:
+        note = self._memory(principal, memory_id)
+        if expected_revision is not None and expected_revision != note.revision:
+            raise DataError(DataErrorCode.VERSION_CONFLICT, f"m{memory_id} is at revision {note.revision}")
+        del self._store.memories[(principal, memory_id)]
+        return note
+
+    async def count_source_memories(self, scope: TrustedScope) -> int:
+        self._store._owned(scope)
+        return sum(1 for (owner, _), m in self._store.memories.items()
+                   if owner == scope.principal_id and m.source_conversation == scope.conversation_id)
 
     # --- StateQuery -------------------------------------------------------------
 

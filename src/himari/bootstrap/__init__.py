@@ -17,7 +17,7 @@ from himari.control.driver import Driver
 from himari.data.memory import InMemoryData, InMemoryStore
 from himari.data.sqlite import SqliteData, SqliteStore
 from himari.environment.api import EnvironmentPlugin
-from himari.prompt.api import ContextBudget, SourceNote
+from himari.prompt.api import MEMORY_NOTE, ContextBudget, SourceNote
 from himari.prompt.compaction import Compactor
 from himari.prompt.composer import Composer
 from himari.prompt.loader import ContextLoader
@@ -27,6 +27,7 @@ from himari.tool.access import ConfiguredExternalAccess
 from himari.tool.api import ToolHandler
 from himari.tool.dispatcher import Dispatcher
 from himari.tool.images import StoredResultImages
+from himari.tool.memory import memory_tools
 from himari.tool.registry import ToolRegistry
 
 DEFAULT_INSTRUCTIONS = ("You are HIMARI, a helpful assistant.",)
@@ -70,10 +71,12 @@ def build_runtime(
     source_notes: Sequence[SourceNote] = (),  # tool server notes (V3-P60); used for enabled sources only
     image_views: ViewMaker | None = None,  # model copies of images (V3-P67); None: images are not prepared
     file_max_bytes: int = DEFAULT_FILE_MAX_BYTES,
+    memory: bool = False,  # V3-P71: the memory Tools, MEMORY_NOTE and the notes in the state
 ) -> Runtime:
     store = store if store is not None else InMemoryStore()
     data = SqliteData(store) if isinstance(store, SqliteStore) else InMemoryData(store)
-    registry = ToolRegistry([AskUserTool(), *tools], allow_require_user=allow_require_user_tools)
+    registry = ToolRegistry([AskUserTool(), *tools, *(memory_tools(data) if memory else ())],
+                            allow_require_user=allow_require_user_tools)
     for env in environments:
         for handler in env.tools():
             registry.register(handler)
@@ -90,6 +93,8 @@ def build_runtime(
         capabilities = provider.describe_capabilities(model_id)
         models = ModelCatalog((ModelOffer(model_id, reasoning_effort, capabilities.reasoning_efforts, context_budget,
                                           capabilities.max_output_tokens),), model_id)
+    if memory:
+        instructions = (*instructions, MEMORY_NOTE)
     if turn_budget is not None:  # the rule for the turn's state, fixed in the system prompt (V3-P62 §8)
         instructions = (*instructions, TURN_GUIDANCE)
     driver = Driver(
@@ -101,6 +106,7 @@ def build_runtime(
         models=models,
         settings=data,
         user_instructions=data,
+        memories=data if memory else None,
         max_runs_per_drive=max_runs_per_drive,
         planner=Compactor() if any(o.budget is not None for o in models.offers) else None,
         turn_budget=turn_budget,

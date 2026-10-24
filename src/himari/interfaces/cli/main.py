@@ -31,6 +31,7 @@ import errno
 import json
 import mimetypes
 import os
+import re
 import shlex
 import shutil
 import sys
@@ -57,6 +58,8 @@ POLL_SECONDS = 0.5
 EVENT_PAGE = 32  # 32 x a 64 KiB Tool result stays well under the 8 MiB response bound
 TRASH_SECONDS = 90.0  # the server waits up to 30 s for a running job to stop (V3-P65 §7.1)
 TOOL_RESULT_LINES = 8
+MEMORY_CHANGES = frozenset({"memory_save", "memory_forget"})  # V3-P71: shown as one line each
+MEMORY_RESULT = re.compile(r"(Saved|Updated|Forgot|Already saved as) (m[0-9]+)")
 PROGRESS_CHARS = 200  # a progress line, like a call's arguments (V3-P68 §6)
 
 STATE_TEXT = {
@@ -118,6 +121,7 @@ class Printer:
     verbose: bool = False
     # A call is identified by (run_id, call_id): call ids repeat across Runs.
     calls: dict[tuple[str, str], str] = field(default_factory=dict)  # -> tool_id
+    notes: dict[tuple[str, str], str] = field(default_factory=dict)  # memory_save calls -> the note's text
     answered: set[tuple[str, str]] = field(default_factory=set)  # ask_user calls whose answer was printed
     # The latest compaction (from /context): a divider is printed before the
     # first event it does not cover, with the summary when verbose.
@@ -208,6 +212,10 @@ class Printer:
                 if model:  # a step of calls only: its model above them
                     self.line(self.speaker(model))
                     model = None
+                if tool_id in MEMORY_CHANGES:  # one line with its result (V3-P71 §8)
+                    note = arguments.get("text") if isinstance(arguments, dict) else None
+                    self.notes[(str(event.get("run_id")), call_id)] = note if isinstance(note, str) else ""
+                    continue
                 shown = json.dumps(arguments, ensure_ascii=False, sort_keys=True)
                 if len(shown) > 200 and not self.verbose:
                     shown = shown[:199] + self.symbols.more
@@ -222,11 +230,28 @@ class Printer:
                 if event.get("is_error"):  # closed without an answer (dismissed, or its turn cancelled)
                     self.line("  (question closed without an answer)")
                 return
+            if called in MEMORY_CHANGES:
+                self.memory_line(called, text, self.notes.get(key, ""), bool(event.get("is_error")))
+                return
             mark = self.symbols.failed if event.get("is_error") else self.symbols.ok
             self.line(f"  {self.symbols.result} {safe_line(called or 'tool', encoding=self.encoding)} {mark}")
             self.line(safe_block(text, encoding=self.encoding, max_lines=None if self.verbose else TOOL_RESULT_LINES))
             self.files(event.get("presented_files") or [])
             self.files(event.get("images") or [])  # V3-P67 §8: the images the call returned
+
+    def memory_line(self, tool_id: str, result: str, note: str, failed: bool) -> None:
+        """``  ◆ remembered m15: Uses Go.`` (V3-P71 §8): what the user would
+        want to know was kept or dropped, apart from the progress lines."""
+        mark = self.symbols.memory
+        if failed:
+            self.line(f"  {mark} {tool_id} {self.symbols.failed}: {safe_line(result, encoding=self.encoding)}")
+            return
+        said = MEMORY_RESULT.match(result)
+        verb, note_id = (said.group(1), said.group(2)) if said else ("", "")
+        shown = {"Saved": f"remembered {note_id}: {note}", "Updated": f"updated {note_id}: {note}",
+                 "Forgot": f"forgot {note_id}", "Already saved as": f"already remembered as {note_id}"}.get(
+                     verb, result)
+        self.line(f"  {mark} {safe_line(' '.join(shown.split()), encoding=self.encoding)}")
 
     def progress(self, text: str) -> None:
         """Commentary as one progress line, ``  » Looking through the code`` (V3-P68 §6):
@@ -592,6 +617,10 @@ def delete_question(name: str, notice: dict[str, Any], now: bool) -> list[str]:
     servers = [f"{s} (no longer configured)" if s in unconfigured else str(s) for s in notice.get("servers") or []]
     lines.append(f"Data stored by the external servers this conversation used ({', '.join(servers)}) is not deleted."
                  if servers else "Data stored by external services is not deleted.")
+    count = int(notice.get("memory_count") or 0)
+    if count:  # V3-P71 D5
+        lines.append(f"{count} note{'s' if count > 1 else ''} HIMARI saved in it {'are' if count > 1 else 'is'} "
+                     "deleted with it for good.")
     return lines
 
 
@@ -915,6 +944,126 @@ def cmd_instructions(session: Session, args: argparse.Namespace, read: Callable[
     return EXIT_OK
 
 
+MEMORY_USAGE = ("usage: himari memory | memory add CATEGORY TEXT|- | memory edit ID TEXT|- [--category C]"
+                " | memory rm ID [--yes]")
+MEMORY_CATEGORIES = ("user", "preference", "project", "reference")
+
+
+def memory_id(raw: str) -> int | None:
+    """``m12`` or ``12`` → 12."""
+    match = re.fullmatch(r"m?([1-9][0-9]{0,9})", raw.strip())
+    return None if match is None else int(match.group(1))
+
+
+def memory_row(note: dict[str, Any]) -> str:
+    """``m12  Uses Go.  (from "Trip" · HIMARI · 2026-10-24)`` (V3-P71 §8)."""
+    source = note.get("source")
+    if isinstance(source, dict):
+        where = f"from \"{source.get('title')}\"" if source.get("title") else f"from {source.get('conversation')}"
+        if source.get("in_trash"):
+            where += " (in trash)"
+    else:
+        where = "added by you"
+    who = "HIMARI" if note.get("origin") == "model" else "you"
+    when = str(note.get("updated_at") or "")[:10]
+    text = " ".join(str(note.get("text") or "").split())
+    return f"m{note.get('id')}  {text}  ({where} · {who} · {when})" if isinstance(source, dict) else \
+        f"m{note.get('id')}  {text}  ({where} · {when})"
+
+
+def _memory_text(session: Session, raw: str) -> str | None:
+    if raw != "-":
+        return raw
+    try:
+        if _is_terminal(sys.stdin):
+            session.note("(reading the note from standard input; end with Ctrl-D)")
+        stream = getattr(sys.stdin, "buffer", None)
+        return stream.read().decode("utf-8-sig") if stream is not None else sys.stdin.read().removeprefix("\ufeff")
+    except (OSError, UnicodeDecodeError) as error:
+        session.note(f"cannot read the note: {safe_line(str(error))}")
+        return None
+
+
+def cmd_memory(session: Session, args: argparse.Namespace, read: Callable[[str], str] = input) -> int:
+    """V3-P71 §8: list the notes, ``add``, ``edit`` or ``rm`` one."""
+    rest = list(args.rest)
+    action = args.action
+    wrong = ((action is None and (rest or args.category or args.yes))
+             or (action == "add" and (len(rest) != 2 or rest[0] not in MEMORY_CATEGORIES or args.category or args.yes))
+             or (action == "edit" and (len(rest) != 2 or args.yes))
+             or (action == "rm" and (len(rest) != 1 or args.category)))
+    if wrong:
+        session.note(MEMORY_USAGE)
+        return EXIT_USAGE
+    if action is None:
+        listing = session.client.get("/api/memories")
+        notes = listing.get("memories") or []
+        if not listing.get("enabled"):
+            session.note("(memory is off on this server: HIMARI neither saves nor uses notes; you can still manage them)")
+        if not notes:
+            session.note("(no notes)")
+            return EXIT_OK
+        for category in MEMORY_CATEGORIES:
+            mine = [n for n in notes if n.get("category") == category]
+            if mine:
+                session.printer.line(f"{category}:")
+                for note in mine:
+                    session.printer.line("  " + safe_line(memory_row(note), encoding=session.printer.encoding))
+        session.note(f"({len(notes)} of {listing.get('max_count')} notes)")
+        return EXIT_OK
+    if action == "add":
+        text = _memory_text(session, rest[1])
+        if text is None:
+            return EXIT_USAGE
+        try:
+            saved = session.client.post("/api/memories", {"category": rest[0], "text": text})
+        except ServerRefused as error:
+            session.note(f"refused ({error.code}): {error}")
+            return EXIT_FAILED
+        session.note(f"(saved as m{saved['id']}; used from the next message)")
+        return EXIT_OK
+    target = memory_id(rest[0])
+    if target is None:
+        session.note(f"not a note id: {safe_line(rest[0])} (as m12)")
+        return EXIT_USAGE
+    notes = session.client.get("/api/memories").get("memories") or []
+    current = next((n for n in notes if n.get("id") == target), None)
+    if current is None:
+        session.note(f"no note m{target}")
+        return EXIT_FAILED
+    if action == "edit":
+        if args.category is not None and args.category not in MEMORY_CATEGORIES:
+            session.note(f"a category is one of {', '.join(MEMORY_CATEGORIES)}")
+            return EXIT_USAGE
+        text = _memory_text(session, rest[1])
+        if text is None:
+            return EXIT_USAGE
+        try:  # from the revision just read: a change made elsewhere since is refused, never overwritten
+            session.client.put(f"/api/memories/{target}", {"category": args.category or current["category"],
+                                                           "text": text, "revision": current["revision"]})
+        except ServerRefused as error:
+            session.note(f"refused ({error.code}): {error}")
+            return EXIT_FAILED
+        session.note("(saved; used from the next message)")
+        return EXIT_OK
+    session.printer.line(safe_line(memory_row(current), encoding=session.printer.encoding))
+    if not args.yes:
+        try:
+            answer = read("Delete this note? Conversations that already used it still show it. [y/N] ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            answer = ""
+        if answer not in ("y", "yes"):
+            session.note("(nothing was deleted)")
+            return EXIT_OK
+    try:
+        session.client.delete(f"/api/memories/{target}", {"revision": current["revision"]})
+    except ServerRefused as error:
+        session.note(f"refused ({error.code}): {error}")
+        return EXIT_FAILED
+    session.note("(deleted)")
+    return EXIT_OK
+
+
 def documents_line(documents: object) -> str:
     """V3-P70 §9: whether documents are read here, whether scripts can make them, with which libraries."""
     if not isinstance(documents, dict) or not documents.get("read"):
@@ -931,7 +1080,8 @@ def cmd_status(session: Session, args: argparse.Namespace) -> int:
     offered = [str(m.get("id")) for m in server.get("models") or [] if not m.get("default")]
     for line in (f"model: {server.get('model')}" + (f" (also offered: {', '.join(offered)})" if offered else ""),
                  f"commands: {SANDBOX_TEXT.get(sandbox, sandbox)}",
-                 f"context budget: {server.get('context_budget'):,} tokens", documents_line(server.get("documents"))):
+                 f"context budget: {server.get('context_budget'):,} tokens", documents_line(server.get("documents")),
+                 f"memory: {'on' if server.get('memory') else 'off'}"):
         session.printer.line(safe_line(line, encoding=session.printer.encoding))
     return EXIT_OK
 
@@ -1215,6 +1365,11 @@ def parser() -> argparse.ArgumentParser:
     instructions.add_argument("action", nargs="?", choices=["set", "clear"])
     instructions.add_argument("file", nargs="?", help="set: a UTF-8 text file, or - for standard input")
     instructions.add_argument("--yes", action="store_true", help="clear without asking")
+    memory = sub.add_parser("memory", help="the notes HIMARI keeps about you: list, add, edit or rm")
+    memory.add_argument("action", nargs="?", choices=["add", "edit", "rm"])
+    memory.add_argument("rest", nargs="*", help="add: CATEGORY TEXT|-; edit: ID TEXT|-; rm: ID")
+    memory.add_argument("--category", help="edit: move the note to this category")
+    memory.add_argument("--yes", action="store_true", help="rm without asking")
     return p
 
 
@@ -1222,7 +1377,7 @@ COMMANDS: dict[str, Callable[[Session, argparse.Namespace], int]] = {
     "chat": cmd_chat, "list": cmd_list, "show": cmd_show, "new": cmd_new, "send": cmd_send, "continue": cmd_continue,
     "compact": cmd_compact, "tools": cmd_tools, "model": cmd_model, "pause": cmd_pause, "cancel": cmd_cancel,
     "status": cmd_status, "rename": cmd_rename, "delete": cmd_delete, "trash": cmd_trash, "restore": cmd_restore,
-    "files": cmd_files, "download": cmd_download, "instructions": cmd_instructions,
+    "files": cmd_files, "download": cmd_download, "instructions": cmd_instructions, "memory": cmd_memory,
 }
 
 

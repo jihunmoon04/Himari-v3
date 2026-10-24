@@ -36,7 +36,7 @@ from himari.common import (
     TrustedScope,
     UnknownOutcomePolicy,
 )
-from himari.data.api import ArtifactMutation, ArtifactStore, BindingAuthority, ConversationWorkspace
+from himari.data.api import ArtifactMutation, ArtifactStore, BindingAuthority, ConversationWorkspace, MemoryChange
 # Tool views (MCP Apps, V3-P58): owned by Data, re-exported here so that a
 # Tool implementation (e.g. the MCP connector, which may import only
 # tool.api — V3-059) can build them.
@@ -186,6 +186,10 @@ class ToolOutcome(DeepFrozen):
     presented_files: tuple[PresentedFile, ...] = ()
     # V3-P67 §4.2: images for the model, at most MAX_RESULT_IMAGES (more become a line).
     result_images: tuple[ResultImage, ...] = ()
+    # V3-P71: a memory Tool's note, written with the result (SUCCEEDED only).
+    # If Data refuses it the call is committed FAILED instead, saying why: the
+    # result said the note was written.
+    memory_change: MemoryChange | None = None
 
 
 @runtime_checkable

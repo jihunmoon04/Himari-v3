@@ -744,6 +744,10 @@ class ToolCompletion(DeepFrozen):
     # Only with SUCCEEDED (INVALID_ARGUMENT otherwise); BLOB_MISSING when a
     # blob is gone or expired, LIMIT_EXCEEDED past the hour's limit.
     presented_files: tuple[PresentedFile, ...] = ()
+    # V3-P71: a memory Tool's note, written in the same transaction with this
+    # call as its source. Only with SUCCEEDED (INVALID_ARGUMENT otherwise);
+    # MemoryStore's errors when the note cannot be written.
+    memory_change: MemoryChange | None = None
 
 
 @dataclass(frozen=True)
@@ -896,6 +900,102 @@ class InstructionsStore(Protocol):
         whitespace is no text. VERSION_CONFLICT for another revision,
         TOO_LARGE past MAX_INSTRUCTIONS_CHARS, INVALID_ARGUMENT for a control
         character other than newline and tab, or a scope not offered."""
+        ...
+
+
+# --- Memory (V3-P71) -----------------------------------------------------------
+
+MAX_MEMORY_CHARS = 500  # one note, in code points after newlines are normalized (Q3)
+MAX_MEMORIES = 1_000  # a principal's notes (Q3)
+
+
+class MemoryCategory(Enum):
+    """The four fixed kinds of note (Q5), in the order they are shown."""
+
+    USER = "user"  # who the user is: work, environment, languages
+    PREFERENCE = "preference"  # how they like answers and work done
+    PROJECT = "project"  # what they are working on: projects, goals, decisions
+    REFERENCE = "reference"  # paths, links, names they use
+
+
+class MemoryOrigin(Enum):
+    """Who wrote a note's current text."""
+
+    USER = "user"  # the Memory screen or the CLI
+    MODEL = "model"  # memory_save in a Conversation
+
+
+@dataclass(frozen=True)
+class Memory(DeepFrozen):
+    memory_id: int  # shown as m<id>; never reused for another note of the principal
+    category: MemoryCategory
+    text: str
+    origin: MemoryOrigin
+    # The memory_save call that wrote it, in which Conversation; None when the
+    # user wrote it outside a Conversation. A permanent delete of that
+    # Conversation deletes the note (D5).
+    source_conversation: ConversationId | None
+    source_call: CallRef | None
+    revision: int
+    created_at: datetime
+    updated_at: datetime
+
+
+class MemoryChangeKind(Enum):
+    SAVE = "save"  # a new note, or a rewrite of one (expected_revision set)
+    FORGET = "forget"
+
+
+@dataclass(frozen=True)
+class MemoryChange(DeepFrozen):
+    """What a memory Tool's succeeded call does, committed with its result
+    (ToolCompletion.memory_change) so the note and the result that reports
+    it are written together or not at all. The source is the call itself.
+
+    SAVE of a new note: ``memory_id`` from ``allocate_memory_id``, no
+    ``expected_revision``. SAVE of an existing note and FORGET: the note's
+    id and the revision the Tool read."""
+
+    kind: MemoryChangeKind
+    memory_id: int
+    category: MemoryCategory | None = None  # SAVE only
+    text: str | None = None  # SAVE only
+    expected_revision: int | None = None
+
+
+class MemoryStore(Protocol):
+    """V3-P71: the notes HIMARI keeps about a principal. The principal comes
+    from the trusted entry point or the Tool's TrustedScope, never from model
+    output. Errors: NOT_FOUND (no such note of this principal),
+    VERSION_CONFLICT (written since the revision given), TOO_LARGE (past
+    MAX_MEMORY_CHARS), LIMIT_EXCEEDED (MAX_MEMORIES reached),
+    INVALID_ARGUMENT (empty text, a control character other than newline and
+    tab, a lone surrogate)."""
+
+    async def list_memories(self, principal: PrincipalId) -> tuple[Memory, ...]:
+        """By category (MemoryCategory order), newest first within each."""
+        ...
+
+    async def read_memory(self, principal: PrincipalId, memory_id: int) -> Memory: ...
+
+    async def allocate_memory_id(self, principal: PrincipalId) -> int:
+        """A new id for a note memory_save will add; one left unused is a gap."""
+        ...
+
+    async def save_memory(self, principal: PrincipalId, category: MemoryCategory, text: str, *,
+                          memory_id: int | None = None, expected_revision: int | None = None) -> Memory:
+        """The user's write. No ``memory_id``: a new note. With it: rewrites
+        that note when ``expected_revision`` is its revision; it becomes the
+        user's text and keeps its source."""
+        ...
+
+    async def delete_memory(self, principal: PrincipalId, memory_id: int,
+                            expected_revision: int | None = None) -> Memory:
+        """The user's delete; returns the note as it was. Gone at once."""
+        ...
+
+    async def count_source_memories(self, scope: TrustedScope) -> int:
+        """The notes this Conversation's calls wrote: deleted with it."""
         ...
 
 

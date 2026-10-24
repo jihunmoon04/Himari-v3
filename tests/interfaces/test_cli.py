@@ -413,7 +413,8 @@ def test_show_reports_the_context_size(harness: Harness) -> None:
 def test_a_compacted_conversation_shows_where_the_summary_takes_over(tmp_path: Path,
                                                                       monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(cli, "POLL_SECONDS", 0.01)
-    harness = Harness(tmp_path, context_tokens=2800)
+    # The budget is sized for a prompt without the memory Tools and note (V3-P71).
+    harness = Harness(tmp_path, context_tokens=2800, turn={"memory": False})
     with harness.test_client:
         cid = harness.run("new")[1].strip()
         harness.queue(*[final("SUMMARY of the start")] * 12)  # every answer and every summary alike
@@ -442,7 +443,7 @@ def test_a_compacted_conversation_shows_where_the_summary_takes_over(tmp_path: P
 def test_a_compacted_conversation_on_an_ascii_terminal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # PR #16 review B1: the divider is the CLI's own mark too; it never raises.
     monkeypatch.setattr(cli, "POLL_SECONDS", 0.01)
-    harness = Harness(tmp_path, context_tokens=2800)
+    harness = Harness(tmp_path, context_tokens=2800, turn={"memory": False})  # sized without the memory Tools
     with harness.test_client:
         cid = harness.run("new")[1].strip()
         harness.queue(*[final("SUMMARY 요약 ─ done")] * 12)
@@ -679,7 +680,7 @@ def test_status_rename_and_a_closed_question_in_the_history(harness: Harness) ->
     code, out, _ = harness.run("status")
     assert code == cli.EXIT_OK
     assert out.splitlines() == ["model: m", "commands: unavailable on this host", "context budget: 128,000 tokens",
-                                "documents: off"]
+                                "documents: off", "memory: on"]
     cid = harness.run("new")[1].strip()
     assert harness.run("rename", cid, "Trip plans")[0] == cli.EXIT_OK
     assert "Trip plans" in harness.run("list")[1]

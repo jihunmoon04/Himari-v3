@@ -60,6 +60,7 @@ import contextlib
 import dataclasses
 import hashlib
 from collections.abc import AsyncIterator, Awaitable, Callable
+from typing import NamedTuple
 
 from himari.common import ASK_USER_TOOL_ID, CallRef, ConversationId, RunId, TrustedScope
 from himari.control.api import (
@@ -87,6 +88,8 @@ from himari.data.api import (
     EventRef,
     InstructionScope,
     InstructionsStore,
+    Memory,
+    MemoryStore,
     RawNoResponse,
     RawReceived,
     RawRunOutcome,
@@ -157,6 +160,13 @@ def session_key(scope: TrustedScope) -> str:
     return hashlib.sha256(f"himari-session:{scope.conversation_id}".encode()).hexdigest()[:32]
 
 
+class _UserContext(NamedTuple):
+    """What the loader takes about the user, in its parameter order."""
+
+    instructions: str  # V3-P69
+    memories: tuple[Memory, ...] | None  # V3-P71; None: memory is off
+
+
 class Driver:
     def __init__(
         self,
@@ -169,6 +179,7 @@ class Driver:
         *,
         settings: ConversationModelSettings | None = None,  # None: every Conversation uses the default model
         user_instructions: InstructionsStore | None = None,  # None: no user instructions (V3-P69)
+        memories: MemoryStore | None = None,  # None: memory is off (V3-P71)
         max_runs_per_drive: int | None = 16,
         planner: CompactionPlanner | None = None,
         turn_budget: int | None = None,
@@ -190,6 +201,7 @@ class Driver:
         self._models = models
         self._settings = settings
         self._user_instructions = user_instructions
+        self._memories = memories
         self._max_runs = max_runs_per_drive
         self._turn_budget = turn_budget
         self._no_progress_runs = no_progress_runs
@@ -198,9 +210,9 @@ class Driver:
         self._signals: dict[ConversationId, StopSignal] = {}  # of the drive holding the lock
         self._turns: dict[ConversationId, Turn] = {}  # of the drive holding the lock
         self._turn_models: dict[ConversationId, ResolvedModel] = {}  # of the drive holding the lock
-        # The user's instructions, read once when the turn started (V3-P69 §5): one turn, one
-        # text, and Conversations running at once each keep their own.
-        self._turn_instructions: dict[ConversationId, str] = {}  # of the drive holding the lock
+        # The user's instructions and notes, read once when the turn started (V3-P69 §5,
+        # V3-P71 §5.4): one turn, one text, and Conversations running at once each keep their own.
+        self._turn_users: dict[ConversationId, _UserContext] = {}  # of the drive holding the lock
 
     async def drive(self, scope: TrustedScope, message: UserMessage, *, stop: StopSignal | None = None,
                     progress: TurnProgress | None = None) -> DriveResult:
@@ -243,7 +255,7 @@ class Driver:
                 return DriveResult(DriveState.WAITING_FOR_USER, waiting_call=waiting, recovery=recovery,
                                    detail="answer the question before compacting")
             try:
-                inputs = await self._loader.load(scope, (), self._options_for(scope), self._turn_text(scope))
+                inputs = await self._loader.load(scope, (), self._options_for(scope), *self._turn_user(scope))
                 model_input = self._compose(scope, inputs)
             except PromptError as exc:
                 state = (DriveState.RECOVERY_REQUIRED if exc.code is PromptErrorCode.INCOMPLETE_HISTORY
@@ -278,9 +290,9 @@ class Driver:
         budget = model.offer.budget
         if self._planner is None or budget is None:
             return None
-        # The next turn's context: today's instructions, not a running turn's (V3-P69 §5).
+        # The next turn's context: today's instructions and notes, not a running turn's (V3-P69 §5).
         inputs = await self._loader.load(scope, (), self._request_options(scope, model),
-                                         await self._read_user_instructions(scope))
+                                         *await self._read_user(scope))
         summary = self._planner.summary_of(inputs.snapshot)
         snapshot = inputs.snapshot if summary is not None else None
         tokens: int | None = None
@@ -324,9 +336,9 @@ class Driver:
             raise ControlError(ControlErrorCode.BUSY, scope.conversation_id)
         async with lock:
             model = await self._resolve_model(scope)  # once per turn (V3-P64 §5)
-            text = await self._read_user_instructions(scope)  # and the user's instructions (V3-P69 §5)
+            user = await self._read_user(scope)  # and the user's instructions and notes (V3-P69 §5)
             self._turn_models[scope.conversation_id] = model
-            self._turn_instructions[scope.conversation_id] = text
+            self._turn_users[scope.conversation_id] = user
             self._signals[scope.conversation_id] = stop if stop is not None else StopSignal()
             self._turns[scope.conversation_id] = Turn(self._turn_budget, self._max_runs, progress,
                                                       model.offer.max_output_tokens)
@@ -336,7 +348,7 @@ class Driver:
                 del self._signals[scope.conversation_id]
                 del self._turns[scope.conversation_id]
                 del self._turn_models[scope.conversation_id]
-                del self._turn_instructions[scope.conversation_id]
+                del self._turn_users[scope.conversation_id]
 
     def _stop(self, scope: TrustedScope) -> StopSignal:
         return self._signals[scope.conversation_id]
@@ -350,13 +362,14 @@ class Driver:
         setting = await self._settings.read_model_setting(scope) if self._settings is not None else None
         return self._models.resolve(setting)
 
-    async def _read_user_instructions(self, scope: TrustedScope) -> str:
-        if self._user_instructions is None:
-            return ""
-        return (await self._user_instructions.read_instructions(scope.principal_id, InstructionScope.USER)).text
+    async def _read_user(self, scope: TrustedScope) -> _UserContext:
+        text = "" if self._user_instructions is None else (
+            await self._user_instructions.read_instructions(scope.principal_id, InstructionScope.USER)).text
+        notes = None if self._memories is None else await self._memories.list_memories(scope.principal_id)
+        return _UserContext(text, notes)
 
-    def _turn_text(self, scope: TrustedScope) -> str:
-        return self._turn_instructions[scope.conversation_id]
+    def _turn_user(self, scope: TrustedScope) -> _UserContext:
+        return self._turn_users[scope.conversation_id]
 
     def _turn_model(self, scope: TrustedScope) -> ResolvedModel:
         return self._turn_models[scope.conversation_id]
@@ -606,7 +619,7 @@ class Driver:
                 return result(DriveState.NO_PROGRESS,
                               detail=f"the last {turn.empty_streak} steps brought nothing new")
             try:
-                inputs = await self._loader.load(scope, triggers, self._options_for(scope), self._turn_text(scope))
+                inputs = await self._loader.load(scope, triggers, self._options_for(scope), *self._turn_user(scope))
                 model_input = self._compose(scope, inputs)
                 model_input, refusal, estimate = await self._fit_budget(scope, triggers, inputs, model_input,
                                                                         compactions)
@@ -711,7 +724,7 @@ class Driver:
             failure = await self._compact(scope, decision.compaction, self._planner, budget, compactions)
             if failure is not None:
                 break
-            inputs = await self._loader.load(scope, triggers, self._options_for(scope), self._turn_text(scope))
+            inputs = await self._loader.load(scope, triggers, self._options_for(scope), *self._turn_user(scope))
             model_input = self._compose(scope, inputs)
             decision = self._planner.decide(inputs, model_input, budget)
         estimate, ceiling = decision.estimate, budget.ceiling_tokens
