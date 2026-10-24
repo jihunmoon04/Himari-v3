@@ -381,6 +381,8 @@ CLI는 Web 서버의 클라이언트다(V3-P47). 이 패킷에서는 바꾸지 �
   - 서버 종료 때의 `RawUncertain("shutdown")` 기록도 스트리밍 Run에만 한다. 비스트리밍 Run은 지금처럼 재시작 복구가 처리한다.
 - `ScriptedAdapter(streaming=True, piece_delay=…)`는 답을 4자씩 sink에 넘긴다. `StreamCut(pieces, end)`은 중간에 멈추는 스트림이다(끝: 결과 불명, 예외, 또는 기다리기). 테스트와 2단계 스모크가 쓴다.
 
+- **PR #82 검수 B1:** 저장된 스트림은 엄격한 UTF-8로 읽는다(`payloads`). 전에는 깨진 바이트를 U+FFFD로 바꿔, 바뀐 글이 답이나 Tool 인자가 될 수 있었다. 같은 바이트의 JSON 응답은 이미 거부했다. 이제 그런 스트림은 잘못된 응답이다. 원본은 받은 그대로 보존한다. 받는 동안 화면에는 U+FFFD로 보일 뿐이다.
+
 **Control**
 - `OutputProgress`(`output_started`·`output`·`output_ended`)는 `TurnProgress`와 따로 둔 runtime-checkable Protocol이다. Driver는 job의 progress가 이것일 때만 조각을 넘긴다. Runner의 `_JobProgress`가 구현한다.
 - Driver(`streaming=`):
