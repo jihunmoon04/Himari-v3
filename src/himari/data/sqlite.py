@@ -50,7 +50,7 @@ import logging
 import os
 import sqlite3
 import stat
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager, contextmanager
 from datetime import UTC, datetime, timedelta
 
@@ -700,6 +700,9 @@ class _Tx:
     def execute(self, sql: str, *params: object) -> sqlite3.Cursor:
         return self._conn.execute(sql, params)
 
+    def executemany(self, sql: str, params: Iterable[Sequence[object]]) -> None:
+        self._conn.executemany(sql, params)
+
     def executescript_parts(self, script: str) -> None:
         # executescript() would COMMIT the open transaction; run each statement instead.
         for statement in script.split(";"):
@@ -897,16 +900,28 @@ def _memory(row: sqlite3.Row) -> Memory:
                   datetime.fromisoformat(row["updated_at"]))
 
 
+FILL_BATCH = 500  # Events read at a time while an upgrade fills event_text
+
+
 def _fill_event_text(tx: _Tx) -> None:
     """V3-P72 §4.2: the searchable text of the Events a v11 (or older) database
-    already holds, folded as new Events are."""
+    already holds, folded as new Events are. Read FILL_BATCH at a time in key
+    order, so the memory it takes does not grow with the history (PR #79
+    review B1); still one transaction with the rest of the upgrade."""
     kinds = [k.value for k in SEARCH_KINDS]
-    for row in tx.all(f"SELECT conversation_id, sequence, kind, payload FROM events WHERE kind IN"
-                      f" ({', '.join('?' * len(kinds))})", *kinds):
-        text = rules.event_text(codec.payload_from(EventKind(row["kind"]), row["payload"]))
-        if text is not None:
-            tx.execute("INSERT INTO event_text (conversation_id, sequence, folded) VALUES (?, ?, ?)",
-                       row["conversation_id"], row["sequence"], rules.fold(text))
+    marks = ", ".join("?" * len(kinds))
+    after: tuple[str, int] = ("", 0)
+    while True:
+        rows = tx.all(f"SELECT conversation_id, sequence, kind, payload FROM events WHERE kind IN ({marks})"
+                      " AND (conversation_id, sequence) > (?, ?) ORDER BY conversation_id, sequence LIMIT ?",
+                      *kinds, *after, FILL_BATCH)
+        if not rows:
+            return
+        texts = [(row["conversation_id"], row["sequence"],
+                  rules.event_text(codec.payload_from(EventKind(row["kind"]), row["payload"]))) for row in rows]
+        tx.executemany("INSERT INTO event_text (conversation_id, sequence, folded) VALUES (?, ?, ?)",
+                       [(cid, seq, rules.fold(text)) for cid, seq, text in texts if text is not None])
+        after = (rows[-1]["conversation_id"], rows[-1]["sequence"])
 
 
 def _timestamp(moment: datetime) -> str:
@@ -2207,22 +2222,30 @@ class SqliteData:
         folded = rules.search_words(words)
         score = " + ".join(["(instr(t.folded, ?) > 0)"] * len(folded))
         only = "" if conversation is None else " AND t.conversation_id=?"
+        # The order and limits of rules.pick_hits, in SQL: only the hits leave
+        # the database, however many Events match (PR #79 review B2).
+        # created_at is fixed-width UTC text, so its text order is time order.
+        order = "matched DESC, created_at DESC, sequence DESC"
         with self._tx() as tx:
             if conversation is not None:
                 tx.authorized(TrustedScope(principal, conversation))
             rows = tx.all(
-                f"SELECT t.conversation_id, t.sequence, e.kind, e.created_at, ({score}) AS matched"
+                "WITH found AS ("
+                f" SELECT t.conversation_id, t.sequence, e.kind, e.created_at, ({score}) AS matched"
                 " FROM event_text t JOIN events e USING (conversation_id, sequence)"
                 " JOIN conversations c ON c.conversation_id=t.conversation_id"
                 " WHERE c.owner=? AND c.trashed_at IS NULL AND (t.conversation_id<>? OR t.sequence<=?)"
-                f"{only} AND ({score}) > 0",
+                f"{only}), ranked AS ("
+                f" SELECT *, ROW_NUMBER() OVER (PARTITION BY conversation_id ORDER BY {order}) AS nth,"
+                " COUNT(*) OVER () AS total FROM found WHERE matched > 0)"
+                f" SELECT * FROM ranked WHERE nth <= ? ORDER BY {order} LIMIT ?",
                 *folded, principal, current, -1 if current_through is None else current_through,
-                *(() if conversation is None else (conversation,)), *folded)
-            found = [EventText(ConversationId(r["conversation_id"]), r["sequence"], EventKind(r["kind"]),
-                               datetime.fromisoformat(r["created_at"]), "", r["matched"]) for r in rows]
-            picked, total = rules.pick_hits(found, per_conversation, limit)
-            hits = tuple(dataclasses.replace(h, text=self._event_text(tx, h.conversation_id, h.sequence))
-                         for h in picked)
+                *(() if conversation is None else (conversation,)), per_conversation, limit)
+            total = rows[0]["total"] if rows else 0
+            hits = tuple(EventText(ConversationId(r["conversation_id"]), r["sequence"], EventKind(r["kind"]),
+                                   datetime.fromisoformat(r["created_at"]),
+                                   self._event_text(tx, ConversationId(r["conversation_id"]), r["sequence"]),
+                                   r["matched"]) for r in rows)
             ids = list(dict.fromkeys(h.conversation_id for h in hits))
             summaries = {r["conversation_id"]: self._summary(r) for r in tx.all(
                 f"{self._SUMMARY} WHERE c.conversation_id IN ({', '.join('?' * len(ids))})", *ids)} if ids else {}

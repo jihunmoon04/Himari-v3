@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
+from pathlib import Path
 
 import pytest
 from testkit import FOREIGN, SCOPE, data_for, new_store, restart, text_result, user
@@ -23,6 +24,7 @@ from himari.data.api import (
     ToolCompletion,
     ToolExecutionStatus,
 )
+from himari.data import sqlite as sqlite_backend
 from himari.data.memory import InMemoryData
 from himari.data.sqlite import SqliteData, SqliteStore
 
@@ -227,3 +229,40 @@ def test_a_permanent_delete_takes_the_text_and_a_restart_keeps_it() -> None:
                 conn.close()
 
     asyncio.run(scenario())
+
+
+def test_an_upgrade_fills_in_batches_without_missing_or_repeating_one(tmp_path: Path,
+                                                                      monkeypatch: pytest.MonkeyPatch) -> None:
+    # PR #79 review B1: the fill reads FILL_BATCH Events at a time, in key order.
+    path = tmp_path / "h.db"
+    store = SqliteStore(path)
+    scopes = [TrustedScope(ME, ConversationId(f"conv_{name}")) for name in ("a", "b", "c")]
+    for scope in scopes:
+        store.create_conversation(scope)
+    data = SqliteData(store)
+
+    async def fill() -> None:
+        for n in range(7):
+            for scope in scopes:
+                await data.append_event(scope, user(f"note {scope.conversation_id} {n}"))
+        await answer(data, scopes[0], "an answer note")
+
+    asyncio.run(fill())
+    store.close()
+    conn = sqlite3.connect(path)
+    try:
+        conn.execute("DROP TABLE event_text")
+        conn.execute("PRAGMA user_version=11")
+        conn.commit()
+    finally:
+        conn.close()
+    monkeypatch.setattr(sqlite_backend, "FILL_BATCH", 2)
+    store = SqliteStore(path)
+    try:
+        rows = store.connection.execute("SELECT conversation_id, sequence FROM event_text").fetchall()
+        assert len(rows) == len(set(rows)) == 22  # 21 messages and one answer, each once
+        found = asyncio.run(SqliteData(store).search_events(ME, ["answer"], current=NOWHERE, current_through=None,
+                                                            per_conversation=3, limit=10))
+        assert texts(found) == ["an answer note"]
+    finally:
+        store.close()
