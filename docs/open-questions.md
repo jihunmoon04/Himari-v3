@@ -102,7 +102,7 @@ P1은 Workspace 전용 소프트웨어 모듈을 다시 도입하는 단계가 �
 | Q-15 | Reasoning / continuation 확장 | **기본 턴별 저장·재생은 PR #6으로 구현(V3-049)**, 압축 시 제외는 V3-P48. 남은 것: 타 모델 지원, cache-control |
 | Q-16 | Memory Tool | 기억 생성·조회·삭제 정책, 자동 삽입/검증/권한, Data 읽기 경계 — V3-P71 설계 초안 [memory-v0.1.md](memory-v0.1.md)에서 다룸. 지난 대화 검색은 V3-P72 설계 초안 [conversation-search-v0.1.md](conversation-search-v0.1.md) |
 | Q-17 | Plan / Note Artifact | **원본은 Data conversation-scoped Artifact로 확정**. Revision/CAS, schema, 삭제/복구·표시, Outside 노출/export |
-| Q-18 | Streaming / recovery | chunk-level 원본 기록, 스트리밍 UI, 중단된 모델 호출, resume/cancel |
+| Q-18 | Streaming / recovery | chunk-level 원본 기록, 스트리밍 UI, 중단된 모델 호출, resume/cancel — V3-P73 설계 초안 [streaming-v0.1.md](streaming-v0.1.md)에서 다룸(SSE 원본 보존, 끝나지 않은 답은 기록하지 않음). 끊긴 답 이어 쓰기는 이후 |
 | Q-19 | Lifecycle/privacy | **설계 초안 (V3-P65, [conversation-delete-v0.1.md](conversation-delete-v0.1.md)):** 휴지통 → 보관 기간 뒤 영구 삭제, Conversation의 모든 행 연쇄 제거, 대화 폴더 정리. 남은 것: 접근 감사, 외부 서버 데이터 삭제 훅 |
 | Q-20 | v2 migration | 데이터/기능 마이그레이션 범위, v2 검증된 Provider replay 규칙 선택적 재사용 |
 | Q-25 | Cache performance | tool schema 안정성, provider별 marker/TTL/히트 관측, 배치 순서에 따른 비용·품질 비교 |
