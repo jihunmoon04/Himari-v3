@@ -93,12 +93,21 @@ def _who(kind: EventKind) -> str:
 
 def snippet(text: str, words: list[str]) -> str:
     """At most SNIPPET_CHARS of the message on one line, from a little before
-    its first matching word; ``…`` where it was cut."""
+    its first matching word; ``…`` where it was cut. The match is found in
+    the folded text and placed back in the original by folding it a
+    character at a time, as NFKC may change lengths ("ﬃ" is three
+    characters folded; PR #79 re-review C1)."""
     line = _one_line(text)
-    folded = fold(line)
-    found = [i for i in (folded.find(w) for w in words) if i >= 0]
-    start = max(0, min(found, default=0) - SNIPPET_LEAD)
-    start = min(start, max(0, len(line) - SNIPPET_CHARS))  # folding rarely changes lengths: stay inside
+    folded: list[str] = []
+    origin: list[int] = []  # for each folded character, the original one it came from
+    for index, char in enumerate(line):
+        piece = fold(char)
+        folded.append(piece)
+        origin.extend([index] * len(piece))
+    found = [i for i in ("".join(folded).find(w) for w in words) if i >= 0]
+    first = origin[min(found)] if found else 0
+    start = max(0, first - SNIPPET_LEAD)
+    start = min(start, max(0, len(line) - SNIPPET_CHARS))
     part = line[start:start + SNIPPET_CHARS]
     return ("…" if start > 0 else "") + part + ("…" if start + SNIPPET_CHARS < len(line) else "")
 

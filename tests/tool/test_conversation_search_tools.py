@@ -87,6 +87,13 @@ def test_a_snippet_starts_a_little_before_the_match_and_marks_cuts() -> None:
     assert snippet("short needle", ["needle"]) == "short needle"
 
 
+def test_a_snippet_finds_its_match_where_folding_changes_lengths() -> None:
+    # PR #79 re-review C1: "ﬃ" folds to "ffi", so folded positions run ahead of the original's.
+    cut = snippet("ﬃ" * 300 + " needle " + "z" * 500, ["needle"])
+    assert "needle" in cut and cut.startswith("…")
+    assert snippet("Ｎeedle at the start", ["needle"]).startswith("Ｎeedle")
+
+
 def test_the_current_conversation_is_named_and_only_its_summarized_part_found() -> None:
     data, search, _ = setup(through=1)
     for text in ("first path /srv/a", "second path /srv/b"):
