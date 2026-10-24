@@ -281,6 +281,7 @@ def test_the_server_info_is_for_the_signed_in_operator(server: Server) -> None:
     assert info == {"model": "scripted-model", "sandbox": "unavailable", "context_budget": 128_000, "trash_days": 30,
                     "images": False,  # V3-P67: no image sandbox in this test
                     "documents": {"read": False, "scripts": False, "libraries": {}},  # V3-P70: no toolkit
+                    "memory": True,  # V3-P71 §9: on unless HIMARI_MEMORY=0
                     "models": [{"id": "scripted-model", "default_effort": None, "efforts": [], "window_known": False,
                                 "default": True, "images": False}],
                     "turn": {"token_budget": 3_000_000, "unattended_runs": 20, "max_runs": None,
@@ -507,7 +508,7 @@ def test_context_reports_the_estimate_and_the_budget(server: Server) -> None:
 
 def test_context_shows_where_the_summary_takes_over(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(web, "FAILED_LOGIN_DELAY_SECONDS", 0)
-    server = Server(tmp_path, [], context_tokens=2800)
+    server = Server(tmp_path, [], context_tokens=2800, turn={"memory": False})  # sized without the memory Tools
     with server.client:
         server.sign_in()
         cid = server.post("/api/conversations").json()["id"]
@@ -980,7 +981,8 @@ def test_trash_restore_and_delete_for_good(server: Server) -> None:
     folder = Path(server.application.inside.host_root(workspace_for(OPERATOR))) / "conversations" / cid
     assert (folder / "plan.txt").read_text() == "draft"
     assert server.client.get(f"/api/conversations/{cid}/delete-notice").json() == {
-        "servers": [], "unconfigured": [], "running": False, "trash_days": 30}  # inside/… is HIMARI's own
+        "servers": [], "unconfigured": [], "running": False, "trash_days": 30,
+        "memory_count": 0}  # inside/… is HIMARI's own
 
     for refused, code in [(server.client.delete(f"/api/conversations/{cid}", headers={"origin": ORIGIN}),
                            "not_in_trash"),

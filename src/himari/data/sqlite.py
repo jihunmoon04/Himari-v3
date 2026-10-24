@@ -108,6 +108,12 @@ from himari.data.api import (
     ImageView,
     Instructions,
     InstructionScope,
+    MAX_MEMORIES,
+    Memory,
+    MemoryCategory,
+    MemoryChange,
+    MemoryChangeKind,
+    MemoryOrigin,
     PresentedFile,
     StoredBlob,
     EventPayload,
@@ -140,7 +146,7 @@ from himari.data.api import (
 
 # v3: compaction_runs; v4: external_settings; v5: ui_resources; v6: model_settings;
 # v7: the trash (all upgraded in place); v1 is refused
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 APPLICATION_ID = 0x48494D41  # "HIMA": written into the database header (PRAGMA application_id)
 
 _TERMINAL_COMPLETIONS = frozenset(
@@ -357,8 +363,30 @@ CREATE TABLE instructions (
     PRIMARY KEY (owner, scope)
 ) STRICT;
 """
+# v11: the notes HIMARI keeps about a principal (V3-P71), and the last id given out to each.
+_V11_ADDITIONS = """
+CREATE TABLE memories (
+    owner TEXT NOT NULL,
+    memory_id INTEGER NOT NULL,
+    category TEXT NOT NULL,
+    text TEXT NOT NULL,
+    origin TEXT NOT NULL,
+    source_conversation TEXT,
+    source_run TEXT,
+    source_call TEXT,
+    revision INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (owner, memory_id)
+) STRICT;
+CREATE INDEX memories_by_source ON memories (source_conversation);
+CREATE TABLE memory_ids (
+    owner TEXT PRIMARY KEY,
+    last_id INTEGER NOT NULL
+) STRICT;
+"""
 _ADDITIONS = (_V3_ADDITIONS, _V4_ADDITIONS, _V5_ADDITIONS, _V6_ADDITIONS, _V7_ADDITIONS,
-              _V8_ADDITIONS, _V9_ADDITIONS, _V10_ADDITIONS)  # what each version from v3 added
+              _V8_ADDITIONS, _V9_ADDITIONS, _V10_ADDITIONS, _V11_ADDITIONS)  # what each version from v3 added
 _SCHEMA = _SCHEMA_V2 + "".join(_ADDITIONS)
 # An older version → (its exact schema, what brings it to SCHEMA_VERSION).
 _UPGRADES = {
@@ -844,6 +872,14 @@ def _instructions(row: sqlite3.Row | None) -> Instructions:
     return Instructions(row["text"], row["revision"], datetime.fromisoformat(row["updated_at"]))
 
 
+def _memory(row: sqlite3.Row) -> Memory:
+    call = None if row["source_call"] is None else CallRef(RunId(row["source_run"]), CallId(row["source_call"]))
+    source = None if row["source_conversation"] is None else ConversationId(row["source_conversation"])
+    return Memory(row["memory_id"], MemoryCategory(row["category"]), row["text"], MemoryOrigin(row["origin"]),
+                  source, call, row["revision"], datetime.fromisoformat(row["created_at"]),
+                  datetime.fromisoformat(row["updated_at"]))
+
+
 def _timestamp(moment: datetime) -> str:
     """Fixed-width UTC ISO text, so string order is time order."""
     return moment.astimezone(UTC).isoformat(timespec="microseconds")
@@ -1012,8 +1048,8 @@ def _refused(file_id: str, why: str) -> DataError:
 class SqliteData:
     """Implements ConversationLog, ArtifactStore, WorkspaceState, StateQuery,
     ConversationCatalog, ConversationRetention, ExternalSourceSettings,
-    FileCatalog, FileRetention and InstructionsStore (V3-P69); ``blobs`` is the
-    BlobStore (V3-P66)."""
+    FileCatalog, FileRetention, InstructionsStore (V3-P69) and MemoryStore
+    (V3-P71); ``blobs`` is the BlobStore (V3-P66)."""
 
     def __init__(self, store: SqliteStore) -> None:
         self._store = store
@@ -1383,7 +1419,11 @@ class SqliteData:
             view = rules.check_app_view(completion)
             if completion.presented_files and completion.status is not ToolExecutionStatus.SUCCEEDED:
                 raise DataError(DataErrorCode.INVALID_ARGUMENT, "only a succeeded call presents files")
+            if completion.memory_change is not None and completion.status is not ToolExecutionStatus.SUCCEEDED:
+                raise DataError(DataErrorCode.INVALID_ARGUMENT, "only a succeeded call changes memory")
             self._apply_artifacts(tx, scope, completion.artifact_mutations)  # CAS errors roll everything back
+            if completion.memory_change is not None:
+                self._apply_memory(tx, scope, call, completion.memory_change)
             if view is not None:
                 self._store_ui_resource(tx, view.resource)
             if completion.presented_files:
@@ -1779,6 +1819,7 @@ class SqliteData:
         "DELETE FROM activations WHERE conversation_id=?",
         "DELETE FROM external_settings WHERE conversation_id=?",
         "DELETE FROM model_settings WHERE conversation_id=?",
+        "DELETE FROM memories WHERE source_conversation=?",  # D5: the notes its calls wrote (V3-P71)
         "DELETE FROM conversations WHERE conversation_id=?",
     )
 
@@ -1991,6 +2032,121 @@ class SqliteData:
                        " updated_at=excluded.updated_at",
                        principal, scope.value, text, current.revision + 1, _timestamp(now))
             return Instructions(text, current.revision + 1, now)
+
+    # --- MemoryStore (V3-P71) ---------------------------------------------------------
+
+    _MEMORY_COLUMNS = ("memory_id, category, text, origin, source_conversation, source_run, source_call, revision,"
+                       " created_at, updated_at")
+
+    def _read_memory(self, tx: _Tx, principal: PrincipalId, memory_id: object) -> Memory:
+        row = None if not isinstance(memory_id, int) else tx.one(
+            f"SELECT {self._MEMORY_COLUMNS} FROM memories WHERE owner=? AND memory_id=?", principal, memory_id)
+        if row is None:
+            raise DataError(DataErrorCode.NOT_FOUND, f"no note m{memory_id}")
+        return _memory(row)
+
+    @staticmethod
+    def _check_room(tx: _Tx, principal: PrincipalId) -> None:
+        row = tx.one("SELECT COUNT(*) AS n FROM memories WHERE owner=?", principal)
+        assert row is not None
+        if row["n"] >= MAX_MEMORIES:
+            raise DataError(DataErrorCode.LIMIT_EXCEEDED, f"{MAX_MEMORIES} notes are kept at most")
+
+    @staticmethod
+    def _last_memory_id(tx: _Tx, principal: PrincipalId) -> int:
+        row = tx.one("SELECT last_id FROM memory_ids WHERE owner=?", principal)
+        return 0 if row is None else int(row["last_id"])
+
+    def _next_memory_id(self, tx: _Tx, principal: PrincipalId) -> int:
+        next_id = self._last_memory_id(tx, principal) + 1
+        tx.execute("INSERT INTO memory_ids (owner, last_id) VALUES (?, ?)"
+                   " ON CONFLICT (owner) DO UPDATE SET last_id=excluded.last_id", principal, next_id)
+        return next_id
+
+    @staticmethod
+    def _write_memory(tx: _Tx, principal: PrincipalId, note: Memory) -> None:
+        call = note.source_call
+        tx.execute("INSERT INTO memories (owner, memory_id, category, text, origin, source_conversation, source_run,"
+                   " source_call, revision, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                   " ON CONFLICT (owner, memory_id) DO UPDATE SET category=excluded.category, text=excluded.text,"
+                   " origin=excluded.origin, source_conversation=excluded.source_conversation,"
+                   " source_run=excluded.source_run, source_call=excluded.source_call, revision=excluded.revision,"
+                   " updated_at=excluded.updated_at",
+                   principal, note.memory_id, note.category.value, note.text, note.origin.value,
+                   note.source_conversation, None if call is None else call.run_id,
+                   None if call is None else call.call_id, note.revision, _timestamp(note.created_at),
+                   _timestamp(note.updated_at))
+
+    def _apply_memory(self, tx: _Tx, scope: TrustedScope, call: CallRef, change: MemoryChange) -> None:
+        """A Tool's change, in the commit's transaction: its errors roll the commit back."""
+        change = rules.check_memory_change(change)
+        principal, now = scope.principal_id, datetime.now(UTC)
+        if change.kind is MemoryChangeKind.SAVE and change.expected_revision is None:
+            exists = tx.one("SELECT 1 FROM memories WHERE owner=? AND memory_id=?", principal, change.memory_id)
+            if change.memory_id > self._last_memory_id(tx, principal) or exists is not None:
+                raise DataError(DataErrorCode.INVALID_ARGUMENT, f"m{change.memory_id} was not given out for a new note")
+            self._check_room(tx, principal)
+            assert change.category is not None and change.text is not None
+            self._write_memory(tx, principal, Memory(change.memory_id, change.category, change.text,
+                                                     MemoryOrigin.MODEL, scope.conversation_id, call, 1, now, now))
+            return
+        note = self._read_memory(tx, principal, change.memory_id)
+        if change.expected_revision != note.revision:
+            raise DataError(DataErrorCode.VERSION_CONFLICT, f"m{note.memory_id} is at revision {note.revision}")
+        if change.kind is MemoryChangeKind.FORGET:
+            tx.execute("DELETE FROM memories WHERE owner=? AND memory_id=?", principal, note.memory_id)
+            return
+        assert change.category is not None and change.text is not None
+        self._write_memory(tx, principal, dataclasses.replace(
+            note, category=change.category, text=change.text, origin=MemoryOrigin.MODEL,
+            source_conversation=scope.conversation_id, source_call=call, revision=note.revision + 1, updated_at=now))
+
+    async def list_memories(self, principal: PrincipalId) -> tuple[Memory, ...]:
+        with self._tx() as tx:
+            rows = tx.all(f"SELECT {self._MEMORY_COLUMNS} FROM memories WHERE owner=?", principal)
+            return rules.order_memories(_memory(r) for r in rows)
+
+    async def read_memory(self, principal: PrincipalId, memory_id: int) -> Memory:
+        with self._tx() as tx:
+            return self._read_memory(tx, principal, memory_id)
+
+    async def allocate_memory_id(self, principal: PrincipalId) -> int:
+        with self._tx() as tx:
+            return self._next_memory_id(tx, principal)
+
+    async def save_memory(self, principal: PrincipalId, category: MemoryCategory, text: str, *,
+                          memory_id: int | None = None, expected_revision: int | None = None) -> Memory:
+        category, text, now = rules.check_memory_category(category), rules.check_memory_text(text), datetime.now(UTC)
+        with self._tx() as tx:
+            if memory_id is None:
+                self._check_room(tx, principal)
+                note = Memory(self._next_memory_id(tx, principal), category, text, MemoryOrigin.USER, None, None, 1,
+                              now, now)
+            else:
+                current = self._read_memory(tx, principal, memory_id)
+                if expected_revision != current.revision:
+                    raise DataError(DataErrorCode.VERSION_CONFLICT, f"m{memory_id} is at revision {current.revision}")
+                note = dataclasses.replace(current, category=category, text=text, origin=MemoryOrigin.USER,
+                               revision=current.revision + 1, updated_at=now)
+            self._write_memory(tx, principal, note)
+            return note
+
+    async def delete_memory(self, principal: PrincipalId, memory_id: int,
+                            expected_revision: int | None = None) -> Memory:
+        with self._tx() as tx:
+            note = self._read_memory(tx, principal, memory_id)
+            if expected_revision is not None and expected_revision != note.revision:
+                raise DataError(DataErrorCode.VERSION_CONFLICT, f"m{memory_id} is at revision {note.revision}")
+            tx.execute("DELETE FROM memories WHERE owner=? AND memory_id=?", principal, memory_id)
+            return note
+
+    async def count_source_memories(self, scope: TrustedScope) -> int:
+        with self._tx() as tx:
+            tx.owned(scope)
+            row = tx.one("SELECT COUNT(*) AS n FROM memories WHERE owner=? AND source_conversation=?",
+                         scope.principal_id, scope.conversation_id)
+            assert row is not None
+            return int(row["n"])
 
     # --- StateQuery -------------------------------------------------------------
 

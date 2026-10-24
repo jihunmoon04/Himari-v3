@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import unicodedata
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 
 from himari.common import ContentBlock, TextBlock, thaw, tool_id_problem
 from himari.data.api import (
@@ -12,6 +12,7 @@ from himari.data.api import (
     MAX_EFFORT_CHARS,
     MAX_EXTERNAL_SETTINGS,
     MAX_INSTRUCTIONS_CHARS,
+    MAX_MEMORY_CHARS,
     MAX_LIST_LIMIT,
     MAX_MODEL_ID_CHARS,
     MAX_TITLE_CHARS,
@@ -22,6 +23,10 @@ from himari.data.api import (
     DataErrorCode,
     InitialActivation,
     InstructionScope,
+    Memory,
+    MemoryCategory,
+    MemoryChange,
+    MemoryChangeKind,
     ModelSetting,
     ToolCompletion,
     ToolExecutionStatus,
@@ -99,6 +104,50 @@ def check_instructions(scope: object, text: object) -> str:
     if len(text) > MAX_INSTRUCTIONS_CHARS:
         raise DataError(DataErrorCode.TOO_LARGE, f"instructions are at most {MAX_INSTRUCTIONS_CHARS} characters")
     return text
+
+
+def check_memory_text(text: object) -> str:
+    """V3-P71 §4.2: a note's text as stored, or why not."""
+    if not isinstance(text, str):
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, "a note is text")
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    if any(unicodedata.category(c) in ("Cc", "Cs") and c not in "\n\t" for c in text):
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, "a note may not contain control characters")
+    text = text.strip()
+    if not text:
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, "a note needs some text")
+    if len(text) > MAX_MEMORY_CHARS:
+        raise DataError(DataErrorCode.TOO_LARGE, f"a note is at most {MAX_MEMORY_CHARS} characters")
+    return text
+
+
+def check_memory_category(category: object) -> MemoryCategory:
+    if not isinstance(category, MemoryCategory):
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, "not a memory category")
+    return category
+
+
+def check_memory_change(change: object) -> MemoryChange:
+    """The shape of a Tool's change (ToolCompletion.memory_change); the text
+    as stored. Whether the note exists is the store's to say."""
+    if (not isinstance(change, MemoryChange) or not isinstance(change.kind, MemoryChangeKind)
+            or not isinstance(change.memory_id, int) or change.memory_id < 1):
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, "not a memory change")
+    if change.kind is MemoryChangeKind.FORGET:
+        if change.category is not None or change.text is not None or change.expected_revision is None:
+            raise DataError(DataErrorCode.INVALID_ARGUMENT, "forgetting names a note and its revision only")
+        return change
+    return MemoryChange(MemoryChangeKind.SAVE, change.memory_id, check_memory_category(change.category),
+                        check_memory_text(change.text), change.expected_revision)
+
+
+_CATEGORY_ORDER = {category: index for index, category in enumerate(MemoryCategory)}
+
+
+def order_memories(memories: Iterable[Memory]) -> tuple[Memory, ...]:
+    """By category, newest first within each (V3-P71 §4.2)."""
+    return tuple(sorted(memories, key=lambda m: (_CATEGORY_ORDER[m.category], -m.updated_at.timestamp(),
+                                                 -m.memory_id)))
 
 
 def preview(blocks: Sequence[ContentBlock]) -> str:

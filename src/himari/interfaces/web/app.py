@@ -42,11 +42,11 @@ import re
 import secrets
 import time
 from urllib.parse import quote
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from importlib import resources
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import Depends, FastAPI, Path, Request, Response
 from fastapi.exceptions import RequestValidationError
@@ -93,6 +93,8 @@ from himari.data.api import (
     MAX_ATTACHMENTS,
     MAX_INSTRUCTIONS_CHARS,
     MAX_LIST_LIMIT,
+    MAX_MEMORIES,
+    MAX_MEMORY_CHARS,
     AssistantFinal,
     AssistantToolCalls,
     ConversationEvent,
@@ -103,6 +105,8 @@ from himari.data.api import (
     FileRecord,
     ImageStatus,
     Instructions,
+    Memory,
+    MemoryCategory,
     ToolResultRecord,
     UserMessage,
     view_state,
@@ -209,6 +213,15 @@ class InstructionsBody(_Body):
     revision: int = Field(ge=0)  # the revision the text was edited from
 
 
+class MemoryBody(_Body):
+    category: Literal["user", "preference", "project", "reference"]  # MemoryCategory's values
+    text: str  # its limit is Data's (V3-P71 §4.2)
+
+
+class MemoryEditBody(MemoryBody):
+    revision: int = Field(ge=1)  # the revision the note was edited from
+
+
 class ToolSourceBody(_Body):
     enabled: bool | None  # null: follow the source's default
 
@@ -291,7 +304,7 @@ def trashed_view(summary: ConversationSummary, trash_days: int) -> dict[str, Any
 
 def delete_notice_view(notice: DeleteNotice) -> dict[str, Any]:
     return {"servers": list(notice.servers), "unconfigured": list(notice.unconfigured), "running": notice.running,
-            "trash_days": notice.trash_days}
+            "trash_days": notice.trash_days, "memory_count": notice.memories}
 
 
 def event_view(event: ConversationEvent, views: dict[CallRef, tuple[bool, bool]] | None = None,
@@ -430,6 +443,26 @@ INSTRUCTIONS_REFUSALS: dict[DataErrorCode, tuple[int, str, str]] = {
     # 422, not 413: the body limit middleware turns every 413 into "request_too_large".
     DataErrorCode.TOO_LARGE: (422, "too_large", f"Instructions are at most {MAX_INSTRUCTIONS_CHARS:,} characters."),
     DataErrorCode.INVALID_ARGUMENT: (422, "invalid_instructions", "Instructions may not contain control characters."),
+}
+
+
+def memory_view(note: Memory, titles: dict[ConversationId, str | None]) -> dict[str, Any]:
+    """V3-P71 §7.2. ``titles``: each source Conversation's title (None:
+    untitled); a source missing from it is in the trash."""
+    source = note.source_conversation
+    return {"id": note.memory_id, "category": note.category.value, "text": note.text, "origin": note.origin.value,
+            "source": None if source is None else {
+                "conversation": source, "title": titles.get(source), "in_trash": source not in titles},
+            "revision": note.revision, "created_at": _time(note.created_at), "updated_at": _time(note.updated_at)}
+
+
+# How a refused write of a note answers (V3-P71 §7.2): status, code, message.
+MEMORY_REFUSALS: dict[DataErrorCode, tuple[int, str, str]] = {
+    DataErrorCode.NOT_FOUND: (404, "not_found", "No such note."),
+    DataErrorCode.VERSION_CONFLICT: (409, "revision_conflict", "The note was changed elsewhere since it was opened."),
+    DataErrorCode.TOO_LARGE: (422, "too_large", f"A note is at most {MAX_MEMORY_CHARS:,} characters."),
+    DataErrorCode.LIMIT_EXCEEDED: (422, "memory_full", f"At most {MAX_MEMORIES:,} notes are kept; delete one first."),
+    DataErrorCode.INVALID_ARGUMENT: (422, "invalid_memory", "A note needs some text and no control characters."),
 }
 
 
@@ -638,6 +671,7 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
                 "trash_days": application.trash_days,  # V3-P65: then a trashed conversation is deleted for good
                 "images": application.images_available,  # V3-P67 §3.1: model copies can be made here
                 "documents": application.documents_status,  # V3-P70 §9
+                "memory": application.memory_enabled,  # V3-P71 §9
                 "turn": {"token_budget": turn.turn_budget, "unattended_runs": turn.unattended_runs,
                          "max_runs": turn.max_runs, "no_progress_runs": turn.no_progress_runs,
                          "seen_seconds": turn.seen_seconds}}
@@ -822,6 +856,61 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
             status, code, message = INSTRUCTIONS_REFUSALS[error.code]
             raise ApiError(status, code, message) from None
         return instructions_view(saved)
+
+    async def memory_titles(application: Application, who: PrincipalId,
+                            notes: Iterable[Memory]) -> dict[ConversationId, str | None]:
+        titles: dict[ConversationId, str | None] = {}
+        for source in {n.source_conversation for n in notes if n.source_conversation is not None}:
+            try:
+                titles[source] = (await application.data.read_conversation(scope_of(source, who))).title
+            except DataError as error:  # in the trash (a purged one took its notes with it)
+                if error.code is not DataErrorCode.NOT_AUTHORIZED:
+                    raise
+        return titles
+
+    def memory_refused(error: DataError) -> ApiError:
+        if error.code not in MEMORY_REFUSALS:
+            raise error
+        status, code, message = MEMORY_REFUSALS[error.code]
+        return ApiError(status, code, message)
+
+    @app.get("/api/memories")
+    async def read_memories(request: Request, who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+        """The notes HIMARI keeps about the user (V3-P71 §7.2)."""
+        application = himari(request)
+        notes = await application.memories(who)
+        titles = await memory_titles(application, who, notes)
+        return {"memories": [memory_view(n, titles) for n in notes], "max_count": MAX_MEMORIES,
+                "max_chars": MAX_MEMORY_CHARS, "enabled": application.memory_enabled}
+
+    @app.post("/api/memories", status_code=201)
+    async def add_memory(body: MemoryBody, request: Request, who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+        """A note the user writes; used from each conversation's next turn."""
+        try:
+            note = await himari(request).add_memory(who, MemoryCategory(body.category), body.text)
+        except DataError as error:
+            raise memory_refused(error) from None
+        return memory_view(note, {})
+
+    @app.put("/api/memories/{memory_id}")
+    async def edit_memory(memory_id: int, body: MemoryEditBody, request: Request,
+                          who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+        application = himari(request)
+        try:
+            note = await application.edit_memory(who, memory_id, MemoryCategory(body.category), body.text,
+                                                 body.revision)
+        except DataError as error:
+            raise memory_refused(error) from None
+        return memory_view(note, await memory_titles(application, who, (note,)))
+
+    @app.delete("/api/memories/{memory_id}", status_code=204)
+    async def delete_memory(memory_id: int, request: Request, who: PrincipalId = Depends(principal),
+                            revision: int | None = None) -> None:
+        """Gone at once. Conversations that already used it still show it."""
+        try:
+            await himari(request).delete_memory(who, memory_id, revision)
+        except DataError as error:
+            raise memory_refused(error) from None
 
     @app.get("/api/conversations/{conversation_id}/tools")
     async def read_tool_sources(conversation_id: str, request: Request,

@@ -79,6 +79,8 @@ from himari.data.api import (
     ImageView,
     Instructions,
     InstructionScope,
+    Memory,
+    MemoryCategory,
     ViewMaker,
     ViewState,
     InitialActivation,
@@ -239,6 +241,7 @@ class DeleteNotice:
     unconfigured: tuple[str, ...]  # of them, the ones no longer configured
     running: bool  # a job runs now: it is stopped first
     trash_days: int
+    memories: int = 0  # notes its calls wrote: deleted with it for good (V3-P71 D5)
 
 
 class ModelRefused(LookupError):
@@ -499,6 +502,7 @@ class Application:
     image_models: tuple[str, ...] = ()  # offered models that get images (V3-P67 §7.1)
     documents: DocumentReader | None = None  # read_document's reader (V3-P70); None: not offered
     toolkit: Toolkit | None = field(default=None, repr=False)  # its checked folder, open until close()
+    memory_enabled: bool = False  # V3-P71 §9: the memory Tools and notes (HIMARI_MEMORY)
     # V3-P65 §7.3: one lifecycle lock per Conversation (P0: one server process),
     # kept only while some call holds or waits for it (PR #56 review C1).
     _lifecycle: dict[ConversationId, _Lifecycle] = field(default_factory=dict, repr=False)
@@ -533,6 +537,7 @@ class Application:
         file_keep_days: int = DEFAULT_KEEP_DAYS,  # unused this long, a stored file expires (§8.5)
         documents_dir: str | None = None,  # V3-P70 §6.2: HIMARI_DOCUMENTS_DIR; None: no documents
         documents_owners: frozenset[int] = frozenset({0}),  # who may own the toolkit: root (tests add their user)
+        memory: bool = True,  # V3-P71 §9: HIMARI_MEMORY=0 turns it off (the notes stay)
     ) -> Application:
         if file_max_bytes < 1 or file_max_bytes > file_store_max_bytes:
             raise ValueError("a file's limit must be positive and within the file store's (V3-P66)")
@@ -626,7 +631,7 @@ class Application:
                                                   for source, note in mcp.notes.items()],
                                     max_runs_per_drive=max_runs, turn_budget=turn_budget,
                                     no_progress_runs=turn.no_progress_runs, image_views=views,
-                                    file_max_bytes=file_max_bytes)
+                                    file_max_bytes=file_max_bytes, memory=memory)
         except BaseException:
             try:
                 if mcp is not None:
@@ -640,7 +645,8 @@ class Application:
         runner = BackgroundRunner(runtime.driver, unattended_runs=unattended_runs, seen_seconds=turn.seen_seconds)
         application = cls(root, store, runtime.data, runtime, runner, inside, state, model_id,
                           default_budget.limit_tokens, secret, mcp, turn, tuple(unverified), trash_days,
-                          file_max_bytes, uploads_work, views, tuple(image_models), reader, toolkit)
+                          file_max_bytes, uploads_work, views, tuple(image_models), reader, toolkit,
+                          memory_enabled=memory)
         if cleanup_seconds is not None:
             application._cleanup = asyncio.create_task(application._purge_periodically(cleanup_seconds),
                                                        name="trash-cleanup")
@@ -847,6 +853,28 @@ class Application:
         (written since ``revision`` was read), TOO_LARGE or INVALID_ARGUMENT."""
         return await self.data.write_instructions(principal, InstructionScope.USER, text, revision)
 
+    # --- memory (V3-P71) ----------------------------------------------------------------
+
+    async def memories(self, principal: PrincipalId) -> tuple[Memory, ...]:
+        """The principal's notes, by category, newest first within each."""
+        return await self.data.list_memories(principal)
+
+    async def add_memory(self, principal: PrincipalId, category: MemoryCategory, text: str) -> Memory:
+        """A note the user writes; used from each Conversation's next turn.
+        DataError TOO_LARGE, LIMIT_EXCEEDED or INVALID_ARGUMENT."""
+        return await self.data.save_memory(principal, category, text)
+
+    async def edit_memory(self, principal: PrincipalId, memory_id: int, category: MemoryCategory, text: str,
+                          revision: int) -> Memory:
+        """The user's rewrite: their text from now on, its source kept (§4.3).
+        DataError NOT_FOUND, VERSION_CONFLICT, TOO_LARGE or INVALID_ARGUMENT."""
+        return await self.data.save_memory(principal, category, text, memory_id=memory_id, expected_revision=revision)
+
+    async def delete_memory(self, principal: PrincipalId, memory_id: int, revision: int | None = None) -> Memory:
+        """Gone at once; out of each Conversation's next turn. Results already
+        in a Conversation still show its text (§4.3). NOT_FOUND, VERSION_CONFLICT."""
+        return await self.data.delete_memory(principal, memory_id, revision)
+
     async def create_conversation(self, principal: PrincipalId, *, title: str | None = None) -> ConversationId:
         """T0 with the principal's Inside Workspace activated (provisioned first)."""
         workspace = workspace_for(principal)
@@ -1005,7 +1033,8 @@ class Application:
         servers = sorted({tool_id.split("/", 1)[0] for tool_id in used if "/" in tool_id}
                          - (BUILT_IN_NAMESPACES - configured))
         return DeleteNotice(tuple(servers), tuple(s for s in servers if s not in configured),
-                            self.runner.status(scope).running, self.trash_days)
+                            self.runner.status(scope).running, self.trash_days,
+                            await self.data.count_source_memories(scope))
 
     async def trash(self, scope: TrustedScope) -> datetime:
         """§7.1: the owner checked first (review B4: before the Runner is

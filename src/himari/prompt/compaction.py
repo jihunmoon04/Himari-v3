@@ -237,6 +237,8 @@ def context_key(inputs: PromptInputs) -> str:
         "reasoning_effort": options.reasoning_effort,
         "instructions": list(inputs.instructions),
         "user_instructions": inputs.user_instructions,  # V3-P69: a change re-estimates
+        "memories": None if inputs.memories is None else [  # V3-P71: and so does a note
+            [m.memory_id, m.category.value, m.text] for m in inputs.memories],
         "source_notes": [[n.source, n.placement, n.text] for n in inputs.source_notes],
         "tools": [[d.tool_id, d.description, thaw(d.input_schema)] for d in inputs.tool_catalog],
     }

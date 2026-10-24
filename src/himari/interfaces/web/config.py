@@ -34,6 +34,9 @@ default 30: a file unused this long expires). None of them can be turned off.
 Documents (V3-P70 §6.2): ``HIMARI_DOCUMENTS_DIR`` names the documents
 toolkit's folder (installed by root with scripts/install_documents.py). Unset,
 read_document is not offered and run_command has no document libraries.
+
+Memory (V3-P71 §9): ``HIMARI_MEMORY=0`` turns the memory Tools and notes off
+(the notes stay and can be seen); on by default.
 """
 
 from __future__ import annotations
@@ -63,6 +66,7 @@ FILE_MAX_VAR = "HIMARI_FILE_MAX_BYTES"  # V3-P66: one uploaded or presented file
 FILE_STORE_MAX_VAR = "HIMARI_FILE_STORE_MAX_BYTES"  # V3-P66: the whole file store
 FILE_KEEP_DAYS_VAR = "HIMARI_FILE_KEEP_DAYS"  # V3-P66: unused this long, a stored file expires
 DOCUMENTS_DIR_VAR = "HIMARI_DOCUMENTS_DIR"  # V3-P70: the documents toolkit; unset: no documents
+MEMORY_VAR = "HIMARI_MEMORY"  # V3-P71: 0 turns memory off
 DEFAULT_FILE_MAX_BYTES = 32 * 1024 * 1024  # as data.api
 DEFAULT_FILE_STORE_MAX_BYTES = 1024 * 1024 * 1024
 DEFAULT_FILE_KEEP_DAYS = 30
@@ -111,6 +115,7 @@ class WebConfig:
     file_store_max_bytes: int = DEFAULT_FILE_STORE_MAX_BYTES
     file_keep_days: int = DEFAULT_FILE_KEEP_DAYS
     documents_dir: str | None = None
+    memory: bool = True
 
     @property
     def view_port(self) -> int:
@@ -207,6 +212,7 @@ class WebConfig:
             file_store_max_bytes=store_max,
             file_keep_days=keep_days,
             documents_dir=documents_dir,
+            memory=_flag(source.get(MEMORY_VAR), MEMORY_VAR, default=True),
         )
 
 

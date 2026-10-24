@@ -115,8 +115,8 @@ class ServerClient:
     def put(self, path: str, body: dict[str, Any]) -> Any:
         return self._request("PUT", path, body=body)
 
-    def delete(self, path: str) -> Any:
-        return self._request("DELETE", path)
+    def delete(self, path: str, params: dict[str, Any] | None = None) -> Any:
+        return self._request("DELETE", path, params=params)
 
     def upload(self, path: str, name: str, source: BinaryIO, content_type: str) -> Any:
         """One file as the body. 503 ``upload_interrupted`` and 507

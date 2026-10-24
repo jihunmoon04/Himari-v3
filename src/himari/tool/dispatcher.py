@@ -52,6 +52,7 @@ from himari.common import (
     CallId,
     CallRef,
     ContentBlock,
+    JsonValue,
     ModelToolResult,
     RunId,
     TextBlock,
@@ -107,6 +108,13 @@ _STATUS = {
 _FILES_REFUSED = {
     DataErrorCode.BLOB_MISSING: "its stored copy is gone",
     DataErrorCode.LIMIT_EXCEEDED: "too much was presented in the last hour",
+}
+
+# V3-P71: why Data refused a memory Tool's note, for the FAILED result that replaces its success.
+_MEMORY_REFUSED = {
+    DataErrorCode.NOT_FOUND: "the note no longer exists",
+    DataErrorCode.VERSION_CONFLICT: "the note was changed meanwhile; read it again with memory_search",
+    DataErrorCode.LIMIT_EXCEEDED: "memory is full; forget or rewrite a note first",
 }
 
 _NOT_KEPT_CANCELLED = "[an image was returned but not kept: the call was cancelled]"
@@ -355,6 +363,7 @@ class Dispatcher:
             record_event=record_event,
             app_view=outcome.app_view if ran else None,  # only a call that ran has a view (V3-P58)
             presented_files=outcome.presented_files if outcome.status is ToolStatus.SUCCEEDED else (),
+            memory_change=outcome.memory_change if outcome.status is ToolStatus.SUCCEEDED else None,
         )
         try:
             await self._log.commit_tool_outcome(scope, call, completion)
@@ -370,6 +379,11 @@ class Dispatcher:
                 return
             except DataError as again:
                 error = again
+        if completion.memory_change is not None and error.code in _MEMORY_REFUSED:
+            await self._commit_refused(scope, call, completion, ModelToolResult(
+                (TextBlock(f"Nothing was saved: {_MEMORY_REFUSED[error.code]}."),), is_error=True),
+                {"memory": None, "refused": error.code.value})
+            return
         if completion.presented_files and error.code in _FILES_REFUSED:
             # V3-P66 §7.1 (review B3): the result says the files were given;
             # without them it would be a false success, so the call fails.
@@ -380,11 +394,16 @@ class Dispatcher:
     async def _commit_unpresented(self, scope: TrustedScope, call: CallRef, completion: ToolCompletion,
                                   error: DataError) -> None:
         reason = _FILES_REFUSED[error.code]
+        await self._commit_refused(scope, call, completion, ModelToolResult(
+            (TextBlock(f"The file could not be kept for the user ({reason}). Nothing was presented."),),
+            is_error=True), {"presented": False, "refused": error.code.value})
+
+    async def _commit_refused(self, scope: TrustedScope, call: CallRef, completion: ToolCompletion,
+                              model_result: ModelToolResult, raw_result: JsonValue) -> None:
+        """A success whose effect Data refused, committed as the failure it is."""
         failed = replace(
             completion, status=ToolExecutionStatus.FAILED, presented_files=(), artifact_mutations=(),
-            model_result=ModelToolResult((TextBlock(f"The file could not be kept for the user ({reason}). "
-                                                    "Nothing was presented."),), is_error=True),
-            raw_result={"presented": False, "refused": error.code.value})
+            memory_change=None, model_result=model_result, raw_result=raw_result)
         try:
             await self._log.commit_tool_outcome(scope, call, failed)
         except DataError as again:
