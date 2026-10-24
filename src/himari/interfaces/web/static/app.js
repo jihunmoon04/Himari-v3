@@ -165,6 +165,7 @@ function status(text, tone) {
 }
 
 function showSurface(name) {
+  closeModelDialog();
   for (const surface of ["login", "home", "chat", "trash", "instructions", "memory"]) {
     $(`surface-${surface}`).hidden = surface !== name;
   }
@@ -176,7 +177,8 @@ function showSurface(name) {
   $("topbar-chat-context").hidden = name !== "chat";
   $("chat-menu-toggle").hidden = name !== "chat";
   if (name !== "chat") closeChatMenu();
-  $("chat-menu-model").hidden = name !== "chat" || app.modelChoice === null || app.models.length === 0;
+  syncModelChrome();
+  syncFullscreen();
   // One composer, including its draft and staged files, on either surface.
   if (name === "home" || name === "chat") {
     (name === "home" ? $("home-composer-slot") : $("surface-chat")).append($("composer-wrap"));
@@ -994,7 +996,7 @@ function modelTakesImages() {
 
 function renderModel() {
   const choice = app.modelChoice;
-  $("chat-menu-model").hidden = $("surface-chat").hidden || choice === null || app.models.length === 0;
+  syncModelChrome();
   if (choice === null) return;
   const select = $("chat-menu-model-select");
   const fallback = app.models.find((m) => m.default);
@@ -1017,6 +1019,80 @@ function renderModel() {
   note.textContent = text;
   note.classList.toggle("is-warn", Boolean(choice.fallback));
   note.hidden = !text;
+}
+
+/* The same controls move into a native modal on compact screens: one set of
+ * IDs, listeners and server-backed state across resizing and turn updates. */
+function syncModelChrome() {
+  const compact = window.matchMedia("(max-width: 1099px)").matches;
+  const available = !$("surface-chat").hidden && app.modelChoice !== null && app.models.length > 0;
+  const controls = $("chat-menu-model");
+  const trigger = $("mobile-model-toggle");
+  if (!compact || !available) closeModelDialog();
+  const parent = compact ? $("model-dialog-controls") : $("topbar");
+  if (controls.parentElement !== parent) {
+    if (compact) parent.append(controls);
+    else parent.insertBefore(controls, trigger);
+  }
+  controls.hidden = !available;
+  trigger.hidden = !compact || !available;
+  $("topbar").classList.toggle("has-mobile-model", compact && available);
+  if (!available) return;
+  const choice = app.modelChoice;
+  const names = {
+    "openai/gpt-6-luna": "GPT-6 Luna", "openai/gpt-6.1-sol": "GPT-6.1 Sol",
+    "anthropic/claude-sonnet-5.5": "Claude Sonnet 5.5",
+    "xiaomi/mimo-v2.6-pro": "MiMo v2.6 Pro", "z-ai/glm-5.3": "GLM 5.3",
+    "deepseek/deepseek-v4.1-flash": "DeepSeek V4.1 Flash", "minimax/minimax-m3": "MiniMax M3",
+  };
+  const model = app.models.find((m) => m.id === choice.model);
+  const name = names[choice.model] || choice.model.split("/").pop();
+  const summary = name + (model && model.efforts.length ? ` · ${choice.effort || "Auto"}` : "");
+  $("mobile-model-summary").textContent = summary;
+  trigger.title = `Model & reasoning: ${summary}`;
+  trigger.setAttribute("aria-label", trigger.title);
+}
+
+function closeModelDialog() {
+  if ($("model-dialog").open) $("model-dialog").close();
+  $("mobile-model-toggle").setAttribute("aria-expanded", "false");
+}
+
+function openModelDialog() {
+  closeChatMenu();
+  closeNav();
+  $("model-dialog").showModal();
+  $("mobile-model-toggle").setAttribute("aria-expanded", "true");
+  $("chat-menu-model-select").focus();
+}
+
+let fullscreenPending = false;
+
+function syncFullscreen() {
+  const button = $("app-fullscreen");
+  const active = document.fullscreenElement === document.documentElement;
+  button.hidden = $("surface-login").hidden === false ||
+    (!active && (!document.fullscreenEnabled || typeof document.documentElement.requestFullscreen !== "function"));
+  button.disabled = fullscreenPending;
+  button.setAttribute("aria-pressed", String(active));
+  button.title = active ? "Exit fullscreen" : "Enter fullscreen";
+  button.setAttribute("aria-label", button.title);
+  $("app-fullscreen-icon").setAttribute("href", active ? "#side-contract" : "#side-expand");
+}
+
+async function toggleFullscreen() {
+  if (fullscreenPending) return;
+  fullscreenPending = true;
+  syncFullscreen();
+  try {
+    if (document.fullscreenElement) await document.exitFullscreen();
+    else await document.documentElement.requestFullscreen({ navigationUI: "hide" });
+  } catch (error) {
+    status("Fullscreen is unavailable in this browser. You can keep chatting here.", "warn");
+  } finally {
+    fullscreenPending = false;
+    syncFullscreen();
+  }
 }
 
 async function loadModel(generation) {
@@ -2328,6 +2404,20 @@ async function boot() {
     }
   });
   $("chat-menu-toggle").addEventListener("click", toggleChatMenu);
+  $("mobile-model-toggle").addEventListener("click", openModelDialog);
+  $("model-dialog-close").addEventListener("click", closeModelDialog);
+  $("model-dialog-done").addEventListener("click", closeModelDialog);
+  $("model-dialog").addEventListener("close", () => {
+    $("mobile-model-toggle").setAttribute("aria-expanded", "false");
+    if (!$("mobile-model-toggle").hidden) $("mobile-model-toggle").focus();
+  });
+  $("model-dialog").addEventListener("click", (event) => {
+    if (event.target !== $("model-dialog")) return;
+    const rect = event.target.getBoundingClientRect();
+    if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) closeModelDialog();
+  });
+  $("app-fullscreen").addEventListener("click", toggleFullscreen);
+  document.addEventListener("fullscreenchange", syncFullscreen);
   $("chat-menu-rename").addEventListener("click", () => renameConversation());
   $("image-dialog-close").addEventListener("click", () => $("image-dialog").close());
   $("image-dialog").addEventListener("close", () => $("image-dialog-image").removeAttribute("src"));
@@ -2362,6 +2452,7 @@ async function boot() {
   window.matchMedia("(min-width: 1100px)").addEventListener("change", () => {
     closeNav();
     $("server-details").open = false;
+    syncModelChrome();
   });
   try {
     const session = await api("GET", "/api/session");

@@ -15,7 +15,12 @@ efforts) and "big" (low/high). Headless Chromium drives the conversation menu:
 5. "Default" follows the server's default model again;
 6. a step of Tool calls without text, by a changed model, names it above
    the calls, and the answer after it does not (PR #53 review B1);
-7. the narrow layout shows the menu without horizontal scroll.
+7. the narrow layout shows the model sheet without horizontal scroll;
+8. the sheet restores focus, closes with Escape/backdrop/Done and reuses one
+   selector, including when resized back to desktop;
+9. widths 320 through 1099 keep a 56px header and 44px touch targets;
+10. native fullscreen enters/exits, tracks browser exits and handles rejection
+    and unsupported browsers without claiming to be fullscreen.
 
 Step 4 also checks that the note shows only after a change made during the
 turn (PR #53 review C1).
@@ -202,12 +207,10 @@ def run(token: str, provider: TwoModels, chrome: str | None, shots: str | None, 
         model.select_option("big")
         page.wait_for_timeout(300)
         page.click("#chat-menu-toggle")
-        send("six", added=2)  # the step's header, then the answer
-        last = page.locator(".item-step").last
+        send("six")  # intermediate calls now fold into the work disclosure
+        last = page.locator(".item-work .work-model-name").last
         check("6: a step of calls only names its changed model",
-              page.locator(".item-step").count() == 1 and last.text_content() == "HIMARIbig"
-              and last.evaluate("n => n.nextElementSibling.classList.contains('item-tool-row')"),
-              page.locator(".item-step").all_text_contents())
+              last.text_content() == "big", last.text_content())
         labels = page.locator(".item-assistant .item-kind").all_text_contents()
         check("6: the answer after it does not", labels[-1] == "HIMARI", labels)
         shot(page, "6-step")
@@ -215,14 +218,67 @@ def run(token: str, provider: TwoModels, chrome: str | None, shots: str | None, 
         # 7. Narrow layout.
         page.set_viewport_size({"width": 380, "height": 800})
         page.wait_for_timeout(800)
-        if page.locator("#chat-menu").is_hidden():
-            page.click("#chat-menu-toggle")
+        page.click("#mobile-model-toggle")
         model.select_option("scripted-model")
+        expect(page.locator("#chat-menu-effort-field")).to_be_hidden()
         model.select_option("big")
         expect(page.locator("#chat-menu-effort-field")).to_be_visible(timeout=5000)
         shot(page, "7-narrow")
         check("7: the narrow layout has no horizontal scroll",
               bool(page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")))
+
+        # Native modal focus, dismissal and the one shared control tree.
+        effort.select_option("high")
+        expect(page.locator("#mobile-model-summary")).to_have_text("big · high")
+        check("8: only one model selector exists", model.count() == 1)
+        page.keyboard.press("Escape")
+        expect(page.locator("#model-dialog")).not_to_be_visible()
+        check("8: Escape restores focus", page.locator("#mobile-model-toggle").evaluate("n => n === document.activeElement"))
+        page.click("#mobile-model-toggle")
+        page.mouse.click(5, 5)
+        expect(page.locator("#model-dialog")).not_to_be_visible()
+        page.click("#mobile-model-toggle")
+        model.select_option("")
+        expect(page.locator("#chat-menu-effort-field")).to_be_hidden()
+        page.click("#model-dialog-done")
+        check("8: Done closes and Default still follows server", stored(cid) is None)
+
+        for width in (320, 360, 390, 430, 768, 1099):
+            page.set_viewport_size({"width": width, "height": 844})
+            bar = page.locator("#topbar").bounding_box()
+            targets = [page.locator(s).bounding_box() for s in
+                       ("#sidebar-toggle", "#mobile-model-toggle", "#app-fullscreen", "#chat-menu-toggle")]
+            check(f"9: {width}px header is 56px with 44px targets and no overflow",
+                  bar is not None and bar["height"] == 56 and all(b and b["height"] >= 44 and b["width"] >= 44 for b in targets)
+                  and page.evaluate("document.documentElement.scrollWidth <= innerWidth"), (bar, targets))
+        page.click("#mobile-model-toggle")
+        page.set_viewport_size({"width": 1100, "height": 900})
+        expect(page.locator("#model-dialog")).not_to_be_visible()
+        expect(model).to_be_visible()
+        check("10: desktop reuses the same controls inline", model.evaluate("n => n.closest('#topbar') !== null"))
+        page.set_viewport_size({"width": 390, "height": 844})
+
+        # Actual Fullscreen API; browser-driven exits must update the button.
+        page.click("#app-fullscreen")
+        page.wait_for_function("() => document.fullscreenElement === document.documentElement")
+        expect(page.locator("#app-fullscreen")).to_have_attribute("aria-pressed", "true")
+        check("11: native fullscreen enters", page.evaluate("document.fullscreenElement === document.documentElement"))
+        page.click("#app-fullscreen")
+        page.wait_for_function("() => !document.fullscreenElement")
+        page.click("#app-fullscreen")
+        page.wait_for_function("() => !!document.fullscreenElement")
+        page.evaluate("document.exitFullscreen()")
+        expect(page.locator("#app-fullscreen")).to_have_attribute("aria-pressed", "false")
+        check("11: external fullscreen exit restores button state", page.locator("#app-fullscreen").get_attribute("aria-label") == "Enter fullscreen")
+        page.evaluate("() => { document.documentElement.requestFullscreen = () => Promise.reject(new Error('denied')); }")
+        page.click("#app-fullscreen")
+        expect(page.locator("#status-bar")).to_contain_text("Fullscreen is unavailable")
+        check("11: rejection leaves normal UI and enabled button", page.locator("#app-fullscreen").is_enabled()
+              and page.locator("#app-fullscreen").get_attribute("aria-pressed") == "false")
+        page.evaluate("Object.defineProperty(document, 'fullscreenEnabled', {value: false, configurable: true})")
+        page.evaluate("document.dispatchEvent(new Event('fullscreenchange'))")
+        expect(page.locator("#app-fullscreen")).to_be_hidden()
+        check("11: unsupported fullscreen is hidden", page.locator("#app-fullscreen").is_hidden())
         check("no uncaught errors in the page", errors == [], errors)
         browser.close()
 
