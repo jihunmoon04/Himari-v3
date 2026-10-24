@@ -72,7 +72,7 @@ from himari.interfaces.web.app import create_app  # noqa: E402
 from himari.interfaces.web.config import WebConfig  # noqa: E402
 from himari.provider.api import NormalizedFinal, NormalizedToolCalls  # noqa: E402
 from himari.provider.api import NativeInvocationOutcome, NativePreparedRequest  # noqa: E402
-from himari.provider.scripted import Measured, ScriptedAdapter  # noqa: E402
+from himari.provider.scripted import Measured, ScriptedAdapter, StreamCut  # noqa: E402
 
 PORT = 8799
 HOSTILE = ("# Plan for Seoul\n\n**Day 1**: walk <script>window.__pwned = 1</script> "
@@ -1092,7 +1092,100 @@ def run_memory(base: str, token: str, shots: str | None, root: str, provider: Sc
     return errors
 
 
-SCENARIOS = ("main", "compaction", "budget", "trash", "files", "images", "work", "instructions", "memory")
+SCENARIOS = ("main", "compaction", "budget", "trash", "files", "images", "work", "instructions", "memory",
+             "streaming")
+
+
+LONG_ANSWER = "\n\n".join(f"Paragraph {n}: the sea keeps moving under a long grey sky." for n in range(1, 41))
+
+
+def streaming_script() -> ScriptedAdapter:
+    """V3-P73: a long streamed answer, one that hangs part way (to be
+    stopped), then a whole one; each starts after a moment of "thinking"."""
+    return ScriptedAdapter([NormalizedFinal((TextBlock(LONG_ANSWER),)),
+                            StreamCut(tuple("Half of an answer that never ends. " for _ in range(40)), asyncio.Event()),
+                            NormalizedFinal((TextBlock("A whole answer."),))],
+                           streaming=True, piece_delay=0.01, first_delay=1.5)
+
+
+def run_streaming(base: str, token: str, shots: str | None) -> list[str]:
+    """V3-P73 §7: the answer being written, the thinking line, a stopped
+    answer, and an answer that still arrives when the live view is blocked."""
+    errors: list[str] = []
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page(viewport={"width": 1280, "height": 860})
+        page.on("pageerror", lambda e: errors.append(str(e)))
+        page.goto(base)
+        page.fill("#login-token", token)
+        page.click("#login-submit")
+        new_chat(page)
+        page.fill("#composer-text", "Tell me about the sea")
+        page.press("#composer-text", "Enter")
+        writing = page.locator(".item-assistant.is-live")
+        thinking = writing.locator(".thinking")
+        expect(thinking).to_be_visible(timeout=5000)
+        expect(thinking).to_have_class(re.compile(r"\bis-sun\b"))
+        assert writing.locator(".thinking-word").inner_text().endswith("…")
+        expect(writing.locator(".thinking-time")).to_have_text(re.compile(r"^· \d+s$"))
+        expect(thinking.locator(".visually-hidden")).to_have_text("HIMARI is thinking")
+        if shots:
+            page.screenshot(path=os.path.join(shots, "10-thinking.png"))
+        # A theme that sets --thinking-style: hidamari switches it at once.
+        page.evaluate("""() => { const root = document.documentElement;
+            root.style.setProperty('--thinking-style', 'hidamari'); root.dataset.theme = 'warm'; }""")
+        expect(thinking).to_have_class(re.compile(r"\bis-hidamari\b"))
+        page.evaluate("""() => { const root = document.documentElement;
+            root.style.removeProperty('--thinking-style'); root.dataset.theme = 'classic'; }""")
+        # The text arrives as it is written, in one item.
+        expect(writing.locator(".rich-text")).to_contain_text("Paragraph 1:", timeout=10000)
+        page.wait_for_function("() => (document.querySelector('.is-live .rich-text') || {textContent: ''})"
+                               ".textContent.length > 600")
+        assert writing.count() == 1 and "Paragraph 40:" not in writing.inner_text()
+        # Followed while at the bottom; reading higher up, the view stays put while it writes.
+        page.wait_for_function("() => (t => t.scrollHeight > t.clientHeight + 300)(document.getElementById('timeline'))",
+                               timeout=10000)
+        assert page.evaluate("(t => t.scrollHeight - t.scrollTop - t.clientHeight < 80)"
+                             "(document.getElementById('timeline'))")
+        page.evaluate("() => { document.getElementById('timeline').scrollTop = 0; }")
+        page.wait_for_timeout(400)
+        assert page.evaluate("document.getElementById('timeline').scrollTop") < 50
+        assert writing.count() == 1
+        # The finished answer replaces it, once.
+        done = page.locator(".item-assistant:not(.is-live)")
+        expect(done).to_contain_text("Paragraph 40:", timeout=20000)
+        expect(writing).to_have_count(0)
+        assert done.count() == 1
+        expect(page.locator("#topbar-state-dot")).not_to_have_class(re.compile("is-active"), timeout=10000)
+        # Stopped part way: it stays dimmed, with what it means.
+        page.fill("#composer-text", "Again")
+        page.press("#composer-text", "Enter")
+        expect(writing.locator(".rich-text")).to_contain_text("Half of an answer", timeout=10000)
+        page.click("#composer-cancel")
+        stopped = page.locator(".item-assistant.is-live.is-stopped")
+        expect(stopped).to_be_visible(timeout=10000)
+        expect(stopped.locator(".live-note")).to_have_text(
+            "Stopped — this part was not kept, and HIMARI will not see it.")
+        if shots:
+            stopped.scroll_into_view_if_needed()
+            page.screenshot(path=os.path.join(shots, "11-stopped.png"))
+        # With the live view blocked, the answer still arrives, whole.
+        page.route("**/live", lambda route: route.abort())
+        page.fill("#composer-text", "Once more")
+        page.press("#composer-text", "Enter")
+        expect(page.locator(".item-assistant:not(.is-live)").last).to_have_text(re.compile("A whole answer."),
+                                                                               timeout=10000)
+        expect(page.locator(".item-assistant.is-live:not(.is-stopped)")).to_have_count(0)
+        assert page.locator(".item-user").last.inner_text().endswith("Once more")
+        assert stopped.evaluate("n => n.nextElementSibling !== null")  # it stayed where it was
+        page.unroute("**/live")
+        page.reload()
+        page.locator(".conv-row").first.click()
+        expect(page.locator(".item-assistant:not(.is-live)").last).to_have_text(re.compile("A whole answer."),
+                                                                               timeout=10000)
+        expect(page.locator(".item-assistant.is-live")).to_have_count(0)  # not a record: gone on reload
+        browser.close()
+    return errors
 
 
 def main() -> int:
@@ -1210,6 +1303,16 @@ def main() -> int:
                 errors += run_memory(f"http://127.0.0.1:{PORT + 8}",
                                      Path(memory, "control", "operator.secret").read_text().strip(),
                                      args.screenshots, memory, provider)
+            finally:
+                server.should_exit = True
+                time.sleep(0.5)
+        if "streaming" in only:
+            streaming = os.path.join(tmp, "streaming")
+            server = serve(streaming, PORT + 9, streaming_script())
+            try:
+                errors += run_streaming(f"http://127.0.0.1:{PORT + 9}",
+                                        Path(streaming, "control", "operator.secret").read_text().strip(),
+                                        args.screenshots)
             finally:
                 server.should_exit = True
                 time.sleep(0.5)

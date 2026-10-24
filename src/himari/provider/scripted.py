@@ -11,7 +11,8 @@ Each ``invoke_prepared`` consumes one script step:
 With ``streaming=True`` the adapter declares the ``streaming`` capability;
 a request prepared with ``stream`` is then invoked with a sink: the answer
 (or commentary) goes to it a few characters at a time, ``piece_delay``
-apart, then the tool ids, and the body goes into the capture.
+apart (``first_delay`` before the first, as a model thinking), then the
+tool ids, and the body goes into the capture.
 
 The request body is ``ModelInput`` serialized to JSON, labelled
 ``ADAPTER_SERIALIZED`` — it is not a wire capture of any real Provider.
@@ -116,10 +117,11 @@ def encode_output(output: NormalizedModelOutput) -> bytes:
 
 class ScriptedAdapter:
     def __init__(self, script: Iterable[ScriptStep] = (), *, streaming: bool = False,
-                 piece_delay: float = 0.0) -> None:
+                 piece_delay: float = 0.0, first_delay: float = 0.0) -> None:
         self._script = list(script)
         self._streaming = streaming
         self._piece_delay = piece_delay
+        self._first_delay = first_delay
         self.prepared_inputs: list[ModelInput] = []
         self.sent: list[NativePreparedRequest] = []
 
@@ -187,6 +189,8 @@ class ScriptedAdapter:
     async def _stream(self, output: NormalizedModelOutput, sink: OutputSink | None) -> None:
         if output.continuation is not None:
             await self._show(sink, OutputDelta(thinking=True))
+        if self._first_delay:
+            await asyncio.sleep(self._first_delay)
         blocks = output.blocks if isinstance(output, NormalizedFinal) else output.commentary
         text = "".join(_blocks_to_json(blocks))
         for start in range(0, len(text), PIECE_CHARS):
@@ -199,6 +203,8 @@ class ScriptedAdapter:
                    capture: RawCapture | None) -> NativeInvocationOutcome:
         if capture is not None:
             capture.content_type = "text/event-stream"
+        if self._first_delay:
+            await asyncio.sleep(self._first_delay)
         for piece in step.pieces:
             if capture is not None:
                 capture.append(piece.encode())

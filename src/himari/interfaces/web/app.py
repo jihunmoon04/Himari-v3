@@ -9,7 +9,11 @@ two. Foreign or missing Conversations are indistinguishable (404).
 
 The browser reads progress by polling: the job status of a Conversation
 and its Events after the last sequence it has. Messages start background
-jobs (202); a second message while one runs is refused (409).
+jobs (202); a second message while one runs is refused (409). While a job
+runs, ``GET …/live`` streams what its model is writing (V3-P73 §6.1,
+``live.py``): display only, never a record; at most ``live.PER_PRINCIPAL``
+at once per principal (429), and every stream ends when the server begins to
+shut down (``begin_shutdown``).
 
 The trash (V3-P65 §9): ``POST …/trash`` moves a Conversation there (a
 running job is stopped first), ``POST …/restore`` brings it back, and
@@ -112,6 +116,7 @@ from himari.data.api import (
     UserMessage,
     view_state,
 )
+from himari.interfaces.web import live
 from himari.interfaces.web.config import WebConfig
 from himari.sandbox.api import SandboxState
 from himari.interfaces.web.sandbox import SandboxGrant, SandboxSigner
@@ -131,7 +136,7 @@ MAX_EVENTS_PAGE = 500
 SESSION_SECONDS = 7 * 24 * 3600
 FAILED_LOGIN_DELAY_SECONDS = 1.0
 STATIC_FILES = {"app.css": "text/css", "app.js": "text/javascript", "app_view.js": "text/javascript",
-                "rich_text.js": "text/javascript", "appearance.js": "text/javascript",
+                "rich_text.js": "text/javascript", "appearance.js": "text/javascript", "live.js": "text/javascript",
                 # KaTeX for the formulas in assistant text, loaded by rich_text.js on the first one.
                 "katex/katex.min.js": "text/javascript", "katex/katex.min.css": "text/css"}
 KATEX_FONTS = ("AMS-Regular", "Caligraphic-Bold", "Caligraphic-Regular", "Fraktur-Bold", "Fraktur-Regular",
@@ -334,6 +339,7 @@ def event_view(event: ConversationEvent, views: dict[CallRef, tuple[bool, bool]]
     elif isinstance(payload, AssistantFinal):
         view["text"] = _text(payload.blocks)
         view["model"] = models.get(event.origin_run_id) if event.origin_run_id else None
+        view["run_id"] = event.origin_run_id  # the live output it replaces (V3-P73 §7.2)
     elif isinstance(payload, AssistantToolCalls):
         view["text"] = _text(payload.commentary)
         view["model"] = models.get(event.origin_run_id) if event.origin_run_id else None
@@ -529,23 +535,37 @@ PROMPT_REFUSAL_STATUS = {"unknown_prompt": 404, "source_disabled": 409, "invalid
 # --- the application ---------------------------------------------------------------------------
 
 
+def begin_shutdown(app: FastAPI) -> None:
+    """The server got its exit signal: end the live streams now, so that
+    uvicorn, which waits for open responses before it stops the application,
+    is not held by them (V3-P73 §6.1). Safe from a signal handler."""
+    loop = getattr(app.state, "loop", None)
+    if loop is not None:
+        loop.call_soon_threadsafe(app.state.closing.set)
+
+
 def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None = None) -> FastAPI:
     """``signer``: shared with the sandbox server (``sandbox.py``); made here
     when not given (one per process, so a restart voids old view URLs)."""
     sessions = Sessions()
     signer = SandboxSigner() if signer is None else signer
+    closing = asyncio.Event()  # set as the server begins to shut down: the live streams end
+    live_streams: dict[PrincipalId, int] = {}  # open live streams of each principal
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        app.state.loop = asyncio.get_running_loop()
         application = await opener()
         app.state.himari = application
         app.state.bearer = derive_cli_bearer(application.operator_secret)
         try:
             yield
         finally:
+            closing.set()
             await application.close()
 
     app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
+    app.state.closing = closing
 
     def himari(request: Request) -> Application:
         application: Application = request.app.state.himari
@@ -818,6 +838,27 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
         memory = await application.memory_lines(scope, results) if results else {}
         return {"items": [event_view(e, views, models, files, presented, memory) for e in events],
                 "last_sequence": events[-1].sequence if events else after}
+
+    @app.get("/api/conversations/{conversation_id}/live")
+    async def read_live(conversation_id: str, request: Request,
+                        who: PrincipalId = Depends(principal)) -> StreamingResponse:
+        """What the running job's model is writing, as it writes (V3-P73 §6.1)."""
+        application, scope = himari(request), scope_of(conversation_id, who)
+        await application.data.read_conversation(scope)  # authorizes first: another's is 404
+        if live_streams.get(who, 0) >= live.PER_PRINCIPAL:
+            raise ApiError(429, "too_many_streams", "Too many live views are open; close one and try again.")
+
+        async def frames() -> AsyncIterator[str]:
+            live_streams[who] = live_streams.get(who, 0) + 1
+            try:
+                async for frame in live.stream(application.runner, scope, closing):
+                    yield frame
+            finally:
+                live_streams[who] -= 1
+                if not live_streams[who]:
+                    del live_streams[who]
+
+        return StreamingResponse(frames(), media_type="text/event-stream", headers={"X-Accel-Buffering": "no"})
 
     @app.get("/api/conversations/{conversation_id}/calls/{run_id}/{call_id}/app")
     async def read_app_view(conversation_id: str, run_id: str, call_id: str, request: Request, origin: str,

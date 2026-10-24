@@ -38,6 +38,11 @@
   --warn-edge: #e3b341;
   --danger: #c4312b;
 
+  /* the thinking line (V3-P73 §7.4): which words and motion, and its light.
+   * Light themes are "sun"; a dark theme sets "hidamari". */
+  --thinking-style: sun;
+  --thinking-shine: #c27c0e;
+
   /* shape */
   --radius-sm: 6px;
   --radius-md: 10px;
@@ -92,6 +97,7 @@
   --accent: #a25237;
   --accent-contrast: #ffffff;
   --accent-soft: #f4e9e1;
+  --thinking-shine: #c0672e;
   --reading-font: Georgia, "Batang", "Times New Roman", serif;
   --composer-radius: 16px;
   --send-radius: 10px;
@@ -3422,4 +3428,85 @@ details > summary {
   background: var(--warn-soft);
   color: var(--warn);
   overflow-wrap: anywhere;
+}
+
+/* The answer being written (V3-P73 §7): the same item as a finished answer,
+ * replaced by it; a stopped one stays dimmed with its note. */
+.item-assistant.is-live.is-stopped {
+  opacity: 0.55;
+}
+
+.live-tool,
+.live-note {
+  margin-top: var(--space-2);
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+/* The thinking line (§7.4): a moving glyph, light passing over one word, and
+ * the seconds. "sun": petals open and close; "hidamari": a warm dot breathes. */
+.thinking {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  color: var(--text-muted);
+  font-size: 14px;
+}
+
+.thinking-glyph {
+  display: inline-block;
+  width: 1em;
+  color: var(--thinking-shine);
+  text-align: center;
+}
+
+.thinking-word {
+  background: linear-gradient(90deg, var(--text-muted) 35%, var(--thinking-shine) 50%, var(--text-muted) 65%);
+  background-size: 300% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: thinking-shine 2.2s linear infinite;
+}
+
+.thinking-time {
+  font-variant-numeric: tabular-nums;
+}
+
+.thinking.is-hidamari .thinking-glyph {
+  font-size: 0.7em;
+  animation: thinking-breathe 2.4s ease-in-out infinite;
+}
+
+.thinking.is-hidamari .thinking-word {
+  animation-duration: 3.6s;
+}
+
+@keyframes thinking-shine {
+  from {
+    background-position: 100% 0;
+  }
+  to {
+    background-position: 0 0;
+  }
+}
+
+@keyframes thinking-breathe {
+  50% {
+    opacity: 0.35;
+    transform: scale(0.7);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .thinking-word {
+    background: none;
+    color: var(--text-muted);
+    animation: none;
+  }
+
+  .thinking-glyph,
+  .thinking.is-hidamari .thinking-glyph {
+    animation: none;
+  }
 }

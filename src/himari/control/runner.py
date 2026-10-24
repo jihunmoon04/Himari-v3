@@ -309,14 +309,15 @@ class BackgroundRunner:
     def live_version(self, scope: TrustedScope) -> int:
         return self._live_versions.get(self._key(scope), 0)
 
-    def live_output(self, scope: TrustedScope) -> LiveOutput | None:
-        """The Conversation's live state; None when there is none."""
+    def live_output(self, scope: TrustedScope, *, text: bool = True) -> LiveOutput | None:
+        """The Conversation's live state; None when there is none. With
+        ``text=False`` the text is left out (``chars`` still says its length)."""
         key = self._key(scope)
         live = self._live.get(key)
         if live is None:
             return None
-        return LiveOutput(live.run_id, live.text_from(0), tuple(live.tools), live.thinking, live.truncated,
-                          live.ended, self._live_versions.get(key, 0))
+        return LiveOutput(live.run_id, live.text_from(0) if text else "", tuple(live.tools), live.thinking,
+                          live.truncated, live.ended, self._live_versions.get(key, 0), live.chars)
 
     def live_text(self, scope: TrustedScope, run_id: RunId, start: int) -> str | None:
         """The live text of ``run_id`` from character ``start`` on; None when

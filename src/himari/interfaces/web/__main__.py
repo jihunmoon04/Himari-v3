@@ -24,6 +24,7 @@ import contextlib
 import os
 import sys
 from collections.abc import Iterator
+from types import FrameType
 
 from himari.bootstrap import read_env_file
 from himari.bootstrap.application import Application, TurnSettings, check_tool_sources, tool_views_configured
@@ -63,7 +64,7 @@ def main(argv: list[str] | None = None) -> int:
 
     import uvicorn
 
-    from himari.interfaces.web.app import create_app
+    from himari.interfaces.web.app import begin_shutdown, create_app
     from himari.interfaces.web.sandbox import SandboxSigner, create_sandbox_app
     from himari.provider.api import ProviderAdapter
 
@@ -122,9 +123,15 @@ def main(argv: list[str] | None = None) -> int:
     # One key per process: a restart (the only way the MCP policy changes)
     # voids every view URL signed before it (V3-P58 §3.4).
     signer = SandboxSigner()
-    main_server = uvicorn.Server(uvicorn.Config(create_app(config, opener, signer), host=config.host,
-                                                port=config.port, log_level="info", server_header=False,
-                                                proxy_headers=False))
+    web_app = create_app(config, opener, signer)
+
+    class MainServer(uvicorn.Server):
+        def handle_exit(self, sig: int, frame: FrameType | None) -> None:
+            begin_shutdown(web_app)  # V3-P73: open live streams would hold the shutdown
+            super().handle_exit(sig, frame)
+
+    main_server = MainServer(uvicorn.Config(web_app, host=config.host, port=config.port, log_level="info",
+                                            server_header=False, proxy_headers=False))
     if not views:
         main_server.run()
         return 0
