@@ -295,5 +295,8 @@ def test_only_the_models_checked_live_declare_streaming() -> None:
     # V3-P73 §9: a model is added here only after tests/live/test_openrouter_stream_live.py passes on it.
     from himari.provider.openrouter import KNOWN_CAPABILITIES
 
-    assert {m for m, c in KNOWN_CAPABILITIES.items() if c.streaming} == {"openai/gpt-6-luna",
-                                                                         "anthropic/claude-haiku-5.5"}
+    assert {m for m, c in KNOWN_CAPABILITIES.items() if c.streaming} == {
+        "openai/gpt-6-luna", "anthropic/claude-haiku-5.5", "openai/gpt-6.1-sol",
+        "anthropic/claude-sonnet-5.5", "xiaomi/mimo-v2.6-pro", "z-ai/glm-5.3",
+        "deepseek/deepseek-v4.1-flash", "minimax/minimax-m3",
+    }

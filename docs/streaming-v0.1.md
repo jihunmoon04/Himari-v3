@@ -411,9 +411,34 @@ CLI는 Web 서버의 클라이언트다(V3-P47). 이 패킷에서는 바꾸지 �
 | `[REDACTED]` | 없음 | 없음 |
 | 중간 중지 | 74자 뒤 끊김, 원본 47 KB 보존 | 89자 뒤 끊김, 원본 4.3 KB 보존 |
 
-- 두 모델만 `streaming=True`다. 다른 모델은 같은 live 테스트를 통과한 뒤에 더한다(`test_only_the_models_checked_live_declare_streaming`).
+- 1단계에서는 이 두 모델만 `streaming=True`였다. 다른 모델은 같은 live 테스트를 통과한 뒤에 더한다(`test_only_the_models_checked_live_declare_streaming`).
 - **저장 크기:** 같은 Tool 턴을 비교했다. luna는 4.8 KB → 46.8 KB(약 10배), haiku는 3.7 KB → 12.3 KB(약 3배). 조각마다 id·model 같은 머리가 붙기 때문이다. 개인 서버 규모에서는 받아들인다(§4).
 - `Application` 기본값으로 luna에 물었다. 답이 쓰이는 동안 Runner의 글 길이가 네 번 바뀌었고, job이 끝난 뒤 `ended`, 최종 답과 흘린 글이 같았다.
+
+**운영 모델 추가 확인 (2026-10-24)**
+
+운영 중인 7개 모델 모두 같은 live 검사 세 가지를 통과했다(21/21, 206.17초).
+아래 6개 모델에도 `streaming=True`를 더했다. 기존 Haiku 선언도 유지한다.
+effort를 제공하지 않는 MiMo와 MiniMax에는 effort를 보내지 않는다. 지원하는 모델은
+기존 검사처럼 `high`로 도구 호출과 continuation을 확인한다.
+
+| 모델 | 긴 답의 조각 수 | 도구 턴에서 되실은 continuation | 중지 전 표시한 글자 수 |
+| --- | --- | --- | --- |
+| `openai/gpt-6-luna` | 45 | summary + encrypted | 77 |
+| `xiaomi/mimo-v2.6-pro` | 28 | text | 60 |
+| `z-ai/glm-5.3` | 63 | text | 74 |
+| `deepseek/deepseek-v4.1-flash` | 35 | text | 48 |
+| `minimax/minimax-m3` | 38 | text | 100 |
+| `openai/gpt-6.1-sol` | 51 | summary + encrypted | 53 |
+| `anthropic/claude-sonnet-5.5` | 23 | text + signature | 471 |
+
+각 답의 표시된 글과 저장된 SSE의 정규화 결과가 같고 usage가 남았다. 도구 결과를
+받은 다음 요청에는 continuation이 바뀌지 않고 실렸고 최종 답(208)이 나왔다.
+중지는 클라이언트 연결이 끊기고 받은 원본이 보존되는 것을 확인한 것이다.
+공급자 쪽의 연산이나 과금까지 멈췄다는 증거는 아니다.
+
+다시 확인할 때는 `HIMARI_LIVE=1`과 키에 더해 `HIMARI_LIVE_MODELS`를 위 7개
+모델 ID의 쉼표 목록으로 주고 `tests/live/test_openrouter_stream_live.py`를 실행한다.
 
 **테스트**
 - Provider 32개: SSE 읽기(한 바이트씩, LF·CRLF·CR), 받기·결과 분류, sink, 정규화와 닫힘 실패, continuation 규칙, 선언한 모델 고정.
