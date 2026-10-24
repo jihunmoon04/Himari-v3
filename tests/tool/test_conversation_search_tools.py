@@ -16,9 +16,13 @@ from himari.tool.conversation_search import (
     MESSAGE_CHARS,
     READ_CHARS,
     SNIPPET_CHARS,
+    SNIPPET_LEAD,
     ConversationReadTool,
     ConversationSearchTool,
+    _at,
     conversation_search_tools,
+    first_match,
+    fold,
     snippet,
 )
 from himari.tool.schema import validate
@@ -92,6 +96,16 @@ def test_a_snippet_finds_its_match_where_folding_changes_lengths() -> None:
     cut = snippet("ﬃ" * 300 + " needle " + "z" * 500, ["needle"])
     assert "needle" in cut and cut.startswith("…")
     assert snippet("Ｎeedle at the start", ["needle"]).startswith("Ｎeedle")
+
+
+@pytest.mark.parametrize(("joined", "word"), [("e\u0301", "é"), ("\u1112\u1161\u11ab", "한")])
+def test_a_match_is_placed_where_folding_joins_characters(joined: str, word: str) -> None:
+    # PR #80 review C1: Data folds the whole text, so "e" + a combining accent
+    # (or decomposed Hangul) matches; folding one character at a time would not.
+    text = "A" * 3000 + joined + "B" * 500
+    assert first_match(text, [word]) == 3000
+    assert f"(offset {3000 - SNIPPET_LEAD})" in _at(text, [word])
+    assert word in fold(snippet(text, [word]))
 
 
 def test_the_current_conversation_is_named_and_only_its_summarized_part_found() -> None:

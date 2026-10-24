@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from bisect import bisect_right
 from collections.abc import Awaitable, Callable, Mapping
 
 from himari.common import ConversationId, JsonValue, ModelToolResult, TextBlock, ToolId, TrustedScope
@@ -93,17 +94,16 @@ def _who(kind: EventKind) -> str:
 
 def first_match(text: str, words: list[str]) -> int:
     """Where in ``text`` the first of the folded ``words`` is (0 if none).
-    It is found in the folded text and placed back in the original by
-    folding it a character at a time, as NFKC may change lengths ("ﬃ" is
-    three characters folded; PR #79 re-review C1)."""
-    folded: list[str] = []
-    origin: list[int] = []  # for each folded character, the original one it came from
-    for index, char in enumerate(text):
-        piece = fold(char)
-        folded.append(piece)
-        origin.extend([index] * len(piece))
-    found = [i for i in ("".join(folded).find(w) for w in words) if i >= 0]
-    return origin[min(found)] if found else 0
+    It is found in the whole text folded, as Data finds it, and placed back
+    in the original as the longest prefix that folds to no more than the
+    text before the match. NFKC may change lengths ("ﬃ" is three characters
+    folded; PR #79 re-review C1) and joins characters across a split ("e" and
+    a combining accent, or Hangul jamo; PR #80 review C1), so the text is
+    never folded a character at a time."""
+    found = [i for i in (fold(text).find(w) for w in words) if i >= 0]
+    if not found:
+        return 0
+    return bisect_right(range(len(text) + 1), min(found), key=lambda end: len(fold(text[:end]))) - 1
 
 
 def snippet(text: str, words: list[str]) -> str:
