@@ -100,7 +100,7 @@ P1은 Workspace 전용 소프트웨어 모듈을 다시 도입하는 단계가 �
 | --- | --- | --- |
 | Q-14 | Compaction | **기본 구현 (V3-P48):** 토큰 기준 자동 압축(80%), 요약 + exact tail, COMPACTION Run, T9c 원자 교체. 수동 압축(V3-P51)과 압축 표시·문맥 크기(V3-P50) 구현. 남은 것: 요약 품질 평가(gpt-5-nano가 글자 수 상한 때문에 다른 언어로 요약하는 경우 관찰), 측정값 없는 첫 요청의 과대 추정(영어 ~1.4배). 거부 기준(모델 창)과 큰 메시지 연쇄 요약은 V3-P49로 구현. 모델 출력 몫 예약은 V3-P54로 구현(거부 기준 = 창 − 선언된 최대 출력) |
 | Q-15 | Reasoning / continuation 확장 | **기본 턴별 저장·재생은 PR #6으로 구현(V3-049)**, 압축 시 제외는 V3-P48. 남은 것: 타 모델 지원, cache-control |
-| Q-16 | Memory Tool | 기억 생성·조회·삭제 정책, 자동 삽입/검증/권한, Data 읽기 경계 |
+| Q-16 | Memory Tool | 기억 생성·조회·삭제 정책, 자동 삽입/검증/권한, Data 읽기 경계 — V3-P71 설계 초안 [memory-v0.1.md](memory-v0.1.md)에서 다룸 |
 | Q-17 | Plan / Note Artifact | **원본은 Data conversation-scoped Artifact로 확정**. Revision/CAS, schema, 삭제/복구·표시, Outside 노출/export |
 | Q-18 | Streaming / recovery | chunk-level 원본 기록, 스트리밍 UI, 중단된 모델 호출, resume/cancel |
 | Q-19 | Lifecycle/privacy | **설계 초안 (V3-P65, [conversation-delete-v0.1.md](conversation-delete-v0.1.md)):** 휴지통 → 보관 기간 뒤 영구 삭제, Conversation의 모든 행 연쇄 제거, 대화 폴더 정리. 남은 것: 접근 감사, 외부 서버 데이터 삭제 훅 |
