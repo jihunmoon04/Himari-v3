@@ -8,6 +8,7 @@ Configuration comes from the environment (see ``config.py``):
 ``HIMARI_TRASH_DAYS`` (days a deleted Conversation stays in the trash, default 30),
 ``HIMARI_FILE_MAX_BYTES``, ``HIMARI_FILE_STORE_MAX_BYTES``, ``HIMARI_FILE_KEEP_DAYS`` (files, V3-P66),
 ``HIMARI_MEMORY`` (0 turns memory off, V3-P71),
+``HIMARI_CONVERSATION_SEARCH`` (0 turns conversation search off, V3-P72),
 ``HIMARI_WEB_SANDBOX_PORT`` (Tool views' origin; started only when some
 MCP server's views are shown) and ``OPENROUTER_API_KEY``. ``--env-file`` reads ``KEY=value`` lines first;
 real environment variables win; the token variables named in
@@ -80,7 +81,8 @@ def main(argv: list[str] | None = None) -> int:
                                              trash_days=config.trash_days, file_max_bytes=config.file_max_bytes,
                                              file_store_max_bytes=config.file_store_max_bytes,
                                              file_keep_days=config.file_keep_days,
-                                             documents_dir=config.documents_dir, memory=config.memory)
+                                             documents_dir=config.documents_dir, memory=config.memory,
+                                             conversation_search=config.conversation_search)
         print(f"HIMARI web: http://{config.host}:{config.port}/ — sign in with the token in "
               f"{application.data_root / 'control' / 'operator.secret'} (sandbox: {application.sandbox_state.value}, "
               f"context budget: {application.context_tokens} tokens; {turn_text(application.turn)})",
@@ -92,6 +94,8 @@ def main(argv: list[str] | None = None) -> int:
         if not application.memory_enabled:  # V3-P71 §9
             print("HIMARI web: memory is off (HIMARI_MEMORY=0): models neither save nor see notes; "
                   "you can still manage them", file=sys.stderr, flush=True)
+        if not application.conversation_search_enabled:  # V3-P72 §9
+            print("HIMARI web: conversation search is off (HIMARI_CONVERSATION_SEARCH=0)", file=sys.stderr, flush=True)
         if not application.images_available:  # V3-P67 §3.1: fail-closed, said once at startup
             print("HIMARI web: images are not shown to models on this server (the image sandbox is unavailable): "
                   "an image is attached as a file line only", file=sys.stderr, flush=True)

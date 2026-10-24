@@ -1868,7 +1868,9 @@ async function restoreConversation(item, button) {
 async function purgeConversation(item, button) {
   const name = conversationName(item);
   const lines = ["This cannot be undone. Its messages, its records and its files are deleted.",
-                 "Data stored by external services is not deleted."];
+                 "Data stored by external services is not deleted.",
+                 // V3-P72 §8: what search already copied into other conversations stays there.
+                 "Text that other conversations found with search stays in them."];
   let saved = 0;
   try { // the notes it saved, as the memory screen lists them (V3-P71 §4.3)
     const listing = await api("GET", "/api/memories");

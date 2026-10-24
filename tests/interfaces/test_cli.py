@@ -414,7 +414,7 @@ def test_a_compacted_conversation_shows_where_the_summary_takes_over(tmp_path: P
                                                                       monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(cli, "POLL_SECONDS", 0.01)
     # The budget is sized for a prompt without the memory Tools and note (V3-P71).
-    harness = Harness(tmp_path, context_tokens=2800, turn={"memory": False})
+    harness = Harness(tmp_path, context_tokens=2800, turn={"memory": False, "conversation_search": False})  # sized without the memory and search Tools
     with harness.test_client:
         cid = harness.run("new")[1].strip()
         harness.queue(*[final("SUMMARY of the start")] * 12)  # every answer and every summary alike
@@ -443,7 +443,7 @@ def test_a_compacted_conversation_shows_where_the_summary_takes_over(tmp_path: P
 def test_a_compacted_conversation_on_an_ascii_terminal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # PR #16 review B1: the divider is the CLI's own mark too; it never raises.
     monkeypatch.setattr(cli, "POLL_SECONDS", 0.01)
-    harness = Harness(tmp_path, context_tokens=2800, turn={"memory": False})  # sized without the memory Tools
+    harness = Harness(tmp_path, context_tokens=2800, turn={"memory": False, "conversation_search": False})  # sized without the memory and search Tools
     with harness.test_client:
         cid = harness.run("new")[1].strip()
         harness.queue(*[final("SUMMARY 요약 ─ done")] * 12)
@@ -680,7 +680,7 @@ def test_status_rename_and_a_closed_question_in_the_history(harness: Harness) ->
     code, out, _ = harness.run("status")
     assert code == cli.EXIT_OK
     assert out.splitlines() == ["model: m", "commands: unavailable on this host", "context budget: 128,000 tokens",
-                                "documents: off", "memory: on"]
+                                "documents: off", "memory: on", "conversation search: on"]
     cid = harness.run("new")[1].strip()
     assert harness.run("rename", cid, "Trip plans")[0] == cli.EXIT_OK
     assert "Trip plans" in harness.run("list")[1]
@@ -712,7 +712,7 @@ def test_a_refusal_says_why(harness: Harness) -> None:
 def test_compacting_with_an_open_question_says_why(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # PR #24 review C1: the reason of WAITING_FOR_USER / NOTHING_TO_COMPACT is shown too.
     monkeypatch.setattr(cli, "POLL_SECONDS", 0.01)
-    harness = Harness(tmp_path, context_tokens=2800)
+    harness = Harness(tmp_path, context_tokens=2800, turn={"memory": False, "conversation_search": False})  # sized without the memory and search Tools
     with harness.test_client:
         cid = harness.run("new")[1].strip()
         harness.queue(calls(("ask_user", {"question": "Which file?"})))
@@ -942,7 +942,9 @@ def test_the_delete_question_says_what_stays_and_what_stops() -> None:
         "The work under way is stopped first.",
         "Data stored by the external servers this conversation used (calliope, old (no longer configured))"
         " is not deleted."]
-    assert len(cli.delete_question("a\nb", notice, now=True)) == 3  # a title's own line breaks are escaped later
+    now = cli.delete_question("a\nb", notice, now=True)
+    assert len(now) == 4  # a title's own line breaks are escaped later
+    assert now[-1] == "Text that other conversations found with search stays in them."  # V3-P72 §8
 
 
 def test_delete_in_a_chat_moves_it_and_leaves(harness: Harness) -> None:

@@ -58,6 +58,7 @@ POLL_SECONDS = 0.5
 EVENT_PAGE = 32  # 32 x a 64 KiB Tool result stays well under the 8 MiB response bound
 TRASH_SECONDS = 90.0  # the server waits up to 30 s for a running job to stop (V3-P65 §7.1)
 TOOL_RESULT_LINES = 8
+SEARCH_COPIES = "Text that other conversations found with search stays in them."
 MEMORY_CHANGES = frozenset({"memory_save", "memory_forget"})  # V3-P71: shown as one line each
 MEMORY_RESULT = re.compile(r"(Saved|Updated|Forgot|Already saved as) (m[0-9]+)")
 PROGRESS_CHARS = 200  # a progress line, like a call's arguments (V3-P68 §6)
@@ -621,6 +622,8 @@ def delete_question(name: str, notice: dict[str, Any], now: bool) -> list[str]:
     if count:  # V3-P71 D5
         lines.append(f"{count} note{'s' if count > 1 else ''} HIMARI saved in it {'are' if count > 1 else 'is'} "
                      "deleted with it for good.")
+    if now:  # V3-P72 §8: what search already copied into other conversations stays there
+        lines.append(SEARCH_COPIES)
     return lines
 
 
@@ -1081,7 +1084,8 @@ def cmd_status(session: Session, args: argparse.Namespace) -> int:
     for line in (f"model: {server.get('model')}" + (f" (also offered: {', '.join(offered)})" if offered else ""),
                  f"commands: {SANDBOX_TEXT.get(sandbox, sandbox)}",
                  f"context budget: {server.get('context_budget'):,} tokens", documents_line(server.get("documents")),
-                 f"memory: {'on' if server.get('memory') else 'off'}"):
+                 f"memory: {'on' if server.get('memory') else 'off'}",
+                 f"conversation search: {'on' if server.get('conversation_search') else 'off'}"):
         session.printer.line(safe_line(line, encoding=session.printer.encoding))
     return EXIT_OK
 

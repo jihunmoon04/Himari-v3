@@ -37,6 +37,9 @@ read_document is not offered and run_command has no document libraries.
 
 Memory (V3-P71 §9): ``HIMARI_MEMORY=0`` turns the memory Tools and notes off
 (the notes stay and can be seen); on by default.
+
+Conversation search (V3-P72 §9): ``HIMARI_CONVERSATION_SEARCH=0`` turns
+conversation_search and conversation_read off; on by default.
 """
 
 from __future__ import annotations
@@ -67,6 +70,7 @@ FILE_STORE_MAX_VAR = "HIMARI_FILE_STORE_MAX_BYTES"  # V3-P66: the whole file sto
 FILE_KEEP_DAYS_VAR = "HIMARI_FILE_KEEP_DAYS"  # V3-P66: unused this long, a stored file expires
 DOCUMENTS_DIR_VAR = "HIMARI_DOCUMENTS_DIR"  # V3-P70: the documents toolkit; unset: no documents
 MEMORY_VAR = "HIMARI_MEMORY"  # V3-P71: 0 turns memory off
+CONVERSATION_SEARCH_VAR = "HIMARI_CONVERSATION_SEARCH"  # V3-P72: 0 turns it off
 DEFAULT_FILE_MAX_BYTES = 32 * 1024 * 1024  # as data.api
 DEFAULT_FILE_STORE_MAX_BYTES = 1024 * 1024 * 1024
 DEFAULT_FILE_KEEP_DAYS = 30
@@ -116,6 +120,7 @@ class WebConfig:
     file_keep_days: int = DEFAULT_FILE_KEEP_DAYS
     documents_dir: str | None = None
     memory: bool = True
+    conversation_search: bool = True
 
     @property
     def view_port(self) -> int:
@@ -213,6 +218,7 @@ class WebConfig:
             file_keep_days=keep_days,
             documents_dir=documents_dir,
             memory=_flag(source.get(MEMORY_VAR), MEMORY_VAR, default=True),
+            conversation_search=_flag(source.get(CONVERSATION_SEARCH_VAR), CONVERSATION_SEARCH_VAR, default=True),
         )
 
 

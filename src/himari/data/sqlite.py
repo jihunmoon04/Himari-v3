@@ -80,6 +80,10 @@ from himari.common import (
 from himari.data import codec, rules
 from himari.data.blobs import BlobRow, DirectoryBlobFiles, FileStore
 from himari.data.api import (
+    SEARCH_KINDS,
+    EventPage,
+    EventSearch,
+    EventText,
     MAX_ATTACHMENTS,
     MAX_STAGED_UPLOADS,
     PRESENT_LIMIT_BYTES,
@@ -146,7 +150,7 @@ from himari.data.api import (
 
 # v3: compaction_runs; v4: external_settings; v5: ui_resources; v6: model_settings;
 # v7: the trash (all upgraded in place); v1 is refused
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 APPLICATION_ID = 0x48494D41  # "HIMA": written into the database header (PRAGMA application_id)
 
 _TERMINAL_COMPLETIONS = frozenset(
@@ -385,8 +389,19 @@ CREATE TABLE memory_ids (
     last_id INTEGER NOT NULL
 ) STRICT;
 """
+# v12: the searchable text of user messages and final answers, folded (V3-P72 §4.1);
+# an upgrade fills it from the Events already there (_fill_event_text).
+_V12_ADDITIONS = """
+CREATE TABLE event_text (
+    conversation_id TEXT NOT NULL REFERENCES conversations,
+    sequence INTEGER NOT NULL,
+    folded TEXT NOT NULL,
+    PRIMARY KEY (conversation_id, sequence),
+    FOREIGN KEY (conversation_id, sequence) REFERENCES events (conversation_id, sequence)
+) STRICT;
+"""
 _ADDITIONS = (_V3_ADDITIONS, _V4_ADDITIONS, _V5_ADDITIONS, _V6_ADDITIONS, _V7_ADDITIONS,
-              _V8_ADDITIONS, _V9_ADDITIONS, _V10_ADDITIONS, _V11_ADDITIONS)  # what each version from v3 added
+              _V8_ADDITIONS, _V9_ADDITIONS, _V10_ADDITIONS, _V11_ADDITIONS, _V12_ADDITIONS)  # what each version from v3 added
 _SCHEMA = _SCHEMA_V2 + "".join(_ADDITIONS)
 # An older version → (its exact schema, what brings it to SCHEMA_VERSION).
 _UPGRADES = {
@@ -544,6 +559,8 @@ class SqliteStore:
                         self.backup_path, SCHEMA_VERSION)
             with self.transaction() as tx:
                 tx.executescript_parts(upgrade)
+                if version < 12:
+                    _fill_event_text(tx)
                 tx.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
         if empty:
             with self.transaction() as tx:
@@ -880,6 +897,18 @@ def _memory(row: sqlite3.Row) -> Memory:
                   datetime.fromisoformat(row["updated_at"]))
 
 
+def _fill_event_text(tx: _Tx) -> None:
+    """V3-P72 §4.2: the searchable text of the Events a v11 (or older) database
+    already holds, folded as new Events are."""
+    kinds = [k.value for k in SEARCH_KINDS]
+    for row in tx.all(f"SELECT conversation_id, sequence, kind, payload FROM events WHERE kind IN"
+                      f" ({', '.join('?' * len(kinds))})", *kinds):
+        text = rules.event_text(codec.payload_from(EventKind(row["kind"]), row["payload"]))
+        if text is not None:
+            tx.execute("INSERT INTO event_text (conversation_id, sequence, folded) VALUES (?, ?, ?)",
+                       row["conversation_id"], row["sequence"], rules.fold(text))
+
+
 def _timestamp(moment: datetime) -> str:
     """Fixed-width UTC ISO text, so string order is time order."""
     return moment.astimezone(UTC).isoformat(timespec="microseconds")
@@ -1080,6 +1109,10 @@ class SqliteData:
             scope.conversation_id, event.sequence, event.event_id, event.kind.value, codec.payload(payload),
             event.payload_schema_version, _timestamp(event.created_at), origin,
         )
+        text = rules.event_text(payload)
+        if text is not None:  # V3-P72 §4.1: searchable from the same transaction on
+            tx.execute("INSERT INTO event_text (conversation_id, sequence, folded) VALUES (?, ?, ?)",
+                       scope.conversation_id, event.sequence, rules.fold(text))
         return event
 
     @staticmethod
@@ -1812,6 +1845,7 @@ class SqliteData:
         "DELETE FROM compaction_runs WHERE run_id IN (SELECT run_id FROM runs WHERE conversation_id=?)",
         "DELETE FROM tool_executions WHERE conversation_id=?",
         "DELETE FROM runs WHERE conversation_id=?",
+        "DELETE FROM event_text WHERE conversation_id=?",  # before events: its foreign key (V3-P72)
         "DELETE FROM events WHERE conversation_id=?",
         "DELETE FROM idempotency WHERE conversation_id=?",
         "DELETE FROM artifacts WHERE conversation_id=?",
@@ -2164,6 +2198,60 @@ class SqliteData:
                          scope.principal_id, scope.conversation_id)
             assert row is not None
             return int(row["n"])
+
+    # --- ConversationSearch (V3-P72) --------------------------------------------------
+
+    async def search_events(self, principal: PrincipalId, words: Sequence[str], *, current: ConversationId,
+                            current_through: int | None, conversation: ConversationId | None = None,
+                            per_conversation: int, limit: int) -> EventSearch:
+        folded = rules.search_words(words)
+        score = " + ".join(["(instr(t.folded, ?) > 0)"] * len(folded))
+        only = "" if conversation is None else " AND t.conversation_id=?"
+        with self._tx() as tx:
+            if conversation is not None:
+                tx.authorized(TrustedScope(principal, conversation))
+            rows = tx.all(
+                f"SELECT t.conversation_id, t.sequence, e.kind, e.created_at, ({score}) AS matched"
+                " FROM event_text t JOIN events e USING (conversation_id, sequence)"
+                " JOIN conversations c ON c.conversation_id=t.conversation_id"
+                " WHERE c.owner=? AND c.trashed_at IS NULL AND (t.conversation_id<>? OR t.sequence<=?)"
+                f"{only} AND ({score}) > 0",
+                *folded, principal, current, -1 if current_through is None else current_through,
+                *(() if conversation is None else (conversation,)), *folded)
+            found = [EventText(ConversationId(r["conversation_id"]), r["sequence"], EventKind(r["kind"]),
+                               datetime.fromisoformat(r["created_at"]), "", r["matched"]) for r in rows]
+            picked, total = rules.pick_hits(found, per_conversation, limit)
+            hits = tuple(dataclasses.replace(h, text=self._event_text(tx, h.conversation_id, h.sequence))
+                         for h in picked)
+            ids = list(dict.fromkeys(h.conversation_id for h in hits))
+            summaries = {r["conversation_id"]: self._summary(r) for r in tx.all(
+                f"{self._SUMMARY} WHERE c.conversation_id IN ({', '.join('?' * len(ids))})", *ids)} if ids else {}
+            return EventSearch(hits, total, tuple(summaries[cid] for cid in ids))
+
+    @staticmethod
+    def _event_text(tx: _Tx, conversation: ConversationId, sequence: int) -> str:
+        row = tx.one("SELECT kind, payload FROM events WHERE conversation_id=? AND sequence=?", conversation, sequence)
+        assert row is not None
+        return rules.event_text(codec.payload_from(EventKind(row["kind"]), row["payload"])) or ""
+
+    async def read_event_texts(self, principal: PrincipalId, conversation: ConversationId, *, from_sequence: int,
+                               current: ConversationId, current_through: int | None, limit: int) -> EventPage:
+        scope = TrustedScope(principal, conversation)
+        with self._tx() as tx:
+            tx.authorized(scope)
+            last = rules.check_read(conversation, from_sequence, current, current_through)
+            rows = tx.all(
+                "SELECT e.sequence, e.kind, e.created_at, e.payload FROM events e"
+                " JOIN event_text t USING (conversation_id, sequence)"
+                " WHERE e.conversation_id=? AND e.sequence>=? AND (? < 0 OR e.sequence<=?)"
+                " ORDER BY e.sequence LIMIT ?", conversation, from_sequence, last, last, limit + 1)
+            items = tuple(EventText(conversation, r["sequence"], EventKind(r["kind"]),
+                                    datetime.fromisoformat(r["created_at"]),
+                                    rules.event_text(codec.payload_from(EventKind(r["kind"]), r["payload"])) or "")
+                          for r in rows[:limit])
+            summary = tx.one(f"{self._SUMMARY} WHERE c.conversation_id=?", conversation)
+            assert summary is not None
+            return EventPage(self._summary(summary), items, len(rows) > limit)
 
     # --- StateQuery -------------------------------------------------------------
 

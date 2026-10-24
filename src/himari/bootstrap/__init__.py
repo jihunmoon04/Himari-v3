@@ -14,11 +14,12 @@ from dataclasses import dataclass
 from himari.control.ask_user import AskUserTool
 from himari.control.api import TURN_GUIDANCE, ModelCatalog, ModelOffer
 from himari.control.driver import Driver
+from himari.common import TrustedScope
 from himari.data.memory import InMemoryData, InMemoryStore
 from himari.data.sqlite import SqliteData, SqliteStore
 from himari.environment.api import EnvironmentPlugin
 from himari.prompt.api import MEMORY_NOTE, ContextBudget, SourceNote
-from himari.prompt.compaction import Compactor
+from himari.prompt.compaction import Compactor, read_summary
 from himari.prompt.composer import Composer
 from himari.prompt.loader import ContextLoader
 from himari.provider.api import ProviderAdapter, ReadsImageCopies
@@ -27,6 +28,7 @@ from himari.tool.access import ConfiguredExternalAccess
 from himari.tool.api import ToolHandler
 from himari.tool.dispatcher import Dispatcher
 from himari.tool.images import StoredResultImages
+from himari.tool.conversation_search import conversation_search_tools
 from himari.tool.memory import memory_tools
 from himari.tool.registry import ToolRegistry
 
@@ -72,10 +74,19 @@ def build_runtime(
     image_views: ViewMaker | None = None,  # model copies of images (V3-P67); None: images are not prepared
     file_max_bytes: int = DEFAULT_FILE_MAX_BYTES,
     memory: bool = False,  # V3-P71: the memory Tools, MEMORY_NOTE and the notes in the state
+    conversation_search: bool = False,  # V3-P72: conversation_search and conversation_read
 ) -> Runtime:
     store = store if store is not None else InMemoryStore()
     data = SqliteData(store) if isinstance(store, SqliteStore) else InMemoryData(store)
-    registry = ToolRegistry([AskUserTool(), *tools, *(memory_tools(data) if memory else ())],
+
+    async def compacted_through(scope: TrustedScope) -> int | None:
+        """V3-P72 §3.2: the last Event this Conversation's compaction summary
+        covers (as ContextStatus reads it), or None when it has none."""
+        snapshot = await data.get_latest_snapshot(scope)
+        return snapshot.covers_through_sequence if snapshot is not None and read_summary(snapshot) else None
+
+    registry = ToolRegistry([AskUserTool(), *tools, *(memory_tools(data) if memory else ()),
+                             *(conversation_search_tools(data, compacted_through) if conversation_search else ())],
                             allow_require_user=allow_require_user_tools)
     for env in environments:
         for handler in env.tools():
