@@ -1,6 +1,6 @@
 # 스트리밍 v0.1
 
-> 2026-10-24 · **PROPOSED (V3-P73)** · rev. 1: 설계 초안.
+> 2026-10-24 · **PROPOSED (V3-P73)** · rev. 2 — 설계 검수 B1(취소된 스트림의 받은 부분, §3.5·§5.3)·B2(놓친 조각 없는 구독, §5.2·§6.1)·N1(continuation 합치기를 보수적으로, §3.3) 반영, 소유자 결정 Q7(생각 중 표시, §7.4). Q1~Q6은 미정. rev. 1: 설계 초안.
 >
 > 배경: 지금은 모델이 답을 다 쓴 뒤에야 화면에 나온다. 긴 답이나 추론이 긴 모델은 수십 초 동안 "HIMARI is working…"만 보인다. 소유자 방향(2026-10-24): 작은 후속 수정 다음으로 스트리밍을 진행한다.
 >
@@ -54,7 +54,7 @@ HIMARI도 마지막 방식을 따른다. 서버가 Provider 스트림을 읽고,
 `normalize`는 저장된 SSE 본문 전체를 읽어, 지금 JSON 응답에서 얻던 것과 같은 결과를 만든다. 재시작 뒤 저장본을 다시 정규화할 때도 같은 함수다.
 - `delta.content`를 이어 붙여 글을 만든다.
 - `delta.tool_calls`는 `index`별로 모아 `id`·`function.name`을 정하고 `function.arguments`를 이어 붙인다.
-- `delta.reasoning_details`: 같은 `index`·`type`의 조각에서 `text`/`summary`/`data`를 이어 붙이고 `signature`·`id`·`format`은 비어 있지 않은 마지막 값을 쓴다. `reasoning` 글도 이어 붙인다(continuation의 대체값, V3-049).
+- `delta.reasoning_details`와 `delta.reasoning`은 §3.3.1의 규칙으로 합친다.
 - `finish_reason`은 마지막으로 온 비어 있지 않은 값이다. 그 뒤 판정은 지금과 같다: `stop` ↔ FINAL, `tool_calls` ↔ TOOL_CALLS, 나머지는 `INVALID_MODEL_OUTPUT`.
 - **닫힘 실패(fail closed):** 다음은 모두 정규화하지 않는다.
   - `[DONE]` 없이 끝난 스트림
@@ -64,9 +64,29 @@ HIMARI도 마지막 방식을 따른다. 서버가 Provider 스트림을 읽고,
   - choice가 둘 이상인 조각
 - 예전 Run(JSON 응답)은 content type으로 구별해 지금 코드로 정규화한다.
 
-**위험: continuation.** 문서는 스트리밍에서 암호화된 추론이 `[REDACTED]`로 올 수 있다고 하고, 같은 `index` 조각을 어떻게 합치는지는 정하지 않는다. 합친 값이 비스트리밍 응답과 다르면 다음 Tool 턴이 거부되거나 추론이 끊긴다. 그래서 **모델마다 실제 요청으로 확인한 뒤에만 `streaming`을 선언**한다(§9, Q5). 확인 항목:
-- 같은 질문의 스트리밍·비스트리밍 continuation이 같은 모양인지
-- 합친 continuation을 다시 실은 Tool 턴이 받아들여지는지
+#### 3.3.1 continuation 합치기 (검수 N1)
+
+**위험.** OpenRouter 문서는 스트리밍에서 암호화된 추론이 `[REDACTED]`로 올 수 있다고 한다. 같은 `index` 조각을 어떻게 합치는지도 정하지 않는다. 합친 값이 비스트리밍 응답과 다르면 다음 Tool 턴이 거부되거나 추론이 끊긴다.
+
+**원칙:** V3-049보다 약해지지 않는다. 지금 Adapter는 `reasoning_details`를 불투명한 값으로 받은 그대로 지킨다. 스트리밍에서도 **애매하면 추측해서 합치지 않고 잘못된 응답으로 다룬다**(`INVALID_MODEL_OUTPUT`, 원본은 보존). 지금 코드가 형식이 깨진 details를 잘못된 응답으로 다루는 것과 같다.
+
+규칙:
+- **항목 나누기:** `reasoning_details`의 각 항목은 `index`로 이어진다.
+  - 조각의 항목이 바로 앞 항목과 `index`가 같으면 이어 붙이는 후보다.
+  - `index`가 다르거나 없으면 새 항목이다.
+  - 이미 지나간 `index`가 다시 나오면 잘못된 응답이다.
+- **이어 붙일 수 있는 조건:** `type`이 같다. `id`·`format`은 없거나 지금 항목과 같다. 하나라도 어긋나면 이어 붙이지 않고 잘못된 응답이다. `type`만 같다고 서로 다른 항목을 합치지 않는다.
+- **필드:** `text`·`summary`·`data`는 이어 붙인다. `signature`는 한 번만 정해진다. 다른 값이 또 오면 잘못된 응답이다. 그 밖의 필드는 처음 값을 지키고, 다른 값이 오면 잘못된 응답이다.
+- **있음과 비어 있음을 구분한다:**
+  - 어느 조각에든 `reasoning_details` 키가 있었으면, 합친 목록(빈 목록 `[]` 포함)이 continuation이다. 지금 코드가 빈 목록도 지키는 것과 같다(DeepSeek V4처럼 빈 목록을 요구하는 모델).
+  - 키가 한 번도 없었으면 이어 붙인 `reasoning` 글이 대체값이다.
+  - 둘 다 없으면 continuation이 없다.
+- **`[REDACTED]`:** 암호화 항목(`reasoning.encrypted`)의 `data`가 `[REDACTED]`이면 다시 실을 수 없으므로 잘못된 응답이다.
+- **모델 확인(§9, Q5):** 모델마다 실제 요청으로 확인한 뒤에만 `streaming`을 선언한다. 확인 항목:
+  - 같은 질문의 스트리밍·비스트리밍 continuation이 같은 모양인지
+  - 합친 continuation을 다시 실은 다음 Tool 턴이 받아들여지는지
+  - `[REDACTED]`가 오지 않는지
+- 확인할 수 없는 모델은 스트리밍하지 않는다. 운영 중 위 규칙 때문에 잘못된 응답이 생기면 그 모델의 선언을 끈다.
 
 ### 3.4 시간과 크기
 
@@ -85,9 +105,20 @@ class OutputDelta:
     tool: str | None = None   # 새로 시작한 Tool 호출의 Tool id
     thinking: bool = False    # 추론 조각이 왔다(내용은 넘기지 않음)
 
-async def invoke_prepared(self, request, sink: OutputSink | None = None) -> NativeInvocationOutcome
+class RawCapture:
+    """받은 응답 바이트. Run 하나에 하나, Driver가 만들고 가진다(검수 B1)."""
+    content_type: str          # 응답 머리가 오면 Provider가 정한다
+    def append(self, chunk: bytes) -> None: ...
+    def body(self) -> bytes | None: ...   # 받은 것이 없으면 None
+
+async def invoke_prepared(self, request, sink: OutputSink | None = None,
+                          capture: RawCapture | None = None) -> NativeInvocationOutcome
 ```
 
+- `capture`의 계약(B1):
+  - Provider는 받은 본문 바이트를 **해석하기 전에** `capture.append`로 넘긴다. 그래서 Provider 작업이 어떻게 끝나든(정상, 취소, 예외), 끝난 순간 `capture`에는 받은 데까지가 들어 있다.
+  - 32 MiB를 넘는 바이트는 넣지 않는다(§3.4).
+  - Provider는 `capture`를 끝난 뒤에 쓰지 않는다. 바이트의 주인과 수명은 §5.3이 정한다.
 - `sink`는 선택이다. 스트리밍하지 않은 요청이면 부르지 않는다. 예외를 던지지 않는다고 가정하지 않는다: Provider는 sink의 예외를 삼키고 읽기를 계속한다(화면 문제로 Run이 실패하지 않게).
 - 한 번 보내기(PROVIDER-01)와 결과 분류는 그대로다: 연결 전 실패는 `NativeNoResponse`, 보낸 뒤 끊김은 `NativeUncertain`.
 - `ScriptedAdapter`는 스크립트의 답을 몇 글자씩 sink에 넘기는 모드를 갖는다(테스트용).
@@ -97,7 +128,8 @@ async def invoke_prepared(self, request, sink: OutputSink | None = None) -> Nati
 - 받은 SSE 본문을 **바이트 그대로** `raw_response_body`에 저장하고 content type은 `text/event-stream`이다. 조각을 합친 JSON을 따로 만들어 저장하지 않는다.
   - 받은 순서가 곧 바이트 순서다. 끝 표시는 `data: [DONE]`이다(data-contract-v0.2의 조건).
   - TCP·chunked 경계는 본문이 아니므로 남기지 않는다(지금과 같음).
-- **끊긴 스트림:** 받은 데까지의 바이트를 결과 불명 Run에 함께 저장한다. `RawUncertain`에 선택 필드 `body`·`content_type`을 더한다. SQLite 열은 이미 있어 스키마 변경이 없다. 사용자 중지(cancel)도 같다.
+- **끊긴 스트림:** 받은 데까지의 바이트를 결과 불명 Run에 함께 저장한다. `RawUncertain`에 선택 필드 `body`·`content_type`을 더한다. SQLite 열은 이미 있어 스키마 변경이 없다. 사용자 중지, Provider 예외, 서버 종료도 같다. 경로는 §5.3이다.
+- **프로세스가 죽으면** 메모리의 받은 부분은 사라진다. 그 Run은 지금처럼 재시작 복구에서 본문 없는 `OUTCOME_UNKNOWN`이 된다. 조각마다 DB에 쓰면 막을 수 있지만, 쓰기가 조각 수만큼 늘어 하지 않는다.
 - 저장 크기: SSE는 같은 답의 JSON보다 몇 배 크다(조각마다 id·model 같은 머리가 붙음). 개인 서버 규모에서는 받아들인다. 늘어나는 양은 구현 때 재서 적는다.
 
 ## 5. Control과 Runner
@@ -108,18 +140,41 @@ async def invoke_prepared(self, request, sink: OutputSink | None = None) -> Nati
 - 압축 요약 Run은 흘리지 않는다. 보일 자리가 없다.
 - `HIMARI_STREAMING=0`이면 아무 Run도 흘리지 않는다(§9).
 
-### 5.2 쓰는 중 상태
+### 5.2 쓰는 중 상태 (검수 B2)
 
-- Driver는 `invoke_prepared`에 sink를 넘기고, 조각을 `TurnProgress`의 새 메서드로 전한다.
+- Driver는 `invoke_prepared`에 sink를 넘기고, `TurnProgress`의 새 메서드로 알린다.
+  - `output_started(run_id)`: 흘리는 Run을 보내기 직전
   - `output(run_id, delta)`: 조각이 올 때
-  - `output_ended(run_id)`: 그 Run의 결과를 기록한 뒤
+  - `output_ended(run_id)`: 그 Run의 결과를 기록한 뒤(어떻게 끝났든)
 - `TurnProgress`의 규칙은 그대로다: 예외를 던지지 않고, Driver는 그 값에 기대지 않는다.
-- Runner는 Conversation마다 **지금 쓰는 Run 하나**의 상태를 메모리에 둔다: `LiveOutput(run_id, text, tools, thinking, version)`.
-  - `version`은 조각마다 1씩 오른다.
-  - 그 Run의 결과가 기록되면(`output_ended`) 지운다.
-  - 한 Run의 글은 512 KiB까지 모으고, 넘는 조각은 버린다. 화면용이고, 원본은 Data에 다 있다.
-- 기다리는 쪽(§6)은 `asyncio.Condition`으로 깨운다.
+- Runner는 Conversation마다 Run 하나의 **누적 상태**를 메모리에 둔다: `LiveOutput(run_id, text, tools, thinking, truncated, ended, version)`.
+  - **이 누적 상태가 권위 있는 값이다.** 구독자에게 보낼 것은 늘 이 상태에서 계산한다(§6.1). 조각을 따로 쌓는 큐는 두지 않는다.
+  - `output_started`가 새 Run의 빈 상태로 바꾼다. `output`은 그 Run의 상태에 이어 붙이고, 다른 Run의 조각은 버린다. `output_ended`는 `ended = True`로 표시만 한다.
+  - **끝난 상태는 지우지 않는다.** 다음 Run의 `output_started`, 다음 job의 시작, 또는 `forget`까지 남는다. 그래야 늦게 깨어난 구독자도 끝남을 본다.
+  - `version`은 상태가 바뀔 때마다 1씩 오른다.
+  - 한 Run의 글은 512 KiB까지 모은다. 넘으면 더 붙이지 않고 `truncated = True`. 화면용이고, 원본은 Data에 다 있다.
+- 기다리는 쪽(§6)은 `asyncio.Condition`으로 깨운다. 깨우기는 합쳐질 수 있다. 그래도 빠지는 것이 없다: 구독자는 깨어날 때마다 지금 상태를 다시 읽는다.
 - 재시작하면 사라진다. 쓰던 Run은 지금처럼 재시작 복구에서 `OUTCOME_UNKNOWN`이 된다.
+
+### 5.3 끝나지 않은 Run의 받은 부분 (검수 B1)
+
+**지금 코드:** `_interruptible`은 취소되면 Provider 작업을 `cancel()`하고 끝나기를 기다린 뒤 `_Cancelled`를 던진다. Driver는 `RawUncertain(CANCELLED_BY_USER)`만 기록한다. 서버 종료의 `CancelledError`는 기록 없이 올라가, 재시작 복구가 `OUTCOME_UNKNOWN`으로 만든다. 어느 쪽에도 받은 바이트를 넘길 길이 없다.
+
+**정하는 것:**
+- **주인과 수명:** Driver가 흘리는 Run마다 `RawCapture`를 만든다. `mark_dispatch` 뒤, 보내기 전이다. Provider는 받은 바이트를 넣기만 한다(§3.5). Driver가 그 Run의 결과를 기록하면 `capture`를 버린다. 메모리는 Run 하나에 32 MiB까지다.
+- **기록:** 어떻게 끝나든 **Provider 작업이 끝난 뒤에** `capture`를 읽는다. 그리고 결과와 받은 부분을 `record_raw_outcome` 한 번에 기록한다. 그 호출이 트랜잭션 하나다.
+
+| 끝난 방식 | 기록 |
+| --- | --- |
+| 정상(`NativeReceived`) | 지금과 같다. 본문은 `capture`의 바이트와 같다 |
+| Provider가 돌려준 `NativeUncertain`(끊김, 32 MiB 초과) | `RawUncertain(error_code, body=capture.body())` |
+| 사용자 중지(`_Cancelled`) | `_interruptible`이 Provider 작업이 끝나기를 이미 기다렸다. 그래서 `capture`가 완전하다. `RawUncertain(CANCELLED_BY_USER, body=…)` |
+| Provider 예외 | `RawUncertain(예외 이름, body=…)` |
+| 서버 종료(밖에서 온 `CancelledError`) | Run 단계를 감싼 `except CancelledError`에서, Provider 작업이 끝나기를 기다린 뒤 `RawUncertain("shutdown", body=…)`를 기록하고 다시 던진다. 이 기록이 실패하거나 시간 안에 끝나지 않으면 지금처럼 재시작 복구가 본문 없이 `OUTCOME_UNKNOWN`으로 만든다 |
+| 프로세스 죽음 | 받은 부분은 사라진다(§4). 재시작 복구가 지금처럼 처리한다 |
+
+- 모든 경로에서 `output_ended(run_id)`를 부른다(§5.2). 기록 뒤, `finally`에서다.
+- 비스트리밍 Run도 같은 `capture`를 쓴다. 결과는 지금과 같다(본문 전체가 한 번에 들어온다).
 
 ## 6. Web API
 
@@ -127,11 +182,17 @@ async def invoke_prepared(self, request, sink: OutputSink | None = None) -> Nati
 
 `GET /api/conversations/{id}/live`는 `text/event-stream`을 돌려준다.
 - 인증과 권한은 다른 경로와 같다(세션 쿠키 또는 Bearer, 남의 대화는 404). `EventSource`는 같은 출처의 쿠키를 보낸다.
-- 연결하면 먼저 지금 상태를 보낸다. `snapshot {run_id, text, tools, thinking}`, 쓰는 Run이 없으면 `idle`.
-- 그 뒤로는 `delta {run_id, text, tools?, thinking?}`가 이어 붙일 부분만 보낸다.
-- 그 Run의 결과가 기록되면 `end {run_id}`를 보낸다.
-- 새 Run이 시작되면 그 Run의 `snapshot`을 보낸다.
-- 일이 끝나면(job running=false) 서버가 연결을 닫는다. 페이지는 일이 돌 때만 연결한다(§7.1). 그래서 열려 있는 연결 수는 일하는 대화를 보는 페이지 수로 묶인다.
+- 보내는 것:
+  - `snapshot {run_id, text, tools, thinking, truncated, ended}`: 상태 전체
+  - `idle`: 상태가 없음
+  - `delta {run_id, text, tools, thinking?, truncated?}`: 이어 붙일 부분
+  - `end {run_id}`: 그 Run이 끝남
+- **구독자의 커서(검수 B2):** 연결마다 "보낸 것"을 기억한다: `run_id`, 보낸 글자 수, 보낸 Tool 수, 보낸 `thinking`·`truncated`·`ended`, 본 `version`.
+- **깨어날 때마다** 그 순간의 누적 상태(§5.2)를 읽고 커서와 비교한다. 알림이 몇 번 합쳐졌든 상관없다.
+  - **같은 Run이면:** `text[보낸 글자 수:]`와 `tools[보낸 Tool 수:]`를 `delta`로 보낸다. 바뀐 표시도 함께 보낸다. `ended`가 됐고 아직 보내지 않았으면 `end`를 보낸다.
+  - **Run이 바뀌었거나 상태가 없으면:** 이어 붙일 것을 추측하지 않는다. `snapshot`(또는 `idle`)으로 다시 맞추고 커서를 새로 잡는다. 브라우저는 다른 Run의 `snapshot`을 받으면, 앞 Run의 쓰는 중 항목을 끝난 것으로 다룬다(§7.2·§7.3). 그 Run의 기록은 polling이 가져온다.
+- 연결하면 먼저 `snapshot` 또는 `idle`을 보낸다.
+- 일이 끝나고(job running=false) 마지막 상태의 `end`까지 보냈으면(또는 상태가 없으면) 서버가 연결을 닫는다. 페이지는 일이 돌 때만 연결한다(§7.1). 그래서 열려 있는 연결 수는 일하는 대화를 보는 페이지 수로 묶인다.
 - 15초마다 주석 줄로 연결을 유지한다.
 - **한 연결은 최대 5분이다.** 운영 Caddy가 응답 쓰기를 600초에 끊기 때문이다(`servers.timeouts.write 600s`). 5분이 되면 서버가 닫고, 일이 아직 돌면 페이지가 다시 연결해 `snapshot`부터 받는다. `Last-Event-ID` 이어 받기는 두지 않는다: 매번 상태 전체로 시작하는 쪽이 단순하고 틀리지 않는다.
 - 주체 하나의 동시 연결은 8개까지, 넘으면 429.
@@ -154,7 +215,7 @@ polling이 "일이 돈다"를 보면 `EventSource`를 연다. 서버가 닫으�
 - 타임라인 끝에 HIMARI 항목 하나를 "쓰는 중" 상태로 둔다.
   - 글은 지금 답과 같은 렌더러(Markdown·KaTeX, 같은 소독 규칙)로 그린다.
   - 다시 그리기는 한 프레임에 한 번이고, 많아야 100 ms마다다. 완성되지 않은 `$…`는 지금 규칙대로 글로 남는다.
-- 추론 조각만 오는 동안은 "Thinking…" 한 줄을 보인다. 추론 내용은 보이지 않는다(Q2).
+- 답 글이 오기 전(보낸 직후, 추론 조각만 오는 동안)에는 생각 중 표시(§7.4)를 보인다. 추론 내용은 보이지 않는다(Q2).
 - Tool 호출이 시작되면 이름을 보인다(`Preparing inside/write_file…`). 인자는 보이지 않는다.
 - `end`가 오면 polling이 그 Run의 Event를 가져올 때까지 쓰는 중 항목을 둔다. Event가 오면 그것으로 바꾼다. 해설(commentary)과 Tool 행, 최종 답은 지금 화면 그대로다.
 - 스크롤: 사용자가 맨 아래에 있을 때만 따라 내려간다. 위로 올려 읽는 중이면 움직이지 않는다.
@@ -165,6 +226,32 @@ polling이 "일이 돈다"를 보면 `EventSource`를 연다. 서버가 닫으�
 - 쓰는 중이던 글은 **흐리게 그 자리에 남기고** "Stopped — this part was not kept, and HIMARI will not see it."을 붙인다.
 - 새로 고치거나 대화를 다시 열면 사라진다. 기록에 없기 때문이다.
 - 기록과 모델 입력은 지금과 같다: 끝나지 않은 답은 다음 요청에 들어가지 않는다.
+
+### 7.4 생각 중 표시 (Q7, 소유자 결정)
+
+Claude Code처럼 움직이는 한 줄이다. HIMARI의 이름(陽葵: 해, 해바라기)과 비슷한 소리의 "히다마리(陽だまり, 볕이 고인 자리)"에서 단어를 가져온다.
+
+- **언제:** 흘리는 Run을 보낸 뒤 첫 답 글이 올 때까지 보인다. 글이 오기 시작하면 사라진다. Tool 호출이 시작되면 그 자리는 `Preparing inside/write_file…`(움직임 없음)이 대신한다.
+- **모습:** `✾ Blooming… · 12s`
+  - 앞의 기호가 움직이고, 단어 위로 빛이 천천히 지나간다.
+  - 끝에 경과 시간이 1초마다 오른다. 60초부터는 `1m 05s`. 오래 걸려도 멈춘 게 아니라는 표시다.
+- **단어:** 생각을 시작할 때 하나를 골라, 그 동안은 바꾸지 않는다(소유자: (a)). 단어가 계속 바뀌면 진행 상황이 바뀐 것처럼 읽히기 때문이다. 다음 Run에서는 새로 고른다. 단어는 영어다(화면의 다른 글과 같음).
+- **테마마다 다름(소유자 결정):** 밝은 테마는 A, 어두운 테마는 B다.
+
+| 묶음 | 테마 | 단어 | 움직임 |
+| --- | --- | --- | --- |
+| A. 해바라기(`sun`) | 밝은 테마(지금의 `classic`·`warm`) | Turning to the sun, Blooming, Basking, Unfurling, Gathering light, Following the sun, Soaking up sunlight, Opening petals | 꽃잎 기호 `· ✢ ✣ ❋ ✾ ❀`가 피었다 오므리기를 되풀이하고(한 단계 약 120 ms), 테마의 따뜻한 색 빛이 단어를 지나간다 |
+| B. 볕 드는 자리(`hidamari`) | 어두운 테마(나중에 더함) | Sitting in the sun, Mulling it over, Brewing tea, Warming up, Curled up thinking, Resting in the warm spot | 따뜻한 점 하나가 천천히 숨 쉬고(약 2.4초), 은은한 빛이 느리게 지나간다 |
+
+  - 단어 목록은 구현 때 다듬을 수 있다. 묶음과 규칙은 위와 같다.
+- **고르는 방법:** 테마 정의(CSS)가 값 하나를 적는다: `--thinking-style: sun` 또는 `hidamari`. 표시는 그 값으로 묶음을 고른다.
+  - 어두운 테마를 더할 때는 그 정의에 `--thinking-style: hidamari`만 적으면 된다. 표시 코드는 바꾸지 않는다.
+  - 값이 없거나 모르는 값이면 `sun`이다.
+  - 테마를 바꾸면(Appearance 대화상자, 다른 탭의 변경, 나중의 "시스템 따라가기") 그 자리에서 바로 다른 묶음으로 바뀐다. 같은 순번의 단어를 써서, 바뀐 뒤에도 단어가 이리저리 흔들리지 않는다.
+  - 색은 테마 토큰에서 가져온다.
+- **접근성:**
+  - 화면 읽기 프로그램에는 움직이는 기호 없이 `HIMARI is thinking`을 한 번 알린다(`role="status"`). 경과 시간은 읽지 않는다.
+  - `prefers-reduced-motion`이면 기호·빛·숨쉬기를 멈추고 기호 하나를 그대로 둔다. 단어와 경과 시간은 남는다.
 
 ## 8. CLI
 
@@ -184,7 +271,9 @@ CLI는 Web 서버의 클라이언트다(V3-P47). 이 패킷에서는 바꾸지 �
 | 남의 대화의 글을 엿보기 | `/live`는 다른 경로와 같은 권한 확인, 남의 대화는 404 |
 | 연결을 많이 열어 서버 자원 쓰기 | 주체당 8개, 일하는 동안만 열림, 5분 상한, 주석 줄 외에 할 일 없음 |
 | 끊긴 답이 기록에 섞임 | Event는 끝난 답의 정규화에서만 생긴다(지금과 같음). 화면의 흐린 글은 기록이 아님을 적는다 |
-| 합친 continuation이 원래와 달라 다음 턴 실패 | 모델별 실측 뒤에만 `streaming`(Q5). 실패하면 그 모델의 선언을 끈다 |
+| 합친 continuation이 원래와 달라 다음 턴 실패 | 애매하면 합치지 않고 잘못된 응답(§3.3.1), 모델별 실측 뒤에만 `streaming`(Q5). 실패하면 그 모델의 선언을 끈다 |
+| 화면에 글이 빠짐(깨우기가 합쳐짐) | 구독자는 누적 상태와 자기 커서의 차이만 보낸다. Run이 바뀌면 `snapshot`(§6.1) |
+| 중지·종료 때 받은 원본을 잃음 | Driver가 가진 `RawCapture`를 Provider 작업이 끝난 뒤 결과와 함께 한 번에 기록(§5.3). 프로세스가 죽을 때만 잃는다 |
 | 끝 표시 없는 스트림을 답으로 씀 | `[DONE]` 없으면 정규화하지 않음(닫힘 실패) |
 | 끝없는 스트림 | 바이트 사이 120초, 32 MiB, 출력 토큰 상한 |
 | sink 예외로 Run 실패 | Provider가 삼킨다. Runner의 `TurnProgress`도 예외를 던지지 않는다 |
@@ -199,6 +288,7 @@ CLI는 Web 서버의 클라이언트다(V3-P47). 이 패킷에서는 바꾸지 �
 | Q4 | 원본은 어떻게 남기나? | **SSE 바이트 그대로**(§4). 합친 JSON을 만들어 저장하면 wire-exact가 아니게 된다. 정규화는 저장본으로 언제든 다시 할 수 있다 |
 | Q5 | 어느 모델에서 켜나? | **실제 요청으로 확인한 모델만**(§9). continuation 합치기가 문서에 정해져 있지 않아, 확인하지 않은 모델에서 다음 Tool 턴이 깨질 수 있다. 처음에는 기본 모델 `openai/gpt-6-luna`와 `anthropic/claude-haiku-5.5`를 확인한다 |
 | Q6 | 끄는 설정? | **`HIMARI_STREAMING=0`**(§9). 문제가 생기면 배포 없이 지금 동작으로 돌아간다 |
+| Q7 | 생각 중 표시? | **소유자 결정(2026-10-24):** Claude Code처럼 움직이는 한 줄(§7.4). 영어 단어, 밝은 테마는 A(해바라기)·어두운 테마는 B(볕 드는 자리), 테마 정의의 `--thinking-style` 값으로 고름. 경과 시간을 1초마다 보이고, 단어는 생각을 시작할 때 하나만 고름 |
 
 ## 12. 검증 계획
 
@@ -209,15 +299,29 @@ CLI는 Web 서버의 클라이언트다(V3-P47). 이 패킷에서는 바꾸지 �
 - 닫힘 실패: `[DONE]` 없음, 오류 조각, 오류 조각만, 깨진 JSON, `index` 어긋남, 32 MiB 넘음.
 - 같은 내용의 JSON 응답과 SSE 응답이 같은 정규화 결과와 continuation을 내는지 확인한다(fuzz 포함).
 - sink에 간 조각을 이으면 정규화한 글과 같은지, sink 예외가 Run을 바꾸지 않는지 확인한다.
+- continuation 합치기(§3.3.1):
+  - 같은 `index`의 조각을 합치고 서명을 한 번 지킨다.
+  - 다음은 모두 잘못된 응답이다: `index`가 같은데 `type`·`id`가 다름, 지나간 `index`가 다시 옴, 서명이 둘, `[REDACTED]`.
+  - `reasoning_details: []`는 빈 목록으로 남고, 키가 없으면 `reasoning` 글로 대체한다. 비스트리밍과 같다.
 
 **Control·Runner**
 - 조각이 Runner 상태에 쌓이고, 결과를 기록한 뒤 지워진다.
 - 압축 요약 Run은 흘리지 않는다.
-- 중지하면 연결이 끊기고, 받은 부분이 `RawUncertain` 원본으로 남는다.
+- 받은 부분(§5.3): 사용자 중지, Provider 예외, 끊김, 서버 종료 각각에서 받은 데까지의 바이트가 `RawUncertain`에 남는다(조각을 몇 개 보낸 뒤 멈추는 가짜 Provider). 모든 경로에서 `output_ended`가 불린다.
 - 재시작 뒤 저장된 SSE 응답을 다시 정규화한다.
 
 **Web**
 - `/live`: snapshot·delta·end 순서, 남의 대화 404, 일이 끝나면 닫힘, 5분 상한(시계 주입), 연결 수 한도.
+- 놓친 조각 없음(B2):
+  - 구독자가 깨어나기 전에 조각 여러 개와 `output_ended`가 한꺼번에 온다. 그래도 받은 글을 이으면 전체 글과 같고 `end`가 온다.
+  - 깨어나기 전에 Run이 바뀌면 `snapshot`으로 다시 맞춘다.
+  - 512 KiB에서 `truncated`.
+- 생각 중 표시(§7.4, 브라우저):
+  - 첫 글 전에 보이고 글이 오면 사라진다.
+  - 경과 시간이 오른다.
+  - 단어가 그 동안 바뀌지 않는다.
+  - `--thinking-style`을 바꾸면 그 자리에서 묶음이 바뀐다.
+  - reduced motion에서는 움직임이 없다.
 - 브라우저 스모크(느린 스크립트 Provider):
   - 답이 끝나기 전에 글 일부가 보이고, Event로 바뀐 뒤 중복되지 않는다.
   - Tool 이름이 보인다.
