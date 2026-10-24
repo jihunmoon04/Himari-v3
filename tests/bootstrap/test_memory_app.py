@@ -11,8 +11,10 @@ from pathlib import Path
 from typing import Any
 
 from himari.bootstrap.application import Application
-from himari.common import CallId, PrincipalId, TextBlock, ToolCall, ToolId, TrustedScope
-from himari.data.api import Memory, MemoryCategory, MemoryOrigin
+from himari.common import CallId, CallRef, PrincipalId, TextBlock, ToolCall, ToolId, TrustedScope
+import pytest
+
+from himari.data.api import DataError, DataErrorCode, Memory, MemoryCategory, MemoryOrigin, ToolResultRecord
 from himari.prompt.api import MEMORY_NOTE, ModelInput, ToolGroupTurn, state_block
 from himari.provider.api import NormalizedFinal, NormalizedToolCalls
 from himari.provider.scripted import ScriptedAdapter
@@ -208,6 +210,146 @@ def test_memory_off_offers_no_tools_and_no_notes(tmp_path: Path) -> None:
             assert texts(sent) is None and MEMORY_NOTE not in sent.stable_prefix
             assert not {d.tool_id for d in sent.tool_catalog} & {"memory_save", "memory_forget", "memory_search"}
             assert state_block(sent.current_state) is None or "user_memory" not in (state_block(sent.current_state) or "")
+        finally:
+            await app.close()
+
+    asyncio.run(scenario())
+
+
+async def result_calls(app: Application, scope: TrustedScope) -> list[CallRef]:
+    return [e.payload.call for e in await app.data.read_events(scope) if isinstance(e.payload, ToolResultRecord)]
+
+
+async def lines(app: Application, scope: TrustedScope) -> list[tuple[str, int, str, bool]]:
+    calls = await result_calls(app, scope)
+    found = await app.memory_lines(scope, [c.run_id for c in calls])
+    return [(line.action, line.memory_id, line.text, line.undo) for c in calls if (line := found.get(c)) is not None]
+
+
+def test_each_memory_call_has_a_line_and_undo_while_the_note_is_as_it_left_it(tmp_path: Path) -> None:
+    # V3-P71 §7.1: forgot and already-saved lines have no Undo; a failed call has no line.
+    async def scenario() -> None:
+        adapter = ScriptedAdapter([call("memory_save", {"category": "user", "text": "Uses Go."}), final(),
+                                   call("memory_save", {"category": "user", "text": "Uses Go."}), final(),
+                                   call("memory_save", {"category": "user", "text": "x", "replaces": "m9"}), final(),
+                                   call("memory_save", {"category": "user", "text": "Uses Rust.", "replaces": "m1"}),
+                                   final(),
+                                   call("memory_forget", {"id": "m1"}), final()])
+        app = await opened(tmp_path, adapter)
+        try:
+            scope = TrustedScope(ME, await app.create_conversation(ME))
+            for _ in range(3):
+                await turn(app, scope)
+            assert await lines(app, scope) == [("saved", 1, "Uses Go.", True), ("already", 1, "Uses Go.", False)]
+            await turn(app, scope)
+            assert await lines(app, scope) == [("saved", 1, "Uses Go.", False), ("already", 1, "Uses Go.", False),
+                                               ("updated", 1, "Uses Rust.", True)]
+            await app.edit_memory(ME, 1, MemoryCategory.USER, "Uses Rust and Go.", 2)
+            assert (await lines(app, scope))[-1] == ("updated", 1, "Uses Rust.", False)  # edited since
+            with pytest.raises(DataError) as error:
+                await app.undo_memory(scope, (await result_calls(app, scope))[-1])
+            assert error.value.code is DataErrorCode.VERSION_CONFLICT
+            await turn(app, scope)
+            assert (await lines(app, scope))[-1] == ("forgot", 1, "Uses Rust and Go.", False)
+            calls = await result_calls(app, scope)
+            for refused in (calls[-1], calls[1], CallRef(calls[0].run_id, CallId("nope"))):
+                with pytest.raises(DataError) as error:  # a forget, an already-saved, no such call
+                    await app.undo_memory(scope, refused)
+                assert error.value.code is DataErrorCode.NOT_FOUND
+        finally:
+            await app.close()
+
+    asyncio.run(scenario())
+
+
+def test_undo_a_new_note_deletes_it(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        adapter = ScriptedAdapter([call("memory_save", {"category": "user", "text": "Uses Go."}), final()])
+        app = await opened(tmp_path, adapter)
+        try:
+            scope = TrustedScope(ME, await app.create_conversation(ME))
+            await turn(app, scope)
+            (saved_by,) = await result_calls(app, scope)
+            assert await app.undo_memory(scope, saved_by) is None
+            assert await app.memories(ME) == ()
+            assert await lines(app, scope) == [("saved", 1, "Uses Go.", False)]
+            with pytest.raises(DataError) as error:  # once
+                await app.undo_memory(scope, saved_by)
+            assert error.value.code is DataErrorCode.NOT_FOUND
+        finally:
+            await app.close()
+
+    asyncio.run(scenario())
+
+
+def test_undo_a_rewrite_from_another_conversation_puts_back_its_text_and_source(tmp_path: Path) -> None:
+    # The review's case (rev. 4): A saves, B rewrites, B's change undone,
+    # then B deleted for good — the note stays, A's again.
+    async def scenario() -> None:
+        adapter = ScriptedAdapter([call("memory_save", {"category": "project", "text": "Plans a trip."}), final(),
+                                   call("memory_save", {"category": "project", "text": "Plans a trip to Jeju.",
+                                                        "replaces": "m1"}), final()])
+        app = await opened(tmp_path, adapter)
+        try:
+            first = TrustedScope(ME, await app.create_conversation(ME))
+            await turn(app, first)
+            (before,) = await app.memories(ME)
+            second = TrustedScope(ME, await app.create_conversation(ME))
+            await turn(app, second)
+            (rewrote,) = await result_calls(app, second)
+            restored = await app.undo_memory(second, rewrote)
+            assert restored is not None
+            assert (restored.text, restored.origin, restored.source_conversation, restored.source_call,
+                    restored.revision) == ("Plans a trip.", MemoryOrigin.MODEL, first.conversation_id,
+                                           before.source_call, 3)
+            await app.trash(second)
+            await app.purge(second)
+            assert [n.text for n in await app.memories(ME)] == ["Plans a trip."]
+        finally:
+            await app.close()
+
+    asyncio.run(scenario())
+
+
+def test_undo_never_brings_back_a_source_deleted_for_good(tmp_path: Path) -> None:
+    # Re-review B1 (rev. 5): A saves, B rewrites, A deleted for good, then B's change undone.
+    async def scenario() -> None:
+        adapter = ScriptedAdapter([call("memory_save", {"category": "project", "text": "Plans a trip."}), final(),
+                                   call("memory_save", {"category": "project", "text": "Plans a trip to Jeju.",
+                                                        "replaces": "m1"}), final()])
+        app = await opened(tmp_path, adapter)
+        try:
+            first = TrustedScope(ME, await app.create_conversation(ME))
+            await turn(app, first)
+            second = TrustedScope(ME, await app.create_conversation(ME))
+            await turn(app, second)
+            await app.trash(first)
+            await app.purge(first)
+            (rewrote,) = await result_calls(app, second)
+            with pytest.raises(DataError) as error:
+                await app.undo_memory(second, rewrote)
+            assert error.value.code is DataErrorCode.NOT_FOUND
+            assert [(n.text, n.source_conversation) for n in await app.memories(ME)] == [
+                ("Plans a trip to Jeju.", second.conversation_id)]
+        finally:
+            await app.close()
+
+    asyncio.run(scenario())
+
+
+def test_null_optional_arguments_pass_the_dispatcher(tmp_path: Path) -> None:
+    # Integration review C1: through the Dispatcher's schema check, not only run().
+    async def scenario() -> None:
+        adapter = ScriptedAdapter([call("memory_save", {"category": "user", "text": "Uses Python.", "replaces": None}),
+                                   final(),
+                                   call("memory_search", {"query": None, "category": None}), final()])
+        app = await opened(tmp_path, adapter)
+        try:
+            scope = TrustedScope(ME, await app.create_conversation(ME))
+            await turn(app, scope)
+            assert last_result(adapter.prepared_inputs[-1]) == "Saved m1 (user)."
+            await turn(app, scope)
+            assert last_result(adapter.prepared_inputs[-1]).startswith("m1 [user] Uses Python. (")
         finally:
             await app.close()
 

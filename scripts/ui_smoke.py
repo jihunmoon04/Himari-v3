@@ -31,7 +31,15 @@ a reload, and a block split at the compaction boundary. An eighth (V3-P69)
 edits the user's instructions: the count and limit, a save that the next
 message's request carries, a save refused after a change made elsewhere
 (the text kept; load theirs or save mine), leaving with unsaved changes,
-and the narrow layout.
+and the narrow layout. A ninth (V3-P71) remembers: the Remembered and
+Updated lines outside the work block, an Undo refused once the note changed,
+an Undo that puts the note back (and the next request carries it), the
+lines after a reload, the memory screen (add, an edit refused after a change
+made elsewhere and saved again, delete, the source link), the delete
+confirmations' note count, a save whose answer was lost (recognized, never
+saved twice, never mistaken for a note that said the same), the off notice and
+what a save says then, leaving with an unsaved edit, a delete for good taking the
+note, and the narrow layout.
 
 Requires: pip install playwright && playwright install chromium
 Usage:    python scripts/ui_smoke.py [--screenshots DIR] [--only main,compaction,...]
@@ -87,13 +95,13 @@ OPENED: dict[str, tuple[Application, asyncio.AbstractEventLoop]] = {}  # root ->
 
 
 def serve(root: str, port: int = PORT, provider: ScriptedAdapter | None = None,
-          context_tokens: int | None = None, turn_budget: int = 3_000_000) -> uvicorn.Server:
+          context_tokens: int | None = None, turn_budget: int = 3_000_000, memory: bool = True) -> uvicorn.Server:
     config = WebConfig("127.0.0.1", port, frozenset({"127.0.0.1"}), frozenset({f"http://127.0.0.1:{port}"}), False,
                        root, "scripted-model", None, False)
 
     async def opener() -> Application:
         application = await Application.open(root, provider or scripted(), model_id="scripted-model", sandbox=False,
-                                             context_tokens=context_tokens, turn_budget=turn_budget)
+                                             context_tokens=context_tokens, turn_budget=turn_budget, memory=memory)
         OPENED[root] = (application, asyncio.get_running_loop())
         return application
 
@@ -848,7 +856,222 @@ def run_instructions(base: str, token: str, shots: str | None, root: str, provid
     return errors
 
 
-SCENARIOS = ("main", "compaction", "budget", "trash", "files", "images", "work", "instructions")
+def memory_script() -> ScriptedAdapter:
+    return ScriptedAdapter([
+        NormalizedToolCalls((ToolCall(CallId("c0"), 0, ToolId("memory_save"),
+                                      {"category": "user", "text": "Writes Go at work."}),)),
+        NormalizedFinal((TextBlock("Noted."),)),
+        NormalizedToolCalls((ToolCall(CallId("c0"), 0, ToolId("memory_save"),
+                                      {"category": "user", "text": "Writes Go and Rust.", "replaces": "m1"}),)),
+        NormalizedFinal((TextBlock("Updated."),)),
+        NormalizedFinal((TextBlock("ok."),)),
+    ])
+
+
+def on_server(root: str, call: Any) -> Any:
+    """Run ``call(application)`` (a coroutine) on the server's own loop."""
+    application, loop = OPENED[root]
+    return asyncio.run_coroutine_threadsafe(call(application), loop).result(10)
+
+
+def run_memory(base: str, token: str, shots: str | None, root: str, provider: ScriptedAdapter) -> list[str]:
+    from himari.data.api import MemoryCategory
+
+    errors: list[str] = []
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page(viewport={"width": 1280, "height": 860}, locale="en-US")
+        page.on("console", lambda m: errors.append(m.text)
+                if m.type == "error" and not re.search(r"40[49]|ERR_FAILED", m.text) else None)  # aborted on purpose
+        page.on("pageerror", lambda e: errors.append(str(e)))
+        page.goto(base)
+        page.fill("#login-token", token)
+        page.click("#login-submit")
+        new_chat(page)
+        page.fill("#composer-text", "Remember: I write Go at work.")
+        page.press("#composer-text", "Enter")
+        expect(page.locator(".item-assistant").last).to_contain_text("Noted.", timeout=10000)
+        lines = page.locator("#timeline > .item-memory")
+        expect(lines).to_have_count(1)
+        expect(lines.first).to_contain_text("Remembered")
+        expect(lines.first.locator(".item-memory-undo")).to_have_text("Undo")
+        expect(lines.first.locator(".item-memory-text")).to_have_text("Writes Go at work.")
+        assert page.locator(".item-work .item-memory").count() == 0  # never folded into the work block
+        expect(page.locator(".item-work .item-tool-row")).to_have_count(1)  # the call itself is in the block
+        page.fill("#composer-text", "I write Rust too.")
+        page.press("#composer-text", "Enter")
+        expect(page.locator(".item-assistant").last).to_contain_text("Updated.", timeout=10000)
+        expect(lines).to_have_count(2)
+        expect(lines.nth(1)).to_contain_text("Updated memory")
+        expect(lines.nth(1).locator(".item-memory-text")).to_have_text("Writes Go and Rust.")
+        if shots:
+            page.screenshot(path=os.path.join(shots, "18-memory-lines.png"))
+        # The first line's Undo is stale (the note was rewritten since): refused, the button goes.
+        lines.first.locator(".item-memory-undo").click()
+        expect(page.locator("#status-bar")).to_have_text("The note was changed since; see Settings › Memory.",
+                                                         timeout=5000)
+        expect(lines.first.locator(".item-memory-undo")).to_have_count(0)
+        lines.nth(1).locator(".item-memory-undo").click()
+        expect(page.locator("#status-bar")).to_have_text("The note is back as it was.", timeout=5000)
+        expect(lines.nth(1).locator(".item-memory-done")).to_have_text("Undone")
+        (note,) = on_server(root, lambda app: app.memories(OPERATOR))
+        assert (note.text, note.revision) == ("Writes Go at work.", 3)
+        page.fill("#composer-text", "thanks")
+        page.press("#composer-text", "Enter")
+        expect(page.locator(".item-assistant").last).to_contain_text("ok.", timeout=10000)
+        memories = provider.prepared_inputs[-1].current_state.memories
+        assert memories is not None and [m.text for m in memories] == ["Writes Go at work."]
+        page.reload()
+        page.locator(".conv-row").first.click()
+        expect(lines).to_have_count(2, timeout=10000)
+        expect(page.locator(".item-memory-undo")).to_have_count(0)  # neither call left the note as it is now
+
+        # The delete confirmation counts the notes the conversation saved.
+        page.click("#chat-menu-toggle")
+        page.click("#chat-menu-delete")
+        dialog = page.locator("#confirm-dialog")
+        expect(dialog).to_contain_text("1 note HIMARI saved in this conversation is deleted when it is deleted for good.",
+                                       timeout=5000)
+        page.click("#confirm-cancel")
+
+        # The memory screen.
+        page.click("#nav-appearance")
+        page.click("#nav-memory")
+        expect(page.locator("#surface-memory")).to_be_visible(timeout=5000)
+        expect(page.locator("#memory-count")).to_have_text("1 of 1,000", timeout=5000)
+        expect(page.locator("#memory-off")).to_be_hidden()
+        row = page.locator(".memory-row").first
+        expect(row).to_contain_text("Writes Go at work.")
+        expect(row.locator(".memory-source")).to_contain_text("From “")
+        expect(row.locator(".memory-source")).to_contain_text(" · HIMARI · ")
+        page.get_by_role("button", name="Add to Preferences").click()
+        page.locator(".memory-form-text").fill("Short lists.")
+        page.locator(".memory-form button[type=submit]").click()
+        expect(page.locator("#status-bar")).to_have_text("Saved. HIMARI uses it from the next message.", timeout=5000)
+        expect(page.locator("#memory-count")).to_have_text("2 of 1,000", timeout=5000)
+        expect(page.locator(".memory-row", has_text="Short lists.")).to_contain_text("Added by you")
+        # The answer to a save is lost after the server saved it: recognized, never saved twice (PR #77 review C1).
+        state, count = page.locator("#status-bar"), page.locator("#memory-count")
+
+        def lose_answer(route: Any) -> None:
+            if route.request.method != "POST":
+                route.continue_()
+                return
+            route.fetch()  # the server saves it
+            route.abort()  # the page never hears back
+
+        page.route("**/api/memories", lose_answer)
+        page.get_by_role("button", name="Add to Projects").click()
+        page.locator(".memory-form-text").fill("Builds HIMARI.")
+        page.evaluate("document.getElementById('status-bar').textContent = ''")  # not the last save's line
+        page.locator(".memory-form button[type=submit]").click()
+        expect(state).to_have_text("Saved. HIMARI uses it from the next message.", timeout=5000)
+        expect(count).to_have_text("3 of 1,000", timeout=5000)
+        expect(page.locator(".memory-form")).to_have_count(0, timeout=5000)
+        page.unroute("**/api/memories")
+        # The server cannot be reached at all: unsure, and saving again looks first.
+        page.route("**/api/memories", lambda route: route.abort())
+        page.get_by_role("button", name="Add to References").click()
+        page.locator(".memory-form-text").fill("Docs live in docs/.")
+        page.locator(".memory-form button[type=submit]").click()
+        expect(state).to_have_text("Could not confirm the save. Saving again checks first, so it is not saved twice.",
+                                   timeout=5000)
+        page.locator(".memory-form button[type=submit]").click()
+        expect(state).to_have_text("Still could not reach the server; nothing was saved again.", timeout=5000)
+        page.unroute("**/api/memories")
+        page.locator(".memory-form button[type=submit]").click()  # it was not saved: saved now, once
+        expect(count).to_have_text("4 of 1,000", timeout=5000)
+        assert sorted(n.text for n in on_server(root, lambda app: app.memories(OPERATOR))) == [
+            "Builds HIMARI.", "Docs live in docs/.", "Short lists.", "Writes Go at work."]
+        for gone in (3, 4):
+            on_server(root, lambda app, gone=gone: app.delete_memory(OPERATOR, gone))
+        page.click("#nav-appearance")
+        page.click("#nav-memory")
+        expect(count).to_have_text("2 of 1,000", timeout=5000)
+        # The same text as a note already there, lost before it reached the server: not taken for saved
+        # (integration review C2).
+        page.route("**/api/memories", lambda route: route.abort() if route.request.method == "POST"
+                   else route.continue_())
+        page.get_by_role("button", name="Add to Preferences").click()
+        page.locator(".memory-form-text").fill("Short lists.")
+        page.locator(".memory-form button[type=submit]").click()
+        expect(state).to_have_text("The note was not saved. Try again.", timeout=5000)
+        page.unroute("**/api/memories")
+        page.locator(".memory-form .link-button", has_text="Cancel").click()
+        expect(count).to_have_text("2 of 1,000", timeout=5000)
+
+        # Memory off (as the server says): the notice, and a save that does not promise use (review C3).
+        def off(route: Any) -> None:
+            if route.request.method != "GET":
+                route.continue_()
+                return
+            response = route.fetch()
+            route.fulfill(response=response, json={**response.json(), "enabled": False})
+
+        page.route("**/api/memories", off)
+        page.click("#nav-appearance")
+        page.click("#nav-memory")
+        expect(page.locator("#memory-off")).to_be_visible(timeout=5000)
+        page.get_by_role("button", name="Add to Projects").click()
+        page.locator(".memory-form-text").fill("Kept while off.")
+        page.locator(".memory-form button[type=submit]").click()
+        expect(state).to_have_text("Saved. Memory is off on this server, so models do not use it.", timeout=5000)
+        expect(page.locator(".memory-form")).to_have_count(0, timeout=5000)  # repainted: no request left on the route
+        page.unroute("**/api/memories")
+        on_server(root, lambda app: app.delete_memory(OPERATOR, 5))
+        page.click("#nav-appearance")
+        page.click("#nav-memory")
+        expect(page.locator("#memory-off")).to_be_hidden(timeout=5000)
+        expect(count).to_have_text("2 of 1,000", timeout=5000)
+        # An edit refused after a change made elsewhere: theirs shown, mine kept, saved again on purpose.
+        page.get_by_role("button", name="Edit note m2").click()
+        page.locator(".memory-form-text").fill("Short lists, no tables.")
+        on_server(root, lambda app: app.edit_memory(OPERATOR, 2, MemoryCategory.PREFERENCE, "Long answers.", 1))
+        page.locator(".memory-form button[type=submit]").click()
+        expect(page.locator(".memory-form-conflict")).to_contain_text("Long answers.", timeout=5000)
+        expect(page.locator(".memory-form-text")).to_have_value("Short lists, no tables.")
+        page.locator(".memory-form button[type=submit]").click()
+        expect(page.locator(".memory-row", has_text="Short lists, no tables.")).to_have_count(1, timeout=5000)
+        page.get_by_role("button", name="Delete note m2").click()
+        expect(dialog).to_contain_text("Conversations that already used it still show it.")
+        page.click("#confirm-ok")
+        expect(page.locator("#memory-count")).to_have_text("1 of 1,000", timeout=5000)
+        # Leaving with an unsaved edit asks first (PR #77 review C2).
+        page.get_by_role("button", name="Edit note m1").click()
+        page.locator(".memory-form-text").fill("Writes Go at work, mostly.")
+        page.click("#nav-home")
+        expect(dialog).to_contain_text("Your changes to a memory are not saved.", timeout=5000)
+        page.click("#confirm-cancel")
+        expect(page.locator("#surface-memory")).to_be_visible()
+        expect(page.locator(".memory-form-text")).to_have_value("Writes Go at work, mostly.")
+        page.locator(".memory-form .link-button", has_text="Cancel").click()
+        expect(page.locator(".memory-form")).to_have_count(0, timeout=5000)
+        page.set_viewport_size({"width": 390, "height": 800})
+        page.wait_for_timeout(300)
+        assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
+        if shots:
+            page.screenshot(path=os.path.join(shots, "19-memory-narrow.png"))
+        page.set_viewport_size({"width": 1280, "height": 860})
+        page.locator(".memory-source-link").click()  # the source opens its conversation
+        expect(page.locator("#surface-chat")).to_be_visible(timeout=5000)
+        expect(lines).to_have_count(2, timeout=10000)
+
+        # Deleted for good from the trash: the confirmation says so, and the note goes with it.
+        page.click("#chat-menu-toggle")
+        page.click("#chat-menu-delete")
+        page.click("#confirm-ok")
+        expect(page.locator("#surface-home")).to_be_visible(timeout=10000)
+        page.click("#nav-trash")
+        page.locator(".trash-row .danger-button").click()
+        expect(dialog).to_contain_text("1 note HIMARI saved in this conversation is deleted with it.", timeout=5000)
+        page.click("#confirm-ok")
+        expect(page.locator("#trash-empty")).to_be_visible(timeout=10000)
+        assert on_server(root, lambda app: app.memories(OPERATOR)) == ()
+        browser.close()
+    return errors
+
+
+SCENARIOS = ("main", "compaction", "budget", "trash", "files", "images", "work", "instructions", "memory")
 
 
 def main() -> int:
@@ -873,7 +1096,8 @@ def main() -> int:
         if "compaction" in only:
             small = os.path.join(tmp, "small")
             provider = ScriptedAdapter([NormalizedFinal((TextBlock(SUMMARY),))] * 12)  # every answer and summary alike
-            server = serve(small, PORT + 1, provider, context_tokens=2800)
+            # memory off: the budget was fitted to a prompt without the memory Tools (V3-P71)
+            server = serve(small, PORT + 1, provider, context_tokens=2800, memory=False)
             try:
                 errors += run_compaction(f"http://127.0.0.1:{PORT + 1}",
                                          Path(small, "control", "operator.secret").read_text().strip(), args.screenshots,
@@ -954,6 +1178,17 @@ def main() -> int:
                 errors += run_instructions(f"http://127.0.0.1:{PORT + 7}",
                                            Path(instructions, "control", "operator.secret").read_text().strip(),
                                            args.screenshots, instructions, provider)
+            finally:
+                server.should_exit = True
+                time.sleep(0.5)
+        if "memory" in only:
+            memory = os.path.join(tmp, "memory")
+            provider = memory_script()
+            server = serve(memory, PORT + 8, provider)
+            try:
+                errors += run_memory(f"http://127.0.0.1:{PORT + 8}",
+                                     Path(memory, "control", "operator.secret").read_text().strip(),
+                                     args.screenshots, memory, provider)
             finally:
                 server.should_exit = True
                 time.sleep(0.5)

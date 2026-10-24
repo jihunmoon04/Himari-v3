@@ -34,6 +34,7 @@
         <symbol id="side-settings" viewBox="0 0 24 24"><path d="M4 7h16M4 17h16"/><circle cx="9" cy="7" r="3"/><circle cx="15" cy="17" r="3"/></symbol>
         <symbol id="side-trash" viewBox="0 0 24 24"><path d="M4 6h16M9 6V3h6v3M6 6l1 15h10l1-15M10 10v7M14 10v7"/></symbol>
         <symbol id="side-chevron" viewBox="0 0 24 24"><path d="m9 5 7 7-7 7"/></symbol>
+        <symbol id="side-memory" viewBox="0 0 24 24"><path d="M12 3a6 6 0 0 0-6 6c0 2.2 1.2 3.6 2.4 4.7.9.8 1.6 1.7 1.6 2.8V18h4v-1.5c0-1.1.7-2 1.6-2.8C16.8 12.6 18 11.2 18 9a6 6 0 0 0-6-6ZM10 21h4"/></symbol>
         <symbol id="side-note" viewBox="0 0 24 24"><rect x="5" y="3" width="14" height="18" rx="2"/><path d="M9 8h6M9 12h6M9 16h3"/></symbol>
       </defs>
     </svg>
@@ -192,6 +193,17 @@
           </div>
         </section>
 
+        <!-- The notes HIMARI keeps about the user (V3-P71 §7.2), by category. -->
+        <section class="surface memory" id="surface-memory" hidden>
+          <h1>Memory</h1>
+          <p class="hint">What HIMARI remembers about you across conversations. About you and Preferences go into
+            every conversation; HIMARI searches the rest when it needs them. Changes apply from the next message.</p>
+          <p class="memory-off" id="memory-off" hidden>Memory is off on this server: models neither use nor save
+            notes. You can still manage your notes here.</p>
+          <p class="hint memory-count" id="memory-count"></p>
+          <div class="memory-groups" id="memory-groups"></div>
+        </section>
+
         <section class="surface chat" id="surface-chat" hidden>
           <div class="timeline" id="timeline" aria-label="Conversation timeline"></div>
 
@@ -289,6 +301,7 @@
       <p class="hint appearance-feedback" id="appearance-feedback" role="status" aria-live="polite"></p>
       <div class="settings-links">
         <button type="button" id="nav-instructions" class="settings-instructions"><svg class="side-icon" aria-hidden="true"><use href="#side-note"/></svg><span><span class="settings-link-title">Instructions</span><span class="settings-link-hint">How HIMARI responds in every conversation</span></span><svg class="side-icon" aria-hidden="true"><use href="#side-chevron"/></svg></button>
+        <button type="button" id="nav-memory" class="settings-instructions"><svg class="side-icon" aria-hidden="true"><use href="#side-memory"/></svg><span><span class="settings-link-title">Memory</span><span class="settings-link-hint">What HIMARI remembers about you</span></span><svg class="side-icon" aria-hidden="true"><use href="#side-chevron"/></svg></button>
         <button type="button" id="nav-sign-out" class="link-button">Sign out</button>
       </div>
     </dialog>

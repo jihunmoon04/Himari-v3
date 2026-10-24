@@ -2140,6 +2140,23 @@ class SqliteData:
             tx.execute("DELETE FROM memories WHERE owner=? AND memory_id=?", principal, memory_id)
             return note
 
+    async def restore_memory(self, principal: PrincipalId, before: Memory, *, expected_revision: int) -> Memory:
+        category, text = rules.check_memory_category(before.category), rules.check_memory_text(before.text)
+        source = before.source_conversation
+        with self._tx() as tx:
+            current = self._read_memory(tx, principal, before.memory_id)
+            if expected_revision != current.revision:
+                raise DataError(DataErrorCode.VERSION_CONFLICT, f"m{current.memory_id} is at revision {current.revision}")
+            if source is not None and tx.one("SELECT 1 FROM conversations WHERE conversation_id=? AND owner=?",
+                                             source, principal) is None:
+                raise DataError(DataErrorCode.NOT_FOUND, "the conversation it came from was deleted")
+            note = dataclasses.replace(current, category=category, text=text, origin=before.origin,
+                                       source_conversation=source,
+                                       source_call=None if source is None else before.source_call,
+                                       revision=current.revision + 1, updated_at=datetime.now(UTC))
+            self._write_memory(tx, principal, note)
+            return note
+
     async def count_source_memories(self, scope: TrustedScope) -> int:
         with self._tx() as tx:
             tx.owned(scope)

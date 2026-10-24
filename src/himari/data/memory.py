@@ -1171,6 +1171,22 @@ class InMemoryData:
         del self._store.memories[(principal, memory_id)]
         return note
 
+    async def restore_memory(self, principal: PrincipalId, before: Memory, *, expected_revision: int) -> Memory:
+        category, text = rules.check_memory_category(before.category), rules.check_memory_text(before.text)
+        current = self._memory(principal, before.memory_id)
+        if expected_revision != current.revision:
+            raise DataError(DataErrorCode.VERSION_CONFLICT, f"m{current.memory_id} is at revision {current.revision}")
+        source = before.source_conversation
+        if source is not None:
+            conv = self._store._conversations.get(source)
+            if conv is None or conv.owner != principal:
+                raise DataError(DataErrorCode.NOT_FOUND, "the conversation it came from was deleted")
+        note = replace(current, category=category, text=text, origin=before.origin, source_conversation=source,
+                       source_call=None if source is None else before.source_call,
+                       revision=current.revision + 1, updated_at=datetime.now(UTC))
+        self._store.memories[(principal, note.memory_id)] = note
+        return note
+
     async def count_source_memories(self, scope: TrustedScope) -> int:
         self._store._owned(scope)
         return sum(1 for (owner, _), m in self._store.memories.items()

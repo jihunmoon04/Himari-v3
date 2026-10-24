@@ -994,6 +994,15 @@ class MemoryStore(Protocol):
         """The user's delete; returns the note as it was. Gone at once."""
         ...
 
+    async def restore_memory(self, principal: PrincipalId, before: Memory, *, expected_revision: int) -> Memory:
+        """An Undo (V3-P71 §4.2): puts the note ``before`` names back to
+        before's category, text, origin and source, at its next revision.
+        NOT_FOUND when the note is gone (a deleted note is never brought back)
+        or before's source Conversation was deleted for good (one in the
+        trash is fine: its purge still takes the note); VERSION_CONFLICT when
+        the note is not at ``expected_revision``."""
+        ...
+
     async def count_source_memories(self, scope: TrustedScope) -> int:
         """The notes this Conversation's calls wrote: deleted with it."""
         ...

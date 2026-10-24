@@ -135,6 +135,7 @@ const app = {
   leaveAsked: false, // that question is open
   instructionsTicket: 0, // the latest load: an older answer is not applied
   instructionsLoading: false,
+  memory: null, // the last /api/memories answer (V3-P71 §7.2)
 };
 
 const views = new AppViews(api, el, () => app.conversationId);
@@ -146,7 +147,7 @@ function status(text, tone) {
 }
 
 function showSurface(name) {
-  for (const surface of ["login", "home", "chat", "trash", "instructions"]) {
+  for (const surface of ["login", "home", "chat", "trash", "instructions", "memory"]) {
     $(`surface-${surface}`).hidden = surface !== name;
   }
   app.leaveAgreed = false;
@@ -477,6 +478,44 @@ function presentedCard(file) {
   return card;
 }
 
+/* V3-P71 §7.1: what a memory call changed, outside the work block so it is
+   never folded away. Undo is offered while the note is as the call left it;
+   the server decides what an Undo puts back, from the call's own record. */
+const MEMORY_ACTIONS = { saved: "Remembered", updated: "Updated memory", forgot: "Forgot" };
+
+function memoryLine(event) {
+  const line = el("div", "item item-memory");
+  line.append(el("span", "item-memory-action", MEMORY_ACTIONS[event.memory.action]),
+              el("span", "item-memory-text", event.memory.text));
+  if (event.memory.undo) {
+    const undo = el("button", "link-button item-memory-undo", "Undo");
+    undo.type = "button";
+    undo.setAttribute("aria-label", `Undo: ${MEMORY_ACTIONS[event.memory.action]} m${event.memory.id}`);
+    undo.addEventListener("click", () => undoMemory(event, undo));
+    line.append(undo);
+  }
+  return line;
+}
+
+async function undoMemory(event, button) {
+  const path = `/api/conversations/${encodeURIComponent(app.conversationId)}/calls/`
+    + `${encodeURIComponent(event.run_id)}/${encodeURIComponent(event.call_id)}/memory-undo`;
+  button.disabled = true;
+  try {
+    await api("POST", path);
+    button.replaceWith(el("span", "item-memory-done", "Undone"));
+    status(event.memory.action === "saved" ? "HIMARI no longer remembers it." : "The note is back as it was.", "ok");
+  } catch (error) {
+    if (error.kind === "http" && (error.status === 404 || error.status === 409)) {
+      button.remove(); // it cannot be undone any more
+      status(error.status === 409 ? "The note was changed since; see Settings › Memory." : error.message, "warn");
+    } else {
+      button.disabled = false;
+      status(error.message, "error");
+    }
+  }
+}
+
 function uploading() {
   return app.attachments.some((a) => a.state === "uploading");
 }
@@ -797,6 +836,7 @@ function renderEvent(event) {
       views.attach(entry, `${event.run_id}/${event.call_id}`, event.run_id, event.call_id, false);
     }
     for (const file of event.presented_files || []) timeline.append(presentedCard(file)); // V3-P66 §9
+    if (event.memory && MEMORY_ACTIONS[event.memory.action]) timeline.append(memoryLine(event)); // V3-P71 §7.1
     if (event.images && event.images.length) timeline.append(toolImages(event.images)); // V3-P67 §8
     entry.result = event;
     paintToolRow(entry);
@@ -1542,6 +1582,12 @@ function externalLine(notice) {
   return `Data stored by the external servers this conversation used (${names.join(", ")}) is not deleted.`;
 }
 
+/* V3-P71 §4.3: the notes a conversation's calls saved go when it is deleted for good. */
+function memoryCountLine(count, now = false) {
+  const notes = count === 1 ? "1 note HIMARI saved in this conversation is" : `${count} notes HIMARI saved in this conversation are`;
+  return now ? `${notes} deleted with it.` : `${notes} deleted when it is deleted for good.`;
+}
+
 async function deleteConversation(item = null) {
   closeChatMenu();
   const id = item ? item.id : app.conversationId;
@@ -1560,6 +1606,7 @@ async function deleteConversation(item = null) {
   const lines = [`It moves to the trash and is deleted for good after ${notice.trash_days} days. `
                  + "Until then you can restore it from the trash."];
   if (notice.running) lines.push("The work under way is stopped first.");
+  if (notice.memory_count) lines.push(memoryCountLine(notice.memory_count));
   lines.push(externalLine(notice));
   if (!(await confirmAction(`Delete “${name}”?`, lines, "Move to trash")) || !still()) return;
   $("chat-menu-delete").disabled = true;
@@ -1791,14 +1838,16 @@ async function discardInstructions() {
    holds until the surface changes, so a navigation that goes on to open a
    conversation does not ask twice, and one that fails keeps the text (N2). */
 async function mayLeave() {
-  if ($("surface-instructions").hidden) return true;
-  if (app.instructionsSave) await app.instructionsSave; // a save under way ends first (N1)
-  if (!instructionsDirty() || app.leaveAgreed) return true;
+  const instructions = !$("surface-instructions").hidden;
+  if (instructions && app.instructionsSave) await app.instructionsSave; // a save under way ends first (N1)
+  // An open memory form with changes asks the same way (PR #77 review C2).
+  const dirty = instructions ? instructionsDirty() : memoryDirty();
+  if (!dirty || app.leaveAgreed) return true;
   if (app.leaveAsked) return false; // one question at a time; a second navigation waits for none (re-review N4)
   app.leaveAsked = true;
   try {
-    app.leaveAgreed = await confirmAction("Leave without saving?",
-                                          ["Your changes to the instructions are not saved."], "Leave");
+    const what = instructions ? "Your changes to the instructions are not saved." : "Your changes to a memory are not saved.";
+    app.leaveAgreed = await confirmAction("Leave without saving?", [what], "Leave");
   } finally {
     app.leaveAsked = false;
   }
@@ -1820,6 +1869,14 @@ async function purgeConversation(item, button) {
   const name = conversationName(item);
   const lines = ["This cannot be undone. Its messages, its records and its files are deleted.",
                  "Data stored by external services is not deleted."];
+  let saved = 0;
+  try { // the notes it saved, as the memory screen lists them (V3-P71 §4.3)
+    const listing = await api("GET", "/api/memories");
+    saved = listing.memories.filter((note) => note.source && note.source.conversation === item.id).length;
+  } catch (error) {
+    lines.push("Notes HIMARI saved in it, if any, are deleted with it.");
+  }
+  if (saved) lines.splice(1, 0, memoryCountLine(saved, true));
   if (!(await confirmAction(`Delete “${name}” for good?`, lines, "Delete for good"))) return;
   button.disabled = true;
   try {
@@ -1830,6 +1887,231 @@ async function purgeConversation(item, button) {
            error.kind === "network" ? "warn" : "error");
   }
   await loadTrash(true).catch(() => {});
+}
+
+/* ---------------------------------------------------------------- memory */
+
+/* V3-P71 §7.2: the notes HIMARI keeps about the user, by category. An edit
+   sends the revision it started from; a note changed elsewhere since is
+   shown with the user's text kept in the box, and saving again replaces it. */
+
+const MEMORY_CATEGORIES = [["user", "About you"], ["preference", "Preferences"], ["project", "Projects"],
+                           ["reference", "References"]];
+
+function memorySource(note) {
+  const meta = el("span", "row-meta memory-source");
+  const when = localDate(note.updated_at);
+  if (!note.source) {
+    meta.textContent = `Added by you · ${when}`;
+    return meta;
+  }
+  if (note.source.in_trash) {
+    meta.append("From a conversation in the trash");
+  } else {
+    const link = el("button", "link-button memory-source-link", `“${conversationName(note.source)}”`);
+    link.type = "button";
+    link.addEventListener("click", () => openConversation(note.source.conversation));
+    meta.append("From ", link);
+  }
+  meta.append(` · ${note.origin === "model" ? "HIMARI" : "edited by you"} · ${when}`);
+  return meta;
+}
+
+/* The text as the server keeps it (V3-P71 §4.2), to recognize a save that went through. */
+function storedText(text) {
+  return text.replace(/\r\n?/g, "\n").trim();
+}
+
+/* After a save whose answer was lost (PR #77 review C1): whether the list now
+   holds it — true, false, or null while the server cannot be asked. A new note
+   counts as saved when a note newer than ``newest`` (the highest id the page
+   knew before saving; ids only grow) has its category and text, so a note that
+   already said the same is never taken for it (integration review C2); a
+   rewrite when the note moved past the revision it was edited from and holds
+   the text. */
+async function memorySaved(note, revision, newest, body) {
+  const listing = await api("GET", "/api/memories").catch(() => null);
+  if (!listing) return null;
+  const text = storedText(body.text);
+  return listing.memories.some((n) => n.category === body.category && n.text === text
+                               && (note ? n.id === note.id && n.revision > revision : n.id > newest));
+}
+
+function memoryDirty() {
+  return !$("surface-memory").hidden
+    && [...$("memory-groups").querySelectorAll(".memory-form")].some((form) => form.dirty());
+}
+
+/* A form in place of a note (``note``) or for a new one in ``category``. */
+function memoryForm(note, category, row) {
+  const form = el("form", "memory-form");
+  const select = el("select", "memory-form-category");
+  select.setAttribute("aria-label", "Category");
+  for (const [value, label] of MEMORY_CATEGORIES) select.append(option(value, label));
+  select.value = note ? note.category : category;
+  const text = el("textarea", "memory-form-text");
+  text.rows = 3;
+  text.value = note ? note.text : "";
+  text.setAttribute("aria-label", note ? `Note m${note.id}` : "New note");
+  text.placeholder = "One or two sentences, as: I write Python at work.";
+  const conflict = el("p", "memory-form-conflict");
+  conflict.hidden = true;
+  const save = el("button", "primary-button", "Save");
+  save.type = "submit";
+  const cancel = el("button", "link-button", "Cancel");
+  cancel.type = "button";
+  const bar = el("div", "memory-form-bar");
+  bar.append(select, cancel, save);
+  form.append(text, conflict, bar);
+  let revision = note ? note.revision : null;
+  let unsure = false; // the last save's answer was lost: look before saving again
+  let newest = 0; // the highest note id known when a new note was first sent
+  form.dirty = () => text.value !== (note ? note.text : "") || select.value !== (note ? note.category : category);
+  cancel.addEventListener("click", () => loadMemory().catch((e) => status(e.message, "error")));
+  const saved = async () => {
+    // Off, the note is kept but no model reads it (§9; integration review C3).
+    status(app.memory && !app.memory.enabled ? "Saved. Memory is off on this server, so models do not use it."
+      : "Saved. HIMARI uses it from the next message.", "ok");
+    await loadMemory();
+  };
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    save.disabled = true;
+    const body = { category: select.value, text: text.value };
+    if (unsure) {
+      const done = await memorySaved(note, revision, newest, body);
+      if (done) {
+        await saved();
+        return;
+      }
+      if (done === null) {
+        save.disabled = false;
+        status("Still could not reach the server; nothing was saved again.", "warn");
+        return;
+      }
+      unsure = false; // it did not go through: save it now
+    }
+    if (!note) newest = Math.max(0, ...app.memory.memories.map((n) => n.id));
+    try {
+      if (note) await api("PUT", `/api/memories/${note.id}`, { ...body, revision });
+      else await api("POST", "/api/memories", body);
+      await saved();
+    } catch (error) {
+      save.disabled = false;
+      if (error.kind !== "http") { // it may have been saved all the same: never save twice blindly
+        const done = await memorySaved(note, revision, newest, body);
+        if (done) {
+          await saved();
+          return;
+        }
+        unsure = done === null;
+        status(unsure ? "Could not confirm the save. Saving again checks first, so it is not saved twice."
+          : "The note was not saved. Try again.", "warn");
+      } else if (error.status === 409 && note) {
+        const latest = await api("GET", "/api/memories").catch(() => null);
+        const now = latest && latest.memories.find((n) => n.id === note.id);
+        if (!now) {
+          status("The note was deleted elsewhere.", "warn");
+          await loadMemory();
+          return;
+        }
+        revision = now.revision; // saving again replaces what is shown here
+        conflict.textContent = `Changed elsewhere. Saved now: “${now.text}” Save again to replace it with yours.`;
+        conflict.hidden = false;
+      } else if (error.status === 404) {
+        status("The note was deleted elsewhere.", "warn");
+        await loadMemory();
+      } else {
+        status(error.message, "error");
+      }
+    }
+  });
+  row.replaceChildren(form);
+  text.focus();
+}
+
+function memoryRow(note) {
+  const li = el("li", "memory-row");
+  const main = el("div", "memory-row-main");
+  main.append(el("p", "memory-text", note.text), memorySource(note));
+  const actions = el("div", "memory-row-actions");
+  const edit = el("button", "link-button", "Edit");
+  edit.type = "button";
+  edit.setAttribute("aria-label", `Edit note m${note.id}`);
+  edit.addEventListener("click", () => memoryForm(note, null, li));
+  const remove = el("button", "link-button danger-link", "Delete");
+  remove.type = "button";
+  remove.setAttribute("aria-label", `Delete note m${note.id}`);
+  remove.addEventListener("click", () => deleteMemory(note));
+  actions.append(edit, remove);
+  li.append(main, actions);
+  return li;
+}
+
+async function deleteMemory(note) {
+  if (!(await confirmAction("Delete this memory?", [note.text, "Conversations that already used it still show it."],
+                            "Delete"))) return;
+  try {
+    await api("DELETE", `/api/memories/${note.id}?revision=${note.revision}`);
+    status("Deleted. HIMARI no longer uses it.", "ok");
+  } catch (error) {
+    status(error.status === 409 ? "The note was changed elsewhere; look at it again before deleting." : error.message,
+           error.kind === "http" ? "warn" : "error");
+  }
+  await loadMemory();
+}
+
+function paintMemory() {
+  const listing = app.memory;
+  $("memory-off").hidden = listing.enabled;
+  $("memory-count").textContent = `${listing.memories.length.toLocaleString()} of ${listing.max_count.toLocaleString()}`;
+  const groups = $("memory-groups");
+  groups.replaceChildren();
+  for (const [category, label] of MEMORY_CATEGORIES) {
+    const notes = listing.memories.filter((note) => note.category === category);
+    const group = el("section", "memory-group");
+    const head = el("div", "memory-group-head");
+    const add = el("button", "link-button", "Add");
+    add.type = "button";
+    add.setAttribute("aria-label", `Add to ${label}`);
+    const list = el("ul", "rows memory-list");
+    add.addEventListener("click", () => {
+      const row = el("li", "memory-row");
+      list.prepend(row);
+      memoryForm(null, category, row);
+    });
+    head.append(el("h2", "memory-group-title", label), add);
+    for (const note of notes) list.append(memoryRow(note));
+    group.append(head, list);
+    if (!notes.length) group.append(el("p", "hint memory-group-empty", "Nothing yet."));
+    groups.append(group);
+  }
+}
+
+async function loadMemory() {
+  const generation = app.generation;
+  const listing = await api("GET", "/api/memories");
+  if (generation !== app.generation || $("surface-memory").hidden) return;
+  app.memory = listing;
+  paintMemory(); // closes any open form
+}
+
+async function showMemory() {
+  if (!(await mayLeave())) return;
+  stopPolling();
+  views.reset();
+  app.conversationId = null;
+  app.generation += 1;
+  clearAttachments();
+  markSelected();
+  app.memory = null;
+  $("memory-groups").replaceChildren();
+  $("memory-count").textContent = "Loading…";
+  showSurface("memory");
+  closeNav();
+  $("topbar-title").textContent = "Memory";
+  status("");
+  await loadMemory();
 }
 
 /* --------------------------------------------------------------- chrome */
@@ -1925,6 +2207,10 @@ async function boot() {
   $("login-form").addEventListener("submit", signIn);
   $("nav-sign-out").addEventListener("click", () => { $("appearance-dialog").close(); signOut(); });
   $("nav-trash").addEventListener("click", () => showTrash().catch((e) => status(e.message, "error")));
+  $("nav-memory").addEventListener("click", () => {
+    $("appearance-dialog").close();
+    showMemory().catch((e) => status(e.message, "error"));
+  });
   $("nav-instructions").addEventListener("click", () => {
     $("appearance-dialog").close();
     showInstructions().catch((e) => status(e.message, "error"));
@@ -1938,7 +2224,8 @@ async function boot() {
   $("instructions-discard").addEventListener("click", () => discardInstructions().catch((e) => status(e.message, "error")));
   $("instructions-load").addEventListener("click", () => loadInstructions().catch((e) => status(e.message, "error")));
   window.addEventListener("beforeunload", (event) => {
-    const unsaved = app.instructionsDraft !== null || (!$("surface-instructions").hidden && instructionsDirty());
+    const unsaved = app.instructionsDraft !== null || (!$("surface-instructions").hidden && instructionsDirty())
+      || memoryDirty();
     if (!unsaved) return;
     event.preventDefault(); // unsaved: the browser asks
     event.returnValue = ""; // older Chrome and some webviews ask only with this
