@@ -16,9 +16,13 @@ from himari.tool.conversation_search import (
     MESSAGE_CHARS,
     READ_CHARS,
     SNIPPET_CHARS,
+    SNIPPET_LEAD,
     ConversationReadTool,
     ConversationSearchTool,
+    _at,
     conversation_search_tools,
+    first_match,
+    fold,
     snippet,
 )
 from himari.tool.schema import validate
@@ -94,6 +98,16 @@ def test_a_snippet_finds_its_match_where_folding_changes_lengths() -> None:
     assert snippet("Ｎeedle at the start", ["needle"]).startswith("Ｎeedle")
 
 
+@pytest.mark.parametrize(("joined", "word"), [("e\u0301", "é"), ("\u1112\u1161\u11ab", "한")])
+def test_a_match_is_placed_where_folding_joins_characters(joined: str, word: str) -> None:
+    # PR #80 review C1: Data folds the whole text, so "e" + a combining accent
+    # (or decomposed Hangul) matches; folding one character at a time would not.
+    text = "A" * 3000 + joined + "B" * 500
+    assert first_match(text, [word]) == 3000
+    assert f"(offset {3000 - SNIPPET_LEAD})" in _at(text, [word])
+    assert word in fold(snippet(text, [word]))
+
+
 def test_the_current_conversation_is_named_and_only_its_summarized_part_found() -> None:
     data, search, _ = setup(through=1)
     for text in ("first path /srv/a", "second path /srv/b"):
@@ -143,8 +157,26 @@ def test_a_read_keeps_its_bounds_and_says_where_to_go_on() -> None:
     for _ in range(6):
         asyncio.run(data.append_event(OTHER, user(long)))
     page = said(run(read, conversation="conv_other", **{"from": 13}))
-    assert len(page) <= READ_CHARS + 200 and ("x" * (MESSAGE_CHARS - 1) + "…") in page
+    assert len(page) <= READ_CHARS + 200 and f", characters 0–{MESSAGE_CHARS} of {MESSAGE_CHARS + 50}):" in page
+    assert ("x" * MESSAGE_CHARS + "\n") in page and ("x" * (MESSAGE_CHARS + 1)) not in page
     assert page.splitlines()[-1].startswith("next: #")
+
+
+def test_a_long_message_is_read_on_from_an_offset() -> None:
+    # PR #79 review C1: past the first MESSAGE_CHARS of one message.
+    data, search, read = setup()
+    long = "a" * 3000 + " needle " + "b" * 2000
+    asyncio.run(data.append_event(OTHER, user(long)))
+    asyncio.run(data.append_event(OTHER, user("after")))
+    line = said(run(search, query="needle"))
+    assert f"#1 user (offset {3001 - 80}): …" in line  # where a read shows the match
+    page = said(run(read, conversation="conv_other", offset=2921)).splitlines()
+    assert page[1].startswith("#1 user (") and page[1].endswith(f", characters 2921–4921 of {len(long)}):")
+    assert page[2] == long[2921:4921] and "needle" in page[2]
+    assert page[3].startswith("#2 user (") and page[3].endswith("):") and page[4] == "after"  # whole: no part
+    rest = said(run(read, conversation="conv_other", **{"from": 2, "offset": 2})).splitlines()
+    assert rest[1].endswith(", characters 2–5 of 5):") and rest[2] == "ter"
+    assert said(run(search, query="after")).endswith("#2 user: after")  # a short one names no offset
 
 
 def test_read_failures() -> None:
@@ -157,7 +189,7 @@ def test_read_failures() -> None:
 
 @pytest.mark.parametrize(("tool", "arguments"), [
     (0, {"query": "x", "conversation": None}),
-    (1, {"conversation": "conv_other", "from": None}),
+    (1, {"conversation": "conv_other", "from": None, "offset": None}),
 ])
 def test_the_schema_takes_unused_optional_arguments_as_null(tool: int, arguments: dict[str, Any]) -> None:
     definition = setup()[1 + tool].definition
