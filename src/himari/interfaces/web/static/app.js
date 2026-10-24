@@ -1838,14 +1838,16 @@ async function discardInstructions() {
    holds until the surface changes, so a navigation that goes on to open a
    conversation does not ask twice, and one that fails keeps the text (N2). */
 async function mayLeave() {
-  if ($("surface-instructions").hidden) return true;
-  if (app.instructionsSave) await app.instructionsSave; // a save under way ends first (N1)
-  if (!instructionsDirty() || app.leaveAgreed) return true;
+  const instructions = !$("surface-instructions").hidden;
+  if (instructions && app.instructionsSave) await app.instructionsSave; // a save under way ends first (N1)
+  // An open memory form with changes asks the same way (PR #77 review C2).
+  const dirty = instructions ? instructionsDirty() : memoryDirty();
+  if (!dirty || app.leaveAgreed) return true;
   if (app.leaveAsked) return false; // one question at a time; a second navigation waits for none (re-review N4)
   app.leaveAsked = true;
   try {
-    app.leaveAgreed = await confirmAction("Leave without saving?",
-                                          ["Your changes to the instructions are not saved."], "Leave");
+    const what = instructions ? "Your changes to the instructions are not saved." : "Your changes to a memory are not saved.";
+    app.leaveAgreed = await confirmAction("Leave without saving?", [what], "Leave");
   } finally {
     app.leaveAsked = false;
   }
@@ -1915,6 +1917,28 @@ function memorySource(note) {
   return meta;
 }
 
+/* The text as the server keeps it (V3-P71 §4.2), to recognize a save that went through. */
+function storedText(text) {
+  return text.replace(/\r\n?/g, "\n").trim();
+}
+
+/* After a save whose answer was lost (PR #77 review C1): whether the list now
+   holds it — true, false, or null while the server cannot be asked. A new note
+   counts as saved when one of its category has its text; a rewrite when the
+   note moved past the revision it was edited from and holds the text. */
+async function memorySaved(note, revision, body) {
+  const listing = await api("GET", "/api/memories").catch(() => null);
+  if (!listing) return null;
+  const text = storedText(body.text);
+  return listing.memories.some((n) => n.category === body.category && n.text === text
+                               && (!note || (n.id === note.id && n.revision > revision)));
+}
+
+function memoryDirty() {
+  return !$("surface-memory").hidden
+    && [...$("memory-groups").querySelectorAll(".memory-form")].some((form) => form.dirty());
+}
+
 /* A form in place of a note (``note``) or for a new one in ``category``. */
 function memoryForm(note, category, row) {
   const form = el("form", "memory-form");
@@ -1937,19 +1961,46 @@ function memoryForm(note, category, row) {
   bar.append(select, cancel, save);
   form.append(text, conflict, bar);
   let revision = note ? note.revision : null;
+  let unsure = false; // the last save's answer was lost: look before saving again
+  form.dirty = () => text.value !== (note ? note.text : "") || select.value !== (note ? note.category : category);
   cancel.addEventListener("click", () => loadMemory().catch((e) => status(e.message, "error")));
+  const saved = async () => {
+    status("Saved. HIMARI uses it from the next message.", "ok");
+    await loadMemory();
+  };
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
     save.disabled = true;
     const body = { category: select.value, text: text.value };
+    if (unsure) {
+      const done = await memorySaved(note, revision, body);
+      if (done) {
+        await saved();
+        return;
+      }
+      if (done === null) {
+        save.disabled = false;
+        status("Still could not reach the server; nothing was saved again.", "warn");
+        return;
+      }
+      unsure = false; // it did not go through: save it now
+    }
     try {
       if (note) await api("PUT", `/api/memories/${note.id}`, { ...body, revision });
       else await api("POST", "/api/memories", body);
-      status("Saved. HIMARI uses it from the next message.", "ok");
-      await loadMemory();
+      await saved();
     } catch (error) {
       save.disabled = false;
-      if (error.kind === "http" && error.status === 409 && note) {
+      if (error.kind !== "http") { // it may have been saved all the same: never save twice blindly
+        const done = await memorySaved(note, revision, body);
+        if (done) {
+          await saved();
+          return;
+        }
+        unsure = done === null;
+        status(unsure ? "Could not confirm the save. Saving again checks first, so it is not saved twice."
+          : "The note was not saved. Try again.", "warn");
+      } else if (error.status === 409 && note) {
         const latest = await api("GET", "/api/memories").catch(() => null);
         const now = latest && latest.memories.find((n) => n.id === note.id);
         if (!now) {
@@ -1960,7 +2011,7 @@ function memoryForm(note, category, row) {
         revision = now.revision; // saving again replaces what is shown here
         conflict.textContent = `Changed elsewhere. Saved now: “${now.text}” Save again to replace it with yours.`;
         conflict.hidden = false;
-      } else if (error.kind === "http" && error.status === 404) {
+      } else if (error.status === 404) {
         status("The note was deleted elsewhere.", "warn");
         await loadMemory();
       } else {
@@ -2166,7 +2217,8 @@ async function boot() {
   $("instructions-discard").addEventListener("click", () => discardInstructions().catch((e) => status(e.message, "error")));
   $("instructions-load").addEventListener("click", () => loadInstructions().catch((e) => status(e.message, "error")));
   window.addEventListener("beforeunload", (event) => {
-    const unsaved = app.instructionsDraft !== null || (!$("surface-instructions").hidden && instructionsDirty());
+    const unsaved = app.instructionsDraft !== null || (!$("surface-instructions").hidden && instructionsDirty())
+      || memoryDirty();
     if (!unsaved) return;
     event.preventDefault(); // unsaved: the browser asks
     event.returnValue = ""; // older Chrome and some webviews ask only with this

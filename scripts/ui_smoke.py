@@ -36,8 +36,9 @@ Updated lines outside the work block, an Undo refused once the note changed,
 an Undo that puts the note back (and the next request carries it), the
 lines after a reload, the memory screen (add, an edit refused after a change
 made elsewhere and saved again, delete, the source link), the delete
-confirmations' note count, a delete for good taking the note, and the
-narrow layout.
+confirmations' note count, a save whose answer was lost (recognized, never
+saved twice), leaving with an unsaved edit, a delete for good taking the
+note, and the narrow layout.
 
 Requires: pip install playwright && playwright install chromium
 Usage:    python scripts/ui_smoke.py [--screenshots DIR] [--only main,compaction,...]
@@ -879,8 +880,8 @@ def run_memory(base: str, token: str, shots: str | None, root: str, provider: Sc
     with sync_playwright() as p:
         browser = p.chromium.launch()
         page = browser.new_page(viewport={"width": 1280, "height": 860}, locale="en-US")
-        page.on("console", lambda m: errors.append(m.text) if m.type == "error" and not re.search(r"40[49]", m.text)
-                else None)
+        page.on("console", lambda m: errors.append(m.text)
+                if m.type == "error" and not re.search(r"40[49]|ERR_FAILED", m.text) else None)  # aborted on purpose
         page.on("pageerror", lambda e: errors.append(str(e)))
         page.goto(base)
         page.fill("#login-token", token)
@@ -948,6 +949,43 @@ def run_memory(base: str, token: str, shots: str | None, root: str, provider: Sc
         expect(page.locator("#status-bar")).to_have_text("Saved. HIMARI uses it from the next message.", timeout=5000)
         expect(page.locator("#memory-count")).to_have_text("2 of 1,000", timeout=5000)
         expect(page.locator(".memory-row", has_text="Short lists.")).to_contain_text("Added by you")
+        # The answer to a save is lost after the server saved it: recognized, never saved twice (PR #77 review C1).
+        state, count = page.locator("#status-bar"), page.locator("#memory-count")
+
+        def lose_answer(route: Any) -> None:
+            if route.request.method != "POST":
+                route.continue_()
+                return
+            route.fetch()  # the server saves it
+            route.abort()  # the page never hears back
+
+        page.route("**/api/memories", lose_answer)
+        page.get_by_role("button", name="Add to Projects").click()
+        page.locator(".memory-form-text").fill("Builds HIMARI.")
+        page.evaluate("document.getElementById('status-bar').textContent = ''")  # not the last save's line
+        page.locator(".memory-form button[type=submit]").click()
+        expect(state).to_have_text("Saved. HIMARI uses it from the next message.", timeout=5000)
+        expect(count).to_have_text("3 of 1,000", timeout=5000)
+        page.unroute("**/api/memories")
+        # The server cannot be reached at all: unsure, and saving again looks first.
+        page.route("**/api/memories", lambda route: route.abort())
+        page.get_by_role("button", name="Add to References").click()
+        page.locator(".memory-form-text").fill("Docs live in docs/.")
+        page.locator(".memory-form button[type=submit]").click()
+        expect(state).to_have_text("Could not confirm the save. Saving again checks first, so it is not saved twice.",
+                                   timeout=5000)
+        page.locator(".memory-form button[type=submit]").click()
+        expect(state).to_have_text("Still could not reach the server; nothing was saved again.", timeout=5000)
+        page.unroute("**/api/memories")
+        page.locator(".memory-form button[type=submit]").click()  # it was not saved: saved now, once
+        expect(count).to_have_text("4 of 1,000", timeout=5000)
+        assert sorted(n.text for n in on_server(root, lambda app: app.memories(OPERATOR))) == [
+            "Builds HIMARI.", "Docs live in docs/.", "Short lists.", "Writes Go at work."]
+        for gone in (3, 4):
+            on_server(root, lambda app, gone=gone: app.delete_memory(OPERATOR, gone))
+        page.click("#nav-appearance")
+        page.click("#nav-memory")
+        expect(count).to_have_text("2 of 1,000", timeout=5000)
         # An edit refused after a change made elsewhere: theirs shown, mine kept, saved again on purpose.
         page.get_by_role("button", name="Edit note m2").click()
         page.locator(".memory-form-text").fill("Short lists, no tables.")
@@ -961,6 +999,16 @@ def run_memory(base: str, token: str, shots: str | None, root: str, provider: Sc
         expect(dialog).to_contain_text("Conversations that already used it still show it.")
         page.click("#confirm-ok")
         expect(page.locator("#memory-count")).to_have_text("1 of 1,000", timeout=5000)
+        # Leaving with an unsaved edit asks first (PR #77 review C2).
+        page.get_by_role("button", name="Edit note m1").click()
+        page.locator(".memory-form-text").fill("Writes Go at work, mostly.")
+        page.click("#nav-home")
+        expect(dialog).to_contain_text("Your changes to a memory are not saved.", timeout=5000)
+        page.click("#confirm-cancel")
+        expect(page.locator("#surface-memory")).to_be_visible()
+        expect(page.locator(".memory-form-text")).to_have_value("Writes Go at work, mostly.")
+        page.locator(".memory-form .link-button", has_text="Cancel").click()
+        expect(page.locator(".memory-form")).to_have_count(0, timeout=5000)
         page.set_viewport_size({"width": 390, "height": 800})
         page.wait_for_timeout(300)
         assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")

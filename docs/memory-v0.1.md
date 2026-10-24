@@ -244,7 +244,7 @@ CREATE TABLE memory_ids (             -- the last id given out to each principal
 - `Edit`은 그 자리에서 입력란과 분류 선택으로 바뀌고 `Save`·`Cancel`이 나온다. 리비전 충돌이면 "Changed elsewhere"와 함께 새 글을 보이고 내 글은 입력란에 남긴다.
 - `Delete`는 확인 창을 띄운다: "Delete this memory? Conversations that already used it still show it." 사용자가 지우면 바로 지워진다(되살리기 없음).
 - 분류마다 `Add` 버튼이 있다. 상단에 `N of 1,000` 개수를 보인다.
-- 기억 기능이 꺼져 있으면(§9) 화면 위에 "Memory is off on this server: HIMARI does not read or save notes."를 보인다. 보기·더하기·고치기·지우기는 그대로 된다(rev. 4). 꺼 둔 채 기억을 정리하거나 지울 수 있어야 하기 때문이다.
+- 기억 기능이 꺼져 있으면(§9) 화면 위에 "Memory is off on this server: models neither use nor save notes. You can still manage your notes here."를 보인다. 보기·더하기·고치기·지우기는 그대로 된다(rev. 4). 꺼 둔 채 기억을 정리하거나 지울 수 있어야 하기 때문이다.
 - 좁은 화면에서 가로 스크롤이 없다.
 
 **API** (인증·CSRF·Origin 검사는 다른 쓰기 API와 같음)
@@ -408,6 +408,12 @@ D1~D5는 위 머리말대로 정해졌다(2026-10-24). 아래는 이 문서에�
 - 대화 안의 기억 줄(§7.1): `Remembered · 글 · Undo`, `Updated memory · 글 · Undo`, `Forgot · 글`. 건넨 파일처럼 작업 묶음 밖에 두고, 호출 줄 자체는 묶음 안에 남는다. "이미 저장됨"은 바꾼 것이 없어 줄을 두지 않는다. Undo가 되면 `Undone`, 404·409이면 버튼을 지우고 상태 줄에 이유를 알린다.
 - 기억 화면(§7.2): 설정 창의 `Instructions` 아래 `Memory`(지시문 화면이 사이드바가 아니라 설정 창에 있어 그 옆에 두었다). 분류 넷(About you, Preferences, Projects, References), `N of 1,000`, 분류마다 `Add`, 기억마다 `Edit`·`Delete`, 출처 줄(대화 이름을 누르면 그 대화로 감). 고칠 때 충돌이면 지금 저장된 글을 보이고 내 글은 입력란에 남기며, 다시 `Save`하면 그 글을 바꾼다. 꺼져 있으면 위에 안내가 나온다.
 - 삭제 확인 창: 휴지통으로 옮길 때 delete notice의 `memory_count`로 "1 note HIMARI saved in this conversation is deleted when it is deleted for good.", 휴지통의 `Delete now`는 `/api/memories`에서 그 대화 출처의 기억을 세어 "… is deleted with it."
+
+**PR #77 검수 반영**
+- C1: 새 기억·수정 저장의 응답을 받지 못하면(네트워크 오류) 목록을 다시 읽어 저장됐는지 본다. 저장됐으면 저장된 것으로 처리하고, 서버에 닿지 못하면 "확인하지 못함"을 알린다. 그 상태에서 다시 `Save`하면 먼저 목록을 확인하므로 두 번 저장되지 않는다. 서버의 멱등성 키는 두지 않았다.
+- C2: 기억 입력란에 저장하지 않은 변경이 있으면 다른 화면으로 갈 때와 페이지를 닫을 때 지시문 화면처럼 묻는다(`mayLeave`, `beforeunload`).
+- C3: 꺼짐 안내를 "모델이 쓰지도 저장하지도 않는다, 관리는 된다"로 고쳤다.
+- 스모크에 두 경우를 더했다: 서버는 저장했는데 응답이 끊긴 저장(한 번만 저장됨), 서버에 닿지 않는 저장(다시 저장할 때 먼저 확인), 저장하지 않은 편집에서 떠나기.
 
 **검증**
 - 새 테스트: Data 4개(두 백엔드 8개), Application 4개, Web API 2개. 전체 pytest 2,141개 통과, mypy, import 경계, node 스모크.
