@@ -3270,3 +3270,156 @@ details > summary {
 @media (min-width: 1100px) {
   .layout:not(.is-nav-collapsed) #sidebar-toggle { display: none; }
 }
+
+/* -- memory (V3-P71 §7) ---------------------------------------------------- */
+
+/* A memory call's line in the conversation: dim, one line that wraps, outside the work block. */
+.item-memory {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px var(--space-2);
+  min-width: 0;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.item-memory-action {
+  font-weight: 600;
+}
+
+.item-memory-text {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.item-memory-action::after,
+.item-memory-text:has(+ .item-memory-undo, + .item-memory-done)::after {
+  content: " ·";
+  font-weight: 400;
+}
+
+.item-memory-undo {
+  padding: 0;
+  font-size: 13px;
+  text-decoration: underline;
+}
+
+.memory > .memory-off,
+.memory > .memory-count,
+.memory-groups {
+  max-width: var(--reading-max);
+  margin-left: auto;
+  margin-right: auto;
+}
+
+.memory-off {
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--warn-edge);
+  border-radius: var(--radius-md);
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+
+.memory-group {
+  margin-top: var(--space-4);
+}
+
+.memory-group-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.memory-group-title {
+  margin: 0;
+  font-size: 15px;
+}
+
+.memory-list {
+  margin-top: var(--space-2);
+}
+
+.rows > li.memory-row {
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: var(--space-2);
+}
+
+.memory-row-main {
+  flex: 1 1 240px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.memory-text {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.memory-source-link {
+  padding: 0;
+  font-size: inherit;
+  text-decoration: underline;
+}
+
+.memory-row-actions {
+  display: flex;
+  gap: var(--space-1);
+  flex: 0 0 auto;
+}
+
+.danger-link {
+  color: var(--danger);
+}
+
+.memory-group-empty {
+  margin: var(--space-1) 0 0;
+}
+
+.memory-form {
+  flex: 1 1 100%;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.memory-form-text {
+  width: 100%;
+  box-sizing: border-box;
+  padding: var(--space-2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  background: var(--surface-raised);
+  color: var(--text);
+  font: inherit;
+  resize: vertical;
+}
+
+.memory-form-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.memory-form-category {
+  margin-right: auto; /* the buttons go to the end */
+  max-width: 100%;
+}
+
+.memory-form-conflict {
+  margin: 0;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--warn-edge);
+  border-radius: var(--radius-md);
+  background: var(--warn-soft);
+  color: var(--warn);
+  overflow-wrap: anywhere;
+}

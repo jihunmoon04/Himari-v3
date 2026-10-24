@@ -15,6 +15,7 @@ from himari.data.api import (
     AssistantToolCalls,
     DataError,
     DataErrorCode,
+    Memory,
     MemoryCategory,
     MemoryChange,
     MemoryChangeKind,
@@ -245,5 +246,91 @@ def test_a_permanent_delete_takes_the_notes_its_calls_wrote_and_only_those() -> 
         await data.begin_purge(SCOPE)
         await data.purge_conversation(SCOPE)
         assert sorted(m.text for m in await data.list_memories(ME)) == ["From the other.", own.text]
+
+    asyncio.run(scenario())
+
+
+async def moved(data: InMemoryData | SqliteData) -> tuple[Memory, Memory]:
+    """m1 saved by a call in SCOPE, then rewritten by a call in OTHER: (before, after)."""
+    first = await tool_call(data, SCOPE)
+    await data.commit_tool_outcome(SCOPE, first, saved(MemoryChange(
+        MemoryChangeKind.SAVE, await data.allocate_memory_id(ME), PROJECT, "Plans a trip.")))
+    before = await data.read_memory(ME, 1)
+    second = await tool_call(data, OTHER)
+    await data.commit_tool_outcome(OTHER, second, saved(MemoryChange(
+        MemoryChangeKind.SAVE, 1, PROJECT, "Plans a trip to Jeju.", expected_revision=1)))
+    return before, await data.read_memory(ME, 1)
+
+
+def test_restore_puts_a_note_back_with_its_source_at_its_next_revision() -> None:
+    # V3-P71 §4.2 (rev. 4–5): an Undo; the source comes back too, so purging
+    # the Conversation that rewrote it no longer takes the note.
+    async def scenario() -> None:
+        store, data = fresh(SCOPE, OTHER)
+        before, after = await moved(data)
+        assert (after.source_conversation, after.revision) == (OTHER.conversation_id, 2)
+        restored = await data.restore_memory(ME, before, expected_revision=2)
+        assert (restored.text, restored.origin, restored.revision) == ("Plans a trip.", MemoryOrigin.MODEL, 3)
+        assert (restored.source_conversation, restored.source_call) == (SCOPE.conversation_id, before.source_call)
+        assert restored.created_at == before.created_at
+        with pytest.raises(DataError) as error:
+            await data.restore_memory(ME, before, expected_revision=2)
+        assert code(error) is DataErrorCode.VERSION_CONFLICT
+        await data.trash_conversation(OTHER)
+        await data.begin_purge(OTHER)
+        await data.purge_conversation(OTHER)
+        assert (await data_for(restart(store)).read_memory(ME, 1)) == restored
+
+    asyncio.run(scenario())
+
+
+def test_restore_never_brings_a_deleted_note_back() -> None:
+    async def scenario() -> None:
+        _, data = fresh()
+        note = await data.save_memory(ME, USER, "Gone.")
+        await data.delete_memory(ME, note.memory_id)
+        with pytest.raises(DataError) as error:
+            await data.restore_memory(ME, note, expected_revision=1)
+        assert code(error) is DataErrorCode.NOT_FOUND
+        assert await data.list_memories(ME) == ()
+
+    asyncio.run(scenario())
+
+
+def test_restore_refuses_a_source_deleted_for_good_but_not_one_in_the_trash() -> None:
+    async def scenario() -> None:
+        _, data = fresh(SCOPE, OTHER)
+        before, after = await moved(data)
+        await data.trash_conversation(SCOPE)
+        await data.begin_purge(SCOPE)
+        await data.purge_conversation(SCOPE)  # m1's source is OTHER now: it stays
+        with pytest.raises(DataError) as error:
+            await data.restore_memory(ME, before, expected_revision=2)
+        assert code(error) is DataErrorCode.NOT_FOUND
+        assert await data.read_memory(ME, 1) == after
+
+        _, data = fresh(SCOPE, OTHER)
+        before, _ = await moved(data)
+        await data.trash_conversation(SCOPE)
+        assert (await data.restore_memory(ME, before, expected_revision=2)).source_conversation == SCOPE.conversation_id
+        await data.begin_purge(SCOPE)
+        await data.purge_conversation(SCOPE)
+        assert await data.list_memories(ME) == ()  # D5: back with its source, it goes with it
+
+    asyncio.run(scenario())
+
+
+def test_restore_is_per_principal() -> None:
+    async def scenario() -> None:
+        elsewhere = TrustedScope(FOREIGN.principal_id, ConversationId("conv_theirs"))
+        _, data = fresh(SCOPE, elsewhere)
+        mine = await data.save_memory(ME, USER, "Mine.")
+        theirs = replace(mine, source_conversation=elsewhere.conversation_id)
+        with pytest.raises(DataError) as error:  # a source that is not this principal's
+            await data.restore_memory(ME, theirs, expected_revision=1)
+        assert code(error) is DataErrorCode.NOT_FOUND
+        with pytest.raises(DataError) as error:
+            await data.restore_memory(FOREIGN.principal_id, mine, expected_revision=1)
+        assert code(error) is DataErrorCode.NOT_FOUND
 
     asyncio.run(scenario())

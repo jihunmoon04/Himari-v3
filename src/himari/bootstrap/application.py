@@ -53,6 +53,7 @@ from himari.bootstrap import DEFAULT_INSTRUCTIONS, Runtime, build_runtime
 from himari.bootstrap.operator import check_private_dir, ensure_operator_secret, ensure_private_dir
 from himari.common import (
     AttachmentRef,
+    CallId,
     CallRef,
     ConversationId,
     FileId,
@@ -81,6 +82,7 @@ from himari.data.api import (
     InstructionScope,
     Memory,
     MemoryCategory,
+    MemoryOrigin,
     ViewMaker,
     ViewState,
     InitialActivation,
@@ -121,6 +123,7 @@ from himari.prompt.api import (
 )
 from himari.provider.api import ProviderAdapter
 from himari.tool.api import ToolHandler
+from himari.tool.memory import MEMORY_FORGET, MEMORY_SAVE
 from himari.tool.schema import check_tool_input_schema
 
 DATABASE_NAME = "himari.db"
@@ -242,6 +245,58 @@ class DeleteNotice:
     running: bool  # a job runs now: it is stopped first
     trash_days: int
     memories: int = 0  # notes its calls wrote: deleted with it for good (V3-P71 D5)
+
+
+@dataclass(frozen=True)
+class MemoryLine:
+    """A memory call as its Conversation shows it (V3-P71 §7.1)."""
+
+    action: str  # "saved", "updated", "forgot" or "already" (the note was there)
+    memory_id: int
+    text: str
+    undo: bool  # the note is still as the call left it, so an Undo is offered
+
+
+def _memory_line(record: ToolExecutionRecord, notes: Mapping[int, Memory]) -> MemoryLine | None:
+    """From the call's own record (raw_result, §15); None for a call that
+    changed nothing the user should see: failed, or not a memory call."""
+    raw = record.raw_result
+    if (record.tool_id not in (MEMORY_SAVE, MEMORY_FORGET) or record.status is not ToolExecutionStatus.SUCCEEDED
+            or not isinstance(raw, Mapping)):
+        return None
+    written = raw.get("memory")
+    memory_id, text = (written.get("id"), written.get("text")) if isinstance(written, Mapping) else (None, None)
+    if not isinstance(memory_id, int) or not isinstance(text, str):
+        return None
+    assert isinstance(written, Mapping)
+    if record.tool_id == MEMORY_FORGET:
+        return MemoryLine("forgot", memory_id, text, False)
+    if raw.get("unchanged"):
+        return MemoryLine("already", memory_id, text, False)
+    current = notes.get(memory_id)
+    undo = current is not None and current.revision == written.get("revision")
+    return MemoryLine("saved" if raw.get("previous") is None else "updated", memory_id, text, undo)
+
+
+def _memory_before(previous: object) -> Memory | None:
+    """The note as it was before a rewrite, from raw_result.previous; None
+    when the record does not say all of it (§7.1: origin and source too)."""
+    if not isinstance(previous, Mapping):
+        return None
+    memory_id, category, text, origin = (previous.get(k) for k in ("id", "category", "text", "origin"))
+    source = previous.get("source")
+    if not (isinstance(memory_id, int) and isinstance(text, str) and category in {c.value for c in MemoryCategory}
+            and origin in {o.value for o in MemoryOrigin} and (source is None or isinstance(source, Mapping))):
+        return None
+    conversation = call = None
+    if isinstance(source, Mapping):
+        conversation, run, call_id = source.get("conversation"), source.get("run"), source.get("call")
+        if not isinstance(conversation, str):
+            return None
+        call = CallRef(RunId(run), CallId(call_id)) if isinstance(run, str) and isinstance(call_id, str) else None
+    epoch = datetime.fromtimestamp(0, UTC)  # restore_memory keeps the note's own times
+    return Memory(memory_id, MemoryCategory(category), text, MemoryOrigin(origin),
+                  None if conversation is None else ConversationId(conversation), call, 0, epoch, epoch)
 
 
 class ModelRefused(LookupError):
@@ -874,6 +929,48 @@ class Application:
         """Gone at once; out of each Conversation's next turn. Results already
         in a Conversation still show its text (§4.3). NOT_FOUND, VERSION_CONFLICT."""
         return await self.data.delete_memory(principal, memory_id, revision)
+
+    async def memory_lines(self, scope: TrustedScope, run_ids: Iterable[RunId]) -> dict[CallRef, MemoryLine]:
+        """The memory calls of these Runs with what each changed, and whether
+        an Undo is offered now — from the notes as they are (§7.1)."""
+        lines: dict[CallRef, MemoryLine] = {}
+        notes: dict[int, Memory] | None = None
+        for run_id in dict.fromkeys(run_ids):
+            for record in await self.data.read_tool_executions(scope, run_id):
+                if record.tool_id not in (MEMORY_SAVE, MEMORY_FORGET):
+                    continue
+                if notes is None:
+                    notes = {n.memory_id: n for n in await self.data.list_memories(scope.principal_id)}
+                line = _memory_line(record, notes)
+                if line is not None:
+                    lines[record.call] = line
+        return lines
+
+    async def undo_memory(self, scope: TrustedScope, call: CallRef) -> Memory | None:
+        """Undo what this memory_save call did (V3-P71 §7.1, rev. 5): a new
+        note is deleted (None), a rewrite puts the note back as it was,
+        origin and source included. What to put back comes from the call's
+        stored record, never from the request. NOT_FOUND: no such change, the
+        note is gone, or the conversation it came from was deleted for good;
+        VERSION_CONFLICT: the note changed since."""
+        record = next((r for r in await self.data.read_tool_executions(scope, call.run_id) if r.call == call), None)
+        raw = None if record is None else record.raw_result
+        line = None if record is None else _memory_line(record, {})
+        if record is None or line is None or line.action not in ("saved", "updated") or not isinstance(raw, Mapping):
+            raise DataError(DataErrorCode.NOT_FOUND, "no memory change to undo")
+        written = raw["memory"]
+        assert isinstance(written, Mapping)
+        revision = written.get("revision")
+        if not isinstance(revision, int):
+            raise DataError(DataErrorCode.NOT_FOUND, "no memory change to undo")
+        principal = scope.principal_id
+        if line.action == "saved":
+            await self.data.delete_memory(principal, line.memory_id, revision)
+            return None
+        before = _memory_before(raw.get("previous"))
+        if before is None or before.memory_id != line.memory_id:
+            raise DataError(DataErrorCode.NOT_FOUND, "this change cannot be undone")
+        return await self.data.restore_memory(principal, before, expected_revision=revision)
 
     async def create_conversation(self, principal: PrincipalId, *, title: str | None = None) -> ConversationId:
         """T0 with the principal's Inside Workspace activated (provisioned first)."""

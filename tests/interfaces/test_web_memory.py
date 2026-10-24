@@ -135,11 +135,12 @@ def test_a_note_the_model_saved_names_its_conversation_and_the_delete_notice_cou
                               headers=SEND).status_code == 202
     server.wait(cid)
     (note,) = server.listing()["memories"]
-    assert (note["origin"], note["source"]) == ("model", {"conversation": cid, "title": "Trip", "in_trash": False})
+    assert (note["origin"], note["source"]) == ("model", {"conversation": cid, "title": "Trip", "preview": "remember",
+                                                       "in_trash": False})
     assert server.client.get(f"/api/conversations/{cid}/delete-notice").json()["memory_count"] == 1
     assert server.client.post(f"/api/conversations/{cid}/trash", headers=SEND).status_code == 200
     (note,) = server.listing()["memories"]
-    assert note["source"] == {"conversation": cid, "title": None, "in_trash": True}
+    assert note["source"] == {"conversation": cid, "title": None, "preview": "", "in_trash": True}
     assert server.client.delete(f"/api/conversations/{cid}", headers=SEND).status_code == 204
     assert server.listing()["memories"] == []
 
@@ -184,3 +185,58 @@ def test_himari_memory_turns_it_off() -> None:
     assert WebConfig.from_env({**base, "HIMARI_MEMORY": " off "}).memory is False
     with pytest.raises(WebConfigError):
         WebConfig.from_env({**base, "HIMARI_MEMORY": "sometimes"})
+
+
+def memory_results(server: Server, cid: str) -> list[dict[str, Any]]:
+    items = server.client.get(f"/api/conversations/{cid}/events").json()["items"]
+    return [e for e in items if e["kind"] == "tool_result"]
+
+
+def test_a_memory_call_carries_its_line_and_undo_puts_it_back(server: Server) -> None:
+    # V3-P71 §7.1: the events say what each memory call changed; the Undo
+    # names the call only, the server reads what to put back.
+    server.sign_in()
+    cid = server.client.post("/api/conversations", json={}, headers=SEND).json()["id"]
+    server.provider.extend([NormalizedToolCalls((ToolCall(CallId("c0"), 0, ToolId("memory_save"),
+                                                          {"category": "user", "text": "Uses Go."}),)),
+                            final("Noted."),
+                            NormalizedToolCalls((ToolCall(CallId("c0"), 0, ToolId("memory_save"),
+                                                          {"category": "user", "text": "Uses Rust.",
+                                                           "replaces": "m1"}),)),
+                            final("Noted.")])
+    for _ in range(2):
+        server.client.post(f"/api/conversations/{cid}/messages", json={"text": "remember"}, headers=SEND)
+        server.wait(cid)
+    first, second = memory_results(server, cid)
+    assert first["memory"] == {"action": "saved", "id": 1, "text": "Uses Go.", "undo": False}  # rewritten since
+    assert second["memory"] == {"action": "updated", "id": 1, "text": "Uses Rust.", "undo": True}
+
+    path = f"/api/conversations/{cid}/calls/{second['run_id']}/{second['call_id']}/memory-undo"
+    assert server.client.post(path).status_code == 403  # no origin: refused like any write
+    undone = server.client.post(path, headers=SEND)
+    assert undone.status_code == 200
+    note = undone.json()["memory"]
+    assert (note["text"], note["origin"], note["revision"]) == ("Uses Go.", "model", 3)
+    assert note["source"] == {"conversation": cid, "title": None, "preview": "remember", "in_trash": False}
+    again = server.client.post(path, headers=SEND)
+    assert again.status_code == 409 and again.json()["error"]["code"] == "revision_conflict"
+    assert [r["memory"]["undo"] for r in memory_results(server, cid)] == [False, False]
+
+    gone = f"/api/conversations/{cid}/calls/{first['run_id']}/c9/memory-undo"
+    refused = server.client.post(gone, headers=SEND)
+    assert refused.status_code == 404 and refused.json()["error"]["code"] == "not_found"
+
+
+def test_undo_of_a_new_note_deletes_it(server: Server) -> None:
+    server.sign_in()
+    cid = server.client.post("/api/conversations", json={}, headers=SEND).json()["id"]
+    server.provider.extend([NormalizedToolCalls((ToolCall(CallId("c0"), 0, ToolId("memory_save"),
+                                                          {"category": "project", "text": "Plans a trip."}),)),
+                            final("Noted.")])
+    server.client.post(f"/api/conversations/{cid}/messages", json={"text": "remember"}, headers=SEND)
+    server.wait(cid)
+    (result,) = memory_results(server, cid)
+    path = f"/api/conversations/{cid}/calls/{result['run_id']}/{result['call_id']}/memory-undo"
+    assert server.client.post(path, headers=SEND).json() == {"memory": None}
+    assert server.listing()["memories"] == []
+    assert server.client.post(path, headers=SEND).status_code == 404

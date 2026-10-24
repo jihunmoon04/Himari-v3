@@ -62,6 +62,7 @@ from himari.bootstrap.application import (
     ConversationStillStopping,
     DeleteNotice,
     FileNameRefused,
+    MemoryLine,
     FilesUnavailable,
     ModelChoiceView,
     ModelRefused,
@@ -309,16 +310,19 @@ def delete_notice_view(notice: DeleteNotice) -> dict[str, Any]:
 
 def event_view(event: ConversationEvent, views: dict[CallRef, tuple[bool, bool]] | None = None,
                models: dict[RunId, str] | None = None, files: Files | None = None,
-               presented: dict[CallRef, list[FileRecord]] | None = None) -> dict[str, Any]:
+               presented: dict[CallRef, list[FileRecord]] | None = None,
+               memory: dict[CallRef, MemoryLine] | None = None) -> dict[str, Any]:
     """``views``: Application.view_flags for the page — (shown while it
     runs, stored with its result) per call with a view that may be shown.
     ``models``: the model of each Run that wrote an assistant event (V3-P64 §7).
     ``files``: the page's attachments by (id, version); ``presented``: the
-    files each call gave the user (V3-P66 §7.3)."""
+    files each call gave the user (V3-P66 §7.3); ``memory``: what each
+    memory call changed (V3-P71 §7.1)."""
     views = {} if views is None else views
     models = {} if models is None else models
     files = {} if files is None else files
     presented = {} if presented is None else presented
+    memory = {} if memory is None else memory
     view: dict[str, Any] = {"sequence": event.sequence, "kind": event.kind.value, "created_at": _time(event.created_at)}
     payload = event.payload
     if isinstance(payload, UserMessage):
@@ -345,6 +349,9 @@ def event_view(event: ConversationEvent, views: dict[CallRef, tuple[bool, bool]]
         view["text"] = _text(payload.model_result.blocks)
         view["app_view"] = views.get(payload.call, (False, False))[1]
         view["presented_files"] = [file_view(f) for f in presented.get(payload.call, [])]
+        line = memory.get(payload.call)
+        view["memory"] = None if line is None else {"action": line.action, "id": line.memory_id, "text": line.text,
+                                                    "undo": line.undo}
         # V3-P67 §8: the images the call returned (kept as files of the call) — never an
         # ask_user answer's attachments, which are its result too (PR #63 review C2).
         view["images"] = [file_view(found) for b in payload.model_result.blocks if isinstance(b, AttachmentRef)
@@ -446,13 +453,15 @@ INSTRUCTIONS_REFUSALS: dict[DataErrorCode, tuple[int, str, str]] = {
 }
 
 
-def memory_view(note: Memory, titles: dict[ConversationId, str | None]) -> dict[str, Any]:
+def memory_view(note: Memory, titles: dict[ConversationId, tuple[str | None, str]]) -> dict[str, Any]:
     """V3-P71 §7.2. ``titles``: each source Conversation's title (None:
-    untitled); a source missing from it is in the trash."""
+    untitled) and preview, which the page names it by when untitled; a
+    source missing from it is in the trash."""
     source = note.source_conversation
     return {"id": note.memory_id, "category": note.category.value, "text": note.text, "origin": note.origin.value,
             "source": None if source is None else {
-                "conversation": source, "title": titles.get(source), "in_trash": source not in titles},
+                "conversation": source, "title": titles.get(source, (None, ""))[0],
+                "preview": titles.get(source, (None, ""))[1], "in_trash": source not in titles},
             "revision": note.revision, "created_at": _time(note.created_at), "updated_at": _time(note.updated_at)}
 
 
@@ -803,7 +812,9 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
         calls = [e.payload.call for e in events if isinstance(e.payload, ToolResultRecord)]
         given = await application.call_files(scope, calls) if calls else {}
         presented = {call: list(records) for call, records in given.items()}
-        return {"items": [event_view(e, views, models, files, presented) for e in events],
+        results = [e.payload.call.run_id for e in events if isinstance(e.payload, ToolResultRecord)]
+        memory = await application.memory_lines(scope, results) if results else {}
+        return {"items": [event_view(e, views, models, files, presented, memory) for e in events],
                 "last_sequence": events[-1].sequence if events else after}
 
     @app.get("/api/conversations/{conversation_id}/calls/{run_id}/{call_id}/app")
@@ -858,11 +869,12 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
         return instructions_view(saved)
 
     async def memory_titles(application: Application, who: PrincipalId,
-                            notes: Iterable[Memory]) -> dict[ConversationId, str | None]:
-        titles: dict[ConversationId, str | None] = {}
+                            notes: Iterable[Memory]) -> dict[ConversationId, tuple[str | None, str]]:
+        titles: dict[ConversationId, tuple[str | None, str]] = {}
         for source in {n.source_conversation for n in notes if n.source_conversation is not None}:
             try:
-                titles[source] = (await application.data.read_conversation(scope_of(source, who))).title
+                summary = await application.data.read_conversation(scope_of(source, who))
+                titles[source] = (summary.title, summary.preview)
             except DataError as error:  # in the trash (a purged one took its notes with it)
                 if error.code is not DataErrorCode.NOT_AUTHORIZED:
                     raise
@@ -911,6 +923,22 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
             await himari(request).delete_memory(who, memory_id, revision)
         except DataError as error:
             raise memory_refused(error) from None
+
+    @app.post("/api/conversations/{conversation_id}/calls/{run_id}/{call_id}/memory-undo")
+    async def undo_memory(conversation_id: str, run_id: str, call_id: str, request: Request,
+                          who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+        """Undo what one memory_save call did (V3-P71 §7.1): the server reads
+        what to put back from the call's own record. ``memory``: the note as
+        restored, or null when the call's new note was deleted."""
+        application = himari(request)
+        try:
+            note = await application.undo_memory(scope_of(conversation_id, who), CallRef(RunId(run_id), CallId(call_id)))
+        except DataError as error:
+            if error.code is DataErrorCode.NOT_FOUND:
+                raise ApiError(404, "not_found", "Nothing to undo: the note or the conversation it came from is "
+                                                 "gone.") from None
+            raise memory_refused(error) from None
+        return {"memory": None if note is None else memory_view(note, await memory_titles(application, who, (note,)))}
 
     @app.get("/api/conversations/{conversation_id}/tools")
     async def read_tool_sources(conversation_id: str, request: Request,
