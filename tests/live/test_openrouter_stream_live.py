@@ -84,7 +84,8 @@ def test_live_a_streamed_tool_turn_replays_its_merged_reasoning(model: str) -> N
     for _ in range(3):
         transport = RecordingTransport()
         add = AddTool()
-        rt = build_runtime(adapter(model, transport), tools=[add], model_id=model, reasoning_effort="high",
+        effort = "high" if adapter(model).describe_capabilities(model).reasoning_efforts else None
+        rt = build_runtime(adapter(model, transport), tools=[add], model_id=model, reasoning_effort=effort,
                            streaming=True)
         rt.store.create_conversation(SCOPE)
         shown = Shown()

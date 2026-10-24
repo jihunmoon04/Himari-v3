@@ -145,6 +145,7 @@ KNOWN_CAPABILITIES: Mapping[str, ProviderCapabilities] = {
     # MiniMax advertises 1M globally but its top provider declares 512K.
     "openai/gpt-6.1-sol": ProviderCapabilities(
         model_id="openai/gpt-6.1-sol",
+        streaming=True,  # V3-P73: live response, tool replay and cancel checked 2026-10-24
         image_input=True,  # V3-P67: user-message and after-group images read back, live 2026-10-22
         reasoning_efforts=frozenset({"low", "medium", "high"}),
         context_tokens=1_050_000,
@@ -152,6 +153,7 @@ KNOWN_CAPABILITIES: Mapping[str, ProviderCapabilities] = {
     ),
     "anthropic/claude-sonnet-5.5": ProviderCapabilities(
         model_id="anthropic/claude-sonnet-5.5",
+        streaming=True,  # V3-P73: live response, tool replay and cancel checked 2026-10-24
         image_input=True,  # V3-P67: user-message and after-group images read back, live 2026-10-22
         reasoning_efforts=frozenset({"low", "medium", "high"}),
         context_tokens=1_000_000,
@@ -159,12 +161,14 @@ KNOWN_CAPABILITIES: Mapping[str, ProviderCapabilities] = {
     ),
     "xiaomi/mimo-v2.6-pro": ProviderCapabilities(
         model_id="xiaomi/mimo-v2.6-pro",
+        streaming=True,  # V3-P73: live response, tool replay and cancel checked 2026-10-24
         image_input=True,  # V3-P67: user-message and after-group images read back, live 2026-10-22
         context_tokens=1_048_576,
         max_output_tokens=131_072,
     ),
     "z-ai/glm-5.3": ProviderCapabilities(
         model_id="z-ai/glm-5.3",
+        streaming=True,  # V3-P73: live response, tool replay and cancel checked 2026-10-24
         reasoning_efforts=frozenset({"low", "medium", "high"}),
         parallel_tool_calls=True,
         context_tokens=1_048_576,
@@ -172,6 +176,7 @@ KNOWN_CAPABILITIES: Mapping[str, ProviderCapabilities] = {
     ),
     "deepseek/deepseek-v4.1-flash": ProviderCapabilities(
         model_id="deepseek/deepseek-v4.1-flash",
+        streaming=True,  # V3-P73: live response, tool replay and cancel checked 2026-10-24
         image_input=True,  # V3-P67: user-message and after-group images read back, live 2026-10-22
         reasoning_efforts=frozenset({"low", "medium", "high"}),
         context_tokens=1_048_576,
@@ -179,6 +184,7 @@ KNOWN_CAPABILITIES: Mapping[str, ProviderCapabilities] = {
     ),
     "minimax/minimax-m3": ProviderCapabilities(
         model_id="minimax/minimax-m3",
+        streaming=True,  # V3-P73: live response, tool replay and cancel checked 2026-10-24
         image_input=True,  # V3-P67: user-message and after-group images read back, live 2026-10-22
         context_tokens=524_288,
         max_output_tokens=512_000,
