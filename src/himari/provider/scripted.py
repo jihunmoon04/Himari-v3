@@ -6,6 +6,12 @@ Each ``invoke_prepared`` consumes one script step:
 - ``RawBody`` → received verbatim (e.g. to exercise invalid output)
 - ``Measured`` → its output, with a Provider-reported input token count
 - a ``BaseException`` instance → raised (e.g. to simulate a process crash)
+- ``StreamCut`` → a stream that stops part way (V3-P73 tests)
+
+With ``streaming=True`` the adapter declares the ``streaming`` capability;
+a request prepared with ``stream`` is then invoked with a sink: the answer
+(or commentary) goes to it a few characters at a time, ``piece_delay``
+apart, then the tool ids, and the body goes into the capture.
 
 The request body is ``ModelInput`` serialized to JSON, labelled
 ``ADAPTER_SERIALIZED`` — it is not a wire capture of any real Provider.
@@ -13,6 +19,7 @@ The request body is ``ModelInput`` serialized to JSON, labelled
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import hashlib
 import json
@@ -26,6 +33,9 @@ from himari.common import CallId, ContentBlock, RawRepresentation, TextBlock, To
 from himari.prompt.api import ModelInput
 from himari.provider.api import (
     NativeInvocationOutcome,
+    OutputDelta,
+    OutputSink,
+    RawCapture,
     NativeNoResponse,
     NativePreparedRequest,
     NativeReceived,
@@ -54,7 +64,19 @@ class Measured:
     cache_write_tokens: int | None = None
 
 
-type ScriptStep = NormalizedModelOutput | NativeNoResponse | NativeUncertain | RawBody | Measured | BaseException
+@dataclass(frozen=True)
+class StreamCut:
+    """A streamed answer that stops after ``pieces``: each goes to the sink
+    and, as bytes, to the capture; then ``end`` is returned or raised, or —
+    an ``asyncio.Event`` — waited for (to be cancelled meanwhile)."""
+
+    pieces: tuple[str, ...]
+    end: NativeUncertain | BaseException | asyncio.Event
+
+
+type ScriptStep = (NormalizedModelOutput | NativeNoResponse | NativeUncertain | RawBody | Measured | BaseException
+                   | StreamCut)
+PIECE_CHARS = 4  # of one streamed piece
 
 
 def _json_default(value: object) -> object:
@@ -93,8 +115,11 @@ def encode_output(output: NormalizedModelOutput) -> bytes:
 
 
 class ScriptedAdapter:
-    def __init__(self, script: Iterable[ScriptStep] = ()) -> None:
+    def __init__(self, script: Iterable[ScriptStep] = (), *, streaming: bool = False,
+                 piece_delay: float = 0.0) -> None:
         self._script = list(script)
+        self._streaming = streaming
+        self._piece_delay = piece_delay
         self.prepared_inputs: list[ModelInput] = []
         self.sent: list[NativePreparedRequest] = []
 
@@ -106,7 +131,7 @@ class ScriptedAdapter:
         return "scripted"
 
     def describe_capabilities(self, model_id: str) -> ProviderCapabilities:
-        return ProviderCapabilities(model_id=model_id, parallel_tool_calls=True)
+        return ProviderCapabilities(model_id=model_id, parallel_tool_calls=True, streaming=self._streaming)
 
     def prepare_native_request(self, model_input: ModelInput) -> NativePreparedRequest:
         body = json.dumps(
@@ -119,25 +144,71 @@ class ScriptedAdapter:
             raw_representation=RawRepresentation.ADAPTER_SERIALIZED,
             endpoint="scripted://local",
             digest=hashlib.sha256(body).hexdigest(),
+            streamed=model_input.request_options.stream and self._streaming,
         )
 
-    async def invoke_prepared(self, request: NativePreparedRequest) -> NativeInvocationOutcome:
+    async def invoke_prepared(self, request: NativePreparedRequest, sink: OutputSink | None = None,
+                              capture: RawCapture | None = None) -> NativeInvocationOutcome:
         self.sent.append(request)
         if not self._script:
             return NativeNoResponse("script_exhausted")
         step = self._script.pop(0)
         if isinstance(step, BaseException):
             raise step
+        if isinstance(step, StreamCut):
+            return await self._cut(step, sink, capture)
         if isinstance(step, (NativeNoResponse, NativeUncertain)):
             return step
         if isinstance(step, RawBody):
             return NativeReceived(step.body, "application/json")
+        output = step.output if isinstance(step, Measured) else step
+        body = encode_output(output)
+        if request.streamed:
+            if capture is not None:
+                capture.content_type = "application/json"
+                capture.append(body)
+            await self._stream(output, sink)
         if isinstance(step, Measured):
-            return NativeReceived(encode_output(step.output), "application/json",
+            return NativeReceived(body, "application/json",
                                   TokenUsage(input_tokens=step.input_tokens, output_tokens=step.output_tokens,
                                              cached_input_tokens=step.cached_input_tokens,
                                              cache_write_tokens=step.cache_write_tokens))
-        return NativeReceived(encode_output(step), "application/json")
+        return NativeReceived(body, "application/json")
+
+    async def _show(self, sink: OutputSink | None, delta: OutputDelta) -> None:
+        if self._piece_delay:
+            await asyncio.sleep(self._piece_delay)
+        if sink is not None:
+            try:
+                sink(delta)
+            except Exception:  # noqa: BLE001 — as a real adapter: display never fails the Run
+                pass
+
+    async def _stream(self, output: NormalizedModelOutput, sink: OutputSink | None) -> None:
+        if output.continuation is not None:
+            await self._show(sink, OutputDelta(thinking=True))
+        blocks = output.blocks if isinstance(output, NormalizedFinal) else output.commentary
+        text = "".join(_blocks_to_json(blocks))
+        for start in range(0, len(text), PIECE_CHARS):
+            await self._show(sink, OutputDelta(text=text[start:start + PIECE_CHARS]))
+        if isinstance(output, NormalizedToolCalls):
+            for call in output.calls:
+                await self._show(sink, OutputDelta(tool=str(call.tool_id)))
+
+    async def _cut(self, step: StreamCut, sink: OutputSink | None,
+                   capture: RawCapture | None) -> NativeInvocationOutcome:
+        if capture is not None:
+            capture.content_type = "text/event-stream"
+        for piece in step.pieces:
+            if capture is not None:
+                capture.append(piece.encode())
+            await self._show(sink, OutputDelta(text=piece))
+        if isinstance(step.end, asyncio.Event):
+            await step.end.wait()
+            return NativeUncertain("stream_incomplete")
+        if isinstance(step.end, BaseException):
+            raise step.end
+        return step.end
 
     def normalize(self, received: NativeReceived) -> NormalizedModelOutput:
         try:

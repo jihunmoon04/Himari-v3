@@ -17,7 +17,7 @@ from himari.common import ConversationId, PrincipalId, TrustedScope
 from himari.control.api import DriveState, ModelCatalog, ModelOffer
 from himari.data.api import ModelSetting, RunPurpose
 from himari.prompt.api import ContextBudget, ModelInput
-from himari.provider.api import NativeInvocationOutcome, NativePreparedRequest
+from himari.provider.api import NativeInvocationOutcome, NativePreparedRequest, OutputSink, RawCapture
 from himari.provider.openrouter import OpenRouterAdapter
 from himari.provider.scripted import ScriptedAdapter
 
@@ -66,11 +66,12 @@ class ChangingAdapter(ScriptedAdapter):
         super().__init__(script)
         self._change: Callable[[], Coroutine[Any, Any, None]] | None = change
 
-    async def invoke_prepared(self, request: NativePreparedRequest) -> NativeInvocationOutcome:
+    async def invoke_prepared(self, request: NativePreparedRequest, sink: OutputSink | None = None,
+                              capture: RawCapture | None = None) -> NativeInvocationOutcome:
         if self._change is not None:
             change, self._change = self._change, None
             await change()
-        return await super().invoke_prepared(request)
+        return await super().invoke_prepared(request, sink, capture)
 
 
 @sync

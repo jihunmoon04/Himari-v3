@@ -11,7 +11,7 @@ from pathlib import Path
 from himari.bootstrap.application import Application
 from himari.common import CallId, PrincipalId, TextBlock, ToolCall, ToolId, TrustedScope
 from himari.prompt.api import USER_INSTRUCTIONS_HEADER, ModelInput, ToolGroupTurn
-from himari.provider.api import NativeInvocationOutcome, NativePreparedRequest, NativeReceived, NormalizedFinal
+from himari.provider.api import NativeInvocationOutcome, NativePreparedRequest, NativeReceived, NormalizedFinal, OutputSink, RawCapture
 from himari.provider.api import NormalizedModelOutput, NormalizedToolCalls
 from himari.provider.scripted import ScriptedAdapter, encode_output
 
@@ -38,7 +38,8 @@ class Reactive(ScriptedAdapter):
         self.inputs[request.digest] = model_input
         return request
 
-    async def invoke_prepared(self, request: NativePreparedRequest) -> NativeInvocationOutcome:
+    async def invoke_prepared(self, request: NativePreparedRequest, sink: OutputSink | None = None,
+                              capture: RawCapture | None = None) -> NativeInvocationOutcome:
         self.sent.append(request)
         if self.hold is not None:
             await self.hold(self.inputs[request.digest])

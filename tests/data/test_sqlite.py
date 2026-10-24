@@ -25,6 +25,7 @@ from himari.common import (
     ConversationId,
     EnvironmentKind,
     PrincipalId,
+    RunId,
     CallId,
     CallRef,
     RawRepresentation,
@@ -51,6 +52,7 @@ from himari.data.api import (
     PromptBasis,
     RawNoResponse,
     RawReceived,
+    RawUncertain,
     RunPreparation,
     RunStatus,
     ToolCompletion,
@@ -150,6 +152,31 @@ def test_everything_reads_back_identically_after_reopening(tmp_path: Path) -> No
     payload = thaw(after["runs"][0].continuation.payload)
     assert payload == {"reasoning_details": [{"type": "enc", "data": "Zm9v", "n": 1.0}]}
     assert isinstance(payload["reasoning_details"][0]["n"], float)
+
+
+def test_what_arrived_of_a_stream_survives_reopening(tmp_path: Path) -> None:
+    # V3-P73 §4: an uncertain Run keeps the part of a stream that arrived, as received.
+    path = tmp_path / "h.db"
+    store, data = open_store(path)
+    store.create_conversation(SCOPE)
+
+    async def fill() -> RunId:
+        run_id = await data.prepare_run(SCOPE, preparation(b"{}"))
+        await data.mark_dispatch(SCOPE, run_id)
+        await data.record_raw_outcome(SCOPE, run_id, RawUncertain("cancelled_by_user", b"data: {\"a\"\n",
+                                                                  "text/event-stream"))
+        return run_id
+
+    run_id = asyncio.run(fill())
+    store.close()
+    store2, data2 = open_store(path)
+    try:
+        run = asyncio.run(data2.read_run(SCOPE, run_id))
+        raw = asyncio.run(data2.read_raw_response(SCOPE, run_id))
+        assert (run.status, run.error_code) == (RunStatus.OUTCOME_UNKNOWN, "cancelled_by_user")
+        assert (raw.body, raw.content_type) == (b"data: {\"a\"\n", "text/event-stream")
+    finally:
+        store2.close()
 
 
 def test_files_are_private(tmp_path: Path) -> None:

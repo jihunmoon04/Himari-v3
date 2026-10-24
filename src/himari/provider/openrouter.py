@@ -24,6 +24,13 @@
   agrees with its output (``stop`` ↔ FINAL, ``tool_calls`` ↔ TOOL_CALLS) is
   accepted; ``length``, ``content_filter``, ``error``, unknown reasons, a
   top-level ``error`` or any other role never becomes a FINAL or runs a Tool.
+- Streaming (V3-P73): for a model that declares ``streaming`` and a request
+  that asks for it, the body carries ``"stream": true``. The SSE body is
+  kept byte for byte as it arrives (into the Driver's ``RawCapture``, before
+  it is parsed) and is normalized by merging it into the message a JSON
+  response carries (``openrouter_stream.assemble``), so both are judged
+  alike. An error chunk is a provider error; a stream that stops without
+  ``[DONE]``, breaks or passes ``MAX_CAPTURE_BYTES`` is uncertain.
 """
 
 from __future__ import annotations
@@ -70,6 +77,8 @@ from himari.prompt.api import (
 )
 from himari.provider.api import (
     NativeInvocationOutcome,
+    OutputSink,
+    RawCapture,
     NativeNoResponse,
     NativePreparedRequest,
     NativeReceived,
@@ -82,11 +91,13 @@ from himari.provider.api import (
     ProviderErrorCode,
     validate_tool_calls,
 )
+from himari.provider.openrouter_stream import SseReader, StreamView, assemble, is_event_stream, payloads
 
 DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
 # OpenRouter's documented reasoning.effort values.
 REASONING_EFFORTS = frozenset({"max", "xhigh", "high", "medium", "low", "minimal", "none"})
 ACCEPTED_FINISH_REASONS = frozenset({"stop", "tool_calls"})
+CONNECT_SECONDS = 10.0  # of a streamed request; reading waits the adapter's timeout between bytes
 
 # Only effort values each model was *verified* to accept, by a live sweep
 # (2026-10-13, gpt-6-luna 2026-10-14; re-checked by tests/live
@@ -97,6 +108,9 @@ ACCEPTED_FINISH_REASONS = frozenset({"stop", "tool_calls"})
 # image_input: only models that read an image back in a user message and in the
 # message after a Tool group (tests/live/test_openrouter_images_live.py, 2026-10-22);
 # z-ai/glm-5.3 takes text only.
+# streaming: only models whose streamed answers, merged reasoning replayed in
+# the next Tool turn and mid-stream cancel were checked live
+# (tests/live/test_openrouter_stream_live.py, 2026-10-24; V3-P73 §9).
 KNOWN_CAPABILITIES: Mapping[str, ProviderCapabilities] = {
     "openai/gpt-6-luna": ProviderCapabilities(
         model_id="openai/gpt-6-luna",
@@ -106,6 +120,7 @@ KNOWN_CAPABILITIES: Mapping[str, ProviderCapabilities] = {
         context_tokens=1_050_000,  # OpenRouter /api/v1/models context_length, 2026-10-14
         max_output_tokens=128_000,  # top_provider.max_completion_tokens, 2026-10-14
         cache_breakpoints=True,  # measured 2026-10-16: hits 75-84% with, ~13% without (V3-P62 §13.1)
+        streaming=True,  # V3-P73: live 2026-10-24
     ),
     "openai/gpt-5-nano": ProviderCapabilities(
         model_id="openai/gpt-5-nano",
@@ -122,6 +137,7 @@ KNOWN_CAPABILITIES: Mapping[str, ProviderCapabilities] = {
         parallel_tool_calls=True,
         context_tokens=1_000_000,  # OpenRouter /api/v1/models context_length, 2026-10-14
         max_output_tokens=128_000,  # top_provider.max_completion_tokens, 2026-10-14
+        streaming=True,  # V3-P73: live 2026-10-24
     ),
     # OpenRouter catalog and live tool-result continuation checks, 2026-10-20.
     # Only low/medium/high were swept; no effort is assumed for MiMo or MiniMax.
@@ -331,6 +347,9 @@ class OpenRouterAdapter:
             # V3-P62 §9 B1: OpenRouter keeps one session on one provider from the first request,
             # so its prompt cache can serve the growing history. An opaque per-Conversation value.
             body["session_id"] = options.session_key
+        streamed = options.stream and caps.streaming  # V3-P73 §3.1: checked models only
+        if streamed:
+            body["stream"] = True
         raw = _dump(body)
         return NativePreparedRequest(
             body=raw,
@@ -339,6 +358,7 @@ class OpenRouterAdapter:
                                 else RawRepresentation.WIRE_EXACT),
             endpoint=self._endpoint,
             digest=hashlib.sha256(raw).hexdigest(),
+            streamed=streamed,
         )
 
     def _replay(self, continuation: ProviderContinuation | None, model_id: str) -> dict[str, Any]:
@@ -426,7 +446,8 @@ class OpenRouterAdapter:
 
     # --- PROVIDER-01: exactly one send -----------------------------------------------
 
-    async def invoke_prepared(self, request: NativePreparedRequest) -> NativeInvocationOutcome:
+    async def invoke_prepared(self, request: NativePreparedRequest, sink: OutputSink | None = None,
+                              capture: RawCapture | None = None) -> NativeInvocationOutcome:
         content = request.body
         if request.raw_representation is RawRepresentation.WIRE_EXACT_BLOB_REFS:
             expanded = self._expand(request.body)
@@ -438,6 +459,9 @@ class OpenRouterAdapter:
             "Content-Type": request.content_type,
             "Accept-Encoding": "identity",  # stored response bytes == HTTP body bytes
         }
+        if request.streamed:
+            return await self._invoke_stream(request.endpoint, content, headers, sink,
+                                             capture if capture is not None else RawCapture())
         try:
             async with httpx.AsyncClient(transport=self._transport, timeout=self._timeout) as client:
                 response = await client.post(request.endpoint, content=content, headers=headers)
@@ -449,6 +473,46 @@ class OpenRouterAdapter:
         content_type = response.headers.get("content-type", "")
         if response.status_code != 200:
             return NativeNoResponse(f"http_{response.status_code}", body, content_type)
+        return self._whole(body, content_type)
+
+    async def _invoke_stream(self, endpoint: str, content: bytes, headers: dict[str, str],
+                             sink: OutputSink | None, capture: RawCapture) -> NativeInvocationOutcome:
+        """One streamed send (V3-P73 §3.2). Every body byte goes into
+        ``capture`` before it is parsed; whatever ends the invocation —
+        a return, a cancel, an exception — what arrived is there."""
+        view = StreamView(sink, decode_tool_name)
+        reader = SseReader()
+        timeout = httpx.Timeout(self._timeout, connect=min(CONNECT_SECONDS, self._timeout))
+        try:
+            async with httpx.AsyncClient(transport=self._transport, timeout=timeout) as client:
+                async with client.stream("POST", endpoint, content=content, headers=headers) as response:
+                    capture.content_type = content_type = response.headers.get("content-type", "")
+                    streaming = response.status_code == 200 and is_event_stream(content_type)
+                    async for chunk in response.aiter_bytes():
+                        if not capture.append(chunk):
+                            return NativeUncertain("response_too_large")  # it was sent: may have been processed
+                        if streaming:
+                            for payload in reader.feed(chunk):
+                                view.take(payload)
+        except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
+            return NativeNoResponse(f"connect_failed:{type(exc).__name__}")  # nothing was sent
+        except httpx.TransportError as exc:
+            return NativeUncertain(f"transport:{type(exc).__name__}")  # may have been sent/processed
+        body = capture.body() or b""
+        if response.status_code != 200:
+            return NativeNoResponse(f"http_{response.status_code}", body, content_type)
+        if not streaming:  # answered with a whole JSON body after all
+            return self._whole(body, content_type)
+        if view.error is not None:
+            code = view.error.get("code") if isinstance(view.error, dict) else None
+            return NativeNoResponse(f"provider_error_{code}", body, content_type)
+        if not view.done:
+            return NativeUncertain("stream_incomplete")  # it ended early: may have been processed
+        return NativeReceived(body, content_type, _usage(view.usage))
+
+    @staticmethod
+    def _whole(body: bytes, content_type: str) -> NativeInvocationOutcome:
+        """A received HTTP 200 JSON body."""
         try:
             doc = json.loads(body)
         except ValueError:
@@ -501,10 +565,13 @@ class OpenRouterAdapter:
             raise _invalid(f"unexpected response structure ({type(exc).__name__})") from exc
 
     def _normalize(self, received: NativeReceived) -> NormalizedModelOutput:
-        try:
-            doc = json.loads(received.body)
-        except ValueError as exc:
-            raise _invalid(f"body is not JSON: {exc}") from exc
+        if is_event_stream(received.content_type):
+            doc: Any = assemble(payloads(received.body))  # V3-P73 §3.3: judged as the JSON response is
+        else:
+            try:
+                doc = json.loads(received.body)
+            except ValueError as exc:
+                raise _invalid(f"body is not JSON: {exc}") from exc
         if isinstance(doc, dict) and doc.get("error") is not None:
             raise _invalid("response carries a top-level error")
         choices = _field(doc, "choices", list, "response")

@@ -682,6 +682,7 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
                 "documents": application.documents_status,  # V3-P70 §9
                 "memory": application.memory_enabled,  # V3-P71 §9
                 "conversation_search": application.conversation_search_enabled,  # V3-P72 §9
+                "streaming": application.streaming_enabled,  # V3-P73 §9
                 "turn": {"token_budget": turn.turn_budget, "unattended_runs": turn.unattended_runs,
                          "max_runs": turn.max_runs, "no_progress_runs": turn.no_progress_runs,
                          "seen_seconds": turn.seen_seconds}}

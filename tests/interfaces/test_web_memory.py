@@ -251,3 +251,14 @@ def test_himari_conversation_search_turns_it_off() -> None:  # V3-P72 §9, besid
     assert (off.conversation_search, off.memory) == (False, True)
     with pytest.raises(WebConfigError):
         WebConfig.from_env({**base, "HIMARI_CONVERSATION_SEARCH": "maybe"})
+
+
+def test_himari_streaming_turns_it_off() -> None:  # V3-P73 §9
+    from himari.interfaces.web.config import WebConfigError
+
+    base = {"HIMARI_DATA_ROOT": "/srv/himari"}
+    assert WebConfig.from_env(base).streaming is True
+    off = WebConfig.from_env({**base, "HIMARI_STREAMING": "0"})
+    assert (off.streaming, off.conversation_search, off.memory) == (False, True, True)
+    with pytest.raises(WebConfigError):
+        WebConfig.from_env({**base, "HIMARI_STREAMING": "maybe"})

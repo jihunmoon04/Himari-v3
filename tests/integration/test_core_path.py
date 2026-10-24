@@ -53,11 +53,14 @@ from himari.data.api import (
 )
 from himari.prompt.api import AssistantTurn, ToolGroupTurn, UserTurn
 from himari.provider.api import (
+    NativeInvocationOutcome,
     NativeNoResponse,
     NativePreparedRequest,
     NativeReceived,
     NativeUncertain,
     NormalizedModelOutput,
+    OutputSink,
+    RawCapture,
 )
 from himari.provider.openrouter import OpenRouterAdapter
 from himari.provider.scripted import RawBody, ScriptedAdapter
@@ -296,9 +299,10 @@ def test_concurrent_drive_on_same_conversation_is_busy() -> None:
     gate = asyncio.Event()
 
     class SlowAdapter(ScriptedAdapter):
-        async def invoke_prepared(self, request: NativePreparedRequest):  # type: ignore[no-untyped-def]
+        async def invoke_prepared(self, request: NativePreparedRequest, sink: OutputSink | None = None,
+                                  capture: RawCapture | None = None) -> NativeInvocationOutcome:
             await gate.wait()
-            return await super().invoke_prepared(request)
+            return await super().invoke_prepared(request, sink, capture)
 
     rt, _ = runtime(provider=SlowAdapter([final("done")]))
 

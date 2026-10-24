@@ -1343,8 +1343,10 @@ class SqliteData:
                 case RawNoResponse(error_code=code, body=body, content_type=content_type):
                     self._set_run(tx, run_id, RunStatus.FAILED_NO_RESPONSE, raw_response_body=body,
                                   raw_response_content_type=content_type, error_code=code)
-                case RawUncertain(error_code=code):
-                    self._set_run(tx, run_id, RunStatus.OUTCOME_UNKNOWN, error_code=code)
+                case RawUncertain(error_code=code, body=body, content_type=content_type):
+                    # What arrived of a stream before it ended (V3-P73 §4), kept as received.
+                    self._set_run(tx, run_id, RunStatus.OUTCOME_UNKNOWN, raw_response_body=body,
+                                  raw_response_content_type=content_type, error_code=code)
 
     async def project_model_output(
         self,

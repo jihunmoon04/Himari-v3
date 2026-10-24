@@ -19,7 +19,7 @@ from himari.control.api import DriveState, StopSignal
 from himari.data.api import RunStatus, ToolExecutionStatus
 from himari.prompt.api import ContextBudget, ToolGroupTurn, UserTurn
 from himari.prompt.compaction import COMPACTION_INSTRUCTIONS
-from himari.provider.api import NativeInvocationOutcome, NativePreparedRequest, NativeReceived
+from himari.provider.api import NativeInvocationOutcome, NativePreparedRequest, NativeReceived, OutputSink, RawCapture
 from himari.provider.scripted import Measured, ScriptedAdapter, ScriptStep, encode_output
 from himari.tool.api import EffectProfile, ToolContext, ToolInvocation, ToolOutcome, ToolStatus, WorkspaceRequirement
 
@@ -33,14 +33,15 @@ class GatedProvider(ScriptedAdapter):
         self.release = asyncio.Event()
         self.interrupted = 0
 
-    async def invoke_prepared(self, request: NativePreparedRequest) -> NativeInvocationOutcome:
+    async def invoke_prepared(self, request: NativePreparedRequest, sink: OutputSink | None = None,
+                              capture: RawCapture | None = None) -> NativeInvocationOutcome:
         self.entered.set()
         try:
             await self.release.wait()
         except asyncio.CancelledError:
             self.interrupted += 1
             raise
-        return await super().invoke_prepared(request)
+        return await super().invoke_prepared(request, sink, capture)
 
 
 class SlowTool(RecordingTool):
@@ -301,14 +302,15 @@ class StopsDuring(ScriptedAdapter):
         self.seen = 0
         self.summaries = 0
 
-    async def invoke_prepared(self, request: NativePreparedRequest) -> NativeInvocationOutcome:
+    async def invoke_prepared(self, request: NativePreparedRequest, sink: OutputSink | None = None,
+                              capture: RawCapture | None = None) -> NativeInvocationOutcome:
         compaction = self.prepared_inputs[-1].stable_prefix == (COMPACTION_INSTRUCTIONS,)
         if compaction == (self.which == "compaction"):
             self.seen += 1
             if self.seen == self.nth:
                 getattr(self.stop, self.act)()
         if not compaction:
-            return await super().invoke_prepared(request)
+            return await super().invoke_prepared(request, sink, capture)
         self.sent.append(request)
         self.summaries += 1
         return NativeReceived(encode_output(final(f"S{self.summaries}")), "application/json")

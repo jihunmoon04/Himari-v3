@@ -199,6 +199,7 @@ def runtime(
     external_defaults: Mapping[str, bool] | None = None,
     models: ModelCatalog | None = None,
     image_views: ViewMaker | None = None,
+    streaming: bool = False,
 ) -> tuple[Runtime, ScriptedAdapter]:
     """Fresh runtime; pass ``restart(rt.store)`` to model a process restart."""
     adapter = provider if provider is not None else ScriptedAdapter(script)
@@ -219,6 +220,7 @@ def runtime(
         external_defaults=external_defaults,
         models=models,
         image_views=image_views,
+        streaming=streaming,
         # Tests exercising REQUIRE_USER opt in explicitly by using such a Tool;
         # the production default stays off (see test_registry_schema.py).
         allow_require_user_tools=any(

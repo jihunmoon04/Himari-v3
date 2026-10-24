@@ -5,6 +5,12 @@ Source documents: docs/control-prompt-provider-v0.1.md §4–§6, docs/contracts
 One Run = exactly one ``invoke_prepared`` attempt. Adapters must disable
 implicit HTTP retries. Credentials are adapter configuration, never part of
 the prepared body that Data stores.
+
+Streaming (V3-P73 §3.5): a request prepared with ``streamed`` is invoked
+with an ``OutputSink`` for what the model writes, shown while it writes,
+and a ``RawCapture`` that the Driver owns: the adapter appends every body
+byte it receives there before parsing it, so whatever arrived is there
+however the invocation ends (returned, cancelled, raised).
 """
 
 from __future__ import annotations
@@ -53,6 +59,9 @@ class ProviderCapabilities(DeepFrozen):
     # Images in user messages are read (V3-P67 §7.1): only for models checked
     # with real requests; unlisted models do not get images.
     image_input: bool = False
+    # Answers may be streamed (V3-P73 §9): only for models whose streamed
+    # continuation was checked with real requests, replayed in a Tool turn.
+    streaming: bool = False
 
 
 @runtime_checkable
@@ -70,6 +79,7 @@ class NativePreparedRequest(DeepFrozen):
     raw_representation: RawRepresentation  # what ``body`` equals (V3-P14 OPEN)
     endpoint: str  # transport descriptor without credentials
     digest: str
+    streamed: bool = False  # the body asks for a stream (V3-P73 §3.1)
 
 
 @dataclass(frozen=True)
@@ -96,6 +106,42 @@ class NativeUncertain(DeepFrozen):
 
 
 type NativeInvocationOutcome = NativeReceived | NativeNoResponse | NativeUncertain
+
+MAX_CAPTURE_BYTES = 32 * 1024 * 1024  # of one response (V3-P73 §3.4)
+
+
+@dataclass(frozen=True)
+class OutputDelta(DeepFrozen):
+    """A piece of what the model is writing, for display only (V3-P73 §3.5)."""
+
+    text: str = ""  # appended to the answer (or the commentary before tool calls)
+    tool: str | None = None  # a tool call started: its Tool id
+    thinking: bool = False  # reasoning arrived; its content is never passed on
+
+
+type OutputSink = Callable[[OutputDelta], None]
+
+
+class RawCapture:
+    """The bytes of one Run's response as they arrive (V3-P73 §5.3). The
+    Driver makes one per streamed Run and reads it once the invocation has
+    ended; the adapter only appends, never past ``MAX_CAPTURE_BYTES``."""
+
+    def __init__(self) -> None:
+        self.content_type = ""
+        self._chunks: list[bytes] = []
+        self.size = 0
+
+    def append(self, chunk: bytes) -> bool:
+        """Keep ``chunk``; False (and nothing kept) if it would pass the limit."""
+        if self.size + len(chunk) > MAX_CAPTURE_BYTES:
+            return False
+        self._chunks.append(chunk)
+        self.size += len(chunk)
+        return True
+
+    def body(self) -> bytes | None:
+        return b"".join(self._chunks) if self._chunks else None
 
 
 @dataclass(frozen=True)
@@ -128,8 +174,11 @@ class ProviderAdapter(Protocol):
         when its provider_key and model_id match this request (V3-049)."""
         ...
 
-    async def invoke_prepared(self, request: NativePreparedRequest) -> NativeInvocationOutcome:
-        """PROVIDER-01: at most one send of exactly this prepared request."""
+    async def invoke_prepared(self, request: NativePreparedRequest, sink: OutputSink | None = None,
+                              capture: RawCapture | None = None) -> NativeInvocationOutcome:
+        """PROVIDER-01: at most one send of exactly this prepared request.
+        ``sink`` and ``capture`` are given only for a ``streamed`` request
+        (V3-P73); an exception from ``sink`` is the adapter's to swallow."""
         ...
 
     def normalize(self, received: NativeReceived) -> NormalizedModelOutput:

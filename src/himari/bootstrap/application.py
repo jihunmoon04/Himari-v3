@@ -559,6 +559,7 @@ class Application:
     toolkit: Toolkit | None = field(default=None, repr=False)  # its checked folder, open until close()
     memory_enabled: bool = False  # V3-P71 §9: the memory Tools and notes (HIMARI_MEMORY)
     conversation_search_enabled: bool = False  # V3-P72 §9 (HIMARI_CONVERSATION_SEARCH)
+    streaming_enabled: bool = False  # V3-P73 §9 (HIMARI_STREAMING)
     # V3-P65 §7.3: one lifecycle lock per Conversation (P0: one server process),
     # kept only while some call holds or waits for it (PR #56 review C1).
     _lifecycle: dict[ConversationId, _Lifecycle] = field(default_factory=dict, repr=False)
@@ -595,6 +596,7 @@ class Application:
         documents_owners: frozenset[int] = frozenset({0}),  # who may own the toolkit: root (tests add their user)
         memory: bool = True,  # V3-P71 §9: HIMARI_MEMORY=0 turns it off (the notes stay)
         conversation_search: bool = True,  # V3-P72 §9: HIMARI_CONVERSATION_SEARCH=0 turns its Tools off
+        streaming: bool = True,  # V3-P73 §9: HIMARI_STREAMING=0 asks no model for a stream
     ) -> Application:
         if file_max_bytes < 1 or file_max_bytes > file_store_max_bytes:
             raise ValueError("a file's limit must be positive and within the file store's (V3-P66)")
@@ -689,7 +691,7 @@ class Application:
                                     max_runs_per_drive=max_runs, turn_budget=turn_budget,
                                     no_progress_runs=turn.no_progress_runs, image_views=views,
                                     file_max_bytes=file_max_bytes, memory=memory,
-                                    conversation_search=conversation_search)
+                                    conversation_search=conversation_search, streaming=streaming)
         except BaseException:
             try:
                 if mcp is not None:
@@ -704,7 +706,8 @@ class Application:
         application = cls(root, store, runtime.data, runtime, runner, inside, state, model_id,
                           default_budget.limit_tokens, secret, mcp, turn, tuple(unverified), trash_days,
                           file_max_bytes, uploads_work, views, tuple(image_models), reader, toolkit,
-                          memory_enabled=memory, conversation_search_enabled=conversation_search)
+                          memory_enabled=memory, conversation_search_enabled=conversation_search,
+                          streaming_enabled=streaming)
         if cleanup_seconds is not None:
             application._cleanup = asyncio.create_task(application._purge_periodically(cleanup_seconds),
                                                        name="trash-cleanup")

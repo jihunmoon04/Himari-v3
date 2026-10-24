@@ -22,7 +22,7 @@ from himari.prompt.api import CompactionPlan, ContextDecision, ModelInput, Promp
 from himari.prompt.compaction import COMPACTION_INSTRUCTIONS, Compactor, request_tokens
 from himari.prompt.composer import Composer
 from himari.provider.scripted import ScriptedAdapter, encode_output
-from himari.provider.api import NativeInvocationOutcome, NativeNoResponse, NativePreparedRequest, NativeReceived
+from himari.provider.api import NativeInvocationOutcome, NativeNoResponse, NativePreparedRequest, NativeReceived, OutputSink, RawCapture
 from himari.provider.scripted import Measured
 from himari.tool.api import ToolOutcome, ToolStatus
 
@@ -322,9 +322,10 @@ class SummarizingAdapter(ScriptedAdapter):
         self._failures = failures or {}
         self._texts = texts or {}
 
-    async def invoke_prepared(self, request: NativePreparedRequest) -> NativeInvocationOutcome:
+    async def invoke_prepared(self, request: NativePreparedRequest, sink: OutputSink | None = None,
+                              capture: RawCapture | None = None) -> NativeInvocationOutcome:
         if not _is_compaction(self.prepared_inputs[-1]):
-            return await super().invoke_prepared(request)
+            return await super().invoke_prepared(request, sink, capture)
         self.sent.append(request)
         self.summaries += 1
         if self.summaries in self._failures:

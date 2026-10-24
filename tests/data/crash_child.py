@@ -129,10 +129,10 @@ def provider_scenario(path: str) -> None:
     store.create_conversation(SCOPE)
     provider = ScriptedAdapter([final("never seen")])
 
-    async def killed_while_sending(request: Any) -> Any:
+    async def killed_while_sending(request: Any, *_: Any) -> Any:
         die()
 
-    provider.invoke_prepared = killed_while_sending  # type: ignore[method-assign]
+    provider.invoke_prepared = killed_while_sending  # type: ignore[method-assign, assignment]
     rt = build_runtime(provider, store=store)
     asyncio.run(rt.driver.drive(SCOPE, user("hi")))
 
