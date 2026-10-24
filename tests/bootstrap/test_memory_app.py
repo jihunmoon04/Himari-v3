@@ -335,3 +335,22 @@ def test_undo_never_brings_back_a_source_deleted_for_good(tmp_path: Path) -> Non
             await app.close()
 
     asyncio.run(scenario())
+
+
+def test_null_optional_arguments_pass_the_dispatcher(tmp_path: Path) -> None:
+    # Integration review C1: through the Dispatcher's schema check, not only run().
+    async def scenario() -> None:
+        adapter = ScriptedAdapter([call("memory_save", {"category": "user", "text": "Uses Python.", "replaces": None}),
+                                   final(),
+                                   call("memory_search", {"query": None, "category": None}), final()])
+        app = await opened(tmp_path, adapter)
+        try:
+            scope = TrustedScope(ME, await app.create_conversation(ME))
+            await turn(app, scope)
+            assert last_result(adapter.prepared_inputs[-1]) == "Saved m1 (user)."
+            await turn(app, scope)
+            assert last_result(adapter.prepared_inputs[-1]).startswith("m1 [user] Uses Python. (")
+        finally:
+            await app.close()
+
+    asyncio.run(scenario())

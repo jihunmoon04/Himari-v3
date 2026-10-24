@@ -1924,14 +1924,17 @@ function storedText(text) {
 
 /* After a save whose answer was lost (PR #77 review C1): whether the list now
    holds it — true, false, or null while the server cannot be asked. A new note
-   counts as saved when one of its category has its text; a rewrite when the
-   note moved past the revision it was edited from and holds the text. */
-async function memorySaved(note, revision, body) {
+   counts as saved when a note newer than ``newest`` (the highest id the page
+   knew before saving; ids only grow) has its category and text, so a note that
+   already said the same is never taken for it (integration review C2); a
+   rewrite when the note moved past the revision it was edited from and holds
+   the text. */
+async function memorySaved(note, revision, newest, body) {
   const listing = await api("GET", "/api/memories").catch(() => null);
   if (!listing) return null;
   const text = storedText(body.text);
   return listing.memories.some((n) => n.category === body.category && n.text === text
-                               && (!note || (n.id === note.id && n.revision > revision)));
+                               && (note ? n.id === note.id && n.revision > revision : n.id > newest));
 }
 
 function memoryDirty() {
@@ -1962,10 +1965,13 @@ function memoryForm(note, category, row) {
   form.append(text, conflict, bar);
   let revision = note ? note.revision : null;
   let unsure = false; // the last save's answer was lost: look before saving again
+  let newest = 0; // the highest note id known when a new note was first sent
   form.dirty = () => text.value !== (note ? note.text : "") || select.value !== (note ? note.category : category);
   cancel.addEventListener("click", () => loadMemory().catch((e) => status(e.message, "error")));
   const saved = async () => {
-    status("Saved. HIMARI uses it from the next message.", "ok");
+    // Off, the note is kept but no model reads it (§9; integration review C3).
+    status(app.memory && !app.memory.enabled ? "Saved. Memory is off on this server, so models do not use it."
+      : "Saved. HIMARI uses it from the next message.", "ok");
     await loadMemory();
   };
   form.addEventListener("submit", async (event) => {
@@ -1973,7 +1979,7 @@ function memoryForm(note, category, row) {
     save.disabled = true;
     const body = { category: select.value, text: text.value };
     if (unsure) {
-      const done = await memorySaved(note, revision, body);
+      const done = await memorySaved(note, revision, newest, body);
       if (done) {
         await saved();
         return;
@@ -1985,6 +1991,7 @@ function memoryForm(note, category, row) {
       }
       unsure = false; // it did not go through: save it now
     }
+    if (!note) newest = Math.max(0, ...app.memory.memories.map((n) => n.id));
     try {
       if (note) await api("PUT", `/api/memories/${note.id}`, { ...body, revision });
       else await api("POST", "/api/memories", body);
@@ -1992,7 +1999,7 @@ function memoryForm(note, category, row) {
     } catch (error) {
       save.disabled = false;
       if (error.kind !== "http") { // it may have been saved all the same: never save twice blindly
-        const done = await memorySaved(note, revision, body);
+        const done = await memorySaved(note, revision, newest, body);
         if (done) {
           await saved();
           return;

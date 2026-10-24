@@ -42,6 +42,9 @@ SEARCH_LIMIT = 20  # notes one memory_search returns
 _CATEGORIES = [c.value for c in MemoryCategory]
 _NOTE_ID = re.compile(r"m?([1-9][0-9]{0,9})")
 _ID_ARG: dict[str, JsonValue] = {"type": "string", "description": "A note's id, as m12."}
+# An optional argument also takes null: models send an unused one as null or ""
+# (seen with a real model), and the Dispatcher checks the schema before run().
+_NULLABLE_CATEGORY: dict[str, JsonValue] = {"type": ["string", "null"], "enum": [*_CATEGORIES, None]}
 
 
 def _text(message: str, *, error: bool = False) -> ModelToolResult:
@@ -119,8 +122,8 @@ class MemorySave:
         "working on, goals, decisions), reference (paths, links, names they use).",
         {"category": {"type": "string", "enum": list(_CATEGORIES)},
          "text": {"type": "string", "description": "One or two self-contained sentences."},
-         "replaces": {**_ID_ARG, "description": "Only to rewrite an existing note: its id, as m12. Leave it out "
-                                                 "for a new note."}},
+         "replaces": {**_ID_ARG, "type": ["string", "null"],
+                      "description": "Only to rewrite an existing note: its id, as m12. Leave it out for a new note."}},
         ["category", "text"], EffectProfile.SCOPED_WRITE)
 
     def __init__(self, store: MemoryStore) -> None:
@@ -206,8 +209,8 @@ class MemorySearch:
         MEMORY_SEARCH,
         "Find saved notes about the user. Use short key words (a name, a project, a tool); without a query, "
         "lists the newest notes of a category or of all.",
-        {"query": {"type": "string", "description": "Key words; a note matches when it contains any of them."},
-         "category": {"type": "string", "enum": list(_CATEGORIES)}},
+        {"query": {"type": ["string", "null"], "description": "Key words; a note matches when it contains any of them."},
+         "category": _NULLABLE_CATEGORY},
         [], EffectProfile.READ)
 
     def __init__(self, store: MemoryStore) -> None:
@@ -215,7 +218,7 @@ class MemorySearch:
 
     async def run(self, invocation: ToolInvocation, ctx: ToolContext) -> ToolOutcome:
         args = invocation.arguments
-        query = args.get("query", "")
+        query = args.get("query") or ""
         if not isinstance(query, str):
             return _failed("query is text")
         category = None

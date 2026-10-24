@@ -13,6 +13,7 @@ from testkit import SCOPE, data_for, new_store
 from himari.common import CallId, TextBlock, ToolId
 from himari.data.api import MAX_MEMORY_CHARS, MemoryCategory, MemoryChange, MemoryChangeKind
 from himari.tool.api import EffectProfile, ToolContext, ToolInvocation, ToolOutcome, ToolStatus
+from himari.tool.schema import validate
 from himari.tool.memory import SEARCH_LIMIT, MemoryForget, MemorySave, MemorySearch, memory_tools, note_id
 
 ME = SCOPE.principal_id
@@ -88,6 +89,19 @@ def test_line_endings_are_made_lf_as_the_store_does() -> None:
     data = fresh()
     outcome = run(MemorySave(data), data, category="user", text="Uses Go.\r\nWrites Python.\r")
     assert outcome.memory_change is not None and outcome.memory_change.text == "Uses Go.\nWrites Python."
+
+
+@pytest.mark.parametrize(("tool", "arguments"), [
+    (MemorySave, {"category": "user", "text": "Uses Go.", "replaces": None}),
+    (MemorySave, {"category": "user", "text": "Uses Go.", "replaces": ""}),
+    (MemorySearch, {"query": None, "category": None}),
+    (MemorySearch, {"query": "go", "category": None}),
+])
+def test_the_schema_takes_an_unused_optional_argument_sent_as_null(tool: Any, arguments: dict[str, Any]) -> None:
+    # Integration review C1: the Dispatcher validates the schema before run(), so the
+    # handler's "null is left out" must be allowed by the schema too.
+    assert validate(arguments, tool.definition.input_schema) == []
+    assert validate({**arguments, "category": "mood"}, tool.definition.input_schema) != []
 
 
 def test_the_same_note_again_changes_nothing() -> None:

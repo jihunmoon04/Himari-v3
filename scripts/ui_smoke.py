@@ -37,7 +37,8 @@ an Undo that puts the note back (and the next request carries it), the
 lines after a reload, the memory screen (add, an edit refused after a change
 made elsewhere and saved again, delete, the source link), the delete
 confirmations' note count, a save whose answer was lost (recognized, never
-saved twice), leaving with an unsaved edit, a delete for good taking the
+saved twice, never mistaken for a note that said the same), the off notice and
+what a save says then, leaving with an unsaved edit, a delete for good taking the
 note, and the narrow layout.
 
 Requires: pip install playwright && playwright install chromium
@@ -966,6 +967,7 @@ def run_memory(base: str, token: str, shots: str | None, root: str, provider: Sc
         page.locator(".memory-form button[type=submit]").click()
         expect(state).to_have_text("Saved. HIMARI uses it from the next message.", timeout=5000)
         expect(count).to_have_text("3 of 1,000", timeout=5000)
+        expect(page.locator(".memory-form")).to_have_count(0, timeout=5000)
         page.unroute("**/api/memories")
         # The server cannot be reached at all: unsure, and saving again looks first.
         page.route("**/api/memories", lambda route: route.abort())
@@ -985,6 +987,41 @@ def run_memory(base: str, token: str, shots: str | None, root: str, provider: Sc
             on_server(root, lambda app, gone=gone: app.delete_memory(OPERATOR, gone))
         page.click("#nav-appearance")
         page.click("#nav-memory")
+        expect(count).to_have_text("2 of 1,000", timeout=5000)
+        # The same text as a note already there, lost before it reached the server: not taken for saved
+        # (integration review C2).
+        page.route("**/api/memories", lambda route: route.abort() if route.request.method == "POST"
+                   else route.continue_())
+        page.get_by_role("button", name="Add to Preferences").click()
+        page.locator(".memory-form-text").fill("Short lists.")
+        page.locator(".memory-form button[type=submit]").click()
+        expect(state).to_have_text("The note was not saved. Try again.", timeout=5000)
+        page.unroute("**/api/memories")
+        page.locator(".memory-form .link-button", has_text="Cancel").click()
+        expect(count).to_have_text("2 of 1,000", timeout=5000)
+
+        # Memory off (as the server says): the notice, and a save that does not promise use (review C3).
+        def off(route: Any) -> None:
+            if route.request.method != "GET":
+                route.continue_()
+                return
+            response = route.fetch()
+            route.fulfill(response=response, json={**response.json(), "enabled": False})
+
+        page.route("**/api/memories", off)
+        page.click("#nav-appearance")
+        page.click("#nav-memory")
+        expect(page.locator("#memory-off")).to_be_visible(timeout=5000)
+        page.get_by_role("button", name="Add to Projects").click()
+        page.locator(".memory-form-text").fill("Kept while off.")
+        page.locator(".memory-form button[type=submit]").click()
+        expect(state).to_have_text("Saved. Memory is off on this server, so models do not use it.", timeout=5000)
+        expect(page.locator(".memory-form")).to_have_count(0, timeout=5000)  # repainted: no request left on the route
+        page.unroute("**/api/memories")
+        on_server(root, lambda app: app.delete_memory(OPERATOR, 5))
+        page.click("#nav-appearance")
+        page.click("#nav-memory")
+        expect(page.locator("#memory-off")).to_be_hidden(timeout=5000)
         expect(count).to_have_text("2 of 1,000", timeout=5000)
         # An edit refused after a change made elsewhere: theirs shown, mine kept, saved again on purpose.
         page.get_by_role("button", name="Edit note m2").click()
