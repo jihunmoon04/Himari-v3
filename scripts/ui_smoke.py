@@ -33,7 +33,7 @@ message's request carries, a save refused after a change made elsewhere
 and the narrow layout.
 
 Requires: pip install playwright && playwright install chromium
-Usage:    python scripts/ui_smoke.py [--screenshots DIR]
+Usage:    python scripts/ui_smoke.py [--screenshots DIR] [--only main,compaction,...]
 """
 
 from __future__ import annotations
@@ -101,6 +101,14 @@ def serve(root: str, port: int = PORT, provider: ScriptedAdapter | None = None,
             return server
         time.sleep(0.1)
     raise RuntimeError("server did not start")
+
+
+def new_chat(page: Any, button: str = "#home-new-chat") -> None:
+    """Start a conversation and wait until it is open: the page focuses its
+    composer last. A message sent while it is still being created is not
+    sent (the draft stays in the box), which is how a fast test lost one."""
+    page.click(button)
+    expect(page.locator("#composer-text")).to_be_focused(timeout=10000)
 
 
 def run(base: str, token: str, shots: str | None) -> list[str]:
@@ -186,7 +194,7 @@ def run_compaction(base: str, token: str, shots: str | None, root: str) -> list[
         page.goto(base)
         page.fill("#login-token", token)
         page.click("#login-submit")
-        page.click("#home-new-chat")
+        new_chat(page)
         for n, text in enumerate(("가" * 550, "가" * 550, "가" * 550, "last question")):
             page.fill("#composer-text", text)
             page.press("#composer-text", "Enter")
@@ -251,7 +259,7 @@ def run_turn_budget(base: str, token: str, shots: str | None) -> list[str]:
         page.goto(base)
         page.fill("#login-token", token)
         page.click("#login-submit")
-        page.click("#home-new-chat")
+        new_chat(page)
         page.fill("#composer-text", "Write three files")
         page.press("#composer-text", "Enter")
         expect(page.locator("#composer-hint")).to_have_text("HIMARI is working… · 45k in · 1.0k out / 100k",
@@ -287,7 +295,7 @@ def run_trash(base: str, token: str, shots: str | None, root: str) -> list[str]:
         page.goto(base)
         page.fill("#login-token", token)
         page.click("#login-submit")
-        page.click("#home-new-chat")
+        new_chat(page)
         page.fill("#composer-text", "hello")
         page.press("#composer-text", "Enter")
         expect(page.locator("#composer-hint")).to_contain_text("HIMARI is working", timeout=5000)
@@ -367,7 +375,7 @@ def run_trash(base: str, token: str, shots: str | None, root: str) -> list[str]:
         expect(page.locator("#trash-empty")).to_be_visible()
 
         # Trashed elsewhere while this page follows its work: it says so and goes home.
-        page.click("#nav-new-chat")
+        new_chat(page, "#nav-new-chat")
         page.fill("#composer-text", "second")
         page.press("#composer-text", "Enter")
         expect(page.locator("#composer-hint")).to_contain_text("HIMARI is working", timeout=5000)
@@ -396,7 +404,7 @@ def run_files(base: str, token: str, shots: str | None, tmp: str) -> list[str]:
         page.goto(base)
         page.fill("#login-token", token)
         page.click("#login-submit")
-        page.click("#home-new-chat")
+        new_chat(page)
         page.set_input_files("#composer-files", [str(a_txt), str(b_html)])
         chips = page.locator("#attach-list .attach-chip")
         expect(chips).to_have_count(2)
@@ -409,7 +417,9 @@ def run_files(base: str, token: str, shots: str | None, tmp: str) -> list[str]:
             page.screenshot(path=os.path.join(shots, "10-attach.png"))
         page.press("#composer-text", "Enter")  # files alone make a message
         user = page.locator(".item-user").last
-        expect(user.locator(".file-chip")).to_have_text("a.txt · 5 bytes", timeout=10000)
+        expect(user.locator(".file-chip .file-name")).to_have_text("a.txt", timeout=10000)
+        expect(user.locator(".file-chip .file-meta")).to_have_text("5 bytes · Download")
+        expect(user.locator(".file-chip .file-type")).to_have_text("TXT")
         expect(page.locator("#attach-list")).to_be_hidden()
         expect(page.locator(".item-assistant").last).to_contain_text("got the files", timeout=10000)
         with page.expect_download() as done:
@@ -421,7 +431,8 @@ def run_files(base: str, token: str, shots: str | None, tmp: str) -> list[str]:
         page.press("#composer-text", "Enter")
         card = page.locator(".item-file").last
         expect(card).to_contain_text("HIMARI gave you a file", timeout=10000)
-        expect(card.locator(".file-card")).to_have_text("a.txt · 5 bytes")
+        expect(card.locator(".file-card .file-name")).to_have_text("a.txt")
+        expect(card.locator(".file-card .file-meta")).to_have_text("5 bytes · Download")
         with page.expect_download() as given:
             card.locator(".file-card").click()
         assert Path(given.value.path()).read_text() == "hello"
@@ -506,7 +517,7 @@ def run_images(base: str, token: str, shots: str | None, tmp: str) -> list[str]:
         page.goto(base)
         page.fill("#login-token", token)
         page.click("#login-submit")
-        page.click("#home-new-chat")
+        new_chat(page)
         page.set_input_files("#composer-files", [str(photo)])
         expect(page.locator("#attach-list .attach-chip").nth(0)).to_have_text(  # uploaded: its size is shown
             re.compile(r"photo\.png · [0-9.]+ KB"), timeout=10000)
@@ -595,7 +606,7 @@ def run_work_progress(base: str, token: str, shots: str | None) -> list[str]:
         page.goto(base)
         page.fill("#login-token", token)
         page.click("#login-submit")
-        page.click("#home-new-chat")
+        new_chat(page)
         page.fill("#composer-text", "Build it")
         page.press("#composer-text", "Enter")
         blocks = page.locator("#timeline > .item-work")
@@ -744,7 +755,7 @@ def run_instructions(base: str, token: str, shots: str | None, root: str, provid
         if shots:
             page.screenshot(path=os.path.join(shots, "16-instructions.png"))
         # The next message's request carries them, after the operator's instructions.
-        page.click("#nav-new-chat")
+        new_chat(page, "#nav-new-chat")
         page.fill("#composer-text", "hi")
         page.press("#composer-text", "Enter")
         expect(page.locator(".item-assistant").last).to_contain_text("네, 알겠습니다.", timeout=10000)
@@ -815,99 +826,115 @@ def run_instructions(base: str, token: str, shots: str | None, root: str, provid
     return errors
 
 
+SCENARIOS = ("main", "compaction", "budget", "trash", "files", "images", "work", "instructions")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--screenshots")
+    parser.add_argument("--only", help="comma-separated scenarios to run: " + ", ".join(SCENARIOS))
     args = parser.parse_args()
+    only = set(args.only.split(",")) if args.only else set(SCENARIOS)
+    if only - set(SCENARIOS):
+        parser.error(f"unknown scenarios: {', '.join(sorted(only - set(SCENARIOS)))}")
+    errors: list[str] = []
     with tempfile.TemporaryDirectory(prefix="himari-ui-") as tmp:
-        root = os.path.join(tmp, "root")
-        server = serve(root)
-        try:
-            errors = run(f"http://127.0.0.1:{PORT}", Path(root, "control", "operator.secret").read_text().strip(),
-                         args.screenshots)
-        finally:
-            server.should_exit = True
-            time.sleep(0.5)
-        small = os.path.join(tmp, "small")
-        provider = ScriptedAdapter([NormalizedFinal((TextBlock(SUMMARY),))] * 12)  # every answer and summary alike
-        server = serve(small, PORT + 1, provider, context_tokens=2800)
-        try:
-            errors += run_compaction(f"http://127.0.0.1:{PORT + 1}",
-                                     Path(small, "control", "operator.secret").read_text().strip(), args.screenshots,
-                                     small)
-        finally:
-            server.should_exit = True
-            time.sleep(0.5)
-        budget = os.path.join(tmp, "budget")
-        server = serve(budget, PORT + 2, budget_script(), turn_budget=100_000)
-        try:
-            errors += run_turn_budget(f"http://127.0.0.1:{PORT + 2}",
-                                      Path(budget, "control", "operator.secret").read_text().strip(), args.screenshots)
-        finally:
-            server.should_exit = True
-            time.sleep(0.5)
-        trash = os.path.join(tmp, "trash")
-        server = serve(trash, PORT + 3, SlowAdapter([NormalizedFinal((TextBlock("first answer"),)),
-                                                     NormalizedFinal((TextBlock("second answer"),))]))
-        try:
-            errors += run_trash(f"http://127.0.0.1:{PORT + 3}",
-                                Path(trash, "control", "operator.secret").read_text().strip(), args.screenshots, trash)
-        finally:
-            server.should_exit = True
-            time.sleep(0.5)
-        files = os.path.join(tmp, "files")
-        server = serve(files, PORT + 4, ScriptedAdapter([
-            NormalizedFinal((TextBlock("got the files"),)),
-            NormalizedToolCalls((ToolCall(CallId("c0"), 0, ToolId("inside/present_file"),
-                                          {"path": "uploads/a.txt"}),)),
-            NormalizedFinal((TextBlock("here it is"),)),
-        ]))
-        try:
-            errors += run_files(f"http://127.0.0.1:{PORT + 4}",
-                                Path(files, "control", "operator.secret").read_text().strip(), args.screenshots, tmp)
-        finally:
-            server.should_exit = True
-            time.sleep(0.5)
-        from himari.bootstrap import application as application_module
+        if "main" in only:
+            root = os.path.join(tmp, "root")
+            server = serve(root)
+            try:
+                errors += run(f"http://127.0.0.1:{PORT}",
+                              Path(root, "control", "operator.secret").read_text().strip(), args.screenshots)
+            finally:
+                server.should_exit = True
+                time.sleep(0.5)
+        if "compaction" in only:
+            small = os.path.join(tmp, "small")
+            provider = ScriptedAdapter([NormalizedFinal((TextBlock(SUMMARY),))] * 12)  # every answer and summary alike
+            server = serve(small, PORT + 1, provider, context_tokens=2800)
+            try:
+                errors += run_compaction(f"http://127.0.0.1:{PORT + 1}",
+                                         Path(small, "control", "operator.secret").read_text().strip(), args.screenshots,
+                                         small)
+            finally:
+                server.should_exit = True
+                time.sleep(0.5)
+        if "budget" in only:
+            budget = os.path.join(tmp, "budget")
+            server = serve(budget, PORT + 2, budget_script(), turn_budget=100_000)
+            try:
+                errors += run_turn_budget(f"http://127.0.0.1:{PORT + 2}",
+                                          Path(budget, "control", "operator.secret").read_text().strip(), args.screenshots)
+            finally:
+                server.should_exit = True
+                time.sleep(0.5)
+        if "trash" in only:
+            trash = os.path.join(tmp, "trash")
+            server = serve(trash, PORT + 3, SlowAdapter([NormalizedFinal((TextBlock("first answer"),)),
+                                                         NormalizedFinal((TextBlock("second answer"),))]))
+            try:
+                errors += run_trash(f"http://127.0.0.1:{PORT + 3}",
+                                    Path(trash, "control", "operator.secret").read_text().strip(), args.screenshots, trash)
+            finally:
+                server.should_exit = True
+                time.sleep(0.5)
+        if "files" in only:
+            files = os.path.join(tmp, "files")
+            server = serve(files, PORT + 4, ScriptedAdapter([
+                NormalizedFinal((TextBlock("got the files"),)),
+                NormalizedToolCalls((ToolCall(CallId("c0"), 0, ToolId("inside/present_file"),
+                                              {"path": "uploads/a.txt"}),)),
+                NormalizedFinal((TextBlock("here it is"),)),
+            ]))
+            try:
+                errors += run_files(f"http://127.0.0.1:{PORT + 4}",
+                                    Path(files, "control", "operator.secret").read_text().strip(), args.screenshots, tmp)
+            finally:
+                server.should_exit = True
+                time.sleep(0.5)
+        if "images" in only:
+            from himari.bootstrap import application as application_module
 
-        async def in_process(root: Path, sandbox: bool) -> InProcessViews:
-            return InProcessViews()
+            async def in_process(root: Path, sandbox: bool) -> InProcessViews:
+                return InProcessViews()
 
-        real = application_module._image_views
-        application_module._image_views = in_process  # type: ignore[assignment]
-        images = os.path.join(tmp, "images")
-        server = serve(images, PORT + 5, SeeingAdapter([
-            NormalizedFinal((TextBlock("a blue photo"),)),
-            NormalizedToolCalls((ToolCall(CallId("c0"), 0, ToolId("inside/read_file"),
-                                          {"path": "uploads/photo.png"}),)),
-            NormalizedFinal((TextBlock("still blue"),)),
-            NormalizedFinal((TextBlock("not an image"),)),
-        ]))
-        try:
-            errors += run_images(f"http://127.0.0.1:{PORT + 5}",
-                                 Path(images, "control", "operator.secret").read_text().strip(), args.screenshots, tmp)
-        finally:
-            application_module._image_views = real  # type: ignore[assignment]
-            server.should_exit = True
-            time.sleep(0.5)
-        work = os.path.join(tmp, "work")
-        server = serve(work, PORT + 6, work_script())
-        try:
-            errors += run_work_progress(f"http://127.0.0.1:{PORT + 6}",
-                                        Path(work, "control", "operator.secret").read_text().strip(), args.screenshots)
-        finally:
-            server.should_exit = True
-            time.sleep(0.5)
-        instructions = os.path.join(tmp, "instructions")
-        provider = ScriptedAdapter([NormalizedFinal((TextBlock("네, 알겠습니다."),))])
-        server = serve(instructions, PORT + 7, provider)
-        try:
-            errors += run_instructions(f"http://127.0.0.1:{PORT + 7}",
-                                       Path(instructions, "control", "operator.secret").read_text().strip(),
-                                       args.screenshots, instructions, provider)
-        finally:
-            server.should_exit = True
-            time.sleep(0.5)
+            real = application_module._image_views
+            application_module._image_views = in_process  # type: ignore[assignment]
+            images = os.path.join(tmp, "images")
+            server = serve(images, PORT + 5, SeeingAdapter([
+                NormalizedFinal((TextBlock("a blue photo"),)),
+                NormalizedToolCalls((ToolCall(CallId("c0"), 0, ToolId("inside/read_file"),
+                                              {"path": "uploads/photo.png"}),)),
+                NormalizedFinal((TextBlock("still blue"),)),
+                NormalizedFinal((TextBlock("not an image"),)),
+            ]))
+            try:
+                errors += run_images(f"http://127.0.0.1:{PORT + 5}",
+                                     Path(images, "control", "operator.secret").read_text().strip(), args.screenshots, tmp)
+            finally:
+                application_module._image_views = real  # type: ignore[assignment]
+                server.should_exit = True
+                time.sleep(0.5)
+        if "work" in only:
+            work = os.path.join(tmp, "work")
+            server = serve(work, PORT + 6, work_script())
+            try:
+                errors += run_work_progress(f"http://127.0.0.1:{PORT + 6}",
+                                            Path(work, "control", "operator.secret").read_text().strip(), args.screenshots)
+            finally:
+                server.should_exit = True
+                time.sleep(0.5)
+        if "instructions" in only:
+            instructions = os.path.join(tmp, "instructions")
+            provider = ScriptedAdapter([NormalizedFinal((TextBlock("네, 알겠습니다."),))])
+            server = serve(instructions, PORT + 7, provider)
+            try:
+                errors += run_instructions(f"http://127.0.0.1:{PORT + 7}",
+                                           Path(instructions, "control", "operator.secret").read_text().strip(),
+                                           args.screenshots, instructions, provider)
+            finally:
+                server.should_exit = True
+                time.sleep(0.5)
     print("UI smoke: OK" if not errors else f"UI smoke: console errors {errors}")
     return 1 if errors else 0
 
