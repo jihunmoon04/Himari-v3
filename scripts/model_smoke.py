@@ -15,7 +15,12 @@ efforts) and "big" (low/high). Headless Chromium drives the conversation menu:
 5. "Default" follows the server's default model again;
 6. a step of Tool calls without text, by a changed model, names it above
    the calls, and the answer after it does not (PR #53 review B1);
-7. the narrow layout shows the menu without horizontal scroll.
+7. the narrow layout shows the model sheet without horizontal scroll;
+8. the sheet restores focus, closes with Escape/backdrop/Done and reuses one
+   selector, including when resized back to desktop;
+9. widths 320 through 1099 keep a 56px header and 44px touch targets;
+10. native fullscreen enters/exits, tracks browser exits and handles rejection
+    and unsupported browsers without claiming to be fullscreen.
 
 Step 4 also checks that the note shows only after a change made during the
 turn (PR #53 review C1).
@@ -265,13 +270,13 @@ def run(token: str, provider: TwoModels, chrome: str | None, shots: str | None, 
         page.evaluate("document.exitFullscreen()")
         expect(page.locator("#app-fullscreen")).to_have_attribute("aria-pressed", "false")
         check("11: external fullscreen exit restores button state", page.locator("#app-fullscreen").get_attribute("aria-label") == "Enter fullscreen")
-        page.evaluate("document.documentElement.requestFullscreen = () => Promise.reject(new Error('denied'))")
+        page.evaluate("() => { document.documentElement.requestFullscreen = () => Promise.reject(new Error('denied')); }")
         page.click("#app-fullscreen")
         expect(page.locator("#status-bar")).to_contain_text("Fullscreen is unavailable")
         check("11: rejection leaves normal UI and enabled button", page.locator("#app-fullscreen").is_enabled()
               and page.locator("#app-fullscreen").get_attribute("aria-pressed") == "false")
         page.evaluate("Object.defineProperty(document, 'fullscreenEnabled', {value: false, configurable: true})")
-        page.dispatch_event("fullscreenchange")
+        page.evaluate("document.dispatchEvent(new Event('fullscreenchange'))")
         expect(page.locator("#app-fullscreen")).to_be_hidden()
         check("11: unsupported fullscreen is hidden", page.locator("#app-fullscreen").is_hidden())
         check("no uncaught errors in the page", errors == [], errors)
