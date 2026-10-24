@@ -1,6 +1,6 @@
 # 스트리밍 v0.1
 
-> 2026-10-24 · **PROPOSED (V3-P73)** · 1단계 구현(§14). rev. 3 — 소유자 결정 Q1~Q6 권고대로(§11). rev. 2 — 설계 검수 B1(취소된 스트림의 받은 부분, §3.5·§5.3)·B2(놓친 조각 없는 구독, §5.2·§6.1)·N1(continuation 합치기를 보수적으로, §3.3) 반영, 소유자 결정 Q7(생각 중 표시, §7.4). rev. 1: 설계 초안.
+> 2026-10-24 · **PROPOSED (V3-P73)** · 구현: 1단계(§14), 2단계 Web(§15). rev. 3 — 소유자 결정 Q1~Q6 권고대로(§11). rev. 2 — 설계 검수 B1(취소된 스트림의 받은 부분, §3.5·§5.3)·B2(놓친 조각 없는 구독, §5.2·§6.1)·N1(continuation 합치기를 보수적으로, §3.3) 반영, 소유자 결정 Q7(생각 중 표시, §7.4). rev. 1: 설계 초안.
 >
 > 배경: 지금은 모델이 답을 다 쓴 뒤에야 화면에 나온다. 긴 답이나 추론이 긴 모델은 수십 초 동안 "HIMARI is working…"만 보인다. 소유자 방향(2026-10-24): 작은 후속 수정 다음으로 스트리밍을 진행한다.
 >
@@ -381,6 +381,8 @@ CLI는 Web 서버의 클라이언트다(V3-P47). 이 패킷에서는 바꾸지 �
   - 서버 종료 때의 `RawUncertain("shutdown")` 기록도 스트리밍 Run에만 한다. 비스트리밍 Run은 지금처럼 재시작 복구가 처리한다.
 - `ScriptedAdapter(streaming=True, piece_delay=…)`는 답을 4자씩 sink에 넘긴다. `StreamCut(pieces, end)`은 중간에 멈추는 스트림이다(끝: 결과 불명, 예외, 또는 기다리기). 테스트와 2단계 스모크가 쓴다.
 
+- **PR #82 검수 B1:** 저장된 스트림은 엄격한 UTF-8로 읽는다(`payloads`). 전에는 깨진 바이트를 U+FFFD로 바꿔, 바뀐 글이 답이나 Tool 인자가 될 수 있었다. 같은 바이트의 JSON 응답은 이미 거부했다. 이제 그런 스트림은 잘못된 응답이다. 원본은 받은 그대로 보존한다. 받는 동안 화면에는 U+FFFD로 보일 뿐이다.
+
 **Control**
 - `OutputProgress`(`output_started`·`output`·`output_ended`)는 `TurnProgress`와 따로 둔 runtime-checkable Protocol이다. Driver는 job의 progress가 이것일 때만 조각을 넘긴다. Runner의 `_JobProgress`가 구현한다.
 - Driver(`streaming=`):
@@ -425,3 +427,72 @@ CLI는 Web 서버의 클라이언트다(V3-P47). 이 패킷에서는 바꾸지 �
 - Application 2개, SQLite 재시작 1개, 설정 1개.
 - 전체 pytest 2,254개, mypy, import 경계, Node 검사 12개, 브라우저 스모크 전체(화면은 바뀌지 않음).
 - 실제 모델 확인용 공용 도우미는 `tests/livekit.py`로 옮겼다. 테스트 모듈끼리는 import할 수 없기 때문이다.
+
+## 15. 구현 노트 (2026-10-24, 2단계: Web)
+
+**서버**
+- `interfaces/web/live.py`(새 모듈): 구독자 커서와 `step`, `stream`. §6.1의 규칙이 여기 있다.
+  - 깨어날 때마다 누적 상태와 커서를 비교한다. Run이 바뀌었으면 `snapshot`을 보낸다.
+  - 15초 조용하면 주석 줄을 보낸다.
+  - 5분이 되면 `done` 없이 끝낸다. 브라우저가 다시 연결해 `snapshot`부터 받는다.
+- **설계에 더한 것: `done` 이벤트.** 서버가 응답을 닫으면 `EventSource`는 스스로 다시 연결한다(`retry: 1000`). 그래서 job이 끝나 다 보냈을 때는 `done`을 보내고, 페이지가 이것을 받으면 연결을 닫는다. 5분 상한에서는 `done`을 보내지 않으므로 다시 연결된다.
+- **구현 중 찾은 것: 서버 종료.** uvicorn은 열린 응답이 끝나기를 시간 제한 없이 기다린 뒤에 애플리케이션을 멈춘다(`timeout_graceful_shutdown` 없음). 그래서 job이 도는 동안 열린 `/live`가 재시작을 붙잡는다. systemd의 기본 정지 제한(90초)에 걸리면 job이 깔끔하게 끝나기 전에 프로세스가 죽는다.
+  - `begin_shutdown(app)`이 `closing` 이벤트를 세운다. `__main__`의 `MainServer.handle_exit`가 종료 신호에서 이것을 부른다(`call_soon_threadsafe`).
+  - 모든 스트림이 바로 끝난다. lifespan 종료에서도 세운다.
+- `GET /api/conversations/{id}/live`:
+  - 대화 읽기로 권한을 먼저 확인한다(남의 대화는 404).
+  - 주체당 8개(`live.PER_PRINCIPAL`), 넘으면 429 `too_many_streams`.
+  - `X-Accel-Buffering: no`. `no-store`와 `nosniff`는 기존 미들웨어가 붙인다.
+- **PR #83 검수 B1:** 연결 수 한도를 검사하는 같은 동기 단계에서 슬롯을 잡는다(`live.Slots.take`).
+  - 전에는 스트림 제너레이터가 시작될 때 셌다. 그래서 응답이 아직 시작되지 않은 요청들이 모두 한도를 통과할 수 있었다.
+  - 반납은 응답의 `__call__`을 감싼 `finally`에서 한 번만 한다(`_LiveResponse`). 끝남, 취소, 클라이언트 연결 끊김에서 모두 반납하고, 본문이 시작되지 않았어도 반납한다.
+  - 테스트:
+    - 시작하지 않은 응답 두 개로 경쟁을 재현한다. 예전 코드에서는 실패한다.
+    - 실제 uvicorn 서버에서 열린 스트림이 슬롯을 쥐고 있다가 끝나면 돌려준다. TestClient는 앱이 응답을 다 끝내야 돌려주므로 열린 스트림을 볼 수 없다.
+- `LiveOutput.chars`와 `live_output(text=False)`: 조각마다 깨어날 때 글 전체를 합치지 않는다. `snapshot`에만 전체 글을 쓴다.
+- 최종 답 Event의 화면용 값에 `run_id`를 더했다. 쓰는 중 항목이 어느 Event로 바뀌는지 안다.
+
+**화면 (`static/live.js`, 새 모듈)**
+- 순수 함수: `reduce`(상태 갱신, 다른 Run의 조각은 무시), `thinkingStyle`·`thinkingWord`·`sunGlyph`·`elapsedText`.
+- `LiveAnswer`가 연결과 항목을 맡는다. `app.js`가 부르는 곳:
+  - polling이 job이 돈다고 보면 `open`
+  - Event를 그리면 `shown(run_id)`, 그 뒤 `keepLast`
+  - 상태를 반영한 뒤 `settle(running)`
+  - 대화를 옮기면 `reset`
+  - 테마가 바뀌면 `restyle`: `data-theme`의 MutationObserver와 `prefers-color-scheme` 변경이 부른다.
+- 규칙:
+
+| 상황 | 동작 |
+| --- | --- |
+| 그 Run의 Event가 이미 보임 | 늦게 온 `snapshot`을 무시한다 |
+| Run이 Event 없이 끝남 | 흐린 항목과 안내 문구를 **그 자리에** 남긴다(뒤의 메시지보다 아래로 옮기지 않음) |
+| 그 뒤 다음 Run이 시작됨 | 새 항목을 만든다. 끝난 항목은 새로 고칠 때까지 남는다 |
+| 아무것도 쓰지 않고 멈춘 Run | 항목을 지운다 |
+| 연결이 거부됨(404, 429, 세션 만료) | 10초 동안 다시 열지 않는다. 그동안도 polling이 끝난 답을 보인다 |
+
+- 다시 그리기는 한 프레임에 한 번, 많아야 100 ms마다다. 맨 아래에 있을 때만 따라 내려간다.
+- 생각 중 표시(§7.4):
+  - `sun`은 꽃잎 기호가 120 ms마다 바뀐다. `hidamari`는 점이 숨 쉬고(CSS) 빛이 느리다.
+  - 경과 시간은 이 페이지가 그 Run을 처음 본 때부터 센다. 다시 연결해도 이어지고, 새로 고치면 다시 시작한다.
+  - 접근성: `role="status"`에 숨긴 글 `HIMARI is thinking`. 움직이는 부분은 `aria-hidden`이다.
+  - reduced motion이면 기호를 하나로 고정하고 빛을 끈다.
+- CSS 토큰: `:root`에 `--thinking-style: sun`과 `--thinking-shine`. `warm` 테마는 빛 색만 다르다. 어두운 테마를 더할 때 `--thinking-style: hidamari`를 적는다.
+
+**테스트**
+- 서버 13개:
+  - 슬롯 3개(검수 B1)
+  - 스트림 7개(가짜 상태 소스): 합쳐진 깨우기, Run 바뀜, 끝난 뒤 연결, 상태 없음, keep-alive, 시간 상한, 종료 신호
+  - 경로 3개: 권한·`run_id`, 429, `begin_shutdown`
+- Node `scripts/live_smoke.mjs` 8개(CI의 static-checks에 추가): 상태 갱신, 단어·기호·시간, 흐름에서 Event로 바뀜, 멈춘 항목이 자리를 지킴, 아무것도 쓰지 않은 Run, 테마 전환, reduced motion, 거부된 연결.
+- 브라우저 스모크 `streaming` 시나리오(`ScriptedAdapter(streaming=True, piece_delay, first_delay)`):
+  - 생각 중 표시와 테마 전환
+  - 글이 한 항목에 흐름
+  - 맨 아래에서는 따라 내려가고, 위로 올리면 멈춤
+  - 끝난 답이 한 번만 남음
+  - 중지하면 흐린 항목과 안내
+  - `/live`를 막아도 끝난 답이 옴
+  - 새로 고치면 사라짐
+
+**실제 모델 확인 (2026-10-24, 로컬 임시 서버 + 브라우저, gpt-6-luna)**
+- 생각 중 표시("Turning to the sun…")가 먼저 나왔다. 그 뒤 쓰는 중 항목의 글이 19번에 걸쳐 늘었고, 끝나자 최종 답 하나로 바뀌었다. 페이지 오류는 없었다.
+- 긴 답이 흐르는 동안(`/live`가 열린 채) 서버에 SIGTERM을 보냈다. 4.1초 만에 끝났다(job의 정지 대기 포함).

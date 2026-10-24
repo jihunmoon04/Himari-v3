@@ -3,7 +3,10 @@
 - ``SseReader`` splits a ``text/event-stream`` body into the ``data`` of
   each event, by bytes (LF, CRLF or CR line ends, a CR at a chunk's end
   waiting for the next), however the body is chunked. Comment lines
-  (``: OPENROUTER PROCESSING``) and other fields are skipped.
+  (``: OPENROUTER PROCESSING``) and other fields are skipped. While a stream
+  arrives a bad byte only shows as U+FFFD; a stored body that is not UTF-8
+  is never normalized (``payloads``, PR #82 review B1), as a JSON body that
+  is not is refused.
 - ``StreamView`` follows a stream while it arrives: it hands what the model
   writes to the sink (text, a tool call's name, that reasoning arrived) and
   notes the end marker, a provider error and the usage. It never raises: it
@@ -36,9 +39,11 @@ def is_event_stream(content_type: str) -> bool:
 
 
 class SseReader:
-    """The ``data`` of each complete event, in order (WHATWG SSE parsing)."""
+    """The ``data`` of each complete event, in order (WHATWG SSE parsing).
+    ``strict``: a line that is not UTF-8 raises instead of showing U+FFFD."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, strict: bool = False) -> None:
+        self._errors = "strict" if strict else "replace"
         self._line = bytearray()
         self._cr = False  # the last byte seen was a CR: a following LF belongs to it
         self._data: list[str] = []
@@ -63,7 +68,7 @@ class SseReader:
         return events
 
     def _end_line(self, events: list[str]) -> None:
-        line = self._line.decode("utf-8", errors="replace")
+        line = self._line.decode("utf-8", errors=self._errors)
         self._line.clear()
         if not line:
             if self._data:
@@ -79,8 +84,13 @@ class SseReader:
 
 def payloads(body: bytes) -> list[str]:
     """The events of a whole stored body. An event the body does not close
-    with a blank line is dropped, as the SSE rules say."""
-    return SseReader().feed(body)
+    with a blank line is dropped, as the SSE rules say. A body that is not
+    UTF-8 is an invalid response: replacing its bytes would let a changed
+    text become an answer or a tool's arguments."""
+    try:
+        return SseReader(strict=True).feed(body)
+    except UnicodeDecodeError as exc:
+        raise _invalid("the body is not UTF-8") from exc
 
 
 class StreamView:

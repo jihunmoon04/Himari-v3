@@ -229,7 +229,7 @@ def test_static_ui_and_security_headers(server: Server) -> None:
     assert page.status_code == 200 and "/assets/app.js" in page.text
     assert "default-src 'self'" in page.headers["content-security-policy"]
     assert page.headers["x-content-type-options"] == "nosniff" and page.headers["x-frame-options"] == "DENY"
-    for name in ("app.js", "app.css", "rich_text.js", "app_view.js", "appearance.js"):
+    for name in ("app.js", "app.css", "rich_text.js", "app_view.js", "appearance.js", "live.js"):
         assert server.client.get(f"/assets/{name}").status_code == 200
     assert server.client.get("/assets/../app.py").status_code == 404
     script = server.client.get("/assets/katex/katex.min.js")

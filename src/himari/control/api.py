@@ -261,6 +261,7 @@ class LiveOutput(DeepFrozen):
     truncated: bool = False
     ended: bool = False
     version: int = 0
+    chars: int = 0  # the text's length (also when the text was left out)
 
 
 # The rule for the turn's state, for HIMARI's system instructions when the

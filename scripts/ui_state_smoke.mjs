@@ -22,6 +22,7 @@ function page() {
   const context = vm.createContext({
     document: { getElementById: node, addEventListener() {} },
     AppViews: class {}, console, setTimeout, clearTimeout,
+    LiveAnswer: class { reset() {} shown() {} keepLast() {} settle() {} open() {} restyle() {} },
   });
   const run = (code) => vm.runInContext(code, context);
   run(source);

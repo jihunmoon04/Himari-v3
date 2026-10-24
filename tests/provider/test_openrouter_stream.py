@@ -258,6 +258,18 @@ def test_reasoning_details_that_cannot_be_joined_without_guessing_are_invalid(pi
         normalize(body)
 
 
+def test_a_stream_that_is_not_utf8_is_never_normalized_but_is_kept() -> None:
+    # PR #82 review B1: a bad byte is not replaced into an answer (or a tool's arguments).
+    body = sse(delta(content="rm -rf X", finish_reason="stop")).replace(b"X", b"\xff")
+    with pytest.raises(ProviderError, match="not UTF-8"):
+        normalize(body)
+    outcome, capture, shown = invoke(streamed(body))
+    assert isinstance(outcome, NativeReceived) and outcome.body == body == capture.body()  # kept as received
+    assert "".join(d.text for d in shown) == "rm -rf \ufffd"  # only shown, never used
+    with pytest.raises(ProviderError):
+        adapter(streamed(b"")).normalize(outcome)
+
+
 @pytest.mark.parametrize("body", [
     sse(delta(content="no end", finish_reason="stop"), done=False),
     sse(delta(content="x", finish_reason="stop")) + b"data: {}\n\n",  # data after [DONE]

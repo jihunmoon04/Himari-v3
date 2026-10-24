@@ -21,6 +21,7 @@
 
 import { AppViews } from "/assets/app_view.js";
 import { assistantTextLine, renderAssistantText } from "/assets/rich_text.js";
+import { LiveAnswer } from "/assets/live.js";
 
 const POLL_MS = 1000;
 const PAGE = 50;
@@ -137,9 +138,25 @@ const app = {
   instructionsTicket: 0, // the latest load: an older answer is not applied
   instructionsLoading: false,
   memory: null, // the last /api/memories answer (V3-P71 §7.2)
+  streaming: false, // the server streams answers (V3-P73 §9)
 };
 
 const views = new AppViews(api, el, () => app.conversationId);
+
+/* The answer being written (V3-P73 §7, live.js): its own item at the end of
+ * the timeline while a job runs, replaced by the Run's Event when it comes. */
+const live = new LiveAnswer({
+  document,
+  timeline: () => $("timeline"),
+  header: () => assistantHeader(null),
+  render: (text) => renderAssistantText(document, text),
+  style: () => getComputedStyle(document.documentElement).getPropertyValue("--thinking-style"),
+  reducedMotion: () => window.matchMedia("(prefers-reduced-motion: reduce)").matches,
+  now: () => Date.now(),
+  random: Math.random,
+  frame: (fn) => requestAnimationFrame(fn),
+  EventSource: globalThis.EventSource,
+});
 
 function status(text, tone) {
   const bar = $("status-bar");
@@ -174,6 +191,7 @@ function showLogin() {
   views.reset();
   app.conversationId = null;
   app.generation += 1;
+  live.reset();
   clearAttachments();
   showSurface("login");
   $("topbar-title").textContent = "HIMARI";
@@ -271,6 +289,7 @@ async function showHome() {
   stopPolling();
   app.conversationId = null;
   app.generation += 1;
+  live.reset();
   clearAttachments();
   markSelected();
   showSurface("home");
@@ -762,9 +781,11 @@ function renderEvent(event) {
   if (event.kind === "assistant_final") {
     closeWork();
     timeline.append(renderMessage(event, changedModel(event.model)));
+    live.shown(event.run_id); // it replaces what was shown while it was written
     return;
   }
   if (event.kind === "assistant_tool_calls") {
+    live.shown(event.run_id);
     const model = changedModel(event.model); // shown on the first thing this step shows
     const question = event.calls.find((call) => call.tool_id === "ask_user");
     if (question) { // always the only call (V3-P15); its text is the question's lead-in (V3-P68 §5.1)
@@ -1226,6 +1247,7 @@ async function pullEvents(generation) {
     const timeline = $("timeline");
     const atBottom = timeline.scrollHeight - timeline.scrollTop - timeline.clientHeight < 80;
     for (const event of page.items) renderEvent(event);
+    live.keepLast();
     app.lastSequence = page.last_sequence;
     if (page.items.length && atBottom) timeline.scrollTop = timeline.scrollHeight;
     if (page.items.length < 200) {
@@ -1297,6 +1319,10 @@ function applyDetail(detail) {
   $("question-text").textContent = detail.waiting ? detail.waiting.question : "";
   $("composer-text").placeholder = detail.waiting ? "Your answer" : "Message HIMARI";
   app.jobRunning = detail.job.running;
+  if (detail.job.running && app.streaming && app.conversationId !== null) {
+    live.open(`/api/conversations/${encodeURIComponent(app.conversationId)}/live`);
+  }
+  live.settle(detail.job.running); // its Events are in: a Run without one was stopped (§7.3)
   if (app.work) paintWork(app.work); // its progress line while the turn runs (V3-P68 §5.2)
   if (app.rowsRunning !== detail.job.running) { // a row without a result: "running" or "no result"
     app.rowsRunning = detail.job.running;
@@ -1363,6 +1389,7 @@ async function openConversation(id) {
   if (!(await mayLeave())) return;
   stopPolling();
   app.generation += 1;
+  live.reset();
   clearAttachments();
   const generation = app.generation;
   views.reset();
@@ -1672,6 +1699,7 @@ async function showTrash() {
   views.reset();
   app.conversationId = null;
   app.generation += 1;
+  live.reset();
   clearAttachments();
   markSelected();
   showSurface("trash");
@@ -1763,6 +1791,7 @@ async function showInstructions() {
     views.reset();
     app.conversationId = null;
     app.generation += 1;
+    live.reset();
     clearAttachments();
     markSelected();
     app.instructions = null;
@@ -2112,6 +2141,7 @@ async function showMemory() {
   views.reset();
   app.conversationId = null;
   app.generation += 1;
+  live.reset();
   clearAttachments();
   markSelected();
   app.memory = null;
@@ -2190,6 +2220,7 @@ async function loadServerInfo() {
     info.textContent = `${server.model} · ${SANDBOX_TEXT[server.sandbox] || server.sandbox}`;
     app.models = Array.isArray(server.models) ? server.models : [];
     app.trashDays = Number.isInteger(server.trash_days) ? server.trash_days : null;
+    app.streaming = server.streaming === true; // V3-P73 §9
     renderModel();
     info.classList.toggle("is-warn", server.sandbox !== "enforced");
     $("server-details").classList.toggle("is-warn", server.sandbox !== "enforced");
@@ -2214,6 +2245,10 @@ async function enter() {
 }
 
 async function boot() {
+  // The thinking line follows the theme at once (V3-P73 §7.4).
+  new MutationObserver(() => live.restyle()).observe(document.documentElement,
+    { attributes: true, attributeFilter: ["data-theme"] });
+  window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => live.restyle());
   $("login-form").addEventListener("submit", signIn);
   $("nav-sign-out").addEventListener("click", () => { $("appearance-dialog").close(); signOut(); });
   $("nav-trash").addEventListener("click", () => showTrash().catch((e) => status(e.message, "error")));
