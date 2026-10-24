@@ -77,7 +77,18 @@ def _category(raw: object) -> MemoryCategory | None:
 
 
 def _note_view(note: Memory) -> dict[str, JsonValue]:
-    return {"id": note.memory_id, "category": note.category.value, "text": note.text, "revision": note.revision}
+    """A note as it stands, its source included: what an Undo puts back (V3-P71 §7.1)."""
+    source: JsonValue = None
+    if note.source_conversation is not None:
+        call = note.source_call
+        source = {"conversation": note.source_conversation,
+                  "run": None if call is None else call.run_id, "call": None if call is None else call.call_id}
+    return {"id": note.memory_id, "category": note.category.value, "text": note.text, "revision": note.revision,
+            "origin": note.origin.value, "source": source}
+
+
+def _lines(text: str) -> str:
+    return text.replace("\r\n", "\n").replace("\r", "\n")
 
 
 def _fold(text: str) -> str:
@@ -85,9 +96,11 @@ def _fold(text: str) -> str:
 
 
 def _text_problem(text: object) -> str | None:
-    """The store's own checks (V3-P71 §4.2), so the model hears why before anything is written."""
+    """The store's own checks (V3-P71 §4.2), line endings made LF first as
+    the store does, so the model hears why before anything is written."""
     if not isinstance(text, str) or not text.strip():
         return "text is one or two sentences about the user"
+    text = _lines(text)
     if any(unicodedata.category(c) in ("Cc", "Cs") and c not in "\n\t" for c in text):
         return "text may not contain control characters"
     if len(text.strip()) > MAX_MEMORY_CHARS:
@@ -123,7 +136,7 @@ class MemorySave:
         if problem is not None:
             return _failed(problem)
         assert isinstance(raw_text, str)
-        text = raw_text.strip()
+        text = _lines(raw_text).strip()
         principal = ctx.scope.principal_id
         previous: Memory | None = None
         if _given(args.get("replaces")):
@@ -179,7 +192,7 @@ def search(notes: Sequence[Memory], query: str, category: MemoryCategory | None)
     """V3-P71 §6.3: notes with any of the query's words (NFKC, case-folded),
     most words first, then newest; no query: newest first."""
     pool = [n for n in notes if category is None or n.category is category]
-    words = _fold(query).split()
+    words = list(dict.fromkeys(_fold(query).split()))  # a word said twice counts once
     if not words:
         return sorted(pool, key=lambda n: (n.updated_at, n.memory_id), reverse=True)
     scored = [(sum(1 for w in words if w in _fold(n.text)), n) for n in pool]

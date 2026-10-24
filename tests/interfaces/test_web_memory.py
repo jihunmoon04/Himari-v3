@@ -159,13 +159,20 @@ def test_sign_in_origin_and_the_cli_bearer(server: Server) -> None:
     assert saved.status_code == 201
 
 
-def test_memory_off_still_lists_the_notes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_memory_off_still_manages_the_notes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # V3-P71 §9 (rev. 4): off stops only the model's use of the notes.
     monkeypatch.setattr(web, "FAILED_LOGIN_DELAY_SECONDS", 0)
     server = Server(tmp_path, memory=False)
     with server.client:
         server.sign_in()
         assert server.listing()["enabled"] is False
         assert server.client.get("/api/server").json()["memory"] is False
+        assert server.add("user", "Writes Go.").status_code == 201
+        assert server.client.put("/api/memories/1", json={"category": "user", "text": "Writes Rust.", "revision": 1},
+                                 headers=SEND).status_code == 200
+        assert [m["text"] for m in server.listing()["memories"]] == ["Writes Rust."]
+        assert server.client.delete("/api/memories/1?revision=2", headers=SEND).status_code == 204
+        assert server.listing()["memories"] == []
 
 
 def test_himari_memory_turns_it_off() -> None:

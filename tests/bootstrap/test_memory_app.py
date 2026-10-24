@@ -124,6 +124,35 @@ def test_rewrite_forget_and_search_through_the_tools(tmp_path: Path) -> None:
     asyncio.run(scenario())
 
 
+def test_a_rewrite_in_another_conversation_records_the_source_an_undo_puts_back(tmp_path: Path) -> None:
+    # V3-P71 §7.1 (rev. 4): the earlier state in raw_result.previous names
+    # where the note came from, so an Undo can restore that too.
+    async def scenario() -> None:
+        adapter = ScriptedAdapter([call("memory_save", {"category": "project", "text": "Plans a trip."}), final(),
+                                   call("memory_save", {"category": "project", "text": "Plans a trip to Jeju.",
+                                                        "replaces": "m1"}), final()])
+        app = await opened(tmp_path, adapter)
+        try:
+            first = TrustedScope(ME, await app.create_conversation(ME))
+            await turn(app, first)
+            (before,) = await app.memories(ME)
+            second = TrustedScope(ME, await app.create_conversation(ME))
+            await turn(app, second)
+            (after,) = await app.memories(ME)
+            assert after.source_conversation == second.conversation_id and after.source_call is not None
+            records = await app.data.read_tool_executions(second, after.source_call.run_id)
+            (record,) = [r for r in records if r.call == after.source_call]
+            assert before.source_call is not None
+            assert record.raw_result["previous"] == {  # type: ignore[index, call-overload]
+                "id": 1, "category": "project", "text": "Plans a trip.", "revision": 1, "origin": "model",
+                "source": {"conversation": first.conversation_id, "run": before.source_call.run_id,
+                           "call": before.source_call.call_id}}
+        finally:
+            await app.close()
+
+    asyncio.run(scenario())
+
+
 def test_a_note_changed_after_the_tool_read_it_fails_the_call_and_stays(tmp_path: Path) -> None:
     async def scenario() -> None:
         adapter = ScriptedAdapter([call("memory_save", {"category": "user", "text": "lost", "replaces": "m1"}), final()])

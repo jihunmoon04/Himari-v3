@@ -68,7 +68,8 @@ def test_a_rewrite_names_the_revision_it_read_and_keeps_the_old_text() -> None:
     assert said(outcome) == "Updated m1 (project)."
     assert outcome.memory_change == MemoryChange(MemoryChangeKind.SAVE, 1, MemoryCategory.PROJECT, "Moves to Busan.",
                                                  expected_revision=1)
-    assert outcome.raw_result["previous"]["text"] == "Lives in Seoul."  # type: ignore[index, call-overload]
+    assert outcome.raw_result["previous"] == {  # type: ignore[index, call-overload]
+        "id": 1, "category": "project", "text": "Lives in Seoul.", "revision": 1, "origin": "user", "source": None}
     missing = run(MemorySave(data), data, category="project", text="x", replaces="m9")
     assert missing.status is ToolStatus.FAILED and said(missing) == "No note m9." and missing.memory_change is None
 
@@ -80,6 +81,13 @@ def test_an_unused_optional_argument_sent_empty_is_left_out(unused: object) -> N
     outcome = run(MemorySave(data), data, category="user", text="Uses Go.", replaces=unused)
     assert said(outcome) == "Saved m1 (user)."
     assert said(run(MemorySearch(data), data, query="", category=unused)) == "No saved notes match."
+
+
+def test_line_endings_are_made_lf_as_the_store_does() -> None:
+    # Review C1: a CR used to be refused as a control character before the store's own fix-up.
+    data = fresh()
+    outcome = run(MemorySave(data), data, category="user", text="Uses Go.\r\nWrites Python.\r")
+    assert outcome.memory_change is not None and outcome.memory_change.text == "Uses Go.\nWrites Python."
 
 
 def test_the_same_note_again_changes_nothing() -> None:
@@ -112,7 +120,8 @@ def test_forget() -> None:
     outcome = run(MemoryForget(data), data, id="m1")
     assert said(outcome) == "Forgot m1."
     assert outcome.memory_change == MemoryChange(MemoryChangeKind.FORGET, 1, expected_revision=1)
-    assert outcome.raw_result == {"memory": {"id": 1, "category": "user", "text": "Old.", "revision": 1}}
+    assert outcome.raw_result == {"memory": {"id": 1, "category": "user", "text": "Old.", "revision": 1,
+                                             "origin": "user", "source": None}}
     assert said(run(MemoryForget(data), data, id="m2")) == "No note m2."
     assert said(run(MemoryForget(data), data, id="one")) == "id is a note's id, as m12"
 
@@ -129,6 +138,8 @@ def test_search_ranks_by_words_then_newest() -> None:
     assert lines[0].startswith("m4 [user] Writes Go and Python. (")
     assert said(run(MemorySearch(data), data, query="himari", category="reference")).startswith("m3 [reference]")
     assert said(run(MemorySearch(data), data, query="rust")) == "No saved notes match."
+    twice = said(run(MemorySearch(data), data, query="calliope calliope himari")).splitlines()
+    assert [line.split()[0] for line in twice] == ["m3", "m2", "m1"]  # a repeated word counts once: newest first
     newest = said(run(MemorySearch(data), data)).splitlines()
     assert [line.split()[0] for line in newest] == ["m4", "m3", "m2", "m1"]
     assert said(run(MemorySearch(data), data, category="mood")).startswith("category is one of")
