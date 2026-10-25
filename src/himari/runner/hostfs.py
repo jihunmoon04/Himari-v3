@@ -272,10 +272,14 @@ class Host:
             return
         fd = _open(existing, os.O_RDONLY | os.O_DIRECTORY)
         try:
-            self._inside(self._judge(fd, masks), roots, masks)
+            parent = self._judge(fd, masks)
+            self._inside(parent, roots, masks)
             for name in reversed(missing):
                 if name in ("", ".", ".."):
                     raise api.RunnerError(api.INVALID)
+                # Each folder is judged before it is made (PR #87 review B2): a hidden or outside
+                # path is never created, even when the write itself would then be refused.
+                self._inside(posixpath.join(parent, name), roots, masks)
                 try:
                     os.mkdir(name, 0o755, dir_fd=fd)
                 except FileExistsError:
@@ -288,6 +292,8 @@ class Host:
                     raise _error(error) from None
                 os.close(fd)
                 fd = child
+                parent = self._judge(fd, masks)  # and again by what was opened
+                self._inside(parent, roots, masks)
         finally:
             os.close(fd)
 

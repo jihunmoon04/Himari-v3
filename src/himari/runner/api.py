@@ -75,7 +75,7 @@ MESSAGES = {
     CHANGED: "file changed while it was being edited; nothing written",
     INVALID: "invalid path",
     LINKS: "too many levels of symbolic links",
-    UNAVAILABLE: "commands cannot run: the machine sandbox is not enforced",
+    UNAVAILABLE: "the machine sandbox is not enforced on this server; nothing was done",
     SETUP_FAILED: "the sandbox could not be set up; nothing was run",
     OTHER: "file operation failed",
 }

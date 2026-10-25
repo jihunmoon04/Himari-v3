@@ -583,7 +583,12 @@ HIMARI는 `hello`의 상태로 따르고, 따로 탈출 시험을 하지 않는�
 - **위임 cgroup**(이 서버, `systemd-run --user --scope -p Delegate=yes`): runner가 `runner`·`commands`를 만들고 자체 검사 통과. 300 MB 한도에서 500 MB를 잡는 명령은 exit 137, `oom: true`, runner는 계속 응답.
 - **실제 모델**(`openai/gpt-6-luna`, 로컬 Web + runner): 대화 폴더에서 `hello.c`를 쓰고 gcc로 컴파일·실행(`hi`), `~` 목록, `~/.ssh/id_ed25519`는 읽지 못함, `~/Himari-v3/…` 쓰기는 "Read-only file system". 디스크에서도 확인.
 
-### 20.4 배포 (1단계)
+### 20.4 외부 검수 1 (HEAD d3ee46e, NOT READY) 반영
+
+- **B1(P1):** runner가 Sandbox 상태를 `run`에서만 봤다. 자체 검사가 실패해도 파일 읽기·쓰기·업로드가 됐다(§13 위반). 이제 `hello`를 뺀 모든 연산이 `ENFORCED`가 아니면 `unavailable`로 거부된다(공통 진입점). 시험: 자체 검사 실패 runner에서 연산 10개가 모두 거부되고, 아무것도 만들어지지 않으며, Sandbox가 불리지 않음. machine Tool은 "the machine sandbox is not enforced on this server; nothing was done"(DENIED)을 보인다.
+- **B2(P2):** `create_parents`가 빠진 중간 폴더를 검사 없이 만들었다. 숨김 경로가 쓰기는 거부돼도 폴더로 남을 수 있었다. 이제 각 폴더를 만들기 **전에** 경로를 숨김·Workspace 범위로 판단하고, 만든 뒤 연 디스크립터의 실제 경로로 다시 판단한다. 시험: Workspace 안의 아직 없는 숨김 경로·홈의 새 점 폴더는 만들어지지 않음.
+
+### 20.5 배포 (1단계)
 
 DB 변경 없음. 소유자 sudo로:
 

@@ -178,3 +178,16 @@ def test_conversation_folders(host: Host, home: Path) -> None:
     (Path(folder) / "f").write_text("x")
     assert host.remove_conversation_folder("c9") and not os.path.exists(folder)
     assert not host.remove_conversation_folder("c9")
+
+
+def test_missing_parents_are_judged_before_they_are_made(home: Path, tmp_path: Path) -> None:
+    """PR #87 review B2: a hidden folder that does not exist yet is never created."""
+    root = home / "projects"
+    rules = HiddenRules(str(home), (".gitconfig",), (str(root / "secret"),))
+    host = Host(rules, str(home / "HIMARI"))
+    assert category(lambda: write(host, f"{root}/secret/deep/a.txt", [str(root)], create_parents=True)) == api.NOT_FOUND
+    assert not (root / "secret").exists()
+    assert category(lambda: write(host, f"{home}/.newdot/a", [str(home)], create_parents=True)) == api.NOT_FOUND
+    assert not (home / ".newdot").exists()
+    assert write(host, f"{root}/fine/deep/a", [str(root)], create_parents=True) == f"{root}/fine/deep/a"
+

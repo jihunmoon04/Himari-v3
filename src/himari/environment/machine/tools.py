@@ -64,8 +64,8 @@ def _refused(shown: str, error: runner.RunnerError) -> ToolOutcome:
     return ToolOutcome(status, _text(f"{shown}: {error}", error=True), raw_result={"category": error.category})
 
 
-def _unreachable() -> ToolOutcome:
-    return ToolOutcome(ToolStatus.DENIED, _text(_UNREACHABLE, error=True), raw_result={"runner": "unreachable"})
+def _unreachable(why: str = _UNREACHABLE) -> ToolOutcome:
+    return ToolOutcome(ToolStatus.DENIED, _text(why, error=True), raw_result={"runner": "unreachable"})
 
 
 def _shown(raw: object) -> str:
@@ -97,8 +97,8 @@ class _MachineTool:
 
         try:
             folder = await self._env.folder(ctx.scope.conversation_id, ctx.workspace.cwd_relative)
-        except MachineUnavailable:
-            return _unreachable()
+        except MachineUnavailable as unavailable:
+            return _unreachable(str(unavailable))
         args = invocation.arguments
         try:
             if self.effect is EffectProfile.READ:
@@ -352,7 +352,9 @@ class MachineReadDocument(ReadDocument):
         try:
             cwd = await self._machine.folder(ctx.scope.conversation_id, ctx.workspace.cwd_relative)
             result, fds = await self._machine.call(runner.OPEN, {"path": raw_path, "cwd": cwd})
-        except (MachineUnavailable, runner.NotSent):
+        except MachineUnavailable as unavailable:
+            return _unreachable(str(unavailable))
+        except runner.NotSent:
             return _unreachable()
         except runner.RunnerError as error:
             return _refused(shown, error)

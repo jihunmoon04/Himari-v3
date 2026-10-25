@@ -159,13 +159,36 @@ def test_closing_the_connection_cancels_the_command(kit: RunnerKit) -> None:
     assert kit.sandbox.cancelled.wait(5)
 
 
-def test_not_enforced_refuses_commands(tmp_path: Path) -> None:
+def test_not_enforced_refuses_everything_but_hello(tmp_path: Path) -> None:
+    """§13 (PR #87 review B1): a failed self-test stops files too, not only commands."""
     kit = start_runner(tmp_path, enforced=False)
     try:
-        folder = str(call(kit, api.CONVERSATION_FOLDER, {"conversation": "c1"})[0]["path"])
-        with pytest.raises(api.RunnerError) as caught:
-            call(kit, api.RUN, {"argv": ["true"], "cwd": folder, "write_roots": [folder], "timeout": 5})
-        assert caught.value.category == api.UNAVAILABLE
+        assert call(kit, api.HELLO, {})[0]["state"] == "setup_failed"
+        folder = str(kit.himari_home / "conversations")
+        roots = {"write_roots": [folder]}
+        r, w = os.pipe()
+        os.close(w)
+        requests: list[tuple[str, dict[str, object], tuple[int, ...]]] = [
+            (api.CONVERSATION_FOLDER, {"conversation": "c1"}, ()),
+            (api.LIST, {"path": "~", "cwd": "/"}, ()),
+            (api.OPEN, {"path": "~/projects/a/main.c", "cwd": "/"}, ()),
+            (api.HOLDS, {"path": "~/projects/a/main.c", "size": 1, "sha256": "x"}, ()),
+            (api.WRITE, {"path": "x", "cwd": folder, "content": "x", **roots}, ()),
+            (api.DELETE, {"path": "x", "cwd": folder, **roots}, ()),
+            (api.RUN, {"argv": ["true"], "cwd": folder, "timeout": 5, **roots}, ()),
+            (api.COPY_IN, {"folder": f"{folder}/u", "clear": True, **roots}, (r,)),
+            (api.FREE_PATH, {"folder": f"{folder}/u", "name": "a", **roots}, ()),
+            (api.REMOVE_CONVERSATION_FOLDER, {"conversation": "c1"}, ()),
+        ]
+        try:
+            for op, args, fds in requests:
+                with pytest.raises(api.RunnerError) as caught:
+                    call(kit, op, args, fds)
+                assert caught.value.category == api.UNAVAILABLE, op
+        finally:
+            os.close(r)
+        assert not (kit.home / "HIMARI/conversations/x").exists() and not (kit.home / "HIMARI/conversations/u").exists()
+        assert not kit.sandbox.calls
     finally:
         kit.close()
 

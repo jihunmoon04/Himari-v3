@@ -157,6 +157,9 @@ class Runner:
                     "memory_max": config.memory_max if self.commands else None,
                     "pids_max": config.pids_max if self.commands else None,
                     "toolkit": config.documents_toolkit is not None}, []
+        if self.sandbox.state is not SandboxState.ENFORCED:
+            # §13 (PR #87 review B1): without a passed self-test nothing but hello is done — files included.
+            raise api.RunnerError(api.UNAVAILABLE)
         if op == api.CONVERSATION_FOLDER:
             path = await self._blocking(lambda: host.conversation_folder(args.get("conversation")))
             return {"path": path}, []
@@ -223,8 +226,6 @@ class Runner:
         return await self._blocking(write)
 
     async def _run(self, args: dict[str, Any], roots: list[str], conn: socket.socket) -> dict[str, Any] | None:
-        if self.sandbox.state is not SandboxState.ENFORCED:
-            raise api.RunnerError(api.UNAVAILABLE)
         try:
             argv = validate_argv(args.get("argv"))
         except ValueError:

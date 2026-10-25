@@ -254,3 +254,15 @@ def test_a_cancelled_waiter_leaves_nothing_behind() -> None:
             pass
 
     asyncio.run(scenario())
+
+
+def test_a_runner_without_its_sandbox_refuses_file_tools(tmp_path: Path) -> None:
+    kit = start_runner(tmp_path, enforced=False)
+    try:
+        env = MachineEnvironment(kit.socket)
+        for outcome in (call(env, "read_file", path="~/projects/a/main.c"), call(env, "write_file", path="a",
+                                                                                content="x")):
+            assert outcome.status is ToolStatus.DENIED and "not enforced" in text(outcome)
+    finally:
+        kit.close()
+
