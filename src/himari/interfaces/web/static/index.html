@@ -51,6 +51,8 @@
         </div>
 
         <button type="button" id="nav-new-chat" class="primary-button sidebar-new-chat"><svg class="side-icon" aria-hidden="true"><use href="#side-pen"/></svg><span>New Chat</span></button>
+        <!-- The server's files (V3-P75 §3.2), where they are offered. -->
+        <button type="button" id="nav-files" class="nav-link sidebar-files" hidden><svg class="side-icon" aria-hidden="true"><use href="#side-folder"/></svg><span>Files</span></button>
 
         <div class="sidebar-body" id="sidebar-body">
           <nav aria-label="Conversations">
@@ -99,6 +101,8 @@
             <span id="mobile-model-summary"></span><span class="model-chevron" aria-hidden="true">⌄</span>
           </button>
           <button type="button" id="app-fullscreen" class="icon-button topbar-icon-button" aria-label="Enter fullscreen" title="Enter fullscreen" aria-pressed="false" hidden><svg class="side-icon" aria-hidden="true"><use id="app-fullscreen-icon" href="#side-expand"/></svg></button>
+          <button type="button" id="chat-files-toggle" class="icon-button topbar-icon-button" aria-controls="file-panel"
+                  aria-expanded="false" aria-label="Show files" title="Show files" hidden><svg class="side-icon" aria-hidden="true"><use href="#side-folder"/></svg></button>
           <button
             type="button"
             id="chat-menu-toggle"
@@ -243,6 +247,11 @@
           <p class="hint folders-empty" id="folders-empty" hidden>No folders registered yet.</p>
         </section>
 
+        <!-- The server's files without a conversation (V3-P75 §3.2). -->
+        <section class="surface files" id="surface-files" hidden>
+          <div class="files-slot" id="files-surface-slot"></div>
+        </section>
+
         <section class="surface chat" id="surface-chat" hidden>
           <div class="timeline" id="timeline" aria-label="Conversation timeline"></div>
 
@@ -293,6 +302,17 @@
           </div>
         </section>
       </main>
+
+      <!-- Files beside the conversation (V3-P75 §3.2): its working folder first. -->
+      <aside class="file-panel" id="file-panel" aria-label="Files" hidden>
+        <div class="file-panel-grip" id="file-panel-grip" role="separator" aria-orientation="vertical"
+             aria-label="Resize the files panel" tabindex="0"></div>
+        <!-- Its controls go into the files pane's head (app.js). -->
+        <button type="button" id="file-panel-expand" class="icon-button file-panel-button" aria-pressed="false"
+                aria-label="Expand files" title="Expand files"><svg class="side-icon" aria-hidden="true"><use id="file-panel-expand-icon" href="#side-expand"/></svg></button>
+        <button type="button" id="file-panel-close" class="icon-button file-panel-button" aria-label="Close files" title="Close files">×</button>
+        <div class="files-slot" id="file-panel-slot"></div>
+      </aside>
     </div>
 
     <dialog id="model-dialog" class="model-dialog" aria-labelledby="model-dialog-title" aria-describedby="model-dialog-description">

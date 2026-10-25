@@ -3575,3 +3575,65 @@ details > summary {
 .folders-note {
   white-space: pre-wrap;
 }
+
+/* ---------------------------------------------- files (V3-P75 §3) ---- */
+/* The server's files in the current look: the sidebar's Files link, a
+ * folder list and a file view (files.js), placed on the Files surface or in
+ * the panel beside a conversation. Existing tokens only. */
+
+.sidebar .sidebar-files { display: flex; align-items: center; gap: 12px; margin: -16px 12px 16px; min-height: 40px; padding: 8px 14px; border: 0; border-radius: 10px; background: none; color: var(--text); font-size: 14px; text-align: left; }
+.sidebar .sidebar-files:hover { background: var(--surface-hover); }
+.sidebar .sidebar-files[hidden] { display: none; }
+
+.files-slot { min-height: 0; height: 100%; display: flex; flex-direction: column; }
+.surface.files { padding: 0; display: flex; flex-direction: column; }
+.surface.files .files-pane { max-width: calc(var(--reading-max) + 160px); width: 100%; margin: 0 auto; }
+.files-pane { display: flex; flex-direction: column; min-height: 0; height: 100%; }
+.files-head { display: flex; align-items: center; gap: var(--space-2); min-height: 48px; padding: var(--space-2) var(--space-4); border-bottom: 1px solid var(--border-subtle); flex: 0 0 auto; }
+.files-crumbs { display: flex; align-items: center; flex-wrap: wrap; gap: 2px; min-width: 0; flex: 1 1 auto; font-size: 13px; }
+.files-crumb { background: none; border: 0; padding: 4px 6px; border-radius: var(--radius-sm); color: var(--text-muted); font: inherit; min-height: 32px; overflow-wrap: anywhere; text-align: left; }
+button.files-crumb:hover { background: var(--surface-hover); color: var(--text); }
+.files-crumb.is-current { color: var(--text); font-weight: 600; }
+.files-crumb-sep { color: var(--text-muted); font-size: 12px; }
+.files-tools { display: flex; align-items: center; gap: var(--space-2); flex: 0 0 auto; font-size: 13px; }
+.files-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: var(--space-2) var(--space-3) var(--space-5); }
+.files-body[aria-busy="true"] { opacity: .6; }
+.files-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 1px; }
+.files-row { position: relative; display: flex; align-items: center; gap: 2px; }
+.files-open { flex: 1 1 auto; min-width: 0; display: flex; align-items: center; gap: 10px; min-height: 40px; padding: 8px 10px; border: 0; border-radius: 8px; background: none; color: var(--text); font-size: 14px; text-align: left; }
+.files-open:hover { background: var(--surface-hover); }
+.files-open .side-icon { flex: 0 0 auto; color: var(--text-muted); }
+.files-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.files-meta { flex: 0 0 auto; color: var(--text-muted); font-size: 12px; white-space: nowrap; }
+.files-row:has(.files-actions[open]) { z-index: 2; margin-bottom: 88px; }
+.files-more { margin: var(--space-2) var(--space-2) 0; }
+.files-note { margin: var(--space-3) var(--space-2); color: var(--text-muted); font-size: 13px; }
+.files-note.is-error { color: var(--danger); }
+.files-view { min-width: 0; }
+.files-download { display: inline-flex; align-items: center; text-decoration: none; }
+.files-text { margin: 0; padding: var(--space-2) 0; font: 13px/1.6 var(--mono); color: var(--text); white-space: pre-wrap; overflow-wrap: anywhere; tab-size: 4; counter-reset: line; }
+.files-line { display: block; padding-left: 4.5em; text-indent: -4.5em; }
+.files-line::before { counter-increment: line; content: counter(line); display: inline-block; width: 3.5em; margin-right: 1em; text-align: right; color: var(--text-muted); opacity: .6; user-select: none; text-indent: 0; }
+.files-image { display: block; max-width: 100%; max-height: 75vh; margin: var(--space-3) auto; object-fit: contain; border-radius: var(--radius-sm); }
+
+/* The panel beside a conversation: a grip to resize, an expand to cover the conversation. */
+.file-panel { position: relative; flex: 0 0 var(--file-panel-width, 45%); width: var(--file-panel-width, 45%); min-width: 0; height: 100%; display: flex; flex-direction: column; background: var(--bg); border-left: 1px solid var(--border-subtle); }
+.file-panel[hidden] { display: none; }
+.file-panel-button { flex: 0 0 auto; width: 36px; min-width: 36px; height: 36px; min-height: 36px; }
+.files-actions-space { flex: 0 0 28px; }
+/* Beside the files the conversation is narrower: its toolbar keeps one line. */
+.layout.has-file-panel .topbar { flex-wrap: nowrap; }
+.layout.has-file-panel .model-control select { max-width: 160px; }
+.layout.has-file-panel .model-control > span { display: none; }
+.file-panel-grip { position: absolute; left: -4px; top: 0; bottom: 0; width: 8px; cursor: col-resize; z-index: 4; touch-action: none; }
+.file-panel-grip:hover, .file-panel-grip:focus-visible { background: var(--accent-soft); outline: none; }
+.layout.is-files-expanded .main { display: none; }
+.layout.is-files-expanded .file-panel { flex: 1 1 auto; width: auto; }
+.layout.is-files-expanded .file-panel-grip { display: none; }
+
+@media (max-width: 899px) {
+  /* Too narrow to sit side by side: the panel covers the screen; its × goes back to the conversation. */
+  .file-panel { position: fixed; inset: 0; z-index: 40; width: auto; border-left: 0; }
+  .file-panel-grip, #file-panel-expand { display: none; }
+}
+#chat-files-toggle[aria-expanded="true"] { background: var(--surface-selected); }

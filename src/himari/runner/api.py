@@ -40,7 +40,8 @@ _HEADER = struct.Struct(">I")
 # Operations
 HELLO = "hello"
 CONVERSATION_FOLDER = "conversation_folder"
-LIST = "list"
+LIST = "list"  # a page of a folder, sorted, after a cursor (V3-P75 §5.1)
+STAT = "stat"  # what open checks, nothing handed over (V3-P75 §5.3)
 OPEN = "open"
 WRITE = "write"
 DELETE = "delete"

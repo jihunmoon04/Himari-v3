@@ -217,9 +217,11 @@ class Runner:
         if op == api.LIST:
             limit = args.get("limit", MAX_LIST)
             limit = limit if isinstance(limit, int) and 1 <= limit <= MAX_LIST else MAX_LIST
-            real, entries, truncated = await self._blocking(
-                lambda: host.listing(args.get("path", "."), _text(args, "cwd"), limit))
-            return {"path": real, "entries": entries, "truncated": truncated}, []
+            real, entries, following = await self._blocking(
+                lambda: host.listing(args.get("path", "."), _text(args, "cwd"), limit, args.get("after")))
+            return {"path": real, "entries": entries, "truncated": following is not None, "next": following}, []
+        if op == api.STAT:
+            return await self._blocking(lambda: host.stat_path(args.get("path"), _text(args, "cwd"))), []
         if op == api.OPEN:
             fd, real, info = await self._blocking(lambda: host.open_read(args.get("path"), _text(args, "cwd")))
             return {"path": real, "size": info.st_size, "identity": host.identity(info)}, [fd]

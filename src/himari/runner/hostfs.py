@@ -19,6 +19,7 @@ user's own paths (§8.1).
 
 from __future__ import annotations
 
+import bisect
 import ctypes
 import errno
 import hashlib
@@ -37,6 +38,7 @@ from himari.runner.hidden import HiddenRules, under
 from himari.sandbox.machine import Mask
 
 MAX_PATH_BYTES = 4096
+MAX_ENUMERATED = 100_000  # a folder listing reads at most this many names (V3-P75 §5.1)
 MAX_LINK_HOPS = 40
 MAX_NAME_TRIES = 100
 SPECIAL_ROOTS = ("/proc", "/sys", "/dev", "/run")
@@ -98,6 +100,19 @@ def filesystem_type(fd: int) -> int:
         err = ctypes.get_errno()
         raise _error(OSError(err, os.strerror(err)))
     return ctypes.c_long.from_buffer(buffer).value & 0xFFFFFFFF
+
+
+def _name_bytes(name: str) -> bytes:
+    return name.encode("utf-8", "surrogateescape")
+
+
+def _cursor_key(after: object) -> tuple[int, bytes] | None:
+    """``d/<name>`` or ``f/<name>`` (a folder or anything else), as ``listing`` gives it."""
+    if after is None:
+        return None
+    if not isinstance(after, str) or after[:2] not in ("d/", "f/") or len(after) > MAX_PATH_BYTES:
+        raise api.RunnerError(api.INVALID, "a bad cursor")
+    return (0 if after[0] == "d" else 1, _name_bytes(after[2:]))
 
 
 def real_path(fd: int) -> str:
@@ -189,7 +204,15 @@ class Host:
             os.close(fd)
             raise
 
-    def listing(self, path: object, cwd: str, limit: int) -> tuple[str, list[dict[str, object]], bool]:
+    def listing(self, path: object, cwd: str, limit: int, after: object = None
+                ) -> tuple[str, list[dict[str, object]], str | None]:
+        """One page of a folder: every entry (but hidden ones) read and
+        sorted, folders first, then by name as bytes; the page is the
+        ``limit`` entries after the cursor ``after`` (V3-P75 §5.1). The
+        cursor of its last entry when more follow, else None. Only the
+        page's entries are stat'ed. A folder of more than MAX_ENUMERATED
+        entries is refused rather than shown in part."""
+        start_key = _cursor_key(after)
         absolute = self.absolute(path, cwd)
         self._precheck(absolute)
         masks = self.rules.masks()
@@ -198,32 +221,61 @@ class Host:
         fd = _open(absolute, os.O_RDONLY | os.O_DIRECTORY)
         try:
             real = self._judge(fd, masks)
-            entries: list[dict[str, object]] = []
-            truncated = False
+            found: list[tuple[int, bytes, str]] = []
             try:
                 with os.scandir(fd) as items:
                     for item in items:
                         if self.rules.is_hidden(posixpath.join(real, item.name), masks):
                             continue
-                        if len(entries) >= limit:
-                            truncated = True
-                            break
-                        info = item.stat(follow_symlinks=False)
-                        if stat.S_ISREG(info.st_mode):
-                            kind, size = "file", info.st_size
-                        elif stat.S_ISDIR(info.st_mode):
-                            kind, size = "directory", None
-                        elif stat.S_ISLNK(info.st_mode):
-                            kind, size = "symlink", None
-                        else:
-                            kind, size = "other", None
-                        entries.append({"name": item.name, "kind": kind, "size": size})
+                        if len(found) >= MAX_ENUMERATED:
+                            raise api.RunnerError(api.TOO_LARGE, f"this folder has more than {MAX_ENUMERATED:,} "
+                                                                 "entries; open a folder inside it, or use run_command")
+                        try:
+                            folder = item.is_dir(follow_symlinks=False)
+                        except OSError:
+                            folder = False
+                        found.append((0 if folder else 1, _name_bytes(item.name), item.name))
             except OSError as error:
                 raise _error(error) from None
-            entries.sort(key=lambda e: str(e["name"]))
-            return real, entries, truncated
+            found.sort()
+            first = 0 if start_key is None else bisect.bisect_right(found, start_key, key=lambda e: (e[0], e[1]))
+            entries: list[dict[str, object]] = []
+            for _, _, name in found[first:first + limit]:
+                try:
+                    info = os.stat(name, dir_fd=fd, follow_symlinks=False)
+                except OSError:
+                    continue  # gone since it was listed
+                if stat.S_ISREG(info.st_mode):
+                    kind, size = "file", info.st_size
+                elif stat.S_ISDIR(info.st_mode):
+                    kind, size = "directory", None
+                elif stat.S_ISLNK(info.st_mode):
+                    kind, size = "symlink", None
+                else:
+                    kind, size = "other", None
+                entries.append({"name": name, "kind": kind, "size": size, "modified": int(info.st_mtime)})
+            last = found[first:first + limit][-1:] if first + limit < len(found) else []
+            return real, entries, (f"{'df'[last[0][0]]}/{last[0][2]}" if last else None)
         finally:
             os.close(fd)
+
+    def stat_path(self, path: object, cwd: str) -> dict[str, object]:
+        """What ``open`` checks, without handing anything over (V3-P75 §5.3):
+        the real path, its kind and its identity; hidden: NOT_FOUND."""
+        absolute = self.absolute(path, cwd)
+        self._precheck(absolute)
+        masks = self.rules.masks()
+        if self.rules.is_hidden(absolute, masks):
+            raise api.RunnerError(api.NOT_FOUND)
+        fd = _open(absolute, os.O_RDONLY | os.O_NONBLOCK | os.O_NOCTTY)
+        try:
+            real = self._judge(fd, masks)
+            info = os.fstat(fd)
+        finally:
+            os.close(fd)
+        kind = "file" if stat.S_ISREG(info.st_mode) else "directory" if stat.S_ISDIR(info.st_mode) else "other"
+        return {"path": real, "kind": kind, "identity": self.identity(info),
+                "size": info.st_size if kind == "file" else None, "modified": int(info.st_mtime)}
 
     def directory(self, path: object, cwd: str) -> str:
         """A folder the model may see (a command's working directory): its real path."""

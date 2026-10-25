@@ -22,6 +22,7 @@
 import { AppViews } from "/assets/app_view.js";
 import { assistantTextLine, renderAssistantText } from "/assets/rich_text.js";
 import { LiveAnswer } from "/assets/live.js";
+import { FilesPane } from "/assets/files.js";
 
 const POLL_MS = 1000;
 const PAGE = 50;
@@ -140,9 +141,15 @@ const app = {
   memory: null, // the last /api/memories answer (V3-P71 §7.2)
   registeredFolders: null, // the last /api/workspaces items, for the attach field (V3-P74 §10.3)
   streaming: false, // the server streams answers (V3-P73 §9)
+  filesOpen: false, // the files panel beside the conversation is open (V3-P75 §3.2)
+  workingFolder: null, // the open conversation's working folder, when it works on this server's folders
 };
 
 const views = new AppViews(api, el, () => app.conversationId);
+
+/* The server's files (V3-P75 §3): one pane on the Files surface, one beside a conversation. */
+const filesSurface = new FilesPane({ api, el });
+const filesPanel = new FilesPane({ api, el, actions: [$("file-panel-expand"), $("file-panel-close")] });
 
 /* The answer being written (V3-P73 §7, live.js): its own item at the end of
  * the timeline while a job runs, replaced by the Run's Event when it comes. */
@@ -167,7 +174,7 @@ function status(text, tone) {
 
 function showSurface(name) {
   closeModelDialog();
-  for (const surface of ["login", "home", "chat", "trash", "instructions", "memory", "folders"]) {
+  for (const surface of ["login", "home", "chat", "trash", "instructions", "memory", "folders", "files"]) {
     $(`surface-${surface}`).hidden = surface !== name;
   }
   app.leaveAgreed = false;
@@ -176,6 +183,7 @@ function showSurface(name) {
   $("sidebar-toggle").hidden = !signedIn;
   syncNavigation();
   $("topbar-chat-context").hidden = name !== "chat";
+  syncFilesPanel(name === "chat");
   $("chat-menu-toggle").hidden = name !== "chat";
   if (name !== "chat") closeChatMenu();
   syncModelChrome();
@@ -1416,6 +1424,7 @@ function applyDetail(detail) {
   $("composer-cancel").hidden = !detail.job.running;
   $("composer-cancel").disabled = stopping === "cancel";
   if (app.running !== detail.job.running) {
+    if (app.running && !detail.job.running && app.filesOpen && !$("file-panel").hidden) filesPanel.refresh();
     app.running = detail.job.running;
     app.changedWhileRunning = false; // a new turn, or the end of the one it was changed in
     renderModel(); // "applies from the next message" only while that turn runs
@@ -1495,6 +1504,9 @@ async function openConversation(id) {
   showSurface("chat");
   closeNav();
   $("chat-menu-folders").hidden = true;
+  app.workingFolder = null;
+  filesPanel.folder = null;
+  filesPanel.file = null; // the next opening starts at this conversation's working folder
   loadToolSources(generation);
   loadModel(generation);
   loadFolders(generation);
@@ -2245,6 +2257,11 @@ function folderPath(item) {
 }
 
 function renderFolders(items) {
+  const working = items.find((item) => item.working && item.path);
+  const before = app.workingFolder;
+  app.workingFolder = working ? working.path : null;
+  syncFilesPanel(!$("surface-chat").hidden);
+  if (app.filesOpen && app.workingFolder && app.workingFolder !== before) filesPanel.openFolder(app.workingFolder);
   const list = $("chat-menu-folders-list");
   list.replaceChildren();
   $("chat-menu-folders").hidden = items.length === 0;
@@ -2427,6 +2444,97 @@ async function registerFolder(event) {
   await loadFoldersList();
 }
 
+/* ------------------------------------------------------------------ files */
+
+/* V3-P75 §3.2: the Files surface — this server's files without a conversation. */
+async function showFiles() {
+  if (!(await mayLeave())) return;
+  stopPolling();
+  views.reset();
+  app.conversationId = null;
+  app.generation += 1;
+  live.reset();
+  clearAttachments();
+  markSelected();
+  showSurface("files");
+  closeNav();
+  $("topbar-title").textContent = "Files";
+  status("");
+  if (filesSurface.place) await filesSurface.refresh();
+  else await filesSurface.openFolder("~");
+}
+
+/* The panel beside a conversation that works on this server's folders. */
+const PANEL_WIDTH_KEY = "himari.filePanelWidth";
+
+function syncFilesPanel(onChat) {
+  const offered = onChat && app.workingFolder !== null;
+  $("chat-files-toggle").hidden = !offered;
+  $("chat-files-toggle").setAttribute("aria-expanded", String(offered && app.filesOpen));
+  $("file-panel").hidden = !(offered && app.filesOpen);
+  $("layout").classList.toggle("has-file-panel", offered && app.filesOpen);
+  if (!(offered && app.filesOpen)) setPanelExpanded(false);
+}
+
+function toggleFilesPanel() {
+  app.filesOpen = !app.filesOpen;
+  syncFilesPanel(true);
+  if (app.filesOpen && app.workingFolder) {
+    // Its place again, or the conversation's working folder the first time.
+    if (filesPanel.place) filesPanel.refresh();
+    else filesPanel.openFolder(app.workingFolder);
+  }
+}
+
+function setPanelExpanded(expanded) {
+  $("layout").classList.toggle("is-files-expanded", expanded);
+  $("file-panel-expand").setAttribute("aria-pressed", String(expanded));
+  $("file-panel-expand").setAttribute("aria-label", expanded ? "Show the conversation" : "Expand files");
+  $("file-panel-expand").title = expanded ? "Show the conversation" : "Expand files";
+  $("file-panel-expand-icon").setAttribute("href", expanded ? "#side-contract" : "#side-expand");
+}
+
+function panelWidth(fraction) {
+  const clamped = Math.min(0.7, Math.max(0.3, fraction));
+  $("layout").style.setProperty("--file-panel-width", `${(clamped * 100).toFixed(1)}%`);
+  return clamped;
+}
+
+function restorePanelWidth() {
+  try {
+    const saved = Number(localStorage.getItem(PANEL_WIDTH_KEY));
+    if (saved) panelWidth(saved);
+  } catch (ignored) { /* the default width */ }
+}
+
+function dragPanel(event) {
+  if (event.button !== 0) return;
+  event.preventDefault();
+  const grip = $("file-panel-grip");
+  grip.setPointerCapture(event.pointerId);
+  const box = $("layout").getBoundingClientRect();
+  let fraction = null;
+  const move = (e) => { fraction = panelWidth((box.right - e.clientX) / box.width); };
+  const end = () => {
+    grip.removeEventListener("pointermove", move);
+    grip.removeEventListener("pointerup", end);
+    grip.removeEventListener("pointercancel", end);
+    try { if (fraction !== null) localStorage.setItem(PANEL_WIDTH_KEY, String(fraction)); } catch (ignored) { /* kept for this page */ }
+  };
+  grip.addEventListener("pointermove", move);
+  grip.addEventListener("pointerup", end);
+  grip.addEventListener("pointercancel", end);
+}
+
+function nudgePanel(event) {
+  if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+  event.preventDefault();
+  const box = $("layout").getBoundingClientRect();
+  const now = $("file-panel").getBoundingClientRect().width / box.width;
+  const fraction = panelWidth(now + (event.key === "ArrowLeft" ? 0.05 : -0.05));
+  try { localStorage.setItem(PANEL_WIDTH_KEY, String(fraction)); } catch (ignored) { /* kept for this page */ }
+}
+
 async function showFolders() {
   if (!(await mayLeave())) return;
   stopPolling();
@@ -2447,9 +2555,12 @@ async function showFolders() {
 /* The Settings link only where folders are offered. */
 async function syncFoldersLink() {
   try {
-    $("nav-folders").hidden = !(await api("GET", "/api/workspaces")).available;
+    const offered = (await api("GET", "/api/workspaces")).available;
+    $("nav-folders").hidden = !offered;
+    $("nav-files").hidden = !offered; // the Files surface too (V3-P75 §3.2)
   } catch (ignored) {
     $("nav-folders").hidden = true;
+    $("nav-files").hidden = true;
   }
 }
 
@@ -2585,6 +2696,16 @@ async function boot() {
   $("chat-menu-delete").addEventListener("click", () => deleteConversation());
   $("nav-home").addEventListener("click", () => showHome().catch((e) => status(e.message, "error")));
   $("nav-new-chat").addEventListener("click", newConversation);
+  $("files-surface-slot").append(filesSurface.root);
+  $("file-panel-slot").append(filesPanel.root);
+  restorePanelWidth();
+  $("nav-files").addEventListener("click", () => showFiles().catch((e) => status(e.message, "error")));
+  $("chat-files-toggle").addEventListener("click", toggleFilesPanel);
+  $("file-panel-close").addEventListener("click", toggleFilesPanel);
+  $("file-panel-expand").addEventListener("click",
+    () => setPanelExpanded(!$("layout").classList.contains("is-files-expanded")));
+  $("file-panel-grip").addEventListener("pointerdown", dragPanel);
+  $("file-panel-grip").addEventListener("keydown", nudgePanel);
   $("home-new-chat").addEventListener("click", newConversation);
   $("conversation-load-more").addEventListener("click", () => loadList(false).then(markSelected));
   $("composer").addEventListener("submit", sendMessage);
