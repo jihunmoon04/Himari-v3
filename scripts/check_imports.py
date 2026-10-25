@@ -14,6 +14,9 @@ Rules:
    nothing else, Data included (V3-P57, PR #25 review B1); the Sandbox uses
    ``common`` only (V3-P59 §3); the image copies use ``common``,
    ``sandbox`` and ``data`` (V3-P67).
+7. ``himari.runner`` is the composition root of its own process (V3-P74):
+   it may import the sandbox's modules, not only its api, and nothing but
+   ``common`` and ``sandbox``. Others reach it through ``runner.api``.
 
 Usage: python -I scripts/check_imports.py [src_root]
 Exit status 1 on any violation. This is a static check, not part of pytest
@@ -29,6 +32,7 @@ from pathlib import Path
 LAYERS = {
     "common": 0,
     "sandbox": 1,  # the isolation mechanism: imports common only (rule 6), used by consumers via its api
+    "runner": 2,  # the machine runner's process (V3-P74): the sandbox's profiles; others use runner.api
     "data": 1,
     "tool": 2,
     "imaging": 2,  # model copies of images (V3-P67): the sandbox and Data's file types, nothing else
@@ -47,7 +51,10 @@ ONLY_FROM = {
     "sandbox": frozenset({"common"}),
     "imaging": frozenset({"common", "sandbox", "data"}),
     "documents": frozenset({"common", "sandbox", "data"}),
+    "runner": frozenset({"common", "sandbox"}),
 }
+# Packages that may import another package's private modules (rule 7).
+PRIVATE_FROM = {"runner": frozenset({"sandbox"})}
 
 
 def module_name(src_root: Path, path: Path) -> str:
@@ -116,7 +123,7 @@ def check(src_root: Path) -> list[str]:
                 allowed = ", ".join(sorted(ONLY_FROM[pkg]))
                 errors.append(f"{where} ({pkg} may import only {allowed})")
                 continue
-            if not target_is_public:
+            if not target_is_public and tpkg not in PRIVATE_FROM.get(pkg, frozenset()):
                 errors.append(f"{where} (private import across modules)")
             elif LAYERS[tpkg] >= LAYERS[pkg]:
                 errors.append(f"{where} (upward or sideways import)")

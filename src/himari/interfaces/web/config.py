@@ -43,6 +43,12 @@ conversation_search and conversation_read off; on by default.
 
 Streaming (V3-P73 §9): ``HIMARI_STREAMING=0`` asks no model for a stream;
 on by default (models that declare it stream their answers).
+
+Machine Workspace (V3-P74 §4.4): ``HIMARI_MACHINE_SOCKET`` names the
+runner's socket (``/run/himari-runner/runner.sock``); then new Conversations
+of the principals in ``HIMARI_MACHINE_PRINCIPALS`` (comma-separated, default
+``operator``) work on this server as the user. Unset: every Conversation
+uses the Inside Workspace, as before.
 """
 
 from __future__ import annotations
@@ -75,6 +81,8 @@ DOCUMENTS_DIR_VAR = "HIMARI_DOCUMENTS_DIR"  # V3-P70: the documents toolkit; uns
 MEMORY_VAR = "HIMARI_MEMORY"  # V3-P71: 0 turns memory off
 CONVERSATION_SEARCH_VAR = "HIMARI_CONVERSATION_SEARCH"  # V3-P72: 0 turns it off
 STREAMING_VAR = "HIMARI_STREAMING"  # V3-P73: 0 turns it off
+MACHINE_SOCKET_VAR = "HIMARI_MACHINE_SOCKET"  # V3-P74: the runner's socket; unset: no machine Environment
+MACHINE_PRINCIPALS_VAR = "HIMARI_MACHINE_PRINCIPALS"  # V3-P74: whose new Conversations use it
 DEFAULT_FILE_MAX_BYTES = 32 * 1024 * 1024  # as data.api
 DEFAULT_FILE_STORE_MAX_BYTES = 1024 * 1024 * 1024
 DEFAULT_FILE_KEEP_DAYS = 30
@@ -126,6 +134,8 @@ class WebConfig:
     memory: bool = True
     conversation_search: bool = True
     streaming: bool = True
+    machine_socket: str | None = None  # V3-P74
+    machine_principals: tuple[str, ...] = ("operator",)
 
     @property
     def view_port(self) -> int:
@@ -201,6 +211,12 @@ class WebConfig:
         documents_dir = source.get(DOCUMENTS_DIR_VAR, "").strip() or None
         if documents_dir is not None and not os.path.isabs(documents_dir):
             raise WebConfigError(f"{DOCUMENTS_DIR_VAR} must be an absolute path")
+        machine_socket = source.get(MACHINE_SOCKET_VAR, "").strip() or None
+        if machine_socket is not None and not os.path.isabs(machine_socket):
+            raise WebConfigError(f"{MACHINE_SOCKET_VAR} must be an absolute path")
+        principals = source.get(MACHINE_PRINCIPALS_VAR)
+        machine_principals = (("operator",) if principals is None
+                              else tuple(p.strip() for p in principals.split(",") if p.strip()))
         return cls(
             host=host,
             port=port,
@@ -225,6 +241,8 @@ class WebConfig:
             memory=_flag(source.get(MEMORY_VAR), MEMORY_VAR, default=True),
             conversation_search=_flag(source.get(CONVERSATION_SEARCH_VAR), CONVERSATION_SEARCH_VAR, default=True),
             streaming=_flag(source.get(STREAMING_VAR), STREAMING_VAR, default=True),
+            machine_socket=machine_socket,
+            machine_principals=machine_principals,
         )
 
 

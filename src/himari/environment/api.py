@@ -35,6 +35,11 @@ class BindingObservation(DeepFrozen):
     binding_id: BindingId
     status: ConnectionStatus
     observed_at: datetime
+    # What the model is told of the Binding's place, when the Environment
+    # knows it (V3-P74 §10.5): the working directory as the model writes
+    # paths, and the folders this Conversation may write. None/(): not given.
+    working_directory: str | None = None
+    writable: tuple[str, ...] = ()
 
 
 @runtime_checkable

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import posixpath
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -52,7 +52,7 @@ from himari.tool.api import (
 )
 
 if TYPE_CHECKING:
-    from himari.environment.inside import InsideEnvironment
+    from himari.environment.inside import InsideEnvironment, InsideFiles
 
 MAX_READ_BYTES = 256 * 1024  # acquisition (V3-051)
 MAX_OBSERVATION_BYTES = 64 * 1024  # shown to the model (V3-051)
@@ -72,10 +72,12 @@ _BINDING_ARG: dict[str, JsonValue] = {
 }
 
 
-def _schema(properties: dict[str, JsonValue], required: list[str]) -> dict[str, JsonValue]:
+def _schema(properties: dict[str, JsonValue], required: list[str], *, binding: bool = True) -> dict[str, JsonValue]:
+    """``binding``: the optional ``workspace_binding_id`` (Inside; the machine
+    Environment picks a Workspace by path instead, V3-P74 §8.4)."""
     return {
         "type": "object",
-        "properties": {**properties, "workspace_binding_id": _BINDING_ARG},
+        "properties": {**properties, **({"workspace_binding_id": _BINDING_ARG} if binding else {})},
         "required": list(required),
         "additionalProperties": False,
     }
@@ -175,32 +177,36 @@ class ListFiles(_InsideTool):
 
     def act(self, root_fd: int, relative: str, args: Mapping[str, Any]) -> ToolOutcome:
         entries, more = fs.list_directory(root_fd, relative, MAX_LIST_ENTRIES)
-        shown_path = fs.display(relative)
-        # Budget the final text: the header (with the widest possible count)
-        # and the partial-listing footer are reserved before any entry.
-        widest_header = f"{shown_path} ({MAX_LIST_ENTRIES} entries shown)"
-        budget = MAX_OBSERVATION_BYTES - len(widest_header.encode()) - len(self.PARTIAL.encode()) - 2
-        lines: list[str] = []
-        for e in entries:
-            if e.kind == "directory":
-                line = f"{e.name}/"
-            elif e.kind == "file":
-                line = f"{e.name}  ({e.size} bytes)"
-            else:
-                line = f"{e.name}  [{e.kind}]"
-            cost = len(line.encode()) + 1
-            if cost > budget:
-                more = True
-                break
-            budget -= cost
-            lines.append(line)
-        header = f"{shown_path} ({len(lines)} entries shown)"
-        body = "\n".join([header, *lines, *([self.PARTIAL] if more else [])])
-        return ToolOutcome(
-            ToolStatus.SUCCEEDED,
-            _text(body),
-            raw_result={"path": shown_path, "count": len(lines), "truncated": more},
-        )
+        return listing_outcome(fs.display(relative), entries, more)
+
+
+def listing_outcome(shown_path: str, entries: list[fs.Entry], more: bool) -> ToolOutcome:
+    """A directory listing as the model reads it (shared with the machine Environment)."""
+    # Budget the final text: the header (with the widest possible count)
+    # and the partial-listing footer are reserved before any entry.
+    widest_header = f"{shown_path} ({MAX_LIST_ENTRIES} entries shown)"
+    budget = MAX_OBSERVATION_BYTES - len(widest_header.encode()) - len(ListFiles.PARTIAL.encode()) - 2
+    lines: list[str] = []
+    for e in entries:
+        if e.kind == "directory":
+            line = f"{e.name}/"
+        elif e.kind == "file":
+            line = f"{e.name}  ({e.size} bytes)"
+        else:
+            line = f"{e.name}  [{e.kind}]"
+        cost = len(line.encode()) + 1
+        if cost > budget:
+            more = True
+            break
+        budget -= cost
+        lines.append(line)
+    header = f"{shown_path} ({len(lines)} entries shown)"
+    body = "\n".join([header, *lines, *([ListFiles.PARTIAL] if more else [])])
+    return ToolOutcome(
+        ToolStatus.SUCCEEDED,
+        _text(body),
+        raw_result={"path": shown_path, "count": len(lines), "truncated": more},
+    )
 
 
 def _visible(data: bytes, budget: int) -> tuple[str, int]:
@@ -234,70 +240,78 @@ class ReadFile(_InsideTool):
     }
     required = ["path"]
 
-    def _image(self, root_fd: int, relative: str, shown: str, size: int, sniffed: SniffedImage) -> ToolOutcome:
+    def act(self, root_fd: int, relative: str, args: Mapping[str, Any]) -> ToolOutcome:
+        offset = read_offset(args)
+        data, size = fs.read_file(root_fd, relative, MAX_READ_BYTES, offset)
         limit = self._env.files.max_bytes if self._env.files is not None else DEFAULT_FILE_MAX_BYTES
+        return read_outcome(fs.display(relative), data, size, offset,
+                            lambda: fs.read_file(root_fd, relative, limit)[0], limit,
+                            documents=self._env.documents is not None)
+
+
+def read_offset(args: Mapping[str, Any]) -> int:
+    offset = args.get("offset", 0)
+    return offset if isinstance(offset, int) and not isinstance(offset, bool) and offset > 0 else 0
+
+
+def _read_notice(offset: int, end: int, size: int) -> str:
+    if offset == 0:
+        return f"\n[truncated: only the first {end} bytes of this {size}-byte file are shown; read on with offset={end}]"
+    return f"\n[truncated: shown bytes {offset}-{end} of {size}; read on with offset={end}]"
+
+
+def read_outcome(shown: str, data: bytes, size: int, offset: int, whole: Callable[[], bytes], limit: int, *,
+                 documents: bool) -> ToolOutcome:
+    """``read_file``'s result from up to MAX_READ_BYTES read at ``offset``
+    (shared with the machine Environment). ``whole`` reads the file from
+    its start, up to ``limit`` bytes, for an image."""
+    if offset >= size and size:
+        return ToolOutcome(ToolStatus.SUCCEEDED, _text(f"{shown} ({size} bytes): offset {offset} is past the end"),
+                           raw_result={"path": shown, "size": size, "offset": offset, "chars_shown": 0})
+    sniffed = sniff_image(data[:IMAGE_HEAD_BYTES]) if offset == 0 else None
+    if sniffed is not None:  # V3-P67 §5 (Q3): the image itself, for a model that sees images
         line = f"{shown} ({size} bytes): {sniffed.media_type} {sniffed.width}×{sniffed.height}"
         raw: dict[str, JsonValue] = {"path": shown, "size": size, "image": sniffed.media_type,
                                      "width": sniffed.width, "height": sniffed.height}
         if size > limit:
             return ToolOutcome(ToolStatus.SUCCEEDED, _text(f"{line}; too large to show"), raw_result=raw)
-        data, _ = fs.read_file(root_fd, relative, limit)
         return ToolOutcome(ToolStatus.SUCCEEDED, _text(line), raw_result=raw,
-                           result_images=(ResultImage(data, sniffed.media_type),))
-
-    @staticmethod
-    def _notice(offset: int, end: int, size: int) -> str:
-        if offset == 0:
-            return f"\n[truncated: only the first {end} bytes of this {size}-byte file are shown; read on with offset={end}]"
-        return f"\n[truncated: shown bytes {offset}-{end} of {size}; read on with offset={end}]"
-
-    def act(self, root_fd: int, relative: str, args: Mapping[str, Any]) -> ToolOutcome:
-        offset = args.get("offset", 0)
-        offset = offset if isinstance(offset, int) and not isinstance(offset, bool) and offset > 0 else 0
-        data, size = fs.read_file(root_fd, relative, MAX_READ_BYTES, offset)
-        shown = fs.display(relative)
-        if offset >= size and size:
-            return ToolOutcome(ToolStatus.SUCCEEDED, _text(f"{shown} ({size} bytes): offset {offset} is past the end"),
-                               raw_result={"path": shown, "size": size, "offset": offset, "chars_shown": 0})
-        sniffed = sniff_image(data[:IMAGE_HEAD_BYTES]) if offset == 0 else None
-        if sniffed is not None:  # V3-P67 §5 (Q3): the image itself, for a model that sees images
-            return self._image(root_fd, relative, shown, size, sniffed)
-        if b"\0" in data:
-            return ToolOutcome(
-                ToolStatus.SUCCEEDED,
-                _text(f"{shown} ({size} bytes): binary file, content not shown"
-                      + ("; read PDF, Office and HWPX documents with read_document" if self._env.documents is not None
-                         else "")),
-                raw_result={"path": shown, "size": size, "binary": True},
-            )
-        # Invalid UTF-8 policy: show invalid bytes as U+FFFD (which can triple
-        # the byte count) and say so; the budget applies to the final encoded
-        # text, header and notices included. Judged on the part shown, so a
-        # read window ending inside a character is not "invalid" (PR #59 C12).
-        def header(invalid: bool) -> str:
-            return (f"{shown} ({size} bytes" + (f", from byte {offset}" if offset else "")
-                    + (", not valid UTF-8: invalid bytes shown as U+FFFD" if invalid else "") + ")\n")
-
-        budget = MAX_OBSERVATION_BYTES - len(header(True).encode()) - len(self._notice(offset, size, size).encode())
-        visible, covered = _visible(data, budget)
-        part = data[:covered]
-        invalid_utf8 = "\ufffd" in part.decode("utf-8", errors="replace") and "\ufffd".encode() not in part
-        end = offset + covered
-        truncated = end < size
-        notice = self._notice(offset, end, size) if truncated else ""
+                           result_images=(ResultImage(whole(), sniffed.media_type),))
+    if b"\0" in data:
         return ToolOutcome(
             ToolStatus.SUCCEEDED,
-            _text(header(invalid_utf8) + visible + notice),
-            raw_result={
-                "path": shown,
-                "size": size,
-                "offset": offset,
-                "next_offset": end if truncated else None,
-                "chars_shown": len(visible),
-                "truncated": truncated,
-                "invalid_utf8": invalid_utf8,
-            },
+            _text(f"{shown} ({size} bytes): binary file, content not shown"
+                  + ("; read PDF, Office and HWPX documents with read_document" if documents else "")),
+            raw_result={"path": shown, "size": size, "binary": True},
         )
+    # Invalid UTF-8 policy: show invalid bytes as U+FFFD (which can triple
+    # the byte count) and say so; the budget applies to the final encoded
+    # text, header and notices included. Judged on the part shown, so a
+    # read window ending inside a character is not "invalid" (PR #59 C12).
+    def header(invalid: bool) -> str:
+        return (f"{shown} ({size} bytes" + (f", from byte {offset}" if offset else "")
+                + (", not valid UTF-8: invalid bytes shown as U+FFFD" if invalid else "") + ")\n")
+
+    budget = MAX_OBSERVATION_BYTES - len(header(True).encode()) - len(_read_notice(offset, size, size).encode())
+    visible, covered = _visible(data, budget)
+    part = data[:covered]
+    invalid_utf8 = "\ufffd" in part.decode("utf-8", errors="replace") and "\ufffd".encode() not in part
+    end = offset + covered
+    truncated = end < size
+    notice = _read_notice(offset, end, size) if truncated else ""
+    return ToolOutcome(
+        ToolStatus.SUCCEEDED,
+        _text(header(invalid_utf8) + visible + notice),
+        raw_result={
+            "path": shown,
+            "size": size,
+            "offset": offset,
+            "next_offset": end if truncated else None,
+            "chars_shown": len(visible),
+            "truncated": truncated,
+            "invalid_utf8": invalid_utf8,
+        },
+    )
 
 
 class WriteFile(_InsideTool):
@@ -535,30 +549,9 @@ class PresentFile(_InsideTool):
             return ToolOutcome(ToolStatus.DENIED, _text("files cannot be given on this server", error=True))
         if ctx.binding is None or ctx.workspace is None:
             return ToolOutcome(ToolStatus.DENIED, _text("no workspace is bound to this conversation", error=True))
-        # Checked before anything is stored (review N1): one Conversation's
-        # Tools run one at a time, so the sum cannot change before the commit.
-        given = await files.catalog.presented_bytes_since(ctx.scope, datetime.now(UTC) - PRESENT_WINDOW)
-        loaded = await run_blocking(self._load, self._env.host_root(ctx.binding.workspace_id),
-                                    ctx.workspace.cwd_relative, invocation.arguments.get("path"),
-                                    files.max_bytes, PRESENT_LIMIT_BYTES - given)
-        if isinstance(loaded, ToolOutcome):
-            return loaded
-        shown, data = loaded
-        try:
-            blob = await files.blobs.put(ctx.scope.principal_id, _once(data), files.max_bytes)
-        except DataError as error:
-            if error.code is DataErrorCode.STORE_FULL:
-                return ToolOutcome(ToolStatus.FAILED, _text(f"{shown}: the file store is full; nothing was given",
-                                                            error=True), raw_result={"refused": "store_full"})
-            if error.code is DataErrorCode.TOO_LARGE:
-                return ToolOutcome(ToolStatus.FAILED, _text(f"{shown}: larger than {_size(files.max_bytes)}",
-                                                            error=True), raw_result={"refused": "too_large"})
-            raise
-        name = clean_file_name(posixpath.basename(shown))
-        presented = PresentedFile(blob, name, clean_media_type(None, name), shown)
-        return ToolOutcome(ToolStatus.SUCCEEDED, _text(f"Presented {name} to the user ({_size(blob.size)})."),
-                           raw_result={"path": shown, "size": blob.size, "sha256": blob.sha256},
-                           presented_files=(presented,))
+        host_root, cwd = self._env.host_root(ctx.binding.workspace_id), ctx.workspace.cwd_relative
+        return await present(files, ctx, invocation.arguments.get("path"),
+                             lambda raw, most, allowance: run_blocking(self._load, host_root, cwd, raw, most, allowance))
 
     @staticmethod
     def _load(host_root: str, cwd: str, raw_path: object, max_bytes: int,
@@ -570,22 +563,63 @@ class PresentFile(_InsideTool):
             with fs.open_root(host_root) as root_fd:
                 before = fs.identity(root_fd, relative)  # regular, one link
                 size = before[2]
-                if size > max_bytes:
-                    return ToolOutcome(ToolStatus.FAILED, _text(
-                        f"{shown}: {_size(size)}, larger than the {_size(max_bytes)} a file may be", error=True),
-                        raw_result={"refused": "too_large", "size": size})
-                if size > allowance:
-                    return ToolOutcome(ToolStatus.FAILED, _text(
-                        f"{shown}: too much was given in the last hour (limit {_size(PRESENT_LIMIT_BYTES)}); "
-                        "nothing was given", error=True), raw_result={"refused": "limit", "size": size})
+                refused = present_refusal(shown, size, max_bytes, allowance)
+                if refused is not None:
+                    return refused
                 data, total, opened = fs.read_file_with_identity(root_fd, relative, size + 1)
                 if opened != before or fs.identity(root_fd, relative) != before or len(data) != total:
-                    return ToolOutcome(ToolStatus.FAILED, _text(
-                        f"{shown}: the file changed while it was being read; nothing was given", error=True),
-                        raw_result={"refused": "changed"})
+                    return present_changed(shown)
                 return shown, data
         except fs.FsError as error:
             return _failure(shown, error)
+
+
+def present_refusal(shown: str, size: int, max_bytes: int, allowance: int) -> ToolOutcome | None:
+    if size > max_bytes:
+        return ToolOutcome(ToolStatus.FAILED, _text(
+            f"{shown}: {_size(size)}, larger than the {_size(max_bytes)} a file may be", error=True),
+            raw_result={"refused": "too_large", "size": size})
+    if size > allowance:
+        return ToolOutcome(ToolStatus.FAILED, _text(
+            f"{shown}: too much was given in the last hour (limit {_size(PRESENT_LIMIT_BYTES)}); "
+            "nothing was given", error=True), raw_result={"refused": "limit", "size": size})
+    return None
+
+
+def present_changed(shown: str) -> ToolOutcome:
+    return ToolOutcome(ToolStatus.FAILED, _text(
+        f"{shown}: the file changed while it was being read; nothing was given", error=True),
+        raw_result={"refused": "changed"})
+
+
+PresentFetch = Callable[[object, int, int], Awaitable["tuple[str, bytes] | ToolOutcome"]]
+
+
+async def present(files: InsideFiles, ctx: ToolContext, raw_path: object, fetch: PresentFetch) -> ToolOutcome:
+    """``present_file`` once the bytes are loaded by ``fetch(path, max
+    bytes, allowance)`` (shared with the machine Environment)."""
+    # Checked before anything is stored (review N1): one Conversation's
+    # Tools run one at a time, so the sum cannot change before the commit.
+    given = await files.catalog.presented_bytes_since(ctx.scope, datetime.now(UTC) - PRESENT_WINDOW)
+    loaded = await fetch(raw_path, files.max_bytes, PRESENT_LIMIT_BYTES - given)
+    if isinstance(loaded, ToolOutcome):
+        return loaded
+    shown, data = loaded
+    try:
+        blob = await files.blobs.put(ctx.scope.principal_id, _once(data), files.max_bytes)
+    except DataError as error:
+        if error.code is DataErrorCode.STORE_FULL:
+            return ToolOutcome(ToolStatus.FAILED, _text(f"{shown}: the file store is full; nothing was given",
+                                                        error=True), raw_result={"refused": "store_full"})
+        if error.code is DataErrorCode.TOO_LARGE:
+            return ToolOutcome(ToolStatus.FAILED, _text(f"{shown}: larger than {_size(files.max_bytes)}",
+                                                        error=True), raw_result={"refused": "too_large"})
+        raise
+    name = clean_file_name(posixpath.basename(shown))
+    presented = PresentedFile(blob, name, clean_media_type(None, name), shown)
+    return ToolOutcome(ToolStatus.SUCCEEDED, _text(f"Presented {name} to the user ({_size(blob.size)})."),
+                       raw_result={"path": shown, "size": blob.size, "sha256": blob.sha256},
+                       presented_files=(presented,))
 
 
 def file_tools(env: InsideEnvironment) -> list[_InsideTool]:

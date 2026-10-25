@@ -89,6 +89,7 @@ def build_runtime(
     registry = ToolRegistry([AskUserTool(), *tools, *(memory_tools(data) if memory else ()),
                              *(conversation_search_tools(data, compacted_through) if conversation_search else ())],
                             allow_require_user=allow_require_user_tools)
+    environments = tuple(environments)
     for env in environments:
         for handler in env.tools():
             registry.register(handler)
@@ -111,7 +112,8 @@ def build_runtime(
         instructions = (*instructions, TURN_GUIDANCE)
     driver = Driver(
         log=data,
-        loader=ContextLoader(data, data, registry, instructions, access, source_notes, files=data),
+        loader=ContextLoader(data, data, registry, instructions, access, source_notes, files=data,
+                             environments={env.kind: env for env in environments}),
         composer=Composer(),
         provider=provider,
         dispatcher=dispatcher,

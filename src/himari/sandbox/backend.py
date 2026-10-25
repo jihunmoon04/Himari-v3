@@ -329,89 +329,102 @@ class SandboxBackend:
         """The one protected spawn (used by ``run`` and by the self-test).
         Returns only after the helper reported enforcement; otherwise the
         tree is killed and SandboxSetupError raised (argv never ran)."""
-        if self._capability is None:
+        capability = self._capability
+        if capability is None:
             raise SandboxUnavailableError(SandboxState.UNAVAILABLE.value)
         if not cwd.startswith(WORKSPACE_MOUNT):
             raise ValueError("cwd must be under /workspace")
         argv = validate_argv(argv)
-        sync_r, sync_w = os.pipe()
-        try:
-            os.set_blocking(sync_r, False)
-            started = time.monotonic()
-            spawn = asyncio.ensure_future(asyncio.create_subprocess_exec(
-                *bwrap_arguments(self._capability, root_fd, cwd, sync_w, argv, self.toolkit_fd),
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                env={},
-                pass_fds=(sync_w, root_fd, *(() if self.toolkit_fd is None else (self.toolkit_fd,))),
-                start_new_session=True,
-            ))
-            try:
-                # The spawn itself is never interrupted: asyncio's own cleanup
-                # of a cancelled spawn SIGKILLs only the outer bwrap, which can
-                # orphan its child while that still waits for the uid map
-                # (before --die-with-parent applies) and then hang on the
-                # child's copy of the pipes. Instead let the spawn finish and
-                # kill the whole process group, which the child still shares.
-                process = await asyncio.shield(spawn)
-            except asyncio.CancelledError:
-                await _abandon(spawn)
-                raise
-            except OSError as error:
-                raise SandboxSetupError("bwrap could not start") from error
-            finally:
-                # Both ends are closed on every path, cancellation included.
-                os.close(sync_w)
-            return await self._supervise(process, sync_r, timeout, started)
-        finally:
-            os.close(sync_r)
+        toolkit_fd = self.toolkit_fd
+        return await protected_run(
+            lambda sync_w: bwrap_arguments(capability, root_fd, cwd, sync_w, argv, toolkit_fd),
+            (root_fd, *(() if toolkit_fd is None else (toolkit_fd,))), timeout)
 
-    async def _supervise(
-        self, process: asyncio.subprocess.Process, sync_r: int, timeout: float, started: float
-    ) -> CommandResult:
-        tasks: list[asyncio.Task[tuple[bytes, int]]] = []
-        finished = False
-        try:
-            sync = await _wait_sync(sync_r, SETUP_TIMEOUT_SECONDS)
-            if sync != landlock_helper.SYNC_OK:
-                raise SandboxSetupError("the sandbox did not report enforcement")
 
-            tasks = [
-                asyncio.create_task(_drain(process.stdout, MAX_OUTPUT_BYTES)),
-                asyncio.create_task(_drain(process.stderr, MAX_OUTPUT_BYTES)),
-            ]
-            timed_out = False
-            try:
-                await asyncio.wait_for(process.wait(), timeout)
-            except TimeoutError:
-                timed_out = True
-                _kill_tree(process.pid)
-                await process.wait()
-            try:
-                (stdout, stdout_total), (stderr, stderr_total) = await asyncio.wait_for(
-                    asyncio.gather(*tasks), _DRAIN_GRACE_SECONDS
-                )
-            except TimeoutError:
-                stdout = stderr = b""
-                stdout_total = stderr_total = 0
-            finished = True
+async def protected_run(build: Callable[[int], list[str]], pass_fds: Sequence[int], timeout: float, *,
+                        max_output: int = MAX_OUTPUT_BYTES) -> CommandResult:
+    """Spawn ``build(sync_w)`` (bwrap arguments around the helper) with only
+    ``pass_fds`` and the sync pipe passed, wait for the helper's report and
+    supervise the command: the tree never outlives this call (V3-P41).
+    Every profile's spawn goes through here."""
+    sync_r, sync_w = os.pipe()
+    try:
+        os.set_blocking(sync_r, False)
+        started = time.monotonic()
+        spawn = asyncio.ensure_future(asyncio.create_subprocess_exec(
+            *build(sync_w),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env={},
+            pass_fds=(sync_w, *pass_fds),
+            start_new_session=True,
+        ))
+        try:
+            # The spawn itself is never interrupted: asyncio's own cleanup
+            # of a cancelled spawn SIGKILLs only the outer bwrap, which can
+            # orphan its child while that still waits for the uid map
+            # (before --die-with-parent applies) and then hang on the
+            # child's copy of the pipes. Instead let the spawn finish and
+            # kill the whole process group, which the child still shares.
+            process = await asyncio.shield(spawn)
+        except asyncio.CancelledError:
+            await _abandon(spawn)
+            raise
+        except OSError as error:
+            raise SandboxSetupError("bwrap could not start") from error
         finally:
-            if not finished:
-                # Cancellation, setup failure or any error after spawn: the
-                # command must not outlive this call (it could keep writing
-                # after the Workspace lock is released).
-                _kill_tree(process.pid)
-                await _reap(process)
-            for task in tasks:
-                if not task.done():
-                    task.cancel()
-        return CommandResult(
-            exit_code=None if timed_out else process.returncode,
-            timed_out=timed_out,
-            stdout=stdout,
-            stderr=stderr,
-            stdout_total=stdout_total,
-            stderr_total=stderr_total,
-            elapsed_ms=int((time.monotonic() - started) * 1000),
-        )
+            # Both ends are closed on every path, cancellation included.
+            os.close(sync_w)
+        return await _supervise(process, sync_r, timeout, started, max_output)
+    finally:
+        os.close(sync_r)
+
+
+async def _supervise(process: asyncio.subprocess.Process, sync_r: int, timeout: float, started: float,
+                     max_output: int) -> CommandResult:
+    tasks: list[asyncio.Task[tuple[bytes, int]]] = []
+    finished = False
+    try:
+        sync = await _wait_sync(sync_r, SETUP_TIMEOUT_SECONDS)
+        if sync != landlock_helper.SYNC_OK:
+            raise SandboxSetupError("the sandbox did not report enforcement")
+
+        tasks = [
+            asyncio.create_task(_drain(process.stdout, max_output)),
+            asyncio.create_task(_drain(process.stderr, MAX_OUTPUT_BYTES)),
+        ]
+        timed_out = False
+        try:
+            await asyncio.wait_for(process.wait(), timeout)
+        except TimeoutError:
+            timed_out = True
+            _kill_tree(process.pid)
+            await process.wait()
+        try:
+            (stdout, stdout_total), (stderr, stderr_total) = await asyncio.wait_for(
+                asyncio.gather(*tasks), _DRAIN_GRACE_SECONDS
+            )
+        except TimeoutError:
+            stdout = stderr = b""
+            stdout_total = stderr_total = 0
+        finished = True
+    finally:
+        if not finished:
+            # Cancellation, setup failure or any error after spawn: the
+            # command must not outlive this call (it could keep writing
+            # after the Workspace lock is released).
+            _kill_tree(process.pid)
+            await _reap(process)
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+    return CommandResult(
+        exit_code=None if timed_out else process.returncode,
+        timed_out=timed_out,
+        stdout=stdout,
+        stderr=stderr,
+        stdout_total=stdout_total,
+        stderr_total=stderr_total,
+        elapsed_ms=int((time.monotonic() - started) * 1000),
+    )

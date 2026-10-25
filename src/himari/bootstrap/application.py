@@ -40,7 +40,7 @@ import hashlib
 import logging
 import re
 import os
-from collections.abc import AsyncIterator, Iterable, Mapping, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
@@ -103,6 +103,7 @@ from himari.imaging import ImageViews, runtime_roots
 # For the interfaces (V3-P66 §9): how placing an upload can be refused.
 from himari.environment.inside import UploadsFolderUnusable as UploadsFolderUnusable
 from himari.environment.inside import WorkspaceBusy as WorkspaceBusy
+from himari.environment.machine import MACHINE, MachineEnvironment, MachineUnavailable, machine_workspace_for
 from himari.sandbox import identity
 from himari.sandbox.api import SandboxAdmissionError, SandboxState, ServerProfile
 from himari.sandbox.backend import SandboxBackend, discover_capability, supports_tmp_size
@@ -130,7 +131,7 @@ DATABASE_NAME = "himari.db"
 DEFAULT_TRASH_DAYS = 30  # V3-P65 Q1 (the owner's choice, 2026-10-21)
 CLEANUP_SECONDS = 3600.0  # how often trash past its days is purged
 TRASH_STOP_SECONDS = 30.0  # how long a running job may take to stop before a trash is refused (§7.1)
-BUILT_IN_NAMESPACES = frozenset({"inside"})  # Tool ids that are HIMARI's own, not an external server's
+BUILT_IN_NAMESPACES = frozenset({"inside", "machine"})  # Tool ids that are HIMARI's own, not an external server's
 PLACE_LOCK_SECONDS = 60.0  # how long sending waits for the Workspace write lock (V3-P66 review N4)
 
 log = logging.getLogger(__name__)
@@ -560,6 +561,10 @@ class Application:
     memory_enabled: bool = False  # V3-P71 §9: the memory Tools and notes (HIMARI_MEMORY)
     conversation_search_enabled: bool = False  # V3-P72 §9 (HIMARI_CONVERSATION_SEARCH)
     streaming_enabled: bool = False  # V3-P73 §9 (HIMARI_STREAMING)
+    # V3-P74: the machine Environment (its runner's socket was configured) and
+    # the principals whose new Conversations use it instead of Inside (Q1).
+    machine: MachineEnvironment | None = None
+    machine_principals: frozenset[PrincipalId] = frozenset()
     # V3-P65 §7.3: one lifecycle lock per Conversation (P0: one server process),
     # kept only while some call holds or waits for it (PR #56 review C1).
     _lifecycle: dict[ConversationId, _Lifecycle] = field(default_factory=dict, repr=False)
@@ -597,6 +602,8 @@ class Application:
         memory: bool = True,  # V3-P71 §9: HIMARI_MEMORY=0 turns it off (the notes stay)
         conversation_search: bool = True,  # V3-P72 §9: HIMARI_CONVERSATION_SEARCH=0 turns its Tools off
         streaming: bool = True,  # V3-P73 §9: HIMARI_STREAMING=0 asks no model for a stream
+        machine_socket: str | None = None,  # V3-P74: HIMARI_MACHINE_SOCKET; None: no machine Environment
+        machine_principals: Iterable[str] = ("operator",),  # whose new Conversations use it (Q1)
     ) -> Application:
         if file_max_bytes < 1 or file_max_bytes > file_store_max_bytes:
             raise ValueError("a file's limit must be positive and within the file store's (V3-P66)")
@@ -678,9 +685,20 @@ class Application:
                 log.warning("commands cannot run (sandbox %s): the model can read attached text files%s, "
                             "but cannot run scripts on other files", state.value,
                             " and PDF, Office and HWPX documents" if reader is not None else "")
+            machine = None
+            if machine_socket is not None:
+                machine = MachineEnvironment(machine_socket,
+                                             files=InsideFiles(store.blobs, SqliteData(store), file_max_bytes),
+                                             documents=reader)
+                try:
+                    hello = await machine.hello()
+                    log.info("machine runner: sandbox %s, HIMARI home %s", hello.get("state"), hello.get("himari_home"))
+                except Exception as error:  # noqa: BLE001 — the Tools say so until it answers
+                    log.warning("the machine runner does not answer yet (%s)", type(error).__name__)
             views = await _image_views(root, sandbox)
             base = DEFAULT_INSTRUCTIONS if instructions is None else instructions
-            runtime = build_runtime(provider, store=store, environments=[inside], tools=[*tools, *mcp.handlers, *mcp.resource_tools],
+            runtime = build_runtime(provider, store=store, environments=[inside, *([machine] if machine else [])],
+                                    tools=[*tools, *mcp.handlers, *mcp.resource_tools],
                                     models=catalog,
                                     instructions=(*base, *((ATTACHMENT_NOTE,) if uploads_work else ()),
                                                   TOOL_IMAGES_NOTE, PROGRESS_NOTE,
@@ -707,7 +725,8 @@ class Application:
                           default_budget.limit_tokens, secret, mcp, turn, tuple(unverified), trash_days,
                           file_max_bytes, uploads_work, views, tuple(image_models), reader, toolkit,
                           memory_enabled=memory, conversation_search_enabled=conversation_search,
-                          streaming_enabled=streaming)
+                          streaming_enabled=streaming, machine=machine,
+                          machine_principals=frozenset(PrincipalId(p) for p in machine_principals))
         if cleanup_seconds is not None:
             application._cleanup = asyncio.create_task(application._purge_periodically(cleanup_seconds),
                                                        name="trash-cleanup")
@@ -979,7 +998,12 @@ class Application:
         return await self.data.restore_memory(principal, before, expected_revision=revision)
 
     async def create_conversation(self, principal: PrincipalId, *, title: str | None = None) -> ConversationId:
-        """T0 with the principal's Inside Workspace activated (provisioned first)."""
+        """T0 with the principal's Inside Workspace activated (provisioned
+        first) — or, for a machine principal, the machine Environment (V3-P74
+        Q1: new Conversations only; its folder is made on first use)."""
+        if self.machine is not None and principal in self.machine_principals:
+            return await self.data.create_conversation(
+                principal, title=title, activations=(InitialActivation(MACHINE, machine_workspace_for(principal)),))
         workspace = workspace_for(principal)
         self.inside.provision(workspace)
         return await self.data.create_conversation(
@@ -1043,16 +1067,26 @@ class Application:
             if self.runner.status(scope).running:
                 raise ControlError(ControlErrorCode.BUSY, scope.conversation_id)
             workspace_id, cwd = await self._workspace(scope)
-            async with self.inside.locked(workspace_id, PLACE_LOCK_SECONDS):
-                # Read again under the lock: another tab may have placed them (review C4).
-                fresh = await self.data.read_file_records(scope, [(r.file_id, r.version) for r in records])
-                for index, record in enumerate(fresh):
-                    await self._place(scope, workspace_id, cwd, record, first=index == 0)
+            machine = self.machine if self.machine is not None and self.machine.owns(workspace_id) else None
+            try:
+                if machine is not None:
+                    locked = machine.locked(workspace_id, PLACE_LOCK_SECONDS, conversation_id=scope.conversation_id,
+                                            cwd_relative=cwd)
+                    placer = _machine_placer(machine, scope.conversation_id, cwd)
+                else:
+                    locked = self.inside.locked(workspace_id, PLACE_LOCK_SECONDS)
+                    placer = _inside_placer(self.inside, workspace_id, cwd)
+                async with locked:
+                    # Read again under the lock: another tab may have placed them (review C4).
+                    fresh = await self.data.read_file_records(scope, [(r.file_id, r.version) for r in records])
+                    for index, record in enumerate(fresh):
+                        await self._place(scope, placer, record, first=index == 0)
+            except MachineUnavailable:
+                raise FilesUnavailable(scope.conversation_id) from None
             blocks = ((TextBlock(text),) if text else ()) + tuple(AttachmentRef(r.file_id, r.version) for r in records)
             return await self.runner.submit(scope, UserMessage(blocks))
 
-    async def _place(self, scope: TrustedScope, workspace_id: WorkspaceId, cwd: str, record: FileRecord, *,
-                     first: bool) -> None:
+    async def _place(self, scope: TrustedScope, placer: _Placer, record: FileRecord, *, first: bool) -> None:
         """One upload into ``uploads/`` (§5.2), its path recorded before it is
         given (owner review B1): a crash after the rename leaves a file its
         record names, and a retry finds it there by its bytes.
@@ -1060,23 +1094,23 @@ class Application:
         Already there with its bytes: nothing to do, and its stored bytes are
         not needed (PR #59 review C11). Otherwise: a durable copy, a free name
         (the recorded one if it is free), the name recorded, then the rename."""
-        if record.workspace_path is not None and await self.inside.holds(
-                workspace_id, cwd, record.workspace_path, record.size, record.blob.sha256):
+        if record.workspace_path is not None and await placer.holds(
+                record.workspace_path, record.size, record.blob.sha256):
             return
         source = self.data.blobs.open(record.blob)  # here: the store is not thread-safe
-        temp = await self.inside.copy_in(workspace_id, cwd, source, clear=first)
+        temp = await placer.copy_in(source, first)
         recorded = record.workspace_path
         try:
             for _ in range(3):  # a name is taken only if something outside the lock wrote it
-                path = await self.inside.free_path(workspace_id, cwd, record.name, recorded)
+                path = await placer.free_path(record.name, recorded)
                 if path != recorded:
                     await self.data.set_placement(scope, record.file_id, path)
                     recorded = path
-                if await self.inside.commit_copy(workspace_id, cwd, temp, path):
+                if await placer.commit_copy(temp, path):
                     return
             raise FilesUnavailable(f"no free name for {record.name}")
         finally:
-            await self.inside.discard_copy(workspace_id, cwd, temp)
+            await placer.discard_copy(temp)
 
     async def files(self, scope: TrustedScope, *, limit: int = 50, offset: int = 0) -> Sequence[FileRecord]:
         return await self.data.read_files(scope, limit=limit, offset=offset)
@@ -1176,7 +1210,9 @@ class Application:
         async with self._exclusive(scope.conversation_id):
             trashed = await self.data.begin_purge(scope)  # owner and state first
             workspace = trashed.workspace
-            if workspace is not None:
+            if workspace is not None and self.machine is not None and self.machine.owns(workspace.workspace_id):
+                await self.machine.remove_conversation_folder(workspace.workspace_id, scope, workspace.cwd_relative)
+            elif workspace is not None:
                 await self.inside.remove_conversation_folder(workspace.workspace_id, scope, workspace.cwd_relative)
             await self.data.purge_conversation(scope)
             self.runner.forget(scope)
@@ -1238,6 +1274,37 @@ class Application:
         """Re-verify the private directories (e.g. before serving)."""
         for path in (self.data_root, self.data_root / "workspaces", self.data_root / "control"):
             check_private_dir(str(path))
+
+
+@dataclass(frozen=True)
+class _Placer:
+    """One upload's steps (V3-P66 §5.2) in a Conversation's folder: Inside's or the machine's."""
+
+    holds: Callable[[str, int, str], Awaitable[bool]]
+    copy_in: Callable[[BinaryIO, bool], Awaitable[str]]
+    free_path: Callable[[str, str | None], Awaitable[str]]
+    commit_copy: Callable[[str, str], Awaitable[bool]]
+    discard_copy: Callable[[str], Awaitable[None]]
+
+
+def _inside_placer(inside: InsideEnvironment, workspace_id: WorkspaceId, cwd: str) -> _Placer:
+    return _Placer(
+        holds=lambda path, size, sha256: inside.holds(workspace_id, cwd, path, size, sha256),
+        copy_in=lambda source, clear: inside.copy_in(workspace_id, cwd, source, clear=clear),
+        free_path=lambda name, preferred: inside.free_path(workspace_id, cwd, name, preferred),
+        commit_copy=lambda temp, path: inside.commit_copy(workspace_id, cwd, temp, path),
+        discard_copy=lambda temp: inside.discard_copy(workspace_id, cwd, temp),
+    )
+
+
+def _machine_placer(machine: MachineEnvironment, conversation_id: str, cwd: str) -> _Placer:
+    return _Placer(
+        holds=lambda path, size, sha256: machine.holds(conversation_id, cwd, path, size, sha256),
+        copy_in=lambda source, clear: machine.copy_in(conversation_id, cwd, source, clear=clear),
+        free_path=lambda name, preferred: machine.free_path(conversation_id, cwd, name, preferred),
+        commit_copy=lambda temp, path: machine.commit_copy(conversation_id, cwd, temp, path),
+        discard_copy=lambda temp: machine.discard_copy(conversation_id, cwd, temp),
+    )
 
 
 def _allowed(declared: UiCsp, policy: McpUiPolicy) -> UiCsp:

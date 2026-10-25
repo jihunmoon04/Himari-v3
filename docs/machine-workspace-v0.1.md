@@ -1,6 +1,6 @@
 # 머신 Workspace v0.1
 
-> 2026-10-25 · **PROPOSED (V3-P74)** · rev. 6 — 외부 재검수 4(HEAD fa79123) 통과. 소유자 결정 Q1~Q9 권고대로(2026-10-25, §17). rev. 5 — 외부 재검수 3(HEAD 903e7f1) 반영: N7 `socketpair`는 `SOCK_STREAM`만 허용(`SOCK_DGRAM` 쌍은 호스트 소켓으로 다시 연결된다, §6.6), N8 소켓 폴더는 `DirectoryMode=0755`(§4.1). 소유자 결정 Q1~Q9 대기(§17). rev. 4 — 외부 재검수 2(HEAD ea6e534) 반영: N4 호스트의 경로 Unix 소켓을 seccomp로 막음(§6.6, Q9), N5 runner 소켓은 systemd 소켓 단위가 그룹 `himari-v3`로 만듦(§4.1), N6 Q5 문구를 §6.5에 맞춤(§17). 소유자 결정 Q1~Q9 대기(§17). rev. 3 — 외부 재검수(HEAD a7eca31) 반영: N1 bundle fetch에만 `file` 전송 허용(§12), N2 숨김은 마지막에 가리고 실행 직전에 확인하는 불변 조건(§6.1), N3 runner 생존은 명령 OOM 격리까지만 보장(§6.5). rev. 2 — 외부 검수(HEAD 61200df) 반영: B1 기본 쓰기 범위를 대화 폴더로, 겹치는 Workspace는 한 충돌 영역(§3.2, §9.1), B2 파일 Tool은 디스크 파일시스템만·보이는 점 항목 줄임(§7, §8.2), B3 git push의 bundle 전달·대상·lock(§12), P2 등록 범위(§5.3)·링크 풀기(§8.3)·OOM(§6.5)·프록시 DNS(§11.3). 소유자 결정 Q1~Q8 대기(§17). rev. 1: 설계 초안.
+> 2026-10-25 · **PROPOSED (V3-P74)** · 1단계 구현(§20; 외부 검수 B1·B2 §20.4, 재검수 C1 §20.5). rev. 6 — 외부 재검수 4(HEAD fa79123) 통과. 소유자 결정 Q1~Q9 권고대로(2026-10-25, §17). rev. 5 — 외부 재검수 3(HEAD 903e7f1) 반영: N7 `socketpair`는 `SOCK_STREAM`만 허용(`SOCK_DGRAM` 쌍은 호스트 소켓으로 다시 연결된다, §6.6), N8 소켓 폴더는 `DirectoryMode=0755`(§4.1). 소유자 결정 Q1~Q9 대기(§17). rev. 4 — 외부 재검수 2(HEAD ea6e534) 반영: N4 호스트의 경로 Unix 소켓을 seccomp로 막음(§6.6, Q9), N5 runner 소켓은 systemd 소켓 단위가 그룹 `himari-v3`로 만듦(§4.1), N6 Q5 문구를 §6.5에 맞춤(§17). 소유자 결정 Q1~Q9 대기(§17). rev. 3 — 외부 재검수(HEAD a7eca31) 반영: N1 bundle fetch에만 `file` 전송 허용(§12), N2 숨김은 마지막에 가리고 실행 직전에 확인하는 불변 조건(§6.1), N3 runner 생존은 명령 OOM 격리까지만 보장(§6.5). rev. 2 — 외부 검수(HEAD 61200df) 반영: B1 기본 쓰기 범위를 대화 폴더로, 겹치는 Workspace는 한 충돌 영역(§3.2, §9.1), B2 파일 Tool은 디스크 파일시스템만·보이는 점 항목 줄임(§7, §8.2), B3 git push의 bundle 전달·대상·lock(§12), P2 등록 범위(§5.3)·링크 풀기(§8.3)·OOM(§6.5)·프록시 DNS(§11.3). 소유자 결정 Q1~Q8 대기(§17). rev. 1: 설계 초안.
 >
 > 소유자 방향(2026-10-24, 대화에서 정함):
 > - 개발용 Workspace를 따로 만들지 않는다. 기본 Workspace에서 git·C·Python·Java 같은 일반 개발이 되게 한다.
@@ -181,7 +181,7 @@ Unix 소켓의 `SCM_RIGHTS`로 열린 파일을 넘긴다.
 | 1 | `/dev`, `/proc` | 새 것 |
 | 2 | 붙인 Workspace들 | 같은 경로에 **읽기·쓰기**로 다시 묶음(확인한 디스크립터로 `--bind-fd`). 얕은 경로부터 |
 | 3 | 도구 캐시 | runner의 캐시 폴더를 읽기·쓰기로(§6.3) |
-| 4 | 숨김 목록(§7) | **마지막에** 가린다. 폴더는 빈 tmpfs를 올리고 바로 읽기 전용으로 다시 마운트, 파일은 `/dev/null`을 읽기 전용으로 묶음 |
+| 4 | 숨김 목록(§7) | **마지막에** 가린다. 폴더는 빈 tmpfs를 올리고 바로 읽기 전용으로 다시 마운트, 파일은 빈 읽기 전용 파일(`--ro-bind-data`, §20.2) |
 
 **불변 조건: 최종 마운트 트리에서 숨김 경로는 모두 가려져 있다.**
 - 숨김을 먼저 가리고 그 위 폴더를 Workspace로 다시 묶으면 가린 것이 사라진다. 이 서버에서 bwrap 0.9.0으로 재현했다(2026-10-25): `--tmpfs D/hidden --bind D D` 순서면 `D/hidden/token`이 읽히고, `--bind D D --tmpfs D/hidden` 순서면 없다. 그래서 숨김은 Workspace·캐시보다 **뒤에** 가린다. `/home/coder` 전체를 Workspace로 붙여도 `.ssh`는 가려진다.
@@ -266,7 +266,7 @@ V3-051 그대로다(기본 120초, 최대 600초, 출력 256 KiB 수집, 모델�
 - HIMARI·runner: `/srv/himari-v3`, `/etc/himari-v3`, `/etc/himari-runner`, `/opt/himari-v3`의 deployment 기록, `/run/himari-runner`, runner의 캐시 밖 상태 폴더.
 - 특수 파일시스템: 파일 Tool은 디스크 파일시스템만 연다(§8.2). 명령의 `/proc`·`/dev`·`/run`은 새로 만든 것이라 runner나 호스트의 것이 보이지 않는다(§6.1).
 - Calliope 데이터 `/var/lib/calliope`(이미 `coder`가 못 읽음, 방어용).
-- 다른 사용자의 홈(`/home/opc` 등, 이미 대부분 못 읽음).
+- ~~다른 사용자의 홈~~ → OS 권한에 맡긴다(§20.2). `/home/ubuntu`를 가리면 그 아래 Drive 마운트도 가려진다.
 - `/etc/shadow` 같은 것은 OS 권한이 이미 막는다.
 
 **어디서 막나:**
@@ -322,10 +322,11 @@ rev. 1은 Workspace 루트에서 `RESOLVE_BENEATH`로 열자고 했지만, 그 �
 - 비교하는 경로는 등록 때 정한 실제 경로(realpath)다. 같은 폴더가 bind mount로 두 경로에 보이는 경우는 등록 때 루트의 (장치, inode)가 이미 등록된 루트와 같으면 거부해 막는다. 하위 폴더까지 bind mount로 겹치는 경우는 찾지 않는다(§15).
 - 읽기는 lock을 잡지 않는다(지금과 같음).
 - lock은 HIMARI 프로세스 안에 있다. runner를 부르는 것은 HIMARI 하나뿐이라 충분하다(P0 단일 서버, V3-045).
+- lock은 runner 쪽 작업보다 먼저 풀리지 않는다(재검수 C1). runner는 요청의 작업이 끝난 뒤에만 연결을 닫는다. 취소된 명령은 죽이고 회수한 뒤에, 파일 작업은 스레드가 돌아온 뒤에 닫는다. runner가 멈출 때도 같다. 쓰기 요청(`api.WRITES`)을 취소한 HIMARI는 보내는 쪽만 닫아 취소를 알리고, runner가 연결을 닫을 때까지 기다린 뒤 lock을 놓는다. runner가 죽어도 연결이 닫히고, 그 작업도 함께 끝난다(스레드는 프로세스와, 명령은 `--die-with-parent`와 서비스 cgroup으로).
 
 ### 9.2 그 밖
 
-- 취소·결과 불명: 지금 Inside와 같다(V3-P41, V3-047). runner와의 연결이 명령 도중 끊기면 결과 불명(`UNKNOWN`)이다.
+- 취소·결과 불명: 지금 Inside와 같다(V3-P41, V3-047). runner와의 연결이 명령 도중 끊기면 결과 불명(`UNKNOWN`)이다. 이때도 runner 쪽 작업은 이미 끝나 있다(§9.1).
 - runner가 다시 시작하면 그 아래 명령은 모두 죽는다(`--die-with-parent`).
 
 ## 10. Workspace 등록과 붙이기 (Q-07, Q-09, Q-10)
@@ -553,3 +554,87 @@ HIMARI는 `hello`의 상태로 따르고, 따로 탈출 시험을 하지 않는�
 - 개발 도구: `openjdk-21-jdk`, `maven`, `cmake`(이 서버에 gcc·make·python3·git은 있음, Java·cmake는 없음, 2026-10-24 확인). Gradle은 프로젝트의 wrapper가 받는다(허용 목록).
 - web.env: `HIMARI_MACHINE_SOCKET=/run/himari-runner/runner.sock`. 지우면 새 대화가 다시 `inside`를 쓴다(되돌리기).
 - 1단계는 DB 변경이 없고, 2단계에서 v12 → v13(업그레이드 전 백업, V3-P65).
+
+## 20. 구현 노트 (2026-10-25, 1단계)
+
+### 20.1 만든 것
+
+- **Sandbox 머신 프로파일** `sandbox/machine.py`: `MachineLayout`, `machine_arguments`(§6.1 순서), `MachineSandbox`(상태는 다른 프로파일과 같음). 실행·감독은 Workspace 프로파일과 같은 `backend.protected_run`으로 옮겼다(동작 변경 없음, 기존 호스트 게이트 30개 통과).
+- **Landlock 도우미**: `tcp: "allow"`(Landlock이 TCP를 다루지 않음, Q8), `hidden` 확인(실행 직전, §6.1), `seccomp: "unix"`(§6.6: `socket(AF_UNIX)`·`SOCK_STREAM`이 아닌 `socketpair(AF_UNIX)` → `EACCES`, io_uring → `ENOSYS`, 다른 아키텍처·x32 → 종료). 필터는 stdlib `ctypes`로 만든 BPF다.
+- **자체 검사** `sandbox/machine_self_test.py`: §13의 항목 + 진짜 숨김 목록의 각 가림. 시험 배치는 HIMARI 폴더 아래에 둔다(Sandbox의 `/tmp`는 따로라 호스트 `/tmp`는 안에서 보이지 않음).
+- **runner** `himari/runner/`: `api`(틀 길이 + JSON, `SCM_RIGHTS`, 오류 범주), `config`(TOML), `hidden`(§7), `hostfs`(§8: `openat2`의 `RESOLVE_NO_MAGICLINKS`, `fstatfs` 디스크 허용 목록, 풀고 나서 검사, 디스크립터 기준 쓰기), `cgroups`(§6.5), `server`(`SO_PEERCRED`, 연결 하나에 요청 하나, 연결이 닫히면 명령 취소), `__main__`(systemd `LISTEN_FDS`, 없으면 설정의 경로).
+- **import 검사 규칙 7**: `runner`는 자기 프로세스의 조립 지점이라 `sandbox`의 모듈을 직접 쓰고, `common`·`sandbox` 말고는 쓰지 않는다. 다른 패키지는 `runner.api`만 쓴다(층 2).
+- **machine Environment** `environment/machine/`: `client`, `locks`(§9.1, 놓을 때 await 없음), Tool 8개(`list_files`·`read_file`·`write_file`·`edit_file`·`delete_file`·`run_command`·`present_file`·`read_document`), 업로드 단계, 대화 폴더 지우기. Inside의 결과 문구는 공유 함수로 꺼냈다(`listing_outcome`·`read_outcome`·`present`, `ReadDocument._fetch`). Inside 동작은 그대로다.
+- **관측(§10.5)**: Prompt 로더가 활성 Environment마다 `observe`를 부른다(3초 한도, 실패는 "unknown"). `BindingObservation`에 `working_directory`·`writable`을 더했다. 머신 대화의 Current State는 실제 작업 위치와 쓰기 가능한 폴더를 보인다.
+- **Application·설정**: `HIMARI_MACHINE_SOCKET`, `HIMARI_MACHINE_PRINCIPALS`(기본 `operator`). 그 principal의 새 대화는 `machine`을 활성화한다(Q1). 업로드·영구 삭제는 대화의 Workspace id(`mws_`)로 Environment를 고른다. runner에 닿지 않으면 첨부는 `FilesUnavailable`, Tool은 "not reachable"(DENIED, 아무것도 하지 않음).
+
+### 20.2 설계와 달라진 것
+
+1. **숨긴 파일은 빈 데이터 파일로 가린다.** `--ro-bind /dev/null`은 bind mount가 `nodev`라 열리지 않는다(`EACCES`, 이 서버에서 확인). `--ro-bind-data <fd>`로 빈 읽기 전용 일반 파일을 올린다. bwrap이 읽은 뒤 fd를 닫으므로 가릴 파일마다 `/dev/null` fd를 하나씩 넘긴다. 도우미의 확인도 "크기 0 일반 파일, 읽기 전용, 원래와 다른 장치"로 바꿨다.
+2. **다른 사용자의 홈은 기본으로 숨기지 않는다.** Drive 마운트가 `/home/ubuntu` 아래에 있어서, 홈을 통째로 가리면 Drive도 가려진다. `coder`가 못 읽는 홈은 OS 권한이 이미 막는다.
+3. **명령 안에서는 가린 점 항목의 이름이 보인다**(`ls -a ~`에 `.bashrc`가 나오지만 내용은 비어 있음). 마운트로 가리기 때문이다. 파일 Tool의 목록은 이름도 숨긴다.
+4. **Inside 대화의 Current State도 연결을 보인다.** 로더가 `observe`를 부르게 되면서 Inside Binding은 "unknown" 대신 "online"으로 나온다(기존 시험은 그대로 통과).
+5. **자체 검사의 네트워크 장치는 `/proc/net/dev`로 읽는다.** `/sys`는 호스트의 것(읽기 전용)이라 호스트 장치가 보인다. 격리는 그대로다(밖으로의 TCP 거부 확인).
+
+### 20.3 확인
+
+- 전체 pytest: 2314 passed, 108 skipped. mypy --strict, import 검사 통과.
+- 새 시험: `tests/sandbox/test_machine_unit.py`(마운트 순서, 정책, BPF를 작은 해석기로 돌려 두 아키텍처의 결정 확인), `tests/runner/`(숨김·hostfs·틀·서버, 가짜 Sandbox), `tests/environment/test_machine.py`(Tool·관측·업로드·lock), `tests/bootstrap/test_machine_app.py`(Application), `tests/runnerkit.py`(시험용 runner).
+- **호스트 게이트**(`HIMARI_SANDBOX_HOST=1`, 이 서버, 진짜 홈): 머신 프로파일 5개 + 기존 41개 통과. 진짜 숨김 목록(36개)으로 자체 검사 통과.
+- **위임 cgroup**(이 서버, `systemd-run --user --scope -p Delegate=yes`): runner가 `runner`·`commands`를 만들고 자체 검사 통과. 300 MB 한도에서 500 MB를 잡는 명령은 exit 137, `oom: true`, runner는 계속 응답.
+- **실제 모델**(`openai/gpt-6-luna`, 로컬 Web + runner): 대화 폴더에서 `hello.c`를 쓰고 gcc로 컴파일·실행(`hi`), `~` 목록, `~/.ssh/id_ed25519`는 읽지 못함, `~/Himari-v3/…` 쓰기는 "Read-only file system". 디스크에서도 확인.
+
+### 20.4 외부 검수 1 (HEAD d3ee46e, NOT READY) 반영
+
+- **B1(P1):** runner가 Sandbox 상태를 `run`에서만 봤다. 자체 검사가 실패해도 파일 읽기·쓰기·업로드가 됐다(§13 위반). 이제 `hello`를 뺀 모든 연산이 `ENFORCED`가 아니면 `unavailable`로 거부된다(공통 진입점). 시험: 자체 검사 실패 runner에서 연산 10개가 모두 거부되고, 아무것도 만들어지지 않으며, Sandbox가 불리지 않음. machine Tool은 "the machine sandbox is not enforced on this server; nothing was done"(DENIED)을 보인다.
+- **B2(P2):** `create_parents`가 빠진 중간 폴더를 검사 없이 만들었다. 숨김 경로가 쓰기는 거부돼도 폴더로 남을 수 있었다. 이제 각 폴더를 만들기 **전에** 경로를 숨김·Workspace 범위로 판단하고, 만든 뒤 연 디스크립터의 실제 경로로 다시 판단한다. 시험: Workspace 안의 아직 없는 숨김 경로·홈의 새 점 폴더는 만들어지지 않음.
+
+### 20.5 외부 재검수 (HEAD 08050f5, NOT READY) 반영
+
+- **C1(P1):** 취소하면 HIMARI가 연결을 바로 닫고 Workspace lock을 놓았다. 그런데 runner의 파일 작업 스레드(`asyncio.to_thread`는 멈추지 않는다)나 명령 회수는 아직 진행 중일 수 있었다. 같은 폴더의 다음 쓰기가 그 작업과 겹칠 수 있었다. 이제 lock의 수명이 runner 쪽 작업을 덮는다(§9.1). runner는 작업이 끝난 뒤에만 연결을 닫는다. 파일 작업은 취소돼도 스레드가 돌아올 때까지 기다리고(Inside의 `run_blocking`과 같다), 취소된 명령은 죽이고 회수한 뒤 닫는다. runner가 멈추는 중에도 같다. HIMARI는 쓰기 요청(`api.WRITES`)을 취소하면 보내는 쪽만 닫고(`shutdown(SHUT_WR)`, runner는 이를 명령 취소로 읽는다), 다시 취소돼도 runner가 연결을 닫을 때까지 기다린 뒤 취소를 다시 올린다. 그동안 lock은 잡혀 있다. 읽기 요청은 기다리지 않는다(lock이 없고, 프롬프트의 관찰은 시간 제한이 있다).
+- 시험(옛 코드에서 모두 실패): Tool 단계에서 쓰기 취소 → 다음 쓰기 요청 → 첫 쓰기 끝 → 다음 쓰기 진입 순서. 명령 취소 → 다음 쓰기 → 명령 회수 → 다음 쓰기 진입 순서. runner 단계에서 쓰기 취소(두 번 취소 포함)와 명령 취소가 작업이 끝난 뒤에만 돌아옴. runner가 멈출 때도 쓰기 스레드가 끝난 뒤에만 연결이 닫힘. 실제 Sandbox 호스트 게이트 5개 통과.
+- 남는 점: runner 쪽 파일 작업이 끝나지 않으면(예: 응답 없는 FUSE 마운트) 취소도 끝나지 않는다. Inside의 `run_blocking`과 같은 선택이다. lock을 먼저 놓는 것보다 안전하다.
+
+### 20.6 배포 (1단계)
+
+DB 변경 없음. 소유자 sudo로:
+
+```ini
+# /etc/systemd/system/himari-runner.socket
+[Socket]
+ListenStream=/run/himari-runner/runner.sock
+SocketUser=coder
+SocketGroup=himari-v3
+SocketMode=0660
+DirectoryMode=0755
+[Install]
+WantedBy=sockets.target
+
+# /etc/systemd/system/himari-runner.service
+[Unit]
+Requires=himari-runner.socket
+[Service]
+User=coder
+ExecStart=/opt/himari-v3/venvs/<sha>/bin/python -m himari.runner --config /etc/himari-runner/runner.toml
+Delegate=yes
+MemoryMax=4608M
+MemorySwapMax=0
+TasksMax=1100
+CPUQuota=150%
+CPUWeight=50
+Restart=always
+```
+
+```toml
+# /etc/himari-runner/runner.toml (root 소유, 0644)
+client_user = "himari-v3"
+himari_home = "/home/coder/HIMARI"
+documents_toolkit = "/opt/himari-v3/documents/current"  # 있으면
+[cgroup]
+mode = "delegated"
+memory_max = "4G"
+pids_max = 1024
+```
+
+그리고 `web.env`에 `HIMARI_MACHINE_SOCKET=/run/himari-runner/runner.sock`. 지우면 새 대화가 다시 Inside를 쓴다. 배포 시험(§4.1): `himari-v3`로 `hello` 성공, 다른 사용자 거부.
+

@@ -1,7 +1,8 @@
 """Prompt context loader: the only part of Prompt that does I/O (V3-043).
 
-P0 does not call ``EnvironmentPlugin.observe`` yet; observations are empty, so
-connection status renders as unknown rather than guessed.
+Observations (V3-P74 §10.5): each active Environment's ``observe`` is asked
+about its Bindings, bounded in time; one that fails or is late gives none,
+so its connection renders as unknown rather than guessed.
 
 With a readable compaction snapshot only the Events after its coverage are
 read, with the Runs and Tool records of those Events (Q-42): the composer
@@ -23,9 +24,11 @@ loaded Events and Tool results refer to, read in one call.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+import asyncio
+import logging
+from collections.abc import Mapping, Sequence
 
-from himari.common import AttachmentRef, ContentBlock, FileId, ProviderContinuation, RunId, TrustedScope
+from himari.common import AttachmentRef, ContentBlock, EnvironmentKind, FileId, ProviderContinuation, RunId, TrustedScope
 from himari.data.api import (
     ConversationEvent,
     ConversationLog,
@@ -33,14 +36,19 @@ from himari.data.api import (
     FileCatalog,
     FileRecord,
     Memory,
+    PersistedStateBasis,
     StateQuery,
     ToolExecutionRecord,
     TriggerRef,
     view_state,
 )
+from himari.environment.api import BindingObservation, EnvironmentPlugin
 from himari.prompt.api import AttachmentInfo, PromptInputs, RequestOptions, SourceNote, UsageMark, attachment_key
 from himari.prompt.compaction import read_summary
 from himari.tool.api import ExternalAccess, ToolCatalog
+
+log = logging.getLogger(__name__)
+OBSERVE_SECONDS = 3.0
 
 
 class ContextLoader:
@@ -53,8 +61,10 @@ class ContextLoader:
         external_access: ExternalAccess | None = None,  # None: no External Tools in the catalog
         source_notes: Sequence[SourceNote] = (),  # every server's notes; only enabled ones are used (V3-P60)
         files: FileCatalog | None = None,  # None: attachments render as unavailable (V3-P66)
+        environments: Mapping[EnvironmentKind, EnvironmentPlugin] | None = None,  # observed (V3-P74 §10.5)
     ) -> None:
         self._files = files
+        self._environments = dict(environments or {})
         self._log = log
         self._state = state
         self._catalog = catalog
@@ -108,7 +118,7 @@ class ContextLoader:
             tool_executions=tuple(executions),
             snapshot=snapshot,
             state_basis=basis,
-            observations=(),
+            observations=await self._observe(scope, basis),
             request_options=request_options,
             trigger_refs=tuple(trigger_refs),
             continuations=continuations,
@@ -118,6 +128,20 @@ class ContextLoader:
             user_instructions=user_instructions,
             memories=memories,
         )
+
+    async def _observe(self, scope: TrustedScope, basis: PersistedStateBasis) -> tuple[BindingObservation, ...]:
+        found: list[BindingObservation] = []
+        for activation in basis.environments:
+            plugin = self._environments.get(activation.environment_kind)
+            bindings = [b for b in basis.bindings if b.environment_kind == activation.environment_kind]
+            if plugin is None or not bindings:
+                continue
+            try:
+                async with asyncio.timeout(OBSERVE_SECONDS):
+                    found.extend(await plugin.observe(scope, bindings))
+            except Exception:  # noqa: BLE001 — ENV-01: best effort; no observation renders as unknown
+                log.warning("could not observe %s", activation.environment_kind, exc_info=True)
+        return tuple(found)
 
     async def _attachments(self, scope: TrustedScope, events: Sequence[ConversationEvent],
                            executions: Sequence[ToolExecutionRecord]) -> dict[str, AttachmentInfo]:
