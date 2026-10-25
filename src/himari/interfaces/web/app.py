@@ -42,15 +42,18 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import posixpath
 import re
 import secrets
+import threading
 import time
 from urllib.parse import quote
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from importlib import resources
-from typing import Any, Literal
+from typing import Any, BinaryIO, Literal
 
 from fastapi import Depends, FastAPI, Path, Request, Response
 from fastapi.exceptions import RequestValidationError
@@ -81,6 +84,7 @@ from himari.bootstrap.application import (
     WorkspaceRefused,
     AttachedFolder,
 )
+from himari.bootstrap.explorer import ExplorerRefused, Listing, ShownFile
 from himari.bootstrap.operator import OPERATOR, derive_cli_bearer, verify_operator_token
 from himari.common import (
     ASK_USER_TOOL_ID,
@@ -145,6 +149,7 @@ SESSION_SECONDS = 7 * 24 * 3600
 FAILED_LOGIN_DELAY_SECONDS = 1.0
 STATIC_FILES = {"app.css": "text/css", "app.js": "text/javascript", "app_view.js": "text/javascript",
                 "rich_text.js": "text/javascript", "appearance.js": "text/javascript", "live.js": "text/javascript",
+                "files.js": "text/javascript",  # the file explorer's parts (V3-P75 §3)
                 # KaTeX for the formulas in assistant text, loaded by rich_text.js on the first one.
                 "katex/katex.min.js": "text/javascript", "katex/katex.min.css": "text/css"}
 KATEX_FONTS = ("AMS-Regular", "Caligraphic-Bold", "Caligraphic-Regular", "Fraktur-Bold", "Fraktur-Regular",
@@ -567,6 +572,24 @@ def workspace_view(workspace: RegisteredWorkspace) -> dict[str, Any]:
             "filesystem": workspace.filesystem, "cloud_synced": workspace.filesystem in CLOUD_FILESYSTEMS}
 
 
+def listing_view(listing: Listing) -> dict[str, Any]:
+    """V3-P75 §5.1: a page of a folder; ``next`` is the cursor of the following page."""
+    return {"path": listing.path, "parent": listing.parent, "entries": list(listing.entries), "next": listing.next,
+            "workspace": None if listing.workspace is None else workspace_view(listing.workspace)}
+
+
+def shown_file_view(shown: ShownFile) -> dict[str, Any]:
+    """V3-P75 §5.2: text as text; an image or other file by its kind only."""
+    return {"path": shown.path, "size": shown.size, "identity": list(shown.identity), "modified": shown.modified,
+            "kind": shown.kind, "text": shown.text, "truncated": shown.truncated, "editable": shown.editable}
+
+
+# How a refused explorer request answers (V3-P75 §5): the runner's category → HTTP status.
+EXPLORER_STATUS = {"not_found": 404, "access": 403, "outside_workspaces": 403, "too_large": 413,
+                   "unavailable": 503, "setup_failed": 503, "timed_out": 504, "invalid": 400, "is_directory": 400,
+                   "not_directory": 400, "not_regular": 415, "links": 400, "other": 500}
+
+
 def attached_view(folder: AttachedFolder) -> dict[str, Any]:
     """One of a Conversation's folders (§10.3): the own one first."""
     return {"binding_id": folder.binding_id, "path": folder.path, "label": folder.label, "note": folder.note,
@@ -607,6 +630,51 @@ class _LiveResponse(StreamingResponse):
             await super().__call__(scope, receive, send)
         finally:
             self._release()
+
+
+class _FileStream(StreamingResponse):
+    """A file sent in chunks, closed however the response ends — finished,
+    cancelled, the client gone — even when its body never started (PR #92
+    re-review C1); and never under a read still running on its thread: that
+    read closes it as it ends (PR #92 review N1). The lock is held only to
+    hand the close over, never across a read."""
+
+    def __init__(self, handle: BinaryIO, **options: Any) -> None:
+        self._handle = handle
+        self._lock = threading.Lock()
+        self._reading = self._ending = self._closed = False
+        super().__init__(self._chunks(), **options)
+
+    async def _chunks(self) -> AsyncIterator[bytes]:
+        while data := await asyncio.to_thread(self._read):
+            yield data
+
+    def _read(self) -> bytes:
+        with self._lock:
+            if self._ending:
+                return b""
+            self._reading = True
+        try:
+            return self._handle.read(1 << 16)
+        finally:
+            with self._lock:
+                self._reading = False
+                if self._ending:
+                    self._shut()
+
+    def _shut(self) -> None:  # with the lock held
+        if not self._closed:
+            self._closed = True
+            self._handle.close()
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            with self._lock:
+                self._ending = True
+                if not self._reading:
+                    self._shut()
 
 
 def begin_shutdown(app: FastAPI) -> None:
@@ -738,6 +806,11 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
     async def workspace_refused(request: Request, error: WorkspaceRefused) -> JSONResponse:
         return JSONResponse({"error": {"code": error.code, "message": error.message}},
                             status_code=422 if error.code == "not_usable" else 409)
+
+    @app.exception_handler(ExplorerRefused)
+    async def explorer_refused(request: Request, error: ExplorerRefused) -> JSONResponse:
+        return JSONResponse({"error": {"code": error.category, "message": str(error)}},
+                            status_code=EXPLORER_STATUS.get(error.category, 400))
 
     @app.exception_handler(UnknownToolSource)
     async def unknown_source(request: Request, error: UnknownToolSource) -> JSONResponse:
@@ -896,6 +969,43 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
         return {"items": [attached_view(f) for f in folders]}
 
     # -- conversations -----------------------------------------------------------------------
+
+    # -- the file explorer (V3-P75 §5): the owner's view of this server's files ----------
+
+    @app.get("/api/machine/list")
+    async def browse_folder(request: Request, path: str = "~", after: str | None = None,
+                            who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+        application = himari(request)
+        explorer = application.explorer(who)
+        return listing_view(await explorer.browse(path, after, await application.machine_workspaces(who)))
+
+    @app.get("/api/machine/stat")
+    async def stat_path(request: Request, path: str, who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+        return await himari(request).explorer(who).stat(path)
+
+    @app.get("/api/machine/file")
+    async def show_file(request: Request, path: str, who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+        return shown_file_view(await himari(request).explorer(who).show(path))
+
+    @app.get("/api/machine/download")
+    async def download_machine_file(request: Request, path: str,
+                                    who: PrincipalId = Depends(principal)) -> Response:
+        """An attachment of type octet-stream, sandboxed: never rendered on this origin (V3-P75 §8.2)."""
+        real, size, fd = await himari(request).explorer(who).open(path)
+        return _FileStream(os.fdopen(fd, "rb"), media_type="application/octet-stream", headers={
+            "Content-Disposition": content_disposition(posixpath.basename(real) or "file"),
+            "Content-Length": str(size),
+            "Content-Security-Policy": "sandbox",
+        })
+
+    @app.get("/api/machine/image")
+    async def show_image(request: Request, path: str, who: PrincipalId = Depends(principal)) -> Response:
+        """The image sandbox's copy (V3-P67), inline: HIMARI's JPEG or PNG, never the file's own bytes."""
+        made = await himari(request).explorer(who).image(path)
+        return Response(made.data, media_type=made.media_type, headers={
+            "Content-Disposition": "inline",
+            "Content-Security-Policy": "default-src 'none'; sandbox",
+        })
 
     @app.get("/api/conversations")
     async def list_conversations(request: Request, who: PrincipalId = Depends(principal),
@@ -1231,13 +1341,7 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
         """Always an attachment of type octet-stream, sandboxed (§7.2): an
         HTML or SVG file never opens on this origin."""
         record, handle = await himari(request).download(scope_of(conversation_id, who), FileId(file_id), version)
-
-        def chunks() -> Iterator[bytes]:
-            with handle:
-                while data := handle.read(1 << 16):
-                    yield data
-
-        return StreamingResponse(chunks(), media_type="application/octet-stream", headers={
+        return _FileStream(handle, media_type="application/octet-stream", headers={
             "Content-Disposition": content_disposition(record.name),
             "Content-Length": str(record.size),
             "Content-Security-Policy": "sandbox",
@@ -1252,13 +1356,7 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
         browser may not guess another (nosniff) and nothing in it can run
         (CSP). 404 unless the file is an image with a copy; 410 once it expired."""
         view, handle = await himari(request).preview(scope_of(conversation_id, who), FileId(file_id), version)
-
-        def chunks() -> Iterator[bytes]:
-            with handle:
-                while data := handle.read(1 << 16):
-                    yield data
-
-        return StreamingResponse(chunks(), media_type=view.media_type, headers={
+        return _FileStream(handle, media_type=view.media_type, headers={
             "Content-Disposition": "inline",
             "Content-Length": str(view.blob.size),
             "Content-Security-Policy": "default-src 'none'; sandbox",  # nosniff and no-store: the middleware

@@ -9,6 +9,7 @@ import pytest
 
 from himari.runner import api
 from himari.runner.hidden import HiddenRules
+from himari.runner import hostfs
 from himari.runner.hostfs import Host
 
 
@@ -239,3 +240,68 @@ def test_mount_type_reads_the_deepest_mount(tmp_path: Path) -> None:
     assert mount_type("/home/ubuntu/cloud storage", str(table)) == "ext4"
     assert mount_type("/run/x", str(table)) == "tmpfs"
     assert mount_type("/x", str(tmp_path / "missing")) is None
+
+
+# --- the explorer's listing and stat (V3-P75 §5.1, §5.3) ---------------------------------------------
+
+def pages(host: Host, path: str, size: int) -> list[str]:
+    names: list[str] = []
+    after = None
+    while True:
+        _, entries, after = host.listing(path, "/", size, after)
+        names += [str(e["name"]) for e in entries]
+        if after is None:
+            return names
+
+
+def test_a_folder_is_sorted_whole_then_paged(host: Host, home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review B3: the first page holds the first names, whatever order the folder lists them in."""
+    big = home / "projects/big"
+    big.mkdir()
+    names = [f"n{i:04d}" for i in range(1200)]
+    for name in reversed(names):
+        (big / name).write_text("x")
+    (big / "zdir").mkdir()
+    (big / "adir").mkdir()
+    real, first, after = host.listing(str(big), "/", 500)
+    assert real == str(big) and [e["name"] for e in first][:3] == ["adir", "zdir", "n0000"]
+    assert first[0]["kind"] == "directory" and first[2]["kind"] == "file" and first[2]["size"] == 1
+    assert isinstance(first[2]["modified"], int) and after == "f/n0497"
+    assert pages(host, str(big), 500) == ["adir", "zdir", *names]
+    # Between pages: an entry added before the cursor waits for a refresh, a removed one is gone; no repeats.
+    _, page, after = host.listing(str(big), "/", 500)
+    (big / "a-new").write_text("x")
+    (big / "n0600").unlink()
+    rest: list[str] = []
+    while after is not None:
+        _, entries, after = host.listing(str(big), "/", 500, after)
+        rest += [str(e["name"]) for e in entries]
+    seen = [str(e["name"]) for e in page] + rest
+    assert len(seen) == len(set(seen)) and "n0600" not in seen and "a-new" not in seen
+    monkeypatch.setattr(hostfs, "MAX_ENUMERATED", 100)
+    with pytest.raises(api.RunnerError, match="more than 100 entries") as refused:
+        host.listing(str(big), "/", 500)
+    assert refused.value.category == api.TOO_LARGE
+
+
+def test_listing_hides_and_checks_its_cursor(host: Host, home: Path) -> None:
+    names = pages(host, "~", 2)
+    assert ".ssh" not in names and ".bashrc" not in names and ".gitconfig" in names and "projects" in names
+    assert names == sorted(names, key=lambda n: (not (home / n).is_dir(), n.encode()))
+    for bad in ("x/n", "f", 3):
+        with pytest.raises(api.RunnerError) as refused:
+            host.listing("~", "/", 2, bad)
+        assert refused.value.category == api.INVALID
+
+
+def test_stat_checks_as_open_does(host: Host, home: Path) -> None:
+    found = host.stat_path("~/projects/a/main.c", "/")
+    info = os.stat(home / "projects/a/main.c")
+    assert found["path"] == str(home / "projects/a/main.c") and found["kind"] == "file" and found["size"] == 13
+    assert found["identity"] == [info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns]
+    assert host.stat_path("~/projects", "/")["kind"] == "directory"
+    (home / "projects/key").symlink_to(home / ".ssh/id")
+    for hidden in ("~/.ssh/id", "~/.bashrc", "~/projects/key", "~/missing"):
+        with pytest.raises(api.RunnerError) as refused:
+            host.stat_path(hidden, "/")
+        assert refused.value.category == api.NOT_FOUND

@@ -103,6 +103,7 @@ from himari.data.sqlite import SqliteData, SqliteStore
 from himari.documents import TMP_BYTES, DocumentReader, Toolkit, ToolkitRefused, open_toolkit, worker_roots
 from himari.environment.inside import INSIDE, InsideEnvironment, InsideFiles
 from himari.imaging import ImageViews, runtime_roots
+from himari.bootstrap.explorer import Explorer, ExplorerRefused
 # For the interfaces (V3-P66 §9): how placing an upload can be refused.
 from himari.environment.inside import UploadsFolderUnusable as UploadsFolderUnusable
 from himari.environment.inside import WorkspaceBusy as WorkspaceBusy
@@ -610,6 +611,7 @@ class Application:
     # One registration at a time (§10.1): the runner's same-folder check and
     # Data's insert together, so two paths to one folder cannot both pass.
     _registering: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
+    _explorer: Explorer | None = field(default=None, repr=False)
     # V3-P65 §7.3: one lifecycle lock per Conversation (P0: one server process),
     # kept only while some call holds or waits for it (PR #56 review C1).
     _lifecycle: dict[ConversationId, _Lifecycle] = field(default_factory=dict, repr=False)
@@ -825,6 +827,16 @@ class Application:
         if self.machine is None or principal not in self.machine_principals:
             raise WorkspaceRefused("unavailable", "Folders on this server are not offered to you.")
         return self.machine
+
+    def explorer(self, principal: PrincipalId) -> Explorer:
+        """The web's file explorer (V3-P75 §5), for a principal folders are offered to."""
+        try:
+            machine = self._machine_for(principal)
+        except WorkspaceRefused:
+            raise ExplorerRefused("not_found", "Not available.") from None
+        if self._explorer is None:
+            self._explorer = Explorer(machine, self.views)
+        return self._explorer
 
     async def machine_workspaces(self, principal: PrincipalId) -> tuple[RegisteredWorkspace, ...]:
         """The principal's registered folders, oldest first."""
