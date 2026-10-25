@@ -79,7 +79,7 @@ export class FilesPane {
     this.loadEditor = loadEditor;
     this.confirm = confirm;
     this.working = working;
-    this.doc = null; // the file in the editor: {path, name, identity, saved, editor, dirty, saving, pollTimer, bar}
+    this.doc = null; // the file in the editor: {path, name, identity, saved, editor, dirty, saving, pollTimer, bar, revision}
     this.onOpenFolder = onOpenFolder;
     this.onOpenFile = onOpenFile;
     this.folderActions = folderActions;
@@ -302,12 +302,18 @@ export class FilesPane {
     bar.hidden = true;
     const area = this.el("div", "files-editor");
     this.body.replaceChildren(bar, area);
+    // ``revision`` counts every change of the text: a read of the server's version started before one is
+    // never applied over it (PR #95 review B1).
     const doc = { path: shown.path, name, identity: shown.identity, saved: shown.text, editor: null, dirty: false,
-                  saving: false, pollTimer: null, bar, module };
+                  saving: false, pollTimer: null, bar, module, revision: 0 };
     this.doc = doc;
     doc.editor = module.createEditor(area, {
       text: shown.text, name,
-      onChange: () => { if (this.doc === doc) this.setDirty(doc.editor.text() !== doc.saved); },
+      onChange: () => {
+        if (this.doc !== doc) return;
+        doc.revision += 1;
+        this.setDirty(doc.editor.text() !== doc.saved);
+      },
       onSave: () => { if (this.doc === doc) this.save(); },
     });
     this.paintState();
@@ -388,12 +394,18 @@ export class FilesPane {
     return this.api("GET", `/api/machine/file?${query(this.doc.path)}`);
   }
 
-  async loadDisk() {
+  /* The server's version into the editor. ``since``: the text's revision when an automatic read began; if
+   * it was typed in since, the text stays and the user is told instead (PR #95 review B1). */
+  async loadDisk({ since = null } = {}) {
     const doc = this.doc;
     if (doc === null) return;
     try {
       const shown = await this.disk();
       if (this.doc !== doc) return;
+      if (since !== null && (doc.revision !== since || doc.dirty)) {
+        this.showChanged(false);
+        return;
+      }
       if (shown.kind !== "text" || !shown.editable) {
         this.paintState("The server's version can no longer be edited here");
         return;
@@ -401,7 +413,7 @@ export class FilesPane {
       doc.saved = shown.text;
       doc.identity = shown.identity;
       doc.editor.setText(shown.text);
-      doc.dirty = false;
+      doc.dirty = doc.editor.text() !== doc.saved;
       this.hideBar();
       this.paintState();
     } catch (error) {
@@ -548,9 +560,13 @@ export class FilesPane {
     if (!(await this.confirm(`Delete ${name}?`, lines, "Delete"))) return;
     if (big && !(await this.confirm(`Delete ${name} for good?`, ["It cannot be put back."], "Delete for good"))) return;
     try {
-      await this.api("POST", "/api/machine/file/delete", { path, expected: now.identity });
+      const gone = await this.api("POST", "/api/machine/file/delete", { path, expected: now.identity });
       if (this.doc === doc) this.closeDoc();
       await this.openFolder(path.slice(0, path.lastIndexOf("/")) || "/", { asked: true });
+      if (!big && !gone.previous_kept) { // told it would be kept: say it was not, where it stays in sight (review B2)
+        this.body.prepend(this.el("p", "files-note is-error files-lasting",
+          `${name} was deleted, but its content could not be kept as a previous version: it cannot be put back.`));
+      }
     } catch (error) {
       if (error.code === "changed") this.paintState("Not deleted: it changed on the server since; look again");
       else this.paintState(error.message);
@@ -573,14 +589,15 @@ export class FilesPane {
 
   async checkDisk(doc = this.doc) {
     if (doc === null) return;
+    const since = doc.revision;
     try {
       const now = await this.api("GET", `/api/machine/stat?${query(doc.path)}`);
       if (this.doc !== doc || doc.saving || sameIdentity(now.identity, doc.identity)) {
         this.paintState();
         return;
       }
-      if (doc.dirty) this.showChanged(false);
-      else await this.loadDisk();
+      if (doc.dirty || doc.revision !== since) this.showChanged(false);
+      else await this.loadDisk({ since });
     } catch (error) {
       if (this.doc === doc && error.code === "not_found") this.paintState("This file is no longer on the server");
     }
@@ -667,7 +684,7 @@ export class FilesPane {
     const reload = this.el("button", "link-button", "Refresh");
     reload.type = "button";
     reload.addEventListener("click", () => this.refresh());
-    this.tools.append(reload, this.newMenu(listing));
+    this.tools.append(reload, this.newMenu(listing), this.folderMenu(listing));
     if (listing && this.folderActions) this.tools.append(...this.folderActions(listing));
   }
 
@@ -689,6 +706,76 @@ export class FilesPane {
                 item("Delete", () => this.deleteFile()));
     actions.append(toggle, list);
     return actions;
+  }
+
+  /* A folder's ⋯: files deleted from it whose content is kept, to put back (PR #95 review B3). */
+  folderMenu(listing) {
+    const actions = this.el("details", "conversation-actions files-actions files-folder-menu");
+    const toggle = this.el("summary", null, "⋯");
+    toggle.setAttribute("aria-label", "Folder actions");
+    toggle.title = "Folder actions";
+    const list = this.el("div", "conversation-action-list");
+    const deleted = this.el("button", "link-button", "Deleted files");
+    deleted.type = "button";
+    deleted.addEventListener("click", () => { actions.open = false; this.showDeleted(listing ? listing.path : this.folder); });
+    list.append(deleted);
+    actions.append(toggle, list);
+    return actions;
+  }
+
+  async showDeleted(folder) {
+    let items;
+    try {
+      items = (await this.api("GET", `/api/machine/versions/deleted?${query(folder)}`)).items;
+    } catch (error) {
+      this.body.prepend(this.el("p", "files-note is-error", error.message));
+      return;
+    }
+    const dialog = this.el("dialog", "files-dialog");
+    const head = this.el("div", "files-dialog-head");
+    head.append(this.el("h2", null, "Deleted files in this folder"));
+    const close = this.el("button", "icon-button", "×");
+    close.type = "button";
+    close.setAttribute("aria-label", "Close");
+    head.append(close);
+    const list = this.el("ul", "files-list files-versions");
+    if (!items.length) list.append(this.el("li", "files-note", "None: a file deleted from here is kept for 30 days."));
+    const note = this.el("p", "files-note is-error");
+    for (const item of items) {
+      const li = this.el("li", "files-row files-version");
+      li.append(this.el("span", "files-name", item.name),
+                this.el("span", "files-meta", `deleted ${new Date(item.saved_at).toLocaleString()} · ${humanSize(item.size)}`));
+      const restore = this.el("button", "link-button", "Restore");
+      restore.type = "button";
+      restore.addEventListener("click", async () => {
+        restore.disabled = true;
+        const error = await this.restoreDeleted(item);
+        if (error === null) { if (dialog.close) dialog.close(); dialog.remove(); return; }
+        restore.disabled = false;
+        note.textContent = error;
+      });
+      li.append(restore);
+      list.append(li);
+    }
+    dialog.append(head, list, note);
+    this.root.append(dialog);
+    close.addEventListener("click", () => { if (dialog.close) dialog.close(); dialog.remove(); });
+    dialog.addEventListener("cancel", () => dialog.remove());
+    if (dialog.showModal) dialog.showModal();
+  }
+
+  /* A deleted file back where it was: made new (never over a file now there), its kept content saved in it,
+   * and opened. An error's text, or null. */
+  async restoreDeleted(item) {
+    try {
+      const text = (await this.api("GET", `/api/machine/versions/${encodeURIComponent(item.id)}?${query(item.path)}`)).text;
+      const made = await this.api("POST", "/api/machine/file", { path: item.path });
+      await this.api("PUT", "/api/machine/file", { path: made.path, content: text, expected: made.identity });
+      await this.openFile(made.path, { asked: true });
+      return null;
+    } catch (error) {
+      return error.code === "exists" ? `${item.name} exists again: open it, and use its previous versions.` : error.message;
+    }
   }
 
   /* A folder's "New": a file (opened in the editor) or a folder, named in a row at the top. */

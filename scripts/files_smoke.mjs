@@ -305,4 +305,65 @@ for (const [size, questions] of [[3, 1], [2_000_000, 2]]) {
   files.closeDoc();
 }
 
+// PR #95 review B1: typing while the server's version is being read keeps the typing; the user is told.
+{
+  let disk = { ...TEXT };
+  const reading = deferred();
+  let reads = 0;
+  const { files, module } = editorPane({
+    "GET /api/machine/file": () => { reads += 1; return reads === 1 ? disk : reading.promise; },
+    "GET /api/machine/stat": () => ({ path: TEXT.path, kind: "file", identity: disk.identity, size: disk.size }),
+  });
+  await files.openFile(TEXT.path);
+  disk = { ...TEXT, text: "from HIMARI", identity: [1, 2, 11, 12] };
+  const checking = files.checkDisk();
+  for (let i = 0; i < 20 && reads < 2; i++) await settle(); // its read of the file is under way
+  module.made[0].type("typed meanwhile");
+  reading.resolve(disk);
+  await checking;
+  assert.equal(module.made[0].text(), "typed meanwhile");
+  assert.equal(files.dirty, true);
+  assert.equal(files.doc.bar.hidden, false);
+  files.closeDoc();
+}
+
+// PR #95 review B2: a delete whose content was not kept says so where the user lands.
+{
+  const { files } = editorPane({
+    "GET /api/machine/file": TEXT,
+    "GET /api/machine/stat": { path: TEXT.path, kind: "file", identity: [5, 5, 3, 5], size: 3 },
+    "POST /api/machine/file/delete": { path: TEXT.path, previous_kept: false },
+    "GET /api/machine/list": listing("/home/u", ["b.txt"]),
+  });
+  await files.openFile(TEXT.path);
+  await files.deleteFile();
+  assert.equal(files.folder, "/home/u");
+  assert.ok(files.body.text().includes("could not be kept"));
+}
+
+// PR #95 review B3: a file deleted from a folder is found there, and put back as a new file with its content.
+{
+  const { files, sent, module } = editorPane({
+    "GET /api/machine/list": listing("/home/u", []),
+    "GET /api/machine/versions/deleted": { items: [{ path: "/home/u/gone.txt", name: "gone.txt", id: "v1",
+      saved_at: "2026-10-25T00:00:00+00:00", size: 4 }] },
+    "GET /api/machine/versions/v1": { text: "kept" },
+    "POST /api/machine/file": { path: "/home/u/gone.txt", identity: ["8", "8", "0", "8"] },
+    "PUT /api/machine/file": { path: "/home/u/gone.txt", identity: ["8", "8", "4", "9"], previous_kept: true },
+    "GET /api/machine/file": { ...TEXT, path: "/home/u/gone.txt", text: "kept", size: 4, identity: ["8", "8", "4", "9"] },
+  });
+  await files.openFolder("/home/u");
+  await files.showDeleted("/home/u");
+  const dialog = files.root.children.find((c) => c.tagName === "dialog");
+  const restore = dialog.children[1].children[0].children.find((c) => c.textContent === "Restore");
+  await restore.listeners.click[0]();
+  const calls = sent.map(([m, p]) => `${m} ${p.split("?")[0]}`);
+  assert.deepEqual(calls.slice(-4), ["GET /api/machine/versions/v1", "POST /api/machine/file", "PUT /api/machine/file",
+                                     "GET /api/machine/file"]);
+  assert.deepEqual(sent.find(([m]) => m === "PUT")[2], { path: "/home/u/gone.txt", content: "kept", expected: ["8", "8", "0", "8"] });
+  assert.equal(files.file, "/home/u/gone.txt");
+  assert.equal(module.made[0].text(), "kept");
+  files.closeDoc();
+}
+
 console.log("files smoke: ok");

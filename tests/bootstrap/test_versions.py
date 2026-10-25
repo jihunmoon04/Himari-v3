@@ -61,3 +61,18 @@ def test_ready_only_with_room(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
 
     monkeypatch.setattr("himari.bootstrap.versions.shutil.disk_usage", lambda path: Usage())
     assert not store.ready_for(1)
+
+
+def test_files_last_kept_on_a_delete_are_found_in_their_folder(tmp_path: Path) -> None:
+    """PR #95 review B3: how a deleted file is found again; one saved again since is not deleted."""
+    store = VersionStore(tmp_path / "v")
+    now = datetime.now(UTC)
+    store.keep("/p/a.txt", copy(b"a"), "delete", now=now)
+    store.keep("/p/b.txt", copy(b"b1"), "delete", now=now + timedelta(seconds=1))
+    store.keep("/p/b.txt", copy(b"b2"), "save", now=now + timedelta(seconds=2))  # made again and saved
+    later = store.keep("/p/c.txt", copy(b"c"), "delete", now=now + timedelta(seconds=3))
+    store.keep("/p/sub/d.txt", copy(b"d"), "delete", now=now)  # not directly in /p
+    found = store.deleted_in("/p")
+    assert [(path, v.version_id) for path, v in found][0] == ("/p/c.txt", later.version_id)
+    assert [path for path, _ in found] == ["/p/c.txt", "/p/a.txt"]
+    assert store.deleted_in("/nowhere") == () and VersionStore(tmp_path / "none").deleted_in("/p") == ()

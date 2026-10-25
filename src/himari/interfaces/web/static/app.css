@@ -3667,7 +3667,7 @@ button.files-crumb:hover { background: var(--surface-hover); color: var(--text);
 .files-bar[hidden] { display: none; }
 .files-bar p { flex: 1 1 100%; margin: 0; }
 .files-new-menu > summary.files-new-toggle { width: auto; padding: 0 10px; font-size: 13px; color: var(--text-muted); }
-.files-new-menu .conversation-action-list, .files-file-menu .conversation-action-list { left: auto; right: 0; width: 200px; }
+.files-new-menu .conversation-action-list, .files-file-menu .conversation-action-list, .files-folder-menu .conversation-action-list { left: auto; right: 0; width: 200px; }
 .files-name-form { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); margin: var(--space-2); }
 .files-name-input { flex: 1 1 200px; min-height: 34px; padding: 6px 10px; border: 1px solid var(--border-strong); border-radius: var(--radius-md); background: var(--surface-raised); color: var(--text); font: 13px var(--mono); }
 .files-dialog { width: min(1100px, calc(100% - 32px)); max-height: calc(100dvh - 32px); padding: 16px 20px; border: 1px solid var(--border-strong); border-radius: 16px; background: var(--bg); color: var(--text); overflow: auto; }
@@ -3678,3 +3678,8 @@ button.files-crumb:hover { background: var(--surface-hover); color: var(--text);
 .files-diff { margin-top: var(--space-3); max-height: 70dvh; overflow: auto; border: 1px solid var(--border-subtle); border-radius: var(--radius-md); }
 .files-version { gap: var(--space-2); padding: 6px 4px; }
 .files-version .files-meta { margin-left: auto; }
+/* The row ⋯ shows on hover as in the conversation list; the head's New and ⋯ always show. */
+@media (hover: hover) and (pointer: fine) {
+  .files-row:hover .conversation-actions, .files-row:focus-within .conversation-actions { opacity: 1; }
+}
+.files-tools .conversation-actions { opacity: 1; }

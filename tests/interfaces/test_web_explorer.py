@@ -490,3 +490,21 @@ def test_versions_follow_the_hidden_list_as_it_is_now(server: Server, kit: Runne
     refused(server.client.get("/api/machine/versions", params={"path": path}), 404, "not_found")
     refused(server.client.get(f"/api/machine/versions/{items[0]['id']}", params={"path": path}), 404, "not_found")
 
+
+
+def test_a_deleted_file_is_found_in_its_folder(server: Server, kit: RunnerKit, monkeypatch: pytest.MonkeyPatch) -> None:
+    """PR #95 review B3: listed for its folder while its last kept version is its delete; never a hidden one."""
+    folder = kit.home / "projects/a"
+    path = str(folder / "main.c")
+    identity = server.client.get("/api/machine/stat", params={"path": path}).json()["identity"]
+    assert server.post("/api/machine/file/delete", {"path": path, "expected": identity}).status_code == 200
+    items = server.client.get("/api/machine/versions/deleted", params={"path": "~/projects/a"}).json()["items"]
+    assert [(i["path"], i["name"], i["size"]) for i in items] == [(path, "main.c", 13)]
+    text = server.client.get(f"/api/machine/versions/{items[0]['id']}", params={"path": path}).json()["text"]
+    assert text == "int main(){}\n"
+    refused(server.client.get("/api/machine/versions/deleted", params={"path": path}), 404, "not_found")  # gone file
+    from himari.runner.hidden import HiddenRules
+
+    by_rule = HiddenRules.by_rule
+    monkeypatch.setattr(HiddenRules, "by_rule", lambda self, real: real == path or by_rule(self, real))
+    assert server.client.get("/api/machine/versions/deleted", params={"path": str(folder)}).json()["items"] == []

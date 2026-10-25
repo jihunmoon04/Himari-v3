@@ -1073,6 +1073,13 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
         return {"items": [{"id": v.version_id, "saved_at": _time(v.saved_at), "size": v.size, "reason": v.reason}
                           for v in versions]}
 
+    @app.get("/api/machine/versions/deleted")
+    async def deleted_files(request: Request, path: str, who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+        """Files deleted from the folder ``path`` whose content is kept (PR #95 review B3), latest first."""
+        found = await himari(request).explorer(who).deleted(path)
+        return {"items": [{"path": p, "name": posixpath.basename(p), "id": v.version_id, "saved_at": _time(v.saved_at),
+                           "size": v.size} for p, v in found]}
+
     @app.get("/api/machine/versions/{version_id}")
     async def read_version(version_id: str, request: Request, path: str,
                            who: PrincipalId = Depends(principal)) -> dict[str, Any]:

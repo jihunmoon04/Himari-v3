@@ -279,6 +279,23 @@ class Explorer:
         real = await self._visible(path)
         return () if self.versions is None else self.versions.of(real)
 
+    async def deleted(self, folder: object) -> tuple[tuple[str, Version], ...]:
+        """Files deleted from this folder whose content is kept (PR #95 review B3): the folder as the runner
+        resolves it, and only paths it shows now."""
+        found = await self.stat(folder)
+        if found.get("kind") != "directory":
+            raise ExplorerRefused("not_directory", f"{found.get('path', folder)} is not a folder.")
+        if self.versions is None:
+            return ()
+        shown: list[tuple[str, Version]] = []
+        for path, version in self.versions.deleted_in(str(found["path"])):
+            try:
+                if await self._visible(path) == path:
+                    shown.append((path, version))
+            except ExplorerRefused:
+                continue  # hidden now
+        return tuple(shown)
+
     async def previous_text(self, path: object, version_id: str) -> str:
         real = await self._visible(path)
         data = None if self.versions is None else self.versions.read(real, version_id)
