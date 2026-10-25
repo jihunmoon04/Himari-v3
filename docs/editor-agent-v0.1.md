@@ -1,6 +1,6 @@
 # 편집기에서 에이전트 부르기 v0.1
 
-> 2026-10-25 · **PROPOSED (V3-P76)** · rev. 5: 외부 재검수(HEAD e617b76) 반영 — 되돌리기는 처음과 지금(마지막 확인)의 있음/없음으로 정함(§6), 새 파일의 `O_EXCL` 경로와 원자적 설치를 나눔(§4.1), 같은 파일의 다음 쓰기에서 끼어든 변경을 감지(§4.1, §5), 브라우저는 범위와 해시만 보냄(§3.2), Changes도 요청마다 숨김 정책(§10). rev. 4: 외부 재검수(HEAD 94f4b28) 반영 — 파일 단위 검토 항목과 호출 단위 의도를 나눔(§5, §7), no-replace를 지원하지 않는 곳에서는 `O_EXCL`로 이름을 잡음(§4.1), runner 오류는 "바꾸기 전"만(§4.1, §7), "그래도 되돌리기"는 본 identity로(§6), 지운 파일 복원은 원자적 설치(§4.1, §6). rev. 3: 외부 검수(HEAD d8851b0) 반영 — 빌드 산출물 제거, 되돌리기는 `after_identity`가 맞을 때만(§6), 참조는 문자 범위와 선택 때 identity로 확인(§3), 쓰기부터 검토 기록까지 실패·재시작 규칙(§7), turn 중에는 받아들이기도 막음(§6), 파일 전체 참조는 내용 없이(§3.3), 모듈 경계(§8), 단축키·명령 알림·직렬화(§3, §9). rev. 2: 소유자 결정 Q1~Q5 권고대로(§11). rev. 1: 설계 초안.
+> 2026-10-25 · **PROPOSED (V3-P76)** · rev. 6: 외부 재검수(HEAD e5998ef, READY_WITH_CORRECTIONS) 반영 — `ChangeLog.kept`에 `prior_identity`·`complete`(§8), 검토 항목의 키는 runner가 확인한 실제 경로(§5, §8). rev. 5: 외부 재검수(HEAD e617b76) 반영 — 되돌리기는 처음과 지금(마지막 확인)의 있음/없음으로 정함(§6), 새 파일의 `O_EXCL` 경로와 원자적 설치를 나눔(§4.1), 같은 파일의 다음 쓰기에서 끼어든 변경을 감지(§4.1, §5), 브라우저는 범위와 해시만 보냄(§3.2), Changes도 요청마다 숨김 정책(§10). rev. 4: 외부 재검수(HEAD 94f4b28) 반영 — 파일 단위 검토 항목과 호출 단위 의도를 나눔(§5, §7), no-replace를 지원하지 않는 곳에서는 `O_EXCL`로 이름을 잡음(§4.1), runner 오류는 "바꾸기 전"만(§4.1, §7), "그래도 되돌리기"는 본 identity로(§6), 지운 파일 복원은 원자적 설치(§4.1, §6). rev. 3: 외부 검수(HEAD d8851b0) 반영 — 빌드 산출물 제거, 되돌리기는 `after_identity`가 맞을 때만(§6), 참조는 문자 범위와 선택 때 identity로 확인(§3), 쓰기부터 검토 기록까지 실패·재시작 규칙(§7), turn 중에는 받아들이기도 막음(§6), 파일 전체 참조는 내용 없이(§3.3), 모듈 경계(§8), 단축키·명령 알림·직렬화(§3, §9). rev. 2: 소유자 결정 Q1~Q5 권고대로(§11). rev. 1: 설계 초안.
 >
 > 소유자 방향(2026-10-25):
 > - V3-P75 4단계("편집 중 에이전트 부르기")를 설계한다.
@@ -116,7 +116,7 @@
 ## 5. 검토 목록 (Changes)
 
 - 대화마다 **"검토하지 않은 변경"**을 둔다. 에이전트가 그 대화에서 바꾼 파일 가운데 아직 받아들이거나 되돌리지 않은 것이다.
-- 기록은 **두 가지로 나눈다**(재검수 1).
+- 기록은 **두 가지로 나눈다**(재검수 1). 둘 다 **runner가 확인한 실제 경로**를 키로 쓴다(§8).
   - **파일 항목**(파일마다 하나): `path`, `before`, `after_identity`, `state`, `interleaved`.
     - `before`: 검토 뒤 **처음 성공한 변경** 직전의 상태다. **한 번 정해지면 바뀌지 않는다.** 셋 중 하나다.
       - **있었음**: 판 id가 붙는다.
@@ -191,9 +191,15 @@
 
 - `VersionStore`와 검토 기록의 구현은 `himari.bootstrap`에 있다. 에이전트의 파일 Tool은 `himari.environment.machine`에 있다. Environment는 Bootstrap을 import하지 않는다(V3-046).
 - 그래서 **Environment 쪽에 포트(Protocol)를 둔다**: `environment/machine`의 `ChangeLog`
-  - `begin(scope, call, path) -> token`: 의도 기록. 실패하면 Tool이 실패한다(아무것도 쓰기 전).
-  - `kept(token, copy_fd | None, created, after_identity)`: 판 남기기와 항목 완성. 실패는 기록된 상태로만 남고, 예외로 Tool을 실패시키지 않는다.
-  - `unknown(token)`
+  - `begin(scope, call, real_path) -> token`: 의도 기록. 실패하면 Tool이 실패한다(아무것도 쓰기 전).
+    - `real_path`는 **runner가 확인한 실제 경로**다(재검수 2). 파일 Tool은 쓰기 전에 runner `visible`로 모델이 준 경로(`main.py`, `~/p/main.py`, 링크 등)를 실제 경로로 푼다. 그것이 실패하면 Tool은 쓰기 전에 실패한다.
+    - 검토 항목과 호출 의도의 키는 이 실제 경로다. 그래서 같은 파일이 다른 표기로 두 항목이 되지 않는다.
+  - `kept(token, real_path, copy_fd | None, created, prior_identity, after_identity, complete)`: 판 남기기와 항목 완성(재검수 1).
+    - `real_path`는 runner 쓰기의 답에 있는 경로다. `begin`의 경로와 다르면(그사이 링크가 바뀜) 답의 경로로 기록하고 그 항목을 `uncertain`으로 둔다.
+    - `prior_identity`는 runner가 쓰기 전에 본 상태다. 항목이 이미 있고 그 `after_identity`와 다르면 `interleaved`가 된다(§5).
+    - **`complete=False`이면 항목은 `uncertain`이 되고, `after_identity`는 `null`이다.** 그 호출의 의도는 `done`이다(결과는 알지만 내용이 덜 찼을 수 있음).
+    - 실패는 기록된 상태로만 남고, 예외로 Tool을 실패시키지 않는다(§7).
+  - `unknown(token)`: 답을 받지 못함. 의도는 `unknown`, 항목은 `uncertain`이다(§7).
 - Bootstrap(`Application`)이 `VersionStore`를 쓰는 구현을 만들어 `MachineEnvironment`에 넣는다. 넣지 않으면(시험, 다른 principal) 지금처럼 판 없이 쓴다.
 - 웹의 Changes API(목록, 받아들이기, 되돌리기)는 Application을 거친다.
 
