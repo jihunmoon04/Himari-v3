@@ -102,10 +102,12 @@ class BodyLimitMiddleware:
     error envelope."""
 
     def __init__(self, app: ASGIApp, max_body_size: int = MAX_REQUEST_BODY_BYTES,
-                 exempt: Callable[[str, str], bool] | None = None) -> None:
+                 exempt: Callable[[str, str], bool] | None = None,
+                 larger: Callable[[str, str], int | None] | None = None) -> None:
         self._app = app
         self._inner = RequestBodyLimitMiddleware(app, max_body_size)
         self._exempt = exempt  # (method, path) → the route holds the body to its own limit (e.g. uploads)
+        self._larger = larger  # (method, path) → a larger limit for that route (V3-P75 §7.7: a file saved)
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
@@ -114,6 +116,8 @@ class BodyLimitMiddleware:
         if self._exempt is not None and self._exempt(scope.get("method", ""), scope.get("path", "")):
             await self._app(scope, receive, send)
             return
+        limit = None if self._larger is None else self._larger(scope.get("method", ""), scope.get("path", ""))
+        inner = self._inner if limit is None else RequestBodyLimitMiddleware(self._app, limit)
         state: dict[str, Any] = {"rewriting": False}
 
         async def rewriting(message: Message) -> None:
@@ -129,4 +133,4 @@ class BodyLimitMiddleware:
                 return
             await send(message)
 
-        await self._inner(scope, receive, rewriting)
+        await inner(scope, receive, rewriting)

@@ -6,18 +6,26 @@ read and download is the runner's, with its hidden list and checks. Paths
 are absolute or start with ``~`` (the user's home); the runner resolves
 them and answers with real paths.
 
-Nothing here writes (part 1). Text is returned as text, to be shown as
-text; images are shown only as the copy the image sandbox made (V3-P67),
-never their own bytes; anything else is a download (an attachment, never
-rendered on this origin).
+Text is returned as text, to be shown as text; images are shown only as
+the copy the image sandbox made (V3-P67), never their own bytes; anything
+else is a download (an attachment, never rendered on this origin).
+
+The editor's writes (§7) are the owner's own: anywhere the runner lets the
+user write, hidden paths and ``writable_under`` aside, whatever the
+conversations' Workspaces are. Each goes to the runner with the target's
+folder as its write root. A save or a delete keeps what the file held as a
+previous version (``versions.py``), from the copy the runner took right
+before; a save is refused when no version could be kept.
 """
 
 from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import logging
 import os
 import posixpath
+import tempfile
 from collections import OrderedDict
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -32,8 +40,11 @@ from himari.data.api import (
     ViewMaker,
     sniff_image,
 )
+from himari.bootstrap.versions import Version, VersionStore
 from himari.environment.machine import MachineEnvironment
 from himari.runner import api as runner
+
+log = logging.getLogger("himari.explorer")
 
 BROWSE_PAGE = 500
 EDIT_MAX_BYTES = 1024 * 1024  # V3-P75 Q3: what the editor takes whole
@@ -64,6 +75,13 @@ class Listing:
 
 
 @dataclass(frozen=True)
+class Saved:
+    path: str
+    identity: tuple[int, ...]
+    previous_kept: bool  # False: saved, but its previous version could not be kept (§7.4, a rare failure)
+
+
+@dataclass(frozen=True)
 class ShownFile:
     path: str
     size: int
@@ -76,17 +94,20 @@ class ShownFile:
 
 
 class Explorer:
-    def __init__(self, machine: MachineEnvironment, views: ViewMaker | None) -> None:
+    def __init__(self, machine: MachineEnvironment, views: ViewMaker | None,
+                 versions: VersionStore | None = None) -> None:
         self._machine = machine
         self._views = views
+        self.versions = versions  # None: the editor cannot save (no place for previous versions)
         self._copies: OrderedDict[tuple[str, tuple[int, ...]], PreparedView] = OrderedDict()
         self._pool = concurrent.futures.ThreadPoolExecutor(MAX_READS, thread_name_prefix="himari-explorer")
         self._reads = 0
 
-    async def _call(self, op: str, args: dict[str, Any]) -> tuple[dict[str, Any], list[int]]:
+    async def _call(self, op: str, args: dict[str, Any], fds: Sequence[int] = (),
+                    seconds: float | None = CALL_SECONDS) -> tuple[dict[str, Any], list[int]]:
         try:
-            async with asyncio.timeout(CALL_SECONDS):
-                return await self._machine.call(op, args)
+            async with asyncio.timeout(seconds):
+                return await self._machine.call(op, args, fds)
         except runner.RunnerError as error:
             raise ExplorerRefused(error.category, str(error)) from None
         except runner.RunnerUnavailable:
@@ -164,6 +185,91 @@ class Explorer:
         if text is None:
             return ShownFile(real, size, identity, modified, "binary")
         return ShownFile(real, size, identity, modified, "text", text, truncated=not whole, editable=whole)
+
+    # --- the editor's writes (§7) ---------------------------------------------------------
+
+    async def _place(self, path: object) -> tuple[str, str]:
+        """The target's folder as the runner resolves it, and its name."""
+        given = self._path(path)
+        folder, name = posixpath.split(given.rstrip("/"))
+        if name in ("", ".", "..", "~") or "/" in name:
+            raise ExplorerRefused("invalid", "Give a file or folder name.")
+        found = await self.stat(folder or "/")
+        if found.get("kind") != "directory":
+            raise ExplorerRefused("not_directory", f"{found.get('path', folder)} is not a folder.")
+        return str(found["path"]), name
+
+    async def _write(self, op: str, path: object, args: dict[str, Any],
+                     fds: Sequence[int] = ()) -> tuple[str, dict[str, Any], list[int]]:
+        folder, name = await self._place(path)
+        target = posixpath.join(folder, name)
+        result, received = await self._call(op, {"path": target, "cwd": "/", "write_roots": [folder], **args}, fds,
+                                            None)  # a write is never given up on: it waits for its outcome
+        log.info("web %s %s", op if op != runner.WRITE else "save", target)
+        return target, result, received
+
+    def _keep(self, path: str, received: list[int], reason: str) -> bool:
+        if not received or self.versions is None:
+            for fd in received:
+                os.close(fd)
+            return False
+        try:
+            self.versions.keep(path, received[0], reason)
+        except OSError:
+            log.exception("a previous version of %s could not be kept", path)
+            return False
+        return True
+
+    async def save(self, path: object, content: bytes, expected: Sequence[int]) -> Saved:
+        """§7.4: replace the file read with identity ``expected``; its
+        previous version kept. CHANGED (nothing written) if it changed since."""
+        if self.versions is None:
+            raise ExplorerRefused("unavailable", "Files cannot be saved on this server.")
+        if len(content) > EDIT_MAX_BYTES:
+            raise ExplorerRefused("too_large", "Too large to save from here (at most 1 MiB).")
+        if len(expected) != 4 or not self.versions.ready_for(int(expected[2])):
+            raise ExplorerRefused("versions_unavailable", "The previous version could not be kept (the data folder "
+                                  "is full or not writable); nothing was saved.")
+        with tempfile.TemporaryFile() as body:
+            body.write(content)
+            body.flush()
+            body.seek(0)
+            target, result, received = await self._write(
+                runner.WRITE, path, {"mode": "replace", "expected": [int(v) for v in expected]}, [body.fileno()])
+        kept = await asyncio.to_thread(self._keep, str(result.get("path", target)), received, "save")
+        return Saved(str(result.get("path", target)), tuple(int(v) for v in result["identity"]), kept)
+
+    async def create_file(self, path: object) -> tuple[str, tuple[int, ...]]:
+        """§7.7: a new, empty file (EXISTS if the name is taken)."""
+        target, result, _ = await self._write(runner.CREATE_FILE, path, {})
+        return str(result.get("path", target)), tuple(int(v) for v in result["identity"])
+
+    async def make_folder(self, path: object) -> str:
+        """§7.5: one new folder (EXISTS if the name is taken)."""
+        target, result, _ = await self._write(runner.MKDIR, path, {})
+        return str(result.get("path", target))
+
+    async def delete(self, path: object, expected: Sequence[int]) -> tuple[str, bool]:
+        """§7.4: delete the file read with identity ``expected``; whether its
+        content was kept as a previous version (not over 1 MiB)."""
+        if len(expected) != 4:
+            raise ExplorerRefused("invalid", "The file's identity, as it was read, is required.")
+        target, result, received = await self._write(runner.DELETE, path,
+                                                      {"expected": [int(v) for v in expected]})
+        real = str(result.get("path", target))
+        return real, await asyncio.to_thread(self._keep, real, received, "delete")
+
+    def previous(self, path: str) -> tuple[Version, ...]:
+        return () if self.versions is None else self.versions.of(path)
+
+    def previous_text(self, path: str, version_id: str) -> str:
+        data = None if self.versions is None else self.versions.read(path, version_id)
+        if data is None:
+            raise ExplorerRefused("not_found", "No such previous version.")
+        text = _text(data, True)
+        if text is None:
+            raise ExplorerRefused("not_regular", "This previous version is not text.")
+        return text
 
     async def image(self, path: object) -> PreparedView:
         """The image sandbox's copy of an image file (V3-P75 §5.2, review N3);

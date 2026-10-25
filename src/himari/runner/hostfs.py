@@ -29,6 +29,7 @@ import re
 import secrets
 import shutil
 import stat
+import tempfile
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -39,6 +40,7 @@ from himari.sandbox.machine import Mask
 
 MAX_PATH_BYTES = 4096
 MAX_ENUMERATED = 100_000  # a folder listing reads at most this many names (V3-P75 §5.1)
+MAX_SNAPSHOT_BYTES = 1024 * 1024  # a replaced or deleted file's copy, for the web's previous versions (V3-P75 §7.4)
 MAX_LINK_HOPS = 40
 MAX_NAME_TRIES = 100
 SPECIAL_ROOTS = ("/proc", "/sys", "/dev", "/run")
@@ -149,6 +151,7 @@ class Host:
 
     rules: HiddenRules
     himari_home: str
+    scratch: str | None = None  # where copies of replaced files are made (the runner's state folder); None: /tmp
 
     @property
     def home(self) -> str:
@@ -472,10 +475,30 @@ class Host:
                 raise api.RunnerError(api.NOT_REGULAR)
         if expected is not None and (existing is None or self.identity(existing) != list(expected)):
             raise api.RunnerError(api.CHANGED)
+        temp = self._write_temp(parent_fd, data, stat.S_IMODE(existing.st_mode) if existing is not None else 0o644)
+        try:
+            if expected is not None:
+                try:
+                    now = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+                except OSError:
+                    raise api.RunnerError(api.CHANGED) from None
+                if self.identity(now) != list(expected):
+                    raise api.RunnerError(api.CHANGED)
+            os.replace(temp, name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+        except BaseException as error:
+            _discard(parent_fd, temp)
+            if isinstance(error, OSError):
+                raise _error(error) from None
+            raise
+        return existing is None
+
+    @staticmethod
+    def _write_temp(parent_fd: int, data: bytes | int, mode: int) -> str:
+        """A new temporary file beside the target, holding ``data``, synced."""
         temp = f".himari-{secrets.token_hex(8)}.tmp"
         try:
-            fd = os.open(temp, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
-                         stat.S_IMODE(existing.st_mode) if existing is not None else 0o644, dir_fd=parent_fd)
+            fd = os.open(temp, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW | os.O_CLOEXEC, mode,
+                         dir_fd=parent_fd)
         except OSError as error:
             raise _error(error) from None
         try:
@@ -489,23 +512,137 @@ class Host:
                 os.fsync(fd)
             finally:
                 os.close(fd)
-            if expected is not None:
-                try:
-                    now = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
-                except OSError:
-                    raise api.RunnerError(api.CHANGED) from None
-                if self.identity(now) != list(expected):
-                    raise api.RunnerError(api.CHANGED)
-            os.replace(temp, name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
         except BaseException as error:
-            try:
-                os.unlink(temp, dir_fd=parent_fd)
-            except OSError:
-                pass
+            _discard(parent_fd, temp)
             if isinstance(error, OSError):
                 raise _error(error) from None
             raise
-        return existing is None
+        return temp
+
+    # --- the web editor's writes (V3-P75 §7) ---------------------------------------------
+
+    def _hold(self, parent_fd: int, name: str, expected: Sequence[int]) -> tuple[int, os.stat_result]:
+        """The file as it is, open to read (a link is not followed), if its
+        identity is ``expected``; else CHANGED (gone, or another file now)."""
+        try:
+            fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=parent_fd)
+        except FileNotFoundError:
+            raise api.RunnerError(api.CHANGED) from None
+        except OSError as error:
+            raise _error(error) from None
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode):
+                raise api.RunnerError(api.NOT_REGULAR)
+            if self.identity(info) != list(expected):
+                raise api.RunnerError(api.CHANGED)
+        except BaseException:
+            os.close(fd)
+            raise
+        return fd, info
+
+    def _copy_of(self, fd: int, size: int) -> int | None:
+        """A copy of the open file, in an unnamed file of the runner's own
+        (None over MAX_SNAPSHOT_BYTES); taken before any rename or unlink, so
+        later writes to the old file cannot change it (review C1)."""
+        if size > MAX_SNAPSHOT_BYTES:
+            return None
+        folder = self.scratch or tempfile.gettempdir()
+        try:
+            copy = os.open(folder, os.O_TMPFILE | os.O_RDWR | os.O_CLOEXEC, 0o600)
+        except OSError:  # a filesystem without O_TMPFILE: made private and unnamed at once
+            copy, made = tempfile.mkstemp(dir=folder)
+            os.unlink(made)
+        try:
+            os.lseek(fd, 0, os.SEEK_SET)
+            _copy(fd, copy)
+            os.lseek(copy, 0, os.SEEK_SET)
+        except BaseException:
+            os.close(copy)
+            raise
+        return copy
+
+    def _unchanged(self, parent_fd: int, name: str, held: int, expected: Sequence[int]) -> None:
+        """Right before the rename or unlink: the name is still that file, and
+        nothing was written to it since it was copied (its mtime and size)."""
+        try:
+            now = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        except OSError:
+            raise api.RunnerError(api.CHANGED) from None
+        if self.identity(now) != list(expected) or self.identity(os.fstat(held)) != list(expected):
+            raise api.RunnerError(api.CHANGED)
+
+    def replace(self, parent_fd: int, name: str, data: bytes | int,
+                expected: Sequence[int]) -> tuple[list[int], int | None]:
+        """V3-P75 §7.4: replace the file whose identity is ``expected`` with
+        ``data``, atomically. Its new identity, and a copy of what it held
+        (an fd the caller takes, or None over MAX_SNAPSHOT_BYTES). CHANGED,
+        with nothing written, if it changed at any point before the rename."""
+        held, info = self._hold(parent_fd, name, expected)
+        copy: int | None = None
+        try:
+            copy = self._copy_of(held, info.st_size)
+            temp = self._write_temp(parent_fd, data, stat.S_IMODE(info.st_mode))
+            try:
+                self._unchanged(parent_fd, name, held, expected)
+                os.replace(temp, name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+            except BaseException as error:
+                _discard(parent_fd, temp)
+                if isinstance(error, OSError):
+                    raise _error(error) from None
+                raise
+            try:
+                now = self.identity(os.stat(name, dir_fd=parent_fd, follow_symlinks=False))
+            except OSError:
+                now = []  # replaced and gone again at once: the next save is told CHANGED
+            return now, copy
+        except BaseException:
+            if copy is not None:
+                os.close(copy)
+            raise
+        finally:
+            os.close(held)
+
+    def delete_checked(self, parent_fd: int, name: str, expected: Sequence[int]) -> int | None:
+        """§7.4: delete the file whose identity is ``expected``; a copy of what
+        it held, taken before the unlink (or None over MAX_SNAPSHOT_BYTES)."""
+        held, info = self._hold(parent_fd, name, expected)
+        copy: int | None = None
+        try:
+            copy = self._copy_of(held, info.st_size)
+            self._unchanged(parent_fd, name, held, expected)
+            try:
+                os.unlink(name, dir_fd=parent_fd)
+            except OSError as error:
+                raise _error(error) from None
+            return copy
+        except BaseException:
+            if copy is not None:
+                os.close(copy)
+            raise
+        finally:
+            os.close(held)
+
+    def create_file(self, parent_fd: int, name: str) -> list[int]:
+        """§7.7 (review C2): a new, empty file, or EXISTS if the name is taken
+        (a link included). Nothing can fail after the name is taken."""
+        try:
+            fd = os.open(name, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW | os.O_CLOEXEC, 0o644,
+                         dir_fd=parent_fd)
+        except OSError as error:
+            raise _error(error) from None
+        try:
+            return self.identity(os.fstat(fd))
+        finally:
+            os.close(fd)
+
+    @staticmethod
+    def make_folder(parent_fd: int, name: str) -> None:
+        """§7.5 (review N1): one new folder, 0755, in a folder that exists; EXISTS if taken."""
+        try:
+            os.mkdir(name, 0o755, dir_fd=parent_fd)
+        except OSError as error:
+            raise _error(error) from None
 
     @staticmethod
     def delete(parent_fd: int, name: str) -> None:
@@ -635,6 +772,13 @@ class Host:
             return digest.hexdigest() == sha256
         finally:
             os.close(fd)
+
+
+def _discard(parent_fd: int, temp: str) -> None:
+    try:
+        os.unlink(temp, dir_fd=parent_fd)
+    except OSError:
+        pass
 
 
 def _copy(source: int, target: int) -> None:

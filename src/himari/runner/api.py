@@ -54,8 +54,12 @@ HOLDS = "holds"
 REMOVE_CONVERSATION_FOLDER = "remove_conversation_folder"
 CHECK_WORKSPACE = "check_workspace"  # a folder the user registers (§10.1): nothing is written
 GIT_PUSH = "git_push"  # a branch of a repository in the call's Workspaces (§12)
+CREATE_FILE = "create_file"  # a new empty file, never over one (V3-P75 §7.7)
+MKDIR = "mkdir"  # one new folder (V3-P75 §7.5)
 WRITES = frozenset({WRITE, DELETE, RUN, COPY_IN, FREE_PATH, COMMIT_COPY, DISCARD_COPY, REMOVE_CONVERSATION_FOLDER,
-                    GIT_PUSH})
+                    GIT_PUSH, CREATE_FILE, MKDIR})
+# ``write`` with ``mode: "replace"`` (V3-P75 §7.4): ``expected`` required; the answer carries a copy of the
+# replaced file as an fd (none over 1 MiB). ``delete`` with ``expected``: the same for the deleted file.
 
 # Error categories: each message is safe to show the model.
 NOT_FOUND = "not_found"  # also every hidden path: whether it exists is not told

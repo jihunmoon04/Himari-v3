@@ -29,7 +29,7 @@ async def main(path: str) -> int:
         except CgroupError as error:
             print(f"himari-runner: {error}", file=sys.stderr)
             return 2
-    host = Host(HiddenRules(config.home, config.visible, config.hidden), config.himari_home)
+    host = Host(HiddenRules(config.home, config.visible, config.hidden), config.himari_home, config.state_dir)
     runner = Runner(config, MachineSandbox.discover(), host, commands)
     state = await runner.start()
     logging.getLogger("himari.runner").info("machine sandbox %s; serving uid %s", state.value, config.client_uid)

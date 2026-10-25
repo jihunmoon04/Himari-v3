@@ -94,6 +94,7 @@ class Runner:
         config = self.config
         os.makedirs(os.path.join(config.himari_home, "conversations"), mode=0o755, exist_ok=True)
         os.makedirs(config.cache_dir, mode=0o700, exist_ok=True)
+        os.makedirs(config.state_dir, mode=0o700, exist_ok=True)  # also where the web editor's copies are made
 
         async def self_test(sandbox: MachineSandbox) -> bool:
             # The bridge and the rules are checked through a proxy of the self-test's own: "localhost" is
@@ -272,8 +273,23 @@ class Runner:
             return await self._blocking(lambda: host.check_workspace(args.get("path"), args.get("others", []),
                                                                      config.writable_under)), []
         roots =await self._blocking(lambda: host.roots(args.get("write_roots"), config.writable_under))
+        if op == api.WRITE and args.get("mode") == "replace":
+            return await self._replace(args, fds, roots)
         if op == api.WRITE:
             return await self._write(args, fds, roots), []
+        if op == api.DELETE and args.get("expected") is not None:
+            return await self._delete_checked(args, roots)
+        if op in (api.CREATE_FILE, api.MKDIR):
+            def make() -> dict[str, Any]:
+                parent_fd, parent, name = host.target(args.get("path"), _text(args, "cwd"), roots, follow=False)
+                try:
+                    if op == api.MKDIR:
+                        host.make_folder(parent_fd, name)
+                        return {"path": posixpath.join(parent, name)}
+                    return {"path": posixpath.join(parent, name), "identity": host.create_file(parent_fd, name)}
+                finally:
+                    os.close(parent_fd)
+            return await self._blocking(make), []
         if op == api.DELETE:
             def delete() -> str:
                 parent_fd, parent, name = host.target(args.get("path"), _text(args, "cwd"), roots, follow=False)
@@ -290,6 +306,44 @@ class Runner:
         if op in (api.COPY_IN, api.FREE_PATH, api.COMMIT_COPY, api.DISCARD_COPY):
             return await self._blocking(lambda: self._upload(op, args, fds, roots)), []
         raise api.RunnerError(api.INVALID, f"unknown operation {op}")
+
+    @staticmethod
+    def _expected(args: dict[str, Any]) -> list[int]:
+        expected = args.get("expected")
+        if not (isinstance(expected, list) and len(expected) == 4 and all(isinstance(v, int) for v in expected)):
+            raise api.RunnerError(api.INVALID, "the file's identity, as it was read, is required")
+        return expected
+
+    async def _replace(self, args: dict[str, Any], fds: Sequence[int],
+                       roots: list[str]) -> tuple[dict[str, Any], list[int]]:
+        """V3-P75 §7.4: the web editor's save; the content comes as an fd."""
+        host, expected = self.host, self._expected(args)
+        if len(fds) != 1:
+            raise api.RunnerError(api.INVALID, "the content comes as one file")
+
+        def replace() -> tuple[dict[str, Any], list[int]]:
+            parent_fd, parent, name = host.target(args.get("path"), _text(args, "cwd"), roots, follow=False)
+            try:
+                identity, copy = host.replace(parent_fd, name, fds[0], expected)
+            finally:
+                os.close(parent_fd)
+            return ({"path": posixpath.join(parent, name), "identity": identity, "previous": copy is not None},
+                    [] if copy is None else [copy])
+
+        return await self._blocking(replace)
+
+    async def _delete_checked(self, args: dict[str, Any], roots: list[str]) -> tuple[dict[str, Any], list[int]]:
+        host, expected = self.host, self._expected(args)
+
+        def delete() -> tuple[dict[str, Any], list[int]]:
+            parent_fd, parent, name = host.target(args.get("path"), _text(args, "cwd"), roots, follow=False)
+            try:
+                copy = host.delete_checked(parent_fd, name, expected)
+            finally:
+                os.close(parent_fd)
+            return {"path": posixpath.join(parent, name), "previous": copy is not None}, [] if copy is None else [copy]
+
+        return await self._blocking(delete)
 
     async def _write(self, args: dict[str, Any], fds: Sequence[int], roots: list[str]) -> dict[str, Any]:
         host = self.host
