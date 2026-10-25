@@ -19,10 +19,13 @@ nothing is written to the sync fd):
 3. every path rule added (a missing root is a failure); no network rule is
    added, so all TCP bind/connect is denied when TCP is handled;
 4. ``PR_SET_NO_NEW_PRIVS``, then ``landlock_restrict_self``;
-5. the machine profile only (V3-P74 §6.6): the seccomp filter that refuses
+5. the machine profile with a proxy only (V3-P74 §11.2): the bridge from
+   ``127.0.0.1:<port>`` to the proxy's socket starts — bound before the
+   payload exists, not its child, not dumpable, outside the seccomp filter;
+6. the machine profile only (V3-P74 §6.6): the seccomp filter that refuses
    ``socket(AF_UNIX)``, ``socketpair(AF_UNIX)`` other than ``SOCK_STREAM``
    and io_uring, and ends a process of another architecture;
-6. write ``SYNC_OK`` to the sync fd, close every fd >= 3, ``execvp``.
+7. write ``SYNC_OK`` to the sync fd, close every fd >= 3, ``execvp``.
 """
 
 from __future__ import annotations
@@ -30,9 +33,11 @@ from __future__ import annotations
 import ctypes
 import json
 import os
+import socket
 import stat
 import struct
 import sys
+import threading
 
 SETUP_FAILURE_EXIT = 125
 SYNC_OK = b"HIMARI_SANDBOX_ENFORCED\n"
@@ -143,6 +148,87 @@ def install_unix_filter() -> None:
     prog = _SockFprog(len(program) // 8, ctypes.cast(buffer, ctypes.c_void_p))
     if _libc().prctl(_PR_SET_SECCOMP, _SECCOMP_MODE_FILTER, ctypes.byref(prog), 0, 0) != 0:
         raise SetupError("seccomp filter refused")
+
+
+# --- the proxy bridge (V3-P74 §11.2) ---------------------------------------------------
+_PR_SET_DUMPABLE = 4
+_MAX_TUNNELS = 64
+
+
+def start_bridge(proxy: object) -> None:
+    """Listen on ``127.0.0.1:<port>`` here, then leave the listening to a
+    grandchild: reparented to the namespace's init, so the payload (this
+    process after exec) is not its parent; not dumpable, so the payload,
+    the same user without capabilities, cannot ptrace it or read its memory."""
+    if not (isinstance(proxy, dict) and isinstance(proxy.get("socket"), str)
+            and isinstance(proxy.get("port"), int) and not isinstance(proxy.get("port"), bool)):
+        raise SetupError("malformed proxy policy")
+    path, port = proxy["socket"], proxy["port"]
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        listener.bind(("127.0.0.1", port))
+        listener.listen(64)
+        child = os.fork()
+        if child == 0:
+            try:
+                if _libc().prctl(_PR_SET_DUMPABLE, 0, 0, 0, 0) != 0:
+                    os._exit(1)
+                if os.fork() == 0:
+                    _bridge(listener, path)
+            finally:
+                os._exit(0)
+        _, status = os.waitpid(child, 0)
+        if status != 0:
+            raise SetupError("the proxy bridge did not start")
+    except OSError as error:
+        raise SetupError("the proxy bridge did not start") from error
+    finally:
+        listener.close()
+
+
+def _bridge(listener: socket.socket, path: str) -> None:
+    null = os.open("/dev/null", os.O_RDWR)
+    for fd in (0, 1, 2):  # the command's output pipes are not held open by the bridge
+        os.dup2(null, fd)
+    keep = listener.fileno()
+    os.closerange(3, keep)
+    os.closerange(keep + 1, 65536)
+    slots = threading.BoundedSemaphore(_MAX_TUNNELS)
+    while True:
+        conn, _ = listener.accept()
+        if not slots.acquire(blocking=False):
+            conn.close()
+            continue
+        threading.Thread(target=_carry, args=(conn, path, slots), daemon=True).start()
+
+
+def _carry(conn: socket.socket, path: str, slots: threading.BoundedSemaphore) -> None:
+    upstream = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        upstream.connect(path)
+        back = threading.Thread(target=_copy, args=(upstream, conn), daemon=True)
+        back.start()
+        _copy(conn, upstream)
+        back.join()
+    except OSError:
+        pass
+    finally:
+        conn.close()
+        upstream.close()
+        slots.release()
+
+
+def _copy(source: socket.socket, sink: socket.socket) -> None:
+    try:
+        while data := source.recv(65536):
+            sink.sendall(data)
+    except OSError:
+        pass
+    finally:
+        try:
+            sink.shutdown(socket.SHUT_WR)
+        except OSError:
+            pass
 
 
 # --- hidden paths (V3-P74 §6.1) --------------------------------------------------------
@@ -275,6 +361,8 @@ def main(argv: list[str]) -> None:
         if seccomp not in (None, "unix"):
             raise SetupError("malformed seccomp policy")
         enforce(policy)
+        if "proxy" in policy:
+            start_bridge(policy["proxy"])
         if seccomp == "unix":
             install_unix_filter()
     except Exception:

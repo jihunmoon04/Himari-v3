@@ -299,7 +299,8 @@ class RunCommand(_MachineTool):
     description = (
         "Run one command as the user in a Linux sandbox on this server. It can read what the user can read, "
         "except hidden locations, and write only inside this conversation's workspaces and /tmp (each command "
-        "gets its own /tmp). No network. argv is a list of strings; use [\"sh\", \"-c\", \"...\"] for shell "
+        "gets its own /tmp). Network: HTTPS only, to the hosts the current state lists (others get 403 from "
+        "the proxy); no SSH, so use https:// git remotes. argv is a list of strings; use [\"sh\", \"-c\", \"...\"] for shell "
         "syntax. Unix domain sockets cannot be created: use TCP on 127.0.0.1, and the 'fork' start method for "
         "Python multiprocessing. Use a virtual environment in the project for Python packages (the home folder "
         f"is read-only). Runs in the working directory; timeout {DEFAULT_TIMEOUT_SECONDS}s by default "

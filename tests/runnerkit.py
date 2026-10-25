@@ -8,6 +8,8 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import os
+import shutil
+import tempfile
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -64,6 +66,7 @@ class RunnerKit:
         if not self.loop.is_closed():  # a test may have stopped it already
             self.loop.call_soon_threadsafe(self.stop.set)
         self.thread.join(10)
+        shutil.rmtree(self.runner.config.state_dir, ignore_errors=True)
 
 
 def make_home(base: Path) -> Path:
@@ -77,16 +80,21 @@ def make_home(base: Path) -> Path:
 
 
 def start_runner(base: Path, *, client_uid: int | None = None, enforced: bool = True,
-                 sandbox: MachineSandbox | None = None, home: Path | None = None) -> RunnerKit:
+                 sandbox: MachineSandbox | None = None, home: Path | None = None,
+                 network: bool = False) -> RunnerKit:
     """``sandbox``/``home``: a real machine sandbox (started with its
-    self-test) and the user's real home, for the host gate."""
+    self-test) and the user's real home, for the host gate. ``network``:
+    the proxy with the default allow list (it starts with a real sandbox
+    only). The runner's state folder is a short one of its own (a socket
+    path is at most 107 bytes), never the user's real one."""
     real = sandbox is not None
     home = make_home(base) if home is None else home
     himari_home = base / "HIMARI" if real else home / "HIMARI"
     socket_path = str(base / "runner.sock")
     config = parse({"client_uid": os.getuid() if client_uid is None else client_uid,
                     "himari_home": str(himari_home), "socket": socket_path,
-                    "cache_dir": str(home / ".cache/himari-runner"), "hidden": [str(base / "secret-root")]})
+                    "cache_dir": str(home / ".cache/himari-runner"), "hidden": [str(base / "secret-root")],
+                    "state_dir": tempfile.mkdtemp(prefix="hr-"), "network": {"enabled": network}})
     config = dataclasses.replace(config, home=str(home))
     rules = HiddenRules(str(home), (".gitconfig", ".local/bin", ".local/lib", ".cache/himari-runner"),
                         config.hidden)

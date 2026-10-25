@@ -11,7 +11,10 @@ is not under /tmp: the sandbox's /tmp is its own):
     scratch/outside/           not attached; host Unix sockets live here
 
 plus the real masks the caller passes (each must look masked inside), a
-TCP listener on the host's 127.0.0.1 and the runner's own socket path.
+TCP listener on the host's 127.0.0.1, the runner's own socket path, and a
+proxy (§11) whose allow list holds ``localhost`` only: through the bridge,
+a name not on it, ``localhost`` (allowed, but loopback) and an IP literal
+are each refused (403), and the bridge cannot be traced or read.
 ENFORCED requires every observation to equal ``EXPECTED``.
 """
 
@@ -103,6 +106,40 @@ for name in os.listdir("/proc/self/fd"):
         except OSError:
             pass
 r["extra_fds"] = found
+def via_proxy(where):
+    s = socket.create_connection(("127.0.0.1", 3128), timeout=5)
+    try:
+        s.sendall(("CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n" % (where, where)).encode())
+        return s.recv(64).split(b" ")[1].decode()
+    finally:
+        s.close()
+def status(where):
+    try:
+        return via_proxy(where)
+    except Exception as e:
+        return type(e).__name__
+r["proxy_unlisted"] = status("example.com:443")
+r["proxy_loopback_name"] = status("localhost:443")
+r["proxy_ip_literal"] = status("127.0.0.1:443")
+r["proxy_env"] = os.environ.get("HTTPS_PROXY")
+def cmdline(pid):
+    try:
+        return open("/proc/%d/cmdline" % pid, "rb").read()
+    except OSError:
+        return b""
+pids = [int(n) for n in os.listdir("/proc") if n.isdigit() and int(n) != os.getpid()]
+r["bridges"] = sum(1 for pid in pids if cmdline(pid).split(b"\0")[3:4] == [b"/run/himari/landlock_helper.py"])
+libc.ptrace.restype = ctypes.c_long
+def traceable(pid):
+    if libc.ptrace(ctypes.c_long(16), ctypes.c_long(pid), None, None) == 0:  # PTRACE_ATTACH
+        libc.ptrace(ctypes.c_long(17), ctypes.c_long(pid), None, None)
+        return True
+    try:
+        open("/proc/%d/mem" % pid, "rb").close()
+        return True
+    except OSError:
+        return False
+r["traceable"] = [pid for pid in pids if traceable(pid)]
 print(json.dumps(r, sort_keys=True))
 """
 
@@ -135,6 +172,12 @@ EXPECTED: dict[str, object] = {
     "cap_eff_zero": True,
     "seccomp": True,
     "extra_fds": [],
+    "proxy_unlisted": "403",
+    "proxy_loopback_name": "403",
+    "proxy_ip_literal": "403",
+    "proxy_env": "http://127.0.0.1:3128",
+    "bridges": 1,
+    "traceable": [],
 }
 
 
@@ -151,8 +194,10 @@ def _directory(path: str) -> int:
 
 
 async def probe(sandbox: MachineSandbox, scratch: str, *, home: str, real_masks: Sequence[Mask] = (),
-                runner_socket: str = "", cache: str | None = None,
+                runner_socket: str = "", cache: str | None = None, proxy: str | None = None,
                 cgroup_procs: str | None = None) -> MachineReport:
+    """``proxy``: the socket of a proxy that allows ``localhost`` only;
+    without one, every proxy check fails (the self-test does not pass)."""
     os.makedirs(scratch, exist_ok=True)
     with ExitStack() as stack:
         base = tempfile.mkdtemp(prefix=".himari-machine-selftest-", dir=scratch)
@@ -186,12 +231,14 @@ async def probe(sandbox: MachineSandbox, scratch: str, *, home: str, real_masks:
                  Mask(secret_file, "file", os.stat(secret_file).st_dev), *real_masks)
         layout = MachineLayout(home=home, cwd=work, writable=((sim_home, home_fd),), masks=masks,
                                cache=None if cache is None or cache_fd is None else (cache, cache_fd),
-                               cgroup_procs=cgroup_procs)
+                               cgroup_procs=cgroup_procs, proxy=proxy)
         params = {"work": work, "outside": outside, "secret_dir": secret_dir, "secret_file": secret_file,
                   "port": tcp.getsockname()[1], "runner_socket": runner_socket,
                   "real_masks": [[m.path, m.kind] for m in real_masks]}
-        result = await sandbox.launch(["/usr/bin/python3", "-I", "-S", "-c", PROBE, json.dumps(params)],
-                                      layout, 30)
+        script = os.path.join(base, "probe.py")  # longer than one argument may be; read-only inside
+        with open(script, "w") as handle:
+            handle.write(PROBE)
+        result = await sandbox.launch(["/usr/bin/python3", "-I", "-S", script, json.dumps(params)], layout, 30)
         if result.timed_out or result.exit_code != 0:
             return MachineReport(False, error=f"probe exit={result.exit_code} timed_out={result.timed_out} "
                                               f"stderr={result.stderr[-300:]!r}")

@@ -60,6 +60,30 @@ def test_policy_allows_loopback_tcp_and_installs_the_filter() -> None:
     assert json.loads(args[args.index("--") + 5])["sync_fd"] == 5
 
 
+def test_the_proxy_is_bound_and_named_only_when_given() -> None:
+    """§11.2: the runner's proxy socket at a fixed path in the sandbox's own /run, before the masks; the
+    bridge's port in the policy and in the proxy variables."""
+    args = machine_arguments(CAPABILITY, layout(proxy="/home/u/.local/state/himari-runner/proxy.sock"), 5,
+                             ["true"], [20])
+    flat = " ".join(args)
+    bind = flat.index("--ro-bind /home/u/.local/state/himari-runner/proxy.sock /run/himari/proxy.sock")
+    assert flat.index("--tmpfs /run") < bind < flat.index("--tmpfs /home/u/.ssh")
+    policy = json.loads(args[args.index("--") + 5])
+    assert policy["proxy"] == {"socket": "/run/himari/proxy.sock", "port": 3128}
+    env = machine_env(layout(proxy="/p.sock"))
+    assert env["HTTPS_PROXY"] == env["http_proxy"] == env["ALL_PROXY"] == "http://127.0.0.1:3128"
+    assert env["NO_PROXY"] == "localhost,127.0.0.1,::1" and "-Dhttps.proxyPort=3128" in env["JAVA_TOOL_OPTIONS"]
+    plain = machine_arguments(CAPABILITY, layout(), 5, ["true"], [20])
+    assert "/run/himari/proxy.sock" not in plain and "proxy" not in machine_policy(layout(), 5)
+    assert not any("PROXY" in key.upper() for key in machine_env(layout()))
+
+
+def test_a_malformed_proxy_policy_fails_closed() -> None:
+    for bad in (None, {"socket": "/x"}, {"socket": 1, "port": 3128}, {"socket": "/x", "port": True}):
+        with pytest.raises(landlock_helper.SetupError):
+            landlock_helper.start_bridge(bad)
+
+
 def test_environment() -> None:
     env = machine_env(layout(toolkit_fd=13))
     assert env["HOME"] == "/home/u" and env["PATH"].startswith("/home/u/.local/bin:")

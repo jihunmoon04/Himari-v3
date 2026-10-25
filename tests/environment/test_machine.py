@@ -408,6 +408,7 @@ def test_the_state_names_the_folders_and_what_may_be_read(kit: RunnerKit) -> Non
     assert [(w.path, w.label, w.note) for w in view.workspaces] == [(own, "this conversation", None),
                                                                     (project, "a", "the C project")]
     assert view.readable is not None and str(kit.home) in view.readable
+    assert view.network == "none: commands cannot reach the network"  # this runner's proxy is not started
 
 
 def test_a_write_waits_for_every_folder_of_the_conversation(kit: RunnerKit) -> None:

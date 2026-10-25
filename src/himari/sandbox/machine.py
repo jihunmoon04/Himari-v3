@@ -10,7 +10,9 @@ the tool cache; TCP inside the private loopback allowed, Q8) and the
 seccomp filter for host Unix sockets (§6.6).
 
 ``/tmp``, ``/run``, ``/dev`` and ``/proc`` are the sandbox's own. The
-network namespace has loopback only (the proxy of §11 comes later).
+network namespace has loopback only; with a proxy (§11), the runner's
+proxy socket is bound at ``PROXY_IN_SANDBOX`` and the helper's bridge
+listens on ``127.0.0.1:BRIDGE_PORT``, named in the proxy variables.
 
 There is no admission walk (V3-P41's whole-tree check): the boundary is
 the mount namespace, Landlock and the user's own permissions.
@@ -42,6 +44,19 @@ from himari.sandbox.backend import (
 )
 
 CACHE_VARIABLES = ("XDG_CACHE_HOME", "PIP_CACHE_DIR", "GRADLE_USER_HOME", "npm_config_cache")
+PROXY_IN_SANDBOX = "/run/himari/proxy.sock"
+BRIDGE_PORT = 3128
+PROXY_URL = f"http://127.0.0.1:{BRIDGE_PORT}"
+PROXY_VARIABLES = {
+    **{name: PROXY_URL for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy",
+                                    "all_proxy")},
+    "NO_PROXY": "localhost,127.0.0.1,::1",
+    "no_proxy": "localhost,127.0.0.1,::1",
+    # Maven, Gradle and other Java programs (§11.3)
+    "JAVA_TOOL_OPTIONS": (f"-Dhttps.proxyHost=127.0.0.1 -Dhttps.proxyPort={BRIDGE_PORT} "
+                          f"-Dhttp.proxyHost=127.0.0.1 -Dhttp.proxyPort={BRIDGE_PORT} "
+                          "-Dhttp.nonProxyHosts=localhost|127.0.0.1"),
+}
 _ENTER_CGROUP = 'echo 0 > "$1" && shift && exec "$@"'  # the shell joins the cgroup, then becomes bwrap
 
 
@@ -67,6 +82,7 @@ class MachineLayout:
     cache: tuple[str, int] | None = None  # the runner's tool cache, writable
     toolkit_fd: int | None = None  # the documents toolkit, read-only at TOOLKIT_MOUNT (V3-P70)
     cgroup_procs: str | None = None  # the commands cgroup's cgroup.procs (§6.5); None: stay put
+    proxy: str | None = None  # the runner's proxy socket (§11); None: no network at all
 
 
 def machine_env(layout: MachineLayout) -> dict[str, str]:
@@ -84,6 +100,8 @@ def machine_env(layout: MachineLayout) -> dict[str, str]:
                     "MAVEN_OPTS": f"-Dmaven.repo.local={cache}/m2"})
     if layout.toolkit_fd is not None:
         env.update(toolkit_env())
+    if layout.proxy is not None:
+        env.update(PROXY_VARIABLES)
     return env
 
 
@@ -91,7 +109,7 @@ def machine_policy(layout: MachineLayout, sync_fd: int) -> dict[str, object]:
     write_roots = [path for path, _ in layout.writable] + ["/tmp"]
     if layout.cache is not None:
         write_roots.append(layout.cache[0])
-    return {
+    policy: dict[str, object] = {
         "read_roots": ["/"],
         "write_roots": write_roots,
         "device_root": "/dev",
@@ -100,6 +118,9 @@ def machine_policy(layout: MachineLayout, sync_fd: int) -> dict[str, object]:
         "hidden": [[m.path, m.kind, m.device] for m in layout.masks],
         "seccomp": "unix",
     }
+    if layout.proxy is not None:
+        policy["proxy"] = {"socket": PROXY_IN_SANDBOX, "port": BRIDGE_PORT}
+    return policy
 
 
 def machine_arguments(capability: HostCapability, layout: MachineLayout, sync_fd: int,
@@ -130,6 +151,8 @@ def machine_arguments(capability: HostCapability, layout: MachineLayout, sync_fd
         "--tmpfs", "/run",
         "--ro-bind", capability.helper, HELPER_IN_SANDBOX,
     ]
+    if layout.proxy is not None:
+        args += ["--ro-bind", layout.proxy, PROXY_IN_SANDBOX]
     if layout.toolkit_fd is not None:
         args += ["--ro-bind-fd", str(layout.toolkit_fd), TOOLKIT_MOUNT]
     for path, fd in sorted(layout.writable, key=lambda item: item[0].count("/")):
