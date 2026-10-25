@@ -96,15 +96,18 @@ class _MachineTool:
         from himari.environment.machine import MachineUnavailable
 
         try:
-            folder = await self._env.folder(ctx.scope.conversation_id, ctx.workspace.cwd_relative)
+            places = await self._env.places(ctx.scope)
         except MachineUnavailable as unavailable:
             return _unreachable(str(unavailable))
         args = invocation.arguments
+        roots = list(places.roots)
         try:
             if self.effect is EffectProfile.READ:
-                return await self.act(args, folder, [folder], ctx)
-            async with self._env.locks.hold((folder,)):
-                return await self.act(args, folder, [folder], ctx)
+                return await self.act(args, places.cwd, roots, ctx)
+            # All of the Conversation's folders at once (§9.1): which one a path lands in is
+            # known only once the runner has resolved it.
+            async with self._env.locks.hold(places.roots):
+                return await self.act(args, places.cwd, roots, ctx)
         except runner.NotSent:
             return _unreachable()
         except runner.RunnerError as error:
@@ -350,7 +353,7 @@ class MachineReadDocument(ReadDocument):
         assert ctx.workspace is not None
         shown = _shown(raw_path)
         try:
-            cwd = await self._machine.folder(ctx.scope.conversation_id, ctx.workspace.cwd_relative)
+            cwd = (await self._machine.places(ctx.scope)).cwd
             result, fds = await self._machine.call(runner.OPEN, {"path": raw_path, "cwd": cwd})
         except MachineUnavailable as unavailable:
             return _unreachable(str(unavailable))

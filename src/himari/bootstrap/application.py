@@ -38,6 +38,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import posixpath
 import re
 import os
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping, Sequence
@@ -53,6 +54,7 @@ from himari.bootstrap import DEFAULT_INSTRUCTIONS, Runtime, build_runtime
 from himari.bootstrap.operator import check_private_dir, ensure_operator_secret, ensure_private_dir
 from himari.common import (
     AttachmentRef,
+    BindingId,
     CallId,
     CallRef,
     ConversationId,
@@ -83,6 +85,7 @@ from himari.data.api import (
     Memory,
     MemoryCategory,
     MemoryOrigin,
+    RegisteredWorkspace,
     ViewMaker,
     ViewState,
     InitialActivation,
@@ -103,7 +106,14 @@ from himari.imaging import ImageViews, runtime_roots
 # For the interfaces (V3-P66 §9): how placing an upload can be refused.
 from himari.environment.inside import UploadsFolderUnusable as UploadsFolderUnusable
 from himari.environment.inside import WorkspaceBusy as WorkspaceBusy
-from himari.environment.machine import MACHINE, MachineEnvironment, MachineUnavailable, machine_workspace_for
+from himari.environment.machine import (
+    MACHINE,
+    OWN_LABEL,
+    MachineEnvironment,
+    MachineUnavailable,
+    machine_workspace_for,
+)
+from himari.runner.api import RunnerError
 from himari.sandbox import identity
 from himari.sandbox.api import SandboxAdmissionError, SandboxState, ServerProfile
 from himari.sandbox.backend import SandboxBackend, discover_capability, supports_tmp_size
@@ -235,6 +245,40 @@ class FilesUnavailable(RuntimeError):
 
 class FileNameRefused(ValueError):
     """V3-P66 §5.3: no name, or a name longer than MAX_RAW_NAME_BYTES."""
+
+
+class WorkspaceRefused(ValueError):
+    """V3-P74 §10: a folder was not registered, attached or detached;
+    ``message`` is for the user. ``code``: ``unavailable`` (folders are not
+    offered to this principal, or the runner does not answer),
+    ``not_usable`` (the runner's check refused the folder), ``duplicate``
+    (registered or attached already), ``not_machine`` (this Conversation does
+    not use the machine Environment), ``own_folder`` (it cannot be detached)."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
+
+
+NOT_MACHINE = "This conversation does not work on this server's folders (it was started before they were offered)."
+# V3-P74 §14: the note a cloud-synced folder gets when it is registered.
+CLOUD_FILESYSTEMS = frozenset({"fuse.rclone"})
+DRIVE_NOTE = ("Cloud-synced folder: files have no execute bit, changes from other devices can take up to 15 minutes "
+              "to appear, keep git repositories and build output on local disk.")
+
+
+@dataclass(frozen=True)
+class AttachedFolder:
+    """One of a Conversation's folders as a client shows it (V3-P74 §10.3)."""
+
+    binding_id: str
+    path: str | None  # the own folder's is None while the runner does not answer
+    label: str
+    note: str | None
+    working: bool  # the working directory (§10.4)
+    own: bool  # the Conversation's own folder: cannot be detached
+    workspace_id: str | None  # the registration; None for the own folder
 
 
 @dataclass(frozen=True)
@@ -689,7 +733,7 @@ class Application:
             if machine_socket is not None:
                 machine = MachineEnvironment(machine_socket,
                                              files=InsideFiles(store.blobs, SqliteData(store), file_max_bytes),
-                                             documents=reader)
+                                             documents=reader, registry=SqliteData(store))
                 try:
                     hello = await machine.hello()
                     log.info("machine runner: sandbox %s, HIMARI home %s", hello.get("state"), hello.get("himari_home"))
@@ -773,6 +817,131 @@ class Application:
         if default is None:
             raise UnknownToolSource(source)
         await self.data.set_external_setting(scope, source, None if enabled == default else enabled)
+
+    # --- Folders on this server as Workspaces (V3-P74 §10) ---------------------------------
+
+    def _machine_for(self, principal: PrincipalId) -> MachineEnvironment:
+        if self.machine is None or principal not in self.machine_principals:
+            raise WorkspaceRefused("unavailable", "Folders on this server are not offered to you.")
+        return self.machine
+
+    async def machine_workspaces(self, principal: PrincipalId) -> tuple[RegisteredWorkspace, ...]:
+        """The principal's registered folders, oldest first."""
+        self._machine_for(principal)
+        return await self.data.list_workspaces(principal, MACHINE)
+
+    async def register_workspace(self, principal: PrincipalId, path: str, label: str | None = None,
+                                 note: str | None = None) -> RegisteredWorkspace:
+        """The runner checks the folder first (§10.1): it exists, the user may
+        write it, it is not hidden; Data keeps its real path. A cloud-synced
+        folder gets the Drive note ahead of the user's (§14)."""
+        machine = self._machine_for(principal)
+        known = await self.data.list_workspaces(principal, MACHINE)
+        real, filesystem, same = await self._check_folder(machine, path, known)
+        if same is not None:
+            raise WorkspaceRefused("duplicate", f"This folder is registered already, as {same.location}.")
+        if filesystem in CLOUD_FILESYSTEMS:
+            note = DRIVE_NOTE if note is None or not note.strip() else f"{DRIVE_NOTE}\n{note.strip()}"
+        try:
+            return await self.data.register_workspace(principal, MACHINE, real, label or posixpath.basename(real) or real,
+                                                      note)
+        except DataError as error:
+            if error.code is DataErrorCode.DUPLICATE_IDENTITY:
+                raise WorkspaceRefused("duplicate", f"{real} is registered already.") from None
+            raise
+
+    async def _check_folder(self, machine: MachineEnvironment, path: str, known: Sequence[RegisteredWorkspace]
+                            ) -> tuple[str, str | None, RegisteredWorkspace | None]:
+        """The runner's check: the real path, its filesystem, and the
+        registration that is already this folder (at that path, or another)."""
+        if not isinstance(path, str) or not path.strip():
+            raise WorkspaceRefused("not_usable", "Give the folder's path.")
+        try:
+            checked = await machine.check_workspace(path.strip(), [w.location for w in known])
+        except MachineUnavailable:
+            raise WorkspaceRefused("unavailable", "The machine runner does not answer; try again later.") from None
+        except RunnerError as error:
+            raise WorkspaceRefused("not_usable", f"{path.strip()}: {error}") from None
+        real = str(checked["path"])
+        same_as = checked.get("same_as")
+        same = next((w for w in known if w.location == real or w.location == same_as), None)
+        filesystem = checked.get("filesystem")
+        return real, filesystem if isinstance(filesystem, str) else None, same
+
+    async def update_workspace(self, principal: PrincipalId, workspace_id: str, label: str,
+                               note: str | None) -> RegisteredWorkspace:
+        self._machine_for(principal)
+        return await self.data.update_workspace(principal, WorkspaceId(workspace_id), label=label, note=note)
+
+    async def unregister_workspace(self, principal: PrincipalId, workspace_id: str) -> None:
+        """Only while no Conversation has it attached; the folder stays."""
+        self._machine_for(principal)
+        await self.data.unregister_workspace(principal, WorkspaceId(workspace_id))
+
+    async def conversation_workspaces(self, scope: TrustedScope) -> tuple[AttachedFolder, ...]:
+        """This Conversation's folders (its own first); empty when it does not
+        use the machine Environment. Authorizes like any read."""
+        try:
+            found = await self.data.read_conversation_workspaces(scope, MACHINE)
+        except DataError as error:
+            if error.code is DataErrorCode.NOT_FOUND:
+                await self.data.read_conversation(scope)  # NOT_AUTHORIZED stays that
+                return ()
+            raise
+        folders: list[AttachedFolder] = []
+        for item in found.attached:
+            working = item.binding.binding_id == found.working
+            if item.workspace is not None:
+                w = item.workspace
+                folders.append(AttachedFolder(item.binding.binding_id, w.location, w.label, w.note, working, False,
+                                              w.workspace_id))
+                continue
+            path = None
+            if self.machine is not None:
+                try:
+                    path = await self.machine.folder(scope.conversation_id, item.binding.cwd_relative or "")
+                except MachineUnavailable:
+                    path = None
+            folders.append(AttachedFolder(item.binding.binding_id, path, OWN_LABEL, None, working, True, None))
+        return tuple(folders)
+
+    async def attach_workspace(self, scope: TrustedScope, *, workspace_id: str | None = None, path: str | None = None,
+                               label: str | None = None) -> tuple[AttachedFolder, ...]:
+        """Attach a registered folder, or a path (registered first unless it
+        is already); it becomes the working directory (§10.4). Takes effect
+        from the next Tool call: one running keeps its folders."""
+        machine = self._machine_for(scope.principal_id)
+        if not await self.conversation_workspaces(scope):  # NOT_AUTHORIZED first; nothing registered for nothing
+            raise WorkspaceRefused("not_machine", NOT_MACHINE)
+        if workspace_id is None:
+            if path is None:
+                raise WorkspaceRefused("not_usable", "Give a registered workspace or a folder's path.")
+            known = await self.data.list_workspaces(scope.principal_id, MACHINE)
+            _, _, same = await self._check_folder(machine, path, known)
+            chosen = same if same is not None else await self.register_workspace(scope.principal_id, path, label)
+            workspace_id = chosen.workspace_id
+        try:
+            await self.data.attach_workspace(scope, WorkspaceId(workspace_id))
+        except DataError as error:
+            if error.code is DataErrorCode.INVALID_STATE_TRANSITION:
+                raise WorkspaceRefused("not_machine", NOT_MACHINE) from None
+            if error.code is DataErrorCode.DUPLICATE_IDENTITY:
+                raise WorkspaceRefused("duplicate", "That folder is attached to this conversation already.") from None
+            raise
+        return await self.conversation_workspaces(scope)
+
+    async def detach_workspace(self, scope: TrustedScope, binding_id: str) -> tuple[AttachedFolder, ...]:
+        try:
+            await self.data.detach_workspace(scope, BindingId(binding_id))
+        except DataError as error:
+            if error.code is DataErrorCode.INVALID_STATE_TRANSITION:
+                raise WorkspaceRefused("own_folder", "The conversation's own folder stays attached.") from None
+            raise
+        return await self.conversation_workspaces(scope)
+
+    async def set_working_workspace(self, scope: TrustedScope, binding_id: str) -> tuple[AttachedFolder, ...]:
+        await self.data.set_working_workspace(scope, BindingId(binding_id))
+        return await self.conversation_workspaces(scope)
 
     # --- Models (V3-P64) ---------------------------------------------------------------
 

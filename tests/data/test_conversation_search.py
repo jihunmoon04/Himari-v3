@@ -251,6 +251,8 @@ def test_an_upgrade_fills_in_batches_without_missing_or_repeating_one(tmp_path: 
     store.close()
     conn = sqlite3.connect(path)
     try:
+        conn.execute("DROP INDEX bindings_by_workspace")  # v13 (V3-P74)
+        conn.execute("DROP TABLE workspaces")
         conn.execute("DROP TABLE event_text")
         conn.execute("PRAGMA user_version=11")
         conn.commit()

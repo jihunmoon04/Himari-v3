@@ -255,6 +255,7 @@ def test_not_enforced_refuses_everything_but_hello(tmp_path: Path) -> None:
             (api.COPY_IN, {"folder": f"{folder}/u", "clear": True, **roots}, (r,)),
             (api.FREE_PATH, {"folder": f"{folder}/u", "name": "a", **roots}, ()),
             (api.REMOVE_CONVERSATION_FOLDER, {"conversation": "c1"}, ()),
+            (api.CHECK_WORKSPACE, {"path": "~/projects/a", "others": []}, ()),
         ]
         try:
             for op, args, fds in requests:
@@ -267,6 +268,16 @@ def test_not_enforced_refuses_everything_but_hello(tmp_path: Path) -> None:
         assert not kit.sandbox.calls
     finally:
         kit.close()
+
+
+def test_check_workspace(kit: RunnerKit) -> None:
+    """V3-P74 §10.1: a read-only check of a folder to register."""
+    checked, _ = call(kit, api.CHECK_WORKSPACE, {"path": "~/projects/a", "others": [str(kit.home / "projects/a")]})
+    assert checked["path"] == str(kit.home / "projects/a") and checked["same_as"] is None  # its own path is not "another"
+    with pytest.raises(api.RunnerError) as caught:
+        call(kit, api.CHECK_WORKSPACE, {"path": "~/.ssh", "others": []})
+    assert caught.value.category == api.NOT_FOUND
+    assert api.CHECK_WORKSPACE not in api.WRITES
 
 
 def test_upload_steps(kit: RunnerKit) -> None:

@@ -22,7 +22,8 @@ from himari.common import (
     TrustedScope,
     WorkspaceId,
 )
-from himari.data.api import BindingAuthority, ConversationWorkspace
+from himari.data.api import BindingAuthority, ConversationWorkspace, InitialActivation
+from himari.data.memory import InMemoryData, InMemoryStore
 from himari.environment.api import ConnectionStatus, EnvironmentPlugin
 from himari.environment.machine import MACHINE, MachineEnvironment, MachineUnavailable, machine_workspace_for
 from himari.environment.machine.locks import PathLocks, overlap
@@ -349,3 +350,91 @@ def test_a_cancelled_command_keeps_the_folder_until_it_is_reaped(env: MachineEnv
 
     asyncio.run(scenario())
     assert log == ["reaped", "start 1", "end 1"]
+
+
+# --- attached Workspaces (V3-P74 §10) ------------------------------------------------------------
+
+
+def attached_setup(kit: RunnerKit) -> tuple[MachineEnvironment, InMemoryData, TrustedScope, str]:
+    """A Conversation with ~/projects/a attached (the working directory)."""
+    data = InMemoryData(InMemoryStore())
+    scope = TrustedScope(PrincipalId("operator"), asyncio.run(data.create_conversation(
+        PrincipalId("operator"), activations=[InitialActivation(MACHINE, WORKSPACE)])))
+    project = str(kit.home / "projects/a")
+    registered = asyncio.run(data.register_workspace(scope.principal_id, MACHINE, project, "a", "the C project"))
+    asyncio.run(data.attach_workspace(scope, registered.workspace_id))
+    return MachineEnvironment(kit.socket, registry=data), data, scope, project
+
+
+def call_in(env: MachineEnvironment, data: InMemoryData, scope: TrustedScope, tool: str, **args: Any) -> ToolOutcome:
+    """As the Dispatcher calls it: the working Binding and its Workspace."""
+    async def go() -> ToolOutcome:
+        handler = next(t for t in env.tools() if t.definition.tool_id == f"machine/{tool}")
+        binding = await data.resolve_default_binding(scope, MACHINE)
+        assert binding is not None and binding.cwd_relative is not None
+        ctx = ToolContext(scope=scope, artifacts=_NoArtifacts(), binding=binding,
+                          workspace=ConversationWorkspace(binding.workspace_id, binding.cwd_relative))
+        return await handler.run(ToolInvocation(ToolId(f"machine/{tool}"), CallId("c"), args), ctx)
+
+    return asyncio.run(go())
+
+
+def test_attached_folders_are_written_and_the_working_one_is_the_cwd(kit: RunnerKit) -> None:
+    env, data, scope, project = attached_setup(kit)
+    own = kit.himari_home / "conversations" / scope.conversation_id
+    assert call_in(env, data, scope, "write_file", path="new.c", content="x").status is ToolStatus.SUCCEEDED
+    assert (Path(project) / "new.c").read_text() == "x"  # relative to the working directory
+    assert call_in(env, data, scope, "write_file", path=f"{own}/notes.md", content="n").status is ToolStatus.SUCCEEDED
+    outside = call_in(env, data, scope, "write_file", path="~/projects/other.c", content="x")
+    assert outside.status is ToolStatus.DENIED and "attach" in text(outside)
+    assert call_in(env, data, scope, "run_command", argv=["make"]).status is ToolStatus.SUCCEEDED
+    _, layout, _ = kit.sandbox.calls[-1]
+    assert layout.cwd == project and sorted(p for p, _ in layout.writable) == sorted([str(own), project])
+    found = asyncio.run(data.read_conversation_workspaces(scope, MACHINE))
+    asyncio.run(data.set_working_workspace(scope, found.attached[0].binding.binding_id))  # back to the own folder
+    assert call_in(env, data, scope, "write_file", path="here.txt", content="h").status is ToolStatus.SUCCEEDED
+    assert (own / "here.txt").read_text() == "h"
+    asyncio.run(data.detach_workspace(scope, found.attached[1].binding.binding_id))
+    assert call_in(env, data, scope, "write_file", path=f"{project}/late.c", content="x").status is ToolStatus.DENIED
+
+
+def test_the_state_names_the_folders_and_what_may_be_read(kit: RunnerKit) -> None:
+    env, data, scope, project = attached_setup(kit)
+    bindings = asyncio.run(data.read_current_state_basis(scope)).bindings
+    observed = asyncio.run(env.observe(scope, bindings))
+    view = observed[0]
+    own = str(kit.himari_home / "conversations" / scope.conversation_id)
+    assert view.status is ConnectionStatus.ONLINE and view.working_directory == project
+    assert [(w.path, w.label, w.note) for w in view.workspaces] == [(own, "this conversation", None),
+                                                                    (project, "a", "the C project")]
+    assert view.readable is not None and str(kit.home) in view.readable
+
+
+def test_a_write_waits_for_every_folder_of_the_conversation(kit: RunnerKit) -> None:
+    """§9.1: a write locks all of the Conversation's folders (which one a path lands in is not known first)."""
+    env, data, scope, project = attached_setup(kit)
+
+    async def scenario() -> None:
+        handler = next(t for t in env.tools() if t.definition.tool_id == "machine/write_file")
+        binding = await data.resolve_default_binding(scope, MACHINE)
+        assert binding is not None
+        ctx = ToolContext(scope=scope, artifacts=_NoArtifacts(), binding=binding,
+                          workspace=ConversationWorkspace(binding.workspace_id, binding.cwd_relative or ""))
+        async with env.locks.hold([f"{project}/sub"]):  # another Conversation's command under the project
+            task = asyncio.create_task(handler.run(ToolInvocation(ToolId("machine/write_file"), CallId("c"),
+                                                                  {"path": "own.txt", "content": "x"}), ctx))
+            await asyncio.sleep(0.2)
+            assert not task.done()
+        assert (await task).status is ToolStatus.SUCCEEDED
+
+    asyncio.run(scenario())
+
+
+def test_a_workspace_gone_from_disk_is_named(kit: RunnerKit) -> None:
+    """A registered folder moved or deleted later: the refusal says which, and how to go on."""
+    env, data, scope, project = attached_setup(kit)
+    found = asyncio.run(data.read_conversation_workspaces(scope, MACHINE))
+    asyncio.run(data.set_working_workspace(scope, found.attached[0].binding.binding_id))
+    Path(project).rename(kit.home / "projects/moved")
+    refused = call_in(env, data, scope, "write_file", path="x.txt", content="x")
+    assert refused.status is ToolStatus.FAILED and project in text(refused) and "detach" in text(refused)

@@ -3534,3 +3534,44 @@ details > summary {
   .model-chevron { flex-shrink: 0; color: var(--text-muted); }
   .topbar-title { flex: 1 1 auto; max-width: none; }
 }
+
+/* ---------------------------------------------------------- folders (V3-P74 §10.3) */
+
+.chat-menu-attach {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+  margin-top: var(--space-1);
+}
+
+.chat-menu-attach input {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 4px var(--space-2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  background: var(--surface-raised);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+}
+
+.chat-menu-folders .chat-menu-tool-meta {
+  overflow-wrap: anywhere;
+}
+
+.folders > .folders-add,
+.folders > .folders-list,
+.folders > .folders-empty {
+  max-width: var(--reading-max);
+  margin-left: auto;
+  margin-right: auto;
+}
+
+.folders-add {
+  margin-top: var(--space-3);
+}
+
+.folders-note {
+  white-space: pre-wrap;
+}

@@ -138,6 +138,7 @@ const app = {
   instructionsTicket: 0, // the latest load: an older answer is not applied
   instructionsLoading: false,
   memory: null, // the last /api/memories answer (V3-P71 §7.2)
+  registeredFolders: null, // the last /api/workspaces items, for the attach field (V3-P74 §10.3)
   streaming: false, // the server streams answers (V3-P73 §9)
 };
 
@@ -166,7 +167,7 @@ function status(text, tone) {
 
 function showSurface(name) {
   closeModelDialog();
-  for (const surface of ["login", "home", "chat", "trash", "instructions", "memory"]) {
+  for (const surface of ["login", "home", "chat", "trash", "instructions", "memory", "folders"]) {
     $(`surface-${surface}`).hidden = surface !== name;
   }
   app.leaveAgreed = false;
@@ -1447,6 +1448,7 @@ function poll(generation) {
         loadServerInfo(); // a command may have found the sandbox broken
         loadToolSources(generation); // and close the views of a source turned off elsewhere
         loadModel(generation); // a stored choice may have been changed elsewhere
+        loadFolders(generation); // and folders attached elsewhere
       }
     } catch (error) {
       if (generation !== app.generation || error.status === 401) return;
@@ -1492,8 +1494,10 @@ async function openConversation(id) {
   markSelected();
   showSurface("chat");
   closeNav();
+  $("chat-menu-folders").hidden = true;
   loadToolSources(generation);
   loadModel(generation);
+  loadFolders(generation);
   loadPrompts(generation);
   try {
     const detail = await refresh(generation);
@@ -2230,6 +2234,222 @@ async function showMemory() {
   await loadMemory();
 }
 
+/* --------------------------------------------------------------- folders */
+
+/* V3-P74 §10.3: folders on this server. A conversation that works on them
+   lists its own folder first, then the attached ones; the checked one is the
+   working directory. Changes apply from the model's next step. */
+
+function folderPath(item) {
+  return item.path || "(the runner does not answer)";
+}
+
+function renderFolders(items) {
+  const list = $("chat-menu-folders-list");
+  list.replaceChildren();
+  $("chat-menu-folders").hidden = items.length === 0;
+  for (const item of items) {
+    const row = el("li", "chat-menu-tool chat-menu-folder");
+    const id = `folder-${item.binding_id}`;
+    const radio = el("input");
+    radio.type = "radio";
+    radio.name = "chat-menu-working-folder";
+    radio.id = id;
+    radio.checked = item.working;
+    radio.title = "Working directory";
+    radio.addEventListener("change", () => setWorkingFolder(item.binding_id));
+    const label = el("label", "chat-menu-tool-name", item.own ? "This conversation" : item.label);
+    label.htmlFor = id;
+    label.append(el("span", "chat-menu-tool-meta", folderPath(item) + (item.working ? " · working directory" : "")));
+    row.append(radio, label);
+    if (!item.own) {
+      const detach = el("button", "link-button", "Detach");
+      detach.type = "button";
+      detach.setAttribute("aria-label", `Detach ${item.label}`);
+      detach.addEventListener("click", () => detachFolder(item));
+      row.append(detach);
+    }
+    list.append(row);
+  }
+}
+
+function conversationFolders() {
+  return `/api/conversations/${encodeURIComponent(app.conversationId)}/workspaces`;
+}
+
+async function loadFolders(generation) {
+  try {
+    const answer = await api("GET", conversationFolders());
+    if (generation !== app.generation) return;
+    renderFolders(answer.items);
+    if (!answer.items.length) return;
+    const known = await api("GET", "/api/workspaces");
+    if (generation !== app.generation) return;
+    app.registeredFolders = known.items;
+    $("chat-menu-attach-known").replaceChildren(...known.items.map((w) => option(w.path, w.label)));
+  } catch (ignored) {
+    /* display only: the conversation works without it */
+  }
+}
+
+async function changeFolders(method, path, body, done) {
+  const generation = app.generation;
+  try {
+    const answer = await api(method, path, body);
+    if (generation !== app.generation) return;
+    renderFolders(answer.items);
+    if (done) status(done, "ok");
+  } catch (error) {
+    if (generation === app.generation) {
+      status(error.message, "error");
+      loadFolders(generation);
+    }
+  }
+}
+
+async function attachFolder(event) {
+  event.preventDefault();
+  const given = $("chat-menu-attach-path").value.trim();
+  if (!given) return;
+  const known = (app.registeredFolders || []).find((w) => w.path === given || w.id === given);
+  await changeFolders("POST", conversationFolders(), known ? { workspace_id: known.id } : { path: given },
+                      "Attached. HIMARI can write there from its next step.");
+  $("chat-menu-attach-path").value = "";
+  loadFolders(app.generation); // the registered list may have grown
+}
+
+function setWorkingFolder(bindingId) {
+  return changeFolders("PUT", `${conversationFolders()}/working`, { binding_id: bindingId }, null);
+}
+
+async function detachFolder(item) {
+  await changeFolders("DELETE", `${conversationFolders()}/${encodeURIComponent(item.binding_id)}`, undefined,
+                      `Detached ${item.label}. The folder itself is unchanged.`);
+}
+
+/* The settings list: register, rename, note, unregister. */
+
+function folderRow(workspace) {
+  const li = el("li", "memory-row");
+  const main = el("div", "memory-row-main");
+  main.append(el("p", "memory-text", workspace.label), el("span", "row-meta", workspace.path));
+  if (workspace.note) main.append(el("span", "row-meta folders-note", workspace.note));
+  if (workspace.attached) {
+    main.append(el("span", "row-meta",
+                   `Attached to ${workspace.attached} conversation${workspace.attached === 1 ? "" : "s"}`));
+  }
+  const actions = el("div", "memory-row-actions");
+  const edit = el("button", "link-button", "Edit");
+  edit.type = "button";
+  edit.setAttribute("aria-label", `Edit ${workspace.label}`);
+  edit.addEventListener("click", () => folderForm(workspace, li));
+  const remove = el("button", "link-button danger-link", "Unregister");
+  remove.type = "button";
+  remove.setAttribute("aria-label", `Unregister ${workspace.label}`);
+  remove.addEventListener("click", () => unregisterFolder(workspace));
+  actions.append(edit, remove);
+  li.append(main, actions);
+  return li;
+}
+
+function folderForm(workspace, li) {
+  const form = el("form", "memory-form");
+  const label = el("input", "memory-form-text");
+  label.value = workspace.label;
+  label.maxLength = 100;
+  label.setAttribute("aria-label", "Name");
+  const note = el("textarea", "memory-form-text");
+  note.rows = 3;
+  note.maxLength = 1000;
+  note.value = workspace.note || "";
+  note.setAttribute("aria-label", "Note HIMARI sees");
+  const bar = el("div", "memory-form-bar");
+  const cancel = el("button", "link-button", "Cancel");
+  cancel.type = "button";
+  cancel.addEventListener("click", () => loadFoldersList());
+  const save = el("button", "primary-button", "Save");
+  save.type = "submit";
+  bar.append(cancel, save);
+  form.append(label, note, bar);
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    try {
+      await api("PATCH", `/api/workspaces/${encodeURIComponent(workspace.id)}`,
+                { label: label.value, note: note.value.trim() ? note.value : null });
+      status("Saved. HIMARI sees it from the next message.", "ok");
+      await loadFoldersList();
+    } catch (error) {
+      status(error.message, "error");
+    }
+  });
+  li.replaceChildren(form);
+  label.focus();
+}
+
+async function unregisterFolder(workspace) {
+  if (!(await confirmAction(`Unregister “${workspace.label}”?`,
+                            [workspace.path, "The folder and its files are not changed."], "Unregister"))) return;
+  try {
+    await api("DELETE", `/api/workspaces/${encodeURIComponent(workspace.id)}`);
+    status("Unregistered. The folder itself is unchanged.", "ok");
+  } catch (error) {
+    status(error.message, error.kind === "http" ? "warn" : "error");
+  }
+  await loadFoldersList();
+}
+
+async function loadFoldersList() {
+  const generation = app.generation;
+  const listing = await api("GET", "/api/workspaces");
+  if (generation !== app.generation || $("surface-folders").hidden) return;
+  $("folders-off").hidden = listing.available;
+  $("folders-add").hidden = !listing.available;
+  $("folders-empty").hidden = !listing.available || listing.items.length > 0;
+  $("folders-list").replaceChildren(...listing.items.map(folderRow));
+}
+
+async function registerFolder(event) {
+  event.preventDefault();
+  const path = $("folders-add-path").value.trim();
+  if (!path) return;
+  const label = $("folders-add-label").value.trim();
+  const note = $("folders-add-note").value.trim();
+  try {
+    await api("POST", "/api/workspaces", { path, label: label || null, note: note || null });
+    $("folders-add").reset();
+    status("Registered. Attach it from a conversation's menu.", "ok");
+  } catch (error) {
+    status(error.message, "error");
+  }
+  await loadFoldersList();
+}
+
+async function showFolders() {
+  if (!(await mayLeave())) return;
+  stopPolling();
+  views.reset();
+  app.conversationId = null;
+  app.generation += 1;
+  live.reset();
+  clearAttachments();
+  markSelected();
+  $("folders-list").replaceChildren();
+  showSurface("folders");
+  closeNav();
+  $("topbar-title").textContent = "Folders";
+  status("");
+  await loadFoldersList();
+}
+
+/* The Settings link only where folders are offered. */
+async function syncFoldersLink() {
+  try {
+    $("nav-folders").hidden = !(await api("GET", "/api/workspaces")).available;
+  } catch (ignored) {
+    $("nav-folders").hidden = true;
+  }
+}
+
 /* --------------------------------------------------------------- chrome */
 
 function closeChatMenu() {
@@ -2311,6 +2531,7 @@ async function loadServerInfo() {
 
 async function enter() {
   loadServerInfo();
+  syncFoldersLink();
   // A save that met a signed-out session goes back to its draft (PR #68 review C2).
   if (!app.instructionsDraft) {
     await showHome();
@@ -2332,6 +2553,12 @@ async function boot() {
     $("appearance-dialog").close();
     showMemory().catch((e) => status(e.message, "error"));
   });
+  $("nav-folders").addEventListener("click", () => {
+    $("appearance-dialog").close();
+    showFolders().catch((e) => status(e.message, "error"));
+  });
+  $("folders-add").addEventListener("submit", registerFolder);
+  $("chat-menu-attach").addEventListener("submit", attachFolder);
   $("nav-instructions").addEventListener("click", () => {
     $("appearance-dialog").close();
     showInstructions().catch((e) => status(e.message, "error"));

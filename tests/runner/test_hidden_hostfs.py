@@ -191,3 +191,51 @@ def test_missing_parents_are_judged_before_they_are_made(home: Path, tmp_path: P
     assert not (home / ".newdot").exists()
     assert write(host, f"{root}/fine/deep/a", [str(root)], create_parents=True) == f"{root}/fine/deep/a"
 
+
+
+def test_check_workspace(host: Host, home: Path, tmp_path: Path) -> None:
+    """V3-P74 §10.1: a folder the user registers."""
+    checked = host.check_workspace("~/projects/a", [], ["/"])
+    assert checked["path"] == f"{home}/projects/a" and checked["same_as"] is None
+    assert isinstance(checked["filesystem"], str)  # whatever the test's disk is
+    (home / "alias").symlink_to(home / "projects/a")
+    assert host.check_workspace("~/alias", [f"{home}/projects/a"], ["/"])["path"] == f"{home}/projects/a"
+    os.mkdir(home / "projects/b")
+    assert host.check_workspace(f"{home}/projects/b", [f"{home}/projects/a", f"{home}/nowhere"], ["/"])["same_as"] \
+        is None
+    assert category(lambda: host.check_workspace("~/.ssh", [], ["/"])) == api.NOT_FOUND
+    assert category(lambda: host.check_workspace("~/projects/a/main.c", [], ["/"])) == api.NOT_DIRECTORY
+    assert category(lambda: host.check_workspace("~/missing", [], ["/"])) == api.NOT_FOUND
+    assert category(lambda: host.check_workspace("/proc", [], ["/"])) == api.NOT_REGULAR
+    assert category(lambda: host.check_workspace("~/projects/a", [], [f"{home}/HIMARI"])) == api.ACCESS
+    assert category(lambda: host.check_workspace("~/projects/a", "x", ["/"])) == api.INVALID
+    locked = home / "projects/locked"
+    locked.mkdir()
+    locked.chmod(0o555)
+    try:
+        if not os.access(locked, os.W_OK):  # not as root
+            assert category(lambda: host.check_workspace(str(locked), [], ["/"])) == api.ACCESS
+    finally:
+        locked.chmod(0o755)
+
+
+def test_the_same_folder_at_another_path_is_found(host: Host, home: Path) -> None:
+    """§9.1: a bind mount needs root, so a second name for the folder stands in: the (device, inode) test."""
+    other = home / "projects/a-again"
+    other.symlink_to(home / "projects/a")
+    checked = host.check_workspace(f"{home}/projects/a", [str(other)], ["/"])
+    assert checked["same_as"] == str(other)
+
+
+def test_mount_type_reads_the_deepest_mount(tmp_path: Path) -> None:
+    from himari.runner.hostfs import mount_type
+
+    table = tmp_path / "mountinfo"
+    table.write_text(
+        "22 1 8:1 / / rw,relatime shared:1 - ext4 /dev/sda1 rw\n"
+        "40 22 0:50 / /home/ubuntu/cloud\\040storage/drive rw,nosuid - fuse.rclone gdrive: rw,user_id=0\n"
+        "41 22 0:51 / /run rw - tmpfs tmpfs rw\n")
+    assert mount_type("/home/ubuntu/cloud storage/drive/대학", str(table)) == "fuse.rclone"
+    assert mount_type("/home/ubuntu/cloud storage", str(table)) == "ext4"
+    assert mount_type("/run/x", str(table)) == "tmpfs"
+    assert mount_type("/x", str(tmp_path / "missing")) is None

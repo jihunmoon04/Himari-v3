@@ -15,6 +15,11 @@
                                    the MCP servers this conversation uses; turn one on or off
     himari model ID [MODEL [EFFORT]|default]
                                    the model this conversation uses; choose another (next turn)
+    himari workspace [add PATH | rm ID|PATH]
+                                   folders on this server registered as workspaces
+    himari attach ID [FOLDER]      a conversation's folders; attach one (the working directory)
+    himari detach ID FOLDER        detach one (the folder stays)
+    himari workdir ID FOLDER       make an attached folder the working directory
 
 The server must be running (``python -m himari.interfaces.web``); the CLI
 reads the operator secret from ``HIMARI_DATA_ROOT`` (or ``--data-root``)
@@ -1067,6 +1072,113 @@ def cmd_memory(session: Session, args: argparse.Namespace, read: Callable[[str],
     return EXIT_OK
 
 
+WORKSPACE_USAGE = "usage: himari workspace | workspace add PATH [--label L] [--note N] | workspace rm ID|PATH [--yes]"
+
+
+def _workspace_row(workspace: dict[str, Any], encoding: str | None) -> str:
+    used = int(workspace.get("attached") or 0)
+    attached = f"  (attached to {used} conversation{'s' if used != 1 else ''})" if used else ""
+    return safe_line(f"{workspace.get('id')}  {workspace.get('label')}  {workspace.get('path')}{attached}",
+                     encoding=encoding)
+
+
+def cmd_workspace(session: Session, args: argparse.Namespace, read: Callable[[str], str] = input) -> int:
+    """V3-P74 §10.3: the folders on this server registered as Workspaces."""
+    rest, action = list(args.rest), args.action
+    if ((action is None and (rest or args.label or args.note or args.yes))
+            or (action == "add" and (len(rest) != 1 or args.yes))
+            or (action == "rm" and (len(rest) != 1 or args.label or args.note))):
+        session.note(WORKSPACE_USAGE)
+        return EXIT_USAGE
+    listing = session.client.get("/api/workspaces")
+    if not listing.get("available"):
+        session.note("(folders on this server are not offered to you)")
+        return EXIT_FAILED
+    items: list[dict[str, Any]] = listing.get("items") or []
+    if action is None:
+        for workspace in items:
+            session.printer.line(_workspace_row(workspace, session.printer.encoding))
+            if workspace.get("note"):
+                session.printer.line("    " + safe_line(" ".join(str(workspace["note"]).split()),
+                                                        encoding=session.printer.encoding))
+        if not items:
+            session.note("(no folders registered; add one with `himari workspace add PATH`)")
+        return EXIT_OK
+    if action == "add":
+        added = session.client.post("/api/workspaces", {"path": rest[0], "label": args.label, "note": args.note})
+        session.printer.line(_workspace_row(added, session.printer.encoding))
+        return EXIT_OK
+    target = next((w for w in items if rest[0] in (w.get("id"), w.get("path"))), None)
+    if target is None:
+        session.note(f"no registered folder {safe_line(rest[0])}")
+        return EXIT_FAILED
+    if not args.yes:
+        try:
+            answer = read(f"Unregister {target.get('path')}? The folder itself stays. [y/N] ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            answer = ""
+        if answer not in ("y", "yes"):
+            session.note("(nothing was changed)")
+            return EXIT_OK
+    session.client.delete(f"/api/workspaces/{quote(str(target['id']), safe='')}")
+    session.note("(unregistered; the folder itself is untouched)")
+    return EXIT_OK
+
+
+def print_folders(session: Session, folders: list[dict[str, Any]]) -> None:
+    """A Conversation's folders: ``*`` marks the working directory."""
+    if not folders:
+        session.note("(this conversation does not work on this server's folders)")
+        return
+    for folder in folders:
+        mark = "*" if folder.get("working") else " "
+        own = "  (this conversation's own)" if folder.get("own") else ""
+        session.printer.line(safe_line(f"{mark} {folder.get('path') or '(unknown: the runner does not answer)'}  "
+                                       f"{folder.get('label')}{own}", encoding=session.printer.encoding))
+
+
+def _folder(folders: list[dict[str, Any]], given: str) -> dict[str, Any] | None:
+    return next((f for f in folders if given in (f.get("binding_id"), f.get("path"), f.get("workspace_id"))), None)
+
+
+def cmd_attach(session: Session, args: argparse.Namespace) -> int:
+    """No folder: the conversation's folders. Else attach a registered one
+    (id or path) or a new path, which becomes the working directory."""
+    if args.folder is None:
+        print_folders(session, session.client.get(_path(args.id, "/workspaces"))["items"])
+        return EXIT_OK
+    listing = session.client.get("/api/workspaces")
+    known = next((w for w in listing.get("items") or [] if args.folder in (w.get("id"), w.get("path"))), None)
+    body: dict[str, Any] = ({"workspace_id": known["id"]} if known is not None
+                            else {"path": args.folder, "label": args.label})
+    folders = session.client.post(_path(args.id, "/workspaces"), body)["items"]
+    print_folders(session, folders)
+    session.note("(the model can write there from its next step)")
+    return EXIT_OK
+
+
+def cmd_detach(session: Session, args: argparse.Namespace) -> int:
+    folders = session.client.get(_path(args.id, "/workspaces"))["items"]
+    found = _folder(folders, args.folder)
+    if found is None:
+        session.note(f"not attached to this conversation: {safe_line(args.folder)}")
+        return EXIT_FAILED
+    print_folders(session, session.client.delete(
+        _path(args.id, f"/workspaces/{quote(str(found['binding_id']), safe='')}"))["items"])
+    return EXIT_OK
+
+
+def cmd_workdir(session: Session, args: argparse.Namespace) -> int:
+    folders = session.client.get(_path(args.id, "/workspaces"))["items"]
+    found = _folder(folders, args.folder)
+    if found is None:
+        session.note(f"not attached to this conversation: {safe_line(args.folder)}")
+        return EXIT_FAILED
+    print_folders(session, session.client.put(_path(args.id, "/workspaces/working"),
+                                              {"binding_id": found["binding_id"]})["items"])
+    return EXIT_OK
+
+
 def documents_line(documents: object) -> str:
     """V3-P70 §9: whether documents are read here, whether scripts can make them, with which libraries."""
     if not isinstance(documents, dict) or not documents.get("read"):
@@ -1375,6 +1487,22 @@ def parser() -> argparse.ArgumentParser:
     memory.add_argument("rest", nargs="*", help="add: CATEGORY TEXT|-; edit: ID TEXT|-; rm: ID")
     memory.add_argument("--category", help="edit: move the note to this category")
     memory.add_argument("--yes", action="store_true", help="rm without asking")
+    workspace = sub.add_parser("workspace", help="folders on this server registered as workspaces: list, add or rm")
+    workspace.add_argument("action", nargs="?", choices=["add", "rm"])
+    workspace.add_argument("rest", nargs="*", help="add: PATH; rm: ID or PATH")
+    workspace.add_argument("--label", help="add: the name shown (default: the folder's name)")
+    workspace.add_argument("--note", help="add: a short note the model sees")
+    workspace.add_argument("--yes", action="store_true", help="rm without asking")
+    attach = sub.add_parser("attach", help="a conversation's folders; attach one (it becomes the working directory)")
+    attach.add_argument("id")
+    attach.add_argument("folder", nargs="?", help="a registered folder (id or path), or a new path")
+    attach.add_argument("--label", help="a new path: the name shown")
+    detach = sub.add_parser("detach", help="detach a folder from a conversation (the folder stays)")
+    detach.add_argument("id")
+    detach.add_argument("folder", help="the folder's path (or binding id)")
+    workdir = sub.add_parser("workdir", help="make an attached folder the conversation's working directory")
+    workdir.add_argument("id")
+    workdir.add_argument("folder", help="the folder's path (or binding id)")
     return p
 
 
@@ -1383,6 +1511,7 @@ COMMANDS: dict[str, Callable[[Session, argparse.Namespace], int]] = {
     "compact": cmd_compact, "tools": cmd_tools, "model": cmd_model, "pause": cmd_pause, "cancel": cmd_cancel,
     "status": cmd_status, "rename": cmd_rename, "delete": cmd_delete, "trash": cmd_trash, "restore": cmd_restore,
     "files": cmd_files, "download": cmd_download, "instructions": cmd_instructions, "memory": cmd_memory,
+    "workspace": cmd_workspace, "attach": cmd_attach, "detach": cmd_detach, "workdir": cmd_workdir,
 }
 
 

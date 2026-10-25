@@ -6,13 +6,16 @@ HIMARI runs as its service user; commands and file operations are done by
 Reading reaches what the user can read except the runner's hidden list;
 writing reaches only the Conversation's Workspaces (§3).
 
-Part 1 (§19): each Conversation's one Workspace is its own folder,
-``<HIMARI home>/conversations/<conversation_id>`` — the Binding's
-``cwd_relative`` under the runner's HIMARI home. Attaching more folders is
-part 2.
+A Conversation's own folder, ``<HIMARI home>/conversations/<conversation_id>``,
+is its first Workspace — the T0 Binding's ``cwd_relative`` under the
+runner's HIMARI home. The user attaches more (§10): each is a Binding of a
+registered folder, whose real path Data keeps (``WorkspaceRegistry``). A
+call may write in all of them; its working directory is the activation's
+default Binding (§10.4).
 
-Writes and commands take path locks (§9.1): overlapping paths wait for
-each other, other Conversations' folders do not.
+Writes and commands take path locks (§9.1) on all of the Conversation's
+folders at once: overlapping paths wait for each other, other
+Conversations' folders do not.
 """
 
 from __future__ import annotations
@@ -25,13 +28,14 @@ import posixpath
 import tempfile
 from collections.abc import AsyncIterator, Awaitable, Iterator, Sequence
 from contextlib import asynccontextmanager, contextmanager
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, BinaryIO, TypeVar
 
 from himari.common import EnvironmentKind, PrincipalId, TrustedScope, WorkspaceId
-from himari.data.api import TEMP_PREFIX, BindingAuthority
+from himari.data.api import TEMP_PREFIX, BindingAuthority, DataError, WorkspaceRegistry
 from himari.documents.api import DocumentReading
-from himari.environment.api import BindingObservation, ConnectionStatus
+from himari.environment.api import BindingObservation, ConnectionStatus, ObservedWorkspace
 from himari.environment.inside import InsideFiles, WorkspaceBusy
 from himari.environment.machine.client import RunnerClient
 from himari.environment.machine.locks import PathLocks
@@ -42,6 +46,19 @@ MACHINE = EnvironmentKind("machine")
 T = TypeVar("T")
 _PREFIX = "mws_"
 OBSERVE_SECONDS = 2.0
+OWN_LABEL = "this conversation"
+READ_SCOPE = ("everything the user can read on this server, except hidden locations (credentials, HIMARI's own "
+              "data); the user's home is {home}")
+
+
+@dataclass(frozen=True)
+class Places:
+    """A Conversation's folders as real paths (§3.2): its working directory,
+    where it may write (its own folder first), and each with its label."""
+
+    cwd: str
+    roots: tuple[str, ...]
+    shown: tuple[ObservedWorkspace, ...]
 
 
 def machine_workspace_for(principal: PrincipalId) -> WorkspaceId:
@@ -56,13 +73,16 @@ class MachineUnavailable(Exception):
 
 class MachineEnvironment:
     def __init__(self, socket_path: str, *, files: InsideFiles | None = None,
-                 documents: DocumentReading | None = None) -> None:
+                 documents: DocumentReading | None = None, registry: WorkspaceRegistry | None = None) -> None:
         from himari.environment.machine.tools import machine_tools
 
         self.client = RunnerClient(socket_path)
         self.files = files
         self.documents = documents
+        # The attached Workspaces (§10); None: each Conversation has its own folder only.
+        self.registry = registry
         self.locks = PathLocks()
+        self._home: str | None = None
         self._tools: tuple[ToolHandler, ...] = tuple(machine_tools(self))
 
     @property
@@ -95,18 +115,72 @@ class MachineEnvironment:
             raise MachineUnavailable(str(error)) from None
         return posixpath.normpath(posixpath.join(str(home), cwd_relative))
 
-    async def observe(self, scope: TrustedScope, bindings: Sequence[BindingAuthority]) -> Sequence[BindingObservation]:
-        now = datetime.now(UTC)
-        observations = []
-        for binding in bindings:
+    async def check_workspace(self, path: str, others: Sequence[str]) -> dict[str, Any]:
+        """The runner's check of a folder the user registers (§10.1):
+        ``path`` (real), ``filesystem``, ``same_as``. RunnerError: refused;
+        MachineUnavailable without the runner."""
+        try:
+            result, _ = await self.call(runner.CHECK_WORKSPACE, {"path": path, "others": list(others)})
+        except runner.RunnerUnavailable as error:
+            raise MachineUnavailable(str(error)) from None
+        return result
+
+    async def home(self) -> str:
+        """The user's home, as the runner says (asked once)."""
+        if self._home is None:
             try:
-                folder = await _within(self.folder(scope.conversation_id, binding.cwd_relative or ""), OBSERVE_SECONDS)
-            except (MachineUnavailable, TimeoutError):
-                observations.append(BindingObservation(binding.binding_id, ConnectionStatus.OFFLINE, now))
+                self._home = str((await self.hello())["home"])
+            except (runner.RunnerUnavailable, runner.RunnerError) as error:
+                raise MachineUnavailable(str(error)) from None
+        return self._home
+
+    async def places(self, scope: TrustedScope) -> Places:
+        """The Conversation's folders: its own (its T0 Binding's
+        ``cwd_relative`` under the HIMARI home) and the Workspaces attached
+        to it. A registered Workspace's location comes from Data only; the
+        runner checks it again on every call (§5.3). Not from the Tool's
+        Binding: that is the working one, which may be an attached folder.
+        MachineUnavailable without the runner."""
+        found = None
+        if self.registry is not None:
+            try:
+                found = await self.registry.read_conversation_workspaces(scope, MACHINE)
+            except DataError:
+                found = None
+        own_binding = None if found is None else next((a.binding for a in found.attached if a.workspace is None), None)
+        own_cwd = (own_binding.cwd_relative if own_binding is not None and own_binding.cwd_relative
+                   else f"conversations/{scope.conversation_id}")
+        own = await self.folder(scope.conversation_id, own_cwd)
+        cwd, roots, shown = own, [own], [ObservedWorkspace(own, OWN_LABEL)]
+        attached, working = ((), None) if found is None else (found.attached, found.working)
+        for item in attached:
+            if item.workspace is None:  # the own folder: first, as above
                 continue
-            observations.append(BindingObservation(binding.binding_id, ConnectionStatus.ONLINE, now,
-                                                   working_directory=folder, writable=(folder,)))
-        return observations
+            path = item.workspace.location
+            if path not in roots:
+                roots.append(path)
+                shown.append(ObservedWorkspace(path, item.workspace.label, item.workspace.note))
+            if item.binding.binding_id == working:
+                cwd = path
+        return Places(cwd, tuple(roots), tuple(shown))
+
+    async def observe(self, scope: TrustedScope, bindings: Sequence[BindingAuthority]) -> Sequence[BindingObservation]:
+        """Every Binding is told online or offline; the working one (the
+        activation's default, which the Current State shows) carries the
+        Conversation's folders (§10.5)."""
+        now = datetime.now(UTC)
+
+        async def look() -> tuple[Places, str]:
+            return await self.places(scope), await self.home()
+
+        try:
+            places, home = await _within(look(), OBSERVE_SECONDS)
+        except (MachineUnavailable, TimeoutError):
+            return [BindingObservation(b.binding_id, ConnectionStatus.OFFLINE, now) for b in bindings]
+        readable = READ_SCOPE.format(home=home)
+        return [BindingObservation(b.binding_id, ConnectionStatus.ONLINE, now, working_directory=places.cwd,
+                                   writable=places.roots, workspaces=places.shown, readable=readable)
+                for b in bindings]
 
     # --- uploads (V3-P66 §5.2), the same steps as Inside -------------------------------------
 

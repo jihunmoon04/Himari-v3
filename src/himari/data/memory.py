@@ -53,10 +53,12 @@ from himari.data.api import (
     AssistantFinal,
     AssistantOutput,
     AssistantToolCalls,
+    AttachedWorkspace,
     BindingAuthority,
     ConversationEvent,
     ConversationSummary,
     ConversationWorkspace,
+    ConversationWorkspaces,
     DataError,
     DataErrorCode,
     EnvironmentActivation,
@@ -66,7 +68,9 @@ from himari.data.api import (
     ImageSetup,
     Instructions,
     InstructionScope,
+    MAX_ATTACHED_WORKSPACES,
     MAX_MEMORIES,
+    MAX_WORKSPACES,
     Memory,
     MemoryCategory,
     MemoryChange,
@@ -87,6 +91,7 @@ from himari.data.api import (
     RawRunOutcome,
     RawUncertain,
     RecoveryReport,
+    RegisteredWorkspace,
     RunPreparation,
     RunPurpose,
     RunRecord,
@@ -183,6 +188,9 @@ class InMemoryStore:
         self.instructions: dict[tuple[PrincipalId, InstructionScope], Instructions] = {}  # V3-P69
         self.memories: dict[tuple[PrincipalId, int], Memory] = {}  # V3-P71
         self.memory_ids: dict[PrincipalId, int] = {}  # the last id given out, per principal
+        # V3-P74 §10.1: registered folders in registration order, and whose each is.
+        self.workspaces: dict[WorkspaceId, RegisteredWorkspace] = {}
+        self.workspace_owners: dict[WorkspaceId, PrincipalId] = {}
 
     # --- admin helpers (trusted setup paths, not model-reachable) --------
 
@@ -338,8 +346,9 @@ def _refused(file_id: str, why: str) -> DataError:
 class InMemoryData:
     """Implements ConversationLog, ArtifactStore, WorkspaceState, StateQuery,
     ConversationCatalog, ConversationRetention, ExternalSourceSettings,
-    FileCatalog, FileRetention, InstructionsStore (V3-P69) and MemoryStore
-    (V3-P71); ``blobs`` is the BlobStore (V3-P66)."""
+    FileCatalog, FileRetention, InstructionsStore (V3-P69), MemoryStore
+    (V3-P71) and WorkspaceRegistry (V3-P74); ``blobs`` is the BlobStore
+    (V3-P66)."""
 
     def __init__(self, store: InMemoryStore) -> None:
         self._store = store
@@ -391,6 +400,125 @@ class InMemoryData:
         ):
             return group[0].call
         return None
+
+    # --- WorkspaceRegistry (V3-P74 §10) ----------------------------------------------
+
+    def _registered(self, workspace: RegisteredWorkspace) -> RegisteredWorkspace:
+        used = sum(1 for conv in self._store._conversations.values()
+                   if any(b.workspace_id == workspace.workspace_id for b in conv.bindings.values()))
+        return replace(workspace, attached=used)
+
+    def _workspace(self, principal: PrincipalId, workspace_id: object) -> RegisteredWorkspace:
+        found = self._store.workspaces.get(WorkspaceId(str(workspace_id)))
+        if found is None or self._store.workspace_owners[found.workspace_id] != principal:
+            raise DataError(DataErrorCode.NOT_FOUND, f"no workspace {workspace_id}")  # another's is a missing one
+        return found
+
+    def _activation(self, conv: _Conversation, kind: object) -> EnvironmentActivation | None:
+        return next((a for a in conv.activations.values() if a.environment_kind == kind), None)
+
+    def _is_registered(self, binding: BindingAuthority) -> bool:
+        return binding.workspace_id in self._store.workspaces
+
+    async def list_workspaces(self, principal: PrincipalId, kind: EnvironmentKind) -> tuple[RegisteredWorkspace, ...]:
+        return tuple(self._registered(w) for w in self._store.workspaces.values()
+                     if self._store.workspace_owners[w.workspace_id] == principal and w.environment_kind == kind)
+
+    async def register_workspace(self, principal: PrincipalId, kind: EnvironmentKind, location: str, label: str,
+                                 note: str | None = None) -> RegisteredWorkspace:
+        location = rules.check_workspace_location(location)
+        label, note = rules.check_workspace_label(label), rules.check_workspace_note(note)
+        mine = await self.list_workspaces(principal, kind)
+        if any(w.location == location for w in mine):
+            raise DataError(DataErrorCode.DUPLICATE_IDENTITY, f"{location} is registered already")
+        if len(mine) >= MAX_WORKSPACES:
+            raise DataError(DataErrorCode.LIMIT_EXCEEDED, f"at most {MAX_WORKSPACES} workspaces")
+        workspace = RegisteredWorkspace(WorkspaceId(self._store.new_id("wsp")), kind, location, label, note,
+                                        datetime.now(UTC))
+        self._store.workspaces[workspace.workspace_id] = workspace
+        self._store.workspace_owners[workspace.workspace_id] = principal
+        return workspace
+
+    async def update_workspace(self, principal: PrincipalId, workspace_id: WorkspaceId, *, label: str,
+                               note: str | None) -> RegisteredWorkspace:
+        label, note = rules.check_workspace_label(label), rules.check_workspace_note(note)
+        workspace = replace(self._workspace(principal, workspace_id), label=label, note=note)
+        self._store.workspaces[workspace.workspace_id] = workspace
+        return self._registered(workspace)
+
+    async def unregister_workspace(self, principal: PrincipalId, workspace_id: WorkspaceId) -> None:
+        workspace = self._workspace(principal, workspace_id)
+        if self._registered(workspace).attached:
+            raise DataError(DataErrorCode.INVALID_STATE_TRANSITION, f"{workspace_id} is attached to a conversation")
+        del self._store.workspaces[workspace.workspace_id]
+        del self._store.workspace_owners[workspace.workspace_id]
+
+    async def read_conversation_workspaces(self, scope: TrustedScope,
+                                           kind: EnvironmentKind) -> ConversationWorkspaces:
+        conv = self._conv(scope)
+        activation = self._activation(conv, kind)
+        if activation is None:
+            raise DataError(DataErrorCode.NOT_FOUND, f"{kind} is not active in this conversation")
+        attached: list[AttachedWorkspace] = []
+        for binding in conv.bindings.values():
+            if binding.environment_instance_id != activation.environment_instance_id:
+                continue
+            registered = self._store.workspaces.get(binding.workspace_id)
+            mine = registered is not None and self._store.workspace_owners[registered.workspace_id] == scope.principal_id
+            attached.append(AttachedWorkspace(binding, self._registered(registered) if mine and registered else None))
+        attached.sort(key=lambda a: a.workspace is not None)  # the own folder first; stable otherwise
+        return ConversationWorkspaces(activation.default_binding_id, tuple(attached))
+
+    async def attach_workspace(self, scope: TrustedScope, workspace_id: WorkspaceId) -> BindingAuthority:
+        conv = self._conv(scope)
+        workspace = self._workspace(scope.principal_id, workspace_id)
+        activation = self._activation(conv, workspace.environment_kind)
+        if activation is None:
+            raise DataError(DataErrorCode.INVALID_STATE_TRANSITION,
+                            f"{workspace.environment_kind} is not active in this conversation")
+        instance = activation.environment_instance_id
+        if any(b.workspace_id == workspace_id for b in conv.bindings.values()):
+            raise DataError(DataErrorCode.DUPLICATE_IDENTITY, f"{workspace_id} is attached already")
+        if sum(1 for b in conv.bindings.values()
+               if b.environment_instance_id == instance and self._is_registered(b)) >= MAX_ATTACHED_WORKSPACES:
+            raise DataError(DataErrorCode.LIMIT_EXCEEDED, f"at most {MAX_ATTACHED_WORKSPACES} attached workspaces")
+        binding = BindingAuthority(BindingId(self._store.new_id("bind")), instance, workspace.environment_kind,
+                                   workspace_id, 1, "")
+        conv.bindings[binding.binding_id] = binding
+        conv.activations[instance] = replace(activation, default_binding_id=binding.binding_id)
+        conv.state_revision += 1
+        return binding
+
+    def _conversation_binding(self, conv: _Conversation, binding_id: object) -> BindingAuthority:
+        binding = conv.bindings.get(BindingId(str(binding_id)))
+        if binding is None:
+            raise DataError(DataErrorCode.NOT_FOUND, f"no binding {binding_id}")
+        return binding
+
+    async def detach_workspace(self, scope: TrustedScope, binding_id: BindingId) -> None:
+        conv = self._conv(scope)
+        binding = self._conversation_binding(conv, binding_id)
+        if not self._is_registered(binding):
+            raise DataError(DataErrorCode.INVALID_STATE_TRANSITION, "the conversation's own folder stays attached")
+        del conv.bindings[binding.binding_id]
+        instance = binding.environment_instance_id
+        activation = conv.activations.get(instance)
+        if activation is not None and activation.default_binding_id == binding.binding_id:
+            left = [b for b in conv.bindings.values() if b.environment_instance_id == instance]
+            attached = [b for b in left if self._is_registered(b)]
+            working = attached[-1] if attached else (left[0] if left else None)
+            conv.activations[instance] = replace(activation,
+                                                 default_binding_id=None if working is None else working.binding_id)
+        conv.state_revision += 1
+
+    async def set_working_workspace(self, scope: TrustedScope, binding_id: BindingId) -> None:
+        conv = self._conv(scope)
+        binding = self._conversation_binding(conv, binding_id)
+        activation = conv.activations.get(binding.environment_instance_id)
+        if activation is not None:
+            conv.activations[activation.environment_instance_id] = replace(activation,
+                                                                           default_binding_id=binding.binding_id)
+        conv.state_revision += 1
 
     # --- files (V3-P66) ---------------------------------------------------------------
 

@@ -104,6 +104,30 @@ def real_path(fd: int) -> str:
     return os.readlink(f"/proc/self/fd/{fd}")
 
 
+def _unescape(field: str) -> str:
+    """A mountinfo path: space, tab, newline and backslash are octal escapes."""
+    return re.sub(r"\\([0-7]{3})", lambda m: chr(int(m.group(1), 8)), field)
+
+
+def mount_type(path: str, mountinfo: str = "/proc/self/mountinfo") -> str | None:
+    """The filesystem type of the mount ``path`` is on (the deepest mount
+    point above it), as the mount table names it; None if unknown."""
+    best: tuple[int, str] | None = None
+    try:
+        with open(mountinfo, encoding="utf-8", errors="surrogateescape") as table:
+            for line in table:
+                fields = line.split()
+                if "-" not in fields:
+                    continue
+                point = _unescape(fields[4])
+                kind = fields[fields.index("-") + 1]
+                if under(path, point) and (best is None or len(point) >= best[0]):
+                    best = (len(point), kind)
+    except OSError:
+        return None
+    return None if best is None else best[1]
+
+
 @dataclass(frozen=True)
 class Host:
     """The runner's view of the user's files: whose home, what is hidden."""
@@ -214,6 +238,43 @@ class Host:
         finally:
             os.close(fd)
 
+    # --- registering a Workspace (§10.1, §14) ------------------------------------------
+
+    def check_workspace(self, path: object, others: object, writable_under: Sequence[str]) -> dict[str, object]:
+        """A folder the user wants to register: an existing folder the user
+        may write, not hidden, on a disk filesystem, under ``writable_under``.
+        Its real path, its filesystem as the mount table names it (e.g.
+        ``fuse.rclone``), and which of ``others`` (registered locations) is
+        the same folder seen at another path, if any (§9.1)."""
+        if not isinstance(others, list) or len(others) > 1000 or not all(isinstance(o, str) for o in others):
+            raise api.RunnerError(api.INVALID)
+        absolute = self.absolute(path, self.home)
+        self._precheck(absolute)
+        masks = self.rules.masks()
+        if self.rules.is_hidden(absolute, masks):
+            raise api.RunnerError(api.NOT_FOUND)
+        fd = _open(absolute, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            real = self._judge(fd, masks)
+            if not any(under(real, w) for w in writable_under) or not os.access(real, os.W_OK | os.X_OK):
+                raise api.RunnerError(api.ACCESS, "this folder cannot be a workspace: the user cannot write it")
+            info = os.fstat(fd)
+            same = None
+            for other in others:
+                assert isinstance(other, str)
+                if not other.startswith("/") or other == real or self.rules.is_hidden(other, masks):
+                    continue
+                try:
+                    seen = os.stat(other)
+                except OSError:
+                    continue
+                if (seen.st_dev, seen.st_ino) == (info.st_dev, info.st_ino):
+                    same = other
+                    break
+            return {"path": real, "filesystem": mount_type(real), "same_as": same}
+        finally:
+            os.close(fd)
+
     # --- the Workspaces of a call ----------------------------------------------------
 
     def roots(self, given: object, writable_under: Sequence[str]) -> list[str]:
@@ -230,10 +291,15 @@ class Host:
                 raise api.RunnerError(api.INVALID, "a workspace is an absolute, normal path")
             if self.rules.is_hidden(root, masks) or not any(under(root, w) for w in writable_under):
                 raise api.RunnerError(api.ACCESS, "this folder cannot be a workspace")
-            fd = _open(root, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                fd = _open(root, os.O_RDONLY | os.O_DIRECTORY)
+            except api.RunnerError as error:  # moved, deleted, renamed since it was registered
+                raise api.RunnerError(error.category, f"the workspace {root} cannot be used ({error}); ask the user "
+                                                      "to detach it") from None
             try:
                 if self._judge(fd, masks) != root:
-                    raise api.RunnerError(api.INVALID, "a workspace is given by its real path")
+                    raise api.RunnerError(api.INVALID, f"the workspace {root} is not where it was registered (a "
+                                                       "link or mount changed); ask the user to detach it")
             finally:
                 os.close(fd)
             accepted.append(root)
