@@ -22,9 +22,11 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import hashlib
 import logging
 import os
 import posixpath
+import re
 import tempfile
 from collections import OrderedDict
 from collections.abc import Sequence
@@ -41,6 +43,7 @@ from himari.data.api import (
     sniff_image,
 )
 from himari.bootstrap.versions import Version, VersionStore
+from himari.common import FileReference
 from himari.environment.machine import MachineEnvironment
 from himari.runner import api as runner
 
@@ -55,6 +58,7 @@ READ_SECONDS = 15.0  # reading an opened file; the runner bounds its own reads a
 CALL_SECONDS = 20.0  # a runner answer, its own 15 s included
 MAX_READS = 4  # file reads under way here, given-up ones included
 DELETED_SHOWN = 50  # files deleted from a folder listed at once
+EXCERPT_BYTES = 20 * 1024  # a reference's excerpt, as UTF-8 (V3-P76 Q1)
 
 
 class ExplorerRefused(Exception):
@@ -309,6 +313,49 @@ class Explorer:
         if text is None:
             raise ExplorerRefused("not_regular", "This previous version is not text.")
         return text
+
+    # --- references (V3-P76 §3) ----------------------------------------------------------
+
+    async def reference(self, path: object, identity: Sequence[int], start: int | None, end: int | None,
+                        sha256: str | None) -> FileReference:
+        """A reference the server builds from the file itself (§3.2): the file
+        must still have the identity it had when the user selected, and the
+        text at ``start``–``end`` (UTF-16, the editor's positions, each line
+        break one "\\n") must hash to ``sha256``; otherwise ``reference_stale``. The whole file (no
+        range) is named only: no excerpt, nothing read beyond its identity."""
+        result, fds = await self._call(runner.OPEN, {"path": self._path(path), "cwd": "/"})
+        fd, real, size = fds[0], str(result["path"]), int(result["size"])
+        now = tuple(int(v) for v in result["identity"])
+        name = posixpath.basename(real)
+        if tuple(int(v) for v in identity) != now:
+            os.close(fd)
+            raise ExplorerRefused("reference_stale", f"{name} changed since you selected in it; select again.")
+        if start is None and end is None:
+            os.close(fd)
+            return FileReference(real, now, size=size)
+        if start is None or end is None or sha256 is None or not 0 <= start < end:
+            os.close(fd)
+            raise ExplorerRefused("invalid", "A selection is a start, an end after it, and its text's hash.")
+        if size > EDIT_MAX_BYTES:
+            os.close(fd)
+            raise ExplorerRefused("too_large", f"{name} is over 1 MiB: point at the whole file instead.")
+        data = await self._read(fd, size + 1)  # takes the fd
+        try:
+            # The editor's text: CodeMirror counts every line break (\r\n, \r, \n) as one "\n".
+            units = re.sub(r"\r\n?", "\n", data.decode("utf-8")).encode("utf-16-le")
+            selected = units[2 * start:2 * end].decode("utf-16-le")
+            before = units[:2 * start].decode("utf-16-le")
+        except UnicodeError:
+            raise ExplorerRefused("reference_stale", f"{name} changed since you selected in it; select again.") \
+                from None
+        if 2 * end > len(units) or hashlib.sha256(selected.encode("utf-8")).hexdigest() != sha256:
+            raise ExplorerRefused("reference_stale", f"{name} changed since you selected in it; select again.")
+        start_line = before.count("\n") + 1
+        end_line = start_line + selected.rstrip("\n").count("\n")
+        excerpt = selected.encode("utf-8")
+        truncated = len(excerpt) > EXCERPT_BYTES
+        text = excerpt[:EXCERPT_BYTES].decode("utf-8", errors="ignore") if truncated else selected
+        return FileReference(real, now, start, end, start_line, end_line, text, truncated)
 
     async def image(self, path: object) -> PreparedView:
         """The image sandbox's copy of an image file (V3-P75 §5.2, review N3);

@@ -68,6 +68,7 @@ from himari.prompt.api import (
     UserTurn,
     attachment_key,
     attachment_line,
+    block_line,
     blocks_text,
     image_plan,
     tool_images,
@@ -240,8 +241,8 @@ def _user_content(blocks: Sequence[ContentBlock], attachments: Mapping[str, Atta
     parts: list[dict[str, Any]] = []
     pending: list[str] = []
     for block in blocks:
-        if isinstance(block, TextBlock):
-            pending.append(block.text)
+        if not isinstance(block, AttachmentRef):  # text, and file references (V3-P76), as their lines
+            pending.append(block_line(block, attachments, plan))
             continue
         pending.append(attachment_line(block, attachments, plan))
         key = attachment_key(block)

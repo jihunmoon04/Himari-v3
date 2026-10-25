@@ -208,7 +208,25 @@ class AttachmentRef(DeepFrozen):
     version: int
 
 
-type ContentBlock = TextBlock | AttachmentRef
+@dataclass(frozen=True)
+class FileReference(DeepFrozen):
+    """V3-P76 §3: part of a file (or all of it) the user pointed at in the
+    editor. Built by the server from the file itself, never from text the
+    browser sent. ``start``/``end`` are UTF-16 code units (the editor's
+    positions); None for the whole file, which carries no excerpt."""
+
+    path: str
+    identity: tuple[int, ...]
+    start: int | None = None
+    end: int | None = None
+    start_line: int | None = None
+    end_line: int | None = None
+    excerpt: str = ""
+    truncated: bool = False
+    size: int | None = None  # the whole file's, when it is the whole file
+
+
+type ContentBlock = TextBlock | AttachmentRef | FileReference
 
 
 @dataclass(frozen=True)

@@ -2087,6 +2087,63 @@ details > summary {
   cursor: pointer;
 }
 
+/* A reference (V3-P76 §3.1): the label opens its place in the panel. */
+.attach-chip.is-reference {
+  border-color: var(--accent);
+}
+
+.attach-chip-open {
+  border: none;
+  background: transparent;
+  padding: 0;
+  font: inherit;
+  color: var(--accent);
+  cursor: pointer;
+  min-height: 28px;
+}
+
+.attach-chip.is-reference.is-failed {
+  border-color: var(--danger);
+}
+
+.attach-chip.is-failed .attach-chip-open {
+  color: var(--danger);
+}
+
+.reference-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0;
+}
+
+.reference-chips > li {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.reference-chip {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-pill);
+  padding: 3px 10px;
+  font: inherit;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--accent);
+  background: transparent;
+  cursor: pointer;
+}
+
+.reference-chip:hover {
+  border-color: var(--accent);
+}
+
 .composer-attach {
   min-width: 44px;
   min-height: 44px;
@@ -3682,4 +3739,4 @@ button.files-crumb:hover { background: var(--surface-hover); color: var(--text);
 @media (hover: hover) and (pointer: fine) {
   .files-row:hover .conversation-actions, .files-row:focus-within .conversation-actions { opacity: 1; }
 }
-.files-tools .conversation-actions { opacity: 1; }
+.files-tools .conversation-actions { opacity: 1; position: relative; } /* its list under it, in the panel too */

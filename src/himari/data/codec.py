@@ -17,6 +17,7 @@ from typing import Any, cast
 from himari.common import (
     ArtifactId,
     AttachmentRef,
+    FileReference,
     CallId,
     CallRef,
     ContentBlock,
@@ -77,7 +78,15 @@ def _optional_str(value: object) -> str | None:
 def _block(block: ContentBlock) -> dict[str, object]:
     if isinstance(block, TextBlock):
         return {"type": "text", "text": block.text}
+    if isinstance(block, FileReference):  # V3-P76 §3.3
+        return {"type": "file_reference", "path": block.path, "identity": list(block.identity), "start": block.start,
+                "end": block.end, "start_line": block.start_line, "end_line": block.end_line,
+                "excerpt": block.excerpt, "truncated": block.truncated, "size": block.size}
     return {"type": "attachment", "file_id": block.file_id, "version": block.version}
+
+
+def _optional_int(value: object) -> int | None:
+    return None if value is None else int(value)  # type: ignore[call-overload]
 
 
 def _block_from(value: object) -> ContentBlock:
@@ -87,6 +96,14 @@ def _block_from(value: object) -> ContentBlock:
             return TextBlock(str(data["text"]))
         case "attachment":
             return AttachmentRef(str(data["file_id"]), int(data["version"]))
+        case "file_reference":
+            identity = data.get("identity")
+            if not isinstance(identity, list):
+                raise ValueError("a file reference's identity is a list")
+            return FileReference(str(data["path"]), tuple(int(v) for v in identity), _optional_int(data.get("start")),
+                                 _optional_int(data.get("end")), _optional_int(data.get("start_line")),
+                                 _optional_int(data.get("end_line")), str(data.get("excerpt", "")),
+                                 bool(data.get("truncated", False)), _optional_int(data.get("size")))
     raise ValueError(f"unknown content block {data.get('type')!r}")
 
 

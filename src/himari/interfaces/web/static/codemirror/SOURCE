@@ -6,9 +6,9 @@ exact versions in build/package.json and build/package-lock.json:
     cd build && npm ci && npx esbuild entry.js --bundle --format=esm --minify \
         --legal-comments=none --target=es2022 --outfile=../codemirror.js
 
-sha256 of codemirror.js: afc0c5282b0b14a1093ed99e9144f183c2d971b22970548ae1797e4cbaf43478
+sha256 of codemirror.js: 6f09fdfd3083e3d3266612bb065a52e115ab56c32ba8c3a667648050ae5fc7d5
 
-It exports createEditor(parent, {text, name, readOnly, onChange, onSave}), createDiff(parent,
+It exports createEditor(parent, {text, name, readOnly, onChange, onSave, onAsk}), createDiff(parent,
 {left, right, name}) and languageFor(name). Its colours are the page's CSS variables. The Web
 server serves only codemirror.js from this folder (STATIC_FILES in app.py); the editor loads it
 on first use.

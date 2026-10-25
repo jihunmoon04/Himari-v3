@@ -54,6 +54,7 @@ from himari.bootstrap import DEFAULT_INSTRUCTIONS, Runtime, build_runtime
 from himari.bootstrap.operator import check_private_dir, ensure_operator_secret, ensure_private_dir
 from himari.common import (
     AttachmentRef,
+    ContentBlock,
     BindingId,
     CallId,
     CallRef,
@@ -132,6 +133,7 @@ from himari.mcp.stdio import ProcessLauncher
 from himari.mcp.tools import LauncherFor, McpConnection, PromptArgument, SourceStatus, connect
 from himari.prompt.api import (
     ATTACHMENT_NOTE,
+    FILE_REFERENCE_NOTE,
     DOCUMENTS_READ_NOTE,
     PROGRESS_NOTE,
     TOOL_IMAGES_NOTE,
@@ -282,6 +284,19 @@ class AttachedFolder:
     working: bool  # the working directory (§10.4)
     own: bool  # the Conversation's own folder: cannot be detached
     workspace_id: str | None  # the registration; None for the own folder
+
+
+@dataclass(frozen=True)
+class ReferenceRequest:
+    """V3-P76 §3.2: what the browser sends for a reference — never the text
+    itself. ``start``/``end`` (UTF-16) and ``sha256`` (of the selection's
+    UTF-8) for a selection; all None for the whole file."""
+
+    path: str
+    identity: tuple[int, ...]
+    start: int | None = None
+    end: int | None = None
+    sha256: str | None = None
 
 
 @dataclass(frozen=True)
@@ -771,6 +786,7 @@ class Application:
                                     tools=[*tools, *mcp.handlers, *mcp.resource_tools],
                                     models=catalog,
                                     instructions=(*base, *((ATTACHMENT_NOTE,) if uploads_work else ()),
+                                                  *((FILE_REFERENCE_NOTE,) if machine is not None else ()),
                                                   TOOL_IMAGES_NOTE, PROGRESS_NOTE,
                                                   *_documents_notes(reader, toolkit, scripts == "on")),
                                     external_defaults=mcp.defaults,
@@ -1370,14 +1386,23 @@ class Application:
             raise
         return workspace.workspace_id, workspace.cwd_relative
 
-    async def send(self, scope: TrustedScope, text: str, attachments: Sequence[FileId] = ()) -> JobStatus:
+    async def send(self, scope: TrustedScope, text: str, attachments: Sequence[FileId] = (),
+                   references: Sequence[ReferenceRequest] = ()) -> JobStatus:
         """A user message. With attachments (§5.1, under the lifecycle lock):
         1 the T1 checks as a read; 2 refused while a job runs; 3 the uploads
         placed in ``uploads/`` under the Workspace write lock (waited for at
-        most PLACE_LOCK_SECONDS); 4 the message submitted, attaching them."""
+        most PLACE_LOCK_SECONDS); 4 the message submitted, attaching them.
+        ``references`` (V3-P76 §3): parts of files the user pointed at, each
+        read again and checked by the explorer before anything is sent; a
+        stale one refuses the message (ExplorerRefused ``reference_stale``)."""
+        await self.data.read_conversation(scope)  # 404 before a job is started (or a file read) for a foreign id
+        pointed: tuple[ContentBlock, ...] = ()
+        if references:
+            explorer = self.explorer(scope.principal_id)
+            pointed = tuple([await explorer.reference(r.path, r.identity, r.start, r.end, r.sha256)
+                             for r in references])
         if not attachments:
-            await self.data.read_conversation(scope)  # 404 before a job is started for a foreign id
-            return await self.runner.submit(scope, UserMessage((TextBlock(text),)))
+            return await self.runner.submit(scope, UserMessage(((TextBlock(text),) if text else ()) + pointed))
         async with self._exclusive(scope.conversation_id):
             records = await self.data.check_attachments(scope, attachments)
             if self.runner.status(scope).running:
@@ -1399,7 +1424,8 @@ class Application:
                         await self._place(scope, placer, record, first=index == 0)
             except MachineUnavailable:
                 raise FilesUnavailable(scope.conversation_id) from None
-            blocks = ((TextBlock(text),) if text else ()) + tuple(AttachmentRef(r.file_id, r.version) for r in records)
+            blocks = ((TextBlock(text),) if text else ()) + tuple(AttachmentRef(r.file_id, r.version) for r in records) \
+                + pointed
             return await self.runner.submit(scope, UserMessage(blocks))
 
     async def _place(self, scope: TrustedScope, placer: _Placer, record: FileRecord, *, first: bool) -> None:

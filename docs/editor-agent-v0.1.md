@@ -275,3 +275,105 @@
 | Q3 | 되돌리기 단위? | **파일마다 + 모두 받아들이기/되돌리기** → 권고대로 |
 | Q4 | 검토 기록은 언제 지우나? | **받아들이거나 되돌릴 때까지.** 판이 만료되면 "되돌릴 수 없음" → 권고대로 |
 | Q5 | 에이전트 판의 보관 한도? | **사용자 판과 따로 200 MiB / 30일** → 권고대로 |
+
+## 12. 구현 노트 (2026-10-25, 1단계: 참조)
+
+### 12.1 만든 것
+
+- **블록** `FileReference(path, identity, start, end, start_line, end_line, excerpt, truncated, size)`(`common.py`, `ContentBlock`에 더함)
+  - 선택이면 `start`·`end`(UTF-16)와 줄 번호, excerpt가 있다. 파일 전체면 `start`가 없고 `size`만 있다.
+  - Data 코덱의 `file_reference` 블록. JSON payload라 DB 판은 그대로다(v13).
+- **모델에게**
+  - `prompt.api.file_reference_line`
+    - 선택: `<file_reference>{"path", "lines": [s, e], "excerpt", "truncated"?}</file_reference>`
+    - 파일 전체: `{"path", "whole_file": true, "bytes"}`
+    - 둘 다 `json_data`로 이스케이프한다.
+  - `block_line`이 글, 첨부, 참조를 한 줄씩 만든다. `blocks_text`(압축 세기와 요약 포함), OpenRouter, scripted가 모두 이것을 쓴다.
+  - `FILE_REFERENCE_NOTE`는 머신 환경이 있을 때 안내에 들어간다.
+- **확인** `Explorer.reference(path, identity, start, end, sha256)`
+  - runner `open`으로 연다. identity가 다르면 `reference_stale`(409)이다.
+  - 파일 전체면 거기서 끝낸다(읽지 않음).
+  - 선택이면:
+    - 1 MiB 이하만 된다. 넘으면 `too_large`(422).
+    - 읽어서 UTF-8로 풀고, 줄바꿈을 CodeMirror처럼 맞춘 뒤(§12.2-1) UTF-16 위치로 자른다.
+    - 그 SHA-256이 다르거나, 범위를 넘거나, 서로게이트 쌍을 가르면 `reference_stale`이다.
+    - excerpt는 20 KB에서 UTF-8 문자 경계로 자른다.
+- **Application** `send(scope, text, attachments, references)`
+  - 대화를 먼저 읽는다(남의 id는 404).
+  - 그다음 참조를 하나씩 확인한다. 하나라도 거부되면 메시지는 들어가지 않는다.
+  - 블록 순서: 글, 첨부, 참조.
+- **API**
+  - `POST /api/conversations/{id}/messages`의 `references: [{path, identity, start?, end?, sha256?}]`
+    - 최대 10개. 넘으면 `400 invalid_request`.
+    - 참조만 있는 메시지도 된다.
+  - 타임라인의 사용자 메시지에 `references: [{path, name, whole, start_line, end_line}]`가 붙는다. excerpt는 주지 않는다.
+- **편집기** (CodeMirror 번들을 다시 빌드했다. sha256은 `SOURCE`에 있다.)
+  - `createEditor`의 `onAsk`
+    - 선택이 있으면 선택 끝에 **Ask HIMARI** tooltip이 뜬다.
+    - Ctrl/Cmd+Shift+Enter로도 된다. 선택이 없으면 파일 전체다.
+  - `selection()`은 위치, 글, 줄·열을 준다. `select(from, to)`는 그 범위를 선택하고 보인다.
+- **FilesPane**
+  - `onAsk(reference)`: 놓인 곳이 참조를 받는다.
+  - `ask()`
+    - 저장 안 한 글이 있으면 "Save first: HIMARI reads the saved file"이라고 알리고 칩을 붙이지 않는다.
+    - 선택의 해시는 SubtleCrypto로 만든다. 계산하는 사이 글이 바뀌면 버린다.
+  - ⋯ 메뉴의 **Ask HIMARI about this file**: 파일 전체다. 편집할 수 없는 파일(이미지, 큰 파일)도 된다.
+  - `reveal(path, start, end)`: 파일을 (이미 열려 있으면 다시 읽지 않고) 열고, 그 범위를 선택한다.
+- **화면** (app.js)
+  - 입력창 칩
+    - 이름은 `main.c:12:5–30:2`(선택) 또는 `main.c`(파일 전체)다.
+    - 최대 10개이고, 같은 곳은 한 번만 붙는다.
+    - ×로 뺀다. 이름을 누르면 패널에서 그 자리를 연다.
+    - 보낸 칩만 빠진다.
+  - 패널에서 Ask: 펼친 패널을 접고 칩을 붙인다.
+  - Files 화면에서 Ask
+    - 그 파일 폴더의 대화를 연다(Open conversation과 같은 규칙).
+    - 패널은 그 파일에서, 선택한 채로 열린다(`panelStart`).
+    - 칩은 그 대화의 입력창에 붙는다.
+  - 타임라인 칩은 `main.c:12–30` 또는 `main.c`다. 누르면 그 파일을 지금 내용으로 연다.
+
+### 12.2 설계와 달라진 것
+
+1. **줄바꿈.**
+   - CodeMirror는 `\r\n`, `\r`, `\n`을 모두 하나의 `\n`으로 센다. 그래서 위치, 해시, excerpt, 줄 번호는 줄바꿈을 그렇게 바꾼 글의 것이다.
+   - 서버도 똑같이 바꾼 다음 자른다. 이렇게 하지 않으면 CRLF 파일의 선택은 늘 `reference_stale`이 된다.
+2. **블록 모양.** 설계의 `range{…}` 대신 납작한 필드를 쓴다. 파일 전체 참조는 `size`(모델에게는 `bytes`)를 든다.
+3. **stale 표시.**
+   - 보내기가 거부되면 상태 줄은 곧 대화 상태로 바뀐다. 그래서 칩마다 runner `stat`으로 지금 identity를 보고, 바뀐 칩을 빨갛게 표시한다("changed, select again").
+   - 첨부가 거부될 때의 칩 표시와 같다.
+4. **좁은 화면.** 패널이 화면을 덮으므로, Ask를 누르면 패널을 닫아 입력창과 칩이 보이게 한다. 패널을 다시 열면 그 파일이 있다.
+5. **파일 전체 참조의 입구로 ⋯ 메뉴를 더했다.** tooltip은 선택이 있을 때만 뜬다.
+
+### 12.3 함께 고친 V3-P75 문제
+
+- **패널의 ⋯ 파일 메뉴가 화면 아래로 열렸다.** 목록의 기준 상자가 `.file-panel`이었다. 그래서 패널에서는 Previous versions, Delete가 사실상 보이지 않았다. 머리 메뉴를 `position: relative`로 고쳤다.
+- **선택이 보이지 않았다.** 현재 줄의 불투명 배경이 선택 층을 덮었다. 선택이 있는 동안은 현재 줄 배경을 끄고, 선택 색을 진하게 했다.
+- **같은 글 강조.** CodeMirror 기본색(밝은 초록)을 페이지 색으로 바꿨다.
+
+고치지 않고 남긴 것: **CRLF 파일을 편집기에서 저장하면 줄바꿈이 LF로 바뀐다.** 편집기가 글을 `\n`으로 돌려주기 때문이다. 따로 고칠 일로 남긴다.
+
+### 12.4 확인
+
+- 시험
+  - 코덱 왕복(큰 identity 포함), 모델 줄(선택, 파일 전체, truncated).
+  - excerpt와 경로의 `</file_reference>`가 줄을 닫지 못한다. 압축 세기는 보내는 줄과 같다.
+  - API
+    - 선택이 서버에서 다시 만들어져 모델 입력에 들어간다. 줄 2–3, 한글과 이모지, 안내 포함.
+    - 파일 전체이고 글 없는 메시지. 타임라인의 참조 모양.
+    - CRLF와 CR 파일의 위치.
+  - 거부
+    - 해시 불일치, 서로게이트 반쪽, 범위 밖, identity 변경(모두 409 `reference_stale`). 아무것도 보내지 않는다.
+    - 11개(400), 끝 없는 시작(400), 숨김 경로(404), 1 MiB 넘는 파일의 선택(422).
+  - 300 KB 선택: 요청은 작고, 모델은 20 KB를 받는다. 문자 경계 자르기.
+  - `scripts/files_smoke.mjs`
+    - 선택(위치와 해시, 글 없음), 선택 없음(파일 전체), 저장 안 한 글(칩 없음, Save first).
+    - ⋯ 메뉴(이미지 파일 전체). `onAsk`가 없으면 메뉴도 단축키도 없다. `reveal`.
+- 브라우저 (headless Chromium, 실제 앱과 runner, 1400px과 390px)
+  - Files 화면에서 줄을 선택하면 tooltip이 뜬다.
+  - Ask를 누르면 폴더 대화가 열리고, 패널에 파일이 열리고, 입력창에 `README.md:3:1–3:19` 칩이 붙는다.
+  - 보내면 모델 입력에 그 줄이 들어가고, 타임라인 칩은 `README.md:3`이다.
+  - 패널에서 Ctrl+Shift+Enter로 칩이 붙는다.
+  - 파일이 바뀐 뒤 보내면 409이고, 칩이 빨갛게 표시되며 입력한 글은 남는다.
+  - 저장 안 한 글은 "Save first"다. ⋯ 메뉴로 파일 전체를 보낸다.
+  - 좁은 화면: 패널이 닫히고 칩이 보인다. 칩을 누르면 패널이 그 선택으로 열린다.
+- 배포 주의: DB 판은 그대로지만, **참조를 쓴 대화는 이 판 이전 서버로 되돌리면 읽지 못한다**(이전 코덱에는 `file_reference` 블록이 없다).
