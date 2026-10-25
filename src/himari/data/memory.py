@@ -1057,6 +1057,22 @@ class InMemoryData:
             trashed_at=conv.trashed_at,
         )
 
+    async def list_conversations_working_in(self, principal: PrincipalId, workspace_id: WorkspaceId, *,
+                                            limit: int = 50) -> Sequence[ConversationSummary]:
+        rules.check_page(limit, 0)
+        if self._store.workspace_owners.get(workspace_id) != principal:
+            return ()
+
+        def working_here(conv: _Conversation) -> bool:
+            return any(a.default_binding_id is not None and a.default_binding_id in conv.bindings
+                       and conv.bindings[a.default_binding_id].workspace_id == workspace_id
+                       for a in conv.activations.values())
+
+        rows = [(self._summary(cid, conv), i) for i, (cid, conv) in enumerate(self._store._conversations.items())
+                if conv.owner == principal and conv.trashed_at is None and working_here(conv)]
+        rows.sort(key=lambda row: (row[0].last_activity_at, row[1]), reverse=True)
+        return tuple(summary for summary, _ in rows[:limit])
+
     async def list_conversations(
         self, principal: PrincipalId, *, limit: int = 50, offset: int = 0, trashed: bool = False
     ) -> Sequence[ConversationSummary]:

@@ -143,13 +143,26 @@ const app = {
   streaming: false, // the server streams answers (V3-P73 §9)
   filesOpen: false, // the files panel beside the conversation is open (V3-P75 §3.2)
   workingFolder: null, // the open conversation's working folder, when it works on this server's folders
+  conversationFolderPaths: [], // all of its folders: a folder already among them is not offered to attach
+  folderTicket: 0, // the latest "conversations in this folder" read: older answers are dropped
 };
 
 const views = new AppViews(api, el, () => app.conversationId);
 
-/* The server's files (V3-P75 §3): one pane on the Files surface, one beside a conversation. */
-const filesSurface = new FilesPane({ api, el });
-const filesPanel = new FilesPane({ api, el, actions: [$("file-panel-expand"), $("file-panel-close")] });
+/* The server's files (V3-P75 §3): one pane on the Files surface, one beside a conversation.
+ * On the surface a folder opens its conversation (§6); beside one, it is attached to it. */
+const filesSurface = new FilesPane({
+  api, el,
+  folderActions: (listing) => [openHereControl(listing.path)],
+  folderRowActions: (path) => [["Open conversation", () => openFolderConversation(path, false)],
+                               ["New conversation here", () => openFolderConversation(path, true)]],
+});
+const filesPanel = new FilesPane({
+  api, el,
+  actions: [$("file-panel-expand"), $("file-panel-close")],
+  folderActions: (listing) => (attachable(listing.path) ? [attachHereButton(listing.path)] : []),
+  folderRowActions: (path) => (attachable(path) ? [["Attach to this conversation", () => attachHere(path)]] : []),
+});
 
 /* The answer being written (V3-P73 §7, live.js): its own item at the end of
  * the timeline while a job runs, replaced by the Run's Event when it comes. */
@@ -2260,6 +2273,7 @@ function renderFolders(items) {
   const working = items.find((item) => item.working && item.path);
   const before = app.workingFolder;
   app.workingFolder = working ? working.path : null;
+  app.conversationFolderPaths = items.map((item) => item.path).filter(Boolean);
   syncFilesPanel(!$("surface-chat").hidden);
   if (app.filesOpen && app.workingFolder && app.workingFolder !== before) filesPanel.openFolder(app.workingFolder);
   const list = $("chat-menu-folders-list");
@@ -2462,6 +2476,86 @@ async function showFiles() {
   status("");
   if (filesSurface.place) await filesSurface.refresh();
   else await filesSurface.openFolder("~");
+}
+
+/* §6: a folder's conversation — its latest, or a new one working in it. */
+async function openFolderConversation(path, isNew) {
+  try {
+    const answer = await api("POST", "/api/machine/conversations", { path, new: isNew });
+    app.filesOpen = true; // the folder stays in sight, beside its conversation
+    await openConversation(answer.conversation.id);
+    if (answer.created) loadList(true).then(markSelected).catch(() => {});
+  } catch (error) {
+    status(error.message, "error");
+  }
+}
+
+/* The surface's folder control: "Open conversation", with the folder's list behind ⌄ (§6.1). */
+function openHereControl(path) {
+  const box = el("div", "files-open-chat");
+  const main = el("button", "primary-button files-open-chat-main", "Open conversation");
+  main.type = "button";
+  main.addEventListener("click", () => openFolderConversation(path, false));
+  const more = el("details", "files-open-chat-more");
+  const toggle = el("summary", "files-open-chat-toggle", "⌄");
+  toggle.setAttribute("aria-label", "Conversations in this folder");
+  toggle.title = "Conversations in this folder";
+  const list = el("div", "conversation-action-list files-open-chat-list");
+  more.append(toggle, list);
+  box.append(main, more);
+  const ticket = ++app.folderTicket;
+  api("GET", `/api/machine/conversations?path=${encodeURIComponent(path)}`).then((folder) => {
+    if (ticket !== app.folderTicket) return;
+    if (folder.refused) {
+      main.disabled = true;
+      main.title = folder.refused;
+      more.hidden = true;
+      return;
+    }
+    if (!folder.conversations.length) main.textContent = "New conversation here";
+    for (const item of folder.conversations) {
+      const row = el("button", "link-button files-open-chat-item");
+      row.type = "button";
+      row.append(el("span", "files-name", conversationName(item)),
+                 el("span", "files-meta", new Date(item.last_activity_at).toLocaleDateString()));
+      row.addEventListener("click", () => { more.open = false; openConversation(item.id); });
+      list.append(row);
+    }
+    if (!folder.own) {
+      const fresh = el("button", "link-button", "New conversation here");
+      fresh.type = "button";
+      fresh.addEventListener("click", () => { more.open = false; openFolderConversation(path, true); });
+      list.append(fresh);
+    }
+    for (const above of folder.above) { // Q2: the folders above with conversations, as links
+      const link = el("button", "link-button files-open-chat-above",
+                      `${above.count} in ${above.workspace.label} (above)`);
+      link.type = "button";
+      link.title = above.workspace.path;
+      link.addEventListener("click", () => { more.open = false; filesSurface.openFolder(above.workspace.path); });
+      list.append(link);
+    }
+  }).catch(() => { /* the button still opens or makes one; the server says why if it cannot */ });
+  return box;
+}
+
+/* Beside a conversation: a folder not yet among its folders can be attached (§6.3). */
+function attachable(path) {
+  return app.conversationId !== null && !app.conversationFolderPaths.includes(path);
+}
+
+function attachHere(path) {
+  return changeFolders("POST", conversationFolders(), { path },
+                       "Attached. HIMARI can write there from its next step, and works in it.")
+    .then(() => filesPanel.refresh());
+}
+
+function attachHereButton(path) {
+  const button = el("button", "link-button", "Attach to this conversation");
+  button.type = "button";
+  button.title = "HIMARI may then write here, and works in this folder";
+  button.addEventListener("click", () => attachHere(path));
+  return button;
 }
 
 /* The panel beside a conversation that works on this server's folders. */

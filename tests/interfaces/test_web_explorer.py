@@ -278,3 +278,87 @@ def test_a_download_cut_during_a_read_closes_its_file_after_that_read() -> None:
     while not handle.closed and time.monotonic() < deadline:
         time.sleep(0.02)
     assert handle.closed and not handle.closed_while_reading  # … closed once it ended
+
+
+# --- a conversation in a folder (V3-P75 §6) ----------------------------------------------------------
+
+def folder_conversations(server: Server, path: str) -> dict[str, Any]:
+    got = server.client.get("/api/machine/conversations", params={"path": path})
+    assert got.status_code == 200, got.text
+    return dict(got.json())
+
+
+def test_open_a_folders_conversation_or_a_new_one(server: Server, kit: RunnerKit) -> None:
+    project = str(kit.home / "projects/a")
+    empty = folder_conversations(server, "~/projects/a")
+    assert (empty["path"], empty["workspace"], empty["conversations"], empty["refused"]) == (project, None, [], None)
+    made = server.post("/api/machine/conversations", {"path": "~/projects/a"})
+    assert made.status_code == 201 and made.json()["created"]
+    first = made.json()["conversation"]["id"]
+    folders = server.client.get(f"/api/conversations/{first}/workspaces").json()["items"]
+    working = next(f for f in folders if f["working"])
+    assert working["path"] == project and not working["own"]  # registered, attached, the working folder
+    again = server.post("/api/machine/conversations", {"path": project})
+    assert again.status_code == 200 and not again.json()["created"] and again.json()["conversation"]["id"] == first
+    second = server.post("/api/machine/conversations", {"path": project, "new": True}).json()["conversation"]["id"]
+    listed = folder_conversations(server, project)
+    assert [c["id"] for c in listed["conversations"]] == [second, first] and listed["workspace"]["label"] == "a"
+    assert server.post("/api/machine/conversations", {"path": project}).json()["conversation"]["id"] == second
+    assert len(server.client.get("/api/workspaces").json()["items"]) == 1  # registered once, reused
+    # Below it: its own list, and a link to the folder above (Q2).
+    (kit.home / "projects/a/src").mkdir()
+    below = folder_conversations(server, "~/projects/a/src")
+    assert below["conversations"] == [] and [(x["workspace"]["path"], x["count"]) for x in below["above"]] == [
+        (project, 2)]
+    # Moved to the trash: no longer one of the folder's.
+    assert server.client.post(f"/api/conversations/{second}/trash", headers=SEND).status_code in (200, 202)
+    assert [c["id"] for c in folder_conversations(server, project)["conversations"]] == [first]
+
+
+def test_a_conversations_own_folder_opens_that_conversation(server: Server, kit: RunnerKit) -> None:
+    cid = server.new()
+    folders = server.client.get(f"/api/conversations/{cid}/workspaces").json()["items"]
+    own = next(f for f in folders if f["own"])["path"]
+    listed = folder_conversations(server, own)
+    assert listed["own"] and [c["id"] for c in listed["conversations"]] == [cid]
+    opened = server.post("/api/machine/conversations", {"path": own})
+    assert opened.status_code == 200 and opened.json()["conversation"]["id"] == cid
+    refused(server.post("/api/machine/conversations", {"path": own, "new": True}), 422, "not_usable")
+
+
+def test_folders_that_cannot_hold_a_conversation(server: Server, kit: RunnerKit, tmp_path: Path) -> None:
+    refused(server.client.get("/api/machine/conversations", params={"path": "~/.ssh"}), 422, "not_usable")
+    refused(server.post("/api/machine/conversations", {"path": "~/projects/a/main.c"}), 422, "not_usable")
+    locked = kit.home / "projects/locked"
+    locked.mkdir()
+    locked.chmod(0o555)  # readable, not writable: it cannot be a workspace
+    try:
+        listed = folder_conversations(server, str(locked))
+        assert listed["refused"] and listed["conversations"] == []
+        refused(server.post("/api/machine/conversations", {"path": str(locked)}), 422, "not_usable")
+    finally:
+        locked.chmod(0o755)
+    before = server.client.get("/api/conversations").json()["items"]
+    assert before == []  # nothing was made by the refusals
+
+
+def test_not_offered_folder_conversations(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(web, "FAILED_LOGIN_DELAY_SECONDS", 0)
+    s = Server(tmp_path, None)
+    with s.client:
+        s.sign_in()
+        refused(s.client.get("/api/machine/conversations", params={"path": "/tmp"}), 404, "not_found")
+        refused(s.post("/api/machine/conversations", {"path": "/tmp"}), 404, "not_found")
+
+
+def test_a_conversation_made_for_a_folder_that_could_not_be_attached_is_removed(
+        server: Server, kit: RunnerKit, monkeypatch: pytest.MonkeyPatch) -> None:
+    from himari.bootstrap.application import Application, WorkspaceRefused
+
+    async def refuse(self: Application, scope: Any, **kwargs: Any) -> Any:
+        raise WorkspaceRefused("unavailable", "The machine runner does not answer; try again later.")
+
+    monkeypatch.setattr(Application, "attach_workspace", refuse)
+    refused(server.post("/api/machine/conversations", {"path": "~/projects/a"}), 409, "unavailable")
+    assert server.client.get("/api/conversations").json()["items"] == []
+    assert server.client.get("/api/conversations", params={"trashed": True}).json()["items"] == []

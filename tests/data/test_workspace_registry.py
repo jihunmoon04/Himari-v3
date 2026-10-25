@@ -167,3 +167,29 @@ def test_unknown_conversation_is_not_authorized() -> None:
     data = data_for(new_store())
     missing = TrustedScope(ME, ConversationId("conv_missing"))
     assert code(data.read_conversation_workspaces(missing, MACHINE)) is DataErrorCode.NOT_AUTHORIZED
+
+
+def test_the_conversations_working_in_a_folder() -> None:
+    """V3-P75 §6.1: those whose working folder it is (attached alone is not), most recent first, none in the
+    trash, and nothing for a Workspace not the principal's."""
+    store = new_store()
+    data = data_for(store)
+    a = run(data.register_workspace(ME, MACHINE, "/p/a", "a"))
+    b = run(data.register_workspace(ME, MACHINE, "/p/b", "b"))
+    first, second, third = (machine_conversation(data) for _ in range(3))
+    for scope in (first, second, third):
+        run(data.attach_workspace(scope, a.workspace_id))
+    run(data.attach_workspace(third, b.workspace_id))  # third works in b now; a is only attached there
+
+    def working_in(workspace: WorkspaceId, data: InMemoryData | SqliteData = data) -> list[ConversationId]:
+        return [s.conversation_id for s in run(data.list_conversations_working_in(ME, workspace))]
+
+    assert working_in(a.workspace_id) == [second.conversation_id, first.conversation_id]
+    assert working_in(b.workspace_id) == [third.conversation_id]
+    run(data.trash_conversation(second))
+    assert working_in(a.workspace_id) == [first.conversation_id]
+    assert run(data.list_conversations_working_in(FOREIGN.principal_id, a.workspace_id)) == ()
+    assert run(data.list_conversations_working_in(ME, WorkspaceId("wsp_none"))) == ()
+    assert code(data.list_conversations_working_in(ME, a.workspace_id, limit=0)) is DataErrorCode.INVALID_ARGUMENT
+    store = restart(store)
+    assert working_in(a.workspace_id, data_for(store)) == [first.conversation_id]

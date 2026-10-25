@@ -3637,3 +3637,17 @@ button.files-crumb:hover { background: var(--surface-hover); color: var(--text);
   .file-panel-grip, #file-panel-expand { display: none; }
 }
 #chat-files-toggle[aria-expanded="true"] { background: var(--surface-selected); }
+
+/* A folder's conversation (V3-P75 §6): the button and the list behind its ⌄. */
+.files-open-chat { position: relative; display: inline-flex; align-items: stretch; flex: 0 0 auto; }
+.files-open-chat-main { min-height: 34px; padding: 6px 12px; border-radius: 10px 0 0 10px; font-size: 13px; }
+.files-open-chat-main:disabled { opacity: .5; cursor: not-allowed; }
+.files-open-chat-more > summary { display: grid; place-items: center; width: 30px; height: 100%; min-height: 34px; list-style: none; border-radius: 0 10px 10px 0; background: var(--accent); color: var(--accent-contrast); border-left: 1px solid var(--accent-soft); cursor: pointer; font-size: 12px; }
+.files-open-chat-more > summary::-webkit-details-marker { display: none; }
+.files-open-chat-more[hidden] { display: none; }
+.files-open-chat:has(.files-open-chat-more[hidden]) .files-open-chat-main { border-radius: 10px; }
+.files-open-chat-list { left: auto; right: 0; width: min(320px, 80vw); max-height: 50vh; overflow-y: auto; }
+.files-open-chat-item { display: flex !important; align-items: center; gap: 8px; text-align: left; }
+.files-open-chat-list button:last-child { color: inherit; }
+.files-open-chat-above { color: var(--text-muted) !important; font-size: 12px; }
+.files-open-chat-item { color: var(--text) !important; }
