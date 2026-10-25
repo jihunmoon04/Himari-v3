@@ -33,11 +33,13 @@ class Version:
     version_id: str
     saved_at: datetime
     size: int
-    reason: str  # "save" | "delete"
+    reason: str  # the owner's "save" | "delete" | "revert"; "agent" | "agent_delete" (V3-P76 §4.2: before an agent's
+    # first change of a file since review, the change a write or a delete)
 
 
 class VersionStore:
     def __init__(self, root: Path) -> None:
+        """One store per budget: the agent's versions have a root of their own (V3-P76 Q5)."""
         self.root = root
         self._lock = threading.Lock()  # the index files; called from threads
 
@@ -98,10 +100,14 @@ class VersionStore:
                 if not isinstance(path, str) or os.path.dirname(path) != folder or not index["versions"]:
                     continue
                 latest = max((_version(v) for v in index["versions"]), key=lambda v: v.saved_at)
-                if latest.reason == "delete":
+                if latest.reason in ("delete", "agent_delete"):
                     found.append((path, latest))
         found.sort(key=lambda item: item[1].saved_at, reverse=True)
         return tuple(found[:limit])
+
+    def has(self, path: str, version_id: str) -> bool:
+        with self._lock:
+            return any(v["id"] == version_id for v in self._index(self._folder(path))["versions"])
 
     def read(self, path: str, version_id: str) -> bytes | None:
         if not all(c.isalnum() or c in "-T" for c in version_id):

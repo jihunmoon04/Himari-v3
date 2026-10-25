@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import ctypes
+import errno
 import os
 from pathlib import Path
 
@@ -429,4 +431,200 @@ def test_visible_path_resolves_the_folder_and_hides_as_open_does(host: Host, hom
     for hidden in ("~/.ssh/id", "~/.bashrc", "~/projects/to-ssh/id", "~/missing/x"):
         with pytest.raises(api.RunnerError) as refused:
             host.visible_path(hidden, "/")
+        assert refused.value.category == api.NOT_FOUND
+
+
+# --- an agent's writes, kept for review (V3-P76 §4.1) ---------------------------------------------
+
+
+def no_temporaries(folder: Path) -> bool:
+    return not [n for n in os.listdir(folder) if n.startswith(".himari-")]
+
+
+class _NoRenameat2:
+    """A file system without RENAME_NOREPLACE (some FUSE ones): renameat2 says EINVAL."""
+
+    real = hostfs._libc
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self.real, name)
+
+    @staticmethod
+    def renameat2(*args: object) -> int:
+        ctypes.set_errno(errno.EINVAL)
+        return -1
+
+
+def test_a_kept_write_copies_what_it_replaces(host: Host, home: Path) -> None:
+    target = home / "projects/a/main.c"
+    before = identity(target)
+    fd, name = parent(host, home, "projects/a/main.c")
+    try:
+        result, copy = host.kept_write(fd, name, b"int main(){return 1;}\n", None)
+    finally:
+        os.close(fd)
+    assert target.read_bytes() == b"int main(){return 1;}\n"
+    assert result == {"created": False, "prior_identity": before, "after_identity": identity(target),
+                      "complete": True, "partial": False}
+    assert copy is not None and read_all(copy) == b"int main(){}\n" and no_temporaries(target.parent)
+
+
+def test_a_kept_write_never_writes_over_a_change(host: Host, home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    target = home / "projects/a/main.c"
+    fd, name = parent(host, home, "projects/a/main.c")
+    try:
+        with pytest.raises(api.RunnerError) as refused:  # edit_file's read is stale
+            host.kept_write(fd, name, b"mine", [0, 0, 0, 0])
+        assert refused.value.category == api.CHANGED and target.read_text() == "int main(){}\n"
+        copy_of = Host._copy_of
+
+        def copy_then_write(self: Host, held: int, size: int) -> int | None:
+            made = copy_of(self, held, size)
+            with open(target, "ab") as late:
+                late.write(b"// owner")
+            return made
+
+        monkeypatch.setattr(Host, "_copy_of", copy_then_write)
+        with pytest.raises(api.RunnerError) as refused:  # written in place between the copy and the rename
+            host.kept_write(fd, name, b"mine", None)
+        assert refused.value.category == api.CHANGED and target.read_text() == "int main(){}\n// owner"
+    finally:
+        os.close(fd)
+    assert no_temporaries(target.parent)
+
+
+def test_a_kept_write_makes_a_new_file_only_where_the_name_is_free(host: Host, home: Path,
+                                                                   monkeypatch: pytest.MonkeyPatch) -> None:
+    folder = home / "projects/a"
+    fd, _ = parent(host, home, "projects/a/new.txt")
+    try:
+        result, copy = host.kept_write(fd, "new.txt", b"new\n", None)
+        assert copy is None and (folder / "new.txt").read_text() == "new\n"
+        assert result == {"created": True, "prior_identity": [], "after_identity": identity(folder / "new.txt"),
+                          "complete": True, "partial": False}
+        with pytest.raises(api.RunnerError) as refused:  # edit_file of a file gone since it was read
+            host.kept_write(fd, "gone.txt", b"x", [1, 2, 3, 4])
+        assert refused.value.category == api.CHANGED and not (folder / "gone.txt").exists()
+        write_temp = Host._write_temp
+
+        def temp_then_taken(parent_fd: int, data: bytes | int, mode: int) -> str:
+            made = write_temp(parent_fd, data, mode)
+            (folder / "raced.txt").write_text("the owner's\n")
+            return made
+
+        monkeypatch.setattr(Host, "_write_temp", staticmethod(temp_then_taken))
+        with pytest.raises(api.RunnerError) as refused:
+            host.kept_write(fd, "raced.txt", b"mine", None)
+        assert refused.value.category == api.CHANGED and (folder / "raced.txt").read_text() == "the owner's\n"
+    finally:
+        os.close(fd)
+    assert no_temporaries(folder)
+
+
+def test_without_renameat2_a_new_file_is_taken_with_o_excl(host: Host, home: Path,
+                                                           monkeypatch: pytest.MonkeyPatch) -> None:
+    folder = home / "projects/a"
+    monkeypatch.setattr(hostfs, "_libc", _NoRenameat2())
+    fd, _ = parent(host, home, "projects/a/new.txt")
+    try:
+        result, _ = host.kept_write(fd, "new.txt", b"new\n", None)
+        assert (folder / "new.txt").read_text() == "new\n" and result["complete"] and not result["partial"]
+        assert result["created"] and result["after_identity"] == identity(folder / "new.txt")
+        (folder / "taken.txt").write_text("the owner's\n")
+        write_temp = Host._write_temp
+
+        def temp_then_taken(parent_fd: int, data: bytes | int, mode: int) -> str:
+            made = write_temp(parent_fd, data, mode)
+            (folder / "raced.txt").write_text("the owner's\n")
+            return made
+
+        monkeypatch.setattr(Host, "_write_temp", staticmethod(temp_then_taken))
+        with pytest.raises(api.RunnerError) as refused:  # taken since it was looked at: never written over
+            host.kept_write(fd, "raced.txt", b"mine", None)
+        assert refused.value.category == api.CHANGED and (folder / "raced.txt").read_text() == "the owner's\n"
+        monkeypatch.setattr(Host, "_write_temp", staticmethod(write_temp))
+        # Its writing fails once the name is taken: a success that says the content may be partial.
+        syncs = []
+        real_fsync = os.fsync
+
+        def second_fails(target: int) -> None:
+            syncs.append(target)
+            if len(syncs) == 2:
+                raise OSError(errno.EIO, "I/O error")
+            real_fsync(target)
+
+        monkeypatch.setattr(os, "fsync", second_fails)
+        result, _ = host.kept_write(fd, "partial.txt", b"half\n", None)
+        assert result == {"created": True, "prior_identity": [], "after_identity": None, "complete": False,
+                          "partial": True}
+        assert (folder / "partial.txt").exists()  # this call's own file: not removed
+    finally:
+        os.close(fd)
+    assert no_temporaries(folder)
+
+
+def test_a_kept_write_over_the_copy_limit_goes_without_a_copy(host: Host, home: Path) -> None:
+    big = home / "projects/a/big.txt"
+    big.write_bytes(b"x" * (hostfs.MAX_SNAPSHOT_BYTES + 1))
+    fd, name = parent(host, home, "projects/a/big.txt")
+    try:
+        result, copy = host.kept_write(fd, name, b"small", None)
+    finally:
+        os.close(fd)
+    assert copy is None and result["complete"] and big.read_bytes() == b"small"
+
+
+def test_a_kept_delete_copies_a_file_and_not_a_link(host: Host, home: Path) -> None:
+    target = home / "projects/a/main.c"
+    before = identity(target)
+    (home / "projects/a/link").symlink_to(target)
+    link_identity = list(Host.identity(os.lstat(home / "projects/a/link")))
+    fd, name = parent(host, home, "projects/a/main.c")
+    try:
+        result, copy = host.kept_delete(fd, "link")
+        assert copy is None and result["prior_identity"] == link_identity and target.exists()
+        result, copy = host.kept_delete(fd, name)
+        assert result == {"prior_identity": before, "after_identity": [], "complete": True, "partial": False}
+        assert copy is not None and read_all(copy) == b"int main(){}\n" and not target.exists()
+        with pytest.raises(api.RunnerError) as refused:
+            host.kept_delete(fd, name)
+        assert refused.value.category == api.NOT_FOUND
+    finally:
+        os.close(fd)
+
+
+def test_install_places_a_file_only_where_the_name_is_free(host: Host, home: Path,
+                                                           monkeypatch: pytest.MonkeyPatch) -> None:
+    folder = home / "projects/a"
+    fd, _ = parent(host, home, "projects/a/back.c")
+    try:
+        assert host.install(fd, "back.c", b"restored\n") == identity(folder / "back.c")
+        with pytest.raises(api.RunnerError) as refused:
+            host.install(fd, "main.c", b"restored\n")
+        assert refused.value.category == api.CHANGED and (folder / "main.c").read_text() == "int main(){}\n"
+        monkeypatch.setattr(hostfs, "_libc", _NoRenameat2())
+        with pytest.raises(api.RunnerError) as refused:  # never a half-written file shown as put back
+            host.install(fd, "other.c", b"restored\n")
+        assert refused.value.category == api.UNSUPPORTED and not (folder / "other.c").exists()
+    finally:
+        os.close(fd)
+    assert no_temporaries(folder)
+
+
+def test_where_a_write_lands(host: Host, home: Path) -> None:
+    """V3-P76 §8: the path a change is recorded under, before it is written."""
+    folder = home / "projects/a"
+    (folder / "link.c").symlink_to("main.c")
+    (home / "projects/to-a").symlink_to(folder)
+    (folder / "to-key").symlink_to(home / ".ssh/id")
+
+    def land(path: str) -> str:
+        return host.visible_path(path, str(folder), follow=True)
+
+    assert land("link.c") == land("main.c") == land("~/projects/to-a/main.c") == str(folder / "main.c")
+    assert land("new/deeper/x.py") == str(folder / "new/deeper/x.py")  # folders the write would make
+    assert land("~/projects/to-a/missing/x") == str(folder / "missing/x")
+    for hidden in ("to-key", "~/.ssh/new", "~/.ssh/a/b"):
+        with pytest.raises(api.RunnerError) as refused:
+            land(hidden)
         assert refused.value.category == api.NOT_FOUND

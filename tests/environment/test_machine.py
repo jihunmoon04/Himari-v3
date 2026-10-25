@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import os
 import threading
 from collections.abc import Iterator
 from pathlib import Path
@@ -505,3 +506,117 @@ def test_git_push(tmp_path: Path) -> None:
         kit.close()
         server.close()
 
+
+
+# --- the review record of the file Tools' changes (V3-P76 §7, §8) -----------------------------------
+
+
+class RecordingLog:
+    """A ChangeLog that records what the Tools tell it."""
+
+    def __init__(self, fail_begin: bool = False) -> None:
+        self.seen: list[tuple[Any, ...]] = []
+        self.fail_begin = fail_begin
+
+    async def begin(self, scope: TrustedScope, call: CallId, path: str) -> object:
+        if self.fail_begin:
+            raise OSError("the record cannot be written")
+        self.seen.append(("begin", path))
+        return len(self.seen)
+
+    async def kept(self, token: object, path: str, copy: int | None, prior: tuple[int, ...],
+                   after: tuple[int, ...] | None, complete: bool) -> None:
+        held = b"" if copy is None else os.read(copy, 1 << 20)
+        if copy is not None:
+            os.close(copy)
+        self.seen.append(("kept", path, held, bool(prior), after == (), complete))
+
+    async def dropped(self, token: object) -> None:
+        self.seen.append(("dropped",))
+
+    async def unknown(self, token: object) -> None:
+        self.seen.append(("unknown",))
+
+    async def commands_ran(self, scope: TrustedScope) -> None:
+        self.seen.append(("commands_ran",))
+
+
+def test_each_change_goes_to_the_record(kit: RunnerKit) -> None:
+    log = RecordingLog()
+    env = MachineEnvironment(kit.socket, changes=log)
+    folder = kit.himari_home / "conversations/c1"
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "real.txt").write_text("before\n")
+    (folder / "link.txt").symlink_to("real.txt")
+    assert call(env, "write_file", path="link.txt", content="after\n").status is ToolStatus.SUCCEEDED
+    assert call(env, "write_file", path="new/deep.txt", content="x").status is ToolStatus.SUCCEEDED
+    assert call(env, "edit_file", path="real.txt", old_text="after", new_text="edited").status is ToolStatus.SUCCEEDED
+    assert call(env, "delete_file", path="link.txt").status is ToolStatus.SUCCEEDED  # the link itself
+    assert call(env, "delete_file", path="missing.txt").status is ToolStatus.FAILED
+    assert call(env, "run_command", argv=["true"]).status is ToolStatus.SUCCEEDED
+    real, deep, link = str(folder / "real.txt"), str(folder / "new/deep.txt"), str(folder / "link.txt")
+    assert log.seen == [
+        ("begin", real), ("kept", real, b"before\n", True, False, True),  # recorded under where it lands
+        ("begin", deep), ("kept", deep, b"", False, False, True),
+        ("begin", real), ("kept", real, b"after\n", True, False, True),
+        ("begin", link), ("kept", link, b"", True, True, True),  # a link goes without a copy
+        ("begin", str(folder / "missing.txt")), ("dropped",),
+        ("commands_ran",)]
+
+
+def test_a_lost_answer_is_unknown_and_an_unrecorded_change_is_not_made(kit: RunnerKit,
+                                                                       monkeypatch: pytest.MonkeyPatch) -> None:
+    from himari.runner import api as runner
+
+    log = RecordingLog()
+    env = MachineEnvironment(kit.socket, changes=log)
+    folder = kit.himari_home / "conversations/c1"
+    calls_made = env.call
+
+    async def lost(op: str, args: dict[str, Any], fds: Any = ()) -> Any:
+        if args.get("keep"):
+            await calls_made(op, args, fds)
+            raise runner.RunnerUnavailable("the connection broke")
+        return await calls_made(op, args, fds)
+
+    monkeypatch.setattr(env, "call", lost)
+    with pytest.raises(runner.RunnerUnavailable):  # the Dispatcher records the call's outcome as unknown
+        call(env, "write_file", path="a.txt", content="x")
+    assert log.seen == [("begin", str(folder / "a.txt")), ("unknown",)] and (folder / "a.txt").exists()
+    monkeypatch.undo()
+    unrecorded = MachineEnvironment(kit.socket, changes=RecordingLog(fail_begin=True))
+    outcome = call(unrecorded, "write_file", path="b.txt", content="x")
+    assert outcome.status is ToolStatus.FAILED and "could not be recorded" in text(outcome)
+    assert not (folder / "b.txt").exists()
+
+
+def test_a_new_file_written_in_part_says_so(kit: RunnerKit, monkeypatch: pytest.MonkeyPatch) -> None:
+    """§4.1: the O_EXCL path's unfinished write is told apart from a whole one."""
+    env = MachineEnvironment(kit.socket, changes=RecordingLog())
+    calls_made = env.call
+
+    async def partial(op: str, args: dict[str, Any], fds: Any = ()) -> Any:
+        result, received = await calls_made(op, args, fds)
+        if args.get("keep"):
+            result = {**result, "partial": True, "complete": False, "after_identity": None}
+        return result, received
+
+    monkeypatch.setattr(env, "call", partial)
+    outcome = call(env, "write_file", path="p.txt", content="x")
+    assert outcome.status is ToolStatus.SUCCEEDED and "its content may be partial" in text(outcome)
+
+
+def test_an_older_runner_gets_plain_writes(kit: RunnerKit, monkeypatch: pytest.MonkeyPatch) -> None:
+    """One not restarted since HIMARI was updated would take ``keep`` for a plain write: none is sent."""
+    log = RecordingLog()
+    env = MachineEnvironment(kit.socket, changes=log)
+    hello = env.hello
+
+    async def old() -> dict[str, Any]:
+        return {**await hello(), "version": 1}
+
+    monkeypatch.setattr(env, "hello", old)
+    assert call(env, "write_file", path="a.txt", content="x").status is ToolStatus.SUCCEEDED and log.seen == []
+    monkeypatch.undo()  # restarted: recorded from then on
+    assert call(env, "write_file", path="a.txt", content="y").status is ToolStatus.SUCCEEDED
+    assert [s[0] for s in log.seen] == ["begin", "kept"]

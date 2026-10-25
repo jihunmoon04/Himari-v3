@@ -261,7 +261,8 @@ class Runner:
         if op == api.STAT:
             return await self._read(lambda: host.stat_path(args.get("path"), _text(args, "cwd"))), []
         if op == api.VISIBLE:
-            return {"path": await self._read(lambda: host.visible_path(args.get("path"), _text(args, "cwd")))}, []
+            return {"path": await self._read(lambda: host.visible_path(args.get("path"), _text(args, "cwd"),
+                                                                       follow=args.get("follow") is True))}, []
         if op == api.OPEN:
             fd, real, info = await self._read(lambda: host.open_read(args.get("path"), _text(args, "cwd")),
                                               abandoned=lambda opened: os.close(opened[0]))
@@ -277,6 +278,10 @@ class Runner:
         roots =await self._blocking(lambda: host.roots(args.get("write_roots"), config.writable_under))
         if op == api.WRITE and args.get("mode") == "replace":
             return await self._replace(args, fds, roots)
+        if op == api.WRITE and args.get("mode") == "install":
+            return await self._install(args, fds, roots), []
+        if op in (api.WRITE, api.DELETE) and args.get("keep") is True:
+            return await self._kept(op, args, roots)
         if op == api.WRITE:
             return await self._write(args, fds, roots), []
         if op == api.DELETE and args.get("expected") is not None:
@@ -346,6 +351,52 @@ class Runner:
             return {"path": posixpath.join(parent, name), "previous": copy is not None}, [] if copy is None else [copy]
 
         return await self._blocking(delete)
+
+    async def _kept(self, op: str, args: dict[str, Any], roots: list[str]) -> tuple[dict[str, Any], list[int]]:
+        """V3-P76 §4.1: an agent's write or delete, with a copy of what the file held (an fd, when there is one)."""
+        host = self.host
+        expected = args.get("expected")
+        if expected is not None and not (isinstance(expected, list) and len(expected) == 4
+                                         and all(isinstance(v, int) for v in expected)):
+            raise api.RunnerError(api.INVALID)
+        content, data = args.get("content"), b""
+        if op == api.WRITE:
+            if not isinstance(content, str):
+                raise api.RunnerError(api.INVALID, "content is required")
+            data = content.encode("utf-8")
+            if len(data) > MAX_CONTENT_BYTES:
+                raise api.RunnerError(api.TOO_LARGE)
+
+        def kept() -> tuple[dict[str, Any], list[int]]:
+            parent_fd, parent, name = host.target(args.get("path"), _text(args, "cwd"), roots, follow=op == api.WRITE,
+                                                  create_parents=bool(args.get("create_parents", False)))
+            try:
+                if op == api.WRITE:
+                    result, copy = host.kept_write(parent_fd, name, data, expected)
+                else:
+                    result, copy = host.kept_delete(parent_fd, name)
+            finally:
+                os.close(parent_fd)
+            return {"path": posixpath.join(parent, name), "previous": copy is not None, **result}, \
+                [] if copy is None else [copy]
+
+        return await self._blocking(kept)
+
+    async def _install(self, args: dict[str, Any], fds: Sequence[int], roots: list[str]) -> dict[str, Any]:
+        """V3-P76 §4.1: a file put back in one step, where its name is free (its content as an fd)."""
+        host = self.host
+        if len(fds) != 1:
+            raise api.RunnerError(api.INVALID, "the content comes as one file")
+
+        def install() -> dict[str, Any]:
+            parent_fd, parent, name = host.target(args.get("path"), _text(args, "cwd"), roots, follow=False)
+            try:
+                identity = host.install(parent_fd, name, fds[0])
+            finally:
+                os.close(parent_fd)
+            return {"path": posixpath.join(parent, name), "identity": identity}
+
+        return await self._blocking(install)
 
     async def _write(self, args: dict[str, Any], fds: Sequence[int], roots: list[str]) -> dict[str, Any]:
         host = self.host

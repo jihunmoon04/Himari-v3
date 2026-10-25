@@ -382,3 +382,75 @@
   - 저장 안 한 글은 "Save first"다. ⋯ 메뉴로 파일 전체를 보낸다.
   - 좁은 화면: 패널이 닫히고 칩이 보인다. 칩을 누르면 패널이 그 선택으로 열린다.
 - 배포 주의: DB 판은 그대로지만, **참조를 쓴 대화는 이 판 이전 서버로 되돌리면 읽지 못한다**(이전 코덱에는 `file_reference` 블록이 없다).
+
+## 13. 구현 노트 (2026-10-25, 2단계 a: 에이전트 판과 검토 API)
+
+2단계는 둘로 나눴다. **a**(이 절)는 runner, 기록, 받아들이기·되돌리기 API다. **b**는 패널의 Changes 화면, diff, 점 표시, 명령 알림이다.
+
+### 13.1 만든 것
+
+- **runner**(`hostfs.py`, `server.py`, `api.py`)
+  - `write`·`delete`에 `keep: true`: `kept_write`, `kept_delete`(§4.1). 답은 `prior_identity`(`[]`: 없었음), `after_identity`(`[]`: 지움, null: 모름), `complete`, `partial`, 사본 fd다.
+  - 새 파일은 `RENAME_NOREPLACE`로만 이름을 단다. 그것이 없는 파일시스템(`EINVAL`·`ENOSYS`·`EOPNOTSUPP`)에서는 `O_EXCL`로 잡고 그 자리에 쓴다. 쓰다 실패하면 `partial: true`이고, Tool은 "its content may be partial"이라고 답한다.
+  - 이름이 바뀐 뒤(`_installed`)에는 오류를 내지 않는다.
+  - `write`의 `mode: "install"`: 빈 이름에만, `RENAME_NOREPLACE`로만 단다. 없으면 `unsupported`이고 아무것도 하지 않는다.
+  - `visible`의 `follow: true`: 쓰기가 닿을 실제 경로(마지막 링크를 따라감, 만들 폴더는 없어도 됨). 기록의 키가 된다(§8).
+  - **프로토콜 판 2.** 1판 runner는 `keep`과 `install`을 모르고 보통 쓰기로 처리한다. 그래서 HIMARI는 `hello`의 판이 2 이상일 때만 둘을 보낸다. 그 전에는 기록 없이 쓰고, 복원은 거부한다. 판이 2가 될 때까지 다시 묻는다.
+- **포트** `environment/machine/changes.py`의 `ChangeLog`: `begin`, `kept`, `dropped`(runner 거부), `unknown`(답 없음), `commands_ran`.
+  - 파일 Tool(`write_file`, `edit_file`, `delete_file`)의 순서: 경로 풀기 → `begin`(실패하면 아무것도 쓰지 않음) → runner(`keep`) → 결과 하나.
+  - `run_command`가 runner에 닿았으면 `commands_ran`이다.
+- **구현** `bootstrap/changes.py`
+  - `ChangeStore`: 대화마다 `file-changes/<대화>.json`을 원자적으로 바꾼다(임시 파일, fsync, rename). 대화마다 asyncio 잠금이 있다.
+  - 에이전트 판은 `file-versions-agent/`에 따로 둔다(Q5: 몫이 따로). 이유는 `agent`, 첫 변경이 지우기면 `agent_delete`다.
+  - 재시작 때 `recover()`가 `pending` 의도를 `unknown`으로 바꾼다.
+  - 대화를 영구 삭제하면 기록도 지운다.
+  - `ChangeReview`: 목록, diff, 받아들이기, 되돌리기, 모두 되돌리기.
+- **API**
+  - `GET /api/conversations/{id}/changes`: 목록, 숨김 개수, `commands_ran`, `running`.
+  - `GET …/changes/diff?path=`: 처음과 지금의 글, 지금의 상태.
+  - `POST …/changes/accept {paths | all}`.
+  - `POST …/changes/revert {path, seen?}`: 충돌이면 409 `changed`와 `now: {exists, identity}`. 그 `now`를 `seen`으로 다시 보내면 "그래도 되돌리기"다.
+  - `POST …/changes/revert-all`: 되돌리지 못한 것과 이유를 돌려준다.
+  - `POST /api/machine/versions/{id}/restore {path}`: 지운 파일을 `install`로 복원한다(V3-P75 Deleted files). 화면 연결은 b에서 한다.
+- **이전 판 목록**: 에이전트 판도 Previous versions와 Deleted files에 함께 나온다("before HIMARI changed it", "before HIMARI deleted it"). 되돌리기 때 남는 소유자 판은 "before a revert"다.
+
+### 13.2 설계와 달라진 것
+
+1. **판을 남기지 못한 첫 변경의 `before`는 `unknown`이다.** §7 3단계는 "없음"이라고 적었다. 하지만 "없었음"이면 되돌리기가 파일을 지운다. 그래서 "모름"으로 두고 `no_version`으로 표시한다.
+2. **사본은 항목의 첫 변경 것만 남긴다.** 그 뒤 변경의 사본은 버린다. `before`는 처음 것으로 고정되기 때문이다.
+3. **링크를 지우면 사본이 없다**(`no_version`). 링크 자체는 판으로 남길 수 없다.
+4. **`dropped`를 포트에 더했다.** §8에는 없지만, §7의 "오류로 답함: 그 호출의 의도만 지운다"가 이것이다.
+5. **runner 프로토콜 판 확인**(13.1). 설계에 없던 안전장치다.
+6. **되돌리기의 실제 쓰기는 편집기의 쓰기를 그대로 쓴다.**
+   - 있었음/있음은 `replace`(이유 `revert`), 있었음/없음은 `install`, 없었음/있음은 `delete`.
+   - 그래서 지금 파일이 1 MiB를 넘으면 `replace`가 거부한다(`too_large`).
+
+### 13.3 확인
+
+- runner(`tests/runner/test_hidden_hostfs.py`)
+  - 사본은 rename 전 내용이다.
+  - edit_file의 identity가 다르면 `CHANGED`다. 사본과 rename 사이에 쓰여도 `CHANGED`다.
+  - 새 이름이 그사이 잡히면 `CHANGED`다(`RENAME_NOREPLACE`, `O_EXCL` 둘 다).
+  - `O_EXCL` 쓰기 실패는 `partial`이고, 그 파일은 지우지 않는다.
+  - 1 MiB 넘는 파일은 사본 없이 바꾼다. 링크는 사본 없이 지운다.
+  - `install`은 빈 이름에만 단다. 플래그가 없으면 `unsupported`이고 아무것도 남지 않는다.
+  - 쓰기가 닿을 경로: 링크, 링크 폴더, 만들 폴더, 숨김.
+- Tool(`tests/environment/test_machine.py`)
+  - 링크를 쓰면 대상 경로로 기록한다. 새 폴더, edit, 링크 지우기, 거부는 `dropped`다. 명령은 `commands_ran`이다.
+  - 답을 잃으면 `unknown`이고, 예외는 Dispatcher로 간다. 기록을 시작하지 못하면 쓰지 않는다.
+  - `partial` 문구를 확인한다. 1판 runner에는 `keep`을 보내지 않는다.
+- 기록(`tests/bootstrap/test_changes.py`)
+  - `before`는 처음, `after`는 마지막이다. 사본 없음과 판 보관 실패는 `no_version`이다.
+  - `complete: false`와 경로가 다른 답은 `uncertain`이고, 다시 좋아지지 않는다.
+  - 끼어든 변경은 `interleaved`다. 기록 쓰기가 실패하면 의도는 `pending`으로 남고, 재시작 때 `unknown`이 된다.
+  - 에이전트 판이 소유자 판을 밀어내지 않는다.
+- API(`tests/interfaces/test_web_changes.py`)
+  - §6의 표 전부(바꿈, 만듦, 지움, 만들고 지움, A→B→지움, 지움→다시 만듦).
+  - 그 뒤 소유자의 저장은 409이고, 본 상태로만 되돌린다. 그사이 또 바뀌면 다시 409다.
+  - 지운 파일이 다시 생겼으면 409다. `interleaved`는 바로 되돌리지 않는다.
+  - 거부된 호출은 항목을 그대로 둔다. turn 중에는 409 `busy`다.
+  - 숨김이 된 경로와 다른 곳으로 풀리는 경로는 개수만 보인다. diff, 되돌리기, 받아들이기는 404이고, 모두 받아들이기로만 지운다.
+  - 1 MiB 넘는 파일은 `no_version`이다. 기록을 시작하지 못하면 쓰지 않는다. 지운 파일 복원과 이름이 잡힌 경우를 확인한다.
+- 배포 주의
+  - **himari-runner도 함께 재시작해야 한다.** 재시작 전에는 기록 없이 쓰고, 경고를 남긴다.
+  - DB 판은 그대로다. 되돌려도 `file-changes/`와 `file-versions-agent/`는 남는다. 이전 빌드는 이들을 읽지 않는다.

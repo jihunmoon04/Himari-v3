@@ -100,10 +100,12 @@ class ShownFile:
 
 class Explorer:
     def __init__(self, machine: MachineEnvironment, views: ViewMaker | None,
-                 versions: VersionStore | None = None) -> None:
+                 versions: VersionStore | None = None, agent_versions: VersionStore | None = None) -> None:
         self._machine = machine
         self._views = views
         self.versions = versions  # None: the editor cannot save (no place for previous versions)
+        # V3-P76 §4.2: what files held before the agent changed them; shown among the previous versions.
+        self.agent_versions = agent_versions
         self._copies: OrderedDict[tuple[str, tuple[int, ...]], PreparedView] = OrderedDict()
         self._pool = concurrent.futures.ThreadPoolExecutor(MAX_READS, thread_name_prefix="himari-explorer")
         self._reads = 0
@@ -213,6 +215,9 @@ class Explorer:
         log.info("web %s %s", op if op != runner.WRITE else "save", target)
         return target, result, received
 
+    def _stores(self) -> tuple[VersionStore, ...]:
+        return tuple(store for store in (self.versions, self.agent_versions) if store is not None)
+
     def _keep(self, path: str, received: list[int], reason: str) -> bool:
         if not received or self.versions is None:
             for fd in received:
@@ -225,7 +230,7 @@ class Explorer:
             return False
         return True
 
-    async def save(self, path: object, content: bytes, expected: Sequence[int]) -> Saved:
+    async def save(self, path: object, content: bytes, expected: Sequence[int], reason: str = "save") -> Saved:
         """§7.4: replace the file read with identity ``expected``; its
         previous version kept. CHANGED (nothing written) if it changed since."""
         if self.versions is None:
@@ -244,8 +249,34 @@ class Explorer:
             body.seek(0)
             target, result, received = await self._write(
                 runner.WRITE, path, {"mode": "replace", "expected": [int(v) for v in expected]}, [body.fileno()])
-        kept = await asyncio.to_thread(self._keep, str(result.get("path", target)), received, "save")
+        kept = await asyncio.to_thread(self._keep, str(result.get("path", target)), received, reason)
         return Saved(str(result.get("path", target)), tuple(int(v) for v in result["identity"]), kept)
+
+    async def install(self, path: object, content: bytes) -> str:
+        """V3-P76 §4.1: a file put back where its name is free, in one step:
+        CHANGED if the name is taken, ``unsupported`` where the file system
+        cannot (nothing is written then)."""
+        if len(content) > EDIT_MAX_BYTES:
+            raise ExplorerRefused("too_large", "Too large to put back from here (at most 1 MiB).")
+        try:
+            keeps = await self._machine.keeps()
+        except (runner.RunnerUnavailable, runner.RunnerError):
+            raise ExplorerRefused("unavailable", "The machine runner does not answer; try again later.") from None
+        if not keeps:  # an older runner would write it plainly, over a file made meanwhile
+            raise ExplorerRefused(runner.UNSUPPORTED, "The machine runner is older than HIMARI (restart "
+                                                      "himari-runner); nothing was put back.")
+        with tempfile.TemporaryFile() as body:
+            body.write(content)
+            body.flush()
+            body.seek(0)
+            try:
+                target, result, _ = await self._write(runner.WRITE, path, {"mode": "install"}, [body.fileno()])
+            except ExplorerRefused as refused:
+                if refused.category == runner.UNSUPPORTED:
+                    raise ExplorerRefused(runner.UNSUPPORTED, "This folder's file system cannot put a file back in "
+                                                              "one step; copy its previous version by hand.") from None
+                raise
+        return str(result.get("path", target))
 
     async def create_file(self, path: object) -> tuple[str, tuple[int, ...]]:
         """§7.7: a new, empty file (EXISTS if the name is taken)."""
@@ -273,7 +304,7 @@ class Explorer:
         real = str(result.get("path", target))
         return real, await asyncio.to_thread(self._keep, real, received, "delete")
 
-    async def _visible(self, path: object) -> str:
+    async def visible(self, path: object) -> str:
         """The path as the versions know it, if the runner shows it now: its
         folder resolved, its name not hidden (review B3: a path hidden since
         it was saved shows no versions)."""
@@ -281,8 +312,9 @@ class Explorer:
         return str(result["path"])
 
     async def previous(self, path: object) -> tuple[Version, ...]:
-        real = await self._visible(path)
-        return () if self.versions is None else self.versions.of(real)
+        real = await self.visible(path)
+        found = [version for store in self._stores() for version in store.of(real)]
+        return tuple(sorted(found, key=lambda v: v.saved_at, reverse=True))
 
     async def deleted(self, folder: object) -> tuple[tuple[str, Version], ...]:
         """Files deleted from this folder whose content is kept (PR #95 review B3): the folder as the runner
@@ -290,26 +322,39 @@ class Explorer:
         found = await self.stat(folder)
         if found.get("kind") != "directory":
             raise ExplorerRefused("not_directory", f"{found.get('path', folder)} is not a folder.")
-        if self.versions is None:
-            return ()
-        # The store is read on a thread; each path is checked with the runner one at a time (its reads are
+        # The stores are read on a thread; each path is checked with the runner one at a time (its reads are
         # bounded to a few at once), for at most DELETED_SHOWN of them (PR #95 re-review N1).
-        candidates = await asyncio.to_thread(self.versions.deleted_in, str(found["path"]), DELETED_SHOWN)
+        latest: dict[str, Version] = {}
+        for store in self._stores():
+            for deleted, version in await asyncio.to_thread(store.deleted_in, str(found["path"]), DELETED_SHOWN):
+                if deleted not in latest or latest[deleted].saved_at < version.saved_at:
+                    latest[deleted] = version
+        candidates = sorted(latest.items(), key=lambda item: item[1].saved_at, reverse=True)[:DELETED_SHOWN]
         shown: list[tuple[str, Version]] = []
         for path, version in candidates:
             try:
-                if await self._visible(path) == path:
+                if await self.visible(path) == path:
                     shown.append((path, version))
             except ExplorerRefused:
                 continue  # hidden now
         return tuple(shown)
 
-    async def previous_text(self, path: object, version_id: str) -> str:
-        real = await self._visible(path)
-        data = None if self.versions is None else self.versions.read(real, version_id)
+    async def restore(self, path: object, version_id: str) -> str:
+        """A deleted file put back from one of its versions, in one step
+        (V3-P76 §4.1): CHANGED if the name is taken again; ``unsupported``
+        where the file system cannot (the editor then restores as before)."""
+        real = await self.visible(path)
+        data = next((d for store in self._stores() if (d := store.read(real, version_id)) is not None), None)
         if data is None:
             raise ExplorerRefused("not_found", "No such previous version.")
-        text = _text(data, True)
+        return await self.install(real, data)
+
+    async def previous_text(self, path: object, version_id: str) -> str:
+        real = await self.visible(path)
+        data = next((d for store in self._stores() if (d := store.read(real, version_id)) is not None), None)
+        if data is None:
+            raise ExplorerRefused("not_found", "No such previous version.")
+        text = text_of(data)
         if text is None:
             raise ExplorerRefused("not_regular", "This previous version is not text.")
         return text
@@ -391,6 +436,11 @@ class Explorer:
 
 def _pread(fd: int, size: int) -> bytes:
     return os.pread(fd, size, 0)
+
+
+def text_of(data: bytes) -> str | None:
+    """A whole file's bytes as text, or None (not UTF-8, or binary)."""
+    return _text(data, True)
 
 
 def _text(data: bytes, whole: bool) -> str | None:
