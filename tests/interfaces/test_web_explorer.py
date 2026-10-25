@@ -76,9 +76,12 @@ def test_refusals(server: Server, kit: RunnerKit) -> None:
 def test_files_are_shown_by_kind(server: Server, kit: RunnerKit) -> None:
     shown = server.client.get("/api/machine/file", params={"path": "~/projects/a/main.c"}).json()
     info = (kit.home / "projects/a/main.c").stat()
+    # The identity as decimal strings: an mtime in nanoseconds is past what a JavaScript number keeps exactly.
+    identity = [str(info.st_dev), str(info.st_ino), "13", str(info.st_mtime_ns)]
+    assert info.st_mtime_ns > 2 ** 53
     assert shown == {"path": str(kit.home / "projects/a/main.c"), "size": 13, "kind": "text",
                      "text": "int main(){}\n", "truncated": False, "editable": True,
-                     "identity": [info.st_dev, info.st_ino, 13, info.st_mtime_ns], "modified": int(info.st_mtime)}
+                     "identity": identity, "modified": int(info.st_mtime)}
     big = kit.home / "projects/big.txt"
     big.write_text("가" * 400_000)  # 1.2 MB of three-byte characters
     shown = server.client.get("/api/machine/file", params={"path": str(big)}).json()
@@ -89,7 +92,7 @@ def test_files_are_shown_by_kind(server: Server, kit: RunnerKit) -> None:
     for name in ("blob", "latin"):
         assert server.client.get("/api/machine/file", params={"path": f"~/projects/{name}"}).json()["kind"] == "binary"
     stat = server.client.get("/api/machine/stat", params={"path": "~/projects/a/main.c"}).json()
-    assert stat["identity"] == [info.st_dev, info.st_ino, 13, info.st_mtime_ns] and stat["kind"] == "file"
+    assert stat["identity"] == identity and stat["kind"] == "file"
 
 
 def test_a_download_is_an_attachment_never_rendered(server: Server, kit: RunnerKit) -> None:
@@ -487,3 +490,21 @@ def test_versions_follow_the_hidden_list_as_it_is_now(server: Server, kit: Runne
     refused(server.client.get("/api/machine/versions", params={"path": path}), 404, "not_found")
     refused(server.client.get(f"/api/machine/versions/{items[0]['id']}", params={"path": path}), 404, "not_found")
 
+
+
+def test_a_deleted_file_is_found_in_its_folder(server: Server, kit: RunnerKit, monkeypatch: pytest.MonkeyPatch) -> None:
+    """PR #95 review B3: listed for its folder while its last kept version is its delete; never a hidden one."""
+    folder = kit.home / "projects/a"
+    path = str(folder / "main.c")
+    identity = server.client.get("/api/machine/stat", params={"path": path}).json()["identity"]
+    assert server.post("/api/machine/file/delete", {"path": path, "expected": identity}).status_code == 200
+    items = server.client.get("/api/machine/versions/deleted", params={"path": "~/projects/a"}).json()["items"]
+    assert [(i["path"], i["name"], i["size"]) for i in items] == [(path, "main.c", 13)]
+    text = server.client.get(f"/api/machine/versions/{items[0]['id']}", params={"path": path}).json()["text"]
+    assert text == "int main(){}\n"
+    refused(server.client.get("/api/machine/versions/deleted", params={"path": path}), 404, "not_found")  # gone file
+    from himari.runner.hidden import HiddenRules
+
+    by_rule = HiddenRules.by_rule
+    monkeypatch.setattr(HiddenRules, "by_rule", lambda self, real: real == path or by_rule(self, real))
+    assert server.client.get("/api/machine/versions/deleted", params={"path": str(folder)}).json()["items"] == []

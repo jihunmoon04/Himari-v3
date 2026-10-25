@@ -54,6 +54,7 @@ _CACHE_BYTES = 24 * 1024 * 1024  # image copies kept for the explorer
 READ_SECONDS = 15.0  # reading an opened file; the runner bounds its own reads alike (PR #92 review B1)
 CALL_SECONDS = 20.0  # a runner answer, its own 15 s included
 MAX_READS = 4  # file reads under way here, given-up ones included
+DELETED_SHOWN = 50  # files deleted from a folder listed at once
 
 
 class ExplorerRefused(Exception):
@@ -278,6 +279,26 @@ class Explorer:
     async def previous(self, path: object) -> tuple[Version, ...]:
         real = await self._visible(path)
         return () if self.versions is None else self.versions.of(real)
+
+    async def deleted(self, folder: object) -> tuple[tuple[str, Version], ...]:
+        """Files deleted from this folder whose content is kept (PR #95 review B3): the folder as the runner
+        resolves it, and only paths it shows now."""
+        found = await self.stat(folder)
+        if found.get("kind") != "directory":
+            raise ExplorerRefused("not_directory", f"{found.get('path', folder)} is not a folder.")
+        if self.versions is None:
+            return ()
+        # The store is read on a thread; each path is checked with the runner one at a time (its reads are
+        # bounded to a few at once), for at most DELETED_SHOWN of them (PR #95 re-review N1).
+        candidates = await asyncio.to_thread(self.versions.deleted_in, str(found["path"]), DELETED_SHOWN)
+        shown: list[tuple[str, Version]] = []
+        for path, version in candidates:
+            try:
+                if await self._visible(path) == path:
+                    shown.append((path, version))
+            except ExplorerRefused:
+                continue  # hidden now
+        return tuple(shown)
 
     async def previous_text(self, path: object, version_id: str) -> str:
         real = await self._visible(path)

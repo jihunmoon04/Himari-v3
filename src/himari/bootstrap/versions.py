@@ -84,6 +84,25 @@ class VersionStore:
             index = self._index(self._folder(path))
         return tuple(sorted((_version(v) for v in index["versions"]), key=lambda v: v.saved_at, reverse=True))
 
+    def deleted_in(self, folder: str, limit: int = 100) -> tuple[tuple[str, Version], ...]:
+        """Files of ``folder`` (directly in it) last kept on a delete: each
+        path with that version, the most recently deleted first (PR #95
+        review B3: how a deleted file is found again)."""
+        found: list[tuple[str, Version]] = []
+        with self._lock:
+            if not self.root.is_dir():
+                return ()
+            for entry in (p for p in self.root.iterdir() if p.is_dir()):
+                index = self._index(entry)
+                path = index.get("path")
+                if not isinstance(path, str) or os.path.dirname(path) != folder or not index["versions"]:
+                    continue
+                latest = max((_version(v) for v in index["versions"]), key=lambda v: v.saved_at)
+                if latest.reason == "delete":
+                    found.append((path, latest))
+        found.sort(key=lambda item: item[1].saved_at, reverse=True)
+        return tuple(found[:limit])
+
     def read(self, path: str, version_id: str) -> bytes | None:
         if not all(c.isalnum() or c in "-T" for c in version_id):
             return None
