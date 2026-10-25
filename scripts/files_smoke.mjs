@@ -13,6 +13,7 @@ class FakeNode {
     this.parent = null;
   }
   append(...nodes) { for (const n of nodes) { n.parent = this; this.children.push(n); } }
+  prepend(...nodes) { for (const n of nodes) n.parent = this; this.children.unshift(...nodes); }
   replaceChildren(...nodes) { this.children = []; this.append(...nodes); }
   after(node) { if (this.parent) this.parent.append(node); }
   remove() { if (this.parent) this.parent.children = this.parent.children.filter((c) => c !== this); }
@@ -139,6 +140,169 @@ const within = (promise) => Promise.race([promise, new Promise((r) => setTimeout
     else assert.deepEqual(labels(node(folderRow)), expected);
     assert.deepEqual(labels(node(fileRow)), ["Download", "Copy path"]);
   }
+}
+
+// --- the editor (V3-P75 §7), with a fake CodeMirror and a fake server ---------------------------------
+
+function fakeModule() {
+  const made = [];
+  return {
+    made,
+    createEditor(parent, opts) {
+      const editor = { value: opts.text, opts, text: () => editor.value, destroyed: false,
+        setText(text) { editor.value = text; }, type(text) { editor.value = text; if (opts.onChange) opts.onChange(); },
+        destroy() { editor.destroyed = true; }, setReadOnly() {}, focus() {} };
+      made.push(editor);
+      return editor;
+    },
+    createDiff(parent, sides) { made.push({ diff: sides }); return { destroy() {} }; },
+  };
+}
+
+/* A pane over a fake server: ``routes`` answers "METHOD path-start"; ``sent`` keeps every request. */
+function editorPane(routes, { confirms = [] } = {}) {
+  const sent = [];
+  const module = fakeModule();
+  const asked = [];
+  const api = async (method, path, body) => {
+    sent.push([method, path, body]);
+    if (path === "/api/machine/stat?path=~") return HOME;
+    const key = Object.keys(routes).find((k) => `${method} ${path}`.startsWith(k));
+    assert.ok(key, `no route for ${method} ${path}`);
+    const answer = routes[key];
+    return typeof answer === "function" ? answer(body, path) : answer;
+  };
+  const files = new FilesPane({ api, el, loadEditor: async () => module,
+    confirm: async (title, lines, action) => { asked.push([title, action]); return confirms.length ? confirms.shift() : true; } });
+  return { files, sent, module, asked };
+}
+
+const TEXT = { path: "/home/u/a.txt", size: 3, identity: [1, 2, 3, 4], modified: 0, kind: "text", text: "one",
+               truncated: false, editable: true };
+const refusal = (code) => Object.assign(new Error(code), { code });
+
+// Typing, then saving: the identity read goes with it; the answer's is the next save's.
+{
+  const { files, sent, module } = editorPane({
+    "GET /api/machine/file": TEXT,
+    "PUT /api/machine/file": { path: TEXT.path, identity: [1, 2, 5, 6], previous_kept: true },
+  });
+  await files.openFile(TEXT.path);
+  const editor = module.made[0];
+  assert.equal(editor.text(), "one");
+  assert.equal(files.saveButton.disabled, true);
+  editor.type("two");
+  assert.equal(files.dirty, true);
+  assert.equal(files.saveButton.disabled, false);
+  await files.save();
+  const put = sent.find(([method]) => method === "PUT");
+  assert.deepEqual(put[2], { path: TEXT.path, content: "two", expected: [1, 2, 3, 4] });
+  assert.equal(files.dirty, false);
+  assert.deepEqual(files.doc.identity, [1, 2, 5, 6]);
+  files.closeDoc();
+}
+
+// A save refused because the file changed on the server: the text stays; "save mine over it" saves
+// against the server's identity now (its version kept there).
+{
+  let puts = 0;
+  const { files, sent, module } = editorPane({
+    "GET /api/machine/file": TEXT,
+    "GET /api/machine/stat": { path: TEXT.path, kind: "file", identity: [9, 9, 9, 9], size: 9 },
+    "PUT /api/machine/file": () => { puts += 1; if (puts === 1) throw refusal("changed");
+      return { path: TEXT.path, identity: [7, 7, 7, 7], previous_kept: true }; },
+  });
+  await files.openFile(TEXT.path);
+  module.made[0].type("mine");
+  await files.save();
+  assert.equal(files.doc.bar.hidden, false);
+  assert.equal(module.made[0].text(), "mine");
+  assert.equal(files.dirty, true);
+  const over = files.doc.bar.children.find((c) => c.textContent === "Save mine over it");
+  await over.listeners.click[0]();
+  assert.deepEqual(sent.filter(([m]) => m === "PUT").map(([, , b]) => b.expected), [[1, 2, 3, 4], [9, 9, 9, 9]]);
+  assert.equal(files.dirty, false);
+  assert.equal(files.doc.bar.hidden, true);
+  files.closeDoc();
+}
+
+// Changed on disk while open: unchanged text follows it; text being edited is kept and the user told.
+{
+  let disk = { ...TEXT };
+  const { files, module } = editorPane({
+    "GET /api/machine/file": () => disk,
+    "GET /api/machine/stat": () => ({ path: TEXT.path, kind: "file", identity: disk.identity, size: disk.size }),
+  });
+  await files.openFile(TEXT.path);
+  disk = { ...TEXT, text: "from HIMARI", identity: [1, 2, 11, 12] };
+  await files.checkDisk();
+  assert.equal(module.made[0].text(), "from HIMARI");
+  assert.equal(files.dirty, false);
+  module.made[0].type("mine");
+  disk = { ...TEXT, text: "again", identity: [1, 2, 13, 14] };
+  await files.refresh(); // the turn ended
+  assert.equal(module.made[0].text(), "mine");
+  assert.equal(files.doc.bar.hidden, false);
+  files.closeDoc();
+}
+
+// Unsaved text is not dropped unasked: a "no" keeps the editor; a "yes" goes.
+{
+  const { files, asked, module } = editorPane({
+    "GET /api/machine/file": TEXT,
+    "GET /api/machine/list": listing("/home/u", ["a.txt"]),
+  }, { confirms: [false, true] });
+  await files.openFile(TEXT.path);
+  module.made[0].type("unsaved");
+  await files.openFolder("/home/u");
+  assert.equal(files.file, TEXT.path);
+  assert.equal(module.made[0].destroyed, false);
+  await files.openFolder("/home/u");
+  assert.equal(files.folder, "/home/u");
+  assert.equal(files.doc, null);
+  assert.equal(module.made[0].destroyed, true);
+  assert.deepEqual(asked.map(([, action]) => action), ["Discard", "Discard"]);
+}
+
+// Over 1 MiB, or not whole: shown read-only, no editor.
+{
+  const { files, module } = editorPane({ "GET /api/machine/file": { ...TEXT, size: 2_000_000, editable: false, truncated: true } });
+  await files.openFile(TEXT.path);
+  assert.equal(module.made.length, 0);
+  assert.equal(files.doc, null);
+}
+
+// Delete: one question, or two for a file no previous version is kept of; sent with the identity seen.
+for (const [size, questions] of [[3, 1], [2_000_000, 2]]) {
+  const { files, sent, asked } = editorPane({
+    "GET /api/machine/file": TEXT,
+    "GET /api/machine/stat": { path: TEXT.path, kind: "file", identity: [5, 5, size, 5], size },
+    "POST /api/machine/file/delete": { path: TEXT.path, previous_kept: size < 1024 * 1024 },
+    "GET /api/machine/list": listing("/home/u", []),
+  });
+  await files.openFile(TEXT.path);
+  await files.deleteFile();
+  assert.equal(asked.length, questions);
+  assert.deepEqual(sent.find(([, p]) => p === "/api/machine/file/delete")[2], { path: TEXT.path, expected: [5, 5, size, 5] });
+  assert.equal(files.folder, "/home/u");
+}
+
+// A new file is made empty on the server and opened in the editor.
+{
+  const { files, sent, module } = editorPane({
+    "GET /api/machine/list": listing("/home/u", []),
+    "POST /api/machine/file": { path: "/home/u/new.md", identity: [3, 3, 0, 3] },
+    "GET /api/machine/file": { ...TEXT, path: "/home/u/new.md", text: "", size: 0, identity: [3, 3, 0, 3] },
+  });
+  await files.openFolder("/home/u");
+  files.askName("/home/u", "file");
+  const form = files.body.children[0];
+  form.children[0].value = "new.md";
+  await form.listeners.submit[0]({ preventDefault() {} });
+  assert.deepEqual(sent.find(([m, p]) => m === "POST" && p === "/api/machine/file")[2], { path: "/home/u/new.md" });
+  assert.equal(files.file, "/home/u/new.md");
+  assert.equal(module.made.length, 1);
+  files.closeDoc();
 }
 
 console.log("files smoke: ok");

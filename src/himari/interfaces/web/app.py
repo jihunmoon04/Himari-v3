@@ -53,7 +53,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterat
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from importlib import resources
-from typing import Any, BinaryIO, Literal
+from typing import Annotated, Any, BinaryIO, Literal
 
 from fastapi import Depends, FastAPI, Path, Request, Response
 from fastapi.exceptions import RequestValidationError
@@ -151,6 +151,7 @@ FAILED_LOGIN_DELAY_SECONDS = 1.0
 STATIC_FILES = {"app.css": "text/css", "app.js": "text/javascript", "app_view.js": "text/javascript",
                 "rich_text.js": "text/javascript", "appearance.js": "text/javascript", "live.js": "text/javascript",
                 "files.js": "text/javascript",  # the file explorer's parts (V3-P75 §3)
+                "codemirror/codemirror.js": "text/javascript",  # the web editor (V3-P75 §7.6), loaded on first use
                 # KaTeX for the formulas in assistant text, loaded by rich_text.js on the first one.
                 "katex/katex.min.js": "text/javascript", "katex/katex.min.css": "text/css"}
 KATEX_FONTS = ("AMS-Regular", "Caligraphic-Bold", "Caligraphic-Regular", "Fraktur-Bold", "Fraktur-Regular",
@@ -246,12 +247,21 @@ class ToolSourceBody(_Body):
     enabled: bool | None  # null: follow the source's default
 
 
+# A file's identity as the browser holds it: [dev, ino, size, mtime_ns] as decimal strings, since an mtime in
+# nanoseconds is past what a JavaScript number keeps exactly (V3-P75 §7.2).
+IdentityIn = Annotated[list[Annotated[str, Field(pattern=r"^[0-9]{1,20}$")] | int], Field(min_length=4, max_length=4)]
+
+
+def identity_out(identity: Iterable[object]) -> list[str]:
+    return [str(v) for v in identity]
+
+
 class SaveFileBody(_Body):
     """A file saved from the web editor (V3-P75 §7.7): its whole text, and its identity as it was read."""
 
     path: str = Field(min_length=1, max_length=4096)
     content: str  # at most 1 MiB as UTF-8 (the explorer checks)
-    expected: list[int] = Field(min_length=4, max_length=4)
+    expected: IdentityIn
 
 
 class NewPathBody(_Body):
@@ -262,7 +272,7 @@ class NewPathBody(_Body):
 
 class DeleteFileBody(_Body):
     path: str = Field(min_length=1, max_length=4096)
-    expected: list[int] = Field(min_length=4, max_length=4)
+    expected: IdentityIn
 
 
 class FolderConversationBody(_Body):
@@ -616,7 +626,7 @@ def folder_conversations_view(folder: FolderConversations) -> dict[str, Any]:
 
 def shown_file_view(shown: ShownFile) -> dict[str, Any]:
     """V3-P75 §5.2: text as text; an image or other file by its kind only."""
-    return {"path": shown.path, "size": shown.size, "identity": list(shown.identity), "modified": shown.modified,
+    return {"path": shown.path, "size": shown.size, "identity": identity_out(shown.identity), "modified": shown.modified,
             "kind": shown.kind, "text": shown.text, "truncated": shown.truncated, "editable": shown.editable}
 
 
@@ -1038,13 +1048,13 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
     @app.put("/api/machine/file")
     async def save_file(body: SaveFileBody, request: Request, who: PrincipalId = Depends(principal)) -> dict[str, Any]:
         saved = await himari(request).explorer(who).save(body.path, body.content.encode("utf-8", "surrogatepass"),
-                                                          body.expected)
-        return {"path": saved.path, "identity": list(saved.identity), "previous_kept": saved.previous_kept}
+                                                          [int(v) for v in body.expected])
+        return {"path": saved.path, "identity": identity_out(saved.identity), "previous_kept": saved.previous_kept}
 
     @app.post("/api/machine/file", status_code=201)
     async def create_file(body: NewPathBody, request: Request, who: PrincipalId = Depends(principal)) -> dict[str, Any]:
         path, identity = await himari(request).explorer(who).create_file(body.path)
-        return {"path": path, "identity": list(identity)}
+        return {"path": path, "identity": identity_out(identity)}
 
     @app.post("/api/machine/folder", status_code=201)
     async def make_folder(body: NewPathBody, request: Request, who: PrincipalId = Depends(principal)) -> dict[str, Any]:
@@ -1053,7 +1063,7 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
     @app.post("/api/machine/file/delete")
     async def delete_machine_file(body: DeleteFileBody, request: Request,
                                   who: PrincipalId = Depends(principal)) -> dict[str, Any]:
-        path, kept = await himari(request).explorer(who).delete(body.path, body.expected)
+        path, kept = await himari(request).explorer(who).delete(body.path, [int(v) for v in body.expected])
         return {"path": path, "previous_kept": kept}
 
     @app.get("/api/machine/versions")
@@ -1070,7 +1080,8 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
 
     @app.get("/api/machine/stat")
     async def stat_path(request: Request, path: str, who: PrincipalId = Depends(principal)) -> dict[str, Any]:
-        return await himari(request).explorer(who).stat(path)
+        found = await himari(request).explorer(who).stat(path)
+        return {**found, "identity": identity_out(found["identity"])}
 
     @app.get("/api/machine/file")
     async def show_file(request: Request, path: str, who: PrincipalId = Depends(principal)) -> dict[str, Any]:

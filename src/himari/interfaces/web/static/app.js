@@ -151,14 +151,16 @@ const views = new AppViews(api, el, () => app.conversationId);
 
 /* The server's files (V3-P75 §3): one pane on the Files surface, one beside a conversation.
  * On the surface a folder opens its conversation (§6); beside one, it is attached to it. */
+const askFiles = (title, lines, action) => confirmAction(title, lines, action);
 const filesSurface = new FilesPane({
-  api, el,
+  api, el, confirm: askFiles,
   folderActions: (listing) => [openHereControl(listing.path)],
   folderRowActions: (path) => [["Open conversation", () => openFolderConversation(path, false)],
                                ["New conversation here", () => openFolderConversation(path, true)]],
 });
 const filesPanel = new FilesPane({
-  api, el,
+  api, el, confirm: askFiles,
+  working: () => app.running, // HIMARI at work in this conversation (§7.3)
   actions: [$("file-panel-expand"), $("file-panel-close")],
   folderActions: (listing) => (attachable(listing.path) ? [attachHereButton(listing.path)] : []),
   folderRowActions: (path) => (attachable(path) ? [["Attach to this conversation", () => attachHere(path)]] : []),
@@ -1980,6 +1982,13 @@ async function discardInstructions() {
    holds until the surface changes, so a navigation that goes on to open a
    conversation does not ask twice, and one that fails keeps the text (N2). */
 async function mayLeave() {
+  // The panel's file goes with its conversation; unsaved text there is dropped only if the user says so
+  // (V3-P75 §7). The Files surface keeps its own file across surfaces: nothing to ask for it here.
+  if (filesPanel.dirty) {
+    if (!(await filesPanel.mayLeave())) return false;
+    filesPanel.closeDoc();
+    filesPanel.file = null;
+  }
   const instructions = !$("surface-instructions").hidden;
   if (instructions && app.instructionsSave) await app.instructionsSave; // a save under way ends first (N1)
   // An open memory form with changes asks the same way (PR #77 review C2).
@@ -2793,7 +2802,7 @@ async function boot() {
   $("instructions-load").addEventListener("click", () => loadInstructions().catch((e) => status(e.message, "error")));
   window.addEventListener("beforeunload", (event) => {
     const unsaved = app.instructionsDraft !== null || (!$("surface-instructions").hidden && instructionsDirty())
-      || memoryDirty();
+      || memoryDirty() || filesSurface.dirty || filesPanel.dirty;
     if (!unsaved) return;
     event.preventDefault(); // unsaved: the browser asks
     event.returnValue = ""; // older Chrome and some webviews ask only with this

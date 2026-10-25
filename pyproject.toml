@@ -22,7 +22,7 @@ dev = ["pytest>=8", "mypy>=1.10", "types-jsonschema", "fastapi>=0.143", "starlet
 where = ["src"]
 
 [tool.setuptools.package-data]
-"himari.interfaces.web" = ["static/*", "static/katex/*", "static/katex/fonts/*"]
+"himari.interfaces.web" = ["static/*", "static/katex/*", "static/katex/fonts/*", "static/codemirror/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
