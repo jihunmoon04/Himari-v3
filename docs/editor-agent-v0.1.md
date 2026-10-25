@@ -454,3 +454,53 @@
 - 배포 주의
   - **himari-runner도 함께 재시작해야 한다.** 재시작 전에는 기록 없이 쓰고, 경고를 남긴다.
   - DB 판은 그대로다. 되돌려도 `file-changes/`와 `file-versions-agent/`는 남는다. 이전 빌드는 이들을 읽지 않는다.
+
+## 14. 구현 노트 (2026-10-25, 2단계 b: 화면)
+
+### 14.1 만든 것
+
+- **배지**
+  - 대화 옆 파일 패널의 머리에 **Changes n**이 붙는다. n은 목록과 숨김 항목을 더한 수이고, 0이면 숨는다.
+  - 되돌릴 수 없는 항목이 있으면 경고색이다.
+  - 패널이 닫혀 있으면 위쪽 폴더 버튼에 점이 붙는다.
+  - 대화를 열 때와 turn이 끝날 때 다시 읽는다. turn이 끝나면 목록을 먼저 읽고, 그다음 패널을 새로 그린다.
+- **목록**(Files › Changes)
+  - 행마다 파일, "changed/made/deleted by HIMARI", 횟수, "also changed by something else", 되돌릴 수 없는 이유를 보이고, Revert와 Accept가 있다.
+  - 머리에는 Accept all과 Revert all이 있다.
+  - 명령 알림(§9), 숨김 개수(§10), "HIMARI is working"을 보인다. turn 중에는 버튼이 꺼진다.
+- **diff**(Files › Changes › 이름)
+  - 처음(왼쪽)과 지금(오른쪽)을 V3-P75의 `createDiff`로 패널 안에 그린다.
+  - 없는 쪽은 글로 알린다: "there was no such file (HIMARI made it)", "there is no such file", 글이 아니거나 1 MiB 초과.
+  - 바뀐 경우(`changed`, `interleaved`)에는 경고 줄과 **Revert anyway**가 나오고, 확인 창을 거친다. 이때 보낸 `seen`은 그 diff가 받은 `now`다.
+- **되돌리기 흐름**
+  - 목록의 Revert가 409 `changed`면 그 파일의 diff를 연다. 그사이 또 바뀌었으면 Revert anyway도 다시 diff로 간다.
+  - Revert all은 확인 창을 거치고, 남은 것을 이름과 이유로 알린다.
+- **점**
+  - 바뀐 파일의 행, 그 위 폴더의 행, 열린 파일의 경로 이름 옆에 점이 붙는다. 열린 파일의 점은 그 변경의 diff로 가는 버튼이다.
+- **이전 판 이름표**: "before HIMARI changed it", "before HIMARI deleted it", "before a revert".
+- **Deleted files 복원**: 먼저 `install`로 한 번에 복원한다. `unsupported`일 때만 V3-P75의 두 단계 방식으로 한다. 이름이 잡혀 있으면 "exists again"이다.
+- **머리의 줄바꿈**
+  - 패널의 머리가 좁으면 도구와 패널 버튼이 한 묶음으로 경로 아래로 내려간다(`files-head-end`).
+  - 전에는 경로가 한 글자씩 세로로 꺾였다(V3-P75에도 있던 문제다).
+
+### 14.2 설계와 달라진 것
+
+- diff는 대화 상자가 아니라 패널 안의 쪽으로 연다. 목록과 diff 사이를 경로(Files › Changes › 이름)로 오간다.
+- 단일 Revert는 확인 창 없이 바로 한다. 되돌린 내용은 소유자 판으로 남는다. Revert all과 Revert anyway는 확인 창을 거친다.
+- diff 응답에 `state`와 `revertible`을 더했다. 열린 파일의 점에서 diff로 바로 갈 때 쓴다.
+
+### 14.3 확인
+
+- `scripts/files_smoke.mjs`
+  - 목록(되돌릴 수 없는 항목의 표시, 명령과 숨김 알림, 하나 받아들이기). turn 중에는 모두 꺼진다.
+  - 충돌이면 diff로 가고, Revert anyway는 본 상태로 보낸다. 만들고 지운 파일의 글 안내.
+  - Revert all은 "아니오"면 아무것도 하지 않고, 남은 것을 알린다.
+  - 점(파일, 폴더, 열린 파일 → diff). 검토가 없는 곳(Files 화면)에는 점이 없다.
+  - 한 번에 복원하고, 이름이 잡혔으면 알린다. 기존 두 단계 시험은 `unsupported`일 때로 고쳤다.
+- 브라우저(headless Chromium, 실제 앱과 runner, 1400px과 390px)
+  1. Ask로 대화를 열고 보낸다. 에이전트가 README 수정, 새 파일, 지우기, 명령을 하면 배지가 "Changes 3"이 된다.
+  2. 목록, README diff, Revert를 거치면 README가 원래대로 돌아온다.
+  3. 소유자가 new.c를 고친 뒤 Revert하면 409와 diff의 경고 줄이 나온다. Revert anyway와 확인 창을 거치면 지워진다.
+  4. 받아들이면 배지가 사라진다. Deleted files에서 notes.txt를 복원하면 201이고 내용이 같다.
+  5. 폴더 행과 열린 파일에 점이 붙는다. 좁은 화면에서 목록과 diff의 머리가 줄바꿈된다.
+- `ui_smoke` 전부 통과, `ui_state_smoke` 14개 통과, pytest 2586 통과, mypy 통과.

@@ -166,7 +166,7 @@ function fakeModule() {
 }
 
 /* A pane over a fake server: ``routes`` answers "METHOD path-start"; ``sent`` keeps every request. */
-function editorPane(routes, { confirms = [], onAsk = null } = {}) {
+function editorPane(routes, { confirms = [], onAsk = null, changes = null } = {}) {
   const sent = [];
   const module = fakeModule();
   const asked = [];
@@ -178,7 +178,7 @@ function editorPane(routes, { confirms = [], onAsk = null } = {}) {
     const answer = routes[key];
     return typeof answer === "function" ? answer(body, path) : answer;
   };
-  const files = new FilesPane({ api, el, loadEditor: async () => module, onAsk,
+  const files = new FilesPane({ api, el, loadEditor: async () => module, onAsk, changes,
     confirm: async (title, lines, action) => { asked.push([title, action]); return confirms.length ? confirms.shift() : true; } });
   return { files, sent, module, asked };
 }
@@ -347,9 +347,11 @@ for (const [size, questions] of [[3, 1], [2_000_000, 2]]) {
   assert.ok(files.body.text().includes("could not be kept"));
 }
 
-// PR #95 review B3: a file deleted from a folder is found there, and put back as a new file with its content.
+// PR #95 review B3: a file deleted from a folder is found there, and put back as a new file with its content
+// (V3-P76: where the file system cannot put it back in one step).
 {
   const { files, sent, module } = editorPane({
+    "POST /api/machine/versions/v1/restore": () => { throw refusal("unsupported"); },
     "GET /api/machine/list": listing("/home/u", []),
     "GET /api/machine/versions/deleted": { items: [{ path: "/home/u/gone.txt", name: "gone.txt", id: "v1",
       saved_at: "2026-10-25T00:00:00+00:00", size: 4 }] },
@@ -376,6 +378,7 @@ for (const [size, questions] of [[3, 1], [2_000_000, 2]]) {
 {
   const slow = deferred();
   const { files, sent, module } = editorPane({
+    "POST /api/machine/versions/v1/restore": () => { throw refusal("unsupported"); },
     "GET /api/machine/versions/v1": () => slow.promise,
     "POST /api/machine/file": { path: "/home/u/gone.txt", identity: ["8", "8", "0", "8"] },
     "PUT /api/machine/file": { path: "/home/u/gone.txt", identity: ["8", "8", "4", "9"], previous_kept: true },
@@ -401,6 +404,7 @@ for (const [size, questions] of [[3, 1], [2_000_000, 2]]) {
   let puts = 0;
   let onDisk = ["8", "8", "0", "8"];
   const { files, sent } = editorPane({
+    "POST /api/machine/versions/v1/restore": () => { throw refusal("unsupported"); },
     "GET /api/machine/versions/v1": { text: "kept" },
     "POST /api/machine/file": { path: "/home/u/gone.txt", identity: ["8", "8", "0", "8"] },
     "GET /api/machine/stat": () => ({ path: "/home/u/gone.txt", kind: "file", identity: onDisk, size: 0 }),
@@ -414,6 +418,7 @@ for (const [size, questions] of [[3, 1], [2_000_000, 2]]) {
   assert.deepEqual(item.made.identity, ["8", "8", "0", "8"]);
   assert.equal(await files.restoreDeleted(item), null);
   assert.equal(sent.filter(([m, p]) => m === "POST" && p === "/api/machine/file").length, 1); // not made twice
+  assert.equal(sent.filter(([m, p]) => p.endsWith("/restore")).length, 1); // the second try fills its own file
   assert.deepEqual(sent.filter(([m]) => m === "PUT").map(([, , b]) => b.expected), [["8", "8", "0", "8"], ["8", "8", "0", "8"]]);
   assert.equal(item.made, null);
   files.closeDoc();
@@ -428,6 +433,25 @@ for (const [size, questions] of [[3, 1], [2_000_000, 2]]) {
   const answer = await routes.files.restoreDeleted(other);
   assert.ok(answer.includes("exists again"));
   assert.equal(routes.sent.filter(([m]) => m === "PUT").length, 0);
+}
+
+// V3-P76 §4.1: a deleted file put back in one step, never over a name taken since.
+{
+  const { files, sent, module } = editorPane({
+    "POST /api/machine/versions/v1/restore": { path: "/home/u/gone.txt" },
+    "GET /api/machine/file": { ...TEXT, path: "/home/u/gone.txt", text: "kept" },
+  });
+  assert.equal(await files.restoreDeleted({ path: "/home/u/gone.txt", name: "gone.txt", id: "v1" }), null);
+  assert.deepEqual(sent.map(([m, p]) => `${m} ${p.split("?")[0]}`),
+                   ["POST /api/machine/versions/v1/restore", "GET /api/machine/stat", "GET /api/machine/file"]);
+  assert.deepEqual(sent[0][2], { path: "/home/u/gone.txt" });
+  assert.equal(files.file, "/home/u/gone.txt");
+  assert.equal(module.made[0].text(), "kept");
+  files.closeDoc();
+  const taken = editorPane({ "POST /api/machine/versions/v1/restore": () => { throw refusal("changed"); } });
+  const answer = await taken.files.restoreDeleted({ path: "/home/u/gone.txt", name: "gone.txt", id: "v1" });
+  assert.ok(answer.includes("exists again"));
+  assert.equal(taken.sent.length, 1);
 }
 
 // PR #95 re-review C1: a new file made after the user moved on is not opened over their editing.
@@ -505,6 +529,130 @@ for (const [size, questions] of [[3, 1], [2_000_000, 2]]) {
   assert.equal(sent.filter(([m, path]) => m === "GET" && path.startsWith("/api/machine/file")).length, 1);
   assert.deepEqual(module.made[0].picked, [0, 3]);
   files.closeDoc();
+}
+
+// --- HIMARI's changes (V3-P76 §5, §6) -----------------------------------------------------------------
+
+/* A fake conversation's review: ``list`` and ``diffs`` as the server would answer; every call kept. */
+function changesSource(list, diffs = {}, { revert = () => ({ reverted: true }), revertAll = () => ({ left: [] }) } = {}) {
+  const calls = [];
+  const told = []; // each list read, as the pane tells its place
+  return {
+    calls, told,
+    list: async () => { calls.push(["list"]); return list; },
+    diff: async (path) => { calls.push(["diff", path]); return diffs[path]; },
+    accept: async (paths) => { calls.push(["accept", paths]); return { accepted: true }; },
+    revert: async (path, seenState) => { calls.push(["revert", path, seenState]); return revert(path, seenState); },
+    revertAll: async () => { calls.push(["revertAll"]); return revertAll(); },
+    seen: (given) => told.push(given),
+  };
+}
+
+const CHANGED = { path: "/home/u/a.txt", name: "a.txt", kind: "changed", state: "ok", interleaved: false, count: 2,
+                  revertible: true, changed_at: "2026-10-25T00:00:00+00:00" };
+const STUCK = { ...CHANGED, path: "/home/u/big.bin", name: "big.bin", state: "no_version", count: 1, revertible: false };
+const LIST = { items: [STUCK, CHANGED], hidden: 1, commands_ran: "2026-10-25T00:00:00+00:00", running: false };
+const DIFF = { path: "/home/u/a.txt", name: "a.txt", kind: "changed", state: "ok", revertible: true, changed: false,
+               interleaved: false, before: { state: "present", text: "A" },
+               now: { exists: true, identity: ["1", "2", "3", "4"], text: "B" } };
+
+// The list: what each change is, the ones that cannot be reverted marked, commands and hidden ones told.
+{
+  const source = changesSource(LIST);
+  const { files } = editorPane({}, { changes: source });
+  await files.openChanges();
+  assert.equal(files.page, "changes");
+  assert.deepEqual(source.told, [LIST]);
+  const rows = files.body.children.find((c) => c.className.includes("files-changes")).children;
+  assert.deepEqual(rows.map((r) => r.className), ["files-row files-change is-warn", "files-row files-change"]);
+  assert.ok(rows[0].text().includes("its previous version could not be kept"));
+  assert.ok(rows[1].text().includes("changed by HIMARI · 2 times"));
+  const button = (row, label) => row.children.find((c) => c.textContent === label);
+  assert.equal(button(rows[0], "Revert").disabled, true);
+  assert.equal(button(rows[1], "Revert").disabled, false);
+  const text = files.body.text();
+  assert.ok(text.includes("also ran commands") && text.includes("1 change is in files hidden now"));
+  assert.deepEqual(files.tools.children.map((c) => [c.textContent, c.disabled]), [["Accept all", false], ["Revert all", false]]);
+  // Accepting one: then the list again, told so.
+  await button(rows[1], "Accept").listeners.click[0]();
+  assert.deepEqual(source.calls.find(([k]) => k === "accept"), ["accept", ["/home/u/a.txt"]]);
+  assert.ok(files.body.text().includes("a.txt: accepted."));
+}
+
+// While HIMARI works: nothing can be accepted or reverted.
+{
+  const { files } = editorPane({}, { changes: changesSource({ ...LIST, running: true }) });
+  await files.openChanges();
+  assert.ok(files.tools.children.every((c) => c.disabled));
+  const rows = files.body.children.find((c) => c.className.includes("files-changes")).children;
+  assert.ok(rows.every((row) => row.children.filter((c) => c.tagName === "button" && c.className === "link-button").every((c) => c.disabled)));
+  assert.ok(files.body.text().includes("HIMARI is working"));
+}
+
+// A change: before (left) and now (right); a revert refused as changed since shows it, to revert anyway as seen.
+{
+  const changedSince = { ...DIFF, changed: true, now: { exists: true, identity: ["9", "9", "9", "9"], text: "owner's" } };
+  let reverts = 0;
+  const source = changesSource(LIST, { "/home/u/a.txt": changedSince }, {
+    revert: (path, seenState) => { reverts += 1; if (!seenState) throw refusal("changed"); return { reverted: true }; } });
+  const { files, module, asked } = editorPane({}, { changes: source });
+  await files.revertOne("/home/u/a.txt", "a.txt");
+  assert.deepEqual(files.page, { path: "/home/u/a.txt" });
+  assert.deepEqual(module.made.at(-1).diff, { left: "A", right: "owner's", name: "a.txt" });
+  const revert = files.tools.children.find((c) => c.textContent === "Revert");
+  assert.equal(revert.disabled, true); // only "anyway", in the bar
+  const bar = files.body.children.find((c) => c.className === "files-bar");
+  assert.ok(bar.text().includes("changed by something other than this conversation's HIMARI"));
+  await bar.children.find((c) => c.textContent === "Revert anyway").listeners.click[0]();
+  assert.deepEqual(asked.at(-1), ["Revert a.txt anyway?", "Revert anyway"]);
+  assert.deepEqual(source.calls.filter(([k]) => k === "revert").map(([, , s]) => s),
+                   [null, { exists: true, identity: ["9", "9", "9", "9"], text: "owner's" }]);
+  assert.equal(files.page, "changes");
+  assert.ok(files.body.text().includes("a.txt is back as it was"));
+  // Made by HIMARI and deleted since: told in words, the diff against nothing.
+  const made = changesSource(LIST, { "/home/u/n.txt": { ...DIFF, path: "/home/u/n.txt", name: "n.txt", kind: "created",
+    before: { state: "absent", text: null }, now: { exists: false, identity: null, text: null }, changed: true } });
+  const shown = editorPane({}, { changes: made });
+  await shown.files.openChange("/home/u/n.txt");
+  const words = shown.files.body.text();
+  assert.ok(words.includes("there was no such file (HIMARI made it)") && words.includes("Now: there is no such file"));
+  assert.ok(!shown.files.tools.children.some((c) => c.textContent === "Open"));
+}
+
+// Revert all: asked first; the ones left are named.
+{
+  const source = changesSource(LIST, {}, { revertAll: () => ({ left: [{ path: "/home/u/a.txt", code: "changed", message: "" }] }) });
+  const { files, asked } = editorPane({}, { changes: source, confirms: [false, true] });
+  await files.openChanges();
+  await files.tools.children.find((c) => c.textContent === "Revert all").listeners.click[0]();
+  assert.equal(source.calls.filter(([k]) => k === "revertAll").length, 0); // "no": nothing done
+  await files.tools.children.find((c) => c.textContent === "Revert all").listeners.click[0]();
+  assert.deepEqual(asked.map(([title]) => title), ["Revert 1 file?", "Revert 1 file?"]);
+  assert.ok(files.body.text().includes("Reverted all but a.txt (changed since)"));
+}
+
+// The dots: on a changed file's row and its folders' rows; the open file links to its change.
+{
+  const { files } = editorPane({ "GET /api/machine/file": TEXT, "GET /api/machine/stat": HOME },
+                               { changes: changesSource(LIST, { "/home/u/a.txt": DIFF }) });
+  files.markChanged({ items: [CHANGED] });
+  const dotted = (row) => row.children[0].children[1].children.some((c) => c.className === "files-changed-dot");
+  assert.ok(dotted(files.row("/home/u", { name: "a.txt", kind: "file", size: 1, modified: 0 })));
+  assert.ok(dotted(files.row("/home", { name: "u", kind: "directory", size: null, modified: 0 })));
+  assert.ok(!dotted(files.row("/home/u", { name: "b.txt", kind: "file", size: 1, modified: 0 })));
+  await files.openFile(TEXT.path);
+  const link = files.crumbs.children.at(-1).children.find((c) => c.className.includes("files-changed-link"));
+  await link.listeners.click[0]();
+  assert.deepEqual(files.page, { path: "/home/u/a.txt" });
+  assert.equal(files.doc, null); // the editor closed for the change's diff
+  files.markChanged(null);
+  assert.ok(!dotted(files.row("/home/u", { name: "a.txt", kind: "file", size: 1, modified: 0 })));
+  // Without a review here (the Files surface): no link.
+  const plain = editorPane({ "GET /api/machine/file": TEXT });
+  plain.files.markChanged({ items: [CHANGED] });
+  await plain.files.openFile(TEXT.path);
+  assert.ok(!plain.files.crumbs.children.at(-1).children.length);
+  plain.files.closeDoc();
 }
 
 console.log("files smoke: ok");

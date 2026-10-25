@@ -688,7 +688,8 @@ def file_state_out(identity: tuple[int, ...] | None) -> dict[str, Any]:
 
 
 def change_diff_view(diff: ChangeDiff) -> dict[str, Any]:
-    return {"path": diff.path, "name": posixpath.basename(diff.path), "kind": diff.kind, "changed": diff.changed,
+    return {"path": diff.path, "name": posixpath.basename(diff.path), "kind": diff.kind, "state": diff.state,
+            "revertible": diff.state == "ok", "changed": diff.changed,
             "interleaved": diff.interleaved, "before": {"state": diff.before.state, "text": diff.before.text},
             "now": {**file_state_out(diff.now.identity), "text": diff.now.text}}
 

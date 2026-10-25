@@ -96,6 +96,7 @@ def test_each_change_is_listed_and_reverted_by_its_first_and_last_state(server: 
     diff = server.client.get(f"/api/conversations/{cid}/changes/diff", params={"path": str(here / "a.txt")}).json()
     assert diff["before"] == {"state": "present", "text": "A\n"} and diff["now"]["text"] == "C\n"
     assert diff["now"]["exists"] and not diff["changed"] and not diff["interleaved"]
+    assert (diff["kind"], diff["state"], diff["revertible"]) == ("changed", "ok", True)
     made = server.client.get(f"/api/conversations/{cid}/changes/diff", params={"path": str(here / "new.txt")}).json()
     assert made["before"] == {"state": "absent", "text": None} and made["now"]["text"] == "N\n"
     deleted = server.client.get(f"/api/conversations/{cid}/changes/diff",

@@ -170,7 +170,16 @@ const filesPanel = new FilesPane({
     if (panelCoversScreen() && app.filesOpen) toggleFilesPanel();
     addReference(reference);
   },
-  actions: [$("file-panel-expand"), $("file-panel-close")],
+  actions: [$("file-panel-changes"), $("file-panel-expand"), $("file-panel-close")],
+  changes: { // V3-P76 §5: this conversation's, each answer marked with the conversation it is of
+    list: async () => ({ ...(await api("GET", conversationChanges())), id: app.conversationId }),
+    diff: (path) => api("GET", conversationChanges(`/diff?path=${encodeURIComponent(path)}`)),
+    accept: (paths) => api("POST", conversationChanges("/accept"), paths ? { paths } : { all: true }),
+    revert: (path, seen) => api("POST", conversationChanges("/revert"),
+                                seen ? { path, seen: { exists: seen.exists, identity: seen.identity } } : { path }),
+    revertAll: () => api("POST", conversationChanges("/revert-all"), {}),
+    seen: (list) => showChanges(list),
+  },
   folderActions: (listing) => (attachable(listing.path) ? [attachHereButton(listing.path)] : []),
   folderRowActions: (path) => (attachable(path) ? [["Attach to this conversation", () => attachHere(path)]] : []),
 });
@@ -1557,7 +1566,10 @@ function applyDetail(detail) {
   $("composer-cancel").hidden = !detail.job.running;
   $("composer-cancel").disabled = stopping === "cancel";
   if (app.running !== detail.job.running) {
-    if (app.running && !detail.job.running && app.filesOpen && !$("file-panel").hidden) filesPanel.refresh();
+    if (app.running && !detail.job.running) { // the turn's changes: listed, then shown in the panel
+      const panelShown = app.filesOpen && !$("file-panel").hidden;
+      loadChanges(app.generation).then(() => { if (panelShown) filesPanel.refresh(); });
+    }
     app.running = detail.job.running;
     app.changedWhileRunning = false; // a new turn, or the end of the one it was changed in
     renderModel(); // "applies from the next message" only while that turn runs
@@ -1640,6 +1652,8 @@ async function openConversation(id) {
   app.workingFolder = null;
   filesPanel.folder = null;
   filesPanel.file = null; // the next opening starts at this conversation's working folder
+  filesPanel.closeDoc();
+  showChanges(null);
   loadToolSources(generation);
   loadModel(generation);
   loadFolders(generation);
@@ -2410,6 +2424,7 @@ function renderFolders(items) {
   app.conversationFolderPaths = items.map((item) => item.path).filter(Boolean);
   syncFilesPanel(!$("surface-chat").hidden);
   if (app.filesOpen && app.workingFolder && app.workingFolder !== before) openPanelStart();
+  if (app.workingFolder !== null && before === null) loadChanges(app.generation);
   const list = $("chat-menu-folders-list");
   list.replaceChildren();
   $("chat-menu-folders").hidden = items.length === 0;
@@ -2708,6 +2723,40 @@ function attachHereButton(path) {
   return button;
 }
 
+/* -------------------------------------------- HIMARI's changes (V3-P76 §5) */
+
+function conversationChanges(tail = "") {
+  return `/api/conversations/${encodeURIComponent(app.conversationId)}/changes${tail}`;
+}
+
+/* The count in the panel's head (and a dot on its toggle while it is closed), and the rows' dots. */
+function showChanges(list) {
+  if (list !== null && list.id !== app.conversationId) return;
+  const count = list === null ? 0 : list.items.length + list.hidden;
+  const button = $("file-panel-changes");
+  button.hidden = count === 0;
+  button.textContent = `Changes ${count}`;
+  const stuck = list !== null && list.items.some((item) => !item.revertible);
+  button.classList.toggle("is-warn", stuck);
+  button.title = stuck ? "Files HIMARI changed, to review: some cannot be reverted" : "Files HIMARI changed, to review";
+  $("chat-files-toggle").classList.toggle("has-changes", count > 0);
+  filesPanel.markChanged(list);
+}
+
+/* Read again at a conversation's opening and at the end of each turn (display only). */
+async function loadChanges(generation) {
+  if (app.workingFolder === null) {
+    showChanges(null);
+    return;
+  }
+  try {
+    const list = await filesPanel.changes.list();
+    if (generation === app.generation) showChanges(list);
+  } catch (ignored) {
+    /* the conversation works without it */
+  }
+}
+
 /* The panel beside a conversation that works on this server's folders. */
 const PANEL_WIDTH_KEY = "himari.filePanelWidth";
 
@@ -2960,6 +3009,7 @@ async function boot() {
   $("nav-files").addEventListener("click", () => showFiles().catch((e) => status(e.message, "error")));
   $("chat-files-toggle").addEventListener("click", toggleFilesPanel);
   $("file-panel-close").addEventListener("click", toggleFilesPanel);
+  $("file-panel-changes").addEventListener("click", () => filesPanel.openChanges());
   $("file-panel-expand").addEventListener("click",
     () => setPanelExpanded(!$("layout").classList.contains("is-files-expanded")));
   $("file-panel-grip").addEventListener("pointerdown", dragPanel);
