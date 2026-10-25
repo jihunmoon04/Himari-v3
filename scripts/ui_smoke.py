@@ -966,8 +966,8 @@ def run_memory(base: str, token: str, shots: str | None, root: str, provider: Sc
         expect(row.locator(".memory-source")).to_contain_text("From “")
         expect(row.locator(".memory-source")).to_contain_text(" · HIMARI · ")
         page.get_by_role("button", name="Add to Preferences").click()
-        page.locator(".memory-form-text").fill("Short lists.")
-        page.locator(".memory-form button[type=submit]").click()
+        page.locator("#surface-memory .memory-form-text").fill("Short lists.")
+        page.locator("#surface-memory .memory-form button[type=submit]").click()
         expect(page.locator("#status-bar")).to_have_text("Saved. HIMARI uses it from the next message.", timeout=5000)
         expect(page.locator("#memory-count")).to_have_text("2 of 1,000", timeout=5000)
         expect(page.locator(".memory-row", has_text="Short lists.")).to_contain_text("Added by you")
@@ -983,24 +983,24 @@ def run_memory(base: str, token: str, shots: str | None, root: str, provider: Sc
 
         page.route("**/api/memories", lose_answer)
         page.get_by_role("button", name="Add to Projects").click()
-        page.locator(".memory-form-text").fill("Builds HIMARI.")
+        page.locator("#surface-memory .memory-form-text").fill("Builds HIMARI.")
         page.evaluate("document.getElementById('status-bar').textContent = ''")  # not the last save's line
-        page.locator(".memory-form button[type=submit]").click()
+        page.locator("#surface-memory .memory-form button[type=submit]").click()
         expect(state).to_have_text("Saved. HIMARI uses it from the next message.", timeout=5000)
         expect(count).to_have_text("3 of 1,000", timeout=5000)
-        expect(page.locator(".memory-form")).to_have_count(0, timeout=5000)
+        expect(page.locator("#surface-memory .memory-form")).to_have_count(0, timeout=5000)
         page.unroute("**/api/memories")
         # The server cannot be reached at all: unsure, and saving again looks first.
         page.route("**/api/memories", lambda route: route.abort())
         page.get_by_role("button", name="Add to References").click()
-        page.locator(".memory-form-text").fill("Docs live in docs/.")
-        page.locator(".memory-form button[type=submit]").click()
+        page.locator("#surface-memory .memory-form-text").fill("Docs live in docs/.")
+        page.locator("#surface-memory .memory-form button[type=submit]").click()
         expect(state).to_have_text("Could not confirm the save. Saving again checks first, so it is not saved twice.",
                                    timeout=5000)
-        page.locator(".memory-form button[type=submit]").click()
+        page.locator("#surface-memory .memory-form button[type=submit]").click()
         expect(state).to_have_text("Still could not reach the server; nothing was saved again.", timeout=5000)
         page.unroute("**/api/memories")
-        page.locator(".memory-form button[type=submit]").click()  # it was not saved: saved now, once
+        page.locator("#surface-memory .memory-form button[type=submit]").click()  # it was not saved: saved now, once
         expect(count).to_have_text("4 of 1,000", timeout=5000)
         assert sorted(n.text for n in on_server(root, lambda app: app.memories(OPERATOR))) == [
             "Builds HIMARI.", "Docs live in docs/.", "Short lists.", "Writes Go at work."]
@@ -1014,11 +1014,11 @@ def run_memory(base: str, token: str, shots: str | None, root: str, provider: Sc
         page.route("**/api/memories", lambda route: route.abort() if route.request.method == "POST"
                    else route.continue_())
         page.get_by_role("button", name="Add to Preferences").click()
-        page.locator(".memory-form-text").fill("Short lists.")
-        page.locator(".memory-form button[type=submit]").click()
+        page.locator("#surface-memory .memory-form-text").fill("Short lists.")
+        page.locator("#surface-memory .memory-form button[type=submit]").click()
         expect(state).to_have_text("The note was not saved. Try again.", timeout=5000)
         page.unroute("**/api/memories")
-        page.locator(".memory-form .link-button", has_text="Cancel").click()
+        page.locator("#surface-memory .memory-form .link-button", has_text="Cancel").click()
         expect(count).to_have_text("2 of 1,000", timeout=5000)
 
         # Memory off (as the server says): the notice, and a save that does not promise use (review C3).
@@ -1034,10 +1034,10 @@ def run_memory(base: str, token: str, shots: str | None, root: str, provider: Sc
         page.click("#nav-memory")
         expect(page.locator("#memory-off")).to_be_visible(timeout=5000)
         page.get_by_role("button", name="Add to Projects").click()
-        page.locator(".memory-form-text").fill("Kept while off.")
-        page.locator(".memory-form button[type=submit]").click()
+        page.locator("#surface-memory .memory-form-text").fill("Kept while off.")
+        page.locator("#surface-memory .memory-form button[type=submit]").click()
         expect(state).to_have_text("Saved. Memory is off on this server, so models do not use it.", timeout=5000)
-        expect(page.locator(".memory-form")).to_have_count(0, timeout=5000)  # repainted: no request left on the route
+        expect(page.locator("#surface-memory .memory-form")).to_have_count(0, timeout=5000)  # repainted: no request left on the route
         page.unroute("**/api/memories")
         on_server(root, lambda app: app.delete_memory(OPERATOR, 5))
         page.click("#nav-appearance")
@@ -1046,12 +1046,12 @@ def run_memory(base: str, token: str, shots: str | None, root: str, provider: Sc
         expect(count).to_have_text("2 of 1,000", timeout=5000)
         # An edit refused after a change made elsewhere: theirs shown, mine kept, saved again on purpose.
         page.get_by_role("button", name="Edit note m2").click()
-        page.locator(".memory-form-text").fill("Short lists, no tables.")
+        page.locator("#surface-memory .memory-form-text").fill("Short lists, no tables.")
         on_server(root, lambda app: app.edit_memory(OPERATOR, 2, MemoryCategory.PREFERENCE, "Long answers.", 1))
-        page.locator(".memory-form button[type=submit]").click()
-        expect(page.locator(".memory-form-conflict")).to_contain_text("Long answers.", timeout=5000)
-        expect(page.locator(".memory-form-text")).to_have_value("Short lists, no tables.")
-        page.locator(".memory-form button[type=submit]").click()
+        page.locator("#surface-memory .memory-form button[type=submit]").click()
+        expect(page.locator("#surface-memory .memory-form-conflict")).to_contain_text("Long answers.", timeout=5000)
+        expect(page.locator("#surface-memory .memory-form-text")).to_have_value("Short lists, no tables.")
+        page.locator("#surface-memory .memory-form button[type=submit]").click()
         expect(page.locator(".memory-row", has_text="Short lists, no tables.")).to_have_count(1, timeout=5000)
         page.get_by_role("button", name="Delete note m2").click()
         expect(dialog).to_contain_text("Conversations that already used it still show it.")
@@ -1059,14 +1059,14 @@ def run_memory(base: str, token: str, shots: str | None, root: str, provider: Sc
         expect(page.locator("#memory-count")).to_have_text("1 of 1,000", timeout=5000)
         # Leaving with an unsaved edit asks first (PR #77 review C2).
         page.get_by_role("button", name="Edit note m1").click()
-        page.locator(".memory-form-text").fill("Writes Go at work, mostly.")
+        page.locator("#surface-memory .memory-form-text").fill("Writes Go at work, mostly.")
         page.click("#nav-home")
         expect(dialog).to_contain_text("Your changes to a memory are not saved.", timeout=5000)
         page.click("#confirm-cancel")
         expect(page.locator("#surface-memory")).to_be_visible()
-        expect(page.locator(".memory-form-text")).to_have_value("Writes Go at work, mostly.")
-        page.locator(".memory-form .link-button", has_text="Cancel").click()
-        expect(page.locator(".memory-form")).to_have_count(0, timeout=5000)
+        expect(page.locator("#surface-memory .memory-form-text")).to_have_value("Writes Go at work, mostly.")
+        page.locator("#surface-memory .memory-form .link-button", has_text="Cancel").click()
+        expect(page.locator("#surface-memory .memory-form")).to_have_count(0, timeout=5000)
         page.set_viewport_size({"width": 390, "height": 800})
         page.wait_for_timeout(300)
         assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")

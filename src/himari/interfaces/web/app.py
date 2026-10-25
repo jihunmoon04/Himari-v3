@@ -84,12 +84,14 @@ from himari.bootstrap.application import (
     WorkspaceRefused,
     AttachedFolder,
     FolderConversations,
+    ReferenceRequest,
 )
 from himari.bootstrap.explorer import ExplorerRefused, Listing, ShownFile
 from himari.bootstrap.operator import OPERATOR, derive_cli_bearer, verify_operator_token
 from himari.common import (
     ASK_USER_TOOL_ID,
     AttachmentRef,
+    FileReference,
     CallId,
     CallRef,
     ContentBlock,
@@ -219,9 +221,23 @@ class RenameBody(_Body):
     title: str | None = Field(max_length=1000)
 
 
+MAX_REFERENCES = 10  # a message's file references (V3-P76 §3.1)
+
+
+class ReferenceBody(_Body):
+    """V3-P76 §3.2: a reference as the browser sends it — the range and its text's hash, never the text."""
+
+    path: str = Field(min_length=1, max_length=4096)
+    identity: IdentityIn
+    start: int | None = Field(default=None, ge=0)
+    end: int | None = Field(default=None, ge=1)
+    sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+
+
 class MessageBody(_Body):
     text: str
     attachments: list[str] = Field(default_factory=list)  # staged uploads' file ids (V3-P66)
+    references: list[ReferenceBody] = Field(default_factory=list, max_length=MAX_REFERENCES)  # V3-P76
 
 
 class ModelBody(_Body):
@@ -411,6 +427,7 @@ def event_view(event: ConversationEvent, views: dict[CallRef, tuple[bool, bool]]
         view["answers_call"] = None if payload.answers_call is None else payload.answers_call.call_id
         view["answers_run"] = None if payload.answers_call is None else payload.answers_call.run_id
         view["attachments"] = [_attachment(b, files) for b in payload.blocks if isinstance(b, AttachmentRef)]
+        view["references"] = [reference_view(b) for b in payload.blocks if isinstance(b, FileReference)]
     elif isinstance(payload, AssistantFinal):
         view["text"] = _text(payload.blocks)
         view["model"] = models.get(event.origin_run_id) if event.origin_run_id else None
@@ -610,6 +627,12 @@ def workspace_view(workspace: RegisteredWorkspace) -> dict[str, Any]:
             "filesystem": workspace.filesystem, "cloud_synced": workspace.filesystem in CLOUD_FILESYSTEMS}
 
 
+def reference_view(ref: FileReference) -> dict[str, Any]:
+    """V3-P76 §3.1: a reference chip in the timeline — where it points, not its excerpt."""
+    return {"path": ref.path, "name": posixpath.basename(ref.path), "whole": ref.start is None,
+            "start_line": ref.start_line, "end_line": ref.end_line}
+
+
 def listing_view(listing: Listing) -> dict[str, Any]:
     """V3-P75 §5.1: a page of a folder; ``next`` is the cursor of the following page."""
     return {"path": listing.path, "parent": listing.parent, "entries": list(listing.entries), "next": listing.next,
@@ -633,7 +656,7 @@ def shown_file_view(shown: ShownFile) -> dict[str, Any]:
 # How a refused explorer request answers (V3-P75 §5): the runner's category → HTTP status. too_large is
 # 422, not 413: the body limit middleware turns every 413 into "request_too_large".
 EXPLORER_STATUS = {"not_found": 404, "access": 403, "outside_workspaces": 403, "too_large": 422,
-                   "changed": 409, "exists": 409, "versions_unavailable": 507,
+                   "changed": 409, "exists": 409, "versions_unavailable": 507, "reference_stale": 409,
                    "unavailable": 503, "setup_failed": 503, "timed_out": 504, "invalid": 400, "is_directory": 400,
                    "not_directory": 400, "not_regular": 415, "links": 400, "other": 500}
 
@@ -1401,10 +1424,12 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
         text = body.text.strip()
         if len(body.attachments) > MAX_ATTACHMENTS:
             raise ApiError(400, "too_many_attachments", f"A message carries at most {MAX_ATTACHMENTS} files.")
-        if (not text and not body.attachments) or len(text) > MAX_MESSAGE_CHARS:
+        if (not text and not body.attachments and not body.references) or len(text) > MAX_MESSAGE_CHARS:
             raise ApiError(400, "invalid_argument", f"A message is 1..{MAX_MESSAGE_CHARS} characters, or files.")
         application, scope = himari(request), scope_of(conversation_id, who)
-        return job_view(await application.send(scope, text, [FileId(f) for f in body.attachments]))
+        references = [ReferenceRequest(r.path, tuple(int(v) for v in r.identity), r.start, r.end, r.sha256)
+                      for r in body.references]
+        return job_view(await application.send(scope, text, [FileId(f) for f in body.attachments], references))
 
     # -- files (V3-P66 §9) ---------------------------------------------------------------------
 

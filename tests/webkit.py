@@ -19,9 +19,10 @@ SEND = {"origin": ORIGIN}
 class Server:
     def __init__(self, tmp_path: Path, socket: str | None) -> None:
         self.application: Application | None = None
+        self.provider = ScriptedAdapter([])
 
         async def opener() -> Application:
-            self.application = await Application.open(tmp_path / "data", ScriptedAdapter([]),
+            self.application = await Application.open(tmp_path / "data", self.provider,
                                                       model_id="scripted-model", sandbox=False, cleanup_seconds=None,
                                                       machine_socket=socket)
             return self.application

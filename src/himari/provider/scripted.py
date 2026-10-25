@@ -30,8 +30,18 @@ from datetime import datetime
 from enum import Enum
 from typing import Any
 
-from himari.common import CallId, ContentBlock, RawRepresentation, TextBlock, TokenUsage, ToolCall, ToolId, thaw
-from himari.prompt.api import ModelInput
+from himari.common import (
+    AttachmentRef,
+    CallId,
+    ContentBlock,
+    RawRepresentation,
+    TextBlock,
+    TokenUsage,
+    ToolCall,
+    ToolId,
+    thaw,
+)
+from himari.prompt.api import ModelInput, file_reference_line
 from himari.provider.api import (
     NativeInvocationOutcome,
     OutputDelta,
@@ -95,7 +105,8 @@ def _json_default(value: object) -> object:
 
 
 def _blocks_to_json(blocks: Iterable[ContentBlock]) -> list[str]:
-    return [b.text if isinstance(b, TextBlock) else f"[attachment {b.file_id}@{b.version}]" for b in blocks]
+    return [b.text if isinstance(b, TextBlock) else f"[attachment {b.file_id}@{b.version}]"
+            if isinstance(b, AttachmentRef) else file_reference_line(b) for b in blocks]
 
 
 def encode_output(output: NormalizedModelOutput) -> bytes:

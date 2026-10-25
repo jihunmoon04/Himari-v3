@@ -13,6 +13,10 @@
  * load the disk's, or save theirs over it). Every save and delete keeps the
  * previous version on the server; the ⋯ menu lists them to compare and to
  * put back. Unsaved text is not dropped without asking.
+ *
+ * Ask HIMARI (V3-P76 §3): a selection, or the whole file, handed to the
+ * place as a reference — the file's path and identity, and for a selection
+ * its positions and the SHA-256 of its text, never the text. Saved text only.
  */
 
 const KIND_ICON = { directory: "#side-folder", file: "#side-note" };
@@ -25,6 +29,12 @@ function defaultConfirm(title, lines) { // the browser's own: no action label
 
 function sameIdentity(a, b) {
   return Array.isArray(a) && Array.isArray(b) && a.length === b.length && a.every((v, i) => v === b[i]);
+}
+
+/* The SHA-256 of ``text``'s UTF-8, as hex (the browser's SubtleCrypto: a secure page only). */
+async function sha256Hex(text) {
+  const hash = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
+  return Array.from(new Uint8Array(hash), (b) => b.toString(16).padStart(2, "0")).join("");
 }
 
 function icon(href) {
@@ -70,15 +80,18 @@ export class FilesPane {
    * "Open conversation"); folderRowActions(path): [label, action] pairs for a
    * folder row's ⋯ menu. Both from the place the pane is in. */
   /* loadEditor(): the CodeMirror module (createEditor, createDiff); confirm(title, lines, action) → Promise<bool>;
-   * working(): HIMARI is at work in this place now (told beside the editor, §7.3). */
+   * working(): HIMARI is at work in this place now (told beside the editor, §7.3).
+   * onAsk(reference): Ask HIMARI (V3-P76 §3.1) — {path, name, identity, whole} and, for a selection,
+   * {start, end, sha256, lines: [fromLine, fromColumn, toLine, toColumn]}; none: not offered here. */
   constructor({ api, el, onOpenFolder = null, onOpenFile = null, actions = [], folderActions = null,
                 folderRowActions = null, loadEditor = () => import("/assets/codemirror/codemirror.js"),
-                confirm = defaultConfirm, working = () => false }) {
+                confirm = defaultConfirm, working = () => false, onAsk = null }) {
     this.api = api;
     this.el = el;
     this.loadEditor = loadEditor;
     this.confirm = confirm;
     this.working = working;
+    this.onAsk = onAsk;
     this.doc = null; // the file in the editor: {path, name, identity, saved, editor, dirty, saving, pollTimer, bar, revision}
     this.onOpenFolder = onOpenFolder;
     this.onOpenFile = onOpenFile;
@@ -315,9 +328,57 @@ export class FilesPane {
         this.setDirty(doc.editor.text() !== doc.saved);
       },
       onSave: () => { if (this.doc === doc) this.save(); },
+      onAsk: this.onAsk ? () => (this.doc === doc ? this.ask() : null) : null,
     });
     this.paintState();
     this.schedulePoll(doc);
+  }
+
+  /* V3-P76 §3.1: the selection, or with none the whole file, as a reference. The server checks it
+   * against the file, so only saved text is pointed at (Q1). */
+  async ask() {
+    const doc = this.doc;
+    if (doc === null || !this.onAsk) return;
+    if (doc.dirty || doc.saving) {
+      this.paintState("Save first: HIMARI reads the saved file");
+      return;
+    }
+    const picked = doc.editor.selection();
+    const reference = { path: doc.path, name: doc.name, identity: doc.identity, whole: picked.from === picked.to };
+    if (reference.whole) {
+      this.onAsk(reference);
+      return;
+    }
+    let sha256;
+    try {
+      sha256 = await sha256Hex(picked.text);
+    } catch (ignored) {
+      this.paintState("Ask HIMARI needs the page over HTTPS");
+      return;
+    }
+    if (this.doc !== doc || doc.dirty) return; // typed in meanwhile: that selection is gone
+    this.onAsk({ ...reference, start: picked.from, end: picked.to, sha256,
+                 lines: [picked.fromLine, picked.fromColumn, picked.toLine, picked.toColumn] });
+  }
+
+  /* The whole file from its ⋯ menu: any file, editable or not. */
+  askWhole(shown) {
+    if (this.doc !== null && this.doc.path === shown.path) {
+      if (this.doc.dirty || this.doc.saving) {
+        this.paintState("Save first: HIMARI reads the saved file");
+        return;
+      }
+      this.onAsk({ path: shown.path, name: this.doc.name, identity: this.doc.identity, whole: true });
+      return;
+    }
+    this.onAsk({ path: shown.path, name: shown.path.slice(shown.path.lastIndexOf("/") + 1),
+                 identity: shown.identity, whole: true });
+  }
+
+  /* A reference's place: its file, with ``start``–``end`` selected when given (§3.1). */
+  async reveal(path, start = null, end = null) {
+    if (this.file !== path || this.doc === null || this.doc.path !== path) await this.openFile(path);
+    if (start !== null && this.doc !== null && this.doc.path === path) this.doc.editor.select(start, end);
   }
 
   setDirty(dirty) {
@@ -702,6 +763,7 @@ export class FilesPane {
       control.addEventListener("click", () => { actions.open = false; action(); });
       return control;
     };
+    if (this.onAsk) list.append(item("Ask HIMARI about this file", () => this.askWhole(shown)));
     if (shown.kind === "text" && shown.editable) list.append(item("Previous versions", () => this.showVersions()));
     list.append(this.download(shown.path, "Download"), this.copyPath(shown.path, () => { actions.open = false; }),
                 item("Delete", () => this.deleteFile()));

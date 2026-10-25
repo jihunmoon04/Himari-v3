@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import io
 import os
 import threading
@@ -16,11 +17,14 @@ import pytest
 pytest.importorskip("fastapi")
 
 from runnerkit import RunnerKit, start_runner  # noqa: E402
+from testkit import final  # noqa: E402
 from webkit import SEND, Server  # noqa: E402
 
 from himari.bootstrap import explorer  # noqa: E402
+from himari.common import FileReference  # noqa: E402
 from himari.data.api import PreparedView, sniff_image  # noqa: E402
 from himari.interfaces.web import app as web  # noqa: E402
+from himari.prompt.api import FILE_REFERENCE_NOTE, UserTurn  # noqa: E402
 
 
 @pytest.fixture
@@ -508,3 +512,153 @@ def test_a_deleted_file_is_found_in_its_folder(server: Server, kit: RunnerKit, m
     by_rule = HiddenRules.by_rule
     monkeypatch.setattr(HiddenRules, "by_rule", lambda self, real: real == path or by_rule(self, real))
     assert server.client.get("/api/machine/versions/deleted", params={"path": str(folder)}).json()["items"] == []
+
+
+# --- references: Ask HIMARI (V3-P76 §3) ---------------------------------------------------------------
+
+NOTES = "alpha\n가나 😀 beta\ngamma\n"
+
+
+def selection(text: str, part: str) -> dict[str, Any]:
+    """What the browser sends for ``part`` of ``text``: UTF-16 positions and the hash of its UTF-8."""
+    start = len(text[:text.index(part)].encode("utf-16-le")) // 2
+    return {"start": start, "end": start + len(part.encode("utf-16-le")) // 2,
+            "sha256": hashlib.sha256(part.encode()).hexdigest()}
+
+
+def ask(server: Server, cid: str, text: str, *references: dict[str, Any]) -> Any:
+    return server.post(f"/api/conversations/{cid}/messages", {"text": text, "references": list(references)})
+
+
+def wait_idle(server: Server, cid: str) -> None:
+    for _ in range(300):
+        if not server.client.get(f"/api/conversations/{cid}").json()["job"]["running"]:
+            return
+        time.sleep(0.02)
+    raise AssertionError("job did not finish")
+
+
+def model_saw(server: Server) -> list[FileReference]:
+    """The file references of the last request's newest message, as the model's input holds them."""
+    model_input = server.provider.prepared_inputs[-1]
+    blocks = [b for part in model_input.conversation if isinstance(part, UserTurn) for b in part.blocks]
+    return [b for b in blocks if isinstance(b, FileReference)]
+
+
+def test_a_selection_is_rebuilt_from_the_file_and_sent(server: Server, kit: RunnerKit) -> None:
+    path = str(kit.home / "projects/a/notes.txt")
+    (kit.home / "projects/a/notes.txt").write_text(NOTES)
+    identity = server.client.get("/api/machine/stat", params={"path": path}).json()["identity"]
+    cid = server.new()
+    server.provider.extend([final("seen")])
+    sent = ask(server, cid, "what is this?", {"path": path, "identity": identity, **selection(NOTES, "가나 😀 beta\nga")})
+    assert sent.status_code == 202, sent.text
+    wait_idle(server, cid)
+    first = server.client.get(f"/api/conversations/{cid}/events").json()["items"][0]
+    assert first["text"] == "what is this?"
+    assert first["references"] == [{"path": path, "name": "notes.txt", "whole": False, "start_line": 2, "end_line": 3}]
+    [seen] = model_saw(server)
+    assert (seen.path, seen.excerpt, seen.start_line, seen.end_line, seen.truncated) == (
+        path, "가나 😀 beta\nga", 2, 3, False)
+    assert FILE_REFERENCE_NOTE in "\n".join(server.provider.prepared_inputs[-1].stable_prefix)
+    # A whole file: named, with no excerpt; a message may be references only.
+    server.provider.extend([final("seen")])
+    whole = ask(server, cid, "", {"path": "~/projects/a/notes.txt", "identity": identity})
+    assert whole.status_code == 202, whole.text
+    wait_idle(server, cid)
+    last = server.client.get(f"/api/conversations/{cid}/events").json()["items"][-2]
+    assert last["text"] == "" and last["references"] == [
+        {"path": path, "name": "notes.txt", "whole": True, "start_line": None, "end_line": None}]
+    whole_seen = model_saw(server)[-1]
+    assert (whole_seen.start, whole_seen.excerpt, whole_seen.size) == (None, "", len(NOTES.encode()))
+
+
+def test_a_stale_reference_refuses_the_message(server: Server, kit: RunnerKit) -> None:
+    path = str(kit.home / "projects/a/notes.txt")
+    (kit.home / "projects/a/notes.txt").write_text(NOTES)
+    identity = server.client.get("/api/machine/stat", params={"path": path}).json()["identity"]
+    cid = server.new()
+    wrong = {**selection(NOTES, "beta"), "sha256": hashlib.sha256(b"other").hexdigest()}
+    refused(ask(server, cid, "x", {"path": path, "identity": identity, **wrong}), 409, "reference_stale")
+    split = {**selection(NOTES, "😀"), "end": selection(NOTES, "😀")["start"] + 1}  # half a surrogate pair
+    refused(ask(server, cid, "x", {"path": path, "identity": identity, **split}), 409, "reference_stale")
+    past = {"start": len(NOTES) + 5, "end": len(NOTES) + 9, "sha256": hashlib.sha256(b"").hexdigest()}
+    refused(ask(server, cid, "x", {"path": path, "identity": identity, **past}), 409, "reference_stale")
+    os.utime(path, ns=(time.time_ns(), time.time_ns() + 10**9))  # changed since the selection
+    refused(ask(server, cid, "x", {"path": path, "identity": identity, **selection(NOTES, "beta")}), 409,
+            "reference_stale")
+    assert server.client.get(f"/api/conversations/{cid}/events").json()["items"] == []  # nothing was sent
+    assert server.provider.sent == []
+
+
+def test_line_breaks_count_as_the_editor_counts_them(server: Server, kit: RunnerKit) -> None:
+    """CodeMirror makes every \\r\\n and \\r one \\n: its positions and text are of that text."""
+    path = kit.home / "projects/a/dos.txt"
+    path.write_bytes(b"one\r\ntwo\rthree\nfour\r\n")
+    identity = server.client.get("/api/machine/stat", params={"path": str(path)}).json()["identity"]
+    cid = server.new()
+    server.provider.extend([final("seen")])
+    sent = ask(server, cid, "x", {"path": str(path), "identity": identity,
+                                  **selection("one\ntwo\nthree\nfour\n", "two\nthree")})
+    assert sent.status_code == 202, sent.text
+    wait_idle(server, cid)
+    reference = model_saw(server)[-1]
+    assert (reference.excerpt, reference.start_line, reference.end_line) == ("two\nthree", 2, 3)
+
+
+@pytest.mark.parametrize(("text", "start", "end", "lines"), [
+    ("a\nb\n", 0, 4, (1, 2)),  # to the end of a file ending in a line break: line 3 has nothing selected
+    ("a\nb\nc", 2, 4, (2, 2)),  # one line with its break
+    ("a\n\n\nb", 0, 4, (1, 3)),  # the empty lines 2 and 3 are selected, line 4 is not
+    ("a\n\nb", 2, 3, (2, 2)),  # an empty line alone
+    ("a\nb", 1, 2, (1, 1)),  # only the break after line 1
+    ("a\nb\n\n", 2, 5, (2, 3)),  # from line 2 to the file's end, past an empty line
+])
+def test_a_selection_ends_on_the_line_of_its_last_character(server: Server, kit: RunnerKit, text: str, start: int,
+                                                            end: int, lines: tuple[int, int]) -> None:
+    path = kit.home / "projects/a/lines.txt"
+    path.write_text(text)
+    identity = server.client.get("/api/machine/stat", params={"path": str(path)}).json()["identity"]
+    cid = server.new()
+    server.provider.extend([final("seen")])
+    sent = ask(server, cid, "x", {"path": str(path), "identity": identity, "start": start, "end": end,
+                                  "sha256": hashlib.sha256(text[start:end].encode()).hexdigest()})
+    assert sent.status_code == 202, sent.text
+    wait_idle(server, cid)
+    reference = model_saw(server)[-1]
+    assert (reference.start_line, reference.end_line) == lines
+
+
+def test_reference_limits(server: Server, kit: RunnerKit, monkeypatch: pytest.MonkeyPatch) -> None:
+    path = str(kit.home / "projects/a/notes.txt")
+    (kit.home / "projects/a/notes.txt").write_text(NOTES)
+    identity = server.client.get("/api/machine/stat", params={"path": path}).json()["identity"]
+    cid = server.new()
+    whole = {"path": path, "identity": identity}
+    refused(ask(server, cid, "x", *[whole] * 11), 400, "invalid_request")  # at most ten
+    refused(ask(server, cid, "x", {**whole, "start": 3}), 400, "invalid")  # a start without its end
+    refused(ask(server, cid, "x", {"path": "~/.ssh/id", "identity": identity}), 404, "not_found")  # hidden
+    big = kit.home / "projects/big.txt"
+    big.write_text("x" * (explorer.EDIT_MAX_BYTES + 1))
+    big_identity = server.client.get("/api/machine/stat", params={"path": str(big)}).json()["identity"]
+    part = {"start": 0, "end": 1, "sha256": hashlib.sha256(b"x").hexdigest()}
+    refused(ask(server, cid, "x", {"path": str(big), "identity": big_identity, **part}), 422, "too_large")
+    # 300 KB selected: the request stays small (no text in it); the model gets 20 KB of it.
+    wide = kit.home / "projects/wide.txt"
+    wide.write_text("가" * 100_000)
+    wide_identity = server.client.get("/api/machine/stat", params={"path": str(wide)}).json()["identity"]
+    body = {"path": str(wide), "identity": wide_identity, **selection("가" * 100_000, "가" * 100_000)}
+    assert len(str(body)) < 300
+    server.provider.extend([final("seen")])
+    assert ask(server, cid, "x", body).status_code == 202
+    wait_idle(server, cid)
+    cut = model_saw(server)[-1]
+    assert cut.truncated and cut.excerpt == "가" * (explorer.EXCERPT_BYTES // 3)
+    # The excerpt is cut at a character boundary, and says so.
+    monkeypatch.setattr(explorer, "EXCERPT_BYTES", 8)
+    server.provider.extend([final("seen")])
+    sent = ask(server, cid, "x", {**whole, **selection(NOTES, "가나 😀 beta")})
+    assert sent.status_code == 202, sent.text
+    wait_idle(server, cid)
+    reference = model_saw(server)[-1]
+    assert reference.truncated and reference.excerpt == "가나 " and reference.start_line == 2

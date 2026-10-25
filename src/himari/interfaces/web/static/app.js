@@ -26,6 +26,7 @@ import { FilesPane } from "/assets/files.js";
 
 const POLL_MS = 1000;
 const PAGE = 50;
+const MAX_REFERENCES = 10; // a message's file references (V3-P76 §3.1)
 
 const STATE_TEXT = {
   completed: "Done",
@@ -129,6 +130,8 @@ const app = {
   work: null, // the work block the next tool step goes into (V3-P68 §5.1)
   rowsRunning: null, // the job state the rows without a result were last painted for
   attachKeys: 0,
+  references: [], // parts of files for the next message (V3-P76 §3.1): {key, path, name, identity, whole, start, end, sha256, label}
+  panelStart: null, // {id, path, start, end}: the file the panel opens on for conversation ``id`` (Ask from Files)
   instructions: null, // the saved instructions (V3-P69 §7): {text, revision, updated_at, max_chars}
   savingInstructions: false,
   instructionsSave: null, // the save under way, for a leave to wait on
@@ -154,6 +157,7 @@ const views = new AppViews(api, el, () => app.conversationId);
 const askFiles = (title, lines, action) => confirmAction(title, lines, action);
 const filesSurface = new FilesPane({
   api, el, confirm: askFiles,
+  onAsk: (reference) => askFromFiles(reference),
   folderActions: (listing) => [openHereControl(listing.path)],
   folderRowActions: (path) => [["Open conversation", () => openFolderConversation(path, false)],
                                ["New conversation here", () => openFolderConversation(path, true)]],
@@ -161,6 +165,11 @@ const filesSurface = new FilesPane({
 const filesPanel = new FilesPane({
   api, el, confirm: askFiles,
   working: () => app.running, // HIMARI at work in this conversation (§7.3)
+  onAsk: (reference) => { // the conversation shown again, where its chip goes
+    setPanelExpanded(false);
+    if (panelCoversScreen() && app.filesOpen) toggleFilesPanel();
+    addReference(reference);
+  },
   actions: [$("file-panel-expand"), $("file-panel-close")],
   folderActions: (listing) => (attachable(listing.path) ? [attachHereButton(listing.path)] : []),
   folderRowActions: (path) => (attachable(path) ? [["Attach to this conversation", () => attachHere(path)]] : []),
@@ -419,7 +428,97 @@ function renderMessage(event, model = null) {
   if (!user) node.append(renderAssistantText(document, event.text || ""));
   else if (event.text) node.append(el("p", "item-text", event.text));
   if (user && event.attachments && event.attachments.length) node.append(fileChips(event.attachments));
+  if (user && event.references && event.references.length) node.append(sentReferenceChips(event.references));
   return node;
+}
+
+/* ------------------------------------------------------------- references */
+
+/* V3-P76 §3.1: where a reference points — the file, and for a selection its lines and columns. */
+function referenceLabel(reference) {
+  if (reference.whole) return reference.name;
+  const [fromLine, fromColumn, toLine, toColumn] = reference.lines;
+  return `${reference.name}:${fromLine}:${fromColumn}–${toLine}:${toColumn}`;
+}
+
+/* A reference for the next message: a chip above the composer (at most MAX_REFERENCES). The same
+ * place again, selected in a file changed since, renews its chip (the old one would be refused). */
+function addReference(reference) {
+  if (app.conversationId === null) return;
+  const same = app.references.find((r) => r.path === reference.path && r.whole === reference.whole
+    && r.start === reference.start && r.end === reference.end);
+  const unchanged = same && !same.stale && same.sha256 === reference.sha256
+    && same.identity.length === reference.identity.length && same.identity.every((v, i) => v === reference.identity[i]);
+  if (unchanged) {
+    status(`${referenceLabel(reference)} is already in your message.`);
+  } else if (same) {
+    Object.assign(same, reference, { label: referenceLabel(reference), stale: false });
+    status("");
+  } else if (app.references.length >= MAX_REFERENCES) {
+    status(`A message points at most ${MAX_REFERENCES} places in files.`, "warn");
+  } else {
+    app.references.push({ ...reference, key: (app.attachKeys += 1), label: referenceLabel(reference) });
+    status("");
+  }
+  renderAttachments();
+  $("composer-text").focus({ preventScroll: true }); // the page itself never scrolls
+}
+
+/* After a reference_stale refusal: the chips whose file changed since they were made say so, as a
+ * refused attachment's chip does (the status line gives way to the conversation's own). */
+async function markStaleReferences(references, generation) {
+  for (const reference of references) {
+    try {
+      const now = await api("GET", `/api/machine/stat?path=${encodeURIComponent(reference.path)}`);
+      reference.stale = now.identity.length !== reference.identity.length
+        || now.identity.some((v, i) => v !== reference.identity[i]);
+    } catch (ignored) {
+      reference.stale = true; // gone, or not to be read now
+    }
+  }
+  if (generation === app.generation) renderAttachments();
+}
+
+/* A reference's place in the panel beside the conversation: the file, its selection selected. */
+function showReference(path, start = null, end = null) {
+  if (app.workingFolder === null) {
+    status("This conversation does not work on this server's files.", "warn");
+    return;
+  }
+  if (!app.filesOpen) {
+    app.filesOpen = true;
+    syncFilesPanel(true);
+  }
+  filesPanel.reveal(path, start, end);
+}
+
+/* §3.1, from the Files surface: the file's folder's conversation opens (as Open conversation does, §6),
+ * with the file in its panel and the reference above its composer. */
+async function askFromFiles(reference) {
+  const folder = reference.path.slice(0, reference.path.lastIndexOf("/")) || "/";
+  const start = { path: reference.path, start: reference.whole ? null : reference.start,
+                  end: reference.whole ? null : reference.end };
+  const id = await openFolderConversation(folder, false, start);
+  if (id === null || app.conversationId !== id) return;
+  if (panelCoversScreen() && app.filesOpen) toggleFilesPanel(); // the file waits there for the panel
+  addReference(reference);
+}
+
+/* A sent message's references: each opens its file (as it is now, not as it was sent). */
+function sentReferenceChips(references) {
+  const list = el("ul", "reference-chips");
+  for (const reference of references) {
+    const item = el("li");
+    const lines = reference.whole ? "" : reference.start_line === reference.end_line
+      ? `:${reference.start_line}` : `:${reference.start_line}–${reference.end_line}`;
+    const chip = el("button", "reference-chip", `${reference.name}${lines}`);
+    chip.type = "button";
+    chip.title = reference.path;
+    chip.addEventListener("click", () => showReference(reference.path));
+    item.append(chip);
+    list.append(item);
+  }
+  return list;
 }
 
 /* ------------------------------------------------------------------ files */
@@ -569,6 +668,7 @@ function uploading() {
 function clearAttachments() {
   for (const entry of app.attachments) if (entry.xhr) entry.xhr.abort();
   app.attachments = [];
+  app.references = [];
   app.jobRunning = false; // another page: its own detail sets it (PR #60 re-review N1)
   renderAttachments();
 }
@@ -576,6 +676,24 @@ function clearAttachments() {
 function renderAttachments() {
   const list = $("attach-list");
   list.replaceChildren();
+  for (const reference of app.references) {
+    const item = el("li", `attach-chip is-reference${reference.stale ? " is-failed" : ""}`);
+    const open = el("button", "attach-chip-text attach-chip-open",
+                    reference.stale ? `${reference.label} · changed, select again` : reference.label);
+    open.type = "button";
+    open.title = `${reference.path} — show it`;
+    open.addEventListener("click", () => showReference(reference.path, reference.whole ? null : reference.start,
+                                                       reference.whole ? null : reference.end));
+    const remove = el("button", "attach-chip-remove", "×");
+    remove.type = "button";
+    remove.setAttribute("aria-label", `Remove ${reference.label}`);
+    remove.addEventListener("click", () => {
+      app.references = app.references.filter((r) => r !== reference);
+      renderAttachments();
+    });
+    item.append(open, remove);
+    list.append(item);
+  }
   for (const entry of app.attachments) {
     const item = el("li", `attach-chip is-${entry.state}`);
     const text = entry.state === "uploading" ? `${entry.name} · ${entry.progress}%`
@@ -592,7 +710,7 @@ function renderAttachments() {
     item.append(remove);
     list.append(item);
   }
-  list.hidden = app.attachments.length === 0;
+  list.hidden = app.attachments.length === 0 && app.references.length === 0;
   $("composer-send").disabled = app.jobRunning || app.sending || uploading();
 }
 
@@ -1552,14 +1670,17 @@ async function sendMessage(event) {
     if (!opened) return; // it failed, or the user went elsewhere meanwhile
   }
   const ready = app.attachments.filter((a) => a.state === "ready");
-  if ((!text && !ready.length) || app.sending || uploading() || app.conversationId === null) return;
+  const pointed = app.references.slice();
+  if ((!text && !ready.length && !pointed.length) || app.sending || uploading() || app.conversationId === null) return;
   abandonExpansion(); // a message sent now is the user's: no prompt answer may replace what follows
   const generation = app.generation;
   app.sending = true;
   $("composer-send").disabled = true;
   try {
     await api("POST", `/api/conversations/${encodeURIComponent(app.conversationId)}/messages`,
-      { text, attachments: ready.map((a) => a.fileId) });
+      { text, attachments: ready.map((a) => a.fileId),
+        references: pointed.map((r) => (r.whole ? { path: r.path, identity: r.identity }
+          : { path: r.path, identity: r.identity, start: r.start, end: r.end, sha256: r.sha256 })) });
     if (generation === app.generation) {
       // A user can navigate or type again while this request is in flight.
       // Only clear the exact draft accepted for this conversation.
@@ -1569,6 +1690,7 @@ async function sendMessage(event) {
       }
       app.jobRunning = true; // a job starts with this message; the next detail says when it ends
       app.attachments = app.attachments.filter((a) => !ready.includes(a));
+      app.references = app.references.filter((r) => !pointed.includes(r));
       renderAttachments();
       status("");
     }
@@ -1579,6 +1701,9 @@ async function sendMessage(event) {
       if (refused) Object.assign(refused, { state: "failed", note: `${error.message} — upload it again` });
       renderAttachments();
       status(error.message, "error");
+    } else if (error.code === "reference_stale") { // the chips stay, the changed ones marked
+      status(error.message, "error");
+      await markStaleReferences(pointed, generation);
     } else if (error.kind === "network") {
       status("The message may or may not have been received; check the conversation before sending again.", "warn");
     } else {
@@ -2284,7 +2409,7 @@ function renderFolders(items) {
   app.workingFolder = working ? working.path : null;
   app.conversationFolderPaths = items.map((item) => item.path).filter(Boolean);
   syncFilesPanel(!$("surface-chat").hidden);
-  if (app.filesOpen && app.workingFolder && app.workingFolder !== before) filesPanel.openFolder(app.workingFolder);
+  if (app.filesOpen && app.workingFolder && app.workingFolder !== before) openPanelStart();
   const list = $("chat-menu-folders-list");
   list.replaceChildren();
   $("chat-menu-folders").hidden = items.length === 0;
@@ -2487,20 +2612,24 @@ async function showFiles() {
   else await filesSurface.openFolder("~");
 }
 
-/* A conversation opened from a folder: its files beside it (V3-P75 §6; PR #93 review B2). */
-function openWithFiles(id) {
+/* A conversation opened from a folder: its files beside it (V3-P75 §6; PR #93 review B2), on ``start``
+ * ({path, start, end}: a file, its selection selected) instead of the working folder when given. */
+function openWithFiles(id, start = null) {
   app.filesOpen = true;
+  app.panelStart = start ? { ...start, id } : null;
   return openConversation(id);
 }
 
-/* §6: a folder's conversation — its latest, or a new one working in it. */
-async function openFolderConversation(path, isNew) {
+/* §6: a folder's conversation — its latest, or a new one working in it. Its id once opened, else null. */
+async function openFolderConversation(path, isNew, start = null) {
   try {
     const answer = await api("POST", "/api/machine/conversations", { path, new: isNew });
-    await openWithFiles(answer.conversation.id);
+    await openWithFiles(answer.conversation.id, start);
     if (answer.created) loadList(true).then(markSelected).catch(() => {});
+    return answer.conversation.id;
   } catch (error) {
     status(error.message, "error");
+    return null;
   }
 }
 
@@ -2595,10 +2724,24 @@ function toggleFilesPanel() {
   app.filesOpen = !app.filesOpen;
   syncFilesPanel(true);
   if (app.filesOpen && app.workingFolder) {
-    // Its place again, or the conversation's working folder the first time.
+    // Its place again, or its first place the first time.
     if (filesPanel.place) filesPanel.refresh();
-    else filesPanel.openFolder(app.workingFolder);
+    else openPanelStart();
   }
+}
+
+/* The panel's first place in this conversation: the file Ask HIMARI came from (V3-P76 §3.1), its
+ * selection selected, else the conversation's working folder. */
+function openPanelStart() {
+  const start = app.panelStart !== null && app.panelStart.id === app.conversationId ? app.panelStart : null;
+  app.panelStart = null;
+  if (start) filesPanel.reveal(start.path, start.start, start.end);
+  else filesPanel.openFolder(app.workingFolder);
+}
+
+/* Too narrow for the panel beside the conversation: it covers the screen (app.css). */
+function panelCoversScreen() {
+  return window.matchMedia("(max-width: 899px)").matches;
 }
 
 function setPanelExpanded(expanded) {

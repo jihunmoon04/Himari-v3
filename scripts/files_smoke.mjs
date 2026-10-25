@@ -149,9 +149,15 @@ function fakeModule() {
   return {
     made,
     createEditor(parent, opts) {
-      const editor = { value: opts.text, opts, text: () => editor.value, destroyed: false,
+      const editor = { value: opts.text, opts, text: () => editor.value, destroyed: false, picked: [0, 0],
         setText(text) { editor.value = text; }, type(text) { editor.value = text; if (opts.onChange) opts.onChange(); },
-        destroy() { editor.destroyed = true; }, setReadOnly() {}, focus() {} };
+        destroy() { editor.destroyed = true; }, setReadOnly() {}, focus() {},
+        selection() { // one line: columns are positions + 1
+          const [from, to] = editor.picked;
+          return { from, to, text: editor.value.slice(from, to), fromLine: 1, fromColumn: from + 1, toLine: 1,
+                   toColumn: to + 1 };
+        },
+        select(from, to) { editor.picked = [from, to]; } };
       made.push(editor);
       return editor;
     },
@@ -160,7 +166,7 @@ function fakeModule() {
 }
 
 /* A pane over a fake server: ``routes`` answers "METHOD path-start"; ``sent`` keeps every request. */
-function editorPane(routes, { confirms = [] } = {}) {
+function editorPane(routes, { confirms = [], onAsk = null } = {}) {
   const sent = [];
   const module = fakeModule();
   const asked = [];
@@ -172,7 +178,7 @@ function editorPane(routes, { confirms = [] } = {}) {
     const answer = routes[key];
     return typeof answer === "function" ? answer(body, path) : answer;
   };
-  const files = new FilesPane({ api, el, loadEditor: async () => module,
+  const files = new FilesPane({ api, el, loadEditor: async () => module, onAsk,
     confirm: async (title, lines, action) => { asked.push([title, action]); return confirms.length ? confirms.shift() : true; } });
   return { files, sent, module, asked };
 }
@@ -444,6 +450,60 @@ for (const [size, questions] of [[3, 1], [2_000_000, 2]]) {
   assert.equal(files.file, TEXT.path);
   assert.equal(module.made[0].text(), "editing");
   assert.ok(files.body.text().includes("new.md is made"));
+  files.closeDoc();
+}
+
+// V3-P76 §3.1: Ask HIMARI — a selection as positions and its text's hash, never the text; with none,
+// the whole file; unsaved text is not pointed at.
+{
+  const asked = [];
+  const { files, module } = editorPane({ "GET /api/machine/file": { ...TEXT, text: "one two" } },
+                                       { onAsk: (reference) => asked.push(reference) });
+  await files.openFile(TEXT.path);
+  const editor = module.made[0];
+  assert.equal(typeof editor.opts.onAsk, "function");
+  editor.picked = [4, 7];
+  await editor.opts.onAsk();
+  assert.deepEqual(asked.pop(), { path: TEXT.path, name: "a.txt", identity: [1, 2, 3, 4], whole: false, start: 4, end: 7,
+    sha256: "3fc4ccfe745870e2c0d99f71f30ff0656c8dedd41cc1d7d3d376b0dbe685e2f3", lines: [1, 5, 1, 8] });
+  editor.picked = [2, 2];
+  await files.ask();
+  assert.deepEqual(asked.pop(), { path: TEXT.path, name: "a.txt", identity: [1, 2, 3, 4], whole: true });
+  editor.type("one two three");
+  editor.picked = [0, 3];
+  await files.ask();
+  assert.equal(asked.length, 0);
+  assert.ok(files.stateLabel.textContent.startsWith("Save first"));
+  files.closeDoc();
+}
+
+// Ask from the ⋯ menu: the whole file, any kind; offered only where the place takes references.
+{
+  const asked = [];
+  const image = { path: "/home/u/p.png", size: 9, identity: ["5", "6", "9", "7"], modified: 0, kind: "image",
+                  text: null, truncated: false, editable: false };
+  const { files } = editorPane({ "GET /api/machine/file": image }, { onAsk: (reference) => asked.push(reference) });
+  await files.openFile(image.path);
+  const menu = files.tools.children.find((c) => c.className.includes("files-file-menu"));
+  const item = menu.children[1].children.find((c) => c.textContent === "Ask HIMARI about this file");
+  item.listeners.click[0]();
+  assert.deepEqual(asked, [{ path: image.path, name: "p.png", identity: ["5", "6", "9", "7"], whole: true }]);
+  const plain = editorPane({ "GET /api/machine/file": TEXT });
+  await plain.files.openFile(TEXT.path);
+  assert.equal(plain.module.made[0].opts.onAsk, null);
+  const plainMenu = plain.files.tools.children.find((c) => c.className.includes("files-file-menu"));
+  assert.ok(!plainMenu.children[1].children.some((c) => c.textContent === "Ask HIMARI about this file"));
+  plain.files.closeDoc();
+}
+
+// A reference's place: the file opened (once), its selection selected.
+{
+  const { files, sent, module } = editorPane({ "GET /api/machine/file": { ...TEXT, text: "one two" } });
+  await files.reveal(TEXT.path, 4, 7);
+  assert.deepEqual(module.made[0].picked, [4, 7]);
+  await files.reveal(TEXT.path, 0, 3);
+  assert.equal(sent.filter(([m, path]) => m === "GET" && path.startsWith("/api/machine/file")).length, 1);
+  assert.deepEqual(module.made[0].picked, [0, 3]);
   files.closeDoc();
 }
 
