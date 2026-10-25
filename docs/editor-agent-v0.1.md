@@ -410,7 +410,7 @@
   - `GET …/changes/diff?path=`: 처음과 지금의 글, 지금의 상태.
   - `POST …/changes/accept {paths | all}`.
   - `POST …/changes/revert {path, seen?}`: 충돌이면 409 `changed`와 `now: {exists, identity}`. 그 `now`를 `seen`으로 다시 보내면 "그래도 되돌리기"다.
-  - `POST …/changes/revert-all`: 되돌리지 못한 것과 이유를 돌려준다.
+  - `POST …/changes/revert-all`: 남은 것과 이유(`left`), 남은 숨김 항목의 개수(`hidden`)를 돌려준다. 되돌릴 수 없는 항목도 `left`에 `not_revertible`로 들어간다.
   - `POST /api/machine/versions/{id}/restore {path}`: 지운 파일을 `install`로 복원한다(V3-P75 Deleted files). 화면 연결은 b에서 한다.
 - **이전 판 목록**: 에이전트 판도 Previous versions와 Deleted files에 함께 나온다("before HIMARI changed it", "before HIMARI deleted it"). 되돌리기 때 남는 소유자 판은 "before a revert"다.
 
@@ -424,6 +424,16 @@
 6. **되돌리기의 실제 쓰기는 편집기의 쓰기를 그대로 쓴다.**
    - 있었음/있음은 `replace`(이유 `revert`), 있었음/없음은 `install`, 없었음/있음은 `delete`.
    - 그래서 지금 파일이 1 MiB를 넘으면 `replace`가 거부한다(`too_large`).
+
+### 13.2a 검수 반영 (PR #98)
+
+1. **받아들이기·되돌리기와 turn 시작의 경쟁**(P1).
+   - 전에는 "turn 중인가"를 본 뒤 따로 잠금을 잡았다. 그 사이 새 turn이 시작해 같은 파일을 바꾸면, 받아들이기가 그 새 변경까지 지울 수 있었다.
+   - 이제 대화별 실행 제어(`BackgroundRunner`)에 `hold`를 더했다. 실행 중이거나 입력을 받는 중이면 BUSY로 거부하고, 잡혀 있는 동안 모든 submit과 시작은 BUSY다. 확인과 잡기는 동기라 사이에 turn이 시작할 수 없다. 아무것도 취소하지 않는다(휴지통의 `close`와 다른 점).
+   - 받아들이기·되돌리기는 대화의 lifecycle 잠금(`_exclusive`) 안에서 `hold`를 잡고 한다. 그동안 휴지통 이동도 기다린다.
+   - 그동안 보낸 메시지는 409 `busy`("still working")다. 되돌리기가 끝나면 다시 보낼 수 있다.
+   - **멈춘 turn의 마지막 답.** Tool의 `kept`/`unknown`은 shield 안에서 돈다. turn을 멈추면 turn은 끝났는데 기록은 아직 도착 중일 수 있다. 그래서 `ChangeStore`가 의도부터 결과까지의 호출을 메모리에서 세고(`busy`), 그동안 받아들이기·되돌리기는 409 `busy`("still finishing a change")다.
+2. **모두 되돌리기의 남은 항목**(P2). 전에는 되돌릴 수 없는 항목을 건너뛰고 `left`에 넣지 않아, 남은 것이 있어도 `left=[]`였다. 이제 보이는 항목을 모두 시도하고, 되돌리지 못한 것은 이유(`not_revertible`, `changed` 등)와 함께 `left`에 넣는다. 숨김 항목은 경로 없이 `hidden` 개수만 준다.
 
 ### 13.3 확인
 
@@ -448,7 +458,10 @@
   - §6의 표 전부(바꿈, 만듦, 지움, 만들고 지움, A→B→지움, 지움→다시 만듦).
   - 그 뒤 소유자의 저장은 409이고, 본 상태로만 되돌린다. 그사이 또 바뀌면 다시 409다.
   - 지운 파일이 다시 생겼으면 409다. `interleaved`는 바로 되돌리지 않는다.
-  - 거부된 호출은 항목을 그대로 둔다. turn 중에는 409 `busy`다.
+  - 거부된 호출은 항목을 그대로 둔다. turn 중에는 409 `busy`다. 받아들이는 동안 시작하려는 turn은 BUSY다.
+  - 모두 되돌리기는 되돌릴 수 없는 항목을 `not_revertible`로, 숨김 항목을 개수로 돌려준다.
+- 실행 제어(`tests/control/test_runner.py`): `hold` 중 모든 submit은 BUSY이고 아무것도 받지 않는다. 다른 대화는 상관없다. 실행·입력 수락 중에는 `hold`가 BUSY이고 job을 멈추지 않는다. 닫힌 대화는 CLOSED다.
+- 기록: 답이 아직 오지 않은 호출이 있으면 받아들이기·되돌리기·모두 되돌리기는 `busy`다. 기록하지 못한 `begin`은 세지 않는다.
   - 숨김이 된 경로와 다른 곳으로 풀리는 경로는 개수만 보인다. diff, 되돌리기, 받아들이기는 404이고, 모두 받아들이기로만 지운다.
   - 1 MiB 넘는 파일은 `no_version`이다. 기록을 시작하지 못하면 쓰지 않는다. 지운 파일 복원과 이름이 잡힌 경우를 확인한다.
 - 배포 주의

@@ -16,6 +16,9 @@ from runnerkit import RunnerKit, start_runner  # noqa: E402
 from testkit import calls, final  # noqa: E402
 from webkit import Server  # noqa: E402
 
+from himari.bootstrap.changes import ChangeReview  # noqa: E402
+from himari.common import ConversationId, PrincipalId, TrustedScope  # noqa: E402
+from himari.control.api import ControlError, ControlErrorCode  # noqa: E402
 from himari.interfaces.web import app as web  # noqa: E402
 
 
@@ -102,8 +105,7 @@ def test_each_change_is_listed_and_reverted_by_its_first_and_last_state(server: 
     deleted = server.client.get(f"/api/conversations/{cid}/changes/diff",
                                 params={"path": str(here / "gone.txt")}).json()
     assert deleted["before"]["text"] == "G\n" and deleted["now"] == {"exists": False, "identity": None, "text": None}
-    left = server.post(f"/api/conversations/{cid}/changes/revert-all", {}).json()["left"]
-    assert left == []
+    assert server.post(f"/api/conversations/{cid}/changes/revert-all", {}).json() == {"left": [], "hidden": 0}
     assert (here / "a.txt").read_text() == "A\n" and (here / "gone.txt").read_text() == "G\n"
     assert not (here / "new.txt").exists() and not (here / "tmp.txt").exists()
     assert changes(server, cid)["items"] == []
@@ -199,11 +201,26 @@ def test_accepting_and_the_turn(server: Server, kit: RunnerKit, monkeypatch: pyt
     running = type("Status", (), {"running": True})()
     with monkeypatch.context() as m:  # §6: while a turn runs, nothing is accepted or reverted
         m.setattr(application.runner, "status", lambda scope: running)
+        m.setattr(application.runner, "_running_in", lambda conversation_id: True)
         refused(server.post(f"/api/conversations/{cid}/changes/accept", {"all": True}), 409, "busy")
         refused(revert(server, cid, here / "a.txt"), 409, "busy")
         refused(server.post(f"/api/conversations/{cid}/changes/revert-all", {}), 409, "busy")
         assert changes(server, cid)["running"]
-    assert server.post(f"/api/conversations/{cid}/changes/accept", {"paths": [str(here / "a.txt")]}).status_code == 200
+    # Review C1: and no turn starts while one is accepted or reverted.
+    told: list[ControlErrorCode] = []
+    accept = ChangeReview.accept
+
+    async def accept_and_send(self: ChangeReview, conversation: str, paths: Any) -> None:
+        with pytest.raises(ControlError) as busy:
+            await application.runner.submit(TrustedScope(PrincipalId("anyone"), ConversationId(cid)), None)
+        told.append(busy.value.code)
+        await accept(self, conversation, paths)
+
+    with monkeypatch.context() as m:
+        m.setattr(ChangeReview, "accept", accept_and_send)
+        assert server.post(f"/api/conversations/{cid}/changes/accept",
+                           {"paths": [str(here / "a.txt")]}).status_code == 200
+    assert told == [ControlErrorCode.BUSY]
     assert list(by_name(changes(server, cid))) == ["b.txt"] and (here / "a.txt").read_text() == "A\n"
     assert server.post(f"/api/conversations/{cid}/changes/accept", {"all": True}).status_code == 200
     assert changes(server, cid) == {"items": [], "hidden": 0, "commands_ran": None, "running": False}
@@ -230,6 +247,8 @@ def test_a_path_hidden_now_is_counted_only(server: Server, kit: RunnerKit) -> No
     (here / "sub").unlink()
     (here / "sub").symlink_to(here / "elsewhere")  # the same name, another folder: still not shown
     assert changes(server, cid)["hidden"] == 1
+    assert server.post(f"/api/conversations/{cid}/changes/revert-all", {}).json() == {"left": [], "hidden": 1}
+    assert not (here / "y.txt").exists()  # the shown one was reverted; the hidden one left, counted
     assert server.post(f"/api/conversations/{cid}/changes/accept", {"all": True}).status_code == 200
     assert changes(server, cid)["hidden"] == 0
 
@@ -243,7 +262,9 @@ def test_what_cannot_be_reverted(server: Server, kit: RunnerKit) -> None:
     item = by_name(changes(server, cid))["big.txt"]
     assert (item["state"], item["revertible"], item["kind"]) == ("no_version", False, "changed")
     assert refused(revert(server, cid, here / "big.txt"), 409, "not_revertible")["message"].startswith("Its previous")
-    assert server.post(f"/api/conversations/{cid}/changes/revert-all", {}).json()["left"] == []  # not tried
+    left = server.post(f"/api/conversations/{cid}/changes/revert-all", {}).json()  # review C3: left, and why
+    assert [(i["path"], i["code"]) for i in left["left"]] == [(str(here / "big.txt"), "not_revertible")]
+    assert left["left"][0]["message"].startswith("Its previous version could not be kept") and left["hidden"] == 0
     assert (here / "big.txt").read_text() == "small"
 
 

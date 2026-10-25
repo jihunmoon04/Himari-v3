@@ -393,3 +393,66 @@ def test_forget_drops_the_last_job_but_not_a_running_one() -> None:
         assert runner.status(SCOPE) == JobStatus(running=False)
 
     asyncio.run(scenario())
+
+
+# --- holding a Conversation while its file changes are reviewed (V3-P76 §6) ----------------
+
+
+def busy(error: pytest.ExceptionInfo[ControlError]) -> bool:
+    return error.value.code is ControlErrorCode.BUSY
+
+
+def test_a_held_conversation_starts_no_work_and_nothing_is_cancelled() -> None:
+    async def scenario() -> None:
+        driver = GatedDriver()
+        driver.release.set()
+        runner = BackgroundRunner(driver)
+        with runner.hold(SCOPE):
+            submits: list[Callable[[], Awaitable[JobStatus]]] = [
+                lambda: runner.submit(SCOPE, user("x")), lambda: runner.submit(SCOPE, None),
+                lambda: runner.submit_compaction(SCOPE), lambda: runner.submit_cancel(SCOPE)]
+            for submit in submits:
+                with pytest.raises(ControlError) as refused:
+                    await submit()
+                assert busy(refused)
+            with pytest.raises(ControlError) as again:
+                with runner.hold(SCOPE):
+                    pass
+            assert busy(again)
+            other = TrustedScope(SCOPE.principal_id, ConversationId("conv_2"))
+            assert (await runner.submit(other, None)).running  # other Conversations are not held
+            await asyncio.sleep(0)
+        assert driver.calls[0] == (other, None) and driver.cancels == []  # nothing accepted here
+        assert (await runner.submit(SCOPE, user("after"))).running
+
+    asyncio.run(scenario())
+
+
+def test_hold_is_refused_while_a_job_runs_or_an_input_is_being_accepted() -> None:
+    async def scenario() -> None:
+        driver = GatedAccept()
+        runner = BackgroundRunner(driver)
+        submitting = asyncio.create_task(runner.submit(SCOPE, user("sent")))
+        await driver.in_accept.wait()
+        with pytest.raises(ControlError) as accepting:
+            with runner.hold(SCOPE):
+                pass
+        assert busy(accepting)
+        driver.accepting.set()
+        await submitting
+        with pytest.raises(ControlError) as running:
+            with runner.hold(SCOPE):
+                pass
+        (signal,) = driver.signals
+        assert busy(running) and signal is not None and signal.request is None  # not stopped
+        driver.release.set()
+        await runner.wait(SCOPE)
+        with runner.hold(SCOPE):
+            pass
+        await runner.close(SCOPE, timeout=5)
+        with pytest.raises(ControlError) as shut:
+            with runner.hold(SCOPE):
+                pass
+        assert closed(shut)
+
+    asyncio.run(scenario())

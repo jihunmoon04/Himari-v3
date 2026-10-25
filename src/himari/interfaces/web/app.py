@@ -1509,10 +1509,12 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
     @app.post("/api/conversations/{conversation_id}/changes/revert-all")
     async def revert_all_file_changes(conversation_id: str, request: Request,
                                       who: PrincipalId = Depends(principal)) -> dict[str, Any]:
-        """Each revertible file in turn; the ones left (changed since, or refused), and why."""
-        left = await himari(request).revert_all_file_changes(scope_of(conversation_id, who))
+        """Each shown file in turn; the ones left (changed since, refused, or
+        not revertible) and why, and how many hidden ones were left."""
+        done = await himari(request).revert_all_file_changes(scope_of(conversation_id, who))
         return {"left": [{"path": path, "code": why.category if isinstance(why, ExplorerRefused) else "changed",
-                          "message": str(why)} for path, why in left]}
+                          "message": str(why)} for path, why in done.left],
+                "hidden": done.hidden}
 
     @app.post("/api/conversations/{conversation_id}/messages", status_code=202)
     async def send_message(conversation_id: str, body: MessageBody, request: Request,
