@@ -35,7 +35,7 @@ from himari.runner.config import RunnerConfig
 from himari.runner.hidden import under
 from himari.runner.hostfs import Host
 from himari.runner.proxy import Door, Proxy
-from himari.runner.push import MAX_BUNDLE_BYTES, Pusher, check_branch, remote
+from himari.runner.push import MAX_BUNDLE_BYTES, Pusher, check_branch, remote, token_problem
 from himari.sandbox.api import (
     MAX_ARGV,
     MAX_OUTPUT_BYTES,
@@ -46,7 +46,7 @@ from himari.sandbox.api import (
     SandboxUnavailableError,
     validate_argv,
 )
-from himari.sandbox.machine import MachineLayout, MachineSandbox
+from himari.sandbox.machine import MachineLayout, MachineSandbox, Mask
 from himari.sandbox.machine_self_test import probe
 
 log = logging.getLogger("himari.runner")
@@ -80,6 +80,8 @@ class Runner:
         self.proxy: Proxy | None = None  # commands' way out (§11); None: no network
         # git push's steps outside the sandbox (§12); None: not set up
         self.pusher = None if config.push is None else Pusher(config.push, config.push_token, config.state_dir)
+        # One push at a time: at most one bundle (2 GiB) on disk (PR #90 review B2).
+        self._pushing = asyncio.Semaphore(1)
 
     async def start(self) -> SandboxState:
         """The self-test (V3-050, §13), once; then the proxy, if configured."""
@@ -105,6 +107,8 @@ class Runner:
             return report.passed
 
         state = await self.sandbox.start(self_test)
+        if self.pusher is not None and (problem := await self._token_problem()) is not None:
+            log.error("git push is off: %s (%s)", problem, self.pusher.token_file)
         if state is not SandboxState.ENFORCED:
             log.error("the machine sandbox is %s: %s", state.value, self.report_failures)
         elif config.network is not None:
@@ -199,7 +203,8 @@ class Runner:
                     "pids_max": config.pids_max if self.commands else None,
                     "toolkit": config.documents_toolkit is not None,
                     "network": None if self.proxy is None else list(self.proxy.allow),
-                    "push": None if self.pusher is None else list(self.pusher.repos)}, []
+                    "push": None if self.pusher is None or await self._token_problem(masks) is not None
+                    else list(self.pusher.repos)}, []
         if self.sandbox.state is not SandboxState.ENFORCED:
             # §13 (PR #87 review B1): without a passed self-test nothing but hello is done — files included.
             raise api.RunnerError(api.UNAVAILABLE)
@@ -351,13 +356,28 @@ class Runner:
         host, pusher = self.host, self.pusher
         if pusher is None:
             raise api.RunnerError(api.ACCESS, "git push is not set up on this server")
+        if (problem := await self._token_problem()) is not None:
+            log.error("git push refused: %s (%s)", problem, pusher.token_file)
+            raise api.RunnerError(api.ACCESS, f"git push is not set up safely on this server: {problem}")
         branch = check_branch(args.get("branch"))
         repository = await self._blocking(lambda: host.directory(args.get("repository", "."), _text(args, "cwd")))
         if not any(under(repository, root) for root in roots):
             raise api.RunnerError(api.OUTSIDE_WORKSPACES, "git_push pushes repositories inside this conversation's "
                                                           "workspaces only; ask the user to attach the folder")
-        work = await self._unless_cancelled(self._push_steps(pusher, repository, branch), conn)
+        work = await self._unless_cancelled(self._one_push(pusher, repository, branch), conn)
         return None if work is None else work.result()
+
+    async def _one_push(self, pusher: Pusher, repository: str, branch: str) -> dict[str, Any]:
+        async with self._pushing:
+            return await self._push_steps(pusher, repository, branch)
+
+    async def _token_problem(self, masks: tuple[Mask, ...] | None = None) -> str | None:
+        """Checked on every use: the file, or the hidden list, may have changed (PR #90 review B1)."""
+        pusher, rules = self.pusher, self.host.rules
+        if pusher is None:
+            return "git push is not set up"
+        return await self._blocking(lambda: token_problem(pusher.token_file, rules,
+                                                          rules.masks() if masks is None else masks))
 
     async def _push_steps(self, pusher: Pusher, repository: str, branch: str) -> dict[str, Any]:
         config = self.config

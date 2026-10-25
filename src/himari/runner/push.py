@@ -12,7 +12,8 @@ transport each step needs (``file`` to read the bundle, ``https`` to push).
 The refspec is ``refs/heads/<branch>:refs/heads/<branch>``: never forced,
 never a deletion. The token is the configured fine-grained one, handed to
 the push alone through ``GIT_ASKPASS``; it is not in the runner's
-environment.
+environment. Its file must be one commands cannot read (``token_problem``):
+otherwise push is off (PR #90 review B1).
 """
 
 from __future__ import annotations
@@ -22,13 +23,16 @@ import contextlib
 import os
 import re
 import shutil
+import stat
 import tempfile
 from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from urllib.parse import urlsplit
 
 from himari.runner import api
+from himari.runner.hidden import HiddenRules
 from himari.runner.proxy import Refused, normalize
+from himari.sandbox.machine import Mask
 
 MAX_BUNDLE_BYTES = 2 * 1024 ** 3
 STEP_SECONDS = 120
@@ -91,6 +95,28 @@ def remote(url: str, repos: Sequence[str]) -> str:
     return f"https://{host}/{owner}/{name}.git"
 
 
+def token_problem(path: str, rules: HiddenRules, masks: tuple[Mask, ...]) -> str | None:
+    """Why the token file may not be used, or None: it must be a regular
+    file of the runner's user, readable by no one else, with no other name
+    (a hard link elsewhere could be visible), and hidden from commands."""
+    real = os.path.realpath(path)
+    try:
+        info = os.lstat(real)
+    except OSError:
+        return "the token file is missing"
+    if not stat.S_ISREG(info.st_mode):
+        return "the token file is not a regular file"
+    if info.st_uid != os.getuid() or not os.access(real, os.R_OK):
+        return "the token file is not the runner user's own"
+    if info.st_mode & 0o077:
+        return "the token file can be read by other users (make it 0600)"
+    if info.st_nlink != 1:
+        return "the token file has other names (hard links)"
+    if not rules.is_hidden(real, masks):
+        return "the token file is visible to commands (put it in a hidden location such as /etc/himari-runner/)"
+    return None
+
+
 def check_branch(branch: object) -> str:
     """A branch name git accepts, from a conservative subset: letters,
     digits, ``._/+-``; no component starting with ``.`` or ending in
@@ -141,8 +167,6 @@ class Pusher:
     async def push(self, folder: str, bundle: str, branch: str, url: str) -> Pushed:
         """Fetch ``bundle`` (exactly ``refs/heads/<branch>``) into a new bare
         repository in ``folder`` and push it to ``url`` (already checked)."""
-        if not os.access(self.token_file, os.R_OK):
-            raise api.RunnerError(api.ACCESS, "git push is not set up on this server (no token)")
         home, bare = os.path.join(folder, "home"), os.path.join(folder, "repo.git")
         os.mkdir(home, 0o700)
         ref = f"refs/heads/{branch}"

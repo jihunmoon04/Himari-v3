@@ -469,8 +469,10 @@ def test_folders_data_will_not_give_run_nothing(kit: RunnerKit) -> None:
 def test_git_push(tmp_path: Path) -> None:
     """§12 through the Tool: created, up to date, rejected; told in the state; refused when not set up."""
     server = gitserver.GitServer(tmp_path / "server", "tok")
-    token = tmp_path / "token"
+    token = tmp_path / "kit/secret-root/token"  # on the kit's hidden list
+    token.parent.mkdir(parents=True)
     token.write_text("tok")
+    token.chmod(0o600)
     kit = start_runner(tmp_path / "kit", push={"repos": ["github.com/owner/*"], "token_file": str(token)})
     try:
         server.bare("repo")

@@ -205,17 +205,27 @@ async def _drain(stream: asyncio.StreamReader | None, limit: int) -> tuple[bytes
     return bytes(kept), total
 
 
-async def _spool(stream: asyncio.StreamReader | None, sink: int, limit: int) -> tuple[bytes, int]:
-    """Write the first ``limit`` bytes to the file ``sink``, count (and
-    discard) the rest, as ``_drain`` does."""
+async def _spool(stream: asyncio.StreamReader | None, sink: int, limit: int,
+                 overflow: Callable[[], None]) -> tuple[bytes, int]:
+    """Write the first ``limit`` bytes to the file ``sink`` (on a thread: a
+    slow disk does not hold up the loop), then call ``overflow`` (which
+    stops the command) and count what is left until the end of the stream."""
     if stream is None:
         return b"", 0
     total = 0
     while chunk := await stream.read(1 << 20):
-        if total < limit:
-            os.write(sink, chunk[: limit - total])  # a regular file of the runner's own: no blocking
+        if total <= limit:
+            await asyncio.to_thread(_write_all, sink, chunk[: limit - total])
+            if total + len(chunk) > limit:
+                overflow()
         total += len(chunk)
     return b"", total
+
+
+def _write_all(fd: int, data: bytes) -> None:
+    view = memoryview(data)
+    while view:
+        view = view[os.write(fd, view):]
 
 
 async def _wait_sync(fd: int, timeout: float) -> bytes:
@@ -406,7 +416,7 @@ async def _supervise(process: asyncio.subprocess.Process, sync_r: int, timeout: 
 
         tasks = [
             asyncio.create_task(_drain(process.stdout, max_output) if stdout_to is None
-                                else _spool(process.stdout, stdout_to, max_output)),
+                                else _spool(process.stdout, stdout_to, max_output, lambda: _kill_tree(process.pid))),
             asyncio.create_task(_drain(process.stderr, MAX_OUTPUT_BYTES)),
         ]
         timed_out = False

@@ -36,7 +36,8 @@ def kit() -> Iterator[RunnerKit]:
     base = Path(tempfile.mkdtemp(prefix="host-", dir=scratch))
     sandbox = MachineSandbox.discover()
     assert sandbox.state is SandboxState.CAPABLE_INACTIVE, "host lacks bwrap/Landlock/userns"
-    token = base / "push-token"
+    token = base / "secret-root/push-token"  # on the kit's hidden list (PR #90 review B1)
+    token.parent.mkdir()
     token.write_text("github_pat_host\n")
     token.chmod(0o600)
     started = start_runner(base, sandbox=sandbox, home=Path.home(), network=True,
@@ -245,4 +246,41 @@ def test_git_push_runs_nothing_of_the_repository_outside(kit: RunnerKit) -> None
             name.startswith("proxy-") for name in os.listdir(kit.runner.config.state_dir))
     finally:
         server.close()
+
+
+def test_the_push_token_is_not_read_by_commands(kit: RunnerKit) -> None:
+    """PR #90 review B1: the token file push uses is hidden; one where commands can read turns push off."""
+    pusher = kit.runner.pusher
+    assert pusher is not None and call(kit, api.HELLO, {})["push"] == ["github.com/owner/*"]
+    code, out, err = run(kit, f"cat {pusher.token_file}; echo; ls -A {os.path.dirname(pusher.token_file)} | wc -l")
+    assert "github_pat_host" not in out + err and out.split()[-1] == "0"
+    visible = kit.himari_home.parent / "visible-token"
+    visible.write_text("github_pat_visible\n")
+    visible.chmod(0o600)
+    hidden, pusher.token_file = pusher.token_file, str(visible)
+    try:
+        assert "github_pat_visible" in run(kit, f"cat {visible}")[1]  # this one a command can read …
+        assert call(kit, api.HELLO, {})["push"] is None  # … so push is off
+        with pytest.raises(api.RunnerError, match="visible to commands"):
+            call(kit, api.GIT_PUSH, {"repository": ".", "branch": "main", "cwd": "/", "write_roots": [
+                call(kit, api.CONVERSATION_FOLDER, {"conversation": "hosttest"})["path"]]})
+    finally:
+        pusher.token_file = hidden
+
+
+def test_a_bundle_over_its_limit_stops_the_command(kit: RunnerKit) -> None:
+    """PR #90 review B2: the spool stops the command at its limit (not at the timeout)."""
+    from himari.sandbox.machine import MachineLayout
+
+    folder = call(kit, api.CONVERSATION_FOLDER, {"conversation": "hosttest"})["path"]
+    out = Path(tempfile.mkdtemp(prefix="spool-", dir=kit.himari_home.parent)) / "out"
+    layout = MachineLayout(home=str(Path.home()), cwd=folder, writable=(), masks=kit.runner.host.rules.masks())
+    fd = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        started = time.monotonic()
+        result = asyncio.run(kit.runner.sandbox.run(["yes"], layout, 60, max_output=1 << 20, stdout_to=fd))
+    finally:
+        os.close(fd)
+    assert time.monotonic() - started < 15 and not result.timed_out
+    assert result.stdout_total > 1 << 20 and out.stat().st_size == 1 << 20
 

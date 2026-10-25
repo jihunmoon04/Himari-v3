@@ -172,15 +172,12 @@ def test_the_bundle_holds_the_branch_only(server: GitServer, tmp_path: Path) -> 
 
 
 @needs_git
-def test_the_token(server: GitServer, tmp_path: Path) -> None:
+def test_a_wrong_or_missing_token(server: GitServer, tmp_path: Path) -> None:
+    """The file's placement is the operation's check (below); here only what git does without the token."""
     repo = work(tmp_path / "work")
-    with pytest.raises(api.RunnerError, match="not set up") as refused:
-        push(LocalPusher(server, REPOS, str(tmp_path / "missing"), str(tmp_path / "state")),
-             bundle(repo, "refs/heads/main"))
-    assert refused.value.category == api.ACCESS
-    with pytest.raises(api.RunnerError, match="git push failed"):
-        push(LocalPusher(server, REPOS, token_file(tmp_path, "wrong"), str(tmp_path / "state")),
-             bundle(repo, "refs/heads/main"))
+    for path in (token_file(tmp_path, "wrong"), str(tmp_path / "missing")):
+        with pytest.raises(api.RunnerError, match="git push failed"):
+            push(LocalPusher(server, REPOS, path, str(tmp_path / "state")), bundle(repo, "refs/heads/main"))
     assert server.head("repo") is None and not any(server.authorized)
 
 
@@ -193,8 +190,10 @@ def call(kit: RunnerKit, args: dict[str, Any]) -> dict[str, Any]:
 
 @pytest.fixture
 def pushing(tmp_path: Path, server: GitServer) -> Iterator[tuple[RunnerKit, Path]]:
+    secret = tmp_path / "kit/secret-root"  # on the kit's hidden list
+    secret.mkdir(parents=True)
     kit = start_runner(tmp_path / "kit", push={"repos": ["github.com/owner/*"],
-                                               "token_file": token_file(tmp_path)})
+                                               "token_file": token_file(secret)})
     assert kit.runner.pusher is not None
     kit.runner.pusher = LocalPusher(server, kit.runner.pusher.repos, kit.runner.pusher.token_file,
                                     kit.runner.config.state_dir)
@@ -261,12 +260,59 @@ def test_the_operation_refuses(pushing: tuple[RunnerKit, Path], monkeypatch: pyt
     assert "not set up" in refused(api.ACCESS, repository=str(repo))
 
 
-def test_a_spooled_stdout_keeps_its_first_bytes_and_counts_the_rest(tmp_path: Path) -> None:
+@needs_git
+def test_the_token_file_must_be_one_commands_cannot_read(pushing: tuple[RunnerKit, Path], tmp_path: Path) -> None:
+    """PR #90 review B1: otherwise push is off, in the state and in the operation."""
+    kit, folder = pushing
+    assert kit.runner.pusher is not None
+    hidden = kit.runner.pusher.token_file
+    visible = token_file(tmp_path)  # a 0600 file of the user's, where commands can read
+    work(folder)
+
+    def problem(path: str) -> str:
+        assert kit.runner.pusher is not None
+        kit.runner.pusher.token_file = path
+        hello, _ = asyncio.run(RunnerClient(kit.socket).call(api.HELLO, {}))
+        assert hello["push"] is None
+        with pytest.raises(api.RunnerError) as error:
+            call(kit, {"repository": str(folder), "branch": "main", "cwd": str(folder), "write_roots": [str(folder)]})
+        assert error.value.category == api.ACCESS and "not set up safely" in str(error.value)
+        return str(error.value)
+
+    assert "visible to commands" in problem(visible)
+    os.chmod(hidden, 0o640)
+    assert "other users" in problem(hidden)
+    os.chmod(hidden, 0o600)
+    os.link(hidden, tmp_path / "other-name")
+    assert "hard links" in problem(hidden)
+    os.unlink(tmp_path / "other-name")
+    assert "missing" in problem(hidden + ".gone")
+    assert "not a regular file" in problem(os.path.dirname(hidden))
+    kit.runner.pusher.token_file = hidden
+    hello, _ = asyncio.run(RunnerClient(kit.socket).call(api.HELLO, {}))
+    assert hello["push"] == ["github.com/owner/*"]
+
+
+def test_a_spooled_stdout_keeps_its_first_bytes_and_stops_the_command(tmp_path: Path,
+                                                                       monkeypatch: pytest.MonkeyPatch) -> None:
+    """PR #90 review B2: written on a thread, whole through partial writes; past the limit the command is
+    stopped and the rest only counted."""
+    writes: list[int] = []
+    real_write = os.write
+
+    def short_write(fd: int, data: Any) -> int:  # at most 7 bytes at a time
+        writes.append(len(data))
+        return real_write(fd, bytes(data[:7]))
+
+    monkeypatch.setattr(os, "write", short_write)  # the os module backend writes with
+    stopped: list[bool] = []
+
     async def go() -> tuple[bytes, int]:
         stream = asyncio.StreamReader()
         stream.feed_data(b"x" * 100)
         stream.feed_eof()
         with open(tmp_path / "out", "wb") as sink:
-            return await _spool(stream, sink.fileno(), 30)
+            return await _spool(stream, sink.fileno(), 30, lambda: stopped.append(True))
 
     assert asyncio.run(go()) == (b"", 100) and (tmp_path / "out").read_bytes() == b"x" * 30
+    assert stopped == [True] and len(writes) == 5  # 30 bytes in writes of 7
