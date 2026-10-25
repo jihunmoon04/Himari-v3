@@ -1,6 +1,6 @@
 # 머신 Workspace v0.1
 
-> 2026-10-25 · **PROPOSED (V3-P74)** · rev. 3 — 외부 재검수(HEAD a7eca31) 반영: N1 bundle fetch에만 `file` 전송 허용(§12), N2 숨김은 마지막에 가리고 실행 직전에 확인하는 불변 조건(§6.1), N3 runner 생존은 명령 OOM 격리까지만 보장(§6.5). rev. 2 — 외부 검수(HEAD 61200df) 반영: B1 기본 쓰기 범위를 대화 폴더로, 겹치는 Workspace는 한 충돌 영역(§3.2, §9.1), B2 파일 Tool은 디스크 파일시스템만·보이는 점 항목 줄임(§7, §8.2), B3 git push의 bundle 전달·대상·lock(§12), P2 등록 범위(§5.3)·링크 풀기(§8.3)·OOM(§6.5)·프록시 DNS(§11.3). 소유자 결정 Q1~Q8 대기(§17). rev. 1: 설계 초안.
+> 2026-10-25 · **PROPOSED (V3-P74)** · rev. 4 — 외부 재검수 2(HEAD ea6e534) 반영: N4 호스트의 경로 Unix 소켓을 seccomp로 막음(§6.6, Q9), N5 runner 소켓은 systemd 소켓 단위가 그룹 `himari-v3`로 만듦(§4.1), N6 Q5 문구를 §6.5에 맞춤(§17). 소유자 결정 Q1~Q9 대기(§17). rev. 3 — 외부 재검수(HEAD a7eca31) 반영: N1 bundle fetch에만 `file` 전송 허용(§12), N2 숨김은 마지막에 가리고 실행 직전에 확인하는 불변 조건(§6.1), N3 runner 생존은 명령 OOM 격리까지만 보장(§6.5). rev. 2 — 외부 검수(HEAD 61200df) 반영: B1 기본 쓰기 범위를 대화 폴더로, 겹치는 Workspace는 한 충돌 영역(§3.2, §9.1), B2 파일 Tool은 디스크 파일시스템만·보이는 점 항목 줄임(§7, §8.2), B3 git push의 bundle 전달·대상·lock(§12), P2 등록 범위(§5.3)·링크 풀기(§8.3)·OOM(§6.5)·프록시 DNS(§11.3). 소유자 결정 Q1~Q8 대기(§17). rev. 1: 설계 초안.
 >
 > 소유자 방향(2026-10-24, 대화에서 정함):
 > - 개발용 Workspace를 따로 만들지 않는다. 기본 Workspace에서 git·C·Python·Java 같은 일반 개발이 되게 한다.
@@ -100,7 +100,9 @@ Workspace는 **대화가 쓸 수 있는 폴더**다. 대화에 붙인 Workspace�
 
 - runner는 HIMARI 저장소의 새 최상위 모듈 `himari/runner/`다. 같은 release·venv에서 `python -m himari.runner`로 띄운다. `common`과 `sandbox`만 import한다(import 검사에 추가).
 - systemd `himari-runner.service`, `User=coder`. 설정은 `/etc/himari-runner/runner.toml`(root 소유, coder 읽기 전용)이라 runner도 모델도 바꿀 수 없다.
-- 소켓은 `/run/himari-runner/runner.sock`. 폴더는 `coder:himari-v3` 0750, 소켓 0660이다. runner는 연결마다 `SO_PEERCRED`로 상대 uid가 설정의 `client_uid`(himari-v3)인지 확인한다.
+- 소켓은 **systemd 소켓 단위**(`himari-runner.socket`)가 만든다: `ListenStream=/run/himari-runner/runner.sock`, `SocketUser=coder`, `SocketGroup=himari-v3`, `SocketMode=0660`, `DirectoryMode=0750`. runner는 받은 소켓을 `LISTEN_FDS`로 쓴다(검수 N5). runner가 직접 만들면 소켓 그룹이 `coder`가 되고, `coder`는 `himari-v3` 그룹의 구성원이 아니라 `chgrp`도 할 수 없다(이 서버: `coder`의 그룹은 `coder`, `users`, `himari-project`, 2026-10-25 확인). root인 systemd가 만들면 그룹을 정확히 줄 수 있다.
+- runner는 연결마다 `SO_PEERCRED`로 상대 uid가 설정의 `client_uid`(himari-v3)인지 다시 확인한다(파일 권한이 잘못되어도 다른 사용자는 거부).
+- 배포 시험: `himari-v3`로 연결 → `hello` 성공, `coder`가 아닌 다른 사용자(예: `nobody`)로 연결 → 권한 거부, 소켓의 소유·그룹·모드 확인.
 - runner는 대화나 principal을 모른다. HIMARI가 매 요청에 **이 호출의 쓰기 범위와 작업 위치**를 담아 보낸다. runner는 그 범위를 자기 설정과 다시 대조한다(§5.3).
 
 ### 4.2 왜 HIMARI를 coder로 돌리지 않나
@@ -218,6 +220,32 @@ V3-051 그대로다(기본 120초, 최대 600초, 출력 256 KiB 수집, 모델�
   - 서비스 OOM은 runner 로그와 HIMARI의 `UNKNOWN` 결과 문구("the machine runner restarted")로 알린다.
 - 결과에 "killed (out of memory)"를 적는다(`commands`의 `memory.events`의 `oom_kill` 증가로 안다).
 - 명령마다 따로 정하는 한도와 디스크 한도는 이후다.
+
+### 6.6 호스트의 경로 Unix 소켓 (검수 N4, Q9)
+
+**문제.** 읽기 전용으로 보이는 호스트 루트에도 경로 Unix 소켓(소켓 파일)이 있다. 소켓 연결은 파일 쓰기가 아니라서 읽기 전용 마운트가 막지 않고, `coder`에게 쓰기 권한이 있으면 연결된다. Landlock ABI 6의 scope는 **추상** 소켓만 막는다. `/run`·`/tmp`를 새로 만드는 것은 그 두 곳만 해결한다.
+
+이 서버에서 확인했다(2026-10-25). `/run`·`/tmp`·`/dev` 밖에서 `coder`가 볼 수 있는 소켓 파일은 셋이고, 그중 하나에 실제로 연결된다.
+- `/home/coder/.local/share/code-server/code-server-ipc.sock`: **연결됨**(code-server IPC). §7의 점 항목 규칙이 가리지만, 숨김 목록이 놓친 소켓 하나가 Sandbox 밖 실행이 될 수 있다는 증거다.
+- `/var/lib/oracle-cloud-agent/tmp/plugin*`, `/etc/unified-monitoring-agenttmp/*`: 권한 거부.
+
+그래서 숨김 목록에 기대지 않고 **소켓을 만드는 것 자체**를 막는다.
+
+**계약.**
+- **seccomp(이 서버, Landlock ABI 8):** Landlock 도우미가 명령을 실행하기 직전(no_new_privs 뒤)에 seccomp 필터를 건다.
+  - `socket(AF_UNIX, …)` → `EACCES`. 경로 소켓에 연결하려면 이 호출이 먼저 있어야 하므로, 어느 경로의 소켓이든 연결할 수 없다.
+  - `socketpair(AF_UNIX, …)`는 허용한다. 이름 없는 한 쌍이라 호스트에 닿지 않고, Python asyncio·Node의 자식 IPC가 쓴다.
+  - `io_uring_setup`·`io_uring_enter`·`io_uring_register` → `ENOSYS`. io_uring의 소켓 연산은 `socket` 호출을 거치지 않기 때문이다.
+  - 아키텍처가 이 서버의 것(aarch64, 필터가 아는 것)이 아니면 프로세스를 끝낸다(다른 아키텍처의 호출 번호로 우회 방지).
+  - 필터는 BPF를 stdlib `ctypes`로 만들어 `prctl(PR_SET_SECCOMP)`로 건다(Landlock과 같은 방식, 새 의존성 없음).
+- **Landlock에 경로 소켓 제한이 생기면:** 검수에 따르면 ABI 9에 경로 소켓 연결 제한(`LANDLOCK_ACCESS_FS_RESOLVE_UNIX`)이 있다. 구현 때 커널 문서로 확인한다. 커널이 그것을 지원하면 Landlock으로 "Sandbox 안 `/tmp`의 소켓만 연결 허용"으로 바꾸고, seccomp의 `socket(AF_UNIX)` 규칙은 뺀다(호환성이 좋아짐). io_uring 규칙은 남긴다.
+- **프록시 다리(§11.2)는 예외가 아니다.** 다리는 도우미가 seccomp를 걸기 **전에** 따로 띄우는 프로세스다. 다리는 `PR_SET_DUMPABLE=0`으로 자기를 감춘다. 명령은 같은 uid이지만 능력(capability)이 없어 다리에 `ptrace`·`pidfd_getfd`·`/proc/<pid>/mem` 접근을 할 수 없다. 다리가 여는 경로는 코드에 고정된 `/run/himari/proxy.sock` 하나다.
+- 명령이 다리를 죽이면 네트워크만 끊긴다.
+
+**호환성 비용(이 서버에서).** 스스로 Unix 소켓을 만드는 프로그램은 `EACCES`로 실패한다.
+- Python 3.14 이상의 `multiprocessing` 기본 시작 방식(`forkserver`), `multiprocessing.Manager`, tmux·screen, ssh-agent, Docker CLI.
+- 이 서버의 Python은 3.12라 기본이 `fork`이고 영향이 없다. pip·Maven·Gradle(데몬은 loopback TCP)·javac·gcc·make·git·pytest·npm은 영향이 없다고 본다. 구현에서 각각 시험한다(§18).
+- `run_command` 설명에 "Unix domain sockets cannot be created; use TCP on 127.0.0.1 or `multiprocessing.set_start_method('fork')`"를 적는다.
 
 ## 7. 숨김 목록 (Q3)
 
@@ -356,6 +384,7 @@ Tool 설명에 고정 문장으로 쓰기 범위·숨김·네트워크·push 방
 
 - runner가 프록시를 Unix 소켓으로 연다. 그 소켓을 Sandbox 안 `/run/himari/proxy.sock`에 묶는다.
 - Landlock 도우미가 명령을 실행하기 전에 Sandbox 안 `127.0.0.1:3128`에서 그 소켓으로 잇는 작은 다리를 띄운다. 명령보다 먼저 포트를 잡으므로 명령이 가로챌 수 없다.
+- 다리는 seccomp를 걸기 전에 갈라져 나오고, 숨겨진(`PR_SET_DUMPABLE=0`) 프로세스다(§6.6).
 
 ### 11.3 프록시 규칙
 
@@ -412,6 +441,10 @@ runner가 시작할 때 머신 프로파일로 실제 명령을 띄워 다음을
 | 붙인 시험 Workspace에 쓰기 | 됨 |
 | 붙이지 않은 `coder` 폴더, 홈, `/usr`, `/`에 쓰기 | 거부 |
 | `/run/user/<uid>/bus`, `/run/dbus/system_bus_socket`, runner 소켓 연결 | 안 보임 |
+| 숨기지 않은 읽기 가능 폴더에 둔 시험용 호스트 소켓(`coder` 쓰기 가능)에 연결 | `socket(AF_UNIX)`에서 `EACCES`(N4) |
+| io_uring으로 소켓 만들기 | `ENOSYS` |
+| `socketpair(AF_UNIX)`, Python asyncio 이벤트 루프 | 됨 |
+| 다리 프로세스에 `ptrace` 붙기 | 거부 |
 | 호스트 `127.0.0.1`의 시험 리스너(TCP) | 닿지 않음 |
 | 프록시로 허용 밖 도메인, 허용 도메인이 사설 주소로 풀리는 경우 | 403 |
 | Sandbox 안 loopback 리스너 | 됨(Q8) |
@@ -443,7 +476,7 @@ HIMARI는 `hello`의 상태로 따르고, 따로 탈출 시험을 하지 않는�
 | 상위 Workspace 마운트가 숨김을 다시 드러냄 | 숨김을 마지막에 읽기 전용으로 가림 + 실행 직전 확인(§6.1) | 명령 도중 새로 생긴 점 항목 |
 | 숨김 위치를 링크로 우회 | 명령: 마운트 namespace에서 가림. 파일 Tool: 실제 경로 대조 | 숨김 파일을 가리키는 **이미 있던** 하드링크(새로 만들 수는 없음: 원본 이름이 안 보임) |
 | 붙이지 않은 폴더 쓰기 | 마운트 읽기 전용 + Landlock + runner 검사 | Workspace 안의 이미 있던 하드링크로 밖의 파일 내용 바꾸기(명령의 직접 쓰기. 파일 Tool은 rename이라 해당 없음) |
-| 호스트 소켓으로 Sandbox 밖 실행 | `/run`·`/tmp` 새로, 네트워크 namespace, Landlock scope | 자체 검사가 알려진 소켓을 확인 |
+| 호스트 소켓으로 Sandbox 밖 실행 | `/run`·`/tmp` 새로, 네트워크 namespace(추상 소켓), Landlock scope, **seccomp로 `socket(AF_UNIX)`·io_uring 거부**(§6.6) | 스스로 Unix 소켓을 만드는 프로그램이 실패(호환성 비용) |
 | push가 모델의 설정·hook을 실행 | bundle은 Sandbox 안, push는 runner의 빈 저장소에서 | — |
 | 강제 push·브랜치 삭제 | refspec에 `+`와 삭제를 만들지 않음 | GitHub 브랜치 보호를 함께 권함 |
 | 메모리·프로세스 폭주 | 서비스 한도, 명령 전용 cgroup(§6.5) | 서비스 전체 OOM 때 runner 재시작(진행 중 호출은 `UNKNOWN`), 디스크 채우기(한도 없음) |
@@ -477,10 +510,11 @@ HIMARI는 `hello`의 상태로 따르고, 따로 탈출 시험을 하지 않는�
 | Q2 | HIMARI 폴더 위치? | **`/home/coder/HIMARI`**(`conversations/<id>/`). 소유자가 터미널·편집기로 바로 열 수 있다 |
 | Q3 | 숨김 목록 방식? | **홈의 점 항목은 기본으로 숨기고 필요한 것만 보이기**(§7). 알려진 인증 위치만 나열하는 방식은 새 도구의 토큰을 놓친다 |
 | Q4 | Workspace를 누가 붙이나? | **사용자만(Web·CLI).** 모델 요청 + 한 번 승인은 이후 |
-| Q5 | 자원 한도? | **명령 전용 cgroup에 메모리 4 GiB·프로세스 1,024개, 서비스 전체 4.5 GiB·CPU 1.5개.** 넘치면 명령만 죽고 runner는 남는다(§6.5) |
+| Q5 | 자원 한도? | **명령 전용 cgroup에 메모리 4 GiB·프로세스 1,024개, 서비스 전체 4.5 GiB·CPU 1.5개.** 명령의 메모리 초과는 명령 cgroup 안에서 끝난다. 서비스 전체가 넘치면 runner도 죽을 수 있고, 그때는 다시 뜨며 진행 중 호출은 `UNKNOWN`이다(§6.5, 검수 N6) |
 | Q6 | 네트워크 허용 목록? | **§11.3의 기본 목록 + 사설·loopback 주소 거부.** 운영자가 설정에서 더한다 |
 | Q7 | push 인증? | **고른 저장소만 쓰는 전용 fine-grained 토큰을 runner 설정에.** `coder`의 gh 토큰은 계정 전체 권한이라 쓰지 않는다 |
 | Q8 | Sandbox 안 loopback TCP? | **허용.** namespace 안이라 밖에 닿지 않고, 테스트에 필요하다 |
+| Q9 | 호스트 경로 Unix 소켓을 어떻게 막나? | **seccomp로 `socket(AF_UNIX)`와 io_uring을 거부**(§6.6). 커널이 Landlock 경로 소켓 제한을 지원하면 그쪽으로 바꾼다. 대안인 "알려진 소켓 위치만 가리기"는 새로 생기는 소켓을 놓친다. 비용: 스스로 Unix 소켓을 만드는 프로그램(Python 3.14+ `forkserver`, tmux 등)이 이 서버에서는 실패한다 |
 
 ## 18. 검증 계획
 
@@ -488,6 +522,8 @@ HIMARI는 `hello`의 상태로 따르고, 따로 탈출 시험을 하지 않는�
 - **프록시:** 허용 이름이 사설 주소로 풀림, 응답 중 하나만 사설, 검사 뒤 DNS 답이 바뀜(재바인딩: 연결은 검사한 주소로), 443 외 포트, keep-alive 중 `Host` 바꾸기.
 - **runner 계약:** `SO_PEERCRED` 거부, 디스크립터 전달, 연결 끊김 → 명령 트리 종료, runner 재시작 → 결과 불명.
 - **호스트 시험(`HIMARI_SANDBOX_HOST=1`):** §13의 표 전부 + Drive 형태의 FUSE 마운트(가능하면 실제 rclone) 읽기·쓰기, Workspace 안 심볼릭 링크가 숨김 위치를 가리킬 때 명령·파일 Tool 모두 막힘.
+- **Unix 소켓(§6.6):** 자체 검사 항목 + 호환성 시험(pip, `python -m pytest`, asyncio, Python 3.12 `multiprocessing` 기본, Maven·Gradle wrapper 빌드, gcc·make, git, npm). 실패하는 것(forkserver 강제, tmux)은 결과 문구 확인.
+- **runner 소켓(§4.1):** `himari-v3`로 연결 성공, 다른 사용자 거부, `SO_PEERCRED` 거부(권한을 일부러 넓힌 경우).
 - **마운트 순서:** 숨김을 품은 Workspace(홈 전체), 숨김 안의 예외(`.local/bin`), 중첩 Workspace 둘, 숨김 파일(폴더가 아닌 것)에서 최종 트리 확인. bwrap 인자 순서를 고정하는 단위 시험.
 - **git push:** bundle `fetch`가 `file` 허용으로 성공하고 push 단계에서는 `file` 원격이 거부됨, 악성 `.git/config`(`core.fsmonitor`, `core.hooksPath`, `include.path`, `credential.helper`, `core.sshCommand`)와 `pre-push` hook을 둔 저장소에서 push해도 Sandbox 밖에서 아무것도 실행되지 않음(표시 파일로 확인). 붙이지 않은 저장소 거부, 허용 밖·`user@`·`http://`·`ssh` 원격 거부, ref가 둘 이상인 bundle 거부, 2 GiB 넘는 bundle 거부, 강제 push가 필요한 상황에서 거부 결과, push 중 같은 Workspace의 명령이 기다림.
 - **실제 개발 흐름(라이브, 선택):** 새 대화에서 Python 프로젝트 `pip install` + 테스트, C `make`, Java Gradle wrapper 빌드, git clone → 수정 → commit → push(시험 저장소).
@@ -501,7 +537,7 @@ HIMARI는 `hello`의 상태로 따르고, 따로 탈출 시험을 하지 않는�
 4. **4단계: git push.** §12.
 
 배포(소유자 sudo, 단계마다 스크립트로 준비):
-- `himari-runner.service`(User=coder, §6.5의 한도), `/etc/himari-runner/runner.toml`, `/run/himari-runner`(RuntimeDirectory).
+- `himari-runner.socket`(§4.1: `SocketUser=coder`, `SocketGroup=himari-v3`, `SocketMode=0660`)과 `himari-runner.service`(User=coder, `Delegate=yes`, §6.5의 한도), `/etc/himari-runner/runner.toml`. 소켓 권한 배포 시험(§4.1).
 - 개발 도구: `openjdk-21-jdk`, `maven`, `cmake`(이 서버에 gcc·make·python3·git은 있음, Java·cmake는 없음, 2026-10-24 확인). Gradle은 프로젝트의 wrapper가 받는다(허용 목록).
 - web.env: `HIMARI_MACHINE_SOCKET=/run/himari-runner/runner.sock`. 지우면 새 대화가 다시 `inside`를 쓴다(되돌리기).
 - 1단계는 DB 변경이 없고, 2단계에서 v12 → v13(업그레이드 전 백업, V3-P65).
