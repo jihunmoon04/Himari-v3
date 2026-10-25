@@ -1,6 +1,6 @@
 # 머신 Workspace v0.1
 
-> 2026-10-25 · **PROPOSED (V3-P74)** · rev. 2 — 외부 검수(HEAD 61200df) 반영: B1 기본 쓰기 범위를 대화 폴더로, 겹치는 Workspace는 한 충돌 영역(§3.2, §9.1), B2 파일 Tool은 디스크 파일시스템만·보이는 점 항목 줄임(§7, §8.2), B3 git push의 bundle 전달·대상·lock(§12), P2 등록 범위(§5.3)·링크 풀기(§8.3)·OOM(§6.5)·프록시 DNS(§11.3). 소유자 결정 Q1~Q8 대기(§17). rev. 1: 설계 초안.
+> 2026-10-25 · **PROPOSED (V3-P74)** · rev. 3 — 외부 재검수(HEAD a7eca31) 반영: N1 bundle fetch에만 `file` 전송 허용(§12), N2 숨김은 마지막에 가리고 실행 직전에 확인하는 불변 조건(§6.1), N3 runner 생존은 명령 OOM 격리까지만 보장(§6.5). rev. 2 — 외부 검수(HEAD 61200df) 반영: B1 기본 쓰기 범위를 대화 폴더로, 겹치는 Workspace는 한 충돌 영역(§3.2, §9.1), B2 파일 Tool은 디스크 파일시스템만·보이는 점 항목 줄임(§7, §8.2), B3 git push의 bundle 전달·대상·lock(§12), P2 등록 범위(§5.3)·링크 풀기(§8.3)·OOM(§6.5)·프록시 DNS(§11.3). 소유자 결정 Q1~Q8 대기(§17). rev. 1: 설계 초안.
 >
 > 소유자 방향(2026-10-24, 대화에서 정함):
 > - 개발용 Workspace를 따로 만들지 않는다. 기본 Workspace에서 git·C·Python·Java 같은 일반 개발이 되게 한다.
@@ -169,15 +169,24 @@ Unix 소켓의 `SCM_RIGHTS`로 열린 파일을 넘긴다.
 
 ### 6.1 배치
 
-| 위치 | 안에서 보이는 모습 |
-| --- | --- |
-| `/` | 호스트 루트를 **읽기 전용**으로(`--ro-bind / /`, 하위 마운트 포함) |
-| 숨김 목록(§7) | 폴더는 빈 tmpfs, 파일은 빈 파일로 가림 |
-| 붙인 Workspace들 | 같은 경로에 **읽기·쓰기**로 다시 묶음(확인한 디스크립터로 `--bind-fd`) |
-| `/tmp` | 새 tmpfs |
-| `/run`, `/var/run` | 새 tmpfs(사용자 systemd·D-Bus·에이전트 소켓을 가림) |
-| `/dev`, `/proc` | 새 것 |
-| 도구 캐시 | runner의 캐시 폴더를 읽기·쓰기로(§6.3) |
+마운트는 아래 **순서대로** 만든다. 순서가 계약의 일부다(검수 N2).
+
+| 순서 | 위치 | 안에서 보이는 모습 |
+| --- | --- | --- |
+| 1 | `/` | 호스트 루트를 **읽기 전용**으로(`--ro-bind / /`, 하위 마운트 포함) |
+| 1 | `/tmp` | 새 tmpfs |
+| 1 | `/run`, `/var/run` | 새 tmpfs(사용자 systemd·D-Bus·에이전트 소켓을 가림) |
+| 1 | `/dev`, `/proc` | 새 것 |
+| 2 | 붙인 Workspace들 | 같은 경로에 **읽기·쓰기**로 다시 묶음(확인한 디스크립터로 `--bind-fd`). 얕은 경로부터 |
+| 3 | 도구 캐시 | runner의 캐시 폴더를 읽기·쓰기로(§6.3) |
+| 4 | 숨김 목록(§7) | **마지막에** 가린다. 폴더는 빈 tmpfs를 올리고 바로 읽기 전용으로 다시 마운트, 파일은 `/dev/null`을 읽기 전용으로 묶음 |
+
+**불변 조건: 최종 마운트 트리에서 숨김 경로는 모두 가려져 있다.**
+- 숨김을 먼저 가리고 그 위 폴더를 Workspace로 다시 묶으면 가린 것이 사라진다. 이 서버에서 bwrap 0.9.0으로 재현했다(2026-10-25): `--tmpfs D/hidden --bind D D` 순서면 `D/hidden/token`이 읽히고, `--bind D D --tmpfs D/hidden` 순서면 없다. 그래서 숨김은 Workspace·캐시보다 **뒤에** 가린다. `/home/coder` 전체를 Workspace로 붙여도 `.ssh`는 가려진다.
+- 가림은 **읽기 전용**이다. tmpfs를 쓰기 가능하게 두면 Landlock의 쓰기 루트(`/home/coder`)가 그 아래 마운트도 허락해 모델이 거기에 쓴 줄 안다(사라지는 쓰기). 읽기 전용이면 "Read-only file system"으로 바로 실패한다.
+- 숨김은 **항목 단위**로 가린다. 홈의 점 항목 규칙(§7)은 명령마다 홈을 나열해 예외가 아닌 점 항목을 하나씩 가린다(예: `.local`은 `bin`·`lib` 외의 자식을, `.cache`는 `himari-runner` 외의 자식을). 예외는 가리지 않을 뿐 따로 묶지 않는다.
+- **실행 직전에 확인한다.** Landlock 도우미가 명령을 실행하기 전에 runner가 넘긴 숨김 목록의 각 경로를 본다. 폴더는 비어 있고 읽기 전용이며 장치가 호스트 원본과 달라야 하고, 파일은 크기 0이어야 한다. 하나라도 어긋나면 실행하지 않고 설정 실패로 보고한다(지금의 sync 보고와 같은 길). 숨김 경로는 수십 개라 비용이 작다.
+- 명령이 도는 동안 홈에 새로 생긴 점 항목은 그 명령에서는 가려지지 않는다. 다음 명령부터 가려진다(§15).
 
 - 사용자 namespace 안에서도 uid는 `coder` 그대로라, 만든 파일의 소유자는 `coder`다.
 - 지금 Workspace 프로파일의 "빈 루트 + 폴더 하나"와 달리, 실행 전에 폴더 전체를 훑는 검사(admission, V3-P41·V3-P59 §4.2)를 하지 않는다. 경계는 마운트 namespace(가림과 읽기 전용) + Landlock(쓰기 범위) + `coder`의 OS 권한이다. Workspace 안의 하드링크·마운트는 막지 않는다(§15의 남는 위험).
@@ -203,7 +212,10 @@ V3-051 그대로다(기본 120초, 최대 600초, 출력 256 KiB 수집, 모델�
 이 서버: 메모리 11 GiB, CPU 2개, cgroup v2(cpu·memory·pids 위임 가능), systemd 255(2026-10-24 확인).
 - **서비스 전체 한도(systemd):** `MemoryMax=4608M`, `MemorySwapMax=0`, `TasksMax=1100`, `CPUQuota=150%`, `CPUWeight=50`. 명령이 넘쳐도 HIMARI·Calliope·Caddy는 영향을 받지 않는다.
 - **명령은 runner와 다른 cgroup에 둔다(검수 P2).** 서비스는 `Delegate=yes`로 하위 cgroup을 위임받는다. runner는 시작할 때 자기를 `runner` 잎으로 옮기고, 명령은 `commands` 잎에 넣는다(bwrap을 띄우기 전에 그 cgroup으로 들어감). `commands`에 `memory.max=4G`, `pids.max=1024`를 건다. 메모리가 넘치면 커널은 `commands` 안에서만 프로세스를 죽인다. runner의 생존은 `oom_score_adj` 같은 유도가 아니라 cgroup 경계로 보장한다.
-- 그래도 runner가 죽으면(버그 등) `Restart=always`로 다시 뜬다. 그 사이의 호출은 HIMARI에서 결과 불명(`UNKNOWN`)이고(§9.2), 다시 뜬 runner에는 이전 명령이 없다(`--die-with-parent`).
+- **보장하는 것과 아닌 것(검수 N3).** 명령의 메모리 초과는 `commands` 안에서 처리되어 runner에 닿지 않는다. 하지만 서비스 전체 한도(4.5 GiB)는 runner·프록시·명령을 합친 값이라, runner가 0.5 GiB 넘게 쓰는 순간에 명령이 4 GiB 가까이 쓰면 서비스 전체 OOM이 날 수 있다. 그래서 runner의 생존은 **보장하지 않고**, 서비스 OOM과 runner 종료를 정상 경로로 다룬다.
+  - `runner` 잎에 `memory.low=256M`을 걸어 서비스 안에서는 runner의 메모리를 먼저 지킨다(유도이지 보장은 아님).
+  - runner가 죽으면 `Restart=always`로 다시 뜬다. 그 사이의 호출은 HIMARI에서 결과 불명(`UNKNOWN`)이고(§9.2), 다시 뜬 runner에는 이전 명령이 없다(`--die-with-parent`). HIMARI는 다음 호출 때 다시 연결하고 `hello`로 상태를 확인한다.
+  - 서비스 OOM은 runner 로그와 HIMARI의 `UNKNOWN` 결과 문구("the machine runner restarted")로 알린다.
 - 결과에 "killed (out of memory)"를 적는다(`commands`의 `memory.events`의 `oom_kill` 증가로 안다).
 - 명령마다 따로 정하는 한도와 디스크 한도는 이후다.
 
@@ -377,7 +389,9 @@ Tool `machine/git_push(repository, branch)`:
 **2. runner 밖에서 검사.**
 - 원격 URL: `https://`만, 사용자 정보(`user@`)·포트·쿼리 없음, 호스트와 경로가 설정의 `push_repos`(예: `github.com/jihunmoon04/*`)에 맞아야 한다. 경로 끝의 `.git`은 정규화한다.
 - bundle: runner 소유의 **빈 bare 저장소**(매번 새로 만들고 끝나면 지움)에서 `git bundle list-heads`로 ref가 정확히 `refs/heads/<branch>` 하나인지 확인하고, `git fetch <bundle> refs/heads/<branch>:refs/heads/<branch>`로 받는다. 원본 저장소의 디렉터리와 설정은 이 단계부터 열지 않는다.
-- runner의 git 실행은 고정 환경이다: `GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL=/dev/null`, `HOME`은 빈 임시 폴더, `core.hooksPath=/dev/null`, `protocol.allow=never` + `protocol.https.allow=always`, `credential.helper=` 비움, `GIT_TERMINAL_PROMPT=0`.
+- runner의 git 실행은 고정 환경이다: `GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL=/dev/null`, `HOME`은 빈 임시 폴더, `core.hooksPath=/dev/null`, `credential.helper=` 비움, `GIT_TERMINAL_PROMPT=0`, `protocol.allow=never`. 허용하는 전송은 **단계마다 따로** 연다(검수 N1).
+  - bundle 받기(`list-heads`, `fetch <bundle>`): `protocol.file.allow=always`만. `protocol.allow=never`만 두면 `fatal: transport 'file' not allowed`로 실패한다(이 서버의 git 2.55.0으로 재현, 2026-10-25). bundle 경로는 runner가 만든 임시 파일의 절대 경로이고, 저장소 설정을 읽지 않는 빈 bare 저장소에서 받는다.
+  - push: `protocol.https.allow=always`만. `file`은 열지 않는다.
 
 **3. push.**
 - 확인한 URL로 `refs/heads/<branch>:refs/heads/<branch>`를 push한다. **`+`(강제)와 삭제는 만들지 않는다.** fast-forward가 아니면 원격이 거부하고, 그 결과를 모델에 돌려준다.
@@ -393,6 +407,8 @@ runner가 시작할 때 머신 프로파일로 실제 명령을 띄워 다음을
 | 검사 | 기대 |
 | --- | --- |
 | 숨김 목록의 시험 파일 읽기·나열 | 안 보임 |
+| 숨김 경로를 품은 폴더(시험용 `home`)를 Workspace로 붙였을 때 그 안의 숨김 파일 읽기·쓰기 | 안 보임, 쓰기는 "Read-only file system"(N2) |
+| 실행 직전 숨김 확인을 일부러 어긋나게(가림 하나 빼기) | 설정 실패, 명령 실행 안 됨 |
 | 붙인 시험 Workspace에 쓰기 | 됨 |
 | 붙이지 않은 `coder` 폴더, 홈, `/usr`, `/`에 쓰기 | 거부 |
 | `/run/user/<uid>/bus`, `/run/dbus/system_bus_socket`, runner 소켓 연결 | 안 보임 |
@@ -424,12 +440,13 @@ HIMARI는 `hello`의 상태로 따르고, 따로 탈출 시험을 하지 않는�
 | 위협 | 대응 | 남는 것 |
 | --- | --- | --- |
 | 웹 내용(Exa)의 주입으로 파일을 읽어 밖으로 보냄 | 숨김 목록, 네트워크 허용 목록, push는 정한 저장소만 | 허용 도메인으로 보내는 경로(예: 공개 저장소의 이슈)는 인증이 없어 막히지만, 모든 경로를 증명하지는 못한다 |
+| 상위 Workspace 마운트가 숨김을 다시 드러냄 | 숨김을 마지막에 읽기 전용으로 가림 + 실행 직전 확인(§6.1) | 명령 도중 새로 생긴 점 항목 |
 | 숨김 위치를 링크로 우회 | 명령: 마운트 namespace에서 가림. 파일 Tool: 실제 경로 대조 | 숨김 파일을 가리키는 **이미 있던** 하드링크(새로 만들 수는 없음: 원본 이름이 안 보임) |
 | 붙이지 않은 폴더 쓰기 | 마운트 읽기 전용 + Landlock + runner 검사 | Workspace 안의 이미 있던 하드링크로 밖의 파일 내용 바꾸기(명령의 직접 쓰기. 파일 Tool은 rename이라 해당 없음) |
 | 호스트 소켓으로 Sandbox 밖 실행 | `/run`·`/tmp` 새로, 네트워크 namespace, Landlock scope | 자체 검사가 알려진 소켓을 확인 |
 | push가 모델의 설정·hook을 실행 | bundle은 Sandbox 안, push는 runner의 빈 저장소에서 | — |
 | 강제 push·브랜치 삭제 | refspec에 `+`와 삭제를 만들지 않음 | GitHub 브랜치 보호를 함께 권함 |
-| 메모리·프로세스 폭주 | 서비스 한도, 명령 전용 cgroup(§6.5) | 디스크 채우기(한도 없음) |
+| 메모리·프로세스 폭주 | 서비스 한도, 명령 전용 cgroup(§6.5) | 서비스 전체 OOM 때 runner 재시작(진행 중 호출은 `UNKNOWN`), 디스크 채우기(한도 없음) |
 | 실수로 지우기 | git, Drive 휴지통 | git 밖 로컬 파일은 되돌릴 수 없음 |
 | 파일 Tool로 특수 파일 읽기(`/proc/self/environ` 등) | 디스크 파일시스템 허용 목록(`fstatfs`) + 경로 문자열 검사(§8.2) | — |
 | 겹치는 Workspace의 동시 쓰기 | 경로 기준 충돌 영역(§9.1) | 하위 폴더 단위의 bind mount 별칭 |
@@ -471,7 +488,8 @@ HIMARI는 `hello`의 상태로 따르고, 따로 탈출 시험을 하지 않는�
 - **프록시:** 허용 이름이 사설 주소로 풀림, 응답 중 하나만 사설, 검사 뒤 DNS 답이 바뀜(재바인딩: 연결은 검사한 주소로), 443 외 포트, keep-alive 중 `Host` 바꾸기.
 - **runner 계약:** `SO_PEERCRED` 거부, 디스크립터 전달, 연결 끊김 → 명령 트리 종료, runner 재시작 → 결과 불명.
 - **호스트 시험(`HIMARI_SANDBOX_HOST=1`):** §13의 표 전부 + Drive 형태의 FUSE 마운트(가능하면 실제 rclone) 읽기·쓰기, Workspace 안 심볼릭 링크가 숨김 위치를 가리킬 때 명령·파일 Tool 모두 막힘.
-- **git push:** 악성 `.git/config`(`core.fsmonitor`, `core.hooksPath`, `include.path`, `credential.helper`, `core.sshCommand`)와 `pre-push` hook을 둔 저장소에서 push해도 Sandbox 밖에서 아무것도 실행되지 않음(표시 파일로 확인). 붙이지 않은 저장소 거부, 허용 밖·`user@`·`http://`·`ssh` 원격 거부, ref가 둘 이상인 bundle 거부, 2 GiB 넘는 bundle 거부, 강제 push가 필요한 상황에서 거부 결과, push 중 같은 Workspace의 명령이 기다림.
+- **마운트 순서:** 숨김을 품은 Workspace(홈 전체), 숨김 안의 예외(`.local/bin`), 중첩 Workspace 둘, 숨김 파일(폴더가 아닌 것)에서 최종 트리 확인. bwrap 인자 순서를 고정하는 단위 시험.
+- **git push:** bundle `fetch`가 `file` 허용으로 성공하고 push 단계에서는 `file` 원격이 거부됨, 악성 `.git/config`(`core.fsmonitor`, `core.hooksPath`, `include.path`, `credential.helper`, `core.sshCommand`)와 `pre-push` hook을 둔 저장소에서 push해도 Sandbox 밖에서 아무것도 실행되지 않음(표시 파일로 확인). 붙이지 않은 저장소 거부, 허용 밖·`user@`·`http://`·`ssh` 원격 거부, ref가 둘 이상인 bundle 거부, 2 GiB 넘는 bundle 거부, 강제 push가 필요한 상황에서 거부 결과, push 중 같은 Workspace의 명령이 기다림.
 - **실제 개발 흐름(라이브, 선택):** 새 대화에서 Python 프로젝트 `pip install` + 테스트, C `make`, Java Gradle wrapper 빌드, git clone → 수정 → commit → push(시험 저장소).
 - **회귀:** Inside 대화와 다른 principal은 그대로(전체 pytest, 두 Data 백엔드).
 
