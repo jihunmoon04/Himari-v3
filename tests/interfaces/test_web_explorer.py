@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import io
 import os
 import threading
 import time
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -188,3 +190,91 @@ def _open(fd: int) -> bool:
     except OSError:
         return False
     return True
+
+
+# --- a download's file is closed however the response ends (PR #92 re-review C1) ---------------------
+
+class Handle:
+    """A file whose reads can be held; it records whether it was closed under a read."""
+
+    def __init__(self, data: bytes, gate: threading.Event | None = None) -> None:
+        self.data, self.gate = data, gate
+        self.reading = False
+        self.closed = False
+        self.closed_while_reading = False
+
+    def read(self, size: int) -> bytes:
+        self.reading = True
+        try:
+            if self.gate is not None:
+                self.gate.wait(10)
+            chunk, self.data = self.data[:size], self.data[size:]
+            return chunk
+        finally:
+            self.reading = False
+
+    def close(self) -> None:
+        self.closed_while_reading |= self.reading
+        self.closed = True
+
+
+def stream(handle: Handle, receive: Any, send: Any) -> None:
+    response = web._FileStream(handle, media_type="application/octet-stream")  # type: ignore[arg-type]
+    scope = {"type": "http", "asgi": {"spec_version": "2.3"}}
+
+    async def go() -> None:
+        try:
+            await response(scope, receive, send)
+        except Exception:  # noqa: BLE001 — a client gone: what matters is the file
+            pass
+
+    asyncio.run(go())
+
+
+def test_a_whole_download_closes_its_file() -> None:
+    handle, sent = Handle(b"x" * 200_000), []
+
+    async def receive() -> dict[str, str]:
+        await asyncio.Event().wait()
+        return {}
+
+    async def send(message: dict[str, Any]) -> None:
+        sent.append(message)
+
+    stream(handle, receive, send)
+    assert b"".join(m.get("body", b"") for m in sent) == b"x" * 200_000 and handle.closed
+
+
+def test_a_download_cut_before_its_first_chunk_closes_its_file() -> None:
+    handle = Handle(b"x" * 10)
+
+    async def receive() -> dict[str, str]:
+        return {"type": "http.disconnect"}  # gone at once
+
+    async def send(message: dict[str, Any]) -> None:
+        await asyncio.sleep(1)  # the start never goes out before the disconnect is seen
+
+    stream(handle, receive, send)
+    assert handle.closed and not handle.closed_while_reading
+
+
+def test_a_download_cut_during_a_read_closes_its_file_after_that_read() -> None:
+    gate = threading.Event()
+    handle = Handle(b"x" * 200_000, gate)
+
+    async def receive() -> dict[str, str]:
+        await asyncio.sleep(0.2)  # while the first read is held
+        return {"type": "http.disconnect"}
+
+    async def send(message: dict[str, Any]) -> None:
+        pass
+
+    releaser = threading.Timer(0.6, gate.set)
+    releaser.start()
+    stream(handle, receive, send)  # returns with the read still held …
+    assert not handle.closed_while_reading
+    releaser.join()
+    deadline = time.monotonic() + 5
+    while not handle.closed and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert handle.closed and not handle.closed_while_reading  # … closed once it ended

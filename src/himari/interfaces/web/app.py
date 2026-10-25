@@ -46,13 +46,14 @@ import os
 import posixpath
 import re
 import secrets
+import threading
 import time
 from urllib.parse import quote
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from importlib import resources
-from typing import Any, Literal
+from typing import Any, BinaryIO, Literal
 
 from fastapi import Depends, FastAPI, Path, Request, Response
 from fastapi.exceptions import RequestValidationError
@@ -631,6 +632,51 @@ class _LiveResponse(StreamingResponse):
             self._release()
 
 
+class _FileStream(StreamingResponse):
+    """A file sent in chunks, closed however the response ends — finished,
+    cancelled, the client gone — even when its body never started (PR #92
+    re-review C1); and never under a read still running on its thread: that
+    read closes it as it ends (PR #92 review N1). The lock is held only to
+    hand the close over, never across a read."""
+
+    def __init__(self, handle: BinaryIO, **options: Any) -> None:
+        self._handle = handle
+        self._lock = threading.Lock()
+        self._reading = self._ending = self._closed = False
+        super().__init__(self._chunks(), **options)
+
+    async def _chunks(self) -> AsyncIterator[bytes]:
+        while data := await asyncio.to_thread(self._read):
+            yield data
+
+    def _read(self) -> bytes:
+        with self._lock:
+            if self._ending:
+                return b""
+            self._reading = True
+        try:
+            return self._handle.read(1 << 16)
+        finally:
+            with self._lock:
+                self._reading = False
+                if self._ending:
+                    self._shut()
+
+    def _shut(self) -> None:  # with the lock held
+        if not self._closed:
+            self._closed = True
+            self._handle.close()
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            with self._lock:
+                self._ending = True
+                if not self._reading:
+                    self._shut()
+
+
 def begin_shutdown(app: FastAPI) -> None:
     """The server got its exit signal: end the live streams now, so that
     uvicorn, which waits for open responses before it stops the application,
@@ -946,13 +992,7 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
                                     who: PrincipalId = Depends(principal)) -> Response:
         """An attachment of type octet-stream, sandboxed: never rendered on this origin (V3-P75 §8.2)."""
         real, size, fd = await himari(request).explorer(who).open(path)
-
-        def chunks() -> Iterator[bytes]:
-            with os.fdopen(fd, "rb") as handle:
-                while data := handle.read(1 << 16):
-                    yield data
-
-        return StreamingResponse(chunks(), media_type="application/octet-stream", headers={
+        return _FileStream(os.fdopen(fd, "rb"), media_type="application/octet-stream", headers={
             "Content-Disposition": content_disposition(posixpath.basename(real) or "file"),
             "Content-Length": str(size),
             "Content-Security-Policy": "sandbox",
@@ -1301,13 +1341,7 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
         """Always an attachment of type octet-stream, sandboxed (§7.2): an
         HTML or SVG file never opens on this origin."""
         record, handle = await himari(request).download(scope_of(conversation_id, who), FileId(file_id), version)
-
-        def chunks() -> Iterator[bytes]:
-            with handle:
-                while data := handle.read(1 << 16):
-                    yield data
-
-        return StreamingResponse(chunks(), media_type="application/octet-stream", headers={
+        return _FileStream(handle, media_type="application/octet-stream", headers={
             "Content-Disposition": content_disposition(record.name),
             "Content-Length": str(record.size),
             "Content-Security-Policy": "sandbox",
@@ -1322,13 +1356,7 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
         browser may not guess another (nosniff) and nothing in it can run
         (CSP). 404 unless the file is an image with a copy; 410 once it expired."""
         view, handle = await himari(request).preview(scope_of(conversation_id, who), FileId(file_id), version)
-
-        def chunks() -> Iterator[bytes]:
-            with handle:
-                while data := handle.read(1 << 16):
-                    yield data
-
-        return StreamingResponse(chunks(), media_type=view.media_type, headers={
+        return _FileStream(handle, media_type=view.media_type, headers={
             "Content-Disposition": "inline",
             "Content-Length": str(view.blob.size),
             "Content-Security-Policy": "default-src 'none'; sandbox",  # nosniff and no-store: the middleware
