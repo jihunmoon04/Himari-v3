@@ -106,6 +106,7 @@ from himari.documents import TMP_BYTES, DocumentReader, Toolkit, ToolkitRefused,
 from himari.environment.inside import INSIDE, InsideEnvironment, InsideFiles
 from himari.imaging import ImageViews, runtime_roots
 from himari.bootstrap.explorer import Explorer, ExplorerRefused
+from himari.bootstrap.versions import VersionStore
 # For the interfaces (V3-P66 §9): how placing an upload can be refused.
 from himari.environment.inside import UploadsFolderUnusable as UploadsFolderUnusable
 from himari.environment.inside import WorkspaceBusy as WorkspaceBusy
@@ -857,7 +858,7 @@ class Application:
         except WorkspaceRefused:
             raise ExplorerRefused("not_found", "Not available.") from None
         if self._explorer is None:
-            self._explorer = Explorer(machine, self.views)
+            self._explorer = Explorer(machine, self.views, VersionStore(self.data_root / "file-versions"))
         return self._explorer
 
     # --- conversations in a folder (V3-P75 §6) ----------------------------------------

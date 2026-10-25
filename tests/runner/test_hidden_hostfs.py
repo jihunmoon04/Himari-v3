@@ -305,3 +305,128 @@ def test_stat_checks_as_open_does(host: Host, home: Path) -> None:
         with pytest.raises(api.RunnerError) as refused:
             host.stat_path(hidden, "/")
         assert refused.value.category == api.NOT_FOUND
+
+
+# --- the web editor's writes (V3-P75 §7) --------------------------------------------------------------
+
+def parent(host: Host, home: Path, path: str) -> tuple[int, str]:
+    fd, _, name = host.target(str(home / path), "/", [str(home)], follow=False)
+    return fd, name
+
+
+def identity(path: Path) -> list[int]:
+    info = os.stat(path)
+    return [info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns]
+
+
+def read_all(fd: int) -> bytes:
+    try:
+        return os.read(fd, 1 << 21)
+    finally:
+        os.close(fd)
+
+
+def test_replace_keeps_a_copy_taken_before_the_rename(host: Host, home: Path, tmp_path: Path) -> None:
+    target = home / "projects/a/main.c"
+    before = identity(target)
+    writer = open(target, "r+b")  # a process holding the old file open, to write into it later
+    fd, name = parent(host, home, "projects/a/main.c")
+    try:
+        now, copy = host.replace(fd, name, b"int main(){return 0;}\n", before)
+    finally:
+        os.close(fd)
+    assert target.read_bytes() == b"int main(){return 0;}\n" and now == identity(target) and now != before
+    writer.write(b"LATE")  # into the replaced (unnamed) file: the copy does not change (review C1)
+    writer.flush()
+    writer.close()
+    assert copy is not None and read_all(copy) == b"int main(){}\n"
+    assert not [n for n in os.listdir(home / "projects/a") if n.startswith(".himari-")]  # no temporary left
+
+
+def test_replace_refuses_a_changed_file_and_writes_nothing(host: Host, home: Path,
+                                                           monkeypatch: pytest.MonkeyPatch) -> None:
+    target = home / "projects/a/main.c"
+    stale = identity(target)
+    target.write_text("changed elsewhere\n")
+    fd, name = parent(host, home, "projects/a/main.c")
+    try:
+        with pytest.raises(api.RunnerError) as refused:
+            host.replace(fd, name, b"mine", stale)
+        assert refused.value.category == api.CHANGED and target.read_text() == "changed elsewhere\n"
+        # Written in place while the copy was taken: refused at the last check, nothing renamed.
+        fresh = identity(target)
+        copy_of = Host._copy_of
+
+        def copy_then_write(self: Host, held: int, size: int) -> int | None:
+            made = copy_of(self, held, size)
+            with open(target, "ab") as late:
+                late.write(b"more")
+            return made
+
+        monkeypatch.setattr(Host, "_copy_of", copy_then_write)
+        with pytest.raises(api.RunnerError) as refused:
+            host.replace(fd, name, b"mine", fresh)
+        assert refused.value.category == api.CHANGED and target.read_text() == "changed elsewhere\nmore"
+    finally:
+        os.close(fd)
+    assert not [n for n in os.listdir(home / "projects/a") if n.startswith(".himari-")]
+
+
+def test_create_file_never_takes_a_name_and_make_folder_one_level(host: Host, home: Path) -> None:
+    fd, _, _ = host.target(str(home / "projects/a/new.txt"), "/", [str(home)], follow=False)
+    try:
+        made = host.create_file(fd, "new.txt")
+        assert (home / "projects/a/new.txt").read_bytes() == b"" and made == identity(home / "projects/a/new.txt")
+        (home / "projects/a/link").symlink_to(home / "projects/a/elsewhere")
+        for taken in ("new.txt", "main.c", "link"):
+            with pytest.raises(api.RunnerError) as refused:
+                host.create_file(fd, taken)
+            assert refused.value.category == api.EXISTS
+        assert not (home / "projects/a/elsewhere").exists()  # a dangling link is not followed to make its target
+        host.make_folder(fd, "sub")
+        assert (home / "projects/a/sub").is_dir() and os.stat(home / "projects/a/sub").st_mode & 0o777 == 0o755
+        with pytest.raises(api.RunnerError) as refused:
+            host.make_folder(fd, "sub")
+        assert refused.value.category == api.EXISTS
+    finally:
+        os.close(fd)
+
+
+def test_delete_checked_keeps_a_copy_and_refuses_a_changed_file(host: Host, home: Path) -> None:
+    target = home / "projects/a/main.c"
+    fd, name = parent(host, home, "projects/a/main.c")
+    try:
+        with pytest.raises(api.RunnerError) as refused:
+            host.delete_checked(fd, name, [0, 0, 0, 0])
+        assert refused.value.category == api.CHANGED and target.exists()
+        copy = host.delete_checked(fd, name, identity(target))
+    finally:
+        os.close(fd)
+    assert not target.exists() and copy is not None and read_all(copy) == b"int main(){}\n"
+
+
+def test_a_file_over_the_copy_limit_is_not_replaced_and_deleted_without_a_copy(host: Host, home: Path) -> None:
+    """PR #94 review B1: no previous version could be kept, so the editor's replace refuses it; a delete
+    (after the editor's own warning) goes without a copy."""
+    big = home / "projects/a/big.bin"
+    big.write_bytes(b"x" * (hostfs.MAX_SNAPSHOT_BYTES + 1))
+    fd, name = parent(host, home, "projects/a/big.bin")
+    try:
+        with pytest.raises(api.RunnerError) as refused:
+            host.replace(fd, name, b"small", identity(big))
+        assert refused.value.category == api.TOO_LARGE and big.stat().st_size == hostfs.MAX_SNAPSHOT_BYTES + 1
+        assert host.delete_checked(fd, name, identity(big)) is None and not big.exists()
+    finally:
+        os.close(fd)
+
+
+def test_visible_path_resolves_the_folder_and_hides_as_open_does(host: Host, home: Path) -> None:
+    """PR #94 review B3: what a previous version is looked up by; the file itself may be gone."""
+    assert host.visible_path("~/projects/a/gone.txt", "/") == str(home / "projects/a/gone.txt")
+    (home / "projects/link").symlink_to(home / "projects/a")
+    assert host.visible_path("~/projects/link/main.c", "/") == str(home / "projects/a/main.c")
+    (home / "projects/to-ssh").symlink_to(home / ".ssh")
+    for hidden in ("~/.ssh/id", "~/.bashrc", "~/projects/to-ssh/id", "~/missing/x"):
+        with pytest.raises(api.RunnerError) as refused:
+            host.visible_path(hidden, "/")
+        assert refused.value.category == api.NOT_FOUND

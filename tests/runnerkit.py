@@ -109,7 +109,7 @@ def start_runner(base: Path, *, client_uid: int | None = None, enforced: bool = 
     rules = HiddenRules(str(home), (".gitconfig", ".local/bin", ".local/lib", ".cache/himari-runner"),
                         config.hidden)
     used = sandbox if sandbox is not None else FakeSandbox(enforced)
-    runner = Runner(config, used, Host(rules, config.himari_home))
+    runner = Runner(config, used, Host(rules, config.himari_home, config.state_dir))
     ready = threading.Event()
     holder: dict[str, object] = {}
 

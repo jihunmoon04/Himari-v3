@@ -246,6 +246,25 @@ class ToolSourceBody(_Body):
     enabled: bool | None  # null: follow the source's default
 
 
+class SaveFileBody(_Body):
+    """A file saved from the web editor (V3-P75 §7.7): its whole text, and its identity as it was read."""
+
+    path: str = Field(min_length=1, max_length=4096)
+    content: str  # at most 1 MiB as UTF-8 (the explorer checks)
+    expected: list[int] = Field(min_length=4, max_length=4)
+
+
+class NewPathBody(_Body):
+    """A new empty file or folder (V3-P75 §7.5, §7.7)."""
+
+    path: str = Field(min_length=1, max_length=4096)
+
+
+class DeleteFileBody(_Body):
+    path: str = Field(min_length=1, max_length=4096)
+    expected: list[int] = Field(min_length=4, max_length=4)
+
+
 class FolderConversationBody(_Body):
     """Open a conversation in a folder (V3-P75 §6): its latest, or ``new`` one."""
 
@@ -572,6 +591,7 @@ FILE_REFUSALS: dict[DataErrorCode, tuple[int, str, str]] = {
     DataErrorCode.BLOB_EXPIRED: (410, "file_expired", "The file has expired: it was not used for a long time."),
 }
 UPLOAD_PATH = re.compile(r"^/api/conversations/[^/]+/uploads$")
+SAVE_BODY_BYTES = 3 * 1024 * 1024  # a saved file of 1 MiB as JSON, escapes included (V3-P75 §7.7)
 
 def workspace_view(workspace: RegisteredWorkspace) -> dict[str, Any]:
     """V3-P74 §10.3: a registered folder."""
@@ -600,8 +620,10 @@ def shown_file_view(shown: ShownFile) -> dict[str, Any]:
             "kind": shown.kind, "text": shown.text, "truncated": shown.truncated, "editable": shown.editable}
 
 
-# How a refused explorer request answers (V3-P75 §5): the runner's category → HTTP status.
-EXPLORER_STATUS = {"not_found": 404, "access": 403, "outside_workspaces": 403, "too_large": 413,
+# How a refused explorer request answers (V3-P75 §5): the runner's category → HTTP status. too_large is
+# 422, not 413: the body limit middleware turns every 413 into "request_too_large".
+EXPLORER_STATUS = {"not_found": 404, "access": 403, "outside_workspaces": 403, "too_large": 422,
+                   "changed": 409, "exists": 409, "versions_unavailable": 507,
                    "unavailable": 503, "setup_failed": 503, "timed_out": 504, "invalid": 400, "is_directory": 400,
                    "not_directory": 400, "not_regular": 415, "links": 400, "other": 500}
 
@@ -1010,6 +1032,41 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
             response.status_code = 201
         return {"conversation": summary_view(await application.data.read_conversation(scope_of(conversation, who))),
                 "created": created}
+
+    # -- the editor (V3-P75 §7): the owner's own writes, anywhere but hidden paths ------------
+
+    @app.put("/api/machine/file")
+    async def save_file(body: SaveFileBody, request: Request, who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+        saved = await himari(request).explorer(who).save(body.path, body.content.encode("utf-8", "surrogatepass"),
+                                                          body.expected)
+        return {"path": saved.path, "identity": list(saved.identity), "previous_kept": saved.previous_kept}
+
+    @app.post("/api/machine/file", status_code=201)
+    async def create_file(body: NewPathBody, request: Request, who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+        path, identity = await himari(request).explorer(who).create_file(body.path)
+        return {"path": path, "identity": list(identity)}
+
+    @app.post("/api/machine/folder", status_code=201)
+    async def make_folder(body: NewPathBody, request: Request, who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+        return {"path": await himari(request).explorer(who).make_folder(body.path)}
+
+    @app.post("/api/machine/file/delete")
+    async def delete_machine_file(body: DeleteFileBody, request: Request,
+                                  who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+        path, kept = await himari(request).explorer(who).delete(body.path, body.expected)
+        return {"path": path, "previous_kept": kept}
+
+    @app.get("/api/machine/versions")
+    async def list_versions(request: Request, path: str, who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+        """A file's previous versions (§7.4), newest first. ``path``: its real path, as saved."""
+        versions = await himari(request).explorer(who).previous(path)
+        return {"items": [{"id": v.version_id, "saved_at": _time(v.saved_at), "size": v.size, "reason": v.reason}
+                          for v in versions]}
+
+    @app.get("/api/machine/versions/{version_id}")
+    async def read_version(version_id: str, request: Request, path: str,
+                           who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+        return {"text": await himari(request).explorer(who).previous_text(path, version_id)}
 
     @app.get("/api/machine/stat")
     async def stat_path(request: Request, path: str, who: PrincipalId = Depends(principal)) -> dict[str, Any]:
@@ -1446,7 +1503,9 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
         return Response((static / name).read_bytes(), media_type=f"{media}{charset}")
 
     # Outer → inner: headers, Host, Origin, body size, routes.
-    app.add_middleware(BodyLimitMiddleware, exempt=lambda method, path: method == "POST" and bool(UPLOAD_PATH.match(path)))
+    app.add_middleware(BodyLimitMiddleware, exempt=lambda method, path: method == "POST" and bool(UPLOAD_PATH.match(path)),
+                       larger=lambda method, path: SAVE_BODY_BYTES if method == "PUT" and path == "/api/machine/file"
+                       else None)
     app.add_middleware(OriginGuardMiddleware, allowed_origins=config.allowed_origins)
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=sorted(config.allowed_hosts))
     app.add_middleware(SecurityHeadersMiddleware, csp=page_csp(config.sandbox_origins))

@@ -362,3 +362,128 @@ def test_a_conversation_made_for_a_folder_that_could_not_be_attached_is_removed(
     refused(server.post("/api/machine/conversations", {"path": "~/projects/a"}), 409, "unavailable")
     assert server.client.get("/api/conversations").json()["items"] == []
     assert server.client.get("/api/conversations", params={"trashed": True}).json()["items"] == []
+
+
+# --- the editor's writes (V3-P75 §7) -----------------------------------------------------------------
+
+def put(server: Server, body: dict[str, Any]) -> Any:
+    return server.client.put("/api/machine/file", json=body, headers=SEND)
+
+
+def test_save_keeps_the_previous_version_and_refuses_a_stale_one(server: Server, kit: RunnerKit) -> None:
+    path = str(kit.home / "projects/a/main.c")
+    shown = server.client.get("/api/machine/file", params={"path": path}).json()
+    saved = put(server, {"path": path, "content": "int main(){return 1;}\n", "expected": shown["identity"]})
+    assert saved.status_code == 200, saved.text
+    assert saved.json()["previous_kept"] and (kit.home / "projects/a/main.c").read_text() == "int main(){return 1;}\n"
+    assert saved.json()["identity"] == server.client.get("/api/machine/stat", params={"path": path}).json()["identity"]
+    stale = put(server, {"path": path, "content": "lost?", "expected": shown["identity"]})
+    refused(stale, 409, "changed")
+    assert (kit.home / "projects/a/main.c").read_text() == "int main(){return 1;}\n"
+    items = server.client.get("/api/machine/versions", params={"path": path}).json()["items"]
+    assert [(v["reason"], v["size"]) for v in items] == [("save", 13)]
+    text = server.client.get(f"/api/machine/versions/{items[0]['id']}", params={"path": path}).json()["text"]
+    assert text == "int main(){}\n"
+    # Put back: a save like any other, which keeps what it replaces.
+    put(server, {"path": path, "content": text, "expected": saved.json()["identity"]})
+    assert (kit.home / "projects/a/main.c").read_text() == "int main(){}\n"
+    assert len(server.client.get("/api/machine/versions", params={"path": path}).json()["items"]) == 2
+
+
+def test_new_file_new_folder_and_delete(server: Server, kit: RunnerKit) -> None:
+    made = server.post("/api/machine/file", {"path": "~/projects/a/notes.md"})
+    assert made.status_code == 201 and (kit.home / "projects/a/notes.md").read_text() == ""
+    refused(server.post("/api/machine/file", {"path": "~/projects/a/main.c"}), 409, "exists")
+    assert (kit.home / "projects/a/main.c").read_text() == "int main(){}\n"  # never over a file
+    folder = server.post("/api/machine/folder", {"path": "~/projects/a/docs"})
+    assert folder.status_code == 201 and (kit.home / "projects/a/docs").is_dir()
+    refused(server.post("/api/machine/folder", {"path": "~/projects/a/docs"}), 409, "exists")
+    refused(server.post("/api/machine/folder", {"path": "~/projects/none/deeper"}), 404, "not_found")
+    path = str(kit.home / "projects/a/main.c")
+    identity = server.client.get("/api/machine/stat", params={"path": path}).json()["identity"]
+    refused(server.post("/api/machine/file/delete", {"path": path, "expected": [0, 0, 0, 0]}), 409, "changed")
+    gone = server.post("/api/machine/file/delete", {"path": path, "expected": identity})
+    assert gone.status_code == 200 and gone.json()["previous_kept"] and not (kit.home / "projects/a/main.c").exists()
+    items = server.client.get("/api/machine/versions", params={"path": path}).json()["items"]
+    assert [v["reason"] for v in items] == ["delete"]
+    # Anywhere the user can write — not only the conversations' workspaces (§7.1).
+    assert server.post("/api/machine/file", {"path": "~/elsewhere.txt"}).status_code == 201
+
+
+def test_hidden_paths_are_not_written(server: Server, kit: RunnerKit) -> None:
+    for path in ("~/.ssh/new", "~/.bashrc2", str(kit.himari_home.parent / "secret-root" / "x")):
+        refused(server.post("/api/machine/file", {"path": path}), 404, "not_found")
+    identity = server.client.get("/api/machine/stat", params={"path": "~/.gitconfig"}).json()["identity"]
+    assert server.client.get("/api/machine/stat", params={"path": "~/.ssh/id"}).status_code == 404
+    refused(put(server, {"path": "~/.ssh/id", "content": "x", "expected": identity}), 404, "not_found")
+    refused(server.post("/api/machine/file/delete", {"path": "~/.ssh/id", "expected": identity}), 404, "not_found")
+    assert (kit.home / ".ssh/id").read_text() == "secret"
+
+
+def test_save_limits(server: Server, kit: RunnerKit, monkeypatch: pytest.MonkeyPatch) -> None:
+    path = str(kit.home / "projects/a/main.c")
+    identity = server.client.get("/api/machine/stat", params={"path": path}).json()["identity"]
+    refused(put(server, {"path": path, "content": "x" * (1024 * 1024 + 1), "expected": identity}), 422, "too_large")
+    refused(put(server, {"path": path, "content": "x" * (4 * 1024 * 1024), "expected": identity}), 413,
+            "request_too_large")
+    assert put(server, {"path": path, "content": "가" * 300_000, "expected": identity}).status_code == 200  # 900 KB
+    assert server.application is not None
+    explorer = server.application.explorer(server.application.machine_principals.__iter__().__next__())
+    assert explorer.versions is not None
+    monkeypatch.setattr(explorer.versions, "ready_for", lambda size: False)
+    identity = server.client.get("/api/machine/stat", params={"path": path}).json()["identity"]
+    refused(put(server, {"path": path, "content": "y", "expected": identity}), 507, "versions_unavailable")
+    assert (kit.home / "projects/a/main.c").read_text() == "가" * 300_000  # nothing saved
+
+
+def test_writes_not_offered(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(web, "FAILED_LOGIN_DELAY_SECONDS", 0)
+    s = Server(tmp_path, None)
+    with s.client:
+        s.sign_in()
+        refused(s.post("/api/machine/file", {"path": "/tmp/x"}), 404, "not_found")
+        refused(s.client.put("/api/machine/file", json={"path": "/tmp/x", "content": "", "expected": [1, 2, 3, 4]},
+                             headers=SEND), 404, "not_found")
+
+
+def test_previous_versions_cannot_be_lost(server: Server, kit: RunnerKit, monkeypatch: pytest.MonkeyPatch) -> None:
+    """PR #94 review B1, B2: a file over 1 MiB is not overwritten (none of it could be kept); a delete waits
+    for a store that can keep it, except a file over 1 MiB, which goes without (after the editor warns)."""
+    big = kit.home / "projects/a/big.log"
+    big.write_bytes(b"x" * (1024 * 1024 + 10))
+    identity = server.client.get("/api/machine/stat", params={"path": str(big)}).json()["identity"]
+    refused(put(server, {"path": str(big), "content": "short", "expected": identity}), 422, "too_large")
+    assert big.stat().st_size == 1024 * 1024 + 10
+    assert server.application is not None
+    explorer = server.application.explorer(next(iter(server.application.machine_principals)))
+    assert explorer.versions is not None
+    monkeypatch.setattr(explorer.versions, "ready_for", lambda size: False)
+    small = str(kit.home / "projects/a/main.c")
+    small_identity = server.client.get("/api/machine/stat", params={"path": small}).json()["identity"]
+    refused(server.post("/api/machine/file/delete", {"path": small, "expected": small_identity}), 507,
+            "versions_unavailable")
+    assert (kit.home / "projects/a/main.c").exists()
+    gone = server.post("/api/machine/file/delete", {"path": str(big), "expected": identity})
+    assert gone.status_code == 200 and not gone.json()["previous_kept"] and not big.exists()
+
+
+def test_versions_follow_the_hidden_list_as_it_is_now(server: Server, kit: RunnerKit,
+                                                      monkeypatch: pytest.MonkeyPatch) -> None:
+    """PR #94 review B3: a path hidden after it was saved shows no versions; a deleted file's still do."""
+    notes = kit.home / "projects/notes"
+    notes.mkdir()
+    (notes / "a.txt").write_text("one")
+    path = str(notes / "a.txt")
+    identity = server.client.get("/api/machine/stat", params={"path": path}).json()["identity"]
+    assert put(server, {"path": path, "content": "two", "expected": identity}).status_code == 200
+    items = server.client.get("/api/machine/versions", params={"path": path}).json()["items"]
+    assert len(items) == 1
+    (notes / "a.txt").unlink()  # gone: its versions are still there to read
+    assert server.client.get("/api/machine/versions", params={"path": path}).json()["items"] == items
+    from himari.runner.hidden import HiddenRules
+
+    by_rule = HiddenRules.by_rule
+    monkeypatch.setattr(HiddenRules, "by_rule", lambda self, real: real.startswith(str(notes)) or by_rule(self, real))
+    refused(server.client.get("/api/machine/versions", params={"path": path}), 404, "not_found")
+    refused(server.client.get(f"/api/machine/versions/{items[0]['id']}", params={"path": path}), 404, "not_found")
+
