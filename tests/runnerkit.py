@@ -27,6 +27,8 @@ class FakeSandbox(MachineSandbox):
         self.calls: list[tuple[list[str], MachineLayout, float]] = []
         self.gate: threading.Event | None = None  # set: the command blocks until it is set
         self.cancelled = threading.Event()
+        self.reap_seconds = 0.0  # how long a cancelled command takes to be reaped
+        self.events: list[str] = []  # "reaped" once a cancelled command is gone
         self.result = CommandResult(0, False, b"out\n", b"", 4, 0, 5)
 
     async def run(self, argv: list[str], layout: MachineLayout, timeout: float, *,
@@ -37,6 +39,8 @@ class FakeSandbox(MachineSandbox):
                 await asyncio.sleep(0.01)
         except asyncio.CancelledError:
             self.cancelled.set()
+            await asyncio.sleep(self.reap_seconds)
+            self.events.append("reaped")
             raise
         return self.result
 
@@ -57,7 +61,8 @@ class RunnerKit:
         return Path(self.runner.config.himari_home)
 
     def close(self) -> None:
-        self.loop.call_soon_threadsafe(self.stop.set)
+        if not self.loop.is_closed():  # a test may have stopped it already
+            self.loop.call_soon_threadsafe(self.stop.set)
         self.thread.join(10)
 
 

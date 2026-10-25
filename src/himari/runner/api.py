@@ -10,7 +10,13 @@ Request: ``{"op": <name>, "args": {...}}``. Answer: ``{"ok": true,
 "message": <text safe to show the model>}}``.
 
 While ``run`` is under way the client sends nothing more; closing the
-connection cancels the command (the runner kills its tree).
+connection (or only its sending side) cancels the command (the runner kills
+its tree).
+
+The runner closes a connection only once the request's work has ended: a
+cancelled command is killed and reaped first, a file operation's thread has
+returned. A client that cancels one of the ``WRITES`` waits for that close
+before it gives up the paths it holds (PR #87 review C1).
 
 Standard library and ``himari.common`` only: both processes import it.
 """
@@ -45,6 +51,7 @@ COMMIT_COPY = "commit_copy"
 DISCARD_COPY = "discard_copy"
 HOLDS = "holds"
 REMOVE_CONVERSATION_FOLDER = "remove_conversation_folder"
+WRITES = frozenset({WRITE, DELETE, RUN, COPY_IN, FREE_PATH, COMMIT_COPY, DISCARD_COPY, REMOVE_CONVERSATION_FOLDER})
 
 # Error categories: each message is safe to show the model.
 NOT_FOUND = "not_found"  # also every hidden path: whether it exists is not told

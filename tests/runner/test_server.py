@@ -6,6 +6,7 @@ import asyncio
 import base64
 import os
 import socket
+import threading
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -15,6 +16,7 @@ from runnerkit import RunnerKit, start_runner
 
 from himari.environment.machine.client import RunnerClient
 from himari.runner import api
+from himari.runner.hostfs import Host
 
 
 @pytest.fixture
@@ -140,8 +142,6 @@ def test_run_gives_the_sandbox_the_checked_layout(kit: RunnerKit) -> None:
 
 
 def test_closing_the_connection_cancels_the_command(kit: RunnerKit) -> None:
-    import threading
-
     folder = str(call(kit, api.CONVERSATION_FOLDER, {"conversation": "c1"})[0]["path"])
     kit.sandbox.gate = threading.Event()
 
@@ -157,6 +157,82 @@ def test_closing_the_connection_cancels_the_command(kit: RunnerKit) -> None:
 
     asyncio.run(cancel())
     assert kit.sandbox.cancelled.wait(5)
+
+
+def _slow_writes(kit: RunnerKit, monkeypatch: pytest.MonkeyPatch) -> tuple[threading.Event, threading.Event]:
+    """The runner's next file writes block in their thread until ``gate`` is set."""
+    entered, gate = threading.Event(), threading.Event()
+    real = Host.write
+
+    def slow(*args: object) -> bool:
+        entered.set()
+        gate.wait(10)
+        return real(*args)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Host, "write", slow)
+    return entered, gate
+
+
+def test_a_cancelled_write_returns_once_the_runner_is_done(kit: RunnerKit, monkeypatch: pytest.MonkeyPatch) -> None:
+    """PR #87 review C1: a file operation's thread cannot be stopped, so the
+    cancelled client waits for it — the caller's locks outlive the work."""
+    folder = str(call(kit, api.CONVERSATION_FOLDER, {"conversation": "c1"})[0]["path"])
+    entered, gate = _slow_writes(kit, monkeypatch)
+
+    async def cancel() -> None:
+        task = asyncio.create_task(RunnerClient(kit.socket).call(
+            api.WRITE, {"path": "slow.txt", "cwd": folder, "write_roots": [folder], "content": "x"}))
+        assert await asyncio.to_thread(entered.wait, 5)
+        task.cancel()
+        await asyncio.sleep(0.2)
+        assert not task.done()
+        task.cancel()  # cancelled again: still waits
+        await asyncio.sleep(0.1)
+        assert not task.done()
+        gate.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert (Path(folder) / "slow.txt").read_text() == "x"
+
+    asyncio.run(cancel())
+
+
+def test_a_cancelled_command_returns_once_it_is_reaped(kit: RunnerKit) -> None:
+    folder = str(call(kit, api.CONVERSATION_FOLDER, {"conversation": "c1"})[0]["path"])
+    kit.sandbox.gate = threading.Event()
+    kit.sandbox.reap_seconds = 0.3
+
+    async def cancel() -> None:
+        task = asyncio.create_task(RunnerClient(kit.socket).call(
+            api.RUN, {"argv": ["sleep", "100"], "cwd": folder, "write_roots": [folder], "timeout": 600}))
+        deadline = time.monotonic() + 5
+        while not kit.sandbox.calls and time.monotonic() < deadline:
+            await asyncio.sleep(0.01)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert kit.sandbox.events == ["reaped"]
+
+    asyncio.run(cancel())
+
+
+def test_a_stopping_runner_closes_only_after_the_work(kit: RunnerKit, monkeypatch: pytest.MonkeyPatch) -> None:
+    folder = str(call(kit, api.CONVERSATION_FOLDER, {"conversation": "c1"})[0]["path"])
+    entered, gate = _slow_writes(kit, monkeypatch)
+
+    async def stop() -> None:
+        task = asyncio.create_task(RunnerClient(kit.socket).call(
+            api.WRITE, {"path": "slow.txt", "cwd": folder, "write_roots": [folder], "content": "x"}))
+        assert await asyncio.to_thread(entered.wait, 5)
+        kit.loop.call_soon_threadsafe(kit.stop.set)
+        await asyncio.sleep(0.2)
+        assert not task.done()  # the connection is still open while the thread works
+        gate.set()
+        with pytest.raises(api.RunnerUnavailable):
+            await task  # no answer: the runner stopped, but only after the write ended
+        assert (Path(folder) / "slow.txt").read_text() == "x"
+
+    asyncio.run(stop())
 
 
 def test_not_enforced_refuses_everything_but_hello(tmp_path: Path) -> None:

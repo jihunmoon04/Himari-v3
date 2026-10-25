@@ -3,7 +3,11 @@
 One request per connection. The peer must be HIMARI's service user
 (``SO_PEERCRED``, checked again whatever the socket's mode says). Blocking
 file work runs in threads; a command runs in the machine sandbox, and the
-client closing the connection cancels it (the tree is killed).
+client closing the connection cancels it (the tree is killed). The
+connection is closed only once the work has ended — a thread returned, a
+command reaped — even when the runner itself is stopping: a client that
+cancelled waits for that close before it lets go of its locks (§9.1, PR #87
+review C1).
 
 The runner knows no Conversation or principal: each call names its
 Workspaces, and the runner checks them against its own configuration —
@@ -145,7 +149,9 @@ class Runner:
             conn.close()
 
     async def _blocking(self, call: Callable[[], T]) -> T:
-        return await asyncio.to_thread(call)
+        work = asyncio.ensure_future(asyncio.to_thread(call))
+        await _ended(work)
+        return work.result()
 
     async def dispatch(self, op: str, args: dict[str, Any], fds: Sequence[int],
                        conn: socket.socket) -> tuple[dict[str, Any] | None, list[int]]:
@@ -250,11 +256,13 @@ class Runner:
                 closed = asyncio.ensure_future(api.wait_closed(conn))
                 try:
                     done, _ = await asyncio.wait({command, closed}, return_when=asyncio.FIRST_COMPLETED)
+                except asyncio.CancelledError:  # the runner is stopping: the tree goes first
+                    await _stopped(command)
+                    raise
                 finally:
                     closed.cancel()
                 if command not in done:  # the client cancelled: the tree is killed with the task
-                    command.cancel()
-                    await asyncio.gather(command, return_exceptions=True)
+                    await _stopped(command)
                     return None
                 try:
                     result = command.result()
@@ -301,6 +309,28 @@ class Runner:
             return {}
         finally:
             os.close(folder_fd)
+
+
+async def _ended(work: asyncio.Future[Any]) -> None:
+    """Return once ``work`` has ended, waiting through cancellations of the
+    caller (re-raised then): a thread cannot be stopped, and a killed
+    command is still being reaped."""
+    interrupted = False
+    while not work.done():
+        try:
+            await asyncio.wait([work])  # never cancels ``work`` itself
+        except asyncio.CancelledError:
+            interrupted = True
+    if interrupted:
+        raise asyncio.CancelledError
+
+
+async def _stopped(command: asyncio.Future[Any]) -> None:
+    """Cancel a command (its tree is killed) and wait until it is reaped."""
+    command.cancel()
+    await _ended(command)
+    if not command.cancelled():
+        command.exception()  # retrieved: a failure while stopping is not reported
 
 
 def listener(config: RunnerConfig) -> socket.socket:

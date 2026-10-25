@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import threading
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -25,6 +26,7 @@ from himari.data.api import BindingAuthority, ConversationWorkspace
 from himari.environment.api import ConnectionStatus, EnvironmentPlugin
 from himari.environment.machine import MACHINE, MachineEnvironment, MachineUnavailable, machine_workspace_for
 from himari.environment.machine.locks import PathLocks, overlap
+from himari.runner.hostfs import Host
 from himari.sandbox.api import CommandResult
 from himari.tool.api import EffectProfile, ToolContext, ToolHandler, ToolInvocation, ToolOutcome, ToolStatus
 from himari.tool.registry import ToolRegistry
@@ -266,3 +268,84 @@ def test_a_runner_without_its_sandbox_refuses_file_tools(tmp_path: Path) -> None
     finally:
         kit.close()
 
+
+
+def _handler(env: MachineEnvironment, tool: str) -> tuple[ToolHandler, ToolContext]:
+    handler = next(t for t in env.tools() if t.definition.tool_id == f"machine/{tool}")
+    ctx = ToolContext(scope=SCOPE, artifacts=_NoArtifacts(), binding=binding(),
+                      workspace=ConversationWorkspace(WORKSPACE, "conversations/c1"))
+    return handler, ctx
+
+
+def _logged_writes(monkeypatch: pytest.MonkeyPatch) -> tuple[list[str], threading.Event, threading.Event]:
+    """The runner's file writes log when they start and end; the first one
+    blocks in its thread until ``gate`` is set."""
+    log: list[str] = []
+    entered, gate = threading.Event(), threading.Event()
+    real = Host.write
+
+    def logged(host: Host, fd: int, name: str, data: bytes | int, expected: list[int] | None) -> bool:
+        number = sum(1 for e in log if e.startswith("start")) + 1
+        log.append(f"start {number}")
+        if number == 1:
+            entered.set()
+            gate.wait(10)
+        try:
+            return real(host, fd, name, data, expected)
+        finally:
+            log.append(f"end {number}")
+
+    monkeypatch.setattr(Host, "write", logged)
+    return log, entered, gate
+
+
+def test_a_cancelled_write_keeps_the_folder_until_it_ends(env: MachineEnvironment, kit: RunnerKit,
+                                                         monkeypatch: pytest.MonkeyPatch) -> None:
+    """PR #87 review C1: cancel → a later write waits → the first write ends → the later one enters."""
+    log, entered, gate = _logged_writes(monkeypatch)
+    write, ctx = _handler(env, "write_file")
+
+    async def scenario() -> None:
+        first = asyncio.create_task(write.run(ToolInvocation(write.definition.tool_id, CallId("c1"),
+                                                             {"path": "a.txt", "content": "first"}), ctx))
+        assert await asyncio.to_thread(entered.wait, 5)
+        first.cancel()
+        second = asyncio.create_task(write.run(ToolInvocation(write.definition.tool_id, CallId("c2"),
+                                                              {"path": "a.txt", "content": "second"}), ctx))
+        await asyncio.sleep(0.3)
+        assert log == ["start 1"] and not first.done() and not second.done()
+        gate.set()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+        assert (await second).status is ToolStatus.SUCCEEDED
+
+    asyncio.run(scenario())
+    assert log == ["start 1", "end 1", "start 2", "end 2"]
+    assert (kit.himari_home / "conversations/c1/a.txt").read_text() == "second"
+
+
+def test_a_cancelled_command_keeps_the_folder_until_it_is_reaped(env: MachineEnvironment, kit: RunnerKit,
+                                                                monkeypatch: pytest.MonkeyPatch) -> None:
+    log, _, gate = _logged_writes(monkeypatch)
+    gate.set()
+    kit.sandbox.gate = threading.Event()
+    kit.sandbox.reap_seconds = 0.3
+    kit.sandbox.events = log  # "reaped" goes in the same log
+    run, ctx = _handler(env, "run_command")
+    write, _ = _handler(env, "write_file")
+
+    async def scenario() -> None:
+        command = asyncio.create_task(run.run(ToolInvocation(run.definition.tool_id, CallId("c1"),
+                                                             {"argv": ["sleep", "100"]}), ctx))
+        deadline = asyncio.get_running_loop().time() + 5
+        while not kit.sandbox.calls and asyncio.get_running_loop().time() < deadline:
+            await asyncio.sleep(0.01)
+        command.cancel()
+        later = asyncio.create_task(write.run(ToolInvocation(write.definition.tool_id, CallId("c2"),
+                                                             {"path": "b.txt", "content": "x"}), ctx))
+        with pytest.raises(asyncio.CancelledError):
+            await command
+        assert (await later).status is ToolStatus.SUCCEEDED
+
+    asyncio.run(scenario())
+    assert log == ["reaped", "start 1", "end 1"]
