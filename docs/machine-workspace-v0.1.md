@@ -1,6 +1,6 @@
 # 머신 Workspace v0.1
 
-> 2026-10-25 · **PROPOSED (V3-P74)** · 1단계 구현(§20; 외부 검수 B1·B2 §20.4, 재검수 C1 §20.5). rev. 6 — 외부 재검수 4(HEAD fa79123) 통과. 소유자 결정 Q1~Q9 권고대로(2026-10-25, §17). rev. 5 — 외부 재검수 3(HEAD 903e7f1) 반영: N7 `socketpair`는 `SOCK_STREAM`만 허용(`SOCK_DGRAM` 쌍은 호스트 소켓으로 다시 연결된다, §6.6), N8 소켓 폴더는 `DirectoryMode=0755`(§4.1). 소유자 결정 Q1~Q9 대기(§17). rev. 4 — 외부 재검수 2(HEAD ea6e534) 반영: N4 호스트의 경로 Unix 소켓을 seccomp로 막음(§6.6, Q9), N5 runner 소켓은 systemd 소켓 단위가 그룹 `himari-v3`로 만듦(§4.1), N6 Q5 문구를 §6.5에 맞춤(§17). 소유자 결정 Q1~Q9 대기(§17). rev. 3 — 외부 재검수(HEAD a7eca31) 반영: N1 bundle fetch에만 `file` 전송 허용(§12), N2 숨김은 마지막에 가리고 실행 직전에 확인하는 불변 조건(§6.1), N3 runner 생존은 명령 OOM 격리까지만 보장(§6.5). rev. 2 — 외부 검수(HEAD 61200df) 반영: B1 기본 쓰기 범위를 대화 폴더로, 겹치는 Workspace는 한 충돌 영역(§3.2, §9.1), B2 파일 Tool은 디스크 파일시스템만·보이는 점 항목 줄임(§7, §8.2), B3 git push의 bundle 전달·대상·lock(§12), P2 등록 범위(§5.3)·링크 풀기(§8.3)·OOM(§6.5)·프록시 DNS(§11.3). 소유자 결정 Q1~Q8 대기(§17). rev. 1: 설계 초안.
+> 2026-10-25 · **PROPOSED (V3-P74)** · 1단계 구현(§20; 외부 검수 B1·B2 §20.4, 재검수 C1 §20.5, 배포 2026-10-25). 2단계 구현(§21). rev. 6 — 외부 재검수 4(HEAD fa79123) 통과. 소유자 결정 Q1~Q9 권고대로(2026-10-25, §17). rev. 5 — 외부 재검수 3(HEAD 903e7f1) 반영: N7 `socketpair`는 `SOCK_STREAM`만 허용(`SOCK_DGRAM` 쌍은 호스트 소켓으로 다시 연결된다, §6.6), N8 소켓 폴더는 `DirectoryMode=0755`(§4.1). 소유자 결정 Q1~Q9 대기(§17). rev. 4 — 외부 재검수 2(HEAD ea6e534) 반영: N4 호스트의 경로 Unix 소켓을 seccomp로 막음(§6.6, Q9), N5 runner 소켓은 systemd 소켓 단위가 그룹 `himari-v3`로 만듦(§4.1), N6 Q5 문구를 §6.5에 맞춤(§17). 소유자 결정 Q1~Q9 대기(§17). rev. 3 — 외부 재검수(HEAD a7eca31) 반영: N1 bundle fetch에만 `file` 전송 허용(§12), N2 숨김은 마지막에 가리고 실행 직전에 확인하는 불변 조건(§6.1), N3 runner 생존은 명령 OOM 격리까지만 보장(§6.5). rev. 2 — 외부 검수(HEAD 61200df) 반영: B1 기본 쓰기 범위를 대화 폴더로, 겹치는 Workspace는 한 충돌 영역(§3.2, §9.1), B2 파일 Tool은 디스크 파일시스템만·보이는 점 항목 줄임(§7, §8.2), B3 git push의 bundle 전달·대상·lock(§12), P2 등록 범위(§5.3)·링크 풀기(§8.3)·OOM(§6.5)·프록시 DNS(§11.3). 소유자 결정 Q1~Q8 대기(§17). rev. 1: 설계 초안.
 >
 > 소유자 방향(2026-10-24, 대화에서 정함):
 > - 개발용 Workspace를 따로 만들지 않는다. 기본 Workspace에서 git·C·Python·Java 같은 일반 개발이 되게 한다.
@@ -340,7 +340,8 @@ CREATE TABLE workspaces (
     environment_kind TEXT NOT NULL,         -- 'machine'
     location         TEXT NOT NULL,         -- 실제 폴더 경로
     label            TEXT NOT NULL,
-    note             TEXT,                  -- 모델에게 보일 짧은 메모(§14의 자동 메모 포함)
+    note             TEXT,                  -- 모델에게 보일 사용자의 짧은 메모
+    filesystem       TEXT,                  -- 등록할 때의 파일시스템 종류(§14 자동 메모의 근거, 사용자가 고치지 않음)
     created_at       TEXT NOT NULL,
     UNIQUE (owner, environment_kind, location)
 );
@@ -348,7 +349,7 @@ CREATE TABLE workspaces (
 
 - 대화에 붙이기는 기존 `bindings` 표에 `machine` Binding 행을 더하는 것이다(Binding은 대화 범위, V3-P03). 떼기는 행을 지운다.
 - 대화 폴더(기본 Workspace)는 새 대화가 만들어질 때 붙는다(T0). 이것은 뗄 수 없다. HIMARI 폴더 전체는 소유자마다 하나 자동으로 등록만 되고, 붙이는 것은 사용자가 고른다(§3.2). 1단계(표가 없을 때)는 대화 폴더 Binding 하나다.
-- 등록할 때 실제 경로(realpath)로 바꿔 저장하고, 루트의 (장치, inode)가 이미 등록된 루트와 같으면 거부한다(§9.1).
+- 등록할 때 실제 경로(realpath)로 바꿔 저장하고, 루트의 (장치, inode)가 이미 등록된 루트와 같으면 거부한다(§9.1). 이 검사와 저장은 한 번에 하나씩 한다(두 경로로 같은 폴더를 동시에 등록해도 하나만 된다).
 - 등록 취소: 어느 대화에도 붙어 있지 않을 때만. 폴더 자체는 지우지 않는다.
 - Workspace의 `location`은 Data에만 있고, Tool 인자에서 오지 않는다(지금의 `host_root`와 같은 원칙).
 
@@ -473,7 +474,7 @@ HIMARI는 `hello`의 상태로 따르고, 따로 탈출 시험을 하지 않는�
 
 다루기:
 - 일반 Workspace처럼 등록하고 붙인다. 막지 않는다.
-- `check_workspace`가 파일시스템 종류가 `fuse.rclone`이면 Workspace에 **자동 메모**를 단다: "Cloud-synced folder: files have no execute bit, changes from other devices can take up to 15 minutes to appear, keep git repositories and build output on local disk." 모델은 Current State에서 이것을 본다.
+- `check_workspace`가 알려 준 파일시스템 종류를 Data가 저장하고, `fuse.rclone`이면 Environment가 사용자 메모와 **따로** 이 **자동 메모**(`notice`)를 단다(사용자가 지울 수 없고 메모 길이를 차지하지 않음): "Cloud-synced folder: files have no execute bit, changes from other devices can take up to 15 minutes to appear, keep git repositories and build output on local disk." 모델은 Current State에서 이것을 본다.
 - 지운 파일은 rclone 기본 설정에서 Drive 휴지통으로 간다(되살릴 수 있음).
 - FUSE `allow_other` 마운트는 Sandbox의 사용자 namespace 안에서도 접근된다(커널이 `allow_other`면 하위 namespace를 허락). 구현에서 자체 검사로 확인한다.
 
@@ -637,4 +638,34 @@ pids_max = 1024
 ```
 
 그리고 `web.env`에 `HIMARI_MACHINE_SOCKET=/run/himari-runner/runner.sock`. 지우면 새 대화가 다시 Inside를 쓴다. 배포 시험(§4.1): `himari-v3`로 `hello` 성공, 다른 사용자 거부.
+
+## 21. 구현 노트 (2026-10-25, 2단계)
+
+### 21.1 만든 것
+
+- **Data v13**(§10.1): `workspaces` 표(`seq`, `workspace_id`, `owner`, `environment_kind`, `location`, `label`, `note`, `filesystem`, `created_at`, `UNIQUE(owner, environment_kind, location)`)와 `bindings_by_workspace` 색인. v12 이하는 백업 후 제자리 업그레이드(V3-P65 §8.1, 기존 방식 그대로). 새 포트 `WorkspaceRegistry`: `list_workspaces`·`register_workspace`·`update_workspace`·`unregister_workspace`(붙어 있으면 거부, 휴지통 포함)·`read_conversation_workspaces`·`attach_workspace`·`detach_workspace`·`set_working_workspace`. 두 Data 백엔드 모두. 한도: 등록 200개, 대화마다 붙이기 16개, 이름 100자 한 줄, 메모 1,000자.
+- **붙이기 = Binding**(§10.1): 같은 activation에 `cwd_relative=""`인 Binding을 더하고 그것을 activation의 기본 Binding(작업 위치)으로 바꾼다. 떼면 남은 것 중 마지막에 붙인 것, 없으면 대화 폴더가 작업 위치다(§10.4). 대화 폴더(T0 Binding)는 뗄 수 없다. 붙이기·떼기·작업 위치 바꾸기는 `state_revision`을 올린다(Current State가 바뀜).
+- **runner `check_workspace`**(§5.3, §14): 있는 폴더이고, 숨김이 아니며, 디스크 파일시스템이고, `writable_under` 안이며, `coder`가 쓸 수 있어야 한다. 실제 경로, mount table의 파일시스템 이름(예: `fuse.rclone`), 이미 등록된 위치 중 (장치, inode)가 같은 것을 돌려준다. 쓰기는 하지 않는다(`WRITES`가 아님). 자체 검사가 실패한 runner에서는 다른 연산처럼 거부된다.
+- **machine Environment**: `places(scope)`가 대화 폴더(T0 Binding)와 붙인 Workspace의 실제 경로(Data에서만)를 모아 쓰기 범위·작업 위치를 정한다. Tool의 Binding에서 대화 폴더를 구하지 않는다(작업 위치가 붙인 폴더일 수 있음). Data가 대화의 폴더를 주지 않으면(`DataError`) Tool은 아무것도 하지 않고 거부된다. 대화 폴더만으로 대신하지 않는다. runner는 매 호출 루트를 다시 검사한다.
+- **Current State**(§10.5): 기본 Binding의 관찰에 `working_directory`, `read`(읽기 범위와 홈 경로), `workspaces`(경로·이름·메모, 클라우드 폴더면 `notice`)를 싣는다. 1단계의 `writable` 목록은 `workspaces`가 있으면 대신한다.
+- **Drive 자동 메모**(§14): 등록할 때의 파일시스템을 `filesystem`에 저장하고, `fuse.rclone`이면 Current State에 고정 문장을 `notice`로 싣는다. 사용자 메모와 따로라서 메모를 고쳐도 남고, 메모 1,000자 한도를 차지하지 않는다. Web·CLI 목록에도 클라우드 폴더라고 표시한다.
+- **Application·Web·CLI**(§10.3): `GET/POST /api/workspaces`, `PATCH/DELETE /api/workspaces/{id}`, `GET/POST /api/conversations/{id}/workspaces`(경로를 주면 먼저 등록, 이미 등록된 같은 폴더면 그것을 씀), `DELETE …/workspaces/{binding}`, `PUT …/workspaces/working`. 대화 메뉴의 **Folders** 칸(작업 위치 고르기, 떼기, 경로로 붙이기, 등록된 목록 자동완성)과 설정의 **Folders** 화면(등록·이름·메모·등록 취소). CLI `himari workspace [add PATH | rm ID|PATH]`, `himari attach ID [FOLDER]`, `himari detach ID FOLDER`, `himari workdir ID FOLDER`.
+
+### 21.2 설계와 달라진 것
+
+1. **파일 Tool의 쓰기도 대화의 모든 폴더에 lock을 건다**(§9.1은 "대상을 담은 Workspace 하나"). 대상이 어느 폴더에 떨어지는지는 runner가 경로를 푼 뒤에야 안다. 그래서 먼저 정할 수 없고, 모두 잡는 쪽이 안전하다. 같은 대화 안에서는 Tool이 한 번에 하나라 손해가 없다. 다른 대화와는 겹치는 경로만 기다리는 것도 그대로다.
+2. **HIMARI 폴더 전체를 자동으로 등록하지 않는다**(§10.1). 등록을 취소해도 다시 생기는 것은 놀랍다. 필요하면 다른 폴더처럼 등록한다.
+3. **같은 폴더 판정은 등록할 때 runner가 살아 있는 (장치, inode)로 한다.** 표에 장치 번호를 저장하지 않는다. FUSE 장치 번호는 재부팅마다 바뀔 수 있어서다. 대신 Application이 등록(목록 읽기 → runner 검사 → 저장)을 한 번에 하나씩 한다(PR #88 검수 B2). Web 프로세스 하나가 Data를 여는 지금 배치에서 충분하다(Data는 이미 프로세스 하나만 열 수 있음).
+
+### 21.3 확인
+
+- 전체 pytest 2382 passed, 110 skipped. mypy --strict, import 검사 통과.
+- 새 시험: `tests/data/test_workspace_registry.py`(두 백엔드, 36개), runner `check_workspace`·`mount_type`, Environment(붙인 폴더 쓰기, 작업 위치, 붙이지 않은 곳 거부, 떼면 거부, 모든 폴더 lock, 관찰), Application(경로로 붙이기, 중복, 숨김 거부, 대화 폴더 떼기 거부, Drive 메모, Inside 대화·다른 principal), Web API, CLI. 검수 반영(PR #88): Data가 폴더를 주지 않으면 모든 machine Tool이 아무것도 안 함(B1), 같은 폴더의 두 경로를 동시에 등록하면 하나만 됨(lock을 빼면 실패하는 것 확인, B2), 1,000자 메모 + Drive 메모, 메모를 지워도 Drive 메모 유지(B3). 업그레이드 시험은 v2~v12 → v13.
+- **호스트 게이트**(실제 Sandbox, 이 서버): 머신 프로파일 7개 통과. HIMARI 폴더 밖의 붙인 폴더에 명령이 쓰고, 붙이지 않은 형제 폴더에는 못 쓴다. 실제 Drive 마운트(`allow_other` FUSE)가 Sandbox 안에서 읽힌다(쓰기 시험은 하지 않음).
+- 이 서버의 실제 runner 설정으로 `check_workspace`: Drive 폴더는 `fuse.rclone`, `~/Himari-v3`는 `ext4`, `~/.ssh`·`/srv/himari-v3`는 "없음", `/usr`는 쓸 수 없어서 거부.
+- **브라우저**(headless Chromium, 실제 Web 서버 + 시험용 runner): 대화 메뉴에서 붙이기·작업 위치 바꾸기·떼기, 숨김 경로 거부 문구, 설정의 Folders 화면에서 등록·이름 바꾸기·붙어 있는 폴더 등록 취소 거부. 1280px과 390px에서 확인.
+
+### 21.4 배포 (2단계)
+
+**DB가 v12 → v13으로 바뀐다.** 처음 열 때 자동 백업 후 업그레이드되고, 시작 로그에 백업 경로가 나온다. 되돌리려면 이전 release로 돌리고 그 백업을 쓴다(v13 DB는 이전 버전이 열지 않음). runner 설정과 systemd 단위는 바뀌지 않는다. 같은 release·venv로 runner와 Web을 함께 다시 시작한다(runner의 새 연산 `check_workspace`).
 

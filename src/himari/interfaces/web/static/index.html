@@ -37,6 +37,7 @@
         <symbol id="side-trash" viewBox="0 0 24 24"><path d="M4 6h16M9 6V3h6v3M6 6l1 15h10l1-15M10 10v7M14 10v7"/></symbol>
         <symbol id="side-chevron" viewBox="0 0 24 24"><path d="m9 5 7 7-7 7"/></symbol>
         <symbol id="side-memory" viewBox="0 0 24 24"><path d="M12 3a6 6 0 0 0-6 6c0 2.2 1.2 3.6 2.4 4.7.9.8 1.6 1.7 1.6 2.8V18h4v-1.5c0-1.1.7-2 1.6-2.8C16.8 12.6 18 11.2 18 9a6 6 0 0 0-6-6ZM10 21h4"/></symbol>
+        <symbol id="side-folder" viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z"/></symbol>
         <symbol id="side-note" viewBox="0 0 24 24"><rect x="5" y="3" width="14" height="18" rx="2"/><path d="M9 8h6M9 12h6M9 16h3"/></symbol>
       </defs>
     </svg>
@@ -128,6 +129,19 @@
               <h2 class="chat-menu-tools-heading" id="chat-menu-tools-heading">Tool servers</h2>
               <ul class="chat-menu-tools-list" id="chat-menu-tools-list"></ul>
             </section>
+            <!-- This conversation's folders on the server (V3-P74 §10.3): the checked one is the working directory. -->
+            <section class="chat-menu-tools chat-menu-folders" id="chat-menu-folders" aria-labelledby="chat-menu-folders-heading" hidden>
+              <h2 class="chat-menu-tools-heading" id="chat-menu-folders-heading">Folders</h2>
+              <ul class="chat-menu-tools-list" id="chat-menu-folders-list"></ul>
+              <form class="chat-menu-attach" id="chat-menu-attach">
+                <input type="text" id="chat-menu-attach-path" list="chat-menu-attach-known" autocomplete="off"
+                       spellcheck="false" placeholder="~/projects/app" aria-label="Folder to attach" />
+                <datalist id="chat-menu-attach-known"></datalist>
+                <button type="submit" class="link-button">Attach</button>
+              </form>
+              <p class="chat-menu-tool-meta">HIMARI writes only in these folders; it can read the rest of the server
+                except private locations.</p>
+            </section>
             <div class="chat-menu-actions">
               <button type="button" id="chat-menu-rename" class="link-button">Rename</button>
               <button type="button" id="chat-menu-resume" class="link-button">Continue</button>
@@ -208,6 +222,25 @@
             notes. You can still manage your notes here.</p>
           <p class="hint memory-count" id="memory-count"></p>
           <div class="memory-groups" id="memory-groups"></div>
+        </section>
+
+        <!-- Folders on this server the user registered (V3-P74 §10.3), to attach to conversations. -->
+        <section class="surface memory folders" id="surface-folders" hidden>
+          <h1>Folders</h1>
+          <p class="hint">Folders on this server you can attach to a conversation. HIMARI writes only in the folders
+            attached there; registering a folder does not change it.</p>
+          <form class="memory-form folders-add" id="folders-add">
+            <input type="text" id="folders-add-path" class="memory-form-text" autocomplete="off" spellcheck="false"
+                   placeholder="Folder, e.g. ~/projects/app" aria-label="Folder to register" required />
+            <input type="text" id="folders-add-label" class="memory-form-text" autocomplete="off"
+                   placeholder="Name (optional)" aria-label="Name" maxlength="100" />
+            <textarea id="folders-add-note" class="memory-form-text" rows="2" maxlength="1000"
+                      placeholder="A note HIMARI sees with it (optional)" aria-label="Note"></textarea>
+            <div class="memory-form-bar"><button type="submit" class="primary-button">Register</button></div>
+          </form>
+          <p class="memory-off" id="folders-off" hidden>Folders on this server are not offered to you.</p>
+          <ul class="rows memory-list folders-list" id="folders-list"></ul>
+          <p class="hint folders-empty" id="folders-empty" hidden>No folders registered yet.</p>
         </section>
 
         <section class="surface chat" id="surface-chat" hidden>
@@ -316,6 +349,7 @@
       <div class="settings-links">
         <button type="button" id="nav-instructions" class="settings-instructions"><svg class="side-icon" aria-hidden="true"><use href="#side-note"/></svg><span><span class="settings-link-title">Instructions</span><span class="settings-link-hint">How HIMARI responds in every conversation</span></span><svg class="side-icon" aria-hidden="true"><use href="#side-chevron"/></svg></button>
         <button type="button" id="nav-memory" class="settings-instructions"><svg class="side-icon" aria-hidden="true"><use href="#side-memory"/></svg><span><span class="settings-link-title">Memory</span><span class="settings-link-hint">What HIMARI remembers about you</span></span><svg class="side-icon" aria-hidden="true"><use href="#side-chevron"/></svg></button>
+        <button type="button" id="nav-folders" class="settings-instructions" hidden><svg class="side-icon" aria-hidden="true"><use href="#side-folder"/></svg><span><span class="settings-link-title">Folders</span><span class="settings-link-hint">Folders on this server HIMARI may work in</span></span><svg class="side-icon" aria-hidden="true"><use href="#side-chevron"/></svg></button>
         <button type="button" id="nav-sign-out" class="link-button">Sign out</button>
       </div>
     </dialog>

@@ -60,6 +60,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from himari.bootstrap.application import (
+    CLOUD_FILESYSTEMS,
     Application,
     AppViewRefused,
     AppViewState,
@@ -77,6 +78,8 @@ from himari.bootstrap.application import (
     UnknownToolSource,
     UploadsFolderUnusable,
     WorkspaceBusy,
+    WorkspaceRefused,
+    AttachedFolder,
 )
 from himari.bootstrap.operator import OPERATOR, derive_cli_bearer, verify_operator_token
 from himari.common import (
@@ -95,11 +98,15 @@ from himari.common import (
 )
 from himari.control.api import ContextStatus, ControlError, ControlErrorCode, JobStatus, TurnUsage
 from himari.data.api import (
+    MAX_ATTACHED_WORKSPACES,
     MAX_ATTACHMENTS,
     MAX_INSTRUCTIONS_CHARS,
     MAX_LIST_LIMIT,
     MAX_MEMORIES,
     MAX_MEMORY_CHARS,
+    MAX_WORKSPACE_LABEL_CHARS,
+    MAX_WORKSPACE_NOTE_CHARS,
+    MAX_WORKSPACES,
     AssistantFinal,
     AssistantToolCalls,
     ConversationEvent,
@@ -112,6 +119,7 @@ from himari.data.api import (
     Instructions,
     Memory,
     MemoryCategory,
+    RegisteredWorkspace,
     ToolResultRecord,
     UserMessage,
     view_state,
@@ -230,6 +238,31 @@ class MemoryEditBody(MemoryBody):
 
 class ToolSourceBody(_Body):
     enabled: bool | None  # null: follow the source's default
+
+
+class WorkspaceBody(_Body):
+    """A folder to register (V3-P74 §10.3): absolute, or under the user's home."""
+
+    path: str = Field(min_length=1, max_length=4096)
+    label: str | None = Field(default=None, max_length=MAX_WORKSPACE_LABEL_CHARS)  # null: the folder's name
+    note: str | None = Field(default=None, max_length=MAX_WORKSPACE_NOTE_CHARS)
+
+
+class WorkspaceEditBody(_Body):
+    label: str = Field(max_length=MAX_WORKSPACE_LABEL_CHARS)
+    note: str | None = Field(max_length=MAX_WORKSPACE_NOTE_CHARS)
+
+
+class AttachBody(_Body):
+    """One of the two: a registered folder, or a path (registered first)."""
+
+    workspace_id: str | None = Field(default=None, max_length=64)
+    path: str | None = Field(default=None, min_length=1, max_length=4096)
+    label: str | None = Field(default=None, max_length=MAX_WORKSPACE_LABEL_CHARS)
+
+
+class WorkingBody(_Body):
+    binding_id: str = Field(max_length=64)
 
 
 class PromptExpandBody(_Body):
@@ -527,6 +560,32 @@ FILE_REFUSALS: dict[DataErrorCode, tuple[int, str, str]] = {
 }
 UPLOAD_PATH = re.compile(r"^/api/conversations/[^/]+/uploads$")
 
+def workspace_view(workspace: RegisteredWorkspace) -> dict[str, Any]:
+    """V3-P74 §10.3: a registered folder."""
+    return {"id": workspace.workspace_id, "path": workspace.location, "label": workspace.label,
+            "note": workspace.note, "created_at": _time(workspace.created_at), "attached": workspace.attached,
+            "filesystem": workspace.filesystem, "cloud_synced": workspace.filesystem in CLOUD_FILESYSTEMS}
+
+
+def attached_view(folder: AttachedFolder) -> dict[str, Any]:
+    """One of a Conversation's folders (§10.3): the own one first."""
+    return {"binding_id": folder.binding_id, "path": folder.path, "label": folder.label, "note": folder.note,
+            "working": folder.working, "own": folder.own, "workspace_id": folder.workspace_id}
+
+
+# How a refused change of a registered folder answers (V3-P74 §10.3): status, code, message.
+WORKSPACE_REFUSALS: dict[DataErrorCode, tuple[int, str, str]] = {
+    DataErrorCode.INVALID_STATE_TRANSITION: (409, "workspace_attached", "It is attached to a conversation; detach "
+                                             "it there first."),
+    DataErrorCode.DUPLICATE_IDENTITY: (409, "duplicate", "That folder is registered already."),
+    DataErrorCode.LIMIT_EXCEEDED: (422, "too_many_workspaces", f"At most {MAX_WORKSPACES} folders can be registered, "
+                                   f"and {MAX_ATTACHED_WORKSPACES} attached to one conversation."),
+    DataErrorCode.TOO_LARGE: (422, "too_large", f"A note is at most {MAX_WORKSPACE_NOTE_CHARS:,} characters."),
+    DataErrorCode.INVALID_ARGUMENT: (422, "invalid_workspace", "A label is one line of at most "
+                                     f"{MAX_WORKSPACE_LABEL_CHARS} characters; notes have no control characters."),
+}
+
+
 # How a refused prompt answers (V3-P60 §4).
 PROMPT_REFUSAL_STATUS = {"unknown_prompt": 404, "source_disabled": 409, "invalid_arguments": 400,
                          "unsupported_content": 422, "server_error": 502}
@@ -675,6 +734,11 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
         return JSONResponse({"error": {"code": error.code, "message": error.message}},
                             status_code=MODEL_REFUSAL_STATUS.get(error.code, 400))
 
+    @app.exception_handler(WorkspaceRefused)
+    async def workspace_refused(request: Request, error: WorkspaceRefused) -> JSONResponse:
+        return JSONResponse({"error": {"code": error.code, "message": error.message}},
+                            status_code=422 if error.code == "not_usable" else 409)
+
     @app.exception_handler(UnknownToolSource)
     async def unknown_source(request: Request, error: UnknownToolSource) -> JSONResponse:
         return JSONResponse({"error": {"code": "not_found", "message": "No such tool source."}}, status_code=404)
@@ -735,6 +799,101 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
     async def sign_out(request: Request, response: Response) -> None:
         sessions.revoke(request.cookies.get(SESSION_COOKIE))
         response.delete_cookie(SESSION_COOKIE, path="/", httponly=True, samesite="strict", secure=config.secure_cookie)
+
+    # -- folders on this server as Workspaces (V3-P74 §10.3) -----------------------------------
+
+    def _workspace_refusal(error: DataError, missing: str) -> ApiError | None:
+        if error.code is DataErrorCode.NOT_FOUND:
+            return ApiError(404, "not_found", missing)
+        found = WORKSPACE_REFUSALS.get(error.code)
+        return None if found is None else ApiError(*found)
+
+    @app.get("/api/workspaces")
+    async def list_workspaces(request: Request, who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+        """``available``: folders on this server are offered to this user."""
+        application = himari(request)
+        try:
+            items = await application.machine_workspaces(who)
+        except WorkspaceRefused:
+            return {"available": False, "items": []}
+        return {"available": True, "items": [workspace_view(w) for w in items]}
+
+    @app.post("/api/workspaces", status_code=201)
+    async def register_workspace(body: WorkspaceBody, request: Request,
+                                 who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+        try:
+            return workspace_view(await himari(request).register_workspace(who, body.path, body.label, body.note))
+        except DataError as error:
+            refusal = _workspace_refusal(error, "No such workspace.")
+            if refusal is None:
+                raise
+            raise refusal from None
+
+    @app.patch("/api/workspaces/{workspace_id}")
+    async def edit_workspace(workspace_id: str, body: WorkspaceEditBody, request: Request,
+                             who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+        try:
+            return workspace_view(await himari(request).update_workspace(who, workspace_id, body.label, body.note))
+        except DataError as error:
+            refusal = _workspace_refusal(error, "No such workspace.")
+            if refusal is None:
+                raise
+            raise refusal from None
+
+    @app.delete("/api/workspaces/{workspace_id}", status_code=204)
+    async def unregister_workspace(workspace_id: str, request: Request, who: PrincipalId = Depends(principal)) -> None:
+        try:
+            await himari(request).unregister_workspace(who, workspace_id)
+        except DataError as error:
+            refusal = _workspace_refusal(error, "No such workspace.")
+            if refusal is None:
+                raise
+            raise refusal from None
+
+    @app.get("/api/conversations/{conversation_id}/workspaces")
+    async def conversation_workspaces(conversation_id: str, request: Request,
+                                      who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+        """Empty for a Conversation that does not work on this server's folders."""
+        folders = await himari(request).conversation_workspaces(scope_of(conversation_id, who))
+        return {"items": [attached_view(f) for f in folders]}
+
+    @app.post("/api/conversations/{conversation_id}/workspaces")
+    async def attach_workspace(conversation_id: str, body: AttachBody, request: Request,
+                               who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+        if (body.workspace_id is None) == (body.path is None):
+            raise ApiError(400, "invalid_request", "Give a registered workspace or a folder's path.")
+        try:
+            folders = await himari(request).attach_workspace(scope_of(conversation_id, who),
+                                                             workspace_id=body.workspace_id, path=body.path,
+                                                             label=body.label)
+        except DataError as error:
+            refusal = _workspace_refusal(error, "No such workspace.")  # a missing Conversation: NOT_AUTHORIZED, 404
+            if refusal is None:
+                raise
+            raise refusal from None
+        return {"items": [attached_view(f) for f in folders]}
+
+    @app.delete("/api/conversations/{conversation_id}/workspaces/{binding_id}")
+    async def detach_workspace(conversation_id: str, binding_id: str, request: Request,
+                               who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+        try:
+            folders = await himari(request).detach_workspace(scope_of(conversation_id, who), binding_id)
+        except DataError as error:
+            if error.code is not DataErrorCode.NOT_FOUND:
+                raise
+            raise ApiError(404, "not_found", "No such folder in this conversation.") from None
+        return {"items": [attached_view(f) for f in folders]}
+
+    @app.put("/api/conversations/{conversation_id}/workspaces/working")
+    async def set_working_workspace(conversation_id: str, body: WorkingBody, request: Request,
+                                    who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+        try:
+            folders = await himari(request).set_working_workspace(scope_of(conversation_id, who), body.binding_id)
+        except DataError as error:
+            if error.code is not DataErrorCode.NOT_FOUND:
+                raise
+            raise ApiError(404, "not_found", "No such folder in this conversation.") from None
+        return {"items": [attached_view(f) for f in folders]}
 
     # -- conversations -----------------------------------------------------------------------
 

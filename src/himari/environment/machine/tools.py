@@ -16,7 +16,7 @@ from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
 from himari.common import EnvironmentKind, JsonValue, TextBlock, ToolId
-from himari.data.api import DEFAULT_FILE_MAX_BYTES, MAX_DOCUMENT_BYTES
+from himari.data.api import DEFAULT_FILE_MAX_BYTES, MAX_DOCUMENT_BYTES, DataError
 from himari.documents.api import DocumentReading
 from himari.environment.inside import fs
 from himari.environment.inside.blocking import run_blocking
@@ -68,6 +68,12 @@ def _unreachable(why: str = _UNREACHABLE) -> ToolOutcome:
     return ToolOutcome(ToolStatus.DENIED, _text(why, error=True), raw_result={"runner": "unreachable"})
 
 
+def _no_places(error: DataError) -> ToolOutcome:
+    """The Conversation's folders could not be read: nothing runs (§10.5)."""
+    return ToolOutcome(ToolStatus.DENIED, _text(f"this conversation's folders could not be read ({error.code.value}); "
+                                                "nothing was done", error=True), raw_result={"data": error.code.value})
+
+
 def _shown(raw: object) -> str:
     return raw if isinstance(raw, str) else "?"
 
@@ -96,15 +102,20 @@ class _MachineTool:
         from himari.environment.machine import MachineUnavailable
 
         try:
-            folder = await self._env.folder(ctx.scope.conversation_id, ctx.workspace.cwd_relative)
+            places = await self._env.places(ctx.scope)
         except MachineUnavailable as unavailable:
             return _unreachable(str(unavailable))
+        except DataError as error:
+            return _no_places(error)
         args = invocation.arguments
+        roots = list(places.roots)
         try:
             if self.effect is EffectProfile.READ:
-                return await self.act(args, folder, [folder], ctx)
-            async with self._env.locks.hold((folder,)):
-                return await self.act(args, folder, [folder], ctx)
+                return await self.act(args, places.cwd, roots, ctx)
+            # All of the Conversation's folders at once (§9.1): which one a path lands in is
+            # known only once the runner has resolved it.
+            async with self._env.locks.hold(places.roots):
+                return await self.act(args, places.cwd, roots, ctx)
         except runner.NotSent:
             return _unreachable()
         except runner.RunnerError as error:
@@ -350,10 +361,12 @@ class MachineReadDocument(ReadDocument):
         assert ctx.workspace is not None
         shown = _shown(raw_path)
         try:
-            cwd = await self._machine.folder(ctx.scope.conversation_id, ctx.workspace.cwd_relative)
+            cwd = (await self._machine.places(ctx.scope)).cwd
             result, fds = await self._machine.call(runner.OPEN, {"path": raw_path, "cwd": cwd})
         except MachineUnavailable as unavailable:
             return _unreachable(str(unavailable))
+        except DataError as error:
+            return _no_places(error)
         except runner.NotSent:
             return _unreachable()
         except runner.RunnerError as error:

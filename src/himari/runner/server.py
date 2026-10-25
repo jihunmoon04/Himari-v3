@@ -186,7 +186,10 @@ class Runner:
             if not isinstance(size, int) or not isinstance(digest, str):
                 raise api.RunnerError(api.INVALID)
             return {"holds": await self._blocking(lambda: host.holds(args.get("path"), size, digest))}, []
-        roots = await self._blocking(lambda: host.roots(args.get("write_roots"), config.writable_under))
+        if op == api.CHECK_WORKSPACE:
+            return await self._blocking(lambda: host.check_workspace(args.get("path"), args.get("others", []),
+                                                                     config.writable_under)), []
+        roots =await self._blocking(lambda: host.roots(args.get("write_roots"), config.writable_under))
         if op == api.WRITE:
             return await self._write(args, fds, roots), []
         if op == api.DELETE:

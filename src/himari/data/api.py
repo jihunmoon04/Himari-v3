@@ -1311,6 +1311,106 @@ class WorkspaceState(Protocol):
         ...
 
 
+# --- Registered Workspaces (V3-P74 §10) ------------------------------------------
+
+MAX_WORKSPACES = 200  # a principal's registered folders, per Environment kind
+MAX_ATTACHED_WORKSPACES = 16  # attached to one Conversation, its own folder not counted
+MAX_WORKSPACE_LABEL_CHARS = 100
+MAX_WORKSPACE_NOTE_CHARS = 1_000
+MAX_WORKSPACE_LOCATION_BYTES = 4_096  # UTF-8, as PATH_MAX
+
+
+@dataclass(frozen=True)
+class RegisteredWorkspace(DeepFrozen):
+    """A folder a principal registered (V3-P74 §10.1): where a Conversation
+    it is attached to may write. ``location`` is the real path the
+    Environment checked when it was registered; Data keeps it as given and
+    never takes it from a Tool's arguments."""
+
+    workspace_id: WorkspaceId
+    environment_kind: EnvironmentKind
+    location: str
+    label: str
+    note: str | None  # the user's, shown to the model in the Current State
+    created_at: datetime
+    attached: int = 0  # Conversations it is attached to, the trash included
+    filesystem: str | None = None  # its kind when registered (e.g. ``fuse.rclone``); not the user's to edit
+
+
+@dataclass(frozen=True)
+class AttachedWorkspace(DeepFrozen):
+    binding: BindingAuthority
+    workspace: RegisteredWorkspace | None  # None: the Conversation's own folder (never registered)
+
+
+@dataclass(frozen=True)
+class ConversationWorkspaces(DeepFrozen):
+    """A Conversation's Workspaces of one Environment kind: its own folder
+    first, then the attached ones in the order they were attached.
+    ``working`` is the activation's default Binding: the working directory
+    (§10.4)."""
+
+    working: BindingId | None
+    attached: tuple[AttachedWorkspace, ...]
+
+
+class WorkspaceRegistry(Protocol):
+    """V3-P74 §10: the folders a principal registered, and which of them a
+    Conversation has attached. The principal comes from the trusted entry
+    point (Web, CLI), never from model output: no Tool writes here (Q4).
+
+    Attaching adds a Binding of the Workspace to the Conversation's
+    activation of its kind, and makes it the working one; detaching removes
+    it, and the last attached one left (else the Conversation's own folder)
+    becomes the working one. Both change ``state_revision``: the model is
+    told of its Workspaces in the Current State (§10.5). The Conversation's
+    own folder cannot be detached."""
+
+    async def list_workspaces(self, principal: PrincipalId, kind: EnvironmentKind) -> tuple[RegisteredWorkspace, ...]:
+        """Oldest first."""
+        ...
+
+    async def register_workspace(self, principal: PrincipalId, kind: EnvironmentKind, location: str, label: str,
+                                 note: str | None = None, filesystem: str | None = None) -> RegisteredWorkspace:
+        """DUPLICATE_IDENTITY: one is registered at ``location`` already.
+        LIMIT_EXCEEDED past MAX_WORKSPACES. INVALID_ARGUMENT: ``location`` is
+        not an absolute, normalized path of at most
+        MAX_WORKSPACE_LOCATION_BYTES, or the label, note or filesystem is not
+        one."""
+        ...
+
+    async def update_workspace(self, principal: PrincipalId, workspace_id: WorkspaceId, *, label: str,
+                               note: str | None) -> RegisteredWorkspace:
+        """NOT_FOUND: not one of the principal's."""
+        ...
+
+    async def unregister_workspace(self, principal: PrincipalId, workspace_id: WorkspaceId) -> None:
+        """NOT_FOUND as above; INVALID_STATE_TRANSITION while it is attached
+        to a Conversation (the trash included). The folder is not touched."""
+        ...
+
+    async def read_conversation_workspaces(self, scope: TrustedScope,
+                                           kind: EnvironmentKind) -> ConversationWorkspaces:
+        """NOT_FOUND: the kind is not active in the Conversation."""
+        ...
+
+    async def attach_workspace(self, scope: TrustedScope, workspace_id: WorkspaceId) -> BindingAuthority:
+        """NOT_FOUND: not one of the principal's Workspaces.
+        INVALID_STATE_TRANSITION: its kind is not active in the Conversation.
+        DUPLICATE_IDENTITY: attached already. LIMIT_EXCEEDED past
+        MAX_ATTACHED_WORKSPACES."""
+        ...
+
+    async def detach_workspace(self, scope: TrustedScope, binding_id: BindingId) -> None:
+        """NOT_FOUND: no such Binding in the Conversation.
+        INVALID_STATE_TRANSITION: the Conversation's own folder."""
+        ...
+
+    async def set_working_workspace(self, scope: TrustedScope, binding_id: BindingId) -> None:
+        """NOT_FOUND: no such Binding in the Conversation."""
+        ...
+
+
 class ExternalSourceSettings(Protocol):
     """V3-P53: per-Conversation on/off choices for External Tool sources.
 
@@ -1438,6 +1538,7 @@ __all__ = [
     "AssistantFinal",
     "AssistantOutput",
     "AssistantToolCalls",
+    "AttachedWorkspace",
     "BindingAuthority",
     "CompletedGroupRef",
     "ConversationCatalog",
@@ -1447,6 +1548,7 @@ __all__ = [
     "ConversationRetention",
     "ConversationSummary",
     "ConversationWorkspace",
+    "ConversationWorkspaces",
     "DataError",
     "DataErrorCode",
     "EnvironmentActivation",
@@ -1457,12 +1559,17 @@ __all__ = [
     "ExternalSourceSettings",
     "InitialActivation",
     "MAX_APP_PAYLOAD_BYTES",
+    "MAX_ATTACHED_WORKSPACES",
     "MAX_EFFORT_CHARS",
     "MAX_EXTERNAL_SETTINGS",
     "MAX_LIST_LIMIT",
     "MAX_MODEL_ID_CHARS",
     "MAX_TITLE_CHARS",
     "MAX_UI_HTML_BYTES",
+    "MAX_WORKSPACES",
+    "MAX_WORKSPACE_LABEL_CHARS",
+    "MAX_WORKSPACE_LOCATION_BYTES",
+    "MAX_WORKSPACE_NOTE_CHARS",
     "ModelSetting",
     "PREVIEW_CHARS",
     "PersistedStateBasis",
@@ -1474,6 +1581,7 @@ __all__ = [
     "RawRunOutcome",
     "RawUncertain",
     "RecoveryReport",
+    "RegisteredWorkspace",
     "RunPreparation",
     "RunRecord",
     "RunStatus",
@@ -1488,6 +1596,7 @@ __all__ = [
     "UiCsp",
     "UiResource",
     "UserMessage",
+    "WorkspaceRegistry",
     "WorkspaceState",
     "ui_digest",
 ]

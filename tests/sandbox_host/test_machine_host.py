@@ -113,3 +113,30 @@ def test_timeouts(kit: RunnerKit) -> None:
     folder = call(kit, api.CONVERSATION_FOLDER, {"conversation": "hosttest"})["path"]
     result = call(kit, api.RUN, {"argv": ["sleep", "10"], "cwd": folder, "write_roots": [folder], "timeout": 1})
     assert result["timed_out"] is True and result["exit_code"] is None
+
+
+def test_an_attached_folder_is_writable_and_others_are_not(kit: RunnerKit) -> None:
+    """V3-P74 §10: a second Workspace outside the HIMARI home (part 2)."""
+    folder = call(kit, api.CONVERSATION_FOLDER, {"conversation": "hosttest"})["path"]
+    base = kit.himari_home.parent
+    project, other = base / "project", base / "other"
+    project.mkdir(exist_ok=True)
+    other.mkdir(exist_ok=True)
+    checked = call(kit, api.CHECK_WORKSPACE, {"path": str(project), "others": []})
+    assert checked["path"] == str(project)
+    result = call(kit, api.RUN, {"argv": ["sh", "-c", f"echo in > {project}/made.txt; echo out > {other}/no.txt; "
+                                                      "pwd"],
+                                 "cwd": str(project), "write_roots": [folder, str(project)], "timeout": 60})
+    assert base64.b64decode(result["stdout"]).decode().strip() == str(project)
+    assert (project / "made.txt").read_text() == "in\n" and not (other / "no.txt").exists()
+
+
+CLOUD = Path("/home/ubuntu/cloud_storage/02_구글_일반")
+
+
+@pytest.mark.skipif(not os.access(CLOUD, os.R_OK | os.X_OK), reason="no rclone Drive mount here")
+def test_a_cloud_mount_is_seen_inside_the_sandbox(kit: RunnerKit) -> None:
+    """§14: an allow_other FUSE mount is reached from the sandbox's user namespace (read only here)."""
+    assert call(kit, api.CHECK_WORKSPACE, {"path": str(CLOUD), "others": []})["filesystem"] == "fuse.rclone"
+    code, out, err = run(kit, f"ls '{CLOUD}' | wc -l")
+    assert code == 0 and int(out.strip()) > 0, err

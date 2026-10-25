@@ -29,6 +29,18 @@ class ConnectionStatus(Enum):
 
 
 @dataclass(frozen=True)
+class ObservedWorkspace(DeepFrozen):
+    """A folder a Conversation may write, as the model is told of it (V3-P74
+    §10.5): its path, the label and note the user gave it, and what the
+    Environment knows of it (``notice``, e.g. that it is cloud-synced)."""
+
+    path: str
+    label: str
+    note: str | None = None
+    notice: str | None = None
+
+
+@dataclass(frozen=True)
 class BindingObservation(DeepFrozen):
     """Time-scoped, best-effort observation. Not authorization."""
 
@@ -40,6 +52,10 @@ class BindingObservation(DeepFrozen):
     # paths, and the folders this Conversation may write. None/(): not given.
     working_directory: str | None = None
     writable: tuple[str, ...] = ()
+    # Given instead of ``writable`` when the folders have labels (V3-P74 §10.5),
+    # with what the Conversation may read.
+    workspaces: tuple[ObservedWorkspace, ...] = ()
+    readable: str | None = None
 
 
 @runtime_checkable

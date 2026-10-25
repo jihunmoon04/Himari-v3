@@ -120,7 +120,8 @@ def v6_database(path: Path) -> None:
     store.close()
     conn = sqlite3.connect(path, isolation_level=None)
     try:
-        for statement in ("DROP TABLE event_text", "DROP TABLE memory_ids", "DROP INDEX memories_by_source",
+        for statement in ("DROP INDEX bindings_by_workspace", "DROP TABLE workspaces",
+                          "DROP TABLE event_text", "DROP TABLE memory_ids", "DROP INDEX memories_by_source",
                           "DROP TABLE memories",
                           "DROP TABLE instructions", "DROP INDEX files_by_view", "DROP TABLE files", "DROP TABLE blobs",
                           "ALTER TABLE conversations DROP COLUMN purge_started_at",

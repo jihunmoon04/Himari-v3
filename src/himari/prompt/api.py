@@ -679,9 +679,16 @@ def state_block(state: CurrentStateProjection, notes: Sequence[SourceNote] = (),
                 }
                 view = views.get(binding.binding_id)
                 if view is not None:  # the Environment's own paths (V3-P74 §10.5)
-                    entry["default_binding"]["working_directory"] = view.working_directory  # type: ignore[index]
-                    if view.writable:
-                        entry["default_binding"]["writable"] = list(view.writable)  # type: ignore[index]
+                    place: dict[str, object] = entry["default_binding"]  # type: ignore[assignment]
+                    place["working_directory"] = view.working_directory
+                    if view.readable:
+                        place["read"] = view.readable
+                    if view.workspaces:
+                        place["workspaces"] = [{"path": w.path, "label": w.label, **({"note": w.note} if w.note else {}),
+                                                **({"notice": w.notice} if w.notice else {})}
+                                               for w in view.workspaces]
+                    elif view.writable:
+                        place["writable"] = list(view.writable)
                 elif binding.cwd_relative is not None:
                     entry["default_binding"]["working_directory"] = f"/workspace/{binding.cwd_relative}"  # type: ignore[index]
             environments.append(entry)
