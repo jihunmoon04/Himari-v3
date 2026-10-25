@@ -1331,9 +1331,10 @@ class RegisteredWorkspace(DeepFrozen):
     environment_kind: EnvironmentKind
     location: str
     label: str
-    note: str | None  # shown to the model in the Current State
+    note: str | None  # the user's, shown to the model in the Current State
     created_at: datetime
     attached: int = 0  # Conversations it is attached to, the trash included
+    filesystem: str | None = None  # its kind when registered (e.g. ``fuse.rclone``); not the user's to edit
 
 
 @dataclass(frozen=True)
@@ -1370,11 +1371,12 @@ class WorkspaceRegistry(Protocol):
         ...
 
     async def register_workspace(self, principal: PrincipalId, kind: EnvironmentKind, location: str, label: str,
-                                 note: str | None = None) -> RegisteredWorkspace:
+                                 note: str | None = None, filesystem: str | None = None) -> RegisteredWorkspace:
         """DUPLICATE_IDENTITY: one is registered at ``location`` already.
         LIMIT_EXCEEDED past MAX_WORKSPACES. INVALID_ARGUMENT: ``location`` is
         not an absolute, normalized path of at most
-        MAX_WORKSPACE_LOCATION_BYTES, or the label or note is not one."""
+        MAX_WORKSPACE_LOCATION_BYTES, or the label, note or filesystem is not
+        one."""
         ...
 
     async def update_workspace(self, principal: PrincipalId, workspace_id: WorkspaceId, *, label: str,

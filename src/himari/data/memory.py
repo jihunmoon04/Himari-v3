@@ -425,16 +425,17 @@ class InMemoryData:
                      if self._store.workspace_owners[w.workspace_id] == principal and w.environment_kind == kind)
 
     async def register_workspace(self, principal: PrincipalId, kind: EnvironmentKind, location: str, label: str,
-                                 note: str | None = None) -> RegisteredWorkspace:
+                                 note: str | None = None, filesystem: str | None = None) -> RegisteredWorkspace:
         location = rules.check_workspace_location(location)
         label, note = rules.check_workspace_label(label), rules.check_workspace_note(note)
+        filesystem = rules.check_workspace_filesystem(filesystem)
         mine = await self.list_workspaces(principal, kind)
         if any(w.location == location for w in mine):
             raise DataError(DataErrorCode.DUPLICATE_IDENTITY, f"{location} is registered already")
         if len(mine) >= MAX_WORKSPACES:
             raise DataError(DataErrorCode.LIMIT_EXCEEDED, f"at most {MAX_WORKSPACES} workspaces")
         workspace = RegisteredWorkspace(WorkspaceId(self._store.new_id("wsp")), kind, location, label, note,
-                                        datetime.now(UTC))
+                                        datetime.now(UTC), filesystem=filesystem)
         self._store.workspaces[workspace.workspace_id] = workspace
         self._store.workspace_owners[workspace.workspace_id] = principal
         return workspace

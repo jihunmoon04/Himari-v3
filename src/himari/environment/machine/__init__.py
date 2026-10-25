@@ -33,7 +33,7 @@ from datetime import UTC, datetime
 from typing import Any, BinaryIO, TypeVar
 
 from himari.common import EnvironmentKind, PrincipalId, TrustedScope, WorkspaceId
-from himari.data.api import TEMP_PREFIX, BindingAuthority, DataError, WorkspaceRegistry
+from himari.data.api import TEMP_PREFIX, BindingAuthority, WorkspaceRegistry
 from himari.documents.api import DocumentReading
 from himari.environment.api import BindingObservation, ConnectionStatus, ObservedWorkspace
 from himari.environment.inside import InsideFiles, WorkspaceBusy
@@ -49,6 +49,10 @@ OBSERVE_SECONDS = 2.0
 OWN_LABEL = "this conversation"
 READ_SCOPE = ("everything the user can read on this server, except hidden locations (credentials, HIMARI's own "
               "data); the user's home is {home}")
+# §14: what the model is told of a cloud-synced folder, apart from the user's note.
+CLOUD_FILESYSTEMS = frozenset({"fuse.rclone"})
+DRIVE_NOTE = ("Cloud-synced folder: files have no execute bit, changes from other devices can take up to 15 minutes "
+              "to appear, keep git repositories and build output on local disk.")
 
 
 @dataclass(frozen=True)
@@ -140,13 +144,11 @@ class MachineEnvironment:
         to it. A registered Workspace's location comes from Data only; the
         runner checks it again on every call (§5.3). Not from the Tool's
         Binding: that is the working one, which may be an attached folder.
-        MachineUnavailable without the runner."""
+        MachineUnavailable without the runner; Data's refusal (DataError)
+        is raised, never taken for the own folder alone."""
         found = None
         if self.registry is not None:
-            try:
-                found = await self.registry.read_conversation_workspaces(scope, MACHINE)
-            except DataError:
-                found = None
+            found = await self.registry.read_conversation_workspaces(scope, MACHINE)
         own_binding = None if found is None else next((a.binding for a in found.attached if a.workspace is None), None)
         own_cwd = (own_binding.cwd_relative if own_binding is not None and own_binding.cwd_relative
                    else f"conversations/{scope.conversation_id}")
@@ -159,7 +161,8 @@ class MachineEnvironment:
             path = item.workspace.location
             if path not in roots:
                 roots.append(path)
-                shown.append(ObservedWorkspace(path, item.workspace.label, item.workspace.note))
+                notice = DRIVE_NOTE if item.workspace.filesystem in CLOUD_FILESYSTEMS else None
+                shown.append(ObservedWorkspace(path, item.workspace.label, item.workspace.note, notice))
             if item.binding.binding_id == working:
                 cwd = path
         return Places(cwd, tuple(roots), tuple(shown))

@@ -22,7 +22,7 @@ from himari.common import (
     TrustedScope,
     WorkspaceId,
 )
-from himari.data.api import BindingAuthority, ConversationWorkspace, InitialActivation
+from himari.data.api import BindingAuthority, ConversationWorkspace, DataError, DataErrorCode, InitialActivation
 from himari.data.memory import InMemoryData, InMemoryStore
 from himari.environment.api import ConnectionStatus, EnvironmentPlugin
 from himari.environment.machine import MACHINE, MachineEnvironment, MachineUnavailable, machine_workspace_for
@@ -438,3 +438,24 @@ def test_a_workspace_gone_from_disk_is_named(kit: RunnerKit) -> None:
     Path(project).rename(kit.home / "projects/moved")
     refused = call_in(env, data, scope, "write_file", path="x.txt", content="x")
     assert refused.status is ToolStatus.FAILED and project in text(refused) and "detach" in text(refused)
+
+
+def test_folders_data_will_not_give_run_nothing(kit: RunnerKit) -> None:
+    """B1: when Data refuses the Conversation's folders, a Tool does nothing; it never falls back to the own
+    folder alone."""
+    env, data, scope, project = attached_setup(kit)
+
+    class Refusing:
+        async def read_conversation_workspaces(self, scope: TrustedScope, kind: Any) -> Any:
+            raise DataError(DataErrorCode.NOT_AUTHORIZED, "not yours")
+
+    refusing = MachineEnvironment(kit.socket, registry=Refusing(),  # type: ignore[arg-type]
+                                  documents=object())  # type: ignore[arg-type]  # never reached
+    calls = len(kit.sandbox.calls)
+    for tool, args in (("write_file", {"path": "x.txt", "content": "x"}), ("run_command", {"argv": ["true"]}),
+                       ("read_file", {"path": "~/projects/a/main.c"}), ("read_document", {"path": "doc.md"})):
+        refused = call_in(refusing, data, scope, tool, **args)
+        assert refused.status is ToolStatus.DENIED and "could not be read" in text(refused), tool
+    assert len(kit.sandbox.calls) == calls
+    assert not (kit.himari_home / "conversations" / scope.conversation_id / "x.txt").exists()
+    assert not (Path(project) / "x.txt").exists()

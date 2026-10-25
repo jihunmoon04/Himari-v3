@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import unicodedata
 from collections.abc import Iterable, Sequence
 
@@ -153,6 +154,15 @@ def check_workspace_label(label: object) -> str:
         raise DataError(DataErrorCode.INVALID_ARGUMENT,
                         f"a workspace label is 1..{MAX_WORKSPACE_LABEL_CHARS} characters of one line")
     return label
+
+
+def check_workspace_filesystem(filesystem: object) -> str | None:
+    """A filesystem kind as mountinfo names it (``ext4``, ``fuse.rclone``)."""
+    if filesystem is None:
+        return None
+    if not isinstance(filesystem, str) or not re.fullmatch(r"[!-~]{1,64}", filesystem):
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, "not a filesystem kind")
+    return filesystem
 
 
 def check_workspace_note(note: object) -> str | None:

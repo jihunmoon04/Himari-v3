@@ -684,7 +684,8 @@ def state_block(state: CurrentStateProjection, notes: Sequence[SourceNote] = (),
                     if view.readable:
                         place["read"] = view.readable
                     if view.workspaces:
-                        place["workspaces"] = [{"path": w.path, "label": w.label, **({"note": w.note} if w.note else {})}
+                        place["workspaces"] = [{"path": w.path, "label": w.label, **({"note": w.note} if w.note else {}),
+                                                **({"notice": w.notice} if w.notice else {})}
                                                for w in view.workspaces]
                     elif view.writable:
                         place["writable"] = list(view.writable)

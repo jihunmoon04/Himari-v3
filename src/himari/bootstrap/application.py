@@ -106,6 +106,8 @@ from himari.imaging import ImageViews, runtime_roots
 # For the interfaces (V3-P66 §9): how placing an upload can be refused.
 from himari.environment.inside import UploadsFolderUnusable as UploadsFolderUnusable
 from himari.environment.inside import WorkspaceBusy as WorkspaceBusy
+# For the interfaces (V3-P74 §14): which registered folders are cloud-synced.
+from himari.environment.machine import CLOUD_FILESYSTEMS as CLOUD_FILESYSTEMS
 from himari.environment.machine import (
     MACHINE,
     OWN_LABEL,
@@ -262,10 +264,6 @@ class WorkspaceRefused(ValueError):
 
 
 NOT_MACHINE = "This conversation does not work on this server's folders (it was started before they were offered)."
-# V3-P74 §14: the note a cloud-synced folder gets when it is registered.
-CLOUD_FILESYSTEMS = frozenset({"fuse.rclone"})
-DRIVE_NOTE = ("Cloud-synced folder: files have no execute bit, changes from other devices can take up to 15 minutes "
-              "to appear, keep git repositories and build output on local disk.")
 
 
 @dataclass(frozen=True)
@@ -609,6 +607,9 @@ class Application:
     # the principals whose new Conversations use it instead of Inside (Q1).
     machine: MachineEnvironment | None = None
     machine_principals: frozenset[PrincipalId] = frozenset()
+    # One registration at a time (§10.1): the runner's same-folder check and
+    # Data's insert together, so two paths to one folder cannot both pass.
+    _registering: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
     # V3-P65 §7.3: one lifecycle lock per Conversation (P0: one server process),
     # kept only while some call holds or waits for it (PR #56 review C1).
     _lifecycle: dict[ConversationId, _Lifecycle] = field(default_factory=dict, repr=False)
@@ -833,22 +834,29 @@ class Application:
     async def register_workspace(self, principal: PrincipalId, path: str, label: str | None = None,
                                  note: str | None = None) -> RegisteredWorkspace:
         """The runner checks the folder first (§10.1): it exists, the user may
-        write it, it is not hidden; Data keeps its real path. A cloud-synced
-        folder gets the Drive note ahead of the user's (§14)."""
+        write it, it is not hidden; Data keeps its real path and its
+        filesystem (a cloud-synced one is told to the model, §14)."""
+        return await self._register(principal, path, label, note, reuse=False)
+
+    async def _register(self, principal: PrincipalId, path: str, label: str | None, note: str | None, *,
+                        reuse: bool) -> RegisteredWorkspace:
+        """Registers the folder, or (``reuse``) gives the registration that is
+        already this folder at any path."""
         machine = self._machine_for(principal)
-        known = await self.data.list_workspaces(principal, MACHINE)
-        real, filesystem, same = await self._check_folder(machine, path, known)
-        if same is not None:
-            raise WorkspaceRefused("duplicate", f"This folder is registered already, as {same.location}.")
-        if filesystem in CLOUD_FILESYSTEMS:
-            note = DRIVE_NOTE if note is None or not note.strip() else f"{DRIVE_NOTE}\n{note.strip()}"
-        try:
-            return await self.data.register_workspace(principal, MACHINE, real, label or posixpath.basename(real) or real,
-                                                      note)
-        except DataError as error:
-            if error.code is DataErrorCode.DUPLICATE_IDENTITY:
-                raise WorkspaceRefused("duplicate", f"{real} is registered already.") from None
-            raise
+        async with self._registering:
+            known = await self.data.list_workspaces(principal, MACHINE)
+            real, filesystem, same = await self._check_folder(machine, path, known)
+            if same is not None:
+                if reuse:
+                    return same
+                raise WorkspaceRefused("duplicate", f"This folder is registered already, as {same.location}.")
+            try:
+                return await self.data.register_workspace(principal, MACHINE, real,
+                                                          label or posixpath.basename(real) or real, note, filesystem)
+            except DataError as error:
+                if error.code is DataErrorCode.DUPLICATE_IDENTITY:
+                    raise WorkspaceRefused("duplicate", f"{real} is registered already.") from None
+                raise
 
     async def _check_folder(self, machine: MachineEnvironment, path: str, known: Sequence[RegisteredWorkspace]
                             ) -> tuple[str, str | None, RegisteredWorkspace | None]:
@@ -910,16 +918,13 @@ class Application:
         """Attach a registered folder, or a path (registered first unless it
         is already); it becomes the working directory (§10.4). Takes effect
         from the next Tool call: one running keeps its folders."""
-        machine = self._machine_for(scope.principal_id)
+        self._machine_for(scope.principal_id)
         if not await self.conversation_workspaces(scope):  # NOT_AUTHORIZED first; nothing registered for nothing
             raise WorkspaceRefused("not_machine", NOT_MACHINE)
         if workspace_id is None:
             if path is None:
                 raise WorkspaceRefused("not_usable", "Give a registered workspace or a folder's path.")
-            known = await self.data.list_workspaces(scope.principal_id, MACHINE)
-            _, _, same = await self._check_folder(machine, path, known)
-            chosen = same if same is not None else await self.register_workspace(scope.principal_id, path, label)
-            workspace_id = chosen.workspace_id
+            workspace_id = (await self._register(scope.principal_id, path, label, None, reuse=True)).workspace_id
         try:
             await self.data.attach_workspace(scope, WorkspaceId(workspace_id))
         except DataError as error:

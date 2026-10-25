@@ -31,11 +31,13 @@ class ConnectionStatus(Enum):
 @dataclass(frozen=True)
 class ObservedWorkspace(DeepFrozen):
     """A folder a Conversation may write, as the model is told of it (V3-P74
-    §10.5): its path, and the label and note the user gave it."""
+    §10.5): its path, the label and note the user gave it, and what the
+    Environment knows of it (``notice``, e.g. that it is cloud-synced)."""
 
     path: str
     label: str
     note: str | None = None
+    notice: str | None = None
 
 
 @dataclass(frozen=True)

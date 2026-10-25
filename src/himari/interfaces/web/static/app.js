@@ -2334,6 +2334,9 @@ function folderRow(workspace) {
   const main = el("div", "memory-row-main");
   main.append(el("p", "memory-text", workspace.label), el("span", "row-meta", workspace.path));
   if (workspace.note) main.append(el("span", "row-meta folders-note", workspace.note));
+  if (workspace.cloud_synced) {
+    main.append(el("span", "row-meta", "Cloud-synced: the model is told files have no execute bit and sync can lag"));
+  }
   if (workspace.attached) {
     main.append(el("span", "row-meta",
                    `Attached to ${workspace.attached} conversation${workspace.attached === 1 ? "" : "s"}`));

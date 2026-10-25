@@ -77,6 +77,20 @@ def test_a_long_note_is_refused() -> None:
     assert code(data.register_workspace(ME, MACHINE, "/a", "a", "x" * 1001)) is DataErrorCode.TOO_LARGE
 
 
+def test_the_filesystem_is_kept_apart_from_the_note() -> None:
+    """§14: what the Environment found is not the user's to edit; it survives a restart."""
+    store = new_store()
+    data = data_for(store)
+    drive = run(data.register_workspace(ME, MACHINE, "/drive/a", "a", "x" * 1000, "fuse.rclone"))
+    assert (drive.note, drive.filesystem) == ("x" * 1000, "fuse.rclone")
+    run(data.update_workspace(ME, drive.workspace_id, label="a", note=None))
+    data = data_for(restart(store))
+    assert [(w.note, w.filesystem) for w in run(data.list_workspaces(ME, MACHINE))] == [(None, "fuse.rclone")]
+    assert run(data.register_workspace(ME, MACHINE, "/b", "b")).filesystem is None
+    assert code(data.register_workspace(ME, MACHINE, "/c", "c", None, "ext 4")) is DataErrorCode.INVALID_ARGUMENT
+    assert code(data.register_workspace(ME, MACHINE, "/c", "c", None, "")) is DataErrorCode.INVALID_ARGUMENT
+
+
 def test_attach_makes_it_the_working_one_and_detach_falls_back() -> None:
     store = new_store()
     data = data_for(store)

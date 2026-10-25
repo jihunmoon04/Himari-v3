@@ -1101,6 +1101,8 @@ def cmd_workspace(session: Session, args: argparse.Namespace, read: Callable[[st
             if workspace.get("note"):
                 session.printer.line("    " + safe_line(" ".join(str(workspace["note"]).split()),
                                                         encoding=session.printer.encoding))
+            if workspace.get("cloud_synced"):
+                session.printer.line("    (cloud-synced: the model is told files have no execute bit and sync can lag)")
         if not items:
             session.note("(no folders registered; add one with `himari workspace add PATH`)")
         return EXIT_OK

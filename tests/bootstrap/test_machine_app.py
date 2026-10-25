@@ -12,8 +12,10 @@ import pytest
 from runnerkit import RunnerKit, start_runner
 from testkit import calls, final
 
-from himari.bootstrap.application import DRIVE_NOTE, Application, FilesUnavailable, WorkspaceRefused, workspace_for
+from himari.bootstrap.application import Application, FilesUnavailable, WorkspaceRefused, workspace_for
 from himari.common import PrincipalId, TrustedScope
+from himari.data.api import MAX_WORKSPACE_NOTE_CHARS
+from himari.environment.machine import DRIVE_NOTE, MachineEnvironment
 from himari.prompt.api import state_block
 from himari.provider.scripted import ScriptedAdapter
 
@@ -163,15 +165,62 @@ def test_folders_are_registered_attached_and_shown_to_the_model(tmp_path: Path, 
 
 
 def test_a_cloud_folder_gets_the_drive_note(tmp_path: Path, kit: RunnerKit, monkeypatch: pytest.MonkeyPatch) -> None:
+    """§14: the model is told a folder is cloud-synced apart from the user's note, which stays theirs whole."""
     from himari.runner import hostfs
 
     monkeypatch.setattr(hostfs, "mount_type", lambda path, mountinfo="": "fuse.rclone")  # the runner is in-process
 
     async def scenario() -> None:
+        adapter = ScriptedAdapter([final("ok")])
+        app = await open_app(tmp_path / "data", kit.socket, adapter)
+        try:
+            longest = "n" * MAX_WORKSPACE_NOTE_CHARS
+            registered = await app.register_workspace(OPERATOR, "~/projects/a", note=longest)
+            assert registered.note == longest and registered.filesystem == "fuse.rclone"
+            edited = await app.update_workspace(OPERATOR, registered.workspace_id, "lectures", None)
+            assert edited.note is None and edited.filesystem == "fuse.rclone"
+            scope = TrustedScope(OPERATOR, await app.create_conversation(OPERATOR))
+            await app.attach_workspace(scope, workspace_id=registered.workspace_id)
+            assert app.machine is not None
+            shown = (await app.machine.places(scope)).shown
+            assert [(w.label, w.note, w.notice) for w in shown[1:]] == [("lectures", None, DRIVE_NOTE)]
+            assert shown[0].notice is None
+            await app.send(scope, "go")
+            await app.runner.wait(scope)
+            block = state_block(adapter.prepared_inputs[0].current_state) or ""
+            assert f'"notice": "{DRIVE_NOTE}"' in block
+        finally:
+            await app.close()
+
+    asyncio.run(scenario())
+
+
+def test_two_paths_to_one_folder_registered_at_once(tmp_path: Path, kit: RunnerKit,
+                                                     monkeypatch: pytest.MonkeyPatch) -> None:
+    """§10.1: two names of one folder (a bind mount, say) registered at the same time: one wins, the other is
+    told it is a duplicate, so one folder never gets two path locks."""
+    one, other = str(kit.home / "projects/a"), str(kit.home / "alias/a")
+
+    async def check(self: MachineEnvironment, path: str, others: list[str]) -> dict[str, object]:
+        await asyncio.sleep(0.05)  # the runner's check takes a while: both would pass without the lock
+        same = next((o for o in others if o in (one, other)), None)
+        return {"path": path, "filesystem": "ext4", "same_as": same}
+
+    monkeypatch.setattr(MachineEnvironment, "check_workspace", check)
+
+    async def scenario() -> None:
         app = await open_app(tmp_path / "data", kit.socket, ScriptedAdapter([]))
         try:
-            registered = await app.register_workspace(OPERATOR, "~/projects/a", note="lecture notes")
-            assert registered.note == f"{DRIVE_NOTE}\nlecture notes"
+            scope = TrustedScope(OPERATOR, await app.create_conversation(OPERATOR))
+            results = await asyncio.gather(app.register_workspace(OPERATOR, one),
+                                           app.attach_workspace(scope, path=other), return_exceptions=True)
+            assert [w.location for w in await app.machine_workspaces(OPERATOR)] == [one]
+            assert results[0].location == one  # type: ignore[union-attr]
+            folders = results[1]
+            assert not isinstance(folders, BaseException) and folders[1].path == one  # attached as the one it is
+            with pytest.raises(WorkspaceRefused) as refused:
+                await app.register_workspace(OPERATOR, other)
+            assert refused.value.code == "duplicate"
         finally:
             await app.close()
 

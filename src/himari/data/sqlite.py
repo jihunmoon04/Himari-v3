@@ -416,6 +416,7 @@ CREATE TABLE workspaces (
     location TEXT NOT NULL,
     label TEXT NOT NULL,
     note TEXT,
+    filesystem TEXT,
     created_at TEXT NOT NULL,
     UNIQUE (owner, environment_kind, location)
 ) STRICT;
@@ -1793,7 +1794,7 @@ class SqliteData:
         assert used is not None
         return RegisteredWorkspace(WorkspaceId(row["workspace_id"]), EnvironmentKind(row["environment_kind"]),
                                    row["location"], row["label"], row["note"],
-                                   datetime.fromisoformat(row["created_at"]), int(used["n"]))
+                                   datetime.fromisoformat(row["created_at"]), int(used["n"]), row["filesystem"])
 
     @staticmethod
     def _workspace_row(tx: _Tx, principal: PrincipalId, workspace_id: object) -> sqlite3.Row:
@@ -1817,9 +1818,10 @@ class SqliteData:
             return tuple(self._registered(tx, r) for r in rows)
 
     async def register_workspace(self, principal: PrincipalId, kind: EnvironmentKind, location: str, label: str,
-                                 note: str | None = None) -> RegisteredWorkspace:
+                                 note: str | None = None, filesystem: str | None = None) -> RegisteredWorkspace:
         location = rules.check_workspace_location(location)
         label, note = rules.check_workspace_label(label), rules.check_workspace_note(note)
+        filesystem = rules.check_workspace_filesystem(filesystem)
         with self._tx() as tx:
             if tx.one("SELECT 1 FROM workspaces WHERE owner=? AND environment_kind=? AND location=?",
                       principal, kind, location):
@@ -1829,9 +1831,9 @@ class SqliteData:
             if count["n"] >= MAX_WORKSPACES:
                 raise DataError(DataErrorCode.LIMIT_EXCEEDED, f"at most {MAX_WORKSPACES} workspaces")
             workspace_id = tx.new_id("wsp")
-            tx.execute("INSERT INTO workspaces (workspace_id, owner, environment_kind, location, label, note, created_at)"
-                       " VALUES (?, ?, ?, ?, ?, ?, ?)", workspace_id, principal, kind, location, label, note,
-                       _timestamp(datetime.now(UTC)))
+            tx.execute("INSERT INTO workspaces (workspace_id, owner, environment_kind, location, label, note, filesystem,"
+                       " created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", workspace_id, principal, kind, location, label,
+                       note, filesystem, _timestamp(datetime.now(UTC)))
             return self._registered(tx, self._workspace_row(tx, principal, workspace_id))
 
     async def update_workspace(self, principal: PrincipalId, workspace_id: WorkspaceId, *, label: str,

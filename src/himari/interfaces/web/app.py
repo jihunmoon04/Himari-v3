@@ -60,6 +60,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from himari.bootstrap.application import (
+    CLOUD_FILESYSTEMS,
     Application,
     AppViewRefused,
     AppViewState,
@@ -562,7 +563,8 @@ UPLOAD_PATH = re.compile(r"^/api/conversations/[^/]+/uploads$")
 def workspace_view(workspace: RegisteredWorkspace) -> dict[str, Any]:
     """V3-P74 §10.3: a registered folder."""
     return {"id": workspace.workspace_id, "path": workspace.location, "label": workspace.label,
-            "note": workspace.note, "created_at": _time(workspace.created_at), "attached": workspace.attached}
+            "note": workspace.note, "created_at": _time(workspace.created_at), "attached": workspace.attached,
+            "filesystem": workspace.filesystem, "cloud_synced": workspace.filesystem in CLOUD_FILESYSTEMS}
 
 
 def attached_view(folder: AttachedFolder) -> dict[str, Any]:
