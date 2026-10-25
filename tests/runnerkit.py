@@ -9,6 +9,7 @@ import asyncio
 import dataclasses
 import os
 import shutil
+import subprocess
 import tempfile
 import threading
 from dataclasses import dataclass, field
@@ -32,10 +33,18 @@ class FakeSandbox(MachineSandbox):
         self.reap_seconds = 0.0  # how long a cancelled command takes to be reaped
         self.events: list[str] = []  # "reaped" once a cancelled command is gone
         self.result = CommandResult(0, False, b"out\n", b"", 4, 0, 5)
+        self.execute = False  # True: run the command for real, unsandboxed, in its cwd (git push's steps)
 
     async def run(self, argv: list[str], layout: MachineLayout, timeout: float, *,
-                  max_output: int = 0) -> CommandResult:
+                  max_output: int = 0, stdout_to: int | None = None) -> CommandResult:
         self.calls.append((argv, layout, timeout))
+        if self.execute:
+            done = await asyncio.to_thread(
+                subprocess.run, argv, cwd=layout.cwd, stdin=subprocess.DEVNULL, timeout=timeout,
+                stdout=subprocess.PIPE if stdout_to is None else stdout_to, stderr=subprocess.PIPE)
+            out = done.stdout or b""
+            total = len(out) if stdout_to is None else os.fstat(stdout_to).st_size
+            return CommandResult(done.returncode, False, out, done.stderr, total, len(done.stderr), 1)
         try:
             while self.gate is not None and not self.gate.is_set():
                 await asyncio.sleep(0.01)
@@ -81,11 +90,11 @@ def make_home(base: Path) -> Path:
 
 def start_runner(base: Path, *, client_uid: int | None = None, enforced: bool = True,
                  sandbox: MachineSandbox | None = None, home: Path | None = None,
-                 network: bool = False) -> RunnerKit:
+                 network: bool = False, push: dict[str, object] | None = None) -> RunnerKit:
     """``sandbox``/``home``: a real machine sandbox (started with its
     self-test) and the user's real home, for the host gate. ``network``:
     the proxy with the default allow list (it starts with a real sandbox
-    only). The runner's state folder is a short one of its own (a socket
+    only). ``push``: the ``[push]`` table. The runner's state folder is a short one of its own (a socket
     path is at most 107 bytes), never the user's real one."""
     real = sandbox is not None
     home = make_home(base) if home is None else home
@@ -94,7 +103,8 @@ def start_runner(base: Path, *, client_uid: int | None = None, enforced: bool = 
     config = parse({"client_uid": os.getuid() if client_uid is None else client_uid,
                     "himari_home": str(himari_home), "socket": socket_path,
                     "cache_dir": str(home / ".cache/himari-runner"), "hidden": [str(base / "secret-root")],
-                    "state_dir": tempfile.mkdtemp(prefix="hr-"), "network": {"enabled": network}})
+                    "state_dir": tempfile.mkdtemp(prefix="hr-"), "network": {"enabled": network},
+                    "push": push or {}})
     config = dataclasses.replace(config, home=str(home))
     rules = HiddenRules(str(home), (".gitconfig", ".local/bin", ".local/lib", ".cache/himari-runner"),
                         config.hidden)

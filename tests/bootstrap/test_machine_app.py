@@ -56,6 +56,7 @@ def test_a_machine_conversation_works_in_its_own_folder(tmp_path: Path, kit: Run
             block = state_block(first.current_state) or ""
             assert f'"working_directory":"{folder}"' in block.replace(" ", "") and '"this conversation"' in block
             assert '"read": "everything the user can read' in block
+            assert '"git_push": "not set up on this server"' in block and "machine/git_push" in tools
             assert '"connection":"online"' in block.replace(" ", "")
             events = await app.data.read_events(scope)
             results = await app.data.read_tool_executions(scope, events[3].origin_run_id)  # type: ignore[arg-type]

@@ -51,6 +51,8 @@ READ_SCOPE = ("everything the user can read on this server, except hidden locati
               "data); the user's home is {home}")
 NETWORK = "HTTPS only, through a proxy, to these hosts (others are refused with 403): {hosts}"
 NO_NETWORK = "none: commands cannot reach the network"
+PUSH = "to the 'origin' remote of a repository in the workspaces, if it is one of: {repos} (https remotes only)"
+NO_PUSH = "not set up on this server"
 # §14: what the model is told of a cloud-synced folder, apart from the user's note.
 CLOUD_FILESYSTEMS = frozenset({"fuse.rclone"})
 DRIVE_NOTE = ("Cloud-synced folder: files have no execute bit, changes from other devices can take up to 15 minutes "
@@ -179,9 +181,11 @@ class MachineEnvironment:
         readable = READ_SCOPE.format(home=about["home"])
         hosts = about.get("network")
         network = NETWORK.format(hosts=", ".join(map(str, hosts))) if isinstance(hosts, list) and hosts else NO_NETWORK
+        repos = about.get("push")
+        push = PUSH.format(repos=", ".join(map(str, repos))) if isinstance(repos, list) and repos else NO_PUSH
         return [BindingObservation(b.binding_id, ConnectionStatus.ONLINE, now, working_directory=places.cwd,
                                    writable=places.roots, workspaces=places.shown, readable=readable,
-                                   network=network)
+                                   network=network, push=push)
                 for b in bindings]
 
     # --- uploads (V3-P66 §5.2), the same steps as Inside -------------------------------------

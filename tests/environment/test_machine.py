@@ -9,6 +9,7 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
+import gitserver
 import pytest
 from runnerkit import RunnerKit, start_runner
 
@@ -80,6 +81,7 @@ def test_plugin_conforms(env: MachineEnvironment) -> None:
     assert all("workspace_binding_id" not in t.definition.input_schema["properties"] for t in tools)  # type: ignore[operator]
     effects = {str(t.definition.tool_id): t.definition.effect_profile for t in tools}
     assert effects["machine/read_file"] is EffectProfile.READ and effects["machine/run_command"] is EffectProfile.UNKNOWN
+    assert effects["machine/git_push"] is EffectProfile.UNKNOWN
     ToolRegistry(tools)
     assert MachineEnvironment.owns(WORKSPACE) and not MachineEnvironment.owns(WorkspaceId("ws_x"))
 
@@ -409,6 +411,7 @@ def test_the_state_names_the_folders_and_what_may_be_read(kit: RunnerKit) -> Non
                                                                     (project, "a", "the C project")]
     assert view.readable is not None and str(kit.home) in view.readable
     assert view.network == "none: commands cannot reach the network"  # this runner's proxy is not started
+    assert view.push == "not set up on this server"
 
 
 def test_a_write_waits_for_every_folder_of_the_conversation(kit: RunnerKit) -> None:
@@ -460,3 +463,45 @@ def test_folders_data_will_not_give_run_nothing(kit: RunnerKit) -> None:
     assert len(kit.sandbox.calls) == calls
     assert not (kit.himari_home / "conversations" / scope.conversation_id / "x.txt").exists()
     assert not (Path(project) / "x.txt").exists()
+
+
+@pytest.mark.skipif(not gitserver.AVAILABLE, reason="needs git-http-backend and openssl")
+def test_git_push(tmp_path: Path) -> None:
+    """§12 through the Tool: created, up to date, rejected; told in the state; refused when not set up."""
+    server = gitserver.GitServer(tmp_path / "server", "tok")
+    token = tmp_path / "kit/secret-root/token"  # on the kit's hidden list
+    token.parent.mkdir(parents=True)
+    token.write_text("tok")
+    token.chmod(0o600)
+    kit = start_runner(tmp_path / "kit", push={"repos": ["github.com/owner/*"], "token_file": str(token)})
+    try:
+        server.bare("repo")
+        assert kit.runner.pusher is not None
+        kit.runner.pusher = gitserver.LocalPusher(server, kit.runner.pusher.repos, str(token),
+                                                  kit.runner.config.state_dir)
+        kit.sandbox.execute = True
+        env = MachineEnvironment(kit.socket)
+        repo = kit.himari_home / "conversations/c1"
+        repo.mkdir()
+        gitserver.git("init", "-q", "-b", "main", cwd=repo)
+        gitserver.git("commit", "-q", "--allow-empty", "-m", "a", cwd=repo)
+        gitserver.git("remote", "add", "origin", "https://github.com/owner/repo.git", cwd=repo)
+        head = gitserver.git("rev-parse", "HEAD", cwd=repo).strip()
+        pushed = call(env, "git_push", branch="main")
+        assert pushed.status is ToolStatus.SUCCEEDED
+        assert text(pushed) == f"pushed main to https://github.com/owner/repo.git: a new branch at {head[:12]}"
+        assert text(call(env, "git_push", branch="main")).startswith("main is already up to date")
+        gitserver.git("commit", "-q", "--amend", "--allow-empty", "-m", "b", cwd=repo)
+        rejected = call(env, "git_push", branch="main")
+        assert rejected.status is ToolStatus.FAILED and "rejected main" in text(rejected) and server.head("repo") == head
+        bindings = (binding(),)
+        assert asyncio.run(env.observe(SCOPE, bindings))[0].push == (
+            "to the 'origin' remote of a repository in the workspaces, if it is one of: github.com/owner/* "
+            "(https remotes only)")
+        kit.runner.pusher = None
+        refused = call(env, "git_push", branch="main", repository=".")
+        assert refused.status is ToolStatus.DENIED and "not set up" in text(refused)
+    finally:
+        kit.close()
+        server.close()
+

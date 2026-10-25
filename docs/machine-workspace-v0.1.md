@@ -1,6 +1,6 @@
 # 머신 Workspace v0.1
 
-> 2026-10-25 · **PROPOSED (V3-P74)** · 1단계 구현(§20; 외부 검수 B1·B2 §20.4, 재검수 C1 §20.5, 배포 2026-10-25). 2단계 구현(§21; 외부 검수 B1~B3 반영, 병합). 3단계 구현(§22; 외부 검수 B1·B2 §22.5). rev. 6 — 외부 재검수 4(HEAD fa79123) 통과. 소유자 결정 Q1~Q9 권고대로(2026-10-25, §17). rev. 5 — 외부 재검수 3(HEAD 903e7f1) 반영: N7 `socketpair`는 `SOCK_STREAM`만 허용(`SOCK_DGRAM` 쌍은 호스트 소켓으로 다시 연결된다, §6.6), N8 소켓 폴더는 `DirectoryMode=0755`(§4.1). 소유자 결정 Q1~Q9 대기(§17). rev. 4 — 외부 재검수 2(HEAD ea6e534) 반영: N4 호스트의 경로 Unix 소켓을 seccomp로 막음(§6.6, Q9), N5 runner 소켓은 systemd 소켓 단위가 그룹 `himari-v3`로 만듦(§4.1), N6 Q5 문구를 §6.5에 맞춤(§17). 소유자 결정 Q1~Q9 대기(§17). rev. 3 — 외부 재검수(HEAD a7eca31) 반영: N1 bundle fetch에만 `file` 전송 허용(§12), N2 숨김은 마지막에 가리고 실행 직전에 확인하는 불변 조건(§6.1), N3 runner 생존은 명령 OOM 격리까지만 보장(§6.5). rev. 2 — 외부 검수(HEAD 61200df) 반영: B1 기본 쓰기 범위를 대화 폴더로, 겹치는 Workspace는 한 충돌 영역(§3.2, §9.1), B2 파일 Tool은 디스크 파일시스템만·보이는 점 항목 줄임(§7, §8.2), B3 git push의 bundle 전달·대상·lock(§12), P2 등록 범위(§5.3)·링크 풀기(§8.3)·OOM(§6.5)·프록시 DNS(§11.3). 소유자 결정 Q1~Q8 대기(§17). rev. 1: 설계 초안.
+> 2026-10-25 · **PROPOSED (V3-P74)** · 1단계 구현(§20; 외부 검수 B1·B2 §20.4, 재검수 C1 §20.5, 배포 2026-10-25). 2단계 구현(§21; 외부 검수 B1~B3 반영, 병합). 3단계 구현(§22; 외부 검수 B1·B2 §22.5, 병합). 4단계 구현(§23; 외부 검수 B1·B2 §23.5, 재검수 C1 §23.6). rev. 6 — 외부 재검수 4(HEAD fa79123) 통과. 소유자 결정 Q1~Q9 권고대로(2026-10-25, §17). rev. 5 — 외부 재검수 3(HEAD 903e7f1) 반영: N7 `socketpair`는 `SOCK_STREAM`만 허용(`SOCK_DGRAM` 쌍은 호스트 소켓으로 다시 연결된다, §6.6), N8 소켓 폴더는 `DirectoryMode=0755`(§4.1). 소유자 결정 Q1~Q9 대기(§17). rev. 4 — 외부 재검수 2(HEAD ea6e534) 반영: N4 호스트의 경로 Unix 소켓을 seccomp로 막음(§6.6, Q9), N5 runner 소켓은 systemd 소켓 단위가 그룹 `himari-v3`로 만듦(§4.1), N6 Q5 문구를 §6.5에 맞춤(§17). 소유자 결정 Q1~Q9 대기(§17). rev. 3 — 외부 재검수(HEAD a7eca31) 반영: N1 bundle fetch에만 `file` 전송 허용(§12), N2 숨김은 마지막에 가리고 실행 직전에 확인하는 불변 조건(§6.1), N3 runner 생존은 명령 OOM 격리까지만 보장(§6.5). rev. 2 — 외부 검수(HEAD 61200df) 반영: B1 기본 쓰기 범위를 대화 폴더로, 겹치는 Workspace는 한 충돌 영역(§3.2, §9.1), B2 파일 Tool은 디스크 파일시스템만·보이는 점 항목 줄임(§7, §8.2), B3 git push의 bundle 전달·대상·lock(§12), P2 등록 범위(§5.3)·링크 풀기(§8.3)·OOM(§6.5)·프록시 DNS(§11.3). 소유자 결정 Q1~Q8 대기(§17). rev. 1: 설계 초안.
 >
 > 소유자 방향(2026-10-24, 대화에서 정함):
 > - 개발용 Workspace를 따로 만들지 않는다. 기본 Workspace에서 git·C·Python·Java 같은 일반 개발이 되게 한다.
@@ -768,4 +768,164 @@ pids_max = 1024
 - 전체 pytest 2449 passed, 114 skipped. mypy --strict, import 검사 통과.
 - 호스트 게이트 52개 통과(4개 생략).
 - 따로 확인: Sandbox 안 `pip install six` 성공, 끝난 뒤 `state_dir`에 소켓이 남지 않음.
+
+## 23. 구현 노트 (2026-10-25, 4단계)
+
+### 23.1 만든 것
+
+- **Tool `machine/git_push(repository, branch)`**(§12).
+  - `repository`의 기본값은 작업 위치다. `branch`는 같은 이름의 원격 브랜치로 push한다.
+  - 결과 상태는 네 가지다.
+    - `created`: 새 브랜치
+    - `pushed`: `이전..새`
+    - `up_to_date`
+    - `rejected`: 원격이 거부함. `FAILED`로 돌려주고 git의 이유와 힌트를 싣는다.
+  - push 동안 대화의 모든 폴더에 lock을 잡는다. 다른 쓰기 Tool과 같은 방식이다.
+- **runner 연산 `git_push`**(`WRITES`에 속한다. 취소하면 runner가 끝낼 때까지 클라이언트가 경로를 놓지 않는다).
+  1. **검사**
+     - push가 설정돼 있어야 한다.
+     - 브랜치 이름은 보수적인 부분집합만 받는다.
+       - 허용 글자: 영문자, 숫자, `._/+-`
+       - 거부: `-`·`+`·`/`로 시작, `..`, `//`, `.`로 시작하는 구성 요소, `.lock`, `.`·`/`로 끝남, `HEAD`
+     - 저장소는 실제 경로로 푼 뒤 이 호출의 Workspace 안에 있어야 한다. 아니면 `OUTSIDE_WORKSPACES`이고, 사용자에게 붙여 달라고 하라고 안내한다.
+  2. **Sandbox 안**: 머신 프로파일로 두 명령을 돌린다.
+     - 쓰기 묶음 없음(Sandbox 자신의 `/tmp`만), 네트워크 없음, 캐시 없음, 명령 cgroup 안이다.
+     - `git remote get-url --push origin`
+     - `git bundle create - refs/heads/<branch>`: stdout을 runner 상태 폴더의 새 `0600` 파일로 받는다(`stdout_to`).
+       - 2 GiB까지 쓰고, 넘는 바이트는 세기만 한다. 넘으면 `TOO_LARGE`다.
+       - 단계마다 300초 한도가 있다.
+  3. **runner 밖**(`himari/runner/push.py`)
+     - **URL 검사**: `https://host/owner/name`만 받는다.
+       - 사용자 정보·포트·쿼리·조각이 있으면 거부한다.
+       - 호스트는 프록시와 같은 방식으로 정규화하고, IP는 거부한다.
+       - 경로는 정확히 두 구성 요소이고, 끝의 `.git`은 정규화한다.
+       - 설정 `push.repos`(`host/owner/name`, `owner`·`name`은 `*`일 수 있음)와 대소문자를 가리지 않고 맞춘다.
+     - **bundle 받기**: 새 bare 저장소에서 한다.
+       - `bundle list-heads` 결과는 정확히 `refs/heads/<branch>` 하나여야 한다.
+       - 그다음 `fetch --no-tags <bundle> <ref>:<ref>`. 이 단계에서만 `protocol.file.allow=always`를 연다.
+     - **push**: `push --porcelain --no-verify <url> <ref>:<ref>`.
+       - `protocol.https.allow=always`, `http.followRedirects=false`
+       - 인증은 `GIT_ASKPASS` 스크립트로 한다. 사용자 이름에는 `x-access-token`, 비밀번호에는 토큰 파일 내용을 준다. 토큰 파일 경로는 이 git 실행의 환경에만 넣는다.
+     - **고정 환경**(모든 git 실행)
+       - `GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL=/dev/null`, 빈 `HOME`, `GIT_TERMINAL_PROMPT=0`, `GIT_NO_REPLACE_OBJECTS=1`, `PATH=/usr/bin:/bin`
+       - `core.hooksPath=/dev/null`, `credential.helper=`, `core.fsmonitor=false`, `protocol.allow=never`
+       - 각 단계는 자기 프로세스 그룹에서 돌고, 시간 한도는 120초다(push는 300초). 넘거나 취소되면 그룹째 종료한다.
+     - push 폴더(bundle, bare 저장소, home, askpass)는 매번 만들고 끝나면 지운다.
+- **runner 설정 `[push]`**
+  - `repos`(기본 없음 = push 꺼짐)
+  - `token_file`(기본 `/etc/himari-runner/push-token`). 이 경로는 숨김 목록 기본값 안이다.
+- **모델에게 알리기**
+  - `hello`의 `push`를 Current State의 `git_push`로 싣는다: "to the 'origin' remote … if it is one of: … (https remotes only)" 또는 "not set up on this server".
+  - `run_command` 설명에 push는 `git_push`로 하라고 적었다(명령에는 인증 정보가 없다).
+
+### 23.2 설계와 달라진 것
+
+1. **effect는 `UNKNOWN`이다.** `EffectProfile`에는 `EXTERNAL`이 없다(`EXTERNAL`은 `ToolOrigin`의 값이고, MCP 서버를 뜻한다). 결과를 모르면 다시 돌리지 않는다는 점이 `run_command`와 같다. 같은 push를 다시 해도 `up_to_date`라 해롭지 않다.
+2. **lock은 대화의 모든 폴더에 잡는다.** §12는 그 Workspace에만 잡는다고 했다. 다른 쓰기 Tool과 같게 했다. 저장소가 어느 폴더에 있는지는 runner가 경로를 푼 뒤에야 안다.
+3. **브랜치 이름은 git을 부르지 않고 Python의 보수적 규칙으로 검사한다**(`check-ref-format`의 부분집합). `+`로 시작하는 이름도 거부한다. refspec이 `refs/heads/`로 시작해서 강제 push가 되지는 않지만, 그래도 막았다.
+4. **설계보다 더 막은 것**
+   - `http.followRedirects=false`: 검사한 호스트 밖으로 가지 않는다.
+   - `core.fsmonitor=false`, `--no-verify`, `GIT_NO_REPLACE_OBJECTS`, `fetch --no-tags`
+5. **2 GiB를 넘으면 바로 멈추지 않는다.** 넘는 바이트는 버리고 세기만 하다가, 명령이 끝나면(최대 300초) 거부한다. 일반 출력의 `_drain`과 같은 방식이다.
+
+### 23.3 확인
+
+- 단위(`tests/runner/test_push.py` 51개)
+  - **URL**: 받는 3가지, 거부 14가지 — `http`·scp형·`ssh`·`file`, 사용자·토큰, 포트, 쿼리, 목록 밖 소유자, 접미사 속임 호스트, 세 단계 경로, `..`, IP, 빈 이름
+  - **설정·이름**: 저장소 패턴과 설정 검사, 브랜치 이름(받는 5가지, 거부 22가지)
+  - **runner 단계**: 로컬 HTTPS git 서버를 썼다(`git-http-backend` + Basic 인증 + 자체 인증서, `tests/gitserver.py`).
+    - 새 브랜치 → fast-forward(`이전..새`) → 이미 최신 → 다른 역사는 거부(원격은 그대로)
+    - 처음 요청은 인증 없이 401을 받고, 그다음 토큰으로 성공한다(askpass 확인).
+    - 브랜치가 둘이거나 다른 브랜치만 든 bundle, bundle이 아닌 파일은 거부한다.
+    - 토큰 파일이 없으면 `ACCESS`, 토큰이 틀리면 실패하고 아무것도 push되지 않는다.
+    - push 폴더가 남지 않는다.
+  - **runner 연산**: 가짜 Sandbox가 명령을 실제로 실행하는 모드로 확인했다.
+    - 저장소의 hook 넷과 `credential.helper`를 두었는데, 아무것도 실행되지 않았다(표시 파일 없음).
+    - Sandbox 단계의 argv와 배치: 쓰기 없음, 프록시 없음, 캐시 없음
+    - 거부: 붙이지 않은 저장소, `origin` 없음, SSH 원격, 목록 밖 저장소, 없는 브랜치, 잘못된 이름, 2 GiB 초과(한도를 줄여서), Sandbox 단계 시간 초과, 설정 없음
+  - `_spool`: 앞 바이트만 쓰고 나머지는 센다.
+- **Tool**(`test_machine.py`)
+  - 만들기 → 이미 최신 → 거부(`FAILED`)
+  - Current State 문구, 설정이 없으면 `DENIED`, effect `UNKNOWN`
+  - 앱 시험에서 Tool 목록과 `git_push` 줄을 확인했다.
+- **호스트 게이트**(실제 Sandbox): 악성 저장소를 만들어 로컬 HTTPS 서버로 push했다. 성공했고, 표시 파일은 없었다.
+  - 저장소 설정: `core.hooksPath`(hook 넷), `core.fsmonitor`, `include.path`로 넣은 `credential.helper`
+  - 표시 파일은 Sandbox 밖에서만 쓸 수 있는 곳에 두었다.
+- 전체 pytest 2501 passed, 115 skipped. mypy --strict, import 검사 통과. 호스트 게이트 53 passed, 4 skipped.
+- 실제 GitHub로는 push하지 않았다(토큰이 없다). 배포한 뒤 소유자의 시험 저장소로 확인한다(§23.4).
+
+### 23.4 배포 (4단계)
+
+- DB와 systemd 단위는 바뀌지 않는다.
+- **소유자가 할 일**
+  1. GitHub에서 fine-grained 토큰을 만든다.
+     - Repository access: push할 저장소만 고른다.
+     - Permissions: Contents **Read and write**(Metadata 읽기는 자동으로 붙는다).
+     - 만료일을 정한다.
+  2. 토큰을 `/etc/himari-runner/push-token`에 둔다(`coder` 소유, `0600`, 하드 링크 없음). 이 경로는 숨김 목록 기본값이라 명령에서 보이지 않는다. 조건이 맞지 않으면 runner가 push를 끄고 로그에 이유를 남긴다(§23.5).
+  3. `/etc/himari-runner/runner.toml`에 적는다.
+     ```toml
+     [push]
+     repos = ["github.com/jihunmoon04/<저장소>"]   # 또는 "github.com/jihunmoon04/*"
+     ```
+  4. runner와 Web을 같은 release로 다시 시작한다.
+- 권장: push할 저장소의 기본 브랜치에 GitHub 브랜치 보호를 건다(§15). Tool은 강제 push와 삭제를 만들지 않지만, 토큰 자체에는 그 권한이 있다.
+- `[push]`가 없으면 Tool은 "not set up"으로 거부한다. 다른 기능에는 영향이 없다.
+
+### 23.5 외부 검수 반영 (HEAD 22836d3)
+
+**B1 (P1) — 설정한 토큰 파일이 명령에서 읽힐 수 있었다.** `push.token_file`은 아무 절대 경로나 받았다. 그래서 숨김 목록 밖(예: `~/projects/token`)에 두면, `run_command`가 그 파일을 읽을 수 있었다. `[hidden]`을 바꾸면 기본 경로의 보호도 사라질 수 있었다.
+
+- runner는 토큰 파일을 **쓸 때마다** 검사한다(`token_problem`): runner 시작, `hello`, `git_push`마다. 파일도, 숨김 목록도 그사이 바뀔 수 있어서다.
+- 검사 내용. 실제 경로로 푼 뒤 다음을 모두 만족해야 한다.
+  - 일반 파일이다.
+  - runner 사용자 소유이고 읽을 수 있다.
+  - 다른 사용자 권한 비트가 없다(`0600`).
+  - 링크 수가 1이다. 다른 곳의 하드 링크가 보일 수 있기 때문이다.
+  - **현재 숨김 규칙으로 숨겨져 있다.**
+- 하나라도 어기면 push가 꺼진다.
+  - `hello.push`가 `null`이 되고, Current State는 "not set up"이 된다.
+  - `git_push`는 `ACCESS` "not set up safely: <이유>"로 거부한다. 경로는 로그에만 남긴다.
+  - 시작할 때 로그에 이유를 남긴다.
+- 확인
+  - 단위: 보이는 위치, `0640`, 하드 링크, 없음, 폴더 각각이 push를 끈다. 숨긴 곳으로 돌려놓으면 다시 켜진다.
+  - 호스트 게이트(실제 Sandbox):
+    - 숨긴 토큰은 `cat`으로도, 폴더 목록으로도 보이지 않는다.
+    - 명령이 읽을 수 있는 `0600` 파일로 바꾸면 push가 꺼진다. 그 파일을 실제로 읽을 수 있다는 것도 함께 확인했다.
+
+**B2 (P2) — bundle 기록이 runner 이벤트 루프를 점유했다.**
+
+- `_spool`은 1 MiB 단위를 **스레드에서** 쓴다. 부분 쓰기도 끝까지 쓴다(`_write_all`).
+- 한도(2 GiB)를 넘으면 **즉시 명령 트리를 끝낸다.** 남은 출력은 끝날 때까지 세기만 하고, 결과는 `TOO_LARGE`다.
+- **push는 runner 전체에서 한 번에 하나다**(`asyncio.Semaphore(1)`). 기다리는 push도 취소할 수 있다. 그래서 디스크의 bundle은 최대 하나(2 GiB)다.
+- 확인
+  - 단위: 7바이트씩만 써지는 `os.write`로도 30바이트가 다 써지고, 한도에서 멈춤 함수가 한 번 불린다.
+  - 호스트 게이트: 실제 Sandbox에서 `yes`를 1 MiB 한도로 받으면, 300초를 기다리지 않고 바로 끝난다. 파일은 정확히 1 MiB다.
+
+- 전체 pytest 2502 passed, 117 skipped. mypy --strict, import 검사 통과. 호스트 게이트 55 passed, 4 skipped.
+
+### 23.6 외부 재검수 반영 (HEAD 695bbef)
+
+**C1 (P2) — 취소하면 bundle을 쓰던 스레드가 남을 수 있었다.**
+
+`asyncio.to_thread`를 기다리던 작업을 취소해도, 이미 돌고 있는 스레드의 쓰기는 멈추지 않는다. 그래서 다음 일이 생길 수 있었다.
+- 취소된 push의 `_push_steps`가 bundle 파일 디스크립터를 닫는다.
+- 스레드는 그 뒤에도, 닫혔거나 같은 번호로 다시 쓰이는 디스크립터에 쓴다.
+
+고친 것:
+- `_spool`은 쓰기 하나를 `_settle`로 기다린다. 취소되어도 그 쓰기가 끝난 다음에 `CancelledError`를 낸다.
+- `_supervise`는 출력 작업(stdout·stderr)을 취소한 뒤, 그것들이 **모두 끝날 때까지** 기다렸다가 반환한다. 이 기다림도 취소로 끊기지 않는다.
+- 그래서 정리는 이 순서로만 일어난다.
+  1. 스레드 쓰기가 끝난다.
+  2. `sandbox.run`이 반환한다.
+  3. 디스크립터를 닫고, push 폴더를 지운다.
+  4. runner가 연결을 닫는다. `git_push`는 `WRITES`라서, 클라이언트는 이때까지 기다린다.
+  5. 클라이언트가 Workspace lock을 놓는다.
+
+확인:
+- 시험: `_write_all`을 일부러 멈춰 둔 채로 취소한다.
+  - `_spool` 단독: 쓰기가 끝나기 전에는 끝나지 않는다.
+  - `_supervise`(실제 `yes` 프로세스): 명령은 이미 죽었는데 쓰기가 남아 있으면, `_supervise`는 반환하지 않는다. 반환한 뒤에는 쓰기가 더 없다.
+  - 수정 전 코드에서는 이 시험이 실패한다.
+- 전체 pytest 2503 passed, 117 skipped. mypy --strict 통과. 호스트 게이트 55 passed, 4 skipped.
 

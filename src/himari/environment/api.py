@@ -57,6 +57,7 @@ class BindingObservation(DeepFrozen):
     workspaces: tuple[ObservedWorkspace, ...] = ()
     readable: str | None = None
     network: str | None = None  # what a command can reach (V3-P74 §11)
+    push: str | None = None  # where git_push may push (V3-P74 §12)
 
 
 @runtime_checkable

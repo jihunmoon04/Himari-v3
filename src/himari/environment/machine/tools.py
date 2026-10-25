@@ -82,6 +82,7 @@ class _MachineTool:
     name = ""
     description = ""
     effect = EffectProfile.READ
+    target = "path"  # the argument a refusal names
     properties: dict[str, JsonValue] = {}
     required: list[str] = []
 
@@ -119,7 +120,7 @@ class _MachineTool:
         except runner.NotSent:
             return _unreachable()
         except runner.RunnerError as error:
-            return _refused(_shown(args.get("path", ".")), error)
+            return _refused(_shown(args.get(self.target, ".")), error)
 
     async def act(self, args: Mapping[str, Any], cwd: str, roots: list[str], ctx: ToolContext) -> ToolOutcome:
         raise NotImplementedError
@@ -300,7 +301,7 @@ class RunCommand(_MachineTool):
         "Run one command as the user in a Linux sandbox on this server. It can read what the user can read, "
         "except hidden locations, and write only inside this conversation's workspaces and /tmp (each command "
         "gets its own /tmp). Network: HTTPS only, to the hosts the current state lists (others get 403 from "
-        "the proxy); no SSH, so use https:// git remotes. argv is a list of strings; use [\"sh\", \"-c\", \"...\"] for shell "
+        "the proxy); no SSH, so use https:// git remotes; to push, use git_push (commands have no credentials). argv is a list of strings; use [\"sh\", \"-c\", \"...\"] for shell "
         "syntax. Unix domain sockets cannot be created: use TCP on 127.0.0.1, and the 'fork' start method for "
         "Python multiprocessing. Use a virtual environment in the project for Python packages (the home folder "
         f"is read-only). Runs in the working directory; timeout {DEFAULT_TIMEOUT_SECONDS}s by default "
@@ -341,6 +342,39 @@ class RunCommand(_MachineTool):
             raw = dict(outcome.raw_result) if isinstance(outcome.raw_result, Mapping) else {}
             return ToolOutcome(outcome.status, _text(text + note, error=True), raw_result={**raw, "oom": True})
         return outcome
+
+
+class GitPush(_MachineTool):
+    """``machine/git_push`` (§12): the runner pushes; the repository is only read, in the sandbox."""
+
+    name = "git_push"
+    description = (
+        "Push one local branch of a git repository in this conversation's workspaces to the branch of the same name "
+        "on its 'origin' remote. Only https remotes the current state lists under git_push. It pushes the branch's "
+        "commits (commit first with run_command), never forced: if the remote has commits the branch lacks, the push "
+        "is rejected; fetch and merge or rebase, then push again."
+    )
+    effect = EffectProfile.UNKNOWN  # changes a remote repository
+    target = "repository"
+    properties = {
+        "repository": {"type": "string", "description": "The repository's folder (default: working directory)."},
+        "branch": {"type": "string", "description": "The local branch to push."},
+    }
+    required = ["branch"]
+
+    async def act(self, args: Mapping[str, Any], cwd: str, roots: list[str], ctx: ToolContext) -> ToolOutcome:
+        result, _ = await self._env.call(runner.GIT_PUSH, {"repository": args.get("repository", "."),
+                                                           "branch": args.get("branch"), "cwd": cwd,
+                                                           "write_roots": roots})
+        branch, url, status = str(result["branch"]), str(result["url"]), str(result["status"])
+        new, message = str(result["new"])[:12], str(result["message"])
+        if status == "rejected":
+            return ToolOutcome(ToolStatus.FAILED, _text(f"the remote rejected {branch} at {url}; nothing was pushed: "
+                                                        f"{message}", error=True), raw_result=result)
+        text = {"created": f"pushed {branch} to {url}: a new branch at {new}",
+                "up_to_date": f"{branch} is already up to date at {url} ({new})"}.get(
+                    status, f"pushed {branch} to {url}: {message}")
+        return ToolOutcome(ToolStatus.SUCCEEDED, _text(text), raw_result=result)
 
 
 class MachineReadDocument(ReadDocument):
@@ -387,7 +421,8 @@ class MachineReadDocument(ReadDocument):
 
 
 def machine_tools(env: MachineEnvironment) -> list[ToolHandler]:
-    tools: list[ToolHandler] = [ListFiles(env), ReadFile(env), WriteFile(env), EditFile(env), DeleteFile(env), RunCommand(env)]
+    tools: list[ToolHandler] = [ListFiles(env), ReadFile(env), WriteFile(env), EditFile(env), DeleteFile(env),
+                                RunCommand(env), GitPush(env)]
     if env.files is not None:
         tools.append(PresentFile(env))
     if env.documents is not None:

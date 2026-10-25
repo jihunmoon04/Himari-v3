@@ -205,6 +205,34 @@ async def _drain(stream: asyncio.StreamReader | None, limit: int) -> tuple[bytes
     return bytes(kept), total
 
 
+async def _spool(stream: asyncio.StreamReader | None, sink: int, limit: int,
+                 overflow: Callable[[], None]) -> tuple[bytes, int]:
+    """Write the first ``limit`` bytes to the file ``sink`` (on a thread: a
+    slow disk does not hold up the loop), then call ``overflow`` (which
+    stops the command) and count what is left until the end of the stream.
+    A write under way is waited for, through cancellation too: ``sink`` is
+    closed by the caller once this has ended (PR #90 review C1)."""
+    if stream is None:
+        return b"", 0
+    total = 0
+    while chunk := await stream.read(1 << 20):
+        if total <= limit:
+            write = asyncio.ensure_future(asyncio.to_thread(_write_all, sink, chunk[: limit - total]))
+            if await _settle(write):
+                raise asyncio.CancelledError
+            write.result()
+            if total + len(chunk) > limit:
+                overflow()
+        total += len(chunk)
+    return b"", total
+
+
+def _write_all(fd: int, data: bytes) -> None:
+    view = memoryview(data)
+    while view:
+        view = view[os.write(fd, view):]
+
+
 async def _wait_sync(fd: int, timeout: float) -> bytes:
     """Read the helper's report from a non-blocking fd via the event loop
     (no thread left blocked on an fd that is about to be closed). EOF or
@@ -342,11 +370,12 @@ class SandboxBackend:
 
 
 async def protected_run(build: Callable[[int], list[str]], pass_fds: Sequence[int], timeout: float, *,
-                        max_output: int = MAX_OUTPUT_BYTES) -> CommandResult:
+                        max_output: int = MAX_OUTPUT_BYTES, stdout_to: int | None = None) -> CommandResult:
     """Spawn ``build(sync_w)`` (bwrap arguments around the helper) with only
     ``pass_fds`` and the sync pipe passed, wait for the helper's report and
     supervise the command: the tree never outlives this call (V3-P41).
-    Every profile's spawn goes through here."""
+    Every profile's spawn goes through here. ``stdout_to``: a file the
+    stdout goes to (its first ``max_output`` bytes) instead of the result."""
     sync_r, sync_w = os.pipe()
     try:
         os.set_blocking(sync_r, False)
@@ -376,13 +405,13 @@ async def protected_run(build: Callable[[int], list[str]], pass_fds: Sequence[in
         finally:
             # Both ends are closed on every path, cancellation included.
             os.close(sync_w)
-        return await _supervise(process, sync_r, timeout, started, max_output)
+        return await _supervise(process, sync_r, timeout, started, max_output, stdout_to)
     finally:
         os.close(sync_r)
 
 
 async def _supervise(process: asyncio.subprocess.Process, sync_r: int, timeout: float, started: float,
-                     max_output: int) -> CommandResult:
+                     max_output: int, stdout_to: int | None = None) -> CommandResult:
     tasks: list[asyncio.Task[tuple[bytes, int]]] = []
     finished = False
     try:
@@ -391,7 +420,8 @@ async def _supervise(process: asyncio.subprocess.Process, sync_r: int, timeout: 
             raise SandboxSetupError("the sandbox did not report enforcement")
 
         tasks = [
-            asyncio.create_task(_drain(process.stdout, max_output)),
+            asyncio.create_task(_drain(process.stdout, max_output) if stdout_to is None
+                                else _spool(process.stdout, stdout_to, max_output, lambda: _kill_tree(process.pid))),
             asyncio.create_task(_drain(process.stderr, MAX_OUTPUT_BYTES)),
         ]
         timed_out = False
@@ -419,6 +449,9 @@ async def _supervise(process: asyncio.subprocess.Process, sync_r: int, timeout: 
         for task in tasks:
             if not task.done():
                 task.cancel()
+        # Returned only once the output's tasks have ended: a spool's write in flight included (C1).
+        if tasks and await _settle(asyncio.gather(*tasks, return_exceptions=True)):
+            raise asyncio.CancelledError
     return CommandResult(
         exit_code=None if timed_out else process.returncode,
         timed_out=timed_out,

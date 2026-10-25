@@ -52,7 +52,9 @@ DISCARD_COPY = "discard_copy"
 HOLDS = "holds"
 REMOVE_CONVERSATION_FOLDER = "remove_conversation_folder"
 CHECK_WORKSPACE = "check_workspace"  # a folder the user registers (§10.1): nothing is written
-WRITES =frozenset({WRITE, DELETE, RUN, COPY_IN, FREE_PATH, COMMIT_COPY, DISCARD_COPY, REMOVE_CONVERSATION_FOLDER})
+GIT_PUSH = "git_push"  # a branch of a repository in the call's Workspaces (§12)
+WRITES = frozenset({WRITE, DELETE, RUN, COPY_IN, FREE_PATH, COMMIT_COPY, DISCARD_COPY, REMOVE_CONVERSATION_FOLDER,
+                    GIT_PUSH})
 
 # Error categories: each message is safe to show the model.
 NOT_FOUND = "not_found"  # also every hidden path: whether it exists is not told
