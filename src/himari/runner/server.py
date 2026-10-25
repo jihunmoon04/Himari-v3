@@ -26,17 +26,21 @@ import shutil
 import socket
 import struct
 import tempfile
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Coroutine, Sequence
 from typing import Any, TypeVar
 
 from himari.runner import api
 from himari.runner.cgroups import Commands
 from himari.runner.config import RunnerConfig
+from himari.runner.hidden import under
 from himari.runner.hostfs import Host
 from himari.runner.proxy import Door, Proxy
+from himari.runner.push import MAX_BUNDLE_BYTES, Pusher, check_branch, remote
 from himari.sandbox.api import (
     MAX_ARGV,
+    MAX_OUTPUT_BYTES,
     MAX_TIMEOUT_SECONDS,
+    CommandResult,
     SandboxSetupError,
     SandboxState,
     SandboxUnavailableError,
@@ -48,6 +52,7 @@ from himari.sandbox.machine_self_test import probe
 log = logging.getLogger("himari.runner")
 MAX_LIST = 1000
 MAX_CONTENT_BYTES = 256 * 1024  # a write Tool's content (V3-051)
+BUNDLE_SECONDS = 300  # git push's steps in the sandbox (§12)
 _PEERCRED = struct.Struct("3i")
 T = TypeVar("T")
 
@@ -73,6 +78,8 @@ class Runner:
         self.commands = commands
         self.report_failures: list[str] = []
         self.proxy: Proxy | None = None  # commands' way out (§11); None: no network
+        # git push's steps outside the sandbox (§12); None: not set up
+        self.pusher = None if config.push is None else Pusher(config.push, config.push_token, config.state_dir)
 
     async def start(self) -> SandboxState:
         """The self-test (V3-050, §13), once; then the proxy, if configured."""
@@ -191,7 +198,8 @@ class Runner:
                     "memory_max": config.memory_max if self.commands else None,
                     "pids_max": config.pids_max if self.commands else None,
                     "toolkit": config.documents_toolkit is not None,
-                    "network": None if self.proxy is None else list(self.proxy.allow)}, []
+                    "network": None if self.proxy is None else list(self.proxy.allow),
+                    "push": None if self.pusher is None else list(self.pusher.repos)}, []
         if self.sandbox.state is not SandboxState.ENFORCED:
             # §13 (PR #87 review B1): without a passed self-test nothing but hello is done — files included.
             raise api.RunnerError(api.UNAVAILABLE)
@@ -232,6 +240,8 @@ class Runner:
             return {"path": await self._blocking(delete)}, []
         if op == api.RUN:
             return await self._run(args, roots, conn), []
+        if op == api.GIT_PUSH:
+            return await self._push(args, roots, conn), []
         if op in (api.COPY_IN, api.FREE_PATH, api.COMMIT_COPY, api.DISCARD_COPY):
             return await self._blocking(lambda: self._upload(op, args, fds, roots)), []
         raise api.RunnerError(api.INVALID, f"unknown operation {op}")
@@ -291,26 +301,10 @@ class Runner:
                                        cgroup_procs=None if self.commands is None else self.commands.procs,
                                        proxy=None if door is None else door.path)
                 before = 0 if self.commands is None else self.commands.oom_kills()
-                command = asyncio.ensure_future(self.sandbox.run(argv, layout, timeout))
-                closed = asyncio.ensure_future(api.wait_closed(conn))
-                try:
-                    done, _ = await asyncio.wait({command, closed}, return_when=asyncio.FIRST_COMPLETED)
-                except asyncio.CancelledError:  # the runner is stopping: the tree goes first
-                    await _stopped(command)
-                    raise
-                finally:
-                    closed.cancel()
-                if command not in done:  # the client cancelled: the tree is killed with the task
-                    await _stopped(command)
+                command = await self._unless_cancelled(self._sandboxed(argv, layout, timeout), conn)
+                if command is None:
                     return None
-                try:
-                    result = command.result()
-                except SandboxUnavailableError:
-                    raise api.RunnerError(api.UNAVAILABLE) from None
-                except SandboxSetupError:
-                    log.error("a command's sandbox could not be set up; the machine sandbox is now %s",
-                              self.sandbox.state.value)
-                    raise api.RunnerError(api.SETUP_FAILED) from None
+                result = command.result()
                 oom = self.commands is not None and self.commands.oom_kills() > before
         finally:
             for fd in (cache_fd, toolkit_fd):
@@ -322,6 +316,79 @@ class Runner:
                 "stdout": base64.b64encode(result.stdout).decode(), "stderr": base64.b64encode(result.stderr).decode(),
                 "stdout_total": result.stdout_total, "stderr_total": result.stderr_total,
                 "elapsed_ms": result.elapsed_ms, "oom": oom}
+
+    async def _unless_cancelled(self, work: Coroutine[Any, Any, T], conn: socket.socket) -> asyncio.Future[T] | None:
+        """``work`` run to its end; or, when the client closes the connection,
+        stopped and waited for (a command's tree is killed and reaped): None."""
+        task = asyncio.ensure_future(work)
+        closed = asyncio.ensure_future(api.wait_closed(conn))
+        try:
+            done, _ = await asyncio.wait({task, closed}, return_when=asyncio.FIRST_COMPLETED)
+        except asyncio.CancelledError:  # the runner is stopping: the work goes first
+            await _stopped(task)
+            raise
+        finally:
+            closed.cancel()
+        if task not in done:
+            await _stopped(task)
+            return None
+        return task
+
+    async def _sandboxed(self, argv: list[str], layout: MachineLayout, timeout: float, *,
+                         max_output: int = MAX_OUTPUT_BYTES, stdout_to: int | None = None) -> CommandResult:
+        try:
+            return await self.sandbox.run(argv, layout, timeout, max_output=max_output, stdout_to=stdout_to)
+        except SandboxUnavailableError:
+            raise api.RunnerError(api.UNAVAILABLE) from None
+        except SandboxSetupError:
+            log.error("a command's sandbox could not be set up; the machine sandbox is now %s",
+                      self.sandbox.state.value)
+            raise api.RunnerError(api.SETUP_FAILED) from None
+
+    async def _push(self, args: dict[str, Any], roots: list[str], conn: socket.socket) -> dict[str, Any] | None:
+        """§12: a branch of a repository in the call's Workspaces, to its
+        checked https remote; the repository is read only in the sandbox."""
+        host, pusher = self.host, self.pusher
+        if pusher is None:
+            raise api.RunnerError(api.ACCESS, "git push is not set up on this server")
+        branch = check_branch(args.get("branch"))
+        repository = await self._blocking(lambda: host.directory(args.get("repository", "."), _text(args, "cwd")))
+        if not any(under(repository, root) for root in roots):
+            raise api.RunnerError(api.OUTSIDE_WORKSPACES, "git_push pushes repositories inside this conversation's "
+                                                          "workspaces only; ask the user to attach the folder")
+        work = await self._unless_cancelled(self._push_steps(pusher, repository, branch), conn)
+        return None if work is None else work.result()
+
+    async def _push_steps(self, pusher: Pusher, repository: str, branch: str) -> dict[str, Any]:
+        config = self.config
+        masks = await self._blocking(self.host.rules.masks)
+        # Nothing writable but its own /tmp, no network, no cache: the repository is only read.
+        layout = MachineLayout(home=config.home, cwd=repository, writable=(), masks=masks,
+                               cgroup_procs=None if self.commands is None else self.commands.procs)
+        with pusher.workdir() as folder:
+            asked = await self._sandboxed(["git", "remote", "get-url", "--push", "origin"], layout, BUNDLE_SECONDS)
+            if asked.timed_out:
+                raise api.RunnerError(api.OTHER, "git remote get-url took too long; nothing was pushed")
+            if asked.exit_code != 0:
+                raise api.RunnerError(api.INVALID, "the repository has no 'origin' remote to push to: "
+                                                   + asked.stderr.decode("utf-8", "replace").strip()[-500:])
+            url = remote(asked.stdout.decode("utf-8", "replace"), pusher.repos)
+            bundle = os.path.join(folder, "bundle")
+            fd = os.open(bundle, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC, 0o600)
+            try:
+                made = await self._sandboxed(["git", "bundle", "create", "-", f"refs/heads/{branch}"], layout,
+                                             BUNDLE_SECONDS, max_output=MAX_BUNDLE_BYTES, stdout_to=fd)
+            finally:
+                os.close(fd)
+            if made.timed_out:
+                raise api.RunnerError(api.OTHER, f"git bundle took over {BUNDLE_SECONDS}s; nothing was pushed")
+            if made.stdout_total > MAX_BUNDLE_BYTES:
+                raise api.RunnerError(api.TOO_LARGE, "the branch is too large to push from here (bundle over 2 GiB)")
+            if made.exit_code != 0:
+                raise api.RunnerError(api.INVALID, f"git bundle failed for {branch}: "
+                                                   + made.stderr.decode("utf-8", "replace").strip()[-500:])
+            pushed = await pusher.push(folder, bundle, branch, url)
+        return {**pushed.result(), "repository": repository}
 
     def _upload(self, op: str, args: dict[str, Any], fds: Sequence[int], roots: list[str]) -> dict[str, Any]:
         host = self.host

@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from himari.runner.proxy import DEFAULT_ALLOW, allow_list
+from himari.runner.push import push_repos
 
 DEFAULT_HIDDEN = ("/srv/himari-v3", "/etc/himari-v3", "/etc/himari-runner", "/var/lib/calliope",
                   "/opt/himari-v3/deployment.json")
@@ -44,6 +45,8 @@ class RunnerConfig:
     runner_memory_low: str
     state_dir: str  # the runner's own: the proxy's sockets (§11)
     network: tuple[str, ...] | None  # the proxy's allow list (§11.3); None: commands have no network
+    push: tuple[str, ...] | None = None  # git push's repositories (§12), host/owner/name; None: no push
+    push_token: str = "/etc/himari-runner/push-token"  # the fine-grained token's file
 
     def proxy_socket(self, tag: str) -> str:
         return os.path.join(self.state_dir, PROXY_SOCKET.format(tag))
@@ -108,6 +111,13 @@ def parse(raw: dict[str, Any]) -> RunnerConfig:
         allow = allow_list(_strings(network.get("allow", list(DEFAULT_ALLOW)), "network.allow"))
     except ValueError as error:
         raise ConfigError(f"network.allow: {error}") from None
+    push = raw.get("push", {})
+    if not isinstance(push, dict):
+        raise ConfigError("[push] is a table")
+    try:
+        repos = push_repos(_strings(push.get("repos", []), "push.repos"))
+    except ValueError as error:
+        raise ConfigError(f"push.repos: {error}") from None
     return RunnerConfig(
         client_uid=client, home=home, himari_home=himari_home,
         socket=_absolute(raw.get("socket", "/run/himari-runner/runner.sock"), "socket"),
@@ -116,4 +126,6 @@ def parse(raw: dict[str, Any]) -> RunnerConfig:
         cgroup=mode, memory_max=str(cgroup.get("memory_max", "4G")), pids_max=pids,
         runner_memory_low=str(cgroup.get("runner_memory_low", "256M")),
         state_dir=state_dir, network=allow if enabled and allow else None,
+        push=repos or None, push_token=_absolute(push.get("token_file", "/etc/himari-runner/push-token"),
+                                                  "push.token_file"),
     )

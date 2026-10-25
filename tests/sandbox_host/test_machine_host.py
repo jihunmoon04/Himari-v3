@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from gitserver import AVAILABLE, GitServer, LocalPusher, git
 from runnerkit import RunnerKit, start_runner
 
 from himari.environment.machine.client import RunnerClient
@@ -35,7 +36,11 @@ def kit() -> Iterator[RunnerKit]:
     base = Path(tempfile.mkdtemp(prefix="host-", dir=scratch))
     sandbox = MachineSandbox.discover()
     assert sandbox.state is SandboxState.CAPABLE_INACTIVE, "host lacks bwrap/Landlock/userns"
-    started = start_runner(base, sandbox=sandbox, home=Path.home(), network=True)
+    token = base / "push-token"
+    token.write_text("github_pat_host\n")
+    token.chmod(0o600)
+    started = start_runner(base, sandbox=sandbox, home=Path.home(), network=True,
+                           push={"repos": ["github.com/owner/*"], "token_file": str(token)})
     state: SandboxState = sandbox.state
     assert state is SandboxState.ENFORCED, f"self-test failed: {started.runner.report_failures}"
     yield started
@@ -197,3 +202,47 @@ def test_a_command_ends_although_the_bridge_is_running(kit: RunnerKit) -> None:
     started = time.monotonic()
     code, out, _ = run(kit, "echo done")
     assert code == 0 and out == "done\n" and time.monotonic() - started < 10
+
+
+# --- git push (§12) ---------------------------------------------------------------------------------------
+
+@pytest.mark.skipif(not AVAILABLE, reason="needs git-http-backend and openssl")
+def test_git_push_runs_nothing_of_the_repository_outside(kit: RunnerKit) -> None:
+    """The repository's hooks, fsmonitor, include and helpers run, if at all, only in the sandbox (read
+    only there: their marker cannot be written); the push itself is the runner's, from an empty repository."""
+    base = kit.himari_home.parent
+    server = GitServer(Path(tempfile.mkdtemp(prefix="git-", dir=base)), "github_pat_host")
+    try:
+        server.bare("repo")
+        assert kit.runner.pusher is not None
+        kit.runner.pusher = LocalPusher(server, kit.runner.pusher.repos, kit.runner.pusher.token_file,
+                                        kit.runner.config.state_dir)
+        folder = Path(call(kit, api.CONVERSATION_FOLDER, {"conversation": "pushtest"})["path"])
+        repo = folder / "repo"
+        repo.mkdir()
+        git("init", "-q", "-b", "main", cwd=repo)
+        (repo / "a").write_text("a")
+        git("add", "a", cwd=repo)
+        git("commit", "-q", "-m", "a", cwd=repo)
+        git("remote", "add", "origin", "https://github.com/owner/repo.git", cwd=repo)
+        marker = base / "ran"
+        hooks = folder / "hooks"
+        hooks.mkdir()
+        evil = f"#!/bin/sh\necho $0 >> {marker}\n"
+        for name in ("pre-push", "post-update", "reference-transaction", "fsmonitor"):
+            (hooks / name).write_text(evil)
+            (hooks / name).chmod(0o755)
+        (folder / "extra.config").write_text(f"[credential]\n\thelper = !{hooks}/fsmonitor\n")
+        for key, value in (("core.hooksPath", str(hooks)), ("core.fsmonitor", f"{hooks}/fsmonitor"),
+                           ("include.path", str(folder / "extra.config"))):
+            git("config", key, value, cwd=repo)
+        head = git("rev-parse", "HEAD", cwd=repo).strip()
+        result = call(kit, api.GIT_PUSH, {"repository": str(repo), "branch": "main", "cwd": str(folder),
+                                          "write_roots": [str(folder)]})
+        assert result["status"] == "created" and server.head("repo") == head
+        assert not marker.exists()
+        assert not os.listdir(kit.runner.config.state_dir) or all(
+            name.startswith("proxy-") for name in os.listdir(kit.runner.config.state_dir))
+    finally:
+        server.close()
+

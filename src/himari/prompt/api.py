@@ -685,6 +685,8 @@ def state_block(state: CurrentStateProjection, notes: Sequence[SourceNote] = (),
                         place["read"] = view.readable
                     if view.network:
                         place["network"] = view.network
+                    if view.push:
+                        place["git_push"] = view.push
                     if view.workspaces:
                         place["workspaces"] = [{"path": w.path, "label": w.label, **({"note": w.note} if w.note else {}),
                                                 **({"notice": w.notice} if w.notice else {})}
