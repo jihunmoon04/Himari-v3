@@ -209,13 +209,18 @@ async def _spool(stream: asyncio.StreamReader | None, sink: int, limit: int,
                  overflow: Callable[[], None]) -> tuple[bytes, int]:
     """Write the first ``limit`` bytes to the file ``sink`` (on a thread: a
     slow disk does not hold up the loop), then call ``overflow`` (which
-    stops the command) and count what is left until the end of the stream."""
+    stops the command) and count what is left until the end of the stream.
+    A write under way is waited for, through cancellation too: ``sink`` is
+    closed by the caller once this has ended (PR #90 review C1)."""
     if stream is None:
         return b"", 0
     total = 0
     while chunk := await stream.read(1 << 20):
         if total <= limit:
-            await asyncio.to_thread(_write_all, sink, chunk[: limit - total])
+            write = asyncio.ensure_future(asyncio.to_thread(_write_all, sink, chunk[: limit - total]))
+            if await _settle(write):
+                raise asyncio.CancelledError
+            write.result()
             if total + len(chunk) > limit:
                 overflow()
         total += len(chunk)
@@ -444,6 +449,9 @@ async def _supervise(process: asyncio.subprocess.Process, sync_r: int, timeout: 
         for task in tasks:
             if not task.done():
                 task.cancel()
+        # Returned only once the output's tasks have ended: a spool's write in flight included (C1).
+        if tasks and await _settle(asyncio.gather(*tasks, return_exceptions=True)):
+            raise asyncio.CancelledError
     return CommandResult(
         exit_code=None if timed_out else process.returncode,
         timed_out=timed_out,

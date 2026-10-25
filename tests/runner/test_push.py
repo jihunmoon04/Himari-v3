@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import threading
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,7 @@ from himari.runner.config import ConfigError, parse
 from himari.runner import server as server_module
 from himari.runner.push import Pusher, check_branch, push_repos, remote
 from himari.sandbox.api import CommandResult
+from himari.sandbox import backend, landlock_helper
 from himari.sandbox.backend import _spool
 
 REPOS = push_repos(["github.com/owner/*"])
@@ -316,3 +318,59 @@ def test_a_spooled_stdout_keeps_its_first_bytes_and_stops_the_command(tmp_path: 
 
     assert asyncio.run(go()) == (b"", 100) and (tmp_path / "out").read_bytes() == b"x" * 30
     assert stopped == [True] and len(writes) == 5  # 30 bytes in writes of 7
+
+
+def test_a_cancelled_spool_waits_for_its_write(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """PR #90 review C1: the file is closed only after the write on the thread has ended, and the
+    supervised command returns only after its spool has; through cancellation too."""
+    entered, release = threading.Event(), threading.Event()
+    done: list[str] = []
+
+    def held(fd: int, data: bytes) -> None:
+        entered.set()
+        release.wait(10)
+        done.append("written")
+
+    monkeypatch.setattr(backend, "_write_all", held)
+
+    async def spool_alone() -> None:
+        stream = asyncio.StreamReader()
+        stream.feed_data(b"x" * 10)
+        task = asyncio.ensure_future(_spool(stream, 99, 100, lambda: None))
+        await asyncio.to_thread(entered.wait, 5)
+        task.cancel()
+        await asyncio.sleep(0.1)
+        assert not task.done() and done == []  # still waiting for the write
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert done == ["written"]
+
+    asyncio.run(spool_alone())
+    entered.clear()
+    release.clear()
+    done.clear()
+
+    async def supervised() -> None:
+        sync_r, sync_w = os.pipe()
+        os.write(sync_w, landlock_helper.SYNC_OK)
+        os.close(sync_w)
+        os.set_blocking(sync_r, False)
+        process = await asyncio.create_subprocess_exec("yes", stdout=asyncio.subprocess.PIPE,
+                                                       stderr=asyncio.subprocess.PIPE, start_new_session=True)
+        task = asyncio.ensure_future(backend._supervise(process, sync_r, 60, 0.0, 1 << 30, stdout_to=99))
+        await asyncio.to_thread(entered.wait, 5)
+        task.cancel()
+        await asyncio.sleep(0.2)
+        assert not task.done() and done == []  # the command is gone, the write is not
+        assert process.returncode is not None
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        # The pipe's buffered rest may be written too (the reap waits for its end), but none after the return.
+        written = len(done)
+        await asyncio.sleep(0.2)
+        assert written >= 1 and len(done) == written
+        os.close(sync_r)
+
+    asyncio.run(supervised())
