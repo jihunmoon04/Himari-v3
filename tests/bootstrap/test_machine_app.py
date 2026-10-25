@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 from runnerkit import RunnerKit, start_runner
@@ -243,6 +244,36 @@ def test_inside_conversations_and_other_principals_attach_nothing(tmp_path: Path
             assert refused.value.code == "unavailable"
             with pytest.raises(WorkspaceRefused):
                 await app.machine_workspaces(ALICE)
+        finally:
+            await app.close()
+
+    asyncio.run(scenario())
+
+
+def test_a_folder_opened_twice_at_once_gets_one_conversation(tmp_path: Path, kit: RunnerKit,
+                                                             monkeypatch: pytest.MonkeyPatch) -> None:
+    """V3-P75 §6, PR #93 review B1: two "open this folder's conversation" at the same time, neither finding one,
+    make one; the second opens it. An explicit new one is still a new one."""
+    create = Application.create_conversation
+
+    async def slow_create(self: Application, principal: Any, **kwargs: Any) -> Any:
+        await asyncio.sleep(0.05)  # the first is still making its conversation when the second looks
+        return await create(self, principal, **kwargs)
+
+    monkeypatch.setattr(Application, "create_conversation", slow_create)
+
+    async def scenario() -> None:
+        app = await open_app(tmp_path / "data", kit.socket, ScriptedAdapter([]))
+        try:
+            path = str(kit.home / "projects/a")
+            opened = await asyncio.gather(app.open_folder_conversation(OPERATOR, path),
+                                          app.open_folder_conversation(OPERATOR, "~/projects/a"))
+            assert opened[0][0] == opened[1][0] and sorted(made for _, made in opened) == [False, True]
+            fresh, made = await app.open_folder_conversation(OPERATOR, path, new=True)
+            assert made and fresh != opened[0][0]
+            listed = await app.folder_conversations(OPERATOR, path)
+            assert [c.conversation_id for c in listed.conversations] == [fresh, opened[0][0]]
+            assert app._opening == {}  # nothing left behind
         finally:
             await app.close()
 

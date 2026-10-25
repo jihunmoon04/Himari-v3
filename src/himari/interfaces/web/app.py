@@ -83,6 +83,7 @@ from himari.bootstrap.application import (
     WorkspaceBusy,
     WorkspaceRefused,
     AttachedFolder,
+    FolderConversations,
 )
 from himari.bootstrap.explorer import ExplorerRefused, Listing, ShownFile
 from himari.bootstrap.operator import OPERATOR, derive_cli_bearer, verify_operator_token
@@ -243,6 +244,13 @@ class MemoryEditBody(MemoryBody):
 
 class ToolSourceBody(_Body):
     enabled: bool | None  # null: follow the source's default
+
+
+class FolderConversationBody(_Body):
+    """Open a conversation in a folder (V3-P75 §6): its latest, or ``new`` one."""
+
+    path: str = Field(min_length=1, max_length=4096)
+    new: bool = False
 
 
 class WorkspaceBody(_Body):
@@ -576,6 +584,14 @@ def listing_view(listing: Listing) -> dict[str, Any]:
     """V3-P75 §5.1: a page of a folder; ``next`` is the cursor of the following page."""
     return {"path": listing.path, "parent": listing.parent, "entries": list(listing.entries), "next": listing.next,
             "workspace": None if listing.workspace is None else workspace_view(listing.workspace)}
+
+
+def folder_conversations_view(folder: FolderConversations) -> dict[str, Any]:
+    """V3-P75 §6.1: the conversations working in a folder, and the folders above it that have some."""
+    return {"path": folder.path, "own": folder.own, "refused": folder.refused,
+            "workspace": None if folder.workspace is None else workspace_view(folder.workspace),
+            "conversations": [summary_view(c) for c in folder.conversations],
+            "above": [{"workspace": workspace_view(w), "count": n} for w, n in folder.above]}
 
 
 def shown_file_view(shown: ShownFile) -> dict[str, Any]:
@@ -978,6 +994,22 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
         application = himari(request)
         explorer = application.explorer(who)
         return listing_view(await explorer.browse(path, after, await application.machine_workspaces(who)))
+
+    @app.get("/api/machine/conversations")
+    async def folder_conversations(request: Request, path: str,
+                                   who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+        return folder_conversations_view(await himari(request).folder_conversations(who, path))
+
+    @app.post("/api/machine/conversations")
+    async def open_folder_conversation(body: FolderConversationBody, request: Request, response: Response,
+                                       who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+        """The folder's latest conversation, or a new one working in it (201)."""
+        application = himari(request)
+        conversation, created = await application.open_folder_conversation(who, body.path, new=body.new)
+        if created:
+            response.status_code = 201
+        return {"conversation": summary_view(await application.data.read_conversation(scope_of(conversation, who))),
+                "created": created}
 
     @app.get("/api/machine/stat")
     async def stat_path(request: Request, path: str, who: PrincipalId = Depends(principal)) -> dict[str, Any]:

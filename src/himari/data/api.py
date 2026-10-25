@@ -1410,6 +1410,14 @@ class WorkspaceRegistry(Protocol):
         """NOT_FOUND: no such Binding in the Conversation."""
         ...
 
+    async def list_conversations_working_in(self, principal: PrincipalId, workspace_id: WorkspaceId, *,
+                                            limit: int = 50) -> Sequence[ConversationSummary]:
+        """V3-P75 §6.1: the principal's active Conversations whose working
+        folder (an activation's default Binding) is this registered Workspace;
+        most recent activity first. None for a Workspace not the principal's.
+        ``limit`` is 1..MAX_LIST_LIMIT, else INVALID_ARGUMENT."""
+        ...
+
 
 class ExternalSourceSettings(Protocol):
     """V3-P53: per-Conversation on/off choices for External Tool sources.

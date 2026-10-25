@@ -1969,6 +1969,17 @@ class SqliteData:
             trashed_at=None if row["trashed_at"] is None else datetime.fromisoformat(row["trashed_at"]),
         )
 
+    async def list_conversations_working_in(self, principal: PrincipalId, workspace_id: WorkspaceId, *,
+                                            limit: int = 50) -> Sequence[ConversationSummary]:
+        rules.check_page(limit, 0)
+        with self._tx() as tx:
+            rows = tx.all(f"{self._SUMMARY} WHERE c.owner=? AND c.trashed_at IS NULL AND EXISTS ("
+                          "SELECT 1 FROM activations a JOIN bindings b ON b.binding_id=a.default_binding_id"
+                          " JOIN workspaces w ON w.workspace_id=b.workspace_id AND w.owner=c.owner"
+                          " WHERE a.conversation_id=c.conversation_id AND b.workspace_id=?)"
+                          " ORDER BY last_activity DESC, c.rowid DESC LIMIT ?", principal, workspace_id, limit)
+            return tuple(self._summary(r) for r in rows)
+
     async def list_conversations(
         self, principal: PrincipalId, *, limit: int = 50, offset: int = 0, trashed: bool = False
     ) -> Sequence[ConversationSummary]:

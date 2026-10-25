@@ -48,11 +48,17 @@ function query(path) {
 
 export class FilesPane {
   /* api(method, path) → JSON or throws {message, status, code}; el(tag, class, text). */
-  constructor({ api, el, onOpenFolder = null, onOpenFile = null, actions = [] }) {
+  /* folderActions(listing): the shown folder's own controls (V3-P75 §3.3, e.g.
+   * "Open conversation"); folderRowActions(path): [label, action] pairs for a
+   * folder row's ⋯ menu. Both from the place the pane is in. */
+  constructor({ api, el, onOpenFolder = null, onOpenFile = null, actions = [], folderActions = null,
+                folderRowActions = null }) {
     this.api = api;
     this.el = el;
     this.onOpenFolder = onOpenFolder;
     this.onOpenFile = onOpenFile;
+    this.folderActions = folderActions;
+    this.folderRowActions = folderRowActions;
     this.root = el("div", "files-pane");
     this.crumbs = el("nav", "files-crumbs");
     this.crumbs.setAttribute("aria-label", "Path");
@@ -93,7 +99,7 @@ export class FilesPane {
       this.folder = listing.path;
       this.body.removeAttribute("aria-busy");
       this.paintCrumbs(listing.path, false);
-      this.paintTools(null);
+      this.paintTools(null, listing);
       const list = this.el("ul", "files-list");
       this.body.replaceChildren(list);
       this.appendRows(list, listing);
@@ -137,7 +143,10 @@ export class FilesPane {
     button.title = path;
     button.addEventListener("click", () => this.follow(path, entry.kind));
     li.append(button);
-    li.append(entry.kind === "file" ? this.menu(path, entry.name) : this.el("span", "files-actions-space"));
+    const given = entry.kind === "directory" && this.folderRowActions ? this.folderRowActions(path) : [];
+    if (entry.kind === "file") li.append(this.menu(path, entry.name, [], true));
+    else if (given.length) li.append(this.menu(path, entry.name, given, false));
+    else li.append(this.el("span", "files-actions-space")); // nothing to do with it here: no menu (PR #93 review N1)
     return li;
   }
 
@@ -159,13 +168,21 @@ export class FilesPane {
     }
   }
 
-  menu(path, name) {
+  /* A row's ⋯: the given actions, then (a file only) Download, and Copy path. */
+  menu(path, name, given, isFile) {
     const actions = this.el("details", "conversation-actions files-actions");
     const toggle = this.el("summary", null, "⋯");
     toggle.setAttribute("aria-label", `Actions for ${name}`);
     toggle.title = `Actions for ${name}`;
     const list = this.el("div", "conversation-action-list");
-    list.append(this.download(path, "Download"), this.copyPath(path, () => { actions.open = false; }));
+    for (const [label, action] of given) {
+      const control = this.el("button", "link-button", label);
+      control.type = "button";
+      control.addEventListener("click", () => { actions.open = false; action(); });
+      list.append(control);
+    }
+    if (isFile) list.append(this.download(path, "Download"));
+    list.append(this.copyPath(path, () => { actions.open = false; }));
     actions.append(toggle, list);
     actions.addEventListener("toggle", () => {
       if (!actions.open) return;
@@ -274,7 +291,7 @@ export class FilesPane {
     });
   }
 
-  paintTools(shown) {
+  paintTools(shown, listing = null) {
     this.tools.replaceChildren();
     if (shown) {
       this.tools.append(this.copyPath(shown.path, null), this.download(shown.path, "Download"));
@@ -284,6 +301,7 @@ export class FilesPane {
     reload.type = "button";
     reload.addEventListener("click", () => this.refresh());
     this.tools.append(reload);
+    if (listing && this.folderActions) this.tools.append(...this.folderActions(listing));
   }
 
   busy(path) {

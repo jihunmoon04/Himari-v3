@@ -70,6 +70,8 @@ from himari.control.api import ContextStatus, ControlError, ControlErrorCode, Jo
 from himari.control.driver import NO_PROGRESS_RUNS
 from himari.control.runner import SEEN_SECONDS, BackgroundRunner
 from himari.data.api import (
+    MAX_LIST_LIMIT,
+    ConversationSummary,
     DEFAULT_FILE_MAX_BYTES,
     DEFAULT_KEEP_DAYS,
     DEFAULT_STORE_MAX_BYTES,
@@ -116,6 +118,7 @@ from himari.environment.machine import (
     MachineUnavailable,
     machine_workspace_for,
 )
+from himari.runner import api as runner_api
 from himari.runner.api import RunnerError
 from himari.sandbox import identity
 from himari.sandbox.api import SandboxAdmissionError, SandboxState, ServerProfile
@@ -278,6 +281,23 @@ class AttachedFolder:
     working: bool  # the working directory (§10.4)
     own: bool  # the Conversation's own folder: cannot be detached
     workspace_id: str | None  # the registration; None for the own folder
+
+
+@dataclass(frozen=True)
+class FolderConversations:
+    """V3-P75 §6.1: the Conversations working in a folder, most recent first.
+    ``workspace``: its registration, if any. ``own``: it is one
+    Conversation's own folder (that one is the list). ``refused``: why it
+    cannot be a workspace (then nothing can be opened in it). ``above``:
+    registered folders above it with Conversations of their own (Q2: shown
+    as links, not mixed in), nearest first, with how many."""
+
+    path: str
+    workspace: RegisteredWorkspace | None
+    conversations: tuple[ConversationSummary, ...]
+    own: bool = False
+    refused: str | None = None
+    above: tuple[tuple[RegisteredWorkspace, int], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -612,6 +632,8 @@ class Application:
     # Data's insert together, so two paths to one folder cannot both pass.
     _registering: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
     _explorer: Explorer | None = field(default=None, repr=False)
+    # One "open this folder's conversation" at a time per folder (PR #93 review B1): by real path.
+    _opening: dict[str, tuple[asyncio.Lock, int]] = field(default_factory=dict, repr=False)
     # V3-P65 §7.3: one lifecycle lock per Conversation (P0: one server process),
     # kept only while some call holds or waits for it (PR #56 review C1).
     _lifecycle: dict[ConversationId, _Lifecycle] = field(default_factory=dict, repr=False)
@@ -837,6 +859,113 @@ class Application:
         if self._explorer is None:
             self._explorer = Explorer(machine, self.views)
         return self._explorer
+
+    # --- conversations in a folder (V3-P75 §6) ----------------------------------------
+
+    async def folder_conversations(self, principal: PrincipalId, path: str) -> FolderConversations:
+        """The folder's real path, its registration and the Conversations
+        working in it (§6.1). ExplorerRefused (not_found): folders are not
+        offered (§4). WorkspaceRefused: the runner does not answer, or the
+        path is not a folder the user can see."""
+        try:
+            machine = self._machine_for(principal)
+        except WorkspaceRefused:
+            raise ExplorerRefused("not_found", "Not available.") from None
+        try:
+            found, _ = await machine.call(runner_api.STAT, {"path": path, "cwd": "/"})
+            himari_home = str((await machine.hello())["himari_home"])
+        except RunnerError as error:
+            raise WorkspaceRefused("not_usable", f"{path}: {error}") from None
+        except runner_api.RunnerUnavailable:
+            raise WorkspaceRefused("unavailable", "The machine runner does not answer; try again later.") from None
+        real = str(found["path"])
+        if found["kind"] != "directory":
+            raise WorkspaceRefused("not_usable", f"{real} is not a folder.")
+        conversations_root = posixpath.join(himari_home, "conversations")
+        if posixpath.dirname(real) == conversations_root:  # one Conversation's own folder: that one
+            scope = TrustedScope(principal, ConversationId(posixpath.basename(real)))
+            try:
+                summary = await self.data.read_conversation(scope)
+            except DataError:
+                return FolderConversations(real, None, (), own=True, refused="This folder belongs to a conversation "
+                                           "that is gone.")
+            return FolderConversations(real, None, () if summary.trashed_at else (summary,), own=True)
+        known = await self.data.list_workspaces(principal, MACHINE)
+        workspace = next((w for w in known if w.location == real), None)
+        refused = None
+        if workspace is None:
+            try:  # the same folder registered at another path (a bind mount) counts as this one
+                _, _, workspace = await self._check_folder(machine, real, known)
+            except WorkspaceRefused as error:
+                refused = error.message
+        conversations: tuple[ConversationSummary, ...] = ()
+        if workspace is not None:
+            conversations = tuple(await self.data.list_conversations_working_in(principal, workspace.workspace_id,
+                                                                                 limit=MAX_LIST_LIMIT))
+        above: list[tuple[RegisteredWorkspace, int]] = []
+        for other in sorted((w for w in known if real.startswith(w.location.rstrip("/") + "/")),
+                            key=lambda w: len(w.location), reverse=True):
+            count = len(await self.data.list_conversations_working_in(principal, other.workspace_id,
+                                                                       limit=MAX_LIST_LIMIT))
+            if count:
+                above.append((other, count))
+        return FolderConversations(real, workspace, conversations, refused=refused, above=tuple(above))
+
+    async def open_folder_conversation(self, principal: PrincipalId, path: str, *,
+                                       new: bool = False) -> tuple[ConversationId, bool]:
+        """§6.1–6.2: the folder's most recent Conversation, or (none, or
+        ``new``) a new one working in it: registered first if it is not
+        (reused if it is, at any path), then created, attached and made the
+        working folder. A Conversation made here whose folder could not be
+        attached is deleted again; the registration stays. Whether one was made."""
+        folder = await self.folder_conversations(principal, path)
+        if new or folder.own:
+            return await self._open_in(principal, folder, new)
+        # Two at once for the same folder must not both find none and both make one (PR #93 review B1):
+        # one at a time per folder, and the folder read again once it is this one's turn.
+        async with self._opening_folder(folder.path):
+            return await self._open_in(principal, await self.folder_conversations(principal, folder.path), new)
+
+    @asynccontextmanager
+    async def _opening_folder(self, real: str) -> AsyncIterator[None]:
+        lock, users = self._opening.get(real, (asyncio.Lock(), 0))
+        self._opening[real] = (lock, users + 1)
+        try:
+            async with lock:
+                yield
+        finally:
+            lock, users = self._opening[real]
+            if users == 1:
+                del self._opening[real]
+            else:
+                self._opening[real] = (lock, users - 1)
+
+    async def _open_in(self, principal: PrincipalId, folder: FolderConversations,
+                       new: bool) -> tuple[ConversationId, bool]:
+        if folder.own:
+            if not folder.conversations:
+                raise WorkspaceRefused("not_usable", folder.refused or "That conversation is in the trash.")
+            if new:
+                raise WorkspaceRefused("not_usable", "This is a conversation's own folder; open that conversation, or "
+                                                     "start a new one in a folder of your own.")
+            return folder.conversations[0].conversation_id, False
+        if folder.conversations and not new:
+            return folder.conversations[0].conversation_id, False
+        if folder.refused is not None:
+            raise WorkspaceRefused("not_usable", folder.refused)
+        workspace = folder.workspace or await self._register(principal, folder.path, None, None, reuse=True)
+        conversation = await self.create_conversation(principal)
+        scope = TrustedScope(principal, conversation)
+        try:
+            await self.attach_workspace(scope, workspace_id=workspace.workspace_id)
+        except BaseException:
+            try:
+                await self.trash(scope)
+                await self.purge(scope)
+            except Exception:  # noqa: BLE001 — the trash keeps it, and its regular purge
+                log.exception("a conversation made for %s could not be removed again", folder.path)
+            raise
+        return conversation, True
 
     async def machine_workspaces(self, principal: PrincipalId) -> tuple[RegisteredWorkspace, ...]:
         """The principal's registered folders, oldest first."""
