@@ -1,6 +1,6 @@
 # 머신 Workspace v0.1
 
-> 2026-10-25 · **PROPOSED (V3-P74)** · rev. 1: 설계 초안. 소유자 결정 Q1~Q8 대기(§17).
+> 2026-10-25 · **PROPOSED (V3-P74)** · rev. 2 — 외부 검수(HEAD 61200df) 반영: B1 기본 쓰기 범위를 대화 폴더로, 겹치는 Workspace는 한 충돌 영역(§3.2, §9.1), B2 파일 Tool은 디스크 파일시스템만·보이는 점 항목 줄임(§7, §8.2), B3 git push의 bundle 전달·대상·lock(§12), P2 등록 범위(§5.3)·링크 풀기(§8.3)·OOM(§6.5)·프록시 DNS(§11.3). 소유자 결정 Q1~Q8 대기(§17). rev. 1: 설계 초안.
 >
 > 소유자 방향(2026-10-24, 대화에서 정함):
 > - 개발용 Workspace를 따로 만들지 않는다. 기본 Workspace에서 git·C·Python·Java 같은 일반 개발이 되게 한다.
@@ -66,12 +66,14 @@ Workspace는 **대화가 쓸 수 있는 폴더**다. 대화에 붙인 Workspace�
 | 쓰기 범위 | 붙인 Workspace 폴더 안에서만 파일을 만들고, 고치고, 지운다. 명령도 같다 |
 | 작업 위치(cwd) | 명령이 시작되고, 파일 Tool의 상대 경로가 기준으로 삼는 폴더 |
 | 모델에게 주는 정보 | Current State에 "이 대화의 Workspace"로 실린다(§10.5) |
-| 동시 실행 단위 | 같은 Workspace에 쓰는 일(파일 쓰기·명령)은 한 번에 하나(지금의 `workspace_busy`) |
+| 동시 실행 단위 | 겹치는 Workspace에 쓰는 일(파일 쓰기·명령)은 한 번에 하나(지금의 `workspace_busy`, §9.1) |
 
-**대화 폴더**는 Workspace를 붙이지 않아도 늘 있다. 소유자의 HIMARI 폴더(Q2, 권고 `/home/coder/HIMARI`) 아래 `conversations/<conversation_id>/`이고, 지금의 대화별 기본 폴더와 같은 역할이다(V3-033). HIMARI 폴더 전체가 하나의 기본 Workspace로 모든 대화에 붙어 있다. 그래서 지금처럼 같은 사용자의 다른 대화 폴더에도 쓸 수 있다.
+**대화 폴더**는 Workspace를 붙이지 않아도 늘 있다. 소유자의 HIMARI 폴더(Q2, 권고 `/home/coder/HIMARI`) 아래 `conversations/<conversation_id>/`이고, 지금의 대화별 기본 폴더와 같은 역할이다. **대화 폴더가 그 대화의 기본 Workspace**다. 대화마다 따로라서, 서로 다른 대화의 명령은 서로 기다리지 않는다(검수 B1).
+
+다른 대화의 폴더는 읽을 수 있지만, 쓰려면 그 폴더나 HIMARI 폴더 전체를 Workspace로 붙여야 한다. 지금 Inside의 "같은 사용자의 다른 대화 폴더에도 쓴다"(V3-033)를 `machine`에서는 이렇게 바꾼다(§16). HIMARI 폴더 전체를 늘 붙여 두면 모든 대화가 한 lock을 나눠 쓰게 되기 때문이다.
 
 예:
-- Workspace를 붙이지 않은 새 대화: 대화 폴더(HIMARI 폴더)에만 쓴다. 다른 곳은 읽기만 한다.
+- Workspace를 붙이지 않은 새 대화: 대화 폴더에만 쓴다. 다른 곳은 읽기만 한다.
 - `~/projects/foo`를 붙인 대화: 그 폴더에도 쓰고, 작업 위치가 그 폴더로 바뀐다(§10.4).
 - Drive의 `대학/`까지 붙인 대화: 세 곳에 쓴다.
 
@@ -157,7 +159,9 @@ Unix 소켓의 `SCM_RIGHTS`로 열린 파일을 넘긴다.
 | `run(argv, cwd, write_roots, timeout)` | 명령(§9) | 쓰기 범위·작업 위치 검사 |
 | `git_push(...)` | §12 | §12 |
 
-**쓰기 범위는 두 번 검사한다.** HIMARI가 대화의 Binding에서 고른 `write_roots`를 보낸다. runner는 그것이 설정의 `writable_under`(기본: `coder`의 홈, Drive 마운트, HIMARI 폴더) 안이고 숨김 목록과 겹치지 않는지 다시 본다. HIMARI가 뚫려도 숨김 목록과 `writable_under` 밖에는 쓸 수 없다.
+**쓰기 범위는 두 번 검사한다.** HIMARI가 대화의 Binding에서 고른 `write_roots`를 보낸다. runner는 각 루트가 숨김 목록 안이 아니고, 특수 파일시스템(§8.2)이 아니며, 설정의 `writable_under` 안인지 다시 본다.
+
+`writable_under`의 기본값은 `/`다. 소유자 방향("금지된 위치 외에는 어디든")대로 **등록 범위는 숨김 목록과 OS 권한이 정한다**(검수 P2). 운영자가 범위를 좁히고 싶으면 이 설정을 바꾼다(예: 홈과 Drive만). 어느 쪽이든 HIMARI가 뚫려도 숨김 목록 안에는 쓸 수 없다.
 
 ## 6. Sandbox 머신 프로파일
 
@@ -197,17 +201,21 @@ V3-051 그대로다(기본 120초, 최대 600초, 출력 256 KiB 수집, 모델�
 ### 6.5 자원 한도 (Q5)
 
 이 서버: 메모리 11 GiB, CPU 2개, cgroup v2(cpu·memory·pids 위임 가능), systemd 255(2026-10-24 확인).
-- **서비스 전체 한도(systemd):** `MemoryMax=4G`, `MemorySwapMax=0`, `TasksMax=1024`, `CPUQuota=150%`, `CPUWeight=50`. 모든 명령을 합친 값이라, 명령이 넘쳐도 HIMARI·Calliope·Caddy는 영향을 받지 않는다.
-- runner는 명령 프로세스의 `oom_score_adj`를 1000으로 올려 띄운다. 한도에 걸리면 runner가 아니라 명령이 죽는다. 결과에 "killed (out of memory)"를 적는다.
-- 명령마다 따로 정하는 한도(위임 cgroup)와 디스크 한도는 이후다.
+- **서비스 전체 한도(systemd):** `MemoryMax=4608M`, `MemorySwapMax=0`, `TasksMax=1100`, `CPUQuota=150%`, `CPUWeight=50`. 명령이 넘쳐도 HIMARI·Calliope·Caddy는 영향을 받지 않는다.
+- **명령은 runner와 다른 cgroup에 둔다(검수 P2).** 서비스는 `Delegate=yes`로 하위 cgroup을 위임받는다. runner는 시작할 때 자기를 `runner` 잎으로 옮기고, 명령은 `commands` 잎에 넣는다(bwrap을 띄우기 전에 그 cgroup으로 들어감). `commands`에 `memory.max=4G`, `pids.max=1024`를 건다. 메모리가 넘치면 커널은 `commands` 안에서만 프로세스를 죽인다. runner의 생존은 `oom_score_adj` 같은 유도가 아니라 cgroup 경계로 보장한다.
+- 그래도 runner가 죽으면(버그 등) `Restart=always`로 다시 뜬다. 그 사이의 호출은 HIMARI에서 결과 불명(`UNKNOWN`)이고(§9.2), 다시 뜬 runner에는 이전 명령이 없다(`--die-with-parent`).
+- 결과에 "killed (out of memory)"를 적는다(`commands`의 `memory.events`의 `oom_kill` 증가로 안다).
+- 명령마다 따로 정하는 한도와 디스크 한도는 이후다.
 
 ## 7. 숨김 목록 (Q3)
 
 숨김 목록은 runner 설정에 있고, 모델·HIMARI가 바꾸지 못한다. 읽기와 쓰기 모두 막는다.
 
 **기본값(권고):**
-- `coder` 홈의 **점(.)으로 시작하는 항목은 기본으로 숨기고**, 아래만 보인다: `.gitconfig`, `.profile`, `.bashrc`, `.local/bin`, `.local/lib`. 인증 정보 대부분이 점 폴더에 있다(이 서버에서 확인: `.ssh`, `.claude`, `.claude.json`, `.config/gh`, `.copilot`, `.cline`, `.vscode-server`, `.pki`, `.bash_history`).
+- `coder` 홈의 **점(.)으로 시작하는 항목은 기본으로 숨기고**, 아래만 보인다: `.gitconfig`(커밋 작성자), `.local/bin`, `.local/lib`(사용자가 설치한 도구). 인증 정보 대부분이 점 폴더에 있다(이 서버에서 확인: `.ssh`, `.claude`, `.claude.json`, `.config/gh`, `.copilot`, `.cline`, `.vscode-server`, `.pki`, `.bash_history`).
+- **보이는 예외도 비밀이 없다고 가정하지 않는다(검수 B2).** `.bashrc`·`.profile`은 토큰을 `export`하는 일이 흔해 rev. 1의 예외에서 뺐다(명령은 비대화형이라 필요 없음). `.gitconfig`는 이 서버에서 비밀 같은 줄이 없고 `credential` 절은 `gh`를 부르는 도우미뿐이다(2026-10-25 확인. Sandbox 안에서는 `~/.config/gh`가 가려져 실패한다). 예외 목록은 운영자가 설정에서 바꾸고, 배포 스크립트가 예외 파일에 비밀 같은 줄(`token`, `password`, `https://…@`)이 있으면 경고한다.
 - HIMARI·runner: `/srv/himari-v3`, `/etc/himari-v3`, `/etc/himari-runner`, `/opt/himari-v3`의 deployment 기록, `/run/himari-runner`, runner의 캐시 밖 상태 폴더.
+- 특수 파일시스템: 파일 Tool은 디스크 파일시스템만 연다(§8.2). 명령의 `/proc`·`/dev`·`/run`은 새로 만든 것이라 runner나 호스트의 것이 보이지 않는다(§6.1).
 - Calliope 데이터 `/var/lib/calliope`(이미 `coder`가 못 읽음, 방어용).
 - 다른 사용자의 홈(`/home/opc` 등, 이미 대부분 못 읽음).
 - `/etc/shadow` 같은 것은 OS 권한이 이미 막는다.
@@ -228,17 +236,26 @@ V3-051 그대로다(기본 120초, 최대 600초, 출력 256 KiB 수집, 모델�
 
 ### 8.2 읽기 검사
 
-1. 경로를 연다(심볼릭 링크는 따라간다. 소유자 폴더에는 정상적인 링크가 많다).
-2. 연 디스크립터의 실제 경로를 `/proc/self/fd`에서 읽어 숨김 목록과 대조한다. 걸리면 닫고 "no such file"로 답한다.
-3. 일반 파일만 읽는다(FIFO·장치는 거부, 지금과 같음). **하드링크가 여럿인 파일도 읽는다.** git의 로컬 clone이 하드링크를 쓰기 때문이다.
+1. 경로를 연다(심볼릭 링크는 절대·상대 모두 따라간다. 소유자 폴더에는 정상적인 링크가 많다). `O_NONBLOCK|O_NOCTTY`로 열어 FIFO·장치에서 멈추지 않는다.
+2. **파일시스템 종류를 본다(검수 B2).** 연 디스크립터에 `fstatfs`를 불러 `f_type`이 디스크 파일시스템 허용 목록(ext2/3/4, xfs, btrfs, f2fs, zfs, FUSE, overlay, NFS, SMB, vfat, exfat, ntfs3)에 있을 때만 계속한다. `proc`·`sysfs`·`devtmpfs`·`tmpfs`·`cgroup2`·`debugfs`·`tracefs`·`securityfs`·`bpf`·`configfs`·`pstore`·`efivarfs` 등은 "not a regular file"로 거부한다. 그래서 `/proc/self/environ`(runner의 환경)이나 `/sys`의 장치 파일처럼 일반 파일로 보이는 특수 인터페이스를 읽을 수 없다. 경로 문자열 검사(`/proc`, `/sys`, `/dev`, `/run`으로 시작하면 거부)를 첫 번째 층으로 둔다.
+3. 연 디스크립터의 실제 경로를 `/proc/self/fd`에서 읽어 숨김 목록과 대조한다. 걸리면 닫고 "no such file"로 답한다.
+4. 일반 파일만 읽는다(`fstat`, 지금과 같음). **하드링크가 여럿인 파일도 읽는다.** git의 로컬 clone이 하드링크를 쓰기 때문이다.
+5. `list_files`도 같다: 폴더 디스크립터에 2·3을 적용한다.
+
+runner 자신은 비밀을 환경 변수에 두지 않는다(push 토큰은 설정 파일에서 읽어 push 때만 넘김, §12). 그래도 runner의 `/proc`가 열리지 않는 것은 위의 2가 보장한다.
 
 ### 8.3 쓰기 검사
 
-1. 대상을 담은 Workspace를 고른다(붙인 Workspace의 실제 경로 중 가장 긴 접두어).
-2. 그 Workspace 루트 디스크립터에서 `openat2(RESOLVE_BENEATH | RESOLVE_NO_MAGICLINKS)`로 연다. 루트 아래로 풀리는 심볼릭 링크와 하위 마운트는 따라가고, 밖으로 나가는 것은 거부한다.
-3. 연 부모 폴더의 실제 경로를 숨김 목록과 대조한다.
-4. 쓰기는 지금처럼 같은 폴더의 `O_EXCL` 임시 파일 후 rename이다. 하드링크된 파일을 고치면 링크가 끊길 뿐, 다른 이름의 내용은 바뀌지 않는다.
+rev. 1은 Workspace 루트에서 `RESOLVE_BENEATH`로 열자고 했지만, 그 방식은 절대 경로 심볼릭 링크를 늘 거부한다(Workspace 안을 가리켜도). 그래서 **풀고 나서 검사한다**(검수 P2).
+
+1. **부모 폴더를 연다.** 경로의 부모를 일반 경로 풀기로(절대·상대 링크 모두 따라감) `O_PATH|O_DIRECTORY`로 연다. `RESOLVE_NO_MAGICLINKS`는 둔다(`/proc/*/fd` 같은 마법 링크는 따라가지 않음).
+2. **풀린 위치를 검사한다.** 그 디스크립터의 실제 경로(`/proc/self/fd`)가 붙인 Workspace의 실제 경로 중 하나의 안이어야 하고(경로 성분 단위 접두어), 숨김 목록 안이 아니어야 하며, 파일시스템이 §8.2의 허용 목록이어야 한다.
+3. **마지막 성분.** 이름이 심볼릭 링크면 그 대상에 대해 1·2를 다시 한다(링크 단계는 최대 40). 대상이 Workspace 밖이면 거부한다. 링크 자체를 바꾸지 않고 대상 파일을 고친다(편집기와 같음).
+4. **그 디스크립터 기준으로만 쓴다.** 검사한 부모 디스크립터에 대해 `O_EXCL` 임시 파일 → `renameat`이다. 검사 뒤 경로가 바뀌어도 쓰는 곳은 검사한 폴더다. 하드링크된 파일을 고치면 링크가 끊길 뿐, 다른 이름의 내용은 바뀌지 않는다.
 5. `edit_file`의 CAS(식별자 비교, `CHANGED`)는 그대로다. 소유자가 다른 곳에서 동시에 고친 경우도 이것이 잡는다.
+6. `delete_file`도 1~2를 거친 부모 디스크립터에 대해 `unlinkat`이다(링크는 링크만 지움).
+
+시험: 절대 링크(안→안 허용, 안→밖 거부, 안→숨김 거부), 상대 링크로 `..` 탈출, 링크 고리, 마지막 성분 링크, 하위 마운트(허용), 검사와 쓰기 사이에 부모를 링크로 바꾸기(검사한 폴더에 씀).
 
 ### 8.4 그 밖
 
@@ -249,7 +266,16 @@ V3-051 그대로다(기본 120초, 최대 600초, 출력 256 KiB 수집, 모델�
 ## 9. `run_command`
 
 - 작업 위치: 대화의 작업 위치(§10.4). 인자 `cwd`로 다른 폴더를 줄 수 있다(읽을 수 있는 곳이면 어디든. 쓰기 범위는 그대로).
-- 쓰기 범위: 대화에 붙인 모든 Workspace. 명령이 무엇을 바꿀지 모르므로 **붙인 모든 Workspace의 lock을 경로 순서로 잡는다**(교착 방지). 파일 Tool은 그 Workspace의 lock 하나만 잡는다.
+### 9.1 lock: 겹치는 경로가 한 충돌 영역 (검수 B1)
+
+- lock은 Workspace id가 아니라 **실제 경로**에 건다. 두 쓰기 작업은 잡으려는 루트 중 하나라도 **같거나 한쪽이 다른 쪽의 조상**이면 충돌한다. `/home/coder/HIMARI`를 붙인 대화의 명령과 `/home/coder/HIMARI/conversations/c_1`의 파일 쓰기는 서로 기다린다. `~/projects/x`와 `~/projects/y`는 기다리지 않는다.
+- `run_command`는 대화에 붙인 모든 Workspace(대화 폴더 포함)를 한 번에 잡는다. 파일 Tool은 대상을 담은 Workspace 하나를 잡는다. 하나의 lock 관리자가 "잡으려는 경로 집합이 지금 잡힌 것과 겹치지 않으면 한꺼번에 준다"로 동작한다. 한꺼번에 잡으므로 교착이 없다. 요청은 지금 잡힌 것과도, **먼저 와서 기다리는 요청**과도 겹치지 않을 때 받는다. 그래서 겹치는 요청끼리는 도착 순이고(큰 명령이 계속 밀리지 않음), 겹치지 않는 요청은 앞의 대기와 상관없이 바로 받는다.
+- 비교하는 경로는 등록 때 정한 실제 경로(realpath)다. 같은 폴더가 bind mount로 두 경로에 보이는 경우는 등록 때 루트의 (장치, inode)가 이미 등록된 루트와 같으면 거부해 막는다. 하위 폴더까지 bind mount로 겹치는 경우는 찾지 않는다(§15).
+- 읽기는 lock을 잡지 않는다(지금과 같음).
+- lock은 HIMARI 프로세스 안에 있다. runner를 부르는 것은 HIMARI 하나뿐이라 충분하다(P0 단일 서버, V3-045).
+
+### 9.2 그 밖
+
 - 취소·결과 불명: 지금 Inside와 같다(V3-P41, V3-047). runner와의 연결이 명령 도중 끊기면 결과 불명(`UNKNOWN`)이다.
 - runner가 다시 시작하면 그 아래 명령은 모두 죽는다(`--die-with-parent`).
 
@@ -271,7 +297,8 @@ CREATE TABLE workspaces (
 ```
 
 - 대화에 붙이기는 기존 `bindings` 표에 `machine` Binding 행을 더하는 것이다(Binding은 대화 범위, V3-P03). 떼기는 행을 지운다.
-- HIMARI 폴더(기본 Workspace)는 소유자마다 하나 자동으로 등록되고, 새 대화가 만들어질 때 붙는다(T0). 이것은 뗄 수 없다. 1단계(표가 없을 때)는 설정의 경로를 쓰는 Binding 하나다.
+- 대화 폴더(기본 Workspace)는 새 대화가 만들어질 때 붙는다(T0). 이것은 뗄 수 없다. HIMARI 폴더 전체는 소유자마다 하나 자동으로 등록만 되고, 붙이는 것은 사용자가 고른다(§3.2). 1단계(표가 없을 때)는 대화 폴더 Binding 하나다.
+- 등록할 때 실제 경로(realpath)로 바꿔 저장하고, 루트의 (장치, inode)가 이미 등록된 루트와 같으면 거부한다(§9.1).
 - 등록 취소: 어느 대화에도 붙어 있지 않을 때만. 폴더 자체는 지우지 않는다.
 - Workspace의 `location`은 Data에만 있고, Tool 인자에서 오지 않는다(지금의 `host_root`와 같은 원칙).
 
@@ -297,7 +324,7 @@ CREATE TABLE workspaces (
 "machine": {
   "read": "everything the user can read, except hidden locations",
   "workspaces": [
-    {"path": "/home/coder/HIMARI", "label": "HIMARI", "writable": true},
+    {"path": "/home/coder/HIMARI/conversations/c_1", "label": "this conversation", "writable": true},
     {"path": "/home/coder/projects/foo", "label": "foo", "writable": true, "note": "…"}
   ],
   "working_directory": "/home/coder/projects/foo",
@@ -321,8 +348,12 @@ Tool 설명에 고정 문장으로 쓰기 범위·숨김·네트워크·push 방
 ### 11.3 프록시 규칙
 
 - HTTP `CONNECT`(HTTPS)와 일반 HTTP를 받는다. 목적지는 **이름**으로 받고, 프록시가 DNS를 푼다.
+- **이름 정규화:** 소문자, 끝의 `.` 제거, IDNA(A-label)로 바꾼 뒤 비교한다. IP 리터럴(`1.2.3.4`, `[::1]`, 십진·8진 표기 포함)은 받지 않는다. 허용 목록은 정확한 이름이고, 하위 도메인은 `*.example.com`처럼 적은 것만 허용한다.
+- **포트:** `CONNECT`는 443, 일반 HTTP는 80만.
+- **풀고, 모두 검사하고, 고정한다(검수 P2):** 이름을 한 번 풀어 **돌아온 주소를 모두** 검사한다. 하나라도 금지 범위면 거부한다. 연결은 검사한 주소로 직접 한다(다시 풀지 않음). 그래서 DNS 재바인딩(검사 때와 연결 때 다른 주소)이 통하지 않는다.
+- **일반 HTTP의 연결 재사용:** 요청마다 `Host`를 다시 검사하고, 다른 이름이면 새 연결을 연다.
 - 허용 목록(권고 기본값): `pypi.org`, `files.pythonhosted.org`, `repo.maven.apache.org`, `repo1.maven.org`, `plugins.gradle.org`, `services.gradle.org`, `downloads.gradle.org`, `github.com`, `codeload.github.com`, `objects.githubusercontent.com`, `raw.githubusercontent.com`, `registry.npmjs.org`.
-- 이름이 허용되어도 **풀린 주소가 loopback·사설·링크 로컬·메타데이터 주소면 거부**한다(이 서버의 HIMARI·Calliope·클라우드 메타데이터에 닿지 않게).
+- 이름이 허용되어도 **풀린 주소가 금지 범위면 거부**한다: loopback, 사설(RFC 1918, `fc00::/7`), 링크 로컬(`169.254.0.0/16`, 클라우드 메타데이터 포함, `fe80::/10`), CGNAT(`100.64.0.0/10`), `0.0.0.0/8`, 멀티캐스트, 예약, IPv4-mapped IPv6(풀어서 다시 검사). 이 서버의 HIMARI·Calliope·VPN 주소에 닿지 않게 한다.
 - 거부는 HTTP 403과 이유 한 줄. 프록시 로그에 도메인·바이트·결과를 남긴다(내용은 남기지 않음).
 - 환경 변수: `HTTP_PROXY`·`HTTPS_PROXY`·`ALL_PROXY`(대소문자 둘 다), `NO_PROXY=localhost,127.0.0.1`, `JAVA_TOOL_OPTIONS=-Dhttps.proxyHost=127.0.0.1 -Dhttps.proxyPort=3128 -Dhttp.proxyHost=…`(Maven·Gradle·Java가 읽음), git은 `HTTPS_PROXY`를 읽는다.
 - 안 되는 것: SSH git(`git@github.com:`, HTTPS를 쓰라고 Tool 설명에 적음), `apt`(root 필요. 시스템 패키지는 운영자가 설치, §19), 허용 목록 밖의 웹(웹 읽기는 Exa Tool로).
@@ -332,11 +363,26 @@ Tool 설명에 고정 문장으로 쓰기 범위·숨김·네트워크·push 방
 push는 인증 정보가 필요하고 밖에 영향을 주는 일이라 Sandbox 밖의 runner가 한다. 그래서 **모델이 만든 것을 Sandbox 밖에서 실행하지 않는 것**이 핵심이다. 저장소의 `.git/hooks`, `.git/config`(`core.fsmonitor`, `core.sshCommand`, `credential.helper`, `include.path` 등)는 모두 모델이 쓸 수 있다.
 
 Tool `machine/git_push(repository, branch)`:
-1. **Sandbox 안에서** `git bundle create`로 그 브랜치의 bundle을 runner의 임시 폴더에 만든다(저장소 설정과 hook이 실행되어도 Sandbox 안이다).
-2. runner가 **자기 소유의 빈 bare 저장소**에 그 bundle을 fetch한다(bundle은 데이터일 뿐이다). 저장소의 설정은 읽지 않는다.
-3. 원격 URL은 저장소 설정에서 읽되 HTTPS만, 그리고 설정의 `push_repos`(예: `github.com/jihunmoon04/*`)에 맞을 때만 쓴다.
-4. runner의 bare 저장소에서 `refs/heads/B:refs/heads/B`로 push한다. **`+`(강제)와 삭제는 만들지 않는다.** fast-forward가 아니면 원격이 거부하고, 그 결과를 모델에 돌려준다.
-5. 인증: runner 설정의 **전용 fine-grained GitHub 토큰**(고른 저장소만, Contents 쓰기만), `GIT_ASKPASS`로 넘긴다. `coder`의 `~/.config/gh` 토큰은 쓰지 않는다.
+
+**대상 검사 (검수 B3)**
+- `repository`(저장소 폴더)는 **이 대화에 붙인 Workspace 안**이어야 한다(§8.3의 풀고 나서 검사). 붙이지 않은 저장소는 push하지 않는다.
+- `branch`는 `git check-ref-format --branch` 규칙에 맞고 `-`로 시작하지 않아야 한다.
+- push 동안 그 Workspace의 lock을 잡는다(§9.1). bundle을 만드는 사이에 다른 명령이 저장소를 바꾸지 못한다.
+
+**1. Sandbox 안에서 꺼내기.** 머신 프로파일로 저장소 폴더에서 두 명령을 돌린다(네트워크 없음).
+- `git remote get-url --push origin` → 원격 URL(글자로만 받음).
+- `git bundle create - refs/heads/<branch>` → bundle을 **stdout으로** 낸다. runner는 이 stdout을 일반 출력 한도(256 KiB)가 아니라 자기 소유의 새 임시 파일(`0600`, runner 상태 폴더)로 받는다. 한도는 2 GiB이고 넘으면 멈추고 거부한다. 따로 묶는 폴더가 없어서 Sandbox와 runner가 공유하는 쓰기 위치가 생기지 않는다.
+- 저장소의 설정·hook(`core.fsmonitor`, `include.path` 등)이 이 단계에서 실행되어도 Sandbox 안이다.
+
+**2. runner 밖에서 검사.**
+- 원격 URL: `https://`만, 사용자 정보(`user@`)·포트·쿼리 없음, 호스트와 경로가 설정의 `push_repos`(예: `github.com/jihunmoon04/*`)에 맞아야 한다. 경로 끝의 `.git`은 정규화한다.
+- bundle: runner 소유의 **빈 bare 저장소**(매번 새로 만들고 끝나면 지움)에서 `git bundle list-heads`로 ref가 정확히 `refs/heads/<branch>` 하나인지 확인하고, `git fetch <bundle> refs/heads/<branch>:refs/heads/<branch>`로 받는다. 원본 저장소의 디렉터리와 설정은 이 단계부터 열지 않는다.
+- runner의 git 실행은 고정 환경이다: `GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL=/dev/null`, `HOME`은 빈 임시 폴더, `core.hooksPath=/dev/null`, `protocol.allow=never` + `protocol.https.allow=always`, `credential.helper=` 비움, `GIT_TERMINAL_PROMPT=0`.
+
+**3. push.**
+- 확인한 URL로 `refs/heads/<branch>:refs/heads/<branch>`를 push한다. **`+`(강제)와 삭제는 만들지 않는다.** fast-forward가 아니면 원격이 거부하고, 그 결과를 모델에 돌려준다.
+- 인증: runner 설정의 **전용 fine-grained GitHub 토큰**(고른 저장소만, Contents 쓰기만)을 이 git 실행에만 `GIT_ASKPASS`로 넘긴다. 토큰은 runner의 환경 변수에 두지 않는다. `coder`의 `~/.config/gh` 토큰은 쓰지 않는다.
+- 프록시 허용 목록(§11)은 Sandbox 명령용이라 push에는 쓰이지 않는다. push는 `push_repos`의 호스트로만 직접 연결한다.
 
 effect는 `EXTERNAL`이다. 결과에 원격 URL·브랜치·이전과 새 커밋을 적는다.
 
@@ -353,7 +399,7 @@ runner가 시작할 때 머신 프로파일로 실제 명령을 띄워 다음을
 | 호스트 `127.0.0.1`의 시험 리스너(TCP) | 닿지 않음 |
 | 프록시로 허용 밖 도메인, 허용 도메인이 사설 주소로 풀리는 경우 | 403 |
 | Sandbox 안 loopback 리스너 | 됨(Q8) |
-| `oom_score_adj` | 1000 |
+| 명령의 cgroup | `commands` 잎(runner와 다름), `memory.max` 적용 |
 | 남은 디스크립터 | 정한 것만 |
 
 HIMARI는 `hello`의 상태로 따르고, 따로 탈출 시험을 하지 않는다(runner의 검사가 그 프로파일의 검사다). 운영자는 `HIMARI_SANDBOX_HOST=1 pytest tests/sandbox_host`에 머신 프로파일 시험을 더해 배포 전에 돌린다.
@@ -383,9 +429,12 @@ HIMARI는 `hello`의 상태로 따르고, 따로 탈출 시험을 하지 않는�
 | 호스트 소켓으로 Sandbox 밖 실행 | `/run`·`/tmp` 새로, 네트워크 namespace, Landlock scope | 자체 검사가 알려진 소켓을 확인 |
 | push가 모델의 설정·hook을 실행 | bundle은 Sandbox 안, push는 runner의 빈 저장소에서 | — |
 | 강제 push·브랜치 삭제 | refspec에 `+`와 삭제를 만들지 않음 | GitHub 브랜치 보호를 함께 권함 |
-| 메모리·프로세스 폭주 | 서비스 한도, `oom_score_adj` | 디스크 채우기(한도 없음) |
+| 메모리·프로세스 폭주 | 서비스 한도, 명령 전용 cgroup(§6.5) | 디스크 채우기(한도 없음) |
 | 실수로 지우기 | git, Drive 휴지통 | git 밖 로컬 파일은 되돌릴 수 없음 |
-| HIMARI가 뚫림 | runner가 쓰기 범위를 자기 설정과 다시 대조, 숨김 목록은 runner 설정 | `coder` 권한 안의 숨김 아닌 파일 |
+| 파일 Tool로 특수 파일 읽기(`/proc/self/environ` 등) | 디스크 파일시스템 허용 목록(`fstatfs`) + 경로 문자열 검사(§8.2) | — |
+| 겹치는 Workspace의 동시 쓰기 | 경로 기준 충돌 영역(§9.1) | 하위 폴더 단위의 bind mount 별칭 |
+| 프록시 DNS 재바인딩 | 모든 응답 검사 + 검사한 주소로 연결 고정(§11.3) | — |
+| HIMARI가 뚫림 | runner가 쓰기 범위를 숨김 목록·특수 파일시스템·`writable_under`와 다시 대조 | `coder` 권한 안의 숨김 아닌 파일 |
 | runner가 뚫림 | HIMARI 데이터는 `himari-v3` 소유, runner는 `coder` 권한만 | `coder` 계정의 모든 것 |
 
 ## 16. 바뀌는 결정
@@ -394,7 +443,8 @@ HIMARI는 `hello`의 상태로 따르고, 따로 탈출 시험을 하지 않는�
 | --- | --- |
 | V3-036·V3-037 | `machine`에서는 명령 네트워크를 허용 목록 프록시로 연다(§11). Inside는 그대로 차단 |
 | V3-050 | `machine`의 자체 검사 항목을 §13으로 정한다(빈 루트 증명 대신 숨김·쓰기 범위·소켓·프록시 증명) |
-| V3-P40 | `machine`은 실제 경로를 보이고, 읽기는 Workspace 밖도 된다. 하드링크 파일 읽기 허용 |
+| V3-033 | `machine`에서 다른 대화 폴더는 읽기만. 쓰려면 붙인다(§3.2) |
+| V3-P40 | `machine`은 실제 경로를 보이고, 읽기는 Workspace 밖도 된다. 하드링크 파일 읽기 허용, 링크는 풀고 나서 검사(§8.3) |
 | V3-P41 | `machine`은 읽기 전용 루트 + 가림 + 쓰기 묶음, 실행 전 전체 검사 없음, Sandbox 안 loopback TCP 허용 |
 | V3-P02 | `machine` Tool은 Binding id 대신 경로로 Workspace를 고른다(runner가 다시 검사) |
 | V3-P13 | `machine` Tool은 `workspace_requirement = DEFAULT`(대화의 Binding들이 쓰기 범위) |
@@ -410,23 +460,24 @@ HIMARI는 `hello`의 상태로 따르고, 따로 탈출 시험을 하지 않는�
 | Q2 | HIMARI 폴더 위치? | **`/home/coder/HIMARI`**(`conversations/<id>/`). 소유자가 터미널·편집기로 바로 열 수 있다 |
 | Q3 | 숨김 목록 방식? | **홈의 점 항목은 기본으로 숨기고 필요한 것만 보이기**(§7). 알려진 인증 위치만 나열하는 방식은 새 도구의 토큰을 놓친다 |
 | Q4 | Workspace를 누가 붙이나? | **사용자만(Web·CLI).** 모델 요청 + 한 번 승인은 이후 |
-| Q5 | 자원 한도? | **서비스 전체 메모리 4 GiB, 프로세스 1,024개, CPU 1.5개, 명령이 먼저 죽음**(§6.5) |
+| Q5 | 자원 한도? | **명령 전용 cgroup에 메모리 4 GiB·프로세스 1,024개, 서비스 전체 4.5 GiB·CPU 1.5개.** 넘치면 명령만 죽고 runner는 남는다(§6.5) |
 | Q6 | 네트워크 허용 목록? | **§11.3의 기본 목록 + 사설·loopback 주소 거부.** 운영자가 설정에서 더한다 |
 | Q7 | push 인증? | **고른 저장소만 쓰는 전용 fine-grained 토큰을 runner 설정에.** `coder`의 gh 토큰은 계정 전체 권한이라 쓰지 않는다 |
 | Q8 | Sandbox 안 loopback TCP? | **허용.** namespace 안이라 밖에 닿지 않고, 테스트에 필요하다 |
 
 ## 18. 검증 계획
 
-- **단위:** 숨김 목록 판정(점 항목 규칙, 예외, 품은 폴더), 쓰기 범위 판정(가장 긴 접두어, 링크로 나가기, 숨김과 겹침), 작업 위치 규칙(§10.4), Current State 모양, refspec 생성(강제·삭제 없음), 프록시 주소 판정(사설·loopback·IPv6·IPv4-mapped).
+- **단위:** 숨김 목록 판정(점 항목 규칙, 예외, 품은 폴더), 쓰기 범위 판정(§8.3의 링크 시험 전부), 파일시스템 종류 거부(`/proc/self/environ`, `/sys`, tmpfs), 경로 lock 충돌(같음·조상·형제, FIFO, 한꺼번에 잡기), 작업 위치 규칙(§10.4), Current State 모양, refspec 생성(강제·삭제 없음), push URL 검사, 프록시 이름 정규화·주소 판정(사설·loopback·CGNAT·IPv6·IPv4-mapped·IP 리터럴 표기).
+- **프록시:** 허용 이름이 사설 주소로 풀림, 응답 중 하나만 사설, 검사 뒤 DNS 답이 바뀜(재바인딩: 연결은 검사한 주소로), 443 외 포트, keep-alive 중 `Host` 바꾸기.
 - **runner 계약:** `SO_PEERCRED` 거부, 디스크립터 전달, 연결 끊김 → 명령 트리 종료, runner 재시작 → 결과 불명.
 - **호스트 시험(`HIMARI_SANDBOX_HOST=1`):** §13의 표 전부 + Drive 형태의 FUSE 마운트(가능하면 실제 rclone) 읽기·쓰기, Workspace 안 심볼릭 링크가 숨김 위치를 가리킬 때 명령·파일 Tool 모두 막힘.
-- **git push:** 악성 `.git/config`(`core.fsmonitor`, `core.hooksPath`, `include.path`, `credential.helper`, `core.sshCommand`)와 `pre-push` hook을 둔 저장소에서 push해도 Sandbox 밖에서 아무것도 실행되지 않음(표시 파일로 확인). 허용 밖 원격 거부. 강제 push가 필요한 상황에서 거부 결과.
+- **git push:** 악성 `.git/config`(`core.fsmonitor`, `core.hooksPath`, `include.path`, `credential.helper`, `core.sshCommand`)와 `pre-push` hook을 둔 저장소에서 push해도 Sandbox 밖에서 아무것도 실행되지 않음(표시 파일로 확인). 붙이지 않은 저장소 거부, 허용 밖·`user@`·`http://`·`ssh` 원격 거부, ref가 둘 이상인 bundle 거부, 2 GiB 넘는 bundle 거부, 강제 push가 필요한 상황에서 거부 결과, push 중 같은 Workspace의 명령이 기다림.
 - **실제 개발 흐름(라이브, 선택):** 새 대화에서 Python 프로젝트 `pip install` + 테스트, C `make`, Java Gradle wrapper 빌드, git clone → 수정 → commit → push(시험 저장소).
 - **회귀:** Inside 대화와 다른 principal은 그대로(전체 pytest, 두 Data 백엔드).
 
 ## 19. 구현 단계와 배포
 
-1. **1단계: runner와 머신 프로파일.** `himari/runner/`, 계약(§5), 머신 프로파일(§6, 네트워크 없이), 숨김 목록(§7), 자체 검사(§13), `machine` Environment의 파일 Tool·`run_command`·업로드·파일 보이기·문서·이미지(§8, §9), HIMARI 폴더 하나만(붙이기 없음), 새 대화 활성화(Q1).
+1. **1단계: runner와 머신 프로파일.** `himari/runner/`, 계약(§5), 머신 프로파일(§6, 네트워크 없이), 숨김 목록(§7), 자체 검사(§13), `machine` Environment의 파일 Tool·`run_command`·업로드·파일 보이기·문서·이미지(§8, §9), 대화 폴더만(붙이기 없음), 새 대화 활성화(Q1).
 2. **2단계: Workspace 등록과 붙이기.** Data v13(§10.1), Web Workspace 줄과 설정 목록, CLI, Current State, Drive 자동 메모(§14).
 3. **3단계: 네트워크.** 프록시와 다리(§11), 캐시 환경 변수(§6.3).
 4. **4단계: git push.** §12.
