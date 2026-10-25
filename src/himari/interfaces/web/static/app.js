@@ -441,13 +441,19 @@ function referenceLabel(reference) {
   return `${reference.name}:${fromLine}:${fromColumn}–${toLine}:${toColumn}`;
 }
 
-/* A reference for the next message: a chip above the composer (at most MAX_REFERENCES). */
+/* A reference for the next message: a chip above the composer (at most MAX_REFERENCES). The same
+ * place again, selected in a file changed since, renews its chip (the old one would be refused). */
 function addReference(reference) {
   if (app.conversationId === null) return;
-  const same = (r) => r.path === reference.path && r.whole === reference.whole && r.start === reference.start
-    && r.end === reference.end;
-  if (app.references.some(same)) {
+  const same = app.references.find((r) => r.path === reference.path && r.whole === reference.whole
+    && r.start === reference.start && r.end === reference.end);
+  const unchanged = same && !same.stale && same.sha256 === reference.sha256
+    && same.identity.length === reference.identity.length && same.identity.every((v, i) => v === reference.identity[i]);
+  if (unchanged) {
     status(`${referenceLabel(reference)} is already in your message.`);
+  } else if (same) {
+    Object.assign(same, reference, { label: referenceLabel(reference), stale: false });
+    status("");
   } else if (app.references.length >= MAX_REFERENCES) {
     status(`A message points at most ${MAX_REFERENCES} places in files.`, "warn");
   } else {

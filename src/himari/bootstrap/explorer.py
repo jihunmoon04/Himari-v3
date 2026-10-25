@@ -351,7 +351,9 @@ class Explorer:
         if 2 * end > len(units) or hashlib.sha256(selected.encode("utf-8")).hexdigest() != sha256:
             raise ExplorerRefused("reference_stale", f"{name} changed since you selected in it; select again.")
         start_line = before.count("\n") + 1
-        end_line = start_line + selected.rstrip("\n").count("\n")
+        # The line of the last selected character: a selection ending just after a line break does not reach
+        # the next line (only its one final break is left out: the empty lines before it are selected).
+        end_line = start_line + selected.count("\n") - selected.endswith("\n")
         excerpt = selected.encode("utf-8")
         truncated = len(excerpt) > EXCERPT_BYTES
         text = excerpt[:EXCERPT_BYTES].decode("utf-8", errors="ignore") if truncated else selected

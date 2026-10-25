@@ -606,6 +606,29 @@ def test_line_breaks_count_as_the_editor_counts_them(server: Server, kit: Runner
     assert (reference.excerpt, reference.start_line, reference.end_line) == ("two\nthree", 2, 3)
 
 
+@pytest.mark.parametrize(("text", "start", "end", "lines"), [
+    ("a\nb\n", 0, 4, (1, 2)),  # to the end of a file ending in a line break: line 3 has nothing selected
+    ("a\nb\nc", 2, 4, (2, 2)),  # one line with its break
+    ("a\n\n\nb", 0, 4, (1, 3)),  # the empty lines 2 and 3 are selected, line 4 is not
+    ("a\n\nb", 2, 3, (2, 2)),  # an empty line alone
+    ("a\nb", 1, 2, (1, 1)),  # only the break after line 1
+    ("a\nb\n\n", 2, 5, (2, 3)),  # from line 2 to the file's end, past an empty line
+])
+def test_a_selection_ends_on_the_line_of_its_last_character(server: Server, kit: RunnerKit, text: str, start: int,
+                                                            end: int, lines: tuple[int, int]) -> None:
+    path = kit.home / "projects/a/lines.txt"
+    path.write_text(text)
+    identity = server.client.get("/api/machine/stat", params={"path": str(path)}).json()["identity"]
+    cid = server.new()
+    server.provider.extend([final("seen")])
+    sent = ask(server, cid, "x", {"path": str(path), "identity": identity, "start": start, "end": end,
+                                  "sha256": hashlib.sha256(text[start:end].encode()).hexdigest()})
+    assert sent.status_code == 202, sent.text
+    wait_idle(server, cid)
+    reference = model_saw(server)[-1]
+    assert (reference.start_line, reference.end_line) == lines
+
+
 def test_reference_limits(server: Server, kit: RunnerKit, monkeypatch: pytest.MonkeyPatch) -> None:
     path = str(kit.home / "projects/a/notes.txt")
     (kit.home / "projects/a/notes.txt").write_text(NOTES)
