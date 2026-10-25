@@ -366,4 +366,85 @@ for (const [size, questions] of [[3, 1], [2_000_000, 2]]) {
   files.closeDoc();
 }
 
+// PR #95 re-review C1: a restore that ends after another file was opened and edited leaves that file be.
+{
+  const slow = deferred();
+  const { files, sent, module } = editorPane({
+    "GET /api/machine/versions/v1": () => slow.promise,
+    "POST /api/machine/file": { path: "/home/u/gone.txt", identity: ["8", "8", "0", "8"] },
+    "PUT /api/machine/file": { path: "/home/u/gone.txt", identity: ["8", "8", "4", "9"], previous_kept: true },
+    "GET /api/machine/file": TEXT,
+  });
+  const item = { path: "/home/u/gone.txt", name: "gone.txt", id: "v1" };
+  const restoring = files.restoreDeleted(item);
+  await files.openFile(TEXT.path); // the user goes on meanwhile
+  module.made[0].type("mine, unsaved");
+  slow.resolve({ text: "kept" });
+  assert.equal(await restoring, null);
+  assert.equal(files.file, TEXT.path);
+  assert.equal(module.made[0].text(), "mine, unsaved");
+  assert.equal(module.made[0].destroyed, false);
+  assert.ok(files.body.text().includes("gone.txt is restored"));
+  assert.equal(sent.filter(([m, p]) => m === "GET" && p.startsWith("/api/machine/file?path=%2Fhome%2Fu%2Fgone")).length, 0);
+  files.closeDoc();
+}
+
+// PR #95 re-review C2: a restore stopped after its empty file was made fills that same file when tried again,
+// while it is still that file; a file made by anyone else meanwhile is never written.
+{
+  let puts = 0;
+  let onDisk = ["8", "8", "0", "8"];
+  const { files, sent } = editorPane({
+    "GET /api/machine/versions/v1": { text: "kept" },
+    "POST /api/machine/file": { path: "/home/u/gone.txt", identity: ["8", "8", "0", "8"] },
+    "GET /api/machine/stat": () => ({ path: "/home/u/gone.txt", kind: "file", identity: onDisk, size: 0 }),
+    "PUT /api/machine/file": () => { puts += 1; if (puts === 1) throw Object.assign(new Error("disk full"), { code: "other" });
+      return { path: "/home/u/gone.txt", identity: ["8", "8", "4", "9"], previous_kept: true }; },
+    "GET /api/machine/file": { ...TEXT, path: "/home/u/gone.txt", text: "kept" },
+  });
+  const item = { path: "/home/u/gone.txt", name: "gone.txt", id: "v1" };
+  const first = await files.restoreDeleted(item);
+  assert.ok(first.includes("Restore again"));
+  assert.deepEqual(item.made.identity, ["8", "8", "0", "8"]);
+  assert.equal(await files.restoreDeleted(item), null);
+  assert.equal(sent.filter(([m, p]) => m === "POST" && p === "/api/machine/file").length, 1); // not made twice
+  assert.deepEqual(sent.filter(([m]) => m === "PUT").map(([, , b]) => b.expected), [["8", "8", "0", "8"], ["8", "8", "0", "8"]]);
+  assert.equal(item.made, null);
+  files.closeDoc();
+  // Changed by someone else since: not that file any more; a new one is asked for (and refused as taken).
+  const other = { path: "/home/u/gone.txt", name: "gone.txt", id: "v1", made: { path: "/home/u/gone.txt", identity: ["1", "1", "0", "1"] } };
+  onDisk = ["2", "2", "5", "2"];
+  const routes = editorPane({
+    "GET /api/machine/versions/v1": { text: "kept" },
+    "GET /api/machine/stat": () => ({ path: "/home/u/gone.txt", kind: "file", identity: onDisk, size: 5 }),
+    "POST /api/machine/file": () => { throw Object.assign(new Error("exists"), { code: "exists" }); },
+  });
+  const answer = await routes.files.restoreDeleted(other);
+  assert.ok(answer.includes("exists again"));
+  assert.equal(routes.sent.filter(([m]) => m === "PUT").length, 0);
+}
+
+// PR #95 re-review C1: a new file made after the user moved on is not opened over their editing.
+{
+  const slow = deferred();
+  const { files, module } = editorPane({
+    "GET /api/machine/list": listing("/home/u", []),
+    "POST /api/machine/file": () => slow.promise,
+    "GET /api/machine/file": TEXT,
+  });
+  await files.openFolder("/home/u");
+  files.askName("/home/u", "file");
+  const form = files.body.children[0];
+  form.children[0].value = "new.md";
+  const submitting = form.listeners.submit[0]({ preventDefault() {} });
+  await files.openFile(TEXT.path);
+  module.made[0].type("editing");
+  slow.resolve({ path: "/home/u/new.md", identity: ["3", "3", "0", "3"] });
+  await submitting;
+  assert.equal(files.file, TEXT.path);
+  assert.equal(module.made[0].text(), "editing");
+  assert.ok(files.body.text().includes("new.md is made"));
+  files.closeDoc();
+}
+
 console.log("files smoke: ok");

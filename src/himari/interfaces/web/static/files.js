@@ -131,8 +131,9 @@ export class FilesPane {
     } catch (ignored) { /* shown from / */ }
   }
 
-  async openFolder(path, { asked = false } = {}) {
-    if (!asked && !(await this.mayLeave())) return;
+  /* Every move asks before unsaved text goes (mayLeave): none skips it (PR #95 re-review C1). */
+  async openFolder(path) {
+    if (!(await this.mayLeave())) return;
     const ticket = ++this.ticket;
     this.closeDoc();
     this.file = null;
@@ -208,8 +209,7 @@ export class FilesPane {
     try {
       const target = await this.api("GET", `/api/machine/stat?${query(path)}`);
       if (ticket !== this.ticket) return null;
-      return target.kind === "directory" ? this.openFolder(target.path, { asked: true })
-        : this.openFile(target.path, { asked: true });
+      return target.kind === "directory" ? this.openFolder(target.path) : this.openFile(target.path);
     } catch (error) {
       if (ticket === this.ticket) this.failed(path, error);
       return null;
@@ -261,8 +261,8 @@ export class FilesPane {
     return button;
   }
 
-  async openFile(path, { asked = false } = {}) {
-    if (!asked && !(await this.mayLeave())) return;
+  async openFile(path) {
+    if (!(await this.mayLeave())) return;
     const ticket = ++this.ticket;
     this.closeDoc();
     this.busy(path);
@@ -559,10 +559,11 @@ export class FilesPane {
     if (doc && doc.dirty) lines.push("Your unsaved changes are dropped too.");
     if (!(await this.confirm(`Delete ${name}?`, lines, "Delete"))) return;
     if (big && !(await this.confirm(`Delete ${name} for good?`, ["It cannot be put back."], "Delete for good"))) return;
+    const ticket = this.ticket; // anything opened meanwhile stays (PR #95 re-review C1)
     try {
       const gone = await this.api("POST", "/api/machine/file/delete", { path, expected: now.identity });
       if (this.doc === doc) this.closeDoc();
-      await this.openFolder(path.slice(0, path.lastIndexOf("/")) || "/", { asked: true });
+      if (this.ticket === ticket) await this.openFolder(path.slice(0, path.lastIndexOf("/")) || "/");
       if (!big && !gone.previous_kept) { // told it would be kept: say it was not, where it stays in sight (review B2)
         this.body.prepend(this.el("p", "files-note is-error files-lasting",
           `${name} was deleted, but its content could not be kept as a previous version: it cannot be put back.`));
@@ -764,18 +765,48 @@ export class FilesPane {
     if (dialog.showModal) dialog.showModal();
   }
 
-  /* A deleted file back where it was: made new (never over a file now there), its kept content saved in it,
-   * and opened. An error's text, or null. */
+  /* A deleted file back where it was: made new (never over a file now there), its kept content saved in it.
+   * Two writes: if the save fails after the empty file was made, ``item.made`` keeps that file's identity and
+   * Restore again fills that same file, while it is still that empty file (PR #95 re-review C2). Opened
+   * afterwards only if nothing else was opened meanwhile; otherwise the user is told (re-review C1). An
+   * error's text, or null. */
   async restoreDeleted(item) {
+    const ticket = this.ticket;
+    let made = null;
     try {
       const text = (await this.api("GET", `/api/machine/versions/${encodeURIComponent(item.id)}?${query(item.path)}`)).text;
-      const made = await this.api("POST", "/api/machine/file", { path: item.path });
+      if (item.made) {
+        const now = await this.api("GET", `/api/machine/stat?${query(item.made.path)}`).catch(() => null);
+        if (now && sameIdentity(now.identity, item.made.identity)) made = item.made;
+      }
+      made = made || await this.api("POST", "/api/machine/file", { path: item.path });
       await this.api("PUT", "/api/machine/file", { path: made.path, content: text, expected: made.identity });
-      await this.openFile(made.path, { asked: true });
-      return null;
+      item.made = null;
     } catch (error) {
-      return error.code === "exists" ? `${item.name} exists again: open it, and use its previous versions.` : error.message;
+      if (error.code === "exists") {
+        return `${item.name} exists again. Its kept content is among its previous versions: open it, then ⋯ › Previous versions.`;
+      }
+      if (made) {
+        item.made = made;
+        return `${item.name} was made, but its content could not be saved in it (${error.message}). Restore again to fill it.`;
+      }
+      return error.message;
     }
+    if (this.ticket === ticket && !this.dirty) await this.openFile(made.path);
+    else this.notice(`${item.name} is restored.`, made.path);
+    return null;
+  }
+
+  /* A note at the top of the pane, with a link to open ``path``; it stays until the next navigation. */
+  notice(text, path = null) {
+    const note = this.el("p", "files-note files-lasting", text);
+    if (path) {
+      const open = this.el("button", "link-button", "Open it");
+      open.type = "button";
+      open.addEventListener("click", () => this.openFile(path));
+      note.append(open);
+    }
+    this.body.prepend(note);
   }
 
   /* A folder's "New": a file (opened in the editor) or a folder, named in a row at the top. */
@@ -818,15 +849,17 @@ export class FilesPane {
       }
       create.disabled = true;
       const path = join(folder, name);
+      const ticket = this.ticket; // anything opened meanwhile stays (PR #95 re-review C1)
       try {
         if (kind === "file") {
           const made = await this.api("POST", "/api/machine/file", { path });
           form.remove();
-          await this.openFile(made.path, { asked: true });
+          if (this.ticket === ticket) await this.openFile(made.path);
+          else this.notice(`${name} is made.`, made.path);
         } else {
           await this.api("POST", "/api/machine/folder", { path });
           form.remove();
-          await this.openFolder(folder, { asked: true });
+          if (this.ticket === ticket) await this.openFolder(folder);
         }
       } catch (error) {
         create.disabled = false;
@@ -852,8 +885,8 @@ export class FilesPane {
    * over unsaved text); another file is read again. */
   refresh() {
     if (this.doc) return this.checkDisk();
-    if (this.file) return this.openFile(this.file, { asked: true });
-    if (this.folder) return this.openFolder(this.folder, { asked: true });
+    if (this.file) return this.openFile(this.file);
+    if (this.folder) return this.openFolder(this.folder);
     return null;
   }
 }
