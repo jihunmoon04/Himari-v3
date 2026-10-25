@@ -632,6 +632,8 @@ class Application:
     # Data's insert together, so two paths to one folder cannot both pass.
     _registering: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
     _explorer: Explorer | None = field(default=None, repr=False)
+    # One "open this folder's conversation" at a time per folder (PR #93 review B1): by real path.
+    _opening: dict[str, tuple[asyncio.Lock, int]] = field(default_factory=dict, repr=False)
     # V3-P65 §7.3: one lifecycle lock per Conversation (P0: one server process),
     # kept only while some call holds or waits for it (PR #56 review C1).
     _lifecycle: dict[ConversationId, _Lifecycle] = field(default_factory=dict, repr=False)
@@ -917,6 +919,29 @@ class Application:
         working folder. A Conversation made here whose folder could not be
         attached is deleted again; the registration stays. Whether one was made."""
         folder = await self.folder_conversations(principal, path)
+        if new or folder.own:
+            return await self._open_in(principal, folder, new)
+        # Two at once for the same folder must not both find none and both make one (PR #93 review B1):
+        # one at a time per folder, and the folder read again once it is this one's turn.
+        async with self._opening_folder(folder.path):
+            return await self._open_in(principal, await self.folder_conversations(principal, folder.path), new)
+
+    @asynccontextmanager
+    async def _opening_folder(self, real: str) -> AsyncIterator[None]:
+        lock, users = self._opening.get(real, (asyncio.Lock(), 0))
+        self._opening[real] = (lock, users + 1)
+        try:
+            async with lock:
+                yield
+        finally:
+            lock, users = self._opening[real]
+            if users == 1:
+                del self._opening[real]
+            else:
+                self._opening[real] = (lock, users - 1)
+
+    async def _open_in(self, principal: PrincipalId, folder: FolderConversations,
+                       new: bool) -> tuple[ConversationId, bool]:
         if folder.own:
             if not folder.conversations:
                 raise WorkspaceRefused("not_usable", folder.refused or "That conversation is in the trash.")

@@ -13,6 +13,16 @@ function deferred() {
   return { promise, resolve, reject };
 }
 
+/* Enough of an element for the parts app.js builds itself (the folder's conversation control). */
+class FakeElement {
+  constructor(tag) { Object.assign(this, { tagName: tag, children: [], listeners: {}, textContent: "", className: "", disabled: false, hidden: false, open: false, title: "" }); }
+  append(...nodes) { this.children.push(...nodes); }
+  setAttribute() {}
+  addEventListener(type, fn) { (this.listeners[type] ||= []).push(fn); }
+  click() { return Promise.all((this.listeners.click || []).map((fn) => fn())); }
+  all() { return [this, ...this.children.flatMap((c) => (c.all ? c.all() : []))]; }
+}
+
 function page() {
   const nodes = new Map();
   const node = (id) => {
@@ -20,7 +30,7 @@ function page() {
     return nodes.get(id);
   };
   const context = vm.createContext({
-    document: { getElementById: node, addEventListener() {} },
+    document: { getElementById: node, addEventListener() {}, createElement: (tag) => new FakeElement(tag) },
     AppViews: class {}, FilesPane: class { refresh() {} openFolder() {} }, console, setTimeout, clearTimeout,
     LiveAnswer: class { reset() {} shown() {} keepLast() {} settle() {} open() {} restyle() {} },
   });
@@ -138,4 +148,35 @@ for (const scenario of ["same", "edited", "navigated", "failed", "stale-failure"
   assert.equal(p.node("composer-text").value, "kept");
 }
 
-console.log("UI async regression checks: 12 passed");
+// PR #93 review B2: a conversation picked from a folder's list opens with its files, as the button's does.
+{
+  const p = page();
+  p.run(`var opened = []; openConversation = async (id) => { opened.push([id, app.filesOpen]); };
+         app.filesOpen = false;
+         api = async (method, path) => ({ path: "/p", own: false, refused: null, workspace: null, above: [],
+           conversations: [{ id: "c1", title: "One", preview: "", last_activity_at: "2026-10-25T00:00:00Z" }] });`);
+  const control = p.run("openHereControl('/p')");
+  await new Promise((r) => setTimeout(r, 0));
+  const item = control.all().find((n) => n.className.includes("files-open-chat-item"));
+  await item.click();
+  assert.equal(p.run("JSON.stringify(opened)"), JSON.stringify([["c1", true]]));
+}
+
+// PR #93 review B1: the folder's button is off while its request is under way.
+{
+  const p = page(), answer = deferred();
+  p.context.answer = answer.promise;
+  p.run(`var asked = 0; openConversation = async () => {}; loadList = async () => [];
+         api = async (method, path) => { if (method === "POST") { asked++; return answer; }
+           return { path: "/p", own: false, refused: null, workspace: null, above: [], conversations: [] }; };`);
+  const control = p.run("openHereControl('/p')");
+  const main = control.children[0];
+  const clicked = main.click();
+  assert.equal(main.disabled, true);
+  answer.resolve({ conversation: { id: "c2" }, created: true });
+  await clicked;
+  assert.equal(main.disabled, false);
+  assert.equal(p.run("asked"), 1);
+}
+
+console.log("UI async regression checks: 14 passed");

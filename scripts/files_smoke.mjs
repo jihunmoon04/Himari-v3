@@ -127,4 +127,18 @@ const within = (promise) => Promise.race([promise, new Promise((r) => setTimeout
   assert.ok(!files.body.text().includes("inside-a"));
 }
 
+// PR #93 review N1: a folder row gets a ⋯ only with something to do, and never a Download.
+{
+  const node = (row) => row.children.find((c) => c.className.includes("conversation-actions"));
+  const labels = (menu) => menu.children[1].children.map((c) => c.textContent);
+  for (const [actions, expected] of [[[], null], [[["Attach to this conversation", () => {}]], ["Attach to this conversation", "Copy path"]]]) {
+    const files = new FilesPane({ api: async () => HOME, el, folderRowActions: () => actions });
+    const folderRow = files.row("/home/u", { name: "sub", kind: "directory", size: null, modified: 0 });
+    const fileRow = files.row("/home/u", { name: "a.txt", kind: "file", size: 1, modified: 0 });
+    if (expected === null) assert.equal(node(folderRow), undefined);
+    else assert.deepEqual(labels(node(folderRow)), expected);
+    assert.deepEqual(labels(node(fileRow)), ["Download", "Copy path"]);
+  }
+}
+
 console.log("files smoke: ok");

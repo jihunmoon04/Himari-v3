@@ -143,9 +143,10 @@ export class FilesPane {
     button.title = path;
     button.addEventListener("click", () => this.follow(path, entry.kind));
     li.append(button);
-    if (entry.kind === "file") li.append(this.menu(path, entry.name, []));
-    else if (entry.kind === "directory" && this.folderRowActions) li.append(this.menu(path, entry.name, this.folderRowActions(path)));
-    else li.append(this.el("span", "files-actions-space"));
+    const given = entry.kind === "directory" && this.folderRowActions ? this.folderRowActions(path) : [];
+    if (entry.kind === "file") li.append(this.menu(path, entry.name, [], true));
+    else if (given.length) li.append(this.menu(path, entry.name, given, false));
+    else li.append(this.el("span", "files-actions-space")); // nothing to do with it here: no menu (PR #93 review N1)
     return li;
   }
 
@@ -167,8 +168,8 @@ export class FilesPane {
     }
   }
 
-  /* A row's ⋯: the given actions, then (a file) Download, and Copy path. */
-  menu(path, name, given) {
+  /* A row's ⋯: the given actions, then (a file only) Download, and Copy path. */
+  menu(path, name, given, isFile) {
     const actions = this.el("details", "conversation-actions files-actions");
     const toggle = this.el("summary", null, "⋯");
     toggle.setAttribute("aria-label", `Actions for ${name}`);
@@ -180,7 +181,7 @@ export class FilesPane {
       control.addEventListener("click", () => { actions.open = false; action(); });
       list.append(control);
     }
-    if (!given.length) list.append(this.download(path, "Download"));
+    if (isFile) list.append(this.download(path, "Download"));
     list.append(this.copyPath(path, () => { actions.open = false; }));
     actions.append(toggle, list);
     actions.addEventListener("toggle", () => {

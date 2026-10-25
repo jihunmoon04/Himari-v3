@@ -2478,12 +2478,17 @@ async function showFiles() {
   else await filesSurface.openFolder("~");
 }
 
+/* A conversation opened from a folder: its files beside it (V3-P75 §6; PR #93 review B2). */
+function openWithFiles(id) {
+  app.filesOpen = true;
+  return openConversation(id);
+}
+
 /* §6: a folder's conversation — its latest, or a new one working in it. */
 async function openFolderConversation(path, isNew) {
   try {
     const answer = await api("POST", "/api/machine/conversations", { path, new: isNew });
-    app.filesOpen = true; // the folder stays in sight, beside its conversation
-    await openConversation(answer.conversation.id);
+    await openWithFiles(answer.conversation.id);
     if (answer.created) loadList(true).then(markSelected).catch(() => {});
   } catch (error) {
     status(error.message, "error");
@@ -2495,7 +2500,14 @@ function openHereControl(path) {
   const box = el("div", "files-open-chat");
   const main = el("button", "primary-button files-open-chat-main", "Open conversation");
   main.type = "button";
-  main.addEventListener("click", () => openFolderConversation(path, false));
+  main.addEventListener("click", async () => {
+    main.disabled = true; // one request at a time from here (PR #93 review B1)
+    try {
+      await openFolderConversation(path, false);
+    } finally {
+      main.disabled = false;
+    }
+  });
   const more = el("details", "files-open-chat-more");
   const toggle = el("summary", "files-open-chat-toggle", "⌄");
   toggle.setAttribute("aria-label", "Conversations in this folder");
@@ -2518,7 +2530,7 @@ function openHereControl(path) {
       row.type = "button";
       row.append(el("span", "files-name", conversationName(item)),
                  el("span", "files-meta", new Date(item.last_activity_at).toLocaleDateString()));
-      row.addEventListener("click", () => { more.open = false; openConversation(item.id); });
+      row.addEventListener("click", () => { more.open = false; openWithFiles(item.id); });
       list.append(row);
     }
     if (!folder.own) {
