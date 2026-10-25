@@ -1,6 +1,6 @@
 # 머신 Workspace v0.1
 
-> 2026-10-25 · **PROPOSED (V3-P74)** · rev. 4 — 외부 재검수 2(HEAD ea6e534) 반영: N4 호스트의 경로 Unix 소켓을 seccomp로 막음(§6.6, Q9), N5 runner 소켓은 systemd 소켓 단위가 그룹 `himari-v3`로 만듦(§4.1), N6 Q5 문구를 §6.5에 맞춤(§17). 소유자 결정 Q1~Q9 대기(§17). rev. 3 — 외부 재검수(HEAD a7eca31) 반영: N1 bundle fetch에만 `file` 전송 허용(§12), N2 숨김은 마지막에 가리고 실행 직전에 확인하는 불변 조건(§6.1), N3 runner 생존은 명령 OOM 격리까지만 보장(§6.5). rev. 2 — 외부 검수(HEAD 61200df) 반영: B1 기본 쓰기 범위를 대화 폴더로, 겹치는 Workspace는 한 충돌 영역(§3.2, §9.1), B2 파일 Tool은 디스크 파일시스템만·보이는 점 항목 줄임(§7, §8.2), B3 git push의 bundle 전달·대상·lock(§12), P2 등록 범위(§5.3)·링크 풀기(§8.3)·OOM(§6.5)·프록시 DNS(§11.3). 소유자 결정 Q1~Q8 대기(§17). rev. 1: 설계 초안.
+> 2026-10-25 · **PROPOSED (V3-P74)** · rev. 5 — 외부 재검수 3(HEAD 903e7f1) 반영: N7 `socketpair`는 `SOCK_STREAM`만 허용(`SOCK_DGRAM` 쌍은 호스트 소켓으로 다시 연결된다, §6.6), N8 소켓 폴더는 `DirectoryMode=0755`(§4.1). 소유자 결정 Q1~Q9 대기(§17). rev. 4 — 외부 재검수 2(HEAD ea6e534) 반영: N4 호스트의 경로 Unix 소켓을 seccomp로 막음(§6.6, Q9), N5 runner 소켓은 systemd 소켓 단위가 그룹 `himari-v3`로 만듦(§4.1), N6 Q5 문구를 §6.5에 맞춤(§17). 소유자 결정 Q1~Q9 대기(§17). rev. 3 — 외부 재검수(HEAD a7eca31) 반영: N1 bundle fetch에만 `file` 전송 허용(§12), N2 숨김은 마지막에 가리고 실행 직전에 확인하는 불변 조건(§6.1), N3 runner 생존은 명령 OOM 격리까지만 보장(§6.5). rev. 2 — 외부 검수(HEAD 61200df) 반영: B1 기본 쓰기 범위를 대화 폴더로, 겹치는 Workspace는 한 충돌 영역(§3.2, §9.1), B2 파일 Tool은 디스크 파일시스템만·보이는 점 항목 줄임(§7, §8.2), B3 git push의 bundle 전달·대상·lock(§12), P2 등록 범위(§5.3)·링크 풀기(§8.3)·OOM(§6.5)·프록시 DNS(§11.3). 소유자 결정 Q1~Q8 대기(§17). rev. 1: 설계 초안.
 >
 > 소유자 방향(2026-10-24, 대화에서 정함):
 > - 개발용 Workspace를 따로 만들지 않는다. 기본 Workspace에서 git·C·Python·Java 같은 일반 개발이 되게 한다.
@@ -100,7 +100,7 @@ Workspace는 **대화가 쓸 수 있는 폴더**다. 대화에 붙인 Workspace�
 
 - runner는 HIMARI 저장소의 새 최상위 모듈 `himari/runner/`다. 같은 release·venv에서 `python -m himari.runner`로 띄운다. `common`과 `sandbox`만 import한다(import 검사에 추가).
 - systemd `himari-runner.service`, `User=coder`. 설정은 `/etc/himari-runner/runner.toml`(root 소유, coder 읽기 전용)이라 runner도 모델도 바꿀 수 없다.
-- 소켓은 **systemd 소켓 단위**(`himari-runner.socket`)가 만든다: `ListenStream=/run/himari-runner/runner.sock`, `SocketUser=coder`, `SocketGroup=himari-v3`, `SocketMode=0660`, `DirectoryMode=0750`. runner는 받은 소켓을 `LISTEN_FDS`로 쓴다(검수 N5). runner가 직접 만들면 소켓 그룹이 `coder`가 되고, `coder`는 `himari-v3` 그룹의 구성원이 아니라 `chgrp`도 할 수 없다(이 서버: `coder`의 그룹은 `coder`, `users`, `himari-project`, 2026-10-25 확인). root인 systemd가 만들면 그룹을 정확히 줄 수 있다.
+- 소켓은 **systemd 소켓 단위**(`himari-runner.socket`)가 만든다: `ListenStream=/run/himari-runner/runner.sock`, `SocketUser=coder`, `SocketGroup=himari-v3`, `SocketMode=0660`, `DirectoryMode=0755`. runner는 받은 소켓을 `LISTEN_FDS`로 쓴다(검수 N5). systemd가 만드는 부모 폴더는 `root:root`라, `0750`이면 `himari-v3`가 폴더를 지나가지 못한다(검수 N8). 폴더는 누구나 지나갈 수 있게 두고, 접근은 소켓 파일의 `0660`(`coder:himari-v3`)과 `SO_PEERCRED`가 정한다. runner가 직접 만들면 소켓 그룹이 `coder`가 되고, `coder`는 `himari-v3` 그룹의 구성원이 아니라 `chgrp`도 할 수 없다(이 서버: `coder`의 그룹은 `coder`, `users`, `himari-project`, 2026-10-25 확인). root인 systemd가 만들면 그룹을 정확히 줄 수 있다.
 - runner는 연결마다 `SO_PEERCRED`로 상대 uid가 설정의 `client_uid`(himari-v3)인지 다시 확인한다(파일 권한이 잘못되어도 다른 사용자는 거부).
 - 배포 시험: `himari-v3`로 연결 → `hello` 성공, `coder`가 아닌 다른 사용자(예: `nobody`)로 연결 → 권한 거부, 소켓의 소유·그룹·모드 확인.
 - runner는 대화나 principal을 모른다. HIMARI가 매 요청에 **이 호출의 쓰기 범위와 작업 위치**를 담아 보낸다. runner는 그 범위를 자기 설정과 다시 대조한다(§5.3).
@@ -234,7 +234,16 @@ V3-051 그대로다(기본 120초, 최대 600초, 출력 256 KiB 수집, 모델�
 **계약.**
 - **seccomp(이 서버, Landlock ABI 8):** Landlock 도우미가 명령을 실행하기 직전(no_new_privs 뒤)에 seccomp 필터를 건다.
   - `socket(AF_UNIX, …)` → `EACCES`. 경로 소켓에 연결하려면 이 호출이 먼저 있어야 하므로, 어느 경로의 소켓이든 연결할 수 없다.
-  - `socketpair(AF_UNIX, …)`는 허용한다. 이름 없는 한 쌍이라 호스트에 닿지 않고, Python asyncio·Node의 자식 IPC가 쓴다.
+  - `socketpair(AF_UNIX, SOCK_STREAM[|SOCK_NONBLOCK|SOCK_CLOEXEC], …)`만 허용하고, 다른 형식의 `socketpair(AF_UNIX)`는 `EACCES`다(검수 N7). 필터는 두 번째 인자에서 `SOCK_NONBLOCK|SOCK_CLOEXEC`를 뺀 값이 `SOCK_STREAM`인지 본다. Python asyncio(`socket.socketpair()` 기본)와 Node의 자식 IPC는 `SOCK_STREAM` 쌍이라 그대로 된다.
+  - 이유(이 서버에서 재현, 2026-10-25): 쌍의 한쪽을 다른 경로로 보낼 수 있는지 형식마다 시험했다.
+
+    | 쌍의 형식 | `connect(경로)` | `sendto(…, 경로)` |
+    | --- | --- | --- |
+    | `SOCK_DGRAM` | **호스트의 DGRAM 소켓에 연결됨** | **호스트가 받음** |
+    | `SOCK_STREAM` | `EISCONN`·`EPROTOTYPE` | `EISCONN` |
+    | `SOCK_SEQPACKET` | `EISCONN`·`EPROTOTYPE` | 주소를 무시하고 쌍의 상대에게 감(호스트에 닿지 않음) |
+
+    `SOCK_DGRAM` 쌍이 우회로다. `SOCK_SEQPACKET`은 지금 커널에서는 닿지 않지만, 필요한 도구가 없어 허용 목록을 `SOCK_STREAM` 하나로 둔다.
   - `io_uring_setup`·`io_uring_enter`·`io_uring_register` → `ENOSYS`. io_uring의 소켓 연산은 `socket` 호출을 거치지 않기 때문이다.
   - 아키텍처가 이 서버의 것(aarch64, 필터가 아는 것)이 아니면 프로세스를 끝낸다(다른 아키텍처의 호출 번호로 우회 방지).
   - 필터는 BPF를 stdlib `ctypes`로 만들어 `prctl(PR_SET_SECCOMP)`로 건다(Landlock과 같은 방식, 새 의존성 없음).
@@ -443,7 +452,8 @@ runner가 시작할 때 머신 프로파일로 실제 명령을 띄워 다음을
 | `/run/user/<uid>/bus`, `/run/dbus/system_bus_socket`, runner 소켓 연결 | 안 보임 |
 | 숨기지 않은 읽기 가능 폴더에 둔 시험용 호스트 소켓(`coder` 쓰기 가능)에 연결 | `socket(AF_UNIX)`에서 `EACCES`(N4) |
 | io_uring으로 소켓 만들기 | `ENOSYS` |
-| `socketpair(AF_UNIX)`, Python asyncio 이벤트 루프 | 됨 |
+| `socketpair(AF_UNIX, SOCK_STREAM)`(플래그 포함), Python asyncio 이벤트 루프 | 됨 |
+| `socketpair(AF_UNIX, SOCK_DGRAM)` | `EACCES`(N7) |
 | 다리 프로세스에 `ptrace` 붙기 | 거부 |
 | 호스트 `127.0.0.1`의 시험 리스너(TCP) | 닿지 않음 |
 | 프록시로 허용 밖 도메인, 허용 도메인이 사설 주소로 풀리는 경우 | 403 |
@@ -514,7 +524,7 @@ HIMARI는 `hello`의 상태로 따르고, 따로 탈출 시험을 하지 않는�
 | Q6 | 네트워크 허용 목록? | **§11.3의 기본 목록 + 사설·loopback 주소 거부.** 운영자가 설정에서 더한다 |
 | Q7 | push 인증? | **고른 저장소만 쓰는 전용 fine-grained 토큰을 runner 설정에.** `coder`의 gh 토큰은 계정 전체 권한이라 쓰지 않는다 |
 | Q8 | Sandbox 안 loopback TCP? | **허용.** namespace 안이라 밖에 닿지 않고, 테스트에 필요하다 |
-| Q9 | 호스트 경로 Unix 소켓을 어떻게 막나? | **seccomp로 `socket(AF_UNIX)`와 io_uring을 거부**(§6.6). 커널이 Landlock 경로 소켓 제한을 지원하면 그쪽으로 바꾼다. 대안인 "알려진 소켓 위치만 가리기"는 새로 생기는 소켓을 놓친다. 비용: 스스로 Unix 소켓을 만드는 프로그램(Python 3.14+ `forkserver`, tmux 등)이 이 서버에서는 실패한다 |
+| Q9 | 호스트 경로 Unix 소켓을 어떻게 막나? | **seccomp로 `socket(AF_UNIX)`, `SOCK_STREAM`이 아닌 `socketpair(AF_UNIX)`, io_uring을 거부**(§6.6). 커널이 Landlock 경로 소켓 제한을 지원하면 그쪽으로 바꾼다. 대안인 "알려진 소켓 위치만 가리기"는 새로 생기는 소켓을 놓친다. 비용: 스스로 Unix 소켓을 만드는 프로그램(Python 3.14+ `forkserver`, tmux 등)이 이 서버에서는 실패한다 |
 
 ## 18. 검증 계획
 
@@ -522,7 +532,7 @@ HIMARI는 `hello`의 상태로 따르고, 따로 탈출 시험을 하지 않는�
 - **프록시:** 허용 이름이 사설 주소로 풀림, 응답 중 하나만 사설, 검사 뒤 DNS 답이 바뀜(재바인딩: 연결은 검사한 주소로), 443 외 포트, keep-alive 중 `Host` 바꾸기.
 - **runner 계약:** `SO_PEERCRED` 거부, 디스크립터 전달, 연결 끊김 → 명령 트리 종료, runner 재시작 → 결과 불명.
 - **호스트 시험(`HIMARI_SANDBOX_HOST=1`):** §13의 표 전부 + Drive 형태의 FUSE 마운트(가능하면 실제 rclone) 읽기·쓰기, Workspace 안 심볼릭 링크가 숨김 위치를 가리킬 때 명령·파일 Tool 모두 막힘.
-- **Unix 소켓(§6.6):** 자체 검사 항목 + 호환성 시험(pip, `python -m pytest`, asyncio, Python 3.12 `multiprocessing` 기본, Maven·Gradle wrapper 빌드, gcc·make, git, npm). 실패하는 것(forkserver 강제, tmux)은 결과 문구 확인.
+- **Unix 소켓(§6.6):** 자체 검사 항목 + 회귀 시험(N7: `SOCK_DGRAM`·`SOCK_SEQPACKET` 쌍 만들기 거부, 만들어졌다고 가정한 `SOCK_DGRAM` 쌍의 `connect`·`sendto`가 시험용 호스트 DGRAM 소켓에 닿지 않음, `SOCK_STREAM|SOCK_NONBLOCK|SOCK_CLOEXEC` 쌍 허용) + 호환성 시험(pip, `python -m pytest`, asyncio, Python 3.12 `multiprocessing` 기본, Maven·Gradle wrapper 빌드, gcc·make, git, npm). 실패하는 것(forkserver 강제, tmux)은 결과 문구 확인.
 - **runner 소켓(§4.1):** `himari-v3`로 연결 성공, 다른 사용자 거부, `SO_PEERCRED` 거부(권한을 일부러 넓힌 경우).
 - **마운트 순서:** 숨김을 품은 Workspace(홈 전체), 숨김 안의 예외(`.local/bin`), 중첩 Workspace 둘, 숨김 파일(폴더가 아닌 것)에서 최종 트리 확인. bwrap 인자 순서를 고정하는 단위 시험.
 - **git push:** bundle `fetch`가 `file` 허용으로 성공하고 push 단계에서는 `file` 원격이 거부됨, 악성 `.git/config`(`core.fsmonitor`, `core.hooksPath`, `include.path`, `credential.helper`, `core.sshCommand`)와 `pre-push` hook을 둔 저장소에서 push해도 Sandbox 밖에서 아무것도 실행되지 않음(표시 파일로 확인). 붙이지 않은 저장소 거부, 허용 밖·`user@`·`http://`·`ssh` 원격 거부, ref가 둘 이상인 bundle 거부, 2 GiB 넘는 bundle 거부, 강제 push가 필요한 상황에서 거부 결과, push 중 같은 Workspace의 명령이 기다림.
