@@ -79,6 +79,7 @@ def test_hello_and_conversation_folder(kit: RunnerKit) -> None:
     hello, _ = call(kit, api.HELLO, {})
     assert hello["state"] == "enforced" and hello["himari_home"] == str(kit.himari_home)
     assert hello["version"] == api.PROTOCOL_VERSION
+    assert hello["network"] is None  # no proxy without a started (self-tested) sandbox
     folder, _ = call(kit, api.CONVERSATION_FOLDER, {"conversation": "c1"})
     assert folder["path"] == f"{kit.himari_home}/conversations/c1"
     assert (kit.himari_home / "conversations/c1").is_dir()

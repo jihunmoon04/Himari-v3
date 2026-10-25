@@ -21,15 +21,18 @@ import base64
 import logging
 import os
 import posixpath
+import shutil
 import socket
 import struct
+import tempfile
 from collections.abc import Callable, Sequence
 from typing import Any, TypeVar
 
 from himari.runner import api
 from himari.runner.cgroups import Commands
-from himari.runner.config import RunnerConfig
+from himari.runner.config import PROXY_SOCKET, RunnerConfig
 from himari.runner.hostfs import Host
+from himari.runner.proxy import Proxy
 from himari.sandbox.api import (
     MAX_ARGV,
     MAX_TIMEOUT_SECONDS,
@@ -68,24 +71,49 @@ class Runner:
         self.host = host
         self.commands = commands
         self.report_failures: list[str] = []
+        self.proxy: Proxy | None = None  # commands' way out (§11); None: no network
 
     async def start(self) -> SandboxState:
-        """The self-test (V3-050, §13), once."""
-        os.makedirs(os.path.join(self.config.himari_home, "conversations"), mode=0o755, exist_ok=True)
-        os.makedirs(self.config.cache_dir, mode=0o700, exist_ok=True)
+        """The self-test (V3-050, §13), once; then the proxy, if configured."""
+        config = self.config
+        os.makedirs(os.path.join(config.himari_home, "conversations"), mode=0o755, exist_ok=True)
+        os.makedirs(config.cache_dir, mode=0o700, exist_ok=True)
 
         async def self_test(sandbox: MachineSandbox) -> bool:
-            report = await probe(sandbox, self.config.himari_home, home=self.config.home,
-                                 real_masks=self.host.rules.masks(), runner_socket=self.config.socket,
-                                 cache=self.config.cache_dir,
-                                 cgroup_procs=None if self.commands is None else self.commands.procs)
+            # The bridge and the rules are checked through a proxy of the self-test's own: "localhost" is
+            # allowed by name there, and must still be refused for its address (§13).
+            folder = tempfile.mkdtemp(prefix="himari-runner-")
+            checked = Proxy(("localhost",))
+            try:
+                await checked.start(os.path.join(folder, PROXY_SOCKET))
+                report = await probe(sandbox, config.himari_home, home=config.home,
+                                     real_masks=self.host.rules.masks(), runner_socket=config.socket,
+                                     cache=config.cache_dir, proxy=os.path.join(folder, PROXY_SOCKET),
+                                     cgroup_procs=None if self.commands is None else self.commands.procs)
+            finally:
+                await checked.close()
+                shutil.rmtree(folder, ignore_errors=True)
             self.report_failures = report.failures + ([report.error] if report.error else [])
             return report.passed
 
         state = await self.sandbox.start(self_test)
         if state is not SandboxState.ENFORCED:
             log.error("the machine sandbox is %s: %s", state.value, self.report_failures)
+        elif config.network is not None:
+            try:
+                os.makedirs(config.state_dir, mode=0o700, exist_ok=True)
+                proxy = Proxy(config.network)
+                await proxy.start(config.proxy_socket)
+            except OSError:
+                log.exception("the network proxy did not start; commands have no network")
+            else:
+                self.proxy = proxy
         return state
+
+    async def close(self) -> None:
+        if self.proxy is not None:
+            await self.proxy.close()
+            self.proxy = None
 
     async def serve(self, listener: socket.socket, stop: asyncio.Event) -> None:
         listener.setblocking(False)
@@ -108,6 +136,7 @@ class Runner:
             for task in tasks:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
+            await self.close()
 
     async def handle(self, conn: socket.socket) -> None:
         conn.setblocking(False)
@@ -162,7 +191,8 @@ class Runner:
                     "himari_home": config.himari_home, "hidden": len(masks), "cgroup": config.cgroup,
                     "memory_max": config.memory_max if self.commands else None,
                     "pids_max": config.pids_max if self.commands else None,
-                    "toolkit": config.documents_toolkit is not None}, []
+                    "toolkit": config.documents_toolkit is not None,
+                    "network": None if self.proxy is None else list(self.proxy.allow)}, []
         if self.sandbox.state is not SandboxState.ENFORCED:
             # §13 (PR #87 review B1): without a passed self-test nothing but hello is done — files included.
             raise api.RunnerError(api.UNAVAILABLE)
@@ -253,7 +283,8 @@ class Runner:
             with host.open_roots(roots) as opened:
                 layout = MachineLayout(home=config.home, cwd=cwd, writable=tuple(opened), masks=masks,
                                        cache=(config.cache_dir, cache_fd), toolkit_fd=toolkit_fd,
-                                       cgroup_procs=None if self.commands is None else self.commands.procs)
+                                       cgroup_procs=None if self.commands is None else self.commands.procs,
+                                       proxy=None if self.proxy is None else config.proxy_socket)
                 before = 0 if self.commands is None else self.commands.oom_kills()
                 command = asyncio.ensure_future(self.sandbox.run(argv, layout, timeout))
                 closed = asyncio.ensure_future(api.wait_closed(conn))

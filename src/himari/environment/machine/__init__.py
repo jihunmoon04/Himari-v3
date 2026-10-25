@@ -49,6 +49,8 @@ OBSERVE_SECONDS = 2.0
 OWN_LABEL = "this conversation"
 READ_SCOPE = ("everything the user can read on this server, except hidden locations (credentials, HIMARI's own "
               "data); the user's home is {home}")
+NETWORK = "HTTPS only, through a proxy, to these hosts (others are refused with 403): {hosts}"
+NO_NETWORK = "none: commands cannot reach the network"
 # §14: what the model is told of a cloud-synced folder, apart from the user's note.
 CLOUD_FILESYSTEMS = frozenset({"fuse.rclone"})
 DRIVE_NOTE = ("Cloud-synced folder: files have no execute bit, changes from other devices can take up to 15 minutes "
@@ -86,7 +88,6 @@ class MachineEnvironment:
         # The attached Workspaces (§10); None: each Conversation has its own folder only.
         self.registry = registry
         self.locks = PathLocks()
-        self._home: str | None = None
         self._tools: tuple[ToolHandler, ...] = tuple(machine_tools(self))
 
     @property
@@ -129,15 +130,6 @@ class MachineEnvironment:
             raise MachineUnavailable(str(error)) from None
         return result
 
-    async def home(self) -> str:
-        """The user's home, as the runner says (asked once)."""
-        if self._home is None:
-            try:
-                self._home = str((await self.hello())["home"])
-            except (runner.RunnerUnavailable, runner.RunnerError) as error:
-                raise MachineUnavailable(str(error)) from None
-        return self._home
-
     async def places(self, scope: TrustedScope) -> Places:
         """The Conversation's folders: its own (its T0 Binding's
         ``cwd_relative`` under the HIMARI home) and the Workspaces attached
@@ -173,16 +165,23 @@ class MachineEnvironment:
         Conversation's folders (§10.5)."""
         now = datetime.now(UTC)
 
-        async def look() -> tuple[Places, str]:
-            return await self.places(scope), await self.home()
+        async def look() -> tuple[Places, dict[str, Any]]:
+            places = await self.places(scope)
+            try:
+                return places, await self.hello()  # asked each time: the runner's network may have changed
+            except (runner.RunnerUnavailable, runner.RunnerError) as error:
+                raise MachineUnavailable(str(error)) from None
 
         try:
-            places, home = await _within(look(), OBSERVE_SECONDS)
+            places, about = await _within(look(), OBSERVE_SECONDS)
         except (MachineUnavailable, TimeoutError):
             return [BindingObservation(b.binding_id, ConnectionStatus.OFFLINE, now) for b in bindings]
-        readable = READ_SCOPE.format(home=home)
+        readable = READ_SCOPE.format(home=about["home"])
+        hosts = about.get("network")
+        network = NETWORK.format(hosts=", ".join(map(str, hosts))) if isinstance(hosts, list) and hosts else NO_NETWORK
         return [BindingObservation(b.binding_id, ConnectionStatus.ONLINE, now, working_directory=places.cwd,
-                                   writable=places.roots, workspaces=places.shown, readable=readable)
+                                   writable=places.roots, workspaces=places.shown, readable=readable,
+                                   network=network)
                 for b in bindings]
 
     # --- uploads (V3-P66 §5.2), the same steps as Inside -------------------------------------

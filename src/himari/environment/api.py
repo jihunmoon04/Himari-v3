@@ -56,6 +56,7 @@ class BindingObservation(DeepFrozen):
     # with what the Conversation may read.
     workspaces: tuple[ObservedWorkspace, ...] = ()
     readable: str | None = None
+    network: str | None = None  # what a command can reach (V3-P74 §11)
 
 
 @runtime_checkable
