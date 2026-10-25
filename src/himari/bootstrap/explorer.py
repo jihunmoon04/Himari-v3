@@ -15,6 +15,7 @@ rendered on this origin).
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import os
 import posixpath
 from collections import OrderedDict
@@ -39,6 +40,9 @@ EDIT_MAX_BYTES = 1024 * 1024  # V3-P75 Q3: what the editor takes whole
 PREVIEW_BYTES = 256 * 1024  # the start of a larger text file, shown read-only
 MAX_PATH_CHARS = 4096
 _CACHE_BYTES = 24 * 1024 * 1024  # image copies kept for the explorer
+READ_SECONDS = 15.0  # reading an opened file; the runner bounds its own reads alike (PR #92 review B1)
+CALL_SECONDS = 20.0  # a runner answer, its own 15 s included
+MAX_READS = 4  # file reads under way here, given-up ones included
 
 
 class ExplorerRefused(Exception):
@@ -76,14 +80,49 @@ class Explorer:
         self._machine = machine
         self._views = views
         self._copies: OrderedDict[tuple[str, tuple[int, ...]], PreparedView] = OrderedDict()
+        self._pool = concurrent.futures.ThreadPoolExecutor(MAX_READS, thread_name_prefix="himari-explorer")
+        self._reads = 0
 
     async def _call(self, op: str, args: dict[str, Any]) -> tuple[dict[str, Any], list[int]]:
         try:
-            return await self._machine.call(op, args)
+            async with asyncio.timeout(CALL_SECONDS):
+                return await self._machine.call(op, args)
         except runner.RunnerError as error:
             raise ExplorerRefused(error.category, str(error)) from None
         except runner.RunnerUnavailable:
             raise ExplorerRefused("unavailable", "The machine runner does not answer; try again later.") from None
+        except TimeoutError:
+            raise ExplorerRefused(runner.TIMED_OUT, runner.MESSAGES[runner.TIMED_OUT]) from None
+
+    async def _read(self, fd: int, size: int) -> bytes:
+        """Up to ``size`` bytes from the start of ``fd``, which this takes over:
+        it is closed when the read has ended, never before (PR #92 review N1),
+        even if the caller gave up (a slow mount, a cancelled request)."""
+        if self._reads >= MAX_READS:
+            os.close(fd)
+            raise ExplorerRefused(runner.TIMED_OUT, "Earlier slow reads are still under way (an unresponsive "
+                                                    "mount?); try again later.")
+        self._reads += 1
+
+        def read() -> bytes:
+            try:
+                return _pread(fd, size)
+            finally:
+                os.close(fd)
+
+        work = asyncio.get_running_loop().run_in_executor(self._pool, read)
+
+        def ended(future: asyncio.Future[bytes]) -> None:
+            self._reads -= 1
+            if not future.cancelled():
+                future.exception()  # retrieved: a given-up read's failure is not reported
+
+        work.add_done_callback(ended)
+        try:
+            async with asyncio.timeout(READ_SECONDS):
+                return await asyncio.shield(work)
+        except TimeoutError:
+            raise ExplorerRefused(runner.TIMED_OUT, runner.MESSAGES[runner.TIMED_OUT]) from None
 
     @staticmethod
     def _path(path: object) -> str:
@@ -116,10 +155,7 @@ class Explorer:
         result, fds = await self._call(runner.OPEN, {"path": self._path(path), "cwd": "/"})
         fd, real, size = fds[0], str(result["path"]), int(result["size"])
         identity = tuple(int(v) for v in result["identity"])
-        try:
-            head = await asyncio.to_thread(os.pread, fd, min(size, EDIT_MAX_BYTES) + 1, 0)
-        finally:
-            os.close(fd)
+        head = await self._read(fd, min(size, EDIT_MAX_BYTES) + 1)
         modified = identity[3] // 1_000_000_000 if len(identity) == 4 else None
         if sniff_image(head[:IMAGE_HEAD_BYTES]) is not None:
             return ShownFile(real, size, identity, modified, "image")
@@ -137,16 +173,14 @@ class Explorer:
         result, fds = await self._call(runner.OPEN, {"path": self._path(path), "cwd": "/"})
         fd, real, size = fds[0], str(result["path"]), int(result["size"])
         key = (real, tuple(int(v) for v in result["identity"]))
-        try:
-            kept = self._copies.get(key)
-            if kept is not None:
-                self._copies.move_to_end(key)
-                return kept
-            if size > MAX_IMAGE_SOURCE_BYTES:
-                raise ExplorerRefused("too_large", "This image is too large to show; download it instead.")
-            data = await asyncio.to_thread(os.pread, fd, size + 1, 0)
-        finally:
+        kept = self._copies.get(key)
+        if kept is not None or size > MAX_IMAGE_SOURCE_BYTES:
             os.close(fd)
+            if kept is None:
+                raise ExplorerRefused("too_large", "This image is too large to show; download it instead.")
+            self._copies.move_to_end(key)
+            return kept
+        data = await self._read(fd, size + 1)
         sniffed = sniff_image(data[:IMAGE_HEAD_BYTES])
         if sniffed is None or len(data) != size:
             raise ExplorerRefused("not_regular", "This file is not an image that can be shown.")
@@ -159,6 +193,10 @@ class Explorer:
         while sum(len(v.data) for v in self._copies.values()) > _CACHE_BYTES:
             self._copies.popitem(last=False)
         return made
+
+
+def _pread(fd: int, size: int) -> bytes:
+    return os.pread(fd, size, 0)
 
 
 def _text(data: bytes, whole: bool) -> str | None:

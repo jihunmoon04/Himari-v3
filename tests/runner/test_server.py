@@ -9,6 +9,7 @@ import socket
 import threading
 import time
 from collections.abc import Iterator
+from typing import Any
 from pathlib import Path
 
 import pytest
@@ -304,3 +305,50 @@ def test_upload_steps(kit: RunnerKit) -> None:
     call(kit, api.DISCARD_COPY, {**base, "temp": temp})
     assert call(kit, api.REMOVE_CONVERSATION_FOLDER, {"conversation": "c1"})[0]["removed"] is True
     assert not Path(folder).exists()
+
+
+def test_slow_reads_are_given_up_and_bounded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """PR #92 review B1: a listing, stat or open that hangs (a stuck mount) answers TIMED_OUT in time; at most
+    MAX_READS threads wait on it, a further read is refused at once; an open given up closes its fd."""
+    from himari.runner import server as runner_server
+
+    monkeypatch.setattr(runner_server, "READ_SECONDS", 0.3)
+    monkeypatch.setattr(runner_server, "MAX_READS", 2)
+    gate = threading.Event()
+    listing, open_read = Host.listing, Host.open_read
+
+    def stuck_listing(self: Host, *args: Any) -> Any:
+        gate.wait(10)
+        return listing(self, *args)
+
+    def stuck_open(self: Host, *args: Any) -> Any:
+        gate.wait(10)
+        return open_read(self, *args)
+
+    monkeypatch.setattr(Host, "listing", stuck_listing)
+    monkeypatch.setattr(Host, "open_read", stuck_open)
+    kit = start_runner(tmp_path)
+    try:
+        fds_before = len(os.listdir("/proc/self/fd"))
+        reads: list[tuple[str, dict[str, object]]] = [(api.LIST, {"path": "~", "cwd": "/"}),
+                                                      (api.OPEN, {"path": "~/projects/a/main.c", "cwd": "/"})]
+        for op, args in reads:
+            started = time.monotonic()
+            with pytest.raises(api.RunnerError) as given_up:
+                call(kit, op, args)
+            assert given_up.value.category == api.TIMED_OUT and time.monotonic() - started < 3
+        with pytest.raises(api.RunnerError, match="earlier slow reads") as busy:
+            call(kit, api.STAT, {"path": "~", "cwd": "/"})  # both read threads still wait on the mount
+        assert busy.value.category == api.TIMED_OUT
+        gate.set()
+        deadline = time.monotonic() + 5
+        while kit.runner._reads and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert kit.runner._reads == 0
+        assert len(os.listdir("/proc/self/fd")) <= fds_before  # the given-up open's fd was closed
+        result, _ = call(kit, api.LIST, {"path": "~", "cwd": "/"})
+        entries = result["entries"]
+        assert isinstance(entries, list) and any(e["name"] == "projects" for e in entries)
+    finally:
+        gate.set()
+        kit.close()

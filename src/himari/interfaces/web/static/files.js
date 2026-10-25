@@ -141,19 +141,22 @@ export class FilesPane {
     return li;
   }
 
-  /* A link is opened as what it points to (the server resolves and checks it). */
+  /* A link is opened as what it points to (the server resolves and checks it).
+   * Its answer, or its failure, is dropped once anything else was opened
+   * meanwhile (PR #92 review B2). */
   async follow(path, kind) {
     if (kind === "directory") return this.openFolder(path);
-    if (kind === "symlink") {
-      try {
-        const target = await this.api("GET", `/api/machine/stat?${query(path)}`);
-        if (target.kind === "directory") return this.openFolder(target.path);
-        return this.openFile(target.path);
-      } catch (error) {
-        return this.failed(path, error);
-      }
+    if (kind !== "symlink") return this.openFile(path);
+    const ticket = ++this.ticket;
+    this.busy(path);
+    try {
+      const target = await this.api("GET", `/api/machine/stat?${query(path)}`);
+      if (ticket !== this.ticket) return null;
+      return target.kind === "directory" ? this.openFolder(target.path) : this.openFile(target.path);
+    } catch (error) {
+      if (ticket === this.ticket) this.failed(path, error);
+      return null;
     }
-    return this.openFile(path);
   }
 
   menu(path, name) {

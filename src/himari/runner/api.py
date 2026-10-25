@@ -70,6 +70,7 @@ CHANGED = "changed"
 INVALID = "invalid"
 LINKS = "links"
 UNAVAILABLE = "unavailable"  # the sandbox is not enforced
+TIMED_OUT = "timed_out"  # a read did not answer in time (a slow mount, V3-P75 §5.1)
 SETUP_FAILED = "setup_failed"  # the sandbox could not be built; nothing ran
 OTHER = "other"
 
@@ -87,6 +88,7 @@ MESSAGES = {
     INVALID: "invalid path",
     LINKS: "too many levels of symbolic links",
     UNAVAILABLE: "the machine sandbox is not enforced on this server; nothing was done",
+    TIMED_OUT: "this did not answer in time (a slow or unresponsive mount?); try again or use a folder inside it",
     SETUP_FAILED: "the sandbox could not be set up; nothing was run",
     OTHER: "file operation failed",
 }

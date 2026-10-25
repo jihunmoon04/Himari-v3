@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import io
+import os
+import threading
+import time
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -13,6 +16,7 @@ pytest.importorskip("fastapi")
 from runnerkit import RunnerKit, start_runner  # noqa: E402
 from webkit import SEND, Server  # noqa: E402
 
+from himari.bootstrap import explorer  # noqa: E402
 from himari.data.api import PreparedView, sniff_image  # noqa: E402
 from himari.interfaces.web import app as web  # noqa: E402
 
@@ -147,3 +151,40 @@ def test_not_offered_to_this_principal(tmp_path: Path, monkeypatch: pytest.Monke
         for path in ("/api/machine/list", "/api/machine/file?path=/etc/hostname", "/api/machine/download?path=/etc/hostname"):
             refused(s.client.get(path), 404, "not_found")
         assert s.client.get("/api/machine/list", headers=SEND).status_code == 404
+
+
+def test_a_slow_read_is_given_up_and_its_fd_closed_after(server: Server, monkeypatch: pytest.MonkeyPatch) -> None:
+    """PR #92 review B1, N1: reading an opened file that hangs answers 504 in time; the fd stays open until
+    the read itself has ended (never closed under it), and further reads are refused while it waits."""
+    monkeypatch.setattr(explorer, "READ_SECONDS", 0.3)
+    gate, seen = threading.Event(), []
+
+    def stuck(fd: int, size: int) -> bytes:
+        seen.append(fd)
+        gate.wait(10)
+        return os.pread(fd, size, 0)
+
+    monkeypatch.setattr(explorer, "_pread", stuck)
+    try:
+        for _ in range(explorer.MAX_READS):
+            refused(server.client.get("/api/machine/file", params={"path": "~/projects/a/main.c"}), 504, "timed_out")
+        assert all(os.fstat(fd) for fd in seen)  # still open: the reads are still under way
+        busy = server.client.get("/api/machine/file", params={"path": "~/projects/a/main.c"})
+        refused(busy, 504, "timed_out")
+        assert "Earlier slow reads" in busy.json()["error"]["message"]
+    finally:
+        gate.set()
+    deadline = time.monotonic() + 5
+    while any(_open(fd) for fd in seen) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert not any(_open(fd) for fd in seen)  # each closed once its read ended
+    monkeypatch.setattr(explorer, "_pread", lambda fd, size: os.pread(fd, size, 0))
+    assert server.client.get("/api/machine/file", params={"path": "~/projects/a/main.c"}).json()["text"]
+
+
+def _open(fd: int) -> bool:
+    try:
+        os.fstat(fd)
+    except OSError:
+        return False
+    return True

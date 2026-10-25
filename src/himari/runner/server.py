@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import concurrent.futures
 import logging
 import os
 import posixpath
@@ -53,6 +54,8 @@ log = logging.getLogger("himari.runner")
 MAX_LIST = 1000
 MAX_CONTENT_BYTES = 256 * 1024  # a write Tool's content (V3-051)
 BUNDLE_SECONDS = 300  # git push's steps in the sandbox (§12)
+READ_SECONDS = 15.0  # a listing, stat or open answers within this, or is given up (V3-P75 §5.1, PR #92 review B1)
+MAX_READS = 4  # reads under way, given-up ones included: a stuck mount holds at most these threads
 _PEERCRED = struct.Struct("3i")
 T = TypeVar("T")
 
@@ -82,6 +85,9 @@ class Runner:
         self.pusher = None if config.push is None else Pusher(config.push, config.push_token, config.state_dir)
         # One push at a time: at most one bundle (2 GiB) on disk (PR #90 review B2).
         self._pushing = asyncio.Semaphore(1)
+        # Reads that can hang on a slow mount (PR #92 review B1): threads of their own, a bounded number.
+        self._read_pool = concurrent.futures.ThreadPoolExecutor(MAX_READS, thread_name_prefix="himari-read")
+        self._reads = 0
 
     async def start(self) -> SandboxState:
         """The self-test (V3-050, §13), once; then the proxy, if configured."""
@@ -187,6 +193,37 @@ class Runner:
                     pass
             conn.close()
 
+    async def _read(self, call: Callable[[], T], abandoned: Callable[[T], None] | None = None) -> T:
+        """A read that may hang on a slow mount (PR #92 review B1): answered
+        within READ_SECONDS or given up (TIMED_OUT). A thread cannot be
+        stopped, so a given-up read keeps its thread until the mount answers;
+        at most MAX_READS are under way, and a further one is refused at once.
+        ``abandoned`` cleans up what a given-up read returns (an open fd)."""
+        if self._reads >= MAX_READS:
+            raise api.RunnerError(api.TIMED_OUT, "the server is still waiting on earlier slow reads (an unresponsive "
+                                                 "mount?); try again later")
+        self._reads += 1
+        work = asyncio.get_running_loop().run_in_executor(self._read_pool, call)
+        given_up = False
+
+        def ended(future: asyncio.Future[T]) -> None:
+            self._reads -= 1
+            if future.cancelled() or future.exception() is not None:
+                return
+            if given_up and abandoned is not None:
+                abandoned(future.result())
+
+        work.add_done_callback(ended)
+        try:
+            async with asyncio.timeout(READ_SECONDS):
+                return await asyncio.shield(work)
+        except TimeoutError:
+            given_up = True
+            raise api.RunnerError(api.TIMED_OUT) from None
+        except asyncio.CancelledError:
+            given_up = True
+            raise
+
     async def _blocking(self, call: Callable[[], T]) -> T:
         work = asyncio.ensure_future(asyncio.to_thread(call))
         await _ended(work)
@@ -217,13 +254,14 @@ class Runner:
         if op == api.LIST:
             limit = args.get("limit", MAX_LIST)
             limit = limit if isinstance(limit, int) and 1 <= limit <= MAX_LIST else MAX_LIST
-            real, entries, following = await self._blocking(
+            real, entries, following = await self._read(
                 lambda: host.listing(args.get("path", "."), _text(args, "cwd"), limit, args.get("after")))
             return {"path": real, "entries": entries, "truncated": following is not None, "next": following}, []
         if op == api.STAT:
-            return await self._blocking(lambda: host.stat_path(args.get("path"), _text(args, "cwd"))), []
+            return await self._read(lambda: host.stat_path(args.get("path"), _text(args, "cwd"))), []
         if op == api.OPEN:
-            fd, real, info = await self._blocking(lambda: host.open_read(args.get("path"), _text(args, "cwd")))
+            fd, real, info = await self._read(lambda: host.open_read(args.get("path"), _text(args, "cwd")),
+                                              abandoned=lambda opened: os.close(opened[0]))
             return {"path": real, "size": info.st_size, "identity": host.identity(info)}, [fd]
         if op == api.HOLDS:
             size, digest = args.get("size"), args.get("sha256")

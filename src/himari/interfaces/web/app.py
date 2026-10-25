@@ -585,7 +585,7 @@ def shown_file_view(shown: ShownFile) -> dict[str, Any]:
 
 # How a refused explorer request answers (V3-P75 §5): the runner's category → HTTP status.
 EXPLORER_STATUS = {"not_found": 404, "access": 403, "outside_workspaces": 403, "too_large": 413,
-                   "unavailable": 503, "setup_failed": 503, "invalid": 400, "is_directory": 400,
+                   "unavailable": 503, "setup_failed": 503, "timed_out": 504, "invalid": 400, "is_directory": 400,
                    "not_directory": 400, "not_regular": 415, "links": 400, "other": 500}
 
 
