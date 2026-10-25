@@ -405,12 +405,28 @@ def test_delete_checked_keeps_a_copy_and_refuses_a_changed_file(host: Host, home
     assert not target.exists() and copy is not None and read_all(copy) == b"int main(){}\n"
 
 
-def test_no_copy_of_a_file_over_the_limit(host: Host, home: Path) -> None:
+def test_a_file_over_the_copy_limit_is_not_replaced_and_deleted_without_a_copy(host: Host, home: Path) -> None:
+    """PR #94 review B1: no previous version could be kept, so the editor's replace refuses it; a delete
+    (after the editor's own warning) goes without a copy."""
     big = home / "projects/a/big.bin"
     big.write_bytes(b"x" * (hostfs.MAX_SNAPSHOT_BYTES + 1))
     fd, name = parent(host, home, "projects/a/big.bin")
     try:
-        _, copy = host.replace(fd, name, b"small", identity(big))
+        with pytest.raises(api.RunnerError) as refused:
+            host.replace(fd, name, b"small", identity(big))
+        assert refused.value.category == api.TOO_LARGE and big.stat().st_size == hostfs.MAX_SNAPSHOT_BYTES + 1
+        assert host.delete_checked(fd, name, identity(big)) is None and not big.exists()
     finally:
         os.close(fd)
-    assert copy is None and big.read_bytes() == b"small"
+
+
+def test_visible_path_resolves_the_folder_and_hides_as_open_does(host: Host, home: Path) -> None:
+    """PR #94 review B3: what a previous version is looked up by; the file itself may be gone."""
+    assert host.visible_path("~/projects/a/gone.txt", "/") == str(home / "projects/a/gone.txt")
+    (home / "projects/link").symlink_to(home / "projects/a")
+    assert host.visible_path("~/projects/link/main.c", "/") == str(home / "projects/a/main.c")
+    (home / "projects/to-ssh").symlink_to(home / ".ssh")
+    for hidden in ("~/.ssh/id", "~/.bashrc", "~/projects/to-ssh/id", "~/missing/x"):
+        with pytest.raises(api.RunnerError) as refused:
+            host.visible_path(hidden, "/")
+        assert refused.value.category == api.NOT_FOUND

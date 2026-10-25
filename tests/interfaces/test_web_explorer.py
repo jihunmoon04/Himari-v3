@@ -444,3 +444,46 @@ def test_writes_not_offered(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
         refused(s.post("/api/machine/file", {"path": "/tmp/x"}), 404, "not_found")
         refused(s.client.put("/api/machine/file", json={"path": "/tmp/x", "content": "", "expected": [1, 2, 3, 4]},
                              headers=SEND), 404, "not_found")
+
+
+def test_previous_versions_cannot_be_lost(server: Server, kit: RunnerKit, monkeypatch: pytest.MonkeyPatch) -> None:
+    """PR #94 review B1, B2: a file over 1 MiB is not overwritten (none of it could be kept); a delete waits
+    for a store that can keep it, except a file over 1 MiB, which goes without (after the editor warns)."""
+    big = kit.home / "projects/a/big.log"
+    big.write_bytes(b"x" * (1024 * 1024 + 10))
+    identity = server.client.get("/api/machine/stat", params={"path": str(big)}).json()["identity"]
+    refused(put(server, {"path": str(big), "content": "short", "expected": identity}), 422, "too_large")
+    assert big.stat().st_size == 1024 * 1024 + 10
+    assert server.application is not None
+    explorer = server.application.explorer(next(iter(server.application.machine_principals)))
+    assert explorer.versions is not None
+    monkeypatch.setattr(explorer.versions, "ready_for", lambda size: False)
+    small = str(kit.home / "projects/a/main.c")
+    small_identity = server.client.get("/api/machine/stat", params={"path": small}).json()["identity"]
+    refused(server.post("/api/machine/file/delete", {"path": small, "expected": small_identity}), 507,
+            "versions_unavailable")
+    assert (kit.home / "projects/a/main.c").exists()
+    gone = server.post("/api/machine/file/delete", {"path": str(big), "expected": identity})
+    assert gone.status_code == 200 and not gone.json()["previous_kept"] and not big.exists()
+
+
+def test_versions_follow_the_hidden_list_as_it_is_now(server: Server, kit: RunnerKit,
+                                                      monkeypatch: pytest.MonkeyPatch) -> None:
+    """PR #94 review B3: a path hidden after it was saved shows no versions; a deleted file's still do."""
+    notes = kit.home / "projects/notes"
+    notes.mkdir()
+    (notes / "a.txt").write_text("one")
+    path = str(notes / "a.txt")
+    identity = server.client.get("/api/machine/stat", params={"path": path}).json()["identity"]
+    assert put(server, {"path": path, "content": "two", "expected": identity}).status_code == 200
+    items = server.client.get("/api/machine/versions", params={"path": path}).json()["items"]
+    assert len(items) == 1
+    (notes / "a.txt").unlink()  # gone: its versions are still there to read
+    assert server.client.get("/api/machine/versions", params={"path": path}).json()["items"] == items
+    from himari.runner.hidden import HiddenRules
+
+    by_rule = HiddenRules.by_rule
+    monkeypatch.setattr(HiddenRules, "by_rule", lambda self, real: real.startswith(str(notes)) or by_rule(self, real))
+    refused(server.client.get("/api/machine/versions", params={"path": path}), 404, "not_found")
+    refused(server.client.get(f"/api/machine/versions/{items[0]['id']}", params={"path": path}), 404, "not_found")
+

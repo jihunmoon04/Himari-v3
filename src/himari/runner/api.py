@@ -42,6 +42,7 @@ HELLO = "hello"
 CONVERSATION_FOLDER = "conversation_folder"
 LIST = "list"  # a page of a folder, sorted, after a cursor (V3-P75 §5.1)
 STAT = "stat"  # what open checks, nothing handed over (V3-P75 §5.3)
+VISIBLE = "visible"  # a path whose folder resolves and which is not hidden; it need not exist (V3-P75 §7.4)
 OPEN = "open"
 WRITE = "write"
 DELETE = "delete"

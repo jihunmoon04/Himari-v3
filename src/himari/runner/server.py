@@ -260,6 +260,8 @@ class Runner:
             return {"path": real, "entries": entries, "truncated": following is not None, "next": following}, []
         if op == api.STAT:
             return await self._read(lambda: host.stat_path(args.get("path"), _text(args, "cwd"))), []
+        if op == api.VISIBLE:
+            return {"path": await self._read(lambda: host.visible_path(args.get("path"), _text(args, "cwd")))}, []
         if op == api.OPEN:
             fd, real, info = await self._read(lambda: host.open_read(args.get("path"), _text(args, "cwd")),
                                               abandoned=lambda opened: os.close(opened[0]))

@@ -262,6 +262,27 @@ class Host:
         finally:
             os.close(fd)
 
+    def visible_path(self, path: object, cwd: str) -> str:
+        """A path as the web's previous versions know it (PR #94 review B3):
+        its folder resolved and checked, its own name not hidden; the file
+        itself need not exist (a deleted one's versions are read too)."""
+        absolute = self.absolute(path, cwd)
+        self._precheck(absolute)
+        folder, name = posixpath.split(absolute)
+        if name in ("", ".", ".."):
+            raise api.RunnerError(api.INVALID)
+        masks = self.rules.masks()
+        if self.rules.is_hidden(absolute, masks):
+            raise api.RunnerError(api.NOT_FOUND)
+        fd = _open(folder, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            real = posixpath.join(self._judge(fd, masks), name)
+        finally:
+            os.close(fd)
+        if self.rules.is_hidden(real, masks):
+            raise api.RunnerError(api.NOT_FOUND)
+        return real
+
     def stat_path(self, path: object, cwd: str) -> dict[str, object]:
         """What ``open`` checks, without handing anything over (V3-P75 §5.3):
         the real path, its kind and its identity; hidden: NOT_FOUND."""
@@ -576,11 +597,14 @@ class Host:
                 expected: Sequence[int]) -> tuple[list[int], int | None]:
         """V3-P75 §7.4: replace the file whose identity is ``expected`` with
         ``data``, atomically. Its new identity, and a copy of what it held
-        (an fd the caller takes, or None over MAX_SNAPSHOT_BYTES). CHANGED,
-        with nothing written, if it changed at any point before the rename."""
+        (an fd the caller takes). TOO_LARGE over MAX_SNAPSHOT_BYTES, where no
+        copy could be made; CHANGED, with nothing written, if it changed at
+        any point before the rename."""
         held, info = self._hold(parent_fd, name, expected)
         copy: int | None = None
         try:
+            if info.st_size > MAX_SNAPSHOT_BYTES:  # its previous version could not be kept (PR #94 review B1)
+                raise api.RunnerError(api.TOO_LARGE, "files over 1 MiB are not replaced from the editor")
             copy = self._copy_of(held, info.st_size)
             temp = self._write_temp(parent_fd, data, stat.S_IMODE(info.st_mode))
             try:

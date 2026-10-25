@@ -227,6 +227,9 @@ class Explorer:
             raise ExplorerRefused("unavailable", "Files cannot be saved on this server.")
         if len(content) > EDIT_MAX_BYTES:
             raise ExplorerRefused("too_large", "Too large to save from here (at most 1 MiB).")
+        if len(expected) == 4 and int(expected[2]) > EDIT_MAX_BYTES:  # no previous version of it (review B1)
+            raise ExplorerRefused("too_large", "This file is over 1 MiB: it is read-only here, since its previous "
+                                               "version could not be kept.")
         if len(expected) != 4 or not self.versions.ready_for(int(expected[2])):
             raise ExplorerRefused("versions_unavailable", "The previous version could not be kept (the data folder "
                                   "is full or not writable); nothing was saved.")
@@ -254,16 +257,31 @@ class Explorer:
         content was kept as a previous version (not over 1 MiB)."""
         if len(expected) != 4:
             raise ExplorerRefused("invalid", "The file's identity, as it was read, is required.")
+        # Up to 1 MiB its content is kept, so a store that cannot keep it refuses the delete (review B2); a
+        # larger file goes without, after the editor's own warning (§7.4).
+        if int(expected[2]) <= EDIT_MAX_BYTES and (self.versions is None
+                                                   or not self.versions.ready_for(int(expected[2]))):
+            raise ExplorerRefused("versions_unavailable", "The file's content could not be kept (the data folder is "
+                                                          "full or not writable); nothing was deleted.")
         target, result, received = await self._write(runner.DELETE, path,
                                                       {"expected": [int(v) for v in expected]})
         real = str(result.get("path", target))
         return real, await asyncio.to_thread(self._keep, real, received, "delete")
 
-    def previous(self, path: str) -> tuple[Version, ...]:
-        return () if self.versions is None else self.versions.of(path)
+    async def _visible(self, path: object) -> str:
+        """The path as the versions know it, if the runner shows it now: its
+        folder resolved, its name not hidden (review B3: a path hidden since
+        it was saved shows no versions)."""
+        result, _ = await self._call(runner.VISIBLE, {"path": self._path(path), "cwd": "/"})
+        return str(result["path"])
 
-    def previous_text(self, path: str, version_id: str) -> str:
-        data = None if self.versions is None else self.versions.read(path, version_id)
+    async def previous(self, path: object) -> tuple[Version, ...]:
+        real = await self._visible(path)
+        return () if self.versions is None else self.versions.of(real)
+
+    async def previous_text(self, path: object, version_id: str) -> str:
+        real = await self._visible(path)
+        data = None if self.versions is None else self.versions.read(real, version_id)
         if data is None:
             raise ExplorerRefused("not_found", "No such previous version.")
         text = _text(data, True)

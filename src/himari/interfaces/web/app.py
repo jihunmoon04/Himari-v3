@@ -1059,14 +1059,14 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
     @app.get("/api/machine/versions")
     async def list_versions(request: Request, path: str, who: PrincipalId = Depends(principal)) -> dict[str, Any]:
         """A file's previous versions (§7.4), newest first. ``path``: its real path, as saved."""
-        versions = himari(request).explorer(who).previous(path)
+        versions = await himari(request).explorer(who).previous(path)
         return {"items": [{"id": v.version_id, "saved_at": _time(v.saved_at), "size": v.size, "reason": v.reason}
                           for v in versions]}
 
     @app.get("/api/machine/versions/{version_id}")
     async def read_version(version_id: str, request: Request, path: str,
                            who: PrincipalId = Depends(principal)) -> dict[str, Any]:
-        return {"text": himari(request).explorer(who).previous_text(path, version_id)}
+        return {"text": await himari(request).explorer(who).previous_text(path, version_id)}
 
     @app.get("/api/machine/stat")
     async def stat_path(request: Request, path: str, who: PrincipalId = Depends(principal)) -> dict[str, Any]:
