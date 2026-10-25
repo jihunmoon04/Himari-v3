@@ -13,7 +13,9 @@ each Conversation's changes in order under one lock.
   else changed it between two of the agent's changes.
 - An **intent** per Tool call: pending until the runner answers; dropped
   on a refusal; done, or unknown when the answer was lost (or HIMARI
-  stopped meanwhile: ``recover``).
+  stopped meanwhile: ``recover``). The calls between their intent and its
+  outcome are counted (``busy``): a turn's last answer may still be on its
+  way after the turn ended (it was stopped).
 
 ``ChangeReview`` is the owner's side: the list, a diff, accepting
 (forgetting an entry) and reverting (§6's table, by the first and the last
@@ -93,6 +95,15 @@ class ChangeDiff:
     interleaved: bool
 
 
+@dataclass(frozen=True)
+class RevertedAll:
+    """What a revert of all left: each shown file not reverted, and why
+    (one that cannot be reverted too); the hidden ones only counted (§10)."""
+
+    left: tuple[tuple[str, ExplorerRefused | ChangeConflict], ...]
+    hidden: int
+
+
 class ChangeConflict(Exception):
     """§6: the file is not as the agent left it (or was changed between the
     agent's changes): not reverted. ``now``: what it is (ABSENT: no file)."""
@@ -134,6 +145,18 @@ class ChangeStore:
         self.root = root
         self.versions = versions  # the agent's: a store and budget of their own (Q5)
         self._locks: dict[str, asyncio.Lock] = {}
+        self._open: dict[str, int] = {}  # calls begun and not yet answered, per Conversation
+
+    def busy(self, conversation: str) -> bool:
+        """A Tool call's change in this Conversation is not answered yet."""
+        return bool(self._open.get(conversation))
+
+    def _close(self, token: _Token) -> None:
+        left = self._open.get(token.conversation, 0) - 1
+        if left > 0:
+            self._open[token.conversation] = left
+        else:
+            self._open.pop(token.conversation, None)
 
     def lock(self, conversation: str) -> asyncio.Lock:
         return self._locks.setdefault(conversation, asyncio.Lock())
@@ -184,8 +207,14 @@ class ChangeStore:
         def add(doc: dict[str, Any]) -> None:
             doc["intents"][intent] = {"call": str(call), "path": path, "state": "pending"}
 
-        await self.transact(scope.conversation_id, add)
-        return _Token(scope.conversation_id, intent)
+        token = _Token(scope.conversation_id, intent)
+        self._open[token.conversation] = self._open.get(token.conversation, 0) + 1
+        try:
+            await self.transact(scope.conversation_id, add)
+        except BaseException:
+            self._close(token)
+            raise
+        return token
 
     async def kept(self, token: object, path: str, copy: int | None, prior: Identity, after: Identity | None,
                    complete: bool) -> None:
@@ -224,6 +253,7 @@ class ChangeStore:
         except Exception:  # noqa: BLE001 — the intent stays pending: recover() makes it unknown
             log.exception("the change of %s could not be recorded", path)
         finally:
+            self._close(token)
             for fd in held:
                 os.close(fd)
 
@@ -237,6 +267,8 @@ class ChangeStore:
             await self.transact(token.conversation, drop)
         except Exception:  # noqa: BLE001 — a pending intent left: recover() makes it unknown
             log.exception("a refused change's intent could not be dropped")
+        finally:
+            self._close(token)
 
     async def unknown(self, token: object) -> None:
         assert isinstance(token, _Token)
@@ -244,6 +276,8 @@ class ChangeStore:
             await self.transact(token.conversation, lambda doc: _unknown(doc, token.intent))
         except Exception:  # noqa: BLE001 — a pending intent left: recover() makes it unknown
             log.exception("an unknown change could not be recorded")
+        finally:
+            self._close(token)
 
     async def commands_ran(self, scope: TrustedScope) -> None:
         def mark(doc: dict[str, Any]) -> None:
@@ -380,12 +414,20 @@ class ChangeReview:
         changed = after is None or tuple(after) != now.identity
         return ChangeDiff(path, _kind(entry), before, now, changed, bool(entry["interleaved"]))
 
+    def _idle(self, conversation: str) -> None:
+        """Under the lock: no Tool call's change is still on its way (its
+        turn stopped, its answer not in yet)."""
+        if self.store.busy(conversation):
+            raise ExplorerRefused("busy", "HIMARI is still finishing a change here: try again shortly.")
+
     async def accept(self, conversation: str, paths: Sequence[str] | None) -> None:
         """Forget the entries (``None``: all, the hidden ones too): nothing is written."""
         if paths is not None:
             for path in paths:
                 await self._entry(conversation, path)
         async with self.store.lock(conversation):
+            self._idle(conversation)
+
             def accept(doc: dict[str, Any]) -> None:
                 _forget(doc, list(doc["entries"]) if paths is None else paths)
 
@@ -396,20 +438,21 @@ class ChangeReview:
         the state the owner saw and chose to revert anyway (after a
         ChangeConflict); without it, only a file as the agent left it."""
         async with self.store.lock(conversation):
+            self._idle(conversation)
             await self._revert(conversation, path, seen)
 
-    async def revert_all(self, conversation: str) -> list[tuple[str, ExplorerRefused | ChangeConflict]]:
-        """Each revertible entry in turn; the ones not reverted, and why."""
+    async def revert_all(self, conversation: str) -> RevertedAll:
+        """Each shown entry in turn; what was left, and why."""
         left: list[tuple[str, ExplorerRefused | ChangeConflict]] = []
         async with self.store.lock(conversation):
-            for item in (await self.view(conversation)).items:
-                if not item.revertible:
-                    continue
+            self._idle(conversation)
+            view = await self.view(conversation)
+            for item in view.items:
                 try:
                     await self._revert(conversation, item.path, None)
                 except (ExplorerRefused, ChangeConflict) as why:
                     left.append((item.path, why))
-        return left
+        return RevertedAll(tuple(left), view.hidden)
 
     async def _revert(self, conversation: str, path: str, seen: Identity | None) -> None:
         entry = await self._entry(conversation, path)

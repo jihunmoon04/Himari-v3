@@ -45,7 +45,7 @@ import posixpath
 import re
 import os
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping, Sequence
-from contextlib import asynccontextmanager
+from contextlib import ExitStack, asynccontextmanager
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -109,7 +109,7 @@ from himari.data.sqlite import SqliteData, SqliteStore
 from himari.documents import TMP_BYTES, DocumentReader, Toolkit, ToolkitRefused, open_toolkit, worker_roots
 from himari.environment.inside import INSIDE, InsideEnvironment, InsideFiles
 from himari.imaging import ImageViews, runtime_roots
-from himari.bootstrap.changes import ChangeConflict, ChangeDiff, ChangeReview, ChangesView, ChangeStore
+from himari.bootstrap.changes import ChangeDiff, ChangeReview, ChangesView, ChangeStore, RevertedAll
 from himari.bootstrap.explorer import Explorer, ExplorerRefused
 from himari.bootstrap.versions import VersionStore
 # For the interfaces (V3-P66 §9): how placing an upload can be refused.
@@ -892,17 +892,31 @@ class Application:
 
     # --- the review of the agent's file changes (V3-P76 §5, §6) -----------------------------
 
-    async def _review(self, scope: TrustedScope, *, writing: bool = False) -> ChangeReview:
+    async def _review(self, scope: TrustedScope) -> ChangeReview:
         """For a Conversation of the caller's (404 otherwise), when folders
-        are offered to them. ``writing``: accepting or reverting, refused
-        while a turn runs (§6)."""
+        are offered to them."""
         await self.data.read_conversation(scope)
         explorer = self.explorer(scope.principal_id)
         if self.changes is None:
             raise ExplorerRefused("not_found", "Not available.")
-        if writing and self.runner.status(scope).running:
-            raise ExplorerRefused("busy", "HIMARI is working in this conversation: wait until it has finished.")
         return ChangeReview(self.changes, explorer)
+
+    @asynccontextmanager
+    async def _reviewing(self, scope: TrustedScope) -> AsyncIterator[ChangeReview]:
+        """Accepting or reverting (§6): under the Conversation's lifecycle
+        lock (no trash meanwhile), refused while a turn runs or an input is
+        being accepted, and no turn starts until it is done."""
+        async with self._exclusive(scope.conversation_id):
+            review = await self._review(scope)
+            with ExitStack() as held:
+                try:
+                    held.enter_context(self.runner.hold(scope))
+                except ControlError as error:
+                    if error.code is not ControlErrorCode.BUSY:
+                        raise
+                    raise ExplorerRefused("busy", "HIMARI is working in this conversation: wait until it has "
+                                                  "finished.") from None
+                yield review
 
     async def file_changes(self, scope: TrustedScope) -> ChangesView:
         return await (await self._review(scope)).view(scope.conversation_id)
@@ -912,16 +926,18 @@ class Application:
 
     async def accept_file_changes(self, scope: TrustedScope, paths: Sequence[str] | None) -> None:
         """``paths``: None accepts all (the hidden ones too, §10)."""
-        await (await self._review(scope, writing=True)).accept(scope.conversation_id, paths)
+        async with self._reviewing(scope) as review:
+            await review.accept(scope.conversation_id, paths)
 
     async def revert_file_change(self, scope: TrustedScope, path: str, seen: tuple[int, ...] | None) -> None:
         """ChangeConflict: changed by something else since; ``seen`` (what
         the owner saw: ``()`` no file) reverts anyway if it is still so."""
-        await (await self._review(scope, writing=True)).revert(scope.conversation_id, path, seen)
+        async with self._reviewing(scope) as review:
+            await review.revert(scope.conversation_id, path, seen)
 
-    async def revert_all_file_changes(self, scope: TrustedScope
-                                      ) -> list[tuple[str, ExplorerRefused | ChangeConflict]]:
-        return await (await self._review(scope, writing=True)).revert_all(scope.conversation_id)
+    async def revert_all_file_changes(self, scope: TrustedScope) -> RevertedAll:
+        async with self._reviewing(scope) as review:
+            return await review.revert_all(scope.conversation_id)
 
     # --- conversations in a folder (V3-P75 §6) ----------------------------------------
 

@@ -5,11 +5,12 @@ from __future__ import annotations
 import asyncio
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
-from himari.bootstrap.changes import ChangeStore
+from himari.bootstrap.changes import ChangeReview, ChangeStore
+from himari.bootstrap.explorer import Explorer, ExplorerRefused
 from himari.bootstrap.versions import VersionStore
 from himari.common import CallId, ConversationId, PrincipalId, TrustedScope
 
@@ -103,6 +104,40 @@ def test_a_change_cut_short_is_unknown_after_a_restart(store: ChangeStore) -> No
         "before": "unknown", "version": None, "after": None, "state": "uncertain", "interleaved": False,
         "first": None, "last": None}
     store.forget("conv_1")
+    assert store.load("conv_1")["entries"] == {}
+
+
+def test_nothing_is_accepted_or_reverted_while_a_change_is_on_its_way(store: ChangeStore,
+                                                                     monkeypatch: pytest.MonkeyPatch) -> None:
+    """A stopped turn's last change may still be answered after the turn ended: the review waits for it."""
+    review = ChangeReview(store, cast(Explorer, None))  # refused before the explorer is asked
+
+    async def refused() -> None:
+        for attempt in (review.accept("conv_1", None), review.revert("conv_1", "/p/a", None),
+                        review.revert_all("conv_1")):
+            with pytest.raises(ExplorerRefused) as busy:
+                await attempt
+            assert busy.value.category == "busy"
+
+    async def run() -> None:
+        first = await store.begin(SCOPE, CallId("c1"), "/p/a")
+        second = await store.begin(SCOPE, CallId("c2"), "/p/b")
+        assert store.busy("conv_1") and not store.busy("conv_2")
+        await refused()
+        await store.kept(first, "/p/a", None, (), A, True)
+        await refused()  # one still on its way
+        await store.unknown(second)
+        assert not store.busy("conv_1")
+        third = await store.begin(SCOPE, CallId("c3"), "/p/c")
+        await store.dropped(third)
+        monkeypatch.setattr(ChangeStore, "save", lambda self, conversation, doc: (_ for _ in ()).throw(OSError()))
+        with pytest.raises(OSError):
+            await store.begin(SCOPE, CallId("c4"), "/p/d")  # not recorded: not on its way either
+        monkeypatch.undo()
+        assert not store.busy("conv_1")
+        await review.accept("conv_1", None)
+
+    asyncio.run(run())
     assert store.load("conv_1")["entries"] == {}
 
 
