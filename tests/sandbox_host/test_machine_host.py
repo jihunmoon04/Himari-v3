@@ -170,6 +170,23 @@ def test_the_proxy_lets_allowed_hosts_through_only(kit: RunnerKit) -> None:
     assert code == 0 and "Error" in out  # around the proxy: no route
 
 
+SPOOF = ("import socket, ssl\n"
+         "s = socket.create_connection((\"127.0.0.1\", 3128), timeout=20)\n"
+         "s.sendall(b\"CONNECT pypi.org:443 HTTP/1.1\\r\\n\\r\\n\")\n"
+         "print(s.recv(4096).split()[1].decode())\n"
+         "try:\n"
+         "    ssl.create_default_context().wrap_socket(s, server_hostname=\"example.com\")\n"
+         "    print(\"handshake\")\n"
+         "except ssl.SSLError as e:\n"
+         "    print(e.reason)\n")
+
+
+def test_the_tunnel_goes_to_the_name_asked_for_only(kit: RunnerKit) -> None:
+    """A TLS server name other than the CONNECT name (another site behind the same addresses) is cut."""
+    code, out, err = run(kit, f"python3 -I -c '{SPOOF}'")
+    assert code == 0 and out.split() == ["200", "TLSV1_UNRECOGNIZED_NAME"], (out, err)
+
+
 def test_git_over_https_through_the_proxy(kit: RunnerKit) -> None:
     code, out, err = run(kit, "git ls-remote --heads https://github.com/octocat/Hello-World.git", timeout=60)
     assert code == 0 and "refs/heads/master" in out, err

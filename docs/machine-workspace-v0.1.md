@@ -1,6 +1,6 @@
 # 머신 Workspace v0.1
 
-> 2026-10-25 · **PROPOSED (V3-P74)** · 1단계 구현(§20; 외부 검수 B1·B2 §20.4, 재검수 C1 §20.5, 배포 2026-10-25). 2단계 구현(§21; 외부 검수 B1~B3 반영, 병합). 3단계 구현(§22). rev. 6 — 외부 재검수 4(HEAD fa79123) 통과. 소유자 결정 Q1~Q9 권고대로(2026-10-25, §17). rev. 5 — 외부 재검수 3(HEAD 903e7f1) 반영: N7 `socketpair`는 `SOCK_STREAM`만 허용(`SOCK_DGRAM` 쌍은 호스트 소켓으로 다시 연결된다, §6.6), N8 소켓 폴더는 `DirectoryMode=0755`(§4.1). 소유자 결정 Q1~Q9 대기(§17). rev. 4 — 외부 재검수 2(HEAD ea6e534) 반영: N4 호스트의 경로 Unix 소켓을 seccomp로 막음(§6.6, Q9), N5 runner 소켓은 systemd 소켓 단위가 그룹 `himari-v3`로 만듦(§4.1), N6 Q5 문구를 §6.5에 맞춤(§17). 소유자 결정 Q1~Q9 대기(§17). rev. 3 — 외부 재검수(HEAD a7eca31) 반영: N1 bundle fetch에만 `file` 전송 허용(§12), N2 숨김은 마지막에 가리고 실행 직전에 확인하는 불변 조건(§6.1), N3 runner 생존은 명령 OOM 격리까지만 보장(§6.5). rev. 2 — 외부 검수(HEAD 61200df) 반영: B1 기본 쓰기 범위를 대화 폴더로, 겹치는 Workspace는 한 충돌 영역(§3.2, §9.1), B2 파일 Tool은 디스크 파일시스템만·보이는 점 항목 줄임(§7, §8.2), B3 git push의 bundle 전달·대상·lock(§12), P2 등록 범위(§5.3)·링크 풀기(§8.3)·OOM(§6.5)·프록시 DNS(§11.3). 소유자 결정 Q1~Q8 대기(§17). rev. 1: 설계 초안.
+> 2026-10-25 · **PROPOSED (V3-P74)** · 1단계 구현(§20; 외부 검수 B1·B2 §20.4, 재검수 C1 §20.5, 배포 2026-10-25). 2단계 구현(§21; 외부 검수 B1~B3 반영, 병합). 3단계 구현(§22; 외부 검수 B1·B2 §22.5). rev. 6 — 외부 재검수 4(HEAD fa79123) 통과. 소유자 결정 Q1~Q9 권고대로(2026-10-25, §17). rev. 5 — 외부 재검수 3(HEAD 903e7f1) 반영: N7 `socketpair`는 `SOCK_STREAM`만 허용(`SOCK_DGRAM` 쌍은 호스트 소켓으로 다시 연결된다, §6.6), N8 소켓 폴더는 `DirectoryMode=0755`(§4.1). 소유자 결정 Q1~Q9 대기(§17). rev. 4 — 외부 재검수 2(HEAD ea6e534) 반영: N4 호스트의 경로 Unix 소켓을 seccomp로 막음(§6.6, Q9), N5 runner 소켓은 systemd 소켓 단위가 그룹 `himari-v3`로 만듦(§4.1), N6 Q5 문구를 §6.5에 맞춤(§17). 소유자 결정 Q1~Q9 대기(§17). rev. 3 — 외부 재검수(HEAD a7eca31) 반영: N1 bundle fetch에만 `file` 전송 허용(§12), N2 숨김은 마지막에 가리고 실행 직전에 확인하는 불변 조건(§6.1), N3 runner 생존은 명령 OOM 격리까지만 보장(§6.5). rev. 2 — 외부 검수(HEAD 61200df) 반영: B1 기본 쓰기 범위를 대화 폴더로, 겹치는 Workspace는 한 충돌 영역(§3.2, §9.1), B2 파일 Tool은 디스크 파일시스템만·보이는 점 항목 줄임(§7, §8.2), B3 git push의 bundle 전달·대상·lock(§12), P2 등록 범위(§5.3)·링크 풀기(§8.3)·OOM(§6.5)·프록시 DNS(§11.3). 소유자 결정 Q1~Q8 대기(§17). rev. 1: 설계 초안.
 >
 > 소유자 방향(2026-10-24, 대화에서 정함):
 > - 개발용 Workspace를 따로 만들지 않는다. 기본 Workspace에서 git·C·Python·Java 같은 일반 개발이 되게 한다.
@@ -673,7 +673,7 @@ pids_max = 1024
 
 ### 22.1 만든 것
 
-- **프록시**(§11.3, `himari/runner/proxy.py`): runner 프로세스 안의 asyncio 서버이고, runner 자신의 Unix 소켓(`state_dir/proxy.sock`, 기본 `~/.local/state/himari-runner/`, `0600`)에서 듣는다. 이 폴더는 홈의 점 항목 규칙(§7)으로 숨겨진다.
+- **프록시**(§11.3, `himari/runner/proxy.py`): runner 프로세스 안의 asyncio 서버이고, runner 자신의 Unix 소켓에서 듣는다. 소켓은 명령마다 하나다(`state_dir/proxy-<16 hex>.sock`, 기본 `~/.local/state/himari-runner/`, `0600`, 명령이 끝나면 지움; §22.5). 이 폴더는 홈의 점 항목 규칙(§7)으로 숨겨진다.
   - 받는 것은 `CONNECT 이름:443`뿐이다.
   - 이름 정규화: 소문자, 끝 `.` 제거, IDNA A-label, DNS 이름 형식이어야 한다.
   - IP 리터럴은 어떤 표기로든 거부한다: `127.1`, `2130706433`, `0x7f.0.0.1`, `[::1]`, 마지막 라벨이 숫자인 이름.
@@ -682,14 +682,15 @@ pids_max = 1024
   - 연결은 검사한 주소로만, 차례로(주소마다 5초) 시도한다.
   - 거부는 `403`과 이유 한 줄이다. 이름을 풀 수 없거나 닿을 수 없으면 `502`다.
   - 로그에는 이름·결과·바이트만 남는다.
-  - 동시 터널은 64개까지다. runner가 멈추면 열린 터널도 끝낸다.
+  - 터널은 TLS만, 요청한 이름으로만 나른다(§22.5).
+  - 연결 수는 명령마다 32개, 전체 256개까지다(§22.5). 명령이 끝나거나 runner가 멈추면 열린 터널도 끝낸다.
 - **다리**(§11.2, Landlock 도우미): Landlock을 건 **뒤**, seccomp를 걸기 **전**에 Sandbox 안 `127.0.0.1:3128`을 먼저 잡는다. 그다음 두 번 fork해서, 듣는 일은 손자 프로세스에 맡긴다.
   - 손자는 namespace의 init(bwrap)으로 넘어가므로 명령의 자식이 아니다. 그래서 Yama `ptrace_scope=1`이 막는다.
   - `PR_SET_DUMPABLE=0`이라, 능력이 없는 명령은 `ptrace`도 `/proc/<pid>/mem` 읽기도 못 한다.
   - 두 방어를 각각 하나씩 빼 보며 확인했다. 둘 다 빼면 자체 검사가 실패한다. 하나만 있어도 막는다.
   - 다리는 stdin·stdout·stderr를 `/dev/null`로 돌리고 다른 디스크립터를 닫는다. 그래서 명령 출력 파이프를 붙잡지 않는다.
   - 명령이 끝나면 다리는 pid namespace와 함께 사라진다.
-  - 다리가 여는 경로는 정책에 고정된 `/run/himari/proxy.sock` 하나다. runner의 소켓은 이 경로에 읽기 전용으로 묶인다(가림보다 먼저, Sandbox의 `/run` tmpfs 안).
+  - 다리가 여는 경로는 정책에 고정된 `/run/himari/proxy.sock` 하나다. 그 명령의 runner 소켓은 이 경로에 읽기 전용으로 묶인다(가림보다 먼저, Sandbox의 `/run` tmpfs 안).
 - **환경 변수**(§11.3): `HTTP(S)_PROXY`·`ALL_PROXY`(대소문자 둘 다) = `http://127.0.0.1:3128`, `NO_PROXY`·`no_proxy` = `localhost,127.0.0.1,::1`, `JAVA_TOOL_OPTIONS`(Java·Maven·Gradle). 캐시 변수(§6.3)는 1단계에 이미 있다.
 - **runner 설정** `[network]`: `enabled`(기본 `true`), `allow`(기본은 §11.3 목록). `state_dir` 최상위 설정. 목록이 비거나 꺼지면 명령에 프록시 변수도 다리도 없다(네트워크 없음).
 - **모델에게 알리기**: `hello`의 `network`(허용 목록, 없으면 `null`)를 Environment가 관찰할 때마다 묻는다. Current State의 `network`에 "HTTPS only, through a proxy, to these hosts …" 또는 "none"을 싣는다. `run_command` 설명에도 HTTPS만 되고 SSH 원격은 안 된다고 적었다.
@@ -720,7 +721,51 @@ pids_max = 1024
 
 - DB 변경 없음. systemd 단위도 바뀌지 않는다.
 - **runner를 새 release로 다시 시작하면 명령에 네트워크(기본 허용 목록)가 생긴다.** 목록을 바꾸려면 `/etc/himari-runner/runner.toml`에 `[network]`의 `allow = [...]`를 적는다. 끄려면 `enabled = false`.
-- runner가 `~/.local/state/himari-runner/`를 만든다(`0700`).
+- runner가 `~/.local/state/himari-runner/`를 만든다(`0700`). 명령마다 소켓이 생겼다 지워진다.
 - Web도 같은 release로 다시 시작한다(Current State의 `network`, `run_command` 설명).
 - 2단계를 아직 배포하지 않았다면 함께 배포된다(DB v12 → v13, 자동 백업).
+
+### 22.5 외부 검수 반영 (HEAD 8a04125)
+
+**B1 (P1) — 터널이 요청한 이름의 TLS 서버로 가는지 확인하지 않았다.** `CONNECT pypi.org:443` 뒤에 다른 이름(SNI)의 ClientHello를 보내면, 같은 주소 뒤의 다른 사이트(CDN 공유 IP)에 닿을 수 있었다.
+
+- `200` 뒤 클라이언트의 첫 메시지를 TLS ClientHello로 읽는다. 여러 레코드에 걸칠 수 있다. 최대 64 KiB이고 10초 안에 와야 한다.
+- 다음 경우만 그 ClientHello를 그대로 보낸다: SNI 호스트 이름이 정확히 하나이고, 정규화했을 때 `CONNECT` 이름과 같다. 나머지는 끊는다.
+  - TLS가 아니면 그냥 닫는다.
+  - SNI가 없거나 여럿이거나 다른 이름이면 TLS 경고 `unrecognized_name`을 보낸다.
+  - 암호화된 ClientHello(ECH, 확장 `0xfe0d`)도 `unrecognized_name`이다. 바깥 SNI가 실제 목적지를 가리기 때문이다.
+  - 형식이 깨졌으면 `decode_error`를 보낸다.
+  - 위 경우 모두 먼 쪽에는 아무것도 가지 않는다.
+- 남는 한계(문서화만 한다):
+  - TLS 안쪽(HTTP `Host`, HTTP/2 `:authority`)은 보지 않는다. SNI와 다른 `Host`로 요청을 보내는 domain fronting은, 그것을 허용하는 서버에서는 여전히 된다.
+  - TLS 1.3 HelloRetryRequest 뒤의 두 번째 ClientHello는 검사하지 않는다. RFC 8446은 이때 SNI를 바꾸지 못하게 한다.
+  - 즉 허용 목록이 정하는 것은 **닿는 TLS 서버**까지다. **보내는 요청과 내용**은 정하지 않는다. 허용된 서비스(GitHub 등)로 내용을 내보내는 일은 원래부터 이 목록으로 막지 않는다.
+  - 내용까지 제한하려면 TLS를 프록시에서 풀어야 한다(MITM). 그건 이번 범위가 아니다.
+- 실제 네트워크에서 확인했다(호스트 게이트): `CONNECT pypi.org` 뒤 SNI `example.com`으로 TLS를 열면 Python이 `TLSV1_UNRECOGNIZED_NAME`을 받는다.
+
+**B2 (P2) — 한 명령이 다른 대화의 네트워크를 막을 수 있었다.** 세마포어(64)의 대기열에 끝이 없었다. DNS 조회에는 시간 한도가 없었다. 헤더를 보내지 않는 연결도 10초 동안 자리를 차지했다.
+
+- **명령마다 프록시 소켓이 따로 있다**(`Proxy.open` → `Door`). runner가 명령을 띄울 때 열고 끝나면 닫는다. 닫을 때 그 명령의 터널을 양쪽 끝 모두 끝내고 소켓을 지운다. 서버가 프록시의 half-close 뒤에도 자기 쪽을 열어 두면, 그 연결이 남아 있지 않게 하려는 것이다. 이 소켓은 Sandbox의 `/run/himari/proxy.sock`에 묶인다(다리와 정책은 그대로다).
+- 연결 수 한도(헤더 읽기·조회·연결·터널, 모든 상태를 센다):
+  - 명령당 32개
+  - 전체 256개
+  - 넘으면 기다리게 하지 않고 바로 `503`이다.
+  - 대기열이 없으므로 한 명령은 자기 연결만 막는다.
+  - 다리의 연결 한도(Sandbox당 64)가 한도를 넘는 연결 수도 묶는다.
+- **DNS 조회**: 10초 한도를 둔다(넘으면 `502`). 조회는 프록시 전용 스레드 8개에서 돈다. 느린 resolver가 runner의 파일 작업 스레드(기본 executor)를 차지하지 않는다.
+- `503` 응답은 요청을 읽기 전에 쓴다. 그래서 닫기 전에 들어온 요청을 1초 안에서 받아 둔다. AF_UNIX는 읽지 않은 입력이 있는 채로 닫으면 상대에게 reset을 보내기 때문이다.
+
+**확인**
+- 단위 시험 16개를 더했다(test_proxy 65개):
+  - SNI 추출: 실제 Python ssl ClientHello, 7바이트 레코드로 쪼갠 ClientHello
+  - 거부 7가지: SNI 없음·빈 목록·둘·확장 둘·ECH·IP·잘림
+  - TLS 아님, ClientHello 아님, 너무 큼
+  - 터널 안에서 다른 SNI·SNI 없음·평문이면 먼 쪽에 0바이트
+  - ClientHello가 오지 않는 터널은 끝남
+  - 한 명령이 한도를 채운 채 놀고 있어도: 그 명령의 다음 연결은 바로 `503`, 다른 명령은 규칙 검사까지 감, 전체 한도는 `busy`
+  - 멈춘 resolver는 `502`
+  - 문 닫기는 소켓을 지우고 터널을 끝냄. 서버가 끝을 열어 둬도 끝나는지 본다. 서버 쪽을 닫지 않으면 이 시험이 실패하는 것을 확인했다.
+- 전체 pytest 2449 passed, 114 skipped. mypy --strict, import 검사 통과.
+- 호스트 게이트 52개 통과(4개 생략).
+- 따로 확인: Sandbox 안 `pip install six` 성공, 끝난 뒤 `state_dir`에 소켓이 남지 않음.
 

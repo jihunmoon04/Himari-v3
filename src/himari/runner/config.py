@@ -19,7 +19,7 @@ DEFAULT_HIDDEN = ("/srv/himari-v3", "/etc/himari-v3", "/etc/himari-runner", "/va
 DEFAULT_VISIBLE = (".gitconfig", ".local/bin", ".local/lib")
 CACHE_NAME = ".cache/himari-runner"
 STATE_NAME = ".local/state/himari-runner"  # hidden by the home's dot rule (§7)
-PROXY_SOCKET = "proxy.sock"
+PROXY_SOCKET = "proxy-{}.sock"  # one per command, tagged with 16 hex digits (§22.2)
 _MAX_SOCKET_PATH = 107  # sun_path, less its NUL
 
 
@@ -42,12 +42,11 @@ class RunnerConfig:
     memory_max: str
     pids_max: int
     runner_memory_low: str
-    state_dir: str  # the runner's own: the proxy's socket (§11)
+    state_dir: str  # the runner's own: the proxy's sockets (§11)
     network: tuple[str, ...] | None  # the proxy's allow list (§11.3); None: commands have no network
 
-    @property
-    def proxy_socket(self) -> str:
-        return os.path.join(self.state_dir, PROXY_SOCKET)
+    def proxy_socket(self, tag: str) -> str:
+        return os.path.join(self.state_dir, PROXY_SOCKET.format(tag))
 
 
 def _strings(value: object, name: str) -> tuple[str, ...]:
@@ -97,7 +96,7 @@ def parse(raw: dict[str, Any]) -> RunnerConfig:
         raise ConfigError("cgroup.pids_max is a number of at least 16")
     toolkit = raw.get("documents_toolkit")
     state_dir = _absolute(raw.get("state_dir", os.path.join(home, STATE_NAME)), "state_dir")
-    if len(os.path.join(state_dir, PROXY_SOCKET).encode()) > _MAX_SOCKET_PATH:
+    if len(os.path.join(state_dir, PROXY_SOCKET.format("0" * 16)).encode()) > _MAX_SOCKET_PATH:
         raise ConfigError("state_dir is too long for a socket path")
     network = raw.get("network", {})
     if not isinstance(network, dict):

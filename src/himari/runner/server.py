@@ -21,6 +21,7 @@ import base64
 import logging
 import os
 import posixpath
+import secrets
 import shutil
 import socket
 import struct
@@ -30,9 +31,9 @@ from typing import Any, TypeVar
 
 from himari.runner import api
 from himari.runner.cgroups import Commands
-from himari.runner.config import PROXY_SOCKET, RunnerConfig
+from himari.runner.config import RunnerConfig
 from himari.runner.hostfs import Host
-from himari.runner.proxy import Proxy
+from himari.runner.proxy import Door, Proxy
 from himari.sandbox.api import (
     MAX_ARGV,
     MAX_TIMEOUT_SECONDS,
@@ -85,10 +86,10 @@ class Runner:
             folder = tempfile.mkdtemp(prefix="himari-runner-")
             checked = Proxy(("localhost",))
             try:
-                await checked.start(os.path.join(folder, PROXY_SOCKET))
+                door = await checked.open(os.path.join(folder, "proxy.sock"))
                 report = await probe(sandbox, config.himari_home, home=config.home,
                                      real_masks=self.host.rules.masks(), runner_socket=config.socket,
-                                     cache=config.cache_dir, proxy=os.path.join(folder, PROXY_SOCKET),
+                                     cache=config.cache_dir, proxy=door.path,
                                      cgroup_procs=None if self.commands is None else self.commands.procs)
             finally:
                 await checked.close()
@@ -102,12 +103,10 @@ class Runner:
         elif config.network is not None:
             try:
                 os.makedirs(config.state_dir, mode=0o700, exist_ok=True)
-                proxy = Proxy(config.network)
-                await proxy.start(config.proxy_socket)
             except OSError:
-                log.exception("the network proxy did not start; commands have no network")
+                log.exception("the network proxy has no state folder; commands have no network")
             else:
-                self.proxy = proxy
+                self.proxy = Proxy(config.network)
         return state
 
     async def close(self) -> None:
@@ -276,7 +275,13 @@ class Runner:
         cwd = await self._blocking(lambda: host.directory(_text(args, "cwd"), "/"))
         masks = await self._blocking(host.rules.masks)
         toolkit_fd = cache_fd = None
+        door: Door | None = None
         try:
+            if self.proxy is not None:  # a socket of the command's own: its connections, its limit (§22.5)
+                try:
+                    door = await self.proxy.open(config.proxy_socket(secrets.token_hex(8)))
+                except OSError:
+                    log.exception("the network proxy could not open; this command has no network")
             cache_fd = os.open(config.cache_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
             if config.documents_toolkit is not None:
                 toolkit_fd = os.open(config.documents_toolkit, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
@@ -284,7 +289,7 @@ class Runner:
                 layout = MachineLayout(home=config.home, cwd=cwd, writable=tuple(opened), masks=masks,
                                        cache=(config.cache_dir, cache_fd), toolkit_fd=toolkit_fd,
                                        cgroup_procs=None if self.commands is None else self.commands.procs,
-                                       proxy=None if self.proxy is None else config.proxy_socket)
+                                       proxy=None if door is None else door.path)
                 before = 0 if self.commands is None else self.commands.oom_kills()
                 command = asyncio.ensure_future(self.sandbox.run(argv, layout, timeout))
                 closed = asyncio.ensure_future(api.wait_closed(conn))
@@ -311,6 +316,8 @@ class Runner:
             for fd in (cache_fd, toolkit_fd):
                 if fd is not None:
                     os.close(fd)
+            if door is not None:
+                await door.close()
         return {"exit_code": result.exit_code, "timed_out": result.timed_out,
                 "stdout": base64.b64encode(result.stdout).decode(), "stderr": base64.b64encode(result.stderr).decode(),
                 "stdout_total": result.stdout_total, "stderr_total": result.stderr_total,
