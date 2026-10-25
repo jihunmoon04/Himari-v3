@@ -663,6 +663,7 @@ def state_block(state: CurrentStateProjection, notes: Sequence[SourceNote] = (),
     The "data" ``notes`` are the tool server notes the operator placed here."""
     basis = state.basis
     observed = {o.binding_id: o.status.value for o in state.observations}
+    views = {o.binding_id: o for o in state.observations if o.working_directory is not None}
     bindings = {b.binding_id: b for b in basis.bindings}
     data: dict[str, object] = {}
     if basis.environments:
@@ -676,11 +677,16 @@ def state_block(state: CurrentStateProjection, notes: Sequence[SourceNote] = (),
                     "workspace_id": binding.workspace_id,
                     "connection": observed.get(binding.binding_id, "unknown"),
                 }
-                if binding.cwd_relative is not None:
+                view = views.get(binding.binding_id)
+                if view is not None:  # the Environment's own paths (V3-P74 §10.5)
+                    entry["default_binding"]["working_directory"] = view.working_directory  # type: ignore[index]
+                    if view.writable:
+                        entry["default_binding"]["writable"] = list(view.writable)  # type: ignore[index]
+                elif binding.cwd_relative is not None:
                     entry["default_binding"]["working_directory"] = f"/workspace/{binding.cwd_relative}"  # type: ignore[index]
             environments.append(entry)
         data["environments"] = environments
-    if basis.conversation_workspace is not None:
+    if basis.conversation_workspace is not None and not views:
         data["working_directory"] = basis.conversation_workspace.cwd_relative
     if basis.artifacts:
         data["artifacts"] = [

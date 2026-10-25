@@ -238,15 +238,11 @@ def _part_block(part: Part, unit_name: str) -> str:
     return f"=== {unit_name} {part.n}{marks} ===\n" + backstop(body)
 
 
-class ReadDocument:
-    """``inside/read_document``; offered only when the reader passed its startup check."""
-
-    def __init__(self, env: InsideEnvironment, reader: DocumentReading) -> None:
-        self._env = env
-        self._reader = reader
-        self.definition = ToolDefinition(
-            tool_id=ToolId("inside/read_document"),
-            description=DESCRIPTION,
+def document_definition(namespace: str, *, binding: bool, description: str = DESCRIPTION) -> ToolDefinition:
+    """``<namespace>/read_document`` (Inside, or the machine Environment, V3-P74 §8.4)."""
+    return ToolDefinition(
+            tool_id=ToolId(f"{namespace}/read_document"),
+            description=description,
             input_schema=_schema({
                 "path": {"type": "string", "description": "Document to read."},
                 "pages": {"type": "string", "description": "Units to read, like \"1-5,8\" or \"12-\" (default: "
@@ -256,11 +252,30 @@ class ReadDocument:
                 "pictures": {"type": "string", "description": "Not for PDFs: picture numbers to return as images, "
                                                               "like \"5-8\" (at most 4 per call); when given, pages "
                                                               "and view are ignored."},
-            }, ["path"]),
+            }, ["path"], binding=binding),
             workspace_requirement=WorkspaceRequirement.DEFAULT,
             effect_profile=EffectProfile.READ,
-            environment_kind=EnvironmentKind("inside"),
+            environment_kind=EnvironmentKind(namespace),
         )
+
+
+class ReadDocument:
+    """``inside/read_document``; offered only when the reader passed its startup check."""
+
+    def __init__(self, env: InsideEnvironment, reader: DocumentReading) -> None:
+        self._env = env
+        self._reader = reader
+        self.definition = document_definition("inside", binding=True)
+
+    def _limit(self) -> int:
+        return min(MAX_DOCUMENT_BYTES, self._env.files.max_bytes if self._env.files is not None
+                   else DEFAULT_FILE_MAX_BYTES)
+
+    async def _fetch(self, ctx: ToolContext, raw_path: object, limit: int) -> ToolOutcome | tuple[str, bytes]:
+        """The document's shown path and bytes, or the refusal."""
+        assert ctx.binding is not None and ctx.workspace is not None
+        return await run_blocking(_load, self._env.host_root(ctx.binding.workspace_id), ctx.workspace.cwd_relative,
+                                  raw_path, limit)
 
     async def run(self, invocation: ToolInvocation, ctx: ToolContext) -> ToolOutcome:
         if ctx.binding is None or ctx.workspace is None:
@@ -277,10 +292,7 @@ class ReadDocument:
         except SelectionError as error:
             return _refused(f"{args.get('path', '?')}: {error}")
         view = args.get("view") is True
-        limit = min(MAX_DOCUMENT_BYTES, self._env.files.max_bytes if self._env.files is not None
-                    else DEFAULT_FILE_MAX_BYTES)
-        host_root = self._env.host_root(ctx.binding.workspace_id)
-        loaded = await run_blocking(_load, host_root, ctx.workspace.cwd_relative, args.get("path"), limit)
+        loaded = await self._fetch(ctx, args.get("path"), self._limit())
         if isinstance(loaded, ToolOutcome):
             return loaded
         shown, data = loaded
