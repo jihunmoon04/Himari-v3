@@ -77,17 +77,17 @@ Data [v0.2 구현 가능 후보](data-contract-v0.2.md)에 **DR-01~DR-09 독립 
 
 | ID | 주제 | 아직 확정해야 할 계약 |
 | --- | --- | --- |
-| Q-07 | Workspace Registry | ID 발급·유일성, 이종 Workspace 메타데이터/비밀 연결정보, 생성/삭제 소유자 |
+| Q-07 | Workspace Registry | ID 발급·유일성, 이종 Workspace 메타데이터/비밀 연결정보, 생성/삭제 소유자. V3-P74 초안: `workspaces` 표(소유자·kind·실제 경로·이름·메모), 사용자만 등록([machine-workspace-v0.1.md](machine-workspace-v0.1.md) §10) |
 | Q-08 | Environment Instance | Conversation 활성화/비활성화, 종류당 여러 Instance 허용 여부, 연결 수명 |
-| Q-09 | Binding | Binding ID·스코프·철회/재연결·공유, Conversation 간 같은 Workspace 참조 |
-| Q-10 | Binding authority | Tool에서 Binding/Workspace 중 어느 ID를 노출할지, 실행 시 권한 검증 |
+| Q-09 | Binding | Binding ID·스코프·철회/재연결·공유, Conversation 간 같은 Workspace 참조. V3-P74 초안: `machine` Binding = 대화의 쓰기 범위, 사용자가 붙이고 뗌(§10) |
+| Q-10 | Binding authority | Tool에서 Binding/Workspace 중 어느 ID를 노출할지, 실행 시 권한 검증. V3-P74 초안: `machine` Tool은 경로만 받고, HIMARI와 runner가 쓰기 범위를 두 번 검사(§5.3, §8.3) |
 | Q-11 | Inside Execution | **기본 파일 I/O와 bounded `run_command`는 P0-F로 선행**. 이후 ManagedProcess 수명/영속 프로세스 복구, 환경 접속 실패 처리 |
 | Q-12 | Safety/Approval | **Sandbox + 네트워크 차단 전용 프로파일 확정**. [v0.2 구현 계약 초안](sandbox-implementation-v0.2.md)의 host gate/원본 Root·cwd 권한/네트워크·Unix socket 테스트 검수 및 실행 제한 값 확정 필요 |
 | Q-13 | Scheduler 상세 | verified read/write footprint, 같은 Workspace 명령 기본 직렬, 다른 Conversation 충돌, 락/종결 배리어/최대 병렬수 |
 | Q-23 | Tool execution durability | Tool 의도 저장·시작/완료·취소, DB 밖에서 발생한 부작용과 중단 후 결과 불명 처리 |
-| Q-24 | Internal vs Environment routing | 실행 유형 등록 계약, `None/Required/Default` Workspace 정책, 외부 서비스 Tool 범주 필요 여부 |
+| Q-24 | Internal vs Environment routing | 실행 유형 등록 계약, `None/Required/Default` Workspace 정책, 외부 서비스 Tool 범주 필요 여부. V3-P74 초안: Environment 실행을 다른 OS 사용자의 runner로 넘기는 첫 사례(§4) |
 | Q-39 | ~~Tool error disclosure~~ | **해결 (PR C1):** claim 없는 Tool의 예외는 모델에게 "The tool failed with an internal error."만 전달하고, 예외 타입·원문은 `raw_result`에만 남긴다. Inside 파일 Tool은 오류를 분류된 안전한 문구로만 돌려준다. |
-| Q-40 | 실제 OS 권한 검증 | **부분 해결 (PR C2):** 시작 시 실호스트 자체 검사(V3-050/P41)와 선택 실행 호스트 게이트(`HIMARI_SANDBOX_HOST=1 pytest tests/sandbox_host`, 29개)를 이 서버에서 통과. 남은 것: 다른 배포 호스트에서의 게이트 실행, 권한이 필요한 마운트 넘기(`NO_XDEV`) 검증, CPU·메모리·프로세스 수 한도(cgroup/rlimit), Sandbox 생성이 멈췄을 때의 운영자 복구 절차(취소된 호출은 fail closed로 Workspace lock을 계속 잡고 있음), Workspace admission이 시점 검사라는 한계(P0는 단일 서버 프로세스이고 Workspace 변경이 Inside Tool과 같은 Workspace lock 아래에서만 일어난다고 전제한다. 다중 worker, 업로드 경로, 호스트 측 쓰기를 추가하면 같은 lock을 쓰게 하거나 검사를 다시 설계해야 함) |
+| Q-40 | 실제 OS 권한 검증 | **부분 해결 (PR C2):** 시작 시 실호스트 자체 검사(V3-050/P41)와 선택 실행 호스트 게이트(`HIMARI_SANDBOX_HOST=1 pytest tests/sandbox_host`, 29개)를 이 서버에서 통과. 남은 것: 다른 배포 호스트에서의 게이트 실행, 권한이 필요한 마운트 넘기(`NO_XDEV`) 검증, CPU·메모리·프로세스 수 한도(cgroup/rlimit), Sandbox 생성이 멈췄을 때의 운영자 복구 절차(취소된 호출은 fail closed로 Workspace lock을 계속 잡고 있음), Workspace admission이 시점 검사라는 한계(P0는 단일 서버 프로세스이고 Workspace 변경이 Inside Tool과 같은 Workspace lock 아래에서만 일어난다고 전제한다. 다중 worker, 업로드 경로, 호스트 측 쓰기를 추가하면 같은 lock을 쓰게 하거나 검사를 다시 설계해야 함). V3-P74 초안: `machine`은 runner 서비스 단위 한도(systemd, §6.5) |
 | Q-41 | 영속 DB 크래시 내구성 | **부분 해결 (V3-P42):** SQLite 백엔드로 T1~T9·T7a·T-R을 포트 호출당 트랜잭션 1개로 구현. Data·통합 테스트를 두 백엔드로 실행(재시작 = DB 다시 열기), 모든 다중 쓰기 연산에 대해 각 쓰기 직후 오류 주입 시 전부 롤백, 실제 `SIGKILL` 시험(송신 중 → `OUTCOME_UNKNOWN`·재송신 없음, 부작용 중 → `UNKNOWN`·재실행 없음, 트랜잭션 도중 → 이전 상태, 커밋 직후 → 커밋 유지). 남은 것: 전원 차단 내구성은 SQLite·파일시스템 fsync 보장에 의존(직접 시험 불가), 스키마 마이그레이션, 백업(업그레이드 전 백업은 V3-P65 초안), 다중 프로세스(P2 lease) |
 | Q-42 | Continuation 일괄 조회 | **부분 해결:** 읽을 수 있는 압축 Snapshot이 있으면 Prompt loader는 Snapshot을 먼저 읽고 coverage 이후의 Event(`read_events(after_sequence=...)`)와 그 Event의 Run·Tool 기록만 읽는다. 접힌 Tool 그룹은 접힐 때 완결됐고 종결된 결과는 바뀌지 않으므로 다시 읽지 않는다. 접힌 Run의 측정값은 다른 Snapshot revision에서 만들어져 어차피 재사용되지 않는다. 요청 내용은 전체를 읽을 때와 같다(통합 테스트로 두 백엔드에서 확인). SQLite `read_run`은 더 이상 요청·응답 원문 BLOB을 읽지 않는다. 공개 포트 변경 없음. 남은 것: 첫 압축 전에는 여전히 턴마다 `read_run`·`read_tool_executions`를 한 번씩 호출한다(SQLite, 300턴·DB 145 MB에서 load 약 100 ms. 호출당 트랜잭션·권한 확인·DTO 변환 비용). 이를 묶으려면 Data 포트에 일괄 조회 메서드가 필요하다(공개 계약 변경). Control의 `_next_triggers`·`_resume_pending_group`도 매번 전체 Event를 읽는다. *(PR #6 검수 C1, PR #14 검수 권고)* |
 | Q-43 | ~~Continuation 크기 예산~~ | **해결 (V3-P48):** 압축으로 접힌 턴은 continuation도 함께 빠진다. continuation은 토큰 추정에 넣지 않는다(Provider가 거의 입력으로 세지 않음을 라이브로 확인, 세는 만큼은 다음 측정값에 포함됨). *(PR #6 검수 C2)* |
