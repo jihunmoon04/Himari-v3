@@ -558,19 +558,14 @@ function enterSends(event) {
 /* An on-screen keyboard is up: the visible part of the page is over 150px shorter than the window (iPadOS
  * Safari keeps the window's height and shrinks only the visual viewport; a hardware keyboard's shortcut bar
  * is shorter). Where the window itself shrinks for it (Android, interactive-widget=resizes-content), a touch
- * device's window over 150px shorter than it has been in this orientation. */
-const tallestWindow = { portrait: 0, landscape: 0 };
-
-/* The device's, from the screen: the window's own sides would turn a portrait tablet "landscape" once the
- * keyboard takes its lower half. */
-function orientation() {
-  const screen = window.screen;
-  return screen && screen.width > screen.height ? "landscape" : "portrait";
-}
+ * device's window over 150px shorter than it has been at this width: a keyboard takes height, never width,
+ * while a rotation or a window resized (Stage Manager) changes the width too. Neither the window's sides
+ * nor iPadOS's screen size tell a rotation (PR #108 review B1). */
+const tallestWindow = new Map(); // window width → the tallest window seen at it
 
 function noteWindowHeight() {
-  const key = orientation();
-  tallestWindow[key] = Math.max(tallestWindow[key], window.innerHeight);
+  const width = window.innerWidth;
+  tallestWindow.set(width, Math.max(tallestWindow.get(width) || 0, window.innerHeight));
 }
 
 function onScreenKeyboard() {
@@ -578,7 +573,7 @@ function onScreenKeyboard() {
   if (view && window.innerHeight - view.height * view.scale > 150) return true;
   if (!window.matchMedia("(hover: none) and (pointer: coarse)").matches) return false;
   if (!view) return true;
-  return tallestWindow[orientation()] - window.innerHeight > 150;
+  return (tallestWindow.get(window.innerWidth) || 0) - window.innerHeight > 150;
 }
 
 /* ----------------------------------------------------------------- copy */
@@ -598,11 +593,15 @@ function answerActions(text) {
  * old copy command on a hidden field. Nothing is read from the clipboard. */
 async function copyText(text, button) {
   let copied = false;
-  try {
-    await navigator.clipboard.writeText(text);
-    copied = true;
-  } catch (ignored) {
-    copied = copyByCommand(text);
+  if (!navigator.clipboard) {
+    copied = copyByCommand(text); // at once, while the press still counts as one (iOS; review N5)
+  } else {
+    try {
+      await navigator.clipboard.writeText(text);
+      copied = true;
+    } catch (ignored) {
+      copied = copyByCommand(text);
+    }
   }
   if (!copied) {
     status("Couldn't copy; select the text instead.", "warn");
@@ -621,6 +620,7 @@ function copyByCommand(text) {
   field.className = "copy-field";
   document.body.append(field);
   field.select();
+  field.setSelectionRange(0, text.length); // iOS selects nothing of a read-only field with select() alone
   let copied = false;
   try {
     copied = document.execCommand("copy");
@@ -1997,6 +1997,12 @@ async function openConversation(id, { created = false, via = "push" } = {}) {
   } catch (error) {
     if (generation !== app.generation) return;
     if (error.status === 404) { // not here (trashed, deleted, or never): Home, and Back does not come back (§3.3)
+      // Its text and references go to Home, as the poll's 404 does (V3-P78 §3.1; PR #108 review N1).
+      if (app.place === id) {
+        const left = composerDraft();
+        drafts.merge("home", { text: left.text, attachments: [], references: left.references });
+      }
+      cancelUploads();
       app.placeTouched = false;
       drafts.remove(id);
       await showHome({ via: "replace" }).catch(() => {});
@@ -3329,7 +3335,7 @@ async function enter() {
     return;
   }
   loadList(true).then(markSelected).catch(() => {}); // as Home would (re-review N3)
-  await showInstructions();
+  await showInstructions({ via: "replace" }); // as the other way in (PR #108 review N4)
 }
 
 async function boot() {

@@ -1560,9 +1560,11 @@ details > summary {
 /* V3-P79 §5: Copy on a code block and under an answer — always shown (touch has no hover), quiet. */
 .rich-text .rich-code-block {
   position: relative;
+  margin: 0 0 0.9em; /* the block's, as a code block's own: none when it ends the answer (review N3) */
 }
 
 .rich-text .rich-code-block .rich-pre {
+  margin: 0;
   padding-right: 64px;
 }
 
