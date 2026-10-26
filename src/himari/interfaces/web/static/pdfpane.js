@@ -16,6 +16,9 @@
  */
 
 export const MAX_PDF_BYTES = 64 * 1024 * 1024; // §3.3, Q2: viewed here up to this; larger ones are downloaded
+// Every page has a box (its canvas only near the view): a few bytes can hold tens of thousands of pages,
+// so their count is bounded too (PR #102 review).
+export const MAX_PDF_PAGES = 2000;
 export const MAX_CANVAS_PIXELS = 16_000_000;
 export const ZOOM_MIN = 0.5; // of the fitted width
 export const ZOOM_MAX = 5;
@@ -60,7 +63,7 @@ export function pageAt(tops, middle) {
 export class PdfError extends Error {
   constructor(code, message) {
     super(message);
-    this.code = code; // "password" | "unreadable"
+    this.code = code; // "password" | "unreadable" | "too_many"
   }
 }
 
@@ -96,6 +99,10 @@ export class PdfView {
       throw new PdfError("unreadable", "This PDF could not be opened here.");
     }
     if (this.destroyed) return;
+    if (this.doc.numPages > MAX_PDF_PAGES) {
+      throw new PdfError("too_many", `This PDF has ${this.doc.numPages.toLocaleString("en")} pages; up to ` +
+                         `${MAX_PDF_PAGES.toLocaleString("en")} are shown here. Download it to open.`);
+    }
     const first = await this.doc.getPage(1);
     const base = first.getViewport({ scale: 1 });
     for (let i = 0; i < this.doc.numPages; i += 1) {
@@ -126,6 +133,7 @@ export class PdfView {
   }
 
   layout() {
+    this.tops = null;
     for (const page of this.pages) {
       const size = page.size || this.guess;
       const scale = this.scaleOf(page);
@@ -222,19 +230,28 @@ export class PdfView {
     }
   }
 
+  /* Each page's top in the view's scrolled content, the coordinates of its scrollTop — never offsetTop,
+   * which counts from whatever positioned box holds the view (PR #102 review). Kept until a layout. */
+  pageTops() {
+    if (!this.tops) {
+      const origin = this.element.getBoundingClientRect().top + this.element.clientTop - this.element.scrollTop;
+      this.tops = this.pages.map((page) => page.box.getBoundingClientRect().top - origin);
+    }
+    return this.tops;
+  }
+
   reportPage(always = false) {
-    if (!this.pages.length) return;
-    const tops = this.pages.map((page) => page.box.offsetTop);
-    const index = pageAt(tops, this.element.scrollTop + this.element.clientHeight / 2);
+    if (!this.pages.length || this.pinch) return; // mid-pinch the boxes are scaled: read again once let go
+    const index = pageAt(this.pageTops(), this.element.scrollTop + this.element.clientHeight / 2);
     if (index === this.current && !always) return;
     this.current = index;
     this.onPage(index + 1, this.pages.length);
   }
 
   goTo(number) {
-    const page = this.pages[Math.min(this.pages.length, Math.max(1, number)) - 1];
-    if (!page) return;
-    this.element.scrollTop = page.box.offsetTop - PAGE_GAP;
+    if (!this.pages.length) return;
+    const index = Math.min(this.pages.length, Math.max(1, number)) - 1;
+    this.element.scrollTop = this.pageTops()[index] - PAGE_GAP;
     this.reportPage(true);
   }
 

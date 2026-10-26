@@ -117,8 +117,10 @@ function query(path) {
   return `path=${encodeURIComponent(path)}`;
 }
 
-/* A file's bytes, from the download endpoint (V3-P77 §3.2: no other read of them). */
-async function readDownload(path) {
+/* A file's bytes, from the download endpoint (V3-P77 §3.2: no other read of them), at most ``limit``: the
+ * file may have grown since its size was told (PR #102 review), so its length is checked before reading
+ * and every chunk as it comes; past the limit the download is stopped. */
+export async function readDownload(path, limit) {
   const response = await fetch(`/api/machine/download?${query(path)}`, { credentials: "same-origin" });
   if (!response.ok) {
     let message = "The file could not be read.";
@@ -127,7 +129,34 @@ async function readDownload(path) {
     } catch (ignored) { /* not JSON */ }
     throw Object.assign(new Error(message), { status: response.status });
   }
-  return new Uint8Array(await response.arrayBuffer());
+  const tooLarge = () => Object.assign(new Error(`This file is now too large to view here (at most ${humanSize(limit)}).`),
+                                       { status: 413, code: "too_large" });
+  const told = Number(response.headers.get("content-length"));
+  if (told > limit) {
+    await response.body?.cancel();
+    throw tooLarge();
+  }
+  if (!response.body) return new Uint8Array(0);
+  const reader = response.body.getReader();
+  const chunks = [];
+  let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.length;
+    if (size > limit) {
+      await reader.cancel();
+      throw tooLarge();
+    }
+    chunks.push(value);
+  }
+  const bytes = new Uint8Array(size);
+  let at = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, at);
+    at += chunk.length;
+  }
+  return bytes;
 }
 
 export class FilesPane {
@@ -142,7 +171,8 @@ export class FilesPane {
    * changes: the review of HIMARI's changes (V3-P76 §5) — {of(), list(of), diff(of, path), accept(of, paths | null),
    * revert(of, path, seen), revertAll(of), seen(list)}: of() the conversation shown now, and each call the API
    * call of the conversation ``of`` it names (seen: told every list read); none: not offered here. */
-  /* loadPdf(): the PDF view's module (pdfpane.js); readFile(path): a file's bytes, as a download. */
+  /* loadPdf(): the PDF view's module (pdfpane.js); readFile(path, limit): a file's bytes, as a download, refused
+   * past ``limit``. */
   constructor({ api, el, onOpenFolder = null, onOpenFile = null, actions = [], folderActions = null,
                 folderRowActions = null, loadEditor = () => import("/assets/codemirror/codemirror.js"),
                 loadPdf = () => import("/assets/pdfpane.js"), readFile = readDownload,
@@ -410,7 +440,7 @@ export class FilesPane {
     this.body.replaceChildren(box);
     let module, pdfjs, bytes;
     try {
-      [module, bytes] = await Promise.all([this.loadPdf(), this.readFile(shown.path)]);
+      [module, bytes] = await Promise.all([this.loadPdf(), this.readFile(shown.path, PDF_MAX_BYTES)]);
       pdfjs = await module.loadPdfjs();
     } catch (error) {
       if (ticket === this.ticket) this.pdfFailed(shown, error.status ? error.message : "The PDF view could not be loaded.");

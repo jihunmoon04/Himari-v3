@@ -31,7 +31,7 @@ globalThis.document = {
   createElementNS: (ns, tag) => new FakeNode(tag),
 };
 
-const { FilesPane } = await import(new URL("../src/himari/interfaces/web/static/files.js", import.meta.url));
+const { FilesPane, readDownload } = await import(new URL("../src/himari/interfaces/web/static/files.js", import.meta.url));
 
 function el(tag, className, text) {
   const node = document.createElement(tag);
@@ -816,7 +816,8 @@ function pdfPane(routes, { fail = null } = {}) {
     return typeof answer === "function" ? answer(path) : answer;
   };
   const pending = [];
-  const readFile = (path) => {
+  const readFile = (path, limit) => {
+    assert.equal(limit, 64 * 1024 * 1024, "the view's limit goes with the read");
     reads.push(path);
     const answer = deferred();
     pending.push(answer);
@@ -873,6 +874,17 @@ const pageLabel = (files) => files.tools.children.find((c) => (c.className || ""
   assert.ok(files.body.text().includes("x"));
 }
 
+// Grown past the limit since its size was told: the read is refused, and the pane says so with its download.
+{
+  const { files, views, pending } = pdfPane({ "GET /api/machine/file": PDF });
+  const opening = files.openFile(PDF.path);
+  for (let i = 0; i < 20 && !pending.length; i++) await settle();
+  pending[0].reject(Object.assign(new Error("This file is now too large to view here (at most 64 MB)."), { status: 413 }));
+  await opening;
+  assert.equal(views.length, 0);
+  assert.ok(files.body.text().includes("now too large to view here") && files.body.text().includes("Download"));
+}
+
 // A PDF that needs a password: told so, with its download; the view let go.
 {
   const message = "This PDF is password-protected; download it to open.";
@@ -910,6 +922,46 @@ const pageLabel = (files) => files.tools.children.find((c) => (c.className || ""
   assert.equal(views[1].went, 3);
   assert.equal(pageLabel(files).textContent, "3 / 3");
   assert.deepEqual(files.pdf.identity, [1, 2, 9, 9]);
+}
+
+// PR #102 review: a PDF read as a download is held to the limit whatever its size was told — its length
+// is checked before any byte is read, and the bytes as they come; past it the download is stopped.
+{
+  const realFetch = globalThis.fetch;
+  const served = ({ chunks, length = null, status = 200, json = null }) => {
+    const log = { read: 0, cancelled: false };
+    let i = 0;
+    const body = {
+      getReader: () => ({
+        read: async () => { if (i >= chunks.length) return { done: true }; log.read += 1; return { done: false, value: chunks[i++] }; },
+        cancel: async () => { log.cancelled = true; },
+      }),
+      cancel: async () => { log.cancelled = true; },
+    };
+    globalThis.fetch = async (url) => {
+      log.url = url;
+      return { ok: status === 200, status, body, json: async () => json,
+               headers: { get: (name) => (name === "content-length" && length !== null ? String(length) : null) } };
+    };
+    return log;
+  };
+  try {
+    let log = served({ chunks: [new Uint8Array(4)], length: 11 });
+    await assert.rejects(readDownload("/home/u/a.pdf", 10), (e) => e.status === 413 && /too large/.test(e.message));
+    assert.equal(log.read, 0);
+    assert.ok(log.cancelled);
+    assert.equal(log.url, "/api/machine/download?path=%2Fhome%2Fu%2Fa.pdf");
+    log = served({ chunks: [new Uint8Array(4), new Uint8Array(4), new Uint8Array(4), new Uint8Array(4)], length: 8 });
+    await assert.rejects(readDownload("/home/u/a.pdf", 10), (e) => e.status === 413);
+    assert.equal(log.read, 3, "stopped at the chunk past the limit");
+    assert.ok(log.cancelled);
+    served({ chunks: [Uint8Array.of(1, 2), Uint8Array.of(3), Uint8Array.of(4, 5, 6, 7, 8, 9, 10)] });
+    assert.deepEqual(Array.from(await readDownload("/home/u/a.pdf", 10)), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    served({ chunks: [], status: 404, json: { error: { code: "not_found", message: "No such file." } } });
+    await assert.rejects(readDownload("/home/u/a.pdf", 10), (e) => e.status === 404 && e.message === "No such file.");
+  } finally {
+    globalThis.fetch = realFetch;
+  }
 }
 
 console.log("files smoke: ok");

@@ -42,6 +42,68 @@ assert.equal(pane.pageAt([0, 100, 200], 150), 1);
 assert.equal(pane.pageAt([0, 100, 200], 0), 0);
 assert.equal(pane.pageAt([0, 100, 200], 999), 2);
 
+// PR #102 review: pages are found in the view's own scrolled coordinates, wherever the view sits on the
+// screen — here 258 px down, with each page's offsetTop counting from the document instead.
+{
+  const VIEW_TOP = 258;
+  let view = null;
+  class Box {
+    constructor(tag, className) {
+      Object.assign(this, { tag, className, children: [], parent: null, dataset: {}, style: {}, attributes: {},
+                            scrollTop: 0, clientTop: 0, clientWidth: 624, clientHeight: 600 });
+    }
+    append(...nodes) { for (const n of nodes) { n.parent = this; this.children.push(n); } }
+    setAttribute(name, value) { this.attributes[name] = value; }
+    addEventListener() {}
+    remove() {}
+    get isPage() { return this.className === "pdf-page"; }
+    // Laid out as app.css does: 12 px around and between pages.
+    get contentTop() {
+      const siblings = this.parent.children;
+      let top = 12;
+      for (const s of siblings.slice(0, siblings.indexOf(this))) top += parseFloat(s.style.height) + 12;
+      return top;
+    }
+    get offsetTop() { return VIEW_TOP + this.contentTop; } // from the document: what goTo must not use
+    getBoundingClientRect() {
+      if (!this.isPage) return { top: VIEW_TOP, left: 0 };
+      return { top: VIEW_TOP + view.element.clientTop + this.contentTop - view.element.scrollTop, left: 0 };
+    }
+  }
+  globalThis.IntersectionObserver = class { observe() {} disconnect() {} };
+  globalThis.ResizeObserver = class { observe() {} disconnect() {} };
+  globalThis.requestAnimationFrame = (fn) => setTimeout(fn, 0);
+  const fakePdfjs = (numPages) => ({
+    getDocument: () => ({ promise: Promise.resolve({
+      numPages, getPage: async () => ({ getViewport: ({ scale }) => ({ width: 600 * scale, height: 800 * scale }) }),
+    }), destroy() {} }),
+  });
+  const shown = [];
+  view = new pane.PdfView({ pdfjs: fakePdfjs(3), el: (tag, className) => new Box(tag, className), bytes: new Uint8Array(),
+                            onPage: (page, pages) => shown.push([page, pages]) });
+  await view.open();
+  assert.deepEqual(view.pageTops(), [12, 824, 1636]);
+  view.goTo(2);
+  assert.equal(view.element.scrollTop, 812, "page 2 at the view's top, less the gap");
+  assert.deepEqual(shown.at(-1), [2, 3]);
+  view.goTo(3);
+  view.element.scrollTop = 900; // scrolled by hand: the middle (1200) is on page 2
+  view.reportPage();
+  assert.deepEqual(shown.at(-1), [2, 3]);
+  view.destroy();
+
+  // A few bytes can hold tens of thousands of pages: past MAX_PDF_PAGES the view is refused, nothing laid out.
+  view = new pane.PdfView({ pdfjs: fakePdfjs(pane.MAX_PDF_PAGES + 1), el: (tag, className) => new Box(tag, className),
+                            bytes: new Uint8Array() });
+  await assert.rejects(view.open(), (e) => e.code === "too_many" && /2,001 pages/.test(e.message));
+  assert.equal(view.pagesBox.children.length, 0);
+  view = new pane.PdfView({ pdfjs: fakePdfjs(pane.MAX_PDF_PAGES), el: (tag, className) => new Box(tag, className),
+                            bytes: new Uint8Array() });
+  await view.open();
+  assert.equal(view.numPages, pane.MAX_PDF_PAGES);
+  view.destroy();
+}
+
 const quiet = { ...pane.PDFJS_OPTIONS, wasmUrl: new URL("pdfjs/wasm/", STATIC).href, cMapUrl: new URL("pdfjs/cmaps/", STATIC).href,
                 verbosity: 0 };
 const open = (bytes) => pdfjs.getDocument({ ...quiet, data: bytes.slice() }).promise;
