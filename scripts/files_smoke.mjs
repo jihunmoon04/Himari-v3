@@ -8,6 +8,7 @@ class FakeNode {
     this.children = [];
     this.attributes = {};
     this.listeners = {};
+    this.dataset = {};
     this.textContent = "";
     this.className = "";
     this.parent = null;
@@ -788,17 +789,27 @@ const DIFF = { path: "/home/u/a.txt", name: "a.txt", kind: "changed", state: "ok
 }
 
 /* V3-P77 §3: a PDF opens in the PDF view, whose module and bytes the test hands out. */
-function pdfPane(routes, { fail = null, confirms = null } = {}) {
+function pdfPane(routes, { fail = null, confirms = null, appended = null, answer = null } = {}) {
   const views = [];
   const reads = [];
   const module = {
     loadPdfjs: async () => ({ fake: true }),
     PdfView: class {
-      constructor({ pdfjs, bytes, onPage }) {
-        Object.assign(this, { pdfjs, bytes, onPage, current: 0, destroyed: false, went: null });
+      constructor({ pdfjs, bytes, onPage, onInk, onNotice }) {
+        Object.assign(this, { pdfjs, bytes, onPage, onInk, onNotice, current: 0, destroyed: false, went: null,
+                              writable: true, readOnly: null, tool: null, saving: false, next: null, savedWith: null,
+                              carried: null, left: 0 });
+        // The ink as the pane sees it: dirty or not, undo and redo, what a conflict carries.
+        this.ink = { dirty: false, done: [], undone: [], carry: () => ({ add: ["unsaved"], erase: new Set(), erasePages: [] }) };
         this.element = el("div", "pdf-view");
         views.push(this);
       }
+      setTool(tool) { this.tool = tool; }
+      undo() {}
+      redo() {}
+      async increment() { return this.next; }
+      async saved(increment) { this.savedWith = increment; this.ink.dirty = false; }
+      async carryIn(carried) { this.carried = carried; return this.left; }
       get numPages() { return 3; }
       async open() {
         if (fail) throw Object.assign(new Error(fail), { code: "password" });
@@ -823,7 +834,12 @@ function pdfPane(routes, { fail = null, confirms = null } = {}) {
     pending.push(answer);
     return answer.promise;
   };
-  const files = new FilesPane({ api, el, loadPdf: async () => module, readFile,
+  const appendPdf = async (path, increment, identity) => {
+    if (appended) appended.push([path, Array.from(increment), identity]);
+    if (answer instanceof Error) throw answer;
+    return answer || { path, identity: ["9", "9", "9", "9"], previous_kept: true };
+  };
+  const files = new FilesPane({ api, el, loadPdf: async () => module, readFile, appendPdf,
     confirm: async (title, lines, action) => { if (confirms) confirms.push([title, lines, action]); return true; } });
   return { files, views, reads, pending };
 }
@@ -838,12 +854,12 @@ const pageLabel = (files) => files.tools.children.find((c) => (c.className || ""
   for (let i = 0; i < 20 && !pending.length; i++) await settle();
   assert.deepEqual(reads, [PDF.path]);
   assert.ok(pageLabel(files).hidden, "no page shown before it is open");
-  pending[0].resolve(new Uint8Array([37, 80, 68, 70]));
+  pending[0].resolve({ bytes: new Uint8Array([37, 80, 68, 70]), identity: null });
   await opening;
   assert.equal(views.length, 1);
   assert.deepEqual(Array.from(views[0].bytes), [37, 80, 68, 70]);
   assert.deepEqual(views[0].pdfjs, { fake: true });
-  assert.equal(files.body.children[0], views[0].element);
+  assert.ok(files.body.children.includes(views[0].element));
   assert.equal(pageLabel(files).textContent, "1 / 3");
   assert.ok(!pageLabel(files).hidden);
   // Opening something else lets the view go.
@@ -869,7 +885,7 @@ const pageLabel = (files) => files.tools.children.find((c) => (c.className || ""
   const opening = files.openFile(PDF.path);
   for (let i = 0; i < 20 && !pending.length; i++) await settle();
   await files.openFolder("/home/u");
-  pending[0].resolve(new Uint8Array(4));
+  pending[0].resolve({ bytes: new Uint8Array(4), identity: null });
   await opening;
   assert.equal(views.length, 0);
   assert.ok(files.body.text().includes("x"));
@@ -892,7 +908,7 @@ const pageLabel = (files) => files.tools.children.find((c) => (c.className || ""
   const { files, views, pending } = pdfPane({ "GET /api/machine/file": PDF }, { fail: message });
   const opening = files.openFile(PDF.path);
   for (let i = 0; i < 20 && !pending.length; i++) await settle();
-  pending[0].resolve(new Uint8Array(4));
+  pending[0].resolve({ bytes: new Uint8Array(4), identity: null });
   await opening;
   assert.ok(views[0].destroyed);
   assert.ok(files.body.text().includes(message) && files.body.text().includes("Download"));
@@ -907,7 +923,7 @@ const pageLabel = (files) => files.tools.children.find((c) => (c.className || ""
   });
   const opening = files.openFile(PDF.path);
   for (let i = 0; i < 20 && !pending.length; i++) await settle();
-  pending[0].resolve(new Uint8Array(4));
+  pending[0].resolve({ bytes: new Uint8Array(4), identity: null });
   await opening;
   views[0].goTo(3);
   await files.refresh();
@@ -916,13 +932,14 @@ const pageLabel = (files) => files.tools.children.find((c) => (c.className || ""
   identity = [1, 2, 9, 9];
   const again = files.refresh();
   for (let i = 0; i < 20 && pending.length < 2; i++) await settle();
-  pending[1].resolve(new Uint8Array(4));
+  pending[1].resolve({ bytes: new Uint8Array(4), identity: null });
   await again;
   assert.equal(reads.length, 2);
   assert.ok(views[0].destroyed);
   assert.equal(views[1].went, 3);
   assert.equal(pageLabel(files).textContent, "3 / 3");
   assert.deepEqual(files.pdf.identity, [1, 2, 9, 9]);
+  files.closeDoc(); // its check on disk stops with it
 }
 
 // PR #103 review P3: a PDF over 1 MiB (up to 64 MiB) is deleted with its content kept: told so, asked once.
@@ -938,7 +955,7 @@ const pageLabel = (files) => files.tools.children.find((c) => (c.className || ""
   }, { confirms });
   const opening = files.openFile(PDF.path);
   for (let i = 0; i < 20 && !pending.length; i++) await settle();
-  pending[0].resolve(new Uint8Array(4));
+  pending[0].resolve({ bytes: new Uint8Array(4), identity: null });
   await opening;
   await files.deleteFile();
   assert.equal(confirms.length, 1, "no second warning that it cannot be put back");
@@ -947,11 +964,150 @@ const pageLabel = (files) => files.tools.children.find((c) => (c.className || ""
   assert.equal(files.pdf, null);
 }
 
+/* V3-P77 §4, §5: ink on an open PDF — the tools, a save against the identity read, a change on the server. */
+async function openPdf(routes, options = {}) {
+  const made = pdfPane(routes, options);
+  const opening = made.files.openFile(PDF.path);
+  for (let i = 0; i < 20 && !made.pending.length; i++) await settle();
+  made.pending[0].resolve({ bytes: new Uint8Array(4), identity: ["1", "2", "3", "5"] });
+  await opening;
+  return made;
+}
+
+{
+  const appended = [];
+  const { files, views } = await openPdf({ "GET /api/machine/file": PDF }, { appended });
+  const view = views[0];
+  const tools = files.ink.tools;
+  assert.ok(!files.ink.group.hidden);
+  await tools.pen.listeners.click[0]();
+  assert.deepEqual(view.tool, { tool: "pen", color: "black", size: "fine" });
+  assert.equal(tools.pen.attributes["aria-pressed"], "true");
+  const red = files.ink.swatches.children.find((c) => c.dataset.color === "red");
+  await red.listeners.click[0]();
+  assert.deepEqual(view.tool, { tool: "pen", color: "red", size: "fine" });
+  await tools.eraser.listeners.click[0]();
+  assert.equal(view.tool.tool, "eraser");
+  await tools.none.listeners.click[0]();
+  assert.equal(view.tool, null);
+  // Nothing drawn: Save stays off; drawn: on, and the save goes against the identity of the bytes read.
+  assert.ok(files.ink.save.disabled);
+  view.ink.dirty = true;
+  view.onInk();
+  assert.ok(!files.ink.save.disabled && files.ink.state.textContent === "Unsaved");
+  assert.ok(files.dirty);
+  view.next = Uint8Array.of(7, 8);
+  await files.savePdf();
+  assert.deepEqual(appended, [[PDF.path, [7, 8], ["1", "2", "3", "5"]]]);
+  assert.deepEqual(Array.from(view.savedWith), [7, 8]);
+  assert.deepEqual(files.pdf.identity, ["9", "9", "9", "9"]);
+  assert.equal(files.ink.state.textContent, "Saved");
+  assert.ok(!files.dirty);
+  files.closeDoc();
+}
+
+// Kept nothing before it, a save says so; refused as changed, the ink stays and the user picks.
+{
+  const { files, views } = await openPdf({ "GET /api/machine/file": PDF },
+                                         { answer: { path: PDF.path, identity: ["9"], previous_kept: false } });
+  views[0].ink.dirty = true;
+  views[0].next = Uint8Array.of(1);
+  await files.savePdf();
+  assert.equal(files.ink.state.textContent, "Saved, but its previous version could not be kept");
+  files.closeDoc();
+}
+{
+  const confirms = [];
+  const { files, views, pending, reads } = await openPdf({ "GET /api/machine/file": PDF }, {
+    confirms, answer: Object.assign(new Error("changed since"), { code: "changed", status: 409 }) });
+  views[0].ink.dirty = true;
+  views[0].next = Uint8Array.of(1);
+  await files.savePdf();
+  const bar = files.pdf.bar;
+  assert.ok(!bar.hidden && bar.text().includes("Not saved: this PDF was changed on the server"));
+  // Leaving asks first, the ink being unsaved.
+  assert.ok(await files.mayLeave());
+  assert.deepEqual(confirms.map((c) => c[0]), ["Discard your ink on notes.pdf?"]);
+  const keep = bar.children.find((c) => c.textContent === "Load the server's version and keep my ink");
+  const again = keep.listeners.click[0]();
+  for (let i = 0; i < 20 && pending.length < 2; i++) await settle();
+  pending[1].resolve({ bytes: new Uint8Array(4), identity: ["1", "2", "3", "6"] });
+  await again;
+  assert.equal(reads.length, 2);
+  assert.ok(views[0].destroyed);
+  assert.deepEqual(views[1].carried.add, ["unsaved"], "the unsaved ink put on the server's version");
+  assert.deepEqual(files.pdf.identity, ["1", "2", "3", "6"]);
+  files.closeDoc();
+}
+
+// Checked on disk: changed with no ink unsaved, read again unasked; with ink unsaved, told instead.
+{
+  let identity = ["1", "2", "3", "5"];
+  const { files, views, pending, reads } = await openPdf({
+    "GET /api/machine/file": PDF,
+    "GET /api/machine/stat": () => ({ path: PDF.path, kind: "file", identity }),
+  });
+  identity = ["1", "2", "3", "7"];
+  views[0].ink.dirty = true;
+  await files.checkPdf();
+  assert.equal(reads.length, 1);
+  assert.ok(!files.pdf.bar.hidden && files.pdf.bar.text().includes("This PDF was changed on the server"));
+  views[0].ink.dirty = false;
+  const quiet = files.checkPdf();
+  for (let i = 0; i < 20 && pending.length < 2; i++) await settle();
+  pending[1].resolve({ bytes: new Uint8Array(4), identity });
+  await quiet;
+  assert.equal(reads.length, 2);
+  assert.equal(views[1].carried, null);
+  files.closeDoc();
+}
+
+// A PDF that cannot be written on (encrypted, its structure unread): viewed, its tools hidden, told why.
+{
+  const made = pdfPane({ "GET /api/machine/file": PDF });
+  const real = made.files.loadPdf;
+  made.files.loadPdf = async () => {
+    const module = await real();
+    return { ...module, PdfView: class extends module.PdfView {
+      async open() { await super.open(); this.writable = false; this.readOnly = "This PDF is encrypted: it can be viewed here, not written on."; }
+    } };
+  };
+  const opening = made.files.openFile(PDF.path);
+  for (let i = 0; i < 20 && !made.pending.length; i++) await settle();
+  made.pending[0].resolve({ bytes: new Uint8Array(4), identity: null });
+  await opening;
+  assert.ok(made.files.ink.tools.pen.hidden && made.files.ink.save.hidden);
+  assert.equal(made.files.ink.state.textContent, "View only");
+  assert.match(made.files.ink.state.title, /encrypted/);
+  assert.deepEqual(made.files.pdf.identity, PDF.identity, "no identity told: the shown one");
+  made.files.closeDoc();
+}
+
+// PR #103 re-review: a PDF the view could not open is still told kept on its delete (by its kind).
+{
+  const confirms = [];
+  const big = { ...PDF, size: 3 * 1024 * 1024 };
+  const { files, pending } = pdfPane({
+    "GET /api/machine/file": big,
+    "GET /api/machine/stat": () => ({ path: PDF.path, kind: "file", size: big.size, identity: big.identity }),
+    "POST /api/machine/file/delete": { path: PDF.path, previous_kept: true },
+    "GET /api/machine/list": listing("/home/u", []),
+  }, { confirms, fail: "This PDF is password-protected; download it to open." });
+  const opening = files.openFile(PDF.path);
+  for (let i = 0; i < 20 && !pending.length; i++) await settle();
+  pending[0].resolve({ bytes: new Uint8Array(4), identity: null });
+  await opening;
+  assert.equal(files.pdf, null);
+  await files.deleteFile();
+  assert.equal(confirms.length, 1);
+  assert.match(confirms[0][1].join(" "), /kept as a previous version/);
+}
+
 // PR #102 review: a PDF read as a download is held to the limit whatever its size was told — its length
 // is checked before any byte is read, and the bytes as they come; past it the download is stopped.
 {
   const realFetch = globalThis.fetch;
-  const served = ({ chunks, length = null, status = 200, json = null }) => {
+  const served = ({ chunks, length = null, status = 200, json = null, identity = null }) => {
     const log = { read: 0, cancelled: false };
     let i = 0;
     const body = {
@@ -964,7 +1120,8 @@ const pageLabel = (files) => files.tools.children.find((c) => (c.className || ""
     globalThis.fetch = async (url) => {
       log.url = url;
       return { ok: status === 200, status, body, json: async () => json,
-               headers: { get: (name) => (name === "content-length" && length !== null ? String(length) : null) } };
+               headers: { get: (name) => (name === "content-length" && length !== null ? String(length)
+                 : name === "x-himari-identity" ? identity : null) } };
     };
     return log;
   };
@@ -978,8 +1135,10 @@ const pageLabel = (files) => files.tools.children.find((c) => (c.className || ""
     await assert.rejects(readDownload("/home/u/a.pdf", 10), (e) => e.status === 413);
     assert.equal(log.read, 3, "stopped at the chunk past the limit");
     assert.ok(log.cancelled);
-    served({ chunks: [Uint8Array.of(1, 2), Uint8Array.of(3), Uint8Array.of(4, 5, 6, 7, 8, 9, 10)] });
-    assert.deepEqual(Array.from(await readDownload("/home/u/a.pdf", 10)), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    served({ chunks: [Uint8Array.of(1, 2), Uint8Array.of(3), Uint8Array.of(4, 5, 6, 7, 8, 9, 10)], identity: "1,2,10,4" });
+    const got = await readDownload("/home/u/a.pdf", 10);
+    assert.deepEqual(Array.from(got.bytes), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    assert.deepEqual(got.identity, ["1", "2", "10", "4"], "the identity of the bytes read (V3-P77 §5.3)");
     served({ chunks: [], status: 404, json: { error: { code: "not_found", message: "No such file." } } });
     await assert.rejects(readDownload("/home/u/a.pdf", 10), (e) => e.status === 404 && e.message === "No such file.");
   } finally {

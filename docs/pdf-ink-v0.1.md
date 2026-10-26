@@ -1,6 +1,6 @@
 # PDF 필기와 에이전트에게 넘기기 v0.1
 
-> 2026-10-26 · **PROPOSED (V3-P77)** · 2단계 1번 구현 노트 §15(서버). 1단계 구현 노트 §14(보기, legacy pdf.js, 직접 만든 증분 작성기·읽기, 진입 조건 결과). rev. 4: 외부 재검수(HEAD d3dfd2c, READY_WITH_CORRECTIONS) 반영 — P2-1 펜 필기와 손가락 스크롤·확대를 나누는 방법과 `pointercancel`, iPad 진입 조건(§4.1, §11), P2-2 판 기록 실패를 바꾸기 전·후로 나눔(§5.3, §6.3, §9), P3 `/HimariInk` 왕복을 1단계 확인에 더함(§11). rev. 3: 외부 검수(HEAD b6d420a) 반영 — P1-1 64 MiB는 저장한 뒤의 파일 크기(§3.3, §5.3), P1-2 큰 PDF의 지우기·복원도 사본을 남기는 한 계약(§6.1, §6.3), P2-3 pdf.js 저장 결과에서 증분을 떼어 내는 확인과 2단계 진입 조건(§5.2, §11), P2-4 형광펜 투명도는 모양 스트림의 ExtGState로(§5.1), P2-5 저장된 HIMARI 필기는 필기 층만 그림(§3.2, §4.4), P3 쪽 수를 셀 수 없으면 페이지 참조 거부(§7.2). rev. 2: 소유자 결정 Q1~Q6 권고대로(§13). rev. 1: 설계 초안.
+> 2026-10-26 · **PROPOSED (V3-P77)** · 2단계 2b 구현 노트 §16(필기 층). 2단계 1번 구현 노트 §15(서버). 1단계 구현 노트 §14(보기, legacy pdf.js, 직접 만든 증분 작성기·읽기, 진입 조건 결과). rev. 4: 외부 재검수(HEAD d3dfd2c, READY_WITH_CORRECTIONS) 반영 — P2-1 펜 필기와 손가락 스크롤·확대를 나누는 방법과 `pointercancel`, iPad 진입 조건(§4.1, §11), P2-2 판 기록 실패를 바꾸기 전·후로 나눔(§5.3, §6.3, §9), P3 `/HimariInk` 왕복을 1단계 확인에 더함(§11). rev. 3: 외부 검수(HEAD b6d420a) 반영 — P1-1 64 MiB는 저장한 뒤의 파일 크기(§3.3, §5.3), P1-2 큰 PDF의 지우기·복원도 사본을 남기는 한 계약(§6.1, §6.3), P2-3 pdf.js 저장 결과에서 증분을 떼어 내는 확인과 2단계 진입 조건(§5.2, §11), P2-4 형광펜 투명도는 모양 스트림의 ExtGState로(§5.1), P2-5 저장된 HIMARI 필기는 필기 층만 그림(§3.2, §4.4), P3 쪽 수를 셀 수 없으면 페이지 참조 거부(§7.2). rev. 2: 소유자 결정 Q1~Q6 권고대로(§13). rev. 1: 설계 초안.
 >
 > 소유자 방향
 > - V3-P75 설계 때(2026-10-25): 나중에 iPad에서 PDF에 Apple Pencil로 필기하고, 그것을 바로 에이전트에게 넘긴다.
@@ -593,3 +593,94 @@ PDF는 믿을 수 없는 입력이다. 클라우드 폴더나 인터넷에서 �
 - **P3 웹의 지우기 안내**
   - 열어 둔 PDF가 64 MiB 이하이면 "1 MiB 넘어서 되돌릴 수 없다" 경고와 두 번째 확인을 띄우지 않는다. 대신 "이전 판으로 30일 남는다"를 띄운다.
   - 2a만 배포해도 안내가 실제와 맞는다.
+
+## 16. 2단계 2번 구현 노트 (필기 층과 저장, 2026-10-26)
+
+2번은 둘로 나눈다.
+- **2b(이 노트)**: 필기 층, 도구, 입력 규칙, 저장, 충돌.
+- **2c**: 저장 안 한 필기의 브라우저 임시 보관(§4.5, IndexedDB), PDF 이전 판 화면(Open·Restore, §6.2), "Draw with finger"(§4.1).
+
+### 16.1 모듈
+
+- `static/freehand/perfect-freehand.mjs`: perfect-freehand 1.2.3(MIT)을 그대로 복사했다. `LICENSE`와 `SOURCE`를 함께 둔다.
+- `static/pdfink.js`(DOM 없음)
+  - 선 모델과 도구(`TOOLS`). 펜은 색 셋에 굵기 둘(1.6/3.2 pt), 형광펜은 노랑 12 pt다.
+  - 외곽선(`outline`)과 저장할 주석의 꼴(`specOf`: `/Rect`, `/InkList`, `/C`, `/BS /W`, 채운 외곽선의 모양 스트림, `/HimariInk`).
+  - 저장된 주석에서 선 만들기(`strokeFromSaved`). `/HimariInk`는 믿을 수 없는 입력이라 검사하고, 맞지 않으면 `/InkList`로 그린다.
+  - 지우개의 닿음 판정(`hits`).
+  - `Ink`: 쪽별 선, 되돌리기·다시하기, 저장할 것(`changes`: 더할 선, `/Annots`에서 뺄 주석), 충돌 때 옮길 것(`carry`/`put`).
+- `static/pdfpane.js`
+  - 쪽마다 필기 canvas(`.pdf-ink`, `mix-blend-mode: multiply`)를 둔다. 그리는 중인 선은 따로 둔 canvas에 그린다.
+  - 입력 규칙, 저장할 증분 만들기(`increment`), 저장 뒤 다시 읽기(`saved`), 충돌 때 옮기기(`carryIn`).
+- `static/files.js`
+  - 머리의 도구: 스크롤, 펜, 형광펜, 지우개, 펜 색·굵기, 되돌리기·다시하기, 상태, Save.
+  - 저장 요청(`postAppend`), 충돌 막대, 몇 초마다 확인, 떠날 때 묻기.
+- 정적 파일: `pdfink.js`, `pdfdoc.js`, `freehand/perfect-freehand.mjs`를 `STATIC_FILES`에 더했다.
+
+### 16.2 입력 (§4.1)
+
+- 도구를 고르지 않으면 아무것도 그리지 않는다(스크롤만).
+- 고르면
+  - 펜(`pointerType: "pen"`)은 그린다.
+  - 손가락(`touch`)은 그리지 않는다. 펜으로 쓰는 동안 닿은 손바닥도 그래서 무시된다.
+  - 마우스는 왼쪽 버튼으로 그리고, 필압은 0.5 고정이다.
+- Apple Pencil의 터치(`touchType: "stylus"`)는 도구가 있을 때 non-passive `touchstart`·`touchmove`에서 `preventDefault`한다. 상자는 `touch-action: pan-x pan-y` 그대로라 손가락 스크롤은 브라우저가 한다.
+- 두 손가락 확대는 stylus가 아닌 터치 둘일 때만이다. Pencil과 손바닥이 함께 닿아도 확대가 아니다.
+- 그리는 동안
+  - `setPointerCapture`로 그 펜을 잡는다.
+  - `getCoalescedEvents()`로 사이 점까지 받는다.
+  - `getPredictedEvents()`는 그리는 중의 모양에만 쓰고, 선에 넣지 않는다.
+- `pointercancel`·`lostpointercapture`: 점이 둘 이상이면 그때까지의 선으로 끝내고, 아니면 버린다. 펜을 뗀(`pointerup`) 한 점은 점으로 남긴다.
+- 한 선은 5,000점에서 끝난다.
+- 지우개: 화면 8px 안에 닿은 선을 통째로 지운다. 한 번 긋는 동안 지운 것은 되돌리기 한 번이다.
+- 되돌리기·다시하기: Ctrl/Cmd+Z, Shift+Ctrl/Cmd+Z, 그리고 머리의 버튼.
+
+### 16.3 저장과 충돌 (§5)
+
+- 저장 기준은 **다운로드의 `X-Himari-Identity`** 다. 받은 바이트의 판이다(`readDownload`가 `{bytes, identity}`를 준다). 없으면 `show`의 identity를 쓴다.
+- Save
+  1. `increment()`: 바뀐 쪽마다 더할 선(`specOf`)과 뺄 주석으로 `appendIncrement`를 만든다. `checkIncrement`와 64 MiB를 확인한다.
+  2. `POST /api/machine/pdf/append`.
+  3. `saved()`: 원본과 증분을 이어 다시 읽고, 읽었던 쪽의 필기를 저장된 선으로 다시 만든다. PDF.js 문서는 다시 열지 않는다. HIMARI 필기는 어차피 필기 층이 그리기 때문이다.
+  - **되돌리기 기록은 저장하면 비운다.**
+  - 저장하는 동안에는 그리기, 되돌리기, 다시하기를 받지 않는다.
+- `previous_kept: false`이면 상태에 "Saved, but its previous version could not be kept"를 띄운다.
+- 409 `changed`이거나, 몇 초마다(5초) 확인했을 때 파일이 바뀌었으면
+  - 저장 안 한 필기가 없으면 조용히 다시 열고, 보던 쪽에 머문다.
+  - 있으면 막대를 띄운다.
+    - "Load the server's version and keep my ink": 새 선은 페이지 좌표 그대로 새 판 위에 다시 올린다. 지웠던 저장 선은 이름(`/NM`)으로 새 판에서 다시 지운다. 새 판에 없는 쪽의 선은 버리고, 몇 개인지 알린다.
+    - "Discard my ink".
+- 떠날 때(다른 파일·폴더·대화) 저장 안 한 필기가 있으면 묻는다: "Discard your ink on …?"
+- 쓰지 않는 PDF: 암호화됐거나 pdfdoc.js가 구조를 못 읽으면 도구를 숨기고 "View only"(이유는 title)를 보인다. 그런 PDF는 HIMARI 필기도 PDF.js가 그린다.
+- 서명된 PDF(`/AcroForm /SigFlags` 1)는 처음 그릴 때 한 번 알린다(§5.4).
+- **PR #103 재검수 P3**: 지우기 안내는 열린 보기가 아니라 서버가 알려 준 파일 종류(`kind: "pdf"`)로 정한다. 그래서 pdf.js가 열지 못한 PDF도 "이전 판으로 남는다"로 안내한다.
+- 판의 이유 문구에 `ink`("before ink was saved")와 `restore`를 더했다.
+
+### 16.4 확인
+
+- `pdf_smoke`: 모델(도구, 외곽선, 꼴, 필압, 닿음, 파일 왕복, 믿을 수 없는 `/HimariInk`, 되돌리기·다시하기, 저장할 것, 옮기기).
+- `pdf_smoke`의 보기 입력: 묶은 PDF.js의 실제 문서와 가짜 DOM으로 확인한다.
+  - 저장된 필기가 숨겨지는지(`ENABLE_STORAGE`, 지운 것으로 표시).
+  - 도구 없음, 손가락, 마우스 오른쪽.
+  - 펜의 coalesced 점과 PDF 좌표, 필압. predicted 점은 넣지 않는지.
+  - `pointercancel`의 두 경우.
+  - stylus 터치를 막는지, 펜과 손바닥이 확대가 아닌지.
+  - 지우개, 되돌리기, 저장 증분과 다시 읽기.
+  - 암호화된 PDF.
+- `files_smoke`: 도구 고르기와 기억, Save의 identity, 판을 못 남긴 저장, 409 막대와 "keep my ink", 떠날 때 묻기, 확인할 때 다시 열기·막대, View only, 열지 못한 PDF의 지우기 안내.
+- 변이 확인: 손가락 그리기, stylus 막기 없앰, cancel 때 버림, 숨기기 없앰, 손바닥도 확대로 셈. 모두 smoke가 잡았다.
+- 브라우저(headless Chromium, 실제 서버와 CSP)
+  - 마우스 선, CDP 펜(force) 선, 형광펜을 그리고, 되돌리기·다시하기 뒤 저장했다. 디스크의 파일에 Ink 주석 셋이 생기고, 다른 앱의 Square·Link는 남았다.
+  - 다시 열면 필기가 돌아오고 마지막 도구가 골라져 있다.
+  - 지우고 저장하면 둘로 줄었다. 판은 30분 규칙대로 하나다.
+  - 저장 안 한 필기를 두고 떠나려 하면 묻는다.
+
+### 16.5 남은 것
+
+- **iPad 진입 조건(§11)은 이 PR을 병합하기 전에 소유자가 확인한다.**
+  1. Pencil로 그려도 페이지가 스크롤되지 않는다.
+  2. 손가락으로 넘기기·확대가 된다.
+  3. 필기 중 시스템 제스처 등으로 끊겨도 선이 남는다.
+  - 안 되면 §4.1 B로 바꾼다.
+- 굵기, 가늘어짐, 형광펜 모양 같은 매개변수는 iPad에서 써 보고 정한다(§4.6).
+- PDF.js가 저장된 형광펜 주석을 읽으며 "AnnotationBorderStyle.setWidth - ignoring width: 12" 경고를 낸다. 그 주석은 필기 층이 그리므로 화면에는 영향이 없다.

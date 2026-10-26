@@ -158,6 +158,9 @@ STATIC_FILES = {"app.css": "text/css", "app.js": "text/javascript", "app_view.js
                 # The PDF view (V3-P77 §3): its part, and PDF.js with its worker, the image decoders it may
                 # import and the CMaps it may fetch; each loaded on first use.
                 "pdfpane.js": "text/javascript", "pdfjs/pdf.min.mjs": "text/javascript",
+                # Its ink (§4, §5): the strokes, perfect-freehand's outlines, the incremental update it writes.
+                "pdfink.js": "text/javascript", "pdfdoc.js": "text/javascript",
+                "freehand/perfect-freehand.mjs": "text/javascript",
                 "pdfjs/pdf.worker.min.mjs": "text/javascript",
                 "pdfjs/wasm/openjpeg_nowasm_fallback.js": "text/javascript",
                 "pdfjs/wasm/jbig2_nowasm_fallback.js": "text/javascript",
