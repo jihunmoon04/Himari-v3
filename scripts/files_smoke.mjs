@@ -1332,6 +1332,47 @@ for (const [why, routes, setup, told] of [
   files.pdf = null;
 }
 
+// A note beside the file's name (here a refused save) stays a while: the next keystroke does not wipe it.
+{
+  const { files, module } = editorPane({ "GET /api/machine/file": TEXT,
+    "PUT /api/machine/file": () => { throw refusal("too_large"); } });
+  await files.openFile(TEXT.path);
+  module.made[0].type("x");
+  await files.save();
+  assert.equal(files.stateLabel.textContent, "too_large");
+  module.made[0].type("xy");
+  assert.equal(files.stateLabel.textContent, "too_large", "still there after a keystroke");
+  files.doc.note.until = 0; // its time is up
+  module.made[0].type("xyz");
+  assert.equal(files.stateLabel.textContent, "Unsaved");
+  files.closeDoc();
+}
+
+// Review B1: a note about the text before a save never outlives the save.
+{
+  const { files, module } = editorPane({ "GET /api/machine/file": TEXT,
+    "PUT /api/machine/file": { path: TEXT.path, identity: [5, 5, 5, 5], previous_kept: true } });
+  await files.openFile(TEXT.path);
+  await files.restore("an old version");
+  assert.equal(files.stateLabel.textContent, "Put in the editor — Save to keep it");
+  await files.save();
+  assert.equal(files.stateLabel.textContent, "Saved");
+  files.closeDoc();
+}
+
+// The PDF's zoom buttons: out, back to the width, in — around the middle of what shows.
+{
+  const files = new FilesPane({ api: async () => HOME, el });
+  const zooms = [];
+  const view = { zoom: 2, element: { getBoundingClientRect: () => ({ left: 0, top: 0, width: 200, height: 100 }) },
+                 zoomBy(factor, x, y) { zooms.push([Math.round(factor * 100) / 100, x, y]); }, current: 0 };
+  files.pdf = { path: "/home/u/p.pdf", view };
+  const group = files.zoomTools();
+  for (const button of group.children) button.listeners.click[0]();
+  assert.deepEqual(zooms, [[0.8, 100, 50], [0.5, 100, 50], [1.25, 100, 50]]);
+  files.pdf = null;
+}
+
 // --- unsaved text kept in the browser (V3-P78 §4) ------------------------------------------------------
 
 /* The browser's store (local_store.js) as a map of "unsaved" records. */

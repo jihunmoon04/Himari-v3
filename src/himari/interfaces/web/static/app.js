@@ -124,6 +124,7 @@ const app = {
   inFlight: new Set(), // the conversations a message is being sent to from this page (V3-P78 §3.1, N6)
   announceAfter: Infinity, // events past this sequence are new (not the history read on opening): told to screen readers
   workingHint: "", // "HIMARI is working…" and its usage, under the composer
+  uploadHint: "", // files still uploading (Send waits for them)
   lengthHint: null, // {count, over} once the message nears its limit
   questionShown: null, // the question text the panel shows (redrawn only when it changes)
   address: null, // the address of the surface shown (V3-P79 §3); the sign-in screen keeps the one it came from
@@ -133,6 +134,7 @@ const app = {
   activityTicket: 0, // the latest /activity read: an older answer is dropped (review N3)
   listTicket: 0, // the latest list read
   listResetting: 0, // the ticket of a reload under way (0: none)
+  listGroup: null, // the list's last heading (Today, Yesterday, …), for "Load more" to go on from
   sendWaiting: false, // a send waits for the conversation being created
   conversationId: null,
   generation: 0,
@@ -390,6 +392,19 @@ function renderListRow(item) {
   return li;
 }
 
+const MAX_LIST = 200; // the server's most per read
+
+/* The list's heading for a conversation last active at ``when`` (local days). */
+function activityGroup(when) {
+  const day = (date) => new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
+  const days = Math.round((day(new Date()) - day(new Date(when))) / 86400000);
+  if (days <= 0) return "Today";
+  if (days === 1) return "Yesterday";
+  if (days < 7) return "Previous 7 days";
+  if (days < 30) return "Previous 30 days";
+  return "Older";
+}
+
 async function loadList(reset) {
   // The latest read draws the list: a reload and "Load more" under way at once never mix (V3-P80 review N2).
   // "Load more" waits out a reload, which would otherwise be dropped for it (re-review N4).
@@ -397,16 +412,30 @@ async function loadList(reset) {
   const ticket = (app.listTicket += 1);
   if (reset) app.listResetting = ticket;
   const offset = reset ? 0 : app.listOffset;
+  // A reload reads as many as were shown, so "Load more" pages stay open after a turn ends (at most 200).
+  const limit = reset ? Math.min(MAX_LIST, Math.max(PAGE, app.listOffset)) : PAGE;
   let page;
   try {
-    page = await api("GET", `/api/conversations?limit=${PAGE}&offset=${offset}`);
+    page = await api("GET", `/api/conversations?limit=${limit}&offset=${offset}`);
   } finally {
     if (app.listResetting === ticket) app.listResetting = 0;
   }
   if (ticket !== app.listTicket) return page.items;
   const list = $("conversation-list");
-  if (reset) list.replaceChildren();
-  for (const item of page.items) list.append(renderListRow(item));
+  if (reset) {
+    list.replaceChildren();
+    app.listGroup = null;
+  }
+  for (const item of page.items) {
+    const group = activityGroup(item.last_activity_at);
+    if (group !== app.listGroup) { // Today, Yesterday, … as the list goes back in time
+      app.listGroup = group;
+      const heading = el("li", "conversation-group", group);
+      heading.setAttribute("role", "presentation");
+      list.append(heading);
+    }
+    list.append(renderListRow(item));
+  }
   app.listOffset = page.next_offset ?? offset + page.items.length;
   $("conversation-load-more").hidden = page.next_offset === null;
   paintActivity();
@@ -712,9 +741,9 @@ function paintHint() {
   const count = length === null ? ""
     : `${length.count.toLocaleString()} / ${MAX_MESSAGE_CHARS.toLocaleString()} characters`
       + (length.over ? ": too long to send; attach it as a file" : "");
-  hint.textContent = [app.workingHint, count].filter(Boolean).join(" · ");
+  hint.textContent = [app.workingHint, app.uploadHint, count].filter(Boolean).join(" · ");
   hint.classList.toggle("is-over", length !== null && length.over);
-  hint.classList.toggle("is-counting", length !== null);
+  hint.classList.toggle("is-counting", length !== null || Boolean(app.uploadHint)); // shown on phones too
 }
 
 const LENGTH_HINT_AT = 30000;
@@ -1266,6 +1295,13 @@ function renderAttachments() {
   }
   list.hidden = app.attachments.length === 0 && app.references.length === 0;
   $("composer-send").disabled = app.jobRunning || app.sending || uploading();
+  // Why Send waits, told under the composer.
+  const going = app.attachments.filter((a) => a.state === "uploading").length;
+  const told = going ? `Uploading ${going} file${going === 1 ? "" : "s"} — Send waits for ${going === 1 ? "it" : "them"}` : "";
+  if (told !== app.uploadHint) {
+    app.uploadHint = told;
+    paintHint();
+  }
 }
 
 /* One request per file, with progress. Uploaded files are staged on the
@@ -2134,6 +2170,8 @@ function applyDetail(detail) {
   status(view.tone ? view.text : "", view.tone, view.tone && view.detail
     ? ["Details", () => status(`${view.text}. ${view.detail}`, view.tone)] : null);
   $("question-panel").hidden = !detail.waiting;
+  // As the menu's: not while the answer is being taken (the server would refuse it as busy; review N1).
+  $("question-dismiss").hidden = !detail.waiting || detail.job.running;
   // As the timeline shows it: formatted, never parsed as HTML (rich_text.js).
   const question = detail.waiting ? detail.waiting.question : null;
   if (question !== app.questionShown) { // a selection, and formulas, stay as they are between polls (review N6)
@@ -3814,6 +3852,12 @@ async function boot() {
   $("chat-menu-resume").addEventListener("click", resumeConversation);
   $("chat-menu-compact").addEventListener("click", compactConversation);
   $("chat-menu-dismiss").addEventListener("click", dismissQuestion);
+  $("question-dismiss").addEventListener("click", async () => { // not only in the ⋮ menu
+    const link = $("question-dismiss");
+    link.disabled = true; // one request (review N1)
+    $("composer-text").focus(); // the panel goes: the keyboard stays in the conversation (N2)
+    try { await dismissQuestion(); } finally { link.disabled = false; }
+  });
   $("chat-menu-model-select").addEventListener("change", (event) => setModel(event.target.value || null, null));
   $("chat-menu-effort-select").addEventListener("change", (event) =>
     setModel($("chat-menu-model-select").value || null, event.target.value || null));

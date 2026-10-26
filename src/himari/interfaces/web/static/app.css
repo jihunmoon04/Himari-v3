@@ -3909,6 +3909,13 @@ button.files-crumb:hover { background: var(--surface-hover); color: var(--text);
 .files-state-dot { width: 7px; height: 7px; flex: 0 0 7px; border-radius: 50%; background: var(--ok); }
 .files-state-dot.is-dirty { background: var(--warn-edge); }
 .files-state { color: var(--text-muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 260px; }
+/* A note (often an error) reads whole: it wraps, a little larger, in the warning colour. */
+.files-state.is-note { white-space: normal; max-width: 420px; font-size: 13px; color: var(--warn); }
+.files-zoom-tools { display: inline-flex; align-items: center; gap: 2px; }
+.files-zoom { min-width: 32px; padding: 2px 6px; font-size: 14px; }
+#conversation-list > .conversation-group { list-style: none; padding: var(--space-3) var(--space-3) var(--space-1); font-size: 11px; font-weight: 600; letter-spacing: .02em; color: var(--text-muted); }
+.question-dismiss { display: inline; padding: 0; min-height: 0; font-size: inherit; text-decoration: underline; }
+@media (pointer: coarse) { .question-dismiss { display: inline-block; min-height: 40px; padding: 0 4px; } } /* a finger's size (N3) */
 .files-save { min-height: 32px; padding: 4px 14px; font-size: 13px; }
 .files-save:disabled { opacity: .45; cursor: default; }
 .files-working { font-size: 12px; color: var(--warn); background: var(--warn-soft); border: 1px solid var(--warn-edge); border-radius: var(--radius-pill); padding: 2px 8px; white-space: nowrap; }

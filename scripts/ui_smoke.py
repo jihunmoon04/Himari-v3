@@ -145,6 +145,7 @@ def run(base: str, token: str, shots: str | None) -> list[str]:
         page.fill("#composer-text", "Plan a trip")
         page.press("#composer-text", "Enter")
         expect(page.locator("#question-text")).to_have_text("Which city?", timeout=10000)  # formatted, as above
+        expect(page.locator("#question-dismiss")).to_be_visible()  # dismissed from the panel, not only the menu
         expect(page.locator("#question-text strong")).to_have_text("city")
         expect(page.locator(".item-tool-row .tool-row-summary")).to_have_text("✓ inside/write_file · done")
         if shots:
@@ -1397,7 +1398,19 @@ def run_polish(base: str, token: str, shots: str | None) -> list[str]:
         page.fill("#composer-text", "short")
         expect(hint).to_have_text("")
 
-        # Retry: an upload that failed goes again from its chip.
+        # The list's heading for today.
+        expect(page.locator("#conversation-list .conversation-group").first).to_have_text("Today")
+        # While a file uploads, the hint says why Send waits; Retry: an upload that failed goes again from its chip.
+        held: list[Any] = []
+        page.route("**/uploads?*", lambda route: held.append(route))
+        page.set_input_files("#composer-files", files=[{"name": "wait.txt", "mimeType": "text/plain", "buffer": b"w"}])
+        expect(page.locator("#composer-hint")).to_contain_text("Uploading 1 file — Send waits for it")
+        while not held:
+            page.wait_for_timeout(50)
+        held[0].abort()
+        page.unroute("**/uploads?*")
+        page.locator("#attach-list .attach-chip .attach-chip-remove").first.click()
+        expect(page.locator("#composer-hint")).not_to_contain_text("Uploading")
         page.route("**/uploads?*", lambda route: route.abort())
         a_file = {"name": "note.txt", "mimeType": "text/plain", "buffer": b"hello"}
         page.set_input_files("#composer-files", files=[a_file])
