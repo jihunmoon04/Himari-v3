@@ -416,15 +416,27 @@ export class FilesPane {
       : `Unsaved text from ${clock(kept.at)} can't be put back here: this file is no longer text the editor opens.`));
     const content = fileText(kept.text, kept.lineBreak || "\n");
     if (gone) {
-      box.append(this.button("Save it here again", async () => {
+      const again = this.button("Save it here again", async () => {
+        again.disabled = true; // one request (PR #106 review N2)
         try {
           await this.api("POST", "/api/machine/file/install", { path, content });
           await this.keep.remove("unsaved", path);
           if (ticket === this.ticket) await this.openFile(path);
         } catch (error) {
-          if (ticket === this.ticket) box.append(this.el("p", "files-note is-error", error.message));
+          if (ticket !== this.ticket) return;
+          if (error.code === "changed") { // a file of that name now: opened, with the kept text offered on it
+            await this.openFile(path);
+            return;
+          }
+          const lasting = ["not_found", "not_directory", "unsupported"].includes(error.code);
+          if (lasting) again.remove();
+          else again.disabled = false;
+          box.append(this.el("p", "files-note is-error", error.code === "unsupported"
+            ? "This folder can't take a new file safely from here; download your text."
+            : lasting ? "The folder is gone too; download your text." : error.message));
         }
-      }));
+      });
+      box.append(again);
     }
     box.append(this.button("Download my text", () => downloadText(content, name)),
                this.button("Discard", () => { this.keep.remove("unsaved", path); box.remove(); }));
@@ -1147,7 +1159,7 @@ export class FilesPane {
 
   async save({ over = null } = {}) {
     const doc = this.doc;
-    if (doc === null || doc.saving) return;
+    if (doc === null || doc.saving || doc.offer) return; // while Restore is offered, nothing replaces it (B1)
     const text = doc.editor.text();
     const content = fileText(text, doc.lineBreak);
     if (new TextEncoder().encode(content).length > EDIT_MAX_BYTES) {
@@ -1283,7 +1295,7 @@ export class FilesPane {
    * it was typed in since, the text stays and the user is told instead (PR #95 review B1). */
   async loadDisk({ since = null } = {}) {
     const doc = this.doc;
-    if (doc === null) return;
+    if (doc === null || doc.offer) return;
     try {
       const shown = await this.disk();
       if (this.doc !== doc) return;
@@ -1481,7 +1493,7 @@ export class FilesPane {
   }
 
   async checkDisk(doc = this.doc) {
-    if (doc === null) return;
+    if (doc === null || doc.offer) return; // after Restore or Discard (B1)
     const since = doc.revision;
     try {
       const now = await this.api("GET", `/api/machine/stat?${query(doc.path)}`);

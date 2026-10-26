@@ -238,6 +238,24 @@ for (const scenario of ["same", "edited", "navigated", "failed", "stale-failure"
   assert.equal(p.node("composer-text").value, "");
 }
 
+// PR #106 review B2: chips put back by a leave and a return still leave once the send is accepted.
+{
+  const p = page(), response = deferred();
+  p.context.response = response.promise;
+  p.run(`app.conversationId = 'a'; app.place = 'a'; app.generation = 1; api = () => response;
+         app.attachments = [{ key: 1, name: 'f', size: 1, state: 'ready', fileId: 'f1', uploadedAt: Date.now() }];
+         app.references = [{ key: 2, path: '/x', whole: true, identity: [1, 2, 3, 4], label: 'x' }];`);
+  p.node("composer-text").value = "with chips";
+  p.run("composerChanged()");
+  const pending = p.run("sendMessage({ preventDefault() {} })");
+  p.run("leavePlace(); enterPlace('b'); leavePlace(); enterPlace('a');");
+  assert.equal(p.run("app.attachments.length + app.references.length"), 2);
+  response.resolve(null);
+  await pending;
+  assert.equal(p.run("app.attachments.length + app.references.length"), 0);
+  assert.equal(p.node("composer-text").value, "");
+}
+
 // V3-P78 §3.1 (review B1, N5): Enter on Home carries its draft into the new conversation.
 {
   const p = page(), created = deferred();
@@ -282,4 +300,4 @@ for (const scenario of ["same", "edited", "navigated", "failed", "stale-failure"
   assert.equal(p.node("login-token").value, "half a tok");
 }
 
-console.log("UI async regression checks: 19 passed");
+console.log("UI async regression checks: 20 passed");

@@ -24,7 +24,7 @@ import { assistantTextLine, renderAssistantText } from "/assets/rich_text.js";
 import { LiveAnswer } from "/assets/live.js";
 import { FilesPane } from "/assets/files.js";
 import * as localStore from "/assets/local_store.js";
-import { DraftBook, isEmpty, mergeDrafts, withoutExpired } from "/assets/drafts.js";
+import { DraftBook, mergeDrafts, referenceKey, withoutExpired } from "/assets/drafts.js";
 
 const POLL_MS = 1000;
 const PAGE = 50;
@@ -1883,9 +1883,13 @@ async function sendMessage(event) {
         autosize();
       }
       app.jobRunning = true; // a job starts with this message; the next detail says when it ends
-      app.attachments = app.attachments.filter((a) => !ready.includes(a));
-      app.references = app.references.filter((r) => !pointed.includes(r));
+      // By what they are, not by object: chips put back by a leave and return are new objects (PR #106 review B2).
+      const sentIds = new Set(sent.fileIds);
+      const sentKeys = new Set(pointed.map(referenceKey));
+      app.attachments = app.attachments.filter((a) => !(a.state === "ready" && sentIds.has(a.fileId)));
+      app.references = app.references.filter((r) => !sentKeys.has(referenceKey(r)));
       renderAttachments();
+      composerChanged(); // what was typed meanwhile is kept as usual (N1)
       status("");
     }
   } catch (error) {
@@ -2073,6 +2077,7 @@ async function deleteConversation(item = null) {
   if (!(await confirmAction(`Delete “${name}”?`, lines, "Move to trash")) || !still()) return;
   $("chat-menu-delete").disabled = true;
   status(notice.running ? "Stopping the work under way, then moving it to the trash…" : "Moving it to the trash…");
+  if (app.conversationId === id) cancelUploads(); // its uploads go with it; nothing to ask (PR #106 review N4)
   try {
     const moved = await api("POST", `/api/conversations/${encodeURIComponent(id)}/trash`);
     // Moved: a list that fails to load now must not read as a failed move.
@@ -3190,11 +3195,9 @@ async function boot() {
   window.addEventListener("pagehide", keepNow);
   document.addEventListener("visibilitychange", () => { if (document.visibilityState === "hidden") keepNow(); });
   // §5.3: another tab signed out — nothing of this one is kept or written either.
-  localStore.onWiped(() => {
+  localStore.onWiped(() => { // signed out like that tab: to sign in again, where writes open again (PR #106 review B3)
     drafts.clear();
-    leavePlace({ keep: false });
-    filesPanel.closeForSignIn({ keepText: false });
-    filesSurface.closeForSignIn({ keepText: false });
+    showLogin({ signingOut: true });
   });
   window.addEventListener("beforeunload", (event) => {
     const unsaved = app.instructionsDraft !== null || (!$("surface-instructions").hidden && instructionsDirty())

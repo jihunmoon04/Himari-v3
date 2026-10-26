@@ -1272,6 +1272,21 @@ const press = (files, label) => files.doc.bar.children.find((c) => c.textContent
   files.closeDoc();
 }
 
+// PR #106 review B1: while Restore is offered, a save (Ctrl+S) or a check of the disk changes nothing.
+{
+  const keep = keepStore({ [TEXT.path]: { ...KEPT, writer: "me" } });
+  const { files, sent } = editorPane({ "GET /api/machine/file": TEXT,
+    "GET /api/machine/stat": { path: TEXT.path, kind: "file", identity: [9, 9, 9, 9], size: 3 },
+    "PUT /api/machine/file": { path: TEXT.path, identity: [5, 5, 5, 5], previous_kept: true } }, { keep });
+  await files.openFile(TEXT.path);
+  await files.save();
+  await files.checkDisk();
+  assert.equal(sent.filter(([m]) => m === "PUT").length, 0);
+  assert.equal(keep.map.get(TEXT.path).text, "kept\n");
+  assert.deepEqual(barLabels(files).slice(1), ["Restore", "Discard"]);
+  files.closeDoc();
+}
+
 // …kept on a version since changed: Restore leads to the conflict bar, so a save never goes over it.
 {
   const keep = keepStore({ [TEXT.path]: { ...KEPT, base: [1, 1, 1, 1] } });

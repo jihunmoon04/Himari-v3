@@ -20,7 +20,7 @@ export function isEmpty(draft) {
   return !draft || (!draft.text && !draft.attachments.length && !draft.references.length);
 }
 
-function referenceKey(r) {
+export function referenceKey(r) {
   return JSON.stringify([r.path, r.whole ? null : r.start, r.whole ? null : r.end]);
 }
 
