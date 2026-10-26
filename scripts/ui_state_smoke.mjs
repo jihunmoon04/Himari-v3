@@ -45,6 +45,7 @@ function page() {
   run(draftsSource);
   run(source);
   run("status = () => {}; abandonExpansion = () => {}; autosize = () => {}; renderAttachments = () => {}; refresh = async () => {}; poll = () => {};");
+  run("scheduleActivity = () => {};"); // V3-P80's 5 s read would keep this process alive
   return { context, run, node };
 }
 
@@ -79,7 +80,7 @@ function page() {
 for (const scenario of ["same", "edited", "navigated", "failed", "stale-failure"]) {
   const p = page(), response = deferred();
   p.context.response = response.promise;
-  p.run("app.conversationId = 'one'; app.place = 'one'; app.generation = 1; var requests = 0; var notices = []; status = (text) => notices.push(text); api = () => { requests++; return response; };");
+  p.run("app.conversationId = 'one'; app.place = 'one'; app.generation = 1; var requests = 0; var notices = []; status = (text) => notices.push(text); api = (method, path) => { if (path === '/api/conversations/activity') return Promise.resolve({ working: [], waiting: [] }); requests++; return response; };");
   p.node("composer-text").value = "  submitted draft  ";
   const pending = p.run("sendMessage({ preventDefault() {} })");
   if (scenario === "edited") p.node("composer-text").value = "next draft";
@@ -103,7 +104,7 @@ for (const scenario of ["same", "edited", "navigated", "failed", "stale-failure"
 {
   const p = page(), response = deferred();
   p.context.response = response.promise;
-  p.run("app.conversationId = 'one'; app.place = 'one'; var requests = 0; api = () => { requests++; return response; };");
+  p.run("app.conversationId = 'one'; app.place = 'one'; var requests = 0; api = (method, path) => { if (path === '/api/conversations/activity') return Promise.resolve({ working: [], waiting: [] }); requests++; return response; };");
   p.node("composer-text").value = "one message";
   const first = p.run("sendMessage({ preventDefault() {} })");
   await p.run("sendMessage({ preventDefault() {} })");

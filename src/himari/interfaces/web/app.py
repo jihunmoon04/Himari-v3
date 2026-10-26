@@ -1280,6 +1280,14 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
         return {"items": [trashed_view(s, application.trash_days) if trashed else summary_view(s) for s in page],
                 "next_offset": offset + limit if len(page) == limit else None}  # may lead to an empty page
 
+    @app.get("/api/conversations/activity")  # before /api/conversations/{conversation_id}, which would take it
+    async def conversation_activity(request: Request, who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+        """V3-P80 §3.2: which Conversations work now and which wait for an answer. Not a read of any one of
+        them: it never counts as the user being there (``seen``, V3-P62 §5)."""
+        application = himari(request)
+        return {"working": sorted(application.runner.running(who)),
+                "waiting": sorted(await application.data.list_waiting_conversations(who))}
+
     @app.post("/api/conversations", status_code=201)
     async def create_conversation(body: CreateBody, request: Request,
                                   who: PrincipalId = Depends(principal)) -> dict[str, Any]:

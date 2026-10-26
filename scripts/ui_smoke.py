@@ -1108,7 +1108,7 @@ def run_memory(base: str, token: str, shots: str | None, root: str, provider: Sc
 
 
 SCENARIOS = ("main", "compaction", "budget", "trash", "files", "images", "work", "instructions", "memory",
-             "streaming", "drafts", "addresses")
+             "streaming", "drafts", "addresses", "activity")
 
 
 def run_drafts(base: str, token: str, shots: str | None) -> list[str]:
@@ -1217,6 +1217,116 @@ def run_drafts(base: str, token: str, shots: str | None) -> list[str]:
         expect(box).to_have_value("")
         open_row(a)
         expect(box).to_have_value("")
+        browser.close()
+    return errors
+
+
+class GatedAdapter(ScriptedAdapter):
+    """Answers in order; the ones listed in ``gated`` wait until the test opens their gate."""
+
+    def __init__(self, outputs: list[Any], gated: set[int]) -> None:
+        super().__init__(outputs)
+        self.gates = {n: threading.Event() for n in gated}
+        self.calls = 0
+
+    async def invoke_prepared(self, request: NativePreparedRequest) -> NativeInvocationOutcome:
+        n = self.calls
+        self.calls += 1
+        gate = self.gates.get(n)
+        while gate is not None and not gate.is_set():
+            await asyncio.sleep(0.05)
+        return await super().invoke_prepared(request)
+
+
+def activity_script() -> GatedAdapter:
+    return GatedAdapter([
+        NormalizedFinal((TextBlock("done with A"),)),  # 0: A works until released
+        NormalizedToolCalls((ToolCall(CallId("c0"), 0, ASK_USER_TOOL_ID, {"question": "Which one?"}),)),  # 1
+        NormalizedFinal((TextBlock("thanks"),)),  # 2: the answer
+        NormalizedFinal((TextBlock("from the other tab"),)),  # 3: C, started in another tab, until released
+    ], gated={0, 3})
+
+
+def run_activity(base: str, token: str, shots: str | None, provider: GatedAdapter) -> list[str]:
+    """V3-P80: other conversations at work or waiting, on the list and in the tab's title; one started in
+    another tab appears; pasting files, text with a file, and text too long for a message."""
+    errors: list[str] = []
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        context = browser.new_context(viewport={"width": 1280, "height": 860})
+        page = context.new_page()
+        page.on("console", lambda m: errors.append(m.text) if m.type == "error" and "40" not in m.text else None)
+        page.on("pageerror", lambda e: errors.append(str(e)))
+        row = lambda cid: page.locator(f'#conversation-list .conv-row[data-id="{cid}"]')  # noqa: E731
+
+        page.goto(base)
+        page.fill("#login-token", token)
+        page.click("#login-submit")
+        new_chat(page)
+        a = page.locator(".conv-row.is-selected").get_attribute("data-id")
+        page.fill("#composer-text", "work on A")
+        page.press("#composer-text", "Enter")
+        new_chat(page, "#nav-new-chat")
+        b = page.locator(".conv-row.is-selected").get_attribute("data-id")
+        expect(row(a).locator(".activity-dot.is-working")).to_be_visible(timeout=8000)
+        if shots:
+            page.screenshot(path=os.path.join(shots, "22-activity-working.png"))
+        provider.gates[0].set()
+        expect(row(a).locator(".activity-dot")).to_have_count(0, timeout=8000)
+
+        # A asks; from B it shows as waiting, and the tab's title counts it.
+        row(a).click()
+        expect(page.locator(".item-assistant").last).to_contain_text("done with A", timeout=10000)
+        page.fill("#composer-text", "ask me")
+        page.press("#composer-text", "Enter")
+        expect(page.locator("#question-panel")).to_be_visible(timeout=10000)
+        row(b).click()
+        expect(row(a).locator(".activity-dot.is-waiting")).to_be_visible(timeout=8000)
+        expect(page).to_have_title(re.compile(r"^\(1\) "))
+        if shots:
+            page.screenshot(path=os.path.join(shots, "23-activity-waiting.png"))
+        row(a).click()
+        page.fill("#composer-text", "this one")
+        page.press("#composer-text", "Enter")
+        expect(page.locator(".item-assistant").last).to_contain_text("thanks", timeout=10000)
+        expect(row(a).locator(".activity-dot")).to_have_count(0, timeout=8000)
+        expect(page).not_to_have_title(re.compile(r"^\("))
+
+        # Started in another tab: it appears here, working.
+        other = context.new_page()
+        other.goto(base)
+        new_chat(other, "#nav-new-chat")
+        c = other.locator(".conv-row.is-selected").get_attribute("data-id")
+        other.fill("#composer-text", "from elsewhere")
+        other.press("#composer-text", "Enter")
+        expect(row(c).locator(".activity-dot.is-working")).to_be_visible(timeout=12000)
+        provider.gates[3].set()
+        expect(row(c).locator(".activity-dot")).to_have_count(0, timeout=8000)
+        other.close()
+
+        # Paste (§4): a file alone is attached under a name of its own; text with a file is text; text too
+        # long for a message goes as a .txt.
+        row(b).click()
+        paste = """([text, file]) => {
+            const data = new DataTransfer();
+            if (text !== null) data.setData("text/plain", text);
+            if (file) data.items.add(new File([new Uint8Array([137, 80, 78, 71])], "image.png", { type: "image/png" }));
+            return document.getElementById("composer-text").dispatchEvent(
+                new ClipboardEvent("paste", { clipboardData: data, bubbles: true, cancelable: true }));
+        }"""
+        chips = page.locator("#attach-list .attach-chip")
+        assert page.evaluate(paste, [None, True]) is False  # taken: attached
+        expect(chips).to_have_count(1)
+        expect(chips.first).to_contain_text(re.compile(r"^pasted-\d{8}-\d{6}\.png · 4 bytes"))  # uploaded
+        assert page.evaluate(paste, ["a caption", True]) is True  # left to the browser: text
+        expect(chips).to_have_count(1)
+        assert page.evaluate(paste, ["x" * 32_001, False]) is False
+        expect(chips).to_have_count(2)
+        expect(chips.nth(1)).to_contain_text(re.compile(r"^pasted-\d{8}-\d{6}\.txt"))
+        expect(page.locator("#status-bar")).to_contain_text("attached as a file")
+        assert page.evaluate(paste, ["y" * 100, False]) is True  # short text: as always
+        if shots:
+            page.screenshot(path=os.path.join(shots, "24-paste.png"))
         browser.close()
     return errors
 
@@ -1544,6 +1654,17 @@ def main() -> int:
                 errors += run_addresses(f"http://127.0.0.1:{PORT + 11}",
                                         Path(addressed, "control", "operator.secret").read_text().strip(),
                                         args.screenshots)
+            finally:
+                server.should_exit = True
+                time.sleep(0.5)
+        if "activity" in only:
+            active = os.path.join(tmp, "activity")
+            provider = activity_script()
+            server = serve(active, PORT + 12, provider)
+            try:
+                errors += run_activity(f"http://127.0.0.1:{PORT + 12}",
+                                       Path(active, "control", "operator.secret").read_text().strip(),
+                                       args.screenshots, provider)
             finally:
                 server.should_exit = True
                 time.sleep(0.5)

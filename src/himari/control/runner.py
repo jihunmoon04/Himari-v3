@@ -33,7 +33,7 @@ import asyncio
 import bisect
 import logging
 import time
-from collections.abc import Awaitable, Callable, Iterator
+from collections.abc import Awaitable, Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -384,6 +384,9 @@ class BackgroundRunner:
 
     def status(self, scope: TrustedScope) -> JobStatus:
         return self._status.get(self._key(scope), JobStatus(running=False))
+
+    def running(self, principal: PrincipalId) -> Sequence[ConversationId]:
+        return tuple(key[1] for key, task in self._tasks.items() if key[0] == principal and not task.done())
 
     async def wait(self, scope: TrustedScope) -> JobStatus:
         task = self._tasks.get(self._key(scope))

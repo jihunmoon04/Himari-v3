@@ -1483,6 +1483,11 @@ class ConversationCatalog(Protocol):
         title is stored as None."""
         ...
 
+    async def list_waiting_conversations(self, principal: PrincipalId) -> Sequence[ConversationId]:
+        """V3-P80 §3.2: the principal's Conversations outside the trash in
+        which ``find_waiting_call`` finds a call, in one read; in no order."""
+        ...
+
     async def list_conversations(
         self, principal: PrincipalId, *, limit: int = 50, offset: int = 0, trashed: bool = False
     ) -> Sequence[ConversationSummary]:

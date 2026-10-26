@@ -1588,6 +1588,23 @@ class SqliteData:
             tx.authorized(scope)
             return self._waiting(tx, scope)
 
+    async def list_waiting_conversations(self, principal: PrincipalId) -> Sequence[ConversationId]:
+        # ``_waiting`` for each Conversation at once: its latest PROJECTED Run with an Event, whose group is
+        # one ask_user call still PENDING.
+        with self._tx() as tx:
+            rows = tx.all(
+                "SELECT c.conversation_id FROM conversations c JOIN runs r ON r.conversation_id=c.conversation_id"
+                " AND r.seq=(SELECT MAX(l.seq) FROM runs l WHERE l.conversation_id=c.conversation_id"
+                " AND l.status=? AND l.projected_event_id IS NOT NULL)"
+                " WHERE c.owner=? AND c.trashed_at IS NULL"
+                " AND (SELECT COUNT(*) FROM tool_executions t WHERE t.conversation_id=r.conversation_id"
+                " AND t.run_id=r.run_id)=1"
+                " AND EXISTS (SELECT 1 FROM tool_executions t WHERE t.conversation_id=r.conversation_id"
+                " AND t.run_id=r.run_id AND t.tool_id=? AND t.status=?)",
+                RunStatus.PROJECTED.value, principal, ASK_USER_TOOL_ID, ToolExecutionStatus.PENDING.value,
+            )
+            return tuple(ConversationId(row["conversation_id"]) for row in rows)
+
     async def answer_pending_call(
         self, scope: TrustedScope, call: CallRef, answer: UserMessage
     ) -> AnswerCommit:

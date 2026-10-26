@@ -885,6 +885,10 @@ class InMemoryData:
     async def find_waiting_call(self, scope: TrustedScope) -> CallRef | None:
         return self._waiting(self._conv(scope))
 
+    async def list_waiting_conversations(self, principal: PrincipalId) -> Sequence[ConversationId]:
+        return tuple(cid for cid, conv in self._store._conversations.items()
+                     if conv.owner == principal and conv.trashed_at is None and self._waiting(conv) is not None)
+
     async def answer_pending_call(
         self, scope: TrustedScope, call: CallRef, answer: UserMessage
     ) -> AnswerCommit:
