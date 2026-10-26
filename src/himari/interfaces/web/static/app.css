@@ -3952,7 +3952,7 @@ button.files-crumb:hover { background: var(--surface-hover); color: var(--text);
 /* The sign-in screen: a card in the middle of the page, in the theme's colours, as the rest of the app. */
 .surface.login:not([hidden]) {
   display: flex;
-  align-items: center;
+  align-items: safe center; /* a card taller than the screen scrolls from its top (review N6) */
   justify-content: center;
   min-height: 100%;
   padding: var(--space-4);

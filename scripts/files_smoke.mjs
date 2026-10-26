@@ -167,6 +167,19 @@ const within = (promise) => Promise.race([promise, new Promise((r) => setTimeout
   assert.deepEqual(asked[0][1], ["Its content is kept as a previous version on the server for 30 days."]);
   assert.deepEqual(sent.find(([m, p]) => m === "POST")[2], { path: "/home/u/big.pdf", expected: [3, 3, 3, 3] });
   assert.ok(files.body.text().includes("other.txt"), "the folder again");
+
+  // Review B1: a PDF opened while the row's delete was on its way stays open.
+  let release;
+  routes["POST /api/machine/file/delete"] = new Promise((r) => { release = r; });
+  const deleting = files.deleteFile("/home/u/big.pdf");
+  await new Promise((r) => setTimeout(r, 0));
+  let destroyed = false;
+  files.ticket += 1; // something else opened meanwhile
+  files.pdf = { path: "/home/u/other.pdf", pollTimer: null, view: { current: 0, zoom: 1, destroy() { destroyed = true; } } };
+  release({ path: "/home/u/big.pdf", previous_kept: true });
+  await deleting;
+  assert.equal(destroyed, false);
+  assert.equal(files.pdf.path, "/home/u/other.pdf");
 }
 
 // --- the editor (V3-P75 §7), with a fake CodeMirror and a fake server ---------------------------------

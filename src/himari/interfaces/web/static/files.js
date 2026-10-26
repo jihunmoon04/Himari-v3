@@ -327,7 +327,7 @@ export class FilesPane {
     this.reviewControls = [];
     if (this.pdf) {
       clearTimeout(this.pdf.pollTimer);
-      keepPdfPlace(this.pdf.path, this.pdf.view.current + 1, this.pdf.view.zoom);
+      this.keepPlace();
       this.pdf.view.destroy();
     }
     this.pdf = null;
@@ -350,6 +350,11 @@ export class FilesPane {
     const open = this.doc !== null || this.pdf !== null;
     this.closeDoc();
     if (open) this.body.replaceChildren();
+  }
+
+  /* Where the PDF shown is now (its page and zoom), kept for the next time it opens. */
+  keepPlace() {
+    if (this.pdf) keepPdfPlace(this.pdf.path, this.pdf.view.current + 1, this.pdf.view.zoom);
   }
 
   /* ------------------------------------------------- unsaved text kept in the browser (V3-P78 §4.1) */
@@ -713,7 +718,7 @@ export class FilesPane {
                   identity: identity || shown.identity, view, bar, saving: false, pollTimer: null };
     this.pdf = pdf;
     this.body.replaceChildren(bar, view.element);
-    if (zoom !== null && zoom >= 0.25 && zoom <= 8) view.zoom = zoom; // as it was left (the view keeps its own bounds)
+    if (zoom !== null && Number.isFinite(zoom)) view.zoom = Math.min(5, Math.max(0.5, zoom)); // pdfpane's ZOOM_MIN/MAX
     view.show(page);
     const tool = view.writable ? this.inkTool() : null;
     view.setTool(tool);
@@ -1019,6 +1024,7 @@ export class FilesPane {
 
   /* "3 / 12" in the head; pressed, a page number to go to. */
   paintPage(number, pages) {
+    this.keepPlace(); // the page in view, kept as it changes: a closed tab or a reload never calls closeDoc (B3)
     if (!this.pageLabel) return;
     this.pageLabel.textContent = `${number} / ${pages}`;
     this.pageLabel.hidden = false;
@@ -1476,8 +1482,11 @@ export class FilesPane {
     let kind = row === null ? this.fileKind : null;
     try {
       now = await this.api("GET", `/api/machine/stat?${query(path)}`);
-      // From a row, its kind as the server reads it (a PDF's content is kept up to 64 MiB) — never the name.
-      if (row !== null) kind = (await this.api("GET", `/api/machine/file?${query(path)}`)).kind;
+      // From a row, its kind as the server reads it (a PDF's content is kept up to 64 MiB) — never the name;
+      // asked only where it decides what is said (over 1 MiB, up to 64 MiB; review N1).
+      if (row !== null && now.size > EDIT_MAX_BYTES && now.size <= PDF_MAX_BYTES) {
+        kind = (await this.api("GET", `/api/machine/file?${query(path)}`)).kind;
+      }
     } catch (error) {
       told(error.message);
       return;
@@ -1490,6 +1499,7 @@ export class FilesPane {
     const lines = big ? ["This file is over 1 MiB: no previous version of it is kept, so it cannot be put back."]
       : ["Its content is kept as a previous version on the server for 30 days."];
     if (doc && doc.dirty) lines.push("Your unsaved changes are dropped too.");
+    if (row !== null && this.openElsewhere(path)) lines.push("It is open with unsaved changes in the other panel.");
     if (row === null && this.pdf && this.pdf.view.ink.dirty) lines.push("Your unsaved ink is dropped too.");
     const offered = doc !== null && doc.offer !== null; // as asked: a Restore meanwhile is not dropped (N-b)
     if (!(await this.confirm(`Delete ${name}?`, lines, "Delete"))) return;
@@ -1499,7 +1509,7 @@ export class FilesPane {
       const gone = await this.api("POST", "/api/machine/file/delete", { path, expected: now.identity });
       // Its unsaved text was dropped with it (told above); text only offered stays, offered again there (re-review C1).
       if (doc && !offered) this.dropKept(doc);
-      if (this.doc === doc) this.closeDoc();
+      if (row === null && this.doc === doc) this.closeDoc(); // a row's: whatever was opened meanwhile stays (B1)
       if (this.ticket === ticket) await this.openFolder(path.slice(0, path.lastIndexOf("/")) || "/");
       else if (row !== null) return; // moved on meanwhile: nothing to show here
       if (!big && !gone.previous_kept) { // told it would be kept: say it was not, where it stays in sight (review B2)

@@ -652,8 +652,11 @@ function newChatShortcut() {
 
 /* Cmd/Ctrl+Shift+O: a new chat (as ChatGPT); Shift+Esc: the message box. Signed in, with no dialog open. */
 function shortcut(event) {
-  if (!$("surface-login").hidden || document.querySelector("dialog[open]")) return;
-  if ((event.metaKey || event.ctrlKey) && event.shiftKey && !event.altKey && event.key.toLowerCase() === "o") {
+  // Any dialog: a <dialog> open, or the confirmation (a div; review B2).
+  if (!$("surface-login").hidden || document.querySelector("dialog[open], [aria-modal='true']:not([hidden])")) return;
+  if (event.isComposing || event.repeat) return; // held down: one chat, not one per repeat (N4)
+  // The key, not the character: a Korean layout types "ㅒ" there (N4).
+  if ((event.metaKey || event.ctrlKey) && event.shiftKey && !event.altKey && event.code === "KeyO") {
     event.preventDefault();
     $("nav-new-chat").click();
   } else if (event.key === "Escape" && event.shiftKey && !$("composer-wrap").closest("[hidden]")) {
@@ -3624,7 +3627,10 @@ async function boot() {
   // V3-P78 §3.3: what waits to be kept goes now (Safari may not finish it; the short delay is the guarantee).
   const keepNow = () => {
     if (app.placeTouched && typeof app.place === "string") drafts.set(app.place, composerDraft());
-    for (const pane of [filesPanel, filesSurface]) pane.keepNow();
+    for (const pane of [filesPanel, filesSurface]) {
+      pane.keepNow();
+      pane.keepPlace(); // a PDF's page and zoom, as the page goes (web polish 2, B3)
+    }
   };
   window.addEventListener("pagehide", keepNow);
   document.addEventListener("visibilitychange", () => {

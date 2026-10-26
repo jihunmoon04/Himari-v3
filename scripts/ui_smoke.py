@@ -1407,6 +1407,13 @@ def run_polish(base: str, token: str, shots: str | None) -> list[str]:
         expect(page.locator("#conversation-list .conv-row")).to_have_count(2, timeout=10000)
         expect(page.locator("#composer-text")).to_be_focused()
         assert page.locator("#nav-new-chat").get_attribute("title").startswith("New chat (")
+        page.click("#chat-menu-toggle")  # with a confirmation up, the shortcut does nothing (review B2)
+        page.click("#chat-menu-delete")
+        expect(page.locator("#confirm-dialog")).to_be_visible()
+        page.keyboard.press("Control+Shift+O")
+        page.wait_for_timeout(500)
+        expect(page.locator("#conversation-list .conv-row")).to_have_count(2)
+        page.click("#confirm-cancel")
         page.locator(f'#conversation-list .conv-row[data-id="{cid}"]').click()
         expect(page.locator(".item-assistant").last).to_contain_text("Paragraph 40", timeout=10000)
 
