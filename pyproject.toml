@@ -23,7 +23,7 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 "himari.interfaces.web" = ["static/*", "static/katex/*", "static/katex/fonts/*", "static/codemirror/*",
-                          "static/pdfjs/*", "static/pdfjs/wasm/*", "static/pdfjs/cmaps/*"]
+                          "static/pdfjs/*", "static/pdfjs/wasm/*", "static/pdfjs/cmaps/*", "static/freehand/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -1,0 +1,12 @@
+perfect-freehand (Steve Ruiz), MIT (LICENSE), for the PDF ink layer (V3-P77 §4.6): the outline of a
+stroke whose width follows the pen's pressure. The same outline is drawn on screen and written into
+the ink annotation's appearance stream, so the two look alike.
+
+perfect-freehand.mjs is dist/esm/index.mjs of the npm package perfect-freehand 1.2.3, unchanged:
+
+    https://registry.npmjs.org/perfect-freehand/-/perfect-freehand-1.2.3.tgz
+    integrity sha512-bHZSfqDHGNlPpgH2yxXgPHlQSPpEbo+qg7li0M78J9vNAi2yjwLeA4x79BEQhX44lEWpCLSFCeRZwpw0niiXPA==
+
+sha256 of perfect-freehand.mjs: a02e221f71a757e46915a51d8f5ffc8d1788d9134e063b3edd21f429c973d46c
+
+pdfink.js imports it; the Web server serves only the files listed in STATIC_FILES (app.py).
