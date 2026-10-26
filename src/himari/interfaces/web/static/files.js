@@ -1460,13 +1460,14 @@ export class FilesPane {
       : ["Its content is kept as a previous version on the server for 30 days."];
     if (doc && doc.dirty) lines.push("Your unsaved changes are dropped too.");
     if (this.pdf && this.pdf.view.ink.dirty) lines.push("Your unsaved ink is dropped too.");
+    const offered = doc !== null && doc.offer !== null; // as asked: a Restore meanwhile is not dropped (N-b)
     if (!(await this.confirm(`Delete ${name}?`, lines, "Delete"))) return;
     if (big && !(await this.confirm(`Delete ${name} for good?`, ["It cannot be put back."], "Delete for good"))) return;
     const ticket = this.ticket; // anything opened meanwhile stays (PR #95 re-review C1)
     try {
       const gone = await this.api("POST", "/api/machine/file/delete", { path, expected: now.identity });
       // Its unsaved text was dropped with it (told above); text only offered stays, offered again there (re-review C1).
-      if (doc && !doc.offer) this.dropKept(doc);
+      if (doc && !offered) this.dropKept(doc);
       if (this.doc === doc) this.closeDoc();
       if (this.ticket === ticket) await this.openFolder(path.slice(0, path.lastIndexOf("/")) || "/");
       if (!big && !gone.previous_kept) { // told it would be kept: say it was not, where it stays in sight (review B2)

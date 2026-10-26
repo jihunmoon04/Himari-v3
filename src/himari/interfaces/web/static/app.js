@@ -1896,7 +1896,13 @@ async function sendMessage(event) {
     }
   } catch (error) {
     if (error.kind !== "network") drafts.clearSending(sentTo); // refused: it was not sent
-    if (generation !== app.generation) return;
+    if (generation !== app.generation) {
+      // Left and back while it was sent (final check N-a): the draft shown is that message's.
+      if (error.kind === "network" && app.place === sentTo) {
+        status("The message may or may not have been received; check the conversation before sending again.", "warn");
+      }
+      return;
+    }
     if (error.code === "attachment_refused" && error.fileId) { // which chip (V3-P66 §9)
       const refused = app.attachments.find((a) => a.fileId === error.fileId);
       if (refused) Object.assign(refused, { state: "failed", note: `${error.message} — upload it again` });
