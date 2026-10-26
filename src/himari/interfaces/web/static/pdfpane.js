@@ -46,7 +46,6 @@ const AROUND = "100% 0px"; // pages drawn beyond the view: one screen up and dow
 const REDRAW_MS = 150; // after a zoom, before the pages are drawn again at the new scale
 const ERASER_PX = 8; // the eraser's reach on screen, CSS px
 const HIDDEN_PREFIX = "pdfjs_internal_editor_himari_"; // PDF.js's own prefix for edited annotations (§14.3)
-export const SIGNED_NOTICE = "This PDF is signed. Notes are added after the signature; some apps show that as a change.";
 
 export const PDFJS_OPTIONS = Object.freeze({
   enableXfa: false,
@@ -94,14 +93,13 @@ export class PdfError extends Error {
 
 export class PdfView {
   /* el(tag, class, text) as the pane's; onPage(page, pages) when the page in view changes; onInk() when the
-   * ink changed (drawn, erased, undone, saved); onNotice(text) for a word to the user. */
-  constructor({ pdfjs, el, bytes, onPage = () => {}, onInk = () => {}, onNotice = () => {} }) {
+   * ink changed (drawn, erased, undone, saved). It may be opened before it is shown (show()). */
+  constructor({ pdfjs, el, bytes, onPage = () => {}, onInk = () => {} }) {
     this.pdfjs = pdfjs;
     this.el = el;
     this.bytes = bytes;
     this.onPage = onPage;
     this.onInk = onInk;
-    this.onNotice = onNotice;
     this.ink = new Ink();
     this.file = null; // pdfdoc.js's reading of the bytes, to write on
     this.writable = false;
@@ -179,6 +177,14 @@ export class PdfView {
 
   get numPages() {
     return this.pages.length;
+  }
+
+  /* Its element now in place: fitted to its width, on ``page``. */
+  show(page = 1) {
+    this.current = Math.min(this.pages.length, Math.max(1, page)) - 1;
+    this.layout();
+    if (page > 1) this.goTo(page);
+    else this.reportPage(true);
   }
 
   /* --------------------------------------------------------------- size */
@@ -543,10 +549,6 @@ export class PdfView {
       this.eraseAt(event);
       return;
     }
-    if (this.signed && !this.toldSigned) {
-      this.toldSigned = true;
-      this.onNotice(SIGNED_NOTICE);
-    }
     this.active.stroke = newStroke(index, this.tool, this.active.pen);
     this.extend([event], []);
   }
@@ -554,6 +556,8 @@ export class PdfView {
   pointerMove(event) {
     const active = this.active;
     if (!active || event.pointerId !== active.id) return;
+    // Where the page is now: a word shown above the pages while drawing moves them (PR #104 review P2).
+    active.rect = this.pages[active.index].box.getBoundingClientRect();
     const events = (event.getCoalescedEvents && event.getCoalescedEvents()) || [];
     if (!active.stroke) {
       for (const each of events.length ? events : [event]) this.eraseAt(each);

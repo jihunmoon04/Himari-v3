@@ -31,6 +31,7 @@ const EDIT_MAX_BYTES = 1024 * 1024; // the server's limit for the editor (§7.7,
 const POLL_MS = 5000; // how often an open file is checked on disk (§5.3)
 const PDF_MAX_BYTES = 64 * 1024 * 1024; // the PDF view's limit (V3-P77 §3.3, Q2), as pdfpane.js's
 const INK_TOOL_KEY = "himari.pdf.tool"; // the ink tool picked last, in this browser (V3-P77 §4.2)
+const SIGNED_NOTICE = "This PDF is signed. Notes are added after the signature; some apps show that as a change.";
 const INK_TOOLS = { pen: { tool: "pen", color: "black", size: "fine" },
                     highlighter: { tool: "highlighter", color: "yellow", size: "wide" }, eraser: { tool: "eraser" } };
 const CHANGE_KINDS = { created: "made by HIMARI", changed: "changed by HIMARI", deleted: "deleted by HIMARI",
@@ -477,53 +478,79 @@ export class FilesPane {
 
   /* ----------------------------------------------------------- a PDF (V3-P77 §3) */
 
-  async showPdf(shown, ticket, page = 1, carried = null) {
+  async showPdf(shown, ticket, page = 1) {
     const box = this.el("div", "files-view");
     box.append(this.el("p", "files-note", `Opening ${humanSize(shown.size)}…`));
     this.body.replaceChildren(box);
+    let made;
+    try {
+      made = await this.loadPdfView(shown, null);
+    } catch (error) {
+      if (ticket === this.ticket) this.pdfFailed(shown, error.message);
+      return;
+    }
+    if (ticket !== this.ticket) {
+      made.view.destroy();
+      return;
+    }
+    this.installPdf(shown, made, page);
+  }
+
+  /* A PDF read and opened in a view of its own, not yet shown — the one shown stays until this is ready
+   * (PR #104 review P1-2). ``carried``: unsaved ink put on it (§5.5); {view, identity, left}. Throws with a
+   * message to show. */
+  async loadPdfView(shown, carried) {
     let module, pdfjs, read;
     try {
       [module, read] = await Promise.all([this.loadPdf(), this.readFile(shown.path, PDF_MAX_BYTES)]);
       pdfjs = await module.loadPdfjs();
     } catch (error) {
-      if (ticket === this.ticket) this.pdfFailed(shown, error.status ? error.message : "The PDF view could not be loaded.");
-      return;
+      throw new Error(error.status ? error.message : "The PDF view could not be loaded.");
     }
-    if (ticket !== this.ticket) return;
     const view = new module.PdfView({
       pdfjs, el: this.el, bytes: read.bytes,
-      onPage: (number, pages) => this.paintPage(number, pages),
+      onPage: (number, pages) => { if (this.pdf && this.pdf.view === view) this.paintPage(number, pages); },
       onInk: () => { if (this.pdf && this.pdf.view === view) this.paintInk(); },
-      onNotice: (text) => { if (this.pdf && this.pdf.view === view) this.showPdfNote(text); },
     });
+    try {
+      await view.open();
+      const left = carried ? await view.carryIn(carried) : 0;
+      return { view, identity: read.identity, left };
+    } catch (error) {
+      view.destroy();
+      throw error;
+    }
+  }
+
+  /* The view shown: fitted to the pane, on ``page``, its tool picked, checked on disk from now on. */
+  installPdf(shown, { view, identity, left }, page) {
     const bar = this.el("div", "files-bar");
     bar.hidden = true;
     // The identity of the bytes read, which a save is made against (V3-P77 §5.3); the shown one if not told.
-    this.pdf = { path: shown.path, name: shown.path.slice(shown.path.lastIndexOf("/") + 1),
-                 identity: read.identity || shown.identity, view, bar, saving: false, pollTimer: null };
-    const pdf = this.pdf;
-    this.body.replaceChildren(bar, view.element); // in place first: the pages fit its width
-    try {
-      await view.open();
-    } catch (error) {
-      if (this.pdf === pdf) {
-        this.closeDoc();
-        this.pdfFailed(shown, error.message);
-      }
-      return;
+    const pdf = { path: shown.path, name: shown.path.slice(shown.path.lastIndexOf("/") + 1),
+                  identity: identity || shown.identity, view, bar, saving: false, pollTimer: null };
+    this.pdf = pdf;
+    this.body.replaceChildren(bar, view.element);
+    view.show(page);
+    const tool = view.writable ? this.inkTool() : null;
+    view.setTool(tool);
+    if (tool) this.tellSigned();
+    if (left) {
+      this.showPdfNote(`${left} unsaved stroke${left === 1 ? " was" : "s were"} on pages this version does not have, ` +
+                       "and could not be kept.");
     }
-    if (this.pdf !== pdf) return;
-    if (page > 1) view.goTo(page);
-    view.setTool(view.writable ? this.inkTool() : null);
-    if (carried) {
-      const left = await view.carryIn(carried);
-      if (this.pdf === pdf && left) {
-        this.showPdfNote(`${left} unsaved stroke${left === 1 ? " was" : "s were"} on pages this version does not have, ` +
-                         "and could not be kept.");
-      }
-    }
+    this.paintPage(view.current + 1, view.numPages);
     this.paintInk();
     this.schedulePdfPoll(pdf);
+  }
+
+  /* A signed PDF, told once a drawing tool is picked — before any stroke, so no word above the pages moves
+   * them under a pen (PR #104 review P2). */
+  tellSigned() {
+    const pdf = this.pdf;
+    if (!pdf || !pdf.view.signed || pdf.toldSigned) return;
+    pdf.toldSigned = true;
+    this.showPdfNote(SIGNED_NOTICE);
   }
 
   /* ----------------------------------------------------------- ink (V3-P77 §4, §5) */
@@ -540,6 +567,7 @@ export class FilesPane {
   pickInkTool(tool) {
     if (!this.pdf) return;
     this.pdf.view.setTool(tool);
+    if (tool) this.tellSigned();
     try {
       if (tool) localStorage.setItem(INK_TOOL_KEY, JSON.stringify(tool));
       else localStorage.removeItem(INK_TOOL_KEY);
@@ -638,36 +666,56 @@ export class FilesPane {
   }
 
   /* §5: the ink drawn and erased since it was read, added after the PDF's bytes on the server. */
+  /* PR #104 review P1-1: no drawing, erasing or undoing from the moment the ink to save is taken until the
+   * server's answer is read back: what is saved is all there is, and nothing drawn meanwhile is lost. A
+   * stroke still being drawn is finished first. */
   async savePdf() {
     const pdf = this.pdf;
     if (!pdf || pdf.saving) return;
+    if (pdf.view.active) {
+      this.paintInk("Finish the stroke, then save");
+      return;
+    }
+    pdf.saving = true;
+    pdf.view.saving = true;
+    this.paintInk();
+    const done = (note) => {
+      pdf.saving = false;
+      pdf.view.saving = false;
+      this.paintInk(note);
+    };
     let increment;
     try {
       increment = await pdf.view.increment();
     } catch (error) {
-      this.paintInk(error.message);
+      if (this.pdf === pdf) done(error.message);
       return;
     }
-    if (!increment || this.pdf !== pdf) return;
-    pdf.saving = true;
-    pdf.view.saving = true;
-    this.paintInk();
+    if (this.pdf !== pdf) return;
+    if (!increment) {
+      done();
+      return;
+    }
+    let answer;
     try {
-      const answer = await this.appendPdf(pdf.path, increment, pdf.identity);
-      if (this.pdf !== pdf) return;
-      pdf.identity = answer.identity;
-      await pdf.view.saved(increment);
-      pdf.saving = false;
-      pdf.view.saving = false;
-      pdf.bar.hidden = true;
-      this.paintInk(answer.previous_kept ? null : "Saved, but its previous version could not be kept");
+      answer = await this.appendPdf(pdf.path, increment, pdf.identity);
     } catch (error) {
       if (this.pdf !== pdf) return;
-      pdf.saving = false;
-      pdf.view.saving = false;
+      done(error.code === "changed" ? null : error.message || "Not saved");
       if (error.code === "changed") this.showPdfChanged(true);
-      else this.paintInk(error.message || "Not saved");
+      return;
     }
+    if (this.pdf !== pdf) return;
+    pdf.identity = answer.identity;
+    try {
+      await pdf.view.saved(increment);
+    } catch (ignored) { // saved on the server, not read back here: read it again (no ink is unsaved now)
+      done();
+      await this.reopenPdf(false);
+      return;
+    }
+    pdf.bar.hidden = true;
+    done(answer.previous_kept ? null : "Saved, but its previous version could not be kept");
   }
 
   /* A word above the pages (a signed PDF; strokes that could not be kept), until dismissed. */
@@ -681,15 +729,16 @@ export class FilesPane {
     pdf.bar.hidden = false;
   }
 
-  /* §5.5: the PDF changed on the server since it was read, with ink unsaved here: the user picks. */
-  showPdfChanged(refused) {
+  /* §5.5: the PDF changed on the server since it was read, with ink unsaved here: the user picks. ``problem``:
+   * why the server's version could not be put in its place (the ink stays). */
+  showPdfChanged(refused, problem = null) {
     const pdf = this.pdf;
     if (!pdf) return;
-    pdf.bar.replaceChildren(this.el("p", null, refused
+    pdf.bar.replaceChildren(this.el("p", null, problem ? `${problem} Your ink is still here.` : refused
       ? "Not saved: this PDF was changed on the server since you opened it. Your ink is still here."
       : "This PDF was changed on the server since you opened it. Your ink is still here."));
-    const actions = [["Load the server's version and keep my ink", () => this.reopenPdf(pdf.view.ink.carry())],
-                     ["Discard my ink", () => this.reopenPdf(null)]];
+    const actions = [["Load the server's version and keep my ink", () => this.reopenPdf(true)],
+                     ["Discard my ink", () => this.reopenPdf(false)]];
     for (const [label, action] of actions) {
       const button = this.el("button", "link-button", label);
       button.type = "button";
@@ -716,23 +765,66 @@ export class FilesPane {
     }
   }
 
-  /* The server's version, on the page it was at; ``carried``: unsaved ink to put on it (§5.5). */
-  async reopenPdf(carried) {
+  /* The server's version, on the page it was at; ``keep``: the unsaved ink put on it (§5.5). The view shown
+   * stays — its ink untouched, nothing drawn on it meanwhile — until the new one is ready (PR #104 review
+   * P1-2); if that cannot be, the ink stays where it is and the user is told why. */
+  async reopenPdf(keep) {
     const pdf = this.pdf;
-    if (!pdf) return;
+    if (!pdf || pdf.reopening) return;
     const page = pdf.view.current + 1;
     const ticket = ++this.ticket;
+    pdf.reopening = true;
+    pdf.saving = true; // no save, no check on disk
+    pdf.view.saving = true; // no drawing: what is carried is all there is
+    this.paintInk();
+    const carried = keep ? pdf.view.ink.carry() : null;
+    const stay = (problem) => {
+      pdf.reopening = false;
+      pdf.saving = false;
+      pdf.view.saving = false;
+      if (this.pdf !== pdf) return;
+      this.paintInk();
+      this.showPdfChanged(false, problem);
+    };
+    let shown;
     try {
-      const shown = await this.api("GET", `/api/machine/file?${query(pdf.path)}`);
+      shown = await this.api("GET", `/api/machine/file?${query(pdf.path)}`);
+    } catch (error) {
       if (ticket !== this.ticket) return;
+      if (keep) return stay(`The server's version could not be read (${error.message}).`);
+      this.closeDoc();
+      this.failed(pdf.path, error);
+      return;
+    }
+    if (ticket !== this.ticket) return;
+    if (shown.kind !== "pdf" || shown.size > PDF_MAX_BYTES) {
+      if (keep) return stay("The server's version is not a PDF that can be opened here.");
       this.closeDoc();
       this.fileKind = shown.kind;
       this.paintTools(shown);
-      if (shown.kind === "pdf" && shown.size <= PDF_MAX_BYTES) await this.showPdf(shown, ticket, page, carried);
-      else this.body.replaceChildren(this.view(shown));
-    } catch (error) {
-      if (ticket === this.ticket) this.failed(pdf.path, error);
+      this.body.replaceChildren(this.view(shown));
+      return;
     }
+    let made;
+    try {
+      made = await this.loadPdfView(shown, carried);
+    } catch (error) {
+      if (ticket !== this.ticket) return;
+      if (keep) return stay(`The server's version could not be opened: ${error.message}`);
+      this.closeDoc();
+      this.fileKind = shown.kind;
+      this.paintTools(shown);
+      this.pdfFailed(shown, error.message);
+      return;
+    }
+    if (ticket !== this.ticket) {
+      made.view.destroy();
+      return;
+    }
+    this.closeDoc();
+    this.fileKind = shown.kind;
+    this.paintTools(shown);
+    this.installPdf(shown, made, page);
   }
 
   pdfFailed(shown, message) {
@@ -797,7 +889,7 @@ export class FilesPane {
       if (pdf.bar.hidden) this.showPdfChanged(false);
       return;
     }
-    await this.reopenPdf(null);
+    await this.reopenPdf(false);
   }
 
   /* ----------------------------------------------------------- the editor (§7) */

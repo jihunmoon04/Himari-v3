@@ -789,7 +789,7 @@ const DIFF = { path: "/home/u/a.txt", name: "a.txt", kind: "changed", state: "ok
 }
 
 /* V3-P77 §3: a PDF opens in the PDF view, whose module and bytes the test hands out. */
-function pdfPane(routes, { fail = null, confirms = null, appended = null, answer = null } = {}) {
+function pdfPane(routes, { fail = null, confirms = null, appended = null, answer = null, failing = new Set() } = {}) {
   const views = [];
   const reads = [];
   const module = {
@@ -804,6 +804,7 @@ function pdfPane(routes, { fail = null, confirms = null, appended = null, answer
         this.element = el("div", "pdf-view");
         views.push(this);
       }
+      show(page) { this.current = page - 1; if (page > 1) this.went = page; }
       setTool(tool) { this.tool = tool; }
       undo() {}
       redo() {}
@@ -813,6 +814,8 @@ function pdfPane(routes, { fail = null, confirms = null, appended = null, answer
       get numPages() { return 3; }
       async open() {
         if (fail) throw Object.assign(new Error(fail), { code: "password" });
+        if (failing.has(views.indexOf(this))) throw Object.assign(new Error("This PDF could not be opened here."),
+                                                                   { code: "unreadable" });
         this.onPage(1, 3);
       }
       goTo(number) { this.went = number; this.current = number - 1; this.onPage(number, 3); }
@@ -887,7 +890,8 @@ const pageLabel = (files) => files.tools.children.find((c) => (c.className || ""
   await files.openFolder("/home/u");
   pending[0].resolve({ bytes: new Uint8Array(4), identity: null });
   await opening;
-  assert.equal(views.length, 0);
+  assert.ok(views.every((view) => view.destroyed), "opened late, let go unseen");
+  assert.ok(!views.some((view) => files.body.children.includes(view.element)));
   assert.ok(files.body.text().includes("x"));
 }
 
@@ -1081,6 +1085,90 @@ async function openPdf(routes, options = {}) {
   assert.match(made.files.ink.state.title, /encrypted/);
   assert.deepEqual(made.files.pdf.identity, PDF.identity, "no identity told: the shown one");
   made.files.closeDoc();
+}
+
+// PR #104 review P1-1: from the moment the ink to save is taken, nothing is drawn, erased or undone until the
+// answer is read back (so nothing drawn meanwhile is dropped); a stroke under way is finished first.
+{
+  const { files, views } = await openPdf({ "GET /api/machine/file": PDF });
+  const view = views[0];
+  view.ink.dirty = true;
+  const made = deferred();
+  view.increment = () => made.promise;
+  const saving = files.savePdf();
+  await settle();
+  assert.ok(view.saving && files.pdf.saving, "frozen while the increment is made");
+  assert.equal(files.ink.state.textContent, "Saving…");
+  made.resolve(Uint8Array.of(1));
+  await saving;
+  assert.ok(!view.saving && !files.pdf.saving);
+  // A failed increment, or a refused save, lets the ink be drawn on again.
+  view.ink.dirty = true;
+  view.increment = async () => { throw new Error("Not saved: the PDF could not be updated in place."); };
+  await files.savePdf();
+  assert.ok(!view.saving && files.ink.state.textContent === "Not saved: the PDF could not be updated in place.");
+  view.active = { id: 1 };
+  view.increment = async () => { throw new Error("not asked"); };
+  await files.savePdf();
+  assert.equal(files.ink.state.textContent, "Finish the stroke, then save");
+  assert.ok(!view.saving);
+  files.closeDoc();
+}
+
+// PR #104 review P1-2: "keep my ink" — the view shown, with its ink, stays until the server's version is open
+// and the ink is on it; if that cannot be, nothing is lost and the user is told.
+for (const [why, routes, setup, told] of [
+  ["its read fails", { "GET /api/machine/file": PDF }, (made) => made.pending, /could not be opened: Gone/],
+  ["it is no PDF now", { "GET /api/machine/file": () => (made_count++ ? { ...PDF, kind: "binary" } : PDF) }, null,
+   /not a PDF that can be opened here/],
+  ["it cannot be opened", { "GET /api/machine/file": PDF }, "fail-open", /could not be opened: This PDF could not/],
+]) {
+  var made_count = 0;
+  const made = await openPdf(routes, setup === "fail-open" ? { failing: new Set([1]) } : {});
+  const { files, views, pending } = made;
+  const old = views[0];
+  old.ink.dirty = true;
+  files.showPdfChanged(true);
+  const keep = files.pdf.bar.children.find((c) => c.textContent === "Load the server's version and keep my ink");
+  const reopening = keep.listeners.click[0]();
+  if (setup) {
+    for (let i = 0; i < 20 && pending.length < 2; i++) await settle();
+    assert.ok(old.saving, `${why}: no drawing while the other version is fetched`);
+    if (typeof setup === "function") pending[1].reject(Object.assign(new Error("Gone"), { status: 404 }));
+    else pending[1].resolve({ bytes: new Uint8Array(4), identity: null });
+  }
+  await reopening;
+  assert.equal(files.pdf.view, old, `${why}: the view shown stays`);
+  assert.ok(!old.destroyed && old.ink.dirty && !old.saving, `${why}: its ink kept, drawn on again`);
+  assert.ok(files.body.children.includes(old.element));
+  assert.match(files.pdf.bar.text(), told);
+  assert.ok(files.pdf.bar.text().includes("Your ink is still here"));
+  assert.ok(views.slice(1).every((view) => view.destroyed), `${why}: a new view that failed is let go`);
+  files.closeDoc();
+}
+{
+  const { files, views, pending } = await openPdf({ "GET /api/machine/file": PDF });
+  views[0].ink.dirty = true;
+  const reopening = files.reopenPdf(true);
+  for (let i = 0; i < 20 && pending.length < 2; i++) await settle();
+  assert.ok(!views[0].destroyed, "the old view stays until the new one is ready");
+  pending[1].resolve({ bytes: new Uint8Array(4), identity: ["1", "2", "3", "8"] });
+  await reopening;
+  assert.ok(views[0].destroyed && files.pdf.view === views[1]);
+  assert.deepEqual(views[1].carried.add, ["unsaved"]);
+  files.closeDoc();
+}
+
+// PR #104 review P2: a signed PDF is told when a drawing tool is picked, never under a pen.
+{
+  const { files, views } = await openPdf({ "GET /api/machine/file": PDF });
+  views[0].signed = true;
+  await files.ink.tools.pen.listeners.click[0]();
+  assert.match(files.pdf.bar.text(), /This PDF is signed/);
+  files.pdf.bar.hidden = true;
+  await files.ink.tools.highlighter.listeners.click[0]();
+  assert.ok(files.pdf.bar.hidden, "told once");
+  files.closeDoc();
 }
 
 // PR #103 re-review: a PDF the view could not open is still told kept on its delete (by its kind).

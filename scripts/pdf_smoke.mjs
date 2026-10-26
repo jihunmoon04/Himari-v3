@@ -340,7 +340,7 @@ const { Ink, newStroke, outline, specOf, strokeFromSaved, hits, TOOLS } = inkMod
     remove() { if (this.parentNode) this.parentNode.children = this.parentNode.children.filter((c) => c !== this); }
     setAttribute(name, value) { this.attributes[name] = value; }
     addEventListener(type, fn) { (this.listeners[type] ||= []).push(fn); }
-    getBoundingClientRect() { return { top: 0, left: 0 }; }
+    getBoundingClientRect() { return { top: this.top || 0, left: 0 }; }
     setPointerCapture(id) { this.captured = id; }
     releasePointerCapture() { this.captured = null; }
     focus() {}
@@ -460,6 +460,24 @@ const { Ink, newStroke, outline, specOf, strokeFromSaved, hits, TOOLS } = inkMod
   view.undo();
   assert.ok(view.ink.on(0).some((s) => s.saved));
   view.redo();
+  // PR #104 review P1-1: while a save is made, nothing is drawn.
+  view.setTool({ tool: "pen", color: "black", size: "fine" });
+  view.saving = true;
+  const counted = view.ink.on(0).length;
+  assert.ok(!pointer(view, "pointerdown", { pointerId: 6, clientX: 50, clientY: 700 }));
+  assert.equal(view.active, null);
+  view.saving = false;
+  // PR #104 review P2: the page moved under the pen (a word shown above the pages): its points follow the page.
+  pointer(view, "pointerdown", { pointerId: 7, clientX: 50, clientY: 700 });
+  box(view).top = 40;
+  pointer(view, "pointermove", { pointerId: 7, clientX: 50, clientY: 740 });
+  pointer(view, "pointerup", { pointerId: 7 });
+  box(view).top = 0;
+  const moved = view.ink.on(0).at(-1).points;
+  assert.equal(view.ink.on(0).length, counted + 1);
+  assert.deepEqual(moved[1].slice(0, 2), moved[0].slice(0, 2), "the same spot on the page");
+  view.undo();
+  view.setTool({ tool: "eraser" });
   // Saved: an increment the server would take, read back — the new strokes saved, the erased one gone.
   const increment = await view.increment();
   assert.ok(checkIncrement(withInk.length, increment));
