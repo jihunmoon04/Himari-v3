@@ -1,6 +1,6 @@
 # PDF 필기와 에이전트에게 넘기기 v0.1
 
-> 2026-10-26 · **PROPOSED (V3-P77)** · rev. 4: 외부 재검수(HEAD d3dfd2c, READY_WITH_CORRECTIONS) 반영 — P2-1 펜 필기와 손가락 스크롤·확대를 나누는 방법과 `pointercancel`, iPad 진입 조건(§4.1, §11), P2-2 판 기록 실패를 바꾸기 전·후로 나눔(§5.3, §6.3, §9), P3 `/HimariInk` 왕복을 1단계 확인에 더함(§11). rev. 3: 외부 검수(HEAD b6d420a) 반영 — P1-1 64 MiB는 저장한 뒤의 파일 크기(§3.3, §5.3), P1-2 큰 PDF의 지우기·복원도 사본을 남기는 한 계약(§6.1, §6.3), P2-3 pdf.js 저장 결과에서 증분을 떼어 내는 확인과 2단계 진입 조건(§5.2, §11), P2-4 형광펜 투명도는 모양 스트림의 ExtGState로(§5.1), P2-5 저장된 HIMARI 필기는 필기 층만 그림(§3.2, §4.4), P3 쪽 수를 셀 수 없으면 페이지 참조 거부(§7.2). rev. 2: 소유자 결정 Q1~Q6 권고대로(§13). rev. 1: 설계 초안.
+> 2026-10-26 · **PROPOSED (V3-P77)** · 1단계 구현 노트 §14(보기, legacy pdf.js, 직접 만든 증분 작성기·읽기, 진입 조건 결과). rev. 4: 외부 재검수(HEAD d3dfd2c, READY_WITH_CORRECTIONS) 반영 — P2-1 펜 필기와 손가락 스크롤·확대를 나누는 방법과 `pointercancel`, iPad 진입 조건(§4.1, §11), P2-2 판 기록 실패를 바꾸기 전·후로 나눔(§5.3, §6.3, §9), P3 `/HimariInk` 왕복을 1단계 확인에 더함(§11). rev. 3: 외부 검수(HEAD b6d420a) 반영 — P1-1 64 MiB는 저장한 뒤의 파일 크기(§3.3, §5.3), P1-2 큰 PDF의 지우기·복원도 사본을 남기는 한 계약(§6.1, §6.3), P2-3 pdf.js 저장 결과에서 증분을 떼어 내는 확인과 2단계 진입 조건(§5.2, §11), P2-4 형광펜 투명도는 모양 스트림의 ExtGState로(§5.1), P2-5 저장된 HIMARI 필기는 필기 층만 그림(§3.2, §4.4), P3 쪽 수를 셀 수 없으면 페이지 참조 거부(§7.2). rev. 2: 소유자 결정 Q1~Q6 권고대로(§13). rev. 1: 설계 초안.
 >
 > 소유자 방향
 > - V3-P75 설계 때(2026-10-25): 나중에 iPad에서 PDF에 Apple Pencil로 필기하고, 그것을 바로 에이전트에게 넘긴다.
@@ -397,6 +397,7 @@ PDF는 믿을 수 없는 입력이다. 클라우드 폴더나 인터넷에서 �
 - 글 상자, 강조(글 선택), 도형.
 - 글 찾기, 쪽 미리보기 목록.
 - pdf.js 보기를 sandbox 출처로 옮기기(Q6의 B).
+- 2,000쪽이 넘는 PDF: 쪽 상자 가상화(§14.5).
 
 ## 13. 소유자 결정
 
@@ -410,3 +411,87 @@ PDF는 믿을 수 없는 입력이다. 클라우드 폴더나 인터넷에서 �
 | Q4 | 에이전트에게 무엇을 넘기나? | **페이지 이미지 + 페이지 참조** / 참조만(에이전트가 `read_document`로 봄) / 이미지만 | **이미지 + 참조** → 권고대로 |
 | Q5 | 언제 저장하나? | **직접 저장(Save, Ask 때 저장, 떠날 때 묻기) + 저장 안 한 필기는 브라우저에 임시 보관** / 몇 초마다 자동 저장 | **직접 저장 + 임시 보관**. 자동 저장은 Drive 파일을 저장할 때마다 통째로 다시 올리게 하기 때문이다 → 권고대로 |
 | Q6 | pdf.js를 어디서 돌리나? | **A. 페이지 출처에서, eval·스크립트·DOM 주석 끄기** / B. sandbox 출처 iframe | **A**. B는 나중의 길로 남김 → 권고대로 |
+
+## 14. 1단계 구현 노트 (보기와 2단계 진입 조건, 2026-10-26)
+
+### 14.1 묶음 (§3.2, §3.4)
+
+- **pdfjs-dist 6.4.299의 legacy 빌드**를 그대로 복사했다(`static/pdfjs/SOURCE`에 판, 내려받은 곳, 해시).
+  - 기본 빌드는 `Promise.try`와 `Map.prototype.getOrInsertComputed`를 대체 코드 없이 쓴다. 조금 오래된 iPad Safari에서는 열리지 않는다. legacy 빌드는 이것들을 함께 싣는다.
+  - legacy 빌드에 남은 `Function("return this")`는 core-js가 `globalThis`가 없을 때만 쓰는 길이다. 브라우저에서는 닿지 않고, 닿더라도 CSP가 막는다. smoke가 이 밖의 `eval`·`new Function`이 없음을 확인한다.
+- **`isEvalSupported`는 pdf.js 6에서 없어졌다.** 6판은 코드를 평가하지 않는다. 그래도 설정 객체(`PDFJS_OPTIONS`)에 남겨 두어, 옛 판으로 돌아가더라도 꺼진 채이게 했다.
+- **WebAssembly는 싣지 않는다.** `useWasm: false`이고, JPEG 2000과 JBIG2는 pdf.js의 JS 대체 해석기(`wasm/*_nowasm_fallback.js`)로 푼다. CSP는 바꾸지 않았다. ICC 색 관리(qcms)는 꺼진다.
+  - JPEG 2000 이미지가 든 PDF가 실제 CSP 아래 Chromium에서 그려지는 것을 확인했다.
+- **CMap**(`cmaps/`, 169개, 1.7 MB)을 싣는다. 글꼴을 싣지 않은 한글 PDF(`UniKS-UCS2-H`)는 CMap이 없으면 글이 통째로 빠진다. CMap이 있으면 "안녕하세요 …"로 읽힌다. 글꼴 자체는 기기의 것을 쓴다. iPad에는 한글 글꼴이 있다.
+- 표준 14 글꼴 자료(`standard_fonts/`)와 스크립트 엔진(quickjs)은 싣지 않았다. 브라우저 글꼴이 대신하고, 스크립트는 돌지 않는다.
+- 주석 층(annotation layer)은 쓰지 않는다. `render`의 `annotationMode: ENABLE`로 주석 모양만 canvas에 그린다. 링크·양식은 DOM에 없다.
+  - 브라우저 확인: JavaScript 열기 동작이 든 PDF에서 대화상자가 뜨지 않았다. `.pdf-view` 안에 링크·입력 요소가 없었다. 콘솔에 CSP 위반도 없었다.
+
+### 14.2 보기 (§3.1~§3.3)
+
+- 서버는 파일 첫머리가 `%PDF-`이면 `kind: "pdf"`라고 알린다. 이름은 보지 않는다.
+  - 1024바이트 안 어디든이 아니라 **첫머리**만 본다. 앞부분에 "%PDF-"라는 글이 든 글 파일을 편집기 대신 PDF로 열지 않기 위해서다.
+  - 글자만으로 된 PDF도 글보다 먼저 PDF로 본다.
+- 브라우저는 64 MiB 이하만 연다. 바이트는 `/api/machine/download`에서 받는다. 더 크면 "too large to view here"와 Download다.
+- **쪽마다 폭에 맞춘다.** 섞인 문서(세로 쪽 사이의 가로 쪽, `/Rotate`)에서 한 배율을 쓰면 좁은 패널에서 옆으로 밀린다. 그래서 쪽마다 패널 폭에 맞추고, 확대는 모든 쪽에 같은 배수(0.5~5배)로 곱한다. 패널 크기가 바뀌면 다시 맞추고, 보던 쪽에 머문다.
+- canvas는 보이는 쪽과 위아래 한 화면 안의 쪽에만 둔다(IntersectionObserver). 40쪽 PDF에서 canvas는 늘 둘이었다. 화면 배율을 곱하되 canvas 하나는 1,600만 픽셀 아래다.
+- 확대
+  - Ctrl+휠: 마우스 한 칸은 약 10%, 트랙패드 집기(작은 delta)는 그 크기만큼.
+  - 두 손가락: §4.1 A대로다. 상자는 `touch-action: pan-x pan-y`이고, 집는 동안 CSS 변형으로 키운다. 손을 떼면 그 배율로 다시 그린다. Safari의 `gesturestart`·`gesturechange`는 막는다.
+- 머리의 "1 / 12"를 누르면 쪽 번호를 넣는다.
+- 에이전트의 차례가 끝나면 `stat`으로 판을 본다. 바뀐 때만 다시 받고, 보던 쪽으로 돌아간다. 30 MB 교재를 차례마다 다시 받지 않기 위해서다.
+- 암호가 필요한 PDF는 "This PDF is password-protected; download it to open."이다. 권한 암호만 있는 PDF는 보인다.
+
+### 14.3 2단계 진입 조건의 결과 (§11)
+
+시험: `scripts/pdf_smoke.mjs`(Node, 묶은 pdf.js와 `tests/fixtures/pdf`).
+- 픽스처는 `tests/fixtures/pdf/make.py`(pikepdf)로 만들어 커밋했다.
+- 상호참조 표 PDF와 상호참조 스트림 PDF(객체가 object stream 안에 있음)다. 셋째 쪽까지 있고, 다른 앱의 Square 주석과 링크, `/Rotate 90` 쪽, CropBox 쪽이 들어 있다.
+
+1. **쓰기 경로: pdf.js가 아니라 직접 만든 증분 작성기(`static/pdfdoc.js`)로 정했다.**
+   - pdf.js의 ink 저장(`InkAnnotation.createNewDict`)은 키가 정해져 있다. `/NM`, `/HimariInk`, 필압 외곽선을 채운 `/AP`와 `/BM /Multiply` ExtGState(§5.1)를 넣을 길이 없다.
+   - 작성기는 원본 뒤에 붙일 바이트만 만든다. 그래서 "pdf.js 결과에서 앞부분을 비교해 떼어 내기"(§5.2의 1~3)는 필요 없어졌다. 서버 확인과 같은 `checkIncrement`가 그 자리를 대신한다.
+   - 증분은 원본의 형식을 따른다(표 → 표, 스트림 → `/W [1 4 2]` 상호참조 스트림). `/Prev`, `/Root`, `/Info`, `/ID`를 잇고, 모양 스트림은 Flate로 압축한다.
+2. **증분만으로 서버 쪽 확인을 지난다.** 두 형식 모두, 지우기용 둘째 증분까지 지난다. 거꾸로 startxref가 없거나, 원본 안을 가리키거나, 파일 밖을 가리키거나, `%%EOF`가 없으면 거부한다.
+3. **HIMARI 주석을 뺀 렌더는 §4.4의 B로 된다.**
+   - pdf.js의 annotation storage에 `{deleted: true, id: "<번호>R", pageIndex}`를 `pdfjs_internal_editor_` 접두 키로 넣는다. 그다음 `annotationMode: ENABLE_STORAGE`로 그리면 그 주석이 빠진다(그리기 명령의 주석 수 3 → 1, 다른 앱의 Square는 남음).
+   - 내부 접두라서 판을 고정하고, smoke가 지킨다. 판을 올릴 때 깨지면 A(보기용 증분)로 간다. 작성기가 이미 있다.
+4. **`/HimariInk` 왕복은 직접 만든 읽기로 된다.** pdf.js `getAnnotations()`는 `/NM`도 모르는 키도 주지 않는다.
+   - 같은 모듈의 `PdfFile.ink(pageRef)`가 쪽의 `/Annots`에서 `/NM`이 `himari-ink-`인 Ink를 찾아 `/HimariInk`를 읽는다. 세 쪽 모두에서 점, 필압, 도구가 쓴 그대로였다.
+
+더 확인한 것(임시 폴더에서, 2단계에서 서버 시험으로 옮긴다)
+- qpdf(pikepdf)가 결과 파일에서 문제를 찾지 못했다.
+- pypdfium2로 그리면 펜 자리의 픽셀이 바뀌고, 지운 뒤에는 돌아온다.
+- 형광펜 아래 검은 막대는 0(검정) 그대로이고, 흰 자리는 옅게 물든다.
+
+읽기의 한계
+- 압축은 Flate와 PNG 예측자만 푼다(상호참조·object stream).
+- 상호참조를 고치지 않는다. 그런 파일과 암호화된 파일에는 쓰지 않는다. 2단계에서 필기 도구를 끈다.
+- 혼합형 파일(`/XRefStm`)도 읽지만, 아직 그 픽스처는 없다.
+
+### 14.4 남은 것
+
+- **iPad 진입 조건(§11)은 소유자 확인이 남았다.** 두 손가락 확대(조건 2)는 1단계에 이미 있어서 지금 볼 수 있다. Pencil 스크롤 막기(조건 1)와 `pointercancel`(조건 3)은 2단계 입력 층과 함께 본다.
+- `pdfdoc.js`는 아직 제공하지 않는다(`STATIC_FILES`에 없음). 2단계가 필기 층과 함께 연다.
+- 다운로드가 읽은 바이트의 identity를 머리글로 함께 주는 것도 2단계다(저장의 `X-Himari-Expected`).
+
+### 14.5 PR #102 검수 반영
+
+- **P2 쪽 위치의 좌표계**
+  - `goTo`와 현재 쪽 계산이 `offsetTop`을 썼다. 이 값은 보기 칸이 아니라 그 위의 위치 잡힌 상자부터 센다. 그래서 보기 칸이 화면 아래에 있으면 그만큼 어긋났다.
+  - 이제 둘 다 `pageTops()`를 쓴다. 각 쪽의 위치를 보기 칸의 스크롤 내용 좌표(`getBoundingClientRect` 차 + `scrollTop`)로 구하고, 배치가 바뀔 때까지 둔다. 집는 동안은 상자가 CSS로 커져 있으니 읽지 않는다.
+  - 시험: `pdf_smoke`가 보기 칸을 258px 아래에 두고, 각 쪽의 `offsetTop`은 문서부터 세게 했다. 그 상태에서 이동한 쪽과 현재 쪽을 확인한다.
+  - 브라우저: 보기 칸 266px 아래에서 2·17·40쪽이 모두 칸 위 12px에 놓였다.
+- **P2 다운로드 크기**
+  - `readDownload(path, limit)`는 `Content-Length`가 한도를 넘으면 한 바이트도 읽지 않는다.
+  - 읽는 동안에도 쌓인 크기가 넘으면 읽기를 멈추고 취소한다. 413으로 "This file is now too large to view here"를 알린다.
+  - 시험: `files_smoke`에 길이로 거절, 읽는 중 거절(셋째 조각에서 멈춤), 정상, 서버 오류, 패널의 안내를 더했다.
+- **P2 쪽 수 한도**
+  - `MAX_PDF_PAGES = 2000`이다. 넘으면 쪽 상자를 하나도 만들지 않고 "This PDF has N pages; up to 2,000 are shown here. Download it to open."이다.
+  - 더 큰 문서가 필요해지면 쪽 상자 자체를 가상화한다(§12).
+- **P2(재검수) canvas 상한**
+  - `outputScale`에 있던 0.1 하한이 픽셀 상한을 넘게 했다. 아주 좁고 긴 쪽(600×3,000,000)이면 1,800만 픽셀이 됐다.
+  - 이제 하한 없이 픽셀 수(1,600만)와 한 변(`MAX_CANVAS_SIDE` 16,384px)을 둘 다 지킨다.
+  - 그만큼 줄여도 CSS 픽셀당 0.25보다 거칠면(`MIN_OUTPUT_SCALE`) 그 쪽은 그리지 않는다. 대신 쪽 위에 "This page is too large to draw here. Zoom out, or download the PDF."를 둔다. 배율이 바뀌면 다시 해 본다.
+  - 시험: `pdf_smoke`가 네 가지 모양(가늘고 긴 쪽, 넓고 낮은 쪽, 아주 넓은 쪽, 큰 정사각형 쪽)에서 상한을 확인한다. 그릴 수 없는 쪽은 canvas도 렌더도 없이 안내만 있는지, 확대가 바뀌어 그릴 수 있게 되면 안내가 사라지는지도 본다.
+  - 브라우저: 10×14,400pt 쪽에서 canvas 없이 안내가 보였다.

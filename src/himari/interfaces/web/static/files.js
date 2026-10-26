@@ -21,11 +21,15 @@
  * Changes (V3-P76 §5, §6), beside a conversation: the files HIMARI changed
  * there and the user has not reviewed — each with a diff of what it was
  * before and what it is now, to accept or revert; a dot on their rows.
+ *
+ * A PDF (V3-P77 §3) of at most 64 MiB opens in the PDF view (pdfpane.js,
+ * loaded on first use), its bytes read as a download.
  */
 
 const KIND_ICON = { directory: "#side-folder", file: "#side-note" };
 const EDIT_MAX_BYTES = 1024 * 1024; // the server's limit for the editor (§7.7, Q3)
 const POLL_MS = 5000; // how often an open file is checked on disk (§5.3)
+const PDF_MAX_BYTES = 64 * 1024 * 1024; // the PDF view's limit (V3-P77 §3.3, Q2), as pdfpane.js's
 const CHANGE_KINDS = { created: "made by HIMARI", changed: "changed by HIMARI", deleted: "deleted by HIMARI",
                        none: "made and deleted by HIMARI", unknown: "HIMARI may have changed it" };
 const CHANGE_STATES = { no_version: "its previous version could not be kept",
@@ -113,6 +117,48 @@ function query(path) {
   return `path=${encodeURIComponent(path)}`;
 }
 
+/* A file's bytes, from the download endpoint (V3-P77 §3.2: no other read of them), at most ``limit``: the
+ * file may have grown since its size was told (PR #102 review), so its length is checked before reading
+ * and every chunk as it comes; past the limit the download is stopped. */
+export async function readDownload(path, limit) {
+  const response = await fetch(`/api/machine/download?${query(path)}`, { credentials: "same-origin" });
+  if (!response.ok) {
+    let message = "The file could not be read.";
+    try {
+      message = (await response.json()).error.message || message;
+    } catch (ignored) { /* not JSON */ }
+    throw Object.assign(new Error(message), { status: response.status });
+  }
+  const tooLarge = () => Object.assign(new Error(`This file is now too large to view here (at most ${humanSize(limit)}).`),
+                                       { status: 413, code: "too_large" });
+  const told = Number(response.headers.get("content-length"));
+  if (told > limit) {
+    await response.body?.cancel();
+    throw tooLarge();
+  }
+  if (!response.body) return new Uint8Array(0);
+  const reader = response.body.getReader();
+  const chunks = [];
+  let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.length;
+    if (size > limit) {
+      await reader.cancel();
+      throw tooLarge();
+    }
+    chunks.push(value);
+  }
+  const bytes = new Uint8Array(size);
+  let at = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, at);
+    at += chunk.length;
+  }
+  return bytes;
+}
+
 export class FilesPane {
   /* api(method, path) → JSON or throws {message, status, code}; el(tag, class, text). */
   /* folderActions(listing): the shown folder's own controls (V3-P75 §3.3, e.g.
@@ -125,12 +171,17 @@ export class FilesPane {
    * changes: the review of HIMARI's changes (V3-P76 §5) — {of(), list(of), diff(of, path), accept(of, paths | null),
    * revert(of, path, seen), revertAll(of), seen(list)}: of() the conversation shown now, and each call the API
    * call of the conversation ``of`` it names (seen: told every list read); none: not offered here. */
+  /* loadPdf(): the PDF view's module (pdfpane.js); readFile(path, limit): a file's bytes, as a download, refused
+   * past ``limit``. */
   constructor({ api, el, onOpenFolder = null, onOpenFile = null, actions = [], folderActions = null,
                 folderRowActions = null, loadEditor = () => import("/assets/codemirror/codemirror.js"),
+                loadPdf = () => import("/assets/pdfpane.js"), readFile = readDownload,
                 confirm = defaultConfirm, working = () => false, onAsk = null, changes = null }) {
     this.api = api;
     this.el = el;
     this.loadEditor = loadEditor;
+    this.loadPdf = loadPdf;
+    this.readFile = readFile;
     this.confirm = confirm;
     this.working = working;
     this.onAsk = onAsk;
@@ -141,6 +192,7 @@ export class FilesPane {
     this.reviewControls = []; // that page's accept and revert controls
     this.pageDiff = null; // that diff's CodeMirror view
     this.doc = null; // the file in the editor: {path, name, identity, saved, lineBreak, editor, dirty, saving, pollTimer, bar, revision}
+    this.pdf = null; // the PDF in view: {path, identity, view}
     this.onOpenFolder = onOpenFolder;
     this.onOpenFile = onOpenFile;
     this.folderActions = folderActions;
@@ -184,6 +236,9 @@ export class FilesPane {
     this.page = null;
     this.pageOf = null;
     this.reviewControls = [];
+    if (this.pdf) this.pdf.view.destroy();
+    this.pdf = null;
+    this.pageLabel = null;
     if (this.doc === null) return;
     clearTimeout(this.doc.pollTimer);
     if (this.doc.editor) this.doc.editor.destroy();
@@ -369,10 +424,111 @@ export class FilesPane {
       this.paintCrumbs(shown.path, true);
       this.paintTools(shown);
       if (shown.kind === "text" && shown.editable) await this.edit(shown, ticket);
+      else if (shown.kind === "pdf" && shown.size <= PDF_MAX_BYTES) await this.showPdf(shown, ticket);
       else this.body.replaceChildren(this.view(shown));
       if (this.onOpenFile) this.onOpenFile(shown);
     } catch (error) {
       if (ticket === this.ticket) this.failed(path, error);
+    }
+  }
+
+  /* ----------------------------------------------------------- a PDF (V3-P77 §3) */
+
+  async showPdf(shown, ticket, page = 1) {
+    const box = this.el("div", "files-view");
+    box.append(this.el("p", "files-note", `Opening ${humanSize(shown.size)}…`));
+    this.body.replaceChildren(box);
+    let module, pdfjs, bytes;
+    try {
+      [module, bytes] = await Promise.all([this.loadPdf(), this.readFile(shown.path, PDF_MAX_BYTES)]);
+      pdfjs = await module.loadPdfjs();
+    } catch (error) {
+      if (ticket === this.ticket) this.pdfFailed(shown, error.status ? error.message : "The PDF view could not be loaded.");
+      return;
+    }
+    if (ticket !== this.ticket) return;
+    const view = new module.PdfView({ pdfjs, el: this.el, bytes, onPage: (number, pages) => this.paintPage(number, pages) });
+    this.pdf = { path: shown.path, identity: shown.identity, view };
+    this.body.replaceChildren(view.element); // in place first: the pages fit its width
+    try {
+      await view.open();
+    } catch (error) {
+      if (this.pdf && this.pdf.view === view) {
+        this.closeDoc();
+        this.pdfFailed(shown, error.message);
+      }
+      return;
+    }
+    if (this.pdf && this.pdf.view === view && page > 1) view.goTo(page);
+  }
+
+  pdfFailed(shown, message) {
+    const box = this.el("div", "files-view");
+    box.append(this.el("p", "files-note is-error", message), this.download(shown.path, "Download"));
+    this.body.replaceChildren(box);
+  }
+
+  /* "3 / 12" in the head; pressed, a page number to go to. */
+  paintPage(number, pages) {
+    if (!this.pageLabel) return;
+    this.pageLabel.textContent = `${number} / ${pages}`;
+    this.pageLabel.hidden = false;
+  }
+
+  pagePicker() {
+    const label = this.el("button", "link-button files-page", "");
+    label.type = "button";
+    label.title = "Go to a page";
+    label.hidden = true; // until the PDF is open
+    label.addEventListener("click", () => {
+      if (!this.pdf) return;
+      const view = this.pdf.view;
+      const input = this.el("input", "files-page-input");
+      input.type = "number";
+      input.min = "1";
+      input.max = String(view.numPages);
+      input.value = String(view.current + 1);
+      input.setAttribute("aria-label", `Page, 1 to ${view.numPages}`);
+      let done = false;
+      const finish = (go) => {
+        if (done) return;
+        done = true;
+        const number = Number(input.value);
+        input.replaceWith(label);
+        if (go && Number.isInteger(number) && this.pdf && this.pdf.view === view) view.goTo(number);
+      };
+      input.addEventListener("keydown", (event) => {
+        if (event.key === "Enter") finish(true);
+        if (event.key === "Escape") finish(false);
+      });
+      input.addEventListener("blur", () => finish(true));
+      label.replaceWith(input);
+      input.focus();
+      input.select();
+    });
+    return label;
+  }
+
+  /* After the agent's turn: read again only if the file changed, on the page it was at. */
+  async checkPdf() {
+    const pdf = this.pdf;
+    try {
+      const now = await this.api("GET", `/api/machine/stat?${query(pdf.path)}`);
+      if (this.pdf !== pdf || sameIdentity(now.identity, pdf.identity)) return;
+    } catch (error) {
+      if (this.pdf !== pdf || error.code !== "not_found") return;
+    }
+    const page = pdf.view.current + 1;
+    const ticket = ++this.ticket;
+    try {
+      const shown = await this.api("GET", `/api/machine/file?${query(pdf.path)}`);
+      if (ticket !== this.ticket) return;
+      this.closeDoc();
+      this.paintTools(shown);
+      if (shown.kind === "pdf" && shown.size <= PDF_MAX_BYTES) await this.showPdf(shown, ticket, page);
+      else this.body.replaceChildren(this.view(shown));
+    } catch (error) {
+      if (ticket === this.ticket) this.failed(pdf.path, error);
     }
   }
 
@@ -772,8 +928,10 @@ export class FilesPane {
       box.append(image);
       return box;
     }
-    box.append(this.el("p", "files-note", `No preview for this file (${humanSize(shown.size)}).`),
-               this.download(shown.path, "Download"));
+    const note = shown.kind === "pdf"
+      ? `This PDF is too large to view here (${humanSize(shown.size)}; at most 64 MiB).`
+      : `No preview for this file (${humanSize(shown.size)}).`;
+    box.append(this.el("p", "files-note", note), this.download(shown.path, "Download"));
     return box;
   }
 
@@ -823,6 +981,10 @@ export class FilesPane {
         this.saveButton.disabled = true;
         this.saveButton.addEventListener("click", () => this.save());
         this.tools.append(this.workingNote, this.stateDot, this.stateLabel, this.saveButton);
+      }
+      if (shown.kind === "pdf" && shown.size <= PDF_MAX_BYTES) {
+        this.pageLabel = this.pagePicker();
+        this.tools.append(this.pageLabel);
       }
       if (this.changes && this.changed.has(shown.path)) { // a dot after its name, to its change
         const review = this.el("button", "files-crumb files-changed-link");
@@ -1302,6 +1464,7 @@ export class FilesPane {
     if (this.page === "changes") return this.openChanges();
     if (this.page) return this.openChange(this.page.path);
     if (this.doc) return this.checkDisk();
+    if (this.pdf) return this.checkPdf();
     if (this.file) return this.openFile(this.file);
     if (this.folder) return this.openFolder(this.folder);
     return null;

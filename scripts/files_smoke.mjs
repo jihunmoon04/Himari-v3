@@ -31,7 +31,7 @@ globalThis.document = {
   createElementNS: (ns, tag) => new FakeNode(tag),
 };
 
-const { FilesPane } = await import(new URL("../src/himari/interfaces/web/static/files.js", import.meta.url));
+const { FilesPane, readDownload } = await import(new URL("../src/himari/interfaces/web/static/files.js", import.meta.url));
 
 function el(tag, className, text) {
   const node = document.createElement(tag);
@@ -785,6 +785,183 @@ const DIFF = { path: "/home/u/a.txt", name: "a.txt", kind: "changed", state: "ok
   await plain.files.openFile(TEXT.path);
   assert.ok(!plain.files.crumbs.children.at(-1).children.length);
   plain.files.closeDoc();
+}
+
+/* V3-P77 §3: a PDF opens in the PDF view, whose module and bytes the test hands out. */
+function pdfPane(routes, { fail = null } = {}) {
+  const views = [];
+  const reads = [];
+  const module = {
+    loadPdfjs: async () => ({ fake: true }),
+    PdfView: class {
+      constructor({ pdfjs, bytes, onPage }) {
+        Object.assign(this, { pdfjs, bytes, onPage, current: 0, destroyed: false, went: null });
+        this.element = el("div", "pdf-view");
+        views.push(this);
+      }
+      get numPages() { return 3; }
+      async open() {
+        if (fail) throw Object.assign(new Error(fail), { code: "password" });
+        this.onPage(1, 3);
+      }
+      goTo(number) { this.went = number; this.current = number - 1; this.onPage(number, 3); }
+      destroy() { this.destroyed = true; }
+    },
+  };
+  const api = async (method, path) => {
+    if (path === "/api/machine/stat?path=~") return HOME;
+    const key = Object.keys(routes).find((k) => `${method} ${path}`.startsWith(k));
+    assert.ok(key, `no route for ${method} ${path}`);
+    const answer = routes[key];
+    return typeof answer === "function" ? answer(path) : answer;
+  };
+  const pending = [];
+  const readFile = (path, limit) => {
+    assert.equal(limit, 64 * 1024 * 1024, "the view's limit goes with the read");
+    reads.push(path);
+    const answer = deferred();
+    pending.push(answer);
+    return answer.promise;
+  };
+  const files = new FilesPane({ api, el, loadPdf: async () => module, readFile });
+  return { files, views, reads, pending };
+}
+
+const PDF = { path: "/home/u/notes.pdf", size: 2048, identity: [1, 2, 3, 4], modified: 0, kind: "pdf", text: null,
+              truncated: false, editable: false };
+const pageLabel = (files) => files.tools.children.find((c) => (c.className || "").includes("files-page"));
+
+{
+  const { files, views, reads, pending } = pdfPane({ "GET /api/machine/file": PDF });
+  const opening = files.openFile(PDF.path);
+  for (let i = 0; i < 20 && !pending.length; i++) await settle();
+  assert.deepEqual(reads, [PDF.path]);
+  assert.ok(pageLabel(files).hidden, "no page shown before it is open");
+  pending[0].resolve(new Uint8Array([37, 80, 68, 70]));
+  await opening;
+  assert.equal(views.length, 1);
+  assert.deepEqual(Array.from(views[0].bytes), [37, 80, 68, 70]);
+  assert.deepEqual(views[0].pdfjs, { fake: true });
+  assert.equal(files.body.children[0], views[0].element);
+  assert.equal(pageLabel(files).textContent, "1 / 3");
+  assert.ok(!pageLabel(files).hidden);
+  // Opening something else lets the view go.
+  files.closeDoc();
+  assert.ok(views[0].destroyed);
+  assert.equal(files.pdf, null);
+}
+
+// Larger than the view takes (64 MiB): its size and a download, nothing read.
+{
+  const large = { ...PDF, size: 64 * 1024 * 1024 + 1 };
+  const { files, views, reads } = pdfPane({ "GET /api/machine/file": large });
+  await files.openFile(PDF.path);
+  assert.equal(reads.length, 0);
+  assert.equal(views.length, 0);
+  assert.ok(files.body.text().includes("too large to view here") && files.body.text().includes("Download"));
+  assert.equal(pageLabel(files), undefined);
+}
+
+// Bytes arriving after another place was opened are not shown.
+{
+  const { files, views, pending } = pdfPane({ "GET /api/machine/file": PDF, "GET /api/machine/list": listing("/home/u", ["x"]) });
+  const opening = files.openFile(PDF.path);
+  for (let i = 0; i < 20 && !pending.length; i++) await settle();
+  await files.openFolder("/home/u");
+  pending[0].resolve(new Uint8Array(4));
+  await opening;
+  assert.equal(views.length, 0);
+  assert.ok(files.body.text().includes("x"));
+}
+
+// Grown past the limit since its size was told: the read is refused, and the pane says so with its download.
+{
+  const { files, views, pending } = pdfPane({ "GET /api/machine/file": PDF });
+  const opening = files.openFile(PDF.path);
+  for (let i = 0; i < 20 && !pending.length; i++) await settle();
+  pending[0].reject(Object.assign(new Error("This file is now too large to view here (at most 64 MB)."), { status: 413 }));
+  await opening;
+  assert.equal(views.length, 0);
+  assert.ok(files.body.text().includes("now too large to view here") && files.body.text().includes("Download"));
+}
+
+// A PDF that needs a password: told so, with its download; the view let go.
+{
+  const message = "This PDF is password-protected; download it to open.";
+  const { files, views, pending } = pdfPane({ "GET /api/machine/file": PDF }, { fail: message });
+  const opening = files.openFile(PDF.path);
+  for (let i = 0; i < 20 && !pending.length; i++) await settle();
+  pending[0].resolve(new Uint8Array(4));
+  await opening;
+  assert.ok(views[0].destroyed);
+  assert.ok(files.body.text().includes(message) && files.body.text().includes("Download"));
+}
+
+// After HIMARI's turn: an unchanged PDF is not read again; a changed one is, on the page it was at.
+{
+  let identity = PDF.identity;
+  const { files, views, reads, pending } = pdfPane({
+    "GET /api/machine/file": () => ({ ...PDF, identity }),
+    "GET /api/machine/stat": () => ({ path: PDF.path, kind: "file", identity }),
+  });
+  const opening = files.openFile(PDF.path);
+  for (let i = 0; i < 20 && !pending.length; i++) await settle();
+  pending[0].resolve(new Uint8Array(4));
+  await opening;
+  views[0].goTo(3);
+  await files.refresh();
+  assert.equal(reads.length, 1);
+  assert.ok(!views[0].destroyed);
+  identity = [1, 2, 9, 9];
+  const again = files.refresh();
+  for (let i = 0; i < 20 && pending.length < 2; i++) await settle();
+  pending[1].resolve(new Uint8Array(4));
+  await again;
+  assert.equal(reads.length, 2);
+  assert.ok(views[0].destroyed);
+  assert.equal(views[1].went, 3);
+  assert.equal(pageLabel(files).textContent, "3 / 3");
+  assert.deepEqual(files.pdf.identity, [1, 2, 9, 9]);
+}
+
+// PR #102 review: a PDF read as a download is held to the limit whatever its size was told — its length
+// is checked before any byte is read, and the bytes as they come; past it the download is stopped.
+{
+  const realFetch = globalThis.fetch;
+  const served = ({ chunks, length = null, status = 200, json = null }) => {
+    const log = { read: 0, cancelled: false };
+    let i = 0;
+    const body = {
+      getReader: () => ({
+        read: async () => { if (i >= chunks.length) return { done: true }; log.read += 1; return { done: false, value: chunks[i++] }; },
+        cancel: async () => { log.cancelled = true; },
+      }),
+      cancel: async () => { log.cancelled = true; },
+    };
+    globalThis.fetch = async (url) => {
+      log.url = url;
+      return { ok: status === 200, status, body, json: async () => json,
+               headers: { get: (name) => (name === "content-length" && length !== null ? String(length) : null) } };
+    };
+    return log;
+  };
+  try {
+    let log = served({ chunks: [new Uint8Array(4)], length: 11 });
+    await assert.rejects(readDownload("/home/u/a.pdf", 10), (e) => e.status === 413 && /too large/.test(e.message));
+    assert.equal(log.read, 0);
+    assert.ok(log.cancelled);
+    assert.equal(log.url, "/api/machine/download?path=%2Fhome%2Fu%2Fa.pdf");
+    log = served({ chunks: [new Uint8Array(4), new Uint8Array(4), new Uint8Array(4), new Uint8Array(4)], length: 8 });
+    await assert.rejects(readDownload("/home/u/a.pdf", 10), (e) => e.status === 413);
+    assert.equal(log.read, 3, "stopped at the chunk past the limit");
+    assert.ok(log.cancelled);
+    served({ chunks: [Uint8Array.of(1, 2), Uint8Array.of(3), Uint8Array.of(4, 5, 6, 7, 8, 9, 10)] });
+    assert.deepEqual(Array.from(await readDownload("/home/u/a.pdf", 10)), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    served({ chunks: [], status: 404, json: { error: { code: "not_found", message: "No such file." } } });
+    await assert.rejects(readDownload("/home/u/a.pdf", 10), (e) => e.status === 404 && e.message === "No such file.");
+  } finally {
+    globalThis.fetch = realFetch;
+  }
 }
 
 console.log("files smoke: ok");

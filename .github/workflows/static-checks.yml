@@ -25,6 +25,8 @@ jobs:
         run: node scripts/live_smoke.mjs
       - name: File explorer pane
         run: node scripts/files_smoke.mjs
+      - name: PDF view settings and HIMARI's PDF writing (V3-P77)
+        run: node scripts/pdf_smoke.mjs
       - name: Install dev tools
         run: pip install -e ".[dev]"
       - name: Import boundaries (V3-046)

@@ -7,8 +7,9 @@ are absolute or start with ``~`` (the user's home); the runner resolves
 them and answers with real paths.
 
 Text is returned as text, to be shown as text; images are shown only as
-the copy the image sandbox made (V3-P67), never their own bytes; anything
-else is a download (an attachment, never rendered on this origin).
+the copy the image sandbox made (V3-P67), never their own bytes; a PDF is
+told as one, for the browser's PDF view to read as a download (V3-P77 §3);
+anything else is a download (an attachment, never rendered on this origin).
 
 The editor's writes (§7) are the owner's own: anywhere the runner lets the
 user write, hidden paths and ``writable_under`` aside, whatever the
@@ -59,6 +60,7 @@ CALL_SECONDS = 20.0  # a runner answer, its own 15 s included
 MAX_READS = 4  # file reads under way here, given-up ones included
 DELETED_SHOWN = 50  # files deleted from a folder listed at once
 EXCERPT_BYTES = 20 * 1024  # a reference's excerpt, as UTF-8 (V3-P76 Q1)
+PDF_HEADER = b"%PDF-"  # what makes a file a PDF here, whatever its name (V3-P77 §3.1)
 
 
 class ExplorerRefused(Exception):
@@ -92,7 +94,7 @@ class ShownFile:
     size: int
     identity: tuple[int, ...]
     modified: int | None
-    kind: str  # "text" | "image" | "binary"
+    kind: str  # "text" | "image" | "pdf" | "binary"
     text: str | None = None
     truncated: bool = False  # the text is the file's start only
     editable: bool = False  # whole, text, at most EDIT_MAX_BYTES (part 3 edits it)
@@ -187,6 +189,8 @@ class Explorer:
         modified = identity[3] // 1_000_000_000 if len(identity) == 4 else None
         if sniff_image(head[:IMAGE_HEAD_BYTES]) is not None:
             return ShownFile(real, size, identity, modified, "image")
+        if head.startswith(PDF_HEADER):  # before text: a PDF may be all ASCII
+            return ShownFile(real, size, identity, modified, "pdf")
         whole = size <= EDIT_MAX_BYTES and len(head) == size
         text = _text(head if whole else head[:PREVIEW_BYTES], whole)
         if text is None:

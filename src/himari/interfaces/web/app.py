@@ -155,6 +155,12 @@ STATIC_FILES = {"app.css": "text/css", "app.js": "text/javascript", "app_view.js
                 "rich_text.js": "text/javascript", "appearance.js": "text/javascript", "live.js": "text/javascript",
                 "files.js": "text/javascript",  # the file explorer's parts (V3-P75 §3)
                 "codemirror/codemirror.js": "text/javascript",  # the web editor (V3-P75 §7.6), loaded on first use
+                # The PDF view (V3-P77 §3): its part, and PDF.js with its worker, the image decoders it may
+                # import and the CMaps it may fetch; each loaded on first use.
+                "pdfpane.js": "text/javascript", "pdfjs/pdf.min.mjs": "text/javascript",
+                "pdfjs/pdf.worker.min.mjs": "text/javascript",
+                "pdfjs/wasm/openjpeg_nowasm_fallback.js": "text/javascript",
+                "pdfjs/wasm/jbig2_nowasm_fallback.js": "text/javascript",
                 # KaTeX for the formulas in assistant text, loaded by rich_text.js on the first one.
                 "katex/katex.min.js": "text/javascript", "katex/katex.min.css": "text/css"}
 KATEX_FONTS = ("AMS-Regular", "Caligraphic-Bold", "Caligraphic-Regular", "Fraktur-Bold", "Fraktur-Regular",
@@ -162,6 +168,9 @@ KATEX_FONTS = ("AMS-Regular", "Caligraphic-Bold", "Caligraphic-Regular", "Fraktu
                "SansSerif-Bold", "SansSerif-Italic", "SansSerif-Regular", "Script-Regular", "Size1-Regular",
                "Size2-Regular", "Size3-Regular", "Size4-Regular", "Typewriter-Regular")
 STATIC_FILES.update({f"katex/fonts/KaTeX_{name}.woff2": "font/woff2" for name in KATEX_FONTS})
+STATIC_FILES.update({f"pdfjs/cmaps/{cmap.name}": "application/octet-stream"
+                     for cmap in (resources.files("himari.interfaces.web") / "static/pdfjs/cmaps").iterdir()
+                     if cmap.name.endswith(".bcmap")})
 
 Opener = Callable[[], Awaitable[Application]]
 
@@ -1640,7 +1649,7 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
         media = STATIC_FILES.get(name)  # only the listed names: never a path into the package
         if media is None:
             raise ApiError(404, "not_found", "Not available.")
-        charset = "" if media.startswith("font/") else "; charset=utf-8"
+        charset = "; charset=utf-8" if media.startswith("text/") else ""
         return Response((static / name).read_bytes(), media_type=f"{media}{charset}")
 
     # Outer → inner: headers, Host, Origin, body size, routes.

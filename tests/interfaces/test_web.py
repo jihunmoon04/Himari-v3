@@ -237,8 +237,15 @@ def test_static_ui_and_security_headers(server: Server) -> None:
     assert server.client.get("/assets/katex/katex.min.css").headers["content-type"] == "text/css; charset=utf-8"
     font = server.client.get("/assets/katex/fonts/KaTeX_Main-Regular.woff2")
     assert font.status_code == 200 and font.headers["content-type"] == "font/woff2" and font.content[:4] == b"wOF2"
+    for name in ("pdfpane.js", "pdfjs/pdf.min.mjs", "pdfjs/pdf.worker.min.mjs", "pdfjs/wasm/openjpeg_nowasm_fallback.js",
+                 "pdfjs/wasm/jbig2_nowasm_fallback.js"):  # the PDF view (V3-P77 §3.2): modules need a script type
+        got = server.client.get(f"/assets/{name}")
+        assert got.status_code == 200 and got.headers["content-type"] == "text/javascript; charset=utf-8", name
+    cmap = server.client.get("/assets/pdfjs/cmaps/UniKS-UCS2-H.bcmap")
+    assert cmap.status_code == 200 and cmap.headers["content-type"] == "application/octet-stream"
     for unlisted in ("katex/SOURCE", "katex/LICENSE", "katex/fonts/KaTeX_Main-Regular.ttf", "katex%2F..%2Fapp.js",
-                     "katex/fonts%2F..%2F..%2Fapp.js"):
+                     "katex/fonts%2F..%2F..%2Fapp.js", "pdfjs/SOURCE", "pdfjs/LICENSE", "pdfjs/cmaps/LICENSE",
+                     "pdfjs/wasm/LICENSE_OPENJPEG", "pdfdoc.js"):
         assert server.client.get(f"/assets/{unlisted}").status_code == 404
     assert server.client.get("/assets/index.html").status_code == 404
     api = server.client.get("/api/session")
