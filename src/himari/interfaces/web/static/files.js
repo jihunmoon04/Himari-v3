@@ -257,7 +257,8 @@ export class FilesPane {
     end.append(this.tools, ...actions); // the place's own controls (the panel's expand, close)
     head.append(navigation, this.crumbs, end);
     this.body = el("div", "files-body");
-    this.root.append(head, this.body);
+    this.inkBar = el("div", "files-ink-bar");
+    this.root.append(head, this.inkBar, this.body);
     this.home = null; // the user's home as the server resolves ~
     this.folder = null; // the folder shown, or the file's folder
     this.file = null; // the file shown
@@ -346,6 +347,7 @@ export class FilesPane {
     }
     this.pdf = null;
     this.ink = null;
+    this.inkBar.replaceChildren();
     this.pageLabel = null;
     if (this.doc === null) return;
     clearTimeout(this.doc.pollTimer);
@@ -1410,6 +1412,7 @@ export class FilesPane {
 
   paintTools(shown, listing = null) {
     this.tools.replaceChildren();
+    this.inkBar.replaceChildren();
     this.stateLabel = null;
     if (shown) {
       if (shown.kind === "text" && shown.editable) {
@@ -1426,7 +1429,8 @@ export class FilesPane {
       }
       if (shown.kind === "pdf" && shown.size <= PDF_MAX_BYTES) {
         this.pageLabel = this.pagePicker();
-        this.tools.append(this.inkTools(), this.pageLabel);
+        this.inkBar.append(this.inkTools());
+        this.tools.append(this.pageLabel);
       }
       if (this.changes && this.changed.has(shown.path)) { // a dot after its name, to its change
         const review = this.el("button", "files-crumb files-changed-link");

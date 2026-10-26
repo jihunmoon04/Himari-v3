@@ -347,7 +347,7 @@ def test_the_startup_purges_what_is_due(tmp_path: Path) -> None:
         app = await open_app(tmp_path / "data", cleanup_seconds=3600)
         try:
             for _ in range(100):
-                if not folder.exists():
+                if not folder.exists() and await app.data.list_conversations(ALICE, trashed=True) == ():
                     break
                 await asyncio.sleep(0.01)
             assert not folder.exists() and await app.data.list_conversations(ALICE, trashed=True) == ()
