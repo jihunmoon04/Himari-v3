@@ -3999,3 +3999,10 @@ button.files-crumb:hover { background: var(--surface-hover); color: var(--text);
 .login-card .form-actions .primary-button {
   width: 100%;
 }
+
+/* "Open" beside a row whose tool wrote a file on this server (the file in the panel). */
+.item-tool-row > .tool-row-open {
+  font-size: 12px;
+  padding: 0 var(--space-2);
+  min-height: 0;
+}

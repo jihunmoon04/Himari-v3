@@ -34,20 +34,32 @@ const drafts = new DraftBook(localStore, { writer: localStore.WRITER }); // the 
 const STATE_TEXT = {
   completed: "Done",
   waiting_for_user: "Waiting for your answer",
-  recovery_required: "Needs attention: an earlier action's outcome is unknown",
-  provider_failed: "The model provider failed; nothing was retried",
-  outcome_unknown: "The request may not have reached the model; it was not resent",
-  invalid_model_output: "The model's reply could not be used",
-  request_rejected: "The request was refused before sending",
-  run_limit_reached: "Stopped after the maximum number of steps",
-  budget_reached: "Stopped: this turn's token budget is used",
-  no_progress: "Stopped: the last steps brought nothing new",
+  recovery_required: "Stopped: HIMARI can't go on safely from here (an earlier step's outcome is unknown) — see Details",
+  provider_failed: "The model service didn't answer. Nothing was retried — Continue to try again",
+  outcome_unknown: "The request may not have reached the model, so it wasn't sent again — Continue to try again",
+  invalid_model_output: "The model's reply couldn't be used — Continue to ask again",
+  request_rejected: "The request was refused before it was sent — see Details; Compact now may help",
+  run_limit_reached: "Stopped after the most steps a turn may take — Continue to go on",
+  budget_reached: "Stopped: this turn used its token budget — Continue to go on with a new one",
+  no_progress: "Stopped: the last steps kept repeating — Continue, or say what to change",
   idle: "Nothing to continue",
   compacted: "Compacted: earlier messages now reach HIMARI as a summary",
   nothing_to_compact: "Nothing to compact yet",
   compaction_failed: "Compaction failed; nothing was changed",
   paused: "Paused — Continue to go on, or send a new message",
   cancelled: "Stopped",
+};
+/* The same, short: beside Continue and in the top bar. */
+const STATE_SHORT = {
+  recovery_required: "Can't go on safely",
+  provider_failed: "Model service failed",
+  outcome_unknown: "Not sure it was sent",
+  invalid_model_output: "Unusable reply",
+  request_rejected: "Refused",
+  run_limit_reached: "Step limit reached",
+  budget_reached: "Token budget used",
+  no_progress: "Going in circles",
+  paused: "Paused",
 };
 const ERROR_TEXT = {
   busy: "This conversation is still working.",
@@ -110,6 +122,7 @@ const app = {
   placeTouched: false, // the composer was changed in this place since it was entered (§3.3)
   placeEntry: 0, // the latest entry into a place: a later read of the store applies to that one only
   inFlight: new Set(), // the conversations a message is being sent to from this page (V3-P78 §3.1, N6)
+  announceAfter: Infinity, // events past this sequence are new (not the history read on opening): told to screen readers
   workingHint: "", // "HIMARI is working…" and its usage, under the composer
   lengthHint: null, // {count, over} once the message nears its limit
   questionShown: null, // the question text the panel shows (redrawn only when it changes)
@@ -1332,6 +1345,28 @@ function paintToolRow(entry) {
   const pending = app.jobRunning ? "running" : "no result";
   const state = tone === "pending" ? pending : tone === "success" ? "done" : "failed";
   entry.details.replaceChildren(el("summary", "tool-row-summary", `${mark} ${entry.toolId} · ${state}`), body);
+  // A file HIMARI wrote on this server: Open, beside the row (not inside its summary, whose children a screen
+  // reader flattens; review N4), to see it in the panel.
+  for (const old of entry.node.querySelectorAll(":scope > .tool-row-open")) old.remove();
+  const opens = tone === "success" ? openableWrite(entry) : null;
+  if (opens) {
+    const open = el("button", "link-button tool-row-open", "Open");
+    open.type = "button";
+    open.title = opens;
+    open.setAttribute("aria-label", `Open ${opens}`);
+    open.addEventListener("click", () => showReference(opens));
+    entry.node.append(open);
+  }
+}
+
+/* The file a successful machine/write_file or machine/edit_file wrote, as the server resolved it (the result
+ * says "created /path (…)", "updated /path (…)" or "edited /path: …"), or null. Never the arguments joined to
+ * today's working folder, which may not be the one it was written in (review B1). */
+function openableWrite(entry) {
+  if (!["machine/write_file", "machine/edit_file"].includes(entry.toolId) || !entry.result) return null;
+  const said = /^(?:created|updated) (\/.+) \(\d+ bytes\)$/.exec(entry.result.text)
+    || /^edited (\/.+): replaced \d+ occurrence\(s\)$/.exec(entry.result.text);
+  return said ? said[1] : null;
 }
 
 /* ------------------------------------------------------------ work blocks */
@@ -1459,6 +1494,18 @@ function splitWork(block, covered) {
   paintWork(rest);
 }
 
+/* A new answer or question (past the history read on opening), for screen readers: its start as plain text
+ * (formulas as written). Emptied first, so the same words again are read again (review N3). */
+function announce(what, text, sequence) {
+  if (!text || !(sequence > app.announceAfter)) return;
+  const line = assistantTextLine(document, text).replace(/\s+/g, " ").trim();
+  const region = $("announce");
+  region.textContent = "";
+  requestAnimationFrame(() => {
+    region.textContent = `${what}: ${line.length > 300 ? `${line.slice(0, 300)}…` : line}`;
+  });
+}
+
 function renderEvent(event) {
   const timeline = tagging($("timeline"), event.sequence);
   if (event.kind === "user_message") {
@@ -1469,6 +1516,7 @@ function renderEvent(event) {
   if (event.kind === "assistant_final") {
     closeWork();
     timeline.append(renderMessage(event, changedModel(event.model)));
+    announce("HIMARI answered", event.text, event.sequence);
     live.shown(event.run_id); // it replaces what was shown while it was written
     return;
   }
@@ -1481,6 +1529,7 @@ function renderEvent(event) {
       if (event.text) timeline.append(renderMessage({ ...event, kind: "assistant_final" }, model));
       const text = typeof question.arguments.question === "string" ? question.arguments.question : "";
       timeline.append(renderMessage({ kind: "assistant_final", text }, event.text ? null : model));
+      announce("HIMARI asks", text, event.sequence);
       app.toolRows.set(`${event.run_id}/${question.call_id}`, null); // the answer appears as the user's message
       return;
     }
@@ -2013,6 +2062,7 @@ async function pullEvents(generation) {
     for (const event of page.items) renderEvent(event);
     live.keepLast();
     app.lastSequence = page.last_sequence;
+    if (app.announceAfter === Infinity && page.items.length < 200) app.announceAfter = app.lastSequence;
     if (page.items.length && atBottom) timeline.scrollTop = timeline.scrollHeight;
     if (page.items.length < 200) {
       views.autoOpen();
@@ -2050,8 +2100,9 @@ function describe(detail) {
   }
   if (job.state && job.state !== "completed" && job.state !== "idle") {
     const base = STATE_TEXT[job.state] || job.state;
-    // The detail says why (e.g. the size that was refused); shown as plain text.
-    return { text: job.detail ? `${base} (${job.detail})` : base, short: base, tone: "warn", active: false };
+    // The detail says why in the server's terms (e.g. the sizes that were refused): behind "Details".
+    return { text: base, short: STATE_SHORT[job.state] || base, detail: job.detail || null, tone: "warn",
+             active: false };
   }
   return { text: job.state ? STATE_TEXT[job.state] : "", tone: null, active: false };
 }
@@ -2080,7 +2131,8 @@ function applyDetail(detail) {
   // Why it stopped, short, beside Continue (the status line above has the whole of it).
   const why = view.short || "Stopped"; // the whole reason is in the status line above (review N3)
   $("stop-text").textContent = stopped ? `${why}${used}` : "";
-  status(view.tone ? view.text : "", view.tone);
+  status(view.tone ? view.text : "", view.tone, view.tone && view.detail
+    ? ["Details", () => status(`${view.text}. ${view.detail}`, view.tone)] : null);
   $("question-panel").hidden = !detail.waiting;
   // As the timeline shows it: formatted, never parsed as HTML (rich_text.js).
   const question = detail.waiting ? detail.waiting.question : null;
@@ -2228,6 +2280,7 @@ async function openConversation(id, { created = false, via = "push" } = {}) {
   loadFolders(generation);
   loadPrompts(generation);
   try {
+    app.announceAfter = Infinity; // the history read first is not news (its first successful read sets the mark)
     const detail = await refresh(generation);
     if (detail && detail.job.running) poll(generation);
     else if (detail) loadContext(generation);

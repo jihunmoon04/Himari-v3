@@ -1458,6 +1458,19 @@ for (const [code, said, labels] of [["not_found", "folder is gone too", ["Downlo
   files.closeDoc();
 }
 
+// The same folder read again after HIMARI's turn stays where the user had scrolled; another folder starts at the top.
+{
+  const files = new FilesPane({ api: async (method, path) => (path === "/api/machine/stat?path=~" ? HOME
+    : listing(path.includes("other") ? "/home/u/other" : "/home/u", ["a", "b"])), el });
+  await files.openFolder("/home/u");
+  files.body.scrollTop = 420;
+  await files.refresh();
+  assert.equal(files.body.scrollTop, 420);
+  files.body.scrollTop = 420;
+  await files.openFolder("/home/u/other");
+  assert.notEqual(files.body.scrollTop, 420);
+}
+
 // A PDF opens where it was left in this browser (its page and zoom); one opened at a page asked for does not.
 {
   const store = new Map();

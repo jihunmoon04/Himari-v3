@@ -305,10 +305,13 @@ def run_turn_budget(base: str, token: str, shots: str | None) -> list[str]:
         expect(page.locator("#composer-hint")).to_have_text("HIMARI is working… · 45k in · 1.0k out / 100k",
                                                             timeout=10000)
         expect(page.locator("#stop-panel")).to_be_visible(timeout=10000)
-        expect(page.locator("#status-bar")).to_contain_text(  # and why: what the next request would need
-            "Stopped: this turn's token budget is used (the turn used 92000 tokens;")
-        expect(page.locator("#stop-text")).to_have_text(  # why, beside Continue, then the usage
-            "Stopped: this turn's token budget is used · 90k in · 2.0k out / 100k")
+        expect(page.locator("#status-bar")).to_contain_text(  # why, in plain words, with what to do
+            "Stopped: this turn used its token budget — Continue to go on with a new one")
+        expect(page.locator("#status-bar")).not_to_contain_text("92000")
+        page.locator("#status-bar .status-action").click()  # the server's own terms behind Details
+        expect(page.locator("#status-bar")).to_contain_text("the turn used 92000 tokens;")
+        expect(page.locator("#stop-text")).to_have_text(  # short, beside Continue, then the usage
+            "Token budget used · 90k in · 2.0k out / 100k")
         expect(page.locator("#composer-hint")).to_have_text("")
         if shots:
             page.screenshot(path=os.path.join(shots, "5-budget.png"))
@@ -1356,6 +1359,13 @@ def run_polish(base: str, token: str, shots: str | None) -> list[str]:
         page.fill("#composer-text", "a long one")
         page.press("#composer-text", "Enter")
         expect(page.locator(".item-assistant").last).to_contain_text("Paragraph 40", timeout=10000)
+        # A screen reader hears the new answer (its start), and not the history when a conversation opens.
+        expect(page.locator("#announce")).to_contain_text("HIMARI answered: Paragraph 1:")
+        page.evaluate("document.getElementById('announce').textContent = ''")
+        page.reload()
+        expect(page.locator(".item-assistant").last).to_contain_text("Paragraph 40", timeout=10000)
+        page.wait_for_timeout(500)
+        expect(page.locator("#announce")).to_have_text("")
 
         # The jump to the latest: shown once scrolled up, and it goes back down.
         jump = page.locator("#jump-latest")

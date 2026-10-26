@@ -499,8 +499,10 @@ export class FilesPane {
   }
 
   /* Every move asks before unsaved text goes (mayLeave): none skips it (PR #95 re-review C1). */
-  async openFolder(path) {
+  /* ``keepScroll``: the same folder read again (after HIMARI's turn): the list stays where the user was. */
+  async openFolder(path, { keepScroll = false } = {}) {
     if (!(await this.mayLeave())) return;
+    const scrolled = keepScroll && path === this.folder ? this.body.scrollTop : 0;
     const ticket = ++this.ticket;
     this.closeDoc();
     this.file = null;
@@ -518,6 +520,7 @@ export class FilesPane {
       this.body.replaceChildren(list);
       this.appendRows(list, listing);
       if (!listing.entries.length) this.body.append(this.el("p", "files-note", "This folder is empty."));
+      this.body.scrollTop = scrolled; // the same folder again: where it was; another: its top
       if (this.onOpenFolder) this.onOpenFolder(listing);
     } catch (error) {
       if (ticket === this.ticket) this.failed(path, error);
@@ -2113,7 +2116,7 @@ export class FilesPane {
     if (this.doc) return this.checkDisk();
     if (this.pdf) return this.checkPdf();
     if (this.file) return this.openFile(this.file);
-    if (this.folder) return this.openFolder(this.folder);
+    if (this.folder) return this.openFolder(this.folder, { keepScroll: true });
     return null;
   }
 }
