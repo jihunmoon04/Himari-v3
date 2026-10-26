@@ -154,6 +154,7 @@ FAILED_LOGIN_DELAY_SECONDS = 1.0
 STATIC_FILES = {"app.css": "text/css", "app.js": "text/javascript", "app_view.js": "text/javascript",
                 "rich_text.js": "text/javascript", "appearance.js": "text/javascript", "live.js": "text/javascript",
                 "files.js": "text/javascript",  # the file explorer's parts (V3-P75 §3)
+                "local_store.js": "text/javascript", "drafts.js": "text/javascript",  # kept in the browser (V3-P78 §5)
                 "codemirror/codemirror.js": "text/javascript",  # the web editor (V3-P75 §7.6), loaded on first use
                 # The PDF view (V3-P77 §3): its part, and PDF.js with its worker, the image decoders it may
                 # import and the CMaps it may fetch; each loaded on first use.
@@ -299,6 +300,13 @@ class SaveFileBody(_Body):
     path: str = Field(min_length=1, max_length=4096)
     content: str  # at most 1 MiB as UTF-8 (the explorer checks)
     expected: IdentityIn
+
+
+class RecreateFileBody(_Body):
+    """V3-P78 §4.2: the editor's text as a new file where the file it was editing is gone."""
+
+    path: str = Field(min_length=1, max_length=4096)
+    content: str  # at most 1 MiB as UTF-8 (the explorer checks)
 
 
 class NewPathBody(_Body):
@@ -668,6 +676,9 @@ FILE_REFUSALS: dict[DataErrorCode, tuple[int, str, str]] = {
 }
 UPLOAD_PATH = re.compile(r"^/api/conversations/[^/]+/uploads$")
 SAVE_BODY_BYTES = 3 * 1024 * 1024  # a saved file of 1 MiB as JSON, escapes included (V3-P75 §7.7)
+SURFACE_PATHS = ("/files", "/trash", "/settings/instructions", "/settings/memory", "/settings/folders")  # V3-P79 §3.1
+PAGE_ID = re.compile(r"[A-Za-z0-9_-]{1,128}")  # a conversation's id in /c/<id>
+SAVE_ROUTES = {("PUT", "/api/machine/file"), ("POST", "/api/machine/file/install")}  # V3-P78 §4.2: the same text
 PDF_APPEND_PATH = "/api/machine/pdf/append"
 EXPECTED_HEADER = "X-Himari-Expected"  # a PDF's identity as the browser read it: four decimal numbers (V3-P77 §5.3)
 IDENTITY_HEADER = "X-Himari-Identity"  # a download's identity, as the bytes sent (§5.3)
@@ -1156,6 +1167,13 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
     async def create_file(body: NewPathBody, request: Request, who: PrincipalId = Depends(principal)) -> dict[str, Any]:
         path, identity = await himari(request).explorer(who).create_file(body.path)
         return {"path": path, "identity": identity_out(identity)}
+
+    @app.post("/api/machine/file/install", status_code=201)
+    async def recreate_file(body: RecreateFileBody, request: Request,
+                            who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+        path, identity = await himari(request).explorer(who).recreate(
+            body.path, body.content.encode("utf-8", "surrogatepass"))
+        return {"path": path, "identity": identity_out(identity) if identity is not None else None}
 
     @app.post("/api/machine/folder", status_code=201)
     async def make_folder(body: NewPathBody, request: Request, who: PrincipalId = Depends(principal)) -> dict[str, Any]:
@@ -1694,6 +1712,16 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
     async def index() -> Response:
         return Response((static / "index.html").read_bytes(), media_type="text/html; charset=utf-8")
 
+    # V3-P79 §3.1: each surface's address is the same page, which reads it; the data stays behind the API.
+    for surface in SURFACE_PATHS:
+        app.add_api_route(surface, index, methods=["GET"], include_in_schema=False)
+
+    @app.get("/c/{conversation_id}", include_in_schema=False)
+    async def conversation_page(conversation_id: str) -> Response:
+        if not PAGE_ID.fullmatch(conversation_id):
+            raise ApiError(404, "not_found", "Not available.")
+        return await index()
+
     @app.get("/assets/{name:path}")
     async def asset(name: str) -> Response:
         media = STATIC_FILES.get(name)  # only the listed names: never a path into the package
@@ -1704,7 +1732,7 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
 
     # Outer → inner: headers, Host, Origin, body size, routes.
     app.add_middleware(BodyLimitMiddleware, exempt=lambda method, path: method == "POST" and bool(UPLOAD_PATH.match(path)),
-                       larger=lambda method, path: SAVE_BODY_BYTES if method == "PUT" and path == "/api/machine/file"
+                       larger=lambda method, path: SAVE_BODY_BYTES if (method, path) in SAVE_ROUTES
                        else PDF_APPEND_MAX_BYTES if method == "POST" and path == PDF_APPEND_PATH else None)
     app.add_middleware(OriginGuardMiddleware, allowed_origins=config.allowed_origins)
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=sorted(config.allowed_hosts))

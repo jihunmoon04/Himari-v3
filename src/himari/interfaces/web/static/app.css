@@ -312,6 +312,8 @@ body {
 .conv-row {
   position: relative;
   display: block;
+  text-decoration: none; /* a link (V3-P79 §3.4) that looks as the button did */
+  cursor: pointer;
   width: 100%;
   text-align: left;
   background: none;
@@ -1569,6 +1571,64 @@ details > summary {
   white-space: pre;
 }
 
+/* V3-P79 §5: Copy on a code block and under an answer — always shown (touch has no hover), quiet. */
+.rich-text .rich-code-block {
+  position: relative;
+  margin: 0 0 0.9em; /* the block's, as a code block's own */
+}
+
+.rich-text > .rich-code-block:last-child {
+  margin-bottom: 0; /* none when it ends the answer: the Copy row follows (review N3, re-review C1) */
+}
+
+.rich-text .rich-code-block .rich-pre {
+  margin: 0;
+  padding-right: 64px;
+}
+
+.copy-button {
+  user-select: none; /* a selection of the answer never takes the label (review N7) */
+  -webkit-user-select: none;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1;
+  min-height: 28px;
+  padding: 6px 8px;
+  cursor: pointer;
+}
+
+.copy-button:hover,
+.copy-button:focus-visible {
+  color: var(--accent);
+  border-color: var(--border-subtle);
+}
+
+.rich-text .rich-code-copy {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  background: var(--code-bg);
+}
+
+.item-actions {
+  display: flex;
+  gap: var(--space-1);
+  margin-top: var(--space-1);
+  margin-left: -8px;
+}
+
+.copy-field {
+  font-size: 16px; /* iOS zooms into a focused field under 16px (re-review N-b) */
+  position: fixed;
+  top: 0;
+  left: 0;
+  opacity: 0;
+  pointer-events: none;
+}
+
 /* Formulas: KaTeX's own stylesheet (loaded with the first one) sets the
  * glyphs; these only place them. Until it loads, and when KaTeX refuses
  * one, the formula shows as written. */
@@ -2729,6 +2789,8 @@ details > summary {
 }
 
 .home-recent-card {
+  text-decoration: none;
+  color: inherit;
   width: 100%;
   min-height: 44px;
   display: flex;

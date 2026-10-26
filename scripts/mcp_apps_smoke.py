@@ -416,7 +416,7 @@ def run(token: str, fake: FakeMcpServer, chrome: str | None, shots: str | None) 
         fake.call_delay = 0.0
         page.wait_for_timeout(500)
         send(page, "five")
-        expect(page.locator(".item-assistant").last).to_have_text("HIMARIfifth", timeout=10000)
+        expect(page.locator(".item-assistant .rich-text").last).to_have_text("fifth", timeout=10000)
         page.wait_for_timeout(1500)  # the oldest view's teardown (at most 1 s)
         check("5: at most three views at once", page.locator(".app-view-frame").count() == 3,
               page.locator(".app-view-frame").count())

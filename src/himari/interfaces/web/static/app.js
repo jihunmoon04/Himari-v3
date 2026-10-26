@@ -23,10 +23,13 @@ import { AppViews } from "/assets/app_view.js";
 import { assistantTextLine, renderAssistantText } from "/assets/rich_text.js";
 import { LiveAnswer } from "/assets/live.js";
 import { FilesPane } from "/assets/files.js";
+import * as localStore from "/assets/local_store.js";
+import { DraftBook, mergeDrafts, referenceKey, withoutExpired } from "/assets/drafts.js";
 
 const POLL_MS = 1000;
 const PAGE = 50;
 const MAX_REFERENCES = 10; // a message's file references (V3-P76 §3.1)
+const drafts = new DraftBook(localStore, { writer: localStore.WRITER }); // the composer's, by place (V3-P78 §3)
 
 const STATE_TEXT = {
   completed: "Done",
@@ -113,6 +116,11 @@ async function api(method, path, body) {
 
 const app = {
   startingConversation: null,
+  place: null, // whose the composer is (V3-P78 §3.1): "home", a conversation id, {creating, from, carried}, or null
+  placeTouched: false, // the composer was changed in this place since it was entered (§3.3)
+  placeEntry: 0, // the latest entry into a place: a later read of the store applies to that one only
+  inFlight: new Set(), // the conversations a message is being sent to from this page (V3-P78 §3.1, N6)
+  address: null, // the address of the surface shown (V3-P79 §3); the sign-in screen keeps the one it came from
   sendWaiting: false, // a send waits for the conversation being created
   conversationId: null,
   generation: 0,
@@ -166,8 +174,12 @@ const views = new AppViews(api, el, () => app.conversationId);
 /* The server's files (V3-P75 §3): one pane on the Files surface, one beside a conversation.
  * On the surface a folder opens its conversation (§6); beside one, it is attached to it. */
 const askFiles = (title, lines, action) => confirmAction(title, lines, action);
+// V3-P78 §4.1: a file open with unsaved text in the other pane: what was kept for it is not offered.
+const openUnsaved = (pane, path) => pane.doc !== null && pane.doc.path === path && pane.doc.dirty;
 const filesSurface = new FilesPane({
   api, el, confirm: askFiles,
+  keep: localStore, writer: `${localStore.WRITER}:files`, // unsaved text kept in this browser (V3-P78 §4.1)
+  openElsewhere: (path) => openUnsaved(filesPanel, path),
   onAsk: (reference) => askFromFiles(reference),
   folderActions: (listing) => [openHereControl(listing.path)],
   folderRowActions: (path) => [["Open conversation", () => openFolderConversation(path, false)],
@@ -175,6 +187,8 @@ const filesSurface = new FilesPane({
 });
 const filesPanel = new FilesPane({
   api, el, confirm: askFiles,
+  keep: localStore, writer: `${localStore.WRITER}:panel`,
+  openElsewhere: (path) => openUnsaved(filesSurface, path),
   working: () => app.running, // HIMARI at work in this conversation (§7.3)
   onAsk: (reference) => { // the conversation shown again, where its chip goes
     setPanelExpanded(false);
@@ -202,7 +216,7 @@ const live = new LiveAnswer({
   document,
   timeline: () => $("timeline"),
   header: () => assistantHeader(null),
-  render: (text) => renderAssistantText(document, text),
+  render: (text) => renderAssistantText(document, text), // redrawn every 100 ms: no Copy until it ends (B2)
   style: () => getComputedStyle(document.documentElement).getPropertyValue("--thinking-style"),
   reducedMotion: () => window.matchMedia("(prefers-reduced-motion: reduce)").matches,
   now: () => Date.now(),
@@ -217,12 +231,14 @@ function status(text, tone) {
   bar.className = tone ? `status-bar is-${tone}` : "status-bar";
 }
 
-function showSurface(name) {
+/* The address follows user navigation, redirects and Back/Forward. */
+function showSurface(name, via = "none") {
   finishShellMotion();
   $("topbar-title").removeAttribute("title");
   for (const surface of ["login", "home", "chat", "trash", "instructions", "memory", "folders", "files"]) {
     $(`surface-${surface}`).hidden = surface !== name;
   }
+  followAddress(name, via);
   app.leaveAgreed = false;
   const signedIn = name !== "login";
   $("sidebar").hidden = !signedIn;
@@ -244,14 +260,20 @@ function showSurface(name) {
 
 /* ------------------------------------------------------------- sign-in */
 
-function showLogin() {
+/* ``signingOut``: nothing is kept (V3-P78 §5.3); else the session ended, and what the user wrote is kept
+ * for the next sign-in (§6). Shown already: nothing changes, the token being typed stays. */
+function showLogin({ signingOut = false } = {}) {
+  if (!$("surface-login").hidden) return;
   stopPolling();
   views.reset();
   app.conversationId = null;
   app.filesReturnId = null;
   app.generation += 1;
   live.reset();
-  clearAttachments();
+  leavePlace({ keep: !signingOut });
+  filesPanel.closeForSignIn({ keepText: !signingOut });
+  filesPanel.file = null; // its conversation is opened again from Home
+  filesSurface.closeForSignIn({ keepText: !signingOut, keepInk: !signingOut });
   showSurface("login");
   $("topbar-title").textContent = "HIMARI";
   $("server-info").hidden = true;
@@ -279,12 +301,24 @@ async function signIn(event) {
   }
 }
 
+/* V3-P78 §5.3: what can be cancelled first; then nothing more is written, the session ends, and what this
+ * browser kept goes, in every tab. */
 async function signOut() {
   if (!(await mayLeave())) return;
+  const kept = await localStore.count();
+  if (kept && !(await confirmAction("Sign out?", [`Unsaved drafts kept in this browser (${kept}) will be deleted.`],
+                                    "Sign out"))) return;
+  localStore.closeWrites();
+  drafts.clear();
+  showLogin({ signingOut: true });
+  history.replaceState(null, "", "/"); // no conversation's address left behind (V3-P79 §3.3)
+  app.address = "/";
   try {
     await api("DELETE", "/api/session");
+  } catch (ignored) {
+    /* signed out here either way */
   } finally {
-    showLogin();
+    await localStore.wipe();
   }
 }
 
@@ -294,15 +328,26 @@ function conversationName(item) {
   return item.title || item.preview || "New conversation";
 }
 
+/* V3-P79 §3.4 (Q4): a conversation as a link: a plain press opens it here; with a modifier, the middle
+ * button or "Open in New Tab", the browser opens its address. */
+function conversationLink(id, className, text = undefined) {
+  const link = el("a", className, text);
+  link.href = `/c/${encodeURIComponent(id)}`;
+  link.addEventListener("click", (event) => {
+    if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+    event.preventDefault();
+    openConversation(id);
+  });
+  return link;
+}
+
 function renderListRow(item) {
   const li = el("li", "conversation-row");
-  const button = el("button", "conv-row", conversationName(item));
-  button.type = "button";
+  const button = conversationLink(item.id, "conv-row", conversationName(item)); // a link (V3-P79 §3.4)
   button.dataset.id = item.id;
   button.title = conversationName(item);
   if (item.id === app.conversationId) button.classList.add("is-selected");
   if (item.id === app.conversationId) button.setAttribute("aria-current", "page");
-  button.addEventListener("click", () => openConversation(item.id));
   const actions = el("details", "conversation-actions");
   const toggle = el("summary");
   toggle.append(sideIcon("#side-more"));
@@ -345,15 +390,15 @@ function markSelected() {
   }
 }
 
-async function showHome() {
+async function showHome({ via = "push" } = {}) {
   if (!(await mayLeave())) return;
   stopPolling();
   app.conversationId = null;
   app.generation += 1;
   live.reset();
-  clearAttachments();
+  leavePlace();
   markSelected();
-  showSurface("home");
+  showSurface("home", via);
   $("composer-send").disabled = false;
   $("composer-pause").hidden = true;
   $("composer-cancel").hidden = true;
@@ -365,30 +410,34 @@ async function showHome() {
   closePromptForm();
   status("");
   app.prompts = null;
+  enterPlace("home");
   $("topbar-title").textContent = "HIMARI";
   const items = await loadList(true);
   const recent = $("home-recent-list");
   recent.replaceChildren();
   for (const item of items.slice(0, 3)) {
     const li = el("li");
-    const card = el("button", "home-recent-card");
-    card.type = "button";
+    const card = conversationLink(item.id, "home-recent-card");
     card.append(el("span", "home-recent-title", conversationName(item)),
                 el("span", "home-recent-activity", new Date(item.last_activity_at).toLocaleDateString()));
-    card.addEventListener("click", () => openConversation(item.id));
     li.append(card);
     recent.append(li);
   }
   $("home-recent-empty").hidden = items.length > 0;
 }
 
-async function newConversation() {
+/* ``carry``: the composer's draft goes into the new conversation (sent or given files from Home); else the
+ * place is left with its draft and the new conversation starts empty (New chat). V3-P78 §3.1. */
+async function newConversation({ carry = false } = {}) {
   if (app.startingConversation) return app.startingConversation;
   // Lock before even the leave/save check: repeated clicks may be waiting on
   // the same instruction save, and must not each create a conversation.
   const pending = (async () => {
     if (!(await mayLeave())) return false;
-    return createConversation();
+    beginCreating(carry);
+    const opened = await createConversation();
+    if (!opened) endCreating();
+    return opened;
   })();
   app.startingConversation = pending;
   try { return await pending; }
@@ -420,7 +469,7 @@ async function createConversation() {
   if (generation !== app.generation) return false; // navigation while creating never sends a draft elsewhere
   await loadList(true).catch(() => {});
   if (generation !== app.generation) return false;
-  await openConversation(created.id);
+  await openConversation(created.id, { created: true });
   $("composer-text").focus();
   return app.conversationId === created.id && app.generation === generation + 1;
 }
@@ -451,11 +500,150 @@ function renderMessage(event, model = null) {
   const user = event.kind === "user_message";
   const node = el("div", user ? "item item-user" : "item item-assistant");
   node.append(user ? el("div", "item-kind", speaker(event.kind)) : assistantHeader(model));
-  if (!user) node.append(renderAssistantText(document, event.text || ""));
+  if (!user) node.append(renderAssistantText(document, event.text || "", { copy: copyText }));
+  if (!user && event.text) node.append(answerActions(event.text));
   else if (event.text) node.append(el("p", "item-text", event.text));
   if (user && event.attachments && event.attachments.length) node.append(fileChips(event.attachments));
   if (user && event.references && event.references.length) node.append(sentReferenceChips(event.references));
   return node;
+}
+
+/* ------------------------------------------------------------- addresses */
+
+const SURFACE_ADDRESS = { home: "/", files: "/files", trash: "/trash", instructions: "/settings/instructions",
+                          memory: "/settings/memory", folders: "/settings/folders" };
+const CONVERSATION_ADDRESS = /^\/c\/([A-Za-z0-9_-]{1,128})$/;
+
+/* V3-P79 §3.2: the surface now shown, at its address. The sign-in screen leaves the address as it is. */
+function followAddress(name, via) {
+  if (name === "login") return;
+  const address = name === "chat" ? `/c/${encodeURIComponent(app.conversationId)}` : SURFACE_ADDRESS[name];
+  if (!address) return;
+  app.address = address;
+  if (location.pathname === address) return;
+  // "none": Back/Forward moved the address already — unless a leave asked meanwhile, and another move
+  // came in between (design review B1): then the screen shown wins.
+  if (via === "replace" || via === "none") history.replaceState(null, "", address);
+  else history.pushState(null, "", address);
+}
+
+/* The surface at ``path`` (an unknown one: Home). Whether it is shown now (a refused leave keeps the last). */
+async function goTo(path, via) {
+  const conversation = CONVERSATION_ADDRESS.exec(path);
+  const surface = Object.keys(SURFACE_ADDRESS).find((name) => SURFACE_ADDRESS[name] === path);
+  if (conversation) await openConversation(conversation[1], { via });
+  else if (surface === "files") await showFiles({ via });
+  else if (surface === "trash") await showTrash({ via });
+  else if (surface === "instructions") await showInstructions({ via });
+  else if (surface === "memory") await showMemory({ via });
+  else if (surface === "folders") await showFolders({ via });
+  else await showHome({ via: surface === "home" ? via : "replace" });
+  return app.address === path;
+}
+
+/* Back or Forward (§3.2). The same address — an app view's full-screen entry (V3-P63) — is app_view.js's. */
+function addressPopped() {
+  if (!$("surface-login").hidden) return; // signed out: the address waits for the sign-in
+  const wanted = location.pathname;
+  if (wanted === app.address) return;
+  goTo(wanted, "none").then(() => {
+    // A leave refused (unsaved text, an upload): the address is the surface's still shown, in this entry
+    // (a push would add an entry, or drop the Forward ones; design review B1).
+    if (app.address !== null && location.pathname !== app.address) history.replaceState(null, "", app.address);
+  }).catch((error) => status(error.message, "error"));
+}
+
+/* The tab's title follows the top bar's: "<conversation> · HIMARI" (§3.4). */
+function followTitle() {
+  const shown = $("topbar-title").textContent.trim();
+  document.title = !shown || shown === "HIMARI" ? "HIMARI" : `${shown} · HIMARI`;
+}
+
+/* ---------------------------------------------------------------- Enter */
+
+/* V3-P79 §4.1: Enter sends from a hardware keyboard and makes a new line from an on-screen one; Shift+Enter
+ * is a new line, Cmd/Ctrl+Enter sends; an Enter that ends a composition (Korean, Japanese…) is the IME's —
+ * Safari reports it with isComposing false but keyCode 229. */
+function enterSends(event) {
+  if (event.key !== "Enter" || event.isComposing || event.keyCode === 229) return false;
+  if (event.metaKey || event.ctrlKey) return true;
+  return !event.shiftKey && !onScreenKeyboard();
+}
+
+/* An on-screen keyboard is up: the visible part of the page is over 150px shorter than the window (iPadOS
+ * Safari keeps the window's height and shrinks only the visual viewport; a hardware keyboard's shortcut bar
+ * is shorter). Where the window itself shrinks for it (Android, interactive-widget=resizes-content), a touch
+ * device's window over 150px shorter than it has been at this width: a keyboard takes height, never width,
+ * while a rotation or a window resized (Stage Manager) changes the width too. Neither the window's sides
+ * nor iPadOS's screen size tell a rotation (PR #108 review B1). */
+const tallestWindow = new Map(); // window width → the tallest window seen at it
+
+function noteWindowHeight() {
+  const width = window.innerWidth;
+  tallestWindow.set(width, Math.max(tallestWindow.get(width) || 0, window.innerHeight));
+}
+
+function onScreenKeyboard() {
+  const view = window.visualViewport;
+  if (view && window.innerHeight - view.height * view.scale > 150) return true;
+  if (!window.matchMedia("(hover: none) and (pointer: coarse)").matches) return false;
+  if (!view) return true;
+  return (tallestWindow.get(window.innerWidth) || 0) - window.innerHeight > 150;
+}
+
+/* ----------------------------------------------------------------- copy */
+
+/* V3-P79 §5: under a finished answer, Copy hands over its Markdown as written. */
+function answerActions(text) {
+  const row = el("div", "item-actions");
+  const copy = el("button", "copy-button", "Copy");
+  copy.type = "button";
+  copy.setAttribute("aria-label", "Copy answer");
+  copy.addEventListener("click", () => copyText(text, copy));
+  row.append(copy);
+  return row;
+}
+
+/* ``text`` to the clipboard, told on ``button`` for 2 s; the Clipboard API (HTTPS or loopback), else the
+ * old copy command on a hidden field. Nothing is read from the clipboard. */
+async function copyText(text, button) {
+  let copied = false;
+  if (!navigator.clipboard) {
+    copied = copyByCommand(text); // at once, while the press still counts as one (iOS; review N5)
+  } else {
+    try {
+      await navigator.clipboard.writeText(text);
+      copied = true;
+    } catch (ignored) {
+      copied = copyByCommand(text);
+    }
+  }
+  if (!copied) {
+    status("Couldn't copy; select the text instead.", "warn");
+    return;
+  }
+  if (!button.dataset.label) button.dataset.label = button.textContent;
+  button.textContent = "Copied";
+  clearTimeout(button.copiedTimer);
+  button.copiedTimer = setTimeout(() => { button.textContent = button.dataset.label; }, 2000);
+}
+
+function copyByCommand(text) {
+  const field = document.createElement("textarea");
+  field.value = text;
+  field.setAttribute("readonly", "");
+  field.className = "copy-field";
+  document.body.append(field);
+  field.select();
+  field.setSelectionRange(0, text.length); // iOS selects nothing of a read-only field with select() alone
+  let copied = false;
+  try {
+    copied = document.execCommand("copy");
+  } catch (ignored) {
+    copied = false;
+  }
+  field.remove();
+  return copied;
 }
 
 /* ------------------------------------------------------------- references */
@@ -487,6 +675,7 @@ function addReference(reference) {
     status("");
   }
   renderAttachments();
+  composerChanged();
   $("composer-text").focus({ preventScroll: true }); // the page itself never scrolls
 }
 
@@ -691,12 +880,123 @@ function uploading() {
   return app.attachments.some((a) => a.state === "uploading");
 }
 
-function clearAttachments() {
-  for (const entry of app.attachments) if (entry.xhr) entry.xhr.abort();
+/* --------------------------------------------- the composer's place (V3-P78 §3) */
+
+/* What the composer holds, as a draft: the text, the files that finished uploading, the references. */
+function composerDraft() {
+  return { text: $("composer-text").value,
+           attachments: app.attachments.filter((a) => a.state === "ready")
+             .map((a) => ({ fileId: a.fileId, name: a.name, size: a.size, uploadedAt: a.uploadedAt })),
+           references: app.references.map(({ key, label, ...reference }) => reference) };
+}
+
+function fillComposer(draft) {
+  $("composer-text").value = draft.text;
+  app.promptDismissed = draft.text || null; // a "/…" draft put back opens no picker (§3.1, N6)
+  app.attachments = draft.attachments.map((f) => ({ key: (app.attachKeys += 1), name: f.name, size: f.size,
+                                                    state: "ready", fileId: f.fileId, uploadedAt: f.uploadedAt,
+                                                    progress: 100, xhr: null, note: "" }));
+  app.references = draft.references.map((r) => ({ ...r, key: (app.attachKeys += 1), label: referenceLabel(r) }));
+  renderAttachments();
+  autosize();
+}
+
+/* The composer changed in its place (§3.3): kept once it settles. The conversation being created is
+ * kept in memory only, and goes with the composer. */
+function composerChanged() {
+  if (app.place === null) return;
+  app.placeTouched = true;
+  if (typeof app.place === "string") drafts.schedule(app.place, composerDraft);
+}
+
+/* Uploads under way stop; the files that finished stay (§3.2). */
+function cancelUploads() {
+  const going = app.attachments.filter((a) => a.state === "uploading");
+  if (!going.length) return;
+  for (const entry of going) if (entry.xhr) entry.xhr.abort();
+  app.attachments = app.attachments.filter((a) => !going.includes(a));
+  renderAttachments();
+}
+
+/* The composer leaves its place: with ``keep``, what was changed there is kept for it (the conversation
+ * being created gives its part back to where it started from), then the composer is empty. */
+function leavePlace({ keep = true } = {}) {
+  cancelUploads();
+  const place = app.place;
+  if (place !== null && keep) {
+    if (typeof place === "object") drafts.merge(place.from, composerDraft());
+    else if (app.placeTouched) drafts.set(place, composerDraft());
+    else drafts.flush();
+  } else {
+    drafts.cancel();
+  }
+  app.place = null;
+  app.placeTouched = false;
+  app.placeEntry += 1;
+  $("composer-text").value = "";
   app.attachments = [];
   app.references = [];
   app.jobRunning = false; // another page: its own detail sets it (PR #60 re-review N1)
   renderAttachments();
+  autosize();
+}
+
+/* The composer comes to ``place`` with its draft, at once from memory (§3.1, review B3); a newer one another
+ * tab kept is put in only while nothing was changed here since. */
+function enterPlace(place) {
+  app.place = place;
+  app.placeTouched = false;
+  const entry = (app.placeEntry += 1);
+  const warned = drafts.sending(place) && !app.inFlight.has(place); // a tab that died mid-send, not this one
+  fillComposer(fresh(place, drafts.get(place)));
+  if (warned) status("This message may have been sent already; check the conversation before sending it again.", "warn");
+  drafts.fresher(place).then((newer) => {
+    if (newer && entry === app.placeEntry && !app.placeTouched && app.place === place) fillComposer(fresh(place, newer));
+  });
+}
+
+/* ``draft`` without chips of uploads too old to send (§3.1, N5), told. */
+function fresh(place, draft) {
+  const [kept, dropped] = withoutExpired(draft, Date.now());
+  if (!dropped.length) return draft;
+  drafts.set(place, kept);
+  status(`An attached file expired; attach it again: ${dropped.join(", ")}`, "warn");
+  return kept;
+}
+
+/* §3.1 (review B1): a conversation is being created. With ``carry`` the composer goes into it as it is
+ * (the stored draft of where it started stays until the conversation has it, N5); else the place is left
+ * with its draft, and the new one starts empty. */
+function beginCreating(carry) {
+  const now = app.place;
+  const from = now === null ? "home" : typeof now === "object" ? now.from : now;
+  if (carry) {
+    drafts.flush();
+    drafts.forget(from);
+  } else {
+    leavePlace();
+  }
+  app.place = { creating: true, from, carried: carry };
+  app.placeTouched = carry;
+  app.placeEntry += 1;
+}
+
+/* The conversation was not created (or not opened): what was written for it goes back where it started. */
+function endCreating() {
+  const place = app.place;
+  if (place === null || typeof place !== "object") return; // left meanwhile: leavePlace gave it back
+  const typed = composerDraft();
+  const shown = place.from === "home" ? !$("surface-home").hidden
+    : !$("surface-chat").hidden && app.conversationId === place.from;
+  if (!shown) {
+    leavePlace();
+    return;
+  }
+  const back = mergeDrafts(drafts.get(place.from), typed);
+  app.place = place.from;
+  app.placeEntry += 1;
+  fillComposer(back);
+  composerChanged();
 }
 
 function renderAttachments() {
@@ -716,6 +1016,7 @@ function renderAttachments() {
     remove.addEventListener("click", () => {
       app.references = app.references.filter((r) => r !== reference);
       renderAttachments();
+      composerChanged();
     });
     item.append(open, remove);
     list.append(item);
@@ -732,6 +1033,7 @@ function renderAttachments() {
       if (entry.xhr) entry.xhr.abort();
       app.attachments = app.attachments.filter((a) => a !== entry);
       renderAttachments();
+      composerChanged();
     });
     item.append(remove);
     list.append(item);
@@ -770,7 +1072,8 @@ function uploadFile(file) {
       /* reported below */
     }
     if (xhr.status === 201 && data) {
-      Object.assign(entry, { state: "ready", fileId: data.file_id, size: data.size });
+      Object.assign(entry, { state: "ready", fileId: data.file_id, size: data.size, uploadedAt: Date.now() });
+      composerChanged();
       // An image with a copy reaches a model that takes images as an image (V3-P67): no command needed.
       const seen = data.image && data.image.state === "ready" && modelTakesImages();
       if (data.commands === false && !seen) {
@@ -794,8 +1097,10 @@ function uploadFile(file) {
 
 async function addFiles(files) {
   if (!files.length) return;
-  if (app.conversationId === null && !$("surface-home").hidden) {
-    if (!(await newConversation())) return;
+  if (app.startingConversation) { // until it opens, the conversation is the one before (V3-P78 §3.1, C1)
+    if (!(await app.startingConversation)) return;
+  } else if (app.conversationId === null && !$("surface-home").hidden) {
+    if (!(await newConversation({ carry: true }))) return;
   }
   for (const file of files) uploadFile(file);
 }
@@ -1331,7 +1636,8 @@ function pickerKey(event) {
   if (event.key === "ArrowDown" || event.key === "ArrowUp") {
     app.promptSelected = (app.promptSelected + (event.key === "ArrowDown" ? 1 : count - 1)) % count;
     updatePicker();
-  } else if ((event.key === "Enter" && !event.shiftKey && !event.isComposing) || event.key === "Tab") {
+  } else if ((event.key === "Enter" && !event.shiftKey && !event.isComposing && event.keyCode !== 229)
+             || event.key === "Tab") { // 229: Safari's Enter that ends a composition (V3-P79 §4.1)
     choosePrompt(app.promptChoices[app.promptSelected]);
   } else if (event.key === "Escape") {
     app.promptDismissed = $("composer-text").value;
@@ -1418,6 +1724,7 @@ async function expandPrompt(prompt, values) {
     box.value = answer.text;
     app.promptDismissed = answer.text;
     autosize();
+    composerChanged();
     box.focus();
     box.setSelectionRange(0, 0);
     box.scrollTop = 0;
@@ -1594,7 +1901,16 @@ function poll(generation) {
     } catch (error) {
       if (generation !== app.generation || error.status === 401) return;
       if (error.status === 404) { // moved to the trash elsewhere (V3-P65): it is gone from here
-        await showHome().catch(() => {});
+        // V3-P78 §3.1 (N7, N3): its text and references go to Home; its uploads were its own.
+        const gone = app.conversationId;
+        cancelUploads();
+        if (app.place === gone) {
+          const left = composerDraft();
+          drafts.merge("home", { text: left.text, attachments: [], references: left.references });
+          app.placeTouched = false;
+        }
+        drafts.remove(gone);
+        await showHome({ via: "replace" }).catch(() => {});
         status("That conversation is no longer here; it may have been moved to the trash.", "warn");
         return;
       }
@@ -1604,12 +1920,16 @@ function poll(generation) {
   }, POLL_MS);
 }
 
-async function openConversation(id) {
+/* ``created``: the conversation just made for the composer's place (V3-P78 §3.1): the composer moves into it
+ * as it is — not a leave. */
+async function openConversation(id, { created = false, via = "push" } = {}) {
   if (!(await mayLeave())) return;
   stopPolling();
   app.generation += 1;
   live.reset();
-  clearAttachments();
+  const moving = created && app.place !== null && typeof app.place === "object" ? app.place : null;
+  if (moving === null) leavePlace();
+  app.jobRunning = false;
   const generation = app.generation;
   views.reset();
   app.conversationId = id;
@@ -1633,7 +1953,16 @@ async function openConversation(id) {
   closePromptForm();
   $("timeline").replaceChildren();
   markSelected();
-  showSurface("chat");
+  showSurface("chat", via);
+  if (moving === null) {
+    enterPlace(id);
+  } else {
+    app.place = id;
+    app.placeTouched = true;
+    app.placeEntry += 1;
+    drafts.set(id, composerDraft());
+    if (moving.carried) drafts.remove(moving.from); // kept under the conversation now (N5)
+  }
   closeNav();
   $("chat-menu-folders").hidden = true;
   app.workingFolder = null;
@@ -1650,7 +1979,21 @@ async function openConversation(id) {
     if (detail && detail.job.running) poll(generation);
     else if (detail) loadContext(generation);
   } catch (error) {
-    if (generation === app.generation) status(error.message, "error");
+    if (generation !== app.generation) return;
+    if (error.status === 404) { // not here (trashed, deleted, or never): Home, and Back does not come back (§3.3)
+      // Its text and references go to Home, as the poll's 404 does (V3-P78 §3.1; PR #108 review N1).
+      if (app.place === id) {
+        const left = composerDraft();
+        drafts.merge("home", { text: left.text, attachments: [], references: left.references });
+      }
+      cancelUploads();
+      app.placeTouched = false;
+      drafts.remove(id);
+      await showHome({ via: "replace" }).catch(() => {});
+      status("That conversation is not here; it may have been moved to the trash.", "warn");
+      return;
+    }
+    status(error.message, "error");
   }
 }
 
@@ -1666,7 +2009,7 @@ async function sendMessage(event) {
     if (app.sendWaiting) return;
     app.sendWaiting = true;
     let opened;
-    try { opened = await newConversation(); }
+    try { opened = await newConversation({ carry: true }); }
     finally { app.sendWaiting = false; }
     if (!opened) return; // it failed, or the user went elsewhere meanwhile
   }
@@ -1675,6 +2018,10 @@ async function sendMessage(event) {
   if ((!text && !ready.length && !pointed.length) || app.sending || uploading() || app.conversationId === null) return;
   abandonExpansion(); // a message sent now is the user's: no prompt answer may replace what follows
   const generation = app.generation;
+  const sentTo = app.conversationId; // V3-P78 §3.1: the draft the sent parts leave, wherever the composer is then
+  const sent = { text: draft, fileIds: ready.map((a) => a.fileId), references: pointed };
+  if (app.place === sentTo) drafts.markSending(sentTo, composerDraft());
+  app.inFlight.add(sentTo);
   app.sending = true;
   $("composer-send").disabled = true;
   try {
@@ -1682,7 +2029,8 @@ async function sendMessage(event) {
       { text, attachments: ready.map((a) => a.fileId),
         references: pointed.map((r) => (r.whole ? { path: r.path, identity: r.identity }
           : { path: r.path, identity: r.identity, start: r.start, end: r.end, sha256: r.sha256 })) });
-    if (generation === app.generation) {
+    drafts.removeSent(sentTo, sent);
+    if (app.place === sentTo) { // the composer is still this conversation's (not by generation: N2)
       // A user can navigate or type again while this request is in flight.
       // Only clear the exact draft accepted for this conversation.
       if (box.value === draft) {
@@ -1690,13 +2038,24 @@ async function sendMessage(event) {
         autosize();
       }
       app.jobRunning = true; // a job starts with this message; the next detail says when it ends
-      app.attachments = app.attachments.filter((a) => !ready.includes(a));
-      app.references = app.references.filter((r) => !pointed.includes(r));
+      // By what they are, not by object: chips put back by a leave and return are new objects (PR #106 review B2).
+      const sentIds = new Set(sent.fileIds);
+      const sentKeys = new Set(pointed.map(referenceKey));
+      app.attachments = app.attachments.filter((a) => !(a.state === "ready" && sentIds.has(a.fileId)));
+      app.references = app.references.filter((r) => !sentKeys.has(referenceKey(r)));
       renderAttachments();
+      composerChanged(); // what was typed meanwhile is kept as usual (N1)
       status("");
     }
   } catch (error) {
-    if (generation !== app.generation) return;
+    if (error.kind !== "network") drafts.clearSending(sentTo); // refused: it was not sent
+    if (generation !== app.generation) {
+      // Left and back while it was sent (final check N-a): the draft shown is that message's.
+      if (error.kind === "network" && app.place === sentTo) {
+        status("The message may or may not have been received; check the conversation before sending again.", "warn");
+      }
+      return;
+    }
     if (error.code === "attachment_refused" && error.fileId) { // which chip (V3-P66 §9)
       const refused = app.attachments.find((a) => a.fileId === error.fileId);
       if (refused) Object.assign(refused, { state: "failed", note: `${error.message} — upload it again` });
@@ -1712,6 +2071,7 @@ async function sendMessage(event) {
     }
   } finally {
     app.sending = false;
+    app.inFlight.delete(sentTo);
   }
   if (generation === app.generation) {
     try {
@@ -1881,8 +2241,11 @@ async function deleteConversation(item = null) {
   status(notice.running ? "Stopping the work under way, then moving it to the trash…" : "Moving it to the trash…");
   try {
     const moved = await api("POST", `/api/conversations/${encodeURIComponent(id)}/trash`);
+    if (app.conversationId === id) cancelUploads(); // moved: its uploads go with it, nothing to ask (PR #106 N4)
     // Moved: a list that fails to load now must not read as a failed move.
-    await (app.conversationId === id || !$("surface-home").hidden ? showHome() : loadList(true).then(markSelected)).catch(() => {});
+    await (app.conversationId === id ? showHome({ via: "replace" }) : !$("surface-home").hidden ? showHome({ via: "none" })
+      : loadList(true).then(markSelected)).catch(() => {});
+    drafts.remove(id); // after the leave kept it (V3-P78 §3.1)
     status(`Moved “${name}” to the trash. It is deleted for good on ${localDate(moved.purge_after)}.`, "ok");
   } catch (error) {
     if (error.kind === "network") {
@@ -1926,16 +2289,16 @@ async function loadTrash(reset) {
   $("trash-empty").hidden = list.children.length > 0;
 }
 
-async function showTrash() {
+async function showTrash({ via = "push" } = {}) {
   if (!(await mayLeave())) return;
   stopPolling();
   views.reset();
   app.conversationId = null;
   app.generation += 1;
   live.reset();
-  clearAttachments();
+  leavePlace();
   markSelected();
-  showSurface("trash");
+  showSurface("trash", via);
   closeNav();
   $("topbar-title").textContent = "Trash";
   $("trash-hint").textContent = (app.trashDays ? `Conversations here are deleted for good ${app.trashDays} days`
@@ -2013,7 +2376,7 @@ async function loadInstructions() {
   paintInstructions();
 }
 
-async function showInstructions() {
+async function showInstructions({ via = "push" } = {}) {
   if (!$("surface-instructions").hidden && (app.instructions !== null || app.instructionsLoading)) {
     closeNav(); // shown, and loaded or loading: nothing to start again
     return;
@@ -2025,13 +2388,13 @@ async function showInstructions() {
     app.conversationId = null;
     app.generation += 1;
     live.reset();
-    clearAttachments();
+    leavePlace();
     markSelected();
     app.instructions = null;
     app.conflictRevision = null;
     $("instructions-conflict").hidden = true;
     $("instructions-text").value = "";
-    showSurface("instructions");
+    showSurface("instructions", via);
     $("topbar-title").textContent = "Instructions";
     status("");
   }
@@ -2108,6 +2471,12 @@ async function discardInstructions() {
    holds until the surface changes, so a navigation that goes on to open a
    conversation does not ask twice, and one that fails keeps the text (N2). */
 async function mayLeave() {
+  // V3-P78 §3.2 (Q1): an upload under way is cancelled only if the user says so; asked once.
+  if (uploading()) {
+    if (!(await confirmAction("A file is still uploading", ["Leave and cancel it? Files that finished stay in "
+                                                          + "your message."], "Leave"))) return false;
+    cancelUploads();
+  }
   // The panel's file goes with its conversation; unsaved text there is dropped only if the user says so
   // (V3-P75 §7). The Files surface keeps its own file across surfaces: nothing to ask for it here.
   if (filesPanel.dirty) {
@@ -2375,19 +2744,19 @@ async function loadMemory() {
   paintMemory(); // closes any open form
 }
 
-async function showMemory() {
+async function showMemory({ via = "push" } = {}) {
   if (!(await mayLeave())) return;
   stopPolling();
   views.reset();
   app.conversationId = null;
   app.generation += 1;
   live.reset();
-  clearAttachments();
+  leavePlace();
   markSelected();
   app.memory = null;
   $("memory-groups").replaceChildren();
   $("memory-count").textContent = "Loading…";
-  showSurface("memory");
+  showSurface("memory", via);
   closeNav();
   $("topbar-title").textContent = "Memory";
   status("");
@@ -2597,7 +2966,7 @@ async function registerFolder(event) {
 /* ------------------------------------------------------------------ files */
 
 /* V3-P75 §3.2: the Files surface — this server's files without a conversation. */
-async function showFiles() {
+async function showFiles({ via = "push" } = {}) {
   if (!(await mayLeave())) return;
   if (app.conversationId) app.filesReturnId = app.conversationId;
   stopPolling();
@@ -2605,9 +2974,9 @@ async function showFiles() {
   app.conversationId = null;
   app.generation += 1;
   live.reset();
-  clearAttachments();
+  leavePlace();
   markSelected();
-  showSurface("files");
+  showSurface("files", via);
   closeNav();
   $("topbar-title").textContent = "Files";
   status("");
@@ -2869,17 +3238,17 @@ function nudgePanel(event) {
   try { localStorage.setItem(PANEL_WIDTH_KEY, String(fraction)); } catch (ignored) { /* kept for this page */ }
 }
 
-async function showFolders() {
+async function showFolders({ via = "push" } = {}) {
   if (!(await mayLeave())) return;
   stopPolling();
   views.reset();
   app.conversationId = null;
   app.generation += 1;
   live.reset();
-  clearAttachments();
+  leavePlace();
   markSelected();
   $("folders-list").replaceChildren();
-  showSurface("folders");
+  showSurface("folders", via);
   closeNav();
   $("topbar-title").textContent = "Folders";
   status("");
@@ -3021,15 +3390,19 @@ async function loadServerInfo() {
 }
 
 async function enter() {
+  localStore.openWrites(); // V3-P78 §5.3: closed by a sign-out until now
+  await drafts.load();
   loadServerInfo();
   syncFoldersLink();
   // A save that met a signed-out session goes back to its draft (PR #68 review C2).
   if (!app.instructionsDraft) {
-    await showHome();
+    // The page's address, or the one signed in at (V3-P79 §3.3); the list as Home would show it (review N4).
+    if (location.pathname !== "/") loadList(true).then(markSelected).catch(() => {});
+    await goTo(location.pathname, "replace");
     return;
   }
   loadList(true).then(markSelected).catch(() => {}); // as Home would (re-review N3)
-  await showInstructions();
+  await showInstructions({ via: "replace" }); // as the other way in (PR #108 review N4)
 }
 
 async function boot() {
@@ -3062,6 +3435,19 @@ async function boot() {
   $("instructions-overwrite").addEventListener("click", () => saveInstructions(true));
   $("instructions-discard").addEventListener("click", () => discardInstructions().catch((e) => status(e.message, "error")));
   $("instructions-load").addEventListener("click", () => loadInstructions().catch((e) => status(e.message, "error")));
+  // V3-P78 §3.3: what waits to be kept goes now (Safari may not finish it; the short delay is the guarantee).
+  const keepNow = () => {
+    if (app.placeTouched && typeof app.place === "string") drafts.set(app.place, composerDraft());
+    for (const pane of [filesPanel, filesSurface]) pane.keepNow();
+  };
+  window.addEventListener("pagehide", keepNow);
+  document.addEventListener("visibilitychange", () => { if (document.visibilityState === "hidden") keepNow(); });
+  // §5.3: another tab signed out — nothing of this one is kept or written either.
+  localStore.onWiped(() => { // signed out like that tab: to sign in again, where writes open again (PR #106 review B3)
+    drafts.clear();
+    filesSurface.closeForSignIn({ keepText: false }); // also when the sign-in screen shows already (re-review N3)
+    showLogin({ signingOut: true });
+  });
   window.addEventListener("beforeunload", (event) => {
     const unsaved = app.instructionsDraft !== null || (!$("surface-instructions").hidden && instructionsDirty())
       || memoryDirty() || filesSurface.dirty || filesPanel.dirty;
@@ -3112,6 +3498,7 @@ async function boot() {
   $("composer-text").addEventListener("input", () => {
     autosize();
     updatePicker();
+    composerChanged();
   });
   $("composer-text").addEventListener("blur", () => setTimeout(closePicker, 150));
   $("prompt-form").addEventListener("submit", submitPromptForm);
@@ -3125,10 +3512,14 @@ async function boot() {
       $("composer-text").focus();
     }
   });
+  noteWindowHeight();
+  window.addEventListener("resize", noteWindowHeight);
+  window.addEventListener("popstate", addressPopped);
+  new MutationObserver(followTitle).observe($("topbar-title"), { childList: true, characterData: true, subtree: true });
   $("composer-text").addEventListener("keydown", (event) => {
     if (pickerKey(event)) return;
     if (event.key === "Escape") abandonExpansion(); // like Cancel: a pending prompt will not fill the box
-    if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
+    if (enterSends(event)) {
       event.preventDefault();
       $("composer").requestSubmit();
     }
