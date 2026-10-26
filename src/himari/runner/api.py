@@ -32,12 +32,14 @@ import struct
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-PROTOCOL_VERSION = 3  # 2: write and delete with ``keep``, write ``mode: "install"``, visible ``follow`` (V3-P76);
-# 3: ``copy_max`` on a replace, ``delete_copied`` (V3-P77 §6.1)
+PROTOCOL_VERSION = 4  # 2: write and delete with ``keep``, write ``mode: "install"``, visible ``follow`` (V3-P76);
+# 3: ``copy_max`` on a replace, ``delete_copied`` (V3-P77 §6.1); 4: ``append`` and ``truncate`` (V3-P82 §3.6)
 KEEP_PROTOCOL = 2  # a runner older than this ignores ``keep`` and ``install`` (it would write plainly)
 COPY_MAX_PROTOCOL = 3  # a runner older than this ignores ``copy_max`` (it copies 1 MiB at most: a replace of a
 # larger file is refused) and refuses ``delete_copied`` as unknown: either way nothing goes uncopied
 MAX_COPY_BYTES = 64 * 1024 * 1024  # the largest ``copy_max``: a PDF the web writes to (V3-P77 §3.3)
+APPEND_PROTOCOL = 4  # a runner older than this refuses ``append`` and ``truncate`` as unknown (``invalid``)
+MAX_APPEND_BYTES = 8 * 1024 * 1024  # one ``append``: a PDF's incremental update (V3-P77 §5.3)
 MAX_FRAME_BYTES = 4 * 1024 * 1024
 MAX_FDS = 4
 _HEADER = struct.Struct(">I")
@@ -65,8 +67,10 @@ CREATE_FILE = "create_file"  # a new empty file, never over one (V3-P75 §7.7)
 MKDIR = "mkdir"  # one new folder (V3-P75 §7.5)
 DELETE_COPIED = "delete_copied"  # a checked delete whose copy is required (V3-P77 §6.3): an op of its own, so
 # that a runner too old for it refuses it instead of deleting without the copy (PR #103 review P1)
+APPEND = "append"  # bytes written at the end of a file, in place (V3-P82 §3.6)
+TRUNCATE = "truncate"  # a file cut back to just after one of its ``%%EOF`` (V3-P82 §3.6)
 WRITES = frozenset({WRITE, DELETE, RUN, COPY_IN, FREE_PATH, COMMIT_COPY, DISCARD_COPY, REMOVE_CONVERSATION_FOLDER,
-                    GIT_PUSH, CREATE_FILE, MKDIR, DELETE_COPIED})
+                    GIT_PUSH, CREATE_FILE, MKDIR, DELETE_COPIED, APPEND, TRUNCATE})
 # ``write`` with ``mode: "replace"`` (V3-P75 §7.4): ``expected`` required; the answer carries a copy of the
 # replaced file as an fd (none over 1 MiB). ``delete`` with ``expected``: the same for the deleted file.
 # ``write`` and ``delete`` with ``keep: true`` (V3-P76 §4.1, an agent's write): the same copy, never over a file
@@ -78,6 +82,15 @@ WRITES = frozenset({WRITE, DELETE, RUN, COPY_IN, FREE_PATH, COMMIT_COPY, DISCARD
 # ``copy_max`` (bytes, 1 MiB to MAX_COPY_BYTES; 1 MiB if left out) on a replace (V3-P77 §6.1): the largest file
 # copied; a larger one is TOO_LARGE. ``delete_copied`` (``expected``, ``copy_max`` required): the file deleted
 # only with its copy (the answer's fd), TOO_LARGE over ``copy_max``.
+# ``append`` (``expected`` required, the bytes as one fd of at most MAX_APPEND_BYTES): written at the end of the
+# file whose identity is ``expected`` (a regular file with one name), in place, never through a temporary file,
+# one at a time per file; the answer's identity is the name's after. Refused before writing: CHANGED, LINKS,
+# NOT_REGULAR, ACCESS (read-only), UNSUPPORTED (cannot be written into in place). After writing: CHANGED with
+# ``partial`` (the file is not the size our bytes left it at, or another file took the name: read it again).
+# A failed write is cut back when nothing else wrote meanwhile; its error carries the file's ``identity`` then
+# and ``partial`` (bytes of it left at the end; never with ACCESS or UNSUPPORTED). ``truncate`` (``expected``,
+# ``to``): the file cut to ``to``, within the last MAX_APPEND_BYTES (and 1 KiB) and right after a
+# ``startxref`` and its ``%%EOF`` (and at most one line break): only a save cut short taken off its end.
 
 # Error categories: each message is safe to show the model.
 NOT_FOUND = "not_found"  # also every hidden path: whether it exists is not told
@@ -121,9 +134,12 @@ MESSAGES = {
 class RunnerError(Exception):
     """The runner refused or failed an operation; ``str()`` is safe to show."""
 
-    def __init__(self, category: str, message: str | None = None) -> None:
+    def __init__(self, category: str, message: str | None = None, *, identity: list[int] | None = None,
+                 partial: bool = False) -> None:
         super().__init__(message or MESSAGES.get(category, MESSAGES[OTHER]))
         self.category = category
+        self.identity = identity  # ``append``'s failure (V3-P82 §3.6): the file as it is now, when known
+        self.partial = partial  # ... and bytes of it left at the end
 
 
 class RunnerUnavailable(Exception):
@@ -241,5 +257,11 @@ def ok(result: Mapping[str, Any]) -> dict[str, Any]:
     return {"ok": True, "result": dict(result)}
 
 
-def failed(category: str, message: str | None = None) -> dict[str, Any]:
-    return {"ok": False, "error": {"category": category, "message": message or MESSAGES.get(category, MESSAGES[OTHER])}}
+def failed(category: str, message: str | None = None, identity: list[int] | None = None,
+           partial: bool = False) -> dict[str, Any]:
+    error: dict[str, Any] = {"category": category, "message": message or MESSAGES.get(category, MESSAGES[OTHER])}
+    if identity is not None:
+        error["identity"] = identity
+    if partial:
+        error["partial"] = True
+    return {"ok": False, "error": error}

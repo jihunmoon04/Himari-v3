@@ -415,3 +415,74 @@
 - 캡처 영역의 좌표를 참조에 넣어, 에이전트가 그 부분의 글만 읽게 하기.
 - **필기 전으로 되돌리기**: 증분 저장의 끝(`%%EOF`)마다가 저장 지점이다. 고른 지점 뒤를 잘라 낸 파일로 되돌린다(rev. 3, §3.6).
 - **바꿔치기 저장의 거짓 충돌**(§3.6의 시험): 편집기 저장 등 `replace`를 쓰는 곳에서, rclone 마운트의 inode가 저절로 바뀌어 "Changed on the server"가 나는 것. 이 문서와 따로 작은 수정으로 고친다.
+
+## 13. 1단계 a 구현 노트 (서버: 원본에 바로 덧붙이기, 2026-10-26)
+
+1단계를 둘로 나눴다. a는 서버(runner·Bootstrap·웹 서버)이고, b는 웹(자동 저장, 보관소, 끝이 잘린 파일 고치기)이다.
+
+- **runner 프로토콜 4**
+  - `append`, `truncate`를 따로 둔 동작으로 더했다. 둘 다 `WRITES`에 들어 있다.
+  - `Host.append`
+    - `O_WRONLY|O_NOFOLLOW|O_NONBLOCK|O_NOCTTY`로 열고, 일반 파일·링크 수 1·identity를 확인한다.
+    - 기대 크기 위치부터 `pwrite`를 되풀이하고 `fsync`한다.
+    - 닫은 뒤 이름으로 다시 `stat`한다. 연 파일과 다르면 `CHANGED`다.
+    - 실패하면 같은 inode이고 크기가 "기대 크기 + 쓴 만큼"일 때만 잘라 되돌린다. 오류에는 그때의 `identity`와 `partial`을 담는다.
+  - `Host.truncate`: `O_RDWR`로 열고, `to` 앞이 `%%EOF`(줄바꿈 `\n`, `\r`, `\r\n` 하나까지 허용)일 때만 자른다.
+  - `RunnerError`와 `failed()`가 선택 필드 `identity`, `partial`을 실어 나르고, 클라이언트가 그것을 읽는다.
+  - `OPEN`의 답에 `filesystem`(마운트 표의 이름)을 더했다.
+- **Bootstrap**
+  - `Explorer.append_pdf`
+    - 확인(크기, 증분, `%PDF-`, identity)을 마친 뒤 runner `append`를 부른다.
+    - 복사, 바꿔치기, 30분 판이 없고, PDF 판 저장소 없이도 저장한다.
+    - 프로토콜 4가 아닌 runner면 보내기 전에 `unsupported`다. 그사이 오래된 runner로 바뀌어 `invalid`가 오면 `hello`를 새로 묻는다.
+  - `Explorer.truncate_pdf`를 더했다.
+  - `ShownFile.cloud_synced`를 더했다(`fuse.rclone`).
+  - `_pdf_with`, `PDF_COPY_SECONDS`, `INK_VERSION_EVERY`를 지웠다.
+- **웹 서버**
+  - `POST /api/machine/pdf/append`의 답은 `{path, identity}`이고, `previous_kept`는 뺐다.
+  - 새 끝점 `POST /api/machine/pdf/truncate?path=&to=`(`X-Himari-Expected`).
+  - 탐색기 오류 답에 `identity`·`partial`을 더하고, `/api/machine/file`의 답에 `cloud_synced`를 더했다.
+- **웹**: PDF 저장 뒤의 "previous version could not be kept" 문구만 뺐다. 나머지는 b에서 한다.
+- **시험**
+  - `test_hidden_hostfs.py`
+    - `append`: 같은 inode에 덧붙임, 임시 파일 없음.
+    - 쓰지 않는 파일: 바뀐 파일, 하드 링크, FIFO, 심볼릭 링크, 읽기 전용, 64 MiB 초과.
+    - 실패 뒤 되돌림과 그 identity. 다른 것이 그사이 쓰면 자르지 않고 `partial`.
+    - 쓰는 사이 이름이 바뀌면 `CHANGED`.
+    - `truncate`는 `%%EOF` 바로 뒤로만.
+  - `test_server.py`: 프로토콜을 거친 `append`·`truncate`, `OPEN`의 `filesystem`, 오류 프레임의 `identity`.
+  - `test_web_pdf.py`
+    - 덧붙여도 같은 inode이고 판이 없음, 끝이 잘린 파일 자르기, 하드 링크·읽기 전용, 실패 답의 `identity`·`partial`.
+    - 옛 runner, 저장소 없이 저장, 큰 PDF의 지우기·되살리기·되돌리기, 그사이 오래된 runner로 바뀐 경우.
+  - 결과: 전체 pytest 2,618개 통과, mypy와 모듈 경계 검사 통과, `files_smoke`·`pdf_smoke`·`ui_state_smoke` 통과.
+- **배포**: himari-runner를 다시 시작해야 한다(프로토콜 4). 다시 시작하기 전에는 PDF 저장이 "restart himari-runner"로 거부된다.
+  - **a만 따로 배포하지 않는다**(검수 N9). 웹이 실패 답의 `identity`·`partial`을 쓰는 것과 끝이 잘린 파일 고치기는 b에 있다. a만 있으면 되돌린 실패 뒤의 다시 저장이 충돌 막대로 가고, 남은 조각을 고치지 못한다.
+
+**PR #118 검수 반영**(READY_WITH_CORRECTIONS)
+- **C1 동시 저장**: 같은 판에서 두 저장이 함께 오면 둘 다 성공하고 끝이 섞였다.
+  - 한 파일에는 제자리 쓰기를 하나씩 한다(파일(`dev`, `ino`)마다의 잠금, identity 확인부터 `fsync`까지). 처음엔 runner 전체에 잠금 하나였으나, 재검수 C-a에 따라 파일마다로 바꿨다. 멈춘 마운트가 다른 파일의 저장까지 붙잡지 않는다.
+  - 쓴 뒤 크기가 "기대 크기 + 덧붙인 크기"가 아니면 `CHANGED`(`identity`, `partial`)다. runner 밖의 쓰기(rclone이 원격의 바뀜을 내려받음)도 이것으로 잡는다.
+  - 이름으로 다시 본 크기가 다르면 그것도 `CHANGED`다.
+- **C2 문구**
+  - 읽기 전용: "this PDF is read-only on the server: it cannot be written on".
+  - 쓰기 캐시가 없는 마운트(`EPERM`, `ENOTSUP`): `unsupported`와 "--vfs-cache-mode writes or full".
+  - 하드 링크 문구를 설계에 맞췄다.
+- **C3**: 실제 runner와 클라이언트를 거쳐 실패의 `identity`가 오는 시험을 더했다(읽을 수 없는 fd로 실패시킴).
+- **C4 자르기의 범위**: 끝에서 8 MiB + 1 KiB 안이고, 바로 앞이 `startxref <수> %%EOF`인 곳만 자른다. 선형화한 PDF의 앞쪽 `%%EOF`나 스트림 안의 `%%EOF`로는 자르지 않는다.
+- **N**
+  - `pwrite`가 0을 돌려주면 `EIO`로 처리한다.
+  - 되돌리기의 같은 inode 비교를 뺐다(늘 참).
+  - `OPEN`의 `mount_type`을 읽기 스레드로 옮겼다(fd 새는 길도 막음).
+  - `cloud_synced`를 모든 종류의 파일에 채운다.
+  - `increment_ok`의 설명을 고쳤다.
+  - 쓰이지 않던 `_reading`의 `discard`를 지웠다.
+  - 돌려받은 fd를 닫는다.
+  - 짧은 `pread`를 거부한다.
+  - 클라우드 표시 시험을 더했다.
+- 돌연변이 확인: 잠금, 쓴 뒤 크기 확인, 클라이언트의 `identity` 읽기를 하나씩 빼면 각 시험이 실패한다.
+- **재검수**(READY_WITH_CORRECTIONS)
+  - C-a: 잠금을 파일마다로 바꿨다. 시험은 한 파일의 잠금을 쥔 동안 다른 파일은 저장되고, 그 파일의 저장은 기다리는지를 본다(잠금을 하나로 되돌리면 실패).
+  - N-a: `%%EOF` 뒤 줄바꿈은 정확히 하나까지(`\Z`).
+  - N-b: `EROFS`도 읽기 전용 문구. `EPERM`의 문구는 고칠 수 없는 파일(`chattr +i`)도 말한다.
+  - N-c: 바이트가 남은 실패는 `unsupported`·`access`가 아니라 `other`다. 두 동작의 결과를 프로토콜 설명에 적었다.
+  - N-d(b 단계에 넘김): 쓴 뒤 크기가 다른 `CHANGED`의 `partial`은 "다시 읽고, 고치거나 자르기"로 다룬다. "저장이 끊겼다"로 다루지 않는다.

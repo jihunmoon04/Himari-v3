@@ -32,8 +32,7 @@ import tempfile
 from collections import OrderedDict
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
-from typing import Any, BinaryIO, TypeVar
+from typing import Any, TypeVar
 
 from himari.data.api import (
     IMAGE_HEAD_BYTES,
@@ -46,7 +45,7 @@ from himari.data.api import (
 )
 from himari.bootstrap.versions import Version, VersionStore
 from himari.common import FileReference
-from himari.environment.machine import MachineEnvironment
+from himari.environment.machine import CLOUD_FILESYSTEMS, MachineEnvironment
 from himari.runner import api as runner
 
 log = logging.getLogger("himari.explorer")
@@ -64,8 +63,6 @@ EXCERPT_BYTES = 20 * 1024  # a reference's excerpt, as UTF-8 (V3-P76 Q1)
 PDF_HEADER = b"%PDF-"  # what makes a file a PDF here, whatever its name (V3-P77 §3.1)
 PDF_MAX_BYTES = runner.MAX_COPY_BYTES  # V3-P77 §3.3, Q2: a PDF written to from the web, after its save too
 PDF_APPEND_MAX_BYTES = 8 * 1024 * 1024  # the ink one save adds (§5.3)
-PDF_COPY_SECONDS = 120.0  # copying a PDF before ink is added to it (a cloud mount may be slow)
-INK_VERSION_EVERY = timedelta(minutes=30)  # §6.2: one previous version per PDF in this time, for ink saves
 
 T = TypeVar("T")
 
@@ -74,9 +71,12 @@ class ExplorerRefused(Exception):
     """``category`` is the runner's (``not_found``, ``access``, …) or
     ``unavailable``/``invalid``; ``str()`` is safe to show the user."""
 
-    def __init__(self, category: str, message: str) -> None:
+    def __init__(self, category: str, message: str, *, identity: tuple[int, ...] | None = None,
+                 partial: bool = False) -> None:
         super().__init__(message)
         self.category = category
+        self.identity = identity  # a PDF's failed save (V3-P82 §3.6): the file as it is now, when known
+        self.partial = partial  # ... and bytes of that save left at its end
 
 
 @dataclass(frozen=True)
@@ -92,8 +92,8 @@ class Listing:
 class Saved:
     path: str
     identity: tuple[int, ...]
-    previous_kept: bool  # False: saved, but its previous version could not be kept (§7.4, a rare failure); an ink
-    # save within 30 minutes of the last version kept is True: that version holds the PDF before the ink (V3-P77 §6.2)
+    previous_kept: bool  # False: saved, but its previous version could not be kept (§7.4, a rare failure); a PDF's
+    # save keeps none and is True: the file itself holds what it was before (V3-P82 §3.6)
 
 
 @dataclass(frozen=True)
@@ -106,6 +106,7 @@ class ShownFile:
     text: str | None = None
     truncated: bool = False  # the text is the file's start only
     editable: bool = False  # whole, text, at most EDIT_MAX_BYTES (part 3 edits it)
+    cloud_synced: bool = False  # on a cloud mount (rclone): a PDF there is saved only when left (V3-P82 §3.2, Q5)
 
 
 class Explorer:
@@ -129,7 +130,8 @@ class Explorer:
             async with asyncio.timeout(seconds):
                 return await self._machine.call(op, args, fds)
         except runner.RunnerError as error:
-            raise ExplorerRefused(error.category, str(error)) from None
+            raise ExplorerRefused(error.category, str(error), partial=error.partial,
+                                  identity=None if error.identity is None else tuple(error.identity)) from None
         except runner.RunnerUnavailable:
             raise ExplorerRefused("unavailable", "The machine runner does not answer; try again later.") from None
         except TimeoutError:
@@ -141,11 +143,9 @@ class Explorer:
         even if the caller gave up (a slow mount, a cancelled request)."""
         return await self._reading(fd, lambda: _pread(fd, size), READ_SECONDS)
 
-    async def _reading(self, fd: int, read: Callable[[], T], seconds: float,
-                       discard: Callable[[T], None] | None = None) -> T:
-        """``read`` (of ``fd``, which this takes over) on the explorer's threads, as ``_read``. What it makes
-        (a temporary file) is ``read``'s own until it is handed over: given up on, it is ``discard``ed when it
-        ends, never used (PR #103 review P1)."""
+    async def _reading(self, fd: int, read: Callable[[], T], seconds: float) -> T:
+        """``read`` (of ``fd``, which this takes over) on the explorer's threads, as ``_read``: given up on (a
+        slow mount, a cancelled request), it still ends on its own and closes ``fd`` then, never before."""
         if self._reads >= MAX_READS:
             os.close(fd)
             raise ExplorerRefused(runner.TIMED_OUT, "Earlier slow reads are still under way (an unresponsive "
@@ -159,30 +159,18 @@ class Explorer:
                 os.close(fd)
 
         work = asyncio.get_running_loop().run_in_executor(self._pool, reading)
-        given_up = False
-
-        def drop(future: asyncio.Future[T]) -> None:
-            if discard is not None and not future.cancelled() and future.exception() is None:
-                discard(future.result())
 
         def ended(future: asyncio.Future[T]) -> None:
             self._reads -= 1
             if not future.cancelled():
                 future.exception()  # retrieved: a given-up read's failure is not reported
-            if given_up:
-                drop(future)
 
         work.add_done_callback(ended)
         try:
             async with asyncio.timeout(seconds):
                 return await asyncio.shield(work)
-        except BaseException as error:  # timed out, or the request cancelled: what it makes is not taken
-            given_up = True
-            if work.done():
-                drop(work)
-            if isinstance(error, TimeoutError):
-                raise ExplorerRefused(runner.TIMED_OUT, runner.MESSAGES[runner.TIMED_OUT]) from None
-            raise
+        except TimeoutError:
+            raise ExplorerRefused(runner.TIMED_OUT, runner.MESSAGES[runner.TIMED_OUT]) from None
 
     @staticmethod
     def _path(path: object) -> str:
@@ -216,17 +204,19 @@ class Explorer:
         result, fds = await self._call(runner.OPEN, {"path": self._path(path), "cwd": "/"})
         fd, real, size = fds[0], str(result["path"]), int(result["size"])
         identity = tuple(int(v) for v in result["identity"])
+        cloud = result.get("filesystem") in CLOUD_FILESYSTEMS
         head = await self._read(fd, min(size, EDIT_MAX_BYTES) + 1)
         modified = identity[3] // 1_000_000_000 if len(identity) == 4 else None
         if sniff_image(head[:IMAGE_HEAD_BYTES]) is not None:
-            return ShownFile(real, size, identity, modified, "image")
+            return ShownFile(real, size, identity, modified, "image", cloud_synced=cloud)
         if head.startswith(PDF_HEADER):  # before text: a PDF may be all ASCII
-            return ShownFile(real, size, identity, modified, "pdf")
+            return ShownFile(real, size, identity, modified, "pdf", cloud_synced=cloud)
         whole = size <= EDIT_MAX_BYTES and len(head) == size
         text = _text(head if whole else head[:PREVIEW_BYTES], whole)
         if text is None:
-            return ShownFile(real, size, identity, modified, "binary")
-        return ShownFile(real, size, identity, modified, "text", text, truncated=not whole, editable=whole)
+            return ShownFile(real, size, identity, modified, "binary", cloud_synced=cloud)
+        return ShownFile(real, size, identity, modified, "text", text, truncated=not whole, editable=whole,
+                         cloud_synced=cloud)
 
     # --- the editor's writes (§7) ---------------------------------------------------------
 
@@ -338,23 +328,26 @@ class Explorer:
 
     # --- PDFs (V3-P77 §5, §6) --------------------------------------------------------------
 
-    async def _copies_large(self, nothing: str) -> None:
-        """The runner copies a PDF up to 64 MiB (protocol 3), or the call is refused before it is made."""
+    async def _copies_large(self, nothing: str, in_place: bool = False) -> None:
+        """The runner copies a PDF up to 64 MiB (protocol 3) — or, ``in_place``, writes one in place (``append``,
+        ``truncate``: protocol 4, V3-P82 §3.6) — or the call is refused before it is made."""
         try:
-            copies = await self._machine.copies_large()
+            copies = await (self._machine.appends() if in_place else self._machine.copies_large())
         except (runner.RunnerUnavailable, runner.RunnerError):
             raise ExplorerRefused("unavailable", "The machine runner does not answer; try again later.") from None
         if not copies:  # an older one would refuse it, or delete it without a copy
             raise ExplorerRefused(runner.UNSUPPORTED, f"The machine runner is older than HIMARI (restart "
                                                       f"himari-runner); {nothing}.")
 
-    async def _older_runner(self, refused: ExplorerRefused, nothing: str) -> None:
-        """A PDF's write refused as an older runner refuses it (``delete_copied`` unknown, ``copy_max`` ignored:
-        over 1 MiB too large) by a runner that is older now (rolled back since it was asked): told as such."""
+    async def _older_runner(self, refused: ExplorerRefused, nothing: str, in_place: bool = False) -> None:
+        """A PDF's write refused as an older runner refuses it (``delete_copied``, ``append`` or ``truncate``
+        unknown; ``copy_max`` ignored: over 1 MiB too large) by a runner that is older now (rolled back since it
+        was asked): told as such."""
         if refused.category not in (runner.INVALID, runner.TOO_LARGE):
             return
         try:
-            copies = await self._machine.copies_large(fresh=True)
+            copies = await (self._machine.appends(fresh=True) if in_place
+                            else self._machine.copies_large(fresh=True))
         except (runner.RunnerUnavailable, runner.RunnerError):
             return
         if not copies:
@@ -371,58 +364,67 @@ class Explorer:
         return (await self._read(fds[0], len(PDF_HEADER))).startswith(PDF_HEADER)
 
     async def append_pdf(self, path: object, increment: bytes, expected: Sequence[int]) -> Saved:
-        """§5.3: ink saved into the PDF read with identity ``expected`` — ``increment`` (an incremental update,
-        made by the browser) added after its bytes, which are never changed. The whole is at most 64 MiB. Its
-        previous version is kept in the PDFs' store, at most one per 30 minutes (§6.2): refused before any write
-        when it would be kept and cannot; after the write, a failure to keep it is told (``previous_kept``)."""
-        store = self.pdf_versions
-        if store is None:
-            raise ExplorerRefused("unavailable", "PDFs cannot be saved on this server.")
+        """V3-P82 §3.6 (V3-P77 §5.3): ink saved into the PDF read with identity ``expected`` — ``increment`` (an
+        incremental update, made by the browser) written at its end, in place, by the runner (``append``). No
+        copy of the file is made and no previous version kept: the bytes before it never change, so the file
+        holds every earlier save, back to the original. The whole is at most 64 MiB. A failed write tells the
+        file's identity after it (``ExplorerRefused.identity``) and whether bytes of it were left (``partial``)."""
         if len(expected) != 4:
             raise ExplorerRefused("invalid", "The file's identity, as it was read, is required.")
         if not increment:
             raise ExplorerRefused("invalid", "There is no ink to save.")
         if len(increment) > PDF_APPEND_MAX_BYTES:
-            raise ExplorerRefused("too_large", "Too much ink to save at once (over 8 MiB); save more often.")
+            raise ExplorerRefused("too_large", "Too much ink to save at once (over 8 MiB).")
         size = int(expected[2])
         if size + len(increment) > PDF_MAX_BYTES:
             raise ExplorerRefused("too_large", "Too large to save here: the PDF would be over 64 MiB.")
         if not increment_ok(size, increment):
             raise ExplorerRefused("invalid", "Not saved: the ink is not an update of this PDF.")
-        await self._copies_large("nothing was saved")
+        real = await self._pdf_as_read(path, expected, "nothing was saved")
+        with tempfile.TemporaryFile() as body:
+            body.write(increment)
+            body.flush()
+            body.seek(0)
+            try:
+                target, written, received = await self._write(runner.APPEND, real,
+                                                              {"expected": [int(v) for v in expected]},
+                                                              [body.fileno()])
+            except ExplorerRefused as refused:
+                await self._older_runner(refused, "nothing was saved", in_place=True)
+                raise
+        for fd in received:  # none is sent back; closed should one ever be
+            os.close(fd)
+        return Saved(str(written.get("path", target)), tuple(int(v) for v in written["identity"]), True)
+
+    async def truncate_pdf(self, path: object, expected: Sequence[int], to: int) -> Saved:
+        """V3-P82 §3.6: the PDF read with identity ``expected`` cut back to ``to``, just after one of its
+        ``%%EOF`` (the runner checks it) — a save whose writing was cut short taken off its end."""
+        if len(expected) != 4:
+            raise ExplorerRefused("invalid", "The file's identity, as it was read, is required.")
+        if not len(PDF_HEADER) < to < int(expected[2]):
+            raise ExplorerRefused("invalid", "A PDF is cut back only to one of its saves.")
+        real = await self._pdf_as_read(path, expected, "nothing was cut")
+        try:
+            target, written, received = await self._write(runner.TRUNCATE, real,
+                                                          {"expected": [int(v) for v in expected], "to": to})
+        except ExplorerRefused as refused:
+            await self._older_runner(refused, "nothing was cut", in_place=True)
+            raise
+        for fd in received:
+            os.close(fd)
+        return Saved(str(written.get("path", target)), tuple(int(v) for v in written["identity"]), True)
+
+    async def _pdf_as_read(self, path: object, expected: Sequence[int], nothing: str) -> str:
+        """The real path of the PDF read with identity ``expected``, once the runner can write it in place:
+        CHANGED if it is another file now, ``not_regular`` if it does not start as a PDF."""
+        await self._copies_large(nothing, in_place=True)
         result, fds = await self._call(runner.OPEN, {"path": self._path(path), "cwd": "/"})
-        real = str(result["path"])
         if [int(v) for v in result["identity"]] != [int(v) for v in expected]:
             os.close(fds[0])
-            raise ExplorerRefused(runner.CHANGED, "This PDF changed since it was opened; nothing was saved.")
-        latest = await asyncio.to_thread(store.latest, real)
-        keep = latest is None or datetime.now(UTC) - latest.saved_at >= INK_VERSION_EVERY
-        if keep and not store.ready_for(size):
-            os.close(fds[0])
-            raise ExplorerRefused("versions_unavailable", "The previous version could not be kept (the data folder "
-                                  "is full or not writable); nothing was saved.")
-        # The copy is made in a temporary file of the copying thread's own, handed over only once whole: a copy
-        # given up on (a slow mount) never writes into a descriptor closed or reused meanwhile (PR #103 review P1).
-        body = await self._reading(fds[0], lambda: _pdf_with(fds[0], size, increment), PDF_COPY_SECONDS,
-                                   discard=lambda made: made.close() if made is not None else None)
-        if body is None:
-            raise ExplorerRefused("not_regular", "This file is not a PDF; nothing was saved.")
-        with body:
-            try:
-                target, written, received = await self._write(
-                    runner.WRITE, real, {"mode": "replace", "expected": [int(v) for v in expected],
-                                         "copy_max": PDF_MAX_BYTES}, [body.fileno()])
-            except ExplorerRefused as refused:
-                await self._older_runner(refused, "nothing was saved")
-                raise
-        saved = str(written.get("path", target))
-        if keep:
-            kept = await asyncio.to_thread(self._keep, saved, received, "ink", store)
-        else:
-            for fd in received:
-                os.close(fd)
-            kept = True  # the version kept within the last 30 minutes holds the PDF before this ink
-        return Saved(saved, tuple(int(v) for v in written["identity"]), kept)
+            raise ExplorerRefused(runner.CHANGED, f"This PDF changed since it was opened; {nothing}.")
+        if not (await self._read(fds[0], len(PDF_HEADER))).startswith(PDF_HEADER):
+            raise ExplorerRefused("not_regular", f"This file is not a PDF; {nothing}.")
+        return str(result["path"])
 
     async def put_back(self, path: object, version_id: str, expected: Sequence[int]) -> Saved:
         """§6.3: a PDF's previous version written over the file read with identity ``expected``, which is kept
@@ -662,37 +664,14 @@ def _pread(fd: int, size: int) -> bytes:
     return os.pread(fd, size, 0)
 
 
-def _pdf_with(source: int, size: int, increment: bytes) -> BinaryIO | None:
-    """A temporary file of the PDF's ``size`` bytes and ``increment`` after them, read from its start; None if
-    the file does not start as a PDF. Written through a file object, which writes every byte or raises (PR #103
-    review P2: no short write is taken for a whole one)."""
-    if os.pread(source, len(PDF_HEADER), 0) != PDF_HEADER:
-        return None
-    body = tempfile.TemporaryFile()
-    try:
-        at = 0
-        while at < size:
-            chunk = os.pread(source, min(1 << 20, size - at), at)
-            if not chunk:
-                raise OSError("the PDF ended early")
-            body.write(chunk)
-            at += len(chunk)
-        body.write(increment)
-        body.flush()
-        body.seek(0)
-    except BaseException:
-        body.close()
-        raise
-    return body
-
-
 _STARTXREF = re.compile(rb"startxref\s+(\d+)\s*%%EOF[\r\n]*$")
 
 
 def increment_ok(size: int, increment: bytes) -> bool:
     """§5.3 step 4, a light check (the browser makes the same one, ``checkIncrement`` in pdfdoc.js): the update
     ends with ``startxref``, an offset inside it, and ``%%EOF`` (line breaks after it allowed). Its structure is
-    not checked: the browser is the owner's, and a broken result goes back to its previous version."""
+    not checked: the browser is the owner's, and a broken result is cut back to the save before it (the bytes
+    before it are never changed, V3-P82 §3.6)."""
     found = _STARTXREF.search(increment[-1024:])
     return found is not None and size < int(found.group(1)) < size + len(increment)
 
