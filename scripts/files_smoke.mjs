@@ -787,4 +787,129 @@ const DIFF = { path: "/home/u/a.txt", name: "a.txt", kind: "changed", state: "ok
   plain.files.closeDoc();
 }
 
+/* V3-P77 §3: a PDF opens in the PDF view, whose module and bytes the test hands out. */
+function pdfPane(routes, { fail = null } = {}) {
+  const views = [];
+  const reads = [];
+  const module = {
+    loadPdfjs: async () => ({ fake: true }),
+    PdfView: class {
+      constructor({ pdfjs, bytes, onPage }) {
+        Object.assign(this, { pdfjs, bytes, onPage, current: 0, destroyed: false, went: null });
+        this.element = el("div", "pdf-view");
+        views.push(this);
+      }
+      get numPages() { return 3; }
+      async open() {
+        if (fail) throw Object.assign(new Error(fail), { code: "password" });
+        this.onPage(1, 3);
+      }
+      goTo(number) { this.went = number; this.current = number - 1; this.onPage(number, 3); }
+      destroy() { this.destroyed = true; }
+    },
+  };
+  const api = async (method, path) => {
+    if (path === "/api/machine/stat?path=~") return HOME;
+    const key = Object.keys(routes).find((k) => `${method} ${path}`.startsWith(k));
+    assert.ok(key, `no route for ${method} ${path}`);
+    const answer = routes[key];
+    return typeof answer === "function" ? answer(path) : answer;
+  };
+  const pending = [];
+  const readFile = (path) => {
+    reads.push(path);
+    const answer = deferred();
+    pending.push(answer);
+    return answer.promise;
+  };
+  const files = new FilesPane({ api, el, loadPdf: async () => module, readFile });
+  return { files, views, reads, pending };
+}
+
+const PDF = { path: "/home/u/notes.pdf", size: 2048, identity: [1, 2, 3, 4], modified: 0, kind: "pdf", text: null,
+              truncated: false, editable: false };
+const pageLabel = (files) => files.tools.children.find((c) => (c.className || "").includes("files-page"));
+
+{
+  const { files, views, reads, pending } = pdfPane({ "GET /api/machine/file": PDF });
+  const opening = files.openFile(PDF.path);
+  for (let i = 0; i < 20 && !pending.length; i++) await settle();
+  assert.deepEqual(reads, [PDF.path]);
+  assert.ok(pageLabel(files).hidden, "no page shown before it is open");
+  pending[0].resolve(new Uint8Array([37, 80, 68, 70]));
+  await opening;
+  assert.equal(views.length, 1);
+  assert.deepEqual(Array.from(views[0].bytes), [37, 80, 68, 70]);
+  assert.deepEqual(views[0].pdfjs, { fake: true });
+  assert.equal(files.body.children[0], views[0].element);
+  assert.equal(pageLabel(files).textContent, "1 / 3");
+  assert.ok(!pageLabel(files).hidden);
+  // Opening something else lets the view go.
+  files.closeDoc();
+  assert.ok(views[0].destroyed);
+  assert.equal(files.pdf, null);
+}
+
+// Larger than the view takes (64 MiB): its size and a download, nothing read.
+{
+  const large = { ...PDF, size: 64 * 1024 * 1024 + 1 };
+  const { files, views, reads } = pdfPane({ "GET /api/machine/file": large });
+  await files.openFile(PDF.path);
+  assert.equal(reads.length, 0);
+  assert.equal(views.length, 0);
+  assert.ok(files.body.text().includes("too large to view here") && files.body.text().includes("Download"));
+  assert.equal(pageLabel(files), undefined);
+}
+
+// Bytes arriving after another place was opened are not shown.
+{
+  const { files, views, pending } = pdfPane({ "GET /api/machine/file": PDF, "GET /api/machine/list": listing("/home/u", ["x"]) });
+  const opening = files.openFile(PDF.path);
+  for (let i = 0; i < 20 && !pending.length; i++) await settle();
+  await files.openFolder("/home/u");
+  pending[0].resolve(new Uint8Array(4));
+  await opening;
+  assert.equal(views.length, 0);
+  assert.ok(files.body.text().includes("x"));
+}
+
+// A PDF that needs a password: told so, with its download; the view let go.
+{
+  const message = "This PDF is password-protected; download it to open.";
+  const { files, views, pending } = pdfPane({ "GET /api/machine/file": PDF }, { fail: message });
+  const opening = files.openFile(PDF.path);
+  for (let i = 0; i < 20 && !pending.length; i++) await settle();
+  pending[0].resolve(new Uint8Array(4));
+  await opening;
+  assert.ok(views[0].destroyed);
+  assert.ok(files.body.text().includes(message) && files.body.text().includes("Download"));
+}
+
+// After HIMARI's turn: an unchanged PDF is not read again; a changed one is, on the page it was at.
+{
+  let identity = PDF.identity;
+  const { files, views, reads, pending } = pdfPane({
+    "GET /api/machine/file": () => ({ ...PDF, identity }),
+    "GET /api/machine/stat": () => ({ path: PDF.path, kind: "file", identity }),
+  });
+  const opening = files.openFile(PDF.path);
+  for (let i = 0; i < 20 && !pending.length; i++) await settle();
+  pending[0].resolve(new Uint8Array(4));
+  await opening;
+  views[0].goTo(3);
+  await files.refresh();
+  assert.equal(reads.length, 1);
+  assert.ok(!views[0].destroyed);
+  identity = [1, 2, 9, 9];
+  const again = files.refresh();
+  for (let i = 0; i < 20 && pending.length < 2; i++) await settle();
+  pending[1].resolve(new Uint8Array(4));
+  await again;
+  assert.equal(reads.length, 2);
+  assert.ok(views[0].destroyed);
+  assert.equal(views[1].went, 3);
+  assert.equal(pageLabel(files).textContent, "3 / 3");
+  assert.deepEqual(files.pdf.identity, [1, 2, 9, 9]);
+}
+
 console.log("files smoke: ok");

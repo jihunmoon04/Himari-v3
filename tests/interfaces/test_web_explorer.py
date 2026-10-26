@@ -95,6 +95,15 @@ def test_files_are_shown_by_kind(server: Server, kit: RunnerKit) -> None:
     (kit.home / "projects/latin").write_bytes("café".encode("latin-1"))
     for name in ("blob", "latin"):
         assert server.client.get("/api/machine/file", params={"path": f"~/projects/{name}"}).json()["kind"] == "binary"
+    # V3-P77 §3.1: a PDF by its header, whatever its name, all-ASCII ones included; only at its start
+    (kit.home / "projects/scan").write_bytes(b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n1 0 obj\n")
+    (kit.home / "projects/plain.pdf").write_text("%PDF-1.4\n1 0 obj << >> endobj\n")
+    (kit.home / "projects/about.txt").write_text("A PDF starts with %PDF-1.7\n")
+    kinds = {name: server.client.get("/api/machine/file", params={"path": f"~/projects/{name}"}).json()
+             for name in ("scan", "plain.pdf", "about.txt")}
+    assert kinds["scan"]["kind"] == kinds["plain.pdf"]["kind"] == "pdf"
+    assert kinds["scan"]["text"] is None and not kinds["plain.pdf"]["editable"]
+    assert kinds["about.txt"]["kind"] == "text"
     stat = server.client.get("/api/machine/stat", params={"path": "~/projects/a/main.c"}).json()
     assert stat["identity"] == identity and stat["kind"] == "file"
 

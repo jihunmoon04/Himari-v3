@@ -22,7 +22,8 @@ dev = ["pytest>=8", "mypy>=1.10", "types-jsonschema", "fastapi>=0.143", "starlet
 where = ["src"]
 
 [tool.setuptools.package-data]
-"himari.interfaces.web" = ["static/*", "static/katex/*", "static/katex/fonts/*", "static/codemirror/*"]
+"himari.interfaces.web" = ["static/*", "static/katex/*", "static/katex/fonts/*", "static/codemirror/*",
+                          "static/pdfjs/*", "static/pdfjs/wasm/*", "static/pdfjs/cmaps/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -40,4 +41,9 @@ explicit_package_bases = true
 # The documents worker imports the documents toolkit, which lives outside HIMARI's environment (V3-P70 §6).
 module = ["pypdfium2", "pypdfium2.*", "docx", "docx.*", "lxml", "lxml.*", "pptx", "pptx.*", "openpyxl",
           "openpyxl.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# tests/fixtures/pdf/make.py makes committed fixtures with pikepdf, which HIMARI does not depend on.
+module = ["pikepdf", "pikepdf.*"]
 ignore_missing_imports = true
