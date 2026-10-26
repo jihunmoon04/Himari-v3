@@ -1051,16 +1051,17 @@ async function openPdf(routes, options = {}) {
   files.closeDoc();
 }
 
-// Kept nothing before it, a save says so; refused as changed, the ink stays and the user picks.
+// V3-P82 §3.6: a save keeps no previous version (the file holds it), so it never says one was not kept.
 {
   const { files, views } = await openPdf({ "GET /api/machine/file": PDF },
-                                         { answer: { path: PDF.path, identity: ["9"], previous_kept: false } });
+                                         { answer: { path: PDF.path, identity: ["9"] } });
   views[0].ink.dirty = true;
   views[0].next = Uint8Array.of(1);
   await files.savePdf();
-  assert.equal(files.ink.state.textContent, "Saved, but its previous version could not be kept");
+  assert.equal(files.ink.state.textContent, "Saved");
   files.closeDoc();
 }
+// Refused as changed, the ink stays and the user picks.
 {
   const confirms = [];
   const { files, views, pending, reads } = await openPdf({ "GET /api/machine/file": PDF }, {

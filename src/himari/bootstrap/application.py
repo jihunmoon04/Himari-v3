@@ -8,7 +8,7 @@ One data root, private to the server user::
         control/operator.secret  the local operator's credential (0600)
         file-versions/           previous versions of files the web editor saved or deleted (V3-P75)
         file-versions-agent/     files as they were before the agent changed them (V3-P76)
-        file-versions-pdf/       PDFs before ink was saved into them, deleted ones (V3-P77)
+        file-versions-pdf/       deleted PDFs and what a put-back wrote over (V3-P77; ink saves keep none, V3-P82)
         file-changes/            the agent's file changes, per Conversation, for review (V3-P76)
         mcp.json                 optional: MCP servers to connect (0600, V3-P53)
 

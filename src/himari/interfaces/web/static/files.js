@@ -238,7 +238,7 @@ export async function readDownload(path, limit) {
 }
 
 /* V3-P77 §5.3: ink saved — ``increment`` added after the PDF read with ``identity``. The answer
- * ({path, identity, previous_kept}), or an error with the server's code ("changed": it changed since). */
+ * ({path, identity}), or an error with the server's code ("changed": it changed since). */
 export async function postAppend(path, increment, identity) {
   let response;
   try {
@@ -960,7 +960,7 @@ export class FilesPane {
       return;
     }
     pdf.bar.hidden = true;
-    done(answer.previous_kept ? null : "Saved, but its previous version could not be kept");
+    done(); // the file itself holds what it was before: nothing else is kept (V3-P82 §3.6)
   }
 
   /* A word above the pages (a signed PDF; strokes that could not be kept), until dismissed. */

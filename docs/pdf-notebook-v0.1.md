@@ -415,3 +415,44 @@
 - 캡처 영역의 좌표를 참조에 넣어, 에이전트가 그 부분의 글만 읽게 하기.
 - **필기 전으로 되돌리기**: 증분 저장의 끝(`%%EOF`)마다가 저장 지점이다. 고른 지점 뒤를 잘라 낸 파일로 되돌린다(rev. 3, §3.6).
 - **바꿔치기 저장의 거짓 충돌**(§3.6의 시험): 편집기 저장 등 `replace`를 쓰는 곳에서, rclone 마운트의 inode가 저절로 바뀌어 "Changed on the server"가 나는 것. 이 문서와 따로 작은 수정으로 고친다.
+
+## 13. 1단계 a 구현 노트 (서버: 원본에 바로 덧붙이기, 2026-10-26)
+
+1단계를 둘로 나눴다. a는 서버(runner·Bootstrap·웹 서버)이고, b는 웹(자동 저장, 보관소, 끝이 잘린 파일 고치기)이다.
+
+- **runner 프로토콜 4**
+  - `append`, `truncate`를 따로 둔 동작으로 더했다. 둘 다 `WRITES`에 들어 있다.
+  - `Host.append`
+    - `O_WRONLY|O_NOFOLLOW|O_NONBLOCK|O_NOCTTY`로 열고, 일반 파일·링크 수 1·identity를 확인한다.
+    - 기대 크기 위치부터 `pwrite`를 되풀이하고 `fsync`한다.
+    - 닫은 뒤 이름으로 다시 `stat`한다. 연 파일과 다르면 `CHANGED`다.
+    - 실패하면 같은 inode이고 크기가 "기대 크기 + 쓴 만큼"일 때만 잘라 되돌린다. 오류에는 그때의 `identity`와 `partial`을 담는다.
+  - `Host.truncate`: `O_RDWR`로 열고, `to` 앞이 `%%EOF`(줄바꿈 `\n`, `\r`, `\r\n` 하나까지 허용)일 때만 자른다.
+  - `RunnerError`와 `failed()`가 선택 필드 `identity`, `partial`을 실어 나르고, 클라이언트가 그것을 읽는다.
+  - `OPEN`의 답에 `filesystem`(마운트 표의 이름)을 더했다.
+- **Bootstrap**
+  - `Explorer.append_pdf`
+    - 확인(크기, 증분, `%PDF-`, identity)을 마친 뒤 runner `append`를 부른다.
+    - 복사, 바꿔치기, 30분 판이 없고, PDF 판 저장소 없이도 저장한다.
+    - 프로토콜 4가 아닌 runner면 보내기 전에 `unsupported`다. 그사이 오래된 runner로 바뀌어 `invalid`가 오면 `hello`를 새로 묻는다.
+  - `Explorer.truncate_pdf`를 더했다.
+  - `ShownFile.cloud_synced`를 더했다(`fuse.rclone`).
+  - `_pdf_with`, `PDF_COPY_SECONDS`, `INK_VERSION_EVERY`를 지웠다.
+- **웹 서버**
+  - `POST /api/machine/pdf/append`의 답은 `{path, identity}`이고, `previous_kept`는 뺐다.
+  - 새 끝점 `POST /api/machine/pdf/truncate?path=&to=`(`X-Himari-Expected`).
+  - 탐색기 오류 답에 `identity`·`partial`을 더하고, `/api/machine/file`의 답에 `cloud_synced`를 더했다.
+- **웹**: PDF 저장 뒤의 "previous version could not be kept" 문구만 뺐다. 나머지는 b에서 한다.
+- **시험**
+  - `test_hidden_hostfs.py`
+    - `append`: 같은 inode에 덧붙임, 임시 파일 없음.
+    - 쓰지 않는 파일: 바뀐 파일, 하드 링크, FIFO, 심볼릭 링크, 읽기 전용, 64 MiB 초과.
+    - 실패 뒤 되돌림과 그 identity. 다른 것이 그사이 쓰면 자르지 않고 `partial`.
+    - 쓰는 사이 이름이 바뀌면 `CHANGED`.
+    - `truncate`는 `%%EOF` 바로 뒤로만.
+  - `test_server.py`: 프로토콜을 거친 `append`·`truncate`, `OPEN`의 `filesystem`, 오류 프레임의 `identity`.
+  - `test_web_pdf.py`
+    - 덧붙여도 같은 inode이고 판이 없음, 끝이 잘린 파일 자르기, 하드 링크·읽기 전용, 실패 답의 `identity`·`partial`.
+    - 옛 runner, 저장소 없이 저장, 큰 PDF의 지우기·되살리기·되돌리기, 그사이 오래된 runner로 바뀐 경우.
+  - 결과: 전체 pytest 2,618개 통과, mypy와 모듈 경계 검사 통과, `files_smoke`·`pdf_smoke`·`ui_state_smoke` 통과.
+- **배포**: himari-runner를 다시 시작해야 한다(프로토콜 4). 다시 시작하기 전에는 PDF 저장이 "restart himari-runner"로 거부된다.

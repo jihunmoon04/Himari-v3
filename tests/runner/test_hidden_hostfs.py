@@ -661,3 +661,137 @@ def test_where_a_write_lands(host: Host, home: Path) -> None:
         with pytest.raises(api.RunnerError) as refused:
             land(hidden)
         assert refused.value.category == api.NOT_FOUND
+
+
+# --- a PDF's saves, written in place (V3-P82 §3.6) ----------------------------------------------------------
+
+def bytes_fd(tmp_path: Path, data: bytes) -> int:
+    source = tmp_path / "increment.bin"
+    source.write_bytes(data)
+    return os.open(source, os.O_RDONLY)
+
+
+def test_append_writes_at_the_end_in_place(host: Host, home: Path, tmp_path: Path) -> None:
+    target = home / "projects/a/notes.pdf"
+    target.write_bytes(b"%PDF-1.7\nbody\n%%EOF\n")
+    before = identity(target)
+    data = bytes_fd(tmp_path, b"more\n%%EOF\n")
+    fd, name = parent(host, home, "projects/a/notes.pdf")
+    try:
+        after = host.append(fd, name, data, before)
+    finally:
+        os.close(fd)
+        os.close(data)
+    assert target.read_bytes() == b"%PDF-1.7\nbody\n%%EOF\nmore\n%%EOF\n"
+    assert after == identity(target) and after[:2] == before[:2]  # the same file, its identity as STAT sees it
+    assert not [n for n in os.listdir(home / "projects/a") if n.startswith(".himari-")]  # no temporary file
+
+
+def test_append_refuses_what_it_must_not_write_into(host: Host, home: Path, tmp_path: Path) -> None:
+    target = home / "projects/a/notes.pdf"
+    target.write_bytes(b"%PDF-1.7\n%%EOF\n")
+    data = bytes_fd(tmp_path, b"x")
+    fd, name = parent(host, home, "projects/a/notes.pdf")
+    try:
+        assert category(lambda: host.append(fd, name, data, [0, 0, 0, 0])) == api.CHANGED
+        os.link(target, home / "projects/a/other-name.pdf")  # a hard link: written in place, both would change
+        assert category(lambda: host.append(fd, name, data, identity(target))) == api.LINKS
+        os.unlink(home / "projects/a/other-name.pdf")
+        os.mkfifo(home / "projects/a/pipe")  # never waited on
+        fifo_fd, fifo = parent(host, home, "projects/a/pipe")
+        os.close(fifo_fd)
+        assert category(lambda: host.append(fd, fifo, data, identity(home / "projects/a/pipe"))) == api.NOT_REGULAR
+        (home / "projects/a/link.pdf").symlink_to(target)
+        assert category(lambda: host.append(fd, "link.pdf", data, identity(target))) in (api.LINKS, api.NOT_REGULAR)
+        if os.geteuid() != 0:
+            target.chmod(0o444)  # read-only: a rename needed the folder's permission, a write in place the file's
+            assert category(lambda: host.append(fd, name, data, identity(target))) == api.ACCESS
+            target.chmod(0o644)
+        big = [*identity(target)[:2], api.MAX_COPY_BYTES, identity(target)[3]]
+        assert category(lambda: host.append(fd, name, data, big)) == api.TOO_LARGE
+    finally:
+        os.close(fd)
+        os.close(data)
+    assert target.read_bytes() == b"%PDF-1.7\n%%EOF\n"
+
+
+def test_a_failed_append_is_cut_back_unless_another_wrote(host: Host, home: Path, tmp_path: Path,
+                                                         monkeypatch: pytest.MonkeyPatch) -> None:
+    target = home / "projects/a/notes.pdf"
+    target.write_bytes(b"%PDF-1.7\n%%EOF\n")
+    data = bytes_fd(tmp_path, b"0123456789")
+    real_pwrite = os.pwrite
+    calls = {"n": 0}
+
+    def half_then_fail(fd: int, view: object, offset: int) -> int:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return real_pwrite(fd, bytes(view)[:4], offset)  # type: ignore[call-overload]
+        raise OSError(errno.ENOSPC, "no space")
+
+    fd, name = parent(host, home, "projects/a/notes.pdf")
+    try:
+        monkeypatch.setattr(hostfs.os, "pwrite", half_then_fail)
+        with pytest.raises(api.RunnerError) as failed:
+            host.append(fd, name, data, identity(target))
+        assert target.read_bytes() == b"%PDF-1.7\n%%EOF\n" and not failed.value.partial
+        assert failed.value.identity == identity(target)  # to save against next (its mtime changed)
+        # Another wrote meanwhile: its bytes are never cut, ours are left and told.
+        calls["n"] = 0
+
+        def half_then_another(fd: int, view: object, offset: int) -> int:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                written = real_pwrite(fd, bytes(view)[:4], offset)  # type: ignore[call-overload]
+                with open(target, "ab") as other:
+                    other.write(b"OTHER")
+                return written
+            raise OSError(errno.EIO, "gone")
+
+        monkeypatch.setattr(hostfs.os, "pwrite", half_then_another)
+        with pytest.raises(api.RunnerError) as failed:
+            host.append(fd, name, data, identity(target))
+        assert target.read_bytes() == b"%PDF-1.7\n%%EOF\n0123OTHER" and failed.value.partial
+    finally:
+        os.close(fd)
+        os.close(data)
+
+
+def test_append_never_reports_another_file_as_written(host: Host, home: Path, tmp_path: Path,
+                                                      monkeypatch: pytest.MonkeyPatch) -> None:
+    target = home / "projects/a/notes.pdf"
+    target.write_bytes(b"%PDF-1.7\n%%EOF\n")
+    data = bytes_fd(tmp_path, b"more")
+    real_fsync = os.fsync
+
+    def renamed_over(fd: int) -> None:
+        real_fsync(fd)
+        (home / "projects/a/new.pdf").write_bytes(b"another")
+        os.replace(home / "projects/a/new.pdf", target)
+
+    fd, name = parent(host, home, "projects/a/notes.pdf")
+    try:
+        monkeypatch.setattr(hostfs.os, "fsync", renamed_over)
+        assert category(lambda: host.append(fd, name, data, identity(target))) == api.CHANGED
+    finally:
+        os.close(fd)
+        os.close(data)
+
+
+def test_truncate_only_back_to_one_of_its_saves(host: Host, home: Path) -> None:
+    target = home / "projects/a/notes.pdf"
+    saved = b"%PDF-1.7\nbody\n%%EOF\r\nmore\n%%EOF\n"
+    target.write_bytes(saved + b"half a save, cut short")
+    fd, name = parent(host, home, "projects/a/notes.pdf")
+    try:
+        for wrong in (5, len(saved) - 3, len(saved) + 3, 0, len(saved) + 100):
+            assert category(lambda: host.truncate(fd, name, identity(target), wrong)) == api.INVALID
+        assert category(lambda: host.truncate(fd, name, [0, 0, 0, 0], len(saved))) == api.CHANGED
+        after = host.truncate(fd, name, identity(target), len(saved))
+        assert target.read_bytes() == saved and after == identity(target)
+        first = len(b"%PDF-1.7\nbody\n%%EOF\r\n")  # after the line break, and before it
+        host.truncate(fd, name, identity(target), first)
+        host.truncate(fd, name, identity(target), first - 2)
+        assert target.read_bytes() == b"%PDF-1.7\nbody\n%%EOF"
+    finally:
+        os.close(fd)
