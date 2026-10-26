@@ -35,6 +35,24 @@ const CHANGE_STATES = { no_version: "its previous version could not be kept",
 const VERSION_REASONS = { save: "before a save", delete: "before a delete", revert: "before a revert",
                           agent: "before HIMARI changed it", agent_delete: "before HIMARI deleted it" };
 
+/* Line breaks: CodeMirror reads \r\n, \r and \n each as one "\n" (V3-P76 §12.2), so the editor's text is
+ * compared in that form, and a save writes the file's own break back — the one most of its lines end with. */
+function editorText(text) {
+  return text.replace(/\r\n?/g, "\n");
+}
+
+function lineBreakOf(text) {
+  const crlf = (text.match(/\r\n/g) || []).length;
+  const cr = (text.match(/\r(?!\n)/g) || []).length;
+  const lf = (text.match(/\n/g) || []).length - crlf;
+  if (crlf > lf && crlf >= cr) return "\r\n";
+  return cr > lf ? "\r" : "\n";
+}
+
+function fileText(text, lineBreak) {
+  return lineBreak === "\n" ? text : text.replace(/\n/g, lineBreak);
+}
+
 /* What a revert of all left (PR #98 review C3): each file and why, and the hidden ones counted. */
 function revertedAll({ left, hidden }) {
   if (!left.length && !hidden) return "Reverted.";
@@ -122,7 +140,7 @@ export class FilesPane {
     this.pageOf = null; // the conversation that page is of
     this.reviewControls = []; // that page's accept and revert controls
     this.pageDiff = null; // that diff's CodeMirror view
-    this.doc = null; // the file in the editor: {path, name, identity, saved, editor, dirty, saving, pollTimer, bar, revision}
+    this.doc = null; // the file in the editor: {path, name, identity, saved, lineBreak, editor, dirty, saving, pollTimer, bar, revision}
     this.onOpenFolder = onOpenFolder;
     this.onOpenFile = onOpenFile;
     this.folderActions = folderActions;
@@ -379,8 +397,10 @@ export class FilesPane {
     this.body.replaceChildren(bar, area);
     // ``revision`` counts every change of the text: a read of the server's version started before one is
     // never applied over it (PR #95 review B1).
-    const doc = { path: shown.path, name, identity: shown.identity, saved: shown.text, editor: null, dirty: false,
-                  saving: false, pollTimer: null, bar, module, revision: 0 };
+    // ``saved``: the saved text as the editor has it; ``lineBreak``: the file's, written back by a save.
+    const doc = { path: shown.path, name, identity: shown.identity, saved: editorText(shown.text),
+                  lineBreak: lineBreakOf(shown.text), editor: null, dirty: false, saving: false, pollTimer: null, bar,
+                  module, revision: 0 };
     this.doc = doc;
     doc.editor = module.createEditor(area, {
       text: shown.text, name,
@@ -463,7 +483,8 @@ export class FilesPane {
   async save({ over = null } = {}) {
     const doc = this.doc;
     if (doc === null || doc.saving) return;
-    const content = doc.editor.text();
+    const text = doc.editor.text();
+    const content = fileText(text, doc.lineBreak);
     if (new TextEncoder().encode(content).length > EDIT_MAX_BYTES) {
       this.paintState("Too large to save from here (at most 1 MiB)");
       return;
@@ -475,9 +496,9 @@ export class FilesPane {
                                     { path: doc.path, content, expected: over || doc.identity });
       if (this.doc !== doc) return;
       doc.identity = answer.identity;
-      doc.saved = content;
+      doc.saved = text;
       doc.saving = false;
-      doc.dirty = doc.editor.text() !== content; // typed on while it was saving
+      doc.dirty = doc.editor.text() !== text; // typed on while it was saving
       this.hideBar();
       this.paintState(answer.previous_kept ? null : "Saved, but its previous version could not be kept");
     } catch (error) {
@@ -533,7 +554,8 @@ export class FilesPane {
         this.paintState("The server's version can no longer be edited here");
         return;
       }
-      doc.saved = shown.text;
+      doc.saved = editorText(shown.text);
+      doc.lineBreak = lineBreakOf(shown.text);
       doc.identity = shown.identity;
       doc.editor.setText(shown.text);
       doc.dirty = doc.editor.text() !== doc.saved;
@@ -660,7 +682,7 @@ export class FilesPane {
   restore(text) {
     if (this.doc === null) return;
     this.doc.editor.setText(text);
-    this.setDirty(text !== this.doc.saved);
+    this.setDirty(editorText(text) !== this.doc.saved);
     this.paintState("Put in the editor — Save to keep it");
   }
 
