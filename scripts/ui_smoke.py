@@ -1359,12 +1359,23 @@ def run_polish(base: str, token: str, shots: str | None) -> list[str]:
         expect(jump).to_be_visible()
         if shots:
             page.screenshot(path=os.path.join(shots, "25-jump.png"))
+        page.click("#nav-home")  # the composer moves to Home: the button does not come along (review B2)
+        expect(page.locator("#surface-home")).to_be_visible()
+        expect(jump).to_be_hidden()
+        page.locator(f'#conversation-list .conv-row[data-id="{cid}"]').click()
+        expect(page.locator(".item-assistant").last).to_contain_text("Paragraph 40", timeout=10000)
+        page.evaluate("document.getElementById('timeline').scrollTop = 0")
+        expect(jump).to_be_visible()
         jump.click()
         expect(jump).to_be_hidden(timeout=5000)
 
         # The count near the limit, and over it.
         hint = page.locator("#composer-hint")
         page.fill("#composer-text", "x" * 30_500)
+        expect(hint).to_have_text("30,500 / 32,000 characters")
+        page.wait_for_timeout(1500)  # the conversation's own refreshes do not wipe it (review B1)
+        page.click("#chat-menu-toggle")  # a detail read
+        page.click("#chat-menu-toggle")
         expect(hint).to_have_text("30,500 / 32,000 characters")
         page.fill("#composer-text", "x" * 32_001)
         expect(hint).to_contain_text("too long to send")

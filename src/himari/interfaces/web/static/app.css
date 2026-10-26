@@ -2099,6 +2099,8 @@ details > summary {
   line-height: 1;
   cursor: pointer;
   z-index: 2;
+  min-height: 36px; /* touch layouts make buttons 44px tall: a circle stays one (review N4) */
+  padding: 0;
 }
 
 .composer-wrap > .jump-latest[hidden] {
@@ -2616,6 +2618,10 @@ details > summary {
     display: none;
   }
 
+  .composer-hint.is-counting { /* the count near the limit shows on phones too (review B1) */
+    display: block;
+  }
+
   .compact-action-button {
     width: 44px;
     min-width: 44px;
@@ -2682,6 +2688,11 @@ details > summary {
   margin: 0;
   font-size: 14px;
   color: var(--accent);
+}
+
+.question-panel .question-text { /* a long question scrolls inside the panel (review N6) */
+  max-height: 40vh;
+  overflow-y: auto;
 }
 
 .question-text {

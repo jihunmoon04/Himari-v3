@@ -110,6 +110,9 @@ const app = {
   placeTouched: false, // the composer was changed in this place since it was entered (§3.3)
   placeEntry: 0, // the latest entry into a place: a later read of the store applies to that one only
   inFlight: new Set(), // the conversations a message is being sent to from this page (V3-P78 §3.1, N6)
+  workingHint: "", // "HIMARI is working…" and its usage, under the composer
+  lengthHint: null, // {count, over} once the message nears its limit
+  questionShown: null, // the question text the panel shows (redrawn only when it changes)
   address: null, // the address of the surface shown (V3-P79 §3); the sign-in screen keeps the one it came from
   activity: { working: new Set(), waiting: new Set() }, // the last /activity answer (V3-P80 §3)
   activityTimer: null,
@@ -242,6 +245,7 @@ function showSurface(name, via = "none") {
     $(`surface-${surface}`).hidden = surface !== name;
   }
   followAddress(name, via);
+  syncJump(); // the composer (and the button in it) moved: shown only beside a scrolled-up conversation
   app.leaveAgreed = false;
   const signedIn = name !== "login";
   $("sidebar").hidden = !signedIn;
@@ -478,7 +482,8 @@ async function showHome({ via = "push" } = {}) {
   $("composer-cancel").hidden = true;
   $("question-panel").hidden = true;
   $("stop-panel").hidden = true;
-  $("composer-hint").textContent = "";
+  app.workingHint = "";
+  paintHint();
   $("composer-text").placeholder = "Ask HIMARI anything…";
   closePicker();
   closePromptForm();
@@ -641,6 +646,14 @@ function followTitle() {
 
 /* "↓" above the composer while the conversation is scrolled up from its end; it goes there. */
 function syncJump() {
+  if (app.jumpFrame) return; // once a frame, however many changes (review N5)
+  app.jumpFrame = requestAnimationFrame(() => {
+    app.jumpFrame = 0;
+    paintJump();
+  });
+}
+
+function paintJump() {
   const timeline = $("timeline");
   const away = timeline.scrollHeight - timeline.scrollTop - timeline.clientHeight > 300;
   $("jump-latest").hidden = !away || $("surface-chat").hidden;
@@ -649,18 +662,23 @@ function syncJump() {
 /* The composer's count, once the message nears its limit (32,000 characters). */
 function syncLength() {
   const box = $("composer-text");
+  // Fewer units than the threshold: fewer characters too, no need to count.
+  const count = box.value.length < LENGTH_HINT_AT ? 0 : characters(box.value);
+  app.lengthHint = count < LENGTH_HINT_AT ? null : { count, over: count > MAX_MESSAGE_CHARS };
+  paintHint();
+}
+
+/* The hint under the composer has two writers (review B1): the turn at work, from the conversation's state,
+ * and the message's count near its limit. One line, the work first; the warning colour is the count's. */
+function paintHint() {
   const hint = $("composer-hint");
-  if (box.value.length < LENGTH_HINT_AT) { // fewer units than that: fewer characters too
-    if (hint.dataset.length) { hint.textContent = ""; delete hint.dataset.length; hint.classList.remove("is-over"); }
-    return;
-  }
-  const count = characters(box.value);
-  if (count < LENGTH_HINT_AT && !hint.dataset.length) return;
-  hint.dataset.length = "1";
-  hint.textContent = count > MAX_MESSAGE_CHARS
-    ? `${count.toLocaleString()} / ${MAX_MESSAGE_CHARS.toLocaleString()} characters: too long to send; attach it as a file`
-    : `${count.toLocaleString()} / ${MAX_MESSAGE_CHARS.toLocaleString()} characters`;
-  hint.classList.toggle("is-over", count > MAX_MESSAGE_CHARS);
+  const length = app.lengthHint;
+  const count = length === null ? ""
+    : `${length.count.toLocaleString()} / ${MAX_MESSAGE_CHARS.toLocaleString()} characters`
+      + (length.over ? ": too long to send; attach it as a file" : "");
+  hint.textContent = [app.workingHint, count].filter(Boolean).join(" · ");
+  hint.classList.toggle("is-over", length !== null && length.over);
+  hint.classList.toggle("is-counting", length !== null);
 }
 
 const LENGTH_HINT_AT = 30000;
@@ -1193,6 +1211,7 @@ function renderAttachments() {
       retry.setAttribute("aria-label", `Upload ${entry.name} again`);
       retry.addEventListener("click", () => {
         app.attachments = app.attachments.filter((a) => a !== entry);
+        renderAttachments();
         uploadFile(entry.file);
       });
       item.append(retry);
@@ -2036,12 +2055,16 @@ function applyDetail(detail) {
   $("stop-continue").disabled = false;
   const used = usageText(detail.job.turn_usage);
   // Why it stopped, short, beside Continue (the status line above has the whole of it).
-  const why = view.short || (detail.job.state === "completed" ? "" : view.text) || "Stopped";
+  const why = view.short || "Stopped"; // the whole reason is in the status line above (review N3)
   $("stop-text").textContent = stopped ? `${why}${used}` : "";
   status(view.tone ? view.text : "", view.tone);
   $("question-panel").hidden = !detail.waiting;
   // As the timeline shows it: formatted, never parsed as HTML (rich_text.js).
-  $("question-text").replaceChildren(...(detail.waiting ? [renderAssistantText(document, detail.waiting.question)] : []));
+  const question = detail.waiting ? detail.waiting.question : null;
+  if (question !== app.questionShown) { // a selection, and formulas, stay as they are between polls (review N6)
+    app.questionShown = question;
+    $("question-text").replaceChildren(...(question === null ? [] : [renderAssistantText(document, question)]));
+  }
   $("composer-text").placeholder = detail.waiting ? "Your answer" : "Message HIMARI";
   app.jobRunning = detail.job.running;
   if (detail.job.running && app.streaming && app.conversationId !== null) {
@@ -2054,7 +2077,8 @@ function applyDetail(detail) {
     for (const entry of app.toolRows.values()) if (entry && entry.result === null) paintToolRow(entry);
   }
   $("composer-send").disabled = detail.job.running || app.sending || uploading();
-  $("composer-hint").textContent = detail.job.running ? `HIMARI is working…${usageText(detail.job.turn_usage)}` : "";
+  app.workingHint = detail.job.running ? `HIMARI is working…${usageText(detail.job.turn_usage)}` : "";
+  paintHint();
   $("chat-menu-resume").hidden = !detail.continuable;
   $("chat-menu-compact").disabled = detail.job.running;
   $("chat-menu-dismiss").hidden = !detail.waiting || detail.job.running;
@@ -2423,8 +2447,9 @@ function memoryCountLine(count, now = false) {
   return now ? `${notes} deleted with it.` : `${notes} deleted when it is deleted for good.`;
 }
 
-/* Undo right after a move to the trash: restored, and opened again (its draft went with the move). */
-async function undoTrash(id, name) {
+/* Undo right after a move to the trash: restored; opened again if it was the one open (its draft went with
+ * the move), else the list shows it again where the user is (review N1). */
+async function undoTrash(id, name, reopen) {
   try {
     await api("POST", `/api/conversations/${encodeURIComponent(id)}/restore`);
   } catch (error) {
@@ -2432,7 +2457,7 @@ async function undoTrash(id, name) {
     return;
   }
   await loadList(true).then(markSelected).catch(() => {});
-  await openConversation(id);
+  if (reopen) await openConversation(id);
   status(`Restored “${name}”.`, "ok");
 }
 
@@ -2459,6 +2484,7 @@ async function deleteConversation(item = null) {
   if (!(await confirmAction(`Delete “${name}”?`, lines, "Move to trash")) || !still()) return;
   $("chat-menu-delete").disabled = true;
   status(notice.running ? "Stopping the work under way, then moving it to the trash…" : "Moving it to the trash…");
+  const wasOpen = app.conversationId === id;
   try {
     const moved = await api("POST", `/api/conversations/${encodeURIComponent(id)}/trash`);
     if (app.conversationId === id) cancelUploads(); // moved: its uploads go with it, nothing to ask (PR #106 N4)
@@ -2467,7 +2493,7 @@ async function deleteConversation(item = null) {
       : loadList(true).then(markSelected)).catch(() => {});
     drafts.remove(id); // after the leave kept it (V3-P78 §3.1)
     status(`Moved “${name}” to the trash. It is deleted for good on ${localDate(moved.purge_after)}.`, "ok",
-           ["Undo", () => undoTrash(id, name)]);
+           ["Undo", () => undoTrash(id, name, wasOpen)]);
   } catch (error) {
     if (error.kind === "network") {
       status("Could not confirm the move; check the trash before trying again.", "warn");
