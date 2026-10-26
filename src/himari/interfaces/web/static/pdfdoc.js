@@ -18,8 +18,8 @@
  *
  * V3-P82 §3.6: a file saved in place many times has as many sections (up to
  * MAX_SECTIONS); a save cut short at its end (a power cut) is read past — the
- * last ``startxref … %%EOF`` that reads is the file's end, and ``cut`` tells
- * where to cut it back to. A stroke's /HimariInk is a Flate stream (v2; a
+ * last ``startxref … %%EOF`` is the file's end, and ``cut`` tells where to cut
+ * the bytes after it back to. A stroke's /HimariInk is a Flate stream (v2; a
  * string, v1, is read too), and an increment can put a stroke's object back
  * in a page's /Annots (an erase undone after a save).
  *
@@ -338,42 +338,34 @@ export class PdfFile {
     return this.trailer.get("Size");
   }
 
-  /* The file's end: its last ``startxref N %%EOF`` (a line break after it allowed) — or, past bytes a save
-   * cut short left after it, the last one that reads (V3-P82 §3.6). ``cut``: where to cut such bytes off,
-   * when they begin as a save does (an object, or a cross-reference table); null when the file ends there,
-   * or ends in what another producer left (never cut). */
+  /* The file's end: its last ``startxref N %%EOF`` (a line break after it allowed), searched back past bytes a
+   * save cut short left after it (V3-P82 §3.6). ``cut``: where to cut such bytes off — when they hold no
+   * ``%%EOF`` of their own (a save of HIMARI's ends in one: cut short, it has none) and begin as a save does (an
+   * object, or a cross-reference table); null otherwise. Never an older end in place of a newer one that does
+   * not read (PR #119 review B1: that is another app's update, viewed only). A startxref in the last 1 KiB with
+   * no ``%%EOF`` after it is the end, as before V3-P82 (a section written whole, never cut). */
   async read() {
     if (find(this.bytes, "%PDF-", 0, Math.min(this.size, 1024)) < 0) throw new PdfReadError("not a PDF");
     this.cut = null;
-    let failure = new PdfReadError("no startxref");
-    for (const { offset, end } of this.ends()) {
-      try {
-        await this.readFrom(offset);
-      } catch (error) {
-        if (!(error instanceof PdfReadError)) throw error;
-        failure = error;
-        this.entries = new Map();
-        this.objectStreams = new Map();
-        this.trailer = null;
-        this.form = null;
-        continue;
-      }
-      const rest = this.bytes.subarray(end);
-      const left = Array.from(rest.subarray(0, 64), (b) => String.fromCharCode(b)).join("").trimStart();
-      if (/^(\d+\s+\d+\s+obj\b|xref\b)/.test(left)) this.cut = end;
-      return this;
-    }
-    throw failure;
+    const last = this.lastEnd();
+    const later = findLast(this.bytes, "startxref", Math.max(last ? last.end : 0, this.size - 1024));
+    if (later >= 0) return this.readFrom(new Lexer(this.bytes, later + 9).token());
+    if (last === null) throw new PdfReadError("no startxref");
+    await this.readFrom(last.offset);
+    const rest = this.bytes.subarray(last.end);
+    const left = Array.from(rest.subarray(0, 64), (b) => String.fromCharCode(b)).join("").trimStart();
+    if (find(rest, "%%EOF", 0) < 0 && /^(\d+\s+\d+\s+obj\b|xref\b)/.test(left)) this.cut = last.end;
+    return this;
   }
 
-  /* Each ``startxref N %%EOF`` near the end, the last first: {offset: N, end: just after its %%EOF and one
-   * line break}. The newest is in the last 1 KiB; one a cut save left behind is at most TAIL_BYTES back. */
-  *ends() {
+  /* The last ``startxref N %%EOF`` at most TAIL_BYTES from the end (one cut save's bytes may follow it):
+   * {offset: N, end: just after its %%EOF and one line break}, or null. */
+  lastEnd() {
     const from = Math.max(0, this.size - TAIL_BYTES);
     let before = this.size;
     while (before > from) {
       const at = findLastBefore(this.bytes, "%%EOF", from, before);
-      if (at < 0) return;
+      if (at < 0) return null;
       before = at;
       const head = Array.from(this.bytes.subarray(Math.max(0, at - 40), at), (b) => String.fromCharCode(b)).join("");
       const found = /startxref\s+(\d+)\s*$/.exec(head);
@@ -381,8 +373,9 @@ export class PdfFile {
       let end = at + 5;
       if (this.bytes[end] === 13) end += 1;
       if (this.bytes[end] === 10) end += 1;
-      yield { offset: Number(found[1]), end };
+      return { offset: Number(found[1]), end };
     }
+    return null;
   }
 
   async readFrom(startxref) {
@@ -614,6 +607,27 @@ PdfFile.prototype.inkData = async function inkData(raw) {
 
 export async function openPdf(bytes) {
   return new PdfFile(bytes).read();
+}
+
+/* ``file`` with one save added after its bytes (``bytes``: the whole, ``file``'s first), its older sections not
+ * read again (V3-P82 §3.4: a file saved in place many times is not read whole on each save) — the new section's
+ * entries over ``file``'s. Throws when ``bytes`` does not end in a section whose /Prev is ``file``'s. */
+export async function extendPdf(file, bytes) {
+  const next = new PdfFile(bytes);
+  next.cut = null;
+  const last = next.lastEnd();
+  if (last === null || last.offset < file.size || last.end !== bytes.length) throw new PdfReadError("no section added");
+  next.startxref = last.offset;
+  const { trailer, form } = await next.section(last.offset);
+  if (trailer.get("Prev") !== file.startxref) throw new PdfReadError("a section not after this file's");
+  if (!(trailer.get("Root") instanceof Ref) || !Number.isInteger(trailer.get("Size"))) {
+    throw new PdfReadError("a trailer without /Root or /Size");
+  }
+  for (const [num, entry] of file.entries) if (!next.entries.has(num)) next.entries.set(num, entry);
+  next.objectStreams = new Map(file.objectStreams); // the bytes they were read from are the same
+  next.trailer = trailer;
+  next.form = form;
+  return next;
 }
 
 /* --------------------------------------------------------------- writing */

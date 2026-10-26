@@ -310,7 +310,9 @@ export class Ink {
     return { add, erase, erasePages };
   }
 
-  /* A carry put on this (a freshly read version's) ink: strokes on pages it lacks are left, and counted. */
+  /* A carry put on this ink: strokes on pages it lacks are left, and counted. On a page read already (kept
+   * ink put back once the PDF shows, PR #119 review B2), a stroke it holds by name — in its file, or on it
+   * now — is not added again, and the carried erasures are made now; a page read later does both in load. */
   put(carried, pages) {
     this.carried = { erase: carried.erase };
     let left = 0;
@@ -319,7 +321,13 @@ export class Ink {
         left += 1;
         continue;
       }
+      const inFile = this.inFile.get(stroke.page);
+      if ((inFile && inFile.has(stroke.name)) || this.on(stroke.page).some((s) => s.name === stroke.name)) continue;
       this.pages.set(stroke.page, [...this.on(stroke.page), { ...stroke, cached: null }]);
+    }
+    for (const page of this.inFile.keys()) {
+      const gone = this.on(page).filter((s) => s.saved && carried.erase.has(s.saved.name));
+      if (gone.length) this.remove(page, gone);
     }
     return left;
   }

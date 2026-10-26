@@ -39,7 +39,7 @@
 
 import { DEFAULT_TUNING, HIGHLIGHT_ALPHA, Ink, MAX_POINTS, currentTuning, hits, newStroke, outline, setTuning, specOf,
          strokeFromSaved } from "./pdfink.js";
-import { Ref, appendIncrement, checkIncrement, openPdf } from "./pdfdoc.js";
+import { Ref, appendIncrement, checkIncrement, extendPdf, openPdf } from "./pdfdoc.js";
 import { InkLab, labOn } from "./inklab.js";
 
 export const MAX_PDF_BYTES = 64 * 1024 * 1024; // §3.3, Q2: viewed here up to this; larger ones are downloaded
@@ -794,7 +794,11 @@ export class PdfView {
     }
     new Uint8Array(this.buffer).set(increment, size);
     this.bytes = new Uint8Array(this.buffer, 0, total);
-    this.file = await openPdf(this.bytes);
+    try {
+      this.file = await extendPdf(this.file, this.bytes); // only the save's section read
+    } catch (ignored) {
+      this.file = await openPdf(this.bytes);
+    }
     this.ink.committed(changes, added);
     this.onInk();
   }
@@ -814,6 +818,7 @@ export class PdfView {
 
   /* V3-P82 §3.7: the whole file with its unsaved ink, past any limit — to download when it cannot be saved. */
   async withInk() {
+    for (const { page } of this.ink.changes()) if (!this.ink.loaded(page)) await this.readInk(page); // as increment()
     const changes = this.ink.changes();
     const pages = [];
     for (const { page, add, restore, drop } of changes) {

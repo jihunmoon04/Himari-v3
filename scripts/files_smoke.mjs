@@ -32,7 +32,7 @@ globalThis.document = {
   createElementNS: (ns, tag) => new FakeNode(tag),
 };
 
-const { FilesPane, readDownload } = await import(new URL("../src/himari/interfaces/web/static/files.js", import.meta.url));
+const { FilesPane, readDownload, postAppend } = await import(new URL("../src/himari/interfaces/web/static/files.js", import.meta.url));
 const { strokeFromSaved } = await import(new URL("../src/himari/interfaces/web/static/pdfink.js", import.meta.url));
 
 function el(tag, className, text) {
@@ -1382,8 +1382,8 @@ const STAT = (identity) => () => ({ path: PDF.path, kind: "file", size: 2048, id
 
 // §3.7: too large to save — told, no more saves, no drawing (nothing drawn could be saved), and the PDF with
 // its ink can be downloaded from the browser.
-{
-  const { files, views } = await openPdf({ "GET /api/machine/file": PDF });
+for (const keep of [keepStore(), null]) {
+  const { files, views } = await openPdf({ "GET /api/machine/file": PDF }, { keep });
   const view = views[0];
   view.tool = { tool: "pen" };
   view.ink.dirty = true;
@@ -1392,8 +1392,13 @@ const STAT = (identity) => () => ({ path: PDF.path, kind: "file", size: 2048, id
   await files.savePdf();
   assert.equal(view.tool, null);
   assert.equal(files.ink.state.textContent, "Not saved");
-  assert.ok(files.pdf.bar.text().includes("over 64 MiB") && files.pdf.bar.text().includes("kept in this browser"));
+  assert.ok(files.pdf.bar.text().includes("over 64 MiB"));
+  assert.equal(files.pdf.bar.text().includes("kept in this browser"), keep !== null, "said only when it is");
   assert.ok(files.pdf.bar.children.some((c) => c.textContent === "Download a copy with your ink"));
+  // PR #119 review C4: no drawing tool to pick again (nothing drawn could be saved).
+  assert.ok(files.ink.tools.pen.hidden && files.ink.tools.eraser.hidden && !files.ink.tools.none.hidden);
+  files.pickInkTool({ tool: "pen", color: "black", size: "fine" });
+  assert.equal(view.tool, null);
   files.closeDoc();
 }
 
@@ -1491,6 +1496,7 @@ for (const [why, base, alive, restored, label] of [
     assert.equal(keep.map.get(PDF.path).writer, "me", `${why}: this pane's from now on`);
   } else {
     assert.equal(view.carried, null, `${why}: not put back unasked`);
+    assert.ok(view.frozen, `${why}: no drawing until it is answered (PR #119 review C2)`);
     const button = files.pdf.bar.children.find((c) => c.textContent === label);
     assert.ok(button, `${why}: ${label}`);
     files.keepInkNow(files.pdf); // nothing replaces the only copy meanwhile
@@ -1499,6 +1505,7 @@ for (const [why, base, alive, restored, label] of [
     discard.listeners.click[0]();
     await settle();
     assert.ok(!keep.map.has(PDF.path), `${why}: discarded`);
+    assert.ok(!view.frozen, `${why}: drawn on again`);
   }
   files.closeDoc();
 }
@@ -1540,6 +1547,102 @@ for (const [fails, carrying] of [[false, false], [false, true], [true, false]]) 
                      carrying ? "the ink carried over" : "nothing carried");
   }
   made.files.closeDoc();
+}
+
+// PR #119 review B3: after "keep my ink", the ink carried over is this pane's record on the new version —
+// never offered back as from another; "Discard my ink" drops this pane's record too.
+{
+  const keep = keepStore();
+  const { files, views, pending } = await openPdf({ "GET /api/machine/file": PDF }, {
+    keep, answer: Object.assign(new Error("changed since"), { code: "changed", status: 409 }) });
+  views[0].ink.dirty = true;
+  views[0].next = SAVE;
+  await files.savePdf();
+  assert.deepEqual(keep.map.get(PDF.path).base, ["1", "2", "3", "5"]);
+  const press = (label) => files.pdf.bar.children.find((c) => c.textContent === label).listeners.click[0]();
+  const again = press("Load the server's version and keep my ink");
+  for (let i = 0; i < 20 && pending.length < 2; i++) await settle();
+  pending[1].resolve({ bytes: new Uint8Array(4), identity: ["1", "2", "3", "6"] });
+  await again;
+  for (let i = 0; i < 10; i++) await settle();
+  assert.deepEqual(keep.map.get(PDF.path).base, ["1", "2", "3", "6"], "kept on the version it is on now");
+  assert.ok(files.pdf.bar.hidden || !files.pdf.bar.text().includes("Unsaved ink"), "not offered or put back again");
+  assert.ok(!views[1].frozen);
+  files.showPdfChanged(true);
+  press("Discard my ink");
+  for (let i = 0; i < 20 && pending.length < 3; i++) await settle();
+  assert.ok(!keep.map.has(PDF.path), "Discard my ink: its kept copy goes too");
+  pending[2].resolve({ bytes: new Uint8Array(4), identity: ["1", "2", "3", "7"] });
+  for (let i = 0; i < 10; i++) await settle();
+  files.closeDoc();
+}
+
+// PR #119 review B4: the save landed but could not be put in the view (out of memory): read again once that
+// save is over — never waiting on itself — with the rest of the ink carried.
+{
+  const { files, views, pending } = await openPdf({ "GET /api/machine/file": PDF });
+  views[0].ink.dirty = true;
+  views[0].next = SAVE;
+  views[0].saved = async () => { throw new RangeError("Array buffer allocation failed"); };
+  assert.equal(await files.savePdf(), true);
+  for (let i = 0; i < 20 && pending.length < 2; i++) await settle();
+  assert.equal(pending.length, 2, "read again");
+  pending[1].resolve({ bytes: new Uint8Array(4), identity: ["9", "9", "9", "9"] });
+  for (let i = 0; i < 10; i++) await settle();
+  assert.equal(files.pdf.view, views[1]);
+  assert.deepEqual(views[1].carried.add, [STROKE]);
+  assert.ok(!files.pdf.waiting && !views[1].frozen && files.pdf.inFlight === null, "not stuck");
+  files.closeDoc();
+}
+
+// PR #119 review C1: the real append tells the runner's failure — the file's identity after it, and partial.
+{
+  const realFetch = globalThis.fetch;
+  try {
+    globalThis.fetch = async () => ({ ok: false, status: 503, json: async () => ({ error: {
+      code: "unavailable", message: "Could not write.", identity: ["1", "2", "3", "6"], partial: true } }) });
+    await assert.rejects(postAppend(PDF.path, Uint8Array.of(1), ["1", "2", "3", "5"]),
+      (e) => e.status === 503 && e.code === "unavailable" && e.partial === true
+        && JSON.stringify(e.identity) === JSON.stringify(["1", "2", "3", "6"]));
+    globalThis.fetch = async () => ({ ok: false, status: 409, json: async () => ({ error: { code: "changed", message: "x" } }) });
+    await assert.rejects(postAppend(PDF.path, Uint8Array.of(1), ["1"]), (e) => e.identity === undefined && !e.partial);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+}
+
+// Ctrl/Cmd+S while a save is on its way: what changed since it began goes as soon as it lands; leaving waits
+// at most 10 s for a save, then asks.
+{
+  const clock = fakeClock();
+  try {
+    let sending = deferred();
+    const appended = [];
+    const confirms = [];
+    const { files, views } = await openPdf({ "GET /api/machine/file": PDF, "GET /api/machine/stat": STAT(["9"]) },
+                                           { appended, confirms, answer: () => sending.promise });
+    const view = views[0];
+    view.next = SAVE;
+    view.ink.dirty = true;
+    view.saved = async (m) => { view.savedWith = m; }; // drawn meanwhile: still unsaved after it
+    const first = files.savePdf();
+    await settle();
+    view.element.listeners.keydown[0]({ ctrlKey: true, key: "s", preventDefault() {} });
+    sending.resolve({ path: PDF.path, identity: ["9"] });
+    await first;
+    sending = deferred();
+    for (let i = 0; i < 10; i++) await settle();
+    assert.equal(appended.length, 2, "the next save at once, not in 5 s");
+    // That one never answers: leaving asks after 10 s.
+    const leaving = files.mayLeave();
+    await clock.advance(10_000);
+    assert.equal(await leaving, true);
+    assert.deepEqual(confirms.map((c) => c[0]), ["Leave notes.pdf with ink not saved?"]);
+    assert.match(confirms[0][1][0], /not kept in this browser: it is lost/);
+    files.closeDoc();
+  } finally {
+    clock.restore();
+  }
 }
 
 // V3-P82 §4: whether the tab that kept ink is open now, asked over the browser's channel (local_store.js).

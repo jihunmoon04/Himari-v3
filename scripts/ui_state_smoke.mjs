@@ -395,4 +395,23 @@ for (const scenario of ["same", "edited", "navigated", "failed", "stale-failure"
   assert.equal(p.run("drafts.get('elsewhere').text"), "about it");
 }
 
-console.log("UI async regression checks: 24 passed");
+// PR #119 review C3: in the store, a newer draft another tab kept for that place is not overwritten.
+{
+  const p = page();
+  p.run(`
+    var PDF = "/home/u/notes.pdf";
+    var puts = [];
+    drafts.now = () => 5;
+    drafts.set("mine", { text: "a", attachments: [], references: [{ path: PDF, identity: ["1"] }] });
+    drafts.set("theirs", { text: "b", attachments: [], references: [{ path: PDF, identity: ["1"] }] });
+    drafts.store = { put: async (s, place, value) => { puts.push([place, value.references[0].identity[0]]); },
+                     get: async (s, place) => (place === "theirs" ? { writer: "another tab", at: 50, text: "newer" } : null),
+                     remove: async () => {}, prune: async () => {}, entries: async () => [] };
+    var following = drafts.follow(PDF, ["1"], ["9"]);
+  `);
+  await p.run("following");
+  assert.deepEqual(JSON.parse(p.run("JSON.stringify(puts)")), [["mine", "9"]]);
+  assert.equal(p.run("drafts.get('theirs').references[0].identity[0]"), "9", "followed in memory");
+}
+
+console.log("UI async regression checks: 25 passed");

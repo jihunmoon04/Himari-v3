@@ -9,7 +9,8 @@ const FIXTURES = new URL("../tests/fixtures/pdf/", import.meta.url);
 const fixture = (name) => new Uint8Array(readFileSync(new URL(name, FIXTURES)));
 
 const pane = await import(new URL("pdfpane.js", STATIC));
-const { openPdf, appendIncrement, checkIncrement, PdfReadError, PdfString, Ref } = await import(new URL("pdfdoc.js", STATIC));
+const { openPdf, extendPdf, appendIncrement, checkIncrement, PdfReadError, PdfString, Ref } =
+  await import(new URL("pdfdoc.js", STATIC));
 const appendBytes = async (...args) => (await appendIncrement(...args)).bytes; // V3-P82: {bytes, added}
 const pdfjs = await import(new URL("pdfjs/pdf.min.mjs", STATIC));
 pdfjs.GlobalWorkerOptions.workerSrc = new URL("pdfjs/pdf.worker.min.mjs", STATIC).href;
@@ -332,6 +333,42 @@ for (const name of ["table.pdf", "stream.pdf"]) {
   }
 }
 
+// PR #119 review B1: an end that does not read is never passed over for an older one — another app's update
+// (here its startxref a few bytes off, as PDF.js forgives) is viewed only, never cut. A file whose startxref
+// has no %%EOF after it reads as before V3-P82.
+for (const name of ["table.pdf", "stream.pdf"]) {
+  const original = fixture(name);
+  const ref = await firstPage(original);
+  const update = await appendBytes(await openPdf(original), [{ ref, add: [stroke(110, 110)] }]);
+  const tail = latin1(update.subarray(update.length - 40));
+  const offset = Number(/startxref\s+(\d+)\s+%%EOF\s*$/.exec(tail)[1]);
+  const at = update.length - 40 + tail.lastIndexOf("startxref");
+  const theirs = join(original, join(update.subarray(0, at), new TextEncoder().encode(`startxref\n${offset + 3}\n%%EOF\n`)));
+  await assert.rejects(openPdf(theirs), PdfReadError, `${name}: viewed only, not cut back`);
+  const noEof = join(original, update.subarray(0, update.length - 6)); // "%%EOF\n" gone
+  assert.equal((await (await openPdf(noEof)).ink(ref)).length, 1, `${name}: read from its last startxref`);
+}
+
+// V3-P82 §3.4: a save read on top of the file it was made on — only its own section read — is the file read
+// whole; a section that is not after it is refused.
+for (const name of ["table.pdf", "stream.pdf"]) {
+  const original = fixture(name);
+  const ref = await firstPage(original);
+  const file = await openPdf(original);
+  const one = join(original, await appendBytes(file, [{ ref, add: [stroke(110, 110), stroke(70, 500, "highlighter")] }]));
+  const extended = await extendPdf(file, one);
+  const whole = await openPdf(one);
+  assert.deepEqual([...extended.entries].sort((a, b) => a[0] - b[0]), [...whole.entries].sort((a, b) => a[0] - b[0]),
+                   `${name}: the same objects`);
+  assert.deepEqual((await extended.ink(ref)).map((e) => e.data), (await whole.ink(ref)).map((e) => e.data));
+  assert.equal(extended.startxref, whole.startxref);
+  assert.equal(extended.nextNumber, whole.nextNumber);
+  const two = join(one, await appendBytes(extended, [{ ref, add: [stroke(200, 300)] }]));
+  assert.equal((await (await extendPdf(extended, two)).ink(ref)).length, 3, `${name}: and the next on it`);
+  await assert.rejects(extendPdf(file, two), PdfReadError, `${name}: not after this file`);
+  await assert.rejects(extendPdf(file, original), PdfReadError, `${name}: nothing added`);
+}
+
 // §3.6 (review r3 B1): a PDF saved in place more than 1,000 times (V3-P77's limit) is read and saved on.
 {
   const original = fixture("table.pdf");
@@ -490,6 +527,18 @@ const { Ink, newStroke, outline, specOf, strokeFromSaved, hits, TOOLS, DEFAULT_T
   lost.load(0, [strokeFromSaved(0, { ref: new Ref(93), name: two.name, data: specOf(two).data, inkList: [] })]);
   assert.deepEqual(lost.on(0).map((s) => [s.name, Boolean(s.saved)]), [[two.name, true]]);
   assert.ok(!lost.dirty);
+  // PR #119 review B2: put on pages read already (kept ink put back once the PDF shows) — a stroke the page
+  // holds by name is not added again, and the carried erasures are made now.
+  const shown = new Ink();
+  const held = strokeFromSaved(0, { ref: new Ref(93), name: two.name, data: specOf(two).data, inkList: [] });
+  const other = strokeFromSaved(0, { ref: new Ref(90), name: one.name, data: specOf(one).data, inkList: [] });
+  shown.load(0, [held, other]);
+  const fresh = newStroke(0, { tool: "pen" }, true);
+  fresh.points.push([5, 5, 0.5]);
+  shown.put({ add: [{ ...two, saved: null }, { ...fresh }], erase: new Set([one.name]), erasePages: [0] }, 3);
+  assert.deepEqual(shown.on(0).map((s) => s.name), [two.name, fresh.name]);
+  assert.deepEqual(shown.changes().map((c) => [c.add.map((s) => s.name), c.drop.map((d) => d.name)]),
+                   [[[fresh.name], [one.name]]]);
 }
 
 // --- the ink (§4.1): the view's input, against the bundled PDF.js with a fake DOM ----------------------------

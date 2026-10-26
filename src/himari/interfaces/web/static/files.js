@@ -42,6 +42,7 @@ const KEPT_MAX = 20; // V3-P78 Q3: files with unsaved text kept, for at most 30 
 const KEPT_AGE_MS = 30 * 24 * 3600 * 1000;
 const PDF_MAX_BYTES = 64 * 1024 * 1024; // the PDF view's limit (V3-P77 §3.3, Q2), as pdfpane.js's
 const AUTOSAVE_IDLE_MS = 5000; // V3-P82 §3.2, Q1: ink saved once it has not changed for this long
+const LEAVE_WAIT_MS = 10_000; // leaving waits this long for the ink to be saved, then asks (review N)
 const AUTOSAVE_MAX_MS = 60_000; // ... or this long after it first changed, written on without a pause (review N4)
 const RETRY_MS = [5000, 30_000, 120_000]; // a save that failed on the way tried again after these, then every 2 min
 const LARGE_PDF_BYTES = 48 * 1024 * 1024; // "getting large" from here, of the 64 MiB a PDF may grow to (§3.6)
@@ -267,8 +268,12 @@ export async function postAppend(path, increment, identity) {
   } catch (ignored) { /* not JSON */ }
   if (!response.ok) {
     const error = (data && data.error) || {};
-    throw Object.assign(new Error(error.message || "Not saved."), { code: error.code || "http_error",
-                                                                     status: response.status });
+    const failed = Object.assign(new Error(error.message || "Not saved."), { code: error.code || "http_error",
+                                                                              status: response.status });
+    // The runner's write failed (V3-P82 §3.6): the file as it is after it, and whether bytes of it are left.
+    if (Array.isArray(error.identity)) failed.identity = error.identity.map(String);
+    if (error.partial === true) failed.partial = true;
+    throw failed;
   }
   return data;
 }
@@ -358,11 +363,15 @@ export class FilesPane {
     if (!this.dirty) return true;
     if (this.doc === null) { // V3-P82 §3.2: saved on the way out; asked only if it cannot be now
       const pdf = this.pdf;
-      if (await this.flushPdf()) return true;
+      let timer = null;
+      const late = new Promise((resolve) => { timer = setTimeout(() => resolve(false), LEAVE_WAIT_MS); });
+      const saved = await Promise.race([this.flushPdf(), late]);
+      clearTimeout(timer);
+      if (saved) return true;
       this.keepInkNow(pdf);
-      return this.confirm(`Leave ${pdf.name} with ink not saved?`,
-                          ["It could not be saved now. It is kept in this browser, and offered again when you open "
-                           + "this PDF."], "Leave");
+      return this.confirm(`Leave ${pdf.name} with ink not saved?`, [this.keptInkWords(pdf)
+        ? "It could not be saved now. It is kept in this browser, and offered again when you open this PDF."
+        : "It could not be saved now, and it is not kept in this browser: it is lost if you leave."], "Leave");
     }
     const doc = this.doc;
     const discard = await this.confirm(`Discard your changes to ${doc.name}?`,
@@ -738,6 +747,18 @@ export class FilesPane {
     this.installPdf(shown, made, page || (left ? left.page : 1), left ? left.zoom : null);
   }
 
+  /* "Discard my ink": the server's version read again, and what this pane kept of the ink goes too (else it
+   * would be offered straight back, PR #119 review B3). */
+  discardInk() {
+    const pdf = this.pdf;
+    if (!pdf || pdf.reopening) return;
+    if (this.keep !== null) {
+      clearTimeout(pdf.keepTimer);
+      this.keep.remove("unsaved", pdf.path, this.writer);
+    }
+    this.reopenPdf(false);
+  }
+
   /* A PDF read and opened in a view of its own, not yet shown — the one shown stays until this is ready
    * (PR #104 review P1-2). ``carried``: unsaved ink put on it (§5.5); {view, identity, left}. Throws with a
    * message to show. */
@@ -757,7 +778,7 @@ export class FilesPane {
     try {
       await view.open();
       const left = carried ? await view.carryIn(carried) : 0;
-      return { view, identity: read.identity, left };
+      return { view, identity: read.identity, left, carried: carried !== null && carried !== undefined };
     } catch (error) {
       view.destroy();
       throw error;
@@ -765,7 +786,7 @@ export class FilesPane {
   }
 
   /* The view shown: fitted to the pane, on ``page``, its tool picked, checked on disk from now on. */
-  installPdf(shown, { view, identity, left }, page, zoom = null) {
+  installPdf(shown, { view, identity, left, carried = false }, page, zoom = null) {
     const bar = this.el("div", "files-bar");
     bar.hidden = true;
     // The identity of the bytes read, which a save is made against (V3-P77 §5.3); the shown one if not told.
@@ -792,8 +813,11 @@ export class FilesPane {
     this.paintPage(view.current + 1, view.numPages);
     this.paintInk();
     this.schedulePdfPoll(pdf);
+    // Ink carried here from the version before is the ink this pane kept: its record is of this version now,
+    // and not offered back as from another (PR #119 review B3).
+    if (carried) this.keepInkNow(pdf);
     if (view.cut !== null) this.cutShort(pdf);
-    else if (view.writable) this.offerKeptInk(pdf);
+    else if (view.writable && !carried) this.offerKeptInk(pdf);
     this.scheduleSave(pdf);
   }
 
@@ -818,7 +842,7 @@ export class FilesPane {
   }
 
   pickInkTool(tool) {
-    if (!this.pdf) return;
+    if (!this.pdf || (tool && this.pdf.tooLarge)) return; // nothing drawn now could be saved (review C4)
     this.pdf.view.setTool(tool);
     if (tool) this.tellSigned();
     try {
@@ -924,9 +948,13 @@ export class FilesPane {
     }
     ink.group.hidden = false;
     const picked = view.tool ? view.tool.tool : "none";
-    for (const [name, control] of Object.entries(ink.tools)) control.setAttribute("aria-pressed", String(name === picked));
+    for (const [name, control] of Object.entries(ink.tools)) {
+      control.setAttribute("aria-pressed", String(name === picked));
+      control.hidden = Boolean(pdf.tooLarge) && name !== "none"; // too large to save: no drawing tools (review C4)
+    }
     const pen = this.penChoice();
     ink.swatches.hidden = picked !== "pen";
+    ink.width.hidden = Boolean(pdf.tooLarge);
     for (const swatch of ink.swatches.children) {
       if (swatch.dataset && swatch.dataset.color) swatch.setAttribute("aria-pressed", String(swatch.dataset.color === pen.color));
     }
@@ -969,8 +997,8 @@ export class FilesPane {
       return;
     }
     if (pdf.dirtySince === null) pdf.dirtySince = Date.now();
-    if (pdf.cloud || pdf.saving || pdf.waiting || pdf.stopped || pdf.failed) return;
-    const wait = Math.min(AUTOSAVE_IDLE_MS, Math.max(0, pdf.dirtySince + AUTOSAVE_MAX_MS - Date.now()));
+    if (pdf.saving || pdf.waiting || pdf.stopped || pdf.failed || (pdf.cloud && !pdf.soon)) return;
+    const wait = pdf.soon ? 0 : Math.min(AUTOSAVE_IDLE_MS, Math.max(0, pdf.dirtySince + AUTOSAVE_MAX_MS - Date.now()));
     pdf.saveTimer = setTimeout(() => { if (this.pdf === pdf) this.savePdf(); }, wait);
   }
 
@@ -979,7 +1007,14 @@ export class FilesPane {
   savePdf() {
     const pdf = this.pdf;
     if (!pdf) return Promise.resolve(true);
-    if (!pdf.inFlight) pdf.inFlight = this.saveOnce(pdf).finally(() => { pdf.inFlight = null; });
+    if (!pdf.inFlight) {
+      pdf.inFlight = this.saveOnce(pdf).finally(() => {
+        pdf.inFlight = null;
+        if (!pdf.reread || this.pdf !== pdf) return;
+        pdf.reread = false; // after the save is over: the read again waits for a save on its way (review B4)
+        this.reopenPdf(true);
+      });
+    }
     return pdf.inFlight;
   }
 
@@ -990,6 +1025,7 @@ export class FilesPane {
     clearTimeout(pdf.retryTimer);
     pdf.failed = null;
     pdf.retries = 0;
+    if (pdf.inFlight) pdf.soon = true; // what changed since that save began goes as soon as it lands
     this.savePdf();
   }
 
@@ -1011,6 +1047,7 @@ export class FilesPane {
    * on the server; once it landed, saved where it is in the view, and what changed since waits for the next. */
   async saveOnce(pdf) {
     clearTimeout(pdf.saveTimer);
+    pdf.soon = false;
     if (pdf.view.frozen || pdf.waiting || pdf.stopped) return false;
     let made;
     try {
@@ -1040,12 +1077,14 @@ export class FilesPane {
     pdf.identity = answer.identity;
     pdf.failed = null;
     pdf.retries = 0;
-    this.onSaved({ path: pdf.path, from: expected, to: answer.identity });
+    try {
+      this.onSaved({ path: pdf.path, from: expected, to: answer.identity });
+    } catch (ignored) { /* the chips are not this save's: it landed */ }
     if (this.pdf !== pdf) return true;
     try {
       await pdf.view.saved(made);
-    } catch (ignored) { // saved on the server, not read back here: read it again, the rest of the ink kept
-      await this.reopenPdf(true);
+    } catch (ignored) { // saved on the server, not read back here: read again once this save is over, the
+      pdf.reread = true; // rest of the ink kept (its strokes the file holds by name are not written twice)
       return true;
     }
     pdf.dirtySince = null;
@@ -1063,7 +1102,7 @@ export class FilesPane {
       return;
     }
     if (error.status === 401) { // the session ended: the sign-in screen comes; kept in the browser till then
-      pdf.failed = "Not saved: sign in again. Your ink is kept in this browser.";
+      pdf.failed = `Not saved: sign in again.${this.keptInkWords(pdf)}`;
       this.paintInk();
       return;
     }
@@ -1121,8 +1160,9 @@ export class FilesPane {
     clearTimeout(pdf.retryTimer);
     this.keepInkNow(pdf);
     if (large) {
+      pdf.tooLarge = true;
       pdf.view.setTool(null);
-      pdf.bar.replaceChildren(this.el("p", null, `${why} Your ink is kept in this browser.`));
+      pdf.bar.replaceChildren(this.el("p", null, `${why}${this.keptInkWords(pdf)}`));
       pdf.bar.append(this.button("Download a copy with your ink", async () => {
         try {
           downloadText(await pdf.view.withInk(), pdf.name);
@@ -1131,6 +1171,11 @@ export class FilesPane {
       pdf.bar.hidden = false;
     }
     this.paintInk();
+  }
+
+  /* " Your ink is kept in this browser." when it is (a store, and not too much to keep), else "". */
+  keptInkWords(pdf) {
+    return this.keep !== null && !pdf.notKept ? " Your ink is kept in this browser." : "";
   }
 
   /* The page went to the background (V3-P82 §3.2): the ink kept in this browser now, and saved. */
@@ -1226,18 +1271,25 @@ export class FilesPane {
       return;
     }
     pdf.offer = found;
+    // No drawing until it is answered, as the editor is read-only then (§4.1): nothing drawn meanwhile would be
+    // kept in this browser, the record there being the only copy of the ink offered (PR #119 review C2).
+    pdf.view.frozen = true;
+    this.paintInk();
     pdf.bar.replaceChildren(this.el("p", null, `Unsaved ink from ${clock(found.at)} was kept in this browser, ` + (same
       ? "by another tab that is still open." : "made on another version of this PDF.")));
     pdf.bar.append(this.button(same ? "Restore" : "Put it on the current version", () => {
       if (this.pdf !== pdf || !pdf.offer) return;
       const offer = pdf.offer;
       pdf.offer = null;
+      pdf.view.frozen = false;
       this.putKeptInk(pdf, offer, null);
     }), this.button("Discard", () => {
-      if (this.pdf !== pdf) return;
+      if (this.pdf !== pdf || !pdf.offer) return;
       pdf.offer = null;
+      pdf.view.frozen = false;
       pdf.bar.hidden = true;
       this.keep.remove("unsaved", pdf.path); // the user's answer, whoever kept it
+      this.paintInk();
     }));
     pdf.bar.hidden = false;
   }
@@ -1259,11 +1311,15 @@ export class FilesPane {
   async cutShort(pdf) {
     pdf.view.setTool(null);
     pdf.view.frozen = true;
+    pdf.mending = true; // no check on disk meanwhile: its read again would not tell why (review N)
+    clearTimeout(pdf.pollTimer);
     this.paintInk("Mending…");
     try { // the identity as decimal strings: none of its numbers rounded (an inode can be past 2^53)
       await this.api("POST", "/api/machine/pdf/truncate", { path: pdf.path, to: pdf.view.cut, expected: pdf.identity });
     } catch (error) {
       if (this.pdf !== pdf) return;
+      pdf.mending = false;
+      this.schedulePdfPoll(pdf);
       pdf.view.writable = false;
       pdf.view.readOnly = `The end of this PDF was cut short and could not be mended here (${error.message}); it ` +
         "can be viewed, not written on.";
@@ -1272,7 +1328,14 @@ export class FilesPane {
     }
     if (this.pdf !== pdf) return;
     await this.reopenPdf(pdf.view.ink.dirty);
-    if (this.pdf) this.showPdfNote("The end of this PDF was cut short; the last save was lost, and the rest is kept.");
+    if (this.pdf === pdf) { // not read again (told why in the bar): checked on disk again
+      pdf.mending = false;
+      this.schedulePdfPoll(pdf);
+    }
+    // Told on the version read again — not over another PDF opened meanwhile, nor over a reason it could not be.
+    if (this.pdf && this.pdf !== pdf && this.pdf.path === pdf.path) {
+      this.showPdfNote("The end of this PDF was cut short; the last save was lost, and the rest is kept.");
+    }
   }
 
   /* A word above the pages (a signed PDF; strokes that could not be kept), until dismissed. */
@@ -1291,6 +1354,10 @@ export class FilesPane {
   showPdfChanged(refused, problem = null) {
     const pdf = this.pdf;
     if (!pdf) return;
+    if (pdf.offer) { // the bar's offer of kept ink gives way (the record stays, offered at the next open)
+      pdf.offer = null;
+      if (!pdf.reopening) pdf.view.frozen = false;
+    }
     pdf.waiting = true; // no save on its own until the user picks (V3-P82 §3.7)
     clearTimeout(pdf.saveTimer);
     clearTimeout(pdf.retryTimer);
@@ -1299,7 +1366,7 @@ export class FilesPane {
       ? "Not saved: this PDF was changed on the server since you opened it. Your ink is still here."
       : "This PDF was changed on the server since you opened it. Your ink is still here."));
     const actions = [["Load the server's version and keep my ink", () => this.reopenPdf(true)],
-                     ["Discard my ink", () => this.reopenPdf(false)]];
+                     ["Discard my ink", () => this.discardInk()]];
     for (const [label, action] of actions) {
       const button = this.el("button", "link-button", label);
       button.type = "button";
@@ -1443,7 +1510,7 @@ export class FilesPane {
    * with ink unsaved, never unasked (§5.5). */
   async checkPdf() {
     const pdf = this.pdf;
-    if (!pdf || pdf.saving || pdf.inFlight || pdf.reopening) return;
+    if (!pdf || pdf.saving || pdf.inFlight || pdf.reopening || pdf.mending) return;
     const generation = pdf.generation; // a save made meanwhile makes this answer old (V3-P82 §3.4, review C2)
     try {
       const now = await this.api("GET", `/api/machine/stat?${query(pdf.path)}`);
