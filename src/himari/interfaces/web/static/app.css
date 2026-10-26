@@ -3646,12 +3646,13 @@ details > summary {
 .surface.files { padding: 0; display: flex; flex-direction: column; }
 .surface.files .files-pane { max-width: calc(var(--reading-max) + 160px); width: 100%; margin: 0 auto; }
 .files-pane { display: flex; flex-direction: column; min-height: 0; height: 100%; }
-.files-head { display: flex; align-items: center; gap: var(--space-2); min-height: 48px; padding: var(--space-2) var(--space-4); border-bottom: 1px solid var(--border-subtle); flex: 0 0 auto; }
-.files-crumbs { display: flex; align-items: center; flex-wrap: wrap; gap: 2px; min-width: 0; flex: 1 1 auto; font-size: 13px; }
+.files-head { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); min-height: 48px; padding: var(--space-2) var(--space-4); border-bottom: 1px solid var(--border-subtle); flex: 0 0 auto; }
+.files-crumbs { display: flex; align-items: center; flex-wrap: wrap; gap: 2px; min-width: 0; flex: 1 1 200px; font-size: 13px; } /* too tight: the tools go under it */
 .files-crumb { background: none; border: 0; padding: 4px 6px; border-radius: var(--radius-sm); color: var(--text-muted); font: inherit; min-height: 32px; overflow-wrap: anywhere; text-align: left; }
 button.files-crumb:hover { background: var(--surface-hover); color: var(--text); }
 .files-crumb.is-current { color: var(--text); font-weight: 600; }
 .files-crumb-sep { color: var(--text-muted); font-size: 12px; }
+.files-head-end { display: flex; align-items: center; gap: var(--space-2); flex: 0 0 auto; margin-left: auto; }
 .files-tools { display: flex; align-items: center; gap: var(--space-2); flex: 0 0 auto; font-size: 13px; }
 .files-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: var(--space-2) var(--space-3) var(--space-5); }
 .files-body[aria-busy="true"] { opacity: .6; }
@@ -3740,3 +3741,22 @@ button.files-crumb:hover { background: var(--surface-hover); color: var(--text);
   .files-row:hover .conversation-actions, .files-row:focus-within .conversation-actions { opacity: 1; }
 }
 .files-tools .conversation-actions { opacity: 1; position: relative; } /* its list under it, in the panel too */
+
+/* HIMARI's changes (V3-P76 §5): the head's count, a dot on changed rows, the list and one change's diff. */
+.file-panel-changes { flex: 0 0 auto; min-height: 30px; padding: 4px 10px; border: 1px solid var(--border-strong); border-radius: var(--radius-pill); background: var(--surface-raised); color: var(--text); font-size: 12px; white-space: nowrap; }
+.file-panel-changes:hover { background: var(--surface-hover); }
+.file-panel-changes[hidden] { display: none; }
+.file-panel-changes.is-warn { border-color: var(--warn-edge); background: var(--warn-soft); color: var(--warn); }
+#chat-files-toggle { position: relative; }
+#chat-files-toggle.has-changes[aria-expanded="false"]::after { content: ""; position: absolute; top: 6px; right: 6px; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); }
+.files-changed-dot { display: inline-block; width: 7px; height: 7px; margin-left: 8px; vertical-align: middle; border-radius: 50%; background: var(--accent); }
+.files-changed-link { display: inline-grid; place-items: center; min-width: 24px; min-height: 24px; padding: 0; vertical-align: middle; }
+.files-changed-link .files-changed-dot { margin-left: 0; }
+.files-note.is-warn { color: var(--warn); }
+.files-tools > .link-button:disabled, .files-change .link-button:disabled { opacity: .45; cursor: default; }
+.files-change .files-open { flex-wrap: wrap; row-gap: 2px; }
+.files-change .files-meta { flex: 1 1 100%; padding-left: 30px; white-space: normal; }
+.files-change.is-warn .files-meta { color: var(--warn); }
+.files-change .link-button { flex: 0 0 auto; min-height: 32px; padding: 4px 8px; font-size: 13px; }
+.files-body:has(.files-change-diff) { display: flex; flex-direction: column; }
+.files-change-diff { flex: 1 1 auto; min-height: 240px; max-height: none; margin: var(--space-2) 0 0; }

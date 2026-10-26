@@ -469,3 +469,68 @@
 - 배포 주의
   - **himari-runner도 함께 재시작해야 한다.** 재시작 전에는 기록 없이 쓰고, 경고를 남긴다.
   - DB 판은 그대로다. 되돌려도 `file-changes/`와 `file-versions-agent/`는 남는다. 이전 빌드는 이들을 읽지 않는다.
+
+## 14. 구현 노트 (2026-10-25, 2단계 b: 화면)
+
+### 14.1 만든 것
+
+- **배지**
+  - 대화 옆 파일 패널의 머리에 **Changes n**이 붙는다. n은 목록과 숨김 항목을 더한 수이고, 0이면 숨는다.
+  - 되돌릴 수 없는 항목이 있으면 경고색이다.
+  - 패널이 닫혀 있으면 위쪽 폴더 버튼에 점이 붙는다.
+  - 대화를 열 때와 turn이 끝날 때 다시 읽는다. turn이 끝나면 목록을 먼저 읽고, 그다음 패널을 새로 그린다.
+- **목록**(Files › Changes)
+  - 행마다 파일, "changed/made/deleted by HIMARI", 횟수, "also changed by something else", 되돌릴 수 없는 이유를 보이고, Revert와 Accept가 있다.
+  - 머리에는 Accept all과 Revert all이 있다.
+  - 명령 알림(§9), 숨김 개수(§10), "HIMARI is working"을 보인다. turn 중에는 버튼이 꺼진다.
+- **diff**(Files › Changes › 이름)
+  - 처음(왼쪽)과 지금(오른쪽)을 V3-P75의 `createDiff`로 패널 안에 그린다.
+  - 없는 쪽은 글로 알린다: "there was no such file (HIMARI made it)", "there is no such file", 글이 아니거나 1 MiB 초과.
+  - 바뀐 경우(`changed`, `interleaved`)에는 경고 줄과 **Revert anyway**가 나오고, 확인 창을 거친다. 이때 보낸 `seen`은 그 diff가 받은 `now`다.
+- **되돌리기 흐름**
+  - 목록의 Revert가 409 `changed`면 그 파일의 diff를 연다. 그사이 또 바뀌었으면 Revert anyway도 다시 diff로 간다.
+  - Revert all은 확인 창을 거치고, 남은 것을 이름과 이유로 알린다.
+- **점**
+  - 바뀐 파일의 행, 그 위 폴더의 행, 열린 파일의 경로 이름 옆에 점이 붙는다. 열린 파일의 점은 그 변경의 diff로 가는 버튼이다.
+- **이전 판 이름표**: "before HIMARI changed it", "before HIMARI deleted it", "before a revert".
+- **Deleted files 복원**: 먼저 `install`로 한 번에 복원한다. `unsupported`일 때만 V3-P75의 두 단계 방식으로 한다. 이름이 잡혀 있으면 "exists again"이다.
+- **머리의 줄바꿈**
+  - 패널의 머리가 좁으면 도구와 패널 버튼이 한 묶음으로 경로 아래로 내려간다(`files-head-end`).
+  - 전에는 경로가 한 글자씩 세로로 꺾였다(V3-P75에도 있던 문제다).
+
+### 14.2 설계와 달라진 것
+
+- diff는 대화 상자가 아니라 패널 안의 쪽으로 연다. 목록과 diff 사이를 경로(Files › Changes › 이름)로 오간다.
+- 단일 Revert는 확인 창 없이 바로 한다. 되돌린 내용은 소유자 판으로 남는다. Revert all과 Revert anyway는 확인 창을 거친다.
+- diff 응답에 `state`와 `revertible`을 더했다. 열린 파일의 점에서 diff로 바로 갈 때 쓴다.
+
+### 14.2a 검수 반영 (PR #99)
+
+1. **대화를 바꾼 뒤 이전 대화의 응답**(P1).
+   - 전에는 목록 응답이 도착한 뒤에 그때의 대화 ID를 붙였다. 대화 A에서 요청하고 B로 옮기면 A의 목록이 B의 것으로 보일 수 있었다. 대화를 바꿔도 패널의 진행 중 요청이 무효가 되지 않아, A의 목록이나 diff와 그 Revert 버튼이 B에서 보일 수 있었다.
+   - 이제 `changes`의 모든 호출이 대화(`of`)를 받는다. 쪽을 열 때 `of()`로 고정하고, 응답은 ticket과 대화가 둘 다 그대로일 때만 그린다. 그 쪽의 버튼은 그 대화의 API만 부르고, 지금 보이는 대화가 다르면 아무것도 하지 않는다.
+   - 대화를 바꾸면 `reset()`이 ticket을 올리고, 검토 쪽이면 그 쪽과 버튼을 지운다. 그래서 A→B→A로 돌아와도 처음 요청의 응답은 그리지 않는다.
+2. **diff 쪽의 turn 중 버튼**(P2). diff 쪽의 Revert, Accept, Revert anyway도 HIMARI가 일하는 동안 꺼지고 그렇게 알린다. 쪽을 보는 중에 turn이 시작하면 `workingChanged()`가 목록·diff의 버튼을 끈다. 누르는 순간에도 다시 확인한다(확인 창 뒤에도).
+3. **모두 되돌리기의 남은 항목**(#98 P2의 화면). "Reverted all but big.bin (cannot be reverted), a.txt (changed since), 1 in a file hidden now."처럼 남은 것을 모두 알린다. 확인 창 문구도 "되돌릴 수 없는 파일은 그대로 둔다"로 고쳤다.
+4. **`outdated`**(#98 재검수의 화면). 받아들이기·되돌리기가 `outdated`로 거부되면 목록을 다시 읽어 그 이유와 함께 보여 준다.
+
+### 14.3 확인
+
+- `scripts/files_smoke.mjs`
+  - 목록(되돌릴 수 없는 항목의 표시, 명령과 숨김 알림, 하나 받아들이기). turn 중에는 모두 꺼진다.
+  - 충돌이면 diff로 가고, Revert anyway는 본 상태로 보낸다. 만들고 지운 파일의 글 안내.
+  - Revert all은 "아니오"면 아무것도 하지 않고, 남은 것을 알린다.
+  - 점(파일, 폴더, 열린 파일 → diff). 검토가 없는 곳(Files 화면)에는 점이 없다.
+  - 한 번에 복원하고, 이름이 잡혔으면 알린다. 기존 두 단계 시험은 `unsupported`일 때로 고쳤다.
+- 브라우저(headless Chromium, 실제 앱과 runner, 1400px과 390px)
+  1. Ask로 대화를 열고 보낸다. 에이전트가 README 수정, 새 파일, 지우기, 명령을 하면 배지가 "Changes 3"이 된다.
+  2. 목록, README diff, Revert를 거치면 README가 원래대로 돌아온다.
+  3. 소유자가 new.c를 고친 뒤 Revert하면 409와 diff의 경고 줄이 나온다. Revert anyway와 확인 창을 거치면 지워진다.
+  4. 받아들이면 배지가 사라진다. Deleted files에서 notes.txt를 복원하면 201이고 내용이 같다.
+  5. 폴더 행과 열린 파일에 점이 붙는다. 좁은 화면에서 목록과 diff의 머리가 줄바꿈된다.
+- `ui_smoke` 전부 통과, `ui_state_smoke` 14개 통과, pytest 2586 통과, mypy 통과.
+- 검수 반영 뒤(14.2a)
+  - `files_smoke`: 요청 중에 대화가 바뀌면 그리지 않는다(알리지 않고 쪽도 없음). `reset()` 뒤에도, A→B→A로 돌아와도 그리지 않는다. 다른 대화가 보이면 남은 버튼이 아무것도 부르지 않는다. diff 쪽 버튼은 turn 중 꺼지고, turn이 시작하면 꺼지며, 그때 누르면 아무것도 보내지 않는다. Revert all의 남은 항목과 숨김 개수 문구.
+  - 위 보호 장치를 하나씩 빼면 각각 smoke가 실패한다.
+  - 브라우저: A의 diff를 연 채 새 대화로 가면 diff·버튼·배지가 없다. A로 돌아오면 배지가 다시 나온다. A의 Changes 응답을 2초 늦추고 그사이 새 대화로 가면, 새 대화에 목록·점·배지가 나오지 않는다. 기존 흐름(1–4)도 다시 통과.
+  - pytest 2589 통과, mypy 통과, `ui_smoke` 전부, `ui_state_smoke` 14개 통과.

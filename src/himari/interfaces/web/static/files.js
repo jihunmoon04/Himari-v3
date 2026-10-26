@@ -17,14 +17,32 @@
  * Ask HIMARI (V3-P76 §3): a selection, or the whole file, handed to the
  * place as a reference — the file's path and identity, and for a selection
  * its positions and the SHA-256 of its text, never the text. Saved text only.
+ *
+ * Changes (V3-P76 §5, §6), beside a conversation: the files HIMARI changed
+ * there and the user has not reviewed — each with a diff of what it was
+ * before and what it is now, to accept or revert; a dot on their rows.
  */
 
 const KIND_ICON = { directory: "#side-folder", file: "#side-note" };
 const EDIT_MAX_BYTES = 1024 * 1024; // the server's limit for the editor (§7.7, Q3)
 const POLL_MS = 5000; // how often an open file is checked on disk (§5.3)
+const CHANGE_KINDS = { created: "made by HIMARI", changed: "changed by HIMARI", deleted: "deleted by HIMARI",
+                       none: "made and deleted by HIMARI", unknown: "HIMARI may have changed it" };
+const CHANGE_STATES = { no_version: "its previous version could not be kept",
+                        uncertain: "whether or how HIMARI changed it is unknown",
+                        expired: "its previous version has expired" };
 // What a previous version was kept before (V3-P75 §7.4; V3-P76 §4.2: the agent's, and a revert).
 const VERSION_REASONS = { save: "before a save", delete: "before a delete", revert: "before a revert",
                           agent: "before HIMARI changed it", agent_delete: "before HIMARI deleted it" };
+
+/* What a revert of all left (PR #98 review C3): each file and why, and the hidden ones counted. */
+function revertedAll({ left, hidden }) {
+  if (!left.length && !hidden) return "Reverted.";
+  const why = (item) => ({ changed: "changed since", not_revertible: "cannot be reverted" })[item.code] || item.message;
+  const parts = left.map((item) => `${item.path.slice(item.path.lastIndexOf("/") + 1)} (${why(item)})`);
+  if (hidden) parts.push(`${hidden} in ${hidden === 1 ? "a file" : "files"} hidden now`);
+  return `Reverted all but ${parts.join(", ")}.`;
+}
 
 function defaultConfirm(title, lines) { // the browser's own: no action label
   return Promise.resolve(window.confirm([title, ...lines].join("\n\n")));
@@ -85,16 +103,25 @@ export class FilesPane {
   /* loadEditor(): the CodeMirror module (createEditor, createDiff); confirm(title, lines, action) → Promise<bool>;
    * working(): HIMARI is at work in this place now (told beside the editor, §7.3).
    * onAsk(reference): Ask HIMARI (V3-P76 §3.1) — {path, name, identity, whole} and, for a selection,
-   * {start, end, sha256, lines: [fromLine, fromColumn, toLine, toColumn]}; none: not offered here. */
+   * {start, end, sha256, lines: [fromLine, fromColumn, toLine, toColumn]}; none: not offered here.
+   * changes: the review of HIMARI's changes (V3-P76 §5) — {of(), list(of), diff(of, path), accept(of, paths | null),
+   * revert(of, path, seen), revertAll(of), seen(list)}: of() the conversation shown now, and each call the API
+   * call of the conversation ``of`` it names (seen: told every list read); none: not offered here. */
   constructor({ api, el, onOpenFolder = null, onOpenFile = null, actions = [], folderActions = null,
                 folderRowActions = null, loadEditor = () => import("/assets/codemirror/codemirror.js"),
-                confirm = defaultConfirm, working = () => false, onAsk = null }) {
+                confirm = defaultConfirm, working = () => false, onAsk = null, changes = null }) {
     this.api = api;
     this.el = el;
     this.loadEditor = loadEditor;
     this.confirm = confirm;
     this.working = working;
     this.onAsk = onAsk;
+    this.changes = changes;
+    this.changed = new Set(); // the paths HIMARI changed, as the last list said: a dot on their rows
+    this.page = null; // "changes", or {path} of one change's diff, while one of them is shown
+    this.pageOf = null; // the conversation that page is of
+    this.reviewControls = []; // that page's accept and revert controls
+    this.pageDiff = null; // that diff's CodeMirror view
     this.doc = null; // the file in the editor: {path, name, identity, saved, editor, dirty, saving, pollTimer, bar, revision}
     this.onOpenFolder = onOpenFolder;
     this.onOpenFile = onOpenFile;
@@ -105,7 +132,9 @@ export class FilesPane {
     this.crumbs.setAttribute("aria-label", "Path");
     this.tools = el("div", "files-tools");
     const head = el("div", "files-head");
-    head.append(this.crumbs, this.tools, ...actions); // the place's own controls (the panel's expand, close)
+    const end = el("div", "files-head-end"); // one group: it goes under the path together when the head is tight
+    end.append(this.tools, ...actions); // the place's own controls (the panel's expand, close)
+    head.append(this.crumbs, end);
     this.body = el("div", "files-body");
     this.root.append(head, this.body);
     this.home = null; // the user's home as the server resolves ~
@@ -114,9 +143,9 @@ export class FilesPane {
     this.ticket = 0; // the latest request: an older answer is not applied
   }
 
-  /* The folder the pane shows (reloaded), or the file's. */
+  /* The folder the pane shows (reloaded), or the file's, or the Changes shown. */
   get place() {
-    return this.file || this.folder;
+    return this.page || this.file || this.folder;
   }
 
   /* Text typed in the editor and not saved. */
@@ -132,10 +161,34 @@ export class FilesPane {
   }
 
   closeDoc() {
+    if (this.pageDiff) this.pageDiff.destroy();
+    this.pageDiff = null;
+    this.page = null;
+    this.pageOf = null;
+    this.reviewControls = [];
     if (this.doc === null) return;
     clearTimeout(this.doc.pollTimer);
     if (this.doc.editor) this.doc.editor.destroy();
     this.doc = null;
+  }
+
+  /* Another conversation is shown (PR #99 review C2): no answer still on its way is applied, and a page of the
+   * last one's changes goes with its controls. */
+  reset() {
+    this.ticket += 1;
+    const page = this.page;
+    this.closeDoc();
+    if (!page) return;
+    this.tools.replaceChildren();
+    this.crumbs.replaceChildren();
+    this.body.replaceChildren();
+  }
+
+  /* HIMARI started or stopped: told beside the editor; a review page's controls wait while it works (§6). */
+  workingChanged() {
+    if (this.doc) this.paintState();
+    if (!this.page || !this.working()) return;
+    for (const control of this.reviewControls) control.disabled = true;
   }
 
   /* ~ as the server resolves it, so paths under it are shown from ~. */
@@ -200,7 +253,13 @@ export class FilesPane {
     const button = this.el("button", "files-open");
     button.type = "button";
     const kind = entry.kind === "directory" ? "directory" : "file";
-    button.append(icon(KIND_ICON[kind]), this.el("span", "files-name", entry.name));
+    const name = this.el("span", "files-name", entry.name);
+    button.append(icon(KIND_ICON[kind]), name);
+    if (this.changedUnder(path, kind === "directory")) {
+      const dot = this.el("span", "files-changed-dot");
+      dot.title = kind === "directory" ? "HIMARI changed files in here: see Changes" : "Changed by HIMARI: see Changes";
+      name.append(dot);
+    }
     const meta = [entry.kind === "file" ? humanSize(entry.size) : "", shortDate(entry.modified)].filter(Boolean);
     button.append(this.el("span", "files-meta", meta.join(" · ")));
     button.title = path;
@@ -743,6 +802,15 @@ export class FilesPane {
         this.saveButton.addEventListener("click", () => this.save());
         this.tools.append(this.workingNote, this.stateDot, this.stateLabel, this.saveButton);
       }
+      if (this.changes && this.changed.has(shown.path)) { // a dot after its name, to its change
+        const review = this.el("button", "files-crumb files-changed-link");
+        review.type = "button";
+        review.append(this.el("span", "files-changed-dot"));
+        review.title = "Changed by HIMARI: what it was before and what it is now, to accept or revert";
+        review.setAttribute("aria-label", review.title);
+        review.addEventListener("click", () => this.openChange(shown.path));
+        this.crumbs.children[this.crumbs.children.length - 1].append(review); // the name's: they wrap as one
+      }
       this.tools.append(this.fileMenu(shown));
       return;
     }
@@ -830,8 +898,8 @@ export class FilesPane {
     if (dialog.showModal) dialog.showModal();
   }
 
-  /* A deleted file back where it was: made new (never over a file now there), its kept content saved in it.
-   * Two writes: if the save fails after the empty file was made, ``item.made`` keeps that file's identity and
+  /* A deleted file back where it was, never over a file now there: in one step (V3-P76 §4.1); where the file
+   * system cannot, made new and its kept content saved in it. Two writes: if the save fails after the empty file was made, ``item.made`` keeps that file's identity and
    * Restore again fills that same file, while it is still that empty file (PR #95 re-review C2). Opened
    * afterwards only if nothing else was opened meanwhile; otherwise the user is told (re-review C1). An
    * error's text, or null. */
@@ -839,6 +907,18 @@ export class FilesPane {
     const ticket = this.ticket;
     let made = null;
     try {
+      // V3-P76 §4.1: in one step, where its name is free — the two writes below only where the folder's file
+      // system cannot (``unsupported``).
+      if (!item.made) {
+        const placed = await this.api("POST", `/api/machine/versions/${encodeURIComponent(item.id)}/restore`,
+                                      { path: item.path })
+          .catch((error) => { if (error.code === "unsupported") return null; throw error; });
+        if (placed !== null) {
+          if (this.ticket === ticket && !this.dirty) await this.openFile(placed.path);
+          else this.notice(`${item.name} is restored.`, placed.path);
+          return null;
+        }
+      }
       const text = (await this.api("GET", `/api/machine/versions/${encodeURIComponent(item.id)}?${query(item.path)}`)).text;
       if (item.made) {
         const now = await this.api("GET", `/api/machine/stat?${query(item.made.path)}`).catch(() => null);
@@ -848,7 +928,7 @@ export class FilesPane {
       await this.api("PUT", "/api/machine/file", { path: made.path, content: text, expected: made.identity });
       item.made = null;
     } catch (error) {
-      if (error.code === "exists") {
+      if (error.code === "exists" || (error.code === "changed" && !made)) {
         return `${item.name} exists again. Its kept content is among its previous versions: open it, then ⋯ › Previous versions.`;
       }
       if (made) {
@@ -935,6 +1015,254 @@ export class FilesPane {
     if (input.focus) input.focus();
   }
 
+  /* ------------------------------------------------ HIMARI's changes (V3-P76 §5, §6) */
+
+  /* The last list read: its paths get a dot (a folder's, when one is under it). */
+  markChanged(list) {
+    this.changed = new Set(list ? list.items.map((item) => item.path) : []);
+  }
+
+  changedUnder(path, folder) {
+    if (!folder) return this.changed.has(path);
+    for (const changed of this.changed) if (changed.startsWith(`${path}/`)) return true;
+    return false;
+  }
+
+  /* Files › Changes [› name]: the way back to the folder last shown. */
+  paintPageCrumbs(name = null) {
+    this.crumbs.replaceChildren();
+    const back = this.el("button", "files-crumb", "Files");
+    back.type = "button";
+    back.addEventListener("click", () => this.openFolder(this.folder || "~"));
+    const list = this.el(name ? "button" : "span", name ? "files-crumb" : "files-crumb is-current", "Changes");
+    if (name) {
+      list.type = "button";
+      list.addEventListener("click", () => this.openChanges());
+    }
+    this.crumbs.append(back, this.el("span", "files-crumb-sep", "›"), list);
+    if (name) this.crumbs.append(this.el("span", "files-crumb-sep", "›"), this.el("span", "files-crumb is-current", name));
+  }
+
+  button(label, action, className = "link-button") {
+    const control = this.el("button", className, label);
+    control.type = "button";
+    control.addEventListener("click", action);
+    return control;
+  }
+
+  /* An accept or revert control: off while HIMARI works (§6). */
+  reviewButton(label, action, off = false) {
+    const control = this.button(label, action);
+    this.reviewControls.push(control);
+    control.disabled = off || this.working();
+    return control;
+  }
+
+  /* Just before an accept or a revert: still the page's conversation, and HIMARI not at work (§6). */
+  mayReview(of) {
+    if (of !== this.pageOf || of !== this.changes.of()) return false;
+    if (!this.working()) return true;
+    this.body.prepend(this.el("p", "files-note is-error files-lasting", "HIMARI is working: accepting and reverting wait until it has finished."));
+    return false;
+  }
+
+  /* An accept or a revert refused: in sight; the list again when it changed meanwhile (PR #98 re-review). */
+  async refused(error) {
+    if (error.code === "outdated") await this.openChanges(error.message);
+    else this.body.prepend(this.el("p", "files-note is-error files-lasting", error.message));
+  }
+
+  /* The answer is still for what is shown: no newer request, and the same conversation. */
+  current(ticket, of) {
+    return ticket === this.ticket && of === this.changes.of();
+  }
+
+  /* The list (§5): what can no longer be reverted first. ``note``: what the last action did. */
+  async openChanges(note = null) {
+    if (!this.changes || !(await this.mayLeave())) return;
+    const of = this.changes.of();
+    this.closeDoc();
+    const ticket = ++this.ticket;
+    this.busy("Changes");
+    let list;
+    try {
+      list = await this.changes.list(of);
+    } catch (error) {
+      if (this.current(ticket, of)) this.failedPage(null, error);
+      return;
+    }
+    if (!this.current(ticket, of)) return;
+    this.page = "changes";
+    this.pageOf = of;
+    this.file = null;
+    this.markChanged(list);
+    this.changes.seen(list);
+    this.body.removeAttribute("aria-busy");
+    this.paintPageCrumbs();
+    const waiting = list.running || this.working();
+    const acceptAll = this.reviewButton("Accept all", () => this.review(of, () => this.changes.accept(of, null), "Accepted."),
+                                        waiting || !(list.items.length || list.hidden));
+    acceptAll.title = "Keep the files as they are, and clear this list";
+    const revertAll = this.reviewButton("Revert all", () => this.revertAll(of, list),
+                                        waiting || !list.items.some((item) => item.revertible));
+    revertAll.title = "Put each file back as it was before HIMARI changed it";
+    this.tools.replaceChildren(acceptAll, revertAll);
+    const parts = [];
+    if (note) parts.push(this.el("p", "files-note files-lasting", note));
+    if (waiting) parts.push(this.el("p", "files-note", "HIMARI is working: accepting and reverting wait until it has finished."));
+    if (list.commands_ran && (list.items.length || list.hidden)) {
+      parts.push(this.el("p", "files-note is-warn", "HIMARI also ran commands since: they may have changed other files, which are not listed here."));
+    }
+    const rows = this.el("ul", "files-list files-changes");
+    for (const item of list.items) rows.append(this.changeRow(of, item, waiting));
+    if (list.items.length) parts.push(rows);
+    else if (!list.hidden) parts.push(this.el("p", "files-note", "Nothing to review: HIMARI has changed no files here since you last reviewed."));
+    if (list.hidden) {
+      parts.push(this.el("p", "files-note", `${list.hidden} ${list.hidden === 1 ? "change is" : "changes are"} in files hidden now; Accept all clears ${list.hidden === 1 ? "it" : "them"}.`));
+    }
+    this.body.replaceChildren(...parts);
+  }
+
+  changeRow(of, item, waiting) {
+    const li = this.el("li", `files-row files-change${item.revertible ? "" : " is-warn"}`);
+    const open = this.el("button", "files-open");
+    open.type = "button";
+    open.title = item.path;
+    const meta = [CHANGE_KINDS[item.kind] || item.kind];
+    if (item.count > 1) meta.push(`${item.count} times`);
+    if (item.interleaved) meta.push("also changed by something else");
+    if (CHANGE_STATES[item.state]) meta.push(CHANGE_STATES[item.state]);
+    open.append(icon(KIND_ICON.file), this.el("span", "files-name", item.name), this.el("span", "files-meta", meta.join(" · ")));
+    open.addEventListener("click", () => this.openChange(item.path));
+    const revert = this.reviewButton("Revert", () => this.revertOne(of, item.path, item.name), waiting || !item.revertible);
+    const accept = this.reviewButton("Accept", () => this.review(of, () => this.changes.accept(of, [item.path]), `${item.name}: accepted.`),
+                                     waiting);
+    li.append(open, revert, accept);
+    return li;
+  }
+
+  /* One change (§5): what it was before HIMARI's first change (left) and what it is now (right). */
+  async openChange(path) {
+    if (!this.changes || !(await this.mayLeave())) return;
+    const of = this.changes.of();
+    this.closeDoc();
+    const ticket = ++this.ticket;
+    this.busy(path);
+    let diff;
+    let module;
+    try {
+      [diff, module] = await Promise.all([this.changes.diff(of, path), this.loadEditor()]);
+    } catch (error) {
+      if (this.current(ticket, of)) this.failedPage(path.slice(path.lastIndexOf("/") + 1), error);
+      return;
+    }
+    if (!this.current(ticket, of)) return;
+    this.page = { path };
+    this.pageOf = of;
+    this.file = null;
+    this.body.removeAttribute("aria-busy");
+    this.paintPageCrumbs(diff.name);
+    const revert = this.reviewButton("Revert", () => this.revertOne(of, path, diff.name),
+                                     !diff.revertible || diff.changed || diff.interleaved);
+    revert.title = "Put it back as it was before HIMARI changed it";
+    const accept = this.reviewButton("Accept", () => this.review(of, () => this.changes.accept(of, [path]), `${diff.name}: accepted.`));
+    this.tools.replaceChildren(revert, accept);
+    if (diff.now.exists) this.tools.append(this.button("Open", () => this.openFile(path)));
+    const parts = [];
+    if (this.working()) parts.push(this.el("p", "files-note", "HIMARI is working: accepting and reverting wait until it has finished."));
+    if (diff.changed || diff.interleaved) {
+      const bar = this.el("div", "files-bar");
+      bar.append(this.el("p", null, diff.interleaved
+        ? "Something other than this conversation's HIMARI also changed it, between HIMARI's changes. Reverting undoes that too."
+        : "It was changed by something other than this conversation's HIMARI since (on the right as it is now). Reverting undoes that too."));
+      if (diff.revertible) bar.append(this.reviewButton("Revert anyway", () => this.revertAnyway(of, diff)));
+      parts.push(bar);
+    }
+    if (CHANGE_STATES[diff.state]) parts.push(this.el("p", "files-note is-warn", `It cannot be reverted: ${CHANGE_STATES[diff.state]}. Accept clears it; earlier versions are under ⋯ › Previous versions.`));
+    const sides = [];
+    if (diff.before.state === "absent") sides.push("Before: there was no such file (HIMARI made it).");
+    else if (diff.before.text === null && diff.before.state === "present") sides.push("Before: not text, so it is not shown.");
+    if (!diff.now.exists) sides.push("Now: there is no such file.");
+    else if (diff.now.text === null) sides.push("Now: not text, or over 1 MiB, so it is not shown.");
+    for (const side of sides) parts.push(this.el("p", "files-note", side));
+    const area = this.el("div", "files-diff files-change-diff");
+    parts.push(area);
+    this.body.replaceChildren(...parts);
+    this.pageDiff = module.createDiff(area, { left: diff.before.text ?? "", right: diff.now.text ?? "", name: diff.name });
+  }
+
+  /* An accept or a revert, then the list again, told what happened; a refusal stays in sight. */
+  async review(of, act, done) {
+    if (!this.mayReview(of)) return false;
+    const ticket = this.ticket;
+    try {
+      await act();
+    } catch (error) {
+      if (this.current(ticket, of)) await this.refused(error);
+      return false;
+    }
+    if (this.current(ticket, of)) await this.openChanges(done);
+    return true;
+  }
+
+  /* §6: only as HIMARI left it; changed since, its diff is shown with the choice to revert anyway. */
+  async revertOne(of, path, name) {
+    if (!this.mayReview(of)) return;
+    const ticket = this.ticket;
+    try {
+      await this.changes.revert(of, path, null);
+    } catch (error) {
+      if (!this.current(ticket, of)) return;
+      if (error.code === "changed") await this.openChange(path);
+      else await this.refused(error);
+      return;
+    }
+    if (this.current(ticket, of)) await this.openChanges(`${name} is back as it was before HIMARI changed it.`);
+  }
+
+  /* With the state shown (``diff.now``): reverted only if the file is still so. */
+  async revertAnyway(of, diff) {
+    const ticket = this.ticket;
+    const sure = await this.confirm(`Revert ${diff.name} anyway?`, [
+      "It was changed by something other than this conversation's HIMARI; reverting undoes that too.",
+      "What it holds now is kept as a previous version."], "Revert anyway");
+    if (!sure || !this.current(ticket, of) || !this.mayReview(of)) return;
+    try {
+      await this.changes.revert(of, diff.path, diff.now);
+    } catch (error) {
+      if (!this.current(ticket, of)) return;
+      if (error.code === "changed") await this.openChange(diff.path); // changed again since it was shown
+      else await this.refused(error);
+      return;
+    }
+    if (this.current(ticket, of)) await this.openChanges(`${diff.name} is back as it was before HIMARI changed it.`);
+  }
+
+  async revertAll(of, list) {
+    const ticket = this.ticket;
+    const count = list.items.filter((item) => item.revertible).length;
+    const sure = await this.confirm(`Revert ${count} ${count === 1 ? "file" : "files"}?`, [
+      "Each goes back to what it was before HIMARI changed it. What it holds now is kept as a previous version.",
+      "A file changed by something else since, or one that cannot be reverted, is left as it is."], "Revert all");
+    if (!sure || !this.current(ticket, of) || !this.mayReview(of)) return;
+    let done;
+    try {
+      done = await this.changes.revertAll(of);
+    } catch (error) {
+      if (this.current(ticket, of)) await this.refused(error);
+      return;
+    }
+    if (!this.current(ticket, of)) return;
+    await this.openChanges(revertedAll(done));
+  }
+
+  failedPage(name, error) {
+    this.body.removeAttribute("aria-busy");
+    this.paintPageCrumbs(name);
+    this.tools.replaceChildren();
+    this.body.replaceChildren(this.el("p", "files-note is-error", error.message || "This could not be opened."));
+  }
+
   busy(path) {
     this.body.setAttribute("aria-busy", "true");
     this.crumbs.title = path;
@@ -947,8 +1275,10 @@ export class FilesPane {
   }
 
   /* After the agent's turn: the folder again; a file in the editor is checked on disk (never reloaded
-   * over unsaved text); another file is read again. */
+   * over unsaved text); another file is read again; Changes, or a change, read again. */
   refresh() {
+    if (this.page === "changes") return this.openChanges();
+    if (this.page) return this.openChange(this.page.path);
     if (this.doc) return this.checkDisk();
     if (this.file) return this.openFile(this.file);
     if (this.folder) return this.openFolder(this.folder);

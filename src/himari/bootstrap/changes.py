@@ -89,6 +89,7 @@ class SideView:
 class ChangeDiff:
     path: str
     kind: str
+    state: str  # as ChangeView's
     before: SideView
     now: SideView
     changed: bool  # the file is not as the agent left it
@@ -418,7 +419,7 @@ class ChangeReview:
             now = SideView(NONE, None, ABSENT)
         after = entry["after"]
         changed = after is None or tuple(after) != now.identity
-        return ChangeDiff(path, _kind(entry), before, now, changed, bool(entry["interleaved"]))
+        return ChangeDiff(path, _kind(entry), state, before, now, changed, bool(entry["interleaved"]))
 
     async def _idle(self, conversation: str) -> None:
         """Under the lock: no Tool call's change is still on its way (its
