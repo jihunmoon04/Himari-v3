@@ -9,8 +9,9 @@
  * in one place, checked by scripts/pdf_smoke.mjs.
  *
  * Only the pages in view and one screen around them have a canvas; a canvas
- * stays under MAX_CANVAS_PIXELS (iOS Safari's limit), giving up sharpness
- * first. Each page fits the pane's width, a turned one too, so nothing needs
+ * stays under MAX_CANVAS_PIXELS (iOS Safari's limit) and MAX_CANVAS_SIDE,
+ * giving up sharpness first; a page that would be drawn coarser than
+ * MIN_OUTPUT_SCALE is not drawn but told. Each page fits the pane's width, a turned one too, so nothing needs
  * scrolling sideways until zoomed; Ctrl+wheel and two fingers zoom the pages,
  * never the whole screen.
  */
@@ -20,6 +21,10 @@ export const MAX_PDF_BYTES = 64 * 1024 * 1024; // §3.3, Q2: viewed here up to t
 // so their count is bounded too (PR #102 review).
 export const MAX_PDF_PAGES = 2000;
 export const MAX_CANVAS_PIXELS = 16_000_000;
+export const MAX_CANVAS_SIDE = 16_384; // px on either side: under every browser's, iOS Safari's included
+// Canvas pixels per CSS pixel below which a page is not drawn (a sliver of a page, kilometres long, can be a
+// few bytes): it would be a blur, and is told instead (PR #102 review).
+export const MIN_OUTPUT_SCALE = 0.25;
 export const ZOOM_MIN = 0.5; // of the fitted width
 export const ZOOM_MAX = 5;
 const PAGE_GAP = 12; // px between pages, and around them
@@ -42,10 +47,13 @@ export async function loadPdfjs() {
   return pdfjs;
 }
 
-/* The canvas's pixels per CSS pixel: the screen's, unless the canvas would pass MAX_CANVAS_PIXELS. */
+/* The canvas's pixels per CSS pixel: the screen's, unless the canvas would pass MAX_CANVAS_PIXELS or
+ * MAX_CANVAS_SIDE — never more than those allow, however small that is (below MIN_OUTPUT_SCALE the page
+ * is not drawn). */
 export function outputScale(width, height, ratio) {
-  const most = Math.sqrt(MAX_CANVAS_PIXELS / Math.max(1, width * height));
-  return Math.max(0.1, Math.min(ratio || 1, most));
+  const byArea = Math.sqrt(MAX_CANVAS_PIXELS / Math.max(1, width * height));
+  const bySide = MAX_CANVAS_SIDE / Math.max(1, width, height);
+  return Math.min(ratio || 1, byArea, bySide);
 }
 
 /* The page that holds the view's middle: ``tops`` are the pages' tops, in order. */
@@ -112,7 +120,7 @@ export class PdfView {
       this.pagesBox.append(box);
       // Until a page is read, it is as large as the first (PDF.js's own viewer guesses alike).
       this.pages.push({ box, size: i === 0 ? { width: base.width, height: base.height } : null, canvas: null,
-                        task: null, scale: 0 });
+                        task: null, scale: 0, note: null });
     }
     this.guess = { width: base.width, height: base.height };
     this.layout();
@@ -303,6 +311,15 @@ export class PdfView {
     }
     const viewport = pdfPage.getViewport({ scale });
     const ratio = outputScale(viewport.width, viewport.height, globalThis.devicePixelRatio);
+    if (ratio < MIN_OUTPUT_SCALE) {
+      if (page.canvas) this.drop(page);
+      page.scale = scale; // not tried again until the zoom changes
+      if (!page.note) {
+        page.note = this.el("p", "pdf-page-note", "This page is too large to draw here. Zoom out, or download the PDF.");
+        page.box.append(page.note);
+      }
+      return;
+    }
     const canvas = this.el("canvas", "pdf-canvas");
     canvas.width = Math.floor(viewport.width * ratio);
     canvas.height = Math.floor(viewport.height * ratio);
@@ -328,6 +345,10 @@ export class PdfView {
       page.canvas.width = 0;
       page.canvas.height = 0;
       page.canvas.remove();
+    }
+    if (page.note) {
+      page.note.remove();
+      page.note = null;
     }
     page.canvas = canvas;
     page.scale = scale;

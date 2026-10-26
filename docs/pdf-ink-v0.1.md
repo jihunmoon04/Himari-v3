@@ -489,3 +489,9 @@ PDF는 믿을 수 없는 입력이다. 클라우드 폴더나 인터넷에서 �
 - **P2 쪽 수 한도**
   - `MAX_PDF_PAGES = 2000`이다. 넘으면 쪽 상자를 하나도 만들지 않고 "This PDF has N pages; up to 2,000 are shown here. Download it to open."이다.
   - 더 큰 문서가 필요해지면 쪽 상자 자체를 가상화한다(§12).
+- **P2(재검수) canvas 상한**
+  - `outputScale`에 있던 0.1 하한이 픽셀 상한을 넘게 했다. 아주 좁고 긴 쪽(600×3,000,000)이면 1,800만 픽셀이 됐다.
+  - 이제 하한 없이 픽셀 수(1,600만)와 한 변(`MAX_CANVAS_SIDE` 16,384px)을 둘 다 지킨다.
+  - 그만큼 줄여도 CSS 픽셀당 0.25보다 거칠면(`MIN_OUTPUT_SCALE`) 그 쪽은 그리지 않는다. 대신 쪽 위에 "This page is too large to draw here. Zoom out, or download the PDF."를 둔다. 배율이 바뀌면 다시 해 본다.
+  - 시험: `pdf_smoke`가 네 가지 모양(가늘고 긴 쪽, 넓고 낮은 쪽, 아주 넓은 쪽, 큰 정사각형 쪽)에서 상한을 확인한다. 그릴 수 없는 쪽은 canvas도 렌더도 없이 안내만 있는지, 확대가 바뀌어 그릴 수 있게 되면 안내가 사라지는지도 본다.
+  - 브라우저: 10×14,400pt 쪽에서 canvas 없이 안내가 보였다.

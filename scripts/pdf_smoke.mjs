@@ -38,6 +38,16 @@ for (const name of bundled) {
 assert.equal(pane.outputScale(600, 800, 2), 2);
 const big = pane.outputScale(2400, 3200, 3);
 assert.ok(Math.floor(2400 * big) * Math.floor(3200 * big) <= pane.MAX_CANVAS_PIXELS && big < 3); // as drawn
+// PR #102 review: no floor under the limits — a sliver of a page, very long, stays under both; drawn that
+// coarsely it is not drawn at all (below MIN_OUTPUT_SCALE), and the side limit holds for a very wide one.
+const drawn = (w, h, s) => [Math.floor(w * s), Math.floor(h * s)];
+for (const [w, h] of [[600, 3_000_000], [3_000_000, 600], [20_000, 100], [5000, 5000]]) {
+  const s = pane.outputScale(w, h, 2);
+  const [cw, ch] = drawn(w, h, s);
+  assert.ok(cw * ch <= pane.MAX_CANVAS_PIXELS && cw <= pane.MAX_CANVAS_SIDE && ch <= pane.MAX_CANVAS_SIDE, `${w}×${h}`);
+}
+assert.ok(pane.outputScale(600, 3_000_000, 2) < pane.MIN_OUTPUT_SCALE);
+assert.ok(pane.outputScale(20_000, 100, 2) < 1); // the side, not the area, holds it
 assert.equal(pane.pageAt([0, 100, 200], 150), 1);
 assert.equal(pane.pageAt([0, 100, 200], 0), 0);
 assert.equal(pane.pageAt([0, 100, 200], 999), 2);
@@ -90,6 +100,34 @@ assert.equal(pane.pageAt([0, 100, 200], 999), 2);
   view.element.scrollTop = 900; // scrolled by hand: the middle (1200) is on page 2
   view.reportPage();
   assert.deepEqual(shown.at(-1), [2, 3]);
+  view.destroy();
+
+  // A page too long to draw at all: told on the page, no canvas made, nothing rendered; drawn again (and the
+  // notice gone) once the zoom lets it.
+  let rendered = 0;
+  const tall = { AnnotationMode: { ENABLE: 1 }, getDocument: () => ({ promise: Promise.resolve({ numPages: 1, getPage: async () => ({
+    getViewport: ({ scale }) => ({ width: 600 * scale, height: (view && view.zoom > 1 ? 3000 : 3_000_000) * scale }),
+    render: () => { rendered += 1; return { promise: Promise.resolve(), cancel() {} }; },
+  }) }), destroy() {} }) };
+  const made = [];
+  const el = (tag, className, text) => { const box = new Box(tag, className); box.textContent = text; made.push(box);
+                                         if (tag === "canvas") box.getContext = () => ({}); return box; };
+  view = new pane.PdfView({ pdfjs: tall, el, bytes: new Uint8Array() });
+  await view.open();
+  view.near.add(0);
+  await view.draw(0);
+  const page = view.pages[0];
+  assert.equal(rendered, 0);
+  assert.ok(!made.some((b) => b.tag === "canvas"));
+  assert.match(page.note.textContent, /too large to draw here/);
+  assert.ok(page.box.children.includes(page.note));
+  view.zoom = 2; // a shape it can draw now (the fake's page shrinks when zoomed)
+  page.size = null;
+  page.note.remove = () => { page.box.children = page.box.children.filter((c) => c !== page.note); };
+  await view.draw(0);
+  assert.equal(rendered, 1);
+  assert.equal(page.note, null);
+  assert.ok(page.box.children.some((c) => c.tag === "canvas"));
   view.destroy();
 
   // A few bytes can hold tens of thousands of pages: past MAX_PDF_PAGES the view is refused, nothing laid out.
