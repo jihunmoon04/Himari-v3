@@ -115,6 +115,30 @@ function keepPdfPlace(path, page, zoom) {
   } catch (ignored) { /* not kept: it opens on page 1 */ }
 }
 
+/* ``change()`` replaces the editor's whole text (HIMARI changed the file): the cursor, the selection and the
+ * scroll stay where they were (cut to the new text), and the focus is not taken. */
+function keepingPlace(editor, change) {
+  const view = editor.view;
+  if (!view || !view.state) {
+    change();
+    return;
+  }
+  const { anchor, head } = view.state.selection.main;
+  // CodeMirror's own snapshot (the line at the top and its offset) where it has one: pixels measured on the old
+  // heights may land elsewhere once the text changed (review N2).
+  const snapshot = typeof view.scrollSnapshot === "function" ? view.scrollSnapshot() : null;
+  const scroll = view.scrollDOM ? view.scrollDOM.scrollTop : 0;
+  change();
+  const length = view.state.doc.length;
+  const selection = { anchor: Math.min(anchor, length), head: Math.min(head, length) };
+  if (snapshot) {
+    view.dispatch({ selection, effects: snapshot });
+  } else {
+    view.dispatch({ selection });
+    if (view.scrollDOM) view.scrollDOM.scrollTop = scroll;
+  }
+}
+
 function sameIdentity(a, b) {
   return Array.isArray(a) && Array.isArray(b) && a.length === b.length && a.every((v, i) => v === b[i]);
 }
@@ -1157,6 +1181,21 @@ export class FilesPane {
 
   /* The whole file from its ⋯ menu: any file, editable or not. */
   askWhole(shown) {
+    // A PDF: as it is now — its ink saved since it was opened gave it a new identity; unsaved ink is not read.
+    if (this.pdf !== null && this.pdf.path === shown.path) {
+      // Told in the ink's own state slot: the bar above may hold a choice (the PDF changed on the server) that
+      // stays, and nothing above the pages moves them (review N1).
+      if (this.pdf.saving) {
+        this.paintInk("Saving… — ask again once it is saved");
+        return;
+      }
+      if (this.pdf.view.ink.dirty) {
+        this.paintInk("Save your ink first: HIMARI reads the saved file");
+        return;
+      }
+      this.onAsk({ path: shown.path, name: this.pdf.name, identity: this.pdf.identity, whole: true });
+      return;
+    }
     if (this.doc !== null && this.doc.path === shown.path) {
       if (this.doc.dirty || this.doc.saving) {
         this.paintState("Save first: HIMARI reads the saved file");
@@ -1345,7 +1384,7 @@ export class FilesPane {
       doc.saved = editorText(shown.text);
       doc.lineBreak = lineBreakOf(shown.text);
       doc.identity = shown.identity;
-      doc.editor.setText(shown.text);
+      keepingPlace(doc.editor, () => doc.editor.setText(shown.text));
       doc.dirty = doc.editor.text() !== doc.saved;
       if (!doc.dirty) this.dropKept(doc);
       this.hideBar();
@@ -1436,7 +1475,7 @@ export class FilesPane {
         dialog.remove();
         const restore = this.el("button", "primary-button", "Put this version in the editor");
         restore.type = "button";
-        restore.addEventListener("click", () => this.restore(version));
+        restore.addEventListener("click", () => this.restore(version, { seen: true })); // compared: no question
         this.diffDialog(`${doc.name}: this version (left) and the editor's text (right)`, version, doc.editor.text(), [restore]);
       });
       const restore = this.el("button", "link-button", "Put in the editor");
@@ -1467,9 +1506,15 @@ export class FilesPane {
     }
   }
 
-  /* Back into the editor, unsaved: Save keeps it (and keeps what it replaces). */
-  restore(text) {
+  /* Back into the editor, unsaved: Save keeps it (and keeps what it replaces). Over unsaved text only if the
+   * user says so (``seen``: they compared it with the editor's text just now). */
+  async restore(text, { seen = false } = {}) {
     if (this.doc === null || this.doc.offer) return;
+    const doc = this.doc;
+    if (doc.dirty && !seen && !(await this.confirm(`Replace your unsaved changes to ${doc.name}?`,
+      ["This version takes their place in the editor (Undo there brings them back). The file on the server " +
+       "stays as it was until you save."], "Replace"))) return;
+    if (this.doc !== doc) return;
     this.doc.editor.setText(text);
     this.setDirty(editorText(text) !== this.doc.saved);
     this.paintState("Put in the editor — Save to keep it");

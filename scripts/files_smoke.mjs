@@ -1275,6 +1275,63 @@ for (const [why, routes, setup, told] of [
   }
 }
 
+// --- the web UX review's small bugs --------------------------------------------------------------------
+
+// HIMARI changed the open file (no unsaved text): the editor shows its version, the cursor and scroll where
+// they were (cut to the new text), the focus not taken.
+{
+  const { files, module } = editorPane({ "GET /api/machine/file": TEXT,
+    "GET /api/machine/stat": { ...TEXT, identity: [9, 9, 9, 9] } });
+  await files.openFile(TEXT.path);
+  const editor = module.made[0];
+  const placed = [];
+  editor.view = { state: { selection: { main: { anchor: 2, head: 3 } }, get doc() { return { length: editor.value.length }; } },
+                  scrollDOM: { scrollTop: 120 }, dispatch(change) { placed.push(change); this.scrollDOM.scrollTop = 0; } };
+  await files.loadDisk();
+  assert.deepEqual(placed, [{ selection: { anchor: 2, head: 3 } }]);
+  assert.equal(editor.view.scrollDOM.scrollTop, 120);
+  files.closeDoc();
+}
+
+// A previous version put in the editor over unsaved text: asked first; "no" leaves the text.
+{
+  const { files, module, asked } = editorPane({ "GET /api/machine/file": TEXT }, { confirms: [false, true] });
+  await files.openFile(TEXT.path);
+  module.made[0].type("mine, unsaved");
+  await files.restore("an old version");
+  assert.equal(module.made[0].text(), "mine, unsaved");
+  assert.deepEqual(asked.at(-1), [`Replace your unsaved changes to a.txt?`, "Replace"]);
+  await files.restore("an old version");
+  assert.equal(module.made[0].text(), "an old version");
+  const before = asked.length;
+  await files.restore("compared one", { seen: true }); // compared just now: no question
+  assert.equal(asked.length, before);
+  files.closeDoc();
+}
+
+// Ask HIMARI about a PDF after its ink was saved: the identity it has now, not the one it was opened with;
+// unsaved ink first saved.
+{
+  const told = [];
+  const asks = [];
+  const files = new FilesPane({ api: async () => HOME, el, onAsk: (reference) => asks.push(reference) });
+  files.paintInk = (text) => told.push(text); // the ink's state slot, never the bar (review N1)
+  files.showPdfNote = () => { throw new Error("the bar is left as it is"); };
+  files.pdf = { path: "/home/u/p.pdf", name: "p.pdf", identity: [2, 2, 2, 2], saving: false,
+                view: { ink: { dirty: false } } };
+  files.askWhole({ path: "/home/u/p.pdf", identity: [1, 1, 1, 1], kind: "pdf" });
+  assert.deepEqual(asks, [{ path: "/home/u/p.pdf", name: "p.pdf", identity: [2, 2, 2, 2], whole: true }]);
+  files.pdf.view.ink.dirty = true;
+  files.askWhole({ path: "/home/u/p.pdf", identity: [1, 1, 1, 1], kind: "pdf" });
+  assert.equal(asks.length, 1);
+  files.pdf.view.ink.dirty = false;
+  files.pdf.saving = true;
+  files.askWhole({ path: "/home/u/p.pdf", identity: [1, 1, 1, 1], kind: "pdf" });
+  assert.equal(asks.length, 1);
+  assert.deepEqual(told, ["Save your ink first: HIMARI reads the saved file", "Saving… — ask again once it is saved"]);
+  files.pdf = null;
+}
+
 // --- unsaved text kept in the browser (V3-P78 §4) ------------------------------------------------------
 
 /* The browser's store (local_store.js) as a map of "unsaved" records. */
