@@ -1,6 +1,6 @@
 # PDF 필기와 에이전트에게 넘기기 v0.1
 
-> 2026-10-26 · **PROPOSED (V3-P77)** · 1단계 구현 노트 §14(보기, legacy pdf.js, 직접 만든 증분 작성기·읽기, 진입 조건 결과). rev. 4: 외부 재검수(HEAD d3dfd2c, READY_WITH_CORRECTIONS) 반영 — P2-1 펜 필기와 손가락 스크롤·확대를 나누는 방법과 `pointercancel`, iPad 진입 조건(§4.1, §11), P2-2 판 기록 실패를 바꾸기 전·후로 나눔(§5.3, §6.3, §9), P3 `/HimariInk` 왕복을 1단계 확인에 더함(§11). rev. 3: 외부 검수(HEAD b6d420a) 반영 — P1-1 64 MiB는 저장한 뒤의 파일 크기(§3.3, §5.3), P1-2 큰 PDF의 지우기·복원도 사본을 남기는 한 계약(§6.1, §6.3), P2-3 pdf.js 저장 결과에서 증분을 떼어 내는 확인과 2단계 진입 조건(§5.2, §11), P2-4 형광펜 투명도는 모양 스트림의 ExtGState로(§5.1), P2-5 저장된 HIMARI 필기는 필기 층만 그림(§3.2, §4.4), P3 쪽 수를 셀 수 없으면 페이지 참조 거부(§7.2). rev. 2: 소유자 결정 Q1~Q6 권고대로(§13). rev. 1: 설계 초안.
+> 2026-10-26 · **PROPOSED (V3-P77)** · 2단계 1번 구현 노트 §15(서버). 1단계 구현 노트 §14(보기, legacy pdf.js, 직접 만든 증분 작성기·읽기, 진입 조건 결과). rev. 4: 외부 재검수(HEAD d3dfd2c, READY_WITH_CORRECTIONS) 반영 — P2-1 펜 필기와 손가락 스크롤·확대를 나누는 방법과 `pointercancel`, iPad 진입 조건(§4.1, §11), P2-2 판 기록 실패를 바꾸기 전·후로 나눔(§5.3, §6.3, §9), P3 `/HimariInk` 왕복을 1단계 확인에 더함(§11). rev. 3: 외부 검수(HEAD b6d420a) 반영 — P1-1 64 MiB는 저장한 뒤의 파일 크기(§3.3, §5.3), P1-2 큰 PDF의 지우기·복원도 사본을 남기는 한 계약(§6.1, §6.3), P2-3 pdf.js 저장 결과에서 증분을 떼어 내는 확인과 2단계 진입 조건(§5.2, §11), P2-4 형광펜 투명도는 모양 스트림의 ExtGState로(§5.1), P2-5 저장된 HIMARI 필기는 필기 층만 그림(§3.2, §4.4), P3 쪽 수를 셀 수 없으면 페이지 참조 거부(§7.2). rev. 2: 소유자 결정 Q1~Q6 권고대로(§13). rev. 1: 설계 초안.
 >
 > 소유자 방향
 > - V3-P75 설계 때(2026-10-25): 나중에 iPad에서 PDF에 Apple Pencil로 필기하고, 그것을 바로 에이전트에게 넘긴다.
@@ -495,3 +495,78 @@ PDF는 믿을 수 없는 입력이다. 클라우드 폴더나 인터넷에서 �
   - 그만큼 줄여도 CSS 픽셀당 0.25보다 거칠면(`MIN_OUTPUT_SCALE`) 그 쪽은 그리지 않는다. 대신 쪽 위에 "This page is too large to draw here. Zoom out, or download the PDF."를 둔다. 배율이 바뀌면 다시 해 본다.
   - 시험: `pdf_smoke`가 네 가지 모양(가늘고 긴 쪽, 넓고 낮은 쪽, 아주 넓은 쪽, 큰 정사각형 쪽)에서 상한을 확인한다. 그릴 수 없는 쪽은 canvas도 렌더도 없이 안내만 있는지, 확대가 바뀌어 그릴 수 있게 되면 안내가 사라지는지도 본다.
   - 브라우저: 10×14,400pt 쪽에서 canvas 없이 안내가 보였다.
+
+## 15. 2단계 1번 구현 노트 (서버: 저장 끝점, runner 프로토콜 3, PDF 판, 2026-10-26)
+
+### 15.1 runner 프로토콜 3 (§6.1)
+
+- `write`(`mode: "replace"`)와 확인하는 `delete`가 `copy_max`를 받는다.
+  - 정수(참·거짓 값은 안 됨)이고 1 MiB에서 64 MiB(`MAX_COPY_BYTES`) 사이다. 그 밖이면 `INVALID`, 빠지면 1 MiB다.
+  - 그 크기까지 rename·unlink 전에 사본을 뜬다. replace는 넘으면 `TOO_LARGE`이고, delete는 넘으면 사본 없이 지운다.
+- `PROTOCOL_VERSION` 3, `COPY_MAX_PROTOCOL` 3. HIMARI 쪽은 `MachineEnvironment.copies_large()`로 확인한다(`keeps()`와 같은 방식).
+
+### 15.2 PDF 판 저장소 (§6.2)
+
+- `VersionStore`가 저장소마다 예산을 받는다(`max_bytes`, `max_version_bytes`).
+  - 편집기와 에이전트 저장소: 200 MiB / 1 MiB, 지금과 같다.
+  - `file-versions-pdf/`: 1 GiB / 64 MiB.
+- 판을 남길 때 **메모리에 다 올리지 않는다.** `.part`로 흘려 쓰고, 다 쓴 뒤에 `.bin`으로 이름을 바꾼다. 한도를 넘거나 실패하면 `.part`를 지운다.
+- `latest(path)`는 30분 규칙에 쓴다. `open(path, id)`는 판을 fd로 연다. 복원과 보기가 판을 통째로 읽지 않기 위해서다.
+- 새 이유: `ink`(필기 저장 전), `restore`(이전 판을 덮어쓰기 전). 화면의 문구는 2번(필기 층)에서 더한다.
+
+### 15.3 저장 끝점 (§5.3)
+
+`POST /api/machine/pdf/append?path=…`
+- 본문은 `application/octet-stream`이다. 아니면 415다.
+- `X-Himari-Expected`는 쉼표로 이은 십진수 넷이다. 아니면 400이다.
+- 이 경로만 본문 한도가 8 MiB다. 넘으면 미들웨어가 413 `request_too_large`로 막는다.
+
+`Explorer.append_pdf`가 하는 일
+1. 받기 전에 거부하는 것
+   - 덧붙일 것이 비었음(`invalid`).
+   - 8 MiB 넘음(`too_large`).
+   - 원본 크기 + 덧붙일 크기가 64 MiB 넘음(`too_large`).
+   - 증분 확인에 실패함(`invalid`). 확인은 브라우저의 `checkIncrement`와 같다: 끝의 `startxref N %%EOF`이고, N이 원본 크기와 새 크기 사이다.
+2. runner가 프로토콜 3보다 오래됐으면 `unsupported`("restart himari-runner")다.
+3. runner `open`의 identity가 `expected`와 다르면 409 `changed`다.
+4. 30분 규칙: 그 파일의 마지막 PDF 판이 30분 안이면 판을 남기지 않는다. 남겨야 하는데 저장소가 받을 수 없으면 507 `versions_unavailable`이고, 파일은 그대로다.
+5. 연 fd에서 원본을 임시 파일로 복사하고 증분을 붙인다.
+   - 첫머리가 `%PDF-`가 아니면 415 `not_regular`다.
+   - 복사는 탐색기의 읽기 스레드에서 하고, 120초까지 기다린다. 클라우드 마운트가 느릴 수 있어서다.
+6. runner replace(`expected`, `copy_max` 64 MiB). 그사이 바뀌었으면 runner가 `CHANGED`로 거부한다.
+7. 판을 남긴다. 실패하면 `previous_kept: false`이고 저장은 된 상태다.
+   - 30분 안이라 판을 남기지 않은 저장도 `previous_kept: true`다. 그 판이 이번 필기 전의 PDF를 담고 있기 때문이다.
+
+상태 코드
+- 64 MiB를 넘는 `too_large`는 설계의 413이 아니라 기존 `EXPLORER_STATUS`대로 422다. 화면은 상태가 아니라 코드를 본다.
+
+다운로드
+- `GET /api/machine/download`가 `X-Himari-Identity`(보낸 바이트의 identity)를 함께 준다. 브라우저는 이것으로 저장한다(2번).
+
+### 15.4 큰 PDF의 지우기, 복원, 되돌리기 (§6.3)
+
+- **지우기**
+  - 64 MiB 이하 파일은 runner로 열어 첫머리를 본다. PDF이면 크기와 상관없이 PDF 판 저장소로 간다.
+  - 1 MiB가 넘으면 `copy_max`를 보내고, 프로토콜 3이 아닌 runner면 거부한다. 1 MiB 이하는 옛 runner도 사본을 뜨므로 거부하지 않는다.
+  - 저장소가 받을 수 없으면 지우지 않는다.
+  - PDF가 아닌 큰 파일은 지금처럼 사본 없이 지운다.
+- **지운 파일 복원**: PDF 판은 `install`로, 판 파일을 fd 그대로 넘긴다(64 MiB 한도는 저장소의 판 한도다). 다른 저장소는 지금과 같다.
+- **이전 판 되돌리기**: `POST /api/machine/versions/{id}/put_back`(`path`, `expected`)이다.
+  - PDF 판만 받는다. 글 파일은 지금처럼 편집기로 되돌린다.
+  - 지금 파일을 30분 규칙과 상관없이 `restore` 판으로 먼저 남기고, 그 위에 판을 쓴다.
+- **판 보기**: `GET /api/machine/versions/{id}/download`는 다운로드와 같은 머리글(`attachment`, `CSP: sandbox`)을 쓴다. 판을 읽기 전용으로 여는 데 쓴다(2번).
+  - PDF 판을 글로 읽으려 하면(`GET /api/machine/versions/{id}`) 통째로 읽지 않고 415로 거부한다.
+
+### 15.5 시험과 배포
+
+- 시험
+  - runner: hostfs의 `copy_max` 경계, 소켓을 거친 값 확인(0, 1024, 64 MiB+1, 참, 문자열), replace·delete의 사본.
+  - `VersionStore`: 큰 판의 흘려 쓰기, 한도, 남은 `.part` 없음, `latest`·`open`.
+  - 웹(`test_web_pdf.py`)
+    - 증분 확인, 저장과 판, 30분 규칙, 오래된 identity.
+    - 거부: 머리글, 형식, 빈 것, 증분이 아님, PDF가 아님, 숨김, 8 MiB, 64 MiB.
+    - 판 기록: 오래된 runner, 저장소 가득, 바꾼 뒤 판 기록 실패.
+    - 3 MiB PDF의 저장, 되돌리기, 지우기(저장소 가득·옛 runner 거부), 지운 판 복원.
+    - PDF가 아닌 큰 파일.
+- 배포: **himari-runner 재시작이 필요하다**(프로토콜 3). 재시작 전에는 필기 저장과 1 MiB 넘는 PDF의 지우기가 "restart himari-runner"로 거부되고, 아무것도 바뀌지 않는다.
+- 이 PR만으로는 화면이 바뀌지 않는다. 필기 층과 저장 버튼은 2번이다.

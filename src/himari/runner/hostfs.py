@@ -606,11 +606,11 @@ class Host:
             raise
         return fd, info
 
-    def _copy_of(self, fd: int, size: int) -> int | None:
+    def _copy_of(self, fd: int, size: int, limit: int = MAX_SNAPSHOT_BYTES) -> int | None:
         """A copy of the open file, in an unnamed file of the runner's own
-        (None over MAX_SNAPSHOT_BYTES); taken before any rename or unlink, so
-        later writes to the old file cannot change it (review C1)."""
-        if size > MAX_SNAPSHOT_BYTES:
+        (None over ``limit``); taken before any rename or unlink, so later
+        writes to the old file cannot change it (review C1)."""
+        if size > limit:
             return None
         folder = self.scratch or tempfile.gettempdir()
         try:
@@ -637,19 +637,21 @@ class Host:
         if self.identity(now) != list(expected) or self.identity(os.fstat(held)) != list(expected):
             raise api.RunnerError(api.CHANGED)
 
-    def replace(self, parent_fd: int, name: str, data: bytes | int,
-                expected: Sequence[int]) -> tuple[list[int], int | None]:
+    def replace(self, parent_fd: int, name: str, data: bytes | int, expected: Sequence[int],
+                copy_max: int = MAX_SNAPSHOT_BYTES) -> tuple[list[int], int | None]:
         """V3-P75 §7.4: replace the file whose identity is ``expected`` with
         ``data``, atomically. Its new identity, and a copy of what it held
-        (an fd the caller takes). TOO_LARGE over MAX_SNAPSHOT_BYTES, where no
-        copy could be made; CHANGED, with nothing written, if it changed at
-        any point before the rename."""
+        (an fd the caller takes). TOO_LARGE over ``copy_max`` (V3-P77 §6.1:
+        1 MiB for the editor, up to 64 MiB for a PDF), where no copy could be
+        made; CHANGED, with nothing written, if it changed at any point before
+        the rename."""
         held, info = self._hold(parent_fd, name, expected)
         copy: int | None = None
         try:
-            if info.st_size > MAX_SNAPSHOT_BYTES:  # its previous version could not be kept (PR #94 review B1)
-                raise api.RunnerError(api.TOO_LARGE, "files over 1 MiB are not replaced from the editor")
-            copy = self._copy_of(held, info.st_size)
+            if info.st_size > copy_max:  # its previous version could not be kept (PR #94 review B1)
+                raise api.RunnerError(api.TOO_LARGE, f"files over {copy_max // (1024 * 1024)} MiB are not replaced "
+                                                     "from the web")
+            copy = self._copy_of(held, info.st_size, copy_max)
             temp = self._write_temp(parent_fd, data, stat.S_IMODE(info.st_mode))
             try:
                 self._unchanged(parent_fd, name, held, expected)
@@ -671,13 +673,14 @@ class Host:
         finally:
             os.close(held)
 
-    def delete_checked(self, parent_fd: int, name: str, expected: Sequence[int]) -> int | None:
+    def delete_checked(self, parent_fd: int, name: str, expected: Sequence[int],
+                       copy_max: int = MAX_SNAPSHOT_BYTES) -> int | None:
         """§7.4: delete the file whose identity is ``expected``; a copy of what
-        it held, taken before the unlink (or None over MAX_SNAPSHOT_BYTES)."""
+        it held, taken before the unlink (or None over ``copy_max``)."""
         held, info = self._hold(parent_fd, name, expected)
         copy: int | None = None
         try:
-            copy = self._copy_of(held, info.st_size)
+            copy = self._copy_of(held, info.st_size, copy_max)
             self._unchanged(parent_fd, name, held, expected)
             try:
                 os.unlink(name, dir_fd=parent_fd)

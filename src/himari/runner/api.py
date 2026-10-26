@@ -32,8 +32,11 @@ import struct
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-PROTOCOL_VERSION = 2  # 2: write and delete with ``keep``, write ``mode: "install"``, visible ``follow`` (V3-P76)
+PROTOCOL_VERSION = 3  # 2: write and delete with ``keep``, write ``mode: "install"``, visible ``follow`` (V3-P76);
+# 3: ``copy_max`` on a replace and a checked delete (V3-P77 §6.1)
 KEEP_PROTOCOL = 2  # a runner older than this ignores ``keep`` and ``install`` (it would write plainly)
+COPY_MAX_PROTOCOL = 3  # a runner older than this ignores ``copy_max`` (it copies 1 MiB at most)
+MAX_COPY_BYTES = 64 * 1024 * 1024  # the largest ``copy_max``: a PDF the web writes to (V3-P77 §3.3)
 MAX_FRAME_BYTES = 4 * 1024 * 1024
 MAX_FDS = 4
 _HEADER = struct.Struct(">I")
@@ -69,6 +72,8 @@ WRITES = frozenset({WRITE, DELETE, RUN, COPY_IN, FREE_PATH, COMMIT_COPY, DISCARD
 # whose writing did not finish). Errors come only before the file was changed: after it, the answer is a success
 # with ``complete: false``. ``write`` with ``mode: "install"``: the content (an fd) given a name that is free,
 # in one step, or nothing (CHANGED: taken; UNSUPPORTED: the file system cannot).
+# ``copy_max`` (bytes, 1 MiB to MAX_COPY_BYTES; 1 MiB if left out) on a replace and a checked delete (V3-P77
+# §6.1): the largest file copied. A replace of a larger one is TOO_LARGE; a delete of one goes without a copy.
 
 # Error categories: each message is safe to show the model.
 NOT_FOUND = "not_found"  # also every hidden path: whether it exists is not told

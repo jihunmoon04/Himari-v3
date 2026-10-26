@@ -34,7 +34,7 @@ from himari.runner import api
 from himari.runner.cgroups import Commands
 from himari.runner.config import RunnerConfig
 from himari.runner.hidden import under
-from himari.runner.hostfs import Host
+from himari.runner.hostfs import MAX_SNAPSHOT_BYTES, Host
 from himari.runner.proxy import Door, Proxy
 from himari.runner.push import MAX_BUNDLE_BYTES, Pusher, check_branch, remote, token_problem
 from himari.sandbox.api import (
@@ -321,17 +321,26 @@ class Runner:
             raise api.RunnerError(api.INVALID, "the file's identity, as it was read, is required")
         return expected
 
+    @staticmethod
+    def _copy_max(args: dict[str, Any]) -> int:
+        """V3-P77 §6.1: the largest file a replace or a checked delete copies."""
+        copy_max = args.get("copy_max", MAX_SNAPSHOT_BYTES)
+        if not isinstance(copy_max, int) or isinstance(copy_max, bool) \
+                or not MAX_SNAPSHOT_BYTES <= copy_max <= api.MAX_COPY_BYTES:
+            raise api.RunnerError(api.INVALID, "copy_max is 1 MiB to 64 MiB")
+        return copy_max
+
     async def _replace(self, args: dict[str, Any], fds: Sequence[int],
                        roots: list[str]) -> tuple[dict[str, Any], list[int]]:
         """V3-P75 §7.4: the web editor's save; the content comes as an fd."""
-        host, expected = self.host, self._expected(args)
+        host, expected, copy_max = self.host, self._expected(args), self._copy_max(args)
         if len(fds) != 1:
             raise api.RunnerError(api.INVALID, "the content comes as one file")
 
         def replace() -> tuple[dict[str, Any], list[int]]:
             parent_fd, parent, name = host.target(args.get("path"), _text(args, "cwd"), roots, follow=False)
             try:
-                identity, copy = host.replace(parent_fd, name, fds[0], expected)
+                identity, copy = host.replace(parent_fd, name, fds[0], expected, copy_max)
             finally:
                 os.close(parent_fd)
             return ({"path": posixpath.join(parent, name), "identity": identity, "previous": copy is not None},
@@ -340,12 +349,12 @@ class Runner:
         return await self._blocking(replace)
 
     async def _delete_checked(self, args: dict[str, Any], roots: list[str]) -> tuple[dict[str, Any], list[int]]:
-        host, expected = self.host, self._expected(args)
+        host, expected, copy_max = self.host, self._expected(args), self._copy_max(args)
 
         def delete() -> tuple[dict[str, Any], list[int]]:
             parent_fd, parent, name = host.target(args.get("path"), _text(args, "cwd"), roots, follow=False)
             try:
-                copy = host.delete_checked(parent_fd, name, expected)
+                copy = host.delete_checked(parent_fd, name, expected, copy_max)
             finally:
                 os.close(parent_fd)
             return {"path": posixpath.join(parent, name), "previous": copy is not None}, [] if copy is None else [copy]
