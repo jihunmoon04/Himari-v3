@@ -1348,6 +1348,18 @@ for (const [why, routes, setup, told] of [
   files.closeDoc();
 }
 
+// Review B1: a note about the text before a save never outlives the save.
+{
+  const { files, module } = editorPane({ "GET /api/machine/file": TEXT,
+    "PUT /api/machine/file": { path: TEXT.path, identity: [5, 5, 5, 5], previous_kept: true } });
+  await files.openFile(TEXT.path);
+  await files.restore("an old version");
+  assert.equal(files.stateLabel.textContent, "Put in the editor — Save to keep it");
+  await files.save();
+  assert.equal(files.stateLabel.textContent, "Saved");
+  files.closeDoc();
+}
+
 // The PDF's zoom buttons: out, back to the width, in — around the middle of what shows.
 {
   const files = new FilesPane({ api: async () => HOME, el });

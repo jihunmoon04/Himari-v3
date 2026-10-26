@@ -2170,6 +2170,8 @@ function applyDetail(detail) {
   status(view.tone ? view.text : "", view.tone, view.tone && view.detail
     ? ["Details", () => status(`${view.text}. ${view.detail}`, view.tone)] : null);
   $("question-panel").hidden = !detail.waiting;
+  // As the menu's: not while the answer is being taken (the server would refuse it as busy; review N1).
+  $("question-dismiss").hidden = !detail.waiting || detail.job.running;
   // As the timeline shows it: formatted, never parsed as HTML (rich_text.js).
   const question = detail.waiting ? detail.waiting.question : null;
   if (question !== app.questionShown) { // a selection, and formulas, stay as they are between polls (review N6)
@@ -3850,7 +3852,12 @@ async function boot() {
   $("chat-menu-resume").addEventListener("click", resumeConversation);
   $("chat-menu-compact").addEventListener("click", compactConversation);
   $("chat-menu-dismiss").addEventListener("click", dismissQuestion);
-  $("question-dismiss").addEventListener("click", dismissQuestion); // not only in the ⋮ menu
+  $("question-dismiss").addEventListener("click", async () => { // not only in the ⋮ menu
+    const link = $("question-dismiss");
+    link.disabled = true; // one request (review N1)
+    $("composer-text").focus(); // the panel goes: the keyboard stays in the conversation (N2)
+    try { await dismissQuestion(); } finally { link.disabled = false; }
+  });
   $("chat-menu-model-select").addEventListener("change", (event) => setModel(event.target.value || null, null));
   $("chat-menu-effort-select").addEventListener("change", (event) =>
     setModel($("chat-menu-model-select").value || null, event.target.value || null));

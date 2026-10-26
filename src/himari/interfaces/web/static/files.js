@@ -366,6 +366,7 @@ export class FilesPane {
     if (this.doc === null) return;
     clearTimeout(this.doc.pollTimer);
     clearTimeout(this.doc.keepTimer);
+    clearTimeout(this.doc.noteTimer);
     if (this.doc.editor) this.doc.editor.destroy();
     this.doc = null;
   }
@@ -1257,7 +1258,11 @@ export class FilesPane {
     this.stateDot.className = `files-state-dot${doc.dirty ? " is-dirty" : ""}`;
     // A note (an error, "Saved, but…") stays at least 6 s: the next keystroke does not wipe it unread.
     const now = Date.now();
-    if (note) doc.note = { text: note, until: now + NOTE_MS };
+    if (note) {
+      doc.note = { text: note, until: now + NOTE_MS };
+      clearTimeout(doc.noteTimer); // back to "Saved"/"Unsaved" when its time is up, without waiting for a key (N4)
+      doc.noteTimer = setTimeout(() => { if (this.doc === doc) this.paintState(); }, NOTE_MS + 50);
+    }
     const shown = note || (doc.note && doc.note.until > now && !doc.saving ? doc.note.text : null);
     this.stateLabel.textContent = shown || text;
     this.stateLabel.title = shown || "";
@@ -1276,6 +1281,7 @@ export class FilesPane {
       return;
     }
     doc.saving = true;
+    doc.note = null; // a note about the text before this save never outlives it (review B1)
     this.paintState();
     try {
       const answer = await this.api("PUT", "/api/machine/file",
@@ -1341,6 +1347,7 @@ export class FilesPane {
       return;
     }
     doc.saving = true;
+    doc.note = null; // a note about the text before this save never outlives it (review B1)
     this.paintState();
     try {
       const made = await this.api("POST", "/api/machine/file/install", { path: doc.path, content });
