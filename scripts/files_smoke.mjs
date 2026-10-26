@@ -641,6 +641,22 @@ const DIFF = { path: "/home/u/a.txt", name: "a.txt", kind: "changed", state: "ok
     "Reverted all but big.bin (cannot be reverted), a.txt (changed since), 1 in a file hidden now."));
 }
 
+// A list that changed under the owner (PR #98 re-review): refused as outdated, the list again, told why.
+{
+  const source = changesSource(LIST);
+  source.accept = async (of, paths) => {
+    source.calls.push(["accept", paths, of]);
+    throw Object.assign(new Error("Some of HIMARI's changes could not be recorded and are now marked unknown: look at the list again."),
+                        { code: "outdated" });
+  };
+  const { files } = editorPane({}, { changes: source });
+  await files.openChanges();
+  await files.tools.children.find((c) => c.textContent === "Accept all").listeners.click[0]();
+  assert.equal(source.calls.filter(([k]) => k === "list").length, 2);
+  assert.equal(files.page, "changes");
+  assert.ok(files.body.children[0].textContent.includes("now marked unknown"));
+}
+
 // Another conversation shown meanwhile (PR #99 review C2): an answer for the last one is not shown, and a page
 // of its changes acts on nothing.
 {

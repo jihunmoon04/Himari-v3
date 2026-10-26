@@ -1066,6 +1066,12 @@ export class FilesPane {
     return false;
   }
 
+  /* An accept or a revert refused: in sight; the list again when it changed meanwhile (PR #98 re-review). */
+  async refused(error) {
+    if (error.code === "outdated") await this.openChanges(error.message);
+    else this.body.prepend(this.el("p", "files-note is-error files-lasting", error.message));
+  }
+
   /* The answer is still for what is shown: no newer request, and the same conversation. */
   current(ticket, of) {
     return ticket === this.ticket && of === this.changes.of();
@@ -1192,7 +1198,7 @@ export class FilesPane {
     try {
       await act();
     } catch (error) {
-      if (this.current(ticket, of)) this.body.prepend(this.el("p", "files-note is-error files-lasting", error.message));
+      if (this.current(ticket, of)) await this.refused(error);
       return false;
     }
     if (this.current(ticket, of)) await this.openChanges(done);
@@ -1208,7 +1214,7 @@ export class FilesPane {
     } catch (error) {
       if (!this.current(ticket, of)) return;
       if (error.code === "changed") await this.openChange(path);
-      else this.body.prepend(this.el("p", "files-note is-error files-lasting", error.message));
+      else await this.refused(error);
       return;
     }
     if (this.current(ticket, of)) await this.openChanges(`${name} is back as it was before HIMARI changed it.`);
@@ -1226,7 +1232,7 @@ export class FilesPane {
     } catch (error) {
       if (!this.current(ticket, of)) return;
       if (error.code === "changed") await this.openChange(diff.path); // changed again since it was shown
-      else this.body.prepend(this.el("p", "files-note is-error files-lasting", error.message));
+      else await this.refused(error);
       return;
     }
     if (this.current(ticket, of)) await this.openChanges(`${diff.name} is back as it was before HIMARI changed it.`);
@@ -1243,7 +1249,7 @@ export class FilesPane {
     try {
       done = await this.changes.revertAll(of);
     } catch (error) {
-      if (this.current(ticket, of)) this.body.prepend(this.el("p", "files-note is-error files-lasting", error.message));
+      if (this.current(ticket, of)) await this.refused(error);
       return;
     }
     if (!this.current(ticket, of)) return;

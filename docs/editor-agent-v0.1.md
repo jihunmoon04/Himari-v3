@@ -512,6 +512,7 @@
    - 대화를 바꾸면 `reset()`이 ticket을 올리고, 검토 쪽이면 그 쪽과 버튼을 지운다. 그래서 A→B→A로 돌아와도 처음 요청의 응답은 그리지 않는다.
 2. **diff 쪽의 turn 중 버튼**(P2). diff 쪽의 Revert, Accept, Revert anyway도 HIMARI가 일하는 동안 꺼지고 그렇게 알린다. 쪽을 보는 중에 turn이 시작하면 `workingChanged()`가 목록·diff의 버튼을 끈다. 누르는 순간에도 다시 확인한다(확인 창 뒤에도).
 3. **모두 되돌리기의 남은 항목**(#98 P2의 화면). "Reverted all but big.bin (cannot be reverted), a.txt (changed since), 1 in a file hidden now."처럼 남은 것을 모두 알린다. 확인 창 문구도 "되돌릴 수 없는 파일은 그대로 둔다"로 고쳤다.
+4. **`outdated`**(#98 재검수의 화면). 받아들이기·되돌리기가 `outdated`로 거부되면 목록을 다시 읽어 그 이유와 함께 보여 준다.
 
 ### 14.3 확인
 
