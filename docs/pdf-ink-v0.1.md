@@ -1,6 +1,6 @@
 # PDF 필기와 에이전트에게 넘기기 v0.1
 
-> 2026-10-26 · **PROPOSED (V3-P77)** · rev. 3: 외부 검수(HEAD b6d420a) 반영 — P1-1 64 MiB는 저장한 뒤의 파일 크기(§3.3, §5.3), P1-2 큰 PDF의 지우기·복원도 사본을 남기는 한 계약(§6.1, §6.3), P2-3 pdf.js 저장 결과에서 증분을 떼어 내는 확인과 2단계 진입 조건(§5.2, §11), P2-4 형광펜 투명도는 모양 스트림의 ExtGState로(§5.1), P2-5 저장된 HIMARI 필기는 필기 층만 그림(§3.2, §4.4), P3 쪽 수를 셀 수 없으면 페이지 참조 거부(§7.2). rev. 2: 소유자 결정 Q1~Q6 권고대로(§13). rev. 1: 설계 초안.
+> 2026-10-26 · **PROPOSED (V3-P77)** · rev. 4: 외부 재검수(HEAD d3dfd2c, READY_WITH_CORRECTIONS) 반영 — P2-1 펜 필기와 손가락 스크롤·확대를 나누는 방법과 `pointercancel`, iPad 진입 조건(§4.1, §11), P2-2 판 기록 실패를 바꾸기 전·후로 나눔(§5.3, §6.3, §9), P3 `/HimariInk` 왕복을 1단계 확인에 더함(§11). rev. 3: 외부 검수(HEAD b6d420a) 반영 — P1-1 64 MiB는 저장한 뒤의 파일 크기(§3.3, §5.3), P1-2 큰 PDF의 지우기·복원도 사본을 남기는 한 계약(§6.1, §6.3), P2-3 pdf.js 저장 결과에서 증분을 떼어 내는 확인과 2단계 진입 조건(§5.2, §11), P2-4 형광펜 투명도는 모양 스트림의 ExtGState로(§5.1), P2-5 저장된 HIMARI 필기는 필기 층만 그림(§3.2, §4.4), P3 쪽 수를 셀 수 없으면 페이지 참조 거부(§7.2). rev. 2: 소유자 결정 Q1~Q6 권고대로(§13). rev. 1: 설계 초안.
 >
 > 소유자 방향
 > - V3-P75 설계 때(2026-10-25): 나중에 iPad에서 PDF에 Apple Pencil로 필기하고, 그것을 바로 에이전트에게 넘긴다.
@@ -103,7 +103,14 @@ PDF는 믿을 수 없는 입력이다. 클라우드 폴더나 인터넷에서 �
   - 펜으로 쓰는 동안 닿은 손바닥은 그래서 무시된다.
   - 펜이 없는 기기를 위해 도구 메뉴에 "Draw with finger"를 둔다. 기본은 꺼짐이다.
 - **마우스**: 데스크톱에서 펜 도구가 골라져 있으면 그린다.
-- 펜이 닿은 동안은 그 페이지에서 스크롤이 일어나지 않게 막는다(`preventDefault`). 손가락 스크롤은 브라우저에 맡긴다(`touch-action: pan-x pan-y pinch-zoom`).
+- 펜과 손가락을 나누는 방법(재검수 P2-1). `pointerdown`에서 `preventDefault()`만으로는 스크롤을 막지 못한다. `touch-action`은 펜에도 걸리고, 브라우저가 스크롤을 시작하면 그 펜 입력은 `pointercancel`로 끊긴다. 그래서 다음처럼 한다.
+  - **A(먼저 쓰는 방법)**
+    - 쪽들을 담은 스크롤 상자는 `touch-action: pan-x pan-y`다. 한 손가락 넘기기는 브라우저에 맡긴다(부드러운 관성 스크롤).
+    - iPadOS Safari에서 Apple Pencil은 Touch 이벤트에서 `touch.touchType === "stylus"`다. 그 상자에 **non-passive** `touchstart`·`touchmove` 리스너를 두고, 바뀐 터치에 stylus가 있으면 `preventDefault()`한다. 그러면 펜으로는 스크롤이 시작되지 않고, 손가락 스크롤은 그대로다.
+    - 확대는 브라우저의 페이지 확대(화면 전체가 커짐)가 아니라 **PDF의 배율**이어야 한다. 그래서 `pinch-zoom`을 주지 않는다. 두 손가락 집기는 우리가 처리한다(두 터치일 때 `touchmove`를 `preventDefault`, Safari의 `gesturestart`·`gesturechange`도 막음). 집는 동안은 CSS 변형으로 키우고, 손을 떼면 그 배율로 다시 그린다.
+  - **B(A가 iPad에서 안 될 때)**: 스크롤 상자를 `touch-action: none`으로 두고, 한 손가락 넘기기(관성 포함)와 두 손가락 확대를 모두 우리가 Pointer Events로 처리한다. Excalidraw 같은 웹 화이트보드가 쓰는 방식이다.
+  - "Draw with finger"를 켜면 B와 같이 `touch-action: none`이고, 한 손가락은 그리고 두 손가락은 넘기기·확대다.
+  - **`pointercancel`**(시스템 제스처, 알림, 앱 전환 등): 그리던 선은 그때까지 받은 점으로 **끝낸다**(버리지 않음). 점이 둘 미만이면 버린다. `lostpointercapture`도 같다. 그리는 동안은 `setPointerCapture`로 그 펜을 잡는다.
 - 부드럽게
   - `getCoalescedEvents()`로 사이 점까지 받는다.
   - 그리는 중에는 `getPredictedEvents()`로 끝을 조금 앞서 그려 지연을 줄인다. 저장하는 선에는 넣지 않는다.
@@ -209,7 +216,10 @@ PDF는 믿을 수 없는 입력이다. 클라우드 폴더나 인터넷에서 �
   4. 가벼운 확인을 한다. 원본이 `%PDF-`로 시작한다. 덧붙일 바이트에 `startxref`가 있고 `%%EOF`로 끝난다. 그 `startxref` 값이 원본 크기보다 크고 새 파일 크기보다 작다. 구조 전체는 검사하지 않는다. 브라우저도 소유자의 것이고, 망가진 결과는 이전 판으로 되돌린다.
   5. runner `write`(`mode: "replace"`, `expected`, 내용은 fd)로 원자적으로 바꾼다. runner가 그사이 바뀌었으면 거부한다(`CHANGED`).
   6. runner가 준 사본으로 이전 판을 남긴다(§6).
-  7. 답: 새 identity, 이전 판을 남겼는지.
+  7. 답: 새 identity, 이전 판을 남겼는지(`previous_kept`).
+- 판 기록의 실패는 둘로 나눈다(재검수 P2-2, V3-P75의 `save`·`_keep`과 같은 계약).
+  - **바꾸기 전**: PDF 판 저장소가 그 크기를 받을 수 없으면(`ready_for`) 저장을 거부한다(`versions_unavailable`). 파일은 그대로다. 30분 규칙으로 이번 저장이 판을 남기지 않는 경우는 이 검사를 하지 않는다.
+  - **바꾼 뒤**: 판을 쓰다 실패하면(디스크 오류 등) 저장은 이미 됐다. 답은 `previous_kept: false`이고, 화면은 "Saved, but its previous version could not be kept"라고 알린다. 판을 반드시 남기려면 순서 자체를 바꿔야 하는데, 이번에는 그만한 복잡함을 들이지 않는다.
 - 브라우저는 "원본 + 증분"을 이미 메모리에 갖고 있다. 그래서 새 identity를 받으면 다시 받지 않고 그 바이트로 문서를 다시 연다.
 
 ### 5.4 쓰지 않는 경우
@@ -259,7 +269,7 @@ PDF는 믿을 수 없는 입력이다. 클라우드 폴더나 인터넷에서 �
 - **지우기**(파일 메뉴의 Delete, `POST /api/machine/file/delete`)
   1. PDF 판 저장소가 그 크기를 받을 수 있는지 본다(`ready_for`). 안 되면 `versions_unavailable`로 거부하고 지우지 않는다.
   2. runner `delete`(`expected`, `copy_max` = 64 MiB). runner가 unlink 전에 사본을 뜬다.
-  3. 사본을 PDF 판 저장소에 이유 `delete`로 남긴다(30분 규칙 없음).
+  3. 사본을 PDF 판 저장소에 이유 `delete`로 남긴다(30분 규칙 없음). 여기서 실패하면 지우기는 이미 됐다. 답은 `previous_kept: false`이고, 화면은 "Deleted, but its content could not be kept"라고 알린다(§5.3과 같은 두 단계).
   4. runner가 프로토콜 3보다 오래됐으면 큰 PDF의 지우기는 거부한다("restart himari-runner"). 사본 없이 지우지 않는다.
 - **복원**(Deleted files의 Restore, `POST /api/machine/versions/{id}/restore`)
   - PDF 판은 `install`로 빈 이름에 놓는다. 한도는 64 MiB다(`Explorer.install`의 한도를 판의 저장소별로 둔다: 사용자·에이전트 판은 1 MiB, PDF 판은 64 MiB).
@@ -322,7 +332,9 @@ PDF는 믿을 수 없는 입력이다. 클라우드 폴더나 인터넷에서 �
 | 상황 | 결과 |
 | --- | --- |
 | 저장 중 연결이 끊김 | 서버가 끝까지 가거나(파일 바뀜) 아무것도 안 함. 브라우저는 "Not saved"이고 선은 남는다. 다시 저장하면, 앞의 저장이 됐을 때는 409 `changed`가 되어 §5.5로 간다 |
-| 이전 판을 못 남김(저장소 가득) | 편집기처럼 저장하지 않는다(`versions_unavailable`). 30분 규칙으로 건너뛰는 경우는 예외 |
+| 바꾸기 전: 판을 받을 자리가 없음(`ready_for`) | 편집기처럼 저장·지우기를 하지 않는다(`versions_unavailable`). 파일은 그대로. 30분 규칙으로 판을 남기지 않는 저장은 예외 |
+| 바꾼 뒤: 판 쓰기 실패 | 저장(지우기)은 됐다. `previous_kept: false`, 화면 경고 |
+| 필기 중 `pointercancel` | 그때까지의 점으로 선을 끝냄(§4.1) |
 | runner가 오래됨 | 저장 거부, "restart himari-runner" |
 | 페이지 이미지 업로드 실패 | 참조 칩만 붙고 "The page image could not be attached" |
 | pdf.js가 못 여는 PDF | "This PDF could not be opened here" + Download |
@@ -355,6 +367,7 @@ PDF는 믿을 수 없는 입력이다. 클라우드 폴더나 인터넷에서 �
 - **입력**: headless Chromium에서 CDP `Input.dispatchMouseEvent`(`pointerType: "pen"`, `force`)로 펜을 흉내 낸다.
   - 펜은 그리고, 터치는 그리지 않는다.
   - 필압이 굵기를 바꾼다.
+  - 그리는 중 `pointercancel`을 보내면 그때까지의 선이 남는다.
 - **보안**: JavaScript 동작이 든 PDF, 링크가 든 PDF로 확인한다. 스크립트가 돌지 않고 링크가 DOM에 없다.
 - **iPad**: 실제 기기 확인은 소유자가 한다. 펜, 손바닥, 두 손가락 확대, 저장, 다시 열기, Ask.
 
@@ -366,6 +379,11 @@ PDF는 믿을 수 없는 입력이다. 클라우드 폴더나 인터넷에서 �
      1. 쓰기 경로(§5.2)가 상호참조 표·스트림 PDF 모두에서 앞부분이 원본과 같은 결과를 낸다.
      2. 그 결과에서 증분만 떼어 내 서버 쪽 확인(§5.3)을 지난다.
      3. HIMARI 주석을 뺀 페이지 렌더(§4.4의 A 또는 B)가 된다.
+     4. **`/HimariInk` 왕복**(재검수 P3): 저장한 주석의 `/HimariInk`를 다시 읽어 점·필압·도구가 같다. pdf.js의 공개 `getAnnotations()`가 이 키를 주지 않으면, 주석 사전만 읽는 작은 읽기 기능을 따로 만든다(직접 작성기를 만드는 경우 그 객체 읽기와 같은 코드).
+   - **iPad 진입 조건**(재검수 P2-1). 2단계의 입력 층을 병합하기 전에 소유자가 실제 iPad에서 확인한다. 안 되면 §4.1의 B로 바꾼다.
+     1. Pencil을 움직여도 페이지가 스크롤되지 않는다.
+     2. 손가락으로는 넘기기와 확대가 된다(확대는 PDF 배율, 화면 전체가 아님).
+     3. 필기 중 시스템 제스처 등으로 `pointercancel`이 나도 선이 그때까지로 남는다.
 2. **필기와 저장**
    - 필기 층과 도구, 증분 저장, 끝점, runner 프로토콜 3(replace·delete의 `copy_max`), PDF 판 저장소와 30분 규칙, 큰 PDF의 지우기·복원(§6.3).
    - 브라우저 임시 보관, 충돌.
