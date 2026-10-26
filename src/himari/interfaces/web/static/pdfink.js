@@ -24,11 +24,30 @@ export const TOOLS = {
 };
 
 /* perfect-freehand's settings: a pen with pressure thins and thickens; without (a mouse), and the
- * highlighter, keep their width. To be tuned on the iPad with the owner (§4.6). */
+ * highlighter, keep their width. To be tuned on the iPad with the owner (§4.6): the ink lab (inklab.js)
+ * changes them in one browser while it is on; ``tuned`` counts the changes, so outlines are made again. */
+export const DEFAULT_TUNING = Object.freeze({ thinning: 0.6, smoothing: 0.5, streamline: 0.35 });
+let tuning = { ...DEFAULT_TUNING };
+let tuned = 0;
+
+export function currentTuning() {
+  return { ...tuning };
+}
+
+/* The settings from now on: each a number from 0 to 1 (thinning to 0.95), else the default's. */
+export function setTuning(values = {}) {
+  const fit = (value, fallback, max) => (isNumber(value) ? Math.min(max, Math.max(0, value)) : fallback);
+  tuning = { thinning: fit(values.thinning, DEFAULT_TUNING.thinning, 0.95),
+             smoothing: fit(values.smoothing, DEFAULT_TUNING.smoothing, 1),
+             streamline: fit(values.streamline, DEFAULT_TUNING.streamline, 1) };
+  tuned += 1;
+  return currentTuning();
+}
+
 function freehand(stroke) {
   const varying = stroke.tool === "pen" && stroke.pressure;
-  return { size: stroke.size, thinning: varying ? 0.6 : 0, smoothing: 0.5, streamline: 0.35,
-           simulatePressure: false, last: true };
+  return { size: stroke.size, thinning: varying ? tuning.thinning : 0, smoothing: tuning.smoothing,
+           streamline: tuning.streamline, simulatePressure: false, last: true };
 }
 
 let made = 0;
@@ -44,10 +63,10 @@ export function newStroke(page, { tool, color: colorName, size: sizeName }, pres
   return { id: `new-${made}`, page, tool, color, rgb, size, pressure, points: [], saved: null, cached: null };
 }
 
-/* The stroke's outline, a polygon in PDF space (kept until its points change). */
+/* The stroke's outline, a polygon in PDF space (kept until its points or the settings change). */
 export function outline(stroke) {
-  if (!stroke.cached || stroke.cached.count !== stroke.points.length) {
-    stroke.cached = { count: stroke.points.length, polygon: getStroke(stroke.points, freehand(stroke)) };
+  if (!stroke.cached || stroke.cached.count !== stroke.points.length || stroke.cached.tuned !== tuned) {
+    stroke.cached = { count: stroke.points.length, tuned, polygon: getStroke(stroke.points, freehand(stroke)) };
   }
   return stroke.cached.polygon;
 }

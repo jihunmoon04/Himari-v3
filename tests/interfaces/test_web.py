@@ -250,7 +250,7 @@ def test_static_ui_and_security_headers(server: Server) -> None:
     assert server.client.get("/assets/katex/katex.min.css").headers["content-type"] == "text/css; charset=utf-8"
     font = server.client.get("/assets/katex/fonts/KaTeX_Main-Regular.woff2")
     assert font.status_code == 200 and font.headers["content-type"] == "font/woff2" and font.content[:4] == b"wOF2"
-    for name in ("pdfpane.js", "pdfink.js", "pdfdoc.js", "freehand/perfect-freehand.mjs", "pdfjs/pdf.min.mjs", "pdfjs/pdf.worker.min.mjs", "pdfjs/wasm/openjpeg_nowasm_fallback.js",
+    for name in ("pdfpane.js", "pdfink.js", "pdfdoc.js", "inklab.js", "freehand/perfect-freehand.mjs", "pdfjs/pdf.min.mjs", "pdfjs/pdf.worker.min.mjs", "pdfjs/wasm/openjpeg_nowasm_fallback.js",
                  "pdfjs/wasm/jbig2_nowasm_fallback.js"):  # the PDF view (V3-P77 §3.2): modules need a script type
         got = server.client.get(f"/assets/{name}")
         assert got.status_code == 200 and got.headers["content-type"] == "text/javascript; charset=utf-8", name

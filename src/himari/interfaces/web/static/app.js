@@ -25,6 +25,9 @@ import { LiveAnswer } from "/assets/live.js";
 import { FilesPane } from "/assets/files.js";
 import * as localStore from "/assets/local_store.js";
 import { DraftBook, mergeDrafts, referenceKey, withoutExpired } from "/assets/drafts.js";
+import { rememberLab } from "/assets/inklab.js";
+
+rememberLab(location.search); // ?ink-lab, before the address is rewritten (V3-P77 §4.6)
 
 const POLL_MS = 1000;
 const PAGE = 50;

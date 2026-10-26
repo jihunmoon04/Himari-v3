@@ -3884,6 +3884,17 @@ button.files-crumb:hover { background: var(--surface-hover); color: var(--text);
 /* Ink (V3-P77 §4): over the page, multiplied with it, so a highlighter leaves the text under it dark. */
 .pdf-ink { position: absolute; inset: 0; width: 100%; height: 100%; mix-blend-mode: multiply; pointer-events: none; }
 .pdf-view.is-inking .pdf-pages { cursor: crosshair; }
+/* The stroke being drawn: over the part of the page in view, multiplied as the ink is. */
+.pdf-live { position: absolute; mix-blend-mode: multiply; pointer-events: none; }
+/* The ink lab (V3-P77 §4.6), only when asked for: a small box in the corner. */
+.ink-lab { position: fixed; right: 12px; bottom: 12px; z-index: 30; max-width: min(320px, calc(100vw - 24px)); padding: 8px 10px; border: 1px solid var(--border-strong); border-radius: var(--radius-sm); background: var(--bg); color: var(--text); font-size: 12px; box-shadow: 0 2px 8px rgba(0, 0, 0, .18); }
+.ink-lab-title { cursor: pointer; font-weight: 600; }
+.ink-lab-numbers { margin: 6px 0; font: 11px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; color: var(--text-muted); }
+.ink-lab-settings { display: grid; gap: 4px; }
+.ink-lab-row { display: grid; grid-template-columns: 76px 1fr 34px; align-items: center; gap: 6px; }
+.ink-lab-slider { width: 100%; min-height: 28px; }
+.ink-lab-value { text-align: right; font-variant-numeric: tabular-nums; }
+.ink-lab-reset { justify-self: start; }
 .files-body:has(.pdf-view) > .files-bar { flex: 0 0 auto; }
 .files-ink-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 2px; }
 .files-ink-tools[hidden], .files-ink-tools [hidden] { display: none; }

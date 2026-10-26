@@ -161,6 +161,7 @@ STATIC_FILES = {"app.css": "text/css", "app.js": "text/javascript", "app_view.js
                 "pdfpane.js": "text/javascript", "pdfjs/pdf.min.mjs": "text/javascript",
                 # Its ink (§4, §5): the strokes, perfect-freehand's outlines, the incremental update it writes.
                 "pdfink.js": "text/javascript", "pdfdoc.js": "text/javascript",
+                "inklab.js": "text/javascript",  # the ink lab (§4.6), asked for with ?ink-lab
                 "freehand/perfect-freehand.mjs": "text/javascript",
                 "pdfjs/pdf.worker.min.mjs": "text/javascript",
                 "pdfjs/wasm/openjpeg_nowasm_fallback.js": "text/javascript",
