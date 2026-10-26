@@ -166,7 +166,7 @@ function fakeModule() {
 }
 
 /* A pane over a fake server: ``routes`` answers "METHOD path-start"; ``sent`` keeps every request. */
-function editorPane(routes, { confirms = [], onAsk = null, changes = null } = {}) {
+function editorPane(routes, { confirms = [], onAsk = null, changes = null, working = () => false } = {}) {
   const sent = [];
   const module = fakeModule();
   const asked = [];
@@ -178,7 +178,7 @@ function editorPane(routes, { confirms = [], onAsk = null, changes = null } = {}
     const answer = routes[key];
     return typeof answer === "function" ? answer(body, path) : answer;
   };
-  const files = new FilesPane({ api, el, loadEditor: async () => module, onAsk, changes,
+  const files = new FilesPane({ api, el, loadEditor: async () => module, onAsk, changes, working,
     confirm: async (title, lines, action) => { asked.push([title, action]); return confirms.length ? confirms.shift() : true; } });
   return { files, sent, module, asked };
 }
@@ -533,19 +533,24 @@ for (const [size, questions] of [[3, 1], [2_000_000, 2]]) {
 
 // --- HIMARI's changes (V3-P76 §5, §6) -----------------------------------------------------------------
 
-/* A fake conversation's review: ``list`` and ``diffs`` as the server would answer; every call kept. */
-function changesSource(list, diffs = {}, { revert = () => ({ reverted: true }), revertAll = () => ({ left: [] }) } = {}) {
+/* A fake conversation's review: ``list`` and ``diffs`` as the server would answer; every call kept, with the
+ * conversation it named last. ``source.shown``: the conversation shown now; ``gate``: a promise each list and
+ * diff waits for first. */
+function changesSource(list, diffs = {}, { revert = () => ({ reverted: true }),
+                                           revertAll = () => ({ left: [], hidden: 0 }) } = {}) {
   const calls = [];
   const told = []; // each list read, as the pane tells its place
-  return {
-    calls, told,
-    list: async () => { calls.push(["list"]); return list; },
-    diff: async (path) => { calls.push(["diff", path]); return diffs[path]; },
-    accept: async (paths) => { calls.push(["accept", paths]); return { accepted: true }; },
-    revert: async (path, seenState) => { calls.push(["revert", path, seenState]); return revert(path, seenState); },
-    revertAll: async () => { calls.push(["revertAll"]); return revertAll(); },
+  const source = {
+    calls, told, shown: "c1", gate: null,
+    of: () => source.shown,
+    list: async (of) => { calls.push(["list", of]); await source.gate; return list; },
+    diff: async (of, path) => { calls.push(["diff", path, of]); await source.gate; return diffs[path]; },
+    accept: async (of, paths) => { calls.push(["accept", paths, of]); return { accepted: true }; },
+    revert: async (of, path, seenState) => { calls.push(["revert", path, seenState, of]); return revert(path, seenState); },
+    revertAll: async (of) => { calls.push(["revertAll", of]); return revertAll(); },
     seen: (given) => told.push(given),
   };
+  return source;
 }
 
 const CHANGED = { path: "/home/u/a.txt", name: "a.txt", kind: "changed", state: "ok", interleaved: false, count: 2,
@@ -575,7 +580,7 @@ const DIFF = { path: "/home/u/a.txt", name: "a.txt", kind: "changed", state: "ok
   assert.deepEqual(files.tools.children.map((c) => [c.textContent, c.disabled]), [["Accept all", false], ["Revert all", false]]);
   // Accepting one: then the list again, told so.
   await button(rows[1], "Accept").listeners.click[0]();
-  assert.deepEqual(source.calls.find(([k]) => k === "accept"), ["accept", ["/home/u/a.txt"]]);
+  assert.deepEqual(source.calls.find(([k]) => k === "accept"), ["accept", ["/home/u/a.txt"], "c1"]);
   assert.ok(files.body.text().includes("a.txt: accepted."));
 }
 
@@ -596,7 +601,9 @@ const DIFF = { path: "/home/u/a.txt", name: "a.txt", kind: "changed", state: "ok
   const source = changesSource(LIST, { "/home/u/a.txt": changedSince }, {
     revert: (path, seenState) => { reverts += 1; if (!seenState) throw refusal("changed"); return { reverted: true }; } });
   const { files, module, asked } = editorPane({}, { changes: source });
-  await files.revertOne("/home/u/a.txt", "a.txt");
+  await files.openChanges();
+  const row = files.body.children.find((c) => c.className.includes("files-changes")).children[1];
+  await row.children.find((c) => c.textContent === "Revert").listeners.click[0]();
   assert.deepEqual(files.page, { path: "/home/u/a.txt" });
   assert.deepEqual(module.made.at(-1).diff, { left: "A", right: "owner's", name: "a.txt" });
   const revert = files.tools.children.find((c) => c.textContent === "Revert");
@@ -605,8 +612,8 @@ const DIFF = { path: "/home/u/a.txt", name: "a.txt", kind: "changed", state: "ok
   assert.ok(bar.text().includes("changed by something other than this conversation's HIMARI"));
   await bar.children.find((c) => c.textContent === "Revert anyway").listeners.click[0]();
   assert.deepEqual(asked.at(-1), ["Revert a.txt anyway?", "Revert anyway"]);
-  assert.deepEqual(source.calls.filter(([k]) => k === "revert").map(([, , s]) => s),
-                   [null, { exists: true, identity: ["9", "9", "9", "9"], text: "owner's" }]);
+  assert.deepEqual(source.calls.filter(([k]) => k === "revert").map(([, , s, of]) => [s, of]),
+                   [[null, "c1"], [{ exists: true, identity: ["9", "9", "9", "9"], text: "owner's" }, "c1"]]);
   assert.equal(files.page, "changes");
   assert.ok(files.body.text().includes("a.txt is back as it was"));
   // Made by HIMARI and deleted since: told in words, the diff against nothing.
@@ -619,16 +626,97 @@ const DIFF = { path: "/home/u/a.txt", name: "a.txt", kind: "changed", state: "ok
   assert.ok(!shown.files.tools.children.some((c) => c.textContent === "Open"));
 }
 
-// Revert all: asked first; the ones left are named.
+// Revert all: asked first; the ones left are named, the hidden ones counted (PR #98 review C3).
 {
-  const source = changesSource(LIST, {}, { revertAll: () => ({ left: [{ path: "/home/u/a.txt", code: "changed", message: "" }] }) });
+  const source = changesSource(LIST, {}, { revertAll: () => ({ left: [
+    { path: "/home/u/big.bin", code: "not_revertible", message: "Its previous version could not be kept…" },
+    { path: "/home/u/a.txt", code: "changed", message: "" }], hidden: 1 }) });
   const { files, asked } = editorPane({}, { changes: source, confirms: [false, true] });
   await files.openChanges();
   await files.tools.children.find((c) => c.textContent === "Revert all").listeners.click[0]();
   assert.equal(source.calls.filter(([k]) => k === "revertAll").length, 0); // "no": nothing done
   await files.tools.children.find((c) => c.textContent === "Revert all").listeners.click[0]();
   assert.deepEqual(asked.map(([title]) => title), ["Revert 1 file?", "Revert 1 file?"]);
-  assert.ok(files.body.text().includes("Reverted all but a.txt (changed since)"));
+  assert.ok(files.body.text().includes(
+    "Reverted all but big.bin (cannot be reverted), a.txt (changed since), 1 in a file hidden now."));
+}
+
+// Another conversation shown meanwhile (PR #99 review C2): an answer for the last one is not shown, and a page
+// of its changes acts on nothing.
+{
+  let open;
+  const source = changesSource(LIST, { "/home/u/a.txt": DIFF });
+  const { files } = editorPane({}, { changes: source });
+  source.gate = new Promise((resolve) => { open = resolve; });
+  const listing = files.openChanges();
+  await Promise.resolve();
+  source.shown = "c2"; // switched, the pane not told yet
+  open();
+  await listing;
+  assert.equal(files.page, null);
+  assert.deepEqual(source.told, []);
+  source.gate = new Promise((resolve) => { open = resolve; });
+  const diffing = files.openChange("/home/u/a.txt");
+  await Promise.resolve();
+  source.shown = "c3";
+  files.reset(); // as the app does at the switch
+  open();
+  await diffing;
+  assert.equal(files.page, null);
+  assert.equal(files.body.children.length, 0);
+  // A page shown for c3, then c4 shown without a reset: its controls reach nothing.
+  source.gate = null;
+  await files.openChange("/home/u/a.txt");
+  source.shown = "c4";
+  await files.tools.children.find((c) => c.textContent === "Accept").listeners.click[0]();
+  await files.tools.children.find((c) => c.textContent === "Revert").listeners.click[0]();
+  assert.ok(!source.calls.some(([k]) => k === "accept" || k === "revert"));
+  assert.deepEqual(source.calls.filter(([k]) => k !== "diff").map(([k, of]) => [k, of]), [["list", "c1"]]);
+  assert.deepEqual(source.calls.filter(([k]) => k === "diff").map(([, , of]) => of), ["c2", "c3"]);
+  files.reset();
+  assert.equal(files.page, null);
+  assert.equal(files.tools.children.length, 0);
+  // Away and back before the answer came: the same conversation, but not asked for since.
+  source.gate = new Promise((resolve) => { open = resolve; });
+  const again = files.openChanges();
+  await Promise.resolve();
+  source.shown = "c5";
+  files.reset();
+  source.shown = "c4";
+  files.reset();
+  open();
+  await again;
+  assert.equal(files.page, null);
+}
+
+// One change's page while HIMARI works (PR #99 review C4): its controls off, and told; one that starts meanwhile
+// turns them off, and a click that was on its way does nothing.
+{
+  let working = true;
+  const changedSince = { ...DIFF, changed: true, now: { exists: true, identity: ["9", "9", "9", "9"], text: "owner's" } };
+  const source = changesSource(LIST, { "/home/u/a.txt": changedSince });
+  const { files } = editorPane({}, { changes: source, working: () => working });
+  await files.openChange("/home/u/a.txt");
+  const controls = () => files.reviewControls;
+  assert.deepEqual(controls().map((c) => [c.textContent, c.disabled]),
+                   [["Revert", true], ["Accept", true], ["Revert anyway", true]]);
+  assert.ok(files.body.text().includes("HIMARI is working: accepting and reverting wait"));
+  working = false;
+  await files.openChange("/home/u/a.txt");
+  assert.deepEqual(controls().map((c) => [c.textContent, c.disabled]),
+                   [["Revert", true], ["Accept", false], ["Revert anyway", false]]);
+  working = true;
+  files.workingChanged(); // a turn started
+  assert.ok(controls().every((c) => c.disabled));
+  await controls()[1].listeners.click[0]();
+  assert.ok(!source.calls.some(([k]) => k === "accept"));
+  assert.ok(files.body.children[0].textContent.startsWith("HIMARI is working"));
+  // The list's too.
+  working = false;
+  await files.openChanges();
+  working = true;
+  files.workingChanged();
+  assert.ok(files.tools.children.every((c) => c.disabled));
 }
 
 // The dots: on a changed file's row and its folders' rows; the open file links to its change.

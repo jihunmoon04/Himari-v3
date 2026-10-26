@@ -171,13 +171,14 @@ const filesPanel = new FilesPane({
     addReference(reference);
   },
   actions: [$("file-panel-changes"), $("file-panel-expand"), $("file-panel-close")],
-  changes: { // V3-P76 §5: this conversation's, each answer marked with the conversation it is of
-    list: async () => ({ ...(await api("GET", conversationChanges())), id: app.conversationId }),
-    diff: (path) => api("GET", conversationChanges(`/diff?path=${encodeURIComponent(path)}`)),
-    accept: (paths) => api("POST", conversationChanges("/accept"), paths ? { paths } : { all: true }),
-    revert: (path, seen) => api("POST", conversationChanges("/revert"),
-                                seen ? { path, seen: { exists: seen.exists, identity: seen.identity } } : { path }),
-    revertAll: () => api("POST", conversationChanges("/revert-all"), {}),
+  changes: { // V3-P76 §5: each call names its conversation, fixed when it starts (PR #99 review C2)
+    of: () => app.conversationId,
+    list: async (of) => ({ ...(await api("GET", conversationChanges(of))), id: of }),
+    diff: (of, path) => api("GET", conversationChanges(of, `/diff?path=${encodeURIComponent(path)}`)),
+    accept: (of, paths) => api("POST", conversationChanges(of, "/accept"), paths ? { paths } : { all: true }),
+    revert: (of, path, seen) => api("POST", conversationChanges(of, "/revert"),
+                                    seen ? { path, seen: { exists: seen.exists, identity: seen.identity } } : { path }),
+    revertAll: (of) => api("POST", conversationChanges(of, "/revert-all"), {}),
     seen: (list) => showChanges(list),
   },
   folderActions: (listing) => (attachable(listing.path) ? [attachHereButton(listing.path)] : []),
@@ -1571,6 +1572,7 @@ function applyDetail(detail) {
       loadChanges(app.generation).then(() => { if (panelShown) filesPanel.refresh(); });
     }
     app.running = detail.job.running;
+    filesPanel.workingChanged();
     app.changedWhileRunning = false; // a new turn, or the end of the one it was changed in
     renderModel(); // "applies from the next message" only while that turn runs
   }
@@ -1652,7 +1654,7 @@ async function openConversation(id) {
   app.workingFolder = null;
   filesPanel.folder = null;
   filesPanel.file = null; // the next opening starts at this conversation's working folder
-  filesPanel.closeDoc();
+  filesPanel.reset(); // nothing of the last conversation's still on its way is shown
   showChanges(null);
   loadToolSources(generation);
   loadModel(generation);
@@ -2725,8 +2727,8 @@ function attachHereButton(path) {
 
 /* -------------------------------------------- HIMARI's changes (V3-P76 §5) */
 
-function conversationChanges(tail = "") {
-  return `/api/conversations/${encodeURIComponent(app.conversationId)}/changes${tail}`;
+function conversationChanges(of, tail = "") {
+  return `/api/conversations/${encodeURIComponent(of)}/changes${tail}`;
 }
 
 /* The count in the panel's head (and a dot on its toggle while it is closed), and the rows' dots. */
@@ -2750,7 +2752,7 @@ async function loadChanges(generation) {
     return;
   }
   try {
-    const list = await filesPanel.changes.list();
+    const list = await filesPanel.changes.list(app.conversationId);
     if (generation === app.generation) showChanges(list);
   } catch (ignored) {
     /* the conversation works without it */
