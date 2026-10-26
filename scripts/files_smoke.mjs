@@ -1275,16 +1275,22 @@ const press = (files, label) => files.doc.bar.children.find((c) => c.textContent
 // PR #106 review B1: while Restore is offered, a save (Ctrl+S) or a check of the disk changes nothing.
 {
   const keep = keepStore({ [TEXT.path]: { ...KEPT, writer: "me" } });
-  const { files, sent } = editorPane({ "GET /api/machine/file": TEXT,
+  const { files, sent, module } = editorPane({ "GET /api/machine/file": TEXT,
     "GET /api/machine/stat": { path: TEXT.path, kind: "file", identity: [9, 9, 9, 9], size: 3 },
-    "PUT /api/machine/file": { path: TEXT.path, identity: [5, 5, 5, 5], previous_kept: true } }, { keep });
+    "PUT /api/machine/file": { path: TEXT.path, identity: [5, 5, 5, 5], previous_kept: true },
+    "POST /api/machine/file/delete": { path: TEXT.path, previous_kept: true },
+    "GET /api/machine/list": listing("/home/u", []) }, { keep });
   await files.openFile(TEXT.path);
   await files.save();
   await files.checkDisk();
   assert.equal(sent.filter(([m]) => m === "PUT").length, 0);
   assert.equal(keep.map.get(TEXT.path).text, "kept\n");
   assert.deepEqual(barLabels(files).slice(1), ["Restore", "Discard"]);
-  files.closeDoc();
+  files.restore("a previous version"); // Previous versions → Put in the editor waits too (re-review N1)
+  assert.equal(module.made[0].text(), "one");
+  files.fileKind = "text";
+  await files.deleteFile(); // deleted while offered: the kept text stays, offered again there (re-review C1)
+  assert.equal(keep.map.get(TEXT.path).text, "kept\n");
 }
 
 // …kept on a version since changed: Restore leads to the conflict bar, so a save never goes over it.

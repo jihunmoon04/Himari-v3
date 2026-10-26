@@ -1370,7 +1370,7 @@ export class FilesPane {
   /* Previous versions (§7.4): compare one with the editor's text, or put it in the editor to save. */
   async showVersions() {
     const doc = this.doc;
-    if (doc === null) return;
+    if (doc === null || doc.offer) return; // Restore or Discard first (re-review N1)
     let items;
     try {
       items = (await this.api("GET", `/api/machine/versions?${query(doc.path)}`)).items;
@@ -1434,7 +1434,7 @@ export class FilesPane {
 
   /* Back into the editor, unsaved: Save keeps it (and keeps what it replaces). */
   restore(text) {
-    if (this.doc === null) return;
+    if (this.doc === null || this.doc.offer) return;
     this.doc.editor.setText(text);
     this.setDirty(editorText(text) !== this.doc.saved);
     this.paintState("Put in the editor — Save to keep it");
@@ -1465,7 +1465,8 @@ export class FilesPane {
     const ticket = this.ticket; // anything opened meanwhile stays (PR #95 re-review C1)
     try {
       const gone = await this.api("POST", "/api/machine/file/delete", { path, expected: now.identity });
-      if (doc) this.dropKept(doc); // its unsaved text was dropped with it (told above)
+      // Its unsaved text was dropped with it (told above); text only offered stays, offered again there (re-review C1).
+      if (doc && !doc.offer) this.dropKept(doc);
       if (this.doc === doc) this.closeDoc();
       if (this.ticket === ticket) await this.openFolder(path.slice(0, path.lastIndexOf("/")) || "/");
       if (!big && !gone.previous_kept) { // told it would be kept: say it was not, where it stays in sight (review B2)

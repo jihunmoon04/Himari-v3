@@ -109,6 +109,7 @@ const app = {
   place: null, // whose the composer is (V3-P78 §3.1): "home", a conversation id, {creating, from, carried}, or null
   placeTouched: false, // the composer was changed in this place since it was entered (§3.3)
   placeEntry: 0, // the latest entry into a place: a later read of the store applies to that one only
+  inFlight: new Set(), // the conversations a message is being sent to from this page (V3-P78 §3.1, N6)
   sendWaiting: false, // a send waits for the conversation being created
   conversationId: null,
   generation: 0,
@@ -777,7 +778,7 @@ function enterPlace(place) {
   app.place = place;
   app.placeTouched = false;
   const entry = (app.placeEntry += 1);
-  const warned = drafts.sending(place);
+  const warned = drafts.sending(place) && !app.inFlight.has(place); // a tab that died mid-send, not this one
   fillComposer(fresh(place, drafts.get(place)));
   if (warned) status("This message may have been sent already; check the conversation before sending it again.", "warn");
   drafts.fresher(place).then((newer) => {
@@ -1867,6 +1868,7 @@ async function sendMessage(event) {
   const sentTo = app.conversationId; // V3-P78 §3.1: the draft the sent parts leave, wherever the composer is then
   const sent = { text: draft, fileIds: ready.map((a) => a.fileId), references: pointed };
   if (app.place === sentTo) drafts.markSending(sentTo, composerDraft());
+  app.inFlight.add(sentTo);
   app.sending = true;
   $("composer-send").disabled = true;
   try {
@@ -1910,6 +1912,7 @@ async function sendMessage(event) {
     }
   } finally {
     app.sending = false;
+    app.inFlight.delete(sentTo);
   }
   if (generation === app.generation) {
     try {
@@ -2077,9 +2080,9 @@ async function deleteConversation(item = null) {
   if (!(await confirmAction(`Delete “${name}”?`, lines, "Move to trash")) || !still()) return;
   $("chat-menu-delete").disabled = true;
   status(notice.running ? "Stopping the work under way, then moving it to the trash…" : "Moving it to the trash…");
-  if (app.conversationId === id) cancelUploads(); // its uploads go with it; nothing to ask (PR #106 review N4)
   try {
     const moved = await api("POST", `/api/conversations/${encodeURIComponent(id)}/trash`);
+    if (app.conversationId === id) cancelUploads(); // moved: its uploads go with it, nothing to ask (PR #106 N4)
     // Moved: a list that fails to load now must not read as a failed move.
     await (app.conversationId === id || !$("surface-home").hidden ? showHome() : loadList(true).then(markSelected)).catch(() => {});
     drafts.remove(id); // after the leave kept it (V3-P78 §3.1)
@@ -3197,6 +3200,7 @@ async function boot() {
   // §5.3: another tab signed out — nothing of this one is kept or written either.
   localStore.onWiped(() => { // signed out like that tab: to sign in again, where writes open again (PR #106 review B3)
     drafts.clear();
+    filesSurface.closeForSignIn({ keepText: false }); // also when the sign-in screen shows already (re-review N3)
     showLogin({ signingOut: true });
   });
   window.addEventListener("beforeunload", (event) => {
