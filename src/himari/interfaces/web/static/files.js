@@ -34,6 +34,8 @@ const KEPT_MAX = 20; // V3-P78 Q3: files with unsaved text kept, for at most 30 
 const KEPT_AGE_MS = 30 * 24 * 3600 * 1000;
 const PDF_MAX_BYTES = 64 * 1024 * 1024; // the PDF view's limit (V3-P77 §3.3, Q2), as pdfpane.js's
 const INK_TOOL_KEY = "himari.pdf.tool"; // the ink tool picked last, in this browser (V3-P77 §4.2)
+const PDF_PLACE_KEY = "himari.pdf.places"; // path → {page, zoom, at}: where each PDF was left, in this browser
+const PDF_PLACES = 50; // the latest kept
 const SIGNED_NOTICE = "This PDF is signed. Notes are added after the signature; some apps show that as a change.";
 const INK_TOOLS = { pen: { tool: "pen", color: "black", size: "fine" },
                     highlighter: { tool: "highlighter", color: "yellow", size: "wide" }, eraser: { tool: "eraser" } };
@@ -92,6 +94,25 @@ function downloadText(text, name) {
   link.click();
   link.remove();
   setTimeout(() => URL.revokeObjectURL(link.href), 60000);
+}
+
+/* Where a PDF was left (its page and zoom), or null; kept per browser, the latest PDF_PLACES. */
+function pdfPlace(path) {
+  try {
+    const place = JSON.parse(localStorage.getItem(PDF_PLACE_KEY) || "{}")[path];
+    return place && Number.isInteger(place.page) && typeof place.zoom === "number" ? place : null;
+  } catch (ignored) {
+    return null;
+  }
+}
+
+function keepPdfPlace(path, page, zoom) {
+  try {
+    const places = JSON.parse(localStorage.getItem(PDF_PLACE_KEY) || "{}");
+    places[path] = { page, zoom, at: Date.now() };
+    const latest = Object.entries(places).sort((a, b) => b[1].at - a[1].at).slice(0, PDF_PLACES);
+    localStorage.setItem(PDF_PLACE_KEY, JSON.stringify(Object.fromEntries(latest)));
+  } catch (ignored) { /* not kept: it opens on page 1 */ }
 }
 
 function sameIdentity(a, b) {
@@ -306,6 +327,7 @@ export class FilesPane {
     this.reviewControls = [];
     if (this.pdf) {
       clearTimeout(this.pdf.pollTimer);
+      this.keepPlace();
       this.pdf.view.destroy();
     }
     this.pdf = null;
@@ -328,6 +350,11 @@ export class FilesPane {
     const open = this.doc !== null || this.pdf !== null;
     this.closeDoc();
     if (open) this.body.replaceChildren();
+  }
+
+  /* Where the PDF shown is now (its page and zoom), kept for the next time it opens. */
+  keepPlace() {
+    if (this.pdf) keepPdfPlace(this.pdf.path, this.pdf.view.current + 1, this.pdf.view.zoom);
   }
 
   /* ------------------------------------------------- unsaved text kept in the browser (V3-P78 §4.1) */
@@ -537,7 +564,7 @@ export class FilesPane {
     button.addEventListener("click", () => this.follow(path, entry.kind));
     li.append(button);
     const given = entry.kind === "directory" && this.folderRowActions ? this.folderRowActions(path) : [];
-    if (entry.kind === "file") li.append(this.menu(path, entry.name, [], true));
+    if (entry.kind === "file") li.append(this.menu(path, entry.name, [["Delete…", () => this.deleteFile(path)]], true));
     else if (given.length) li.append(this.menu(path, entry.name, given, false));
     else li.append(this.el("span", "files-actions-space")); // nothing to do with it here: no menu (PR #93 review N1)
     return li;
@@ -636,7 +663,8 @@ export class FilesPane {
 
   /* ----------------------------------------------------------- a PDF (V3-P77 §3) */
 
-  async showPdf(shown, ticket, page = 1) {
+  /* ``page``: one asked for; none, where it was left in this browser (and at its zoom). */
+  async showPdf(shown, ticket, page = null) {
     const box = this.el("div", "files-view");
     box.append(this.el("p", "files-note", `Opening ${humanSize(shown.size)}…`));
     this.body.replaceChildren(box);
@@ -651,7 +679,8 @@ export class FilesPane {
       made.view.destroy();
       return;
     }
-    this.installPdf(shown, made, page);
+    const left = page === null ? pdfPlace(shown.path) : null;
+    this.installPdf(shown, made, page || (left ? left.page : 1), left ? left.zoom : null);
   }
 
   /* A PDF read and opened in a view of its own, not yet shown — the one shown stays until this is ready
@@ -681,7 +710,7 @@ export class FilesPane {
   }
 
   /* The view shown: fitted to the pane, on ``page``, its tool picked, checked on disk from now on. */
-  installPdf(shown, { view, identity, left }, page) {
+  installPdf(shown, { view, identity, left }, page, zoom = null) {
     const bar = this.el("div", "files-bar");
     bar.hidden = true;
     // The identity of the bytes read, which a save is made against (V3-P77 §5.3); the shown one if not told.
@@ -689,6 +718,7 @@ export class FilesPane {
                   identity: identity || shown.identity, view, bar, saving: false, pollTimer: null };
     this.pdf = pdf;
     this.body.replaceChildren(bar, view.element);
+    if (zoom !== null && Number.isFinite(zoom)) view.zoom = Math.min(5, Math.max(0.5, zoom)); // pdfpane's ZOOM_MIN/MAX
     view.show(page);
     const tool = view.writable ? this.inkTool() : null;
     view.setTool(tool);
@@ -979,10 +1009,11 @@ export class FilesPane {
       made.view.destroy();
       return;
     }
+    const zoom = this.pdf ? this.pdf.view.zoom : null; // read again (changed on disk): the zoom stays too
     this.closeDoc();
     this.fileKind = shown.kind;
     this.paintTools(shown);
-    this.installPdf(shown, made, page);
+    this.installPdf(shown, made, page, zoom);
   }
 
   pdfFailed(shown, message) {
@@ -993,6 +1024,7 @@ export class FilesPane {
 
   /* "3 / 12" in the head; pressed, a page number to go to. */
   paintPage(number, pages) {
+    this.keepPlace(); // the page in view, kept as it changes: a closed tab or a reload never calls closeDoc (B3)
     if (!this.pageLabel) return;
     this.pageLabel.textContent = `${number} / ${pages}`;
     this.pageLabel.hidden = false;
@@ -1440,26 +1472,35 @@ export class FilesPane {
     this.paintState("Put in the editor — Save to keep it");
   }
 
-  async deleteFile() {
-    const doc = this.doc;
-    const path = doc ? doc.path : this.file;
+  /* The open file, or ``row`` (a path in the folder shown, from its ⋯ menu; what is open stays). */
+  async deleteFile(row = null) {
+    const doc = row === null ? this.doc : null;
+    const path = row !== null ? row : doc ? doc.path : this.file;
     if (path === null) return;
+    const told = (text) => (row === null ? this.paintState(text) : this.notice(text)); // a folder has no state line
     let now;
+    let kind = row === null ? this.fileKind : null;
     try {
       now = await this.api("GET", `/api/machine/stat?${query(path)}`);
+      // From a row, its kind as the server reads it (a PDF's content is kept up to 64 MiB) — never the name;
+      // asked only where it decides what is said (over 1 MiB, up to 64 MiB; review N1).
+      if (row !== null && now.size > EDIT_MAX_BYTES && now.size <= PDF_MAX_BYTES) {
+        kind = (await this.api("GET", `/api/machine/file?${query(path)}`)).kind;
+      }
     } catch (error) {
-      this.paintState(error.message);
+      told(error.message);
       return;
     }
     const name = path.slice(path.lastIndexOf("/") + 1);
     // A PDF up to 64 MiB is deleted only with its content kept (V3-P77 §6.3; PR #103 review P3) — told by the
     // file's kind as the server read it, whether the view could open it or not (PR #103 re-review).
-    const keptPdf = this.fileKind === "pdf" && now.size <= PDF_MAX_BYTES;
+    const keptPdf = kind === "pdf" && now.size <= PDF_MAX_BYTES;
     const big = now.size > EDIT_MAX_BYTES && !keptPdf;
     const lines = big ? ["This file is over 1 MiB: no previous version of it is kept, so it cannot be put back."]
       : ["Its content is kept as a previous version on the server for 30 days."];
     if (doc && doc.dirty) lines.push("Your unsaved changes are dropped too.");
-    if (this.pdf && this.pdf.view.ink.dirty) lines.push("Your unsaved ink is dropped too.");
+    if (row !== null && this.openElsewhere(path)) lines.push("It is open with unsaved changes in the other panel.");
+    if (row === null && this.pdf && this.pdf.view.ink.dirty) lines.push("Your unsaved ink is dropped too.");
     const offered = doc !== null && doc.offer !== null; // as asked: a Restore meanwhile is not dropped (N-b)
     if (!(await this.confirm(`Delete ${name}?`, lines, "Delete"))) return;
     if (big && !(await this.confirm(`Delete ${name} for good?`, ["It cannot be put back."], "Delete for good"))) return;
@@ -1468,15 +1509,16 @@ export class FilesPane {
       const gone = await this.api("POST", "/api/machine/file/delete", { path, expected: now.identity });
       // Its unsaved text was dropped with it (told above); text only offered stays, offered again there (re-review C1).
       if (doc && !offered) this.dropKept(doc);
-      if (this.doc === doc) this.closeDoc();
+      if (row === null && this.doc === doc) this.closeDoc(); // a row's: whatever was opened meanwhile stays (B1)
       if (this.ticket === ticket) await this.openFolder(path.slice(0, path.lastIndexOf("/")) || "/");
+      else if (row !== null) return; // moved on meanwhile: nothing to show here
       if (!big && !gone.previous_kept) { // told it would be kept: say it was not, where it stays in sight (review B2)
         this.body.prepend(this.el("p", "files-note is-error files-lasting",
           `${name} was deleted, but its content could not be kept as a previous version: it cannot be put back.`));
       }
     } catch (error) {
-      if (error.code === "changed") this.paintState("Not deleted: it changed on the server since; look again");
-      else this.paintState(error.message);
+      if (error.code === "changed") told("Not deleted: it changed on the server since; look again");
+      else told(error.message);
     }
   }
 

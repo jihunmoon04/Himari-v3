@@ -165,18 +165,21 @@
         <div class="status-bar" id="status-bar" role="status" aria-live="polite"></div>
 
         <!-- Sign-in: the operator token from <data root>/control/operator.secret -->
-        <section class="surface" id="surface-login" hidden>
-          <h1>Sign in</h1>
-          <p class="hint">Paste the operator token from <code>control/operator.secret</code> in the HIMARI data directory.</p>
-          <form id="login-form" class="stacked-form">
-            <div class="field">
-              <label for="login-token">Operator token</label>
-              <input type="password" id="login-token" name="login-token" autocomplete="current-password" required />
-            </div>
-            <div class="form-actions">
-              <button type="submit" class="primary-button" id="login-submit">Sign in</button>
-            </div>
-          </form>
+        <section class="surface login" id="surface-login" hidden>
+          <div class="login-card">
+            <p class="login-brand">HIMARI</p>
+            <h1>Sign in</h1>
+            <p class="hint">Paste the operator token from <code>control/operator.secret</code> in the HIMARI data directory.</p>
+            <form id="login-form" class="stacked-form">
+              <div class="field">
+                <label for="login-token">Operator token</label>
+                <input type="password" id="login-token" name="login-token" autocomplete="current-password" required />
+              </div>
+              <div class="form-actions">
+                <button type="submit" class="primary-button" id="login-submit">Sign in</button>
+              </div>
+            </form>
+          </div>
         </section>
 
         <section class="surface home" id="surface-home" hidden>

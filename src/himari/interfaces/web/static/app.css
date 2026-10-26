@@ -3948,3 +3948,54 @@ button.files-crumb:hover { background: var(--surface-hover); color: var(--text);
 .files-change .link-button { flex: 0 0 auto; min-height: 32px; padding: 4px 8px; font-size: 13px; }
 .files-body:has(.files-change-diff) { display: flex; flex-direction: column; }
 .files-change-diff { flex: 1 1 auto; min-height: 240px; max-height: none; margin: var(--space-2) 0 0; }
+
+/* The sign-in screen: a card in the middle of the page, in the theme's colours, as the rest of the app. */
+.surface.login:not([hidden]) {
+  display: flex;
+  align-items: safe center; /* a card taller than the screen scrolls from its top (review N6) */
+  justify-content: center;
+  min-height: 100%;
+  padding: var(--space-4);
+  box-sizing: border-box;
+}
+
+.login-card {
+  width: 100%;
+  max-width: 420px;
+  padding: var(--space-5, 24px);
+  background: var(--surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.06);
+}
+
+.login-card .login-brand {
+  margin: 0 0 var(--space-2);
+  font-size: 13px;
+  font-weight: 650;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+}
+
+.login-card h1 {
+  margin: 0 0 var(--space-2);
+  font-size: 22px;
+}
+
+.login-card .hint {
+  margin: 0 0 var(--space-4);
+}
+
+.login-card .stacked-form,
+.login-card .stacked-form .field {
+  max-width: none;
+}
+
+.login-card input {
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.login-card .form-actions .primary-button {
+  width: 100%;
+}

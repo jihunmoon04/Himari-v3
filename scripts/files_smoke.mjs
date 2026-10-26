@@ -139,8 +139,47 @@ const within = (promise) => Promise.race([promise, new Promise((r) => setTimeout
     const fileRow = files.row("/home/u", { name: "a.txt", kind: "file", size: 1, modified: 0 });
     if (expected === null) assert.equal(node(folderRow), undefined);
     else assert.deepEqual(labels(node(folderRow)), expected);
-    assert.deepEqual(labels(node(fileRow)), ["Download", "Copy path"]);
+    assert.deepEqual(labels(node(fileRow)), ["Delete…", "Download", "Copy path"]);
   }
+}
+
+// A file deleted from its row's ⋯: asked as from the file itself (kept or not, by the kind the server reads),
+// with the identity seen; the folder is read again (the web UX review's row Delete).
+{
+  const sent = [];
+  const asked = [];
+  const routes = {
+    "GET /api/machine/stat": { path: "/home/u/big.pdf", kind: "file", size: 5 * 1024 * 1024, identity: [3, 3, 3, 3] },
+    "GET /api/machine/file": { path: "/home/u/big.pdf", kind: "pdf", size: 5 * 1024 * 1024, identity: [3, 3, 3, 3] },
+    "POST /api/machine/file/delete": { path: "/home/u/big.pdf", previous_kept: true },
+    "GET /api/machine/list": listing("/home/u", ["other.txt"]),
+  };
+  const api = async (method, path, body) => {
+    sent.push([method, path, body]);
+    if (path === "/api/machine/stat?path=~") return HOME;
+    const key = Object.keys(routes).find((k) => `${method} ${path}`.startsWith(k));
+    return routes[key];
+  };
+  const files = new FilesPane({ api, el, confirm: async (title, lines, action) => { asked.push([title, lines, action]); return true; } });
+  files.folder = "/home/u";
+  await files.deleteFile("/home/u/big.pdf");
+  assert.deepEqual(asked.map(([t, , a]) => [t, a]), [["Delete big.pdf?", "Delete"]]); // a PDF's content is kept: one question
+  assert.deepEqual(asked[0][1], ["Its content is kept as a previous version on the server for 30 days."]);
+  assert.deepEqual(sent.find(([m, p]) => m === "POST")[2], { path: "/home/u/big.pdf", expected: [3, 3, 3, 3] });
+  assert.ok(files.body.text().includes("other.txt"), "the folder again");
+
+  // Review B1: a PDF opened while the row's delete was on its way stays open.
+  let release;
+  routes["POST /api/machine/file/delete"] = new Promise((r) => { release = r; });
+  const deleting = files.deleteFile("/home/u/big.pdf");
+  await new Promise((r) => setTimeout(r, 0));
+  let destroyed = false;
+  files.ticket += 1; // something else opened meanwhile
+  files.pdf = { path: "/home/u/other.pdf", pollTimer: null, view: { current: 0, zoom: 1, destroy() { destroyed = true; } } };
+  release({ path: "/home/u/big.pdf", previous_kept: true });
+  await deleting;
+  assert.equal(destroyed, false);
+  assert.equal(files.pdf.path, "/home/u/other.pdf");
 }
 
 // --- the editor (V3-P75 §7), with a fake CodeMirror and a fake server ---------------------------------
@@ -1417,6 +1456,33 @@ for (const [code, said, labels] of [["not_found", "folder is gone too", ["Downlo
   assert.equal(files.doc.bar.hidden, true);
   assert.equal(files.stateLabel.textContent, "This file is no longer on the server");
   files.closeDoc();
+}
+
+// A PDF opens where it was left in this browser (its page and zoom); one opened at a page asked for does not.
+{
+  const store = new Map();
+  globalThis.localStorage = { getItem: (k) => store.get(k) ?? null, setItem: (k, v) => store.set(k, String(v)),
+                              removeItem: (k) => store.delete(k) };
+  const shownAt = [];
+  const fakeView = () => ({ current: 0, zoom: 1, numPages: 9, writable: false, element: el("div"), destroyed: false,
+    show(page) { this.current = page - 1; shownAt.push([page, this.zoom]); }, setTool() {}, destroy() { this.destroyed = true; },
+    ink: { dirty: false } });
+  const files = new FilesPane({ api: async () => HOME, el });
+  files.loadPdfView = async () => ({ view: fakeView(), identity: [1, 1, 1, 1], left: 0 });
+  files.schedulePdfPoll = () => {};
+  const shown = { path: "/home/u/book.pdf", size: 10, identity: [1, 1, 1, 1], kind: "pdf" };
+  await files.showPdf(shown, files.ticket);
+  assert.deepEqual(shownAt.pop(), [1, 1]); // never seen: page 1
+  files.pdf.view.current = 6; // read on to page 7, zoomed in
+  files.pdf.view.zoom = 1.5;
+  files.closeDoc();
+  await files.showPdf(shown, files.ticket);
+  assert.deepEqual(shownAt.pop(), [7, 1.5]);
+  files.closeDoc();
+  await files.showPdf(shown, files.ticket, 2); // a page asked for (a reference): that page, its own zoom
+  assert.deepEqual(shownAt.pop(), [2, 1]);
+  files.closeDoc();
+  delete globalThis.localStorage;
 }
 
 console.log("files smoke: ok");
