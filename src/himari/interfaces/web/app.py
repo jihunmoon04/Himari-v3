@@ -301,6 +301,13 @@ class SaveFileBody(_Body):
     expected: IdentityIn
 
 
+class RecreateFileBody(_Body):
+    """V3-P78 §4.2: the editor's text as a new file where the file it was editing is gone."""
+
+    path: str = Field(min_length=1, max_length=4096)
+    content: str  # at most 1 MiB as UTF-8 (the explorer checks)
+
+
 class NewPathBody(_Body):
     """A new empty file or folder (V3-P75 §7.5, §7.7)."""
 
@@ -668,6 +675,7 @@ FILE_REFUSALS: dict[DataErrorCode, tuple[int, str, str]] = {
 }
 UPLOAD_PATH = re.compile(r"^/api/conversations/[^/]+/uploads$")
 SAVE_BODY_BYTES = 3 * 1024 * 1024  # a saved file of 1 MiB as JSON, escapes included (V3-P75 §7.7)
+SAVE_ROUTES = {("PUT", "/api/machine/file"), ("POST", "/api/machine/file/install")}  # V3-P78 §4.2: the same text
 PDF_APPEND_PATH = "/api/machine/pdf/append"
 EXPECTED_HEADER = "X-Himari-Expected"  # a PDF's identity as the browser read it: four decimal numbers (V3-P77 §5.3)
 IDENTITY_HEADER = "X-Himari-Identity"  # a download's identity, as the bytes sent (§5.3)
@@ -1156,6 +1164,13 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
     async def create_file(body: NewPathBody, request: Request, who: PrincipalId = Depends(principal)) -> dict[str, Any]:
         path, identity = await himari(request).explorer(who).create_file(body.path)
         return {"path": path, "identity": identity_out(identity)}
+
+    @app.post("/api/machine/file/install", status_code=201)
+    async def recreate_file(body: RecreateFileBody, request: Request,
+                            who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+        path, identity = await himari(request).explorer(who).recreate(
+            body.path, body.content.encode("utf-8", "surrogatepass"))
+        return {"path": path, "identity": identity_out(identity) if identity is not None else None}
 
     @app.post("/api/machine/folder", status_code=201)
     async def make_folder(body: NewPathBody, request: Request, who: PrincipalId = Depends(principal)) -> dict[str, Any]:
@@ -1704,7 +1719,7 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
 
     # Outer → inner: headers, Host, Origin, body size, routes.
     app.add_middleware(BodyLimitMiddleware, exempt=lambda method, path: method == "POST" and bool(UPLOAD_PATH.match(path)),
-                       larger=lambda method, path: SAVE_BODY_BYTES if method == "PUT" and path == "/api/machine/file"
+                       larger=lambda method, path: SAVE_BODY_BYTES if (method, path) in SAVE_ROUTES
                        else PDF_APPEND_MAX_BYTES if method == "POST" and path == PDF_APPEND_PATH else None)
     app.add_middleware(OriginGuardMiddleware, allowed_origins=config.allowed_origins)
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=sorted(config.allowed_hosts))

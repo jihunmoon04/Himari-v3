@@ -292,17 +292,33 @@ class Explorer:
         """V3-P76 §4.1: a file put back where its name is free, in one step:
         CHANGED if the name is taken, ``unsupported`` where the file system
         cannot (nothing is written then)."""
+        return (await self._install_bytes(path, content, "put back"))[0]
+
+    async def recreate(self, path: object, content: bytes) -> tuple[str, tuple[int, ...] | None]:
+        """V3-P78 §4.2: the editor's text as a new file where the one it was
+        editing is gone; as ``install`` (only while the name is free). Its
+        identity as the runner saw it right after (None: placed, but not
+        seen) — never read again, where a later write could pass for this one."""
+        if self.versions is None:
+            raise ExplorerRefused("unavailable", "Files cannot be saved on this server.")
+        return await self._install_bytes(path, content, "save")
+
+    async def _install_bytes(self, path: object, content: bytes, what: str) -> tuple[str, tuple[int, ...] | None]:
         if len(content) > EDIT_MAX_BYTES:
-            raise ExplorerRefused("too_large", "Too large to put back from here (at most 1 MiB).")
+            raise ExplorerRefused("too_large", f"Too large to {what} from here (at most 1 MiB).")
         with tempfile.TemporaryFile() as body:
             body.write(content)
             body.flush()
             body.seek(0)
-            return await self._install(path, body.fileno())
+            return await self._install_placed(path, body.fileno())
 
     async def _install(self, path: object, fd: int) -> str:
         """``install`` of what ``fd`` holds (the caller closes it): a PDF's version is put back as it is, never
         read whole (V3-P77 §6.3)."""
+        return (await self._install_placed(path, fd))[0]
+
+    async def _install_placed(self, path: object, fd: int) -> tuple[str, tuple[int, ...] | None]:
+        """``_install``, with the identity the runner saw (None if it did not see it)."""
         try:
             keeps = await self._machine.keeps()
         except (runner.RunnerUnavailable, runner.RunnerError):
@@ -317,7 +333,8 @@ class Explorer:
                 raise ExplorerRefused(runner.UNSUPPORTED, "This folder's file system cannot put a file back in "
                                                           "one step; copy its previous version by hand.") from None
             raise
-        return str(result.get("path", target))
+        seen = result.get("identity")
+        return str(result.get("path", target)), tuple(int(v) for v in seen) if isinstance(seen, list) else None
 
     # --- PDFs (V3-P77 §5, §6) --------------------------------------------------------------
 

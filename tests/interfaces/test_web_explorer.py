@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import io
 import os
+import stat
 import threading
 import time
 from collections.abc import Iterator
@@ -424,6 +425,28 @@ def test_new_file_new_folder_and_delete(server: Server, kit: RunnerKit) -> None:
     assert [v["reason"] for v in items] == ["delete"]
     # Anywhere the user can write — not only the conversations' workspaces (§7.1).
     assert server.post("/api/machine/file", {"path": "~/elsewhere.txt"}).status_code == 201
+
+
+def test_recreate_a_file_that_is_gone(server: Server, kit: RunnerKit) -> None:
+    """V3-P78 §4.2: the editor's text as a new file where its file is gone — only while the name is free."""
+    path = kit.home / "projects/a/main.c"
+    path.unlink()  # removed by hand: no previous version of it
+    made = server.post("/api/machine/file/install", {"path": str(path), "content": "int main(){return 2;}\n"})
+    assert made.status_code == 201, made.text
+    assert path.read_text() == "int main(){return 2;}\n" and stat.S_IMODE(path.stat().st_mode) == 0o644
+    assert made.json() == {"path": str(path), "identity": server.client.get(
+        "/api/machine/stat", params={"path": str(path)}).json()["identity"]}
+    assert server.client.get("/api/machine/versions", params={"path": str(path)}).json()["items"] == []
+    # Never over a file: one made meanwhile stays as it is.
+    refused(server.post("/api/machine/file/install", {"path": str(path), "content": "lost?"}), 409, "changed")
+    assert path.read_text() == "int main(){return 2;}\n"
+    refused(server.post("/api/machine/file/install", {"path": "~/projects/none/x.c", "content": "x"}), 404,
+            "not_found")
+    refused(server.post("/api/machine/file/install", {"path": f"{path}/x.c", "content": "x"}), 400, "not_directory")
+    refused(server.post("/api/machine/file/install", {"path": "~/.ssh/new", "content": "x"}), 404, "not_found")
+    refused(server.post("/api/machine/file/install", {"path": "~/projects/a/big.c", "content": "x" * (1024 * 1024 + 1)}),
+            422, "too_large")
+    assert not (kit.home / ".ssh/new").exists() and not (kit.home / "projects/a/big.c").exists()
 
 
 def test_hidden_paths_are_not_written(server: Server, kit: RunnerKit) -> None:
