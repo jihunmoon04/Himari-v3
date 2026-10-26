@@ -676,6 +676,8 @@ FILE_REFUSALS: dict[DataErrorCode, tuple[int, str, str]] = {
 }
 UPLOAD_PATH = re.compile(r"^/api/conversations/[^/]+/uploads$")
 SAVE_BODY_BYTES = 3 * 1024 * 1024  # a saved file of 1 MiB as JSON, escapes included (V3-P75 §7.7)
+SURFACE_PATHS = ("/files", "/trash", "/settings/instructions", "/settings/memory", "/settings/folders")  # V3-P79 §3.1
+PAGE_ID = re.compile(r"[A-Za-z0-9_-]{1,128}")  # a conversation's id in /c/<id>
 SAVE_ROUTES = {("PUT", "/api/machine/file"), ("POST", "/api/machine/file/install")}  # V3-P78 §4.2: the same text
 PDF_APPEND_PATH = "/api/machine/pdf/append"
 EXPECTED_HEADER = "X-Himari-Expected"  # a PDF's identity as the browser read it: four decimal numbers (V3-P77 §5.3)
@@ -1709,6 +1711,16 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
     @app.get("/")
     async def index() -> Response:
         return Response((static / "index.html").read_bytes(), media_type="text/html; charset=utf-8")
+
+    # V3-P79 §3.1: each surface's address is the same page, which reads it; the data stays behind the API.
+    for surface in SURFACE_PATHS:
+        app.add_api_route(surface, index, methods=["GET"], include_in_schema=False)
+
+    @app.get("/c/{conversation_id}", include_in_schema=False)
+    async def conversation_page(conversation_id: str) -> Response:
+        if not PAGE_ID.fullmatch(conversation_id):
+            raise ApiError(404, "not_found", "Not available.")
+        return await index()
 
     @app.get("/assets/{name:path}")
     async def asset(name: str) -> Response:

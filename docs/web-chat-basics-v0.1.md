@@ -1,6 +1,6 @@
 # 대화 화면의 기본기 v0.1
 
-> 2026-10-26 · **PROPOSED (V3-P79)** · rev. 2: 독립 설계 검수 READY_WITH_CORRECTIONS 반영(§10) — 뒤로/앞으로가 거절·겹칠 때 주소는 보이는 화면의 것으로 바꿈, 쓰는 중인 답의 코드에는 복사 없음, 열 때 대화 목록, 로그아웃 상태의 뒤로 가기, 키보드 감지의 한계. rev. 1: 설계 초안. 소유자 결정 Q1~Q4 권고대로(§8).
+> 2026-10-26 · **PROPOSED (V3-P79)** · 구현 노트 §11. rev. 2: 독립 설계 검수 READY_WITH_CORRECTIONS 반영(§10) — 뒤로/앞으로가 거절·겹칠 때 주소는 보이는 화면의 것으로 바꿈, 쓰는 중인 답의 코드에는 복사 없음, 열 때 대화 목록, 로그아웃 상태의 뒤로 가기, 키보드 감지의 한계. rev. 1: 설계 초안. 소유자 결정 Q1~Q4 권고대로(§8).
 >
 > 소유자 방향(2026-10-26): Web UX 점검의 항목을 우선순위대로 진행한다. 첫 묶음(V3-P78, 작성 중인 것 지키기)에 이어 두 번째 묶음은 **매일 쓰면서 가장 자주 걸리는 것** 셋이다: 대화마다 주소, iPad 화상 키보드의 Enter, 답과 코드의 복사.
 >
@@ -84,7 +84,7 @@ Data·Provider·runner·CLI는 바뀌지 않는다. 서버는 화면 주소에�
 - **화상 키보드가 떠 있는지**는 `visualViewport.height × scale`이 창 높이(`window.innerHeight`)보다 150px 넘게 작은지로 본다(Q2; `scale`은 확대한 화면에서 하드웨어 Enter가 줄바꿈이 되지 않게, 검수 N1). iPad에 하드웨어 키보드를 붙이면 화상 키보드가 뜨지 않으므로 Enter가 그대로 보내기다(아래쪽 단축키 막대는 150px보다 작다).
 - 이 페이지는 `interactive-widget=resizes-content`를 쓰므로 Android의 Chromium·Firefox에서는 창 자체가 줄어 위 비교가 늘 0이다. 그래서 터치가 주 입력인 기기(`(hover: none) and (pointer: coarse)`)에서는 **이 방향에서 본 가장 큰 창 높이보다 150px 넘게 작으면** 화상 키보드로 본다. `visualViewport`가 없으면 터치가 주 입력인 기기에서 줄바꿈으로 본다.
 - 한계(실기기 확인 목록에): iPad의 떠 있는(floating)·나뉜 키보드는 화면을 줄이지 않아 Enter가 보내기가 되고 줄바꿈은 Shift가 없어 넣을 수 없다. Stage Manager 창은 키보드에 일부만 가려 150px보다 덜 줄 수 있다.
-- **조합 중:** `event.isComposing` 또는 `event.keyCode === 229`이면 Enter를 처리하지 않는다. Safari는 조합을 끝내는 Enter에 `isComposing=false`·`keyCode=229`를 주기 때문이다. 프롬프트 선택 창의 Enter(고르기)도 같은 규칙을 쓴다. 기본 동작을 막지 않으므로 Safari가 조합을 끝내며 줄바꿈을 넣을 수 있다(그러면 다음 Enter가 끝에 빈 줄이 붙은 글을 보냄; 서버가 앞뒤 공백을 지우므로 보이는 차이는 없음). 실기기에서 확인한다(검수 N2).
+- **조합 중:** `event.isComposing` 또는 `event.keyCode === 229`이면 Enter를 처리하지 않는다. Safari는 조합을 끝내는 Enter에 `isComposing=false`·`keyCode=229`를 주기 때문이다. 프롬프트 선택 창의 Enter(고르기)도 같은 규칙을 쓴다. 기본 동작을 막지 않으므로 Safari가 조합을 끝내며 줄바꿈을 넣을 수 있다(그러면 다음 Enter가 끝에 빈 줄이 붙은 글을 보냄; 보내기가 앞뒤 공백을 지우므로 보이는 차이는 없음). 실기기에서 확인한다(검수 N2).
 - 프롬프트 선택 창이 열려 있을 때의 Enter(고르기)는 지금 그대로다.
 
 ### 4.2 보이는 것
@@ -157,3 +157,14 @@ Data·Provider·runner·CLI는 바뀌지 않는다. 서버는 화면 주소에�
 | N6 | §1의 두 주장 | 고침 |
 | N7 | 질문에도 Copy, 선택에 단추 글이 섞임, 코드 단추는 선택 사항 | §5 |
 | N8 | 탭 제목·앞 항목·다른 탭 로그아웃 | §7 |
+
+## 11. 구현 노트 (2026-10-26)
+
+- **서버:** `SURFACE_PATHS`의 다섯 경로와 `GET /c/{id}`(`PAGE_ID`)가 `index`와 같은 응답(테스트 `test_surface_addresses_are_the_page`: 헤더 같음, 잘못된 id·다른 경로는 404).
+- **주소(`app.js`):** 화면 함수마다 `{ via }`(기본 `"push"`)를 받아 `showSurface(name, via)`로 넘기고, `followAddress`가 `app.address`를 정한 뒤 push/replace한다. `"none"`(뒤로/앞으로)도 주소가 화면과 다르면 replace한다(§3.2, B1). `goTo(path, via)`가 주소를 화면 함수로 바꾸고, `addressPopped`가 `popstate`를 받는다(로그인 화면에서는 무시). `enter()`는 `goTo(location.pathname, "replace")`이고 홈이 아니면 목록을 읽는다. 열 때의 404는 `openConversation`에서 `showHome({ via: "replace" })` + 알림, 그 대화의 초안도 지움. 여기서 휴지통으로 옮긴 열린 대화·폴링의 404는 `replace`. Sign out은 `replaceState("/")`.
+- **탭 제목:** 상단 제목(`#topbar-title`)을 `MutationObserver`로 따라 "<이름> · HIMARI".
+- **링크:** `conversationLink`가 사이드바 행과 홈의 최근 대화를 `<a href="/c/<id>">`로 만든다. 수정 키 없는 왼쪽 단추만 이 페이지에서 연다.
+- **Enter:** `enterSends`·`onScreenKeyboard`. Android용 비교의 "방향"은 창의 가로·세로가 아니라 `screen`의 것이다: 세로 태블릿의 창이 키보드에 반쯤 가려지면 창은 가로가 길어 보이기 때문이다(테스트가 찾음). 프롬프트 선택 창의 Enter도 `keyCode 229`를 무시.
+- **복사:** `renderAssistantText(doc, text, { copy })`일 때만 코드 블록에 단추(`rich-code-copy`); `renderMessage`가 답 아래 `answerActions`. `copyText`는 Clipboard API, 안 되면 `copyByCommand`.
+- **설계와 다른 점:** 없음. 거절된 뒤로 가기는 그 항목이 지금 화면의 주소를 갖게 되므로, 그 뒤의 뒤로 가기는 한 칸 더 간다(§3.2에 적은 대로; 스모크가 확인).
+- **확인:** `tests/interfaces` 301 passed, mypy, import 경계. node: `ui_state_smoke` 21(Enter 규칙 포함), `rich_text`·`live`·`files`·`pdf`. 브라우저 `ui_smoke` 전부 통과(기존 시나리오 셋을 새 동작에 맞춤: 새로고침·로그인 뒤 그 대화로), 새 `addresses`(뒤로/앞으로, 거절된 뒤로, 로그인 전 주소, 없는 대화, 제목, 링크, Sign out, 답·코드 복사와 클립보드 내용). `mcp_apps_smoke`는 전체 화면·뒤로 가기를 포함해 39/40 통과; 남은 하나("1: the work block counts it", `Activity · 1 step`)는 이 변경 전 main에서도 같은 결과다. iPad 실기기 확인은 소유자 몫.

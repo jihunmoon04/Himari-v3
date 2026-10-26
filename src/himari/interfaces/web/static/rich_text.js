@@ -175,7 +175,9 @@ export function safeLinkHref(raw) {
   return parsed.href;
 }
 
-export function renderAssistantText(doc, text) {
+/* ``options.copy(text, button)``: a code block gets a Copy button that hands its code to it (V3-P79 §5);
+ * without it, none (a one-line summary, the work block's notes). */
+export function renderAssistantText(doc, text, options = {}) {
   const el = (tag, className) => {
     const node = doc.createElement(tag);
     if (className) node.className = className;
@@ -718,7 +720,19 @@ export function renderAssistantText(doc, text) {
         // the inline parser, so HTML- or Markdown-looking text stays text.
         code.append(textNode(body.join("\n")));
         pre.append(code);
-        parent.append(pre);
+        if (options.copy) {
+          const block = el("div", "rich-code-block");
+          const copy = el("button", "copy-button rich-code-copy");
+          copy.type = "button";
+          copy.append(textNode("Copy"));
+          copy.setAttribute("aria-label", "Copy code");
+          const source = body.join("\n");
+          copy.addEventListener("click", () => options.copy(source, copy));
+          block.append(copy, pre);
+          parent.append(block);
+        } else {
+          parent.append(pre);
+        }
         continue;
       }
 

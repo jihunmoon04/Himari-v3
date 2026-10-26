@@ -110,6 +110,7 @@ const app = {
   placeTouched: false, // the composer was changed in this place since it was entered (§3.3)
   placeEntry: 0, // the latest entry into a place: a later read of the store applies to that one only
   inFlight: new Set(), // the conversations a message is being sent to from this page (V3-P78 §3.1, N6)
+  address: null, // the address of the surface shown (V3-P79 §3); the sign-in screen keeps the one it came from
   sendWaiting: false, // a send waits for the conversation being created
   conversationId: null,
   generation: 0,
@@ -204,7 +205,7 @@ const live = new LiveAnswer({
   document,
   timeline: () => $("timeline"),
   header: () => assistantHeader(null),
-  render: (text) => renderAssistantText(document, text),
+  render: (text) => renderAssistantText(document, text), // redrawn every 100 ms: no Copy until it ends (B2)
   style: () => getComputedStyle(document.documentElement).getPropertyValue("--thinking-style"),
   reducedMotion: () => window.matchMedia("(prefers-reduced-motion: reduce)").matches,
   now: () => Date.now(),
@@ -219,11 +220,14 @@ function status(text, tone) {
   bar.className = tone ? `status-bar is-${tone}` : "status-bar";
 }
 
-function showSurface(name) {
+/* ``via`` (V3-P79 §3.2): how the address follows — "push" for a move the user chose, "replace" for a place
+ * the page was sent to, "none" for Back/Forward (the browser moved it already). */
+function showSurface(name, via = "none") {
   closeModelDialog();
   for (const surface of ["login", "home", "chat", "trash", "instructions", "memory", "folders", "files"]) {
     $(`surface-${surface}`).hidden = surface !== name;
   }
+  followAddress(name, via);
   app.leaveAgreed = false;
   const signedIn = name !== "login";
   $("sidebar").hidden = !signedIn;
@@ -294,6 +298,8 @@ async function signOut() {
   localStore.closeWrites();
   drafts.clear();
   showLogin({ signingOut: true });
+  history.replaceState(null, "", "/"); // no conversation's address left behind (V3-P79 §3.3)
+  app.address = "/";
   try {
     await api("DELETE", "/api/session");
   } catch (ignored) {
@@ -309,15 +315,26 @@ function conversationName(item) {
   return item.title || item.preview || "New conversation";
 }
 
+/* V3-P79 §3.4 (Q4): a conversation as a link: a plain press opens it here; with a modifier, the middle
+ * button or "Open in New Tab", the browser opens its address. */
+function conversationLink(id, className, text = undefined) {
+  const link = el("a", className, text);
+  link.href = `/c/${encodeURIComponent(id)}`;
+  link.addEventListener("click", (event) => {
+    if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+    event.preventDefault();
+    openConversation(id);
+  });
+  return link;
+}
+
 function renderListRow(item) {
   const li = el("li", "conversation-row");
-  const button = el("button", "conv-row", conversationName(item));
-  button.type = "button";
+  const button = conversationLink(item.id, "conv-row", conversationName(item)); // a link (V3-P79 §3.4)
   button.dataset.id = item.id;
   button.title = conversationName(item);
   if (item.id === app.conversationId) button.classList.add("is-selected");
   if (item.id === app.conversationId) button.setAttribute("aria-current", "page");
-  button.addEventListener("click", () => openConversation(item.id));
   const actions = el("details", "conversation-actions");
   const toggle = el("summary", null, "⋯");
   toggle.setAttribute("aria-label", `Actions for ${conversationName(item)}`);
@@ -358,7 +375,7 @@ function markSelected() {
   }
 }
 
-async function showHome() {
+async function showHome({ via = "push" } = {}) {
   if (!(await mayLeave())) return;
   stopPolling();
   app.conversationId = null;
@@ -366,7 +383,7 @@ async function showHome() {
   live.reset();
   leavePlace();
   markSelected();
-  showSurface("home");
+  showSurface("home", via);
   $("composer-send").disabled = false;
   $("composer-pause").hidden = true;
   $("composer-cancel").hidden = true;
@@ -385,11 +402,9 @@ async function showHome() {
   recent.replaceChildren();
   for (const item of items.slice(0, 3)) {
     const li = el("li");
-    const card = el("button", "home-recent-card");
-    card.type = "button";
+    const card = conversationLink(item.id, "home-recent-card");
     card.append(el("span", "home-recent-title", conversationName(item)),
                 el("span", "home-recent-activity", new Date(item.last_activity_at).toLocaleDateString()));
-    card.addEventListener("click", () => openConversation(item.id));
     li.append(card);
     recent.append(li);
   }
@@ -470,11 +485,150 @@ function renderMessage(event, model = null) {
   const user = event.kind === "user_message";
   const node = el("div", user ? "item item-user" : "item item-assistant");
   node.append(user ? el("div", "item-kind", speaker(event.kind)) : assistantHeader(model));
-  if (!user) node.append(renderAssistantText(document, event.text || ""));
+  if (!user) node.append(renderAssistantText(document, event.text || "", { copy: copyText }));
+  if (!user && event.text) node.append(answerActions(event.text));
   else if (event.text) node.append(el("p", "item-text", event.text));
   if (user && event.attachments && event.attachments.length) node.append(fileChips(event.attachments));
   if (user && event.references && event.references.length) node.append(sentReferenceChips(event.references));
   return node;
+}
+
+/* ------------------------------------------------------------- addresses */
+
+const SURFACE_ADDRESS = { home: "/", files: "/files", trash: "/trash", instructions: "/settings/instructions",
+                          memory: "/settings/memory", folders: "/settings/folders" };
+const CONVERSATION_ADDRESS = /^\/c\/([A-Za-z0-9_-]{1,128})$/;
+
+/* V3-P79 §3.2: the surface now shown, at its address. The sign-in screen leaves the address as it is. */
+function followAddress(name, via) {
+  if (name === "login") return;
+  const address = name === "chat" ? `/c/${encodeURIComponent(app.conversationId)}` : SURFACE_ADDRESS[name];
+  if (!address) return;
+  app.address = address;
+  if (location.pathname === address) return;
+  // "none": Back/Forward moved the address already — unless a leave asked meanwhile, and another move
+  // came in between (design review B1): then the screen shown wins.
+  if (via === "replace" || via === "none") history.replaceState(null, "", address);
+  else history.pushState(null, "", address);
+}
+
+/* The surface at ``path`` (an unknown one: Home). Whether it is shown now (a refused leave keeps the last). */
+async function goTo(path, via) {
+  const conversation = CONVERSATION_ADDRESS.exec(path);
+  const surface = Object.keys(SURFACE_ADDRESS).find((name) => SURFACE_ADDRESS[name] === path);
+  if (conversation) await openConversation(conversation[1], { via });
+  else if (surface === "files") await showFiles({ via });
+  else if (surface === "trash") await showTrash({ via });
+  else if (surface === "instructions") await showInstructions({ via });
+  else if (surface === "memory") await showMemory({ via });
+  else if (surface === "folders") await showFolders({ via });
+  else await showHome({ via: surface === "home" ? via : "replace" });
+  return app.address === path;
+}
+
+/* Back or Forward (§3.2). The same address — an app view's full-screen entry (V3-P63) — is app_view.js's. */
+function addressPopped() {
+  if (!$("surface-login").hidden) return; // signed out: the address waits for the sign-in
+  const wanted = location.pathname;
+  if (wanted === app.address) return;
+  goTo(wanted, "none").then(() => {
+    // A leave refused (unsaved text, an upload): the address is the surface's still shown, in this entry
+    // (a push would add an entry, or drop the Forward ones; design review B1).
+    if (app.address !== null && location.pathname !== app.address) history.replaceState(null, "", app.address);
+  }).catch((error) => status(error.message, "error"));
+}
+
+/* The tab's title follows the top bar's: "<conversation> · HIMARI" (§3.4). */
+function followTitle() {
+  const shown = $("topbar-title").textContent.trim();
+  document.title = !shown || shown === "HIMARI" ? "HIMARI" : `${shown} · HIMARI`;
+}
+
+/* ---------------------------------------------------------------- Enter */
+
+/* V3-P79 §4.1: Enter sends from a hardware keyboard and makes a new line from an on-screen one; Shift+Enter
+ * is a new line, Cmd/Ctrl+Enter sends; an Enter that ends a composition (Korean, Japanese…) is the IME's —
+ * Safari reports it with isComposing false but keyCode 229. */
+function enterSends(event) {
+  if (event.key !== "Enter" || event.isComposing || event.keyCode === 229) return false;
+  if (event.metaKey || event.ctrlKey) return true;
+  return !event.shiftKey && !onScreenKeyboard();
+}
+
+/* An on-screen keyboard is up: the visible part of the page is over 150px shorter than the window (iPadOS
+ * Safari keeps the window's height and shrinks only the visual viewport; a hardware keyboard's shortcut bar
+ * is shorter). Where the window itself shrinks for it (Android, interactive-widget=resizes-content), a touch
+ * device's window over 150px shorter than it has been in this orientation. */
+const tallestWindow = { portrait: 0, landscape: 0 };
+
+/* The device's, from the screen: the window's own sides would turn a portrait tablet "landscape" once the
+ * keyboard takes its lower half. */
+function orientation() {
+  const screen = window.screen;
+  return screen && screen.width > screen.height ? "landscape" : "portrait";
+}
+
+function noteWindowHeight() {
+  const key = orientation();
+  tallestWindow[key] = Math.max(tallestWindow[key], window.innerHeight);
+}
+
+function onScreenKeyboard() {
+  const view = window.visualViewport;
+  if (view && window.innerHeight - view.height * view.scale > 150) return true;
+  if (!window.matchMedia("(hover: none) and (pointer: coarse)").matches) return false;
+  if (!view) return true;
+  return tallestWindow[orientation()] - window.innerHeight > 150;
+}
+
+/* ----------------------------------------------------------------- copy */
+
+/* V3-P79 §5: under a finished answer, Copy hands over its Markdown as written. */
+function answerActions(text) {
+  const row = el("div", "item-actions");
+  const copy = el("button", "copy-button", "Copy");
+  copy.type = "button";
+  copy.setAttribute("aria-label", "Copy answer");
+  copy.addEventListener("click", () => copyText(text, copy));
+  row.append(copy);
+  return row;
+}
+
+/* ``text`` to the clipboard, told on ``button`` for 2 s; the Clipboard API (HTTPS or loopback), else the
+ * old copy command on a hidden field. Nothing is read from the clipboard. */
+async function copyText(text, button) {
+  let copied = false;
+  try {
+    await navigator.clipboard.writeText(text);
+    copied = true;
+  } catch (ignored) {
+    copied = copyByCommand(text);
+  }
+  if (!copied) {
+    status("Couldn't copy; select the text instead.", "warn");
+    return;
+  }
+  if (!button.dataset.label) button.dataset.label = button.textContent;
+  button.textContent = "Copied";
+  clearTimeout(button.copiedTimer);
+  button.copiedTimer = setTimeout(() => { button.textContent = button.dataset.label; }, 2000);
+}
+
+function copyByCommand(text) {
+  const field = document.createElement("textarea");
+  field.value = text;
+  field.setAttribute("readonly", "");
+  field.className = "copy-field";
+  document.body.append(field);
+  field.select();
+  let copied = false;
+  try {
+    copied = document.execCommand("copy");
+  } catch (ignored) {
+    copied = false;
+  }
+  field.remove();
+  return copied;
 }
 
 /* ------------------------------------------------------------- references */
@@ -1502,7 +1656,8 @@ function pickerKey(event) {
   if (event.key === "ArrowDown" || event.key === "ArrowUp") {
     app.promptSelected = (app.promptSelected + (event.key === "ArrowDown" ? 1 : count - 1)) % count;
     updatePicker();
-  } else if ((event.key === "Enter" && !event.shiftKey && !event.isComposing) || event.key === "Tab") {
+  } else if ((event.key === "Enter" && !event.shiftKey && !event.isComposing && event.keyCode !== 229)
+             || event.key === "Tab") { // 229: Safari's Enter that ends a composition (V3-P79 §4.1)
     choosePrompt(app.promptChoices[app.promptSelected]);
   } else if (event.key === "Escape") {
     app.promptDismissed = $("composer-text").value;
@@ -1771,7 +1926,7 @@ function poll(generation) {
           app.placeTouched = false;
         }
         drafts.remove(gone);
-        await showHome().catch(() => {});
+        await showHome({ via: "replace" }).catch(() => {});
         status("That conversation is no longer here; it may have been moved to the trash.", "warn");
         return;
       }
@@ -1783,7 +1938,7 @@ function poll(generation) {
 
 /* ``created``: the conversation just made for the composer's place (V3-P78 §3.1): the composer moves into it
  * as it is — not a leave. */
-async function openConversation(id, { created = false } = {}) {
+async function openConversation(id, { created = false, via = "push" } = {}) {
   if (!(await mayLeave())) return;
   stopPolling();
   app.generation += 1;
@@ -1814,7 +1969,7 @@ async function openConversation(id, { created = false } = {}) {
   closePromptForm();
   $("timeline").replaceChildren();
   markSelected();
-  showSurface("chat");
+  showSurface("chat", via);
   if (moving === null) {
     enterPlace(id);
   } else {
@@ -1840,7 +1995,15 @@ async function openConversation(id, { created = false } = {}) {
     if (detail && detail.job.running) poll(generation);
     else if (detail) loadContext(generation);
   } catch (error) {
-    if (generation === app.generation) status(error.message, "error");
+    if (generation !== app.generation) return;
+    if (error.status === 404) { // not here (trashed, deleted, or never): Home, and Back does not come back (§3.3)
+      app.placeTouched = false;
+      drafts.remove(id);
+      await showHome({ via: "replace" }).catch(() => {});
+      status("That conversation is not here; it may have been moved to the trash.", "warn");
+      return;
+    }
+    status(error.message, "error");
   }
 }
 
@@ -2090,7 +2253,8 @@ async function deleteConversation(item = null) {
     const moved = await api("POST", `/api/conversations/${encodeURIComponent(id)}/trash`);
     if (app.conversationId === id) cancelUploads(); // moved: its uploads go with it, nothing to ask (PR #106 N4)
     // Moved: a list that fails to load now must not read as a failed move.
-    await (app.conversationId === id || !$("surface-home").hidden ? showHome() : loadList(true).then(markSelected)).catch(() => {});
+    await (app.conversationId === id ? showHome({ via: "replace" }) : !$("surface-home").hidden ? showHome({ via: "none" })
+      : loadList(true).then(markSelected)).catch(() => {});
     drafts.remove(id); // after the leave kept it (V3-P78 §3.1)
     status(`Moved “${name}” to the trash. It is deleted for good on ${localDate(moved.purge_after)}.`, "ok");
   } catch (error) {
@@ -2135,7 +2299,7 @@ async function loadTrash(reset) {
   $("trash-empty").hidden = list.children.length > 0;
 }
 
-async function showTrash() {
+async function showTrash({ via = "push" } = {}) {
   if (!(await mayLeave())) return;
   stopPolling();
   views.reset();
@@ -2144,7 +2308,7 @@ async function showTrash() {
   live.reset();
   leavePlace();
   markSelected();
-  showSurface("trash");
+  showSurface("trash", via);
   closeNav();
   $("topbar-title").textContent = "Trash";
   $("trash-hint").textContent = (app.trashDays ? `Conversations here are deleted for good ${app.trashDays} days`
@@ -2222,7 +2386,7 @@ async function loadInstructions() {
   paintInstructions();
 }
 
-async function showInstructions() {
+async function showInstructions({ via = "push" } = {}) {
   if (!$("surface-instructions").hidden && (app.instructions !== null || app.instructionsLoading)) {
     closeNav(); // shown, and loaded or loading: nothing to start again
     return;
@@ -2240,7 +2404,7 @@ async function showInstructions() {
     app.conflictRevision = null;
     $("instructions-conflict").hidden = true;
     $("instructions-text").value = "";
-    showSurface("instructions");
+    showSurface("instructions", via);
     $("topbar-title").textContent = "Instructions";
     status("");
   }
@@ -2590,7 +2754,7 @@ async function loadMemory() {
   paintMemory(); // closes any open form
 }
 
-async function showMemory() {
+async function showMemory({ via = "push" } = {}) {
   if (!(await mayLeave())) return;
   stopPolling();
   views.reset();
@@ -2602,7 +2766,7 @@ async function showMemory() {
   app.memory = null;
   $("memory-groups").replaceChildren();
   $("memory-count").textContent = "Loading…";
-  showSurface("memory");
+  showSurface("memory", via);
   closeNav();
   $("topbar-title").textContent = "Memory";
   status("");
@@ -2812,7 +2976,7 @@ async function registerFolder(event) {
 /* ------------------------------------------------------------------ files */
 
 /* V3-P75 §3.2: the Files surface — this server's files without a conversation. */
-async function showFiles() {
+async function showFiles({ via = "push" } = {}) {
   if (!(await mayLeave())) return;
   stopPolling();
   views.reset();
@@ -2821,7 +2985,7 @@ async function showFiles() {
   live.reset();
   leavePlace();
   markSelected();
-  showSurface("files");
+  showSurface("files", via);
   closeNav();
   $("topbar-title").textContent = "Files";
   status("");
@@ -3044,7 +3208,7 @@ function nudgePanel(event) {
   try { localStorage.setItem(PANEL_WIDTH_KEY, String(fraction)); } catch (ignored) { /* kept for this page */ }
 }
 
-async function showFolders() {
+async function showFolders({ via = "push" } = {}) {
   if (!(await mayLeave())) return;
   stopPolling();
   views.reset();
@@ -3054,7 +3218,7 @@ async function showFolders() {
   leavePlace();
   markSelected();
   $("folders-list").replaceChildren();
-  showSurface("folders");
+  showSurface("folders", via);
   closeNav();
   $("topbar-title").textContent = "Folders";
   status("");
@@ -3159,7 +3323,9 @@ async function enter() {
   syncFoldersLink();
   // A save that met a signed-out session goes back to its draft (PR #68 review C2).
   if (!app.instructionsDraft) {
-    await showHome();
+    // The page's address, or the one signed in at (V3-P79 §3.3); the list as Home would show it (review N4).
+    if (location.pathname !== "/") loadList(true).then(markSelected).catch(() => {});
+    await goTo(location.pathname, "replace");
     return;
   }
   loadList(true).then(markSelected).catch(() => {}); // as Home would (re-review N3)
@@ -3272,10 +3438,14 @@ async function boot() {
       $("composer-text").focus();
     }
   });
+  noteWindowHeight();
+  window.addEventListener("resize", noteWindowHeight);
+  window.addEventListener("popstate", addressPopped);
+  new MutationObserver(followTitle).observe($("topbar-title"), { childList: true, characterData: true, subtree: true });
   $("composer-text").addEventListener("keydown", (event) => {
     if (pickerKey(event)) return;
     if (event.key === "Escape") abandonExpansion(); // like Cancel: a pending prompt will not fill the box
-    if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
+    if (enterSends(event)) {
       event.preventDefault();
       $("composer").requestSubmit();
     }
