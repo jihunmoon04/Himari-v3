@@ -251,4 +251,250 @@ for (const name of ["table.pdf", "stream.pdf"]) {
   await assert.rejects(openPdf(looped), PdfReadError, "a /Prev loop");
 }
 
+// --- the ink (V3-P77 §4): the model -------------------------------------------------------------------------
+const inkModule = await import(new URL("pdfink.js", STATIC));
+const { Ink, newStroke, outline, specOf, strokeFromSaved, hits, TOOLS } = inkModule;
+{
+  const pen = newStroke(0, { tool: "pen", color: "blue", size: "bold" }, true);
+  pen.points.push([100, 100, 0.2], [140, 130, 0.9], [180, 110, 0.5]);
+  assert.equal(pen.size, TOOLS.pen.sizes.bold);
+  assert.deepEqual(pen.rgb, TOOLS.pen.colors.blue);
+  assert.ok(outline(pen).length > 4);
+  const spec = specOf(pen);
+  const [x0, y0, x1, y1] = spec.rect;
+  assert.ok(pen.points.every(([x, y]) => x0 <= x && x <= x1 && y0 <= y && y <= y1));
+  assert.match(spec.appearance, /^0\.1 0\.32 0\.85 rg\n[\d. ]+ m /);
+  assert.ok(spec.appearance.endsWith(" h f") && !spec.appearance.includes("/GS0"));
+  const marker = newStroke(0, { tool: "highlighter", color: "nope", size: "nope" }, false);
+  marker.points.push([70, 520, 0.5], [380, 520, 0.5]);
+  assert.equal(marker.size, 12);
+  assert.ok(specOf(marker).highlighter && specOf(marker).appearance.includes("/GS0 gs"));
+  // Pressure thins and thickens a pen's stroke; without it (a mouse) the width holds.
+  const span = (stroke) => { const ys = outline(stroke).map(([, y]) => y); return Math.max(...ys) - Math.min(...ys); };
+  const flat = (pressure) => { const s = newStroke(0, { tool: "pen", color: "black", size: "bold" }, pressure);
+                               s.points.push([0, 0, 0.1], [50, 0, 1], [100, 0, 0.1]); return s; };
+  assert.ok(span(flat(true)) !== span(flat(false)));
+  // Hits: on it, near it, off it.
+  assert.ok(hits(pen, 140, 130, 1) && hits(pen, 120, 118, 1) && !hits(pen, 300, 300, 5));
+
+  // Round trip through the file: what is drawn is read back as it was (§11 entry 4, now with real strokes).
+  const original = fixture("table.pdf");
+  const file = await openPdf(original);
+  const doc = await open(original);
+  const ref = new Ref((await doc.getPage(1)).ref.num, 0);
+  const saved = join(original, await appendIncrement(file, [{ ref, add: [specOf(pen), specOf(marker)] }]));
+  const back = (await (await openPdf(saved)).ink(ref)).map((entry) => strokeFromSaved(0, entry));
+  assert.deepEqual(back.map((s) => [s.tool, s.size, s.rgb, s.pressure, s.points]),
+                   [pen, marker].map((s) => [s.tool, s.size, s.rgb.map((v) => Math.round(v * 1000) / 1000), s.pressure,
+                                             s.points]));
+  assert.ok(back.every((s) => s.saved && s.saved.name.startsWith("himari-ink-")));
+  // Untrusted data falls back to /InkList: too many points, wrong types, a colour out of range.
+  for (const data of [{ v: 1, tool: "pen", size: 2, rgb: [0, 0, 0], points: [[1, 2, "x"]] },
+                      { v: 1, tool: "pen", size: 2, rgb: [0, 0, 9], points: [[1, 2, 0.5]] },
+                      { v: 1, tool: "brush", size: 2, rgb: [0, 0, 0], points: [[1, 2, 0.5]] }, null]) {
+    const fallback = strokeFromSaved(0, { ref, name: "himari-ink-x", data, inkList: [[10, 20, 30, 40]], width: 2,
+                                          color: [1, 0, 0], opacity: 1 });
+    assert.deepEqual(fallback.points, [[10, 20, 0.5], [30, 40, 0.5]]);
+    assert.deepEqual(fallback.rgb, [1, 0, 0]);
+  }
+  await doc.loadingTask.destroy();
+
+  // Undo and redo; an erase undone goes back where it was; what a save writes and drops.
+  const ink = new Ink();
+  const old = [strokeFromSaved(0, { ref: new Ref(40), name: "himari-ink-a", data: null, inkList: [[0, 0, 5, 5]], width: 1, color: [0, 0, 0] }),
+               strokeFromSaved(0, { ref: new Ref(41), name: "himari-ink-b", data: null, inkList: [[9, 9, 8, 8]], width: 1, color: [0, 0, 0] })];
+  ink.load(0, old);
+  assert.ok(!ink.dirty);
+  ink.add(pen);
+  ink.erase(0, [old[0]]);
+  assert.deepEqual(ink.on(0), [old[1], pen]);
+  assert.deepEqual(ink.changes().map((c) => [c.page, c.add, c.drop.map((r) => r.num)]), [[0, [pen], [40]]]);
+  assert.equal(ink.undo(), 0);
+  assert.deepEqual(ink.on(0), [old[0], old[1], pen]);
+  ink.undo();
+  assert.ok(!ink.dirty && ink.undone.length === 2);
+  ink.redo();
+  assert.deepEqual(ink.on(0), [old[0], old[1], pen]);
+  ink.add(marker); // a new stroke ends what could be redone
+  assert.equal(ink.undone.length, 0);
+  // §5.5: carried to another version — new strokes kept (not past its pages), erased ones erased again.
+  ink.erase(0, [old[1]]);
+  const carried = ink.carry();
+  assert.deepEqual(carried.erasePages, [0]);
+  const next = new Ink();
+  assert.equal(next.put({ ...carried, add: [...carried.add, { ...pen, page: 7 }] }, 3), 1, "one left: no page 8");
+  next.load(0, old.map((s) => ({ ...s })));
+  assert.deepEqual(next.on(0).map((s) => s.saved ? s.saved.name : "new"), ["himari-ink-a", "new", "new"]);
+}
+
+// --- the ink (§4.1): the view's input, against the bundled PDF.js with a fake DOM ----------------------------
+{
+  class Node {
+    constructor(tag, className) {
+      Object.assign(this, { tag, className, children: [], parentNode: null, dataset: {}, style: {}, attributes: {},
+                            listeners: {}, scrollTop: 0, scrollLeft: 0, clientTop: 0, clientWidth: 624,
+                            clientHeight: 800, width: 0, height: 0, captured: null });
+      this.classList = { toggle: (name, on) => { this.attributes[`class:${name}`] = on; } };
+    }
+    append(...nodes) { for (const n of nodes) { n.parentNode = this; this.children.push(n); } }
+    remove() { if (this.parentNode) this.parentNode.children = this.parentNode.children.filter((c) => c !== this); }
+    setAttribute(name, value) { this.attributes[name] = value; }
+    addEventListener(type, fn) { (this.listeners[type] ||= []).push(fn); }
+    getBoundingClientRect() { return { top: this.top || 0, left: 0 }; }
+    setPointerCapture(id) { this.captured = id; }
+    releasePointerCapture() { this.captured = null; }
+    focus() {}
+    getContext() {
+      return { clearRect() {}, beginPath() {}, moveTo() {}, lineTo() {}, closePath() {}, fill() { this.fills = (this.fills || 0) + 1; } };
+    }
+  }
+  const fire = (node, type, event) => {
+    let prevented = false;
+    for (const fn of node.listeners[type] || []) fn({ preventDefault: () => { prevented = true; }, ...event });
+    return prevented;
+  };
+  let observed = null;
+  globalThis.IntersectionObserver = class { constructor(fn) { observed = fn; } observe() {} disconnect() {} };
+  globalThis.ResizeObserver = class { observe() {} disconnect() {} };
+  globalThis.requestAnimationFrame = (fn) => setTimeout(fn, 0);
+  const renders = [];
+  const wrapped = {
+    AnnotationMode: pdfjs.AnnotationMode,
+    getDocument: (options) => {
+      const task = pdfjs.getDocument({ ...options, ...quiet, data: options.data });
+      return {
+        promise: task.promise.then((doc) => ({
+          numPages: doc.numPages, annotationStorage: doc.annotationStorage,
+          getPage: async (n) => {
+            const page = await doc.getPage(n);
+            return Object.assign(Object.create(page), { render: (params) => {
+              renders.push(params);
+              return { promise: Promise.resolve(), cancel() {} };
+            } });
+          },
+        })),
+        destroy: () => task.destroy(),
+      };
+    },
+  };
+  async function viewOf(bytes) {
+    const notices = [];
+    const view = new pane.PdfView({ pdfjs: wrapped, el: (tag, className) => new Node(tag, className), bytes,
+                                    onNotice: (text) => notices.push(text) });
+    await view.open();
+    observed([{ target: view.pages[0].box, isIntersecting: true }]);
+    for (let i = 0; i < 50 && !view.pages[0].canvas; i++) await new Promise((r) => setTimeout(r, 5));
+    assert.ok(view.pages[0].canvas, "page 1 drawn");
+    return { view, notices };
+  }
+  const box = (view) => view.pages[0].box;
+  const pointer = (view, type, extra) => fire(view.pagesBox, type, { pointerId: 1, pointerType: "pen", button: 0,
+                                                                     target: box(view), pressure: 0.6, ...extra });
+
+  // A PDF with HIMARI ink already: the page drawn without it (its refs marked deleted), the layer holding it.
+  const original = fixture("table.pdf");
+  const doc = await open(original);
+  const ref = new Ref((await doc.getPage(1)).ref.num, 0);
+  await doc.loadingTask.destroy();
+  const first = newStroke(0, { tool: "pen", color: "black", size: "fine" }, true);
+  first.points.push([100, 600, 0.5], [200, 650, 0.5]);
+  const withInk = join(original, await appendIncrement(await openPdf(original), [{ ref, add: [specOf(first)] }]));
+  const savedRef = (await (await openPdf(withInk)).ink(ref))[0].ref;
+  const { view } = await viewOf(withInk);
+  assert.ok(view.writable && !view.readOnly);
+  assert.equal(renders.at(-1).annotationMode, pdfjs.AnnotationMode.ENABLE_STORAGE);
+  assert.ok(view.doc.annotationStorage.has(`pdfjs_internal_editor_himari_${savedRef.key}`));
+  assert.equal(view.ink.on(0).length, 1);
+  assert.ok(view.pages[0].inkCanvas, "the saved stroke on the ink layer");
+
+  // No tool: a pen does nothing (scrolls). A finger never draws; a mouse's other buttons do not.
+  assert.ok(!pointer(view, "pointerdown", { clientX: 50, clientY: 50 }));
+  view.setTool({ tool: "pen", color: "red", size: "fine" });
+  assert.ok(!pointer(view, "pointerdown", { pointerType: "touch", clientX: 50, clientY: 50 }));
+  assert.ok(!pointer(view, "pointerdown", { pointerType: "mouse", button: 2, clientX: 50, clientY: 50 }));
+  assert.equal(view.active, null);
+  // The pen: down, moved (its coalesced points), up — one stroke in PDF space.
+  assert.ok(pointer(view, "pointerdown", { clientX: 100, clientY: 100 }));
+  assert.equal(view.pagesBox.captured, 1);
+  pointer(view, "pointermove", { clientX: 130, clientY: 120,
+                                 getCoalescedEvents: () => [{ clientX: 115, clientY: 110, pressure: 0.4 },
+                                                            { clientX: 130, clientY: 120, pressure: 0.8 }],
+                                 getPredictedEvents: () => [{ clientX: 140, clientY: 125, pressure: 0.8 }] });
+  pointer(view, "pointerup", { clientX: 130, clientY: 120 });
+  const drawn = view.ink.on(0).at(-1);
+  assert.equal(drawn.points.length, 3, "down and the two coalesced points; never the predicted one");
+  const viewport = view.pages[0].pdfPage.getViewport({ scale: view.scaleOf(view.pages[0]) });
+  assert.deepEqual(drawn.points[0].slice(0, 2), viewport.convertToPdfPoint(100, 100));
+  assert.deepEqual(drawn.points.map((p) => p[2]), [0.6, 0.4, 0.8]);
+  assert.equal(drawn.color, "red");
+  assert.ok(view.ink.dirty && !view.pages[0].liveCanvas);
+  // A mouse draws at an even pressure.
+  pointer(view, "pointerdown", { pointerType: "mouse", pointerId: 2, clientX: 300, clientY: 300 });
+  pointer(view, "pointermove", { pointerType: "mouse", pointerId: 2, clientX: 320, clientY: 300 });
+  pointer(view, "pointerup", { pointerType: "mouse", pointerId: 2 });
+  assert.deepEqual(view.ink.on(0).at(-1).points.map((p) => p[2]), [0.5, 0.5]);
+  // Cut short by the system: kept from two points, dropped with fewer.
+  const before = view.ink.on(0).length;
+  pointer(view, "pointerdown", { pointerId: 3, clientX: 400, clientY: 400 });
+  pointer(view, "pointermove", { pointerId: 3, clientX: 410, clientY: 410 });
+  pointer(view, "pointercancel", { pointerId: 3 });
+  pointer(view, "lostpointercapture", { pointerId: 3 });
+  assert.equal(view.ink.on(0).length, before + 1);
+  pointer(view, "pointerdown", { pointerId: 4, clientX: 400, clientY: 500 });
+  pointer(view, "pointercancel", { pointerId: 4 });
+  assert.equal(view.ink.on(0).length, before + 1);
+  // §4.1 A: a stylus touch is kept from scrolling while a tool is picked; a finger's is not, nor is a pencil
+  // and a palm a pinch.
+  const touch = (type) => ({ clientX: 10, clientY: 10, touchType: type });
+  assert.ok(fire(view.element, "touchstart", { changedTouches: [touch("stylus")], touches: [touch("stylus")] }));
+  assert.ok(!fire(view.element, "touchstart", { changedTouches: [touch("direct")], touches: [touch("direct")] }));
+  fire(view.element, "touchstart", { changedTouches: [touch("direct")], touches: [touch("stylus"), touch("direct")] });
+  assert.equal(view.pinch, null);
+  // The eraser takes whole strokes, the saved one too; undone, they come back.
+  view.setTool({ tool: "eraser" });
+  const [sx, sy] = viewport.convertToViewportPoint(150, 625); // on the saved stroke
+  pointer(view, "pointerdown", { pointerId: 5, clientX: sx, clientY: sy });
+  pointer(view, "pointerup", { pointerId: 5 });
+  assert.ok(!view.ink.on(0).some((s) => s.saved));
+  assert.deepEqual(view.ink.changes()[0].drop.map((r) => r.key), [savedRef.key]);
+  view.undo();
+  assert.ok(view.ink.on(0).some((s) => s.saved));
+  view.redo();
+  // PR #104 review P1-1: while a save is made, nothing is drawn.
+  view.setTool({ tool: "pen", color: "black", size: "fine" });
+  view.saving = true;
+  const counted = view.ink.on(0).length;
+  assert.ok(!pointer(view, "pointerdown", { pointerId: 6, clientX: 50, clientY: 700 }));
+  assert.equal(view.active, null);
+  view.saving = false;
+  // PR #104 review P2: the page moved under the pen (a word shown above the pages): its points follow the page.
+  pointer(view, "pointerdown", { pointerId: 7, clientX: 50, clientY: 700 });
+  box(view).top = 40;
+  pointer(view, "pointermove", { pointerId: 7, clientX: 50, clientY: 740 });
+  pointer(view, "pointerup", { pointerId: 7 });
+  box(view).top = 0;
+  const moved = view.ink.on(0).at(-1).points;
+  assert.equal(view.ink.on(0).length, counted + 1);
+  assert.deepEqual(moved[1].slice(0, 2), moved[0].slice(0, 2), "the same spot on the page");
+  view.undo();
+  view.setTool({ tool: "eraser" });
+  // Saved: an increment the server would take, read back — the new strokes saved, the erased one gone.
+  const increment = await view.increment();
+  assert.ok(checkIncrement(withInk.length, increment));
+  await view.saved(increment);
+  assert.ok(!view.ink.dirty && view.ink.on(0).every((s) => s.saved));
+  assert.equal(view.ink.on(0).length, 3);
+  assert.equal(view.ink.done.length, 0, "undo starts again after a save");
+  assert.equal((await view.increment()), null);
+  view.destroy();
+
+  // Encrypted: viewed only, its annotations drawn by PDF.js, no pen.
+  const locked = await viewOf(fixture("encrypted.pdf"));
+  assert.ok(!locked.view.writable && /encrypted/.test(locked.view.readOnly));
+  assert.equal(renders.at(-1).annotationMode, pdfjs.AnnotationMode.ENABLE);
+  locked.view.setTool({ tool: "pen", color: "black", size: "fine" });
+  assert.equal(locked.view.tool, null);
+  locked.view.destroy();
+}
+
 console.log("pdf smoke ok");

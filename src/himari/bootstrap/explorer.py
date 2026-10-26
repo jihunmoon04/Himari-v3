@@ -30,9 +30,10 @@ import posixpath
 import re
 import tempfile
 from collections import OrderedDict
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import Any
+from datetime import UTC, datetime, timedelta
+from typing import Any, BinaryIO, TypeVar
 
 from himari.data.api import (
     IMAGE_HEAD_BYTES,
@@ -61,6 +62,12 @@ MAX_READS = 4  # file reads under way here, given-up ones included
 DELETED_SHOWN = 50  # files deleted from a folder listed at once
 EXCERPT_BYTES = 20 * 1024  # a reference's excerpt, as UTF-8 (V3-P76 Q1)
 PDF_HEADER = b"%PDF-"  # what makes a file a PDF here, whatever its name (V3-P77 §3.1)
+PDF_MAX_BYTES = runner.MAX_COPY_BYTES  # V3-P77 §3.3, Q2: a PDF written to from the web, after its save too
+PDF_APPEND_MAX_BYTES = 8 * 1024 * 1024  # the ink one save adds (§5.3)
+PDF_COPY_SECONDS = 120.0  # copying a PDF before ink is added to it (a cloud mount may be slow)
+INK_VERSION_EVERY = timedelta(minutes=30)  # §6.2: one previous version per PDF in this time, for ink saves
+
+T = TypeVar("T")
 
 
 class ExplorerRefused(Exception):
@@ -85,7 +92,8 @@ class Listing:
 class Saved:
     path: str
     identity: tuple[int, ...]
-    previous_kept: bool  # False: saved, but its previous version could not be kept (§7.4, a rare failure)
+    previous_kept: bool  # False: saved, but its previous version could not be kept (§7.4, a rare failure); an ink
+    # save within 30 minutes of the last version kept is True: that version holds the PDF before the ink (V3-P77 §6.2)
 
 
 @dataclass(frozen=True)
@@ -102,12 +110,15 @@ class ShownFile:
 
 class Explorer:
     def __init__(self, machine: MachineEnvironment, views: ViewMaker | None,
-                 versions: VersionStore | None = None, agent_versions: VersionStore | None = None) -> None:
+                 versions: VersionStore | None = None, agent_versions: VersionStore | None = None,
+                 pdf_versions: VersionStore | None = None) -> None:
         self._machine = machine
         self._views = views
         self.versions = versions  # None: the editor cannot save (no place for previous versions)
         # V3-P76 §4.2: what files held before the agent changed them; shown among the previous versions.
         self.agent_versions = agent_versions
+        # V3-P77 §6.2: PDFs' previous versions, ink saves and deletes (a budget of their own); None: not written to.
+        self.pdf_versions = pdf_versions
         self._copies: OrderedDict[tuple[str, tuple[int, ...]], PreparedView] = OrderedDict()
         self._pool = concurrent.futures.ThreadPoolExecutor(MAX_READS, thread_name_prefix="himari-explorer")
         self._reads = 0
@@ -128,31 +139,50 @@ class Explorer:
         """Up to ``size`` bytes from the start of ``fd``, which this takes over:
         it is closed when the read has ended, never before (PR #92 review N1),
         even if the caller gave up (a slow mount, a cancelled request)."""
+        return await self._reading(fd, lambda: _pread(fd, size), READ_SECONDS)
+
+    async def _reading(self, fd: int, read: Callable[[], T], seconds: float,
+                       discard: Callable[[T], None] | None = None) -> T:
+        """``read`` (of ``fd``, which this takes over) on the explorer's threads, as ``_read``. What it makes
+        (a temporary file) is ``read``'s own until it is handed over: given up on, it is ``discard``ed when it
+        ends, never used (PR #103 review P1)."""
         if self._reads >= MAX_READS:
             os.close(fd)
             raise ExplorerRefused(runner.TIMED_OUT, "Earlier slow reads are still under way (an unresponsive "
                                                     "mount?); try again later.")
         self._reads += 1
 
-        def read() -> bytes:
+        def reading() -> T:
             try:
-                return _pread(fd, size)
+                return read()
             finally:
                 os.close(fd)
 
-        work = asyncio.get_running_loop().run_in_executor(self._pool, read)
+        work = asyncio.get_running_loop().run_in_executor(self._pool, reading)
+        given_up = False
 
-        def ended(future: asyncio.Future[bytes]) -> None:
+        def drop(future: asyncio.Future[T]) -> None:
+            if discard is not None and not future.cancelled() and future.exception() is None:
+                discard(future.result())
+
+        def ended(future: asyncio.Future[T]) -> None:
             self._reads -= 1
             if not future.cancelled():
                 future.exception()  # retrieved: a given-up read's failure is not reported
+            if given_up:
+                drop(future)
 
         work.add_done_callback(ended)
         try:
-            async with asyncio.timeout(READ_SECONDS):
+            async with asyncio.timeout(seconds):
                 return await asyncio.shield(work)
-        except TimeoutError:
-            raise ExplorerRefused(runner.TIMED_OUT, runner.MESSAGES[runner.TIMED_OUT]) from None
+        except BaseException as error:  # timed out, or the request cancelled: what it makes is not taken
+            given_up = True
+            if work.done():
+                drop(work)
+            if isinstance(error, TimeoutError):
+                raise ExplorerRefused(runner.TIMED_OUT, runner.MESSAGES[runner.TIMED_OUT]) from None
+            raise
 
     @staticmethod
     def _path(path: object) -> str:
@@ -176,10 +206,11 @@ class Explorer:
         result, _ = await self._call(runner.STAT, {"path": self._path(path), "cwd": "/"})
         return result
 
-    async def open(self, path: object) -> tuple[str, int, int]:
-        """The file's real path, size and an open descriptor (the caller closes it)."""
+    async def open(self, path: object) -> tuple[str, int, tuple[int, ...], int]:
+        """The file's real path, size, identity (V3-P77 §5.3: what a PDF's ink is saved against) and an open
+        descriptor (the caller closes it)."""
         result, fds = await self._call(runner.OPEN, {"path": self._path(path), "cwd": "/"})
-        return str(result["path"]), int(result["size"]), fds[0]
+        return str(result["path"]), int(result["size"]), tuple(int(v) for v in result["identity"]), fds[0]
 
     async def show(self, path: object) -> ShownFile:
         result, fds = await self._call(runner.OPEN, {"path": self._path(path), "cwd": "/"})
@@ -220,15 +251,16 @@ class Explorer:
         return target, result, received
 
     def _stores(self) -> tuple[VersionStore, ...]:
-        return tuple(store for store in (self.versions, self.agent_versions) if store is not None)
+        return tuple(store for store in (self.versions, self.agent_versions, self.pdf_versions) if store is not None)
 
-    def _keep(self, path: str, received: list[int], reason: str) -> bool:
-        if not received or self.versions is None:
+    def _keep(self, path: str, received: list[int], reason: str, store: VersionStore | None = None) -> bool:
+        store = store or self.versions
+        if not received or store is None:
             for fd in received:
                 os.close(fd)
             return False
         try:
-            self.versions.keep(path, received[0], reason)
+            store.keep(path, received[0], reason)
         except OSError:
             log.exception("a previous version of %s could not be kept", path)
             return False
@@ -262,6 +294,15 @@ class Explorer:
         cannot (nothing is written then)."""
         if len(content) > EDIT_MAX_BYTES:
             raise ExplorerRefused("too_large", "Too large to put back from here (at most 1 MiB).")
+        with tempfile.TemporaryFile() as body:
+            body.write(content)
+            body.flush()
+            body.seek(0)
+            return await self._install(path, body.fileno())
+
+    async def _install(self, path: object, fd: int) -> str:
+        """``install`` of what ``fd`` holds (the caller closes it): a PDF's version is put back as it is, never
+        read whole (V3-P77 §6.3)."""
         try:
             keeps = await self._machine.keeps()
         except (runner.RunnerUnavailable, runner.RunnerError):
@@ -269,18 +310,144 @@ class Explorer:
         if not keeps:  # an older runner would write it plainly, over a file made meanwhile
             raise ExplorerRefused(runner.UNSUPPORTED, "The machine runner is older than HIMARI (restart "
                                                       "himari-runner); nothing was put back.")
-        with tempfile.TemporaryFile() as body:
-            body.write(content)
-            body.flush()
-            body.seek(0)
-            try:
-                target, result, _ = await self._write(runner.WRITE, path, {"mode": "install"}, [body.fileno()])
-            except ExplorerRefused as refused:
-                if refused.category == runner.UNSUPPORTED:
-                    raise ExplorerRefused(runner.UNSUPPORTED, "This folder's file system cannot put a file back in "
-                                                              "one step; copy its previous version by hand.") from None
-                raise
+        try:
+            target, result, _ = await self._write(runner.WRITE, path, {"mode": "install"}, [fd])
+        except ExplorerRefused as refused:
+            if refused.category == runner.UNSUPPORTED:
+                raise ExplorerRefused(runner.UNSUPPORTED, "This folder's file system cannot put a file back in "
+                                                          "one step; copy its previous version by hand.") from None
+            raise
         return str(result.get("path", target))
+
+    # --- PDFs (V3-P77 §5, §6) --------------------------------------------------------------
+
+    async def _copies_large(self, nothing: str) -> None:
+        """The runner copies a PDF up to 64 MiB (protocol 3), or the call is refused before it is made."""
+        try:
+            copies = await self._machine.copies_large()
+        except (runner.RunnerUnavailable, runner.RunnerError):
+            raise ExplorerRefused("unavailable", "The machine runner does not answer; try again later.") from None
+        if not copies:  # an older one would refuse it, or delete it without a copy
+            raise ExplorerRefused(runner.UNSUPPORTED, f"The machine runner is older than HIMARI (restart "
+                                                      f"himari-runner); {nothing}.")
+
+    async def _older_runner(self, refused: ExplorerRefused, nothing: str) -> None:
+        """A PDF's write refused as an older runner refuses it (``delete_copied`` unknown, ``copy_max`` ignored:
+        over 1 MiB too large) by a runner that is older now (rolled back since it was asked): told as such."""
+        if refused.category not in (runner.INVALID, runner.TOO_LARGE):
+            return
+        try:
+            copies = await self._machine.copies_large(fresh=True)
+        except (runner.RunnerUnavailable, runner.RunnerError):
+            return
+        if not copies:
+            raise ExplorerRefused(runner.UNSUPPORTED, f"The machine runner is older than HIMARI (restart "
+                                                      f"himari-runner); {nothing}.") from None
+
+    async def _is_pdf(self, path: object, expected: Sequence[int]) -> bool:
+        """The file read with identity ``expected`` starts as a PDF (§6.3: decided here, never by its name).
+        False also when it is another file now: the write that follows is refused then (CHANGED)."""
+        result, fds = await self._call(runner.OPEN, {"path": self._path(path), "cwd": "/"})
+        if [int(v) for v in result["identity"]] != [int(v) for v in expected]:
+            os.close(fds[0])
+            return False
+        return (await self._read(fds[0], len(PDF_HEADER))).startswith(PDF_HEADER)
+
+    async def append_pdf(self, path: object, increment: bytes, expected: Sequence[int]) -> Saved:
+        """§5.3: ink saved into the PDF read with identity ``expected`` — ``increment`` (an incremental update,
+        made by the browser) added after its bytes, which are never changed. The whole is at most 64 MiB. Its
+        previous version is kept in the PDFs' store, at most one per 30 minutes (§6.2): refused before any write
+        when it would be kept and cannot; after the write, a failure to keep it is told (``previous_kept``)."""
+        store = self.pdf_versions
+        if store is None:
+            raise ExplorerRefused("unavailable", "PDFs cannot be saved on this server.")
+        if len(expected) != 4:
+            raise ExplorerRefused("invalid", "The file's identity, as it was read, is required.")
+        if not increment:
+            raise ExplorerRefused("invalid", "There is no ink to save.")
+        if len(increment) > PDF_APPEND_MAX_BYTES:
+            raise ExplorerRefused("too_large", "Too much ink to save at once (over 8 MiB); save more often.")
+        size = int(expected[2])
+        if size + len(increment) > PDF_MAX_BYTES:
+            raise ExplorerRefused("too_large", "Too large to save here: the PDF would be over 64 MiB.")
+        if not increment_ok(size, increment):
+            raise ExplorerRefused("invalid", "Not saved: the ink is not an update of this PDF.")
+        await self._copies_large("nothing was saved")
+        result, fds = await self._call(runner.OPEN, {"path": self._path(path), "cwd": "/"})
+        real = str(result["path"])
+        if [int(v) for v in result["identity"]] != [int(v) for v in expected]:
+            os.close(fds[0])
+            raise ExplorerRefused(runner.CHANGED, "This PDF changed since it was opened; nothing was saved.")
+        latest = await asyncio.to_thread(store.latest, real)
+        keep = latest is None or datetime.now(UTC) - latest.saved_at >= INK_VERSION_EVERY
+        if keep and not store.ready_for(size):
+            os.close(fds[0])
+            raise ExplorerRefused("versions_unavailable", "The previous version could not be kept (the data folder "
+                                  "is full or not writable); nothing was saved.")
+        # The copy is made in a temporary file of the copying thread's own, handed over only once whole: a copy
+        # given up on (a slow mount) never writes into a descriptor closed or reused meanwhile (PR #103 review P1).
+        body = await self._reading(fds[0], lambda: _pdf_with(fds[0], size, increment), PDF_COPY_SECONDS,
+                                   discard=lambda made: made.close() if made is not None else None)
+        if body is None:
+            raise ExplorerRefused("not_regular", "This file is not a PDF; nothing was saved.")
+        with body:
+            try:
+                target, written, received = await self._write(
+                    runner.WRITE, real, {"mode": "replace", "expected": [int(v) for v in expected],
+                                         "copy_max": PDF_MAX_BYTES}, [body.fileno()])
+            except ExplorerRefused as refused:
+                await self._older_runner(refused, "nothing was saved")
+                raise
+        saved = str(written.get("path", target))
+        if keep:
+            kept = await asyncio.to_thread(self._keep, saved, received, "ink", store)
+        else:
+            for fd in received:
+                os.close(fd)
+            kept = True  # the version kept within the last 30 minutes holds the PDF before this ink
+        return Saved(saved, tuple(int(v) for v in written["identity"]), kept)
+
+    async def put_back(self, path: object, version_id: str, expected: Sequence[int]) -> Saved:
+        """§6.3: a PDF's previous version written over the file read with identity ``expected``, which is kept
+        as a version first (whatever the 30-minute rule). Text files' versions go back through the editor."""
+        store = self.pdf_versions
+        real = await self.visible(path)
+        if store is None or not await asyncio.to_thread(store.has, real, version_id):
+            raise ExplorerRefused("not_found", "No such previous version of this PDF.")
+        if len(expected) != 4:
+            raise ExplorerRefused("invalid", "The file's identity, as it was read, is required.")
+        size = int(expected[2])
+        if size > PDF_MAX_BYTES:
+            raise ExplorerRefused("too_large", "This file is over 64 MiB: its content could not be kept.")
+        args: dict[str, Any] = {"mode": "replace", "expected": [int(v) for v in expected]}
+        if size > EDIT_MAX_BYTES:
+            await self._copies_large("nothing was put back")
+            args["copy_max"] = PDF_MAX_BYTES
+        if not store.ready_for(size):
+            raise ExplorerRefused("versions_unavailable", "The file's content could not be kept (the data folder is "
+                                                          "full or not writable); nothing was put back.")
+        fd = await asyncio.to_thread(store.open, real, version_id)
+        if fd is None:
+            raise ExplorerRefused("not_found", "No such previous version of this PDF.")
+        try:
+            target, written, received = await self._write(runner.WRITE, real, args, [fd])
+        except ExplorerRefused as refused:
+            await self._older_runner(refused, "nothing was put back")
+            raise
+        finally:
+            os.close(fd)
+        saved = str(written.get("path", target))
+        kept = await asyncio.to_thread(self._keep, saved, received, "restore", store)
+        return Saved(saved, tuple(int(v) for v in written["identity"]), kept)
+
+    async def open_version(self, path: object, version_id: str) -> tuple[str, int, int]:
+        """A previous version to read (a PDF's, opened to view): the path, its size and an fd the caller closes."""
+        real = await self.visible(path)
+        for store in self._stores():
+            fd = await asyncio.to_thread(store.open, real, version_id)
+            if fd is not None:
+                return real, os.fstat(fd).st_size, fd
+        raise ExplorerRefused("not_found", "No such previous version.")
 
     async def create_file(self, path: object) -> tuple[str, tuple[int, ...]]:
         """§7.7: a new, empty file (EXISTS if the name is taken)."""
@@ -297,6 +464,9 @@ class Explorer:
         content was kept as a previous version (not over 1 MiB)."""
         if len(expected) != 4:
             raise ExplorerRefused("invalid", "The file's identity, as it was read, is required.")
+        size = int(expected[2])
+        if self.pdf_versions is not None and size <= PDF_MAX_BYTES and await self._is_pdf(path, expected):
+            return await self._delete_pdf(path, expected, self.pdf_versions)
         # Up to 1 MiB its content is kept, so a store that cannot keep it refuses the delete (review B2); a
         # larger file goes without, after the editor's own warning (§7.4).
         if int(expected[2]) <= EDIT_MAX_BYTES and (self.versions is None
@@ -307,6 +477,28 @@ class Explorer:
                                                       {"expected": [int(v) for v in expected]})
         real = str(result.get("path", target))
         return real, await asyncio.to_thread(self._keep, real, received, "delete")
+
+    async def _delete_pdf(self, path: object, expected: Sequence[int], store: VersionStore) -> tuple[str, bool]:
+        """V3-P77 §6.3: a PDF up to 64 MiB is deleted only with its content kept in the PDFs' store (whatever
+        the 30-minute rule); refused before the delete when it could not be."""
+        size = int(expected[2])
+        args: dict[str, Any] = {"expected": [int(v) for v in expected]}
+        op = runner.DELETE  # up to 1 MiB every runner copies it before the unlink
+        if size > EDIT_MAX_BYTES:
+            # ``delete_copied``: a runner too old for it refuses it as unknown, whatever was told of it before,
+            # rather than deleting the file without its copy (PR #103 review P1).
+            await self._copies_large("nothing was deleted")
+            op, args["copy_max"] = runner.DELETE_COPIED, PDF_MAX_BYTES
+        if not store.ready_for(size):
+            raise ExplorerRefused("versions_unavailable", "The file's content could not be kept (the data folder is "
+                                                          "full or not writable); nothing was deleted.")
+        try:
+            target, result, received = await self._write(op, path, args)
+        except ExplorerRefused as refused:
+            await self._older_runner(refused, "nothing was deleted")
+            raise
+        real = str(result.get("path", target))
+        return real, await asyncio.to_thread(self._keep, real, received, "delete", store)
 
     async def visible(self, path: object) -> str:
         """The path as the versions know it, if the runner shows it now: its
@@ -348,14 +540,25 @@ class Explorer:
         (V3-P76 §4.1): CHANGED if the name is taken again; ``unsupported``
         where the file system cannot (the editor then restores as before)."""
         real = await self.visible(path)
-        data = next((d for store in self._stores() if (d := store.read(real, version_id)) is not None), None)
+        if self.pdf_versions is not None:  # a PDF's, up to 64 MiB, put back as it is (V3-P77 §6.3)
+            fd = await asyncio.to_thread(self.pdf_versions.open, real, version_id)
+            if fd is not None:
+                try:
+                    return await self._install(real, fd)
+                finally:
+                    os.close(fd)
+        data = next((d for store in (self.versions, self.agent_versions) if store is not None
+                     and (d := store.read(real, version_id)) is not None), None)
         if data is None:
             raise ExplorerRefused("not_found", "No such previous version.")
         return await self.install(real, data)
 
     async def previous_text(self, path: object, version_id: str) -> str:
         real = await self.visible(path)
-        data = next((d for store in self._stores() if (d := store.read(real, version_id)) is not None), None)
+        if self.pdf_versions is not None and await asyncio.to_thread(self.pdf_versions.has, real, version_id):
+            raise ExplorerRefused("not_regular", "This previous version is a PDF: open it instead.")
+        data = next((d for store in (self.versions, self.agent_versions) if store is not None
+                     and (d := store.read(real, version_id)) is not None), None)
         if data is None:
             raise ExplorerRefused("not_found", "No such previous version.")
         text = text_of(data)
@@ -440,6 +643,41 @@ class Explorer:
 
 def _pread(fd: int, size: int) -> bytes:
     return os.pread(fd, size, 0)
+
+
+def _pdf_with(source: int, size: int, increment: bytes) -> BinaryIO | None:
+    """A temporary file of the PDF's ``size`` bytes and ``increment`` after them, read from its start; None if
+    the file does not start as a PDF. Written through a file object, which writes every byte or raises (PR #103
+    review P2: no short write is taken for a whole one)."""
+    if os.pread(source, len(PDF_HEADER), 0) != PDF_HEADER:
+        return None
+    body = tempfile.TemporaryFile()
+    try:
+        at = 0
+        while at < size:
+            chunk = os.pread(source, min(1 << 20, size - at), at)
+            if not chunk:
+                raise OSError("the PDF ended early")
+            body.write(chunk)
+            at += len(chunk)
+        body.write(increment)
+        body.flush()
+        body.seek(0)
+    except BaseException:
+        body.close()
+        raise
+    return body
+
+
+_STARTXREF = re.compile(rb"startxref\s+(\d+)\s*%%EOF[\r\n]*$")
+
+
+def increment_ok(size: int, increment: bytes) -> bool:
+    """§5.3 step 4, a light check (the browser makes the same one, ``checkIncrement`` in pdfdoc.js): the update
+    ends with ``startxref``, an offset inside it, and ``%%EOF`` (line breaks after it allowed). Its structure is
+    not checked: the browser is the owner's, and a broken result goes back to its previous version."""
+    found = _STARTXREF.search(increment[-1024:])
+    return found is not None and size < int(found.group(1)) < size + len(increment)
 
 
 def text_of(data: bytes) -> str | None:

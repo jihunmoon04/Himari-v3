@@ -328,6 +328,17 @@ def read_all(fd: int) -> bytes:
         os.close(fd)
 
 
+def read_all_large(fd: int) -> bytes:
+    try:
+        os.lseek(fd, 0, os.SEEK_SET)
+        chunks = []
+        while chunk := os.read(fd, 1 << 20):
+            chunks.append(chunk)
+        return b"".join(chunks)
+    finally:
+        os.close(fd)
+
+
 def test_replace_keeps_a_copy_taken_before_the_rename(host: Host, home: Path, tmp_path: Path) -> None:
     target = home / "projects/a/main.c"
     before = identity(target)
@@ -359,8 +370,8 @@ def test_replace_refuses_a_changed_file_and_writes_nothing(host: Host, home: Pat
         fresh = identity(target)
         copy_of = Host._copy_of
 
-        def copy_then_write(self: Host, held: int, size: int) -> int | None:
-            made = copy_of(self, held, size)
+        def copy_then_write(self: Host, held: int, size: int, limit: int = hostfs.MAX_SNAPSHOT_BYTES) -> int | None:
+            made = copy_of(self, held, size, limit)
             with open(target, "ab") as late:
                 late.write(b"more")
             return made
@@ -422,6 +433,28 @@ def test_a_file_over_the_copy_limit_is_not_replaced_and_deleted_without_a_copy(h
         os.close(fd)
 
 
+def test_copy_max_raises_the_copy_limit_of_a_replace_and_a_checked_delete(host: Host, home: Path) -> None:
+    """V3-P77 §6.1: a PDF up to copy_max (64 MiB at most) is replaced and deleted with its copy taken first."""
+    pdf = home / "projects/a/notes.pdf"
+    body = b"%PDF-1.7\n" + b"x" * (2 * hostfs.MAX_SNAPSHOT_BYTES)
+    pdf.write_bytes(body)
+    fd, name = parent(host, home, "projects/a/notes.pdf")
+    try:
+        with pytest.raises(api.RunnerError) as refused:
+            host.replace(fd, name, b"%PDF-small", identity(pdf), len(body) - 1)
+        assert refused.value.category == api.TOO_LARGE and pdf.read_bytes() == body
+        now, copy = host.replace(fd, name, body + b"\n%%EOF\n", identity(pdf), len(body))
+        assert copy is not None and read_all_large(copy) == body and now == identity(pdf)
+        whole = pdf.read_bytes()
+        with pytest.raises(api.RunnerError) as refused:  # its copy required: never deleted without it
+            host.delete_checked(fd, name, identity(pdf), len(whole) - 1, copied=True)
+        assert refused.value.category == api.TOO_LARGE and pdf.read_bytes() == whole
+        copy = host.delete_checked(fd, name, identity(pdf), len(whole), copied=True)
+        assert copy is not None and read_all_large(copy) == whole and not pdf.exists()
+    finally:
+        os.close(fd)
+
+
 def test_visible_path_resolves_the_folder_and_hides_as_open_does(host: Host, home: Path) -> None:
     """PR #94 review B3: what a previous version is looked up by; the file itself may be gone."""
     assert host.visible_path("~/projects/a/gone.txt", "/") == str(home / "projects/a/gone.txt")
@@ -478,8 +511,8 @@ def test_a_kept_write_never_writes_over_a_change(host: Host, home: Path, monkeyp
         assert refused.value.category == api.CHANGED and target.read_text() == "int main(){}\n"
         copy_of = Host._copy_of
 
-        def copy_then_write(self: Host, held: int, size: int) -> int | None:
-            made = copy_of(self, held, size)
+        def copy_then_write(self: Host, held: int, size: int, limit: int = hostfs.MAX_SNAPSHOT_BYTES) -> int | None:
+            made = copy_of(self, held, size, limit)
             with open(target, "ab") as late:
                 late.write(b"// owner")
             return made

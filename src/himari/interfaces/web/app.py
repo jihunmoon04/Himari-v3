@@ -87,7 +87,7 @@ from himari.bootstrap.application import (
     ReferenceRequest,
 )
 from himari.bootstrap.changes import ChangeConflict, ChangeDiff, ChangesView
-from himari.bootstrap.explorer import ExplorerRefused, Listing, ShownFile
+from himari.bootstrap.explorer import PDF_APPEND_MAX_BYTES, ExplorerRefused, Listing, ShownFile
 from himari.bootstrap.operator import OPERATOR, derive_cli_bearer, verify_operator_token
 from himari.common import (
     ASK_USER_TOOL_ID,
@@ -158,6 +158,9 @@ STATIC_FILES = {"app.css": "text/css", "app.js": "text/javascript", "app_view.js
                 # The PDF view (V3-P77 §3): its part, and PDF.js with its worker, the image decoders it may
                 # import and the CMaps it may fetch; each loaded on first use.
                 "pdfpane.js": "text/javascript", "pdfjs/pdf.min.mjs": "text/javascript",
+                # Its ink (§4, §5): the strokes, perfect-freehand's outlines, the incremental update it writes.
+                "pdfink.js": "text/javascript", "pdfdoc.js": "text/javascript",
+                "freehand/perfect-freehand.mjs": "text/javascript",
                 "pdfjs/pdf.worker.min.mjs": "text/javascript",
                 "pdfjs/wasm/openjpeg_nowasm_fallback.js": "text/javascript",
                 "pdfjs/wasm/jbig2_nowasm_fallback.js": "text/javascript",
@@ -282,6 +285,14 @@ def identity_out(identity: Iterable[object]) -> list[str]:
     return [str(v) for v in identity]
 
 
+def identity_in(header: str) -> list[int]:
+    """An identity sent in a header (V3-P77 §5.3): four decimal numbers, comma-separated."""
+    parts = [part.strip() for part in header.split(",")]
+    if len(parts) != 4 or not all(re.fullmatch(r"[0-9]{1,20}", part) for part in parts):
+        raise ApiError(400, "invalid_argument", "X-Himari-Expected is the PDF's identity as it was read.")
+    return [int(part) for part in parts]
+
+
 class SaveFileBody(_Body):
     """A file saved from the web editor (V3-P75 §7.7): its whole text, and its identity as it was read."""
 
@@ -297,6 +308,13 @@ class NewPathBody(_Body):
 
 
 class DeleteFileBody(_Body):
+    path: str = Field(min_length=1, max_length=4096)
+    expected: IdentityIn
+
+
+class PutBackBody(_Body):
+    """A PDF's previous version written over the file as it was read (V3-P77 §6.3)."""
+
     path: str = Field(min_length=1, max_length=4096)
     expected: IdentityIn
 
@@ -650,6 +668,9 @@ FILE_REFUSALS: dict[DataErrorCode, tuple[int, str, str]] = {
 }
 UPLOAD_PATH = re.compile(r"^/api/conversations/[^/]+/uploads$")
 SAVE_BODY_BYTES = 3 * 1024 * 1024  # a saved file of 1 MiB as JSON, escapes included (V3-P75 §7.7)
+PDF_APPEND_PATH = "/api/machine/pdf/append"
+EXPECTED_HEADER = "X-Himari-Expected"  # a PDF's identity as the browser read it: four decimal numbers (V3-P77 §5.3)
+IDENTITY_HEADER = "X-Himari-Identity"  # a download's identity, as the bytes sent (§5.3)
 
 def workspace_view(workspace: RegisteredWorkspace) -> dict[str, Any]:
     """V3-P74 §10.3: a registered folder."""
@@ -1160,6 +1181,24 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
         return {"items": [{"path": p, "name": posixpath.basename(p), "id": v.version_id, "saved_at": _time(v.saved_at),
                            "size": v.size} for p, v in found]}
 
+    @app.post("/api/machine/versions/{version_id}/put_back")
+    async def put_back_version(version_id: str, body: PutBackBody, request: Request,
+                               who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+        """A PDF's previous version over the file (V3-P77 §6.3); the file as it was is kept first."""
+        saved = await himari(request).explorer(who).put_back(body.path, version_id, [int(v) for v in body.expected])
+        return {"path": saved.path, "identity": identity_out(saved.identity), "previous_kept": saved.previous_kept}
+
+    @app.get("/api/machine/versions/{version_id}/download")
+    async def download_version(version_id: str, request: Request, path: str,
+                               who: PrincipalId = Depends(principal)) -> Response:
+        """A previous version's bytes (a PDF's, to view: V3-P77 §6.2), as a download is: never rendered here."""
+        real, size, fd = await himari(request).explorer(who).open_version(path, version_id)
+        return _FileStream(os.fdopen(fd, "rb"), media_type="application/octet-stream", headers={
+            "Content-Disposition": content_disposition(posixpath.basename(real) or "file"),
+            "Content-Length": str(size),
+            "Content-Security-Policy": "sandbox",
+        })
+
     @app.get("/api/machine/versions/{version_id}")
     async def read_version(version_id: str, request: Request, path: str,
                            who: PrincipalId = Depends(principal)) -> dict[str, Any]:
@@ -1185,12 +1224,23 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
     async def download_machine_file(request: Request, path: str,
                                     who: PrincipalId = Depends(principal)) -> Response:
         """An attachment of type octet-stream, sandboxed: never rendered on this origin (V3-P75 §8.2)."""
-        real, size, fd = await himari(request).explorer(who).open(path)
+        real, size, identity, fd = await himari(request).explorer(who).open(path)
         return _FileStream(os.fdopen(fd, "rb"), media_type="application/octet-stream", headers={
             "Content-Disposition": content_disposition(posixpath.basename(real) or "file"),
             "Content-Length": str(size),
             "Content-Security-Policy": "sandbox",
+            IDENTITY_HEADER: ",".join(identity_out(identity)),
         })
+
+    @app.post(PDF_APPEND_PATH)
+    async def append_pdf(request: Request, path: str, who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+        """V3-P77 §5.3: ink saved into a PDF — the body is the bytes to add after it (an incremental update, at
+        most 8 MiB), ``X-Himari-Expected`` its identity as read. 409 changed; 422 too_large over 64 MiB in all."""
+        if request.headers.get("content-type", "").split(";")[0].strip() != "application/octet-stream":
+            raise ApiError(415, "invalid_argument", "The ink comes as application/octet-stream.")
+        expected = identity_in(request.headers.get(EXPECTED_HEADER, ""))
+        saved = await himari(request).explorer(who).append_pdf(path, await request.body(), expected)
+        return {"path": saved.path, "identity": identity_out(saved.identity), "previous_kept": saved.previous_kept}
 
     @app.get("/api/machine/image")
     async def show_image(request: Request, path: str, who: PrincipalId = Depends(principal)) -> Response:
@@ -1655,7 +1705,7 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
     # Outer → inner: headers, Host, Origin, body size, routes.
     app.add_middleware(BodyLimitMiddleware, exempt=lambda method, path: method == "POST" and bool(UPLOAD_PATH.match(path)),
                        larger=lambda method, path: SAVE_BODY_BYTES if method == "PUT" and path == "/api/machine/file"
-                       else None)
+                       else PDF_APPEND_MAX_BYTES if method == "POST" and path == PDF_APPEND_PATH else None)
     app.add_middleware(OriginGuardMiddleware, allowed_origins=config.allowed_origins)
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=sorted(config.allowed_hosts))
     app.add_middleware(SecurityHeadersMiddleware, csp=page_csp(config.sandbox_origins))

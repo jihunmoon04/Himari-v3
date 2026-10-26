@@ -471,6 +471,14 @@ export class PdfFile {
     return value instanceof Ref ? this.get(value) : value;
   }
 
+  /* Whether the PDF carries signatures (/AcroForm /SigFlags bit 1): ink is added after them (§5.4). */
+  async signed() {
+    const root = await this.get(this.trailer.get("Root"));
+    const form = root instanceof Map ? await this.resolve(root.get("AcroForm")) : null;
+    const flags = form instanceof Map ? await this.resolve(form.get("SigFlags")) : 0;
+    return Number.isInteger(flags) && (flags & 1) === 1;
+  }
+
   /* The page's /Annots as it is: refs, and the odd dictionary written in place. */
   async annots(pageRef) {
     const page = await this.get(pageRef);

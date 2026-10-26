@@ -1,6 +1,6 @@
 # PDF 필기와 에이전트에게 넘기기 v0.1
 
-> 2026-10-26 · **PROPOSED (V3-P77)** · 1단계 구현 노트 §14(보기, legacy pdf.js, 직접 만든 증분 작성기·읽기, 진입 조건 결과). rev. 4: 외부 재검수(HEAD d3dfd2c, READY_WITH_CORRECTIONS) 반영 — P2-1 펜 필기와 손가락 스크롤·확대를 나누는 방법과 `pointercancel`, iPad 진입 조건(§4.1, §11), P2-2 판 기록 실패를 바꾸기 전·후로 나눔(§5.3, §6.3, §9), P3 `/HimariInk` 왕복을 1단계 확인에 더함(§11). rev. 3: 외부 검수(HEAD b6d420a) 반영 — P1-1 64 MiB는 저장한 뒤의 파일 크기(§3.3, §5.3), P1-2 큰 PDF의 지우기·복원도 사본을 남기는 한 계약(§6.1, §6.3), P2-3 pdf.js 저장 결과에서 증분을 떼어 내는 확인과 2단계 진입 조건(§5.2, §11), P2-4 형광펜 투명도는 모양 스트림의 ExtGState로(§5.1), P2-5 저장된 HIMARI 필기는 필기 층만 그림(§3.2, §4.4), P3 쪽 수를 셀 수 없으면 페이지 참조 거부(§7.2). rev. 2: 소유자 결정 Q1~Q6 권고대로(§13). rev. 1: 설계 초안.
+> 2026-10-26 · **PROPOSED (V3-P77)** · 2단계 2b 구현 노트 §16(필기 층). 2단계 1번 구현 노트 §15(서버). 1단계 구현 노트 §14(보기, legacy pdf.js, 직접 만든 증분 작성기·읽기, 진입 조건 결과). rev. 4: 외부 재검수(HEAD d3dfd2c, READY_WITH_CORRECTIONS) 반영 — P2-1 펜 필기와 손가락 스크롤·확대를 나누는 방법과 `pointercancel`, iPad 진입 조건(§4.1, §11), P2-2 판 기록 실패를 바꾸기 전·후로 나눔(§5.3, §6.3, §9), P3 `/HimariInk` 왕복을 1단계 확인에 더함(§11). rev. 3: 외부 검수(HEAD b6d420a) 반영 — P1-1 64 MiB는 저장한 뒤의 파일 크기(§3.3, §5.3), P1-2 큰 PDF의 지우기·복원도 사본을 남기는 한 계약(§6.1, §6.3), P2-3 pdf.js 저장 결과에서 증분을 떼어 내는 확인과 2단계 진입 조건(§5.2, §11), P2-4 형광펜 투명도는 모양 스트림의 ExtGState로(§5.1), P2-5 저장된 HIMARI 필기는 필기 층만 그림(§3.2, §4.4), P3 쪽 수를 셀 수 없으면 페이지 참조 거부(§7.2). rev. 2: 소유자 결정 Q1~Q6 권고대로(§13). rev. 1: 설계 초안.
 >
 > 소유자 방향
 > - V3-P75 설계 때(2026-10-25): 나중에 iPad에서 PDF에 Apple Pencil로 필기하고, 그것을 바로 에이전트에게 넘긴다.
@@ -495,3 +495,218 @@ PDF는 믿을 수 없는 입력이다. 클라우드 폴더나 인터넷에서 �
   - 그만큼 줄여도 CSS 픽셀당 0.25보다 거칠면(`MIN_OUTPUT_SCALE`) 그 쪽은 그리지 않는다. 대신 쪽 위에 "This page is too large to draw here. Zoom out, or download the PDF."를 둔다. 배율이 바뀌면 다시 해 본다.
   - 시험: `pdf_smoke`가 네 가지 모양(가늘고 긴 쪽, 넓고 낮은 쪽, 아주 넓은 쪽, 큰 정사각형 쪽)에서 상한을 확인한다. 그릴 수 없는 쪽은 canvas도 렌더도 없이 안내만 있는지, 확대가 바뀌어 그릴 수 있게 되면 안내가 사라지는지도 본다.
   - 브라우저: 10×14,400pt 쪽에서 canvas 없이 안내가 보였다.
+
+## 15. 2단계 1번 구현 노트 (서버: 저장 끝점, runner 프로토콜 3, PDF 판, 2026-10-26)
+
+### 15.1 runner 프로토콜 3 (§6.1)
+
+- `write`(`mode: "replace"`)가 `copy_max`를 받는다.
+  - 정수(참·거짓 값은 안 됨)이고 1 MiB에서 64 MiB(`MAX_COPY_BYTES`) 사이다. 그 밖이면 `INVALID`, 빠지면 1 MiB다.
+  - 그 크기까지 rename 전에 사본을 뜨고, 넘으면 `TOO_LARGE`다.
+- **사본이 꼭 있어야 하는 지우기는 새 op `delete_copied`다**(`expected`, `copy_max` 필수). 사본 없이는 지우지 않는다. 넘으면 `TOO_LARGE`이고, 아무것도 지우지 않는다(§15.6).
+- 확인하는 `delete`는 지금(프로토콜 2)과 같다. 1 MiB까지 사본을 뜨고, 넘으면 사본 없이 지운다.
+- `PROTOCOL_VERSION` 3, `COPY_MAX_PROTOCOL` 3. HIMARI 쪽은 `MachineEnvironment.copies_large()`로 확인한다(`keeps()`와 같은 방식).
+
+### 15.2 PDF 판 저장소 (§6.2)
+
+- `VersionStore`가 저장소마다 예산을 받는다(`max_bytes`, `max_version_bytes`).
+  - 편집기와 에이전트 저장소: 200 MiB / 1 MiB, 지금과 같다.
+  - `file-versions-pdf/`: 1 GiB / 64 MiB.
+- 판을 남길 때 **메모리에 다 올리지 않는다.** `.part`로 흘려 쓰고, 다 쓴 뒤에 `.bin`으로 이름을 바꾼다. 한도를 넘거나 실패하면 `.part`를 지운다.
+- `latest(path)`는 30분 규칙에 쓴다. `open(path, id)`는 판을 fd로 연다. 복원과 보기가 판을 통째로 읽지 않기 위해서다.
+- 새 이유: `ink`(필기 저장 전), `restore`(이전 판을 덮어쓰기 전). 화면의 문구는 2번(필기 층)에서 더한다.
+
+### 15.3 저장 끝점 (§5.3)
+
+`POST /api/machine/pdf/append?path=…`
+- 본문은 `application/octet-stream`이다. 아니면 415다.
+- `X-Himari-Expected`는 쉼표로 이은 십진수 넷이다. 아니면 400이다.
+- 이 경로만 본문 한도가 8 MiB다. 넘으면 미들웨어가 413 `request_too_large`로 막는다.
+
+`Explorer.append_pdf`가 하는 일
+1. 받기 전에 거부하는 것
+   - 덧붙일 것이 비었음(`invalid`).
+   - 8 MiB 넘음(`too_large`).
+   - 원본 크기 + 덧붙일 크기가 64 MiB 넘음(`too_large`).
+   - 증분 확인에 실패함(`invalid`). 확인은 브라우저의 `checkIncrement`와 같다: 끝의 `startxref N %%EOF`이고, N이 원본 크기와 새 크기 사이다.
+2. runner가 프로토콜 3보다 오래됐으면 `unsupported`("restart himari-runner")다.
+3. runner `open`의 identity가 `expected`와 다르면 409 `changed`다.
+4. 30분 규칙: 그 파일의 마지막 PDF 판이 30분 안이면 판을 남기지 않는다. 남겨야 하는데 저장소가 받을 수 없으면 507 `versions_unavailable`이고, 파일은 그대로다.
+5. 연 fd에서 원본을 임시 파일로 복사하고 증분을 붙인다.
+   - 첫머리가 `%PDF-`가 아니면 415 `not_regular`다.
+   - 복사는 탐색기의 읽기 스레드에서 하고, 120초까지 기다린다. 클라우드 마운트가 느릴 수 있어서다.
+6. runner replace(`expected`, `copy_max` 64 MiB). 그사이 바뀌었으면 runner가 `CHANGED`로 거부한다.
+7. 판을 남긴다. 실패하면 `previous_kept: false`이고 저장은 된 상태다.
+   - 30분 안이라 판을 남기지 않은 저장도 `previous_kept: true`다. 그 판이 이번 필기 전의 PDF를 담고 있기 때문이다.
+
+상태 코드
+- 64 MiB를 넘는 `too_large`는 설계의 413이 아니라 기존 `EXPLORER_STATUS`대로 422다. 화면은 상태가 아니라 코드를 본다.
+
+다운로드
+- `GET /api/machine/download`가 `X-Himari-Identity`(보낸 바이트의 identity)를 함께 준다. 브라우저는 이것으로 저장한다(2번).
+
+### 15.4 큰 PDF의 지우기, 복원, 되돌리기 (§6.3)
+
+- **지우기**
+  - 64 MiB 이하 파일은 runner로 열어 첫머리를 본다. PDF이면 크기와 상관없이 PDF 판 저장소로 간다.
+  - 1 MiB가 넘으면 `copy_max`를 보내고, 프로토콜 3이 아닌 runner면 거부한다. 1 MiB 이하는 옛 runner도 사본을 뜨므로 거부하지 않는다.
+  - 저장소가 받을 수 없으면 지우지 않는다.
+  - PDF가 아닌 큰 파일은 지금처럼 사본 없이 지운다.
+- **지운 파일 복원**: PDF 판은 `install`로, 판 파일을 fd 그대로 넘긴다(64 MiB 한도는 저장소의 판 한도다). 다른 저장소는 지금과 같다.
+- **이전 판 되돌리기**: `POST /api/machine/versions/{id}/put_back`(`path`, `expected`)이다.
+  - PDF 판만 받는다. 글 파일은 지금처럼 편집기로 되돌린다.
+  - 지금 파일을 30분 규칙과 상관없이 `restore` 판으로 먼저 남기고, 그 위에 판을 쓴다.
+- **판 보기**: `GET /api/machine/versions/{id}/download`는 다운로드와 같은 머리글(`attachment`, `CSP: sandbox`)을 쓴다. 판을 읽기 전용으로 여는 데 쓴다(2번).
+  - PDF 판을 글로 읽으려 하면(`GET /api/machine/versions/{id}`) 통째로 읽지 않고 415로 거부한다.
+
+### 15.5 시험과 배포
+
+- 시험
+  - runner: hostfs의 `copy_max` 경계, 소켓을 거친 값 확인(0, 1024, 64 MiB+1, 참, 문자열), replace·delete의 사본.
+  - `VersionStore`: 큰 판의 흘려 쓰기, 한도, 남은 `.part` 없음, `latest`·`open`.
+  - 웹(`test_web_pdf.py`)
+    - 증분 확인, 저장과 판, 30분 규칙, 오래된 identity.
+    - 거부: 머리글, 형식, 빈 것, 증분이 아님, PDF가 아님, 숨김, 8 MiB, 64 MiB.
+    - 판 기록: 오래된 runner, 저장소 가득, 바꾼 뒤 판 기록 실패.
+    - 3 MiB PDF의 저장, 되돌리기, 지우기(저장소 가득·옛 runner 거부), 지운 판 복원.
+    - PDF가 아닌 큰 파일.
+- 배포: **himari-runner 재시작이 필요하다**(프로토콜 3). 재시작 전에는 필기 저장과 1 MiB 넘는 PDF의 지우기가 "restart himari-runner"로 거부되고, 아무것도 바뀌지 않는다.
+- 이 PR만으로는 화면이 바뀌지 않는다. 필기 층과 저장 버튼은 2번이다.
+
+### 15.6 PR #103 검수 반영
+
+- **P1 runner가 뒤로 바뀐 경우**
+  - HIMARI는 프로토콜 3을 듣고 기억해 둔다. 그 뒤 runner만 2판으로 되돌려지면, 2판은 `copy_max`를 모른 채 큰 PDF를 사본 없이 지울 수 있었다.
+  - 그래서 사본이 필요한 지우기를 새 op `delete_copied`로 바꿨다. 2판은 모르는 op를 `INVALID`로 거부하므로 지우지 않는다.
+  - replace는 2판이 `copy_max`를 무시해도 1 MiB 넘는 파일을 `TOO_LARGE`로 거부하므로 원래부터 닫힌 채 실패한다.
+  - 이 두 거부를 받으면 `copies_large(fresh=True)`로 판을 다시 묻는다. 오래됐으면 "restart himari-runner"(`unsupported`)로 알린다.
+  - 시험: 3을 기억한 뒤 runner가 2처럼 답하게 하고, 3 MiB PDF의 지우기와 저장을 해 본다. 둘 다 422 `unsupported`이고 파일은 그대로다.
+- **P1 복사를 포기한 뒤의 fd**
+  - 원본 복사는 이제 복사 스레드가 자기 임시 파일을 만들어 다 쓴 뒤에만 넘긴다(`_pdf_with`).
+  - 시간 초과나 요청 취소로 포기하면, 스레드가 끝날 때 그 파일을 닫는다(`_reading`의 `discard`).
+  - 그래서 닫혔거나 다른 요청이 다시 쓰는 fd 번호에 쓰는 일이 없다.
+  - 시험: 복사를 멈춰 504를 받고, fd 번호들을 다시 연 뒤 복사를 풀어 준다. 그 복사본이 닫히고, PDF와 다른 파일이 그대로인지 본다.
+- **P2 부분 쓰기**: 복사는 파일 객체로 쓴다. 파일 객체는 모든 바이트를 쓰거나 예외를 낸다. 예외가 나면 바꾸지 않는다.
+- **P2 색인 실패**
+  - 판의 `index.json`을 쓰지 못하면 방금 만든 그 판의 `.bin`(과 남은 임시 색인)을 지운다. 이전에 남긴 판은 건드리지 않는다.
+  - 시험: 색인 쓰기를 실패시키고, 남은 파일과 이전 판을 확인한다.
+- **P3 웹의 지우기 안내**
+  - 열어 둔 PDF가 64 MiB 이하이면 "1 MiB 넘어서 되돌릴 수 없다" 경고와 두 번째 확인을 띄우지 않는다. 대신 "이전 판으로 30일 남는다"를 띄운다.
+  - 2a만 배포해도 안내가 실제와 맞는다.
+
+## 16. 2단계 2번 구현 노트 (필기 층과 저장, 2026-10-26)
+
+2번은 둘로 나눈다.
+- **2b(이 노트)**: 필기 층, 도구, 입력 규칙, 저장, 충돌.
+- **2c**: 저장 안 한 필기의 브라우저 임시 보관(§4.5, IndexedDB), PDF 이전 판 화면(Open·Restore, §6.2), "Draw with finger"(§4.1).
+
+### 16.1 모듈
+
+- `static/freehand/perfect-freehand.mjs`: perfect-freehand 1.2.3(MIT)을 그대로 복사했다. `LICENSE`와 `SOURCE`를 함께 둔다.
+- `static/pdfink.js`(DOM 없음)
+  - 선 모델과 도구(`TOOLS`). 펜은 색 셋에 굵기 둘(1.6/3.2 pt), 형광펜은 노랑 12 pt다.
+  - 외곽선(`outline`)과 저장할 주석의 꼴(`specOf`: `/Rect`, `/InkList`, `/C`, `/BS /W`, 채운 외곽선의 모양 스트림, `/HimariInk`).
+  - 저장된 주석에서 선 만들기(`strokeFromSaved`). `/HimariInk`는 믿을 수 없는 입력이라 검사하고, 맞지 않으면 `/InkList`로 그린다.
+  - 지우개의 닿음 판정(`hits`).
+  - `Ink`: 쪽별 선, 되돌리기·다시하기, 저장할 것(`changes`: 더할 선, `/Annots`에서 뺄 주석), 충돌 때 옮길 것(`carry`/`put`).
+- `static/pdfpane.js`
+  - 쪽마다 필기 canvas(`.pdf-ink`, `mix-blend-mode: multiply`)를 둔다. 그리는 중인 선은 따로 둔 canvas에 그린다.
+  - 입력 규칙, 저장할 증분 만들기(`increment`), 저장 뒤 다시 읽기(`saved`), 충돌 때 옮기기(`carryIn`).
+- `static/files.js`
+  - 머리의 도구: 스크롤, 펜, 형광펜, 지우개, 펜 색·굵기, 되돌리기·다시하기, 상태, Save.
+  - 저장 요청(`postAppend`), 충돌 막대, 몇 초마다 확인, 떠날 때 묻기.
+- 정적 파일: `pdfink.js`, `pdfdoc.js`, `freehand/perfect-freehand.mjs`를 `STATIC_FILES`에 더했다.
+
+### 16.2 입력 (§4.1)
+
+- 도구를 고르지 않으면 아무것도 그리지 않는다(스크롤만).
+- 고르면
+  - 펜(`pointerType: "pen"`)은 그린다.
+  - 손가락(`touch`)은 그리지 않는다. 펜으로 쓰는 동안 닿은 손바닥도 그래서 무시된다.
+  - 마우스는 왼쪽 버튼으로 그리고, 필압은 0.5 고정이다.
+- Apple Pencil의 터치(`touchType: "stylus"`)는 도구가 있을 때 non-passive `touchstart`·`touchmove`에서 `preventDefault`한다. 상자는 `touch-action: pan-x pan-y` 그대로라 손가락 스크롤은 브라우저가 한다.
+- 두 손가락 확대는 stylus가 아닌 터치 둘일 때만이다. Pencil과 손바닥이 함께 닿아도 확대가 아니다.
+- 그리는 동안
+  - `setPointerCapture`로 그 펜을 잡는다.
+  - `getCoalescedEvents()`로 사이 점까지 받는다.
+  - `getPredictedEvents()`는 그리는 중의 모양에만 쓰고, 선에 넣지 않는다.
+- `pointercancel`·`lostpointercapture`: 점이 둘 이상이면 그때까지의 선으로 끝내고, 아니면 버린다. 펜을 뗀(`pointerup`) 한 점은 점으로 남긴다.
+- 한 선은 5,000점에서 끝난다.
+- 지우개: 화면 8px 안에 닿은 선을 통째로 지운다. 한 번 긋는 동안 지운 것은 되돌리기 한 번이다.
+- 되돌리기·다시하기: Ctrl/Cmd+Z, Shift+Ctrl/Cmd+Z, 그리고 머리의 버튼.
+
+### 16.3 저장과 충돌 (§5)
+
+- 저장 기준은 **다운로드의 `X-Himari-Identity`** 다. 받은 바이트의 판이다(`readDownload`가 `{bytes, identity}`를 준다). 없으면 `show`의 identity를 쓴다.
+- Save
+  1. `increment()`: 바뀐 쪽마다 더할 선(`specOf`)과 뺄 주석으로 `appendIncrement`를 만든다. `checkIncrement`와 64 MiB를 확인한다.
+  2. `POST /api/machine/pdf/append`.
+  3. `saved()`: 원본과 증분을 이어 다시 읽고, 읽었던 쪽의 필기를 저장된 선으로 다시 만든다. PDF.js 문서는 다시 열지 않는다. HIMARI 필기는 어차피 필기 층이 그리기 때문이다.
+  - **되돌리기 기록은 저장하면 비운다.**
+  - 저장하는 동안에는 그리기, 되돌리기, 다시하기를 받지 않는다.
+- `previous_kept: false`이면 상태에 "Saved, but its previous version could not be kept"를 띄운다.
+- 409 `changed`이거나, 몇 초마다(5초) 확인했을 때 파일이 바뀌었으면
+  - 저장 안 한 필기가 없으면 조용히 다시 열고, 보던 쪽에 머문다.
+  - 있으면 막대를 띄운다.
+    - "Load the server's version and keep my ink": 새 선은 페이지 좌표 그대로 새 판 위에 다시 올린다. 지웠던 저장 선은 이름(`/NM`)으로 새 판에서 다시 지운다. 새 판에 없는 쪽의 선은 버리고, 몇 개인지 알린다.
+    - "Discard my ink".
+- 떠날 때(다른 파일·폴더·대화) 저장 안 한 필기가 있으면 묻는다: "Discard your ink on …?"
+- 쓰지 않는 PDF: 암호화됐거나 pdfdoc.js가 구조를 못 읽으면 도구를 숨기고 "View only"(이유는 title)를 보인다. 그런 PDF는 HIMARI 필기도 PDF.js가 그린다.
+- 서명된 PDF(`/AcroForm /SigFlags` 1)는 처음 그릴 때 한 번 알린다(§5.4).
+- **PR #103 재검수 P3**: 지우기 안내는 열린 보기가 아니라 서버가 알려 준 파일 종류(`kind: "pdf"`)로 정한다. 그래서 pdf.js가 열지 못한 PDF도 "이전 판으로 남는다"로 안내한다.
+- 판의 이유 문구에 `ink`("before ink was saved")와 `restore`를 더했다.
+
+### 16.4 확인
+
+- `pdf_smoke`: 모델(도구, 외곽선, 꼴, 필압, 닿음, 파일 왕복, 믿을 수 없는 `/HimariInk`, 되돌리기·다시하기, 저장할 것, 옮기기).
+- `pdf_smoke`의 보기 입력: 묶은 PDF.js의 실제 문서와 가짜 DOM으로 확인한다.
+  - 저장된 필기가 숨겨지는지(`ENABLE_STORAGE`, 지운 것으로 표시).
+  - 도구 없음, 손가락, 마우스 오른쪽.
+  - 펜의 coalesced 점과 PDF 좌표, 필압. predicted 점은 넣지 않는지.
+  - `pointercancel`의 두 경우.
+  - stylus 터치를 막는지, 펜과 손바닥이 확대가 아닌지.
+  - 지우개, 되돌리기, 저장 증분과 다시 읽기.
+  - 암호화된 PDF.
+- `files_smoke`: 도구 고르기와 기억, Save의 identity, 판을 못 남긴 저장, 409 막대와 "keep my ink", 떠날 때 묻기, 확인할 때 다시 열기·막대, View only, 열지 못한 PDF의 지우기 안내.
+- 변이 확인: 손가락 그리기, stylus 막기 없앰, cancel 때 버림, 숨기기 없앰, 손바닥도 확대로 셈. 모두 smoke가 잡았다.
+- 브라우저(headless Chromium, 실제 서버와 CSP)
+  - 마우스 선, CDP 펜(force) 선, 형광펜을 그리고, 되돌리기·다시하기 뒤 저장했다. 디스크의 파일에 Ink 주석 셋이 생기고, 다른 앱의 Square·Link는 남았다.
+  - 다시 열면 필기가 돌아오고 마지막 도구가 골라져 있다.
+  - 지우고 저장하면 둘로 줄었다. 판은 30분 규칙대로 하나다.
+  - 저장 안 한 필기를 두고 떠나려 하면 묻는다.
+
+### 16.5 남은 것
+
+- **iPad 진입 조건(§11)은 이 PR을 병합하기 전에 소유자가 확인한다.**
+  1. Pencil로 그려도 페이지가 스크롤되지 않는다.
+  2. 손가락으로 넘기기·확대가 된다.
+  3. 필기 중 시스템 제스처 등으로 끊겨도 선이 남는다.
+  - 안 되면 §4.1 B로 바꾼다.
+- 굵기, 가늘어짐, 형광펜 모양 같은 매개변수는 iPad에서 써 보고 정한다(§4.6).
+- PDF.js가 저장된 형광펜 주석을 읽으며 "AnnotationBorderStyle.setWidth - ignoring width: 12" 경고를 낸다. 그 주석은 필기 층이 그리므로 화면에는 영향이 없다.
+
+### 16.6 PR #104 검수 반영
+
+- **P1-1 저장 중에 그린 선**
+  - 전에는 증분을 만드는 동안(비동기) 그릴 수 있었다. 그러면 그 선은 저장되지 않고, 다시 읽을 때 사라졌다.
+  - 이제 Save를 누르면 **증분을 만들기 전에** 그리기·지우기·되돌리기를 막는다(`pdf.saving`, `view.saving`). 증분 실패, 저장 거부, 성공 모두 막음을 푼다.
+  - 그리는 중인 선이 있으면 저장하지 않고 "Finish the stroke, then save"라고 알린다.
+  - 서버는 받았는데 다시 읽기에 실패하면, 저장 안 한 필기가 없는 상태이므로 서버 판을 조용히 다시 연다.
+- **P1-2 "keep my ink"가 실패하면 필기가 사라짐**
+  - 이제 새 판은 화면 밖에서 따로 연다(`loadPdfView`): 받기, 열기, `carryIn`까지 끝낸 다음에야 지금 보기를 닫고 바꾼다(`installPdf`).
+  - 그동안 지금 보기는 얼려 둔다(그리기·저장·확인 없음). 옮길 필기는 그 시점의 것이 전부다.
+  - 받기 실패, PDF가 아님(또는 64 MiB 넘음), 열기 실패면 지금 보기와 필기를 그대로 두고 풀어 준다. 막대에 이유와 "Your ink is still here."를 다시 띄운다. 실패한 새 보기는 닫는다.
+  - 처음 열 때와 조용히 다시 열 때도 같은 길(미리 열고 붙이기)을 쓴다. 붙인 뒤 `show(page)`가 폭에 맞추고 보던 쪽으로 간다.
+- **P2 서명 안내가 필기 중에 좌표를 바꿈**
+  - 서명 안내는 이제 그리는 도구를 고를 때(기억된 도구로 열 때 포함) 한 번 띄운다. 선을 긋기 전이다.
+  - 그 밖의 이유로(충돌 막대 등) 그리는 도중 페이지가 움직여도 선이 따라가도록, `pointermove`마다 그 쪽의 위치를 다시 읽는다.
+- 시험
+  - `files_smoke`
+    - 증분을 만드는 동안 얼어 있는지, 실패·거부 뒤 풀리는지, 그리는 중 저장을 막는지.
+    - "keep my ink"의 실패 세 가지(받기, PDF 아님, 열기)에서 보기·필기·막대가 남는지, 성공할 때 새 보기가 준비될 때까지 옛 보기가 남는지.
+    - 서명 안내가 도구를 고를 때 한 번만 뜨는지.
+  - `pdf_smoke`: 저장 중에는 펜이 그리지 않는지, 그리는 도중 쪽이 40px 내려가도 같은 자리를 그리는지.
+  - 변이: 막는 때를 늦춤, 먼저 닫음, 위치를 다시 안 읽음, 도구 고를 때 안 알림. 모두 smoke가 잡았다.
+  - 브라우저
+    - 그리는 도중 다른 앱이 PDF를 바꾸자 5초 안에 막대가 떴다.
+    - "keep my ink" 뒤 새 판 위에 선이 올라가 Unsaved가 됐다. 저장하니 새 판의 HIMARI 선 둘에 하나가 더해졌다.
