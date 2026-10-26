@@ -116,6 +116,7 @@ const app = {
   activityAsked: new Set(), // ids not in the list that the list was read again for once (§3.3)
   activityTicket: 0, // the latest /activity read: an older answer is dropped (review N3)
   listTicket: 0, // the latest list read
+  listResetting: 0, // the ticket of a reload under way (0: none)
   sendWaiting: false, // a send waits for the conversation being created
   conversationId: null,
   generation: 0,
@@ -259,6 +260,7 @@ function showLogin({ signingOut = false } = {}) {
   if (!$("surface-login").hidden) return;
   stopPolling();
   clearTimeout(app.activityTimer); // V3-P80: read again after the sign-in
+  app.activityTicket += 1; // a read answered before this never paints the sign-in screen (review N2)
   app.activity = { working: new Set(), waiting: new Set() };
   views.reset();
   app.conversationId = null;
@@ -365,9 +367,17 @@ function renderListRow(item) {
 
 async function loadList(reset) {
   // The latest read draws the list: a reload and "Load more" under way at once never mix (V3-P80 review N2).
+  // "Load more" waits out a reload, which would otherwise be dropped for it (re-review N4).
+  if (!reset && app.listResetting) return [];
   const ticket = (app.listTicket += 1);
+  if (reset) app.listResetting = ticket;
   const offset = reset ? 0 : app.listOffset;
-  const page = await api("GET", `/api/conversations?limit=${PAGE}&offset=${offset}`);
+  let page;
+  try {
+    page = await api("GET", `/api/conversations?limit=${PAGE}&offset=${offset}`);
+  } finally {
+    if (app.listResetting === ticket) app.listResetting = 0;
+  }
   if (ticket !== app.listTicket) return page.items;
   const list = $("conversation-list");
   if (reset) list.replaceChildren();
@@ -439,7 +449,9 @@ async function readActivity() {
     }
     paintActivity();
   } catch (error) {
-    if (error.status === 401) return; // the sign-in screen; reading starts again after it
+    // The sign-in screen: reading starts again after it. Any other failure (a 401 a proxy wrote, the
+    // network) tries again later (review N3).
+    if (!$("surface-login").hidden) return;
   }
   if ($("surface-login").hidden) scheduleActivity();
 }
@@ -624,6 +636,11 @@ const PLAIN_NAMES = /^(image|img|pasted|screenshot|untitled)?\.(png|jpe?g|gif|we
 const PASTE_TYPES = { "image/png": "png", "image/jpeg": "jpg", "image/gif": "gif", "image/webp": "webp",
                       "image/heic": "heic", "image/tiff": "tiff", "text/plain": "txt", "application/pdf": "pdf" };
 
+function extensionOf(name) {
+  const dot = (name || "").lastIndexOf(".");
+  return dot > 0 ? name.slice(dot + 1).toLowerCase() : null;
+}
+
 /* pasted-YYYYMMDD-HHMMSS[-n].ext: several things pasted at once stay apart (V3-P80 §4.1). */
 function pastedName(extension, index = 0) {
   const now = new Date();
@@ -647,7 +664,8 @@ function pasteIntoComposer(event) {
   if (files.length && !text) {
     event.preventDefault();
     addFiles(files.map((file, index) => (file.name && !PLAIN_NAMES.test(file.name) ? file
-      : new File([file], pastedName(PASTE_TYPES[file.type] || "bin", index), { type: file.type }))));
+      : new File([file], pastedName(PASTE_TYPES[file.type] || extensionOf(file.name) || "bin", index),
+                 { type: file.type }))));
     return;
   }
   if (!text) return;
@@ -656,7 +674,9 @@ function pasteIntoComposer(event) {
   const box = $("composer-text");
   const kept = box.value.slice(0, box.selectionStart) + box.value.slice(box.selectionEnd);
   if (kept.length + text.length <= MAX_MESSAGE_CHARS) return; // fewer UTF-16 units: fewer characters too
-  if (characters(kept) + characters(text) <= MAX_MESSAGE_CHARS) return;
+  // A character is at most two units: past twice the limit, no need to count (a huge paste; review N5).
+  if (kept.length + text.length <= 2 * MAX_MESSAGE_CHARS
+      && characters(kept) + characters(text) <= MAX_MESSAGE_CHARS) return;
   event.preventDefault();
   addFiles([new File([text], pastedName("txt"), { type: "text/plain" })]);
   status("The pasted text was long, so it was attached as a file.", "ok");

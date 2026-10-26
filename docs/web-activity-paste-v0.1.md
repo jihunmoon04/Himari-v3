@@ -147,3 +147,13 @@
 - **Web API:** `GET /api/conversations/activity`(id 경로보다 앞), `seen`을 부르지 않음(테스트가 `seen`을 바꿔 확인), 휴지통으로 옮기면 빠짐, 로그인 전 401.
 - **화면:** `app.activity`·`paintActivity`(목록 행과 홈 카드에 점, `followTitle`의 수)·`readActivity`(마지막 읽기만, 목록에 없는 id마다 한 번 목록 새로)·`scheduleActivity`(5초, 숨으면 멈춤, 보이면 바로). `loadList`는 마지막 읽기만 그린다. 보내기가 받아들여지면, job이 끝나면, 다시 보이면 바로 읽는다. `pasteIntoComposer`와 `pastedName`.
 - **확인:** 전체 pytest 2,609 passed(117 skipped), mypy, import 경계. node: `ui_state_smoke` 21(5초 읽기는 하네스에서 막음), `rich_text`·`live`·`files`·`pdf`. 브라우저 `ui_smoke` 전부 통과, 새 `activity`(일하는 중·기다림 점과 사라짐, 탭 제목 `(1)`, 다른 탭에서 시작한 대화가 나타남, 붙여넣기 넷: 그림만, 글과 그림, 긴 글, 짧은 글). 붙여넣기 이벤트는 합성한 `ClipboardEvent`라, iPad 스크린샷·사진 앱·Finder 복사는 실기기 확인(§4.1).
+
+### 10.1 구현 검수 (PR #110): READY
+
+반드시 고칠 것 없음(SQL과 `_waiting`의 같음, `running`, 경로, 타이머, `loadList` 호출자, 제목, 붙여넣기 확인). 선택 항목 반영:
+- N1: 점이 있는 행의 오른쪽 여백이 행 자체의 여백 규칙에 져서 긴 제목 끝을 가림 → 더 구체적인 선택자.
+- N2: 로그아웃 전에 답한 활동 읽기가 로그인 화면에 `(1)`을 그림 → `showLogin`이 읽기 번호를 올림.
+- N3: 프록시가 쓴 JSON 아닌 401 등에서 읽기가 멈춤 → 로그인 화면일 때만 멈추고, 아니면 다시 예약.
+- N4: 다시 읽기가 진행 중일 때 누른 "Load more"가 그 다시 읽기를 버리게 함 → 다시 읽기 중에는 "Load more"를 하지 않음.
+- N5: 아주 큰 붙여넣기에서 글자 수 세기 비용 → 한도의 두 배를 넘으면 세지 않고 파일로; 형식을 모르는 붙여넣은 파일은 원래 이름의 확장자를 씀.
+

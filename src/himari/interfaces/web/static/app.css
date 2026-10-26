@@ -1627,7 +1627,7 @@ details > summary {
   margin: -4px 0 0;
 }
 
-.conv-row:has(> .activity-dot) {
+.conversation-row > .conv-row:has(> .activity-dot) { /* over the row's own padding (review N1) */
   padding-right: 24px;
 }
 
