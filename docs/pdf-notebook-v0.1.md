@@ -1,11 +1,11 @@
 # PDF를 필기 앱처럼 (V3-P82 설계 초안 v0.1, rev. 3)
 
-상태: **Proposed**. 소유자 결정 Q1~Q4·Q6 권고대로, Q5는 rev. 3에서 거두었다가 Drive 판 기록을 확인한 뒤 다시 정한다(2026-10-26, §11). rev. 2는 독립 설계 검수(READY_WITH_CORRECTIONS, B1~B4·C1~C8·N1~N7)를 반영했다. 검수에서 나온 비용(클라우드 폴더의 다시 올리기)과 캡처의 탭 동작은 Q5·Q6으로 다시 물었고, 권고대로 정했다(2026-10-26).
+상태: **Proposed**. 소유자 결정 Q1~Q4·Q6 권고대로, Q5는 Drive 판 기록을 확인한 뒤 "클라우드 폴더는 떠날 때만"(2026-10-26, §11). rev. 2는 독립 설계 검수(READY_WITH_CORRECTIONS, B1~B4·C1~C8·N1~N7)를 반영했다. 검수에서 나온 비용(클라우드 폴더의 다시 올리기)과 캡처의 탭 동작은 Q5·Q6으로 다시 물었고, 권고대로 정했다(2026-10-26).
 
 **rev. 3(2026-10-26, 소유자 요청):** "필기 내용은 지울 수 있는데 수정할 때마다 이전 파일 내용을 저장하는 건 불필요해 보인다. 백업 파일을 만들지 않고 원본에 바로 저장하자."
 - PDF 저장은 **원본 끝에 바로 덧붙인다**(runner의 새 동작 `append`, §3.6). 파일 전체를 복사해 바꿔치기하지 않고, 필기 저장마다의 이전 판(30분 규칙)도 남기지 않는다.
 - 운영 서버의 rclone Drive 마운트에서 시험했다(§3.6). 덧붙이기는 identity가 안정적이었고, 바꿔치기는 inode가 저절로 바뀌어 거짓 충돌을 낸다. Drive 휴지통에는 아무것도 쌓이지 않았다.
-- 그래서 Q5(클라우드 폴더는 저장 사이 2분)를 거두었다. 다만 Drive가 갱신마다 판 기록을 쌓는지 확인한 뒤 다시 정한다(§3.6, 검수 r3 C5).
+- Q5(클라우드 폴더는 저장 사이 2분)를 거두었다가, Drive가 갱신마다 판 기록을 쌓는 것을 확인하고 **클라우드 폴더는 떠날 때만 저장**으로 다시 정했다(§3.6, 검수 r3 C5).
 - rev. 3 재검수(READY_WITH_CORRECTIONS, 이 문서에서 "검수 r3")의 B1·B2·C1~C6·N1~N7을 반영했다.
 
 > 소유자 요청(2026-10-26): "pdf편집기를 조금 더 일반적인 필기 앱처럼 만들고 싶은데"
@@ -71,7 +71,9 @@
 
 - **필기를 멈추고 5초**(Q1). 그리기, 지우기, 되돌리기, 다시하기가 바뀜이다. 바뀔 때마다 5초를 다시 센다.
   - **쉬지 않고 계속 쓰면 60초마다** 저장한다(검수 N4).
-  - 클라우드 동기화 폴더(rclone 마운트)는 Q5를 다시 정할 때까지 정하지 않는다(§3.6, §11).
+  - **클라우드 동기화 폴더(rclone 마운트 등)의 PDF는 5초·60초 규칙으로 저장하지 않는다**(Q5). 아래의 떠날 때, 탭이 숨을 때, 캡처 전, Ctrl/Cmd+S에만 저장한다. 그 사이에 쓴 것은 브라우저 보관소가 지킨다(§4). Drive는 저장마다 파일 크기의 판을 남기기 때문이다(§3.6).
+  - 그 폴더인지는 서버가 알려 준다. 파일을 열 때의 답에 `cloud_synced`(그 파일이 있는 파일시스템이 Workspace 화면의 클라우드 목록에 드는지)를 담는다.
+  - 머리의 상태 글은 그 폴더에서 "Unsaved · saved when you leave"다.
 - **떠날 때**: 다른 파일·폴더·대화로 갈 때, 파일 패널을 닫을 때. 지금의 "Discard your ink?" 확인 대신 저장하고 간다.
   - 저장이 실패하면 지금처럼 묻는다. 쓴 것은 브라우저 보관소에 남아 있다고 함께 알린다(§4).
 - **탭이 숨을 때**(`visibilitychange`가 `hidden`, iPad에서 앱을 내림): 브라우저 보관소에 **바로** 쓰고, 저장을 시작한다. 저장이 끝나지 못해도 보관소에 남는다.
@@ -179,10 +181,10 @@
 - 덧붙이기를 5초 간격으로 다섯 번: identity(`dev`, `ino`, `size`, `mtime_ns`)가 우리가 쓴 만큼만 바뀌었다. rclone이 올리는 동안을 포함해 90초 뒤까지 그대로였다.
 - 바꿔치기를 다섯 번: 두 번은 바꿔치기 직후 inode가 임시 파일의 번호였다가, 몇 초 뒤 rclone이 저절로 원래 번호로 되돌렸다. 그러면 곧 이어지는 저장이나 5초 확인이 "Changed on the server"를 낸다. 지금 편집기 저장과 PDF 저장이 쓰는 방식이고, 이 문서 밖에서 따로 고친다(§12).
 - 소유자가 본 Drive 휴지통에는 새 항목이 없었다. rclone은 바뀐 파일을 같은 파일의 갱신으로 올린다.
-- **Drive의 판 기록은 확인 중이다**(검수 r3 C5). Drive는 PDF 같은 파일이 갱신될 때마다 옛 내용을 "버전 관리"에 30일 또는 100개까지 두고, 그것도 용량을 쓰는 것으로 안다. 그렇다면 30 MB 교재를 자동 저장으로 쓰면 드러나지 않는 판이 수 GB 쌓일 수 있다. 시험 파일(덧붙이기 세 번)의 판 수를 소유자가 확인한 뒤 Q5를 다시 정한다.
+- **Drive는 갱신마다 판을 남긴다**(검수 r3 C5). 시험 파일(올림 한 번, 30초 간격 덧붙이기 세 번)의 "버전 관리"에 판 1~4가 있었다(소유자 확인). Drive는 옛 판을 30일 또는 100개까지 두고 그것도 용량을 쓰는 것으로 안다(Google 안내, 직접 재지는 않음). 30 MB 교재를 5초 규칙으로 쓰면 드러나지 않는 판이 수 GB 쌓일 수 있다. 그래서 클라우드 폴더는 떠날 때만 저장한다(Q5, §3.2).
 - 시험의 방법: 앞 시험은 `O_APPEND` 쓰기와 `fsync`, 닫기. 두 번째 시험은 `pwrite`(이 설계의 방식)와 `fsync`, 닫기, 30초 간격. 마운트 옵션은 `--vfs-cache-mode full --dir-cache-time 1000h --attr-timeout 1000h --poll-interval 15m`이다.
 - 90초만 지켜봤다(검수 r3 N7). rclone 캐시가 비워지거나 다시 시작되면 mtime을 Drive의 밀리초 값으로 다시 읽어 한 번 거짓 충돌이 날 수 있다. 그 경우는 지금의 충돌 막대가 맡는다.
-- Drive는 파일 일부만 올리는 방법이 없어서, rclone은 저장마다 파일 전체를 다시 올린다(서버의 대역이고, iPad는 증분만 보낸다). 5초 규칙은 쉬는 동안에만 저장하고, rclone도 바뀐 뒤 몇 초를 기다렸다 올리므로 그대로 둔다.
+- Drive는 파일 일부만 올리는 방법이 없어서, rclone은 저장마다 파일 전체를 다시 올린다(서버의 대역이고, iPad는 증분만 보낸다).
 
 **파일 크기**
 - 커지는 것은 대부분 필기 자체다. 지금 `/HimariInk`는 JSON을 16진 글자로 쓰고, `/InkList`와 모양 스트림까지 선 하나가 3~13 KB다. 빽빽이 한 시간 쓰면 10~15 MB가 된다.
@@ -350,11 +352,11 @@
   - `files.js`: 자동 저장 차례, 상태, 색 고르기 창, 메뉴, 저장 알림(`{path, from, to}`). PDF 저장의 "Saved, but its previous version could not be kept"는 뺀다.
   - `app.js`: 캡처 이미지와 쪽 참조를 입력창에, `referenceLabel`·`referenceKey`·`addReference`와 초안의 `page`, 칩의 identity 바꾸기.
   - `local_store.js`: 그대로.
-- **Interfaces(웹 서버)**: `ReferenceBody.page`, `reference_view`의 `page`. `pdf/append` 답의 `previous_kept`는 뺀다(검수 r3 N3).
+- **Interfaces(웹 서버)**: `ReferenceBody.page`, `reference_view`의 `page`, PDF를 열 때 답의 `cloud_synced`. `pdf/append` 답의 `previous_kept`는 뺀다(검수 r3 N3).
 - **Application**: `ReferenceRequest.page`.
 - **Data**: `FileReference`의 `page`·`pages`와 이벤트 코덱. 스키마 변경 없음.
 - **Documents**: 작업자의 `count` 연산(64 MiB).
-- **Bootstrap**: `Explorer.append_pdf`가 runner `append`를 부름(복사와 판 없음, PDF 판 저장소 없이도 저장됨), 옛 runner의 `invalid`를 `unsupported`로, 끝이 잘린 파일의 `truncate`, `Explorer.reference`의 쪽 확인과 작업자 잇기. 쓰이지 않게 되는 `_pdf_with`, `PDF_COPY_SECONDS`, `INK_VERSION_EVERY`와 `application.py`의 옛 주석을 지운다. 지우기·`delete_copied`·지운 PDF 되살리기·`put_back`은 그대로다(`put_back`은 아직 `replace`이고, rclone의 inode 문제는 §12).
+- **Bootstrap**: 파일의 `cloud_synced`(그 파일시스템 종류), `Explorer.append_pdf`가 runner `append`를 부름(복사와 판 없음, PDF 판 저장소 없이도 저장됨), 옛 runner의 `invalid`를 `unsupported`로, 끝이 잘린 파일의 `truncate`, `Explorer.reference`의 쪽 확인과 작업자 잇기. 쓰이지 않게 되는 `_pdf_with`, `PDF_COPY_SECONDS`, `INK_VERSION_EVERY`와 `application.py`의 옛 주석을 지운다. 지우기·`delete_copied`·지운 PDF 되살리기·`put_back`은 그대로다(`put_back`은 아직 `replace`이고, rclone의 inode 문제는 §12).
 - **runner**: 새 동작 `append`와 `truncate`, `api.WRITES`에 둘 다, 프로토콜 4. Environment(machine)의 `appends(fresh)`.
 - **Prompt**: `<file_reference>` 줄의 `page`·`pages`와 `FILE_REFERENCE_NOTE` 한 줄.
 - Provider, Control, CLI 변경 없음.
@@ -386,7 +388,7 @@
   - 캡처 영역의 배율과 크기, 작은 긋기의 무시.
   - 끝이 잘린 파일(1 KiB 미만·초과 조각)의 `cut`, 1,000개가 넘는 저장 기록(검수 r3 B1·B2).
   - 바꾼 코드를 되돌리면 시험이 실패하는지(돌연변이 확인).
-- `ui_state_smoke`·`files_smoke`: 자동 저장 차례(5초, 쉬지 않을 때 60초, 떠날 때, 숨을 때, 실패 뒤 다시), 5초 확인의 세대, 보관소 되살리기, 칩의 identity 바꾸기와 쪽별 칩.
+- `ui_state_smoke`·`files_smoke`: 자동 저장 차례(5초, 쉬지 않을 때 60초, 클라우드 폴더는 떠날 때만, 떠날 때, 숨을 때, 실패 뒤 다시), 5초 확인의 세대, 보관소 되살리기, 칩의 identity 바꾸기와 쪽별 칩.
 - pytest: runner `append`(identity가 다르면 아무것도 쓰지 않음, 링크 수 2, FIFO, 링크·숨김·쓰기 범위, 읽기 전용 파일, 답의 identity가 OPEN·STAT과 같음, 쓰는 사이 이름이 바뀜, 실패 뒤 원래 크기와 그 identity, 그사이 커졌으면 자르지 않음, `ftruncate` 실패의 `partial`, 취소 때 `WRITES`의 기다림, 옛 runner의 `invalid` → 새 `hello` → `unsupported`), runner `truncate`(`%%EOF` 바로 뒤만, 커지는 자르기 거부), `append_pdf`가 판을 남기지 않음, `FileReference.page`의 코덱 왕복과 옛 빌드의 읽기, 서버의 쪽 확인(범위 밖, 셀 수 없음, 64 MiB), 작업자 `count`, 프롬프트 줄.
 - 헤드리스 Chromium: 실제 PDF에서 자동 저장, 캡처한 이미지(캡처 → 한 획 → 자동 저장 → 보내기), 쪽 더한 파일을 pypdfium2로 다시 열기.
 - 소유자 확인: iPad에서 64 MiB 파일 자동 저장의 메모리, 쓰는 동안 저장이 끼어들지 않는지, 앱을 내렸다 돌아왔을 때, 캡처의 손맛.
@@ -401,7 +403,7 @@
 | Q2 | 색과 굵기는 어떻게 고르나? | **A. 미리 둔 색(펜 8, 형광펜 5) + Custom + 최근 색, 굵기 슬라이더와 자주 쓰는 셋** / B. 즐겨찾는 펜 몇 개를 직접 만들어 두기(색·굵기 묶음) / C. 미리 둔 색만 늘리기(Custom 없음) | **A**. 자유롭게 고르면서 자주 쓰는 것은 한 번에 고른다 → 권고대로 |
 | Q3 | 캡처한 뒤는? | **A. 사각형을 그으면 바로 대화 입력창에 붙음(탭은 쪽 전체)** / B. 그은 뒤 작은 메뉴(Ask HIMARI, 이미지 복사, 취소) / C. 올가미로 고르고 메뉴 | **A**. "바로 보내기"에 가장 가깝다. 잘못 붙은 것은 칩의 ×로 뺀다 → 권고대로 |
 | Q4 | 빈 쪽은? | **A. 지금 쪽 뒤에, 지금 쪽과 같은 크기의 흰 쪽. HIMARI가 더한 쪽만 지울 수 있음** / B. A + 종이 모양(빈, 줄, 모눈) 고르기 / C. 끝에만 더하기 | **A**. 줄·모눈은 나중에 더할 수 있다 → 권고대로 |
-| Q5 | 클라우드 동기화 폴더(운영 서버의 rclone Drive)의 PDF는? | A. 5초 규칙에 더해, 같은 파일은 저장 사이 2분 이상 / B. 다른 폴더와 같이 5초 / C. 떠날 때만 | 처음엔 A로 정했다. rev. 3에서 거두었으나(휴지통에 쌓이지 않고 identity가 안정적), Drive의 판 기록이 쌓이는지(§3.6) 확인한 뒤 다시 정한다 |
+| Q5 | 클라우드 동기화 폴더(운영 서버의 rclone Drive)의 PDF는? | 떠날 때 + 10분마다 / **떠날 때만**(떠날 때·앱을 내릴 때·캡처 전·Ctrl/Cmd+S) / 2분 간격 / 5초 | 처음엔 2분 간격으로 정했다. Drive가 저장마다 파일 크기의 판을 남기는 것을 확인한 뒤(§3.6) 권고는 "떠날 때 + 10분마다"였고, **소유자 결정은 "떠날 때만"**(2026-10-26) |
 | Q6 | 캡처 도구의 탭은? | **A. 짧은 긋기·탭은 무시, 쪽 전체는 ⋯ 메뉴** / B. 탭하면 쪽 전체 | **A**. Pencil이 닿기만 해도 저장되고 화면이 바뀌는 것을 막는다(§6.1) → 권고대로 |
 
 ## 12. 나중의 일
