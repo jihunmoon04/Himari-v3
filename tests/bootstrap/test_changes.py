@@ -141,6 +141,31 @@ def test_nothing_is_accepted_or_reverted_while_a_change_is_on_its_way(store: Cha
     assert store.load("conv_1")["entries"] == {}
 
 
+@pytest.mark.parametrize("act", ["accept", "revert_all"])
+def test_an_outcome_that_could_not_be_recorded_is_made_unknown_before_a_review(
+        store: ChangeStore, monkeypatch: pytest.MonkeyPatch, act: str) -> None:
+    """PR #98 re-review: the record failed after the file changed, then works again — the intent left pending is
+    not forgotten by an accept (nor reverted past): it becomes unknown, and the owner looks at the list again."""
+    change(store, "/p/a", copy_of(b"A"), A, B)
+    review = ChangeReview(store, cast(Explorer, None))  # refused before the explorer is asked
+
+    async def run() -> None:
+        token = await store.begin(SCOPE, CallId("c2"), "/p/a")
+        with monkeypatch.context() as m:
+            m.setattr(ChangeStore, "save", lambda self, conversation, doc: (_ for _ in ()).throw(OSError()))
+            await store.kept(token, "/p/a", None, B, C, True)  # B → C done; not recorded
+        assert not store.busy("conv_1")
+        with pytest.raises(ExplorerRefused) as outdated:
+            await (review.accept("conv_1", None) if act == "accept" else review.revert_all("conv_1"))
+        assert outdated.value.category == "outdated"
+
+    asyncio.run(run())
+    assert sorted(i["state"] for i in store.load("conv_1")["intents"].values()) == ["done", "unknown"]
+    assert (entry(store, "/p/a")["state"], entry(store, "/p/a")["after"]) == ("uncertain", None)
+    asyncio.run(review.accept("conv_1", None))  # seen again: accepted
+    assert store.load("conv_1")["entries"] == {}
+
+
 def test_the_agents_versions_never_push_out_the_owners(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Q5: a budget each (their own roots)."""
     from himari.bootstrap import versions

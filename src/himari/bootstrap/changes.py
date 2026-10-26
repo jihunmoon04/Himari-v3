@@ -298,18 +298,24 @@ class ChangeStore:
         if not self.root.is_dir():
             return 0
         for record in self.root.glob("*.json"):
-            conversation = record.stem
             try:
-                doc = self.load(conversation)
-                pending = [k for k, v in doc["intents"].items() if v.get("state") == "pending"]
-                for intent in pending:
-                    _unknown(doc, intent)
-                if pending:
-                    self.save(conversation, doc)
-                    found += len(pending)
+                found += self.settle(record.stem)
             except (OSError, ValueError):
                 log.exception("the change record %s could not be recovered", record.name)
         return found
+
+    def settle(self, conversation: str) -> int:
+        """Every intent still pending, when none is on its way (``busy``
+        false, or HIMARI just started): its outcome was not recorded (the
+        record could not be written then), so whether its file changed is
+        unknown. How many there were."""
+        doc = self.load(conversation)
+        pending = [k for k, v in doc["intents"].items() if v.get("state") == "pending"]
+        for intent in pending:
+            _unknown(doc, intent)
+        if pending:
+            self.save(conversation, doc)
+        return len(pending)
 
     def forget(self, conversation: str) -> None:
         """The Conversation is gone (purged): its record goes too."""
@@ -415,11 +421,17 @@ class ChangeReview:
         changed = after is None or tuple(after) != now.identity
         return ChangeDiff(path, _kind(entry), state, before, now, changed, bool(entry["interleaved"]))
 
-    def _idle(self, conversation: str) -> None:
+    async def _idle(self, conversation: str) -> None:
         """Under the lock: no Tool call's change is still on its way (its
-        turn stopped, its answer not in yet)."""
+        turn stopped, its answer not in yet), and none was left pending (its
+        outcome could not be recorded: PR #98 re-review). Those are made
+        unknown first, and the request refused: the list changed under the
+        owner, so nothing is accepted or reverted unseen."""
         if self.store.busy(conversation):
             raise ExplorerRefused("busy", "HIMARI is still finishing a change here: try again shortly.")
+        if await asyncio.to_thread(self.store.settle, conversation):
+            raise ExplorerRefused("outdated", "Some of HIMARI's changes could not be recorded and are now marked "
+                                              "unknown: look at the list again.")
 
     async def accept(self, conversation: str, paths: Sequence[str] | None) -> None:
         """Forget the entries (``None``: all, the hidden ones too): nothing is written."""
@@ -427,7 +439,7 @@ class ChangeReview:
             for path in paths:
                 await self._entry(conversation, path)
         async with self.store.lock(conversation):
-            self._idle(conversation)
+            await self._idle(conversation)
 
             def accept(doc: dict[str, Any]) -> None:
                 _forget(doc, list(doc["entries"]) if paths is None else paths)
@@ -439,14 +451,14 @@ class ChangeReview:
         the state the owner saw and chose to revert anyway (after a
         ChangeConflict); without it, only a file as the agent left it."""
         async with self.store.lock(conversation):
-            self._idle(conversation)
+            await self._idle(conversation)
             await self._revert(conversation, path, seen)
 
     async def revert_all(self, conversation: str) -> RevertedAll:
         """Each shown entry in turn; what was left, and why."""
         left: list[tuple[str, ExplorerRefused | ChangeConflict]] = []
         async with self.store.lock(conversation):
-            self._idle(conversation)
+            await self._idle(conversation)
             view = await self.view(conversation)
             for item in view.items:
                 try:
