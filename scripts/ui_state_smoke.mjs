@@ -343,19 +343,21 @@ for (const scenario of ["same", "edited", "navigated", "failed", "stale-failure"
   assert.equal(p.context.enterSends(key()), true, "rotated, with a hardware keyboard");
 }
 
-// A file HIMARI wrote on this server opens beside the conversation (the web UX review): its path relative to
-// the working folder; never for a tool that only read, nor where the panel cannot show this server's files.
+// A file HIMARI wrote on this server opens beside the conversation (the web UX review): the path the server
+// resolved, from the result — never the arguments joined to today's working folder (review B1).
 {
   const p = page();
-  const entry = (toolId, path) => ({ toolId, args: { path } });
-  p.run("app.workingFolder = '/home/u/project/';");
-  assert.equal(p.context.openableWrite(entry("machine/write_file", "src/a.py")), "/home/u/project/src/a.py");
-  assert.equal(p.context.openableWrite(entry("machine/edit_file", "/etc/x.conf")), "/etc/x.conf");
-  assert.equal(p.context.openableWrite(entry("machine/edit_file", "~/notes.md")), "~/notes.md");
-  assert.equal(p.context.openableWrite(entry("machine/read_file", "a.py")), null);
-  assert.equal(p.context.openableWrite(entry("inside/write_file", "a.py")), null);
-  p.run("app.workingFolder = null;");
-  assert.equal(p.context.openableWrite(entry("machine/write_file", "a.py")), null);
+  const entry = (toolId, text) => ({ toolId, args: { path: "relative.txt" }, result: { text } });
+  assert.equal(p.context.openableWrite(entry("machine/write_file", "created /home/u/a.py (12 bytes)")), "/home/u/a.py");
+  assert.equal(p.context.openableWrite(entry("machine/write_file", "updated /home/u/my notes.md (3 bytes)")),
+               "/home/u/my notes.md");
+  assert.equal(p.context.openableWrite(entry("machine/edit_file", "edited /etc/x.conf: replaced 2 occurrence(s)")),
+               "/etc/x.conf");
+  assert.equal(p.context.openableWrite(entry("machine/write_file",
+    "created /home/u/a.py, but writing it did not finish; its content may be partial — read it and write it again")), null);
+  assert.equal(p.context.openableWrite(entry("machine/read_file", "created /home/u/a.py (1 bytes)")), null);
+  assert.equal(p.context.openableWrite(entry("inside/write_file", "created /home/u/a.py (1 bytes)")), null);
+  assert.equal(p.context.openableWrite({ toolId: "machine/write_file", args: {}, result: null }), null);
 }
 
 console.log("UI async regression checks: 22 passed");

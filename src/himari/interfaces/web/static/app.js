@@ -34,11 +34,11 @@ const drafts = new DraftBook(localStore, { writer: localStore.WRITER }); // the 
 const STATE_TEXT = {
   completed: "Done",
   waiting_for_user: "Waiting for your answer",
-  recovery_required: "Stopped to be safe: HIMARI can't tell whether an earlier step happened. Look at it, then Continue",
+  recovery_required: "Stopped: HIMARI can't go on safely from here (an earlier step's outcome is unknown) — see Details",
   provider_failed: "The model service didn't answer. Nothing was retried — Continue to try again",
   outcome_unknown: "The request may not have reached the model, so it wasn't sent again — Continue to try again",
   invalid_model_output: "The model's reply couldn't be used — Continue to ask again",
-  request_rejected: "The request was refused before it was sent",
+  request_rejected: "The request was refused before it was sent — see Details; Compact now may help",
   run_limit_reached: "Stopped after the most steps a turn may take — Continue to go on",
   budget_reached: "Stopped: this turn used its token budget — Continue to go on with a new one",
   no_progress: "Stopped: the last steps kept repeating — Continue, or say what to change",
@@ -51,7 +51,7 @@ const STATE_TEXT = {
 };
 /* The same, short: beside Continue and in the top bar. */
 const STATE_SHORT = {
-  recovery_required: "Needs a look",
+  recovery_required: "Can't go on safely",
   provider_failed: "Model service failed",
   outcome_unknown: "Not sure it was sent",
   invalid_model_output: "Unusable reply",
@@ -122,7 +122,7 @@ const app = {
   placeTouched: false, // the composer was changed in this place since it was entered (§3.3)
   placeEntry: 0, // the latest entry into a place: a later read of the store applies to that one only
   inFlight: new Set(), // the conversations a message is being sent to from this page (V3-P78 §3.1, N6)
-  announcing: false, // what arrives now is new (not the history read on opening): told to screen readers
+  announceAfter: Infinity, // events past this sequence are new (not the history read on opening): told to screen readers
   workingHint: "", // "HIMARI is working…" and its usage, under the composer
   lengthHint: null, // {count, over} once the message nears its limit
   questionShown: null, // the question text the panel shows (redrawn only when it changes)
@@ -1344,28 +1344,29 @@ function paintToolRow(entry) {
   // unknown, or its result may be kept out of the conversation — the page cannot tell (V3-P68).
   const pending = app.jobRunning ? "running" : "no result";
   const state = tone === "pending" ? pending : tone === "success" ? "done" : "failed";
-  const summary = el("summary", "tool-row-summary", `${mark} ${entry.toolId} · ${state}`);
-  const opens = tone === "success" && openableWrite(entry);
-  if (opens) { // a file HIMARI wrote on this server: open it beside the conversation
+  entry.details.replaceChildren(el("summary", "tool-row-summary", `${mark} ${entry.toolId} · ${state}`), body);
+  // A file HIMARI wrote on this server: Open, beside the row (not inside its summary, whose children a screen
+  // reader flattens; review N4), to see it in the panel.
+  for (const old of entry.node.querySelectorAll(":scope > .tool-row-open")) old.remove();
+  const opens = tone === "success" ? openableWrite(entry) : null;
+  if (opens) {
     const open = el("button", "link-button tool-row-open", "Open");
     open.type = "button";
     open.title = opens;
-    open.addEventListener("click", (event) => {
-      event.preventDefault(); // not the row's own toggle
-      showReference(opens);
-    });
-    summary.append(" ", open);
+    open.setAttribute("aria-label", `Open ${opens}`);
+    open.addEventListener("click", () => showReference(opens));
+    entry.node.append(open);
   }
-  entry.details.replaceChildren(summary, body);
 }
 
-/* The path a successful machine/write_file or machine/edit_file wrote, as the files panel opens it (relative
- * to the working folder), or null — only where the panel can show this server's files. */
+/* The file a successful machine/write_file or machine/edit_file wrote, as the server resolved it (the result
+ * says "created /path (…)", "updated /path (…)" or "edited /path: …"), or null. Never the arguments joined to
+ * today's working folder, which may not be the one it was written in (review B1). */
 function openableWrite(entry) {
-  if (app.workingFolder === null || !["machine/write_file", "machine/edit_file"].includes(entry.toolId)) return null;
-  const path = entry.args && typeof entry.args.path === "string" ? entry.args.path : "";
-  if (!path) return null;
-  return path.startsWith("/") || path.startsWith("~") ? path : `${app.workingFolder.replace(/\/$/, "")}/${path}`;
+  if (!["machine/write_file", "machine/edit_file"].includes(entry.toolId) || !entry.result) return null;
+  const said = /^(?:created|updated) (\/.+) \(\d+ bytes\)$/.exec(entry.result.text)
+    || /^edited (\/.+): replaced \d+ occurrence\(s\)$/.exec(entry.result.text);
+  return said ? said[1] : null;
 }
 
 /* ------------------------------------------------------------ work blocks */
@@ -1493,11 +1494,16 @@ function splitWork(block, covered) {
   paintWork(rest);
 }
 
-/* A new answer or question, for screen readers: its start as plain text (formulas as written). */
-function announce(what, text) {
-  if (!app.announcing || !text) return;
+/* A new answer or question (past the history read on opening), for screen readers: its start as plain text
+ * (formulas as written). Emptied first, so the same words again are read again (review N3). */
+function announce(what, text, sequence) {
+  if (!text || !(sequence > app.announceAfter)) return;
   const line = assistantTextLine(document, text).replace(/\s+/g, " ").trim();
-  $("announce").textContent = `${what}: ${line.length > 300 ? `${line.slice(0, 300)}…` : line}`;
+  const region = $("announce");
+  region.textContent = "";
+  requestAnimationFrame(() => {
+    region.textContent = `${what}: ${line.length > 300 ? `${line.slice(0, 300)}…` : line}`;
+  });
 }
 
 function renderEvent(event) {
@@ -1510,7 +1516,7 @@ function renderEvent(event) {
   if (event.kind === "assistant_final") {
     closeWork();
     timeline.append(renderMessage(event, changedModel(event.model)));
-    announce("HIMARI answered", event.text);
+    announce("HIMARI answered", event.text, event.sequence);
     live.shown(event.run_id); // it replaces what was shown while it was written
     return;
   }
@@ -1523,7 +1529,7 @@ function renderEvent(event) {
       if (event.text) timeline.append(renderMessage({ ...event, kind: "assistant_final" }, model));
       const text = typeof question.arguments.question === "string" ? question.arguments.question : "";
       timeline.append(renderMessage({ kind: "assistant_final", text }, event.text ? null : model));
-      announce("HIMARI asks", text);
+      announce("HIMARI asks", text, event.sequence);
       app.toolRows.set(`${event.run_id}/${question.call_id}`, null); // the answer appears as the user's message
       return;
     }
@@ -2056,6 +2062,7 @@ async function pullEvents(generation) {
     for (const event of page.items) renderEvent(event);
     live.keepLast();
     app.lastSequence = page.last_sequence;
+    if (app.announceAfter === Infinity && page.items.length < 200) app.announceAfter = app.lastSequence;
     if (page.items.length && atBottom) timeline.scrollTop = timeline.scrollHeight;
     if (page.items.length < 200) {
       views.autoOpen();
@@ -2273,9 +2280,8 @@ async function openConversation(id, { created = false, via = "push" } = {}) {
   loadFolders(generation);
   loadPrompts(generation);
   try {
-    app.announcing = false; // the history read now is not news
+    app.announceAfter = Infinity; // the history read first is not news (its first successful read sets the mark)
     const detail = await refresh(generation);
-    if (generation === app.generation) app.announcing = true;
     if (detail && detail.job.running) poll(generation);
     else if (detail) loadContext(generation);
   } catch (error) {
