@@ -30,6 +30,7 @@ const KIND_ICON = { directory: "#side-folder", file: "#side-note" };
 const EDIT_MAX_BYTES = 1024 * 1024; // the server's limit for the editor (§7.7, Q3)
 const POLL_MS = 5000; // how often an open file is checked on disk (§5.3)
 const KEEP_MS = 1000; // unsaved text kept in this browser once typing settles (V3-P78 §4.1)
+const NOTE_MS = 6000; // how long a note beside the file's name stays before "Unsaved"/"Saved" again
 const KEPT_MAX = 20; // V3-P78 Q3: files with unsaved text kept, for at most 30 days
 const KEPT_AGE_MS = 30 * 24 * 3600 * 1000;
 const PDF_MAX_BYTES = 64 * 1024 * 1024; // the PDF view's limit (V3-P77 §3.3, Q2), as pdfpane.js's
@@ -137,6 +138,11 @@ function keepingPlace(editor, change) {
     view.dispatch({ selection });
     if (view.scrollDOM) view.scrollDOM.scrollTop = scroll;
   }
+}
+
+function appleKeys() {
+  return typeof navigator !== "undefined"
+    && (/Mac|iPhone|iPad|iPod/.test(navigator.platform || "") || /Mac OS/.test(navigator.userAgent || ""));
 }
 
 function sameIdentity(a, b) {
@@ -827,8 +833,9 @@ export class FilesPane {
       this.pickInkTool({ ...now, tool: "pen", size: now.size === "bold" ? "fine" : "bold" });
     });
     swatches.append(width);
-    const undo = button("Undo (Ctrl+Z)", "#ink-undo", () => this.pdf && this.pdf.view.undo());
-    const redo = button("Redo (Shift+Ctrl+Z)", "#ink-redo", () => this.pdf && this.pdf.view.redo());
+    const mod = appleKeys() ? "⌘" : "Ctrl+"; // as the keyboard names it
+    const undo = button(`Undo (${mod}Z)`, "#ink-undo", () => this.pdf && this.pdf.view.undo());
+    const redo = button(`Redo (${appleKeys() ? "⇧⌘" : "Shift+Ctrl+"}Z)`, "#ink-redo", () => this.pdf && this.pdf.view.redo());
     const dot = this.el("span", "files-state-dot");
     const state = this.el("span", "files-state", "Saved");
     const save = this.el("button", "primary-button files-save", "Save");
@@ -837,6 +844,28 @@ export class FilesPane {
     save.addEventListener("click", () => this.savePdf());
     group.append(...Object.values(tools), swatches, undo, redo, dot, state, save);
     this.ink = { group, tools, swatches, width, undo, redo, dot, state, save };
+    return group;
+  }
+
+  /* Zoom out, back to the panel's width, zoom in — for a mouse without a wheel and a hand without two fingers
+   * free; around the middle of what shows. */
+  zoomTools() {
+    const group = this.el("span", "files-zoom-tools");
+    const zoom = (label, title, factor) => {
+      const control = this.el("button", "link-button files-zoom", label);
+      control.type = "button";
+      control.title = title;
+      control.setAttribute("aria-label", title);
+      control.addEventListener("click", () => {
+        const view = this.pdf && this.pdf.view;
+        if (!view) return;
+        const box = view.element.getBoundingClientRect();
+        view.zoomBy(factor === null ? 1 / view.zoom : factor, box.left + box.width / 2, box.top + box.height / 2);
+        this.keepPlace();
+      });
+      return control;
+    };
+    group.append(zoom("−", "Zoom out", 1 / 1.25), zoom("Fit", "Fit the width", null), zoom("+", "Zoom in", 1.25));
     return group;
   }
 
@@ -1226,7 +1255,13 @@ export class FilesPane {
     if (doc === null || !this.stateLabel) return;
     const text = doc.saving ? "Saving…" : doc.dirty ? "Unsaved" : "Saved";
     this.stateDot.className = `files-state-dot${doc.dirty ? " is-dirty" : ""}`;
-    this.stateLabel.textContent = note || text;
+    // A note (an error, "Saved, but…") stays at least 6 s: the next keystroke does not wipe it unread.
+    const now = Date.now();
+    if (note) doc.note = { text: note, until: now + NOTE_MS };
+    const shown = note || (doc.note && doc.note.until > now && !doc.saving ? doc.note.text : null);
+    this.stateLabel.textContent = shown || text;
+    this.stateLabel.title = shown || "";
+    this.stateLabel.classList.toggle("is-note", Boolean(shown));
     this.saveButton.disabled = doc.saving || !doc.dirty;
     this.workingNote.hidden = !this.working();
   }
@@ -1679,7 +1714,7 @@ export class FilesPane {
       }
       if (shown.kind === "pdf" && shown.size <= PDF_MAX_BYTES) {
         this.pageLabel = this.pagePicker();
-        this.tools.append(this.inkTools(), this.pageLabel);
+        this.tools.append(this.inkTools(), this.zoomTools(), this.pageLabel);
       }
       if (this.changes && this.changed.has(shown.path)) { // a dot after its name, to its change
         const review = this.el("button", "files-crumb files-changed-link");

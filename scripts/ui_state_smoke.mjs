@@ -360,4 +360,15 @@ for (const scenario of ["same", "edited", "navigated", "failed", "stale-failure"
   assert.equal(p.context.openableWrite({ toolId: "machine/write_file", args: {}, result: null }), null);
 }
 
-console.log("UI async regression checks: 22 passed");
+// The list's headings: Today, Yesterday, … by the day a conversation was last active (local days).
+{
+  const p = page();
+  const ago = (days) => new Date(Date.now() - days * 86400000).toISOString();
+  assert.equal(p.context.activityGroup(new Date().toISOString()), "Today");
+  assert.equal(p.context.activityGroup(ago(1)), "Yesterday");
+  assert.equal(p.context.activityGroup(ago(3)), "Previous 7 days");
+  assert.equal(p.context.activityGroup(ago(12)), "Previous 30 days");
+  assert.equal(p.context.activityGroup(ago(90)), "Older");
+}
+
+console.log("UI async regression checks: 23 passed");
