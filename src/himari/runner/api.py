@@ -32,8 +32,12 @@ import struct
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-PROTOCOL_VERSION = 2  # 2: write and delete with ``keep``, write ``mode: "install"``, visible ``follow`` (V3-P76)
+PROTOCOL_VERSION = 3  # 2: write and delete with ``keep``, write ``mode: "install"``, visible ``follow`` (V3-P76);
+# 3: ``copy_max`` on a replace, ``delete_copied`` (V3-P77 §6.1)
 KEEP_PROTOCOL = 2  # a runner older than this ignores ``keep`` and ``install`` (it would write plainly)
+COPY_MAX_PROTOCOL = 3  # a runner older than this ignores ``copy_max`` (it copies 1 MiB at most: a replace of a
+# larger file is refused) and refuses ``delete_copied`` as unknown: either way nothing goes uncopied
+MAX_COPY_BYTES = 64 * 1024 * 1024  # the largest ``copy_max``: a PDF the web writes to (V3-P77 §3.3)
 MAX_FRAME_BYTES = 4 * 1024 * 1024
 MAX_FDS = 4
 _HEADER = struct.Struct(">I")
@@ -59,8 +63,10 @@ CHECK_WORKSPACE = "check_workspace"  # a folder the user registers (§10.1): not
 GIT_PUSH = "git_push"  # a branch of a repository in the call's Workspaces (§12)
 CREATE_FILE = "create_file"  # a new empty file, never over one (V3-P75 §7.7)
 MKDIR = "mkdir"  # one new folder (V3-P75 §7.5)
+DELETE_COPIED = "delete_copied"  # a checked delete whose copy is required (V3-P77 §6.3): an op of its own, so
+# that a runner too old for it refuses it instead of deleting without the copy (PR #103 review P1)
 WRITES = frozenset({WRITE, DELETE, RUN, COPY_IN, FREE_PATH, COMMIT_COPY, DISCARD_COPY, REMOVE_CONVERSATION_FOLDER,
-                    GIT_PUSH, CREATE_FILE, MKDIR})
+                    GIT_PUSH, CREATE_FILE, MKDIR, DELETE_COPIED})
 # ``write`` with ``mode: "replace"`` (V3-P75 §7.4): ``expected`` required; the answer carries a copy of the
 # replaced file as an fd (none over 1 MiB). ``delete`` with ``expected``: the same for the deleted file.
 # ``write`` and ``delete`` with ``keep: true`` (V3-P76 §4.1, an agent's write): the same copy, never over a file
@@ -69,6 +75,9 @@ WRITES = frozenset({WRITE, DELETE, RUN, COPY_IN, FREE_PATH, COMMIT_COPY, DISCARD
 # whose writing did not finish). Errors come only before the file was changed: after it, the answer is a success
 # with ``complete: false``. ``write`` with ``mode: "install"``: the content (an fd) given a name that is free,
 # in one step, or nothing (CHANGED: taken; UNSUPPORTED: the file system cannot).
+# ``copy_max`` (bytes, 1 MiB to MAX_COPY_BYTES; 1 MiB if left out) on a replace (V3-P77 §6.1): the largest file
+# copied; a larger one is TOO_LARGE. ``delete_copied`` (``expected``, ``copy_max`` required): the file deleted
+# only with its copy (the answer's fd), TOO_LARGE over ``copy_max``.
 
 # Error categories: each message is safe to show the model.
 NOT_FOUND = "not_found"  # also every hidden path: whether it exists is not told

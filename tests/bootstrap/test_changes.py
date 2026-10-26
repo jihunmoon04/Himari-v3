@@ -168,12 +168,9 @@ def test_an_outcome_that_could_not_be_recorded_is_made_unknown_before_a_review(
 
 def test_the_agents_versions_never_push_out_the_owners(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Q5: a budget each (their own roots)."""
-    from himari.bootstrap import versions
-
-    owner = VersionStore(tmp_path / "file-versions")
-    agent = ChangeStore(tmp_path / "changes", VersionStore(tmp_path / "file-versions-agent"))
+    owner = VersionStore(tmp_path / "file-versions", max_bytes=10)
+    agent = ChangeStore(tmp_path / "changes", VersionStore(tmp_path / "file-versions-agent", max_bytes=10))
     owner.keep("/p/a", copy_of(b"mine"), "save")
-    monkeypatch.setattr(versions, "MAX_BYTES", 10)
     for n in range(5):
         change(agent, f"/p/{n}", copy_of(b"agent's"), A, B)
     assert [v.reason for v in owner.of("/p/a")] == ["save"]

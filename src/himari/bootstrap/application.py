@@ -8,6 +8,7 @@ One data root, private to the server user::
         control/operator.secret  the local operator's credential (0600)
         file-versions/           previous versions of files the web editor saved or deleted (V3-P75)
         file-versions-agent/     files as they were before the agent changed them (V3-P76)
+        file-versions-pdf/       PDFs before ink was saved into them, deleted ones (V3-P77)
         file-changes/            the agent's file changes, per Conversation, for review (V3-P76)
         mcp.json                 optional: MCP servers to connect (0600, V3-P53)
 
@@ -110,7 +111,7 @@ from himari.documents import TMP_BYTES, DocumentReader, Toolkit, ToolkitRefused,
 from himari.environment.inside import INSIDE, InsideEnvironment, InsideFiles
 from himari.imaging import ImageViews, runtime_roots
 from himari.bootstrap.changes import ChangeDiff, ChangeReview, ChangesView, ChangeStore, RevertedAll
-from himari.bootstrap.explorer import Explorer, ExplorerRefused
+from himari.bootstrap.explorer import PDF_MAX_BYTES, Explorer, ExplorerRefused
 from himari.bootstrap.versions import VersionStore
 # For the interfaces (V3-P66 §9): how placing an upload can be refused.
 from himari.environment.inside import UploadsFolderUnusable as UploadsFolderUnusable
@@ -155,6 +156,7 @@ DEFAULT_TRASH_DAYS = 30  # V3-P65 Q1 (the owner's choice, 2026-10-21)
 CLEANUP_SECONDS = 3600.0  # how often trash past its days is purged
 TRASH_STOP_SECONDS = 30.0  # how long a running job may take to stop before a trash is refused (§7.1)
 BUILT_IN_NAMESPACES = frozenset({"inside", "machine"})  # Tool ids that are HIMARI's own, not an external server's
+PDF_VERSIONS_BYTES = 1024 * 1024 * 1024  # PDFs' previous versions, all together (V3-P77 Q3)
 PLACE_LOCK_SECONDS = 60.0  # how long sending waits for the Workspace write lock (V3-P66 review N4)
 
 log = logging.getLogger(__name__)
@@ -887,7 +889,9 @@ class Application:
             raise ExplorerRefused("not_found", "Not available.") from None
         if self._explorer is None:
             self._explorer = Explorer(machine, self.views, VersionStore(self.data_root / "file-versions"),
-                                      None if self.changes is None else self.changes.versions)
+                                      None if self.changes is None else self.changes.versions,
+                                      VersionStore(self.data_root / "file-versions-pdf", PDF_VERSIONS_BYTES,
+                                                   PDF_MAX_BYTES))
         return self._explorer
 
     # --- the review of the agent's file changes (V3-P76 §5, §6) -----------------------------
