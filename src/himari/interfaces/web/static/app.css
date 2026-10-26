@@ -3812,8 +3812,9 @@ details > summary {
 button.files-crumb:hover { background: var(--surface-hover); color: var(--text); }
 .files-crumb.is-current { color: var(--text); font-weight: 600; }
 .files-crumb-sep { color: var(--text-muted); font-size: 12px; }
-.files-head-end { display: flex; align-items: center; gap: var(--space-2); flex: 0 0 auto; margin-left: auto; }
-.files-tools { display: flex; align-items: center; gap: var(--space-2); flex: 0 0 auto; font-size: 13px; }
+/* The tools wrap onto a second line rather than push Save or close out of a narrow panel (iPad landscape). */
+.files-head-end { display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: var(--space-2); flex: 0 1 auto; min-width: 0; margin-left: auto; }
+.files-tools { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); flex: 0 1 auto; min-width: 0; font-size: 13px; }
 .files-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: var(--space-2) var(--space-3) var(--space-5); }
 .files-body[aria-busy="true"] { opacity: .6; }
 .files-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 1px; }
