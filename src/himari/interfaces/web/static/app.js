@@ -111,6 +111,11 @@ const app = {
   placeEntry: 0, // the latest entry into a place: a later read of the store applies to that one only
   inFlight: new Set(), // the conversations a message is being sent to from this page (V3-P78 §3.1, N6)
   address: null, // the address of the surface shown (V3-P79 §3); the sign-in screen keeps the one it came from
+  activity: { working: new Set(), waiting: new Set() }, // the last /activity answer (V3-P80 §3)
+  activityTimer: null,
+  activityAsked: new Set(), // ids not in the list that the list was read again for once (§3.3)
+  activityTicket: 0, // the latest /activity read: an older answer is dropped (review N3)
+  listTicket: 0, // the latest list read
   sendWaiting: false, // a send waits for the conversation being created
   conversationId: null,
   generation: 0,
@@ -253,6 +258,8 @@ function showSurface(name, via = "none") {
 function showLogin({ signingOut = false } = {}) {
   if (!$("surface-login").hidden) return;
   stopPolling();
+  clearTimeout(app.activityTimer); // V3-P80: read again after the sign-in
+  app.activity = { working: new Set(), waiting: new Set() };
   views.reset();
   app.conversationId = null;
   app.generation += 1;
@@ -357,13 +364,17 @@ function renderListRow(item) {
 }
 
 async function loadList(reset) {
-  if (reset) app.listOffset = 0;
-  const page = await api("GET", `/api/conversations?limit=${PAGE}&offset=${app.listOffset}`);
+  // The latest read draws the list: a reload and "Load more" under way at once never mix (V3-P80 review N2).
+  const ticket = (app.listTicket += 1);
+  const offset = reset ? 0 : app.listOffset;
+  const page = await api("GET", `/api/conversations?limit=${PAGE}&offset=${offset}`);
+  if (ticket !== app.listTicket) return page.items;
   const list = $("conversation-list");
   if (reset) list.replaceChildren();
   for (const item of page.items) list.append(renderListRow(item));
-  app.listOffset = page.next_offset ?? app.listOffset + page.items.length;
+  app.listOffset = page.next_offset ?? offset + page.items.length;
   $("conversation-load-more").hidden = page.next_offset === null;
+  paintActivity();
   return page.items;
 }
 
@@ -373,6 +384,64 @@ function markSelected() {
     if (button.dataset.id === app.conversationId) button.setAttribute("aria-current", "page");
     else button.removeAttribute("aria-current");
   }
+  paintActivity(); // rows drawn again get their dots back
+}
+
+/* ------------------------------------------------- other conversations (V3-P80 §3) */
+
+const ACTIVITY_MS = 5000;
+const ACTIVITY_LABEL = { working: "Working", waiting: "Waiting for your answer" };
+
+/* A dot on each conversation in the list and on Home's cards: working, or waiting for an answer. */
+function paintActivity() {
+  const rows = [...$("conversation-list").querySelectorAll(".conv-row"),
+                ...$("home-recent-list").querySelectorAll(".home-recent-card")];
+  for (const row of rows) {
+    const id = row.dataset.id;
+    const state = app.activity.waiting.has(id) ? "waiting" : app.activity.working.has(id) ? "working" : null;
+    let dot = row.querySelector(".activity-dot");
+    if (state === null) {
+      if (dot) dot.remove();
+      continue;
+    }
+    if (!dot) {
+      dot = el("span", "activity-dot");
+      dot.setAttribute("role", "img");
+      row.append(dot);
+    }
+    dot.className = `activity-dot is-${state}`;
+    dot.title = ACTIVITY_LABEL[state];
+    dot.setAttribute("aria-label", ACTIVITY_LABEL[state]);
+  }
+  followTitle();
+}
+
+/* Every 5 s while the page shows and the user is signed in; a hidden page reads again when shown. */
+function scheduleActivity(delay = ACTIVITY_MS) {
+  clearTimeout(app.activityTimer);
+  app.activityTimer = setTimeout(readActivity, delay);
+}
+
+async function readActivity() {
+  clearTimeout(app.activityTimer);
+  if (!$("surface-login").hidden || document.visibilityState === "hidden") return;
+  const ticket = (app.activityTicket += 1);
+  try {
+    const answer = await api("GET", "/api/conversations/activity");
+    if (ticket !== app.activityTicket) return; // a newer read is on its way, and schedules the next
+    app.activity = { working: new Set(answer.working), waiting: new Set(answer.waiting) };
+    const listed = new Set([...$("conversation-list").querySelectorAll(".conv-row")].map((row) => row.dataset.id));
+    // One started elsewhere (another tab, the CLI): the list once more, so it is there (§3.3).
+    const unknown = [...answer.working, ...answer.waiting].filter((id) => !listed.has(id) && !app.activityAsked.has(id));
+    if (unknown.length) {
+      for (const id of unknown) app.activityAsked.add(id);
+      await loadList(true).then(markSelected).catch(() => {});
+    }
+    paintActivity();
+  } catch (error) {
+    if (error.status === 401) return; // the sign-in screen; reading starts again after it
+  }
+  if ($("surface-login").hidden) scheduleActivity();
 }
 
 async function showHome({ via = "push" } = {}) {
@@ -403,12 +472,14 @@ async function showHome({ via = "push" } = {}) {
   for (const item of items.slice(0, 3)) {
     const li = el("li");
     const card = conversationLink(item.id, "home-recent-card");
+    card.dataset.id = item.id;
     card.append(el("span", "home-recent-title", conversationName(item)),
                 el("span", "home-recent-activity", new Date(item.last_activity_at).toLocaleDateString()));
     li.append(card);
     recent.append(li);
   }
   $("home-recent-empty").hidden = items.length > 0;
+  paintActivity();
 }
 
 /* ``carry``: the composer's draft goes into the new conversation (sent or given files from Home); else the
@@ -541,7 +612,54 @@ function addressPopped() {
 /* The tab's title follows the top bar's: "<conversation> · HIMARI" (§3.4). */
 function followTitle() {
   const shown = $("topbar-title").textContent.trim();
-  document.title = !shown || shown === "HIMARI" ? "HIMARI" : `${shown} · HIMARI`;
+  const title = !shown || shown === "HIMARI" ? "HIMARI" : `${shown} · HIMARI`;
+  const waiting = app.activity.waiting.size; // V3-P80 §3.4: conversations waiting for an answer, this one too
+  document.title = waiting ? `(${waiting}) ${title}` : title;
+}
+
+/* ---------------------------------------------------------------- paste */
+
+const MAX_MESSAGE_CHARS = 32000; // the server's (characters, as Python counts them)
+const PLAIN_NAMES = /^(image|img|pasted|screenshot|untitled)?\.(png|jpe?g|gif|webp|heic|tiff?|bmp)$/i;
+const PASTE_TYPES = { "image/png": "png", "image/jpeg": "jpg", "image/gif": "gif", "image/webp": "webp",
+                      "image/heic": "heic", "image/tiff": "tiff", "text/plain": "txt", "application/pdf": "pdf" };
+
+/* pasted-YYYYMMDD-HHMMSS[-n].ext: several things pasted at once stay apart (V3-P80 §4.1). */
+function pastedName(extension, index = 0) {
+  const now = new Date();
+  const two = (n) => String(n).padStart(2, "0");
+  const stamp = `${now.getFullYear()}${two(now.getMonth() + 1)}${two(now.getDate())}-${two(now.getHours())}`
+    + `${two(now.getMinutes())}${two(now.getSeconds())}`;
+  return `pasted-${stamp}${index ? `-${index + 1}` : ""}.${extension}`;
+}
+
+/* V3-P80 §4: files alone on the clipboard are attached (a screenshot, a copied file); with text, the text
+ * is pasted as always, unless it would take the message past its limit: then it is attached as a .txt. */
+function pasteIntoComposer(event) {
+  const data = event.clipboardData;
+  if (!data) return;
+  const text = data.getData("text/plain");
+  let files = Array.from(data.files || []);
+  if (!files.length && data.items) {
+    files = Array.from(data.items).filter((item) => item.kind === "file").map((item) => item.getAsFile())
+      .filter(Boolean);
+  }
+  if (files.length && !text) {
+    event.preventDefault();
+    addFiles(files.map((file, index) => (file.name && !PLAIN_NAMES.test(file.name) ? file
+      : new File([file], pastedName(PASTE_TYPES[file.type] || "bin", index), { type: file.type }))));
+    return;
+  }
+  if (!text) return;
+  // The message as it would be, the selection replaced, counted as the server counts (review N5). Over the
+  // limit already: anything pasted goes as a file.
+  const box = $("composer-text");
+  const kept = box.value.slice(0, box.selectionStart) + box.value.slice(box.selectionEnd);
+  if (kept.length + text.length <= MAX_MESSAGE_CHARS) return; // fewer UTF-16 units: fewer characters too
+  if (characters(kept) + characters(text) <= MAX_MESSAGE_CHARS) return;
+  event.preventDefault();
+  addFiles([new File([text], pastedName("txt"), { type: "text/plain" })]);
+  status("The pasted text was long, so it was attached as a file.", "ok");
 }
 
 /* ---------------------------------------------------------------- Enter */
@@ -1061,7 +1179,7 @@ function uploadFile(file) {
       composerChanged();
       // An image with a copy reaches a model that takes images as an image (V3-P67): no command needed.
       const seen = data.image && data.image.state === "ready" && modelTakesImages();
-      if (data.commands === false && !seen) {
+      if (data.commands === false && !seen && file.type !== "text/plain") { // plain text is read anyway (V3-P80)
         status("Commands cannot run on this server: HIMARI can read text files, but not PDFs or images.", "warn");
       }
     } else {
@@ -1908,6 +2026,7 @@ function poll(generation) {
       if (detail && detail.job.running) poll(generation);
       else if (detail) {
         loadList(true).then(markSelected).catch(() => {});
+        readActivity(); // this one stopped working, or now waits (V3-P80 §3.3)
         loadContext(generation);
         loadServerInfo(); // a command may have found the sandbox broken
         loadToolSources(generation); // and close the views of a source turned off elsewhere
@@ -2046,6 +2165,7 @@ async function sendMessage(event) {
         references: pointed.map((r) => (r.whole ? { path: r.path, identity: r.identity }
           : { path: r.path, identity: r.identity, start: r.start, end: r.end, sha256: r.sha256 })) });
     drafts.removeSent(sentTo, sent);
+    readActivity(); // it works now, or no longer waits for an answer (V3-P80 review N10)
     if (app.place === sentTo) { // the composer is still this conversation's (not by generation: N2)
       // A user can navigate or type again while this request is in flight.
       // Only clear the exact draft accepted for this conversation.
@@ -3325,6 +3445,8 @@ async function loadServerInfo() {
 async function enter() {
   localStore.openWrites(); // V3-P78 §5.3: closed by a sign-out until now
   await drafts.load();
+  app.activityAsked.clear();
+  scheduleActivity(0); // V3-P80 §3.3
   loadServerInfo();
   syncFoldersLink();
   // A save that met a signed-out session goes back to its draft (PR #68 review C2).
@@ -3374,7 +3496,10 @@ async function boot() {
     for (const pane of [filesPanel, filesSurface]) pane.keepNow();
   };
   window.addEventListener("pagehide", keepNow);
-  document.addEventListener("visibilitychange", () => { if (document.visibilityState === "hidden") keepNow(); });
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "hidden") keepNow();
+    else if ($("surface-login").hidden) readActivity(); // shown again: what changed meanwhile (V3-P80 §3.3)
+  });
   // §5.3: another tab signed out — nothing of this one is kept or written either.
   localStore.onWiped(() => { // signed out like that tab: to sign in again, where writes open again (PR #106 review B3)
     drafts.clear();
@@ -3447,6 +3572,7 @@ async function boot() {
   noteWindowHeight();
   window.addEventListener("resize", noteWindowHeight);
   window.addEventListener("popstate", addressPopped);
+  $("composer-text").addEventListener("paste", pasteIntoComposer);
   new MutationObserver(followTitle).observe($("topbar-title"), { childList: true, characterData: true, subtree: true });
   $("composer-text").addEventListener("keydown", (event) => {
     if (pickerKey(event)) return;

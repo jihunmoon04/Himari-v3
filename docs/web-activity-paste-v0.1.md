@@ -1,6 +1,6 @@
 # 다른 대화의 상태와 붙여넣기 첨부 v0.1
 
-> 2026-10-26 · **PROPOSED (V3-P80)** · rev. 2: 독립 설계 검수 READY_WITH_CORRECTIONS 반영(§9) — 목록에 없는 대화는 새 id마다 한 번만 목록을 다시 읽음, 표시는 앱 상태에서 다시 그림, 늦은 응답 버림, 제목은 저장한 수로, 글자 수는 서버처럼, Data 읽기는 `ConversationCatalog`에. rev. 1: 설계 초안. 소유자 결정 Q1~Q4 권고대로(§7).
+> 2026-10-26 · **PROPOSED (V3-P80)** · 구현 노트 §10. rev. 2: 독립 설계 검수 READY_WITH_CORRECTIONS 반영(§9) — 목록에 없는 대화는 새 id마다 한 번만 목록을 다시 읽음, 표시는 앱 상태에서 다시 그림, 늦은 응답 버림, 제목은 저장한 수로, 글자 수는 서버처럼, Data 읽기는 `ConversationCatalog`에. rev. 1: 설계 초안. 소유자 결정 Q1~Q4 권고대로(§7).
 >
 > 소유자 방향(2026-10-26): Web UX 점검의 세 번째 묶음. 원래 묶음의 "메시지 수정·다시 보내기·다시 생성"은 기록(Data의 Event가 쌓이기만 함)·압축 요약·Prompt·Control에 걸친 설계라 다음 패킷(V3-P81)으로 떼고, 이 패킷은 **다른 대화가 무엇을 하는지 보이기**와 **붙여넣기로 첨부하기**를 다룬다.
 >
@@ -79,7 +79,7 @@
 
 - 붙여넣은 평문 때문에 입력창이(고른 부분을 붙여넣은 글로 바꾼 결과가, 서버처럼 코드 포인트로 세어, 검수 N5) **32,000자를 넘게 되면**, 그 글을 입력창에 넣지 않고 `pasted-<YYYYMMDD-HHMMSS>.txt`(UTF-8) 첨부로 올리고 알린다: "The pasted text was long, so it was attached as a file." 입력창의 원래 글은 그대로다.
 - 32,000자 이하면 지금처럼 글로 붙는다. 입력창이 이미 한도를 넘었으면 무엇을 붙여넣든 파일이 된다.
-- 명령을 실행할 수 없는 서버에서 올리기가 끝나면 "PDF·그림은 못 읽음" 경고가 나오는데, 텍스트 파일에는 내지 않는다(위 알림을 덮지 않게, 검수 N6).
+- 명령을 실행할 수 없는 서버에서 올리기가 끝나면 "PDF·그림은 못 읽음" 경고가 나오는데, 평문 파일(`text/plain`)에는 내지 않는다(위 알림을 덮지 않게, 검수 N6). HTML 등 다른 글 파일은 지금처럼 경고한다.
 - 모델은 그 파일을 첨부 파일로 받는다(지금 텍스트 파일 첨부와 같음: 명령 실행이 없어도 텍스트 파일은 읽음).
 
 ## 5. 계약 변경 (Proposed)
@@ -139,3 +139,11 @@
 | N8 | Data 포트, `running`이 동기 | `ConversationCatalog`, 동기(§3.2, §5) |
 | N9 | 전체 pytest, 새 Run이 뒤에 있어도 기다림 | §8 |
 | N10 | 보내기·답한 뒤 바로 읽기 | §3.3 |
+
+## 10. 구현 노트 (2026-10-26)
+
+- **Data:** `ConversationCatalog.list_waiting_conversations` — SQLite는 대화마다 PROJECTED이고 Event가 있는 Run의 `MAX(seq)`를 고른 뒤 그 Run의 Tool 실행이 하나뿐이고 PENDING `ask_user`인지 보는 질의 하나(`runs_by_conversation` 색인), 인메모리는 `_waiting`을 대화마다. 계약 테스트(두 백엔드): 주체·휴지통·답함·Tool 둘·질문 뒤 새 Run, 그리고 대화별 `find_waiting_call`과 같은 답.
+- **Control:** `BackgroundRunner.running` — `_tasks` 중 그 주체의 끝나지 않은 것(압축 job 포함, 테스트).
+- **Web API:** `GET /api/conversations/activity`(id 경로보다 앞), `seen`을 부르지 않음(테스트가 `seen`을 바꿔 확인), 휴지통으로 옮기면 빠짐, 로그인 전 401.
+- **화면:** `app.activity`·`paintActivity`(목록 행과 홈 카드에 점, `followTitle`의 수)·`readActivity`(마지막 읽기만, 목록에 없는 id마다 한 번 목록 새로)·`scheduleActivity`(5초, 숨으면 멈춤, 보이면 바로). `loadList`는 마지막 읽기만 그린다. 보내기가 받아들여지면, job이 끝나면, 다시 보이면 바로 읽는다. `pasteIntoComposer`와 `pastedName`.
+- **확인:** 전체 pytest 2,609 passed(117 skipped), mypy, import 경계. node: `ui_state_smoke` 21(5초 읽기는 하네스에서 막음), `rich_text`·`live`·`files`·`pdf`. 브라우저 `ui_smoke` 전부 통과, 새 `activity`(일하는 중·기다림 점과 사라짐, 탭 제목 `(1)`, 다른 탭에서 시작한 대화가 나타남, 붙여넣기 넷: 그림만, 글과 그림, 긴 글, 짧은 글). 붙여넣기 이벤트는 합성한 `ClipboardEvent`라, iPad 스크린샷·사진 앱·Finder 복사는 실기기 확인(§4.1).

@@ -1599,6 +1599,47 @@ details > summary {
   background: var(--code-bg);
 }
 
+/* V3-P80 §3.1: another conversation at work (a slow pulse), or waiting for an answer (filled). */
+.activity-dot {
+  display: inline-block;
+  flex: none;
+  width: 8px;
+  height: 8px;
+  margin-left: 8px;
+  border-radius: 50%;
+  vertical-align: middle;
+}
+
+.activity-dot.is-working {
+  background: var(--accent);
+  animation: activity-pulse 1.6s ease-in-out infinite;
+}
+
+.activity-dot.is-waiting {
+  background: var(--warn-edge);
+}
+
+/* In the list the title ellipsizes: the dot sits at the row's end, never cut off. */
+.conv-row > .activity-dot {
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  margin: -4px 0 0;
+}
+
+.conv-row:has(> .activity-dot) {
+  padding-right: 24px;
+}
+
+@keyframes activity-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .activity-dot.is-working { animation: none; }
+}
+
 .item-actions {
   display: flex;
   gap: var(--space-1);
