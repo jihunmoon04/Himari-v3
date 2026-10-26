@@ -701,11 +701,10 @@ class Host:
 
     # --- a PDF's saves, written in place (V3-P82 §3.6) ---------------------------------------
 
-    def _in_place(self, parent_fd: int, name: str, expected: Sequence[int], flags: int) -> tuple[int, os.stat_result]:
+    def _in_place(self, parent_fd: int, name: str, flags: int) -> int:
         """The file open to write in place (a link is not followed; a FIFO is not waited on), if it is a regular
-        file with one name whose identity is ``expected``. One name only: the rename the other writes do leaves
-        a hard link's other names as they were, a write in place would not (review C2). Called under
-        ``_IN_PLACE``."""
+        file with one name. One name only: the rename the other writes do leaves a hard link's other names as
+        they were, a write in place would not (review C2). Its identity is checked once its lock is held."""
         try:
             fd = os.open(name, flags | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_NOCTTY | os.O_CLOEXEC, dir_fd=parent_fd)
         except FileNotFoundError:
@@ -719,13 +718,18 @@ class Host:
             if info.st_nlink != 1:
                 raise api.RunnerError(api.LINKS, "this PDF has other names (hard links): it is not written on in "
                                                  "place")
-            if self.identity(info) != list(expected):
-                raise api.RunnerError(api.CHANGED)
             os.set_blocking(fd, True)
         except BaseException:
             os.close(fd)
             raise
-        return fd, info
+        return fd
+
+    def _checked(self, fd: int, expected: Sequence[int]) -> os.stat_result:
+        """Under the file's lock: it is still the file read (CHANGED otherwise)."""
+        info = os.fstat(fd)
+        if self.identity(info) != list(expected):
+            raise api.RunnerError(api.CHANGED)
+        return info
 
     def _named(self, parent_fd: int, name: str, written: os.stat_result) -> list[int]:
         """The identity the name shows now, as OPEN and STAT will (on a FUSE mount the mtime may settle only at
@@ -744,19 +748,22 @@ class Host:
         ``expected`` — at its expected size, never through O_APPEND, which would ignore the position — and
         sync it; its identity after. One at a time in this runner, from the identity check to the sync (review
         C1: two saves from the same base would both succeed). Ended at any other size than ours (something
-        else wrote meanwhile): CHANGED, with its identity and ``partial``. A failed write is cut back to the
-        expected size, but only while the file is that size plus what was written; the error tells the
-        identity then, and whether bytes of it were left (``partial``)."""
+        else wrote meanwhile): CHANGED, with its identity and ``partial`` (the file must be read again). A failed
+        write is cut back to the expected size, but only while the file is that size plus what was written; the
+        error tells the identity then, and whether bytes of it were left (``partial``: then never ``unsupported``
+        or ``access``, which mean nothing was written). The lock is the file's own: a stalled mount holds up
+        saves into its own files only (review C-a)."""
         source = os.fstat(data)
         if not stat.S_ISREG(source.st_mode):
             raise api.RunnerError(api.INVALID, "the bytes come as a regular file")
         length, size = source.st_size, int(expected[2])
         if length > api.MAX_APPEND_BYTES or size + length > api.MAX_COPY_BYTES:
             raise api.RunnerError(api.TOO_LARGE)
-        with _IN_PLACE:
-            fd, _ = self._in_place(parent_fd, name, expected, os.O_WRONLY)
-            written = 0
-            try:
+        fd = self._in_place(parent_fd, name, os.O_WRONLY)
+        try:
+            with _file_lock(fd):
+                self._checked(fd, expected)
+                written = 0
                 try:
                     while written < length:
                         chunk = os.pread(data, min(1 << 20, length - written), written)
@@ -775,9 +782,12 @@ class Host:
                 mine = os.fstat(fd)
                 if mine.st_size != size + length:
                     raise api.RunnerError(api.CHANGED, identity=self.identity(mine), partial=True)
-            finally:
                 os.close(fd)
-            return self._named(parent_fd, name, mine)
+                fd = -1
+                return self._named(parent_fd, name, mine)
+        finally:
+            if fd >= 0:
+                os.close(fd)
 
     def _cut_back(self, fd: int, size: int, written: int, error: OSError) -> api.RunnerError:
         """``append``'s failure: the bytes written cut off again if the file is the size they left it at (only
@@ -795,15 +805,17 @@ class Host:
         except OSError:
             pass
         failure = _in_place_error(error)
-        return api.RunnerError(failure.category, str(failure), identity=identity, partial=partial)
+        category = api.OTHER if partial and failure.category in (api.UNSUPPORTED, api.ACCESS) else failure.category
+        return api.RunnerError(category, str(failure), identity=identity, partial=partial)
 
     def truncate(self, parent_fd: int, name: str, expected: Sequence[int], to: int) -> list[int]:
         """The file whose identity is ``expected`` cut back to ``to``: only a save cut short at its end taken off
         (V3-P82 §3.6) — ``to`` within the last MAX_APPEND_BYTES (and 1 KiB) and right after a ``startxref``
         and its ``%%EOF`` (and at most one line break), never further back (review C4). Its identity after."""
-        with _IN_PLACE:
-            fd, info = self._in_place(parent_fd, name, expected, os.O_RDWR)
-            try:
+        fd = self._in_place(parent_fd, name, os.O_RDWR)
+        try:
+            with _file_lock(fd):
+                info = self._checked(fd, expected)
                 if not max(0, info.st_size - api.MAX_APPEND_BYTES - 1024) < to < info.st_size:
                     raise api.RunnerError(api.INVALID, "only a save cut short at the end of a PDF is cut off")
                 want = min(to, 64)
@@ -816,9 +828,12 @@ class Host:
                     mine = os.fstat(fd)
                 except OSError as error:
                     raise _in_place_error(error) from None
-            finally:
                 os.close(fd)
-            return self._named(parent_fd, name, mine)
+                fd = -1
+                return self._named(parent_fd, name, mine)
+        finally:
+            if fd >= 0:
+                os.close(fd)
 
     # --- an agent's writes, kept for review (V3-P76 §4.1) -----------------------------------
 
@@ -1101,18 +1116,41 @@ class Host:
             os.close(fd)
 
 
-_IN_PLACE = threading.Lock()  # one write in place at a time in this runner (V3-P82 §3.6, review C1)
-_SAVE_END = re.compile(rb"startxref\s+\d+\s*%%EOF(?:\r\n|\r|\n)?$")  # the end of one of a PDF's saves
+_SAVE_END = re.compile(rb"startxref\s+\d+\s*%%EOF(?:\r\n|\r|\n)?\Z")  # the end of one of a PDF's saves
+_LOCKS: dict[tuple[int, int], tuple[threading.Lock, int]] = {}  # (dev, ino) → its lock, and how many hold or wait
+_LOCKS_GUARD = threading.Lock()
+
+
+@contextmanager
+def _file_lock(fd: int) -> Iterator[None]:
+    """One write in place at a time into the file open as ``fd`` (V3-P82 §3.6, review C1): two saves from the
+    same base never both land. Per file (review C-a): one stalled mount holds up its own files only."""
+    info = os.fstat(fd)
+    key = (info.st_dev, info.st_ino)
+    with _LOCKS_GUARD:
+        lock, users = _LOCKS.get(key, (threading.Lock(), 0))
+        _LOCKS[key] = (lock, users + 1)
+    try:
+        with lock:
+            yield
+    finally:
+        with _LOCKS_GUARD:
+            lock, users = _LOCKS[key]
+            if users == 1:
+                del _LOCKS[key]
+            else:
+                _LOCKS[key] = (lock, users - 1)
 
 
 def _in_place_error(error: OSError) -> api.RunnerError:
     """A write in place refused (V3-P82 §3.6), told as such: a read-only file (a rename needed only its
-    folder's permission), or a mount that cannot write into a file (rclone without its write cache)."""
-    if error.errno == errno.EACCES:
+    folder's permission) or file system, or a file that cannot be written into (an immutable one; an rclone
+    mount without its write cache)."""
+    if error.errno in (errno.EACCES, errno.EROFS):
         return api.RunnerError(api.ACCESS, "this PDF is read-only on the server: it cannot be written on")
     if error.errno in (errno.EPERM, errno.ENOTSUP, errno.EOPNOTSUPP):
-        return api.RunnerError(api.UNSUPPORTED, "this folder's mount cannot write into a file in place (rclone: "
-                                                "--vfs-cache-mode writes or full)")
+        return api.RunnerError(api.UNSUPPORTED, "this file cannot be written into in place here (an immutable "
+                                                "file, or an rclone mount without --vfs-cache-mode writes or full)")
     return _error(error)
 
 

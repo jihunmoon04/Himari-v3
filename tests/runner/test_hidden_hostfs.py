@@ -798,6 +798,8 @@ def test_truncate_only_back_to_one_of_its_saves(host: Host, home: Path) -> None:
         host.truncate(fd, name, identity(target), len(first))  # after the line break, and before it
         host.truncate(fd, name, identity(target), len(first) - 2)
         assert target.read_bytes() == first[:-2]
+        target.write_bytes(b"%PDF-1.7\nstartxref\n9\n%%EOF\n\nx")  # two line breaks after it: not just after
+        assert category(lambda: host.truncate(fd, name, identity(target), target.stat().st_size - 1)) == api.INVALID
         target.write_bytes(b"%PDF-1.7\n%%EOF\nno startxref before it")  # a %%EOF alone is not a save's end
         assert category(lambda: host.truncate(fd, name, identity(target), len(b"%PDF-1.7\n%%EOF\n"))) == api.INVALID
         far = b"%PDF-1.7\nstartxref\n1\n%%EOF\n"
@@ -897,6 +899,41 @@ def test_a_mount_that_cannot_write_in_place_is_told(host: Host, home: Path, tmp_
         with pytest.raises(api.RunnerError) as refused:
             host.append(fd, name, data, identity(target))
         assert refused.value.category == api.UNSUPPORTED and "vfs-cache-mode" in str(refused.value)
+        assert hostfs._in_place_error(OSError(errno.EROFS, "read-only")).category == api.ACCESS
     finally:
         os.close(fd)
+        os.close(data)
+
+
+def test_a_held_file_holds_up_its_own_saves_only(host: Host, home: Path, tmp_path: Path) -> None:
+    """Review C-a: the lock is the file's own — a save into another file goes on while one is held (a Drive
+    PDF on a stalled mount), and the held file's own save waits for it."""
+    import threading
+
+    held, other = home / "projects/a/drive.pdf", home / "projects/a/local.pdf"
+    for each in (held, other):
+        each.write_bytes(b"%PDF-1.7\nstartxref\n9\n%%EOF\n")
+    data = bytes_fd(tmp_path, b"more\nstartxref\n30\n%%EOF\n")
+    fd, _ = parent(host, home, "projects/a/drive.pdf")
+    held_fd = os.open(held, os.O_RDONLY)
+    done: dict[str, object] = {}
+
+    def save(name: str) -> None:
+        done[name] = host.append(fd, name, data, identity(home / "projects/a" / name))
+
+    try:
+        with hostfs._file_lock(held_fd):
+            local = threading.Thread(target=save, args=("local.pdf",))
+            local.start()
+            local.join(5)
+            assert "local.pdf" in done  # not held up by the other file's lock
+            drive = threading.Thread(target=save, args=("drive.pdf",))
+            drive.start()
+            drive.join(0.3)
+            assert drive.is_alive() and "drive.pdf" not in done  # its own file's: waits
+        drive.join(5)
+        assert "drive.pdf" in done and not hostfs._LOCKS  # every lock given back
+    finally:
+        os.close(fd)
+        os.close(held_fd)
         os.close(data)

@@ -83,11 +83,14 @@ WRITES = frozenset({WRITE, DELETE, RUN, COPY_IN, FREE_PATH, COMMIT_COPY, DISCARD
 # copied; a larger one is TOO_LARGE. ``delete_copied`` (``expected``, ``copy_max`` required): the file deleted
 # only with its copy (the answer's fd), TOO_LARGE over ``copy_max``.
 # ``append`` (``expected`` required, the bytes as one fd of at most MAX_APPEND_BYTES): written at the end of the
-# file whose identity is ``expected`` (a regular file with one name), in place, never through a temporary file;
-# the answer's identity is the name's after (CHANGED if the name no longer holds the file written). A failed
-# write is cut back when nothing else wrote meanwhile; its error carries the file's ``identity`` then and
-# ``partial`` (bytes of it left at the end). ``truncate`` (``expected``, ``to``): the file cut to ``to``, which
-# must follow a ``%%EOF`` (and one line break), so only back to one of its saves.
+# file whose identity is ``expected`` (a regular file with one name), in place, never through a temporary file,
+# one at a time per file; the answer's identity is the name's after. Refused before writing: CHANGED, LINKS,
+# NOT_REGULAR, ACCESS (read-only), UNSUPPORTED (cannot be written into in place). After writing: CHANGED with
+# ``partial`` (the file is not the size our bytes left it at, or another file took the name: read it again).
+# A failed write is cut back when nothing else wrote meanwhile; its error carries the file's ``identity`` then
+# and ``partial`` (bytes of it left at the end; never with ACCESS or UNSUPPORTED). ``truncate`` (``expected``,
+# ``to``): the file cut to ``to``, within the last MAX_APPEND_BYTES (and 1 KiB) and right after a
+# ``startxref`` and its ``%%EOF`` (and at most one line break): only a save cut short taken off its end.
 
 # Error categories: each message is safe to show the model.
 NOT_FOUND = "not_found"  # also every hidden path: whether it exists is not told
