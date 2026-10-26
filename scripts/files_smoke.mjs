@@ -146,11 +146,13 @@ const within = (promise) => Promise.race([promise, new Promise((r) => setTimeout
 
 function fakeModule() {
   const made = [];
+  const read = (text) => text.replace(/\r\n?/g, "\n"); // as CodeMirror does: every line break one "\n"
   return {
     made,
     createEditor(parent, opts) {
-      const editor = { value: opts.text, opts, text: () => editor.value, destroyed: false, picked: [0, 0],
-        setText(text) { editor.value = text; }, type(text) { editor.value = text; if (opts.onChange) opts.onChange(); },
+      const editor = { value: read(opts.text), opts, text: () => editor.value, destroyed: false, picked: [0, 0],
+        setText(text) { editor.value = read(text); },
+        type(text) { editor.value = read(text); if (opts.onChange) opts.onChange(); },
         destroy() { editor.destroyed = true; }, setReadOnly() {}, focus() {},
         selection() { // one line: columns are positions + 1
           const [from, to] = editor.picked;
@@ -229,6 +231,32 @@ const refusal = (code) => Object.assign(new Error(code), { code });
   assert.deepEqual(sent.filter(([m]) => m === "PUT").map(([, , b]) => b.expected), [[1, 2, 3, 4], [9, 9, 9, 9]]);
   assert.equal(files.dirty, false);
   assert.equal(files.doc.bar.hidden, true);
+  files.closeDoc();
+}
+
+// A file's own line breaks: not "unsaved" when opened or loaded again, and written back by a save.
+for (const [text, typed, written] of [
+  ["one\r\ntwo\r\n", "one\nthree\n", "one\r\nthree\r\n"],
+  ["one\rtwo\r", "one\nthree\n", "one\rthree\r"],
+  ["one\ntwo\n", "one\nthree\n", "one\nthree\n"],
+  ["a\r\nb\r\nc\nd\r\n", "a\nb\n", "a\r\nb\r\n"], // mixed: the break most lines end with
+]) {
+  const { files, sent, module } = editorPane({
+    "GET /api/machine/file": { ...TEXT, text },
+    "PUT /api/machine/file": { path: TEXT.path, identity: [1, 2, 5, 6], previous_kept: true },
+  });
+  await files.openFile(TEXT.path);
+  const editor = module.made[0];
+  editor.type(editor.text()); // a change, then back: the same text
+  assert.equal(files.dirty, false);
+  editor.type(typed);
+  await files.save();
+  assert.equal(sent.find(([method]) => method === "PUT")[2].content, written);
+  assert.equal(files.dirty, false);
+  await files.loadDisk(); // the server's version (as it was read) again: nothing to save
+  assert.equal(files.dirty, false);
+  files.restore(text); // a previous version with the same text
+  assert.equal(files.dirty, false);
   files.closeDoc();
 }
 
