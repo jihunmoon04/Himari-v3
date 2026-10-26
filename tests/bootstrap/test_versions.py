@@ -72,6 +72,25 @@ def test_a_store_of_large_versions_streams_them_and_holds_its_limit(tmp_path: Pa
         VersionStore(tmp_path / "v").keep("/q", copy(b"y" * (versions.MAX_VERSION_BYTES + 1)), "save")
 
 
+def test_a_version_not_indexed_leaves_nothing_behind(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """PR #103 review P2: a version whose index could not be written is not left as an unpruned file; the
+    versions kept before stay."""
+    store = VersionStore(tmp_path / "v", max_version_bytes=4 << 20)
+    first = store.keep("/p.pdf", copy(b"%PDF-first"), "ink")
+
+    def broken(folder: Path, index: dict[str, object]) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(VersionStore, "_write_index", staticmethod(broken))
+    with pytest.raises(OSError):
+        store.keep("/p.pdf", copy(b"%PDF-" + b"x" * (3 << 20)), "ink")
+    monkeypatch.undo()
+    assert [v.version_id for v in store.of("/p.pdf")] == [first.version_id]
+    files = sorted(p.name for p in (tmp_path / "v").rglob("*") if p.is_file())
+    assert files == sorted([f"{first.version_id}.bin", "index.json"])
+    assert store.read("/p.pdf", first.version_id) == b"%PDF-first"
+
+
 def test_ready_only_with_room(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     store = VersionStore(tmp_path / "v")
     assert store.ready_for(1024)

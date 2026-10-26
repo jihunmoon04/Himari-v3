@@ -788,7 +788,7 @@ const DIFF = { path: "/home/u/a.txt", name: "a.txt", kind: "changed", state: "ok
 }
 
 /* V3-P77 §3: a PDF opens in the PDF view, whose module and bytes the test hands out. */
-function pdfPane(routes, { fail = null } = {}) {
+function pdfPane(routes, { fail = null, confirms = null } = {}) {
   const views = [];
   const reads = [];
   const module = {
@@ -823,7 +823,8 @@ function pdfPane(routes, { fail = null } = {}) {
     pending.push(answer);
     return answer.promise;
   };
-  const files = new FilesPane({ api, el, loadPdf: async () => module, readFile });
+  const files = new FilesPane({ api, el, loadPdf: async () => module, readFile,
+    confirm: async (title, lines, action) => { if (confirms) confirms.push([title, lines, action]); return true; } });
   return { files, views, reads, pending };
 }
 
@@ -922,6 +923,28 @@ const pageLabel = (files) => files.tools.children.find((c) => (c.className || ""
   assert.equal(views[1].went, 3);
   assert.equal(pageLabel(files).textContent, "3 / 3");
   assert.deepEqual(files.pdf.identity, [1, 2, 9, 9]);
+}
+
+// PR #103 review P3: a PDF over 1 MiB (up to 64 MiB) is deleted with its content kept: told so, asked once.
+{
+  const big = { ...PDF, size: 3 * 1024 * 1024 };
+  const confirms = [];
+  const sent = [];
+  const { files, pending } = pdfPane({
+    "GET /api/machine/file": big,
+    "GET /api/machine/stat": () => ({ path: PDF.path, kind: "file", size: big.size, identity: big.identity }),
+    "POST /api/machine/file/delete": () => { sent.push("delete"); return { path: PDF.path, previous_kept: true }; },
+    "GET /api/machine/list": listing("/home/u", []),
+  }, { confirms });
+  const opening = files.openFile(PDF.path);
+  for (let i = 0; i < 20 && !pending.length; i++) await settle();
+  pending[0].resolve(new Uint8Array(4));
+  await opening;
+  await files.deleteFile();
+  assert.equal(confirms.length, 1, "no second warning that it cannot be put back");
+  assert.match(confirms[0][1].join(" "), /kept as a previous version/);
+  assert.deepEqual(sent, ["delete"]);
+  assert.equal(files.pdf, null);
 }
 
 // PR #102 review: a PDF read as a download is held to the limit whatever its size was told — its length

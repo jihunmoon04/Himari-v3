@@ -87,14 +87,20 @@ class VersionStore:
             os.close(fd)
         version = Version(version_id, now, size, reason)
         with self._lock:
-            folder.mkdir(mode=0o700, exist_ok=True)  # pruned meanwhile, with its last version
-            if not (folder / f"{version_id}.bin").exists():
-                raise OSError("the version went while it was being kept")
-            index = self._index(folder)
-            index["path"] = path
-            index["versions"].append({"id": version.version_id, "saved_at": now.isoformat(), "size": size,
-                                      "reason": reason})
-            self._write_index(folder, index)
+            kept = folder / f"{version_id}.bin"
+            try:
+                if not kept.exists():  # its folder pruned meanwhile, with its last version
+                    raise OSError("the version went while it was being kept")
+                index = self._index(folder)
+                index["path"] = path
+                index["versions"].append({"id": version.version_id, "saved_at": now.isoformat(), "size": size,
+                                          "reason": reason})
+                self._write_index(folder, index)
+            except BaseException:
+                # Not in the index, so nothing would ever prune it: this version's file goes now (PR #103
+                # review P2); the versions already kept are not touched.
+                kept.unlink(missing_ok=True)
+                raise
             self._prune(now)
         return version
 
@@ -171,8 +177,12 @@ class VersionStore:
     @staticmethod
     def _write_index(folder: Path, index: dict[str, Any]) -> None:
         temp = folder / f"index.{secrets.token_hex(4)}.tmp"
-        temp.write_text(json.dumps(index), "utf-8")
-        temp.replace(folder / "index.json")
+        try:
+            temp.write_text(json.dumps(index), "utf-8")
+            temp.replace(folder / "index.json")
+        except BaseException:
+            temp.unlink(missing_ok=True)
+            raise
 
     def _prune(self, now: datetime) -> None:
         """Older than KEEP_DAYS go; then the oldest, while all pass the budget."""

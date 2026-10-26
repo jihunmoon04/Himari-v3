@@ -674,12 +674,16 @@ class Host:
             os.close(held)
 
     def delete_checked(self, parent_fd: int, name: str, expected: Sequence[int],
-                       copy_max: int = MAX_SNAPSHOT_BYTES) -> int | None:
+                       copy_max: int = MAX_SNAPSHOT_BYTES, copied: bool = False) -> int | None:
         """§7.4: delete the file whose identity is ``expected``; a copy of what
-        it held, taken before the unlink (or None over ``copy_max``)."""
+        it held, taken before the unlink (or None over ``copy_max``). With
+        ``copied`` (V3-P77 §6.3), never without it: TOO_LARGE, nothing deleted."""
         held, info = self._hold(parent_fd, name, expected)
         copy: int | None = None
         try:
+            if copied and info.st_size > copy_max:
+                raise api.RunnerError(api.TOO_LARGE, f"files over {copy_max // (1024 * 1024)} MiB are not deleted "
+                                                     "with a copy")
             copy = self._copy_of(held, info.st_size, copy_max)
             self._unchanged(parent_fd, name, held, expected)
             try:

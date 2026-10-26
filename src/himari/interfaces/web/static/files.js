@@ -854,7 +854,9 @@ export class FilesPane {
       return;
     }
     const name = path.slice(path.lastIndexOf("/") + 1);
-    const big = now.size > EDIT_MAX_BYTES;
+    // A PDF up to 64 MiB is deleted only with its content kept (V3-P77 §6.3; PR #103 review P3).
+    const keptPdf = this.pdf !== null && this.pdf.path === path && now.size <= PDF_MAX_BYTES;
+    const big = now.size > EDIT_MAX_BYTES && !keptPdf;
     const lines = big ? ["This file is over 1 MiB: no previous version of it is kept, so it cannot be put back."]
       : ["Its content is kept as a previous version on the server for 30 days."];
     if (doc && doc.dirty) lines.push("Your unsaved changes are dropped too.");

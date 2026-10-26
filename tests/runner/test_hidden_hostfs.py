@@ -446,9 +446,10 @@ def test_copy_max_raises_the_copy_limit_of_a_replace_and_a_checked_delete(host: 
         now, copy = host.replace(fd, name, body + b"\n%%EOF\n", identity(pdf), len(body))
         assert copy is not None and read_all_large(copy) == body and now == identity(pdf)
         whole = pdf.read_bytes()
-        assert host.delete_checked(fd, name, identity(pdf), len(whole) - 1) is None  # over it: no copy
-        pdf.write_bytes(whole)
-        copy = host.delete_checked(fd, name, identity(pdf), len(whole))
+        with pytest.raises(api.RunnerError) as refused:  # its copy required: never deleted without it
+            host.delete_checked(fd, name, identity(pdf), len(whole) - 1, copied=True)
+        assert refused.value.category == api.TOO_LARGE and pdf.read_bytes() == whole
+        copy = host.delete_checked(fd, name, identity(pdf), len(whole), copied=True)
         assert copy is not None and read_all_large(copy) == whole and not pdf.exists()
     finally:
         os.close(fd)

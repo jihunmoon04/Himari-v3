@@ -124,10 +124,14 @@ class MachineEnvironment:
             self._protocol = version if isinstance(version, int) else 0
         return self._protocol >= runner.KEEP_PROTOCOL
 
-    async def copies_large(self) -> bool:
-        """The runner takes ``copy_max`` (V3-P77 §6.1): a replace or a checked
-        delete of a PDF up to 64 MiB, with its copy. One older would copy 1
-        MiB at most: a PDF's save is then refused before it is sent."""
+    async def copies_large(self, fresh: bool = False) -> bool:
+        """The runner takes ``copy_max`` and ``delete_copied`` (V3-P77 §6.1):
+        a PDF up to 64 MiB replaced or deleted with its copy. One older would
+        copy 1 MiB at most: a PDF's write is then refused before it is sent.
+        ``fresh``: asked again, not as told before (a runner rolled back since
+        refuses those writes; PR #103 review P1)."""
+        if fresh:
+            self._protocol = 0
         if self._protocol < runner.COPY_MAX_PROTOCOL:
             version = (await self.hello()).get("version")
             self._protocol = version if isinstance(version, int) else 0

@@ -354,9 +354,9 @@ def test_slow_reads_are_given_up_and_bounded(tmp_path: Path, monkeypatch: pytest
         kit.close()
 
 
-def test_copy_max_on_a_replace_and_a_checked_delete(kit: RunnerKit) -> None:
+def test_copy_max_on_a_replace_and_a_copied_delete(kit: RunnerKit) -> None:
     """V3-P77 §6.1 (protocol 3): a PDF over 1 MiB is replaced and deleted with its copy, up to copy_max; the
-    copy_max given is checked."""
+    copy_max given is checked. A delete that needs its copy is an op of its own (PR #103 review P1)."""
     folder = str(kit.home / "projects")
     (kit.home / "projects").mkdir(exist_ok=True)
     pdf = kit.home / "projects/notes.pdf"
@@ -385,8 +385,14 @@ def test_copy_max_on_a_replace_and_a_checked_delete(kit: RunnerKit) -> None:
     with os.fdopen(fds[0], "rb") as copy:
         assert copy.read() == body
     info = pdf.stat()
-    result, fds = call(kit, api.DELETE, {**base, "expected": [info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns],
-                                         "copy_max": api.MAX_COPY_BYTES})
+    now: dict[str, object] = {**base, "expected": [info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns]}
+    with pytest.raises(api.RunnerError) as refused:
+        call(kit, api.DELETE_COPIED, now)  # copy_max is required
+    assert refused.value.category == api.INVALID and pdf.exists()
+    with pytest.raises(api.RunnerError) as refused:
+        call(kit, api.DELETE_COPIED, {**now, "copy_max": 2 * 1024 * 1024})  # over it: not deleted
+    assert refused.value.category == api.TOO_LARGE and pdf.exists()
+    result, fds = call(kit, api.DELETE_COPIED, {**now, "copy_max": api.MAX_COPY_BYTES})
     assert result["previous"] is True and not pdf.exists()
     with os.fdopen(fds[0], "rb") as copy:
         assert copy.read() == body + b"\n%%EOF\n"

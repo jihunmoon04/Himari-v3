@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 from collections.abc import Iterator
 from pathlib import Path
@@ -214,3 +215,70 @@ def test_a_large_file_that_is_not_a_pdf_is_deleted_as_before(server: Server, kit
     assert gone.status_code == 200 and not gone.json()["previous_kept"] and not target.exists()
     refused(server.post("/api/machine/versions/nope/put_back", {"path": path, "expected": [1, 2, 3, 4]}), 404,
             "not_found")
+
+
+def test_a_runner_rolled_back_since_it_was_asked_fails_closed(server: Server, kit: RunnerKit,
+                                                             monkeypatch: pytest.MonkeyPatch) -> None:
+    """PR #103 review P1: HIMARI was told protocol 3; the runner is an older one now. Its refusals — an unknown
+    ``delete_copied``, a large replace with ``copy_max`` ignored — leave the PDF as it was, and are told."""
+    from himari.runner import api as runner
+
+    original = FIXTURE.read_bytes()
+    padded = original.replace(b"%%EOF", b"%" + b"p" * (3 * MiB) + b"\n%%EOF", 1)
+    target, path = place(kit, padded)
+    machine = explorer_of(server)._machine
+    real_call = machine.call
+    assert append(server, path, increment(padded), identity(server, path)).status_code == 200  # told: 3
+    assert machine._protocol == runner.PROTOCOL_VERSION
+    saved = target.read_bytes()
+
+    async def older(op: str, args: dict[str, Any], fds: Any = ()) -> Any:
+        if op == runner.HELLO:
+            return {"version": 2}, []
+        if op == runner.DELETE_COPIED:
+            raise runner.RunnerError(runner.INVALID, f"unknown operation {op}")
+        return await real_call(op, {k: v for k, v in args.items() if k != "copy_max"}, fds)  # ignored
+
+    monkeypatch.setattr(machine, "call", older)
+    machine._protocol = runner.PROTOCOL_VERSION  # as told before the rollback
+    refused(server.post("/api/machine/file/delete", {"path": path, "expected": identity(server, path)}), 422,
+            "unsupported")
+    assert target.read_bytes() == saved
+    machine._protocol = runner.PROTOCOL_VERSION
+    refused(append(server, path, increment(saved, 93), identity(server, path)), 422, "unsupported")
+    assert target.read_bytes() == saved
+
+
+def test_a_copy_given_up_on_never_writes_anywhere(server: Server, kit: RunnerKit,
+                                                  monkeypatch: pytest.MonkeyPatch) -> None:
+    """PR #103 review P1: the copy is the copying thread's own file, handed over only when whole: given up on
+    (a slow mount), it is closed when it ends — never written into a descriptor closed or reused meanwhile."""
+    import threading
+    import time
+
+    from himari.bootstrap import explorer as module
+
+    original = FIXTURE.read_bytes()
+    target, path = place(kit, original)
+    gate = threading.Event()
+    made: list[Any] = []
+    real = module._pdf_with
+
+    def slow(source: int, size: int, added: bytes) -> Any:
+        gate.wait(10)
+        body = real(source, size, added)
+        made.append(body)
+        return body
+
+    monkeypatch.setattr(module, "_pdf_with", slow)
+    monkeypatch.setattr(module, "PDF_COPY_SECONDS", 0.2)
+    refused(append(server, path, increment(original), identity(server, path)), 504, "timed_out")
+    reused = [os.open(str(kit.home / "projects/a/main.c"), os.O_RDONLY) for _ in range(4)]  # numbers taken again
+    gate.set()
+    deadline = time.monotonic() + 10
+    while not (made and made[0].closed) and time.monotonic() < deadline:
+        time.sleep(0.02)
+    for fd in reused:
+        os.close(fd)
+    assert made and made[0].closed  # the given-up copy, closed by the thread's end
+    assert target.read_bytes() == original and (kit.home / "projects/a/main.c").read_text() == "int main(){}\n"

@@ -286,6 +286,8 @@ class Runner:
             return await self._write(args, fds, roots), []
         if op == api.DELETE and args.get("expected") is not None:
             return await self._delete_checked(args, roots)
+        if op == api.DELETE_COPIED:
+            return await self._delete_checked(args, roots, copied=True)
         if op in (api.CREATE_FILE, api.MKDIR):
             def make() -> dict[str, Any]:
                 parent_fd, parent, name = host.target(args.get("path"), _text(args, "cwd"), roots, follow=False)
@@ -323,7 +325,7 @@ class Runner:
 
     @staticmethod
     def _copy_max(args: dict[str, Any]) -> int:
-        """V3-P77 §6.1: the largest file a replace or a checked delete copies."""
+        """V3-P77 §6.1: the largest file a replace or ``delete_copied`` copies."""
         copy_max = args.get("copy_max", MAX_SNAPSHOT_BYTES)
         if not isinstance(copy_max, int) or isinstance(copy_max, bool) \
                 or not MAX_SNAPSHOT_BYTES <= copy_max <= api.MAX_COPY_BYTES:
@@ -348,13 +350,19 @@ class Runner:
 
         return await self._blocking(replace)
 
-    async def _delete_checked(self, args: dict[str, Any], roots: list[str]) -> tuple[dict[str, Any], list[int]]:
-        host, expected, copy_max = self.host, self._expected(args), self._copy_max(args)
+    async def _delete_checked(self, args: dict[str, Any], roots: list[str],
+                              copied: bool = False) -> tuple[dict[str, Any], list[int]]:
+        """§7.4: a checked delete, its copy up to 1 MiB; ``copied`` (``delete_copied``, V3-P77 §6.3): up to the
+        ``copy_max`` it requires, and never without its copy."""
+        host, expected = self.host, self._expected(args)
+        if copied and "copy_max" not in args:
+            raise api.RunnerError(api.INVALID, "copy_max is required")
+        copy_max = self._copy_max(args) if copied else MAX_SNAPSHOT_BYTES
 
         def delete() -> tuple[dict[str, Any], list[int]]:
             parent_fd, parent, name = host.target(args.get("path"), _text(args, "cwd"), roots, follow=False)
             try:
-                copy = host.delete_checked(parent_fd, name, expected, copy_max)
+                copy = host.delete_checked(parent_fd, name, expected, copy_max, copied)
             finally:
                 os.close(parent_fd)
             return {"path": posixpath.join(parent, name), "previous": copy is not None}, [] if copy is None else [copy]
