@@ -93,7 +93,7 @@ HIMARI는 ChatGPT처럼 자리마다 초안을 두고(§3), VS Code처럼 편집
 
 ### 4.1 저장 안 한 글의 임시 보관
 
-- 편집기의 글이 저장된 글과 다르면(`dirty`) 1초 모아서 (글을 되돌려 저장된 글과 같아지면 자기 기록을 지운다, 재검수 N8) `{ path, kind: "text", base, text, lineBreak, at, writer }`를 §5의 `unsaved`에 둔다. `base`는 그 글을 읽었을 때의 `identity`, 키는 경로, `writer`는 탭 id와 창(채팅 옆 패널 또는 Files 화면)이다.
+- 편집기의 글이 저장된 글과 다르면(`dirty`) 1초 모아서 `{ path, kind: "text", base, text, lineBreak, at, writer }`를 §5의 `unsaved`에 둔다. `base`는 그 글을 읽었을 때의 `identity`, 키는 경로, `writer`는 탭 id와 창(채팅 옆 패널 또는 Files 화면)이다. 글을 되돌려 저장된 글과 같아지면 자기 기록을 지운다(재검수 N8).
 - **지우는 것은 자기 기록만**(`writer`가 같을 때): 저장했을 때, 서버 판을 불러왔을 때, 사용자가 "Discard"(되살리기 막대의 Discard, 또는 떠날 때 묻는 "Discard your changes?")를 골랐을 때(검수 B4, 재검수 C4).
 - **같은 파일을 다시 열 때** 보관된 글이 있고, 그 파일이 이 탭의 다른 창에서 저장 안 한 채 열려 있지 않으면, **되살리기를 제안한다**(저절로 넣지 않는다: 다른 탭이 아직 그 글로 일하고 있을 수 있다).
   - 막대: "Unsaved changes from 10:42 were kept in this browser." — **Restore**, **Discard**.
