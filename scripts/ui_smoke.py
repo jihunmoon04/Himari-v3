@@ -144,7 +144,8 @@ def run(base: str, token: str, shots: str | None) -> list[str]:
         expect(page.locator("#home-recent-empty")).to_be_visible()
         page.fill("#composer-text", "Plan a trip")
         page.press("#composer-text", "Enter")
-        expect(page.locator("#question-text")).to_have_text("Which **city**?", timeout=10000)
+        expect(page.locator("#question-text")).to_have_text("Which city?", timeout=10000)  # formatted, as above
+        expect(page.locator("#question-text strong")).to_have_text("city")
         expect(page.locator(".item-tool-row .tool-row-summary")).to_have_text("✓ inside/write_file · done")
         if shots:
             page.screenshot(path=os.path.join(shots, "1-question.png"))
@@ -306,7 +307,8 @@ def run_turn_budget(base: str, token: str, shots: str | None) -> list[str]:
         expect(page.locator("#stop-panel")).to_be_visible(timeout=10000)
         expect(page.locator("#status-bar")).to_contain_text(  # and why: what the next request would need
             "Stopped: this turn's token budget is used (the turn used 92000 tokens;")
-        expect(page.locator("#stop-text")).to_have_text("This turn · 90k in · 2.0k out / 100k")
+        expect(page.locator("#stop-text")).to_have_text(  # why, beside Continue, then the usage
+            "Stopped: this turn's token budget is used · 90k in · 2.0k out / 100k")
         expect(page.locator("#composer-hint")).to_have_text("")
         if shots:
             page.screenshot(path=os.path.join(shots, "5-budget.png"))
@@ -1108,7 +1110,7 @@ def run_memory(base: str, token: str, shots: str | None, root: str, provider: Sc
 
 
 SCENARIOS = ("main", "compaction", "budget", "trash", "files", "images", "work", "instructions", "memory",
-             "streaming", "drafts", "addresses", "activity")
+             "streaming", "drafts", "addresses", "activity", "polish")
 
 
 def run_drafts(base: str, token: str, shots: str | None) -> list[str]:
@@ -1327,6 +1329,67 @@ def run_activity(base: str, token: str, shots: str | None, provider: GatedAdapte
         assert page.evaluate(paste, ["y" * 100, False]) is True  # short text: as always
         if shots:
             page.screenshot(path=os.path.join(shots, "24-paste.png"))
+        browser.close()
+    return errors
+
+
+def run_polish(base: str, token: str, shots: str | None) -> list[str]:
+    """Small things: Undo right after a move to the trash; the jump to the latest; the length count near the
+    limit; Retry on a failed upload."""
+    errors: list[str] = []
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page(viewport={"width": 1280, "height": 860})
+        page.on("console", lambda m: errors.append(m.text) if m.type == "error" and "Failed to load" not in m.text
+                else None)
+        page.on("pageerror", lambda e: errors.append(str(e)))
+        page.goto(base)
+        page.fill("#login-token", token)
+        page.click("#login-submit")
+        new_chat(page)
+        cid = page.locator(".conv-row.is-selected").get_attribute("data-id")
+        page.fill("#composer-text", "a long one")
+        page.press("#composer-text", "Enter")
+        expect(page.locator(".item-assistant").last).to_contain_text("Paragraph 40", timeout=10000)
+
+        # The jump to the latest: shown once scrolled up, and it goes back down.
+        jump = page.locator("#jump-latest")
+        expect(jump).to_be_hidden()
+        page.evaluate("document.getElementById('timeline').scrollTop = 0")
+        expect(jump).to_be_visible()
+        if shots:
+            page.screenshot(path=os.path.join(shots, "25-jump.png"))
+        jump.click()
+        expect(jump).to_be_hidden(timeout=5000)
+
+        # The count near the limit, and over it.
+        hint = page.locator("#composer-hint")
+        page.fill("#composer-text", "x" * 30_500)
+        expect(hint).to_have_text("30,500 / 32,000 characters")
+        page.fill("#composer-text", "x" * 32_001)
+        expect(hint).to_contain_text("too long to send")
+        page.fill("#composer-text", "short")
+        expect(hint).to_have_text("")
+
+        # Retry: an upload that failed goes again from its chip.
+        page.route("**/uploads?*", lambda route: route.abort())
+        a_file = {"name": "note.txt", "mimeType": "text/plain", "buffer": b"hello"}
+        page.set_input_files("#composer-files", files=[a_file])
+        chip = page.locator("#attach-list .attach-chip")
+        expect(chip).to_contain_text("did not finish", timeout=10000)
+        page.unroute("**/uploads?*")
+        chip.locator(".attach-chip-retry").click()
+        expect(chip).to_have_text(re.compile(r"note\.txt · 5 bytes"), timeout=10000)
+        expect(page.locator("#attach-list .attach-chip")).to_have_count(1)
+
+        # Undo right after a move to the trash: back, and open again.
+        page.click("#chat-menu-toggle")
+        page.click("#chat-menu-delete")
+        page.click("#confirm-ok")
+        expect(page.locator("#status-bar")).to_contain_text("Moved")
+        page.locator("#status-bar .status-action").click()
+        expect(page.locator(f'#conversation-list .conv-row.is-selected[data-id="{cid}"]')).to_be_visible()
+        expect(page.locator("#status-bar")).to_contain_text("Restored")
         browser.close()
     return errors
 
@@ -1665,6 +1728,15 @@ def main() -> int:
                 errors += run_activity(f"http://127.0.0.1:{PORT + 12}",
                                        Path(active, "control", "operator.secret").read_text().strip(),
                                        args.screenshots, provider)
+            finally:
+                server.should_exit = True
+                time.sleep(0.5)
+        if "polish" in only:
+            polished = os.path.join(tmp, "polish")
+            server = serve(polished, PORT + 13, ScriptedAdapter([NormalizedFinal((TextBlock(LONG_ANSWER),))]))
+            try:
+                errors += run_polish(f"http://127.0.0.1:{PORT + 13}",
+                                     Path(polished, "control", "operator.secret").read_text().strip(), args.screenshots)
             finally:
                 server.should_exit = True
                 time.sleep(0.5)

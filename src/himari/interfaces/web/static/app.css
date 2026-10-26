@@ -2078,6 +2078,52 @@ details > summary {
   margin-right: auto;
 }
 
+.composer-wrap {
+  position: relative;
+}
+
+/* Back to the end of the conversation, floating just above the composer. */
+.composer-wrap > .jump-latest {
+  position: absolute;
+  top: -48px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  border: 1px solid var(--border-subtle);
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  z-index: 2;
+}
+
+.composer-wrap > .jump-latest[hidden] {
+  display: none;
+}
+
+.composer-hint.is-over {
+  color: var(--warn);
+}
+
+.status-action {
+  padding: 0 var(--space-1);
+  font-size: inherit;
+  text-decoration: underline;
+}
+
+.attach-chip-retry {
+  background: none;
+  border: none;
+  color: var(--accent);
+  font-size: 12px;
+  padding: 0 4px;
+  cursor: pointer;
+}
+
 /* -- composer ------------------------------------------------------------ */
 
 .composer {

@@ -262,9 +262,11 @@
           <div class="timeline" id="timeline" aria-label="Conversation timeline"></div>
 
           <div class="composer-wrap" id="composer-wrap">
+            <button type="button" class="jump-latest" id="jump-latest" hidden aria-label="Jump to the latest"
+                    title="Jump to the latest">↓</button>
             <section class="question-panel" id="question-panel" role="group" aria-labelledby="question-heading" hidden>
               <h2 class="question-heading" id="question-heading">The assistant has a question</h2>
-              <p class="question-text" id="question-text"></p>
+              <div class="question-text" id="question-text"></div>
               <p class="question-hint" id="question-hint">Answer in the message box below.</p>
             </section>
 
