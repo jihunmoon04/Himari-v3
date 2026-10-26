@@ -40,7 +40,7 @@ function page() {
     document: { getElementById: node, addEventListener() {}, createElement: (tag) => new FakeElement(tag) },
     AppViews: class { reset() {} }, FilesPane: class { refresh() {} openFolder() {} }, console, setTimeout, clearTimeout,
     LiveAnswer: class { reset() {} shown() {} keepLast() {} settle() {} open() {} restyle() {} },
-    localStore,
+    localStore, rememberLab() {}, location: { search: "" },
   });
   const run = (code) => vm.runInContext(code, context);
   run(draftsSource);

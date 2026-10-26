@@ -63,6 +63,7 @@ assert.equal(pane.pageAt([0, 100, 200], 999), 2);
                             scrollTop: 0, clientTop: 0, clientWidth: 624, clientHeight: 600 });
     }
     append(...nodes) { for (const n of nodes) { n.parent = this; this.children.push(n); } }
+    prepend(node) { node.parent = this; this.children.unshift(node); }
     setAttribute(name, value) { this.attributes[name] = value; }
     addEventListener() {}
     remove() {}
@@ -253,7 +254,7 @@ for (const name of ["table.pdf", "stream.pdf"]) {
 
 // --- the ink (V3-P77 §4): the model -------------------------------------------------------------------------
 const inkModule = await import(new URL("pdfink.js", STATIC));
-const { Ink, newStroke, outline, specOf, strokeFromSaved, hits, TOOLS } = inkModule;
+const { Ink, newStroke, outline, specOf, strokeFromSaved, hits, TOOLS, DEFAULT_TUNING, currentTuning, setTuning } = inkModule;
 {
   const pen = newStroke(0, { tool: "pen", color: "blue", size: "bold" }, true);
   pen.points.push([100, 100, 0.2], [140, 130, 0.9], [180, 110, 0.5]);
@@ -274,6 +275,17 @@ const { Ink, newStroke, outline, specOf, strokeFromSaved, hits, TOOLS } = inkMod
   const flat = (pressure) => { const s = newStroke(0, { tool: "pen", color: "black", size: "bold" }, pressure);
                                s.points.push([0, 0, 0.1], [50, 0, 1], [100, 0, 0.1]); return s; };
   assert.ok(span(flat(true)) !== span(flat(false)));
+  // §4.6: the settings tried in the ink lab — outlines made again, the defaults giving the same as before;
+  // out of range, the nearest; not a number, the default.
+  const tunedBefore = outline(pen).map((p) => [...p]);
+  setTuning({ thinning: 0 });
+  assert.notDeepEqual(outline(pen), tunedBefore);
+  setTuning(DEFAULT_TUNING);
+  assert.deepEqual(outline(pen), tunedBefore);
+  assert.deepEqual(setTuning({ thinning: 5, smoothing: "x", streamline: -1 }),
+                   { thinning: 0.95, smoothing: DEFAULT_TUNING.smoothing, streamline: 0 });
+  setTuning(DEFAULT_TUNING);
+  assert.deepEqual(currentTuning(), { ...DEFAULT_TUNING });
   // Hits: on it, near it, off it.
   assert.ok(hits(pen, 140, 130, 1) && hits(pen, 120, 118, 1) && !hits(pen, 300, 300, 5));
 
@@ -336,16 +348,35 @@ const { Ink, newStroke, outline, specOf, strokeFromSaved, hits, TOOLS } = inkMod
                             clientHeight: 800, width: 0, height: 0, captured: null });
       this.classList = { toggle: (name, on) => { this.attributes[`class:${name}`] = on; } };
     }
-    append(...nodes) { for (const n of nodes) { n.parentNode = this; this.children.push(n); } }
-    remove() { if (this.parentNode) this.parentNode.children = this.parentNode.children.filter((c) => c !== this); }
+    append(...nodes) { for (const n of nodes) { n.remove(); n.parentNode = this; this.children.push(n); } }
+    prepend(node) { node.remove(); node.parentNode = this; this.children.unshift(node); }
+    after(node) {
+      node.remove();
+      node.parentNode = this.parentNode;
+      this.parentNode.children.splice(this.parentNode.children.indexOf(this) + 1, 0, node);
+    }
+    get lastChild() { return this.children.at(-1) || null; }
+    contains(node) { for (let at = node; at; at = at.parentNode) if (at === this) return true; return false; }
+    remove() {
+      if (this.parentNode) this.parentNode.children = this.parentNode.children.filter((c) => c !== this);
+      this.parentNode = null;
+    }
     setAttribute(name, value) { this.attributes[name] = value; }
     addEventListener(type, fn) { (this.listeners[type] ||= []).push(fn); }
-    getBoundingClientRect() { return { top: this.top || 0, left: 0 }; }
+    getBoundingClientRect() { // a page as large as its box; the view 624 × 800 at the top left
+      const width = parseFloat(this.style.width) || this.clientWidth;
+      const height = parseFloat(this.style.height) || this.clientHeight;
+      const top = this.top || 0;
+      return { top, left: 0, width, height, right: width, bottom: top + height };
+    }
     setPointerCapture(id) { this.captured = id; }
     releasePointerCapture() { this.captured = null; }
     focus() {}
-    getContext() {
-      return { clearRect() {}, beginPath() {}, moveTo() {}, lineTo() {}, closePath() {}, fill() { this.fills = (this.fills || 0) + 1; } };
+    getContext() { // one per canvas, counting what was done with it
+      this.context ||= { fills: 0, clears: [], transforms: [], clearRect(...r) { this.clears.push(r); },
+                         setTransform(...m) { this.transforms.push(m); }, beginPath() {}, moveTo() {}, lineTo() {},
+                         closePath() {}, fill() { this.fills += 1; } };
+      return this.context;
     }
   }
   const fire = (node, type, event) => {
@@ -427,7 +458,64 @@ const { Ink, newStroke, outline, specOf, strokeFromSaved, hits, TOOLS } = inkMod
   assert.deepEqual(drawn.points[0].slice(0, 2), viewport.convertToPdfPoint(100, 100));
   assert.deepEqual(drawn.points.map((p) => p[2]), [0.6, 0.4, 0.8]);
   assert.equal(drawn.color, "red");
-  assert.ok(view.ink.dirty && !view.pages[0].liveCanvas);
+  assert.ok(view.ink.dirty);
+  // The live layer: over the part of the page in view (scrolled 300 px down), painted once a frame however many
+  // moves came, emptied where it was drawn on when the pen lifts; the stroke then added on top of the page's
+  // ink, the page not painted again.
+  const tick = () => new Promise((r) => setTimeout(r, 5));
+  const inkContext = view.pages[0].inkCanvas.getContext();
+  const [inkClears, inkFills] = [inkContext.clears.length, inkContext.fills];
+  box(view).top = -300;
+  pointer(view, "pointerdown", { pointerId: 8, clientX: 200, clientY: 200 });
+  for (const x of [210, 220, 230]) pointer(view, "pointermove", { pointerId: 8, clientX: x, clientY: 210 });
+  await tick();
+  const live = view.live.canvas;
+  assert.equal(live.parentNode, box(view));
+  assert.equal(live.className, "pdf-live");
+  assert.deepEqual([live.style.left, live.style.top, live.style.width, live.style.height],
+                   ["0px", "300px", box(view).style.width, `${parseFloat(box(view).style.height) - 300}px`]);
+  assert.deepEqual([live.width, live.height], [parseFloat(box(view).style.width), parseFloat(box(view).style.height) - 300]);
+  const liveContext = live.getContext();
+  assert.equal(liveContext.fills, 1, "one frame for the down and three moves");
+  assert.deepEqual(box(view).children.map((c) => c.className), ["pdf-canvas", "pdf-ink", "pdf-live"]);
+  const transform = view.pages[0].pdfPage.getViewport({ scale: view.scaleOf(view.pages[0]) }).transform;
+  assert.deepEqual(liveContext.transforms.at(-2), [...transform.slice(0, 5), transform[5] - 300]);
+  pointer(view, "pointermove", { pointerId: 8, clientX: 260, clientY: 240 });
+  await tick();
+  assert.equal(liveContext.fills, 2);
+  assert.equal(liveContext.clears.length, 1, "where the frame before drew, emptied");
+  // The view scrolled under the pen (a palm, a wheel): the layer follows what is in view, emptied first.
+  box(view).top = -350;
+  pointer(view, "pointermove", { pointerId: 8, clientX: 270, clientY: 240 });
+  await tick();
+  assert.deepEqual([live.style.top, live.height], ["350px", parseFloat(box(view).style.height) - 350]); // emptied
+  assert.equal(liveContext.fills, 3);
+  assert.deepEqual(liveContext.transforms.at(-2).slice(4), [transform[4], transform[5] - 350]);
+  pointer(view, "pointerup", { pointerId: 8 });
+  assert.equal(liveContext.clears.length, 2);
+  const [, , w, h] = liveContext.clears.at(-1);
+  assert.ok(w > 0 && w < live.width && h > 0 && h < live.height, "only where it was drawn on");
+  assert.deepEqual([inkContext.clears.length, inkContext.fills], [inkClears, inkFills + 1]);
+  await tick();
+  assert.equal(liveContext.fills, 3, "no frame after the pen lifted");
+  box(view).top = 0;
+  view.undo();
+  // A zoom drawn again: the ink's canvas is made the drawing's size again (it kept the old one).
+  view.zoomBy(2, 0, 0);
+  for (let i = 0; i < 100 && view.pages[0].canvas.width < 1000; i++) await new Promise((r) => setTimeout(r, 10));
+  assert.ok(view.pages[0].canvas.width >= 1000, "drawn again at twice the size");
+  assert.deepEqual([view.pages[0].inkCanvas.width, view.pages[0].inkCanvas.height],
+                   [view.pages[0].canvas.width, view.pages[0].canvas.height]);
+  // ... and the new drawing goes under the ink and the live layer, never over them (review B1).
+  assert.deepEqual(box(view).children.map((c) => c.className), ["pdf-canvas", "pdf-ink", "pdf-live"]);
+  view.zoomBy(0.5, 0, 0);
+  for (let i = 0; i < 100 && view.pages[0].canvas.width >= 1000; i++) await new Promise((r) => setTimeout(r, 10));
+  // A page out of view dropped: its live layer goes with it; back in view, drawn again.
+  observed([{ target: box(view), isIntersecting: false }]);
+  assert.ok(view.live === null && !view.pages[0].inkCanvas && box(view).children.length === 0);
+  observed([{ target: box(view), isIntersecting: true }]);
+  for (let i = 0; i < 50 && !view.pages[0].inkCanvas; i++) await new Promise((r) => setTimeout(r, 5));
+  assert.deepEqual(box(view).children.map((c) => c.className), ["pdf-canvas", "pdf-ink"]);
   // A mouse draws at an even pressure.
   pointer(view, "pointerdown", { pointerType: "mouse", pointerId: 2, clientX: 300, clientY: 300 });
   pointer(view, "pointermove", { pointerType: "mouse", pointerId: 2, clientX: 320, clientY: 300 });
@@ -487,6 +575,47 @@ const { Ink, newStroke, outline, specOf, strokeFromSaved, hits, TOOLS } = inkMod
   assert.equal(view.ink.done.length, 0, "undo starts again after a save");
   assert.equal((await view.increment()), null);
   view.destroy();
+
+  // §4.6, the ink lab: off unless asked for; ?ink-lab turns it on in this browser, its numbers the last
+  // stroke's, a setting tried kept there and the ink painted again with it; ?ink-lab=0 off, the settings gone.
+  const lab = await import(new URL("inklab.js", STATIC));
+  const stored = new Map();
+  globalThis.localStorage = { getItem: (k) => stored.get(k) ?? null, setItem: (k, v) => stored.set(k, String(v)),
+                              removeItem: (k) => stored.delete(k) };
+  assert.ok(!lab.labOn());
+  lab.rememberLab("?x=1");
+  assert.ok(!lab.labOn());
+  lab.rememberLab("?ink-lab");
+  assert.ok(lab.labOn());
+  const tried = (await viewOf(fixture("table.pdf"))).view;
+  assert.ok(tried.lab && tried.element.children.includes(tried.lab.element));
+  tried.setTool({ tool: "pen", color: "black", size: "fine" });
+  pointer(tried, "pointerdown", { pointerId: 9, clientX: 100, clientY: 100, timeStamp: 0 });
+  pointer(tried, "pointermove", { pointerId: 9, clientX: 120, clientY: 100,
+                                  getCoalescedEvents: () => [{ clientX: 110, clientY: 100, pressure: 0.3, timeStamp: 8 },
+                                                             { clientX: 120, clientY: 100, pressure: 0.7, timeStamp: 16 }] });
+  await tick();
+  pointer(tried, "pointerup", { pointerId: 9 });
+  const numbers = tried.lab.numbers.textContent;
+  assert.match(numbers, /^pen · 63 moves\/s · 125 points\/s\n/); // the down's point at 0 ms counted too
+  assert.match(numbers, /\ninput to paint: [\d.]+ ms avg · [\d.]+ max · \d of 1 frames over 40 ms\n/);
+  assert.match(numbers, /per move: 2\.0 coalesced, 0\.0 predicted/);
+  assert.match(numbers, /pressure: 0\.30–0\.70 · 3 points · live \d+×\d+$/);
+  // A pencil's touch on the lab's controls is the controls', never kept from them.
+  const onLab = { clientX: 1, clientY: 1, touchType: "stylus" };
+  assert.ok(!fire(tried.element, "touchstart", { changedTouches: [onLab], touches: [onLab], target: tried.lab.numbers }));
+  assert.ok(fire(tried.element, "touchstart", { changedTouches: [onLab], touches: [onLab], target: box(tried) }));
+  const fillsBefore = tried.pages[0].inkCanvas.getContext().fills;
+  tried.lab.sliders.thinning.input.value = "0.2";
+  fire(tried.lab.sliders.thinning.input, "input", {});
+  assert.equal(currentTuning().thinning, 0.2);
+  assert.equal(JSON.parse(stored.get("himari.ink.tuning")).thinning, 0.2);
+  assert.ok(tried.pages[0].inkCanvas.getContext().fills > fillsBefore, "painted again");
+  tried.destroy();
+  lab.rememberLab("?ink-lab=0");
+  assert.ok(!lab.labOn() && !stored.has("himari.ink.tuning"));
+  setTuning(DEFAULT_TUNING);
+  delete globalThis.localStorage;
 
   // Encrypted: viewed only, its annotations drawn by PDF.js, no pen.
   const locked = await viewOf(fixture("encrypted.pdf"));
