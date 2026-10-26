@@ -224,6 +224,19 @@ def test_the_entry_point_refuses_a_bad_mcp_json_before_listening(tmp_path: Path,
 # --- envelope ------------------------------------------------------------------------------
 
 
+def test_surface_addresses_are_the_page(server: Server) -> None:
+    """V3-P79 §3.1: each surface's address is the same page, with the same headers; nothing else is."""
+    page = server.client.get("/").text
+    for path in ("/c/conv_12", "/c/a-B_9", "/files", "/trash", "/settings/instructions", "/settings/memory",
+                 "/settings/folders"):
+        got = server.client.get(path)
+        assert got.status_code == 200 and got.text == page, path
+        assert "default-src 'self'" in got.headers["content-security-policy"] and got.headers["x-frame-options"] == "DENY"
+    for path in ("/c/", "/c/a.b", "/c/" + "x" * 129, "/c/a/b", "/settings", "/settings/other", "/files/x", "/chat/1"):
+        assert server.client.get(path).status_code == 404, path
+    assert server.client.post("/files").status_code != 200  # a page to read only (the Origin guard answers first)
+
+
 def test_static_ui_and_security_headers(server: Server) -> None:
     page = server.client.get("/")
     assert page.status_code == 200 and "/assets/app.js" in page.text

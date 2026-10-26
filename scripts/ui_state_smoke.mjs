@@ -300,4 +300,45 @@ for (const scenario of ["same", "edited", "navigated", "failed", "stale-failure"
   assert.equal(p.node("login-token").value, "half a tok");
 }
 
-console.log("UI async regression checks: 20 passed");
+// V3-P79 §4.1: Enter sends from a hardware keyboard, makes a line with an on-screen one up; Shift+Enter is a
+// line, Cmd/Ctrl+Enter sends; an Enter that ends a composition (isComposing, or Safari's keyCode 229) is the IME's.
+{
+  const p = page();
+  const key = (extra = {}) => ({ key: "Enter", shiftKey: false, metaKey: false, ctrlKey: false, isComposing: false,
+                                 keyCode: 13, ...extra });
+  const windowWith = (visible, { touch = false, scale = 1 } = {}) => ({
+    innerHeight: 1000, innerWidth: 800, visualViewport: { height: visible, scale },
+    matchMedia: () => ({ matches: touch }) });
+  p.context.window = windowWith(1000);
+  p.run("noteWindowHeight()");
+  assert.equal(p.context.enterSends(key()), true, "hardware keyboard");
+  assert.equal(p.context.enterSends(key({ shiftKey: true })), false);
+  assert.equal(p.context.enterSends(key({ isComposing: true })), false);
+  assert.equal(p.context.enterSends(key({ keyCode: 229 })), false, "Safari's composition Enter");
+  assert.equal(p.context.enterSends(key({ key: "a" })), false);
+  p.context.window = windowWith(1000 - 60, { touch: true }); // an iPad keyboard's shortcut bar
+  assert.equal(p.context.enterSends(key()), true);
+  p.context.window = windowWith(600, { touch: true }); // the on-screen keyboard
+  assert.equal(p.context.enterSends(key()), false, "a new line");
+  assert.equal(p.context.enterSends(key({ metaKey: true })), true);
+  assert.equal(p.context.enterSends(key({ ctrlKey: true })), true);
+  assert.equal(p.context.enterSends(key({ keyCode: 229, metaKey: true })), false);
+  p.context.window = windowWith(500, { scale: 2 }); // zoomed in, with a hardware keyboard
+  assert.equal(p.context.enterSends(key()), true, "zoom is not a keyboard");
+  // Android: the window itself shrinks for the keyboard (interactive-widget=resizes-content).
+  p.context.window = { ...windowWith(1000, { touch: true }) };
+  p.run("noteWindowHeight()");
+  p.context.window = { ...windowWith(600, { touch: true }), innerHeight: 600 };
+  assert.equal(p.context.enterSends(key()), false);
+  p.context.window = { ...windowWith(600), innerHeight: 600 }; // a desktop window made smaller
+  assert.equal(p.context.enterSends(key()), true);
+  // PR #108 review B1: an iPad with a keyboard folio (touch-first), turned from portrait to landscape: its
+  // window is shorter than before, but it is wider too — a rotation, not a keyboard. Enter still sends.
+  p.context.window = { ...windowWith(1100, { touch: true }), innerWidth: 820, innerHeight: 1100 };
+  p.run("noteWindowHeight()");
+  p.context.window = { ...windowWith(760, { touch: true }), innerWidth: 1180, innerHeight: 760 };
+  p.run("noteWindowHeight()");
+  assert.equal(p.context.enterSends(key()), true, "rotated, with a hardware keyboard");
+}
+
+console.log("UI async regression checks: 21 passed");

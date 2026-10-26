@@ -182,7 +182,11 @@ def run(base: str, token: str, shots: str | None) -> list[str]:
         page.fill("#rename-name", "Seoul trip")
         page.get_by_role("button", name="Save name", exact=True).click()
         expect(page.locator(".conv-row")).to_have_text("Seoul trip")
-        page.reload()
+        page.reload()  # V3-P79 §3.3: the conversation's address opens it again, its name on the tab
+        expect(page.locator("#surface-chat")).to_be_visible()
+        expect(page.locator("#topbar-title")).to_have_text("Seoul trip")
+        expect(page).to_have_title("Seoul trip · HIMARI")
+        page.click("#nav-home")
         expect(page.locator(".home-recent-title")).to_have_text("Seoul trip")
         assert page.evaluate("document.cookie") == ""  # HttpOnly session
         page.set_viewport_size({"width": 390, "height": 800})
@@ -706,8 +710,8 @@ def run_work_progress(base: str, token: str, shots: str | None) -> list[str]:
         if shots:
             page.screenshot(path=os.path.join(shots, "14-work-done.png"))
         # The same after a reload; opened, a block shows its steps.
-        page.reload()
-        page.locator(".conv-row").first.click()
+        page.reload()  # the conversation's address opens it again (V3-P79), with the list beside it
+        expect(page.locator(".conv-row.is-selected")).to_have_count(1)
         expect(blocks).to_have_count(2, timeout=10000)
         assert [blocks.nth(n).locator(".work-count").inner_text() for n in range(2)] == ["Activity · 3 steps", "Activity · 2 steps"]
         assert page.evaluate("[...document.querySelectorAll('.item-work')].every(b => !b.open)")
@@ -1104,7 +1108,7 @@ def run_memory(base: str, token: str, shots: str | None, root: str, provider: Sc
 
 
 SCENARIOS = ("main", "compaction", "budget", "trash", "files", "images", "work", "instructions", "memory",
-             "streaming", "drafts")
+             "streaming", "drafts", "addresses")
 
 
 def run_drafts(base: str, token: str, shots: str | None) -> list[str]:
@@ -1120,10 +1124,10 @@ def run_drafts(base: str, token: str, shots: str | None) -> list[str]:
         page.on("pageerror", lambda e: errors.append(str(e)))
         box = page.locator("#composer-text")
 
-        def sign_in() -> None:
+        def sign_in() -> None:  # to the page's address: Home, or the conversation it showed (V3-P79)
             page.fill("#login-token", token)
             page.click("#login-submit")
-            expect(page.locator("#surface-home")).to_be_visible()
+            expect(page.locator("#surface-login")).to_be_hidden()
 
         def open_row(conversation: str) -> None:
             page.locator(f'#conversation-list .conv-row[data-id="{conversation}"]').click()
@@ -1186,8 +1190,8 @@ def run_drafts(base: str, token: str, shots: str | None) -> list[str]:
         expect(other.locator("#composer-text")).to_have_value("draft for B")
         other.evaluate("document.dispatchEvent(new Event('visibilitychange'))")
         other.close()
-        page.reload()
-        expect(page.locator("#surface-home")).to_be_visible()
+        page.reload()  # back to the conversation it showed (V3-P79)
+        expect(page.locator("#surface-chat")).to_be_visible()
         open_row(b)
         expect(box).to_have_value("draft for B")
 
@@ -1213,6 +1217,103 @@ def run_drafts(base: str, token: str, shots: str | None) -> list[str]:
         expect(box).to_have_value("")
         open_row(a)
         expect(box).to_have_value("")
+        browser.close()
+    return errors
+
+
+CODE_ANSWER = "Here it is:\n\n```python\nprint('hi')\n```\n\nAnd **done**."
+
+
+def run_addresses(base: str, token: str, shots: str | None) -> list[str]:
+    """V3-P79: each surface at its address — Back and Forward, a refused leave keeping the address, an address
+    opened before signing in, one that is not there, the tab's title, links in the list, sign-out — and Copy
+    on an answer and on its code."""
+    errors: list[str] = []
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        context = browser.new_context(viewport={"width": 1280, "height": 860},
+                                      permissions=["clipboard-read", "clipboard-write"])
+        page = context.new_page()
+        page.on("console", lambda m: errors.append(m.text) if m.type == "error" and "40" not in m.text else None)
+        page.on("pageerror", lambda e: errors.append(str(e)))
+        path = lambda: page.evaluate("location.pathname")  # noqa: E731
+
+        def sign_in(on: Any) -> None:
+            on.fill("#login-token", token)
+            on.click("#login-submit")
+
+        page.goto(base)
+        sign_in(page)
+        expect(page.locator("#surface-home")).to_be_visible()
+        new_chat(page)
+        a = page.locator(".conv-row.is-selected").get_attribute("data-id")
+        assert path() == f"/c/{a}"
+        page.fill("#composer-text", "first")
+        page.press("#composer-text", "Enter")
+        answer = page.locator(".item-assistant").last
+        expect(answer).to_contain_text("done", timeout=10000)
+        expect(page).to_have_title(re.compile(r".+ · HIMARI$"))
+
+        # Copy: the code alone from its block, the Markdown as written from the answer (§5).
+        code_copy = answer.locator(".rich-code-copy")
+        code_copy.click()
+        expect(code_copy).to_have_text("Copied")
+        assert page.evaluate("navigator.clipboard.readText()") == "print('hi')"
+        answer.locator(".item-actions .copy-button").click()
+        assert page.evaluate("navigator.clipboard.readText()") == CODE_ANSWER
+        expect(code_copy).to_have_text("Copy", timeout=4000)
+        if shots:
+            page.screenshot(path=os.path.join(shots, "21-copy.png"))
+
+        new_chat(page, "#nav-new-chat")
+        b = page.locator(".conv-row.is-selected").get_attribute("data-id")
+        assert a != b and path() == f"/c/{b}"
+        assert page.locator(f'#conversation-list .conv-row[data-id="{a}"]').get_attribute("href") == f"/c/{a}"
+        page.evaluate("history.back()")
+        expect(page.locator(f'#conversation-list .conv-row.is-selected[data-id="{a}"]')).to_be_visible()
+        assert path() == f"/c/{a}"
+        expect(page.locator(".item-assistant").last).to_contain_text("done")
+        page.evaluate("history.forward()")
+        expect(page.locator(f'#conversation-list .conv-row.is-selected[data-id="{b}"]')).to_be_visible()
+
+        # A leave refused on Back keeps the surface and its address (§3.2).
+        page.click("#nav-appearance")
+        page.click("#nav-instructions")
+        expect(page.locator("#surface-instructions")).to_be_visible()
+        assert path() == "/settings/instructions"
+        page.fill("#instructions-text", "not saved yet")
+        page.evaluate("history.back()")
+        expect(page.locator("#confirm-dialog")).to_be_visible()
+        page.click("#confirm-cancel")
+        expect(page.locator("#surface-instructions")).to_be_visible()
+        page.wait_for_timeout(300)
+        assert path() == "/settings/instructions"
+        # The refused Back's entry now holds this surface's address (§3.2), so Back again goes one further.
+        page.evaluate("history.back()")
+        page.click("#confirm-ok")
+        expect(page.locator(f'#conversation-list .conv-row.is-selected[data-id="{a}"]')).to_be_visible()
+        assert path() == f"/c/{a}"
+
+        # An address opened before signing in is where the sign-in goes, with the list beside it (§3.3).
+        other = browser.new_context(viewport={"width": 1280, "height": 860}).new_page()
+        other.goto(f"{base}/c/{a}")
+        expect(other.locator("#surface-login")).to_be_visible()
+        sign_in(other)
+        expect(other.locator(f'#conversation-list .conv-row.is-selected[data-id="{a}"]')).to_be_visible()
+        expect(other.locator(".item-assistant").last).to_contain_text("done", timeout=10000)
+        assert other.evaluate("location.pathname") == f"/c/{a}"
+        # One that is not here: Home, told, and Back does not go to it.
+        other.goto(f"{base}/c/conv_999999")
+        expect(other.locator("#surface-home")).to_be_visible()
+        expect(other.locator("#status-bar")).to_contain_text("not here")
+        assert other.evaluate("location.pathname") == "/"
+        other.context.close()
+
+        # Sign out leaves no conversation's address (§3.3).
+        page.click("#nav-appearance")
+        page.click("#nav-sign-out")
+        expect(page.locator("#surface-login")).to_be_visible()
+        assert path() == "/"
         browser.close()
     return errors
 
@@ -1433,6 +1534,16 @@ def main() -> int:
             try:
                 errors += run_drafts(f"http://127.0.0.1:{PORT + 10}",
                                      Path(kept, "control", "operator.secret").read_text().strip(), args.screenshots)
+            finally:
+                server.should_exit = True
+                time.sleep(0.5)
+        if "addresses" in only:
+            addressed = os.path.join(tmp, "addresses")
+            server = serve(addressed, PORT + 11, ScriptedAdapter([NormalizedFinal((TextBlock(CODE_ANSWER),))]))
+            try:
+                errors += run_addresses(f"http://127.0.0.1:{PORT + 11}",
+                                        Path(addressed, "control", "operator.secret").read_text().strip(),
+                                        args.screenshots)
             finally:
                 server.should_exit = True
                 time.sleep(0.5)
