@@ -163,6 +163,8 @@
         </div>
 
         <div class="status-bar" id="status-bar" role="status" aria-live="polite"></div>
+        <!-- New answers and questions, read by screen readers (the timeline itself is not a live region). -->
+        <div class="visually-hidden" id="announce" aria-live="polite" aria-atomic="true"></div>
 
         <!-- Sign-in: the operator token from <data root>/control/operator.secret -->
         <section class="surface login" id="surface-login" hidden>

@@ -343,4 +343,19 @@ for (const scenario of ["same", "edited", "navigated", "failed", "stale-failure"
   assert.equal(p.context.enterSends(key()), true, "rotated, with a hardware keyboard");
 }
 
-console.log("UI async regression checks: 21 passed");
+// A file HIMARI wrote on this server opens beside the conversation (the web UX review): its path relative to
+// the working folder; never for a tool that only read, nor where the panel cannot show this server's files.
+{
+  const p = page();
+  const entry = (toolId, path) => ({ toolId, args: { path } });
+  p.run("app.workingFolder = '/home/u/project/';");
+  assert.equal(p.context.openableWrite(entry("machine/write_file", "src/a.py")), "/home/u/project/src/a.py");
+  assert.equal(p.context.openableWrite(entry("machine/edit_file", "/etc/x.conf")), "/etc/x.conf");
+  assert.equal(p.context.openableWrite(entry("machine/edit_file", "~/notes.md")), "~/notes.md");
+  assert.equal(p.context.openableWrite(entry("machine/read_file", "a.py")), null);
+  assert.equal(p.context.openableWrite(entry("inside/write_file", "a.py")), null);
+  p.run("app.workingFolder = null;");
+  assert.equal(p.context.openableWrite(entry("machine/write_file", "a.py")), null);
+}
+
+console.log("UI async regression checks: 22 passed");
