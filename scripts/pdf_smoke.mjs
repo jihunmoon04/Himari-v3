@@ -9,7 +9,8 @@ const FIXTURES = new URL("../tests/fixtures/pdf/", import.meta.url);
 const fixture = (name) => new Uint8Array(readFileSync(new URL(name, FIXTURES)));
 
 const pane = await import(new URL("pdfpane.js", STATIC));
-const { openPdf, appendIncrement, checkIncrement, PdfReadError, Ref } = await import(new URL("pdfdoc.js", STATIC));
+const { openPdf, appendIncrement, checkIncrement, PdfReadError, PdfString, Ref } = await import(new URL("pdfdoc.js", STATIC));
+const appendBytes = async (...args) => (await appendIncrement(...args)).bytes; // V3-P82: {bytes, added}
 const pdfjs = await import(new URL("pdfjs/pdf.min.mjs", STATIC));
 pdfjs.GlobalWorkerOptions.workerSrc = new URL("pdfjs/pdf.worker.min.mjs", STATIC).href;
 
@@ -177,7 +178,7 @@ for (const name of ["table.pdf", "stream.pdf"]) {
 
   // §11 entry 1–2: an increment of the file's own form, after its bytes, that passes the server's check.
   const strokes = [[stroke(110, 110), stroke(70, 500, "highlighter")], [stroke(200, 300)], [stroke(100, 100)]];
-  const increment = await appendIncrement(file, refs.map((ref, i) => ({ ref, add: strokes[i] })));
+  const increment = await appendBytes(file, refs.map((ref, i) => ({ ref, add: strokes[i] })));
   assert.ok(checkIncrement(original.length, increment), `${name}: the increment passes the server's check`);
   assert.equal(/\/Type\s*\/XRef/.test(new TextDecoder("latin1").decode(increment)), name === "stream.pdf",
                `${name}: the cross-reference form kept`);
@@ -211,7 +212,7 @@ for (const name of ["table.pdf", "stream.pdf"]) {
   assert.equal(await annotationOps(await reopened.getPage(2), pdfjs.AnnotationMode.ENABLE_STORAGE), 1);
 
   // An erase is a second increment after the first: the pen stroke leaves /Annots, the rest stay.
-  const second = await appendIncrement(again, [{ ref: refs[0], drop: [firstInk[0].ref] }]);
+  const second = await appendBytes(again, [{ ref: refs[0], drop: [firstInk[0].ref] }]);
   assert.ok(checkIncrement(saved.length, second));
   const twice = join(saved, second);
   const left = await (await openPdf(twice)).ink(refs[0]);
@@ -226,7 +227,7 @@ for (const name of ["table.pdf", "stream.pdf"]) {
 // The server's light check (§5.3 step 4) refuses what is not an increment after these bytes.
 {
   const original = fixture("table.pdf");
-  const increment = await appendIncrement(await openPdf(original), []);
+  const increment = await appendBytes(await openPdf(original), []);
   assert.ok(checkIncrement(original.length, increment));
   const ascii = (text) => new TextEncoder().encode(text);
   assert.ok(!checkIncrement(original.length, ascii("1 0 obj\n<<>>\nendobj\n")), "no startxref");
@@ -250,6 +251,118 @@ for (const name of ["table.pdf", "stream.pdf"]) {
   const own = text.match(/startxref\s+(\d+)/)[1];
   const looped = Uint8Array.from(text.replace(/trailer\s*<</, (m) => `${m} /Prev ${own}`), (c) => c.charCodeAt(0));
   await assert.rejects(openPdf(looped), PdfReadError, "a /Prev loop");
+}
+
+// --- saving in place (V3-P82 §3.3, §3.6) -------------------------------------------------------------------
+const latin1 = (bytes) => new TextDecoder("latin1").decode(bytes);
+const firstPage = async (bytes) => {
+  const doc = await open(bytes);
+  const { num, gen } = (await doc.getPage(1)).ref;
+  await doc.loadingTask.destroy();
+  return new Ref(num, gen);
+};
+
+// A named stroke's object, told back; /HimariInk a Flate stream (v2); an erase undone after a save puts the
+// same object back in /Annots — never twice, nothing written again. PDF.js reads each step.
+for (const name of ["table.pdf", "stream.pdf"]) {
+  const original = fixture(name);
+  const ref = await firstPage(original);
+  const pen = { ...stroke(110, 110), name: "himari-ink-0123456789abcdef01234567" };
+  const made = await appendIncrement(await openPdf(original), [{ ref, add: [pen] }]);
+  const annot = made.added.get(pen.name);
+  assert.ok(annot instanceof Ref && made.added.size === 1, `${name}: the stroke's object told`);
+  assert.match(latin1(made.bytes), /\/HimariInk \d+ 0 R/, `${name}: v2, a stream`);
+  const one = join(original, made.bytes);
+  assert.deepEqual((await (await openPdf(one)).ink(ref)).map((e) => [e.name, e.data, e.ref.key]),
+                   [[pen.name, pen.data, annot.key]], `${name}: read back as written, by its name`);
+  const two = join(one, await appendBytes(await openPdf(one), [{ ref, drop: [annot] }]));
+  assert.deepEqual(await (await openPdf(two)).ink(ref), []);
+  const back = await appendIncrement(await openPdf(two), [{ ref, restore: [annot, annot] }]);
+  assert.equal(back.added.size, 0, "nothing written again");
+  assert.ok(checkIncrement(two.length, back.bytes));
+  const three = join(two, back.bytes);
+  assert.deepEqual((await (await openPdf(three)).ink(ref)).map((e) => e.ref.key), [annot.key], `${name}: put back once`);
+  const held = join(three, await appendBytes(await openPdf(three), [{ ref, restore: [annot] }]));
+  assert.equal((await (await openPdf(held)).ink(ref)).length, 1, `${name}: in /Annots already: not twice`);
+  const doc = await open(held);
+  assert.deepEqual((await (await doc.getPage(1)).getAnnotations()).map((a) => a.subtype), ["Square", "Link", "Ink"]);
+  await doc.loadingTask.destroy();
+}
+
+// /HimariInk: a string (v1, V3-P77) read too; a stream inflating past 4 MiB is not read (the stroke drawn from
+// its /InkList), nor a stream of another kind.
+{
+  const file = await openPdf(fixture("table.pdf"));
+  const data = { v: 1, tool: "pen", points: [[1, 2, 0.5]] };
+  assert.equal(await file.inkData(PdfString.utf8(JSON.stringify(data))), JSON.stringify(data));
+  await assert.rejects(file.inkData(null), PdfReadError);
+  const original = fixture("table.pdf");
+  const ref = await firstPage(original);
+  const huge = { ...stroke(50, 50), name: "himari-ink-huge", data: { ...stroke(50, 50).data, pad: "x".repeat(5 << 20) } };
+  const saved = join(original, await appendBytes(await openPdf(original), [{ ref, add: [huge] }]));
+  const [entry] = await (await openPdf(saved)).ink(ref);
+  assert.equal(entry.data, null, "past 4 MiB inflated: not read");
+  assert.equal(entry.inkList[0].length, 6, "drawn from its /InkList");
+}
+
+// §3.6 (review r3 B2): a save cut short at the end — a piece under 1 KiB or over it — is read past to the last
+// save that reads, ``cut`` saying where to cut back to; the size stays the file's. Bytes another producer left
+// after %%EOF are never cut. Cut back, it reads as before.
+for (const name of ["table.pdf", "stream.pdf"]) {
+  const original = fixture(name);
+  const ref = await firstPage(original);
+  const one = join(original, await appendBytes(await openPdf(original), [{ ref, add: [stroke(110, 110)] }]));
+  assert.equal((await openPdf(one)).cut, null, `${name}: a whole file has nothing to cut`);
+  const many = Array.from({ length: 40 }, (_, i) => ({ ...stroke(20 + i, 30 + i), name: `himari-ink-cut${i}` }));
+  const next = await appendBytes(await openPdf(one), [{ ref, add: many }]);
+  assert.ok(next.length > 4096);
+  for (const piece of [300, next.length - 20]) {
+    const cut = join(one, next.subarray(0, piece));
+    const file = await openPdf(cut);
+    assert.equal(file.cut, one.length, `${name}: cut back to the save before (${piece} bytes left)`);
+    assert.equal(file.size, cut.length, "its size is the file's");
+    assert.equal((await file.ink(ref)).length, 1, "the saves before read");
+    const mended = await openPdf(cut.subarray(0, file.cut));
+    assert.equal(mended.cut, null);
+    assert.equal((await mended.ink(ref)).length, 1);
+  }
+  for (const tail of ["\n\n\n", "%% another producer's comment\n", "\0\0\0\0"]) {
+    const file = await openPdf(join(one, new TextEncoder().encode(tail)));
+    assert.equal(file.cut, null, `${name}: ${JSON.stringify(tail)} not cut`);
+  }
+}
+
+// §3.6 (review r3 B1): a PDF saved in place more than 1,000 times (V3-P77's limit) is read and saved on.
+{
+  const original = fixture("table.pdf");
+  const text = latin1(original);
+  const trailer = /trailer\s*<<([\s\S]*?)>>\s*startxref\s+(\d+)/.exec(text);
+  let prev = Number(trailer[2]);
+  const parts = [original];
+  let size = original.length;
+  for (let i = 0; i < 1200; i += 1) {
+    const section = `xref\n0 1\n0000000000 65535 f\r\ntrailer\n<<${trailer[1]} /Prev ${prev}>>\nstartxref\n${size}\n%%EOF\n`;
+    const bytes = new TextEncoder().encode(section);
+    prev = size;
+    parts.push(bytes);
+    size += bytes.length;
+  }
+  const saves = new Uint8Array(size);
+  let at = 0;
+  for (const part of parts) {
+    saves.set(part, at);
+    at += part.length;
+  }
+  const started = Date.now();
+  const file = await openPdf(saves);
+  const ref = await firstPage(saves);
+  const saved = join(saves, await appendBytes(file, [{ ref, add: [stroke(110, 110)] }]));
+  assert.equal((await (await openPdf(saved)).ink(ref)).length, 1);
+  assert.ok(Date.now() - started < 10_000, "read in good time");
+  const doc = await open(saved);
+  assert.equal((await (await doc.getPage(1)).getAnnotations()).filter((a) => a.subtype === "Ink").length, 1,
+               "PDF.js reads it too");
+  await doc.loadingTask.destroy();
 }
 
 // --- the ink (V3-P77 §4): the model -------------------------------------------------------------------------
@@ -294,7 +407,7 @@ const { Ink, newStroke, outline, specOf, strokeFromSaved, hits, TOOLS, DEFAULT_T
   const file = await openPdf(original);
   const doc = await open(original);
   const ref = new Ref((await doc.getPage(1)).ref.num, 0);
-  const saved = join(original, await appendIncrement(file, [{ ref, add: [specOf(pen), specOf(marker)] }]));
+  const saved = join(original, await appendBytes(file, [{ ref, add: [specOf(pen), specOf(marker)] }]));
   const back = (await (await openPdf(saved)).ink(ref)).map((entry) => strokeFromSaved(0, entry));
   assert.deepEqual(back.map((s) => [s.tool, s.size, s.rgb, s.pressure, s.points]),
                    [pen, marker].map((s) => [s.tool, s.size, s.rgb.map((v) => Math.round(v * 1000) / 1000), s.pressure,
@@ -320,7 +433,8 @@ const { Ink, newStroke, outline, specOf, strokeFromSaved, hits, TOOLS, DEFAULT_T
   ink.add(pen);
   ink.erase(0, [old[0]]);
   assert.deepEqual(ink.on(0), [old[1], pen]);
-  assert.deepEqual(ink.changes().map((c) => [c.page, c.add, c.drop.map((r) => r.num)]), [[0, [pen], [40]]]);
+  assert.deepEqual(ink.changes().map((c) => [c.page, c.add, c.restore, c.drop.map((d) => [d.name, d.ref.num])]),
+                   [[0, [pen], [], [["himari-ink-a", 40]]]]);
   assert.equal(ink.undo(), 0);
   assert.deepEqual(ink.on(0), [old[0], old[1], pen]);
   ink.undo();
@@ -337,6 +451,45 @@ const { Ink, newStroke, outline, specOf, strokeFromSaved, hits, TOOLS, DEFAULT_T
   assert.equal(next.put({ ...carried, add: [...carried.add, { ...pen, page: 7 }] }, 3), 1, "one left: no page 8");
   next.load(0, old.map((s) => ({ ...s })));
   assert.deepEqual(next.on(0).map((s) => s.saved ? s.saved.name : "new"), ["himari-ink-a", "new", "new"]);
+
+  // V3-P82 §3.1, §3.3–§3.5: strokes are named when drawn; a save marks what it wrote as saved where it is,
+  // and what changed meanwhile stays a change; undo goes on across saves — a saved stroke's add undone is
+  // dropped, its erase undone is put back (its object, not written again); carried, a stroke the other
+  // version holds already (by name) is left out.
+  const book = new Ink();
+  book.load(0, old.map((s) => ({ ...s, cached: null })));
+  const one = newStroke(0, { tool: "pen", color: "black", size: "fine" }, true);
+  one.points.push([1, 1, 0.5], [2, 2, 0.5]);
+  assert.match(one.name, /^himari-ink-[0-9a-f]{24}$/);
+  assert.notEqual(one.name, newStroke(0, { tool: "pen" }, true).name);
+  assert.equal(specOf(one).name, one.name);
+  book.add(one);
+  const snapshot = book.changes();
+  const two = newStroke(0, { tool: "pen" }, true);
+  two.points.push([3, 3, 0.5]);
+  book.add(two); // drawn while the save is on its way
+  book.committed(snapshot, new Map([[one.name, new Ref(90)]]));
+  assert.deepEqual(one.saved, { ref: new Ref(90), name: one.name });
+  assert.deepEqual(book.changes().map((c) => [c.add, c.restore, c.drop]), [[[two], [], []]], "only the newer");
+  book.committed(book.changes(), new Map([[two.name, new Ref(93)]]));
+  assert.ok(!book.dirty);
+  book.undo(); // two's add, after its save: dropped next
+  assert.deepEqual(book.changes()[0].drop.map((d) => d.ref.num), [93]);
+  book.redo();
+  assert.ok(!book.dirty);
+  book.erase(0, [one]);
+  book.committed(book.changes(), new Map());
+  assert.ok(!book.dirty && !book.inFile.get(0).has(one.name));
+  book.undo(); // the erase, after its save: put back, the same object
+  assert.deepEqual(book.changes().map((c) => [c.add, c.restore.map((r) => r.ref.num), c.drop]), [[[], [90], []]]);
+  const away = book.carry();
+  assert.deepEqual(away.add.map((s) => [s.name, s.saved]), [[one.name, null]], "carried whole: put back elsewhere");
+  // Saved, though its answer was lost: the version read again holds it; carried there, it is not added twice.
+  const lost = new Ink();
+  lost.put({ add: [{ ...two, saved: null }], erase: new Set(), erasePages: [] }, 3);
+  lost.load(0, [strokeFromSaved(0, { ref: new Ref(93), name: two.name, data: specOf(two).data, inkList: [] })]);
+  assert.deepEqual(lost.on(0).map((s) => [s.name, Boolean(s.saved)]), [[two.name, true]]);
+  assert.ok(!lost.dirty);
 }
 
 // --- the ink (§4.1): the view's input, against the bundled PDF.js with a fake DOM ----------------------------
@@ -429,7 +582,7 @@ const { Ink, newStroke, outline, specOf, strokeFromSaved, hits, TOOLS, DEFAULT_T
   await doc.loadingTask.destroy();
   const first = newStroke(0, { tool: "pen", color: "black", size: "fine" }, true);
   first.points.push([100, 600, 0.5], [200, 650, 0.5]);
-  const withInk = join(original, await appendIncrement(await openPdf(original), [{ ref, add: [specOf(first)] }]));
+  const withInk = join(original, await appendBytes(await openPdf(original), [{ ref, add: [specOf(first)] }]));
   const savedRef = (await (await openPdf(withInk)).ink(ref))[0].ref;
   const { view } = await viewOf(withInk);
   assert.ok(view.writable && !view.readOnly);
@@ -544,17 +697,17 @@ const { Ink, newStroke, outline, specOf, strokeFromSaved, hits, TOOLS, DEFAULT_T
   pointer(view, "pointerdown", { pointerId: 5, clientX: sx, clientY: sy });
   pointer(view, "pointerup", { pointerId: 5 });
   assert.ok(!view.ink.on(0).some((s) => s.saved));
-  assert.deepEqual(view.ink.changes()[0].drop.map((r) => r.key), [savedRef.key]);
+  assert.deepEqual(view.ink.changes()[0].drop.map((d) => d.ref.key), [savedRef.key]);
   view.undo();
   assert.ok(view.ink.on(0).some((s) => s.saved));
   view.redo();
-  // PR #104 review P1-1: while a save is made, nothing is drawn.
+  // V3-P82 §3.4: while another version is read in its place (frozen), nothing is drawn; a save never stops it.
   view.setTool({ tool: "pen", color: "black", size: "fine" });
-  view.saving = true;
+  view.frozen = true;
   const counted = view.ink.on(0).length;
   assert.ok(!pointer(view, "pointerdown", { pointerId: 6, clientX: 50, clientY: 700 }));
   assert.equal(view.active, null);
-  view.saving = false;
+  view.frozen = false;
   // PR #104 review P2: the page moved under the pen (a word shown above the pages): its points follow the page.
   pointer(view, "pointerdown", { pointerId: 7, clientX: 50, clientY: 700 });
   box(view).top = 40;
@@ -566,14 +719,33 @@ const { Ink, newStroke, outline, specOf, strokeFromSaved, hits, TOOLS, DEFAULT_T
   assert.deepEqual(moved[1].slice(0, 2), moved[0].slice(0, 2), "the same spot on the page");
   view.undo();
   view.setTool({ tool: "eraser" });
-  // Saved: an increment the server would take, read back — the new strokes saved, the erased one gone.
-  const increment = await view.increment();
-  assert.ok(checkIncrement(withInk.length, increment));
-  await view.saved(increment);
-  assert.ok(!view.ink.dirty && view.ink.on(0).every((s) => s.saved));
-  assert.equal(view.ink.on(0).length, 3);
-  assert.equal(view.ink.done.length, 0, "undo starts again after a save");
-  assert.equal((await view.increment()), null);
+  // Saved: an increment the server would take — the new strokes saved where they are (named, never read back),
+  // the erased one gone; a stroke drawn while it was on its way stays unsaved; undo goes on (V3-P82 §3.4–§3.5).
+  const made = await view.increment();
+  assert.ok(checkIncrement(withInk.length, made.bytes));
+  view.setTool({ tool: "pen", color: "black", size: "fine" });
+  const doneBefore = view.ink.done.length + 1;
+  pointer(view, "pointerdown", { pointerId: 10, clientX: 60, clientY: 60 });
+  pointer(view, "pointerup", { pointerId: 10 });
+  await view.saved(made);
+  assert.equal(view.file.size, withInk.length + made.bytes.length);
+  assert.deepEqual(Array.from(view.bytes.subarray(0, withInk.length)), Array.from(withInk), "the file's bytes kept");
+  const reread = await openPdf(view.bytes);
+  assert.deepEqual((await reread.ink(ref)).map((e) => e.name).sort(),
+                   view.ink.on(0).filter((s) => s.saved).map((s) => s.name).sort(), "what it holds, named so");
+  assert.deepEqual(view.ink.changes().map((c) => c.add.length), [1], "the one drawn meanwhile waits");
+  assert.equal(view.ink.done.length, doneBefore, "undo goes on after a save");
+  view.undo(); // that one
+  assert.equal(await view.increment(), null);
+  // A second save is added after the first, in the same buffer (no copy of the whole each time).
+  pointer(view, "pointerdown", { pointerId: 11, clientX: 70, clientY: 70 });
+  pointer(view, "pointermove", { pointerId: 11, clientX: 90, clientY: 80 });
+  pointer(view, "pointerup", { pointerId: 11 });
+  const buffer = view.buffer;
+  const next = await view.increment();
+  await view.saved(next);
+  assert.equal(view.buffer, buffer);
+  assert.ok(!view.ink.dirty);
   view.destroy();
 
   // §4.6, the ink lab: off unless asked for; ?ink-lab turns it on in this browser, its numbers the last

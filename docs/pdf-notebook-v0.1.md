@@ -486,3 +486,67 @@
   - N-b: `EROFS`도 읽기 전용 문구. `EPERM`의 문구는 고칠 수 없는 파일(`chattr +i`)도 말한다.
   - N-c: 바이트가 남은 실패는 `unsupported`·`access`가 아니라 `other`다. 두 동작의 결과를 프로토콜 설명에 적었다.
   - N-d(b 단계에 넘김): 쓴 뒤 크기가 다른 `CHANGED`의 `partial`은 "다시 읽고, 고치거나 자르기"로 다룬다. "저장이 끊겼다"로 다루지 않는다.
+
+## 14. 1단계 b 구현 노트 (웹: 자동 저장과 보관소, 2026-10-26)
+
+- **`pdfink.js`**
+  - 선의 이름(`/NM`)을 그릴 때 정한다(`strokeName`, 무작위 12바이트).
+  - 쪽마다 "파일의 `/Annots`에 든 HIMARI 선의 이름"(`inFile`)과 이름 → 객체 번호(`objects`)를 안다. `changes()`는 쪽마다 `add`·`restore`·`drop`이다.
+  - `committed(changes, added)`: 저장이 가져간 바뀜만 "저장됨"으로 만든다. 그사이 그리거나 지운 것은 바뀜으로 남는다. 되돌리기 기록은 비우지 않는다.
+  - `carry()`는 파일에 없는 선을 모두 온전한 선으로 가져간다(되살림 포함). `load()`는 이름이 같은 선을 건너뛴다.
+- **`pdfdoc.js`**
+  - `appendIncrement`가 `{bytes, added}`를 돌려준다(선 이름 → 주석 객체). `restore`는 이미 `/Annots`에 있으면 넣지 않는다.
+  - `/HimariInk`는 Flate 스트림(v2)으로 쓰고, 문자열(v1)도 읽는다. 풀린 크기가 4 MiB를 넘으면 읽지 않고 `/InkList`로 그린다.
+  - 끝 찾기: 끝에서 8 MiB + 1 KiB 안의 `startxref N %%EOF`를 뒤에서부터 읽어 본다. 읽히는 것의 뒤가 객체나 `xref`로 시작하면 `cut`이다. 다른 앱이 남긴 공백·주석·0 바이트는 자르지 않는다.
+  - `MAX_SECTIONS`를 50,000으로 올렸다.
+- **`pdfpane.js`**
+  - 저장 중에는 막지 않는다. `frozen`은 다른 판을 읽는 동안만이다.
+  - `increment()`는 `{bytes, changes, added}`다. 8 MiB를 넘으면 쪽을 반씩 줄여 앞쪽만 보내고, 나머지는 다음 저장에 간다. 아직 읽지 않은 쪽(옮겨 온 선)은 먼저 읽어 이름으로 건너뛴다.
+  - `saved()`는 여유를 둔 버퍼에 덧붙이고, 다시 읽지 않는다.
+  - `carry()`는 쪽의 객체 번호(`refs`)를 함께 준다. `carryIn()`은 쪽을 객체 번호로 찾고, 없으면 쪽 번호로 찾는다.
+  - `withInk()`: 내려받기용 "지금 바이트 + 증분".
+- **`files.js`**
+  - 저장 차례: 5초, 쉬지 않으면 60초, 클라우드 폴더는 떠날 때·숨을 때·Ctrl/Cmd+S만. 한 번에 하나(`inFlight`)이고, 끝나면 남은 바뀜을 다시 센다.
+  - 떠날 때(`mayLeave`)는 다 저장될 때까지 저장한다(8 MiB씩 나뉜 경우 포함). 못 하면 보관소에 쓰고 "Leave … with ink not saved?"를 묻는다.
+  - 실패(§3.7)
+    - 네트워크·5xx·408·429: 5초, 30초, 2분, 그 뒤 2분마다. 보내기 전에 stat으로 identity를 본다. 다르면 충돌 막대다.
+    - 401: 다시 하지 않고 보관소에 쓴다.
+    - runner 실패의 `identity`: 다음 기대값으로 쓴다. `partial`: "The last save was cut short." 충돌 막대로 가고, 다시 읽으면 자른다.
+    - 409: 충돌 막대이고, 고를 때까지 자동 저장을 멈춘다(`waiting`).
+    - `too_large`: 필기 도구를 끄고 "Download a copy with your ink"를 준다. 나머지 다시 해도 안 되는 것은 멈추고 까닭을 보인다.
+  - 5초 확인은 세대 번호(`generation`)를 본다. 확인을 보낸 뒤 저장했으면 그 답은 버린다.
+  - Save 버튼을 없애고 Retry만 실패했을 때 보인다. 48 MiB를 넘으면 상태 글의 설명에 "This PDF is getting large"를 둔다.
+  - 끝이 잘린 파일은 필기 도구를 켜기 전에 `truncate`하고 다시 읽는다. 옮겨 온 필기가 있으면 들고 간다(PR #118 재검수 N-d: 크기가 다른 `CHANGED`의 `partial` → 다시 읽기 → 자르기). 자르지 못하면 보기만 한다.
+  - "Ask HIMARI"는 먼저 저장하고 저장된 판을 보낸다.
+  - 저장 알림 `onSaved({path, from, to})`를 둔다.
+- **보관소**(§4)
+  - 기록은 `{kind: "ink", path, writer, base, at, add, erase, erasePages, refs}`다. 설계의 쪽별 `pages` 대신 평평하게 두었다. `carry()`와 `carryIn()`의 모양 그대로라 바꾸는 코드가 없다. 선의 점은 `Float32Array`다.
+  - 펜을 떼고 1초 뒤, 숨을 때, 저장 실패·떠날 때·로그인 화면에서 바로 쓴다. 저장이 끝날 때마다 새 `base`로 다시 쓰고, 남은 것이 없으면 지운다. 16 MiB를 넘으면 쓰지 않고 상태에 "Not kept in this browser"를 덧붙인다.
+  - 다시 열 때 같은 판이면 되살리고, 다른 판이면 "Put it on the current version" / "Discard"를 묻는다. 되살릴 때 선마다 `strokeFromSaved`의 검사를 거친다.
+  - **다른 탭이 살아 있는지**: V3-P78에는 그 장치가 없었다. `local_store.alive(writer)`를 더했다. 같은 BroadcastChannel로 묻고 300 ms 기다린다. 그 탭이 열려 있으면 같은 판이라도 "Restore" / "Discard"를 묻는다. 채널이 없는 브라우저는 "없음"으로 본다.
+  - `closeForSignIn`의 `keepInk` 우회를 없앴다.
+- **`app.js`·`drafts.js`**(§6.3을 앞당김)
+  - `followSave`: 입력창 칩과 다른 자리 초안의 칩이 저장 전 identity를 가리키면 새 identity로 바꾼다.
+  - `drafts.follow`는 기다리던 입력창 저장을 먼저 끝내고, 초안의 시각과 보내는 중 표시를 그대로 둔다.
+  - `pagehide`에서 `pageHidden()`을 부른다. `beforeunload`는 지금처럼 저장 안 한 필기가 있을 때 묻는다.
+- **웹 서버**: `POST /api/machine/pdf/truncate`를 JSON 본문(`{path, expected, to}`)으로 바꿨다. §13의 쿼리·헤더 방식은 쓰지 않는다. 브라우저가 identity를 10진 문자열로 보내므로 큰 inode도 반올림되지 않는다.
+- **시험**
+  - `files_smoke`
+    - 5초와 다시 세기, 60초 상한, 클라우드 폴더(혼자 저장하지 않음, 떠날 때 묻지 않고 저장, Ctrl+S).
+    - 저장 중 그리기와 그 뒤의 다음 저장, 멈추는 실패.
+    - 다시 하기(5초, 30초, 확인, Retry, 답을 잃은 저장 뒤 바뀐 파일), 401, runner의 `identity`·`partial`, `too_large`.
+    - 5초 확인의 세대, 숨을 때, 보관소(쓰기, 지우기, 16 MiB, 로그인 화면, 같은 판, 살아 있는 다른 탭, 다른 판, Discard), `alive`.
+    - 끝이 잘린 파일(고침, 필기를 들고 감, 고치지 못함), Ask HIMARI 전 저장.
+  - `pdf_smoke`
+    - 이름, `committed`, 저장을 넘는 되돌리기(뺌·되살림), 답을 잃은 저장 뒤 옮기기에서 두 벌 없음.
+    - 증분의 되살림(한 번만, pdf.js가 읽음), v2 왕복과 v1 읽기, 4 MiB 한도.
+    - 잘린 끝(1 KiB 미만·초과 조각, 다른 앱의 꼬리는 자르지 않음, 자른 뒤 읽기), 저장 기록 1,200개인 파일을 읽고 저장(pdf.js도 읽음).
+    - 여유 버퍼에 이어 쓰기.
+  - `ui_state_smoke`: `followSave`와 `drafts.follow`(시각 유지).
+  - 돌연변이 확인: 세대, 60초 상한, 다른 탭 확인, 클라우드, 다시 하기 전 확인, 잘린 파일의 필기 들고 가기, `MAX_SECTIONS`, `cut`, 되살림 한 번, 4 MiB 한도, v1 읽기, 초안 시각 유지, 칩 따라가기를 하나씩 되돌리면 각 시험이 실패한다.
+  - 결과: Node 시험 다섯 개, mypy, 모듈 경계 검사, `tests/interfaces`·`tests/runner`·`tests/bootstrap` pytest 625개 통과.
+  - **하지 않은 것**
+    - 헤드리스 Chromium에서 실제 PDF로 자동 저장해 보기(runner와 machine Workspace가 필요).
+    - 8 MiB를 넘는 바뀜을 나눠 저장하는 시험.
+    - 소유자의 iPad 확인(메모리, 쓰는 동안 끼어드는 저장, 앱을 내렸다 돌아오기).
+- **배포**: a와 b를 함께 배포하고, himari-runner를 다시 시작한다(프로토콜 4).

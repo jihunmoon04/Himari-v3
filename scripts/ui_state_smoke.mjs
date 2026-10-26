@@ -371,4 +371,28 @@ for (const scenario of ["same", "edited", "navigated", "failed", "stale-failure"
   assert.equal(p.context.activityGroup(ago(90)), "Older");
 }
 
-console.log("UI async regression checks: 23 passed");
+// V3-P82 §6.3: this tab saved a PDF's ink — the chips pointing at it as it was (the composer's, and the drafts
+// kept for other places) point at it now; other files' and other versions' chips stay, and so does each
+// draft's time (only its chips changed).
+{
+  const p = page();
+  p.run(`
+    var PDF = "/home/u/notes.pdf";
+    app.references = [{ key: "a", path: PDF, identity: ["1", "2", "3", "5"], stale: true },
+                      { key: "b", path: PDF, identity: ["1", "2", "3", "4"] },
+                      { key: "c", path: "/home/u/other.pdf", identity: ["1", "2", "3", "5"] }];
+    drafts.now = () => 5;
+    drafts.set("elsewhere", { text: "about it", attachments: [], references: [{ path: PDF, identity: [1, 2, 3, 5] }] });
+    drafts.now = () => 99;
+    followSave({ path: PDF, from: ["1", "2", "3", "5"], to: ["9", "9", "9", "9"] });
+  `);
+  assert.deepEqual(JSON.parse(p.run("JSON.stringify(app.references.map((r) => [r.key, r.identity, Boolean(r.stale)]))")),
+                   [["a", ["9", "9", "9", "9"], false], ["b", ["1", "2", "3", "4"], false],
+                    ["c", ["1", "2", "3", "5"], false]]);
+  assert.deepEqual(JSON.parse(p.run("JSON.stringify(drafts.get('elsewhere').references)")),
+                   [{ path: "/home/u/notes.pdf", identity: ["9", "9", "9", "9"] }]);
+  assert.equal(p.run("drafts.at('elsewhere')"), 5, "its time kept");
+  assert.equal(p.run("drafts.get('elsewhere').text"), "about it");
+}
+
+console.log("UI async regression checks: 24 passed");

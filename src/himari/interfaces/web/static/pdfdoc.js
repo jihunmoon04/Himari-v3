@@ -16,11 +16,22 @@
  *   The file's bytes are never changed.
  * - checkIncrement(size, increment): the server's light check (§5.3 step 4).
  *
+ * V3-P82 §3.6: a file saved in place many times has as many sections (up to
+ * MAX_SECTIONS); a save cut short at its end (a power cut) is read past — the
+ * last ``startxref … %%EOF`` that reads is the file's end, and ``cut`` tells
+ * where to cut it back to. A stroke's /HimariInk is a Flate stream (v2; a
+ * string, v1, is read too), and an increment can put a stroke's object back
+ * in a page's /Annots (an erase undone after a save).
+ *
  * No DOM: it runs in the browser and in Node alike (scripts/pdf_smoke.mjs).
  */
 
 export const HIMARI_INK_PREFIX = "himari-ink-";
-const MAX_SECTIONS = 1000; // /Prev links followed: a loop in a broken file ends here
+// /Prev links followed. Loops are caught by the offsets seen; this bounds the work: a save in place adds one
+// section of a few hundred bytes at least, so 64 MiB holds well under this (V3-P82 §3.6, review r3 B1).
+const MAX_SECTIONS = 50_000;
+const TAIL_BYTES = 8 * 1024 * 1024 + 1024; // where the end of a save cut short is looked for: one increment's
+const MAX_INK_DATA = 4 * 1024 * 1024; // a stroke's /HimariInk, inflated (more: drawn from its /InkList)
 
 export class PdfReadError extends Error {}
 
@@ -224,6 +235,16 @@ function find(bytes, text, from, to = bytes.length) {
   return -1;
 }
 
+/* The last ``text`` that starts at ``from`` or after and ends before ``before``. */
+function findLastBefore(bytes, text, from, before) {
+  const codes = Array.from(text, (c) => c.charCodeAt(0));
+  outer: for (let i = before - codes.length; i >= from; i -= 1) {
+    for (let j = 0; j < codes.length; j += 1) if (bytes[i + j] !== codes[j]) continue outer;
+    return i;
+  }
+  return -1;
+}
+
 function findLast(bytes, text, from) {
   const codes = Array.from(text, (c) => c.charCodeAt(0));
   outer: for (let i = bytes.length - codes.length; i >= from; i -= 1) {
@@ -236,6 +257,30 @@ function findLast(bytes, text, from) {
 async function inflate(data) {
   const stream = new Blob([data]).stream().pipeThrough(new DecompressionStream("deflate"));
   return new Uint8Array(await new Response(stream).arrayBuffer());
+}
+
+/* Inflated, but no more than ``limit`` bytes of it (null past that): a small stream cannot fill the memory. */
+async function inflateAtMost(data, limit) {
+  const reader = new Blob([data]).stream().pipeThrough(new DecompressionStream("deflate")).getReader();
+  const chunks = [];
+  let total = 0;
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    total += value.length;
+    if (total > limit) {
+      await reader.cancel();
+      return null;
+    }
+    chunks.push(value);
+  }
+  const out = new Uint8Array(total);
+  let at = 0;
+  for (const chunk of chunks) {
+    out.set(chunk, at);
+    at += chunk.length;
+  }
+  return out;
 }
 
 async function deflate(data) {
@@ -293,12 +338,55 @@ export class PdfFile {
     return this.trailer.get("Size");
   }
 
+  /* The file's end: its last ``startxref N %%EOF`` (a line break after it allowed) — or, past bytes a save
+   * cut short left after it, the last one that reads (V3-P82 §3.6). ``cut``: where to cut such bytes off,
+   * when they begin as a save does (an object, or a cross-reference table); null when the file ends there,
+   * or ends in what another producer left (never cut). */
   async read() {
     if (find(this.bytes, "%PDF-", 0, Math.min(this.size, 1024)) < 0) throw new PdfReadError("not a PDF");
-    const at = findLast(this.bytes, "startxref", Math.max(0, this.size - 1024));
-    if (at < 0) throw new PdfReadError("no startxref");
-    const lexer = new Lexer(this.bytes, at + 9);
-    this.startxref = lexer.token();
+    this.cut = null;
+    let failure = new PdfReadError("no startxref");
+    for (const { offset, end } of this.ends()) {
+      try {
+        await this.readFrom(offset);
+      } catch (error) {
+        if (!(error instanceof PdfReadError)) throw error;
+        failure = error;
+        this.entries = new Map();
+        this.objectStreams = new Map();
+        this.trailer = null;
+        this.form = null;
+        continue;
+      }
+      const rest = this.bytes.subarray(end);
+      const left = Array.from(rest.subarray(0, 64), (b) => String.fromCharCode(b)).join("").trimStart();
+      if (/^(\d+\s+\d+\s+obj\b|xref\b)/.test(left)) this.cut = end;
+      return this;
+    }
+    throw failure;
+  }
+
+  /* Each ``startxref N %%EOF`` near the end, the last first: {offset: N, end: just after its %%EOF and one
+   * line break}. The newest is in the last 1 KiB; one a cut save left behind is at most TAIL_BYTES back. */
+  *ends() {
+    const from = Math.max(0, this.size - TAIL_BYTES);
+    let before = this.size;
+    while (before > from) {
+      const at = findLastBefore(this.bytes, "%%EOF", from, before);
+      if (at < 0) return;
+      before = at;
+      const head = Array.from(this.bytes.subarray(Math.max(0, at - 40), at), (b) => String.fromCharCode(b)).join("");
+      const found = /startxref\s+(\d+)\s*$/.exec(head);
+      if (!found) continue;
+      let end = at + 5;
+      if (this.bytes[end] === 13) end += 1;
+      if (this.bytes[end] === 10) end += 1;
+      yield { offset: Number(found[1]), end };
+    }
+  }
+
+  async readFrom(startxref) {
+    this.startxref = startxref;
     if (!Number.isInteger(this.startxref) || this.startxref <= 0 || this.startxref >= this.size) {
       throw new PdfReadError("startxref out of the file");
     }
@@ -498,12 +586,9 @@ export class PdfFile {
       const name = dict.get("NM");
       if (!(name instanceof PdfString) || !name.text.startsWith(HIMARI_INK_PREFIX)) continue;
       let data = null;
-      const raw = dict.get("HimariInk");
-      if (raw instanceof PdfString) {
-        try {
-          data = JSON.parse(raw.text);
-        } catch (ignored) { /* drawn from /InkList */ }
-      }
+      try {
+        data = JSON.parse(await this.inkData(dict.get("HimariInk")));
+      } catch (ignored) { /* drawn from /InkList */ }
       const bs = await this.resolve(dict.get("BS"));
       found.push({ ref: item, name: name.text, data, inkList: dict.get("InkList") || [],
                    width: bs instanceof Map ? bs.get("W") ?? 1 : 1, color: dict.get("C") || [0, 0, 0],
@@ -512,6 +597,20 @@ export class PdfFile {
     return found;
   }
 }
+
+/* A stroke's /HimariInk as text: a string (v1), or a Flate stream of at most MAX_INK_DATA inflated (v2,
+ * V3-P82 §3.6). Throws when it is neither, or too large. */
+PdfFile.prototype.inkData = async function inkData(raw) {
+  if (raw instanceof PdfString) return raw.text;
+  if (!(raw instanceof Ref)) throw new PdfReadError("no /HimariInk");
+  const stream = await this.get(raw, true);
+  if (!(stream instanceof Stream) || stream.dict.get("Filter")?.name !== "FlateDecode") {
+    throw new PdfReadError("a /HimariInk stream of another kind");
+  }
+  const data = await inflateAtMost(await this.streamData(stream), MAX_INK_DATA);
+  if (data === null) throw new PdfReadError("a /HimariInk too large");
+  return new TextDecoder().decode(data);
+};
 
 export async function openPdf(bytes) {
   return new PdfFile(bytes).read();
@@ -574,12 +673,12 @@ function concat(parts) {
 
 /* One stroke (§5.1). {rect: [x0, y0, x1, y1], inkList: [[x, y, …], …], color: [r, g, b], width,
  * highlighter, appearance: the /AP /N content (PDF operators, in page space), data: /HimariInk}. */
-function inkDict(stroke, pageRef, apRef, date) {
+function inkDict(stroke, name, pageRef, apRef, dataRef, date) {
   const dict = new Map([
     ["Type", new Name("Annot")], ["Subtype", new Name("Ink")], ["Rect", stroke.rect],
     ["InkList", stroke.inkList], ["C", stroke.color], ["BS", new Map([["W", stroke.width]])],
-    ["NM", PdfString.of(stroke.name || randomName())], ["M", PdfString.of(pdfDate(date))], ["F", 4], ["P", pageRef],
-    ["AP", new Map([["N", apRef]])], ["HimariInk", PdfString.utf8(JSON.stringify(stroke.data))],
+    ["NM", PdfString.of(name)], ["M", PdfString.of(pdfDate(date))], ["F", 4], ["P", pageRef],
+    ["AP", new Map([["N", apRef]])], ["HimariInk", dataRef],
   ]);
   if (stroke.highlighter) dict.set("CA", 0.35);
   return dict;
@@ -594,29 +693,43 @@ function appearanceDict(stroke) {
   return dict;
 }
 
-/* §5.2: the incremental update. ``pages``: [{ref: the page's Ref, drop: Refs of its HIMARI ink erased,
- * add: strokes as inkDict takes them}]. Returns the bytes to add after the file's own. */
+/* §5.2, V3-P82 §3.3: the incremental update. ``pages``: [{ref: the page's Ref, drop: Refs of its HIMARI ink
+ * erased, restore: Refs of HIMARI ink of this file put back (an erase undone after a save), add: strokes as
+ * specOf makes them (named)}]. Returns {bytes: what to add after the file's own, added: a stroke's name → the
+ * Ref of its annotation}. */
 export async function appendIncrement(file, pages, { date = new Date() } = {}) {
   if (file.encrypted) throw new PdfReadError("an encrypted PDF is not written to");
   let next = file.nextNumber;
   const objects = []; // [num, gen, bytes]
+  const added = new Map();
   const body = (num, gen, text) => objects.push([num, gen, ascii(`${num} ${gen} obj\n${text}\nendobj\n`)]);
-  for (const { ref, drop = [], add = [] } of pages) {
+  const stream = (num, dict, content) => {
+    dict.set("Filter", new Name("FlateDecode"));
+    dict.set("Length", content.length);
+    objects.push([num, 0, concat([ascii(`${num} 0 obj\n${serialize(dict)}\nstream\n`), content,
+                                  ascii("\nendstream\nendobj\n")])]);
+  };
+  for (const { ref, drop = [], restore = [], add = [] } of pages) {
     const page = await file.get(ref);
     if (!(page instanceof Map)) throw new PdfReadError("not a page");
     const dropped = new Set(drop.map((r) => r.key));
     const annots = (await file.annots(ref)).filter((a) => !(a instanceof Ref && dropped.has(a.key)));
+    const held = new Set(annots.filter((a) => a instanceof Ref).map((a) => a.key));
+    for (const back of restore) {
+      if (held.has(back.key)) continue;
+      held.add(back.key);
+      annots.push(back);
+    }
     for (const stroke of add) {
+      const name = stroke.name || randomName();
       const apRef = new Ref(next++);
+      const dataRef = new Ref(next++);
       const annotRef = new Ref(next++);
-      const content = await deflate(ascii(stroke.appearance));
-      const ap = appearanceDict(stroke);
-      ap.set("Filter", new Name("FlateDecode"));
-      ap.set("Length", content.length);
-      objects.push([apRef.num, 0, concat([ascii(`${apRef.num} 0 obj\n${serialize(ap)}\nstream\n`), content,
-                                          ascii("\nendstream\nendobj\n")])]);
-      body(annotRef.num, 0, serialize(inkDict(stroke, ref, apRef, date)));
+      stream(apRef.num, appearanceDict(stroke), await deflate(ascii(stroke.appearance)));
+      stream(dataRef.num, new Map(), await deflate(new TextEncoder().encode(JSON.stringify(stroke.data))));
+      body(annotRef.num, 0, serialize(inkDict(stroke, name, ref, apRef, dataRef, date)));
       annots.push(annotRef);
+      added.set(name, annotRef);
     }
     const changed = new Map(page);
     if (annots.length) changed.set("Annots", annots);
@@ -650,7 +763,7 @@ export async function appendIncrement(file, pages, { date = new Date() } = {}) {
                           ["Length", rows.length]]);
     parts.push(ascii(`${xrefNum} 0 obj\n${serialize(dict)}\nstream\n`), rows, ascii("\nendstream\nendobj\n"),
                ascii(`startxref\n${at}\n%%EOF\n`));
-    return concat(parts);
+    return { bytes: concat(parts), added };
   }
   offsets.sort((a, b) => a[0] - b[0]);
   let table = "xref\n";
@@ -659,7 +772,7 @@ export async function appendIncrement(file, pages, { date = new Date() } = {}) {
     for (const [, gen, offset] of rows) table += `${String(offset).padStart(10, "0")} ${String(gen).padStart(5, "0")} n\r\n`;
   }
   parts.push(ascii(`${table}trailer\n${serialize(trailer)}\nstartxref\n${at}\n%%EOF\n`));
-  return concat(parts);
+  return { bytes: concat(parts), added };
 }
 
 /* Runs of consecutive object numbers: [first, count, rows]. */

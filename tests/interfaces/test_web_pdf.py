@@ -126,8 +126,7 @@ def test_a_save_cut_short_is_taken_off_its_end(server: Server, kit: RunnerKit) -
     seen = identity(server, path)
 
     def cut(to: int, expected: list[str]) -> Any:
-        return server.client.post("/api/machine/pdf/truncate", params={"path": path, "to": to},
-                                  headers={**SEND, "X-Himari-Expected": ",".join(expected)})
+        return server.post("/api/machine/pdf/truncate", {"path": path, "to": to, "expected": expected})
 
     refused(cut(len(original) + 3, seen), 400, "invalid")  # not after a %%EOF
     refused(cut(len(original) + 100, seen), 400, "invalid")  # past its end

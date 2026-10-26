@@ -191,11 +191,13 @@ const views = new AppViews(api, el, () => app.conversationId);
  * On the surface a folder opens its conversation (§6); beside one, it is attached to it. */
 const askFiles = (title, lines, action) => confirmAction(title, lines, action);
 // V3-P78 §4.1: a file open with unsaved text in the other pane: what was kept for it is not offered.
-const openUnsaved = (pane, path) => pane.doc !== null && pane.doc.path === path && pane.doc.dirty;
+const openUnsaved = (pane, path) => (pane.doc !== null && pane.doc.path === path && pane.doc.dirty)
+  || (pane.pdf !== null && pane.pdf.path === path && pane.pdf.view.ink.dirty); // its ink kept by that pane (V3-P82 §4)
 const filesSurface = new FilesPane({
   api, el, confirm: askFiles,
   keep: localStore, writer: `${localStore.WRITER}:files`, // unsaved text kept in this browser (V3-P78 §4.1)
   openElsewhere: (path) => openUnsaved(filesPanel, path),
+  onSaved: (saved) => followSave(saved),
   onAsk: (reference) => askFromFiles(reference),
   folderActions: (listing) => [openHereControl(listing.path)],
   folderRowActions: (path) => [["Open conversation", () => openFolderConversation(path, false)],
@@ -205,6 +207,7 @@ const filesPanel = new FilesPane({
   api, el, confirm: askFiles,
   keep: localStore, writer: `${localStore.WRITER}:panel`,
   openElsewhere: (path) => openUnsaved(filesSurface, path),
+  onSaved: (saved) => followSave(saved),
   working: () => app.running, // HIMARI at work in this conversation (§7.3)
   onAsk: (reference) => { // the conversation shown again, where its chip goes
     setPanelExpanded(false);
@@ -299,7 +302,7 @@ function showLogin({ signingOut = false } = {}) {
   leavePlace({ keep: !signingOut });
   filesPanel.closeForSignIn({ keepText: !signingOut });
   filesPanel.file = null; // its conversation is opened again from Home
-  filesSurface.closeForSignIn({ keepText: !signingOut, keepInk: !signingOut });
+  filesSurface.closeForSignIn({ keepText: !signingOut });
   showSurface("login");
   $("topbar-title").textContent = "HIMARI";
   $("server-info").hidden = true;
@@ -922,6 +925,22 @@ function addReference(reference) {
   renderAttachments();
   composerChanged();
   $("composer-text").focus({ preventScroll: true }); // the page itself never scrolls
+}
+
+/* V3-P82 §6.3: this tab saved a PDF's ink — its identity ``from`` is ``to`` now, and only ink was added: the
+ * chips pointing at it as it was (the composer's, and the drafts kept for other places) point at it now, or
+ * the next message would be refused as stale. */
+function followSave({ path, from, to }) {
+  const same = (a, b) => Array.isArray(a) && a.length === b.length && a.every((v, i) => String(v) === String(b[i]));
+  let moved = false;
+  for (const reference of app.references) {
+    if (reference.path !== path || !same(reference.identity, from)) continue;
+    reference.identity = [...to];
+    reference.stale = false;
+    moved = true;
+  }
+  drafts.follow(path, from, to);
+  if (moved) renderAttachments();
 }
 
 /* After a reference_stale refusal: the chips whose file changed since they were made say so, as a
@@ -3724,6 +3743,7 @@ async function boot() {
     for (const pane of [filesPanel, filesSurface]) {
       pane.keepNow();
       pane.keepPlace(); // a PDF's page and zoom, as the page goes (web polish 2, B3)
+      pane.pageHidden(); // a PDF's unsaved ink kept, and saved (V3-P82 §3.2)
     }
   };
   window.addEventListener("pagehide", keepNow);

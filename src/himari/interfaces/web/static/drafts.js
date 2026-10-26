@@ -205,6 +205,23 @@ export class DraftBook {
     return copy(value);
   }
 
+  /* V3-P82 §6.3: a file saved here (ink added to a PDF), its identity ``from`` now ``to``: the chips of every
+   * kept draft that point at it as it was point at it now. The composer's waiting save goes first (its chips
+   * are followed already); each draft keeps its time and mark — only its chips changed, not what was written. */
+  follow(path, from, to) {
+    const same = (a, b) => Array.isArray(a) && a.length === b.length && a.every((v, i) => String(v) === String(b[i]));
+    const stale = (r) => r.path === path && same(r.identity, from);
+    this.flush();
+    for (const [place, draft] of [...this.table]) {
+      if (!draft.references.some(stale)) continue;
+      const moved = { ...draft, references: draft.references.map((r) => (stale(r) ? { ...r, identity: [...to] } : { ...r })) };
+      this.table.set(place, moved);
+      if (storable(place)) {
+        this.store.put("drafts", place, { ...moved, text: moved.text.slice(0, this.limits.chars), writer: this.writer });
+      }
+    }
+  }
+
   /* Sign out (§5.3): nothing kept in memory, nothing waiting to be written. */
   clear() {
     this.cancel();

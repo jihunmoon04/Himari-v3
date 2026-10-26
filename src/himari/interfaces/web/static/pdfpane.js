@@ -43,6 +43,7 @@ import { Ref, appendIncrement, checkIncrement, openPdf } from "./pdfdoc.js";
 import { InkLab, labOn } from "./inklab.js";
 
 export const MAX_PDF_BYTES = 64 * 1024 * 1024; // §3.3, Q2: viewed here up to this; larger ones are downloaded
+export const MAX_INCREMENT_BYTES = 8 * 1024 * 1024; // one save's bytes, as the server takes (V3-P77 §5.3)
 // Every page has a box (its canvas only near the view): a few bytes can hold tens of thousands of pages,
 // so their count is bounded too (PR #102 review).
 export const MAX_PDF_PAGES = 2000;
@@ -119,7 +120,8 @@ export class PdfView {
     this.signed = false;
     this.tool = null; // {tool: "pen" | "highlighter" | "eraser", color, size}; null: scrolling only
     this.active = null; // the stroke or erasing under way
-    this.saving = false; // no drawing while a save is made
+    this.frozen = false; // no drawing while another version is read in its place (V3-P82 §3.4); a save never
+    this.cut = null; // V3-P82 §3.6: where a save cut short at its end is to be cut off, when there is one
     this.element = el("div", "pdf-view");
     this.element.tabIndex = 0;
     this.pagesBox = el("div", "pdf-pages");
@@ -188,6 +190,7 @@ export class PdfView {
       return;
     }
     this.writable = true;
+    this.cut = this.file.cut;
     try {
       this.signed = await this.file.signed();
     } catch (ignored) { /* told nothing */ }
@@ -614,7 +617,7 @@ export class PdfView {
   }
 
   pointerDown(event) {
-    if (!this.tool || !this.writable || this.saving || this.pinch || this.active) return;
+    if (!this.tool || !this.writable || this.frozen || this.pinch || this.active) return;
     if (event.pointerType === "touch") return; // fingers scroll and zoom; a resting palm does nothing (§4.1)
     if (event.pointerType === "mouse" && event.button !== 0) return;
     const index = this.pageIndexOf(event.target);
@@ -717,7 +720,7 @@ export class PdfView {
   }
 
   undo() {
-    if (this.active || this.saving) return;
+    if (this.active || this.frozen) return;
     const page = this.ink.undo();
     if (page !== null) {
       this.paintInk(page);
@@ -726,7 +729,7 @@ export class PdfView {
   }
 
   redo() {
-    if (this.active || this.saving) return;
+    if (this.active || this.frozen) return;
     const page = this.ink.redo();
     if (page !== null) {
       this.paintInk(page);
@@ -736,50 +739,109 @@ export class PdfView {
 
   /* --------------------------------------------------------------- saving (§5) */
 
-  /* The bytes to add after the file's own for the ink drawn and erased since it was read, checked as the
-   * server checks them (§5.2), within 64 MiB in all; null when there is nothing to save. */
+  /* The next save (V3-P82 §3.4): {bytes: what to add after the file's own, checked as the server checks it,
+   * changes: what they hold, added: each added stroke's object} — the changes as they are now, or the first
+   * pages of them while the bytes would be over MAX_INCREMENT_BYTES (the rest go in the next save); null when
+   * there is nothing to save. A page with strokes not yet read (carried here) is read first, so a stroke it
+   * already holds is not written again. */
   async increment() {
-    const changes = this.ink.changes();
+    let changes = this.ink.changes();
     if (!changes.length) return null;
-    const pages = [];
-    for (const { page, add, drop } of changes) {
-      const pdfPage = this.pages[page].pdfPage || await this.doc.getPage(page + 1);
-      pages.push({ ref: new Ref(pdfPage.ref.num, pdfPage.ref.gen), drop, add: add.map(specOf) });
+    for (const { page } of changes) if (!this.ink.loaded(page)) await this.readInk(page);
+    changes = this.ink.changes();
+    if (!changes.length) return null;
+    for (;;) {
+      const pages = [];
+      for (const { page, add, restore, drop } of changes) {
+        const pdfPage = this.pages[page].pdfPage || await this.doc.getPage(page + 1);
+        pages.push({ ref: new Ref(pdfPage.ref.num, pdfPage.ref.gen), drop: drop.map((d) => d.ref),
+                     restore: restore.map((r) => r.ref), add: add.map(specOf) });
+      }
+      let made;
+      try {
+        made = await appendIncrement(this.file, pages);
+      } catch (ignored) {
+        throw new PdfError("unsaved", "Not saved: the PDF could not be updated in place.");
+      }
+      if (!checkIncrement(this.file.size, made.bytes)) {
+        throw new PdfError("unsaved", "Not saved: the PDF could not be updated in place.");
+      }
+      if (made.bytes.length > MAX_INCREMENT_BYTES && changes.length > 1) {
+        changes = changes.slice(0, Math.ceil(changes.length / 2));
+        continue;
+      }
+      if (made.bytes.length > MAX_INCREMENT_BYTES) {
+        throw new PdfError("too_large", "Too much ink on one page to save at once (over 8 MiB).");
+      }
+      if (this.file.size + made.bytes.length > MAX_PDF_BYTES) {
+        throw new PdfError("too_large", "Too large to save here: the PDF would be over 64 MiB.");
+      }
+      return { bytes: made.bytes, changes, added: made.added };
     }
-    let increment;
-    try {
-      increment = await appendIncrement(this.file, pages);
-    } catch (ignored) {
-      throw new PdfError("unsaved", "Not saved: the PDF could not be updated in place.");
-    }
-    if (!checkIncrement(this.file.size, increment)) {
-      throw new PdfError("unsaved", "Not saved: the PDF could not be updated in place.");
-    }
-    if (this.file.size + increment.length > MAX_PDF_BYTES) {
-      throw new PdfError("too_large", "Too large to save here: the PDF would be over 64 MiB.");
-    }
-    return increment;
   }
 
-  /* After the server took ``increment``: the file is its bytes and the increment (never read again from the
-   * server), its ink read back — saved now, with names to erase by; undo starts again. */
-  async saved(increment) {
-    const bytes = new Uint8Array(this.file.size + increment.length);
-    bytes.set(this.file.bytes);
-    bytes.set(increment, this.file.size);
-    this.bytes = bytes;
-    this.file = await openPdf(bytes);
-    const read = [...this.ink.saved.keys()];
-    this.ink = new Ink();
-    for (const index of read) await this.readInk(index);
-    for (const index of read) this.paintInk(index);
+  /* After the server took a save (``increment()``'s): the file is its bytes and the save's (never read again
+   * from the server), in a buffer with room for the next saves (no copy of the whole each time, V3-P82 §3.4);
+   * what the save held is saved where it is now. Nothing is read back; undo goes on. */
+  async saved({ bytes: increment, changes, added }) {
+    const size = this.file.size;
+    const total = size + increment.length;
+    if (!this.buffer || this.buffer.byteLength < total) {
+      const room = Math.min(MAX_PDF_BYTES + MAX_INCREMENT_BYTES, Math.max(total, Math.ceil(size * 1.25) + (1 << 20)));
+      const buffer = new ArrayBuffer(room);
+      new Uint8Array(buffer).set(this.file.bytes.subarray(0, size));
+      this.buffer = buffer;
+    }
+    new Uint8Array(this.buffer).set(increment, size);
+    this.bytes = new Uint8Array(this.buffer, 0, total);
+    this.file = await openPdf(this.bytes);
+    this.ink.committed(changes, added);
     this.onInk();
   }
 
-  /* §5.5: unsaved ink from another version put on this one; the strokes left (on pages it lacks) counted. */
+  /* §5.5: what is unsaved, to put on another version (or keep in the browser): the ink's carry, with each
+   * page's object number where it is known (``refs``: page index → {num, gen}; a page with ink has been
+   * drawn), by which the other version finds that page (V3-P82 §4, review C4). At once: no await. */
+  carry() {
+    const carried = this.ink.carry();
+    const refs = new Map();
+    for (const index of new Set([...carried.add.map((s) => s.page), ...carried.erasePages])) {
+      const pdfPage = this.pages[index] && this.pages[index].pdfPage;
+      if (pdfPage && pdfPage.ref) refs.set(index, { num: pdfPage.ref.num, gen: pdfPage.ref.gen });
+    }
+    return { ...carried, refs };
+  }
+
+  /* V3-P82 §3.7: the whole file with its unsaved ink, past any limit — to download when it cannot be saved. */
+  async withInk() {
+    const changes = this.ink.changes();
+    const pages = [];
+    for (const { page, add, restore, drop } of changes) {
+      const pdfPage = this.pages[page].pdfPage || await this.doc.getPage(page + 1);
+      pages.push({ ref: new Ref(pdfPage.ref.num, pdfPage.ref.gen), drop: drop.map((d) => d.ref),
+                   restore: restore.map((r) => r.ref), add: add.map(specOf) });
+    }
+    const { bytes } = await appendIncrement(this.file, pages);
+    const whole = new Uint8Array(this.file.size + bytes.length);
+    whole.set(this.file.bytes.subarray(0, this.file.size));
+    whole.set(bytes, this.file.size);
+    return whole;
+  }
+
+  /* §5.5: unsaved ink from another version put on this one, each page found by its object number (else by
+   * its number); the strokes left (on pages it lacks) counted. */
   async carryIn(carried) {
-    const left = this.ink.put(carried, this.pages.length);
-    for (const index of new Set(carried.erasePages)) if (index < this.pages.length) await this.readInk(index);
+    const where = new Map();
+    for (const [index, ref] of carried.refs || []) {
+      try {
+        where.set(index, await this.doc.getPageIndex(ref));
+      } catch (ignored) { /* not a page of this version: by its number */ }
+    }
+    const moved = (index) => (where.has(index) ? where.get(index) : index);
+    const placed = { ...carried, add: carried.add.map((s) => ({ ...s, page: moved(s.page) })),
+                     erasePages: carried.erasePages.map(moved) };
+    const left = this.ink.put(placed, this.pages.length);
+    for (const index of new Set(placed.erasePages)) if (index < this.pages.length) await this.readInk(index);
     for (let index = 0; index < this.pages.length; index += 1) this.paintInk(index);
     this.onInk();
     return left;
