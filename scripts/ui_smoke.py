@@ -39,7 +39,10 @@ made elsewhere and saved again, delete, the source link), the delete
 confirmations' note count, a save whose answer was lost (recognized, never
 saved twice, never mistaken for a note that said the same), the off notice and
 what a save says then, leaving with an unsaved edit, a delete for good taking the
-note, and the narrow layout.
+note, and the narrow layout. An eleventh (V3-P78) keeps drafts: one per
+conversation and Home, back after a reload and an ended session, a send
+accepted after the user left, another tab that changes nothing, and a
+sign-out that deletes them.
 
 Requires: pip install playwright && playwright install chromium
 Usage:    python scripts/ui_smoke.py [--screenshots DIR] [--only main,compaction,...]
@@ -512,13 +515,21 @@ def run_files(base: str, token: str, shots: str | None, tmp: str) -> list[str]:
             page.wait_for_timeout(50)
         conversation_id = page.locator(".conv-row.is-selected").get_attribute("data-id")
         page.click("#nav-home")
+        # V3-P78 §3.2 (Q1): leaving asks first; Cancel stays with the upload, Leave cancels it.
+        expect(page.get_by_role("dialog", name="A file is still uploading")).to_be_visible()
+        page.get_by_role("button", name="Cancel").click()
+        expect(page.locator("#surface-chat")).to_be_visible()
+        page.click("#nav-home")
+        page.get_by_role("button", name="Leave").click()
         expect(page.locator("#surface-home")).to_be_visible()
         held[0].continue_()
         page.wait_for_timeout(500)
         page.unroute("**/uploads?*")
         page.locator(f'#conversation-list .conv-row[data-id="{conversation_id}"]').click()
         expect(page.locator(".item-file").last).to_be_visible(timeout=10000)
-        expect(page.locator("#attach-list")).to_be_hidden()
+        # The file that had finished is back in the conversation's draft (§3.1); the cancelled one is not.
+        expect(page.locator("#attach-list .attach-chip")).to_have_count(1)
+        expect(page.locator("#attach-list .attach-chip").first).to_have_text(re.compile(r"d\.txt · 7 bytes"))
         browser.close()
     return errors
 
@@ -1093,7 +1104,117 @@ def run_memory(base: str, token: str, shots: str | None, root: str, provider: Sc
 
 
 SCENARIOS = ("main", "compaction", "budget", "trash", "files", "images", "work", "instructions", "memory",
-             "streaming")
+             "streaming", "drafts")
+
+
+def run_drafts(base: str, token: str, shots: str | None) -> list[str]:
+    """V3-P78 §3, §5.3: each place keeps its own draft, in the browser across a reload and an ended session;
+    a message accepted after the user left leaves that draft; another tab never erases one; signing out
+    deletes them all."""
+    errors: list[str] = []
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        context = browser.new_context(viewport={"width": 1280, "height": 860})
+        page = context.new_page()
+        page.on("console", lambda m: errors.append(m.text) if m.type == "error" and "401" not in m.text else None)
+        page.on("pageerror", lambda e: errors.append(str(e)))
+        box = page.locator("#composer-text")
+
+        def sign_in() -> None:
+            page.fill("#login-token", token)
+            page.click("#login-submit")
+            expect(page.locator("#surface-home")).to_be_visible()
+
+        def open_row(conversation: str) -> None:
+            page.locator(f'#conversation-list .conv-row[data-id="{conversation}"]').click()
+            expect(page.locator(f'#conversation-list .conv-row.is-selected[data-id="{conversation}"]')).to_be_visible()
+
+        def settled() -> None:
+            page.wait_for_timeout(700)  # past the composer's save delay (0.4 s)
+
+        page.goto(base)
+        sign_in()
+        new_chat(page)
+        a = page.locator(".conv-row.is-selected").get_attribute("data-id")
+        box.fill("draft for A")
+        new_chat(page, "#nav-new-chat")
+        expect(box).to_have_value("")  # A's draft never follows into B (§1 A)
+        b = page.locator(".conv-row.is-selected").get_attribute("data-id")
+        assert a and b and a != b
+        box.fill("draft for B")
+        open_row(a)
+        expect(box).to_have_value("draft for A")
+        open_row(b)
+        expect(box).to_have_value("draft for B")
+        page.click("#nav-home")
+        expect(box).to_have_value("")
+        box.fill("home draft")
+        open_row(a)
+        expect(box).to_have_value("draft for A")
+        page.click("#nav-home")
+        expect(box).to_have_value("home draft")
+        settled()
+
+        page.reload()  # the session stays; the drafts come from the browser's store
+        expect(page.locator("#surface-home")).to_be_visible()
+        expect(box).to_have_value("home draft")
+        open_row(a)
+        expect(box).to_have_value("draft for A")
+        if shots:
+            page.screenshot(path=os.path.join(shots, "20-draft-restored.png"))
+
+        # Sent, accepted after the user left: back in A the sent text is gone, and nothing says "maybe sent".
+        held: list[Any] = []
+        page.route("**/messages", lambda route: held.append(route))
+        page.press("#composer-text", "Enter")
+        while not held:
+            page.wait_for_timeout(50)
+        open_row(b)
+        expect(box).to_have_value("draft for B")
+        held[0].continue_()
+        page.wait_for_timeout(500)
+        page.unroute("**/messages")
+        open_row(a)
+        expect(page.locator(".item-user").last).to_contain_text("draft for A", timeout=10000)
+        expect(box).to_have_value("")
+        expect(page.locator("#status-bar")).not_to_contain_text("may have been sent")
+
+        # Another tab on B that changes nothing, then goes away, erases nothing.
+        other = context.new_page()
+        other.goto(base)
+        other.locator(f'#conversation-list .conv-row[data-id="{b}"]').click()
+        expect(other.locator("#composer-text")).to_have_value("draft for B")
+        other.evaluate("document.dispatchEvent(new Event('visibilitychange'))")
+        other.close()
+        page.reload()
+        expect(page.locator("#surface-home")).to_be_visible()
+        open_row(b)
+        expect(box).to_have_value("draft for B")
+
+        # The session ends (a restart signs everyone out): what was typed is kept for the next sign-in.
+        box.fill("typed before the session ended")
+        settled()
+        context.clear_cookies()
+        page.locator(f'#conversation-list .conv-row[data-id="{a}"]').click()
+        expect(page.locator("#surface-login")).to_be_visible()
+        sign_in()
+        open_row(b)
+        expect(box).to_have_value("typed before the session ended")
+
+        # Sign out: told how many are kept, then none are, in this tab or after signing in again.
+        page.click("#nav-appearance")
+        page.click("#nav-sign-out")
+        expect(page.locator("#confirm-dialog")).to_contain_text("Unsaved drafts kept in this browser")
+        page.click("#confirm-ok")
+        expect(page.locator("#surface-login")).to_be_visible()
+        sign_in()
+        expect(box).to_have_value("")
+        open_row(b)
+        expect(box).to_have_value("")
+        open_row(a)
+        expect(box).to_have_value("")
+        browser.close()
+    return errors
 
 
 LONG_ANSWER = "\n\n".join(f"Paragraph {n}: the sea keeps moving under a long grey sky." for n in range(1, 41))
@@ -1303,6 +1424,15 @@ def main() -> int:
                 errors += run_memory(f"http://127.0.0.1:{PORT + 8}",
                                      Path(memory, "control", "operator.secret").read_text().strip(),
                                      args.screenshots, memory, provider)
+            finally:
+                server.should_exit = True
+                time.sleep(0.5)
+        if "drafts" in only:
+            kept = os.path.join(tmp, "drafts")
+            server = serve(kept, PORT + 10, ScriptedAdapter([NormalizedFinal((TextBlock("noted"),))]))
+            try:
+                errors += run_drafts(f"http://127.0.0.1:{PORT + 10}",
+                                     Path(kept, "control", "operator.secret").read_text().strip(), args.screenshots)
             finally:
                 server.should_exit = True
                 time.sleep(0.5)

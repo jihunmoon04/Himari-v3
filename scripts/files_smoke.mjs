@@ -154,7 +154,7 @@ function fakeModule() {
       const editor = { value: read(opts.text), opts, text: () => editor.value, destroyed: false, picked: [0, 0],
         setText(text) { editor.value = read(text); },
         type(text) { editor.value = read(text); if (opts.onChange) opts.onChange(); },
-        destroy() { editor.destroyed = true; }, setReadOnly() {}, focus() {},
+        destroy() { editor.destroyed = true; }, readOnly: false, setReadOnly(on) { editor.readOnly = on; }, focus() {},
         selection() { // one line: columns are positions + 1
           const [from, to] = editor.picked;
           return { from, to, text: editor.value.slice(from, to), fromLine: 1, fromColumn: from + 1, toLine: 1,
@@ -169,7 +169,8 @@ function fakeModule() {
 }
 
 /* A pane over a fake server: ``routes`` answers "METHOD path-start"; ``sent`` keeps every request. */
-function editorPane(routes, { confirms = [], onAsk = null, changes = null, working = () => false } = {}) {
+function editorPane(routes, { confirms = [], onAsk = null, changes = null, working = () => false, keep = null,
+                              openElsewhere = () => false } = {}) {
   const sent = [];
   const module = fakeModule();
   const asked = [];
@@ -181,7 +182,8 @@ function editorPane(routes, { confirms = [], onAsk = null, changes = null, worki
     const answer = routes[key];
     return typeof answer === "function" ? answer(body, path) : answer;
   };
-  const files = new FilesPane({ api, el, loadEditor: async () => module, onAsk, changes, working,
+  const files = new FilesPane({ api, el, loadEditor: async () => module, onAsk, changes, working, keep, writer: "me",
+    openElsewhere,
     confirm: async (title, lines, action) => { asked.push([title, action]); return confirms.length ? confirms.shift() : true; } });
   return { files, sent, module, asked };
 }
@@ -1232,6 +1234,168 @@ for (const [why, routes, setup, told] of [
   } finally {
     globalThis.fetch = realFetch;
   }
+}
+
+// --- unsaved text kept in the browser (V3-P78 §4) ------------------------------------------------------
+
+/* The browser's store (local_store.js) as a map of "unsaved" records. */
+function keepStore(records = {}) {
+  const map = new Map(Object.entries(records));
+  return { map, get: async (store, key) => map.get(key) ?? null, put: async (store, key, value) => { map.set(key, value); },
+           remove: async (store, key, writer = null) => { if (writer === null || map.get(key)?.writer === writer) map.delete(key); },
+           prune: async () => {} };
+}
+const KEPT = { kind: "text", path: TEXT.path, base: [1, 2, 3, 4], text: "kept\n", lineBreak: "\n", at: Date.now(),
+               writer: "another tab" };
+const barLabels = (files) => files.doc.bar.children.map((c) => c.textContent);
+const press = (files, label) => files.doc.bar.children.find((c) => c.textContent === label).listeners.click[0]();
+
+// §4.1: kept text is offered, never put in by itself; the editor is read-only until Restore or Discard (C2).
+{
+  const keep = keepStore({ [TEXT.path]: KEPT });
+  const { files, module } = editorPane({ "GET /api/machine/file": TEXT }, { keep });
+  await files.openFile(TEXT.path);
+  const editor = module.made[0];
+  assert.equal(editor.text(), "one");
+  assert.equal(editor.readOnly, true);
+  assert.equal(files.dirty, false);
+  assert.ok(files.doc.bar.text().includes("were kept in this browser"));
+  assert.deepEqual(barLabels(files).slice(1), ["Restore", "Discard"]);
+  files.keepNow(); // nothing typed can replace the only copy meanwhile
+  assert.equal(keep.map.get(TEXT.path).writer, "another tab");
+  press(files, "Restore");
+  assert.equal(editor.text(), "kept\n");
+  assert.equal(editor.readOnly, false);
+  assert.equal(files.dirty, true);
+  assert.equal(files.doc.bar.hidden, true);
+  assert.equal(keep.map.get(TEXT.path).writer, "me", "this pane's from now on");
+  files.closeDoc();
+}
+
+// …kept on a version since changed: Restore leads to the conflict bar, so a save never goes over it.
+{
+  const keep = keepStore({ [TEXT.path]: { ...KEPT, base: [1, 1, 1, 1] } });
+  const { files, sent } = editorPane({ "GET /api/machine/file": TEXT,
+    "PUT /api/machine/file": () => { throw refusal("changed"); },
+    "GET /api/machine/stat": { path: TEXT.path, kind: "file", identity: [1, 2, 3, 4], size: 3 } }, { keep });
+  await files.openFile(TEXT.path);
+  press(files, "Restore");
+  assert.ok(files.doc.bar.text().includes("changed on the server"));
+  await files.save();
+  assert.deepEqual(sent.find(([m]) => m === "PUT")[2].expected, [1, 1, 1, 1]);
+  assert.ok(barLabels(files).includes("Save mine over it"));
+  files.closeDoc();
+}
+
+// Discard drops it, whoever kept it; open unsaved in the other pane, it is not offered there (B4).
+{
+  const keep = keepStore({ [TEXT.path]: KEPT });
+  const { files, module } = editorPane({ "GET /api/machine/file": TEXT }, { keep });
+  await files.openFile(TEXT.path);
+  press(files, "Discard");
+  assert.equal(keep.map.has(TEXT.path), false);
+  assert.equal(module.made[0].readOnly, false);
+  files.closeDoc();
+  const other = keepStore({ [TEXT.path]: KEPT });
+  const elsewhere = editorPane({ "GET /api/machine/file": TEXT }, { keep: other, openElsewhere: () => true });
+  await elsewhere.files.openFile(TEXT.path);
+  assert.equal(elsewhere.files.doc.bar.hidden, true);
+  elsewhere.files.closeDoc();
+}
+
+// Typing is kept with the identity it was read at; a save drops this pane's record; so does undoing to the
+// saved text (N8). A record another writer made is not this pane's to drop.
+{
+  const keep = keepStore();
+  const { files, module } = editorPane({ "GET /api/machine/file": TEXT,
+    "PUT /api/machine/file": { path: TEXT.path, identity: [5, 5, 5, 5], previous_kept: true } }, { keep });
+  await files.openFile(TEXT.path);
+  module.made[0].type("two");
+  files.keepNow();
+  assert.deepEqual(keep.map.get(TEXT.path), { ...keep.map.get(TEXT.path), kind: "text", base: [1, 2, 3, 4],
+                                               text: "two", writer: "me" });
+  await files.save();
+  assert.equal(keep.map.has(TEXT.path), false);
+  keep.map.set(TEXT.path, KEPT);
+  module.made[0].type("three");
+  module.made[0].type("two"); // the saved text again
+  await new Promise((r) => setTimeout(r, 1100));
+  assert.equal(keep.map.get(TEXT.path).writer, "another tab");
+  files.closeDoc();
+}
+
+// §6: the session ended — unsaved text is kept at once and the editor closes without asking (C4).
+{
+  const keep = keepStore();
+  const { files, module, asked } = editorPane({ "GET /api/machine/file": TEXT }, { keep });
+  await files.openFile(TEXT.path);
+  module.made[0].type("typed");
+  files.closeForSignIn();
+  assert.equal(keep.map.get(TEXT.path).text, "typed");
+  assert.equal(files.doc, null);
+  assert.equal(asked.length, 0);
+}
+
+// §4.2: the file is gone (the runner says "changed"): with unsaved text, make it again or download it.
+{
+  const { files, sent, module } = editorPane({ "GET /api/machine/file": TEXT,
+    "PUT /api/machine/file": () => { throw refusal("changed"); },
+    "GET /api/machine/stat": () => { throw refusal("not_found"); },
+    "POST /api/machine/file/install": { path: TEXT.path, identity: [8, 8, 8, 8] } }, { keep: keepStore() });
+  await files.openFile(TEXT.path);
+  module.made[0].type("mine");
+  await files.save();
+  assert.ok(files.doc.bar.text().includes("no longer on the server"));
+  assert.deepEqual(barLabels(files).slice(1), ["Save it here again", "Download my text"]);
+  await press(files, "Save it here again");
+  assert.deepEqual(sent.find(([m, p]) => m === "POST" && p === "/api/machine/file/install")[2],
+                   { path: TEXT.path, content: "mine" });
+  assert.equal(files.dirty, false);
+  assert.deepEqual(files.doc.identity, [8, 8, 8, 8]);
+  assert.equal(files.doc.bar.hidden, true);
+  files.closeDoc();
+}
+
+// …the folder is gone too, or the file system cannot place it safely: download only. A name taken
+// meanwhile: the conflict bar, never over that file.
+for (const [code, said, labels] of [["not_found", "folder is gone too", ["Download my text"]],
+                                    ["unsupported", "can't take a new file safely", ["Download my text"]],
+                                    ["changed", "changed on the server", ["Compare", "Load the server's version", "Save mine over it"]]]) {
+  const { files, module } = editorPane({ "GET /api/machine/file": TEXT,
+    "PUT /api/machine/file": () => { throw refusal("changed"); },
+    "GET /api/machine/stat": () => { throw refusal("not_found"); },
+    "POST /api/machine/file/install": () => { throw refusal(code); } });
+  await files.openFile(TEXT.path);
+  module.made[0].type("mine");
+  await files.save();
+  await press(files, "Save it here again");
+  assert.ok(files.doc.bar.text().includes(said), code);
+  assert.deepEqual(barLabels(files).slice(1), labels, code);
+  assert.equal(module.made[0].text(), "mine");
+  files.closeDoc();
+}
+
+// C5: gone while the conflict bar shows — its buttons lead to the gone bar; N7: a clean file is only told.
+{
+  let gone = false;
+  const { files, module } = editorPane({ "GET /api/machine/file": () => { if (gone) throw refusal("not_found"); return TEXT; },
+    "PUT /api/machine/file": () => { throw refusal("changed"); },
+    "GET /api/machine/stat": () => { if (gone) throw refusal("not_found"); return { ...TEXT, identity: [9, 9, 9, 9] }; } });
+  await files.openFile(TEXT.path);
+  module.made[0].type("mine");
+  await files.save();
+  assert.ok(barLabels(files).includes("Load the server's version"));
+  gone = true;
+  await press(files, "Load the server's version");
+  assert.ok(barLabels(files).includes("Save it here again"));
+  files.closeDoc();
+  gone = false;
+  await files.openFile(TEXT.path);
+  gone = true;
+  await files.checkDisk();
+  assert.equal(files.doc.bar.hidden, true);
+  assert.equal(files.stateLabel.textContent, "This file is no longer on the server");
+  files.closeDoc();
 }
 
 console.log("files smoke: ok");

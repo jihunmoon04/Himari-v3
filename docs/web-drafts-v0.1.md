@@ -1,6 +1,6 @@
 # 작성 중인 것 지키기 v0.1
 
-> 2026-10-26 · **PROPOSED (V3-P78)** · rev. 3: 재검수 READY_WITH_CORRECTIONS 반영(§12.1) — 만드는 중 놓은 파일, 되살리기 막대 동안 읽기 전용, 로그아웃은 묻는 것부터, 401에서 편집기는 묻지 않고 닫음, 충돌 막대 중 사라진 파일. rev. 2: 독립 설계 검수 READY_WITH_CORRECTIONS 반영(§12) — 만드는 중인 대화의 자리, 보낸 것은 그 대화의 초안에서 뺌, 메모리 표가 원본, 여러 탭·창의 쓰기, 로그아웃 순서, 사라진 파일의 오류. rev. 1: 설계 초안. 소유자 결정 Q1~Q4 권고대로(§9).
+> 2026-10-26 · **PROPOSED (V3-P78)** · 구현 노트 §13. rev. 3: 재검수 READY_WITH_CORRECTIONS 반영(§12.1) — 만드는 중 놓은 파일, 되살리기 막대 동안 읽기 전용, 로그아웃은 묻는 것부터, 401에서 편집기는 묻지 않고 닫음, 충돌 막대 중 사라진 파일. rev. 2: 독립 설계 검수 READY_WITH_CORRECTIONS 반영(§12) — 만드는 중인 대화의 자리, 보낸 것은 그 대화의 초안에서 뺌, 메모리 표가 원본, 여러 탭·창의 쓰기, 로그아웃 순서, 사라진 파일의 오류. rev. 1: 설계 초안. 소유자 결정 Q1~Q4 권고대로(§9).
 >
 > 소유자 방향(2026-10-26): 지금까지 구현한 Web을 사용자 경험 쪽에서 점검했고(화면 확인 + 코드 검토), 찾은 항목을 우선순위 높은 것부터 차례로 진행한다. 이 패킷은 첫 묶음, **사용자가 쓴 것을 잃는 경우**를 다룬다.
 >
@@ -242,3 +242,14 @@ B2·B3, B4의 대부분이 닫혔고 B1·B5는 일부만 닫혔다는 판정.
 | N6 | 202 전에 탭이 죽으면 보낸 글이 되돌아옴 | `sending` 표시와 알림(§3.1) |
 | N7 | 깨끗한 파일에도 다시 만들기를 제안 | 저장 안 한 글이 있을 때만(§4.2) |
 | N8 | 되돌려 저장된 글과 같아진 기록 | 지움(§4.1) |
+
+## 13. 구현 노트 (2026-10-26)
+
+- **서버:** `MachineExplorer.recreate`(§7)와 `POST /api/machine/file/install`. 본문 한도는 저장과 같은 3 MiB(`SAVE_ROUTES`). 다시 만든 파일은 이전 판 없이 `0644`로 생김(테스트 `test_recreate_a_file_that_is_gone`).
+- **브라우저 저장소:** `static/local_store.js`(IndexedDB `himari-local` 판 1, `drafts`·`unsaved`; 쓰기는 `enter()`가 열고 Sign out이 닫음; `BroadcastChannel`로 지움을 알림). `static/drafts.js`의 `DraftBook`이 메모리 표와 0.4초 저장, `sending` 표시, 보낸 것 빼기, 합치기를 맡는다(DOM 없음).
+- **입력창(`app.js`):** `app.place`·`leavePlace`·`enterPlace`가 모든 이동에서 예전 `clearAttachments`를 대신한다. 새 대화는 `beginCreating`/`endCreating`과 `openConversation(id, { created: true })`(옮기기). 202의 정리는 `app.place === 보낸 대화`일 때만 입력창에 적용된다. Q1 질문은 `mayLeave` 맨 앞.
+- **편집기(`files.js`):** `keepLater`/`keepNow`/`dropKept`(자기 기록만), 열 때 기록을 먼저 읽고 편집기를 만든 뒤 `offerKept`(읽기 전용). 사라진 파일은 `changedOrGone`·`goneOr`·`showGone`·`recreate`. 편집기 밖의 경우(파일이 없음, 이제 편집할 수 없는 파일)는 `offerKeptAside`가 본문 위에 Save it here again·Download my text·Discard를 놓는다.
+- **설계와 다른 점:**
+  - 되살리기 막대의 Discard는 누가 남긴 기록이든 지운다(사용자가 그 기록을 보고 고른 답이므로). 그 밖의 지우기는 자기 기록만.
+  - 401 때 **Files 화면**의 PDF에 저장 안 한 필기가 있으면 닫지 않고 둔다(`keepInk`). 돌아올 때 그 화면을 묻는 곳이 없어 C4가 생기지 않고, 닫으면 필기를 잃기 때문이다. 채팅 옆 패널의 PDF는 §6대로 닫는다(2c 전까지 그 필기는 잃음).
+- **확인:** `tests/interfaces` 300 passed, `mypy` 통과, import 경계 통과. node: `ui_state_smoke`(19: 자리마다 초안, 보낸 뒤 정리, 홈에서 옮겨 감, 만들기 실패 시 되돌림, Q1, 로그인 칸), `files_smoke`(되살리기 제안·읽기 전용·충돌로 넘김, Discard, 다른 창, 자기 기록만 지움, 401에서 바로 보관, 사라진 파일과 오류 셋, 충돌 막대 중 사라짐). 브라우저 `ui_smoke`: 기존 시나리오 모두 통과(파일 시나리오는 Q1 질문과 되돌아온 칩으로 고침), 새 `drafts`(§10의 1~3, 3b, 3c, 세션 만료, Sign out). 편집기의 브라우저 확인은 runner가 필요해 `files_smoke`로 대신했고, iPad 실기기 확인은 소유자 몫으로 남는다.
