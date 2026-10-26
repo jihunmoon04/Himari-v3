@@ -2078,6 +2078,54 @@ details > summary {
   margin-right: auto;
 }
 
+.composer-wrap {
+  position: relative;
+}
+
+/* Back to the end of the conversation, floating just above the composer. */
+.composer-wrap > .jump-latest {
+  position: absolute;
+  top: -48px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  border: 1px solid var(--border-subtle);
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  z-index: 2;
+  min-height: 36px; /* touch layouts make buttons 44px tall: a circle stays one (review N4) */
+  padding: 0;
+}
+
+.composer-wrap > .jump-latest[hidden] {
+  display: none;
+}
+
+.composer-hint.is-over {
+  color: var(--warn);
+}
+
+.status-action {
+  padding: 0 var(--space-1);
+  font-size: inherit;
+  text-decoration: underline;
+}
+
+.attach-chip-retry {
+  background: none;
+  border: none;
+  color: var(--accent);
+  font-size: 12px;
+  padding: 0 4px;
+  cursor: pointer;
+}
+
 /* -- composer ------------------------------------------------------------ */
 
 .composer {
@@ -2570,6 +2618,10 @@ details > summary {
     display: none;
   }
 
+  .composer-hint.is-counting { /* the count near the limit shows on phones too (review B1) */
+    display: block;
+  }
+
   .compact-action-button {
     width: 44px;
     min-width: 44px;
@@ -2636,6 +2688,11 @@ details > summary {
   margin: 0;
   font-size: 14px;
   color: var(--accent);
+}
+
+.question-panel .question-text { /* a long question scrolls inside the panel (review N6) */
+  max-height: 40vh;
+  overflow-y: auto;
 }
 
 .question-text {

@@ -32,7 +32,8 @@ class FakeElement {
 function page() {
   const nodes = new Map();
   const node = (id) => {
-    if (!nodes.has(id)) nodes.set(id, { value: "", disabled: false, hidden: true, focus() {}, close() {} });
+    if (!nodes.has(id)) nodes.set(id, { value: "", disabled: false, hidden: true, focus() {}, close() {}, dataset: {},
+                                       classList: { toggle() {}, add() {}, remove() {} } });
     return nodes.get(id);
   };
   const context = vm.createContext({

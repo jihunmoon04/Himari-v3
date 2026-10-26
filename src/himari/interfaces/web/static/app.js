@@ -110,6 +110,9 @@ const app = {
   placeTouched: false, // the composer was changed in this place since it was entered (§3.3)
   placeEntry: 0, // the latest entry into a place: a later read of the store applies to that one only
   inFlight: new Set(), // the conversations a message is being sent to from this page (V3-P78 §3.1, N6)
+  workingHint: "", // "HIMARI is working…" and its usage, under the composer
+  lengthHint: null, // {count, over} once the message nears its limit
+  questionShown: null, // the question text the panel shows (redrawn only when it changes)
   address: null, // the address of the surface shown (V3-P79 §3); the sign-in screen keeps the one it came from
   activity: { working: new Set(), waiting: new Set() }, // the last /activity answer (V3-P80 §3)
   activityTimer: null,
@@ -220,10 +223,18 @@ const live = new LiveAnswer({
   EventSource: globalThis.EventSource,
 });
 
-function status(text, tone) {
+/* ``action``: [label, run] — one button after the text (e.g. Undo), gone with the next status. */
+function status(text, tone, action = null) {
   const bar = $("status-bar");
   bar.textContent = text || "";
   bar.className = tone ? `status-bar is-${tone}` : "status-bar";
+  if (action && text) {
+    const [label, run] = action;
+    const button = el("button", "link-button status-action", label);
+    button.type = "button";
+    button.addEventListener("click", () => { button.disabled = true; run(); });
+    bar.append(" ", button);
+  }
 }
 
 /* ``via`` (V3-P79 §3.2): how the address follows — "push" for a move the user chose, "replace" for a place
@@ -234,6 +245,7 @@ function showSurface(name, via = "none") {
     $(`surface-${surface}`).hidden = surface !== name;
   }
   followAddress(name, via);
+  syncJump(); // the composer (and the button in it) moved: shown only beside a scrolled-up conversation
   app.leaveAgreed = false;
   const signedIn = name !== "login";
   $("sidebar").hidden = !signedIn;
@@ -470,7 +482,8 @@ async function showHome({ via = "push" } = {}) {
   $("composer-cancel").hidden = true;
   $("question-panel").hidden = true;
   $("stop-panel").hidden = true;
-  $("composer-hint").textContent = "";
+  app.workingHint = "";
+  paintHint();
   $("composer-text").placeholder = "Ask HIMARI anything…";
   closePicker();
   closePromptForm();
@@ -628,6 +641,47 @@ function followTitle() {
   const waiting = app.activity.waiting.size; // V3-P80 §3.4: conversations waiting for an answer, this one too
   document.title = waiting ? `(${waiting}) ${title}` : title;
 }
+
+/* --------------------------------------------------- the end of the timeline */
+
+/* "↓" above the composer while the conversation is scrolled up from its end; it goes there. */
+function syncJump() {
+  if (app.jumpFrame) return; // once a frame, however many changes (review N5)
+  app.jumpFrame = requestAnimationFrame(() => {
+    app.jumpFrame = 0;
+    paintJump();
+  });
+}
+
+function paintJump() {
+  const timeline = $("timeline");
+  const away = timeline.scrollHeight - timeline.scrollTop - timeline.clientHeight > 300;
+  $("jump-latest").hidden = !away || $("surface-chat").hidden;
+}
+
+/* The composer's count, once the message nears its limit (32,000 characters). */
+function syncLength() {
+  const box = $("composer-text");
+  // Fewer units than the threshold: fewer characters too, no need to count.
+  const count = box.value.length < LENGTH_HINT_AT ? 0 : characters(box.value);
+  app.lengthHint = count < LENGTH_HINT_AT ? null : { count, over: count > MAX_MESSAGE_CHARS };
+  paintHint();
+}
+
+/* The hint under the composer has two writers (review B1): the turn at work, from the conversation's state,
+ * and the message's count near its limit. One line, the work first; the warning colour is the count's. */
+function paintHint() {
+  const hint = $("composer-hint");
+  const length = app.lengthHint;
+  const count = length === null ? ""
+    : `${length.count.toLocaleString()} / ${MAX_MESSAGE_CHARS.toLocaleString()} characters`
+      + (length.over ? ": too long to send; attach it as a file" : "");
+  hint.textContent = [app.workingHint, count].filter(Boolean).join(" · ");
+  hint.classList.toggle("is-over", length !== null && length.over);
+  hint.classList.toggle("is-counting", length !== null);
+}
+
+const LENGTH_HINT_AT = 30000;
 
 /* ---------------------------------------------------------------- paste */
 
@@ -865,7 +919,7 @@ function humanSize(n) {
   if (n >= 1 << 30) return `${(n / (1 << 30)).toFixed(1)} GB`;
   if (n >= 1 << 20) return `${(n / (1 << 20)).toFixed(1)} MB`;
   if (n >= 1 << 10) return `${(n / (1 << 10)).toFixed(1)} KB`;
-  return `${n} bytes`;
+  return `${n} ${n === 1 ? "byte" : "bytes"}`;
 }
 
 /* A file of this conversation: a download link, or "expired" (V3-P66 §8.5).
@@ -1022,11 +1076,13 @@ function fillComposer(draft) {
   app.references = draft.references.map((r) => ({ ...r, key: (app.attachKeys += 1), label: referenceLabel(r) }));
   renderAttachments();
   autosize();
+  syncLength();
 }
 
 /* The composer changed in its place (§3.3): kept once it settles. The conversation being created is
  * kept in memory only, and goes with the composer. */
 function composerChanged() {
+  syncLength();
   if (app.place === null) return;
   app.placeTouched = true;
   if (typeof app.place === "string") drafts.schedule(app.place, composerDraft);
@@ -1149,6 +1205,17 @@ function renderAttachments() {
     const text = entry.state === "uploading" ? `${entry.name} · ${entry.progress}%`
       : entry.state === "ready" ? `${entry.name} · ${humanSize(entry.size)}` : `${entry.name} · ${entry.note}`;
     item.append(el("span", "attach-chip-text", text));
+    if (entry.state === "failed" && entry.file) { // the same file again, in this place (no new pick)
+      const retry = el("button", "attach-chip-retry", "Retry");
+      retry.type = "button";
+      retry.setAttribute("aria-label", `Upload ${entry.name} again`);
+      retry.addEventListener("click", () => {
+        app.attachments = app.attachments.filter((a) => a !== entry);
+        renderAttachments();
+        uploadFile(entry.file);
+      });
+      item.append(retry);
+    }
     const remove = el("button", "attach-chip-remove", "×");
     remove.type = "button";
     remove.setAttribute("aria-label", `Remove ${entry.name}`);
@@ -1172,7 +1239,7 @@ function uploadFile(file) {
   const conversationId = app.conversationId;
   if (conversationId === null) return;
   const generation = app.generation;
-  const entry = { key: (app.attachKeys += 1), name: file.name, size: file.size, state: "uploading", fileId: null,
+  const entry = { key: (app.attachKeys += 1), name: file.name, size: file.size, state: "uploading", fileId: null, file,
                   progress: 0, xhr: new XMLHttpRequest(), note: "" };
   app.attachments.push(entry);
   renderAttachments();
@@ -1987,10 +2054,17 @@ function applyDetail(detail) {
   $("stop-panel").hidden = !stopped;
   $("stop-continue").disabled = false;
   const used = usageText(detail.job.turn_usage);
-  $("stop-text").textContent = stopped ? (used ? `This turn${used}` : "Continue where it stopped") : "";
+  // Why it stopped, short, beside Continue (the status line above has the whole of it).
+  const why = view.short || "Stopped"; // the whole reason is in the status line above (review N3)
+  $("stop-text").textContent = stopped ? `${why}${used}` : "";
   status(view.tone ? view.text : "", view.tone);
   $("question-panel").hidden = !detail.waiting;
-  $("question-text").textContent = detail.waiting ? detail.waiting.question : "";
+  // As the timeline shows it: formatted, never parsed as HTML (rich_text.js).
+  const question = detail.waiting ? detail.waiting.question : null;
+  if (question !== app.questionShown) { // a selection, and formulas, stay as they are between polls (review N6)
+    app.questionShown = question;
+    $("question-text").replaceChildren(...(question === null ? [] : [renderAssistantText(document, question)]));
+  }
   $("composer-text").placeholder = detail.waiting ? "Your answer" : "Message HIMARI";
   app.jobRunning = detail.job.running;
   if (detail.job.running && app.streaming && app.conversationId !== null) {
@@ -2003,7 +2077,8 @@ function applyDetail(detail) {
     for (const entry of app.toolRows.values()) if (entry && entry.result === null) paintToolRow(entry);
   }
   $("composer-send").disabled = detail.job.running || app.sending || uploading();
-  $("composer-hint").textContent = detail.job.running ? `HIMARI is working…${usageText(detail.job.turn_usage)}` : "";
+  app.workingHint = detail.job.running ? `HIMARI is working…${usageText(detail.job.turn_usage)}` : "";
+  paintHint();
   $("chat-menu-resume").hidden = !detail.continuable;
   $("chat-menu-compact").disabled = detail.job.running;
   $("chat-menu-dismiss").hidden = !detail.waiting || detail.job.running;
@@ -2372,6 +2447,20 @@ function memoryCountLine(count, now = false) {
   return now ? `${notes} deleted with it.` : `${notes} deleted when it is deleted for good.`;
 }
 
+/* Undo right after a move to the trash: restored; opened again if it was the one open (its draft went with
+ * the move), else the list shows it again where the user is (review N1). */
+async function undoTrash(id, name, reopen) {
+  try {
+    await api("POST", `/api/conversations/${encodeURIComponent(id)}/restore`);
+  } catch (error) {
+    status(error.message, "error");
+    return;
+  }
+  await loadList(true).then(markSelected).catch(() => {});
+  if (reopen) await openConversation(id);
+  status(`Restored “${name}”.`, "ok");
+}
+
 async function deleteConversation(item = null) {
   closeChatMenu();
   const id = item ? item.id : app.conversationId;
@@ -2395,6 +2484,7 @@ async function deleteConversation(item = null) {
   if (!(await confirmAction(`Delete “${name}”?`, lines, "Move to trash")) || !still()) return;
   $("chat-menu-delete").disabled = true;
   status(notice.running ? "Stopping the work under way, then moving it to the trash…" : "Moving it to the trash…");
+  const wasOpen = app.conversationId === id;
   try {
     const moved = await api("POST", `/api/conversations/${encodeURIComponent(id)}/trash`);
     if (app.conversationId === id) cancelUploads(); // moved: its uploads go with it, nothing to ask (PR #106 N4)
@@ -2402,7 +2492,8 @@ async function deleteConversation(item = null) {
     await (app.conversationId === id ? showHome({ via: "replace" }) : !$("surface-home").hidden ? showHome({ via: "none" })
       : loadList(true).then(markSelected)).catch(() => {});
     drafts.remove(id); // after the leave kept it (V3-P78 §3.1)
-    status(`Moved “${name}” to the trash. It is deleted for good on ${localDate(moved.purge_after)}.`, "ok");
+    status(`Moved “${name}” to the trash. It is deleted for good on ${localDate(moved.purge_after)}.`, "ok",
+           ["Undo", () => undoTrash(id, name, wasOpen)]);
   } catch (error) {
     if (error.kind === "network") {
       status("Could not confirm the move; check the trash before trying again.", "warn");
@@ -3593,6 +3684,12 @@ async function boot() {
   window.addEventListener("resize", noteWindowHeight);
   window.addEventListener("popstate", addressPopped);
   $("composer-text").addEventListener("paste", pasteIntoComposer);
+  $("timeline").addEventListener("scroll", syncJump, { passive: true });
+  new MutationObserver(syncJump).observe($("timeline"), { childList: true, subtree: true });
+  $("jump-latest").addEventListener("click", () => {
+    const timeline = $("timeline");
+    timeline.scrollTo({ top: timeline.scrollHeight, behavior: "smooth" });
+  });
   new MutationObserver(followTitle).observe($("topbar-title"), { childList: true, characterData: true, subtree: true });
   $("composer-text").addEventListener("keydown", (event) => {
     if (pickerKey(event)) return;
