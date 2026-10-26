@@ -964,4 +964,73 @@ const pageLabel = (files) => files.tools.children.find((c) => (c.className || ""
   }
 }
 
-console.log("files smoke: ok");
+// Back restores the last successful location and its scroll position; a
+// refresh doesn't consume Back, and Up works even on a directly opened file.
+{
+  const { files, next } = pane();
+  let move = files.openFolder("/home/u");
+  (await next("/api/machine/list")).resolve(listing("/home/u", ["a"]));
+  await move;
+  assert.equal(files.backButton.disabled, true);
+  files.body.scrollTop = 280;
+  move = files.openFolder("/home/u/nested");
+  (await next("/api/machine/list")).resolve(listing("/home/u/nested", []));
+  await move;
+  move = files.refresh();
+  (await next("/api/machine/list")).resolve(listing("/home/u/nested", []));
+  await move;
+  assert.equal(files.locations.length, 2);
+  move = files.back();
+  (await next("/api/machine/list")).resolve(listing("/home/u", ["a"]));
+  await move;
+  assert.equal(files.folder, "/home/u");
+  assert.equal(files.body.scrollTop, 280);
+  assert.equal(files.backButton.disabled, true);
+  move = files.openFolder("/missing");
+  (await next("/api/machine/list")).reject(new Error("missing"));
+  await move;
+  assert.equal(files.backButton.disabled, false, "a failed navigation has a way back");
+  move = files.back();
+  (await next("/api/machine/list")).resolve(listing("/home/u", []));
+  await move;
+  assert.equal(files.locationIndex, 0);
+}
+
+// An unsaved editor cancelled at Back stays open, with the same history.
+{
+  const { files, module, asked } = editorPane({
+    "GET /api/machine/file": TEXT,
+    "GET /api/machine/list": listing("/home/u", []),
+  }, { confirms: [false, true] });
+  await files.openFolder("/home/u");
+  await files.openFile(TEXT.path);
+  module.made[0].type("unsaved");
+  await files.back();
+  assert.equal(files.locationIndex, 1);
+  assert.equal(files.doc.editor.text(), "unsaved");
+  assert.equal(asked.length, 1);
+  await files.back();
+  assert.equal(files.locationIndex, 0);
+  assert.equal(files.doc, null);
+  files.reset();
+  assert.equal(files.locations.length, 0, "another conversation has no previous folder's history");
+  await files.openFile(TEXT.path);
+  await files.up();
+  assert.equal(files.file, null);
+  assert.equal(files.folder, "/home/u");
+}
+
+// A late file response can't enter Back history after another folder won.
+{
+  const { files, next } = pane();
+  const stale = files.openFile("/home/u/a.txt");
+  const answer = await next("/api/machine/file");
+  const move = files.openFolder("/home/u/new");
+  (await next("/api/machine/list")).resolve(listing("/home/u/new", []));
+  await move;
+  answer.resolve({ ...TEXT, editable: false });
+  await stale;
+  assert.deepEqual(files.locations, [{ path: "/home/u/new", kind: "folder" }]);
+}
+
+console.log("files smoke: ok (including navigation, cancelled Back and stale reads)");
