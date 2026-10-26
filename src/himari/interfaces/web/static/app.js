@@ -642,6 +642,26 @@ function followTitle() {
   document.title = waiting ? `(${waiting}) ${title}` : title;
 }
 
+/* ------------------------------------------------------------ shortcuts */
+
+/* The new-chat shortcut as the keyboard names it: ⌘ on Apple devices. */
+function newChatShortcut() {
+  const apple = /Mac|iPhone|iPad|iPod/.test(navigator.platform || "") || /Mac OS/.test(navigator.userAgent || "");
+  return apple ? "⌘⇧O" : "Ctrl+Shift+O";
+}
+
+/* Cmd/Ctrl+Shift+O: a new chat (as ChatGPT); Shift+Esc: the message box. Signed in, with no dialog open. */
+function shortcut(event) {
+  if (!$("surface-login").hidden || document.querySelector("dialog[open]")) return;
+  if ((event.metaKey || event.ctrlKey) && event.shiftKey && !event.altKey && event.key.toLowerCase() === "o") {
+    event.preventDefault();
+    $("nav-new-chat").click();
+  } else if (event.key === "Escape" && event.shiftKey && !$("composer-wrap").closest("[hidden]")) {
+    event.preventDefault();
+    $("composer-text").focus();
+  }
+}
+
 /* --------------------------------------------------- the end of the timeline */
 
 /* "↓" above the composer while the conversation is scrolled up from its end; it goes there. */
@@ -3628,6 +3648,8 @@ async function boot() {
   $("chat-menu-delete").addEventListener("click", () => deleteConversation());
   $("nav-home").addEventListener("click", () => showHome().catch((e) => status(e.message, "error")));
   $("nav-new-chat").addEventListener("click", newConversation);
+  $("nav-new-chat").title = `New chat (${newChatShortcut()})`;
+  document.addEventListener("keydown", shortcut);
   $("files-surface-slot").append(filesSurface.root);
   $("file-panel-slot").append(filesPanel.root);
   restorePanelWidth();

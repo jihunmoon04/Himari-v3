@@ -1344,6 +1344,11 @@ def run_polish(base: str, token: str, shots: str | None) -> list[str]:
                 else None)
         page.on("pageerror", lambda e: errors.append(str(e)))
         page.goto(base)
+        expect(page.locator(".login-card")).to_be_visible()  # the sign-in card, in the middle
+        box = page.locator(".login-card").bounding_box()
+        assert box is not None and abs((box["x"] + box["width"] / 2) - 640) < 140, box
+        if shots:
+            page.screenshot(path=os.path.join(shots, "26-sign-in.png"))
         page.fill("#login-token", token)
         page.click("#login-submit")
         new_chat(page)
@@ -1392,6 +1397,18 @@ def run_polish(base: str, token: str, shots: str | None) -> list[str]:
         chip.locator(".attach-chip-retry").click()
         expect(chip).to_have_text(re.compile(r"note\.txt · 5 bytes"), timeout=10000)
         expect(page.locator("#attach-list .attach-chip")).to_have_count(1)
+
+        # Shortcuts: Cmd/Ctrl+Shift+O opens a new chat; Shift+Esc goes to the message box.
+        page.locator("#timeline").click()
+        page.keyboard.press("Shift+Escape")
+        expect(page.locator("#composer-text")).to_be_focused()
+        page.locator("#timeline").click()
+        page.keyboard.press("Control+Shift+O")
+        expect(page.locator("#conversation-list .conv-row")).to_have_count(2, timeout=10000)
+        expect(page.locator("#composer-text")).to_be_focused()
+        assert page.locator("#nav-new-chat").get_attribute("title").startswith("New chat (")
+        page.locator(f'#conversation-list .conv-row[data-id="{cid}"]').click()
+        expect(page.locator(".item-assistant").last).to_contain_text("Paragraph 40", timeout=10000)
 
         # Undo right after a move to the trash: back, and open again.
         page.click("#chat-menu-toggle")
@@ -1744,7 +1761,7 @@ def main() -> int:
                 time.sleep(0.5)
         if "polish" in only:
             polished = os.path.join(tmp, "polish")
-            server = serve(polished, PORT + 13, ScriptedAdapter([NormalizedFinal((TextBlock(LONG_ANSWER),))]))
+            server = serve(polished, PORT + 13, ScriptedAdapter([NormalizedFinal((TextBlock(LONG_ANSWER),))] * 2))
             try:
                 errors += run_polish(f"http://127.0.0.1:{PORT + 13}",
                                      Path(polished, "control", "operator.secret").read_text().strip(), args.screenshots)
