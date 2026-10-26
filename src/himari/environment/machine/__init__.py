@@ -37,6 +37,7 @@ from himari.data.api import TEMP_PREFIX, BindingAuthority, WorkspaceRegistry
 from himari.documents.api import DocumentReading
 from himari.environment.api import BindingObservation, ConnectionStatus, ObservedWorkspace
 from himari.environment.inside import InsideFiles, WorkspaceBusy
+from himari.environment.machine.changes import ChangeLog
 from himari.environment.machine.client import RunnerClient
 from himari.environment.machine.locks import PathLocks
 from himari.runner import api as runner
@@ -81,7 +82,8 @@ class MachineUnavailable(Exception):
 
 class MachineEnvironment:
     def __init__(self, socket_path: str, *, files: InsideFiles | None = None,
-                 documents: DocumentReading | None = None, registry: WorkspaceRegistry | None = None) -> None:
+                 documents: DocumentReading | None = None, registry: WorkspaceRegistry | None = None,
+                 changes: ChangeLog | None = None) -> None:
         from himari.environment.machine.tools import machine_tools
 
         self.client = RunnerClient(socket_path)
@@ -89,6 +91,9 @@ class MachineEnvironment:
         self.documents = documents
         # The attached Workspaces (§10); None: each Conversation has its own folder only.
         self.registry = registry
+        # The review record of the file Tools' changes (V3-P76 §8); None: written without one.
+        self.changes = changes
+        self._protocol = 0  # the runner's, once it is new enough (it is asked again until then)
         self.locks = PathLocks()
         self._tools: tuple[ToolHandler, ...] = tuple(machine_tools(self))
 
@@ -109,6 +114,21 @@ class MachineEnvironment:
     async def hello(self) -> dict[str, Any]:
         result, _ = await self.call(runner.HELLO, {})
         return result
+
+    async def keeps(self) -> bool:
+        """The runner keeps copies and installs in one step (V3-P76 §4.1).
+        One older (not restarted since HIMARI was updated) would take such a
+        request for a plain write: then none is sent, until it is new."""
+        if self._protocol < runner.KEEP_PROTOCOL:
+            version = (await self.hello()).get("version")
+            self._protocol = version if isinstance(version, int) else 0
+        return self._protocol >= runner.KEEP_PROTOCOL
+
+    async def change_log(self) -> ChangeLog | None:
+        """The review record, when there is one and the runner can serve it."""
+        if self.changes is None or not await self.keeps():
+            return None
+        return self.changes
 
     async def folder(self, conversation_id: str, cwd_relative: str) -> str:
         """The Binding's folder as a real path; the Conversation's own folder

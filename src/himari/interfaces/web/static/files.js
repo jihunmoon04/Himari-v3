@@ -22,6 +22,9 @@
 const KIND_ICON = { directory: "#side-folder", file: "#side-note" };
 const EDIT_MAX_BYTES = 1024 * 1024; // the server's limit for the editor (§7.7, Q3)
 const POLL_MS = 5000; // how often an open file is checked on disk (§5.3)
+// What a previous version was kept before (V3-P75 §7.4; V3-P76 §4.2: the agent's, and a revert).
+const VERSION_REASONS = { save: "before a save", delete: "before a delete", revert: "before a revert",
+                          agent: "before HIMARI changed it", agent_delete: "before HIMARI deleted it" };
 
 function defaultConfirm(title, lines) { // the browser's own: no action label
   return Promise.resolve(window.confirm([title, ...lines].join("\n\n")));
@@ -553,7 +556,7 @@ export class FilesPane {
     for (const item of items) {
       const li = this.el("li", "files-row files-version");
       li.append(this.el("span", "files-name", new Date(item.saved_at).toLocaleString()),
-                this.el("span", "files-meta", `${item.reason === "delete" ? "before a delete" : "before a save"} · ${humanSize(item.size)}`));
+                this.el("span", "files-meta", `${VERSION_REASONS[item.reason] || "before a save"} · ${humanSize(item.size)}`));
       const compare = this.el("button", "link-button", "Compare");
       compare.type = "button";
       compare.addEventListener("click", async () => {

@@ -64,6 +64,8 @@ _ERRNO = {
     errno.ENXIO: api.NOT_REGULAR,
 }
 
+_RENAME_NOREPLACE = 1
+_NO_RENAMEAT2 = frozenset({errno.EINVAL, errno.ENOSYS, errno.EOPNOTSUPP})  # a file system without RENAME_NOREPLACE
 _RESOLVE_NO_MAGICLINKS = 0x02
 _SYS_OPENAT2 = 437
 _AT_FDCWD = -100
@@ -262,10 +264,15 @@ class Host:
         finally:
             os.close(fd)
 
-    def visible_path(self, path: object, cwd: str) -> str:
+    def visible_path(self, path: object, cwd: str, *, follow: bool = False) -> str:
         """A path as the web's previous versions know it (PR #94 review B3):
         its folder resolved and checked, its own name not hidden; the file
-        itself need not exist (a deleted one's versions are read too)."""
+        itself need not exist (a deleted one's versions are read too).
+        ``follow`` (V3-P76 §8, the path a write lands on): a final link is
+        followed as ``target`` follows it, and folders a write would make
+        may be missing."""
+        if follow:
+            return self._landing(path, cwd)
         absolute = self.absolute(path, cwd)
         self._precheck(absolute)
         folder, name = posixpath.split(absolute)
@@ -282,6 +289,43 @@ class Host:
         if self.rules.is_hidden(real, masks):
             raise api.RunnerError(api.NOT_FOUND)
         return real
+
+    def _landing(self, path: object, cwd: str) -> str:
+        absolute = self.absolute(path, cwd)
+        self._precheck(absolute)
+        masks = self.rules.masks()
+        for _ in range(MAX_LINK_HOPS):
+            folder, name = posixpath.split(absolute)
+            if name in ("", ".", ".."):
+                raise api.RunnerError(api.IS_DIRECTORY)
+            existing, missing = folder, []
+            while not os.path.lexists(existing):
+                missing.append(posixpath.basename(existing))
+                existing = posixpath.dirname(existing)
+            if self.rules.is_hidden(existing, masks):
+                raise api.RunnerError(api.NOT_FOUND)
+            fd = _open(existing, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                real_folder = posixpath.join(self._judge(fd, masks), *reversed(missing))
+                link = None
+                if not missing:
+                    try:
+                        if stat.S_ISLNK(os.stat(name, dir_fd=fd, follow_symlinks=False).st_mode):
+                            link = os.readlink(name, dir_fd=fd)
+                    except FileNotFoundError:
+                        pass
+                    except OSError as error:
+                        raise _error(error) from None
+            finally:
+                os.close(fd)
+            if link is not None:
+                absolute = posixpath.normpath(posixpath.join(real_folder, link))
+                continue
+            real = posixpath.join(real_folder, name)
+            if self.rules.is_hidden(real, masks):
+                raise api.RunnerError(api.NOT_FOUND)
+            return real
+        raise api.RunnerError(api.LINKS)
 
     def stat_path(self, path: object, cwd: str) -> dict[str, object]:
         """What ``open`` checks, without handing anything over (V3-P75 §5.3):
@@ -646,6 +690,136 @@ class Host:
             raise
         finally:
             os.close(held)
+
+    # --- an agent's writes, kept for review (V3-P76 §4.1) -----------------------------------
+
+    def kept_write(self, parent_fd: int, name: str, data: bytes,
+                   expected: Sequence[int] | None) -> tuple[dict[str, object], int | None]:
+        """Create or replace ``name`` with ``data``, keeping a copy of what it
+        held (an fd, none over MAX_SNAPSHOT_BYTES). ``expected``: it must be
+        that file (edit_file's read). A replaced file must not change between
+        its copy and the rename; a new name is taken only if still free
+        (RENAME_NOREPLACE, or O_EXCL where the file system has no such
+        rename). Errors only before the name changes (``_installed``)."""
+        try:
+            held: int | None = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
+                                       dir_fd=parent_fd)
+        except FileNotFoundError:
+            held = None
+        except OSError as error:
+            raise _error(error) from None
+        copy: int | None = None
+        try:
+            if held is None:
+                if expected is not None:
+                    raise api.RunnerError(api.CHANGED)
+                return self._kept_create(parent_fd, name, data), None
+            info = os.fstat(held)
+            if stat.S_ISDIR(info.st_mode):
+                raise api.RunnerError(api.IS_DIRECTORY)
+            if not stat.S_ISREG(info.st_mode):
+                raise api.RunnerError(api.NOT_REGULAR)
+            prior = self.identity(info)
+            if expected is not None and prior != list(expected):
+                raise api.RunnerError(api.CHANGED)
+            copy = self._copy_of(held, info.st_size)
+            temp = self._write_temp(parent_fd, data, stat.S_IMODE(info.st_mode))
+            try:
+                self._unchanged(parent_fd, name, held, prior)
+                os.replace(temp, name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+            except BaseException as error:
+                _discard(parent_fd, temp)
+                if isinstance(error, OSError):
+                    raise _error(error) from None
+                raise
+            return self._installed(parent_fd, name, created=False, prior=prior), copy
+        except BaseException:
+            if copy is not None:
+                os.close(copy)
+            raise
+        finally:
+            if held is not None:
+                os.close(held)
+
+    def _kept_create(self, parent_fd: int, name: str, data: bytes) -> dict[str, object]:
+        temp = self._write_temp(parent_fd, data, 0o644)
+        if _libc.renameat2(parent_fd, os.fsencode(temp), parent_fd, os.fsencode(name), _RENAME_NOREPLACE) == 0:
+            return self._installed(parent_fd, name, created=True, prior=[])
+        err = ctypes.get_errno()
+        _discard(parent_fd, temp)
+        if err == errno.EEXIST:
+            raise api.RunnerError(api.CHANGED)
+        if err not in _NO_RENAMEAT2:
+            raise _error(OSError(err, os.strerror(err)))
+        # No RENAME_NOREPLACE here (some FUSE file systems): the name is taken with O_EXCL, never over a file, and
+        # written in place. From the moment it is taken nothing raises: a write that fails leaves a file whose
+        # content may be partial, and says so (it cannot be anyone else's: this call made it).
+        try:
+            fd = os.open(name, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW | os.O_CLOEXEC, 0o644,
+                         dir_fd=parent_fd)
+        except FileExistsError:
+            raise api.RunnerError(api.CHANGED) from None
+        except OSError as error:
+            raise _error(error) from None
+        partial = False
+        try:
+            view = memoryview(data)
+            while view:
+                view = view[os.write(fd, view):]
+            os.fsync(fd)
+        except OSError:
+            partial = True
+        finally:
+            try:
+                os.close(fd)
+            except OSError:
+                partial = True
+        return self._installed(parent_fd, name, created=True, prior=[], partial=partial)
+
+    def _installed(self, parent_fd: int, name: str, *, created: bool, prior: list[int],
+                   partial: bool = False) -> dict[str, object]:
+        """What a kept write answers once the name has changed: never an error."""
+        try:
+            after: list[int] | None = self.identity(os.stat(name, dir_fd=parent_fd, follow_symlinks=False))
+        except OSError:
+            after = None
+        return {"created": created, "prior_identity": prior, "after_identity": None if partial else after,
+                "complete": after is not None and not partial, "partial": partial}
+
+    def kept_delete(self, parent_fd: int, name: str) -> tuple[dict[str, object], int | None]:
+        """Delete one file, keeping a copy of what it held (as ``kept_write``).
+        A link (or other non-file) goes without a copy."""
+        try:
+            info = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        except OSError as error:
+            raise _error(error) from None
+        if stat.S_ISDIR(info.st_mode):
+            raise api.RunnerError(api.IS_DIRECTORY)
+        prior = self.identity(info)
+        if not stat.S_ISREG(info.st_mode):
+            self.delete(parent_fd, name)
+            return {"prior_identity": prior, "after_identity": [], "complete": True, "partial": False}, None
+        copy = self.delete_checked(parent_fd, name, prior)
+        return {"prior_identity": prior, "after_identity": [], "complete": True, "partial": False}, copy
+
+    def install(self, parent_fd: int, name: str, data: bytes | int) -> list[int] | None:
+        """``data`` given the name ``name`` in one step, only while it is free
+        (V3-P76 §4.1): CHANGED if taken, UNSUPPORTED where the file system has
+        no RENAME_NOREPLACE; nothing is written then. Its identity (None:
+        placed, but not seen after)."""
+        temp = self._write_temp(parent_fd, data, 0o644)
+        if _libc.renameat2(parent_fd, os.fsencode(temp), parent_fd, os.fsencode(name), _RENAME_NOREPLACE) != 0:
+            err = ctypes.get_errno()
+            _discard(parent_fd, temp)
+            if err == errno.EEXIST:
+                raise api.RunnerError(api.CHANGED)
+            if err in _NO_RENAMEAT2:
+                raise api.RunnerError(api.UNSUPPORTED)
+            raise _error(OSError(err, os.strerror(err)))
+        try:
+            return self.identity(os.stat(name, dir_fd=parent_fd, follow_symlinks=False))
+        except OSError:
+            return None
 
     def create_file(self, parent_fd: int, name: str) -> list[int]:
         """§7.7 (review C2): a new, empty file, or EXISTS if the name is taken

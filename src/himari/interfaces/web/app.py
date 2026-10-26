@@ -86,6 +86,7 @@ from himari.bootstrap.application import (
     FolderConversations,
     ReferenceRequest,
 )
+from himari.bootstrap.changes import ChangeConflict, ChangeDiff, ChangesView
 from himari.bootstrap.explorer import ExplorerRefused, Listing, ShownFile
 from himari.bootstrap.operator import OPERATOR, derive_cli_bearer, verify_operator_token
 from himari.common import (
@@ -289,6 +290,27 @@ class NewPathBody(_Body):
 class DeleteFileBody(_Body):
     path: str = Field(min_length=1, max_length=4096)
     expected: IdentityIn
+
+
+class FileStateIn(_Body):
+    """A file as the owner saw it (V3-P76 §6): there, with this identity, or not there."""
+
+    exists: bool
+    identity: IdentityIn | None = None
+
+
+class AcceptChangesBody(_Body):
+    """Accept the agent's changes of ``paths``, or ``all`` of them (the hidden ones too)."""
+
+    paths: list[Annotated[str, Field(min_length=1, max_length=4096)]] = Field(default_factory=list, max_length=1000)
+    all: bool = False
+
+
+class RevertChangeBody(_Body):
+    """Revert one file; ``seen``: after a conflict, the state shown, to revert anyway if it is still so."""
+
+    path: str = Field(min_length=1, max_length=4096)
+    seen: FileStateIn | None = None
 
 
 class FolderConversationBody(_Body):
@@ -653,12 +675,31 @@ def shown_file_view(shown: ShownFile) -> dict[str, Any]:
             "kind": shown.kind, "text": shown.text, "truncated": shown.truncated, "editable": shown.editable}
 
 
+def changes_view(changes: ChangesView, running: bool) -> dict[str, Any]:
+    """V3-P76 §5: the agent's changes not yet reviewed; the hidden ones counted only (§10)."""
+    return {"items": [{"path": c.path, "name": posixpath.basename(c.path), "kind": c.kind, "state": c.state,
+                       "interleaved": c.interleaved, "count": c.count, "revertible": c.revertible,
+                       "changed_at": _time(c.changed_at)} for c in changes.items],
+            "hidden": changes.hidden, "commands_ran": _time(changes.commands_ran), "running": running}
+
+
+def file_state_out(identity: tuple[int, ...] | None) -> dict[str, Any]:
+    return {"exists": bool(identity), "identity": identity_out(identity) if identity else None}
+
+
+def change_diff_view(diff: ChangeDiff) -> dict[str, Any]:
+    return {"path": diff.path, "name": posixpath.basename(diff.path), "kind": diff.kind, "changed": diff.changed,
+            "interleaved": diff.interleaved, "before": {"state": diff.before.state, "text": diff.before.text},
+            "now": {**file_state_out(diff.now.identity), "text": diff.now.text}}
+
+
 # How a refused explorer request answers (V3-P75 §5): the runner's category → HTTP status. too_large is
 # 422, not 413: the body limit middleware turns every 413 into "request_too_large".
 EXPLORER_STATUS = {"not_found": 404, "access": 403, "outside_workspaces": 403, "too_large": 422,
                    "changed": 409, "exists": 409, "versions_unavailable": 507, "reference_stale": 409,
                    "unavailable": 503, "setup_failed": 503, "timed_out": 504, "invalid": 400, "is_directory": 400,
-                   "not_directory": 400, "not_regular": 415, "links": 400, "other": 500}
+                   "not_directory": 400, "not_regular": 415, "links": 400, "other": 500,
+                   "unsupported": 422, "busy": 409, "not_revertible": 409, "outdated": 409}
 
 
 def attached_view(folder: AttachedFolder) -> dict[str, Any]:
@@ -882,6 +923,12 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
     async def explorer_refused(request: Request, error: ExplorerRefused) -> JSONResponse:
         return JSONResponse({"error": {"code": error.category, "message": str(error)}},
                             status_code=EXPLORER_STATUS.get(error.category, 400))
+
+    @app.exception_handler(ChangeConflict)
+    async def change_conflict(request: Request, error: ChangeConflict) -> JSONResponse:
+        """V3-P76 §6: not reverted; ``now`` is what the file is, to revert anyway with as ``seen``."""
+        return JSONResponse({"error": {"code": "changed", "message": str(error), "now": file_state_out(error.now),
+                                       "interleaved": error.interleaved}}, status_code=409)
 
     @app.exception_handler(UnknownToolSource)
     async def unknown_source(request: Request, error: UnknownToolSource) -> JSONResponse:
@@ -1107,6 +1154,13 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
     async def read_version(version_id: str, request: Request, path: str,
                            who: PrincipalId = Depends(principal)) -> dict[str, Any]:
         return {"text": await himari(request).explorer(who).previous_text(path, version_id)}
+
+    @app.post("/api/machine/versions/{version_id}/restore", status_code=201)
+    async def restore_version(version_id: str, body: NewPathBody, request: Request,
+                              who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+        """A deleted file put back in one step (V3-P76 §4.1): 409 changed if the name is taken, 422 unsupported
+        where the file system cannot."""
+        return {"path": await himari(request).explorer(who).restore(body.path, version_id)}
 
     @app.get("/api/machine/stat")
     async def stat_path(request: Request, path: str, who: PrincipalId = Depends(principal)) -> dict[str, Any]:
@@ -1417,6 +1471,49 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
         text = await himari(request).expand_prompt(scope_of(conversation_id, who), body.source, body.name,
                                                    body.arguments)
         return {"text": text}
+
+    # -- the review of the agent's file changes (V3-P76 §5, §6) ------------------------------
+
+    @app.get("/api/conversations/{conversation_id}/changes")
+    async def file_changes(conversation_id: str, request: Request,
+                           who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+        application, scope = himari(request), scope_of(conversation_id, who)
+        changes = await application.file_changes(scope)
+        return changes_view(changes, application.runner.status(scope).running)
+
+    @app.get("/api/conversations/{conversation_id}/changes/diff")
+    async def file_change_diff(conversation_id: str, path: str, request: Request,
+                               who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+        return change_diff_view(await himari(request).file_change_diff(scope_of(conversation_id, who), path))
+
+    @app.post("/api/conversations/{conversation_id}/changes/accept")
+    async def accept_file_changes(conversation_id: str, body: AcceptChangesBody, request: Request,
+                                  who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+        if body.all == bool(body.paths):
+            raise ApiError(400, "invalid_argument", "Give the paths to accept, or all.")
+        await himari(request).accept_file_changes(scope_of(conversation_id, who), None if body.all else body.paths)
+        return {"accepted": True}
+
+    @app.post("/api/conversations/{conversation_id}/changes/revert")
+    async def revert_file_change(conversation_id: str, body: RevertChangeBody, request: Request,
+                                 who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+        seen = None
+        if body.seen is not None:
+            if body.seen.exists != (body.seen.identity is not None):
+                raise ApiError(400, "invalid_argument", "A file seen is there with its identity, or not there.")
+            seen = tuple(int(v) for v in body.seen.identity) if body.seen.identity is not None else ()
+        await himari(request).revert_file_change(scope_of(conversation_id, who), body.path, seen)
+        return {"reverted": True}
+
+    @app.post("/api/conversations/{conversation_id}/changes/revert-all")
+    async def revert_all_file_changes(conversation_id: str, request: Request,
+                                      who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+        """Each shown file in turn; the ones left (changed since, refused, or
+        not revertible) and why, and how many hidden ones were left."""
+        done = await himari(request).revert_all_file_changes(scope_of(conversation_id, who))
+        return {"left": [{"path": path, "code": why.category if isinstance(why, ExplorerRefused) else "changed",
+                          "message": str(why)} for path, why in done.left],
+                "hidden": done.hidden}
 
     @app.post("/api/conversations/{conversation_id}/messages", status_code=202)
     async def send_message(conversation_id: str, body: MessageBody, request: Request,

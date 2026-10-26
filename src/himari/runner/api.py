@@ -32,7 +32,8 @@ import struct
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-PROTOCOL_VERSION = 1
+PROTOCOL_VERSION = 2  # 2: write and delete with ``keep``, write ``mode: "install"``, visible ``follow`` (V3-P76)
+KEEP_PROTOCOL = 2  # a runner older than this ignores ``keep`` and ``install`` (it would write plainly)
 MAX_FRAME_BYTES = 4 * 1024 * 1024
 MAX_FDS = 4
 _HEADER = struct.Struct(">I")
@@ -42,7 +43,8 @@ HELLO = "hello"
 CONVERSATION_FOLDER = "conversation_folder"
 LIST = "list"  # a page of a folder, sorted, after a cursor (V3-P75 §5.1)
 STAT = "stat"  # what open checks, nothing handed over (V3-P75 §5.3)
-VISIBLE = "visible"  # a path whose folder resolves and which is not hidden; it need not exist (V3-P75 §7.4)
+VISIBLE = "visible"  # a path whose folder resolves and which is not hidden; it need not exist (V3-P75 §7.4);
+# with ``follow: true``, where a write lands (a final link followed, missing folders allowed: V3-P76 §8)
 OPEN = "open"
 WRITE = "write"
 DELETE = "delete"
@@ -61,6 +63,12 @@ WRITES = frozenset({WRITE, DELETE, RUN, COPY_IN, FREE_PATH, COMMIT_COPY, DISCARD
                     GIT_PUSH, CREATE_FILE, MKDIR})
 # ``write`` with ``mode: "replace"`` (V3-P75 §7.4): ``expected`` required; the answer carries a copy of the
 # replaced file as an fd (none over 1 MiB). ``delete`` with ``expected``: the same for the deleted file.
+# ``write`` and ``delete`` with ``keep: true`` (V3-P76 §4.1, an agent's write): the same copy, never over a file
+# that changed meanwhile, and a new file never over one made meanwhile; the answer says ``prior_identity`` (``[]``:
+# there was none), ``after_identity`` (``[]``: deleted; null: unknown), ``complete`` and ``partial`` (a new file
+# whose writing did not finish). Errors come only before the file was changed: after it, the answer is a success
+# with ``complete: false``. ``write`` with ``mode: "install"``: the content (an fd) given a name that is free,
+# in one step, or nothing (CHANGED: taken; UNSUPPORTED: the file system cannot).
 
 # Error categories: each message is safe to show the model.
 NOT_FOUND = "not_found"  # also every hidden path: whether it exists is not told
@@ -77,6 +85,7 @@ LINKS = "links"
 UNAVAILABLE = "unavailable"  # the sandbox is not enforced
 TIMED_OUT = "timed_out"  # a read did not answer in time (a slow mount, V3-P75 §5.1)
 SETUP_FAILED = "setup_failed"  # the sandbox could not be built; nothing ran
+UNSUPPORTED = "unsupported"  # the file system cannot do this in one step; nothing was done (V3-P76 §4.1)
 OTHER = "other"
 
 MESSAGES = {
@@ -95,6 +104,7 @@ MESSAGES = {
     UNAVAILABLE: "the machine sandbox is not enforced on this server; nothing was done",
     TIMED_OUT: "this did not answer in time (a slow or unresponsive mount?); try again or use a folder inside it",
     SETUP_FAILED: "the sandbox could not be set up; nothing was run",
+    UNSUPPORTED: "this file system cannot put a file in place in one step; nothing was done",
     OTHER: "file operation failed",
 }
 
