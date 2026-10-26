@@ -29,6 +29,9 @@
 const KIND_ICON = { directory: "#side-folder", file: "#side-note" };
 const EDIT_MAX_BYTES = 1024 * 1024; // the server's limit for the editor (§7.7, Q3)
 const POLL_MS = 5000; // how often an open file is checked on disk (§5.3)
+const KEEP_MS = 1000; // unsaved text kept in this browser once typing settles (V3-P78 §4.1)
+const KEPT_MAX = 20; // V3-P78 Q3: files with unsaved text kept, for at most 30 days
+const KEPT_AGE_MS = 30 * 24 * 3600 * 1000;
 const PDF_MAX_BYTES = 64 * 1024 * 1024; // the PDF view's limit (V3-P77 §3.3, Q2), as pdfpane.js's
 const INK_TOOL_KEY = "himari.pdf.tool"; // the ink tool picked last, in this browser (V3-P77 §4.2)
 const SIGNED_NOTICE = "This PDF is signed. Notes are added after the signature; some apps show that as a change.";
@@ -73,6 +76,22 @@ function revertedAll({ left, hidden }) {
 
 function defaultConfirm(title, lines) { // the browser's own: no action label
   return Promise.resolve(window.confirm([title, ...lines].join("\n\n")));
+}
+
+function clock(ms) {
+  return new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
+/* ``text`` saved by the browser as a file called ``name`` (V3-P78 §4.2): nothing goes to the server. */
+function downloadText(text, name) {
+  if (typeof document === "undefined" || typeof URL === "undefined" || !URL.createObjectURL) return;
+  const link = document.createElement("a");
+  link.href = URL.createObjectURL(new Blob([text], { type: "application/octet-stream" }));
+  link.download = name;
+  document.body.append(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(link.href), 60000);
 }
 
 function sameIdentity(a, b) {
@@ -205,10 +224,14 @@ export class FilesPane {
    * call of the conversation ``of`` it names (seen: told every list read); none: not offered here. */
   /* loadPdf(): the PDF view's module (pdfpane.js); readFile(path, limit): a file's {bytes, identity}, as a
    * download, refused past ``limit``; appendPdf(path, increment, identity): ink saved (V3-P77 §5.3). */
+  /* keep: the browser's store of unsaved text (local_store.js: get, put, remove, prune; V3-P78 §4.1), none:
+   * nothing kept; writer: this pane in this tab, on what it keeps; openElsewhere(path): the file is open with
+   * unsaved text in this tab's other pane (its kept text is not offered here). */
   constructor({ api, el, onOpenFolder = null, onOpenFile = null, actions = [], folderActions = null,
                 folderRowActions = null, loadEditor = () => import("/assets/codemirror/codemirror.js"),
                 loadPdf = () => import("/assets/pdfpane.js"), readFile = readDownload, appendPdf = postAppend,
-                confirm = defaultConfirm, working = () => false, onAsk = null, changes = null }) {
+                confirm = defaultConfirm, working = () => false, onAsk = null, changes = null, keep = null,
+                writer = "", openElsewhere = () => false }) {
     this.api = api;
     this.el = el;
     this.loadEditor = loadEditor;
@@ -219,6 +242,9 @@ export class FilesPane {
     this.working = working;
     this.onAsk = onAsk;
     this.changes = changes;
+    this.keep = keep;
+    this.writer = writer;
+    this.openElsewhere = openElsewhere;
     this.changed = new Set(); // the paths HIMARI changed, as the last list said: a dot on their rows
     this.page = null; // "changes", or {path} of one change's diff, while one of them is shown
     this.pageOf = null; // the conversation that page is of
@@ -265,8 +291,11 @@ export class FilesPane {
       return this.confirm(`Discard your ink on ${this.pdf.name}?`,
                           ["It is not saved. The PDF on the server stays as it was."], "Discard");
     }
-    return this.confirm(`Discard your changes to ${this.doc.name}?`,
-                        ["They are not saved. The file on the server stays as it was."], "Discard");
+    const doc = this.doc;
+    const discard = await this.confirm(`Discard your changes to ${doc.name}?`,
+                                       ["They are not saved. The file on the server stays as it was."], "Discard");
+    if (discard) this.dropKept(doc); // the user's own answer: what this pane kept goes too (V3-P78 §4.1, C4)
+    return discard;
   }
 
   closeDoc() {
@@ -284,8 +313,134 @@ export class FilesPane {
     this.pageLabel = null;
     if (this.doc === null) return;
     clearTimeout(this.doc.pollTimer);
+    clearTimeout(this.doc.keepTimer);
     if (this.doc.editor) this.doc.editor.destroy();
     this.doc = null;
+  }
+
+  /* The session ended (V3-P78 §6): unsaved text is kept in the browser now, and the editor closes without
+   * asking; reopening the file offers it back (§4.1). Ink waits for V3-P77 2c: a PDF with unsaved ink stays
+   * open where nothing asks about it on the way back (``keepInk``), else it goes. */
+  closeForSignIn({ keepText = true, keepInk = false } = {}) {
+    const doc = this.doc;
+    if (doc !== null && doc.dirty && keepText) this.keepNow(doc);
+    if (this.pdf !== null && keepInk && this.pdf.view.ink.dirty) return;
+    const open = this.doc !== null || this.pdf !== null;
+    this.closeDoc();
+    if (open) this.body.replaceChildren();
+  }
+
+  /* ------------------------------------------------- unsaved text kept in the browser (V3-P78 §4.1) */
+
+  /* The editor's text changed: kept once typing settles while it differs from the saved text; this pane's
+   * record goes once it is the saved text again (N8). */
+  keepLater(doc) {
+    if (this.keep === null || doc.offer) return; // while Restore is offered, the only copy stays (C2)
+    clearTimeout(doc.keepTimer);
+    doc.keepTimer = setTimeout(() => {
+      if (this.doc !== doc) return;
+      if (doc.dirty) this.keepNow(doc);
+      else this.dropKept(doc);
+    }, KEEP_MS);
+  }
+
+  keepNow(doc = this.doc) {
+    if (this.keep === null || doc === null || doc.offer || !doc.dirty) return;
+    clearTimeout(doc.keepTimer);
+    this.keep.put("unsaved", doc.path, { kind: "text", path: doc.path, base: doc.identity, text: doc.editor.text(),
+                                         lineBreak: doc.lineBreak, at: Date.now(), writer: this.writer });
+    this.keep.prune("unsaved", KEPT_MAX, KEPT_AGE_MS);
+  }
+
+  /* What this pane kept for ``doc``'s file goes (saved, the server's version loaded, discarded). */
+  dropKept(doc) {
+    if (this.keep === null || doc === null) return;
+    clearTimeout(doc.keepTimer);
+    this.keep.remove("unsaved", doc.path, this.writer);
+  }
+
+  /* Text kept for ``path`` and not open unsaved in the other pane here, or null. */
+  async keptFor(path) {
+    if (this.keep === null || this.openElsewhere(path)) return null;
+    const kept = await this.keep.get("unsaved", path);
+    if (!kept || kept.kind !== "text" || typeof kept.text !== "string" || typeof kept.at !== "number"
+        || Date.now() - kept.at > KEPT_AGE_MS) return null;
+    return kept;
+  }
+
+  /* §4.1: "Unsaved changes … were kept" — Restore or Discard; the editor is read-only until one is picked. */
+  offerKept(doc, kept) {
+    doc.offer = kept;
+    doc.editor.setReadOnly(true);
+    const bar = doc.bar;
+    bar.replaceChildren(this.el("p", null, `Unsaved changes from ${clock(kept.at)} were kept in this browser.`));
+    bar.append(this.button("Restore", () => this.restoreKept(doc)),
+               this.button("Discard", () => this.discardKept(doc)));
+    bar.hidden = false;
+    this.paintState();
+  }
+
+  restoreKept(doc) {
+    const kept = doc.offer;
+    if (this.doc !== doc || !kept) return;
+    doc.offer = null;
+    doc.editor.setReadOnly(false);
+    this.hideBar();
+    doc.lineBreak = kept.lineBreak || doc.lineBreak;
+    const changed = Array.isArray(kept.base) && !sameIdentity(kept.base, doc.identity);
+    if (changed) doc.identity = kept.base; // a save meets the conflict bar: never over the newer version
+    doc.editor.setText(kept.text);
+    this.setDirty(doc.editor.text() !== doc.saved);
+    this.keepNow(doc); // this pane's from now on
+    if (changed) this.showChanged(false);
+  }
+
+  discardKept(doc) {
+    if (this.doc !== doc || !doc.offer) return;
+    doc.offer = null;
+    doc.editor.setReadOnly(false);
+    this.hideBar();
+    this.keep.remove("unsaved", doc.path); // the user's answer, whoever kept it
+    this.paintState();
+  }
+
+  /* §4.1: a file whose kept text cannot go back in the editor (gone, or no longer text it edits): the text
+   * can be saved as the file again (gone) or downloaded, or discarded. */
+  async offerKeptAside(path, ticket, gone) {
+    const kept = await this.keptFor(path);
+    if (kept === null || ticket !== this.ticket) return;
+    const name = path.slice(path.lastIndexOf("/") + 1);
+    const box = this.el("div", "files-bar");
+    box.append(this.el("p", null, gone
+      ? `This file is no longer on the server. Unsaved changes from ${clock(kept.at)} were kept in this browser.`
+      : `Unsaved text from ${clock(kept.at)} can't be put back here: this file is no longer text the editor opens.`));
+    const content = fileText(kept.text, kept.lineBreak || "\n");
+    if (gone) {
+      const again = this.button("Save it here again", async () => {
+        again.disabled = true; // one request (PR #106 review N2)
+        try {
+          await this.api("POST", "/api/machine/file/install", { path, content });
+          await this.keep.remove("unsaved", path);
+          if (ticket === this.ticket) await this.openFile(path);
+        } catch (error) {
+          if (ticket !== this.ticket) return;
+          if (error.code === "changed") { // a file of that name now: opened, with the kept text offered on it
+            await this.openFile(path);
+            return;
+          }
+          const lasting = ["not_found", "not_directory", "unsupported"].includes(error.code);
+          if (lasting) again.remove();
+          else again.disabled = false;
+          box.append(this.el("p", "files-note is-error", error.code === "unsupported"
+            ? "This folder can't take a new file safely from here; download your text."
+            : lasting ? "The folder is gone too; download your text." : error.message));
+        }
+      });
+      box.append(again);
+    }
+    box.append(this.button("Download my text", () => downloadText(content, name)),
+               this.button("Discard", () => { this.keep.remove("unsaved", path); box.remove(); }));
+    this.body.prepend(box);
   }
 
   /* Another conversation is shown (PR #99 review C2): no answer still on its way is applied, and a page of the
@@ -470,9 +625,12 @@ export class FilesPane {
       if (shown.kind === "text" && shown.editable) await this.edit(shown, ticket);
       else if (shown.kind === "pdf" && shown.size <= PDF_MAX_BYTES) await this.showPdf(shown, ticket);
       else this.body.replaceChildren(this.view(shown));
+      if (!(shown.kind === "text" && shown.editable)) this.offerKeptAside(shown.path, ticket, false);
       if (this.onOpenFile) this.onOpenFile(shown);
     } catch (error) {
-      if (ticket === this.ticket) this.failed(path, error);
+      if (ticket !== this.ticket) return;
+      this.failed(path, error);
+      if (error.code === "not_found") this.offerKeptAside(path, ticket, true);
     }
   }
 
@@ -906,6 +1064,7 @@ export class FilesPane {
       this.body.replaceChildren(box);
       return;
     }
+    const kept = await this.keptFor(shown.path); // read before the editor: nothing typed meets the offer (C2)
     if (ticket !== this.ticket) return;
     const bar = this.el("div", "files-bar");
     bar.hidden = true;
@@ -916,7 +1075,7 @@ export class FilesPane {
     // ``saved``: the saved text as the editor has it; ``lineBreak``: the file's, written back by a save.
     const doc = { path: shown.path, name, identity: shown.identity, saved: editorText(shown.text),
                   lineBreak: lineBreakOf(shown.text), editor: null, dirty: false, saving: false, pollTimer: null, bar,
-                  module, revision: 0 };
+                  module, revision: 0, keepTimer: null, offer: null };
     this.doc = doc;
     doc.editor = module.createEditor(area, {
       text: shown.text, name,
@@ -924,11 +1083,13 @@ export class FilesPane {
         if (this.doc !== doc) return;
         doc.revision += 1;
         this.setDirty(doc.editor.text() !== doc.saved);
+        this.keepLater(doc);
       },
       onSave: () => { if (this.doc === doc) this.save(); },
       onAsk: this.onAsk ? () => (this.doc === doc ? this.ask() : null) : null,
     });
     this.paintState();
+    if (kept !== null) this.offerKept(doc, kept);
     this.schedulePoll(doc);
   }
 
@@ -998,7 +1159,7 @@ export class FilesPane {
 
   async save({ over = null } = {}) {
     const doc = this.doc;
-    if (doc === null || doc.saving) return;
+    if (doc === null || doc.saving || doc.offer) return; // while Restore is offered, nothing replaces it (B1)
     const text = doc.editor.text();
     const content = fileText(text, doc.lineBreak);
     if (new TextEncoder().encode(content).length > EDIT_MAX_BYTES) {
@@ -1015,13 +1176,89 @@ export class FilesPane {
       doc.saved = text;
       doc.saving = false;
       doc.dirty = doc.editor.text() !== text; // typed on while it was saving
+      if (doc.dirty) this.keepNow(doc);
+      else this.dropKept(doc);
       this.hideBar();
       this.paintState(answer.previous_kept ? null : "Saved, but its previous version could not be kept");
     } catch (error) {
       if (this.doc !== doc) return;
       doc.saving = false;
-      if (error.code === "changed") this.showChanged(true);
+      if (error.code === "changed") await this.changedOrGone(doc, true);
       else this.paintState(error.message || "Not saved");
+    }
+  }
+
+  /* V3-P78 §4.2: a save refused as changed — or the file is gone, which the runner also answers as changed. */
+  async changedOrGone(doc, refused) {
+    try {
+      await this.api("GET", `/api/machine/stat?${query(doc.path)}`);
+    } catch (error) {
+      if (this.doc === doc && error.code === "not_found" && doc.dirty) {
+        this.showGone();
+        return;
+      }
+    }
+    if (this.doc === doc) this.showChanged(refused);
+  }
+
+  /* A ``not_found`` from a read of the open file: the gone bar while there is unsaved text (§4.2, C5, N7). */
+  goneOr(doc, error) {
+    if (this.doc !== doc) return;
+    if (error.code === "not_found" && doc.dirty) this.showGone();
+    else if (error.code === "not_found") this.paintState("This file is no longer on the server");
+    else this.paintState(error.message);
+  }
+
+  /* §4.2: the file is gone (deleted or moved) and the text is still here: make it again, or download it. */
+  showGone(note = null) {
+    const doc = this.doc;
+    if (doc === null) return;
+    const bar = doc.bar;
+    bar.replaceChildren(this.el("p", null, note || "This file is no longer on the server (deleted or moved). Your "
+                                + "text is still here. Saving it here again makes it as a new file."));
+    if (note === null) bar.append(this.button("Save it here again", () => this.recreate()));
+    bar.append(this.button("Download my text", () => downloadText(fileText(doc.editor.text(), doc.lineBreak), doc.name)));
+    bar.hidden = false;
+    this.paintState();
+  }
+
+  async recreate() {
+    const doc = this.doc;
+    if (doc === null || doc.saving) return;
+    const text = doc.editor.text();
+    const content = fileText(text, doc.lineBreak);
+    if (new TextEncoder().encode(content).length > EDIT_MAX_BYTES) {
+      this.paintState("Too large to save from here (at most 1 MiB)");
+      return;
+    }
+    doc.saving = true;
+    this.paintState();
+    try {
+      const made = await this.api("POST", "/api/machine/file/install", { path: doc.path, content });
+      if (this.doc !== doc) return;
+      doc.saving = false;
+      if (made.identity === null) { // placed, but not seen after: open it as it is now
+        this.dropKept(doc);
+        doc.dirty = false;
+        await this.openFile(doc.path);
+        return;
+      }
+      doc.identity = made.identity;
+      doc.saved = text;
+      doc.dirty = doc.editor.text() !== text;
+      if (doc.dirty) this.keepNow(doc);
+      else this.dropKept(doc);
+      this.hideBar();
+      this.paintState("Saved as a new file");
+    } catch (error) {
+      if (this.doc !== doc) return;
+      doc.saving = false;
+      if (error.code === "changed") this.showChanged(true); // a file of that name was made meanwhile
+      else if (error.code === "not_found" || error.code === "not_directory") {
+        this.showGone("The folder is gone too; download your text.");
+      } else if (error.code === "unsupported") {
+        this.showGone("This folder can't take a new file safely from here; download your text.");
+      } else this.paintState(error.message || "Not saved");
     }
   }
 
@@ -1058,7 +1295,7 @@ export class FilesPane {
    * it was typed in since, the text stays and the user is told instead (PR #95 review B1). */
   async loadDisk({ since = null } = {}) {
     const doc = this.doc;
-    if (doc === null) return;
+    if (doc === null || doc.offer) return;
     try {
       const shown = await this.disk();
       if (this.doc !== doc) return;
@@ -1075,10 +1312,11 @@ export class FilesPane {
       doc.identity = shown.identity;
       doc.editor.setText(shown.text);
       doc.dirty = doc.editor.text() !== doc.saved;
+      if (!doc.dirty) this.dropKept(doc);
       this.hideBar();
       this.paintState();
     } catch (error) {
-      if (this.doc === doc) this.paintState(error.message);
+      this.goneOr(doc, error);
     }
   }
 
@@ -1090,7 +1328,7 @@ export class FilesPane {
       if (this.doc !== doc) return;
       await this.save({ over: now.identity }); // the server's version is kept as a previous version
     } catch (error) {
-      if (this.doc === doc) this.paintState(error.message);
+      this.goneOr(doc, error);
     }
   }
 
@@ -1103,7 +1341,7 @@ export class FilesPane {
       this.diffDialog(`${doc.name}: the server's version (left) and yours (right)`,
                       shown.kind === "text" ? shown.text : "", doc.editor.text());
     } catch (error) {
-      if (this.doc === doc) this.paintState(error.message);
+      this.goneOr(doc, error);
     }
   }
 
@@ -1132,7 +1370,7 @@ export class FilesPane {
   /* Previous versions (§7.4): compare one with the editor's text, or put it in the editor to save. */
   async showVersions() {
     const doc = this.doc;
-    if (doc === null) return;
+    if (doc === null || doc.offer) return; // Restore or Discard first (re-review N1)
     let items;
     try {
       items = (await this.api("GET", `/api/machine/versions?${query(doc.path)}`)).items;
@@ -1196,7 +1434,7 @@ export class FilesPane {
 
   /* Back into the editor, unsaved: Save keeps it (and keeps what it replaces). */
   restore(text) {
-    if (this.doc === null) return;
+    if (this.doc === null || this.doc.offer) return;
     this.doc.editor.setText(text);
     this.setDirty(editorText(text) !== this.doc.saved);
     this.paintState("Put in the editor — Save to keep it");
@@ -1222,11 +1460,14 @@ export class FilesPane {
       : ["Its content is kept as a previous version on the server for 30 days."];
     if (doc && doc.dirty) lines.push("Your unsaved changes are dropped too.");
     if (this.pdf && this.pdf.view.ink.dirty) lines.push("Your unsaved ink is dropped too.");
+    const offered = doc !== null && doc.offer !== null; // as asked: a Restore meanwhile is not dropped (N-b)
     if (!(await this.confirm(`Delete ${name}?`, lines, "Delete"))) return;
     if (big && !(await this.confirm(`Delete ${name} for good?`, ["It cannot be put back."], "Delete for good"))) return;
     const ticket = this.ticket; // anything opened meanwhile stays (PR #95 re-review C1)
     try {
       const gone = await this.api("POST", "/api/machine/file/delete", { path, expected: now.identity });
+      // Its unsaved text was dropped with it (told above); text only offered stays, offered again there (re-review C1).
+      if (doc && !offered) this.dropKept(doc);
       if (this.doc === doc) this.closeDoc();
       if (this.ticket === ticket) await this.openFolder(path.slice(0, path.lastIndexOf("/")) || "/");
       if (!big && !gone.previous_kept) { // told it would be kept: say it was not, where it stays in sight (review B2)
@@ -1254,7 +1495,7 @@ export class FilesPane {
   }
 
   async checkDisk(doc = this.doc) {
-    if (doc === null) return;
+    if (doc === null || doc.offer) return; // after Restore or Discard (B1)
     const since = doc.revision;
     try {
       const now = await this.api("GET", `/api/machine/stat?${query(doc.path)}`);
@@ -1265,7 +1506,7 @@ export class FilesPane {
       if (doc.dirty || doc.revision !== since) this.showChanged(false);
       else await this.loadDisk({ since });
     } catch (error) {
-      if (this.doc === doc && error.code === "not_found") this.paintState("This file is no longer on the server");
+      if (error.code === "not_found") this.goneOr(doc, error);
     }
   }
 
