@@ -1315,7 +1315,8 @@ for (const [why, routes, setup, told] of [
   const told = [];
   const asks = [];
   const files = new FilesPane({ api: async () => HOME, el, onAsk: (reference) => asks.push(reference) });
-  files.showPdfNote = (text) => told.push(text);
+  files.paintInk = (text) => told.push(text); // the ink's state slot, never the bar (review N1)
+  files.showPdfNote = () => { throw new Error("the bar is left as it is"); };
   files.pdf = { path: "/home/u/p.pdf", name: "p.pdf", identity: [2, 2, 2, 2], saving: false,
                 view: { ink: { dirty: false } } };
   files.askWhole({ path: "/home/u/p.pdf", identity: [1, 1, 1, 1], kind: "pdf" });
@@ -1323,7 +1324,11 @@ for (const [why, routes, setup, told] of [
   files.pdf.view.ink.dirty = true;
   files.askWhole({ path: "/home/u/p.pdf", identity: [1, 1, 1, 1], kind: "pdf" });
   assert.equal(asks.length, 1);
-  assert.deepEqual(told, ["Save your ink first: HIMARI reads the saved file"]);
+  files.pdf.view.ink.dirty = false;
+  files.pdf.saving = true;
+  files.askWhole({ path: "/home/u/p.pdf", identity: [1, 1, 1, 1], kind: "pdf" });
+  assert.equal(asks.length, 1);
+  assert.deepEqual(told, ["Save your ink first: HIMARI reads the saved file", "Saving… — ask again once it is saved"]);
   files.pdf = null;
 }
 

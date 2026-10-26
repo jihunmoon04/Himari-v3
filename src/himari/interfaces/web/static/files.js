@@ -124,11 +124,19 @@ function keepingPlace(editor, change) {
     return;
   }
   const { anchor, head } = view.state.selection.main;
+  // CodeMirror's own snapshot (the line at the top and its offset) where it has one: pixels measured on the old
+  // heights may land elsewhere once the text changed (review N2).
+  const snapshot = typeof view.scrollSnapshot === "function" ? view.scrollSnapshot() : null;
   const scroll = view.scrollDOM ? view.scrollDOM.scrollTop : 0;
   change();
   const length = view.state.doc.length;
-  view.dispatch({ selection: { anchor: Math.min(anchor, length), head: Math.min(head, length) } });
-  if (view.scrollDOM) view.scrollDOM.scrollTop = scroll;
+  const selection = { anchor: Math.min(anchor, length), head: Math.min(head, length) };
+  if (snapshot) {
+    view.dispatch({ selection, effects: snapshot });
+  } else {
+    view.dispatch({ selection });
+    if (view.scrollDOM) view.scrollDOM.scrollTop = scroll;
+  }
 }
 
 function sameIdentity(a, b) {
@@ -1175,8 +1183,14 @@ export class FilesPane {
   askWhole(shown) {
     // A PDF: as it is now — its ink saved since it was opened gave it a new identity; unsaved ink is not read.
     if (this.pdf !== null && this.pdf.path === shown.path) {
-      if (this.pdf.saving || this.pdf.view.ink.dirty) {
-        this.showPdfNote("Save your ink first: HIMARI reads the saved file");
+      // Told in the ink's own state slot: the bar above may hold a choice (the PDF changed on the server) that
+      // stays, and nothing above the pages moves them (review N1).
+      if (this.pdf.saving) {
+        this.paintInk("Saving… — ask again once it is saved");
+        return;
+      }
+      if (this.pdf.view.ink.dirty) {
+        this.paintInk("Save your ink first: HIMARI reads the saved file");
         return;
       }
       this.onAsk({ path: shown.path, name: this.pdf.name, identity: this.pdf.identity, whole: true });
