@@ -402,7 +402,7 @@ def test_append_and_truncate_in_place(kit: RunnerKit, tmp_path: Path) -> None:
     """V3-P82 §3.6: a PDF's save written at its end through the protocol (its bytes as an fd), and cut back to
     one of its saves; the open tells the file's filesystem; a failure's identity reaches the caller."""
     pdf = kit.home / "projects/a/notes.pdf"
-    pdf.write_bytes(b"%PDF-1.7\n%%EOF\n")
+    pdf.write_bytes(b"%PDF-1.7\nstartxref\n9\n%%EOF\n")
     info = pdf.stat()
     base: dict[str, object] = {"path": str(pdf), "cwd": "/", "write_roots": [str(pdf.parent)],
                                "expected": [info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns]}
@@ -421,20 +421,37 @@ def test_append_and_truncate_in_place(kit: RunnerKit, tmp_path: Path) -> None:
     finally:
         os.close(r)
     after = pdf.stat()
-    assert pdf.read_bytes() == b"%PDF-1.7\n%%EOF\nmore\n%%EOF\n" and after.st_ino == info.st_ino
+    assert pdf.read_bytes() == b"%PDF-1.7\nstartxref\n9\n%%EOF\nmore\n%%EOF\n" and after.st_ino == info.st_ino
     assert result["identity"] == [after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns]
     with pytest.raises(api.RunnerError) as refused:
         call(kit, api.TRUNCATE, {**base, "expected": result["identity"]})  # to is required
     assert refused.value.category == api.INVALID
-    cut, _ = call(kit, api.TRUNCATE, {**base, "expected": result["identity"], "to": len(b"%PDF-1.7\n%%EOF\n")})
-    assert pdf.read_bytes() == b"%PDF-1.7\n%%EOF\n" and cut["identity"][2] == len(b"%PDF-1.7\n%%EOF\n")
+    saved = b"%PDF-1.7\nstartxref\n9\n%%EOF\n"
+    cut, _ = call(kit, api.TRUNCATE, {**base, "expected": result["identity"], "to": len(saved)})
+    assert pdf.read_bytes() == saved and cut["identity"][2] == len(saved)
     with pytest.raises(api.RunnerError) as refused:  # outside the call's roots: as any write
         call(kit, api.TRUNCATE, {**base, "write_roots": [str(kit.home / "HIMARI")], "expected": cut["identity"],
                                  "to": 9})
     assert refused.value.category in (api.OUTSIDE_WORKSPACES, api.ACCESS)
 
 
-def test_a_failure_carries_its_identity_through_the_frame() -> None:
+def test_a_failure_carries_its_identity_through_the_frame(kit: RunnerKit, tmp_path: Path) -> None:
+    """Review C3: a failed append, through the runner and its client, tells the file as it is after it."""
     sent = api.failed(api.OTHER, "disk full", [1, 2, 3, 4], True)
     assert sent["error"]["identity"] == [1, 2, 3, 4] and sent["error"]["partial"] is True
     assert "identity" not in api.failed(api.CHANGED)["error"]
+    pdf = kit.home / "projects/a/notes.pdf"
+    pdf.write_bytes(b"%PDF-1.7\n%%EOF\n")
+    info = pdf.stat()
+    expected = [info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns]
+    content = tmp_path / "increment"
+    content.write_bytes(b"more\n%%EOF\n")
+    w = os.open(content, os.O_WRONLY)  # the bytes cannot be read: the write fails before any of it is written
+    try:
+        with pytest.raises(api.RunnerError) as failed:
+            call(kit, api.APPEND, {"path": str(pdf), "cwd": "/", "write_roots": [str(pdf.parent)],
+                                   "expected": expected}, (w,))
+    finally:
+        os.close(w)
+    assert failed.value.identity == expected and failed.value.partial is False
+    assert pdf.read_bytes() == b"%PDF-1.7\n%%EOF\n"

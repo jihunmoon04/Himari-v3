@@ -143,11 +143,9 @@ class Explorer:
         even if the caller gave up (a slow mount, a cancelled request)."""
         return await self._reading(fd, lambda: _pread(fd, size), READ_SECONDS)
 
-    async def _reading(self, fd: int, read: Callable[[], T], seconds: float,
-                       discard: Callable[[T], None] | None = None) -> T:
-        """``read`` (of ``fd``, which this takes over) on the explorer's threads, as ``_read``. What it makes
-        (a temporary file) is ``read``'s own until it is handed over: given up on, it is ``discard``ed when it
-        ends, never used (PR #103 review P1)."""
+    async def _reading(self, fd: int, read: Callable[[], T], seconds: float) -> T:
+        """``read`` (of ``fd``, which this takes over) on the explorer's threads, as ``_read``: given up on (a
+        slow mount, a cancelled request), it still ends on its own and closes ``fd`` then, never before."""
         if self._reads >= MAX_READS:
             os.close(fd)
             raise ExplorerRefused(runner.TIMED_OUT, "Earlier slow reads are still under way (an unresponsive "
@@ -161,30 +159,18 @@ class Explorer:
                 os.close(fd)
 
         work = asyncio.get_running_loop().run_in_executor(self._pool, reading)
-        given_up = False
-
-        def drop(future: asyncio.Future[T]) -> None:
-            if discard is not None and not future.cancelled() and future.exception() is None:
-                discard(future.result())
 
         def ended(future: asyncio.Future[T]) -> None:
             self._reads -= 1
             if not future.cancelled():
                 future.exception()  # retrieved: a given-up read's failure is not reported
-            if given_up:
-                drop(future)
 
         work.add_done_callback(ended)
         try:
             async with asyncio.timeout(seconds):
                 return await asyncio.shield(work)
-        except BaseException as error:  # timed out, or the request cancelled: what it makes is not taken
-            given_up = True
-            if work.done():
-                drop(work)
-            if isinstance(error, TimeoutError):
-                raise ExplorerRefused(runner.TIMED_OUT, runner.MESSAGES[runner.TIMED_OUT]) from None
-            raise
+        except TimeoutError:
+            raise ExplorerRefused(runner.TIMED_OUT, runner.MESSAGES[runner.TIMED_OUT]) from None
 
     @staticmethod
     def _path(path: object) -> str:
@@ -218,18 +204,19 @@ class Explorer:
         result, fds = await self._call(runner.OPEN, {"path": self._path(path), "cwd": "/"})
         fd, real, size = fds[0], str(result["path"]), int(result["size"])
         identity = tuple(int(v) for v in result["identity"])
+        cloud = result.get("filesystem") in CLOUD_FILESYSTEMS
         head = await self._read(fd, min(size, EDIT_MAX_BYTES) + 1)
         modified = identity[3] // 1_000_000_000 if len(identity) == 4 else None
         if sniff_image(head[:IMAGE_HEAD_BYTES]) is not None:
-            return ShownFile(real, size, identity, modified, "image")
+            return ShownFile(real, size, identity, modified, "image", cloud_synced=cloud)
         if head.startswith(PDF_HEADER):  # before text: a PDF may be all ASCII
-            return ShownFile(real, size, identity, modified, "pdf",
-                             cloud_synced=result.get("filesystem") in CLOUD_FILESYSTEMS)
+            return ShownFile(real, size, identity, modified, "pdf", cloud_synced=cloud)
         whole = size <= EDIT_MAX_BYTES and len(head) == size
         text = _text(head if whole else head[:PREVIEW_BYTES], whole)
         if text is None:
-            return ShownFile(real, size, identity, modified, "binary")
-        return ShownFile(real, size, identity, modified, "text", text, truncated=not whole, editable=whole)
+            return ShownFile(real, size, identity, modified, "binary", cloud_synced=cloud)
+        return ShownFile(real, size, identity, modified, "text", text, truncated=not whole, editable=whole,
+                         cloud_synced=cloud)
 
     # --- the editor's writes (§7) ---------------------------------------------------------
 
@@ -399,11 +386,14 @@ class Explorer:
             body.flush()
             body.seek(0)
             try:
-                target, written, _ = await self._write(runner.APPEND, real, {"expected": [int(v) for v in expected]},
-                                                       [body.fileno()])
+                target, written, received = await self._write(runner.APPEND, real,
+                                                              {"expected": [int(v) for v in expected]},
+                                                              [body.fileno()])
             except ExplorerRefused as refused:
                 await self._older_runner(refused, "nothing was saved", in_place=True)
                 raise
+        for fd in received:  # none is sent back; closed should one ever be
+            os.close(fd)
         return Saved(str(written.get("path", target)), tuple(int(v) for v in written["identity"]), True)
 
     async def truncate_pdf(self, path: object, expected: Sequence[int], to: int) -> Saved:
@@ -415,11 +405,13 @@ class Explorer:
             raise ExplorerRefused("invalid", "A PDF is cut back only to one of its saves.")
         real = await self._pdf_as_read(path, expected, "nothing was cut")
         try:
-            target, written, _ = await self._write(runner.TRUNCATE, real, {"expected": [int(v) for v in expected],
-                                                                          "to": to})
+            target, written, received = await self._write(runner.TRUNCATE, real,
+                                                          {"expected": [int(v) for v in expected], "to": to})
         except ExplorerRefused as refused:
             await self._older_runner(refused, "nothing was cut", in_place=True)
             raise
+        for fd in received:
+            os.close(fd)
         return Saved(str(written.get("path", target)), tuple(int(v) for v in written["identity"]), True)
 
     async def _pdf_as_read(self, path: object, expected: Sequence[int], nothing: str) -> str:
@@ -678,7 +670,8 @@ _STARTXREF = re.compile(rb"startxref\s+(\d+)\s*%%EOF[\r\n]*$")
 def increment_ok(size: int, increment: bytes) -> bool:
     """§5.3 step 4, a light check (the browser makes the same one, ``checkIncrement`` in pdfdoc.js): the update
     ends with ``startxref``, an offset inside it, and ``%%EOF`` (line breaks after it allowed). Its structure is
-    not checked: the browser is the owner's, and a broken result goes back to its previous version."""
+    not checked: the browser is the owner's, and a broken result is cut back to the save before it (the bytes
+    before it are never changed, V3-P82 §3.6)."""
     found = _STARTXREF.search(increment[-1024:])
     return found is not None and size < int(found.group(1)) < size + len(increment)
 

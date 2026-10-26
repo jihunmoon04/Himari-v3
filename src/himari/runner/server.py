@@ -264,10 +264,15 @@ class Runner:
             return {"path": await self._read(lambda: host.visible_path(args.get("path"), _text(args, "cwd"),
                                                                        follow=args.get("follow") is True))}, []
         if op == api.OPEN:
-            fd, real, info = await self._read(lambda: host.open_read(args.get("path"), _text(args, "cwd")),
-                                              abandoned=lambda opened: os.close(opened[0]))
-            # Its filesystem as the mount table names it: a PDF on a cloud mount is saved less often (V3-P82 §3.2).
-            filesystem = mount_type(real)
+            def opened() -> tuple[int, str, os.stat_result, str | None]:
+                fd, real, info = host.open_read(args.get("path"), _text(args, "cwd"))
+                try:  # its filesystem as the mount table names it: a PDF on a cloud mount is saved less often
+                    return fd, real, info, mount_type(real)  # (V3-P82 §3.2)
+                except BaseException:
+                    os.close(fd)
+                    raise
+
+            fd, real, info, filesystem = await self._read(opened, abandoned=lambda done: os.close(done[0]))
             return {"path": real, "size": info.st_size, "identity": host.identity(info), "filesystem": filesystem}, [fd]
         if op == api.HOLDS:
             size, digest = args.get("size"), args.get("sha256")

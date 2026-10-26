@@ -705,7 +705,9 @@ def test_append_refuses_what_it_must_not_write_into(host: Host, home: Path, tmp_
         assert category(lambda: host.append(fd, "link.pdf", data, identity(target))) in (api.LINKS, api.NOT_REGULAR)
         if os.geteuid() != 0:
             target.chmod(0o444)  # read-only: a rename needed the folder's permission, a write in place the file's
-            assert category(lambda: host.append(fd, name, data, identity(target))) == api.ACCESS
+            with pytest.raises(api.RunnerError) as read_only:
+                host.append(fd, name, data, identity(target))
+            assert read_only.value.category == api.ACCESS and "read-only" in str(read_only.value)
             target.chmod(0o644)
         big = [*identity(target)[:2], api.MAX_COPY_BYTES, identity(target)[3]]
         assert category(lambda: host.append(fd, name, data, big)) == api.TOO_LARGE
@@ -779,19 +781,122 @@ def test_append_never_reports_another_file_as_written(host: Host, home: Path, tm
 
 
 def test_truncate_only_back_to_one_of_its_saves(host: Host, home: Path) -> None:
+    """Review C4: only a save cut short at the end is taken off — right after a startxref and its %%EOF, within
+    the last 8 MiB (and 1 KiB), never to an earlier %%EOF further back (a linearized PDF's first one)."""
     target = home / "projects/a/notes.pdf"
-    saved = b"%PDF-1.7\nbody\n%%EOF\r\nmore\n%%EOF\n"
+    first = b"%PDF-1.7\nbody\nstartxref\n9\n%%EOF\r\n"
+    saved = first + b"more\nstartxref\n20\n%%EOF\n"
     target.write_bytes(saved + b"half a save, cut short")
     fd, name = parent(host, home, "projects/a/notes.pdf")
     try:
-        for wrong in (5, len(saved) - 3, len(saved) + 3, 0, len(saved) + 100):
-            assert category(lambda: host.truncate(fd, name, identity(target), wrong)) == api.INVALID
+        size = target.stat().st_size
+        for wrong in (5, len(saved) - 3, len(saved) + 3, 0, size, size + 100):
+            assert category(lambda: host.truncate(fd, name, identity(target), wrong)) == api.INVALID, wrong
         assert category(lambda: host.truncate(fd, name, [0, 0, 0, 0], len(saved))) == api.CHANGED
         after = host.truncate(fd, name, identity(target), len(saved))
         assert target.read_bytes() == saved and after == identity(target)
-        first = len(b"%PDF-1.7\nbody\n%%EOF\r\n")  # after the line break, and before it
-        host.truncate(fd, name, identity(target), first)
-        host.truncate(fd, name, identity(target), first - 2)
-        assert target.read_bytes() == b"%PDF-1.7\nbody\n%%EOF"
+        host.truncate(fd, name, identity(target), len(first))  # after the line break, and before it
+        host.truncate(fd, name, identity(target), len(first) - 2)
+        assert target.read_bytes() == first[:-2]
+        target.write_bytes(b"%PDF-1.7\n%%EOF\nno startxref before it")  # a %%EOF alone is not a save's end
+        assert category(lambda: host.truncate(fd, name, identity(target), len(b"%PDF-1.7\n%%EOF\n"))) == api.INVALID
+        far = b"%PDF-1.7\nstartxref\n1\n%%EOF\n"
+        target.write_bytes(far + b"x" * (api.MAX_APPEND_BYTES + 2048) + b"startxref\n2\n%%EOF\ncut")
+        assert category(lambda: host.truncate(fd, name, identity(target), len(far))) == api.INVALID  # too far back
     finally:
         os.close(fd)
+
+
+def test_two_appends_from_the_same_base_never_both_succeed(host: Host, home: Path, tmp_path: Path,
+                                                           monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review C1: one write in place at a time — the second, from the same identity, waits and is CHANGED."""
+    import threading
+
+    target = home / "projects/a/notes.pdf"
+    target.write_bytes(b"%PDF-1.7\n%%EOF\n")
+    base = identity(target)
+    mine, theirs = bytes_fd(tmp_path, b"AAAA\n%%EOF\n"), os.open(target, os.O_RDONLY)
+    other = tmp_path / "other.bin"
+    other.write_bytes(b"BBBBBBBB\n%%EOF\n")
+    second = os.open(other, os.O_RDONLY)
+    real_pwrite = os.pwrite
+    outcome: dict[str, object] = {}
+    fd, name = parent(host, home, "projects/a/notes.pdf")
+
+    def run_second() -> None:
+        try:
+            outcome["second"] = host.append(fd, name, second, base)
+        except api.RunnerError as error:
+            outcome["second"] = error.category
+
+    def first_write(out: int, view: object, offset: int) -> int:
+        if "thread" not in outcome:
+            thread = threading.Thread(target=run_second)
+            outcome["thread"] = thread
+            thread.start()
+            thread.join(0.3)
+            assert thread.is_alive()  # waiting on the first, not writing over it
+        return real_pwrite(out, view, offset)  # type: ignore[call-overload]
+
+    try:
+        monkeypatch.setattr(hostfs.os, "pwrite", first_write)
+        host.append(fd, name, mine, base)
+        thread = outcome["thread"]
+        assert isinstance(thread, threading.Thread)
+        thread.join(5)
+        assert outcome["second"] == api.CHANGED
+        assert target.read_bytes() == b"%PDF-1.7\n%%EOF\nAAAA\n%%EOF\n"
+    finally:
+        os.close(fd)
+        for each in (mine, theirs, second):
+            os.close(each)
+
+
+def test_an_append_written_over_by_another_is_changed_not_saved(host: Host, home: Path, tmp_path: Path,
+                                                               monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review C1: something outside the runner (rclone pulling a remote change) wrote meanwhile: CHANGED, told
+    with the file as it is and partial — never a success whose next save would build on a wrong end."""
+    target = home / "projects/a/notes.pdf"
+    target.write_bytes(b"%PDF-1.7\n%%EOF\n")
+    data = bytes_fd(tmp_path, b"mine")
+    real_pwrite = os.pwrite
+
+    def then_another(out: int, view: object, offset: int) -> int:
+        count = real_pwrite(out, view, offset)  # type: ignore[call-overload]
+        with open(target, "ab") as other:
+            other.write(b"THEIRS")
+        return count
+
+    fd, name = parent(host, home, "projects/a/notes.pdf")
+    try:
+        monkeypatch.setattr(hostfs.os, "pwrite", then_another)
+        with pytest.raises(api.RunnerError) as changed:
+            host.append(fd, name, data, identity(target))
+        assert changed.value.category == api.CHANGED and changed.value.partial
+        assert changed.value.identity == identity(target)
+    finally:
+        os.close(fd)
+        os.close(data)
+
+
+def test_a_mount_that_cannot_write_in_place_is_told(host: Host, home: Path, tmp_path: Path,
+                                                    monkeypatch: pytest.MonkeyPatch) -> None:
+    target = home / "projects/a/notes.pdf"
+    target.write_bytes(b"%PDF-1.7\n%%EOF\n")
+    data = bytes_fd(tmp_path, b"x")
+    real_open = os.open
+
+    def no_write_cache(path: object, flags: int, *args: object, **kw: object) -> int:
+        if flags & os.O_WRONLY:
+            raise OSError(errno.EPERM, "operation not permitted")
+        return real_open(path, flags, *args, **kw)  # type: ignore[arg-type]
+
+    fd, name = parent(host, home, "projects/a/notes.pdf")
+    try:
+        monkeypatch.setattr(hostfs.os, "open", no_write_cache)
+        with pytest.raises(api.RunnerError) as refused:
+            host.append(fd, name, data, identity(target))
+        assert refused.value.category == api.UNSUPPORTED and "vfs-cache-mode" in str(refused.value)
+    finally:
+        os.close(fd)
+        os.close(data)

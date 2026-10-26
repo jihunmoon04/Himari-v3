@@ -30,6 +30,7 @@ import secrets
 import shutil
 import stat
 import tempfile
+import threading
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -703,19 +704,21 @@ class Host:
     def _in_place(self, parent_fd: int, name: str, expected: Sequence[int], flags: int) -> tuple[int, os.stat_result]:
         """The file open to write in place (a link is not followed; a FIFO is not waited on), if it is a regular
         file with one name whose identity is ``expected``. One name only: the rename the other writes do leaves
-        a hard link's other names as they were, a write in place would not (review C2)."""
+        a hard link's other names as they were, a write in place would not (review C2). Called under
+        ``_IN_PLACE``."""
         try:
             fd = os.open(name, flags | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_NOCTTY | os.O_CLOEXEC, dir_fd=parent_fd)
         except FileNotFoundError:
             raise api.RunnerError(api.CHANGED) from None
         except OSError as error:
-            raise _error(error) from None
+            raise _in_place_error(error) from None
         try:
             info = os.fstat(fd)
             if not stat.S_ISREG(info.st_mode):
                 raise api.RunnerError(api.NOT_REGULAR)
             if info.st_nlink != 1:
-                raise api.RunnerError(api.LINKS, "this file has other names (hard links): it is not written in place")
+                raise api.RunnerError(api.LINKS, "this PDF has other names (hard links): it is not written on in "
+                                                 "place")
             if self.identity(info) != list(expected):
                 raise api.RunnerError(api.CHANGED)
             os.set_blocking(fd, True)
@@ -726,56 +729,64 @@ class Host:
 
     def _named(self, parent_fd: int, name: str, written: os.stat_result) -> list[int]:
         """The identity the name shows now, as OPEN and STAT will (on a FUSE mount the mtime may settle only at
-        close): CHANGED if another file took the name meanwhile, the bytes then gone to one no name holds."""
+        close): CHANGED if another file took the name meanwhile (the bytes then gone to one no name holds), or
+        if it is not the size it was left at (written to by something else)."""
         try:
             now = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
         except OSError:
             raise api.RunnerError(api.CHANGED) from None
-        if (now.st_dev, now.st_ino) != (written.st_dev, written.st_ino):
+        if (now.st_dev, now.st_ino, now.st_size) != (written.st_dev, written.st_ino, written.st_size):
             raise api.RunnerError(api.CHANGED)
         return self.identity(now)
 
     def append(self, parent_fd: int, name: str, data: int, expected: Sequence[int]) -> list[int]:
         """Write the open file ``data`` (at most MAX_APPEND_BYTES) at the end of the file whose identity is
         ``expected`` — at its expected size, never through O_APPEND, which would ignore the position — and
-        sync it; its identity after. A failed write is cut back to the expected size, but only while the file
-        is that size plus what was written (nothing else wrote meanwhile); the error tells the identity then,
-        and whether bytes of it were left (``partial``)."""
+        sync it; its identity after. One at a time in this runner, from the identity check to the sync (review
+        C1: two saves from the same base would both succeed). Ended at any other size than ours (something
+        else wrote meanwhile): CHANGED, with its identity and ``partial``. A failed write is cut back to the
+        expected size, but only while the file is that size plus what was written; the error tells the
+        identity then, and whether bytes of it were left (``partial``)."""
         source = os.fstat(data)
         if not stat.S_ISREG(source.st_mode):
             raise api.RunnerError(api.INVALID, "the bytes come as a regular file")
         length, size = source.st_size, int(expected[2])
         if length > api.MAX_APPEND_BYTES or size + length > api.MAX_COPY_BYTES:
             raise api.RunnerError(api.TOO_LARGE)
-        fd, info = self._in_place(parent_fd, name, expected, os.O_WRONLY)
-        written = 0
-        try:
+        with _IN_PLACE:
+            fd, _ = self._in_place(parent_fd, name, expected, os.O_WRONLY)
+            written = 0
             try:
-                while written < length:
-                    chunk = os.pread(data, min(1 << 20, length - written), written)
-                    if not chunk:
-                        raise OSError(errno.EIO, "the bytes to write ended early")
-                    view = memoryview(chunk)
-                    while view:
-                        count = os.pwrite(fd, view, size + written)
-                        written += count
-                        view = view[count:]
-                os.fsync(fd)
-            except OSError as error:
-                raise self._cut_back(fd, info, size, written, error) from None
-            mine = os.fstat(fd)
-        finally:
-            os.close(fd)
-        return self._named(parent_fd, name, mine)
+                try:
+                    while written < length:
+                        chunk = os.pread(data, min(1 << 20, length - written), written)
+                        if not chunk:
+                            raise OSError(errno.EIO, "the bytes to write ended early")
+                        view = memoryview(chunk)
+                        while view:
+                            count = os.pwrite(fd, view, size + written)
+                            if count <= 0:
+                                raise OSError(errno.EIO, "nothing was written")
+                            written += count
+                            view = view[count:]
+                    os.fsync(fd)
+                except OSError as error:
+                    raise self._cut_back(fd, size, written, error) from None
+                mine = os.fstat(fd)
+                if mine.st_size != size + length:
+                    raise api.RunnerError(api.CHANGED, identity=self.identity(mine), partial=True)
+            finally:
+                os.close(fd)
+            return self._named(parent_fd, name, mine)
 
-    def _cut_back(self, fd: int, info: os.stat_result, size: int, written: int, error: OSError) -> api.RunnerError:
-        """``append``'s failure: the bytes written cut off again if the file is still only ours (V3-P82 §3.6);
-        the error to raise, with the file's identity now and whether bytes were left."""
+    def _cut_back(self, fd: int, size: int, written: int, error: OSError) -> api.RunnerError:
+        """``append``'s failure: the bytes written cut off again if the file is the size they left it at (only
+        ours past the expected size; V3-P82 §3.6); the error to raise, with the file's identity now and whether
+        bytes were left."""
         partial = written > 0
         identity: list[int] | None = None
         try:
-            now = os.fstat(fd)
-            if (now.st_dev, now.st_ino) == (info.st_dev, info.st_ino) and now.st_size == size + written:
+            if os.fstat(fd).st_size == size + written:
                 if written:
                     os.ftruncate(fd, size)
                     os.fsync(fd)
@@ -783,28 +794,31 @@ class Host:
             identity = self.identity(os.fstat(fd))
         except OSError:
             pass
-        failure = _error(error)
+        failure = _in_place_error(error)
         return api.RunnerError(failure.category, str(failure), identity=identity, partial=partial)
 
     def truncate(self, parent_fd: int, name: str, expected: Sequence[int], to: int) -> list[int]:
-        """The file whose identity is ``expected`` cut back to ``to``, which must follow one of its ``%%EOF``
-        (and at most one line break): only back to one of its saves (V3-P82 §3.6). Its identity after."""
-        fd, info = self._in_place(parent_fd, name, expected, os.O_RDWR)
-        try:
-            if not 0 < to < info.st_size:
-                raise api.RunnerError(api.INVALID, "to is inside the file")
-            before = os.pread(fd, min(to, 7), to - min(to, 7))
-            if not any(before.endswith(b"%%EOF" + eol) for eol in (b"", b"\n", b"\r", b"\r\n")):
-                raise api.RunnerError(api.INVALID, "a file is cut back only to just after one of its %%EOF")
+        """The file whose identity is ``expected`` cut back to ``to``: only a save cut short at its end taken off
+        (V3-P82 §3.6) — ``to`` within the last MAX_APPEND_BYTES (and 1 KiB) and right after a ``startxref``
+        and its ``%%EOF`` (and at most one line break), never further back (review C4). Its identity after."""
+        with _IN_PLACE:
+            fd, info = self._in_place(parent_fd, name, expected, os.O_RDWR)
             try:
-                os.ftruncate(fd, to)
-                os.fsync(fd)
-                mine = os.fstat(fd)
-            except OSError as error:
-                raise _error(error) from None
-        finally:
-            os.close(fd)
-        return self._named(parent_fd, name, mine)
+                if not max(0, info.st_size - api.MAX_APPEND_BYTES - 1024) < to < info.st_size:
+                    raise api.RunnerError(api.INVALID, "only a save cut short at the end of a PDF is cut off")
+                want = min(to, 64)
+                before = os.pread(fd, want, to - want)
+                if len(before) != want or not _SAVE_END.search(before):
+                    raise api.RunnerError(api.INVALID, "a PDF is cut back only to just after one of its saves")
+                try:
+                    os.ftruncate(fd, to)
+                    os.fsync(fd)
+                    mine = os.fstat(fd)
+                except OSError as error:
+                    raise _in_place_error(error) from None
+            finally:
+                os.close(fd)
+            return self._named(parent_fd, name, mine)
 
     # --- an agent's writes, kept for review (V3-P76 §4.1) -----------------------------------
 
@@ -1085,6 +1099,21 @@ class Host:
             return digest.hexdigest() == sha256
         finally:
             os.close(fd)
+
+
+_IN_PLACE = threading.Lock()  # one write in place at a time in this runner (V3-P82 §3.6, review C1)
+_SAVE_END = re.compile(rb"startxref\s+\d+\s*%%EOF(?:\r\n|\r|\n)?$")  # the end of one of a PDF's saves
+
+
+def _in_place_error(error: OSError) -> api.RunnerError:
+    """A write in place refused (V3-P82 §3.6), told as such: a read-only file (a rename needed only its
+    folder's permission), or a mount that cannot write into a file (rclone without its write cache)."""
+    if error.errno == errno.EACCES:
+        return api.RunnerError(api.ACCESS, "this PDF is read-only on the server: it cannot be written on")
+    if error.errno in (errno.EPERM, errno.ENOTSUP, errno.EOPNOTSUPP):
+        return api.RunnerError(api.UNSUPPORTED, "this folder's mount cannot write into a file in place (rclone: "
+                                                "--vfs-cache-mode writes or full)")
+    return _error(error)
 
 
 def _discard(parent_fd: int, temp: str) -> None:

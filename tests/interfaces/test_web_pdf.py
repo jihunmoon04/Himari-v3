@@ -137,6 +137,26 @@ def test_a_save_cut_short_is_taken_off_its_end(server: Server, kit: RunnerKit) -
     assert target.read_bytes() == original and done.json()["identity"] == identity(server, path)
 
 
+def test_a_file_on_a_cloud_mount_is_told(server: Server, kit: RunnerKit, monkeypatch: pytest.MonkeyPatch) -> None:
+    """§3.2 (Q5): the open's filesystem tells a cloud mount, for every kind of file."""
+    from himari.runner import api as runner
+
+    _, path = place(kit, FIXTURE.read_bytes())
+    (kit.home / "projects/a/note.txt").write_text("hi\n")
+    machine = explorer_of(server)._machine
+    real_call = machine.call
+
+    async def on_rclone(op: str, args: dict[str, Any], fds: Any = ()) -> Any:
+        result, received = await real_call(op, args, fds)
+        if op == runner.OPEN:
+            result = {**result, "filesystem": "fuse.rclone"}
+        return result, received
+
+    monkeypatch.setattr(machine, "call", on_rclone)
+    for shown in (path, str(kit.home / "projects/a/note.txt")):
+        assert server.client.get("/api/machine/file", params={"path": shown}).json()["cloud_synced"] is True
+
+
 def test_a_file_with_other_names_or_read_only_is_not_written(server: Server, kit: RunnerKit) -> None:
     original = FIXTURE.read_bytes()
     target, path = place(kit, original)

@@ -456,3 +456,27 @@
     - 옛 runner, 저장소 없이 저장, 큰 PDF의 지우기·되살리기·되돌리기, 그사이 오래된 runner로 바뀐 경우.
   - 결과: 전체 pytest 2,618개 통과, mypy와 모듈 경계 검사 통과, `files_smoke`·`pdf_smoke`·`ui_state_smoke` 통과.
 - **배포**: himari-runner를 다시 시작해야 한다(프로토콜 4). 다시 시작하기 전에는 PDF 저장이 "restart himari-runner"로 거부된다.
+  - **a만 따로 배포하지 않는다**(검수 N9). 웹이 실패 답의 `identity`·`partial`을 쓰는 것과 끝이 잘린 파일 고치기는 b에 있다. a만 있으면 되돌린 실패 뒤의 다시 저장이 충돌 막대로 가고, 남은 조각을 고치지 못한다.
+
+**PR #118 검수 반영**(READY_WITH_CORRECTIONS)
+- **C1 동시 저장**: 같은 판에서 두 저장이 함께 오면 둘 다 성공하고 끝이 섞였다.
+  - runner 안에서 제자리 쓰기를 하나씩 한다(`_IN_PLACE` 잠금, identity 확인부터 `fsync`까지).
+  - 쓴 뒤 크기가 "기대 크기 + 덧붙인 크기"가 아니면 `CHANGED`(`identity`, `partial`)다. runner 밖의 쓰기(rclone이 원격의 바뀜을 내려받음)도 이것으로 잡는다.
+  - 이름으로 다시 본 크기가 다르면 그것도 `CHANGED`다.
+- **C2 문구**
+  - 읽기 전용: "this PDF is read-only on the server: it cannot be written on".
+  - 쓰기 캐시가 없는 마운트(`EPERM`, `ENOTSUP`): `unsupported`와 "--vfs-cache-mode writes or full".
+  - 하드 링크 문구를 설계에 맞췄다.
+- **C3**: 실제 runner와 클라이언트를 거쳐 실패의 `identity`가 오는 시험을 더했다(읽을 수 없는 fd로 실패시킴).
+- **C4 자르기의 범위**: 끝에서 8 MiB + 1 KiB 안이고, 바로 앞이 `startxref <수> %%EOF`인 곳만 자른다. 선형화한 PDF의 앞쪽 `%%EOF`나 스트림 안의 `%%EOF`로는 자르지 않는다.
+- **N**
+  - `pwrite`가 0을 돌려주면 `EIO`로 처리한다.
+  - 되돌리기의 같은 inode 비교를 뺐다(늘 참).
+  - `OPEN`의 `mount_type`을 읽기 스레드로 옮겼다(fd 새는 길도 막음).
+  - `cloud_synced`를 모든 종류의 파일에 채운다.
+  - `increment_ok`의 설명을 고쳤다.
+  - 쓰이지 않던 `_reading`의 `discard`를 지웠다.
+  - 돌려받은 fd를 닫는다.
+  - 짧은 `pread`를 거부한다.
+  - 클라우드 표시 시험을 더했다.
+- 돌연변이 확인: 잠금, 쓴 뒤 크기 확인, 클라이언트의 `identity` 읽기를 하나씩 빼면 각 시험이 실패한다.
