@@ -3297,7 +3297,7 @@ details > summary {
 .sidebar-symbols { position: absolute; width: 0; height: 0; overflow: hidden; }
 .side-icon { display: block; width: 18px; height: 18px; flex: 0 0 18px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
 .sidebar { border-right-color: var(--border-subtle); }
-.sidebar-head { flex: 0 0 var(--chrome-height); height: var(--chrome-height); padding: 0 var(--chrome-gutter); gap: var(--space-2); border-bottom: 1px solid var(--border-subtle); }
+.sidebar-head { flex: 0 0 var(--chrome-height); height: var(--chrome-height); padding: 0 var(--chrome-gutter); gap: var(--space-2); border-bottom: 1px solid transparent; }
 .sidebar-head .brand-button { display: inline-flex; align-items: center; gap: 10px; padding: 0; font-size: 13px; font-weight: 600; letter-spacing: .05em; }
 .sidebar-brand-mark { display: grid; place-items: center; width: 32px; height: 32px; border-radius: 10px; background: var(--accent-soft); color: var(--accent); }
 .sidebar-brand-mark .side-icon { width: 22px; height: 22px; }
@@ -3654,7 +3654,7 @@ details > summary {
 .surface.files { padding: 0; display: flex; flex-direction: column; }
 .surface.files .files-pane { max-width: calc(var(--reading-max) + 160px); width: 100%; margin: 0 auto; }
 .files-pane { display: flex; flex-direction: column; min-height: 0; height: 100%; }
-.files-head { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); min-height: var(--chrome-height); padding: 9px var(--chrome-gutter) 10px; border-bottom: 1px solid var(--border-subtle); flex: 0 0 auto; }
+.files-head { display: flex; flex-wrap: nowrap; align-items: center; gap: var(--space-2); height: var(--chrome-height); min-height: var(--chrome-height); padding: 0 var(--chrome-gutter); border-bottom: 1px solid var(--border-subtle); flex: 0 0 auto; }
 .files-crumbs { display: flex; align-items: center; gap: 2px; min-width: 0; flex: 1 1 80px; overflow: hidden; font-size: 13px; }
 .files-crumb { min-width: 0; background: none; border: 0; padding: 4px 6px; border-radius: var(--tool-radius); color: var(--text-muted); font: inherit; min-height: var(--tool-size); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; }
 button.files-crumb:hover { background: var(--surface-hover); color: var(--text); }
@@ -3847,7 +3847,7 @@ button.files-crumb:hover { background: var(--surface-hover); color: var(--text);
 
 /* File navigation is always visible, even when a long breadcrumb is clipped. */
 .files-navigation { display: flex; flex: 0 0 auto; gap: 2px; }
-.files-nav-button { display: inline-flex; align-items: center; justify-content: center; gap: 4px; min-height: 44px; padding: 6px 8px; background: transparent; color: var(--text); border: 0; border-radius: var(--tool-radius); font: inherit; font-size: 13px; }
+.files-nav-button { display: inline-flex; align-items: center; justify-content: center; gap: 4px; min-height: var(--tool-size); padding: 6px 8px; background: transparent; color: var(--text); border: 0; border-radius: var(--tool-radius); font: inherit; font-size: 13px; }
 .files-nav-button:disabled { opacity: .35; }
 .files-nav-button:not(:disabled):hover { background: var(--surface-hover); }
 .files-crumbs { overflow-x: auto; overscroll-behavior-x: contain; scrollbar-width: thin; }
@@ -3865,7 +3865,8 @@ button.files-crumb:hover { background: var(--surface-hover); color: var(--text);
   .workspace-switch button[aria-pressed="true"] { background: var(--surface-selected); color: var(--text); font-weight: 600; }
   .layout.is-nav-open ~ .workspace-switch { visibility: hidden; }
   .file-panel .files-head { padding-top: calc(6px + env(safe-area-inset-top, 0px)); }
-  .files-head { gap: 4px; padding-left: max(8px, env(safe-area-inset-left, 0px)); padding-right: max(8px, env(safe-area-inset-right, 0px)); }
+  .files-head { height: auto; flex-wrap: wrap; gap: 4px; padding: 6px max(8px, env(safe-area-inset-right, 0px)) 6px max(8px, env(safe-area-inset-left, 0px)); }
+  .files-nav-button { min-height: 44px; }
   .files-head-end { max-width: 100%; flex-wrap: wrap; }
   .files-tools { min-width: 0; flex-wrap: wrap; }
   .files-open { min-height: 48px; }

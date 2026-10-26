@@ -31,7 +31,7 @@ def main() -> None:
             with sync_playwright() as p:
                 browser = p.chromium.launch()
                 for width in (390, 768, 1024, 1366):
-                    context = browser.new_context(viewport={"width": width, "height": 900}, has_touch=True)
+                    context = browser.new_context(viewport={"width": width, "height": 900}, has_touch=width < 1100)
                     page = context.new_page()
                     page.on("pageerror", lambda error: errors.append(str(error)))
 
@@ -79,6 +79,12 @@ def main() -> None:
                         page.locator("#chat-files-toggle").click()
                     panel = page.locator("#file-panel")
                     expect(panel.get_by_title("/home/demo/nested", exact=True)).to_be_visible()
+                    if width >= 1100:
+                        heights = [page.locator(selector).bounding_box()["height"] for selector in
+                                   (".sidebar-head", "#topbar", "#file-panel .files-head")]
+                        assert max(heights) - min(heights) < 1, heights
+                    assert page.locator(".sidebar-head").evaluate(
+                        "e => getComputedStyle(e).borderBottomColor === 'rgba(0, 0, 0, 0)'")
                     panel.get_by_title("/home/demo/nested", exact=True).click()
                     panel.get_by_title("/home/demo/nested/note.txt", exact=True).click()
                     expect(panel.locator(".cm-content")).to_contain_text("touch note")
