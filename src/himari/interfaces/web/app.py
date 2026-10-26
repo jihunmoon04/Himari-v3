@@ -699,7 +699,7 @@ EXPLORER_STATUS = {"not_found": 404, "access": 403, "outside_workspaces": 403, "
                    "changed": 409, "exists": 409, "versions_unavailable": 507, "reference_stale": 409,
                    "unavailable": 503, "setup_failed": 503, "timed_out": 504, "invalid": 400, "is_directory": 400,
                    "not_directory": 400, "not_regular": 415, "links": 400, "other": 500,
-                   "unsupported": 422, "busy": 409, "not_revertible": 409}
+                   "unsupported": 422, "busy": 409, "not_revertible": 409, "outdated": 409}
 
 
 def attached_view(folder: AttachedFolder) -> dict[str, Any]:
