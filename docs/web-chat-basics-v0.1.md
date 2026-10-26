@@ -141,7 +141,7 @@ Data·Provider·runner·CLI는 바뀌지 않는다. 서버는 화면 주소에�
   6. MCP 앱 화면의 전체 화면 → 뒤로(인라인으로)가 대화를 떠나지 않음(기존 `mcp_apps_smoke`도 다시).
   7. 복사: 답과 코드 블록의 단추, 클립보드 내용(브라우저 권한 허용), "Copied".
   8. Enter: 하드웨어 키보드(보내기), 좁은 화면에서 `visualViewport`를 줄인 상태(줄바꿈), Cmd+Enter.
-- iPad 실기기(소유자): 화상 키보드 Enter 줄바꿈, 하드웨어 키보드 Enter 보내기, 한글 마지막 글자(조합을 끝내는 Enter가 줄바꿈을 남기는지), 떠 있는·나뉜 키보드, Stage Manager, 길게 눌러 새 탭에서 열기.
+- iPad 실기기(소유자): 화상 키보드 Enter 줄바꿈, 하드웨어 키보드 Enter 보내기, 한글 마지막 글자(조합을 끝내는 Enter가 줄바꿈을 남기는지), 떠 있는·나뉜 키보드, Stage Manager, 길게 눌러 새 탭에서 열기. Android(있으면): 키보드가 떠 있을 때 돌린 뒤의 Enter(그 너비에서 키보드를 한 번 내릴 때까지 보내기가 됨; 재검수 N-a), Clipboard API가 없는 평문 HTTP에서 복사 대체 경로의 확대·포커스.
 
 ## 10. 독립 설계 검수 — rev. 1(PR #107): READY_WITH_CORRECTIONS
 
@@ -178,6 +178,6 @@ Data·Provider·runner·CLI는 바뀌지 않는다. 서버는 화면 주소에�
 | B1 | iPadOS는 돌려도 `screen` 크기가 그대로라, 키보드 폴리오 iPad를 세로로 쓴 뒤 가로로 돌리면 Enter가 줄바꿈이 됨 | 방향 대신 창 너비별 가장 큰 높이; 스모크에 돌리기 경우 |
 | N1 | 열 때의 404가 입력창 글을 버림(폴링 404와 다름) | 글과 참조를 홈 초안으로, 올리기 취소 |
 | N2 | Stage Manager로 창 높이를 줄이면 | 너비도 바뀌는 경우는 B1 수정으로 해결; 높이만 줄이는 경우는 실기기 확인 목록(§9) |
-| N3 | 코드로 끝나는 답 아래 여백 | 바깥 묶음이 여백을 갖고 안쪽은 0 |
+| N3 | 코드로 끝나는 답 아래 여백 | 바깥 묶음이 여백을 갖고 안쪽은 0, 답의 마지막이면 0(`.rich-text > .rich-code-block:last-child`; 처음 고침은 우선순위 때문에 듣지 않았음, 재검수 C1) |
 | N4 | 지시문 초안이 있을 때 `enter()`가 push | `replace` |
 | N5 | iOS에서 복사 대체 경로 | Clipboard API가 없으면 바로 대체, `setSelectionRange` |

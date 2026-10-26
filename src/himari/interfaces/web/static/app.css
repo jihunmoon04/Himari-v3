@@ -1560,7 +1560,11 @@ details > summary {
 /* V3-P79 §5: Copy on a code block and under an answer — always shown (touch has no hover), quiet. */
 .rich-text .rich-code-block {
   position: relative;
-  margin: 0 0 0.9em; /* the block's, as a code block's own: none when it ends the answer (review N3) */
+  margin: 0 0 0.9em; /* the block's, as a code block's own */
+}
+
+.rich-text > .rich-code-block:last-child {
+  margin-bottom: 0; /* none when it ends the answer: the Copy row follows (review N3, re-review C1) */
 }
 
 .rich-text .rich-code-block .rich-pre {
@@ -1603,6 +1607,7 @@ details > summary {
 }
 
 .copy-field {
+  font-size: 16px; /* iOS zooms into a focused field under 16px (re-review N-b) */
   position: fixed;
   top: 0;
   left: 0;
