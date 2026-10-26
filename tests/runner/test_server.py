@@ -398,6 +398,11 @@ def test_copy_max_on_a_replace_and_a_copied_delete(kit: RunnerKit) -> None:
         assert copy.read() == body + b"\n%%EOF\n"
 
 
+def identity_of(path: Path) -> list[int]:
+    info = path.stat()
+    return [info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns]
+
+
 def test_append_and_truncate_in_place(kit: RunnerKit, tmp_path: Path) -> None:
     """V3-P82 §3.6: a PDF's save written at its end through the protocol (its bytes as an fd), and cut back to
     one of its saves; the open tells the file's filesystem; a failure's identity reaches the caller."""
@@ -428,7 +433,7 @@ def test_append_and_truncate_in_place(kit: RunnerKit, tmp_path: Path) -> None:
     assert refused.value.category == api.INVALID
     saved = b"%PDF-1.7\nstartxref\n9\n%%EOF\n"
     cut, _ = call(kit, api.TRUNCATE, {**base, "expected": result["identity"], "to": len(saved)})
-    assert pdf.read_bytes() == saved and cut["identity"][2] == len(saved)
+    assert pdf.read_bytes() == saved and cut["identity"] == list(identity_of(pdf)) and identity_of(pdf)[2] == len(saved)
     with pytest.raises(api.RunnerError) as refused:  # outside the call's roots: as any write
         call(kit, api.TRUNCATE, {**base, "write_roots": [str(kit.home / "HIMARI")], "expected": cut["identity"],
                                  "to": 9})

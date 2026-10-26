@@ -5,7 +5,9 @@ from __future__ import annotations
 import ctypes
 import errno
 import os
+from collections.abc import Buffer
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -725,15 +727,15 @@ def test_a_failed_append_is_cut_back_unless_another_wrote(host: Host, home: Path
     real_pwrite = os.pwrite
     calls = {"n": 0}
 
-    def half_then_fail(fd: int, view: object, offset: int) -> int:
+    def half_then_fail(fd: int, view: Buffer, offset: int) -> int:
         calls["n"] += 1
         if calls["n"] == 1:
-            return real_pwrite(fd, bytes(view)[:4], offset)  # type: ignore[call-overload]
+            return real_pwrite(fd, bytes(view)[:4], offset)
         raise OSError(errno.ENOSPC, "no space")
 
     fd, name = parent(host, home, "projects/a/notes.pdf")
     try:
-        monkeypatch.setattr(hostfs.os, "pwrite", half_then_fail)
+        monkeypatch.setattr(os, "pwrite", half_then_fail)
         with pytest.raises(api.RunnerError) as failed:
             host.append(fd, name, data, identity(target))
         assert target.read_bytes() == b"%PDF-1.7\n%%EOF\n" and not failed.value.partial
@@ -741,16 +743,16 @@ def test_a_failed_append_is_cut_back_unless_another_wrote(host: Host, home: Path
         # Another wrote meanwhile: its bytes are never cut, ours are left and told.
         calls["n"] = 0
 
-        def half_then_another(fd: int, view: object, offset: int) -> int:
+        def half_then_another(fd: int, view: Buffer, offset: int) -> int:
             calls["n"] += 1
             if calls["n"] == 1:
-                written = real_pwrite(fd, bytes(view)[:4], offset)  # type: ignore[call-overload]
+                written = real_pwrite(fd, bytes(view)[:4], offset)
                 with open(target, "ab") as other:
                     other.write(b"OTHER")
                 return written
             raise OSError(errno.EIO, "gone")
 
-        monkeypatch.setattr(hostfs.os, "pwrite", half_then_another)
+        monkeypatch.setattr(os, "pwrite", half_then_another)
         with pytest.raises(api.RunnerError) as failed:
             host.append(fd, name, data, identity(target))
         assert target.read_bytes() == b"%PDF-1.7\n%%EOF\n0123OTHER" and failed.value.partial
@@ -773,7 +775,7 @@ def test_append_never_reports_another_file_as_written(host: Host, home: Path, tm
 
     fd, name = parent(host, home, "projects/a/notes.pdf")
     try:
-        monkeypatch.setattr(hostfs.os, "fsync", renamed_over)
+        monkeypatch.setattr(os, "fsync", renamed_over)
         assert category(lambda: host.append(fd, name, data, identity(target))) == api.CHANGED
     finally:
         os.close(fd)
@@ -831,17 +833,17 @@ def test_two_appends_from_the_same_base_never_both_succeed(host: Host, home: Pat
         except api.RunnerError as error:
             outcome["second"] = error.category
 
-    def first_write(out: int, view: object, offset: int) -> int:
+    def first_write(out: int, view: Buffer, offset: int) -> int:
         if "thread" not in outcome:
             thread = threading.Thread(target=run_second)
             outcome["thread"] = thread
             thread.start()
             thread.join(0.3)
             assert thread.is_alive()  # waiting on the first, not writing over it
-        return real_pwrite(out, view, offset)  # type: ignore[call-overload]
+        return real_pwrite(out, view, offset)
 
     try:
-        monkeypatch.setattr(hostfs.os, "pwrite", first_write)
+        monkeypatch.setattr(os, "pwrite", first_write)
         host.append(fd, name, mine, base)
         thread = outcome["thread"]
         assert isinstance(thread, threading.Thread)
@@ -863,15 +865,15 @@ def test_an_append_written_over_by_another_is_changed_not_saved(host: Host, home
     data = bytes_fd(tmp_path, b"mine")
     real_pwrite = os.pwrite
 
-    def then_another(out: int, view: object, offset: int) -> int:
-        count = real_pwrite(out, view, offset)  # type: ignore[call-overload]
+    def then_another(out: int, view: Buffer, offset: int) -> int:
+        count = real_pwrite(out, view, offset)
         with open(target, "ab") as other:
             other.write(b"THEIRS")
         return count
 
     fd, name = parent(host, home, "projects/a/notes.pdf")
     try:
-        monkeypatch.setattr(hostfs.os, "pwrite", then_another)
+        monkeypatch.setattr(os, "pwrite", then_another)
         with pytest.raises(api.RunnerError) as changed:
             host.append(fd, name, data, identity(target))
         assert changed.value.category == api.CHANGED and changed.value.partial
@@ -888,14 +890,14 @@ def test_a_mount_that_cannot_write_in_place_is_told(host: Host, home: Path, tmp_
     data = bytes_fd(tmp_path, b"x")
     real_open = os.open
 
-    def no_write_cache(path: object, flags: int, *args: object, **kw: object) -> int:
+    def no_write_cache(path: Any, flags: int, *args: Any, **kw: Any) -> int:
         if flags & os.O_WRONLY:
             raise OSError(errno.EPERM, "operation not permitted")
-        return real_open(path, flags, *args, **kw)  # type: ignore[arg-type]
+        return real_open(path, flags, *args, **kw)
 
     fd, name = parent(host, home, "projects/a/notes.pdf")
     try:
-        monkeypatch.setattr(hostfs.os, "open", no_write_cache)
+        monkeypatch.setattr(os, "open", no_write_cache)
         with pytest.raises(api.RunnerError) as refused:
             host.append(fd, name, data, identity(target))
         assert refused.value.category == api.UNSUPPORTED and "vfs-cache-mode" in str(refused.value)
