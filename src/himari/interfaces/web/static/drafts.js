@@ -205,6 +205,29 @@ export class DraftBook {
     return copy(value);
   }
 
+  /* V3-P82 §6.3: a file saved here (ink added to a PDF), its identity ``from`` now ``to``: the chips of every
+   * kept draft that point at it as it was point at it now. The composer's waiting save goes first (its chips
+   * are followed already); each draft keeps its time and mark — only its chips changed, not what was written.
+   * In the store, a newer draft another tab kept for that place stays (PR #119 review C3). */
+  async follow(path, from, to) {
+    const same = (a, b) => Array.isArray(a) && a.length === b.length && a.every((v, i) => String(v) === String(b[i]));
+    const stale = (r) => r.path === path && same(r.identity, from);
+    this.flush();
+    const moved = [];
+    for (const [place, draft] of [...this.table]) {
+      if (!draft.references.some(stale)) continue;
+      const entry = { ...draft, references: draft.references.map((r) => (stale(r) ? { ...r, identity: [...to] } : { ...r })) };
+      this.table.set(place, entry);
+      if (storable(place)) moved.push([place, entry]);
+    }
+    for (const [place, entry] of moved) {
+      const stored = await this.store.get("drafts", place);
+      if (this.table.get(place) !== entry) continue; // changed here meanwhile: that change was kept
+      if (stored && stored.writer !== this.writer && typeof stored.at === "number" && stored.at > entry.at) continue;
+      this.store.put("drafts", place, { ...entry, text: entry.text.slice(0, this.limits.chars), writer: this.writer });
+    }
+  }
+
   /* Sign out (§5.3): nothing kept in memory, nothing waiting to be written. */
   clear() {
     this.cancel();

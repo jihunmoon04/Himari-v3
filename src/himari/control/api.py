@@ -8,12 +8,13 @@ docs/decisions.md V3-024, V3-044, V3-045, V3-P55, V3-P62, V3-P64.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 from typing import Protocol, runtime_checkable
 
-from himari.common import CallRef, DeepFrozen, RunId, TrustedScope
+from himari.common import CallRef, ConversationId, DeepFrozen, PrincipalId, RunId, TrustedScope
 from himari.data.api import ConversationEvent, ModelSetting, RecoveryReport, UserMessage
 from himari.prompt.api import ContextBudget
 from himari.provider.api import OutputDelta
@@ -389,6 +390,10 @@ class ConversationRunner(Protocol):
         ...
 
     def status(self, scope: TrustedScope) -> JobStatus: ...
+
+    def running(self, principal: PrincipalId) -> Sequence[ConversationId]:
+        """V3-P80 §3.2: the principal's Conversations with a job under way now (of any kind)."""
+        ...
 
     async def wait(self, scope: TrustedScope) -> JobStatus:
         """Until the current job (if any) has finished."""

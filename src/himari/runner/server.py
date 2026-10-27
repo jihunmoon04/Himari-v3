@@ -34,7 +34,7 @@ from himari.runner import api
 from himari.runner.cgroups import Commands
 from himari.runner.config import RunnerConfig
 from himari.runner.hidden import under
-from himari.runner.hostfs import MAX_SNAPSHOT_BYTES, Host
+from himari.runner.hostfs import MAX_SNAPSHOT_BYTES, Host, mount_type
 from himari.runner.proxy import Door, Proxy
 from himari.runner.push import MAX_BUNDLE_BYTES, Pusher, check_branch, remote, token_problem
 from himari.sandbox.api import (
@@ -174,7 +174,7 @@ class Runner:
             try:
                 result, out = await self.dispatch(op, args, fds, conn)
             except api.RunnerError as error:
-                await api.send_frame(conn, api.failed(error.category, str(error)))
+                await api.send_frame(conn, api.failed(error.category, str(error), error.identity, error.partial))
                 return
             except asyncio.CancelledError:
                 raise
@@ -264,9 +264,16 @@ class Runner:
             return {"path": await self._read(lambda: host.visible_path(args.get("path"), _text(args, "cwd"),
                                                                        follow=args.get("follow") is True))}, []
         if op == api.OPEN:
-            fd, real, info = await self._read(lambda: host.open_read(args.get("path"), _text(args, "cwd")),
-                                              abandoned=lambda opened: os.close(opened[0]))
-            return {"path": real, "size": info.st_size, "identity": host.identity(info)}, [fd]
+            def opened() -> tuple[int, str, os.stat_result, str | None]:
+                fd, real, info = host.open_read(args.get("path"), _text(args, "cwd"))
+                try:  # its filesystem as the mount table names it: a PDF on a cloud mount is saved less often
+                    return fd, real, info, mount_type(real)  # (V3-P82 §3.2)
+                except BaseException:
+                    os.close(fd)
+                    raise
+
+            fd, real, info, filesystem = await self._read(opened, abandoned=lambda done: os.close(done[0]))
+            return {"path": real, "size": info.st_size, "identity": host.identity(info), "filesystem": filesystem}, [fd]
         if op == api.HOLDS:
             size, digest = args.get("size"), args.get("sha256")
             if not isinstance(size, int) or not isinstance(digest, str):
@@ -288,6 +295,8 @@ class Runner:
             return await self._delete_checked(args, roots)
         if op == api.DELETE_COPIED:
             return await self._delete_checked(args, roots, copied=True)
+        if op in (api.APPEND, api.TRUNCATE):
+            return await self._in_place(op, args, fds, roots), []
         if op in (api.CREATE_FILE, api.MKDIR):
             def make() -> dict[str, Any]:
                 parent_fd, parent, name = host.target(args.get("path"), _text(args, "cwd"), roots, follow=False)
@@ -368,6 +377,27 @@ class Runner:
             return {"path": posixpath.join(parent, name), "previous": copy is not None}, [] if copy is None else [copy]
 
         return await self._blocking(delete)
+
+    async def _in_place(self, op: str, args: dict[str, Any], fds: Sequence[int], roots: list[str]) -> dict[str, Any]:
+        """V3-P82 §3.6: a PDF's save written at its end, or the file cut back to one of its saves."""
+        host, expected = self.host, self._expected(args)
+        if op == api.APPEND and len(fds) != 1:
+            raise api.RunnerError(api.INVALID, "the bytes come as one file")
+        to = args.get("to", 0)
+        if op == api.TRUNCATE and (not isinstance(to, int) or isinstance(to, bool)):
+            raise api.RunnerError(api.INVALID, "to is required")
+        cut = to if isinstance(to, int) else 0
+
+        def in_place() -> dict[str, Any]:
+            parent_fd, parent, name = host.target(args.get("path"), _text(args, "cwd"), roots, follow=False)
+            try:
+                identity = host.append(parent_fd, name, fds[0], expected) if op == api.APPEND \
+                    else host.truncate(parent_fd, name, expected, cut)
+            finally:
+                os.close(parent_fd)
+            return {"path": posixpath.join(parent, name), "identity": identity}
+
+        return await self._blocking(in_place)
 
     async def _kept(self, op: str, args: dict[str, Any], roots: list[str]) -> tuple[dict[str, Any], list[int]]:
         """V3-P76 §4.1: an agent's write or delete, with a copy of what the file held (an fd, when there is one)."""

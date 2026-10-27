@@ -25,6 +25,9 @@ import { LiveAnswer } from "/assets/live.js";
 import { FilesPane } from "/assets/files.js";
 import * as localStore from "/assets/local_store.js";
 import { DraftBook, mergeDrafts, referenceKey, withoutExpired } from "/assets/drafts.js";
+import { rememberLab } from "/assets/inklab.js";
+
+rememberLab(location.search); // ?ink-lab, before the address is rewritten (V3-P77 §4.6)
 
 const POLL_MS = 1000;
 const PAGE = 50;
@@ -34,20 +37,32 @@ const drafts = new DraftBook(localStore, { writer: localStore.WRITER }); // the 
 const STATE_TEXT = {
   completed: "Done",
   waiting_for_user: "Waiting for your answer",
-  recovery_required: "Needs attention: an earlier action's outcome is unknown",
-  provider_failed: "The model provider failed; nothing was retried",
-  outcome_unknown: "The request may not have reached the model; it was not resent",
-  invalid_model_output: "The model's reply could not be used",
-  request_rejected: "The request was refused before sending",
-  run_limit_reached: "Stopped after the maximum number of steps",
-  budget_reached: "Stopped: this turn's token budget is used",
-  no_progress: "Stopped: the last steps brought nothing new",
+  recovery_required: "Stopped: HIMARI can't go on safely from here (an earlier step's outcome is unknown) — see Details",
+  provider_failed: "The model service didn't answer. Nothing was retried — Continue to try again",
+  outcome_unknown: "The request may not have reached the model, so it wasn't sent again — Continue to try again",
+  invalid_model_output: "The model's reply couldn't be used — Continue to ask again",
+  request_rejected: "The request was refused before it was sent — see Details; Compact now may help",
+  run_limit_reached: "Stopped after the most steps a turn may take — Continue to go on",
+  budget_reached: "Stopped: this turn used its token budget — Continue to go on with a new one",
+  no_progress: "Stopped: the last steps kept repeating — Continue, or say what to change",
   idle: "Nothing to continue",
   compacted: "Compacted: earlier messages now reach HIMARI as a summary",
   nothing_to_compact: "Nothing to compact yet",
   compaction_failed: "Compaction failed; nothing was changed",
   paused: "Paused — Continue to go on, or send a new message",
   cancelled: "Stopped",
+};
+/* The same, short: beside Continue and in the top bar. */
+const STATE_SHORT = {
+  recovery_required: "Can't go on safely",
+  provider_failed: "Model service failed",
+  outcome_unknown: "Not sure it was sent",
+  invalid_model_output: "Unusable reply",
+  request_rejected: "Refused",
+  run_limit_reached: "Step limit reached",
+  budget_reached: "Token budget used",
+  no_progress: "Going in circles",
+  paused: "Paused",
 };
 const ERROR_TEXT = {
   busy: "This conversation is still working.",
@@ -120,7 +135,19 @@ const app = {
   placeTouched: false, // the composer was changed in this place since it was entered (§3.3)
   placeEntry: 0, // the latest entry into a place: a later read of the store applies to that one only
   inFlight: new Set(), // the conversations a message is being sent to from this page (V3-P78 §3.1, N6)
+  announceAfter: Infinity, // events past this sequence are new (not the history read on opening): told to screen readers
+  workingHint: "", // "HIMARI is working…" and its usage, under the composer
+  uploadHint: "", // files still uploading (Send waits for them)
+  lengthHint: null, // {count, over} once the message nears its limit
+  questionShown: null, // the question text the panel shows (redrawn only when it changes)
   address: null, // the address of the surface shown (V3-P79 §3); the sign-in screen keeps the one it came from
+  activity: { working: new Set(), waiting: new Set() }, // the last /activity answer (V3-P80 §3)
+  activityTimer: null,
+  activityAsked: new Set(), // ids not in the list that the list was read again for once (§3.3)
+  activityTicket: 0, // the latest /activity read: an older answer is dropped (review N3)
+  listTicket: 0, // the latest list read
+  listResetting: 0, // the ticket of a reload under way (0: none)
+  listGroup: null, // the list's last heading (Today, Yesterday, …), for "Load more" to go on from
   sendWaiting: false, // a send waits for the conversation being created
   conversationId: null,
   generation: 0,
@@ -175,11 +202,13 @@ const views = new AppViews(api, el, () => app.conversationId);
  * On the surface a folder opens its conversation (§6); beside one, it is attached to it. */
 const askFiles = (title, lines, action) => confirmAction(title, lines, action);
 // V3-P78 §4.1: a file open with unsaved text in the other pane: what was kept for it is not offered.
-const openUnsaved = (pane, path) => pane.doc !== null && pane.doc.path === path && pane.doc.dirty;
+const openUnsaved = (pane, path) => (pane.doc !== null && pane.doc.path === path && pane.doc.dirty)
+  || (pane.pdf !== null && pane.pdf.path === path && pane.pdf.view.ink.dirty); // its ink kept by that pane (V3-P82 §4)
 const filesSurface = new FilesPane({
   api, el, confirm: askFiles,
   keep: localStore, writer: `${localStore.WRITER}:files`, // unsaved text kept in this browser (V3-P78 §4.1)
   openElsewhere: (path) => openUnsaved(filesPanel, path),
+  onSaved: (saved) => followSave(saved),
   onAsk: (reference) => askFromFiles(reference),
   folderActions: (listing) => [openHereControl(listing.path)],
   folderRowActions: (path) => [["Open conversation", () => openFolderConversation(path, false)],
@@ -189,6 +218,7 @@ const filesPanel = new FilesPane({
   api, el, confirm: askFiles,
   keep: localStore, writer: `${localStore.WRITER}:panel`,
   openElsewhere: (path) => openUnsaved(filesSurface, path),
+  onSaved: (saved) => followSave(saved),
   working: () => app.running, // HIMARI at work in this conversation (§7.3)
   onAsk: (reference) => { // the conversation shown again, where its chip goes
     setPanelExpanded(false);
@@ -225,10 +255,18 @@ const live = new LiveAnswer({
   EventSource: globalThis.EventSource,
 });
 
-function status(text, tone) {
+/* ``action``: [label, run] — one button after the text (e.g. Undo), gone with the next status. */
+function status(text, tone, action = null) {
   const bar = $("status-bar");
   bar.textContent = text || "";
   bar.className = tone ? `status-bar is-${tone}` : "status-bar";
+  if (action && text) {
+    const [label, run] = action;
+    const button = el("button", "link-button status-action", label);
+    button.type = "button";
+    button.addEventListener("click", () => { button.disabled = true; run(); });
+    bar.append(" ", button);
+  }
 }
 
 /* The address follows user navigation, redirects and Back/Forward. */
@@ -239,6 +277,7 @@ function showSurface(name, via = "none") {
     $(`surface-${surface}`).hidden = surface !== name;
   }
   followAddress(name, via);
+  syncJump(); // the composer (and the button in it) moved: shown only beside a scrolled-up conversation
   app.leaveAgreed = false;
   const signedIn = name !== "login";
   $("sidebar").hidden = !signedIn;
@@ -265,6 +304,9 @@ function showSurface(name, via = "none") {
 function showLogin({ signingOut = false } = {}) {
   if (!$("surface-login").hidden) return;
   stopPolling();
+  clearTimeout(app.activityTimer); // V3-P80: read again after the sign-in
+  app.activityTicket += 1; // a read answered before this never paints the sign-in screen (review N2)
+  app.activity = { working: new Set(), waiting: new Set() };
   views.reset();
   app.conversationId = null;
   app.filesReturnId = null;
@@ -273,7 +315,7 @@ function showLogin({ signingOut = false } = {}) {
   leavePlace({ keep: !signingOut });
   filesPanel.closeForSignIn({ keepText: !signingOut });
   filesPanel.file = null; // its conversation is opened again from Home
-  filesSurface.closeForSignIn({ keepText: !signingOut, keepInk: !signingOut });
+  filesSurface.closeForSignIn({ keepText: !signingOut });
   showSurface("login");
   $("topbar-title").textContent = "HIMARI";
   $("server-info").hidden = true;
@@ -371,14 +413,53 @@ function renderListRow(item) {
   return li;
 }
 
+const MAX_LIST = 200; // the server's most per read
+
+/* The list's heading for a conversation last active at ``when`` (local days). */
+function activityGroup(when) {
+  const day = (date) => new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
+  const days = Math.round((day(new Date()) - day(new Date(when))) / 86400000);
+  if (days <= 0) return "Today";
+  if (days === 1) return "Yesterday";
+  if (days < 7) return "Previous 7 days";
+  if (days < 30) return "Previous 30 days";
+  return "Older";
+}
+
 async function loadList(reset) {
-  if (reset) app.listOffset = 0;
-  const page = await api("GET", `/api/conversations?limit=${PAGE}&offset=${app.listOffset}`);
+  // The latest read draws the list: a reload and "Load more" under way at once never mix (V3-P80 review N2).
+  // "Load more" waits out a reload, which would otherwise be dropped for it (re-review N4).
+  if (!reset && app.listResetting) return [];
+  const ticket = (app.listTicket += 1);
+  if (reset) app.listResetting = ticket;
+  const offset = reset ? 0 : app.listOffset;
+  // A reload reads as many as were shown, so "Load more" pages stay open after a turn ends (at most 200).
+  const limit = reset ? Math.min(MAX_LIST, Math.max(PAGE, app.listOffset)) : PAGE;
+  let page;
+  try {
+    page = await api("GET", `/api/conversations?limit=${limit}&offset=${offset}`);
+  } finally {
+    if (app.listResetting === ticket) app.listResetting = 0;
+  }
+  if (ticket !== app.listTicket) return page.items;
   const list = $("conversation-list");
-  if (reset) list.replaceChildren();
-  for (const item of page.items) list.append(renderListRow(item));
-  app.listOffset = page.next_offset ?? app.listOffset + page.items.length;
+  if (reset) {
+    list.replaceChildren();
+    app.listGroup = null;
+  }
+  for (const item of page.items) {
+    const group = activityGroup(item.last_activity_at);
+    if (group !== app.listGroup) { // Today, Yesterday, … as the list goes back in time
+      app.listGroup = group;
+      const heading = el("li", "conversation-group", group);
+      heading.setAttribute("role", "presentation");
+      list.append(heading);
+    }
+    list.append(renderListRow(item));
+  }
+  app.listOffset = page.next_offset ?? offset + page.items.length;
   $("conversation-load-more").hidden = page.next_offset === null;
+  paintActivity();
   return page.items;
 }
 
@@ -388,6 +469,66 @@ function markSelected() {
     if (button.dataset.id === app.conversationId) button.setAttribute("aria-current", "page");
     else button.removeAttribute("aria-current");
   }
+  paintActivity(); // rows drawn again get their dots back
+}
+
+/* ------------------------------------------------- other conversations (V3-P80 §3) */
+
+const ACTIVITY_MS = 5000;
+const ACTIVITY_LABEL = { working: "Working", waiting: "Waiting for your answer" };
+
+/* A dot on each conversation in the list and on Home's cards: working, or waiting for an answer. */
+function paintActivity() {
+  const rows = [...$("conversation-list").querySelectorAll(".conv-row"),
+                ...$("home-recent-list").querySelectorAll(".home-recent-card")];
+  for (const row of rows) {
+    const id = row.dataset.id;
+    const state = app.activity.waiting.has(id) ? "waiting" : app.activity.working.has(id) ? "working" : null;
+    let dot = row.querySelector(".activity-dot");
+    if (state === null) {
+      if (dot) dot.remove();
+      continue;
+    }
+    if (!dot) {
+      dot = el("span", "activity-dot");
+      dot.setAttribute("role", "img");
+      row.append(dot);
+    }
+    dot.className = `activity-dot is-${state}`;
+    dot.title = ACTIVITY_LABEL[state];
+    dot.setAttribute("aria-label", ACTIVITY_LABEL[state]);
+  }
+  followTitle();
+}
+
+/* Every 5 s while the page shows and the user is signed in; a hidden page reads again when shown. */
+function scheduleActivity(delay = ACTIVITY_MS) {
+  clearTimeout(app.activityTimer);
+  app.activityTimer = setTimeout(readActivity, delay);
+}
+
+async function readActivity() {
+  clearTimeout(app.activityTimer);
+  if (!$("surface-login").hidden || document.visibilityState === "hidden") return;
+  const ticket = (app.activityTicket += 1);
+  try {
+    const answer = await api("GET", "/api/conversations/activity");
+    if (ticket !== app.activityTicket) return; // a newer read is on its way, and schedules the next
+    app.activity = { working: new Set(answer.working), waiting: new Set(answer.waiting) };
+    const listed = new Set([...$("conversation-list").querySelectorAll(".conv-row")].map((row) => row.dataset.id));
+    // One started elsewhere (another tab, the CLI): the list once more, so it is there (§3.3).
+    const unknown = [...answer.working, ...answer.waiting].filter((id) => !listed.has(id) && !app.activityAsked.has(id));
+    if (unknown.length) {
+      for (const id of unknown) app.activityAsked.add(id);
+      await loadList(true).then(markSelected).catch(() => {});
+    }
+    paintActivity();
+  } catch (error) {
+    // The sign-in screen: reading starts again after it. Any other failure (a 401 a proxy wrote, the
+    // network) tries again later (review N3).
+    if (!$("surface-login").hidden) return;
+  }
+  if ($("surface-login").hidden) scheduleActivity();
 }
 
 async function showHome({ via = "push" } = {}) {
@@ -404,7 +545,8 @@ async function showHome({ via = "push" } = {}) {
   $("composer-cancel").hidden = true;
   $("question-panel").hidden = true;
   $("stop-panel").hidden = true;
-  $("composer-hint").textContent = "";
+  app.workingHint = "";
+  paintHint();
   $("composer-text").placeholder = "Ask HIMARI anything…";
   closePicker();
   closePromptForm();
@@ -418,12 +560,14 @@ async function showHome({ via = "push" } = {}) {
   for (const item of items.slice(0, 3)) {
     const li = el("li");
     const card = conversationLink(item.id, "home-recent-card");
+    card.dataset.id = item.id;
     card.append(el("span", "home-recent-title", conversationName(item)),
                 el("span", "home-recent-activity", new Date(item.last_activity_at).toLocaleDateString()));
     li.append(card);
     recent.append(li);
   }
   $("home-recent-empty").hidden = items.length > 0;
+  paintActivity();
 }
 
 /* ``carry``: the composer's draft goes into the new conversation (sent or given files from Home); else the
@@ -556,7 +700,126 @@ function addressPopped() {
 /* The tab's title follows the top bar's: "<conversation> · HIMARI" (§3.4). */
 function followTitle() {
   const shown = $("topbar-title").textContent.trim();
-  document.title = !shown || shown === "HIMARI" ? "HIMARI" : `${shown} · HIMARI`;
+  const title = !shown || shown === "HIMARI" ? "HIMARI" : `${shown} · HIMARI`;
+  const waiting = app.activity.waiting.size; // V3-P80 §3.4: conversations waiting for an answer, this one too
+  document.title = waiting ? `(${waiting}) ${title}` : title;
+}
+
+/* ------------------------------------------------------------ shortcuts */
+
+/* The new-chat shortcut as the keyboard names it: ⌘ on Apple devices. */
+function newChatShortcut() {
+  const apple = /Mac|iPhone|iPad|iPod/.test(navigator.platform || "") || /Mac OS/.test(navigator.userAgent || "");
+  return apple ? "⌘⇧O" : "Ctrl+Shift+O";
+}
+
+/* Cmd/Ctrl+Shift+O: a new chat (as ChatGPT); Shift+Esc: the message box. Signed in, with no dialog open. */
+function shortcut(event) {
+  // Any dialog: a <dialog> open, or the confirmation (a div; review B2).
+  if (!$("surface-login").hidden || document.querySelector("dialog[open], [aria-modal='true']:not([hidden])")) return;
+  if (event.isComposing || event.repeat) return; // held down: one chat, not one per repeat (N4)
+  // The key, not the character: a Korean layout types "ㅒ" there (N4).
+  if ((event.metaKey || event.ctrlKey) && event.shiftKey && !event.altKey && event.code === "KeyO") {
+    event.preventDefault();
+    $("nav-new-chat").click();
+  } else if (event.key === "Escape" && event.shiftKey && !$("composer-wrap").closest("[hidden]")) {
+    event.preventDefault();
+    $("composer-text").focus();
+  }
+}
+
+/* --------------------------------------------------- the end of the timeline */
+
+/* "↓" above the composer while the conversation is scrolled up from its end; it goes there. */
+function syncJump() {
+  if (app.jumpFrame) return; // once a frame, however many changes (review N5)
+  app.jumpFrame = requestAnimationFrame(() => {
+    app.jumpFrame = 0;
+    paintJump();
+  });
+}
+
+function paintJump() {
+  const timeline = $("timeline");
+  const away = timeline.scrollHeight - timeline.scrollTop - timeline.clientHeight > 300;
+  $("jump-latest").hidden = !away || $("surface-chat").hidden;
+}
+
+/* The composer's count, once the message nears its limit (32,000 characters). */
+function syncLength() {
+  const box = $("composer-text");
+  // Fewer units than the threshold: fewer characters too, no need to count.
+  const count = box.value.length < LENGTH_HINT_AT ? 0 : characters(box.value);
+  app.lengthHint = count < LENGTH_HINT_AT ? null : { count, over: count > MAX_MESSAGE_CHARS };
+  paintHint();
+}
+
+/* The hint under the composer has two writers (review B1): the turn at work, from the conversation's state,
+ * and the message's count near its limit. One line, the work first; the warning colour is the count's. */
+function paintHint() {
+  const hint = $("composer-hint");
+  const length = app.lengthHint;
+  const count = length === null ? ""
+    : `${length.count.toLocaleString()} / ${MAX_MESSAGE_CHARS.toLocaleString()} characters`
+      + (length.over ? ": too long to send; attach it as a file" : "");
+  hint.textContent = [app.workingHint, app.uploadHint, count].filter(Boolean).join(" · ");
+  hint.classList.toggle("is-over", length !== null && length.over);
+  hint.classList.toggle("is-counting", length !== null || Boolean(app.uploadHint)); // shown on phones too
+}
+
+const LENGTH_HINT_AT = 30000;
+
+/* ---------------------------------------------------------------- paste */
+
+const MAX_MESSAGE_CHARS = 32000; // the server's (characters, as Python counts them)
+const PLAIN_NAMES = /^(image|img|pasted|screenshot|untitled)?\.(png|jpe?g|gif|webp|heic|tiff?|bmp)$/i;
+const PASTE_TYPES = { "image/png": "png", "image/jpeg": "jpg", "image/gif": "gif", "image/webp": "webp",
+                      "image/heic": "heic", "image/tiff": "tiff", "text/plain": "txt", "application/pdf": "pdf" };
+
+function extensionOf(name) {
+  const dot = (name || "").lastIndexOf(".");
+  return dot > 0 ? name.slice(dot + 1).toLowerCase() : null;
+}
+
+/* pasted-YYYYMMDD-HHMMSS[-n].ext: several things pasted at once stay apart (V3-P80 §4.1). */
+function pastedName(extension, index = 0) {
+  const now = new Date();
+  const two = (n) => String(n).padStart(2, "0");
+  const stamp = `${now.getFullYear()}${two(now.getMonth() + 1)}${two(now.getDate())}-${two(now.getHours())}`
+    + `${two(now.getMinutes())}${two(now.getSeconds())}`;
+  return `pasted-${stamp}${index ? `-${index + 1}` : ""}.${extension}`;
+}
+
+/* V3-P80 §4: files alone on the clipboard are attached (a screenshot, a copied file); with text, the text
+ * is pasted as always, unless it would take the message past its limit: then it is attached as a .txt. */
+function pasteIntoComposer(event) {
+  const data = event.clipboardData;
+  if (!data) return;
+  const text = data.getData("text/plain");
+  let files = Array.from(data.files || []);
+  if (!files.length && data.items) {
+    files = Array.from(data.items).filter((item) => item.kind === "file").map((item) => item.getAsFile())
+      .filter(Boolean);
+  }
+  if (files.length && !text) {
+    event.preventDefault();
+    addFiles(files.map((file, index) => (file.name && !PLAIN_NAMES.test(file.name) ? file
+      : new File([file], pastedName(PASTE_TYPES[file.type] || extensionOf(file.name) || "bin", index),
+                 { type: file.type }))));
+    return;
+  }
+  if (!text) return;
+  // The message as it would be, the selection replaced, counted as the server counts (review N5). Over the
+  // limit already: anything pasted goes as a file.
+  const box = $("composer-text");
+  const kept = box.value.slice(0, box.selectionStart) + box.value.slice(box.selectionEnd);
+  if (kept.length + text.length <= MAX_MESSAGE_CHARS) return; // fewer UTF-16 units: fewer characters too
+  // A character is at most two units: past twice the limit, no need to count (a huge paste; review N5).
+  if (kept.length + text.length <= 2 * MAX_MESSAGE_CHARS
+      && characters(kept) + characters(text) <= MAX_MESSAGE_CHARS) return;
+  event.preventDefault();
+  addFiles([new File([text], pastedName("txt"), { type: "text/plain" })]);
+  status("The pasted text was long, so it was attached as a file.", "ok");
 }
 
 /* ---------------------------------------------------------------- Enter */
@@ -679,6 +942,22 @@ function addReference(reference) {
   $("composer-text").focus({ preventScroll: true }); // the page itself never scrolls
 }
 
+/* V3-P82 §6.3: this tab saved a PDF's ink — its identity ``from`` is ``to`` now, and only ink was added: the
+ * chips pointing at it as it was (the composer's, and the drafts kept for other places) point at it now, or
+ * the next message would be refused as stale. */
+function followSave({ path, from, to }) {
+  const same = (a, b) => Array.isArray(a) && a.length === b.length && a.every((v, i) => String(v) === String(b[i]));
+  let moved = false;
+  for (const reference of app.references) {
+    if (reference.path !== path || !same(reference.identity, from)) continue;
+    reference.identity = [...to];
+    reference.stale = false;
+    moved = true;
+  }
+  drafts.follow(path, from, to);
+  if (moved) renderAttachments();
+}
+
 /* After a reference_stale refusal: the chips whose file changed since they were made say so, as a
  * refused attachment's chip does (the status line gives way to the conversation's own). */
 async function markStaleReferences(references, generation) {
@@ -742,7 +1021,7 @@ function humanSize(n) {
   if (n >= 1 << 30) return `${(n / (1 << 30)).toFixed(1)} GB`;
   if (n >= 1 << 20) return `${(n / (1 << 20)).toFixed(1)} MB`;
   if (n >= 1 << 10) return `${(n / (1 << 10)).toFixed(1)} KB`;
-  return `${n} bytes`;
+  return `${n} ${n === 1 ? "byte" : "bytes"}`;
 }
 
 /* A file of this conversation: a download link, or "expired" (V3-P66 §8.5).
@@ -899,11 +1178,13 @@ function fillComposer(draft) {
   app.references = draft.references.map((r) => ({ ...r, key: (app.attachKeys += 1), label: referenceLabel(r) }));
   renderAttachments();
   autosize();
+  syncLength();
 }
 
 /* The composer changed in its place (§3.3): kept once it settles. The conversation being created is
  * kept in memory only, and goes with the composer. */
 function composerChanged() {
+  syncLength();
   if (app.place === null) return;
   app.placeTouched = true;
   if (typeof app.place === "string") drafts.schedule(app.place, composerDraft);
@@ -1026,6 +1307,17 @@ function renderAttachments() {
     const text = entry.state === "uploading" ? `${entry.name} · ${entry.progress}%`
       : entry.state === "ready" ? `${entry.name} · ${humanSize(entry.size)}` : `${entry.name} · ${entry.note}`;
     item.append(el("span", "attach-chip-text", text));
+    if (entry.state === "failed" && entry.file) { // the same file again, in this place (no new pick)
+      const retry = el("button", "attach-chip-retry", "Retry");
+      retry.type = "button";
+      retry.setAttribute("aria-label", `Upload ${entry.name} again`);
+      retry.addEventListener("click", () => {
+        app.attachments = app.attachments.filter((a) => a !== entry);
+        renderAttachments();
+        uploadFile(entry.file);
+      });
+      item.append(retry);
+    }
     const remove = el("button", "attach-chip-remove", "×");
     remove.type = "button";
     remove.setAttribute("aria-label", `Remove ${entry.name}`);
@@ -1040,6 +1332,13 @@ function renderAttachments() {
   }
   list.hidden = app.attachments.length === 0 && app.references.length === 0;
   $("composer-send").disabled = app.jobRunning || app.sending || uploading();
+  // Why Send waits, told under the composer.
+  const going = app.attachments.filter((a) => a.state === "uploading").length;
+  const told = going ? `Uploading ${going} file${going === 1 ? "" : "s"} — Send waits for ${going === 1 ? "it" : "them"}` : "";
+  if (told !== app.uploadHint) {
+    app.uploadHint = told;
+    paintHint();
+  }
 }
 
 /* One request per file, with progress. Uploaded files are staged on the
@@ -1049,7 +1348,7 @@ function uploadFile(file) {
   const conversationId = app.conversationId;
   if (conversationId === null) return;
   const generation = app.generation;
-  const entry = { key: (app.attachKeys += 1), name: file.name, size: file.size, state: "uploading", fileId: null,
+  const entry = { key: (app.attachKeys += 1), name: file.name, size: file.size, state: "uploading", fileId: null, file,
                   progress: 0, xhr: new XMLHttpRequest(), note: "" };
   app.attachments.push(entry);
   renderAttachments();
@@ -1076,7 +1375,7 @@ function uploadFile(file) {
       composerChanged();
       // An image with a copy reaches a model that takes images as an image (V3-P67): no command needed.
       const seen = data.image && data.image.state === "ready" && modelTakesImages();
-      if (data.commands === false && !seen) {
+      if (data.commands === false && !seen && file.type !== "text/plain") { // plain text is read anyway (V3-P80)
         status("Commands cannot run on this server: HIMARI can read text files, but not PDFs or images.", "warn");
       }
     } else {
@@ -1119,6 +1418,28 @@ function paintToolRow(entry) {
   const pending = app.jobRunning ? "running" : "no result";
   const state = tone === "pending" ? pending : tone === "success" ? "done" : "failed";
   entry.details.replaceChildren(el("summary", "tool-row-summary", `${mark} ${entry.toolId} · ${state}`), body);
+  // A file HIMARI wrote on this server: Open, beside the row (not inside its summary, whose children a screen
+  // reader flattens; review N4), to see it in the panel.
+  for (const old of entry.node.querySelectorAll(":scope > .tool-row-open")) old.remove();
+  const opens = tone === "success" ? openableWrite(entry) : null;
+  if (opens) {
+    const open = el("button", "link-button tool-row-open", "Open");
+    open.type = "button";
+    open.title = opens;
+    open.setAttribute("aria-label", `Open ${opens}`);
+    open.addEventListener("click", () => showReference(opens));
+    entry.node.append(open);
+  }
+}
+
+/* The file a successful machine/write_file or machine/edit_file wrote, as the server resolved it (the result
+ * says "created /path (…)", "updated /path (…)" or "edited /path: …"), or null. Never the arguments joined to
+ * today's working folder, which may not be the one it was written in (review B1). */
+function openableWrite(entry) {
+  if (!["machine/write_file", "machine/edit_file"].includes(entry.toolId) || !entry.result) return null;
+  const said = /^(?:created|updated) (\/.+) \(\d+ bytes\)$/.exec(entry.result.text)
+    || /^edited (\/.+): replaced \d+ occurrence\(s\)$/.exec(entry.result.text);
+  return said ? said[1] : null;
 }
 
 /* ------------------------------------------------------------ work blocks */
@@ -1246,6 +1567,18 @@ function splitWork(block, covered) {
   paintWork(rest);
 }
 
+/* A new answer or question (past the history read on opening), for screen readers: its start as plain text
+ * (formulas as written). Emptied first, so the same words again are read again (review N3). */
+function announce(what, text, sequence) {
+  if (!text || !(sequence > app.announceAfter)) return;
+  const line = assistantTextLine(document, text).replace(/\s+/g, " ").trim();
+  const region = $("announce");
+  region.textContent = "";
+  requestAnimationFrame(() => {
+    region.textContent = `${what}: ${line.length > 300 ? `${line.slice(0, 300)}…` : line}`;
+  });
+}
+
 function renderEvent(event) {
   const timeline = tagging($("timeline"), event.sequence);
   if (event.kind === "user_message") {
@@ -1256,6 +1589,7 @@ function renderEvent(event) {
   if (event.kind === "assistant_final") {
     closeWork();
     timeline.append(renderMessage(event, changedModel(event.model)));
+    announce("HIMARI answered", event.text, event.sequence);
     live.shown(event.run_id); // it replaces what was shown while it was written
     return;
   }
@@ -1268,6 +1602,7 @@ function renderEvent(event) {
       if (event.text) timeline.append(renderMessage({ ...event, kind: "assistant_final" }, model));
       const text = typeof question.arguments.question === "string" ? question.arguments.question : "";
       timeline.append(renderMessage({ kind: "assistant_final", text }, event.text ? null : model));
+      announce("HIMARI asks", text, event.sequence);
       app.toolRows.set(`${event.run_id}/${question.call_id}`, null); // the answer appears as the user's message
       return;
     }
@@ -1765,6 +2100,7 @@ async function pullEvents(generation) {
     for (const event of page.items) renderEvent(event);
     live.keepLast();
     app.lastSequence = page.last_sequence;
+    if (app.announceAfter === Infinity && page.items.length < 200) app.announceAfter = app.lastSequence;
     if (page.items.length && atBottom) timeline.scrollTop = timeline.scrollHeight;
     if (page.items.length < 200) {
       views.autoOpen();
@@ -1802,8 +2138,9 @@ function describe(detail) {
   }
   if (job.state && job.state !== "completed" && job.state !== "idle") {
     const base = STATE_TEXT[job.state] || job.state;
-    // The detail says why (e.g. the size that was refused); shown as plain text.
-    return { text: job.detail ? `${base} (${job.detail})` : base, short: base, tone: "warn", active: false };
+    // The detail says why in the server's terms (e.g. the sizes that were refused): behind "Details".
+    return { text: base, short: STATE_SHORT[job.state] || base, detail: job.detail || null, tone: "warn",
+             active: false };
   }
   return { text: job.state ? STATE_TEXT[job.state] : "", tone: null, active: false };
 }
@@ -1833,10 +2170,20 @@ function applyDetail(detail) {
   $("stop-panel").hidden = !stopped;
   $("stop-continue").disabled = false;
   const used = usageText(detail.job.turn_usage);
-  $("stop-text").textContent = stopped ? (used ? `This turn${used}` : "Continue where it stopped") : "";
-  status(view.tone ? view.text : "", view.tone);
+  // Why it stopped, short, beside Continue (the status line above has the whole of it).
+  const why = view.short || "Stopped"; // the whole reason is in the status line above (review N3)
+  $("stop-text").textContent = stopped ? `${why}${used}` : "";
+  status(view.tone ? view.text : "", view.tone, view.tone && view.detail
+    ? ["Details", () => status(`${view.text}. ${view.detail}`, view.tone)] : null);
   $("question-panel").hidden = !detail.waiting;
-  $("question-text").textContent = detail.waiting ? detail.waiting.question : "";
+  // As the menu's: not while the answer is being taken (the server would refuse it as busy; review N1).
+  $("question-dismiss").hidden = !detail.waiting || detail.job.running;
+  // As the timeline shows it: formatted, never parsed as HTML (rich_text.js).
+  const question = detail.waiting ? detail.waiting.question : null;
+  if (question !== app.questionShown) { // a selection, and formulas, stay as they are between polls (review N6)
+    app.questionShown = question;
+    $("question-text").replaceChildren(...(question === null ? [] : [renderAssistantText(document, question)]));
+  }
   $("composer-text").placeholder = detail.waiting ? "Your answer" : "Message HIMARI";
   app.jobRunning = detail.job.running;
   if (detail.job.running && app.streaming && app.conversationId !== null) {
@@ -1849,7 +2196,8 @@ function applyDetail(detail) {
     for (const entry of app.toolRows.values()) if (entry && entry.result === null) paintToolRow(entry);
   }
   $("composer-send").disabled = detail.job.running || app.sending || uploading();
-  $("composer-hint").textContent = detail.job.running ? `HIMARI is working…${usageText(detail.job.turn_usage)}` : "";
+  app.workingHint = detail.job.running ? `HIMARI is working…${usageText(detail.job.turn_usage)}` : "";
+  paintHint();
   $("chat-menu-resume").hidden = !detail.continuable;
   $("chat-menu-compact").disabled = detail.job.running;
   $("chat-menu-dismiss").hidden = !detail.waiting || detail.job.running;
@@ -1892,6 +2240,7 @@ function poll(generation) {
       if (detail && detail.job.running) poll(generation);
       else if (detail) {
         loadList(true).then(markSelected).catch(() => {});
+        readActivity(); // this one stopped working, or now waits (V3-P80 §3.3)
         loadContext(generation);
         loadServerInfo(); // a command may have found the sandbox broken
         loadToolSources(generation); // and close the views of a source turned off elsewhere
@@ -1975,6 +2324,7 @@ async function openConversation(id, { created = false, via = "push" } = {}) {
   loadFolders(generation);
   loadPrompts(generation);
   try {
+    app.announceAfter = Infinity; // the history read first is not news (its first successful read sets the mark)
     const detail = await refresh(generation);
     if (detail && detail.job.running) poll(generation);
     else if (detail) loadContext(generation);
@@ -2030,6 +2380,7 @@ async function sendMessage(event) {
         references: pointed.map((r) => (r.whole ? { path: r.path, identity: r.identity }
           : { path: r.path, identity: r.identity, start: r.start, end: r.end, sha256: r.sha256 })) });
     drafts.removeSent(sentTo, sent);
+    readActivity(); // it works now, or no longer waits for an answer (V3-P80 review N10)
     if (app.place === sentTo) { // the composer is still this conversation's (not by generation: N2)
       // A user can navigate or type again while this request is in flight.
       // Only clear the exact draft accepted for this conversation.
@@ -2216,6 +2567,20 @@ function memoryCountLine(count, now = false) {
   return now ? `${notes} deleted with it.` : `${notes} deleted when it is deleted for good.`;
 }
 
+/* Undo right after a move to the trash: restored; opened again if it was the one open (its draft went with
+ * the move), else the list shows it again where the user is (review N1). */
+async function undoTrash(id, name, reopen) {
+  try {
+    await api("POST", `/api/conversations/${encodeURIComponent(id)}/restore`);
+  } catch (error) {
+    status(error.message, "error");
+    return;
+  }
+  await loadList(true).then(markSelected).catch(() => {});
+  if (reopen) await openConversation(id);
+  status(`Restored “${name}”.`, "ok");
+}
+
 async function deleteConversation(item = null) {
   closeChatMenu();
   const id = item ? item.id : app.conversationId;
@@ -2239,6 +2604,7 @@ async function deleteConversation(item = null) {
   if (!(await confirmAction(`Delete “${name}”?`, lines, "Move to trash")) || !still()) return;
   $("chat-menu-delete").disabled = true;
   status(notice.running ? "Stopping the work under way, then moving it to the trash…" : "Moving it to the trash…");
+  const wasOpen = app.conversationId === id;
   try {
     const moved = await api("POST", `/api/conversations/${encodeURIComponent(id)}/trash`);
     if (app.conversationId === id) cancelUploads(); // moved: its uploads go with it, nothing to ask (PR #106 N4)
@@ -2246,7 +2612,8 @@ async function deleteConversation(item = null) {
     await (app.conversationId === id ? showHome({ via: "replace" }) : !$("surface-home").hidden ? showHome({ via: "none" })
       : loadList(true).then(markSelected)).catch(() => {});
     drafts.remove(id); // after the leave kept it (V3-P78 §3.1)
-    status(`Moved “${name}” to the trash. It is deleted for good on ${localDate(moved.purge_after)}.`, "ok");
+    status(`Moved “${name}” to the trash. It is deleted for good on ${localDate(moved.purge_after)}.`, "ok",
+           ["Undo", () => undoTrash(id, name, wasOpen)]);
   } catch (error) {
     if (error.kind === "network") {
       status("Could not confirm the move; check the trash before trying again.", "warn");
@@ -3392,6 +3759,8 @@ async function loadServerInfo() {
 async function enter() {
   localStore.openWrites(); // V3-P78 §5.3: closed by a sign-out until now
   await drafts.load();
+  app.activityAsked.clear();
+  scheduleActivity(0); // V3-P80 §3.3
   loadServerInfo();
   syncFoldersLink();
   // A save that met a signed-out session goes back to its draft (PR #68 review C2).
@@ -3438,10 +3807,17 @@ async function boot() {
   // V3-P78 §3.3: what waits to be kept goes now (Safari may not finish it; the short delay is the guarantee).
   const keepNow = () => {
     if (app.placeTouched && typeof app.place === "string") drafts.set(app.place, composerDraft());
-    for (const pane of [filesPanel, filesSurface]) pane.keepNow();
+    for (const pane of [filesPanel, filesSurface]) {
+      pane.keepNow();
+      pane.keepPlace(); // a PDF's page and zoom, as the page goes (web polish 2, B3)
+      pane.pageHidden(); // a PDF's unsaved ink kept, and saved (V3-P82 §3.2)
+    }
   };
   window.addEventListener("pagehide", keepNow);
-  document.addEventListener("visibilitychange", () => { if (document.visibilityState === "hidden") keepNow(); });
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "hidden") keepNow();
+    else if ($("surface-login").hidden) readActivity(); // shown again: what changed meanwhile (V3-P80 §3.3)
+  });
   // §5.3: another tab signed out — nothing of this one is kept or written either.
   localStore.onWiped(() => { // signed out like that tab: to sign in again, where writes open again (PR #106 review B3)
     drafts.clear();
@@ -3459,6 +3835,8 @@ async function boot() {
   $("chat-menu-delete").addEventListener("click", () => deleteConversation());
   $("nav-home").addEventListener("click", () => showHome().catch((e) => status(e.message, "error")));
   $("nav-new-chat").addEventListener("click", newConversation);
+  $("nav-new-chat").title = `New chat (${newChatShortcut()})`;
+  document.addEventListener("keydown", shortcut);
   $("files-surface-slot").append(filesSurface.root);
   $("file-panel-slot").append(filesPanel.root);
   restorePanelWidth();
@@ -3515,6 +3893,13 @@ async function boot() {
   noteWindowHeight();
   window.addEventListener("resize", noteWindowHeight);
   window.addEventListener("popstate", addressPopped);
+  $("composer-text").addEventListener("paste", pasteIntoComposer);
+  $("timeline").addEventListener("scroll", syncJump, { passive: true });
+  new MutationObserver(syncJump).observe($("timeline"), { childList: true, subtree: true });
+  $("jump-latest").addEventListener("click", () => {
+    const timeline = $("timeline");
+    timeline.scrollTo({ top: timeline.scrollHeight, behavior: "smooth" });
+  });
   new MutationObserver(followTitle).observe($("topbar-title"), { childList: true, characterData: true, subtree: true });
   $("composer-text").addEventListener("keydown", (event) => {
     if (pickerKey(event)) return;
@@ -3548,6 +3933,12 @@ async function boot() {
   $("chat-menu-resume").addEventListener("click", resumeConversation);
   $("chat-menu-compact").addEventListener("click", compactConversation);
   $("chat-menu-dismiss").addEventListener("click", dismissQuestion);
+  $("question-dismiss").addEventListener("click", async () => { // not only in the ⋮ menu
+    const link = $("question-dismiss");
+    link.disabled = true; // one request (review N1)
+    $("composer-text").focus(); // the panel goes: the keyboard stays in the conversation (N2)
+    try { await dismissQuestion(); } finally { link.disabled = false; }
+  });
   $("chat-menu-model-select").addEventListener("change", (event) => setModel(event.target.value || null, null));
   $("chat-menu-effort-select").addEventListener("change", (event) =>
     setModel($("chat-menu-model-select").value || null, event.target.value || null));

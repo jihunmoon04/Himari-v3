@@ -7,7 +7,7 @@ import asyncio
 import pytest
 from testkit import SCOPE, data_for, forget_unknown_policy, new_store, text_result, user
 
-from himari.common import ASK_USER_TOOL_ID, ProviderContinuation, RunId, TextBlock, UnknownOutcomePolicy, ArtifactId, CallId, CallRef, RawRepresentation, ToolCall, ToolId
+from himari.common import ASK_USER_TOOL_ID, ProviderContinuation, RunId, TextBlock, UnknownOutcomePolicy, ArtifactId, CallId, CallRef, ConversationId, PrincipalId, RawRepresentation, ToolCall, ToolId, TrustedScope
 from himari.data.api import (
     ArtifactMutation,
     AssistantFinal,
@@ -32,15 +32,15 @@ def fresh() -> InMemoryData | SqliteData:
     return data_for(store)
 
 
-async def projected_group(data: InMemoryData | SqliteData, *tool_ids: str) -> CallRef:
+async def projected_group(data: InMemoryData | SqliteData, *tool_ids: str, scope: TrustedScope = SCOPE) -> CallRef:
     run_id = await data.prepare_run(
-        SCOPE,
+        scope,
         RunPreparation(b"{}", "application/json", RawRepresentation.ADAPTER_SERIALIZED, (), PromptBasis(0, 0), "p", "m"),
     )
-    await data.mark_dispatch(SCOPE, run_id)
-    await data.record_raw_outcome(SCOPE, run_id, RawReceived(b"{}", "application/json"))
+    await data.mark_dispatch(scope, run_id)
+    await data.record_raw_outcome(scope, run_id, RawReceived(b"{}", "application/json"))
     group = tuple(ToolCall(CallId(f"c{i}"), i, ToolId(t), {}) for i, t in enumerate(tool_ids))
-    await data.project_model_output(SCOPE, run_id, AssistantToolCalls(group))
+    await data.project_model_output(scope, run_id, AssistantToolCalls(group))
     return CallRef(run_id, CallId("c0"))
 
 
@@ -55,6 +55,41 @@ def test_send_mark_is_once_only() -> None:
         with pytest.raises(DataError) as exc:
             await data.mark_dispatch(SCOPE, run_id)
         assert exc.value.code is DataErrorCode.INVALID_STATE_TRANSITION
+
+    asyncio.run(scenario())
+
+
+def test_waiting_conversations_of_a_principal() -> None:
+    """V3-P80 §3.2: the Conversations ``find_waiting_call`` finds waiting, all at once: only the
+    principal's, none in the trash, none whose question was answered or whose group is not one ask_user."""
+    async def scenario() -> None:
+        store = new_store()
+        scopes = {name: TrustedScope(PrincipalId(owner), ConversationId(name))
+                  for name, owner in (("conv_1", "alice"), ("conv_2", "alice"), ("conv_3", "alice"),
+                                      ("conv_4", "alice"), ("conv_5", "mallory"))}
+        for scope in scopes.values():
+            store.create_conversation(scope)
+        data = data_for(store)
+        alice = PrincipalId("alice")
+        assert await data.list_waiting_conversations(alice) == ()
+        asked = {name: await projected_group(data, ASK_USER_TOOL_ID, scope=scopes[name])
+                 for name in ("conv_1", "conv_2", "conv_3", "conv_5")}
+        await projected_group(data, ASK_USER_TOOL_ID, "inside/read_file", scope=scopes["conv_4"])  # two calls
+        assert sorted(await data.list_waiting_conversations(alice)) == ["conv_1", "conv_2", "conv_3"]
+        # A newer Run that was never PROJECTED (here, only prepared) leaves the question waiting, as
+        # ``find_waiting_call`` does (review N9).
+        await data.prepare_run(scopes["conv_1"], RunPreparation(b"{}", "application/json",
+                                                                RawRepresentation.ADAPTER_SERIALIZED, (),
+                                                                PromptBasis(0, 0), "p", "m"))
+        assert await data.find_waiting_call(scopes["conv_1"]) == asked["conv_1"]
+        assert "conv_1" in await data.list_waiting_conversations(alice)
+        await data.answer_pending_call(scopes["conv_2"], asked["conv_2"], user("yes"))
+        await data.trash_conversation(scopes["conv_3"])
+        assert await data.list_waiting_conversations(alice) == ("conv_1",)
+        assert await data.list_waiting_conversations(PrincipalId("mallory")) == ("conv_5",)
+        for name, scope in scopes.items():  # the same answer as one at a time
+            if name != "conv_3":
+                assert (await data.find_waiting_call(scope) is not None) == (name in ("conv_1", "conv_5")), name
 
     asyncio.run(scenario())
 

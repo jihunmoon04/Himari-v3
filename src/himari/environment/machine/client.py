@@ -56,7 +56,11 @@ class RunnerClient:
             received = []
             failure = answer.get("error")
             if isinstance(failure, dict):
-                raise RunnerError(str(failure.get("category", "other")), str(failure.get("message", "")) or None)
+                identity = failure.get("identity")
+                raise RunnerError(str(failure.get("category", "other")), str(failure.get("message", "")) or None,
+                                  identity=[int(v) for v in identity] if isinstance(identity, list)
+                                  and len(identity) == 4 and all(isinstance(v, int) for v in identity) else None,
+                                  partial=failure.get("partial") is True)
             raise RunnerUnavailable("a malformed answer")
         except BaseException as error:
             for fd in received:

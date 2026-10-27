@@ -161,6 +161,7 @@ STATIC_FILES = {"app.css": "text/css", "app.js": "text/javascript", "app_view.js
                 "pdfpane.js": "text/javascript", "pdfjs/pdf.min.mjs": "text/javascript",
                 # Its ink (§4, §5): the strokes, perfect-freehand's outlines, the incremental update it writes.
                 "pdfink.js": "text/javascript", "pdfdoc.js": "text/javascript",
+                "inklab.js": "text/javascript",  # the ink lab (§4.6), asked for with ?ink-lab
                 "freehand/perfect-freehand.mjs": "text/javascript",
                 "pdfjs/pdf.worker.min.mjs": "text/javascript",
                 "pdfjs/wasm/openjpeg_nowasm_fallback.js": "text/javascript",
@@ -325,6 +326,14 @@ class PutBackBody(_Body):
 
     path: str = Field(min_length=1, max_length=4096)
     expected: IdentityIn
+
+
+class TruncateBody(_Body):
+    """V3-P82 §3.6: a PDF cut back to ``to``, just after one of its saves; ``expected`` its identity as read."""
+
+    path: str = Field(min_length=1, max_length=4096)
+    expected: IdentityIn
+    to: int
 
 
 class FileStateIn(_Body):
@@ -680,6 +689,7 @@ SURFACE_PATHS = ("/files", "/trash", "/settings/instructions", "/settings/memory
 PAGE_ID = re.compile(r"[A-Za-z0-9_-]{1,128}")  # a conversation's id in /c/<id>
 SAVE_ROUTES = {("PUT", "/api/machine/file"), ("POST", "/api/machine/file/install")}  # V3-P78 §4.2: the same text
 PDF_APPEND_PATH = "/api/machine/pdf/append"
+PDF_TRUNCATE_PATH = "/api/machine/pdf/truncate"
 EXPECTED_HEADER = "X-Himari-Expected"  # a PDF's identity as the browser read it: four decimal numbers (V3-P77 §5.3)
 IDENTITY_HEADER = "X-Himari-Identity"  # a download's identity, as the bytes sent (§5.3)
 
@@ -713,7 +723,8 @@ def folder_conversations_view(folder: FolderConversations) -> dict[str, Any]:
 def shown_file_view(shown: ShownFile) -> dict[str, Any]:
     """V3-P75 §5.2: text as text; an image or other file by its kind only."""
     return {"path": shown.path, "size": shown.size, "identity": identity_out(shown.identity), "modified": shown.modified,
-            "kind": shown.kind, "text": shown.text, "truncated": shown.truncated, "editable": shown.editable}
+            "kind": shown.kind, "text": shown.text, "truncated": shown.truncated, "editable": shown.editable,
+            "cloud_synced": shown.cloud_synced}
 
 
 def changes_view(changes: ChangesView, running: bool) -> dict[str, Any]:
@@ -963,8 +974,12 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
 
     @app.exception_handler(ExplorerRefused)
     async def explorer_refused(request: Request, error: ExplorerRefused) -> JSONResponse:
-        return JSONResponse({"error": {"code": error.category, "message": str(error)}},
-                            status_code=EXPLORER_STATUS.get(error.category, 400))
+        body: dict[str, Any] = {"code": error.category, "message": str(error)}
+        if error.identity is not None:  # a PDF's failed save: the file as it is now (V3-P82 §3.6)
+            body["identity"] = identity_out(error.identity)
+        if error.partial:
+            body["partial"] = True
+        return JSONResponse({"error": body}, status_code=EXPLORER_STATUS.get(error.category, 400))
 
     @app.exception_handler(ChangeConflict)
     async def change_conflict(request: Request, error: ChangeConflict) -> JSONResponse:
@@ -1252,13 +1267,23 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
 
     @app.post(PDF_APPEND_PATH)
     async def append_pdf(request: Request, path: str, who: PrincipalId = Depends(principal)) -> dict[str, Any]:
-        """V3-P77 §5.3: ink saved into a PDF — the body is the bytes to add after it (an incremental update, at
-        most 8 MiB), ``X-Himari-Expected`` its identity as read. 409 changed; 422 too_large over 64 MiB in all."""
+        """V3-P77 §5.3, V3-P82 §3.6: ink saved into a PDF — the body is the bytes to add after it (an incremental
+        update, at most 8 MiB), written at its end in place; ``X-Himari-Expected`` its identity as read. 409
+        changed; 422 too_large over 64 MiB in all; a failed write's error tells the file's ``identity`` after it
+        and ``partial`` when bytes of it were left."""
         if request.headers.get("content-type", "").split(";")[0].strip() != "application/octet-stream":
             raise ApiError(415, "invalid_argument", "The ink comes as application/octet-stream.")
         expected = identity_in(request.headers.get(EXPECTED_HEADER, ""))
         saved = await himari(request).explorer(who).append_pdf(path, await request.body(), expected)
-        return {"path": saved.path, "identity": identity_out(saved.identity), "previous_kept": saved.previous_kept}
+        return {"path": saved.path, "identity": identity_out(saved.identity)}
+
+    @app.post(PDF_TRUNCATE_PATH)
+    async def truncate_pdf(body: TruncateBody, request: Request,
+                           who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+        """V3-P82 §3.6: a PDF cut back to ``to``, just after one of its saves' ``%%EOF`` — a save whose writing
+        was cut short taken off its end; ``expected``: its identity as read."""
+        saved = await himari(request).explorer(who).truncate_pdf(body.path, [int(v) for v in body.expected], body.to)
+        return {"path": saved.path, "identity": identity_out(saved.identity)}
 
     @app.get("/api/machine/image")
     async def show_image(request: Request, path: str, who: PrincipalId = Depends(principal)) -> Response:
@@ -1279,6 +1304,14 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
         page = await application.data.list_conversations(who, limit=limit, offset=offset, trashed=trashed)
         return {"items": [trashed_view(s, application.trash_days) if trashed else summary_view(s) for s in page],
                 "next_offset": offset + limit if len(page) == limit else None}  # may lead to an empty page
+
+    @app.get("/api/conversations/activity")  # before /api/conversations/{conversation_id}, which would take it
+    async def conversation_activity(request: Request, who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+        """V3-P80 §3.2: which Conversations work now and which wait for an answer. Not a read of any one of
+        them: it never counts as the user being there (``seen``, V3-P62 §5)."""
+        application = himari(request)
+        return {"working": sorted(application.runner.running(who)),
+                "waiting": sorted(await application.data.list_waiting_conversations(who))}
 
     @app.post("/api/conversations", status_code=201)
     async def create_conversation(body: CreateBody, request: Request,

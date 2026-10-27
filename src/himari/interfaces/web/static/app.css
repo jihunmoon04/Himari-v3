@@ -1613,6 +1613,47 @@ details > summary {
   background: var(--code-bg);
 }
 
+/* V3-P80 §3.1: another conversation at work (a slow pulse), or waiting for an answer (filled). */
+.activity-dot {
+  display: inline-block;
+  flex: none;
+  width: 8px;
+  height: 8px;
+  margin-left: 8px;
+  border-radius: 50%;
+  vertical-align: middle;
+}
+
+.activity-dot.is-working {
+  background: var(--accent);
+  animation: activity-pulse 1.6s ease-in-out infinite;
+}
+
+.activity-dot.is-waiting {
+  background: var(--warn-edge);
+}
+
+/* In the list the title ellipsizes: the dot sits at the row's end, never cut off. */
+.conv-row > .activity-dot {
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  margin: -4px 0 0;
+}
+
+.conversation-row > .conv-row:has(> .activity-dot) { /* over the row's own padding (review N1) */
+  padding-right: 24px;
+}
+
+@keyframes activity-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .activity-dot.is-working { animation: none; }
+}
+
 .item-actions {
   display: flex;
   gap: var(--space-1);
@@ -2049,6 +2090,54 @@ details > summary {
   width: 100%;
   margin-left: auto;
   margin-right: auto;
+}
+
+.composer-wrap {
+  position: relative;
+}
+
+/* Back to the end of the conversation, floating just above the composer. */
+.composer-wrap > .jump-latest {
+  position: absolute;
+  top: -48px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  border: 1px solid var(--border-subtle);
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  z-index: 2;
+  min-height: 36px; /* touch layouts make buttons 44px tall: a circle stays one (review N4) */
+  padding: 0;
+}
+
+.composer-wrap > .jump-latest[hidden] {
+  display: none;
+}
+
+.composer-hint.is-over {
+  color: var(--warn);
+}
+
+.status-action {
+  padding: 0 var(--space-1);
+  font-size: inherit;
+  text-decoration: underline;
+}
+
+.attach-chip-retry {
+  background: none;
+  border: none;
+  color: var(--accent);
+  font-size: 12px;
+  padding: 0 4px;
+  cursor: pointer;
 }
 
 /* -- composer ------------------------------------------------------------ */
@@ -2540,6 +2629,10 @@ details > summary {
     display: none;
   }
 
+  .composer-hint.is-counting { /* the count near the limit shows on phones too (review B1) */
+    display: block;
+  }
+
   .compact-action-button {
     width: 44px;
     min-width: 44px;
@@ -2606,6 +2699,11 @@ details > summary {
   margin: 0;
   font-size: 14px;
   color: var(--accent);
+}
+
+.question-panel .question-text { /* a long question scrolls inside the panel (review N6) */
+  max-height: 40vh;
+  overflow-y: auto;
 }
 
 .question-text {
@@ -3795,6 +3893,17 @@ button.files-crumb:hover { background: var(--surface-hover); color: var(--text);
 /* Ink (V3-P77 §4): over the page, multiplied with it, so a highlighter leaves the text under it dark. */
 .pdf-ink { position: absolute; inset: 0; width: 100%; height: 100%; mix-blend-mode: multiply; pointer-events: none; }
 .pdf-view.is-inking .pdf-pages { cursor: crosshair; }
+/* The stroke being drawn: over the part of the page in view, multiplied as the ink is. */
+.pdf-live { position: absolute; mix-blend-mode: multiply; pointer-events: none; }
+/* The ink lab (V3-P77 §4.6), only when asked for: a small box in the corner. */
+.ink-lab { position: fixed; right: 12px; bottom: 12px; z-index: 30; max-width: min(320px, calc(100vw - 24px)); padding: 8px 10px; border: 1px solid var(--border-strong); border-radius: var(--radius-sm); background: var(--bg); color: var(--text); font-size: 12px; box-shadow: 0 2px 8px rgba(0, 0, 0, .18); }
+.ink-lab-title { cursor: pointer; font-weight: 600; }
+.ink-lab-numbers { margin: 6px 0; font: 11px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; color: var(--text-muted); }
+.ink-lab-settings { display: grid; gap: 4px; }
+.ink-lab-row { display: grid; grid-template-columns: 76px 1fr 34px; align-items: center; gap: 6px; }
+.ink-lab-slider { width: 100%; min-height: 28px; }
+.ink-lab-value { text-align: right; font-variant-numeric: tabular-nums; }
+.ink-lab-reset { justify-self: start; }
 .files-body:has(.pdf-view) > .files-bar { flex: 0 0 auto; }
 .files-ink-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 2px; }
 .files-ink-bar { flex: 0 0 auto; min-width: 0; }
@@ -3815,12 +3924,22 @@ button.files-crumb:hover { background: var(--surface-hover); color: var(--text);
 .files-ink-width { min-height: 28px; padding: 2px 8px; font-size: 12px; border: 1px solid var(--border-strong); border-radius: var(--radius-pill); background: none; color: var(--text); }
 .files-ink-tools .files-state { margin-left: 6px; }
 .pdf-page-note { position: sticky; top: 0; margin: 0; padding: var(--space-3); color: #5f6368; font-size: 13px; } /* on paper, whatever the theme */
-.files-page { font-size: 12px; color: var(--text-muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
+/* Widths kept as the text changes ("9 / 12" → "10 / 12", "Saved" → "Saving…"), so a head near its wrap point
+   does not flip lines — and move the pages under the pen — while writing or scrolling. */
+.files-page { font-size: 12px; color: var(--text-muted); white-space: nowrap; font-variant-numeric: tabular-nums; min-width: 7ch; text-align: right; }
+.files-ink-tools .files-state { min-width: 7ch; }
 .files-page[hidden] { display: none; }
 .files-page-input { width: 5em; font-size: 12px; padding: 2px 6px; border: 1px solid var(--border-strong); border-radius: var(--radius-sm); background: var(--bg); color: var(--text); }
 .files-state-dot { width: 7px; height: 7px; flex: 0 0 7px; border-radius: 50%; background: var(--ok); }
 .files-state-dot.is-dirty { background: var(--warn-edge); }
 .files-state { color: var(--text-muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 260px; }
+/* A note (often an error) reads whole: it wraps, a little larger, in the warning colour. */
+.files-state.is-note { white-space: normal; max-width: 420px; font-size: 13px; color: var(--warn); }
+.files-zoom-tools { display: inline-flex; align-items: center; gap: 2px; }
+.files-zoom { min-width: 32px; padding: 2px 6px; font-size: 14px; }
+#conversation-list > .conversation-group { list-style: none; padding: var(--space-3) var(--space-3) var(--space-1); font-size: 11px; font-weight: 600; letter-spacing: .02em; color: var(--text-muted); }
+.question-dismiss { display: inline; padding: 0; min-height: 0; font-size: inherit; text-decoration: underline; }
+@media (pointer: coarse) { .question-dismiss { display: inline-block; min-height: 40px; padding: 0 4px; } } /* a finger's size (N3) */
 .files-save { min-height: 32px; padding: 4px 14px; font-size: 13px; }
 .files-save:disabled { opacity: .45; cursor: default; }
 .files-working { font-size: 12px; color: var(--warn); background: var(--warn-soft); border: 1px solid var(--warn-edge); border-radius: var(--radius-pill); padding: 2px 8px; white-space: nowrap; }

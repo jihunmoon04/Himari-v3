@@ -250,7 +250,7 @@ def test_static_ui_and_security_headers(server: Server) -> None:
     assert server.client.get("/assets/katex/katex.min.css").headers["content-type"] == "text/css; charset=utf-8"
     font = server.client.get("/assets/katex/fonts/KaTeX_Main-Regular.woff2")
     assert font.status_code == 200 and font.headers["content-type"] == "font/woff2" and font.content[:4] == b"wOF2"
-    for name in ("pdfpane.js", "pdfink.js", "pdfdoc.js", "freehand/perfect-freehand.mjs", "pdfjs/pdf.min.mjs", "pdfjs/pdf.worker.min.mjs", "pdfjs/wasm/openjpeg_nowasm_fallback.js",
+    for name in ("pdfpane.js", "pdfink.js", "pdfdoc.js", "inklab.js", "freehand/perfect-freehand.mjs", "pdfjs/pdf.min.mjs", "pdfjs/pdf.worker.min.mjs", "pdfjs/wasm/openjpeg_nowasm_fallback.js",
                  "pdfjs/wasm/jbig2_nowasm_fallback.js"):  # the PDF view (V3-P77 §3.2): modules need a script type
         got = server.client.get(f"/assets/{name}")
         assert got.status_code == 200 and got.headers["content-type"] == "text/javascript; charset=utf-8", name
@@ -351,6 +351,30 @@ def test_cli_bearer_works_without_origin_and_the_secret_itself_does_not(server: 
 
 
 # --- conversations -----------------------------------------------------------------------------
+
+
+def test_activity_tells_waiting_and_working_without_counting_as_a_reader(server: Server,
+                                                                         monkeypatch: pytest.MonkeyPatch) -> None:
+    """V3-P80 §3.2: which Conversations wait for an answer and which work, in one read that is never
+    ``seen`` (V3-P62 §5); the trash left out; signed in only."""
+    assert server.client.get("/api/conversations/activity").status_code == 401
+    server.sign_in()
+    asking = server.post("/api/conversations", {}).json()["id"]
+    idle = server.post("/api/conversations", {}).json()["id"]
+    queue(server, calls((ASK_USER_TOOL_ID, {"question": "Which city?"})))
+    assert server.post(f"/api/conversations/{asking}/messages", {"text": "plan a trip"}).status_code == 202
+    server.wait_idle(asking)
+    assert server.application is not None
+    readers: list[object] = []
+    monkeypatch.setattr(server.application, "seen", lambda scope: readers.append(scope))
+    activity = server.client.get("/api/conversations/activity")
+    assert activity.status_code == 200 and activity.json() == {"working": [], "waiting": [asking]}
+    assert readers == []  # not a reader of any of them
+    monkeypatch.setattr(server.application.runner, "running", lambda who: (idle,))
+    assert server.client.get("/api/conversations/activity").json() == {"working": [idle], "waiting": [asking]}
+    monkeypatch.undo()
+    assert server.post(f"/api/conversations/{asking}/trash").status_code == 200
+    assert server.client.get("/api/conversations/activity").json()["waiting"] == []
 
 
 def test_conversation_flow_with_a_tool_and_a_question(server: Server) -> None:

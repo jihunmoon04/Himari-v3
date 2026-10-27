@@ -1,4 +1,5 @@
-"""Saving ink into a PDF over the API (V3-P77 §5, §6): a real runner (fake sandbox) on a temporary home."""
+"""Saving ink into a PDF over the API (V3-P77 §5, §6; V3-P82 §3.6: written in place at its end, no copy and
+no previous version): a real runner (fake sandbox) on a temporary home."""
 
 from __future__ import annotations
 
@@ -91,31 +92,104 @@ def test_the_increment_check() -> None:
     assert not increment_ok(len(original), f"startxref\n{len(original) + 999}\n%%EOF\n".encode())  # past the end
 
 
-def test_ink_is_added_after_the_pdf_and_its_previous_version_kept(server: Server, kit: RunnerKit) -> None:
+def test_ink_is_added_at_the_end_in_place_and_nothing_else_kept(server: Server, kit: RunnerKit) -> None:
     original = FIXTURE.read_bytes()
     target, path = place(kit, original)
+    inode = target.stat().st_ino
     read = server.client.get("/api/machine/download", params={"path": path})
     assert read.content == original
     seen = read.headers["x-himari-identity"].split(",")
     assert seen == identity(server, path)  # the identity of the bytes sent, to save against (§5.3)
+    shown = server.client.get("/api/machine/file", params={"path": path}).json()
+    assert shown["kind"] == "pdf" and shown["cloud_synced"] is False  # a local disk: saved as written (§3.2)
     added = increment(original)
     saved = append(server, path, added, seen)
     assert saved.status_code == 200, saved.text
     assert target.read_bytes() == original + added  # the original bytes untouched
-    assert saved.json()["previous_kept"] and saved.json()["identity"] == identity(server, path)
-    kept = versions(server, path)
-    assert [(v["reason"], v["size"]) for v in kept] == [("ink", len(original))]
-    as_kept = server.client.get(f"/api/machine/versions/{kept[0]['id']}/download", params={"path": path})
-    assert as_kept.content == original and as_kept.headers["content-security-policy"].startswith("sandbox")
-    refused(server.client.get(f"/api/machine/versions/{kept[0]['id']}", params={"path": path}), 415, "not_regular")
-    # Within 30 minutes of that version, another save keeps none: that one holds the PDF before the ink.
+    assert target.stat().st_ino == inode  # the same file, written in place: no temporary file renamed over it
+    assert saved.json() == {"path": path, "identity": identity(server, path)}
+    assert versions(server, path) == []  # no copy: the file itself holds what it was (V3-P82 §3.6)
     second = increment(original + added, 91)
     again = append(server, path, second, saved.json()["identity"])
-    assert again.status_code == 200 and again.json()["previous_kept"]
-    assert target.read_bytes() == original + added + second and len(versions(server, path)) == 1
+    assert again.status_code == 200 and target.read_bytes() == original + added + second
+    assert versions(server, path) == [] and not [n for n in os.listdir(target.parent) if n.startswith(".himari-")]
     # Saved against what was read: changed since, nothing written (ink made on the old bytes).
     refused(append(server, path, increment(original, 92), seen), 409, "changed")
     assert target.read_bytes() == original + added + second
+
+
+def test_a_save_cut_short_is_taken_off_its_end(server: Server, kit: RunnerKit) -> None:
+    """§3.6: a PDF whose last save was cut short (a power cut) is cut back to just after one of its %%EOF —
+    only there, only as read."""
+    original = FIXTURE.read_bytes()
+    target, path = place(kit, original + b"\n12 0 obj << /Half")
+    seen = identity(server, path)
+
+    def cut(to: int, expected: list[str]) -> Any:
+        return server.post("/api/machine/pdf/truncate", {"path": path, "to": to, "expected": expected})
+
+    refused(cut(len(original) + 3, seen), 400, "invalid")  # not after a %%EOF
+    refused(cut(len(original) + 100, seen), 400, "invalid")  # past its end
+    refused(cut(len(original), [seen[0], "999", seen[2], seen[3]]), 409, "changed")
+    done = cut(len(original), seen)
+    assert done.status_code == 200, done.text
+    assert target.read_bytes() == original and done.json()["identity"] == identity(server, path)
+
+
+def test_a_file_on_a_cloud_mount_is_told(server: Server, kit: RunnerKit, monkeypatch: pytest.MonkeyPatch) -> None:
+    """§3.2 (Q5): the open's filesystem tells a cloud mount, for every kind of file."""
+    from himari.runner import api as runner
+
+    _, path = place(kit, FIXTURE.read_bytes())
+    (kit.home / "projects/a/note.txt").write_text("hi\n")
+    machine = explorer_of(server)._machine
+    real_call = machine.call
+
+    async def on_rclone(op: str, args: dict[str, Any], fds: Any = ()) -> Any:
+        result, received = await real_call(op, args, fds)
+        if op == runner.OPEN:
+            result = {**result, "filesystem": "fuse.rclone"}
+        return result, received
+
+    monkeypatch.setattr(machine, "call", on_rclone)
+    for shown in (path, str(kit.home / "projects/a/note.txt")):
+        assert server.client.get("/api/machine/file", params={"path": shown}).json()["cloud_synced"] is True
+
+
+def test_a_file_with_other_names_or_read_only_is_not_written(server: Server, kit: RunnerKit) -> None:
+    original = FIXTURE.read_bytes()
+    target, path = place(kit, original)
+    os.link(target, target.parent / "same.pdf")  # a hard link: in place, the other name would change too
+    refused(append(server, path, increment(original), identity(server, path)), 400, "links")
+    os.unlink(target.parent / "same.pdf")
+    if os.geteuid() != 0:
+        target.chmod(0o444)
+        refused(append(server, path, increment(original), identity(server, path)), 403, "access")
+        target.chmod(0o644)
+    assert target.read_bytes() == original
+
+
+def test_a_failed_write_tells_the_file_as_it_is(server: Server, kit: RunnerKit,
+                                                monkeypatch: pytest.MonkeyPatch) -> None:
+    """§3.6: the runner cut its bytes back (or could not); the answer carries the file's identity then, to save
+    against next, and whether bytes were left."""
+    from himari.runner import api as runner
+
+    original = FIXTURE.read_bytes()
+    _, path = place(kit, original)
+    machine = explorer_of(server)._machine
+    real_call = machine.call
+
+    async def failing(op: str, args: dict[str, Any], fds: Any = ()) -> Any:
+        if op == runner.APPEND:
+            raise runner.RunnerError(runner.OTHER, "disk full", identity=[1, 2, 3, 4], partial=True)
+        return await real_call(op, args, fds)
+
+    monkeypatch.setattr(machine, "call", failing)
+    failed = append(server, path, increment(original), identity(server, path))
+    assert failed.status_code == 500
+    assert failed.json()["error"] == {"code": "other", "message": "disk full", "identity": ["1", "2", "3", "4"],
+                                      "partial": True}
 
 
 def test_what_is_not_saved(server: Server, kit: RunnerKit) -> None:
@@ -138,53 +212,37 @@ def test_what_is_not_saved(server: Server, kit: RunnerKit) -> None:
     assert target.read_bytes() == original and versions(server, path) == []
 
 
-def test_a_previous_version_is_kept_or_nothing_is_saved(server: Server, kit: RunnerKit,
-                                                        monkeypatch: pytest.MonkeyPatch) -> None:
-    """§5.3: before the replace, a store that cannot keep the version refuses the save; after it, a failure
-    to keep it is told (previous_kept false). An older runner refuses before anything is sent."""
+def test_an_older_runner_is_told_and_no_store_is_needed(server: Server, kit: RunnerKit,
+                                                       monkeypatch: pytest.MonkeyPatch) -> None:
+    """§3.6: a runner older than protocol 4 refuses before anything is sent; the PDFs' store is not needed for
+    a save any more (nothing is kept)."""
     original = FIXTURE.read_bytes()
     target, path = place(kit, original)
     explorer = explorer_of(server)
-    assert explorer.pdf_versions is not None
 
-    async def old() -> bool:
+    async def old(fresh: bool = False) -> bool:
         return False
 
     with monkeypatch.context() as m:
-        m.setattr(explorer._machine, "copies_large", old)
+        m.setattr(explorer._machine, "appends", old)
         refused(append(server, path, increment(original), identity(server, path)), 422, "unsupported")
-    with monkeypatch.context() as m:
-        m.setattr(explorer.pdf_versions, "ready_for", lambda size: False)
-        refused(append(server, path, increment(original), identity(server, path)), 507, "versions_unavailable")
     assert target.read_bytes() == original
-
-    def broken(*args: Any, **kwargs: Any) -> None:
-        raise OSError("disk full")
-
-    monkeypatch.setattr(explorer.pdf_versions, "keep", broken)
+    monkeypatch.setattr(explorer, "pdf_versions", None)
     saved = append(server, path, increment(original), identity(server, path))
-    assert saved.status_code == 200 and saved.json()["previous_kept"] is False
-    assert target.read_bytes().startswith(original) and versions(server, path) == []
+    assert saved.status_code == 200 and target.read_bytes().startswith(original)
 
 
 def test_a_large_pdf_is_saved_deleted_and_put_back_with_its_content(server: Server, kit: RunnerKit,
                                                                     monkeypatch: pytest.MonkeyPatch) -> None:
-    """§6.1, §6.3: over the editor's 1 MiB, up to 64 MiB, a PDF keeps its versions."""
+    """V3-P77 §6.1, §6.3: over the editor's 1 MiB, up to 64 MiB, a PDF is saved in place (V3-P82 §3.6) and
+    deleted with its content kept, put back in one step, and its kept version can be put back over it."""
     original = FIXTURE.read_bytes()
     padded = original.replace(b"%%EOF", b"%" + b"p" * (3 * MiB) + b"\n%%EOF", 1)  # a comment: still a PDF
     target, path = place(kit, padded)
     added = increment(padded)
     assert append(server, path, added, identity(server, path)).status_code == 200
-    ink = versions(server, path)
-    assert [(v["reason"], v["size"]) for v in ink] == [("ink", len(padded))]
-    # Put back over the file: what it holds now is kept first, whatever the 30 minutes.
-    stale = identity(server, path)
-    back = server.post(f"/api/machine/versions/{ink[0]['id']}/put_back", {"path": path, "expected": stale})
-    assert back.status_code == 200, back.text
-    assert target.read_bytes() == padded and back.json()["previous_kept"]
-    assert [v["reason"] for v in versions(server, path)] == ["restore", "ink"]
-    refused(server.post(f"/api/machine/versions/{ink[0]['id']}/put_back", {"path": path, "expected": stale}), 409,
-            "changed")
+    assert versions(server, path) == []
+    inked = padded + added
     # Deleted: its content kept in the PDFs' store, put back in one step.
     explorer = explorer_of(server)
     assert explorer.pdf_versions is not None
@@ -193,7 +251,7 @@ def test_a_large_pdf_is_saved_deleted_and_put_back_with_its_content(server: Serv
         m.setattr(explorer.pdf_versions, "ready_for", lambda size: False)
         refused(server.post("/api/machine/file/delete", {"path": path, "expected": now}), 507, "versions_unavailable")
 
-    async def old() -> bool:
+    async def old(fresh: bool = False) -> bool:
         return False
 
     with monkeypatch.context() as m:
@@ -203,10 +261,19 @@ def test_a_large_pdf_is_saved_deleted_and_put_back_with_its_content(server: Serv
     gone = server.post("/api/machine/file/delete", {"path": path, "expected": now})
     assert gone.status_code == 200 and gone.json()["previous_kept"] and not target.exists()
     deleted = server.client.get("/api/machine/versions/deleted", params={"path": "~/projects/a"}).json()["items"]
-    assert [(d["name"], d["size"]) for d in deleted] == [("notes.pdf", len(padded))]
+    assert [(d["name"], d["size"]) for d in deleted] == [("notes.pdf", len(inked))]
     put = server.post(f"/api/machine/versions/{deleted[0]['id']}/restore", {"path": path})
     assert put.status_code == 201, put.text
-    assert target.read_bytes() == padded
+    assert target.read_bytes() == inked
+    # Its kept version put back over it: what it holds now is kept first.
+    assert append(server, path, increment(inked, 94), identity(server, path)).status_code == 200
+    stale = identity(server, path)
+    back = server.post(f"/api/machine/versions/{deleted[0]['id']}/put_back", {"path": path, "expected": stale})
+    assert back.status_code == 200, back.text
+    assert target.read_bytes() == inked and back.json()["previous_kept"]
+    assert [v["reason"] for v in versions(server, path)] == ["restore", "delete"]
+    refused(server.post(f"/api/machine/versions/{deleted[0]['id']}/put_back", {"path": path, "expected": stale}),
+            409, "changed")
 
 
 def test_a_large_file_that_is_not_a_pdf_is_deleted_as_before(server: Server, kit: RunnerKit) -> None:
@@ -219,8 +286,9 @@ def test_a_large_file_that_is_not_a_pdf_is_deleted_as_before(server: Server, kit
 
 def test_a_runner_rolled_back_since_it_was_asked_fails_closed(server: Server, kit: RunnerKit,
                                                              monkeypatch: pytest.MonkeyPatch) -> None:
-    """PR #103 review P1: HIMARI was told protocol 3; the runner is an older one now. Its refusals — an unknown
-    ``delete_copied``, a large replace with ``copy_max`` ignored — leave the PDF as it was, and are told."""
+    """PR #103 review P1, V3-P82 §3.6: HIMARI was told protocol 4; the runner is an older one now. Its refusals
+    — an unknown ``append`` or ``delete_copied``, a large replace with ``copy_max`` ignored — leave the PDF as
+    it was, and are told."""
     from himari.runner import api as runner
 
     original = FIXTURE.read_bytes()
@@ -228,14 +296,14 @@ def test_a_runner_rolled_back_since_it_was_asked_fails_closed(server: Server, ki
     target, path = place(kit, padded)
     machine = explorer_of(server)._machine
     real_call = machine.call
-    assert append(server, path, increment(padded), identity(server, path)).status_code == 200  # told: 3
+    assert append(server, path, increment(padded), identity(server, path)).status_code == 200  # told: 4
     assert machine._protocol == runner.PROTOCOL_VERSION
     saved = target.read_bytes()
 
     async def older(op: str, args: dict[str, Any], fds: Any = ()) -> Any:
         if op == runner.HELLO:
             return {"version": 2}, []
-        if op == runner.DELETE_COPIED:
+        if op in (runner.DELETE_COPIED, runner.APPEND, runner.TRUNCATE):
             raise runner.RunnerError(runner.INVALID, f"unknown operation {op}")
         return await real_call(op, {k: v for k, v in args.items() if k != "copy_max"}, fds)  # ignored
 
@@ -247,38 +315,3 @@ def test_a_runner_rolled_back_since_it_was_asked_fails_closed(server: Server, ki
     machine._protocol = runner.PROTOCOL_VERSION
     refused(append(server, path, increment(saved, 93), identity(server, path)), 422, "unsupported")
     assert target.read_bytes() == saved
-
-
-def test_a_copy_given_up_on_never_writes_anywhere(server: Server, kit: RunnerKit,
-                                                  monkeypatch: pytest.MonkeyPatch) -> None:
-    """PR #103 review P1: the copy is the copying thread's own file, handed over only when whole: given up on
-    (a slow mount), it is closed when it ends — never written into a descriptor closed or reused meanwhile."""
-    import threading
-    import time
-
-    from himari.bootstrap import explorer as module
-
-    original = FIXTURE.read_bytes()
-    target, path = place(kit, original)
-    gate = threading.Event()
-    made: list[Any] = []
-    real = module._pdf_with
-
-    def slow(source: int, size: int, added: bytes) -> Any:
-        gate.wait(10)
-        body = real(source, size, added)
-        made.append(body)
-        return body
-
-    monkeypatch.setattr(module, "_pdf_with", slow)
-    monkeypatch.setattr(module, "PDF_COPY_SECONDS", 0.2)
-    refused(append(server, path, increment(original), identity(server, path)), 504, "timed_out")
-    reused = [os.open(str(kit.home / "projects/a/main.c"), os.O_RDONLY) for _ in range(4)]  # numbers taken again
-    gate.set()
-    deadline = time.monotonic() + 10
-    while not (made and made[0].closed) and time.monotonic() < deadline:
-        time.sleep(0.02)
-    for fd in reused:
-        os.close(fd)
-    assert made and made[0].closed  # the given-up copy, closed by the thread's end
-    assert target.read_bytes() == original and (kit.home / "projects/a/main.c").read_text() == "int main(){}\n"

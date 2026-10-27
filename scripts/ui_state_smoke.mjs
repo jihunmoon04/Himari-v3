@@ -32,7 +32,8 @@ class FakeElement {
 function page() {
   const nodes = new Map();
   const node = (id) => {
-    if (!nodes.has(id)) nodes.set(id, { value: "", disabled: false, hidden: true, focus() {}, close() {} });
+    if (!nodes.has(id)) nodes.set(id, { value: "", disabled: false, hidden: true, focus() {}, close() {}, dataset: {},
+                                       classList: { toggle() {}, add() {}, remove() {} } });
     return nodes.get(id);
   };
   const context = vm.createContext({
@@ -40,12 +41,13 @@ function page() {
     window: { matchMedia: () => ({ matches: false }) },
     AppViews: class { reset() {} }, FilesPane: class { refresh() {} openFolder() {} }, console, setTimeout, clearTimeout,
     LiveAnswer: class { reset() {} shown() {} keepLast() {} settle() {} open() {} restyle() {} },
-    localStore,
+    localStore, rememberLab() {}, location: { search: "" },
   });
   const run = (code) => vm.runInContext(code, context);
   run(draftsSource);
   run(source);
   run("status = () => {}; abandonExpansion = () => {}; autosize = () => {}; renderAttachments = () => {}; refresh = async () => {}; poll = () => {};");
+  run("scheduleActivity = () => {};"); // V3-P80's 5 s read would keep this process alive
   return { context, run, node };
 }
 
@@ -80,7 +82,7 @@ function page() {
 for (const scenario of ["same", "edited", "navigated", "failed", "stale-failure"]) {
   const p = page(), response = deferred();
   p.context.response = response.promise;
-  p.run("app.conversationId = 'one'; app.place = 'one'; app.generation = 1; var requests = 0; var notices = []; status = (text) => notices.push(text); api = () => { requests++; return response; };");
+  p.run("app.conversationId = 'one'; app.place = 'one'; app.generation = 1; var requests = 0; var notices = []; status = (text) => notices.push(text); api = (method, path) => { if (path === '/api/conversations/activity') return Promise.resolve({ working: [], waiting: [] }); requests++; return response; };");
   p.node("composer-text").value = "  submitted draft  ";
   const pending = p.run("sendMessage({ preventDefault() {} })");
   if (scenario === "edited") p.node("composer-text").value = "next draft";
@@ -104,7 +106,7 @@ for (const scenario of ["same", "edited", "navigated", "failed", "stale-failure"
 {
   const p = page(), response = deferred();
   p.context.response = response.promise;
-  p.run("app.conversationId = 'one'; app.place = 'one'; var requests = 0; api = () => { requests++; return response; };");
+  p.run("app.conversationId = 'one'; app.place = 'one'; var requests = 0; api = (method, path) => { if (path === '/api/conversations/activity') return Promise.resolve({ working: [], waiting: [] }); requests++; return response; };");
   p.node("composer-text").value = "one message";
   const first = p.run("sendMessage({ preventDefault() {} })");
   await p.run("sendMessage({ preventDefault() {} })");
@@ -383,4 +385,75 @@ for (const asyncFailure of [false, true]) {
   assert.equal(p.context.enterSends(key()), true, "rotated, with a hardware keyboard");
 }
 
-console.log("UI async regression checks: passed (drafts, keyboard and shell motion)");
+// A file HIMARI wrote on this server opens beside the conversation (the web UX review): the path the server
+// resolved, from the result — never the arguments joined to today's working folder (review B1).
+{
+  const p = page();
+  const entry = (toolId, text) => ({ toolId, args: { path: "relative.txt" }, result: { text } });
+  assert.equal(p.context.openableWrite(entry("machine/write_file", "created /home/u/a.py (12 bytes)")), "/home/u/a.py");
+  assert.equal(p.context.openableWrite(entry("machine/write_file", "updated /home/u/my notes.md (3 bytes)")),
+               "/home/u/my notes.md");
+  assert.equal(p.context.openableWrite(entry("machine/edit_file", "edited /etc/x.conf: replaced 2 occurrence(s)")),
+               "/etc/x.conf");
+  assert.equal(p.context.openableWrite(entry("machine/write_file",
+    "created /home/u/a.py, but writing it did not finish; its content may be partial — read it and write it again")), null);
+  assert.equal(p.context.openableWrite(entry("machine/read_file", "created /home/u/a.py (1 bytes)")), null);
+  assert.equal(p.context.openableWrite(entry("inside/write_file", "created /home/u/a.py (1 bytes)")), null);
+  assert.equal(p.context.openableWrite({ toolId: "machine/write_file", args: {}, result: null }), null);
+}
+
+// The list's headings: Today, Yesterday, … by the day a conversation was last active (local days).
+{
+  const p = page();
+  const ago = (days) => new Date(Date.now() - days * 86400000).toISOString();
+  assert.equal(p.context.activityGroup(new Date().toISOString()), "Today");
+  assert.equal(p.context.activityGroup(ago(1)), "Yesterday");
+  assert.equal(p.context.activityGroup(ago(3)), "Previous 7 days");
+  assert.equal(p.context.activityGroup(ago(12)), "Previous 30 days");
+  assert.equal(p.context.activityGroup(ago(90)), "Older");
+}
+
+// V3-P82 §6.3: this tab saved a PDF's ink — the chips pointing at it as it was (the composer's, and the drafts
+// kept for other places) point at it now; other files' and other versions' chips stay, and so does each
+// draft's time (only its chips changed).
+{
+  const p = page();
+  p.run(`
+    var PDF = "/home/u/notes.pdf";
+    app.references = [{ key: "a", path: PDF, identity: ["1", "2", "3", "5"], stale: true },
+                      { key: "b", path: PDF, identity: ["1", "2", "3", "4"] },
+                      { key: "c", path: "/home/u/other.pdf", identity: ["1", "2", "3", "5"] }];
+    drafts.now = () => 5;
+    drafts.set("elsewhere", { text: "about it", attachments: [], references: [{ path: PDF, identity: [1, 2, 3, 5] }] });
+    drafts.now = () => 99;
+    followSave({ path: PDF, from: ["1", "2", "3", "5"], to: ["9", "9", "9", "9"] });
+  `);
+  assert.deepEqual(JSON.parse(p.run("JSON.stringify(app.references.map((r) => [r.key, r.identity, Boolean(r.stale)]))")),
+                   [["a", ["9", "9", "9", "9"], false], ["b", ["1", "2", "3", "4"], false],
+                    ["c", ["1", "2", "3", "5"], false]]);
+  assert.deepEqual(JSON.parse(p.run("JSON.stringify(drafts.get('elsewhere').references)")),
+                   [{ path: "/home/u/notes.pdf", identity: ["9", "9", "9", "9"] }]);
+  assert.equal(p.run("drafts.at('elsewhere')"), 5, "its time kept");
+  assert.equal(p.run("drafts.get('elsewhere').text"), "about it");
+}
+
+// PR #119 review C3: in the store, a newer draft another tab kept for that place is not overwritten.
+{
+  const p = page();
+  p.run(`
+    var PDF = "/home/u/notes.pdf";
+    var puts = [];
+    drafts.now = () => 5;
+    drafts.set("mine", { text: "a", attachments: [], references: [{ path: PDF, identity: ["1"] }] });
+    drafts.set("theirs", { text: "b", attachments: [], references: [{ path: PDF, identity: ["1"] }] });
+    drafts.store = { put: async (s, place, value) => { puts.push([place, value.references[0].identity[0]]); },
+                     get: async (s, place) => (place === "theirs" ? { writer: "another tab", at: 50, text: "newer" } : null),
+                     remove: async () => {}, prune: async () => {}, entries: async () => [] };
+    var following = drafts.follow(PDF, ["1"], ["9"]);
+  `);
+  await p.run("following");
+  assert.deepEqual(JSON.parse(p.run("JSON.stringify(puts)")), [["mine", "9"]]);
+  assert.equal(p.run("drafts.get('theirs').references[0].identity[0]"), "9", "followed in memory");
+}
+
+console.log("UI async regression checks: passed (activity, drafts, keyboard and shell motion)");

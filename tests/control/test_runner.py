@@ -89,6 +89,27 @@ def test_submit_returns_at_once_and_one_job_runs_per_conversation() -> None:
     asyncio.run(scenario())
 
 
+def test_running_lists_the_principals_jobs_under_way() -> None:
+    """V3-P80 §3.2: the Conversations with a job under way now, of any kind, the principal's only."""
+    async def scenario() -> None:
+        driver = GatedDriver()
+        runner = BackgroundRunner(driver)
+        alice = SCOPE.principal_id
+        assert runner.running(alice) == ()
+        other = TrustedScope(alice, ConversationId("conv_2"))
+        await runner.submit(SCOPE, user("hi"))
+        await runner.submit_compaction(other)  # a compaction is a job too
+        await asyncio.sleep(0)
+        assert sorted(runner.running(alice)) == ["conv_1", "conv_2"]
+        assert runner.running(FOREIGN.principal_id) == ()
+        driver.release.set()
+        await runner.wait(SCOPE)
+        await runner.wait(other)
+        assert runner.running(alice) == ()
+
+    asyncio.run(scenario())
+
+
 def test_another_principal_sees_nothing() -> None:
     async def scenario() -> None:
         driver = GatedDriver()

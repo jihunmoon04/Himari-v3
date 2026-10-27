@@ -167,20 +167,25 @@
         </div>
 
         <div class="status-bar" id="status-bar" role="status" aria-live="polite"></div>
+        <!-- New answers and questions, read by screen readers (the timeline itself is not a live region). -->
+        <div class="visually-hidden" id="announce" aria-live="polite" aria-atomic="true"></div>
 
         <!-- Sign-in: the operator token from <data root>/control/operator.secret -->
-        <section class="surface" id="surface-login" hidden>
-          <h1>Sign in</h1>
-          <p class="hint">Paste the operator token from <code>control/operator.secret</code> in the HIMARI data directory.</p>
-          <form id="login-form" class="stacked-form">
-            <div class="field">
-              <label for="login-token">Operator token</label>
-              <input type="password" id="login-token" name="login-token" autocomplete="current-password" required />
-            </div>
-            <div class="form-actions">
-              <button type="submit" class="primary-button" id="login-submit">Sign in</button>
-            </div>
-          </form>
+        <section class="surface login" id="surface-login" hidden>
+          <div class="login-card">
+            <p class="login-brand">HIMARI</p>
+            <h1>Sign in</h1>
+            <p class="hint">Paste the operator token from <code>control/operator.secret</code> in the HIMARI data directory.</p>
+            <form id="login-form" class="stacked-form">
+              <div class="field">
+                <label for="login-token">Operator token</label>
+                <input type="password" id="login-token" name="login-token" autocomplete="current-password" required />
+              </div>
+              <div class="form-actions">
+                <button type="submit" class="primary-button" id="login-submit">Sign in</button>
+              </div>
+            </form>
+          </div>
         </section>
 
         <section class="surface home" id="surface-home" hidden>
@@ -266,10 +271,13 @@
           <div class="timeline" id="timeline" aria-label="Conversation timeline"></div>
 
           <div class="composer-wrap" id="composer-wrap">
+            <button type="button" class="jump-latest" id="jump-latest" hidden aria-label="Jump to the latest"
+                    title="Jump to the latest">↓</button>
             <section class="question-panel" id="question-panel" role="group" aria-labelledby="question-heading" hidden>
               <h2 class="question-heading" id="question-heading">The assistant has a question</h2>
-              <p class="question-text" id="question-text"></p>
-              <p class="question-hint" id="question-hint">Answer in the message box below.</p>
+              <div class="question-text" id="question-text"></div>
+              <p class="question-hint" id="question-hint">Answer in the message box below, or
+                <button type="button" id="question-dismiss" class="link-button question-dismiss">dismiss it</button>.</p>
             </section>
 
             <section class="prompt-picker" id="prompt-picker" hidden>

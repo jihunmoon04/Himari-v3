@@ -86,7 +86,7 @@ def test_files_are_shown_by_kind(server: Server, kit: RunnerKit) -> None:
     assert info.st_mtime_ns > 2 ** 53
     assert shown == {"path": str(kit.home / "projects/a/main.c"), "size": 13, "kind": "text",
                      "text": "int main(){}\n", "truncated": False, "editable": True,
-                     "identity": identity, "modified": int(info.st_mtime)}
+                     "identity": identity, "modified": int(info.st_mtime), "cloud_synced": False}
     big = kit.home / "projects/big.txt"
     big.write_text("가" * 400_000)  # 1.2 MB of three-byte characters
     shown = server.client.get("/api/machine/file", params={"path": str(big)}).json()
