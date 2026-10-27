@@ -338,11 +338,13 @@ export class FilesPane {
     this.locationFailed = false;
     this.backPending = false;
     this.folderScrolls = new Map();
-    this.backButton = this.button("Back", () => this.back());
+    this.backButton = this.button("", () => this.back());
+    this.backButton.title = "Back";
     this.backButton.className = "files-nav-button files-back";
     this.backButton.setAttribute("aria-label", "Go back in files");
     this.backButton.prepend(icon("#side-back"));
-    this.upButton = this.button("Up", () => this.up());
+    this.upButton = this.button("", () => this.up());
+    this.upButton.title = "Up";
     this.upButton.className = "files-nav-button files-up";
     this.upButton.setAttribute("aria-label", "Go to parent folder");
     this.upButton.prepend(icon("#side-up"));
@@ -2203,7 +2205,10 @@ export class FilesPane {
       this.tools.append(this.fileMenu(shown));
       return;
     }
-    const reload = this.el("button", "link-button", "Refresh");
+    const reload = this.el("button", "link-button files-icon-button");
+    reload.append(icon("#side-refresh"));
+    reload.title = "Refresh";
+    reload.setAttribute("aria-label", "Refresh");
     reload.type = "button";
     reload.addEventListener("click", () => this.refresh());
     this.tools.append(reload, this.newMenu(listing), this.folderMenu(listing));
@@ -2348,8 +2353,10 @@ export class FilesPane {
   /* A folder's "New": a file (opened in the editor) or a folder, named in a row at the top. */
   newMenu(listing) {
     const actions = this.el("details", "conversation-actions files-actions files-new-menu");
-    const toggle = this.el("summary", "files-new-toggle", "New");
+    const toggle = this.el("summary", "files-new-toggle");
+    toggle.append(icon("#side-plus"));
     toggle.title = "New file or folder here";
+    toggle.setAttribute("aria-label", "New file or folder here");
     const list = this.el("div", "conversation-action-list");
     for (const [label, kind] of [["New file", "file"], ["New folder", "folder"]]) {
       const control = this.el("button", "link-button", label);

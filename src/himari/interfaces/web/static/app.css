@@ -3940,7 +3940,8 @@ button.files-crumb:hover { background: var(--surface-hover); color: var(--text);
 .files-bar { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); margin: var(--space-2) var(--space-3); padding: var(--space-2) var(--space-3); border: 1px solid var(--warn-edge); border-radius: var(--radius-md); background: var(--warn-soft); color: var(--warn); font-size: 13px; }
 .files-bar[hidden] { display: none; }
 .files-bar p { flex: 1 1 100%; margin: 0; }
-.files-new-menu > summary.files-new-toggle { width: auto; padding: 0 10px; font-size: 13px; color: var(--text-muted); }
+.files-new-menu > summary.files-new-toggle { display: inline-flex; align-items: center; justify-content: center; width: var(--tool-size); height: var(--tool-size); min-height: var(--tool-size); padding: 0; color: var(--text-muted); }
+.files-tools > .files-icon-button { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 var(--tool-size); width: var(--tool-size); height: var(--tool-size); padding: 0; color: var(--text-muted); }
 .files-new-menu .conversation-action-list, .files-file-menu .conversation-action-list, .files-folder-menu .conversation-action-list { left: auto; right: 0; width: 200px; }
 .files-name-form { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); margin: var(--space-2); }
 .files-name-input { flex: 1 1 200px; min-height: 34px; padding: 6px 10px; border: 1px solid var(--border-strong); border-radius: var(--radius-md); background: var(--surface-raised); color: var(--text); font: 13px var(--mono); }
@@ -4043,7 +4044,7 @@ button.files-crumb:hover { background: var(--surface-hover); color: var(--text);
 
 /* File navigation is always visible, even when a long breadcrumb is clipped. */
 .files-navigation { display: flex; flex: 0 0 auto; gap: 2px; }
-.files-nav-button { display: inline-flex; align-items: center; justify-content: center; gap: 4px; min-height: var(--tool-size); padding: 6px 8px; background: transparent; color: var(--text); border: 0; border-radius: var(--tool-radius); font: inherit; font-size: 13px; }
+.files-nav-button { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 var(--tool-size); width: var(--tool-size); height: var(--tool-size); min-height: var(--tool-size); padding: 0; background: transparent; color: var(--text); border: 0; border-radius: var(--tool-radius); font: inherit; font-size: 13px; }
 .files-nav-button:disabled { opacity: .35; }
 .files-nav-button:not(:disabled):hover { background: var(--surface-hover); }
 .files-crumbs { overflow-x: auto; overscroll-behavior-x: contain; scrollbar-width: thin; }
