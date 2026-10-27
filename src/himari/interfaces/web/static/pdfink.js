@@ -7,6 +7,15 @@
  * perfect-freehand's, the same on screen and in the annotation's appearance
  * stream. A saved stroke is one of HIMARI's ink annotations, read back from
  * its /HimariInk; erased, it leaves its page's /Annots at the next save.
+ *
+ * V3-P82 §3.1, §3.3: a stroke is named when it is drawn (its /NM), so the
+ * same stroke is never written twice — carried to another version, or kept
+ * in the browser, a stroke the file already holds is left out. A page's
+ * changes are three: strokes added (no object in this file), dropped (in its
+ * /Annots, not on the page now) and put back (an object of this file, out of
+ * its /Annots: an erase undone after a save). A save marks what it wrote as
+ * saved where it is (``committed``): nothing is read again, and undo goes on
+ * across saves.
  */
 
 import { getStroke } from "./freehand/perfect-freehand.mjs";
@@ -51,6 +60,14 @@ function freehand(stroke) {
 }
 
 let made = 0;
+const NAME_PREFIX = "himari-ink-"; // as pdfdoc.js's HIMARI_INK_PREFIX: the /NM of HIMARI's ink
+
+/* A new stroke's name (its /NM): random, so two tabs or devices never make the same one. */
+export function strokeName() {
+  const bytes = new Uint8Array(12);
+  globalThis.crypto.getRandomValues(bytes);
+  return NAME_PREFIX + Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+}
 
 /* A new stroke: ``tool`` with its ``color`` and ``size`` named as in TOOLS (an unknown name: the tool's
  * first), ``pressure``: the points carry the pen's (a mouse's do not). */
@@ -60,7 +77,8 @@ export function newStroke(page, { tool, color: colorName, size: sizeName }, pres
   const rgb = colors[color];
   const size = sizes[sizeName] || Object.values(sizes)[0];
   made += 1;
-  return { id: `new-${made}`, page, tool, color, rgb, size, pressure, points: [], saved: null, cached: null };
+  return { id: `new-${made}`, name: strokeName(), page, tool, color, rgb, size, pressure, points: [], saved: null,
+           cached: null };
 }
 
 /* The stroke's outline, a polygon in PDF space (kept until its points or the settings change). */
@@ -91,6 +109,7 @@ export function specOf(stroke) {
   const appearance = `${fixed(r)} ${fixed(g)} ${fixed(b)} rg${stroke.tool === "highlighter" ? " /GS0 gs" : ""}\n` +
     (polygon.length ? `${path} h f` : "");
   return {
+    name: stroke.name,
     rect: bounds(polygon, stroke.points, 1),
     inkList: [stroke.points.flatMap(([x, y]) => [round(x, 2), round(y, 2)])],
     color: stroke.rgb.map((v) => round(v, 3)),
@@ -115,8 +134,9 @@ export function strokeFromSaved(page, entry) {
     && isNumber(data.size) && data.size > 0 && data.size <= 100
     && Array.isArray(data.rgb) && data.rgb.length === 3 && data.rgb.every((v) => isNumber(v) && v >= 0 && v <= 1);
   if (valid) {
-    return { id: entry.name, page, tool: data.tool, color: String(data.color), rgb: data.rgb, size: data.size,
-             pressure: data.pressure === true, points: data.points.map((p) => [p[0], p[1], p[2]]), saved, cached: null };
+    return { id: entry.name, name: entry.name, page, tool: data.tool, color: String(data.color), rgb: data.rgb,
+             size: data.size, pressure: data.pressure === true, points: data.points.map((p) => [p[0], p[1], p[2]]),
+             saved, cached: null };
   }
   const flat = (Array.isArray(entry.inkList[0]) ? entry.inkList[0] : []).filter(isNumber).slice(0, 2 * MAX_SAVED_POINTS);
   const points = [];
@@ -125,8 +145,8 @@ export function strokeFromSaved(page, entry) {
     ? entry.color.map((v) => Math.min(1, Math.max(0, v))) : [0, 0, 0];
   const width = isNumber(entry.width) && entry.width > 0 ? Math.min(entry.width, 100) : 1;
   const highlighter = isNumber(entry.opacity) && entry.opacity < 1;
-  return { id: entry.name, page, tool: highlighter ? "highlighter" : "pen", color: null, rgb, size: width,
-           pressure: false, points, saved, cached: null };
+  return { id: entry.name, name: entry.name, page, tool: highlighter ? "highlighter" : "pen", color: null, rgb,
+           size: width, pressure: false, points, saved, cached: null };
 }
 
 /* Whether the eraser at (x, y), ``radius`` points wide, touches the stroke (§4.2: a whole stroke). */
@@ -145,25 +165,30 @@ export function hits(stroke, x, y, radius) {
   return false;
 }
 
-/* The ink of one open PDF: each page's strokes as read (saved), what was drawn and erased since, and the
- * undo and redo of those (§4.2: while it is open; a save starts them again). */
+/* The ink of one open PDF: each page's strokes now, the names of HIMARI's strokes its /Annots holds in the file
+ * (``inFile``; a page in it has been read), the objects this file has for named strokes, and the undo and redo
+ * of drawing and erasing — while it is open, across saves (V3-P82 §3.5). */
 export class Ink {
   constructor() {
     this.pages = new Map(); // page index → its strokes now, drawn in this order
-    this.saved = new Map(); // page index → the saved strokes as read (a page in it has been read)
+    this.inFile = new Map(); // page index → names of the HIMARI strokes in its /Annots
+    this.objects = new Map(); // a stroke's name → its annotation's Ref in this file
     this.done = [];
     this.undone = [];
     this.carried = null; // after a conflict: {erase: names} to erase again as pages are read (§5.5)
   }
 
   loaded(page) {
-    return this.saved.has(page);
+    return this.inFile.has(page);
   }
 
-  /* A page's saved strokes, read when it is first drawn. */
+  /* A page's saved strokes, read when it is first drawn. Strokes carried here that it already holds (by name:
+   * a save that landed though its answer was lost) are left out — the file's are the same strokes. */
   load(page, strokes) {
-    this.saved.set(page, strokes);
-    const now = this.pages.get(page) || []; // strokes carried over a conflict may be there already
+    const names = new Set(strokes.map((s) => s.saved.name));
+    this.inFile.set(page, names);
+    for (const s of strokes) this.objects.set(s.saved.name, s.saved.ref);
+    const now = (this.pages.get(page) || []).filter((s) => !names.has(s.name));
     this.pages.set(page, [...strokes, ...now]);
     if (this.carried) {
       const gone = strokes.filter((s) => this.carried.erase.has(s.saved.name));
@@ -224,14 +249,19 @@ export class Ink {
     return op.erase.page;
   }
 
-  /* §5: per page, the strokes to write and the saved ones to drop from its /Annots. */
+  /* §3.3: per page changed, the strokes to write (``add``), the objects to put back in its /Annots
+   * (``restore``: {name, ref}) and the ones to take out (``drop``: {name, ref}). */
   changes() {
     const found = [];
     for (const [page, strokes] of this.pages) {
+      const inFile = this.inFile.get(page) || new Set();
       const add = strokes.filter((s) => !s.saved);
+      const restore = strokes.filter((s) => s.saved && !inFile.has(s.saved.name))
+        .map((s) => ({ name: s.saved.name, ref: s.saved.ref }));
       const kept = new Set(strokes.filter((s) => s.saved).map((s) => s.saved.name));
-      const drop = (this.saved.get(page) || []).filter((s) => !kept.has(s.saved.name));
-      if (add.length || drop.length) found.push({ page, add, drop: drop.map((s) => s.saved.ref) });
+      const drop = [...inFile].filter((name) => !kept.has(name) && this.objects.has(name))
+        .map((name) => ({ name, ref: this.objects.get(name) }));
+      if (add.length || restore.length || drop.length) found.push({ page, add, restore, drop });
     }
     return found.sort((a, b) => a.page - b.page);
   }
@@ -240,25 +270,49 @@ export class Ink {
     return this.changes().length > 0;
   }
 
-  /* §5.5: what is unsaved, to put on the server's version — new strokes (page coordinates) and the saved
-   * ones erased (by their /NM). */
+  /* §3.4: ``changes`` written into the file — ``added`` names the object each added stroke got. Each is saved
+   * where it is now (drawn, or erased since: then dropped at the next save), and the pages' /Annots are as
+   * written; what changed meanwhile stays a change. */
+  committed(changes, added) {
+    for (const { page, add, restore, drop } of changes) {
+      const inFile = new Set(this.inFile.get(page) || []);
+      for (const stroke of add) {
+        const ref = added.get(stroke.name);
+        if (!ref) continue;
+        stroke.saved = { ref, name: stroke.name };
+        this.objects.set(stroke.name, ref);
+        inFile.add(stroke.name);
+      }
+      for (const { name } of restore) inFile.add(name);
+      for (const { name } of drop) inFile.delete(name);
+      this.inFile.set(page, inFile);
+    }
+  }
+
+  /* §5.5: what is unsaved, to put on another version — every stroke on a page its file does not hold, whole
+   * (an object of this file may be missing there), and the names of the file's strokes erased. */
   carry() {
     const add = [];
     const erase = new Set();
     const erasePages = [];
-    for (const { page, add: strokes } of this.changes()) add.push(...strokes.map((s) => ({ ...s, page })));
-    for (const [page, strokes] of this.saved) {
-      const now = new Set(this.on(page));
-      for (const s of strokes) {
-        if (now.has(s)) continue;
-        erase.add(s.saved.name);
+    for (const [page, strokes] of this.pages) {
+      const inFile = this.inFile.get(page) || new Set();
+      for (const s of strokes) if (!s.saved || !inFile.has(s.saved.name)) add.push({ ...s, page, saved: null });
+    }
+    for (const [page, inFile] of this.inFile) {
+      const now = new Set(this.on(page).filter((s) => s.saved).map((s) => s.saved.name));
+      for (const name of inFile) {
+        if (now.has(name)) continue;
+        erase.add(name);
         erasePages.push(page);
       }
     }
     return { add, erase, erasePages };
   }
 
-  /* A carry put on this (a freshly read version's) ink: strokes on pages it lacks are left, and counted. */
+  /* A carry put on this ink: strokes on pages it lacks are left, and counted. On a page read already (kept
+   * ink put back once the PDF shows, PR #119 review B2), a stroke it holds by name — in its file, or on it
+   * now — is not added again, and the carried erasures are made now; a page read later does both in load. */
   put(carried, pages) {
     this.carried = { erase: carried.erase };
     let left = 0;
@@ -267,7 +321,13 @@ export class Ink {
         left += 1;
         continue;
       }
+      const inFile = this.inFile.get(stroke.page);
+      if ((inFile && inFile.has(stroke.name)) || this.on(stroke.page).some((s) => s.name === stroke.name)) continue;
       this.pages.set(stroke.page, [...this.on(stroke.page), { ...stroke, cached: null }]);
+    }
+    for (const page of this.inFile.keys()) {
+      const gone = this.on(page).filter((s) => s.saved && carried.erase.has(s.saved.name));
+      if (gone.length) this.remove(page, gone);
     }
     return left;
   }

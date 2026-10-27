@@ -328,6 +328,14 @@ class PutBackBody(_Body):
     expected: IdentityIn
 
 
+class TruncateBody(_Body):
+    """V3-P82 §3.6: a PDF cut back to ``to``, just after one of its saves; ``expected`` its identity as read."""
+
+    path: str = Field(min_length=1, max_length=4096)
+    expected: IdentityIn
+    to: int
+
+
 class FileStateIn(_Body):
     """A file as the owner saw it (V3-P76 §6): there, with this identity, or not there."""
 
@@ -1270,12 +1278,11 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
         return {"path": saved.path, "identity": identity_out(saved.identity)}
 
     @app.post(PDF_TRUNCATE_PATH)
-    async def truncate_pdf(request: Request, path: str, to: int,
+    async def truncate_pdf(body: TruncateBody, request: Request,
                            who: PrincipalId = Depends(principal)) -> dict[str, Any]:
-        """V3-P82 §3.6: a PDF cut back to ``to``, just after one of its ``%%EOF`` — a save whose writing was cut
-        short taken off its end. ``X-Himari-Expected``: its identity as read."""
-        expected = identity_in(request.headers.get(EXPECTED_HEADER, ""))
-        saved = await himari(request).explorer(who).truncate_pdf(path, expected, to)
+        """V3-P82 §3.6: a PDF cut back to ``to``, just after one of its saves' ``%%EOF`` — a save whose writing
+        was cut short taken off its end; ``expected``: its identity as read."""
+        saved = await himari(request).explorer(who).truncate_pdf(body.path, [int(v) for v in body.expected], body.to)
         return {"path": saved.path, "identity": identity_out(saved.identity)}
 
     @app.get("/api/machine/image")

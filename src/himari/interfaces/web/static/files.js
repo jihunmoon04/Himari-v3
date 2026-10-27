@@ -24,6 +24,13 @@
  *
  * A PDF (V3-P77 §3) of at most 64 MiB opens in the PDF view (pdfpane.js,
  * loaded on first use), its bytes read as a download.
+ *
+ * Its ink is saved on its own (V3-P82 §3): 5 s after it last changed (60 s
+ * at most while it keeps changing), when the PDF is left, when the page is
+ * hidden, and with Ctrl/Cmd+S; in a cloud-synced folder only when left or
+ * hidden (Q5: Drive keeps a version of the whole file per save). One save at
+ * a time; drawing goes on meanwhile. What is not saved yet is kept in this
+ * browser (§4) and offered again when the PDF opens.
  */
 
 const KIND_ICON = { directory: "#side-folder", file: "#side-note" };
@@ -34,6 +41,12 @@ const NOTE_MS = 6000; // how long a note beside the file's name stays before "Un
 const KEPT_MAX = 20; // V3-P78 Q3: files with unsaved text kept, for at most 30 days
 const KEPT_AGE_MS = 30 * 24 * 3600 * 1000;
 const PDF_MAX_BYTES = 64 * 1024 * 1024; // the PDF view's limit (V3-P77 §3.3, Q2), as pdfpane.js's
+const AUTOSAVE_IDLE_MS = 5000; // V3-P82 §3.2, Q1: ink saved once it has not changed for this long
+const LEAVE_WAIT_MS = 10_000; // leaving waits this long for the ink to be saved, then asks (review N)
+const AUTOSAVE_MAX_MS = 60_000; // ... or this long after it first changed, written on without a pause (review N4)
+const RETRY_MS = [5000, 30_000, 120_000]; // a save that failed on the way tried again after these, then every 2 min
+const LARGE_PDF_BYTES = 48 * 1024 * 1024; // "getting large" from here, of the 64 MiB a PDF may grow to (§3.6)
+const KEPT_INK_MAX_BYTES = 16 * 1024 * 1024; // V3-P82 §4: one PDF's unsaved ink kept in this browser
 const INK_TOOL_KEY = "himari.pdf.tool"; // the ink tool picked last, in this browser (V3-P77 §4.2)
 const PDF_PLACE_KEY = "himari.pdf.places"; // path → {page, zoom, at}: where each PDF was left, in this browser
 const PDF_PLACES = 50; // the latest kept
@@ -255,8 +268,12 @@ export async function postAppend(path, increment, identity) {
   } catch (ignored) { /* not JSON */ }
   if (!response.ok) {
     const error = (data && data.error) || {};
-    throw Object.assign(new Error(error.message || "Not saved."), { code: error.code || "http_error",
-                                                                     status: response.status });
+    const failed = Object.assign(new Error(error.message || "Not saved."), { code: error.code || "http_error",
+                                                                              status: response.status });
+    // The runner's write failed (V3-P82 §3.6): the file as it is after it, and whether bytes of it are left.
+    if (Array.isArray(error.identity)) failed.identity = error.identity.map(String);
+    if (error.partial === true) failed.partial = true;
+    throw failed;
   }
   return data;
 }
@@ -277,12 +294,13 @@ export class FilesPane {
    * download, refused past ``limit``; appendPdf(path, increment, identity): ink saved (V3-P77 §5.3). */
   /* keep: the browser's store of unsaved text (local_store.js: get, put, remove, prune; V3-P78 §4.1), none:
    * nothing kept; writer: this pane in this tab, on what it keeps; openElsewhere(path): the file is open with
-   * unsaved text in this tab's other pane (its kept text is not offered here). */
+   * unsaved text in this tab's other pane (its kept text is not offered here). onSaved({path, from, to}): this
+   * pane saved a PDF's ink, its identity ``from`` now ``to`` (V3-P82 §6.3: the chips pointing at it follow). */
   constructor({ api, el, onOpenFolder = null, onOpenFile = null, actions = [], folderActions = null,
                 folderRowActions = null, loadEditor = () => import("/assets/codemirror/codemirror.js"),
                 loadPdf = () => import("/assets/pdfpane.js"), readFile = readDownload, appendPdf = postAppend,
                 confirm = defaultConfirm, working = () => false, onAsk = null, changes = null, keep = null,
-                writer = "", openElsewhere = () => false }) {
+                writer = "", openElsewhere = () => false, onSaved = () => {} }) {
     this.api = api;
     this.el = el;
     this.loadEditor = loadEditor;
@@ -296,13 +314,18 @@ export class FilesPane {
     this.keep = keep;
     this.writer = writer;
     this.openElsewhere = openElsewhere;
+    this.onSaved = onSaved;
     this.changed = new Set(); // the paths HIMARI changed, as the last list said: a dot on their rows
     this.page = null; // "changes", or {path} of one change's diff, while one of them is shown
     this.pageOf = null; // the conversation that page is of
     this.reviewControls = []; // that page's accept and revert controls
     this.pageDiff = null; // that diff's CodeMirror view
     this.doc = null; // the file in the editor: {path, name, identity, saved, lineBreak, editor, dirty, saving, pollTimer, bar, revision}
-    this.pdf = null; // the PDF in view: {path, name, identity, view, bar, saving, pollTimer}
+    // The PDF in view: {path, name, identity, view, bar, cloud, saving (a save on its way), inFlight (its
+    // promise), waiting (the user picks: changed on the server), stopped (why saves stopped), failed (why the
+    // last failed: tried again), retries, generation (saves made: a disk check older is dropped), saveTimer,
+    // retryTimer, keepTimer, dirtySince, pollTimer}.
+    this.pdf = null;
     this.ink = null; // its tools in the head
     this.fileKind = null; // the shown file's kind, as the server told it
     this.onOpenFolder = onOpenFolder;
@@ -338,9 +361,17 @@ export class FilesPane {
   /* Before anything replaces the editor or the PDF: unsaved text or ink is dropped only if the user says so. */
   async mayLeave() {
     if (!this.dirty) return true;
-    if (this.doc === null) {
-      return this.confirm(`Discard your ink on ${this.pdf.name}?`,
-                          ["It is not saved. The PDF on the server stays as it was."], "Discard");
+    if (this.doc === null) { // V3-P82 §3.2: saved on the way out; asked only if it cannot be now
+      const pdf = this.pdf;
+      let timer = null;
+      const late = new Promise((resolve) => { timer = setTimeout(() => resolve(false), LEAVE_WAIT_MS); });
+      const saved = await Promise.race([this.flushPdf(), late]);
+      clearTimeout(timer);
+      if (saved) return true;
+      this.keepInkNow(pdf);
+      return this.confirm(`Leave ${pdf.name} with ink not saved?`, [this.keptInkWords(pdf)
+        ? "It could not be saved now. It is kept in this browser, and offered again when you open this PDF."
+        : "It could not be saved now, and it is not kept in this browser: it is lost if you leave."], "Leave");
     }
     const doc = this.doc;
     const discard = await this.confirm(`Discard your changes to ${doc.name}?`,
@@ -356,7 +387,7 @@ export class FilesPane {
     this.pageOf = null;
     this.reviewControls = [];
     if (this.pdf) {
-      clearTimeout(this.pdf.pollTimer);
+      for (const timer of ["pollTimer", "saveTimer", "retryTimer", "keepTimer"]) clearTimeout(this.pdf[timer]);
       this.keepPlace();
       this.pdf.view.destroy();
     }
@@ -371,13 +402,12 @@ export class FilesPane {
     this.doc = null;
   }
 
-  /* The session ended (V3-P78 §6): unsaved text is kept in the browser now, and the editor closes without
-   * asking; reopening the file offers it back (§4.1). Ink waits for V3-P77 2c: a PDF with unsaved ink stays
-   * open where nothing asks about it on the way back (``keepInk``), else it goes. */
-  closeForSignIn({ keepText = true, keepInk = false } = {}) {
+  /* The session ended (V3-P78 §6): unsaved text and ink are kept in the browser now (V3-P82 §4), and the
+   * editor or PDF closes without asking; reopening the file offers them back. */
+  closeForSignIn({ keepText = true } = {}) {
     const doc = this.doc;
     if (doc !== null && doc.dirty && keepText) this.keepNow(doc);
-    if (this.pdf !== null && keepInk && this.pdf.view.ink.dirty) return;
+    if (this.pdf !== null && keepText) this.keepInkNow(this.pdf);
     const open = this.doc !== null || this.pdf !== null;
     this.closeDoc();
     if (open) this.body.replaceChildren();
@@ -717,6 +747,18 @@ export class FilesPane {
     this.installPdf(shown, made, page || (left ? left.page : 1), left ? left.zoom : null);
   }
 
+  /* "Discard my ink": the server's version read again, and what this pane kept of the ink goes too (else it
+   * would be offered straight back, PR #119 review B3). */
+  discardInk() {
+    const pdf = this.pdf;
+    if (!pdf || pdf.reopening) return;
+    if (this.keep !== null) {
+      clearTimeout(pdf.keepTimer);
+      this.keep.remove("unsaved", pdf.path, this.writer);
+    }
+    this.reopenPdf(false);
+  }
+
   /* A PDF read and opened in a view of its own, not yet shown — the one shown stays until this is ready
    * (PR #104 review P1-2). ``carried``: unsaved ink put on it (§5.5); {view, identity, left}. Throws with a
    * message to show. */
@@ -731,12 +773,12 @@ export class FilesPane {
     const view = new module.PdfView({
       pdfjs, el: this.el, bytes: read.bytes,
       onPage: (number, pages) => { if (this.pdf && this.pdf.view === view) this.paintPage(number, pages); },
-      onInk: () => { if (this.pdf && this.pdf.view === view) this.paintInk(); },
+      onInk: () => { if (this.pdf && this.pdf.view === view) this.inkChanged(this.pdf); },
     });
     try {
       await view.open();
       const left = carried ? await view.carryIn(carried) : 0;
-      return { view, identity: read.identity, left };
+      return { view, identity: read.identity, left, carried: carried !== null && carried !== undefined };
     } catch (error) {
       view.destroy();
       throw error;
@@ -744,12 +786,14 @@ export class FilesPane {
   }
 
   /* The view shown: fitted to the pane, on ``page``, its tool picked, checked on disk from now on. */
-  installPdf(shown, { view, identity, left }, page, zoom = null) {
+  installPdf(shown, { view, identity, left, carried = false }, page, zoom = null) {
     const bar = this.el("div", "files-bar");
     bar.hidden = true;
     // The identity of the bytes read, which a save is made against (V3-P77 §5.3); the shown one if not told.
     const pdf = { path: shown.path, name: shown.path.slice(shown.path.lastIndexOf("/") + 1),
-                  identity: identity || shown.identity, view, bar, saving: false, pollTimer: null };
+                  identity: identity || shown.identity, view, bar, cloud: shown.cloud_synced === true, saving: false,
+                  inFlight: null, waiting: false, stopped: null, failed: null, retries: 0, generation: 0,
+                  saveTimer: null, retryTimer: null, keepTimer: null, dirtySince: null, pollTimer: null };
     this.pdf = pdf;
     this.body.replaceChildren(bar, view.element);
     if (zoom !== null && Number.isFinite(zoom)) view.zoom = Math.min(5, Math.max(0.5, zoom)); // pdfpane's ZOOM_MIN/MAX
@@ -761,9 +805,20 @@ export class FilesPane {
       this.showPdfNote(`${left} unsaved stroke${left === 1 ? " was" : "s were"} on pages this version does not have, ` +
                        "and could not be kept.");
     }
+    view.element.addEventListener("keydown", (event) => { // Ctrl/Cmd+S: now, as the editor's
+      if (!(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== "s") return;
+      event.preventDefault();
+      this.retrySave();
+    });
     this.paintPage(view.current + 1, view.numPages);
     this.paintInk();
     this.schedulePdfPoll(pdf);
+    // Ink carried here from the version before is the ink this pane kept: its record is of this version now,
+    // and not offered back as from another (PR #119 review B3).
+    if (carried) this.keepInkNow(pdf);
+    if (view.cut !== null) this.cutShort(pdf);
+    else if (view.writable && !carried) this.offerKeptInk(pdf);
+    this.scheduleSave(pdf);
   }
 
   /* A signed PDF, told once a drawing tool is picked — before any stroke, so no word above the pages moves
@@ -787,7 +842,7 @@ export class FilesPane {
   }
 
   pickInkTool(tool) {
-    if (!this.pdf) return;
+    if (!this.pdf || (tool && this.pdf.tooLarge)) return; // nothing drawn now could be saved (review C4)
     this.pdf.view.setTool(tool);
     if (tool) this.tellSigned();
     try {
@@ -839,10 +894,10 @@ export class FilesPane {
     const redo = button(`Redo (${appleKeys() ? "⇧⌘" : "Shift+Ctrl+"}Z)`, "#ink-redo", () => this.pdf && this.pdf.view.redo());
     const dot = this.el("span", "files-state-dot");
     const state = this.el("span", "files-state", "Saved");
-    const save = this.el("button", "primary-button files-save", "Save");
+    const save = this.el("button", "primary-button files-save", "Retry"); // V3-P82 §3.8: saves are its own
     save.type = "button";
-    save.disabled = true;
-    save.addEventListener("click", () => this.savePdf());
+    save.hidden = true;
+    save.addEventListener("click", () => this.retrySave());
     group.append(...Object.values(tools), swatches, undo, redo, dot, state, save);
     this.ink = { group, tools, swatches, width, undo, redo, dot, state, save };
     return group;
@@ -893,74 +948,395 @@ export class FilesPane {
     }
     ink.group.hidden = false;
     const picked = view.tool ? view.tool.tool : "none";
-    for (const [name, control] of Object.entries(ink.tools)) control.setAttribute("aria-pressed", String(name === picked));
+    for (const [name, control] of Object.entries(ink.tools)) {
+      control.setAttribute("aria-pressed", String(name === picked));
+      control.hidden = Boolean(pdf.tooLarge) && name !== "none"; // too large to save: no drawing tools (review C4)
+    }
     const pen = this.penChoice();
     ink.swatches.hidden = picked !== "pen";
+    ink.width.hidden = Boolean(pdf.tooLarge);
     for (const swatch of ink.swatches.children) {
       if (swatch.dataset && swatch.dataset.color) swatch.setAttribute("aria-pressed", String(swatch.dataset.color === pen.color));
     }
     ink.width.textContent = pen.size === "bold" ? "Bold" : "Fine";
     ink.width.title = "Pen width";
-    ink.undo.disabled = pdf.saving || !view.ink.done.length;
-    ink.redo.disabled = pdf.saving || !view.ink.undone.length;
+    ink.undo.disabled = view.frozen || !view.ink.done.length;
+    ink.redo.disabled = view.frozen || !view.ink.undone.length;
     const dirty = view.ink.dirty;
-    ink.dot.className = `files-state-dot${dirty ? " is-dirty" : ""}`;
-    ink.state.textContent = note || (pdf.saving ? "Saving…" : dirty ? "Unsaved" : "Saved");
-    ink.state.title = note || "";
-    ink.save.disabled = pdf.saving || !dirty;
+    ink.dot.className = `files-state-dot${dirty || pdf.failed || pdf.stopped ? " is-dirty" : ""}`;
+    // V3-P82 §3.8: no Save — what the saves are doing, and Retry once one failed.
+    const state = pdf.saving ? "Saving…" : pdf.stopped || pdf.failed ? "Not saved"
+      : !dirty ? "Saved" : pdf.cloud ? "Unsaved · saved when you leave" : "Unsaved";
+    const size = view.file ? view.file.size : 0;
+    const large = size >= LARGE_PDF_BYTES ? `This PDF is getting large (${Math.round(size / 1048576)} MB of 64).` : "";
+    // §4: too much unsaved ink to keep in this browser, said beside the state.
+    ink.state.textContent = note || (pdf.notKept && dirty ? `${state} · Not kept in this browser` : state);
+    ink.state.title = note || pdf.stopped || pdf.failed || large || "";
+    ink.save.hidden = !(pdf.failed && !pdf.saving);
+    ink.save.disabled = false;
   }
 
-  /* §5: the ink drawn and erased since it was read, added after the PDF's bytes on the server. */
-  /* PR #104 review P1-1: no drawing, erasing or undoing from the moment the ink to save is taken until the
-   * server's answer is read back: what is saved is all there is, and nothing drawn meanwhile is lost. A
-   * stroke still being drawn is finished first. */
-  async savePdf() {
-    const pdf = this.pdf;
-    if (!pdf || pdf.saving) return;
-    if (pdf.view.active) {
-      this.paintInk("Finish the stroke, then save");
+  /* ------------------------------------------------- saving on its own (V3-P82 §3) */
+
+  /* The ink changed (drawn, erased, undone, a save landed): told, kept in this browser once the pen rests
+   * (§4), and a save waited for (§3.2). */
+  inkChanged(pdf) {
+    this.paintInk();
+    this.keepInkLater(pdf);
+    this.scheduleSave(pdf);
+  }
+
+  /* §3.2: a save AUTOSAVE_IDLE_MS after the ink last changed, at most AUTOSAVE_MAX_MS after it first did;
+   * none on its own in a cloud folder (Q5), nor while one is on its way (the next is waited for when it
+   * lands), the user picks (changed on the server), or saving has stopped. */
+  scheduleSave(pdf) {
+    clearTimeout(pdf.saveTimer);
+    pdf.saveTimer = null;
+    if (!pdf.view.writable || !pdf.view.ink.dirty) {
+      pdf.dirtySince = null;
+      pdf.soon = false; // nothing left for Ctrl/Cmd+S to send (re-review N2)
       return;
+    }
+    if (pdf.dirtySince === null) pdf.dirtySince = Date.now();
+    if (pdf.saving || pdf.waiting || pdf.stopped || pdf.failed || (pdf.cloud && !pdf.soon)) return;
+    const wait = pdf.soon ? 0 : Math.min(AUTOSAVE_IDLE_MS, Math.max(0, pdf.dirtySince + AUTOSAVE_MAX_MS - Date.now()));
+    pdf.saveTimer = setTimeout(() => { if (this.pdf === pdf) this.savePdf(); }, wait);
+  }
+
+  /* A save of what is unsaved now — the one on its way, if there is one. True once it landed (or there was
+   * nothing to save). */
+  savePdf() {
+    const pdf = this.pdf;
+    if (!pdf) return Promise.resolve(true);
+    if (!pdf.inFlight) {
+      pdf.inFlight = this.saveOnce(pdf).finally(() => {
+        pdf.inFlight = null;
+        if (!pdf.reread || this.pdf !== pdf) return;
+        pdf.reread = false; // after the save is over: the read again waits for a save on its way (review B4)
+        this.reopenPdf(true);
+      });
+    }
+    return pdf.inFlight;
+  }
+
+  /* Ctrl/Cmd+S, or Retry: now, a failure's wait cut short. */
+  retrySave() {
+    const pdf = this.pdf;
+    if (!pdf || pdf.stopped || pdf.waiting) return;
+    clearTimeout(pdf.retryTimer);
+    pdf.failed = null;
+    pdf.retries = 0;
+    if (pdf.inFlight) pdf.soon = true; // what changed since that save began goes as soon as it lands
+    this.savePdf();
+  }
+
+  /* §3.2: leaving, or the page hidden — saves until nothing is unsaved (a large change goes in parts, §3.4).
+   * True when nothing is left unsaved. */
+  async flushPdf() {
+    const pdf = this.pdf;
+    if (!pdf) return true;
+    for (let round = 0; round < 16 && this.pdf === pdf && pdf.view.ink.dirty; round += 1) {
+      if (pdf.waiting || pdf.stopped || pdf.view.frozen) return false;
+      clearTimeout(pdf.retryTimer);
+      pdf.failed = null;
+      if (!(await this.savePdf())) return false;
+    }
+    return !pdf.view.ink.dirty;
+  }
+
+  /* One save (§3.4): what is unsaved as the save begins (drawing goes on meanwhile), added at the PDF's end
+   * on the server; once it landed, saved where it is in the view, and what changed since waits for the next. */
+  async saveOnce(pdf) {
+    clearTimeout(pdf.saveTimer);
+    pdf.soon = false;
+    if (pdf.view.frozen || pdf.waiting || pdf.stopped) return false;
+    let made;
+    try {
+      made = await pdf.view.increment();
+    } catch (error) {
+      if (this.pdf === pdf) this.stopSaving(pdf, error.message, error.code === "too_large");
+      return false;
+    }
+    if (this.pdf !== pdf) return false;
+    if (!made) {
+      this.paintInk();
+      return true;
     }
     pdf.saving = true;
-    pdf.view.saving = true;
+    pdf.generation += 1;
     this.paintInk();
-    const done = (note) => {
-      pdf.saving = false;
-      pdf.view.saving = false;
-      this.paintInk(note);
-    };
-    let increment;
-    try {
-      increment = await pdf.view.increment();
-    } catch (error) {
-      if (this.pdf === pdf) done(error.message);
-      return;
-    }
-    if (this.pdf !== pdf) return;
-    if (!increment) {
-      done();
-      return;
-    }
+    const expected = pdf.identity;
     let answer;
     try {
-      answer = await this.appendPdf(pdf.path, increment, pdf.identity);
+      answer = await this.appendPdf(pdf.path, made.bytes, expected);
+    } catch (error) {
+      pdf.saving = false;
+      if (this.pdf === pdf) this.saveFailed(pdf, error, expected);
+      return false;
+    }
+    pdf.saving = false;
+    pdf.identity = answer.identity;
+    pdf.failed = null;
+    pdf.retries = 0;
+    try {
+      this.onSaved({ path: pdf.path, from: expected, to: answer.identity });
+    } catch (ignored) { /* the chips are not this save's: it landed */ }
+    if (this.pdf !== pdf) return true;
+    try {
+      await pdf.view.saved(made);
+    } catch (ignored) { // saved on the server, not read back here: read again once this save is over, the
+      pdf.reread = true; // rest of the ink kept (its strokes the file holds by name are not written twice)
+      return true;
+    }
+    pdf.dirtySince = null;
+    this.keepInkNow(pdf); // the kept ink: on the new version, or gone when nothing is left (review B1)
+    this.paintInk();
+    this.scheduleSave(pdf);
+    return true;
+  }
+
+  /* §3.7: why a save failed, and what then. */
+  saveFailed(pdf, error, expected) {
+    this.keepInkNow(pdf);
+    if (error.code === "changed") { // another wrote it, or ours landed though its answer was lost: the user picks
+      this.showPdfChanged(true);
+      return;
+    }
+    if (error.status === 401) { // the session ended: the sign-in screen comes; kept in the browser till then
+      pdf.failed = `Not saved: sign in again.${this.keptInkWords(pdf)}`;
+      this.paintInk();
+      return;
+    }
+    if (Array.isArray(error.identity)) { // the runner's write failed: the file as it is after it
+      if (error.partial) { // part of it left at the end: read again (and cut back), the ink kept
+        this.showPdfChanged(true, "The last save was cut short.");
+        return;
+      }
+      pdf.identity = error.identity; // cut back to what it was: saved against that next
+    }
+    const transient = !error.status || error.status >= 500 || [408, 429].includes(error.status);
+    if (!transient) {
+      this.stopSaving(pdf, error.message || "Not saved.", error.code === "too_large");
+      return;
+    }
+    pdf.failed = error.message || "Not saved.";
+    const wait = RETRY_MS[Math.min(pdf.retries, RETRY_MS.length - 1)];
+    pdf.retries += 1;
+    clearTimeout(pdf.retryTimer);
+    pdf.retryTimer = setTimeout(() => this.retryLater(pdf), wait);
+    this.paintInk();
+  }
+
+  /* §3.7: before a save is sent again, the file is checked: as expected, sent again; changed (by another, or
+   * by our save whose answer was lost), the user picks — the strokes are named, never written twice (§3.1). */
+  async retryLater(pdf) {
+    if (this.pdf !== pdf || !pdf.failed || pdf.saving) return;
+    let now = null;
+    try {
+      now = await this.api("GET", `/api/machine/stat?${query(pdf.path)}`);
     } catch (error) {
       if (this.pdf !== pdf) return;
-      done(error.code === "changed" ? null : error.message || "Not saved");
-      if (error.code === "changed") this.showPdfChanged(true);
+      if (error.code === "not_found") {
+        this.showPdfChanged(true);
+        return;
+      }
+      this.saveFailed(pdf, error, pdf.identity); // still out of reach: waited for again
       return;
     }
     if (this.pdf !== pdf) return;
-    pdf.identity = answer.identity;
-    try {
-      await pdf.view.saved(increment);
-    } catch (ignored) { // saved on the server, not read back here: read it again (no ink is unsaved now)
-      done();
-      await this.reopenPdf(false);
+    if (!sameIdentity(now.identity, pdf.identity)) {
+      this.showPdfChanged(true);
       return;
     }
+    pdf.failed = null;
+    this.savePdf();
+  }
+
+  /* §3.7: a save that cannot succeed by trying again: told, and no more tried on its own. Too large: the tools
+   * go too (nothing drawn could be saved), and the PDF with its ink can be downloaded. */
+  stopSaving(pdf, why, large = false) {
+    pdf.stopped = why;
+    pdf.failed = null;
+    clearTimeout(pdf.saveTimer);
+    clearTimeout(pdf.retryTimer);
+    this.keepInkNow(pdf);
+    if (large) {
+      pdf.tooLarge = true;
+      pdf.view.setTool(null);
+      pdf.bar.replaceChildren(this.el("p", null, `${why}${this.keptInkWords(pdf)}`));
+      pdf.bar.append(this.button("Download a copy with your ink", async () => {
+        try {
+          downloadText(await pdf.view.withInk(), pdf.name);
+        } catch (ignored) { /* nothing to download */ }
+      }));
+      pdf.bar.hidden = false;
+    }
+    this.paintInk();
+  }
+
+  /* " Your ink is kept in this browser." when it is (a store, and not too much to keep), else "". */
+  keptInkWords(pdf) {
+    return this.keep !== null && !pdf.notKept ? " Your ink is kept in this browser." : "";
+  }
+
+  /* The page went to the background (V3-P82 §3.2): the ink kept in this browser now, and saved. */
+  pageHidden() {
+    const pdf = this.pdf;
+    if (!pdf || !pdf.view.ink.dirty) return;
+    this.keepInkNow(pdf);
+    this.flushPdf();
+  }
+
+  /* ------------------------------------------------- unsaved ink kept in the browser (V3-P82 §4) */
+
+  /* Once the pen has rested a moment (never while a stroke is drawn: what is copied would hold it up). */
+  keepInkLater(pdf) {
+    if (this.keep === null || pdf.offer) return;
+    clearTimeout(pdf.keepTimer);
+    pdf.keepTimer = setTimeout(() => {
+      if (this.pdf !== pdf) return;
+      if (pdf.view.active) this.keepInkLater(pdf);
+      else this.keepInkNow(pdf);
+    }, KEEP_MS);
+  }
+
+  /* What is unsaved now, kept as {path, kind: "ink", writer, base, at, add, erase, erasePages, refs}: the
+   * strokes whole (their points as one Float32Array), against the version they were drawn on; this pane's
+   * record goes once nothing is unsaved. */
+  keepInkNow(pdf) {
+    if (this.keep === null || pdf === null || pdf.offer) return;
+    clearTimeout(pdf.keepTimer);
+    if (!pdf.view.ink.dirty) {
+      this.keep.remove("unsaved", pdf.path, this.writer);
+      return;
+    }
+    const carried = pdf.view.carry();
+    let bytes = 0;
+    const add = carried.add.map((s) => {
+      bytes += s.points.length * 12 + 200;
+      return { name: s.name, page: s.page, tool: s.tool, color: s.color, rgb: s.rgb, size: s.size,
+               pressure: s.pressure, points: Float32Array.from(s.points.flat()) };
+    });
+    pdf.notKept = bytes > KEPT_INK_MAX_BYTES;
+    if (pdf.notKept) return; // told beside the state (too much to keep here)
+    this.keep.put("unsaved", pdf.path, { kind: "ink", path: pdf.path, writer: this.writer, base: pdf.identity,
+                                         at: Date.now(), add, erase: [...carried.erase],
+                                         erasePages: carried.erasePages, refs: [...carried.refs] });
+    this.keep.prune("unsaved", KEPT_MAX, KEPT_AGE_MS);
+  }
+
+  /* Ink kept for this PDF (not open with ink in this tab's other pane), as a carry the view takes; null when
+   * there is none, or it is not ink kept as this does (each stroke checked as a saved one is, §9). */
+  async keptInk(path, module) {
+    if (this.keep === null || this.openElsewhere(path)) return null;
+    const kept = await this.keep.get("unsaved", path);
+    if (!kept || kept.kind !== "ink" || !Array.isArray(kept.add) || typeof kept.at !== "number"
+        || Date.now() - kept.at > KEPT_AGE_MS) return null;
+    const add = [];
+    for (const s of kept.add) {
+      if (!s || typeof s.name !== "string" || !s.name.startsWith("himari-ink-") || !Number.isInteger(s.page)) continue;
+      const flat = s.points instanceof Float32Array ? Array.from(s.points) : [];
+      const points = [];
+      for (let i = 0; i + 2 < flat.length; i += 3) points.push([flat[i], flat[i + 1], flat[i + 2]]);
+      const checked = module.strokeFromSaved(s.page, { ref: null, name: s.name, inkList: [], data: {
+        v: 1, tool: s.tool, color: s.color, rgb: s.rgb, size: s.size, pressure: s.pressure, points } });
+      if (checked.points.length) add.push({ ...checked, saved: null });
+    }
+    const erase = new Set((Array.isArray(kept.erase) ? kept.erase : []).filter((n) => typeof n === "string"));
+    const erasePages = (Array.isArray(kept.erasePages) ? kept.erasePages : []).filter(Number.isInteger);
+    const refs = new Map((Array.isArray(kept.refs) ? kept.refs : []).filter((r) => Array.isArray(r) && r.length === 2
+      && Number.isInteger(r[0]) && r[1] && Number.isInteger(r[1].num) && Number.isInteger(r[1].gen)));
+    if (!add.length && !erase.size) return null;
+    return { at: kept.at, base: kept.base, writer: typeof kept.writer === "string" ? kept.writer : "",
+             carried: { add, erase, erasePages, refs } };
+  }
+
+  /* §4: ink kept from before — on the same version, put back at once (and saved as ever); on another, or
+   * kept by another tab open now (it may still hold that ink), the user picks. Strokes the file holds already
+   * (by name) are left out either way. */
+  async offerKeptInk(pdf) {
+    let found;
+    try {
+      found = await this.keptInk(pdf.path, await this.loadPdf());
+    } catch (ignored) {
+      return;
+    }
+    if (found === null || this.pdf !== pdf) return;
+    const tab = found.writer.split(":")[0];
+    const elsewhere = tab !== this.writer.split(":")[0] && typeof this.keep.alive === "function"
+      && await this.keep.alive(tab);
+    if (this.pdf !== pdf) return;
+    const same = Array.isArray(found.base) && sameIdentity(found.base, pdf.identity);
+    if (same && !elsewhere) {
+      await this.putKeptInk(pdf, found, "Unsaved ink from before was restored.");
+      return;
+    }
+    pdf.offer = found;
+    // No drawing until it is answered, as the editor is read-only then (§4.1): nothing drawn meanwhile would be
+    // kept in this browser, the record there being the only copy of the ink offered (PR #119 review C2).
+    pdf.view.frozen = true;
+    this.paintInk();
+    pdf.bar.replaceChildren(this.el("p", null, `Unsaved ink from ${clock(found.at)} was kept in this browser, ` + (same
+      ? "by another tab that is still open." : "made on another version of this PDF.")));
+    pdf.bar.append(this.button(same ? "Restore" : "Put it on the current version", () => {
+      if (this.pdf !== pdf || !pdf.offer) return;
+      const offer = pdf.offer;
+      pdf.offer = null;
+      pdf.view.frozen = false;
+      this.putKeptInk(pdf, offer, null);
+    }), this.button("Discard", () => {
+      if (this.pdf !== pdf || !pdf.offer) return;
+      pdf.offer = null;
+      pdf.view.frozen = false;
+      pdf.bar.hidden = true;
+      this.keep.remove("unsaved", pdf.path); // the user's answer, whoever kept it
+      this.inkChanged(pdf); // ink drawn before the offer showed: kept and saved now (re-review N3)
+    }));
+    pdf.bar.hidden = false;
+  }
+
+  async putKeptInk(pdf, found, note) {
+    const left = await pdf.view.carryIn(found.carried);
+    if (this.pdf !== pdf) return;
     pdf.bar.hidden = true;
-    done(); // the file itself holds what it was before: nothing else is kept (V3-P82 §3.6)
+    const told = [note, left ? `${left} stroke${left === 1 ? " was" : "s were"} on pages this version does not have.`
+      : null].filter(Boolean).join(" ");
+    if (told) this.showPdfNote(told);
+    this.keepInkNow(pdf); // this pane's from now on
+    this.inkChanged(pdf);
+  }
+
+  /* §3.6: a save cut short at its end (a power cut, a failed write left in part): taken off before anything
+   * is drawn, and the PDF read again — with the ink carried here (read again after such a write, PR #118
+   * re-review N-d); if it cannot be, viewed only. */
+  async cutShort(pdf) {
+    pdf.view.setTool(null);
+    pdf.view.frozen = true;
+    pdf.mending = true; // no check on disk meanwhile: its read again would not tell why (review N)
+    clearTimeout(pdf.pollTimer);
+    this.paintInk("Mending…");
+    try { // the identity as decimal strings: none of its numbers rounded (an inode can be past 2^53)
+      await this.api("POST", "/api/machine/pdf/truncate", { path: pdf.path, to: pdf.view.cut, expected: pdf.identity });
+    } catch (error) {
+      if (this.pdf !== pdf) return;
+      pdf.mending = false;
+      this.schedulePdfPoll(pdf);
+      pdf.view.writable = false;
+      pdf.view.readOnly = `The end of this PDF was cut short and could not be mended here (${error.message}); it ` +
+        "can be viewed, not written on.";
+      this.paintInk();
+      return;
+    }
+    if (this.pdf !== pdf) return;
+    await this.reopenPdf(pdf.view.ink.dirty);
+    if (this.pdf === pdf) { // not read again (told why in the bar): checked on disk again
+      pdf.mending = false;
+      this.schedulePdfPoll(pdf);
+    }
+    // Told on the version read again — not over another PDF opened meanwhile, nor over a reason it could not be.
+    if (this.pdf && this.pdf !== pdf && this.pdf.path === pdf.path) {
+      this.showPdfNote("The end of this PDF was cut short; the last save was lost, and the rest is kept.");
+    }
   }
 
   /* A word above the pages (a signed PDF; strokes that could not be kept), until dismissed. */
@@ -979,11 +1355,19 @@ export class FilesPane {
   showPdfChanged(refused, problem = null) {
     const pdf = this.pdf;
     if (!pdf) return;
+    if (pdf.offer) { // the bar's offer of kept ink gives way (the record stays, offered at the next open)
+      pdf.offer = null;
+      if (!pdf.reopening) pdf.view.frozen = false;
+    }
+    pdf.waiting = true; // no save on its own until the user picks (V3-P82 §3.7)
+    clearTimeout(pdf.saveTimer);
+    clearTimeout(pdf.retryTimer);
+    pdf.failed = null;
     pdf.bar.replaceChildren(this.el("p", null, problem ? `${problem} Your ink is still here.` : refused
       ? "Not saved: this PDF was changed on the server since you opened it. Your ink is still here."
       : "This PDF was changed on the server since you opened it. Your ink is still here."));
     const actions = [["Load the server's version and keep my ink", () => this.reopenPdf(true)],
-                     ["Discard my ink", () => this.reopenPdf(false)]];
+                     ["Discard my ink", () => this.discardInk()]];
     for (const [label, action] of actions) {
       const button = this.el("button", "link-button", label);
       button.type = "button";
@@ -1019,14 +1403,16 @@ export class FilesPane {
     const page = pdf.view.current + 1;
     const ticket = ++this.ticket;
     pdf.reopening = true;
-    pdf.saving = true; // no save, no check on disk
-    pdf.view.saving = true; // no drawing: what is carried is all there is
+    pdf.waiting = true; // no save on its own, no check on disk
+    pdf.view.frozen = true; // no drawing: what is carried is all there is
+    clearTimeout(pdf.saveTimer);
+    clearTimeout(pdf.retryTimer);
+    if (pdf.inFlight) await pdf.inFlight.catch(() => false); // a save on its way lands (or not) first
     this.paintInk();
-    const carried = keep ? pdf.view.ink.carry() : null;
+    const carried = keep ? pdf.view.carry() : null;
     const stay = (problem) => {
       pdf.reopening = false;
-      pdf.saving = false;
-      pdf.view.saving = false;
+      pdf.view.frozen = false;
       if (this.pdf !== pdf) return;
       this.paintInk();
       this.showPdfChanged(false, problem);
@@ -1125,12 +1511,14 @@ export class FilesPane {
    * with ink unsaved, never unasked (§5.5). */
   async checkPdf() {
     const pdf = this.pdf;
-    if (!pdf || pdf.saving) return;
+    if (!pdf || pdf.saving || pdf.inFlight || pdf.reopening || pdf.mending) return;
+    const generation = pdf.generation; // a save made meanwhile makes this answer old (V3-P82 §3.4, review C2)
     try {
       const now = await this.api("GET", `/api/machine/stat?${query(pdf.path)}`);
-      if (this.pdf !== pdf || pdf.saving || sameIdentity(now.identity, pdf.identity)) return;
+      if (this.pdf !== pdf || pdf.saving || pdf.inFlight || pdf.generation !== generation
+          || sameIdentity(now.identity, pdf.identity)) return;
     } catch (error) {
-      if (this.pdf !== pdf || error.code !== "not_found") return;
+      if (this.pdf !== pdf || pdf.generation !== generation || error.code !== "not_found") return;
     }
     if (pdf.view.ink.dirty) {
       if (pdf.bar.hidden) this.showPdfChanged(false);
@@ -1210,20 +1598,18 @@ export class FilesPane {
   }
 
   /* The whole file from its ⋯ menu: any file, editable or not. */
-  askWhole(shown) {
-    // A PDF: as it is now — its ink saved since it was opened gave it a new identity; unsaved ink is not read.
-    if (this.pdf !== null && this.pdf.path === shown.path) {
-      // Told in the ink's own state slot: the bar above may hold a choice (the PDF changed on the server) that
-      // stays, and nothing above the pages moves them (review N1).
-      if (this.pdf.saving) {
-        this.paintInk("Saving… — ask again once it is saved");
+  async askWhole(shown) {
+    // A PDF: its ink saved first (V3-P82 §3.2: HIMARI reads the saved file), then as it is then.
+    const pdf = this.pdf;
+    if (pdf !== null && pdf.path === shown.path) {
+      if (!(await this.flushPdf())) {
+        // Told in the ink's own state slot: the bar above may hold a choice (the PDF changed on the server)
+        // that stays, and nothing above the pages moves them (review N1).
+        if (this.pdf === pdf) this.paintInk("Not saved: HIMARI reads the saved file");
         return;
       }
-      if (this.pdf.view.ink.dirty) {
-        this.paintInk("Save your ink first: HIMARI reads the saved file");
-        return;
-      }
-      this.onAsk({ path: shown.path, name: this.pdf.name, identity: this.pdf.identity, whole: true });
+      if (this.pdf !== pdf) return;
+      this.onAsk({ path: shown.path, name: pdf.name, identity: pdf.identity, whole: true });
       return;
     }
     if (this.doc !== null && this.doc.path === shown.path) {
