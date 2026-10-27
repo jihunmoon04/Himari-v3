@@ -1502,10 +1502,12 @@ for (const [why, base, alive, restored, label] of [
     files.keepInkNow(files.pdf); // nothing replaces the only copy meanwhile
     assert.equal(keep.map.get(PDF.path).writer, "tab-2:panel");
     const discard = files.pdf.bar.children.find((c) => c.textContent === "Discard");
+    view.ink.dirty = true; // drawn just before the offer showed
     discard.listeners.click[0]();
     await settle();
-    assert.ok(!keep.map.has(PDF.path), `${why}: discarded`);
     assert.ok(!view.frozen, `${why}: drawn on again`);
+    assert.ok(files.pdf.saveTimer !== null, `${why}: what was drawn before is saved (re-review N3)`);
+    assert.ok(files.pdf.keepTimer !== null, `${why}: and kept in this browser once the pen rests`);
   }
   files.closeDoc();
 }
@@ -1643,6 +1645,21 @@ for (const [fails, carrying] of [[false, false], [false, true], [true, false]]) 
   } finally {
     clock.restore();
   }
+}
+
+// Re-review N2: Ctrl/Cmd+S during a save that then leaves nothing unsaved — the next stroke waits its 5 s.
+{
+  const sending = deferred();
+  const { files, views } = await openPdf({ "GET /api/machine/file": PDF }, { answer: () => sending.promise });
+  views[0].next = SAVE;
+  views[0].ink.dirty = true;
+  const saving = files.savePdf();
+  await settle();
+  views[0].element.listeners.keydown[0]({ ctrlKey: true, key: "s", preventDefault() {} });
+  sending.resolve({ path: PDF.path, identity: ["9"] });
+  await saving;
+  assert.ok(!files.pdf.soon);
+  files.closeDoc();
 }
 
 // V3-P82 §4: whether the tab that kept ink is open now, asked over the browser's channel (local_store.js).

@@ -994,6 +994,7 @@ export class FilesPane {
     pdf.saveTimer = null;
     if (!pdf.view.writable || !pdf.view.ink.dirty) {
       pdf.dirtySince = null;
+      pdf.soon = false; // nothing left for Ctrl/Cmd+S to send (re-review N2)
       return;
     }
     if (pdf.dirtySince === null) pdf.dirtySince = Date.now();
@@ -1289,7 +1290,7 @@ export class FilesPane {
       pdf.view.frozen = false;
       pdf.bar.hidden = true;
       this.keep.remove("unsaved", pdf.path); // the user's answer, whoever kept it
-      this.paintInk();
+      this.inkChanged(pdf); // ink drawn before the offer showed: kept and saved now (re-review N3)
     }));
     pdf.bar.hidden = false;
   }

@@ -349,7 +349,18 @@ export class PdfFile {
     this.cut = null;
     const last = this.lastEnd();
     const later = findLast(this.bytes, "startxref", Math.max(last ? last.end : 0, this.size - 1024));
-    if (later >= 0) return this.readFrom(new Lexer(this.bytes, later + 9).token());
+    if (later >= 0) {
+      try {
+        return await this.readFrom(new Lexer(this.bytes, later + 9).token());
+      } catch (error) {
+        // Cut short within its own ``startxref N`` (PR #119 re-review N1): a save cut short, as below.
+        if (!(error instanceof PdfReadError) || last === null) throw error;
+        this.entries = new Map();
+        this.objectStreams = new Map();
+        this.trailer = null;
+        this.form = null;
+      }
+    }
     if (last === null) throw new PdfReadError("no startxref");
     await this.readFrom(last.offset);
     const rest = this.bytes.subarray(last.end);

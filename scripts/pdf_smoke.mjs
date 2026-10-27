@@ -317,7 +317,7 @@ for (const name of ["table.pdf", "stream.pdf"]) {
   const many = Array.from({ length: 40 }, (_, i) => ({ ...stroke(20 + i, 30 + i), name: `himari-ink-cut${i}` }));
   const next = await appendBytes(await openPdf(one), [{ ref, add: many }]);
   assert.ok(next.length > 4096);
-  for (const piece of [300, next.length - 20]) {
+  for (const piece of [300, next.length - 20, next.length - 10]) { // the last: cut within its startxref N
     const cut = join(one, next.subarray(0, piece));
     const file = await openPdf(cut);
     assert.equal(file.cut, one.length, `${name}: cut back to the save before (${piece} bytes left)`);
