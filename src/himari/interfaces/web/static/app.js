@@ -262,6 +262,8 @@ const app = {
   registeredFolders: null, // the last /api/workspaces items, for the attach field (V3-P74 §10.3)
   streaming: false, // the server streams answers (V3-P73 §9)
   filesOpen: false, // the files panel beside the conversation is open (V3-P75 §3.2)
+  workspaceMode: "chat", // chat → chat-files → files → files-chat → chat
+  workspaceContext: "chat", // the shared toolbar follows the pane being used
   workingFolder: null, // the open conversation's working folder, when it works on this server's folders
   conversationFolderPaths: [], // all of its folders: a folder already among them is not offered to attach
   filesReturnId: null, // the conversation to return to from the separate Files surface
@@ -293,11 +295,10 @@ const filesPanel = new FilesPane({
   onSaved: (saved) => followSave(saved),
   working: () => app.running, // HIMARI at work in this conversation (§7.3)
   onAsk: (reference) => { // the conversation shown again, where its chip goes
-    setPanelExpanded(false);
-    if (panelCoversScreen() && app.filesOpen) toggleFilesPanel();
+    workspaceChat();
     addReference(reference);
   },
-  actions: [$("file-panel-changes"), $("file-panel-expand"), $("file-panel-close")],
+  actions: [$("file-panel-changes")],
   changes: { // V3-P76 §5: each call names its conversation, fixed when it starts (PR #99 review C2)
     of: () => app.conversationId,
     list: async (of) => ({ ...(await api("GET", conversationChanges(of))), id: of }),
@@ -1053,8 +1054,10 @@ function showReference(path, start = null, end = null) {
   }
   if (!app.filesOpen) {
     app.filesOpen = true;
+    app.workspaceMode = "chat-files";
     syncFilesPanel(true);
   }
+  setWorkspaceContext("files");
   filesPanel.reveal(path, start, end);
 }
 
@@ -1066,7 +1069,7 @@ async function askFromFiles(reference) {
                   end: reference.whole ? null : reference.end };
   const id = await openFolderConversation(folder, false, start);
   if (id === null || app.conversationId !== id) return;
-  if (panelCoversScreen() && app.filesOpen) toggleFilesPanel(); // the file waits there for the panel
+  workspaceChat(); // the file waits there; Ask always brings its composer back
   addReference(reference);
 }
 
@@ -1913,16 +1916,17 @@ function syncModelChrome() {
 let fullscreenPending = false;
 
 function syncFullscreen() {
-  const button = $("app-fullscreen");
   const active = document.fullscreenElement === document.documentElement;
-  button.hidden = $("surface-login").hidden === false ||
-    (!active && (!document.fullscreenEnabled || typeof document.documentElement.requestFullscreen !== "function"));
-  button.disabled = fullscreenPending;
-  button.setAttribute("aria-pressed", String(active));
-  button.title = active ? "Exit fullscreen" : "Enter fullscreen";
-  button.setAttribute("aria-label", button.title);
-  $("app-fullscreen-label").textContent = active ? "Exit fullscreen" : "Fullscreen";
-  $("app-fullscreen-icon").setAttribute("href", active ? "#side-contract" : "#side-expand");
+  const supported = active || (document.fullscreenEnabled && typeof document.documentElement.requestFullscreen === "function");
+  for (const id of ["app-fullscreen", "sidebar-fullscreen"]) {
+    const button = $(id);
+    button.hidden = !$("surface-login").hidden;
+    button.disabled = fullscreenPending || !supported;
+    button.setAttribute("aria-pressed", String(active));
+    button.title = active ? "Exit fullscreen" : supported ? "Enter fullscreen" : "Fullscreen is unavailable in this browser";
+    button.setAttribute("aria-label", button.title);
+    $(`${id}-icon`).setAttribute("href", active ? "#side-contract" : "#side-expand");
+  }
 }
 
 async function toggleFullscreen() {
@@ -3426,9 +3430,10 @@ async function showFiles({ via = "push" } = {}) {
 /* A conversation opened from a folder: its files beside it (V3-P75 §6; PR #93 review B2), on ``start``
  * ({path, start, end}: a file, its selection selected) instead of the working folder when given. */
 function openWithFiles(id, start = null) {
-  // Opening a conversation should show its messages on a touch screen;
-  // its file/selection is ready behind the Files tab.
+  // Touch starts on the messages; its file/selection is ready for the cycle control.
   app.filesOpen = !panelCoversScreen();
+  app.workspaceMode = app.filesOpen ? "chat-files" : "chat";
+  app.workspaceContext = "chat";
   app.panelStart = start ? { ...start, id } : null;
   return openConversation(id);
 }
@@ -3557,51 +3562,110 @@ async function loadChanges(generation) {
 
 /* The panel beside a conversation that works on this server's folders. */
 const PANEL_WIDTH_KEY = "himari.filePanelWidth";
+const PANEL_HEIGHT_KEY = "himari.filePanelHeight";
 
 function syncFilesPanel(onChat) {
   const offered = onChat && app.workingFolder !== null;
+  // Existing file links can reveal the pane without changing the conversation.
+  if (app.filesOpen && app.workspaceMode === "chat") app.workspaceMode = "chat-files";
+  if (!app.filesOpen) app.workspaceMode = "chat";
+  const mode = offered ? app.workspaceMode : "chat";
   $("chat-files-toggle").hidden = !offered;
   $("chat-files-toggle").setAttribute("aria-expanded", String(offered && app.filesOpen));
   $("file-panel").hidden = !(offered && app.filesOpen);
   $("layout").classList.toggle("has-file-panel", offered && app.filesOpen);
-  if (!(offered && app.filesOpen)) setPanelExpanded(false);
+  $("workspace-panes").dataset.mode = mode;
+  $("main").inert = mode === "files";
+  $("main").setAttribute("aria-hidden", String(mode === "files"));
+  $("file-panel-grip").hidden = !mode.includes("-");
+  $("file-panel-grip").setAttribute("aria-orientation", panelCoversScreen() ? "horizontal" : "vertical");
+  const labels = { chat: "Open files beside conversation", "chat-files": "Make files the main view",
+                   files: "Open conversation beside files", "files-chat": "Make conversation the main view" };
+  $("chat-files-toggle").title = labels[mode];
+  $("chat-files-toggle").setAttribute("aria-label", labels[mode]);
+  $("workspace-cycle-icon").setAttribute("href", mode.includes("-") ? "#side-panel-expand" : "#side-panel-restore");
   syncWorkspaceSwitch();
+  syncWorkspaceChrome();
 }
 
 function toggleFilesPanel() {
   shellMotion(() => {
-    app.filesOpen = !app.filesOpen;
+    const modes = ["chat", "chat-files", "files", "files-chat"];
+    app.workspaceMode = modes[(modes.indexOf(app.workspaceMode) + 1) % modes.length];
+    app.filesOpen = app.workspaceMode !== "chat";
+    app.workspaceContext = app.workspaceMode.startsWith("files") ? "files" : "chat";
     syncFilesPanel(true);
-    if (app.filesOpen && app.workingFolder) {
-      // Its place again, or its first place the first time.
-      if (filesPanel.place) filesPanel.refresh();
-      else openPanelStart();
-    }
+    // Reordering the live panes never reloads an editor or asks it to leave.
+    if (app.filesOpen && app.workingFolder && !filesPanel.place) openPanelStart();
   });
 }
 
-/* A stable touch navigation bar stays outside the covering files pane.
- * Switching views in a conversation keeps its composer, selected file and editor. */
+/* The old touch tabs remain on the standalone Files route. In a conversation
+ * the shared cycle control replaces their duplicate view-switching role. */
 function syncWorkspaceSwitch() {
   const chat = !$("surface-chat").hidden;
   const files = !$("surface-files").hidden;
   const compact = window.matchMedia("(max-width: 1099px)").matches;
-  const available = compact && (files || (chat && app.workingFolder !== null));
-  const showingFiles = files || (chat && app.filesOpen);
+  const available = compact && files;
+  const showingFiles = files || (chat && app.workspaceMode.startsWith("files"));
   $("workspace-switch").hidden = !available;
   document.body.classList.toggle("has-workspace-switch", available);
   $("workspace-chat").setAttribute("aria-pressed", String(!showingFiles));
   $("workspace-files").setAttribute("aria-pressed", String(showingFiles));
   $("workspace-chat-label").textContent = chat || app.filesReturnId ? "Chat" : "Home";
   $("workspace-files").title = chat ? "Files for this conversation" : "Browse all files";
-  // The covered pane must not leave invisible conversation controls in the tab order.
-  $("main").inert = chat && app.filesOpen && compact;
+}
+
+/* One toolbar outside both panes. The actual FilesPane controls are reparented,
+ * so Back, Save, review, PDF zoom and file menus retain their state and handlers. */
+function syncWorkspaceChrome() {
+  const chat = !$("surface-chat").hidden;
+  const standalone = !$("surface-files").hidden;
+  const pane = standalone ? filesSurface : chat && app.filesOpen && app.workingFolder !== null ? filesPanel : null;
+  const host = $("workspace-file-tools");
+  for (const candidate of [filesSurface, filesPanel]) {
+    if (candidate !== pane && candidate.head && candidate.head.parentNode === host) candidate.root.prepend(candidate.head);
+  }
+  if (pane && pane.head && pane.head.parentNode !== host) host.append(pane.head);
+  const files = pane !== null && (standalone || app.workspaceContext === "files");
+  $("topbar").classList.toggle("is-file-context", files);
+  $("workspace-file-title").hidden = !files;
+  syncWorkspaceFileTitle();
+  host.hidden = !files;
+  $("workspace-context").hidden = !chat || !app.workspaceMode.includes("-") || pane === null;
+  $("workspace-context").title = files ? "Conversation controls" : "File controls";
+  $("workspace-context").setAttribute("aria-label", $("workspace-context").title);
+  $("workspace-context-icon").setAttribute("href", files ? "#side-chat" : "#side-folder");
+  $("workspace-file-menu").hidden = !files;
+  if (!files) closeWorkspaceFileMenu();
+  if (files) closeChatMenu();
+}
+
+function syncWorkspaceFileTitle() {
+  const pane = !$("surface-files").hidden ? filesSurface : filesPanel;
+  const path = pane.file || pane.folder || "Files";
+  $("workspace-file-title").textContent = path.split("/").pop() || path;
+  $("workspace-file-title").title = path;
+}
+
+function setWorkspaceContext(context) {
+  if (app.workspaceContext === context) return;
+  app.workspaceContext = context;
+  closeWorkspaceFileMenu();
+  syncWorkspaceChrome();
+}
+
+function closeWorkspaceFileMenu() {
+  $("topbar").classList.remove("is-file-menu-open");
+  $("workspace-file-menu").setAttribute("aria-expanded", "false");
 }
 
 function workspaceChat() {
   if (!$("surface-chat").hidden) {
     finishShellMotion();
     app.filesOpen = false;
+    app.workspaceMode = "chat";
+    app.workspaceContext = "chat";
     syncFilesPanel(true);
   } else if (app.filesReturnId) openConversation(app.filesReturnId);
   else showHome();
@@ -3610,7 +3674,11 @@ function workspaceChat() {
 function workspaceFiles() {
   if (!$("surface-chat").hidden && app.workingFolder !== null) {
     finishShellMotion();
-    if (!app.filesOpen) toggleFilesPanel();
+    app.filesOpen = true;
+    app.workspaceMode = "files";
+    app.workspaceContext = "files";
+    syncFilesPanel(true);
+    if (!filesPanel.place) openPanelStart();
   } else if ($("surface-files").hidden) showFiles();
 }
 
@@ -3623,29 +3691,23 @@ function openPanelStart() {
   else filesPanel.openFolder(app.workingFolder);
 }
 
-/* Too narrow for the panel beside the conversation: it covers the screen (app.css). */
+/* Portrait/touch layouts stack the sub view below the main view. */
 function panelCoversScreen() {
   return window.matchMedia("(max-width: 1099px)").matches;
 }
 
-function setPanelExpanded(expanded) {
-  $("layout").classList.toggle("is-files-expanded", expanded);
-  $("file-panel-expand").setAttribute("aria-pressed", String(expanded));
-  $("file-panel-expand").setAttribute("aria-label", expanded ? "Show the conversation" : "Expand files");
-  $("file-panel-expand").title = expanded ? "Show the conversation" : "Expand files";
-  $("file-panel-expand-icon").setAttribute("href", expanded ? "#side-panel-restore" : "#side-panel-expand");
-}
-
-function panelWidth(fraction) {
+function panelWidth(fraction, vertical = panelCoversScreen()) {
   const clamped = Math.min(0.7, Math.max(0.3, fraction));
-  $("layout").style.setProperty("--file-panel-width", `${(clamped * 100).toFixed(1)}%`);
+  $("workspace-panes").style.setProperty(vertical ? "--file-panel-height" : "--file-panel-width", `${(clamped * 100).toFixed(1)}%`);
   return clamped;
 }
 
 function restorePanelWidth() {
   try {
-    const saved = Number(localStorage.getItem(PANEL_WIDTH_KEY));
-    if (saved) panelWidth(saved);
+    for (const [key, vertical] of [[PANEL_WIDTH_KEY, false], [PANEL_HEIGHT_KEY, true]]) {
+      const saved = Number(localStorage.getItem(key));
+      if (saved) panelWidth(saved, vertical);
+    }
   } catch (ignored) { /* the default width */ }
 }
 
@@ -3654,14 +3716,19 @@ function dragPanel(event) {
   event.preventDefault();
   const grip = $("file-panel-grip");
   grip.setPointerCapture(event.pointerId);
-  const box = $("layout").getBoundingClientRect();
+  const box = $("workspace-panes").getBoundingClientRect();
   let fraction = null;
-  const move = (e) => { fraction = panelWidth((box.right - e.clientX) / box.width); };
+  const move = (e) => {
+    const filesMain = app.workspaceMode === "files-chat";
+    const fileFraction = panelCoversScreen() ? (filesMain ? e.clientY - box.top : box.bottom - e.clientY) / box.height
+      : (filesMain ? e.clientX - box.left : box.right - e.clientX) / box.width;
+    fraction = panelWidth(filesMain ? 1 - fileFraction : fileFraction);
+  };
   const end = () => {
     grip.removeEventListener("pointermove", move);
     grip.removeEventListener("pointerup", end);
     grip.removeEventListener("pointercancel", end);
-    try { if (fraction !== null) localStorage.setItem(PANEL_WIDTH_KEY, String(fraction)); } catch (ignored) { /* kept for this page */ }
+    try { if (fraction !== null) localStorage.setItem(panelCoversScreen() ? PANEL_HEIGHT_KEY : PANEL_WIDTH_KEY, String(fraction)); } catch (ignored) { /* kept for this page */ }
   };
   grip.addEventListener("pointermove", move);
   grip.addEventListener("pointerup", end);
@@ -3669,12 +3736,17 @@ function dragPanel(event) {
 }
 
 function nudgePanel(event) {
-  if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+  const vertical = panelCoversScreen();
+  if (!(vertical ? ["ArrowUp", "ArrowDown"] : ["ArrowLeft", "ArrowRight"]).includes(event.key)) return;
   event.preventDefault();
-  const box = $("layout").getBoundingClientRect();
-  const now = $("file-panel").getBoundingClientRect().width / box.width;
-  const fraction = panelWidth(now + (event.key === "ArrowLeft" ? 0.05 : -0.05));
-  try { localStorage.setItem(PANEL_WIDTH_KEY, String(fraction)); } catch (ignored) { /* kept for this page */ }
+  const box = $("workspace-panes").getBoundingClientRect();
+  const panel = $("file-panel").getBoundingClientRect();
+  const now = vertical ? panel.height / box.height : panel.width / box.width;
+  const towardStart = event.key === "ArrowLeft" || event.key === "ArrowUp";
+  const filesMain = app.workspaceMode === "files-chat";
+  const fileFraction = now + (towardStart !== filesMain ? 0.05 : -0.05);
+  const fraction = panelWidth(filesMain ? 1 - fileFraction : fileFraction);
+  try { localStorage.setItem(vertical ? PANEL_HEIGHT_KEY : PANEL_WIDTH_KEY, String(fraction)); } catch (ignored) { /* kept for this page */ }
 }
 
 async function showFolders({ via = "push" } = {}) {
@@ -3912,13 +3984,25 @@ async function boot() {
   document.addEventListener("keydown", shortcut);
   $("files-surface-slot").append(filesSurface.root);
   $("file-panel-slot").append(filesPanel.root);
+  for (const pane of [filesSurface, filesPanel]) {
+    new MutationObserver(syncWorkspaceFileTitle).observe(pane.crumbs, { childList: true, subtree: true });
+  }
   restorePanelWidth();
   $("nav-files").addEventListener("click", () => showFiles().catch((e) => status(e.message, "error")));
   $("chat-files-toggle").addEventListener("click", toggleFilesPanel);
-  $("file-panel-close").addEventListener("click", workspaceChat);
   $("file-panel-changes").addEventListener("click", () => filesPanel.openChanges());
-  $("file-panel-expand").addEventListener("click",
-    () => shellMotion(() => setPanelExpanded(!$("layout").classList.contains("is-files-expanded"))));
+  $("workspace-context").addEventListener("click", () => setWorkspaceContext(app.workspaceContext === "files" ? "chat" : "files"));
+  $("workspace-file-menu").addEventListener("click", () => {
+    const open = $("topbar").classList.toggle("is-file-menu-open");
+    $("workspace-file-menu").setAttribute("aria-expanded", String(open));
+  });
+  for (const [node, context] of [[$("main"), "chat"], [$("file-panel"), "files"]]) {
+    node.addEventListener("pointerdown", () => setWorkspaceContext(context));
+    node.addEventListener("focusin", () => setWorkspaceContext(context));
+  }
+  document.addEventListener("pointerdown", (event) => {
+    if (!$("topbar").contains(event.target)) closeWorkspaceFileMenu();
+  });
   $("file-panel-grip").addEventListener("pointerdown", dragPanel);
   $("file-panel-grip").addEventListener("keydown", nudgePanel);
   new ResizeObserver(() => syncModelChrome()).observe($("topbar"));
@@ -3986,6 +4070,7 @@ async function boot() {
   $("workspace-chat").addEventListener("click", workspaceChat);
   $("workspace-files").addEventListener("click", workspaceFiles);
   $("app-fullscreen").addEventListener("click", toggleFullscreen);
+  $("sidebar-fullscreen").addEventListener("click", toggleFullscreen);
   document.addEventListener("fullscreenchange", syncFullscreen);
   $("chat-menu-rename").addEventListener("click", () => renameConversation());
   $("image-dialog-close").addEventListener("click", () => $("image-dialog").close());
@@ -3998,6 +4083,9 @@ async function boot() {
   document.addEventListener("keydown", (event) => {
     if (event.key !== "Escape") return;
     closeChatMenu();
+    const fileMenuOpen = $("topbar").classList.contains("is-file-menu-open");
+    closeWorkspaceFileMenu();
+    if (fileMenuOpen) $("workspace-file-menu").focus();
     for (const menu of $("conversation-list").querySelectorAll("details[open]")) {
       menu.open = false;
       menu.querySelector("summary").focus();
@@ -4028,7 +4116,7 @@ async function boot() {
     closeNav();
     $("server-details").open = false;
     syncModelChrome();
-    syncWorkspaceSwitch();
+    syncFilesPanel(!$("surface-chat").hidden);
   });
   try {
     const session = await api("GET", "/api/session");

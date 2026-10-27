@@ -60,6 +60,7 @@
       <aside class="sidebar" id="sidebar" aria-label="Navigation" hidden>
         <div class="sidebar-head">
           <button type="button" id="nav-home" class="brand brand-button" aria-label="HIMARI"><span class="sidebar-brand-mark"><svg class="side-icon" aria-hidden="true"><use href="#side-halo"/></svg></span><span>HIMARI</span></button>
+          <button type="button" id="sidebar-fullscreen" class="icon-button sidebar-fullscreen" aria-label="Enter fullscreen" title="Enter fullscreen" aria-pressed="false" hidden><svg class="side-icon" aria-hidden="true"><use id="sidebar-fullscreen-icon" href="#side-expand"/></svg></button>
           <button type="button" id="sidebar-close" class="icon-button sidebar-close" aria-label="Collapse navigation" title="Collapse navigation"><svg class="side-icon" aria-hidden="true"><use href="#side-panel"/></svg></button>
         </div>
 
@@ -82,15 +83,15 @@
         <nav class="sidebar-utility" aria-label="Utilities">
           <details class="sidebar-server" id="server-details" hidden><summary><span class="sidebar-status-dot" aria-hidden="true"></span><span id="server-status-label">Connected</span><svg class="side-icon sidebar-status-chevron" aria-hidden="true"><use href="#side-chevron"/></svg></summary><p class="server-info" id="server-info" hidden></p></details>
           <button type="button" id="nav-trash" class="nav-link sidebar-utility-link"><svg class="side-icon" aria-hidden="true"><use href="#side-trash"/></svg><span>Trash</span></button>
-          <button type="button" id="app-fullscreen" class="nav-link sidebar-utility-link" aria-label="Enter fullscreen" title="Enter fullscreen" aria-pressed="false" hidden><svg class="side-icon" aria-hidden="true"><use id="app-fullscreen-icon" href="#side-expand"/></svg><span id="app-fullscreen-label">Fullscreen</span></button>
           <button type="button" id="nav-appearance" class="nav-link sidebar-utility-link" aria-haspopup="dialog"><svg class="side-icon" aria-hidden="true"><use href="#side-settings"/></svg><span>Settings</span></button>
         </nav>
       </aside>
 
       <button type="button" class="backdrop" id="nav-backdrop" aria-label="Close navigation" hidden></button>
 
-      <main class="main" id="main" aria-label="Main">
+      <div class="workspace" id="workspace">
         <div class="topbar" id="topbar">
+          <button type="button" id="app-fullscreen" class="icon-button topbar-icon-button" aria-label="Enter fullscreen" title="Enter fullscreen" aria-pressed="false" hidden><svg class="side-icon" aria-hidden="true"><use id="app-fullscreen-icon" href="#side-expand"/></svg></button>
           <button
             type="button"
             id="sidebar-toggle"
@@ -111,8 +112,12 @@
             <label class="model-control" id="chat-menu-effort-field" hidden><span>Reasoning</span><select id="chat-menu-effort-select"></select></label>
             <p class="model-note" id="chat-menu-model-note" hidden></p>
           </section>
-          <button type="button" id="chat-files-toggle" class="icon-button topbar-icon-button" aria-controls="file-panel"
-                  aria-expanded="false" aria-label="Show files" title="Show files" hidden><svg class="side-icon" aria-hidden="true"><use href="#side-folder"/></svg></button>
+          <span id="workspace-file-title" class="topbar-title workspace-file-title" hidden>Files</span>
+          <div id="workspace-file-tools" class="workspace-file-tools" hidden></div>
+          <button type="button" id="workspace-file-menu" class="icon-button topbar-icon-button" aria-label="File actions" title="File actions" aria-expanded="false" aria-controls="workspace-file-tools" hidden><svg class="side-icon" aria-hidden="true"><use href="#side-more"/></svg></button>
+          <button type="button" id="workspace-context" class="icon-button topbar-icon-button" aria-label="File controls" title="File controls" hidden><svg class="side-icon" aria-hidden="true"><use id="workspace-context-icon" href="#side-folder"/></svg></button>
+          <button type="button" id="chat-files-toggle" class="icon-button topbar-icon-button" aria-controls="workspace-panes"
+                  aria-expanded="false" aria-label="Open files beside conversation" title="Open files beside conversation" hidden><svg class="side-icon" aria-hidden="true"><use id="workspace-cycle-icon" href="#side-panel-restore"/></svg></button>
           <button
             type="button"
             id="chat-menu-toggle"
@@ -166,6 +171,8 @@
           </div>
         </div>
 
+        <div class="workspace-panes" id="workspace-panes" data-mode="chat">
+        <main class="main" id="main" aria-label="Main">
         <div class="status-bar" id="status-bar" role="status" aria-live="polite"></div>
         <!-- New answers and questions, read by screen readers (the timeline itself is not a live region). -->
         <div class="visually-hidden" id="announce" aria-live="polite" aria-atomic="true"></div>
@@ -327,11 +334,10 @@
              aria-label="Resize the files panel" tabindex="0"></div>
         <!-- Its controls go into the files pane's head (app.js). -->
         <button type="button" id="file-panel-changes" class="file-panel-changes" hidden>Changes</button>
-        <button type="button" id="file-panel-expand" class="icon-button file-panel-button" aria-pressed="false"
-                aria-label="Expand files" title="Expand files"><svg class="side-icon" aria-hidden="true"><use id="file-panel-expand-icon" href="#side-panel-expand"/></svg></button>
-        <button type="button" id="file-panel-close" class="icon-button file-panel-button" aria-label="Close files" title="Close files"><svg class="side-icon" aria-hidden="true"><use href="#side-close"/></svg></button>
         <div class="files-slot" id="file-panel-slot"></div>
       </aside>
+        </div>
+      </div>
     </div>
 
     <nav id="workspace-switch" class="workspace-switch" aria-label="Workspace views" hidden>

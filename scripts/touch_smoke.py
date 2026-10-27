@@ -1,4 +1,4 @@
-"""Touch navigation smoke over an isolated real server and a fake machine.
+"""Unified workspace smoke over an isolated real server and a fake machine.
 
 Requires Playwright Chromium. No production data or model requests are used.
 python scripts/touch_smoke.py --screenshots /tmp/himari-touch
@@ -12,7 +12,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 from ui_smoke import serve
-from playwright.sync_api import expect, sync_playwright
+from playwright.sync_api import Locator, expect, sync_playwright
 
 
 def main() -> None:
@@ -30,8 +30,8 @@ def main() -> None:
             token = Path(root, "control/operator.secret").read_text().strip()
             with sync_playwright() as p:
                 browser = p.chromium.launch()
-                for width in (390, 768, 1024, 1366):
-                    context = browser.new_context(viewport={"width": width, "height": 900}, has_touch=width < 1100)
+                for width in (320, 390, 768, 1024, 1180, 1366):
+                    context = browser.new_context(viewport={"width": width, "height": 900}, has_touch=width < 1200)
                     page = context.new_page()
                     page.on("pageerror", lambda error: errors.append(str(error)))
 
@@ -71,65 +71,127 @@ def main() -> None:
                     assert page.locator("#model-dialog").count() == 0
                     assert page.locator("#chat-menu-model-select").bounding_box()["height"] >= 36
                     page.locator("#composer-text").fill("draft to keep")
+                    height = page.locator("#topbar").bounding_box()["height"]
+                    expect(page.locator("#workspace-switch")).to_be_hidden()
+                    cycle = page.locator("#chat-files-toggle")
+                    modes = ("chat-files", "files", "files-chat", "chat")
 
-                    if width < 1100:
-                        expect(page.locator("#workspace-switch")).to_be_visible()
-                        page.locator("#workspace-files").click()
-                    else:
-                        page.locator("#chat-files-toggle").click()
+                    def next_mode(mode: str) -> None:
+                        cycle.click()
+                        expect(page.locator("#workspace-panes")).to_have_attribute("data-mode", mode)
+                        assert page.locator("#topbar").bounding_box()["height"] == height
+
+                    def file_control(name: str) -> Locator:
+                        if width < 1100 and page.locator("#workspace-file-menu").get_attribute("aria-expanded") != "true":
+                            page.locator("#workspace-file-menu").click()
+                        return page.locator("#workspace-file-tools").get_by_role("button", name=name, exact=True)
+
+                    next_mode(modes[0])
                     panel = page.locator("#file-panel")
-                    expect(panel.get_by_title("/home/demo/nested", exact=True)).to_be_visible()
-                    if width >= 1100:
-                        heights = [page.locator(selector).bounding_box()["height"] for selector in
-                                   (".sidebar-head", "#topbar", "#file-panel .files-head")]
-                        assert max(heights) - min(heights) < 1, heights
+                    body = panel.locator(".files-body")
+                    expect(body.get_by_title("/home/demo/nested", exact=True)).to_be_visible()
+                    chat_box = page.locator("#main").bounding_box()
+                    file_box = panel.bounding_box()
+                    assert (file_box["y"] >= chat_box["y"] + chat_box["height"] - 1 if width < 1100
+                            else file_box["x"] >= chat_box["x"] + chat_box["width"] - 1)
+                    assert page.locator("#topbar .files-head").count() == 1
+                    assert panel.locator(".files-head").count() == 0
                     assert page.locator(".sidebar-head").evaluate(
                         "e => getComputedStyle(e).borderBottomColor === 'rgba(0, 0, 0, 0)'")
-                    panel.get_by_title("/home/demo/nested", exact=True).click()
-                    panel.get_by_title("/home/demo/nested/note.txt", exact=True).click()
+                    body.get_by_title("/home/demo/nested", exact=True).click()
+                    body.get_by_title("/home/demo/nested/note.txt", exact=True).click()
                     expect(panel.locator(".cm-content")).to_contain_text("touch note")
-                    panel.get_by_role("button", name="Go back in files", exact=True).click()
-                    expect(panel.get_by_title("/home/demo/nested/nested", exact=True)).to_be_visible()
-                    panel.get_by_role("button", name="Go to parent folder", exact=True).click()
-                    expect(panel.get_by_title("/home/demo/note.txt", exact=True)).to_be_visible()
-                    panel.get_by_title("/home/demo/note.txt", exact=True).click()
+                    file_control("Go back in files").click()
+                    expect(body.get_by_title("/home/demo/nested/nested", exact=True)).to_be_visible()
+                    file_control("Go to parent folder").click()
+                    expect(body.get_by_title("/home/demo/note.txt", exact=True)).to_be_visible()
+                    page.keyboard.press("Escape")
+                    body.get_by_title("/home/demo/note.txt", exact=True).click()
                     editor = panel.locator(".cm-content")
                     editor.click()
                     editor.press("ControlOrMeta+End")
                     page.keyboard.type("unsaved")
-                    panel.get_by_role("button", name="Go back in files", exact=True).click()
+                    file_control("Go back in files").click()
                     expect(page.locator("#confirm-dialog")).to_be_visible()
                     page.locator("#confirm-dialog").get_by_role("button", name="Cancel", exact=True).click()
                     expect(editor).to_contain_text("unsaved")
-                    if width < 1100:
-                        page.locator("#workspace-chat").click()
-                        expect(page.locator("#composer-text")).to_have_value("draft to keep")
-                        page.locator("#workspace-files").click()
-                        expect(editor).to_contain_text("unsaved")
+                    page.keyboard.press("Escape")
+                    next_mode(modes[1])
+                    expect(page.locator("#main")).to_be_hidden()
+                    expect(page.locator("#topbar")).to_be_visible()
+                    next_mode(modes[2])
+                    expect(page.locator("#main")).to_be_visible()
+                    expect(page.locator("#composer-text")).to_have_value("draft to keep")
+                    expect(editor).to_contain_text("unsaved")
+                    page.wait_for_timeout(250)
+                    chat_box = page.locator("#main").bounding_box()
+                    file_box = panel.bounding_box()
+                    assert (chat_box["y"] >= file_box["y"] + file_box["height"] - 1 if width < 1100
+                            else chat_box["x"] >= file_box["x"] + file_box["width"] - 1)
+                    next_mode(modes[3])
+                    expect(panel).to_be_hidden()
+                    expect(page.locator("#chat-menu-model-select")).to_be_visible()
+                    expect(page.locator("#composer-text")).to_have_value("draft to keep")
+                    next_mode(modes[0])
+                    expect(editor).to_contain_text("unsaved")
+                    # Rapid clicks skip an in-flight snapshot and commit each cycle once.
+                    page.evaluate("for (let i = 0; i < 4; i++) document.getElementById('chat-files-toggle').click()")
+                    expect(page.locator("#workspace-panes")).to_have_attribute("data-mode", modes[0])
+                    expect(editor).to_contain_text("unsaved")
+                    expect(page.locator("#composer-text")).to_have_value("draft to keep")
+                    page.wait_for_timeout(250)
+                    grip = page.locator("#file-panel-grip")
+                    before_resize = panel.bounding_box()
+                    grip.focus()
+                    page.keyboard.press("ArrowUp" if width < 1100 else "ArrowLeft")
+                    after_resize = panel.bounding_box()
+                    axis = "height" if width < 1100 else "width"
+                    assert after_resize[axis] > before_resize[axis] + 1
+                    # Reduced motion uses the same cycle with no view-transition delay.
+                    page.emulate_media(reduced_motion="reduce")
+                    for mode in modes[1:] + modes[:1]:
+                        next_mode(mode)
+                    expect(editor).to_contain_text("unsaved")
+                    page.emulate_media(reduced_motion="no-preference")
+                    assert page.locator("#confirm-dialog").is_visible() is False
+                    assert page.locator("#file-panel-expand, #file-panel-close").count() == 0
                     assert page.evaluate("document.documentElement.scrollWidth <= innerWidth + 1")
                     page.evaluate("document.documentElement.dataset.theme = 'warm'; window.scrollTo(0, 5000)")
                     assert page.evaluate("scrollY === 0 && getComputedStyle(document.documentElement).backgroundColor === getComputedStyle(document.body).backgroundColor")
                     if args.screenshots:
                         page.wait_for_timeout(400)  # capture the settled view, after shell motion
-                        page.screenshot(path=str(args.screenshots / f"touch-files-{width}.png"))
+                        page.screenshot(path=str(args.screenshots / f"workspace-split-{width}.png"))
+                    if width >= 1100:
+                        page.locator("#sidebar-close").click()
+                    else:
+                        # The drawer keeps its deployed transform animation.
+                        assert "transform" in page.locator("#sidebar").evaluate("e => getComputedStyle(e).transitionProperty")
+                    expect(page.locator("#app-fullscreen")).to_be_visible()
+                    assert page.locator("#app-fullscreen").bounding_box()["x"] < page.locator("#sidebar-toggle").bounding_box()["x"]
+                    page.locator("#sidebar-toggle").click()
+                    expect(page.locator("#sidebar-fullscreen")).to_be_visible()
+                    assert page.locator("#sidebar-fullscreen").bounding_box()["x"] < page.locator("#sidebar-close").bounding_box()["x"]
+                    page.locator("#sidebar-fullscreen").click()
+                    page.wait_for_function("document.fullscreenElement !== null")
+                    if width < 1200:
+                        assert page.locator(".sidebar-head").evaluate("e => parseFloat(getComputedStyle(e).paddingLeft) >= 72")
+                    button_box = page.locator("#sidebar-close").bounding_box()
+                    sidebar_box = page.locator("#sidebar").bounding_box()
+                    assert button_box["x"] + button_box["width"] <= sidebar_box["x"] + sidebar_box["width"]
+                    page.locator("#sidebar-close").click()
+                    page.wait_for_timeout(250)
+                    expect(page.locator("#app-fullscreen")).to_be_visible()
                     if width < 1100:
-                        page.locator("#workspace-chat").click()
-                        page.locator("#sidebar-toggle").click()
-                        if page.locator("#app-fullscreen").is_visible():
-                            page.locator("#app-fullscreen").click()
-                            page.wait_for_function("document.fullscreenElement !== null")
-                            assert page.locator(".sidebar-head").evaluate("e => parseFloat(getComputedStyle(e).paddingLeft) >= 72")
-                            page.locator("#sidebar-close").click()
-                            page.wait_for_timeout(400)
-                            assert page.locator("#topbar").evaluate("e => parseFloat(getComputedStyle(e).paddingLeft) >= 72")
-                            if args.screenshots:
-                                page.screenshot(path=str(args.screenshots / f"touch-fullscreen-{width}.png"))
-                            page.evaluate("document.exitFullscreen()")
+                        assert page.locator("#topbar").evaluate("e => parseFloat(getComputedStyle(e).paddingLeft) >= 72")
+                    page.locator("#app-fullscreen").click()
+                    page.wait_for_function("document.fullscreenElement === null")
+                    if width < 1100:
                         page.set_viewport_size({"width": width, "height": 450})
-                        expect(page.locator("#workspace-switch")).to_be_visible()
+                        expect(page.locator("#chat-files-toggle")).to_be_visible()
                         assert page.locator("#composer-text").bounding_box()["y"] < 450
                     checks.append({"width": width, "file_back_and_up": True, "cancel_keeps_editor": True,
-                                   "draft_and_editor_survive_view_switch": width < 1100, "root_scroll": 0})
+                                   "cycle": list(modes), "header_height_preserved": height,
+                                   "draft_and_editor_survive_view_switch": True, "root_scroll": 0})
                     context.close()
                 browser.close()
             assert not errors, errors

@@ -353,6 +353,7 @@ export class FilesPane {
     this.crumbs.setAttribute("aria-label", "Path");
     this.tools = el("div", "files-tools");
     const head = el("div", "files-head");
+    this.head = head; // the shell can host the same controls in its shared toolbar
     const end = el("div", "files-head-end"); // one group: it goes under the path together when the head is tight
     end.append(this.tools, ...actions); // the place's own controls (the panel's expand, close)
     head.append(navigation, this.crumbs, end);

@@ -3861,15 +3861,6 @@ button.files-crumb:hover { background: var(--surface-hover); color: var(--text);
 .file-panel-grip { position: absolute; left: -4px; top: 0; bottom: 0; width: 8px; cursor: col-resize; z-index: 4; touch-action: none; }
 .file-panel-grip:hover { background: var(--accent-soft); }
 .file-panel-grip:focus-visible { background: var(--accent-soft); outline: 2px solid var(--accent); outline-offset: -2px; }
-.layout.is-files-expanded .main { display: none; }
-.layout.is-files-expanded .file-panel { flex: 1 1 auto; width: auto; }
-.layout.is-files-expanded .file-panel-grip { display: none; }
-
-@media (max-width: 1099px) {
-  /* Too narrow to sit side by side: the panel covers the screen; its × goes back to the conversation. */
-  .file-panel { position: fixed; inset: 0 0 var(--workspace-bar-height, 0px); z-index: 40; width: auto; height: auto; border-left: 0; }
-  .file-panel-grip, #file-panel-expand { display: none; }
-}
 #chat-files-toggle[aria-expanded="true"] { background: var(--surface-selected); }
 
 /* A folder's conversation (V3-P75 §6): the button and the list behind its ⌄. */
@@ -4089,4 +4080,70 @@ button.files-crumb:hover { background: var(--surface-hover); color: var(--text);
   :root:fullscreen .sidebar-head,
   :root:fullscreen .file-panel .files-head { padding-left: max(var(--fullscreen-leading), env(safe-area-inset-left, 0px)); }
   :root:fullscreen .topbar { padding-left: max(var(--fullscreen-leading), env(safe-area-inset-left, 0px)); }
+}
+
+/* One conversation/files workspace; navigation remains a separate column/drawer.
+ * Header height, theme tokens and the existing navigation motion stay unchanged. */
+.workspace { display: flex; flex-direction: column; flex: 1 1 0; min-width: 0; min-height: 0; height: 100%; }
+.workspace > .topbar { z-index: 20; }
+.workspace-panes { display: flex; flex: 1 1 0; min-height: 0; min-width: 0; overflow: hidden; }
+.workspace-panes > .main { flex: 1 1 0; min-width: 0; }
+.workspace-panes > .file-panel { position: relative; inset: auto; z-index: auto; }
+.workspace-panes[data-mode="files"] > .main { display: none; }
+.workspace-panes[data-mode="files"] > .file-panel { flex: 1 1 0; width: 100%; border: 0; }
+.workspace-panes[data-mode="files-chat"] > .file-panel { order: 0; flex-basis: calc(100% - var(--file-panel-width, 45%)); width: calc(100% - var(--file-panel-width, 45%)); border-left: 0; border-right: 1px solid var(--border-subtle); }
+.workspace-panes[data-mode="files-chat"] > .main { order: 1; }
+.workspace-panes[data-mode="files-chat"] .file-panel-grip { left: auto; right: -4px; }
+.sidebar-head .sidebar-fullscreen { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 var(--tool-size); width: var(--tool-size); height: var(--tool-size); min-height: var(--tool-size); padding: 0; border: 0; background: transparent; color: var(--text-muted); border-radius: var(--tool-radius); margin-left: auto; }
+.sidebar-head .sidebar-fullscreen:hover { background: var(--surface-hover); color: var(--text); }
+.sidebar-head .sidebar-close { margin-left: 0; flex-shrink: 0; }
+.sidebar-head .brand-button { min-width: 0; }
+.sidebar-head .brand-button > span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.workspace-file-tools { display: flex; flex: 1 1 0; min-width: 0; }
+.workspace-file-title { display: none; }
+.workspace-file-tools > .files-head { flex: 1 1 0; min-width: 0; width: 100%; padding: 0; border: 0; }
+.topbar.is-file-context > .topbar-title,
+.topbar.is-file-context > .topbar-chat-context,
+.topbar.is-file-context > .model-controls,
+.topbar.is-file-context > #chat-menu-toggle { display: none !important; }
+#workspace-context, #chat-files-toggle, #workspace-file-menu { flex: 0 0 var(--tool-size); }
+#workspace-file-menu { display: none; }
+.topbar.is-file-context #workspace-context { margin-left: 0; }
+.topbar > #chat-files-toggle { margin-left: 0; }
+.topbar > #chat-menu-toggle { margin-left: 0; }
+.workspace-panes .files-pane > .files-head { display: none; }
+@media (min-width: 1100px) {
+  .layout:not(.is-nav-collapsed) #app-fullscreen { display: none; }
+}
+@media (max-width: 1099px) {
+  .workspace-panes { flex-direction: column; }
+  .workspace-panes > .main { width: 100%; height: auto; }
+  .workspace-panes > .file-panel { flex: 0 0 var(--file-panel-height, 45%); width: 100%; height: var(--file-panel-height, 45%); border-left: 0; border-top: 1px solid var(--border-subtle); }
+  .workspace-panes[data-mode="files"] > .file-panel { height: 100%; }
+  .workspace-panes[data-mode="files-chat"] > .file-panel { flex-basis: calc(100% - var(--file-panel-height, 45%)); width: 100%; height: calc(100% - var(--file-panel-height, 45%)); border: 0; border-bottom: 1px solid var(--border-subtle); }
+  .workspace-panes .file-panel-grip { display: block; inset: -4px 0 auto; height: 8px; width: 100%; cursor: row-resize; }
+  .workspace-panes[data-mode="files-chat"] .file-panel-grip { inset: auto 0 -4px; }
+  #chat-files-toggle .side-icon { transform: rotate(90deg); }
+  .topbar #workspace-context, .topbar #chat-files-toggle, .topbar #workspace-file-menu { flex: 0 0 44px; }
+  /* Files controls use their original menus, in a bounded popover on narrow
+   * screens; they never increase the shared header's deployed height. */
+  #workspace-file-menu:not([hidden]) { display: inline-flex; margin-left: auto; }
+  .workspace-file-tools:not([hidden]) { display: none; position: absolute; top: 100%; left: 6px; right: 6px; z-index: 25; max-height: min(55dvh, 360px); overflow: auto; padding: 8px; border: 1px solid var(--border-subtle); border-radius: var(--radius-md); background: var(--bg); box-shadow: var(--shadow-lg); }
+  .topbar.is-file-menu-open .workspace-file-tools:not([hidden]) { display: flex; }
+  .workspace-file-tools > .files-head { height: auto; min-height: 44px; flex-wrap: wrap; gap: 4px; }
+  .workspace-file-tools .files-head-end { flex-wrap: wrap; max-width: 100%; }
+  .workspace-file-tools .files-tools { flex-wrap: wrap; max-width: 100%; }
+  .topbar.is-file-context #workspace-file-menu { margin-left: auto; }
+  .topbar.is-file-context #workspace-file-title { display: block !important; }
+  .topbar.has-model-controls .model-controls { flex: 1 1 0; }
+  .topbar #chat-menu-effort-field { flex: 1 1 0; }
+}
+@media (hover: none), (pointer: coarse), (any-pointer: coarse) {
+  .sidebar-head .sidebar-fullscreen { flex-basis: 44px; width: 44px; min-height: 44px; }
+}
+@supports (view-transition-name: himari-main) {
+  .topbar { view-transition-name: himari-toolbar; }
+  /* A tool app's existing page-covering view must escape the pane's snapshot
+   * stacking context and stay above the shared toolbar and navigation. */
+  body.has-fullscreen-view .main { view-transition-name: none; }
 }
