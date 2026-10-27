@@ -795,6 +795,33 @@ const { Ink, newStroke, outline, specOf, strokeFromSaved, hits, TOOLS, DEFAULT_T
   await view.saved(next);
   assert.equal(view.buffer, buffer);
   assert.ok(!view.ink.dirty);
+  // V3-P82 §3.4: one page's ink over one save's limit goes in parts — its first new strokes, then the rest;
+  // a stroke alone over it is too large.
+  for (let i = 0; i < 6; i += 1) {
+    pointer(view, "pointerdown", { pointerId: 20 + i, clientX: 40 + i * 10, clientY: 100 });
+    pointer(view, "pointermove", { pointerId: 20 + i, clientX: 60 + i * 10, clientY: 140 });
+    pointer(view, "pointerup", { pointerId: 20 + i });
+  }
+  const many = view.ink.changes()[0].add.map((s) => s.name);
+  assert.equal(many.length, 6);
+  const whole = (await view.increment()).bytes.length;
+  view.maxIncrement = Math.floor(whole / 2.5);
+  let parts = 0;
+  while (view.ink.dirty) {
+    const part = await view.increment();
+    assert.ok(part.bytes.length <= view.maxIncrement && checkIncrement(view.file.size, part.bytes));
+    await view.saved(part);
+    parts += 1;
+    assert.ok(parts < 10);
+  }
+  assert.ok(parts >= 3, `in parts (${parts})`);
+  const inFile = (await (await openPdf(view.bytes)).ink(new Ref(view.pages[0].pdfPage.ref.num, view.pages[0].pdfPage.ref.gen))).map((e) => e.name);
+  assert.ok(many.every((name) => inFile.filter((n) => n === name).length === 1), "each stroke saved once");
+  pointer(view, "pointerdown", { pointerId: 30, clientX: 50, clientY: 200 });
+  pointer(view, "pointerup", { pointerId: 30 });
+  view.maxIncrement = 100;
+  await assert.rejects(view.increment(), (e) => e.code === "too_large");
+  view.maxIncrement = pane.MAX_INCREMENT_BYTES;
   view.destroy();
 
   // §4.6, the ink lab: off unless asked for; ?ink-lab turns it on in this browser, its numbers the last

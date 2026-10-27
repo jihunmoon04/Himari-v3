@@ -122,6 +122,7 @@ export class PdfView {
     this.active = null; // the stroke or erasing under way
     this.frozen = false; // no drawing while another version is read in its place (V3-P82 §3.4); a save never
     this.cut = null; // V3-P82 §3.6: where a save cut short at its end is to be cut off, when there is one
+    this.maxIncrement = MAX_INCREMENT_BYTES; // one save's bytes at most (a field: the smoke makes it small)
     this.element = el("div", "pdf-view");
     this.element.tabIndex = 0;
     this.pagesBox = el("div", "pdf-pages");
@@ -740,9 +741,9 @@ export class PdfView {
   /* --------------------------------------------------------------- saving (§5) */
 
   /* The next save (V3-P82 §3.4): {bytes: what to add after the file's own, checked as the server checks it,
-   * changes: what they hold, added: each added stroke's object} — the changes as they are now, or the first
-   * pages of them while the bytes would be over MAX_INCREMENT_BYTES (the rest go in the next save); null when
-   * there is nothing to save. A page with strokes not yet read (carried here) is read first, so a stroke it
+   * changes: what they hold, added: each added stroke's object} — the changes as they are now, or, while the
+   * bytes would be over ``maxIncrement``, the first pages of them, and of one page its first new strokes (its
+   * erasures with them; the rest go in the next saves); null when there is nothing to save. A page with strokes not yet read (carried here) is read first, so a stroke it
    * already holds is not written again. */
   async increment() {
     let changes = this.ink.changes();
@@ -766,12 +767,17 @@ export class PdfView {
       if (!checkIncrement(this.file.size, made.bytes)) {
         throw new PdfError("unsaved", "Not saved: the PDF could not be updated in place.");
       }
-      if (made.bytes.length > MAX_INCREMENT_BYTES && changes.length > 1) {
+      if (made.bytes.length > this.maxIncrement && changes.length > 1) {
         changes = changes.slice(0, Math.ceil(changes.length / 2));
         continue;
       }
-      if (made.bytes.length > MAX_INCREMENT_BYTES) {
-        throw new PdfError("too_large", "Too much ink on one page to save at once (over 8 MiB).");
+      if (made.bytes.length > this.maxIncrement && changes[0].add.length > 1) {
+        // One page's ink over the limit (a cloud folder saved only when left, written on long): in parts.
+        changes = [{ ...changes[0], add: changes[0].add.slice(0, Math.ceil(changes[0].add.length / 2)) }];
+        continue;
+      }
+      if (made.bytes.length > this.maxIncrement) {
+        throw new PdfError("too_large", "A stroke too large to save (over 8 MiB).");
       }
       if (this.file.size + made.bytes.length > MAX_PDF_BYTES) {
         throw new PdfError("too_large", "Too large to save here: the PDF would be over 64 MiB.");
