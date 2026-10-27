@@ -3829,7 +3829,13 @@ function toggleNavNow() {
 function autosize() {
   const box = $("composer-text");
   box.style.height = "auto";
-  box.style.height = `${Math.min(box.scrollHeight, 240)}px`;
+  let ceiling = 240;
+  const wrap = $("composer-wrap"), chat = $("surface-chat");
+  if (wrap.parentElement === chat && chat.clientHeight > 0) {
+    const chrome = wrap.getBoundingClientRect().height - box.getBoundingClientRect().height;
+    ceiling = Math.max(44, Math.min(ceiling, chat.clientHeight - chrome - 24));
+  }
+  box.style.height = `${Math.min(box.scrollHeight, ceiling)}px`;
 }
 
 const SANDBOX_TEXT = {
@@ -3946,12 +3952,22 @@ async function boot() {
   for (const pane of [filesSurface, filesPanel]) {
     // Bound the menu itself to the file pane; the toolbar never becomes a
     // scrolling/clipping popover around a second menu.
-    const fitMenus = new ResizeObserver(() => {
+    let menuFrame = null;
+    const updateMenus = () => {
+      menuFrame = null;
+      pane.syncCompactPdfTools(window.matchMedia("(max-width: 767px)").matches);
       pane.head.style.setProperty("--files-menu-height", `${Math.max(44, pane.root.clientHeight - pane.head.offsetHeight - 8)}px`);
+    };
+    const fitMenus = new ResizeObserver(() => {
+      if (menuFrame === null) menuFrame = requestAnimationFrame(updateMenus);
     });
     fitMenus.observe(pane.root);
     fitMenus.observe(pane.head);
   }
+  let composerFrame = null;
+  new ResizeObserver(() => {
+    if (composerFrame === null) composerFrame = requestAnimationFrame(() => { composerFrame = null; autosize(); });
+  }).observe($("surface-chat"));
   restorePanelWidth();
   $("nav-files").addEventListener("click", () => showFiles().catch((e) => status(e.message, "error")));
   $("chat-files-toggle").addEventListener("click", toggleFilesPanel);

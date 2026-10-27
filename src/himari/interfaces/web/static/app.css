@@ -4129,6 +4129,24 @@ button.files-crumb:hover { background: var(--surface-hover); color: var(--text);
 @media (hover: none), (pointer: coarse), (any-pointer: coarse) {
   .sidebar-head .sidebar-fullscreen { flex-basis: 44px; width: 44px; min-height: 44px; }
 }
+/* Keep tablet titles useful instead of stretching native pickers across the bar. */
+@media (min-width: 768px) and (max-width: 1099px) {
+  .topbar.has-model-controls .topbar-title { display: block; flex: 1 1 auto; max-width: none; }
+  .topbar.has-model-controls .model-controls { flex: 0 1 360px; max-width: 55%; margin-left: auto; }
+  .topbar .model-control { flex: 2 1 0; }
+  .topbar #chat-menu-effort-field { flex: 1 1 0; }
+}
+@media (max-width: 767px) {
+  .has-compact-pdf-tools > .files-ink-bar { display: flex; align-items: center; flex: 0 0 auto; gap: 8px; padding: 6px 8px; overflow-x: auto; overscroll-behavior-x: contain; scrollbar-width: thin; border-bottom: 1px solid var(--border-subtle); }
+  .has-compact-pdf-tools .files-ink-tools { flex: 0 0 auto; flex-wrap: nowrap; white-space: nowrap; }
+  .has-compact-pdf-tools .files-ink-bar > .files-zoom-tools,
+  .has-compact-pdf-tools .files-ink-bar > .files-page { flex: 0 0 auto; }
+}
+/* A short viewport must retain a usable PDF while the conversation stays live. */
+@media (max-width: 1099px) and (max-height: 500px) {
+  .workspace-panes > .file-panel:has(.pdf-view) { min-height: 180px; }
+  .workspace-panes .timeline { padding-top: 8px; padding-bottom: 8px; }
+}
 @supports (view-transition-name: himari-main) {
   .topbar { view-transition-name: himari-toolbar; }
   /* A tool app's existing page-covering view must escape the pane's snapshot

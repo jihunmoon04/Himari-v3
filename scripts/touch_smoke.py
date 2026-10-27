@@ -23,6 +23,7 @@ def main() -> None:
         args.screenshots.mkdir(parents=True, exist_ok=True)
     errors: list[str] = []
     checks: list[dict[str, object]] = []
+    pdf_bytes = (Path(__file__).resolve().parents[1] / "tests/fixtures/pdf/table.pdf").read_bytes()
     with tempfile.TemporaryDirectory(prefix="himari-touch-") as tmp:
         root = str(Path(tmp) / "data")
         server = serve(root, port=8809)
@@ -46,7 +47,15 @@ def main() -> None:
                             data = {"path": path, "parent": path.rsplit("/", 1)[0] or "/", "next": None,
                                     "workspace": None, "entries": [
                                         {"name": "nested", "kind": "directory", "size": None, "modified": 0},
-                                        {"name": "note.txt", "kind": "file", "size": 12, "modified": 0}]}
+                                        {"name": "note.txt", "kind": "file", "size": 12, "modified": 0},
+                                        {"name": "sample.pdf", "kind": "file", "size": len(pdf_bytes), "modified": 0}]}
+                        elif url.path.endswith("/download") and path.endswith(".pdf"):
+                            route.fulfill(body=pdf_bytes, content_type="application/pdf",
+                                          headers={"x-himari-identity": f"1,2,{len(pdf_bytes)},4"})
+                            return
+                        elif url.path.endswith("/file") and path.endswith(".pdf"):
+                            data = {"path": path, "kind": "pdf", "editable": False, "size": len(pdf_bytes),
+                                    "identity": [1, 2, len(pdf_bytes), 4], "modified": 0, "truncated": False}
                         elif url.path.endswith("/file"):
                             data = {"path": path, "kind": "text", "text": "touch note\n", "editable": True,
                                     "size": 11, "identity": [1, 2, 3, 4], "modified": 0, "truncated": False}
@@ -199,6 +208,26 @@ def main() -> None:
                         page.set_viewport_size({"width": width, "height": 450})
                         expect(page.locator("#chat-files-toggle")).to_be_visible()
                         assert page.locator("#composer-text").bounding_box()["y"] < 450
+                        # A short viewport and multiline draft must not consume the PDF or composer.
+                        file_control("Go back in files").click()
+                        page.locator("#confirm-dialog").get_by_role("button", name="Discard", exact=True).click()
+                        panel.locator(".files-open").filter(has_text="sample.pdf").click()
+                        expect(panel.locator(".pdf-view")).to_be_visible()
+                        panel.get_by_role("button", name="Pen", exact=True).click()
+                        page.set_viewport_size({"width": width, "height": 350})
+                        page.locator("#composer-text").fill("multiline draft\n" * 30)
+                        page.wait_for_function("document.querySelector('#file-panel .pdf-view').clientHeight >= 40")
+                        compose = page.locator("#composer").bounding_box()
+                        main_box = page.locator("#main").bounding_box()
+                        assert compose["y"] >= main_box["y"] and compose["y"] + compose["height"] <= main_box["y"] + main_box["height"] + 1
+                        if args.screenshots:
+                            page.screenshot(path=str(args.screenshots / f"workspace-pdf-short-{width}.png"))
+                        page.set_viewport_size({"width": 390, "height": 700})
+                        expect(panel.locator(".files-ink-bar .files-zoom-tools")).to_be_visible()
+                        page.set_viewport_size({"width": 820, "height": 900})
+                        expect(panel.locator(".files-head .files-zoom-tools")).to_be_visible()
+                        expect(panel.get_by_role("button", name="Pen", exact=True)).to_have_attribute("aria-pressed", "true")
+                        expect(page.locator("#composer-text")).to_have_value("multiline draft\n" * 30)
                     checks.append({"width": width, "file_back_and_up": True, "cancel_keeps_editor": True,
                                    "cycle": list(modes), "header_height_preserved": height,
                                    "draft_and_editor_survive_view_switch": True, "root_scroll": 0})

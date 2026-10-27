@@ -378,6 +378,24 @@ export class FilesPane {
     return (this.doc !== null && this.doc.dirty) || (this.pdf !== null && this.pdf.view.ink.dirty);
   }
 
+  /* On phones, PDF zoom/page controls share the horizontally scrollable ink
+   * row. Move the live controls, retaining their handlers and PDF state. */
+  syncCompactPdfTools(compact) {
+    const zoom = this.root.querySelector(".files-zoom-tools");
+    const page = this.root.querySelector(".files-page");
+    this.root.classList.toggle("has-compact-pdf-tools", compact && zoom !== null);
+    if (!zoom) return;
+    const host = compact ? this.inkBar : this.tools;
+    if (zoom.parentElement === host) return;
+    if (compact) {
+      host.append(zoom);
+      if (page) host.append(page);
+    } else {
+      host.prepend(zoom);
+      if (page) zoom.after(page);
+    }
+  }
+
   // A successful read commits a move. Cancelled, failed and stale reads never
   // consume the previous location; refreshes do not add duplicate entries.
   rememberLocation(path, kind, index = null) {
