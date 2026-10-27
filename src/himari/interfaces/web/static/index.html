@@ -114,10 +114,12 @@
           </section>
           <span id="workspace-file-title" class="topbar-title workspace-file-title" hidden>Files</span>
           <div id="workspace-file-tools" class="workspace-file-tools" hidden></div>
-          <button type="button" id="workspace-file-menu" class="icon-button topbar-icon-button" aria-label="File actions" title="File actions" aria-expanded="false" aria-controls="workspace-file-tools" hidden><svg class="side-icon" aria-hidden="true"><use href="#side-more"/></svg></button>
+          <div id="workspace-actions" class="workspace-actions" hidden>
           <button type="button" id="workspace-context" class="icon-button topbar-icon-button" aria-label="File controls" title="File controls" hidden><svg class="side-icon" aria-hidden="true"><use id="workspace-context-icon" href="#side-folder"/></svg></button>
           <button type="button" id="chat-files-toggle" class="icon-button topbar-icon-button" aria-controls="workspace-panes"
                   aria-expanded="false" aria-label="Open files beside conversation" title="Open files beside conversation" hidden><svg class="side-icon" aria-hidden="true"><use id="workspace-cycle-icon" href="#side-panel-restore"/></svg></button>
+          <div class="workspace-more-slot">
+          <button type="button" id="workspace-file-menu" class="icon-button topbar-icon-button" aria-label="File actions" title="File actions" aria-expanded="false" aria-controls="workspace-file-tools" hidden><svg class="side-icon" aria-hidden="true"><use href="#side-more"/></svg></button>
           <button
             type="button"
             id="chat-menu-toggle"
@@ -128,6 +130,8 @@
             title="Conversation menu"
             hidden
           ><svg class="side-icon" aria-hidden="true"><use href="#side-more"/></svg></button>
+          </div>
+          </div>
           <div class="chat-menu" id="chat-menu" role="group" aria-label="Conversation details and actions" hidden>
             <dl class="chat-menu-meta">
               <div class="chat-menu-pair">

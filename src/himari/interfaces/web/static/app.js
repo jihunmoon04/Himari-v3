@@ -3629,6 +3629,7 @@ function syncWorkspaceChrome() {
   if (pane && pane.head && pane.head.parentNode !== host) host.append(pane.head);
   const files = pane !== null && (standalone || app.workspaceContext === "files");
   $("topbar").classList.toggle("is-file-context", files);
+  $("workspace-actions").hidden = !chat && !standalone;
   $("workspace-file-title").hidden = !files;
   syncWorkspaceFileTitle();
   host.hidden = !files;

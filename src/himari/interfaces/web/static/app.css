@@ -4105,7 +4105,9 @@ button.files-crumb:hover { background: var(--surface-hover); color: var(--text);
 .topbar.is-file-context > .topbar-title,
 .topbar.is-file-context > .topbar-chat-context,
 .topbar.is-file-context > .model-controls,
-.topbar.is-file-context > #chat-menu-toggle { display: none !important; }
+.topbar.is-file-context #chat-menu-toggle { display: none !important; }
+.workspace-actions { display: flex; align-items: center; flex: 0 0 auto; gap: var(--space-2); margin-left: auto; }
+.workspace-more-slot { display: flex; align-items: center; flex: 0 0 var(--tool-size); width: var(--tool-size); }
 #workspace-context, #chat-files-toggle, #workspace-file-menu { flex: 0 0 var(--tool-size); }
 #workspace-file-menu { display: none; }
 .topbar.is-file-context #workspace-context { margin-left: 0; }
@@ -4114,6 +4116,11 @@ button.files-crumb:hover { background: var(--surface-hover); color: var(--text);
 .workspace-panes .files-pane > .files-head { display: none; }
 @media (min-width: 1100px) {
   .layout:not(.is-nav-collapsed) #app-fullscreen { display: none; }
+  /* Anchor the existing file menu in the same final slot as the conversation
+   * menu. Keep the original details, controls and event handlers intact. */
+  #workspace-file-tools .files-file-menu, #workspace-file-tools .files-folder-menu { position: static; flex: 0 0 0; width: 0; }
+  #workspace-file-tools :is(.files-file-menu, .files-folder-menu) > summary { position: absolute; right: var(--topbar-gutter); top: calc((var(--chrome-height) - var(--tool-size)) / 2); width: var(--tool-size); height: var(--tool-size); min-height: var(--tool-size); }
+  #workspace-file-tools :is(.files-file-menu, .files-folder-menu) > .conversation-action-list { top: calc(100% + 4px); right: var(--topbar-gutter); }
 }
 @media (max-width: 1099px) {
   .workspace-panes { flex-direction: column; }
@@ -4125,6 +4132,8 @@ button.files-crumb:hover { background: var(--surface-hover); color: var(--text);
   .workspace-panes[data-mode="files-chat"] .file-panel-grip { inset: auto 0 -4px; }
   #chat-files-toggle .side-icon { transform: rotate(90deg); }
   .topbar #workspace-context, .topbar #chat-files-toggle, .topbar #workspace-file-menu { flex: 0 0 44px; }
+  .workspace-actions { gap: 4px; }
+  .workspace-more-slot { flex-basis: 44px; width: 44px; }
   /* Files controls use their original menus, in a bounded popover on narrow
    * screens; they never increase the shared header's deployed height. */
   #workspace-file-menu:not([hidden]) { display: inline-flex; margin-left: auto; }
