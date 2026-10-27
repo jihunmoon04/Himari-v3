@@ -3612,30 +3612,13 @@ function syncWorkspaceSwitch() {
   $("workspace-files").title = chat ? "Files for this conversation" : "Browse all files";
 }
 
-/* One toolbar outside both panes. The actual FilesPane controls are reparented,
- * so Back, Save, review, PDF zoom and file menus retain their state and handlers. */
+/* Common controls stay fixed; file controls live in the file pane's own compact row. */
 function syncWorkspaceChrome() {
   const chat = !$("surface-chat").hidden;
   const standalone = !$("surface-files").hidden;
-  const pane = standalone ? filesSurface : chat && app.filesOpen && app.workingFolder !== null ? filesPanel : null;
-  const host = $("workspace-file-tools");
-  for (const candidate of [filesSurface, filesPanel]) {
-    if (candidate !== pane && candidate.head && candidate.head.parentNode === host) candidate.root.prepend(candidate.head);
-  }
-  if (pane && pane.head && pane.head.parentNode !== host) host.append(pane.head);
   $("workspace-actions").hidden = !chat && !standalone;
-  host.hidden = pane === null;
-  $("workspace-context").hidden = !chat && !standalone;
-  $("workspace-context").disabled = pane === null;
-  $("workspace-context").title = pane === null ? "Open files to use file tools" : "File tools";
   $("chat-menu-toggle").hidden = !chat;
   $("workspace-actions").classList.toggle("has-conversation", chat);
-  if (pane === null) closeWorkspaceFileMenu();
-}
-
-function closeWorkspaceFileMenu() {
-  $("topbar").classList.remove("is-file-menu-open");
-  $("workspace-context").setAttribute("aria-expanded", "false");
 }
 
 function workspaceChat() {
@@ -3800,7 +3783,6 @@ function closeChatMenu() {
 }
 
 function toggleChatMenu() {
-  closeWorkspaceFileMenu();
   const open = $("chat-menu").hidden;
   $("chat-menu").hidden = !open;
   $("chat-menu-toggle").setAttribute("aria-expanded", String(open));
@@ -3961,18 +3943,19 @@ async function boot() {
   document.addEventListener("keydown", shortcut);
   $("files-surface-slot").append(filesSurface.root);
   $("file-panel-slot").append(filesPanel.root);
+  for (const pane of [filesSurface, filesPanel]) {
+    // Bound the menu itself to the file pane; the toolbar never becomes a
+    // scrolling/clipping popover around a second menu.
+    const fitMenus = new ResizeObserver(() => {
+      pane.head.style.setProperty("--files-menu-height", `${Math.max(44, pane.root.clientHeight - pane.head.offsetHeight - 8)}px`);
+    });
+    fitMenus.observe(pane.root);
+    fitMenus.observe(pane.head);
+  }
   restorePanelWidth();
   $("nav-files").addEventListener("click", () => showFiles().catch((e) => status(e.message, "error")));
   $("chat-files-toggle").addEventListener("click", toggleFilesPanel);
   $("file-panel-changes").addEventListener("click", () => filesPanel.openChanges());
-  $("workspace-context").addEventListener("click", () => {
-    closeChatMenu();
-    const open = $("topbar").classList.toggle("is-file-menu-open");
-    $("workspace-context").setAttribute("aria-expanded", String(open));
-  });
-  document.addEventListener("pointerdown", (event) => {
-    if (!$("topbar").contains(event.target)) closeWorkspaceFileMenu();
-  });
   $("file-panel-grip").addEventListener("pointerdown", dragPanel);
   $("file-panel-grip").addEventListener("keydown", nudgePanel);
   new ResizeObserver(() => syncModelChrome()).observe($("topbar"));
@@ -4046,17 +4029,14 @@ async function boot() {
   $("image-dialog-close").addEventListener("click", () => $("image-dialog").close());
   $("image-dialog").addEventListener("close", () => $("image-dialog-image").removeAttribute("src"));
   document.addEventListener("click", (event) => {
-    for (const menu of $("conversation-list").querySelectorAll("details[open]")) {
+    for (const menu of document.querySelectorAll("#conversation-list details[open], .files-head details[open]")) {
       if (!menu.contains(event.target)) menu.open = false;
     }
   });
   document.addEventListener("keydown", (event) => {
     if (event.key !== "Escape") return;
     closeChatMenu();
-    const fileMenuOpen = $("topbar").classList.contains("is-file-menu-open");
-    closeWorkspaceFileMenu();
-    if (fileMenuOpen) $("workspace-context").focus();
-    for (const menu of $("conversation-list").querySelectorAll("details[open]")) {
+    for (const menu of document.querySelectorAll("#conversation-list details[open], .files-head details[open]")) {
       menu.open = false;
       menu.querySelector("summary").focus();
     }

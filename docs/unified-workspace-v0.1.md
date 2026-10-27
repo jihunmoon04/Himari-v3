@@ -24,10 +24,10 @@ motion, unsupported browsers, skipped transitions and rapid clicks still commit
 each action once.
 
 The toolbar is fixed across all four modes and does not follow pane focus.
-Model/reasoning controls stay visible, the folder icon always opens File tools,
-and the final More button always opens the conversation menu. File tools are
-disabled, with their position reserved, while files are closed. The original
-file controls occupy one bounded popover at every width; Back/Up,
+Model/reasoning controls stay visible, and the final More button always opens
+the conversation menu. Files have their own compact toolbar inside the file
+pane, directly above its content, without a global File tools button or outer
+popover. Its menus scroll within the file pane's available height; Back/Up,
 breadcrumbs, editing, review, file menus and PDF zoom remain available. PDF ink
 tools stay beside their PDF. Tool-app fullscreen retains its page-covering
 behavior above the toolbar. No provider, MCP, data or machine API changes.

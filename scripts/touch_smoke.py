@@ -76,9 +76,8 @@ def main() -> None:
                     cycle = page.locator("#chat-files-toggle")
                     cycle_x = cycle.bounding_box()["x"]
                     more_x = page.locator("#chat-menu-toggle").bounding_box()["x"]
-                    tools_x = page.locator("#workspace-context").bounding_box()["x"]
                     model_x = page.locator("#chat-menu-model-select").bounding_box()["x"]
-                    expect(page.locator("#workspace-context")).to_be_disabled()
+                    expect(page.locator("#workspace-context, #workspace-file-tools")).to_have_count(0)
                     modes = ("chat-files", "files", "files-chat", "chat")
 
                     def next_mode(mode: str) -> None:
@@ -87,19 +86,15 @@ def main() -> None:
                         assert page.locator("#topbar").bounding_box()["height"] == height
                         assert abs(cycle.bounding_box()["x"] - cycle_x) < .5
                         assert abs(page.locator("#chat-menu-toggle").bounding_box()["x"] - more_x) < .5
-                        assert abs(page.locator("#workspace-context").bounding_box()["x"] - tools_x) < .5
                         expect(page.locator("#chat-menu-model-select")).to_be_visible()
                         assert abs(page.locator("#chat-menu-model-select").bounding_box()["x"] - model_x) < .5
-                        expect(page.locator("#workspace-context")).to_have_attribute("aria-label", "File tools")
                         # More always means conversation details, even with files as the only pane.
                         page.locator("#chat-menu-toggle").click()
                         expect(page.locator("#chat-menu-rename")).to_be_visible()
                         page.locator("#chat-menu-toggle").click()
 
                     def file_control(name: str) -> Locator:
-                        if page.locator("#workspace-context").get_attribute("aria-expanded") != "true":
-                            page.locator("#workspace-context").click()
-                        return page.locator("#workspace-file-tools").get_by_role("button", name=name, exact=True)
+                        return page.locator("#file-panel .files-head").get_by_role("button", name=name, exact=True)
 
                     next_mode(modes[0])
                     panel = page.locator("#file-panel")
@@ -109,8 +104,8 @@ def main() -> None:
                     file_box = panel.bounding_box()
                     assert (file_box["y"] >= chat_box["y"] + chat_box["height"] - 1 if width < 1100
                             else file_box["x"] >= chat_box["x"] + chat_box["width"] - 1)
-                    assert page.locator("#topbar .files-head").count() == 1
-                    assert panel.locator(".files-head").count() == 0
+                    assert page.locator("#topbar .files-head").count() == 0
+                    expect(panel.locator(".files-head")).to_be_visible()
                     assert page.locator(".sidebar-head").evaluate(
                         "e => getComputedStyle(e).borderBottomColor === 'rgba(0, 0, 0, 0)'")
                     body.get_by_title("/home/demo/nested", exact=True).click()

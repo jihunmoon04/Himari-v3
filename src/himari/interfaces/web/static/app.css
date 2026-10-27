@@ -4096,19 +4096,17 @@ button.files-crumb:hover { background: var(--surface-hover); color: var(--text);
 .sidebar-head .sidebar-close { margin-left: 0; flex-shrink: 0; }
 .sidebar-head .brand-button { min-width: 0; }
 .sidebar-head .brand-button > span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.workspace-file-tools:not([hidden]) { display: none; position: absolute; top: 100%; right: var(--topbar-gutter); width: min(680px, calc(100% - 24px)); z-index: 25; max-height: min(55dvh, 360px); overflow: auto; padding: 12px; border: 1px solid var(--border-subtle); border-radius: var(--radius-md); background: var(--bg); box-shadow: var(--shadow-lg); }
-.topbar.is-file-menu-open .workspace-file-tools:not([hidden]) { display: flex; }
-.workspace-file-tools > .files-head { flex: 1 1 0; min-width: 0; width: 100%; height: auto; min-height: 44px; flex-wrap: wrap; gap: 4px; padding: 0; border: 0; }
-.workspace-file-tools .files-head-end { flex-wrap: wrap; max-width: 100%; }
-.workspace-file-tools .files-tools { flex-wrap: wrap; max-width: 100%; }
 .workspace-actions { display: flex; align-items: center; flex: 0 0 auto; gap: var(--space-2); margin-left: auto; }
 .workspace-more-slot { display: flex; align-items: center; flex: 0 0 var(--tool-size); width: var(--tool-size); }
 .workspace-actions:not(.has-conversation) .workspace-more-slot { display: none; }
-#workspace-context, #chat-files-toggle { flex: 0 0 var(--tool-size); }
-#workspace-context[aria-expanded="true"] { background: var(--surface-selected); }
+#chat-files-toggle { flex: 0 0 var(--tool-size); }
 .topbar > #chat-files-toggle { margin-left: 0; }
 .topbar > #chat-menu-toggle { margin-left: 0; }
-.workspace-panes .files-pane > .files-head { display: none; }
+.workspace-panes .files-head { position: relative; z-index: 6; height: auto; min-height: 40px; flex-wrap: wrap; padding: 2px 8px; gap: 4px; background: var(--bg); }
+.workspace-panes .file-panel-grip { z-index: 7; }
+.workspace-panes .files-crumbs { flex-basis: 40px; }
+.workspace-panes .files-head-end, .workspace-panes .files-tools { gap: 4px; max-width: 100%; flex-wrap: wrap; }
+.workspace-panes .files-head .conversation-action-list { max-height: min(280px, var(--files-menu-height, 35dvh)); overflow-y: auto; }
 @media (min-width: 1100px) {
   .layout:not(.is-nav-collapsed) #app-fullscreen { display: none; }
 }
@@ -4121,10 +4119,10 @@ button.files-crumb:hover { background: var(--surface-hover); color: var(--text);
   .workspace-panes .file-panel-grip { display: block; inset: -4px 0 auto; height: 8px; width: 100%; cursor: row-resize; }
   .workspace-panes[data-mode="files-chat"] .file-panel-grip { inset: auto 0 -4px; }
   #chat-files-toggle .side-icon { transform: rotate(90deg); }
-  .topbar #workspace-context, .topbar #chat-files-toggle { flex: 0 0 44px; }
+  .topbar #chat-files-toggle { flex: 0 0 44px; }
   .workspace-actions { gap: 4px; }
   .workspace-more-slot { flex-basis: 44px; width: 44px; }
-  .workspace-file-tools:not([hidden]) { left: 6px; right: 6px; width: auto; padding: 8px; }
+  .workspace-panes .files-head { min-height: 48px; }
   .topbar.has-model-controls .model-controls { flex: 1 1 0; }
   .topbar #chat-menu-effort-field { flex: 1 1 0; }
 }
