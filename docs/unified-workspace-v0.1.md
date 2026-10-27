@@ -23,11 +23,11 @@ Existing view-transition snapshots animate the cycle and navigation; reduced
 motion, unsupported browsers, skipped transitions and rapid clicks still commit
 each action once.
 
-The toolbar follows the pane being used. Clicking/focusing files shows the
-existing file controls; clicking/focusing the conversation shows its existing
-model, reasoning and conversation controls. A context icon also switches these
-controls in a split view without changing its layout. On compact screens, file
-controls occupy the File actions popover to preserve header height; Back/Up,
+The toolbar is fixed across all four modes and does not follow pane focus.
+Model/reasoning controls stay visible, the folder icon always opens File tools,
+and the final More button always opens the conversation menu. File tools are
+disabled, with their position reserved, while files are closed. The original
+file controls occupy one bounded popover at every width; Back/Up,
 breadcrumbs, editing, review, file menus and PDF zoom remain available. PDF ink
 tools stay beside their PDF. Tool-app fullscreen retains its page-covering
 behavior above the toolbar. No provider, MCP, data or machine API changes.

@@ -263,7 +263,6 @@ const app = {
   streaming: false, // the server streams answers (V3-P73 §9)
   filesOpen: false, // the files panel beside the conversation is open (V3-P75 §3.2)
   workspaceMode: "chat", // chat → chat-files → files → files-chat → chat
-  workspaceContext: "chat", // the shared toolbar follows the pane being used
   workingFolder: null, // the open conversation's working folder, when it works on this server's folders
   conversationFolderPaths: [], // all of its folders: a folder already among them is not offered to attach
   filesReturnId: null, // the conversation to return to from the separate Files surface
@@ -1057,7 +1056,6 @@ function showReference(path, start = null, end = null) {
     app.workspaceMode = "chat-files";
     syncFilesPanel(true);
   }
-  setWorkspaceContext("files");
   filesPanel.reveal(path, start, end);
 }
 
@@ -3433,7 +3431,6 @@ function openWithFiles(id, start = null) {
   // Touch starts on the messages; its file/selection is ready for the cycle control.
   app.filesOpen = !panelCoversScreen();
   app.workspaceMode = app.filesOpen ? "chat-files" : "chat";
-  app.workspaceContext = "chat";
   app.panelStart = start ? { ...start, id } : null;
   return openConversation(id);
 }
@@ -3593,7 +3590,6 @@ function toggleFilesPanel() {
     const modes = ["chat", "chat-files", "files", "files-chat"];
     app.workspaceMode = modes[(modes.indexOf(app.workspaceMode) + 1) % modes.length];
     app.filesOpen = app.workspaceMode !== "chat";
-    app.workspaceContext = app.workspaceMode.startsWith("files") ? "files" : "chat";
     syncFilesPanel(true);
     // Reordering the live panes never reloads an editor or asks it to leave.
     if (app.filesOpen && app.workingFolder && !filesPanel.place) openPanelStart();
@@ -3627,38 +3623,19 @@ function syncWorkspaceChrome() {
     if (candidate !== pane && candidate.head && candidate.head.parentNode === host) candidate.root.prepend(candidate.head);
   }
   if (pane && pane.head && pane.head.parentNode !== host) host.append(pane.head);
-  const files = pane !== null && (standalone || app.workspaceContext === "files");
-  $("topbar").classList.toggle("is-file-context", files);
   $("workspace-actions").hidden = !chat && !standalone;
-  $("workspace-file-title").hidden = !files;
-  syncWorkspaceFileTitle();
-  host.hidden = !files;
-  $("workspace-context").hidden = !chat || !app.workspaceMode.includes("-") || pane === null;
-  $("workspace-context").title = files ? "Conversation controls" : "File controls";
-  $("workspace-context").setAttribute("aria-label", $("workspace-context").title);
-  $("workspace-context-icon").setAttribute("href", files ? "#side-chat" : "#side-folder");
-  $("workspace-file-menu").hidden = !files;
-  if (!files) closeWorkspaceFileMenu();
-  if (files) closeChatMenu();
-}
-
-function syncWorkspaceFileTitle() {
-  const pane = !$("surface-files").hidden ? filesSurface : filesPanel;
-  const path = pane.file || pane.folder || "Files";
-  $("workspace-file-title").textContent = path.split("/").pop() || path;
-  $("workspace-file-title").title = path;
-}
-
-function setWorkspaceContext(context) {
-  if (app.workspaceContext === context) return;
-  app.workspaceContext = context;
-  closeWorkspaceFileMenu();
-  syncWorkspaceChrome();
+  host.hidden = pane === null;
+  $("workspace-context").hidden = !chat && !standalone;
+  $("workspace-context").disabled = pane === null;
+  $("workspace-context").title = pane === null ? "Open files to use file tools" : "File tools";
+  $("chat-menu-toggle").hidden = !chat;
+  $("workspace-actions").classList.toggle("has-conversation", chat);
+  if (pane === null) closeWorkspaceFileMenu();
 }
 
 function closeWorkspaceFileMenu() {
   $("topbar").classList.remove("is-file-menu-open");
-  $("workspace-file-menu").setAttribute("aria-expanded", "false");
+  $("workspace-context").setAttribute("aria-expanded", "false");
 }
 
 function workspaceChat() {
@@ -3666,7 +3643,6 @@ function workspaceChat() {
     finishShellMotion();
     app.filesOpen = false;
     app.workspaceMode = "chat";
-    app.workspaceContext = "chat";
     syncFilesPanel(true);
   } else if (app.filesReturnId) openConversation(app.filesReturnId);
   else showHome();
@@ -3677,7 +3653,6 @@ function workspaceFiles() {
     finishShellMotion();
     app.filesOpen = true;
     app.workspaceMode = "files";
-    app.workspaceContext = "files";
     syncFilesPanel(true);
     if (!filesPanel.place) openPanelStart();
   } else if ($("surface-files").hidden) showFiles();
@@ -3825,6 +3800,7 @@ function closeChatMenu() {
 }
 
 function toggleChatMenu() {
+  closeWorkspaceFileMenu();
   const open = $("chat-menu").hidden;
   $("chat-menu").hidden = !open;
   $("chat-menu-toggle").setAttribute("aria-expanded", String(open));
@@ -3985,22 +3961,15 @@ async function boot() {
   document.addEventListener("keydown", shortcut);
   $("files-surface-slot").append(filesSurface.root);
   $("file-panel-slot").append(filesPanel.root);
-  for (const pane of [filesSurface, filesPanel]) {
-    new MutationObserver(syncWorkspaceFileTitle).observe(pane.crumbs, { childList: true, subtree: true });
-  }
   restorePanelWidth();
   $("nav-files").addEventListener("click", () => showFiles().catch((e) => status(e.message, "error")));
   $("chat-files-toggle").addEventListener("click", toggleFilesPanel);
   $("file-panel-changes").addEventListener("click", () => filesPanel.openChanges());
-  $("workspace-context").addEventListener("click", () => setWorkspaceContext(app.workspaceContext === "files" ? "chat" : "files"));
-  $("workspace-file-menu").addEventListener("click", () => {
+  $("workspace-context").addEventListener("click", () => {
+    closeChatMenu();
     const open = $("topbar").classList.toggle("is-file-menu-open");
-    $("workspace-file-menu").setAttribute("aria-expanded", String(open));
+    $("workspace-context").setAttribute("aria-expanded", String(open));
   });
-  for (const [node, context] of [[$("main"), "chat"], [$("file-panel"), "files"]]) {
-    node.addEventListener("pointerdown", () => setWorkspaceContext(context));
-    node.addEventListener("focusin", () => setWorkspaceContext(context));
-  }
   document.addEventListener("pointerdown", (event) => {
     if (!$("topbar").contains(event.target)) closeWorkspaceFileMenu();
   });
@@ -4086,7 +4055,7 @@ async function boot() {
     closeChatMenu();
     const fileMenuOpen = $("topbar").classList.contains("is-file-menu-open");
     closeWorkspaceFileMenu();
-    if (fileMenuOpen) $("workspace-file-menu").focus();
+    if (fileMenuOpen) $("workspace-context").focus();
     for (const menu of $("conversation-list").querySelectorAll("details[open]")) {
       menu.open = false;
       menu.querySelector("summary").focus();

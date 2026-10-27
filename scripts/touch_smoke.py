@@ -76,6 +76,9 @@ def main() -> None:
                     cycle = page.locator("#chat-files-toggle")
                     cycle_x = cycle.bounding_box()["x"]
                     more_x = page.locator("#chat-menu-toggle").bounding_box()["x"]
+                    tools_x = page.locator("#workspace-context").bounding_box()["x"]
+                    model_x = page.locator("#chat-menu-model-select").bounding_box()["x"]
+                    expect(page.locator("#workspace-context")).to_be_disabled()
                     modes = ("chat-files", "files", "files-chat", "chat")
 
                     def next_mode(mode: str) -> None:
@@ -83,15 +86,19 @@ def main() -> None:
                         expect(page.locator("#workspace-panes")).to_have_attribute("data-mode", mode)
                         assert page.locator("#topbar").bounding_box()["height"] == height
                         assert abs(cycle.bounding_box()["x"] - cycle_x) < .5
-                        files_context = "is-file-context" in page.locator("#topbar").get_attribute("class")
-                        more = page.locator("#workspace-file-menu") if files_context and width < 1100 else (
-                            page.locator("#workspace-file-tools :is(.files-file-menu, .files-folder-menu) > summary")
-                            if files_context else page.locator("#chat-menu-toggle"))
-                        assert abs(more.bounding_box()["x"] - more_x) < .5
+                        assert abs(page.locator("#chat-menu-toggle").bounding_box()["x"] - more_x) < .5
+                        assert abs(page.locator("#workspace-context").bounding_box()["x"] - tools_x) < .5
+                        expect(page.locator("#chat-menu-model-select")).to_be_visible()
+                        assert abs(page.locator("#chat-menu-model-select").bounding_box()["x"] - model_x) < .5
+                        expect(page.locator("#workspace-context")).to_have_attribute("aria-label", "File tools")
+                        # More always means conversation details, even with files as the only pane.
+                        page.locator("#chat-menu-toggle").click()
+                        expect(page.locator("#chat-menu-rename")).to_be_visible()
+                        page.locator("#chat-menu-toggle").click()
 
                     def file_control(name: str) -> Locator:
-                        if width < 1100 and page.locator("#workspace-file-menu").get_attribute("aria-expanded") != "true":
-                            page.locator("#workspace-file-menu").click()
+                        if page.locator("#workspace-context").get_attribute("aria-expanded") != "true":
+                            page.locator("#workspace-context").click()
                         return page.locator("#workspace-file-tools").get_by_role("button", name=name, exact=True)
 
                     next_mode(modes[0])

@@ -3854,10 +3854,6 @@ button.files-crumb:hover { background: var(--surface-hover); color: var(--text);
 .file-panel[hidden] { display: none; }
 .file-panel-button { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto; width: var(--tool-size); min-width: var(--tool-size); height: var(--tool-size); min-height: var(--tool-size); padding: 0; border-color: transparent; border-radius: var(--tool-radius); background: transparent; }
 .files-actions-space { flex: 0 0 28px; }
-/* Beside the files the conversation is narrower: its toolbar keeps one line. */
-.layout.has-file-panel .topbar { flex-wrap: nowrap; }
-.layout.has-file-panel .model-control select { max-width: 160px; }
-.layout.has-file-panel .model-control > span { display: none; }
 .file-panel-grip { position: absolute; left: -4px; top: 0; bottom: 0; width: 8px; cursor: col-resize; z-index: 4; touch-action: none; }
 .file-panel-grip:hover { background: var(--accent-soft); }
 .file-panel-grip:focus-visible { background: var(--accent-soft); outline: 2px solid var(--accent); outline-offset: -2px; }
@@ -4099,28 +4095,21 @@ button.files-crumb:hover { background: var(--surface-hover); color: var(--text);
 .sidebar-head .sidebar-close { margin-left: 0; flex-shrink: 0; }
 .sidebar-head .brand-button { min-width: 0; }
 .sidebar-head .brand-button > span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.workspace-file-tools { display: flex; flex: 1 1 0; min-width: 0; }
-.workspace-file-title { display: none; }
-.workspace-file-tools > .files-head { flex: 1 1 0; min-width: 0; width: 100%; padding: 0; border: 0; }
-.topbar.is-file-context > .topbar-title,
-.topbar.is-file-context > .topbar-chat-context,
-.topbar.is-file-context > .model-controls,
-.topbar.is-file-context #chat-menu-toggle { display: none !important; }
+.workspace-file-tools:not([hidden]) { display: none; position: absolute; top: 100%; right: var(--topbar-gutter); width: min(680px, calc(100% - 24px)); z-index: 25; max-height: min(55dvh, 360px); overflow: auto; padding: 12px; border: 1px solid var(--border-subtle); border-radius: var(--radius-md); background: var(--bg); box-shadow: var(--shadow-lg); }
+.topbar.is-file-menu-open .workspace-file-tools:not([hidden]) { display: flex; }
+.workspace-file-tools > .files-head { flex: 1 1 0; min-width: 0; width: 100%; height: auto; min-height: 44px; flex-wrap: wrap; gap: 4px; padding: 0; border: 0; }
+.workspace-file-tools .files-head-end { flex-wrap: wrap; max-width: 100%; }
+.workspace-file-tools .files-tools { flex-wrap: wrap; max-width: 100%; }
 .workspace-actions { display: flex; align-items: center; flex: 0 0 auto; gap: var(--space-2); margin-left: auto; }
 .workspace-more-slot { display: flex; align-items: center; flex: 0 0 var(--tool-size); width: var(--tool-size); }
-#workspace-context, #chat-files-toggle, #workspace-file-menu { flex: 0 0 var(--tool-size); }
-#workspace-file-menu { display: none; }
-.topbar.is-file-context #workspace-context { margin-left: 0; }
+.workspace-actions:not(.has-conversation) .workspace-more-slot { display: none; }
+#workspace-context, #chat-files-toggle { flex: 0 0 var(--tool-size); }
+#workspace-context[aria-expanded="true"] { background: var(--surface-selected); }
 .topbar > #chat-files-toggle { margin-left: 0; }
 .topbar > #chat-menu-toggle { margin-left: 0; }
 .workspace-panes .files-pane > .files-head { display: none; }
 @media (min-width: 1100px) {
   .layout:not(.is-nav-collapsed) #app-fullscreen { display: none; }
-  /* Anchor the existing file menu in the same final slot as the conversation
-   * menu. Keep the original details, controls and event handlers intact. */
-  #workspace-file-tools .files-file-menu, #workspace-file-tools .files-folder-menu { position: static; flex: 0 0 0; width: 0; }
-  #workspace-file-tools :is(.files-file-menu, .files-folder-menu) > summary { position: absolute; right: var(--topbar-gutter); top: calc((var(--chrome-height) - var(--tool-size)) / 2); width: var(--tool-size); height: var(--tool-size); min-height: var(--tool-size); }
-  #workspace-file-tools :is(.files-file-menu, .files-folder-menu) > .conversation-action-list { top: calc(100% + 4px); right: var(--topbar-gutter); }
 }
 @media (max-width: 1099px) {
   .workspace-panes { flex-direction: column; }
@@ -4131,19 +4120,10 @@ button.files-crumb:hover { background: var(--surface-hover); color: var(--text);
   .workspace-panes .file-panel-grip { display: block; inset: -4px 0 auto; height: 8px; width: 100%; cursor: row-resize; }
   .workspace-panes[data-mode="files-chat"] .file-panel-grip { inset: auto 0 -4px; }
   #chat-files-toggle .side-icon { transform: rotate(90deg); }
-  .topbar #workspace-context, .topbar #chat-files-toggle, .topbar #workspace-file-menu { flex: 0 0 44px; }
+  .topbar #workspace-context, .topbar #chat-files-toggle { flex: 0 0 44px; }
   .workspace-actions { gap: 4px; }
   .workspace-more-slot { flex-basis: 44px; width: 44px; }
-  /* Files controls use their original menus, in a bounded popover on narrow
-   * screens; they never increase the shared header's deployed height. */
-  #workspace-file-menu:not([hidden]) { display: inline-flex; margin-left: auto; }
-  .workspace-file-tools:not([hidden]) { display: none; position: absolute; top: 100%; left: 6px; right: 6px; z-index: 25; max-height: min(55dvh, 360px); overflow: auto; padding: 8px; border: 1px solid var(--border-subtle); border-radius: var(--radius-md); background: var(--bg); box-shadow: var(--shadow-lg); }
-  .topbar.is-file-menu-open .workspace-file-tools:not([hidden]) { display: flex; }
-  .workspace-file-tools > .files-head { height: auto; min-height: 44px; flex-wrap: wrap; gap: 4px; }
-  .workspace-file-tools .files-head-end { flex-wrap: wrap; max-width: 100%; }
-  .workspace-file-tools .files-tools { flex-wrap: wrap; max-width: 100%; }
-  .topbar.is-file-context #workspace-file-menu { margin-left: auto; }
-  .topbar.is-file-context #workspace-file-title { display: block !important; }
+  .workspace-file-tools:not([hidden]) { left: 6px; right: 6px; width: auto; padding: 8px; }
   .topbar.has-model-controls .model-controls { flex: 1 1 0; }
   .topbar #chat-menu-effort-field { flex: 1 1 0; }
 }
