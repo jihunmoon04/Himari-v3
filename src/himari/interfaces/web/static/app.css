@@ -3488,6 +3488,12 @@ details > summary {
 .sidebar-server[open] .sidebar-status-chevron { transform: rotate(90deg); }
 .sidebar-server .server-info { padding: 10px; margin: 2px 0 8px; border: 1px solid var(--border-subtle); border-radius: 8px; background: var(--surface-raised); color: var(--text-muted); font-size: 11px; line-height: 1.65; overflow-wrap: anywhere; }
 .settings-section-title { margin: 24px 0 8px; font-size: 13px; font-weight: 600; }
+.mcp-settings-list { list-style: none; margin: 12px 0; padding: 0; }
+.mcp-setting { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-height: 60px; padding: 8px 0; border-bottom: 1px solid var(--border-subtle); cursor: pointer; }
+.mcp-setting > span { min-width: 0; }
+.mcp-setting strong { display: block; overflow-wrap: anywhere; }
+.mcp-setting .hint { display: block; margin: 2px 0 0; }
+.mcp-setting input { flex: 0 0 24px; width: 24px; height: 24px; min-height: 24px; accent-color: var(--accent); }
 .settings-links { display: flex; flex-direction: column; align-items: stretch; gap: 12px; border-top: 1px solid var(--border-subtle); margin-top: 20px; padding-top: 18px; }
 .settings-instructions { display: flex; align-items: center; gap: 12px; padding: 12px; width: 100%; text-align: left; border: 0; background: var(--surface); border-radius: 10px; color: var(--text); }
 .settings-instructions:hover { background: var(--surface-hover); }

@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 import posixpath
 import re
@@ -56,6 +57,7 @@ import httpx
 
 from himari.bootstrap import DEFAULT_INSTRUCTIONS, Runtime, build_runtime
 from himari.bootstrap.operator import check_private_dir, ensure_operator_secret, ensure_private_dir
+from himari.bootstrap.mcp_defaults import McpDefaultsConflict, read_defaults, write_defaults
 from himari.common import (
     AttachmentRef,
     ContentBlock,
@@ -661,6 +663,7 @@ class Application:
     # kept only while some call holds or waits for it (PR #56 review C1).
     _lifecycle: dict[ConversationId, _Lifecycle] = field(default_factory=dict, repr=False)
     _cleanup: asyncio.Task[None] | None = field(default=None, repr=False)
+    _mcp_defaults_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
 
     @classmethod
     async def open(
@@ -744,6 +747,9 @@ class Application:
                 launcher_for = await _server_launchers(mcp_config, root)
             mcp = await connect(mcp_config, check_schema=check_tool_input_schema, transport=mcp_transport,
                                 launcher_for=launcher_for)
+            saved_defaults = read_defaults(root / "control/mcp-defaults.json")
+            mcp.statuses = tuple(replace(s, enabled_by_default=saved_defaults.get(s.source, s.enabled_by_default))
+                                 for s in mcp.statuses)
             toolkit, reader, documents_reason = await _documents(root, sandbox, documents_dir, documents_owners)
             backend: SandboxBackend | None = None
             state = SandboxState.UNAVAILABLE
@@ -852,6 +858,30 @@ class Application:
     def tool_source_statuses(self) -> tuple[SourceStatus, ...]:
         """The configured MCP servers as connected at startup."""
         return self.mcp.statuses
+
+    @property
+    def mcp_defaults_revision(self) -> str:
+        return hashlib.sha256(json.dumps(self.mcp.defaults, sort_keys=True).encode()).hexdigest()
+
+    async def set_mcp_default(self, source: str, enabled: bool, revision: str) -> None:
+        """Persist an operator default without reconnecting or stopping any server.
+
+        Conversations with no override follow it on their next model request;
+        explicit per-conversation settings remain unchanged.
+        """
+        async with self._mcp_defaults_lock:
+            if source not in self.mcp.defaults:
+                raise UnknownToolSource(source)
+            if revision != self.mcp_defaults_revision:
+                raise McpDefaultsConflict("MCP defaults changed; reload them before saving")
+            values = read_defaults(self.data_root / "control/mcp-defaults.json")
+            # Removed servers cannot accumulate in the override file.
+            values = {key: value for key, value in values.items() if key in self.mcp.defaults}
+            values[source] = enabled
+            write_defaults(self.data_root / "control/mcp-defaults.json", values)
+            self.runtime.access.set_default(source, enabled)
+            self.mcp.statuses = tuple(replace(s, enabled_by_default=enabled) if s.source == source else s
+                                      for s in self.mcp.statuses)
 
     async def tool_sources(self, scope: TrustedScope) -> tuple[ToolSourceView, ...]:
         """Every configured External Tool source and whether this

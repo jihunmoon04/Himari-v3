@@ -58,7 +58,7 @@ from typing import Annotated, Any, BinaryIO, Literal
 from fastapi import Depends, FastAPI, Path, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, StrictBool
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
@@ -89,6 +89,7 @@ from himari.bootstrap.application import (
 from himari.bootstrap.changes import ChangeConflict, ChangeDiff, ChangesView
 from himari.bootstrap.explorer import PDF_APPEND_MAX_BYTES, ExplorerRefused, Listing, ShownFile
 from himari.bootstrap.operator import OPERATOR, derive_cli_bearer, verify_operator_token
+from himari.bootstrap.mcp_defaults import McpDefaultsConflict
 from himari.common import (
     ASK_USER_TOOL_ID,
     AttachmentRef,
@@ -276,6 +277,11 @@ class MemoryEditBody(MemoryBody):
 
 class ToolSourceBody(_Body):
     enabled: bool | None  # null: follow the source's default
+
+
+class McpDefaultBody(_Body):
+    enabled: StrictBool
+    revision: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
 # A file's identity as the browser holds it: [dev, ino, size, mtime_ns] as decimal strings, since an mtime in
@@ -1015,6 +1021,32 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
         signed_in = sessions.principal(request.cookies.get(SESSION_COOKIE)) is not None
         return {"authenticated": signed_in, "model": application.model_id if signed_in else None,
                 "sandbox": application.current_sandbox_state.value if signed_in else None}
+
+    def mcp_settings(application: Application) -> dict[str, Any]:
+        return {"revision": application.mcp_defaults_revision,
+                "sources": [{"source": s.source, "default": s.enabled_by_default,
+                             "available": s.available, "tools": len(s.tool_ids)}
+                            for s in application.tool_source_statuses]}
+
+    @app.get("/api/settings/mcp")
+    async def read_mcp_settings(request: Request, who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+        if who != OPERATOR:
+            raise ApiError(403, "not_authorized", "Only the operator can manage MCP defaults.")
+        return mcp_settings(himari(request))
+
+    @app.put("/api/settings/mcp/{source}")
+    async def write_mcp_setting(source: str, body: McpDefaultBody, request: Request,
+                                who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+        if who != OPERATOR:
+            raise ApiError(403, "not_authorized", "Only the operator can manage MCP defaults.")
+        application = himari(request)
+        try:
+            await application.set_mcp_default(source, body.enabled, body.revision)
+        except McpDefaultsConflict:
+            raise ApiError(409, "changed", "MCP defaults changed elsewhere. Reload settings and try again.") from None
+        except (OSError, ValueError):
+            raise ApiError(503, "not_saved", "Could not confirm the save. Reload MCP settings to check.") from None
+        return mcp_settings(application)
 
     @app.get("/api/server")
     async def read_server(request: Request, who: PrincipalId = Depends(principal)) -> dict[str, Any]:

@@ -127,6 +127,78 @@ async function api(method, path, body) {
   return data;
 }
 
+/* Operator MCP defaults: no server addresses, commands or credentials in the UI. */
+let mcpSettings = null;
+let mcpSettingsTicket = 0;
+let mcpSettingsSaving = false;
+
+function renderMcpSettings() {
+  const list = $("mcp-settings-list");
+  list.replaceChildren();
+  if (!mcpSettings) return;
+  if (!mcpSettings.sources.length) {
+    list.append(el("li", "hint", "No MCP servers configured."));
+    return;
+  }
+  for (const source of mcpSettings.sources) {
+    const row = el("li");
+    const label = el("label", "mcp-setting");
+    const text = el("span");
+    text.append(el("strong", null, source.source),
+                el("span", "hint", `${source.tools} tools · ${source.available ? "Connected at startup" : "Not connected at startup"}`));
+    const toggle = el("input");
+    toggle.type = "checkbox";
+    toggle.checked = source.default;
+    toggle.disabled = mcpSettingsSaving;
+    toggle.setAttribute("aria-label", `${source.source}: enabled by default`);
+    toggle.addEventListener("change", () => saveMcpDefault(source.source, toggle.checked));
+    label.append(text, toggle);
+    row.append(label);
+    list.append(row);
+  }
+}
+
+async function loadMcpSettings() {
+  if (mcpSettingsSaving) return;
+  const ticket = ++mcpSettingsTicket;
+  $("mcp-settings-feedback").textContent = "Loading…";
+  try {
+    const settings = await api("GET", "/api/settings/mcp");
+    if (ticket !== mcpSettingsTicket) return;
+    mcpSettings = settings;
+    renderMcpSettings();
+    $("mcp-settings-feedback").textContent = "Enabled by default: checked = on, unchecked = off.";
+  } catch (error) {
+    if (ticket === mcpSettingsTicket) $("mcp-settings-feedback").textContent = error.message;
+  }
+}
+
+async function saveMcpDefault(source, enabled) {
+  if (mcpSettingsSaving || !mcpSettings) return;
+  mcpSettingsSaving = true;
+  const ticket = ++mcpSettingsTicket;
+  renderMcpSettings();
+  $("mcp-settings-feedback").textContent = "Saving…";
+  try {
+    const settings = await api("PUT", `/api/settings/mcp/${encodeURIComponent(source)}`,
+                               { enabled, revision: mcpSettings.revision });
+    if (ticket !== mcpSettingsTicket) return;
+    mcpSettings = settings;
+    $("mcp-settings-feedback").textContent = "Saved. Conversations using Default follow this from their next request.";
+    if (app.conversationId) loadToolSources(app.generation);
+  } catch (error) {
+    // An outcome-unknown write is read back, never replayed.
+    try {
+      const settings = await api("GET", "/api/settings/mcp");
+      if (ticket === mcpSettingsTicket) mcpSettings = settings;
+    } catch (ignored) { /* reopening settings retries the read */ }
+    if (ticket === mcpSettingsTicket) $("mcp-settings-feedback").textContent = error.message;
+  } finally {
+    mcpSettingsSaving = false;
+    if (ticket === mcpSettingsTicket) renderMcpSettings();
+  }
+}
+
 /* ------------------------------------------------------------------ state */
 
 const app = {
@@ -3780,6 +3852,7 @@ async function boot() {
     { attributes: true, attributeFilter: ["data-theme"] });
   window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => live.restyle());
   $("login-form").addEventListener("submit", signIn);
+  $("nav-appearance").addEventListener("click", loadMcpSettings);
   $("nav-sign-out").addEventListener("click", () => { $("appearance-dialog").close(); signOut(); });
   $("nav-trash").addEventListener("click", () => showTrash().catch((e) => status(e.message, "error")));
   $("nav-memory").addEventListener("click", () => {
