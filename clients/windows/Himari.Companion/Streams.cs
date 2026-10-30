@@ -105,8 +105,14 @@ public partial class MainWindow
     }
     private async Task RecoverAndStartLive(string id, string? job, ServerClient local, CancellationToken ct)
     {
-        try { await RecoverMoveJob(id, job, local, ct); if (!ct.IsCancellationRequested && ReferenceEquals(local, client)) StartLive(id, local, ct); }
+        try
+        {
+            job ??= await ScreenHistory.RunningJobIdAsync(local, id, ct);
+            await RecoverMoveJob(id, job, local, ct);
+            if (!ct.IsCancellationRequested && ReferenceEquals(local, client)) StartLive(id, local, ct);
+        }
         catch (OperationCanceledException) { }
+        catch (Exception) { if (!ct.IsCancellationRequested && ReferenceEquals(local, client)) StartLive(id, local, ct); }
     }
     private void StartLive(string id, ServerClient local, CancellationToken ct)
     {

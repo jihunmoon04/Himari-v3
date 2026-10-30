@@ -13,6 +13,7 @@ public partial class MainWindow
 {
     private sealed record Conversation(string Id, string Title);
     private ServerClient? client;
+    private ServerClient? recoveryOwner;
     private CancellationTokenSource? connection;
     private readonly Dictionary<string, CancellationTokenSource> liveStreams = new();
     private readonly Dictionary<string, (string Text, string Mood)> liveDisplays = new();
@@ -38,8 +39,7 @@ public partial class MainWindow
     }
     private void StopConnection()
     {
-        moveJobs.Clear(); localScreens.Clear(); earlyMoves.Clear(); moveLifetime.Reset();
-        submittedScreen = null; submittedConversation = null; unresolvedScreen = null;
+        // Transport shutdown must not erase delivery evidence or replay counters.
         ReturnFromMove();
         CancelLive();
         connection?.Cancel(); connection?.Dispose(); connection = null;
@@ -96,8 +96,20 @@ public partial class MainWindow
     }
     private void StartConnection(string address, string token)
     {
+        var local = new ServerClient(address, token);
+        if (recoveryOwner is not null && !recoveryOwner.SameDevice(local))
+        {
+            if ((unresolvedScreen is not null || unknownText is not null || sending) &&
+                System.Windows.MessageBox.Show(this, "이전 연결에서 메시지가 접수됐는지 확인하지 못했습니다. 연결을 바꾸면 이 앱에서 확인을 계속할 수 없고, 다시 보내면 중복될 수 있습니다. 이전 기록을 확인한 뒤 연결을 바꾸시겠어요?", "미확정 전송이 남아 있습니다", MessageBoxButton.YesNo, MessageBoxImage.Warning) != MessageBoxResult.Yes)
+            { local.Dispose(); return; }
+            // A different identity is discarded only after an explicit decision.
+            moveJobs.Clear(); localScreens.Clear(); earlyMoves.Clear(); moveLifetime.Reset();
+            submittedScreen = null; submittedConversation = null; unresolvedScreen = null; unknownText = null;
+        }
+        recoveryOwner = local;
+        if (unknownText is { } pending && pending.Server.SameDevice(local)) unknownText = pending with { Server = local };
         StopConnection();
-        var local = new ServerClient(address, token); client = local;
+        client = local;
         var cts = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token); connection = cts;
         PairPanel.Visibility = Visibility.Collapsed;
         SetConnected(false, "기기 확인 중…");
@@ -254,6 +266,7 @@ public partial class MainWindow
                     var captured = await CaptureScreenAsync(ct);
                     Status.Text = "화면을 캡처해 업로드 중입니다…";
                     var upload = await local.UploadScreenAsync(context.ConversationId, captured.Bytes, captured.ContentType, ct);
+                    if (recoveryOwner?.SameDevice(local) != true) return;
                     string fileId = Str(upload, "file_id") ?? throw new InvalidOperationException("화면 업로드 응답이 올바르지 않습니다.");
                     screen = new(fileId, captured.Geometry, captured.CapturedAt, ScreenSafety.Ready(upload));
                     localScreens[fileId] = screen;
@@ -273,10 +286,12 @@ public partial class MainWindow
             try
             {
                 response = await local.SendAsync(HttpMethod.Post, PathFor(context.ConversationId) + "/messages", screen is null ? new { text } : new { text, screen = screen.FileId }, ct);
+                if (recoveryOwner?.SameDevice(local) != true) return;
                 unresolvedScreen = null;
             }
             catch (ApiException ex) when (screen is not null && ex.Code == "screen_already_sent")
             {
+                if (recoveryOwner?.SameDevice(local) != true) return;
                 unresolvedScreen = null;
                 var detail = await local.SendAsync(HttpMethod.Get, PathFor(context.ConversationId), null, ct);
                 await RecoverMoveJob(context.ConversationId, Str(Prop(detail, "job"), "job_id"), local, ct);
@@ -285,6 +300,7 @@ public partial class MainWindow
             }
             catch (ApiException ex) when (screen is not null && MessageFailures.Classify(ex) == MessageFailure.Closed)
             {
+                if (recoveryOwner?.SameDevice(local) != true) return;
                 unresolvedScreen = null;
                 try { await ReadConversation(context.ConversationId, ct); } catch (Exception) { }
                 Status.Text = "이 대화는 닫혔습니다. 메시지가 기록됐을 수 있으니 기록을 확인해 주세요.";
@@ -292,18 +308,21 @@ public partial class MainWindow
             }
             catch (Exception ex) when (screen is not null && MessageFailures.Classify(ex) == MessageFailure.Unknown)
             {
+                if (recoveryOwner?.SameDevice(local) != true) return;
                 unresolvedScreen = (context.ConversationId, text, screen);
                 Status.Text = "화면 메시지가 전송됐는지 확인하지 못했습니다. 같은 내용으로 다시 보내면 확인합니다.";
                 return;
             }
             catch (ApiException ex) when (screen is not null && MessageFailures.ReuseScreen(ex))
             {
+                if (recoveryOwner?.SameDevice(local) != true) return;
                 unresolvedScreen = (context.ConversationId, text, screen);
                 Status.Text = "전송이 거절됐습니다. 원인을 해결한 뒤 10분 안에는 같은 화면으로 다시 보낼 수 있습니다.";
                 return;
             }
             catch (Exception ex) when (screen is null && MessageFailures.Classify(ex) is MessageFailure.Unknown or MessageFailure.Closed)
             {
+                if (recoveryOwner?.SameDevice(local) != true) return;
                 unknownText = new(local, context.ConversationId, text, deviceId ?? "", beforeSequence);
                 await CheckUnknownText(false, ct);
                 if (MessageFailures.Classify(ex) == MessageFailure.Closed) Status.Text = "이 대화는 닫혔습니다. 메시지가 기록됐을 수 있으니 기록을 확인해 주세요.";

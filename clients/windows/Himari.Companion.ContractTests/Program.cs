@@ -4,6 +4,33 @@ using System.Text.Json;
 using Himari.Companion;
 
 static void Check(bool value, string message) { if (!value) throw new Exception(message); }
+var reconnectServer = new ReconnectRecoveryHandler();
+var previousConnection = new ServerClient("https://example.com/", "same-device", reconnectServer);
+try { await previousConnection.SendAsync(HttpMethod.Post, "/api/conversations/c/messages", new { text = "hello", screen = "f1" }, CancellationToken.None); }
+catch (HttpRequestException) { }
+previousConnection.Dispose();
+using (var reconnected = new ServerClient("https://example.com/", "same-device", new ReconnectRecoveryHandler()))
+{
+    Check(previousConnection.SameDevice(reconnected), "same identity survives disposed transport");
+    string? recoveredJob = await ScreenHistory.RunningJobIdAsync(reconnected, "c", CancellationToken.None);
+    Check(recoveredJob == "j1", "hello activity without job_id falls back to conversation detail");
+    Check(await ScreenHistory.LatestReadyIdAsync(reconnected, "c", recoveredJob!, CancellationToken.None) == "f1", "screen metadata remains usable after manual reconnect");
+    try { await reconnected.SendAsync(HttpMethod.Post, "/api/conversations/c/messages", new { text = "hello", screen = "f1" }, CancellationToken.None); throw new Exception("duplicate screen accepted"); }
+    catch (ApiException ex) { Check(ex.Code == "screen_already_sent", "retry after reconnect uses same file id"); }
+}
+var lostTextConnection = new ServerClient("https://example.com/", "same-device", new ReconnectRecoveryHandler());
+try { await lostTextConnection.SendAsync(HttpMethod.Post, "/api/conversations/c/messages", new { text = "hello" }, CancellationToken.None); }
+catch (HttpRequestException) { }
+lostTextConnection.Dispose();
+using (var reconnectedText = new ServerClient("https://example.com/", "same-device", new ReconnectRecoveryHandler()))
+{
+    Check(lostTextConnection.SameDevice(reconnectedText), "unknown text can bind new transport of same device");
+    Check(!await TextRecovery.AcceptedAsync(reconnectedText, "c", "hello", "d1", 0, CancellationToken.None), "origin-less history after reconnect still requires duplicate warning");
+}
+using (var otherDevice = new ServerClient("https://example.com/", "other-device", new ReconnectRecoveryHandler()))
+    Check(!lostTextConnection.SameDevice(otherDevice), "device switch cannot silently claim pending text");
+using (var otherServer = new ServerClient("https://other.example/", "same-device", new ReconnectRecoveryHandler()))
+    Check(!lostTextConnection.SameDevice(otherServer), "server switch cannot claim pending screen");
 foreach (string state in new[] { "ready", "no_sandbox", "view_expired" })
 {
     using var recoveryClient = new ServerClient("https://example.com/", "test", new LostResponseHandler(state));
@@ -245,6 +272,29 @@ using (var screenClient = new ServerClient("https://example.com/", "test", new S
     await foreach (var (kind, data) in screenClient.StreamAsync("/api/conversations/c1/live", CancellationToken.None))
         if (kind == "snapshot") collected.AddRange(replay.Accept(data.GetProperty("job_id").GetString(), data.GetProperty("run_id").GetString(), true, data.GetProperty("moves"), 1, captured));
     Check(collected.Count == 1 && collected[0].X == 42, "PR 126 upload, message job id and reconnect snapshot");
+}
+
+sealed class ReconnectRecoveryHandler : HttpMessageHandler
+{
+    private static bool screenRecorded;
+    protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+    {
+        if (request.Method == HttpMethod.Post)
+        {
+            using var body = JsonDocument.Parse(await request.Content!.ReadAsStringAsync(ct));
+            if (body.RootElement.TryGetProperty("screen", out var file))
+            {
+                if (file.GetString() != "f1") throw new Exception("screen was recaptured instead of reused");
+                if (screenRecorded) return new(HttpStatusCode.Conflict) { Content = new StringContent("{\"error\":{\"code\":\"screen_already_sent\"}}") };
+                screenRecorded = true;
+            }
+            throw new HttpRequestException("accepted, response lost");
+        }
+        string value = request.RequestUri!.AbsolutePath.EndsWith("/events")
+            ? "{\"items\":[{\"kind\":\"user_message\",\"sequence\":1,\"text\":\"hello\",\"attachments\":[{\"file_id\":\"f1\",\"screen\":true,\"image\":{\"state\":\"ready\"}}]}]}"
+            : "{\"job\":{\"job_id\":\"j1\",\"running\":true},\"conversation\":{\"last_sequence\":1}}";
+        return new(HttpStatusCode.OK) { Content = new StringContent(value, Encoding.UTF8, "application/json") };
+    }
 }
 
 sealed class LostResponseHandler(string state) : HttpMessageHandler

@@ -12,24 +12,17 @@ public partial class MainWindow
     private async Task<bool> CheckUnknownText(bool ask, CancellationToken ct)
     {
         var pending = unknownText;
-        if (pending is null || !ReferenceEquals(pending.Server, client)) return true;
+        if (pending is null) return true;
+        var server = client;
+        if (server is null || !pending.Server.SameDevice(server))
+        { Status.Text = "이전 서버·기기의 전송 여부가 미확정입니다. 원래 연결에서 기록을 확인해 주세요."; return false; }
         bool confirmed = false;
         try
         {
-            int after = pending.After;
-            while (true)
-            {
-                var page = await pending.Server.SendAsync(HttpMethod.Get, PathFor(pending.Conversation) + $"/events?after={after}&limit=100", null, ct);
-                var items = Items(Prop(page, "items")).ToArray();
-                if (items.Any(x => TextRecovery.Matches(x, pending.Text, pending.Device, pending.After))) { confirmed = true; break; }
-                if (items.Length < 100) break;
-                var seq = Prop(items[^1], "sequence");
-                if (!seq.TryGetInt32(out int next) || next <= after) break;
-                after = next;
-            }
+            confirmed = await TextRecovery.AcceptedAsync(server, pending.Conversation, pending.Text, pending.Device, pending.After, ct);
         }
         catch (Exception) when (!ct.IsCancellationRequested) { }
-        if (!ReferenceEquals(pending, unknownText)) return false;
+        if (!ReferenceEquals(server, client) || !ReferenceEquals(pending, unknownText)) return false;
         if (confirmed)
         {
             unknownText = null;
