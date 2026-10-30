@@ -144,7 +144,7 @@ public partial class MainWindow
                             liveDisplays[id] = (display.Text, display.Mood);
                             if (id == currentConversation)
                             {
-                                if (!opened && display.Text.Length > 0) { OpenBubble(); opened = true; }
+                                if (!opened && display.Text.Length > 0) { OpenReplyBubble(id, liveJob); opened = true; }
                                 Message.Text = display.Text;
                                 SetMood(display.Mood);
                                 talking = true;

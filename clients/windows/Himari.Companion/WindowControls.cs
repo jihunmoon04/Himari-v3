@@ -65,20 +65,8 @@ public partial class MainWindow
         }
         preferencesLoaded = true;
         saveTimer.Tick += (_, _) => { saveTimer.Stop(); SaveWindowPreferences(); };
-        bubbleTimer.Tick += (_, _) =>
-        {
-            bubbleTimer.Stop();
-            if (BubblePanel.IsMouseOver || awaitingAnswer || liveStreams.ContainsKey(currentConversation ?? "") || moveVerifications.ContainsValue(currentConversation ?? ""))
-            { bubbleTimer.Interval = TimeSpan.FromSeconds(2); bubbleTimer.Start(); }
-            else CloseBubble();
-        };
-        userBubbleTimer.Tick += (_, _) =>
-        {
-            userBubbleTimer.Stop();
-            if (DialoguePolicy.KeepUserBubble(UserBubble.IsMouseOver, Input.IsKeyboardFocusWithin, Input.Text, sending, unresolvedScreen is not null || unknownText is not null))
-            { userBubbleTimer.Interval = TimeSpan.FromSeconds(2); userBubbleTimer.Start(); }
-            else { UserBubble.Visibility = Visibility.Collapsed; ComposerPanel.Visibility = Visibility.Collapsed; UpdateBubbleBounds(); }
-        };
+        bubbleTimer.Tick += (_, _) => AssistantBubbleExpired();
+        userBubbleTimer.Tick += (_, _) => UserBubbleExpired();
         LocationChanged += (_, _) => SchedulePreferencesSave();
         hotKeySource = HwndSource.FromHwnd(new WindowInteropHelper(this).Handle);
         if (hotKeySource is not null) { hotKeySource.AddHook(HotKeyHook); RegisterSelectedHotkey(); }
@@ -122,13 +110,13 @@ public partial class MainWindow
         if (!workWindow.Return(window => IsWindow(window) && IsWindowVisible(window) && SetForegroundWindow(window)))
         { Status.Text = "이전 작업 창으로 돌아가지 못했습니다. Alt+Tab으로 전환해 주세요."; return; }
         System.Windows.Input.Keyboard.ClearFocus();
-        if (!string.IsNullOrWhiteSpace(Input.Text)) UserBubble.Visibility = Visibility.Collapsed;
+        if (!string.IsNullOrWhiteSpace(Input.Text)) HideUserBubble();
         else
         {
             ComposerPanel.Visibility = Visibility.Collapsed;
             UserSent.Visibility = string.IsNullOrEmpty(UserSent.Text) ? Visibility.Collapsed : Visibility.Visible;
-            if (UserSent.Visibility != Visibility.Visible) UserBubble.Visibility = Visibility.Collapsed;
-            ScheduleUserBubbleClose();
+            if (UserSent.Visibility != Visibility.Visible) HideUserBubble();
+            else ScheduleUserBubbleClose();
         }
     }
     private void CharacterSizeChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
@@ -194,23 +182,32 @@ public partial class MainWindow
         if (!preferencesLoaded || movePreviewActive || autoMoveActive) return;
         saveTimer.Stop(); saveTimer.Start();
     }
-    private void OpenBubble() { bubbleTimer.Stop(); BubblePanel.Visibility = Visibility.Visible; UpdateSceneBounds(); }
-    private void CloseBubble() { bubbleTimer.Stop(); BubblePanel.Visibility = Visibility.Collapsed; ReturnFromMove(); UpdateBubbleBounds(); }
+    private void OpenBubble() => ShowAssistantBubble(null);
+    private void CloseBubble()
+    {
+        bubbleTimer.Stop(); assistantBubbleCloseDue = false; BubblePanel.Visibility = Visibility.Collapsed;
+        ReturnFromMove(); ArrangeBubbles(); UpdateBubbleBounds();
+        if (userBubbleCloseDue && UserBubble.Visibility == Visibility.Visible) RetryExpiry(userBubbleTimer);
+    }
     private void ShowSentMessage(string text)
     {
         UserSent.Text = string.IsNullOrEmpty(text) ? "화면을 보냈습니다." : text;
         bool hasDraft = !string.IsNullOrEmpty(Input.Text);
         UserSent.Visibility = hasDraft ? Visibility.Collapsed : Visibility.Visible;
         ComposerPanel.Visibility = hasDraft ? Visibility.Visible : Visibility.Collapsed;
+        // A late 202 must not move this request below a reply already received.
+        if (userBubbleSequence == 0) PresentUserBubble();
         UserBubble.Visibility = Visibility.Visible; awaitingAnswer = false;
-        ScheduleUserBubbleClose(); UpdateSceneBounds();
+        ScheduleUserBubbleClose(); ArrangeBubbles(); UpdateSceneBounds(); ExpireBubbles();
     }
     private void ScheduleUserBubbleClose()
     {
+        userBubbleCloseDue = false;
         userBubbleTimer.Stop(); userBubbleTimer.Interval = TimeSpan.FromSeconds(DialoguePolicy.Duration(UserSent.Text, settings.BubbleMinimum.Value, settings.SecondsPer100.Value)); userBubbleTimer.Start();
     }
     private void ScheduleBubbleClose(string text)
     {
+        assistantBubbleCloseDue = false;
         bubbleTimer.Stop(); bubbleTimer.Interval = TimeSpan.FromSeconds(DialoguePolicy.Duration(text, settings.BubbleMinimum.Value, settings.SecondsPer100.Value)); bubbleTimer.Start();
     }
     private async Task ScheduleBubbleAfterMoves(string conversation)

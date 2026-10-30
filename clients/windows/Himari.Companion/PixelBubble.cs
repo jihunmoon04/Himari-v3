@@ -30,8 +30,8 @@ public sealed class PixelBubble : Decorator
     {
         double w = Math.Floor(ActualWidth / 4) * 4, h = Math.Floor((ActualHeight - 16) / 4) * 4;
         if (w < 48 || h < 24) return;
-        var edge = Brush(IsUser ? "#60538F" : "#625972");
-        var fill = Brush(IsUser ? "#F0EBFF" : "#FFFDF4");
+        var edge = Brush(IsUser ? "#625972" : "#60538F");
+        var fill = Brush(IsUser ? "#FFFDF4" : "#F0EBFF");
         double x = TailRight ? w - 52 : 28;
         if (TailRight) dc.PushTransform(new ScaleTransform(-1, 1, x + 12, 0));
         dc.DrawGeometry(edge, null, Polygon(new Point(x, h - 4), new Point(x + 24, h - 4), new Point(x + 24, h + 4), new Point(x + 16, h + 4), new Point(x + 16, h + 8), new Point(x + 8, h + 8), new Point(x + 8, h + 12), new Point(x, h + 12)));
@@ -41,7 +41,7 @@ public sealed class PixelBubble : Decorator
         dc.DrawGeometry(edge, null, Frame(0, 0, w, h));
         dc.DrawGeometry(fill, null, Frame(4, 4, w - 8, h - 8));
         dc.DrawRectangle(Brush("#FFFFFF"), null, new Rect(12, 4, Math.Max(0, w - 24), 4));
-        dc.DrawRectangle(Brush(IsUser ? "#DCD2F0" : "#E4DDCF"), null, new Rect(12, h - 8, Math.Max(0, w - 24), 4));
+        dc.DrawRectangle(Brush(IsUser ? "#E4DDCF" : "#DCD2F0"), null, new Rect(12, h - 8, Math.Max(0, w - 24), 4));
     }
     private static SolidColorBrush Brush(string color) { var brush = new SolidColorBrush((System.Windows.Media.Color)System.Windows.Media.ColorConverter.ConvertFromString(color)); brush.Freeze(); return brush; }
     private static Geometry Frame(double x, double y, double w, double h) => Polygon(new Point(x + 12,y), new Point(x + w - 12,y), new Point(x + w - 12,y + 4), new Point(x + w - 4,y + 4), new Point(x + w - 4,y + 12), new Point(x + w,y + 12), new Point(x + w,y + h - 12), new Point(x + w - 4,y + h - 12), new Point(x + w - 4,y + h - 4), new Point(x + w - 12,y + h - 4), new Point(x + w - 12,y + h), new Point(x + 12,y + h), new Point(x + 12,y + h - 4), new Point(x + 4,y + h - 4), new Point(x + 4,y + h - 12), new Point(x,y + h - 12), new Point(x,y + 12), new Point(x + 4,y + 12), new Point(x + 4,y + 4), new Point(x + 12,y + 4));

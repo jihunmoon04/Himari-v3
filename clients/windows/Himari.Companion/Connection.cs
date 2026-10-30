@@ -229,7 +229,7 @@ public partial class MainWindow
             Str(Prop(detail, "job"), "job_id") != awaited.Job)) return;
         StopButton.Visibility = ConversationView.IsRunning(detail) ? Visibility.Visible : Visibility.Collapsed;
         if (connected) Status.Text = ConversationView.IsRunning(detail) ? "이 대화는 작업 중입니다. 새 대화를 열 수 있습니다." : "연결됨";
-        if (question is not null) { awaitingAnswer = true; Message.Text = question; OpenBubble(); OpenComposer(); if (IsActive) Input.Focus(); return; }
+        if (question is not null) { awaitingAnswer = true; Message.Text = question; OpenReplyBubble(id, Str(Prop(detail, "job"), "job_id")); OpenComposer(); if (IsActive) Input.Focus(); return; }
         awaitingAnswer = false;
         if (liveDisplays.TryGetValue(id, out var display)) { Message.Text = display.Text; SetMood(display.Mood); return; }
         var sequence = Prop(Prop(detail, "conversation"), "last_sequence");
@@ -264,7 +264,7 @@ public partial class MainWindow
         }
         Message.Text = lastText ?? "대화를 시작해 주세요.";
         SetMood(lastText is null ? "neutral" : lastMood);
-        if (recoveredReply) { talking = false; OpenBubble(); _ = ScheduleBubbleAfterMoves(id); }
+        if (recoveredReply) { talking = false; OpenReplyBubble(id, Str(Prop(detail, "job"), "job_id")); _ = ScheduleBubbleAfterMoves(id); }
     }
     private void WaitForReply(ServerClient server, string conversation, string? job, int after)
     {
@@ -284,7 +284,11 @@ public partial class MainWindow
         try { var created = await client.SendAsync(HttpMethod.Post, "/api/conversations", new { }, connection.Token); await RefreshConversations(Str(created, "id"), connection.Token); }
         catch (Exception ex) { ShowError(ex); }
     }
-    private void InputChanged(object sender, System.Windows.Controls.TextChangedEventArgs e) => inputRevision++;
+    private void InputChanged(object sender, System.Windows.Controls.TextChangedEventArgs e)
+    {
+        inputRevision++;
+        if (!string.IsNullOrEmpty(Input.Text) && ComposerPanel.Visibility == Visibility.Visible) PresentUserBubble();
+    }
     private void SetCurrentConversation(string? id)
     {
         if (currentConversation != id)
@@ -307,7 +311,7 @@ public partial class MainWindow
         var local = client; var ct = connection.Token;
         var context = new SendContext(local, currentConversation, inputRevision);
         sending = true;
-        userBubbleTimer.Stop();
+        PresentUserBubble();
         SendButton.IsEnabled = false;
         LocalScreen? screen = null;
         bool screenFailed = false;
