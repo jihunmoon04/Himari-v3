@@ -43,6 +43,33 @@ try { await coordinator.PairAsync("https://example.com/", "AAAA-BBBB", Cancellat
 string oldPending = vault.PendingValue!.Token;
 try { await coordinator.PairAsync("https://example.com/", "CCCC-DDDD", CancellationToken.None); } catch (ApiException) { }
 Check(vault.PendingValue!.Token != oldPending && vault.ActiveValue!.Token == firstToken, "new code generates new pending token without losing active");
+var retryVault = new FakeVault { ActiveValue = new("https://old.example/", "old-token", null) };
+var retryServer = new PairHandler { TokenConflicts = 1, BusyResponses = 2 };
+int delays = 0;
+var retryCoordinator = new PairingCoordinator(retryVault, c => new ServerClient(c.Server, c.Token, new SharedHandler(retryServer)), (duration, ct) => { ct.ThrowIfCancellationRequested(); Check(duration == TimeSpan.FromSeconds(2), "busy retry delay"); delays++; return Task.CompletedTask; });
+var newDevice = await retryCoordinator.PairAsync("https://example.com/", "ABCD-EFGH", CancellationToken.None);
+Check(retryServer.AttemptedTokens.Count == 4 && retryServer.AttemptedTokens[0] != retryServer.AttemptedTokens[1] && retryServer.AttemptedTokens[1] == retryServer.AttemptedTokens[2] && retryServer.AttemptedTokens[2] == retryServer.AttemptedTokens[3], "token collision regenerates once; busy retries same token");
+Check(retryServer.AttemptedCodes.All(c => c == "ABCDEFGH") && delays == 2 && retryVault.ActiveValue == newDevice && retryVault.PendingValue is null, "retry preserves code and promotes only after verify");
+var fullVault = new FakeVault { ActiveValue = new("https://old.example/", "old-token", null) };
+var fullServer = new PairHandler { BusyResponses = 10 };
+var fullCoordinator = new PairingCoordinator(fullVault, c => new ServerClient(c.Server, c.Token, new SharedHandler(fullServer)), (_, ct) => Task.CompletedTask);
+try { await fullCoordinator.PairAsync("https://example.com/", "ABCD-EFGH", CancellationToken.None); throw new Exception("busy should fail"); }
+catch (ApiException ex) { Check(ex.Code == "pairing_busy", "busy error surfaced"); }
+Check(fullServer.AttemptedTokens.Count == 3 && fullVault.ActiveValue!.Token == "old-token" && fullVault.PendingValue is not null, "busy retries bounded and credentials preserved");
+var conflictVault = new FakeVault { ActiveValue = new("https://old.example/", "old-token", null) };
+var conflictServer = new PairHandler { TokenConflicts = 3 };
+var conflictCoordinator = new PairingCoordinator(conflictVault, c => new ServerClient(c.Server, c.Token, new SharedHandler(conflictServer)), (_, ct) => Task.CompletedTask);
+try { await conflictCoordinator.PairAsync("https://example.com/", "ABCD-EFGH", CancellationToken.None); throw new Exception("conflict should fail"); }
+catch (ApiException ex) { Check(ex.Code == "token_in_use", "repeated collision surfaced"); }
+Check(conflictServer.AttemptedTokens.Count == 2 && conflictVault.ActiveValue!.Token == "old-token" && conflictVault.PendingValue!.Token == conflictServer.AttemptedTokens[1], "collision retry bounded and latest pending preserved");
+var cancelVault = new FakeVault { ActiveValue = new("https://old.example/", "old-token", null) };
+var cancelServer = new PairHandler { BusyResponses = 2 };
+using (var cancelRetry = new CancellationTokenSource())
+{
+    var cancelCoordinator = new PairingCoordinator(cancelVault, c => new ServerClient(c.Server, c.Token, new SharedHandler(cancelServer)), (_, ct) => { cancelRetry.Cancel(); return Task.Delay(1, ct); });
+    try { await cancelCoordinator.PairAsync("https://example.com/", "ABCD-EFGH", cancelRetry.Token); throw new Exception("retry cancellation ignored"); } catch (OperationCanceledException) { }
+    Check(cancelServer.AttemptedTokens.Count == 1 && cancelVault.ActiveValue!.Token == "old-token", "cancel stops retry and preserves active credential");
+}
 // Reconnect after the server finished a job while the stream was down.
 string displayed = "중간 결과"; bool resumed = false; string serverFinal = "최종 답변";
 await HelloReconciliation.ApplyAsync(() => Task.CompletedTask, () => resumed = false, () => { displayed = serverFinal; return Task.CompletedTask; }, CancellationToken.None);
@@ -106,6 +133,16 @@ using (var gateCancel = new CancellationTokenSource())
     try { await waitingForGate; throw new Exception("gate cancellation ignored"); } catch (OperationCanceledException) { }
 }
 gate.Exit(); await gate.EnterAsync(CancellationToken.None); gate.Exit();
+var sendGate = new ConnectionGate(); var releaseSend = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously); int posts = 0;
+async Task PressEnter()
+{
+    if (!sendGate.TryEnter()) return;
+    try { posts++; await releaseSend.Task; } finally { sendGate.Exit(); }
+}
+var firstPress = PressEnter(); await PressEnter(); await PressEnter();
+Check(posts == 1, "repeated Enter while sending creates only one request");
+releaseSend.SetResult(); await firstPress; await PressEnter();
+Check(posts == 2, "sending can resume after request finishes");
 Console.WriteLine("Contract transport checks passed.");
 
 sealed class FakeHandler(string token) : HttpMessageHandler
@@ -142,6 +179,8 @@ sealed class SharedHandler(PairHandler inner) : HttpMessageHandler
 sealed class PairHandler
 {
     public bool FailPair, LoseResponse;
+    public int TokenConflicts, BusyResponses;
+    public readonly List<string> AttemptedTokens = [], AttemptedCodes = [];
     public string? RegisteredToken;
     public async Task<HttpResponseMessage> Handle(HttpRequestMessage request, CancellationToken ct)
     {
@@ -149,9 +188,13 @@ sealed class PairHandler
             return request.Headers.Authorization?.Parameter == RegisteredToken && RegisteredToken is not null
                 ? Json(HttpStatusCode.OK, "{\"device\":{\"device_id\":\"d1\"}}")
                 : Json(HttpStatusCode.Unauthorized, "{\"error\":{\"code\":\"unauthorized\"}}");
-        if (FailPair) return Json(HttpStatusCode.Unauthorized, "{\"error\":{\"code\":\"pairing_invalid\"}}");
         using var body = JsonDocument.Parse(await request.Content!.ReadAsStringAsync(ct));
-        RegisteredToken = body.RootElement.GetProperty("token").GetString();
+        var attempted = body.RootElement.GetProperty("token").GetString()!;
+        AttemptedTokens.Add(attempted); AttemptedCodes.Add(request.Headers.Authorization?.Parameter ?? "");
+        if (FailPair) return Json(HttpStatusCode.Unauthorized, "{\"error\":{\"code\":\"pairing_invalid\"}}");
+        if (TokenConflicts-- > 0) return Json(HttpStatusCode.Conflict, "{\"error\":{\"code\":\"token_in_use\"}}");
+        if (BusyResponses-- > 0) return Json(HttpStatusCode.TooManyRequests, "{\"error\":{\"code\":\"pairing_busy\"}}");
+        RegisteredToken = attempted;
         if (LoseResponse) { LoseResponse = false; throw new HttpRequestException("simulated lost response"); }
         return Json(HttpStatusCode.OK, "{\"device_id\":\"d1\",\"name\":\"PC\"}");
     }

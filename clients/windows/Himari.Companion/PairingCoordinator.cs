@@ -23,7 +23,7 @@ internal sealed class WindowsCredentialVault : ICredentialVault
     public void SavePending(DeviceCredential value) => CredentialStore.SavePending(value);
     public void DeletePending() => CredentialStore.DeletePending();
 }
-internal sealed class PairingCoordinator(ICredentialVault vault, Func<DeviceCredential, ServerClient> createClient)
+internal sealed class PairingCoordinator(ICredentialVault vault, Func<DeviceCredential, ServerClient> createClient, Func<TimeSpan, CancellationToken, Task>? delay = null)
 {
     private async Task<bool> Verify(DeviceCredential credential, CancellationToken ct)
     {
@@ -54,9 +54,22 @@ internal sealed class PairingCoordinator(ICredentialVault vault, Func<DeviceCred
         if (pending is null || pending.Server != server || (pending.CodeFingerprint is { Length: > 0 } && pending.CodeFingerprint != fingerprint))
             pending = new(server, CredentialStore.NewToken(), fingerprint);
         else pending = pending with { CodeFingerprint = fingerprint };
-        vault.SavePending(pending);
-        using var client = createClient(pending);
-        await client.PairAsync(normalized, ct);
+        int conflicts = 0, busyRetries = 0;
+        while (true)
+        {
+            ct.ThrowIfCancellationRequested();
+            vault.SavePending(pending);
+            using var client = createClient(pending);
+            try { await client.PairAsync(normalized, ct); break; }
+            catch (ApiException ex) when (ex.Status == HttpStatusCode.Conflict && ex.Code == "token_in_use" && conflicts++ == 0)
+            {
+                pending = pending with { Token = CredentialStore.NewToken() };
+            }
+            catch (ApiException ex) when (ex.Status == HttpStatusCode.TooManyRequests && ex.Code == "pairing_busy" && busyRetries++ < 2)
+            {
+                await (delay ?? Task.Delay)(TimeSpan.FromSeconds(2), ct);
+            }
+        }
         if (!await Verify(pending, ct)) throw new InvalidOperationException("짝짓기 후 기기 인증을 확인하지 못했습니다.");
         Promote(pending); return pending;
     }

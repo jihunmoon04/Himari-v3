@@ -17,9 +17,10 @@ public partial class MainWindow
     private readonly Dictionary<string, CancellationTokenSource> liveStreams = new();
     private readonly Dictionary<string, (string Text, string Mood)> liveDisplays = new();
     private string? deviceId, currentConversation;
-    private bool connected, changingSelection;
+    private bool connected, changingSelection, sending;
     private DateTime? awaySince;
     private readonly ConnectionGate connectionChange = new();
+    private readonly ConnectionGate messageSend = new();
     private readonly CancellationTokenSource lifetime = new();
     private readonly ICredentialVault vault = new WindowsCredentialVault();
     private PairingCoordinator Pairing() => new(vault, c => new ServerClient(c.Server, c.Token));
@@ -31,7 +32,7 @@ public partial class MainWindow
 
     private void SetConnected(bool value, string text)
     {
-        connected = value; Status.Text = text; SendButton.IsEnabled = value; Input.IsEnabled = value;
+        connected = value; Status.Text = text; SendButton.IsEnabled = value && !sending; Input.IsEnabled = value;
         Character.Opacity = value ? 1 : .55;
     }
     private void StopConnection()
@@ -142,6 +143,8 @@ public partial class MainWindow
             "companion_off" => "서버에서 반려 기능이 꺼져 있습니다.",
             "device_scope" => "앱 권한 오류가 발생했습니다.",
             "pairing_used" => "이미 사용된 코드입니다. Web에서 새 코드를 발급해 주세요.",
+            "pairing_busy" => "서버가 혼잡합니다. 잠시 후 다시 시도해 주세요.",
+            "token_in_use" => "기기 토큰이 충돌했습니다. 다시 시도해 주세요.",
             _ => "요청 실패: " + api.Code
         } : ex is ArgumentException ? ex.Message : "연결하지 못했습니다. 서버 주소와 VPN을 확인해 주세요.";
         if (ex is ApiException { Code: "device_scope" }) Trace.TraceWarning("HIMARI device_scope: client requested an unauthorized route.");
@@ -214,6 +217,8 @@ public partial class MainWindow
         if (!connected || client is null || connection is null || currentConversation is null) return;
         string text = Input.Text.Trim(); int length = text.EnumerateRunes().Count();
         if (length is < 1 or > 32000) { Status.Text = "메시지는 1~32,000자로 입력해 주세요."; return; }
+        if (!messageSend.TryEnter()) return;
+        sending = true;
         SendButton.IsEnabled = false;
         try
         {
@@ -222,7 +227,7 @@ public partial class MainWindow
             Status.Text = "답변을 기다리는 중…"; SetMood("thinking");
         }
         catch (Exception ex) { ShowError(ex); }
-        finally { SendButton.IsEnabled = connected; }
+        finally { sending = false; messageSend.Exit(); SendButton.IsEnabled = connected; }
     }
     private async void CancelClick(object sender, RoutedEventArgs e)
     {
