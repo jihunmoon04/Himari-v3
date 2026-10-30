@@ -73,10 +73,10 @@ class CompanionEvents:
         if self._revisions.get(principal) == revision:  # else a later change's read publishes
             self._hub.publish(principal, "activity", activity)
 
-    def job_started(self, scope: TrustedScope, origin: MessageOrigin | None) -> None:
+    def job_started(self, scope: TrustedScope, origin: MessageOrigin | None, status: JobStatus) -> None:
         self._working[(scope.principal_id, scope.conversation_id)] = origin
         self._hub.publish(scope.principal_id, "job", {"conversation": scope.conversation_id, "state": "started",
-                                                      "origin": origin_view(origin)})
+                                                      "origin": origin_view(origin), "job_id": status.job_id})
         self.activity_changed(scope.principal_id)
 
     def accepted(self, scope: TrustedScope) -> None:
@@ -89,7 +89,8 @@ class CompanionEvents:
         self._working.pop((scope.principal_id, scope.conversation_id), None)
         outcome = None if status.result is None else status.result.state.value
         self._hub.publish(scope.principal_id, "job", {"conversation": scope.conversation_id, "state": "ended",
-                                                      "outcome": outcome, "error": status.error})
+                                                      "outcome": outcome, "error": status.error,
+                                                      "job_id": status.job_id})
         self._hub.publish(scope.principal_id, "conversation", {"conversation": scope.conversation_id})
         self.activity_changed(scope.principal_id)
 

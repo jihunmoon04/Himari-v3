@@ -84,6 +84,8 @@ class RequestOptions(DeepFrozen):
     session_key: str | None = None
     # The model takes images (V3-P67 §7.1), as its Provider declares; set by the Driver.
     image_input: bool = False
+    # And points on a screen where it says (V3-P84 §5); set by the Driver.
+    screen_points: bool = False
     # Ask for the answer as a stream (V3-P73 §3.1); set by the Driver right before
     # the request is prepared, only for a Run that answers the user.
     stream: bool = False
@@ -555,6 +557,15 @@ COMPANION_NOTE = (
     f"\"[[mood:happy]]잘 됐다!\". Moods: {', '.join(MOODS)}. Use at most one per sentence. Never put a mood mark "
     "inside code."
 )
+# V3-P84 §5: told with COMPANION_NOTE; the second only to a model whose points
+# on a screen were checked (RequestOptions.screen_points), right after the first.
+SCREEN_NOTE = "An attachment with \"screen\": true is the user's screen when they sent the message."
+SCREEN_MOVE_NOTE = (
+    "Its width and height are the pixels of the image you see. To move your character to a spot on the latest "
+    "screen, write [[move:X,Y]] in that image's pixels where you start talking about it, e.g. "
+    "\"[[move:812,430]]이 버튼을 눌러 봐\". Use moves only when you can see that screen. The character only points; "
+    "it cannot click or type."
+)
 
 
 # V3-P70 §7: one sentence when read_document is offered, one when run_command
@@ -600,10 +611,17 @@ def user_instructions_section(text: str) -> str | None:
 def attachment_line(ref: AttachmentRef, attachments: Mapping[str, AttachmentInfo],
                     plan: ImagePlan | None = None) -> str:
     """With ``plan``: an image the model does not get says why (V3-P67 §7.3)."""
-    info = attachments.get(attachment_key(ref))
+    key = attachment_key(ref)
+    info = attachments.get(key)
     data: dict[str, object] = {"name": "(unavailable)"} if info is None else {
         "name": info.name, "path": info.path, "media_type": info.media_type, "bytes": info.size}
-    reason = None if info is None or plan is None else plan.reason(attachment_key(ref), info)
+    if ref.screen:  # V3-P84 §5: never placed in the Workspace, so no path
+        data.pop("path", None)
+        data["screen"] = True
+        if info is not None and plan is not None and plan.screen_points and key == plan.latest_screen \
+                and key in plan.shown:  # only the screen moves refer to, and only when it is seen
+            data["width"], data["height"] = info.view_width, info.view_height
+    reason = None if info is None or plan is None else plan.reason(key, info)
     if reason is not None:
         data["not_shown"] = reason
     return "<attachment>" + json_data(data) + "</attachment>"
@@ -655,6 +673,8 @@ _NOT_READY = {"too_large": "too large to show", "unprepared": "could not be prep
               "no_sandbox": "images cannot be prepared on this server", "view_expired": "expired"}
 NO_IMAGE_MODEL = "this model does not take images"
 OVER_PLAN = "too many images in this request"
+OLDER_SCREEN = "an older screen"
+SCREENS_SHOWN = 2  # V3-P84 §5 (Q4): the latest screens sent as images; older ones are lines
 
 
 @dataclass(frozen=True)
@@ -665,6 +685,9 @@ class ImagePlan(DeepFrozen):
 
     image_input: bool
     shown: frozenset[str] = frozenset()  # attachment keys
+    older_screens: frozenset[str] = frozenset()  # screens past the latest SCREENS_SHOWN (V3-P84 §5)
+    screen_points: bool = False  # the latest screen's line gives its size when it is shown (V3-P84 §5)
+    latest_screen: str | None = None  # the screen moves refer to, shown or not (PR #126 review B1)
 
     def reason(self, key: str, info: AttachmentInfo) -> str | None:
         """Why an image is a line only; None for a shown image and for a file
@@ -675,6 +698,8 @@ class ImagePlan(DeepFrozen):
             return _NOT_READY.get(info.view_state, "could not be prepared")
         if not self.image_input:
             return NO_IMAGE_MODEL
+        if key in self.older_screens:
+            return OLDER_SCREEN
         return None if key in self.shown else OVER_PLAN
 
 
@@ -694,21 +719,41 @@ def _refs_newest_first(model_input: ModelInput) -> list[AttachmentRef]:
 def image_plan(model_input: ModelInput) -> ImagePlan:
     """V3-P67 §6.2: ready copies, newest first, within MAX_IMAGES_PER_REQUEST
     and MAX_IMAGE_BYTES_PER_REQUEST of copy bytes — decided from the records,
-    before any byte is read (review B3)."""
-    if not model_input.request_options.image_input:
+    before any byte is read (review B3). Of the screens, only the latest
+    SCREENS_SHOWN (V3-P84 §5), counted by their order whether they can be
+    shown or not: a newer screen that cannot be seen never lets an older one
+    in (PR #126 review B1). The latest screen, when ready, is taken first:
+    the images after it never crowd it out (re-review C2)."""
+    options = model_input.request_options
+    if not options.image_input:
         return ImagePlan(False)
+    refs = _refs_newest_first(model_input)
     shown: list[str] = []
+    older: set[str] = set()
+    screens: list[str] = []
     used = 0
-    for ref in _refs_newest_first(model_input):
+    latest = next((r for r in refs if r.screen), None)
+    if latest is not None:  # first, so later images never crowd out the screen moves are about (re-review C2)
+        first = model_input.attachments.get(attachment_key(latest))
+        if first is not None and first.view_state == "ready" and first.view_bytes <= MAX_IMAGE_BYTES_PER_REQUEST:
+            shown.append(attachment_key(latest))
+            used += first.view_bytes
+    for ref in refs:
         key = attachment_key(ref)
+        if ref.screen and key not in screens and key not in older:
+            if len(screens) < SCREENS_SHOWN:
+                screens.append(key)
+            else:
+                older.add(key)
         info = model_input.attachments.get(key)
-        if info is None or info.view_state != "ready" or key in shown:
+        if info is None or info.view_state != "ready" or key in shown or key in older:
             continue
         if len(shown) >= MAX_IMAGES_PER_REQUEST or used + info.view_bytes > MAX_IMAGE_BYTES_PER_REQUEST:
             continue  # an older, larger one is left out; a smaller one may still fit
         shown.append(key)
         used += info.view_bytes
-    return ImagePlan(True, frozenset(shown))
+    return ImagePlan(True, frozenset(shown), frozenset(older), options.screen_points,
+                     screens[0] if screens else None)
 
 
 def image_tokens(info: AttachmentInfo) -> int:

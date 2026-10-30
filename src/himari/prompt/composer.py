@@ -34,6 +34,8 @@ from himari.prompt.api import (
     PromptError,
     PromptErrorCode,
     PromptInputs,
+    SCREEN_MOVE_NOTE,
+    SCREEN_NOTE,
     TIME_GAP,
     SourceNote,
     ToolGroupTurn,
@@ -139,9 +141,15 @@ CUT = "\n[… cut]"
 
 
 def stable_prefix(inputs: PromptInputs) -> tuple[str, ...]:
-    """The operator's instructions and notes, then the user's (V3-P69 §4)."""
+    """The operator's instructions and notes, then the user's (V3-P69 §4).
+    SCREEN_MOVE_NOTE follows SCREEN_NOTE for a model that points on a screen
+    (V3-P84 §5): which model it is is part of the context key already."""
+    instructions = inputs.instructions
+    if inputs.request_options.screen_points and SCREEN_NOTE in instructions:
+        at = instructions.index(SCREEN_NOTE) + 1
+        instructions = (*instructions[:at], SCREEN_MOVE_NOTE, *instructions[at:])
     section = user_instructions_section(inputs.user_instructions)
-    return inputs.instructions if section is None else (*inputs.instructions, section)
+    return instructions if section is None else (*instructions, section)
 
 
 def fit_notes(notes: tuple[SourceNote, ...]) -> tuple[SourceNote, ...]:

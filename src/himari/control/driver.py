@@ -444,9 +444,10 @@ class Driver:
         return self._turn_models[scope.conversation_id]
 
     def _request_options(self, scope: TrustedScope, model: ResolvedModel) -> RequestOptions:
+        capabilities = self._provider.describe_capabilities(model.model_id)
         return RequestOptions(model.model_id, model.reasoning_effort, provider_key=self._provider.provider_key,
-                              session_key=session_key(scope),
-                              image_input=self._provider.describe_capabilities(model.model_id).image_input)
+                              session_key=session_key(scope), image_input=capabilities.image_input,
+                              screen_points=capabilities.image_input and capabilities.screen_points)
 
     def _options_for(self, scope: TrustedScope) -> RequestOptions:
         return self._request_options(scope, self._turn_model(scope))

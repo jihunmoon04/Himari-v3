@@ -72,11 +72,17 @@ class DataErrorCode(Enum):
     ATTACHMENT_REFUSED = "attachment_refused"  # an attachment a message may not carry (§4.2)
 
 
+# DataError.reason of an upload a message names once more (V3-P84 §4.2: a screen is attached once).
+ALREADY_SENT = "already sent"
+
+
 class DataError(Exception):
-    def __init__(self, code: DataErrorCode, message: str = "", *, file_id: FileId | None = None) -> None:
+    def __init__(self, code: DataErrorCode, message: str = "", *, file_id: FileId | None = None,
+                 reason: str | None = None) -> None:
         super().__init__(f"{code.value}: {message}" if message else code.value)
         self.code = code
         self.file_id = file_id  # ATTACHMENT_REFUSED: the attachment refused
+        self.reason = reason  # ATTACHMENT_REFUSED: why, e.g. ALREADY_SENT
 
 
 # --- Conversation Events (Data v0.2 §4) ---------------------------------------

@@ -303,7 +303,7 @@ class BackgroundRunner:
         progress = _JobProgress(self, key, signal)
         self._tasks[key] = asyncio.create_task(self._run(key, scope, lambda s: job(s, signal, progress)),
                                                name=f"{name}:{scope.conversation_id}")
-        self._tell(lambda listener: listener.job_started(scope, origin))
+        self._tell(lambda listener: listener.job_started(scope, origin, status))
         return status
 
     def _reported(self, key: _Key, signal: StopSignal, usage: TurnUsage) -> None:

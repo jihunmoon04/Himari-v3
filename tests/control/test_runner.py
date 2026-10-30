@@ -484,6 +484,7 @@ class Listening:
 
     def __init__(self, fail: bool = False) -> None:
         self.told: list[tuple[str, object]] = []
+        self.jobs: list[tuple[str, str | None]] = []  # V3-P84 §6.3
         self.fail = fail
 
     def _note(self, what: str, detail: object = None) -> None:
@@ -491,7 +492,8 @@ class Listening:
         if self.fail:
             raise RuntimeError("a listener that fails")
 
-    def job_started(self, scope: TrustedScope, origin: MessageOrigin | None) -> None:
+    def job_started(self, scope: TrustedScope, origin: MessageOrigin | None, status: JobStatus) -> None:
+        self.jobs.append(("started", status.job_id))
         self._note("started", origin)
 
     def accepted(self, scope: TrustedScope) -> None:
@@ -501,6 +503,7 @@ class Listening:
         self._note("run")
 
     def job_ended(self, scope: TrustedScope, status: JobStatus) -> None:
+        self.jobs.append(("ended", status.job_id))
         self._note("ended", None if status.result is None else status.result.state)
 
 
@@ -524,11 +527,14 @@ def test_a_listener_is_told_as_the_job_goes(fail: bool) -> None:
         driver.release.set()
         runner = BackgroundRunner(driver, listener=listener)
         origin = MessageOrigin(OriginKind.DEVICE, "d1")
-        await runner.submit(SCOPE, UserMessage(user("hi").blocks, origin=origin))
+        started = await runner.submit(SCOPE, UserMessage(user("hi").blocks, origin=origin))
         status = await runner.wait(SCOPE)
         assert status.result is not None and status.result.state is DriveState.COMPLETED
-        await runner.submit_compaction(SCOPE)
+        compacting = await runner.submit_compaction(SCOPE)
         await runner.wait(SCOPE)
+        assert started.job_id is not None and compacting.job_id not in (None, started.job_id)
+        assert listener.jobs == [("started", started.job_id), ("ended", started.job_id),
+                                 ("started", compacting.job_id), ("ended", compacting.job_id)]  # V3-P84 §6.3
         assert listener.told == [("accepted", None), ("started", origin), ("run", None), ("run", None),
                                  ("ended", DriveState.COMPLETED),
                                  ("started", None), ("ended", DriveState.COMPLETED)]  # a compaction's: no origin
@@ -545,9 +551,11 @@ def test_an_input_accepted_while_closing_is_told_but_no_job_starts() -> None:
         closing = asyncio.create_task(runner.close(SCOPE, timeout=5))
         await asyncio.sleep(0.02)
         driver.accepting.set()
-        with pytest.raises(ControlError):
+        with pytest.raises(ControlError) as refused:
             await submitting
         await closing
+        # V3-P84 §7.8 (third review C1): recorded, then CLOSED (409 conversation_closed) — not a sure refusal.
+        assert refused.value.code is ControlErrorCode.CLOSED
         assert listener.told == [("accepted", None)]  # re-review C2: "started" only from _start
 
     asyncio.run(scenario())

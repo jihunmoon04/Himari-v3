@@ -7,7 +7,7 @@ import base64
 import secrets
 from datetime import timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from himari.bootstrap.application import Application
 from himari.bootstrap.companion import CompanionEvents
@@ -61,6 +61,8 @@ def test_the_runners_events_reach_the_stream(tmp_path: Path) -> None:
             await app.runner.wait(scope)
             got = [(e.name, thaw(e.data)) for e in await drained(stream)]
             cid = scope.conversation_id
+            jobs = {cast(dict[str, Any], data).pop("job_id") for name, data in got if name == "job"}
+            assert jobs == {app.runner.status(scope).job_id} != {None}  # V3-P84 §6.3: one job, started and ended
             assert [g for g in got if g[0] != "activity"] == [
                 ("conversation", {"conversation": cid}),  # accepted
                 ("job", {"conversation": cid, "state": "started", "origin": {"kind": "device", "device_id": "d1"}}),
@@ -151,7 +153,7 @@ def test_an_older_activity_read_never_lands_after_a_newer_one() -> None:
         events = CompanionEvents(hub, waiting)
         stream = hub.subscribe(ME)
         scope = TrustedScope(ME, ConversationId("c1"))
-        events.job_started(scope, WEB)  # its activity read takes working=[c1], then waits on Data
+        events.job_started(scope, WEB, JobStatus(running=True))  # its activity read takes working=[c1], then waits
         for _ in range(3):
             await asyncio.sleep(0)
         events.job_ended(scope, JobStatus(running=False, result=DriveResult(DriveState.COMPLETED)))

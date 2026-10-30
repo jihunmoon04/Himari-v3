@@ -37,6 +37,7 @@ from himari.common import (
 from himari.data import rules
 from himari.data.blobs import BlobRow, FileStore, MemoryBlobFiles
 from himari.data.api import (
+    ALREADY_SENT,
     EventPage,
     EventSearch,
     EventText,
@@ -358,7 +359,7 @@ class _MemoryBlobRows:
 
 
 def _refused(file_id: str, why: str) -> DataError:
-    return DataError(DataErrorCode.ATTACHMENT_REFUSED, f"{file_id}: {why}", file_id=FileId(file_id))
+    return DataError(DataErrorCode.ATTACHMENT_REFUSED, f"{file_id}: {why}", file_id=FileId(file_id), reason=why)
 
 
 class InMemoryData:
@@ -592,7 +593,7 @@ class InMemoryData:
             if file.origin is not FileOrigin.UPLOAD or file.version != 1:
                 raise _refused(file_id, "not an upload")
             if file.attached_at is not None:
-                raise _refused(file_id, "already sent")
+                raise _refused(file_id, ALREADY_SENT)
             if self._store.blob_rows[file.blob_key].expired_at is not None:
                 raise _refused(file_id, "expired")
             if cutoff is not None and file.created_at < cutoff:
