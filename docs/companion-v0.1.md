@@ -1,4 +1,4 @@
-# 반려 에이전트 1단계: Windows 앱과 기기 연결 (V3-P83 설계 초안 v0.1, rev. 2)
+# 반려 에이전트 1단계: Windows 앱과 기기 연결 (V3-P83 설계 초안 v0.1, rev. 3)
 
 상태: **Proposed**. 소유자 결정 Q1~Q7 모두 정함(2026-10-30, §12).
 
@@ -17,6 +17,11 @@
 - **반려 전용 대화를 두지 않는다**(Q6). HIMARI 자체가 반려 에이전트다. 앱은 최근 대화를 이어 가고 새 대화도 연다(§7.2). 성격 글은 기존 사용자 지시문(V3-P69)에 쓴다. rev. 1의 `companion` 표, 반려 대화 고정, 성격 글 자리는 거둔다.
   - 이유: 한 대화는 한 번에 한 작업만 한다(작업 중 메시지는 `BUSY`). 반려 대화가 하나뿐이면 HIMARI가 그 대화에서 긴 일을 하는 동안 말을 걸 수 없다.
 
+**rev. 3(2026-10-30, 소유자 동의):**
+- **새 모듈 `himari.presence`**(§2.2): 기기, 짝짓기, 지금 기기, 사건 흐름. rev. 2는 Presence를 `bootstrap`에 두었다. bootstrap은 조립하는 곳인데 이미 기능이 쌓여 있다(`application.py` 1.7k줄, 파일 탐색기·변경 리뷰·편집 판). 반려 기능의 중심은 처음부터 `api.py`를 가진 모듈로 둔다.
+- **기기 채널을 주체 단위 사건 흐름 `GET /api/events`로**(§7.1): 기기와 Web이 같이 쓴다. Web의 5초 활동 읽기(V3-P80)를 이것으로 바꾼다. 다음 단계의 "먼저 말 걸기"도 이 흐름으로 알린다.
+- **Environment와의 관계**(§2.1): 기기는 사람 쪽 창구, Environment는 에이전트 쪽 작업 대상. 같은 PC의 기기 id가 뒤 단계의 `pc` Environment 인스턴스 id가 된다.
+
 앞선 결정
 - **V3-001: Run = LLM 호출 한 번.** 모델이 Tool을 부르면 결과를 받아 한 번 더 부른다. 그래서 표정은 Tool이 아니라 답 안의 표시로 보낸다(§6).
 - **Current State**(prompt-composition §1): 요청 끝의 `<runtime_state>` JSON. 캐시를 깨지 않는 최신 상태의 자리다. 시각과 기기는 여기에 넣는다(§5).
@@ -33,7 +38,7 @@
 3. **지금 기기:** 앱이 입력 활동을 알리고, 서버가 지금 사용자가 있는 기기를 정한다. 모델은 Current State에서 본다(§5).
 4. **시각:** 모든 대화에 지금 시각과 오래 쉬었다 온 메시지의 시각(§5.4).
 5. **표정 표시:** 답 안의 `[[mood:이름]]`. 서버가 떼어 내 표정 사건으로 보낸다(§6).
-6. **기기 채널:** 기기마다 열어 두는 SSE(§7).
+6. **사건 흐름:** 주체 단위 SSE `GET /api/events`. 기기와 Web이 같이 쓴다(§7).
 7. **앱 계약:** 로컬 에이전트가 만드는 Windows 앱이 지킬 것(§8).
 
 **하지 않는다(뒤 단계, §11)**
@@ -49,7 +54,7 @@
             ┌──────────── 서버: HIMARI ─────────────────────┐
             │ Control·Prompt·Provider → OpenRouter           │
             │ Data v14: devices (+ 기존 전부)                  │
-            │ Presence(메모리 안): 기기별 연결·마지막 입력     │
+            │ presence 모듈: 기기·짝짓기·지금 기기·사건 흐름   │
             └──────┬─────────────────────────┬──────────────┘
    기기 토큰 HTTPS·SSE (VPN)                  │ 세션 쿠키 HTTPS (VPN)
                    │                          │
@@ -65,6 +70,42 @@
 - 서버가 하나의 원본이다. 대화, 기억, 지시문은 모두 서버의 Data에 있다. 여러 PC와 Web이 같은 대화를 이어 쓴다.
 - 대화 사이를 잇는 것은 메모리(V3-P71)와 대화 검색(V3-P72)이다. 그래서 메모리 2단계가 다음 단계의 핵심이다(§11).
 - 지연: PC↔서버 구간이 더해진다. 모델의 첫 토큰(0.5~수 초)에 비해 작다. 즉각적이어야 하는 반응(가만히 있을 때의 움직임, 말하는 중 입 모양 등)은 앱이 혼자 처리한다(§8.3).
+
+### 2.1 Environment와의 관계
+
+둘은 루프의 반대쪽이다.
+
+| | 기기 (presence) | Environment |
+| --- | --- | --- |
+| 묻는 것 | 사람이 어디서 말하나, 지금 어디 있나, 답을 어디로 보내나 | 에이전트가 어디에 손을 대나 |
+| 편 | 사람 쪽 창구(Web·CLI와 같은 편) | 에이전트 쪽 작업 대상 |
+| 단위 | 주체. Workspace가 없어도 있다 | 대화마다 Binding으로 Workspace에 붙음 |
+| 모델에게 | Current State `presence`(정보), Tool 없음 | Tool(`<kind>/<name>`), Current State `environments` |
+| 권한 | 기기 토큰: 사람의 화면 권한 | Workspace 접근 권한 |
+
+```
+                사람 쪽 (어디서 말하나)        에이전트 쪽 (어디에 손을 대나)
+서버 호스트     Web, CLI                      machine / inside Environment
+Windows PC     앱 = 기기 (presence)          [뒤 단계] pc Environment
+                         └──── 같은 기기 id, 같은 연결 ────┘
+```
+
+- **기기를 지금 Environment로 만들지 않는다.** "사용자가 어디 있나"는 Binding 없이 모든 대화가 알아야 하고, 사람의 창구 권한과 파일 권한을 섞지 않기 위해서다.
+- **뒤 단계(로컬 파일, 화면 캡처, 캐릭터가 창 가리키기):** PC의 runner가 새 Environment 종류 `pc`가 된다.
+  - 기기 하나가 `pc` Environment 인스턴스 하나를 제공한다. **인스턴스 id = 기기 id.**
+  - `pc` 플러그인은 `presence.api`로 그 기기에 닿는다(계층 presence 2 → environment 3, 아래 방향). `observe()`의 온라인·오프라인은 presence가 아는 연결을 그대로 쓴다.
+  - 에이전트가 PC에 직접 하는 행동은 `pc/*` Tool이다. 표정 표시는 답의 일부라 Tool이 아니다(§6).
+  - 사건 흐름은 서버→기기 SSE다. runner는 요청과 응답이 오가므로 그때 기기 연결을 양방향(WebSocket)으로 올린다. 1단계는 SSE로 충분하다.
+
+### 2.2 presence 모듈
+
+- `himari.presence`, 계층 2. `common`과 `data.api`만 가져온다(`ONLY_FROM`).
+- 공개 계약 `presence/api.py`:
+  - **`Devices`**: 짝짓기 코드 만들기, 짝짓기, 토큰 확인(→ `device_id`), 목록, 이름 바꾸기, 끊기. 저장은 Data `DeviceStore`(§4.2).
+  - **`Presence`**: 접속 신호 받기, 연결 열기·닫기, 지금 기기, 기기별 상태 읽기. 메모리 안에만 둔다.
+  - **`EventHub`**: 주체 단위 사건 내기와 구독(§7.1). Control의 작업 시작·끝과 Data의 새 이벤트는 bootstrap이 이어 준다.
+- Control은 presence를 직접 가져오지 않는다. `control.api`의 `PresenceSource` 포트를 bootstrap이 presence로 구현한다(§5.3).
+- `interfaces/web`은 `presence.api`를 가져와 경로를 만든다(규칙 5).
 
 ## 3. 성격과 반려 안내문
 
@@ -125,7 +166,7 @@ CREATE UNIQUE INDEX devices_by_token ON devices (token_hash) WHERE token_hash IS
 | 경로 | 기기 토큰 |
 | --- | --- |
 | `GET /api/device` (이 기기의 id·이름, 표정 목록, 최근 대화) | 허용 |
-| `GET /api/device/stream` (기기 채널 SSE, §7) | 허용 |
+| `GET /api/events` (사건 흐름 SSE, §7) | 허용 |
 | `POST /api/device/presence` (§5.1) | 허용 |
 | `GET /api/conversations`, `GET /api/conversations/activity`, `POST /api/conversations`(새 대화) | 허용 |
 | 대화의 `GET`·`events`·`live`·`messages`·`cancel`·`dismiss`·`resume` | 허용 |
@@ -139,7 +180,7 @@ CREATE UNIQUE INDEX devices_by_token ON devices (token_hash) WHERE token_hash IS
 
 ### 5.1 접속 신호
 
-- **연결됨:** 그 기기의 기기 채널 SSE(§7)가 열려 있다.
+- **연결됨:** 그 기기의 사건 흐름 SSE(§7)가 열려 있다.
 - **입력 활동:** 앱이 `POST /api/device/presence`로 알린다.
   ```json
   {"idle_seconds": 12, "time_zone": "Asia/Seoul"}
@@ -178,7 +219,7 @@ Current State에 두 항목을 더한다.
 ### 5.3 적용 시점
 
 턴이 시작될 때 한 번 읽고 그 턴 내내 같다(V3-P71 §5.4와 같음).
-- Driver가 턴을 시작할 때 지시문·기억과 함께 시계와 **`PresenceSource`** 포트(control.api에 선언, bootstrap이 Data + Presence로 구현)를 읽는다.
+- Driver가 턴을 시작할 때 지시문·기억과 함께 시계와 **`PresenceSource`** 포트(control.api에 선언, bootstrap이 presence 모듈로 구현)를 읽는다.
 - `PromptInputs.now`와 `PromptInputs.presence`로 넘긴다. `compose()`는 그대로 순수 함수다(시계는 Driver가 읽음).
 - 한 턴이 길게 일해도 `now`는 턴이 시작된 시각이다. 그렇다고 모델에게 말한다(`COMPANION_NOTE`가 아니라 Current State 머리말에 "now: when this turn started").
 
@@ -216,22 +257,25 @@ Current State에 두 항목을 더한다.
 - **대화 검색(V3-P72):** `event_text`에 넣는 글에서 표시를 뺀다.
 - 표정은 **Tool이 아니다.** Tool로 하면 표정 하나마다 LLM 호출이 한 번 더 든다.
 
-## 7. 기기 채널과 대화 고르기
+## 7. 사건 흐름과 대화 고르기
 
-### 7.1 기기 채널
+### 7.1 사건 흐름
 
-`GET /api/device/stream` — 기기마다 하나씩 열어 두는 SSE.
+`GET /api/events` — 주체 단위 SSE. 기기(기기 토큰)와 Web(세션 쿠키)이 같이 쓴다.
 
 - 보내는 사건:
-  - `hello {device, moods, recent_conversation}`: 열렸을 때.
+  - `hello {device, moods, recent_conversation, activity}`: 열렸을 때. `device`는 Web이면 `null`.
+  - `activity {working, waiting}`: 일하는 중인 대화와 답을 기다리는 대화의 id 목록(V3-P80과 같은 규칙). 바뀔 때마다.
   - `job {conversation, state: "started"|"ended", sent_from}`: 어느 대화의 작업이 시작·끝남. `sent_from`은 기기 id, `"web"`, `"cli"` 중 하나이거나 없음.
   - `conversation {conversation}`: 그 대화에 새 이벤트가 생김(다른 기기나 Web에서 보낸 것 포함).
   - `current {device}`: 지금 기기가 바뀜(자리 비움이면 `null`).
   - `revoked`: 이 기기가 끊김. 바로 닫는다.
   - 30초마다 주석 줄(연결 유지).
-- 답의 글과 표정은 그 대화의 `live` SSE(§6.2)로 받는다. 기기 채널은 알림만 한다.
-- 연결당 5분(Caddy `write` 600s 안), 앱이 바로 다시 연다. 다시 열기 사이의 짧은 공백은 "연결됨"을 끊지 않는다(30초 유예).
-- 주체당 기기 채널은 16개까지다.
+  - `revoked`는 그 기기의 흐름에만 간다. 나머지는 주체의 모든 흐름에 간다.
+- 답의 글과 표정은 그 대화의 `live` SSE(§6.2)로 받는다. 사건 흐름은 알림만 한다.
+- 연결당 5분(Caddy `write` 600s 안), 받는 쪽이 바로 다시 연다. 기기는 다시 열기 사이의 짧은 공백에 "연결됨"이 끊기지 않는다(30초 유예).
+- 주체당 사건 흐름은 16개까지다(기기와 Web 탭을 합쳐).
+- **Web:** 사이드바·탭 제목의 활동 표시(V3-P80)를 `activity` 사건으로 그린다. 5초 활동 읽기는 흐름이 끊긴 동안만 쓴다. `GET /api/conversations/activity`는 남긴다.
 
 ### 7.2 어느 대화에서 말하나
 
@@ -258,7 +302,7 @@ Windows 앱은 소유자의 로컬 에이전트가 `clients/windows/`에 만든�
 3. **원격 코드 금지:** 화면은 원격 스크립트·스타일을 불러오지 않는다. 모델이 쓴 글은 HTML로 넣지 않고 글(또는 안전하게 다듬은 마크다운)로 그린다.
 4. **서버 주소:** 사용자가 넣은 HTTPS 주소만 쓴다. 인증서 검사를 끄지 않는다.
 5. **접속 신호:** §5.1대로 보낸다. `idle_seconds`는 시스템 전체의 입력으로 잰다.
-6. **기기 채널:** 늘 열어 두고 끊기면 다시 연다(1초부터 30초까지 늘려 가며). `revoked`면 토큰을 지우고 짝짓기 화면으로 간다.
+6. **사건 흐름:** 늘 열어 두고 끊기면 다시 연다(1초부터 30초까지 늘려 가며). `revoked`면 토큰을 지우고 짝짓기 화면으로 간다.
 7. **표정:** `GET /api/device`의 목록에 있는 표정을 모두 그릴 수 있어야 한다. 모르는 이름은 `neutral`로 그린다.
 8. **글만 보낸다**(1단계). 메시지는 `POST /api/conversations/{id}/messages {text}`.
 9. **오류:** 401은 다시 짝짓기, 403 `device_scope`는 앱의 잘못이므로 로그에 남긴다, 409 `BUSY`는 사용자에게 보인다.
@@ -279,7 +323,7 @@ Windows 앱은 소유자의 로컬 에이전트가 `clients/windows/`에 만든�
 
 ### 8.4 참조 클라이언트
 
-- 서버 2부와 함께 **가짜 기기 스크립트**(`scripts/device_client.py`)를 둔다. 짝짓기 → 기기 채널 → 접속 신호 → 메시지 → `live`의 글과 `mood`를 순서대로 해 보인다. CI에서 돌고, 로컬 에이전트에게는 실행되는 계약 예시가 된다.
+- 서버 2부와 함께 **가짜 기기 스크립트**(`scripts/device_client.py`)를 둔다. 짝짓기 → 사건 흐름 → 접속 신호 → 메시지 → `live`의 글과 `mood`를 순서대로 해 보인다. CI에서 돌고, 로컬 에이전트에게는 실행되는 계약 예시가 된다.
 - `clients/windows/README.md`(로컬 에이전트가 씀)에 빌드·실행 방법을 둔다. Python 검사(mypy, pytest, import 규칙)는 `clients/`를 보지 않는다.
 
 ## 9. 애니메이션을 먼저 만들 때
@@ -296,17 +340,19 @@ Windows 앱은 소유자의 로컬 에이전트가 `clients/windows/`에 만든�
 | --- | --- |
 | `data` | v14: `devices`, `UserMessage.origin_device`. `DeviceStore` sub-port. `event_text`에서 표시 빼기 |
 | `prompt` | `PromptInputs.now`·`presence`, `state_block`의 `now`·`presence`, 쉬었다 온 메시지의 시각 줄, `COMPANION_NOTE`, `MOODS`, `split_moods` |
+| `presence` (새, 계층 2) | `Devices`·`Presence`·`EventHub`(§2.2). `common`·`data.api`만 |
 | `control` | `PresenceSource` 포트(api), Driver가 턴 시작에 시계와 함께 읽음 |
-| `bootstrap` | `Presence`(메모리 안), `PresenceSource` 구현, 최근 대화 |
-| `interfaces/web` | 짝짓기·기기 경로, `Caller`와 허용 목록, 기기 채널 SSE, `events`의 `display`, `live`의 `mood`, Web 설정 화면 Devices, 화면이 `display.text`를 그림 |
+| `bootstrap` | presence 조립, `PresenceSource` 구현, 작업 시작·끝과 새 이벤트를 `EventHub`에 이음, 최근 대화 |
+| `interfaces/web` | 짝짓기·기기 경로, `Caller`와 허용 목록, `GET /api/events`, `events`의 `display`, `live`의 `mood`, Web 설정 화면 Devices, 화면이 `display.text`를 그림, 활동 표시를 사건 흐름으로 |
 | `clients/windows` | 새 앱(로컬 에이전트) |
 
 - `split_moods`와 `MOODS`는 `prompt.api`에 있어 `interfaces`가 부를 수 있다(규칙 5).
+- `scripts/check_imports.py`의 `LAYERS`에 `presence: 2`, `ONLY_FROM`에 `presence: {common, data}`를 더한다.
 - Provider, Tool, Environment, runner, sandbox, MCP는 바뀌지 않는다.
 
 ## 11. 다음 단계 (방향, 이 패킷에서 구현하지 않음)
 
-1. **먼저 말 걸기:** 서버의 계기(정한 시각, 사용자가 돌아옴, 예정된 일)가 턴을 연다. 기기 채널로 지금 기기에 알린다.
+1. **먼저 말 걸기:** 서버의 계기(정한 시각, 사용자가 돌아옴, 예정된 일)가 턴을 연다. 사건 흐름으로 지금 기기에 알린다.
 2. **메모리 2단계와 일화 기억:** 대화를 나누어 쓰므로 대화 사이의 연속성은 메모리가 맡는다. 자동 추출과 일화(언제 무엇을 함께 했는지)를 더한다.
 3. **로컬 파일:** PC가 먼저 접속하는 runner 연결(runner 프로토콜을 바이트 전송·기기 인증으로). 처음엔 읽기만.
 4. **화면 캡처:** 모델이 부르는 Tool. 캡처 중 표시. 이미지는 Data의 파일 저장소(V3-P67).
@@ -331,7 +377,7 @@ Windows 앱은 소유자의 로컬 에이전트가 `clients/windows/`에 만든�
 - **pytest(서버):**
   - 짝짓기: 코드 만료, 한 번만, 5번 실패, 동시에 하나, 토큰 해시만 저장.
   - 권한: 허용 목록 밖 경로 403 `device_scope`, 끊은 토큰 401과 SSE `revoked`.
-  - Presence: 지금 기기 고르기(입력이 가장 늦은 연결된 기기, 10분), 자리 비움, 다시 열기 유예 30초, `current` 사건.
+  - presence: 지금 기기 고르기(입력이 가장 늦은 연결된 기기, 10분), 자리 비움, 다시 열기 유예 30초, `current` 사건.
   - Prompt: 모든 대화의 `now`, 시각 줄(첫 메시지, 30분 경계, 같은 입력 → 같은 줄, 압축 요약 요청), `presence`는 스위치와 기기가 있을 때만, `COMPANION_NOTE`는 스위치를 따름.
   - `split_moods`: 시험 벡터(여러 표시, 목록 밖 이름, 코드 안, 깨진 `[[`, 한국어 사이).
   - `live`: 조각 경계에 걸친 표시(`[[mo` + `od:happy]]`), 40자 넘는 `[[`는 글로, `at` 위치.
@@ -344,8 +390,8 @@ Windows 앱은 소유자의 로컬 에이전트가 `clients/windows/`에 만든�
 
 ## 14. 구현 단계
 
-1. **서버 1부:** Data v14, `DeviceStore`, 짝짓기·기기 토큰·`Caller`·허용 목록, Web 설정 화면 Devices.
-2. **서버 2부:** 시각(`now`, 시각 줄 — 모든 대화), Presence와 기기 채널, `PresenceSource`, `presence` 항목, `COMPANION_NOTE`·`MOODS`·`split_moods`, `events`의 `display`와 `live`의 `mood`, Web이 `display.text`를 그림, 가짜 기기 스크립트.
+1. **서버 1부:** Data v14, `DeviceStore`, presence 모듈의 `Devices`, 짝짓기·기기 토큰·`Caller`·허용 목록, Web 설정 화면 Devices.
+2. **서버 2부:** 시각(`now`, 시각 줄 — 모든 대화), presence의 `Presence`·`EventHub`와 `GET /api/events`(Web 활동 표시 포함), `PresenceSource`, `presence` 항목, `COMPANION_NOTE`·`MOODS`·`split_moods`, `events`의 `display`와 `live`의 `mood`, Web이 `display.text`를 그림, 가짜 기기 스크립트.
 3. **Windows 앱(로컬 에이전트):** §8의 계약대로. 애니메이션은 서버와 상관없이 지금 시작할 수 있다(§9).
 
 배포는 1·2부를 함께 한다(v14 업그레이드). 시각(2부의 일부)은 따로 먼저 배포해도 된다(DB 변경 없음).
