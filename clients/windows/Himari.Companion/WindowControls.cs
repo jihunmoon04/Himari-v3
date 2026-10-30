@@ -99,8 +99,11 @@ public partial class MainWindow
             if (DialoguePolicy.HotkeyCloses(foreground == hwnd, ComposerPanel.Visibility == Visibility.Visible)) CloseChat();
             else
             {
-                workWindow.Remember(foreground, window => IsWindow(window) && !OwnWindow(window));
-                captureFromWorkWindow = true;
+                // Only a window that was in front at this press may pick the capture monitor;
+                // opening from Himari itself must not reuse an older remembered window.
+                bool fromWork = IsWindow(foreground) && !OwnWindow(foreground);
+                workWindow.Remember(foreground, _ => fromWork);
+                captureFromWorkWindow = fromWork;
                 if (!IsVisible) Show(); Activate(); OpenChat();
             }
             handled = true;
