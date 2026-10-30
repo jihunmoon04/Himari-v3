@@ -5,6 +5,7 @@ using System.Windows.Interop;
 using System.Windows.Threading;
 using System.Reflection;
 using System.Windows.Media;
+using System.Windows.Media.Imaging;
 using System.Net;
 using System.Net.Http;
 using System.Text;
@@ -13,7 +14,7 @@ using Himari.Companion;
 
 internal static class Program
 {
-    [STAThread] private static void Main()
+    [STAThread] private static void Main(string[] args)
     {
         var app = new App(); app.InitializeComponent(); app.ShutdownMode = ShutdownMode.OnExplicitShutdown;
         using var source = new HwndSource(new HwndSourceParameters("HIMARI keyboard regression") { Width = 1, Height = 1, WindowStyle = unchecked((int)0x80000000) });
@@ -45,6 +46,75 @@ internal static class Program
         input.RaiseEvent(new TextCompositionEventArgs(Keyboard.PrimaryDevice, normal) { RoutedEvent = TextCompositionManager.PreviewTextInputStartEvent });
         input.RaiseEvent(new TextCompositionEventArgs(Keyboard.PrimaryDevice, normal) { RoutedEvent = TextCompositionManager.PreviewTextInputEvent });
         Check(Key(System.Windows.Input.Key.Enter).Handled && sent == 3, "ordinary text followed immediately by Enter is not mistaken for IME");
+        Color Fill(bool isUser)
+        {
+            var bubble = new PixelBubble { IsUser = isUser, Child = new Border() };
+            bubble.Measure(new Size(160, 100)); bubble.Arrange(new Rect(0, 0, 160, 100)); bubble.UpdateLayout();
+            var bitmap = new RenderTargetBitmap(160, 100, 96, 96, PixelFormats.Pbgra32); bitmap.Render(bubble);
+            var pixel = new byte[4]; bitmap.CopyPixels(new Int32Rect(20, 20, 1, 1), pixel, 4, 0);
+            return Color.FromArgb(pixel[3], pixel[2], pixel[1], pixel[0]);
+        }
+        Check(Fill(true) == Color.FromRgb(255, 253, 244) && Fill(false) == Color.FromRgb(240, 235, 255), "rendered user bubble is cream and Himari bubble is lavender");
+        var timeline = new MainWindow();
+        object? Timeline(string method, params object?[] args) => typeof(MainWindow).GetMethod(method, BindingFlags.NonPublic | BindingFlags.Instance)!.Invoke(timeline, args);
+        var oldUser = (FrameworkElement)timeline.FindName("UserBubble");
+        var reply = (FrameworkElement)timeline.FindName("BubblePanel");
+        var draftInput = (TextBox)timeline.FindName("Input");
+        var replyTimer = (DispatcherTimer)typeof(MainWindow).GetField("bubbleTimer", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(timeline)!;
+        Timeline("OpenComposer"); draftInput.Text = "첫 질문"; draftInput.Clear(); Timeline("ShowSentMessage", "첫 질문");
+        Timeline("OpenReplyBubble", "c", "j1");
+        Check(Grid.GetRow(oldUser) == 0 && Grid.GetRow(reply) == 1, "reply arrives beneath the earlier user message");
+        Timeline("ShowSentMessage", "첫 질문");
+        Check(Grid.GetRow(oldUser) == 0 && Grid.GetRow(reply) == 1, "late send acknowledgement preserves chronological order");
+        var originalParent = oldUser.Parent;
+        Timeline("OpenComposer"); draftInput.Text = "다음 초안"; draftInput.Select(1, 3);
+        Timeline("OpenReplyBubble", "c", "j1");
+        Check(Grid.GetRow(reply) == 0 && Grid.GetRow(oldUser) == 1 && oldUser.Parent == originalParent && draftInput.SelectedText == "음 초", "new draft moves below the prior reply and reconnecting that same reply neither reorders nor reparents its editor");
+        Timeline("OpenReplyBubble", "c", "j2");
+        Check(Grid.GetRow(oldUser) == 0 && Grid.GetRow(reply) == 1, "a new reply moves to the bottom even if a previous reply remained visible");
+        draftInput.Clear(); Timeline("ShowSentMessage", new string('가', 100)); Timeline("ScheduleBubbleClose", "짧은 답변");
+        Timeline("AssistantBubbleExpired");
+        Check(oldUser.Visibility == Visibility.Visible && reply.Visibility == Visibility.Visible && !replyTimer.IsEnabled, "a newer short answer cannot disappear ahead of an older long user message");
+        Timeline("UserBubbleExpired");
+        Check(oldUser.Visibility == Visibility.Collapsed && reply.Visibility == Visibility.Visible && replyTimer.IsEnabled && replyTimer.Interval == TimeSpan.FromSeconds(2), "oldest expires first and the overdue newer answer remains for another tick");
+        Timeline("AssistantBubbleExpired");
+        Check(reply.Visibility == Visibility.Collapsed, "the newer answer then expires");
+        Timeline("OpenComposer"); draftInput.Text = "보존할 초안"; Timeline("OpenReplyBubble", "c", "j3");
+        Timeline("UserBubbleExpired"); Timeline("AssistantBubbleExpired");
+        Check(oldUser.Visibility == Visibility.Visible && reply.Visibility == Visibility.Visible && draftInput.Text == "보존할 초안", "an older protected draft also holds an expired newer answer");
+        draftInput.Text += " 계속";
+        Check(reply.Visibility == Visibility.Collapsed && oldUser.Visibility == Visibility.Visible, "continued drafting moves the user last and lets an expired older answer close");
+        Timeline("OpenReplyBubble", "c", "j4"); Timeline("ScheduleBubbleClose", "새 답변"); draftInput.Clear(); Timeline("ShowSentMessage", "보낸 질문");
+        Timeline("UserBubbleExpired");
+        Check(oldUser.Visibility == Visibility.Collapsed && reply.Visibility == Visibility.Visible, "replacing an expired answer gives the new answer its own reading lifetime");
+        Timeline("CloseBubble");
+        Timeline("OpenReplyBubble", "c", "j5"); Timeline("OpenComposer"); draftInput.Clear();
+        typeof(MainWindow).GetField("awaitingAnswer", BindingFlags.NonPublic | BindingFlags.Instance)!.SetValue(timeline, true);
+        Timeline("AssistantBubbleExpired"); Timeline("UserBubbleExpired");
+        Check(reply.Visibility == Visibility.Visible && oldUser.Visibility == Visibility.Visible, "an older pending question blocks the newer bubble's expiry");
+        typeof(MainWindow).GetField("awaitingAnswer", BindingFlags.NonPublic | BindingFlags.Instance)!.SetValue(timeline, false);
+        Timeline("AssistantBubbleExpired");
+        Check(reply.Visibility == Visibility.Collapsed && oldUser.Visibility == Visibility.Visible, "assistant-first order also closes from the top");
+        Timeline("UserBubbleExpired");
+        Check(oldUser.Visibility == Visibility.Collapsed, "the newer user bubble closes after the older answer");
+        Timeline("OpenComposer"); Timeline("ShowSentMessage", "전송 중인 글"); Timeline("OpenReplyBubble", "c", "j6");
+        typeof(MainWindow).GetField("sending", BindingFlags.NonPublic | BindingFlags.Instance)!.SetValue(timeline, true);
+        Timeline("UserBubbleExpired"); Timeline("AssistantBubbleExpired");
+        Check(oldUser.Visibility == Visibility.Visible && reply.Visibility == Visibility.Visible, "an older unconfirmed send holds both bubbles");
+        typeof(MainWindow).GetField("sending", BindingFlags.NonPublic | BindingFlags.Instance)!.SetValue(timeline, false);
+        Timeline("UserBubbleExpired"); Timeline("AssistantBubbleExpired");
+        Timeline("OpenReplyBubble", "c", "j7"); Timeline("OpenComposer");
+        var streams = (Dictionary<string, CancellationTokenSource>)typeof(MainWindow).GetField("liveStreams", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(timeline)!;
+        using var live = new CancellationTokenSource(); streams[""] = live;
+        Timeline("AssistantBubbleExpired"); Timeline("UserBubbleExpired");
+        Check(reply.Visibility == Visibility.Visible && oldUser.Visibility == Visibility.Visible, "an older streaming answer holds a newer expired user bubble");
+        streams.Clear(); Timeline("AssistantBubbleExpired"); Timeline("UserBubbleExpired");
+        Timeline("OpenComposer"); draftInput.Text = "숨겨도 남는 초안"; Timeline("OpenReplyBubble", "c", "j8");
+        Timeline("AssistantBubbleExpired"); Timeline("HideUserBubble");
+        Check(replyTimer.IsEnabled && draftInput.Text == "숨겨도 남는 초안", "manually hiding an older draft resumes the overdue reply timer without losing the draft");
+        Timeline("AssistantBubbleExpired");
+        Check(reply.Visibility == Visibility.Collapsed, "the overdue reply can expire after the older draft is hidden");
+        timeline.Close();
         var companion = new MainWindow();
         var settings = (Window)typeof(MainWindow).GetField("settings", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(companion)!;
         var assistant = (FrameworkElement)companion.FindName("BubblePanel");
@@ -57,14 +127,17 @@ internal static class Program
         ((FrameworkElement)companion.FindName("StopButton")).Visibility = Visibility.Visible;
         ((TextBlock)companion.FindName("Message")).Text = new string('가', 1500);
         ((TextBox)companion.FindName("Input")).Text = "작성 중인 글\n둘째 줄";
+        typeof(MainWindow).GetMethod("OpenBubble", BindingFlags.NonPublic | BindingFlags.Instance)!.Invoke(companion, null);
         foreach (bool flipped in new[] { false, true })
         {
             ((CheckBox)settings.FindName("FacingLeft")).IsChecked = flipped;
             Check(((ScaleTransform)character.RenderTransform).ScaleX == (flipped ? -1 : 1), "character mirrors");
             Check(assistant.HorizontalAlignment == HorizontalAlignment.Center && user.HorizontalAlignment == HorizontalAlignment.Center && assistant.Width == user.Width, "speakers share a column and bubble width without mirroring text");
             Check(((PixelBubble)assistant).TailRight == flipped && ((PixelBubble)user).TailRight != flipped, "assistant tail points toward character and user tail points away");
+            foreach (bool assistantLatest in new[] { true, false })
             foreach (int size in new[] { 200, 400 })
             {
+                typeof(MainWindow).GetMethod(assistantLatest ? "OpenBubble" : "OpenComposer", BindingFlags.NonPublic | BindingFlags.Instance)!.Invoke(companion, null);
                 ((Slider)settings.FindName("SizeSlider")).Value = size;
                 companion.Width = 520; companion.Height = 700;
                 var content = (FrameworkElement)companion.Content;
@@ -76,7 +149,8 @@ internal static class Program
                 var assistantBounds = assistant.TransformToAncestor(content).TransformBounds(new Rect(assistant.RenderSize));
                 var userBounds = user.TransformToAncestor(content).TransformBounds(new Rect(user.RenderSize));
                 Check(assistantBounds.Top >= 0 && userBounds.Bottom <= 700 - size + 14, "both bubbles fit above character at supported sizes");
-                Check(Math.Abs(assistantBounds.Left + assistantBounds.Width / 2 - userBounds.Left - userBounds.Width / 2) < 1 && assistantBounds.Bottom <= userBounds.Top, "assistant stays above user on the same center line");
+                Check(Math.Abs(assistantBounds.Left + assistantBounds.Width / 2 - userBounds.Left - userBounds.Width / 2) < 1 &&
+                    (assistantLatest ? userBounds.Bottom <= assistantBounds.Top : assistantBounds.Bottom <= userBounds.Top), "the newer bubble stays below the older on the same center line in either speaker order");
                 var characterBounds = character.TransformToAncestor(content).TransformBounds(new Rect(character.RenderSize));
                 double gazeOffset = userBounds.Left + userBounds.Width / 2 - characterBounds.Left - characterBounds.Width / 2;
                 Check(flipped ? gazeOffset < 0 : gazeOffset > 0, "shared conversation center follows the character gaze in both directions");
@@ -149,6 +223,7 @@ internal static class Program
                 transport.Live = "event: snapshot\ndata: {\"job_id\":\"j\",\"run_id\":\"r\",\"text\":\"답변 앞부분\",\"moods\":[]}\n\n";
                 Call("StartLive", "c", first, connectionToken.Token, "j");
                 Until(() => ((TextBlock)recovery.FindName("Message")).Text == "답변 앞부분");
+                Call("OpenComposer"); editor.Text = "연결이 끊겨도 남길 새 초안";
             }
             Call("StopConnection"); Call("CloseBubble");
             Call("SetConnected", false, "연결이 끊겼습니다. 다시 연결 중…");
@@ -163,6 +238,11 @@ internal static class Program
             Check(answer.Visibility == Visibility.Visible && ((TextBlock)recovery.FindName("Message")).Text == "복구된 최종 답변" && readingTimer.IsEnabled, "accepted send, disconnect, server completion and reconnect opens final answer with reading timer");
             Check(!(bool)typeof(MainWindow).GetField("talking", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(recovery)!, "completed recovery stops partial Live talking animation");
             Check(notice.Visibility == Visibility.Collapsed, "successful reconnect clears independent warning");
+            if (partialLive)
+            {
+                Check(editor.Text == "연결이 끊겨도 남길 새 초안" && Grid.GetRow(answer) < Grid.GetRow((FrameworkElement)recovery.FindName("UserBubble")), "recovered final keeps a newer draft below the same job's earlier streamed reply");
+                editor.Clear();
+            }
             Call("CloseBubble"); Finish((Task)Call("ReadConversation", "c", CancellationToken.None)!);
             Check(answer.Visibility == Visibility.Collapsed && !readingTimer.IsEnabled, "repeated refresh does not reopen or restart an already recovered answer");
             Call("WaitForReply", restored, "c", "j2", 3);
@@ -241,14 +321,54 @@ internal static class Program
             bool shouldShow = !doneBeforeAcceptance || !hasLiveBody;
             Check((answer.Visibility == Visibility.Visible) == shouldShow && timer.IsEnabled == shouldShow, "both delivery orders recover unread finals once and preserve closure of already displayed Live");
             Check(((TextBlock)ordering.FindName("Message")).Text == "복구된 최종 답변", "ordered delivery leaves the correct final text");
+            if (shouldShow)
+                Check(Grid.GetRow((FrameworkElement)ordering.FindName("UserBubble")) < Grid.GetRow(answer), "reply stays below its request regardless of HTTP acceptance and Live completion order");
             Call("CloseBubble");
             var refresh = (Task)Call("ReadConversation", "c", connectionToken.Token)!;
             Until(() => refresh.IsCompleted); refresh.GetAwaiter().GetResult();
             Check(answer.Visibility == Visibility.Collapsed && !timer.IsEnabled, "later refresh does not reopen the ordered delivery answer");
             ordering.Close();
         }
+        if (args.Length == 2 && args[0] == "--screenshots")
+        {
+            // Render actual controls without opening a connected app, using credentials,
+            // saving preferences, registering hotkeys, or capturing the desktop.
+            System.IO.Directory.CreateDirectory(args[1]);
+            var preview = new MainWindow();
+            object? Preview(string method, params object?[] values) => typeof(MainWindow).GetMethod(method, BindingFlags.NonPublic | BindingFlags.Instance)!.Invoke(preview, values);
+            var previewSettings = (Window)typeof(MainWindow).GetField("settings", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(preview)!;
+            ((CheckBox)previewSettings.FindName("ScreenSharing")).IsChecked = false;
+            ((Slider)previewSettings.FindName("SizeSlider")).Value = 280;
+            ((TextBlock)preview.FindName("Status")).Text = "연결됨";
+            void Snapshot(string name)
+            {
+                var content = (FrameworkElement)preview.Content;
+                for (int pass = 0; pass < 3; pass++)
+                {
+                    Preview("UpdateBubbleBounds");
+                    content.Measure(new Size(520, 700)); content.Arrange(new Rect(0, 0, 520, 700)); content.UpdateLayout();
+                }
+                var drawing = new DrawingVisual();
+                using (var dc = drawing.RenderOpen())
+                {
+                    dc.DrawRectangle(Brushes.WhiteSmoke, null, new Rect(0, 0, 520, 700));
+                    var brush = new VisualBrush(content) { ViewboxUnits = BrushMappingMode.Absolute, Viewbox = new Rect(0, 0, 520, 700) };
+                    dc.DrawRectangle(brush, null, new Rect(0, 0, 520, 700));
+                }
+                var image = new RenderTargetBitmap(520, 700, 96, 96, PixelFormats.Pbgra32); image.Render(drawing);
+                var png = new PngBitmapEncoder(); png.Frames.Add(BitmapFrame.Create(image));
+                using var file = System.IO.File.Create(System.IO.Path.Combine(args[1], name + ".png")); png.Save(file);
+            }
+            Preview("PresentUserBubble"); Preview("ShowSentMessage", "안녕?"); Preview("OpenReplyBubble", "preview", "reply");
+            ((TextBlock)preview.FindName("Message")).Text = "안녕하세요, 선생님! 오늘도 잘 부탁드려요.";
+            Snapshot("01-user-then-himari");
+            Preview("UserBubbleExpired"); Snapshot("02-oldest-hidden");
+            Preview("OpenComposer"); ((TextBox)preview.FindName("Input")).Text = "다음 이야기도 해 볼까?";
+            Snapshot("03-new-draft-below-reply");
+            preview.Close();
+        }
         app.Shutdown();
-        Console.WriteLine("WPF keyboard, synthetic IME, dual-bubble layout and reply reconnect checks passed.");
+        Console.WriteLine("WPF keyboard, IME, bubble colors/order/expiry, layout and reply reconnect checks passed.");
     }
 }
 

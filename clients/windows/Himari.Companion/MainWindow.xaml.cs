@@ -92,7 +92,7 @@ public partial class MainWindow : Window
     }
     private void OpenChat()
     {
-        if (awaitingAnswer && !string.IsNullOrWhiteSpace(Message.Text)) OpenBubble();
+        if (awaitingAnswer && !string.IsNullOrWhiteSpace(Message.Text)) ShowAssistantBubble(assistantBubbleKey);
         OpenComposer();
         Input.Focus();
     }
@@ -100,10 +100,11 @@ public partial class MainWindow : Window
     {
         if (UserBubble.Visibility != Visibility.Visible && string.IsNullOrWhiteSpace(Input.Text)) { UserSent.Text = ""; UserSent.Visibility = Visibility.Collapsed; }
         UserSent.Visibility = Visibility.Collapsed;
-        userBubbleTimer.Stop(); UserBubble.Visibility = Visibility.Visible; ComposerPanel.Visibility = Visibility.Visible; UpdateSceneBounds();
+        PresentUserBubble(); UserBubble.Visibility = Visibility.Visible; ComposerPanel.Visibility = Visibility.Visible;
+        ArrangeBubbles(); UpdateSceneBounds(); ExpireBubbles();
     }
     private void ConversationMenuClick(object sender, RoutedEventArgs e) { OpenComposer(); ChatTools.Visibility = Visibility.Visible; ChatTools.IsExpanded = true; }
-    private void CloseBubbleClick(object sender, RoutedEventArgs e) { CloseBubble(); userBubbleTimer.Stop(); UserBubble.Visibility = Visibility.Collapsed; ComposerPanel.Visibility = Visibility.Collapsed; }
+    private void CloseBubbleClick(object sender, RoutedEventArgs e) { CloseBubble(); HideUserBubble(); }
     private void FlipClick(object sender, RoutedEventArgs e) => settings.FacingLeft.IsChecked = FlipMenu.IsChecked;
     private void ChatClick(object sender, RoutedEventArgs e) => OpenChat();
     private void SettingsClick(object sender, RoutedEventArgs e) => ShowSettings();
@@ -146,7 +147,7 @@ public partial class MainWindow : Window
     private async void DemoClick(object sender, RoutedEventArgs e)
     {
         if (sending || liveStreams.ContainsKey(currentConversation ?? "")) { Status.Text = "답변이 끝난 뒤 미리보기를 실행해 주세요."; return; }
-        ShowSentMessage("설정은 어디에서 바꿀 수 있어?");
+        PresentUserBubble(); ShowSentMessage("설정은 어디에서 바꿀 수 있어?");
         OpenBubble(); SetMood("thinking"); int version = demoVersion; Message.Text = "잠시만 기다려 주세요…";
         await Task.Delay(1500); if (version != demoVersion) return;
         SetMood("happy"); version = demoVersion; Message.Text = "다 됐답니다, 선생님.";
