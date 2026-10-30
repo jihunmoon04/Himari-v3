@@ -2500,7 +2500,7 @@ class SqliteData:
                     return DevicePairing(PairingResult.USED)
                 return DevicePairing(PairingResult.RESENT, principal, _device(row))
             if tx.one("SELECT 1 FROM devices WHERE token_hash=?", token_hash) is not None:
-                raise DataError(DataErrorCode.INVALID_ARGUMENT, "that token is taken")
+                return DevicePairing(PairingResult.TOKEN_IN_USE)
             tx.execute("UPDATE devices SET token_hash=?, paired_at=? WHERE owner=? AND device_id=?",
                        token_hash, _timestamp(now), principal, row["device_id"])
             return DevicePairing(PairingResult.PAIRED, principal, self._read_device(tx, principal, row["device_id"]))

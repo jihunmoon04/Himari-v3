@@ -427,7 +427,7 @@ Windows 앱은 소유자의 로컬 에이전트가 `clients/windows/`에 만든�
 8. **표정:** `GET /api/device`의 목록에 있는 표정을 모두 그릴 수 있어야 한다. 모르는 이름은 `neutral`로 그린다.
 9. **글만 보낸다**(1단계). 메시지는 `POST /api/conversations/{id}/messages {"text": …}`, 1~32,000자(코드 포인트, 앞뒤 공백 뺀 뒤). 서버도 글만 받는다(§4.3).
 10. **기록:** 대화를 보일 때는 `events`의 `display.text`를 그린다(`text`는 원문).
-11. **오류:** 401은 다시 짝짓기. 403 `device_scope`는 앱의 잘못이므로 로그에 남긴다. 403 `companion_off`는 "서버에서 꺼짐"을 보이고 5분마다 다시 본다. 409 `busy`는 사용자에게 보인다. 429 `too_many_streams`는 30초 뒤 다시.
+11. **오류:** 짝짓기의 409 `token_in_use`는 새 토큰으로 한 번 다시, 429 `pairing_busy`는 몇 초 뒤 다시. 401은 다시 짝짓기. 403 `device_scope`는 앱의 잘못이므로 로그에 남긴다. 403 `companion_off`는 "서버에서 꺼짐"을 보이고 5분마다 다시 본다. 409 `busy`는 사용자에게 보인다. 429 `too_many_streams`는 30초 뒤 다시.
 
 ### 9.2 해야 할 것
 
@@ -559,7 +559,9 @@ Content-Type: application/json
 - 401 `pairing_invalid`: 코드가 없거나 틀림(실패로 셈).
 - 401 `pairing_expired`: 만료되었거나 실패가 5번 넘어 지워짐.
 - 409 `pairing_used`: 다른 토큰으로 이미 짝지음.
-- 400 `invalid_token`: 토큰 모양이 틀림(`hd_` + 43자 base64url).
+- 409 `token_in_use`: 다른 기기가 이미 이 토큰을 씀. 앱은 새 토큰을 만들어 같은 코드로 다시 보낸다(실패로 세지 않음).
+- 400 `invalid_token`: 토큰 모양이 틀림(`hd_` + 43자 base64url). 몸이 JSON이 아니거나 `{"token": 문자열}` 꼴이 아니어도 같다.
+- 429 `pairing_busy`: 짝짓기가 너무 많이 기다리는 중. 잠시 뒤 다시.
 - 403 `companion_off`.
 
 ### A.2 기기
@@ -698,5 +700,11 @@ data: {}
   - **`app.routes` 전체를 도는 기본 거부 시험**
   - 짝짓기 거부와 끊기(끊은 뒤 같은 코드 거부 포함), 이름 규칙, `companion_off`
 - `scripts/ui_smoke.py` `devices` 시나리오: 기기 추가 → 코드 → 앱처럼 짝짓기(HTTP) → 새로 고침에 코드 사라짐 → 이름 바꾸기 → 끊기 → 토큰 401. headless Chromium에서 전체 ui_smoke 통과.
+
+**외부 검수(PR #122, READY_WITH_CORRECTIONS) 반영:**
+- C1: 다른 기기의 토큰으로 짝지으려 하면 Data가 `PairingResult.TOKEN_IN_USE`를 돌려주고(아무것도 바꾸지 않음), Web은 409 `token_in_use`로 답한다. 이전에는 Data 오류가 400 `invalid_argument`로 새어 나갔다.
+- C2: 짝짓기 대기열에 상한(`MAX_PAIRING_WAITERS` = 8, 검사 중인 하나 뒤에 기다리는 수)을 두고, 넘치면 바로 429 `pairing_busy`로 답한다. 서버 프로세스는 하나(P0)라 잠금과 대기 수도 프로세스 하나의 것이다. 여러 프로세스가 되면 Data 쪽 잠금으로 옮긴다.
+- C3: 짝짓기 경로는 몸을 직접 읽는다. JSON이 아니거나 `{"token": 문자열}` 꼴이 아니면 FastAPI의 검증 오류가 아니라 400 `invalid_token`이다.
+- 시험: 두 백엔드의 `TOKEN_IN_USE`, 대기열 포화, 잘못된 몸 다섯 가지와 JSON 아닌 몸, Web의 `token_in_use`.
 
 **배포:** 2부와 함께(§15). v14 업그레이드는 시작할 때 자동 백업 뒤 한다.

@@ -1325,7 +1325,7 @@ class InMemoryData:
                 return DevicePairing(PairingResult.USED)
             return DevicePairing(PairingResult.RESENT, principal, row.device)
         if any(d.token_hash == token_hash for d in self._store.devices.values()):
-            raise DataError(DataErrorCode.INVALID_ARGUMENT, "that token is taken")
+            return DevicePairing(PairingResult.TOKEN_IN_USE)
         row.token_hash = token_hash
         row.device = replace(row.device, paired_at=now)
         return DevicePairing(PairingResult.PAIRED, principal, row.device)

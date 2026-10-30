@@ -1056,6 +1056,7 @@ class PairingResult(Enum):
     USED = "used"  # the code's device was paired with another token
     EXPIRED = "expired"  # the code is known but past its end
     INVALID = "invalid"  # no live device has this code
+    TOKEN_IN_USE = "token_in_use"  # another paired device has this token: the app must make a new one
 
 
 @dataclass(frozen=True)
@@ -1084,7 +1085,8 @@ class DeviceStore(Protocol):
     async def pair_device(self, pairing_hash: bytes, token_hash: bytes, now: datetime) -> DevicePairing:
         """§4.1, one transaction: an unpaired device with this code takes the
         token (PAIRED); a paired one whose code has not ended and that has
-        this very token answers again (RESENT); another token: USED. Never a
+        this very token answers again (RESENT); another token: USED; a token
+        another unrevoked device has: TOKEN_IN_USE (nothing changes). Never a
         revoked device."""
         ...
 

@@ -25,9 +25,10 @@ from himari.presence.api import (
 )
 
 FAILED_PAIRING_DELAY_SECONDS = 1.0  # as a failed sign-in (Web)
+MAX_PAIRING_WAITERS = 8  # pairings queued behind the one being checked; more are refused at once
 
 _REFUSED = {PairingResult.INVALID: "pairing_invalid", PairingResult.EXPIRED: "pairing_expired",
-            PairingResult.USED: "pairing_used"}
+            PairingResult.USED: "pairing_used", PairingResult.TOKEN_IN_USE: "token_in_use"}
 
 
 def _hash(value: str) -> bytes:
@@ -42,11 +43,13 @@ def _uniform(token: str) -> bool:
 
 class DeviceRegistry:
     def __init__(self, store: DeviceStore, *, clock: Callable[[], datetime] = lambda: datetime.now(UTC),
-                 failure_delay: float = FAILED_PAIRING_DELAY_SECONDS) -> None:
+                 failure_delay: float = FAILED_PAIRING_DELAY_SECONDS, max_waiters: int = MAX_PAIRING_WAITERS) -> None:
         self._store = store
         self._clock = clock
         self._failure_delay = failure_delay
+        self._max_waiters = max_waiters
         self._pairing = asyncio.Lock()  # one pairing at a time: concurrent guesses wait out each delay
+        self._queued = 0  # pairings holding or waiting for the lock (one process, P0)
 
     async def create(self, principal: PrincipalId, name: str) -> PairingCode:
         code = "".join(secrets.choice(CODE_ALPHABET) for _ in range(CODE_LENGTH))
@@ -57,6 +60,15 @@ class DeviceRegistry:
     async def pair(self, raw_code: str, token: str) -> DeviceCaller:
         if not token_shape_ok(token) or _uniform(token):
             raise PairingRefused("invalid_token")
+        if self._queued > self._max_waiters:  # a flood of guesses may not hold a real pairing back for long
+            raise PairingRefused("pairing_busy")
+        self._queued += 1
+        try:
+            return await self._pair_one(raw_code, token)
+        finally:
+            self._queued -= 1
+
+    async def _pair_one(self, raw_code: str, token: str) -> DeviceCaller:
         async with self._pairing:
             code = normalize_code(raw_code)
             now = self._clock()

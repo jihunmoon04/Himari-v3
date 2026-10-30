@@ -132,6 +132,36 @@ def test_concurrent_wrong_guesses_each_wait_out_the_delay() -> None:
     asyncio.run(scenario())
 
 
+def test_another_devices_token_is_refused_as_in_use() -> None:
+    async def scenario() -> None:
+        devices, _, _ = registry()
+        mine = token()
+        await devices.pair((await devices.create(ME, "Desk")).code, mine)
+        second = await devices.create(ME, "Laptop")
+        with pytest.raises(PairingRefused) as error:
+            await devices.pair(second.code, mine)
+        assert refusal(error) == "token_in_use"
+        assert (await devices.pair(second.code, token())).device.device_id == "d2"  # the code still works
+
+    asyncio.run(scenario())
+
+
+def test_a_full_queue_refuses_more_pairings_at_once() -> None:
+    async def scenario() -> None:
+        clock = Clock()
+        devices = DeviceRegistry(InMemoryData(InMemoryStore()), clock=clock, failure_delay=0.05, max_waiters=2)
+        made = await devices.create(ME, "Desk")
+        guesses = [asyncio.ensure_future(devices.pair("AAAA-AAAA", token())) for _ in range(3)]  # one checked, two wait
+        await asyncio.sleep(0)
+        with pytest.raises(PairingRefused) as error:
+            await devices.pair(made.code, token())
+        assert refusal(error) == "pairing_busy"
+        await asyncio.gather(*guesses, return_exceptions=True)
+        assert (await devices.pair(made.code, token())).device.device_id == "d1"  # the queue drained
+
+    asyncio.run(scenario())
+
+
 def test_the_list_hides_an_ended_code_and_a_revoked_device_signs_in_no_more() -> None:
     async def scenario() -> None:
         devices, _, clock = registry()

@@ -132,9 +132,10 @@ def test_a_token_is_one_devices_and_the_device_limit_holds() -> None:
         await data.add_device(ME, "Desk", b"code-1", now + SOON)
         await data.pair_device(b"code-1", b"tok-1", now)
         await data.add_device(ME, "Laptop", b"code-2", now + SOON)
-        with pytest.raises(DataError) as error:
-            await data.pair_device(b"code-2", b"tok-1", now)
-        assert code(error) is DataErrorCode.INVALID_ARGUMENT
+        taken = await data.pair_device(b"code-2", b"tok-1", now)  # another device's token (review C1)
+        assert taken.result is PairingResult.TOKEN_IN_USE and taken.device is None
+        assert (await data.pair_device(b"code-2", b"tok-2", now)).result is PairingResult.PAIRED  # nothing changed
+        await data.revoke_device(ME, "d2")
         for n in range(MAX_DEVICES - 1):
             await data.add_device(ME, f"pc {n}", f"c{n}".encode(), now + SOON)
             await data.pair_device(f"c{n}".encode(), f"t{n}".encode(), now)

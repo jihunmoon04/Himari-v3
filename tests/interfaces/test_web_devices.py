@@ -233,6 +233,13 @@ def test_pairing_refusals_and_revocation(server: Server) -> None:
         assert (response.status_code, error_code(response)) == (401, "pairing_invalid"), header
     response = server.pair(made["code"], "hd_" + "A" * 43)
     assert (response.status_code, error_code(response)) == (400, "invalid_token")
+    pairing = {"authorization": f"Pairing {made['code']}"}
+    bodies: list[Any] = [{}, {"token": 1}, {"token": "hd_" + "x" * 500}, {"token": new_token(), "name": "x"}, []]
+    for body in bodies:
+        response = server.device.post("/api/devices/pair", json=body, headers=pairing)  # review C3: one contract
+        assert (response.status_code, error_code(response)) == (400, "invalid_token"), body
+    response = server.device.post("/api/devices/pair", content=b"not json", headers=pairing)
+    assert (response.status_code, error_code(response)) == (400, "invalid_token")
     token = new_token()
     assert server.pair(made["code"], token).status_code == 200
     response = server.pair(made["code"], new_token())
@@ -245,6 +252,14 @@ def test_pairing_refusals_and_revocation(server: Server) -> None:
     assert (response.status_code, error_code(response)) == (401, "pairing_invalid")
     response = server.client.delete("/api/devices/d1", headers=SEND)
     assert (response.status_code, error_code(response)) == (404, "not_found")
+
+
+def test_another_devices_token_is_refused_as_in_use(server: Server) -> None:
+    token = server.paired("Desk")
+    second = server.add_device("Laptop")
+    response = server.pair(second["code"], token)  # review C1
+    assert (response.status_code, error_code(response)) == (409, "token_in_use")
+    assert server.pair(second["code"], new_token()).status_code == 200
 
 
 def test_device_names_are_checked(server: Server) -> None:

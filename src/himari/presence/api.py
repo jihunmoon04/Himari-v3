@@ -62,7 +62,9 @@ class DeviceCaller(DeepFrozen):
 
 class PairingRefused(Exception):
     """Why a pairing failed (appendix A.1): ``pairing_invalid``,
-    ``pairing_expired``, ``pairing_used`` or ``invalid_token``."""
+    ``pairing_expired``, ``pairing_used``, ``invalid_token``, ``token_in_use``
+    (another device has it: make a new token) or ``pairing_busy`` (too many
+    pairings wait already)."""
 
     def __init__(self, code: str) -> None:
         super().__init__(code)

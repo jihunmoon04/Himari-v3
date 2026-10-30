@@ -243,10 +243,6 @@ class LoginBody(_Body):
     token: str = Field(max_length=256)
 
 
-class PairBody(_Body):
-    token: str = Field(max_length=64)  # the device's own: "hd_" + 43 base64url characters (V3-P83 §4.1)
-
-
 class DeviceNameBody(_Body):
     name: str = Field(max_length=200)  # Data checks the 40-character limit after trimming
 
@@ -671,12 +667,15 @@ DEVICE_REFUSALS: dict[DataErrorCode, tuple[int, str, str]] = {
 }
 
 # How a refused pairing answers (appendix A.1).
-PAIRING_STATUS = {"pairing_invalid": 401, "pairing_expired": 401, "pairing_used": 409, "invalid_token": 400}
+PAIRING_STATUS = {"pairing_invalid": 401, "pairing_expired": 401, "pairing_used": 409, "invalid_token": 400,
+                  "token_in_use": 409, "pairing_busy": 429}
 PAIRING_MESSAGES = {
     "pairing_invalid": "That code is not valid. Make a new one in Settings → Devices if it keeps failing.",
     "pairing_expired": "That code has ended. Make a new one in Settings → Devices.",
     "pairing_used": "That code already paired another device.",
     "invalid_token": "The device's token is not usable.",
+    "token_in_use": "Another device has that token; make a new token and pair again.",
+    "pairing_busy": "Too many pairings are waiting; try again shortly.",
 }
 
 
@@ -1862,17 +1861,25 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
             raise device_refused(error) from None
 
     @app.post("/api/devices/pair")
-    async def pair_device(body: PairBody, request: Request) -> dict[str, Any]:
+    async def pair_device(request: Request) -> dict[str, Any]:
         """The one route without a sign-in (§4.3): the code in ``Authorization:
         Pairing <code>`` is its permission, and the device's own token is
-        registered by its hash."""
+        registered by its hash. Any body but ``{"token": "<string>"}`` is
+        ``invalid_token`` (appendix A.1), not a generic validation error."""
         application = himari(request)
         companion_on(application)
+        try:
+            body = await request.json()
+        except ValueError:
+            body = None
+        token = body.get("token") if isinstance(body, dict) and set(body) == {"token"} else None
+        if not isinstance(token, str):
+            raise ApiError(400, "invalid_token", PAIRING_MESSAGES["invalid_token"])
         scheme, _, code = request.headers.get("authorization", "").partition(" ")
         if scheme.lower() != "pairing" or not code.strip():
             raise ApiError(401, "pairing_invalid", PAIRING_MESSAGES["pairing_invalid"])
         try:
-            paired = await application.devices.pair(code.strip(), body.token)
+            paired = await application.devices.pair(code.strip(), token)
         except PairingRefused as refused:
             raise ApiError(PAIRING_STATUS[refused.code], refused.code, PAIRING_MESSAGES[refused.code]) from None
         return {"device_id": paired.device.device_id, "name": paired.device.name}
