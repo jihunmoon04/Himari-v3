@@ -27,6 +27,7 @@ public partial class MainWindow
         {
             unknownText = null;
             if (currentConversation == pending.Conversation && Input.Text.Trim() == pending.Text) Input.Clear();
+            if (currentConversation == pending.Conversation) ShowSentMessage(pending.Text);
             Status.Text = "기록에서 이전 메시지의 접수를 확인했습니다.";
             return false;
         }

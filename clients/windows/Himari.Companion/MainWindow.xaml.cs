@@ -48,6 +48,8 @@ public partial class MainWindow : Window
         settings.MoveDemoButton.Click += MoveDemoClick;
         settings.MoveEnabled.Unchecked += (_, _) => { if (autoMoveActive) ReturnFromMove(); else CancelAutomaticMove(); SchedulePreferencesSave(); };
         settings.MoveEnabled.Checked += (_, _) => SchedulePreferencesSave();
+        SetupPresentationControls();
+        Character.MouseRightButtonDown += (_, _) => captureFromWorkWindow = false;
         ApplyCharacterTheme();
         MoodSelector.ItemsSource = Moods;
         MoodSelector.SelectedIndex = 0;
@@ -55,17 +57,14 @@ public partial class MainWindow : Window
         menu.Items.Add("보이기 / 숨기기", null, (_, _) => ToggleVisible());
         menu.Items.Add("설정", null, (_, _) => ShowSettings());
         menu.Items.Add("다시 연결", null, (_, _) => Reconnect());
-        var share = new Forms.ToolStripMenuItem("화면 같이 보기") { CheckOnClick = true };
-        share.CheckedChanged += (_, _) => { shareEveryMessage = share.Checked; ScreenOnce.IsChecked = share.Checked; ScreenSharingIndicator.Visibility = share.Checked ? Visibility.Visible : Visibility.Collapsed; if (tray is not null) tray.Text = share.Checked ? "히마리 · 화면 같이 보기 켜짐" : "히마리 · Ctrl+Alt+H"; };
-        menu.Items.Add(share);
         menu.Items.Add("Web 열기", null, (_, _) => OpenWeb());
         menu.Items.Add("끝내기", null, (_, _) => Close());
-        tray = new Forms.NotifyIcon { Icon = System.Drawing.SystemIcons.Application, Text = "히마리 · Ctrl+Alt+H", ContextMenuStrip = menu, Visible = true };
+        tray = new Forms.NotifyIcon { Icon = System.Drawing.SystemIcons.Application, Text = "히마리 · Alt+Q", ContextMenuStrip = menu, Visible = true };
         tray.DoubleClick += (_, _) => ToggleVisible();
         timer.Tick += (_, _) => UpdateFrame();
         timer.Start();
         SourceInitialized += (_, _) => SetupWindowControls();
-        Loaded += async (_, _) => { if (loadedOnce) return; loadedOnce = true; settings.Owner = this; await RestoreConnection(); };
+        Loaded += async (_, _) => { if (loadedOnce) return; loadedOnce = true; settings.Owner = this; UpdateSceneBounds(); await RestoreConnection(); };
         Closing += (_, _) => { settings.AllowClose = true; };
         Closing += (_, _) => RestoreMoveHomeOnClose();
         Closed += (_, _) => { CancelMovePreview(); lifetime.Cancel(); StopConnection(); timer.Stop(); CleanupWindowControls(); tray.Visible = false; tray.Dispose(); menu.Dispose(); };
@@ -76,6 +75,7 @@ public partial class MainWindow : Window
     private void DragWindow(object sender, MouseButtonEventArgs e) { if (e.ChangedButton == MouseButton.Left) DragMove(); }
     private void CharacterMouseDown(object sender, MouseButtonEventArgs e)
     {
+        captureFromWorkWindow = false;
         dragStart = e.GetPosition(this); dragInProgress = false; Character.CaptureMouse(); e.Handled = true;
     }
     private void CharacterMouseMove(object sender, System.Windows.Input.MouseEventArgs e)
@@ -92,13 +92,19 @@ public partial class MainWindow : Window
     }
     private void OpenChat()
     {
+        if (awaitingAnswer && !string.IsNullOrWhiteSpace(Message.Text)) OpenBubble();
         OpenComposer();
-        if (connected) Input.Focus(); else MoreButton.Focus();
+        Input.Focus();
     }
-    private void OpenComposer() { OpenBubble(); ComposerPanel.Visibility = Visibility.Visible; }
-    private void MoreClick(object sender, RoutedEventArgs e) { MoreButton.ContextMenu.PlacementTarget = MoreButton; MoreButton.ContextMenu.IsOpen = true; }
+    private void OpenComposer()
+    {
+        if (UserBubble.Visibility != Visibility.Visible && string.IsNullOrWhiteSpace(Input.Text)) { UserSent.Text = ""; UserSent.Visibility = Visibility.Collapsed; }
+        UserSent.Visibility = Visibility.Collapsed;
+        userBubbleTimer.Stop(); UserBubble.Visibility = Visibility.Visible; ComposerPanel.Visibility = Visibility.Visible; UpdateSceneBounds();
+    }
     private void ConversationMenuClick(object sender, RoutedEventArgs e) { OpenComposer(); ChatTools.Visibility = Visibility.Visible; ChatTools.IsExpanded = true; }
-    private void CloseBubbleClick(object sender, RoutedEventArgs e) => CloseBubble();
+    private void CloseBubbleClick(object sender, RoutedEventArgs e) { CloseBubble(); userBubbleTimer.Stop(); UserBubble.Visibility = Visibility.Collapsed; ComposerPanel.Visibility = Visibility.Collapsed; }
+    private void FlipClick(object sender, RoutedEventArgs e) => settings.FacingLeft.IsChecked = FlipMenu.IsChecked;
     private void ChatClick(object sender, RoutedEventArgs e) => OpenChat();
     private void SettingsClick(object sender, RoutedEventArgs e) => ShowSettings();
     private void HideClick(object sender, RoutedEventArgs e) => Hide();
@@ -109,14 +115,11 @@ public partial class MainWindow : Window
         CharacterTheme theme = CharacterTheme.Default;
         try
         {
-            var resource = System.Windows.Application.GetResourceStream(new Uri("pack://application:,,,/Assets/himari.json"));
+            var resource = System.Windows.Application.GetResourceStream(new Uri("pack://application:,,,/Himari.Companion;component/Assets/himari.json"));
             if (resource is not null) { using var reader = new StreamReader(resource.Stream); theme = CharacterTheme.Parse(reader.ReadToEnd()); }
         }
         catch (IOException) { }
-        var fill = new SolidColorBrush((System.Windows.Media.Color)System.Windows.Media.ColorConverter.ConvertFromString(theme.BubbleTemplate == "pixel" ? "#FFFDF8" : "#FFFFFF"));
-        var outline = new SolidColorBrush((System.Windows.Media.Color)System.Windows.Media.ColorConverter.ConvertFromString(theme.BubbleTemplate == "pixel" ? "#6C678C" : "#52627B"));
-        BubbleSurface.Background = BubbleTail.Fill = fill; BubbleSurface.BorderBrush = BubbleTail.Stroke = outline;
-        settings.BubbleDescription.Text = theme.BubbleTemplate == "pixel" ? "히마리 도트 말풍선이 선택되어 있습니다." : "기본 말풍선을 사용 중입니다.";
+        settings.BubbleDescription.Text = "히마리와 선생님의 말풍선을 각각 표시합니다. 4단위 격자의 도트 프레임과 꼬리는 말풍선이 커져도 같은 굵기를 유지합니다.";
     }
     private void MoodChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
     {
@@ -137,11 +140,13 @@ public partial class MainWindow : Window
         else if (mood == "neutral" && talking && (int)(elapsed / 260) % 2 == 1) frame = "talk";
         else if (mood == "neutral" && !talking && elapsed % 4000 > 3820) frame = "blink";
         if (!frames.TryGetValue(frame, out var image))
-            frames[frame] = image = new BitmapImage(new Uri($"pack://application:,,,/Assets/{frame}.png"));
+            frames[frame] = image = new BitmapImage(new Uri($"pack://application:,,,/Himari.Companion;component/Assets/{frame}.png"));
         Character.Source = image;
     }
     private async void DemoClick(object sender, RoutedEventArgs e)
     {
+        if (sending || liveStreams.ContainsKey(currentConversation ?? "")) { Status.Text = "답변이 끝난 뒤 미리보기를 실행해 주세요."; return; }
+        ShowSentMessage("설정은 어디에서 바꿀 수 있어?");
         OpenBubble(); SetMood("thinking"); int version = demoVersion; Message.Text = "잠시만 기다려 주세요…";
         await Task.Delay(1500); if (version != demoVersion) return;
         SetMood("happy"); version = demoVersion; Message.Text = "다 됐답니다, 선생님.";

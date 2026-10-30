@@ -4,6 +4,28 @@ using System.Text.Json;
 using Himari.Companion;
 
 static void Check(bool value, string message) { if (!value) throw new Exception(message); }
+var legacyPresentation = JsonSerializer.Deserialize<WindowPreferences>("{\"Left\":10,\"Top\":20,\"CharacterHeight\":330,\"MoveEnabled\":true}")!;
+Check(legacyPresentation.ScreenSharing && !legacyPresentation.FacingLeft && legacyPresentation.ChatHotkey == "Alt+Q", "old preferences migrate to requested capture default and one-handed hotkey");
+var newPresentation = legacyPresentation with { ScreenSharing = false, FacingLeft = true, BubbleMinimum = 12, SecondsPer100 = 20, ChatHotkey = "Ctrl+Space" };
+Check(JsonSerializer.Deserialize<WindowPreferences>(JsonSerializer.Serialize(newPresentation)) == newPresentation, "presentation settings persist without losing opt-out or orientation");
+var safePresentation = WindowPreferences.Normalize(newPresentation with { BubbleMinimum = double.NaN, SecondsPer100 = 999, ChatHotkey = "invalid" }, 0, 0, 1920, 1080, 520, 700);
+Check(safePresentation.BubbleMinimum == 8 && safePresentation.SecondsPer100 == 30 && safePresentation.ChatHotkey == "Alt+Q", "invalid presentation settings are normalized");
+Check(DialoguePolicy.Duration("hello", 8, 8) < DialoguePolicy.Duration(new string('가',100), 8, 8) && DialoguePolicy.Duration("😀",8,8) == DialoguePolicy.Duration("가",8,8), "bubble duration follows Unicode character count");
+Check(DialoguePolicy.Duration(new string('가',10000),8,8) == 300 && DialoguePolicy.PointAnchor(false) == .1 && DialoguePolicy.PointAnchor(true) == .9, "display duration is bounded and pointing anchor mirrors");
+Check(DialoguePolicy.Hotkey("Alt+Q") == (0x4001u, 0x51u) && DialoguePolicy.Hotkey("Ctrl+Space") == (0x4002u, 0x20u), "global key registration uses expected modifiers and no-repeat");
+var hotkeySelection = new HotkeyState(); int unregistered = 0;
+Check(hotkeySelection.Select("Alt+Q", _ => true, () => unregistered++), "initial global shortcut registers");
+var keyAttempts = new List<string>();
+Check(!hotkeySelection.Select("Ctrl+Space", key => { keyAttempts.Add(key); return key == "Alt+Q"; }, () => unregistered++) && hotkeySelection.Current == "Alt+Q" && hotkeySelection.IsRegistered, "shortcut collision restores previous registration and selection");
+Check(keyAttempts.SequenceEqual(new[] { "Ctrl+Space", "Alt+Q" }) && unregistered == 1, "failed change restores previous key after releasing it");
+var workHistory = new WorkWindowHistory(); int restores = 0;
+Check(!workHistory.Return(_ => { restores++; return true; }) && restores == 0, "no work window is restored before entry");
+workHistory.Remember(new IntPtr(10), _ => true);
+workHistory.Remember(new IntPtr(20), _ => false);
+Check(workHistory.Target == new IntPtr(10) && workHistory.Return(window => { restores++; return window == new IntPtr(10); }), "own windows do not overwrite previous work target");
+Check(!workHistory.Return(_ => false) && workHistory.Target == new IntPtr(10), "closed or denied work target fails safely without switching elsewhere");
+Check(DialoguePolicy.KeepUserBubble(false,false,"draft",false,false) && DialoguePolicy.KeepUserBubble(false,false,"",false,true) && DialoguePolicy.KeepUserBubble(false,true,"",false,false), "auto-hide preserves draft, unresolved delivery and active input");
+Check(!DialoguePolicy.KeepUserBubble(false,false,"",false,false), "sent bubble may expire when no interaction needs it");
 foreach (bool textOnlyFollowUp in new[] { false, true })
 foreach (string quickScenario in new[] { "completed", "already-completed", "different-job", "different-screen", "no_sandbox", "view_expired" })
 {

@@ -8,7 +8,6 @@ namespace Himari.Companion;
 
 public partial class MainWindow
 {
-    private bool shareEveryMessage;
     private sealed record LocalScreen(string FileId, ScreenGeometry Geometry, DateTimeOffset CapturedAt, bool Ready);
     private sealed record MoveJob(string ConversationId, MovePlayback Playback);
     private readonly Dictionary<string, LocalScreen> localScreens = new();
@@ -33,7 +32,8 @@ public partial class MainWindow
     private async Task<CapturedScreen> CaptureScreenAsync(CancellationToken ct)
     {
         // Choose before hiding: hiding the composer changes the foreground window.
-        var bounds = ScreenCapture.SelectMonitor();
+        var bounds = captureFromWorkWindow && OwnWindow(GetForegroundWindow()) && IsWindow(lastWorkWindow) && IsWindowVisible(lastWorkWindow)
+            ? Forms.Screen.FromHandle(lastWorkWindow).Bounds : ScreenCapture.SelectMonitor();
         var visible = System.Windows.Application.Current.Windows.Cast<Window>().Where(w => w.IsVisible).ToArray();
         bool excluded = OperatingSystem.IsWindowsVersionAtLeast(10, 0, 19041) &&
             visible.All(w => ScreenCapture.TryExcludeWindow(new WindowInteropHelper(w).Handle));
@@ -151,7 +151,12 @@ public partial class MainWindow
         if (!GetWindowRect(handle, out var start)) return;
         if (!autoMoveActive) { moveHome = start; autoMoveActive = true; saveTimer.Stop(); }
         var point = playback.Geometry.Map(move.X, move.Y);
-        var anchor = Character.PointToScreen(new System.Windows.Point(Character.ActualWidth * 0.1, Character.ActualHeight * 0.75));
+        var corner = Character.PointToScreen(new System.Windows.Point(0, 0));
+        var opposite = Character.PointToScreen(new System.Windows.Point(Character.ActualWidth, Character.ActualHeight));
+        // PointToScreen already includes the image's RenderTransform. Work from
+        // visual bounds so reflection is not applied a second time to the anchor.
+        var anchor = new System.Windows.Point(Math.Min(corner.X, opposite.X) + Math.Abs(opposite.X - corner.X) * DialoguePolicy.PointAnchor(settings.FacingLeft.IsChecked == true),
+            Math.Min(corner.Y, opposite.Y) + Math.Abs(opposite.Y - corner.Y) * .75);
         var work = Forms.Screen.FromPoint(new System.Drawing.Point((int)point.X, (int)point.Y)).WorkingArea;
         int width = start.Right - start.Left, height = start.Bottom - start.Top;
         int x = Math.Clamp((int)Math.Round(point.X - (anchor.X - start.Left)), work.Left, Math.Max(work.Left, work.Right - width));
