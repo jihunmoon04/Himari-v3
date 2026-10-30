@@ -4,12 +4,14 @@ plus the key. For each model in ``HIMARI_LIVE_SCREEN_MODELS``, ten asks on
 field), sent as HIMARI sends a screen; a ``[[move:X,Y]]`` must fall on the
 target (24 pixels to spare) in at least eight. A model gets ``screen_points``
 in the declared list only when it passes; the result goes to
-docs/openrouter-model-catalog.md."""
+docs/openrouter-model-catalog.md. With ``HIMARI_LIVE_SCREEN_OUT`` set to a
+file, every ask's answer is appended to it as one JSON line (PR #128 review C1)."""
 
 from __future__ import annotations
 
 import asyncio
 import io
+import json
 import os
 from dataclasses import replace
 from pathlib import Path
@@ -58,8 +60,11 @@ def labelled(draw: ImageDraw.ImageDraw, box: Box, text: str, fill: tuple[int, in
     return box
 
 
+SCENES = ("button", "corner", "menu", "shape", "field")
+
+
 def scenes() -> list[tuple[str, bytes, Box]]:
-    """(what to ask, the PNG, the target's box)."""
+    """(what to ask, the PNG, the target's box), in the order of SCENES."""
     out = []
     image, draw = desktop()
     box = labelled(draw, (1000, 560, 1090, 594), "Save", (80, 140, 240))
@@ -115,7 +120,15 @@ def inside(found: tuple[int, int] | None, box: Box) -> bool:
 
 @pytest.mark.parametrize("model", MODELS)
 def test_a_model_points_where_it_is_asked(model: str) -> None:
-    results = [(ask, found, inside(found, box)) for ask, png, box in scenes() * 2
+    results = [(scene, ask, box, found, inside(found, box))
+               for scene, (ask, png, box) in list(zip(SCENES, scenes(), strict=True)) * 2
                for found in [point(model, ask, png)]]
-    hits = sum(1 for _, _, hit in results if hit)
+    out = os.environ.get("HIMARI_LIVE_SCREEN_OUT")
+    if out:
+        with open(out, "a", encoding="utf-8") as kept:
+            for scene, ask, box, found, hit in results:
+                kept.write(json.dumps({"model": model, "scene": scene, "ask": ask, "target": box,
+                                       "point": found, "hit": hit}, ensure_ascii=False) + "\n")
+    hits = sum(1 for *_, hit in results if hit)
+    print(f"{model}: {hits}/10, missed {[scene for scene, *_, hit in results if not hit]}")
     assert hits >= NEEDED, results
