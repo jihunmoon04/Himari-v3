@@ -1566,6 +1566,8 @@ function announce(what, text, sequence) {
 }
 
 function renderEvent(event) {
+  // V3-P83 §7.2: what the model wrote, without its mood marks; Copy takes this too.
+  if (event.display) event = { ...event, text: event.display.text };
   const timeline = tagging($("timeline"), event.sequence);
   if (event.kind === "user_message") {
     closeWork();
@@ -1586,7 +1588,8 @@ function renderEvent(event) {
     if (question) { // always the only call (V3-P15); its text is the question's lead-in (V3-P68 §5.1)
       closeWork();
       if (event.text) timeline.append(renderMessage({ ...event, kind: "assistant_final" }, model));
-      const text = typeof question.arguments.question === "string" ? question.arguments.question : "";
+      const text = question.display ? question.display.text
+        : typeof question.arguments.question === "string" ? question.arguments.question : "";
       timeline.append(renderMessage({ kind: "assistant_final", text }, event.text ? null : model));
       announce("HIMARI asks", text, event.sequence);
       app.toolRows.set(`${event.run_id}/${question.call_id}`, null); // the answer appears as the user's message
@@ -2196,7 +2199,7 @@ function applyDetail(detail) {
   // As the menu's: not while the answer is being taken (the server would refuse it as busy; review N1).
   $("question-dismiss").hidden = !detail.waiting || detail.job.running;
   // As the timeline shows it: formatted, never parsed as HTML (rich_text.js).
-  const question = detail.waiting ? detail.waiting.question : null;
+  const question = !detail.waiting ? null : detail.waiting.display ? detail.waiting.display.text : detail.waiting.question;
   if (question !== app.questionShown) { // a selection, and formulas, stay as they are between polls (review N6)
     app.questionShown = question;
     $("question-text").replaceChildren(...(question === null ? [] : [renderAssistantText(document, question)]));

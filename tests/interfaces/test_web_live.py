@@ -21,7 +21,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 from testkit import final  # noqa: E402
 
 from himari.bootstrap.application import Application  # noqa: E402
-from himari.common import ConversationId, PrincipalId, RunId, TrustedScope  # noqa: E402
+from himari.common import ConversationId, PrincipalId, RunId, TrustedScope, split_moods  # noqa: E402
 from himari.control.api import JobStatus, LiveOutput  # noqa: E402
 from himari.interfaces.web import app as web  # noqa: E402
 from himari.interfaces.web import live  # noqa: E402
@@ -148,9 +148,10 @@ def test_coalesced_changes_lose_nothing_and_end_with_done() -> None:
     source = FakeLive([lambda s: s.start(R1), many, lambda s: s.write("."), finish])
     sent = events(source)
     assert sent[0] == ("retry: 1000", None) and sent[1] == ("idle", {})
-    assert sent[2] == ("snapshot", {"run_id": R1, "text": "", "tools": [], "thinking": False, "truncated": False,
-                                    "ended": False})
-    assert sent[3] == ("delta", {"run_id": R1, "text": "Hello, Seoul", "tools": ["echo"], "thinking": True})
+    assert sent[2] == ("snapshot", {"run_id": R1, "text": "", "moods": [], "tools": [], "thinking": False,
+                                    "truncated": False, "ended": False})
+    assert sent[3] == ("delta", {"run_id": R1, "text": "Hello, Seoul", "moods": [], "tools": ["echo"],
+                                 "thinking": True})
     assert text_of(sent) == "Hello, Seoul."
     assert sent[-2:] == [("end", {"run_id": R1}), ("done", {})]
 
@@ -177,6 +178,71 @@ def test_connecting_after_the_job_sends_the_ended_state_then_done() -> None:
     sent = events(source)
     assert [e for e, _ in sent] == ["retry: 1000", "snapshot", "done"]
     assert sent[1][1]["text"] == "all of it" and sent[1][1]["ended"] is True
+
+
+def moods_of(sent: list[tuple[str, Any]]) -> list[tuple[int, str]]:
+    return [(m["at"], m["mood"]) for e, d in sent if e in ("snapshot", "delta") for m in d["moods"]]
+
+
+def test_mood_marks_come_out_of_the_text_as_moods() -> None:
+    """V3-P83 §7.3: a mark cut between wakeups waits until it is known."""
+    pieces = ["[[mood:hap", "py]]좋아, ", "해 볼게. [", "[mood:thinking]] 음", "… `[[mood:sad]]` [["]
+    source = FakeLive([lambda s: s.start(R1), *[(lambda s, p=p: s.write(p)) for p in pieces], finish])
+    sent = events(source)
+    assert text_of(sent) == "좋아, 해 볼게.  음… `[[mood:sad]]` [["  # the last [[ is known as text at the end
+    assert moods_of(sent) == [(0, "happy"), (10, "thinking")]
+    deltas = [d["text"] for e, d in sent if e == "delta"]
+    assert deltas[0] == "좋아, " and deltas[-1] == "[["  # held back until the Run ended
+    plain, moods, _ = split_moods("".join(pieces), complete=True)
+    assert (text_of(sent), moods_of(sent)) == (plain, list(moods))  # the same as the recorded answer's display
+
+
+def test_a_snapshot_mid_mark_holds_its_end_back() -> None:
+    """Connecting while a mark is half written: the snapshot stops before it."""
+    source = FakeLive([lambda s: s.write("py]] 됐다"), finish])
+    source.start(R1)
+    source.write("시작 [[mood:hap")
+    sent = events(source)
+    snapshot = sent[1][1]
+    assert snapshot["text"] == "시작 " and snapshot["moods"] == []
+    assert text_of(sent) == "시작  됐다" and moods_of(sent) == [(3, "happy")]
+
+
+def test_a_fence_while_streaming_keeps_its_marks_as_text() -> None:
+    source = FakeLive([lambda s: s.start(R1), lambda s: s.write("코드:\n``"), lambda s: s.write("`\n[[mood:sad]]\n"),
+                       lambda s: s.write("```\n[[mood:happy]]끝"), finish])
+    sent = events(source)
+    assert text_of(sent) == "코드:\n```\n[[mood:sad]]\n```\n끝"
+    assert moods_of(sent) == [(len("코드:\n```\n[[mood:sad]]\n```\n"), "happy")]
+
+
+def test_a_long_answer_is_split_from_where_it_stood_not_from_its_start() -> None:
+    """Re-review N1: each wakeup reads only what it has not confirmed yet."""
+    read: list[int] = []
+
+    class Counting(FakeLive):
+        def live_text(self, scope: TrustedScope, run_id: RunId, start: int) -> str | None:
+            text = super().live_text(scope, run_id, start)
+            read.append(len(text or ""))
+            return text
+
+    piece = "가나다라 [[mood:happy]] `x` "
+    source = Counting([lambda s: s.start(R1), *[(lambda s: s.write(piece)) for _ in range(2000)], finish])
+    sent = events(source)
+    assert len(moods_of(sent)) == 2000
+    assert sum(read) <= 2 * len(source.text)  # not the 2,000 × half the text that starting over reads
+
+
+def test_each_run_counts_its_moods_from_zero() -> None:
+    def second(s: FakeLive) -> None:
+        s.end()
+        s.start(R2)
+        s.write("[[mood:sad]]둘")
+
+    source = FakeLive([lambda s: s.start(R1), lambda s: s.write("하나[[mood:happy]]"), second, finish])
+    sent = events(source)
+    snapshots = [d for e, d in sent if e == "snapshot"]
+    assert snapshots[-1]["run_id"] == R2 and snapshots[-1]["moods"] == [{"at": 0, "mood": "sad"}]
 
 
 def test_no_state_and_no_job_is_idle_then_done() -> None:

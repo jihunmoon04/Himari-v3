@@ -434,7 +434,7 @@ Windows 앱은 소유자의 로컬 에이전트가 `clients/windows/`에 만든�
 - **말풍선:** `live`의 글을 흘러오는 대로 그리고, 다 읽을 시간이 지나면 접는다. 긴 답은 펼쳐 보기나 "Web에서 열기"를 둔다.
 - **입력:** 캐릭터 클릭 또는 단축키로 입력창. Enter로 보낸다.
 - **멈춤:** 답하는 중 멈춤 → `cancel`.
-- **질문(`ask_user`):** 대화 보기의 `waiting.question.display.text`를 말풍선에 보이고 입력창을 연다. 답은 보통 메시지 경로로 간다(Web과 같음).
+- **질문(`ask_user`):** 대화 보기의 `waiting.display.text`를 말풍선에 보이고 입력창을 연다. 답은 보통 메시지 경로로 간다(Web과 같음).
 - **트레이:** 보이기·숨기기, 다시 연결, Web 열기, 끝내기, 연결 상태.
 - **연결이 끊기면:** 캐릭터를 흐리게 하고 입력을 막는다. 보내지 못한 입력은 앱 안에 남긴다.
 
@@ -649,7 +649,7 @@ data: {}
 
 ### A.6 `display`
 
-`events`의 `assistant_final`·`assistant_tool_calls` 항목과 대화 보기의 `waiting.question`에 더한다.
+`events`의 `assistant_final`·`assistant_tool_calls` 항목, 그 안의 `ask_user` 호출, 대화 보기의 `waiting`(`{"call_id", "question", "display"}`)에 더한다.
 
 ```json
 {"kind": "assistant_final", "text": "[[mood:happy]]잘 됐다!", "display": {"text": "잘 됐다!", "moods": [{"at": 0, "mood": "happy"}]}, …}
@@ -714,3 +714,30 @@ data: {}
 - 재검수가 짚은 Windows 앱 쪽(409 `token_in_use`에 새 토큰으로 다시, 429 `pairing_busy`에 잠시 뒤 다시)은 §9.1 규칙 11대로 앱(PR #121) 또는 통합 단계의 일이다.
 
 **배포:** 2부와 함께(§15). v14 업그레이드는 시작할 때 자동 백업 뒤 한다.
+
+## 17. 구현 노트 — 서버 2a부: 시각과 표정 (2026-10-30)
+
+2부를 둘로 나눴다. **2a**(이 노트)는 시각·표정·`display`·`live`·CLI, **2b**는 presence의 지금 기기·`EventHub`·`GET /api/events`·`JobListener`·`PresenceSource`·`seen`·가짜 기기 스크립트다. 2a는 DB를 바꾸지 않는다.
+
+**표정(`himari.common`)**
+- `split_moods(text, *, complete) -> (plain, moods, consumed)`과 이어 계산용 `scan_moods(rest, MoodScan, *, complete)`. `MoodScan`은 확정한 원문·`plain` 길이, 열린 펜스(글자와 길이), 줄 머리 여부를 든다.
+- 펜스는 줄 머리(공백 3칸까지) + `` ` ``나 `~` 셋 이상. 닫는 줄은 같은 글자, 같거나 긴 길이, 뒤에 공백만. 백틱 펜스의 정보 글에 백틱이 있으면 펜스가 아니다(CommonMark). 공백 4칸이면 펜스가 아니다.
+- 인라인 코드는 여는 백틱 줄과 같은 길이의 줄이 같은 줄에서 200자(`INLINE_CODE_CHARS`) 안에 올 때만이다.
+- 실시간에서 남겨 두는 꼬리: 표시의 앞부분, 아직 닫히지 않은 인라인 코드(200자까지), 줄 머리의 펜스 후보(공백만 있는 줄 머리 포함)와 펜스 줄의 끝.
+- 시험: 시험 벡터, 무작위 글을 모든 위치에서 자른 접두사의 불변식, 상태에서 이어 계산한 결과 = 처음부터 계산한 결과.
+
+**시각(Prompt·Control)**
+- `TIME_NOTE`는 늘, `COMPANION_NOTE`는 `HIMARI_COMPANION`이 켜져 있을 때 HIMARI의 고정 시스템 문장 뒤에 붙는다.
+- `HIMARI_TIME_ZONE`(IANA 이름, 기본 `Asia/Seoul`, 틀리면 시작 거부). Driver가 `_exclusive`에서 지시문·기억과 함께 시계를 읽어 `PromptInputs.now`로 넘긴다. 2b에서 보낸 기기의 시간대가 이것을 바꾼다.
+- `compose()`는 그대로 순수하다. 시각 줄은 압축 뒤 실제로 보이는 history의 사용자 메시지에 대해 계산하고, `<time>…</time>`을 첫 글 블록으로 앞에 붙인다. 그래서 Provider, 크기 계산, 압축 요약 요청이 모두 같은 줄을 본다.
+- `context_key`에 시간대를 넣었다(시간대를 바꾸면 크기 측정을 다시 함). 배포 직후 한 번 측정이 새로 시작된다.
+- Current State에 `now`(분, UTC 차이)와 머리말의 "`now` is when this turn started."가 더해져 모든 요청에 `<runtime_state>`가 생긴다.
+
+**`display`와 `live`(Web·CLI)**
+- `events`의 `assistant_final`·`assistant_tool_calls`에 `display`. **설계와 다른 점:** 대화 보기의 질문은 `waiting.question`이 글이라 `display`를 `waiting` 안에 두었다(`waiting.display`). Web 타임라인이 질문을 `ask_user` 호출의 인자에서 그리므로, 그 호출 보기에도 `display`를 더했다. §9.2와 부록 A.6을 고쳤다.
+- `live`: 커서가 `MoodScan`을 들고, 깨어날 때마다 확정하지 않은 원문부터만 읽어 이어 계산한다. snapshot은 처음부터 계산한다. Run이 끝나면(`ended`) 남은 꼬리를 `complete=True`로 확정해 마지막 `delta`로 보낸 뒤 `end`를 보낸다.
+- Web은 `display.text`를 그리고 복사한다(질문 패널 포함). `live`의 `moods`는 Web이 쓰지 않는다.
+- CLI는 `display.text`를 찍는다(질문 포함).
+- 대화 검색의 `event_text`는 답에서 표시를 뺀다.
+
+**시험:** `tests/common/test_moods.py`, `tests/prompt/test_time.py`, `tests/bootstrap/test_time_app.py`(턴 하나에 시각 한 번, 스위치를 꺼도 `TIME_NOTE`), `test_web_live.py`(조각난 표시, 표시 한가운데의 snapshot, 스트리밍 중 펜스, Run마다 0부터, 원문이 같을 때 이은 글 = `display`, 긴 답에서 읽은 글자 수가 원문의 2배 이하), `test_web_devices.py`(`display`, 시간대 설정), `test_cli.py`, `test_conversation_search.py`. ui_smoke `addresses`: 표시가 화면에 없고 Copy가 `display.text`.

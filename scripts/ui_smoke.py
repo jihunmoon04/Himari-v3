@@ -1453,6 +1453,7 @@ def run_polish(base: str, token: str, shots: str | None) -> list[str]:
 
 
 CODE_ANSWER = "Here it is:\n\n```python\nprint('hi')\n```\n\nAnd **done**."
+MOOD_MARK = "[[mood:happy]]"  # V3-P83 §7.2: the model writes it first; the page shows and copies the text without it
 
 
 def run_addresses(base: str, token: str, shots: str | None) -> list[str]:
@@ -1483,6 +1484,7 @@ def run_addresses(base: str, token: str, shots: str | None) -> list[str]:
         page.press("#composer-text", "Enter")
         answer = page.locator(".item-assistant").last
         expect(answer).to_contain_text("done", timeout=10000)
+        assert "[[mood" not in answer.inner_text(), "the mood mark is not shown"
         expect(page).to_have_title(re.compile(r".+ · HIMARI$"))
 
         # Copy: the code alone from its block, the Markdown as written from the answer (§5).
@@ -1849,7 +1851,7 @@ def main() -> int:
                 time.sleep(0.5)
         if "addresses" in only:
             addressed = os.path.join(tmp, "addresses")
-            server = serve(addressed, PORT + 11, ScriptedAdapter([NormalizedFinal((TextBlock(CODE_ANSWER),))]))
+            server = serve(addressed, PORT + 11, ScriptedAdapter([NormalizedFinal((TextBlock(MOOD_MARK + CODE_ANSWER),))]))
             try:
                 errors += run_addresses(f"http://127.0.0.1:{PORT + 11}",
                                         Path(addressed, "control", "operator.secret").read_text().strip(),

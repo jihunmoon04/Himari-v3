@@ -237,6 +237,7 @@ def context_key(inputs: PromptInputs) -> str:
         "reasoning_effort": options.reasoning_effort,
         "instructions": list(inputs.instructions),
         "user_instructions": inputs.user_instructions,  # V3-P69: a change re-estimates
+        "time_zone": inputs.time_zone,  # V3-P83 §6.4: the time lines change with it
         "memories": None if inputs.memories is None else [  # V3-P71: and so does a note
             [m.memory_id, m.category.value, m.text] for m in inputs.memories],
         "source_notes": [[n.source, n.placement, n.text] for n in inputs.source_notes],

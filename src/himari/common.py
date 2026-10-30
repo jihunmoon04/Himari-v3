@@ -305,3 +305,146 @@ class RawRepresentation(Enum):
 # contract between the server and a device's character. Adding one keeps old
 # apps working (they draw an unknown mood as "neutral"); removing one does not.
 MOODS = ("neutral", "happy", "excited", "sad", "surprised", "thinking", "embarrassed", "worried")
+
+# ``[[mood:NAME]]`` (V3-P83 §7.2). A name outside MOODS still comes out of
+# the text, as "neutral"; inside code (a fenced block, or inline code closed
+# on the same line within INLINE_CODE_CHARS) it is text.
+MOOD_MARK = re.compile(r"\[\[mood:([a-z0-9_]{1,24})\]\]")
+_MOOD_PREFIX = re.compile(r"\[(\[(m(o(o(d(:([a-z0-9_]{1,24}\]?)?)?)?)?)?)?)?")
+_MOOD_SPECIAL = re.compile(r"[\[`\n]")
+INLINE_CODE_CHARS = 200
+
+
+@dataclass(frozen=True)
+class MoodScan(DeepFrozen):
+    """Where a split stopped: the raw text and the plain text confirmed so
+    far, and what the next character is in — an open fence (its character
+    and length) or not, at a line's start or not. ``scan_moods`` goes on
+    from here, so a growing text is never counted from its start again."""
+
+    raw: int = 0
+    plain: int = 0
+    fence: tuple[str, int] | None = None
+    line_start: bool = True
+
+
+def split_moods(text: str, *, complete: bool) -> tuple[str, tuple[tuple[int, str], ...], int]:
+    """``text`` without its mood marks, each mark as ``(at, mood)`` where
+    ``at`` counts code points of the plain text, and how much of ``text``
+    that covers. ``complete=False`` (a text still growing) leaves an end
+    that could still change meaning — the start of a mark, an inline code
+    not yet closed, a line that may open or close a fence — for later; what
+    it confirms is always the start of the complete text's split."""
+    plain, moods, state = scan_moods(text, MoodScan(), complete=complete)
+    return plain, moods, state.raw
+
+
+def scan_moods(rest: str, state: MoodScan, *, complete: bool
+               ) -> tuple[str, tuple[tuple[int, str], ...], MoodScan]:
+    """``split_moods`` from ``state`` on: ``rest`` is the raw text from
+    ``state.raw``. The ``at`` of a mood counts from the start of the whole
+    plain text. Returns the newly confirmed plain text, its moods and the
+    state after it."""
+    out: list[str] = []
+    moods: list[tuple[int, str]] = []
+    plain = state.plain
+    fence, line_start = state.fence, state.line_start
+    i, n = 0, len(rest)
+
+    def emit(piece: str) -> None:
+        nonlocal plain
+        out.append(piece)
+        plain += len(piece)
+
+    while i < n:
+        if line_start:
+            j = i
+            while j < n and j - i < 3 and rest[j] == " ":
+                j += 1
+            if j == n and not complete:
+                break  # spaces so far: the line may still open or close a fence
+            if j < n and rest[j] in "`~":
+                k = j
+                while k < n and rest[k] == rest[j]:
+                    k += 1
+                if k == n and not complete:
+                    break
+                if k - j >= 3:
+                    eol = rest.find("\n", k)
+                    if eol == -1 and not complete:
+                        break  # a fence line, known only once it ends
+                    end = n if eol == -1 else eol + 1
+                    char, run, info = rest[j], k - j, rest[k:end]
+                    if fence is not None or not (char == "`" and "`" in info):  # else an ordinary line
+                        if fence is None:
+                            fence = (char, run)
+                        elif char == fence[0] and run >= fence[1] and not info.strip():
+                            fence = None
+                        emit(rest[i:end])
+                        i, line_start = end, eol != -1
+                        continue
+        if fence is not None:  # a line of code
+            eol = rest.find("\n", i)
+            end = n if eol == -1 else eol + 1
+            emit(rest[i:end])
+            i, line_start = end, eol != -1
+            continue
+        found = _MOOD_SPECIAL.search(rest, i)
+        stop = n if found is None else found.start()
+        if stop > i:
+            emit(rest[i:stop])
+            i, line_start = stop, False
+            continue
+        char = rest[i]
+        if char == "\n":
+            emit("\n")
+            i, line_start = i + 1, True
+            continue
+        if char == "[":
+            mark = MOOD_MARK.match(rest, i)
+            if mark is not None:
+                name = mark.group(1)
+                moods.append((plain, name if name in MOODS else "neutral"))
+                i, line_start = mark.end(), False
+                continue
+            if not complete and _MOOD_PREFIX.fullmatch(rest, i):
+                break  # the start of a mark, perhaps
+            emit("[")
+            i, line_start = i + 1, False
+            continue
+        close = _inline_code_end(rest, i, complete)  # a backtick
+        if close is None:
+            break
+        emit(rest[i:close])
+        i, line_start = close, False
+    return "".join(out), tuple(moods), MoodScan(state.raw + i, plain, fence, line_start)
+
+
+def _inline_code_end(rest: str, i: int, complete: bool) -> int | None:
+    """Where the inline code opened by the backticks at ``i`` ends (after its
+    closing run), or the end of the opening run when it is not closed on
+    its line within INLINE_CODE_CHARS; None while that is not known yet."""
+    n = len(rest)
+    k = i
+    while k < n and rest[k] == "`":
+        k += 1
+    eol = rest.find("\n", k)
+    line_end = n if eol == -1 else eol
+    open_end = eol == -1 and not complete  # the line may still grow
+    if k == n and open_end:
+        return None
+    j = k
+    while True:
+        p = rest.find("`", j, line_end)
+        if p == -1 or p - k > INLINE_CODE_CHARS:
+            if p == -1 and open_end and n - k <= INLINE_CODE_CHARS:
+                return None
+            return k
+        q = p
+        while q < n and rest[q] == "`":
+            q += 1
+        if q == n and open_end:
+            return None
+        if q - p == k - i:
+            return q
+        j = q

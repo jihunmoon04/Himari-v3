@@ -143,7 +143,9 @@ from himari.prompt.api import (
     ATTACHMENT_NOTE,
     FILE_REFERENCE_NOTE,
     DOCUMENTS_READ_NOTE,
+    COMPANION_NOTE,
     PROGRESS_NOTE,
+    TIME_NOTE,
     TOOL_IMAGES_NOTE,
     ContextBudget,
     SourceNote,
@@ -156,6 +158,7 @@ from himari.tool.schema import check_tool_input_schema
 
 DATABASE_NAME = "himari.db"
 DEFAULT_TRASH_DAYS = 30  # V3-P65 Q1 (the owner's choice, 2026-10-21)
+DEFAULT_TIME_ZONE = "Asia/Seoul"  # V3-P83 §6.4: HIMARI_TIME_ZONE when unset
 CLEANUP_SECONDS = 3600.0  # how often trash past its days is purged
 TRASH_STOP_SECONDS = 30.0  # how long a running job may take to stop before a trash is refused (§7.1)
 BUILT_IN_NAMESPACES = frozenset({"inside", "machine"})  # Tool ids that are HIMARI's own, not an external server's
@@ -703,6 +706,7 @@ class Application:
         conversation_search: bool = True,  # V3-P72 §9: HIMARI_CONVERSATION_SEARCH=0 turns its Tools off
         streaming: bool = True,  # V3-P73 §9: HIMARI_STREAMING=0 asks no model for a stream
         companion: bool = True,  # V3-P83 §3: HIMARI_COMPANION=0 refuses pairing and device tokens
+        time_zone: str = DEFAULT_TIME_ZONE,  # V3-P83 §6.4: HIMARI_TIME_ZONE, the zone the model is told the time in
         machine_socket: str | None = None,  # V3-P74: HIMARI_MACHINE_SOCKET; None: no machine Environment
         machine_principals: Iterable[str] = ("operator",),  # whose new Conversations use it (Q1)
     ) -> Application:
@@ -810,7 +814,8 @@ class Application:
                                     models=catalog,
                                     instructions=(*base, *((ATTACHMENT_NOTE,) if uploads_work else ()),
                                                   *((FILE_REFERENCE_NOTE,) if machine is not None else ()),
-                                                  TOOL_IMAGES_NOTE, PROGRESS_NOTE,
+                                                  TOOL_IMAGES_NOTE, PROGRESS_NOTE, TIME_NOTE,
+                                                  *((COMPANION_NOTE,) if companion else ()),
                                                   *_documents_notes(reader, toolkit, scripts == "on")),
                                     external_defaults=mcp.defaults,
                                     source_notes=[SourceNote(source, note.placement, note.text)
@@ -818,7 +823,8 @@ class Application:
                                     max_runs_per_drive=max_runs, turn_budget=turn_budget,
                                     no_progress_runs=turn.no_progress_runs, image_views=views,
                                     file_max_bytes=file_max_bytes, memory=memory,
-                                    conversation_search=conversation_search, streaming=streaming)
+                                    conversation_search=conversation_search, streaming=streaming,
+                                    time_zone=time_zone)
         except BaseException:
             try:
                 if mcp is not None:

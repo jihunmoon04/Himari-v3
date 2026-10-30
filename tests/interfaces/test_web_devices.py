@@ -20,10 +20,10 @@ from testkit import final  # noqa: E402
 
 from himari.bootstrap.application import Application  # noqa: E402
 from himari.bootstrap.operator import OPERATOR, derive_cli_bearer  # noqa: E402
-from himari.common import ASK_USER_TOOL_ID, MOODS, CallId, ConversationId, ToolCall, TrustedScope  # noqa: E402
+from himari.common import ASK_USER_TOOL_ID, MOODS, CallId, ConversationId, TextBlock, ToolCall, TrustedScope  # noqa: E402
 from himari.data.api import MessageOrigin, OriginKind, UserMessage  # noqa: E402
 from himari.interfaces.web import app as web  # noqa: E402
-from himari.interfaces.web.config import WebConfig  # noqa: E402
+from himari.interfaces.web.config import WebConfig, WebConfigError  # noqa: E402
 from himari.presence import devices as presence_devices  # noqa: E402
 from himari.provider.api import NormalizedToolCalls  # noqa: E402
 from himari.provider.scripted import ScriptedAdapter  # noqa: E402
@@ -299,3 +299,40 @@ def test_with_companion_off_pairing_and_device_tokens_are_refused(tmp_path: Path
         assert (response.status_code, error_code(response)) == (403, "companion_off")
         listed = off.client.get("/api/devices").json()
         assert listed["enabled"] is False and [d["device_id"] for d in listed["items"]] == ["d1"]  # the tokens stay
+
+
+def test_the_time_zone_is_an_iana_name() -> None:
+    """V3-P83 §6.4: HIMARI_TIME_ZONE, Asia/Seoul when unset."""
+    base = {"HIMARI_DATA_ROOT": "/srv/himari"}
+    assert WebConfig.from_env(base).time_zone == "Asia/Seoul"
+    assert WebConfig.from_env({**base, "HIMARI_TIME_ZONE": " Europe/London "}).time_zone == "Europe/London"
+    for bad in ("Mars/Olympus", "../etc", "KST+9"):
+        with pytest.raises(WebConfigError):
+            WebConfig.from_env({**base, "HIMARI_TIME_ZONE": bad})
+
+
+def test_answers_and_questions_carry_their_display(server: Server) -> None:
+    """V3-P83 §7.2, appendix A.6: ``text`` stays as the model wrote it."""
+    cid = server.client.post("/api/conversations", json={}, headers=SEND).json()["id"]
+
+    def events() -> list[Any]:
+        return list(server.client.get(f"/api/conversations/{cid}/events").json()["items"])
+
+    server.provider.extend([
+        NormalizedToolCalls((ToolCall(CallId("q"), 0, ASK_USER_TOOL_ID, {"question": "[[mood:thinking]]어디?"}),),
+                            commentary=(TextBlock("[[mood:happy]]좋아"),)),
+        final("[[mood:excited]]서울! [[mood:nope]]끝"),
+    ])
+    assert server.client.post(f"/api/conversations/{cid}/messages", json={"text": "여행"}, headers=SEND).status_code == 202
+    server.wait(cid)
+    waiting = server.client.get(f"/api/conversations/{cid}").json()["waiting"]
+    assert waiting["question"] == "[[mood:thinking]]어디?"
+    assert waiting["display"] == {"text": "어디?", "moods": [{"at": 0, "mood": "thinking"}]}
+    asked = [e for e in events() if e["kind"] == "assistant_tool_calls"][0]
+    assert asked["display"] == {"text": "좋아", "moods": [{"at": 0, "mood": "happy"}]}
+    assert asked["calls"][0]["display"]["text"] == "어디?"
+    assert server.client.post(f"/api/conversations/{cid}/messages", json={"text": "서울"}, headers=SEND).status_code == 202
+    server.wait(cid)
+    answer = [e for e in events() if e["kind"] == "assistant_final"][-1]
+    assert answer["text"] == "[[mood:excited]]서울! [[mood:nope]]끝"
+    assert answer["display"] == {"text": "서울! 끝", "moods": [{"at": 0, "mood": "excited"}, {"at": 4, "mood": "neutral"}]}

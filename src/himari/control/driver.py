@@ -69,7 +69,9 @@ import contextlib
 import dataclasses
 import hashlib
 from collections.abc import AsyncIterator, Awaitable, Callable
+from datetime import UTC, datetime
 from typing import NamedTuple
+from zoneinfo import ZoneInfo
 
 from himari.common import ASK_USER_TOOL_ID, CallRef, ConversationId, RunId, TrustedScope
 from himari.control.api import (
@@ -176,10 +178,11 @@ def session_key(scope: TrustedScope) -> str:
 
 
 class _UserContext(NamedTuple):
-    """What the loader takes about the user, in its parameter order."""
+    """What the loader takes about the user and the turn's start, in its parameter order."""
 
     instructions: str  # V3-P69
     memories: tuple[Memory, ...] | None  # V3-P71; None: memory is off
+    now: datetime | None  # V3-P83 §6.3; None: the Driver has no time zone
 
 
 class Driver:
@@ -200,6 +203,8 @@ class Driver:
         turn_budget: int | None = None,
         no_progress_runs: int | None = None,  # None: no NO_PROGRESS stop (V3-P62 §4 turns it on with O3)
         streaming: bool = False,  # V3-P73: answering Runs ask for a stream
+        time_zone: str | None = None,  # V3-P83 §6.4: the zone the turn's time is shown in; None: not shown
+        clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         if any((planner is None) != (offer.budget is None) for offer in models.offers):
             raise ValueError("a context budget needs a compaction planner and vice versa, for every model")
@@ -223,6 +228,8 @@ class Driver:
         self._no_progress_runs = no_progress_runs
         self._planner = planner
         self._streaming = streaming
+        self._zone = None if time_zone is None else ZoneInfo(time_zone)
+        self._clock = clock
         self._outputs: dict[ConversationId, OutputProgress | None] = {}  # of the drive holding the lock
         self._locks: dict[ConversationId, asyncio.Lock] = {}
         self._signals: dict[ConversationId, StopSignal] = {}  # of the drive holding the lock
@@ -354,7 +361,7 @@ class Driver:
             raise ControlError(ControlErrorCode.BUSY, scope.conversation_id)
         async with lock:
             model = await self._resolve_model(scope)  # once per turn (V3-P64 §5)
-            user = await self._read_user(scope)  # and the user's instructions and notes (V3-P69 §5)
+            user = await self._read_user(scope)  # the user's instructions and notes, and the time (V3-P69 §5)
             self._turn_models[scope.conversation_id] = model
             self._turn_users[scope.conversation_id] = user
             self._signals[scope.conversation_id] = stop if stop is not None else StopSignal()
@@ -386,7 +393,7 @@ class Driver:
         text = "" if self._user_instructions is None else (
             await self._user_instructions.read_instructions(scope.principal_id, InstructionScope.USER)).text
         notes = None if self._memories is None else await self._memories.list_memories(scope.principal_id)
-        return _UserContext(text, notes)
+        return _UserContext(text, notes, None if self._zone is None else self._clock().astimezone(self._zone))
 
     def _turn_user(self, scope: TrustedScope) -> _UserContext:
         return self._turn_users[scope.conversation_id]

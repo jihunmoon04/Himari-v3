@@ -47,6 +47,9 @@ on by default (models that declare it stream their answers).
 Companion (V3-P83 §3): ``HIMARI_COMPANION=0`` refuses pairing and every
 device token (403 ``companion_off``; the tokens stay); on by default.
 
+Time (V3-P83 §6.4): ``HIMARI_TIME_ZONE`` (an IANA name, default
+``Asia/Seoul``) is the zone the model is told the time in.
+
 Machine Workspace (V3-P74 §4.4): ``HIMARI_MACHINE_SOCKET`` names the
 runner's socket (``/run/himari-runner/runner.sock``); then new Conversations
 of the principals in ``HIMARI_MACHINE_PRINCIPALS`` (comma-separated, default
@@ -60,6 +63,7 @@ import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 from urllib.parse import urlsplit
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 HOST_VAR = "HIMARI_WEB_HOST"
 PORT_VAR = "HIMARI_WEB_PORT"
@@ -85,6 +89,7 @@ MEMORY_VAR = "HIMARI_MEMORY"  # V3-P71: 0 turns memory off
 CONVERSATION_SEARCH_VAR = "HIMARI_CONVERSATION_SEARCH"  # V3-P72: 0 turns it off
 STREAMING_VAR = "HIMARI_STREAMING"  # V3-P73: 0 turns it off
 COMPANION_VAR = "HIMARI_COMPANION"  # V3-P83: 0 turns devices off
+TIME_ZONE_VAR = "HIMARI_TIME_ZONE"  # V3-P83: the zone the model is told the time in
 MACHINE_SOCKET_VAR = "HIMARI_MACHINE_SOCKET"  # V3-P74: the runner's socket; unset: no machine Environment
 MACHINE_PRINCIPALS_VAR = "HIMARI_MACHINE_PRINCIPALS"  # V3-P74: whose new Conversations use it
 DEFAULT_FILE_MAX_BYTES = 32 * 1024 * 1024  # as data.api
@@ -96,6 +101,7 @@ DEFAULT_TURN_BUDGET = 3_000_000
 MIN_TURN_BUDGET = 16_384
 DEFAULT_UNATTENDED_RUNS = 20
 DEFAULT_TRASH_DAYS = 30  # as bootstrap.application.DEFAULT_TRASH_DAYS
+DEFAULT_TIME_ZONE = "Asia/Seoul"  # as bootstrap.application.DEFAULT_TIME_ZONE
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
@@ -139,6 +145,7 @@ class WebConfig:
     conversation_search: bool = True
     streaming: bool = True
     companion: bool = True  # V3-P83
+    time_zone: str = DEFAULT_TIME_ZONE  # V3-P83 §6.4
     machine_socket: str | None = None  # V3-P74
     machine_principals: tuple[str, ...] = ("operator",)
 
@@ -247,6 +254,7 @@ class WebConfig:
             conversation_search=_flag(source.get(CONVERSATION_SEARCH_VAR), CONVERSATION_SEARCH_VAR, default=True),
             streaming=_flag(source.get(STREAMING_VAR), STREAMING_VAR, default=True),
             companion=_flag(source.get(COMPANION_VAR), COMPANION_VAR, default=True),
+            time_zone=_time_zone(source.get(TIME_ZONE_VAR)),
             machine_socket=machine_socket,
             machine_principals=machine_principals,
         )
@@ -311,6 +319,16 @@ def _optional(value: str | None, name: str, default: int | None, low: int, high:
     if not low <= number <= high:
         raise WebConfigError(f"{name} must be 0 (off) or between {low} and {high}")
     return number
+
+
+def _time_zone(value: str | None) -> str:
+    if value is None or not value.strip():
+        return DEFAULT_TIME_ZONE
+    try:
+        ZoneInfo(value.strip())
+    except (ValueError, ZoneInfoNotFoundError):
+        raise WebConfigError(f"{TIME_ZONE_VAR} must be an IANA time zone name, e.g. Asia/Seoul") from None
+    return value.strip()
 
 
 def _flag(value: str | None, name: str, *, default: bool) -> bool:
