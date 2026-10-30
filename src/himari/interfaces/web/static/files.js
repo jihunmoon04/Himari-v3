@@ -312,7 +312,8 @@ export class FilesPane {
   /* A row's ⋯: the given actions, then (a file only) Download, and Copy path. */
   menu(path, name, given, isFile) {
     const actions = this.el("details", "conversation-actions files-actions");
-    const toggle = this.el("summary", null, "⋯");
+    const toggle = this.el("summary");
+    toggle.append(icon("#side-more"));
     toggle.setAttribute("aria-label", `Actions for ${name}`);
     toggle.title = `Actions for ${name}`;
     const list = this.el("div", "conversation-action-list");
@@ -846,12 +847,13 @@ export class FilesPane {
   /* The open file's ⋯: previous versions, download, copy path, delete. */
   fileMenu(shown) {
     const actions = this.el("details", "conversation-actions files-actions files-file-menu");
-    const toggle = this.el("summary", null, "⋯");
+    const toggle = this.el("summary");
+    toggle.append(icon("#side-more"));
     toggle.setAttribute("aria-label", "File actions");
     toggle.title = "File actions";
     const list = this.el("div", "conversation-action-list");
-    const item = (label, action) => {
-      const control = this.el("button", "link-button", label);
+    const item = (label, action, destructive = false) => {
+      const control = this.el("button", destructive ? "link-button danger-link" : "link-button", label);
       control.type = "button";
       control.addEventListener("click", () => { actions.open = false; action(); });
       return control;
@@ -859,7 +861,7 @@ export class FilesPane {
     if (this.onAsk) list.append(item("Ask HIMARI about this file", () => this.askWhole(shown)));
     if (shown.kind === "text" && shown.editable) list.append(item("Previous versions", () => this.showVersions()));
     list.append(this.download(shown.path, "Download"), this.copyPath(shown.path, () => { actions.open = false; }),
-                item("Delete", () => this.deleteFile()));
+                item("Delete", () => this.deleteFile(), true));
     actions.append(toggle, list);
     return actions;
   }
@@ -867,7 +869,8 @@ export class FilesPane {
   /* A folder's ⋯: files deleted from it whose content is kept, to put back (PR #95 review B3). */
   folderMenu(listing) {
     const actions = this.el("details", "conversation-actions files-actions files-folder-menu");
-    const toggle = this.el("summary", null, "⋯");
+    const toggle = this.el("summary");
+    toggle.append(icon("#side-more"));
     toggle.setAttribute("aria-label", "Folder actions");
     toggle.title = "Folder actions";
     const list = this.el("div", "conversation-action-list");

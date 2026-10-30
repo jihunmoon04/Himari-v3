@@ -61,6 +61,16 @@ function el(tag, className, text) {
   return node;
 }
 
+function sideIcon(href) {
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("class", "side-icon");
+  svg.setAttribute("aria-hidden", "true");
+  const use = document.createElementNS("http://www.w3.org/2000/svg", "use");
+  use.setAttribute("href", href);
+  svg.append(use);
+  return svg;
+}
+
 class ApiError extends Error {
   constructor(kind, status, code, message) {
     super(message);
@@ -207,6 +217,8 @@ function status(text, tone) {
 }
 
 function showSurface(name) {
+  finishShellMotion();
+  $("topbar-title").removeAttribute("title");
   closeModelDialog();
   for (const surface of ["login", "home", "chat", "trash", "instructions", "memory", "folders", "files"]) {
     $(`surface-${surface}`).hidden = surface !== name;
@@ -290,12 +302,14 @@ function renderListRow(item) {
   if (item.id === app.conversationId) button.setAttribute("aria-current", "page");
   button.addEventListener("click", () => openConversation(item.id));
   const actions = el("details", "conversation-actions");
-  const toggle = el("summary", null, "⋯");
+  const toggle = el("summary");
+  toggle.append(sideIcon("#side-more"));
   toggle.setAttribute("aria-label", `Actions for ${conversationName(item)}`);
   toggle.title = `Actions for ${conversationName(item)}`;
   const menu = el("div", "conversation-action-list");
-  for (const [label, action] of [["Rename", () => renameConversation(item)], ["Move to trash", () => deleteConversation(item)]]) {
-    const control = el("button", "link-button", label);
+  for (const [label, action, destructive] of [["Rename", () => renameConversation(item), false],
+                                            ["Move to trash", () => deleteConversation(item), true]]) {
+    const control = el("button", destructive ? "link-button danger-link" : "link-button", label);
     control.type = "button";
     control.addEventListener("click", () => { actions.open = false; action(); });
     menu.append(control);
@@ -1152,11 +1166,12 @@ function renderModel() {
   if (choice === null) return;
   const select = $("chat-menu-model-select");
   const fallback = app.models.find((m) => m.default);
-  select.replaceChildren(option("", `Default${fallback ? ` (${fallback.id})` : ""}`));
+  select.replaceChildren(option("", fallback ? `${fallback.id.split("/").pop()} · Default` : "Default"));
   for (const model of app.models) select.append(option(model.id, model.id.split("/").pop()));
   const chosen = choice.chosen ? choice.chosen.model : "";
   if (chosen && !app.models.some((m) => m.id === chosen)) select.append(option(chosen, `${chosen} (not offered)`));
   select.value = chosen;
+  select.title = `${choice.model}${chosen ? "" : " (server default)"}`;
   const offered = app.models.find((m) => m.id === chosen);
   const effort = $("chat-menu-effort-select");
   const efforts = offered ? offered.efforts : [];
@@ -1176,7 +1191,8 @@ function renderModel() {
 /* The same controls move into a native modal on compact screens: one set of
  * IDs, listeners and server-backed state across resizing and turn updates. */
 function syncModelChrome() {
-  const compact = window.matchMedia("(max-width: 1099px)").matches;
+  // A split pane can be narrow even on a wide desktop. Reuse the same model sheet there.
+  const compact = window.matchMedia("(max-width: 1099px)").matches || $("topbar").clientWidth < 580;
   const available = !$("surface-chat").hidden && app.modelChoice !== null && app.models.length > 0;
   const controls = $("chat-menu-model");
   const trigger = $("mobile-model-toggle");
@@ -1229,6 +1245,7 @@ function syncFullscreen() {
   button.setAttribute("aria-pressed", String(active));
   button.title = active ? "Exit fullscreen" : "Enter fullscreen";
   button.setAttribute("aria-label", button.title);
+  $("app-fullscreen-label").textContent = active ? "Exit fullscreen" : "Fullscreen";
   $("app-fullscreen-icon").setAttribute("href", active ? "#side-contract" : "#side-expand");
 }
 
@@ -1530,9 +1547,13 @@ function usageText(usage) {
 function applyDetail(detail) {
   const name = conversationName(detail.conversation);
   $("topbar-title").textContent = name;
+  $("topbar-title").title = name;
   $("chat-menu-title").textContent = name;
   const view = describe(detail);
   $("topbar-chat-label").textContent = view.short || view.text;
+  $("topbar-chat-context").title = view.text;
+  // Ready/Done stays in the conversation menu; only actionable state needs header space.
+  $("topbar-chat-context").hidden = !view.active && !view.tone;
   $("chat-menu-state").textContent = view.short || view.text || "Ready";
   $("topbar-state-dot").classList.toggle("is-active", view.active);
   // V3-P62 §7: a turn that stopped before its answer (a guard, a pause, a
@@ -2772,13 +2793,15 @@ function syncFilesPanel(onChat) {
 }
 
 function toggleFilesPanel() {
-  app.filesOpen = !app.filesOpen;
-  syncFilesPanel(true);
-  if (app.filesOpen && app.workingFolder) {
-    // Its place again, or its first place the first time.
-    if (filesPanel.place) filesPanel.refresh();
-    else openPanelStart();
-  }
+  shellMotion(() => {
+    app.filesOpen = !app.filesOpen;
+    syncFilesPanel(true);
+    if (app.filesOpen && app.workingFolder) {
+      // Its place again, or its first place the first time.
+      if (filesPanel.place) filesPanel.refresh();
+      else openPanelStart();
+    }
+  });
 }
 
 /* The panel's first place in this conversation: the file Ask HIMARI came from (V3-P76 §3.1), its
@@ -2800,7 +2823,7 @@ function setPanelExpanded(expanded) {
   $("file-panel-expand").setAttribute("aria-pressed", String(expanded));
   $("file-panel-expand").setAttribute("aria-label", expanded ? "Show the conversation" : "Expand files");
   $("file-panel-expand").title = expanded ? "Show the conversation" : "Expand files";
-  $("file-panel-expand-icon").setAttribute("href", expanded ? "#side-contract" : "#side-expand");
+  $("file-panel-expand-icon").setAttribute("href", expanded ? "#side-panel-restore" : "#side-panel-expand");
 }
 
 function panelWidth(fraction) {
@@ -2875,6 +2898,44 @@ async function syncFoldersLink() {
 
 /* --------------------------------------------------------------- chrome */
 
+// Native snapshots animate layout without delaying `hidden`, cloning editors, or
+// interpolating widths during a drag. The DOM update is still committed exactly
+// once if a transition is skipped, fails, or another control is clicked quickly.
+let activeShellMotion = null;
+
+function finishShellMotion() {
+  const active = activeShellMotion;
+  if (!active) return;
+  activeShellMotion = null;
+  active.commit();
+  active.transition.skipTransition();
+}
+
+function shellMotion(update) {
+  finishShellMotion();
+  if (!document.startViewTransition || window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+    update();
+    return;
+  }
+  let committed = false;
+  const commit = () => {
+    if (committed) return;
+    committed = true;
+    update();
+  };
+  try {
+    const transition = document.startViewTransition(commit);
+    const active = { transition, commit };
+    activeShellMotion = active;
+    const clear = () => { if (activeShellMotion === active) activeShellMotion = null; };
+    transition.ready.catch(() => {}); // a snapshot can be skipped (e.g. a hidden tab)
+    transition.updateCallbackDone.catch(commit);
+    transition.finished.then(clear, clear);
+  } catch (error) {
+    commit(); // unsupported/declined snapshots never prevent a control from working
+  }
+}
+
 function closeChatMenu() {
   $("chat-menu").hidden = true;
   $("chat-menu-toggle").setAttribute("aria-expanded", "false");
@@ -2904,6 +2965,11 @@ function syncNavigation() {
 }
 
 function toggleNav() {
+  if (window.matchMedia("(min-width: 1100px)").matches) shellMotion(toggleNavNow);
+  else toggleNavNow(); // the compact drawer already has its own transform transition
+}
+
+function toggleNavNow() {
   const layout = $("layout");
   if (window.matchMedia("(min-width: 1100px)").matches) {
     layout.classList.toggle("is-nav-collapsed");
@@ -3013,9 +3079,10 @@ async function boot() {
   $("file-panel-close").addEventListener("click", toggleFilesPanel);
   $("file-panel-changes").addEventListener("click", () => filesPanel.openChanges());
   $("file-panel-expand").addEventListener("click",
-    () => setPanelExpanded(!$("layout").classList.contains("is-files-expanded")));
+    () => shellMotion(() => setPanelExpanded(!$("layout").classList.contains("is-files-expanded"))));
   $("file-panel-grip").addEventListener("pointerdown", dragPanel);
   $("file-panel-grip").addEventListener("keydown", nudgePanel);
+  new ResizeObserver(() => syncModelChrome()).observe($("topbar"));
   $("home-new-chat").addEventListener("click", newConversation);
   $("conversation-load-more").addEventListener("click", () => loadList(false).then(markSelected));
   $("composer").addEventListener("submit", sendMessage);
