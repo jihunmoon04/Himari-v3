@@ -122,3 +122,13 @@ def test_a_newer_screen_that_cannot_be_seen_lets_no_older_one_in() -> None:
     plan = image_plan(model_input(turns, infos, image_input=True, screen_points=True))
     assert '"width": 1280' in attachment_line(screen(2), infos, plan)
     assert '"width"' not in attachment_line(screen(1), infos, plan)
+
+
+def test_the_latest_screen_is_taken_before_the_images_after_it() -> None:
+    """PR #126 re-review C2: Tool images after the screen, filling the request's bytes, do not crowd it out."""
+    big = replace(READY, view_bytes=MAX_IMAGE_BYTES_PER_REQUEST // 2)
+    turns = [UserTurn(EventId("e0"), (screen(0),)), *[UserTurn(EventId(f"e{n}"), (ref(n),)) for n in (1, 2)]]
+    infos = {"file_0#1": SCREEN, "file_1#1": big, "file_2#1": big}
+    plan = image_plan(model_input(turns, infos, image_input=True, screen_points=True))
+    assert "file_0#1" in plan.shown and "file_2#1" in plan.shown and "file_1#1" not in plan.shown
+    assert '"width": 1280' in attachment_line(screen(0), infos, plan)

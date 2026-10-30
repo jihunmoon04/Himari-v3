@@ -722,15 +722,23 @@ def image_plan(model_input: ModelInput) -> ImagePlan:
     before any byte is read (review B3). Of the screens, only the latest
     SCREENS_SHOWN (V3-P84 §5), counted by their order whether they can be
     shown or not: a newer screen that cannot be seen never lets an older one
-    in (PR #126 review B1)."""
+    in (PR #126 review B1). The latest screen, when ready, is taken first:
+    the images after it never crowd it out (re-review C2)."""
     options = model_input.request_options
     if not options.image_input:
         return ImagePlan(False)
+    refs = _refs_newest_first(model_input)
     shown: list[str] = []
     older: set[str] = set()
     screens: list[str] = []
     used = 0
-    for ref in _refs_newest_first(model_input):
+    latest = next((r for r in refs if r.screen), None)
+    if latest is not None:  # first, so later images never crowd out the screen moves are about (re-review C2)
+        first = model_input.attachments.get(attachment_key(latest))
+        if first is not None and first.view_state == "ready" and first.view_bytes <= MAX_IMAGE_BYTES_PER_REQUEST:
+            shown.append(attachment_key(latest))
+            used += first.view_bytes
+    for ref in refs:
         key = attachment_key(ref)
         if ref.screen and key not in screens and key not in older:
             if len(screens) < SCREENS_SHOWN:

@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from himari.bootstrap.application import Application, ScreenRefused
+from himari.bootstrap.application import SCREEN_MAX_BYTES, Application, ScreenRefused
 from himari.common import AttachmentRef, FileId, PrincipalId, TextBlock, TrustedScope
 from himari.data.api import ALREADY_SENT, DataError, DataErrorCode, MessageOrigin, OriginKind, UserMessage
 from himari.prompt.api import SCREEN_MOVE_NOTE, SCREEN_NOTE, UserTurn
@@ -126,3 +126,28 @@ def test_the_screen_mark_is_kept_only_when_true() -> None:
     text = codec.payload(message)
     assert text.count('"screen":true') == 1
     assert codec.payload_from(EventKind.USER_MESSAGE, text) == message
+
+
+def test_a_broken_screen_is_refused_and_repeating_it_takes_no_more_room(tmp_path: Path) -> None:
+    """PR #126 re-review N1: a PNG's start with a header that cannot be read is stored, then refused;
+    the same bytes again are the same blob, and a body over the limit is never kept."""
+    async def scenario() -> None:
+        app = await opened(tmp_path, answers())
+        try:
+            scope = TrustedScope(ME, await app.create_conversation(ME))
+            broken = b"\x89PNG\r\n\x1a\n\x00\x00\x00\x0dIHDR" + b"\x00" * 64  # width and height 0
+            before = app.data.blobs.rows.live_total()
+            for _ in range(3):
+                with pytest.raises(ScreenRefused):
+                    await app.upload_screen(scope, body(broken))
+            assert app.data.blobs.rows.live_total() - before <= len(broken)  # one blob at most, for the sweep
+            oversized = png() + b"\x00" * SCREEN_MAX_BYTES
+            with pytest.raises(DataError) as refused:
+                await app.upload_screen(scope, body(oversized))
+            assert refused.value.code is DataErrorCode.TOO_LARGE
+            assert app.data.blobs.rows.live_total() - before <= len(broken)
+            assert await app.data.count_staged(scope) == 0
+        finally:
+            await app.close()
+
+    asyncio.run(scenario())
