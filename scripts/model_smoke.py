@@ -3,9 +3,9 @@ server (opt-in evidence, not part of pytest).
 
 Starts the page server on a temporary private data root with a scripted
 provider that offers two models: the default "scripted-model" (no reasoning
-efforts) and "big" (low/high). Headless Chromium drives the conversation menu:
+efforts) and "big" (low/high). Headless Chromium drives the shared toolbar:
 
-1. the menu shows the model, following the default; no reasoning choice for
+1. the toolbar shows the model, following the default; no reasoning choice for
    a model without efforts;
 2. choosing "big" shows its efforts; choosing one is stored as made;
 3. the next answer is written by "big" at that effort, and its header names
@@ -15,9 +15,8 @@ efforts) and "big" (low/high). Headless Chromium drives the conversation menu:
 5. "Default" follows the server's default model again;
 6. a step of Tool calls without text, by a changed model, names it above
    the calls, and the answer after it does not (PR #53 review B1);
-7. the narrow layout shows the model sheet without horizontal scroll;
-8. the sheet restores focus, closes with Escape/backdrop/Done and reuses one
-   selector, including when resized back to desktop;
+7. the narrow layout keeps inline model controls without horizontal scroll;
+8. one selector stays in the fixed toolbar at compact and desktop widths;
 9. widths 320 through 1099 keep a 56px header and 44px touch targets;
 10. native fullscreen enters/exits, tracks browser exits and handles rejection
     and unsupported browsers without claiming to be fullscreen.
@@ -147,7 +146,7 @@ def run(token: str, provider: TwoModels, chrome: str | None, shots: str | None, 
         expect(page.locator("#chat-menu-model")).to_be_visible(timeout=5000)
         check("1: the model follows the default",
               model.input_value() == "" and model.locator("option").all_text_contents()
-              == ["Default (scripted-model)", "scripted-model", "big"],
+              == ["scripted-model · Default", "scripted-model", "big"],
               model.locator("option").all_text_contents())
         check("1: no reasoning choice for a model without efforts", page.locator("#chat-menu-effort-field").is_hidden())
         shot(page, "1-default")
@@ -218,7 +217,6 @@ def run(token: str, provider: TwoModels, chrome: str | None, shots: str | None, 
         # 7. Narrow layout.
         page.set_viewport_size({"width": 380, "height": 800})
         page.wait_for_timeout(800)
-        page.click("#mobile-model-toggle")
         model.select_option("scripted-model")
         expect(page.locator("#chat-menu-effort-field")).to_be_hidden()
         model.select_option("big")
@@ -227,33 +225,24 @@ def run(token: str, provider: TwoModels, chrome: str | None, shots: str | None, 
         check("7: the narrow layout has no horizontal scroll",
               bool(page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")))
 
-        # Native modal focus, dismissal and the one shared control tree.
+        # One inline control tree at every width (split panes have their own touch smoke).
         effort.select_option("high")
-        expect(page.locator("#mobile-model-summary")).to_have_text("big · high")
         check("8: only one model selector exists", model.count() == 1)
-        page.keyboard.press("Escape")
-        expect(page.locator("#model-dialog")).not_to_be_visible()
-        check("8: Escape restores focus", page.locator("#mobile-model-toggle").evaluate("n => n === document.activeElement"))
-        page.click("#mobile-model-toggle")
-        page.mouse.click(5, 5)
-        expect(page.locator("#model-dialog")).not_to_be_visible()
-        page.click("#mobile-model-toggle")
+        check("8: model controls stay in the fixed toolbar", model.evaluate("n => n.closest('#topbar') !== null"))
+        check("8: the old model modal is absent", page.locator("#model-dialog").count() == 0)
         model.select_option("")
         expect(page.locator("#chat-menu-effort-field")).to_be_hidden()
-        page.click("#model-dialog-done")
-        check("8: Done closes and Default still follows server", stored(cid) is None)
+        check("8: Default still follows server", stored(cid) is None)
 
         for width in (320, 360, 390, 430, 768, 1099):
             page.set_viewport_size({"width": width, "height": 844})
             bar = page.locator("#topbar").bounding_box()
             targets = [page.locator(s).bounding_box() for s in
-                       ("#sidebar-toggle", "#mobile-model-toggle", "#app-fullscreen", "#chat-menu-toggle")]
+                       ("#sidebar-toggle", "#app-fullscreen", "#chat-menu-toggle")]
             check(f"9: {width}px header is 56px with 44px targets and no overflow",
                   bar is not None and bar["height"] == 56 and all(b and b["height"] >= 44 and b["width"] >= 44 for b in targets)
                   and page.evaluate("document.documentElement.scrollWidth <= innerWidth"), (bar, targets))
-        page.click("#mobile-model-toggle")
         page.set_viewport_size({"width": 1100, "height": 900})
-        expect(page.locator("#model-dialog")).not_to_be_visible()
         expect(model).to_be_visible()
         check("10: desktop reuses the same controls inline", model.evaluate("n => n.closest('#topbar') !== null"))
         page.set_viewport_size({"width": 390, "height": 844})
@@ -277,8 +266,8 @@ def run(token: str, provider: TwoModels, chrome: str | None, shots: str | None, 
               and page.locator("#app-fullscreen").get_attribute("aria-pressed") == "false")
         page.evaluate("Object.defineProperty(document, 'fullscreenEnabled', {value: false, configurable: true})")
         page.evaluate("document.dispatchEvent(new Event('fullscreenchange'))")
-        expect(page.locator("#app-fullscreen")).to_be_hidden()
-        check("11: unsupported fullscreen is hidden", page.locator("#app-fullscreen").is_hidden())
+        expect(page.locator("#app-fullscreen")).to_be_disabled()
+        check("11: unsupported fullscreen keeps its place and explains why", "unavailable" in page.locator("#app-fullscreen").get_attribute("title"))
         check("no uncaught errors in the page", errors == [], errors)
         browser.close()
 

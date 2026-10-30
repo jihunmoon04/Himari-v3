@@ -669,6 +669,82 @@ def test_without_mcp_json_there_are_no_tool_sources(server: Server) -> None:
     assert put_source(server, cid, "calliope", True).status_code == 404
 
 
+def test_mcp_defaults_change_inherited_access_but_keep_conversation_choices(
+    mcp_server: tuple[Server, FakeMcpServer],
+) -> None:
+    server, _ = mcp_server
+    assert server.client.get("/api/settings/mcp").status_code == 401
+    assert server.client.put("/api/settings/mcp/calliope", headers={"origin": ORIGIN},
+                             json={"enabled": True, "revision": "0" * 64}).status_code == 401
+    server.sign_in()
+    first = server.client.get("/api/settings/mcp").json()
+    assert first["sources"] == [{"source": "calliope", "default": False, "available": True, "tools": 1}]
+    inherited = server.post("/api/conversations").json()["id"]
+    explicit = server.post("/api/conversations").json()["id"]
+    put_source(server, explicit, "calliope", True)
+    changed = server.client.put("/api/settings/mcp/calliope", headers={"origin": ORIGIN},
+                                json={"enabled": True, "revision": first["revision"]})
+    assert changed.status_code == 200
+    application = server.application
+    assert application is not None and server.client.portal is not None
+    scope = TrustedScope(OPERATOR, ConversationId(inherited))
+    assert server.client.portal.call(application.runtime.access.enabled_sources, scope) == frozenset({"calliope"})
+    stale = server.client.put("/api/settings/mcp/calliope", headers={"origin": ORIGIN},
+                              json={"enabled": False, "revision": first["revision"]})
+    assert stale.status_code == 409
+    off = server.client.put("/api/settings/mcp/calliope", headers={"origin": ORIGIN},
+                            json={"enabled": False, "revision": changed.json()["revision"]})
+    assert off.status_code == 200
+    assert server.client.portal.call(application.runtime.access.enabled_sources, scope) == frozenset()
+    assert server.client.get(f"/api/conversations/{explicit}/tools").json()["sources"][0]["enabled"] is True
+    assert server.client.get(f"/api/conversations/{inherited}/tools").json()["sources"][0]["enabled"] is False
+    assert server.client.put("/api/settings/mcp/absent", headers={"origin": ORIGIN},
+                             json={"enabled": True, "revision": off.json()["revision"]}).status_code == 404
+    assert server.client.put("/api/settings/mcp/calliope", headers={"origin": ORIGIN},
+                             json={"enabled": "false", "revision": off.json()["revision"]}).status_code == 400
+
+
+def test_mcp_defaults_survive_restart_without_changing_server_configuration(tmp_path: Path) -> None:
+    data = tmp_path / "data"
+    data.mkdir(mode=0o700)
+    configured = '{"servers":{"calliope":{"url":"%s","default":"off","tools":{"echo":{"effect":"read"}}}}}' % MCP_URL
+    path = data / "mcp.json"
+    path.write_text(configured)
+    path.chmod(0o600)
+    fake = FakeMcpServer()
+    first = Server(tmp_path, [], mcp=fake)
+    with first.client:
+        first.sign_in()
+        revision = first.client.get("/api/settings/mcp").json()["revision"]
+        assert first.client.put("/api/settings/mcp/calliope", headers={"origin": ORIGIN},
+                                json={"enabled": True, "revision": revision}).status_code == 200
+    assert path.read_text() == configured
+    persisted = data / "control/mcp-defaults.json"
+    assert persisted.stat().st_mode & 0o077 == 0
+    second = Server(tmp_path, [], mcp=fake)
+    with second.client:
+        second.sign_in()
+        assert second.client.get("/api/settings/mcp").json()["sources"][0]["default"] is True
+
+
+def test_failed_mcp_default_save_does_not_change_running_access(
+    mcp_server: tuple[Server, FakeMcpServer], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from himari.bootstrap import application as application_module
+
+    def refuse(*args: Any) -> None:
+        raise OSError("disk unavailable")
+
+    server, _ = mcp_server
+    server.sign_in()
+    first = server.client.get("/api/settings/mcp").json()
+    monkeypatch.setattr(application_module, "write_defaults", refuse)
+    response = server.client.put("/api/settings/mcp/calliope", headers={"origin": ORIGIN},
+                                 json={"enabled": True, "revision": first["revision"]})
+    assert response.status_code == 503
+    assert server.client.get("/api/settings/mcp").json() == first
+
+
 class RefusingDriver(GatedDriver):
     """Ends every job with a refusal that says why."""
 

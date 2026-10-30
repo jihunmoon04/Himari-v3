@@ -79,6 +79,16 @@ function el(tag, className, text) {
   return node;
 }
 
+function sideIcon(href) {
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("class", "side-icon");
+  svg.setAttribute("aria-hidden", "true");
+  const use = document.createElementNS("http://www.w3.org/2000/svg", "use");
+  use.setAttribute("href", href);
+  svg.append(use);
+  return svg;
+}
+
 class ApiError extends Error {
   constructor(kind, status, code, message) {
     super(message);
@@ -115,6 +125,78 @@ async function api(method, path, body) {
     throw failure;
   }
   return data;
+}
+
+/* Operator MCP defaults: no server addresses, commands or credentials in the UI. */
+let mcpSettings = null;
+let mcpSettingsTicket = 0;
+let mcpSettingsSaving = false;
+
+function renderMcpSettings() {
+  const list = $("mcp-settings-list");
+  list.replaceChildren();
+  if (!mcpSettings) return;
+  if (!mcpSettings.sources.length) {
+    list.append(el("li", "hint", "No MCP servers configured."));
+    return;
+  }
+  for (const source of mcpSettings.sources) {
+    const row = el("li");
+    const label = el("label", "mcp-setting");
+    const text = el("span");
+    text.append(el("strong", null, source.source),
+                el("span", "hint", `${source.tools} tools · ${source.available ? "Connected at startup" : "Not connected at startup"}`));
+    const toggle = el("input");
+    toggle.type = "checkbox";
+    toggle.checked = source.default;
+    toggle.disabled = mcpSettingsSaving;
+    toggle.setAttribute("aria-label", `${source.source}: enabled by default`);
+    toggle.addEventListener("change", () => saveMcpDefault(source.source, toggle.checked));
+    label.append(text, toggle);
+    row.append(label);
+    list.append(row);
+  }
+}
+
+async function loadMcpSettings() {
+  if (mcpSettingsSaving) return;
+  const ticket = ++mcpSettingsTicket;
+  $("mcp-settings-feedback").textContent = "Loading…";
+  try {
+    const settings = await api("GET", "/api/settings/mcp");
+    if (ticket !== mcpSettingsTicket) return;
+    mcpSettings = settings;
+    renderMcpSettings();
+    $("mcp-settings-feedback").textContent = "Enabled by default: checked = on, unchecked = off.";
+  } catch (error) {
+    if (ticket === mcpSettingsTicket) $("mcp-settings-feedback").textContent = error.message;
+  }
+}
+
+async function saveMcpDefault(source, enabled) {
+  if (mcpSettingsSaving || !mcpSettings) return;
+  mcpSettingsSaving = true;
+  const ticket = ++mcpSettingsTicket;
+  renderMcpSettings();
+  $("mcp-settings-feedback").textContent = "Saving…";
+  try {
+    const settings = await api("PUT", `/api/settings/mcp/${encodeURIComponent(source)}`,
+                               { enabled, revision: mcpSettings.revision });
+    if (ticket !== mcpSettingsTicket) return;
+    mcpSettings = settings;
+    $("mcp-settings-feedback").textContent = "Saved. Conversations using Default follow this from their next request.";
+    if (app.conversationId) loadToolSources(app.generation);
+  } catch (error) {
+    // An outcome-unknown write is read back, never replayed.
+    try {
+      const settings = await api("GET", "/api/settings/mcp");
+      if (ticket === mcpSettingsTicket) mcpSettings = settings;
+    } catch (ignored) { /* reopening settings retries the read */ }
+    if (ticket === mcpSettingsTicket) $("mcp-settings-feedback").textContent = error.message;
+  } finally {
+    mcpSettingsSaving = false;
+    if (ticket === mcpSettingsTicket) renderMcpSettings();
+  }
 }
 
 /* ------------------------------------------------------------------ state */
@@ -182,8 +264,10 @@ const app = {
   registeredFolders: null, // the last /api/workspaces items, for the attach field (V3-P74 §10.3)
   streaming: false, // the server streams answers (V3-P73 §9)
   filesOpen: false, // the files panel beside the conversation is open (V3-P75 §3.2)
+  workspaceMode: "chat", // chat → chat-files → files → files-chat → chat
   workingFolder: null, // the open conversation's working folder, when it works on this server's folders
   conversationFolderPaths: [], // all of its folders: a folder already among them is not offered to attach
+  filesReturnId: null, // the conversation to return to from the separate Files surface
   folderTicket: 0, // the latest "conversations in this folder" read: older answers are dropped
 };
 
@@ -212,11 +296,10 @@ const filesPanel = new FilesPane({
   onSaved: (saved) => followSave(saved),
   working: () => app.running, // HIMARI at work in this conversation (§7.3)
   onAsk: (reference) => { // the conversation shown again, where its chip goes
-    setPanelExpanded(false);
-    if (panelCoversScreen() && app.filesOpen) toggleFilesPanel();
+    workspaceChat();
     addReference(reference);
   },
-  actions: [$("file-panel-changes"), $("file-panel-expand"), $("file-panel-close")],
+  actions: [$("file-panel-changes")],
   changes: { // V3-P76 §5: each call names its conversation, fixed when it starts (PR #99 review C2)
     of: () => app.conversationId,
     list: async (of) => ({ ...(await api("GET", conversationChanges(of))), id: of }),
@@ -260,10 +343,10 @@ function status(text, tone, action = null) {
   }
 }
 
-/* ``via`` (V3-P79 §3.2): how the address follows — "push" for a move the user chose, "replace" for a place
- * the page was sent to, "none" for Back/Forward (the browser moved it already). */
+/* The address follows user navigation, redirects and Back/Forward. */
 function showSurface(name, via = "none") {
-  closeModelDialog();
+  finishShellMotion();
+  $("topbar-title").removeAttribute("title");
   for (const surface of ["login", "home", "chat", "trash", "instructions", "memory", "folders", "devices", "files"]) {
     $(`surface-${surface}`).hidden = surface !== name;
   }
@@ -280,6 +363,7 @@ function showSurface(name, via = "none") {
   if (name !== "chat") closeChatMenu();
   syncModelChrome();
   syncFullscreen();
+  syncWorkspaceSwitch();
   // One composer, including its draft and staged files, on either surface.
   if (name === "home" || name === "chat") {
     (name === "home" ? $("home-composer-slot") : $("surface-chat")).append($("composer-wrap"));
@@ -300,6 +384,7 @@ function showLogin({ signingOut = false } = {}) {
   app.activity = { working: new Set(), waiting: new Set() };
   views.reset();
   app.conversationId = null;
+  app.filesReturnId = null;
   app.generation += 1;
   live.reset();
   leavePlace({ keep: !signingOut });
@@ -381,12 +466,14 @@ function renderListRow(item) {
   if (item.id === app.conversationId) button.classList.add("is-selected");
   if (item.id === app.conversationId) button.setAttribute("aria-current", "page");
   const actions = el("details", "conversation-actions");
-  const toggle = el("summary", null, "⋯");
+  const toggle = el("summary");
+  toggle.append(sideIcon("#side-more"));
   toggle.setAttribute("aria-label", `Actions for ${conversationName(item)}`);
   toggle.title = `Actions for ${conversationName(item)}`;
   const menu = el("div", "conversation-action-list");
-  for (const [label, action] of [["Rename", () => renameConversation(item)], ["Move to trash", () => deleteConversation(item)]]) {
-    const control = el("button", "link-button", label);
+  for (const [label, action, destructive] of [["Rename", () => renameConversation(item), false],
+                                            ["Move to trash", () => deleteConversation(item), true]]) {
+    const control = el("button", destructive ? "link-button danger-link" : "link-button", label);
     control.type = "button";
     control.addEventListener("click", () => { actions.open = false; action(); });
     menu.append(control);
@@ -1014,6 +1101,7 @@ function showReference(path, start = null, end = null) {
   }
   if (!app.filesOpen) {
     app.filesOpen = true;
+    app.workspaceMode = "chat-files";
     syncFilesPanel(true);
   }
   filesPanel.reveal(path, start, end);
@@ -1027,7 +1115,7 @@ async function askFromFiles(reference) {
                   end: reference.whole ? null : reference.end };
   const id = await openFolderConversation(folder, false, start);
   if (id === null || app.conversationId !== id) return;
-  if (panelCoversScreen() && app.filesOpen) toggleFilesPanel(); // the file waits there for the panel
+  workspaceChat(); // the file waits there; Ask always brings its composer back
   addReference(reference);
 }
 
@@ -1844,11 +1932,12 @@ function renderModel() {
   if (choice === null) return;
   const select = $("chat-menu-model-select");
   const fallback = app.models.find((m) => m.default);
-  select.replaceChildren(option("", `Default${fallback ? ` (${fallback.id})` : ""}`));
+  select.replaceChildren(option("", fallback ? `${fallback.id.split("/").pop()} · Default` : "Default"));
   for (const model of app.models) select.append(option(model.id, model.id.split("/").pop()));
   const chosen = choice.chosen ? choice.chosen.model : "";
   if (chosen && !app.models.some((m) => m.id === chosen)) select.append(option(chosen, `${chosen} (not offered)`));
   select.value = chosen;
+  select.title = `${choice.model}${chosen ? "" : " (server default)"}`;
   const offered = app.models.find((m) => m.id === chosen);
   const effort = $("chat-menu-effort-select");
   const efforts = offered ? offered.efforts : [];
@@ -1865,63 +1954,28 @@ function renderModel() {
   note.hidden = !text;
 }
 
-/* The same controls move into a native modal on compact screens: one set of
- * IDs, listeners and server-backed state across resizing and turn updates. */
+/* Native selects stay in the header at every width, including touch devices.
+ * Their system picker is enough: no second dialog to open and dismiss. */
 function syncModelChrome() {
-  const compact = window.matchMedia("(max-width: 1099px)").matches;
   const available = !$("surface-chat").hidden && app.modelChoice !== null && app.models.length > 0;
-  const controls = $("chat-menu-model");
-  const trigger = $("mobile-model-toggle");
-  if (!compact || !available) closeModelDialog();
-  const parent = compact ? $("model-dialog-controls") : $("topbar");
-  if (controls.parentElement !== parent) {
-    if (compact) parent.append(controls);
-    else parent.insertBefore(controls, trigger);
-  }
-  controls.hidden = !available;
-  trigger.hidden = !compact || !available;
-  $("topbar").classList.toggle("has-mobile-model", compact && available);
-  if (!available) return;
-  const choice = app.modelChoice;
-  const names = {
-    "openai/gpt-6-luna": "GPT-6 Luna", "openai/gpt-6.1-sol": "GPT-6.1 Sol",
-    "anthropic/claude-sonnet-5.5": "Claude Sonnet 5.5",
-    "xiaomi/mimo-v2.6-pro": "MiMo v2.6 Pro", "z-ai/glm-5.3": "GLM 5.3",
-    "deepseek/deepseek-v4.1-flash": "DeepSeek V4.1 Flash", "minimax/minimax-m3": "MiniMax M3",
-  };
-  const model = app.models.find((m) => m.id === choice.model);
-  const name = names[choice.model] || choice.model.split("/").pop();
-  const summary = name + (model && model.efforts.length ? ` · ${choice.effort || "Auto"}` : "");
-  $("mobile-model-summary").textContent = summary;
-  trigger.title = `Model & reasoning: ${summary}`;
-  trigger.setAttribute("aria-label", trigger.title);
-}
-
-function closeModelDialog() {
-  if ($("model-dialog").open) $("model-dialog").close();
-  $("mobile-model-toggle").setAttribute("aria-expanded", "false");
-}
-
-function openModelDialog() {
-  closeChatMenu();
-  closeNav();
-  $("model-dialog").showModal();
-  $("mobile-model-toggle").setAttribute("aria-expanded", "true");
-  $("chat-menu-model-select").focus();
+  $("chat-menu-model").hidden = !available;
+  $("topbar").classList.toggle("has-model-controls", available);
 }
 
 let fullscreenPending = false;
 
 function syncFullscreen() {
-  const button = $("app-fullscreen");
   const active = document.fullscreenElement === document.documentElement;
-  button.hidden = $("surface-login").hidden === false ||
-    (!active && (!document.fullscreenEnabled || typeof document.documentElement.requestFullscreen !== "function"));
-  button.disabled = fullscreenPending;
-  button.setAttribute("aria-pressed", String(active));
-  button.title = active ? "Exit fullscreen" : "Enter fullscreen";
-  button.setAttribute("aria-label", button.title);
-  $("app-fullscreen-icon").setAttribute("href", active ? "#side-contract" : "#side-expand");
+  const supported = active || (document.fullscreenEnabled && typeof document.documentElement.requestFullscreen === "function");
+  for (const id of ["app-fullscreen", "sidebar-fullscreen"]) {
+    const button = $(id);
+    button.hidden = !$("surface-login").hidden;
+    button.disabled = fullscreenPending || !supported;
+    button.setAttribute("aria-pressed", String(active));
+    button.title = active ? "Exit fullscreen" : supported ? "Enter fullscreen" : "Fullscreen is unavailable in this browser";
+    button.setAttribute("aria-label", button.title);
+    $(`${id}-icon`).setAttribute("href", active ? "#side-contract" : "#side-expand");
+  }
 }
 
 async function toggleFullscreen() {
@@ -2226,9 +2280,13 @@ function usageText(usage) {
 function applyDetail(detail) {
   const name = conversationName(detail.conversation);
   $("topbar-title").textContent = name;
+  $("topbar-title").title = name;
   $("chat-menu-title").textContent = name;
   const view = describe(detail);
   $("topbar-chat-label").textContent = view.short || view.text;
+  $("topbar-chat-context").title = view.text;
+  // Ready/Done stays in the conversation menu; only actionable state needs header space.
+  $("topbar-chat-context").hidden = !view.active && !view.tone;
   $("chat-menu-state").textContent = view.short || view.text || "Ready";
   $("topbar-state-dot").classList.toggle("is-active", view.active);
   // V3-P62 §7: a turn that stopped before its answer (a guard, a pause, a
@@ -3402,6 +3460,7 @@ async function registerFolder(event) {
 /* V3-P75 §3.2: the Files surface — this server's files without a conversation. */
 async function showFiles({ via = "push" } = {}) {
   if (!(await mayLeave())) return;
+  if (app.conversationId) app.filesReturnId = app.conversationId;
   stopPolling();
   views.reset();
   app.conversationId = null;
@@ -3420,7 +3479,9 @@ async function showFiles({ via = "push" } = {}) {
 /* A conversation opened from a folder: its files beside it (V3-P75 §6; PR #93 review B2), on ``start``
  * ({path, start, end}: a file, its selection selected) instead of the working folder when given. */
 function openWithFiles(id, start = null) {
-  app.filesOpen = true;
+  // Touch starts on the messages; its file/selection is ready for the cycle control.
+  app.filesOpen = !panelCoversScreen();
+  app.workspaceMode = app.filesOpen ? "chat-files" : "chat";
   app.panelStart = start ? { ...start, id } : null;
   return openConversation(id);
 }
@@ -3549,24 +3610,86 @@ async function loadChanges(generation) {
 
 /* The panel beside a conversation that works on this server's folders. */
 const PANEL_WIDTH_KEY = "himari.filePanelWidth";
+const PANEL_HEIGHT_KEY = "himari.filePanelHeight";
 
 function syncFilesPanel(onChat) {
   const offered = onChat && app.workingFolder !== null;
+  // Existing file links can reveal the pane without changing the conversation.
+  if (app.filesOpen && app.workspaceMode === "chat") app.workspaceMode = "chat-files";
+  if (!app.filesOpen) app.workspaceMode = "chat";
+  const mode = offered ? app.workspaceMode : "chat";
   $("chat-files-toggle").hidden = !offered;
   $("chat-files-toggle").setAttribute("aria-expanded", String(offered && app.filesOpen));
   $("file-panel").hidden = !(offered && app.filesOpen);
   $("layout").classList.toggle("has-file-panel", offered && app.filesOpen);
-  if (!(offered && app.filesOpen)) setPanelExpanded(false);
+  $("workspace-panes").dataset.mode = mode;
+  $("main").inert = mode === "files";
+  $("main").setAttribute("aria-hidden", String(mode === "files"));
+  $("file-panel-grip").hidden = !mode.includes("-");
+  $("file-panel-grip").setAttribute("aria-orientation", panelCoversScreen() ? "horizontal" : "vertical");
+  const labels = { chat: "Open files beside conversation", "chat-files": "Make files the main view",
+                   files: "Open conversation beside files", "files-chat": "Make conversation the main view" };
+  $("chat-files-toggle").title = labels[mode];
+  $("chat-files-toggle").setAttribute("aria-label", labels[mode]);
+  $("workspace-cycle-icon").setAttribute("href", mode.includes("-") ? "#side-panel-expand" : "#side-panel-restore");
+  syncWorkspaceSwitch();
+  syncWorkspaceChrome();
 }
 
 function toggleFilesPanel() {
-  app.filesOpen = !app.filesOpen;
-  syncFilesPanel(true);
-  if (app.filesOpen && app.workingFolder) {
-    // Its place again, or its first place the first time.
-    if (filesPanel.place) filesPanel.refresh();
-    else openPanelStart();
-  }
+  shellMotion(() => {
+    const modes = ["chat", "chat-files", "files", "files-chat"];
+    app.workspaceMode = modes[(modes.indexOf(app.workspaceMode) + 1) % modes.length];
+    app.filesOpen = app.workspaceMode !== "chat";
+    syncFilesPanel(true);
+    // Reordering the live panes never reloads an editor or asks it to leave.
+    if (app.filesOpen && app.workingFolder && !filesPanel.place) openPanelStart();
+  });
+}
+
+/* The old touch tabs remain on the standalone Files route. In a conversation
+ * the shared cycle control replaces their duplicate view-switching role. */
+function syncWorkspaceSwitch() {
+  const chat = !$("surface-chat").hidden;
+  const files = !$("surface-files").hidden;
+  const compact = window.matchMedia("(max-width: 1099px)").matches;
+  const available = compact && files;
+  const showingFiles = files || (chat && app.workspaceMode.startsWith("files"));
+  $("workspace-switch").hidden = !available;
+  document.body.classList.toggle("has-workspace-switch", available);
+  $("workspace-chat").setAttribute("aria-pressed", String(!showingFiles));
+  $("workspace-files").setAttribute("aria-pressed", String(showingFiles));
+  $("workspace-chat-label").textContent = chat || app.filesReturnId ? "Chat" : "Home";
+  $("workspace-files").title = chat ? "Files for this conversation" : "Browse all files";
+}
+
+/* Common controls stay fixed; file controls live in the file pane's own compact row. */
+function syncWorkspaceChrome() {
+  const chat = !$("surface-chat").hidden;
+  const standalone = !$("surface-files").hidden;
+  $("workspace-actions").hidden = !chat && !standalone;
+  $("chat-menu-toggle").hidden = !chat;
+  $("workspace-actions").classList.toggle("has-conversation", chat);
+}
+
+function workspaceChat() {
+  if (!$("surface-chat").hidden) {
+    finishShellMotion();
+    app.filesOpen = false;
+    app.workspaceMode = "chat";
+    syncFilesPanel(true);
+  } else if (app.filesReturnId) openConversation(app.filesReturnId);
+  else showHome();
+}
+
+function workspaceFiles() {
+  if (!$("surface-chat").hidden && app.workingFolder !== null) {
+    finishShellMotion();
+    app.filesOpen = true;
+    app.workspaceMode = "files";
+    syncFilesPanel(true);
+    if (!filesPanel.place) openPanelStart();
+  } else if ($("surface-files").hidden) showFiles();
 }
 
 /* The panel's first place in this conversation: the file Ask HIMARI came from (V3-P76 §3.1), its
@@ -3578,29 +3701,23 @@ function openPanelStart() {
   else filesPanel.openFolder(app.workingFolder);
 }
 
-/* Too narrow for the panel beside the conversation: it covers the screen (app.css). */
+/* Portrait/touch layouts stack the sub view below the main view. */
 function panelCoversScreen() {
-  return window.matchMedia("(max-width: 899px)").matches;
+  return window.matchMedia("(max-width: 1099px)").matches;
 }
 
-function setPanelExpanded(expanded) {
-  $("layout").classList.toggle("is-files-expanded", expanded);
-  $("file-panel-expand").setAttribute("aria-pressed", String(expanded));
-  $("file-panel-expand").setAttribute("aria-label", expanded ? "Show the conversation" : "Expand files");
-  $("file-panel-expand").title = expanded ? "Show the conversation" : "Expand files";
-  $("file-panel-expand-icon").setAttribute("href", expanded ? "#side-contract" : "#side-expand");
-}
-
-function panelWidth(fraction) {
+function panelWidth(fraction, vertical = panelCoversScreen()) {
   const clamped = Math.min(0.7, Math.max(0.3, fraction));
-  $("layout").style.setProperty("--file-panel-width", `${(clamped * 100).toFixed(1)}%`);
+  $("workspace-panes").style.setProperty(vertical ? "--file-panel-height" : "--file-panel-width", `${(clamped * 100).toFixed(1)}%`);
   return clamped;
 }
 
 function restorePanelWidth() {
   try {
-    const saved = Number(localStorage.getItem(PANEL_WIDTH_KEY));
-    if (saved) panelWidth(saved);
+    for (const [key, vertical] of [[PANEL_WIDTH_KEY, false], [PANEL_HEIGHT_KEY, true]]) {
+      const saved = Number(localStorage.getItem(key));
+      if (saved) panelWidth(saved, vertical);
+    }
   } catch (ignored) { /* the default width */ }
 }
 
@@ -3609,14 +3726,19 @@ function dragPanel(event) {
   event.preventDefault();
   const grip = $("file-panel-grip");
   grip.setPointerCapture(event.pointerId);
-  const box = $("layout").getBoundingClientRect();
+  const box = $("workspace-panes").getBoundingClientRect();
   let fraction = null;
-  const move = (e) => { fraction = panelWidth((box.right - e.clientX) / box.width); };
+  const move = (e) => {
+    const filesMain = app.workspaceMode === "files-chat";
+    const fileFraction = panelCoversScreen() ? (filesMain ? e.clientY - box.top : box.bottom - e.clientY) / box.height
+      : (filesMain ? e.clientX - box.left : box.right - e.clientX) / box.width;
+    fraction = panelWidth(filesMain ? 1 - fileFraction : fileFraction);
+  };
   const end = () => {
     grip.removeEventListener("pointermove", move);
     grip.removeEventListener("pointerup", end);
     grip.removeEventListener("pointercancel", end);
-    try { if (fraction !== null) localStorage.setItem(PANEL_WIDTH_KEY, String(fraction)); } catch (ignored) { /* kept for this page */ }
+    try { if (fraction !== null) localStorage.setItem(panelCoversScreen() ? PANEL_HEIGHT_KEY : PANEL_WIDTH_KEY, String(fraction)); } catch (ignored) { /* kept for this page */ }
   };
   grip.addEventListener("pointermove", move);
   grip.addEventListener("pointerup", end);
@@ -3624,12 +3746,17 @@ function dragPanel(event) {
 }
 
 function nudgePanel(event) {
-  if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+  const vertical = panelCoversScreen();
+  if (!(vertical ? ["ArrowUp", "ArrowDown"] : ["ArrowLeft", "ArrowRight"]).includes(event.key)) return;
   event.preventDefault();
-  const box = $("layout").getBoundingClientRect();
-  const now = $("file-panel").getBoundingClientRect().width / box.width;
-  const fraction = panelWidth(now + (event.key === "ArrowLeft" ? 0.05 : -0.05));
-  try { localStorage.setItem(PANEL_WIDTH_KEY, String(fraction)); } catch (ignored) { /* kept for this page */ }
+  const box = $("workspace-panes").getBoundingClientRect();
+  const panel = $("file-panel").getBoundingClientRect();
+  const now = vertical ? panel.height / box.height : panel.width / box.width;
+  const towardStart = event.key === "ArrowLeft" || event.key === "ArrowUp";
+  const filesMain = app.workspaceMode === "files-chat";
+  const fileFraction = now + (towardStart !== filesMain ? 0.05 : -0.05);
+  const fraction = panelWidth(filesMain ? 1 - fileFraction : fileFraction);
+  try { localStorage.setItem(vertical ? PANEL_HEIGHT_KEY : PANEL_WIDTH_KEY, String(fraction)); } catch (ignored) { /* kept for this page */ }
 }
 
 async function showFolders({ via = "push" } = {}) {
@@ -3779,6 +3906,44 @@ async function syncFoldersLink() {
 
 /* --------------------------------------------------------------- chrome */
 
+// Native snapshots animate layout without delaying `hidden`, cloning editors, or
+// interpolating widths during a drag. The DOM update is still committed exactly
+// once if a transition is skipped, fails, or another control is clicked quickly.
+let activeShellMotion = null;
+
+function finishShellMotion() {
+  const active = activeShellMotion;
+  if (!active) return;
+  activeShellMotion = null;
+  active.commit();
+  active.transition.skipTransition();
+}
+
+function shellMotion(update) {
+  finishShellMotion();
+  if (!document.startViewTransition || window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+    update();
+    return;
+  }
+  let committed = false;
+  const commit = () => {
+    if (committed) return;
+    committed = true;
+    update();
+  };
+  try {
+    const transition = document.startViewTransition(commit);
+    const active = { transition, commit };
+    activeShellMotion = active;
+    const clear = () => { if (activeShellMotion === active) activeShellMotion = null; };
+    transition.ready.catch(() => {}); // a snapshot can be skipped (e.g. a hidden tab)
+    transition.updateCallbackDone.catch(commit);
+    transition.finished.then(clear, clear);
+  } catch (error) {
+    commit(); // unsupported/declined snapshots never prevent a control from working
+  }
+}
+
 function closeChatMenu() {
   $("chat-menu").hidden = true;
   $("chat-menu-toggle").setAttribute("aria-expanded", "false");
@@ -3808,6 +3973,11 @@ function syncNavigation() {
 }
 
 function toggleNav() {
+  if (window.matchMedia("(min-width: 1100px)").matches) shellMotion(toggleNavNow);
+  else toggleNavNow(); // the compact drawer already has its own transform transition
+}
+
+function toggleNavNow() {
   const layout = $("layout");
   if (window.matchMedia("(min-width: 1100px)").matches) {
     layout.classList.toggle("is-nav-collapsed");
@@ -3826,7 +3996,13 @@ function toggleNav() {
 function autosize() {
   const box = $("composer-text");
   box.style.height = "auto";
-  box.style.height = `${Math.min(box.scrollHeight, 240)}px`;
+  let ceiling = 240;
+  const wrap = $("composer-wrap"), chat = $("surface-chat");
+  if (wrap.parentElement === chat && chat.clientHeight > 0) {
+    const chrome = wrap.getBoundingClientRect().height - box.getBoundingClientRect().height;
+    ceiling = Math.max(44, Math.min(ceiling, chat.clientHeight - chrome - 24));
+  }
+  box.style.height = `${Math.min(box.scrollHeight, ceiling)}px`;
 }
 
 const SANDBOX_TEXT = {
@@ -3881,6 +4057,7 @@ async function boot() {
     { attributes: true, attributeFilter: ["data-theme"] });
   window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => live.restyle());
   $("login-form").addEventListener("submit", signIn);
+  $("nav-appearance").addEventListener("click", loadMcpSettings);
   $("nav-sign-out").addEventListener("click", () => { $("appearance-dialog").close(); signOut(); });
   $("nav-trash").addEventListener("click", () => showTrash().catch((e) => status(e.message, "error")));
   $("nav-memory").addEventListener("click", () => {
@@ -3950,15 +4127,32 @@ async function boot() {
   document.addEventListener("keydown", shortcut);
   $("files-surface-slot").append(filesSurface.root);
   $("file-panel-slot").append(filesPanel.root);
+  for (const pane of [filesSurface, filesPanel]) {
+    // Bound the menu itself to the file pane; the toolbar never becomes a
+    // scrolling/clipping popover around a second menu.
+    let menuFrame = null;
+    const updateMenus = () => {
+      menuFrame = null;
+      pane.syncCompactPdfTools(window.matchMedia("(max-width: 767px)").matches);
+      pane.head.style.setProperty("--files-menu-height", `${Math.max(44, pane.root.clientHeight - pane.head.offsetHeight - 8)}px`);
+    };
+    const fitMenus = new ResizeObserver(() => {
+      if (menuFrame === null) menuFrame = requestAnimationFrame(updateMenus);
+    });
+    fitMenus.observe(pane.root);
+    fitMenus.observe(pane.head);
+  }
+  let composerFrame = null;
+  new ResizeObserver(() => {
+    if (composerFrame === null) composerFrame = requestAnimationFrame(() => { composerFrame = null; autosize(); });
+  }).observe($("surface-chat"));
   restorePanelWidth();
   $("nav-files").addEventListener("click", () => showFiles().catch((e) => status(e.message, "error")));
   $("chat-files-toggle").addEventListener("click", toggleFilesPanel);
-  $("file-panel-close").addEventListener("click", toggleFilesPanel);
   $("file-panel-changes").addEventListener("click", () => filesPanel.openChanges());
-  $("file-panel-expand").addEventListener("click",
-    () => setPanelExpanded(!$("layout").classList.contains("is-files-expanded")));
   $("file-panel-grip").addEventListener("pointerdown", dragPanel);
   $("file-panel-grip").addEventListener("keydown", nudgePanel);
+  new ResizeObserver(() => syncModelChrome()).observe($("topbar"));
   $("home-new-chat").addEventListener("click", newConversation);
   $("conversation-load-more").addEventListener("click", () => loadList(false).then(markSelected));
   $("composer").addEventListener("submit", sendMessage);
@@ -4020,32 +4214,23 @@ async function boot() {
     }
   });
   $("chat-menu-toggle").addEventListener("click", toggleChatMenu);
-  $("mobile-model-toggle").addEventListener("click", openModelDialog);
-  $("model-dialog-close").addEventListener("click", closeModelDialog);
-  $("model-dialog-done").addEventListener("click", closeModelDialog);
-  $("model-dialog").addEventListener("close", () => {
-    $("mobile-model-toggle").setAttribute("aria-expanded", "false");
-    if (!$("mobile-model-toggle").hidden) $("mobile-model-toggle").focus();
-  });
-  $("model-dialog").addEventListener("click", (event) => {
-    if (event.target !== $("model-dialog")) return;
-    const rect = event.target.getBoundingClientRect();
-    if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) closeModelDialog();
-  });
+  $("workspace-chat").addEventListener("click", workspaceChat);
+  $("workspace-files").addEventListener("click", workspaceFiles);
   $("app-fullscreen").addEventListener("click", toggleFullscreen);
+  $("sidebar-fullscreen").addEventListener("click", toggleFullscreen);
   document.addEventListener("fullscreenchange", syncFullscreen);
   $("chat-menu-rename").addEventListener("click", () => renameConversation());
   $("image-dialog-close").addEventListener("click", () => $("image-dialog").close());
   $("image-dialog").addEventListener("close", () => $("image-dialog-image").removeAttribute("src"));
   document.addEventListener("click", (event) => {
-    for (const menu of $("conversation-list").querySelectorAll("details[open]")) {
+    for (const menu of document.querySelectorAll("#conversation-list details[open], .files-head details[open]")) {
       if (!menu.contains(event.target)) menu.open = false;
     }
   });
   document.addEventListener("keydown", (event) => {
     if (event.key !== "Escape") return;
     closeChatMenu();
-    for (const menu of $("conversation-list").querySelectorAll("details[open]")) {
+    for (const menu of document.querySelectorAll("#conversation-list details[open], .files-head details[open]")) {
       menu.open = false;
       menu.querySelector("summary").focus();
     }
@@ -4075,6 +4260,7 @@ async function boot() {
     closeNav();
     $("server-details").open = false;
     syncModelChrome();
+    syncFilesPanel(!$("surface-chat").hidden);
   });
   try {
     const session = await api("GET", "/api/session");

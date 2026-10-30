@@ -333,15 +333,35 @@ export class FilesPane {
     this.folderActions = folderActions;
     this.folderRowActions = folderRowActions;
     this.root = el("div", "files-pane");
+    this.locations = [];
+    this.locationIndex = -1;
+    this.locationFailed = false;
+    this.backPending = false;
+    this.folderScrolls = new Map();
+    this.backButton = this.button("", () => this.back());
+    this.backButton.title = "Back";
+    this.backButton.className = "files-nav-button files-back";
+    this.backButton.setAttribute("aria-label", "Go back in files");
+    this.backButton.prepend(icon("#side-back"));
+    this.upButton = this.button("", () => this.up());
+    this.upButton.title = "Up";
+    this.upButton.className = "files-nav-button files-up";
+    this.upButton.setAttribute("aria-label", "Go to parent folder");
+    this.upButton.prepend(icon("#side-up"));
+    const navigation = el("div", "files-navigation");
+    navigation.append(this.backButton, this.upButton);
+    this.syncNavigation();
     this.crumbs = el("nav", "files-crumbs");
     this.crumbs.setAttribute("aria-label", "Path");
     this.tools = el("div", "files-tools");
     const head = el("div", "files-head");
+    this.head = head; // compact local controls; the shell fits menus to this pane's available height
     const end = el("div", "files-head-end"); // one group: it goes under the path together when the head is tight
     end.append(this.tools, ...actions); // the place's own controls (the panel's expand, close)
-    head.append(this.crumbs, end);
+    head.append(navigation, this.crumbs, end);
     this.body = el("div", "files-body");
-    this.root.append(head, this.body);
+    this.inkBar = el("div", "files-ink-bar");
+    this.root.append(head, this.inkBar, this.body);
     this.home = null; // the user's home as the server resolves ~
     this.folder = null; // the folder shown, or the file's folder
     this.file = null; // the file shown
@@ -356,6 +376,73 @@ export class FilesPane {
   /* Text typed in the editor, or ink drawn on a PDF (V3-P77 §4.5), and not saved. */
   get dirty() {
     return (this.doc !== null && this.doc.dirty) || (this.pdf !== null && this.pdf.view.ink.dirty);
+  }
+
+  /* On phones, PDF zoom/page controls share the horizontally scrollable ink
+   * row. Move the live controls, retaining their handlers and PDF state. */
+  syncCompactPdfTools(compact) {
+    const zoom = this.root.querySelector(".files-zoom-tools");
+    const page = this.root.querySelector(".files-page");
+    this.root.classList.toggle("has-compact-pdf-tools", compact && zoom !== null);
+    if (!zoom) return;
+    const host = compact ? this.inkBar : this.tools;
+    if (zoom.parentElement === host) return;
+    if (compact) {
+      host.append(zoom);
+      if (page) host.append(page);
+    } else {
+      host.prepend(zoom);
+      if (page) zoom.after(page);
+    }
+  }
+
+  // A successful read commits a move. Cancelled, failed and stale reads never
+  // consume the previous location; refreshes do not add duplicate entries.
+  rememberLocation(path, kind, index = null) {
+    const current = this.locations[this.locationIndex];
+    if (index !== null) this.locationIndex = index;
+    else if (!current || current.path !== path || current.kind !== kind) {
+      this.locations.splice(this.locationIndex + 1);
+      this.locations.push({ path, kind });
+      this.locationIndex = this.locations.length - 1;
+    }
+    this.locationFailed = false;
+    if (kind === "folder") this.body.scrollTop = this.folderScrolls.get(path) || 0;
+    this.syncNavigation();
+  }
+
+  saveLocationScroll() {
+    const here = this.locations[this.locationIndex];
+    if (here && here.kind === "folder" && !this.page && !this.locationFailed) {
+      this.folderScrolls.set(here.path, this.body.scrollTop);
+    }
+  }
+
+  syncNavigation() {
+    this.backButton.disabled = this.backPending || this.locationIndex < (this.locationFailed || this.page ? 0 : 1);
+    const here = this.locations[this.locationIndex];
+    this.upButton.disabled = !here || (here.kind === "folder" && here.path === "/");
+  }
+
+  async back() {
+    if (this.backButton.disabled) return;
+    const index = this.locationFailed || this.page ? this.locationIndex : this.locationIndex - 1;
+    const target = this.locations[index];
+    this.backPending = true;
+    this.syncNavigation();
+    try {
+      return await (target.kind === "file" ? this.openFile(target.path, index) : this.openFolder(target.path, { historyIndex: index }));
+    } finally {
+      this.backPending = false;
+      this.syncNavigation();
+    }
+  }
+
+  up() {
+    const here = this.locations[this.locationIndex];
+    if (!here || this.upButton.disabled) return;
+    const parent = here.path.slice(0, here.path.lastIndexOf("/")) || "/";
+    return this.openFolder(parent);
   }
 
   /* Before anything replaces the editor or the PDF: unsaved text or ink is dropped only if the user says so. */
@@ -393,6 +480,7 @@ export class FilesPane {
     }
     this.pdf = null;
     this.ink = null;
+    this.inkBar.replaceChildren();
     this.pageLabel = null;
     if (this.doc === null) return;
     clearTimeout(this.doc.pollTimer);
@@ -535,6 +623,11 @@ export class FilesPane {
    * last one's changes goes with its controls. */
   reset() {
     this.ticket += 1;
+    this.locations = [];
+    this.locationIndex = -1;
+    this.locationFailed = false;
+    this.folderScrolls.clear();
+    this.syncNavigation();
     const page = this.page;
     this.closeDoc();
     if (!page) return;
@@ -560,9 +653,9 @@ export class FilesPane {
   }
 
   /* Every move asks before unsaved text goes (mayLeave): none skips it (PR #95 re-review C1). */
-  /* ``keepScroll``: the same folder read again (after HIMARI's turn): the list stays where the user was. */
-  async openFolder(path, { keepScroll = false } = {}) {
+  async openFolder(path, { keepScroll = false, historyIndex = null } = {}) {
     if (!(await this.mayLeave())) return;
+    this.saveLocationScroll();
     const scrolled = keepScroll && path === this.folder ? this.body.scrollTop : 0;
     const ticket = ++this.ticket;
     this.closeDoc();
@@ -581,8 +674,10 @@ export class FilesPane {
       this.body.replaceChildren(list);
       this.appendRows(list, listing);
       if (!listing.entries.length) this.body.append(this.el("p", "files-note", "This folder is empty."));
-      this.body.scrollTop = scrolled; // the same folder again: where it was; another: its top
+      this.rememberLocation(listing.path, "folder", historyIndex);
+      if (historyIndex === null) this.body.scrollTop = scrolled;
       if (this.onOpenFolder) this.onOpenFolder(listing);
+      return true;
     } catch (error) {
       if (ticket === this.ticket) this.failed(path, error);
     }
@@ -656,7 +751,8 @@ export class FilesPane {
   /* A row's ⋯: the given actions, then (a file only) Download, and Copy path. */
   menu(path, name, given, isFile) {
     const actions = this.el("details", "conversation-actions files-actions");
-    const toggle = this.el("summary", null, "⋯");
+    const toggle = this.el("summary");
+    toggle.append(icon("#side-more"));
     toggle.setAttribute("aria-label", `Actions for ${name}`);
     toggle.title = `Actions for ${name}`;
     const list = this.el("div", "conversation-action-list");
@@ -698,8 +794,9 @@ export class FilesPane {
     return button;
   }
 
-  async openFile(path) {
+  async openFile(path, historyIndex = null) {
     if (!(await this.mayLeave())) return;
+    this.saveLocationScroll();
     const ticket = ++this.ticket;
     this.closeDoc();
     this.busy(path);
@@ -716,8 +813,11 @@ export class FilesPane {
       if (shown.kind === "text" && shown.editable) await this.edit(shown, ticket);
       else if (shown.kind === "pdf" && shown.size <= PDF_MAX_BYTES) await this.showPdf(shown, ticket);
       else this.body.replaceChildren(this.view(shown));
+      if (ticket !== this.ticket) return;
+      this.rememberLocation(shown.path, "file", historyIndex);
       if (!(shown.kind === "text" && shown.editable)) this.offerKeptAside(shown.path, ticket, false);
       if (this.onOpenFile) this.onOpenFile(shown);
+      return true;
     } catch (error) {
       if (ticket !== this.ticket) return;
       this.failed(path, error);
@@ -2091,6 +2191,7 @@ export class FilesPane {
 
   paintTools(shown, listing = null) {
     this.tools.replaceChildren();
+    this.inkBar.replaceChildren();
     this.stateLabel = null;
     if (shown) {
       if (shown.kind === "text" && shown.editable) {
@@ -2107,7 +2208,8 @@ export class FilesPane {
       }
       if (shown.kind === "pdf" && shown.size <= PDF_MAX_BYTES) {
         this.pageLabel = this.pagePicker();
-        this.tools.append(this.inkTools(), this.zoomTools(), this.pageLabel);
+        this.inkBar.append(this.inkTools());
+        this.tools.append(this.zoomTools(), this.pageLabel);
       }
       if (this.changes && this.changed.has(shown.path)) { // a dot after its name, to its change
         const review = this.el("button", "files-crumb files-changed-link");
@@ -2121,7 +2223,10 @@ export class FilesPane {
       this.tools.append(this.fileMenu(shown));
       return;
     }
-    const reload = this.el("button", "link-button", "Refresh");
+    const reload = this.el("button", "link-button files-icon-button");
+    reload.append(icon("#side-refresh"));
+    reload.title = "Refresh";
+    reload.setAttribute("aria-label", "Refresh");
     reload.type = "button";
     reload.addEventListener("click", () => this.refresh());
     this.tools.append(reload, this.newMenu(listing), this.folderMenu(listing));
@@ -2131,12 +2236,13 @@ export class FilesPane {
   /* The open file's ⋯: previous versions, download, copy path, delete. */
   fileMenu(shown) {
     const actions = this.el("details", "conversation-actions files-actions files-file-menu");
-    const toggle = this.el("summary", null, "⋯");
+    const toggle = this.el("summary");
+    toggle.append(icon("#side-more"));
     toggle.setAttribute("aria-label", "File actions");
     toggle.title = "File actions";
     const list = this.el("div", "conversation-action-list");
-    const item = (label, action) => {
-      const control = this.el("button", "link-button", label);
+    const item = (label, action, destructive = false) => {
+      const control = this.el("button", destructive ? "link-button danger-link" : "link-button", label);
       control.type = "button";
       control.addEventListener("click", () => { actions.open = false; action(); });
       return control;
@@ -2144,7 +2250,7 @@ export class FilesPane {
     if (this.onAsk) list.append(item("Ask HIMARI about this file", () => this.askWhole(shown)));
     if (shown.kind === "text" && shown.editable) list.append(item("Previous versions", () => this.showVersions()));
     list.append(this.download(shown.path, "Download"), this.copyPath(shown.path, () => { actions.open = false; }),
-                item("Delete", () => this.deleteFile()));
+                item("Delete", () => this.deleteFile(), true));
     actions.append(toggle, list);
     return actions;
   }
@@ -2152,7 +2258,8 @@ export class FilesPane {
   /* A folder's ⋯: files deleted from it whose content is kept, to put back (PR #95 review B3). */
   folderMenu(listing) {
     const actions = this.el("details", "conversation-actions files-actions files-folder-menu");
-    const toggle = this.el("summary", null, "⋯");
+    const toggle = this.el("summary");
+    toggle.append(icon("#side-more"));
     toggle.setAttribute("aria-label", "Folder actions");
     toggle.title = "Folder actions";
     const list = this.el("div", "conversation-action-list");
@@ -2264,8 +2371,10 @@ export class FilesPane {
   /* A folder's "New": a file (opened in the editor) or a folder, named in a row at the top. */
   newMenu(listing) {
     const actions = this.el("details", "conversation-actions files-actions files-new-menu");
-    const toggle = this.el("summary", "files-new-toggle", "New");
+    const toggle = this.el("summary", "files-new-toggle");
+    toggle.append(icon("#side-plus"));
     toggle.title = "New file or folder here";
+    toggle.setAttribute("aria-label", "New file or folder here");
     const list = this.el("div", "conversation-action-list");
     for (const [label, kind] of [["New file", "file"], ["New folder", "folder"]]) {
       const control = this.el("button", "link-button", label);
@@ -2337,6 +2446,7 @@ export class FilesPane {
 
   /* Files › Changes [› name]: the way back to the folder last shown. */
   paintPageCrumbs(name = null) {
+    this.syncNavigation();
     this.crumbs.replaceChildren();
     const back = this.el("button", "files-crumb", "Files");
     back.type = "button";
@@ -2576,6 +2686,8 @@ export class FilesPane {
   }
 
   failed(path, error) {
+    this.locationFailed = true;
+    this.syncNavigation();
     this.body.removeAttribute("aria-busy");
     this.paintCrumbs(path.startsWith("~") && this.home ? this.home + path.slice(1) : path, false);
     this.body.replaceChildren(this.el("p", "files-note is-error", error.message || "This could not be opened."));

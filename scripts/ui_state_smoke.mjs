@@ -38,6 +38,7 @@ function page() {
   };
   const context = vm.createContext({
     document: { getElementById: node, addEventListener() {}, createElement: (tag) => new FakeElement(tag) },
+    window: { matchMedia: () => ({ matches: false }) },
     AppViews: class { reset() {} }, FilesPane: class { refresh() {} openFolder() {} }, console, setTimeout, clearTimeout,
     LiveAnswer: class { reset() {} shown() {} keepLast() {} settle() {} open() {} restyle() {} },
     localStore, rememberLab() {}, location: { search: "" },
@@ -203,6 +204,47 @@ for (const scenario of ["same", "edited", "navigated", "failed", "stale-failure"
   await clicked;
   assert.equal(main.disabled, false);
   assert.equal(p.run("asked"), 1);
+}
+
+// Motion is optional: unsupported browsers and reduced-motion update immediately.
+for (const reduced of [false, true]) {
+  const p = page();
+  p.run(`var updates = 0; window = {matchMedia: () => ({matches: ${reduced}})};
+         ${reduced ? 'document.startViewTransition = () => { throw new Error("must not animate"); };' : ''}
+         shellMotion(() => { updates++; });`);
+  assert.equal(p.run("updates"), 1);
+}
+
+// Rapid shell clicks preserve order; a skipped native callback cannot replay an update.
+{
+  const p = page();
+  p.run(`var callbacks = [], updates = [], skipped = 0;
+         window = {matchMedia: () => ({matches: false})};
+         document.startViewTransition = (callback) => {
+           callbacks.push(callback);
+           return {ready: Promise.resolve(), updateCallbackDone: new Promise(() => {}),
+                   finished: new Promise(() => {}), skipTransition() { skipped++; }};
+         };
+         shellMotion(() => updates.push(1));
+         shellMotion(() => updates.push(2));`);
+  assert.equal(p.run("JSON.stringify(updates)"), "[1]");
+  p.run("callbacks[0](); callbacks[1](); callbacks[1](); finishShellMotion();");
+  assert.equal(p.run("JSON.stringify(updates)"), "[1,2]");
+  assert.equal(p.run("skipped"), 2);
+}
+
+// Snapshot failure still commits once, whether failure was synchronous or asynchronous.
+for (const asyncFailure of [false, true]) {
+  const p = page();
+  p.run(`var updates = 0; window = {matchMedia: () => ({matches: false})};
+         document.startViewTransition = () => {
+           ${asyncFailure ? 'return {ready: Promise.reject(new Error("snapshot")), updateCallbackDone: Promise.reject(new Error("snapshot")), finished: Promise.reject(new Error("snapshot")), skipTransition() {}};' : 'throw new Error("snapshot");'}
+         };
+         shellMotion(() => { updates++; });`);
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(p.run("updates"), 1);
+  p.run("finishShellMotion()");
+  assert.equal(p.run("updates"), 1);
 }
 
 // V3-P78 §3.1: each conversation has its own draft; Home's goes into the conversation it starts.
@@ -414,4 +456,4 @@ for (const scenario of ["same", "edited", "navigated", "failed", "stale-failure"
   assert.equal(p.run("drafts.get('theirs').references[0].identity[0]"), "9", "followed in memory");
 }
 
-console.log("UI async regression checks: 25 passed");
+console.log("UI async regression checks: passed (activity, drafts, keyboard and shell motion)");

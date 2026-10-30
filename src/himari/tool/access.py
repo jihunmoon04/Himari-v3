@@ -28,6 +28,12 @@ class ConfiguredExternalAccess:
         self._defaults = dict(defaults)
         self._settings = settings
 
+    def set_default(self, source: str, enabled: bool) -> None:
+        """Update a configured source; the next access check uses it."""
+        if source not in self._defaults:
+            raise KeyError(source)
+        self._defaults[source] = enabled
+
     async def enabled_sources(self, scope: TrustedScope) -> frozenset[str]:
         chosen = {s.source: s.enabled for s in await self._settings.read_external_settings(scope)}
         return frozenset(source for source, default in self._defaults.items() if chosen.get(source, default))
