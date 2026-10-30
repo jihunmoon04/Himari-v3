@@ -50,7 +50,7 @@ public partial class MainWindow
                     }
                     else if (type == "revoked")
                     {
-                        DeleteActiveIfCurrent(local); StopConnection(); PairPanel.Visibility = Visibility.Visible; ChatPanel.Visibility = Visibility.Collapsed;
+                        DeleteActiveIfCurrent(local); StopConnection(); PairPanel.Visibility = Visibility.Visible;
                         SetConnected(false, "기기 연결이 해제되었습니다. 다시 짝짓기해 주세요."); return;
                     }
                     else if (type == "replaced") { Status.Text = "다른 히마리 앱이 연결되어 이 앱을 종료합니다."; Close(); return; }
@@ -62,7 +62,7 @@ public partial class MainWindow
             catch (ApiException ex) when (ex.Status == HttpStatusCode.Unauthorized)
             {
                 if (ct.IsCancellationRequested || !ReferenceEquals(local, client)) return;
-                DeleteActiveIfCurrent(local); StopConnection(); PairPanel.Visibility = Visibility.Visible; ChatPanel.Visibility = Visibility.Collapsed;
+                DeleteActiveIfCurrent(local); StopConnection(); PairPanel.Visibility = Visibility.Visible;
                 SetConnected(false, "인증이 만료되었습니다. 다시 짝짓기해 주세요."); return;
             }
             catch (Exception ex)
@@ -105,7 +105,7 @@ public partial class MainWindow
     }
     private async Task LiveLoop(string id, ServerClient local, CancellationToken ct)
     {
-        var display = new LiveDisplayState(); int delay = 1;
+        var display = new LiveDisplayState(); int delay = 1; bool opened = false;
         try
         {
             while (!ct.IsCancellationRequested)
@@ -118,9 +118,11 @@ public partial class MainWindow
                         if (type is "snapshot" or "delta")
                         {
                             display.Apply(type, Str(data, "run_id"), Str(data, "text") ?? "", Prop(data, "moods"));
+                            ReceiveMoves(id, Str(data, "job_id"), Str(data, "run_id"), type == "snapshot", Prop(data, "moves"), display.Text.EnumerateRunes().Count());
                             liveDisplays[id] = (display.Text, display.Mood);
                             if (id == currentConversation)
                             {
+                                if (!opened) { OpenBubble(); opened = true; }
                                 Message.Text = display.Text;
                                 SetMood(display.Mood);
                                 talking = true;
@@ -148,7 +150,7 @@ public partial class MainWindow
             if (liveStreams.TryGetValue(id, out var source) && source.Token == ct && !ct.IsCancellationRequested)
             {
                 liveStreams.Remove(id); liveDisplays.Remove(id); source.Dispose();
-                if (currentConversation == id) { talking = false; SetMood("neutral"); }
+                if (currentConversation == id) { talking = false; SetMood("neutral"); ScheduleBubbleClose(Message.Text); }
                 if (connected && currentConversation == id) Status.Text = "연결됨";
                 if (currentConversation == id && connection is not null)
                     try { await ReadConversation(id, connection.Token); } catch (Exception ex) { ShowError(ex); }

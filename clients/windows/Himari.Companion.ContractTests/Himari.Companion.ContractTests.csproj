@@ -9,5 +9,10 @@
     <Compile Include="..\Himari.Companion\DisplayState.cs" Link="DisplayState.cs" />
     <Compile Include="..\Himari.Companion\ConnectionGate.cs" Link="ConnectionGate.cs" />
     <Compile Include="..\Himari.Companion\SendContext.cs" Link="SendContext.cs" />
+    <Compile Include="..\Himari.Companion\WindowPreferences.cs" Link="WindowPreferences.cs" />
+    <Compile Include="..\Himari.Companion\HistoryReader.cs" Link="HistoryReader.cs" />
+    <Compile Include="..\Himari.Companion\CharacterTheme.cs" Link="CharacterTheme.cs" />
+    <Compile Include="..\Himari.Companion\ScreenMove.cs" Link="ScreenMove.cs" />
+    <Compile Include="..\Himari.Companion\MessageFailure.cs" Link="MessageFailure.cs" />
   </ItemGroup>
 </Project>

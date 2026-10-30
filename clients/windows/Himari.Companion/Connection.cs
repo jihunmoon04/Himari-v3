@@ -96,7 +96,7 @@ public partial class MainWindow
         StopConnection();
         var local = new ServerClient(address, token); client = local;
         var cts = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token); connection = cts;
-        PairPanel.Visibility = Visibility.Collapsed; ChatPanel.Visibility = Visibility.Visible;
+        PairPanel.Visibility = Visibility.Collapsed;
         SetConnected(false, "기기 확인 중…");
         _ = ConnectLoop(local, cts);
     }
@@ -119,7 +119,7 @@ public partial class MainWindow
             catch (ApiException ex) when (ex.Status == HttpStatusCode.Unauthorized)
             {
                 if (cts.IsCancellationRequested || !ReferenceEquals(local, client)) return;
-                DeleteActiveIfCurrent(local); StopConnection(); PairPanel.Visibility = Visibility.Visible; ChatPanel.Visibility = Visibility.Collapsed;
+                DeleteActiveIfCurrent(local); StopConnection(); PairPanel.Visibility = Visibility.Visible;
                 SetConnected(false, "다시 짝짓기가 필요합니다."); return;
             }
             catch (Exception ex)
@@ -183,7 +183,7 @@ public partial class MainWindow
         var question = ConversationView.Question(detail);
         if (id != currentConversation) return;
         if (connected) Status.Text = ConversationView.IsRunning(detail) ? "이 대화는 작업 중입니다. 새 대화를 열 수 있습니다." : "연결됨";
-        if (question is not null) { Message.Text = question; Input.Focus(); return; }
+        if (question is not null) { OpenComposer(); Message.Text = question; Input.Focus(); return; }
         if (liveDisplays.TryGetValue(id, out var display)) { Message.Text = display.Text; SetMood(display.Mood); return; }
         var sequence = Prop(Prop(detail, "conversation"), "last_sequence");
         int lastSequence = sequence.ValueKind == JsonValueKind.Number && sequence.TryGetInt32(out int n) ? n : 0;
@@ -216,6 +216,7 @@ public partial class MainWindow
     private void SetCurrentConversation(string? id)
     {
         if (currentConversation != id) inputRevision++;
+        if (currentConversation != id && autoMoveActive) ReturnFromMove();
         currentConversation = id;
     }
     private void SendClick(object sender, RoutedEventArgs e) => SendMessage();
@@ -223,25 +224,85 @@ public partial class MainWindow
     {
         if (!connected || client is null || connection is null || currentConversation is null) return;
         string text = Input.Text.Trim(); int length = text.EnumerateRunes().Count();
-        if (length is < 1 or > 32000) { Status.Text = "메시지는 1~32,000자로 입력해 주세요."; return; }
+        bool wantsScreen = ScreenOnce.IsChecked == true;
+        if (length > 32000 || (length == 0 && !wantsScreen && unresolvedScreen is null)) { Status.Text = "메시지를 입력하거나 화면 첨부를 선택해 주세요 (최대 32,000자)."; return; }
+        if (unresolvedScreen is { } unresolved && (unresolved.Conversation != currentConversation || unresolved.Text != text)) { Status.Text = "이전 화면 메시지의 전송 여부를 먼저 확인해 주세요. 원래 대화와 입력으로 돌아가 다시 보내기를 누르세요."; return; }
         if (!messageSend.TryEnter()) return;
         var local = client; var ct = connection.Token;
         var context = new SendContext(local, currentConversation, inputRevision);
         sending = true;
         SendButton.IsEnabled = false;
+        LocalScreen? screen = null;
+        bool screenFailed = false;
         try
         {
-            await local.SendAsync(HttpMethod.Post, PathFor(context.ConversationId) + "/messages", new { text }, ct);
+            if (unresolvedScreen is { } retry)
+            {
+                if (DateTimeOffset.UtcNow - retry.Screen.CapturedAt > TimeSpan.FromMinutes(10)) { unresolvedScreen = null; Status.Text = "이전 화면이 만료되었습니다. 전송 여부를 기록에서 확인한 뒤 다시 보내세요. 중복될 수 있습니다."; return; }
+                screen = retry.Screen;
+            }
+            else if (wantsScreen)
+            {
+                try
+                {
+                    Status.Text = "화면을 캡처하고 있습니다…";
+                    var captured = await CaptureScreenAsync(ct);
+                    Status.Text = "화면을 캡처해 업로드 중입니다…";
+                    var upload = await local.UploadScreenAsync(context.ConversationId, captured.Bytes, captured.ContentType, ct);
+                    string fileId = Str(upload, "file_id") ?? throw new InvalidOperationException("화면 업로드 응답이 올바르지 않습니다.");
+                    screen = new(fileId, captured.Geometry, captured.CapturedAt);
+                    localScreens[fileId] = screen;
+                }
+                catch (OperationCanceledException) { throw; }
+                catch (Exception) { screenFailed = true; if (length == 0) { Status.Text = "화면을 보내지 못했습니다. 다시 시도해 주세요."; return; } }
+            }
+            if (screen is not null || localScreens.Count > 0) pendingScreenConversation = context.ConversationId;
+            JsonElement response;
+            try
+            {
+                response = await local.SendAsync(HttpMethod.Post, PathFor(context.ConversationId) + "/messages", screen is null ? new { text } : new { text, screen = screen.FileId }, ct);
+                unresolvedScreen = null;
+            }
+            catch (ApiException ex) when (screen is not null && ex.Code == "screen_already_sent")
+            {
+                unresolvedScreen = null; earlyMoves.Remove(context.ConversationId);
+                if (context.IsCurrent(client, currentConversation, connected)) { if (context.CanClear(client, currentConversation, connected, inputRevision)) Input.Clear(); await ReadConversation(context.ConversationId, ct); Status.Text = "이전에 보낸 화면 메시지를 확인했습니다."; }
+                return;
+            }
+            catch (ApiException ex) when (screen is not null && MessageFailures.Classify(ex) == MessageFailure.Closed)
+            {
+                unresolvedScreen = null;
+                try { await ReadConversation(context.ConversationId, ct); } catch (Exception) { }
+                Status.Text = "이 대화는 닫혔습니다. 메시지가 기록됐을 수 있으니 기록을 확인해 주세요.";
+                return;
+            }
+            catch (Exception ex) when (screen is not null && MessageFailures.Classify(ex) == MessageFailure.Unknown)
+            {
+                unresolvedScreen = (context.ConversationId, text, screen);
+                Status.Text = "화면 메시지가 전송됐는지 확인하지 못했습니다. 같은 내용으로 다시 보내면 확인합니다.";
+                return;
+            }
+            catch (ApiException ex) when (screen is not null && ex.Code == "busy")
+            {
+                unresolvedScreen = (context.ConversationId, text, screen);
+                Status.Text = "이 대화가 작업 중입니다. 끝난 뒤 같은 화면으로 다시 보낼 수 있습니다.";
+                return;
+            }
+            string? jobId = Str(response, "job_id");
+            if (screen is null && jobId is not null && localScreens.Count > 0)
+                try { screen = await FindLatestLocalScreen(local, context.ConversationId, jobId, ct); } catch (Exception) when (!ct.IsCancellationRequested) { /* No verified screen means no movement. */ }
+            BeginMoveJob(context.ConversationId, jobId, screen);
             if (context.CanClear(client, currentConversation, connected, inputRevision)) Input.Clear();
+            ScreenOnce.IsChecked = shareEveryMessage;
             if (context.IsCurrent(client, currentConversation, connected) && !liveDisplays.ContainsKey(context.ConversationId))
-            { Status.Text = "답변을 기다리는 중…"; SetMood("thinking"); }
+            { OpenBubble(); Status.Text = screenFailed ? "화면을 보내지 못해 글만 보냈습니다." : "답변을 기다리는 중…"; SetMood("thinking"); }
         }
         catch (Exception ex)
         {
             if (context.IsCurrent(client, currentConversation, connected)) ShowError(ex);
             else if (ex is ApiException { Code: "device_scope" }) Trace.TraceWarning("HIMARI device_scope: message request denied.");
         }
-        finally { sending = false; messageSend.Exit(); SendButton.IsEnabled = connected; }
+        finally { pendingScreenConversation = null; earlyMoves.Remove(context.ConversationId); sending = false; messageSend.Exit(); SendButton.IsEnabled = connected; }
     }
     private async void CancelClick(object sender, RoutedEventArgs e)
     {
@@ -250,6 +311,12 @@ public partial class MainWindow
         catch (Exception ex) { ShowError(ex); }
     }
     private void OpenWebClick(object sender, RoutedEventArgs e) => OpenWeb();
+    private void HistoryClick(object sender, RoutedEventArgs e)
+    {
+        if (!connected || client is null || connection is null || currentConversation is null) return;
+        var title = (Conversations.SelectedItem as Conversation)?.Title ?? "대화";
+        new HistoryWindow(this, client, currentConversation, title, connection.Token).Show();
+    }
     private void DeleteActiveIfCurrent(ServerClient source)
     {
         var stored = vault.Active();
