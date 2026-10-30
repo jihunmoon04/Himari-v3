@@ -50,7 +50,7 @@ public partial class MainWindow
                     }
                     else if (type == "revoked")
                     {
-                        CredentialStore.DeleteActive(); StopConnection(); PairPanel.Visibility = Visibility.Visible; ChatPanel.Visibility = Visibility.Collapsed;
+                        DeleteActiveIfCurrent(local); StopConnection(); PairPanel.Visibility = Visibility.Visible; ChatPanel.Visibility = Visibility.Collapsed;
                         SetConnected(false, "기기 연결이 해제되었습니다. 다시 짝짓기해 주세요."); return;
                     }
                     else if (type == "replaced") { Status.Text = "다른 히마리 앱이 연결되어 이 앱을 종료합니다."; Close(); return; }
@@ -61,11 +61,13 @@ public partial class MainWindow
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { return; }
             catch (ApiException ex) when (ex.Status == HttpStatusCode.Unauthorized)
             {
-                CredentialStore.DeleteActive(); StopConnection(); PairPanel.Visibility = Visibility.Visible; ChatPanel.Visibility = Visibility.Collapsed;
+                if (ct.IsCancellationRequested || !ReferenceEquals(local, client)) return;
+                DeleteActiveIfCurrent(local); StopConnection(); PairPanel.Visibility = Visibility.Visible; ChatPanel.Visibility = Visibility.Collapsed;
                 SetConnected(false, "인증이 만료되었습니다. 다시 짝짓기해 주세요."); return;
             }
             catch (Exception ex)
             {
+                if (ct.IsCancellationRequested || !ReferenceEquals(local, client)) return;
                 CancelLive();
                 if (ex is ApiException { Code: "device_scope" }) System.Diagnostics.Trace.TraceWarning("HIMARI device_scope: event stream denied.");
                 SetConnected(false, ex is ApiException { Code: "companion_off" } ? "서버에서 반려 기능이 꺼져 있습니다." : "연결이 끊겼습니다. 다시 연결 중…");
@@ -103,7 +105,7 @@ public partial class MainWindow
     }
     private async Task LiveLoop(string id, ServerClient local, CancellationToken ct)
     {
-        string? run = null; var text = new StringBuilder(); int delay = 1; string currentMood = "neutral";
+        var display = new LiveDisplayState(); int delay = 1;
         try
         {
             while (!ct.IsCancellationRequested)
@@ -115,20 +117,12 @@ public partial class MainWindow
                         delay = 1;
                         if (type is "snapshot" or "delta")
                         {
-                            string? newRun = Str(data, "run_id");
-                            if (type == "snapshot" || newRun != run) { text.Clear(); run = newRun; }
-                            text.Append(Str(data, "text"));
-                            int count = text.ToString().EnumerateRunes().Count();
-                            foreach (var mark in Items(Prop(data, "moods")))
-                            {
-                                var offset = Prop(mark, "at");
-                                if (offset.ValueKind == JsonValueKind.Number && offset.TryGetInt32(out var at) && at >= 0 && at <= count) currentMood = Str(mark, "mood") ?? "neutral";
-                            }
-                            liveDisplays[id] = (text.ToString(), currentMood);
+                            display.Apply(type, Str(data, "run_id"), Str(data, "text") ?? "", Prop(data, "moods"));
+                            liveDisplays[id] = (display.Text, display.Mood);
                             if (id == currentConversation)
                             {
-                                Message.Text = text.ToString();
-                                SetMood(currentMood);
+                                Message.Text = display.Text;
+                                SetMood(display.Mood);
                                 talking = true;
                                 Status.Text = "답변 중…";
                             }

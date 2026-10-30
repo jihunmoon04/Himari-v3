@@ -78,6 +78,34 @@ Check(ConversationView.Question(waiting) == "어떻게 할까요?", "ask_user qu
 await scenarioClient.SendAsync(HttpMethod.Post, "/api/conversations/c1/messages", new { text = "계속해" }, CancellationToken.None);
 waiting = await scenarioClient.SendAsync(HttpMethod.Get, "/api/conversations/c1", null, CancellationToken.None);
 Check(scenario.Answer == "계속해" && ConversationView.Question(waiting) is null, "question answer and completion");
+using (var marks = JsonDocument.Parse("[{\"at\":0,\"mood\":\"happy\"},{\"at\":2,\"mood\":\"worried\"}]"))
+using (var emptyMarks = JsonDocument.Parse("[]"))
+using (var unknown = JsonDocument.Parse("[{\"at\":0,\"mood\":\"unknown\"}]"))
+{
+    var live = new LiveDisplayState();
+    live.Apply("snapshot", "r1", "😀", marks.RootElement);
+    Check(live.Mood == "happy", "mood offsets use Unicode code points");
+    live.Apply("delta", "r1", "가", marks.RootElement);
+    Check(live.Mood == "worried", "later mood after delta");
+    live.Apply("snapshot", "r2", "새 답", emptyMarks.RootElement);
+    Check(live.Text == "새 답" && live.Mood == "neutral", "new run resets mood");
+    live.Apply("delta", "r3", "다음", emptyMarks.RootElement);
+    Check(live.Text == "다음" && live.Mood == "neutral", "run change without snapshot resets state");
+    Check(DisplayState.Mood(marks.RootElement, 2) == "worried", "saved final restores last mood");
+    Check(DisplayState.Mood(emptyMarks.RootElement, 5) == "neutral", "missing mood resets to neutral");
+    Check(DisplayState.Mood(unknown.RootElement, 1) == "neutral", "unknown mood fallback");
+}
+var gate = new ConnectionGate();
+Check(gate.TryEnter(), "first connection operation enters");
+Check(!gate.TryEnter(), "concurrent pairing is rejected");
+using (var gateCancel = new CancellationTokenSource())
+{
+    var waitingForGate = gate.EnterAsync(gateCancel.Token);
+    Check(!waitingForGate.IsCompleted, "restore waits for pairing");
+    gateCancel.Cancel();
+    try { await waitingForGate; throw new Exception("gate cancellation ignored"); } catch (OperationCanceledException) { }
+}
+gate.Exit(); await gate.EnterAsync(CancellationToken.None); gate.Exit();
 Console.WriteLine("Contract transport checks passed.");
 
 sealed class FakeHandler(string token) : HttpMessageHandler

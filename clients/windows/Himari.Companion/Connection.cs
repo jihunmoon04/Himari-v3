@@ -19,6 +19,8 @@ public partial class MainWindow
     private string? deviceId, currentConversation;
     private bool connected, changingSelection;
     private DateTime? awaySince;
+    private readonly ConnectionGate connectionChange = new();
+    private readonly CancellationTokenSource lifetime = new();
     private readonly ICredentialVault vault = new WindowsCredentialVault();
     private PairingCoordinator Pairing() => new(vault, c => new ServerClient(c.Server, c.Token));
 
@@ -40,6 +42,7 @@ public partial class MainWindow
     }
     private async Task RestoreConnection()
     {
+        try { await connectionChange.EnterAsync(lifetime.Token); } catch (OperationCanceledException) { return; }
         try
         {
             var stored = vault.Active();
@@ -48,45 +51,55 @@ public partial class MainWindow
             {
                 try
                 {
-                    using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+                    using var timeout = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token); timeout.CancelAfter(TimeSpan.FromSeconds(10));
                     stored = await Pairing().RecoverPendingAsync(timeout.Token) ?? stored;
                 }
                 catch (Exception) { /* Preserve both records; an offline pending attempt can be retried later. */ }
             }
+            if (lifetime.IsCancellationRequested) return;
             if (stored is null)
             {
                 if (pending is not null) ServerAddress.Text = pending.Server;
                 SetConnected(false, pending is null ? "Web에서 짝짓기 코드를 발급해 주세요." : "짝짓기 코드를 입력해 연결을 다시 시도해 주세요."); return;
             }
             ServerAddress.Text = stored.Server;
-            await StartConnection(stored.Server, stored.Token);
+            StartConnection(stored.Server, stored.Token);
         }
         catch (Exception ex) { ShowError(ex); }
+        finally { connectionChange.Exit(); }
     }
     private async void PairClick(object sender, RoutedEventArgs e)
     {
         string address = ServerAddress.Text.Trim(), code = PairCode.Text.Trim();
         if (string.IsNullOrWhiteSpace(code)) { Status.Text = "짝짓기 코드를 입력해 주세요."; return; }
+        if (!connectionChange.TryEnter()) { Status.Text = "다른 연결 작업이 진행 중입니다."; return; }
+        PairButton.IsEnabled = false;
         try
         {
             // Verify the URL before touching the existing credential.
             using var validator = new ServerClient(address, "unused");
             string canonical = validator.BaseUri.ToString();
-            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token); timeout.CancelAfter(TimeSpan.FromSeconds(20));
             Status.Text = "기기 연결 중…";
             var paired = await Pairing().PairAsync(canonical, code, timeout.Token);
+            if (lifetime.IsCancellationRequested) return;
             PairCode.Clear();
-            await StartConnection(paired.Server, paired.Token);
+            StartConnection(paired.Server, paired.Token);
         }
         catch (Exception ex) { ShowError(ex); }
+        finally { PairButton.IsEnabled = true; connectionChange.Exit(); }
     }
-    private async Task StartConnection(string address, string token)
+    private void StartConnection(string address, string token)
     {
         StopConnection();
         var local = new ServerClient(address, token); client = local;
-        var cts = new CancellationTokenSource(); connection = cts;
+        var cts = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token); connection = cts;
         PairPanel.Visibility = Visibility.Collapsed; ChatPanel.Visibility = Visibility.Visible;
         SetConnected(false, "기기 확인 중…");
+        _ = ConnectLoop(local, cts);
+    }
+    private async Task ConnectLoop(ServerClient local, CancellationTokenSource cts)
+    {
         int delay = 1;
         while (!cts.IsCancellationRequested)
         {
@@ -94,18 +107,22 @@ public partial class MainWindow
             {
                 using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cts.Token); timeout.CancelAfter(TimeSpan.FromSeconds(20));
                 var info = await local.SendAsync(HttpMethod.Get, "/api/device", null, timeout.Token);
+                if (cts.IsCancellationRequested || !ReferenceEquals(local, client)) return;
                 deviceId = Str(Prop(info, "device"), "device_id") ?? throw new InvalidOperationException("기기 응답이 올바르지 않습니다.");
                 await RefreshConversations(Str(Prop(info, "recent_conversation"), "id"), timeout.Token);
+                if (cts.IsCancellationRequested || !ReferenceEquals(local, client)) return;
                 _ = EventLoop(local, cts.Token); _ = PresenceLoop(local, cts.Token); return;
             }
             catch (OperationCanceledException) when (cts.IsCancellationRequested) { return; }
             catch (ApiException ex) when (ex.Status == HttpStatusCode.Unauthorized)
             {
-                StopConnection(); CredentialStore.DeleteActive(); PairPanel.Visibility = Visibility.Visible; ChatPanel.Visibility = Visibility.Collapsed;
+                if (cts.IsCancellationRequested || !ReferenceEquals(local, client)) return;
+                DeleteActiveIfCurrent(local); StopConnection(); PairPanel.Visibility = Visibility.Visible; ChatPanel.Visibility = Visibility.Collapsed;
                 SetConnected(false, "다시 짝짓기가 필요합니다."); return;
             }
             catch (Exception ex)
             {
+                if (cts.IsCancellationRequested || !ReferenceEquals(local, client)) return;
                 SetConnected(false, ex is ApiException { Code: "companion_off" } ? "서버에서 반려 기능이 꺼져 있습니다." : "기기 연결을 다시 시도합니다…");
                 int wait = ex is ApiException { Code: "companion_off" } ? 300 : delay;
                 delay = Math.Min(30, delay * 2);
@@ -115,7 +132,6 @@ public partial class MainWindow
     }
     private async void Reconnect()
     {
-        StopConnection(); PairPanel.Visibility = Visibility.Visible; ChatPanel.Visibility = Visibility.Collapsed;
         await RestoreConnection();
     }
     private void ShowError(Exception ex)
@@ -167,18 +183,23 @@ public partial class MainWindow
         if (liveDisplays.TryGetValue(id, out var display)) { Message.Text = display.Text; SetMood(display.Mood); return; }
         var sequence = Prop(Prop(detail, "conversation"), "last_sequence");
         int lastSequence = sequence.ValueKind == JsonValueKind.Number && sequence.TryGetInt32(out int n) ? n : 0;
-        int after = Math.Max(0, lastSequence - 100); string? lastText = null;
+        int after = Math.Max(0, lastSequence - 100); string? lastText = null; string lastMood = "neutral";
         while (true)
         {
             var history = await client.SendAsync(HttpMethod.Get, PathFor(id) + $"/events?after={after}&limit=100", null, ct);
             var page = Items(Prop(history, "items")).ToList();
             foreach (var item in page)
-                if (Str(item, "kind") == "assistant_final") lastText = Str(Prop(item, "display"), "text") ?? lastText;
+                if (Str(item, "kind") == "assistant_final")
+                {
+                    var finalDisplay = Prop(item, "display"); var value = Str(finalDisplay, "text");
+                    if (value is not null) { lastText = value; lastMood = DisplayState.Mood(Prop(finalDisplay, "moods"), value.EnumerateRunes().Count()); }
+                }
             if (lastText is not null || after == 0) break;
             after = Math.Max(0, after - 100);
         }
         if (id != currentConversation || liveStreams.ContainsKey(id)) return;
         Message.Text = lastText ?? "대화를 시작해 주세요.";
+        SetMood(lastText is null ? "neutral" : lastMood);
     }
     private async void NewConversationClick(object sender, RoutedEventArgs e)
     {
@@ -210,6 +231,11 @@ public partial class MainWindow
         catch (Exception ex) { ShowError(ex); }
     }
     private void OpenWebClick(object sender, RoutedEventArgs e) => OpenWeb();
+    private void DeleteActiveIfCurrent(ServerClient source)
+    {
+        var stored = vault.Active();
+        if (stored is not null && source.Matches(stored)) CredentialStore.DeleteActive();
+    }
     private void OpenWeb() { if (client is not null) Process.Start(new ProcessStartInfo(client.BaseUri.ToString()) { UseShellExecute = true }); }
 
     [StructLayout(LayoutKind.Sequential)] private struct LastInput { internal uint Size, Time; }

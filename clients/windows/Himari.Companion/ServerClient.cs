@@ -19,6 +19,7 @@ internal sealed class ServerClient : IDisposable
     private readonly HttpClient http;
     private readonly string token;
     internal Uri BaseUri { get; }
+    internal bool Matches(DeviceCredential credential) => credential.Server == BaseUri.ToString() && credential.Token == token;
     internal ServerClient(string address, string token) : this(address, token, new HttpClientHandler { UseCookies = false, AllowAutoRedirect = false }) { }
     internal ServerClient(string address, string token, HttpMessageHandler handler)
     {

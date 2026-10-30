@@ -32,7 +32,7 @@ public partial class MainWindow : Window
         timer.Tick += (_, _) => UpdateFrame();
         timer.Start();
         Loaded += async (_, _) => await RestoreConnection();
-        Closed += (_, _) => { StopConnection(); timer.Stop(); tray.Visible = false; tray.Dispose(); menu.Dispose(); };
+        Closed += (_, _) => { lifetime.Cancel(); StopConnection(); timer.Stop(); tray.Visible = false; tray.Dispose(); menu.Dispose(); };
         UpdateFrame();
     }
 

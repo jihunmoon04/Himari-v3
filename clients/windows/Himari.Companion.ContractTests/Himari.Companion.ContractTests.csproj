@@ -6,5 +6,7 @@
     <Compile Include="..\Himari.Companion\PairingCoordinator.cs" Link="PairingCoordinator.cs" />
     <Compile Include="..\Himari.Companion\ConversationView.cs" Link="ConversationView.cs" />
     <Compile Include="..\Himari.Companion\HelloReconciliation.cs" Link="HelloReconciliation.cs" />
+    <Compile Include="..\Himari.Companion\DisplayState.cs" Link="DisplayState.cs" />
+    <Compile Include="..\Himari.Companion\ConnectionGate.cs" Link="ConnectionGate.cs" />
   </ItemGroup>
 </Project>
