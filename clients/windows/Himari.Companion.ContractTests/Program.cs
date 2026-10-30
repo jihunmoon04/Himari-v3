@@ -105,6 +105,29 @@ using (var detail = JsonDocument.Parse("{\"waiting\":{\"question\":{\"display\":
 using (var detail = JsonDocument.Parse("{\"waiting\":{\"question\":\"raw\",\"display\":{\"text\":\"clean\"}},\"job\":{\"running\":false}}"))
     Check(ConversationView.Question(detail.RootElement) == "clean" && !ConversationView.IsRunning(detail.RootElement), "display wins and question completion");
 
+var declinedVault = new FakeVault { ActiveValue = new DeviceCredential("https://old.example/", "old-token", null) };
+var declinedServer = new PairHandler();
+var originalCredential = declinedVault.ActiveValue;
+int switchPrompts = 0;
+var declinedPairing = new PairingCoordinator(declinedVault, c => new ServerClient(c.Server, c.Token, new SharedHandler(declinedServer)), approveChange: _ =>
+{
+    switchPrompts++;
+    Check(declinedVault.ActiveValue == originalCredential && declinedVault.PendingValue is null, "approval requested before any credential write");
+    return false;
+});
+try { await declinedPairing.PairAsync("https://example.com/", "NEW-CODE", CancellationToken.None); throw new Exception("declined switch continued"); }
+catch (DeviceSwitchDeclinedException) { }
+Check(switchPrompts == 1 && declinedServer.AttemptedTokens.Count == 0 && declinedVault.ActiveValue == originalCredential && declinedVault.PendingValue is null, "declined switch preserves active and pending credentials without pairing request");
+using (var oldRecoveryOwner = new ServerClient("https://old.example/", "old-token", new SharedHandler(declinedServer)))
+    Check(oldRecoveryOwner.Matches(declinedVault.Active()!), "reconnect after declined pairing selects original recovery identity");
+// A prior successful-but-unpromoted pairing must also ask before changing Active.
+declinedVault.PendingValue = new DeviceCredential("https://example.com/", "new-token", null);
+var pendingBeforeDecline = declinedVault.PendingValue;
+var declinedRecovery = new PairingCoordinator(declinedVault, c => new ServerClient(c.Server, c.Token, new SharedHandler(declinedServer)), approveChange: _ => false);
+try { await declinedRecovery.RecoverPendingAsync(CancellationToken.None); throw new Exception("declined pending promotion continued"); }
+catch (DeviceSwitchDeclinedException) { }
+Check(declinedVault.ActiveValue == originalCredential && declinedVault.PendingValue == pendingBeforeDecline, "declined pending recovery preserves both credentials");
+
 var vault = new FakeVault { ActiveValue = new DeviceCredential("https://old.example/", "old-token", null) };
 var pairingServer = new PairHandler();
 var coordinator = new PairingCoordinator(vault, c => new ServerClient(c.Server, c.Token, new SharedHandler(pairingServer)));

@@ -7,6 +7,7 @@ using System.Text.Json;
 namespace Himari.Companion;
 
 internal sealed record DeviceCredential(string Server, string Token, string? CodeFingerprint);
+internal sealed class DeviceSwitchDeclinedException : Exception { }
 internal interface ICredentialVault
 {
     DeviceCredential? Active();
@@ -23,8 +24,12 @@ internal sealed class WindowsCredentialVault : ICredentialVault
     public void SavePending(DeviceCredential value) => CredentialStore.SavePending(value);
     public void DeletePending() => CredentialStore.DeletePending();
 }
-internal sealed class PairingCoordinator(ICredentialVault vault, Func<DeviceCredential, ServerClient> createClient, Func<TimeSpan, CancellationToken, Task>? delay = null)
+internal sealed class PairingCoordinator(ICredentialVault vault, Func<DeviceCredential, ServerClient> createClient, Func<TimeSpan, CancellationToken, Task>? delay = null, Func<DeviceCredential, bool>? approveChange = null)
 {
+    private void Approve(DeviceCredential credential)
+    {
+        if (approveChange is not null && !approveChange(credential)) throw new DeviceSwitchDeclinedException();
+    }
     private async Task<bool> Verify(DeviceCredential credential, CancellationToken ct)
     {
         using var client = createClient(credential);
@@ -35,19 +40,25 @@ internal sealed class PairingCoordinator(ICredentialVault vault, Func<DeviceCred
         }
         catch (ApiException ex) when (ex.Status == HttpStatusCode.Unauthorized) { return false; }
     }
-    private void Promote(DeviceCredential credential) { vault.SaveActive(credential); vault.DeletePending(); }
+    private void Promote(DeviceCredential credential) { Approve(credential); vault.SaveActive(credential); vault.DeletePending(); }
     internal async Task<DeviceCredential?> RecoverPendingAsync(CancellationToken ct)
     {
         // ReadActive first to migrate the prototype's legacy pending record.
         _ = vault.Active();
         var pending = vault.Pending();
-        if (pending is null || !await Verify(pending, ct)) return null;
+        if (pending is null) return null;
+        Approve(pending);
+        if (!await Verify(pending, ct)) return null;
         Promote(pending); return pending;
     }
     internal async Task<DeviceCredential> PairAsync(string server, string code, CancellationToken ct)
     {
         var pending = vault.Pending();
-        if (pending is not null && pending.Server == server && await Verify(pending, ct)) { Promote(pending); return pending; }
+        if (pending is not null && pending.Server == server)
+        {
+            Approve(pending);
+            if (await Verify(pending, ct)) { Promote(pending); return pending; }
+        }
         var normalized = new string(code.Where(c => c != '-' && !char.IsWhiteSpace(c)).ToArray()).ToUpperInvariant();
         var fingerprint = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(normalized)));
         // A new code must not reuse a token already associated with an earlier attempt.
@@ -58,6 +69,7 @@ internal sealed class PairingCoordinator(ICredentialVault vault, Func<DeviceCred
         while (true)
         {
             ct.ThrowIfCancellationRequested();
+            Approve(pending);
             vault.SavePending(pending);
             using var client = createClient(pending);
             try { await client.PairAsync(normalized, ct); break; }

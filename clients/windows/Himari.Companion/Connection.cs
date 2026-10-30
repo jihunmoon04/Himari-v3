@@ -25,7 +25,20 @@ public partial class MainWindow
     private readonly ConnectionGate messageSend = new();
     private readonly CancellationTokenSource lifetime = new();
     private readonly ICredentialVault vault = new WindowsCredentialVault();
-    private PairingCoordinator Pairing() => new(vault, c => new ServerClient(c.Server, c.Token));
+    private bool pairingInProgress;
+    private PairingCoordinator Pairing()
+    {
+        bool approved = false;
+        return new(vault, c => new ServerClient(c.Server, c.Token), approveChange: credential =>
+        {
+            if (approved || recoveryOwner is null || recoveryOwner.Matches(credential)) return true;
+            if (unresolvedScreen is null && unknownText is null && !sending) return true;
+            if (!ConfirmDeviceSwitch()) return false;
+            approved = true; return true;
+        });
+    }
+    private bool ConfirmDeviceSwitch() => (unresolvedScreen is null && unknownText is null && !sending) ||
+        System.Windows.MessageBox.Show(this, "이전 연결에서 메시지가 접수됐는지 확인하지 못했습니다. 연결을 바꾸면 이 앱에서 확인을 계속할 수 없고, 다시 보내면 중복될 수 있습니다. 이전 기록을 확인한 뒤 연결을 바꾸시겠어요?", "미확정 전송이 남아 있습니다", MessageBoxButton.YesNo, MessageBoxImage.Warning) == MessageBoxResult.Yes;
 
     private static string? Str(JsonElement element, string name) => element.ValueKind == JsonValueKind.Object && element.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
     private static JsonElement Prop(JsonElement element, string name) => element.ValueKind == JsonValueKind.Object && element.TryGetProperty(name, out var v) ? v : default;
@@ -48,16 +61,19 @@ public partial class MainWindow
     private async Task RestoreConnection()
     {
         try { await connectionChange.EnterAsync(lifetime.Token); } catch (OperationCanceledException) { return; }
+        pairingInProgress = true;
         try
         {
             var stored = vault.Active();
             var pending = vault.Pending();
+            bool switchApproved = false;
             if (pending is not null)
             {
                 try
                 {
                     using var timeout = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token); timeout.CancelAfter(TimeSpan.FromSeconds(10));
-                    stored = await Pairing().RecoverPendingAsync(timeout.Token) ?? stored;
+                    var recovered = await Pairing().RecoverPendingAsync(timeout.Token);
+                    if (recovered is not null) { stored = recovered; switchApproved = true; }
                 }
                 catch (Exception) { /* Preserve both records; an offline pending attempt can be retried later. */ }
             }
@@ -68,10 +84,10 @@ public partial class MainWindow
                 SetConnected(false, pending is null ? "Web에서 짝짓기 코드를 발급해 주세요." : "짝짓기 코드를 입력해 연결을 다시 시도해 주세요."); return;
             }
             ServerAddress.Text = stored.Server;
-            StartConnection(stored.Server, stored.Token);
+            StartConnection(stored.Server, stored.Token, switchApproved);
         }
         catch (Exception ex) { ShowError(ex); }
-        finally { connectionChange.Exit(); }
+        finally { pairingInProgress = false; connectionChange.Exit(); }
     }
     private async void PairClick(object sender, RoutedEventArgs e)
     {
@@ -79,6 +95,7 @@ public partial class MainWindow
         if (string.IsNullOrWhiteSpace(code)) { Status.Text = "짝짓기 코드를 입력해 주세요."; return; }
         if (!connectionChange.TryEnter()) { Status.Text = "다른 연결 작업이 진행 중입니다."; return; }
         PairButton.IsEnabled = false;
+        pairingInProgress = true;
         try
         {
             // Verify the URL before touching the existing credential.
@@ -89,18 +106,18 @@ public partial class MainWindow
             var paired = await Pairing().PairAsync(canonical, code, timeout.Token);
             if (lifetime.IsCancellationRequested) return;
             PairCode.Clear();
-            StartConnection(paired.Server, paired.Token);
+            StartConnection(paired.Server, paired.Token, switchApproved: true);
         }
+        catch (DeviceSwitchDeclinedException) { Status.Text = "기기 전환을 취소했습니다. 기존 연결과 미확정 전송을 유지합니다."; }
         catch (Exception ex) { ShowError(ex); }
-        finally { PairButton.IsEnabled = true; connectionChange.Exit(); }
+        finally { pairingInProgress = false; PairButton.IsEnabled = true; connectionChange.Exit(); }
     }
-    private void StartConnection(string address, string token)
+    private void StartConnection(string address, string token, bool switchApproved = false)
     {
         var local = new ServerClient(address, token);
         if (recoveryOwner is not null && !recoveryOwner.SameDevice(local))
         {
-            if ((unresolvedScreen is not null || unknownText is not null || sending) &&
-                System.Windows.MessageBox.Show(this, "이전 연결에서 메시지가 접수됐는지 확인하지 못했습니다. 연결을 바꾸면 이 앱에서 확인을 계속할 수 없고, 다시 보내면 중복될 수 있습니다. 이전 기록을 확인한 뒤 연결을 바꾸시겠어요?", "미확정 전송이 남아 있습니다", MessageBoxButton.YesNo, MessageBoxImage.Warning) != MessageBoxResult.Yes)
+            if (!switchApproved && !ConfirmDeviceSwitch())
             { local.Dispose(); return; }
             // A different identity is discarded only after an explicit decision.
             moveJobs.Clear(); localScreens.Clear(); earlyMoves.Clear(); moveLifetime.Reset();
@@ -237,6 +254,7 @@ public partial class MainWindow
     private void SendClick(object sender, RoutedEventArgs e) => SendMessage();
     private async void SendMessage()
     {
+        if (pairingInProgress) { Status.Text = "기기 연결 작업이 끝난 뒤 메시지를 보내 주세요."; return; }
         if (!connected || client is null || connection is null || currentConversation is null) return;
         string text = Input.Text.Trim(); int length = text.EnumerateRunes().Count();
         bool wantsScreen = ScreenOnce.IsChecked == true;
