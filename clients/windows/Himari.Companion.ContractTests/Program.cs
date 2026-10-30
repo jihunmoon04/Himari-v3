@@ -18,6 +18,8 @@ Check(hotkeySelection.Select("Alt+Q", _ => true, () => unregistered++), "initial
 var keyAttempts = new List<string>();
 Check(!hotkeySelection.Select("Ctrl+Space", key => { keyAttempts.Add(key); return key == "Alt+Q"; }, () => unregistered++) && hotkeySelection.Current == "Alt+Q" && hotkeySelection.IsRegistered, "shortcut collision restores previous registration and selection");
 Check(keyAttempts.SequenceEqual(new[] { "Ctrl+Space", "Alt+Q" }) && unregistered == 1, "failed change restores previous key after releasing it");
+Check(!DialoguePolicy.HotkeyCloses(true, false) && !DialoguePolicy.HotkeyCloses(false, false) && !DialoguePolicy.HotkeyCloses(false, true), "shortcut opens the composer at startup, when idle in front and from other windows");
+Check(DialoguePolicy.HotkeyCloses(true, true), "shortcut closes only the composer already in front");
 var workHistory = new WorkWindowHistory(); int restores = 0;
 Check(!workHistory.Return(_ => { restores++; return true; }) && restores == 0, "no work window is restored before entry");
 workHistory.Remember(new IntPtr(10), _ => true);

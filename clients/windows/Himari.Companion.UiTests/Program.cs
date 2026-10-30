@@ -114,6 +114,13 @@ internal static class Program
         Check(replyTimer.IsEnabled && draftInput.Text == "숨겨도 남는 초안", "manually hiding an older draft resumes the overdue reply timer without losing the draft");
         Timeline("AssistantBubbleExpired");
         Check(reply.Visibility == Visibility.Collapsed, "the overdue reply can expire after the older draft is hidden");
+        var composerPanel = (FrameworkElement)timeline.FindName("ComposerPanel");
+        Timeline("OpenChat"); draftInput.Text = "단축키로 숨긴 초안"; Timeline("CloseChat");
+        Check(oldUser.Visibility == Visibility.Collapsed && composerPanel.Visibility == Visibility.Collapsed && draftInput.Text == "단축키로 숨긴 초안", "second shortcut hides the composer without a previous work window and keeps the draft");
+        Timeline("OpenChat");
+        Check(oldUser.Visibility == Visibility.Visible && composerPanel.Visibility == Visibility.Visible && draftInput.Text == "단축키로 숨긴 초안", "shortcut reopens the hidden draft ready to type");
+        draftInput.Clear(); Timeline("CloseChat");
+        Check(composerPanel.Visibility == Visibility.Collapsed, "an empty composer closes on the second shortcut");
         timeline.Close();
         var companion = new MainWindow();
         var settings = (Window)typeof(MainWindow).GetField("settings", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(companion)!;
