@@ -346,4 +346,4 @@ B1·B2·C1·C2·N1은 해결로 판정됐다.
 
 ### 14.3 실제 모델 확인 (2026-10-30)
 
-`tests/live/test_openrouter_screen_live.py`를 `image_input`이 켜진 8개 모델에 돌렸다. 7개가 10번 중 8번 이상 대상을 가리켜 `screen_points`를 켰다: `openai/gpt-6-luna`, `openai/gpt-6.1-sol`, `anthropic/claude-sonnet-5.5`, `anthropic/claude-haiku-5.5`, `xiaomi/mimo-v2.6-pro`, `deepseek/deepseek-v4.1-flash`, `minimax/minimax-m3`. `openai/gpt-5-nano`는 6번이라 화면을 보기만 한다. 시험 화면은 단순한 그림이므로, 실제 데스크톱에서의 정확도는 소유자의 사용으로 확인한다(`docs/openrouter-model-catalog.md`).
+`tests/live/test_openrouter_screen_live.py`를 `image_input`이 켜진 8개 모델에 돌렸다. 7개가 10번 중 8번 이상 대상을 가리켜 `screen_points`를 켰다: `openai/gpt-6-luna`, `openai/gpt-6.1-sol`, `anthropic/claude-sonnet-5.5`, `anthropic/claude-haiku-5.5`, `xiaomi/mimo-v2.6-pro`, `deepseek/deepseek-v4.1-flash`, `minimax/minimax-m3`. `openai/gpt-5-nano`는 6번이라 화면을 보기만 한다. 결과를 모두 남긴 두 번째 실행(구현 PR #128 검수 C1)에서 7개는 모두 10/10, `gpt-5-nano`는 5/10(작은 단추 1, 도형·입력칸 0)이었다. 장면별 표와 좌표 원본은 카탈로그 문서와 `docs/live-results/screen-points-2026-10-30.jsonl`. 시험 화면은 단순한 그림이므로, 실제 데스크톱에서의 정확도는 소유자의 사용으로 확인한다(`docs/openrouter-model-catalog.md`).

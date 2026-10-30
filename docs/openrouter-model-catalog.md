@@ -49,13 +49,40 @@ they do not measure how well they describe real pictures.
 ## Points on a screen (V3-P84, 2026-10-30)
 
 Each model with `image_input` was checked with `tests/live/test_openrouter_screen_live.py`:
-five 1280×720 screens (a small Save button, Settings in the top-right corner, a menu
-word, a red circle among grey squares, a search field), each asked twice as HIMARI
-sends a screen (the `screen` attachment line with its size, `SCREEN_NOTE` and
-`SCREEN_MOVE_NOTE`). A `[[move:X,Y]]` counted when it fell on the target with 24 pixels
-to spare. Seven reached at least 8 of 10, so `screen_points` is declared for
-`openai/gpt-6-luna`, `openai/gpt-6.1-sol`, `anthropic/claude-sonnet-5.5`,
-`anthropic/claude-haiku-5.5`, `xiaomi/mimo-v2.6-pro`, `deepseek/deepseek-v4.1-flash`
-and `minimax/minimax-m3`. `openai/gpt-5-nano` hit 6 of 10 (its misses include the small Save
-button both times), so it sees screens but is not told how to move. The screens are
-plain drawings; real desktops are busier, so the owner's own use is the next check.
+five 1280×720 screens, each asked twice as HIMARI sends a screen (the `screen` attachment
+line with its size, `SCREEN_NOTE` and `SCREEN_MOVE_NOTE`). A `[[move:X,Y]]` counted when it
+fell on the target with 24 pixels to spare; a model passes with 8 of 10.
+
+The screens: **button** (a small Save button beside Cancel), **corner** (Settings in the
+top-right corner), **menu** (View in a File/Edit/View/Help bar), **shape** (a red circle
+among grey squares), **field** (a search field). They are plain drawings: real desktops
+are busier, with small icons, many windows and scaling, so these counts are not the
+accuracy to expect there; the owner's own use is the next check.
+
+Two runs on 2026-10-30, with the same eight models:
+
+```
+HIMARI_LIVE=1 HIMARI_LIVE_SCREEN_OUT=docs/live-results/screen-points-2026-10-30.jsonl \
+HIMARI_LIVE_SCREEN_MODELS=<models> python -m pytest -q -s tests/live/test_openrouter_screen_live.py
+```
+
+- The first run kept pass or fail only: seven passed, `openai/gpt-5-nano` hit 6 of 10
+  (both Save asks missed).
+- The second run kept every answer, in
+  [live-results/screen-points-2026-10-30.jsonl](live-results/screen-points-2026-10-30.jsonl)
+  (model, scene, ask, target box, point, hit). Hits per scene, of 2:
+
+| Model | button | corner | menu | shape | field | of 10 |
+| --- | --- | --- | --- | --- | --- | --- |
+| `openai/gpt-6-luna` | 2 | 2 | 2 | 2 | 2 | 10 |
+| `openai/gpt-6.1-sol` | 2 | 2 | 2 | 2 | 2 | 10 |
+| `anthropic/claude-sonnet-5.5` | 2 | 2 | 2 | 2 | 2 | 10 |
+| `anthropic/claude-haiku-5.5` | 2 | 2 | 2 | 2 | 2 | 10 |
+| `xiaomi/mimo-v2.6-pro` | 2 | 2 | 2 | 2 | 2 | 10 |
+| `deepseek/deepseek-v4.1-flash` | 2 | 2 | 2 | 2 | 2 | 10 |
+| `minimax/minimax-m3` | 2 | 2 | 2 | 2 | 2 | 10 |
+| `openai/gpt-5-nano` | 1 | 2 | 2 | 0 | 0 | 5 |
+
+`screen_points` is declared for the seven that passed both runs. `openai/gpt-5-nano`
+missed by 30–160 pixels from the target's edge (left of Save, right of the circle, below
+the field), so it sees screens but is not told how to move.

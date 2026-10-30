@@ -1,0 +1,80 @@
+{"model": "openai/gpt-6-luna", "scene": "button", "ask": "Save 단추를 가리켜 줘.", "target": [1000, 560, 1090, 594], "point": [1045, 578], "hit": true}
+{"model": "openai/gpt-6-luna", "scene": "corner", "ask": "오른쪽 위의 Settings를 가리켜 줘.", "target": [1170, 6, 1272, 38], "point": [1220, 23], "hit": true}
+{"model": "openai/gpt-6-luna", "scene": "menu", "ask": "메뉴의 View를 가리켜 줘.", "target": [168, 8, 240, 38], "point": [202, 24], "hit": true}
+{"model": "openai/gpt-6-luna", "scene": "shape", "ask": "빨간 동그라미를 가리켜 줘.", "target": [740, 420, 790, 470], "point": [765, 445], "hit": true}
+{"model": "openai/gpt-6-luna", "scene": "field", "ask": "검색 입력칸을 가리켜 줘.", "target": [500, 230, 860, 262], "point": [680, 246], "hit": true}
+{"model": "openai/gpt-6-luna", "scene": "button", "ask": "Save 단추를 가리켜 줘.", "target": [1000, 560, 1090, 594], "point": [1045, 578], "hit": true}
+{"model": "openai/gpt-6-luna", "scene": "corner", "ask": "오른쪽 위의 Settings를 가리켜 줘.", "target": [1170, 6, 1272, 38], "point": [1220, 23], "hit": true}
+{"model": "openai/gpt-6-luna", "scene": "menu", "ask": "메뉴의 View를 가리켜 줘.", "target": [168, 8, 240, 38], "point": [205, 24], "hit": true}
+{"model": "openai/gpt-6-luna", "scene": "shape", "ask": "빨간 동그라미를 가리켜 줘.", "target": [740, 420, 790, 470], "point": [765, 445], "hit": true}
+{"model": "openai/gpt-6-luna", "scene": "field", "ask": "검색 입력칸을 가리켜 줘.", "target": [500, 230, 860, 262], "point": [680, 246], "hit": true}
+{"model": "openai/gpt-5-nano", "scene": "button", "ask": "Save 단추를 가리켜 줘.", "target": [1000, 560, 1090, 594], "point": [970, 560], "hit": false}
+{"model": "openai/gpt-5-nano", "scene": "corner", "ask": "오른쪽 위의 Settings를 가리켜 줘.", "target": [1170, 6, 1272, 38], "point": [1190, 40], "hit": true}
+{"model": "openai/gpt-5-nano", "scene": "menu", "ask": "메뉴의 View를 가리켜 줘.", "target": [168, 8, 240, 38], "point": [240, 40], "hit": true}
+{"model": "openai/gpt-5-nano", "scene": "shape", "ask": "빨간 동그라미를 가리켜 줘.", "target": [740, 420, 790, 470], "point": [950, 480], "hit": false}
+{"model": "openai/gpt-5-nano", "scene": "field", "ask": "검색 입력칸을 가리켜 줘.", "target": [500, 230, 860, 262], "point": [640, 310], "hit": false}
+{"model": "openai/gpt-5-nano", "scene": "button", "ask": "Save 단추를 가리켜 줘.", "target": [1000, 560, 1090, 594], "point": [990, 560], "hit": true}
+{"model": "openai/gpt-5-nano", "scene": "corner", "ask": "오른쪽 위의 Settings를 가리켜 줘.", "target": [1170, 6, 1272, 38], "point": [1200, 28], "hit": true}
+{"model": "openai/gpt-5-nano", "scene": "menu", "ask": "메뉴의 View를 가리켜 줘.", "target": [168, 8, 240, 38], "point": [230, 34], "hit": true}
+{"model": "openai/gpt-5-nano", "scene": "shape", "ask": "빨간 동그라미를 가리켜 줘.", "target": [740, 420, 790, 470], "point": [950, 430], "hit": false}
+{"model": "openai/gpt-5-nano", "scene": "field", "ask": "검색 입력칸을 가리켜 줘.", "target": [500, 230, 860, 262], "point": [700, 320], "hit": false}
+{"model": "anthropic/claude-haiku-5.5", "scene": "button", "ask": "Save 단추를 가리켜 줘.", "target": [1000, 560, 1090, 594], "point": [1045, 577], "hit": true}
+{"model": "anthropic/claude-haiku-5.5", "scene": "corner", "ask": "오른쪽 위의 Settings를 가리켜 줘.", "target": [1170, 6, 1272, 38], "point": [1221, 22], "hit": true}
+{"model": "anthropic/claude-haiku-5.5", "scene": "menu", "ask": "메뉴의 View를 가리켜 줘.", "target": [168, 8, 240, 38], "point": [204, 24], "hit": true}
+{"model": "anthropic/claude-haiku-5.5", "scene": "shape", "ask": "빨간 동그라미를 가리켜 줘.", "target": [740, 420, 790, 470], "point": [765, 445], "hit": true}
+{"model": "anthropic/claude-haiku-5.5", "scene": "field", "ask": "검색 입력칸을 가리켜 줘.", "target": [500, 230, 860, 262], "point": [680, 246], "hit": true}
+{"model": "anthropic/claude-haiku-5.5", "scene": "button", "ask": "Save 단추를 가리켜 줘.", "target": [1000, 560, 1090, 594], "point": [1045, 577], "hit": true}
+{"model": "anthropic/claude-haiku-5.5", "scene": "corner", "ask": "오른쪽 위의 Settings를 가리켜 줘.", "target": [1170, 6, 1272, 38], "point": [1220, 22], "hit": true}
+{"model": "anthropic/claude-haiku-5.5", "scene": "menu", "ask": "메뉴의 View를 가리켜 줘.", "target": [168, 8, 240, 38], "point": [204, 23], "hit": true}
+{"model": "anthropic/claude-haiku-5.5", "scene": "shape", "ask": "빨간 동그라미를 가리켜 줘.", "target": [740, 420, 790, 470], "point": [765, 445], "hit": true}
+{"model": "anthropic/claude-haiku-5.5", "scene": "field", "ask": "검색 입력칸을 가리켜 줘.", "target": [500, 230, 860, 262], "point": [680, 246], "hit": true}
+{"model": "openai/gpt-6.1-sol", "scene": "button", "ask": "Save 단추를 가리켜 줘.", "target": [1000, 560, 1090, 594], "point": [1046, 578], "hit": true}
+{"model": "openai/gpt-6.1-sol", "scene": "corner", "ask": "오른쪽 위의 Settings를 가리켜 줘.", "target": [1170, 6, 1272, 38], "point": [1221, 23], "hit": true}
+{"model": "openai/gpt-6.1-sol", "scene": "menu", "ask": "메뉴의 View를 가리켜 줘.", "target": [168, 8, 240, 38], "point": [204, 24], "hit": true}
+{"model": "openai/gpt-6.1-sol", "scene": "shape", "ask": "빨간 동그라미를 가리켜 줘.", "target": [740, 420, 790, 470], "point": [765, 445], "hit": true}
+{"model": "openai/gpt-6.1-sol", "scene": "field", "ask": "검색 입력칸을 가리켜 줘.", "target": [500, 230, 860, 262], "point": [680, 246], "hit": true}
+{"model": "openai/gpt-6.1-sol", "scene": "button", "ask": "Save 단추를 가리켜 줘.", "target": [1000, 560, 1090, 594], "point": [1046, 578], "hit": true}
+{"model": "openai/gpt-6.1-sol", "scene": "corner", "ask": "오른쪽 위의 Settings를 가리켜 줘.", "target": [1170, 6, 1272, 38], "point": [1221, 23], "hit": true}
+{"model": "openai/gpt-6.1-sol", "scene": "menu", "ask": "메뉴의 View를 가리켜 줘.", "target": [168, 8, 240, 38], "point": [204, 24], "hit": true}
+{"model": "openai/gpt-6.1-sol", "scene": "shape", "ask": "빨간 동그라미를 가리켜 줘.", "target": [740, 420, 790, 470], "point": [765, 446], "hit": true}
+{"model": "openai/gpt-6.1-sol", "scene": "field", "ask": "검색 입력칸을 가리켜 줘.", "target": [500, 230, 860, 262], "point": [680, 246], "hit": true}
+{"model": "anthropic/claude-sonnet-5.5", "scene": "button", "ask": "Save 단추를 가리켜 줘.", "target": [1000, 560, 1090, 594], "point": [1045, 577], "hit": true}
+{"model": "anthropic/claude-sonnet-5.5", "scene": "corner", "ask": "오른쪽 위의 Settings를 가리켜 줘.", "target": [1170, 6, 1272, 38], "point": [1221, 23], "hit": true}
+{"model": "anthropic/claude-sonnet-5.5", "scene": "menu", "ask": "메뉴의 View를 가리켜 줘.", "target": [168, 8, 240, 38], "point": [204, 24], "hit": true}
+{"model": "anthropic/claude-sonnet-5.5", "scene": "shape", "ask": "빨간 동그라미를 가리켜 줘.", "target": [740, 420, 790, 470], "point": [765, 445], "hit": true}
+{"model": "anthropic/claude-sonnet-5.5", "scene": "field", "ask": "검색 입력칸을 가리켜 줘.", "target": [500, 230, 860, 262], "point": [680, 246], "hit": true}
+{"model": "anthropic/claude-sonnet-5.5", "scene": "button", "ask": "Save 단추를 가리켜 줘.", "target": [1000, 560, 1090, 594], "point": [1045, 577], "hit": true}
+{"model": "anthropic/claude-sonnet-5.5", "scene": "corner", "ask": "오른쪽 위의 Settings를 가리켜 줘.", "target": [1170, 6, 1272, 38], "point": [1221, 23], "hit": true}
+{"model": "anthropic/claude-sonnet-5.5", "scene": "menu", "ask": "메뉴의 View를 가리켜 줘.", "target": [168, 8, 240, 38], "point": [204, 24], "hit": true}
+{"model": "anthropic/claude-sonnet-5.5", "scene": "shape", "ask": "빨간 동그라미를 가리켜 줘.", "target": [740, 420, 790, 470], "point": [765, 445], "hit": true}
+{"model": "anthropic/claude-sonnet-5.5", "scene": "field", "ask": "검색 입력칸을 가리켜 줘.", "target": [500, 230, 860, 262], "point": [680, 246], "hit": true}
+{"model": "xiaomi/mimo-v2.6-pro", "scene": "button", "ask": "Save 단추를 가리켜 줘.", "target": [1000, 560, 1090, 594], "point": [1044, 578], "hit": true}
+{"model": "xiaomi/mimo-v2.6-pro", "scene": "corner", "ask": "오른쪽 위의 Settings를 가리켜 줘.", "target": [1170, 6, 1272, 38], "point": [1221, 25], "hit": true}
+{"model": "xiaomi/mimo-v2.6-pro", "scene": "menu", "ask": "메뉴의 View를 가리켜 줘.", "target": [168, 8, 240, 38], "point": [203, 24], "hit": true}
+{"model": "xiaomi/mimo-v2.6-pro", "scene": "shape", "ask": "빨간 동그라미를 가리켜 줘.", "target": [740, 420, 790, 470], "point": [766, 446], "hit": true}
+{"model": "xiaomi/mimo-v2.6-pro", "scene": "field", "ask": "검색 입력칸을 가리켜 줘.", "target": [500, 230, 860, 262], "point": [680, 245], "hit": true}
+{"model": "xiaomi/mimo-v2.6-pro", "scene": "button", "ask": "Save 단추를 가리켜 줘.", "target": [1000, 560, 1090, 594], "point": [1045, 579], "hit": true}
+{"model": "xiaomi/mimo-v2.6-pro", "scene": "corner", "ask": "오른쪽 위의 Settings를 가리켜 줘.", "target": [1170, 6, 1272, 38], "point": [1220, 22], "hit": true}
+{"model": "xiaomi/mimo-v2.6-pro", "scene": "menu", "ask": "메뉴의 View를 가리켜 줘.", "target": [168, 8, 240, 38], "point": [203, 24], "hit": true}
+{"model": "xiaomi/mimo-v2.6-pro", "scene": "shape", "ask": "빨간 동그라미를 가리켜 줘.", "target": [740, 420, 790, 470], "point": [766, 445], "hit": true}
+{"model": "xiaomi/mimo-v2.6-pro", "scene": "field", "ask": "검색 입력칸을 가리켜 줘.", "target": [500, 230, 860, 262], "point": [680, 245], "hit": true}
+{"model": "deepseek/deepseek-v4.1-flash", "scene": "button", "ask": "Save 단추를 가리켜 줘.", "target": [1000, 560, 1090, 594], "point": [1046, 578], "hit": true}
+{"model": "deepseek/deepseek-v4.1-flash", "scene": "corner", "ask": "오른쪽 위의 Settings를 가리켜 줘.", "target": [1170, 6, 1272, 38], "point": [1225, 21], "hit": true}
+{"model": "deepseek/deepseek-v4.1-flash", "scene": "menu", "ask": "메뉴의 View를 가리켜 줘.", "target": [168, 8, 240, 38], "point": [188, 25], "hit": true}
+{"model": "deepseek/deepseek-v4.1-flash", "scene": "shape", "ask": "빨간 동그라미를 가리켜 줘.", "target": [740, 420, 790, 470], "point": [766, 447], "hit": true}
+{"model": "deepseek/deepseek-v4.1-flash", "scene": "field", "ask": "검색 입력칸을 가리켜 줘.", "target": [500, 230, 860, 262], "point": [680, 246], "hit": true}
+{"model": "deepseek/deepseek-v4.1-flash", "scene": "button", "ask": "Save 단추를 가리켜 줘.", "target": [1000, 560, 1090, 594], "point": [1046, 577], "hit": true}
+{"model": "deepseek/deepseek-v4.1-flash", "scene": "corner", "ask": "오른쪽 위의 Settings를 가리켜 줘.", "target": [1170, 6, 1272, 38], "point": [1190, 30], "hit": true}
+{"model": "deepseek/deepseek-v4.1-flash", "scene": "menu", "ask": "메뉴의 View를 가리켜 줘.", "target": [168, 8, 240, 38], "point": [191, 24], "hit": true}
+{"model": "deepseek/deepseek-v4.1-flash", "scene": "shape", "ask": "빨간 동그라미를 가리켜 줘.", "target": [740, 420, 790, 470], "point": [765, 448], "hit": true}
+{"model": "deepseek/deepseek-v4.1-flash", "scene": "field", "ask": "검색 입력칸을 가리켜 줘.", "target": [500, 230, 860, 262], "point": [680, 246], "hit": true}
+{"model": "minimax/minimax-m3", "scene": "button", "ask": "Save 단추를 가리켜 줘.", "target": [1000, 560, 1090, 594], "point": [1040, 572], "hit": true}
+{"model": "minimax/minimax-m3", "scene": "corner", "ask": "오른쪽 위의 Settings를 가리켜 줘.", "target": [1170, 6, 1272, 38], "point": [1218, 23], "hit": true}
+{"model": "minimax/minimax-m3", "scene": "menu", "ask": "메뉴의 View를 가리켜 줘.", "target": [168, 8, 240, 38], "point": [185, 34], "hit": true}
+{"model": "minimax/minimax-m3", "scene": "shape", "ask": "빨간 동그라미를 가리켜 줘.", "target": [740, 420, 790, 470], "point": [755, 426], "hit": true}
+{"model": "minimax/minimax-m3", "scene": "field", "ask": "검색 입력칸을 가리켜 줘.", "target": [500, 230, 860, 262], "point": [655, 260], "hit": true}
+{"model": "minimax/minimax-m3", "scene": "button", "ask": "Save 단추를 가리켜 줘.", "target": [1000, 560, 1090, 594], "point": [1063, 594], "hit": true}
+{"model": "minimax/minimax-m3", "scene": "corner", "ask": "오른쪽 위의 Settings를 가리켜 줘.", "target": [1170, 6, 1272, 38], "point": [1219, 22], "hit": true}
+{"model": "minimax/minimax-m3", "scene": "menu", "ask": "메뉴의 View를 가리켜 줘.", "target": [168, 8, 240, 38], "point": [163, 33], "hit": true}
+{"model": "minimax/minimax-m3", "scene": "shape", "ask": "빨간 동그라미를 가리켜 줘.", "target": [740, 420, 790, 470], "point": [745, 440], "hit": true}
+{"model": "minimax/minimax-m3", "scene": "field", "ask": "검색 입력칸을 가리켜 줘.", "target": [500, 230, 860, 262], "point": [753, 258], "hit": true}
