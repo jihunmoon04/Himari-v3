@@ -224,6 +224,19 @@ def test_the_entry_point_refuses_a_bad_mcp_json_before_listening(tmp_path: Path,
 # --- envelope ------------------------------------------------------------------------------
 
 
+def test_surface_addresses_are_the_page(server: Server) -> None:
+    """V3-P79 §3.1: each surface's address is the same page, with the same headers; nothing else is."""
+    page = server.client.get("/").text
+    for path in ("/c/conv_12", "/c/a-B_9", "/files", "/trash", "/settings/instructions", "/settings/memory",
+                 "/settings/folders"):
+        got = server.client.get(path)
+        assert got.status_code == 200 and got.text == page, path
+        assert "default-src 'self'" in got.headers["content-security-policy"] and got.headers["x-frame-options"] == "DENY"
+    for path in ("/c/", "/c/a.b", "/c/" + "x" * 129, "/c/a/b", "/settings", "/settings/other", "/files/x", "/chat/1"):
+        assert server.client.get(path).status_code == 404, path
+    assert server.client.post("/files").status_code != 200  # a page to read only (the Origin guard answers first)
+
+
 def test_static_ui_and_security_headers(server: Server) -> None:
     page = server.client.get("/")
     assert page.status_code == 200 and "/assets/app.js" in page.text
@@ -237,8 +250,15 @@ def test_static_ui_and_security_headers(server: Server) -> None:
     assert server.client.get("/assets/katex/katex.min.css").headers["content-type"] == "text/css; charset=utf-8"
     font = server.client.get("/assets/katex/fonts/KaTeX_Main-Regular.woff2")
     assert font.status_code == 200 and font.headers["content-type"] == "font/woff2" and font.content[:4] == b"wOF2"
+    for name in ("pdfpane.js", "pdfink.js", "pdfdoc.js", "inklab.js", "freehand/perfect-freehand.mjs", "pdfjs/pdf.min.mjs", "pdfjs/pdf.worker.min.mjs", "pdfjs/wasm/openjpeg_nowasm_fallback.js",
+                 "pdfjs/wasm/jbig2_nowasm_fallback.js"):  # the PDF view (V3-P77 §3.2): modules need a script type
+        got = server.client.get(f"/assets/{name}")
+        assert got.status_code == 200 and got.headers["content-type"] == "text/javascript; charset=utf-8", name
+    cmap = server.client.get("/assets/pdfjs/cmaps/UniKS-UCS2-H.bcmap")
+    assert cmap.status_code == 200 and cmap.headers["content-type"] == "application/octet-stream"
     for unlisted in ("katex/SOURCE", "katex/LICENSE", "katex/fonts/KaTeX_Main-Regular.ttf", "katex%2F..%2Fapp.js",
-                     "katex/fonts%2F..%2F..%2Fapp.js"):
+                     "katex/fonts%2F..%2F..%2Fapp.js", "pdfjs/SOURCE", "pdfjs/LICENSE", "pdfjs/cmaps/LICENSE",
+                     "pdfjs/wasm/LICENSE_OPENJPEG", "freehand/LICENSE", "freehand/SOURCE"):
         assert server.client.get(f"/assets/{unlisted}").status_code == 404
     assert server.client.get("/assets/index.html").status_code == 404
     api = server.client.get("/api/session")
@@ -331,6 +351,30 @@ def test_cli_bearer_works_without_origin_and_the_secret_itself_does_not(server: 
 
 
 # --- conversations -----------------------------------------------------------------------------
+
+
+def test_activity_tells_waiting_and_working_without_counting_as_a_reader(server: Server,
+                                                                         monkeypatch: pytest.MonkeyPatch) -> None:
+    """V3-P80 §3.2: which Conversations wait for an answer and which work, in one read that is never
+    ``seen`` (V3-P62 §5); the trash left out; signed in only."""
+    assert server.client.get("/api/conversations/activity").status_code == 401
+    server.sign_in()
+    asking = server.post("/api/conversations", {}).json()["id"]
+    idle = server.post("/api/conversations", {}).json()["id"]
+    queue(server, calls((ASK_USER_TOOL_ID, {"question": "Which city?"})))
+    assert server.post(f"/api/conversations/{asking}/messages", {"text": "plan a trip"}).status_code == 202
+    server.wait_idle(asking)
+    assert server.application is not None
+    readers: list[object] = []
+    monkeypatch.setattr(server.application, "seen", lambda scope: readers.append(scope))
+    activity = server.client.get("/api/conversations/activity")
+    assert activity.status_code == 200 and activity.json() == {"working": [], "waiting": [asking]}
+    assert readers == []  # not a reader of any of them
+    monkeypatch.setattr(server.application.runner, "running", lambda who: (idle,))
+    assert server.client.get("/api/conversations/activity").json() == {"working": [idle], "waiting": [asking]}
+    monkeypatch.undo()
+    assert server.post(f"/api/conversations/{asking}/trash").status_code == 200
+    assert server.client.get("/api/conversations/activity").json()["waiting"] == []
 
 
 def test_conversation_flow_with_a_tool_and_a_question(server: Server) -> None:
@@ -623,6 +667,82 @@ def test_without_mcp_json_there_are_no_tool_sources(server: Server) -> None:
     cid = server.post("/api/conversations").json()["id"]
     assert server.client.get(f"/api/conversations/{cid}/tools").json() == {"sources": []}
     assert put_source(server, cid, "calliope", True).status_code == 404
+
+
+def test_mcp_defaults_change_inherited_access_but_keep_conversation_choices(
+    mcp_server: tuple[Server, FakeMcpServer],
+) -> None:
+    server, _ = mcp_server
+    assert server.client.get("/api/settings/mcp").status_code == 401
+    assert server.client.put("/api/settings/mcp/calliope", headers={"origin": ORIGIN},
+                             json={"enabled": True, "revision": "0" * 64}).status_code == 401
+    server.sign_in()
+    first = server.client.get("/api/settings/mcp").json()
+    assert first["sources"] == [{"source": "calliope", "default": False, "available": True, "tools": 1}]
+    inherited = server.post("/api/conversations").json()["id"]
+    explicit = server.post("/api/conversations").json()["id"]
+    put_source(server, explicit, "calliope", True)
+    changed = server.client.put("/api/settings/mcp/calliope", headers={"origin": ORIGIN},
+                                json={"enabled": True, "revision": first["revision"]})
+    assert changed.status_code == 200
+    application = server.application
+    assert application is not None and server.client.portal is not None
+    scope = TrustedScope(OPERATOR, ConversationId(inherited))
+    assert server.client.portal.call(application.runtime.access.enabled_sources, scope) == frozenset({"calliope"})
+    stale = server.client.put("/api/settings/mcp/calliope", headers={"origin": ORIGIN},
+                              json={"enabled": False, "revision": first["revision"]})
+    assert stale.status_code == 409
+    off = server.client.put("/api/settings/mcp/calliope", headers={"origin": ORIGIN},
+                            json={"enabled": False, "revision": changed.json()["revision"]})
+    assert off.status_code == 200
+    assert server.client.portal.call(application.runtime.access.enabled_sources, scope) == frozenset()
+    assert server.client.get(f"/api/conversations/{explicit}/tools").json()["sources"][0]["enabled"] is True
+    assert server.client.get(f"/api/conversations/{inherited}/tools").json()["sources"][0]["enabled"] is False
+    assert server.client.put("/api/settings/mcp/absent", headers={"origin": ORIGIN},
+                             json={"enabled": True, "revision": off.json()["revision"]}).status_code == 404
+    assert server.client.put("/api/settings/mcp/calliope", headers={"origin": ORIGIN},
+                             json={"enabled": "false", "revision": off.json()["revision"]}).status_code == 400
+
+
+def test_mcp_defaults_survive_restart_without_changing_server_configuration(tmp_path: Path) -> None:
+    data = tmp_path / "data"
+    data.mkdir(mode=0o700)
+    configured = '{"servers":{"calliope":{"url":"%s","default":"off","tools":{"echo":{"effect":"read"}}}}}' % MCP_URL
+    path = data / "mcp.json"
+    path.write_text(configured)
+    path.chmod(0o600)
+    fake = FakeMcpServer()
+    first = Server(tmp_path, [], mcp=fake)
+    with first.client:
+        first.sign_in()
+        revision = first.client.get("/api/settings/mcp").json()["revision"]
+        assert first.client.put("/api/settings/mcp/calliope", headers={"origin": ORIGIN},
+                                json={"enabled": True, "revision": revision}).status_code == 200
+    assert path.read_text() == configured
+    persisted = data / "control/mcp-defaults.json"
+    assert persisted.stat().st_mode & 0o077 == 0
+    second = Server(tmp_path, [], mcp=fake)
+    with second.client:
+        second.sign_in()
+        assert second.client.get("/api/settings/mcp").json()["sources"][0]["default"] is True
+
+
+def test_failed_mcp_default_save_does_not_change_running_access(
+    mcp_server: tuple[Server, FakeMcpServer], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from himari.bootstrap import application as application_module
+
+    def refuse(*args: Any) -> None:
+        raise OSError("disk unavailable")
+
+    server, _ = mcp_server
+    server.sign_in()
+    first = server.client.get("/api/settings/mcp").json()
+    monkeypatch.setattr(application_module, "write_defaults", refuse)
+    response = server.client.put("/api/settings/mcp/calliope", headers={"origin": ORIGIN},
+                                 json={"enabled": True, "revision": first["revision"]})
+    assert response.status_code == 503
+    assert server.client.get("/api/settings/mcp").json() == first
 
 
 class RefusingDriver(GatedDriver):

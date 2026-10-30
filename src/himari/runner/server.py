@@ -34,7 +34,7 @@ from himari.runner import api
 from himari.runner.cgroups import Commands
 from himari.runner.config import RunnerConfig
 from himari.runner.hidden import under
-from himari.runner.hostfs import Host
+from himari.runner.hostfs import MAX_SNAPSHOT_BYTES, Host, mount_type
 from himari.runner.proxy import Door, Proxy
 from himari.runner.push import MAX_BUNDLE_BYTES, Pusher, check_branch, remote, token_problem
 from himari.sandbox.api import (
@@ -174,7 +174,7 @@ class Runner:
             try:
                 result, out = await self.dispatch(op, args, fds, conn)
             except api.RunnerError as error:
-                await api.send_frame(conn, api.failed(error.category, str(error)))
+                await api.send_frame(conn, api.failed(error.category, str(error), error.identity, error.partial))
                 return
             except asyncio.CancelledError:
                 raise
@@ -264,9 +264,16 @@ class Runner:
             return {"path": await self._read(lambda: host.visible_path(args.get("path"), _text(args, "cwd"),
                                                                        follow=args.get("follow") is True))}, []
         if op == api.OPEN:
-            fd, real, info = await self._read(lambda: host.open_read(args.get("path"), _text(args, "cwd")),
-                                              abandoned=lambda opened: os.close(opened[0]))
-            return {"path": real, "size": info.st_size, "identity": host.identity(info)}, [fd]
+            def opened() -> tuple[int, str, os.stat_result, str | None]:
+                fd, real, info = host.open_read(args.get("path"), _text(args, "cwd"))
+                try:  # its filesystem as the mount table names it: a PDF on a cloud mount is saved less often
+                    return fd, real, info, mount_type(real)  # (V3-P82 §3.2)
+                except BaseException:
+                    os.close(fd)
+                    raise
+
+            fd, real, info, filesystem = await self._read(opened, abandoned=lambda done: os.close(done[0]))
+            return {"path": real, "size": info.st_size, "identity": host.identity(info), "filesystem": filesystem}, [fd]
         if op == api.HOLDS:
             size, digest = args.get("size"), args.get("sha256")
             if not isinstance(size, int) or not isinstance(digest, str):
@@ -286,6 +293,10 @@ class Runner:
             return await self._write(args, fds, roots), []
         if op == api.DELETE and args.get("expected") is not None:
             return await self._delete_checked(args, roots)
+        if op == api.DELETE_COPIED:
+            return await self._delete_checked(args, roots, copied=True)
+        if op in (api.APPEND, api.TRUNCATE):
+            return await self._in_place(op, args, fds, roots), []
         if op in (api.CREATE_FILE, api.MKDIR):
             def make() -> dict[str, Any]:
                 parent_fd, parent, name = host.target(args.get("path"), _text(args, "cwd"), roots, follow=False)
@@ -321,17 +332,26 @@ class Runner:
             raise api.RunnerError(api.INVALID, "the file's identity, as it was read, is required")
         return expected
 
+    @staticmethod
+    def _copy_max(args: dict[str, Any]) -> int:
+        """V3-P77 §6.1: the largest file a replace or ``delete_copied`` copies."""
+        copy_max = args.get("copy_max", MAX_SNAPSHOT_BYTES)
+        if not isinstance(copy_max, int) or isinstance(copy_max, bool) \
+                or not MAX_SNAPSHOT_BYTES <= copy_max <= api.MAX_COPY_BYTES:
+            raise api.RunnerError(api.INVALID, "copy_max is 1 MiB to 64 MiB")
+        return copy_max
+
     async def _replace(self, args: dict[str, Any], fds: Sequence[int],
                        roots: list[str]) -> tuple[dict[str, Any], list[int]]:
         """V3-P75 §7.4: the web editor's save; the content comes as an fd."""
-        host, expected = self.host, self._expected(args)
+        host, expected, copy_max = self.host, self._expected(args), self._copy_max(args)
         if len(fds) != 1:
             raise api.RunnerError(api.INVALID, "the content comes as one file")
 
         def replace() -> tuple[dict[str, Any], list[int]]:
             parent_fd, parent, name = host.target(args.get("path"), _text(args, "cwd"), roots, follow=False)
             try:
-                identity, copy = host.replace(parent_fd, name, fds[0], expected)
+                identity, copy = host.replace(parent_fd, name, fds[0], expected, copy_max)
             finally:
                 os.close(parent_fd)
             return ({"path": posixpath.join(parent, name), "identity": identity, "previous": copy is not None},
@@ -339,18 +359,45 @@ class Runner:
 
         return await self._blocking(replace)
 
-    async def _delete_checked(self, args: dict[str, Any], roots: list[str]) -> tuple[dict[str, Any], list[int]]:
+    async def _delete_checked(self, args: dict[str, Any], roots: list[str],
+                              copied: bool = False) -> tuple[dict[str, Any], list[int]]:
+        """§7.4: a checked delete, its copy up to 1 MiB; ``copied`` (``delete_copied``, V3-P77 §6.3): up to the
+        ``copy_max`` it requires, and never without its copy."""
         host, expected = self.host, self._expected(args)
+        if copied and "copy_max" not in args:
+            raise api.RunnerError(api.INVALID, "copy_max is required")
+        copy_max = self._copy_max(args) if copied else MAX_SNAPSHOT_BYTES
 
         def delete() -> tuple[dict[str, Any], list[int]]:
             parent_fd, parent, name = host.target(args.get("path"), _text(args, "cwd"), roots, follow=False)
             try:
-                copy = host.delete_checked(parent_fd, name, expected)
+                copy = host.delete_checked(parent_fd, name, expected, copy_max, copied)
             finally:
                 os.close(parent_fd)
             return {"path": posixpath.join(parent, name), "previous": copy is not None}, [] if copy is None else [copy]
 
         return await self._blocking(delete)
+
+    async def _in_place(self, op: str, args: dict[str, Any], fds: Sequence[int], roots: list[str]) -> dict[str, Any]:
+        """V3-P82 §3.6: a PDF's save written at its end, or the file cut back to one of its saves."""
+        host, expected = self.host, self._expected(args)
+        if op == api.APPEND and len(fds) != 1:
+            raise api.RunnerError(api.INVALID, "the bytes come as one file")
+        to = args.get("to", 0)
+        if op == api.TRUNCATE and (not isinstance(to, int) or isinstance(to, bool)):
+            raise api.RunnerError(api.INVALID, "to is required")
+        cut = to if isinstance(to, int) else 0
+
+        def in_place() -> dict[str, Any]:
+            parent_fd, parent, name = host.target(args.get("path"), _text(args, "cwd"), roots, follow=False)
+            try:
+                identity = host.append(parent_fd, name, fds[0], expected) if op == api.APPEND \
+                    else host.truncate(parent_fd, name, expected, cut)
+            finally:
+                os.close(parent_fd)
+            return {"path": posixpath.join(parent, name), "identity": identity}
+
+        return await self._blocking(in_place)
 
     async def _kept(self, op: str, args: dict[str, Any], roots: list[str]) -> tuple[dict[str, Any], list[int]]:
         """V3-P76 §4.1: an agent's write or delete, with a copy of what the file held (an fd, when there is one)."""

@@ -352,3 +352,111 @@ def test_slow_reads_are_given_up_and_bounded(tmp_path: Path, monkeypatch: pytest
     finally:
         gate.set()
         kit.close()
+
+
+def test_copy_max_on_a_replace_and_a_copied_delete(kit: RunnerKit) -> None:
+    """V3-P77 §6.1 (protocol 3): a PDF over 1 MiB is replaced and deleted with its copy, up to copy_max; the
+    copy_max given is checked. A delete that needs its copy is an op of its own (PR #103 review P1)."""
+    folder = str(kit.home / "projects")
+    (kit.home / "projects").mkdir(exist_ok=True)
+    pdf = kit.home / "projects/notes.pdf"
+    body = b"%PDF-1.7\n" + b"x" * (3 * 1024 * 1024)
+    pdf.write_bytes(body)
+    info = pdf.stat()
+    expected = [info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns]
+    base = {"path": str(pdf), "cwd": "/", "write_roots": [folder], "expected": expected}
+    content = kit.home / "content.pdf"  # a file, not a pipe: more than a pipe holds
+    content.write_bytes(body + b"\n%%EOF\n")
+    r = os.open(content, os.O_RDONLY)
+    try:
+        for wrong in (0, 1024, api.MAX_COPY_BYTES + 1, True, "64"):
+            with pytest.raises(api.RunnerError) as refused:
+                call(kit, api.WRITE, {**base, "mode": "replace", "copy_max": wrong}, (r,))
+            assert refused.value.category == api.INVALID, wrong
+            os.lseek(r, 0, os.SEEK_SET)
+        with pytest.raises(api.RunnerError) as refused:  # left out: 1 MiB, as the editor's
+            call(kit, api.WRITE, {**base, "mode": "replace"}, (r,))
+        assert refused.value.category == api.TOO_LARGE and pdf.read_bytes() == body
+        os.lseek(r, 0, os.SEEK_SET)
+        result, fds = call(kit, api.WRITE, {**base, "mode": "replace", "copy_max": api.MAX_COPY_BYTES}, (r,))
+    finally:
+        os.close(r)
+    assert result["previous"] is True and len(fds) == 1 and pdf.read_bytes() == body + b"\n%%EOF\n"
+    with os.fdopen(fds[0], "rb") as copy:
+        assert copy.read() == body
+    info = pdf.stat()
+    now: dict[str, object] = {**base, "expected": [info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns]}
+    with pytest.raises(api.RunnerError) as refused:
+        call(kit, api.DELETE_COPIED, now)  # copy_max is required
+    assert refused.value.category == api.INVALID and pdf.exists()
+    with pytest.raises(api.RunnerError) as refused:
+        call(kit, api.DELETE_COPIED, {**now, "copy_max": 2 * 1024 * 1024})  # over it: not deleted
+    assert refused.value.category == api.TOO_LARGE and pdf.exists()
+    result, fds = call(kit, api.DELETE_COPIED, {**now, "copy_max": api.MAX_COPY_BYTES})
+    assert result["previous"] is True and not pdf.exists()
+    with os.fdopen(fds[0], "rb") as copy:
+        assert copy.read() == body + b"\n%%EOF\n"
+
+
+def identity_of(path: Path) -> list[int]:
+    info = path.stat()
+    return [info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns]
+
+
+def test_append_and_truncate_in_place(kit: RunnerKit, tmp_path: Path) -> None:
+    """V3-P82 §3.6: a PDF's save written at its end through the protocol (its bytes as an fd), and cut back to
+    one of its saves; the open tells the file's filesystem; a failure's identity reaches the caller."""
+    pdf = kit.home / "projects/a/notes.pdf"
+    pdf.write_bytes(b"%PDF-1.7\nstartxref\n9\n%%EOF\n")
+    info = pdf.stat()
+    base: dict[str, object] = {"path": str(pdf), "cwd": "/", "write_roots": [str(pdf.parent)],
+                               "expected": [info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns]}
+    opened, fds = call(kit, api.OPEN, {"path": str(pdf), "cwd": "/"})
+    os.close(fds[0])
+    assert isinstance(opened["filesystem"], str)
+    assert api.APPEND in api.WRITES and api.TRUNCATE in api.WRITES  # a cancelled one is waited for
+    content = tmp_path / "increment"
+    content.write_bytes(b"more\n%%EOF\n")
+    r = os.open(content, os.O_RDONLY)
+    try:
+        with pytest.raises(api.RunnerError) as refused:
+            call(kit, api.APPEND, base)  # the bytes come as one fd
+        assert refused.value.category == api.INVALID
+        result, _ = call(kit, api.APPEND, base, (r,))
+    finally:
+        os.close(r)
+    after = pdf.stat()
+    assert pdf.read_bytes() == b"%PDF-1.7\nstartxref\n9\n%%EOF\nmore\n%%EOF\n" and after.st_ino == info.st_ino
+    assert result["identity"] == [after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns]
+    with pytest.raises(api.RunnerError) as refused:
+        call(kit, api.TRUNCATE, {**base, "expected": result["identity"]})  # to is required
+    assert refused.value.category == api.INVALID
+    saved = b"%PDF-1.7\nstartxref\n9\n%%EOF\n"
+    cut, _ = call(kit, api.TRUNCATE, {**base, "expected": result["identity"], "to": len(saved)})
+    assert pdf.read_bytes() == saved and cut["identity"] == list(identity_of(pdf)) and identity_of(pdf)[2] == len(saved)
+    with pytest.raises(api.RunnerError) as refused:  # outside the call's roots: as any write
+        call(kit, api.TRUNCATE, {**base, "write_roots": [str(kit.home / "HIMARI")], "expected": cut["identity"],
+                                 "to": 9})
+    assert refused.value.category in (api.OUTSIDE_WORKSPACES, api.ACCESS)
+
+
+def test_a_failure_carries_its_identity_through_the_frame(kit: RunnerKit, tmp_path: Path) -> None:
+    """Review C3: a failed append, through the runner and its client, tells the file as it is after it."""
+    sent = api.failed(api.OTHER, "disk full", [1, 2, 3, 4], True)
+    assert sent["error"]["identity"] == [1, 2, 3, 4] and sent["error"]["partial"] is True
+    assert "identity" not in api.failed(api.CHANGED)["error"]
+    pdf = kit.home / "projects/a/notes.pdf"
+    pdf.write_bytes(b"%PDF-1.7\n%%EOF\n")
+    info = pdf.stat()
+    expected = [info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns]
+    content = tmp_path / "increment"
+    content.write_bytes(b"more\n%%EOF\n")
+    w = os.open(content, os.O_WRONLY)  # the bytes cannot be read: the write fails before any of it is written
+    try:
+        with pytest.raises(api.RunnerError) as failed:
+            call(kit, api.APPEND, {"path": str(pdf), "cwd": "/", "write_roots": [str(pdf.parent)],
+                                   "expected": expected}, (w,))
+    finally:
+        os.close(w)
+    assert failed.value.identity == expected and failed.value.partial is False
+    assert pdf.read_bytes() == b"%PDF-1.7\n%%EOF\n"

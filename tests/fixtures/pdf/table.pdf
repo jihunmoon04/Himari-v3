@@ -1,0 +1,74 @@
+%PDF-1.3
+%¿÷¢þ
+1 0 obj
+<< /OpenAction << /JS (app.alert\('scripts must not run'\);) /S /JavaScript >> /Pages 2 0 R /Type /Catalog >>
+endobj
+2 0 obj
+<< /Count 3 /Kids [ 3 0 R 4 0 R 5 0 R ] /Type /Pages >>
+endobj
+3 0 obj
+<< /Annots 6 0 R /Contents 7 0 R /MediaBox [ 0 0 612 792 ] /Parent 2 0 R /Resources << /Font << /F1 << /BaseFont /Helvetica /Subtype /Type1 /Type /Font >> >> >> /Type /Page >>
+endobj
+4 0 obj
+<< /Contents 8 0 R /MediaBox [ 0 0 612 792 ] /Parent 2 0 R /Resources << /Font << /F1 << /BaseFont /Helvetica /Subtype /Type1 /Type /Font >> >> >> /Rotate 90 /Type /Page >>
+endobj
+5 0 obj
+<< /Contents 9 0 R /CropBox [ 50 50 562 742 ] /MediaBox [ 0 0 612 792 ] /Parent 2 0 R /Resources << /Font << /F1 << /BaseFont /Helvetica /Subtype /Type1 /Type /Font >> >> >> /Type /Page >>
+endobj
+6 0 obj
+[ 10 0 R 11 0 R ]
+endobj
+7 0 obj
+<< /Length 86 >>
+stream
+BT /F1 24 Tf 72 700 Td (HIMARI ink fixture, page 1) Tj ET
+0 0 0 rg 72 500 300 40 re f
+
+endstream
+endobj
+8 0 obj
+<< /Length 68 >>
+stream
+BT /F1 24 Tf 72 700 Td (HIMARI ink fixture, page 2 (rotated)) Tj ET
+
+endstream
+endobj
+9 0 obj
+<< /Length 68 >>
+stream
+BT /F1 24 Tf 72 700 Td (HIMARI ink fixture, page 3 (cropped)) Tj ET
+
+endstream
+endobj
+10 0 obj
+<< /AP << /N 12 0 R >> /C [ 1 0 0 ] /F 4 /NM (other-app-1) /Rect [ 400 400 500 450 ] /Subtype /Square /Type /Annot >>
+endobj
+11 0 obj
+<< /A << /S /URI /URI (https://example.com/) >> /Border [ 0 0 0 ] /Rect [ 72 690 300 730 ] /Subtype /Link /Type /Annot >>
+endobj
+12 0 obj
+<< /BBox [ 0 0 100 50 ] /Subtype /Form /Type /XObject /Length 28 >>
+stream
+1 0 0 RG 2 w 1 1 98 48 re S
+
+endstream
+endobj
+xref
+0 13
+0000000000 65535 f 
+0000000015 00000 n 
+0000000140 00000 n 
+0000000211 00000 n 
+0000000402 00000 n 
+0000000590 00000 n 
+0000000794 00000 n 
+0000000827 00000 n 
+0000000963 00000 n 
+0000001081 00000 n 
+0000001199 00000 n 
+0000001333 00000 n 
+0000001471 00000 n 
+trailer << /Root 1 0 R /Size 13 /ID [<d2ea0c59b7b91f7fcdcf1552bcf5ec61><d2ea0c59b7b91f7fcdcf1552bcf5ec61>] >>
+startxref
+1601
+%%EOF

@@ -8,6 +8,7 @@ One data root, private to the server user::
         control/operator.secret  the local operator's credential (0600)
         file-versions/           previous versions of files the web editor saved or deleted (V3-P75)
         file-versions-agent/     files as they were before the agent changed them (V3-P76)
+        file-versions-pdf/       deleted PDFs and what a put-back wrote over (V3-P77; ink saves keep none, V3-P82)
         file-changes/            the agent's file changes, per Conversation, for review (V3-P76)
         mcp.json                 optional: MCP servers to connect (0600, V3-P53)
 
@@ -40,6 +41,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 import posixpath
 import re
@@ -55,6 +57,7 @@ import httpx
 
 from himari.bootstrap import DEFAULT_INSTRUCTIONS, Runtime, build_runtime
 from himari.bootstrap.operator import check_private_dir, ensure_operator_secret, ensure_private_dir
+from himari.bootstrap.mcp_defaults import McpDefaultsConflict, read_defaults, write_defaults
 from himari.common import (
     AttachmentRef,
     ContentBlock,
@@ -110,7 +113,7 @@ from himari.documents import TMP_BYTES, DocumentReader, Toolkit, ToolkitRefused,
 from himari.environment.inside import INSIDE, InsideEnvironment, InsideFiles
 from himari.imaging import ImageViews, runtime_roots
 from himari.bootstrap.changes import ChangeDiff, ChangeReview, ChangesView, ChangeStore, RevertedAll
-from himari.bootstrap.explorer import Explorer, ExplorerRefused
+from himari.bootstrap.explorer import PDF_MAX_BYTES, Explorer, ExplorerRefused
 from himari.bootstrap.versions import VersionStore
 # For the interfaces (V3-P66 §9): how placing an upload can be refused.
 from himari.environment.inside import UploadsFolderUnusable as UploadsFolderUnusable
@@ -155,6 +158,7 @@ DEFAULT_TRASH_DAYS = 30  # V3-P65 Q1 (the owner's choice, 2026-10-21)
 CLEANUP_SECONDS = 3600.0  # how often trash past its days is purged
 TRASH_STOP_SECONDS = 30.0  # how long a running job may take to stop before a trash is refused (§7.1)
 BUILT_IN_NAMESPACES = frozenset({"inside", "machine"})  # Tool ids that are HIMARI's own, not an external server's
+PDF_VERSIONS_BYTES = 1024 * 1024 * 1024  # PDFs' previous versions, all together (V3-P77 Q3)
 PLACE_LOCK_SECONDS = 60.0  # how long sending waits for the Workspace write lock (V3-P66 review N4)
 
 log = logging.getLogger(__name__)
@@ -659,6 +663,7 @@ class Application:
     # kept only while some call holds or waits for it (PR #56 review C1).
     _lifecycle: dict[ConversationId, _Lifecycle] = field(default_factory=dict, repr=False)
     _cleanup: asyncio.Task[None] | None = field(default=None, repr=False)
+    _mcp_defaults_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
 
     @classmethod
     async def open(
@@ -742,6 +747,9 @@ class Application:
                 launcher_for = await _server_launchers(mcp_config, root)
             mcp = await connect(mcp_config, check_schema=check_tool_input_schema, transport=mcp_transport,
                                 launcher_for=launcher_for)
+            saved_defaults = read_defaults(root / "control/mcp-defaults.json")
+            mcp.statuses = tuple(replace(s, enabled_by_default=saved_defaults.get(s.source, s.enabled_by_default))
+                                 for s in mcp.statuses)
             toolkit, reader, documents_reason = await _documents(root, sandbox, documents_dir, documents_owners)
             backend: SandboxBackend | None = None
             state = SandboxState.UNAVAILABLE
@@ -851,6 +859,30 @@ class Application:
         """The configured MCP servers as connected at startup."""
         return self.mcp.statuses
 
+    @property
+    def mcp_defaults_revision(self) -> str:
+        return hashlib.sha256(json.dumps(self.mcp.defaults, sort_keys=True).encode()).hexdigest()
+
+    async def set_mcp_default(self, source: str, enabled: bool, revision: str) -> None:
+        """Persist an operator default without reconnecting or stopping any server.
+
+        Conversations with no override follow it on their next model request;
+        explicit per-conversation settings remain unchanged.
+        """
+        async with self._mcp_defaults_lock:
+            if source not in self.mcp.defaults:
+                raise UnknownToolSource(source)
+            if revision != self.mcp_defaults_revision:
+                raise McpDefaultsConflict("MCP defaults changed; reload them before saving")
+            values = read_defaults(self.data_root / "control/mcp-defaults.json")
+            # Removed servers cannot accumulate in the override file.
+            values = {key: value for key, value in values.items() if key in self.mcp.defaults}
+            values[source] = enabled
+            write_defaults(self.data_root / "control/mcp-defaults.json", values)
+            self.runtime.access.set_default(source, enabled)
+            self.mcp.statuses = tuple(replace(s, enabled_by_default=enabled) if s.source == source else s
+                                      for s in self.mcp.statuses)
+
     async def tool_sources(self, scope: TrustedScope) -> tuple[ToolSourceView, ...]:
         """Every configured External Tool source and whether this
         Conversation uses it. Authorizes like any read (NOT_AUTHORIZED)."""
@@ -887,7 +919,9 @@ class Application:
             raise ExplorerRefused("not_found", "Not available.") from None
         if self._explorer is None:
             self._explorer = Explorer(machine, self.views, VersionStore(self.data_root / "file-versions"),
-                                      None if self.changes is None else self.changes.versions)
+                                      None if self.changes is None else self.changes.versions,
+                                      VersionStore(self.data_root / "file-versions-pdf", PDF_VERSIONS_BYTES,
+                                                   PDF_MAX_BYTES))
         return self._explorer
 
     # --- the review of the agent's file changes (V3-P76 §5, §6) -----------------------------

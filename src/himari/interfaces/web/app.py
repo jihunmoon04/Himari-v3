@@ -58,7 +58,7 @@ from typing import Annotated, Any, BinaryIO, Literal
 from fastapi import Depends, FastAPI, Path, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, StrictBool
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
@@ -87,8 +87,9 @@ from himari.bootstrap.application import (
     ReferenceRequest,
 )
 from himari.bootstrap.changes import ChangeConflict, ChangeDiff, ChangesView
-from himari.bootstrap.explorer import ExplorerRefused, Listing, ShownFile
+from himari.bootstrap.explorer import PDF_APPEND_MAX_BYTES, ExplorerRefused, Listing, ShownFile
 from himari.bootstrap.operator import OPERATOR, derive_cli_bearer, verify_operator_token
+from himari.bootstrap.mcp_defaults import McpDefaultsConflict
 from himari.common import (
     ASK_USER_TOOL_ID,
     AttachmentRef,
@@ -154,7 +155,18 @@ FAILED_LOGIN_DELAY_SECONDS = 1.0
 STATIC_FILES = {"app.css": "text/css", "app.js": "text/javascript", "app_view.js": "text/javascript",
                 "rich_text.js": "text/javascript", "appearance.js": "text/javascript", "live.js": "text/javascript",
                 "files.js": "text/javascript",  # the file explorer's parts (V3-P75 §3)
+                "local_store.js": "text/javascript", "drafts.js": "text/javascript",  # kept in the browser (V3-P78 §5)
                 "codemirror/codemirror.js": "text/javascript",  # the web editor (V3-P75 §7.6), loaded on first use
+                # The PDF view (V3-P77 §3): its part, and PDF.js with its worker, the image decoders it may
+                # import and the CMaps it may fetch; each loaded on first use.
+                "pdfpane.js": "text/javascript", "pdfjs/pdf.min.mjs": "text/javascript",
+                # Its ink (§4, §5): the strokes, perfect-freehand's outlines, the incremental update it writes.
+                "pdfink.js": "text/javascript", "pdfdoc.js": "text/javascript",
+                "inklab.js": "text/javascript",  # the ink lab (§4.6), asked for with ?ink-lab
+                "freehand/perfect-freehand.mjs": "text/javascript",
+                "pdfjs/pdf.worker.min.mjs": "text/javascript",
+                "pdfjs/wasm/openjpeg_nowasm_fallback.js": "text/javascript",
+                "pdfjs/wasm/jbig2_nowasm_fallback.js": "text/javascript",
                 # KaTeX for the formulas in assistant text, loaded by rich_text.js on the first one.
                 "katex/katex.min.js": "text/javascript", "katex/katex.min.css": "text/css"}
 KATEX_FONTS = ("AMS-Regular", "Caligraphic-Bold", "Caligraphic-Regular", "Fraktur-Bold", "Fraktur-Regular",
@@ -162,6 +174,9 @@ KATEX_FONTS = ("AMS-Regular", "Caligraphic-Bold", "Caligraphic-Regular", "Fraktu
                "SansSerif-Bold", "SansSerif-Italic", "SansSerif-Regular", "Script-Regular", "Size1-Regular",
                "Size2-Regular", "Size3-Regular", "Size4-Regular", "Typewriter-Regular")
 STATIC_FILES.update({f"katex/fonts/KaTeX_{name}.woff2": "font/woff2" for name in KATEX_FONTS})
+STATIC_FILES.update({f"pdfjs/cmaps/{cmap.name}": "application/octet-stream"
+                     for cmap in (resources.files("himari.interfaces.web") / "static/pdfjs/cmaps").iterdir()
+                     if cmap.name.endswith(".bcmap")})
 
 Opener = Callable[[], Awaitable[Application]]
 
@@ -264,6 +279,11 @@ class ToolSourceBody(_Body):
     enabled: bool | None  # null: follow the source's default
 
 
+class McpDefaultBody(_Body):
+    enabled: StrictBool
+    revision: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
 # A file's identity as the browser holds it: [dev, ino, size, mtime_ns] as decimal strings, since an mtime in
 # nanoseconds is past what a JavaScript number keeps exactly (V3-P75 §7.2).
 IdentityIn = Annotated[list[Annotated[str, Field(pattern=r"^[0-9]{1,20}$")] | int], Field(min_length=4, max_length=4)]
@@ -273,12 +293,27 @@ def identity_out(identity: Iterable[object]) -> list[str]:
     return [str(v) for v in identity]
 
 
+def identity_in(header: str) -> list[int]:
+    """An identity sent in a header (V3-P77 §5.3): four decimal numbers, comma-separated."""
+    parts = [part.strip() for part in header.split(",")]
+    if len(parts) != 4 or not all(re.fullmatch(r"[0-9]{1,20}", part) for part in parts):
+        raise ApiError(400, "invalid_argument", "X-Himari-Expected is the PDF's identity as it was read.")
+    return [int(part) for part in parts]
+
+
 class SaveFileBody(_Body):
     """A file saved from the web editor (V3-P75 §7.7): its whole text, and its identity as it was read."""
 
     path: str = Field(min_length=1, max_length=4096)
     content: str  # at most 1 MiB as UTF-8 (the explorer checks)
     expected: IdentityIn
+
+
+class RecreateFileBody(_Body):
+    """V3-P78 §4.2: the editor's text as a new file where the file it was editing is gone."""
+
+    path: str = Field(min_length=1, max_length=4096)
+    content: str  # at most 1 MiB as UTF-8 (the explorer checks)
 
 
 class NewPathBody(_Body):
@@ -290,6 +325,21 @@ class NewPathBody(_Body):
 class DeleteFileBody(_Body):
     path: str = Field(min_length=1, max_length=4096)
     expected: IdentityIn
+
+
+class PutBackBody(_Body):
+    """A PDF's previous version written over the file as it was read (V3-P77 §6.3)."""
+
+    path: str = Field(min_length=1, max_length=4096)
+    expected: IdentityIn
+
+
+class TruncateBody(_Body):
+    """V3-P82 §3.6: a PDF cut back to ``to``, just after one of its saves; ``expected`` its identity as read."""
+
+    path: str = Field(min_length=1, max_length=4096)
+    expected: IdentityIn
+    to: int
 
 
 class FileStateIn(_Body):
@@ -641,6 +691,13 @@ FILE_REFUSALS: dict[DataErrorCode, tuple[int, str, str]] = {
 }
 UPLOAD_PATH = re.compile(r"^/api/conversations/[^/]+/uploads$")
 SAVE_BODY_BYTES = 3 * 1024 * 1024  # a saved file of 1 MiB as JSON, escapes included (V3-P75 §7.7)
+SURFACE_PATHS = ("/files", "/trash", "/settings/instructions", "/settings/memory", "/settings/folders")  # V3-P79 §3.1
+PAGE_ID = re.compile(r"[A-Za-z0-9_-]{1,128}")  # a conversation's id in /c/<id>
+SAVE_ROUTES = {("PUT", "/api/machine/file"), ("POST", "/api/machine/file/install")}  # V3-P78 §4.2: the same text
+PDF_APPEND_PATH = "/api/machine/pdf/append"
+PDF_TRUNCATE_PATH = "/api/machine/pdf/truncate"
+EXPECTED_HEADER = "X-Himari-Expected"  # a PDF's identity as the browser read it: four decimal numbers (V3-P77 §5.3)
+IDENTITY_HEADER = "X-Himari-Identity"  # a download's identity, as the bytes sent (§5.3)
 
 def workspace_view(workspace: RegisteredWorkspace) -> dict[str, Any]:
     """V3-P74 §10.3: a registered folder."""
@@ -672,7 +729,8 @@ def folder_conversations_view(folder: FolderConversations) -> dict[str, Any]:
 def shown_file_view(shown: ShownFile) -> dict[str, Any]:
     """V3-P75 §5.2: text as text; an image or other file by its kind only."""
     return {"path": shown.path, "size": shown.size, "identity": identity_out(shown.identity), "modified": shown.modified,
-            "kind": shown.kind, "text": shown.text, "truncated": shown.truncated, "editable": shown.editable}
+            "kind": shown.kind, "text": shown.text, "truncated": shown.truncated, "editable": shown.editable,
+            "cloud_synced": shown.cloud_synced}
 
 
 def changes_view(changes: ChangesView, running: bool) -> dict[str, Any]:
@@ -922,8 +980,12 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
 
     @app.exception_handler(ExplorerRefused)
     async def explorer_refused(request: Request, error: ExplorerRefused) -> JSONResponse:
-        return JSONResponse({"error": {"code": error.category, "message": str(error)}},
-                            status_code=EXPLORER_STATUS.get(error.category, 400))
+        body: dict[str, Any] = {"code": error.category, "message": str(error)}
+        if error.identity is not None:  # a PDF's failed save: the file as it is now (V3-P82 §3.6)
+            body["identity"] = identity_out(error.identity)
+        if error.partial:
+            body["partial"] = True
+        return JSONResponse({"error": body}, status_code=EXPLORER_STATUS.get(error.category, 400))
 
     @app.exception_handler(ChangeConflict)
     async def change_conflict(request: Request, error: ChangeConflict) -> JSONResponse:
@@ -959,6 +1021,32 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
         signed_in = sessions.principal(request.cookies.get(SESSION_COOKIE)) is not None
         return {"authenticated": signed_in, "model": application.model_id if signed_in else None,
                 "sandbox": application.current_sandbox_state.value if signed_in else None}
+
+    def mcp_settings(application: Application) -> dict[str, Any]:
+        return {"revision": application.mcp_defaults_revision,
+                "sources": [{"source": s.source, "default": s.enabled_by_default,
+                             "available": s.available, "tools": len(s.tool_ids)}
+                            for s in application.tool_source_statuses]}
+
+    @app.get("/api/settings/mcp")
+    async def read_mcp_settings(request: Request, who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+        if who != OPERATOR:
+            raise ApiError(403, "not_authorized", "Only the operator can manage MCP defaults.")
+        return mcp_settings(himari(request))
+
+    @app.put("/api/settings/mcp/{source}")
+    async def write_mcp_setting(source: str, body: McpDefaultBody, request: Request,
+                                who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+        if who != OPERATOR:
+            raise ApiError(403, "not_authorized", "Only the operator can manage MCP defaults.")
+        application = himari(request)
+        try:
+            await application.set_mcp_default(source, body.enabled, body.revision)
+        except McpDefaultsConflict:
+            raise ApiError(409, "changed", "MCP defaults changed elsewhere. Reload settings and try again.") from None
+        except (OSError, ValueError):
+            raise ApiError(503, "not_saved", "Could not confirm the save. Reload MCP settings to check.") from None
+        return mcp_settings(application)
 
     @app.get("/api/server")
     async def read_server(request: Request, who: PrincipalId = Depends(principal)) -> dict[str, Any]:
@@ -1127,6 +1215,13 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
         path, identity = await himari(request).explorer(who).create_file(body.path)
         return {"path": path, "identity": identity_out(identity)}
 
+    @app.post("/api/machine/file/install", status_code=201)
+    async def recreate_file(body: RecreateFileBody, request: Request,
+                            who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+        path, identity = await himari(request).explorer(who).recreate(
+            body.path, body.content.encode("utf-8", "surrogatepass"))
+        return {"path": path, "identity": identity_out(identity) if identity is not None else None}
+
     @app.post("/api/machine/folder", status_code=201)
     async def make_folder(body: NewPathBody, request: Request, who: PrincipalId = Depends(principal)) -> dict[str, Any]:
         return {"path": await himari(request).explorer(who).make_folder(body.path)}
@@ -1150,6 +1245,24 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
         found = await himari(request).explorer(who).deleted(path)
         return {"items": [{"path": p, "name": posixpath.basename(p), "id": v.version_id, "saved_at": _time(v.saved_at),
                            "size": v.size} for p, v in found]}
+
+    @app.post("/api/machine/versions/{version_id}/put_back")
+    async def put_back_version(version_id: str, body: PutBackBody, request: Request,
+                               who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+        """A PDF's previous version over the file (V3-P77 §6.3); the file as it was is kept first."""
+        saved = await himari(request).explorer(who).put_back(body.path, version_id, [int(v) for v in body.expected])
+        return {"path": saved.path, "identity": identity_out(saved.identity), "previous_kept": saved.previous_kept}
+
+    @app.get("/api/machine/versions/{version_id}/download")
+    async def download_version(version_id: str, request: Request, path: str,
+                               who: PrincipalId = Depends(principal)) -> Response:
+        """A previous version's bytes (a PDF's, to view: V3-P77 §6.2), as a download is: never rendered here."""
+        real, size, fd = await himari(request).explorer(who).open_version(path, version_id)
+        return _FileStream(os.fdopen(fd, "rb"), media_type="application/octet-stream", headers={
+            "Content-Disposition": content_disposition(posixpath.basename(real) or "file"),
+            "Content-Length": str(size),
+            "Content-Security-Policy": "sandbox",
+        })
 
     @app.get("/api/machine/versions/{version_id}")
     async def read_version(version_id: str, request: Request, path: str,
@@ -1176,12 +1289,33 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
     async def download_machine_file(request: Request, path: str,
                                     who: PrincipalId = Depends(principal)) -> Response:
         """An attachment of type octet-stream, sandboxed: never rendered on this origin (V3-P75 §8.2)."""
-        real, size, fd = await himari(request).explorer(who).open(path)
+        real, size, identity, fd = await himari(request).explorer(who).open(path)
         return _FileStream(os.fdopen(fd, "rb"), media_type="application/octet-stream", headers={
             "Content-Disposition": content_disposition(posixpath.basename(real) or "file"),
             "Content-Length": str(size),
             "Content-Security-Policy": "sandbox",
+            IDENTITY_HEADER: ",".join(identity_out(identity)),
         })
+
+    @app.post(PDF_APPEND_PATH)
+    async def append_pdf(request: Request, path: str, who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+        """V3-P77 §5.3, V3-P82 §3.6: ink saved into a PDF — the body is the bytes to add after it (an incremental
+        update, at most 8 MiB), written at its end in place; ``X-Himari-Expected`` its identity as read. 409
+        changed; 422 too_large over 64 MiB in all; a failed write's error tells the file's ``identity`` after it
+        and ``partial`` when bytes of it were left."""
+        if request.headers.get("content-type", "").split(";")[0].strip() != "application/octet-stream":
+            raise ApiError(415, "invalid_argument", "The ink comes as application/octet-stream.")
+        expected = identity_in(request.headers.get(EXPECTED_HEADER, ""))
+        saved = await himari(request).explorer(who).append_pdf(path, await request.body(), expected)
+        return {"path": saved.path, "identity": identity_out(saved.identity)}
+
+    @app.post(PDF_TRUNCATE_PATH)
+    async def truncate_pdf(body: TruncateBody, request: Request,
+                           who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+        """V3-P82 §3.6: a PDF cut back to ``to``, just after one of its saves' ``%%EOF`` — a save whose writing
+        was cut short taken off its end; ``expected``: its identity as read."""
+        saved = await himari(request).explorer(who).truncate_pdf(body.path, [int(v) for v in body.expected], body.to)
+        return {"path": saved.path, "identity": identity_out(saved.identity)}
 
     @app.get("/api/machine/image")
     async def show_image(request: Request, path: str, who: PrincipalId = Depends(principal)) -> Response:
@@ -1202,6 +1336,14 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
         page = await application.data.list_conversations(who, limit=limit, offset=offset, trashed=trashed)
         return {"items": [trashed_view(s, application.trash_days) if trashed else summary_view(s) for s in page],
                 "next_offset": offset + limit if len(page) == limit else None}  # may lead to an empty page
+
+    @app.get("/api/conversations/activity")  # before /api/conversations/{conversation_id}, which would take it
+    async def conversation_activity(request: Request, who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+        """V3-P80 §3.2: which Conversations work now and which wait for an answer. Not a read of any one of
+        them: it never counts as the user being there (``seen``, V3-P62 §5)."""
+        application = himari(request)
+        return {"working": sorted(application.runner.running(who)),
+                "waiting": sorted(await application.data.list_waiting_conversations(who))}
 
     @app.post("/api/conversations", status_code=201)
     async def create_conversation(body: CreateBody, request: Request,
@@ -1635,18 +1777,28 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
     async def index() -> Response:
         return Response((static / "index.html").read_bytes(), media_type="text/html; charset=utf-8")
 
+    # V3-P79 §3.1: each surface's address is the same page, which reads it; the data stays behind the API.
+    for surface in SURFACE_PATHS:
+        app.add_api_route(surface, index, methods=["GET"], include_in_schema=False)
+
+    @app.get("/c/{conversation_id}", include_in_schema=False)
+    async def conversation_page(conversation_id: str) -> Response:
+        if not PAGE_ID.fullmatch(conversation_id):
+            raise ApiError(404, "not_found", "Not available.")
+        return await index()
+
     @app.get("/assets/{name:path}")
     async def asset(name: str) -> Response:
         media = STATIC_FILES.get(name)  # only the listed names: never a path into the package
         if media is None:
             raise ApiError(404, "not_found", "Not available.")
-        charset = "" if media.startswith("font/") else "; charset=utf-8"
+        charset = "; charset=utf-8" if media.startswith("text/") else ""
         return Response((static / name).read_bytes(), media_type=f"{media}{charset}")
 
     # Outer → inner: headers, Host, Origin, body size, routes.
     app.add_middleware(BodyLimitMiddleware, exempt=lambda method, path: method == "POST" and bool(UPLOAD_PATH.match(path)),
-                       larger=lambda method, path: SAVE_BODY_BYTES if method == "PUT" and path == "/api/machine/file"
-                       else None)
+                       larger=lambda method, path: SAVE_BODY_BYTES if (method, path) in SAVE_ROUTES
+                       else PDF_APPEND_MAX_BYTES if method == "POST" and path == PDF_APPEND_PATH else None)
     app.add_middleware(OriginGuardMiddleware, allowed_origins=config.allowed_origins)
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=sorted(config.allowed_hosts))
     app.add_middleware(SecurityHeadersMiddleware, csp=page_csp(config.sandbox_origins))

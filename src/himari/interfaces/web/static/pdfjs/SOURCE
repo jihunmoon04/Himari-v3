@@ -1,0 +1,30 @@
+PDF.js for the PDF view (V3-P77 §3.2), Apache-2.0 (LICENSE). The image decoders in wasm/ are
+BSD licensed (wasm/LICENSE_*); the CMaps in cmaps/ are Adobe's, BSD-style (cmaps/LICENSE).
+
+All files are copied unchanged from the npm package pdfjs-dist 6.4.299:
+
+    https://registry.npmjs.org/pdfjs-dist/-/pdfjs-dist-6.4.299.tgz
+    integrity sha512-AVl138zALtfaAPvADulE0PZThbYzCBS79nL4pOSL/6Sm/4AH5A21BD9VHt97OlCuzJuCpmeZtAtkinisF4Vb1g==
+
+    pdf.min.mjs                         <- legacy/build/pdf.min.mjs
+    pdf.worker.min.mjs                  <- legacy/build/pdf.worker.min.mjs
+    wasm/openjpeg_nowasm_fallback.js    <- wasm/openjpeg_nowasm_fallback.js
+    wasm/jbig2_nowasm_fallback.js       <- wasm/jbig2_nowasm_fallback.js
+    cmaps/*                             <- cmaps/*
+
+sha256
+    bccc24ea711db8e44503629519904a5292d73b9daaa214bbe7cdcc282b0f4259  pdf.min.mjs
+    145d2dd3ab0c86151011dba95acfa2d5336e2accd59388ea43dbee0efddaaec6  pdf.worker.min.mjs
+    9047b34b6bc142d85e4b0aa1b08b0b9baad4c6f8b7ac87641b9e8f90eb6fd23e  wasm/openjpeg_nowasm_fallback.js
+    68686ced624a48c42f84cdaa482ec44b72b0de4dc84a0df903af1fb7b45b5d9a  wasm/jbig2_nowasm_fallback.js
+
+Why the legacy build: the generic build calls Promise.try and Map.prototype.getOrInsertComputed
+without a fallback, which older Safari on iPad lacks; the legacy build carries them.
+
+Why no .wasm: the page's CSP has no 'wasm-unsafe-eval' (§3.4). pdf.js runs with useWasm: false
+and decodes JPEG 2000 and JBIG2 with the JavaScript fallbacks above; ICC colour management (qcms)
+is off. Scripting (quickjs) and the standard font data are not shipped: scripts never run, and
+the browser's own fonts stand in for the standard 14.
+
+The Web server serves only the files listed in STATIC_FILES (app.py); pdfpane.js loads pdf.js on
+the first PDF opened. Updating PDF.js is a PR of its own: copy the new files, update this file.

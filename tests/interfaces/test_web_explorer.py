@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import io
 import os
+import stat
 import threading
 import time
 from collections.abc import Iterator
@@ -85,7 +86,7 @@ def test_files_are_shown_by_kind(server: Server, kit: RunnerKit) -> None:
     assert info.st_mtime_ns > 2 ** 53
     assert shown == {"path": str(kit.home / "projects/a/main.c"), "size": 13, "kind": "text",
                      "text": "int main(){}\n", "truncated": False, "editable": True,
-                     "identity": identity, "modified": int(info.st_mtime)}
+                     "identity": identity, "modified": int(info.st_mtime), "cloud_synced": False}
     big = kit.home / "projects/big.txt"
     big.write_text("가" * 400_000)  # 1.2 MB of three-byte characters
     shown = server.client.get("/api/machine/file", params={"path": str(big)}).json()
@@ -95,6 +96,15 @@ def test_files_are_shown_by_kind(server: Server, kit: RunnerKit) -> None:
     (kit.home / "projects/latin").write_bytes("café".encode("latin-1"))
     for name in ("blob", "latin"):
         assert server.client.get("/api/machine/file", params={"path": f"~/projects/{name}"}).json()["kind"] == "binary"
+    # V3-P77 §3.1: a PDF by its header, whatever its name, all-ASCII ones included; only at its start
+    (kit.home / "projects/scan").write_bytes(b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n1 0 obj\n")
+    (kit.home / "projects/plain.pdf").write_text("%PDF-1.4\n1 0 obj << >> endobj\n")
+    (kit.home / "projects/about.txt").write_text("A PDF starts with %PDF-1.7\n")
+    kinds = {name: server.client.get("/api/machine/file", params={"path": f"~/projects/{name}"}).json()
+             for name in ("scan", "plain.pdf", "about.txt")}
+    assert kinds["scan"]["kind"] == kinds["plain.pdf"]["kind"] == "pdf"
+    assert kinds["scan"]["text"] is None and not kinds["plain.pdf"]["editable"]
+    assert kinds["about.txt"]["kind"] == "text"
     stat = server.client.get("/api/machine/stat", params={"path": "~/projects/a/main.c"}).json()
     assert stat["identity"] == identity and stat["kind"] == "file"
 
@@ -415,6 +425,28 @@ def test_new_file_new_folder_and_delete(server: Server, kit: RunnerKit) -> None:
     assert [v["reason"] for v in items] == ["delete"]
     # Anywhere the user can write — not only the conversations' workspaces (§7.1).
     assert server.post("/api/machine/file", {"path": "~/elsewhere.txt"}).status_code == 201
+
+
+def test_recreate_a_file_that_is_gone(server: Server, kit: RunnerKit) -> None:
+    """V3-P78 §4.2: the editor's text as a new file where its file is gone — only while the name is free."""
+    path = kit.home / "projects/a/main.c"
+    path.unlink()  # removed by hand: no previous version of it
+    made = server.post("/api/machine/file/install", {"path": str(path), "content": "int main(){return 2;}\n"})
+    assert made.status_code == 201, made.text
+    assert path.read_text() == "int main(){return 2;}\n" and stat.S_IMODE(path.stat().st_mode) == 0o644
+    assert made.json() == {"path": str(path), "identity": server.client.get(
+        "/api/machine/stat", params={"path": str(path)}).json()["identity"]}
+    assert server.client.get("/api/machine/versions", params={"path": str(path)}).json()["items"] == []
+    # Never over a file: one made meanwhile stays as it is.
+    refused(server.post("/api/machine/file/install", {"path": str(path), "content": "lost?"}), 409, "changed")
+    assert path.read_text() == "int main(){return 2;}\n"
+    refused(server.post("/api/machine/file/install", {"path": "~/projects/none/x.c", "content": "x"}), 404,
+            "not_found")
+    refused(server.post("/api/machine/file/install", {"path": f"{path}/x.c", "content": "x"}), 400, "not_directory")
+    refused(server.post("/api/machine/file/install", {"path": "~/.ssh/new", "content": "x"}), 404, "not_found")
+    refused(server.post("/api/machine/file/install", {"path": "~/projects/a/big.c", "content": "x" * (1024 * 1024 + 1)}),
+            422, "too_large")
+    assert not (kit.home / ".ssh/new").exists() and not (kit.home / "projects/a/big.c").exists()
 
 
 def test_hidden_paths_are_not_written(server: Server, kit: RunnerKit) -> None:

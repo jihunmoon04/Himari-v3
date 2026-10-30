@@ -334,6 +334,7 @@ def run(token: str, fake: FakeMcpServer, chrome: str | None, shots: str | None) 
         page.fill("#login-token", token)
         page.click("#login-submit")
         page.click("#home-new-chat")
+        expect(page.locator("#composer-text")).to_be_focused()
 
         # 1. Auto-open, bridge round trip, isolation.
         send(page, "one")
@@ -348,7 +349,7 @@ def run(token: str, fake: FakeMcpServer, chrome: str | None, shots: str | None) 
               page.locator("#timeline > .item-tool-row .app-view-slot").count() == 1
               and page.locator(".item-work .app-view-slot").count() == 0)
         check("1: the work block counts it", page.locator(".item-work .work-count").first.inner_text().endswith(
-            "1 tool call"), page.locator(".item-work .work-count").first.inner_text())
+            "1 step"), page.locator(".item-work .work-count").first.inner_text())
         check("1: tool-input reached the view", 'input {"text":"one"}' in lines, lines)
         check("1: tool-result reached the view exactly once", lines.count('result {"said":"one"}') == 1, lines)
         init = next((json.loads(line[5:]) for line in lines if line.startswith("init ")), None)
@@ -416,7 +417,7 @@ def run(token: str, fake: FakeMcpServer, chrome: str | None, shots: str | None) 
         fake.call_delay = 0.0
         page.wait_for_timeout(500)
         send(page, "five")
-        expect(page.locator(".item-assistant").last).to_have_text("HIMARIfifth", timeout=10000)
+        expect(page.locator(".item-assistant .rich-text").last).to_have_text("fifth", timeout=10000)
         page.wait_for_timeout(1500)  # the oldest view's teardown (at most 1 s)
         check("5: at most three views at once", page.locator(".app-view-frame").count() == 3,
               page.locator(".app-view-frame").count())
