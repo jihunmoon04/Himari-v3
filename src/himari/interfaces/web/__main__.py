@@ -85,6 +85,7 @@ def main(argv: list[str] | None = None) -> int:
                                              documents_dir=config.documents_dir, memory=config.memory,
                                              conversation_search=config.conversation_search,
                                              streaming=config.streaming, companion=config.companion,
+                                             time_zone=config.time_zone,
                                              machine_socket=config.machine_socket,
                                              machine_principals=config.machine_principals)
         print(f"HIMARI web: http://{config.host}:{config.port}/ — sign in with the token in "

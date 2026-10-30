@@ -50,7 +50,7 @@ import secrets
 import threading
 import time
 from urllib.parse import quote
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -106,6 +106,7 @@ from himari.common import (
     RunId,
     TextBlock,
     TrustedScope,
+    split_moods,
     thaw,
 )
 from himari.control.api import ContextStatus, ControlError, ControlErrorCode, JobStatus, TurnUsage
@@ -429,6 +430,19 @@ def _text(blocks: tuple[ContentBlock, ...]) -> str:
     return "\n\n".join(b.text for b in blocks if isinstance(b, TextBlock))
 
 
+def _question(arguments: Mapping[str, Any]) -> str:
+    """An ask_user call's question, as the model wrote it."""
+    asked = arguments.get("question")
+    return asked if isinstance(asked, str) else ""
+
+
+def display_view(text: str) -> dict[str, Any]:
+    """What the model wrote as it is shown (V3-P83 §7.2, appendix A.6): the
+    text without its mood marks, and each mark's place in it (code points)."""
+    plain, moods, _ = split_moods(text, complete=True)
+    return {"text": plain, "moods": [{"at": at, "mood": mood} for at, mood in moods]}
+
+
 def image_view(record: FileRecord) -> dict[str, Any] | None:
     """V3-P67 §8: the original's judged type and size, and ``state`` (the
     ``view_state``): a preview exists only when it is ``ready``."""
@@ -516,15 +530,19 @@ def event_view(event: ConversationEvent, views: dict[CallRef, tuple[bool, bool]]
         view["references"] = [reference_view(b) for b in payload.blocks if isinstance(b, FileReference)]
     elif isinstance(payload, AssistantFinal):
         view["text"] = _text(payload.blocks)
+        view["display"] = display_view(view["text"])
         view["model"] = models.get(event.origin_run_id) if event.origin_run_id else None
         view["run_id"] = event.origin_run_id  # the live output it replaces (V3-P73 §7.2)
     elif isinstance(payload, AssistantToolCalls):
         view["text"] = _text(payload.commentary)
+        view["display"] = display_view(view["text"])
         view["model"] = models.get(event.origin_run_id) if event.origin_run_id else None
         view["run_id"] = event.origin_run_id
         run = event.origin_run_id
         view["calls"] = [{"call_id": c.call_id, "tool_id": c.tool_id, "arguments": thaw(c.arguments),
-                          "app_view": run is not None and views.get(CallRef(run, c.call_id), (False, False))[0]}
+                          "app_view": run is not None and views.get(CallRef(run, c.call_id), (False, False))[0],
+                          **({"display": display_view(_question(c.arguments))} if c.tool_id == ASK_USER_TOOL_ID
+                             else {})}
                          for c in sorted(payload.calls, key=lambda c: c.ordinal)]
     elif isinstance(payload, ToolResultRecord):
         view["run_id"] = payload.call.run_id
@@ -1416,8 +1434,8 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
         if waiting is not None:
             for record in await application.data.read_tool_executions(scope, waiting.run_id):
                 if record.call == waiting and record.tool_id == ASK_USER_TOOL_ID:
-                    asked = record.arguments.get("question")
-                    question = {"call_id": waiting.call_id, "question": asked if isinstance(asked, str) else ""}
+                    asked = _question(record.arguments)
+                    question = {"call_id": waiting.call_id, "question": asked, "display": display_view(asked)}
         job = application.runner.status(scope)
         # An accepted input (or finished Tool results) with no assistant
         # output after it — e.g. the server stopped before the job ran.

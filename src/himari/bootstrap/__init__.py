@@ -76,6 +76,7 @@ def build_runtime(
     memory: bool = False,  # V3-P71: the memory Tools, MEMORY_NOTE and the notes in the state
     conversation_search: bool = False,  # V3-P72: conversation_search and conversation_read
     streaming: bool = False,  # V3-P73: answering Runs ask for a stream (models that declare it)
+    time_zone: str | None = None,  # V3-P83 §6.4: the turn's time and the time lines; None: the model is not told
 ) -> Runtime:
     store = store if store is not None else InMemoryStore()
     data = SqliteData(store) if isinstance(store, SqliteStore) else InMemoryData(store)
@@ -113,7 +114,7 @@ def build_runtime(
     driver = Driver(
         log=data,
         loader=ContextLoader(data, data, registry, instructions, access, source_notes, files=data,
-                             environments={env.kind: env for env in environments}),
+                             environments={env.kind: env for env in environments}, time_zone=time_zone),
         composer=Composer(),
         provider=provider,
         dispatcher=dispatcher,
@@ -126,6 +127,7 @@ def build_runtime(
         turn_budget=turn_budget,
         no_progress_runs=no_progress_runs,
         streaming=streaming,
+        time_zone=time_zone,
     )
     return Runtime(store=store, data=data, registry=registry, driver=driver, access=access, models=models)
 

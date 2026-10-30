@@ -7,7 +7,7 @@ import re
 import unicodedata
 from collections.abc import Iterable, Sequence
 
-from himari.common import ContentBlock, TextBlock, thaw, tool_id_problem
+from himari.common import ContentBlock, TextBlock, split_moods, thaw, tool_id_problem
 from himari.data.api import (
     MAX_APP_PAYLOAD_BYTES,
     MAX_DEVICE_NAME_CHARS,
@@ -253,10 +253,12 @@ def fold(text: str) -> str:
 
 def event_text(payload: object) -> str | None:
     """V3-P72 §3.3: the searchable text of an Event's payload — a user
-    message's or final answer's text blocks, joined by newlines — or None."""
+    message's or final answer's text blocks, joined by newlines — or None.
+    An answer's mood marks are not part of it (V3-P83 §7.2)."""
     if not isinstance(payload, (UserMessage, AssistantFinal)):
         return None
-    return "\n".join(b.text for b in payload.blocks if isinstance(b, TextBlock))
+    text = "\n".join(b.text for b in payload.blocks if isinstance(b, TextBlock))
+    return split_moods(text, complete=True)[0] if isinstance(payload, AssistantFinal) else text
 
 
 def search_words(words: object) -> tuple[str, ...]:

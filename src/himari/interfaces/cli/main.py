@@ -117,6 +117,15 @@ def usage_line(usage: dict[str, Any] | None) -> str | None:
             f"{of} tokens in {runs} request{'s' if runs != 1 else ''}")
 
 
+def display_text(item: dict[str, Any]) -> str:
+    """An event's (or a question's) text as the server shows it: the model's
+    mood marks taken out (``display``, V3-P83 §7.2); ``text`` otherwise."""
+    display = item.get("display")
+    if isinstance(display, dict) and isinstance(display.get("text"), str):
+        return str(display["text"])
+    return str(item.get("text") or "")
+
+
 def _path(conversation_id: str, suffix: str = "") -> str:
     return f"/api/conversations/{quote(conversation_id, safe='')}{suffix}"
 
@@ -183,7 +192,7 @@ class Printer:
                 and sequence > self.covered):
             self.divider()
         kind = event.get("kind")
-        text = str(event.get("text") or "")
+        text = display_text(event)
         if kind == "user_message":
             answers = event.get("answers_call")
             if answers:
@@ -212,7 +221,8 @@ class Printer:
                 arguments = call.get("arguments") or {}
                 if tool_id == "ask_user":
                     question = arguments.get("question") if isinstance(arguments, dict) else None
-                    self.block(self.speaker(model, " asks"), question if isinstance(question, str) else "")
+                    fallback = question if isinstance(question, str) else ""
+                    self.block(self.speaker(model, " asks"), display_text({"text": fallback, **call}))
                     model = None
                     continue
                 if model:  # a step of calls only: its model above them

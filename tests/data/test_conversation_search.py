@@ -23,8 +23,9 @@ from himari.data.api import (
     RunPreparation,
     ToolCompletion,
     ToolExecutionStatus,
+    UserMessage,
 )
-from himari.data import sqlite as sqlite_backend
+from himari.data import rules, sqlite as sqlite_backend
 from himari.data.memory import InMemoryData
 from himari.data.sqlite import SqliteData, SqliteStore
 
@@ -271,3 +272,9 @@ def test_an_upgrade_fills_in_batches_without_missing_or_repeating_one(tmp_path: 
         assert texts(found) == ["an answer note"]
     finally:
         store.close()
+
+
+def test_an_answers_mood_marks_are_not_searched() -> None:
+    """V3-P83 §7.2: the answer's marks come out; a user's text stays as written."""
+    assert rules.event_text(AssistantFinal((TextBlock("[[mood:happy]]잘 됐다!"),))) == "잘 됐다!"
+    assert rules.event_text(UserMessage((TextBlock("[[mood:happy]]"),))) == "[[mood:happy]]"

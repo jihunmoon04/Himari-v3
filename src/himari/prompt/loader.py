@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Mapping, Sequence
+from datetime import datetime
 
 from himari.common import AttachmentRef, ContentBlock, EnvironmentKind, FileId, ProviderContinuation, RunId, TrustedScope
 from himari.data.api import (
@@ -62,7 +63,9 @@ class ContextLoader:
         source_notes: Sequence[SourceNote] = (),  # every server's notes; only enabled ones are used (V3-P60)
         files: FileCatalog | None = None,  # None: attachments render as unavailable (V3-P66)
         environments: Mapping[EnvironmentKind, EnvironmentPlugin] | None = None,  # observed (V3-P74 §10.5)
+        time_zone: str | None = None,  # the time lines' zone (V3-P83 §6.4); None: no time lines
     ) -> None:
+        self._time_zone = time_zone
         self._files = files
         self._environments = dict(environments or {})
         self._log = log
@@ -79,6 +82,7 @@ class ContextLoader:
         request_options: RequestOptions,
         user_instructions: str = "",  # the turn's, read by Control when it started (V3-P69 §5)
         memories: tuple[Memory, ...] | None = None,  # the turn's notes, read with them (V3-P71 §5.4)
+        now: datetime | None = None,  # when the turn started (V3-P83 §6.3)
     ) -> PromptInputs:
         snapshot = await self._log.get_latest_snapshot(scope)
         events: tuple[ConversationEvent, ...] = ()
@@ -127,6 +131,8 @@ class ContextLoader:
             attachments=attachments,
             user_instructions=user_instructions,
             memories=memories,
+            now=now,
+            time_zone=self._time_zone,
         )
 
     async def _observe(self, scope: TrustedScope, basis: PersistedStateBasis) -> tuple[BindingObservation, ...]:

@@ -147,6 +147,17 @@ def test_questions_are_answered_and_reported(harness: Harness) -> None:
     assert code == 0 and out.splitlines() == ["You (answer):", f"{INDENT}Seoul", "HIMARI:", f"{INDENT}Seoul it is."]
 
 
+def test_mood_marks_are_not_printed(harness: Harness) -> None:
+    """V3-P83 §7.2: the CLI prints ``display.text`` — the question's too."""
+    cid = harness.run("new")[1].strip()
+    harness.queue(calls((ASK_USER_TOOL_ID, {"question": "[[mood:thinking]]Which city?"})),
+                  final("[[mood:happy]]Seoul it is. `[[mood:sad]]`"))
+    code, out, _ = harness.run("send", cid, "plan a trip")
+    assert code == cli.EXIT_WAITING and f"{INDENT}Which city?" in out.splitlines()
+    code, out, _ = harness.run("send", cid, "Seoul")
+    assert code == 0 and out.splitlines()[-1] == f"{INDENT}Seoul it is. `[[mood:sad]]`"
+
+
 def test_interactive_chat(harness: Harness) -> None:
     harness.queue(calls((ASK_USER_TOOL_ID, {"question": "Which city?"})), final(HOSTILE))
     prompts: list[str] = []
@@ -603,7 +614,8 @@ def test_server_prompts_from_the_cli(tmp_path: Path, monkeypatch: pytest.MonkeyP
         assert prompts_asked.count("Send it? [Y/n] ") == 2
         assert "(not sent)" in notes and "Required: game." in notes and cli.PROMPT_USAGE in notes
         (sent,) = [m for m in harness.provider.prepared_inputs[0].conversation]
-        assert sent.blocks[0].text == ("[MCP prompt calliope/calliope_commentary · game=g-1 note=a long note]"  # type: ignore[union-attr]
+        assert sent.blocks[0].text.startswith("<time>")  # type: ignore[union-attr]  # V3-P83 §6.4: the first message's time
+        assert sent.blocks[1].text == ("[MCP prompt calliope/calliope_commentary · game=g-1 note=a long note]"  # type: ignore[union-attr]
                                        "\n\nWrite it.")
         assert len(harness.provider.prepared_inputs) == 1  # the declined one was never sent
         assert "written" in shown

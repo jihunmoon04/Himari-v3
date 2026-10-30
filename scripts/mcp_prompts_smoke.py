@@ -168,7 +168,7 @@ def run(token: str, fake: FakeMcpServer, provider: ScriptedAdapter, chrome: str 
             if provider.prepared_inputs:
                 break
             time.sleep(0.05)
-        given = provider.prepared_inputs[0].conversation[-1].blocks[0].text if provider.prepared_inputs else None  # type: ignore[union-attr]
+        given = provider.prepared_inputs[0].conversation[-1].blocks[-1].text if provider.prepared_inputs else None  # type: ignore[union-attr]
         check("3: the model gets exactly the text the user sent", given == sent, given)
 
         # 4. No arguments: filled in at once.
@@ -238,7 +238,7 @@ def run(token: str, fake: FakeMcpServer, provider: ScriptedAdapter, chrome: str 
         settle()
         check("8: after sending a message, a late answer does not fill the box", box.input_value() == "",
               box.input_value())
-        given = provider.prepared_inputs[-1].conversation[-1].blocks[0].text if provider.prepared_inputs else None  # type: ignore[union-attr]
+        given = provider.prepared_inputs[-1].conversation[-1].blocks[-1].text if provider.prepared_inputs else None  # type: ignore[union-attr]
         check("8: the message sent is the user's", given == "a message of my own", given)
         expect(page.locator("#composer-send")).to_be_enabled(timeout=10000)
         fake.prompt_delay = {"calliope_check": 2.0, "calliope_commentary": 0.2}
