@@ -57,9 +57,12 @@ class _Subscription:
         self._wake.set()
         return True
 
-    def end(self, last: StreamEvent | None = None) -> None:
+    def end(self, last: StreamEvent | None = None, *, drop: bool = False) -> None:
+        """``drop``: what still waits is not sent, only ``last`` (a revoked device, PR #124 review N1)."""
         if self.ended:
             return
+        if drop:
+            self._events.clear()
         if last is not None:
             self._events.append(last)  # the one event past the limit: why it ends
         self.ended = True
@@ -153,7 +156,7 @@ class PresenceHub:
 
     def revoked(self, principal: PrincipalId, device_id: str) -> None:
         for subscription in [s for s in self._subscriptions.get(principal, ()) if s.device_id == device_id]:
-            subscription.end(StreamEvent("revoked", {}))
+            subscription.end(StreamEvent("revoked", {}), drop=True)  # nothing more reaches it
             self._subscriptions[principal].remove(subscription)
         if not self._subscriptions.get(principal, True):
             del self._subscriptions[principal]

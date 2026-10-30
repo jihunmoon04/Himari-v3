@@ -150,3 +150,19 @@ def test_next_waits_for_an_event() -> None:
         assert await stream.next(1) == StreamEvent("activity", {})
 
     asyncio.run(scenario())
+
+
+def test_a_revoked_device_gets_nothing_that_was_still_waiting(hub: PresenceHub) -> None:
+    """PR #124 review N1: revoking ends access at once — queued events are dropped, only "revoked" goes."""
+    device = hub.subscribe(ME, "d1")
+    hub.publish(ME, "conversation", {"conversation": "c1"})
+    hub.publish(ME, "job", {"conversation": "c1", "state": "started", "origin": None})
+    hub.revoked(ME, "d1")
+    assert drained(device) == [StreamEvent("revoked", {})] and device.finished
+
+
+def test_a_replaced_stream_still_gets_what_was_waiting(hub: PresenceHub) -> None:
+    first = hub.subscribe(ME, "d1")
+    hub.publish(ME, "conversation", {"conversation": "c1"})
+    hub.subscribe(ME, "d1")
+    assert [e.name for e in drained(first)] == ["conversation", "replaced"]

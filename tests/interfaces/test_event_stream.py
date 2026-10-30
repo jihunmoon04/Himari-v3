@@ -47,7 +47,7 @@ def test_hello_first_then_what_is_published_until_revoked() -> None:
     def act(hub: PresenceHub, closing: asyncio.Event) -> None:
         hub.publish(ME, "job", {"conversation": "c1", "state": "started", "origin": None})
         hub.publish(ME, "conversation", {"conversation": "c1"})
-        hub.revoked(ME, "d1")
+        asyncio.get_running_loop().call_later(0.05, hub.revoked, ME, "d1")  # once those were sent
 
     frames = run("d1", act, limit=5)
     assert frames[0] == ("retry: 1000", None) and frames[1] == ("hello", HELLO)

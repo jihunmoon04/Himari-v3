@@ -10,9 +10,12 @@ from pathlib import Path
 from typing import Any
 
 from himari.bootstrap.application import Application
-from himari.common import CallId, PrincipalId, TextBlock, ToolCall, ToolId, TrustedScope, thaw
+from himari.bootstrap.companion import CompanionEvents
+from himari.common import CallId, ConversationId, PrincipalId, TextBlock, ToolCall, ToolId, TrustedScope, thaw
+from himari.control.api import DriveResult, DriveState, JobStatus
 from himari.data.api import MessageOrigin, OriginKind
 from himari.presence.api import StreamEvent, Subscription
+from himari.presence.hub import PresenceHub
 from himari.prompt.api import DevicePresence, PresenceView
 from himari.provider.api import NormalizedFinal, NormalizedToolCalls
 from himari.provider.scripted import ScriptedAdapter
@@ -127,3 +130,37 @@ def test_nothing_is_told_without_a_paired_device_or_with_the_companion_off(tmp_p
     assert asyncio.run(scenario(companion=True, pair=False)) is None
     assert asyncio.run(scenario(companion=False, pair=True)) is None
     assert asyncio.run(scenario(companion=True, pair=True)) is not None
+
+
+def test_an_older_activity_read_never_lands_after_a_newer_one() -> None:
+    """PR #124 review B1: the read for a job's start is slow; the read for its end, later, finishes first.
+    Only the latest change's read is published."""
+    class Slow:
+        def __init__(self) -> None:
+            self.gates: list[asyncio.Event] = []
+
+        async def list_waiting_conversations(self, principal: PrincipalId) -> list[Any]:
+            gate = asyncio.Event()
+            self.gates.append(gate)
+            if len(self.gates) == 1:
+                await gate.wait()  # the first read waits until let go
+            return []
+
+    async def scenario() -> list[Any]:
+        hub, waiting = PresenceHub(), Slow()
+        events = CompanionEvents(hub, waiting)
+        stream = hub.subscribe(ME)
+        scope = TrustedScope(ME, ConversationId("c1"))
+        events.job_started(scope, WEB)  # its activity read takes working=[c1], then waits on Data
+        for _ in range(3):
+            await asyncio.sleep(0)
+        events.job_ended(scope, JobStatus(running=False, result=DriveResult(DriveState.COMPLETED)))
+        for _ in range(3):
+            await asyncio.sleep(0)  # the end's read: working=[], published
+        waiting.gates[0].set()  # now the start's read finishes, late
+        for _ in range(3):
+            await asyncio.sleep(0)
+        await events.aclose()
+        return [thaw(e.data) for e in await drained(stream) if e.name == "activity"]
+
+    assert asyncio.run(scenario()) == [{"working": [], "waiting": []}]

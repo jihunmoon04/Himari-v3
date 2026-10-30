@@ -779,3 +779,8 @@ data: {}
 - `tests/bootstrap/test_companion_app.py`: Runner 사건이 흐름에 닿음, 휴지통의 `activity`, 모델에게 가는 `presence`(턴에 한 번, 기기 시간대, web의 `sent_from`), 기기가 없거나 스위치가 꺼지면 없음.
 - `tests/interfaces/test_web_devices.py`: 신호 → 지금 기기, 목록의 `connected`·`current`, 신호 몸 검사, `hello`, 16개, 끊기의 `revoked`, 스위치를 꺼도 Web 흐름. 경로 허용 목록에 두 경로를 더했다.
 - ui_smoke `activity`: 흐름이 열린 동안 5초 읽기 없음, 숨은 탭이 흐름을 닫고 다시 보이면 새로 엶.
+
+**외부 검수(PR #123 READY, PR #124 READY_WITH_CORRECTIONS) 반영:**
+- B1: `activity`는 Data를 읽는 작업으로 내므로, 먼저 시작한 읽기가 나중에 끝나면 오래된 상태(`working=[c1]`)가 새 상태 뒤에 도착할 수 있었다. 흐름이 정상일 때는 5초 읽기도 없어 그대로 남는다. `CompanionEvents`가 주체마다 변경 번호를 세고, 읽기를 마쳤을 때 그 사이 더 새 변경이 있었으면 버린다(새 변경의 읽기가 낸다).
+- N1: 끊긴 기기의 흐름에는 아직 대기 중인 사건을 보내지 않고 `revoked`만 보낸다. `replaced`는 그대로(대기 중인 것을 보낸 뒤 끝).
+- 시험: 첫 읽기를 늦추고 두 번째가 먼저 끝나게 해 새 상태만 나가는지(고치기 전 코드에서 실패 확인), 끊기 때 대기열 비우기, 바뀐 흐름은 대기분을 받음.

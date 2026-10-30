@@ -46,6 +46,9 @@ class CompanionEvents:
         self._waiting = waiting
         self._working: dict[tuple[PrincipalId, ConversationId], MessageOrigin | None] = {}
         self._tasks: set[asyncio.Task[None]] = set()
+        # Each principal's latest activity change: a read that a later change overtook is
+        # not published (PR #124 review B1), so an older state never lands after a newer one.
+        self._revisions: dict[PrincipalId, int] = {}
 
     async def activity(self, principal: PrincipalId) -> dict[str, Any]:
         """V3-P80's working and waiting conversations, with the working ones' origins (§8.1)."""
@@ -54,16 +57,21 @@ class CompanionEvents:
                 "waiting": sorted(await self._waiting.list_waiting_conversations(principal))}
 
     def activity_changed(self, principal: PrincipalId) -> None:
-        """Publish ``activity`` soon (it reads Data): after a job, a trash, a restore."""
-        task = asyncio.get_running_loop().create_task(self._publish_activity(principal))
+        """Publish ``activity`` soon (it reads Data): after a job, a trash, a restore.
+        Only the read for the latest change is published."""
+        revision = self._revisions[principal] = self._revisions.get(principal, 0) + 1
+        task = asyncio.get_running_loop().create_task(self._publish_activity(principal, revision))
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
 
-    async def _publish_activity(self, principal: PrincipalId) -> None:
+    async def _publish_activity(self, principal: PrincipalId, revision: int) -> None:
         try:
-            self._hub.publish(principal, "activity", await self.activity(principal))
+            activity = await self.activity(principal)
         except Exception:  # noqa: BLE001 — a missed activity is caught up by the next hello
-            log.exception("could not publish the activity")
+            log.exception("could not read the activity")
+            return
+        if self._revisions.get(principal) == revision:  # else a later change's read publishes
+            self._hub.publish(principal, "activity", activity)
 
     def job_started(self, scope: TrustedScope, origin: MessageOrigin | None) -> None:
         self._working[(scope.principal_id, scope.conversation_id)] = origin
