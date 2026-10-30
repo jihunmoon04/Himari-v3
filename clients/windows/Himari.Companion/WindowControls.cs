@@ -60,6 +60,7 @@ public partial class MainWindow
     {
         if (Character is not null) Character.Height = e.NewValue;
         if (BubblePanel is not null) BubblePanel.Margin = new Thickness(15, 0, 15, Math.Max(0, e.NewValue - 10));
+        if (BubblePanel is not null) BubblePanel.MaxHeight = Math.Max(200, Height - e.NewValue - 12);
         SchedulePreferencesSave();
     }
     private void SchedulePreferencesSave()
@@ -74,6 +75,15 @@ public partial class MainWindow
         bubbleTimer.Stop();
         bubbleTimer.Interval = TimeSpan.FromSeconds(Math.Clamp(8 + text.Length / 12.0, 12, 120));
         bubbleTimer.Start();
+    }
+    private async Task ScheduleBubbleAfterMoves(string conversation)
+    {
+        int version = autoMoveVersion;
+        Task pending;
+        do { pending = moveQueue; try { await pending; } catch (Exception) { } }
+        while (!ReferenceEquals(pending, moveQueue));
+        if (!lifetime.IsCancellationRequested && version == autoMoveVersion && conversation == currentConversation && !liveStreams.ContainsKey(conversation) && !moveVerifications.ContainsValue(conversation))
+            ScheduleBubbleClose(Message.Text);
     }
     private void SaveWindowPreferences()
     {

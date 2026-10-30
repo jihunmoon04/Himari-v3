@@ -120,7 +120,7 @@ public partial class MainWindow
             if (!switchApproved && !ConfirmDeviceSwitch())
             { local.Dispose(); return; }
             // A different identity is discarded only after an explicit decision.
-            moveJobs.Clear(); localScreens.Clear(); earlyMoves.Clear(); moveLifetime.Reset();
+            moveJobs.Clear(); localScreens.Clear(); previousScreenIds.Clear(); earlyMoves.Clear(); moveVerifications.Clear(); moveLifetime.Reset();
             submittedScreen = null; submittedConversation = null; unresolvedScreen = null; unknownText = null;
         }
         recoveryOwner = local;
@@ -243,7 +243,6 @@ public partial class MainWindow
         try { var created = await client.SendAsync(HttpMethod.Post, "/api/conversations", new { }, connection.Token); await RefreshConversations(Str(created, "id"), connection.Token); }
         catch (Exception ex) { ShowError(ex); }
     }
-    private void InputKeyDown(object sender, System.Windows.Input.KeyEventArgs e) { if (e.Key == Key.Enter) { e.Handled = true; SendMessage(); } }
     private void InputChanged(object sender, System.Windows.Controls.TextChangedEventArgs e) => inputRevision++;
     private void SetCurrentConversation(string? id)
     {
@@ -306,11 +305,13 @@ public partial class MainWindow
                 response = await local.SendAsync(HttpMethod.Post, PathFor(context.ConversationId) + "/messages", screen is null ? new { text } : new { text, screen = screen.FileId }, ct);
                 if (recoveryOwner?.SameDevice(local) != true) return;
                 unresolvedScreen = null;
+                if (screen is { Ready: true }) previousScreenIds[context.ConversationId] = screen.FileId;
             }
             catch (ApiException ex) when (screen is not null && ex.Code == "screen_already_sent")
             {
                 if (recoveryOwner?.SameDevice(local) != true) return;
                 unresolvedScreen = null;
+                if (screen.Ready) previousScreenIds[context.ConversationId] = screen.FileId;
                 var detail = await local.SendAsync(HttpMethod.Get, PathFor(context.ConversationId), null, ct);
                 await RecoverMoveJob(context.ConversationId, Str(Prop(detail, "job"), "job_id"), local, ct);
                 if (context.IsCurrent(client, currentConversation, connected)) { if (context.CanClear(client, currentConversation, connected, inputRevision)) Input.Clear(); await ReadConversation(context.ConversationId, ct); Status.Text = "이전에 보낸 화면 메시지를 확인했습니다."; }
@@ -338,6 +339,14 @@ public partial class MainWindow
                 Status.Text = "전송이 거절됐습니다. 원인을 해결한 뒤 10분 안에는 같은 화면으로 다시 보낼 수 있습니다.";
                 return;
             }
+            catch (ApiException ex) when (screen is not null && ex.Code is "not_a_screen" or "attachment_refused" or "not_found")
+            {
+                if (recoveryOwner?.SameDevice(local) != true) return;
+                unresolvedScreen = null; localScreens.Remove(screen.FileId);
+                submittedScreen = null; submittedConversation = null;
+                if (context.IsCurrent(client, currentConversation, connected)) Status.Text = "화면 첨부가 거절됐습니다. 다음 전송에서는 화면을 새로 캡처해 주세요.";
+                return;
+            }
             catch (Exception ex) when (screen is null && MessageFailures.Classify(ex) is MessageFailure.Unknown or MessageFailure.Closed)
             {
                 if (recoveryOwner?.SameDevice(local) != true) return;
@@ -347,12 +356,7 @@ public partial class MainWindow
                 return;
             }
             string? jobId = Str(response, "job_id");
-            if (jobId is not null && localScreens.Count > 0)
-            {
-                screen = null;
-                try { screen = await FindLatestLocalScreen(local, context.ConversationId, jobId, ct); } catch (Exception) when (!ct.IsCancellationRequested) { /* No verified screen means no movement. */ }
-            }
-            BeginMoveJob(context.ConversationId, jobId, screen);
+            if (jobId is not null && localScreens.Count > 0) await RecoverMoveJob(context.ConversationId, jobId, local, ct, screen);
             if (context.CanClear(client, currentConversation, connected, inputRevision)) Input.Clear();
             ScreenOnce.IsChecked = shareEveryMessage;
             if (context.IsCurrent(client, currentConversation, connected) && !liveDisplays.ContainsKey(context.ConversationId))
@@ -363,7 +367,13 @@ public partial class MainWindow
             if (context.IsCurrent(client, currentConversation, connected)) ShowError(ex);
             else if (ex is ApiException { Code: "device_scope" }) Trace.TraceWarning("HIMARI device_scope: message request denied.");
         }
-        finally { pendingScreenConversation = null; earlyMoves.Remove(context.ConversationId); sending = false; messageSend.Exit(); SendButton.IsEnabled = connected; }
+        finally
+        {
+            pendingScreenConversation = null;
+            // Another stream may still be validating this request's screen.
+            if (earlyMoves.TryGetValue(context.ConversationId, out var buffered)) buffered.RemoveAll(x => !moveLifetime.IsVerifying(x.Job));
+            sending = false; messageSend.Exit(); SendButton.IsEnabled = connected;
+        }
     }
     private async void CancelClick(object sender, RoutedEventArgs e)
     {

@@ -35,6 +35,7 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+        _ = new ComposerInput(Input, SendMessage);
         settings = new SettingsWindow();
         settings.ConnectionStatus.SetBinding(System.Windows.Controls.TextBlock.TextProperty, new System.Windows.Data.Binding("Text") { Source = Status });
         settings.PairButton.Click += PairClick;
