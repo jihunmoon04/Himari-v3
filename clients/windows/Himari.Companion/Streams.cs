@@ -26,6 +26,7 @@ public partial class MainWindow
                             async () => { if (currentConversation is null || (returned && string.IsNullOrWhiteSpace(Input.Text))) await RefreshConversations(Str(Prop(data, "recent_conversation"), "id"), ct); },
                             () => StartOwnJobs(Prop(data, "activity"), local, ct),
                             async () => { if (currentConversation is not null) await ReadConversation(currentConversation, ct); }, ct);
+                        if (unknownText is not null) await CheckUnknownText(false, ct);
                     }
                     else if (type == "activity")
                     {
@@ -35,7 +36,12 @@ public partial class MainWindow
                     else if (type == "job")
                     {
                         string? id = Str(data, "conversation"), state = Str(data, "state");
-                        if (state == "started" && IsOwn(Prop(data, "origin")) && id is not null) StartLive(id, local, ct);
+                        if (state == "started" && IsOwn(Prop(data, "origin")) && id is not null)
+                        {
+                            await RecoverMoveJob(id, Str(data, "job_id"), local, ct);
+                            StartLive(id, local, ct);
+                        }
+                        if (state == "ended" && id is not null) EndMoveJob(id, Str(data, "job_id"));
                         else if (state == "ended" && id == currentConversation && Str(data, "outcome") is null && Prop(data, "error").ValueKind is not (JsonValueKind.Null or JsonValueKind.Undefined)) Status.Text = "작업 중 문제가 생겼습니다. Web에서 확인해 주세요.";
                     }
                     else if (type == "conversation" && Str(data, "conversation") == currentConversation && currentConversation is not null && !liveStreams.ContainsKey(currentConversation))
@@ -94,8 +100,13 @@ public partial class MainWindow
         foreach (var job in Items(Prop(activity, "working")))
         {
             string? id = Str(job, "id");
-            if (id is not null && IsOwn(Prop(job, "origin"))) StartLive(id, local, ct);
+            if (id is not null && IsOwn(Prop(job, "origin"))) _ = RecoverAndStartLive(id, Str(job, "job_id"), local, ct);
         }
+    }
+    private async Task RecoverAndStartLive(string id, string? job, ServerClient local, CancellationToken ct)
+    {
+        try { await RecoverMoveJob(id, job, local, ct); if (!ct.IsCancellationRequested && ReferenceEquals(local, client)) StartLive(id, local, ct); }
+        catch (OperationCanceledException) { }
     }
     private void StartLive(string id, ServerClient local, CancellationToken ct)
     {
@@ -105,7 +116,7 @@ public partial class MainWindow
     }
     private async Task LiveLoop(string id, ServerClient local, CancellationToken ct)
     {
-        var display = new LiveDisplayState(); int delay = 1; bool opened = false;
+        var display = new LiveDisplayState(); int delay = 1; bool opened = false; string? liveJob = null;
         try
         {
             while (!ct.IsCancellationRequested)
@@ -117,6 +128,7 @@ public partial class MainWindow
                         delay = 1;
                         if (type is "snapshot" or "delta")
                         {
+                            liveJob = Str(data, "job_id");
                             display.Apply(type, Str(data, "run_id"), Str(data, "text") ?? "", Prop(data, "moods"));
                             ReceiveMoves(id, Str(data, "job_id"), Str(data, "run_id"), type == "snapshot", Prop(data, "moves"), display.Text.EnumerateRunes().Count());
                             liveDisplays[id] = (display.Text, display.Mood);
@@ -129,7 +141,7 @@ public partial class MainWindow
                                 Status.Text = "답변 중…";
                             }
                         }
-                        else if (type == "done") return;
+                        else if (type == "done") { EndMoveJob(id, liveJob); return; }
                     }
                 }
                 catch (OperationCanceledException) when (ct.IsCancellationRequested) { return; }

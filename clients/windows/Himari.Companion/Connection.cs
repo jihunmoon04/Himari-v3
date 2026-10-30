@@ -38,6 +38,9 @@ public partial class MainWindow
     }
     private void StopConnection()
     {
+        moveJobs.Clear(); localScreens.Clear(); earlyMoves.Clear(); moveLifetime.Reset();
+        submittedScreen = null; submittedConversation = null; unresolvedScreen = null;
+        ReturnFromMove();
         CancelLive();
         connection?.Cancel(); connection?.Dispose(); connection = null;
         client?.Dispose(); client = null; connected = false;
@@ -234,8 +237,10 @@ public partial class MainWindow
         SendButton.IsEnabled = false;
         LocalScreen? screen = null;
         bool screenFailed = false;
+        int beforeSequence = 0;
         try
         {
+            if (unknownText is not null && !await CheckUnknownText(true, ct)) return;
             if (unresolvedScreen is { } retry)
             {
                 if (DateTimeOffset.UtcNow - retry.Screen.CapturedAt > TimeSpan.FromMinutes(10)) { unresolvedScreen = null; Status.Text = "이전 화면이 만료되었습니다. 전송 여부를 기록에서 확인한 뒤 다시 보내세요. 중복될 수 있습니다."; return; }
@@ -250,13 +255,20 @@ public partial class MainWindow
                     Status.Text = "화면을 캡처해 업로드 중입니다…";
                     var upload = await local.UploadScreenAsync(context.ConversationId, captured.Bytes, captured.ContentType, ct);
                     string fileId = Str(upload, "file_id") ?? throw new InvalidOperationException("화면 업로드 응답이 올바르지 않습니다.");
-                    screen = new(fileId, captured.Geometry, captured.CapturedAt);
+                    screen = new(fileId, captured.Geometry, captured.CapturedAt, ScreenSafety.Ready(upload));
                     localScreens[fileId] = screen;
                 }
                 catch (OperationCanceledException) { throw; }
                 catch (Exception) { screenFailed = true; if (length == 0) { Status.Text = "화면을 보내지 못했습니다. 다시 시도해 주세요."; return; } }
             }
             if (screen is not null || localScreens.Count > 0) pendingScreenConversation = context.ConversationId;
+            submittedScreen = screen; submittedConversation = context.ConversationId;
+            if (screen is null)
+            {
+                var before = await local.SendAsync(HttpMethod.Get, PathFor(context.ConversationId), null, ct);
+                var seq = Prop(Prop(before, "conversation"), "last_sequence");
+                if (seq.ValueKind == JsonValueKind.Number) seq.TryGetInt32(out beforeSequence);
+            }
             JsonElement response;
             try
             {
@@ -265,7 +277,9 @@ public partial class MainWindow
             }
             catch (ApiException ex) when (screen is not null && ex.Code == "screen_already_sent")
             {
-                unresolvedScreen = null; earlyMoves.Remove(context.ConversationId);
+                unresolvedScreen = null;
+                var detail = await local.SendAsync(HttpMethod.Get, PathFor(context.ConversationId), null, ct);
+                await RecoverMoveJob(context.ConversationId, Str(Prop(detail, "job"), "job_id"), local, ct);
                 if (context.IsCurrent(client, currentConversation, connected)) { if (context.CanClear(client, currentConversation, connected, inputRevision)) Input.Clear(); await ReadConversation(context.ConversationId, ct); Status.Text = "이전에 보낸 화면 메시지를 확인했습니다."; }
                 return;
             }
@@ -282,15 +296,25 @@ public partial class MainWindow
                 Status.Text = "화면 메시지가 전송됐는지 확인하지 못했습니다. 같은 내용으로 다시 보내면 확인합니다.";
                 return;
             }
-            catch (ApiException ex) when (screen is not null && ex.Code == "busy")
+            catch (ApiException ex) when (screen is not null && MessageFailures.ReuseScreen(ex))
             {
                 unresolvedScreen = (context.ConversationId, text, screen);
-                Status.Text = "이 대화가 작업 중입니다. 끝난 뒤 같은 화면으로 다시 보낼 수 있습니다.";
+                Status.Text = "전송이 거절됐습니다. 원인을 해결한 뒤 10분 안에는 같은 화면으로 다시 보낼 수 있습니다.";
+                return;
+            }
+            catch (Exception ex) when (screen is null && MessageFailures.Classify(ex) is MessageFailure.Unknown or MessageFailure.Closed)
+            {
+                unknownText = new(local, context.ConversationId, text, deviceId ?? "", beforeSequence);
+                await CheckUnknownText(false, ct);
+                if (MessageFailures.Classify(ex) == MessageFailure.Closed) Status.Text = "이 대화는 닫혔습니다. 메시지가 기록됐을 수 있으니 기록을 확인해 주세요.";
                 return;
             }
             string? jobId = Str(response, "job_id");
-            if (screen is null && jobId is not null && localScreens.Count > 0)
+            if (jobId is not null && localScreens.Count > 0)
+            {
+                screen = null;
                 try { screen = await FindLatestLocalScreen(local, context.ConversationId, jobId, ct); } catch (Exception) when (!ct.IsCancellationRequested) { /* No verified screen means no movement. */ }
+            }
             BeginMoveJob(context.ConversationId, jobId, screen);
             if (context.CanClear(client, currentConversation, connected, inputRevision)) Input.Clear();
             ScreenOnce.IsChecked = shareEveryMessage;

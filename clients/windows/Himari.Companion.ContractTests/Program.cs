@@ -4,6 +4,31 @@ using System.Text.Json;
 using Himari.Companion;
 
 static void Check(bool value, string message) { if (!value) throw new Exception(message); }
+foreach (string state in new[] { "ready", "no_sandbox", "view_expired" })
+{
+    using var recoveryClient = new ServerClient("https://example.com/", "test", new LostResponseHandler(state));
+    try { await recoveryClient.SendAsync(HttpMethod.Post, "/api/conversations/c/messages", new { text = "hello", screen = "f1" }, CancellationToken.None); }
+    catch (HttpRequestException) { }
+    // The job started event provides j1 after the HTTP response was lost.
+    string? recoveredFile = await ScreenHistory.LatestReadyIdAsync(recoveryClient, "c", "j1", CancellationToken.None);
+    Check(recoveredFile == (state == "ready" ? "f1" : null), "lost response recovery checks recorded image readiness: " + state);
+    Check(await ScreenHistory.LatestReadyIdAsync(recoveryClient, "c", "other-job", CancellationToken.None) is null, "job event for another job cannot recover screen");
+}
+foreach (string state in new[] { "ready", "no_sandbox", "view_expired" })
+{
+    var file = JsonSerializer.SerializeToElement(new { image = new { state } });
+    Check(ScreenSafety.Ready(file) == (state == "ready"), "only ready screen can create move context: " + state);
+}
+Check(!ScreenSafety.Ready(default), "missing image state is not ready");
+var lifetime = new MoveJobLifetime();
+lifetime.End("old");
+Check(!lifetime.CanStart("old") && lifetime.CanStart("new"), "ended job cannot be restored by late HTTP response or SSE");
+var withoutOrigin = JsonSerializer.SerializeToElement(new { kind = "user_message", sequence = 42, text = "hello" });
+Check(!TextRecovery.Matches(withoutOrigin, "hello", "d1", 41), "same text without origin does not confirm acceptance");
+var ownText = JsonSerializer.SerializeToElement(new { kind = "user_message", sequence = 42, text = "hello", origin = new { kind = "device", device_id = "d1" } });
+Check(TextRecovery.Matches(ownText, "hello", "d1", 41) && !TextRecovery.Matches(ownText, "hello", "d2", 41) && !TextRecovery.Matches(ownText, "hello", "d1", 42), "text recovery checks origin and sequence boundary");
+Check(MessageFailures.ReuseScreen(new ApiException(HttpStatusCode.TooManyRequests, "rate_limited")), "definite rejection preserves staged screen");
+Check(!MessageFailures.ReuseScreen(new ApiException(HttpStatusCode.BadRequest, "attachment_refused")), "refused file is not reused");
 Check(MessageFailures.Classify(new ApiException(HttpStatusCode.Conflict, "busy")) == MessageFailure.Rejected, "busy is rejected before recording");
 Check(MessageFailures.Classify(new ApiException(HttpStatusCode.Conflict, "conversation_closed")) == MessageFailure.Closed, "closed may have been recorded");
 Check(MessageFailures.Classify(new ApiException(HttpStatusCode.Conflict, "screen_already_sent")) == MessageFailure.AlreadySent, "screen retry can confirm acceptance");
@@ -220,6 +245,18 @@ using (var screenClient = new ServerClient("https://example.com/", "test", new S
     await foreach (var (kind, data) in screenClient.StreamAsync("/api/conversations/c1/live", CancellationToken.None))
         if (kind == "snapshot") collected.AddRange(replay.Accept(data.GetProperty("job_id").GetString(), data.GetProperty("run_id").GetString(), true, data.GetProperty("moves"), 1, captured));
     Check(collected.Count == 1 && collected[0].X == 42, "PR 126 upload, message job id and reconnect snapshot");
+}
+
+sealed class LostResponseHandler(string state) : HttpMessageHandler
+{
+    protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+    {
+        if (request.Method == HttpMethod.Post) throw new HttpRequestException("202 was lost after server accepted screen");
+        string value = request.RequestUri!.AbsolutePath.EndsWith("/events")
+            ? JsonSerializer.Serialize(new { items = new[] { new { kind = "user_message", attachments = new[] { new { file_id = "f1", screen = true, image = new { state } } } } } })
+            : "{\"job\":{\"job_id\":\"j1\",\"running\":true},\"conversation\":{\"last_sequence\":1}}";
+        return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(value, Encoding.UTF8, "application/json") });
+    }
 }
 
 sealed class ScreenProtocolHandler : HttpMessageHandler

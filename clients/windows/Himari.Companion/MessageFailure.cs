@@ -6,6 +6,7 @@ internal enum MessageFailure { Rejected, Unknown, Closed, AlreadySent }
 
 internal static class MessageFailures
 {
+    internal static bool ReuseScreen(Exception ex) => Classify(ex) == MessageFailure.Rejected && ex is ApiException api && api.Code is not ("attachment_refused" or "not_found");
     internal static MessageFailure Classify(Exception ex)
     {
         if (ex is not ApiException api) return MessageFailure.Unknown;

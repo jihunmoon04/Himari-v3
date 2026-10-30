@@ -14,5 +14,8 @@
     <Compile Include="..\Himari.Companion\CharacterTheme.cs" Link="CharacterTheme.cs" />
     <Compile Include="..\Himari.Companion\ScreenMove.cs" Link="ScreenMove.cs" />
     <Compile Include="..\Himari.Companion\MessageFailure.cs" Link="MessageFailure.cs" />
+    <Compile Include="..\Himari.Companion\ScreenSafety.cs" Link="ScreenSafety.cs" />
+    <Compile Include="..\Himari.Companion\TextRecovery.cs" Link="TextRecovery.cs" />
+    <Compile Include="..\Himari.Companion\ScreenHistory.cs" Link="ScreenHistory.cs" />
   </ItemGroup>
 </Project>

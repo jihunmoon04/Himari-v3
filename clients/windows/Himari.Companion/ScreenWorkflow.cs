@@ -9,10 +9,14 @@ namespace Himari.Companion;
 public partial class MainWindow
 {
     private bool shareEveryMessage;
-    private sealed record LocalScreen(string FileId, ScreenGeometry Geometry, DateTimeOffset CapturedAt);
+    private sealed record LocalScreen(string FileId, ScreenGeometry Geometry, DateTimeOffset CapturedAt, bool Ready);
     private sealed record MoveJob(string ConversationId, MovePlayback Playback);
     private readonly Dictionary<string, LocalScreen> localScreens = new();
     private readonly Dictionary<string, MoveJob> moveJobs = new();
+    private readonly MoveJobLifetime moveLifetime = new();
+    private LocalScreen? submittedScreen;
+    private string? submittedConversation;
+    private string? autoMoveJob;
     private readonly Dictionary<string, List<(string Job, string Run, bool Snapshot, JsonElement Moves, int Length)>> earlyMoves = new();
     private string? pendingScreenConversation;
     private (string Conversation, string Text, LocalScreen Screen)? unresolvedScreen;
@@ -30,57 +34,60 @@ public partial class MainWindow
         // Choose before hiding: hiding the composer changes the foreground window.
         var bounds = ScreenCapture.SelectMonitor();
         var visible = System.Windows.Application.Current.Windows.Cast<Window>().Where(w => w.IsVisible).ToArray();
+        bool excluded = OperatingSystem.IsWindowsVersionAtLeast(10, 0, 19041) &&
+            visible.All(w => ScreenCapture.TryExcludeWindow(new WindowInteropHelper(w).Handle));
         try
         {
-            foreach (var window in visible.Reverse()) window.Hide();
+            if (!excluded) foreach (var window in visible.Reverse()) window.Hide();
             await Task.Delay(200, ct); // let the desktop compositor remove our windows
             ct.ThrowIfCancellationRequested();
             return ScreenCapture.Capture(bounds);
         }
         finally
         {
-            foreach (var window in visible) window.Show();
+            if (!excluded) foreach (var window in visible) window.Show();
         }
     }
 
     private async Task<LocalScreen?> FindLatestLocalScreen(ServerClient server, string conversation, string jobId, CancellationToken ct)
     {
-        async Task<JsonElement> Detail() => await server.SendAsync(System.Net.Http.HttpMethod.Get, PathFor(conversation), null, ct);
-        bool SameRunningJob(JsonElement detail) => Str(Prop(detail, "job"), "job_id") == jobId && ConversationView.IsRunning(detail);
-        var detail = await Detail();
-        if (!SameRunningJob(detail)) return null;
-        var sequence = Prop(Prop(detail, "conversation"), "last_sequence");
-        if (sequence.ValueKind != JsonValueKind.Number || !sequence.TryGetInt32(out int last)) return null;
-        int after = Math.Max(0, last - 100);
-        string? found = null;
-        while (true)
-        {
-            var page = await server.SendAsync(System.Net.Http.HttpMethod.Get, PathFor(conversation) + $"/events?after={after}&limit=100", null, ct);
-            foreach (var item in Items(Prop(page, "items")).Reverse())
-            {
-                if (Str(item, "kind") != "user_message") continue;
-                foreach (var attachment in Items(Prop(item, "attachments")).Reverse())
-                    if (Prop(attachment, "screen").ValueKind == JsonValueKind.True) { found = Str(attachment, "file_id"); break; }
-                if (found is not null) break;
-            }
-            if (found is not null || after == 0) break;
-            after = Math.Max(0, after - 100);
-        }
-        if (found is null || !localScreens.TryGetValue(found, out var screen) || !SameRunningJob(await Detail())) return null;
-        return screen;
+        string? id = await ScreenHistory.LatestReadyIdAsync(server, conversation, jobId, ct);
+        return id is not null && localScreens.TryGetValue(id, out var screen) && screen.Ready ? screen : null;
     }
 
     private void BeginMoveJob(string conversation, string? jobId, LocalScreen? screen)
     {
-        if (string.IsNullOrEmpty(jobId) || screen is null) return;
+        if (string.IsNullOrEmpty(jobId) || screen is null || !screen.Ready || !moveLifetime.CanStart(jobId)) return;
         if (!moveJobs.ContainsKey(jobId)) moveJobs[jobId] = new(conversation, new(jobId, screen.Geometry, screen.CapturedAt));
         if (earlyMoves.Remove(conversation, out var buffered))
             foreach (var item in buffered.Where(x => x.Job == jobId)) ApplyMoves(conversation, item.Job, item.Run, item.Snapshot, item.Moves, item.Length);
     }
 
+    private async Task RecoverMoveJob(string conversation, string? jobId, ServerClient server, CancellationToken ct)
+    {
+        if (jobId is null || !moveLifetime.CanStart(jobId)) return;
+        try
+        {
+            var screen = await FindLatestLocalScreen(server, conversation, jobId, ct);
+            // The recorded screen, rather than event arrival order, binds the request.
+            if (screen is null || !ReferenceEquals(server, client)) return;
+            if (submittedConversation == conversation && submittedScreen is { } pending && pending.FileId != screen.FileId) return;
+            BeginMoveJob(conversation, jobId, screen);
+        }
+        catch (Exception) when (!ct.IsCancellationRequested) { /* No verified context: do not move. */ }
+    }
+
+    private void EndMoveJob(string conversation, string? jobId)
+    {
+        if (jobId is null) return;
+        moveLifetime.End(jobId); moveJobs.Remove(jobId);
+        if (earlyMoves.TryGetValue(conversation, out var buffer)) buffer.RemoveAll(x => x.Job == jobId);
+        if (autoMoveJob == jobId) { autoMoveVersion++; autoMoveJob = null; }
+    }
+
     private void ReceiveMoves(string conversation, string? job, string? run, bool snapshot, JsonElement moves, int length)
     {
-        if (string.IsNullOrEmpty(job) || string.IsNullOrEmpty(run) || moves.ValueKind != JsonValueKind.Array) return;
+        if (string.IsNullOrEmpty(job) || string.IsNullOrEmpty(run) || !moveLifetime.CanStart(job) || moves.ValueKind != JsonValueKind.Array) return;
         if (moveJobs.ContainsKey(job)) { ApplyMoves(conversation, job, run, snapshot, moves, length); return; }
         if (pendingScreenConversation != conversation) return;
         if (!earlyMoves.TryGetValue(conversation, out var pending)) earlyMoves[conversation] = pending = [];
@@ -95,14 +102,15 @@ public partial class MainWindow
         foreach (var move in accepted)
         {
             int version = autoMoveVersion;
-            moveQueue = AnimateMoveAfterAsync(moveQueue, conversation, context.Playback, move, version);
+            moveQueue = AnimateMoveAfterAsync(moveQueue, conversation, job, context.Playback, move, version);
         }
     }
 
-    private async Task AnimateMoveAfterAsync(Task previous, string conversation, MovePlayback playback, ScreenMove move, int version)
+    private async Task AnimateMoveAfterAsync(Task previous, string conversation, string job, MovePlayback playback, ScreenMove move, int version)
     {
         try { await previous; } catch (Exception) { }
-        if (version != autoMoveVersion || conversation != currentConversation || settings.MoveEnabled.IsChecked != true || !IsVisible || !playback.IsFresh(DateTimeOffset.UtcNow)) return;
+        if (!moveLifetime.CanStart(job) || version != autoMoveVersion || conversation != currentConversation || settings.MoveEnabled.IsChecked != true || !IsVisible || !playback.IsFresh(DateTimeOffset.UtcNow)) return;
+        autoMoveJob = job;
         var handle = new WindowInteropHelper(this).Handle;
         if (!GetWindowRect(handle, out var start)) return;
         if (!autoMoveActive) { moveHome = start; autoMoveActive = true; saveTimer.Stop(); }
