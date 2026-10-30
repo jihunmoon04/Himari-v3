@@ -18,6 +18,7 @@ public partial class MainWindow
     private readonly Dictionary<string, (string Text, string Mood)> liveDisplays = new();
     private string? deviceId, currentConversation;
     private bool connected, changingSelection, sending;
+    private long inputRevision;
     private DateTime? awaySince;
     private readonly ConnectionGate connectionChange = new();
     private readonly ConnectionGate messageSend = new();
@@ -165,13 +166,13 @@ public partial class MainWindow
         changingSelection = true; Conversations.ItemsSource = list;
         Conversations.SelectedItem = list.FirstOrDefault(x => x.Id == chosen) ?? list.FirstOrDefault();
         changingSelection = false;
-        currentConversation = (Conversations.SelectedItem as Conversation)?.Id;
+        SetCurrentConversation((Conversations.SelectedItem as Conversation)?.Id);
         if (currentConversation is not null) await ReadConversation(currentConversation, ct);
     }
     private async void ConversationChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
     {
         if (changingSelection) return;
-        currentConversation = (Conversations.SelectedItem as Conversation)?.Id;
+        SetCurrentConversation((Conversations.SelectedItem as Conversation)?.Id);
         if (currentConversation is not null && connection is not null)
             try { await ReadConversation(currentConversation, connection.Token); } catch (Exception ex) { ShowError(ex); }
     }
@@ -211,6 +212,12 @@ public partial class MainWindow
         catch (Exception ex) { ShowError(ex); }
     }
     private void InputKeyDown(object sender, System.Windows.Input.KeyEventArgs e) { if (e.Key == Key.Enter) { e.Handled = true; SendMessage(); } }
+    private void InputChanged(object sender, System.Windows.Controls.TextChangedEventArgs e) => inputRevision++;
+    private void SetCurrentConversation(string? id)
+    {
+        if (currentConversation != id) inputRevision++;
+        currentConversation = id;
+    }
     private void SendClick(object sender, RoutedEventArgs e) => SendMessage();
     private async void SendMessage()
     {
@@ -218,15 +225,22 @@ public partial class MainWindow
         string text = Input.Text.Trim(); int length = text.EnumerateRunes().Count();
         if (length is < 1 or > 32000) { Status.Text = "메시지는 1~32,000자로 입력해 주세요."; return; }
         if (!messageSend.TryEnter()) return;
+        var local = client; var ct = connection.Token;
+        var context = new SendContext(local, currentConversation, inputRevision);
         sending = true;
         SendButton.IsEnabled = false;
         try
         {
-            await client.SendAsync(HttpMethod.Post, PathFor(currentConversation) + "/messages", new { text }, connection.Token);
-            if (Input.Text.Trim() == text) Input.Clear();
-            Status.Text = "답변을 기다리는 중…"; SetMood("thinking");
+            await local.SendAsync(HttpMethod.Post, PathFor(context.ConversationId) + "/messages", new { text }, ct);
+            if (context.CanClear(client, currentConversation, connected, inputRevision)) Input.Clear();
+            if (context.IsCurrent(client, currentConversation, connected) && !liveDisplays.ContainsKey(context.ConversationId))
+            { Status.Text = "답변을 기다리는 중…"; SetMood("thinking"); }
         }
-        catch (Exception ex) { ShowError(ex); }
+        catch (Exception ex)
+        {
+            if (context.IsCurrent(client, currentConversation, connected)) ShowError(ex);
+            else if (ex is ApiException { Code: "device_scope" }) Trace.TraceWarning("HIMARI device_scope: message request denied.");
+        }
         finally { sending = false; messageSend.Exit(); SendButton.IsEnabled = connected; }
     }
     private async void CancelClick(object sender, RoutedEventArgs e)

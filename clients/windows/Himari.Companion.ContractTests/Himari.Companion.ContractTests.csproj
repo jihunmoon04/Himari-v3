@@ -8,5 +8,6 @@
     <Compile Include="..\Himari.Companion\HelloReconciliation.cs" Link="HelloReconciliation.cs" />
     <Compile Include="..\Himari.Companion\DisplayState.cs" Link="DisplayState.cs" />
     <Compile Include="..\Himari.Companion\ConnectionGate.cs" Link="ConnectionGate.cs" />
+    <Compile Include="..\Himari.Companion\SendContext.cs" Link="SendContext.cs" />
   </ItemGroup>
 </Project>

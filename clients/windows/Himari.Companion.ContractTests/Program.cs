@@ -143,6 +143,26 @@ var firstPress = PressEnter(); await PressEnter(); await PressEnter();
 Check(posts == 1, "repeated Enter while sending creates only one request");
 releaseSend.SetResult(); await firstPress; await PressEnter();
 Check(posts == 2, "sending can resume after request finishes");
+var connectionA = new object(); var connectionB = new object();
+var sendContext = new SendContext(connectionA, "conversation-A", 7);
+Check(sendContext.CanClear(connectionA, "conversation-A", true, 7), "unchanged original draft may clear");
+Check(!sendContext.CanClear(connectionA, "conversation-B", true, 7), "old result cannot clear another conversation");
+Check(!sendContext.CanClear(connectionA, "conversation-A", true, 9), "edited then restored draft is preserved");
+Check(!sendContext.IsCurrent(connectionB, "conversation-A", true), "old connection cannot update new connection");
+Check(!sendContext.IsCurrent(connectionA, "conversation-A", false), "offline state is not overwritten");
+var pendingResponse = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+object currentClient = connectionA; string currentId = "conversation-A"; long revision = 7;
+string draft = "같은 내용", uiStatus = "B 상태"; bool showError = false;
+async Task CompleteOldSend(bool fail)
+{
+    await pendingResponse.Task;
+    if (fail) { if (sendContext.IsCurrent(currentClient, currentId, true)) showError = true; return; }
+    if (sendContext.CanClear(currentClient, currentId, true, revision)) draft = "";
+    if (sendContext.IsCurrent(currentClient, currentId, true)) uiStatus = "답변 대기";
+}
+var delayedSuccess = CompleteOldSend(false); var delayedFailure = CompleteOldSend(true);
+currentId = "conversation-B"; revision++; pendingResponse.SetResult(); await Task.WhenAll(delayedSuccess, delayedFailure);
+Check(draft == "같은 내용" && uiStatus == "B 상태" && !showError, "late success and error do not change another conversation");
 Console.WriteLine("Contract transport checks passed.");
 
 sealed class FakeHandler(string token) : HttpMessageHandler

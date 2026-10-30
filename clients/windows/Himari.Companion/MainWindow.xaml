@@ -16,7 +16,7 @@
         </StackPanel>
         <StackPanel x:Name="ChatPanel" Visibility="Collapsed" Margin="0,8,0,0">
           <DockPanel><Button DockPanel.Dock="Right" Content="새 대화" Click="NewConversationClick"/><ComboBox x:Name="Conversations" DisplayMemberPath="Title" SelectionChanged="ConversationChanged"/></DockPanel>
-          <TextBox x:Name="Input" Margin="0,4,0,0" MaxLength="64000" KeyDown="InputKeyDown" ToolTip="메시지 입력"/>
+          <TextBox x:Name="Input" Margin="0,4,0,0" MaxLength="64000" KeyDown="InputKeyDown" TextChanged="InputChanged" ToolTip="메시지 입력"/>
           <WrapPanel Margin="0,4,0,0"><Button x:Name="SendButton" Content="보내기" Click="SendClick" Padding="8,3"/><Button Content="멈춤" Click="CancelClick" Padding="8,3" Margin="5,0,0,0"/><Button Content="Web 열기" Click="OpenWebClick" Padding="8,3" Margin="5,0,0,0"/></WrapPanel>
         </StackPanel>
         <WrapPanel Margin="0,8,0,0"><Button Content="가짜 대화" Click="DemoClick" Padding="8,4" Margin="0,0,6,0"/><ComboBox x:Name="MoodSelector" Width="140" SelectionChanged="MoodChanged"/></WrapPanel>
