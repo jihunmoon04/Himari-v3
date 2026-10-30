@@ -94,7 +94,8 @@ public partial class MainWindow : Window
     {
         if (awaitingAnswer && !string.IsNullOrWhiteSpace(Message.Text)) ShowAssistantBubble(assistantBubbleKey);
         OpenComposer();
-        Input.Focus();
+        // The first time the composer appears its editor is not laid out yet and refuses focus.
+        if (!Input.Focus()) Dispatcher.BeginInvoke(DispatcherPriority.Input, () => Input.Focus());
     }
     private void OpenComposer()
     {
