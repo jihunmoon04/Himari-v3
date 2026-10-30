@@ -368,6 +368,7 @@ def test_requests_arriving_together_cannot_pass_the_limit(streaming_server: Serv
     from starlette.requests import Request
 
     from himari.bootstrap.operator import OPERATOR
+    from himari.data.api import MessageOrigin, OriginKind
 
     server = streaming_server
     server.sign_in()
@@ -379,9 +380,9 @@ def test_requests_arriving_together_cannot_pass_the_limit(streaming_server: Serv
     request = Request({"type": "http", "app": app, "headers": [], "method": "GET", "path": "/"})
 
     async def together() -> tuple[Any, int | None]:
-        first = await endpoint(cid, request, who=OPERATOR)  # not started: no stream has begun
+        first = await endpoint(cid, request, by=web.Caller(OPERATOR, MessageOrigin(OriginKind.WEB)))  # not started
         try:
-            await endpoint(cid, request, who=OPERATOR)
+            await endpoint(cid, request, by=web.Caller(OPERATOR, MessageOrigin(OriginKind.WEB)))
         except web.ApiError as error:
             return first, error.status
         return first, None

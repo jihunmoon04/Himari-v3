@@ -40,6 +40,8 @@ from himari.data.api import (
     EventKind,
     EventPayload,
     EventRef,
+    MessageOrigin,
+    OriginKind,
     PromptBasis,
     ToolResultRecord,
     TriggerRef,
@@ -146,10 +148,27 @@ def model_result_from(text: str) -> ModelToolResult:
 # --- Conversation Event payloads ---------------------------------------------------
 
 
+def _origin(origin: MessageOrigin) -> dict[str, object]:
+    data: dict[str, object] = {"kind": origin.kind.value}
+    if origin.device_id is not None:
+        data["device_id"] = origin.device_id
+    return data
+
+
+def _origin_from(value: object) -> MessageOrigin:
+    data = _obj(value)
+    device = data.get("device_id")
+    return MessageOrigin(OriginKind(str(data["kind"])), None if device is None else str(device))
+
+
 def payload(value: EventPayload) -> str:
     match value:
-        case UserMessage(blocks=blocks, answers_call=answers):
-            return dumps({"blocks": _blocks(blocks), "answers_call": None if answers is None else _call_ref(answers)})
+        case UserMessage(blocks=blocks, answers_call=answers, origin=origin):
+            data: dict[str, object] = {"blocks": _blocks(blocks),
+                                       "answers_call": None if answers is None else _call_ref(answers)}
+            if origin is not None:  # V3-P83: an optional field; older messages have none
+                data["origin"] = _origin(origin)
+            return dumps(data)
         case AssistantFinal(blocks=blocks):
             return dumps({"blocks": _blocks(blocks)})
         case AssistantToolCalls(calls=calls, commentary=commentary):
@@ -169,8 +188,9 @@ def payload_from(kind: EventKind, text: str) -> EventPayload:
     data = _obj(json.loads(text))
     match kind:
         case EventKind.USER_MESSAGE:
-            answers = data.get("answers_call")
-            return UserMessage(_blocks_from(data["blocks"]), None if answers is None else _call_ref_from(answers))
+            answers, origin = data.get("answers_call"), data.get("origin")
+            return UserMessage(_blocks_from(data["blocks"]), None if answers is None else _call_ref_from(answers),
+                               None if origin is None else _origin_from(origin))
         case EventKind.ASSISTANT_FINAL:
             return AssistantFinal(_blocks_from(data["blocks"]))
         case EventKind.ASSISTANT_TOOL_CALLS:

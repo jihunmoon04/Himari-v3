@@ -10,6 +10,7 @@ from collections.abc import Iterable, Sequence
 from himari.common import ContentBlock, TextBlock, thaw, tool_id_problem
 from himari.data.api import (
     MAX_APP_PAYLOAD_BYTES,
+    MAX_DEVICE_NAME_CHARS,
     MAX_EFFORT_CHARS,
     MAX_EXTERNAL_SETTINGS,
     MAX_INSTRUCTIONS_CHARS,
@@ -24,6 +25,7 @@ from himari.data.api import (
     MAX_WORKSPACE_LOCATION_BYTES,
     MAX_WORKSPACE_NOTE_CHARS,
     PREVIEW_CHARS,
+    RESERVED_DEVICE_NAMES,
     AppView,
     AssistantFinal,
     DataError,
@@ -35,7 +37,9 @@ from himari.data.api import (
     MemoryCategory,
     MemoryChange,
     MemoryChangeKind,
+    MessageOrigin,
     ModelSetting,
+    OriginKind,
     ToolCompletion,
     ToolExecutionStatus,
     UiResource,
@@ -128,6 +132,39 @@ def check_memory_text(text: object) -> str:
     if len(text) > MAX_MEMORY_CHARS:
         raise DataError(DataErrorCode.TOO_LARGE, f"a note is at most {MAX_MEMORY_CHARS} characters")
     return text
+
+
+def check_device_name(name: object) -> str:
+    """V3-P83 §4.2: a device's name as stored, or why not. One line, so the
+    model and the Web show it as given."""
+    if not isinstance(name, str):
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, "a device name is text")
+    name = unicodedata.normalize("NFC", name).strip()
+    if any(unicodedata.category(c) in ("Cc", "Cs", "Zl", "Zp") for c in name):
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, "a device name may not contain control characters")
+    if not name:
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, "a device needs a name")
+    if len(name) > MAX_DEVICE_NAME_CHARS:
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, f"a device name is at most {MAX_DEVICE_NAME_CHARS} characters")
+    if name.casefold() in RESERVED_DEVICE_NAMES:
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, f"{name!r} is reserved")
+    return name
+
+
+def check_device_name_free(name: str, others: Iterable[str]) -> None:
+    """Names are unique among a principal's devices that are not revoked, case ignored."""
+    if any(other.casefold() == name.casefold() for other in others):
+        raise DataError(DataErrorCode.DUPLICATE_IDENTITY, "another device has that name")
+
+
+def check_origin(origin: object) -> None:
+    """V3-P83 §4.2: a device origin names its device; the others name none."""
+    if origin is None:
+        return
+    if not isinstance(origin, MessageOrigin) or not isinstance(origin.kind, OriginKind):
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, "not a message origin")
+    if (origin.kind is OriginKind.DEVICE) != isinstance(origin.device_id, str) or origin.device_id == "":
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, "a device origin names its device, and only it")
 
 
 def check_workspace_location(location: object) -> str:

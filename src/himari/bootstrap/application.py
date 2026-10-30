@@ -75,6 +75,7 @@ from himari.control.api import ContextStatus, ControlError, ControlErrorCode, Jo
 from himari.control.driver import NO_PROGRESS_RUNS
 from himari.control.runner import SEEN_SECONDS, BackgroundRunner
 from himari.data.api import (
+    MessageOrigin,
     MAX_LIST_LIMIT,
     ConversationSummary,
     DEFAULT_FILE_MAX_BYTES,
@@ -107,6 +108,8 @@ from himari.data.api import (
     view_state,
 )
 from himari.data.sqlite import SqliteData, SqliteStore
+from himari.presence.api import Devices
+from himari.presence.devices import DeviceRegistry
 from himari.documents import TMP_BYTES, DocumentReader, Toolkit, ToolkitRefused, open_toolkit, worker_roots
 from himari.environment.inside import INSIDE, InsideEnvironment, InsideFiles
 from himari.imaging import ImageViews, runtime_roots
@@ -646,6 +649,7 @@ class Application:
     memory_enabled: bool = False  # V3-P71 §9: the memory Tools and notes (HIMARI_MEMORY)
     conversation_search_enabled: bool = False  # V3-P72 §9 (HIMARI_CONVERSATION_SEARCH)
     streaming_enabled: bool = False  # V3-P73 §9 (HIMARI_STREAMING)
+    companion_enabled: bool = False  # V3-P83 §3 (HIMARI_COMPANION): pairing and device tokens
     # V3-P74: the machine Environment (its runner's socket was configured) and
     # the principals whose new Conversations use it instead of Inside (Q1).
     machine: MachineEnvironment | None = None
@@ -661,6 +665,10 @@ class Application:
     # kept only while some call holds or waits for it (PR #56 review C1).
     _lifecycle: dict[ConversationId, _Lifecycle] = field(default_factory=dict, repr=False)
     _cleanup: asyncio.Task[None] | None = field(default=None, repr=False)
+    devices: Devices = field(init=False, repr=False)  # V3-P83 §4: pairing and device tokens
+
+    def __post_init__(self) -> None:
+        self.devices = DeviceRegistry(self.data)
 
     @classmethod
     async def open(
@@ -694,6 +702,7 @@ class Application:
         memory: bool = True,  # V3-P71 §9: HIMARI_MEMORY=0 turns it off (the notes stay)
         conversation_search: bool = True,  # V3-P72 §9: HIMARI_CONVERSATION_SEARCH=0 turns its Tools off
         streaming: bool = True,  # V3-P73 §9: HIMARI_STREAMING=0 asks no model for a stream
+        companion: bool = True,  # V3-P83 §3: HIMARI_COMPANION=0 refuses pairing and device tokens
         machine_socket: str | None = None,  # V3-P74: HIMARI_MACHINE_SOCKET; None: no machine Environment
         machine_principals: Iterable[str] = ("operator",),  # whose new Conversations use it (Q1)
     ) -> Application:
@@ -825,7 +834,8 @@ class Application:
                           default_budget.limit_tokens, secret, mcp, turn, tuple(unverified), trash_days,
                           file_max_bytes, uploads_work, views, tuple(image_models), reader, toolkit,
                           memory_enabled=memory, conversation_search_enabled=conversation_search,
-                          streaming_enabled=streaming, machine=machine, changes=changes,
+                          streaming_enabled=streaming, companion_enabled=companion, machine=machine,
+                          changes=changes,
                           machine_principals=frozenset(PrincipalId(p) for p in machine_principals))
         if cleanup_seconds is not None:
             application._cleanup = asyncio.create_task(application._purge_periodically(cleanup_seconds),
@@ -1453,14 +1463,15 @@ class Application:
         return workspace.workspace_id, workspace.cwd_relative
 
     async def send(self, scope: TrustedScope, text: str, attachments: Sequence[FileId] = (),
-                   references: Sequence[ReferenceRequest] = ()) -> JobStatus:
+                   references: Sequence[ReferenceRequest] = (), origin: MessageOrigin | None = None) -> JobStatus:
         """A user message. With attachments (§5.1, under the lifecycle lock):
         1 the T1 checks as a read; 2 refused while a job runs; 3 the uploads
         placed in ``uploads/`` under the Workspace write lock (waited for at
         most PLACE_LOCK_SECONDS); 4 the message submitted, attaching them.
         ``references`` (V3-P76 §3): parts of files the user pointed at, each
         read again and checked by the explorer before anything is sent; a
-        stale one refuses the message (ExplorerRefused ``reference_stale``)."""
+        stale one refuses the message (ExplorerRefused ``reference_stale``).
+        ``origin``: where it was sent from (V3-P83 §4.2), kept on the message."""
         await self.data.read_conversation(scope)  # 404 before a job is started (or a file read) for a foreign id
         pointed: tuple[ContentBlock, ...] = ()
         if references:
@@ -1468,7 +1479,8 @@ class Application:
             pointed = tuple([await explorer.reference(r.path, r.identity, r.start, r.end, r.sha256)
                              for r in references])
         if not attachments:
-            return await self.runner.submit(scope, UserMessage(((TextBlock(text),) if text else ()) + pointed))
+            return await self.runner.submit(scope, UserMessage(((TextBlock(text),) if text else ()) + pointed,
+                                                               origin=origin))
         async with self._exclusive(scope.conversation_id):
             records = await self.data.check_attachments(scope, attachments)
             if self.runner.status(scope).running:
@@ -1492,7 +1504,7 @@ class Application:
                 raise FilesUnavailable(scope.conversation_id) from None
             blocks = ((TextBlock(text),) if text else ()) + tuple(AttachmentRef(r.file_id, r.version) for r in records) \
                 + pointed
-            return await self.runner.submit(scope, UserMessage(blocks))
+            return await self.runner.submit(scope, UserMessage(blocks, origin=origin))
 
     async def _place(self, scope: TrustedScope, placer: _Placer, record: FileRecord, *, first: bool) -> None:
         """One upload into ``uploads/`` (§5.2), its path recorded before it is

@@ -13,7 +13,8 @@ Rules:
    low their layer: the MCP connector uses ``common`` and ``tool.api`` and
    nothing else, Data included (V3-P57, PR #25 review B1); the Sandbox uses
    ``common`` only (V3-P59 §3); the image copies use ``common``,
-   ``sandbox`` and ``data`` (V3-P67).
+   ``sandbox`` and ``data`` (V3-P67); presence uses ``common`` and ``data``
+   (V3-P83).
 7. ``himari.runner`` is the composition root of its own process (V3-P74):
    it may import the sandbox's modules, not only its api, and nothing but
    ``common`` and ``sandbox``. Others reach it through ``runner.api``.
@@ -34,6 +35,7 @@ LAYERS = {
     "sandbox": 1,  # the isolation mechanism: imports common only (rule 6), used by consumers via its api
     "runner": 2,  # the machine runner's process (V3-P74): the sandbox's profiles; others use runner.api
     "data": 1,
+    "presence": 2,  # devices and the current device (V3-P83 §2.2): Data's types and nothing else
     "tool": 2,
     "imaging": 2,  # model copies of images (V3-P67): the sandbox and Data's file types, nothing else
     "documents": 2,  # reading documents (V3-P70): the sandbox and Data's file types, nothing else
@@ -52,6 +54,7 @@ ONLY_FROM = {
     "imaging": frozenset({"common", "sandbox", "data"}),
     "documents": frozenset({"common", "sandbox", "data"}),
     "runner": frozenset({"common", "sandbox"}),
+    "presence": frozenset({"common", "data"}),
 }
 # Packages that may import another package's private modules (rule 7).
 PRIVATE_FROM = {"runner": frozenset({"sandbox"})}
