@@ -1,6 +1,6 @@
-# 반려 에이전트 2단계 1부: 화면을 보여 주고 캐릭터가 가리키기 (V3-P84 설계 초안 v0.1, rev. 3)
+# 반려 에이전트 2단계 1부: 화면을 보여 주고 캐릭터가 가리키기 (V3-P84 설계 초안 v0.1, rev. 4)
 
-상태: **Proposed**. 소유자 결정 Q1~Q4 모두 정함(2026-10-30, §12): Q1은 A에서 미리보기를 뺌, Q2~Q4는 권고대로. rev. 2는 독립 설계 검수(NOT_READY: B1·B2, C1·C2, N1), rev. 3은 재검수(NOT_READY: B1·C2 부분 해결)를 반영했다(§13). 소유자 결정을 뒤집는 항목은 없다.
+상태: **Proposed**. 소유자 결정 Q1~Q4 모두 정함(2026-10-30, §12): Q1은 A에서 미리보기를 뺌, Q2~Q4는 권고대로. rev. 2는 독립 설계 검수(NOT_READY: B1·B2, C1·C2, N1), rev. 3은 재검수(NOT_READY: B1·C2 부분 해결), rev. 4는 세 번째 검수(READY_WITH_CORRECTIONS: C1, N1)를 반영했다(§13). 소유자 결정을 뒤집는 항목은 없다.
 
 **rev. 2(검수 반영):**
 - B1: 이동이 어느 화면의 좌표인지는 **작업이 시작될 때 앱이 정해 그 작업 내내 고정한다**(`MoveContext`). 재연결 snapshot에 다시 오는 이동은 Run마다 센 개수로 건너뛴다(§7).
@@ -219,8 +219,10 @@
 6. **돌아오기:** 답이 끝나고 말풍선이 접히면 원래 자리로 돌아간다. 사용자가 그 사이에 캐릭터를 끌어 옮겼으면 그 자리에 둔다.
 7. **끄기:** 설정에서 "캐릭터 이동"을 끌 수 있다. 끄면 이동을 무시한다(표정과 말은 그대로).
 8. **보내기가 실패하면(검수 C2, 재검수 C2):** 업로드는 됐는데 메시지가 실패할 수 있다. 앱은 글을 입력창에 남기고(V3-P83 §9.2), 올린 화면의 file id와 변환도 함께 둔다. 실패는 세 가지로 나눈다.
-   - **서버가 거절했음이 확실함**(4xx 오류 본문이 있는 응답: 409 `busy`·`still_stopping`·`conversation_closed`, 400, 403, 429 등): 메시지는 기록되지 않았다. 찍은 지 10분 안이면 같은 file id로 다시 보내도 된다(사용자가 다시 보내거나, `busy`면 작업이 끝난 뒤). 10분이 지나면 그 화면을 버리고 다음에 새로 찍는다.
-   - **결과를 모름**(보낸 뒤 연결이 끊김, 시간 초과, 5xx: 서버 안에서 기록한 뒤 실패했을 수 있다): 받아들여졌을 수 있다. 저절로 다시 보내지 않는다.
+   - **HTTP 상태만으로 나누지 않는다(3차 검수 C1).** Runner는 메시지를 먼저 기록하고(`Driver.accept`) 그다음 작업을 시작한다(`_start`). 그 사이 대화가 닫히면 메시지는 기록된 채 409 `conversation_closed`가 난다(`BackgroundRunner.submit`의 주석 "the input stays recorded"). 그래서 **오류 코드로** 나눈다.
+   - **거절이 확실함**: 메시지 경로가 **기록하기 전에만** 내는 코드다. 400 `invalid_argument`·`attachment_refused`, 403 `device_scope`·`companion_off`, 404 `not_found`, 409 `busy`(기록 전 확인), 409 `screen_already_sent`(그 요청은 기록하지 않음), 413, 429. 메시지는 기록되지 않았다. 찍은 지 10분 안이면 같은 file id로 다시 보내도 된다(사용자가 다시 보내거나, `busy`면 작업이 끝난 뒤). 10분이 지나면 그 화면을 버리고 다음에 새로 찍는다.
+   - **결과를 모름**: 409 `conversation_closed`(기록 뒤에도 남), 위 목록에 없는 모든 코드(`still_stopping` 포함), 5xx(서버 안에서 기록한 뒤 실패했을 수 있다), 보낸 뒤 연결이 끊김, 시간 초과. 받아들여졌을 수 있다. 저절로 다시 보내지 않는다.
+     - `conversation_closed`면 대화가 휴지통으로 가는 중이다. 다시 보내지 않고, 기록을 읽어 보인 뒤 "이 대화는 닫혔어요"를 알린다.
      - **화면이 붙은 메시지:** 같은 file id로 한 번 다시 보내 확인한다. 409 `screen_already_sent`면 앞의 보내기가 받아들여진 것이다. 그 대화의 `events`를 읽어 맞추고, 사건 흐름의 자기 `job started`로 `job_id`를 얻는다. 202면 앞의 것은 기록되지 않았던 것이고 지금 보낸 것이 기록됐다. 어느 쪽이든 메시지는 한 번만 기록된다(§4.2).
      - **글만 있는 메시지:** 멱등 키가 없다. 사건 흐름이 다시 연결되면(`hello`) 그 대화의 `events`를 아는 마지막 `sequence` 뒤부터 읽는다. 이 기기의 `origin`이고 글이 같은 `user_message`가 있으면 받아들여진 것이다. 없으면 "보내졌는지 확인하지 못했어요. 다시 보낼까요?"를 보이고 사용자가 고르게 한다. 다시 보내면 두 번 기록될 수 있음을 그 문구가 알린다.
      - 클라이언트가 만든 요청 id로 모든 메시지를 멱등하게 하는 일은 뒤로 미룬다(V3-P83의 글 메시지에도 같은 문제가 있다).
@@ -245,7 +247,7 @@
 | `common` | `AttachmentRef.screen`; `split_moods`→`split_marks`(이동 표시, `moves`), `MarkScan` |
 | `data` | codec의 `screen`, `event_text`가 이동 표시도 뺌 |
 | `provider` | `ProviderCapabilities.screen_points`, OpenRouter 선언 목록(확인한 모델만). 메시지 모양은 그대로 |
-| `control` | Driver가 요청 옵션에 `screen_points`를 채움(`image_input`과 같은 자리). `JobListener.job_started`에 새 작업의 `JobStatus`를 넘김 |
+| `control` | Driver가 요청 옵션에 `screen_points`를 채움(`image_input`과 같은 자리). `JobListener.job_started`에 새 작업의 `JobStatus`를 넘김(`control/api.py`, `control/runner.py`의 `_start`) |
 | `prompt` | 요청 옵션 `screen_points`, `<attachment>` 줄의 `screen`(`path` 없음)·`width`·`height`, `image_plan`의 `SCREENS_SHOWN`, `SCREEN_NOTE`·`SCREEN_MOVE_NOTE` |
 | `bootstrap` | 작업 사건의 `job_id`(`CompanionEvents`), `send`의 `screen`, 화면은 Workspace에 복사하지 않음(`_place` 건너뜀), 기기 업로드의 조건(이미지, 8 MiB, 서버가 정한 이름), 고정 문장 조립 |
 | `interfaces/web` | 기기 허용 목록에 업로드, 메시지의 `screen`과 409 `screen_already_sent`, 첨부 보기의 `screen`, `display`·`live`의 `moves`, `job_view`·`live`의 `job_id` |
@@ -253,7 +255,7 @@
 | `scripts/device_client.py` | 화면 올리기 → `screen` 메시지 → `live`의 `moves` 확인 |
 | `clients/windows` | §3, §7(로컬 에이전트) |
 
-- Tool, Environment, runner, presence는 바뀌지 않는다. Provider와 Control은 기능 선언 하나만 더한다.
+- Tool, Environment, machine runner 프로세스(`himari.runner`), presence는 바뀌지 않는다. Provider는 기능 선언 하나, Control은 그 옵션과 `JobListener`의 인자 하나만 더한다.
 
 ## 10. 검증 계획
 
@@ -267,6 +269,7 @@
   - **`live`·`display`:** `moves`의 `at`, 표시 한가운데서 다시 연결, `waiting.display`의 `moves`.
   - **`job_id`(재검수 B1):** 202 응답·`job started`·`ended`·`live`의 `snapshot`·`delta`·`end`가 같은 값, 다음 작업은 다른 값, 재시작 뒤 같은 `generation`이어도 다른 값, 앞 작업의 `live` 연결이 열린 채 새 작업이 시작되면 새 Run의 사건은 새 `job_id`.
   - **다시 보내기(재검수 C2):** 같은 `screen`으로 두 번 → 하나만 기록되고 둘째는 409 `screen_already_sent`, 동시에 두 번 보내도 하나만, Web 첨부의 "already sent"는 지금처럼 400 `attachment_refused`.
+  - **기록 뒤 닫힘(3차 검수 C1):** `Driver.accept`가 끝난 뒤 `_start` 전에 대화를 닫으면 메시지는 기록되고 응답은 409 `conversation_closed`(글 메시지, 화면 메시지 둘 다). 참조 클라이언트도 `conversation_closed`를 결과를 모름으로 다룬다.
 - **참조 클라이언트(CI):** 화면 올리기 → 메시지 → `live`의 `moves`와 `display.moves`.
 - **실제 모델 확인(`screen_points`를 켜는 조건, 검수 C1, opt-in `tests/live`):** `image_input`이 켜진 모델마다 지금 보내는 방식 그대로 1280×720 화면 몇 장(작은 단추, 화면 구석, 글자 메뉴)을 주고, "X를 가리켜 줘"의 `[[move:X,Y]]`가 그 대상의 영역(여유 24픽셀) 안에 드는지 본다. 모델마다 10번 중 8번 이상이면 켠다. 결과는 `docs/openrouter-model-catalog.md`에 적는다. 어느 모델도 넘지 못하면 Q3의 B(0~1000)로 다시 시험한다.
 - **Windows 앱:** 로컬 에이전트가 다중 모니터, DPI 배율 100·150%, 캐릭터 제외 캡처, `MoveContext`(다른 PC의 화면·10분 지난 화면은 움직이지 않음), 재연결 snapshot에서 이동을 다시 하지 않음, 다른 `job_id`의 `live` 사건으로 움직이지 않음, 결과를 모르는 보내기에서 `screen_already_sent`·기록 확인으로 두 번 보내지 않음을 확인한다. 소유자가 실제로 써 본다.
@@ -303,3 +306,12 @@ B2·C1·N1은 해결로 판정됐다.
 | --- | --- | --- |
 | B1(부분) | 작업 사건과 `live` 사이에 공통 작업 id가 없고, `live`는 작업에 묶이지 않은 대화의 지금 상태라 앞 맥락으로 새 Run의 이동을 할 수 있음. 두 연결의 도착 순서도 보장 안 됨 | `job_id`(불투명, `generation`과 `started_at`으로 만듦)를 202 응답·작업 사건·`live`의 `snapshot`·`delta`·`end`에 실음. `live`의 값이 맞는 이유는 Runner가 작업을 시작할 때 앞 `live` 상태를 같은 동기 단계에서 버리기 때문. 앱은 `job_id`가 같은 사건의 이동만 실행(§6.3, §7.3) |
 | C2(부분) | file id는 멱등 키가 아니라 응답을 잃으면 메시지가 두 번 기록될 수 있음 | 확인 결과 업로드는 메시지 트랜잭션 안에서 한 번만 붙음(이미 붙었으면 거절). 그래서 화면 메시지는 같은 file id가 멱등 키 구실을 함. 이미 붙은 화면은 409 `screen_already_sent`. 실패를 거절 확실·결과 모름으로 나누고, 글만 있는 메시지는 결과를 모르면 저절로 다시 보내지 않고 기록을 본 뒤 사용자에게 물음. 요청 id 멱등은 뒤로(§4.2, §7.8) |
+
+### 13.2 세 번째 검수 (`f4240fd`): READY_WITH_CORRECTIONS → rev. 4
+
+B1·B2·C1·C2·N1은 해결로 판정됐다.
+
+| # | 지적 | 반영 |
+| --- | --- | --- |
+| C1 | 4xx라고 메시지가 기록되지 않은 것이 아님: `Driver.accept` 뒤 `_start` 전에 대화가 닫히면 기록된 채 409 `conversation_closed` | 코드로 확인. §7.8을 HTTP 상태가 아니라 오류 코드로 나눔: 기록 전에만 나는 코드 목록만 "거절 확실", `conversation_closed`·목록 밖 코드·5xx·끊김은 "결과를 모름"(기록 확인, 저절로 다시 보내지 않음). 회귀 시험 추가(§10) |
+| N1 | `JobListener.job_started`가 바뀌는데 §9는 runner가 안 바뀐다고 함 | §9의 "runner"는 machine runner 프로세스(`himari.runner`)였다. 그렇게 적고, `control/runner.py`의 `_start` 변경을 control 줄에 명시 |
