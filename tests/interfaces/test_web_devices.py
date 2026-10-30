@@ -4,6 +4,7 @@ permission, and where messages come from."""
 from __future__ import annotations
 
 import base64
+import json
 import secrets
 import time
 from collections.abc import Iterator
@@ -23,6 +24,7 @@ from himari.bootstrap.operator import OPERATOR, derive_cli_bearer  # noqa: E402
 from himari.common import ASK_USER_TOOL_ID, MOODS, CallId, ConversationId, TextBlock, ToolCall, TrustedScope  # noqa: E402
 from himari.data.api import MessageOrigin, OriginKind, UserMessage  # noqa: E402
 from himari.interfaces.web import app as web  # noqa: E402
+from himari.interfaces.web import event_stream  # noqa: E402
 from himari.interfaces.web.config import WebConfig, WebConfigError  # noqa: E402
 from himari.presence import devices as presence_devices  # noqa: E402
 from himari.provider.api import NormalizedToolCalls  # noqa: E402
@@ -34,6 +36,8 @@ SEND = {"origin": ORIGIN}
 # §4.3: what a device token may call; everything else is refused by default.
 ALLOWED = {
     ("GET", "/api/device"),
+    ("POST", "/api/device/presence"),
+    ("GET", "/api/events"),
     ("GET", "/api/conversations"),
     ("GET", "/api/conversations/activity"),
     ("POST", "/api/conversations"),
@@ -133,6 +137,7 @@ class Server:
 def server(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Server]:
     monkeypatch.setattr(web, "FAILED_LOGIN_DELAY_SECONDS", 0)
     monkeypatch.setattr(presence_devices, "FAILED_PAIRING_DELAY_SECONDS", 0)
+    monkeypatch.setattr(event_stream, "MAX_SECONDS", 0.2)  # the test client reads a stream once it ends
     s = Server(tmp_path)
     with s.client:
         s.app.devices._failure_delay = 0  # type: ignore[attr-defined]
@@ -336,3 +341,78 @@ def test_answers_and_questions_carry_their_display(server: Server) -> None:
     answer = [e for e in events() if e["kind"] == "assistant_final"][-1]
     assert answer["text"] == "[[mood:excited]]서울! [[mood:nope]]끝"
     assert answer["display"] == {"text": "서울! 끝", "moods": [{"at": 0, "mood": "excited"}, {"at": 4, "mood": "neutral"}]}
+
+
+def frames_of(body: str) -> list[tuple[str, Any]]:
+    out = []
+    for block in body.split("\n\n"):
+        lines = block.strip().split("\n")
+        if lines[0].startswith("event: "):
+            out.append((lines[0][len("event: "):], json.loads(lines[1][len("data: "):])))
+    return out
+
+
+def test_a_devices_signal_makes_it_current(server: Server) -> None:
+    """§5, §6.1: with its event stream open and a signal, it is connected and current."""
+    me = server.as_device(server.paired())
+    server.client.portal.call(lambda: server.app.hub.subscribe(OPERATOR, "d1"))  # type: ignore[union-attr]
+    assert server.device.get("/api/device", headers=me).json()["current_device"] is None
+    response = server.device.post("/api/device/presence", json={"idle_seconds": 3, "time_zone": "Asia/Seoul"},
+                                  headers=me)
+    assert response.status_code == 204
+    assert server.device.get("/api/device", headers=me).json()["current_device"] == "d1"
+    (listed,) = server.client.get("/api/devices").json()["items"]
+    assert listed["connected"] is True and listed["current"] is True
+    for bad in ({"idle_seconds": -1}, {"idle_seconds": "x"}, {}, {"idle_seconds": 1, "time_zone": "x" * 65}):
+        assert server.device.post("/api/device/presence", json=bad, headers=me).status_code == 400, bad
+    response = server.client.post("/api/device/presence", json={"idle_seconds": 0}, headers=SEND)
+    assert (response.status_code, error_code(response)) == (403, "not_a_device")
+
+
+def test_the_event_stream_starts_with_hello(server: Server) -> None:
+    me = server.as_device(server.paired())
+    cid = server.client.post("/api/conversations", json={}, headers=SEND).json()["id"]
+    server.provider.extend([final("hi")])
+    server.device.post(f"/api/conversations/{cid}/messages", json={"text": "안녕"}, headers=me)
+    server.wait(cid)
+    response = server.device.get("/api/events", headers=me)
+    assert response.status_code == 200 and response.headers["content-type"].startswith("text/event-stream")
+    name, hello = frames_of(response.text)[0]
+    assert name == "hello" and hello == {
+        "device": {"device_id": "d1", "name": "데스크톱"}, "moods": list(MOODS), "current_device": None,
+        "recent_conversation": {"id": cid, "title": None}, "activity": {"working": [], "waiting": []}}
+    web_hello = frames_of(server.client.get("/api/events").text)[0][1]
+    assert web_hello["device"] is None and web_hello["recent_conversation"]["id"] == cid
+    assert server.client.portal.call(server.app.hub.open_streams, OPERATOR) == 0  # type: ignore[union-attr]
+
+
+def test_a_principal_has_at_most_sixteen_event_streams(server: Server) -> None:
+    def fill() -> None:
+        for _ in range(16):
+            server.app.hub.subscribe(OPERATOR)
+
+    server.client.portal.call(fill)  # type: ignore[union-attr]
+    response = server.client.get("/api/events")
+    assert (response.status_code, error_code(response)) == (429, "too_many_streams")
+
+
+def test_revoking_ends_the_devices_event_stream(server: Server) -> None:
+    server.paired()
+    stream = server.client.portal.call(lambda: server.app.hub.subscribe(OPERATOR, "d1"))  # type: ignore[union-attr]
+    assert server.client.delete("/api/devices/d1", headers=SEND).status_code == 204
+
+    async def drain() -> list[str]:
+        out = []
+        while (event := await stream.next(0)) is not None:
+            out.append(event.name)
+        return out
+
+    assert server.client.portal.call(drain)[-1] == "revoked" and stream.finished  # type: ignore[union-attr]
+
+
+def test_with_companion_off_the_web_still_has_its_event_stream(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(event_stream, "MAX_SECONDS", 0.2)
+    off = Server(tmp_path, companion=False)
+    with off.client:
+        off.sign_in()
+        assert frames_of(off.client.get("/api/events").text)[0][0] == "hello"

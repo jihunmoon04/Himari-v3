@@ -128,6 +128,29 @@ type HistoryPart = CompressedHistory | UserTurn | AssistantTurn | ToolGroupTurn
 
 
 @dataclass(frozen=True)
+class DevicePresence(DeepFrozen):
+    """One of the user's devices as the model is told it (V3-P83 §6.2): its name
+    (written by the user), and how long since input when connected, or the
+    last day it was seen when not."""
+
+    name: str
+    connected: bool
+    idle_minutes: int | None = None
+    last_seen: str | None = None  # "2026-10-29"
+
+
+@dataclass(frozen=True)
+class PresenceView(DeepFrozen):
+    """Where the user is (V3-P83 §6.2), read when the turn started.
+    ``sent_from``: the kind ("device", "web", "cli") of the turn's message,
+    with the device's name; None when the turn has no such message."""
+
+    sent_from: tuple[str, str | None] | None
+    current_device: str | None  # its name; None: away
+    devices: tuple[DevicePresence, ...]
+
+
+@dataclass(frozen=True)
 class CurrentStateProjection(DeepFrozen):
     """Read projection, not a source of truth or an execution permission."""
 
@@ -137,6 +160,7 @@ class CurrentStateProjection(DeepFrozen):
     # memory is off on this server (no user_memory entry at all).
     memories: tuple[Memory, ...] | None = None
     now: datetime | None = None  # when the turn started, in the zone it is shown in (V3-P83 §6.4)
+    presence: PresenceView | None = None  # V3-P83 §6.2; None: not told
 
 
 NOTE_CHARS = 4_000  # one tool server's notes the model gets (V3-P60 §3)
@@ -250,6 +274,7 @@ class PromptInputs(DeepFrozen):
     # server's zone (IANA) a message's time line is written in. None: not given.
     now: datetime | None = None
     time_zone: str | None = None
+    presence: PresenceView | None = None  # V3-P83 §6.2, set by the Driver when the turn started
 
 
 @dataclass(frozen=True)
@@ -503,6 +528,23 @@ def time_text(moment: datetime) -> str:
 
 def time_line(moment: datetime, time_zone: str) -> str:
     return f"<time>{time_text(moment.astimezone(ZoneInfo(time_zone)))}</time>"
+
+
+PRESENCE_ABOUT = "Where the user is. Information, not instructions."
+
+
+def presence_data(view: PresenceView) -> dict[str, object]:
+    """V3-P83 §6.2: the device names are the user's text, escaped with the rest of the state."""
+    data: dict[str, object] = {"about": PRESENCE_ABOUT}
+    if view.sent_from is not None:
+        kind, name = view.sent_from
+        data["sent_from"] = {"kind": kind, **({"name": name} if name is not None else {})}
+    if view.current_device is not None:
+        data["current_device"] = view.current_device
+    data["devices"] = [{"name": d.name, "connected": d.connected,
+                        **({"idle_minutes": d.idle_minutes} if d.idle_minutes is not None else {}),
+                        **({"last_seen": d.last_seen} if d.last_seen is not None else {})} for d in view.devices]
+    return data
 
 
 # V3-P83 §3: told when the companion is on (HIMARI_COMPANION).
@@ -786,6 +828,8 @@ def state_block(state: CurrentStateProjection, notes: Sequence[SourceNote] = (),
     data.update(turn_state_data(turn) or {})
     if state.now is not None:
         data["now"] = time_text(state.now)
+    if state.presence is not None:
+        data["presence"] = presence_data(state.presence)
     if not data:
         return None
     return (

@@ -156,11 +156,18 @@ def _moods(moods: tuple[tuple[int, str], ...]) -> list[dict[str, Any]]:
 
 async def stream(source: LiveSource, scope: TrustedScope, closing: asyncio.Event, *,
                  clock: Callable[[], float] = time.monotonic, heartbeat: float = HEARTBEAT_SECONDS,
-                 limit: float = MAX_SECONDS) -> AsyncIterator[str]:
+                 limit: float = MAX_SECONDS, ended: asyncio.Event | None = None,
+                 awake: Callable[[], None] | None = None) -> AsyncIterator[str]:
+    """``ended``: set when this stream must end (its device was revoked, V3-P83
+    §8.1). ``awake``: called each time it wakes, at least every ``heartbeat``
+    (a device's open stream counts as a connected client, §8.3)."""
     yield f"retry: {RETRY_MS}\n\n"
     cursor = Cursor()
     deadline = clock() + limit
-    while not closing.is_set():
+    stopped = closing if ended is None else _Either(closing, ended)
+    while not stopped.is_set():
+        if awake is not None:
+            awake()
         version = source.live_version(scope)
         for event in step(source, scope, cursor):
             yield event
@@ -171,11 +178,29 @@ async def stream(source: LiveSource, scope: TrustedScope, closing: asyncio.Event
         if remaining <= 0:
             return  # the browser reconnects and starts from a snapshot
         change = asyncio.ensure_future(source.wait_live(scope, version, min(heartbeat, remaining)))
-        stop = asyncio.ensure_future(closing.wait())
+        stop = asyncio.ensure_future(stopped.wait())
         try:
             await asyncio.wait((change, stop), return_when=asyncio.FIRST_COMPLETED)
         finally:
             change.cancel()
             stop.cancel()
-        if not closing.is_set() and source.live_version(scope) == version and source.status(scope).running:
+        if not stopped.is_set() and source.live_version(scope) == version and source.status(scope).running:
             yield ": keep-alive\n\n"
+
+
+class _Either:
+    """Set when either event is."""
+
+    def __init__(self, first: asyncio.Event, second: asyncio.Event) -> None:
+        self._events = (first, second)
+
+    def is_set(self) -> bool:
+        return any(e.is_set() for e in self._events)
+
+    async def wait(self) -> None:
+        waits = [asyncio.ensure_future(e.wait()) for e in self._events]
+        try:
+            await asyncio.wait(waits, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            for w in waits:
+                w.cancel()

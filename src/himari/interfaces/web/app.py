@@ -91,7 +91,7 @@ from himari.bootstrap.application import (
 from himari.bootstrap.changes import ChangeConflict, ChangeDiff, ChangesView
 from himari.bootstrap.explorer import PDF_APPEND_MAX_BYTES, ExplorerRefused, Listing, ShownFile
 from himari.bootstrap.operator import OPERATOR, derive_cli_bearer, verify_operator_token
-from himari.presence.api import PairingRefused, is_device_token
+from himari.presence.api import PairingRefused, TooManyStreams, is_device_token
 from himari.common import (
     ASK_USER_TOOL_ID,
     MOODS,
@@ -140,7 +140,7 @@ from himari.data.api import (
     UserMessage,
     view_state,
 )
-from himari.interfaces.web import live
+from himari.interfaces.web import event_stream, live
 from himari.interfaces.web.config import WebConfig
 from himari.sandbox.api import SandboxState
 from himari.interfaces.web.sandbox import SandboxGrant, SandboxSigner
@@ -247,6 +247,14 @@ class LoginBody(_Body):
 
 class DeviceNameBody(_Body):
     name: str = Field(max_length=200)  # Data checks the 40-character limit after trimming
+
+
+class PresenceBody(_Body):
+    """V3-P83 §5: seconds since the last input anywhere on the device (cut to
+    30 days), and its IANA time zone (an unknown one is ignored)."""
+
+    idle_seconds: float = Field(ge=0, allow_inf_nan=False)
+    time_zone: str | None = Field(default=None, max_length=64)
 
 
 class CreateBody(_Body):
@@ -679,11 +687,10 @@ def pairing_token(raw: bytes) -> str | None:
     return token if isinstance(token, str) else None
 
 
-def device_view(device: Device) -> dict[str, Any]:
-    """A device as the Web's Devices screen shows it (V3-P83 appendix A.1).
-    ``connected`` and ``current`` come with the current device (part 2)."""
+def device_view(device: Device, connected: bool = False, current: bool = False) -> dict[str, Any]:
+    """A device as the Web's Devices screen shows it (V3-P83 appendix A.1)."""
     return {"device_id": device.device_id, "name": device.name, "paired": device.paired_at is not None,
-            "connected": False, "current": False, "created_at": _time(device.created_at),
+            "connected": connected, "current": current, "created_at": _time(device.created_at),
             "paired_at": _time(device.paired_at), "last_seen_at": _time(device.last_seen_at),
             "pairing_expires_at": None if device.paired_at is not None else _time(device.pairing_expires_at)}
 
@@ -942,6 +949,8 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
     signer = SandboxSigner() if signer is None else signer
     closing = asyncio.Event()  # set as the server begins to shut down: the live streams end
     live_slots = live.Slots()  # open live streams of each principal
+    # V3-P83 §8.1: the live streams each device opened, ended when it is revoked.
+    device_lives: dict[tuple[PrincipalId, str], set[asyncio.Event]] = {}
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -1535,7 +1544,23 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
         release = live_slots.take(who)  # checked and taken in one step (PR #83 review B1)
         if release is None:
             raise ApiError(429, "too_many_streams", "Too many live views are open; close one and try again.")
-        return _LiveResponse(live.stream(application.runner, scope, closing), release,
+        if by.device is None:
+            return _LiveResponse(live.stream(application.runner, scope, closing), release,
+                                 media_type="text/event-stream", headers={"X-Accel-Buffering": "no"})
+        # V3-P83 §8.3: a device's open live stream is a connected client (seen); §8.1: revoking ends it.
+        key, ended = (who, by.device.device_id), asyncio.Event()
+        device_lives.setdefault(key, set()).add(ended)
+
+        def done() -> None:
+            release()
+            kept = device_lives.get(key)
+            if kept is not None:
+                kept.discard(ended)
+                if not kept:
+                    del device_lives[key]
+
+        return _LiveResponse(live.stream(application.runner, scope, closing, ended=ended,
+                                         awake=lambda: application.seen(scope)), done,
                              media_type="text/event-stream", headers={"X-Accel-Buffering": "no"})
 
     @app.get("/api/conversations/{conversation_id}/calls/{run_id}/{call_id}/app")
@@ -1864,7 +1889,9 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
     @app.get("/api/devices")
     async def list_devices(request: Request, who: PrincipalId = Depends(principal)) -> dict[str, Any]:
         application = himari(request)
-        return {"items": [device_view(d) for d in await application.devices.list(who)],
+        states, current = application.hub.states(who), application.hub.current(who)
+        return {"items": [device_view(d, d.device_id in states and states[d.device_id].connected,
+                                      d.device_id == current) for d in await application.devices.list(who)],
                 "enabled": application.companion_enabled}
 
     @app.post("/api/devices", status_code=201)
@@ -1888,10 +1915,14 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
 
     @app.delete("/api/devices/{device_id}", status_code=204)
     async def revoke_device(device_id: str, request: Request, who: PrincipalId = Depends(principal)) -> None:
+        application = himari(request)
         try:
-            await himari(request).devices.revoke(who, device_id)
+            await application.devices.revoke(who, device_id)
         except DataError as error:
             raise device_refused(error) from None
+        application.hub.revoked(who, device_id)  # its event streams end with "revoked" (§8.1)
+        for ended in device_lives.get((who, device_id), ()):
+            ended.set()  # and its live streams end
 
     @app.post(PAIR_PATH)
     async def pair_device(request: Request) -> dict[str, Any]:
@@ -1916,12 +1947,41 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
     @app.get("/api/device")
     async def read_device(request: Request, by: Caller = Depends(caller)) -> dict[str, Any]:
         """What a device needs to start (appendix A.2); ``device`` is null for the Web."""
-        recent = await himari(request).data.most_recent_user_conversation(by.principal)
+        return {**await device_state(himari(request), by), "limits": {"message_chars": MAX_MESSAGE_CHARS}}
+
+    async def device_state(application: Application, by: Caller) -> dict[str, Any]:
+        """What ``GET /api/device`` and ``hello`` both say (appendix A.2, A.3)."""
+        recent = await application.data.most_recent_user_conversation(by.principal)
         return {"device": None if by.device is None else {"device_id": by.device.device_id, "name": by.device.name},
-                "moods": list(MOODS), "current_device": None,
+                "moods": list(MOODS), "current_device": application.hub.current(by.principal),
                 "recent_conversation": None if recent is None else {"id": recent.conversation_id,
-                                                                    "title": recent.title},
-                "limits": {"message_chars": MAX_MESSAGE_CHARS}}
+                                                                    "title": recent.title}}
+
+    @app.post("/api/device/presence", status_code=204)
+    async def device_presence(body: PresenceBody, request: Request, by: Caller = Depends(caller)) -> None:
+        """A device's input activity (§5)."""
+        if by.device is None:
+            raise ApiError(403, "not_a_device", "Only a device sends its activity.")
+        himari(request).hub.signal(by.principal, by.device.device_id, body.idle_seconds, body.time_zone)
+
+    @app.get("/api/events")
+    async def read_events_stream(request: Request, by: Caller = Depends(caller)) -> StreamingResponse:
+        """The principal's event stream (§8.1, appendix A.3), for the devices and the Web."""
+        application = himari(request)
+        try:
+            subscription = application.hub.subscribe(by.principal, None if by.device is None else by.device.device_id)
+        except TooManyStreams:
+            raise ApiError(429, "too_many_streams", "Too many event streams are open; close one and try again.") \
+                from None
+        try:
+            assert application.events is not None
+            hello = {**await device_state(application, by), "activity": await application.events.activity(by.principal)}
+        except BaseException:
+            application.hub.unsubscribe(subscription)
+            raise
+        return _LiveResponse(event_stream.stream(subscription, hello, closing),
+                             lambda: application.hub.unsubscribe(subscription),
+                             media_type="text/event-stream", headers={"X-Accel-Buffering": "no"})
 
     # -- static UI ----------------------------------------------------------------------------
 

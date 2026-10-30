@@ -82,7 +82,8 @@ class Composer:
             tool_catalog=inputs.tool_catalog,
             conversation=tuple(history),
             current_state=CurrentStateProjection(basis=basis, observations=inputs.observations,
-                                                 memories=inputs.memories, now=inputs.now),
+                                                 memories=inputs.memories, now=inputs.now,
+                                                 presence=inputs.presence),
             request_options=inputs.request_options,
             trigger_refs=inputs.trigger_refs,
             prompt_basis=PromptBasis(

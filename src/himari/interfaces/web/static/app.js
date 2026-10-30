@@ -134,6 +134,8 @@ const app = {
   activity: { working: new Set(), waiting: new Set() }, // the last /activity answer (V3-P80 §3)
   activityTimer: null,
   activityAsked: new Set(), // ids not in the list that the list was read again for once (§3.3)
+  events: null, // V3-P83 §8.1: the open event stream (EventSource), while the page shows
+  eventsFailed: false, // it failed and has not said hello again: the activity is read every 5 s meanwhile
   activityTicket: 0, // the latest /activity read: an older answer is dropped (review N3)
   listTicket: 0, // the latest list read
   listResetting: 0, // the ticket of a reload under way (0: none)
@@ -293,6 +295,7 @@ function showLogin({ signingOut = false } = {}) {
   if (!$("surface-login").hidden) return;
   stopPolling();
   clearTimeout(app.activityTimer); // V3-P80: read again after the sign-in
+  closeEvents(); // V3-P83: and the event stream opened again
   app.activityTicket += 1; // a read answered before this never paints the sign-in screen (review N2)
   app.activity = { working: new Set(), waiting: new Set() };
   views.reset();
@@ -486,7 +489,42 @@ function paintActivity() {
   followTitle();
 }
 
-/* Every 5 s while the page shows and the user is signed in; a hidden page reads again when shown. */
+/* V3-P83 §8.1: the event stream draws the activity while the page shows; it is closed while the page is
+ * hidden and opened again when shown (its hello brings what changed). Reading every 5 s is only for a shown
+ * page whose stream failed, until a stream says hello again (re-review N5). */
+function openEvents() {
+  if (app.events || !$("surface-login").hidden || document.visibilityState === "hidden") return;
+  const source = new EventSource("/api/events");
+  app.events = source;
+  source.addEventListener("hello", (event) => {
+    if (app.events !== source) return;
+    app.eventsFailed = false;
+    clearTimeout(app.activityTimer);
+    fromStream(JSON.parse(event.data).activity);
+  });
+  source.addEventListener("activity", (event) => { if (app.events === source) fromStream(JSON.parse(event.data)); });
+  source.onerror = () => {
+    if (app.events !== source) return;
+    if (source.readyState === EventSource.CLOSED) app.events = null; // refused (e.g. too many): read, try later
+    if (!app.eventsFailed) {
+      app.eventsFailed = true;
+      scheduleActivity();
+    }
+  };
+}
+
+function closeEvents() {
+  if (app.events) app.events.close();
+  app.events = null;
+  app.eventsFailed = false;
+}
+
+function fromStream(answer) {
+  app.activityTicket += 1; // a read still on its way is older than this
+  applyActivity(answer).catch(() => {});
+}
+
+/* While the stream fails, every 5 s; a hidden page reads again when shown. */
 function scheduleActivity(delay = ACTIVITY_MS) {
   clearTimeout(app.activityTimer);
   app.activityTimer = setTimeout(readActivity, delay);
@@ -499,21 +537,30 @@ async function readActivity() {
   try {
     const answer = await api("GET", "/api/conversations/activity");
     if (ticket !== app.activityTicket) return; // a newer read is on its way, and schedules the next
-    app.activity = { working: new Set(answer.working), waiting: new Set(answer.waiting) };
-    const listed = new Set([...$("conversation-list").querySelectorAll(".conv-row")].map((row) => row.dataset.id));
-    // One started elsewhere (another tab, the CLI): the list once more, so it is there (§3.3).
-    const unknown = [...answer.working, ...answer.waiting].filter((id) => !listed.has(id) && !app.activityAsked.has(id));
-    if (unknown.length) {
-      for (const id of unknown) app.activityAsked.add(id);
-      await loadList(true).then(markSelected).catch(() => {});
-    }
-    paintActivity();
+    await applyActivity(answer);
   } catch (error) {
     // The sign-in screen: reading starts again after it. Any other failure (a 401 a proxy wrote, the
     // network) tries again later (review N3).
     if (!$("surface-login").hidden) return;
   }
-  if ($("surface-login").hidden) scheduleActivity();
+  if ($("surface-login").hidden && (!app.events || app.eventsFailed)) {
+    openEvents(); // a stream refused before may be taken now
+    scheduleActivity();
+  }
+}
+
+/* ``working``: ids (the activity read) or {id, origin} (the event stream, V3-P83 appendix A.3). */
+async function applyActivity(answer) {
+  const working = answer.working.map((item) => (typeof item === "string" ? item : item.id));
+  app.activity = { working: new Set(working), waiting: new Set(answer.waiting) };
+  const listed = new Set([...$("conversation-list").querySelectorAll(".conv-row")].map((row) => row.dataset.id));
+  // One started elsewhere (another tab, the CLI): the list once more, so it is there (§3.3).
+  const unknown = [...working, ...answer.waiting].filter((id) => !listed.has(id) && !app.activityAsked.has(id));
+  if (unknown.length) {
+    for (const id of unknown) app.activityAsked.add(id);
+    await loadList(true).then(markSelected).catch(() => {});
+  }
+  paintActivity();
 }
 
 async function showHome({ via = "push" } = {}) {
@@ -3814,6 +3861,7 @@ async function enter() {
   await drafts.load();
   app.activityAsked.clear();
   scheduleActivity(0); // V3-P80 §3.3
+  openEvents(); // V3-P83 §8.1
   loadServerInfo();
   syncFoldersLink();
   // A save that met a signed-out session goes back to its draft (PR #68 review C2).
@@ -3873,8 +3921,13 @@ async function boot() {
   };
   window.addEventListener("pagehide", keepNow);
   document.addEventListener("visibilitychange", () => {
-    if (document.visibilityState === "hidden") keepNow();
-    else if ($("surface-login").hidden) readActivity(); // shown again: what changed meanwhile (V3-P80 §3.3)
+    if (document.visibilityState === "hidden") {
+      keepNow();
+      closeEvents(); // V3-P83 §8.1: a hidden tab holds no stream
+    } else if ($("surface-login").hidden) {
+      readActivity(); // shown again: what changed meanwhile (V3-P80 §3.3)
+      openEvents();
+    }
   });
   // §5.3: another tab signed out — nothing of this one is kept or written either.
   localStore.onWiped(() => { // signed out like that tab: to sign in again, where writes open again (PR #106 review B3)

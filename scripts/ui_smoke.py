@@ -1254,8 +1254,9 @@ def activity_script() -> GatedAdapter:
 
 
 def run_activity(base: str, token: str, shots: str | None, provider: GatedAdapter) -> list[str]:
-    """V3-P80: other conversations at work or waiting, on the list and in the tab's title; one started in
-    another tab appears; pasting files, text with a file, and text too long for a message."""
+    """V3-P80: other conversations at work or waiting, on the list and in the tab's title, drawn from the event
+    stream (V3-P83 §8.1), which a hidden tab closes; one started in another tab appears; pasting files, text
+    with a file, and text too long for a message."""
     errors: list[str] = []
     with sync_playwright() as p:
         browser = p.chromium.launch()
@@ -1265,10 +1266,29 @@ def run_activity(base: str, token: str, shots: str | None, provider: GatedAdapte
         page.on("pageerror", lambda e: errors.append(str(e)))
         row = lambda cid: page.locator(f'#conversation-list .conv-row[data-id="{cid}"]')  # noqa: E731
 
+        # V3-P83 §8.1: the event stream draws the activity; a hidden tab closes it, a shown one opens it again.
+        streams: list[Any] = []
+        ended: list[Any] = []
+        reads: list[str] = []
+        page.on("request", lambda r: streams.append(r) if r.url.endswith("/api/events")
+                else reads.append(r.url) if r.url.endswith("/api/conversations/activity") else None)
+        page.on("requestfailed", lambda r: ended.append(r) if r.url.endswith("/api/events") else None)
+        page.on("requestfinished", lambda r: ended.append(r) if r.url.endswith("/api/events") else None)
         page.goto(base)
         page.fill("#login-token", token)
         page.click("#login-submit")
         new_chat(page)
+        page.wait_for_timeout(6000)
+        assert len(streams) == 1 and not ended, (streams, ended)
+        assert len(reads) <= 1, f"no 5 s reading while the stream is open: {reads}"
+        visible = """state => { Object.defineProperty(document, 'visibilityState', {configurable: true,
+            get: () => state}); document.dispatchEvent(new Event('visibilitychange')); }"""
+        page.evaluate(visible, "hidden")
+        page.wait_for_timeout(500)
+        assert len(ended) == 1, "a hidden tab holds no event stream"
+        page.evaluate(visible, "visible")
+        page.wait_for_timeout(500)
+        assert len(streams) == 2, "shown again, it opens a new one"
         a = page.locator(".conv-row.is-selected").get_attribute("data-id")
         page.fill("#composer-text", "work on A")
         page.press("#composer-text", "Enter")

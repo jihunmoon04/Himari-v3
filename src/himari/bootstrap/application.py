@@ -51,6 +51,7 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, BinaryIO
+from zoneinfo import available_timezones
 
 import httpx
 
@@ -108,8 +109,10 @@ from himari.data.api import (
     view_state,
 )
 from himari.data.sqlite import SqliteData, SqliteStore
+from himari.bootstrap.companion import CompanionEvents, CompanionPresence
 from himari.presence.api import Devices
 from himari.presence.devices import DeviceRegistry
+from himari.presence.hub import PresenceHub
 from himari.documents import TMP_BYTES, DocumentReader, Toolkit, ToolkitRefused, open_toolkit, worker_roots
 from himari.environment.inside import INSIDE, InsideEnvironment, InsideFiles
 from himari.imaging import ImageViews, runtime_roots
@@ -668,6 +671,11 @@ class Application:
     # kept only while some call holds or waits for it (PR #56 review C1).
     _lifecycle: dict[ConversationId, _Lifecycle] = field(default_factory=dict, repr=False)
     _cleanup: asyncio.Task[None] | None = field(default=None, repr=False)
+    # V3-P83 §5, §8.1: who is connected, the current device and the event stream (one per
+    # server), and the Runner's listener that publishes on it.
+    hub: PresenceHub = field(default_factory=PresenceHub, repr=False)
+    events: CompanionEvents | None = field(default=None, repr=False)
+    _ticking: asyncio.Task[None] | None = field(default=None, repr=False)
     devices: Devices = field(init=False, repr=False)  # V3-P83 §4: pairing and device tokens
 
     def __post_init__(self) -> None:
@@ -809,6 +817,8 @@ class Application:
                     log.warning("the machine runner does not answer yet (%s)", type(error).__name__)
             views = await _image_views(root, sandbox)
             base = DEFAULT_INSTRUCTIONS if instructions is None else instructions
+            zones = frozenset(available_timezones())
+            hub = PresenceHub(time_zones=zones.__contains__)  # a device's zone that is not known is ignored (§5)
             runtime = build_runtime(provider, store=store, environments=[inside, *([machine] if machine else [])],
                                     tools=[*tools, *mcp.handlers, *mcp.resource_tools],
                                     models=catalog,
@@ -824,7 +834,9 @@ class Application:
                                     no_progress_runs=turn.no_progress_runs, image_views=views,
                                     file_max_bytes=file_max_bytes, memory=memory,
                                     conversation_search=conversation_search, streaming=streaming,
-                                    time_zone=time_zone)
+                                    time_zone=time_zone,
+                                    presence=CompanionPresence(DeviceRegistry(SqliteData(store)), hub, time_zone,
+                                                               enabled=companion))
         except BaseException:
             try:
                 if mcp is not None:
@@ -835,14 +847,18 @@ class Application:
                 store.close()
             raise
         assert isinstance(runtime.data, SqliteData)
-        runner = BackgroundRunner(runtime.driver, unattended_runs=unattended_runs, seen_seconds=turn.seen_seconds)
+        events = CompanionEvents(hub, runtime.data)
+        runner = BackgroundRunner(runtime.driver, unattended_runs=unattended_runs, seen_seconds=turn.seen_seconds,
+                                  listener=events)
         application = cls(root, store, runtime.data, runtime, runner, inside, state, model_id,
                           default_budget.limit_tokens, secret, mcp, turn, tuple(unverified), trash_days,
                           file_max_bytes, uploads_work, views, tuple(image_models), reader, toolkit,
                           memory_enabled=memory, conversation_search_enabled=conversation_search,
                           streaming_enabled=streaming, companion_enabled=companion, machine=machine,
                           changes=changes,
-                          machine_principals=frozenset(PrincipalId(p) for p in machine_principals))
+                          machine_principals=frozenset(PrincipalId(p) for p in machine_principals),
+                          hub=hub, events=events)
+        application._ticking = asyncio.create_task(hub.run(), name="presence-tick")
         if cleanup_seconds is not None:
             application._cleanup = asyncio.create_task(application._purge_periodically(cleanup_seconds),
                                                        name="trash-cleanup")
@@ -1623,12 +1639,14 @@ class Application:
                 await self.mcp.release(scope.conversation_id)
             except Exception:  # noqa: BLE001 — the move stands; an idle process ends by itself
                 log.exception("could not end the MCP processes of %s", scope.conversation_id)
+            self._activity_changed(scope)
             return moved
 
     async def restore(self, scope: TrustedScope) -> None:
         async with self._exclusive(scope.conversation_id):
             await self.data.restore_conversation(scope)  # owner and state first
             self.runner.reopen(scope)
+            self._activity_changed(scope)
 
     async def purge(self, scope: TrustedScope) -> None:
         """§7.2: PURGING recorded (no restore from here on), the
@@ -1645,6 +1663,12 @@ class Application:
                 await asyncio.to_thread(self.changes.forget, scope.conversation_id)
             self.runner.forget(scope)
             self.runner.reopen(scope)
+            self._activity_changed(scope)
+
+    def _activity_changed(self, scope: TrustedScope) -> None:
+        """V3-P83 §2.2: a waiting conversation may have left or come back."""
+        if self.events is not None:
+            self.events.activity_changed(scope.principal_id)
 
     async def purge_due(self, now: datetime | None = None) -> int:
         """Purge what was trashed more than ``trash_days`` before ``now``,
@@ -1683,11 +1707,14 @@ class Application:
             await asyncio.sleep(seconds)
 
     async def close(self, grace_seconds: float = 30.0) -> None:
-        if self._cleanup is not None:
-            self._cleanup.cancel()
-            await asyncio.gather(self._cleanup, return_exceptions=True)  # its own cancellation, not ours
+        for task in (self._cleanup, self._ticking):
+            if task is not None:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)  # its own cancellation, not ours
         try:
             await self.runner.shutdown(grace_seconds)
+            if self.events is not None:
+                await self.events.aclose()
         finally:
             try:
                 await self.mcp.aclose()
