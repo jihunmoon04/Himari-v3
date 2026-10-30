@@ -343,3 +343,7 @@ B1·B2·C1·C2·N1은 해결로 판정됐다.
 | --- | --- | --- |
 | C2 | 가장 최근 화면이 `ready`여도 요청의 이미지 한도(32 MiB)를 뒤의 Tool 이미지가 먼저 채우면 빠질 수 있어, 앱의 조건과 모델이 본 것이 어긋남 | `image_plan`이 가장 최근 화면을 다른 이미지보다 먼저 담음(§5). 시험: 화면 뒤의 큰 이미지 둘이 한도를 채워도 화면이 들어가고 크기를 받음 |
 | N1 | 앞머리만 맞는 깨진 파일은 저장 뒤 거절됨 | 그대로 둠(정리가 지움). 시험을 더함: 같은 깨진 파일을 세 번 보내도 보관소는 한 개만큼만 늘고(같은 내용은 같은 보관본), 8 MiB를 넘는 본문은 남지 않음 |
+
+### 14.3 실제 모델 확인 (2026-10-30)
+
+`tests/live/test_openrouter_screen_live.py`를 `image_input`이 켜진 8개 모델에 돌렸다. 7개가 10번 중 8번 이상 대상을 가리켜 `screen_points`를 켰다: `openai/gpt-6-luna`, `openai/gpt-6.1-sol`, `anthropic/claude-sonnet-5.5`, `anthropic/claude-haiku-5.5`, `xiaomi/mimo-v2.6-pro`, `deepseek/deepseek-v4.1-flash`, `minimax/minimax-m3`. `openai/gpt-5-nano`는 6번이라 화면을 보기만 한다. 시험 화면은 단순한 그림이므로, 실제 데스크톱에서의 정확도는 소유자의 사용으로 확인한다(`docs/openrouter-model-catalog.md`).

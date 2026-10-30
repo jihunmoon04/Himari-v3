@@ -45,3 +45,17 @@ both, so `image_input` is declared for `openai/gpt-6-luna`, `openai/gpt-6.1-sol`
 `xiaomi/mimo-v2.6-pro`, `deepseek/deepseek-v4.1-flash` and `minimax/minimax-m3`.
 `z-ai/glm-5.3` gets attachment lines only. The checks say the models read the image;
 they do not measure how well they describe real pictures.
+
+## Points on a screen (V3-P84, 2026-10-30)
+
+Each model with `image_input` was checked with `tests/live/test_openrouter_screen_live.py`:
+five 1280×720 screens (a small Save button, Settings in the top-right corner, a menu
+word, a red circle among grey squares, a search field), each asked twice as HIMARI
+sends a screen (the `screen` attachment line with its size, `SCREEN_NOTE` and
+`SCREEN_MOVE_NOTE`). A `[[move:X,Y]]` counted when it fell on the target with 24 pixels
+to spare. Seven reached at least 8 of 10, so `screen_points` is declared for
+`openai/gpt-6-luna`, `openai/gpt-6.1-sol`, `anthropic/claude-sonnet-5.5`,
+`anthropic/claude-haiku-5.5`, `xiaomi/mimo-v2.6-pro`, `deepseek/deepseek-v4.1-flash`
+and `minimax/minimax-m3`. `openai/gpt-5-nano` hit 6 of 10 (its misses include the small Save
+button both times), so it sees screens but is not told how to move. The screens are
+plain drawings; real desktops are busier, so the owner's own use is the next check.
