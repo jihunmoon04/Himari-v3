@@ -338,6 +338,14 @@ public partial class MainWindow
                 Status.Text = "전송이 거절됐습니다. 원인을 해결한 뒤 10분 안에는 같은 화면으로 다시 보낼 수 있습니다.";
                 return;
             }
+            catch (ApiException ex) when (screen is not null && ex.Code is "not_a_screen" or "attachment_refused" or "not_found")
+            {
+                if (recoveryOwner?.SameDevice(local) != true) return;
+                unresolvedScreen = null; localScreens.Remove(screen.FileId);
+                submittedScreen = null; submittedConversation = null;
+                if (context.IsCurrent(client, currentConversation, connected)) Status.Text = "화면 첨부가 거절됐습니다. 다음 전송에서는 화면을 새로 캡처해 주세요.";
+                return;
+            }
             catch (Exception ex) when (screen is null && MessageFailures.Classify(ex) is MessageFailure.Unknown or MessageFailure.Closed)
             {
                 if (recoveryOwner?.SameDevice(local) != true) return;

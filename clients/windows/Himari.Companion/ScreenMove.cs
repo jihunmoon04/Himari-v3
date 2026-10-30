@@ -2,6 +2,15 @@ using System.Text.Json;
 
 namespace Himari.Companion;
 
+internal static class MoveQueue
+{
+    internal static async Task RunAfterAsync(Task previous, Func<Task> animate)
+    {
+        try { await previous; } catch (Exception) { /* A failed animation must not lose later accepted moves. */ }
+        await animate();
+    }
+}
+
 // Coordinates are physical pixels, including negative virtual-screen origins.
 internal readonly record struct PixelRect(int Left, int Top, int Width, int Height);
 internal readonly record struct PixelPoint(double X, double Y);

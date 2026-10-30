@@ -39,10 +39,13 @@ public partial class MainWindow
                         if (state == "started" && IsOwn(Prop(data, "origin")) && id is not null)
                         {
                             await RecoverMoveJob(id, Str(data, "job_id"), local, ct);
-                            StartLive(id, local, ct);
+                            StartLive(id, local, ct, Str(data, "job_id"));
                         }
-                        if (state == "ended" && id is not null) EndMoveJob(id, Str(data, "job_id"));
-                        else if (state == "ended" && id == currentConversation && Str(data, "outcome") is null && Prop(data, "error").ValueKind is not (JsonValueKind.Null or JsonValueKind.Undefined)) Status.Text = "작업 중 문제가 생겼습니다. Web에서 확인해 주세요.";
+                        if (state == "ended" && id is not null)
+                        {
+                            EndMoveJob(id, Str(data, "job_id"));
+                            if (id == currentConversation && Str(data, "outcome") is null && Prop(data, "error").ValueKind is not (JsonValueKind.Null or JsonValueKind.Undefined)) Status.Text = "작업 중 문제가 생겼습니다. Web에서 확인해 주세요.";
+                        }
                     }
                     else if (type == "conversation" && Str(data, "conversation") == currentConversation && currentConversation is not null && !liveStreams.ContainsKey(currentConversation))
                         await ReadConversation(currentConversation, ct);
@@ -107,22 +110,22 @@ public partial class MainWindow
     {
         try
         {
-            job ??= await ScreenHistory.RunningJobIdAsync(local, id, ct);
+            job = await ScreenHistory.ResolveJobIdAsync(local, id, job, ct);
             await RecoverMoveJob(id, job, local, ct);
-            if (!ct.IsCancellationRequested && ReferenceEquals(local, client)) StartLive(id, local, ct);
+            if (!ct.IsCancellationRequested && ReferenceEquals(local, client)) StartLive(id, local, ct, job);
         }
         catch (OperationCanceledException) { }
         catch (Exception) { if (!ct.IsCancellationRequested && ReferenceEquals(local, client)) StartLive(id, local, ct); }
     }
-    private void StartLive(string id, ServerClient local, CancellationToken ct)
+    private void StartLive(string id, ServerClient local, CancellationToken ct, string? expectedJob = null)
     {
         if (liveStreams.ContainsKey(id)) return;
         var source = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        liveStreams[id] = source; _ = LiveLoop(id, local, source.Token);
+        liveStreams[id] = source; _ = LiveLoop(id, local, source.Token, expectedJob);
     }
-    private async Task LiveLoop(string id, ServerClient local, CancellationToken ct)
+    private async Task LiveLoop(string id, ServerClient local, CancellationToken ct, string? expectedJob)
     {
-        var display = new LiveDisplayState(); int delay = 1; bool opened = false; string? liveJob = null;
+        var display = new LiveDisplayState(); int delay = 1; bool opened = false; string? liveJob = expectedJob;
         try
         {
             while (!ct.IsCancellationRequested)
@@ -147,7 +150,7 @@ public partial class MainWindow
                                 Status.Text = "답변 중…";
                             }
                         }
-                        else if (type == "done") { EndMoveJob(id, liveJob); return; }
+                        else if (type == "done") { CompleteLiveMoves(id, liveJob); return; }
                     }
                 }
                 catch (OperationCanceledException) when (ct.IsCancellationRequested) { return; }
@@ -168,7 +171,7 @@ public partial class MainWindow
             if (liveStreams.TryGetValue(id, out var source) && source.Token == ct && !ct.IsCancellationRequested)
             {
                 liveStreams.Remove(id); liveDisplays.Remove(id); source.Dispose();
-                if (currentConversation == id) { talking = false; SetMood("neutral"); ScheduleBubbleClose(Message.Text); }
+                if (currentConversation == id) { talking = false; SetMood("neutral"); _ = ScheduleBubbleAfterMoves(id); }
                 if (connected && currentConversation == id) Status.Text = "연결됨";
                 if (currentConversation == id && connection is not null)
                     try { await ReadConversation(id, connection.Token); } catch (Exception ex) { ShowError(ex); }

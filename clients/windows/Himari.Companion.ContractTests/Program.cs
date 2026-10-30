@@ -4,6 +4,31 @@ using System.Text.Json;
 using Himari.Companion;
 
 static void Check(bool value, string message) { if (!value) throw new Exception(message); }
+// Both streams can end while the first animation is still blocked.
+var orderedLifetime = new MoveJobLifetime();
+var firstAnimation = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+var animationOrder = new List<int>();
+Task orderedMoves = Task.CompletedTask;
+orderedMoves = MoveQueue.RunAfterAsync(orderedMoves, async () => { animationOrder.Add(1); await firstAnimation.Task; });
+orderedMoves = MoveQueue.RunAfterAsync(orderedMoves, () => { animationOrder.Add(2); return Task.CompletedTask; });
+orderedLifetime.End("job");
+Check(!orderedLifetime.CanStart("job") && orderedLifetime.CanReceive("job"), "job ended blocks new contexts while existing live accepts final delta");
+if (orderedLifetime.CanReceive("job")) orderedMoves = MoveQueue.RunAfterAsync(orderedMoves, () => { animationOrder.Add(3); return Task.CompletedTask; });
+orderedLifetime.CompleteLive("job");
+Check(!orderedLifetime.CanReceive("job") && !orderedLifetime.CanStart("job"), "done closes reception without reopening ended context");
+Check(animationOrder.SequenceEqual(new[] { 1 }), "following moves wait for first animation");
+firstAnimation.SetResult(); await orderedMoves;
+Check(animationOrder.SequenceEqual(new[] { 1, 2, 3 }), "all accepted moves drain after job ended and live done");
+var protocol129 = new OriginRecoveryHandler();
+using (var protocolClient = new ServerClient("https://example.com/", "test", protocol129))
+{
+    Check(await ScreenHistory.ResolveJobIdAsync(protocolClient, "c", "activity-job", CancellationToken.None) == "activity-job" && protocol129.Reads == 0, "activity job id is used without detail request");
+    Check(await ScreenHistory.ResolveJobIdAsync(protocolClient, "c", null, CancellationToken.None) == "detail-job" && protocol129.Reads == 1, "legacy activity retains detail fallback");
+    Check(await TextRecovery.AcceptedAsync(protocolClient, "c", "hello", "d1", 41, CancellationToken.None), "PR 129 origin and text confirm unknown delivery");
+    Check(!await TextRecovery.AcceptedAsync(protocolClient, "c", "hello", "other", 41, CancellationToken.None), "another device's identical text is not confirmation");
+}
+var invalidScreen = new ApiException(HttpStatusCode.BadRequest, "not_a_screen");
+Check(MessageFailures.Classify(invalidScreen) == MessageFailure.Rejected && !MessageFailures.ReuseScreen(invalidScreen), "not_a_screen is rejected and cannot reuse staged screen");
 var reconnectServer = new ReconnectRecoveryHandler();
 var previousConnection = new ServerClient("https://example.com/", "same-device", reconnectServer);
 try { await previousConnection.SendAsync(HttpMethod.Post, "/api/conversations/c/messages", new { text = "hello", screen = "f1" }, CancellationToken.None); }
@@ -295,6 +320,19 @@ using (var screenClient = new ServerClient("https://example.com/", "test", new S
     await foreach (var (kind, data) in screenClient.StreamAsync("/api/conversations/c1/live", CancellationToken.None))
         if (kind == "snapshot") collected.AddRange(replay.Accept(data.GetProperty("job_id").GetString(), data.GetProperty("run_id").GetString(), true, data.GetProperty("moves"), 1, captured));
     Check(collected.Count == 1 && collected[0].X == 42, "PR 126 upload, message job id and reconnect snapshot");
+}
+
+sealed class OriginRecoveryHandler : HttpMessageHandler
+{
+    public int Reads;
+    protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+    {
+        Reads++;
+        string value = request.RequestUri!.AbsolutePath.EndsWith("/events")
+            ? "{\"items\":[{\"sequence\":42,\"kind\":\"user_message\",\"text\":\"hello\",\"origin\":{\"kind\":\"device\",\"device_id\":\"d1\"}}]}"
+            : "{\"job\":{\"running\":true,\"job_id\":\"detail-job\"}}";
+        return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(value, Encoding.UTF8, "application/json") });
+    }
 }
 
 sealed class ReconnectRecoveryHandler : HttpMessageHandler

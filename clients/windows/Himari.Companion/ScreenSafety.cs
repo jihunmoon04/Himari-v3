@@ -12,7 +12,10 @@ internal static class ScreenSafety
 internal sealed class MoveJobLifetime
 {
     private readonly HashSet<string> ended = new();
+    private readonly HashSet<string> liveClosed = new();
     internal bool CanStart(string job) => !ended.Contains(job);
     internal void End(string job) => ended.Add(job);
-    internal void Reset() => ended.Clear();
+    internal bool CanReceive(string job) => !liveClosed.Contains(job);
+    internal void CompleteLive(string job) { ended.Add(job); liveClosed.Add(job); }
+    internal void Reset() { ended.Clear(); liveClosed.Clear(); }
 }

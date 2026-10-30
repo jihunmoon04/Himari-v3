@@ -16,7 +16,6 @@ public partial class MainWindow
     private readonly MoveJobLifetime moveLifetime = new();
     private LocalScreen? submittedScreen;
     private string? submittedConversation;
-    private string? autoMoveJob;
     private readonly Dictionary<string, List<(string Job, string Run, bool Snapshot, JsonElement Moves, int Length)>> earlyMoves = new();
     private string? pendingScreenConversation;
     private (string Conversation, string Text, LocalScreen Screen)? unresolvedScreen;
@@ -80,15 +79,24 @@ public partial class MainWindow
     private void EndMoveJob(string conversation, string? jobId)
     {
         if (jobId is null) return;
-        moveLifetime.End(jobId); moveJobs.Remove(jobId);
+        // The event stream can end a job before live delivers its last delta.
+        // Block new contexts, keeping existing live playback open until done.
+        moveLifetime.End(jobId);
+    }
+
+    private void CompleteLiveMoves(string conversation, string? jobId)
+    {
+        if (jobId is null) return;
+        moveLifetime.CompleteLive(jobId); moveJobs.Remove(jobId);
         if (earlyMoves.TryGetValue(conversation, out var buffer)) buffer.RemoveAll(x => x.Job == jobId);
-        if (autoMoveJob == jobId) { autoMoveVersion++; autoMoveJob = null; }
+        // Accepted animations own their playback data and finish after done.
     }
 
     private void ReceiveMoves(string conversation, string? job, string? run, bool snapshot, JsonElement moves, int length)
     {
-        if (string.IsNullOrEmpty(job) || string.IsNullOrEmpty(run) || !moveLifetime.CanStart(job) || moves.ValueKind != JsonValueKind.Array) return;
+        if (string.IsNullOrEmpty(job) || string.IsNullOrEmpty(run) || !moveLifetime.CanReceive(job) || moves.ValueKind != JsonValueKind.Array) return;
         if (moveJobs.ContainsKey(job)) { ApplyMoves(conversation, job, run, snapshot, moves, length); return; }
+        if (!moveLifetime.CanStart(job)) return;
         if (pendingScreenConversation != conversation) return;
         if (!earlyMoves.TryGetValue(conversation, out var pending)) earlyMoves[conversation] = pending = [];
         if (pending.Count < 256) pending.Add((job, run, snapshot, moves.Clone(), length));
@@ -102,15 +110,13 @@ public partial class MainWindow
         foreach (var move in accepted)
         {
             int version = autoMoveVersion;
-            moveQueue = AnimateMoveAfterAsync(moveQueue, conversation, job, context.Playback, move, version);
+            moveQueue = MoveQueue.RunAfterAsync(moveQueue, () => AnimateMoveAsync(conversation, context.Playback, move, version));
         }
     }
 
-    private async Task AnimateMoveAfterAsync(Task previous, string conversation, string job, MovePlayback playback, ScreenMove move, int version)
+    private async Task AnimateMoveAsync(string conversation, MovePlayback playback, ScreenMove move, int version)
     {
-        try { await previous; } catch (Exception) { }
-        if (!moveLifetime.CanStart(job) || version != autoMoveVersion || conversation != currentConversation || settings.MoveEnabled.IsChecked != true || !IsVisible || !playback.IsFresh(DateTimeOffset.UtcNow)) return;
-        autoMoveJob = job;
+        if (version != autoMoveVersion || conversation != currentConversation || settings.MoveEnabled.IsChecked != true || !IsVisible || !playback.IsFresh(DateTimeOffset.UtcNow)) return;
         var handle = new WindowInteropHelper(this).Handle;
         if (!GetWindowRect(handle, out var start)) return;
         if (!autoMoveActive) { moveHome = start; autoMoveActive = true; saveTimer.Stop(); }

@@ -76,6 +76,15 @@ public partial class MainWindow
         bubbleTimer.Interval = TimeSpan.FromSeconds(Math.Clamp(8 + text.Length / 12.0, 12, 120));
         bubbleTimer.Start();
     }
+    private async Task ScheduleBubbleAfterMoves(string conversation)
+    {
+        int version = autoMoveVersion;
+        Task pending;
+        do { pending = moveQueue; try { await pending; } catch (Exception) { } }
+        while (!ReferenceEquals(pending, moveQueue));
+        if (!lifetime.IsCancellationRequested && version == autoMoveVersion && conversation == currentConversation && !liveStreams.ContainsKey(conversation))
+            ScheduleBubbleClose(Message.Text);
+    }
     private void SaveWindowPreferences()
     {
         if (!preferencesLoaded || !double.IsFinite(Left) || !double.IsFinite(Top)) return;

@@ -9,6 +9,8 @@ internal static class ScreenHistory
     private static string? Str(JsonElement e, string n) => Prop(e, n).ValueKind == JsonValueKind.String ? Prop(e, n).GetString() : null;
     private static IEnumerable<JsonElement> Items(JsonElement e) => e.ValueKind == JsonValueKind.Array ? e.EnumerateArray() : [];
     private static string PathFor(string id) => "/api/conversations/" + Uri.EscapeDataString(id);
+    internal static async Task<string?> ResolveJobIdAsync(ServerClient server, string conversation, string? activityJobId, CancellationToken ct) =>
+        activityJobId ?? await RunningJobIdAsync(server, conversation, ct);
     internal static async Task<string?> RunningJobIdAsync(ServerClient server, string conversation, CancellationToken ct)
     {
         var detail = await server.SendAsync(HttpMethod.Get, PathFor(conversation), null, ct);
