@@ -339,14 +339,23 @@ class JobStatus(DeepFrozen):
     stop_requested: StopRequest | None = None  # asked of the running job (V3-P55)
     turn_usage: TurnUsage | None = None  # the latest report of the job's drive (V3-P62 §7)
 
+    @property
+    def job_id(self) -> str | None:
+        """V3-P84 §6.3: which job this is, opaque, compared for equality only;
+        None before the first. ``generation`` starts again with the process,
+        ``started_at`` does not, so no two jobs of a Conversation share one."""
+        if self.started_at is None:
+            return None
+        return f"{self.generation}.{self.started_at.strftime('%Y%m%dT%H%M%S%f')}"
+
 
 class JobListener(Protocol):
     """What the Runner tells as it goes (V3-P83 §2.2), for the event stream.
     Called synchronously; a listener that fails is logged, never the job's failure."""
 
-    def job_started(self, scope: TrustedScope, origin: MessageOrigin | None) -> None:
+    def job_started(self, scope: TrustedScope, origin: MessageOrigin | None, status: JobStatus) -> None:
         """Any job: a message's (``origin``: where it came from), a resume, a
-        compaction, a cancel."""
+        compaction, a cancel. ``status``: the new job's (V3-P84 §6.3)."""
         ...
 
     def accepted(self, scope: TrustedScope) -> None:

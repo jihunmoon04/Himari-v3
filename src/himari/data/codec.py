@@ -84,7 +84,10 @@ def _block(block: ContentBlock) -> dict[str, object]:
         return {"type": "file_reference", "path": block.path, "identity": list(block.identity), "start": block.start,
                 "end": block.end, "start_line": block.start_line, "end_line": block.end_line,
                 "excerpt": block.excerpt, "truncated": block.truncated, "size": block.size}
-    return {"type": "attachment", "file_id": block.file_id, "version": block.version}
+    data: dict[str, object] = {"type": "attachment", "file_id": block.file_id, "version": block.version}
+    if block.screen:  # V3-P84 §4.3: written only when true, so older events read as before
+        data["screen"] = True
+    return data
 
 
 def _optional_int(value: object) -> int | None:
@@ -97,7 +100,7 @@ def _block_from(value: object) -> ContentBlock:
         case "text":
             return TextBlock(str(data["text"]))
         case "attachment":
-            return AttachmentRef(str(data["file_id"]), int(data["version"]))
+            return AttachmentRef(str(data["file_id"]), int(data["version"]), data.get("screen") is True)
         case "file_reference":
             identity = data.get("identity")
             if not isinstance(identity, list):

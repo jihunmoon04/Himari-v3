@@ -2,9 +2,11 @@
 
 It pairs (and sends the same pairing again, as an app that lost the answer
 would), opens the event stream and reads ``hello``, sends its activity,
-sends a message, follows ``live`` from the job's start to ``done`` — the
-text without mood marks, and each mood at its place — and reads the
-recorded answer's ``display``.
+uploads its screen and sends a message with it (V3-P84 §4), follows
+``live`` of that job (by its ``job_id``, §6.3) to ``done`` — the text
+without marks, each mood and each move at its place — reads the recorded
+answer's ``display``, and sends the same screen again as an app that lost
+the answer would (409 ``screen_already_sent``, §7.8).
 
     python scripts/device_client.py --server https://himari.example --code ABCD-EFGH "안녕"
     python scripts/device_client.py --self-test
@@ -21,10 +23,12 @@ import asyncio
 import base64
 import json
 import secrets
+import struct
 import sys
 import tempfile
 import threading
 import time
+import zlib
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -70,8 +74,24 @@ class Report:
     conversation: str = ""
     text: str = ""  # what live sent for the answer's Run
     moods: list[tuple[int, str]] = field(default_factory=list)
+    moves: list[tuple[int, int, int]] = field(default_factory=list)
+    screen: dict[str, Any] = field(default_factory=dict)  # the uploaded screen's file view
+    job_id: str | None = None  # from the message's 202
+    started_job_id: str | None = None  # from the event stream's "job started"
+    live_job_ids: set[str | None] = field(default_factory=set)
+    screen_again: str | None = None  # the error code of sending the same screen again
     display: dict[str, Any] = field(default_factory=dict)  # the recorded answer's
     events: list[str] = field(default_factory=list)  # the event stream's, in order
+
+
+def screen_png(width: int = 1280, height: int = 720) -> bytes:
+    """A blank screen, as an app's capture would be sized (V3-P84 §3.3)."""
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
+
+    rows = b"".join(b"\x00" + b"\xff\xff\xff" * width for _ in range(height))
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(rows, 9)) + chunk(b"IEND", b""))
 
 
 async def pair(http: httpx.AsyncClient, code: str, token: str) -> tuple[dict[str, Any], str]:
@@ -124,17 +144,27 @@ async def run(server: str, code: str, text: str, *, verify: bool = True) -> Repo
                     raise Refused(response)
                 recent = response.json()
             report.conversation = recent["id"]
-            response = await http.post(f"/api/conversations/{report.conversation}/messages", json={"text": text})
+            response = await http.post(f"/api/conversations/{report.conversation}/uploads", content=screen_png(),
+                                       headers={"content-type": "image/png"})
+            if response.status_code != 201:
+                raise Refused(response)
+            report.screen = response.json()
+            message = {"text": text, "screen": report.screen["file_id"]}
+            response = await http.post(f"/api/conversations/{report.conversation}/messages", json=message)
             if response.status_code != 202:
                 raise Refused(response)
+            report.job_id = response.json()["job_id"]
             me = {"kind": "device", "device_id": report.device["device_id"]}
             while True:  # live opens at this device's own job's start (§8.4, §9.1 rule 7)
                 name, data = await asyncio.wait_for(events.get(), 60)
                 if name == "job" and data.get("state") == "started" and data.get("origin") == me:
+                    report.started_job_id = data.get("job_id")
                     break
             await follow(http, report)
             items = (await http.get(f"/api/conversations/{report.conversation}/events")).json()["items"]
             report.display = [i for i in items if i["kind"] == "assistant_final"][-1]["display"]
+            response = await http.post(f"/api/conversations/{report.conversation}/messages", json=message)
+            report.screen_again = Refused(response).code if response.status_code != 202 else None
         finally:
             reader.cancel()
             await asyncio.gather(reader, return_exceptions=True)
@@ -142,18 +172,30 @@ async def run(server: str, code: str, text: str, *, verify: bool = True) -> Repo
 
 
 async def follow(http: httpx.AsyncClient, report: Report) -> None:
-    """The answer as it is written: a snapshot starts a Run's text over, a delta adds to it (appendix A.4)."""
+    """The answer as it is written: a snapshot starts a Run's text over, a delta adds to it (appendix A.4).
+    Only frames of this device's job count (V3-P84 §6.3); a snapshot of a Run seen before plays no move again."""
+    played: dict[str, int] = {}  # run_id → moves taken (§7.4)
     async with http.stream("GET", f"/api/conversations/{report.conversation}/live") as response:
         if response.status_code != 200:
             raise Refused(response)
         async for name, data in frames(response):
+            if name in ("snapshot", "delta", "end"):
+                report.live_job_ids.add(data.get("job_id"))
+                if data.get("job_id") != report.job_id:
+                    continue
             if name == "snapshot":
                 report.text, report.moods = data["text"], [(m["at"], m["mood"]) for m in data["moods"]]
+                fresh = data["moves"][played.get(data["run_id"], 0):]
             elif name == "delta":
                 report.text += data["text"]
                 report.moods += [(m["at"], m["mood"]) for m in data["moods"]]
+                fresh = data["moves"]
             elif name == "done":
                 return
+            else:
+                continue
+            played[data["run_id"]] = played.get(data["run_id"], 0) + len(fresh)
+            report.moves += [(m["at"], m["x"], m["y"]) for m in fresh]
 
 
 def show(report: Report) -> None:
@@ -162,12 +204,14 @@ def show(report: Report) -> None:
     print(f"current device after the signal: {report.current_device}")
     print(f"answer: {report.text!r}")
     print(f"moods: {report.moods}")
+    print(f"screen: {report.screen.get('name')}; moves: {report.moves}; job: {report.job_id}; "
+          f"the same screen again: {report.screen_again}")
     print(f"events: {', '.join(report.events)}")
 
 
 # --- self test ---------------------------------------------------------------------------------
 
-ANSWER = "[[mood:happy]]안녕! 오늘은 `[[mood:sad]]` 대신 [[mood:thinking]]뭘 할까?"
+ANSWER = "[[mood:happy]]안녕! 오늘은 `[[mood:sad]]` 대신 [[mood:thinking]]뭘 할까? [[move:1043,88]]여기 봐!"
 
 
 def self_test() -> int:
@@ -220,8 +264,9 @@ def self_test() -> int:
 
 
 def check(report: Report) -> list[str]:
-    plain = "안녕! 오늘은 `[[mood:sad]]` 대신 뭘 할까?"
+    plain = "안녕! 오늘은 `[[mood:sad]]` 대신 뭘 할까? 여기 봐!"
     expected = [(0, "happy"), (len("안녕! 오늘은 `[[mood:sad]]` 대신 "), "thinking")]
+    moves = [(len("안녕! 오늘은 `[[mood:sad]]` 대신 뭘 할까? "), 1043, 88)]
     wanted = {
         "paired as d1": report.device == {"device_id": "d1", "name": "데스크톱"},
         "the same pairing again gets the same answer": report.resent == report.device,
@@ -230,7 +275,13 @@ def check(report: Report) -> list[str]:
         "live sends the text without marks": report.text == plain,
         "each mood at its place": report.moods == expected,
         "the recorded answer's display is the same": report.display == {
-            "text": plain, "moods": [{"at": at, "mood": mood} for at, mood in expected]},
+            "text": plain, "moods": [{"at": at, "mood": mood} for at, mood in expected],
+            "moves": [{"at": at, "x": x, "y": y} for at, x, y in moves]},
+        "the screen was named by the server": str(report.screen.get("name", "")).startswith("screen-"),
+        "each move once at its place": report.moves == moves,
+        "the 202, the job event and live name one job": report.job_id is not None
+        and report.started_job_id == report.job_id and report.live_job_ids == {report.job_id},
+        "the same screen again is refused as sent": report.screen_again == "screen_already_sent",
         "the stream told the job's start and end": "job" in report.events and "conversation" in report.events,
     }
     return [name for name, ok in wanted.items() if not ok]

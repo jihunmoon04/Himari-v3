@@ -9,7 +9,9 @@ from himari.common import AttachmentRef, CallId, EventId, FileId, ModelToolResul
 from himari.data.api import MAX_IMAGE_BYTES_PER_REQUEST, MAX_IMAGES_PER_REQUEST
 from himari.prompt.api import (
     NO_IMAGE_MODEL,
+    OLDER_SCREEN,
     OVER_PLAN,
+    SCREENS_SHOWN,
     AttachmentInfo,
     ImagePlan,
     ToolGroupTurn,
@@ -68,3 +70,38 @@ def test_the_estimate_counts_shown_images_and_the_tool_image_message() -> None:
     with_image = part_tokens(group, infos, plan)
     without = part_tokens(group, infos, ImagePlan(False))
     assert with_image - without >= image_tokens(READY) + tokens_of_text("Images from the tool results above:")
+
+
+# --- screens (V3-P84 §5) ---------------------------------------------------------------------
+
+SCREEN = replace(READY, name="screen-20261030-120000.png", path=None, view_width=1280, view_height=720)
+
+
+def screen(n: int) -> AttachmentRef:
+    return AttachmentRef(FileId(f"file_{n}"), 1, screen=True)
+
+
+def test_only_the_latest_two_screens_are_images() -> None:
+    turns = [UserTurn(EventId(f"e{n}"), (screen(n),)) for n in range(4)] + [UserTurn(EventId("e9"), (ref(9),))]
+    infos = {**{f"file_{n}#1": SCREEN for n in range(4)}, "file_9#1": READY}
+    plan = image_plan(model_input(turns, infos, image_input=True))
+    assert plan.shown == frozenset({"file_3#1", "file_2#1", "file_9#1"})  # other images are not counted as screens
+    assert plan.older_screens == frozenset({"file_0#1", "file_1#1"})
+    assert f'"not_shown": "{OLDER_SCREEN}"' in attachment_line(screen(0), infos, plan)
+    assert SCREENS_SHOWN == 2
+
+
+def test_a_screen_line_says_screen_and_its_size_only_to_a_model_that_points() -> None:
+    infos = {"file_1#1": SCREEN}
+    turns = [UserTurn(EventId("e1"), (TextBlock("이거 봐"), screen(1)))]
+    pointing = image_plan(model_input(turns, infos, image_input=True, screen_points=True))
+    line = attachment_line(screen(1), infos, pointing)
+    assert '"screen": true' in line and '"width": 1280' in line and '"height": 720' in line
+    assert '"path"' not in line  # never placed in the Workspace (§4.2)
+    looking = image_plan(model_input(turns, infos, image_input=True))
+    line = attachment_line(screen(1), infos, looking)
+    assert '"screen": true' in line and '"width"' not in line
+    blind = attachment_line(screen(1), infos, image_plan(model_input(turns, infos)))
+    assert '"width"' not in blind and f'"not_shown": "{NO_IMAGE_MODEL}"' in blind
+    assert attachment_line(ref(1), {"file_1#1": READY}, pointing) == attachment_line(
+        ref(1), {"file_1#1": READY}, ImagePlan(True, frozenset({"file_1#1"})))  # other lines do not change

@@ -7,7 +7,7 @@ import re
 import unicodedata
 from collections.abc import Iterable, Sequence
 
-from himari.common import ContentBlock, TextBlock, split_moods, thaw, tool_id_problem
+from himari.common import ContentBlock, TextBlock, split_marks, thaw, tool_id_problem
 from himari.data.api import (
     MAX_APP_PAYLOAD_BYTES,
     MAX_DEVICE_NAME_CHARS,
@@ -258,7 +258,7 @@ def event_text(payload: object) -> str | None:
     if not isinstance(payload, (UserMessage, AssistantFinal)):
         return None
     text = "\n".join(b.text for b in payload.blocks if isinstance(b, TextBlock))
-    return split_moods(text, complete=True)[0] if isinstance(payload, AssistantFinal) else text
+    return split_marks(text, complete=True)[0] if isinstance(payload, AssistantFinal) else text
 
 
 def search_words(words: object) -> tuple[str, ...]:

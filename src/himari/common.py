@@ -202,10 +202,12 @@ class TextBlock(DeepFrozen):
 
 @dataclass(frozen=True)
 class AttachmentRef(DeepFrozen):
-    """Immutable reference to a versioned file (FILE-02); never raw bytes."""
+    """Immutable reference to a versioned file (FILE-02); never raw bytes.
+    ``screen``: the user's screen a device attached (V3-P84 §4.2)."""
 
     file_id: str
     version: int
+    screen: bool = False
 
 
 @dataclass(frozen=True)
@@ -310,16 +312,24 @@ MOODS = ("neutral", "happy", "excited", "sad", "surprised", "thinking", "embarra
 # the text, as "neutral"; inside code (a fenced block, or inline code closed
 # on the same line within INLINE_CODE_CHARS) it is text.
 MOOD_MARK = re.compile(r"\[\[mood:([a-z0-9_]{1,24})\]\]")
-_MOOD_PREFIX = re.compile(r"\[(\[(m(o(o(d(:([a-z0-9_]{1,24}\]?)?)?)?)?)?)?)?")
-_MOOD_SPECIAL = re.compile(r"[\[`\n]")
+# ``[[move:X,Y]]`` (V3-P84 §6.1): a point on the latest screen, in its image's
+# pixels. Anything of this shape comes out of the text; only ``X,Y`` moves.
+MOVE_MARK = re.compile(r"\[\[move:([0-9 ,]{1,13})\]\]")
+_MOVE_POINT = re.compile(r"(\d{1,5}), ?(\d{1,5})")
+_MARK_PREFIX = re.compile(
+    r"\[(\[(m(o(o(d(:([a-z0-9_]{1,24}\]?)?)?)?|v(e(:([0-9 ,]{1,13}\]?)?)?)?)?)?)?)?")
+_MARK_SPECIAL = re.compile(r"[\[`\n]")
 INLINE_CODE_CHARS = 200
+
+type Moods = tuple[tuple[int, str], ...]  # (at, mood)
+type Moves = tuple[tuple[int, int, int], ...]  # (at, x, y)
 
 
 @dataclass(frozen=True)
-class MoodScan(DeepFrozen):
+class MarkScan(DeepFrozen):
     """Where a split stopped: the raw text and the plain text confirmed so
     far, and what the next character is in — an open fence (its character
-    and length) or not, at a line's start or not. ``scan_moods`` goes on
+    and length) or not, at a line's start or not. ``scan_marks`` goes on
     from here, so a growing text is never counted from its start again."""
 
     raw: int = 0
@@ -328,25 +338,26 @@ class MoodScan(DeepFrozen):
     line_start: bool = True
 
 
-def split_moods(text: str, *, complete: bool) -> tuple[str, tuple[tuple[int, str], ...], int]:
-    """``text`` without its mood marks, each mark as ``(at, mood)`` where
-    ``at`` counts code points of the plain text, and how much of ``text``
-    that covers. ``complete=False`` (a text still growing) leaves an end
-    that could still change meaning — the start of a mark, an inline code
-    not yet closed, a line that may open or close a fence — for later; what
-    it confirms is always the start of the complete text's split."""
-    plain, moods, state = scan_moods(text, MoodScan(), complete=complete)
-    return plain, moods, state.raw
+def split_marks(text: str, *, complete: bool) -> tuple[str, Moods, Moves, int]:
+    """``text`` without its mood and move marks, each mood as ``(at, mood)``
+    and each move as ``(at, x, y)`` where ``at`` counts code points of the
+    plain text, and how much of ``text`` that covers. ``complete=False`` (a
+    text still growing) leaves an end that could still change meaning — the
+    start of a mark, an inline code not yet closed, a line that may open or
+    close a fence — for later; what it confirms is always the start of the
+    complete text's split."""
+    plain, moods, moves, state = scan_marks(text, MarkScan(), complete=complete)
+    return plain, moods, moves, state.raw
 
 
-def scan_moods(rest: str, state: MoodScan, *, complete: bool
-               ) -> tuple[str, tuple[tuple[int, str], ...], MoodScan]:
-    """``split_moods`` from ``state`` on: ``rest`` is the raw text from
-    ``state.raw``. The ``at`` of a mood counts from the start of the whole
-    plain text. Returns the newly confirmed plain text, its moods and the
-    state after it."""
+def scan_marks(rest: str, state: MarkScan, *, complete: bool) -> tuple[str, Moods, Moves, MarkScan]:
+    """``split_marks`` from ``state`` on: ``rest`` is the raw text from
+    ``state.raw``. The ``at`` of a mark counts from the start of the whole
+    plain text. Returns the newly confirmed plain text, its moods and moves
+    and the state after it."""
     out: list[str] = []
     moods: list[tuple[int, str]] = []
+    moves: list[tuple[int, int, int]] = []
     plain = state.plain
     fence, line_start = state.fence, state.line_start
     i, n = 0, len(rest)
@@ -389,7 +400,7 @@ def scan_moods(rest: str, state: MoodScan, *, complete: bool
             emit(rest[i:end])
             i, line_start = end, eol != -1
             continue
-        found = _MOOD_SPECIAL.search(rest, i)
+        found = _MARK_SPECIAL.search(rest, i)
         stop = n if found is None else found.start()
         if stop > i:
             emit(rest[i:stop])
@@ -407,7 +418,14 @@ def scan_moods(rest: str, state: MoodScan, *, complete: bool
                 moods.append((plain, name if name in MOODS else "neutral"))
                 i, line_start = mark.end(), False
                 continue
-            if not complete and _MOOD_PREFIX.fullmatch(rest, i):
+            mark = MOVE_MARK.match(rest, i)
+            if mark is not None:
+                point = _MOVE_POINT.fullmatch(mark.group(1))
+                if point is not None:
+                    moves.append((plain, int(point.group(1)), int(point.group(2))))
+                i, line_start = mark.end(), False
+                continue
+            if not complete and _MARK_PREFIX.fullmatch(rest, i):
                 break  # the start of a mark, perhaps
             emit("[")
             i, line_start = i + 1, False
@@ -417,7 +435,7 @@ def scan_moods(rest: str, state: MoodScan, *, complete: bool
             break
         emit(rest[i:close])
         i, line_start = close, False
-    return "".join(out), tuple(moods), MoodScan(state.raw + i, plain, fence, line_start)
+    return "".join(out), tuple(moods), tuple(moves), MarkScan(state.raw + i, plain, fence, line_start)
 
 
 def _inline_code_end(rest: str, i: int, complete: bool) -> int | None:

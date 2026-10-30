@@ -45,6 +45,7 @@ ALLOWED = {
     ("GET", "/api/conversations/{conversation_id}/events"),
     ("GET", "/api/conversations/{conversation_id}/live"),
     ("POST", "/api/conversations/{conversation_id}/messages"),
+    ("POST", "/api/conversations/{conversation_id}/uploads"),  # a screen only (V3-P84 §4.1)
     ("POST", "/api/conversations/{conversation_id}/pause"),
     ("POST", "/api/conversations/{conversation_id}/resume"),
     ("POST", "/api/conversations/{conversation_id}/cancel"),
@@ -332,15 +333,16 @@ def test_answers_and_questions_carry_their_display(server: Server) -> None:
     server.wait(cid)
     waiting = server.client.get(f"/api/conversations/{cid}").json()["waiting"]
     assert waiting["question"] == "[[mood:thinking]]어디?"
-    assert waiting["display"] == {"text": "어디?", "moods": [{"at": 0, "mood": "thinking"}]}
+    assert waiting["display"] == {"text": "어디?", "moods": [{"at": 0, "mood": "thinking"}], "moves": []}
     asked = [e for e in events() if e["kind"] == "assistant_tool_calls"][0]
-    assert asked["display"] == {"text": "좋아", "moods": [{"at": 0, "mood": "happy"}]}
+    assert asked["display"] == {"text": "좋아", "moods": [{"at": 0, "mood": "happy"}], "moves": []}
     assert asked["calls"][0]["display"]["text"] == "어디?"
     assert server.client.post(f"/api/conversations/{cid}/messages", json={"text": "서울"}, headers=SEND).status_code == 202
     server.wait(cid)
     answer = [e for e in events() if e["kind"] == "assistant_final"][-1]
     assert answer["text"] == "[[mood:excited]]서울! [[mood:nope]]끝"
-    assert answer["display"] == {"text": "서울! 끝", "moods": [{"at": 0, "mood": "excited"}, {"at": 4, "mood": "neutral"}]}
+    assert answer["display"] == {"text": "서울! 끝", "moods": [{"at": 0, "mood": "excited"}, {"at": 4, "mood": "neutral"}],
+                                 "moves": []}
 
 
 def frames_of(body: str) -> list[tuple[str, Any]]:
@@ -416,3 +418,62 @@ def test_with_companion_off_the_web_still_has_its_event_stream(tmp_path: Path, m
     with off.client:
         off.sign_in()
         assert frames_of(off.client.get("/api/events").text)[0][0] == "hello"
+
+
+# --- screens (V3-P84 §4) ---------------------------------------------------------------------
+
+def png(width: int = 4, height: int = 3) -> bytes:
+    import struct
+    import zlib
+
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
+
+    rows = b"".join(b"\x00" + b"\x00\x00\x00" * width for _ in range(height))
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(rows)) + chunk(b"IEND", b""))
+
+
+def test_a_device_sends_its_screen_once(server: Server) -> None:
+    server.provider._script.extend([final("[[move:3,2]]여기!"), final("응")])
+    me = server.as_device(server.paired())
+    cid = server.device.post("/api/conversations", json={}, headers=me).json()["id"]
+    response = server.device.post(f"/api/conversations/{cid}/uploads?name=../../evil.png", content=png(),
+                                  headers={**me, "content-type": "image/png"})
+    assert response.status_code == 201, response.text
+    uploaded = response.json()
+    assert uploaded["name"].startswith("screen-") and uploaded["name"].endswith(".png")  # named here (§4.1)
+    sent = server.device.post(f"/api/conversations/{cid}/messages", json={"text": "", "screen": uploaded["file_id"]},
+                              headers=me)  # a screen alone
+    assert sent.status_code == 202, sent.text
+    job_id = sent.json()["job_id"]
+    assert job_id
+    server.wait(cid)
+    items = server.device.get(f"/api/conversations/{cid}/events", headers=me).json()["items"]
+    (said,) = [i for i in items if i["kind"] == "user_message"]
+    assert [a["screen"] for a in said["attachments"]] == [True] and said["attachments"][0]["workspace_path"] is None
+    answer = [i for i in items if i["kind"] == "assistant_final"][-1]
+    assert answer["display"] == {"text": "여기!", "moods": [], "moves": [{"at": 0, "x": 3, "y": 2}]}
+    again = server.device.post(f"/api/conversations/{cid}/messages", json={"text": "또", "screen": uploaded["file_id"]},
+                               headers=me)
+    assert (again.status_code, error_code(again)) == (409, "screen_already_sent")  # §7.8: the first was recorded
+    assert server.client.get(f"/api/conversations/{cid}").json()["job"]["job_id"] == job_id  # no second job
+
+
+def test_what_a_screen_may_be(server: Server, monkeypatch: pytest.MonkeyPatch) -> None:
+    me = server.as_device(server.paired())
+    cid = server.device.post("/api/conversations", json={}, headers=me).json()["id"]
+    response = server.device.post(f"/api/conversations/{cid}/uploads", content=b"not an image", headers=me)
+    assert (response.status_code, error_code(response)) == (400, "not_a_screen")
+    monkeypatch.setattr(web, "SCREEN_MAX_BYTES", 10)
+    response = server.device.post(f"/api/conversations/{cid}/uploads", content=png(), headers=me)
+    assert (response.status_code, error_code(response)) == (413, "file_too_large")
+    web_upload = server.client.post(f"/api/conversations/{cid}/uploads?name=a.png", content=png(), headers=SEND)
+    assert web_upload.status_code == 201, web_upload.text
+    response = server.client.post(f"/api/conversations/{cid}/messages",
+                                  json={"text": "x", "screen": web_upload.json()["file_id"]}, headers=SEND)
+    assert (response.status_code, error_code(response)) == (400, "invalid_argument")  # a device's only
+    response = server.device.post(f"/api/conversations/{cid}/messages",
+                                  json={"text": "x", "screen": web_upload.json()["file_id"],
+                                        "attachments": [web_upload.json()["file_id"]]}, headers=me)
+    assert (response.status_code, error_code(response)) == (403, "device_scope")  # still one screen only

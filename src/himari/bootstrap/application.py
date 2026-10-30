@@ -147,6 +147,7 @@ from himari.prompt.api import (
     FILE_REFERENCE_NOTE,
     DOCUMENTS_READ_NOTE,
     COMPANION_NOTE,
+    SCREEN_NOTE,
     PROGRESS_NOTE,
     TIME_NOTE,
     TOOL_IMAGES_NOTE,
@@ -269,6 +270,15 @@ class FilesUnavailable(RuntimeError):
 
 class FileNameRefused(ValueError):
     """V3-P66 §5.3: no name, or a name longer than MAX_RAW_NAME_BYTES."""
+
+
+class ScreenRefused(ValueError):
+    """V3-P84 §4.1–§4.2: a screen is a PNG or JPEG image (by its bytes)."""
+
+
+# V3-P84 §4.1: a device's upload is a screen, of these types, at most this large.
+SCREEN_TYPES = {"image/png": "png", "image/jpeg": "jpg"}
+SCREEN_MAX_BYTES = 8 * 1024 * 1024
 
 
 class WorkspaceRefused(ValueError):
@@ -825,7 +835,7 @@ class Application:
                                     instructions=(*base, *((ATTACHMENT_NOTE,) if uploads_work else ()),
                                                   *((FILE_REFERENCE_NOTE,) if machine is not None else ()),
                                                   TOOL_IMAGES_NOTE, PROGRESS_NOTE, TIME_NOTE,
-                                                  *((COMPANION_NOTE,) if companion else ()),
+                                                  *((COMPANION_NOTE, SCREEN_NOTE) if companion else ()),
                                                   *_documents_notes(reader, toolkit, scripts == "on")),
                                     external_defaults=mcp.defaults,
                                     source_notes=[SourceNote(source, note.placement, note.text)
@@ -1484,8 +1494,25 @@ class Application:
             raise
         return workspace.workspace_id, workspace.cwd_relative
 
+    async def upload_screen(self, scope: TrustedScope, chunks: AsyncIterator[bytes]) -> FileRecord:
+        """V3-P84 §4.1: a device's screen, staged like an upload: a PNG or
+        JPEG by its bytes, at most SCREEN_MAX_BYTES, named here by when it
+        came. Refused bytes are left unreferenced; the cleanup drops them."""
+        await self.data.read_conversation(scope)  # 404 for a foreign id, before any byte is read
+        if await self.data.count_staged(scope) >= MAX_STAGED_UPLOADS:
+            raise DataError(DataErrorCode.LIMIT_EXCEEDED, f"{MAX_STAGED_UPLOADS} uploads wait to be sent")
+        blob = await self.data.blobs.put(scope.principal_id, chunks, min(SCREEN_MAX_BYTES, self.file_max_bytes))
+        image = await self.data.blobs.prepare_image(scope.principal_id, blob, self.views)
+        extension = SCREEN_TYPES.get(image.image_type or "")
+        if extension is None:
+            raise ScreenRefused("not a PNG or JPEG image")
+        name = f"screen-{datetime.now(UTC):%Y%m%d-%H%M%S}.{extension}"
+        async with self._exclusive(scope.conversation_id):
+            return await self.data.stage_upload(scope, blob, name, image.image_type or "", image)
+
     async def send(self, scope: TrustedScope, text: str, attachments: Sequence[FileId] = (),
-                   references: Sequence[ReferenceRequest] = (), origin: MessageOrigin | None = None) -> JobStatus:
+                   references: Sequence[ReferenceRequest] = (), origin: MessageOrigin | None = None,
+                   screen: FileId | None = None) -> JobStatus:
         """A user message. With attachments (§5.1, under the lifecycle lock):
         1 the T1 checks as a read; 2 refused while a job runs; 3 the uploads
         placed in ``uploads/`` under the Workspace write lock (waited for at
@@ -1493,8 +1520,20 @@ class Application:
         ``references`` (V3-P76 §3): parts of files the user pointed at, each
         read again and checked by the explorer before anything is sent; a
         stale one refuses the message (ExplorerRefused ``reference_stale``).
-        ``origin``: where it was sent from (V3-P83 §4.2), kept on the message."""
+        ``origin``: where it was sent from (V3-P83 §4.2), kept on the message.
+        ``screen`` (V3-P84 §4.2): a staged PNG or JPEG upload, attached as the
+        user's screen and never placed in the Workspace (§4.4); attached once,
+        in the message's own transaction (T1)."""
         await self.data.read_conversation(scope)  # 404 before a job is started (or a file read) for a foreign id
+        if screen is not None:
+            async with self._exclusive(scope.conversation_id):
+                (record,) = await self.data.check_attachments(scope, [screen])
+                if record.image_type not in SCREEN_TYPES:
+                    raise ScreenRefused("not a PNG or JPEG image")
+                if self.runner.status(scope).running:
+                    raise ControlError(ControlErrorCode.BUSY, scope.conversation_id)
+                said = ((TextBlock(text),) if text else ()) + (AttachmentRef(record.file_id, 1, screen=True),)
+                return await self.runner.submit(scope, UserMessage(said, origin=origin))
         pointed: tuple[ContentBlock, ...] = ()
         if references:
             explorer = self.explorer(scope.principal_id)

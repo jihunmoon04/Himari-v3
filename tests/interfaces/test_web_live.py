@@ -10,6 +10,8 @@ import json
 import threading
 import time
 from collections.abc import Callable, Iterator
+from dataclasses import replace
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -21,7 +23,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 from testkit import final  # noqa: E402
 
 from himari.bootstrap.application import Application  # noqa: E402
-from himari.common import ConversationId, PrincipalId, RunId, TrustedScope, split_moods  # noqa: E402
+from himari.common import ConversationId, PrincipalId, RunId, TrustedScope, split_marks  # noqa: E402
 from himari.control.api import JobStatus, LiveOutput  # noqa: E402
 from himari.interfaces.web import app as web  # noqa: E402
 from himari.interfaces.web import live  # noqa: E402
@@ -77,6 +79,7 @@ class FakeLive:
         self.thinking = self.truncated = self.ended = False
         self.version = 0
         self.running = True
+        self.job = JobStatus(running=True)  # V3-P84 §6.3: whose job_id the frames carry
         self._changes = changes
 
     def start(self, run_id: RunId) -> None:
@@ -113,7 +116,7 @@ class FakeLive:
         return self.version
 
     def status(self, scope: TrustedScope) -> JobStatus:
-        return JobStatus(running=self.running)
+        return replace(self.job, running=self.running)
 
 
 def events(source: FakeLive, closing: asyncio.Event | None = None, **options: Any) -> list[tuple[str, Any]]:
@@ -148,12 +151,12 @@ def test_coalesced_changes_lose_nothing_and_end_with_done() -> None:
     source = FakeLive([lambda s: s.start(R1), many, lambda s: s.write("."), finish])
     sent = events(source)
     assert sent[0] == ("retry: 1000", None) and sent[1] == ("idle", {})
-    assert sent[2] == ("snapshot", {"run_id": R1, "text": "", "moods": [], "tools": [], "thinking": False,
-                                    "truncated": False, "ended": False})
-    assert sent[3] == ("delta", {"run_id": R1, "text": "Hello, Seoul", "moods": [], "tools": ["echo"],
-                                 "thinking": True})
+    assert sent[2] == ("snapshot", {"run_id": R1, "job_id": None, "text": "", "moods": [], "moves": [], "tools": [],
+                                    "thinking": False, "truncated": False, "ended": False})
+    assert sent[3] == ("delta", {"run_id": R1, "job_id": None, "text": "Hello, Seoul", "moods": [], "moves": [],
+                                 "tools": ["echo"], "thinking": True})
     assert text_of(sent) == "Hello, Seoul."
-    assert sent[-2:] == [("end", {"run_id": R1}), ("done", {})]
+    assert sent[-2:] == [("end", {"run_id": R1, "job_id": None}), ("done", {})]
 
 
 def test_a_run_that_changed_meanwhile_is_resynchronized_by_a_snapshot() -> None:
@@ -167,7 +170,8 @@ def test_a_run_that_changed_meanwhile_is_resynchronized_by_a_snapshot() -> None:
     sent = events(source)
     snapshots = [d for e, d in sent if e == "snapshot"]
     assert [s["run_id"] for s in snapshots] == [R1, R2] and snapshots[1]["text"] == "second"
-    assert ("end", {"run_id": R2}) in sent and ("end", {"run_id": R1}) not in sent  # never guessed
+    ends = [d["run_id"] for e, d in sent if e == "end"]
+    assert ends == [R2]  # never guessed
 
 
 def test_connecting_after_the_job_sends_the_ended_state_then_done() -> None:
@@ -193,7 +197,7 @@ def test_mood_marks_come_out_of_the_text_as_moods() -> None:
     assert moods_of(sent) == [(0, "happy"), (10, "thinking")]
     deltas = [d["text"] for e, d in sent if e == "delta"]
     assert deltas[0] == "좋아, " and deltas[-1] == "[["  # held back until the Run ended
-    plain, moods, _ = split_moods("".join(pieces), complete=True)
+    plain, moods, _, _ = split_marks("".join(pieces), complete=True)
     assert (text_of(sent), moods_of(sent)) == (plain, list(moods))  # the same as the recorded answer's display
 
 
@@ -456,3 +460,27 @@ def test_requests_arriving_together_cannot_pass_the_limit(streaming_server: Serv
     first, refused = server.client.portal.call(together)  # type: ignore[union-attr]
     assert refused == 429
     first._release()  # it never ran: give its slot back by hand
+
+
+def test_frames_carry_their_job_and_moves() -> None:
+    """V3-P84 §6.2–§6.3: each frame names its Run's job; a mark split by a wakeup is held back whole."""
+    first = JobStatus(running=True, generation=1, started_at=datetime(2026, 10, 30, 12, tzinfo=UTC))
+    second = JobStatus(running=True, generation=2, started_at=datetime(2026, 10, 30, 12, 1, tzinfo=UTC))
+
+    def next_job(s: FakeLive) -> None:
+        s.end()
+        s.job = second
+        s.start(R2)
+        s.write("[[move:9,9]]저기")
+
+    def begin(s: FakeLive) -> None:
+        s.job = first
+        s.start(R1)
+
+    source = FakeLive([begin, lambda s: s.write("음… [[move:10"), lambda s: s.write("43,88]]여기"), next_job, finish])
+    sent = [(e, d) for e, d in events(source) if e in ("snapshot", "delta", "end")]
+    assert {d["job_id"] for e, d in sent if d["run_id"] == R1} == {first.job_id}
+    assert {d["job_id"] for e, d in sent if d["run_id"] == R2} == {second.job_id} != {first.job_id}
+    moves = [(d["run_id"], m) for e, d in sent for m in d.get("moves", [])]
+    assert moves == [(R1, {"at": 3, "x": 1043, "y": 88}), (R2, {"at": 0, "x": 9, "y": 9})]
+    assert "".join(d["text"] for e, d in sent if d["run_id"] == R1 and e != "end") == "음… 여기"

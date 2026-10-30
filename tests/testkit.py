@@ -254,11 +254,12 @@ def assert_chat_structure(messages: list[dict[str, Any]]) -> None:
 
 
 def image_model_input(parts: Sequence[Any], attachments: Mapping[str, Any], *, image_input: bool = False,
-                      model: str = "m") -> Any:
-    """A ModelInput for attachment and image tests (V3-P67)."""
+                      model: str = "m", screen_points: bool = False) -> Any:
+    """A ModelInput for attachment and image tests (V3-P67, V3-P84)."""
     from himari.data.api import PersistedStateBasis, PromptBasis
     from himari.prompt.api import CurrentStateProjection, ModelInput, RequestOptions
     return ModelInput(stable_prefix=("You are HIMARI.",), tool_catalog=(), conversation=tuple(parts),
                       current_state=CurrentStateProjection(PersistedStateBasis(0, 0, (), (), ())),
-                      request_options=RequestOptions(model, image_input=image_input), trigger_refs=(),
+                      request_options=RequestOptions(model, image_input=image_input,
+                                                     screen_points=screen_points), trigger_refs=(),
                       prompt_basis=PromptBasis(0, 0), attachments=dict(attachments))

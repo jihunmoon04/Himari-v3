@@ -315,3 +315,15 @@ B1·B2·C1·C2·N1은 해결로 판정됐다.
 | --- | --- | --- |
 | C1 | 4xx라고 메시지가 기록되지 않은 것이 아님: `Driver.accept` 뒤 `_start` 전에 대화가 닫히면 기록된 채 409 `conversation_closed` | 코드로 확인. §7.8을 HTTP 상태가 아니라 오류 코드로 나눔: 기록 전에만 나는 코드 목록만 "거절 확실", `conversation_closed`·목록 밖 코드·5xx·끊김은 "결과를 모름"(기록 확인, 저절로 다시 보내지 않음). 회귀 시험 추가(§10) |
 | N1 | `JobListener.job_started`가 바뀌는데 §9는 runner가 안 바뀐다고 함 | §9의 "runner"는 machine runner 프로세스(`himari.runner`)였다. 그렇게 적고, `control/runner.py`의 `_start` 변경을 control 줄에 명시 |
+
+## 14. 구현 노트 — 서버 (2026-10-30)
+
+- `common`: `AttachmentRef.screen`, `split_marks`·`scan_marks`·`MarkScan`(표정과 이동을 함께, `Moods`·`Moves`). `split_moods` 이름은 없어졌다.
+- `data`: codec은 참일 때만 `"screen": true`, `DataError.reason`(`ALREADY_SENT`), `event_text`는 `split_marks`.
+- `control`: `JobStatus.job_id`(`generation`.`started_at`), `JobListener.job_started(scope, origin, status)`, Driver가 `screen_points`를 채움(`image_input`일 때만).
+- `prompt`: `SCREEN_NOTE`·`SCREEN_MOVE_NOTE`(stable prefix에서 `screen_points`일 때 `SCREEN_NOTE` 바로 뒤), `ImagePlan.older_screens`·`screen_points`, `SCREENS_SHOWN = 2`, `context_key`에 `screen_points`.
+- `provider`: `ProviderCapabilities.screen_points`. **선언 목록에서 켠 모델은 아직 없다.** `tests/live/test_openrouter_screen_live.py`(opt-in, 1280×720 화면 다섯 장 × 2, 10번 중 8번)를 통과한 모델만 켠다.
+- `bootstrap`: `Application.upload_screen`(PNG·JPEG, 8 MiB, `screen-<UTC>.png|jpg`), `send(screen=)`(Workspace에 놓지 않음, 수명주기 잠금 안에서 확인과 submit), 작업 사건의 `job_id`.
+- `interfaces/web`: 기기의 업로드(허용 목록), 메시지 `screen`(Web은 400), 409 `screen_already_sent`, 400 `not_a_screen`, 첨부 보기의 `screen`, `display.moves`, `job_view.job_id`, `live`의 `job_id`·`moves`.
+- 참조 클라이언트: 화면 올리기 → `screen` 메시지 → 같은 `job_id`의 `live`만 따라 이동을 한 번씩 → 같은 화면 다시 보내기는 409.
+- 시험 맞춤: `test_instructions_app`의 압축 시험 크기 2800→2900(`SCREEN_NOTE`만큼).

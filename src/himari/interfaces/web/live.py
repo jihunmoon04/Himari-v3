@@ -2,11 +2,11 @@
 
 ``GET /api/conversations/{id}/live`` sends what a streamed Run is writing:
 
-- ``snapshot {run_id, text, moods, tools, thinking, truncated, ended}``: the
-  whole state, first and whenever the Run changed;
+- ``snapshot {run_id, job_id, text, moods, moves, tools, thinking, truncated, ended}``:
+  the whole state, first and whenever the Run changed;
 - ``idle {}``: there is no state;
-- ``delta {run_id, text, moods, tools, thinking?, truncated?}``: what to append;
-- ``end {run_id}``: that Run's outcome is recorded;
+- ``delta {run_id, job_id, text, moods, moves, tools, thinking?, truncated?}``: what to append;
+- ``end {run_id, job_id}``: that Run's outcome is recorded;
 - ``done {}``: the job has ended and everything was sent; the page closes
   its EventSource (otherwise it would reconnect).
 
@@ -14,13 +14,17 @@ A stream keeps a cursor of what it sent and, each time it wakes, compares the
 Runner's accumulated state with it (§5.2): wakeups may coalesce, nothing is
 lost, and when the Run changed it resynchronizes with a snapshot instead of
 guessing. The text is sent without its mood marks (V3-P83 §7.3): each mark
-is a ``{at, mood}`` of ``moods``, ``at`` counting code points of the Run's
-sent text from its start; an end that may still turn out to be a mark (or
-code) waits until it is known, or until the Run ends. It sends a comment line when idle for ``HEARTBEAT_SECONDS`` and
-ends after ``MAX_SECONDS`` (the production proxy cuts a response at 600 s;
-the browser then reconnects and starts from a snapshot), or as soon as the
-server begins to shut down (``closing``): uvicorn waits for open responses
-before it stops the application, and a job may run for long.
+is a ``{at, mood}`` of ``moods`` (a move mark a ``{at, x, y}`` of ``moves``,
+V3-P84 §6.2), ``at`` counting code points of the Run's sent text from its
+start; an end that may still turn out to be a mark (or code) waits until it
+is known, or until the Run ends. ``job_id`` is the job the Run is of (§6.3):
+the job's status and its live state are read in one synchronous step, and a
+job's start drops the last one's live state in the same step. It sends a
+comment line when idle for ``HEARTBEAT_SECONDS`` and ends after
+``MAX_SECONDS`` (the production proxy cuts a response at 600 s; the browser
+then reconnects and starts from a snapshot), or as soon as the server begins
+to shut down (``closing``): uvicorn waits for open responses before it stops
+the application, and a job may run for long.
 """
 
 from __future__ import annotations
@@ -32,7 +36,7 @@ from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from typing import Any, Protocol
 
-from himari.common import MoodScan, RunId, TrustedScope, scan_moods
+from himari.common import MarkScan, Moods, Moves, RunId, TrustedScope, scan_marks
 from himari.control.api import JobStatus, LiveOutput
 
 HEARTBEAT_SECONDS = 15.0
@@ -92,13 +96,13 @@ class Cursor:
 
     sent: bool = False  # anything at all (``idle`` counts)
     run_id: RunId | None = None
-    scan: MoodScan = MoodScan()  # the raw text read and the plain text sent, and where the split stands
+    scan: MarkScan = MarkScan()  # the raw text read and the plain text sent, and where the split stands
     tools: int = 0
     thinking: bool = False
     truncated: bool = False
     ended: bool = False
 
-    def restart(self, state: LiveOutput | None, scan: MoodScan = MoodScan()) -> None:
+    def restart(self, state: LiveOutput | None, scan: MarkScan = MarkScan()) -> None:
         """Sent from scratch: ``state`` whole (split up to ``scan``), or ``idle`` for None."""
         self.sent = True
         self.run_id = None if state is None else state.run_id
@@ -121,37 +125,42 @@ def step(source: LiveSource, scope: TrustedScope, cursor: Cursor) -> list[str]:
             return []
         cursor.restart(None)
         return [frame("idle", {})]
+    job_id = source.status(scope).job_id  # the same step: this Run's job (V3-P84 §6.3)
     if state.run_id != cursor.run_id:
         whole = source.live_output(scope)
         assert whole is not None  # the same state: nothing runs between the two reads
-        plain, moods, scan = scan_moods(whole.text, MoodScan(), complete=whole.ended)
+        plain, moods, moves, scan = scan_marks(whole.text, MarkScan(), complete=whole.ended)
         cursor.restart(whole, scan)
-        return [frame("snapshot", {"run_id": whole.run_id, "text": plain, "moods": _moods(moods),
-                                   "tools": list(whole.tools), "thinking": whole.thinking,
+        return [frame("snapshot", {"run_id": whole.run_id, "job_id": job_id, "text": plain, "moods": _moods(moods),
+                                   "moves": _moves(moves), "tools": list(whole.tools), "thinking": whole.thinking,
                                    "truncated": whole.truncated, "ended": whole.ended})]
     out: list[str] = []
     rest = source.live_text(scope, state.run_id, cursor.scan.raw) or ""
-    text, moods, cursor.scan = scan_moods(rest, cursor.scan, complete=state.ended)  # from where it stood (N1)
+    text, moods, moves, cursor.scan = scan_marks(rest, cursor.scan, complete=state.ended)  # from where it stood
     tools = list(state.tools[cursor.tools:])
     change: dict[str, Any] = {}
     if state.thinking and not cursor.thinking:
         change["thinking"] = True
     if state.truncated and not cursor.truncated:
         change["truncated"] = True
-    if text or moods or tools or change:
-        out.append(frame("delta", {"run_id": state.run_id, "text": text, "moods": _moods(moods), "tools": tools,
-                                   **change}))
+    if text or moods or moves or tools or change:
+        out.append(frame("delta", {"run_id": state.run_id, "job_id": job_id, "text": text, "moods": _moods(moods),
+                                   "moves": _moves(moves), "tools": tools, **change}))
         cursor.tools += len(tools)
         cursor.thinking = state.thinking
         cursor.truncated = state.truncated
     if state.ended and not cursor.ended:
-        out.append(frame("end", {"run_id": state.run_id}))
+        out.append(frame("end", {"run_id": state.run_id, "job_id": job_id}))
         cursor.ended = True
     return out
 
 
-def _moods(moods: tuple[tuple[int, str], ...]) -> list[dict[str, Any]]:
+def _moods(moods: Moods) -> list[dict[str, Any]]:
     return [{"at": at, "mood": mood} for at, mood in moods]
+
+
+def _moves(moves: Moves) -> list[dict[str, Any]]:
+    return [{"at": at, "x": x, "y": y} for at, x, y in moves]
 
 
 async def stream(source: LiveSource, scope: TrustedScope, closing: asyncio.Event, *,

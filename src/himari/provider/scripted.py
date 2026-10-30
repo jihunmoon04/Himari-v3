@@ -128,9 +128,12 @@ def encode_output(output: NormalizedModelOutput) -> bytes:
 
 class ScriptedAdapter:
     def __init__(self, script: Iterable[ScriptStep] = (), *, streaming: bool = False,
-                 piece_delay: float = 0.0, first_delay: float = 0.0) -> None:
+                 piece_delay: float = 0.0, first_delay: float = 0.0, image_input: bool = False,
+                 screen_points: bool = False) -> None:
         self._script = list(script)
         self._streaming = streaming
+        self._image_input = image_input
+        self._screen_points = screen_points
         self._piece_delay = piece_delay
         self._first_delay = first_delay
         self.prepared_inputs: list[ModelInput] = []
@@ -144,7 +147,8 @@ class ScriptedAdapter:
         return "scripted"
 
     def describe_capabilities(self, model_id: str) -> ProviderCapabilities:
-        return ProviderCapabilities(model_id=model_id, parallel_tool_calls=True, streaming=self._streaming)
+        return ProviderCapabilities(model_id=model_id, parallel_tool_calls=True, streaming=self._streaming,
+                                    image_input=self._image_input, screen_points=self._screen_points)
 
     def prepare_native_request(self, model_input: ModelInput) -> NativePreparedRequest:
         body = json.dumps(

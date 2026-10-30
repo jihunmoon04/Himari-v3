@@ -80,6 +80,7 @@ from himari.common import (
 from himari.data import codec, rules
 from himari.data.blobs import BlobRow, DirectoryBlobFiles, FileStore
 from himari.data.api import (
+    ALREADY_SENT,
     SEARCH_KINDS,
     EventPage,
     EventSearch,
@@ -1146,7 +1147,7 @@ def _alive(tx: _Tx, blob: StoredBlob) -> bool:
 
 
 def _refused(file_id: str, why: str) -> DataError:
-    return DataError(DataErrorCode.ATTACHMENT_REFUSED, f"{file_id}: {why}", file_id=FileId(file_id))
+    return DataError(DataErrorCode.ATTACHMENT_REFUSED, f"{file_id}: {why}", file_id=FileId(file_id), reason=why)
 
 
 class SqliteData:
@@ -1257,7 +1258,7 @@ class SqliteData:
             if row["origin"] != FileOrigin.UPLOAD.value or row["version"] != 1:
                 raise _refused(file_id, "not an upload")
             if row["attached_at"] is not None:
-                raise _refused(file_id, "already sent")
+                raise _refused(file_id, ALREADY_SENT)
             if row["expired_at"] is not None:
                 raise _refused(file_id, "expired")
             if cutoff is not None and datetime.fromisoformat(row["created_at"]) < cutoff:

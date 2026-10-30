@@ -78,6 +78,8 @@ from himari.bootstrap.application import (
     ModelRefused,
     ModelView,
     PromptRefused,
+    SCREEN_MAX_BYTES,
+    ScreenRefused,
     PromptView,
     ToolSourceView,
     UnknownToolSource,
@@ -106,11 +108,12 @@ from himari.common import (
     RunId,
     TextBlock,
     TrustedScope,
-    split_moods,
+    split_marks,
     thaw,
 )
 from himari.control.api import ContextStatus, ControlError, ControlErrorCode, JobStatus, TurnUsage
 from himari.data.api import (
+    ALREADY_SENT,
     MAX_ATTACHED_WORKSPACES,
     MAX_ATTACHMENTS,
     MAX_INSTRUCTIONS_CHARS,
@@ -282,6 +285,7 @@ class MessageBody(_Body):
     text: str
     attachments: list[str] = Field(default_factory=list)  # staged uploads' file ids (V3-P66)
     references: list[ReferenceBody] = Field(default_factory=list, max_length=MAX_REFERENCES)  # V3-P76
+    screen: str | None = Field(default=None, max_length=200)  # a device's staged screen (V3-P84 §4.2)
 
 
 class ModelBody(_Body):
@@ -446,9 +450,11 @@ def _question(arguments: Mapping[str, Any]) -> str:
 
 def display_view(text: str) -> dict[str, Any]:
     """What the model wrote as it is shown (V3-P83 §7.2, appendix A.6): the
-    text without its mood marks, and each mark's place in it (code points)."""
-    plain, moods, _ = split_moods(text, complete=True)
-    return {"text": plain, "moods": [{"at": at, "mood": mood} for at, mood in moods]}
+    text without its marks, and each mark's place in it (code points) — moods,
+    and moves on the latest screen (V3-P84 §6.2)."""
+    plain, moods, moves, _ = split_marks(text, complete=True)
+    return {"text": plain, "moods": [{"at": at, "mood": mood} for at, mood in moods],
+            "moves": [{"at": at, "x": x, "y": y} for at, x, y in moves]}
 
 
 def image_view(record: FileRecord) -> dict[str, Any] | None:
@@ -472,8 +478,9 @@ def file_view(record: FileRecord) -> dict[str, Any]:
 
 def _attachment(ref: AttachmentRef, files: Files) -> dict[str, Any]:
     found = files.get((ref.file_id, ref.version))
-    return (file_view(found) if found is not None
+    view = (file_view(found) if found is not None
             else {"file_id": ref.file_id, "version": ref.version, "name": None, "expired": True, "image": None})
+    return {**view, "screen": True} if ref.screen else view  # V3-P84 §4.3
 
 
 _DOWNLOAD_SAFE = "!#$&+-.^_`|~"  # RFC 5987 attr-char besides letters and digits
@@ -605,6 +612,7 @@ def job_view(status: JobStatus) -> dict[str, Any]:
     return {
         "running": status.running,
         "generation": status.generation,
+        "job_id": status.job_id,  # V3-P84 §6.3: the same as the job events' and live's
         "state": None if result is None else result.state.value,
         "detail": detail,  # why it ended so (e.g. the size that was refused); plain text
         "unknown_calls": 0 if result is None else len(result.unknown_calls),
@@ -1047,6 +1055,11 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
     async def files_unavailable(request: Request, error: FilesUnavailable) -> JSONResponse:
         return JSONResponse({"error": {"code": "files_unavailable",
                                        "message": "Files cannot be attached in this conversation."}}, status_code=409)
+
+    @app.exception_handler(ScreenRefused)
+    async def not_a_screen(request: Request, error: ScreenRefused) -> JSONResponse:
+        return JSONResponse({"error": {"code": "not_a_screen", "message": "A screen is a PNG or JPEG image."}},
+                            status_code=400)
 
     @app.exception_handler(FileNameRefused)
     async def bad_name(request: Request, error: FileNameRefused) -> JSONResponse:
@@ -1763,14 +1776,25 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
     async def send_message(conversation_id: str, body: MessageBody, request: Request,
                            by: Caller = Depends(caller)) -> dict[str, Any]:
         who = by.principal
-        if by.device is not None and (body.attachments or body.references):  # V3-P83 §4.3: text only
-            raise ApiError(403, "device_scope", "A device sends text only.")
+        if by.device is not None and (body.attachments or body.references):  # V3-P83 §4.3: text and a screen
+            raise ApiError(403, "device_scope", "A device sends text and a screen only.")
+        if body.screen is not None and by.device is None:
+            raise ApiError(400, "invalid_argument", "Only a device sends a screen.")
         text = body.text.strip()
         if len(body.attachments) > MAX_ATTACHMENTS:
             raise ApiError(400, "too_many_attachments", f"A message carries at most {MAX_ATTACHMENTS} files.")
-        if (not text and not body.attachments and not body.references) or len(text) > MAX_MESSAGE_CHARS:
+        if ((not text and not body.attachments and not body.references and body.screen is None)
+                or len(text) > MAX_MESSAGE_CHARS):
             raise ApiError(400, "invalid_argument", f"A message is 1..{MAX_MESSAGE_CHARS} characters, or files.")
         application, scope = himari(request), scope_of(conversation_id, who)
+        if body.screen is not None:
+            try:
+                return job_view(await application.send(scope, text, origin=by.origin, screen=FileId(body.screen)))
+            except DataError as error:
+                if error.code is DataErrorCode.ATTACHMENT_REFUSED and error.reason == ALREADY_SENT:
+                    # §7.8: the earlier send of this screen was recorded; this one is not.
+                    raise ApiError(409, "screen_already_sent", "This screen was sent already.") from None
+                raise
         references = [ReferenceRequest(r.path, tuple(int(v) for v in r.identity), r.start, r.end, r.sha256)
                       for r in body.references]
         return job_view(await application.send(scope, text, [FileId(f) for f in body.attachments], references,
@@ -1780,13 +1804,15 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
 
     @app.post("/api/conversations/{conversation_id}/uploads", status_code=201)
     async def upload_file(conversation_id: str, request: Request, name: str = "",
-                          who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+                          by: Caller = Depends(caller)) -> dict[str, Any]:
         """The body is the file. Received as it streams, held to the file
         limit (not the general body limit); refused at once when its declared
-        length is over."""
-        application, scope = himari(request), scope_of(conversation_id, who)
+        length is over. A device uploads a screen only (V3-P84 §4.1): a PNG or
+        JPEG of at most SCREEN_MAX_BYTES, named by the server."""
+        application, scope = himari(request), scope_of(conversation_id, by.principal)
+        limit = application.file_max_bytes if by.device is None else min(SCREEN_MAX_BYTES, application.file_max_bytes)
         declared = request.headers.get("content-length", "")
-        if declared.isdigit() and int(declared) > application.file_max_bytes:
+        if declared.isdigit() and int(declared) > limit:
             raise ApiError(413, "file_too_large", "The file is larger than this server takes.")
 
         async def body() -> AsyncIterator[bytes]:
@@ -1795,7 +1821,10 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
                     yield chunk
 
         try:
-            record = await application.upload(scope, name, request.headers.get("content-type"), body())
+            if by.device is not None:
+                record = await application.upload_screen(scope, body())
+            else:
+                record = await application.upload(scope, name, request.headers.get("content-type"), body())
         except DataError as error:
             if error.code is DataErrorCode.BLOB_MISSING:  # swept while it stalled (§8.2)
                 raise ApiError(503, "upload_interrupted", "The upload was interrupted; upload it again.") from None
