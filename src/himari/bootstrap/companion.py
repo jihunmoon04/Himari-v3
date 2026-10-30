@@ -44,7 +44,8 @@ class CompanionEvents:
     def __init__(self, hub: EventHub, waiting: WaitingConversations) -> None:
         self._hub = hub
         self._waiting = waiting
-        self._working: dict[tuple[PrincipalId, ConversationId], MessageOrigin | None] = {}
+        # Each working conversation's origin and job (V3-P84 §6.3: an app that reconnects finds its job).
+        self._working: dict[tuple[PrincipalId, ConversationId], tuple[MessageOrigin | None, str | None]] = {}
         self._tasks: set[asyncio.Task[None]] = set()
         # Each principal's latest activity change: a read that a later change overtook is
         # not published (PR #124 review B1), so an older state never lands after a newer one.
@@ -52,8 +53,8 @@ class CompanionEvents:
 
     async def activity(self, principal: PrincipalId) -> dict[str, Any]:
         """V3-P80's working and waiting conversations, with the working ones' origins (§8.1)."""
-        working = sorted((cid, origin) for (who, cid), origin in self._working.items() if who == principal)
-        return {"working": [{"id": cid, "origin": origin_view(origin)} for cid, origin in working],
+        working = sorted((cid, origin, job) for (who, cid), (origin, job) in self._working.items() if who == principal)
+        return {"working": [{"id": cid, "origin": origin_view(origin), "job_id": job} for cid, origin, job in working],
                 "waiting": sorted(await self._waiting.list_waiting_conversations(principal))}
 
     def activity_changed(self, principal: PrincipalId) -> None:
@@ -74,7 +75,7 @@ class CompanionEvents:
             self._hub.publish(principal, "activity", activity)
 
     def job_started(self, scope: TrustedScope, origin: MessageOrigin | None, status: JobStatus) -> None:
-        self._working[(scope.principal_id, scope.conversation_id)] = origin
+        self._working[(scope.principal_id, scope.conversation_id)] = (origin, status.job_id)
         self._hub.publish(scope.principal_id, "job", {"conversation": scope.conversation_id, "state": "started",
                                                       "origin": origin_view(origin), "job_id": status.job_id})
         self.activity_changed(scope.principal_id)
