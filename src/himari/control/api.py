@@ -15,8 +15,8 @@ from enum import Enum
 from typing import Protocol, runtime_checkable
 
 from himari.common import CallRef, ConversationId, DeepFrozen, PrincipalId, RunId, TrustedScope
-from himari.data.api import ConversationEvent, ModelSetting, RecoveryReport, UserMessage
-from himari.prompt.api import ContextBudget
+from himari.data.api import ConversationEvent, MessageOrigin, ModelSetting, RecoveryReport, UserMessage
+from himari.prompt.api import ContextBudget, PresenceView
 from himari.provider.api import OutputDelta
 
 
@@ -338,6 +338,39 @@ class JobStatus(DeepFrozen):
     finished_at: datetime | None = None
     stop_requested: StopRequest | None = None  # asked of the running job (V3-P55)
     turn_usage: TurnUsage | None = None  # the latest report of the job's drive (V3-P62 §7)
+
+
+class JobListener(Protocol):
+    """What the Runner tells as it goes (V3-P83 §2.2), for the event stream.
+    Called synchronously; a listener that fails is logged, never the job's failure."""
+
+    def job_started(self, scope: TrustedScope, origin: MessageOrigin | None) -> None:
+        """Any job: a message's (``origin``: where it came from), a resume, a
+        compaction, a cancel."""
+        ...
+
+    def accepted(self, scope: TrustedScope) -> None:
+        """A user message was recorded (its job may still be refused)."""
+        ...
+
+    def run_ended(self, scope: TrustedScope) -> None: ...
+
+    def job_ended(self, scope: TrustedScope, status: JobStatus) -> None: ...
+
+
+@dataclass(frozen=True)
+class TurnPresence(DeepFrozen):
+    """Where the user is, for one turn (V3-P83 §6.2): what the model is told
+    (None: nothing), and the zone of the device the message came from."""
+
+    view: PresenceView | None = None
+    time_zone: str | None = None
+
+
+class PresenceSource(Protocol):
+    async def read(self, principal: PrincipalId, sent_from: MessageOrigin | None) -> TurnPresence:
+        """``sent_from``: the origin of the turn's message, which the Driver read from the log."""
+        ...
 
 
 class ContextInspector(Protocol):

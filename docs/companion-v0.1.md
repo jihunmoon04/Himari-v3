@@ -582,7 +582,7 @@ Authorization: Bearer hd_…
 }
 ```
 
-`POST /api/device/presence` 몸 `{"idle_seconds": 12, "time_zone": "Asia/Seoul"}` → 204.
+`POST /api/device/presence` 몸 `{"idle_seconds": 12, "time_zone": "Asia/Seoul"}` → 204. `idle_seconds`는 0 이상의 수(30일로 자름), `time_zone`은 64자까지. 틀린 몸은 400, 기기가 아닌 호출은 403 `not_a_device`.
 
 ### A.3 `GET /api/events`
 
@@ -741,3 +741,41 @@ data: {}
 - 대화 검색의 `event_text`는 답에서 표시를 뺀다.
 
 **시험:** `tests/common/test_moods.py`, `tests/prompt/test_time.py`, `tests/bootstrap/test_time_app.py`(턴 하나에 시각 한 번, 스위치를 꺼도 `TIME_NOTE`), `test_web_live.py`(조각난 표시, 표시 한가운데의 snapshot, 스트리밍 중 펜스, Run마다 0부터, 원문이 같을 때 이은 글 = `display`, 긴 답에서 읽은 글자 수가 원문의 2배 이하), `test_web_devices.py`(`display`, 시간대 설정), `test_cli.py`, `test_conversation_search.py`. ui_smoke `addresses`: 표시가 화면에 없고 Copy가 `display.text`.
+
+## 18. 구현 노트 — 서버 2b부: 지금 기기와 사건 흐름 (2026-10-30)
+
+**presence(`himari.presence`)**
+- `presence/api.py`에 `Presence`·`EventHub`·`Subscription` 계약, `DeviceState`, `StreamEvent`, `TooManyStreams`, 상수(§5·§6.1·§8.1의 120초·30초·10분·60초·15초·30일·16개·256개)를 더했다.
+- `presence/hub.py` `PresenceHub`가 둘 다다. "연결됨"이 그 기기의 열린 흐름에 달려 있기 때문이다. 메모리에만 둔다.
+  - 지금 기기는 신호·흐름 열기·닫기 때와 15초마다(`run`, bootstrap이 시작) 다시 정하고, 바뀌면 `current`를 낸다.
+  - 기기당 흐름 하나(옛 흐름은 `replaced`), 주체당 16개(같은 기기가 자기 자리를 바꾸는 것은 거절하지 않음), 구독자 대기열 256개를 넘으면 그 흐름을 닫는다.
+  - 모르는 시간대 이름은 무시한다(bootstrap이 `zoneinfo.available_timezones()`로 확인).
+
+**Control**
+- `control.api`: `JobListener`(`job_started(scope, origin)`, `accepted`, `run_ended`, `job_ended(scope, status)`), `TurnPresence(view, time_zone)`, `PresenceSource.read(principal, sent_from)`.
+- Runner: `accepted`는 `driver.accept` 뒤에, `job_started`는 `_start`에서(메시지 작업만 `origin`), `run_ended`는 보고된 Run 수가 늘 때, `job_ended`는 작업이 어떻게 끝나든. listener의 실패는 로그만 남기고 작업에 영향을 주지 않는다.
+- Driver: `sent_from`은 턴의 **첫 Prompt 입력의 events**에서 정한다(뒤에 어시스턴트 이벤트가 없는 마지막 사용자 메시지). 메시지 기록과 `_prepare`가 끝난 뒤이고, 압축 뒤에도 마지막 턴은 꼬리에 있다. `PresenceSource`는 그때 한 번 읽어 턴 내내 쓴다. 보낸 기기의 시간대가 있으면 `now`를 그 시간대로 바꾼다. `context_status`는 다음 턴의 것으로 그때 새로 읽는다.
+
+**Prompt:** `PresenceView`(`sent_from`, `current_device`, `devices`)와 `DevicePresence`. Current State의 `presence`에는 `about`이 붙는다. 이름은 다른 상태와 같이 `json_data`로 인코딩된다.
+
+**bootstrap(`bootstrap/companion.py`)**
+- `CompanionEvents`(Runner의 listener): `job`·`conversation`·`activity`를 낸다. 실행 중인 작업의 보낸 곳을 들고 있어 `activity.working`에 `origin`을 붙인다. `activity`는 Data를 읽으므로 작업(task)으로 낸다. 휴지통·되살리기·영구 삭제도 `activity`를 낸다.
+- `CompanionPresence`(Driver의 `PresenceSource`): `HIMARI_COMPANION`이 켜져 있고 짝지은 기기가 있을 때만. 기기 8개까지, 연결된 기기는 `idle_minutes`, 아닌 기기는 `last_seen`(서버 시간대의 날짜).
+
+**Web**
+- `POST /api/device/presence`(기기만), `GET /api/events`(기기·Web·CLI, `hello` = `GET /api/device`의 내용 + `activity`), `GET /api/device`의 `current_device`, 기기 목록의 `connected`·`current`.
+- 끊기: `PresenceHub.revoked`가 그 기기의 사건 흐름을 `revoked`로 닫고, Web이 기억해 둔 그 기기의 `live` 흐름도 닫는다.
+- 기기의 `live` 흐름은 깨어날 때마다(15초 안에 한 번 이상) `seen`을 부른다.
+- 화면: 활동 표시를 사건 흐름(`hello`·`activity`)으로 그린다. 숨은 탭은 흐름을 닫고, 다시 보이면 열어 `hello`로 맞춘다. 5초 읽기는 보이는 탭의 흐름이 오류로 끊긴 동안만 하고, `hello`가 다시 오면 멈춘다. 거절된 흐름(예: 429)은 읽기마다 다시 열어 본다.
+- `HIMARI_COMPANION=0`이어도 Web의 `GET /api/events`는 그대로다.
+
+**참조 클라이언트:** `scripts/device_client.py`. 짝짓기(`token_in_use`는 새 토큰으로 한 번, `pairing_busy`는 잠시 뒤) → 같은 짝짓기 다시 보내기 → 사건 흐름 `hello` → 접속 신호 → 메시지 → 자기 작업의 `job started`에서 `live`를 열어 `done`까지 → 기록된 답의 `display`와 비교. `--self-test`는 loopback 포트에 Scripted Provider로 HIMARI를 띄워 모든 단계를 확인한다. CI(`static-checks`)와 pytest(`tests/scripts/test_device_client.py`)가 돌린다.
+
+**시험:**
+- `tests/presence/test_hub.py`: 연결됨·120초·30초 유예, 흔들림 막기, 10분 자리 비움, 신호 자르기와 모르는 시간대, 기기당 흐름 하나, 16개, 느린 구독자, 주체 사이 분리, 끊기.
+- `tests/control/test_runner.py`: listener 순서, 실패하는 listener, 닫히는 중 받아들인 입력에는 `started` 없음.
+- `tests/control/test_sent_from.py`.
+- `tests/interfaces/test_event_stream.py`: `hello`부터, `revoked`·`replaced`·한도·종료·뒤처짐으로 끝남. 기기의 `live`가 끊기로 끝나고 깨어날 때마다 `awake`.
+- `tests/bootstrap/test_companion_app.py`: Runner 사건이 흐름에 닿음, 휴지통의 `activity`, 모델에게 가는 `presence`(턴에 한 번, 기기 시간대, web의 `sent_from`), 기기가 없거나 스위치가 꺼지면 없음.
+- `tests/interfaces/test_web_devices.py`: 신호 → 지금 기기, 목록의 `connected`·`current`, 신호 몸 검사, `hello`, 16개, 끊기의 `revoked`, 스위치를 꺼도 Web 흐름. 경로 허용 목록에 두 경로를 더했다.
+- ui_smoke `activity`: 흐름이 열린 동안 5초 읽기 없음, 숨은 탭이 흐름을 닫고 다시 보이면 새로 엶.

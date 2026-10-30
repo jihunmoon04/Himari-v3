@@ -10,9 +10,9 @@ from testkit import SCOPE, calls, final, runtime, user
 
 from himari.common import ASK_USER_TOOL_ID, ConversationId, PrincipalId, TrustedScope
 from himari.control.api import (ControlError, ControlErrorCode, DriveResult, DriveState, JobStatus, StopRequest,
-                                StopSignal, TurnProgress)
+                                StopSignal, TurnProgress, TurnUsage)
 from himari.control.runner import BackgroundRunner
-from himari.data.api import DataError, DataErrorCode, UserMessage
+from himari.data.api import DataError, DataErrorCode, MessageOrigin, OriginKind, UserMessage
 
 FOREIGN = TrustedScope(PrincipalId("mallory"), SCOPE.conversation_id)
 
@@ -475,5 +475,79 @@ def test_hold_is_refused_while_a_job_runs_or_an_input_is_being_accepted() -> Non
             with runner.hold(SCOPE):
                 pass
         assert closed(shut)
+
+    asyncio.run(scenario())
+
+
+class Listening:
+    """A JobListener that records what it is told (V3-P83 §2.2)."""
+
+    def __init__(self, fail: bool = False) -> None:
+        self.told: list[tuple[str, object]] = []
+        self.fail = fail
+
+    def _note(self, what: str, detail: object = None) -> None:
+        self.told.append((what, detail))
+        if self.fail:
+            raise RuntimeError("a listener that fails")
+
+    def job_started(self, scope: TrustedScope, origin: MessageOrigin | None) -> None:
+        self._note("started", origin)
+
+    def accepted(self, scope: TrustedScope) -> None:
+        self._note("accepted")
+
+    def run_ended(self, scope: TrustedScope) -> None:
+        self._note("run")
+
+    def job_ended(self, scope: TrustedScope, status: JobStatus) -> None:
+        self._note("ended", None if status.result is None else status.result.state)
+
+
+class Reporting(GatedDriver):
+    """Two Runs reported, then the outcome."""
+
+    async def resume(self, scope: TrustedScope, *, stop: StopSignal | None = None,
+                     progress: TurnProgress | None = None) -> DriveResult:
+        assert progress is not None
+        progress.report(TurnUsage(runs=1))
+        progress.report(TurnUsage(runs=1, input_tokens=5))  # the same Run's later report: no new Run
+        progress.report(TurnUsage(runs=2))
+        return await super().resume(scope, stop=stop, progress=progress)
+
+
+@pytest.mark.parametrize("fail", [False, True])
+def test_a_listener_is_told_as_the_job_goes(fail: bool) -> None:
+    """A failing listener is logged; the job goes on as if none were there."""
+    async def scenario() -> None:
+        driver, listener = Reporting(), Listening(fail)
+        driver.release.set()
+        runner = BackgroundRunner(driver, listener=listener)
+        origin = MessageOrigin(OriginKind.DEVICE, "d1")
+        await runner.submit(SCOPE, UserMessage(user("hi").blocks, origin=origin))
+        status = await runner.wait(SCOPE)
+        assert status.result is not None and status.result.state is DriveState.COMPLETED
+        await runner.submit_compaction(SCOPE)
+        await runner.wait(SCOPE)
+        assert listener.told == [("accepted", None), ("started", origin), ("run", None), ("run", None),
+                                 ("ended", DriveState.COMPLETED),
+                                 ("started", None), ("ended", DriveState.COMPLETED)]  # a compaction's: no origin
+
+    asyncio.run(scenario())
+
+
+def test_an_input_accepted_while_closing_is_told_but_no_job_starts() -> None:
+    async def scenario() -> None:
+        driver, listener = GatedAccept(), Listening()
+        runner = BackgroundRunner(driver, listener=listener)
+        submitting = asyncio.create_task(runner.submit(SCOPE, user("sent just before")))
+        await driver.in_accept.wait()
+        closing = asyncio.create_task(runner.close(SCOPE, timeout=5))
+        await asyncio.sleep(0.02)
+        driver.accepting.set()
+        with pytest.raises(ControlError):
+            await submitting
+        await closing
+        assert listener.told == [("accepted", None)]  # re-review C2: "started" only from _start
 
     asyncio.run(scenario())

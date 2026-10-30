@@ -46,7 +46,7 @@ function page() {
   run(draftsSource);
   run(source);
   run("status = () => {}; abandonExpansion = () => {}; autosize = () => {}; renderAttachments = () => {}; refresh = async () => {}; poll = () => {};");
-  run("scheduleActivity = () => {};"); // V3-P80's 5 s read would keep this process alive
+  run("scheduleActivity = () => {}; openEvents = () => {};"); // V3-P80's 5 s read and V3-P83's stream would keep this process alive
   return { context, run, node };
 }
 
