@@ -47,7 +47,8 @@ public partial class MainWindow
 
     private void SetConnected(bool value, string text)
     {
-        connected = value; Status.Text = text; SendButton.IsEnabled = value && !sending; Input.IsEnabled = value;
+        connected = value; Status.Text = text; SendButton.IsEnabled = value && !sending; Input.IsEnabled = true;
+        StopButton.IsEnabled = value;
         Character.Opacity = value ? 1 : .55;
     }
     private void StopConnection()
@@ -214,8 +215,10 @@ public partial class MainWindow
         var detail = await client.SendAsync(HttpMethod.Get, PathFor(id), null, ct);
         var question = ConversationView.Question(detail);
         if (id != currentConversation) return;
+        StopButton.Visibility = ConversationView.IsRunning(detail) ? Visibility.Visible : Visibility.Collapsed;
         if (connected) Status.Text = ConversationView.IsRunning(detail) ? "이 대화는 작업 중입니다. 새 대화를 열 수 있습니다." : "연결됨";
-        if (question is not null) { OpenComposer(); Message.Text = question; Input.Focus(); return; }
+        if (question is not null) { awaitingAnswer = true; Message.Text = question; OpenBubble(); OpenComposer(); if (IsActive) Input.Focus(); return; }
+        awaitingAnswer = false;
         if (liveDisplays.TryGetValue(id, out var display)) { Message.Text = display.Text; SetMood(display.Mood); return; }
         var sequence = Prop(Prop(detail, "conversation"), "last_sequence");
         int lastSequence = sequence.ValueKind == JsonValueKind.Number && sequence.TryGetInt32(out int n) ? n : 0;
@@ -246,8 +249,11 @@ public partial class MainWindow
     private void InputChanged(object sender, System.Windows.Controls.TextChangedEventArgs e) => inputRevision++;
     private void SetCurrentConversation(string? id)
     {
-        if (currentConversation != id) inputRevision++;
-        if (currentConversation != id && autoMoveActive) ReturnFromMove();
+        if (currentConversation != id)
+        {
+            inputRevision++; CloseBubble(); awaitingAnswer = false;
+            UserSent.Text = ""; UserSent.Visibility = Visibility.Collapsed;
+        }
         currentConversation = id;
     }
     private void SendClick(object sender, RoutedEventArgs e) => SendMessage();
@@ -256,13 +262,14 @@ public partial class MainWindow
         if (pairingInProgress) { Status.Text = "기기 연결 작업이 끝난 뒤 메시지를 보내 주세요."; return; }
         if (!connected || client is null || connection is null || currentConversation is null) return;
         string text = Input.Text.Trim(); int length = text.EnumerateRunes().Count();
-        bool wantsScreen = ScreenOnce.IsChecked == true;
+        bool wantsScreen = settings.ScreenSharing.IsChecked == true;
         if (length > 32000 || (length == 0 && !wantsScreen && unresolvedScreen is null)) { Status.Text = "메시지를 입력하거나 화면 첨부를 선택해 주세요 (최대 32,000자)."; return; }
         if (unresolvedScreen is { } unresolved && (unresolved.Conversation != currentConversation || unresolved.Text != text)) { Status.Text = "이전 화면 메시지의 전송 여부를 먼저 확인해 주세요. 원래 대화와 입력으로 돌아가 다시 보내기를 누르세요."; return; }
         if (!messageSend.TryEnter()) return;
         var local = client; var ct = connection.Token;
         var context = new SendContext(local, currentConversation, inputRevision);
         sending = true;
+        userBubbleTimer.Stop();
         SendButton.IsEnabled = false;
         LocalScreen? screen = null;
         bool screenFailed = false;
@@ -314,7 +321,7 @@ public partial class MainWindow
                 if (screen.Ready) previousScreenIds[context.ConversationId] = screen.FileId;
                 var detail = await local.SendAsync(HttpMethod.Get, PathFor(context.ConversationId), null, ct);
                 await RecoverMoveJob(context.ConversationId, Str(Prop(detail, "job"), "job_id"), local, ct);
-                if (context.IsCurrent(client, currentConversation, connected)) { if (context.CanClear(client, currentConversation, connected, inputRevision)) Input.Clear(); await ReadConversation(context.ConversationId, ct); Status.Text = "이전에 보낸 화면 메시지를 확인했습니다."; }
+                if (context.IsCurrent(client, currentConversation, connected)) { if (context.CanClear(client, currentConversation, connected, inputRevision)) Input.Clear(); ShowSentMessage(text); await ReadConversation(context.ConversationId, ct); Status.Text = "이전에 보낸 화면 메시지를 확인했습니다."; }
                 return;
             }
             catch (ApiException ex) when (screen is not null && MessageFailures.Classify(ex) == MessageFailure.Closed)
@@ -358,9 +365,9 @@ public partial class MainWindow
             string? jobId = Str(response, "job_id");
             if (jobId is not null && localScreens.Count > 0) await RecoverMoveJob(context.ConversationId, jobId, local, ct, screen);
             if (context.CanClear(client, currentConversation, connected, inputRevision)) Input.Clear();
-            ScreenOnce.IsChecked = shareEveryMessage;
-            if (context.IsCurrent(client, currentConversation, connected) && !liveDisplays.ContainsKey(context.ConversationId))
-            { OpenBubble(); Status.Text = screenFailed ? "화면을 보내지 못해 글만 보냈습니다." : "답변을 기다리는 중…"; SetMood("thinking"); }
+            if (context.IsCurrent(client, currentConversation, connected)) ShowSentMessage(text);
+            if (context.IsCurrent(client, currentConversation, connected) && !liveDisplays.ContainsKey(context.ConversationId) && (jobId is null || moveLifetime.CanStart(jobId)))
+            { Status.Text = screenFailed ? "화면을 보내지 못해 글만 보냈습니다." : "답변을 기다리는 중…"; SetMood("thinking"); }
         }
         catch (Exception ex)
         {

@@ -143,10 +143,11 @@ public partial class MainWindow
                             liveDisplays[id] = (display.Text, display.Mood);
                             if (id == currentConversation)
                             {
-                                if (!opened) { OpenBubble(); opened = true; }
+                                if (!opened && display.Text.Length > 0) { OpenBubble(); opened = true; }
                                 Message.Text = display.Text;
                                 SetMood(display.Mood);
                                 talking = true;
+                                StopButton.Visibility = Visibility.Visible;
                                 Status.Text = "답변 중…";
                             }
                         }
@@ -171,7 +172,7 @@ public partial class MainWindow
             if (liveStreams.TryGetValue(id, out var source) && source.Token == ct && !ct.IsCancellationRequested)
             {
                 liveStreams.Remove(id); liveDisplays.Remove(id); source.Dispose();
-                if (currentConversation == id) { talking = false; SetMood("neutral"); _ = ScheduleBubbleAfterMoves(id); }
+                if (currentConversation == id) { talking = false; StopButton.Visibility = Visibility.Collapsed; SetMood("neutral"); _ = ScheduleBubbleAfterMoves(id); }
                 if (connected && currentConversation == id) Status.Text = "연결됨";
                 if (currentConversation == id && connection is not null)
                     try { await ReadConversation(id, connection.Token); } catch (Exception ex) { ShowError(ex); }
