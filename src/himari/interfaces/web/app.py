@@ -41,6 +41,7 @@ is never served from this origin.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import posixpath
@@ -648,6 +649,18 @@ def memory_view(note: Memory, titles: dict[ConversationId, tuple[str | None, str
             "revision": note.revision, "created_at": _time(note.created_at), "updated_at": _time(note.updated_at)}
 
 
+def pairing_token(raw: bytes) -> str | None:
+    """The token in a pairing body, or None for any body but ``{"token": "<string>"}``
+    (appendix A.1). Deep nesting fails the parser with RecursionError, not
+    ValueError (review C4)."""
+    try:
+        body = json.loads(raw)
+    except (ValueError, RecursionError):
+        return None
+    token = body.get("token") if isinstance(body, dict) and set(body) == {"token"} else None
+    return token if isinstance(token, str) else None
+
+
 def device_view(device: Device) -> dict[str, Any]:
     """A device as the Web's Devices screen shows it (V3-P83 appendix A.1).
     ``connected`` and ``current`` come with the current device (part 2)."""
@@ -669,6 +682,8 @@ DEVICE_REFUSALS: dict[DataErrorCode, tuple[int, str, str]] = {
 # How a refused pairing answers (appendix A.1).
 PAIRING_STATUS = {"pairing_invalid": 401, "pairing_expired": 401, "pairing_used": 409, "invalid_token": 400,
                   "token_in_use": 409, "pairing_busy": 429}
+PAIR_PATH = "/api/devices/pair"
+PAIR_BODY_BYTES = 1024  # {"token": "hd_…"} is about 60 bytes; the one route without a sign-in reads no more (review C4)
 PAIRING_MESSAGES = {
     "pairing_invalid": "That code is not valid. Make a new one in Settings → Devices if it keeps failing.",
     "pairing_expired": "That code has ended. Make a new one in Settings → Devices.",
@@ -1860,7 +1875,7 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
         except DataError as error:
             raise device_refused(error) from None
 
-    @app.post("/api/devices/pair")
+    @app.post(PAIR_PATH)
     async def pair_device(request: Request) -> dict[str, Any]:
         """The one route without a sign-in (§4.3): the code in ``Authorization:
         Pairing <code>`` is its permission, and the device's own token is
@@ -1868,12 +1883,8 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
         ``invalid_token`` (appendix A.1), not a generic validation error."""
         application = himari(request)
         companion_on(application)
-        try:
-            body = await request.json()
-        except ValueError:
-            body = None
-        token = body.get("token") if isinstance(body, dict) and set(body) == {"token"} else None
-        if not isinstance(token, str):
+        token = pairing_token(await request.body())
+        if token is None:
             raise ApiError(400, "invalid_token", PAIRING_MESSAGES["invalid_token"])
         scheme, _, code = request.headers.get("authorization", "").partition(" ")
         if scheme.lower() != "pairing" or not code.strip():
@@ -1923,7 +1934,8 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
     # Outer → inner: headers, Host, Origin, body size, routes.
     app.add_middleware(BodyLimitMiddleware, exempt=lambda method, path: method == "POST" and bool(UPLOAD_PATH.match(path)),
                        larger=lambda method, path: SAVE_BODY_BYTES if (method, path) in SAVE_ROUTES
-                       else PDF_APPEND_MAX_BYTES if method == "POST" and path == PDF_APPEND_PATH else None)
+                       else PDF_APPEND_MAX_BYTES if method == "POST" and path == PDF_APPEND_PATH
+                       else PAIR_BODY_BYTES if method == "POST" and path == PAIR_PATH else None)
     app.add_middleware(OriginGuardMiddleware, allowed_origins=config.allowed_origins)
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=sorted(config.allowed_hosts))
     app.add_middleware(SecurityHeadersMiddleware, csp=page_csp(config.sandbox_origins))

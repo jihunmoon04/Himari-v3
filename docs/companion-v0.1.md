@@ -562,6 +562,7 @@ Content-Type: application/json
 - 409 `token_in_use`: 다른 기기가 이미 이 토큰을 씀. 앱은 새 토큰을 만들어 같은 코드로 다시 보낸다(실패로 세지 않음).
 - 400 `invalid_token`: 토큰 모양이 틀림(`hd_` + 43자 base64url). 몸이 JSON이 아니거나 `{"token": 문자열}` 꼴이 아니어도 같다.
 - 429 `pairing_busy`: 짝짓기가 너무 많이 기다리는 중. 잠시 뒤 다시.
+- 413 `request_too_large`: 몸이 1 KiB(`PAIR_BODY_BYTES`)를 넘음. 바른 몸은 60바이트쯤이다.
 - 403 `companion_off`.
 
 ### A.2 기기
@@ -706,5 +707,10 @@ data: {}
 - C2: 짝짓기 대기열에 상한(`MAX_PAIRING_WAITERS` = 8, 검사 중인 하나 뒤에 기다리는 수)을 두고, 넘치면 바로 429 `pairing_busy`로 답한다. 서버 프로세스는 하나(P0)라 잠금과 대기 수도 프로세스 하나의 것이다. 여러 프로세스가 되면 Data 쪽 잠금으로 옮긴다.
 - C3: 짝짓기 경로는 몸을 직접 읽는다. JSON이 아니거나 `{"token": 문자열}` 꼴이 아니면 FastAPI의 검증 오류가 아니라 400 `invalid_token`이다.
 - 시험: 두 백엔드의 `TOKEN_IN_USE`, 대기열 포화, 잘못된 몸 다섯 가지와 JSON 아닌 몸, Web의 `token_in_use`.
+
+**외부 재검수(PR #122 `360635a`, READY_WITH_CORRECTIONS; C1·C2 PASS, C3 부분 PASS) 반영:**
+- C4: 아주 깊게 중첩된 JSON은 Python 파서에서 `ValueError`가 아닌 `RecursionError`로 실패해, 로그인 없이 닿는 짝짓기 경로가 500으로 끝날 수 있었다. 몸 해석을 `pairing_token()`으로 빼고 두 오류 모두 "토큰 없음"(400 `invalid_token`)으로 읽는다. 또 짝짓기 경로의 몸 상한을 일반 256 KiB가 아닌 1 KiB(`PAIR_BODY_BYTES`)로 낮춰, 넘으면 미들웨어가 413 `request_too_large`로 먼저 답한다.
+- 시험: 깊이 20,000 중첩을 `pairing_token()`에 직접 넣어 None, HTTP로는 1 KiB 아래 중첩이 400, 위(40 KB)가 413.
+- 재검수가 짚은 Windows 앱 쪽(409 `token_in_use`에 새 토큰으로 다시, 429 `pairing_busy`에 잠시 뒤 다시)은 §9.1 규칙 11대로 앱(PR #121) 또는 통합 단계의 일이다.
 
 **배포:** 2부와 함께(§15). v14 업그레이드는 시작할 때 자동 백업 뒤 한다.

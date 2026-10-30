@@ -240,6 +240,11 @@ def test_pairing_refusals_and_revocation(server: Server) -> None:
         assert (response.status_code, error_code(response)) == (400, "invalid_token"), body
     response = server.device.post("/api/devices/pair", content=b"not json", headers=pairing)
     assert (response.status_code, error_code(response)) == (400, "invalid_token")
+    for depth in (500, 20_000):  # review C4: the small cap answers first; under it, deep nesting is no 500
+        nested = b"[" * depth + b"]" * depth
+        response = server.device.post("/api/devices/pair", content=nested, headers=pairing)
+        expected = (400, "invalid_token") if len(nested) <= web.PAIR_BODY_BYTES else (413, "request_too_large")
+        assert (response.status_code, error_code(response)) == expected, depth
     token = new_token()
     assert server.pair(made["code"], token).status_code == 200
     response = server.pair(made["code"], new_token())
@@ -252,6 +257,12 @@ def test_pairing_refusals_and_revocation(server: Server) -> None:
     assert (response.status_code, error_code(response)) == (401, "pairing_invalid")
     response = server.client.delete("/api/devices/d1", headers=SEND)
     assert (response.status_code, error_code(response)) == (404, "not_found")
+
+
+def test_a_pairing_body_too_deep_to_parse_is_no_token() -> None:
+    """Review C4: RecursionError is not a ValueError; the parser's own failure reads as no token."""
+    assert web.pairing_token(b"[" * 20_000 + b"]" * 20_000) is None
+    assert web.pairing_token(b'{"token": "hd_x"}') == "hd_x"
 
 
 def test_another_devices_token_is_refused_as_in_use(server: Server) -> None:
