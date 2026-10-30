@@ -618,7 +618,8 @@ def attachment_line(ref: AttachmentRef, attachments: Mapping[str, AttachmentInfo
     if ref.screen:  # V3-P84 §5: never placed in the Workspace, so no path
         data.pop("path", None)
         data["screen"] = True
-        if info is not None and plan is not None and plan.screen_points and key in plan.shown:
+        if info is not None and plan is not None and plan.screen_points and key == plan.latest_screen \
+                and key in plan.shown:  # only the screen moves refer to, and only when it is seen
             data["width"], data["height"] = info.view_width, info.view_height
     reason = None if info is None or plan is None else plan.reason(key, info)
     if reason is not None:
@@ -685,7 +686,8 @@ class ImagePlan(DeepFrozen):
     image_input: bool
     shown: frozenset[str] = frozenset()  # attachment keys
     older_screens: frozenset[str] = frozenset()  # screens past the latest SCREENS_SHOWN (V3-P84 §5)
-    screen_points: bool = False  # a shown screen's line gives its size (V3-P84 §5)
+    screen_points: bool = False  # the latest screen's line gives its size when it is shown (V3-P84 §5)
+    latest_screen: str | None = None  # the screen moves refer to, shown or not (PR #126 review B1)
 
     def reason(self, key: str, info: AttachmentInfo) -> str | None:
         """Why an image is a line only; None for a shown image and for a file
@@ -718,29 +720,32 @@ def image_plan(model_input: ModelInput) -> ImagePlan:
     """V3-P67 §6.2: ready copies, newest first, within MAX_IMAGES_PER_REQUEST
     and MAX_IMAGE_BYTES_PER_REQUEST of copy bytes — decided from the records,
     before any byte is read (review B3). Of the screens, only the latest
-    SCREENS_SHOWN (V3-P84 §5)."""
+    SCREENS_SHOWN (V3-P84 §5), counted by their order whether they can be
+    shown or not: a newer screen that cannot be seen never lets an older one
+    in (PR #126 review B1)."""
     options = model_input.request_options
     if not options.image_input:
         return ImagePlan(False)
     shown: list[str] = []
     older: set[str] = set()
-    screens = 0
+    screens: list[str] = []
     used = 0
     for ref in _refs_newest_first(model_input):
         key = attachment_key(ref)
+        if ref.screen and key not in screens and key not in older:
+            if len(screens) < SCREENS_SHOWN:
+                screens.append(key)
+            else:
+                older.add(key)
         info = model_input.attachments.get(key)
         if info is None or info.view_state != "ready" or key in shown or key in older:
             continue
-        if ref.screen:
-            if screens >= SCREENS_SHOWN:
-                older.add(key)
-                continue
-            screens += 1
         if len(shown) >= MAX_IMAGES_PER_REQUEST or used + info.view_bytes > MAX_IMAGE_BYTES_PER_REQUEST:
             continue  # an older, larger one is left out; a smaller one may still fit
         shown.append(key)
         used += info.view_bytes
-    return ImagePlan(True, frozenset(shown), frozenset(older), options.screen_points)
+    return ImagePlan(True, frozenset(shown), frozenset(older), options.screen_points,
+                     screens[0] if screens else None)
 
 
 def image_tokens(info: AttachmentInfo) -> int:

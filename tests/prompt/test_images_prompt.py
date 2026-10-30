@@ -105,3 +105,20 @@ def test_a_screen_line_says_screen_and_its_size_only_to_a_model_that_points() ->
     assert '"width"' not in blind and f'"not_shown": "{NO_IMAGE_MODEL}"' in blind
     assert attachment_line(ref(1), {"file_1#1": READY}, pointing) == attachment_line(
         ref(1), {"file_1#1": READY}, ImagePlan(True, frozenset({"file_1#1"})))  # other lines do not change
+
+
+def test_a_newer_screen_that_cannot_be_seen_lets_no_older_one_in() -> None:
+    """PR #126 review B1: screens count by their order, shown or not; only the latest gets a size."""
+    turns = [UserTurn(EventId(f"e{n}"), (screen(n),)) for n in range(3)]
+    for state in ("no_sandbox", "view_expired"):
+        infos = {"file_0#1": SCREEN, "file_1#1": SCREEN, "file_2#1": replace(SCREEN, view_state=state)}
+        plan = image_plan(model_input(turns, infos, image_input=True, screen_points=True))
+        assert plan.shown == frozenset({"file_1#1"}) and plan.older_screens == frozenset({"file_0#1"})
+        assert plan.latest_screen == "file_2#1"
+        assert '"width"' not in attachment_line(screen(1), infos, plan)  # seen, but moves are not about it
+        assert '"width"' not in attachment_line(screen(2), infos, plan)  # moves are about it, but it is not seen
+        assert f'"not_shown": "{OLDER_SCREEN}"' in attachment_line(screen(0), infos, plan)
+    infos = {f"file_{n}#1": SCREEN for n in range(3)}
+    plan = image_plan(model_input(turns, infos, image_input=True, screen_points=True))
+    assert '"width": 1280' in attachment_line(screen(2), infos, plan)
+    assert '"width"' not in attachment_line(screen(1), infos, plan)

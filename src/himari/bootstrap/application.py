@@ -279,6 +279,26 @@ class ScreenRefused(ValueError):
 # V3-P84 §4.1: a device's upload is a screen, of these types, at most this large.
 SCREEN_TYPES = {"image/png": "png", "image/jpeg": "jpg"}
 SCREEN_MAX_BYTES = 8 * 1024 * 1024
+_SCREEN_HEAD = 16  # PNG's signature and IHDR; JPEG's start of image
+
+
+async def _screen_body(chunks: AsyncIterator[bytes]) -> AsyncIterator[bytes]:
+    """The body again, once its first bytes look like a PNG or a JPEG; refused
+    before anything is stored otherwise (PR #126 review C1)."""
+    head = b""
+    async for chunk in chunks:
+        head += chunk
+        if len(head) >= _SCREEN_HEAD:
+            break
+    if not (head.startswith(b"\x89PNG\r\n\x1a\n") and head[12:16] == b"IHDR") and not head.startswith(b"\xff\xd8\xff"):
+        raise ScreenRefused("not a PNG or JPEG image")
+    return _then(head, chunks)
+
+
+async def _then(head: bytes, chunks: AsyncIterator[bytes]) -> AsyncIterator[bytes]:
+    yield head
+    async for chunk in chunks:
+        yield chunk
 
 
 class WorkspaceRefused(ValueError):
@@ -1497,11 +1517,14 @@ class Application:
     async def upload_screen(self, scope: TrustedScope, chunks: AsyncIterator[bytes]) -> FileRecord:
         """V3-P84 §4.1: a device's screen, staged like an upload: a PNG or
         JPEG by its bytes, at most SCREEN_MAX_BYTES, named here by when it
-        came. Refused bytes are left unreferenced; the cleanup drops them."""
+        came. A body that does not start as one is refused before it is
+        stored (PR #126 review C1); one whose header cannot be read after is
+        left unreferenced, and the cleanup drops it."""
         await self.data.read_conversation(scope)  # 404 for a foreign id, before any byte is read
         if await self.data.count_staged(scope) >= MAX_STAGED_UPLOADS:
             raise DataError(DataErrorCode.LIMIT_EXCEEDED, f"{MAX_STAGED_UPLOADS} uploads wait to be sent")
-        blob = await self.data.blobs.put(scope.principal_id, chunks, min(SCREEN_MAX_BYTES, self.file_max_bytes))
+        body = await _screen_body(chunks)
+        blob = await self.data.blobs.put(scope.principal_id, body, min(SCREEN_MAX_BYTES, self.file_max_bytes))
         image = await self.data.blobs.prepare_image(scope.principal_id, blob, self.views)
         extension = SCREEN_TYPES.get(image.image_type or "")
         if extension is None:

@@ -99,11 +99,13 @@ def test_a_screen_is_a_png_or_a_jpeg(tmp_path: Path) -> None:
         app = await opened(tmp_path, answers())
         try:
             scope = TrustedScope(ME, await app.create_conversation(ME))
+            before = app.data.blobs.rows.live_total()
             with pytest.raises(ScreenRefused):
                 await app.upload_screen(scope, body(b"GIF89a\x01\x00\x01\x00" + b"\x00" * 20))
             with pytest.raises(ScreenRefused):
                 await app.upload_screen(scope, body(b"plain text"))
             assert await app.data.count_staged(scope) == 0
+            assert app.data.blobs.rows.live_total() == before  # PR #126 review C1: refused before it is stored
             text = await app.upload(scope, "notes.txt", "text/plain", body(b"hello"))
             with pytest.raises(ScreenRefused):  # a staged upload that is not an image is no screen
                 await app.send(scope, "x", origin=DESK, screen=FileId(text.file_id))
