@@ -651,3 +651,52 @@ data: {}
 ```json
 {"kind": "assistant_final", "text": "[[mood:happy]]잘 됐다!", "display": {"text": "잘 됐다!", "moods": [{"at": 0, "mood": "happy"}]}, …}
 ```
+
+## 16. 구현 노트 — 서버 1부: 기기 등록과 기본 거부 (2026-10-30)
+
+**Data (v14)**
+- `devices`, `device_ids` 표와 색인 `devices_by_token`(토큰 해시, 유일), `devices_by_pairing`(코드 해시). 업그레이드는 v13 → v14로 표만 더한다(V3-P65 백업 경로 그대로).
+- `DeviceStore`: `add_device`, `pair_device`, `record_pairing_failure`, `device_for_token`, `list_devices`, `rename_device`, `revoke_device`, `touch_device`. SQLite와 메모리 저장소 둘 다, `tests/data/test_devices.py`가 두 백엔드에서 돈다.
+  - `pair_device`의 결과는 `PairingResult`(PAIRED·RESENT·USED·EXPIRED·INVALID). 해시가 맞는 줄을 끊지 않은 것만 찾으므로, 끊은 기기는 남은 코드로도 되살아나지 않는다(재검수 B1).
+  - 실패 세기는 짝짓지 않은 살아 있는 코드 모두에 더한다. P0는 주체가 하나라 §4.1의 "주체의 코드 하나"와 같다.
+  - 이름 유일성은 끊지 않은 기기 사이에서 대소문자를 무시하고 본다(`rules.check_device_name_free`). 실패한 추가는 번호를 쓰지 않는다.
+- `UserMessage.origin`(`MessageOrigin(kind, device_id)`): 코덱은 값이 있을 때만 `origin` 키를 쓴다. 옛 이벤트의 바이트는 그대로이고 `payload_schema_version`도 1 그대로다. T1·T7a 모두 `rules.check_origin`으로 확인한다.
+- `ConversationCatalog.most_recent_user_conversation`: 휴지통 밖, 사용자 메시지(답 포함)의 `created_at`이 가장 늦은 대화.
+- `ConversationEvent.created_at` 주석을 §4.2대로 고쳤다.
+
+**presence 모듈(계층 2, `common`·`data.api`만)**
+- `presence/api.py`: `Devices` 포트, `PairingCode`, `DeviceCaller`, `PairingRefused`, 코드·토큰 모양 도우미(`normalize_code`, `token_shape_ok`, `is_device_token`).
+- `presence/devices.py` `DeviceRegistry`:
+  - 코드는 `secrets.choice`로 32자 알파벳(I·O·0·1 없음)에서 8글자를 뽑는다. 코드와 토큰은 SHA-256만 Data로 간다.
+  - 짝짓기는 `asyncio.Lock` 하나 안에서 처리하고, 실패하면 그 잠금을 쥔 채 1초 늦게 답한다. 그래서 동시에 보낸 추측도 하나씩 늦춰진다.
+  - 32바이트가 모두 같은 토큰은 `invalid_token`이다(§9.1).
+  - `authenticate`는 `last_seen_at`을 10분에 한 번만 쓴다.
+- `scripts/check_imports.py`: `presence: 2`, `ONLY_FROM["presence"] = {common, data}`.
+- `himari.common.MOODS`를 이번에 넣었다(`GET /api/device`가 알려 줌). `split_moods`는 2부에서 넣는다.
+
+**Web**
+- `caller()`가 세션 쿠키 → web, 운영자 bearer → cli, `hd_` bearer → device(기기로만 확인)를 정한다. 공용 `principal()`은 `caller()`를 거쳐 기기면 403 `device_scope`를 낸다. 그래서 새 경로는 저절로 기기를 막는다.
+- 허용 경로(§4.3 표)만 `caller()`를 쓴다. 메시지는 기기가 `references`·`attachments`를 보내면 403, 목록은 `trashed=true`면 403이다.
+- 메시지의 `origin`은 `Application.send(..., origin=)`로 `UserMessage`에 실린다. 질문의 답(T7a)도 같은 길이다(`answer_pending_call`이 `replace(answer, answers_call=…)`).
+- 새 경로:
+  - `GET/POST /api/devices`, `PATCH/DELETE /api/devices/{id}`(세션 또는 CLI)
+  - `POST /api/devices/pair`(인증 없음, `Authorization: Pairing <코드>`)
+  - `GET /api/device`(`current_device`는 2부까지 `null`)
+  - 기기 목록의 `connected`·`current`는 2부까지 늘 `false`다.
+- `HIMARI_COMPANION=0`이면 짝짓기·코드 만들기·기기 토큰이 403 `companion_off`다. 기기 목록은 보이고(`enabled: false`), 토큰은 남는다.
+- **설계와 다른 점:** `Authorization` 머리글이 아예 없는 짝짓기 요청은 지금의 OriginGuard가 먼저 403 `origin_forbidden`으로 막는다(머리글이 있고 코드가 틀리면 401 `pairing_invalid`). 앱은 늘 머리글을 보내므로 계약(부록 A.1)은 바뀌지 않는다.
+- 화면: Settings → **Devices**(`/settings/devices`). 이름을 넣고 Add device를 누르면 코드가 한 번만 보인다. 다시 열거나 새로 고치면 사라진다. 기다리는 기기는 Cancel, 짝지은 기기는 Rename·Revoke(확인)를 쓴다.
+
+**시험**
+- `tests/data/test_devices.py`(두 백엔드): 짝짓기·다시 보내기·USED·EXPIRED·INVALID, 끊은 뒤 같은 코드로 다시 짝짓기 불가, 새 코드가 짝짓지 않은 줄을 지움, 이름 규칙, 실패 5번, 토큰 중복, 기기 수 한도, touch, origin 저장과 거부, 최근 대화.
+- `tests/data/test_sqlite.py`: v13 → v14 업그레이드와 v14 표 동작, 정확한 옛 스키마만 올림. `test_sqlite_trash.py`, `test_conversation_search.py`의 옛 스키마 만들기에 v14 표 빼기를 더했다.
+- `tests/presence/test_devices.py`: 코드 모양, 느슨히 친 코드, 다시 보내기, 10분 touch, 거부 이유, 5번 실패, 동시에 보낸 추측의 늦춤, 끝난 코드 숨김, 끊기.
+- `tests/interfaces/test_web_devices.py`:
+  - Origin 없는 짝짓기와 기기 토큰으로 대화하기
+  - 기기·질문의 답·web·cli 메시지의 origin
+  - 기기 첨부·참조 403, 휴지통 403
+  - **`app.routes` 전체를 도는 기본 거부 시험**
+  - 짝짓기 거부와 끊기(끊은 뒤 같은 코드 거부 포함), 이름 규칙, `companion_off`
+- `scripts/ui_smoke.py` `devices` 시나리오: 기기 추가 → 코드 → 앱처럼 짝짓기(HTTP) → 새로 고침에 코드 사라짐 → 이름 바꾸기 → 끊기 → 토큰 401. headless Chromium에서 전체 ui_smoke 통과.
+
+**배포:** 2부와 함께(§15). v14 업그레이드는 시작할 때 자동 백업 뒤 한다.

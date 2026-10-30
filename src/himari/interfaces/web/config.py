@@ -44,6 +44,9 @@ conversation_search and conversation_read off; on by default.
 Streaming (V3-P73 §9): ``HIMARI_STREAMING=0`` asks no model for a stream;
 on by default (models that declare it stream their answers).
 
+Companion (V3-P83 §3): ``HIMARI_COMPANION=0`` refuses pairing and every
+device token (403 ``companion_off``; the tokens stay); on by default.
+
 Machine Workspace (V3-P74 §4.4): ``HIMARI_MACHINE_SOCKET`` names the
 runner's socket (``/run/himari-runner/runner.sock``); then new Conversations
 of the principals in ``HIMARI_MACHINE_PRINCIPALS`` (comma-separated, default
@@ -81,6 +84,7 @@ DOCUMENTS_DIR_VAR = "HIMARI_DOCUMENTS_DIR"  # V3-P70: the documents toolkit; uns
 MEMORY_VAR = "HIMARI_MEMORY"  # V3-P71: 0 turns memory off
 CONVERSATION_SEARCH_VAR = "HIMARI_CONVERSATION_SEARCH"  # V3-P72: 0 turns it off
 STREAMING_VAR = "HIMARI_STREAMING"  # V3-P73: 0 turns it off
+COMPANION_VAR = "HIMARI_COMPANION"  # V3-P83: 0 turns devices off
 MACHINE_SOCKET_VAR = "HIMARI_MACHINE_SOCKET"  # V3-P74: the runner's socket; unset: no machine Environment
 MACHINE_PRINCIPALS_VAR = "HIMARI_MACHINE_PRINCIPALS"  # V3-P74: whose new Conversations use it
 DEFAULT_FILE_MAX_BYTES = 32 * 1024 * 1024  # as data.api
@@ -134,6 +138,7 @@ class WebConfig:
     memory: bool = True
     conversation_search: bool = True
     streaming: bool = True
+    companion: bool = True  # V3-P83
     machine_socket: str | None = None  # V3-P74
     machine_principals: tuple[str, ...] = ("operator",)
 
@@ -241,6 +246,7 @@ class WebConfig:
             memory=_flag(source.get(MEMORY_VAR), MEMORY_VAR, default=True),
             conversation_search=_flag(source.get(CONVERSATION_SEARCH_VAR), CONVERSATION_SEARCH_VAR, default=True),
             streaming=_flag(source.get(STREAMING_VAR), STREAMING_VAR, default=True),
+            companion=_flag(source.get(COMPANION_VAR), COMPANION_VAR, default=True),
             machine_socket=machine_socket,
             machine_principals=machine_principals,
         )

@@ -115,8 +115,12 @@ from himari.data.api import (
     Instructions,
     InstructionScope,
     MAX_ATTACHED_WORKSPACES,
+    MAX_DEVICES,
     MAX_MEMORIES,
+    PAIRING_FAILURE_LIMIT,
     MAX_WORKSPACES,
+    Device,
+    DevicePairing,
     Memory,
     MemoryCategory,
     MemoryChange,
@@ -128,6 +132,7 @@ from himari.data.api import (
     ExternalSourceSetting,
     InitialActivation,
     ModelSetting,
+    PairingResult,
     PersistedStateBasis,
     ProjectionResult,
     PromptBasis,
@@ -155,7 +160,7 @@ from himari.data.api import (
 
 # v3: compaction_runs; v4: external_settings; v5: ui_resources; v6: model_settings;
 # v7: the trash (all upgraded in place); v1 is refused
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 14
 APPLICATION_ID = 0x48494D41  # "HIMA": written into the database header (PRAGMA application_id)
 
 _TERMINAL_COMPLETIONS = frozenset(
@@ -422,9 +427,33 @@ CREATE TABLE workspaces (
 ) STRICT;
 CREATE INDEX bindings_by_workspace ON bindings (workspace_id);
 """
+# v14: a principal's devices (V3-P83 §4.2): hashes of their token and pairing
+# code only. Revoked rows stay so their ids are never given out again.
+_V14_ADDITIONS = """
+CREATE TABLE devices (
+    owner TEXT NOT NULL,
+    device_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    token_hash BLOB,
+    pairing_hash BLOB,
+    pairing_expires_at TEXT,
+    pairing_failures INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    paired_at TEXT,
+    last_seen_at TEXT,
+    revoked_at TEXT,
+    PRIMARY KEY (owner, device_id)
+) STRICT;
+CREATE UNIQUE INDEX devices_by_token ON devices (token_hash) WHERE token_hash IS NOT NULL;
+CREATE INDEX devices_by_pairing ON devices (pairing_hash) WHERE pairing_hash IS NOT NULL;
+CREATE TABLE device_ids (
+    owner TEXT PRIMARY KEY,
+    last_id INTEGER NOT NULL
+) STRICT;
+"""
 _ADDITIONS = (_V3_ADDITIONS, _V4_ADDITIONS, _V5_ADDITIONS, _V6_ADDITIONS, _V7_ADDITIONS, _V8_ADDITIONS,
               _V9_ADDITIONS, _V10_ADDITIONS, _V11_ADDITIONS, _V12_ADDITIONS,
-              _V13_ADDITIONS)  # what each version from v3 added
+              _V13_ADDITIONS, _V14_ADDITIONS)  # what each version from v3 added
 _SCHEMA = _SCHEMA_V2 + "".join(_ADDITIONS)
 # An older version → (its exact schema, what brings it to SCHEMA_VERSION).
 _UPGRADES = {
@@ -923,6 +952,14 @@ def _memory(row: sqlite3.Row) -> Memory:
                   datetime.fromisoformat(row["updated_at"]))
 
 
+def _device(row: sqlite3.Row) -> Device:
+    def moment(value: str | None) -> datetime | None:
+        return None if value is None else datetime.fromisoformat(value)
+
+    return Device(row["device_id"], row["name"], datetime.fromisoformat(row["created_at"]),
+                  moment(row["pairing_expires_at"]), moment(row["paired_at"]), moment(row["last_seen_at"]))
+
+
 FILL_BATCH = 500  # Events read at a time while an upgrade fills event_text
 
 
@@ -1299,6 +1336,7 @@ class SqliteData:
                     return existing
             if message.answers_call is not None:
                 raise DataError(DataErrorCode.INVALID_STATE_TRANSITION, "answers go through T7a")
+            rules.check_origin(message.origin)
             if self._waiting(tx, scope) is not None:
                 raise DataError(
                     DataErrorCode.INVALID_STATE_TRANSITION, "an ask_user call is waiting; use answer_pending_call"
@@ -1612,6 +1650,7 @@ class SqliteData:
             tx.authorized(scope)
             if self._waiting(tx, scope) != call:
                 raise DataError(DataErrorCode.ALREADY_COMMITTED, f"{call.call_id} is not waiting")
+            rules.check_origin(answer.origin)
             record = self._execution_row(tx, scope, call)
             self._attach(tx, scope, answer.blocks)
             result = ModelToolResult(blocks=answer.blocks)
@@ -1996,6 +2035,15 @@ class SqliteData:
                           " WHERE a.conversation_id=c.conversation_id AND b.workspace_id=?)"
                           " ORDER BY last_activity DESC, c.rowid DESC LIMIT ?", principal, workspace_id, limit)
             return tuple(self._summary(r) for r in rows)
+
+    async def most_recent_user_conversation(self, principal: PrincipalId) -> ConversationSummary | None:
+        with self._tx() as tx:
+            row = tx.one(
+                f"{self._SUMMARY} WHERE c.conversation_id=(SELECT e.conversation_id FROM events e"
+                " JOIN conversations o ON o.conversation_id=e.conversation_id"
+                " WHERE o.owner=? AND o.trashed_at IS NULL AND e.kind='user_message'"
+                " ORDER BY e.created_at DESC, o.rowid DESC LIMIT 1)", principal)
+            return None if row is None else self._summary(row)
 
     async def list_conversations(
         self, principal: PrincipalId, *, limit: int = 50, offset: int = 0, trashed: bool = False
@@ -2401,6 +2449,99 @@ class SqliteData:
                                        revision=current.revision + 1, updated_at=datetime.now(UTC))
             self._write_memory(tx, principal, note)
             return note
+
+    # --- DeviceStore (V3-P83 §4) ----------------------------------------------------
+
+    _DEVICE_COLUMNS = "device_id, name, created_at, pairing_expires_at, paired_at, last_seen_at"
+
+    @staticmethod
+    def _live_names(tx: _Tx, principal: PrincipalId, *, besides: str | None = None) -> list[str]:
+        rows = tx.all("SELECT device_id, name FROM devices WHERE owner=? AND revoked_at IS NULL", principal)
+        return [r["name"] for r in rows if r["device_id"] != besides]
+
+    def _read_device(self, tx: _Tx, principal: PrincipalId, device_id: object) -> Device:
+        row = None if not isinstance(device_id, str) else tx.one(
+            f"SELECT {self._DEVICE_COLUMNS} FROM devices WHERE owner=? AND device_id=? AND revoked_at IS NULL",
+            principal, device_id)
+        if row is None:
+            raise DataError(DataErrorCode.NOT_FOUND, f"no device {device_id}")
+        return _device(row)
+
+    async def add_device(self, principal: PrincipalId, name: str, pairing_hash: bytes,
+                         expires_at: datetime) -> Device:
+        name, now = rules.check_device_name(name), datetime.now(UTC)
+        with self._tx() as tx:
+            tx.execute("DELETE FROM devices WHERE owner=? AND paired_at IS NULL AND revoked_at IS NULL", principal)
+            names = self._live_names(tx, principal)
+            rules.check_device_name_free(name, names)
+            if len(names) >= MAX_DEVICES:
+                raise DataError(DataErrorCode.LIMIT_EXCEEDED, f"{MAX_DEVICES} devices at most")
+            row = tx.one("SELECT last_id FROM device_ids WHERE owner=?", principal)
+            number = (0 if row is None else int(row["last_id"])) + 1
+            tx.execute("INSERT INTO device_ids (owner, last_id) VALUES (?, ?)"
+                       " ON CONFLICT (owner) DO UPDATE SET last_id=excluded.last_id", principal, number)
+            device = Device(f"d{number}", name, now, expires_at, None, None)
+            tx.execute("INSERT INTO devices (owner, device_id, name, pairing_hash, pairing_expires_at, created_at)"
+                       " VALUES (?, ?, ?, ?, ?, ?)", principal, device.device_id, name, pairing_hash,
+                       _timestamp(expires_at), _timestamp(now))
+            return device
+
+    async def pair_device(self, pairing_hash: bytes, token_hash: bytes, now: datetime) -> DevicePairing:
+        with self._tx() as tx:
+            row = tx.one(f"SELECT owner, token_hash, {self._DEVICE_COLUMNS} FROM devices"
+                         " WHERE pairing_hash=? AND revoked_at IS NULL", pairing_hash)
+            if row is None:
+                return DevicePairing(PairingResult.INVALID)
+            if datetime.fromisoformat(row["pairing_expires_at"]) <= now:
+                return DevicePairing(PairingResult.EXPIRED)
+            principal = PrincipalId(row["owner"])
+            if row["paired_at"] is not None:
+                if row["token_hash"] != token_hash:
+                    return DevicePairing(PairingResult.USED)
+                return DevicePairing(PairingResult.RESENT, principal, _device(row))
+            if tx.one("SELECT 1 FROM devices WHERE token_hash=?", token_hash) is not None:
+                raise DataError(DataErrorCode.INVALID_ARGUMENT, "that token is taken")
+            tx.execute("UPDATE devices SET token_hash=?, paired_at=? WHERE owner=? AND device_id=?",
+                       token_hash, _timestamp(now), principal, row["device_id"])
+            return DevicePairing(PairingResult.PAIRED, principal, self._read_device(tx, principal, row["device_id"]))
+
+    async def record_pairing_failure(self, now: datetime) -> None:
+        live = ("paired_at IS NULL AND revoked_at IS NULL AND pairing_hash IS NOT NULL"
+                " AND pairing_expires_at > ?")
+        with self._tx() as tx:
+            tx.execute(f"UPDATE devices SET pairing_failures=pairing_failures+1 WHERE {live}", _timestamp(now))
+            tx.execute("DELETE FROM devices WHERE paired_at IS NULL AND pairing_failures >= ?", PAIRING_FAILURE_LIMIT)
+
+    async def device_for_token(self, token_hash: bytes) -> tuple[PrincipalId, Device] | None:
+        with self._tx() as tx:
+            row = tx.one(f"SELECT owner, {self._DEVICE_COLUMNS} FROM devices"
+                         " WHERE token_hash=? AND revoked_at IS NULL AND paired_at IS NOT NULL", token_hash)
+            return None if row is None else (PrincipalId(row["owner"]), _device(row))
+
+    async def list_devices(self, principal: PrincipalId) -> tuple[Device, ...]:
+        with self._tx() as tx:
+            rows = tx.all(f"SELECT {self._DEVICE_COLUMNS} FROM devices WHERE owner=? AND revoked_at IS NULL"
+                          " ORDER BY rowid", principal)
+            return tuple(_device(r) for r in rows)
+
+    async def rename_device(self, principal: PrincipalId, device_id: str, name: str) -> Device:
+        name = rules.check_device_name(name)
+        with self._tx() as tx:
+            self._read_device(tx, principal, device_id)
+            rules.check_device_name_free(name, self._live_names(tx, principal, besides=device_id))
+            tx.execute("UPDATE devices SET name=? WHERE owner=? AND device_id=?", name, principal, device_id)
+            return self._read_device(tx, principal, device_id)
+
+    async def revoke_device(self, principal: PrincipalId, device_id: str) -> None:
+        with self._tx() as tx:
+            self._read_device(tx, principal, device_id)
+            tx.execute("UPDATE devices SET revoked_at=?, token_hash=NULL, pairing_hash=NULL, pairing_expires_at=NULL"
+                       " WHERE owner=? AND device_id=?", _timestamp(datetime.now(UTC)), principal, device_id)
+
+    async def touch_device(self, principal: PrincipalId, device_id: str, at: datetime) -> None:
+        with self._tx() as tx:
+            tx.execute("UPDATE devices SET last_seen_at=? WHERE owner=? AND device_id=? AND revoked_at IS NULL",
+                       _timestamp(at), principal, device_id)
 
     async def count_source_memories(self, scope: TrustedScope) -> int:
         with self._tx() as tx:

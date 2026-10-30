@@ -262,7 +262,7 @@ function status(text, tone, action = null) {
  * the page was sent to, "none" for Back/Forward (the browser moved it already). */
 function showSurface(name, via = "none") {
   closeModelDialog();
-  for (const surface of ["login", "home", "chat", "trash", "instructions", "memory", "folders", "files"]) {
+  for (const surface of ["login", "home", "chat", "trash", "instructions", "memory", "folders", "devices", "files"]) {
     $(`surface-${surface}`).hidden = surface !== name;
   }
   followAddress(name, via);
@@ -640,7 +640,7 @@ function renderMessage(event, model = null) {
 /* ------------------------------------------------------------- addresses */
 
 const SURFACE_ADDRESS = { home: "/", files: "/files", trash: "/trash", instructions: "/settings/instructions",
-                          memory: "/settings/memory", folders: "/settings/folders" };
+                          memory: "/settings/memory", folders: "/settings/folders", devices: "/settings/devices" };
 const CONVERSATION_ADDRESS = /^\/c\/([A-Za-z0-9_-]{1,128})$/;
 
 /* V3-P79 §3.2: the surface now shown, at its address. The sign-in screen leaves the address as it is. */
@@ -666,6 +666,7 @@ async function goTo(path, via) {
   else if (surface === "instructions") await showInstructions({ via });
   else if (surface === "memory") await showMemory({ via });
   else if (surface === "folders") await showFolders({ via });
+  else if (surface === "devices") await showDevices({ via });
   else await showHome({ via: surface === "home" ? via : "replace" });
   return app.address === path;
 }
@@ -3598,6 +3599,122 @@ async function showFolders({ via = "push" } = {}) {
   await loadFoldersList();
 }
 
+/* --------------------------------------------------------------- devices */
+
+/* V3-P83 §4.1: add a device (its code is shown once), rename, revoke. */
+
+function deviceRow(device) {
+  const li = el("li", "memory-row");
+  const main = el("div", "memory-row-main");
+  main.append(el("p", "memory-text", device.name));
+  if (!device.paired) {
+    main.append(el("span", "row-meta", `Waiting for its code until ${new Date(device.pairing_expires_at).toLocaleTimeString()}`));
+  } else {
+    main.append(el("span", "row-meta", device.last_seen_at
+      ? `Last seen ${new Date(device.last_seen_at).toLocaleString()}`
+      : `Paired ${new Date(device.paired_at).toLocaleString()}`));
+  }
+  const actions = el("div", "memory-row-actions");
+  const rename = el("button", "link-button", "Rename");
+  rename.type = "button";
+  rename.setAttribute("aria-label", `Rename ${device.name}`);
+  rename.addEventListener("click", () => deviceForm(device, li));
+  const revoke = el("button", "link-button danger-link", device.paired ? "Revoke" : "Cancel");
+  revoke.type = "button";
+  revoke.setAttribute("aria-label", `${device.paired ? "Revoke" : "Cancel"} ${device.name}`);
+  revoke.addEventListener("click", () => revokeDevice(device));
+  actions.append(rename, revoke);
+  li.append(main, actions);
+  return li;
+}
+
+function deviceForm(device, li) {
+  const form = el("form", "memory-form");
+  const name = el("input", "memory-form-text");
+  name.value = device.name;
+  name.maxLength = 40;
+  name.required = true;
+  name.setAttribute("aria-label", "Device name");
+  const bar = el("div", "memory-form-bar");
+  const cancel = el("button", "link-button", "Cancel");
+  cancel.type = "button";
+  cancel.addEventListener("click", () => loadDevicesList());
+  const save = el("button", "primary-button", "Save");
+  save.type = "submit";
+  bar.append(cancel, save);
+  form.append(name, bar);
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    try {
+      await api("PATCH", `/api/devices/${encodeURIComponent(device.device_id)}`, { name: name.value });
+      status("Renamed. HIMARI sees the new name from the next message.", "ok");
+      await loadDevicesList();
+    } catch (error) {
+      status(error.message, "error");
+    }
+  });
+  li.replaceChildren(form);
+  name.focus();
+}
+
+async function revokeDevice(device) {
+  if (device.paired && !(await confirmAction(`Revoke “${device.name}”?`,
+                                             ["Its app stops working at once. To use it again, pair it anew."],
+                                             "Revoke"))) return;
+  try {
+    await api("DELETE", `/api/devices/${encodeURIComponent(device.device_id)}`);
+    status(device.paired ? "Revoked." : "Cancelled. Its code no longer works.", "ok");
+    if ($("devices-code").dataset.device === device.device_id) $("devices-code").hidden = true;
+  } catch (error) {
+    status(error.message, error.kind === "http" ? "warn" : "error");
+  }
+  await loadDevicesList();
+}
+
+async function addDevice(event) {
+  event.preventDefault();
+  try {
+    const made = await api("POST", "/api/devices", { name: $("devices-add-name").value });
+    $("devices-add").reset();
+    $("devices-code-name").textContent = made.name;
+    $("devices-code-until").textContent = new Date(made.expires_at).toLocaleTimeString();
+    $("devices-code-value").textContent = made.code;
+    $("devices-code").dataset.device = made.device_id;
+    $("devices-code").hidden = false;
+    await loadDevicesList();
+  } catch (error) {
+    status(error.message, "error");
+  }
+}
+
+async function loadDevicesList() {
+  const generation = app.generation;
+  const listing = await api("GET", "/api/devices");
+  if (generation !== app.generation || $("surface-devices").hidden) return;
+  $("devices-off").hidden = listing.enabled;
+  $("devices-add").hidden = !listing.enabled;
+  $("devices-empty").hidden = listing.items.length > 0;
+  $("devices-list").replaceChildren(...listing.items.map(deviceRow));
+}
+
+async function showDevices({ via = "push" } = {}) {
+  if (!(await mayLeave())) return;
+  stopPolling();
+  views.reset();
+  app.conversationId = null;
+  app.generation += 1;
+  live.reset();
+  leavePlace();
+  markSelected();
+  $("devices-list").replaceChildren();
+  $("devices-code").hidden = true; // a code is shown once, right after it was made
+  showSurface("devices", via);
+  closeNav();
+  $("topbar-title").textContent = "Devices";
+  status("");
+  await loadDevicesList();
+}
+
 /* The Settings link only where folders are offered. */
 async function syncFoldersLink() {
   try {
@@ -3724,6 +3841,11 @@ async function boot() {
     showFolders().catch((e) => status(e.message, "error"));
   });
   $("folders-add").addEventListener("submit", registerFolder);
+  $("nav-devices").addEventListener("click", () => {
+    $("appearance-dialog").close();
+    showDevices().catch((e) => status(e.message, "error"));
+  });
+  $("devices-add").addEventListener("submit", addDevice);
   $("chat-menu-attach").addEventListener("submit", attachFolder);
   $("nav-instructions").addEventListener("click", () => {
     $("appearance-dialog").close();

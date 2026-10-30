@@ -299,3 +299,9 @@ class RawRepresentation(Enum):
     # ``himari-blob:`` markers that the adapter expands when it sends: the
     # sent bytes can be rebuilt exactly while the blobs remain.
     WIRE_EXACT_BLOB_REFS = "wire_exact_blob_refs"
+
+
+# The moods an answer may show with ``[[mood:NAME]]`` (V3-P83 §7.1): the
+# contract between the server and a device's character. Adding one keeps old
+# apps working (they draw an unknown mood as "neutral"); removing one does not.
+MOODS = ("neutral", "happy", "excited", "sad", "surprised", "thinking", "embarrassed", "worried")

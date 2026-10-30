@@ -251,6 +251,9 @@ def test_an_upgrade_fills_in_batches_without_missing_or_repeating_one(tmp_path: 
     store.close()
     conn = sqlite3.connect(path)
     try:
+        for statement in ("DROP TABLE device_ids", "DROP INDEX devices_by_pairing", "DROP INDEX devices_by_token",
+                          "DROP TABLE devices"):  # v14 (V3-P83)
+            conn.execute(statement)
         conn.execute("DROP INDEX bindings_by_workspace")  # v13 (V3-P74)
         conn.execute("DROP TABLE workspaces")
         conn.execute("DROP TABLE event_text")
