@@ -16,14 +16,22 @@ public partial class MainWindow
             {
                 await foreach (var (type, data) in local.StreamAsync("/api/events", ct))
                 {
+                    if (ct.IsCancellationRequested || !ReferenceEquals(local, client)) return;
                     if (type == "hello")
                     {
                         delay = 1; SetConnected(true, "연결됨");
                         deviceId = Str(Prop(data, "device"), "device_id") ?? deviceId;
-                        if (currentConversation is null) await RefreshConversations(Str(Prop(data, "recent_conversation"), "id"), ct);
-                        StartOwnJobs(Prop(data, "activity"), local, ct);
+                        bool returned = UpdateCurrent(Str(data, "current_device"));
+                        await HelloReconciliation.ApplyAsync(
+                            async () => { if (currentConversation is null || (returned && string.IsNullOrWhiteSpace(Input.Text))) await RefreshConversations(Str(Prop(data, "recent_conversation"), "id"), ct); },
+                            () => StartOwnJobs(Prop(data, "activity"), local, ct),
+                            async () => { if (currentConversation is not null) await ReadConversation(currentConversation, ct); }, ct);
                     }
-                    else if (type == "activity") StartOwnJobs(data, local, ct);
+                    else if (type == "activity")
+                    {
+                        StartOwnJobs(data, local, ct);
+                        if (currentConversation is not null && !liveStreams.ContainsKey(currentConversation)) await ReadConversation(currentConversation, ct);
+                    }
                     else if (type == "job")
                     {
                         string? id = Str(data, "conversation"), state = Str(data, "state");
@@ -34,21 +42,15 @@ public partial class MainWindow
                         await ReadConversation(currentConversation, ct);
                     else if (type == "current")
                     {
-                        string? current = Str(data, "device_id");
-                        if (current != deviceId) awaySince ??= DateTime.UtcNow;
-                        else if (awaySince is DateTime since)
+                        if (UpdateCurrent(Str(data, "device_id")) && string.IsNullOrWhiteSpace(Input.Text))
                         {
-                            awaySince = null;
-                            if (DateTime.UtcNow - since > TimeSpan.FromMinutes(10) && string.IsNullOrWhiteSpace(Input.Text))
-                            {
-                                var info = await local.SendAsync(System.Net.Http.HttpMethod.Get, "/api/device", null, ct);
-                                await RefreshConversations(Str(Prop(info, "recent_conversation"), "id"), ct);
-                            }
+                            var info = await local.SendAsync(System.Net.Http.HttpMethod.Get, "/api/device", null, ct);
+                            await RefreshConversations(Str(Prop(info, "recent_conversation"), "id"), ct);
                         }
                     }
                     else if (type == "revoked")
                     {
-                        CredentialStore.Delete(); StopConnection(); PairPanel.Visibility = Visibility.Visible; ChatPanel.Visibility = Visibility.Collapsed;
+                        CredentialStore.DeleteActive(); StopConnection(); PairPanel.Visibility = Visibility.Visible; ChatPanel.Visibility = Visibility.Collapsed;
                         SetConnected(false, "기기 연결이 해제되었습니다. 다시 짝짓기해 주세요."); return;
                     }
                     else if (type == "replaced") { Status.Text = "다른 히마리 앱이 연결되어 이 앱을 종료합니다."; Close(); return; }
@@ -59,7 +61,7 @@ public partial class MainWindow
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { return; }
             catch (ApiException ex) when (ex.Status == HttpStatusCode.Unauthorized)
             {
-                CredentialStore.Delete(); StopConnection(); PairPanel.Visibility = Visibility.Visible; ChatPanel.Visibility = Visibility.Collapsed;
+                CredentialStore.DeleteActive(); StopConnection(); PairPanel.Visibility = Visibility.Visible; ChatPanel.Visibility = Visibility.Collapsed;
                 SetConnected(false, "인증이 만료되었습니다. 다시 짝짓기해 주세요."); return;
             }
             catch (Exception ex)
@@ -72,6 +74,12 @@ public partial class MainWindow
                 try { await Task.Delay(TimeSpan.FromSeconds(wait), ct); } catch (OperationCanceledException) { return; }
             }
         }
+    }
+    private bool UpdateCurrent(string? current)
+    {
+        if (current != deviceId) { awaySince ??= DateTime.UtcNow; return false; }
+        bool returned = awaySince is DateTime since && DateTime.UtcNow - since > TimeSpan.FromMinutes(10);
+        awaySince = null; return returned;
     }
     private bool IsOwn(JsonElement origin) => Str(origin, "kind") == "device" && Str(origin, "device_id") == deviceId && deviceId is not null;
     private void CancelLive()

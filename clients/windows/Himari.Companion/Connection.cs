@@ -19,6 +19,8 @@ public partial class MainWindow
     private string? deviceId, currentConversation;
     private bool connected, changingSelection;
     private DateTime? awaySince;
+    private readonly ICredentialVault vault = new WindowsCredentialVault();
+    private PairingCoordinator Pairing() => new(vault, c => new ServerClient(c.Server, c.Token));
 
     private static string? Str(JsonElement element, string name) => element.ValueKind == JsonValueKind.Object && element.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
     private static JsonElement Prop(JsonElement element, string name) => element.ValueKind == JsonValueKind.Object && element.TryGetProperty(name, out var v) ? v : default;
@@ -40,11 +42,24 @@ public partial class MainWindow
     {
         try
         {
-            var stored = CredentialStore.Read();
-            if (stored is null) { SetConnected(false, "Web에서 짝짓기 코드를 발급해 주세요."); return; }
-            ServerAddress.Text = stored.Value.Server;
-            if (stored.Value.Pending) { SetConnected(false, "짝짓기 코드를 입력해 연결을 다시 시도해 주세요."); return; }
-            await StartConnection(stored.Value.Server, stored.Value.Token);
+            var stored = vault.Active();
+            var pending = vault.Pending();
+            if (pending is not null)
+            {
+                try
+                {
+                    using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+                    stored = await Pairing().RecoverPendingAsync(timeout.Token) ?? stored;
+                }
+                catch (Exception) { /* Preserve both records; an offline pending attempt can be retried later. */ }
+            }
+            if (stored is null)
+            {
+                if (pending is not null) ServerAddress.Text = pending.Server;
+                SetConnected(false, pending is null ? "Web에서 짝짓기 코드를 발급해 주세요." : "짝짓기 코드를 입력해 연결을 다시 시도해 주세요."); return;
+            }
+            ServerAddress.Text = stored.Server;
+            await StartConnection(stored.Server, stored.Token);
         }
         catch (Exception ex) { ShowError(ex); }
     }
@@ -57,16 +72,11 @@ public partial class MainWindow
             // Verify the URL before touching the existing credential.
             using var validator = new ServerClient(address, "unused");
             string canonical = validator.BaseUri.ToString();
-            var stored = CredentialStore.Read();
-            string token = stored is not null && stored.Value.Pending && stored.Value.Server == canonical ? stored.Value.Token : CredentialStore.NewToken();
-            CredentialStore.Save(canonical, token, pending: true);
-            using var pending = new ServerClient(canonical, token);
             using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(20));
             Status.Text = "기기 연결 중…";
-            await pending.PairAsync(code, timeout.Token);
-            CredentialStore.Save(canonical, token, pending: false);
+            var paired = await Pairing().PairAsync(canonical, code, timeout.Token);
             PairCode.Clear();
-            await StartConnection(canonical, token);
+            await StartConnection(paired.Server, paired.Token);
         }
         catch (Exception ex) { ShowError(ex); }
     }
@@ -91,7 +101,7 @@ public partial class MainWindow
             catch (OperationCanceledException) when (cts.IsCancellationRequested) { return; }
             catch (ApiException ex) when (ex.Status == HttpStatusCode.Unauthorized)
             {
-                StopConnection(); CredentialStore.Delete(); PairPanel.Visibility = Visibility.Visible; ChatPanel.Visibility = Visibility.Collapsed;
+                StopConnection(); CredentialStore.DeleteActive(); PairPanel.Visibility = Visibility.Visible; ChatPanel.Visibility = Visibility.Collapsed;
                 SetConnected(false, "다시 짝짓기가 필요합니다."); return;
             }
             catch (Exception ex)
@@ -123,8 +133,15 @@ public partial class MainWindow
     private async Task RefreshConversations(string? preferred, CancellationToken ct)
     {
         if (client is null) return;
-        var data = await client.SendAsync(HttpMethod.Get, "/api/conversations", null, ct);
-        var list = Items(Prop(data, "items")).Select(x => new Conversation(Str(x, "id") ?? "", Str(x, "title") ?? "새 대화")).Where(x => x.Id.Length > 0).ToList();
+        var list = new List<Conversation>(); int offset = 0;
+        while (true)
+        {
+            var data = await client.SendAsync(HttpMethod.Get, $"/api/conversations?limit=50&offset={offset}", null, ct);
+            list.AddRange(Items(Prop(data, "items")).Select(x => new Conversation(Str(x, "id") ?? "", Str(x, "title") ?? "새 대화")).Where(x => x.Id.Length > 0));
+            var nextValue = Prop(data, "next_offset");
+            if (nextValue.ValueKind != JsonValueKind.Number || !nextValue.TryGetInt32(out var next) || next <= offset) break;
+            offset = next;
+        }
         string? chosen = preferred ?? currentConversation;
         changingSelection = true; Conversations.ItemsSource = list;
         Conversations.SelectedItem = list.FirstOrDefault(x => x.Id == chosen) ?? list.FirstOrDefault();
@@ -143,21 +160,22 @@ public partial class MainWindow
     {
         if (client is null) return;
         var detail = await client.SendAsync(HttpMethod.Get, PathFor(id), null, ct);
-        var question = Str(Prop(Prop(detail, "waiting"), "display"), "text");
+        var question = ConversationView.Question(detail);
         if (id != currentConversation) return;
+        if (connected) Status.Text = ConversationView.IsRunning(detail) ? "이 대화는 작업 중입니다. 새 대화를 열 수 있습니다." : "연결됨";
         if (question is not null) { Message.Text = question; Input.Focus(); return; }
         if (liveDisplays.TryGetValue(id, out var display)) { Message.Text = display.Text; SetMood(display.Mood); return; }
-        int after = 0; string? lastText = null;
+        var sequence = Prop(Prop(detail, "conversation"), "last_sequence");
+        int lastSequence = sequence.ValueKind == JsonValueKind.Number && sequence.TryGetInt32(out int n) ? n : 0;
+        int after = Math.Max(0, lastSequence - 100); string? lastText = null;
         while (true)
         {
             var history = await client.SendAsync(HttpMethod.Get, PathFor(id) + $"/events?after={after}&limit=100", null, ct);
             var page = Items(Prop(history, "items")).ToList();
             foreach (var item in page)
                 if (Str(item, "kind") == "assistant_final") lastText = Str(Prop(item, "display"), "text") ?? lastText;
-            if (page.Count < 100) break;
-            var seq = Prop(page[^1], "sequence");
-            if (seq.ValueKind != JsonValueKind.Number || !seq.TryGetInt32(out int next) || next <= after) break;
-            after = next;
+            if (lastText is not null || after == 0) break;
+            after = Math.Max(0, after - 100);
         }
         if (id != currentConversation || liveStreams.ContainsKey(id)) return;
         Message.Text = lastText ?? "대화를 시작해 주세요.";

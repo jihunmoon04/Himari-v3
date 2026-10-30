@@ -3,5 +3,8 @@
   <ItemGroup>
     <Compile Include="..\Himari.Companion\ServerClient.cs" Link="ServerClient.cs" />
     <Compile Include="..\Himari.Companion\CredentialStore.cs" Link="CredentialStore.cs" />
+    <Compile Include="..\Himari.Companion\PairingCoordinator.cs" Link="PairingCoordinator.cs" />
+    <Compile Include="..\Himari.Companion\ConversationView.cs" Link="ConversationView.cs" />
+    <Compile Include="..\Himari.Companion\HelloReconciliation.cs" Link="HelloReconciliation.cs" />
   </ItemGroup>
 </Project>
