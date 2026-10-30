@@ -107,7 +107,8 @@ class BodyLimitMiddleware:
         self._app = app
         self._inner = RequestBodyLimitMiddleware(app, max_body_size)
         self._exempt = exempt  # (method, path) → the route holds the body to its own limit (e.g. uploads)
-        self._larger = larger  # (method, path) → a larger limit for that route (V3-P75 §7.7: a file saved)
+        self._larger = larger  # (method, path) → that route's own limit: larger for a saved file
+        # (V3-P75 §7.7), smaller for pairing (V3-P83)
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":

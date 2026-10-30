@@ -1,6 +1,7 @@
 """Pure prompt composition (PROMPT-01/03, V3-043, CPP §6.1).
 
-No I/O, no clock, no randomness: same ``PromptInputs`` → same ``ModelInput``.
+No I/O, no clock, no randomness: same ``PromptInputs`` → same ``ModelInput``
+(the turn's time comes in ``PromptInputs.now``).
 With a compaction snapshot (``compaction.read_summary``) the history is its
 summary followed by every part that starts after the coverage; without one
 the whole history is exact. Every ToolCall group in the inputs is checked
@@ -33,9 +34,13 @@ from himari.prompt.api import (
     PromptError,
     PromptErrorCode,
     PromptInputs,
+    SCREEN_MOVE_NOTE,
+    SCREEN_NOTE,
+    TIME_GAP,
     SourceNote,
     ToolGroupTurn,
     UserTurn,
+    time_line,
     user_instructions_section,
 )
 from himari.prompt.compaction import anchors, context_key, part_anchor, read_summary
@@ -71,13 +76,16 @@ class Composer:
             tail = [p for p in history if part_anchor(p, by_event, by_run) > covers]
             history = [CompressedHistory((TextBlock(summary),), covers), *tail]
             snapshot_revision = inputs.snapshot.revision
+        if inputs.time_zone is not None:
+            history = timed(history, inputs)
         basis = inputs.state_basis
         return ModelInput(
             stable_prefix=stable_prefix(inputs),
             tool_catalog=inputs.tool_catalog,
             conversation=tuple(history),
             current_state=CurrentStateProjection(basis=basis, observations=inputs.observations,
-                                                 memories=inputs.memories),
+                                                 memories=inputs.memories, now=inputs.now,
+                                                 presence=inputs.presence),
             request_options=inputs.request_options,
             trigger_refs=inputs.trigger_refs,
             prompt_basis=PromptBasis(
@@ -110,13 +118,38 @@ class Composer:
         return ToolGroupTurn(run_id, payload.commentary, calls, results)
 
 
+def timed(history: list[HistoryPart], inputs: PromptInputs) -> list[HistoryPart]:
+    """V3-P83 §6.4: a user message's time line before its content — on the
+    first one shown and on each that came over TIME_GAP after the one
+    before it (answers to questions are tool results, not counted). From
+    the Events' own times only, so the same history gives the same lines."""
+    assert inputs.time_zone is not None
+    received = {e.event_id: e.created_at for e in inputs.events}
+    out: list[HistoryPart] = []
+    previous = None
+    for part in history:
+        if isinstance(part, UserTurn):
+            moment = received[part.event_id]
+            if previous is None or moment - previous > TIME_GAP:
+                part = replace(part, blocks=(TextBlock(time_line(moment, inputs.time_zone)), *part.blocks))
+            previous = moment
+        out.append(part)
+    return out
+
+
 CUT = "\n[… cut]"
 
 
 def stable_prefix(inputs: PromptInputs) -> tuple[str, ...]:
-    """The operator's instructions and notes, then the user's (V3-P69 §4)."""
+    """The operator's instructions and notes, then the user's (V3-P69 §4).
+    SCREEN_MOVE_NOTE follows SCREEN_NOTE for a model that points on a screen
+    (V3-P84 §5): which model it is is part of the context key already."""
+    instructions = inputs.instructions
+    if inputs.request_options.screen_points and SCREEN_NOTE in instructions:
+        at = instructions.index(SCREEN_NOTE) + 1
+        instructions = (*instructions[:at], SCREEN_MOVE_NOTE, *instructions[at:])
     section = user_instructions_section(inputs.user_instructions)
-    return inputs.instructions if section is None else (*inputs.instructions, section)
+    return instructions if section is None else (*instructions, section)
 
 
 def fit_notes(notes: tuple[SourceNote, ...]) -> tuple[SourceNote, ...]:

@@ -62,6 +62,9 @@ class ProviderCapabilities(DeepFrozen):
     # Answers may be streamed (V3-P73 §9): only for models whose streamed
     # continuation was checked with real requests, replayed in a Tool turn.
     streaming: bool = False
+    # Points on a screen image are where the model says (V3-P84 §5): only for
+    # models whose [[move:X,Y]] fell on the asked target in real requests.
+    screen_points: bool = False
 
 
 @runtime_checkable

@@ -25,6 +25,9 @@ change past a version or the job's end. Wakeups may coalesce; a reader that comp
 with what it has sent loses nothing. An ended Run's state stays until the
 next Run of the job starts, the next job starts, or the Conversation is
 forgotten.
+
+Listening (V3-P83 §2.2): a ``JobListener`` is told when an input is
+accepted, a job starts (with its message's origin), a Run ends and a job ends.
 """
 
 from __future__ import annotations
@@ -45,13 +48,14 @@ from himari.control.api import (
     ControlErrorCode,
     ConversationDriver,
     DriveResult,
+    JobListener,
     JobStatus,
     LiveOutput,
     StopSignal,
     TurnProgress,
     TurnUsage,
 )
-from himari.data.api import DataError, UserMessage
+from himari.data.api import DataError, MessageOrigin, UserMessage
 from himari.provider.api import OutputDelta
 
 log = logging.getLogger(__name__)
@@ -131,13 +135,15 @@ class _JobProgress:
 
 class BackgroundRunner:
     def __init__(self, driver: ConversationDriver, *, unattended_runs: int | None = None,
-                 seen_seconds: float = SEEN_SECONDS, clock: Callable[[], float] = time.monotonic) -> None:
+                 seen_seconds: float = SEEN_SECONDS, clock: Callable[[], float] = time.monotonic,
+                 listener: JobListener | None = None) -> None:
         if unattended_runs is not None and unattended_runs < 1:
             raise ValueError("unattended_runs is positive (or None: never pause for it)")
         self._driver = driver
         self._unattended_runs = unattended_runs
         self._seen_seconds = seen_seconds
         self._clock = clock
+        self._listener = listener
         self._status: dict[_Key, JobStatus] = {}
         self._tasks: dict[_Key, asyncio.Task[None]] = {}
         self._signals: dict[_Key, StopSignal] = {}  # of the running (or last) job
@@ -169,11 +175,12 @@ class BackgroundRunner:
                 await self._driver.accept(scope, message)  # durable before anything is reported
             finally:
                 self._admit(scope.conversation_id, -1)
+            self._tell(lambda listener: listener.accepted(scope))
             if self._running_in(scope.conversation_id):  # cannot happen: accept holds the driver lock
                 raise ControlError(ControlErrorCode.BUSY, scope.conversation_id)
         # Closed meanwhile: the input stays recorded, unanswered; _start refuses.
         return self._start(scope, lambda s, stop, progress: self._driver.resume(s, stop=stop, progress=progress),
-                           "drive")
+                           "drive", None if message is None else message.origin)
 
     def _check_open(self, scope: TrustedScope) -> None:
         if scope.conversation_id in self._closed:
@@ -271,9 +278,17 @@ class BackgroundRunner:
         task = self._tasks.get(key)
         return task is not None and not task.done()
 
+    def _tell(self, call: Callable[[JobListener], None]) -> None:
+        if self._listener is None:
+            return
+        try:
+            call(self._listener)
+        except Exception:  # noqa: BLE001 — the event stream is not the job
+            log.exception("a job listener failed")
+
     def _start(self, scope: TrustedScope,
                job: Callable[[TrustedScope, StopSignal, TurnProgress], Awaitable[DriveResult]],
-               name: str) -> JobStatus:
+               name: str, origin: MessageOrigin | None = None) -> JobStatus:
         """Synchronous: nothing closes the Conversation between this check and the start."""
         self._check_open(scope)
         key = self._key(scope)
@@ -288,6 +303,7 @@ class BackgroundRunner:
         progress = _JobProgress(self, key, signal)
         self._tasks[key] = asyncio.create_task(self._run(key, scope, lambda s: job(s, signal, progress)),
                                                name=f"{name}:{scope.conversation_id}")
+        self._tell(lambda listener: listener.job_started(scope, origin, status))
         return status
 
     def _reported(self, key: _Key, signal: StopSignal, usage: TurnUsage) -> None:
@@ -296,6 +312,8 @@ class BackgroundRunner:
         self._status[key] = replace(self._status[key], turn_usage=usage)
         new_runs = usage.runs - self._runs.get(key, 0)
         self._runs[key] = usage.runs
+        if new_runs:
+            self._tell(lambda listener: listener.run_ended(TrustedScope(*key)))
         if self._unattended_runs is None:
             return
         seen = self._seen.get(key[1])
@@ -381,6 +399,8 @@ class BackgroundRunner:
                                         finished_at=datetime.now(UTC))
         finally:
             self._notify_live(key)  # a reader of the live output learns the job ended
+            status = self._status[key]
+            self._tell(lambda listener: listener.job_ended(scope, status))
 
     def status(self, scope: TrustedScope) -> JobStatus:
         return self._status.get(self._key(scope), JobStatus(running=False))

@@ -7,9 +7,10 @@ import re
 import unicodedata
 from collections.abc import Iterable, Sequence
 
-from himari.common import ContentBlock, TextBlock, thaw, tool_id_problem
+from himari.common import ContentBlock, TextBlock, split_marks, thaw, tool_id_problem
 from himari.data.api import (
     MAX_APP_PAYLOAD_BYTES,
+    MAX_DEVICE_NAME_CHARS,
     MAX_EFFORT_CHARS,
     MAX_EXTERNAL_SETTINGS,
     MAX_INSTRUCTIONS_CHARS,
@@ -24,6 +25,7 @@ from himari.data.api import (
     MAX_WORKSPACE_LOCATION_BYTES,
     MAX_WORKSPACE_NOTE_CHARS,
     PREVIEW_CHARS,
+    RESERVED_DEVICE_NAMES,
     AppView,
     AssistantFinal,
     DataError,
@@ -35,7 +37,9 @@ from himari.data.api import (
     MemoryCategory,
     MemoryChange,
     MemoryChangeKind,
+    MessageOrigin,
     ModelSetting,
+    OriginKind,
     ToolCompletion,
     ToolExecutionStatus,
     UiResource,
@@ -130,6 +134,39 @@ def check_memory_text(text: object) -> str:
     return text
 
 
+def check_device_name(name: object) -> str:
+    """V3-P83 §4.2: a device's name as stored, or why not. One line, so the
+    model and the Web show it as given."""
+    if not isinstance(name, str):
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, "a device name is text")
+    name = unicodedata.normalize("NFC", name).strip()
+    if any(unicodedata.category(c) in ("Cc", "Cs", "Zl", "Zp") for c in name):
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, "a device name may not contain control characters")
+    if not name:
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, "a device needs a name")
+    if len(name) > MAX_DEVICE_NAME_CHARS:
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, f"a device name is at most {MAX_DEVICE_NAME_CHARS} characters")
+    if name.casefold() in RESERVED_DEVICE_NAMES:
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, f"{name!r} is reserved")
+    return name
+
+
+def check_device_name_free(name: str, others: Iterable[str]) -> None:
+    """Names are unique among a principal's devices that are not revoked, case ignored."""
+    if any(other.casefold() == name.casefold() for other in others):
+        raise DataError(DataErrorCode.DUPLICATE_IDENTITY, "another device has that name")
+
+
+def check_origin(origin: object) -> None:
+    """V3-P83 §4.2: a device origin names its device; the others name none."""
+    if origin is None:
+        return
+    if not isinstance(origin, MessageOrigin) or not isinstance(origin.kind, OriginKind):
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, "not a message origin")
+    if (origin.kind is OriginKind.DEVICE) != isinstance(origin.device_id, str) or origin.device_id == "":
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, "a device origin names its device, and only it")
+
+
 def check_workspace_location(location: object) -> str:
     """V3-P74 §10.1: an absolute, normalized path (no ``.``/``..``/empty
     component, no trailing ``/`` but for the root itself), as the
@@ -216,10 +253,12 @@ def fold(text: str) -> str:
 
 def event_text(payload: object) -> str | None:
     """V3-P72 §3.3: the searchable text of an Event's payload — a user
-    message's or final answer's text blocks, joined by newlines — or None."""
+    message's or final answer's text blocks, joined by newlines — or None.
+    An answer's mood marks are not part of it (V3-P83 §7.2)."""
     if not isinstance(payload, (UserMessage, AssistantFinal)):
         return None
-    return "\n".join(b.text for b in payload.blocks if isinstance(b, TextBlock))
+    text = "\n".join(b.text for b in payload.blocks if isinstance(b, TextBlock))
+    return split_marks(text, complete=True)[0] if isinstance(payload, AssistantFinal) else text
 
 
 def search_words(words: object) -> tuple[str, ...]:

@@ -41,6 +41,7 @@ is never served from this origin.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import posixpath
@@ -49,8 +50,9 @@ import secrets
 import threading
 import time
 from urllib.parse import quote
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator, Mapping
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from importlib import resources
 from typing import Annotated, Any, BinaryIO, Literal
@@ -76,6 +78,8 @@ from himari.bootstrap.application import (
     ModelRefused,
     ModelView,
     PromptRefused,
+    SCREEN_MAX_BYTES,
+    ScreenRefused,
     PromptView,
     ToolSourceView,
     UnknownToolSource,
@@ -87,11 +91,14 @@ from himari.bootstrap.application import (
     ReferenceRequest,
 )
 from himari.bootstrap.changes import ChangeConflict, ChangeDiff, ChangesView
+from himari.bootstrap.companion import origin_view
 from himari.bootstrap.explorer import PDF_APPEND_MAX_BYTES, ExplorerRefused, Listing, ShownFile
 from himari.bootstrap.operator import OPERATOR, derive_cli_bearer, verify_operator_token
 from himari.bootstrap.mcp_defaults import McpDefaultsConflict
+from himari.presence.api import PairingRefused, TooManyStreams, is_device_token
 from himari.common import (
     ASK_USER_TOOL_ID,
+    MOODS,
     AttachmentRef,
     FileReference,
     CallId,
@@ -103,10 +110,12 @@ from himari.common import (
     RunId,
     TextBlock,
     TrustedScope,
+    split_marks,
     thaw,
 )
 from himari.control.api import ContextStatus, ControlError, ControlErrorCode, JobStatus, TurnUsage
 from himari.data.api import (
+    ALREADY_SENT,
     MAX_ATTACHED_WORKSPACES,
     MAX_ATTACHMENTS,
     MAX_INSTRUCTIONS_CHARS,
@@ -125,15 +134,18 @@ from himari.data.api import (
     FileOrigin,
     FileRecord,
     ImageStatus,
+    Device,
     Instructions,
     Memory,
     MemoryCategory,
+    MessageOrigin,
+    OriginKind,
     RegisteredWorkspace,
     ToolResultRecord,
     UserMessage,
     view_state,
 )
-from himari.interfaces.web import live
+from himari.interfaces.web import event_stream, live
 from himari.interfaces.web.config import WebConfig
 from himari.sandbox.api import SandboxState
 from himari.interfaces.web.sandbox import SandboxGrant, SandboxSigner
@@ -187,6 +199,15 @@ class ApiError(Exception):
         self.status, self.code, self.message = status, code, message
 
 
+@dataclass(frozen=True)
+class Caller:
+    """An authenticated caller (V3-P83 §4.3): whose, from where, and the device if it is one."""
+
+    principal: PrincipalId
+    origin: MessageOrigin
+    device: Device | None = None
+
+
 # --- sessions ---------------------------------------------------------------------------
 
 
@@ -229,6 +250,18 @@ class LoginBody(_Body):
     token: str = Field(max_length=256)
 
 
+class DeviceNameBody(_Body):
+    name: str = Field(max_length=200)  # Data checks the 40-character limit after trimming
+
+
+class PresenceBody(_Body):
+    """V3-P83 §5: seconds since the last input anywhere on the device (cut to
+    30 days), and its IANA time zone (an unknown one is ignored)."""
+
+    idle_seconds: float = Field(ge=0, allow_inf_nan=False)
+    time_zone: str | None = Field(default=None, max_length=64)
+
+
 class CreateBody(_Body):
     title: str | None = Field(default=None, max_length=1000)
 
@@ -254,6 +287,7 @@ class MessageBody(_Body):
     text: str
     attachments: list[str] = Field(default_factory=list)  # staged uploads' file ids (V3-P66)
     references: list[ReferenceBody] = Field(default_factory=list, max_length=MAX_REFERENCES)  # V3-P76
+    screen: str | None = Field(default=None, max_length=200)  # a device's staged screen (V3-P84 §4.2)
 
 
 class ModelBody(_Body):
@@ -415,6 +449,21 @@ def _text(blocks: tuple[ContentBlock, ...]) -> str:
     return "\n\n".join(b.text for b in blocks if isinstance(b, TextBlock))
 
 
+def _question(arguments: Mapping[str, Any]) -> str:
+    """An ask_user call's question, as the model wrote it."""
+    asked = arguments.get("question")
+    return asked if isinstance(asked, str) else ""
+
+
+def display_view(text: str) -> dict[str, Any]:
+    """What the model wrote as it is shown (V3-P83 §7.2, appendix A.6): the
+    text without its marks, and each mark's place in it (code points) — moods,
+    and moves on the latest screen (V3-P84 §6.2)."""
+    plain, moods, moves, _ = split_marks(text, complete=True)
+    return {"text": plain, "moods": [{"at": at, "mood": mood} for at, mood in moods],
+            "moves": [{"at": at, "x": x, "y": y} for at, x, y in moves]}
+
+
 def image_view(record: FileRecord) -> dict[str, Any] | None:
     """V3-P67 §8: the original's judged type and size, and ``state`` (the
     ``view_state``): a preview exists only when it is ``ready``."""
@@ -436,8 +485,9 @@ def file_view(record: FileRecord) -> dict[str, Any]:
 
 def _attachment(ref: AttachmentRef, files: Files) -> dict[str, Any]:
     found = files.get((ref.file_id, ref.version))
-    return (file_view(found) if found is not None
+    view = (file_view(found) if found is not None
             else {"file_id": ref.file_id, "version": ref.version, "name": None, "expired": True, "image": None})
+    return {**view, "screen": True} if ref.screen else view  # V3-P84 §4.3
 
 
 _DOWNLOAD_SAFE = "!#$&+-.^_`|~"  # RFC 5987 attr-char besides letters and digits
@@ -500,17 +550,23 @@ def event_view(event: ConversationEvent, views: dict[CallRef, tuple[bool, bool]]
         view["answers_run"] = None if payload.answers_call is None else payload.answers_call.run_id
         view["attachments"] = [_attachment(b, files) for b in payload.blocks if isinstance(b, AttachmentRef)]
         view["references"] = [reference_view(b) for b in payload.blocks if isinstance(b, FileReference)]
+        # Where it was sent from (V3-P84 §7.8): an app tells its own message whose answer it lost.
+        view["origin"] = origin_view(payload.origin)
     elif isinstance(payload, AssistantFinal):
         view["text"] = _text(payload.blocks)
+        view["display"] = display_view(view["text"])
         view["model"] = models.get(event.origin_run_id) if event.origin_run_id else None
         view["run_id"] = event.origin_run_id  # the live output it replaces (V3-P73 §7.2)
     elif isinstance(payload, AssistantToolCalls):
         view["text"] = _text(payload.commentary)
+        view["display"] = display_view(view["text"])
         view["model"] = models.get(event.origin_run_id) if event.origin_run_id else None
         view["run_id"] = event.origin_run_id
         run = event.origin_run_id
         view["calls"] = [{"call_id": c.call_id, "tool_id": c.tool_id, "arguments": thaw(c.arguments),
-                          "app_view": run is not None and views.get(CallRef(run, c.call_id), (False, False))[0]}
+                          "app_view": run is not None and views.get(CallRef(run, c.call_id), (False, False))[0],
+                          **({"display": display_view(_question(c.arguments))} if c.tool_id == ASK_USER_TOOL_ID
+                             else {})}
                          for c in sorted(payload.calls, key=lambda c: c.ordinal)]
     elif isinstance(payload, ToolResultRecord):
         view["run_id"] = payload.call.run_id
@@ -565,6 +621,7 @@ def job_view(status: JobStatus) -> dict[str, Any]:
     return {
         "running": status.running,
         "generation": status.generation,
+        "job_id": status.job_id,  # V3-P84 §6.3: the same as the job events' and live's
         "state": None if result is None else result.state.value,
         "detail": detail,  # why it ended so (e.g. the size that was refused); plain text
         "unknown_calls": 0 if result is None else len(result.unknown_calls),
@@ -635,6 +692,50 @@ def memory_view(note: Memory, titles: dict[ConversationId, tuple[str | None, str
             "revision": note.revision, "created_at": _time(note.created_at), "updated_at": _time(note.updated_at)}
 
 
+def pairing_token(raw: bytes) -> str | None:
+    """The token in a pairing body, or None for any body but ``{"token": "<string>"}``
+    (appendix A.1). Deep nesting fails the parser with RecursionError, not
+    ValueError (review C4)."""
+    try:
+        body = json.loads(raw)
+    except (ValueError, RecursionError):
+        return None
+    token = body.get("token") if isinstance(body, dict) and set(body) == {"token"} else None
+    return token if isinstance(token, str) else None
+
+
+def device_view(device: Device, connected: bool = False, current: bool = False) -> dict[str, Any]:
+    """A device as the Web's Devices screen shows it (V3-P83 appendix A.1)."""
+    return {"device_id": device.device_id, "name": device.name, "paired": device.paired_at is not None,
+            "connected": connected, "current": current, "created_at": _time(device.created_at),
+            "paired_at": _time(device.paired_at), "last_seen_at": _time(device.last_seen_at),
+            "pairing_expires_at": None if device.paired_at is not None else _time(device.pairing_expires_at)}
+
+
+# How a refused device write answers (V3-P83 appendix A.1): status, code, message.
+DEVICE_REFUSALS: dict[DataErrorCode, tuple[int, str, str]] = {
+    DataErrorCode.NOT_FOUND: (404, "not_found", "No such device."),
+    DataErrorCode.DUPLICATE_IDENTITY: (409, "duplicate_name", "Another device has that name."),
+    DataErrorCode.INVALID_ARGUMENT: (422, "invalid_name",
+                                     "A device name is 1 to 40 characters on one line, and not “web” or “cli”."),
+    DataErrorCode.LIMIT_EXCEEDED: (422, "too_many_devices", "Revoke a device before adding another."),
+}
+
+# How a refused pairing answers (appendix A.1).
+PAIRING_STATUS = {"pairing_invalid": 401, "pairing_expired": 401, "pairing_used": 409, "invalid_token": 400,
+                  "token_in_use": 409, "pairing_busy": 429}
+PAIR_PATH = "/api/devices/pair"
+PAIR_BODY_BYTES = 1024  # {"token": "hd_…"} is about 60 bytes; the one route without a sign-in reads no more (review C4)
+PAIRING_MESSAGES = {
+    "pairing_invalid": "That code is not valid. Make a new one in Settings → Devices if it keeps failing.",
+    "pairing_expired": "That code has ended. Make a new one in Settings → Devices.",
+    "pairing_used": "That code already paired another device.",
+    "invalid_token": "The device's token is not usable.",
+    "token_in_use": "Another device has that token; make a new token and pair again.",
+    "pairing_busy": "Too many pairings are waiting; try again shortly.",
+}
+
+
 # How a refused write of a note answers (V3-P71 §7.2): status, code, message.
 MEMORY_REFUSALS: dict[DataErrorCode, tuple[int, str, str]] = {
     DataErrorCode.NOT_FOUND: (404, "not_found", "No such note."),
@@ -691,7 +792,8 @@ FILE_REFUSALS: dict[DataErrorCode, tuple[int, str, str]] = {
 }
 UPLOAD_PATH = re.compile(r"^/api/conversations/[^/]+/uploads$")
 SAVE_BODY_BYTES = 3 * 1024 * 1024  # a saved file of 1 MiB as JSON, escapes included (V3-P75 §7.7)
-SURFACE_PATHS = ("/files", "/trash", "/settings/instructions", "/settings/memory", "/settings/folders")  # V3-P79 §3.1
+SURFACE_PATHS = ("/files", "/trash", "/settings/instructions", "/settings/memory", "/settings/folders",
+                 "/settings/devices")  # V3-P79 §3.1, V3-P83
 PAGE_ID = re.compile(r"[A-Za-z0-9_-]{1,128}")  # a conversation's id in /c/<id>
 SAVE_ROUTES = {("PUT", "/api/machine/file"), ("POST", "/api/machine/file/install")}  # V3-P78 §4.2: the same text
 PDF_APPEND_PATH = "/api/machine/pdf/append"
@@ -864,6 +966,8 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
     signer = SandboxSigner() if signer is None else signer
     closing = asyncio.Event()  # set as the server begins to shut down: the live streams end
     live_slots = live.Slots()  # open live streams of each principal
+    # V3-P83 §8.1: the live streams each device opened, ended when it is revoked.
+    device_lives: dict[tuple[PrincipalId, str], set[asyncio.Event]] = {}
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -884,15 +988,34 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
         application: Application = request.app.state.himari
         return application
 
-    def principal(request: Request) -> PrincipalId:
+    async def caller(request: Request) -> Caller:
+        """Who calls, and as which origin (V3-P83 §4.2): the Web session, the
+        CLI's operator bearer, or a paired device's token (``hd_…``, checked
+        only as one). Only the routes a device may use depend on this."""
         found = sessions.principal(request.cookies.get(SESSION_COOKIE))
         if found is not None:
-            return found
+            return Caller(found, MessageOrigin(OriginKind.WEB))
         authorization = request.headers.get("authorization", "")
         scheme, _, token = authorization.partition(" ")
-        if scheme.lower() == "bearer" and verify_operator_token(token.strip(), request.app.state.bearer):
-            return OPERATOR
+        token = token.strip()
+        if scheme.lower() == "bearer" and is_device_token(token):
+            application = himari(request)
+            if not application.companion_enabled:
+                raise ApiError(403, "companion_off", "Devices are turned off on this server.")
+            device = await application.devices.authenticate(token)
+            if device is None:
+                raise ApiError(401, "unauthenticated", "This device is not paired; pair it again.")
+            return Caller(device.principal, MessageOrigin(OriginKind.DEVICE, device.device.device_id), device.device)
+        if scheme.lower() == "bearer" and verify_operator_token(token, request.app.state.bearer):
+            return Caller(OPERATOR, MessageOrigin(OriginKind.CLI))
         raise ApiError(401, "unauthenticated", "Sign in first.")
+
+    async def principal(request: Request) -> PrincipalId:
+        """Every other route (V3-P83 §4.3): a device is refused by default."""
+        who = await caller(request)
+        if who.device is not None:
+            raise ApiError(403, "device_scope", "A device may not use this.")
+        return who.principal
 
     def scope_of(conversation_id: str, who: PrincipalId) -> TrustedScope:
         return TrustedScope(who, ConversationId(conversation_id))
@@ -941,6 +1064,11 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
     async def files_unavailable(request: Request, error: FilesUnavailable) -> JSONResponse:
         return JSONResponse({"error": {"code": "files_unavailable",
                                        "message": "Files cannot be attached in this conversation."}}, status_code=409)
+
+    @app.exception_handler(ScreenRefused)
+    async def not_a_screen(request: Request, error: ScreenRefused) -> JSONResponse:
+        return JSONResponse({"error": {"code": "not_a_screen", "message": "A screen is a PNG or JPEG image."}},
+                            status_code=400)
 
     @app.exception_handler(FileNameRefused)
     async def bad_name(request: Request, error: FileNameRefused) -> JSONResponse:
@@ -1327,9 +1455,12 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
         })
 
     @app.get("/api/conversations")
-    async def list_conversations(request: Request, who: PrincipalId = Depends(principal),
+    async def list_conversations(request: Request, by: Caller = Depends(caller),
                                  limit: int = 50, offset: int = 0, trashed: bool = False) -> dict[str, Any]:
-        """``trashed``: the trash instead, most recently trashed first."""
+        """``trashed``: the trash instead, most recently trashed first (not for a device)."""
+        who = by.principal
+        if trashed and by.device is not None:
+            raise ApiError(403, "device_scope", "A device may not see the trash.")
         if not 1 <= limit <= MAX_LIST_LIMIT or offset < 0:
             raise ApiError(400, "invalid_argument", f"limit must be 1..{MAX_LIST_LIMIT}, offset >= 0")
         application = himari(request)
@@ -1338,17 +1469,17 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
                 "next_offset": offset + limit if len(page) == limit else None}  # may lead to an empty page
 
     @app.get("/api/conversations/activity")  # before /api/conversations/{conversation_id}, which would take it
-    async def conversation_activity(request: Request, who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+    async def conversation_activity(request: Request, by: Caller = Depends(caller)) -> dict[str, Any]:
         """V3-P80 §3.2: which Conversations work now and which wait for an answer. Not a read of any one of
         them: it never counts as the user being there (``seen``, V3-P62 §5)."""
-        application = himari(request)
+        application, who = himari(request), by.principal
         return {"working": sorted(application.runner.running(who)),
                 "waiting": sorted(await application.data.list_waiting_conversations(who))}
 
     @app.post("/api/conversations", status_code=201)
     async def create_conversation(body: CreateBody, request: Request,
-                                  who: PrincipalId = Depends(principal)) -> dict[str, Any]:
-        application = himari(request)
+                                  by: Caller = Depends(caller)) -> dict[str, Any]:
+        application, who = himari(request), by.principal
         cid = await application.create_conversation(who, title=body.title)
         return summary_view(await application.data.read_conversation(scope_of(cid, who)))
 
@@ -1360,8 +1491,8 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
         if waiting is not None:
             for record in await application.data.read_tool_executions(scope, waiting.run_id):
                 if record.call == waiting and record.tool_id == ASK_USER_TOOL_ID:
-                    asked = record.arguments.get("question")
-                    question = {"call_id": waiting.call_id, "question": asked if isinstance(asked, str) else ""}
+                    asked = _question(record.arguments)
+                    question = {"call_id": waiting.call_id, "question": asked, "display": display_view(asked)}
         job = application.runner.status(scope)
         # An accepted input (or finished Tool results) with no assistant
         # output after it — e.g. the server stopped before the job ran.
@@ -1374,8 +1505,8 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
 
     @app.get("/api/conversations/{conversation_id}")
     async def read_conversation(conversation_id: str, request: Request,
-                                who: PrincipalId = Depends(principal)) -> dict[str, Any]:
-        return await _detail(himari(request), scope_of(conversation_id, who))
+                                by: Caller = Depends(caller)) -> dict[str, Any]:
+        return await _detail(himari(request), scope_of(conversation_id, by.principal))
 
     @app.patch("/api/conversations/{conversation_id}")
     async def rename_conversation(conversation_id: str, body: RenameBody, request: Request,
@@ -1423,8 +1554,9 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
             raise ApiError(409, "not_in_trash", "Move the conversation to the trash first.") from None
 
     @app.get("/api/conversations/{conversation_id}/events")
-    async def read_events(conversation_id: str, request: Request, who: PrincipalId = Depends(principal),
+    async def read_events(conversation_id: str, request: Request, by: Caller = Depends(caller),
                           after: int = 0, limit: int = 200) -> dict[str, Any]:
+        who = by.principal
         if after < 0 or not 1 <= limit <= MAX_EVENTS_PAGE:
             raise ApiError(400, "invalid_argument", f"after >= 0 and limit 1..{MAX_EVENTS_PAGE}")
         application, scope = himari(request), scope_of(conversation_id, who)
@@ -1452,14 +1584,31 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
 
     @app.get("/api/conversations/{conversation_id}/live")
     async def read_live(conversation_id: str, request: Request,
-                        who: PrincipalId = Depends(principal)) -> StreamingResponse:
+                        by: Caller = Depends(caller)) -> StreamingResponse:
         """What the running job's model is writing, as it writes (V3-P73 §6.1)."""
+        who = by.principal
         application, scope = himari(request), scope_of(conversation_id, who)
         await application.data.read_conversation(scope)  # authorizes first: another's is 404
         release = live_slots.take(who)  # checked and taken in one step (PR #83 review B1)
         if release is None:
             raise ApiError(429, "too_many_streams", "Too many live views are open; close one and try again.")
-        return _LiveResponse(live.stream(application.runner, scope, closing), release,
+        if by.device is None:
+            return _LiveResponse(live.stream(application.runner, scope, closing), release,
+                                 media_type="text/event-stream", headers={"X-Accel-Buffering": "no"})
+        # V3-P83 §8.3: a device's open live stream is a connected client (seen); §8.1: revoking ends it.
+        key, ended = (who, by.device.device_id), asyncio.Event()
+        device_lives.setdefault(key, set()).add(ended)
+
+        def done() -> None:
+            release()
+            kept = device_lives.get(key)
+            if kept is not None:
+                kept.discard(ended)
+                if not kept:
+                    del device_lives[key]
+
+        return _LiveResponse(live.stream(application.runner, scope, closing, ended=ended,
+                                         awake=lambda: application.seen(scope)), done,
                              media_type="text/event-stream", headers={"X-Accel-Buffering": "no"})
 
     @app.get("/api/conversations/{conversation_id}/calls/{run_id}/{call_id}/app")
@@ -1660,28 +1809,45 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
 
     @app.post("/api/conversations/{conversation_id}/messages", status_code=202)
     async def send_message(conversation_id: str, body: MessageBody, request: Request,
-                           who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+                           by: Caller = Depends(caller)) -> dict[str, Any]:
+        who = by.principal
+        if by.device is not None and (body.attachments or body.references):  # V3-P83 §4.3: text and a screen
+            raise ApiError(403, "device_scope", "A device sends text and a screen only.")
+        if body.screen is not None and by.device is None:
+            raise ApiError(400, "invalid_argument", "Only a device sends a screen.")
         text = body.text.strip()
         if len(body.attachments) > MAX_ATTACHMENTS:
             raise ApiError(400, "too_many_attachments", f"A message carries at most {MAX_ATTACHMENTS} files.")
-        if (not text and not body.attachments and not body.references) or len(text) > MAX_MESSAGE_CHARS:
+        if ((not text and not body.attachments and not body.references and body.screen is None)
+                or len(text) > MAX_MESSAGE_CHARS):
             raise ApiError(400, "invalid_argument", f"A message is 1..{MAX_MESSAGE_CHARS} characters, or files.")
         application, scope = himari(request), scope_of(conversation_id, who)
+        if body.screen is not None:
+            try:
+                return job_view(await application.send(scope, text, origin=by.origin, screen=FileId(body.screen)))
+            except DataError as error:
+                if error.code is DataErrorCode.ATTACHMENT_REFUSED and error.reason == ALREADY_SENT:
+                    # §7.8: the earlier send of this screen was recorded; this one is not.
+                    raise ApiError(409, "screen_already_sent", "This screen was sent already.") from None
+                raise
         references = [ReferenceRequest(r.path, tuple(int(v) for v in r.identity), r.start, r.end, r.sha256)
                       for r in body.references]
-        return job_view(await application.send(scope, text, [FileId(f) for f in body.attachments], references))
+        return job_view(await application.send(scope, text, [FileId(f) for f in body.attachments], references,
+                                               origin=by.origin))
 
     # -- files (V3-P66 §9) ---------------------------------------------------------------------
 
     @app.post("/api/conversations/{conversation_id}/uploads", status_code=201)
     async def upload_file(conversation_id: str, request: Request, name: str = "",
-                          who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+                          by: Caller = Depends(caller)) -> dict[str, Any]:
         """The body is the file. Received as it streams, held to the file
         limit (not the general body limit); refused at once when its declared
-        length is over."""
-        application, scope = himari(request), scope_of(conversation_id, who)
+        length is over. A device uploads a screen only (V3-P84 §4.1): a PNG or
+        JPEG of at most SCREEN_MAX_BYTES, named by the server."""
+        application, scope = himari(request), scope_of(conversation_id, by.principal)
+        limit = application.file_max_bytes if by.device is None else min(SCREEN_MAX_BYTES, application.file_max_bytes)
         declared = request.headers.get("content-length", "")
-        if declared.isdigit() and int(declared) > application.file_max_bytes:
+        if declared.isdigit() and int(declared) > limit:
             raise ApiError(413, "file_too_large", "The file is larger than this server takes.")
 
         async def body() -> AsyncIterator[bytes]:
@@ -1690,7 +1856,10 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
                     yield chunk
 
         try:
-            record = await application.upload(scope, name, request.headers.get("content-type"), body())
+            if by.device is not None:
+                record = await application.upload_screen(scope, body())
+            else:
+                record = await application.upload(scope, name, request.headers.get("content-type"), body())
         except DataError as error:
             if error.code is DataErrorCode.BLOB_MISSING:  # swept while it stalled (§8.2)
                 raise ApiError(503, "upload_interrupted", "The upload was interrupted; upload it again.") from None
@@ -1735,30 +1904,30 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
         })
 
     @app.post("/api/conversations/{conversation_id}/resume", status_code=202)
-    async def resume(conversation_id: str, request: Request, who: PrincipalId = Depends(principal)) -> dict[str, Any]:
-        application, scope = himari(request), scope_of(conversation_id, who)
+    async def resume(conversation_id: str, request: Request, by: Caller = Depends(caller)) -> dict[str, Any]:
+        application, scope = himari(request), scope_of(conversation_id, by.principal)
         await application.data.read_conversation(scope)
         return job_view(await application.runner.submit(scope, None))
 
     @app.post("/api/conversations/{conversation_id}/pause", status_code=202)
-    async def pause(conversation_id: str, request: Request, who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+    async def pause(conversation_id: str, request: Request, by: Caller = Depends(caller)) -> dict[str, Any]:
         """Stop the running job at the next safe boundary (V3-P55); nothing if idle."""
-        application, scope = himari(request), scope_of(conversation_id, who)
+        application, scope = himari(request), scope_of(conversation_id, by.principal)
         await application.data.read_conversation(scope)
         return job_view(application.runner.request_pause(scope))
 
     @app.post("/api/conversations/{conversation_id}/cancel", status_code=202)
-    async def cancel(conversation_id: str, request: Request, who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+    async def cancel(conversation_id: str, request: Request, by: Caller = Depends(caller)) -> dict[str, Any]:
         """Stop the running job now (V3-P55); nothing if idle."""
-        application, scope = himari(request), scope_of(conversation_id, who)
+        application, scope = himari(request), scope_of(conversation_id, by.principal)
         await application.data.read_conversation(scope)
         return job_view(application.runner.cancel(scope))
 
     @app.post("/api/conversations/{conversation_id}/dismiss", status_code=202)
-    async def dismiss(conversation_id: str, request: Request, who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+    async def dismiss(conversation_id: str, request: Request, by: Caller = Depends(caller)) -> dict[str, Any]:
         """Close what was left waiting — a question, or never-started steps
         of a paused or interrupted turn (V3-P55). Busy while a job runs."""
-        application, scope = himari(request), scope_of(conversation_id, who)
+        application, scope = himari(request), scope_of(conversation_id, by.principal)
         await application.data.read_conversation(scope)
         return job_view(await application.runner.submit_cancel(scope))
 
@@ -1768,6 +1937,115 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
         application, scope = himari(request), scope_of(conversation_id, who)
         await application.data.read_conversation(scope)
         return job_view(await application.runner.submit_compaction(scope))
+
+    # -- devices (V3-P83 §4) -------------------------------------------------------------------
+
+    def device_refused(error: DataError) -> ApiError:
+        if error.code not in DEVICE_REFUSALS:
+            raise error
+        status, code, message = DEVICE_REFUSALS[error.code]
+        return ApiError(status, code, message)
+
+    def companion_on(application: Application) -> None:
+        if not application.companion_enabled:
+            raise ApiError(403, "companion_off", "Devices are turned off on this server.")
+
+    @app.get("/api/devices")
+    async def list_devices(request: Request, who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+        application = himari(request)
+        states, current = application.hub.states(who), application.hub.current(who)
+        return {"items": [device_view(d, d.device_id in states and states[d.device_id].connected,
+                                      d.device_id == current) for d in await application.devices.list(who)],
+                "enabled": application.companion_enabled}
+
+    @app.post("/api/devices", status_code=201)
+    async def add_device(body: DeviceNameBody, request: Request, who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+        """A new device and its pairing code, shown once (§4.1)."""
+        application = himari(request)
+        companion_on(application)
+        try:
+            made = await application.devices.create(who, body.name)
+        except DataError as error:
+            raise device_refused(error) from None
+        return {**device_view(made.device), "code": made.code, "expires_at": _time(made.expires_at)}
+
+    @app.patch("/api/devices/{device_id}")
+    async def rename_device(device_id: str, body: DeviceNameBody, request: Request,
+                            who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+        try:
+            return device_view(await himari(request).devices.rename(who, device_id, body.name))
+        except DataError as error:
+            raise device_refused(error) from None
+
+    @app.delete("/api/devices/{device_id}", status_code=204)
+    async def revoke_device(device_id: str, request: Request, who: PrincipalId = Depends(principal)) -> None:
+        application = himari(request)
+        try:
+            await application.devices.revoke(who, device_id)
+        except DataError as error:
+            raise device_refused(error) from None
+        application.hub.revoked(who, device_id)  # its event streams end with "revoked" (§8.1)
+        for ended in device_lives.get((who, device_id), ()):
+            ended.set()  # and its live streams end
+
+    @app.post(PAIR_PATH)
+    async def pair_device(request: Request) -> dict[str, Any]:
+        """The one route without a sign-in (§4.3): the code in ``Authorization:
+        Pairing <code>`` is its permission, and the device's own token is
+        registered by its hash. Any body but ``{"token": "<string>"}`` is
+        ``invalid_token`` (appendix A.1), not a generic validation error."""
+        application = himari(request)
+        companion_on(application)
+        token = pairing_token(await request.body())
+        if token is None:
+            raise ApiError(400, "invalid_token", PAIRING_MESSAGES["invalid_token"])
+        scheme, _, code = request.headers.get("authorization", "").partition(" ")
+        if scheme.lower() != "pairing" or not code.strip():
+            raise ApiError(401, "pairing_invalid", PAIRING_MESSAGES["pairing_invalid"])
+        try:
+            paired = await application.devices.pair(code.strip(), token)
+        except PairingRefused as refused:
+            raise ApiError(PAIRING_STATUS[refused.code], refused.code, PAIRING_MESSAGES[refused.code]) from None
+        return {"device_id": paired.device.device_id, "name": paired.device.name}
+
+    @app.get("/api/device")
+    async def read_device(request: Request, by: Caller = Depends(caller)) -> dict[str, Any]:
+        """What a device needs to start (appendix A.2); ``device`` is null for the Web."""
+        return {**await device_state(himari(request), by), "limits": {"message_chars": MAX_MESSAGE_CHARS}}
+
+    async def device_state(application: Application, by: Caller) -> dict[str, Any]:
+        """What ``GET /api/device`` and ``hello`` both say (appendix A.2, A.3)."""
+        recent = await application.data.most_recent_user_conversation(by.principal)
+        return {"device": None if by.device is None else {"device_id": by.device.device_id, "name": by.device.name},
+                "moods": list(MOODS), "current_device": application.hub.current(by.principal),
+                "recent_conversation": None if recent is None else {"id": recent.conversation_id,
+                                                                    "title": recent.title}}
+
+    @app.post("/api/device/presence", status_code=204)
+    async def device_presence(body: PresenceBody, request: Request, by: Caller = Depends(caller)) -> None:
+        """A device's input activity (§5)."""
+        if by.device is None:
+            raise ApiError(403, "not_a_device", "Only a device sends its activity.")
+        himari(request).hub.signal(by.principal, by.device.device_id, body.idle_seconds, body.time_zone)
+
+    @app.get("/api/events")
+    async def read_events_stream(request: Request, by: Caller = Depends(caller)) -> StreamingResponse:
+        """The principal's event stream (§8.1, appendix A.3), for the devices and the Web."""
+        application = himari(request)
+        try:
+            subscription = application.hub.subscribe(by.principal, None if by.device is None else by.device.device_id)
+        except TooManyStreams:
+            raise ApiError(429, "too_many_streams", "Too many event streams are open; close one and try again.") \
+                from None
+        try:
+            assert application.events is not None
+            hello = {**await device_state(application, by), "activity": await application.events.activity(by.principal)}
+        except BaseException:
+            application.hub.unsubscribe(subscription)
+            raise
+        return _LiveResponse(event_stream.stream(subscription, hello, closing),
+                             lambda: application.hub.unsubscribe(subscription),
+                             media_type="text/event-stream", headers={"X-Accel-Buffering": "no"})
 
     # -- static UI ----------------------------------------------------------------------------
 
@@ -1798,7 +2076,8 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
     # Outer → inner: headers, Host, Origin, body size, routes.
     app.add_middleware(BodyLimitMiddleware, exempt=lambda method, path: method == "POST" and bool(UPLOAD_PATH.match(path)),
                        larger=lambda method, path: SAVE_BODY_BYTES if (method, path) in SAVE_ROUTES
-                       else PDF_APPEND_MAX_BYTES if method == "POST" and path == PDF_APPEND_PATH else None)
+                       else PDF_APPEND_MAX_BYTES if method == "POST" and path == PDF_APPEND_PATH
+                       else PAIR_BODY_BYTES if method == "POST" and path == PAIR_PATH else None)
     app.add_middleware(OriginGuardMiddleware, allowed_origins=config.allowed_origins)
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=sorted(config.allowed_hosts))
     app.add_middleware(SecurityHeadersMiddleware, csp=page_csp(config.sandbox_origins))

@@ -1114,7 +1114,7 @@ def run_memory(base: str, token: str, shots: str | None, root: str, provider: Sc
 
 
 SCENARIOS = ("main", "compaction", "budget", "trash", "files", "images", "work", "instructions", "memory",
-             "streaming", "drafts", "addresses", "activity", "polish")
+             "streaming", "drafts", "addresses", "activity", "polish", "devices")
 
 
 def run_drafts(base: str, token: str, shots: str | None) -> list[str]:
@@ -1254,8 +1254,9 @@ def activity_script() -> GatedAdapter:
 
 
 def run_activity(base: str, token: str, shots: str | None, provider: GatedAdapter) -> list[str]:
-    """V3-P80: other conversations at work or waiting, on the list and in the tab's title; one started in
-    another tab appears; pasting files, text with a file, and text too long for a message."""
+    """V3-P80: other conversations at work or waiting, on the list and in the tab's title, drawn from the event
+    stream (V3-P83 §8.1), which a hidden tab closes; one started in another tab appears; pasting files, text
+    with a file, and text too long for a message."""
     errors: list[str] = []
     with sync_playwright() as p:
         browser = p.chromium.launch()
@@ -1265,10 +1266,29 @@ def run_activity(base: str, token: str, shots: str | None, provider: GatedAdapte
         page.on("pageerror", lambda e: errors.append(str(e)))
         row = lambda cid: page.locator(f'#conversation-list .conv-row[data-id="{cid}"]')  # noqa: E731
 
+        # V3-P83 §8.1: the event stream draws the activity; a hidden tab closes it, a shown one opens it again.
+        streams: list[Any] = []
+        ended: list[Any] = []
+        reads: list[str] = []
+        page.on("request", lambda r: streams.append(r) if r.url.endswith("/api/events")
+                else reads.append(r.url) if r.url.endswith("/api/conversations/activity") else None)
+        page.on("requestfailed", lambda r: ended.append(r) if r.url.endswith("/api/events") else None)
+        page.on("requestfinished", lambda r: ended.append(r) if r.url.endswith("/api/events") else None)
         page.goto(base)
         page.fill("#login-token", token)
         page.click("#login-submit")
         new_chat(page)
+        page.wait_for_timeout(6000)
+        assert len(streams) == 1 and not ended, (streams, ended)
+        assert len(reads) <= 1, f"no 5 s reading while the stream is open: {reads}"
+        visible = """state => { Object.defineProperty(document, 'visibilityState', {configurable: true,
+            get: () => state}); document.dispatchEvent(new Event('visibilitychange')); }"""
+        page.evaluate(visible, "hidden")
+        page.wait_for_timeout(500)
+        assert len(ended) == 1, "a hidden tab holds no event stream"
+        page.evaluate(visible, "visible")
+        page.wait_for_timeout(500)
+        assert len(streams) == 2, "shown again, it opens a new one"
         a = page.locator(".conv-row.is-selected").get_attribute("data-id")
         page.fill("#composer-text", "work on A")
         page.press("#composer-text", "Enter")
@@ -1453,6 +1473,7 @@ def run_polish(base: str, token: str, shots: str | None) -> list[str]:
 
 
 CODE_ANSWER = "Here it is:\n\n```python\nprint('hi')\n```\n\nAnd **done**."
+MOOD_MARK = "[[mood:happy]]"  # V3-P83 §7.2: the model writes it first; the page shows and copies the text without it
 
 
 def run_addresses(base: str, token: str, shots: str | None) -> list[str]:
@@ -1483,6 +1504,7 @@ def run_addresses(base: str, token: str, shots: str | None) -> list[str]:
         page.press("#composer-text", "Enter")
         answer = page.locator(".item-assistant").last
         expect(answer).to_contain_text("done", timeout=10000)
+        assert "[[mood" not in answer.inner_text(), "the mood mark is not shown"
         expect(page).to_have_title(re.compile(r".+ · HIMARI$"))
 
         # Copy: the code alone from its block, the Markdown as written from the answer (§5).
@@ -1641,6 +1663,85 @@ def run_streaming(base: str, token: str, shots: str | None) -> list[str]:
     return errors
 
 
+def http(base: str, method: str, path: str, headers: dict[str, str], body: dict[str, Any] | None = None
+         ) -> tuple[int, dict[str, Any]]:
+    """What a native device app sends: no cookie, no Origin (V3-P83 §4.1)."""
+    import json
+    import urllib.error
+    import urllib.request
+
+    data = None if body is None else json.dumps(body).encode()
+    request = urllib.request.Request(base + path, data=data, method=method,
+                                     headers={**headers, **({"content-type": "application/json"} if data else {})})
+    try:
+        with urllib.request.urlopen(request) as response:
+            return response.status, json.loads(response.read() or b"{}")
+    except urllib.error.HTTPError as error:
+        return error.code, json.loads(error.read() or b"{}")
+
+
+def run_devices(base: str, token: str, shots: str | None) -> list[str]:
+    """V3-P83 §4.1: add a device, read its code once, pair it as an app would, rename and revoke it."""
+    import base64
+    import secrets
+
+    errors: list[str] = []
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page(viewport={"width": 1280, "height": 860}, locale="en-US")
+        page.on("console", lambda m: errors.append(m.text) if m.type == "error" else None)
+        page.on("pageerror", lambda e: errors.append(str(e)))
+        page.goto(base)
+        page.fill("#login-token", token)
+        page.click("#login-submit")
+        expect(page.locator("#surface-home")).to_be_visible()
+        page.click("#nav-appearance")
+        page.click("#nav-devices")
+        expect(page.locator("#surface-devices h1")).to_have_text("Devices")
+        assert page.url.endswith("/settings/devices"), page.url
+        expect(page.locator("#devices-empty")).to_be_visible()
+        page.fill("#devices-add-name", "Desk")
+        page.click("#devices-add button[type=submit]")
+        expect(page.locator("#devices-code")).to_be_visible()
+        expect(page.locator("#devices-code-name")).to_have_text("Desk")
+        code = page.locator("#devices-code-value").inner_text()
+        assert re.fullmatch(r"[A-HJ-NP-Z2-9]{4}-[A-HJ-NP-Z2-9]{4}", code), code
+        rows = page.locator("#devices-list > li")
+        expect(rows).to_have_count(1)
+        expect(rows.first).to_contain_text("Waiting for its code until")
+        if shots:
+            page.screenshot(path=os.path.join(shots, "30-devices-code.png"))
+
+        device_token = "hd_" + base64.urlsafe_b64encode(secrets.token_bytes(32)).decode().rstrip("=")
+        status, paired = http(base, "POST", "/api/devices/pair", {"authorization": f"Pairing {code}"},
+                              {"token": device_token})
+        assert (status, paired) == (200, {"device_id": "d1", "name": "Desk"}), (status, paired)
+        status, started = http(base, "GET", "/api/device", {"authorization": f"Bearer {device_token}"})
+        assert status == 200 and started["device"]["name"] == "Desk", (status, started)
+
+        page.reload()  # the code is shown once: gone after a reload
+        expect(page.locator("#surface-devices")).to_be_visible()
+        expect(page.locator("#devices-code")).to_be_hidden()
+        expect(rows.first).to_contain_text("Last seen")
+        rows.first.get_by_role("button", name="Rename Desk").click()
+        rows.first.locator("input").fill("Big desk")
+        rows.first.locator("button[type=submit]").click()
+        expect(page.locator("#status-bar")).to_contain_text("Renamed", timeout=5000)
+        expect(rows.first).to_contain_text("Big desk")
+        rows.first.get_by_role("button", name="Revoke Big desk").click()
+        expect(page.locator("#confirm-title")).to_have_text("Revoke “Big desk”?")
+        page.click("#confirm-ok")
+        expect(page.locator("#status-bar")).to_contain_text("Revoked", timeout=5000)
+        expect(rows).to_have_count(0)
+        expect(page.locator("#devices-empty")).to_be_visible()
+        status, _ = http(base, "GET", "/api/device", {"authorization": f"Bearer {device_token}"})
+        assert status == 401, status
+        if shots:
+            page.screenshot(path=os.path.join(shots, "31-devices-empty.png"))
+        browser.close()
+    return errors
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--screenshots")
@@ -1770,7 +1871,7 @@ def main() -> int:
                 time.sleep(0.5)
         if "addresses" in only:
             addressed = os.path.join(tmp, "addresses")
-            server = serve(addressed, PORT + 11, ScriptedAdapter([NormalizedFinal((TextBlock(CODE_ANSWER),))]))
+            server = serve(addressed, PORT + 11, ScriptedAdapter([NormalizedFinal((TextBlock(MOOD_MARK + CODE_ANSWER),))]))
             try:
                 errors += run_addresses(f"http://127.0.0.1:{PORT + 11}",
                                         Path(addressed, "control", "operator.secret").read_text().strip(),
@@ -1786,6 +1887,15 @@ def main() -> int:
                 errors += run_activity(f"http://127.0.0.1:{PORT + 12}",
                                        Path(active, "control", "operator.secret").read_text().strip(),
                                        args.screenshots, provider)
+            finally:
+                server.should_exit = True
+                time.sleep(0.5)
+        if "devices" in only:
+            paired = os.path.join(tmp, "devices")
+            server = serve(paired, PORT + 14)
+            try:
+                errors += run_devices(f"http://127.0.0.1:{PORT + 14}",
+                                      Path(paired, "control", "operator.secret").read_text().strip(), args.screenshots)
             finally:
                 server.should_exit = True
                 time.sleep(0.5)

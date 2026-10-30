@@ -52,6 +52,7 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, BinaryIO
+from zoneinfo import available_timezones
 
 import httpx
 
@@ -77,6 +78,7 @@ from himari.control.api import ContextStatus, ControlError, ControlErrorCode, Jo
 from himari.control.driver import NO_PROGRESS_RUNS
 from himari.control.runner import SEEN_SECONDS, BackgroundRunner
 from himari.data.api import (
+    MessageOrigin,
     MAX_LIST_LIMIT,
     ConversationSummary,
     DEFAULT_FILE_MAX_BYTES,
@@ -109,6 +111,10 @@ from himari.data.api import (
     view_state,
 )
 from himari.data.sqlite import SqliteData, SqliteStore
+from himari.bootstrap.companion import CompanionEvents, CompanionPresence
+from himari.presence.api import Devices
+from himari.presence.devices import DeviceRegistry
+from himari.presence.hub import PresenceHub
 from himari.documents import TMP_BYTES, DocumentReader, Toolkit, ToolkitRefused, open_toolkit, worker_roots
 from himari.environment.inside import INSIDE, InsideEnvironment, InsideFiles
 from himari.imaging import ImageViews, runtime_roots
@@ -142,7 +148,10 @@ from himari.prompt.api import (
     ATTACHMENT_NOTE,
     FILE_REFERENCE_NOTE,
     DOCUMENTS_READ_NOTE,
+    COMPANION_NOTE,
+    SCREEN_NOTE,
     PROGRESS_NOTE,
+    TIME_NOTE,
     TOOL_IMAGES_NOTE,
     ContextBudget,
     SourceNote,
@@ -155,6 +164,7 @@ from himari.tool.schema import check_tool_input_schema
 
 DATABASE_NAME = "himari.db"
 DEFAULT_TRASH_DAYS = 30  # V3-P65 Q1 (the owner's choice, 2026-10-21)
+DEFAULT_TIME_ZONE = "Asia/Seoul"  # V3-P83 §6.4: HIMARI_TIME_ZONE when unset
 CLEANUP_SECONDS = 3600.0  # how often trash past its days is purged
 TRASH_STOP_SECONDS = 30.0  # how long a running job may take to stop before a trash is refused (§7.1)
 BUILT_IN_NAMESPACES = frozenset({"inside", "machine"})  # Tool ids that are HIMARI's own, not an external server's
@@ -262,6 +272,35 @@ class FilesUnavailable(RuntimeError):
 
 class FileNameRefused(ValueError):
     """V3-P66 §5.3: no name, or a name longer than MAX_RAW_NAME_BYTES."""
+
+
+class ScreenRefused(ValueError):
+    """V3-P84 §4.1–§4.2: a screen is a PNG or JPEG image (by its bytes)."""
+
+
+# V3-P84 §4.1: a device's upload is a screen, of these types, at most this large.
+SCREEN_TYPES = {"image/png": "png", "image/jpeg": "jpg"}
+SCREEN_MAX_BYTES = 8 * 1024 * 1024
+_SCREEN_HEAD = 16  # PNG's signature and IHDR; JPEG's start of image
+
+
+async def _screen_body(chunks: AsyncIterator[bytes]) -> AsyncIterator[bytes]:
+    """The body again, once its first bytes look like a PNG or a JPEG; refused
+    before anything is stored otherwise (PR #126 review C1)."""
+    head = b""
+    async for chunk in chunks:
+        head += chunk
+        if len(head) >= _SCREEN_HEAD:
+            break
+    if not (head.startswith(b"\x89PNG\r\n\x1a\n") and head[12:16] == b"IHDR") and not head.startswith(b"\xff\xd8\xff"):
+        raise ScreenRefused("not a PNG or JPEG image")
+    return _then(head, chunks)
+
+
+async def _then(head: bytes, chunks: AsyncIterator[bytes]) -> AsyncIterator[bytes]:
+    yield head
+    async for chunk in chunks:
+        yield chunk
 
 
 class WorkspaceRefused(ValueError):
@@ -648,6 +687,7 @@ class Application:
     memory_enabled: bool = False  # V3-P71 §9: the memory Tools and notes (HIMARI_MEMORY)
     conversation_search_enabled: bool = False  # V3-P72 §9 (HIMARI_CONVERSATION_SEARCH)
     streaming_enabled: bool = False  # V3-P73 §9 (HIMARI_STREAMING)
+    companion_enabled: bool = False  # V3-P83 §3 (HIMARI_COMPANION): pairing and device tokens
     # V3-P74: the machine Environment (its runner's socket was configured) and
     # the principals whose new Conversations use it instead of Inside (Q1).
     machine: MachineEnvironment | None = None
@@ -664,6 +704,15 @@ class Application:
     _lifecycle: dict[ConversationId, _Lifecycle] = field(default_factory=dict, repr=False)
     _cleanup: asyncio.Task[None] | None = field(default=None, repr=False)
     _mcp_defaults_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
+    # V3-P83 §5, §8.1: who is connected, the current device and the event stream (one per
+    # server), and the Runner's listener that publishes on it.
+    hub: PresenceHub = field(default_factory=PresenceHub, repr=False)
+    events: CompanionEvents | None = field(default=None, repr=False)
+    _ticking: asyncio.Task[None] | None = field(default=None, repr=False)
+    devices: Devices = field(init=False, repr=False)  # V3-P83 §4: pairing and device tokens
+
+    def __post_init__(self) -> None:
+        self.devices = DeviceRegistry(self.data)
 
     @classmethod
     async def open(
@@ -697,6 +746,8 @@ class Application:
         memory: bool = True,  # V3-P71 §9: HIMARI_MEMORY=0 turns it off (the notes stay)
         conversation_search: bool = True,  # V3-P72 §9: HIMARI_CONVERSATION_SEARCH=0 turns its Tools off
         streaming: bool = True,  # V3-P73 §9: HIMARI_STREAMING=0 asks no model for a stream
+        companion: bool = True,  # V3-P83 §3: HIMARI_COMPANION=0 refuses pairing and device tokens
+        time_zone: str = DEFAULT_TIME_ZONE,  # V3-P83 §6.4: HIMARI_TIME_ZONE, the zone the model is told the time in
         machine_socket: str | None = None,  # V3-P74: HIMARI_MACHINE_SOCKET; None: no machine Environment
         machine_principals: Iterable[str] = ("operator",),  # whose new Conversations use it (Q1)
     ) -> Application:
@@ -802,12 +853,15 @@ class Application:
                     log.warning("the machine runner does not answer yet (%s)", type(error).__name__)
             views = await _image_views(root, sandbox)
             base = DEFAULT_INSTRUCTIONS if instructions is None else instructions
+            zones = frozenset(available_timezones())
+            hub = PresenceHub(time_zones=zones.__contains__)  # a device's zone that is not known is ignored (§5)
             runtime = build_runtime(provider, store=store, environments=[inside, *([machine] if machine else [])],
                                     tools=[*tools, *mcp.handlers, *mcp.resource_tools],
                                     models=catalog,
                                     instructions=(*base, *((ATTACHMENT_NOTE,) if uploads_work else ()),
                                                   *((FILE_REFERENCE_NOTE,) if machine is not None else ()),
-                                                  TOOL_IMAGES_NOTE, PROGRESS_NOTE,
+                                                  TOOL_IMAGES_NOTE, PROGRESS_NOTE, TIME_NOTE,
+                                                  *((COMPANION_NOTE, SCREEN_NOTE) if companion else ()),
                                                   *_documents_notes(reader, toolkit, scripts == "on")),
                                     external_defaults=mcp.defaults,
                                     source_notes=[SourceNote(source, note.placement, note.text)
@@ -815,7 +869,10 @@ class Application:
                                     max_runs_per_drive=max_runs, turn_budget=turn_budget,
                                     no_progress_runs=turn.no_progress_runs, image_views=views,
                                     file_max_bytes=file_max_bytes, memory=memory,
-                                    conversation_search=conversation_search, streaming=streaming)
+                                    conversation_search=conversation_search, streaming=streaming,
+                                    time_zone=time_zone,
+                                    presence=CompanionPresence(DeviceRegistry(SqliteData(store)), hub, time_zone,
+                                                               enabled=companion))
         except BaseException:
             try:
                 if mcp is not None:
@@ -826,13 +883,18 @@ class Application:
                 store.close()
             raise
         assert isinstance(runtime.data, SqliteData)
-        runner = BackgroundRunner(runtime.driver, unattended_runs=unattended_runs, seen_seconds=turn.seen_seconds)
+        events = CompanionEvents(hub, runtime.data)
+        runner = BackgroundRunner(runtime.driver, unattended_runs=unattended_runs, seen_seconds=turn.seen_seconds,
+                                  listener=events)
         application = cls(root, store, runtime.data, runtime, runner, inside, state, model_id,
                           default_budget.limit_tokens, secret, mcp, turn, tuple(unverified), trash_days,
                           file_max_bytes, uploads_work, views, tuple(image_models), reader, toolkit,
                           memory_enabled=memory, conversation_search_enabled=conversation_search,
-                          streaming_enabled=streaming, machine=machine, changes=changes,
-                          machine_principals=frozenset(PrincipalId(p) for p in machine_principals))
+                          streaming_enabled=streaming, companion_enabled=companion, machine=machine,
+                          changes=changes,
+                          machine_principals=frozenset(PrincipalId(p) for p in machine_principals),
+                          hub=hub, events=events)
+        application._ticking = asyncio.create_task(hub.run(), name="presence-tick")
         if cleanup_seconds is not None:
             application._cleanup = asyncio.create_task(application._purge_periodically(cleanup_seconds),
                                                        name="trash-cleanup")
@@ -1482,23 +1544,57 @@ class Application:
             raise
         return workspace.workspace_id, workspace.cwd_relative
 
+    async def upload_screen(self, scope: TrustedScope, chunks: AsyncIterator[bytes]) -> FileRecord:
+        """V3-P84 §4.1: a device's screen, staged like an upload: a PNG or
+        JPEG by its bytes, at most SCREEN_MAX_BYTES, named here by when it
+        came. A body that does not start as one is refused before it is
+        stored (PR #126 review C1); one whose header cannot be read after is
+        left unreferenced, and the cleanup drops it."""
+        await self.data.read_conversation(scope)  # 404 for a foreign id, before any byte is read
+        if await self.data.count_staged(scope) >= MAX_STAGED_UPLOADS:
+            raise DataError(DataErrorCode.LIMIT_EXCEEDED, f"{MAX_STAGED_UPLOADS} uploads wait to be sent")
+        body = await _screen_body(chunks)
+        blob = await self.data.blobs.put(scope.principal_id, body, min(SCREEN_MAX_BYTES, self.file_max_bytes))
+        image = await self.data.blobs.prepare_image(scope.principal_id, blob, self.views)
+        extension = SCREEN_TYPES.get(image.image_type or "")
+        if extension is None:
+            raise ScreenRefused("not a PNG or JPEG image")
+        name = f"screen-{datetime.now(UTC):%Y%m%d-%H%M%S}.{extension}"
+        async with self._exclusive(scope.conversation_id):
+            return await self.data.stage_upload(scope, blob, name, image.image_type or "", image)
+
     async def send(self, scope: TrustedScope, text: str, attachments: Sequence[FileId] = (),
-                   references: Sequence[ReferenceRequest] = ()) -> JobStatus:
+                   references: Sequence[ReferenceRequest] = (), origin: MessageOrigin | None = None,
+                   screen: FileId | None = None) -> JobStatus:
         """A user message. With attachments (§5.1, under the lifecycle lock):
         1 the T1 checks as a read; 2 refused while a job runs; 3 the uploads
         placed in ``uploads/`` under the Workspace write lock (waited for at
         most PLACE_LOCK_SECONDS); 4 the message submitted, attaching them.
         ``references`` (V3-P76 §3): parts of files the user pointed at, each
         read again and checked by the explorer before anything is sent; a
-        stale one refuses the message (ExplorerRefused ``reference_stale``)."""
+        stale one refuses the message (ExplorerRefused ``reference_stale``).
+        ``origin``: where it was sent from (V3-P83 §4.2), kept on the message.
+        ``screen`` (V3-P84 §4.2): a staged PNG or JPEG upload, attached as the
+        user's screen and never placed in the Workspace (§4.4); attached once,
+        in the message's own transaction (T1)."""
         await self.data.read_conversation(scope)  # 404 before a job is started (or a file read) for a foreign id
+        if screen is not None:
+            async with self._exclusive(scope.conversation_id):
+                (record,) = await self.data.check_attachments(scope, [screen])
+                if record.image_type not in SCREEN_TYPES:
+                    raise ScreenRefused("not a PNG or JPEG image")
+                if self.runner.status(scope).running:
+                    raise ControlError(ControlErrorCode.BUSY, scope.conversation_id)
+                said = ((TextBlock(text),) if text else ()) + (AttachmentRef(record.file_id, 1, screen=True),)
+                return await self.runner.submit(scope, UserMessage(said, origin=origin))
         pointed: tuple[ContentBlock, ...] = ()
         if references:
             explorer = self.explorer(scope.principal_id)
             pointed = tuple([await explorer.reference(r.path, r.identity, r.start, r.end, r.sha256)
                              for r in references])
         if not attachments:
-            return await self.runner.submit(scope, UserMessage(((TextBlock(text),) if text else ()) + pointed))
+            return await self.runner.submit(scope, UserMessage(((TextBlock(text),) if text else ()) + pointed,
+                                                               origin=origin))
         async with self._exclusive(scope.conversation_id):
             records = await self.data.check_attachments(scope, attachments)
             if self.runner.status(scope).running:
@@ -1522,7 +1618,7 @@ class Application:
                 raise FilesUnavailable(scope.conversation_id) from None
             blocks = ((TextBlock(text),) if text else ()) + tuple(AttachmentRef(r.file_id, r.version) for r in records) \
                 + pointed
-            return await self.runner.submit(scope, UserMessage(blocks))
+            return await self.runner.submit(scope, UserMessage(blocks, origin=origin))
 
     async def _place(self, scope: TrustedScope, placer: _Placer, record: FileRecord, *, first: bool) -> None:
         """One upload into ``uploads/`` (§5.2), its path recorded before it is
@@ -1635,12 +1731,14 @@ class Application:
                 await self.mcp.release(scope.conversation_id)
             except Exception:  # noqa: BLE001 — the move stands; an idle process ends by itself
                 log.exception("could not end the MCP processes of %s", scope.conversation_id)
+            self._activity_changed(scope)
             return moved
 
     async def restore(self, scope: TrustedScope) -> None:
         async with self._exclusive(scope.conversation_id):
             await self.data.restore_conversation(scope)  # owner and state first
             self.runner.reopen(scope)
+            self._activity_changed(scope)
 
     async def purge(self, scope: TrustedScope) -> None:
         """§7.2: PURGING recorded (no restore from here on), the
@@ -1657,6 +1755,12 @@ class Application:
                 await asyncio.to_thread(self.changes.forget, scope.conversation_id)
             self.runner.forget(scope)
             self.runner.reopen(scope)
+            self._activity_changed(scope)
+
+    def _activity_changed(self, scope: TrustedScope) -> None:
+        """V3-P83 §2.2: a waiting conversation may have left or come back."""
+        if self.events is not None:
+            self.events.activity_changed(scope.principal_id)
 
     async def purge_due(self, now: datetime | None = None) -> int:
         """Purge what was trashed more than ``trash_days`` before ``now``,
@@ -1695,11 +1799,14 @@ class Application:
             await asyncio.sleep(seconds)
 
     async def close(self, grace_seconds: float = 30.0) -> None:
-        if self._cleanup is not None:
-            self._cleanup.cancel()
-            await asyncio.gather(self._cleanup, return_exceptions=True)  # its own cancellation, not ours
+        for task in (self._cleanup, self._ticking):
+            if task is not None:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)  # its own cancellation, not ours
         try:
             await self.runner.shutdown(grace_seconds)
+            if self.events is not None:
+                await self.events.aclose()
         finally:
             try:
                 await self.mcp.aclose()

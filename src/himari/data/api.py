@@ -72,11 +72,17 @@ class DataErrorCode(Enum):
     ATTACHMENT_REFUSED = "attachment_refused"  # an attachment a message may not carry (§4.2)
 
 
+# DataError.reason of an upload a message names once more (V3-P84 §4.2: a screen is attached once).
+ALREADY_SENT = "already sent"
+
+
 class DataError(Exception):
-    def __init__(self, code: DataErrorCode, message: str = "", *, file_id: FileId | None = None) -> None:
+    def __init__(self, code: DataErrorCode, message: str = "", *, file_id: FileId | None = None,
+                 reason: str | None = None) -> None:
         super().__init__(f"{code.value}: {message}" if message else code.value)
         self.code = code
         self.file_id = file_id  # ATTACHMENT_REFUSED: the attachment refused
+        self.reason = reason  # ATTACHMENT_REFUSED: why, e.g. ALREADY_SENT
 
 
 # --- Conversation Events (Data v0.2 §4) ---------------------------------------
@@ -89,10 +95,25 @@ class EventKind(Enum):
     TOOL_RESULT = "tool_result"
 
 
+class OriginKind(Enum):
+    """Where a user message was sent from (V3-P83 §4.2): how its caller signed in."""
+
+    DEVICE = "device"  # a paired device's token
+    WEB = "web"  # the Web session cookie
+    CLI = "cli"  # the operator's bearer token
+
+
+@dataclass(frozen=True)
+class MessageOrigin(DeepFrozen):
+    kind: OriginKind
+    device_id: str | None = None  # DEVICE only
+
+
 @dataclass(frozen=True)
 class UserMessage(DeepFrozen):
     blocks: tuple[ContentBlock, ...]
     answers_call: CallRef | None = None  # set only via answer_pending_call (T7a)
+    origin: MessageOrigin | None = None  # V3-P83: set by the entry point; None for older messages
 
 
 @dataclass(frozen=True)
@@ -124,7 +145,9 @@ class ConversationEvent(DeepFrozen):
     kind: EventKind
     payload: EventPayload
     payload_schema_version: int
-    created_at: datetime  # observational only
+    # Observational; the model also sees it as time lines (V3-P83 §6.4).
+    # ``sequence`` stays the chronology authority.
+    created_at: datetime
     origin_run_id: RunId | None = None
 
 
@@ -1012,6 +1035,91 @@ class MemoryStore(Protocol):
         ...
 
 
+# --- Devices (V3-P83) -----------------------------------------------------------
+
+MAX_DEVICE_NAME_CHARS = 40
+MAX_DEVICES = 32  # a principal's devices that are not revoked
+PAIRING_FAILURE_LIMIT = 5  # failed pairings that end a live code (§4.1)
+RESERVED_DEVICE_NAMES = frozenset({"web", "cli"})  # the other origins' names (§4.2)
+
+
+@dataclass(frozen=True)
+class Device(DeepFrozen):
+    """A device of a principal that is not revoked. Its token and pairing code
+    are kept as hashes only and never leave Data."""
+
+    device_id: str  # "d<n>", never reused for another device of the principal
+    name: str
+    created_at: datetime
+    pairing_expires_at: datetime | None  # the code's end; None once it ended
+    paired_at: datetime | None  # None: still waiting for its code
+    last_seen_at: datetime | None
+
+
+class PairingResult(Enum):
+    PAIRED = "paired"  # the code's device now has this token
+    RESENT = "resent"  # the same code and token again: the answer was lost
+    USED = "used"  # the code's device was paired with another token
+    EXPIRED = "expired"  # the code is known but past its end
+    INVALID = "invalid"  # no live device has this code
+    TOKEN_IN_USE = "token_in_use"  # another paired device has this token: the app must make a new one
+
+
+@dataclass(frozen=True)
+class DevicePairing(DeepFrozen):
+    result: PairingResult
+    principal: PrincipalId | None = None  # PAIRED and RESENT
+    device: Device | None = None  # PAIRED and RESENT
+
+
+class DeviceStore(Protocol):
+    """V3-P83 §4: a principal's devices. The principal comes from the trusted
+    entry point (a signed-in user) or from the device's own token, never from
+    model output. Revoked devices are invisible to every method; their ids
+    are not reused. Errors: NOT_FOUND, INVALID_ARGUMENT (a name that is
+    empty, too long, reserved or has control characters),
+    DUPLICATE_IDENTITY (a name another device has, case ignored),
+    LIMIT_EXCEEDED (MAX_DEVICES)."""
+
+    async def add_device(self, principal: PrincipalId, name: str, pairing_hash: bytes,
+                         expires_at: datetime) -> Device:
+        """A new unpaired device waiting for the code whose hash is given.
+        The principal's other unpaired devices are deleted first: one live
+        code at a time."""
+        ...
+
+    async def pair_device(self, pairing_hash: bytes, token_hash: bytes, now: datetime) -> DevicePairing:
+        """§4.1, one transaction: an unpaired device with this code takes the
+        token (PAIRED); a paired one whose code has not ended and that has
+        this very token answers again (RESENT); another token: USED; a token
+        another unrevoked device has: TOKEN_IN_USE (nothing changes). Never a
+        revoked device."""
+        ...
+
+    async def record_pairing_failure(self, now: datetime) -> None:
+        """A pairing with an unknown code: counted against every live
+        unpaired code; one reaching PAIRING_FAILURE_LIMIT is deleted."""
+        ...
+
+    async def device_for_token(self, token_hash: bytes) -> tuple[PrincipalId, Device] | None:
+        """The paired, unrevoked device with this token."""
+        ...
+
+    async def list_devices(self, principal: PrincipalId) -> tuple[Device, ...]:
+        """In creation order."""
+        ...
+
+    async def rename_device(self, principal: PrincipalId, device_id: str, name: str) -> Device: ...
+
+    async def revoke_device(self, principal: PrincipalId, device_id: str) -> None:
+        """Clears its token and code: neither works again (§4.1)."""
+        ...
+
+    async def touch_device(self, principal: PrincipalId, device_id: str, at: datetime) -> None:
+        """Records when it was last seen; nothing for an unknown device."""
+        ...
+
+
 # --- Conversation search (V3-P72) -------------------------------------------
 
 SEARCH_KINDS = frozenset({EventKind.USER_MESSAGE, EventKind.ASSISTANT_FINAL})  # what is searched (§3.3)
@@ -1481,6 +1589,11 @@ class ConversationCatalog(Protocol):
         Environment activations, atomically. The id is generated by Data.
         A title longer than MAX_TITLE_CHARS raises INVALID_ARGUMENT; a blank
         title is stored as None."""
+        ...
+
+    async def most_recent_user_conversation(self, principal: PrincipalId) -> ConversationSummary | None:
+        """V3-P83 §8.2: outside the trash, the Conversation whose latest user
+        message (answers included) is the latest; None without any."""
         ...
 
     async def list_waiting_conversations(self, principal: PrincipalId) -> Sequence[ConversationId]:

@@ -33,3 +33,5 @@ jobs:
         run: python -I scripts/check_imports.py
       - name: mypy --strict
         run: python -m mypy
+      - name: The reference device client against a served HIMARI (V3-P83 §9.4)
+        run: python -I scripts/device_client.py --self-test

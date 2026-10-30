@@ -109,12 +109,16 @@ CONNECT_SECONDS = 10.0  # of a streamed request; reading waits the adapter's tim
 # image_input: only models that read an image back in a user message and in the
 # message after a Tool group (tests/live/test_openrouter_images_live.py, 2026-10-22);
 # z-ai/glm-5.3 takes text only.
+# screen_points: only models whose [[move:X,Y]] fell on the asked target on
+# 1280×720 screens in at least 8 of 10 asks (tests/live/test_openrouter_screen_live.py,
+# 2026-10-30; V3-P84 §5); openai/gpt-5-nano hit 6 of 10.
 # streaming: only models whose streamed answers, merged reasoning replayed in
 # the next Tool turn and mid-stream cancel were checked live
 # (tests/live/test_openrouter_stream_live.py, 2026-10-24; V3-P73 §9).
 KNOWN_CAPABILITIES: Mapping[str, ProviderCapabilities] = {
     "openai/gpt-6-luna": ProviderCapabilities(
         model_id="openai/gpt-6-luna",
+        screen_points=True,  # V3-P84: 8+ of 10 points on target, live 2026-10-30
         image_input=True,  # V3-P67: user-message and after-group images read back, live 2026-10-22
         reasoning_efforts=REASONING_EFFORTS,
         parallel_tool_calls=True,
@@ -133,6 +137,7 @@ KNOWN_CAPABILITIES: Mapping[str, ProviderCapabilities] = {
     ),
     "anthropic/claude-haiku-5.5": ProviderCapabilities(
         model_id="anthropic/claude-haiku-5.5",
+        screen_points=True,  # V3-P84: 8+ of 10 points on target, live 2026-10-30
         image_input=True,  # V3-P67: user-message and after-group images read back, live 2026-10-22
         reasoning_efforts=REASONING_EFFORTS,
         parallel_tool_calls=True,
@@ -146,6 +151,7 @@ KNOWN_CAPABILITIES: Mapping[str, ProviderCapabilities] = {
     # MiniMax advertises 1M globally but its top provider declares 512K.
     "openai/gpt-6.1-sol": ProviderCapabilities(
         model_id="openai/gpt-6.1-sol",
+        screen_points=True,  # V3-P84: 8+ of 10 points on target, live 2026-10-30
         streaming=True,  # V3-P73: live response, tool replay and cancel checked 2026-10-24
         image_input=True,  # V3-P67: user-message and after-group images read back, live 2026-10-22
         reasoning_efforts=frozenset({"low", "medium", "high"}),
@@ -154,6 +160,7 @@ KNOWN_CAPABILITIES: Mapping[str, ProviderCapabilities] = {
     ),
     "anthropic/claude-sonnet-5.5": ProviderCapabilities(
         model_id="anthropic/claude-sonnet-5.5",
+        screen_points=True,  # V3-P84: 8+ of 10 points on target, live 2026-10-30
         streaming=True,  # V3-P73: live response, tool replay and cancel checked 2026-10-24
         image_input=True,  # V3-P67: user-message and after-group images read back, live 2026-10-22
         reasoning_efforts=frozenset({"low", "medium", "high"}),
@@ -162,6 +169,7 @@ KNOWN_CAPABILITIES: Mapping[str, ProviderCapabilities] = {
     ),
     "xiaomi/mimo-v2.6-pro": ProviderCapabilities(
         model_id="xiaomi/mimo-v2.6-pro",
+        screen_points=True,  # V3-P84: 8+ of 10 points on target, live 2026-10-30
         streaming=True,  # V3-P73: live response, tool replay and cancel checked 2026-10-24
         image_input=True,  # V3-P67: user-message and after-group images read back, live 2026-10-22
         context_tokens=1_048_576,
@@ -177,6 +185,7 @@ KNOWN_CAPABILITIES: Mapping[str, ProviderCapabilities] = {
     ),
     "deepseek/deepseek-v4.1-flash": ProviderCapabilities(
         model_id="deepseek/deepseek-v4.1-flash",
+        screen_points=True,  # V3-P84: 8+ of 10 points on target, live 2026-10-30
         streaming=True,  # V3-P73: live response, tool replay and cancel checked 2026-10-24
         image_input=True,  # V3-P67: user-message and after-group images read back, live 2026-10-22
         reasoning_efforts=frozenset({"low", "medium", "high"}),
@@ -185,6 +194,7 @@ KNOWN_CAPABILITIES: Mapping[str, ProviderCapabilities] = {
     ),
     "minimax/minimax-m3": ProviderCapabilities(
         model_id="minimax/minimax-m3",
+        screen_points=True,  # V3-P84: 8+ of 10 points on target, live 2026-10-30
         streaming=True,  # V3-P73: live response, tool replay and cancel checked 2026-10-24
         image_input=True,  # V3-P67: user-message and after-group images read back, live 2026-10-22
         context_tokens=524_288,

@@ -68,8 +68,10 @@ import asyncio
 import contextlib
 import dataclasses
 import hashlib
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from datetime import UTC, datetime
 from typing import NamedTuple
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from himari.common import ASK_USER_TOOL_ID, CallRef, ConversationId, RunId, TrustedScope
 from himari.control.api import (
@@ -80,8 +82,10 @@ from himari.control.api import (
     DriveState,
     ModelCatalog,
     OutputProgress,
+    PresenceSource,
     ResolvedModel,
     StopSignal,
+    TurnPresence,
     TurnProgress,
 )
 from himari.control.turn import Turn
@@ -100,6 +104,7 @@ from himari.data.api import (
     InstructionsStore,
     Memory,
     MemoryStore,
+    MessageOrigin,
     RawNoResponse,
     RawReceived,
     RawRunOutcome,
@@ -170,16 +175,30 @@ NO_PROGRESS_RUNS = 3  # V3-P62 O3
 PAUSED_COMPACTING = "paused between summarizing calls; nothing was committed"
 
 
+def sent_from(events: Sequence[ConversationEvent]) -> MessageOrigin | None:
+    """V3-P83 §6.2 (re-review C1): the origin of the last user message that no
+    assistant Event follows — a question's answer too, which its call's result
+    follows in the same transaction. None: there is none (a resume after an
+    answer), or it came before origins were recorded."""
+    for event in sorted(events, key=lambda e: e.sequence, reverse=True):
+        if event.kind in (EventKind.ASSISTANT_FINAL, EventKind.ASSISTANT_TOOL_CALLS):
+            return None
+        if isinstance(event.payload, UserMessage):
+            return event.payload.origin
+    return None
+
+
 def session_key(scope: TrustedScope) -> str:
     """V3-P62 §9 B1: an opaque, stable key per Conversation (never its id)."""
     return hashlib.sha256(f"himari-session:{scope.conversation_id}".encode()).hexdigest()[:32]
 
 
 class _UserContext(NamedTuple):
-    """What the loader takes about the user, in its parameter order."""
+    """What the loader takes about the user and the turn's start, in its parameter order."""
 
     instructions: str  # V3-P69
     memories: tuple[Memory, ...] | None  # V3-P71; None: memory is off
+    now: datetime | None  # V3-P83 §6.3; None: the Driver has no time zone
 
 
 class Driver:
@@ -200,6 +219,9 @@ class Driver:
         turn_budget: int | None = None,
         no_progress_runs: int | None = None,  # None: no NO_PROGRESS stop (V3-P62 §4 turns it on with O3)
         streaming: bool = False,  # V3-P73: answering Runs ask for a stream
+        time_zone: str | None = None,  # V3-P83 §6.4: the zone the turn's time is shown in; None: not shown
+        clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+        presence: PresenceSource | None = None,  # V3-P83 §6.2: where the user is; None: not told
     ) -> None:
         if any((planner is None) != (offer.budget is None) for offer in models.offers):
             raise ValueError("a context budget needs a compaction planner and vice versa, for every model")
@@ -223,6 +245,12 @@ class Driver:
         self._no_progress_runs = no_progress_runs
         self._planner = planner
         self._streaming = streaming
+        self._zone = None if time_zone is None else ZoneInfo(time_zone)
+        self._clock = clock
+        self._presence = presence
+        # Where the user is, read at the turn's first request — after its message
+        # is recorded and the restart cleanup is done (V3-P83 §6.3).
+        self._turn_presences: dict[ConversationId, TurnPresence] = {}  # of the drive holding the lock
         self._outputs: dict[ConversationId, OutputProgress | None] = {}  # of the drive holding the lock
         self._locks: dict[ConversationId, asyncio.Lock] = {}
         self._signals: dict[ConversationId, StopSignal] = {}  # of the drive holding the lock
@@ -273,7 +301,8 @@ class Driver:
                 return DriveResult(DriveState.WAITING_FOR_USER, waiting_call=waiting, recovery=recovery,
                                    detail="answer the question before compacting")
             try:
-                inputs = await self._loader.load(scope, (), self._options_for(scope), *self._turn_user(scope))
+                inputs = await self._situated(scope, await self._loader.load(
+                    scope, (), self._options_for(scope), *self._turn_user(scope)))
                 model_input = self._compose(scope, inputs)
             except PromptError as exc:
                 state = (DriveState.RECOVERY_REQUIRED if exc.code is PromptErrorCode.INCOMPLETE_HISTORY
@@ -309,8 +338,8 @@ class Driver:
         if self._planner is None or budget is None:
             return None
         # The next turn's context: today's instructions and notes, not a running turn's (V3-P69 §5).
-        inputs = await self._loader.load(scope, (), self._request_options(scope, model),
-                                         *await self._read_user(scope))
+        inputs = await self._situated(scope, await self._loader.load(scope, (), self._request_options(scope, model),
+                                                                     *await self._read_user(scope)), turn=False)
         summary = self._planner.summary_of(inputs.snapshot)
         snapshot = inputs.snapshot if summary is not None else None
         tokens: int | None = None
@@ -354,7 +383,7 @@ class Driver:
             raise ControlError(ControlErrorCode.BUSY, scope.conversation_id)
         async with lock:
             model = await self._resolve_model(scope)  # once per turn (V3-P64 §5)
-            user = await self._read_user(scope)  # and the user's instructions and notes (V3-P69 §5)
+            user = await self._read_user(scope)  # the user's instructions and notes, and the time (V3-P69 §5)
             self._turn_models[scope.conversation_id] = model
             self._turn_users[scope.conversation_id] = user
             self._signals[scope.conversation_id] = stop if stop is not None else StopSignal()
@@ -369,6 +398,7 @@ class Driver:
                 del self._turns[scope.conversation_id]
                 del self._turn_models[scope.conversation_id]
                 del self._turn_users[scope.conversation_id]
+                self._turn_presences.pop(scope.conversation_id, None)
 
     def _stop(self, scope: TrustedScope) -> StopSignal:
         return self._signals[scope.conversation_id]
@@ -386,7 +416,26 @@ class Driver:
         text = "" if self._user_instructions is None else (
             await self._user_instructions.read_instructions(scope.principal_id, InstructionScope.USER)).text
         notes = None if self._memories is None else await self._memories.list_memories(scope.principal_id)
-        return _UserContext(text, notes)
+        return _UserContext(text, notes, None if self._zone is None else self._clock().astimezone(self._zone))
+
+    async def _situated(self, scope: TrustedScope, inputs: PromptInputs, *, turn: bool = True) -> PromptInputs:
+        """``inputs`` with where the user is (V3-P83 §6.2) and the time in the
+        zone of the device the message came from (§6.4) — read once per turn
+        (``turn``), or now for the next turn's context."""
+        if self._presence is None:
+            return inputs
+        found = self._turn_presences.get(scope.conversation_id) if turn else None
+        if found is None:
+            found = await self._presence.read(scope.principal_id, sent_from(inputs.events))
+            if turn:
+                self._turn_presences[scope.conversation_id] = found
+        now = inputs.now
+        if now is not None and found.time_zone is not None:
+            try:
+                now = now.astimezone(ZoneInfo(found.time_zone))
+            except (ValueError, ZoneInfoNotFoundError):
+                pass  # the server's zone, then
+        return dataclasses.replace(inputs, presence=found.view, now=now)
 
     def _turn_user(self, scope: TrustedScope) -> _UserContext:
         return self._turn_users[scope.conversation_id]
@@ -395,9 +444,10 @@ class Driver:
         return self._turn_models[scope.conversation_id]
 
     def _request_options(self, scope: TrustedScope, model: ResolvedModel) -> RequestOptions:
+        capabilities = self._provider.describe_capabilities(model.model_id)
         return RequestOptions(model.model_id, model.reasoning_effort, provider_key=self._provider.provider_key,
-                              session_key=session_key(scope),
-                              image_input=self._provider.describe_capabilities(model.model_id).image_input)
+                              session_key=session_key(scope), image_input=capabilities.image_input,
+                              screen_points=capabilities.image_input and capabilities.screen_points)
 
     def _options_for(self, scope: TrustedScope) -> RequestOptions:
         return self._request_options(scope, self._turn_model(scope))
@@ -651,7 +701,8 @@ class Driver:
                 return result(DriveState.NO_PROGRESS,
                               detail=f"the last {turn.empty_streak} steps brought nothing new")
             try:
-                inputs = await self._loader.load(scope, triggers, self._options_for(scope), *self._turn_user(scope))
+                inputs = await self._situated(scope, await self._loader.load(
+                    scope, triggers, self._options_for(scope), *self._turn_user(scope)))
                 model_input = self._compose(scope, inputs)
                 model_input, refusal, estimate = await self._fit_budget(scope, triggers, inputs, model_input,
                                                                         compactions)
@@ -772,7 +823,8 @@ class Driver:
             failure = await self._compact(scope, decision.compaction, self._planner, budget, compactions)
             if failure is not None:
                 break
-            inputs = await self._loader.load(scope, triggers, self._options_for(scope), *self._turn_user(scope))
+            inputs = await self._situated(scope, await self._loader.load(
+                scope, triggers, self._options_for(scope), *self._turn_user(scope)))
             model_input = self._compose(scope, inputs)
             decision = self._planner.decide(inputs, model_input, budget)
         estimate, ceiling = decision.estimate, budget.ceiling_tokens

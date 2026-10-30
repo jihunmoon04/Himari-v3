@@ -37,6 +37,7 @@ from himari.common import (
 from himari.data import rules
 from himari.data.blobs import BlobRow, FileStore, MemoryBlobFiles
 from himari.data.api import (
+    ALREADY_SENT,
     EventPage,
     EventSearch,
     EventText,
@@ -69,8 +70,12 @@ from himari.data.api import (
     Instructions,
     InstructionScope,
     MAX_ATTACHED_WORKSPACES,
+    MAX_DEVICES,
     MAX_MEMORIES,
+    PAIRING_FAILURE_LIMIT,
     MAX_WORKSPACES,
+    Device,
+    DevicePairing,
     Memory,
     MemoryCategory,
     MemoryChange,
@@ -82,6 +87,7 @@ from himari.data.api import (
     ExternalSourceSetting,
     InitialActivation,
     ModelSetting,
+    PairingResult,
     PersistedStateBasis,
     ProjectionResult,
     PromptBasis,
@@ -176,6 +182,17 @@ class _Conversation:
     files: list[_File] = field(default_factory=list)  # V3-P66, in creation order
 
 
+@dataclass
+class _Device:
+    """A ``devices`` row (V3-P83 §4.2)."""
+
+    device: Device
+    token_hash: bytes | None = None
+    pairing_hash: bytes | None = None
+    pairing_failures: int = 0
+    revoked: bool = False
+
+
 class InMemoryStore:
     """Durable-storage stand-in plus admin helpers (not part of any port)."""
 
@@ -191,6 +208,8 @@ class InMemoryStore:
         # V3-P74 §10.1: registered folders in registration order, and whose each is.
         self.workspaces: dict[WorkspaceId, RegisteredWorkspace] = {}
         self.workspace_owners: dict[WorkspaceId, PrincipalId] = {}
+        self.devices: dict[tuple[PrincipalId, str], _Device] = {}  # V3-P83, in creation order; revoked ones stay
+        self.device_ids: dict[PrincipalId, int] = {}
 
     # --- admin helpers (trusted setup paths, not model-reachable) --------
 
@@ -340,7 +359,7 @@ class _MemoryBlobRows:
 
 
 def _refused(file_id: str, why: str) -> DataError:
-    return DataError(DataErrorCode.ATTACHMENT_REFUSED, f"{file_id}: {why}", file_id=FileId(file_id))
+    return DataError(DataErrorCode.ATTACHMENT_REFUSED, f"{file_id}: {why}", file_id=FileId(file_id), reason=why)
 
 
 class InMemoryData:
@@ -574,7 +593,7 @@ class InMemoryData:
             if file.origin is not FileOrigin.UPLOAD or file.version != 1:
                 raise _refused(file_id, "not an upload")
             if file.attached_at is not None:
-                raise _refused(file_id, "already sent")
+                raise _refused(file_id, ALREADY_SENT)
             if self._store.blob_rows[file.blob_key].expired_at is not None:
                 raise _refused(file_id, "expired")
             if cutoff is not None and file.created_at < cutoff:
@@ -635,6 +654,7 @@ class InMemoryData:
             return existing
         if message.answers_call is not None:
             raise DataError(DataErrorCode.INVALID_STATE_TRANSITION, "answers go through T7a")
+        rules.check_origin(message.origin)
         if self._waiting(conv) is not None:
             raise DataError(
                 DataErrorCode.INVALID_STATE_TRANSITION, "an ask_user call is waiting; use answer_pending_call"
@@ -895,6 +915,7 @@ class InMemoryData:
         conv = self._conv(scope)
         if self._waiting(conv) != call:
             raise DataError(DataErrorCode.ALREADY_COMMITTED, f"{call.call_id} is not waiting")
+        rules.check_origin(answer.origin)
         record = self._execution(conv, call)
         self._mark_attached(self._attach(conv, answer.blocks))
         result = ModelToolResult(blocks=answer.blocks)
@@ -1077,6 +1098,16 @@ class InMemoryData:
         rows.sort(key=lambda row: (row[0].last_activity_at, row[1]), reverse=True)
         return tuple(summary for summary, _ in rows[:limit])
 
+    async def most_recent_user_conversation(self, principal: PrincipalId) -> ConversationSummary | None:
+        best: tuple[datetime, int, ConversationId, _Conversation] | None = None
+        for i, (cid, conv) in enumerate(self._store._conversations.items()):
+            if conv.owner != principal or conv.trashed_at is not None:
+                continue
+            times = [e.created_at for e in conv.events if e.kind is EventKind.USER_MESSAGE]
+            if times and (best is None or (max(times), i) > best[:2]):
+                best = (max(times), i, cid, conv)
+        return None if best is None else self._summary(best[2], best[3])
+
     async def list_conversations(
         self, principal: PrincipalId, *, limit: int = 50, offset: int = 0, trashed: bool = False
     ) -> Sequence[ConversationSummary]:
@@ -1252,6 +1283,86 @@ class InMemoryData:
         record = Instructions(text, current.revision + 1, datetime.now(UTC))
         self._store.instructions[(principal, scope)] = record
         return record
+
+    # --- DeviceStore (V3-P83 §4) ----------------------------------------------------
+
+    def _live_devices(self, principal: PrincipalId) -> list[_Device]:
+        return [d for (owner, _), d in self._store.devices.items() if owner == principal and not d.revoked]
+
+    def _device(self, principal: PrincipalId, device_id: object) -> _Device:
+        row = self._store.devices.get((principal, device_id)) if isinstance(device_id, str) else None
+        if row is None or row.revoked:
+            raise DataError(DataErrorCode.NOT_FOUND, f"no device {device_id}")
+        return row
+
+    async def add_device(self, principal: PrincipalId, name: str, pairing_hash: bytes,
+                         expires_at: datetime) -> Device:
+        name = rules.check_device_name(name)
+        live = self._live_devices(principal)
+        waiting = [d for d in live if d.device.paired_at is None]
+        live = [d for d in live if d.device.paired_at is not None]
+        rules.check_device_name_free(name, (d.device.name for d in live))
+        if len(live) >= MAX_DEVICES:
+            raise DataError(DataErrorCode.LIMIT_EXCEEDED, f"{MAX_DEVICES} devices at most")
+        for row in waiting:  # one live code at a time
+            del self._store.devices[(principal, row.device.device_id)]
+        number = self._store.device_ids.get(principal, 0) + 1
+        self._store.device_ids[principal] = number
+        device = Device(f"d{number}", name, datetime.now(UTC), expires_at, None, None)
+        self._store.devices[(principal, device.device_id)] = _Device(device, pairing_hash=pairing_hash)
+        return device
+
+    async def pair_device(self, pairing_hash: bytes, token_hash: bytes, now: datetime) -> DevicePairing:
+        found = next(((owner, row) for (owner, _), row in self._store.devices.items()
+                      if row.pairing_hash == pairing_hash and not row.revoked), None)
+        if found is None:
+            return DevicePairing(PairingResult.INVALID)
+        principal, row = found
+        expires = row.device.pairing_expires_at
+        if expires is None or expires <= now:
+            return DevicePairing(PairingResult.EXPIRED)
+        if row.device.paired_at is not None:
+            if row.token_hash != token_hash:
+                return DevicePairing(PairingResult.USED)
+            return DevicePairing(PairingResult.RESENT, principal, row.device)
+        if any(d.token_hash == token_hash for d in self._store.devices.values()):
+            return DevicePairing(PairingResult.TOKEN_IN_USE)
+        row.token_hash = token_hash
+        row.device = replace(row.device, paired_at=now)
+        return DevicePairing(PairingResult.PAIRED, principal, row.device)
+
+    async def record_pairing_failure(self, now: datetime) -> None:
+        for key, row in list(self._store.devices.items()):
+            expires = row.device.pairing_expires_at
+            if (row.device.paired_at is None and not row.revoked and row.pairing_hash is not None
+                    and expires is not None and expires > now):
+                row.pairing_failures += 1
+            if row.device.paired_at is None and row.pairing_failures >= PAIRING_FAILURE_LIMIT:
+                del self._store.devices[key]
+
+    async def device_for_token(self, token_hash: bytes) -> tuple[PrincipalId, Device] | None:
+        return next(((owner, row.device) for (owner, _), row in self._store.devices.items()
+                     if row.token_hash == token_hash and not row.revoked and row.device.paired_at is not None), None)
+
+    async def list_devices(self, principal: PrincipalId) -> tuple[Device, ...]:
+        return tuple(d.device for d in self._live_devices(principal))
+
+    async def rename_device(self, principal: PrincipalId, device_id: str, name: str) -> Device:
+        name = rules.check_device_name(name)
+        row = self._device(principal, device_id)
+        rules.check_device_name_free(name, (d.device.name for d in self._live_devices(principal) if d is not row))
+        row.device = replace(row.device, name=name)
+        return row.device
+
+    async def revoke_device(self, principal: PrincipalId, device_id: str) -> None:
+        row = self._device(principal, device_id)
+        row.revoked, row.token_hash, row.pairing_hash = True, None, None
+        row.device = replace(row.device, pairing_expires_at=None)
+
+    async def touch_device(self, principal: PrincipalId, device_id: str, at: datetime) -> None:
+        row = self._store.devices.get((principal, device_id))
+        if row is not None and not row.revoked:
+            row.device = replace(row.device, last_seen_at=at)
 
     # --- MemoryStore (V3-P71) ---------------------------------------------------------
 

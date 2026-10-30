@@ -216,6 +216,8 @@ const app = {
   activity: { working: new Set(), waiting: new Set() }, // the last /activity answer (V3-P80 §3)
   activityTimer: null,
   activityAsked: new Set(), // ids not in the list that the list was read again for once (§3.3)
+  events: null, // V3-P83 §8.1: the open event stream (EventSource), while the page shows
+  eventsFailed: false, // it failed and has not said hello again: the activity is read every 5 s meanwhile
   activityTicket: 0, // the latest /activity read: an older answer is dropped (review N3)
   listTicket: 0, // the latest list read
   listResetting: 0, // the ticket of a reload under way (0: none)
@@ -345,7 +347,7 @@ function status(text, tone, action = null) {
 function showSurface(name, via = "none") {
   finishShellMotion();
   $("topbar-title").removeAttribute("title");
-  for (const surface of ["login", "home", "chat", "trash", "instructions", "memory", "folders", "files"]) {
+  for (const surface of ["login", "home", "chat", "trash", "instructions", "memory", "folders", "devices", "files"]) {
     $(`surface-${surface}`).hidden = surface !== name;
   }
   followAddress(name, via);
@@ -377,6 +379,7 @@ function showLogin({ signingOut = false } = {}) {
   if (!$("surface-login").hidden) return;
   stopPolling();
   clearTimeout(app.activityTimer); // V3-P80: read again after the sign-in
+  closeEvents(); // V3-P83: and the event stream opened again
   app.activityTicket += 1; // a read answered before this never paints the sign-in screen (review N2)
   app.activity = { working: new Set(), waiting: new Set() };
   views.reset();
@@ -573,7 +576,42 @@ function paintActivity() {
   followTitle();
 }
 
-/* Every 5 s while the page shows and the user is signed in; a hidden page reads again when shown. */
+/* V3-P83 §8.1: the event stream draws the activity while the page shows; it is closed while the page is
+ * hidden and opened again when shown (its hello brings what changed). Reading every 5 s is only for a shown
+ * page whose stream failed, until a stream says hello again (re-review N5). */
+function openEvents() {
+  if (app.events || !$("surface-login").hidden || document.visibilityState === "hidden") return;
+  const source = new EventSource("/api/events");
+  app.events = source;
+  source.addEventListener("hello", (event) => {
+    if (app.events !== source) return;
+    app.eventsFailed = false;
+    clearTimeout(app.activityTimer);
+    fromStream(JSON.parse(event.data).activity);
+  });
+  source.addEventListener("activity", (event) => { if (app.events === source) fromStream(JSON.parse(event.data)); });
+  source.onerror = () => {
+    if (app.events !== source) return;
+    if (source.readyState === EventSource.CLOSED) app.events = null; // refused (e.g. too many): read, try later
+    if (!app.eventsFailed) {
+      app.eventsFailed = true;
+      scheduleActivity();
+    }
+  };
+}
+
+function closeEvents() {
+  if (app.events) app.events.close();
+  app.events = null;
+  app.eventsFailed = false;
+}
+
+function fromStream(answer) {
+  app.activityTicket += 1; // a read still on its way is older than this
+  applyActivity(answer).catch(() => {});
+}
+
+/* While the stream fails, every 5 s; a hidden page reads again when shown. */
 function scheduleActivity(delay = ACTIVITY_MS) {
   clearTimeout(app.activityTimer);
   app.activityTimer = setTimeout(readActivity, delay);
@@ -586,21 +624,30 @@ async function readActivity() {
   try {
     const answer = await api("GET", "/api/conversations/activity");
     if (ticket !== app.activityTicket) return; // a newer read is on its way, and schedules the next
-    app.activity = { working: new Set(answer.working), waiting: new Set(answer.waiting) };
-    const listed = new Set([...$("conversation-list").querySelectorAll(".conv-row")].map((row) => row.dataset.id));
-    // One started elsewhere (another tab, the CLI): the list once more, so it is there (§3.3).
-    const unknown = [...answer.working, ...answer.waiting].filter((id) => !listed.has(id) && !app.activityAsked.has(id));
-    if (unknown.length) {
-      for (const id of unknown) app.activityAsked.add(id);
-      await loadList(true).then(markSelected).catch(() => {});
-    }
-    paintActivity();
+    await applyActivity(answer);
   } catch (error) {
     // The sign-in screen: reading starts again after it. Any other failure (a 401 a proxy wrote, the
     // network) tries again later (review N3).
     if (!$("surface-login").hidden) return;
   }
-  if ($("surface-login").hidden) scheduleActivity();
+  if ($("surface-login").hidden && (!app.events || app.eventsFailed)) {
+    openEvents(); // a stream refused before may be taken now
+    scheduleActivity();
+  }
+}
+
+/* ``working``: ids (the activity read) or {id, origin} (the event stream, V3-P83 appendix A.3). */
+async function applyActivity(answer) {
+  const working = answer.working.map((item) => (typeof item === "string" ? item : item.id));
+  app.activity = { working: new Set(working), waiting: new Set(answer.waiting) };
+  const listed = new Set([...$("conversation-list").querySelectorAll(".conv-row")].map((row) => row.dataset.id));
+  // One started elsewhere (another tab, the CLI): the list once more, so it is there (§3.3).
+  const unknown = [...working, ...answer.waiting].filter((id) => !listed.has(id) && !app.activityAsked.has(id));
+  if (unknown.length) {
+    for (const id of unknown) app.activityAsked.add(id);
+    await loadList(true).then(markSelected).catch(() => {});
+  }
+  paintActivity();
 }
 
 async function showHome({ via = "push" } = {}) {
@@ -727,7 +774,7 @@ function renderMessage(event, model = null) {
 /* ------------------------------------------------------------- addresses */
 
 const SURFACE_ADDRESS = { home: "/", files: "/files", trash: "/trash", instructions: "/settings/instructions",
-                          memory: "/settings/memory", folders: "/settings/folders" };
+                          memory: "/settings/memory", folders: "/settings/folders", devices: "/settings/devices" };
 const CONVERSATION_ADDRESS = /^\/c\/([A-Za-z0-9_-]{1,128})$/;
 
 /* V3-P79 §3.2: the surface now shown, at its address. The sign-in screen leaves the address as it is. */
@@ -753,6 +800,7 @@ async function goTo(path, via) {
   else if (surface === "instructions") await showInstructions({ via });
   else if (surface === "memory") await showMemory({ via });
   else if (surface === "folders") await showFolders({ via });
+  else if (surface === "devices") await showDevices({ via });
   else await showHome({ via: surface === "home" ? via : "replace" });
   return app.address === path;
 }
@@ -1653,6 +1701,8 @@ function announce(what, text, sequence) {
 }
 
 function renderEvent(event) {
+  // V3-P83 §7.2: what the model wrote, without its mood marks; Copy takes this too.
+  if (event.display) event = { ...event, text: event.display.text };
   const timeline = tagging($("timeline"), event.sequence);
   if (event.kind === "user_message") {
     closeWork();
@@ -1673,7 +1723,8 @@ function renderEvent(event) {
     if (question) { // always the only call (V3-P15); its text is the question's lead-in (V3-P68 §5.1)
       closeWork();
       if (event.text) timeline.append(renderMessage({ ...event, kind: "assistant_final" }, model));
-      const text = typeof question.arguments.question === "string" ? question.arguments.question : "";
+      const text = question.display ? question.display.text
+        : typeof question.arguments.question === "string" ? question.arguments.question : "";
       timeline.append(renderMessage({ kind: "assistant_final", text }, event.text ? null : model));
       announce("HIMARI asks", text, event.sequence);
       app.toolRows.set(`${event.run_id}/${question.call_id}`, null); // the answer appears as the user's message
@@ -2253,7 +2304,7 @@ function applyDetail(detail) {
   // As the menu's: not while the answer is being taken (the server would refuse it as busy; review N1).
   $("question-dismiss").hidden = !detail.waiting || detail.job.running;
   // As the timeline shows it: formatted, never parsed as HTML (rich_text.js).
-  const question = detail.waiting ? detail.waiting.question : null;
+  const question = !detail.waiting ? null : detail.waiting.display ? detail.waiting.display.text : detail.waiting.question;
   if (question !== app.questionShown) { // a selection, and formulas, stay as they are between polls (review N6)
     app.questionShown = question;
     $("question-text").replaceChildren(...(question === null ? [] : [renderAssistantText(document, question)]));
@@ -3725,6 +3776,122 @@ async function showFolders({ via = "push" } = {}) {
   await loadFoldersList();
 }
 
+/* --------------------------------------------------------------- devices */
+
+/* V3-P83 §4.1: add a device (its code is shown once), rename, revoke. */
+
+function deviceRow(device) {
+  const li = el("li", "memory-row");
+  const main = el("div", "memory-row-main");
+  main.append(el("p", "memory-text", device.name));
+  if (!device.paired) {
+    main.append(el("span", "row-meta", `Waiting for its code until ${new Date(device.pairing_expires_at).toLocaleTimeString()}`));
+  } else {
+    main.append(el("span", "row-meta", device.last_seen_at
+      ? `Last seen ${new Date(device.last_seen_at).toLocaleString()}`
+      : `Paired ${new Date(device.paired_at).toLocaleString()}`));
+  }
+  const actions = el("div", "memory-row-actions");
+  const rename = el("button", "link-button", "Rename");
+  rename.type = "button";
+  rename.setAttribute("aria-label", `Rename ${device.name}`);
+  rename.addEventListener("click", () => deviceForm(device, li));
+  const revoke = el("button", "link-button danger-link", device.paired ? "Revoke" : "Cancel");
+  revoke.type = "button";
+  revoke.setAttribute("aria-label", `${device.paired ? "Revoke" : "Cancel"} ${device.name}`);
+  revoke.addEventListener("click", () => revokeDevice(device));
+  actions.append(rename, revoke);
+  li.append(main, actions);
+  return li;
+}
+
+function deviceForm(device, li) {
+  const form = el("form", "memory-form");
+  const name = el("input", "memory-form-text");
+  name.value = device.name;
+  name.maxLength = 40;
+  name.required = true;
+  name.setAttribute("aria-label", "Device name");
+  const bar = el("div", "memory-form-bar");
+  const cancel = el("button", "link-button", "Cancel");
+  cancel.type = "button";
+  cancel.addEventListener("click", () => loadDevicesList());
+  const save = el("button", "primary-button", "Save");
+  save.type = "submit";
+  bar.append(cancel, save);
+  form.append(name, bar);
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    try {
+      await api("PATCH", `/api/devices/${encodeURIComponent(device.device_id)}`, { name: name.value });
+      status("Renamed. HIMARI sees the new name from the next message.", "ok");
+      await loadDevicesList();
+    } catch (error) {
+      status(error.message, "error");
+    }
+  });
+  li.replaceChildren(form);
+  name.focus();
+}
+
+async function revokeDevice(device) {
+  if (device.paired && !(await confirmAction(`Revoke “${device.name}”?`,
+                                             ["Its app stops working at once. To use it again, pair it anew."],
+                                             "Revoke"))) return;
+  try {
+    await api("DELETE", `/api/devices/${encodeURIComponent(device.device_id)}`);
+    status(device.paired ? "Revoked." : "Cancelled. Its code no longer works.", "ok");
+    if ($("devices-code").dataset.device === device.device_id) $("devices-code").hidden = true;
+  } catch (error) {
+    status(error.message, error.kind === "http" ? "warn" : "error");
+  }
+  await loadDevicesList();
+}
+
+async function addDevice(event) {
+  event.preventDefault();
+  try {
+    const made = await api("POST", "/api/devices", { name: $("devices-add-name").value });
+    $("devices-add").reset();
+    $("devices-code-name").textContent = made.name;
+    $("devices-code-until").textContent = new Date(made.expires_at).toLocaleTimeString();
+    $("devices-code-value").textContent = made.code;
+    $("devices-code").dataset.device = made.device_id;
+    $("devices-code").hidden = false;
+    await loadDevicesList();
+  } catch (error) {
+    status(error.message, "error");
+  }
+}
+
+async function loadDevicesList() {
+  const generation = app.generation;
+  const listing = await api("GET", "/api/devices");
+  if (generation !== app.generation || $("surface-devices").hidden) return;
+  $("devices-off").hidden = listing.enabled;
+  $("devices-add").hidden = !listing.enabled;
+  $("devices-empty").hidden = listing.items.length > 0;
+  $("devices-list").replaceChildren(...listing.items.map(deviceRow));
+}
+
+async function showDevices({ via = "push" } = {}) {
+  if (!(await mayLeave())) return;
+  stopPolling();
+  views.reset();
+  app.conversationId = null;
+  app.generation += 1;
+  live.reset();
+  leavePlace();
+  markSelected();
+  $("devices-list").replaceChildren();
+  $("devices-code").hidden = true; // a code is shown once, right after it was made
+  showSurface("devices", via);
+  closeNav();
+  $("topbar-title").textContent = "Devices";
+  status("");
+  await loadDevicesList();
+}
+
 /* The Settings link only where folders are offered. */
 async function syncFoldersLink() {
   try {
@@ -3870,6 +4037,7 @@ async function enter() {
   await drafts.load();
   app.activityAsked.clear();
   scheduleActivity(0); // V3-P80 §3.3
+  openEvents(); // V3-P83 §8.1
   loadServerInfo();
   syncFoldersLink();
   // A save that met a signed-out session goes back to its draft (PR #68 review C2).
@@ -3901,6 +4069,11 @@ async function boot() {
     showFolders().catch((e) => status(e.message, "error"));
   });
   $("folders-add").addEventListener("submit", registerFolder);
+  $("nav-devices").addEventListener("click", () => {
+    $("appearance-dialog").close();
+    showDevices().catch((e) => status(e.message, "error"));
+  });
+  $("devices-add").addEventListener("submit", addDevice);
   $("chat-menu-attach").addEventListener("submit", attachFolder);
   $("nav-instructions").addEventListener("click", () => {
     $("appearance-dialog").close();
@@ -3925,8 +4098,13 @@ async function boot() {
   };
   window.addEventListener("pagehide", keepNow);
   document.addEventListener("visibilitychange", () => {
-    if (document.visibilityState === "hidden") keepNow();
-    else if ($("surface-login").hidden) readActivity(); // shown again: what changed meanwhile (V3-P80 §3.3)
+    if (document.visibilityState === "hidden") {
+      keepNow();
+      closeEvents(); // V3-P83 §8.1: a hidden tab holds no stream
+    } else if ($("surface-login").hidden) {
+      readActivity(); // shown again: what changed meanwhile (V3-P80 §3.3)
+      openEvents();
+    }
   });
   // §5.3: another tab signed out — nothing of this one is kept or written either.
   localStore.onWiped(() => { // signed out like that tab: to sign in again, where writes open again (PR #106 review B3)
