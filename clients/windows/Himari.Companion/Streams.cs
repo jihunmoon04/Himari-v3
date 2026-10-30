@@ -134,6 +134,7 @@ public partial class MainWindow
                 {
                     await foreach (var (type, data) in local.StreamAsync(PathFor(id) + "/live", ct))
                     {
+                        if (ct.IsCancellationRequested || !ReferenceEquals(local, client)) return;
                         delay = 1;
                         if (type is "snapshot" or "delta")
                         {
@@ -151,7 +152,14 @@ public partial class MainWindow
                                 Status.Text = "답변 중…";
                             }
                         }
-                        else if (type == "done") { CompleteLiveMoves(id, liveJob); return; }
+                        else if (type == "done")
+                        {
+                            // A reconnect may return done without any display.
+                            // Only a reply actually shown through Live is read;
+                            // otherwise ReadConversation must recover its final.
+                            if (opened && display.Text.Length > 0) CompleteReply(id, liveJob);
+                            CompleteLiveMoves(id, liveJob); return;
+                        }
                     }
                 }
                 catch (OperationCanceledException) when (ct.IsCancellationRequested) { return; }

@@ -38,5 +38,6 @@
         <Separator/><MenuItem Header="숨기기" Click="HideClick"/><MenuItem Header="종료" Click="ExitClick"/>
       </ContextMenu></Image.ContextMenu>
     </Image>
+    <Button x:Name="ConnectionNotice" Width="24" Height="24" MinHeight="24" Padding="0" Content="!" FontWeight="Bold" Foreground="#80501D" Background="#FFF5DB" BorderBrush="#B69254" HorizontalAlignment="Center" VerticalAlignment="Bottom" Margin="220,0,0,24" Visibility="Collapsed" ToolTip="{Binding Text, ElementName=Status}" AutomationProperties.Name="연결 상태 확인" AutomationProperties.HelpText="{Binding Text, ElementName=Status}" Click="SettingsClick"/>
   </Grid>
 </Window>

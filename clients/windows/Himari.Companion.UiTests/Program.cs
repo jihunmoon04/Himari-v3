@@ -5,13 +5,17 @@ using System.Windows.Interop;
 using System.Windows.Threading;
 using System.Reflection;
 using System.Windows.Media;
+using System.Net;
+using System.Net.Http;
+using System.Text;
+using System.Text.Json;
 using Himari.Companion;
 
 internal static class Program
 {
     [STAThread] private static void Main()
     {
-        var app = new App(); app.InitializeComponent();
+        var app = new App(); app.InitializeComponent(); app.ShutdownMode = ShutdownMode.OnExplicitShutdown;
         using var source = new HwndSource(new HwndSourceParameters("HIMARI keyboard regression") { Width = 1, Height = 1, WindowStyle = unchecked((int)0x80000000) });
         var root = new Grid(); var input = new TextBox { AcceptsReturn = true }; root.Children.Add(input); source.RootVisual = root;
         int sent = 0, routed = 0; ModifierKeys modifiers = ModifierKeys.None;
@@ -105,7 +109,123 @@ internal static class Program
         Check(userStatus.Visibility == Visibility.Collapsed, "routine connected status does not add a chat row");
         status.Text = "화면을 보내지 못해 글만 보냈습니다.";
         Check(userStatus.Visibility == Visibility.Visible && userStatus.Text == status.Text, "screen delivery warnings remain visible inside user bubble");
-        companion.Close(); app.Shutdown();
-        Console.WriteLine("WPF keyboard, synthetic IME and dual-bubble layout checks passed.");
+        companion.Close();
+        foreach (bool partialLive in new[] { false, true })
+        {
+            var recovery = new MainWindow();
+            object? Call(string method, params object?[] args) => typeof(MainWindow).GetMethod(method, BindingFlags.NonPublic | BindingFlags.Instance)!.Invoke(recovery, args);
+            void Field(string field, object? value) => typeof(MainWindow).GetField(field, BindingFlags.NonPublic | BindingFlags.Instance)!.SetValue(recovery, value);
+            void Finish(Task task)
+            {
+                Until(() => task.IsCompleted);
+                task.GetAwaiter().GetResult();
+            }
+            void Until(Func<bool> ready)
+            {
+                var untilFrame = new DispatcherFrame(); var poll = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(10) };
+                var deadline = DateTime.UtcNow.AddSeconds(5);
+                poll.Tick += (_, _) => { if (ready() || DateTime.UtcNow >= deadline) untilFrame.Continue = false; };
+                if (!ready()) { poll.Start(); Dispatcher.PushFrame(untilFrame); poll.Stop(); }
+                Check(ready(), "asynchronous UI operation completed within test deadline");
+            }
+            var transport = new ReplyReconnectHandler();
+            var first = new ServerClient("https://example.com/", "device-one", transport);
+            using var connectionToken = new CancellationTokenSource();
+            Field("client", first); Field("recoveryOwner", first); Field("connection", connectionToken); Field("currentConversation", "c"); Field("deviceId", "d");
+            var recoverySettings = (Window)typeof(MainWindow).GetField("settings", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(recovery)!;
+            ((CheckBox)recoverySettings.FindName("ScreenSharing")).IsChecked = false;
+            var answer = (FrameworkElement)recovery.FindName("BubblePanel");
+            var editor = (TextBox)recovery.FindName("Input");
+            var notice = (FrameworkElement)recovery.FindName("ConnectionNotice");
+            Call("SetConnected", true, "연결됨");
+            Finish((Task)Call("ReadConversation", "c", CancellationToken.None)!);
+            Check(answer.Visibility == Visibility.Collapsed, "browsing an old completed answer does not open a bubble");
+            editor.Text = "새 질문";
+            Call("SendMessage");
+            Until(() => !(bool)typeof(MainWindow).GetField("sending", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(recovery)!);
+            Check(transport.Posts == 1 && editor.Text == "", "real send path records accepted request and clears submitted draft");
+            if (partialLive)
+            {
+                transport.Live = "event: snapshot\ndata: {\"job_id\":\"j\",\"run_id\":\"r\",\"text\":\"답변 앞부분\",\"moods\":[]}\n\n";
+                Call("StartLive", "c", first, connectionToken.Token, "j");
+                Until(() => ((TextBlock)recovery.FindName("Message")).Text == "답변 앞부분");
+            }
+            Call("StopConnection"); Call("CloseBubble");
+            Call("SetConnected", false, "연결이 끊겼습니다. 다시 연결 중…");
+            Check(notice.Visibility == Visibility.Visible && answer.Visibility == Visibility.Collapsed, "disconnect warning is visible even when chat is hidden");
+            transport.Complete = true;
+            var restored = new ServerClient("https://example.com/", "device-one", transport);
+            using var restoredConnection = new CancellationTokenSource();
+            Field("client", restored); Field("recoveryOwner", restored); Field("connection", restoredConnection);
+            Call("SetConnected", true, "연결됨");
+            Finish((Task)Call("ReadConversation", "c", CancellationToken.None)!);
+            var readingTimer = (DispatcherTimer)typeof(MainWindow).GetField("bubbleTimer", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(recovery)!;
+            Check(answer.Visibility == Visibility.Visible && ((TextBlock)recovery.FindName("Message")).Text == "복구된 최종 답변" && readingTimer.IsEnabled, "accepted send, disconnect, server completion and reconnect opens final answer with reading timer");
+            Check(!(bool)typeof(MainWindow).GetField("talking", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(recovery)!, "completed recovery stops partial Live talking animation");
+            Check(notice.Visibility == Visibility.Collapsed, "successful reconnect clears independent warning");
+            Call("CloseBubble"); Finish((Task)Call("ReadConversation", "c", CancellationToken.None)!);
+            Check(answer.Visibility == Visibility.Collapsed && !readingTimer.IsEnabled, "repeated refresh does not reopen or restart an already recovered answer");
+            Call("WaitForReply", restored, "c", "j2", 3);
+            transport.Job = "j2"; transport.Live = "event: snapshot\ndata: {\"job_id\":\"j2\",\"run_id\":\"r2\",\"text\":\"정상 Live 답변\",\"moods\":[]}\n\nevent: done\ndata: {}\n\n";
+            Finish((Task)Call("LiveLoop", "c", restored, CancellationToken.None, "j2")!);
+            Call("CloseBubble");
+            Call("WaitForReply", restored, "c", "j2", 3); // A late HTTP acknowledgement must not re-arm done.
+            transport.Sequence = 5;
+            Finish((Task)Call("ReadConversation", "c", CancellationToken.None)!);
+            Check(answer.Visibility == Visibility.Collapsed, "normally completed Live and late acceptance cannot resurrect a hidden answer");
+            Call("WaitForReply", restored, "c", "j3", 5);
+            transport.Job = "j4"; transport.Sequence = 7;
+            Finish((Task)Call("ReadConversation", "c", CancellationToken.None)!);
+            Check(answer.Visibility == Visibility.Collapsed, "another job's final answer cannot satisfy the pending reply");
+            Call("WaitForReply", restored, "c", "j4", 7);
+            Finish((Task)Call("ReadConversation", "c", CancellationToken.None)!);
+            Check(answer.Visibility == Visibility.Collapsed, "a final at or before the send boundary is not new evidence");
+            transport.Job = "j5"; transport.Sequence = 9;
+            Call("WaitForReply", restored, "c", "j5", 7);
+            transport.Live = "event: done\ndata: {}\n\n";
+            Call("StartLive", "c", restored, CancellationToken.None, "j5");
+            Until(() => answer.Visibility == Visibility.Visible && readingTimer.IsEnabled);
+            Check(((TextBlock)recovery.FindName("Message")).Text == "복구된 최종 답변", "done without a Live snapshot still recovers and opens saved final");
+            Call("CloseBubble");
+            var foreign = new ServerClient("https://example.com/", "device-two", transport);
+            Call("WaitForReply", foreign, "c", "j6", 9);
+            transport.Job = "j6"; transport.Sequence = 11;
+            Finish((Task)Call("ReadConversation", "c", CancellationToken.None)!);
+            Check(answer.Visibility == Visibility.Collapsed, "pending replies from a different device do not open this device's bubble");
+            foreign.Dispose();
+            recovery.Close();
+        }
+        app.Shutdown();
+        Console.WriteLine("WPF keyboard, synthetic IME, dual-bubble layout and reply reconnect checks passed.");
     }
+}
+
+internal sealed class ReplyReconnectHandler : HttpMessageHandler
+{
+    internal bool Complete;
+    internal int Posts, Sequence = 1;
+    internal string Job = "old", Live = "";
+    private bool liveSent;
+    // Reconnection replaces HttpClient but the fake server's state survives it.
+    protected override void Dispose(bool disposing) { }
+    protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+    {
+        string body; var status = HttpStatusCode.OK;
+        string path = request.RequestUri!.AbsolutePath;
+        if (request.Method == HttpMethod.Post && path.EndsWith("/messages"))
+        { Posts++; Job = "j"; Sequence = 2; body = "{\"job_id\":\"j\"}"; status = HttpStatusCode.Accepted; }
+        else if (path.EndsWith("/live"))
+        {
+            if (liveSent && !Live.Contains("event: done")) return UntilCancelled(ct);
+            liveSent = true;
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(Live, Encoding.UTF8, "text/event-stream") });
+        }
+        else if (path.EndsWith("/events"))
+            body = JsonSerializer.Serialize(new { items = new[] { new { sequence = Complete ? Math.Max(3, Sequence) : 1, kind = "assistant_final", display = new { text = Complete ? "복구된 최종 답변" : "이전 답변", moods = Array.Empty<object>() } } } });
+        else
+            body = JsonSerializer.Serialize(new { conversation = new { last_sequence = Complete ? Math.Max(3, Sequence) : Sequence }, job = new { running = Posts > 0 && !Complete, job_id = Job } });
+        return Task.FromResult(new HttpResponseMessage(status) { Content = new StringContent(body, Encoding.UTF8, "application/json") });
+    }
+    private static async Task<HttpResponseMessage> UntilCancelled(CancellationToken ct)
+    { await Task.Delay(Timeout.Infinite, ct); throw new OperationCanceledException(ct); }
 }

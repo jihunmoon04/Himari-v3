@@ -158,6 +158,7 @@ public partial class MainWindow
         double bottom = Math.Max(0, Character.Height - 10);
         DialogueStack.Margin = flip ? new Thickness(50, 0, 0, bottom) : new Thickness(0, 0, 50, bottom);
         Character.Margin = flip ? new Thickness(80, 0, 0, 4) : new Thickness(0, 0, 80, 4);
+        ConnectionNotice.Margin = flip ? new Thickness(0, 0, 220, 24) : new Thickness(220, 0, 0, 24);
     }
     private void UpdateSceneBounds()
     {
