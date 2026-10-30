@@ -4,6 +4,83 @@ using System.Text.Json;
 using Himari.Companion;
 
 static void Check(bool value, string message) { if (!value) throw new Exception(message); }
+var reconnectServer = new ReconnectRecoveryHandler();
+var previousConnection = new ServerClient("https://example.com/", "same-device", reconnectServer);
+try { await previousConnection.SendAsync(HttpMethod.Post, "/api/conversations/c/messages", new { text = "hello", screen = "f1" }, CancellationToken.None); }
+catch (HttpRequestException) { }
+previousConnection.Dispose();
+using (var reconnected = new ServerClient("https://example.com/", "same-device", new ReconnectRecoveryHandler()))
+{
+    Check(previousConnection.SameDevice(reconnected), "same identity survives disposed transport");
+    string? recoveredJob = await ScreenHistory.RunningJobIdAsync(reconnected, "c", CancellationToken.None);
+    Check(recoveredJob == "j1", "hello activity without job_id falls back to conversation detail");
+    Check(await ScreenHistory.LatestReadyIdAsync(reconnected, "c", recoveredJob!, CancellationToken.None) == "f1", "screen metadata remains usable after manual reconnect");
+    try { await reconnected.SendAsync(HttpMethod.Post, "/api/conversations/c/messages", new { text = "hello", screen = "f1" }, CancellationToken.None); throw new Exception("duplicate screen accepted"); }
+    catch (ApiException ex) { Check(ex.Code == "screen_already_sent", "retry after reconnect uses same file id"); }
+}
+var lostTextConnection = new ServerClient("https://example.com/", "same-device", new ReconnectRecoveryHandler());
+try { await lostTextConnection.SendAsync(HttpMethod.Post, "/api/conversations/c/messages", new { text = "hello" }, CancellationToken.None); }
+catch (HttpRequestException) { }
+lostTextConnection.Dispose();
+using (var reconnectedText = new ServerClient("https://example.com/", "same-device", new ReconnectRecoveryHandler()))
+{
+    Check(lostTextConnection.SameDevice(reconnectedText), "unknown text can bind new transport of same device");
+    Check(!await TextRecovery.AcceptedAsync(reconnectedText, "c", "hello", "d1", 0, CancellationToken.None), "origin-less history after reconnect still requires duplicate warning");
+}
+using (var otherDevice = new ServerClient("https://example.com/", "other-device", new ReconnectRecoveryHandler()))
+    Check(!lostTextConnection.SameDevice(otherDevice), "device switch cannot silently claim pending text");
+using (var otherServer = new ServerClient("https://other.example/", "same-device", new ReconnectRecoveryHandler()))
+    Check(!lostTextConnection.SameDevice(otherServer), "server switch cannot claim pending screen");
+foreach (string state in new[] { "ready", "no_sandbox", "view_expired" })
+{
+    using var recoveryClient = new ServerClient("https://example.com/", "test", new LostResponseHandler(state));
+    try { await recoveryClient.SendAsync(HttpMethod.Post, "/api/conversations/c/messages", new { text = "hello", screen = "f1" }, CancellationToken.None); }
+    catch (HttpRequestException) { }
+    // The job started event provides j1 after the HTTP response was lost.
+    string? recoveredFile = await ScreenHistory.LatestReadyIdAsync(recoveryClient, "c", "j1", CancellationToken.None);
+    Check(recoveredFile == (state == "ready" ? "f1" : null), "lost response recovery checks recorded image readiness: " + state);
+    Check(await ScreenHistory.LatestReadyIdAsync(recoveryClient, "c", "other-job", CancellationToken.None) is null, "job event for another job cannot recover screen");
+}
+foreach (string state in new[] { "ready", "no_sandbox", "view_expired" })
+{
+    var file = JsonSerializer.SerializeToElement(new { image = new { state } });
+    Check(ScreenSafety.Ready(file) == (state == "ready"), "only ready screen can create move context: " + state);
+}
+Check(!ScreenSafety.Ready(default), "missing image state is not ready");
+var lifetime = new MoveJobLifetime();
+lifetime.End("old");
+Check(!lifetime.CanStart("old") && lifetime.CanStart("new"), "ended job cannot be restored by late HTTP response or SSE");
+var withoutOrigin = JsonSerializer.SerializeToElement(new { kind = "user_message", sequence = 42, text = "hello" });
+Check(!TextRecovery.Matches(withoutOrigin, "hello", "d1", 41), "same text without origin does not confirm acceptance");
+var ownText = JsonSerializer.SerializeToElement(new { kind = "user_message", sequence = 42, text = "hello", origin = new { kind = "device", device_id = "d1" } });
+Check(TextRecovery.Matches(ownText, "hello", "d1", 41) && !TextRecovery.Matches(ownText, "hello", "d2", 41) && !TextRecovery.Matches(ownText, "hello", "d1", 42), "text recovery checks origin and sequence boundary");
+Check(MessageFailures.ReuseScreen(new ApiException(HttpStatusCode.TooManyRequests, "rate_limited")), "definite rejection preserves staged screen");
+Check(!MessageFailures.ReuseScreen(new ApiException(HttpStatusCode.BadRequest, "attachment_refused")), "refused file is not reused");
+Check(MessageFailures.Classify(new ApiException(HttpStatusCode.Conflict, "busy")) == MessageFailure.Rejected, "busy is rejected before recording");
+Check(MessageFailures.Classify(new ApiException(HttpStatusCode.Conflict, "conversation_closed")) == MessageFailure.Closed, "closed may have been recorded");
+Check(MessageFailures.Classify(new ApiException(HttpStatusCode.Conflict, "screen_already_sent")) == MessageFailure.AlreadySent, "screen retry can confirm acceptance");
+Check(MessageFailures.Classify(new ApiException(HttpStatusCode.Conflict, "still_stopping")) == MessageFailure.Unknown, "unknown conflict is not assumed rejected");
+var imageSize = ScreenGeometry.ImageSize(3840, 2160);
+Check(imageSize == (1280, 720), "screen is scaled down to model size");
+var portrait = ScreenGeometry.ImageSize(1440, 2560);
+Check(portrait.Width * portrait.Height <= 1_150_000 && portrait.Height <= 1280, "portrait respects both limits");
+Check(ScreenGeometry.ImageSize(640, 480) == (640, 480), "small screen is not enlarged");
+var geometry = new ScreenGeometry(new PixelRect(-1920, 0, 1920, 1080), 1280, 720);
+Check(geometry.Map(640, 360) == new PixelPoint(-960, 540), "negative monitor coordinates are preserved");
+Check(geometry.Map(-50, 10000).X == -1920 && geometry.Map(-50, 10000).Y < 1080, "out of range coordinates are clamped");
+var captured = DateTimeOffset.UtcNow;
+var playback = new MovePlayback("job-1", geometry, captured);
+using (var moves = JsonDocument.Parse("[{\"at\":1,\"x\":10,\"y\":20},{\"at\":2,\"x\":30,\"y\":40}]"))
+{
+    Check(playback.Accept("other", "run-1", false, moves.RootElement, 2, captured).Count == 0, "unrelated job ignored");
+    Check(playback.Accept(null, "run-1", false, moves.RootElement, 2, captured).Count == 0, "old server without job id ignored");
+    Check(playback.Accept("job-1", "run-1", false, moves.RootElement, 2, captured).Count == 2, "live moves are returned in order");
+    Check(playback.Accept("job-1", "run-1", true, moves.RootElement, 2, captured).Count == 0, "reconnect snapshot does not replay moves");
+    Check(playback.Accept("job-1", "run-2", true, moves.RootElement, 2, captured).Single().X == 30, "snapshot catches up with only last move");
+    Check(playback.Accept("job-1", "run-3", false, moves.RootElement, 2, captured.AddMinutes(11)).Count == 0, "stale screen ignored");
+}
+using (var malformed = JsonDocument.Parse("[{\"at\":\"bad\",\"x\":1,\"y\":2},null]"))
+    Check(playback.Accept("job-1", "run-4", false, malformed.RootElement, 2, captured).Count == 0, "malformed moves ignored");
 var token = CredentialStore.NewToken();
 Check(token.StartsWith("hd_") && token.Length == 46, "token format");
 Check(token != CredentialStore.NewToken(), "tokens must not repeat");
@@ -13,6 +90,8 @@ using var client = new ServerClient("https://example.com/", token, new FakeHandl
 var paired = await client.PairAsync("ABCD-EFGH", CancellationToken.None);
 Check(paired.GetProperty("device_id").GetString() == "d1", "pair response");
 await client.SendAsync(HttpMethod.Post, "/api/device/presence", new { idle_seconds = 12, time_zone = "Asia/Seoul" }, CancellationToken.None);
+var uploaded = await client.UploadScreenAsync("c1", [1, 2, 3], "image/png", CancellationToken.None);
+Check(uploaded.GetProperty("file_id").GetString() == "f1", "screen upload response");
 var events = new List<(string Event, string Text)>();
 await foreach (var item in client.StreamAsync("/api/events", CancellationToken.None)) events.Add((item.Event, item.Data.GetProperty("text").GetString()!));
 Check(events.Count == 2 && events[0] == ("hello", "안녕😀") && events[1] == ("current", "끝"), "SSE parsing");
@@ -25,6 +104,29 @@ using (var detail = JsonDocument.Parse("{\"waiting\":{\"question\":{\"display\":
 }
 using (var detail = JsonDocument.Parse("{\"waiting\":{\"question\":\"raw\",\"display\":{\"text\":\"clean\"}},\"job\":{\"running\":false}}"))
     Check(ConversationView.Question(detail.RootElement) == "clean" && !ConversationView.IsRunning(detail.RootElement), "display wins and question completion");
+
+var declinedVault = new FakeVault { ActiveValue = new DeviceCredential("https://old.example/", "old-token", null) };
+var declinedServer = new PairHandler();
+var originalCredential = declinedVault.ActiveValue;
+int switchPrompts = 0;
+var declinedPairing = new PairingCoordinator(declinedVault, c => new ServerClient(c.Server, c.Token, new SharedHandler(declinedServer)), approveChange: _ =>
+{
+    switchPrompts++;
+    Check(declinedVault.ActiveValue == originalCredential && declinedVault.PendingValue is null, "approval requested before any credential write");
+    return false;
+});
+try { await declinedPairing.PairAsync("https://example.com/", "NEW-CODE", CancellationToken.None); throw new Exception("declined switch continued"); }
+catch (DeviceSwitchDeclinedException) { }
+Check(switchPrompts == 1 && declinedServer.AttemptedTokens.Count == 0 && declinedVault.ActiveValue == originalCredential && declinedVault.PendingValue is null, "declined switch preserves active and pending credentials without pairing request");
+using (var oldRecoveryOwner = new ServerClient("https://old.example/", "old-token", new SharedHandler(declinedServer)))
+    Check(oldRecoveryOwner.Matches(declinedVault.Active()!), "reconnect after declined pairing selects original recovery identity");
+// A prior successful-but-unpromoted pairing must also ask before changing Active.
+declinedVault.PendingValue = new DeviceCredential("https://example.com/", "new-token", null);
+var pendingBeforeDecline = declinedVault.PendingValue;
+var declinedRecovery = new PairingCoordinator(declinedVault, c => new ServerClient(c.Server, c.Token, new SharedHandler(declinedServer)), approveChange: _ => false);
+try { await declinedRecovery.RecoverPendingAsync(CancellationToken.None); throw new Exception("declined pending promotion continued"); }
+catch (DeviceSwitchDeclinedException) { }
+Check(declinedVault.ActiveValue == originalCredential && declinedVault.PendingValue == pendingBeforeDecline, "declined pending recovery preserves both credentials");
 
 var vault = new FakeVault { ActiveValue = new DeviceCredential("https://old.example/", "old-token", null) };
 var pairingServer = new PairHandler();
@@ -163,7 +265,89 @@ async Task CompleteOldSend(bool fail)
 var delayedSuccess = CompleteOldSend(false); var delayedFailure = CompleteOldSend(true);
 currentId = "conversation-B"; revision++; pendingResponse.SetResult(); await Task.WhenAll(delayedSuccess, delayedFailure);
 Check(draft == "같은 내용" && uiStatus == "B 상태" && !showError, "late success and error do not change another conversation");
+var restoredWindow = WindowPreferences.Normalize(new(2400, -900, 900), 0, 0, 1920, 1080, 420, 700);
+Check(CharacterTheme.Parse("{\"characterId\":\"himari\",\"bubbleTemplate\":\"pixel\"}").BubbleTemplate == "pixel", "character bubble template");
+Check(CharacterTheme.Parse("{\"characterId\":\"himari\",\"bubbleTemplate\":\"unknown\"}").BubbleTemplate == "default", "unknown template fallback");
+Check(CharacterTheme.Parse("bad json") == CharacterTheme.Default, "invalid character manifest fallback");
+Check(restoredWindow == new WindowPreferences(1500, 0, 400), "window and size clamped to visible bounds");
+var safeWindow = WindowPreferences.Normalize(new(double.NaN, double.PositiveInfinity, double.NaN), -1920, 0, 3840, 1080, 420, 700);
+Check(safeWindow == new WindowPreferences(-1920, 0, 330), "invalid preferences use safe defaults");
+var firstHistory = Enumerable.Range(1, 100).Select(n => new { sequence = n, kind = n == 1 ? "user_message" : "tool_result", text = n == 1 ? "<hello>" : "private tool result" });
+var pageOne = JsonSerializer.SerializeToElement(new { items = firstHistory });
+var pageTwo = JsonSerializer.SerializeToElement(new { items = new[] { new { sequence = 101, kind = "assistant_final", text = "[[mood:happy]]raw", display = new { text = "안녕하세요" } } } });
+var requestedPages = new List<int>();
+string historyText = await HistoryReader.ReadAsync((after, ct) => { requestedPages.Add(after); return Task.FromResult(after == 0 ? pageOne : pageTwo); }, null, CancellationToken.None);
+Check(requestedPages.SequenceEqual(new[] { 0, 100 }) && historyText.Contains("<hello>") && historyText.Contains("안녕하세요") && !historyText.Contains("private tool result") && !historyText.Contains("[[mood:"), "history pages and display text");
+using (var cancelledHistory = new CancellationTokenSource())
+{
+    cancelledHistory.Cancel();
+    try { await HistoryReader.ReadAsync((_, _) => throw new Exception("unexpected page"), null, cancelledHistory.Token); throw new Exception("history cancellation ignored"); }
+    catch (OperationCanceledException) { }
+}
 Console.WriteLine("Contract transport checks passed.");
+
+using (var screenClient = new ServerClient("https://example.com/", "test", new ScreenProtocolHandler()))
+{
+    var staged = await screenClient.UploadScreenAsync("c1", [1, 2, 3], "image/png", CancellationToken.None);
+    var job = await screenClient.SendAsync(HttpMethod.Post, "/api/conversations/c1/messages", new { text = "봐줘", screen = staged.GetProperty("file_id").GetString() }, CancellationToken.None);
+    var replay = new MovePlayback(job.GetProperty("job_id").GetString()!, geometry, captured);
+    var collected = new List<ScreenMove>();
+    await foreach (var (kind, data) in screenClient.StreamAsync("/api/conversations/c1/live", CancellationToken.None))
+        if (kind == "snapshot") collected.AddRange(replay.Accept(data.GetProperty("job_id").GetString(), data.GetProperty("run_id").GetString(), true, data.GetProperty("moves"), 1, captured));
+    Check(collected.Count == 1 && collected[0].X == 42, "PR 126 upload, message job id and reconnect snapshot");
+}
+
+sealed class ReconnectRecoveryHandler : HttpMessageHandler
+{
+    private static bool screenRecorded;
+    protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+    {
+        if (request.Method == HttpMethod.Post)
+        {
+            using var body = JsonDocument.Parse(await request.Content!.ReadAsStringAsync(ct));
+            if (body.RootElement.TryGetProperty("screen", out var file))
+            {
+                if (file.GetString() != "f1") throw new Exception("screen was recaptured instead of reused");
+                if (screenRecorded) return new(HttpStatusCode.Conflict) { Content = new StringContent("{\"error\":{\"code\":\"screen_already_sent\"}}") };
+                screenRecorded = true;
+            }
+            throw new HttpRequestException("accepted, response lost");
+        }
+        string value = request.RequestUri!.AbsolutePath.EndsWith("/events")
+            ? "{\"items\":[{\"kind\":\"user_message\",\"sequence\":1,\"text\":\"hello\",\"attachments\":[{\"file_id\":\"f1\",\"screen\":true,\"image\":{\"state\":\"ready\"}}]}]}"
+            : "{\"job\":{\"job_id\":\"j1\",\"running\":true},\"conversation\":{\"last_sequence\":1}}";
+        return new(HttpStatusCode.OK) { Content = new StringContent(value, Encoding.UTF8, "application/json") };
+    }
+}
+
+sealed class LostResponseHandler(string state) : HttpMessageHandler
+{
+    protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+    {
+        if (request.Method == HttpMethod.Post) throw new HttpRequestException("202 was lost after server accepted screen");
+        string value = request.RequestUri!.AbsolutePath.EndsWith("/events")
+            ? JsonSerializer.Serialize(new { items = new[] { new { kind = "user_message", attachments = new[] { new { file_id = "f1", screen = true, image = new { state } } } } } })
+            : "{\"job\":{\"job_id\":\"j1\",\"running\":true},\"conversation\":{\"last_sequence\":1}}";
+        return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(value, Encoding.UTF8, "application/json") });
+    }
+}
+
+sealed class ScreenProtocolHandler : HttpMessageHandler
+{
+    protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+    {
+        if (request.RequestUri!.AbsolutePath.EndsWith("/uploads")) return Json("{\"file_id\":\"f1\"}");
+        if (request.RequestUri.AbsolutePath.EndsWith("/messages"))
+        {
+            using var body = JsonDocument.Parse(await request.Content!.ReadAsStringAsync(ct));
+            if (body.RootElement.GetProperty("screen").GetString() != "f1") throw new Exception("screen id missing");
+            return Json("{\"job_id\":\"j1\"}");
+        }
+        const string snapshot = "event: snapshot\ndata: {\"job_id\":\"j1\",\"run_id\":\"r1\",\"text\":\"가\",\"moves\":[{\"at\":1,\"x\":42,\"y\":5}]}\n\n";
+        return new(HttpStatusCode.OK) { Content = new StringContent(snapshot + snapshot, Encoding.UTF8, "text/event-stream") };
+    }
+    private static HttpResponseMessage Json(string value) => new(HttpStatusCode.OK) { Content = new StringContent(value, Encoding.UTF8, "application/json") };
+}
 
 sealed class FakeHandler(string token) : HttpMessageHandler
 {
@@ -176,6 +360,11 @@ sealed class FakeHandler(string token) : HttpMessageHandler
             return Json("{\"device_id\":\"d1\",\"name\":\"PC\"}");
         }
         if (request.Headers.Authorization?.ToString() != "Bearer " + token) throw new Exception("bearer header");
+        if (path == "/api/conversations/c1/uploads")
+        {
+            if (request.Method != HttpMethod.Post || request.RequestUri!.Query != "?name=screen.png" || request.Content?.Headers.ContentType?.MediaType != "image/png" || !(await request.Content.ReadAsByteArrayAsync(ct)).SequenceEqual(new byte[] { 1, 2, 3 })) throw new Exception("screen upload request");
+            return Json("{\"file_id\":\"f1\"}");
+        }
         if (path == "/api/device/presence") return new HttpResponseMessage(HttpStatusCode.NoContent);
         if (path == "/api/events") return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(": keep-alive\r\nevent: hello\r\ndata: {\"text\":\"안녕😀\"}\r\n\r\nevent: current\ndata: {\"text\":\ndata: \"끝\"}\n\n", Encoding.UTF8, "text/event-stream") };
         return new HttpResponseMessage(HttpStatusCode.Forbidden) { Content = new StringContent("{\"error\":{\"code\":\"device_scope\"}}", Encoding.UTF8, "application/json") };

@@ -19,6 +19,7 @@ internal sealed class ServerClient : IDisposable
     private readonly HttpClient http;
     private readonly string token;
     internal Uri BaseUri { get; }
+    internal bool SameDevice(ServerClient other) => BaseUri == other.BaseUri && token == other.token;
     internal bool Matches(DeviceCredential credential) => credential.Server == BaseUri.ToString() && credential.Token == token;
     internal ServerClient(string address, string token) : this(address, token, new HttpClientHandler { UseCookies = false, AllowAutoRedirect = false }) { }
     internal ServerClient(string address, string token, HttpMessageHandler handler)
@@ -46,6 +47,17 @@ internal sealed class ServerClient : IDisposable
     internal async Task<JsonElement> SendAsync(HttpMethod method, string path, object? body, CancellationToken ct)
     {
         using var request = Request(method, path, body);
+        using var response = await http.SendAsync(request, ct);
+        return await ReadAsync(response, ct);
+    }
+    internal async Task<JsonElement> UploadScreenAsync(string conversationId, byte[] bytes, string contentType, CancellationToken ct)
+    {
+        if (contentType is not ("image/png" or "image/jpeg")) throw new ArgumentException("Unsupported screen image format.", nameof(contentType));
+        if (bytes.Length == 0 || bytes.Length > 8 * 1024 * 1024) throw new ArgumentException("Invalid screen image size.", nameof(bytes));
+        string name = contentType == "image/png" ? "screen.png" : "screen.jpg";
+        using var request = Request(HttpMethod.Post, "/api/conversations/" + Uri.EscapeDataString(conversationId) + "/uploads?name=" + name);
+        request.Content = new ByteArrayContent(bytes);
+        request.Content.Headers.ContentType = new MediaTypeHeaderValue(contentType);
         using var response = await http.SendAsync(request, ct);
         return await ReadAsync(response, ct);
     }

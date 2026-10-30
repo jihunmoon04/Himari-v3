@@ -7,10 +7,13 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <EnableDefaultApplicationDefinition>true</EnableDefaultApplicationDefinition>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <NoWarn>$(NoWarn);WFO0003</NoWarn>
   </PropertyGroup>
   <ItemGroup>
     <Resource Include="..\animation-preview\pixel\moods\*.png" Link="Assets\%(Filename)%(Extension)" />
     <Resource Include="..\animation-preview\pixel\blink.png" Link="Assets\blink.png" />
     <Resource Include="..\animation-preview\pixel\talk.png" Link="Assets\talk.png" />
+    <Resource Include="Assets\himari.json" />
   </ItemGroup>
 </Project>
