@@ -12,6 +12,7 @@ public partial class MainWindow
     private sealed record LocalScreen(string FileId, ScreenGeometry Geometry, DateTimeOffset CapturedAt, bool Ready);
     private sealed record MoveJob(string ConversationId, MovePlayback Playback);
     private readonly Dictionary<string, LocalScreen> localScreens = new();
+    private readonly Dictionary<string, string> previousScreenIds = new();
     private readonly Dictionary<string, MoveJob> moveJobs = new();
     private readonly MoveJobLifetime moveLifetime = new();
     private readonly Dictionary<string, string> moveVerifications = new();
@@ -51,13 +52,17 @@ public partial class MainWindow
 
     private async Task<LocalScreen?> FindLatestLocalScreen(ServerClient server, string conversation, string jobId, CancellationToken ct, LocalScreen? expected = null)
     {
-        string? id = await ScreenHistory.LatestReadyIdAsync(server, conversation, jobId, ct, expected?.FileId);
+        // A text-only follow-up has no new attachment. Pin the last locally
+        // accepted screen for this conversation before awaiting server reads.
+        string? previous = previousScreenIds.GetValueOrDefault(conversation);
+        string? id = await ScreenHistory.LatestReadyIdAsync(server, conversation, jobId, ct, expected?.FileId, previous);
         return id is not null && localScreens.TryGetValue(id, out var screen) && screen.Ready ? screen : null;
     }
 
     private void BeginMoveJob(string conversation, string? jobId, LocalScreen? screen)
     {
         if (string.IsNullOrEmpty(jobId) || screen is null || !screen.Ready || !moveLifetime.CanBind(jobId)) return;
+        previousScreenIds[conversation] = screen.FileId;
         if (!moveJobs.ContainsKey(jobId)) moveJobs[jobId] = new(conversation, new(jobId, screen.Geometry, screen.CapturedAt));
         if (earlyMoves.TryGetValue(conversation, out var buffered))
         {

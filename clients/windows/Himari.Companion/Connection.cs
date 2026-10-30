@@ -120,7 +120,7 @@ public partial class MainWindow
             if (!switchApproved && !ConfirmDeviceSwitch())
             { local.Dispose(); return; }
             // A different identity is discarded only after an explicit decision.
-            moveJobs.Clear(); localScreens.Clear(); earlyMoves.Clear(); moveVerifications.Clear(); moveLifetime.Reset();
+            moveJobs.Clear(); localScreens.Clear(); previousScreenIds.Clear(); earlyMoves.Clear(); moveVerifications.Clear(); moveLifetime.Reset();
             submittedScreen = null; submittedConversation = null; unresolvedScreen = null; unknownText = null;
         }
         recoveryOwner = local;
@@ -305,11 +305,13 @@ public partial class MainWindow
                 response = await local.SendAsync(HttpMethod.Post, PathFor(context.ConversationId) + "/messages", screen is null ? new { text } : new { text, screen = screen.FileId }, ct);
                 if (recoveryOwner?.SameDevice(local) != true) return;
                 unresolvedScreen = null;
+                if (screen is { Ready: true }) previousScreenIds[context.ConversationId] = screen.FileId;
             }
             catch (ApiException ex) when (screen is not null && ex.Code == "screen_already_sent")
             {
                 if (recoveryOwner?.SameDevice(local) != true) return;
                 unresolvedScreen = null;
+                if (screen.Ready) previousScreenIds[context.ConversationId] = screen.FileId;
                 var detail = await local.SendAsync(HttpMethod.Get, PathFor(context.ConversationId), null, ct);
                 await RecoverMoveJob(context.ConversationId, Str(Prop(detail, "job"), "job_id"), local, ct);
                 if (context.IsCurrent(client, currentConversation, connected)) { if (context.CanClear(client, currentConversation, connected, inputRevision)) Input.Clear(); await ReadConversation(context.ConversationId, ct); Status.Text = "이전에 보낸 화면 메시지를 확인했습니다."; }

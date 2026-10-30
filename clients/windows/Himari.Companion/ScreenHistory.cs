@@ -16,8 +16,9 @@ internal static class ScreenHistory
         var detail = await server.SendAsync(HttpMethod.Get, PathFor(conversation), null, ct);
         return ConversationView.IsRunning(detail) ? Str(Prop(detail, "job"), "job_id") : null;
     }
-    internal static async Task<string?> LatestReadyIdAsync(ServerClient server, string conversation, string jobId, CancellationToken ct, string? expectedFileId = null)
+    internal static async Task<string?> LatestReadyIdAsync(ServerClient server, string conversation, string jobId, CancellationToken ct, string? expectedFileId = null, string? previousFileId = null)
     {
+        expectedFileId ??= previousFileId;
         async Task<JsonElement> Detail() => await server.SendAsync(System.Net.Http.HttpMethod.Get, PathFor(conversation), null, ct);
         bool SameJob(JsonElement detail) => Str(Prop(detail, "job"), "job_id") == jobId && (ConversationView.IsRunning(detail) || expectedFileId is not null);
         var detail = await Detail();

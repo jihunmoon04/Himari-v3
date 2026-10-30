@@ -4,17 +4,23 @@ using System.Text.Json;
 using Himari.Companion;
 
 static void Check(bool value, string message) { if (!value) throw new Exception(message); }
-foreach (string quickScenario in new[] { "completed", "different-job", "different-screen", "no_sandbox" })
+foreach (bool textOnlyFollowUp in new[] { false, true })
+foreach (string quickScenario in new[] { "completed", "already-completed", "different-job", "different-screen", "no_sandbox", "view_expired" })
 {
     var verifyingJob = new MoveJobLifetime();
     Check(verifyingJob.ReserveVerification("j1"), "reserve before asynchronous screen lookup");
-    using var quick = new ServerClient("https://example.com/", "test", new QuickCompletionHandler(quickScenario, () => { verifyingJob.End("j1"); verifyingJob.CompleteLive("j1"); }));
-    var file = await ScreenHistory.LatestReadyIdAsync(quick, "c", "j1", CancellationToken.None, "f1");
-    Check(file == (quickScenario == "completed" ? "f1" : null), "screen lookup finishing after done still requires exact job, screen and readiness: " + quickScenario);
+    using var quick = new ServerClient("https://example.com/", "test", new QuickCompletionHandler(quickScenario, () => { verifyingJob.End("j1"); verifyingJob.CompleteLive("j1"); }, textOnlyFollowUp));
+    var file = await ScreenHistory.LatestReadyIdAsync(quick, "c", "j1", CancellationToken.None,
+        expectedFileId: textOnlyFollowUp ? null : "f1", previousFileId: textOnlyFollowUp ? "f1" : null);
+    Check(file == (quickScenario is "completed" or "already-completed" ? "f1" : null), "screen lookup after completion requires exact job, screen and readiness: " + quickScenario + ", textOnly=" + textOnlyFollowUp);
     Check(!verifyingJob.CanReceive("j1") && verifyingJob.CanBind("j1"), "in-flight verification can bind buffered moves without reopening live");
     verifyingJob.FinishVerification("j1");
     Check(!verifyingJob.CanBind("j1") && !verifyingJob.ReserveVerification("j1"), "completion cannot be resurrected after verification retires");
 }
+using (var missingPrevious = new ServerClient("https://example.com/", "test", new QuickCompletionHandler("completed", () => { })))
+    Check(await ScreenHistory.LatestReadyIdAsync(missingPrevious, "c", "j1", CancellationToken.None) is null, "completed follow-up without local previous screen is rejected");
+using (var newScreenWins = new ServerClient("https://example.com/", "test", new QuickCompletionHandler("completed", () => { })))
+    Check(await ScreenHistory.LatestReadyIdAsync(newScreenWins, "c", "j1", CancellationToken.None, "new-f2", "f1") is null, "new attachment takes priority; do not fall back to older screen on mismatch");
 // Both streams can end while the first animation is still blocked.
 var orderedLifetime = new MoveJobLifetime();
 var firstAnimation = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -333,7 +339,7 @@ using (var screenClient = new ServerClient("https://example.com/", "test", new S
     Check(collected.Count == 1 && collected[0].X == 42, "PR 126 upload, message job id and reconnect snapshot");
 }
 
-sealed class QuickCompletionHandler(string scenario, Action complete) : HttpMessageHandler
+sealed class QuickCompletionHandler(string scenario, Action complete, bool textOnlyFollowUp = false) : HttpMessageHandler
 {
     private int detailReads;
     protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
@@ -342,12 +348,14 @@ sealed class QuickCompletionHandler(string scenario, Action complete) : HttpMess
         if (request.RequestUri!.AbsolutePath.EndsWith("/events"))
         {
             complete();
-            value = JsonSerializer.Serialize(new { items = new[] { new { kind = "user_message", attachments = new[] { new { file_id = scenario == "different-screen" ? "f2" : "f1", screen = true, image = new { state = scenario == "no_sandbox" ? "no_sandbox" : "ready" } } } } } });
+            var priorScreen = new { kind = "user_message", attachments = new[] { new { file_id = scenario == "different-screen" ? "f2" : "f1", screen = true, image = new { state = scenario is "no_sandbox" or "view_expired" ? scenario : "ready" } } } };
+            object[] history = textOnlyFollowUp ? [priorScreen, new { kind = "user_message", text = "follow-up without screen", attachments = Array.Empty<object>() }] : [priorScreen];
+            value = JsonSerializer.Serialize(new { items = history });
         }
         else
         {
             detailReads++;
-            value = JsonSerializer.Serialize(new { conversation = new { last_sequence = 1 }, job = new { job_id = detailReads > 1 && scenario == "different-job" ? "j2" : "j1", running = detailReads == 1 } });
+            value = JsonSerializer.Serialize(new { conversation = new { last_sequence = textOnlyFollowUp ? 2 : 1 }, job = new { job_id = detailReads > 1 && scenario == "different-job" ? "j2" : "j1", running = detailReads == 1 && scenario != "already-completed" } });
         }
         return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(value, Encoding.UTF8, "application/json") });
     }
