@@ -195,6 +195,58 @@ internal static class Program
             foreign.Dispose();
             recovery.Close();
         }
+        foreach (bool doneBeforeAcceptance in new[] { true, false })
+        foreach (bool hasLiveBody in new[] { false, true })
+        {
+            var ordering = new MainWindow();
+            object? Call(string method, params object?[] args) => typeof(MainWindow).GetMethod(method, BindingFlags.NonPublic | BindingFlags.Instance)!.Invoke(ordering, args);
+            void Field(string field, object? value) => typeof(MainWindow).GetField(field, BindingFlags.NonPublic | BindingFlags.Instance)!.SetValue(ordering, value);
+            void Until(Func<bool> ready)
+            {
+                var pendingFrame = new DispatcherFrame(); var poll = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(10) };
+                var deadline = DateTime.UtcNow.AddSeconds(5);
+                poll.Tick += (_, _) => { if (ready() || DateTime.UtcNow >= deadline) pendingFrame.Continue = false; };
+                if (!ready()) { poll.Start(); Dispatcher.PushFrame(pendingFrame); poll.Stop(); }
+                Check(ready(), "ordered delivery operation completes within test deadline");
+            }
+            bool Sending() => (bool)typeof(MainWindow).GetField("sending", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(ordering)!;
+            bool LiveActive() => ((Dictionary<string, CancellationTokenSource>)typeof(MainWindow).GetField("liveStreams", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(ordering)!).ContainsKey("c");
+            var transport = new ReplyReconnectHandler { DeferAcceptance = true };
+            var server = new ServerClient("https://example.com/", "device-one", transport);
+            using var connectionToken = new CancellationTokenSource();
+            Field("client", server); Field("recoveryOwner", server); Field("connection", connectionToken); Field("currentConversation", "c"); Field("deviceId", "d");
+            var orderingSettings = (Window)typeof(MainWindow).GetField("settings", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(ordering)!;
+            ((CheckBox)orderingSettings.FindName("ScreenSharing")).IsChecked = false;
+            var answer = (FrameworkElement)ordering.FindName("BubblePanel");
+            var editor = (TextBox)ordering.FindName("Input");
+            var timer = (DispatcherTimer)typeof(MainWindow).GetField("bubbleTimer", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(ordering)!;
+            Call("SetConnected", true, "연결됨"); editor.Text = "빠른 답변을 기다리는 질문";
+            Call("SendMessage"); Until(() => transport.Posts == 1);
+            Check(Sending() && answer.Visibility == Visibility.Collapsed, "POST is accepted on server while its HTTP response is deliberately held");
+            if (!doneBeforeAcceptance)
+            {
+                transport.ReleaseAcceptance(); Until(() => !Sending());
+                Check(answer.Visibility == Visibility.Collapsed && !timer.IsEnabled, "202 for a running job does not open historical text or start reading timer");
+            }
+            transport.Complete = true;
+            Call("EndMoveJob", "c", "j");
+            transport.Live = (hasLiveBody ? "event: snapshot\ndata: {\"job_id\":\"j\",\"run_id\":\"r\",\"text\":\"복구된 최종 답변\",\"moods\":[]}\n\n" : "") + "event: done\ndata: {}\n\n";
+            Call("StartLive", "c", server, connectionToken.Token, "j"); Until(() => !LiveActive());
+            if (doneBeforeAcceptance)
+            {
+                Check(Sending() && (answer.Visibility == Visibility.Visible) == hasLiveBody, "job ended and Live done finish before HTTP 202 is released");
+                if (hasLiveBody) Call("CloseBubble");
+                transport.ReleaseAcceptance(); Until(() => !Sending());
+            }
+            bool shouldShow = !doneBeforeAcceptance || !hasLiveBody;
+            Check((answer.Visibility == Visibility.Visible) == shouldShow && timer.IsEnabled == shouldShow, "both delivery orders recover unread finals once and preserve closure of already displayed Live");
+            Check(((TextBlock)ordering.FindName("Message")).Text == "복구된 최종 답변", "ordered delivery leaves the correct final text");
+            Call("CloseBubble");
+            var refresh = (Task)Call("ReadConversation", "c", connectionToken.Token)!;
+            Until(() => refresh.IsCompleted); refresh.GetAwaiter().GetResult();
+            Check(answer.Visibility == Visibility.Collapsed && !timer.IsEnabled, "later refresh does not reopen the ordered delivery answer");
+            ordering.Close();
+        }
         app.Shutdown();
         Console.WriteLine("WPF keyboard, synthetic IME, dual-bubble layout and reply reconnect checks passed.");
     }
@@ -205,6 +257,9 @@ internal sealed class ReplyReconnectHandler : HttpMessageHandler
     internal bool Complete;
     internal int Posts, Sequence = 1;
     internal string Job = "old", Live = "";
+    internal bool DeferAcceptance;
+    private readonly TaskCompletionSource<HttpResponseMessage> acceptance = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    internal void ReleaseAcceptance() => acceptance.SetResult(new HttpResponseMessage(HttpStatusCode.Accepted) { Content = new StringContent("{\"job_id\":\"j\"}", Encoding.UTF8, "application/json") });
     private bool liveSent;
     // Reconnection replaces HttpClient but the fake server's state survives it.
     protected override void Dispose(bool disposing) { }
@@ -213,7 +268,11 @@ internal sealed class ReplyReconnectHandler : HttpMessageHandler
         string body; var status = HttpStatusCode.OK;
         string path = request.RequestUri!.AbsolutePath;
         if (request.Method == HttpMethod.Post && path.EndsWith("/messages"))
-        { Posts++; Job = "j"; Sequence = 2; body = "{\"job_id\":\"j\"}"; status = HttpStatusCode.Accepted; }
+        {
+            Posts++; Job = "j"; Sequence = 2;
+            if (DeferAcceptance) return acceptance.Task.WaitAsync(ct);
+            body = "{\"job_id\":\"j\"}"; status = HttpStatusCode.Accepted;
+        }
         else if (path.EndsWith("/live"))
         {
             if (liveSent && !Live.Contains("event: done")) return UntilCancelled(ct);

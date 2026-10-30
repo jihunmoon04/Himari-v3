@@ -214,13 +214,19 @@ public partial class MainWindow
         if (currentConversation is not null && connection is not null)
             try { await ReadConversation(currentConversation, connection.Token); } catch (Exception ex) { ShowError(ex); }
     }
-    private async Task ReadConversation(string id, CancellationToken ct)
+    private Task ReadConversation(string id, CancellationToken ct) => ReadConversationState(id, ct, completedReplyOnly: false);
+    private async Task ReadConversationState(string id, CancellationToken ct, bool completedReplyOnly)
     {
         var local = client;
         if (local is null) return;
         var detail = await local.SendAsync(HttpMethod.Get, PathFor(id), null, ct);
         var question = ConversationView.Question(detail);
         if (ct.IsCancellationRequested || !ReferenceEquals(local, client) || id != currentConversation) return;
+        // Acceptance can arrive after job ended and a bodyless Live done. Probe
+        // again once the waiter exists, leaving a still-running display alone.
+        if (completedReplyOnly && (ConversationView.IsRunning(detail) ||
+            !pendingReplies.TryGetValue(id, out var awaited) || !awaited.Server.SameDevice(local) ||
+            Str(Prop(detail, "job"), "job_id") != awaited.Job)) return;
         StopButton.Visibility = ConversationView.IsRunning(detail) ? Visibility.Visible : Visibility.Collapsed;
         if (connected) Status.Text = ConversationView.IsRunning(detail) ? "이 대화는 작업 중입니다. 새 대화를 열 수 있습니다." : "연결됨";
         if (question is not null) { awaitingAnswer = true; Message.Text = question; OpenBubble(); OpenComposer(); if (IsActive) Input.Focus(); return; }
@@ -400,6 +406,12 @@ public partial class MainWindow
             if (context.IsCurrent(client, currentConversation, connected)) ShowSentMessage(text);
             if (context.IsCurrent(client, currentConversation, connected) && !liveDisplays.ContainsKey(context.ConversationId) && (jobId is null || moveLifetime.CanStart(jobId)))
             { Status.Text = screenFailed ? "화면을 보내지 못해 글만 보냈습니다." : "답변을 기다리는 중…"; SetMood("thinking"); }
+            if (context.IsCurrent(client, currentConversation, connected) && jobId is not null &&
+                pendingReplies.TryGetValue(context.ConversationId, out var pendingReply) && pendingReply.Job == jobId)
+            {
+                await ReadConversationState(context.ConversationId, ct, completedReplyOnly: true);
+                if (screenFailed && context.IsCurrent(client, currentConversation, connected)) Status.Text = "화면을 보내지 못해 글만 보냈습니다.";
+            }
         }
         catch (Exception ex)
         {
