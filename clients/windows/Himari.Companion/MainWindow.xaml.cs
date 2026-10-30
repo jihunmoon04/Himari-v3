@@ -99,6 +99,7 @@ public partial class MainWindow : Window
     private void OpenComposer()
     {
         if (UserBubble.Visibility != Visibility.Visible && string.IsNullOrWhiteSpace(Input.Text)) { UserSent.Text = ""; UserSent.Visibility = Visibility.Collapsed; }
+        UserSent.Visibility = Visibility.Collapsed;
         userBubbleTimer.Stop(); UserBubble.Visibility = Visibility.Visible; ComposerPanel.Visibility = Visibility.Visible; UpdateSceneBounds();
     }
     private void ConversationMenuClick(object sender, RoutedEventArgs e) { OpenComposer(); ChatTools.Visibility = Visibility.Visible; ChatTools.IsExpanded = true; }

@@ -123,12 +123,18 @@ public partial class MainWindow
         { Status.Text = "이전 작업 창으로 돌아가지 못했습니다. Alt+Tab으로 전환해 주세요."; return; }
         System.Windows.Input.Keyboard.ClearFocus();
         if (!string.IsNullOrWhiteSpace(Input.Text)) UserBubble.Visibility = Visibility.Collapsed;
-        else { ComposerPanel.Visibility = Visibility.Collapsed; ScheduleUserBubbleClose(); }
+        else
+        {
+            ComposerPanel.Visibility = Visibility.Collapsed;
+            UserSent.Visibility = string.IsNullOrEmpty(UserSent.Text) ? Visibility.Collapsed : Visibility.Visible;
+            if (UserSent.Visibility != Visibility.Visible) UserBubble.Visibility = Visibility.Collapsed;
+            ScheduleUserBubbleClose();
+        }
     }
     private void CharacterSizeChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
     {
         if (Character is not null) Character.Height = e.NewValue;
-        if (DialogueStack is not null) DialogueStack.Margin = new Thickness(16, 0, 16, Math.Max(0, e.NewValue - 10));
+        if (DialogueStack is not null) UpdateDialoguePosition();
         UpdateSceneBounds(); SchedulePreferencesSave();
     }
     private void PresentationChanged()
@@ -136,11 +142,22 @@ public partial class MainWindow
         if (settings is null) return;
         bool flip = settings.FacingLeft.IsChecked == true;
         Character.RenderTransform = new ScaleTransform(flip ? -1 : 1, 1);
-        BubblePanel.HorizontalAlignment = flip ? System.Windows.HorizontalAlignment.Right : System.Windows.HorizontalAlignment.Left;
-        UserBubble.HorizontalAlignment = flip ? System.Windows.HorizontalAlignment.Left : System.Windows.HorizontalAlignment.Right;
-        BubblePanel.TailRight = !flip; UserBubble.TailRight = flip; FlipMenu.IsChecked = flip;
-        ScreenSharingIndicator.Text = settings.ScreenSharing.IsChecked == true ? "▣ 화면 함께 전송" : "화면 첨부 꺼짐";
+        UpdateDialoguePosition();
+        BubblePanel.TailRight = flip; UserBubble.TailRight = !flip; FlipMenu.IsChecked = flip;
+        bool sharing = settings.ScreenSharing.IsChecked == true;
+        ScreenSharingIndicator.Text = sharing ? "▣" : "▢";
+        string sharingDescription = sharing ? "화면 함께 전송 켜짐" : "화면 함께 전송 꺼짐";
+        ScreenSharingIndicator.ToolTip = sharingDescription + " · 설정에서 변경";
+        System.Windows.Automation.AutomationProperties.SetName(ScreenSharingIndicator, sharingDescription);
         UpdateBubbleBounds(); SchedulePreferencesSave();
+    }
+    private void UpdateDialoguePosition()
+    {
+        bool flip = settings.FacingLeft.IsChecked == true;
+        DialogueStack.HorizontalAlignment = flip ? System.Windows.HorizontalAlignment.Left : System.Windows.HorizontalAlignment.Right;
+        double bottom = Math.Max(0, Character.Height - 10);
+        DialogueStack.Margin = flip ? new Thickness(50, 0, 0, bottom) : new Thickness(0, 0, 50, bottom);
+        Character.Margin = flip ? new Thickness(80, 0, 0, 4) : new Thickness(0, 0, 80, 4);
     }
     private void UpdateSceneBounds()
     {
@@ -180,7 +197,10 @@ public partial class MainWindow
     private void CloseBubble() { bubbleTimer.Stop(); BubblePanel.Visibility = Visibility.Collapsed; ReturnFromMove(); UpdateBubbleBounds(); }
     private void ShowSentMessage(string text)
     {
-        UserSent.Text = string.IsNullOrEmpty(text) ? "화면을 보냈습니다." : text; UserSent.Visibility = Visibility.Visible;
+        UserSent.Text = string.IsNullOrEmpty(text) ? "화면을 보냈습니다." : text;
+        bool hasDraft = !string.IsNullOrEmpty(Input.Text);
+        UserSent.Visibility = hasDraft ? Visibility.Collapsed : Visibility.Visible;
+        ComposerPanel.Visibility = hasDraft ? Visibility.Visible : Visibility.Collapsed;
         UserBubble.Visibility = Visibility.Visible; awaitingAnswer = false;
         ScheduleUserBubbleClose(); UpdateSceneBounds();
     }

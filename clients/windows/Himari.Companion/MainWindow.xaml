@@ -1,32 +1,37 @@
 <Window x:Class="Himari.Companion.MainWindow" xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" xmlns:local="clr-namespace:Himari.Companion" Title="히마리" Width="520" Height="700" WindowStyle="None" AllowsTransparency="True" Background="Transparent" ResizeMode="NoResize" Topmost="True" ShowInTaskbar="True" FontFamily="Malgun Gothic, Segoe UI" FontSize="13" UseLayoutRounding="True">
   <Grid>
     <TextBlock x:Name="Status" Text="연결되지 않음" Visibility="Collapsed"/>
-    <StackPanel x:Name="DialogueStack" VerticalAlignment="Bottom" Margin="16,0,16,320">
-      <local:PixelBubble x:Name="BubblePanel" Width="320" MaxHeight="320" HorizontalAlignment="Left" Visibility="Collapsed">
+    <StackPanel x:Name="DialogueStack" Width="340" HorizontalAlignment="Right" VerticalAlignment="Bottom" Margin="0,0,50,320">
+      <local:PixelBubble x:Name="BubblePanel" Width="300" MaxHeight="320" HorizontalAlignment="Center" TailRight="False" Visibility="Collapsed">
         <Grid><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
           <TextBlock Text="히마리" FontSize="11" FontWeight="SemiBold" Foreground="#71668F" Margin="0,0,0,7"/>
           <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"><TextBlock x:Name="Message" Text="" TextWrapping="Wrap" FontSize="15" LineHeight="23" Foreground="#34304A"/></ScrollViewer>
           <Button x:Name="StopButton" Grid.Row="2" Width="30" Height="28" MinHeight="28" Padding="6" Margin="0,8,0,0" HorizontalAlignment="Right" ToolTip="답변 멈춤" AutomationProperties.Name="답변 멈춤" Click="CancelClick" Visibility="Collapsed"><local:PixelGlyph Stop="True" Width="16" Height="16"/></Button>
         </Grid>
       </local:PixelBubble>
-      <local:PixelBubble x:Name="UserBubble" Width="300" MaxHeight="260" HorizontalAlignment="Right" IsUser="True" TailRight="False" Visibility="Collapsed" Margin="0,8,0,0">
+      <local:PixelBubble x:Name="UserBubble" Width="300" MaxHeight="260" HorizontalAlignment="Center" IsUser="True" TailRight="True" Visibility="Collapsed" Margin="0,8,0,0">
         <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"><StackPanel>
           <TextBlock Text="선생님" FontSize="11" FontWeight="SemiBold" Foreground="#71668F" Margin="0,0,0,7"/>
           <TextBlock x:Name="UserSent" TextWrapping="Wrap" FontSize="14" LineHeight="22" Margin="0,0,0,8" Visibility="Collapsed"/>
           <StackPanel x:Name="ComposerPanel" Visibility="Collapsed">
             <Expander x:Name="ChatTools" Header="대화 선택" Visibility="Collapsed" Margin="0,0,0,6"><DockPanel><Button DockPanel.Dock="Right" Margin="6,0,0,0" Content="새 대화" Click="NewConversationClick"/><ComboBox x:Name="Conversations" DisplayMemberPath="Title" SelectionChanged="ConversationChanged" AutomationProperties.Name="대화 선택"/></DockPanel></Expander>
-            <TextBox x:Name="Input" MaxLength="64000" MinHeight="44" MaxHeight="110" AcceptsReturn="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto" TextChanged="InputChanged" ToolTip="Enter로 보내기 · Shift+Enter로 줄바꿈" AutomationProperties.Name="히마리에게 보낼 메시지"/>
-            <Button x:Name="SendButton" Width="30" Height="28" MinHeight="28" Padding="6" Margin="0,8,0,0" HorizontalAlignment="Right" ToolTip="보내기 · Enter" AutomationProperties.Name="보내기" Click="SendClick"><local:PixelGlyph Width="16" Height="16"/></Button>
+            <TextBox x:Name="Input" MaxLength="64000" MinHeight="44" MaxHeight="110" BorderThickness="0" Background="Transparent" Padding="0" AcceptsReturn="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto" TextChanged="InputChanged" ToolTip="Enter로 보내기 · Shift+Enter로 줄바꿈" AutomationProperties.Name="히마리에게 보낼 메시지"/>
+            <DockPanel Margin="0,8,0,0" LastChildFill="False">
+              <Button x:Name="SendButton" DockPanel.Dock="Right" Width="30" Height="28" MinHeight="28" Padding="6" ToolTip="보내기 · Enter" AutomationProperties.Name="보내기" Click="SendClick"><local:PixelGlyph Width="16" Height="16"/></Button>
+              <TextBlock x:Name="ScreenSharingIndicator" Text="▣" Foreground="#776743" FontSize="10" VerticalAlignment="Center" ToolTip="화면 함께 전송 켜짐 · 설정에서 변경" AutomationProperties.Name="화면 함께 전송 켜짐"/>
+            </DockPanel>
           </StackPanel>
-          <DockPanel Margin="0,5,0,0">
-            <Button DockPanel.Dock="Right" Width="28" Height="28" MinHeight="28" Padding="0" Content="⚙" Background="Transparent" ToolTip="대화·화면 첨부 설정" AutomationProperties.Name="대화 설정" Click="SettingsClick"/>
-            <TextBlock x:Name="ScreenSharingIndicator" Text="▣ 화면 함께 전송" Foreground="#776743" FontSize="10" VerticalAlignment="Center" TextWrapping="Wrap"/>
-          </DockPanel>
-          <TextBlock Text="{Binding Text, ElementName=Status}" FontSize="11" Foreground="#625E76" TextWrapping="Wrap" LineHeight="17" Margin="0,4,0,0"/>
+          <TextBlock x:Name="UserStatus" Text="{Binding Text, ElementName=Status}" FontSize="11" Foreground="#625E76" TextWrapping="Wrap" LineHeight="17" Margin="0,4,0,0">
+            <TextBlock.Style><Style TargetType="TextBlock"><Style.Triggers>
+              <Trigger Property="Text" Value=""><Setter Property="Visibility" Value="Collapsed"/></Trigger>
+              <Trigger Property="Text" Value="연결됨"><Setter Property="Visibility" Value="Collapsed"/></Trigger>
+              <Trigger Property="Text" Value="답변을 기다리는 중…"><Setter Property="Visibility" Value="Collapsed"/></Trigger>
+            </Style.Triggers></Style></TextBlock.Style>
+          </TextBlock>
         </StackPanel></ScrollViewer>
       </local:PixelBubble>
     </StackPanel>
-    <Image x:Name="Character" Height="330" HorizontalAlignment="Center" VerticalAlignment="Bottom" Margin="0,0,0,4" RenderTransformOrigin="0.5,0.5" RenderOptions.BitmapScalingMode="NearestNeighbor" MouseLeftButtonDown="CharacterMouseDown" MouseMove="CharacterMouseMove" MouseLeftButtonUp="CharacterMouseUp" ToolTip="클릭해 대화 · 우클릭해 메뉴 · 드래그해 이동">
+    <Image x:Name="Character" Height="330" HorizontalAlignment="Center" VerticalAlignment="Bottom" Margin="0,0,80,4" RenderTransformOrigin="0.5,0.5" RenderOptions.BitmapScalingMode="NearestNeighbor" MouseLeftButtonDown="CharacterMouseDown" MouseMove="CharacterMouseMove" MouseLeftButtonUp="CharacterMouseUp" ToolTip="클릭해 대화 · 우클릭해 메뉴 · 드래그해 이동">
       <Image.ContextMenu><ContextMenu>
         <MenuItem Header="대화 입력" Click="ChatClick"/><MenuItem Header="대화 선택" Click="ConversationMenuClick"/><MenuItem Header="새 대화" Click="NewConversationClick"/><MenuItem Header="대화 기록" Click="HistoryClick"/>
         <Separator/><MenuItem x:Name="FlipMenu" Header="좌우 반전" IsCheckable="True" Click="FlipClick"/><MenuItem Header="설정" Click="SettingsClick"/><MenuItem Header="말풍선 닫기" Click="CloseBubbleClick"/>
