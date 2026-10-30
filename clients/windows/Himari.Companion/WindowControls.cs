@@ -9,7 +9,7 @@ namespace Himari.Companion;
 
 public partial class MainWindow
 {
-    private const int HotKeyId = 0x4849, HotKeyMessage = 0x0312;
+    private const int HotKeyId = 0x4849, HotKeyMessage = 0x0312, RestoreCommand = 9;
     private HwndSource? hotKeySource;
     private bool preferencesLoaded, changingHotkey, sizingScene;
     private readonly HotkeyState hotkeyState = new();
@@ -28,6 +28,8 @@ public partial class MainWindow
     [DllImport("user32.dll")] private static extern bool SetForegroundWindow(IntPtr hwnd);
     [DllImport("user32.dll")] private static extern bool IsWindow(IntPtr hwnd);
     [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr hwnd);
+    [DllImport("user32.dll")] private static extern bool IsIconic(IntPtr hwnd);
+    [DllImport("user32.dll")] private static extern bool ShowWindow(IntPtr hwnd, int command);
     [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint processId);
 
     private bool OwnWindow(IntPtr hwnd)
@@ -94,7 +96,7 @@ public partial class MainWindow
         if (msg == HotKeyMessage && wParam.ToInt32() == HotKeyId)
         {
             var foreground = GetForegroundWindow();
-            if (OwnWindow(foreground)) ReturnToWork();
+            if (DialoguePolicy.HotkeyCloses(foreground == hwnd, ComposerPanel.Visibility == Visibility.Visible)) CloseChat();
             else
             {
                 workWindow.Remember(foreground, window => IsWindow(window) && !OwnWindow(window));
@@ -105,10 +107,9 @@ public partial class MainWindow
         }
         return IntPtr.Zero;
     }
-    private void ReturnToWork()
+    // Hiding the composer never depends on a previous window: without one Himari simply stays.
+    private void CloseChat()
     {
-        if (!workWindow.Return(window => IsWindow(window) && IsWindowVisible(window) && SetForegroundWindow(window)))
-        { Status.Text = "이전 작업 창으로 돌아가지 못했습니다. Alt+Tab으로 전환해 주세요."; return; }
         System.Windows.Input.Keyboard.ClearFocus();
         if (!string.IsNullOrWhiteSpace(Input.Text)) HideUserBubble();
         else
@@ -118,6 +119,12 @@ public partial class MainWindow
             if (UserSent.Visibility != Visibility.Visible) HideUserBubble();
             else ScheduleUserBubbleClose();
         }
+        workWindow.Return(window => IsWindow(window) && IsWindowVisible(window) && RestoreWindow(window));
+    }
+    private static bool RestoreWindow(IntPtr window)
+    {
+        if (IsIconic(window)) ShowWindow(window, RestoreCommand);
+        return SetForegroundWindow(window);
     }
     private void CharacterSizeChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
     {
