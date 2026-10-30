@@ -60,6 +60,7 @@ public partial class MainWindow
     {
         if (Character is not null) Character.Height = e.NewValue;
         if (BubblePanel is not null) BubblePanel.Margin = new Thickness(15, 0, 15, Math.Max(0, e.NewValue - 10));
+        if (BubblePanel is not null) BubblePanel.MaxHeight = Math.Max(200, Height - e.NewValue - 12);
         SchedulePreferencesSave();
     }
     private void SchedulePreferencesSave()

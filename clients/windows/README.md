@@ -1,5 +1,7 @@
 # HIMARI Windows 앱
 
+입력창에서 Enter는 전송, Shift+Enter는 줄바꿈이다. 말풍선 내용이 길면 스크롤해 읽을 수 있으며, 설정의 모든 탭도 작은 창에서 스크롤할 수 있다.
+
 PR 120에서 병합된 설계 rev. 5를 기준으로 만든 개발 중인 Windows 앱이다. .NET 10 Windows Desktop SDK가 필요하다. 서버 측 기기 API도 배포되어야 실제 연결할 수 있다.
 
 ```powershell

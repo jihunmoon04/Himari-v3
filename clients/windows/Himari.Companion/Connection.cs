@@ -243,7 +243,7 @@ public partial class MainWindow
         try { var created = await client.SendAsync(HttpMethod.Post, "/api/conversations", new { }, connection.Token); await RefreshConversations(Str(created, "id"), connection.Token); }
         catch (Exception ex) { ShowError(ex); }
     }
-    private void InputKeyDown(object sender, System.Windows.Input.KeyEventArgs e) { if (e.Key == Key.Enter) { e.Handled = true; SendMessage(); } }
+    private void InputKeyDown(object sender, System.Windows.Input.KeyEventArgs e) { if (e.Key == Key.Enter && !Keyboard.Modifiers.HasFlag(ModifierKeys.Shift)) { e.Handled = true; SendMessage(); } }
     private void InputChanged(object sender, System.Windows.Controls.TextChangedEventArgs e) => inputRevision++;
     private void SetCurrentConversation(string? id)
     {

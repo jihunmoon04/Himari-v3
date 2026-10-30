@@ -1,30 +1,50 @@
-<Window x:Class="Himari.Companion.SettingsWindow" xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" Title="히마리 설정" Width="540" Height="460" MinWidth="450" MinHeight="380" WindowStartupLocation="CenterOwner" Background="#F7F7FB">
-  <Grid Margin="20"><TabControl>
-    <TabItem Header="연결"><ScrollViewer VerticalScrollBarVisibility="Auto"><StackPanel Margin="16">
-      <TextBlock Text="기기 연결" FontSize="20" FontWeight="Bold"/>
-      <TextBlock x:Name="ConnectionStatus" Margin="0,10,0,10" TextWrapping="Wrap" Foreground="#58627B"/>
-      <StackPanel x:Name="PairPanel">
-        <TextBlock Text="서버 HTTPS 주소"/><TextBox x:Name="ServerAddress" Text="https://" Margin="0,4,0,10"/>
-        <TextBlock Text="Web에서 발급한 짝짓기 코드"/><TextBox x:Name="PairCode" Margin="0,4,0,10"/>
-        <Button x:Name="PairButton" Content="기기 연결" HorizontalAlignment="Left" Padding="14,6"/>
-      </StackPanel>
-      <WrapPanel Margin="0,14,0,0"><Button x:Name="ReconnectButton" Content="다시 연결" Padding="10,5" Margin="0,0,8,0"/><Button x:Name="ChangeServerButton" Content="연결 변경" Padding="10,5" Margin="0,0,8,0"/><Button x:Name="WebButton" Content="Web 열기" Padding="10,5"/></WrapPanel>
-    </StackPanel></ScrollViewer></TabItem>
-    <TabItem Header="캐릭터"><StackPanel Margin="16">
-      <TextBlock Text="캐릭터" FontSize="20" FontWeight="Bold"/>
-      <TextBlock Text="히마리 · 도트 시안" Margin="0,14,0,0"/>
-      <TextBlock Text="크기" Margin="0,14,0,3"/><Slider x:Name="SizeSlider" Minimum="200" Maximum="400" Value="330" TickFrequency="10"/>
-      <TextBlock Text="캐릭터를 끌어 위치를 바꿀 수 있습니다." TextWrapping="Wrap" Foreground="#58627B" Margin="0,6,0,0"/>
-      <CheckBox x:Name="MoveEnabled" Content="캐릭터 이동 허용" IsChecked="True" Margin="0,8,0,0"/>
-      <TextBlock Text="표정 미리보기" Margin="0,18,0,4"/><ComboBox x:Name="MoodSelector" Width="170" HorizontalAlignment="Left"/>
-      <Button x:Name="DemoButton" Content="가짜 대화 재생" HorizontalAlignment="Left" Padding="10,5" Margin="0,12,0,0"/>
-      <Button x:Name="MoveDemoButton" Content="이동 미리보기" HorizontalAlignment="Left" Padding="10,5" Margin="0,8,0,0"/>
-    </StackPanel></TabItem>
-    <TabItem Header="대화 화면"><StackPanel Margin="16">
-      <TextBlock Text="말풍선" FontSize="20" FontWeight="Bold"/>
-      <TextBlock x:Name="BubbleDescription" TextWrapping="Wrap" Margin="0,14,0,0"/>
-      <TextBlock Text="답변이 끝나면 읽을 시간을 둔 뒤 말풍선을 접습니다. 답변 영역을 펼쳐 긴 글을 스크롤할 수 있습니다." TextWrapping="Wrap" Margin="0,12,0,0" Foreground="#58627B"/>
-      <TextBlock Text="단축키: Ctrl+Alt+H" Margin="0,16,0,0"/>
-    </StackPanel></TabItem>
-  </TabControl></Grid>
+<Window x:Class="Himari.Companion.SettingsWindow" xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" Title="히마리 설정" Width="560" Height="540" MinWidth="460" MinHeight="420" WindowStartupLocation="CenterOwner" Background="#F7F5FA" FontFamily="Malgun Gothic, Segoe UI" FontSize="13" Foreground="#34304A" UseLayoutRounding="True">
+  <Grid Margin="22">
+    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+    <StackPanel Margin="0,0,0,18"><TextBlock Text="히마리 설정" FontSize="23" FontWeight="SemiBold"/><TextBlock Text="연결과 캐릭터, 대화 화면을 내게 맞게 조정하세요." Style="{StaticResource Hint}" Margin="0,5,0,0"/></StackPanel>
+    <TabControl Grid.Row="1" Background="Transparent" BorderThickness="0">
+      <TabItem Header="연결"><ScrollViewer VerticalScrollBarVisibility="Auto"><StackPanel Margin="0,14,8,0">
+        <Border Style="{StaticResource SectionCard}"><StackPanel>
+          <TextBlock Text="기기 연결" FontSize="16" FontWeight="SemiBold"/>
+          <Border Background="#F4F0FA" Padding="10,8" CornerRadius="3" Margin="0,12,0,0"><TextBlock x:Name="ConnectionStatus" TextWrapping="Wrap" Foreground="#51466F"/></Border>
+          <StackPanel x:Name="PairPanel" Margin="0,14,0,0">
+            <Label Content="서버 HTTPS 주소" Target="{Binding ElementName=ServerAddress}" Padding="0,0,0,5"/><TextBox x:Name="ServerAddress" Text="https://" Margin="0,0,0,12" AutomationProperties.Name="서버 HTTPS 주소"/>
+            <Label Content="짝짓기 코드" Target="{Binding ElementName=PairCode}" Padding="0,0,0,5"/><TextBox x:Name="PairCode" Margin="0,0,0,6" AutomationProperties.Name="짝짓기 코드"/>
+            <TextBlock Text="Web의 Devices 화면에서 발급한 코드를 입력하세요." Style="{StaticResource Hint}" FontSize="12"/>
+            <Button x:Name="PairButton" Content="기기 연결" Style="{StaticResource PrimaryButton}" HorizontalAlignment="Left" Margin="0,14,0,0"/>
+          </StackPanel>
+        </StackPanel></Border>
+        <WrapPanel><Button x:Name="ReconnectButton" Content="다시 연결" Margin="0,0,8,8"/><Button x:Name="ChangeServerButton" Content="연결 변경" Margin="0,0,8,8"/><Button x:Name="WebButton" Content="Web 열기" Margin="0,0,0,8"/></WrapPanel>
+      </StackPanel></ScrollViewer></TabItem>
+      <TabItem Header="캐릭터"><ScrollViewer VerticalScrollBarVisibility="Auto"><StackPanel Margin="0,14,8,0">
+        <Border Style="{StaticResource SectionCard}"><StackPanel>
+          <TextBlock Text="크기와 움직임" FontSize="16" FontWeight="SemiBold"/>
+          <TextBlock Text="히마리 · 도트 시안" Style="{StaticResource Hint}" Margin="0,5,0,14"/>
+          <DockPanel Margin="0,0,0,8"><TextBlock DockPanel.Dock="Right" Text="{Binding Value, ElementName=SizeSlider, StringFormat={}{0:0}}" Foreground="#61569B" FontWeight="SemiBold"/><TextBlock Text="캐릭터 크기"/></DockPanel>
+          <Slider x:Name="SizeSlider" Minimum="200" Maximum="400" Value="330" TickFrequency="10" IsSnapToTickEnabled="True" AutomationProperties.Name="캐릭터 크기"/>
+          <TextBlock Text="캐릭터를 끌어 원하는 위치에 놓을 수 있습니다." Style="{StaticResource Hint}" Margin="0,8,0,12"/>
+          <CheckBox x:Name="MoveEnabled" Content="캐릭터 이동 허용" IsChecked="True"/>
+          <TextBlock Text="화면을 설명할 때 해당 위치로 이동하고, 답변이 끝나면 돌아옵니다." Style="{StaticResource Hint}" FontSize="12" Margin="0,3,0,0"/>
+        </StackPanel></Border>
+        <Border Style="{StaticResource SectionCard}"><StackPanel>
+          <TextBlock Text="미리보기" FontSize="16" FontWeight="SemiBold"/>
+          <Label Content="표정" Target="{Binding ElementName=MoodSelector}" Padding="0,12,0,5"/><ComboBox x:Name="MoodSelector" Width="180" HorizontalAlignment="Left" AutomationProperties.Name="표정 미리보기"/>
+          <WrapPanel Margin="0,14,0,0"><Button x:Name="DemoButton" Content="대화 미리보기" Margin="0,0,8,8"/><Button x:Name="MoveDemoButton" Content="이동 미리보기" Margin="0,0,0,8"/></WrapPanel>
+        </StackPanel></Border>
+      </StackPanel></ScrollViewer></TabItem>
+      <TabItem Header="대화 화면"><ScrollViewer VerticalScrollBarVisibility="Auto"><StackPanel Margin="0,14,8,0">
+        <Border Style="{StaticResource SectionCard}"><StackPanel>
+          <TextBlock Text="말풍선" FontSize="16" FontWeight="SemiBold"/>
+          <TextBlock x:Name="BubbleDescription" TextWrapping="Wrap" Margin="0,12,0,0"/>
+          <TextBlock Text="답변이 끝나면 읽을 시간을 둔 뒤 말풍선을 접습니다. 긴 답변은 말풍선 안에서 스크롤해 읽을 수 있습니다." Style="{StaticResource Hint}" Margin="0,10,0,0"/>
+        </StackPanel></Border>
+        <Border Style="{StaticResource SectionCard}"><StackPanel>
+          <TextBlock Text="빠르게 대화하기" FontSize="16" FontWeight="SemiBold"/>
+          <TextBlock Text="Ctrl+Alt+H  ·  대화창 열기" Margin="0,14,0,8" FontWeight="SemiBold"/>
+          <TextBlock Text="Enter로 보내기 · Shift+Enter로 줄바꿈" Style="{StaticResource Hint}"/>
+          <TextBlock Text="입력창의 화면 첨부를 선택하면 보내는 순간의 화면이 함께 전송됩니다. 매번 첨부하려면 트레이에서 화면 같이 보기를 켜세요." Style="{StaticResource Hint}" Margin="0,12,0,0"/>
+        </StackPanel></Border>
+      </StackPanel></ScrollViewer></TabItem>
+    </TabControl>
+  </Grid>
 </Window>
