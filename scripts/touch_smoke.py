@@ -191,7 +191,7 @@ def main() -> None:
                     expect(page.locator("#sidebar-fullscreen")).to_be_visible()
                     assert page.locator("#sidebar-fullscreen").bounding_box()["x"] < page.locator("#sidebar-close").bounding_box()["x"]
                     page.locator("#sidebar-fullscreen").click()
-                    page.wait_for_function("document.fullscreenElement !== null")
+                    page.wait_for_function("() => document.fullscreenElement !== null")
                     if width < 1200:
                         assert page.locator(".sidebar-head").evaluate("e => parseFloat(getComputedStyle(e).paddingLeft) >= 72")
                     button_box = page.locator("#sidebar-close").bounding_box()
@@ -203,7 +203,7 @@ def main() -> None:
                     if width < 1100:
                         assert page.locator("#topbar").evaluate("e => parseFloat(getComputedStyle(e).paddingLeft) >= 72")
                     page.locator("#app-fullscreen").click()
-                    page.wait_for_function("document.fullscreenElement === null")
+                    page.wait_for_function("() => document.fullscreenElement === null")
                     if width < 1100:
                         page.set_viewport_size({"width": width, "height": 450})
                         expect(page.locator("#chat-files-toggle")).to_be_visible()
@@ -216,7 +216,7 @@ def main() -> None:
                         panel.get_by_role("button", name="Pen", exact=True).click()
                         page.set_viewport_size({"width": width, "height": 350})
                         page.locator("#composer-text").fill("multiline draft\n" * 30)
-                        page.wait_for_function("document.querySelector('#file-panel .pdf-view').clientHeight >= 40")
+                        page.wait_for_function("() => document.querySelector('#file-panel .pdf-view').clientHeight >= 40")
                         compose = page.locator("#composer").bounding_box()
                         main_box = page.locator("#main").bounding_box()
                         assert compose["y"] >= main_box["y"] and compose["y"] + compose["height"] <= main_box["y"] + main_box["height"] + 1
