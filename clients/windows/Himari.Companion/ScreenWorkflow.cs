@@ -14,6 +14,7 @@ public partial class MainWindow
     private readonly Dictionary<string, LocalScreen> localScreens = new();
     private readonly Dictionary<string, MoveJob> moveJobs = new();
     private readonly MoveJobLifetime moveLifetime = new();
+    private readonly Dictionary<string, string> moveVerifications = new();
     private LocalScreen? submittedScreen;
     private string? submittedConversation;
     private readonly Dictionary<string, List<(string Job, string Run, bool Snapshot, JsonElement Moves, int Length)>> earlyMoves = new();
@@ -48,32 +49,55 @@ public partial class MainWindow
         }
     }
 
-    private async Task<LocalScreen?> FindLatestLocalScreen(ServerClient server, string conversation, string jobId, CancellationToken ct)
+    private async Task<LocalScreen?> FindLatestLocalScreen(ServerClient server, string conversation, string jobId, CancellationToken ct, LocalScreen? expected = null)
     {
-        string? id = await ScreenHistory.LatestReadyIdAsync(server, conversation, jobId, ct);
+        string? id = await ScreenHistory.LatestReadyIdAsync(server, conversation, jobId, ct, expected?.FileId);
         return id is not null && localScreens.TryGetValue(id, out var screen) && screen.Ready ? screen : null;
     }
 
     private void BeginMoveJob(string conversation, string? jobId, LocalScreen? screen)
     {
-        if (string.IsNullOrEmpty(jobId) || screen is null || !screen.Ready || !moveLifetime.CanStart(jobId)) return;
+        if (string.IsNullOrEmpty(jobId) || screen is null || !screen.Ready || !moveLifetime.CanBind(jobId)) return;
         if (!moveJobs.ContainsKey(jobId)) moveJobs[jobId] = new(conversation, new(jobId, screen.Geometry, screen.CapturedAt));
-        if (earlyMoves.Remove(conversation, out var buffered))
-            foreach (var item in buffered.Where(x => x.Job == jobId)) ApplyMoves(conversation, item.Job, item.Run, item.Snapshot, item.Moves, item.Length);
+        if (earlyMoves.TryGetValue(conversation, out var buffered))
+        {
+            var matching = buffered.Where(x => x.Job == jobId).ToArray();
+            buffered.RemoveAll(x => x.Job == jobId);
+            foreach (var item in matching) ApplyMoves(conversation, item.Job, item.Run, item.Snapshot, item.Moves, item.Length);
+        }
+        if (!moveLifetime.CanReceive(jobId))
+        {
+            moveJobs.Remove(jobId);
+            if (conversation == currentConversation) _ = ScheduleBubbleAfterMoves(conversation);
+        }
     }
 
-    private async Task RecoverMoveJob(string conversation, string? jobId, ServerClient server, CancellationToken ct)
+    private async Task RecoverMoveJob(string conversation, string? jobId, ServerClient server, CancellationToken ct, LocalScreen? acceptedScreen = null)
     {
-        if (jobId is null || !moveLifetime.CanStart(jobId)) return;
+        if (jobId is null || moveJobs.ContainsKey(jobId) || !moveLifetime.ReserveVerification(jobId)) return;
+        moveVerifications[jobId] = conversation;
         try
         {
-            var screen = await FindLatestLocalScreen(server, conversation, jobId, ct);
+            var expected = acceptedScreen ?? (submittedConversation == conversation ? submittedScreen : null);
+            var screen = await FindLatestLocalScreen(server, conversation, jobId, ct, expected);
             // The recorded screen, rather than event arrival order, binds the request.
             if (screen is null || !ReferenceEquals(server, client)) return;
             if (submittedConversation == conversation && submittedScreen is { } pending && pending.FileId != screen.FileId) return;
             BeginMoveJob(conversation, jobId, screen);
         }
         catch (Exception) when (!ct.IsCancellationRequested) { /* No verified context: do not move. */ }
+        finally
+        {
+            moveLifetime.FinishVerification(jobId);
+            moveVerifications.Remove(jobId);
+            if (earlyMoves.TryGetValue(conversation, out var remaining)) remaining.RemoveAll(x => x.Job == jobId);
+            if (!moveLifetime.CanReceive(jobId))
+            {
+                moveJobs.Remove(jobId);
+                if (earlyMoves.TryGetValue(conversation, out var buffered)) buffered.RemoveAll(x => x.Job == jobId);
+                if (conversation == currentConversation) _ = ScheduleBubbleAfterMoves(conversation);
+            }
+        }
     }
 
     private void EndMoveJob(string conversation, string? jobId)
@@ -88,7 +112,7 @@ public partial class MainWindow
     {
         if (jobId is null) return;
         moveLifetime.CompleteLive(jobId); moveJobs.Remove(jobId);
-        if (earlyMoves.TryGetValue(conversation, out var buffer)) buffer.RemoveAll(x => x.Job == jobId);
+        if (!moveLifetime.IsVerifying(jobId) && earlyMoves.TryGetValue(conversation, out var buffer)) buffer.RemoveAll(x => x.Job == jobId);
         // Accepted animations own their playback data and finish after done.
     }
 
@@ -96,8 +120,8 @@ public partial class MainWindow
     {
         if (string.IsNullOrEmpty(job) || string.IsNullOrEmpty(run) || !moveLifetime.CanReceive(job) || moves.ValueKind != JsonValueKind.Array) return;
         if (moveJobs.ContainsKey(job)) { ApplyMoves(conversation, job, run, snapshot, moves, length); return; }
-        if (!moveLifetime.CanStart(job)) return;
-        if (pendingScreenConversation != conversation) return;
+        if (!moveLifetime.CanStart(job) && !moveLifetime.IsVerifying(job)) return;
+        if (pendingScreenConversation != conversation && !moveLifetime.IsVerifying(job)) return;
         if (!earlyMoves.TryGetValue(conversation, out var pending)) earlyMoves[conversation] = pending = [];
         if (pending.Count < 256) pending.Add((job, run, snapshot, moves.Clone(), length));
     }
@@ -107,6 +131,7 @@ public partial class MainWindow
         if (!moveJobs.TryGetValue(job, out var context) || context.ConversationId != conversation) return;
         var accepted = context.Playback.Accept(job, run, snapshot, moves, length, DateTimeOffset.UtcNow);
         if (settings.MoveEnabled.IsChecked != true || conversation != currentConversation || !IsVisible) return;
+        if (accepted.Count > 0) bubbleTimer.Stop();
         foreach (var move in accepted)
         {
             int version = autoMoveVersion;

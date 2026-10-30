@@ -4,6 +4,17 @@ using System.Text.Json;
 using Himari.Companion;
 
 static void Check(bool value, string message) { if (!value) throw new Exception(message); }
+foreach (string quickScenario in new[] { "completed", "different-job", "different-screen", "no_sandbox" })
+{
+    var verifyingJob = new MoveJobLifetime();
+    Check(verifyingJob.ReserveVerification("j1"), "reserve before asynchronous screen lookup");
+    using var quick = new ServerClient("https://example.com/", "test", new QuickCompletionHandler(quickScenario, () => { verifyingJob.End("j1"); verifyingJob.CompleteLive("j1"); }));
+    var file = await ScreenHistory.LatestReadyIdAsync(quick, "c", "j1", CancellationToken.None, "f1");
+    Check(file == (quickScenario == "completed" ? "f1" : null), "screen lookup finishing after done still requires exact job, screen and readiness: " + quickScenario);
+    Check(!verifyingJob.CanReceive("j1") && verifyingJob.CanBind("j1"), "in-flight verification can bind buffered moves without reopening live");
+    verifyingJob.FinishVerification("j1");
+    Check(!verifyingJob.CanBind("j1") && !verifyingJob.ReserveVerification("j1"), "completion cannot be resurrected after verification retires");
+}
 // Both streams can end while the first animation is still blocked.
 var orderedLifetime = new MoveJobLifetime();
 var firstAnimation = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -320,6 +331,26 @@ using (var screenClient = new ServerClient("https://example.com/", "test", new S
     await foreach (var (kind, data) in screenClient.StreamAsync("/api/conversations/c1/live", CancellationToken.None))
         if (kind == "snapshot") collected.AddRange(replay.Accept(data.GetProperty("job_id").GetString(), data.GetProperty("run_id").GetString(), true, data.GetProperty("moves"), 1, captured));
     Check(collected.Count == 1 && collected[0].X == 42, "PR 126 upload, message job id and reconnect snapshot");
+}
+
+sealed class QuickCompletionHandler(string scenario, Action complete) : HttpMessageHandler
+{
+    private int detailReads;
+    protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+    {
+        string value;
+        if (request.RequestUri!.AbsolutePath.EndsWith("/events"))
+        {
+            complete();
+            value = JsonSerializer.Serialize(new { items = new[] { new { kind = "user_message", attachments = new[] { new { file_id = scenario == "different-screen" ? "f2" : "f1", screen = true, image = new { state = scenario == "no_sandbox" ? "no_sandbox" : "ready" } } } } } });
+        }
+        else
+        {
+            detailReads++;
+            value = JsonSerializer.Serialize(new { conversation = new { last_sequence = 1 }, job = new { job_id = detailReads > 1 && scenario == "different-job" ? "j2" : "j1", running = detailReads == 1 } });
+        }
+        return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(value, Encoding.UTF8, "application/json") });
+    }
 }
 
 sealed class OriginRecoveryHandler : HttpMessageHandler

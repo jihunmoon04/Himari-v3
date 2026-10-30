@@ -15,7 +15,7 @@
         <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" MaxHeight="140" MinHeight="28"><TextBlock x:Name="Message" Text="안녕하세요, 선생님." TextWrapping="Wrap" FontSize="15" LineHeight="23" Foreground="#34304A"/></ScrollViewer>
         <StackPanel x:Name="ComposerPanel" Grid.Row="2" Visibility="Collapsed" Margin="0,12,0,0">
           <Expander x:Name="ChatTools" Header="대화 선택" Visibility="Collapsed" Margin="0,0,0,4"><DockPanel><Button DockPanel.Dock="Right" Margin="6,0,0,0" Content="새 대화" Click="NewConversationClick"/><ComboBox x:Name="Conversations" DisplayMemberPath="Title" SelectionChanged="ConversationChanged"/></DockPanel></Expander>
-          <TextBox x:Name="Input" MaxLength="64000" MinHeight="46" MaxHeight="88" AcceptsReturn="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto" KeyDown="InputKeyDown" TextChanged="InputChanged" ToolTip="메시지 입력 · Enter로 보내기, Shift+Enter로 줄바꿈" AutomationProperties.Name="메시지 입력"/>
+          <TextBox x:Name="Input" MaxLength="64000" MinHeight="46" MaxHeight="88" AcceptsReturn="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto" TextChanged="InputChanged" ToolTip="메시지 입력 · Enter로 보내기, Shift+Enter로 줄바꿈" AutomationProperties.Name="메시지 입력"/>
           <DockPanel Margin="0,8,0,0">
             <Button x:Name="SendButton" DockPanel.Dock="Right" Content="보내기" Style="{StaticResource PrimaryButton}" Click="SendClick" Margin="8,0,0,0"/>
             <CheckBox x:Name="ScreenOnce" Content="화면 첨부" ToolTip="보내는 순간의 모니터 화면을 첨부합니다."/>

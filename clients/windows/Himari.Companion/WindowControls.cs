@@ -82,7 +82,7 @@ public partial class MainWindow
         Task pending;
         do { pending = moveQueue; try { await pending; } catch (Exception) { } }
         while (!ReferenceEquals(pending, moveQueue));
-        if (!lifetime.IsCancellationRequested && version == autoMoveVersion && conversation == currentConversation && !liveStreams.ContainsKey(conversation))
+        if (!lifetime.IsCancellationRequested && version == autoMoveVersion && conversation == currentConversation && !liveStreams.ContainsKey(conversation) && !moveVerifications.ContainsValue(conversation))
             ScheduleBubbleClose(Message.Text);
     }
     private void SaveWindowPreferences()

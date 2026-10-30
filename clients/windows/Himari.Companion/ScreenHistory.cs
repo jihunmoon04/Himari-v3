@@ -16,12 +16,12 @@ internal static class ScreenHistory
         var detail = await server.SendAsync(HttpMethod.Get, PathFor(conversation), null, ct);
         return ConversationView.IsRunning(detail) ? Str(Prop(detail, "job"), "job_id") : null;
     }
-    internal static async Task<string?> LatestReadyIdAsync(ServerClient server, string conversation, string jobId, CancellationToken ct)
+    internal static async Task<string?> LatestReadyIdAsync(ServerClient server, string conversation, string jobId, CancellationToken ct, string? expectedFileId = null)
     {
         async Task<JsonElement> Detail() => await server.SendAsync(System.Net.Http.HttpMethod.Get, PathFor(conversation), null, ct);
-        bool SameRunningJob(JsonElement detail) => Str(Prop(detail, "job"), "job_id") == jobId && ConversationView.IsRunning(detail);
+        bool SameJob(JsonElement detail) => Str(Prop(detail, "job"), "job_id") == jobId && (ConversationView.IsRunning(detail) || expectedFileId is not null);
         var detail = await Detail();
-        if (!SameRunningJob(detail)) return null;
+        if (!SameJob(detail)) return null;
         var sequence = Prop(Prop(detail, "conversation"), "last_sequence");
         if (sequence.ValueKind != JsonValueKind.Number || !sequence.TryGetInt32(out int last)) return null;
         int after = Math.Max(0, last - 100);
@@ -40,7 +40,7 @@ internal static class ScreenHistory
             if (found is not null || after == 0) break;
             after = Math.Max(0, after - 100);
         }
-        if (!ready || found is null || !SameRunningJob(await Detail())) return null;
+        if (!ready || found is null || (expectedFileId is not null && found != expectedFileId) || !SameJob(await Detail())) return null;
         return found;
     }
 }
