@@ -61,6 +61,8 @@ def test_the_runners_events_reach_the_stream(tmp_path: Path) -> None:
             await app.runner.wait(scope)
             got = [(e.name, thaw(e.data)) for e in await drained(stream)]
             cid = scope.conversation_id
+            working = [w for name, data in got if name == "activity" for w in cast(dict[str, Any], data)["working"]]
+            assert working and {w.pop("job_id") for w in working} == {app.runner.status(scope).job_id}  # §6.3
             jobs = {cast(dict[str, Any], data).pop("job_id") for name, data in got if name == "job"}
             assert jobs == {app.runner.status(scope).job_id} != {None}  # V3-P84 §6.3: one job, started and ended
             assert [g for g in got if g[0] != "activity"] == [

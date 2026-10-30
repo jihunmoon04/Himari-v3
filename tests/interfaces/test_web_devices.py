@@ -200,6 +200,9 @@ def test_each_message_keeps_where_it_came_from(server: Server) -> None:
     found = server.client.portal.call(origins)  # type: ignore[union-attr]
     device = MessageOrigin(OriginKind.DEVICE, "d1")
     assert found == [device, device, MessageOrigin(OriginKind.WEB), MessageOrigin(OriginKind.CLI)]
+    items = server.device.get(f"/api/conversations/{cid}/events", headers=server.as_device(token)).json()["items"]
+    shown = [i["origin"] for i in items if i["kind"] == "user_message"]  # V3-P84 §7.8: an app finds its own
+    assert shown == [{"kind": "device", "device_id": "d1"}] * 2 + [{"kind": "web"}, {"kind": "cli"}]
 
 
 def test_a_device_sends_text_only_and_sees_no_trash(server: Server) -> None:

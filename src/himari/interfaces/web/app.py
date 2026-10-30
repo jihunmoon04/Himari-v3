@@ -91,6 +91,7 @@ from himari.bootstrap.application import (
     ReferenceRequest,
 )
 from himari.bootstrap.changes import ChangeConflict, ChangeDiff, ChangesView
+from himari.bootstrap.companion import origin_view
 from himari.bootstrap.explorer import PDF_APPEND_MAX_BYTES, ExplorerRefused, Listing, ShownFile
 from himari.bootstrap.operator import OPERATOR, derive_cli_bearer, verify_operator_token
 from himari.presence.api import PairingRefused, TooManyStreams, is_device_token
@@ -543,6 +544,8 @@ def event_view(event: ConversationEvent, views: dict[CallRef, tuple[bool, bool]]
         view["answers_run"] = None if payload.answers_call is None else payload.answers_call.run_id
         view["attachments"] = [_attachment(b, files) for b in payload.blocks if isinstance(b, AttachmentRef)]
         view["references"] = [reference_view(b) for b in payload.blocks if isinstance(b, FileReference)]
+        # Where it was sent from (V3-P84 §7.8): an app tells its own message whose answer it lost.
+        view["origin"] = origin_view(payload.origin)
     elif isinstance(payload, AssistantFinal):
         view["text"] = _text(payload.blocks)
         view["display"] = display_view(view["text"])

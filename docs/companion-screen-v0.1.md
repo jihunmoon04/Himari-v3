@@ -347,3 +347,18 @@ B1·B2·C1·C2·N1은 해결로 판정됐다.
 ### 14.3 실제 모델 확인 (2026-10-30)
 
 `tests/live/test_openrouter_screen_live.py`를 `image_input`이 켜진 8개 모델에 돌렸다. 7개가 10번 중 8번 이상 대상을 가리켜 `screen_points`를 켰다: `openai/gpt-6-luna`, `openai/gpt-6.1-sol`, `anthropic/claude-sonnet-5.5`, `anthropic/claude-haiku-5.5`, `xiaomi/mimo-v2.6-pro`, `deepseek/deepseek-v4.1-flash`, `minimax/minimax-m3`. `openai/gpt-5-nano`는 6번이라 화면을 보기만 한다. 결과를 모두 남긴 두 번째 실행(구현 PR #128 검수 C1)에서 7개는 모두 10/10, `gpt-5-nano`는 5/10(작은 단추 1, 도형·입력칸 0)이었다. 장면별 표와 좌표 원본은 카탈로그 문서와 `docs/live-results/screen-points-2026-10-30.jsonl`. 시험 화면은 단순한 그림이므로, 실제 데스크톱에서의 정확도는 소유자의 사용으로 확인한다(`docs/openrouter-model-catalog.md`).
+
+### 14.4 앱과의 연결 점검 (Windows 앱 PR #127, 2026-10-30)
+
+#125(설계)부터 #128까지의 서버와 앱 PR #127이 맞물리는지 코드로 확인했다.
+
+**맞는 것:** 캡처 크기(1,280·115만 픽셀, 1.5 MiB가 넘으면 JPEG), 캐릭터 창 빼기(실패하면 숨김), Per-Monitor V2와 물리 픽셀 좌표 변환, 업로드 → `screen` 메시지 → 202의 `job_id`, 응답을 잃으면 `job started`·대화 보기의 `job_id`로 맥락 복구, `job_id`가 같은 `live`만, Run마다 실행한 수(snapshot은 남은 것 중 마지막 하나), 자기가 올린 `ready` 화면·10분, 오류 코드로 나눈 보내기 실패(`screen_already_sent`, `conversation_closed`는 결과를 모름).
+
+**서버에서 고친 것(이 PR):**
+- `events`의 `user_message`에 `origin`이 없어, 앱이 결과를 모르는 글 메시지를 자기 것으로 확인할 수 없었다(§7.8이 가정한 것). `origin`을 더했다.
+- `activity.working`에 `job_id`를 더했다. 다시 연결한 앱이 대화 보기를 따로 읽지 않고 자기 작업을 찾는다.
+
+**앱에 남은 것(로컬 에이전트):**
+- **A1 작업이 끝날 때 이동을 잃음:** 앱은 `live`의 `done`과 사건 흐름의 `job ended`에서 그 작업의 맥락을 닫는다. 그러면 ① 같은 묶음으로 온 이동 중 첫 번째만 움직이고 나머지는 줄을 서 있다가 버려진다(애니메이션 0.6초 동안 `done`이 옴). ② 사건 흐름의 `job ended`가 `live`의 마지막 `delta`보다 먼저 오면(연결이 달라 순서가 보장되지 않음) 그 `delta`의 이동이 버려진다. 짧은 답의 마지막 이동이 가장 잃기 쉽다. 고침: 작업이 끝나면 새 맥락만 막고, 이미 받은 이동은 끝까지 움직이며, 그 작업의 `live`는 `done`까지 이동을 받는다.
+- **A2:** 결과를 모르는 글 메시지는 이제 `user_message.origin`(이 기기)과 글로 확인한다. 다시 연결할 때는 `activity.working[].job_id`를 쓴다.
+- **A3(작음):** 메시지의 400 `not_a_screen`은 기록하기 전의 거절이다. 결과를 모름이 아니라 거절로 다룬다(그 화면은 다시 쓰지 않음).
