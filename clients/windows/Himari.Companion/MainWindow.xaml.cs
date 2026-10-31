@@ -12,7 +12,9 @@ namespace Himari.Companion;
 public partial class MainWindow : Window
 {
     private static readonly string[] Moods = ["neutral", "happy", "excited", "sad", "surprised", "thinking", "embarrassed", "worried"];
-    private readonly DispatcherTimer timer = new() { Interval = TimeSpan.FromMilliseconds(100) };
+    private static readonly string[] TalkFrames = ["talk-small", "talk-wide", "talk-small", "neutral"];
+    // Ticks fast enough for the 60-90 ms blink frames.
+    private readonly DispatcherTimer timer = new() { Interval = TimeSpan.FromMilliseconds(30) };
     private readonly Dictionary<string, BitmapImage> frames = new();
     private readonly Forms.NotifyIcon tray;
     private readonly SettingsWindow settings;
@@ -162,13 +164,15 @@ public partial class MainWindow : Window
             catch (System.ComponentModel.Win32Exception) { sleeping = false; }
         }
         var frame = mood;
-        if (mood == "neutral" && sleeping && !talking && !Input.IsKeyboardFocusWithin) frame = "blink";
-        else if (mood == "neutral" && talking && (int)(elapsed / 260) % 2 == 1) frame = "talk";
-        else if (mood == "neutral" && !talking && elapsed % 4000 > 3820) frame = "blink";
+        if (mood == "neutral" && sleeping && !talking && !Input.IsKeyboardFocusWithin) frame = "blink-closed";
+        else if (mood == "neutral" && talking) frame = TalkFrames[(int)(elapsed / 130) % TalkFrames.Length];
+        else if (mood == "neutral" && !talking) frame = BlinkFrame(elapsed % 4000) ?? frame;
         if (!frames.TryGetValue(frame, out var image))
             frames[frame] = image = new BitmapImage(new Uri($"pack://application:,,,/Himari.Companion;component/Assets/{frame}.png"));
-        Character.Source = image;
+        if (Character.Source != image) Character.Source = image;
     }
+    // Half-closed, closed, half-closed at the end of each 4 s cycle (see animation-preview/pixel/clean).
+    private static string? BlinkFrame(double phase) => phase switch { > 3950 => "blink-half", > 3860 => "blink-closed", > 3800 => "blink-half", _ => null };
     private async void DemoClick(object sender, RoutedEventArgs e)
     {
         if (sending || liveStreams.ContainsKey(currentConversation ?? "")) { Status.Text = "답변이 끝난 뒤 미리보기를 실행해 주세요."; return; }
