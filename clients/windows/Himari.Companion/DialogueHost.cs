@@ -79,13 +79,15 @@ public partial class MainWindow
             // Fixed-side modes retain their direction at an edge; only the bubbles may overlap
             // the character when that side cannot fit even the minimum usable editor.
             double available = Math.Min(Math.Max(240, sideSpace / dpi.DpiScaleY), Math.Max(240, area.Height / dpi.DpiScaleY - 16));
-            dialogueHost.Width = Math.Min(340, area.Width / dpi.DpiScaleX);
+            dialogueHost.Width = Math.Min(replyExpanded ? 644 : 264, area.Width / dpi.DpiScaleX);
             DialogueStack.Width = dialogueHost.Width;
-            BubblePanel.Width = UserBubble.Width = Math.Min(300, dialogueHost.Width);
+            BubblePanel.Width = Math.Min(replyExpanded ? 620 : 240, dialogueHost.Width);
+            UserBubble.Width = Math.Min(240, dialogueHost.Width);
             UserBubble.MaxHeight = BubblePanel.Visibility == Visibility.Visible ? Math.Min(280, available * .5) : Math.Min(340, available);
             UserBubble.Measure(new Size(dialogueHost.Width, available));
             double user = UserBubble.Visibility == Visibility.Visible ? UserBubble.DesiredSize.Height + 8 : 0;
             BubblePanel.MaxHeight = Math.Max(60, available - user);
+            if (replyReader is not null) replyReader.Height = Math.Clamp(replyReader.ContentHeight, 22, Math.Max(22, BubblePanel.MaxHeight - 32));
             DialogueStack.Measure(new Size(dialogueHost.Width, available));
             dialogueHost.Height = Math.Max(1, Math.Min(available, DialogueStack.DesiredSize.Height));
             double width = dialogueHost.Width * dpi.DpiScaleX, height = dialogueHost.Height * dpi.DpiScaleY;

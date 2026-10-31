@@ -4,3 +4,4 @@ window.chrome.webview.addEventListener('message', ({ data }) => {
   document.getElementById('answer').replaceChildren(renderAssistantText(document, data.text));
 });
 window.chrome.webview.postMessage('ready');
+new ResizeObserver(() => window.chrome.webview.postMessage({height: document.getElementById('answer').scrollHeight})).observe(document.getElementById('answer'));

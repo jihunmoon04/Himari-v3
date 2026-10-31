@@ -78,8 +78,18 @@ public partial class MainWindow
         bubbleTimer.Tick += (_, _) => AssistantBubbleExpired();
         userBubbleTimer.Tick += (_, _) => UserBubbleExpired();
         LocationChanged += (_, _) => { UpdateSceneBounds(); SchedulePreferencesSave(); };
-        hotKeySource = HwndSource.FromHwnd(new WindowInteropHelper(this).Handle);
-        if (hotKeySource is not null) { hotKeySource.AddHook(HotKeyHook); RegisterSelectedHotkey(); }
+        SetupChatHotkey();
+    }
+    private void SetupChatHotkey()
+    {
+        if (hotKeySource is null)
+        {
+            // Keep the registration alive independently of WPF's presentation HWNDs.
+            hotKeySource = new HwndSource(new HwndSourceParameters("HIMARI shortcuts")
+            { ParentWindow = new IntPtr(-3), Width = 0, Height = 0, WindowStyle = 0 });
+            hotKeySource.AddHook(HotKeyHook);
+        }
+        RegisterSelectedHotkey();
     }
     private void RegisterSelectedHotkey()
     {
@@ -232,6 +242,6 @@ public partial class MainWindow
     private void CleanupWindowControls()
     {
         bubbleTimer.Stop(); userBubbleTimer.Stop(); saveTimer.Stop(); SaveWindowPreferences();
-        if (hotKeySource is not null) { if (hotKeyRegistered) UnregisterHotKey(hotKeySource.Handle, HotKeyId); hotKeySource.RemoveHook(HotKeyHook); }
+        if (hotKeySource is not null) { if (hotKeyRegistered) UnregisterHotKey(hotKeySource.Handle, HotKeyId); hotKeySource.RemoveHook(HotKeyHook); hotKeySource.Dispose(); hotKeySource = null; }
     }
 }

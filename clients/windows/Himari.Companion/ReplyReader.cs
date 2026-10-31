@@ -10,21 +10,28 @@ namespace Himari.Companion;
 public partial class MainWindow
 {
     private ReplyReader? replyReader;
+    private bool replyExpanded;
     private void ExpandReplyClick(object sender, RoutedEventArgs e)
     {
-        if (replyReader is null)
+        replyExpanded = !replyExpanded;
+        if (replyExpanded && replyReader is null)
         {
-            replyReader = new ReplyReader(this, Message.Text);
-            replyReader.Closed += (_, _) => replyReader = null;
+            replyReader = new ReplyReader(Message.Text);
+            replyReader.ContentHeightChanged += (_, _) => UpdateSceneBounds();
+            ExpandedReply.Content = replyReader;
         }
-        replyReader.UpdateText(Message.Text); replyReader.Show(); replyReader.Activate();
+        Message.Visibility = replyExpanded ? Visibility.Collapsed : Visibility.Visible;
+        ExpandedReply.Visibility = replyExpanded ? Visibility.Visible : Visibility.Collapsed;
+        ExpandGlyph.Expanded = replyExpanded;
+        ExpandButton.ToolTip = replyExpanded ? "말풍선 작게" : "말풍선 크게";
+        replyReader?.UpdateText(Message.Text);
+        UpdateSceneBounds();
     }
 }
-
-internal sealed class ReplyReader : Window
+internal sealed class ReplyReader : System.Windows.Controls.UserControl, IDisposable
 {
     private const string Host = "himari-reader.invalid";
-    private readonly WebView2 browser = new();
+    private readonly WebView2CompositionControl browser = new();
     private string text;
     private bool ready;
     private MarkdownView? fallbackView;
@@ -34,23 +41,24 @@ internal sealed class ReplyReader : Window
         if (ready) browser.CoreWebView2.PostWebMessageAsJson(JsonSerializer.Serialize(new { text }));
         if (fallbackView is not null) fallbackView.Text = value;
     }
-    internal ReplyReader(Window owner, string text, string? dataFolder = null)
+    internal ReplyReader(string text, string? dataFolder = null)
     {
-        this.text = text; Owner = owner; Title = "히마리 · 답변 확장 보기";
-        Width = 900; Height = 720; MinWidth = 360; MinHeight = 300; WindowStartupLocation = WindowStartupLocation.CenterScreen;
-        var root = new DockPanel(); var copy = new System.Windows.Controls.Button { Content = "원문 복사", Margin = new Thickness(12, 8, 12, 8), HorizontalAlignment = System.Windows.HorizontalAlignment.Right };
-        copy.Click += (_, _) => { try { System.Windows.Clipboard.SetText(this.text); } catch (System.Runtime.InteropServices.COMException) { } };
-        DockPanel.SetDock(copy, Dock.Top); root.Children.Add(copy); root.Children.Add(browser); Content = root;
-        Loaded += async (_, _) => await InitializeReader(root, dataFolder);
-        Closed += (_, _) => { ready = false; browser.Dispose(); };
+        this.text = text;
+        var root = new DockPanel(); root.Children.Add(browser); Content = root;
+        browser.DefaultBackgroundColor = System.Drawing.Color.Transparent;
+        Loaded += async (_, _) => { if (initialized) return; initialized = true; await InitializeReader(root, dataFolder); };
     }
+    private bool initialized;
+    public double ContentHeight { get; private set; } = 120;
+    public event EventHandler? ContentHeightChanged;
+    public void Dispose() { ready = false; browser.Dispose(); }
     private async Task InitializeReader(DockPanel root, string? dataFolder)
     {
         try
         {
             var data = dataFolder ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "HIMARI", "reader");
             var environment = await CoreWebView2Environment.CreateAsync(userDataFolder: data);
-            if (!IsVisible) return;
+            if (!IsLoaded) return;
             await browser.EnsureCoreWebView2Async(environment);
             var core = browser.CoreWebView2;
             core.Settings.AreDevToolsEnabled = false; core.Settings.AreDefaultContextMenusEnabled = false;
@@ -72,8 +80,15 @@ internal sealed class ReplyReader : Window
             core.NewWindowRequested += (_, e) => { e.Handled = true; MarkdownView.OpenLink(e.Uri); };
             core.WebMessageReceived += (_, e) =>
             {
-                if (e.Source == $"https://{Host}/index.html" && e.TryGetWebMessageAsString() == "ready")
+                if (e.Source != $"https://{Host}/index.html") return;
+                if (e.WebMessageAsJson == "\"ready\"")
                 { ready = true; core.PostWebMessageAsJson(JsonSerializer.Serialize(new { text })); }
+                else
+                {
+                    using var message = JsonDocument.Parse(e.WebMessageAsJson);
+                    if (message.RootElement.TryGetProperty("height", out var height) && height.TryGetDouble(out double value) && double.IsFinite(value))
+                    { ContentHeight = Math.Clamp(value, 22, 4000); ContentHeightChanged?.Invoke(this, EventArgs.Empty); }
+                }
             };
             browser.Source = new Uri($"https://{Host}/index.html");
         }

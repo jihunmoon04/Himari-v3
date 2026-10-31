@@ -20,12 +20,12 @@ public sealed class PixelBubble : Decorator
     protected override Size MeasureOverride(Size constraint)
     {
         if (Child is null) return new Size(64, 48);
-        Child.Measure(new Size(Math.Max(0, constraint.Width - 36), Math.Max(0, constraint.Height - 44)));
-        return new Size(Child.DesiredSize.Width + 36, Child.DesiredSize.Height + 44);
+        Child.Measure(new Size(Math.Max(0, constraint.Width - 24), Math.Max(0, constraint.Height - 32)));
+        return new Size(Child.DesiredSize.Width + 24, Child.DesiredSize.Height + 32);
     }
     protected override Size ArrangeOverride(Size size)
     {
-        Child?.Arrange(new Rect(18, TailTop ? 30 : 14, Math.Max(0, size.Width - 36), Math.Max(0, size.Height - 44)));
+        Child?.Arrange(new Rect(12, TailTop ? 24 : 8, Math.Max(0, size.Width - 24), Math.Max(0, size.Height - 32)));
         return size;
     }
     protected override void OnRender(DrawingContext dc)
@@ -54,6 +54,26 @@ public sealed class PixelBubble : Decorator
     {
         var shape = new StreamGeometry(); using (var ctx = shape.Open()) { ctx.BeginFigure(points[0], true, true); ctx.PolyLineTo(points.Skip(1).ToArray(), true, false); }
         shape.Freeze(); return shape;
+    }
+}
+
+public sealed class SizeGlyph : FrameworkElement
+{
+    public static readonly DependencyProperty ExpandedProperty = DependencyProperty.Register(nameof(Expanded), typeof(bool), typeof(SizeGlyph), new FrameworkPropertyMetadata(false, FrameworkPropertyMetadataOptions.AffectsRender));
+    public bool Expanded { get => (bool)GetValue(ExpandedProperty); set => SetValue(ExpandedProperty, value); }
+    protected override void OnRender(DrawingContext dc)
+    {
+        var pen = new System.Windows.Media.Pen(new SolidColorBrush(System.Windows.Media.Color.FromRgb(77, 65, 112)), 1.5);
+        if (Expanded)
+        {
+            dc.DrawLine(pen, new Point(0, 4), new Point(4, 4)); dc.DrawLine(pen, new Point(4, 0), new Point(4, 4));
+            dc.DrawLine(pen, new Point(8, 8), new Point(12, 8)); dc.DrawLine(pen, new Point(8, 8), new Point(8, 12));
+        }
+        else
+        {
+            dc.DrawLine(pen, new Point(0, 0), new Point(4, 0)); dc.DrawLine(pen, new Point(0, 0), new Point(0, 4));
+            dc.DrawLine(pen, new Point(8, 12), new Point(12, 12)); dc.DrawLine(pen, new Point(12, 8), new Point(12, 12));
+        }
     }
 }
 

@@ -9,10 +9,12 @@ using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 using Himari.Companion;
 using Microsoft.Web.WebView2.Wpf;
+using System.Runtime.InteropServices;
 
 internal static class PresentationChecks
 {
     private const BindingFlags Private = BindingFlags.NonPublic | BindingFlags.Instance;
+    [DllImport("user32.dll")] private static extern bool PostMessage(IntPtr window, int message, IntPtr wParam, IntPtr lParam);
     private static object? Call(MainWindow window, string method, params object?[] values) => typeof(MainWindow).GetMethod(method, Private)!.Invoke(window, values);
     private static void Pump()
     {
@@ -43,8 +45,14 @@ internal static class PresentationChecks
         double left = w.Left, top = w.Top;
         Call(w, "OpenChat"); Pump();
         check(host.IsVisible && input.IsKeyboardFocused, "opening real detached composer focuses its editor");
+        check(user.ActualHeight <= 60 && input.ActualHeight <= 26, "empty composer fits one compact line including send button");
+        var send = (FrameworkElement)w.FindName("SendButton");
+        check(Math.Abs(input.TranslatePoint(new Point(0, 0), user).Y - send.TranslatePoint(new Point(0, 0), user).Y) < 4, "send action and empty editor share the same row");
         check(w.Left == left && w.Top == top, "opening a bubble never moves the character window");
         check(answer.TailTop && user.TailTop && host.Top >= w.Top + w.Height - 1, "automatic mode puts both bubbles below a character in the top half");
+        Call(w, "OpenReplyBubble", "c", "short"); message.Text = "한 줄 답변"; Pump();
+        check(answer.ActualHeight <= 70, "short answer occupies one row with small expansion icon");
+        Call(w, "CloseBubble");
         input.Text = "남길 초안"; input.Select(2, 2);
         foreach (string value in new[] { "상 고정", "하 고정", "상하 자동" })
         {
@@ -88,9 +96,11 @@ internal static class PresentationChecks
         }
         w.Hide(); Pump(); check(!host.IsVisible, "hiding character also hides detached bubbles");
         w.Show(); Pump(); check(host.IsVisible && input.Text == "IME 초안", "show restores bubble without losing draft");
-        var reader = new ReplyReader(w, "# 확장 보기\n\n| 기능 | 상태 |\n|---|---|\n| 수식 | 준비 |\n\n$$x^2+\\frac{1}{2}$$\n\n```csharp\nvar text = \"한 줄의 긴 코드도 가로 스크롤로 읽습니다.\";\n```\n\n<script>window.pwned=true</script>\n\n![private](https://example.com/private.png)", System.IO.Path.Combine(System.IO.Path.GetTempPath(), "himari-reader-test-" + Guid.NewGuid().ToString("N")));
-        reader.Show();
-        var browser = (WebView2)typeof(ReplyReader).GetField("browser", Private)!.GetValue(reader)!;
+        var reader = new ReplyReader("# 확장 보기\n\n| 기능 | 상태 |\n|---|---|\n| 수식 | 준비 |\n\n$$x^2+\\frac{1}{2}$$\n\n```csharp\nvar text = \"한 줄의 긴 코드도 가로 스크롤로 읽습니다.\";\n```\n\n<script>window.pwned=true</script>\n\n![private](https://example.com/private.png)", System.IO.Path.Combine(System.IO.Path.GetTempPath(), "himari-reader-test-" + Guid.NewGuid().ToString("N")));
+        ((ContentControl)w.FindName("ExpandedReply")).Content = reader;
+        ((ContentControl)w.FindName("ExpandedReply")).Visibility = Visibility.Visible;
+        reader.Height = 300;
+        var browser = (WebView2CompositionControl)typeof(ReplyReader).GetField("browser", Private)!.GetValue(reader)!;
         Until(() => (bool)typeof(ReplyReader).GetField("ready", Private)!.GetValue(reader)!);
         string Eval(string js) { var task = browser.ExecuteScriptAsync(js); Until(() => task.IsCompleted); return task.GetAwaiter().GetResult(); }
         Until(() => Eval("document.querySelectorAll('table').length") == "1");
@@ -99,7 +109,37 @@ internal static class PresentationChecks
         check(Eval("getComputedStyle(document.querySelector('pre')).overflowX") == "\"auto\"", "long code has horizontal scrolling in expanded reader");
         reader.UpdateText("**새 답변**"); Until(() => Eval("document.getElementById('answer').textContent") == "\"새 답변\"");
         check(Eval("document.querySelectorAll('table').length") == "0", "reopening reader with a new answer replaces old content");
-        reader.Close();
+        reader.Dispose();
+        ((ContentControl)w.FindName("ExpandedReply")).Content = null;
+        ((ContentControl)w.FindName("ExpandedReply")).Visibility = Visibility.Collapsed;
+        int windowCount = System.Windows.Application.Current.Windows.Count;
+        double compactWidth = answer.Width;
+        double anchoredLeft = w.Left, anchoredTop = w.Top;
+        Call(w, "ExpandReplyClick", w, new RoutedEventArgs()); Pump();
+        var inlineReader = (ReplyReader)typeof(MainWindow).GetField("replyReader", Private)!.GetValue(w)!;
+        Until(() => (bool)typeof(ReplyReader).GetField("ready", Private)!.GetValue(inlineReader)!);
+        var inlineBrowser = (WebView2CompositionControl)typeof(ReplyReader).GetField("browser", Private)!.GetValue(inlineReader)!;
+        var rendered = inlineBrowser.ExecuteScriptAsync("document.getElementById('answer').textContent"); Until(() => rendered.IsCompleted);
+        Pump();
+        check(System.Windows.Application.Current.Windows.Count == windowCount && answer.Width > compactWidth && Window.GetWindow(inlineReader) == host, "expansion enlarges existing pixel bubble without creating another window");
+        check(w.Left == anchoredLeft && w.Top == anchoredTop, "expanding content keeps character anchored");
+        if (screenshots is not null) Save(host, System.IO.Path.Combine(screenshots, "06-expanded-inline.png"));
+        Call(w, "ExpandReplyClick", w, new RoutedEventArgs()); Pump();
+        check(answer.Width == compactWidth && input.Text == "IME 초안", "collapsing restores compact bubble and preserves draft");
+        ((ComboBox)settings.FindName("ChatHotkey")).SelectedItem = "Alt+Shift+Q";
+        Call(w, "SetupChatHotkey");
+        check((bool)typeof(MainWindow).GetProperty("hotKeyRegistered", Private)!.GetValue(w)!, "OS accepted the real global hotkey registration");
+        var hotkeySource = (HwndSource)typeof(MainWindow).GetField("hotKeySource", Private)!.GetValue(w)!;
+        var register = typeof(MainWindow).GetMethod("RegisterHotKey", BindingFlags.Static | BindingFlags.NonPublic)!;
+        bool Available() => (bool)register.Invoke(null, new object[] { IntPtr.Zero, 0x7123, 0x4005u, 0x51u })!;
+        check(!Available(), "native global shortcut is reserved by dedicated message window");
+        Call(w, "CloseBubble"); Call(w, "HideUserBubble"); w.Hide(); w.Show(); Pump();
+        check(!Available(), "hiding and showing presentation windows keeps native hotkey registered");
+        check(PostMessage(hotkeySource.Handle, 0x0312, new IntPtr(0x4849), IntPtr.Zero), "native shortcut message can be posted to stable receiver");
+        Pump();
+        // If the app was already in front the first press switches away; the second reopens it.
+        if (!input.IsKeyboardFocused) { PostMessage(hotkeySource.Handle, 0x0312, new IntPtr(0x4849), IntPtr.Zero); Pump(); }
+        check(host.IsVisible && ((FrameworkElement)w.FindName("ComposerPanel")).Visibility == Visibility.Visible && input.IsKeyboardFocused, "actual WM_HOTKEY routing reopens detached composer and focuses input");
         Console.WriteLine("WebView2 expanded reader: tables, KaTeX, scrollable code and hostile-content checks passed.");
         w.Activate(); Call(w, "CloseChat"); Pump();
         var foreground = (IntPtr)typeof(MainWindow).GetMethod("GetForegroundWindow", BindingFlags.Static | BindingFlags.NonPublic)!.Invoke(null, null)!;

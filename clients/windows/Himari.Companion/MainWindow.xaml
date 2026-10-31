@@ -3,32 +3,32 @@
     <TextBlock x:Name="Status" Text="연결되지 않음" Visibility="Collapsed"/>
     <Grid x:Name="DialogueStack" Width="340" HorizontalAlignment="Right" VerticalAlignment="Bottom" Margin="0,0,50,320">
       <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
-      <local:PixelBubble x:Name="BubblePanel" Grid.Row="1" Width="300" MaxHeight="320" HorizontalAlignment="Center" TailRight="False" Visibility="Collapsed">
-        <Grid><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
-          <TextBlock Text="히마리" FontSize="11" FontWeight="SemiBold" Foreground="#71668F" Margin="0,0,0,7"/>
-          <local:MarkdownView Grid.Row="1" x:Name="Message" FontSize="15" Foreground="#34304A"/>
-          <DockPanel Grid.Row="2" Margin="0,8,0,0" LastChildFill="False">
-            <Button Content="확장 보기" Padding="7,3" MinHeight="24" FontSize="11" Click="ExpandReplyClick" AutomationProperties.Name="답변 확장 보기"/>
-            <Button x:Name="StopButton" DockPanel.Dock="Right" Width="30" Height="28" MinHeight="28" Padding="6" HorizontalAlignment="Right" ToolTip="답변 멈춤" AutomationProperties.Name="답변 멈춤" Click="CancelClick" Visibility="Collapsed"><local:PixelGlyph Stop="True" Width="16" Height="16"/></Button>
-          </DockPanel>
-        </Grid>
+      <local:PixelBubble x:Name="BubblePanel" Grid.Row="1" Width="240" MaxHeight="320" HorizontalAlignment="Center" TailRight="False" Visibility="Collapsed">
+        <DockPanel LastChildFill="True">
+          <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Top" Margin="5,0,0,0">
+            <Button x:Name="ExpandButton" Width="20" Height="20" MinHeight="20" Padding="3" ToolTip="말풍선 크게" AutomationProperties.Name="답변 확장 보기" Click="ExpandReplyClick"><local:SizeGlyph x:Name="ExpandGlyph" Width="12" Height="12"/></Button>
+            <Button x:Name="StopButton" Width="20" Height="20" MinHeight="20" Padding="3" Margin="3,0,0,0" ToolTip="답변 멈춤" AutomationProperties.Name="답변 멈춤" Click="CancelClick" Visibility="Collapsed"><local:PixelGlyph Stop="True" Width="12" Height="12"/></Button>
+          </StackPanel>
+          <Grid><local:MarkdownView x:Name="Message" FontSize="14" Foreground="#34304A"/>
+            <ContentControl x:Name="ExpandedReply" Visibility="Collapsed"/>
+          </Grid>
+        </DockPanel>
       </local:PixelBubble>
-      <local:PixelBubble x:Name="UserBubble" Width="300" MaxHeight="260" HorizontalAlignment="Center" IsUser="True" TailRight="True" Visibility="Collapsed">
+      <local:PixelBubble x:Name="UserBubble" Width="240" MaxHeight="260" HorizontalAlignment="Center" IsUser="True" TailRight="True" Visibility="Collapsed">
         <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"><StackPanel>
-          <TextBlock Text="선생님" FontSize="11" FontWeight="SemiBold" Foreground="#71668F" Margin="0,0,0,7"/>
-          <TextBlock x:Name="UserSent" TextWrapping="Wrap" FontSize="14" LineHeight="22" Margin="0,0,0,8" Visibility="Collapsed"/>
+          <TextBlock x:Name="UserSent" TextWrapping="Wrap" FontSize="14" LineHeight="22" Margin="0" Visibility="Collapsed"/>
           <StackPanel x:Name="ComposerPanel" Visibility="Collapsed">
             <Expander x:Name="ChatTools" Header="대화 선택" Visibility="Collapsed" Margin="0,0,0,6"><DockPanel><Button DockPanel.Dock="Right" Margin="6,0,0,0" Content="새 대화" Click="NewConversationClick"/><ComboBox x:Name="Conversations" DisplayMemberPath="Title" SelectionChanged="ConversationChanged" AutomationProperties.Name="대화 선택"/></DockPanel></Expander>
-            <TextBox x:Name="Input" MaxLength="64000" MinHeight="44" MaxHeight="110" BorderThickness="0" Background="Transparent" Padding="0" AcceptsReturn="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto" TextChanged="InputChanged" ToolTip="Enter로 보내기 · Shift+Enter로 줄바꿈" AutomationProperties.Name="히마리에게 보낼 메시지"/>
-            <DockPanel Margin="0,8,0,0" LastChildFill="False">
-              <Button x:Name="SendButton" DockPanel.Dock="Right" Width="30" Height="28" MinHeight="28" Padding="6" ToolTip="보내기 · Enter" AutomationProperties.Name="보내기" Click="SendClick"><local:PixelGlyph Width="16" Height="16"/></Button>
-              <TextBlock x:Name="ScreenSharingIndicator" Text="▣" Foreground="#776743" FontSize="10" VerticalAlignment="Center" ToolTip="화면 함께 전송 켜짐 · 설정에서 변경" AutomationProperties.Name="화면 함께 전송 켜짐"/>
-            </DockPanel>
+            <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+              <TextBox x:Name="Input" MaxLength="64000" MinHeight="22" MaxHeight="110" FontSize="14" BorderThickness="0" Background="Transparent" Padding="0" AcceptsReturn="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto" TextChanged="InputChanged" ToolTip="Enter로 보내기 · Shift+Enter로 줄바꿈" AutomationProperties.Name="히마리에게 보낼 메시지"/>
+              <TextBlock x:Name="ScreenSharingIndicator" Grid.Column="1" Text="▣" Foreground="#776743" FontSize="9" VerticalAlignment="Center" Margin="5,0,4,0" ToolTip="화면 함께 전송 켜짐 · 설정에서 변경" AutomationProperties.Name="화면 함께 전송 켜짐"/>
+              <Button x:Name="SendButton" Grid.Column="2" Width="22" Height="22" MinHeight="22" Padding="3" VerticalAlignment="Bottom" ToolTip="보내기 · Enter" AutomationProperties.Name="보내기" Click="SendClick"><local:PixelGlyph Width="14" Height="14"/></Button>
+            </Grid>
           </StackPanel>
           <TextBlock x:Name="UserStatus" Text="{Binding Text, ElementName=Status}" FontSize="11" Foreground="#625E76" TextWrapping="Wrap" LineHeight="17" Margin="0,4,0,0">
             <TextBlock.Style><Style TargetType="TextBlock"><Style.Triggers>
               <Trigger Property="Text" Value=""><Setter Property="Visibility" Value="Collapsed"/></Trigger>
-              <Trigger Property="Text" Value="연결됨"><Setter Property="Visibility" Value="Collapsed"/></Trigger>
+              <Trigger Property="Text" Value="연결되지 않음"><Setter Property="Visibility" Value="Collapsed"/></Trigger><Trigger Property="Text" Value="답변 중…"><Setter Property="Visibility" Value="Collapsed"/></Trigger><Trigger Property="Text" Value="연결됨"><Setter Property="Visibility" Value="Collapsed"/></Trigger>
               <Trigger Property="Text" Value="답변을 기다리는 중…"><Setter Property="Visibility" Value="Collapsed"/></Trigger>
             </Style.Triggers></Style></TextBlock.Style>
           </TextBlock>

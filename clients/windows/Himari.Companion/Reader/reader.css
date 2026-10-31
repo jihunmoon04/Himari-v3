@@ -1,5 +1,5 @@
-:root{color-scheme:light;font:16px/1.7 'Malgun Gothic','Segoe UI',sans-serif;color:#34304a;background:#faf8ff}
-body{margin:0}main{max-width:1100px;margin:0 auto;padding:28px 36px 64px;overflow-wrap:anywhere}
+:root{color-scheme:light;font:15px/1.6 'Malgun Gothic','Segoe UI',sans-serif;color:#34304a;background:transparent}
+body{margin:0;background:transparent}main{margin:0;padding:0 3px 4px;overflow-wrap:anywhere}main>:first-child{margin-top:0}main>:last-child{margin-bottom:0}
 h1,h2,h3,h4{line-height:1.35;margin:1.4em 0 .6em}p{margin:.6em 0 1em}a{color:#61569b}
 pre{overflow:auto;padding:16px;border-radius:6px;background:#eee9f6;white-space:pre;overflow-wrap:normal}
 code{font:14px/1.6 Consolas,monospace;background:#eee9f6}blockquote{border-left:3px solid #b6a6d4;margin-left:0;padding-left:18px;color:#625e76}
