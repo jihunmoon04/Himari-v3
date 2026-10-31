@@ -265,7 +265,7 @@ public partial class MainWindow
         }
         Message.Text = lastText ?? "대화를 시작해 주세요.";
         SetMood(lastText is null ? "neutral" : lastMood);
-        if (recoveredReply) { talking = false; OpenReplyBubble(id, Str(Prop(detail, "job"), "job_id")); _ = ScheduleBubbleAfterMoves(id); }
+        if (recoveredReply) { SetTalking(false); OpenReplyBubble(id, Str(Prop(detail, "job"), "job_id")); _ = ScheduleBubbleAfterMoves(id); }
     }
     private void WaitForReply(ServerClient server, string conversation, string? job, int after)
     {

@@ -1,13 +1,15 @@
--- Build a 4-frame idle test from the part layers: the upper body breathes by 1 px and
--- the halo floats by up to 2 px. Reports pixels that become transparent while moving.
+-- Build the idle breathing loop from the part layers: one breath every 4 s, about 2 s up
+-- and 2 s down. The upper body lifts 1 px, the hair tail follows 250 ms later in the same
+-- direction and the halo floats by up to 2 px a little behind. Reports pixels that become
+-- transparent while moving.
 local P = app.params
 local spr = app.open(P["in"])
 local OFFSETS = {
-  ["upper (breathing)"] = { 0, -1, -1, 0 },
-  ["halo"] = { 0, -1, -2, -1 },
-  ["hair tail"] = { 0, 0, 1, 0 },
+  ["upper (breathing)"] = { 0, -1, -1, -1, 0, 0 },
+  ["hair tail"] = { 0, 0, -1, -1, -1, 0 },
+  ["halo"] = { 0, -1, -1, -2, -2, -1 },
 }
-local DURATION = { 400, 300, 400, 300 }
+local DURATION = { 1250, 250, 750, 1000, 250, 500 }
 for _ = 2, #DURATION do spr:newFrame() end
 for i, d in ipairs(DURATION) do spr.frames[i].duration = d / 1000 end
 

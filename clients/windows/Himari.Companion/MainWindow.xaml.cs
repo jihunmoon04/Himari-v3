@@ -12,10 +12,11 @@ namespace Himari.Companion;
 public partial class MainWindow : Window
 {
     private static readonly string[] Moods = ["neutral", "happy", "excited", "sad", "surprised", "thinking", "embarrassed", "worried"];
-    private static readonly string[] TalkFrames = ["talk-small", "talk-wide", "talk-small", "neutral"];
-    // Ticks fast enough for the 60-90 ms blink frames.
+    // Rescheduled after every frame to wake exactly when the pose next changes.
     private readonly DispatcherTimer timer = new() { Interval = TimeSpan.FromMilliseconds(30) };
-    private readonly Dictionary<string, BitmapImage> frames = new();
+    private readonly System.Diagnostics.Stopwatch clock = System.Diagnostics.Stopwatch.StartNew();
+    private readonly CharacterRenderer character = CharacterRenderer.Load();
+    private readonly CharacterAnimator animator;
     private readonly Forms.NotifyIcon tray;
     private readonly SettingsWindow settings;
     private System.Windows.Controls.Panel PairPanel => settings.PairPanel;
@@ -27,7 +28,6 @@ public partial class MainWindow : Window
     private System.Windows.Point dragStart;
     private bool dragInProgress;
     private bool loadedOnce;
-    private DateTime started = DateTime.UtcNow;
     private string mood = "neutral";
     private bool talking;
     private bool sleeping;
@@ -39,6 +39,9 @@ public partial class MainWindow : Window
     internal MainWindow(bool offline)
     {
         InitializeComponent();
+        animator = new CharacterAnimator(character.Manifest, Environment.TickCount, TimeSpan.Zero);
+        animationClockRead = clock.Elapsed;
+        Character.Source = character.Bitmap;
         _ = new ComposerInput(Input, SendMessage);
         SetupTypeToChat(this);
         Message.SourceChanged += (_, _) => { replyReader?.UpdateText(Message.Text); UpdateBubblePresentation(); };
@@ -54,6 +57,7 @@ public partial class MainWindow : Window
         settings.MoveDemoButton.Click += MoveDemoClick;
         settings.MoveEnabled.Unchecked += (_, _) => { if (autoMoveActive) ReturnFromMove(); else CancelAutomaticMove(); SchedulePreferencesSave(); };
         settings.MoveEnabled.Checked += (_, _) => SchedulePreferencesSave();
+        SetupAnimationPreview();
         SetupPresentationControls();
         SetupBubblePresentation();
         Character.MouseRightButtonDown += (_, _) => captureFromWorkWindow = false;
@@ -151,28 +155,27 @@ public partial class MainWindow : Window
     }
     private void MoodChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
     {
-        if (MoodSelector.SelectedItem is string value) { demoVersion++; talking = false; mood = value; started = DateTime.UtcNow; UpdateFrame(); }
+        if (MoodSelector.SelectedItem is string value) { demoVersion++; talking = false; mood = value; UpdateFrame(); }
     }
     private void SetMood(string value) { mood = Moods.Contains(value) ? value : "neutral"; MoodSelector.SelectedItem = mood; }
+    private void SetTalking(bool value) { talking = value; UpdateFrame(); }
     private void UpdateFrame()
     {
-        var elapsed = (DateTime.UtcNow - started).TotalMilliseconds;
         if ((DateTime.UtcNow - lastIdleCheck).TotalSeconds >= 2)
         {
             lastIdleCheck = DateTime.UtcNow;
             try { sleeping = IdleSeconds() >= 300; }
             catch (System.ComponentModel.Win32Exception) { sleeping = false; }
         }
-        var frame = mood;
-        if (mood == "neutral" && sleeping && !talking && !Input.IsKeyboardFocusWithin) frame = "blink-closed";
-        else if (mood == "neutral" && talking) frame = TalkFrames[(int)(elapsed / 130) % TalkFrames.Length];
-        else if (mood == "neutral" && !talking) frame = BlinkFrame(elapsed % 4000) ?? frame;
-        if (!frames.TryGetValue(frame, out var image))
-            frames[frame] = image = new BitmapImage(new Uri($"pack://application:,,,/Himari.Companion;component/Assets/{frame}.png"));
-        if (Character.Source != image) Character.Source = image;
+        var now = AnimationNow();
+        animator.Mood = mood;
+        animator.SetTalking(talking || settings.TalkPreview.IsChecked == true, now);
+        animator.SetSleeping(settings.SleepPreview.IsChecked == true || sleeping && !Input.IsKeyboardFocusWithin, now);
+        character.Render(PreviewPose(animator.Pose(now)));
+        // Wake for the next pose, and at least every 2 s for the idle check.
+        double wait = settings.PausePreview.IsChecked == true ? 2000 : (animator.NextChange(now) - now).TotalMilliseconds / animationSpeed;
+        timer.Interval = TimeSpan.FromMilliseconds(Math.Clamp(wait, 10, 2000));
     }
-    // Half-closed, closed, half-closed at the end of each 4 s cycle (see animation-preview/pixel/clean).
-    private static string? BlinkFrame(double phase) => phase switch { > 3950 => "blink-half", > 3860 => "blink-closed", > 3800 => "blink-half", _ => null };
     private async void DemoClick(object sender, RoutedEventArgs e)
     {
         if (sending || liveStreams.ContainsKey(currentConversation ?? "")) { Status.Text = "답변이 끝난 뒤 미리보기를 실행해 주세요."; return; }
