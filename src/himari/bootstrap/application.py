@@ -86,9 +86,18 @@ from himari.control.api import (
 )
 from himari.control.driver import NO_PROGRESS_RUNS
 from himari.control.runner import SEEN_SECONDS, BackgroundRunner
-from himari.memory.api import MemoryPassSettings
+from himari.memory.api import MemoryPassSettings, PassOutcome
 from himari.memory.worker import MemoryPasses
 from himari.data.api import (
+    RETIRED_KEEP,
+    Episode,
+    NoteDates,
+    PassItemRecord,
+    PassStatus,
+    PassSummary,
+    Proposal,
+    RecentEpisode,
+    memory_from_record,
     MessageOrigin,
     MAX_LIST_LIMIT,
     ConversationSummary,
@@ -383,6 +392,7 @@ class DeleteNotice:
     running: bool  # a job runs now: it is stopped first
     trash_days: int
     memories: int = 0  # notes its calls wrote: deleted with it for good (V3-P71 D5)
+    episodes: int = 0  # its episodes, deleted with it too (V3-P85 §10.3)
 
 
 @dataclass(frozen=True)
@@ -393,6 +403,52 @@ class MemoryLine:
     memory_id: int
     text: str
     undo: bool  # the note is still as the call left it, so an Undo is offered
+
+
+@dataclass(frozen=True)
+class PassLineItem:
+    """One thing a memory pass did, as its Conversation shows it (V3-P85 §10.1)."""
+
+    item: int
+    action: str  # "remembered", "updated", "forgot", "open_loop", "closed_loop" or "waiting" (a sensitive proposal)
+    memory_id: int | None
+    text: str
+    due: str | None
+    undo: bool  # the note is as the pass left it (a retired one within its days): an Undo is offered
+    evidence: tuple[int, ...] = ()  # the user messages it rests on, to go to (§10.1)
+
+
+@dataclass(frozen=True)
+class PassLine:
+    """An applied memory pass: shown after the Event it read through."""
+
+    pass_id: str
+    through_sequence: int
+    items: tuple[PassLineItem, ...]
+
+
+def _planned(text: str | None) -> dict[str, Any]:
+    try:
+        value = json.loads(text) if text else {}
+    except ValueError:
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _evidence(record: PassItemRecord) -> tuple[int, ...]:
+    """The user messages a decision cited (checked when it was planned, §4.4)."""
+    cited = _planned(record.proposal).get("evidence")
+    return tuple(n for n in cited if isinstance(n, int)) if isinstance(cited, list) else ()
+
+
+def _pass_action(record: PassItemRecord) -> str | None:
+    """ADD, UPDATE or FORGET from what an applied item recorded (§11): no
+    previous state is an ADD, no planned note a FORGET."""
+    if record.outcome != "applied":
+        return None
+    if record.previous is None:
+        return "add"
+    return "forget" if record.planned is None else "update"
 
 
 def _memory_line(record: ToolExecutionRecord, notes: Mapping[int, Memory]) -> MemoryLine | None:
@@ -685,6 +741,24 @@ async def _server_launchers(config: McpConfig, root: Path) -> LauncherFor | None
     return launcher_for
 
 
+@dataclass(frozen=True)
+class AutoMemoryStatus:
+    """V3-P85 §10.3: automatic memory as the Memory screen tells it."""
+
+    running: bool
+    told: str  # as at startup: "on (…)" or "off (why)"
+    model_id: str | None
+    daily_tokens: int | None
+    summary: PassSummary
+
+
+PASS_LINES_LIMIT = 200  # the newest applied passes a conversation shows lines for (PR #138 review)
+
+
+class MemoryPassesOff(RuntimeError):
+    """A backfill or retry asked while memory passes do not run here."""
+
+
 class _JobListeners:
     """The Runner's one listener, passing each job event on to several (V3-P85:
     the event stream and memory passes). One that fails is logged; the others
@@ -778,6 +852,7 @@ class Application:
     # V3-P85 §12: memory passes (None: they do not run) and why, as told at startup.
     memory_passes: MemoryPasses | None = field(default=None, repr=False)
     auto_memory: str = "off"
+    time_zone: str = DEFAULT_TIME_ZONE  # HIMARI_TIME_ZONE: a date the user writes ends in it unless the page says (V3-P85)
     conversation_search_enabled: bool = False  # V3-P72 §9 (HIMARI_CONVERSATION_SEARCH)
     streaming_enabled: bool = False  # V3-P73 §9 (HIMARI_STREAMING)
     companion_enabled: bool = False  # V3-P83 §3 (HIMARI_COMPANION): pairing and device tokens
@@ -992,6 +1067,7 @@ class Application:
                           changes=changes,
                           machine_principals=frozenset(PrincipalId(p) for p in machine_principals),
                           hub=hub, events=events)
+        application.time_zone = time_zone
         settings, application.auto_memory = memory_pass_settings(
             provider, memory=memory, auto=memory_auto, model_id=memory_model, idle_minutes=memory_idle_minutes,
             daily_tokens=memory_daily_tokens, time_zone=time_zone)
@@ -1003,6 +1079,7 @@ class Application:
 
             passes = MemoryPasses(runtime.data, provider, settings, _RunnerActivity(runner), zone_for=zone_for)
             listeners.listeners.append(passes)
+            passes.on_applied = events.memory_applied
             application.memory_passes = passes
             await passes.start()
         application._ticking = asyncio.create_task(hub.run(), name="presence-tick")
@@ -1540,16 +1617,128 @@ class Application:
         """The principal's notes, by category, newest first within each."""
         return await self.data.list_memories(principal)
 
-    async def add_memory(self, principal: PrincipalId, category: MemoryCategory, text: str) -> Memory:
+    async def add_memory(self, principal: PrincipalId, category: MemoryCategory, text: str,
+                         dates: NoteDates | None = None) -> Memory:
         """A note the user writes; used from each Conversation's next turn.
         DataError TOO_LARGE, LIMIT_EXCEEDED or INVALID_ARGUMENT."""
-        return await self.data.save_memory(principal, category, text)
+        return await self.data.save_memory(principal, category, text, dates=dates)
 
     async def edit_memory(self, principal: PrincipalId, memory_id: int, category: MemoryCategory, text: str,
-                          revision: int) -> Memory:
-        """The user's rewrite: their text from now on, its source kept (§4.3).
-        DataError NOT_FOUND, VERSION_CONFLICT, TOO_LARGE or INVALID_ARGUMENT."""
-        return await self.data.save_memory(principal, category, text, memory_id=memory_id, expected_revision=revision)
+                          revision: int, dates: NoteDates | None = None) -> Memory:
+        """The user's rewrite: their text from now on, its source kept (§4.3);
+        ``dates`` None keeps the note's (V3-P85). DataError NOT_FOUND,
+        VERSION_CONFLICT, TOO_LARGE or INVALID_ARGUMENT."""
+        return await self.data.save_memory(principal, category, text, memory_id=memory_id, expected_revision=revision,
+                                           dates=dates)
+
+    # --- memory passes (V3-P85 §10, §12) ---------------------------------------------
+
+    async def memory_pass_lines(self, scope: TrustedScope) -> tuple[PassLine, ...]:
+        """§10.1: this Conversation's applied passes that did something to show,
+        each item with whether an Undo is offered now. Authorizes like any read."""
+        now = datetime.now(UTC)
+        found = await self.data.applied_pass_items(scope, limit=PASS_LINES_LIMIT)  # two reads, however many (review)
+        targets = [int(r.target.removeprefix("m")) for _, records in found for r in records
+                   if r.target is not None and r.target.removeprefix("m").isdigit()]
+        states = await self.data.memory_revisions(scope.principal_id, targets)
+        lines: list[PassLine] = []
+        for memory_pass, records in found:
+            items = tuple(item for record in records if (item := self._pass_line_item(record, states, now)) is not None)
+            if items:
+                lines.append(PassLine(memory_pass.pass_id, memory_pass.through_sequence, items))
+        return tuple(lines)
+
+    @staticmethod
+    def _pass_line_item(record: PassItemRecord, states: Mapping[int, tuple[int, bool]],
+                        now: datetime) -> PassLineItem | None:
+        planned, previous = _planned(record.planned), _planned(record.previous)
+        memory_id = None if record.target is None else int(record.target.removeprefix("m"))
+        if record.outcome in ("sensitive_proposed", "kept"):
+            text = str(planned.get("text") or "")
+            return PassLineItem(record.item, "waiting" if record.outcome == "sensitive_proposed" else "remembered",
+                                memory_id, text, planned.get("due_at"), False, _evidence(record))
+        action = _pass_action(record)
+        if action is None or memory_id is None:
+            return None
+        loop = (previous if action == "forget" else planned).get("category") == MemoryCategory.LOOP.value
+        state = states.get(memory_id)
+        if action == "forget":
+            undo = (state == (record.written_revision, True) and record.created_at > now - RETIRED_KEEP)
+            return PassLineItem(record.item, "closed_loop" if loop else "forgot", memory_id,
+                                str(previous.get("text") or ""), previous.get("due_at"), undo, _evidence(record))
+        undo = state == (record.written_revision, False)
+        shown = "open_loop" if loop and action == "add" else "remembered" if action == "add" else "updated"
+        return PassLineItem(record.item, shown, memory_id, str(planned.get("text") or ""), planned.get("due_at"), undo,
+                            _evidence(record))
+
+    async def undo_pass_item(self, scope: TrustedScope, pass_id: str, item: int) -> Memory | None:
+        """§10.1: undo what one item of this Conversation's pass did, from its
+        own record: an added note is deleted (None), a rewrite put back, a
+        retired note brought back. NOT_FOUND: no such change, the note gone,
+        retired too long ago or its source deleted; VERSION_CONFLICT: changed since;
+        LIMIT_EXCEEDED: memory is full."""
+        if not any(p.pass_id == pass_id and p.status is PassStatus.APPLIED for p in await self.data.list_passes(scope)):
+            raise DataError(DataErrorCode.NOT_FOUND, "no such memory pass here")
+        record = next((r for r in await self.data.read_pass_items(pass_id) if r.item == item), None)
+        action = None if record is None else _pass_action(record)
+        if record is None or action is None or record.target is None or record.written_revision is None:
+            raise DataError(DataErrorCode.NOT_FOUND, "no memory change to undo")
+        memory_id, principal = int(record.target.removeprefix("m")), scope.principal_id
+        if action == "add":
+            await self.data.delete_memory(principal, memory_id, record.written_revision)
+            return None
+        if action == "forget":
+            return await self.data.unretire_memory(principal, memory_id, expected_revision=record.written_revision,
+                                                   now=datetime.now(UTC))
+        before = None if record.previous is None else memory_from_record(record.previous)
+        if before is None or before.memory_id != memory_id:
+            raise DataError(DataErrorCode.NOT_FOUND, "this change cannot be undone")
+        return await self.data.restore_memory(principal, before, expected_revision=record.written_revision)
+
+    async def proposals(self, principal: PrincipalId) -> tuple[Proposal, ...]:
+        return await self.data.list_proposals(principal)
+
+    async def decide_proposal(self, principal: PrincipalId, pass_id: str, item: int, keep: bool,
+                              dates: NoteDates | None = None) -> Memory | None:
+        """``dates``: the user's, in place of the proposal's (a passed date dropped or moved)."""
+        return await self.data.decide_proposal(principal, pass_id, item, keep=keep, now=datetime.now(UTC),
+                                               dates=dates)
+
+    async def episodes(self, principal: PrincipalId, before: tuple[datetime, int] | None,
+                       limit: int) -> tuple[RecentEpisode, ...]:
+        return await self.data.page_episodes(principal, before=before, limit=limit)
+
+    async def edit_episode(self, principal: PrincipalId, episode_id: int, text: str, revision: int) -> Episode:
+        return await self.data.update_episode(principal, episode_id, text, expected_revision=revision)
+
+    async def delete_episode(self, principal: PrincipalId, episode_id: int, revision: int) -> None:
+        await self.data.delete_episode(principal, episode_id, expected_revision=revision)
+
+    async def memory_status(self, principal: PrincipalId) -> AutoMemoryStatus:
+        """§10.3: whether memory passes run here and why, today's tokens, the
+        last applied pass, and the trouble of the last seven days."""
+        passes = self.memory_passes
+        now = datetime.now(UTC)
+        day_start = passes.day_start(now) if passes is not None else now.replace(hour=0, minute=0, second=0,
+                                                                                  microsecond=0)
+        summary = await self.data.pass_summary(principal, day_start=day_start, since=now - timedelta(days=7))
+        return AutoMemoryStatus(passes is not None, self.auto_memory,
+                                None if passes is None else passes.model_id,
+                                None if passes is None else passes.daily_tokens, summary)
+
+    async def backfill(self, scope: TrustedScope) -> list[PassOutcome]:
+        """§4.9, §12: read a Conversation's part before the upgrade. NOT_AUTHORIZED
+        for another's; MemoryPassesOff when they do not run here."""
+        await self.data.read_conversation(scope)
+        if self.memory_passes is None:
+            raise MemoryPassesOff(self.auto_memory)
+        return await self.memory_passes.backfill(scope)
+
+    async def retry_pass(self, scope: TrustedScope, pass_id: str) -> PassOutcome:
+        await self.data.read_conversation(scope)
+        if self.memory_passes is None:
+            raise MemoryPassesOff(self.auto_memory)
+        return await self.memory_passes.retry(scope, pass_id)
 
     async def delete_memory(self, principal: PrincipalId, memory_id: int, revision: int | None = None) -> Memory:
         """Gone at once; out of each Conversation's next turn. Results already
@@ -1816,7 +2005,7 @@ class Application:
                          - (BUILT_IN_NAMESPACES - configured))
         return DeleteNotice(tuple(servers), tuple(s for s in servers if s not in configured),
                             self.runner.status(scope).running, self.trash_days,
-                            await self.data.count_source_memories(scope))
+                            await self.data.count_source_memories(scope), await self.data.count_source_episodes(scope))
 
     async def trash(self, scope: TrustedScope) -> datetime:
         """§7.1: the owner checked first (review B4: before the Runner is

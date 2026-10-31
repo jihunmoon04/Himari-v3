@@ -34,6 +34,7 @@ from himari.data.api import (
     MemoryChange,
     MemoryChangeKind,
     MemoryCursor,
+    NoteDates,
     MemoryOrigin,
     PassAction,
     PassItem,
@@ -45,6 +46,7 @@ from himari.data.api import (
     RawReceived,
     RunPreparation,
     ToolCompletion,
+    memory_from_record,
     ToolExecutionStatus,
 )
 from himari.data.memory import InMemoryData, InMemoryStore
@@ -586,5 +588,206 @@ def test_episodes_are_ranked_before_the_limit_is_taken() -> None:
         first_days = await data.find_episodes(ME, [], start=NOW - timedelta(days=4), limit=2)
         assert [f.episode.text for f in first_days] == ["Bubbles and hotkey fixed.", "Bubbles again."]  # time order
         assert [f.episode.text for f in await data.find_episodes(ME, [], limit=1)] == ["Bubbles once more."]
+
+    asyncio.run(scenario())
+
+
+# --- part 4: Undo of a pass item, proposals, the Timeline and the status --------------------------------------
+
+
+def test_an_automatic_forget_is_undone_once_within_its_days_and_the_limit() -> None:
+    async def scenario() -> None:
+        _, data = fresh()
+        last = await turn(data, SCOPE, "Interview on Nov 4.")
+        first = await live(data, SCOPE, last)
+        await data.apply_pass(first, [add(0, "Interview on Nov 4.", LOOP, due_at="2026-11-04",
+                                          due_instant=NOW + timedelta(days=4))], None, now=NOW)
+        (loop,) = await data.list_memories(ME)
+        last = await turn(data, SCOPE, "The interview is done.")
+        second = await live(data, SCOPE, last)
+        retired_at = datetime.now(UTC)
+        await data.apply_pass(second, [PassItem(0, "{}", PassAction.FORGET, memory_id=loop.memory_id,
+                                                expected_revision=1)], None, now=retired_at)
+        (record,) = await data.read_pass_items(second)
+        assert (record.outcome, record.target, record.written_revision, record.planned) == (
+            "applied", f"m{loop.memory_id}", 2, None)
+        before = memory_from_record(record.previous or "")
+        assert before is not None and (before.text, before.due_at, before.revision) == (
+            "Interview on Nov 4.", "2026-11-04", 1)
+        assert await data.memory_revision(ME, loop.memory_id) == (2, True)
+        with pytest.raises(DataError) as error:
+            await data.unretire_memory(ME, loop.memory_id, expected_revision=1, now=retired_at)
+        assert code(error) is DataErrorCode.VERSION_CONFLICT
+        with pytest.raises(DataError) as error:  # too late: Undo lasts RETIRED_KEEP
+            await data.unretire_memory(ME, loop.memory_id, expected_revision=2, now=retired_at + timedelta(days=30))
+        assert code(error) is DataErrorCode.NOT_FOUND
+        back = await data.unretire_memory(ME, loop.memory_id, expected_revision=2, now=retired_at)
+        assert (back.revision, back.due_at, back.source_pass) == (3, "2026-11-04", first)
+        assert await data.list_memories(ME) == (await data.read_memory(ME, loop.memory_id),)
+        with pytest.raises(DataError) as error:  # not retired any more
+            await data.unretire_memory(ME, loop.memory_id, expected_revision=3, now=retired_at)
+        assert code(error) is DataErrorCode.NOT_FOUND
+        assert await data.memory_revision(ME, 999) is None
+
+    asyncio.run(scenario())
+
+
+def test_a_proposal_is_kept_as_the_users_or_discarded_once() -> None:
+    async def scenario() -> None:
+        _, data = fresh()
+        last = await turn(data, SCOPE, "Sensitive things.")
+        pass_id = await live(data, SCOPE, last)
+        await data.apply_pass(pass_id, [
+            PassItem(0, "{}", PassAction.PROPOSE, "sensitive_proposed", category=USER, text="Takes pills."),
+            PassItem(1, "{}", PassAction.PROPOSE, "sensitive_proposed", category=LOOP, text="Doctor on Nov 3.",
+                     due_at="2026-11-03", due_instant=NOW + timedelta(days=3)),
+            add(2, "Builds HIMARI."),
+        ], None, now=NOW)
+        await data.rename_conversation(SCOPE, "Health")
+        proposals = await data.list_proposals(ME)
+        assert [(p.record.item, p.kind, p.title, p.in_trash) for p in proposals] == [
+            (0, PassKind.LIVE, "Health", False), (1, PassKind.LIVE, "Health", False)]
+        kept = await data.decide_proposal(ME, pass_id, 1, keep=True, now=NOW)
+        assert kept is not None and (kept.category, kept.due_at, kept.origin, kept.source_pass, kept.source_item,
+                                     kept.user_approved_at) == (LOOP, "2026-11-03", MemoryOrigin.EXTRACTOR, pass_id,
+                                                                1, NOW)
+        assert await data.decide_proposal(ME, pass_id, 0, keep=False, now=NOW) is None
+        assert await data.list_proposals(ME) == ()
+        assert (await data.read_pass_outcomes(pass_id)) == ("discarded", "kept", "applied")
+        for item in (0, 2):  # decided, or never a proposal
+            with pytest.raises(DataError) as error:
+                await data.decide_proposal(ME, pass_id, item, keep=True, now=NOW)
+            assert code(error) is DataErrorCode.VERSION_CONFLICT
+        with pytest.raises(DataError) as error:  # another principal's pass is none of theirs
+            await data.decide_proposal(PrincipalId("bob"), pass_id, 0, keep=True, now=NOW)
+        assert code(error) is DataErrorCode.NOT_FOUND
+
+    asyncio.run(scenario())
+
+
+def test_a_kept_proposal_waits_while_memory_is_full() -> None:
+    async def scenario() -> None:
+        _, data = fresh()
+        last = await turn(data, SCOPE, "A past part.")
+        pass_id = await live(data, SCOPE, last)
+        await data.apply_pass(pass_id, [PassItem(0, "{}", PassAction.PROPOSE, "proposed", category=USER,
+                                                 text="Lived in Tokyo.")], None, now=NOW)
+        for n in range(MAX_MEMORIES):
+            await data.save_memory(ME, USER, f"Note {n}.")
+        with pytest.raises(DataError) as error:
+            await data.decide_proposal(ME, pass_id, 0, keep=True, now=NOW)
+        assert code(error) is DataErrorCode.LIMIT_EXCEEDED
+        assert len(await data.list_proposals(ME)) == 1
+
+    asyncio.run(scenario())
+
+
+def test_the_timeline_pages_by_end_and_the_users_rewrite_stops_extending() -> None:
+    async def scenario() -> None:
+        _, data = fresh()
+        for n in range(3):
+            last = await turn(data, SCOPE, f"Part {n} with words enough")
+            pass_id = await live(data, SCOPE, last)
+            ended = NOW + timedelta(hours=n)
+            await data.apply_pass(pass_id, [], EpisodePlan(f"Episode {n}.", ended, ended, (last - 1,), ()), now=NOW)
+        first = await data.page_episodes(ME, before=None, limit=2)
+        assert [f.episode.episode_id for f in first] == [3, 2]
+        last_shown = first[-1].episode
+        rest = await data.page_episodes(ME, before=(last_shown.ended_at, last_shown.episode_id), limit=2)
+        assert [f.episode.episode_id for f in rest] == [1]
+        newest = first[0].episode
+        mine = await data.update_episode(ME, newest.episode_id, "  My own words.\r\n", expected_revision=1)
+        assert (mine.text, mine.origin, mine.revision) == ("My own words.", MemoryOrigin.USER, 2)
+        with pytest.raises(DataError) as error:
+            await data.update_episode(ME, newest.episode_id, "Again.", expected_revision=1)
+        assert code(error) is DataErrorCode.VERSION_CONFLICT
+        last = await turn(data, SCOPE, "And more, continuing it")
+        pass_id = await live(data, SCOPE, last)
+        result = await data.apply_pass(pass_id, [], EpisodePlan(
+            "Continued.", NOW + timedelta(hours=2), NOW + timedelta(hours=2), (last - 1,), (),
+            extend=newest.episode_id, expected_revision=2), now=NOW)
+        assert result.episode_id == 4  # the user's episode is never rewritten by a pass
+        assert await data.count_source_episodes(SCOPE) == 4
+        await data.delete_episode(ME, 4, expected_revision=1)
+        with pytest.raises(DataError) as error:
+            await data.delete_episode(ME, 4, expected_revision=1)
+        assert code(error) is DataErrorCode.NOT_FOUND
+
+    asyncio.run(scenario())
+
+
+def test_the_status_counts_todays_tokens_the_last_applied_pass_and_recent_trouble() -> None:
+    async def scenario() -> None:
+        _, data = fresh(SCOPE, OTHER)
+        since = datetime.now(UTC) - timedelta(minutes=1)
+        last = await turn(data, SCOPE, "I build HIMARI.")
+        for _ in range(3):
+            pass_id = await live(data, SCOPE, last)
+            call = await data.prepare_pass_call(pass_id, b"{}", "application/json", 100)
+            await data.record_pass_call(pass_id, call, RawNoResponse("http_500"))
+            await data.fail_pass(pass_id, "http_500", NOW)
+        other = await turn(data, OTHER, "Another one.")
+        applied = await live(data, OTHER, other)
+        await data.apply_pass(applied, [], None, now=NOW)
+        summary = await data.pass_summary(ME, day_start=since, since=since)
+        assert summary.charged_today == 300 and summary.failed == 2
+        assert [p.status for p in summary.skipped] == [PassStatus.SKIPPED]
+        assert summary.last_applied_at is not None and summary.last_applied_at >= since
+
+    asyncio.run(scenario())
+
+
+def test_a_proposal_kept_with_a_passed_date_is_refused_unless_its_date_is_dropped_or_moved() -> None:
+    # PR #138 review: kept as it was, the hourly cleanup would take it at once.
+    async def scenario() -> None:
+        _, data = fresh()
+        last = await turn(data, SCOPE, "Old plans.")
+        pass_id = await live(data, SCOPE, last)
+        long_ago, now = NOW - timedelta(days=20), datetime.now(UTC)
+        await data.apply_pass(pass_id, [
+            PassItem(0, "{}", PassAction.PROPOSE, "proposed", category=LOOP, text="Dentist.", due_at="2026-10-11",
+                     due_instant=now - timedelta(days=20)),
+            PassItem(1, "{}", PassAction.PROPOSE, "proposed", category=USER, text="Away.", valid_until="2026-10-20",
+                     valid_instant=now - timedelta(days=1)),
+            PassItem(2, "{}", PassAction.PROPOSE, "proposed", category=LOOP, text="Overdue a little.",
+                     due_at="2026-10-28", due_instant=now - timedelta(days=3)),
+        ], None, now=long_ago)
+        for item in (0, 1):
+            with pytest.raises(DataError) as error:
+                await data.decide_proposal(ME, pass_id, item, keep=True, now=now)
+            assert code(error) is DataErrorCode.STALE_DATE
+        assert len(await data.list_proposals(ME)) == 3  # still waiting
+        undated = await data.decide_proposal(ME, pass_id, 0, keep=True, now=now, dates=NoteDates())
+        assert undated is not None and (undated.text, undated.due_at) == ("Dentist.", None)
+        moved = await data.decide_proposal(ME, pass_id, 1, keep=True, now=now,
+                                           dates=NoteDates(valid_until="2026-12-01",
+                                                           valid_instant=now + timedelta(days=30)))
+        assert moved is not None and moved.valid_until == "2026-12-01"
+        recent = await data.decide_proposal(ME, pass_id, 2, keep=True, now=now)  # overdue, not yet the cleanup's
+        assert recent is not None and recent.due_at == "2026-10-28"
+
+    asyncio.run(scenario())
+
+
+def test_the_lines_read_the_newest_passes_with_their_shown_items_at_once() -> None:
+    async def scenario() -> None:
+        _, data = fresh()
+        ids = []
+        for n in range(3):
+            last = await turn(data, SCOPE, f"Part {n} with words enough")
+            pass_id = await live(data, SCOPE, last)
+            await data.apply_pass(pass_id, [add(0, f"Note {n}."), PassItem(1, "{}", PassAction.DROP, "bad_evidence")],
+                                  None, now=NOW)
+            ids.append(pass_id)
+        last = await turn(data, SCOPE, "Nothing to remember here")
+        quiet = await live(data, SCOPE, last)
+        await data.apply_pass(quiet, [PassItem(0, "{}", PassAction.DROP, "no_evidence")], None, now=NOW)
+        found = await data.applied_pass_items(SCOPE, limit=2)
+        assert [p.pass_id for p, _ in found] == ids[1:]  # the newest two that show something, oldest first
+        assert [[r.outcome for r in records] for _, records in found] == [["applied"], ["applied"]]
+        notes = {n.text: n.memory_id for n in await data.list_memories(ME)}
+        assert await data.memory_revisions(ME, [notes["Note 0."], notes["Note 2."], 999]) == {
+            notes["Note 0."]: (1, False), notes["Note 2."]: (1, False)}
+        assert await data.memory_revisions(ME, []) == {}
 
     asyncio.run(scenario())

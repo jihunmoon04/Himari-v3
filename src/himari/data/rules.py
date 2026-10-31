@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import dataclasses
+from datetime import datetime
 import json
 import re
 import unicodedata
@@ -54,6 +56,8 @@ from himari.data.api import (
     PassAction,
     PassItem,
     PassKind,
+    NoteDates,
+    STALE_DUE,
 )
 
 
@@ -466,3 +470,31 @@ def extends(plan: EpisodePlan, kind: PassKind, previous: Episode | None) -> bool
 def overlaps(a_from: int, a_through: int, b_from: int, b_through: int) -> bool:
     """Two parts (from exclusive, through inclusive) share an Event."""
     return a_from < b_through and b_from < a_through
+
+
+def check_fresh(note: Memory, now: datetime) -> Memory:
+    """A kept proposal (V3-P85 §10.2) must not be one the hourly cleanup takes
+    at once: STALE_DATE for a loop due STALE_DUE ago or a fact past its end."""
+    if note.due_instant is not None and note.due_instant < now - STALE_DUE:
+        raise DataError(DataErrorCode.STALE_DATE, f"its date {note.due_at} has passed")
+    if note.valid_instant is not None and note.valid_instant < now:
+        raise DataError(DataErrorCode.STALE_DATE, f"it held until {note.valid_until}")
+    return note
+
+
+def dated(note: Memory, dates: NoteDates | None) -> Memory:
+    """The user's write (V3-P85 §10.2): ``dates`` given are the note's, checked;
+    None keeps its own, but not one its category does not have."""
+    loop = note.category is MemoryCategory.LOOP
+    if dates is None:
+        return dataclasses.replace(note, due_at=note.due_at if loop else None,
+                                   due_instant=note.due_instant if loop else None,
+                                   valid_until=None if loop else note.valid_until,
+                                   valid_instant=None if loop else note.valid_instant)
+    if (dates.due_at is None) != (dates.due_instant is None) or \
+            (dates.valid_until is None) != (dates.valid_instant is None):
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, "a date comes with its instant")
+    if (not loop and dates.due_at is not None) or (loop and dates.valid_until is not None):
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, "a loop has a due date, a fact an end")
+    return dataclasses.replace(note, due_at=dates.due_at, due_instant=dates.due_instant,
+                               valid_until=dates.valid_until, valid_instant=dates.valid_instant)

@@ -245,12 +245,25 @@
         <!-- The notes HIMARI keeps about the user (V3-P71 §7.2), by category. -->
         <section class="surface memory" id="surface-memory" hidden>
           <h1>Memory</h1>
-          <p class="hint">What HIMARI remembers about you across conversations. About you and Preferences go into
-            every conversation; HIMARI searches the rest when it needs them. Changes apply from the next message.</p>
+          <p class="hint">What HIMARI remembers about you across conversations. Open loops, About you and
+            Preferences go into every conversation, with what you did together lately; HIMARI searches the rest when
+            it needs them. Changes apply from the next message.</p>
           <p class="memory-off" id="memory-off" hidden>Memory is off on this server: models neither use nor save
             notes. You can still manage your notes here.</p>
-          <p class="hint memory-count" id="memory-count"></p>
-          <div class="memory-groups" id="memory-groups"></div>
+          <p class="hint memory-auto" id="memory-auto"></p>
+          <div class="memory-tabs" role="tablist" aria-label="Memory">
+            <button type="button" class="memory-tab" id="memory-tab-notes" role="tab" aria-selected="true"
+                    aria-controls="memory-notes">Notes</button>
+            <button type="button" class="memory-tab" id="memory-tab-timeline" role="tab" aria-selected="false"
+                    aria-controls="memory-timeline">Timeline</button>
+          </div>
+          <div id="memory-notes" role="tabpanel" aria-labelledby="memory-tab-notes">
+            <section class="memory-suggestions" id="memory-suggestions" hidden></section>
+            <p class="hint memory-count" id="memory-count"></p>
+            <div class="memory-groups" id="memory-groups"></div>
+          </div>
+          <div class="memory-timeline" id="memory-timeline" role="tabpanel" aria-labelledby="memory-tab-timeline"
+               hidden></div>
         </section>
 
         <!-- Folders on this server the user registered (V3-P74 §10.3), to attach to conversations. -->

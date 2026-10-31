@@ -29,6 +29,7 @@ from himari.common import (
     DeepFrozen,
     ArtifactId,
     BindingId,
+    CallId,
     CallRef,
     ContentBlock,
     ConversationId,
@@ -65,6 +66,7 @@ class DataErrorCode(Enum):
     RAW_PERSISTENCE_UNAVAILABLE = "raw_persistence_unavailable"
     INVALID_STATE_TRANSITION = "invalid_state_transition"
     INVALID_ARGUMENT = "invalid_argument"
+    STALE_DATE = "stale_date"  # V3-P85: a kept proposal would carry a date already past use
     # V3-P66: files
     LIMIT_EXCEEDED = "limit_exceeded"  # too many staged uploads, or too much presented in the hour
     TOO_LARGE = "too_large"  # one file over the operator's limit
@@ -1012,6 +1014,16 @@ class MemoryChange(DeepFrozen):
     valid_instant: datetime | None = None
 
 
+@dataclass(frozen=True)
+class NoteDates(DeepFrozen):
+    """The dates the user gives a note (V3-P85 §10.2): all None clears them."""
+
+    due_at: str | None = None
+    due_instant: datetime | None = None
+    valid_until: str | None = None
+    valid_instant: datetime | None = None
+
+
 def parse_note_date(value: object, zone: str) -> tuple[str, datetime] | None:
     """V3-P85 §5.3: a note's date as written and as the instant compared — a
     date (``2026-11-04``: its end of day in ``zone``) or a time with its UTC
@@ -1060,10 +1072,13 @@ class MemoryStore(Protocol):
         ...
 
     async def save_memory(self, principal: PrincipalId, category: MemoryCategory, text: str, *,
-                          memory_id: int | None = None, expected_revision: int | None = None) -> Memory:
+                          memory_id: int | None = None, expected_revision: int | None = None,
+                          dates: NoteDates | None = None) -> Memory:
         """The user's write. No ``memory_id``: a new note. With it: rewrites
         that note when ``expected_revision`` is its revision; it becomes the
-        user's text and keeps its source."""
+        user's text and keeps its source. ``dates`` (V3-P85): None keeps a
+        rewritten note's dates (but not one its new category does not have);
+        given, they are the note's — checked as a Tool's are."""
         ...
 
     async def delete_memory(self, principal: PrincipalId, memory_id: int,
@@ -1082,6 +1097,43 @@ class MemoryStore(Protocol):
 
     async def count_source_memories(self, scope: TrustedScope) -> int:
         """The notes this Conversation's calls wrote: deleted with it."""
+        ...
+
+    async def unretire_memory(self, principal: PrincipalId, memory_id: int, *, expected_revision: int,
+                              now: datetime) -> Memory:
+        """V3-P85 §5.4: bring back a note an automatic forget retired, as it
+        was, at its next revision. NOT_FOUND when it is not retired, retired
+        RETIRED_KEEP ago or more, or its source Conversation was deleted for
+        good; VERSION_CONFLICT when not at ``expected_revision``;
+        LIMIT_EXCEEDED when MAX_MEMORIES live notes are kept."""
+        ...
+
+    async def memory_revision(self, principal: PrincipalId, memory_id: int) -> tuple[int, bool] | None:
+        """A note's revision and whether it is retired; None when there is no such note."""
+        ...
+
+    async def memory_revisions(self, principal: PrincipalId, memory_ids: Sequence[int]) -> dict[int, tuple[int, bool]]:
+        """``memory_revision`` of many notes in one read; a note that is not there is left out."""
+        ...
+
+    async def count_source_episodes(self, scope: TrustedScope) -> int:
+        """The episodes of this Conversation: deleted with it (V3-P85 §10.3)."""
+        ...
+
+    async def page_episodes(self, principal: PrincipalId, *, before: tuple[datetime, int] | None,
+                            limit: int) -> tuple[RecentEpisode, ...]:
+        """V3-P85 §10.3: the Timeline, newest first by (ended_at, episode_id),
+        after ``before`` (the last one shown); not of a Conversation in the trash."""
+        ...
+
+    async def update_episode(self, principal: PrincipalId, episode_id: int, text: str, *,
+                             expected_revision: int) -> Episode:
+        """The user's rewrite: it becomes the user's (passes no longer extend
+        it). NOT_FOUND, VERSION_CONFLICT, TOO_LARGE, INVALID_ARGUMENT."""
+        ...
+
+    async def delete_episode(self, principal: PrincipalId, episode_id: int, *, expected_revision: int) -> None:
+        """NOT_FOUND, VERSION_CONFLICT."""
         ...
 
     async def recent_episodes(self, principal: PrincipalId, *, since: datetime, besides: ConversationId | None,
@@ -1276,6 +1328,81 @@ class PassApplied(DeepFrozen):
 
 
 @dataclass(frozen=True)
+class PassItemRecord(DeepFrozen):
+    """One item of a pass as recorded (§11). ``proposal``: the decision as the
+    model wrote it; ``planned``: the note it names (JSON, as ``rules.planned_json``)
+    for an ADD, UPDATE or proposal; ``previous``: the note before an UPDATE or
+    FORGET (JSON, as ``rules.memory_json``)."""
+
+    pass_id: str
+    item: int
+    proposal: str
+    planned: str | None
+    outcome: str
+    target: str | None
+    previous: str | None
+    written_revision: int | None
+    decided_at: datetime | None
+    created_at: datetime
+
+
+def memory_from_record(previous: str) -> Memory | None:
+    """A note as an item's ``previous`` recorded it (``rules.memory_json``), for
+    an Undo (V3-P85 §10.1); None when the record does not hold one. Its times
+    are not recorded: ``restore_memory`` keeps the note's own."""
+    try:
+        raw = json.loads(previous)
+        call = raw.get("source_call")
+
+        def moment(key: str) -> datetime | None:
+            return None if raw.get(key) is None else datetime.fromisoformat(raw[key])
+
+        epoch = datetime.fromtimestamp(0, UTC)
+        return Memory(int(raw["memory_id"]), MemoryCategory(raw["category"]), str(raw["text"]),
+                      MemoryOrigin(raw["origin"]),
+                      None if raw.get("source_conversation") is None else ConversationId(raw["source_conversation"]),
+                      None if not isinstance(call, dict) else CallRef(RunId(call["run_id"]), CallId(call["call_id"])),
+                      int(raw["revision"]), epoch, epoch, due_at=raw.get("due_at"), due_instant=moment("due_instant"),
+                      valid_until=raw.get("valid_until"), valid_instant=moment("valid_instant"),
+                      source_pass=raw.get("source_pass"), source_item=raw.get("source_item"),
+                      user_approved_at=moment("user_approved_at"))
+    except (ValueError, KeyError, TypeError, AttributeError):
+        return None
+
+
+def planned_item(planned: str, item: int, action: PassAction) -> PassItem | None:
+    """The note an item's ``planned`` names, as a PassItem to check and write; None when unreadable."""
+    try:
+        raw = json.loads(planned)
+
+        def moment(key: str) -> datetime | None:
+            return None if raw.get(key) is None else datetime.fromisoformat(raw[key])
+
+        return PassItem(item, planned, action, category=MemoryCategory(raw["category"]), text=raw["text"],
+                        due_at=raw.get("due_at"), due_instant=moment("due_instant"),
+                        valid_until=raw.get("valid_until"), valid_instant=moment("valid_instant"))
+    except (ValueError, KeyError, TypeError, AttributeError):
+        return None
+
+
+@dataclass(frozen=True)
+class Proposal(DeepFrozen):
+    record: PassItemRecord
+    conversation_id: ConversationId
+    kind: PassKind  # LIVE: a sensitive note without a request; BACKFILL, RETRY: a past part's
+    title: str | None
+    in_trash: bool
+
+
+@dataclass(frozen=True)
+class PassSummary(DeepFrozen):
+    charged_today: int
+    last_applied_at: datetime | None
+    skipped: tuple[MemoryPass, ...]  # still SKIPPED (not retried) since then
+    failed: int  # FAILED or INTERRUPTED since then
+
+
+@dataclass(frozen=True)
 class MemoryCleanup(DeepFrozen):
     stale_loops: int = 0
     expired_facts: int = 0
@@ -1378,6 +1505,38 @@ class MemoryPassLog(Protocol):
 
     async def read_pass_outcomes(self, pass_id: str) -> tuple[str, ...]:
         """Each item's outcome, by item."""
+        ...
+
+    async def read_pass_items(self, pass_id: str) -> tuple[PassItemRecord, ...]:
+        """Each item as recorded, by item. NOT_FOUND for no such pass."""
+        ...
+
+    async def applied_pass_items(self, scope: TrustedScope, *,
+                                 limit: int) -> tuple[tuple[MemoryPass, tuple[PassItemRecord, ...]], ...]:
+        """§10.1 in one read (PR #138 review): this Conversation's newest ``limit``
+        APPLIED passes that did something to show (an item applied, kept, or a
+        sensitive proposal), oldest first, each with those items by item."""
+        ...
+
+    async def list_proposals(self, principal: PrincipalId) -> tuple[Proposal, ...]:
+        """V3-P85 §10.2: the principal's proposals nobody kept or discarded, oldest first."""
+        ...
+
+    async def decide_proposal(self, principal: PrincipalId, pass_id: str, item: int, *, keep: bool,
+                              now: datetime, dates: NoteDates | None = None) -> Memory | None:
+        """Keep (the note it names, added now: EXTRACTOR, its pass as source,
+        ``user_approved_at`` set; ``dates`` given replace the proposal's) or
+        discard a proposal; the note kept, or None. NOT_FOUND when the pass is
+        not the principal's (or is gone); VERSION_CONFLICT when the item is
+        not a proposal still waiting; STALE_DATE when the note would keep a
+        date the cleanup takes at once (a loop due STALE_DUE ago, a fact past
+        its end — PR #138 review); for a keep, the note's own checks
+        (TOO_LARGE, INVALID_ARGUMENT, LIMIT_EXCEEDED). After a refusal it still waits."""
+        ...
+
+    async def pass_summary(self, principal: PrincipalId, *, day_start: datetime, since: datetime) -> PassSummary:
+        """V3-P85 §10.3's status: today's charged tokens, the last applied pass,
+        and the parts skipped and passes failed since ``since``."""
         ...
 
     async def clean_memories(self, now: datetime) -> MemoryCleanup:

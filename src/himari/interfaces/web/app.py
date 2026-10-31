@@ -41,6 +41,7 @@ is never served from this origin.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 import os
@@ -53,7 +54,8 @@ from urllib.parse import quote
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
+from zoneinfo import available_timezones
 from importlib import resources
 from typing import Annotated, Any, BinaryIO, Literal
 
@@ -73,6 +75,9 @@ from himari.bootstrap.application import (
     DeleteNotice,
     FileNameRefused,
     MemoryLine,
+    AutoMemoryStatus,
+    MemoryPassesOff,
+    PassLine,
     FilesUnavailable,
     ModelChoiceView,
     ModelRefused,
@@ -144,6 +149,13 @@ from himari.data.api import (
     ToolResultRecord,
     UserMessage,
     view_state,
+    MAX_EPISODE_CHARS,
+    MAX_LOOP_CHARS,
+    Episode,
+    NoteDates,
+    Proposal,
+    RecentEpisode,
+    parse_note_date,
 )
 from himari.interfaces.web import event_stream, live
 from himari.interfaces.web.config import WebConfig
@@ -301,8 +313,30 @@ class InstructionsBody(_Body):
 
 
 class MemoryBody(_Body):
-    category: Literal["user", "preference", "project", "reference"]  # MemoryCategory's values
+    category: Literal["user", "preference", "project", "reference", "loop"]  # MemoryCategory's values
     text: str  # its limit is Data's (V3-P71 §4.2)
+    # V3-P85 §10.2: a loop's date and a fact's end, YYYY-MM-DD (or a time with its offset); null clears.
+    # Both left out on an edit keep the note's. A bare date ends in ``time_zone`` (the browser's), else the server's.
+    due: str | None = None
+    valid_until: str | None = None
+    time_zone: str | None = Field(default=None, max_length=64)
+
+
+class EpisodeEditBody(_Body):
+    text: str  # its limit is Data's (V3-P85 §6.1)
+    revision: int = Field(ge=1)
+
+
+class ProposalBody(_Body):
+    decision: Literal["keep", "discard"]
+    # A keep may give the note's dates instead of the proposal's (null: none), e.g. after a stale_date refusal.
+    due: str | None = None
+    valid_until: str | None = None
+    time_zone: str | None = Field(default=None, max_length=64)
+
+
+class BackfillBody(_Body):
+    conversation_id: str
 
 
 class MemoryEditBody(MemoryBody):
@@ -523,7 +557,7 @@ def trashed_view(summary: ConversationSummary, trash_days: int) -> dict[str, Any
 
 def delete_notice_view(notice: DeleteNotice) -> dict[str, Any]:
     return {"servers": list(notice.servers), "unconfigured": list(notice.unconfigured), "running": notice.running,
-            "trash_days": notice.trash_days, "memory_count": notice.memories}
+            "trash_days": notice.trash_days, "memory_count": notice.memories, "episode_count": notice.episodes}
 
 
 def event_view(event: ConversationEvent, views: dict[CallRef, tuple[bool, bool]] | None = None,
@@ -681,15 +715,100 @@ INSTRUCTIONS_REFUSALS: dict[DataErrorCode, tuple[int, str, str]] = {
 
 
 def memory_view(note: Memory, titles: dict[ConversationId, tuple[str | None, str]]) -> dict[str, Any]:
-    """V3-P71 §7.2. ``titles``: each source Conversation's title (None:
-    untitled) and preview, which the page names it by when untitled; a
+    """V3-P71 §7.2, V3-P85 §10.2. ``titles``: each source Conversation's title
+    (None: untitled) and preview, which the page names it by when untitled; a
     source missing from it is in the trash."""
-    source = note.source_conversation
+    source, now = note.source_conversation, datetime.now(UTC)
     return {"id": note.memory_id, "category": note.category.value, "text": note.text, "origin": note.origin.value,
             "source": None if source is None else {
                 "conversation": source, "title": titles.get(source, (None, ""))[0],
                 "preview": titles.get(source, (None, ""))[1], "in_trash": source not in titles},
-            "revision": note.revision, "created_at": _time(note.created_at), "updated_at": _time(note.updated_at)}
+            "revision": note.revision, "created_at": _time(note.created_at), "updated_at": _time(note.updated_at),
+            "due": note.due_at, "overdue": note.due_instant is not None and note.due_instant < now,
+            "valid_until": note.valid_until, "expired": note.valid_instant is not None and note.valid_instant < now,
+            "kept_by_user": note.user_approved_at is not None}
+
+
+def auto_memory_view(status: AutoMemoryStatus) -> dict[str, Any]:
+    """V3-P85 §10.3: the Memory screen's status line."""
+    summary = status.summary
+    return {"running": status.running, "told": status.told, "model": status.model_id,
+            "daily_tokens": status.daily_tokens, "today_tokens": summary.charged_today,
+            "last_applied_at": _time(summary.last_applied_at), "failed": summary.failed,
+            "skipped": [{"conversation": p.conversation_id, "pass_id": p.pass_id} for p in summary.skipped]}
+
+
+def pass_line_view(line: PassLine) -> dict[str, Any]:
+    return {"pass_id": line.pass_id, "through_sequence": line.through_sequence,
+            "items": [{"item": i.item, "action": i.action, "id": i.memory_id, "text": i.text, "due": i.due,
+                       "undo": i.undo, "evidence": list(i.evidence)} for i in line.items]}
+
+
+def proposal_view(proposal: Proposal, previews: dict[ConversationId, str] | None = None) -> dict[str, Any]:
+    record = proposal.record
+    try:
+        planned = json.loads(record.planned or "{}")
+    except ValueError:
+        planned = {}
+    try:
+        cited = json.loads(record.proposal).get("evidence")
+    except (ValueError, AttributeError):
+        cited = None
+    return {"pass_id": record.pass_id, "item": record.item,
+            "kind": "sensitive" if record.outcome == "sensitive_proposed" else "past",
+            # the user messages it rests on (checked when it was planned, V3-P85 §4.4), to read before keeping it
+            "evidence": [n for n in cited if isinstance(n, int)] if isinstance(cited, list) else [],
+            "category": planned.get("category"), "text": planned.get("text"), "due": planned.get("due_at"),
+            "valid_until": planned.get("valid_until"), "created_at": _time(record.created_at),
+            "conversation": {"id": proposal.conversation_id, "title": proposal.title,
+                             "preview": (previews or {}).get(proposal.conversation_id, ""),
+                             "in_trash": proposal.in_trash}}
+
+
+def episode_view(found: RecentEpisode, previews: dict[ConversationId, str] | None = None) -> dict[str, Any]:
+    episode = found.episode
+    return {"id": episode.episode_id, "conversation": {"id": episode.conversation_id, "title": found.title,
+                                                       "preview": (previews or {}).get(episode.conversation_id, "")},
+            "started_at": _time(episode.started_at), "ended_at": _time(episode.ended_at), "text": episode.text,
+            "origin": episode.origin.value, "revision": episode.revision,
+            "user_sequences": list(episode.user_sequences), "himari_sequences": list(episode.himari_sequences)}
+
+
+def episode_cursor(episode: Episode) -> str:
+    """The Timeline's opaque page cursor: the last episode shown (§10.3)."""
+    return base64.urlsafe_b64encode(f"{episode.ended_at.isoformat()}|{episode.episode_id}".encode()).decode()
+
+
+def read_episode_cursor(cursor: str) -> tuple[datetime, int]:
+    try:
+        when, number = base64.urlsafe_b64decode(cursor.encode()).decode().rsplit("|", 1)
+        moment = datetime.fromisoformat(when)
+    except (ValueError, UnicodeDecodeError) as error:
+        raise ApiError(400, "invalid_argument", "not a timeline cursor") from error
+    if moment.tzinfo is None or not re.fullmatch(r"[0-9]{1,18}", number):  # not one we gave (PR #138 review)
+        raise ApiError(400, "invalid_argument", "not a timeline cursor")
+    return moment, int(number)
+
+
+def note_dates(body: MemoryBody, server_zone: str, *, editing: bool) -> NoteDates | None:
+    """V3-P85 §10.2: the dates a note body gives; None (keep the note's) for an
+    edit that names neither. A date that does not read is a 422."""
+    if editing and not ({"due", "valid_until"} & body.model_fields_set):
+        return None
+    zone = body.time_zone if body.time_zone and body.time_zone in available_timezones() else server_zone
+    parsed: list[tuple[str, datetime] | None] = []
+    for value in (body.due, body.valid_until):
+        found = None if value is None or not value.strip() else parse_note_date(value, zone)
+        if value is not None and value.strip() and found is None:
+            raise ApiError(422, "invalid_date", "A date is YYYY-MM-DD, or a time with its UTC offset.")
+        parsed.append(found)
+    due, valid = parsed
+    if body.category == "loop":
+        valid = None
+    else:
+        due = None
+    return NoteDates(None if due is None else due[0], None if due is None else due[1],
+                     None if valid is None else valid[0], None if valid is None else valid[1])
 
 
 def pairing_token(raw: bytes) -> str | None:
@@ -740,9 +859,11 @@ PAIRING_MESSAGES = {
 MEMORY_REFUSALS: dict[DataErrorCode, tuple[int, str, str]] = {
     DataErrorCode.NOT_FOUND: (404, "not_found", "No such note."),
     DataErrorCode.VERSION_CONFLICT: (409, "revision_conflict", "The note was changed elsewhere since it was opened."),
-    DataErrorCode.TOO_LARGE: (422, "too_large", f"A note is at most {MAX_MEMORY_CHARS:,} characters."),
+    DataErrorCode.TOO_LARGE: (422, "too_large", f"A note is at most {MAX_MEMORY_CHARS:,} characters (an open loop "
+                                                f"{MAX_LOOP_CHARS:,})."),
     DataErrorCode.LIMIT_EXCEEDED: (422, "memory_full", f"At most {MAX_MEMORIES:,} notes are kept; delete one first."),
     DataErrorCode.INVALID_ARGUMENT: (422, "invalid_memory", "A note needs some text and no control characters."),
+    DataErrorCode.STALE_DATE: (422, "stale_date", "Its date has passed: keep it with a new date or without one."),
 }
 
 
@@ -1188,6 +1309,7 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
                 "images": application.images_available,  # V3-P67 §3.1: model copies can be made here
                 "documents": application.documents_status,  # V3-P70 §9
                 "memory": application.memory_enabled,  # V3-P71 §9
+                "auto_memory": application.auto_memory,  # V3-P85 §12: "on (…)" or "off (why)"
                 "conversation_search": application.conversation_search_enabled,  # V3-P72 §9
                 "streaming": application.streaming_enabled,  # V3-P73 §9
                 "turn": {"token_budget": turn.turn_budget, "unattended_runs": turn.unattended_runs,
@@ -1687,13 +1809,16 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
         notes = await application.memories(who)
         titles = await memory_titles(application, who, notes)
         return {"memories": [memory_view(n, titles) for n in notes], "max_count": MAX_MEMORIES,
-                "max_chars": MAX_MEMORY_CHARS, "enabled": application.memory_enabled}
+                "max_chars": MAX_MEMORY_CHARS, "max_loop_chars": MAX_LOOP_CHARS, "enabled": application.memory_enabled,
+                "auto": auto_memory_view(await application.memory_status(who))}
 
     @app.post("/api/memories", status_code=201)
     async def add_memory(body: MemoryBody, request: Request, who: PrincipalId = Depends(principal)) -> dict[str, Any]:
         """A note the user writes; used from each conversation's next turn."""
+        application = himari(request)
         try:
-            note = await himari(request).add_memory(who, MemoryCategory(body.category), body.text)
+            note = await application.add_memory(who, MemoryCategory(body.category), body.text,
+                                                note_dates(body, application.time_zone, editing=False))
         except DataError as error:
             raise memory_refused(error) from None
         return memory_view(note, {})
@@ -1704,7 +1829,7 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
         application = himari(request)
         try:
             note = await application.edit_memory(who, memory_id, MemoryCategory(body.category), body.text,
-                                                 body.revision)
+                                                 body.revision, note_dates(body, application.time_zone, editing=True))
         except DataError as error:
             raise memory_refused(error) from None
         return memory_view(note, await memory_titles(application, who, (note,)))
@@ -1733,6 +1858,138 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
                                                  "gone.") from None
             raise memory_refused(error) from None
         return {"memory": None if note is None else memory_view(note, await memory_titles(application, who, (note,)))}
+
+    # --- memory passes (V3-P85 §10, §12) ------------------------------------------------
+
+    @app.get("/api/conversations/{conversation_id}/memory-passes")
+    async def read_memory_passes(conversation_id: str, request: Request,
+                                 who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+        """What each applied memory pass did here, after the Event it read through (§10.1)."""
+        lines = await himari(request).memory_pass_lines(scope_of(conversation_id, who))
+        return {"passes": [pass_line_view(line) for line in lines]}
+
+    @app.post("/api/conversations/{conversation_id}/memory-passes/{pass_id}/{item}/undo")
+    async def undo_pass_item(conversation_id: str, pass_id: str, item: int, request: Request,
+                             who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+        """Undo one thing a pass did (§10.1), from its own record. ``memory``: the
+        note as it is back, or null when an added note was deleted."""
+        application = himari(request)
+        try:
+            note = await application.undo_pass_item(scope_of(conversation_id, who), pass_id, item)
+        except DataError as error:
+            if error.code is DataErrorCode.NOT_FOUND:
+                raise ApiError(404, "not_found", "Nothing to undo: the note is gone, it was forgotten too long ago, "
+                                                 "or the conversation it came from was deleted.") from None
+            raise memory_refused(error) from None
+        return {"memory": None if note is None else memory_view(note, await memory_titles(application, who, (note,)))}
+
+    async def previews(application: Application, who: PrincipalId,
+                       ids: Iterable[ConversationId]) -> dict[ConversationId, str]:
+        """What the page names an untitled conversation by (as a note's source, V3-P71 §7.2)."""
+        found: dict[ConversationId, str] = {}
+        for cid in set(ids):
+            try:
+                found[cid] = (await application.data.read_conversation(scope_of(cid, who))).preview
+            except DataError as error:  # in the trash
+                if error.code is not DataErrorCode.NOT_AUTHORIZED:
+                    raise
+        return found
+
+    @app.get("/api/memories/proposals")
+    async def read_proposals(request: Request, who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+        """Notes waiting for the user to keep or discard (§10.2)."""
+        application = himari(request)
+        found = await application.proposals(who)
+        named = await previews(application, who, (p.conversation_id for p in found if not p.title))
+        return {"proposals": [proposal_view(p, named) for p in found]}
+
+    @app.post("/api/memories/proposals/{pass_id}/{item}")
+    async def decide_proposal(pass_id: str, item: int, body: ProposalBody, request: Request,
+                              who: PrincipalId = Depends(principal)) -> Response:
+        application = himari(request)
+        dates = None
+        if {"due", "valid_until"} & body.model_fields_set:
+            zone = body.time_zone if body.time_zone and body.time_zone in available_timezones() else \
+                application.time_zone
+            parsed = []
+            for value in (body.due, body.valid_until):
+                found = None if value is None or not value.strip() else parse_note_date(value, zone)
+                if value is not None and value.strip() and found is None:
+                    raise ApiError(422, "invalid_date", "A date is YYYY-MM-DD, or a time with its UTC offset.")
+                parsed.append(found)
+            due, valid = parsed
+            dates = NoteDates(None if due is None else due[0], None if due is None else due[1],
+                              None if valid is None else valid[0], None if valid is None else valid[1])
+        try:
+            note = await application.decide_proposal(who, pass_id, item, body.decision == "keep", dates)
+        except DataError as error:
+            if error.code is DataErrorCode.NOT_FOUND:
+                raise ApiError(404, "not_found", "No such suggestion: its conversation may have been deleted.") from None
+            if error.code is DataErrorCode.VERSION_CONFLICT:
+                raise ApiError(409, "already_decided", "This suggestion was already kept or discarded.") from None
+            raise memory_refused(error) from None
+        if note is None:
+            return Response(status_code=204)
+        return JSONResponse(memory_view(note, await memory_titles(application, who, (note,))), status_code=201)
+
+    @app.get("/api/episodes")
+    async def read_episodes(request: Request, who: PrincipalId = Depends(principal), cursor: str | None = None,
+                            limit: int = 30) -> dict[str, Any]:
+        """The Timeline (§10.3), newest first; ``next`` reads on from the last shown."""
+        if not 1 <= limit <= 100:
+            raise ApiError(400, "invalid_argument", "limit is 1..100")
+        application = himari(request)
+        found = await application.episodes(who, None if cursor is None else read_episode_cursor(cursor), limit)
+        named = await previews(application, who, (f.episode.conversation_id for f in found if not f.title))
+        return {"episodes": [episode_view(f, named) for f in found],
+                "next": episode_cursor(found[-1].episode) if len(found) == limit else None}
+
+    @app.put("/api/episodes/{episode_id}")
+    async def edit_episode(episode_id: int, body: EpisodeEditBody, request: Request,
+                           who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+        try:
+            episode = await himari(request).edit_episode(who, episode_id, body.text, body.revision)
+        except DataError as error:
+            if error.code is DataErrorCode.NOT_FOUND:
+                raise ApiError(404, "not_found", "This episode was deleted.") from None
+            if error.code is DataErrorCode.VERSION_CONFLICT:
+                raise ApiError(409, "revision_conflict", "This episode was changed elsewhere.") from None
+            if error.code is DataErrorCode.TOO_LARGE:
+                raise ApiError(422, "too_large", f"An episode is at most {MAX_EPISODE_CHARS} characters.") from None
+            raise ApiError(422, "invalid_episode", "An episode needs some text and no control characters.") from None
+        return {"id": episode.episode_id, "text": episode.text, "origin": episode.origin.value,
+                "revision": episode.revision}
+
+    @app.delete("/api/episodes/{episode_id}", status_code=204)
+    async def delete_episode(episode_id: int, request: Request, revision: int,
+                             who: PrincipalId = Depends(principal)) -> None:
+        try:
+            await himari(request).delete_episode(who, episode_id, revision)
+        except DataError as error:
+            if error.code is DataErrorCode.NOT_FOUND:
+                raise ApiError(404, "not_found", "This episode was deleted.") from None
+            if error.code is DataErrorCode.VERSION_CONFLICT:
+                raise ApiError(409, "revision_conflict", "This episode was changed elsewhere.") from None
+            raise
+
+    @app.post("/api/memory-passes/backfill")
+    async def backfill(body: BackfillBody, request: Request, who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+        """§4.9, §12: read a conversation's part from before the upgrade (notes only proposed)."""
+        try:
+            outcomes = await himari(request).backfill(scope_of(body.conversation_id, who))
+        except MemoryPassesOff as off:
+            raise ApiError(409, "memory_passes_off", f"Automatic memory is {off}.") from None
+        return {"outcomes": [o.value for o in outcomes]}
+
+    @app.post("/api/conversations/{conversation_id}/memory-passes/{pass_id}/retry")
+    async def retry_pass(conversation_id: str, pass_id: str, request: Request,
+                         who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+        """§4.9, §12: read a skipped part once more (notes only proposed)."""
+        try:
+            outcome = await himari(request).retry_pass(scope_of(conversation_id, who), pass_id)
+        except MemoryPassesOff as off:
+            raise ApiError(409, "memory_passes_off", f"Automatic memory is {off}.") from None
+        return {"outcome": outcome.value}
 
     @app.get("/api/conversations/{conversation_id}/tools")
     async def read_tool_sources(conversation_id: str, request: Request,

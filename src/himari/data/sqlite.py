@@ -141,8 +141,13 @@ from himari.data.api import (
     PassKind,
     PassStart,
     PassStatus,
+    NoteDates,
+    PassItemRecord,
+    PassSummary,
+    Proposal,
     PROPOSAL_KEEP,
     RecentEpisode,
+    planned_item,
     RETIRED_KEEP,
     EXPIRED_KEEP,
     SKIP_AFTER_FAILURES,
@@ -1097,6 +1102,12 @@ def _cursor(row: sqlite3.Row | None) -> MemoryCursor:
         return MemoryCursor()
     return MemoryCursor(row["through_sequence"], row["failures"], _moment(row["retry_after"]),
                         row["baseline_sequence"], row["backfill_through"])
+
+
+def _item(row: sqlite3.Row) -> PassItemRecord:
+    return PassItemRecord(row["pass_id"], row["item"], row["proposal"], row["planned"], row["outcome"], row["target"],
+                          row["previous"], row["written_revision"], _moment(row["decided_at"]),
+                          datetime.fromisoformat(row["created_at"]))
 
 
 def _pass(row: sqlite3.Row) -> MemoryPass:
@@ -2596,8 +2607,10 @@ class SqliteData:
             return self._next_memory_id(tx, principal)
 
     async def save_memory(self, principal: PrincipalId, category: MemoryCategory, text: str, *,
-                          memory_id: int | None = None, expected_revision: int | None = None) -> Memory:
-        category, text, now = rules.check_memory_category(category), rules.check_memory_text(text), datetime.now(UTC)
+                          memory_id: int | None = None, expected_revision: int | None = None,
+                          dates: NoteDates | None = None) -> Memory:
+        category, now = rules.check_memory_category(category), datetime.now(UTC)
+        text = rules.check_note_text(category, text)
         with self._tx() as tx:
             if memory_id is None:
                 self._check_room(tx, principal)
@@ -2609,6 +2622,7 @@ class SqliteData:
                     raise DataError(DataErrorCode.VERSION_CONFLICT, f"m{memory_id} is at revision {current.revision}")
                 note = dataclasses.replace(current, category=category, text=text, origin=MemoryOrigin.USER,
                                revision=current.revision + 1, updated_at=now)
+            note = rules.dated(note, dates)
             self._write_memory(tx, principal, note)
             return note
 
@@ -2752,6 +2766,84 @@ class SqliteData:
     )
     _EPISODE_COLUMNS = ("episode_id, conversation_id, from_sequence, through_sequence, started_at, ended_at, text,"
                         " user_sequences, himari_sequences, origin, source_pass, revision, created_at, updated_at")
+
+    async def unretire_memory(self, principal: PrincipalId, memory_id: int, *, expected_revision: int,
+                              now: datetime) -> Memory:
+        with self._tx() as tx:
+            row = tx.one(f"SELECT {self._MEMORY_COLUMNS}, retired_at FROM memories WHERE owner=? AND memory_id=?"
+                         " AND retired_at IS NOT NULL", principal, memory_id)
+            if row is None or datetime.fromisoformat(row["retired_at"]) <= now - RETIRED_KEEP:
+                raise DataError(DataErrorCode.NOT_FOUND, f"no retired note m{memory_id}")
+            note = _memory(row)
+            if note.source_conversation is not None and tx.one(
+                    "SELECT 1 FROM conversations WHERE conversation_id=? AND owner=?", note.source_conversation,
+                    principal) is None:
+                raise DataError(DataErrorCode.NOT_FOUND, "the conversation it came from was deleted")
+            if expected_revision != note.revision:
+                raise DataError(DataErrorCode.VERSION_CONFLICT, f"m{memory_id} is at revision {note.revision}")
+            self._check_room(tx, principal)
+            tx.execute("UPDATE memories SET retired_at=NULL, retired_pass=NULL, retired_item=NULL, revision=?,"
+                       " updated_at=? WHERE owner=? AND memory_id=?", note.revision + 1, _timestamp(now), principal,
+                       memory_id)
+            return dataclasses.replace(note, revision=note.revision + 1, updated_at=now)
+
+    async def memory_revision(self, principal: PrincipalId, memory_id: int) -> tuple[int, bool] | None:
+        with self._tx() as tx:
+            row = tx.one("SELECT revision, retired_at FROM memories WHERE owner=? AND memory_id=?", principal,
+                         memory_id)
+            return None if row is None else (int(row["revision"]), row["retired_at"] is not None)
+
+    async def memory_revisions(self, principal: PrincipalId, memory_ids: Sequence[int]) -> dict[int, tuple[int, bool]]:
+        ids = sorted({i for i in memory_ids if isinstance(i, int)})
+        if not ids:
+            return {}
+        with self._tx() as tx:
+            rows = tx.all(f"SELECT memory_id, revision, retired_at FROM memories WHERE owner=? AND memory_id IN"
+                          f" ({', '.join('?' * len(ids))})", principal, *ids)
+            return {int(r["memory_id"]): (int(r["revision"]), r["retired_at"] is not None) for r in rows}
+
+    async def count_source_episodes(self, scope: TrustedScope) -> int:
+        with self._tx() as tx:
+            tx.owned(scope)
+            row = tx.one("SELECT COUNT(*) AS n FROM episodes WHERE owner=? AND conversation_id=?",
+                         scope.principal_id, scope.conversation_id)
+            assert row is not None
+            return int(row["n"])
+
+    async def page_episodes(self, principal: PrincipalId, *, before: tuple[datetime, int] | None,
+                            limit: int) -> tuple[RecentEpisode, ...]:
+        with self._tx() as tx:
+            if before is None:
+                return self._recent_rows(tx, principal, "", limit=limit)
+            return self._recent_rows(tx, principal, " AND (e.ended_at, e.episode_id) < (?, ?)",
+                                     _timestamp(before[0]), before[1], limit=limit)
+
+    def _episode_row(self, tx: _Tx, principal: PrincipalId, episode_id: object, expected_revision: int) -> Episode:
+        row = None if not isinstance(episode_id, int) else tx.one(
+            f"SELECT {self._EPISODE_COLUMNS} FROM episodes WHERE owner=? AND episode_id=?", principal, episode_id)
+        if row is None:
+            raise DataError(DataErrorCode.NOT_FOUND, f"no episode e{episode_id}")
+        episode = _episode(row)
+        if expected_revision != episode.revision:
+            raise DataError(DataErrorCode.VERSION_CONFLICT, f"e{episode_id} is at revision {episode.revision}")
+        return episode
+
+    async def update_episode(self, principal: PrincipalId, episode_id: int, text: str, *,
+                             expected_revision: int) -> Episode:
+        text = rules.check_episode_text(text)
+        with self._tx() as tx:
+            episode = self._episode_row(tx, principal, episode_id, expected_revision)
+            now = datetime.now(UTC)
+            tx.execute("UPDATE episodes SET text=?, folded=?, origin='user', revision=?, updated_at=? WHERE owner=?"
+                       " AND episode_id=?", text, rules.fold(text), episode.revision + 1, _timestamp(now), principal,
+                       episode_id)
+            return dataclasses.replace(episode, text=text, origin=MemoryOrigin.USER, revision=episode.revision + 1,
+                                       updated_at=now)
+
+    async def delete_episode(self, principal: PrincipalId, episode_id: int, *, expected_revision: int) -> None:
+        with self._tx() as tx:
+            self._episode_row(tx, principal, episode_id, expected_revision)
+            tx.execute("DELETE FROM episodes WHERE owner=? AND episode_id=?", principal, episode_id)
 
     def _recent_rows(self, tx: _Tx, principal: PrincipalId, where: str, *params: object, limit: int,
                      order: str = "e.ended_at DESC, e.episode_id DESC",
@@ -3176,6 +3268,81 @@ class SqliteData:
             self._pass_row(tx, pass_id)
             return tuple(r["outcome"] for r in tx.all("SELECT outcome FROM memory_pass_items WHERE pass_id=?"
                                                       " ORDER BY item", pass_id))
+
+    async def read_pass_items(self, pass_id: str) -> tuple[PassItemRecord, ...]:
+        with self._tx() as tx:
+            self._pass_row(tx, pass_id)
+            return tuple(_item(r) for r in tx.all("SELECT * FROM memory_pass_items WHERE pass_id=? ORDER BY item",
+                                                  pass_id))
+
+    async def applied_pass_items(self, scope: TrustedScope, *,
+                                 limit: int) -> tuple[tuple[MemoryPass, tuple[PassItemRecord, ...]], ...]:
+        with self._tx() as tx:
+            tx.owned(scope)
+            passes = tx.all("SELECT * FROM memory_passes p WHERE conversation_id=? AND status='applied' AND EXISTS"
+                            " (SELECT 1 FROM memory_pass_items i WHERE i.pass_id=p.pass_id AND i.outcome IN"
+                            " ('applied', 'kept', 'sensitive_proposed')) ORDER BY seq DESC LIMIT ?",
+                            scope.conversation_id, limit)
+            if not passes:
+                return ()
+            ids = [r["pass_id"] for r in passes]
+            items = tx.all(f"SELECT * FROM memory_pass_items WHERE pass_id IN ({', '.join('?' * len(ids))})"
+                           " AND outcome IN ('applied', 'kept', 'sensitive_proposed') ORDER BY item", *ids)
+            by_pass: dict[str, list[PassItemRecord]] = {}
+            for row in items:
+                by_pass.setdefault(row["pass_id"], []).append(_item(row))
+            return tuple((_pass(r), tuple(by_pass.get(r["pass_id"], ()))) for r in reversed(passes))
+
+    async def list_proposals(self, principal: PrincipalId) -> tuple[Proposal, ...]:
+        with self._tx() as tx:
+            rows = tx.all("SELECT i.*, p.conversation_id, p.kind, c.title, c.trashed_at FROM memory_pass_items i"
+                          " JOIN memory_passes p ON p.pass_id=i.pass_id JOIN conversations c"
+                          " ON c.conversation_id=p.conversation_id WHERE p.owner=? AND i.outcome IN"
+                          " ('proposed', 'sensitive_proposed') ORDER BY i.created_at, p.seq, i.item", principal)
+            return tuple(Proposal(_item(r), ConversationId(r["conversation_id"]), PassKind(r["kind"]), r["title"],
+                                  r["trashed_at"] is not None) for r in rows)
+
+    async def decide_proposal(self, principal: PrincipalId, pass_id: str, item: int, *, keep: bool,
+                              now: datetime, dates: NoteDates | None = None) -> Memory | None:
+        with self._tx() as tx:
+            owner = tx.one("SELECT conversation_id FROM memory_passes WHERE pass_id=? AND owner=?", pass_id, principal)
+            row = None if owner is None else tx.one("SELECT * FROM memory_pass_items WHERE pass_id=? AND item=?",
+                                                    pass_id, item)
+            if owner is None or row is None:
+                raise DataError(DataErrorCode.NOT_FOUND, f"no proposal {pass_id}/{item}")
+            if row["outcome"] not in ("proposed", "sensitive_proposed"):
+                raise DataError(DataErrorCode.VERSION_CONFLICT, f"{pass_id}/{item} was {row['outcome']}")
+            note = None
+            if keep:
+                planned = None if row["planned"] is None else planned_item(row["planned"], item, PassAction.ADD)
+                if planned is None or planned.category is None:
+                    raise DataError(DataErrorCode.INVALID_ARGUMENT, "the proposal names no note")
+                text = rules.check_note_text(planned.category, planned.text)
+                self._check_room(tx, principal)
+                proposed = Memory(0, planned.category, text, MemoryOrigin.EXTRACTOR,
+                                  ConversationId(owner["conversation_id"]), None, 1, now, now, due_at=planned.due_at,
+                                  due_instant=planned.due_instant, valid_until=planned.valid_until,
+                                  valid_instant=planned.valid_instant, source_pass=pass_id, source_item=item,
+                                  user_approved_at=now)
+                proposed = rules.check_fresh(proposed if dates is None else rules.dated(proposed, dates), now)
+                note = dataclasses.replace(proposed, memory_id=self._next_memory_id(tx, principal))
+                self._write_memory(tx, principal, note)
+            tx.execute("UPDATE memory_pass_items SET outcome=?, decided_at=?, target=? WHERE pass_id=? AND item=?",
+                       "kept" if keep else "discarded", _timestamp(now),
+                       row["target"] if note is None else f"m{note.memory_id}", pass_id, item)
+            return note
+
+    async def pass_summary(self, principal: PrincipalId, *, day_start: datetime, since: datetime) -> PassSummary:
+        charged = await self.pass_usage(principal, day_start)
+        with self._tx() as tx:
+            last = tx.one("SELECT MAX(finished_at) AS at FROM memory_passes WHERE owner=? AND status='applied'",
+                          principal)
+            skipped = tx.all("SELECT * FROM memory_passes WHERE owner=? AND status='skipped' AND finished_at >= ?"
+                             " ORDER BY seq", principal, _timestamp(since))
+            failed = tx.one("SELECT COUNT(*) AS n FROM memory_passes WHERE owner=? AND status IN"
+                            " ('failed', 'interrupted') AND finished_at >= ?", principal, _timestamp(since))
+            assert last is not None and failed is not None
+            return PassSummary(charged, _moment(last["at"]), tuple(_pass(r) for r in skipped), int(failed["n"]))
 
     async def clean_memories(self, now: datetime) -> MemoryCleanup:
         with self._tx() as tx:

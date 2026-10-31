@@ -902,3 +902,75 @@ rev. 3의 P1 둘은 해결, 민감정보 거부 표현은 개선으로 판정했
 | P2 | `memory_search`의 `from`을 그날 끝에서 24시간 빼서 정해, 23·25시간인 날(서머타임 전환일)의 첫 한 시간이 빠짐 | 그날의 현지 자정을 만들어 UTC로 바꾼다. 뉴욕의 2026-11-01(25시간)에서 00:30 일화가 검색되는지 확인 |
 | P2 | Data가 최신 200개를 먼저 자르고 Tool이 그 안에서 순위를 매겨, 낱말이 더 많이 맞는 오래된 일화가 후보에서 빠질 수 있음 | `find_episodes`가 순위를 정한 뒤 자른다(맞은 낱말 수 → 최신, 기간만 있으면 시간순). Tool은 그 순서를 그대로 쓴다 |
 | P2 | `due: null`로 날짜를 지울 수 없음 | 키가 없거나 `""`면 지키고, 명시적 `null`이면 지운다(`valid_until`도). 자동 기억 작업의 규칙(§4.4 rev. 4 P2-1)과 같다. 잘못 지워져도 대화 안 줄과 Undo로 되돌린다 |
+
+## 23. 구현 노트 — 4단계: Web과 CLI (2026-10-31)
+
+이 단계로 §18의 네 단계를 모두 마쳤다. 소유자 결정(2026-10-31)대로, 이 단계를 배포한 뒤 `HIMARI_MEMORY_MODEL`을 `memory_passes`가 선언된 모델로 두면 자동 기억이 켜진다.
+
+- **Data(두 백엔드):**
+  - `unretire_memory`: 30일 안, 출처 대화가 있을 때, 리비전이 같을 때, 1,000개 한도 안일 때 되살린다.
+  - `memory_revision`, `count_source_episodes`.
+  - 타임라인: `page_episodes`(`(ended_at, episode_id)` 커서, 휴지통 제외), `update_episode`(사용자의 것이 되어 자동 기억이 더 이어 쓰지 않음), `delete_episode`.
+  - `read_pass_items`, `list_proposals`, `decide_proposal`(`Keep`은 그때의 검사로 더하고 `user_approved_at`을 적음; 이미 고른 제안은 VERSION_CONFLICT), `pass_summary`.
+  - `save_memory(..., dates=NoteDates)`: 주지 않으면 기존 날짜를 지키고, 분류에 없는 칸은 버린다.
+  - 공개 도우미 `memory_from_record`, `planned_item`.
+- **작업자:**
+  - 실시간·`backfill`·`retry`가 한 흐름(`_run`)을 쓴다.
+  - `backfill`은 `(backfill_through, baseline]`를 구간마다 읽는다. `retry`는 건너뛴 구간을 한 번 더 읽는다.
+  - 둘 다 사실·고리는 제안만 하고, 일화는 더하기만 한다.
+  - 건너뛴 구간이 한 작업에 다 들어가지 않으면 `retry`하지 않고 건너뛴 채로 둔다.
+  - 작업이 적용되면 `on_applied`로 사건 흐름에 그 대화의 `conversation` 사건을 보낸다(새 사건 종류 없음, §10.1).
+- **Application:** `memory_pass_lines`, `undo_pass_item`(항목 기록으로 정한다: 이전 상태가 없으면 더함 → 지움, 계획이 없으면 지움 → 되살림, 둘 다 있으면 고침 → 되돌림), 제안, 타임라인, `memory_status`, `backfill`, `retry_pass`. 삭제 확인에 일화 수를 더했다.
+- **Web API:**
+  - `GET /api/conversations/{id}/memory-passes`, `POST …/memory-passes/{pass}/{item}/undo`(그 대화의 작업만).
+  - `GET /api/memories/proposals`, `POST /api/memories/proposals/{pass}/{item}`.
+  - `GET/PUT/DELETE /api/episodes`.
+  - `POST /api/memory-passes/backfill`, `POST …/memory-passes/{pass}/retry`.
+  - 기억 본문에 `loop`·`due`·`valid_until`·`time_zone`(브라우저의 시간대)을 받는다. 수정에서 두 날짜를 다 빼면 기존 날짜를 지킨다.
+  - `GET /api/memories`에 `auto`(상태), `/api/server`에 `auto_memory`.
+  - 자동 기억이 꺼진 서버의 `backfill`·`retry`는 **409** `memory_passes_off`다. 설계는 정하지 않았는데, 503이면 CLI가 서버 장애로 다루기 때문이다.
+- **Web 화면:**
+  - 대화 안: 작업이 읽은 마지막 이벤트 뒤에 접힌 한 줄("HIMARI remembered 2 things · 1 sensitive note waiting for you")을 둔다. 펼치면 항목마다 Undo 또는 Review가 있다. 대화를 열 때, 작업이 끝났을 때, 폴링하지 않는 동안 그 대화의 `conversation` 사건이 올 때 다시 읽는다.
+  - 기억 화면:
+    - 상태 줄, `Notes`·`Timeline` 탭.
+    - 제안 묶음(`Keep`·`Discard`·`Keep all`·`Discard all`).
+    - 열린 고리를 맨 앞에 두고, 날짜 입력(고리는 `Due`, 다른 기억은 `Valid until`; 날짜를 바꿀 때만 보냄)을 둔다.
+    - `Due …`/`overdue`·`Until`/`Ended` 표시, 출처 줄의 `auto`/`auto · kept by you`.
+    - 제목 없는 대화는 미리보기로 부른다.
+- **CLI:**
+  - `himari memory`가 고리를 먼저, `[due …]`·`[until|ended …]`, `auto`/`kept by you`, 자동 기억 상태를 보인다.
+  - `add`·`edit`에 `--due`·`--until`(`none`은 지움)을 더했다.
+  - 새 동작: `episodes`, `rm eID`, `passes CONVERSATION`, `proposals [keep|discard PASS/ITEM …]`, `backfill CONVERSATION`, `retry CONVERSATION PASS`.
+  - `himari status`에 `automatic memory: …`를 더했다.
+  - §12의 `backfill --all`은 넣지 않았다(대화마다 부른다). `retry`는 API가 대화를 받으므로 대화도 함께 준다.
+- **검증:**
+  - Data 5개 × 두 백엔드, worker 2개(`backfill`의 제안·일화·커서·알림, `retry`), Web API 4개, CLI 2개.
+  - 브라우저 스모크 `scripts/ui_smoke.py --only passes`: 자동 기억 줄 → 펼침 → Undo → Review → 제안 Keep → 날짜 있는 고리 추가 → 타임라인 편집 → 390px에서 가로 스크롤 없음. 기존 `memory` 시나리오도 다시 통과.
+
+### 23.1 구현 검수 (PR #138, `335ce2b`): READY_WITH_CORRECTIONS
+
+새 P1은 없었다. 자동 기억을 켜기 전에 고치라고 권한 것까지 이 PR에서 모두 고쳤다.
+
+| # | 지적 | 고침 |
+| --- | --- | --- |
+| P2 | 날짜가 오래 지난 제안을 `Keep`하면 저장된 뒤 다음 정리에서 바로 지워짐 | `decide_proposal`이 정리 대상이 될 날짜(14일 넘게 지난 고리의 `due`, 이미 끝난 사실의 `valid_until`)를 가진 `Keep`을 STALE_DATE로 거절한다(Web 422 `stale_date`, 제안은 그대로 남음). `Keep`은 날짜를 바꿔 보낼 수 있다(`dates`; Web은 `due`·`valid_until`, CLI는 `proposals keep … --due D\|none`). 화면은 "날짜 없이 남길까요?"를 물어 다시 보낸다. 조금 지난 고리(`overdue`)는 그대로 받는다 |
+| P2 | 자동 기억 항목과 일화에서 근거 메시지로 갈 수 없음(§10.1, §10.3) | 줄의 항목이 모델이 댄 근거(`evidence`, 계획 때 사용자 메시지인지 확인된 번호)를 내보내고 `Source`로 그 메시지에 스크롤해 잠깐 표시한다. 타임라인은 `Your messages`·`HIMARI's replies`로 그 대화를 열고 근거로 간다. 접힌 작업 묶음 안이면 연다 |
+| P2 | 대화를 열 때마다 모든 작업·항목·기억 리비전을 하나씩 읽음 | `applied_pass_items`(보여 줄 것이 있는 최근 `PASS_LINES_LIMIT`(200)개 작업과 그 항목을 한 번에)와 `memory_revisions`(한 번에)로 두 번만 읽는다. 더 오래된 작업의 줄은 보이지 않는다 |
+| P3 | 타임라인 커서의 시각에 시간대가 없어도 받음 | 시간대 없는 시각이나 숫자가 아닌 번호는 400이다 |
+
+회귀 테스트:
+- Data 2개 × 두 백엔드: 지난 날짜의 제안 거절과 날짜를 지우거나 옮긴 `Keep`, 최근 작업 한 번에 읽기와 리비전.
+- Web 2개: `stale_date` → 날짜 없이 `Keep`, 근거·상한·커서.
+- 브라우저 스모크: `Source` → 근거 메시지 표시, 지난 날짜 제안의 확인 창 → 날짜 없이 남음, 타임라인의 `HIMARI's replies` → 그 대화의 답에 표시.
+
+### 23.2 구현 재검수 (`9f35e70`): READY_WITH_CORRECTIONS
+
+이전 지적 넷은 모두 해결로 판정했다. 새로 나온 것을 이 PR에서 고쳤다.
+
+| # | 지적 | 고침 |
+| --- | --- | --- |
+| P2-1 | 날짜가 지난 제안의 확인 창에서 취소해도 "Kept."가 뜸 | 남김·버림·취소·실패를 따로 센다. 취소만 했으면 "Nothing was kept; the suggestion is still waiting.", `Keep all`은 "Kept 2 of 3; 1 still waiting."처럼 실제 수를 알린다 |
+| P2-2 | 제안의 출처는 대화만 열고 근거 메시지로 가지 않음, §10.2의 `Compare`가 없음 | 제안이 근거(`evidence`)를 싣고 `Source`가 그 대화를 열어 그 메시지로 간다(민감한 제안을 남기기 전에 사용자의 말을 읽는다). `Compare`는 같은 분류의 기억 묶음으로 스크롤해 표시한다 |
+| P3 | `"²".isdigit()`이 참이라 그런 커서가 500 | 번호는 ASCII 숫자(`[0-9]{1,18}`)만 받는다 |
+
+회귀 테스트: Web(제안의 근거, `²` 커서 400), 브라우저 스모크(Compare → 묶음 표시, 제안의 Source → 근거 메시지, 확인 창 취소 → 남겼다고 하지 않음, 다시 확인 → 날짜 없이 남김).

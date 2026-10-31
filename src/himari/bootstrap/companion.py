@@ -86,6 +86,10 @@ class CompanionEvents:
     def run_ended(self, scope: TrustedScope) -> None:
         self._hub.publish(scope.principal_id, "conversation", {"conversation": scope.conversation_id})
 
+    def memory_applied(self, scope: TrustedScope) -> None:
+        """V3-P85 §10.1: a memory pass wrote this Conversation's lines: open pages read them again."""
+        self._hub.publish(scope.principal_id, "conversation", {"conversation": scope.conversation_id})
+
     def job_ended(self, scope: TrustedScope, status: JobStatus) -> None:
         self._working.pop((scope.principal_id, scope.conversation_id), None)
         outcome = None if status.result is None else status.result.state.value

@@ -91,6 +91,8 @@ class MemoryPasses:
         self._slots = asyncio.Semaphore(PASSES_AT_ONCE)
         self._closed = False
         self._scanning: asyncio.Task[int] | None = None
+        # Told after a pass applied, so open pages read its lines again (§10.1); set by the composition root.
+        self.on_applied: Callable[[TrustedScope], None] | None = None
 
     # --- the Runner's job events (JobListener) ------------------------------------
 
@@ -219,6 +221,18 @@ class MemoryPasses:
                 return found  # cut short: the rest is the next part's
         return next_part(kept, cursor, last if after >= last[0] else end)
 
+    @property
+    def model_id(self) -> str:
+        return self._settings.model_id
+
+    @property
+    def daily_tokens(self) -> int:
+        return self._settings.daily_tokens
+
+    def day_start(self, now: datetime) -> datetime:
+        """The start of ``now``'s day in the server's zone: the daily budget's (§4.8)."""
+        return self._day_start(now)
+
     def _day_start(self, now: datetime) -> datetime:
         zone = ZoneInfo(self._settings.time_zone)
         return datetime.combine(now.astimezone(zone).date(), time(), tzinfo=zone).astimezone(UTC)
@@ -247,22 +261,78 @@ class MemoryPasses:
             raise
         if part is None:
             return PassOutcome.NOTHING
+        return await self._run(scope, PassKind.LIVE, part, last[0], now)
+
+    # --- past parts (§4.9): the operator's backfill and retry ------------------------
+
+    async def backfill(self, scope: TrustedScope) -> list[PassOutcome]:
+        """Read the part before the upgrade, a part at a time: notes only proposed,
+        episodes added at their own time (§4.9)."""
+        lock = self._principals.setdefault(scope.principal_id, asyncio.Lock())
+        outcomes: list[PassOutcome] = []
+        async with lock, self._slots:
+            for _ in range(MAX_PARTS_PER_READ):
+                outcome = await self._past(scope, None)
+                outcomes.append(outcome)
+                if outcome is not PassOutcome.APPLIED:
+                    break
+        return outcomes
+
+    async def retry(self, scope: TrustedScope, pass_id: str) -> PassOutcome:
+        """Read a skipped part once more, by the past-part rule (§4.9)."""
+        lock = self._principals.setdefault(scope.principal_id, asyncio.Lock())
+        async with lock, self._slots:
+            return await self._past(scope, pass_id)
+
+    async def _past(self, scope: TrustedScope, retry_of: str | None) -> PassOutcome:
+        now = self._clock()
+        try:
+            snapshot = await self._data.last_event(scope)
+            if snapshot is None:
+                return PassOutcome.NOTHING
+            if retry_of is None:
+                cursor = await self._data.read_memory_cursor(scope)
+                start, end = cursor.backfill_through, cursor.baseline_sequence
+            else:
+                skipped = await self._data.read_pass(retry_of)
+                if skipped.conversation_id != scope.conversation_id or skipped.status is not PassStatus.SKIPPED:
+                    return PassOutcome.NOTHING
+                start, end = skipped.from_sequence, skipped.through_sequence
+            if end <= start:
+                return PassOutcome.NOTHING
+            (at,) = await self._data.read_events(scope, after_sequence=end - 1, limit=1)
+            part = await self._read_part(scope, start, (end, at.created_at))
+        except DataError as error:
+            if error.code in (DataErrorCode.NOT_AUTHORIZED, DataErrorCode.NOT_FOUND):
+                return PassOutcome.NOTHING
+            raise
+        if part is None:
+            return PassOutcome.NOTHING
+        kind = PassKind.BACKFILL if retry_of is None else PassKind.RETRY
+        if retry_of is not None and part.through_sequence < end:
+            return PassOutcome.NOTHING  # a skipped part too long to read whole: it stays skipped
+        return await self._run(scope, kind, part, snapshot[0], now, retry_of=retry_of)
+
+    async def _run(self, scope: TrustedScope, kind: PassKind, part: Part, snapshot: int, now: datetime, *,
+                   retry_of: str | None = None) -> PassOutcome:
+        """One pass over ``part``: the request, the budget, the record, the call and the plan."""
+        live = kind is PassKind.LIVE
         notes = await self._data.list_memories(scope.principal_id)
-        if waits(part, open_loops=any(n.category is MemoryCategory.LOOP for n in notes), now=now):
+        if live and waits(part, open_loops=any(n.category is MemoryCategory.LOOP for n in notes), now=now):
             return PassOutcome.WAITING
-        previous = await self._data.last_episode(scope)
+        previous = await self._data.last_episode(scope) if live else None
         shown = shown_notes(notes)
         zone = self._settings.time_zone if self._zone_for is None else await self._zone_for(scope, part.origin)
         options = RequestOptions(self._settings.model_id, self._settings.reasoning_effort,
                                  provider_key=self._provider.provider_key, max_output_tokens=PASS_MAX_OUTPUT_TOKENS)
-        asked = model_input(request_data(part, shown, previous, now=now, zone=zone, kind=PassKind.LIVE), options)
+        asked = model_input(request_data(part, shown, previous, now=now, zone=zone, kind=kind), options)
         reserve = reservation(self._provider.prepare_native_request(asked).body)
         if await self._data.pass_usage(scope.principal_id, self._day_start(now)) + reserve > self._settings.daily_tokens:
             return PassOutcome.DEFERRED
         try:
             pass_id = await self._data.begin_pass(scope, PassStart(
-                PassKind.LIVE, cursor.through_sequence, part.through_sequence, last[0],
-                self._provider.provider_key, self._settings.model_id, part.omitted))
+                kind, part.from_sequence, part.through_sequence, snapshot, self._provider.provider_key,
+                self._settings.model_id, part.omitted, retry_of))
         except DataError as error:
             if error.code is DataErrorCode.NOT_FOUND:
                 return PassOutcome.NOTHING
@@ -284,8 +354,8 @@ class MemoryPasses:
             await self._failed(pass_id, type(error).__name__)
             raise
         try:
-            items = plan_items(answer, part, shown, kind=PassKind.LIVE, now=now, zone=zone)
-            episode = plan_episode(answer, part, previous, kind=PassKind.LIVE)
+            items = plan_items(answer, part, shown, kind=kind, now=now, zone=zone)
+            episode = plan_episode(answer, part, previous, kind=kind)
             result = await self._data.apply_pass(pass_id, items, episode, now=self._clock())
         except asyncio.CancelledError:
             raise
@@ -293,6 +363,11 @@ class MemoryPasses:
             await self._failed(pass_id, f"could not apply: {type(error).__name__}")
             raise
         if result.status is PassStatus.APPLIED:
+            if self.on_applied is not None:
+                try:
+                    self.on_applied(scope)
+                except Exception:  # noqa: BLE001 — telling the pages is not the pass
+                    log.exception("could not tell that memory pass %s applied", pass_id)
             return PassOutcome.APPLIED
         log.info("memory pass %s of %s discarded: %s", pass_id, scope.conversation_id, result.reason)
         return PassOutcome.DISCARDED

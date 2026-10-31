@@ -43,6 +43,7 @@ import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any, TextIO
 from urllib.parse import quote
 
@@ -637,6 +638,10 @@ def delete_question(name: str, notice: dict[str, Any], now: bool) -> list[str]:
     if count:  # V3-P71 D5
         lines.append(f"{count} note{'s' if count > 1 else ''} HIMARI saved in it {'are' if count > 1 else 'is'} "
                      "deleted with it for good.")
+    episodes = int(notice.get("episode_count") or 0)
+    if episodes:  # V3-P85 §10.3
+        lines.append(f"{episodes} episode{'s' if episodes > 1 else ''} of it {'are' if episodes > 1 else 'is'} "
+                     "deleted with it for good.")
     if now:  # V3-P72 §8: what search already copied into other conversations stays there
         lines.append(SEARCH_COPIES)
     return lines
@@ -962,9 +967,13 @@ def cmd_instructions(session: Session, args: argparse.Namespace, read: Callable[
     return EXIT_OK
 
 
-MEMORY_USAGE = ("usage: himari memory | memory add CATEGORY TEXT|- | memory edit ID TEXT|- [--category C]"
-                " | memory rm ID [--yes]")
-MEMORY_CATEGORIES = ("user", "preference", "project", "reference")
+MEMORY_USAGE = ("usage: himari memory | memory add CATEGORY TEXT|- [--due D] [--until D]"
+                " | memory edit ID TEXT|- [--category C] [--due D|none] [--until D|none] | memory rm ID|eID [--yes]"
+                " | memory episodes | memory passes CONVERSATION"
+                " | memory proposals [keep|discard PASS/ITEM ... [--due D|none] [--until D|none]]"
+                " | memory backfill CONVERSATION | memory retry CONVERSATION PASS")
+MEMORY_CATEGORIES = ("loop", "user", "preference", "project", "reference")  # loops first (V3-P85 §10.2)
+MEMORY_ACTIONS = ("add", "edit", "rm", "episodes", "passes", "proposals", "backfill", "retry")
 
 
 def memory_id(raw: str) -> int | None:
@@ -982,11 +991,112 @@ def memory_row(note: dict[str, Any]) -> str:
             where += " (in trash)"
     else:
         where = "added by you"
-    who = "HIMARI" if note.get("origin") == "model" else "you"
+    origin = note.get("origin")
+    who = ("kept by you" if note.get("kept_by_user") else "auto") if origin == "extractor" else \
+        "HIMARI" if origin == "model" else "you"
     when = str(note.get("updated_at") or "")[:10]
     text = " ".join(str(note.get("text") or "").split())
+    if note.get("due"):  # V3-P85 §10.2
+        text += f"  [due {note['due']}{', overdue' if note.get('overdue') else ''}]"
+    if note.get("valid_until"):
+        text += f"  [{'ended' if note.get('expired') else 'until'} {note['valid_until']}]"
     return f"m{note.get('id')}  {text}  ({where} · {who} · {when})" if isinstance(source, dict) else \
         f"m{note.get('id')}  {text}  ({where} · {when})"
+
+
+def episode_row(episode: dict[str, Any]) -> str:
+    """``e8  2026-10-30 20:10–21:40  "Bubbles": Fixed them.`` (V3-P85 §12)."""
+    try:  # in this machine's zone
+        start = datetime.fromisoformat(str(episode.get("started_at"))).astimezone()
+        end = datetime.fromisoformat(str(episode.get("ended_at"))).astimezone()
+        span = (f"{start:%Y-%m-%d %H:%M}–{end:%H:%M}" if start.date() == end.date()
+                else f"{start:%Y-%m-%d %H:%M}–{end:%Y-%m-%d %H:%M}")
+    except ValueError:
+        span = "?"
+    title = (episode.get("conversation") or {}).get("title")
+    text = " ".join(str(episode.get("text") or "").split())
+    mine = " (edited by you)" if episode.get("origin") == "user" else ""
+    return f"e{episode.get('id')}  {span}  " + (f"\"{title}\": " if title else "") + text + mine
+
+
+def _date_option(raw: str | None) -> tuple[bool, str | None]:
+    """--due/--until: (given, value); "none" clears (null)."""
+    if raw is None:
+        return False, None
+    return True, None if raw.strip().lower() == "none" else raw.strip()
+
+
+def _memory_more(session: Session, args: argparse.Namespace, rest: list[str]) -> int:
+    """V3-P85 §12: episodes, passes, proposals, backfill, retry."""
+    printer = session.printer
+    if args.action == "episodes":
+        cursor: str | None = None
+        shown = 0
+        while True:
+            page = session.client.get("/api/episodes", {"limit": 100, **({"cursor": cursor} if cursor else {})})
+            for episode in page.get("episodes") or []:
+                printer.line(safe_line(episode_row(episode), encoding=printer.encoding))
+                shown += 1
+            cursor = page.get("next")
+            if not cursor:
+                break
+        session.note(f"({shown} episode{'s' if shown != 1 else ''})" if shown else "(no episodes)")
+        return EXIT_OK
+    if args.action == "passes":
+        lines = session.client.get(f"/api/conversations/{rest[0]}/memory-passes").get("passes") or []
+        for line in lines:
+            printer.line(f"{line['pass_id']} (through event {line['through_sequence']}):")
+            for item in line.get("items") or []:
+                due = f" [due {item['due']}]" if item.get("due") else ""
+                printer.line(safe_line(f"  {item['item']}  {item['action']}  {item.get('text') or ''}{due}"
+                                       + ("  (undo in the web)" if item.get("undo") else ""),
+                                       encoding=printer.encoding))
+        if not lines:
+            session.note("(no memory passes applied here)")
+        return EXIT_OK
+    if args.action == "proposals":
+        if not rest:
+            proposals = session.client.get("/api/memories/proposals").get("proposals") or []
+            for p in proposals:
+                kind = "sensitive" if p.get("kind") == "sensitive" else "from an older conversation"
+                printer.line(safe_line(f"{p['pass_id']}/{p['item']}  [{p.get('category')}] {p.get('text')}  ({kind})",
+                                       encoding=printer.encoding))
+            session.note(f"({len(proposals)} waiting; keep or discard them by PASS/ITEM)" if proposals
+                         else "(no suggestions waiting)")
+            return EXIT_OK
+        decision, ids = rest[0], rest[1:]
+        if decision not in ("keep", "discard") or not ids or not all(re.fullmatch(r"[\w.-]+/\d+", i) for i in ids):
+            session.note(MEMORY_USAGE)
+            return EXIT_USAGE
+        failed = False
+        choice: dict[str, Any] = {"decision": decision}
+        for key, raw in (("due", args.due), ("valid_until", args.until)):  # a keep with the user's dates
+            given, value = _date_option(raw)
+            if given:
+                choice[key] = value
+        for target in ids:
+            pass_id, item = target.split("/")
+            try:
+                session.client.post(f"/api/memories/proposals/{pass_id}/{item}", choice)
+                session.note(f"({target}: {'kept' if decision == 'keep' else 'discarded'})")
+            except ServerRefused as error:
+                hint = " (keep it with --due/--until DATE, or none)" if error.code == "stale_date" else ""
+                session.note(f"{target}: refused ({error.code}): {error}{hint}")
+                failed = True
+        return EXIT_FAILED if failed else EXIT_OK
+    try:
+        if args.action == "backfill":
+            answer = session.client.post("/api/memory-passes/backfill", {"conversation_id": rest[0]},
+                                         timeout=600.0)
+            session.note(f"(backfill: {', '.join(answer.get('outcomes') or []) or 'nothing'})")
+        else:
+            answer = session.client.post(f"/api/conversations/{rest[0]}/memory-passes/{rest[1]}/retry",
+                                         timeout=600.0)
+            session.note(f"(retry: {answer.get('outcome')})")
+    except ServerRefused as error:
+        session.note(f"refused ({error.code}): {error}")
+        return EXIT_FAILED
+    return EXIT_OK
 
 
 def _memory_text(session: Session, raw: str) -> str | None:
@@ -1006,18 +1116,30 @@ def cmd_memory(session: Session, args: argparse.Namespace, read: Callable[[str],
     """V3-P71 §8: list the notes, ``add``, ``edit`` or ``rm`` one."""
     rest = list(args.rest)
     action = args.action
-    wrong = ((action is None and (rest or args.category or args.yes))
+    dated = args.due is not None or args.until is not None
+    wrong = ((action is None and (rest or args.category or args.yes or dated))
              or (action == "add" and (len(rest) != 2 or rest[0] not in MEMORY_CATEGORIES or args.category or args.yes))
              or (action == "edit" and (len(rest) != 2 or args.yes))
-             or (action == "rm" and (len(rest) != 1 or args.category)))
+             or (action == "rm" and (len(rest) != 1 or args.category or dated))
+             or (action in ("episodes",) and (rest or args.category or args.yes or dated))
+             or (action in ("passes", "backfill") and (len(rest) != 1 or args.category or args.yes or dated))
+             or (action == "retry" and (len(rest) != 2 or args.category or args.yes or dated))
+             or (action == "proposals" and (args.category or args.yes or (dated and rest[:1] != ["keep"]))))
     if wrong:
         session.note(MEMORY_USAGE)
         return EXIT_USAGE
+    if action in ("episodes", "passes", "proposals", "backfill", "retry"):
+        return _memory_more(session, args, rest)
     if action is None:
         listing = session.client.get("/api/memories")
         notes = listing.get("memories") or []
         if not listing.get("enabled"):
             session.note("(memory is off on this server: HIMARI neither saves nor uses notes; you can still manage them)")
+        auto = listing.get("auto") or {}
+        if auto.get("running"):  # V3-P85 §10.3
+            session.note(f"(automatic memory {auto.get('told')}; today {int(auto.get('today_tokens') or 0):,} tokens"
+                         + (f"; {len(auto.get('skipped') or [])} part(s) skipped this week" if auto.get("skipped")
+                            else "") + ")")
         if not notes:
             session.note("(no notes)")
             return EXIT_OK
@@ -1033,13 +1155,20 @@ def cmd_memory(session: Session, args: argparse.Namespace, read: Callable[[str],
         text = _memory_text(session, rest[1])
         if text is None:
             return EXIT_USAGE
+        body: dict[str, Any] = {"category": rest[0], "text": text}
+        for key, raw in (("due", args.due), ("valid_until", args.until)):
+            given, value = _date_option(raw)
+            if given:
+                body[key] = value
         try:
-            saved = session.client.post("/api/memories", {"category": rest[0], "text": text})
+            saved = session.client.post("/api/memories", body)
         except ServerRefused as error:
             session.note(f"refused ({error.code}): {error}")
             return EXIT_FAILED
         session.note(f"(saved as m{saved['id']}; used from the next message)")
         return EXIT_OK
+    if action == "rm" and re.fullmatch(r"e[1-9][0-9]{0,9}", rest[0].strip()):
+        return _remove_episode(session, int(rest[0].strip()[1:]), args.yes, read)
     target = memory_id(rest[0])
     if target is None:
         session.note(f"not a note id: {safe_line(rest[0])} (as m12)")
@@ -1056,9 +1185,14 @@ def cmd_memory(session: Session, args: argparse.Namespace, read: Callable[[str],
         text = _memory_text(session, rest[1])
         if text is None:
             return EXIT_USAGE
+        change: dict[str, Any] = {"category": args.category or current["category"], "text": text,
+                                  "revision": current["revision"]}
+        for key, raw in (("due", args.due), ("valid_until", args.until)):
+            given, value = _date_option(raw)
+            if given:
+                change[key] = value
         try:  # from the revision just read: a change made elsewhere since is refused, never overwritten
-            session.client.put(f"/api/memories/{target}", {"category": args.category or current["category"],
-                                                           "text": text, "revision": current["revision"]})
+            session.client.put(f"/api/memories/{target}", change)
         except ServerRefused as error:
             session.note(f"refused ({error.code}): {error}")
             return EXIT_FAILED
@@ -1075,6 +1209,36 @@ def cmd_memory(session: Session, args: argparse.Namespace, read: Callable[[str],
             return EXIT_OK
     try:
         session.client.delete(f"/api/memories/{target}", {"revision": current["revision"]})
+    except ServerRefused as error:
+        session.note(f"refused ({error.code}): {error}")
+        return EXIT_FAILED
+    session.note("(deleted)")
+    return EXIT_OK
+
+
+def _remove_episode(session: Session, episode_id: int, yes: bool, read: Callable[[str], str]) -> int:
+    cursor: str | None = None
+    found: dict[str, Any] | None = None
+    while found is None:
+        page = session.client.get("/api/episodes", {"limit": 100, **({"cursor": cursor} if cursor else {})})
+        found = next((e for e in page.get("episodes") or [] if e.get("id") == episode_id), None)
+        cursor = page.get("next")
+        if not cursor:
+            break
+    if found is None:
+        session.note(f"no episode e{episode_id}")
+        return EXIT_FAILED
+    session.printer.line(safe_line(episode_row(found), encoding=session.printer.encoding))
+    if not yes:
+        try:
+            answer = read("Delete this episode? [y/N] ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            answer = ""
+        if answer not in ("y", "yes"):
+            session.note("(nothing was deleted)")
+            return EXIT_OK
+    try:
+        session.client.delete(f"/api/episodes/{episode_id}", {"revision": found["revision"]})
     except ServerRefused as error:
         session.note(f"refused ({error.code}): {error}")
         return EXIT_FAILED
@@ -1209,6 +1373,7 @@ def cmd_status(session: Session, args: argparse.Namespace) -> int:
                  f"commands: {SANDBOX_TEXT.get(sandbox, sandbox)}",
                  f"context budget: {server.get('context_budget'):,} tokens", documents_line(server.get("documents")),
                  f"memory: {'on' if server.get('memory') else 'off'}",
+                 f"automatic memory: {server.get('auto_memory') or 'off'}",
                  f"conversation search: {'on' if server.get('conversation_search') else 'off'}",
                  f"streaming: {'on' if server.get('streaming') else 'off'}"):
         session.printer.line(safe_line(line, encoding=session.printer.encoding))
@@ -1494,10 +1659,14 @@ def parser() -> argparse.ArgumentParser:
     instructions.add_argument("action", nargs="?", choices=["set", "clear"])
     instructions.add_argument("file", nargs="?", help="set: a UTF-8 text file, or - for standard input")
     instructions.add_argument("--yes", action="store_true", help="clear without asking")
-    memory = sub.add_parser("memory", help="the notes HIMARI keeps about you: list, add, edit or rm")
-    memory.add_argument("action", nargs="?", choices=["add", "edit", "rm"])
-    memory.add_argument("rest", nargs="*", help="add: CATEGORY TEXT|-; edit: ID TEXT|-; rm: ID")
+    memory = sub.add_parser("memory", help="the notes and episodes HIMARI keeps about you")
+    memory.add_argument("action", nargs="?", choices=list(MEMORY_ACTIONS))
+    memory.add_argument("rest", nargs="*", help="add: CATEGORY TEXT|-; edit: ID TEXT|-; rm: ID or eID; passes and "
+                                                "backfill: CONVERSATION; retry: CONVERSATION PASS; proposals: "
+                                                "[keep|discard PASS/ITEM ...]")
     memory.add_argument("--category", help="edit: move the note to this category")
+    memory.add_argument("--due", help="add, edit: a loop's date (YYYY-MM-DD); edit: none clears it")
+    memory.add_argument("--until", help="add, edit: the last day a fact holds; edit: none clears it")
     memory.add_argument("--yes", action="store_true", help="rm without asking")
     workspace = sub.add_parser("workspace", help="folders on this server registered as workspaces: list, add or rm")
     workspace.add_argument("action", nargs="?", choices=["add", "rm"])

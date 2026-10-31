@@ -94,8 +94,13 @@ from himari.data.api import (
     PassKind,
     PassStart,
     PassStatus,
+    NoteDates,
+    PassItemRecord,
+    PassSummary,
+    Proposal,
     PROPOSAL_KEEP,
     RecentEpisode,
+    planned_item,
     RETIRED_KEEP,
     EXPIRED_KEEP,
     SKIP_AFTER_FAILURES,
@@ -1457,8 +1462,10 @@ class InMemoryData:
         return self._new_memory_id(principal)
 
     async def save_memory(self, principal: PrincipalId, category: MemoryCategory, text: str, *,
-                          memory_id: int | None = None, expected_revision: int | None = None) -> Memory:
-        category, text, now = rules.check_memory_category(category), rules.check_memory_text(text), datetime.now(UTC)
+                          memory_id: int | None = None, expected_revision: int | None = None,
+                          dates: NoteDates | None = None) -> Memory:
+        category, now = rules.check_memory_category(category), datetime.now(UTC)
+        text = rules.check_note_text(category, text)
         if memory_id is None:
             if self._memory_count(principal) >= MAX_MEMORIES:
                 raise DataError(DataErrorCode.LIMIT_EXCEEDED, f"{MAX_MEMORIES} notes are kept at most")
@@ -1470,6 +1477,7 @@ class InMemoryData:
                 raise DataError(DataErrorCode.VERSION_CONFLICT, f"m{memory_id} is at revision {current.revision}")
             note = replace(current, category=category, text=text, origin=MemoryOrigin.USER,
                            revision=current.revision + 1, updated_at=now)
+        note = rules.dated(note, dates)
         self._store.memories[(principal, note.memory_id)] = note
         return note
 
@@ -1512,6 +1520,70 @@ class InMemoryData:
         return (any(r.record.status in (RunStatus.PREPARED, RunStatus.DISPATCH_CLAIMED, RunStatus.RECEIVED)
                     for r in conv.runs.values())
                 or any(e.status is ToolExecutionStatus.EXECUTION_CLAIMED for e in conv.executions.values()))
+
+    async def unretire_memory(self, principal: PrincipalId, memory_id: int, *, expected_revision: int,
+                              now: datetime) -> Memory:
+        found = self._store.retired_memories.get((principal, memory_id))
+        if found is None or found[1] <= now - RETIRED_KEEP:
+            raise DataError(DataErrorCode.NOT_FOUND, f"no retired note m{memory_id}")
+        note = found[0]
+        if note.source_conversation is not None:
+            conv = self._store._conversations.get(note.source_conversation)
+            if conv is None or conv.owner != principal:
+                raise DataError(DataErrorCode.NOT_FOUND, "the conversation it came from was deleted")
+        if expected_revision != note.revision:
+            raise DataError(DataErrorCode.VERSION_CONFLICT, f"m{memory_id} is at revision {note.revision}")
+        if self._memory_count(principal) >= MAX_MEMORIES:
+            raise DataError(DataErrorCode.LIMIT_EXCEEDED, f"{MAX_MEMORIES} notes are kept at most")
+        back = replace(note, revision=note.revision + 1, updated_at=now)
+        del self._store.retired_memories[(principal, memory_id)]
+        self._store.memories[(principal, memory_id)] = back
+        return back
+
+    async def memory_revision(self, principal: PrincipalId, memory_id: int) -> tuple[int, bool] | None:
+        note = self._store.memories.get((principal, memory_id))
+        if note is not None:
+            return note.revision, False
+        retired = self._store.retired_memories.get((principal, memory_id))
+        return None if retired is None else (retired[0].revision, True)
+
+    async def memory_revisions(self, principal: PrincipalId, memory_ids: Sequence[int]) -> dict[int, tuple[int, bool]]:
+        found: dict[int, tuple[int, bool]] = {}
+        for memory_id in memory_ids:
+            state = await self.memory_revision(principal, memory_id)
+            if state is not None:
+                found[memory_id] = state
+        return found
+
+    async def count_source_episodes(self, scope: TrustedScope) -> int:
+        self._store._owned(scope)
+        return len(self._episodes_of(scope.principal_id, scope.conversation_id))
+
+    async def page_episodes(self, principal: PrincipalId, *, before: tuple[datetime, int] | None,
+                            limit: int) -> tuple[RecentEpisode, ...]:
+        return self._with_titles((e for e in self._episodes_of(principal)
+                                  if before is None or (e.ended_at, e.episode_id) < before), limit)
+
+    def _episode(self, principal: PrincipalId, episode_id: object, expected_revision: int) -> Episode:
+        episode = self._store.episodes.get((principal, episode_id)) if isinstance(episode_id, int) else None
+        if episode is None:
+            raise DataError(DataErrorCode.NOT_FOUND, f"no episode e{episode_id}")
+        if expected_revision != episode.revision:
+            raise DataError(DataErrorCode.VERSION_CONFLICT, f"e{episode_id} is at revision {episode.revision}")
+        return episode
+
+    async def update_episode(self, principal: PrincipalId, episode_id: int, text: str, *,
+                             expected_revision: int) -> Episode:
+        text = rules.check_episode_text(text)
+        episode = self._episode(principal, episode_id, expected_revision)
+        rewritten = replace(episode, text=text, origin=MemoryOrigin.USER, revision=episode.revision + 1,
+                            updated_at=datetime.now(UTC))
+        self._store.episodes[(principal, episode_id)] = rewritten
+        return rewritten
+
+    async def delete_episode(self, principal: PrincipalId, episode_id: int, *, expected_revision: int) -> None:
+        self._episode(principal, episode_id, expected_revision)
+        del self._store.episodes[(principal, episode_id)]
 
     def _with_titles(self, episodes: Iterable[Episode], limit: int) -> tuple[RecentEpisode, ...]:
         found: list[RecentEpisode] = []
@@ -1858,6 +1930,88 @@ class InMemoryData:
         self._pass(pass_id)
         rows = sorted((k[1], v) for k, v in self._store.pass_items.items() if k[0] == pass_id)
         return tuple(str(v["outcome"]) for _, v in rows)
+
+    @staticmethod
+    def _item_record(pass_id: str, item: int, row: Mapping[str, object]) -> PassItemRecord:
+        def text(key: str) -> str | None:
+            value = row[key]
+            return value if isinstance(value, str) else None
+
+        written, decided, created = row["written"], row["decided_at"], row["created_at"]
+        assert isinstance(created, datetime)
+        return PassItemRecord(pass_id, item, str(row["proposal"]), text("planned"), str(row["outcome"]),
+                              text("target"), text("previous"), written if isinstance(written, int) else None,
+                              decided if isinstance(decided, datetime) else None, created)
+
+    async def read_pass_items(self, pass_id: str) -> tuple[PassItemRecord, ...]:
+        self._pass(pass_id)
+        return tuple(self._item_record(p, i, row) for (p, i), row in sorted(self._store.pass_items.items())
+                     if p == pass_id)
+
+    async def applied_pass_items(self, scope: TrustedScope, *,
+                                 limit: int) -> tuple[tuple[MemoryPass, tuple[PassItemRecord, ...]], ...]:
+        self._store._owned(scope)
+        shown = ("applied", "kept", "sensitive_proposed")
+        found: list[tuple[MemoryPass, tuple[PassItemRecord, ...]]] = []
+        for _, mp in self._store.memory_passes.values():  # in creation order
+            if mp.conversation_id != scope.conversation_id or mp.status is not PassStatus.APPLIED:
+                continue
+            items = tuple(self._item_record(p, i, row) for (p, i), row in sorted(self._store.pass_items.items())
+                          if p == mp.pass_id and row["outcome"] in shown)
+            if items:
+                found.append((mp, items))
+        return tuple(found[-limit:])
+
+    async def list_proposals(self, principal: PrincipalId) -> tuple[Proposal, ...]:
+        order = {p: n for n, p in enumerate(self._store.memory_passes)}
+        found: list[tuple[datetime, int, int, Proposal]] = []
+        for (pass_id, item), row in self._store.pass_items.items():
+            owner, mp = self._store.memory_passes[pass_id]
+            if owner != principal or row["outcome"] not in ("proposed", "sensitive_proposed"):
+                continue
+            conv = self._store._conversations[mp.conversation_id]
+            record = self._item_record(pass_id, item, row)
+            found.append((record.created_at, order[pass_id], item,
+                          Proposal(record, mp.conversation_id, mp.kind, conv.title, conv.trashed_at is not None)))
+        return tuple(p for *_, p in sorted(found, key=lambda f: f[:3]))
+
+    async def decide_proposal(self, principal: PrincipalId, pass_id: str, item: int, *, keep: bool,
+                              now: datetime, dates: NoteDates | None = None) -> Memory | None:
+        found = self._store.memory_passes.get(pass_id)
+        row = None if found is None or found[0] != principal else self._store.pass_items.get((pass_id, item))
+        if found is None or row is None:
+            raise DataError(DataErrorCode.NOT_FOUND, f"no proposal {pass_id}/{item}")
+        if row["outcome"] not in ("proposed", "sensitive_proposed"):
+            raise DataError(DataErrorCode.VERSION_CONFLICT, f"{pass_id}/{item} was {row['outcome']}")
+        note = None
+        if keep:
+            planned_text = row["planned"]
+            planned = planned_item(planned_text, item, PassAction.ADD) if isinstance(planned_text, str) else None
+            if planned is None or planned.category is None:
+                raise DataError(DataErrorCode.INVALID_ARGUMENT, "the proposal names no note")
+            text = rules.check_note_text(planned.category, planned.text)
+            if self._memory_count(principal) >= MAX_MEMORIES:
+                raise DataError(DataErrorCode.LIMIT_EXCEEDED, f"{MAX_MEMORIES} notes are kept at most")
+            proposed = Memory(0, planned.category, text, MemoryOrigin.EXTRACTOR, found[1].conversation_id, None, 1,
+                              now, now, due_at=planned.due_at, due_instant=planned.due_instant,
+                              valid_until=planned.valid_until, valid_instant=planned.valid_instant,
+                              source_pass=pass_id, source_item=item, user_approved_at=now)
+            proposed = rules.check_fresh(proposed if dates is None else rules.dated(proposed, dates), now)
+            note = replace(proposed, memory_id=self._new_memory_id(principal))
+            self._store.memories[(principal, note.memory_id)] = note
+        row.update(outcome="kept" if keep else "discarded", decided_at=now,
+                   target=row["target"] if note is None else f"m{note.memory_id}")
+        return note
+
+    async def pass_summary(self, principal: PrincipalId, *, day_start: datetime, since: datetime) -> PassSummary:
+        mine = [mp for owner, mp in self._store.memory_passes.values() if owner == principal]
+        applied = [mp.finished_at for mp in mine if mp.status is PassStatus.APPLIED and mp.finished_at is not None]
+        return PassSummary(
+            await self.pass_usage(principal, day_start), max(applied, default=None),
+            tuple(mp for mp in mine if mp.status is PassStatus.SKIPPED and mp.finished_at is not None
+                  and mp.finished_at >= since),
+            sum(1 for mp in mine if mp.status in (PassStatus.FAILED, PassStatus.INTERRUPTED)
+                and mp.finished_at is not None and mp.finished_at >= since))
 
     async def clean_memories(self, now: datetime) -> MemoryCleanup:
         notes = self._store.memories

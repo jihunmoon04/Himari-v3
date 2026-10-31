@@ -3538,19 +3538,118 @@ details > summary {
 }
 
 .item-memory-action::after,
-.item-memory-text:has(+ .item-memory-undo, + .item-memory-done)::after {
+.item-memory-text:has(+ .item-memory-undo, + .item-memory-done, + .item-memory-link)::after {
   content: " ·";
   font-weight: 400;
 }
 
-.item-memory-undo {
+/* After a link the dot is its own box, so the link's underline stops before it. */
+.item-memory-link:has(+ .item-memory-undo, + .item-memory-done)::after {
+  content: "·";
+  display: inline-block;
+  margin-left: 0.3em;
+  text-decoration: none;
+}
+
+.item-memory-undo,
+.item-memory-link {
   padding: 0;
   font-size: 13px;
   text-decoration: underline;
 }
 
+/* V3-P85 §10.1: what a memory pass did, after the event it read through: a dim line that opens to its items. */
+.item-pass {
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.item-pass-summary {
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+
+.item-pass-items {
+  margin: var(--space-1) 0 0;
+  padding-left: var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.memory > .memory-auto,
+.memory > .memory-tabs,
+#memory-notes > .memory-count,
+.memory-suggestions,
+.memory-timeline {
+  max-width: var(--reading-max);
+  margin-left: auto;
+  margin-right: auto;
+}
+
+.memory-tabs {
+  display: flex;
+  gap: var(--space-2);
+  border-bottom: 1px solid var(--border);
+}
+
+.memory-tab {
+  padding: var(--space-1) var(--space-2);
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: none;
+  color: var(--text-muted);
+  font: inherit;
+  cursor: pointer;
+}
+
+.memory-tab[aria-selected="true"] {
+  border-bottom-color: var(--text);
+  color: var(--text);
+}
+
+.memory-suggestions {
+  margin-top: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+}
+
+.memory-date {
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.memory-date.is-overdue {
+  color: var(--warn);
+}
+
+.memory-date.is-ended {
+  text-decoration: line-through;
+}
+
+.memory-form-date {
+  max-width: 100%;
+  padding: 2px var(--space-1);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  background: var(--surface-raised);
+  color: var(--text);
+  font: inherit;
+}
+
+/* What a note or an episode rests on, gone to from its Source link: marked for a moment. */
+.is-revealed {
+  border-radius: var(--radius-md);
+  box-shadow: 0 0 0 2px var(--warn-edge);
+  transition: box-shadow 0.3s;
+}
+
+.memory-timeline-more {
+  margin-top: var(--space-2);
+}
+
 .memory > .memory-off,
-.memory > .memory-count,
 .memory-groups {
   max-width: var(--reading-max);
   margin-left: auto;
