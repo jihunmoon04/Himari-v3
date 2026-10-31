@@ -521,7 +521,10 @@ CREATE INDEX memory_passes_by_day ON memory_passes (owner, created_at);  -- the 
 CREATE TABLE memory_pass_calls (       -- the raw records, shaped as in runs (V3-001)
     pass_id TEXT NOT NULL REFERENCES memory_passes,
     call INTEGER NOT NULL,
-    status TEXT NOT NULL,              -- 'prepared' | 'dispatched' | 'received' | 'failed'
+    status TEXT NOT NULL,              -- 'prepared' | 'dispatched' | 'received' | 'failed' | 'uncertain' | 'abandoned'
+    reserved_tokens INTEGER NOT NULL,
+    prepared_at TEXT NOT NULL,         -- the day its tokens count on (§4.8)
+    charged_tokens INTEGER NOT NULL,   -- reservation, reported use, or 0 for one never sent
     raw_request_body BLOB NOT NULL,    -- stored before the send; no store, no send
     raw_request_content_type TEXT NOT NULL,
     raw_response_body BLOB,
@@ -823,3 +826,14 @@ rev. 3의 P1 둘은 해결, 민감정보 거부 표현은 개선으로 판정했
 - 날짜: 넘침, 읽을 수 없는 날짜, 고칠 때 날짜 보존과 `null`.
 - 판정 예외 때 작업이 `failed`로 닫히고 다음 작업이 시작됨.
 - 페이지 읽기: 첫 구간이 이벤트 1~4만 읽고 멈춤.
+
+### 20.2 구현 재검수 (`f382a8b`): READY_WITH_CORRECTIONS
+
+이전 P1 둘과 P2 셋은 해결(긴 대화 읽기는 개선)로 판정했다.
+
+| # | 지적 | 처리 |
+| --- | --- | --- |
+| P2 | 하루 사용량을 작업 시작 시각(`memory_passes.created_at`)으로 세어, 자정 전에 시작한 작업의 자정 뒤 호출이 전날로 감 | 고침. 호출마다 `prepared_at`과 `charged_tokens`를 두고, 하루 사용량은 그날 준비한 호출의 합이다. 호출 하나가 세는 양: 진행 중·결과 모름·사용량 없음이면 예약, 사용량을 보고하면 그 값, 보내지 않았으면 0 |
+| P3 | 페이지가 늘 때마다 쌓인 메시지 전체에 `next_part`를 다시 돈다 | 후속. 한 구간은 많아야 24,000자라 쌓이는 메시지는 작다. 더 긴 Tool 위주 대화에서 느려지면 자르는 상태를 이어 가는 방식으로 바꾼다 |
+
+검수 권고: 실제로 켜기 전에 SQLite에서 Provider 실패와 프로세스 재시작을 묶은 통합 시험을 한 번 돈다. 2단계(실제 모델 확인)에 넣는다.

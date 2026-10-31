@@ -1549,8 +1549,14 @@ class InMemoryData:
         return tuple(self._episodes_of(principal))
 
     async def pass_usage(self, principal: PrincipalId, since: datetime) -> int:
-        return sum(mp.charged_tokens for owner, mp in self._store.memory_passes.values()
-                   if owner == principal and mp.created_at >= since)
+        owned = {p for p, (owner, _) in self._store.memory_passes.items() if owner == principal}
+        total = 0
+        for (pass_id, _), row in self._store.pass_calls.items():
+            prepared, charged = row["prepared_at"], row["charged"]
+            assert isinstance(prepared, datetime) and isinstance(charged, int)
+            if pass_id in owned and prepared >= since:
+                total += charged
+        return total
 
     def _pass(self, pass_id: object) -> tuple[PrincipalId, MemoryPass]:
         found = self._store.memory_passes.get(pass_id) if isinstance(pass_id, str) else None
@@ -1592,6 +1598,7 @@ class InMemoryData:
         owner, mp = self._running_pass(pass_id)
         call = mp.calls + 1
         self._store.pass_calls[(pass_id, call)] = {"status": "prepared", "reserved": reserved_tokens,
+                                                   "prepared_at": datetime.now(UTC), "charged": reserved_tokens,
                                                    "request": body, "response": None}
         self._put_pass(owner, replace(mp, calls=call, reserved_tokens=reserved_tokens))
         return call
@@ -1611,7 +1618,10 @@ class InMemoryData:
         usage = outcome.usage if isinstance(outcome, RawReceived) else None
         reserved = row["reserved"]
         assert isinstance(reserved, int)
-        row.update(status="received" if isinstance(outcome, RawReceived) else "failed", response=outcome.body)
+        reported = (None if usage is None or usage.input_tokens is None or usage.output_tokens is None
+                    else usage.input_tokens + usage.output_tokens)
+        row.update(status="received" if isinstance(outcome, RawReceived) else "failed", response=outcome.body,
+                   charged=reserved if reported is None else reported)
         if usage is None or usage.input_tokens is None or usage.output_tokens is None:
             self._put_pass(owner, replace(mp, reserved_tokens=0, unmetered_tokens=mp.unmetered_tokens + reserved))
         else:
@@ -1641,7 +1651,7 @@ class InMemoryData:
                 uncertain += reserved
                 row["status"] = "uncertain"
             elif row["status"] == "prepared":
-                row["status"] = "abandoned"
+                row.update(status="abandoned", charged=0)
         settled = replace(mp, reserved_tokens=0, unmetered_tokens=mp.unmetered_tokens + uncertain)
         self._put_pass(owner, settled)
         return settled

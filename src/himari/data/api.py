@@ -1262,7 +1262,10 @@ class MemoryPassLog(Protocol):
         ...
 
     async def pass_usage(self, principal: PrincipalId, since: datetime) -> int:
-        """The tokens charged by the principal's passes begun since then (§4.8)."""
+        """The tokens charged by the principal's calls prepared since then
+        (§4.8; by the call, so one past midnight counts on its own day): a
+        call in flight or with an unknown outcome its reservation, one that
+        reported usage that use, one never sent nothing."""
         ...
 
     async def begin_pass(self, scope: TrustedScope, start: PassStart) -> str:

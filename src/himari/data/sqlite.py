@@ -548,6 +548,8 @@ CREATE TABLE memory_pass_calls (
     call INTEGER NOT NULL,
     status TEXT NOT NULL,
     reserved_tokens INTEGER NOT NULL,
+    prepared_at TEXT NOT NULL,
+    charged_tokens INTEGER NOT NULL,
     raw_request_body BLOB NOT NULL,
     raw_request_content_type TEXT NOT NULL,
     raw_response_body BLOB,
@@ -2798,8 +2800,9 @@ class SqliteData:
 
     async def pass_usage(self, principal: PrincipalId, since: datetime) -> int:
         with self._tx() as tx:
-            row = tx.one("SELECT COALESCE(SUM(reserved_tokens + input_tokens + output_tokens + unmetered_tokens), 0)"
-                         " AS n FROM memory_passes WHERE owner=? AND created_at >= ?", principal, _timestamp(since))
+            row = tx.one("SELECT COALESCE(SUM(c.charged_tokens), 0) AS n FROM memory_pass_calls c"
+                         " JOIN memory_passes p ON p.pass_id=c.pass_id WHERE p.owner=? AND c.prepared_at >= ?",
+                         principal, _timestamp(since))
             assert row is not None
             return int(row["n"])
 
@@ -2847,9 +2850,10 @@ class SqliteData:
             with self._tx() as tx:
                 row = self._running_pass(tx, pass_id)
                 call = int(row["calls"]) + 1
-                tx.execute("INSERT INTO memory_pass_calls (pass_id, call, status, reserved_tokens, raw_request_body,"
-                           " raw_request_content_type) VALUES (?, ?, 'prepared', ?, ?, ?)",
-                           pass_id, call, reserved_tokens, body, content_type)
+                tx.execute("INSERT INTO memory_pass_calls (pass_id, call, status, reserved_tokens, prepared_at,"
+                           " charged_tokens, raw_request_body, raw_request_content_type)"
+                           " VALUES (?, ?, 'prepared', ?, ?, ?, ?, ?)", pass_id, call, reserved_tokens,
+                           _timestamp(datetime.now(UTC)), reserved_tokens, body, content_type)
                 tx.execute("UPDATE memory_passes SET calls=?, reserved_tokens=? WHERE pass_id=?",
                            call, reserved_tokens, pass_id)
                 return call
@@ -2873,10 +2877,11 @@ class SqliteData:
             reported = (None if usage is None or usage.input_tokens is None or usage.output_tokens is None
                         else (usage.input_tokens, usage.output_tokens))
             tx.execute("UPDATE memory_pass_calls SET status=?, raw_response_body=?, raw_response_content_type=?,"
-                       " usage=?, error_code=? WHERE pass_id=? AND call=?",
+                       " usage=?, error_code=?, charged_tokens=? WHERE pass_id=? AND call=?",
                        "received" if isinstance(outcome, RawReceived) else "failed", outcome.body,
                        outcome.content_type, None if reported is None else json.dumps(list(reported)),
-                       None if isinstance(outcome, RawReceived) else outcome.error_code, pass_id, call)
+                       None if isinstance(outcome, RawReceived) else outcome.error_code,
+                       row["reserved_tokens"] if reported is None else sum(reported), pass_id, call)
             reserved = row["reserved_tokens"]
             if reported is None:
                 tx.execute("UPDATE memory_passes SET reserved_tokens=0, unmetered_tokens=unmetered_tokens+?"
@@ -2902,7 +2907,8 @@ class SqliteData:
                            " AND status='dispatched'", pass_id)
         assert uncertain is not None
         tx.execute("UPDATE memory_pass_calls SET status='uncertain' WHERE pass_id=? AND status='dispatched'", pass_id)
-        tx.execute("UPDATE memory_pass_calls SET status='abandoned' WHERE pass_id=? AND status='prepared'", pass_id)
+        tx.execute("UPDATE memory_pass_calls SET status='abandoned', charged_tokens=0 WHERE pass_id=?"
+                   " AND status='prepared'", pass_id)
         tx.execute("UPDATE memory_passes SET reserved_tokens=0, unmetered_tokens=unmetered_tokens+? WHERE pass_id=?",
                    int(uncertain["n"]), pass_id)
 

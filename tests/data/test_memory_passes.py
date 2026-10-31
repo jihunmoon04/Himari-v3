@@ -468,3 +468,25 @@ def test_a_call_that_may_have_been_sent_counts_its_reservation_whatever_ends_the
         assert await data.pass_usage(ME, since) == 800 + 700 + 300
 
     asyncio.run(scenario())
+
+
+def test_the_daily_usage_counts_each_call_on_the_day_it_was_prepared() -> None:
+    # PR #135 re-review P2: a pass begun before midnight whose second call is sent after it.
+    async def scenario() -> None:
+        _, data = fresh()
+        last = await turn(data, SCOPE, "I build HIMARI.")
+        pass_id = await live(data, SCOPE, last)
+        first = await data.prepare_pass_call(pass_id, b"{}", "application/json", 1000)
+        await data.mark_pass_call_dispatched(pass_id, first)
+        await data.record_pass_call(pass_id, first, RawReceived(b"x", "application/json"))  # malformed, no usage
+        midnight = datetime.now(UTC)
+        await asyncio.sleep(0.001)
+        second = await data.prepare_pass_call(pass_id, b"{}", "application/json", 600)
+        assert await data.pass_usage(ME, midnight) == 600  # only the call of the new day, still reserved
+        await data.mark_pass_call_dispatched(pass_id, second)
+        await data.record_pass_call(pass_id, second, RawReceived(b"{}", "application/json",
+                                                                 TokenUsage(input_tokens=400, output_tokens=50)))
+        assert await data.pass_usage(ME, midnight) == 450
+        assert await data.pass_usage(ME, midnight - timedelta(days=1)) == 1450
+
+    asyncio.run(scenario())
