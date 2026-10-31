@@ -90,7 +90,7 @@ aseprite -b neutral-face.aseprite --tag blink --scale 3 --save-as blink-x3.gif
 aseprite -b --script-param in=happy.png --script-param neutral=neutral.png --script-param sx=6.02 --script-param ox=4.00 --script-param sy=6.255 --script-param oy=0.70 --script-param out=moods/happy.png --script-param log=happy.txt --script mood.lua
 ```
 
-깜빡임과 말하기는 아직 neutral에만 있다. 다른 표정에서 쓰려면 그 표정의 눈과 입 영역에 같은 방식으로 프레임을 그려야 한다.
+깜빡임과 말하기 변형은 이제 `faces.aseprite`에 표정마다 있다(아래 "다른 표정의 눈·입").
 
 ## 앱 자산: 원본과 내보내기
 
@@ -99,12 +99,12 @@ aseprite -b --script-param in=happy.png --script-param neutral=neutral.png --scr
 | 파일 | 내용 |
 |---|---|
 | `body.aseprite` | 몸 동작. 태그 하나가 동작 하나(지금은 `idle` 6프레임). 숨긴 레이어 `@face`의 1×1 점이 그 프레임에서 얼굴을 놓을 자리다(쉬는 자세 (101, 47), 숨쉬기 프레임은 1px 위). |
-| `faces.aseprite` | 얼굴 33×26. 표정마다 프레임 하나, 태그 이름이 표정 이름. 그룹 `eyes/half`, `eyes/closed`, `mouth/small`, `mouth/wide`에 기본 얼굴과 다른 픽셀만 그린다(지금은 neutral 프레임에만 있음). 숨긴 `@body`는 맞춰 볼 몸 그림이다. 턱의 손(129 이상, 66 이상)은 몸 쪽이라 비워 둔다. |
+| `faces.aseprite` | 얼굴 33×26. 표정마다 프레임 하나, 태그 이름이 표정 이름. 그룹 `eyes/half`, `eyes/closed`, `mouth/small`, `mouth/wide`에 기본 얼굴과 다른 픽셀만 그린다(happy는 눈 변형이 없다). 숨긴 `@body`는 맞춰 볼 몸 그림이다. 턱의 손(129 이상, 66 이상)은 몸 쪽이라 비워 둔다. |
 
 - **처음 만들기**: `../tools/sources.lua`가 `idle-test.aseprite`, `neutral-face.aseprite`, `moods/`에서 두 원본을 한 번 만들었다. 그대로 다시 돌리면 고친 `faces.aseprite`를 덮어쓴다. 숨쉬기를 바꿀 때는 `idle-test.lua`를 고쳐 돌린 뒤 `--script-param only=body`로 `body.aseprite`만 다시 만든다.
 - **neutral 눈·입 다시 그림**(소유자 검토 2026-10-31): `../tools/neutral-variants.lua`가 `faces.aseprite`의 neutral 변형을 고쳤다. 반쯤 감은 눈은 뜬 눈의 속눈썹처럼 오른쪽으로 내려가고, 감은 눈은 선 위의 갈색 채움을 없앴다. 두 경우 모두 바깥쪽 속눈썹 끝을 눈마다 2px 줄였다. 말하는 입은 다문 입 선의 두 끝 (112,65), (116,67)을 그대로 두고 가운데가 벌어진다. 그래서 `frames/`의 낱장과는 이제 다르다.
 - **내보내기**: 원본을 고친 뒤 `../tools/export.lua`를 돌린다(`pixel/`에서 실행).
-  - 같은 그림 조각은 시트에 한 번만 넣는다(지금 18조각, 820×412).
+  - 같은 그림 조각은 시트에 한 번만 넣는다(지금 40조각, 1013×424).
   - UI 테스트가 비교할 기준 그림 3장(`idle-1-neutral`, `idle-2-happy`, `idle-1-neutral-closed-wide`)도 함께 쓴다.
   - 다음 중 하나라도 어기면 아무것도 쓰지 않고 실패한다: 색 인덱스 모드와 `himari-32.gpl` 팔레트, 모든 몸 프레임의 `@face` 점, 모든 동작의 첫 프레임과 단발 동작의 마지막 프레임 = idle 첫 프레임, 표정 8종.
 
@@ -113,3 +113,23 @@ aseprite -b --script-param body=clean/body.aseprite --script-param faces=clean/f
 ```
 
 결과물(시트, JSON, 기준 그림)은 저장소에 넣는다. 빌드와 CI에는 Aseprite가 없다.
+
+## 다른 표정의 눈·입
+
+`../tools/mood-variants.lua`가 `faces.aseprite`의 표정 7종에 눈·입 변형을 그렸다. `mood-variants.png`가 결과다(줄: neutral, happy, excited, sad, surprised, thinking, embarrassed, worried / 칸: 기본, 반쯤 감음, 감음, 작은 입, 큰 입. 어두운 칸은 그 변형이 없음). neutral은 소유자가 확인한 손 그림(`neutral-variants.lua`)이고, 이 스크립트는 그 모양을 규칙으로 옮긴 것이다.
+
+- **눈**: 표정마다 속눈썹 모양이 달라서 그 표정의 눈에서 직접 계산한다. 눈 칸(왼눈 103–114 × 52–59, 오른눈 119–129 × 57–64)에서 속눈썹 색이 있는 열을 눈으로 본다.
+  - 반쯤 감음: 눈 윗선에 맞춘 직선을 눈 높이의 절반만큼 내려 한 줄 눈꺼풀로 그리고, 그 위는 피부로 덮는다. 두 줄 넘게 두꺼운 속눈썹의 남는 줄과 바깥 끝 아래 테두리도 지운다.
+  - 감음: 눈의 보통 아랫선 위에 호를 그리고 양 끝을 한 줄 올린다.
+  - 둘 다 바깥 끝을 한 칸 짧게 해서 꼬리가 길어 보이지 않게 한다(neutral 검토와 같은 기준).
+  - 덮는 피부색은 같은 줄의 눈 바깥에서 가져온다. 그래서 embarrassed의 볼 홍조 띠는 감은 눈 위로도 이어진다.
+  - happy는 이미 눈을 감고 웃는 얼굴이라 눈 변형이 없다.
+- **입**: 표정마다 입 위치에 작은 틀을 놓는다. 작은 입은 3×2, 큰 입은 3×4다.
+  - happy와 surprised는 원래 입 안을 어둡게 하거나 한 줄 더 연다.
+  - excited는 원래 입이 크게 벌어져 있다. 그래서 작은 입은 입을 줄이고, 큰 입은 원래 입에 입안을 보인다.
+
+```
+aseprite -b --script-param faces=clean/faces.aseprite --script tools/mood-variants.lua
+```
+
+다시 돌리면 7종의 변형을 새로 그린다(neutral은 건드리지 않는다). 특정 표정만 손으로 고쳤다면 그 표정은 `--script-param only=<표정>`으로 따로 다루거나 다시 돌리지 않는다.

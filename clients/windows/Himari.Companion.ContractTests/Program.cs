@@ -359,6 +359,10 @@ var shipped = CharacterManifest.Parse(File.ReadAllText(Path.Combine(AppContext.B
 Check(shipped.Width == 205 && shipped.Height == 206 && new[] { "neutral", "happy", "excited", "sad", "surprised", "thinking", "embarrassed", "worried" }.All(shipped.Faces.ContainsKey),
     "shipped manifest covers the server's eight moods on the 205x206 canvas");
 Check(shipped.Faces["neutral"].Eyes!.Keys.Order().SequenceEqual(["closed", "half"]) && shipped.Faces["neutral"].Mouth!.Keys.Order().SequenceEqual(["small", "wide"]), "neutral has blink and talk variants");
+Check(shipped.Faces.All(f => f.Value.Mouth?.Keys.Order().SequenceEqual(["small", "wide"]) == true)
+    && shipped.Faces.Where(f => f.Key != "happy").All(f => f.Value.Eyes?.Keys.Order().SequenceEqual(["closed", "half"]) == true)
+    && shipped.Faces["happy"].Eyes is null,
+    "every mood talks; every mood but happy (eyes already closed in a smile) blinks");
 foreach (var bad in new[] { "{\"version\":2,\"canvas\":[1,1],\"sheet\":\"s\",\"face\":{\"origin\":[0,0],\"size\":[1,1]},\"clips\":{},\"faces\":{}}",
                             "{\"version\":1,\"canvas\":[1,1],\"sheet\":\"s\",\"face\":{\"origin\":[0,0],\"size\":[1,1]},\"clips\":{},\"faces\":{\"neutral\":{\"src\":[0,0,1,1]}}}",
                             "{\"version\":1,\"canvas\":[1,1],\"sheet\":\"s\",\"face\":{\"origin\":[0,0],\"size\":[0,1]},\"clips\":{\"idle\":{\"loop\":true,\"frames\":[{\"src\":[0,0,1,1],\"ms\":1,\"face\":[0,0]}]}},\"faces\":{\"neutral\":{\"src\":[0,0,1,1]}}}",
@@ -369,15 +373,18 @@ foreach (var bad in new[] { "{\"version\":2,\"canvas\":[1,1],\"sheet\":\"s\",\"f
     try { CharacterManifest.Parse(bad); Check(false, "invalid character manifest is rejected"); }
     catch (InvalidDataException) { }
 }
-var shippedRects = shipped.Clips.Values.SelectMany(c => c.Frames.Select(f => f.Src)).Concat(shipped.Faces.Values.Select(f => f.Src)).ToList();
+var shippedRects = shipped.Clips.Values.SelectMany(c => c.Frames.Select(f => f.Src)).Concat(shipped.Faces.Values.Select(f => f.Src))
+    .Concat(shipped.Faces.Values.SelectMany(f => (f.Eyes ?? []).Concat(f.Mouth ?? []).Select(v => v.Value.Src))).ToList();
 int sheetRight = shippedRects.Max(r => r[0] + r[2]), sheetBottom = shippedRects.Max(r => r[1] + r[3]);
 shipped.CheckSheet(sheetRight, sheetBottom);
 try { shipped.CheckSheet(sheetRight, sheetBottom - 1); Check(false, "a src outside the sheet is rejected"); }
 catch (InvalidDataException) { }
 static TimeSpan Ms(double value) => TimeSpan.FromMilliseconds(value);
 var frame = new ClipFrame([0, 0, 1, 1], 100, [0, 0]);
+// "plain" is a mood face without blink or talk art.
 var animationManifest = shipped with
 {
+    Faces = new(shipped.Faces) { ["plain"] = new CharacterFace([0, 0, 1, 1]) },
     Clips = new()
     {
         ["idle"] = new(true, [frame, frame with { Src = [1, 0, 1, 1], Ms = 300 }]),
@@ -428,7 +435,7 @@ Check(animator.Pose(Ms(1010)).Mouth == "small" && animator.Pose(Ms(1140)).Mouth 
     "talking cycles small, wide, small, closed in 130 ms steps");
 animator.SetTalking(false, Ms(1150));
 Check(animator.Pose(Ms(1200)).Mouth == "wide" && animator.Pose(Ms(1260)).Mouth is null, "when talking stops the current step finishes, then the mouth closes");
-animator.Mood = "happy";
+animator.Mood = "plain";
 animator.SetTalking(true, Ms(1300));
 Check(animator.Pose(Ms(1310)).Mouth is null && animator.Pose(Ms(1310)).Eyes is null, "a mood without the variant keeps its own face");
 animator.SetTalking(false, Ms(1310)); animator.Mood = "neutral";
