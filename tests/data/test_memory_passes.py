@@ -568,3 +568,23 @@ def test_recent_episodes_leave_out_the_asking_conversation_the_trash_and_the_old
         assert [f.episode.text for f in await data.find_episodes(ME, [])] == ["Here.", "Long ago."]  # not the trash
 
     asyncio.run(scenario())
+
+
+def test_episodes_are_ranked_before_the_limit_is_taken() -> None:
+    # PR #137 review: the newest 200 were taken first, so an older episode holding every word could be cut.
+    async def scenario() -> None:
+        _, data = fresh()
+        for text, ended in (("Bubbles and hotkey fixed.", NOW - timedelta(days=3)),
+                            ("Bubbles again.", NOW - timedelta(days=2)), ("Bubbles once more.", NOW - timedelta(days=1))):
+            last = await turn(data, SCOPE, f"{text} with words enough")
+            pass_id = await live(data, SCOPE, last)
+            await data.apply_pass(pass_id, [], EpisodePlan(text, ended, ended, (last - 1,), ()), now=NOW)
+        best = await data.find_episodes(ME, ["bubbles", "hotkey", "bubbles"], limit=1)
+        assert [f.episode.text for f in best] == ["Bubbles and hotkey fixed."]  # two words beat one, though older
+        assert [f.episode.text for f in await data.find_episodes(ME, ["bubbles"], limit=2)] == [
+            "Bubbles once more.", "Bubbles again."]  # one word each: newest first
+        first_days = await data.find_episodes(ME, [], start=NOW - timedelta(days=4), limit=2)
+        assert [f.episode.text for f in first_days] == ["Bubbles and hotkey fixed.", "Bubbles again."]  # time order
+        assert [f.episode.text for f in await data.find_episodes(ME, [], limit=1)] == ["Bubbles once more."]
+
+    asyncio.run(scenario())

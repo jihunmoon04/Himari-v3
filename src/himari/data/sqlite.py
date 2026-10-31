@@ -2753,12 +2753,13 @@ class SqliteData:
     _EPISODE_COLUMNS = ("episode_id, conversation_id, from_sequence, through_sequence, started_at, ended_at, text,"
                         " user_sequences, himari_sequences, origin, source_pass, revision, created_at, updated_at")
 
-    def _recent_rows(self, tx: _Tx, principal: PrincipalId, where: str, *params: object,
-                     limit: int) -> tuple[RecentEpisode, ...]:
+    def _recent_rows(self, tx: _Tx, principal: PrincipalId, where: str, *params: object, limit: int,
+                     order: str = "e.ended_at DESC, e.episode_id DESC",
+                     order_params: Sequence[object] = ()) -> tuple[RecentEpisode, ...]:
         columns = ", ".join(f"e.{c.strip()}" for c in self._EPISODE_COLUMNS.split(","))
         rows = tx.all(f"SELECT {columns}, c.title FROM episodes e JOIN conversations c"
                       " ON c.conversation_id=e.conversation_id WHERE e.owner=? AND c.trashed_at IS NULL"
-                      f"{where} ORDER BY e.ended_at DESC, e.episode_id DESC LIMIT ?", principal, *params, limit)
+                      f"{where} ORDER BY {order} LIMIT ?", principal, *params, *order_params, limit)
         return tuple(RecentEpisode(_episode(r), r["title"]) for r in rows)
 
     async def recent_episodes(self, principal: PrincipalId, *, since: datetime, besides: ConversationId | None,
@@ -2775,14 +2776,21 @@ class SqliteData:
 
     async def find_episodes(self, principal: PrincipalId, words: Sequence[str], *, start: datetime | None = None,
                             end: datetime | None = None, limit: int = 200) -> tuple[RecentEpisode, ...]:
-        folded = [rules.fold(w) for w in words if w.strip()]
+        folded = list(dict.fromkeys(rules.fold(w) for w in words if w.strip()))
         where = "".join([" AND e.ended_at >= ?" if start is not None else "",
                          " AND e.ended_at <= ?" if end is not None else "",
                          (" AND (" + " OR ".join("instr(e.folded, ?) > 0" for _ in folded) + ")") if folded else ""])
         params = [*([_timestamp(start)] if start is not None else []), *([_timestamp(end)] if end is not None else []),
                   *folded]
+        if folded:
+            order = ("(" + " + ".join("(instr(e.folded, ?) > 0)" for _ in folded) + ") DESC,"
+                     " e.ended_at DESC, e.episode_id DESC")
+        elif start is not None or end is not None:
+            order = "e.ended_at, e.episode_id"
+        else:
+            order = "e.ended_at DESC, e.episode_id DESC"
         with self._tx() as tx:
-            return self._recent_rows(tx, principal, where, *params, limit=limit)
+            return self._recent_rows(tx, principal, where, *params, limit=limit, order=order, order_params=folded)
 
     async def read_memory_cursor(self, scope: TrustedScope) -> MemoryCursor:
         with self._tx() as tx:

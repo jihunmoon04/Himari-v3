@@ -264,3 +264,38 @@ def test_search_finds_episodes_by_words_and_by_days() -> None:
     assert said(run(search, data, query="bubbles", category="user")) == "No saved notes or episodes match."
     outcome = run(search, data, query="memory")
     assert outcome.raw_result == {"ids": (), "episodes": (2,)}  # frozen as results are
+
+
+def test_a_rewrite_removes_a_date_sent_as_null_and_keeps_one_sent_empty() -> None:
+    # PR #137 review: a date gone or now unknown could not be taken off a note.
+    data = fresh()
+    asyncio.run(data.save_memory(ME, MemoryCategory.LOOP, "Interview."))
+    loop = asyncio.run(data.read_memory(ME, 1))
+    asyncio.run(data.restore_memory(ME, replace(loop, due_at="2026-11-04", due_instant=NOW + timedelta(days=4)),
+                                    expected_revision=1))
+    cleared = run(saving(data), data, category="loop", text="Interview, date unknown.", replaces="m1", due=None)
+    assert cleared.memory_change is not None and cleared.memory_change.due_at is None
+    kept = run(saving(data), data, category="loop", text="Interview at Kakao.", replaces="m1", due="")
+    assert kept.memory_change is not None and kept.memory_change.due_at == "2026-11-04"
+
+
+def test_a_day_that_starts_a_clock_change_is_searched_from_its_local_midnight() -> None:
+    # PR #137 review: 2026-11-01 in New York has 25 hours; its first hour was left out.
+    from testkit import user
+
+    from himari.data.api import EpisodePlan, PassKind, PassStart
+
+    data = fresh()
+
+    async def episode(text: str, ended: datetime) -> None:
+        await data.append_event(SCOPE, user(f"{text} — enough words here"))
+        last = (await data.read_events(SCOPE))[-1].sequence
+        cursor = (await data.read_memory_cursor(SCOPE)).through_sequence
+        pass_id = await data.begin_pass(SCOPE, PassStart(PassKind.LIVE, cursor, last, last, "p", "m"))
+        await data.apply_pass(pass_id, [], EpisodePlan(text, ended, ended, (last,), ()), now=ended)
+
+    asyncio.run(episode("Just after midnight.", datetime(2026, 11, 1, 4, 30, tzinfo=UTC)))  # 00:30 EDT
+    asyncio.run(episode("The evening before.", datetime(2026, 11, 1, 3, 30, tzinfo=UTC)))  # 23:30 EDT, Oct 31
+    search = MemorySearch(data, time_zone="America/New_York", clock=lambda: NOW)
+    found = said(run(search, data, kind="episodes", **{"from": "2026-11-01", "to": "2026-11-01"})).splitlines()
+    assert [line.split(": ", 1)[1] for line in found] == ["Just after midnight."]

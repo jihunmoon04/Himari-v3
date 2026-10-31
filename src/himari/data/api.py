@@ -1096,8 +1096,11 @@ class MemoryStore(Protocol):
     async def find_episodes(self, principal: PrincipalId, words: Sequence[str], *, start: datetime | None = None,
                             end: datetime | None = None, limit: int = 200) -> tuple[RecentEpisode, ...]:
         """V3-P85 §9: episodes that ended in [start, end] holding any of the
-        folded ``words`` (none: all of them), newest first, at most ``limit``;
-        not of a Conversation in the trash."""
+        folded ``words`` (none: all of them), not of a Conversation in the
+        trash, ranked before the ``limit`` is taken (PR #137 review): with
+        words, most words held first, then newest (a word given twice counts
+        once); without words but with a day, in time order (oldest first);
+        with neither, newest first."""
         ...
 
 

@@ -1534,10 +1534,15 @@ class InMemoryData:
 
     async def find_episodes(self, principal: PrincipalId, words: Sequence[str], *, start: datetime | None = None,
                             end: datetime | None = None, limit: int = 200) -> tuple[RecentEpisode, ...]:
-        folded = [rules.fold(w) for w in words if w.strip()]
-        return self._with_titles((e for e in self._episodes_of(principal)
-                                  if (start is None or e.ended_at >= start) and (end is None or e.ended_at <= end)
-                                  and (not folded or any(w in rules.fold(e.text) for w in folded))), limit)
+        folded = list(dict.fromkeys(rules.fold(w) for w in words if w.strip()))
+        found = [e for e in self._episodes_of(principal)  # newest first
+                 if (start is None or e.ended_at >= start) and (end is None or e.ended_at <= end)
+                 and (not folded or any(w in rules.fold(e.text) for w in folded))]
+        if folded:
+            found.sort(key=lambda e: sum(1 for w in folded if w in rules.fold(e.text)), reverse=True)  # stable
+        elif start is not None or end is not None:
+            found.reverse()
+        return self._with_titles(found, limit)
 
     async def read_memory_cursor(self, scope: TrustedScope) -> MemoryCursor:
         self._store._owned(scope)

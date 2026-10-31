@@ -11,7 +11,7 @@ from __future__ import annotations
 import re
 import unicodedata
 from collections.abc import Callable, Mapping, Sequence
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -158,8 +158,11 @@ type _Date = tuple[str, datetime] | None
 
 def _date_arg(args: Mapping[str, JsonValue], key: str, kept: _Date, zone: str, now: datetime,
               bounds: tuple[timedelta, timedelta]) -> _Date | str:
-    """A date argument: the kept one when not given (V3-P85 §5.3), the given
-    one when it reads and is in range, else why not (a str)."""
+    """A date argument (V3-P85 §5.3): the kept one when left out (or sent as
+    ""), none when sent as null — a date gone or now unknown (PR #137 review)
+    — the given one when it reads and is in range, else why not (a str)."""
+    if key in args and args[key] is None:
+        return None
     if not _given(args.get(key)):
         return kept
     parsed = parse_note_date(args.get(key), zone)
@@ -187,13 +190,13 @@ class MemorySave:
         "working on, goals, decisions), reference (paths, links, names they use), loop (something ahead: a "
         "plan, a promise, an appointment; give due when there is a date). A fact that holds only for a while "
         "gets valid_until. Dates are YYYY-MM-DD or a time with its UTC offset; a rewrite keeps a date it does "
-        "not give.",
+        "not give, and null removes it.",
         {"category": {"type": "string", "enum": list(_CATEGORIES)},
          "text": {"type": "string", "description": "One or two self-contained sentences."},
          "replaces": {**_ID_ARG, "type": ["string", "null"],
                       "description": "Only to rewrite an existing note: its id, as m12. Leave it out for a new note."},
-         "due": {**_DATE_ARG, "description": "A loop's date, if known."},
-         "valid_until": {**_DATE_ARG, "description": "The last day a passing fact holds."}},
+         "due": {**_DATE_ARG, "description": "A loop's date, if known; null removes it from the note."},
+         "valid_until": {**_DATE_ARG, "description": "The last day a passing fact holds; null removes it."}},
         ["category", "text"], EffectProfile.SCOPED_WRITE)
 
     def __init__(self, store: MemoryStore, *, time_zone: str = "UTC",
@@ -294,18 +297,6 @@ def _words(query: str) -> list[str]:
     return list(dict.fromkeys(_fold(query).split()))  # a word said twice counts once
 
 
-def rank_episodes(found: Sequence[RecentEpisode], query: str, *, ranged: bool) -> list[RecentEpisode]:
-    """V3-P85 §9: most words first, then newest; no query: the newest first,
-    or in time order when a range was asked ("what did we do last week")."""
-    words = _words(query)
-    if not words:
-        return sorted(found, key=lambda f: (f.episode.ended_at, f.episode.episode_id), reverse=not ranged)
-    scored = [(sum(1 for w in words if w in _fold(f.episode.text)), f) for f in found]
-    hits = [(score, f) for score, f in scored if score]
-    hits.sort(key=lambda pair: (pair[0], pair[1].episode.ended_at, pair[1].episode.episode_id), reverse=True)
-    return [f for _, f in hits]
-
-
 class MemorySearch:
     definition = _definition(
         MEMORY_SEARCH,
@@ -326,14 +317,21 @@ class MemorySearch:
         self._clock = clock
 
     def _day(self, args: Mapping[str, JsonValue], key: str) -> tuple[datetime | None, str | None]:
-        """A from/to day: its first (from) or last (to) instant, or why not."""
+        """A from/to day: its first (from: local midnight, so a day of 23 or 25
+        hours starts where it does, PR #137 review) or last (to) instant, or why not."""
         raw = args.get(key)
         if not _given(raw):
             return None, None
         parsed = parse_note_date(raw, self._zone) if isinstance(raw, str) and len(raw.strip()) == 10 else None
         if parsed is None:
             return None, f"{key} is a day, YYYY-MM-DD"
-        return (parsed[1] - timedelta(days=1) + timedelta(microseconds=1) if key == "from" else parsed[1]), None
+        if key == "to":
+            return parsed[1], None
+        try:
+            zone = ZoneInfo(self._zone)
+        except (ValueError, ZoneInfoNotFoundError):
+            zone = ZoneInfo("UTC")
+        return datetime.combine(date.fromisoformat(parsed[0]), time(), tzinfo=zone).astimezone(UTC), None
 
     async def run(self, invocation: ToolInvocation, ctx: ToolContext) -> ToolOutcome:
         args = invocation.arguments
@@ -366,13 +364,13 @@ class MemorySearch:
             if len(found) > len(shown):
                 lines.append(f"… {len(found) - len(shown)} more match; use more specific words or a category.")
         if kind in ("episodes", "all") and category is None:
-            episodes = rank_episodes(await self._store.find_episodes(principal, _words(query), start=start, end=end),
-                                     query, ranged=start is not None or end is not None)
+            episodes = await self._store.find_episodes(principal, _words(query), start=start, end=end,
+                                                       limit=EPISODE_LIMIT + 1)  # ranked by Data (§9)
             shown_episodes = episodes[:EPISODE_LIMIT]
             lines += [episode_line(f, self._zone) for f in shown_episodes]
             episode_ids = [f.episode.episode_id for f in shown_episodes]
             if len(episodes) > len(shown_episodes):
-                lines.append(f"… {len(episodes) - len(shown_episodes)} more episodes match; narrow the days or words.")
+                lines.append("… more episodes match; narrow the days or words.")
         if not ids and not episode_ids:
             nothing = "No saved notes match." if kind == "notes" else "No saved notes or episodes match."
             return ToolOutcome(ToolStatus.SUCCEEDED, _text(nothing),
