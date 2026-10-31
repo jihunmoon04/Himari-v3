@@ -933,16 +933,19 @@ class InstructionsStore(Protocol):
 # --- Memory (V3-P71) -----------------------------------------------------------
 
 MAX_MEMORY_CHARS = 500  # one note, in code points after newlines are normalized (Q3)
-MAX_MEMORIES = 1_000  # a principal's notes (Q3)
+MAX_LOOP_CHARS = 300  # an open loop (V3-P85 §5.1)
+MAX_MEMORIES = 1_000  # a principal's live notes (Q3); retired ones are not counted (V3-P85 §5.4)
 
 
 class MemoryCategory(Enum):
-    """The four fixed kinds of note (Q5), in the order they are shown."""
+    """The fixed kinds of note (V3-P71 Q5; LOOP from V3-P85 §5.1), in the order
+    they are shown."""
 
     USER = "user"  # who the user is: work, environment, languages
     PREFERENCE = "preference"  # how they like answers and work done
     PROJECT = "project"  # what they are working on: projects, goals, decisions
     REFERENCE = "reference"  # paths, links, names they use
+    LOOP = "loop"  # something ahead: a plan, a promise, a date (V3-P85 §7)
 
 
 class MemoryOrigin(Enum):
@@ -950,6 +953,7 @@ class MemoryOrigin(Enum):
 
     USER = "user"  # the Memory screen or the CLI
     MODEL = "model"  # memory_save in a Conversation
+    EXTRACTOR = "extractor"  # a memory pass after a Conversation went quiet (V3-P85 §4)
 
 
 @dataclass(frozen=True)
@@ -966,6 +970,17 @@ class Memory(DeepFrozen):
     revision: int
     created_at: datetime
     updated_at: datetime
+    # V3-P85 §5.3: a loop's date and a fact's end, as written (a date or an
+    # offset time) and as the instant fixed when written; every comparison
+    # uses the instant.
+    due_at: str | None = None
+    due_instant: datetime | None = None
+    valid_until: str | None = None
+    valid_instant: datetime | None = None
+    source_pass: str | None = None  # origin EXTRACTOR: the pass and item that wrote it
+    source_item: int | None = None
+    # A proposal the user kept (§10.2): automatic passes leave it alone.
+    user_approved_at: datetime | None = None
 
 
 class MemoryChangeKind(Enum):
@@ -1032,6 +1047,281 @@ class MemoryStore(Protocol):
 
     async def count_source_memories(self, scope: TrustedScope) -> int:
         """The notes this Conversation's calls wrote: deleted with it."""
+        ...
+
+
+# --- Memory passes (V3-P85) -----------------------------------------------------------
+
+MAX_EPISODE_CHARS = 600  # one episode (§6.1)
+MAX_EPISODES = 10_000  # a principal's episodes; past it the oldest go (§6.2)
+SKIP_AFTER_FAILURES = 3  # failed or interrupted passes from one cursor before its part is skipped (§4.5)
+STALE_DUE = timedelta(days=14)  # an open loop this far past its date is cleaned up (§5.1)
+STALE_UNDATED = timedelta(days=90)  # an open loop without a date, untouched this long
+EXPIRED_KEEP = timedelta(days=30)  # a fact this far past valid_until (§5.2)
+RETIRED_KEEP = timedelta(days=30)  # a retired note, while Undo can still bring it back (§5.4)
+PROPOSAL_KEEP = timedelta(days=30)  # a proposal nobody kept or discarded (§4.9)
+
+
+class PassKind(Enum):
+    LIVE = "live"  # the unread part after the cursor
+    BACKFILL = "backfill"  # the part before the upgrade (§4.9)
+    RETRY = "retry"  # a skipped part, once more (§4.9)
+
+
+class PassStatus(Enum):
+    RUNNING = "running"
+    APPLIED = "applied"
+    FAILED = "failed"
+    INTERRUPTED = "interrupted"  # the process ended while it ran
+    DISCARDED = "discarded"  # the Conversation or its cursor changed before it was applied (§4.4)
+    SKIPPED = "skipped"  # SKIP_AFTER_FAILURES counted from one cursor
+    RETRIED = "retried"  # a skipped pass whose part a retry read
+
+
+class PassAction(Enum):
+    """What one decision of a pass does, as the memory module planned it."""
+
+    ADD = "add"
+    UPDATE = "update"
+    FORGET = "forget"  # retires the note (§5.4)
+    PROPOSE = "propose"  # kept as a proposal the user keeps or discards (§4.9, §4.4)
+    DROP = "drop"  # refused before Data (``reason`` says why); only recorded
+
+
+@dataclass(frozen=True)
+class PassItem(DeepFrozen):
+    """One decision of a pass. ``proposal`` is the decision as the model wrote
+    it (JSON text), kept for the record. ADD/PROPOSE carry the note's fields;
+    UPDATE carries them with ``memory_id`` and ``expected_revision``; FORGET
+    only those two; DROP and PROPOSE carry ``reason`` (for PROPOSE:
+    ``proposed`` or ``sensitive_proposed``)."""
+
+    item: int
+    proposal: str
+    action: PassAction
+    reason: str | None = None
+    memory_id: int | None = None
+    expected_revision: int | None = None
+    category: MemoryCategory | None = None
+    text: str | None = None
+    due_at: str | None = None
+    due_instant: datetime | None = None
+    valid_until: str | None = None
+    valid_instant: datetime | None = None
+
+
+@dataclass(frozen=True)
+class EpisodePlan(DeepFrozen):
+    """The pass's episode (§6.2). ``extend``: the episode of this Conversation
+    to rewrite, at ``expected_revision``; Data turns it into a new one when it
+    is gone, the user's, rewritten since, or ended more than ``extend_within``
+    before ``started_at``."""
+
+    text: str
+    started_at: datetime
+    ended_at: datetime
+    user_sequences: tuple[int, ...]
+    himari_sequences: tuple[int, ...]
+    extend: int | None = None
+    expected_revision: int | None = None
+    extend_within: timedelta = timedelta(hours=3)
+
+
+@dataclass(frozen=True)
+class Episode(DeepFrozen):
+    episode_id: int  # e<id>, never reused for another episode of the principal
+    conversation_id: ConversationId
+    from_sequence: int  # exclusive
+    through_sequence: int
+    started_at: datetime
+    ended_at: datetime
+    text: str
+    user_sequences: tuple[int, ...]
+    himari_sequences: tuple[int, ...]
+    origin: MemoryOrigin  # EXTRACTOR, or USER once the user rewrote it
+    source_pass: str | None
+    revision: int
+    created_at: datetime
+    updated_at: datetime
+
+
+@dataclass(frozen=True)
+class MemoryCursor(DeepFrozen):
+    """A Conversation's reading position (§4.2, §4.9). A Conversation with no
+    row reads from 0."""
+
+    through_sequence: int = 0  # read through here; only moves forward
+    failures: int = 0  # failed or interrupted passes from this cursor
+    retry_after: datetime | None = None
+    baseline_sequence: int = 0  # the upgrade's cursor: (backfill_through, baseline] is unread
+    backfill_through: int = 0
+
+
+@dataclass(frozen=True)
+class DueConversation(DeepFrozen):
+    """A Conversation with work for a live pass (§4.1): not trashed, a user
+    message after the cursor, quiet since ``last_event_at``, nothing
+    unfinished, past its retry time."""
+
+    scope: TrustedScope
+    cursor: MemoryCursor
+    last_event_at: datetime
+
+
+@dataclass(frozen=True)
+class PassStart(DeepFrozen):
+    kind: PassKind
+    from_sequence: int  # exclusive: the cursor it reads from
+    through_sequence: int  # the end of the part it reads
+    snapshot_sequence: int  # the Conversation's last event when the input was made (§4.4)
+    provider_key: str
+    model_id: str
+    omitted_chars: int = 0  # the middle of long messages left out (§4.2)
+    retry_of: str | None = None  # RETRY: the skipped pass
+
+
+@dataclass(frozen=True)
+class MemoryPass(DeepFrozen):
+    pass_id: str
+    conversation_id: ConversationId
+    kind: PassKind
+    from_sequence: int
+    through_sequence: int
+    snapshot_sequence: int
+    status: PassStatus
+    provider_key: str
+    model_id: str
+    calls: int
+    reserved_tokens: int  # of the call in flight (§4.8)
+    input_tokens: int  # as the Provider reported them
+    output_tokens: int
+    unmetered_tokens: int  # reservations of calls that reported no usage, counted as used
+    over_estimate: int  # calls whose reported use passed their reservation
+    omitted_chars: int
+    error: str | None
+    retry_of: str | None
+    created_at: datetime
+    finished_at: datetime | None
+
+    @property
+    def charged_tokens(self) -> int:
+        """What it counts against the daily budget."""
+        return self.reserved_tokens + self.input_tokens + self.output_tokens + self.unmetered_tokens
+
+
+@dataclass(frozen=True)
+class PassApplied(DeepFrozen):
+    """``apply_pass``'s answer: APPLIED with each item's outcome (``applied``,
+    ``proposed``, ``sensitive_proposed`` or why it was dropped) and the
+    episode written, if any; or DISCARDED with why (nothing was applied)."""
+
+    status: PassStatus
+    outcomes: tuple[str, ...] = ()
+    episode_id: int | None = None
+    reason: str | None = None
+
+
+@dataclass(frozen=True)
+class MemoryCleanup(DeepFrozen):
+    stale_loops: int = 0
+    expired_facts: int = 0
+    retired: int = 0
+    proposals: int = 0
+
+
+class MemoryPassLog(Protocol):
+    """V3-P85: the record and the application of memory passes. A pass reads a
+    Conversation's settled part without its lock; ``apply_pass`` checks in
+    its own transaction that what it read still stands. The principal comes
+    from the scope the memory module was given, never from model output."""
+
+    async def read_memory_cursor(self, scope: TrustedScope) -> MemoryCursor: ...
+
+    async def memory_due(self, *, quiet_before: datetime, now: datetime, after: ConversationId | None = None,
+                         limit: int = 50) -> Sequence[DueConversation]:
+        """Conversations of every principal with work for a live pass, by
+        Conversation id after ``after``: a page of at most ``limit``."""
+        ...
+
+    async def unfinished_work(self, scope: TrustedScope) -> bool:
+        """A Run PREPARED, DISPATCH_CLAIMED or RECEIVED, or a Tool execution
+        EXECUTION_CLAIMED (§4.1). Waiting for the user is not unfinished."""
+        ...
+
+    async def last_episode(self, scope: TrustedScope) -> Episode | None:
+        """The newest episode of this Conversation."""
+        ...
+
+    async def list_episodes(self, principal: PrincipalId) -> tuple[Episode, ...]:
+        """Newest first: by ``ended_at``, then id."""
+        ...
+
+    async def pass_usage(self, principal: PrincipalId, since: datetime) -> int:
+        """The tokens charged by the principal's passes begun since then (§4.8)."""
+        ...
+
+    async def begin_pass(self, scope: TrustedScope, start: PassStart) -> str:
+        """A RUNNING pass; its id. NOT_FOUND for a Conversation that is gone
+        or trashed; INVALID_STATE_TRANSITION while another pass of the
+        principal runs (one at a time per principal, §4.8)."""
+        ...
+
+    async def prepare_pass_call(self, pass_id: str, body: bytes, content_type: str, reserved_tokens: int) -> int:
+        """Store one call's request before it is sent (no store, no send) and
+        reserve its tokens; the call's number. RAW_PERSISTENCE_UNAVAILABLE
+        when it cannot be stored. INVALID_STATE_TRANSITION unless RUNNING."""
+        ...
+
+    async def mark_pass_call_dispatched(self, pass_id: str, call: int) -> None: ...
+
+    async def record_pass_call(self, pass_id: str, call: int, outcome: RawRunOutcome) -> None:
+        """The call's response, if any. Its reservation becomes the reported
+        usage, or is counted as used when none is reported."""
+        ...
+
+    async def read_pass_response(self, pass_id: str, call: int) -> bytes | None: ...
+
+    async def fail_pass(self, pass_id: str, error: str, retry_after: datetime) -> PassStatus:
+        """A RUNNING pass failed: FAILED, counted on its cursor (live) — or
+        SKIPPED once SKIP_AFTER_FAILURES are counted from that cursor, which
+        then moves past the part (§4.5). A failed retry or backfill is only
+        FAILED: the skipped pass stays SKIPPED, ``backfill_through`` stays."""
+        ...
+
+    async def interrupt_running_passes(self, retry_after: datetime) -> int:
+        """At startup: every RUNNING pass becomes INTERRUPTED and counts as a
+        failure, as ``fail_pass``; how many."""
+        ...
+
+    async def apply_pass(self, pass_id: str, items: Sequence[PassItem], episode: EpisodePlan | None, *,
+                         now: datetime) -> PassApplied:
+        """One transaction (§4.4): first the Conversation exists and is not
+        trashed, the pass RUNNING, its part overlaps no APPLIED pass, and by
+        kind — LIVE: the cursor is ``from_sequence``, the last event is
+        ``snapshot_sequence`` and nothing is unfinished; BACKFILL:
+        ``backfill_through`` is ``from_sequence`` within the baseline;
+        RETRY: the skipped pass is still SKIPPED. Otherwise DISCARDED and
+        nothing changes (also when the pass itself is gone: its Conversation
+        was deleted for good). Then each item on its own (the note's revision, not
+        retired, not the user's or kept by the user, the limits), the
+        episode, the cursor (LIVE) or ``backfill_through`` (BACKFILL), and
+        the pass APPLIED."""
+        ...
+
+    async def read_pass(self, pass_id: str) -> MemoryPass: ...
+
+    async def list_passes(self, scope: TrustedScope) -> tuple[MemoryPass, ...]:
+        """This Conversation's passes, oldest first."""
+        ...
+
+    async def read_pass_outcomes(self, pass_id: str) -> tuple[str, ...]:
+        """Each item's outcome, by item."""
+        ...
+
+    async def clean_memories(self, now: datetime) -> MemoryCleanup:
+        """The hourly cleanup (§5.1, §5.2, §5.4, §4.9): loops due more than 14
+        days ago or without a date and untouched for 90 days, facts 30 days
+        past their end, notes retired 30 days ago, proposals left 30 days."""
         ...
 
 

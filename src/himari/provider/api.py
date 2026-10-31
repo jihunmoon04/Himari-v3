@@ -65,6 +65,9 @@ class ProviderCapabilities(DeepFrozen):
     # Points on a screen image are where the model says (V3-P84 §5): only for
     # models whose [[move:X,Y]] fell on the asked target in real requests.
     screen_points: bool = False
+    # Memory passes may use it (V3-P85 §4.8, Q6): only for models whose answers
+    # passed the live memory check (well-formed, grounded, sensitive words marked).
+    memory_passes: bool = False
 
 
 @runtime_checkable

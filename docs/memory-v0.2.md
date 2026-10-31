@@ -770,3 +770,40 @@ rev. 3의 P1 둘은 해결, 민감정보 거부 표현은 개선으로 판정했
 | --- | --- | --- |
 | P2-1 | `Keep`으로 고른 제안이 `extractor`로 저장되어 이후 자동 기억이 다시 고치거나 지울 수 있음 | `user_approved_at`을 적고, 자동 기억은 사용자가 쓴 기억과 같이 건드리지 못함. 쓴 이와 출처는 그대로(§4.4, §10.2, §11) |
 | P2-2 | `BYTES_PER_TOKEN = 3` 추정이 엄격한 상한을 보장하지 않음 | 추정에 기반한 예산으로 고쳐 씀. 예약에 ×1.5 여유분, 넘으면 기록과 상태 표시(§4.8) |
+
+## 20. 구현 노트 — 1단계: Data와 작업자 (2026-10-31)
+
+§18의 1단계를 구현했다. 자동 기억은 `ProviderCapabilities.memory_passes`가 켜진 모델이 있어야 돈다. 아직 그런 모델이 없으므로(2단계에서 실제 확인), 배포해도 운영 서버의 동작은 바뀌지 않는다. 업그레이드(v14 → v15)만 일어난다.
+
+**만든 것:**
+- **Data(v15, 두 백엔드):**
+  - `memories`의 새 칸, `episodes`, `memory_cursors`, `memory_passes`, `memory_pass_calls`, `memory_pass_items`.
+  - 업그레이드는 기존 대화마다 커서를 마지막 이벤트(= `baseline_sequence`)에 둔다.
+  - 공개 Port `MemoryPassLog`(`data/api.py`). 판정 규칙은 두 백엔드가 `data/rules.py`(`decide_item`, `extends`)를 함께 쓴다.
+  - 영구 삭제가 일화·커서·작업·호출·항목과 물러난 기억까지 지운다. 매시간 정리 `clean_memories`.
+- **`himari/memory/`:**
+  - `passes.py`(순수 함수): 구간 자르기, 입력, 고정 지시문 `MEMORY_PASS_INSTRUCTIONS`, 답 검사(jsonschema), 근거·민감·거부·날짜·지난 구간 규칙, 일화 계획.
+  - `worker.py`: 잠잠함 타이머, 영속 상태로 할 일 찾기(50개씩), 주체당 한 줄·서버 전체 둘, 보내기 전 요청 저장과 예약, 잘못된 답은 한 번 더, 실패·중단 처리.
+  - 경계 검사에 `memory` 층(6, `common`·`data`·`prompt`·`provider`만)을 더했다.
+- **Provider:** `ProviderCapabilities.memory_passes`(모두 False), `RequestOptions.max_output_tokens` → OpenRouter `max_tokens`.
+- **bootstrap:**
+  - `HIMARI_MEMORY_AUTO`·`HIMARI_MEMORY_MODEL`·`HIMARI_MEMORY_IDLE_MINUTES`·`HIMARI_MEMORY_DAILY_TOKENS`를 읽는다.
+  - Runner의 작업 신호를 여럿에게 나누는 `_JobListeners`, 실행 상태 `_RunnerActivity`를 둔다.
+  - 매시간 정리에 기억 정리와 할 일 찾기를 더했다.
+  - 시작 때 `HIMARI web: automatic memory …`를 알린다.
+
+**설계와 다르게 한 것(뒤 단계가 알아야 함):**
+- **커서 행:** 대화를 만들 때 만들지 않는다. 행이 없으면 0부터 읽는 것으로 본다(`MemoryCursor()`). 업그레이드 때 기존 대화의 행만 만든다. 첫 적용이나 실패가 행을 만든다.
+- **`memory_passes`:** 사용량 칸을 `reserved_tokens`(호출 중 예약)·`input_tokens`·`output_tokens`(보고된 값)·`unmetered_tokens`(사용량이 오지 않은 호출의 예약)·`over_estimate`(예약을 넘은 호출 수)로 나눴다. 하루 사용량은 이 넷의 합이다.
+- **`memory_pass_items.planned`:** 제안과 적용한 항목의 정리된 값을 JSON으로 둔다. 4단계의 `Keep`이 이 값으로 더한다.
+- **`deferred`:** 예산이 모자라면 작업 행을 만들지 않고 돌아간다. 다음 할 일 찾기가 다시 본다. 상태 줄의 "오늘 사용량"은 작업 행으로 센다.
+- **첨부 표시:** 이름 없이 `[attachment]`·`[screen]`·`[file reference]`로만 넣는다. 이름을 찾으려면 파일 기록을 읽어야 해서 넣지 않았다.
+- **시간대:** 1단계는 서버 시간대(`HIMARI_TIME_ZONE`)를 쓴다. 보낸 기기의 시간대는 3단계(Prompt)에서 `zone_for`로 잇는다.
+- **`apply_pass`의 "자동 기억 켜짐" 확인:** Data는 프로세스 설정을 모른다. 설정이 꺼진 프로세스에는 작업자가 없어서 `apply_pass`를 부르는 쪽이 없다. 같은 보장을 이 방식으로 지킨다.
+- **Tool:** 모델의 `memory_save`·`memory_search`는 3단계까지 네 분류만 받는다. `loop`과 `due`는 3단계에서 연다.
+- **아직 없는 것(4단계):** `unretire_memory`, 제안 고르기, 일화 고치기·지우기, 항목 Undo, 상태 API, CLI, `backfill`·`retry` 명령. Data는 `retry`·`backfill` 작업의 적용 규칙을 이미 지키고, 테스트가 `retry`를 확인한다.
+
+**검증:**
+- `tests/data/test_memory_passes.py`(두 백엔드, 13개 × 2): 적용, 스냅샷 뒤 새 이벤트·휴지통·끝나지 않은 Run·영구 삭제로 버림, 사용자 기억·리비전·한도, 물러남, 일화 이어 쓰기 조건, 실패 셋째 건너뜀과 재시작 중단, `retry`의 제안과 `past_range`, 주체당 한 줄, `memory_due`의 조건과 페이지, 예약과 사용량, 정리.
+- `tests/memory/test_passes.py`(12개), `tests/memory/test_worker.py`(12개), `tests/bootstrap/test_memory_passes_app.py`(4개).
+- 업그레이드 테스트를 v14에서도 돌리고 커서를 확인한다(`tests/data/test_sqlite.py`).

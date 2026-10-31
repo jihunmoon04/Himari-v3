@@ -14,7 +14,8 @@ Rules:
    nothing else, Data included (V3-P57, PR #25 review B1); the Sandbox uses
    ``common`` only (V3-P59 §3); the image copies use ``common``,
    ``sandbox`` and ``data`` (V3-P67); presence uses ``common`` and ``data``
-   (V3-P83).
+   (V3-P83); memory passes use ``common``, ``data``, ``prompt`` and
+   ``provider`` (V3-P85), never Control.
 7. ``himari.runner`` is the composition root of its own process (V3-P74):
    it may import the sandbox's modules, not only its api, and nothing but
    ``common`` and ``sandbox``. Others reach it through ``runner.api``.
@@ -44,6 +45,7 @@ LAYERS = {
     "prompt": 4,
     "provider": 5,
     "control": 6,
+    "memory": 6,  # memory passes (V3-P85): Data, Prompt's request types and the Provider, beside Control
     "bootstrap": 7,
     "interfaces": 8,
 }
@@ -55,6 +57,7 @@ ONLY_FROM = {
     "documents": frozenset({"common", "sandbox", "data"}),
     "runner": frozenset({"common", "sandbox"}),
     "presence": frozenset({"common", "data"}),
+    "memory": frozenset({"common", "data", "prompt", "provider"}),
 }
 # Packages that may import another package's private modules (rule 7).
 PRIVATE_FROM = {"runner": frozenset({"sandbox"})}

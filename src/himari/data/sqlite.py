@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import dataclasses
 import errno
+import json
 import fcntl
 import logging
 import os
@@ -126,7 +127,26 @@ from himari.data.api import (
     MemoryCategory,
     MemoryChange,
     MemoryChangeKind,
+    MemoryCleanup,
+    MemoryCursor,
     MemoryOrigin,
+    MemoryPass,
+    DueConversation,
+    Episode,
+    EpisodePlan,
+    MAX_EPISODES,
+    PassAction,
+    PassApplied,
+    PassItem,
+    PassKind,
+    PassStart,
+    PassStatus,
+    PROPOSAL_KEEP,
+    RETIRED_KEEP,
+    EXPIRED_KEEP,
+    SKIP_AFTER_FAILURES,
+    STALE_DUE,
+    STALE_UNDATED,
     PresentedFile,
     StoredBlob,
     EventPayload,
@@ -161,7 +181,7 @@ from himari.data.api import (
 
 # v3: compaction_runs; v4: external_settings; v5: ui_resources; v6: model_settings;
 # v7: the trash (all upgraded in place); v1 is refused
-SCHEMA_VERSION = 14
+SCHEMA_VERSION = 15
 APPLICATION_ID = 0x48494D41  # "HIMA": written into the database header (PRAGMA application_id)
 
 _TERMINAL_COMPLETIONS = frozenset(
@@ -452,9 +472,108 @@ CREATE TABLE device_ids (
     last_id INTEGER NOT NULL
 ) STRICT;
 """
+# v15: memory passes (V3-P85 §11): a note's dates, source pass, retirement and the
+# user's keep; episodes; each Conversation's reading position; the passes, their
+# calls' raw records and their items. An upgrade puts every Conversation's cursor
+# at its last Event (_fill_memory_cursors), so nothing old is read at once.
+_V15_ADDITIONS = """
+ALTER TABLE memories ADD COLUMN due_at TEXT;
+ALTER TABLE memories ADD COLUMN due_instant TEXT;
+ALTER TABLE memories ADD COLUMN valid_until TEXT;
+ALTER TABLE memories ADD COLUMN valid_instant TEXT;
+ALTER TABLE memories ADD COLUMN source_pass TEXT;
+ALTER TABLE memories ADD COLUMN source_item INTEGER;
+ALTER TABLE memories ADD COLUMN retired_at TEXT;
+ALTER TABLE memories ADD COLUMN retired_pass TEXT;
+ALTER TABLE memories ADD COLUMN retired_item INTEGER;
+ALTER TABLE memories ADD COLUMN user_approved_at TEXT;
+ALTER TABLE memory_ids ADD COLUMN last_episode_id INTEGER NOT NULL DEFAULT 0;
+CREATE TABLE episodes (
+    owner TEXT NOT NULL,
+    episode_id INTEGER NOT NULL,
+    conversation_id TEXT NOT NULL REFERENCES conversations,
+    from_sequence INTEGER NOT NULL,
+    through_sequence INTEGER NOT NULL,
+    started_at TEXT NOT NULL,
+    ended_at TEXT NOT NULL,
+    text TEXT NOT NULL,
+    folded TEXT NOT NULL,
+    user_sequences TEXT NOT NULL,
+    himari_sequences TEXT NOT NULL,
+    origin TEXT NOT NULL,
+    source_pass TEXT,
+    revision INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (owner, episode_id)
+) STRICT;
+CREATE INDEX episodes_by_time ON episodes (owner, ended_at, episode_id);
+CREATE INDEX episodes_by_conversation ON episodes (conversation_id);
+CREATE TABLE memory_cursors (
+    conversation_id TEXT PRIMARY KEY REFERENCES conversations,
+    through_sequence INTEGER NOT NULL,
+    failures INTEGER NOT NULL,
+    retry_after TEXT,
+    baseline_sequence INTEGER NOT NULL,
+    backfill_through INTEGER NOT NULL
+) STRICT;
+CREATE TABLE memory_passes (
+    seq INTEGER PRIMARY KEY,
+    pass_id TEXT NOT NULL UNIQUE,
+    owner TEXT NOT NULL,
+    conversation_id TEXT NOT NULL REFERENCES conversations,
+    kind TEXT NOT NULL,
+    from_sequence INTEGER NOT NULL,
+    through_sequence INTEGER NOT NULL,
+    snapshot_sequence INTEGER NOT NULL,
+    retry_of TEXT,
+    status TEXT NOT NULL,
+    provider_key TEXT NOT NULL,
+    model_id TEXT NOT NULL,
+    calls INTEGER NOT NULL,
+    reserved_tokens INTEGER NOT NULL,
+    input_tokens INTEGER NOT NULL,
+    output_tokens INTEGER NOT NULL,
+    unmetered_tokens INTEGER NOT NULL,
+    over_estimate INTEGER NOT NULL,
+    omitted_chars INTEGER NOT NULL,
+    error TEXT,
+    created_at TEXT NOT NULL,
+    finished_at TEXT
+) STRICT;
+CREATE INDEX memory_passes_by_conversation ON memory_passes (conversation_id, from_sequence);
+CREATE INDEX memory_passes_by_owner ON memory_passes (owner, created_at);
+CREATE TABLE memory_pass_calls (
+    pass_id TEXT NOT NULL REFERENCES memory_passes (pass_id),
+    call INTEGER NOT NULL,
+    status TEXT NOT NULL,
+    reserved_tokens INTEGER NOT NULL,
+    raw_request_body BLOB NOT NULL,
+    raw_request_content_type TEXT NOT NULL,
+    raw_response_body BLOB,
+    raw_response_content_type TEXT NOT NULL DEFAULT '',
+    usage TEXT,
+    error_code TEXT,
+    PRIMARY KEY (pass_id, call)
+) STRICT;
+CREATE TABLE memory_pass_items (
+    pass_id TEXT NOT NULL REFERENCES memory_passes (pass_id),
+    item INTEGER NOT NULL,
+    proposal TEXT NOT NULL,
+    planned TEXT,
+    outcome TEXT NOT NULL,
+    target TEXT,
+    previous TEXT,
+    written_revision INTEGER,
+    decided_at TEXT,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (pass_id, item)
+) STRICT;
+CREATE INDEX memory_pass_items_by_outcome ON memory_pass_items (outcome, created_at);
+"""
 _ADDITIONS = (_V3_ADDITIONS, _V4_ADDITIONS, _V5_ADDITIONS, _V6_ADDITIONS, _V7_ADDITIONS, _V8_ADDITIONS,
               _V9_ADDITIONS, _V10_ADDITIONS, _V11_ADDITIONS, _V12_ADDITIONS,
-              _V13_ADDITIONS, _V14_ADDITIONS)  # what each version from v3 added
+              _V13_ADDITIONS, _V14_ADDITIONS, _V15_ADDITIONS)  # what each version from v3 added
 _SCHEMA = _SCHEMA_V2 + "".join(_ADDITIONS)
 # An older version → (its exact schema, what brings it to SCHEMA_VERSION).
 _UPGRADES = {
@@ -614,6 +733,8 @@ class SqliteStore:
                 tx.executescript_parts(upgrade)
                 if version < 12:
                     _fill_event_text(tx)
+                if version < 15:
+                    _fill_memory_cursors(tx)
                 tx.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
         if empty:
             with self.transaction() as tx:
@@ -945,12 +1066,43 @@ def _instructions(row: sqlite3.Row | None) -> Instructions:
     return Instructions(row["text"], row["revision"], datetime.fromisoformat(row["updated_at"]))
 
 
+def _moment(value: str | None) -> datetime | None:
+    return None if value is None else datetime.fromisoformat(value)
+
+
 def _memory(row: sqlite3.Row) -> Memory:
     call = None if row["source_call"] is None else CallRef(RunId(row["source_run"]), CallId(row["source_call"]))
     source = None if row["source_conversation"] is None else ConversationId(row["source_conversation"])
     return Memory(row["memory_id"], MemoryCategory(row["category"]), row["text"], MemoryOrigin(row["origin"]),
                   source, call, row["revision"], datetime.fromisoformat(row["created_at"]),
-                  datetime.fromisoformat(row["updated_at"]))
+                  datetime.fromisoformat(row["updated_at"]), due_at=row["due_at"],
+                  due_instant=_moment(row["due_instant"]), valid_until=row["valid_until"],
+                  valid_instant=_moment(row["valid_instant"]), source_pass=row["source_pass"],
+                  source_item=row["source_item"], user_approved_at=_moment(row["user_approved_at"]))
+
+
+def _episode(row: sqlite3.Row) -> Episode:
+    return Episode(row["episode_id"], ConversationId(row["conversation_id"]), row["from_sequence"],
+                   row["through_sequence"], datetime.fromisoformat(row["started_at"]),
+                   datetime.fromisoformat(row["ended_at"]), row["text"], tuple(json.loads(row["user_sequences"])),
+                   tuple(json.loads(row["himari_sequences"])), MemoryOrigin(row["origin"]), row["source_pass"],
+                   row["revision"], datetime.fromisoformat(row["created_at"]), datetime.fromisoformat(row["updated_at"]))
+
+
+def _cursor(row: sqlite3.Row | None) -> MemoryCursor:
+    if row is None:
+        return MemoryCursor()
+    return MemoryCursor(row["through_sequence"], row["failures"], _moment(row["retry_after"]),
+                        row["baseline_sequence"], row["backfill_through"])
+
+
+def _pass(row: sqlite3.Row) -> MemoryPass:
+    return MemoryPass(row["pass_id"], ConversationId(row["conversation_id"]), PassKind(row["kind"]),
+                      row["from_sequence"], row["through_sequence"], row["snapshot_sequence"],
+                      PassStatus(row["status"]), row["provider_key"], row["model_id"], row["calls"],
+                      row["reserved_tokens"], row["input_tokens"], row["output_tokens"], row["unmetered_tokens"],
+                      row["over_estimate"], row["omitted_chars"], row["error"], row["retry_of"],
+                      datetime.fromisoformat(row["created_at"]), _moment(row["finished_at"]))
 
 
 def _device(row: sqlite3.Row) -> Device:
@@ -983,6 +1135,14 @@ def _fill_event_text(tx: _Tx) -> None:
         tx.executemany("INSERT INTO event_text (conversation_id, sequence, folded) VALUES (?, ?, ?)",
                        [(cid, seq, rules.fold(text)) for cid, seq, text in texts if text is not None])
         after = (rows[-1]["conversation_id"], rows[-1]["sequence"])
+
+
+def _fill_memory_cursors(tx: _Tx) -> None:
+    """V3-P85 §11: every Conversation a v14 (or older) database holds reads
+    from its last Event, which is also its baseline for a backfill."""
+    tx.execute("INSERT INTO memory_cursors (conversation_id, through_sequence, failures, retry_after,"
+               " baseline_sequence, backfill_through) SELECT conversation_id, MAX(sequence), 0, NULL, MAX(sequence), 0"
+               " FROM events GROUP BY conversation_id")
 
 
 def _timestamp(moment: datetime) -> str:
@@ -2114,6 +2274,12 @@ class SqliteData:
         "DELETE FROM external_settings WHERE conversation_id=?",
         "DELETE FROM model_settings WHERE conversation_id=?",
         "DELETE FROM memories WHERE source_conversation=?",  # D5: the notes its calls wrote (V3-P71)
+        # V3-P85 §11: its episodes, reading position and passes with their records
+        "DELETE FROM episodes WHERE conversation_id=?",
+        "DELETE FROM memory_cursors WHERE conversation_id=?",
+        "DELETE FROM memory_pass_items WHERE pass_id IN (SELECT pass_id FROM memory_passes WHERE conversation_id=?)",
+        "DELETE FROM memory_pass_calls WHERE pass_id IN (SELECT pass_id FROM memory_passes WHERE conversation_id=?)",
+        "DELETE FROM memory_passes WHERE conversation_id=?",
         "DELETE FROM conversations WHERE conversation_id=?",
     )
 
@@ -2330,18 +2496,21 @@ class SqliteData:
     # --- MemoryStore (V3-P71) ---------------------------------------------------------
 
     _MEMORY_COLUMNS = ("memory_id, category, text, origin, source_conversation, source_run, source_call, revision,"
-                       " created_at, updated_at")
+                       " created_at, updated_at, due_at, due_instant, valid_until, valid_instant, source_pass,"
+                       " source_item, user_approved_at")
 
     def _read_memory(self, tx: _Tx, principal: PrincipalId, memory_id: object) -> Memory:
+        """A live note: a retired one (V3-P85 §5.4) is not found."""
         row = None if not isinstance(memory_id, int) else tx.one(
-            f"SELECT {self._MEMORY_COLUMNS} FROM memories WHERE owner=? AND memory_id=?", principal, memory_id)
+            f"SELECT {self._MEMORY_COLUMNS} FROM memories WHERE owner=? AND memory_id=? AND retired_at IS NULL",
+            principal, memory_id)
         if row is None:
             raise DataError(DataErrorCode.NOT_FOUND, f"no note m{memory_id}")
         return _memory(row)
 
     @staticmethod
     def _check_room(tx: _Tx, principal: PrincipalId) -> None:
-        row = tx.one("SELECT COUNT(*) AS n FROM memories WHERE owner=?", principal)
+        row = tx.one("SELECT COUNT(*) AS n FROM memories WHERE owner=? AND retired_at IS NULL", principal)
         assert row is not None
         if row["n"] >= MAX_MEMORIES:
             raise DataError(DataErrorCode.LIMIT_EXCEEDED, f"{MAX_MEMORIES} notes are kept at most")
@@ -2360,23 +2529,33 @@ class SqliteData:
     @staticmethod
     def _write_memory(tx: _Tx, principal: PrincipalId, note: Memory) -> None:
         call = note.source_call
+
+        def moment(value: datetime | None) -> str | None:
+            return None if value is None else _timestamp(value)
+
         tx.execute("INSERT INTO memories (owner, memory_id, category, text, origin, source_conversation, source_run,"
-                   " source_call, revision, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                   " source_call, revision, created_at, updated_at, due_at, due_instant, valid_until, valid_instant,"
+                   " source_pass, source_item, user_approved_at)"
+                   " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
                    " ON CONFLICT (owner, memory_id) DO UPDATE SET category=excluded.category, text=excluded.text,"
                    " origin=excluded.origin, source_conversation=excluded.source_conversation,"
                    " source_run=excluded.source_run, source_call=excluded.source_call, revision=excluded.revision,"
-                   " updated_at=excluded.updated_at",
+                   " updated_at=excluded.updated_at, due_at=excluded.due_at, due_instant=excluded.due_instant,"
+                   " valid_until=excluded.valid_until, valid_instant=excluded.valid_instant,"
+                   " source_pass=excluded.source_pass, source_item=excluded.source_item,"
+                   " user_approved_at=excluded.user_approved_at",
                    principal, note.memory_id, note.category.value, note.text, note.origin.value,
                    note.source_conversation, None if call is None else call.run_id,
                    None if call is None else call.call_id, note.revision, _timestamp(note.created_at),
-                   _timestamp(note.updated_at))
+                   _timestamp(note.updated_at), note.due_at, moment(note.due_instant), note.valid_until,
+                   moment(note.valid_instant), note.source_pass, note.source_item, moment(note.user_approved_at))
 
     def _apply_memory(self, tx: _Tx, scope: TrustedScope, call: CallRef, change: MemoryChange) -> None:
         """A Tool's change, in the commit's transaction: its errors roll the commit back."""
         change = rules.check_memory_change(change)
         principal, now = scope.principal_id, datetime.now(UTC)
         if change.kind is MemoryChangeKind.SAVE and change.expected_revision is None:
-            exists = tx.one("SELECT 1 FROM memories WHERE owner=? AND memory_id=?", principal, change.memory_id)
+            exists = tx.one("SELECT 1 FROM memories WHERE owner=? AND memory_id=?", principal, change.memory_id)  # retired too
             if change.memory_id > self._last_memory_id(tx, principal) or exists is not None:
                 raise DataError(DataErrorCode.INVALID_ARGUMENT, f"m{change.memory_id} was not given out for a new note")
             self._check_room(tx, principal)
@@ -2393,11 +2572,13 @@ class SqliteData:
         assert change.category is not None and change.text is not None
         self._write_memory(tx, principal, dataclasses.replace(
             note, category=change.category, text=change.text, origin=MemoryOrigin.MODEL,
-            source_conversation=scope.conversation_id, source_call=call, revision=note.revision + 1, updated_at=now))
+            source_conversation=scope.conversation_id, source_call=call, revision=note.revision + 1, updated_at=now,
+            source_pass=None, source_item=None, user_approved_at=None))
 
     async def list_memories(self, principal: PrincipalId) -> tuple[Memory, ...]:
         with self._tx() as tx:
-            rows = tx.all(f"SELECT {self._MEMORY_COLUMNS} FROM memories WHERE owner=?", principal)
+            rows = tx.all(f"SELECT {self._MEMORY_COLUMNS} FROM memories WHERE owner=? AND retired_at IS NULL",
+                          principal)
             return rules.order_memories(_memory(r) for r in rows)
 
     async def read_memory(self, principal: PrincipalId, memory_id: int) -> Memory:
@@ -2547,10 +2728,395 @@ class SqliteData:
     async def count_source_memories(self, scope: TrustedScope) -> int:
         with self._tx() as tx:
             tx.owned(scope)
-            row = tx.one("SELECT COUNT(*) AS n FROM memories WHERE owner=? AND source_conversation=?",
-                         scope.principal_id, scope.conversation_id)
+            row = tx.one("SELECT COUNT(*) AS n FROM memories WHERE owner=? AND source_conversation=?"
+                         " AND retired_at IS NULL", scope.principal_id, scope.conversation_id)
             assert row is not None
             return int(row["n"])
+
+    # --- MemoryPassLog (V3-P85) --------------------------------------------------------
+
+    _UNFINISHED = (
+        "(EXISTS (SELECT 1 FROM runs r WHERE r.conversation_id={c} AND r.status IN"
+        " ('prepared', 'dispatch_claimed', 'received'))"
+        " OR EXISTS (SELECT 1 FROM tool_executions t WHERE t.conversation_id={c} AND t.status='execution_claimed'))"
+    )
+    _EPISODE_COLUMNS = ("episode_id, conversation_id, from_sequence, through_sequence, started_at, ended_at, text,"
+                        " user_sequences, himari_sequences, origin, source_pass, revision, created_at, updated_at")
+
+    async def read_memory_cursor(self, scope: TrustedScope) -> MemoryCursor:
+        with self._tx() as tx:
+            tx.owned(scope)
+            return _cursor(tx.one("SELECT * FROM memory_cursors WHERE conversation_id=?", scope.conversation_id))
+
+    async def memory_due(self, *, quiet_before: datetime, now: datetime, after: ConversationId | None = None,
+                         limit: int = 50) -> Sequence[DueConversation]:
+        with self._tx() as tx:
+            rows = tx.all(
+                "SELECT c.owner, c.conversation_id, m.through_sequence, m.failures, m.retry_after,"
+                " m.baseline_sequence, m.backfill_through,"
+                " (SELECT MAX(e.created_at) FROM events e WHERE e.conversation_id=c.conversation_id) AS last_at"
+                " FROM conversations c LEFT JOIN memory_cursors m ON m.conversation_id=c.conversation_id"
+                " WHERE c.trashed_at IS NULL AND c.conversation_id > ?"
+                " AND EXISTS (SELECT 1 FROM events e WHERE e.conversation_id=c.conversation_id"
+                " AND e.kind='user_message' AND e.sequence > COALESCE(m.through_sequence, 0))"
+                " AND (m.retry_after IS NULL OR m.retry_after <= ?)"
+                f" AND NOT {self._UNFINISHED.format(c='c.conversation_id')}"
+                " AND (SELECT MAX(e.created_at) FROM events e WHERE e.conversation_id=c.conversation_id) < ?"
+                " ORDER BY c.conversation_id LIMIT ?",
+                after or "", _timestamp(now), _timestamp(quiet_before), limit)
+            return tuple(DueConversation(TrustedScope(PrincipalId(r["owner"]), ConversationId(r["conversation_id"])),
+                                         _cursor(r) if r["through_sequence"] is not None else MemoryCursor(),
+                                         datetime.fromisoformat(r["last_at"])) for r in rows)
+
+    async def unfinished_work(self, scope: TrustedScope) -> bool:
+        with self._tx() as tx:
+            tx.owned(scope)
+            row = tx.one(f"SELECT {self._UNFINISHED.format(c='?')} AS busy", scope.conversation_id,
+                         scope.conversation_id)
+            assert row is not None
+            return bool(row["busy"])
+
+    async def last_episode(self, scope: TrustedScope) -> Episode | None:
+        with self._tx() as tx:
+            tx.owned(scope)
+            row = tx.one(f"SELECT {self._EPISODE_COLUMNS} FROM episodes WHERE owner=? AND conversation_id=?"
+                         " ORDER BY ended_at DESC, episode_id DESC LIMIT 1", scope.principal_id, scope.conversation_id)
+            return None if row is None else _episode(row)
+
+    async def list_episodes(self, principal: PrincipalId) -> tuple[Episode, ...]:
+        with self._tx() as tx:
+            rows = tx.all(f"SELECT {self._EPISODE_COLUMNS} FROM episodes WHERE owner=?"
+                          " ORDER BY ended_at DESC, episode_id DESC", principal)
+            return tuple(_episode(r) for r in rows)
+
+    async def pass_usage(self, principal: PrincipalId, since: datetime) -> int:
+        with self._tx() as tx:
+            row = tx.one("SELECT COALESCE(SUM(reserved_tokens + input_tokens + output_tokens + unmetered_tokens), 0)"
+                         " AS n FROM memory_passes WHERE owner=? AND created_at >= ?", principal, _timestamp(since))
+            assert row is not None
+            return int(row["n"])
+
+    @staticmethod
+    def _pass_row(tx: _Tx, pass_id: object) -> sqlite3.Row:
+        row = None if not isinstance(pass_id, str) else tx.one("SELECT * FROM memory_passes WHERE pass_id=?", pass_id)
+        if row is None:
+            raise DataError(DataErrorCode.NOT_FOUND, f"no memory pass {pass_id}")
+        return row
+
+    @staticmethod
+    def _running_pass(tx: _Tx, pass_id: str) -> sqlite3.Row:
+        row = SqliteData._pass_row(tx, pass_id)
+        if row["status"] != PassStatus.RUNNING.value:
+            raise DataError(DataErrorCode.INVALID_STATE_TRANSITION, f"{pass_id} is {row['status']}")
+        return row
+
+    async def begin_pass(self, scope: TrustedScope, start: PassStart) -> str:
+        if (not isinstance(start, PassStart) or not isinstance(start.kind, PassKind)
+                or not 0 <= start.from_sequence < start.through_sequence <= start.snapshot_sequence
+                or start.omitted_chars < 0 or (start.kind is PassKind.RETRY) != (start.retry_of is not None)):
+            raise DataError(DataErrorCode.INVALID_ARGUMENT, "not a pass start")
+        with self._tx() as tx:
+            try:
+                tx.authorized(scope)
+            except DataError:
+                raise DataError(DataErrorCode.NOT_FOUND, scope.conversation_id) from None
+            if tx.one("SELECT 1 FROM memory_passes WHERE owner=? AND status='running'", scope.principal_id):
+                raise DataError(DataErrorCode.INVALID_STATE_TRANSITION, "another pass of this principal runs")
+            pass_id = tx.new_id("mpass")
+            tx.execute("INSERT INTO memory_passes (pass_id, owner, conversation_id, kind, from_sequence,"
+                       " through_sequence, snapshot_sequence, retry_of, status, provider_key, model_id, calls,"
+                       " reserved_tokens, input_tokens, output_tokens, unmetered_tokens, over_estimate,"
+                       " omitted_chars, error, created_at, finished_at)"
+                       " VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?, 0, 0, 0, 0, 0, 0, ?, NULL, ?, NULL)",
+                       pass_id, scope.principal_id, scope.conversation_id, start.kind.value, start.from_sequence,
+                       start.through_sequence, start.snapshot_sequence, start.retry_of, start.provider_key,
+                       start.model_id, start.omitted_chars, _timestamp(datetime.now(UTC)))
+            return pass_id
+
+    async def prepare_pass_call(self, pass_id: str, body: bytes, content_type: str, reserved_tokens: int) -> int:
+        if not isinstance(body, bytes) or reserved_tokens < 0:
+            raise DataError(DataErrorCode.INVALID_ARGUMENT, "a call stores its request and a reservation")
+        try:
+            with self._tx() as tx:
+                row = self._running_pass(tx, pass_id)
+                call = int(row["calls"]) + 1
+                tx.execute("INSERT INTO memory_pass_calls (pass_id, call, status, reserved_tokens, raw_request_body,"
+                           " raw_request_content_type) VALUES (?, ?, 'prepared', ?, ?, ?)",
+                           pass_id, call, reserved_tokens, body, content_type)
+                tx.execute("UPDATE memory_passes SET calls=?, reserved_tokens=? WHERE pass_id=?",
+                           call, reserved_tokens, pass_id)
+                return call
+        except sqlite3.Error as error:
+            raise DataError(DataErrorCode.RAW_PERSISTENCE_UNAVAILABLE, type(error).__name__) from error
+
+    async def mark_pass_call_dispatched(self, pass_id: str, call: int) -> None:
+        with self._tx() as tx:
+            self._running_pass(tx, pass_id)
+            if tx.execute("UPDATE memory_pass_calls SET status='dispatched' WHERE pass_id=? AND call=?"
+                          " AND status='prepared'", pass_id, call).rowcount != 1:
+                raise DataError(DataErrorCode.INVALID_STATE_TRANSITION, f"call {call} of {pass_id} is not prepared")
+
+    async def record_pass_call(self, pass_id: str, call: int, outcome: RawRunOutcome) -> None:
+        with self._tx() as tx:
+            self._pass_row(tx, pass_id)
+            row = tx.one("SELECT * FROM memory_pass_calls WHERE pass_id=? AND call=?", pass_id, call)
+            if row is None or row["status"] not in ("prepared", "dispatched"):
+                raise DataError(DataErrorCode.INVALID_STATE_TRANSITION, f"call {call} of {pass_id} is recorded")
+            usage = outcome.usage if isinstance(outcome, RawReceived) else None
+            reported = (None if usage is None or usage.input_tokens is None or usage.output_tokens is None
+                        else (usage.input_tokens, usage.output_tokens))
+            tx.execute("UPDATE memory_pass_calls SET status=?, raw_response_body=?, raw_response_content_type=?,"
+                       " usage=?, error_code=? WHERE pass_id=? AND call=?",
+                       "received" if isinstance(outcome, RawReceived) else "failed", outcome.body,
+                       outcome.content_type, None if reported is None else json.dumps(list(reported)),
+                       None if isinstance(outcome, RawReceived) else outcome.error_code, pass_id, call)
+            reserved = row["reserved_tokens"]
+            if reported is None:
+                tx.execute("UPDATE memory_passes SET reserved_tokens=0, unmetered_tokens=unmetered_tokens+?"
+                           " WHERE pass_id=?", reserved, pass_id)
+            else:
+                tx.execute("UPDATE memory_passes SET reserved_tokens=0, input_tokens=input_tokens+?,"
+                           " output_tokens=output_tokens+?, over_estimate=over_estimate+? WHERE pass_id=?",
+                           reported[0], reported[1], int(sum(reported) > reserved), pass_id)
+
+    async def read_pass_response(self, pass_id: str, call: int) -> bytes | None:
+        with self._tx() as tx:
+            row = tx.one("SELECT raw_response_body FROM memory_pass_calls WHERE pass_id=? AND call=?", pass_id, call)
+            if row is None:
+                raise DataError(DataErrorCode.NOT_FOUND, f"no call {call} of {pass_id}")
+            return None if row["raw_response_body"] is None else bytes(row["raw_response_body"])
+
+    @staticmethod
+    def _count_failure(tx: _Tx, row: sqlite3.Row, status: PassStatus, error: str, retry_after: datetime) -> PassStatus:
+        """§4.5: a RUNNING pass ends as ``status`` (FAILED or INTERRUPTED),
+        or SKIPPED when it is the live part's last allowed failure."""
+        now = _timestamp(datetime.now(UTC))
+        final = status
+        if row["kind"] == PassKind.LIVE.value:
+            cursor = _cursor(tx.one("SELECT * FROM memory_cursors WHERE conversation_id=?", row["conversation_id"]))
+            if cursor.through_sequence == row["from_sequence"]:
+                failures = cursor.failures + 1
+                if failures >= SKIP_AFTER_FAILURES:
+                    final = PassStatus.SKIPPED
+                    cursor = dataclasses.replace(cursor, through_sequence=row["through_sequence"], failures=0,
+                                                 retry_after=None)
+                else:
+                    cursor = dataclasses.replace(cursor, failures=failures, retry_after=retry_after)
+                SqliteData._write_cursor(tx, ConversationId(row["conversation_id"]), cursor)
+        tx.execute("UPDATE memory_passes SET status=?, error=?, reserved_tokens=0, finished_at=? WHERE pass_id=?",
+                   final.value, error[:200], now, row["pass_id"])
+        return final
+
+    @staticmethod
+    def _write_cursor(tx: _Tx, conversation: ConversationId, cursor: MemoryCursor) -> None:
+        tx.execute("INSERT INTO memory_cursors (conversation_id, through_sequence, failures, retry_after,"
+                   " baseline_sequence, backfill_through) VALUES (?, ?, ?, ?, ?, ?)"
+                   " ON CONFLICT (conversation_id) DO UPDATE SET through_sequence=excluded.through_sequence,"
+                   " failures=excluded.failures, retry_after=excluded.retry_after,"
+                   " baseline_sequence=excluded.baseline_sequence, backfill_through=excluded.backfill_through",
+                   conversation, cursor.through_sequence, cursor.failures,
+                   None if cursor.retry_after is None else _timestamp(cursor.retry_after),
+                   cursor.baseline_sequence, cursor.backfill_through)
+
+    async def fail_pass(self, pass_id: str, error: str, retry_after: datetime) -> PassStatus:
+        with self._tx() as tx:
+            return self._count_failure(tx, self._running_pass(tx, pass_id), PassStatus.FAILED, error, retry_after)
+
+    async def interrupt_running_passes(self, retry_after: datetime) -> int:
+        with self._tx() as tx:
+            rows = tx.all("SELECT * FROM memory_passes WHERE status='running' ORDER BY seq")
+            for row in rows:
+                self._count_failure(tx, row, PassStatus.INTERRUPTED, "interrupted", retry_after)
+            return len(rows)
+
+    def _discard(self, tx: _Tx, pass_id: str, reason: str) -> PassApplied:
+        tx.execute("UPDATE memory_passes SET status='discarded', error=?, reserved_tokens=0, finished_at=?"
+                   " WHERE pass_id=?", reason, _timestamp(datetime.now(UTC)), pass_id)
+        return PassApplied(PassStatus.DISCARDED, reason=reason)
+
+    def _pass_checks(self, tx: _Tx, row: sqlite3.Row) -> str | None:
+        """§4.4's checks by kind; why the pass cannot be applied, or None."""
+        conversation = row["conversation_id"]
+        conv = tx.one("SELECT trashed_at FROM conversations WHERE conversation_id=? AND owner=?", conversation,
+                      row["owner"])
+        if conv is None or conv["trashed_at"] is not None:
+            return "conversation_gone"
+        kind = PassKind(row["kind"])
+        applied = tx.all("SELECT from_sequence, through_sequence FROM memory_passes WHERE conversation_id=?"
+                         " AND status='applied'", conversation)
+        if any(rules.overlaps(row["from_sequence"], row["through_sequence"], a["from_sequence"],
+                              a["through_sequence"]) for a in applied):
+            return "already_read"
+        cursor = _cursor(tx.one("SELECT * FROM memory_cursors WHERE conversation_id=?", conversation))
+        if kind is PassKind.LIVE:
+            last = tx.one("SELECT COALESCE(MAX(sequence), 0) AS last FROM events WHERE conversation_id=?",
+                          conversation)
+            assert last is not None
+            if cursor.through_sequence != row["from_sequence"]:
+                return "cursor_moved"
+            if last["last"] != row["snapshot_sequence"]:
+                return "new_events"
+            busy = tx.one(f"SELECT {self._UNFINISHED.format(c='?')} AS busy", conversation, conversation)
+            if busy is not None and busy["busy"]:
+                return "unfinished_work"
+        elif kind is PassKind.BACKFILL:
+            if cursor.backfill_through != row["from_sequence"] or row["through_sequence"] > cursor.baseline_sequence:
+                return "backfill_moved"
+        else:
+            skipped = tx.one("SELECT status, from_sequence, through_sequence FROM memory_passes WHERE pass_id=?"
+                             " AND conversation_id=?", row["retry_of"], conversation)
+            if (skipped is None or skipped["status"] != PassStatus.SKIPPED.value
+                    or (skipped["from_sequence"], skipped["through_sequence"])
+                    != (row["from_sequence"], row["through_sequence"])):
+                return "not_skipped"
+        return None
+
+    async def apply_pass(self, pass_id: str, items: Sequence[PassItem], episode: EpisodePlan | None, *,
+                         now: datetime) -> PassApplied:
+        if (not all(isinstance(i, PassItem) and isinstance(i.action, PassAction) for i in items)
+                or len({i.item for i in items}) != len(items)
+                or (episode is not None and not isinstance(episode, EpisodePlan))):
+            raise DataError(DataErrorCode.INVALID_ARGUMENT, "not a pass plan")
+        with self._tx() as tx:
+            row = tx.one("SELECT * FROM memory_passes WHERE pass_id=?", pass_id)
+            if row is None:  # its Conversation was deleted for good meanwhile, rows and all
+                return PassApplied(PassStatus.DISCARDED, reason="conversation_gone")
+            if row["status"] != PassStatus.RUNNING.value:
+                return PassApplied(PassStatus(row["status"]), reason="not_running")
+            why = self._pass_checks(tx, row)
+            if why is not None:
+                return self._discard(tx, pass_id, why)
+            principal, conversation = PrincipalId(row["owner"]), ConversationId(row["conversation_id"])
+            kind, stamp = PassKind(row["kind"]), _timestamp(now)
+            outcomes: list[str] = []
+            for item in items:
+                note = None
+                if item.memory_id is not None and item.action in (PassAction.UPDATE, PassAction.FORGET):
+                    found = tx.one(f"SELECT {self._MEMORY_COLUMNS} FROM memories WHERE owner=? AND memory_id=?"
+                                   " AND retired_at IS NULL", principal, item.memory_id)
+                    note = None if found is None else _memory(found)
+                live = tx.one("SELECT COUNT(*) AS n FROM memories WHERE owner=? AND retired_at IS NULL", principal)
+                assert live is not None
+                outcome, action, normal = rules.decide_item(item, kind, note, live["n"])
+                target, previous, written = None, None, None
+                if action is PassAction.ADD:
+                    assert normal.category is not None and normal.text is not None
+                    added = Memory(self._next_memory_id(tx, principal), normal.category, normal.text,
+                                   MemoryOrigin.EXTRACTOR, conversation, None, 1, now, now, due_at=normal.due_at,
+                                   due_instant=normal.due_instant, valid_until=normal.valid_until,
+                                   valid_instant=normal.valid_instant, source_pass=pass_id, source_item=item.item)
+                    self._write_memory(tx, principal, added)
+                    target, written = f"m{added.memory_id}", 1
+                elif action is PassAction.UPDATE:
+                    assert note is not None and normal.category is not None and normal.text is not None
+                    previous = rules.memory_json(note)
+                    changed = dataclasses.replace(
+                        note, category=normal.category, text=normal.text, origin=MemoryOrigin.EXTRACTOR,
+                        source_conversation=conversation, source_call=None, source_pass=pass_id,
+                        source_item=item.item, due_at=normal.due_at, due_instant=normal.due_instant,
+                        valid_until=normal.valid_until, valid_instant=normal.valid_instant,
+                        revision=note.revision + 1, updated_at=now)
+                    self._write_memory(tx, principal, changed)
+                    target, written = f"m{note.memory_id}", changed.revision
+                elif action is PassAction.FORGET:
+                    assert note is not None
+                    previous = rules.memory_json(note)
+                    tx.execute("UPDATE memories SET retired_at=?, retired_pass=?, retired_item=?, revision=?,"
+                               " updated_at=? WHERE owner=? AND memory_id=?", stamp, pass_id, item.item,
+                               note.revision + 1, stamp, principal, note.memory_id)
+                    target, written = f"m{note.memory_id}", note.revision + 1
+                elif item.memory_id is not None:
+                    target = f"m{item.memory_id}"
+                planned = (rules.planned_json(normal) if outcome in ("applied", "proposed", "sensitive_proposed")
+                           and normal.action is not PassAction.FORGET else None)
+                tx.execute("INSERT INTO memory_pass_items (pass_id, item, proposal, planned, outcome, target,"
+                           " previous, written_revision, decided_at, created_at)"
+                           " VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)", pass_id, item.item, item.proposal, planned,
+                           outcome, target, previous, written, stamp)
+                outcomes.append(outcome)
+            episode_id = None if episode is None else self._write_episode(tx, row, kind, episode, now)
+            cursor = _cursor(tx.one("SELECT * FROM memory_cursors WHERE conversation_id=?", conversation))
+            if kind is PassKind.LIVE:
+                self._write_cursor(tx, conversation, dataclasses.replace(
+                    cursor, through_sequence=row["through_sequence"], failures=0, retry_after=None))
+            elif kind is PassKind.BACKFILL:
+                done = row["through_sequence"] >= cursor.baseline_sequence
+                self._write_cursor(tx, conversation, dataclasses.replace(
+                    cursor, backfill_through=0 if done else row["through_sequence"],
+                    baseline_sequence=0 if done else cursor.baseline_sequence))
+            else:
+                tx.execute("UPDATE memory_passes SET status='retried' WHERE pass_id=?", row["retry_of"])
+            tx.execute("UPDATE memory_passes SET status='applied', reserved_tokens=0, finished_at=? WHERE pass_id=?",
+                       stamp, pass_id)
+            return PassApplied(PassStatus.APPLIED, tuple(outcomes), episode_id)
+
+    def _write_episode(self, tx: _Tx, row: sqlite3.Row, kind: PassKind, plan: EpisodePlan, now: datetime) -> int | None:
+        """§6.2: rewrite this Conversation's newest episode, or add one; None
+        when the text is not an episode's (the rest still applies)."""
+        try:
+            text = rules.check_episode_text(plan.text)
+        except DataError:
+            return None
+        principal, conversation = PrincipalId(row["owner"]), ConversationId(row["conversation_id"])
+        found = tx.one(f"SELECT {self._EPISODE_COLUMNS} FROM episodes WHERE owner=? AND conversation_id=?"
+                       " ORDER BY ended_at DESC, episode_id DESC LIMIT 1", principal, conversation)
+        previous = None if found is None else _episode(found)
+        users, himari = json.dumps(list(plan.user_sequences)), json.dumps(list(plan.himari_sequences))
+        stamp = _timestamp(now)
+        if rules.extends(plan, kind, previous):
+            assert previous is not None
+            tx.execute("UPDATE episodes SET through_sequence=?, ended_at=?, text=?, folded=?, user_sequences=?,"
+                       " himari_sequences=?, source_pass=?, revision=?, updated_at=? WHERE owner=? AND episode_id=?",
+                       row["through_sequence"], _timestamp(plan.ended_at), text, rules.fold(text),
+                       json.dumps(list(previous.user_sequences) + list(plan.user_sequences)),
+                       json.dumps(list(previous.himari_sequences) + list(plan.himari_sequences)), row["pass_id"],
+                       previous.revision + 1, stamp, principal, previous.episode_id)
+            return previous.episode_id
+        last = tx.one("SELECT last_episode_id FROM memory_ids WHERE owner=?", principal)
+        episode_id = (0 if last is None else int(last["last_episode_id"])) + 1
+        tx.execute("INSERT INTO memory_ids (owner, last_id, last_episode_id) VALUES (?, 0, ?)"
+                   " ON CONFLICT (owner) DO UPDATE SET last_episode_id=excluded.last_episode_id", principal, episode_id)
+        tx.execute(f"INSERT INTO episodes ({self._EPISODE_COLUMNS}, owner, folded)"
+                   " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                   episode_id, conversation, row["from_sequence"], row["through_sequence"],
+                   _timestamp(plan.started_at), _timestamp(plan.ended_at), text, users, himari,
+                   MemoryOrigin.EXTRACTOR.value, row["pass_id"], 1, stamp, stamp, principal, rules.fold(text))
+        tx.execute("DELETE FROM episodes WHERE owner=? AND episode_id IN (SELECT episode_id FROM episodes"
+                   " WHERE owner=? ORDER BY ended_at DESC, episode_id DESC LIMIT -1 OFFSET ?)",
+                   principal, principal, MAX_EPISODES)
+        return episode_id
+
+    async def read_pass(self, pass_id: str) -> MemoryPass:
+        with self._tx() as tx:
+            return _pass(self._pass_row(tx, pass_id))
+
+    async def list_passes(self, scope: TrustedScope) -> tuple[MemoryPass, ...]:
+        with self._tx() as tx:
+            tx.owned(scope)
+            return tuple(_pass(r) for r in tx.all("SELECT * FROM memory_passes WHERE conversation_id=? ORDER BY seq",
+                                                  scope.conversation_id))
+
+    async def read_pass_outcomes(self, pass_id: str) -> tuple[str, ...]:
+        with self._tx() as tx:
+            self._pass_row(tx, pass_id)
+            return tuple(r["outcome"] for r in tx.all("SELECT outcome FROM memory_pass_items WHERE pass_id=?"
+                                                      " ORDER BY item", pass_id))
+
+    async def clean_memories(self, now: datetime) -> MemoryCleanup:
+        with self._tx() as tx:
+            loops = tx.execute(
+                "DELETE FROM memories WHERE category='loop' AND retired_at IS NULL AND ((due_instant IS NOT NULL"
+                " AND due_instant < ?) OR (due_instant IS NULL AND updated_at < ?))",
+                _timestamp(now - STALE_DUE), _timestamp(now - STALE_UNDATED)).rowcount
+            expired = tx.execute("DELETE FROM memories WHERE valid_instant IS NOT NULL AND valid_instant < ?",
+                                 _timestamp(now - EXPIRED_KEEP)).rowcount
+            retired = tx.execute("DELETE FROM memories WHERE retired_at IS NOT NULL AND retired_at < ?",
+                                 _timestamp(now - RETIRED_KEEP)).rowcount
+            proposals = tx.execute(
+                "UPDATE memory_pass_items SET outcome='discarded', decided_at=? WHERE outcome IN"
+                " ('proposed', 'sensitive_proposed') AND created_at < ?", _timestamp(now),
+                _timestamp(now - PROPOSAL_KEEP)).rowcount
+            return MemoryCleanup(loops, expired, retired, proposals)
 
     # --- ConversationSearch (V3-P72) --------------------------------------------------
 

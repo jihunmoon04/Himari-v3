@@ -234,6 +234,16 @@ def test_reasoning_effort_mapping_and_rejection() -> None:
     assert exc.value.code is ProviderErrorCode.UNSUPPORTED_CAPABILITY
 
 
+def test_an_output_cap_is_sent_only_when_one_is_asked_for() -> None:
+    # V3-P85 §4.8: a memory pass caps its answer, reasoning included; other requests send no cap.
+    import dataclasses
+
+    hi = model_input((UserTurn(EventId("e1"), (TextBlock("hi"),)),))
+    assert "max_tokens" not in body(ADAPTER, hi)
+    capped = dataclasses.replace(hi, request_options=dataclasses.replace(hi.request_options, max_output_tokens=4000))
+    assert body(ADAPTER, capped)["max_tokens"] == 4000
+
+
 def test_an_attachment_is_one_escaped_line_of_its_record() -> None:
     from dataclasses import replace
 

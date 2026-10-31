@@ -43,6 +43,13 @@ from himari.tool.api import (
 )
 
 SCOPE = TrustedScope(PrincipalId("alice"), ConversationId("conv_1"))
+V15_UNDO = ("DROP INDEX memory_pass_items_by_outcome", "DROP TABLE memory_pass_items", "DROP TABLE memory_pass_calls",
+            "DROP INDEX memory_passes_by_owner", "DROP INDEX memory_passes_by_conversation", "DROP TABLE memory_passes",
+            "DROP TABLE memory_cursors", "DROP INDEX episodes_by_conversation", "DROP INDEX episodes_by_time",
+            "DROP TABLE episodes", "ALTER TABLE memory_ids DROP COLUMN last_episode_id",
+            *(f"ALTER TABLE memories DROP COLUMN {c}" for c in (
+                "user_approved_at", "retired_item", "retired_pass", "retired_at", "source_item", "source_pass",
+                "valid_instant", "valid_until", "due_instant", "due_at")))  # what v15 added (V3-P85), undone
 FOREIGN = TrustedScope(PrincipalId("mallory"), ConversationId("conv_1"))
 FAKE = EnvironmentKind("fake")
 

@@ -89,6 +89,9 @@ class RequestOptions(DeepFrozen):
     # Ask for the answer as a stream (V3-P73 §3.1); set by the Driver right before
     # the request is prepared, only for a Run that answers the user.
     stream: bool = False
+    # The most the answer may take, reasoning included (V3-P85 §4.8); None: the
+    # model's own limit. Only memory passes set it.
+    max_output_tokens: int | None = None
 
 
 # --- Provider-neutral history (CPP §6.1) ------------------------------------

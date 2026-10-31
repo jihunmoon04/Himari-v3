@@ -31,7 +31,8 @@ from himari.data.sqlite import SqliteData, SqliteStore
 
 ME = SCOPE.principal_id
 OTHER = TrustedScope(ME, ConversationId("conv_other"))
-USER, PREFERENCE, PROJECT, REFERENCE = MemoryCategory
+USER, PREFERENCE, PROJECT, REFERENCE = (MemoryCategory.USER, MemoryCategory.PREFERENCE, MemoryCategory.PROJECT,
+                                         MemoryCategory.REFERENCE)
 
 
 def fresh(*scopes: TrustedScope) -> tuple[InMemoryStore | SqliteStore, InMemoryData | SqliteData]:

@@ -9,6 +9,9 @@ from collections.abc import Iterable, Sequence
 
 from himari.common import ContentBlock, TextBlock, split_marks, thaw, tool_id_problem
 from himari.data.api import (
+    MAX_EPISODE_CHARS,
+    MAX_LOOP_CHARS,
+    MAX_MEMORIES,
     MAX_APP_PAYLOAD_BYTES,
     MAX_DEVICE_NAME_CHARS,
     MAX_EFFORT_CHARS,
@@ -45,6 +48,12 @@ from himari.data.api import (
     UiResource,
     UserMessage,
     ui_digest,
+    Episode,
+    EpisodePlan,
+    MemoryOrigin,
+    PassAction,
+    PassItem,
+    PassKind,
 )
 
 
@@ -332,3 +341,120 @@ def check_ui_resource(resource: UiResource) -> None:
     expected = ui_digest(resource.source, resource.uri, resource.html, resource.csp, resource.prefers_border)
     if resource.digest != expected:
         raise DataError(DataErrorCode.INVALID_ARGUMENT, "a view's digest does not match its content")
+
+
+# --- Memory passes (V3-P85) -----------------------------------------------------------
+
+
+def check_note_text(category: MemoryCategory, text: object) -> str:
+    """A note's text as stored: an open loop is shorter (§5.1)."""
+    text = check_memory_text(text)
+    if category is MemoryCategory.LOOP and len(text) > MAX_LOOP_CHARS:
+        raise DataError(DataErrorCode.TOO_LARGE, f"an open loop is at most {MAX_LOOP_CHARS} characters")
+    return text
+
+
+def check_episode_text(text: object) -> str:
+    if not isinstance(text, str):
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, "an episode is text")
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    if any(unicodedata.category(c) in ("Cc", "Cs") and c not in "\n\t" for c in text):
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, "an episode may not contain control characters")
+    text = text.strip()
+    if not text:
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, "an episode needs some text")
+    if len(text) > MAX_EPISODE_CHARS:
+        raise DataError(DataErrorCode.TOO_LARGE, f"an episode is at most {MAX_EPISODE_CHARS} characters")
+    return text
+
+
+def user_owned(note: Memory) -> bool:
+    """Written or kept by the user: automatic passes leave it alone (§4.4)."""
+    return note.origin is MemoryOrigin.USER or note.user_approved_at is not None
+
+
+def _check_item_fields(item: PassItem) -> PassItem:
+    """The note an ADD, UPDATE or PROPOSE writes, normalized; DataError if not one."""
+    if not isinstance(item.category, MemoryCategory):
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, "not a memory category")
+    text = check_note_text(item.category, item.text)
+    loop = item.category is MemoryCategory.LOOP
+    if (item.due_at is None) != (item.due_instant is None) or (item.valid_until is None) != (item.valid_instant is None):
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, "a date comes with its instant")
+    if (not loop and item.due_at is not None) or (loop and item.valid_until is not None):
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, "a loop has a due date, a fact an end")
+    return PassItem(item.item, item.proposal, item.action, item.reason, item.memory_id, item.expected_revision,
+                    item.category, text, item.due_at, item.due_instant, item.valid_until, item.valid_instant)
+
+
+def decide_item(item: PassItem, kind: PassKind, note: Memory | None,
+                live_notes: int) -> tuple[str, PassAction | None, PassItem]:
+    """§4.4, §4.9: the outcome recorded for one item, the change to make
+    (None: only recorded) and the item as normalized. ``note``: the live note
+    an UPDATE or FORGET names (None: none); ``live_notes``: the principal's
+    live notes now."""
+    try:
+        if item.action is PassAction.DROP:
+            return item.reason or "dropped", None, item
+        if item.action is PassAction.PROPOSE or (kind is not PassKind.LIVE and item.action is PassAction.ADD):
+            normal = _check_item_fields(item)
+            return (item.reason if item.action is PassAction.PROPOSE and item.reason else "proposed"), None, normal
+        if kind is not PassKind.LIVE:
+            return "past_range", None, item
+        if item.action is PassAction.ADD:
+            normal = _check_item_fields(item)
+            if live_notes >= MAX_MEMORIES:
+                return "memory_full", None, normal
+            return "applied", PassAction.ADD, normal
+        if note is None:
+            return "not_found", None, item
+        if user_owned(note):
+            return "user_owned", None, item
+        if item.expected_revision != note.revision:
+            return "revision_conflict", None, item
+        if item.action is PassAction.FORGET:
+            return "applied", PassAction.FORGET, item
+        return "applied", PassAction.UPDATE, _check_item_fields(item)
+    except DataError as error:
+        return ("too_large" if error.code is DataErrorCode.TOO_LARGE else "invalid"), None, item
+
+
+def planned_json(item: PassItem) -> str:
+    """The normalized note a PROPOSE (or an applied change) names, for the record."""
+    def moment(value: object) -> str | None:
+        return None if value is None else value.isoformat()  # type: ignore[attr-defined]
+
+    return json.dumps({"category": None if item.category is None else item.category.value, "text": item.text,
+                       "due_at": item.due_at, "due_instant": moment(item.due_instant),
+                       "valid_until": item.valid_until, "valid_instant": moment(item.valid_instant),
+                       "memory_id": item.memory_id}, ensure_ascii=False, sort_keys=True)
+
+
+def memory_json(note: Memory) -> str:
+    """A note's state before a pass changed it (§4.4), for Undo."""
+    def moment(value: object) -> str | None:
+        return None if value is None else value.isoformat()  # type: ignore[attr-defined]
+
+    call = note.source_call
+    return json.dumps({"memory_id": note.memory_id, "category": note.category.value, "text": note.text,
+                       "origin": note.origin.value, "source_conversation": note.source_conversation,
+                       "source_call": None if call is None else {"run_id": call.run_id, "call_id": call.call_id},
+                       "source_pass": note.source_pass, "source_item": note.source_item,
+                       "due_at": note.due_at, "due_instant": moment(note.due_instant),
+                       "valid_until": note.valid_until, "valid_instant": moment(note.valid_instant),
+                       "user_approved_at": moment(note.user_approved_at), "revision": note.revision},
+                      ensure_ascii=False, sort_keys=True)
+
+
+def extends(plan: EpisodePlan, kind: PassKind, previous: Episode | None) -> bool:
+    """§6.2: whether the plan rewrites ``previous`` (this Conversation's newest
+    episode, read now) rather than adding one."""
+    return (kind is PassKind.LIVE and plan.extend is not None and previous is not None
+            and previous.episode_id == plan.extend and previous.origin is MemoryOrigin.EXTRACTOR
+            and previous.revision == plan.expected_revision
+            and plan.started_at - previous.ended_at <= plan.extend_within)
+
+
+def overlaps(a_from: int, a_through: int, b_from: int, b_through: int) -> bool:
+    """Two parts (from exclusive, through inclusive) share an Event."""
+    return a_from < b_through and b_from < a_through

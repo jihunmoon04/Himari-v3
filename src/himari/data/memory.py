@@ -80,7 +80,26 @@ from himari.data.api import (
     MemoryCategory,
     MemoryChange,
     MemoryChangeKind,
+    MemoryCleanup,
+    MemoryCursor,
     MemoryOrigin,
+    MemoryPass,
+    DueConversation,
+    Episode,
+    EpisodePlan,
+    MAX_EPISODES,
+    PassAction,
+    PassApplied,
+    PassItem,
+    PassKind,
+    PassStart,
+    PassStatus,
+    PROPOSAL_KEEP,
+    RETIRED_KEEP,
+    EXPIRED_KEEP,
+    SKIP_AFTER_FAILURES,
+    STALE_DUE,
+    STALE_UNDATED,
     PresentedFile,
     StoredBlob,
     EventPayload,
@@ -205,6 +224,14 @@ class InMemoryStore:
         self.instructions: dict[tuple[PrincipalId, InstructionScope], Instructions] = {}  # V3-P69
         self.memories: dict[tuple[PrincipalId, int], Memory] = {}  # V3-P71
         self.memory_ids: dict[PrincipalId, int] = {}  # the last id given out, per principal
+        # V3-P85: notes an automatic forget retired (§5.4), with when, pass and item.
+        self.retired_memories: dict[tuple[PrincipalId, int], tuple[Memory, datetime, str, int]] = {}
+        self.episodes: dict[tuple[PrincipalId, int], Episode] = {}
+        self.episode_ids: dict[PrincipalId, int] = {}
+        self.memory_cursors: dict[ConversationId, MemoryCursor] = {}
+        self.memory_passes: dict[str, tuple[PrincipalId, MemoryPass]] = {}  # in creation order
+        self.pass_calls: dict[tuple[str, int], dict[str, object]] = {}
+        self.pass_items: dict[tuple[str, int], dict[str, object]] = {}
         # V3-P74 §10.1: registered folders in registration order, and whose each is.
         self.workspaces: dict[WorkspaceId, RegisteredWorkspace] = {}
         self.workspace_owners: dict[WorkspaceId, PrincipalId] = {}
@@ -1154,6 +1181,18 @@ class InMemoryData:
         for key in [k for k, m in self._store.memories.items()
                     if k[0] == scope.principal_id and m.source_conversation == scope.conversation_id]:
             del self._store.memories[key]  # D5: the notes its calls wrote go with it
+        for key in [k for k, (m, *_) in self._store.retired_memories.items()
+                    if k[0] == scope.principal_id and m.source_conversation == scope.conversation_id]:
+            del self._store.retired_memories[key]
+        for key in [k for k, e in self._store.episodes.items() if e.conversation_id == scope.conversation_id]:
+            del self._store.episodes[key]  # V3-P85 §11: its episodes, reading position and passes
+        self._store.memory_cursors.pop(scope.conversation_id, None)
+        for pass_id in [p for p, (_, mp) in self._store.memory_passes.items()
+                        if mp.conversation_id == scope.conversation_id]:
+            del self._store.memory_passes[pass_id]
+            for table in (self._store.pass_calls, self._store.pass_items):
+                for row_key in [k for k in table if k[0] == pass_id]:
+                    del table[row_key]
         used = {e.ui_digest for c in self._store._conversations.values() for e in c.executions.values()}
         for digest in {e.ui_digest for e in conv.executions.values()} - used:
             if digest is not None:
@@ -1385,7 +1424,8 @@ class InMemoryData:
         change = rules.check_memory_change(change)
         principal, key, now = scope.principal_id, (scope.principal_id, change.memory_id), datetime.now(UTC)
         if change.kind is MemoryChangeKind.SAVE and change.expected_revision is None:
-            if change.memory_id > self._store.memory_ids.get(principal, 0) or key in self._store.memories:
+            if (change.memory_id > self._store.memory_ids.get(principal, 0) or key in self._store.memories
+                    or key in self._store.retired_memories):
                 raise DataError(DataErrorCode.INVALID_ARGUMENT, f"m{change.memory_id} was not given out for a new note")
             if self._memory_count(principal) >= MAX_MEMORIES:
                 raise DataError(DataErrorCode.LIMIT_EXCEEDED, f"{MAX_MEMORIES} notes are kept at most")
@@ -1400,7 +1440,8 @@ class InMemoryData:
         assert change.category is not None and change.text is not None
         return key, replace(note, category=change.category, text=change.text, origin=MemoryOrigin.MODEL,
                             source_conversation=scope.conversation_id, source_call=call,
-                            revision=note.revision + 1, updated_at=now)
+                            revision=note.revision + 1, updated_at=now, source_pass=None, source_item=None,
+                            user_approved_at=None)
 
     async def list_memories(self, principal: PrincipalId) -> tuple[Memory, ...]:
         return rules.order_memories(m for (owner, _), m in self._store.memories.items() if owner == principal)
@@ -1456,6 +1497,318 @@ class InMemoryData:
         self._store._owned(scope)
         return sum(1 for (owner, _), m in self._store.memories.items()
                    if owner == scope.principal_id and m.source_conversation == scope.conversation_id)
+
+    # --- MemoryPassLog (V3-P85) --------------------------------------------------------
+
+    @staticmethod
+    def _unfinished(conv: _Conversation) -> bool:
+        return (any(r.record.status in (RunStatus.PREPARED, RunStatus.DISPATCH_CLAIMED, RunStatus.RECEIVED)
+                    for r in conv.runs.values())
+                or any(e.status is ToolExecutionStatus.EXECUTION_CLAIMED for e in conv.executions.values()))
+
+    async def read_memory_cursor(self, scope: TrustedScope) -> MemoryCursor:
+        self._store._owned(scope)
+        return self._store.memory_cursors.get(scope.conversation_id, MemoryCursor())
+
+    async def memory_due(self, *, quiet_before: datetime, now: datetime, after: ConversationId | None = None,
+                         limit: int = 50) -> Sequence[DueConversation]:
+        due: list[DueConversation] = []
+        for cid in sorted(c for c in self._store._conversations if c > (after or "")):
+            conv = self._store._conversations[cid]
+            cursor = self._store.memory_cursors.get(cid, MemoryCursor())
+            if (conv.trashed_at is not None or not conv.events
+                    or not any(e.kind is EventKind.USER_MESSAGE and e.sequence > cursor.through_sequence
+                               for e in conv.events)
+                    or (cursor.retry_after is not None and cursor.retry_after > now)
+                    or self._unfinished(conv) or conv.events[-1].created_at >= quiet_before):
+                continue
+            due.append(DueConversation(TrustedScope(conv.owner, cid), cursor, conv.events[-1].created_at))
+            if len(due) == limit:
+                break
+        return tuple(due)
+
+    async def unfinished_work(self, scope: TrustedScope) -> bool:
+        return self._unfinished(self._store._owned(scope))
+
+    def _episodes_of(self, principal: PrincipalId,
+                     conversation: ConversationId | None = None) -> list[Episode]:
+        found = [e for (owner, _), e in self._store.episodes.items()
+                 if owner == principal and (conversation is None or e.conversation_id == conversation)]
+        return sorted(found, key=lambda e: (e.ended_at, e.episode_id), reverse=True)
+
+    async def last_episode(self, scope: TrustedScope) -> Episode | None:
+        self._store._owned(scope)
+        found = self._episodes_of(scope.principal_id, scope.conversation_id)
+        return found[0] if found else None
+
+    async def list_episodes(self, principal: PrincipalId) -> tuple[Episode, ...]:
+        return tuple(self._episodes_of(principal))
+
+    async def pass_usage(self, principal: PrincipalId, since: datetime) -> int:
+        return sum(mp.charged_tokens for owner, mp in self._store.memory_passes.values()
+                   if owner == principal and mp.created_at >= since)
+
+    def _pass(self, pass_id: object) -> tuple[PrincipalId, MemoryPass]:
+        found = self._store.memory_passes.get(pass_id) if isinstance(pass_id, str) else None
+        if found is None:
+            raise DataError(DataErrorCode.NOT_FOUND, f"no memory pass {pass_id}")
+        return found
+
+    def _running_pass(self, pass_id: str) -> tuple[PrincipalId, MemoryPass]:
+        owner, mp = self._pass(pass_id)
+        if mp.status is not PassStatus.RUNNING:
+            raise DataError(DataErrorCode.INVALID_STATE_TRANSITION, f"{pass_id} is {mp.status.value}")
+        return owner, mp
+
+    def _put_pass(self, owner: PrincipalId, mp: MemoryPass) -> None:
+        self._store.memory_passes[mp.pass_id] = (owner, mp)
+
+    async def begin_pass(self, scope: TrustedScope, start: PassStart) -> str:
+        if (not isinstance(start, PassStart) or not isinstance(start.kind, PassKind)
+                or not 0 <= start.from_sequence < start.through_sequence <= start.snapshot_sequence
+                or start.omitted_chars < 0 or (start.kind is PassKind.RETRY) != (start.retry_of is not None)):
+            raise DataError(DataErrorCode.INVALID_ARGUMENT, "not a pass start")
+        try:
+            self._store._authorized(scope)
+        except DataError:
+            raise DataError(DataErrorCode.NOT_FOUND, scope.conversation_id) from None
+        if any(owner == scope.principal_id and mp.status is PassStatus.RUNNING
+               for owner, mp in self._store.memory_passes.values()):
+            raise DataError(DataErrorCode.INVALID_STATE_TRANSITION, "another pass of this principal runs")
+        pass_id = self._store.new_id("mpass")
+        self._put_pass(scope.principal_id, MemoryPass(
+            pass_id, scope.conversation_id, start.kind, start.from_sequence, start.through_sequence,
+            start.snapshot_sequence, PassStatus.RUNNING, start.provider_key, start.model_id, 0, 0, 0, 0, 0, 0,
+            start.omitted_chars, None, start.retry_of, datetime.now(UTC), None))
+        return pass_id
+
+    async def prepare_pass_call(self, pass_id: str, body: bytes, content_type: str, reserved_tokens: int) -> int:
+        if not isinstance(body, bytes) or reserved_tokens < 0:
+            raise DataError(DataErrorCode.INVALID_ARGUMENT, "a call stores its request and a reservation")
+        owner, mp = self._running_pass(pass_id)
+        call = mp.calls + 1
+        self._store.pass_calls[(pass_id, call)] = {"status": "prepared", "reserved": reserved_tokens,
+                                                   "request": body, "response": None}
+        self._put_pass(owner, replace(mp, calls=call, reserved_tokens=reserved_tokens))
+        return call
+
+    async def mark_pass_call_dispatched(self, pass_id: str, call: int) -> None:
+        self._running_pass(pass_id)
+        row = self._store.pass_calls.get((pass_id, call))
+        if row is None or row["status"] != "prepared":
+            raise DataError(DataErrorCode.INVALID_STATE_TRANSITION, f"call {call} of {pass_id} is not prepared")
+        row["status"] = "dispatched"
+
+    async def record_pass_call(self, pass_id: str, call: int, outcome: RawRunOutcome) -> None:
+        owner, mp = self._pass(pass_id)
+        row = self._store.pass_calls.get((pass_id, call))
+        if row is None or row["status"] not in ("prepared", "dispatched"):
+            raise DataError(DataErrorCode.INVALID_STATE_TRANSITION, f"call {call} of {pass_id} is recorded")
+        usage = outcome.usage if isinstance(outcome, RawReceived) else None
+        reserved = row["reserved"]
+        assert isinstance(reserved, int)
+        row.update(status="received" if isinstance(outcome, RawReceived) else "failed", response=outcome.body)
+        if usage is None or usage.input_tokens is None or usage.output_tokens is None:
+            self._put_pass(owner, replace(mp, reserved_tokens=0, unmetered_tokens=mp.unmetered_tokens + reserved))
+        else:
+            self._put_pass(owner, replace(
+                mp, reserved_tokens=0, input_tokens=mp.input_tokens + usage.input_tokens,
+                output_tokens=mp.output_tokens + usage.output_tokens,
+                over_estimate=mp.over_estimate + int(usage.input_tokens + usage.output_tokens > reserved)))
+
+    async def read_pass_response(self, pass_id: str, call: int) -> bytes | None:
+        row = self._store.pass_calls.get((pass_id, call))
+        if row is None:
+            raise DataError(DataErrorCode.NOT_FOUND, f"no call {call} of {pass_id}")
+        response = row["response"]
+        assert response is None or isinstance(response, bytes)
+        return response
+
+    def _count_failure(self, owner: PrincipalId, mp: MemoryPass, status: PassStatus, error: str,
+                       retry_after: datetime) -> PassStatus:
+        final = status
+        if mp.kind is PassKind.LIVE:
+            cursor = self._store.memory_cursors.get(mp.conversation_id, MemoryCursor())
+            if cursor.through_sequence == mp.from_sequence:
+                failures = cursor.failures + 1
+                if failures >= SKIP_AFTER_FAILURES:
+                    final = PassStatus.SKIPPED
+                    cursor = replace(cursor, through_sequence=mp.through_sequence, failures=0, retry_after=None)
+                else:
+                    cursor = replace(cursor, failures=failures, retry_after=retry_after)
+                self._store.memory_cursors[mp.conversation_id] = cursor
+        self._put_pass(owner, replace(mp, status=final, error=error[:200], reserved_tokens=0,
+                                      finished_at=datetime.now(UTC)))
+        return final
+
+    async def fail_pass(self, pass_id: str, error: str, retry_after: datetime) -> PassStatus:
+        owner, mp = self._running_pass(pass_id)
+        return self._count_failure(owner, mp, PassStatus.FAILED, error, retry_after)
+
+    async def interrupt_running_passes(self, retry_after: datetime) -> int:
+        running = [(o, mp) for o, mp in self._store.memory_passes.values() if mp.status is PassStatus.RUNNING]
+        for owner, mp in running:
+            self._count_failure(owner, mp, PassStatus.INTERRUPTED, "interrupted", retry_after)
+        return len(running)
+
+    def _pass_checks(self, owner: PrincipalId, mp: MemoryPass) -> str | None:
+        conv = self._store._conversations.get(mp.conversation_id)
+        if conv is None or conv.owner != owner or conv.trashed_at is not None:
+            return "conversation_gone"
+        if any(o.conversation_id == mp.conversation_id and o.status is PassStatus.APPLIED
+               and rules.overlaps(mp.from_sequence, mp.through_sequence, o.from_sequence, o.through_sequence)
+               for _, o in self._store.memory_passes.values()):
+            return "already_read"
+        cursor = self._store.memory_cursors.get(mp.conversation_id, MemoryCursor())
+        if mp.kind is PassKind.LIVE:
+            if cursor.through_sequence != mp.from_sequence:
+                return "cursor_moved"
+            if (conv.events[-1].sequence if conv.events else 0) != mp.snapshot_sequence:
+                return "new_events"
+            if self._unfinished(conv):
+                return "unfinished_work"
+        elif mp.kind is PassKind.BACKFILL:
+            if cursor.backfill_through != mp.from_sequence or mp.through_sequence > cursor.baseline_sequence:
+                return "backfill_moved"
+        else:
+            skipped = self._store.memory_passes.get(mp.retry_of or "")
+            if (skipped is None or skipped[1].conversation_id != mp.conversation_id
+                    or skipped[1].status is not PassStatus.SKIPPED
+                    or (skipped[1].from_sequence, skipped[1].through_sequence)
+                    != (mp.from_sequence, mp.through_sequence)):
+                return "not_skipped"
+        return None
+
+    async def apply_pass(self, pass_id: str, items: Sequence[PassItem], episode: EpisodePlan | None, *,
+                         now: datetime) -> PassApplied:
+        if (not all(isinstance(i, PassItem) and isinstance(i.action, PassAction) for i in items)
+                or len({i.item for i in items}) != len(items)
+                or (episode is not None and not isinstance(episode, EpisodePlan))):
+            raise DataError(DataErrorCode.INVALID_ARGUMENT, "not a pass plan")
+        if pass_id not in self._store.memory_passes:  # its Conversation was deleted for good meanwhile
+            return PassApplied(PassStatus.DISCARDED, reason="conversation_gone")
+        owner, mp = self._pass(pass_id)
+        if mp.status is not PassStatus.RUNNING:
+            return PassApplied(mp.status, reason="not_running")
+        why = self._pass_checks(owner, mp)
+        if why is not None:
+            self._put_pass(owner, replace(mp, status=PassStatus.DISCARDED, error=why, reserved_tokens=0,
+                                          finished_at=datetime.now(UTC)))
+            return PassApplied(PassStatus.DISCARDED, reason=why)
+        outcomes: list[str] = []
+        for item in items:
+            note = (self._store.memories.get((owner, item.memory_id))
+                    if item.memory_id is not None and item.action in (PassAction.UPDATE, PassAction.FORGET) else None)
+            outcome, action, normal = rules.decide_item(item, mp.kind, note, self._memory_count(owner))
+            target: str | None = None
+            previous: str | None = None
+            written: int | None = None
+            if action is PassAction.ADD:
+                assert normal.category is not None and normal.text is not None
+                added = Memory(self._new_memory_id(owner), normal.category, normal.text, MemoryOrigin.EXTRACTOR,
+                               mp.conversation_id, None, 1, now, now, due_at=normal.due_at,
+                               due_instant=normal.due_instant, valid_until=normal.valid_until,
+                               valid_instant=normal.valid_instant, source_pass=pass_id, source_item=item.item)
+                self._store.memories[(owner, added.memory_id)] = added
+                target, written = f"m{added.memory_id}", 1
+            elif action is PassAction.UPDATE:
+                assert note is not None and normal.category is not None and normal.text is not None
+                previous = rules.memory_json(note)
+                changed = replace(note, category=normal.category, text=normal.text, origin=MemoryOrigin.EXTRACTOR,
+                                  source_conversation=mp.conversation_id, source_call=None, source_pass=pass_id,
+                                  source_item=item.item, due_at=normal.due_at, due_instant=normal.due_instant,
+                                  valid_until=normal.valid_until, valid_instant=normal.valid_instant,
+                                  revision=note.revision + 1, updated_at=now)
+                self._store.memories[(owner, note.memory_id)] = changed
+                target, written = f"m{note.memory_id}", changed.revision
+            elif action is PassAction.FORGET:
+                assert note is not None
+                previous = rules.memory_json(note)
+                retired = replace(note, revision=note.revision + 1, updated_at=now)
+                del self._store.memories[(owner, note.memory_id)]
+                self._store.retired_memories[(owner, note.memory_id)] = (retired, now, pass_id, item.item)
+                target, written = f"m{note.memory_id}", retired.revision
+            elif item.memory_id is not None:
+                target = f"m{item.memory_id}"
+            planned = (rules.planned_json(normal) if outcome in ("applied", "proposed", "sensitive_proposed")
+                       and normal.action is not PassAction.FORGET else None)
+            self._store.pass_items[(pass_id, item.item)] = {
+                "proposal": item.proposal, "planned": planned, "outcome": outcome, "target": target,
+                "previous": previous, "written": written, "decided_at": None, "created_at": now}
+            outcomes.append(outcome)
+        episode_id = None if episode is None else self._write_episode(owner, mp, episode, now)
+        cursor = self._store.memory_cursors.get(mp.conversation_id, MemoryCursor())
+        if mp.kind is PassKind.LIVE:
+            self._store.memory_cursors[mp.conversation_id] = replace(
+                cursor, through_sequence=mp.through_sequence, failures=0, retry_after=None)
+        elif mp.kind is PassKind.BACKFILL:
+            done = mp.through_sequence >= cursor.baseline_sequence
+            self._store.memory_cursors[mp.conversation_id] = replace(
+                cursor, backfill_through=0 if done else mp.through_sequence,
+                baseline_sequence=0 if done else cursor.baseline_sequence)
+        else:
+            assert mp.retry_of is not None
+            skipped_owner, skipped = self._store.memory_passes[mp.retry_of]
+            self._put_pass(skipped_owner, replace(skipped, status=PassStatus.RETRIED))
+        self._put_pass(owner, replace(mp, status=PassStatus.APPLIED, reserved_tokens=0, finished_at=now))
+        return PassApplied(PassStatus.APPLIED, tuple(outcomes), episode_id)
+
+    def _write_episode(self, owner: PrincipalId, mp: MemoryPass, plan: EpisodePlan, now: datetime) -> int | None:
+        try:
+            text = rules.check_episode_text(plan.text)
+        except DataError:
+            return None
+        found = self._episodes_of(owner, mp.conversation_id)
+        previous = found[0] if found else None
+        if rules.extends(plan, mp.kind, previous):
+            assert previous is not None
+            self._store.episodes[(owner, previous.episode_id)] = replace(
+                previous, through_sequence=mp.through_sequence, ended_at=plan.ended_at, text=text,
+                user_sequences=previous.user_sequences + plan.user_sequences,
+                himari_sequences=previous.himari_sequences + plan.himari_sequences, source_pass=mp.pass_id,
+                revision=previous.revision + 1, updated_at=now)
+            return previous.episode_id
+        episode_id = self._store.episode_ids[owner] = self._store.episode_ids.get(owner, 0) + 1
+        self._store.episodes[(owner, episode_id)] = Episode(
+            episode_id, mp.conversation_id, mp.from_sequence, mp.through_sequence, plan.started_at, plan.ended_at,
+            text, plan.user_sequences, plan.himari_sequences, MemoryOrigin.EXTRACTOR, mp.pass_id, 1, now, now)
+        for old in self._episodes_of(owner)[MAX_EPISODES:]:
+            del self._store.episodes[(owner, old.episode_id)]
+        return episode_id
+
+    async def read_pass(self, pass_id: str) -> MemoryPass:
+        return self._pass(pass_id)[1]
+
+    async def list_passes(self, scope: TrustedScope) -> tuple[MemoryPass, ...]:
+        self._store._owned(scope)
+        return tuple(mp for _, mp in self._store.memory_passes.values() if mp.conversation_id == scope.conversation_id)
+
+    async def read_pass_outcomes(self, pass_id: str) -> tuple[str, ...]:
+        self._pass(pass_id)
+        rows = sorted((k[1], v) for k, v in self._store.pass_items.items() if k[0] == pass_id)
+        return tuple(str(v["outcome"]) for _, v in rows)
+
+    async def clean_memories(self, now: datetime) -> MemoryCleanup:
+        notes = self._store.memories
+        loops = [k for k, m in notes.items() if m.category is MemoryCategory.LOOP
+                 and ((m.due_instant is not None and m.due_instant < now - STALE_DUE)
+                      or (m.due_instant is None and m.updated_at < now - STALE_UNDATED))]
+        for key in loops:
+            del notes[key]
+        expired = [k for k, m in notes.items() if m.valid_instant is not None and m.valid_instant < now - EXPIRED_KEEP]
+        for key in expired:
+            del notes[key]
+        retired = [k for k, (_, at, *_) in self._store.retired_memories.items() if at < now - RETIRED_KEEP]
+        for key in retired:
+            del self._store.retired_memories[key]
+        proposals = 0
+        for row in self._store.pass_items.values():
+            created = row["created_at"]
+            assert isinstance(created, datetime)
+            if row["outcome"] in ("proposed", "sensitive_proposed") and created < now - PROPOSAL_KEEP:
+                row.update(outcome="discarded", decided_at=now)
+                proposals += 1
+        return MemoryCleanup(len(loops), len(expired), len(retired), proposals)
 
     # --- ConversationSearch (V3-P72) --------------------------------------------------
 

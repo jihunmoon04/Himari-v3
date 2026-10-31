@@ -8,13 +8,20 @@ import asyncio
 import os
 import sqlite3
 import stat
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
-from testkit import SCOPE, text_result, user
+from testkit import SCOPE, V15_UNDO, text_result, user
 
 from himari.common import CallId, CallRef, ConversationId, RawRepresentation, ToolCall, ToolId, TrustedScope
 from himari.data.api import (
+    EpisodePlan,
+    MemoryCategory,
+    PassAction,
+    PassItem,
+    PassKind,
+    PassStart,
     AppView,
     ArtifactMutation,
     AssistantToolCalls,
@@ -62,6 +69,13 @@ async def fill(data: SqliteData, scope: TrustedScope) -> None:
     await data.commit_tool_outcome(scope, CallRef(run_id, CallId("c")), ToolCompletion(
         ToolExecutionStatus.SUCCEEDED, text_result("v"), app_view=view, artifact_mutations=(ArtifactMutation("note", "n"),),
         presented_files=(PresentedFile(given, "o.txt", "text/plain", "/workspace/o.txt"),)))
+    now = datetime.now(UTC)  # V3-P85: an applied memory pass: its cursor, episode, call and item
+    pass_id = await data.begin_pass(scope, PassStart(PassKind.LIVE, 0, 3, 3, "p", "m"))
+    call = await data.prepare_pass_call(pass_id, b"{}", "application/json", 10)
+    await data.record_pass_call(pass_id, call, RawReceived(b"{}", "application/json"))
+    await data.apply_pass(pass_id, [PassItem(0, "{}", PassAction.ADD, category=MemoryCategory.USER,
+                                             text=f"Note of {scope.conversation_id}.")],
+                          EpisodePlan("Talked.", now, now, (1,), ()), now=now)
     await data.prepare_run(scope, preparation(RunPurpose.COMPACTION))
     await data.set_external_setting(scope, "fake", False)
     await data.set_model_setting(scope, ModelSetting("m", None))
@@ -98,6 +112,8 @@ def test_a_purge_leaves_no_row_of_the_conversation_in_any_table(tmp_path: Path) 
     assert all(n > 0 for table, n in rows_of(conn, OTHER.conversation_id).items()
                if table not in ("activations", "bindings")), "the other Conversation keeps its rows"
     assert conn.execute("SELECT count(*) FROM compaction_runs").fetchone()[0] == 1  # only the other one's
+    for table in ("memory_pass_calls", "memory_pass_items", "memories"):  # V3-P85: only the other one's
+        assert conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0] == 1, table
     assert conn.execute("SELECT count(*) FROM ui_resources").fetchone()[0] == 1
     assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
     store.close()
@@ -120,7 +136,7 @@ def v6_database(path: Path) -> None:
     store.close()
     conn = sqlite3.connect(path, isolation_level=None)
     try:
-        for statement in ("DROP TABLE device_ids", "DROP INDEX devices_by_pairing", "DROP INDEX devices_by_token",
+        for statement in (*V15_UNDO, "DROP TABLE device_ids", "DROP INDEX devices_by_pairing", "DROP INDEX devices_by_token",
                           "DROP TABLE devices", "DROP INDEX bindings_by_workspace", "DROP TABLE workspaces",
                           "DROP TABLE event_text", "DROP TABLE memory_ids", "DROP INDEX memories_by_source",
                           "DROP TABLE memories",
