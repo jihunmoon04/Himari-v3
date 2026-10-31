@@ -16,6 +16,7 @@ internal static class Program
 {
     [STAThread] private static void Main(string[] args)
     {
+        if (args.Contains("--fullscreen-fixture")) { FullscreenChecks.Fixture(); return; }
         var app = new App(); app.InitializeComponent(); app.ShutdownMode = ShutdownMode.OnExplicitShutdown;
         using var source = new HwndSource(new HwndSourceParameters("HIMARI keyboard regression") { Width = 1, Height = 1, WindowStyle = unchecked((int)0x80000000) });
         var root = new Grid(); var input = new TextBox { AcceptsReturn = true }; root.Children.Add(input); source.RootVisual = root;
@@ -54,7 +55,7 @@ internal static class Program
             var pixel = new byte[4]; bitmap.CopyPixels(new Int32Rect(20, 20, 1, 1), pixel, 4, 0);
             return Color.FromArgb(pixel[3], pixel[2], pixel[1], pixel[0]);
         }
-        Check(Fill(true) == Color.FromRgb(255, 253, 244) && Fill(false) == Color.FromRgb(240, 235, 255), "rendered user bubble is cream and Himari bubble is lavender");
+        Check(Fill(true) == Color.FromRgb(255, 253, 243) && Fill(false) == Color.FromRgb(242, 237, 255), "rendered user bubble is cream and Himari bubble is lavender");
         var timeline = new MainWindow();
         object? Timeline(string method, params object?[] args) => typeof(MainWindow).GetMethod(method, BindingFlags.NonPublic | BindingFlags.Instance)!.Invoke(timeline, args);
         var oldUser = (FrameworkElement)timeline.FindName("UserBubble");
@@ -116,11 +117,11 @@ internal static class Program
         Check(reply.Visibility == Visibility.Collapsed, "the overdue reply can expire after the older draft is hidden");
         var composerPanel = (FrameworkElement)timeline.FindName("ComposerPanel");
         Timeline("OpenChat"); draftInput.Text = "단축키로 숨긴 초안"; Timeline("CloseChat");
-        Check(oldUser.Visibility == Visibility.Collapsed && composerPanel.Visibility == Visibility.Collapsed && draftInput.Text == "단축키로 숨긴 초안", "second shortcut hides the composer without a previous work window and keeps the draft");
+        Check(oldUser.Visibility == Visibility.Visible && composerPanel.Visibility == Visibility.Visible && draftInput.Text == "단축키로 숨긴 초안", "switching away preserves composer and draft like Alt+Tab");
         Timeline("OpenChat");
         Check(oldUser.Visibility == Visibility.Visible && composerPanel.Visibility == Visibility.Visible && draftInput.Text == "단축키로 숨긴 초안", "shortcut reopens the hidden draft ready to type");
         draftInput.Clear(); Timeline("CloseChat");
-        Check(composerPanel.Visibility == Visibility.Collapsed, "an empty composer closes on the second shortcut");
+        Check(composerPanel.Visibility == Visibility.Visible, "switching focus leaves an empty composer available until ordinary expiry");
         timeline.Close();
         var companion = new MainWindow();
         var settings = (Window)typeof(MainWindow).GetField("settings", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(companion)!;
@@ -132,7 +133,7 @@ internal static class Program
         assistant.Visibility = user.Visibility = Visibility.Visible;
         ((FrameworkElement)companion.FindName("ComposerPanel")).Visibility = Visibility.Visible;
         ((FrameworkElement)companion.FindName("StopButton")).Visibility = Visibility.Visible;
-        ((TextBlock)companion.FindName("Message")).Text = new string('가', 1500);
+        ((MarkdownView)companion.FindName("Message")).Text = new string('가', 1500);
         ((TextBox)companion.FindName("Input")).Text = "작성 중인 글\n둘째 줄";
         typeof(MainWindow).GetMethod("OpenBubble", BindingFlags.NonPublic | BindingFlags.Instance)!.Invoke(companion, null);
         foreach (bool flipped in new[] { false, true })
@@ -189,7 +190,8 @@ internal static class Program
         status.Text = "연결됨";
         Check(userStatus.Visibility == Visibility.Collapsed, "routine connected status does not add a chat row");
         status.Text = "화면을 보내지 못해 글만 보냈습니다.";
-        Check(userStatus.Visibility == Visibility.Visible && userStatus.Text == status.Text, "screen delivery warnings remain visible inside user bubble");
+        Check(userStatus.Visibility == Visibility.Visible && userStatus.Text == "화면 없이 글만 보냈어요.", "screen delivery warning uses concise bubble copy");
+        Check((string)((FrameworkElement)companion.FindName("UserStatusPanel")).ToolTip == status.Text, "warning tooltip retains the full diagnostic text");
         companion.Close();
         foreach (bool partialLive in new[] { false, true })
         {
@@ -229,7 +231,7 @@ internal static class Program
             {
                 transport.Live = "event: snapshot\ndata: {\"job_id\":\"j\",\"run_id\":\"r\",\"text\":\"답변 앞부분\",\"moods\":[]}\n\n";
                 Call("StartLive", "c", first, connectionToken.Token, "j");
-                Until(() => ((TextBlock)recovery.FindName("Message")).Text == "답변 앞부분");
+                Until(() => ((MarkdownView)recovery.FindName("Message")).Text == "답변 앞부분");
                 Call("OpenComposer"); editor.Text = "연결이 끊겨도 남길 새 초안";
             }
             Call("StopConnection"); Call("CloseBubble");
@@ -242,7 +244,7 @@ internal static class Program
             Call("SetConnected", true, "연결됨");
             Finish((Task)Call("ReadConversation", "c", CancellationToken.None)!);
             var readingTimer = (DispatcherTimer)typeof(MainWindow).GetField("bubbleTimer", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(recovery)!;
-            Check(answer.Visibility == Visibility.Visible && ((TextBlock)recovery.FindName("Message")).Text == "복구된 최종 답변" && readingTimer.IsEnabled, "accepted send, disconnect, server completion and reconnect opens final answer with reading timer");
+            Check(answer.Visibility == Visibility.Visible && ((MarkdownView)recovery.FindName("Message")).Text == "복구된 최종 답변" && readingTimer.IsEnabled, "accepted send, disconnect, server completion and reconnect opens final answer with reading timer");
             Check(!(bool)typeof(MainWindow).GetField("talking", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(recovery)!, "completed recovery stops partial Live talking animation");
             Check(notice.Visibility == Visibility.Collapsed, "successful reconnect clears independent warning");
             if (partialLive)
@@ -272,7 +274,7 @@ internal static class Program
             transport.Live = "event: done\ndata: {}\n\n";
             Call("StartLive", "c", restored, CancellationToken.None, "j5");
             Until(() => answer.Visibility == Visibility.Visible && readingTimer.IsEnabled);
-            Check(((TextBlock)recovery.FindName("Message")).Text == "복구된 최종 답변", "done without a Live snapshot still recovers and opens saved final");
+            Check(((MarkdownView)recovery.FindName("Message")).Text == "복구된 최종 답변", "done without a Live snapshot still recovers and opens saved final");
             Call("CloseBubble");
             var foreign = new ServerClient("https://example.com/", "device-two", transport);
             Call("WaitForReply", foreign, "c", "j6", 9);
@@ -327,7 +329,7 @@ internal static class Program
             }
             bool shouldShow = !doneBeforeAcceptance || !hasLiveBody;
             Check((answer.Visibility == Visibility.Visible) == shouldShow && timer.IsEnabled == shouldShow, "both delivery orders recover unread finals once and preserve closure of already displayed Live");
-            Check(((TextBlock)ordering.FindName("Message")).Text == "복구된 최종 답변", "ordered delivery leaves the correct final text");
+            Check(((MarkdownView)ordering.FindName("Message")).Text == "복구된 최종 답변", "ordered delivery leaves the correct final text");
             if (shouldShow)
                 Check(Grid.GetRow((FrameworkElement)ordering.FindName("UserBubble")) < Grid.GetRow(answer), "reply stays below its request regardless of HTTP acceptance and Live completion order");
             Call("CloseBubble");
@@ -336,6 +338,8 @@ internal static class Program
             Check(answer.Visibility == Visibility.Collapsed && !timer.IsEnabled, "later refresh does not reopen the ordered delivery answer");
             ordering.Close();
         }
+        PresentationChecks.Run(Check, args.Length == 2 && args[0] == "--screenshots" ? args[1] : null);
+        if (args.Contains("--native-presentation")) FullscreenChecks.Run(Check);
         if (args.Length == 2 && args[0] == "--screenshots")
         {
             // Render actual controls without opening a connected app, using credentials,
@@ -367,7 +371,7 @@ internal static class Program
                 using var file = System.IO.File.Create(System.IO.Path.Combine(args[1], name + ".png")); png.Save(file);
             }
             Preview("PresentUserBubble"); Preview("ShowSentMessage", "안녕?"); Preview("OpenReplyBubble", "preview", "reply");
-            ((TextBlock)preview.FindName("Message")).Text = "안녕하세요, 선생님! 오늘도 잘 부탁드려요.";
+            ((MarkdownView)preview.FindName("Message")).Text = "안녕하세요, 선생님! 오늘도 잘 부탁드려요.";
             Snapshot("01-user-then-himari");
             Preview("UserBubbleExpired"); Snapshot("02-oldest-hidden");
             Preview("OpenComposer"); ((TextBox)preview.FindName("Input")).Text = "다음 이야기도 해 볼까?";
@@ -385,6 +389,9 @@ internal sealed class ReplyReconnectHandler : HttpMessageHandler
     internal int Posts, Sequence = 1;
     internal string Job = "old", Live = "";
     internal bool DeferAcceptance;
+    internal bool DeferCancel;
+    private readonly TaskCompletionSource<HttpResponseMessage> cancellation = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    internal void ReleaseCancel() => cancellation.SetResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("{}") });
     private readonly TaskCompletionSource<HttpResponseMessage> acceptance = new(TaskCreationOptions.RunContinuationsAsynchronously);
     internal void ReleaseAcceptance() => acceptance.SetResult(new HttpResponseMessage(HttpStatusCode.Accepted) { Content = new StringContent("{\"job_id\":\"j\"}", Encoding.UTF8, "application/json") });
     private bool liveSent;
@@ -394,6 +401,7 @@ internal sealed class ReplyReconnectHandler : HttpMessageHandler
     {
         string body; var status = HttpStatusCode.OK;
         string path = request.RequestUri!.AbsolutePath;
+        if (request.Method == HttpMethod.Post && path.EndsWith("/cancel") && DeferCancel) return cancellation.Task.WaitAsync(ct);
         if (request.Method == HttpMethod.Post && path.EndsWith("/messages"))
         {
             Posts++; Job = "j"; Sequence = 2;

@@ -23,6 +23,7 @@ public partial class MainWindow
         // Change grid rows, not parents: moving a live TextBox must retain focus,
         // selection, its draft and any IME composition.
         bool userFirst = userBubbleSequence <= assistantBubbleSequence;
+        if (bubblesBelow) userFirst = !userFirst;
         Grid.SetRow(UserBubble, userFirst ? 0 : 1);
         Grid.SetRow(BubblePanel, userFirst ? 1 : 0);
         bool both = UserBubble.Visibility == Visibility.Visible && BubblePanel.Visibility == Visibility.Visible;
@@ -32,11 +33,12 @@ public partial class MainWindow
     private void OpenReplyBubble(string conversation, string? job) => ShowAssistantBubble($"{conversation}:{job}");
     private void ShowAssistantBubble(string? key)
     {
-        if (key is null || key != assistantBubbleKey) assistantBubbleSequence = ++bubbleSequence;
+        if (key is null || key != assistantBubbleKey) { assistantBubbleSequence = ++bubbleSequence; replyStopRequested = false; ResetCopyFeedback(); }
         assistantBubbleKey = key;
         assistantBubbleCloseDue = false;
         bubbleTimer.Stop();
         BubblePanel.Visibility = Visibility.Visible;
+        UpdateBubblePresentation();
         ArrangeBubbles(); UpdateSceneBounds(); ExpireBubbles();
     }
     private void AssistantBubbleExpired()
@@ -48,7 +50,8 @@ public partial class MainWindow
         userBubbleTimer.Stop(); userBubbleCloseDue = true; ExpireBubbles();
     }
     private FrameworkElement? OldestVisibleBubble() => new[] { UserBubble, BubblePanel }
-        .Where(bubble => bubble.Visibility == Visibility.Visible).OrderBy(Grid.GetRow).FirstOrDefault();
+        .Where(bubble => bubble.Visibility == Visibility.Visible)
+        .OrderBy(bubble => bubble == UserBubble ? userBubbleSequence : assistantBubbleSequence).FirstOrDefault();
     private void ExpireBubbles()
     {
         var oldest = OldestVisibleBubble();

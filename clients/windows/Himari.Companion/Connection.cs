@@ -50,10 +50,11 @@ public partial class MainWindow
 
     private void SetConnected(bool value, string text)
     {
-        connected = value; Status.Text = text; SendButton.IsEnabled = value && !sending; Input.IsEnabled = true;
+        connected = value; Status.Text = text; Input.IsEnabled = true;
         StopButton.IsEnabled = value;
         Character.Opacity = value ? 1 : .55;
         ConnectionNotice.Visibility = value || text == "기기 확인 중…" ? Visibility.Collapsed : Visibility.Visible;
+        UpdateBubblePresentation();
     }
     private void StopConnection()
     {
@@ -229,7 +230,7 @@ public partial class MainWindow
             Str(Prop(detail, "job"), "job_id") != awaited.Job)) return;
         StopButton.Visibility = ConversationView.IsRunning(detail) ? Visibility.Visible : Visibility.Collapsed;
         if (connected) Status.Text = ConversationView.IsRunning(detail) ? "이 대화는 작업 중입니다. 새 대화를 열 수 있습니다." : "연결됨";
-        if (question is not null) { awaitingAnswer = true; Message.Text = question; OpenReplyBubble(id, Str(Prop(detail, "job"), "job_id")); OpenComposer(); if (IsActive) Input.Focus(); return; }
+        if (question is not null) { awaitingAnswer = true; Message.Text = question; OpenReplyBubble(id, Str(Prop(detail, "job"), "job_id")); OpenComposer(); if (IsChatWindow(GetForegroundWindow())) { dialogueHost?.Activate(); Input.Focus(); } return; }
         awaitingAnswer = false;
         if (liveDisplays.TryGetValue(id, out var display)) { Message.Text = display.Text; SetMood(display.Mood); return; }
         var sequence = Prop(Prop(detail, "conversation"), "last_sequence");
@@ -287,6 +288,7 @@ public partial class MainWindow
     private void InputChanged(object sender, System.Windows.Controls.TextChangedEventArgs e)
     {
         inputRevision++;
+        UpdateBubblePresentation();
         if (!string.IsNullOrEmpty(Input.Text) && ComposerPanel.Visibility == Visibility.Visible) PresentUserBubble();
     }
     private void SetCurrentConversation(string? id)
@@ -427,13 +429,20 @@ public partial class MainWindow
             pendingScreenConversation = null;
             // Another stream may still be validating this request's screen.
             if (earlyMoves.TryGetValue(context.ConversationId, out var buffered)) buffered.RemoveAll(x => !moveLifetime.IsVerifying(x.Job));
-            sending = false; messageSend.Exit(); SendButton.IsEnabled = connected;
+            sending = false; messageSend.Exit(); UpdateBubblePresentation();
         }
     }
-    private async void CancelClick(object sender, RoutedEventArgs e)
+    private async void CancelClick(object sender, RoutedEventArgs e) => await RequestCancel();
+    private async Task RequestCancel()
     {
         if (!connected || client is null || connection is null || currentConversation is null) return;
-        try { await client.SendAsync(HttpMethod.Post, PathFor(currentConversation) + "/cancel", new { }, connection.Token); }
+        var local = client; var conversation = currentConversation; var reply = assistantBubbleKey;
+        try
+        {
+            await local.SendAsync(HttpMethod.Post, PathFor(conversation) + "/cancel", new { }, connection.Token);
+            if (ReferenceEquals(local, client) && conversation == currentConversation && reply == assistantBubbleKey)
+            { replyStopRequested = true; UpdateBubblePresentation(); }
+        }
         catch (Exception ex) { ShowError(ex); }
     }
     private void OpenWebClick(object sender, RoutedEventArgs e) => OpenWeb();

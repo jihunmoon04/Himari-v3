@@ -37,7 +37,9 @@
         <Border Style="{StaticResource SectionCard}"><StackPanel>
           <TextBlock Text="말풍선" FontSize="16" FontWeight="SemiBold"/>
           <TextBlock x:Name="BubbleDescription" TextWrapping="Wrap" Margin="0,12,0,0"/>
-          <TextBlock Text="새 말풍선은 아래에 표시하고, 글 길이에 따른 표시 시간이 끝나면 위의 오래된 말풍선부터 숨깁니다. 입력 중이거나 확인이 필요한 메시지는 자동으로 숨기지 않습니다." Style="{StaticResource Hint}" Margin="0,10,0,12"/>
+          <Label Content="말풍선 위치" Target="{Binding ElementName=BubblePlacement}" Padding="0,12,0,5"/><ComboBox x:Name="BubblePlacement" AutomationProperties.Name="말풍선 위치"/>
+          <TextBlock Text="자동은 캐릭터가 화면 위쪽 절반에 있으면 아래에, 아래쪽 절반에 있으면 위에 표시합니다." Style="{StaticResource Hint}" Margin="0,5,0,0"/>
+          <TextBlock Text="새 말풍선은 캐릭터에 가까운 쪽에 표시하고, 글 길이에 따른 표시 시간이 끝나면 오래된 말풍선부터 숨깁니다. 입력 중이거나 확인이 필요한 메시지는 자동으로 숨기지 않습니다." Style="{StaticResource Hint}" Margin="0,10,0,12"/>
           <TextBlock Text="최소 표시 시간 (초)"/><Slider x:Name="BubbleMinimum" Minimum="3" Maximum="30" Value="8" TickFrequency="1" IsSnapToTickEnabled="True" AutomationProperties.Name="말풍선 최소 표시 시간"/><TextBlock Text="{Binding Value, ElementName=BubbleMinimum, StringFormat={}{0:0}초}" Style="{StaticResource Hint}"/>
           <TextBlock Text="100자마다 추가할 시간 (초)" Margin="0,10,0,0"/><Slider x:Name="SecondsPer100" Minimum="3" Maximum="30" Value="8" TickFrequency="1" IsSnapToTickEnabled="True" AutomationProperties.Name="100자당 추가 표시 시간"/><TextBlock Text="{Binding Value, ElementName=SecondsPer100, StringFormat={}{0:0}초}" Style="{StaticResource Hint}"/>
         </StackPanel></Border>
@@ -45,7 +47,7 @@
           <TextBlock Text="빠르게 대화하기" FontSize="16" FontWeight="SemiBold"/>
           <Label Content="대화 전환 단축키" Target="{Binding ElementName=ChatHotkey}" Padding="0,14,0,6"/><ComboBox x:Name="ChatHotkey" AutomationProperties.Name="대화 전환 단축키"/>
           <TextBlock x:Name="HotkeyStatus" Style="{StaticResource Hint}" Margin="0,6,0,8"/>
-          <TextBlock Text="한 번 누르면 히마리 입력창으로, 다시 누르면 직전에 작업하던 창으로 돌아갑니다. 작성 중인 글은 유지합니다." Style="{StaticResource Hint}" Margin="0,0,0,10"/>
+          <TextBlock Text="히마리와 직전 작업 창을 오갑니다. 이전 작업 창이 없으면 히마리의 입력 포커스를 해제합니다. 히마리가 활성화된 동안 글자를 치면 바로 입력창이 열리고, 작성 중인 글은 유지합니다." Style="{StaticResource Hint}" Margin="0,0,0,10"/>
           <TextBlock Text="Enter로 보내기 · Shift+Enter로 줄바꿈" Style="{StaticResource Hint}"/>
           <CheckBox x:Name="ScreenSharing" Content="메시지를 보낼 때 화면 함께 첨부" IsChecked="True" Margin="0,12,0,0"/>
           <TextBlock Text="기본으로 켜져 있습니다. 보내는 순간의 모니터 화면이 서버와 모델에 전달됩니다. 여기서 끄면 글만 보냅니다." Style="{StaticResource Hint}" Margin="0,4,0,0"/>

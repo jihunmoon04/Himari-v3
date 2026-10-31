@@ -5,6 +5,7 @@ namespace Himari.Companion;
 internal static class DialoguePolicy
 {
     internal static readonly string[] Hotkeys = ["Alt+Q", "Alt+Shift+Q", "Ctrl+Space", "Ctrl+Alt+H"];
+    internal static readonly string[] BubblePlacements = ["상하 자동", "상 고정", "하 고정"];
     internal static (uint Modifiers, uint Key) Hotkey(string value) => value switch
     {
         "Alt+Shift+Q" => (0x0001 | 0x0004 | 0x4000, 0x51),
@@ -16,9 +17,10 @@ internal static class DialoguePolicy
     internal static double Duration(string text, double minimum, double per100) => Math.Min(300,
         Finite(minimum, 8, 3, 30) + text.EnumerateRunes().Count() / 100.0 * Finite(per100, 8, 3, 30));
     internal static double PointAnchor(bool facingLeft) => facingLeft ? .9 : .1;
-    // The shortcut closes only a composer that is already in front; from a fresh start,
-    // an idle companion or any other window it brings Himari forward ready to type.
-    internal static bool HotkeyCloses(bool companionInFront, bool composerOpen) => companionInFront && composerOpen;
+    // Switching away does not depend on the editor being visible.
+    internal static bool HotkeyCloses(bool companionInFront, bool composerOpen) => companionInFront;
+    internal static bool BubblesBelow(string placement, double characterCenter, double monitorCenter) =>
+        placement == "하 고정" || (placement != "상 고정" && characterCenter < monitorCenter);
     internal static bool KeepUserBubble(bool hovered, bool focused, string draft, bool sending, bool unresolved) =>
         hovered || focused || !string.IsNullOrWhiteSpace(draft) || sending || unresolved;
 }
