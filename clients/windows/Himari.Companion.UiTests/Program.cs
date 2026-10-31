@@ -93,15 +93,15 @@ internal static class Program
         var characterImage = (Image)timeline.FindName("Character");
         Check(characterImage.Source == renderer.Bitmap && renderer.Bitmap.PixelWidth == 205 && renderer.Bitmap.PixelHeight == 206, "the character image shows the composed 205x206 bitmap");
         Timeline("SetMood", "happy"); Timeline("SetTalking", true);
-        Check(renderer.Shown is { Mood: "happy", Mouth: null }, "mood reaches the character; happy has no talk art, so its face stays");
+        Check(renderer.Shown is { Mood: "happy", Mouth: "small" }, "mood reaches the character and every mood talks");
         Timeline("SetMood", "neutral"); Timeline("SetTalking", true);
         Check(renderer.Shown is { Mood: "neutral", Mouth: "small" }, "talking starts the mouth at once");
         Timeline("SetTalking", false);
         var inspect = (SettingsWindow)typeof(MainWindow).GetField("settings", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(timeline)!;
         inspect.EyesSelector.SelectedIndex = 3; inspect.MouthSelector.SelectedIndex = 3;
-        Check(renderer.Shown is { Eyes: "closed", Mouth: "wide" } && inspect.PoseText.Text.Contains("closed"), "the animation inspect holds eyes and mouth on a chosen variant");
+        Check(renderer.Shown is { Eyes: "closed", Mouth: "wide" } && inspect.PoseText.Text.Contains("closed"), "the animation preview holds eyes and mouth on a chosen variant");
         Timeline("SetMood", "happy");
-        Check(renderer.Shown is { Mood: "happy", Eyes: null, Mouth: null } && inspect.PoseText.Text.Contains("그림이 없어"), "the inspect says when a mood lacks the chosen variant");
+        Check(renderer.Shown is { Mood: "happy", Eyes: null, Mouth: "wide" } && inspect.PoseText.Text.Contains("그림이 없어"), "the preview says when a mood lacks the chosen variant (happy has no blink art)");
         Timeline("SetMood", "neutral");
         inspect.PausePreview.IsChecked = true;
         var paused = renderer.Shown!;
