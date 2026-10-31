@@ -837,3 +837,27 @@ rev. 3의 P1 둘은 해결, 민감정보 거부 표현은 개선으로 판정했
 | P3 | 페이지가 늘 때마다 쌓인 메시지 전체에 `next_part`를 다시 돈다 | 후속. 한 구간은 많아야 24,000자라 쌓이는 메시지는 작다. 더 긴 Tool 위주 대화에서 느려지면 자르는 상태를 이어 가는 방식으로 바꾼다 |
 
 검수 권고: 실제로 켜기 전에 SQLite에서 Provider 실패와 프로세스 재시작을 묶은 통합 시험을 한 번 돈다. 2단계(실제 모델 확인)에 넣는다.
+
+## 21. 구현 노트 — 2단계: 실제 모델 확인 (2026-10-31)
+
+- **SQLite 통합 시험(1단계 재검수 권고):** `tests/bootstrap/test_memory_passes_app.py`가 실제 `Application`과 SQLite로 다음을 차례로 확인한다.
+  1. Provider 실패 → `failed`, 실패 1.
+  2. 다시 연 서버에서 호출을 보낸 채 프로세스 중지 → `running`과 보낸 호출이 남음.
+  3. 다시 열면 `interrupted`, 실패 2, 예약은 `unmetered`로 정산.
+  4. 재시도 시각 뒤 같은 구간을 한 번만 적용, 실패 0.
+- **실제 확인** `tests/live/test_memory_passes_live.py`:
+  - 고정 대화 12개(§15의 항목)를 모델마다 3번. 작업자와 같은 입력·지시문·요청 옵션과 같은 답 검사·계획으로 돈다.
+  - 결과와 표는 [openrouter-model-catalog.md](openrouter-model-catalog.md)의 "Memory passes", 답 전부는 `docs/live-results/memory-passes-2026-10-31.jsonl`.
+- **결과:** 싼 후보 7개 중 5개가 모든 기준을 통과해 `memory_passes`를 선언했다: `openai/gpt-6-luna`, `anthropic/claude-haiku-5.5`, `xiaomi/mimo-v2.6-pro`, `deepseek/deepseek-v4.1-flash`, `minimax/minimax-m3`.
+  - `z-ai/glm-5.3`은 날짜 0.67(출장의 끝을 빠뜨림)로 떨어졌다.
+  - `openai/gpt-5-nano`는 재현율 0.79·날짜 0.50으로 떨어졌다.
+  - 웹·HIMARI의 말에서 나온 기억, 민감한 사실의 유출, HIMARI의 제안을 정한 것처럼 쓴 일화는 모든 모델에서 0이었다.
+- **확인에서 고친 것(첫 실행 뒤):**
+  - **지시문:** 답의 예시가 `"id": "m12 (update, forget)"`이라 약한 모델이 그대로 베꼈다. 예시를 실제 값으로 바꾸고, 답 검사는 `id`의 모양을 보지 않는다. 읽을 수 없는 번호는 `unknown_note`로 떨어진다.
+  - **채점과 fixture:**
+    - 치과 예약은 건강 정보라, 지시문대로 민감하게 다룬 모델이 실패로 셌다. 자동차 정기검사로 바꿨다.
+    - 기한이 있는 출장은 고리로도 사실로도 인정한다.
+    - 근거 판정은 기억이 담은 기대 항목 중 하나라도 근거가 맞으면 맞는 것으로 본다.
+- **배포하면:** `HIMARI_MEMORY_MODEL`을 위 다섯 중 하나로 두면 자동 기억이 켜진다. 비워 두면 지금처럼 꺼져 있다.
+  - 권고: `deepseek/deepseek-v4.1-flash`(가장 싸고 모든 기준 1.00) 또는 `openai/gpt-6-luna`.
+  - 대화 안의 자동 기억 줄과 Undo(4단계)가 아직 없으므로, 켜기 전에 4단계를 먼저 하거나 켠 뒤 `himari` DB와 로그로 살펴보는 쪽을 소유자가 정한다.
