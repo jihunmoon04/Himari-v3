@@ -78,6 +78,12 @@ end
 -- join that tag, so idle's end is put back once the new frames are in.
 local idleTag, oldSleep = find(spr.tags, "idle"), find(spr.tags, "sleep")
 local idleEnd = oldSleep and oldSleep.fromFrame.frameNumber - 1 or idleTag.toFrame.frameNumber
+-- Everything after idleEnd is deleted, so refuse when anything but the old sleep clip is
+-- there (PR #144 review): a later clip would be lost.
+for _, t in ipairs(spr.tags) do
+  if t ~= idleTag and t ~= oldSleep and t.toFrame.frameNumber > idleEnd then error("sleep: " .. t.name .. " lies after idle; move sleep.lua's clip by hand", 0) end
+end
+if oldSleep and oldSleep.toFrame.frameNumber ~= #spr.frames then error("sleep: frames follow the old sleep clip", 0) end
 if oldSleep then spr:deleteTag(oldSleep) end
 while #spr.frames > idleEnd do spr:deleteFrame(#spr.frames) end
 local zLayer, eyesLayer, fillLayer = layer("zzz"), layer("@eyes", true), layer("fill")

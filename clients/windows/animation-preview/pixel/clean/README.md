@@ -116,7 +116,7 @@ aseprite -b --script-param body=clean/body.aseprite --script-param faces=clean/f
 
 ## 졸기
 
-`../tools/sleep.lua`가 `body.aseprite`의 파츠를 움직여 `sleep` 태그를 idle 뒤에 붙인다. 다시 돌리면 기존 `sleep`을 지우고 새로 만든다. idle을 다시 만들었다면(`sources.lua only=body`) 이것도 다시 돌린다.
+`../tools/sleep.lua`가 `body.aseprite`의 파츠를 움직여 `sleep` 태그를 idle 뒤에 붙인다. 다시 돌리면 기존 `sleep`을 지우고 새로 만든다. idle 뒤의 프레임을 모두 지우므로, `sleep` 말고 다른 동작이 idle 뒤에 있으면 아무것도 하지 않고 실패한다(PR #144 검수). idle을 다시 만들었다면(`sources.lua only=body`) 이것도 다시 돌린다.
 
 - **잠들기**(앞 3프레임, 한 번): 반쯤 감은 눈 → 고개 1px → 고개 2px와 감은 눈. 태그 사용자 데이터 `loopFrom=4`가 반복 시작이다.
 - **자는 중**(500ms × 12): 고개 2px 아래 3초, 1px 아래 3초. 머리카락 끝은 한 칸, 헤일로는 두 칸 늦게 따라간다.

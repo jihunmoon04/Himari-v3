@@ -161,7 +161,9 @@ public partial class MainWindow : Window
     private void SetTalking(bool value) { talking = value; UpdateFrame(); }
     private void UpdateFrame()
     {
-        if ((DateTime.UtcNow - lastIdleCheck).TotalSeconds >= 2)
+        // Check for input every 2 s, and every 0.25 s while dozing so any key or mouse move
+        // wakes the character almost at once (PR #144 review).
+        if ((DateTime.UtcNow - lastIdleCheck).TotalSeconds >= (sleeping ? 0.25 : 2))
         {
             lastIdleCheck = DateTime.UtcNow;
             try { sleeping = IdleSeconds() >= 300; }
@@ -172,9 +174,9 @@ public partial class MainWindow : Window
         animator.SetTalking(talking || settings.TalkPreview.IsChecked == true, now);
         animator.SetSleeping(settings.SleepPreview.IsChecked == true || sleeping && !Input.IsKeyboardFocusWithin, now);
         character.Render(PreviewPose(animator.Pose(now)));
-        // Wake for the next pose, and at least every 2 s for the idle check.
+        // Wake for the next pose, and at least as often as the idle check.
         double wait = settings.PausePreview.IsChecked == true ? 2000 : (animator.NextChange(now) - now).TotalMilliseconds / animationSpeed;
-        timer.Interval = TimeSpan.FromMilliseconds(Math.Clamp(wait, 10, 2000));
+        timer.Interval = TimeSpan.FromMilliseconds(Math.Clamp(wait, 10, sleeping ? 250 : 2000));
     }
     private async void DemoClick(object sender, RoutedEventArgs e)
     {

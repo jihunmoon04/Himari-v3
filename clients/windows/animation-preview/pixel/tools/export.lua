@@ -78,7 +78,9 @@ end
 for _, tag in ipairs(body.tags) do
   local frames = {}
   -- A loop may play some opening frames once: user data "loopFrom=N" (1-based) on the tag.
-  local loopFrom = tonumber((tag.data or ""):match("loopFrom=(%d+)") or 1)
+  local raw = (tag.data or ""):match("loopFrom=(%S*)")
+  local loopFrom = raw == nil and 1 or (raw:match("^%d+$") and tonumber(raw))
+  if not loopFrom then fail(tag.name .. " has a malformed loopFrom: " .. raw) end
   if loopFrom < 1 or loopFrom > tag.frames or (loopFrom > 1 and tag.repeats ~= 0) then fail(tag.name .. " has a bad loopFrom") end
   for f = tag.fromFrame.frameNumber, tag.toFrame.frameNumber do
     local cel = marker:cel(f) or fail("frame " .. f .. " of " .. tag.name .. " has no @face marker")
