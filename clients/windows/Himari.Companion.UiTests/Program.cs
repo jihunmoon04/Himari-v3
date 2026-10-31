@@ -58,6 +58,25 @@ internal static class Program
         Check(Fill(true) == Color.FromRgb(255, 253, 243) && Fill(false) == Color.FromRgb(242, 237, 255), "rendered user bubble is cream and Himari bubble is lavender");
         var timeline = new MainWindow();
         object? Timeline(string method, params object?[] args) => typeof(MainWindow).GetMethod(method, BindingFlags.NonPublic | BindingFlags.Instance)!.Invoke(timeline, args);
+        // Every mood and animation frame the app can select must load as a 205x206 sprite.
+        void SetField(string name, object value) => typeof(MainWindow).GetField(name, BindingFlags.NonPublic | BindingFlags.Instance)!.SetValue(timeline, value);
+        string Shown(string mood, bool talking, bool sleeping, double elapsedMs)
+        {
+            SetField("mood", mood); SetField("talking", talking); SetField("sleeping", sleeping);
+            SetField("lastIdleCheck", DateTime.UtcNow); SetField("started", DateTime.UtcNow.AddMilliseconds(-elapsedMs));
+            Timeline("UpdateFrame");
+            var source = (BitmapImage)((Image)timeline.FindName("Character")).Source;
+            Check(source.PixelWidth == 205 && source.PixelHeight == 206, $"{source.UriSource} loads as a 205x206 pixel sprite");
+            return System.IO.Path.GetFileNameWithoutExtension(source.UriSource.AbsolutePath);
+        }
+        foreach (var mood in new[] { "happy", "excited", "sad", "surprised", "thinking", "embarrassed", "worried" })
+            Check(Shown(mood, false, false, 0) == mood && Shown(mood, true, false, 190) == mood, $"{mood} shows its own sprite, without neutral's talk frames");
+        Check(Shown("neutral", false, false, 1000) == "neutral" && Shown("neutral", false, false, 3830) == "blink-half"
+            && Shown("neutral", false, false, 3900) == "blink-closed" && Shown("neutral", false, false, 3975) == "blink-half", "neutral blinks half, closed, half at the end of each 4 s cycle");
+        Check(Shown("neutral", true, false, 60) == "talk-small" && Shown("neutral", true, false, 190) == "talk-wide"
+            && Shown("neutral", true, false, 450) == "neutral", "talking cycles small, wide, small and closed mouth frames");
+        Check(Shown("neutral", false, true, 1000) == "blink-closed", "a sleeping character keeps its eyes closed");
+        Shown("neutral", false, false, 0);
         var oldUser = (FrameworkElement)timeline.FindName("UserBubble");
         var reply = (FrameworkElement)timeline.FindName("BubblePanel");
         var draftInput = (TextBox)timeline.FindName("Input");
