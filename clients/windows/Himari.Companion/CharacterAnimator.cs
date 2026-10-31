@@ -114,6 +114,8 @@ internal sealed class CharacterAnimator
         bool talking = Talking(now);
         string? eyes = talking ? BlinkEyes(now) : frame.Eyes ?? (sleeping ? "closed" : BlinkEyes(now));
         string? mouth = talking ? TalkMouth(now) : frame.Mouth;
+        // A frame with its own face shows no variants (talking waits for the next frame).
+        if (frame.OwnFace) eyes = mouth = null;
         return new(current.Clip, Array.IndexOf(clip.Frames, frame), Mood,
             eyes is not null && face.Eyes?.ContainsKey(eyes) == true ? eyes : null,
             mouth is not null && face.Mouth?.ContainsKey(mouth) == true ? mouth : null);

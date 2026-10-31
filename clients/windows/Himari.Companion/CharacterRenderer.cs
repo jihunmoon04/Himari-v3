@@ -50,10 +50,14 @@ internal sealed class CharacterRenderer
         var face = Manifest.Faces[pose.Mood];
         Array.Clear(buffer);
         Draw(frame.Src, 0, 0, replace: true);
-        int fx = Manifest.Face.Origin[0] + frame.Face[0], fy = Manifest.Face.Origin[1] + frame.Face[1];
-        Draw(face.Src, fx, fy);
-        if (pose.Eyes is { } eyes && face.Eyes?.GetValueOrDefault(eyes) is { } e) Draw(e.Src, fx + e.At[0], fy + e.At[1]);
-        if (pose.Mouth is { } mouth && face.Mouth?.GetValueOrDefault(mouth) is { } m) Draw(m.Src, fx + m.At[0], fy + m.At[1]);
+        // A frame with its own drawn face takes no mood face.
+        if (!frame.OwnFace)
+        {
+            int fx = Manifest.Face.Origin[0] + frame.Face[0], fy = Manifest.Face.Origin[1] + frame.Face[1];
+            Draw(face.Src, fx, fy);
+            if (pose.Eyes is { } eyes && face.Eyes?.GetValueOrDefault(eyes) is { } e) Draw(e.Src, fx + e.At[0], fy + e.At[1]);
+            if (pose.Mouth is { } mouth && face.Mouth?.GetValueOrDefault(mouth) is { } m) Draw(m.Src, fx + m.At[0], fy + m.At[1]);
+        }
         Bitmap.WritePixels(new Int32Rect(0, 0, Manifest.Width, Manifest.Height), buffer, Manifest.Width * 4, 0);
         shown = pose;
         return true;

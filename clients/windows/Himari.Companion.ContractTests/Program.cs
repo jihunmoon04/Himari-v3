@@ -482,10 +482,15 @@ noSleepArt.SetTalking(true, Ms(300));
 Check(noSleepArt.Pose(Ms(310)) is { Eyes: not "closed", Mouth: "small" }, "talking wakes the eyes");
 var shippedClips = shipped.Clips;
 Check(new[] { "yawn", "glance", "ahoge", "twinkle" }.All(c => shippedClips.TryGetValue(c, out var clip) && !clip.Loop && clip.Frames[0].Src.SequenceEqual(shippedClips["idle"].Frames[0].Src))
-    && shippedClips["yawn"].Frames.Any(f => f.Eyes == "closed" && f.Mouth == "wide")
+    && shippedClips["yawn"].Frames.Any(f => f.OwnFace)
     && shippedClips["glance"].Frames.Any(f => f.Eyes == "left") && shippedClips["glance"].Frames.Any(f => f.Eyes == "right"),
-    "the shipped extras are one-shots from the rest pose; the yawn opens the mouth wide, the glance looks both ways");
+    "the shipped extras are one-shots from the rest pose; the yawn has its own drawn face, the glance looks both ways");
 var one = new ClipFrame([0, 0, 1, 1], 100, [0, 0]);
+var ownFaced = animationManifest with { Clips = new(animationManifest.Clips) { ["hand"] = new(false, [one with { OwnFace = true, Eyes = "closed" }, one]) } };
+var handAnimator = new CharacterAnimator(ownFaced, 7, TimeSpan.Zero);
+handAnimator.Request("hand", AnimationLayer.Directed, Ms(0));
+handAnimator.SetTalking(true, Ms(10));
+Check(handAnimator.Pose(Ms(20)) is { Clip: "hand", Eyes: null, Mouth: null } && handAnimator.Pose(Ms(150)) is { Mouth: not null }, "a frame with its own face shows no eye or mouth variants");
 var sequenced = animationManifest with
 {
     Clips = new(animationManifest.Clips)
