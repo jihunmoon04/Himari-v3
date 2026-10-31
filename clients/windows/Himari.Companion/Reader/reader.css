@@ -1,7 +1,8 @@
-:root{color-scheme:light;font:15px/1.6 'Malgun Gothic','Segoe UI',sans-serif;color:#34304a;background:transparent}
-body{margin:0;background:transparent}main{margin:0;padding:0 3px 4px;overflow-wrap:anywhere}main>:first-child{margin-top:0}main>:last-child{margin-bottom:0}
-h1,h2,h3,h4{line-height:1.35;margin:1.4em 0 .6em}p{margin:.6em 0 1em}a{color:#61569b}
-pre{overflow:auto;padding:16px;border-radius:6px;background:#eee9f6;white-space:pre;overflow-wrap:normal}
-code{font:14px/1.6 Consolas,monospace;background:#eee9f6}blockquote{border-left:3px solid #b6a6d4;margin-left:0;padding-left:18px;color:#625e76}
-table{display:block;max-width:100%;overflow-x:auto;border-collapse:collapse;margin:18px 0}td,th{border:1px solid #cfc8de;padding:8px 12px;min-width:80px}th{background:#eee9f6}
-.katex-display{overflow-x:auto;overflow-y:hidden;padding:6px 0}hr{border:0;border-top:1px solid #d5cfe3}
+:root{color-scheme:light;font:14px/22px 'Malgun Gothic','Segoe UI',sans-serif;color:#453c51;background:transparent}
+body{margin:0;background:transparent}main{margin:0;padding:0 3px 0 0;overflow-wrap:anywhere}main>:first-child{margin-top:0}main>:last-child{margin-bottom:0}
+.rich-heading{font-size:16px;line-height:24px;font-weight:500;margin:18px 0 10px}p{margin:0 0 12px}strong{font-weight:500}a{color:#6c5686}
+pre{overflow:auto;padding:9px 10px;border-radius:0;background:#e9e2f5;white-space:pre;overflow-wrap:normal}
+code{font:12px/19px Consolas,'Malgun Gothic',monospace;background:#e9e2f5}blockquote{border-left:2px solid #766385;margin-left:0;padding-left:10px;color:#766a82}
+table{display:block;max-width:100%;overflow-x:auto;border-collapse:collapse;margin:10px 0 14px;font-size:13px;line-height:20px}td,th{border:0;border-bottom:1px solid #ded4e9;padding:7px 9px;min-width:80px;text-align:left}th{font-weight:500;background:#e8dff4}
+.katex-display{overflow-x:auto;overflow-y:hidden;padding:6px 0}hr{border:0;border-top:1px solid #ded4e9}
+::-webkit-scrollbar{width:8px;height:8px}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-thumb{background:#b4a5c2;border:2px solid #f2edff}

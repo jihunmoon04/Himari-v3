@@ -39,7 +39,7 @@ public partial class MainWindow : Window
         InitializeComponent();
         _ = new ComposerInput(Input, SendMessage);
         SetupTypeToChat(this);
-        Message.SourceChanged += (_, _) => replyReader?.UpdateText(Message.Text);
+        Message.SourceChanged += (_, _) => { replyReader?.UpdateText(Message.Text); UpdateBubblePresentation(); };
         settings = new SettingsWindow();
         settings.ConnectionStatus.SetBinding(System.Windows.Controls.TextBlock.TextProperty, new System.Windows.Data.Binding("Text") { Source = Status });
         settings.PairButton.Click += PairClick;
@@ -53,6 +53,7 @@ public partial class MainWindow : Window
         settings.MoveEnabled.Unchecked += (_, _) => { if (autoMoveActive) ReturnFromMove(); else CancelAutomaticMove(); SchedulePreferencesSave(); };
         settings.MoveEnabled.Checked += (_, _) => SchedulePreferencesSave();
         SetupPresentationControls();
+        SetupBubblePresentation();
         Character.MouseRightButtonDown += (_, _) => captureFromWorkWindow = false;
         ApplyCharacterTheme();
         MoodSelector.ItemsSource = Moods;
@@ -71,7 +72,7 @@ public partial class MainWindow : Window
         Loaded += async (_, _) => { if (loadedOnce) return; loadedOnce = true; settings.Owner = this; InitializeDialogueHost(); UpdateSceneBounds(); if (!offline) { if (!preferencesLoaded) SetupWindowControls(); SetupChatHotkey(); await RestoreConnection(); } };
         Closing += (_, _) => { settings.AllowClose = true; };
         Closing += (_, _) => RestoreMoveHomeOnClose();
-        Closed += (_, _) => { replyReader?.Dispose(); CleanupForegroundTracking(); dialogueHost?.Close(); CancelMovePreview(); lifetime.Cancel(); StopConnection(); timer.Stop(); CleanupWindowControls(); tray.Visible = false; tray.Dispose(); menu.Dispose(); };
+        Closed += (_, _) => { CleanupBubblePresentation(); replyReader?.Dispose(); CleanupForegroundTracking(); dialogueHost?.Close(); CancelMovePreview(); lifetime.Cancel(); StopConnection(); timer.Stop(); CleanupWindowControls(); tray.Visible = false; tray.Dispose(); menu.Dispose(); };
         IsVisibleChanged += (_, _) => UpdateSceneBounds();
         Activated += (_, _) => { UpdateFullscreenPresentation(); FocusComposerIfOpen(); };
         UpdateFrame();
@@ -138,7 +139,7 @@ public partial class MainWindow : Window
             if (resource is not null) { using var reader = new StreamReader(resource.Stream); theme = CharacterTheme.Parse(reader.ReadToEnd()); }
         }
         catch (IOException) { }
-        settings.BubbleDescription.Text = "히마리와 선생님의 말풍선을 각각 표시합니다. 4단위 격자의 도트 프레임과 꼬리는 말풍선이 커져도 같은 굵기를 유지합니다.";
+        settings.BubbleDescription.Text = "말풍선은 2단위 도트 테두리와 한 줄 입력창을 사용합니다. 답변 아래 도구줄에서 복사·중지·펼치기를 사용할 수 있어요.";
     }
     private void MoodChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
     {

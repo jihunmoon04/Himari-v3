@@ -51,8 +51,47 @@ internal static class PresentationChecks
         check(w.Left == left && w.Top == top, "opening a bubble never moves the character window");
         check(answer.TailTop && user.TailTop && host.Top >= w.Top + w.Height - 1, "automatic mode puts both bubbles below a character in the top half");
         Call(w, "OpenReplyBubble", "c", "short"); message.Text = "한 줄 답변"; Pump();
-        check(answer.ActualHeight <= 70, "short answer occupies one row with small expansion icon");
+        check(answer.ActualHeight <= 100, "short answer keeps one text row plus a compact footer toolbar");
+        var toolbar = (FrameworkElement)w.FindName("ReplyToolbar");
+        var replyContent = (FrameworkElement)w.FindName("ReplyContent");
+        check(toolbar.TranslatePoint(new Point(), answer).Y >= replyContent.TranslatePoint(new Point(0, replyContent.ActualHeight), answer).Y, "reply toolbar occupies a separate row below text");
+        foreach (string name in new[] { "CopyReplyButton", "StopButton", "ExpandButton", "SendButton", "ScreenSharingButton" })
+        {
+            var button = (Button)w.FindName(name);
+            check(button.Width == 24 && button.Height == 24 && button.Content is BubbleGlyph { Width: 14, Height: 14 }, "all bubble actions share 24-DIP targets and 14-DIP glyphs");
+        }
+        string copied = ""; typeof(MainWindow).GetField("copyText", Private)!.SetValue(w, (Action<string>)(value => copied = value));
+        message.Text = "**복사할 원문**"; ((Button)w.FindName("CopyReplyButton")).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+        check(copied == "**복사할 원문**" && ((BubbleGlyph)w.FindName("CopyReplyGlyph")).Kind == BubbleGlyphKind.Check, "footer copy preserves full Markdown source and shows confirmation glyph");
+        var status = (TextBlock)w.FindName("Status"); var userStatus = (TextBlock)w.FindName("UserStatus");
+        var stop = (Button)w.FindName("StopButton"); var copy = (Button)w.FindName("CopyReplyButton"); var replyStatus = (TextBlock)w.FindName("ReplyStatus");
+        stop.Visibility = Visibility.Visible; status.Text = "답변 중…"; Pump();
+        check(copy.Visibility == Visibility.Collapsed && replyStatus.Text == "답변 중이에요…" && userStatus.Visibility == Visibility.Collapsed, "streaming replaces copy with stop and shows progress only in assistant bubble");
+        typeof(MainWindow).GetField("replyWasStopped", Private)!.SetValue(w, true); stop.Visibility = Visibility.Collapsed; Pump();
+        check(copy.Visibility == Visibility.Visible && replyStatus.Text == "답변을 멈췄어요.", "completed cancellation retains answer and shows consistent stop feedback");
+        Call(w, "OpenReplyBubble", "c", "new-footer-reply"); status.Text = "연결됨"; Pump();
+        check(replyStatus.Visibility == Visibility.Collapsed && ((BubbleGlyph)w.FindName("CopyReplyGlyph")).Kind == BubbleGlyphKind.Copy, "new reply clears old stop and copy feedback");
+        status.Text = "화면을 보내지 못해 글만 보냈습니다."; Pump();
+        check(userStatus.Text == "화면 없이 글만 보냈어요." && (string)((FrameworkElement)w.FindName("UserStatusPanel")).ToolTip == status.Text, "screen warning uses short copy and retains full diagnostic tooltip");
+        Call(w, "SetConnected", false, "연결이 끊겼습니다. 다시 연결 중…"); Pump();
+        check(userStatus.Text == "다시 연결하는 중이에요…" && ((TextBlock)w.FindName("StatusActionText")).Text == "연결 설정", "connection failure exposes consistent reconnect copy and settings action");
+        status.Text = "이전 메시지의 접수 여부를 확인하지 못했습니다. 다시 보내면 중복될 수 있습니다."; Pump();
+        check(userStatus.Text == "보냈는지 확인이 필요해요." && ((TextBlock)w.FindName("StatusActionText")).Text == "확인", "uncertain delivery points to confirmation rather than resubmitting automatically");
+        Call(w, "SetConnected", false, "연결되지 않음");
+        bool sharing = ((CheckBox)settings.FindName("ScreenSharing")).IsChecked == true;
+        Call(w, "ScreenSharingClick", w, new RoutedEventArgs());
+        check(((CheckBox)settings.FindName("ScreenSharing")).IsChecked != sharing && ((BubbleGlyph)w.FindName("ScreenSharingIndicator")).Kind == BubbleGlyphKind.MonitorOff, "attachment action changes the next message setting and matching glyph");
+        Call(w, "ScreenSharingClick", w, new RoutedEventArgs());
+        Call(w, "SetConnected", true, "연결됨"); ((CheckBox)settings.FindName("ScreenSharing")).IsChecked = false; input.Clear();
+        check(!((Button)w.FindName("SendButton")).IsEnabled, "blank text with no attachment has no send action");
+        var attachmentButton = (Button)w.FindName("ScreenSharingButton"); attachmentButton.Focus();
+        attachmentButton.RaiseEvent(new KeyEventArgs(Keyboard.PrimaryDevice, source, Environment.TickCount, Key.Space) { RoutedEvent = Keyboard.PreviewKeyDownEvent });
+        check(attachmentButton.IsKeyboardFocused, "Space on a toolbar button is reserved for its action rather than opening composer");
+        attachmentButton.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+        check(((Button)w.FindName("SendButton")).IsEnabled && ((Button)w.FindName("SendButton")).ToolTip.ToString()!.StartsWith("화면만 보내기"), "one-line composer retains screen-only sending when sharing is enabled");
+        Call(w, "SetConnected", false, "연결되지 않음");
         Call(w, "CloseBubble");
+        Call(w, "OpenChat"); Pump();
         input.Text = "남길 초안"; input.Select(2, 2);
         foreach (string value in new[] { "상 고정", "하 고정", "상하 자동" })
         {
@@ -93,6 +132,14 @@ internal static class PresentationChecks
             System.IO.Directory.CreateDirectory(screenshots);
             w.Left = area.Left + 160; w.Top = area.Top + 80; mode.SelectedItem = "하 고정"; Pump(); Save(host, System.IO.Path.Combine(screenshots, "04-detached-below.png"));
             w.Top = area.Bottom - w.Height - 60; mode.SelectedItem = "상 고정"; Pump(); Save(host, System.IO.Path.Combine(screenshots, "05-detached-above.png"));
+            string draftBefore = input.Text, replyBefore = message.Text;
+            Call(w, "SetConnected", true, "연결됨"); input.Clear(); message.Text = "이어서 이야기해요."; Pump(); Save(host, System.IO.Path.Combine(screenshots, "07-footer-idle.png"));
+            input.Text = "이 부분을 더 설명해줘."; Pump(); Save(host, System.IO.Path.Combine(screenshots, "08-footer-writing.png"));
+            stop.Visibility = Visibility.Visible; status.Text = "답변 중…"; message.Text = "Alt+Q로 입력창을 열고, 한 번 더 누르면 이전 작업으로 돌아가요."; Pump(); Save(host, System.IO.Path.Combine(screenshots, "09-footer-streaming.png"));
+            stop.Visibility = Visibility.Collapsed; status.Text = "화면을 보내지 못해 글만 보냈습니다."; Pump(); Save(host, System.IO.Path.Combine(screenshots, "10-footer-screen-warning.png"));
+            Call(w, "SetConnected", false, "연결이 끊겼습니다. 다시 연결 중…"); Pump(); Save(host, System.IO.Path.Combine(screenshots, "11-footer-offline.png"));
+            Call(w, "SetConnected", true, "이전 메시지의 접수 여부를 확인하지 못했습니다. 다시 보내면 중복될 수 있습니다."); Pump(); Save(host, System.IO.Path.Combine(screenshots, "12-footer-uncertain.png"));
+            Call(w, "SetConnected", false, "연결되지 않음"); input.Text = draftBefore; message.Text = replyBefore; Pump();
         }
         w.Hide(); Pump(); check(!host.IsVisible, "hiding character also hides detached bubbles");
         w.Show(); Pump(); check(host.IsVisible && input.Text == "IME 초안", "show restores bubble without losing draft");
@@ -120,9 +167,11 @@ internal static class PresentationChecks
         Until(() => (bool)typeof(ReplyReader).GetField("ready", Private)!.GetValue(inlineReader)!);
         var inlineBrowser = (WebView2CompositionControl)typeof(ReplyReader).GetField("browser", Private)!.GetValue(inlineReader)!;
         var rendered = inlineBrowser.ExecuteScriptAsync("document.getElementById('answer').textContent"); Until(() => rendered.IsCompleted);
+        Until(() => { var style = inlineBrowser.ExecuteScriptAsync("document.querySelector('h2') ? getComputedStyle(document.querySelector('h2')).fontSize : ''"); Until(() => style.IsCompleted); return style.Result == "\"16px\""; });
         Pump();
         check(System.Windows.Application.Current.Windows.Count == windowCount && answer.Width > compactWidth && Window.GetWindow(inlineReader) == host, "expansion enlarges existing pixel bubble without creating another window");
         check(w.Left == anchoredLeft && w.Top == anchoredTop, "expanding content keeps character anchored");
+        check(toolbar.TranslatePoint(new Point(), answer).Y >= replyContent.TranslatePoint(new Point(0, replyContent.ActualHeight), answer).Y, "expanded reader also keeps the toolbar outside its scrolling content");
         if (screenshots is not null) Save(host, System.IO.Path.Combine(screenshots, "06-expanded-inline.png"));
         Call(w, "ExpandReplyClick", w, new RoutedEventArgs()); Pump();
         check(answer.Width == compactWidth && input.Text == "IME 초안", "collapsing restores compact bubble and preserves draft");

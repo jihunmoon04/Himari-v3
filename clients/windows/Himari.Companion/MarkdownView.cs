@@ -48,6 +48,7 @@ public sealed class MarkdownView : FlowDocumentScrollViewer
         double offset = scroll?.VerticalOffset ?? 0;
         var doc = new FlowDocument { PagePadding = new Thickness(0), FontFamily = FontFamily, FontSize = FontSize, Foreground = Foreground, ColumnWidth = double.PositiveInfinity };
         foreach (var block in Markdown.Parse(Text, Pipeline)) AddBlock(doc.Blocks, block);
+        if (doc.Blocks.LastBlock is { } last) last.Margin = new Thickness(last.Margin.Left, last.Margin.Top, last.Margin.Right, 0);
         Document = doc;
         if (offset > 0) Dispatcher.BeginInvoke(new Action(() => FindScrollViewer(this)?.ScrollToVerticalOffset(offset)));
     }
@@ -62,14 +63,14 @@ public sealed class MarkdownView : FlowDocumentScrollViewer
         if (block is Markdig.Extensions.Mathematics.MathBlock) target.Add(new WpfParagraph(new Run("∑ 수식 · 확장 보기에서 확인")) { Margin = new Thickness(0, 4, 0, 8) });
         else if (block is HeadingBlock heading)
         {
-            var p = Paragraph(heading.Inline); p.FontWeight = FontWeights.SemiBold; p.FontSize = heading.Level <= 2 ? 17 : 15; target.Add(p);
+            var p = Paragraph(heading.Inline); p.FontWeight = FontWeights.Medium; p.FontSize = 16; p.LineHeight = 24; target.Add(p);
         }
         else if (block is ParagraphBlock paragraph) target.Add(Paragraph(paragraph.Inline));
         else if (block is CodeBlock code)
         {
             var lines = code.Lines.ToString().Split('\n');
             var p = new WpfParagraph(new Run(string.Join("\n", lines.Take(5)) + (lines.Length > 5 ? "\n… 확장 보기에서 계속" : "")))
-            { FontFamily = new FontFamily("Consolas, Malgun Gothic"), FontSize = 12, Background = new SolidColorBrush(Color.FromRgb(231, 225, 241)), Padding = new Thickness(6), Margin = new Thickness(0, 4, 0, 8) };
+            { FontFamily = new FontFamily("Consolas, Malgun Gothic"), FontSize = 12, LineHeight = 19, Background = new SolidColorBrush(Color.FromRgb(233, 226, 245)), Padding = new Thickness(9), Margin = new Thickness(0, 4, 0, 8) };
             target.Add(p);
         }
         else if (block is Markdig.Extensions.Tables.Table) target.Add(new WpfParagraph(new Run("▦ 표 · 확장 보기에서 확인")) { Margin = new Thickness(0, 4, 0, 8), FontStyle = FontStyles.Italic });
@@ -82,7 +83,7 @@ public sealed class MarkdownView : FlowDocumentScrollViewer
         }
         else if (block is QuoteBlock quote)
         {
-            var section = new Section { BorderBrush = Brushes.SlateGray, BorderThickness = new Thickness(2, 0, 0, 0), Padding = new Thickness(8, 0, 0, 0), Margin = new Thickness(0, 4, 0, 8) };
+            var section = new Section { BorderBrush = new SolidColorBrush(Color.FromRgb(118, 99, 133)), BorderThickness = new Thickness(2, 0, 0, 0), Padding = new Thickness(10, 0, 0, 0), Margin = new Thickness(0, 4, 0, 8) };
             foreach (var child in quote) AddBlock(section.Blocks, child); target.Add(section);
         }
         else if (block is ThematicBreakBlock) target.Add(new WpfParagraph(new Run("────────")) { Foreground = Brushes.SlateGray });
@@ -91,7 +92,7 @@ public sealed class MarkdownView : FlowDocumentScrollViewer
     }
     private static WpfParagraph Paragraph(ContainerInline? inline)
     {
-        var p = new WpfParagraph { Margin = new Thickness(0, 0, 0, 8), LineHeight = 23 };
+        var p = new WpfParagraph { Margin = new Thickness(0, 0, 0, 8), LineHeight = 22 };
         if (inline is not null) Inlines(p.Inlines, inline); return p;
     }
     private static void Inlines(InlineCollection target, ContainerInline container)
@@ -111,11 +112,11 @@ public sealed class MarkdownView : FlowDocumentScrollViewer
                 }
                 else target.Add(new Run(auto.Url));
             }
-            else if (inline is CodeInline code) target.Add(new Run(code.Content) { FontFamily = new FontFamily("Consolas"), Background = new SolidColorBrush(Color.FromRgb(231, 225, 241)) });
+            else if (inline is CodeInline code) target.Add(new Run(code.Content) { FontFamily = new FontFamily("Consolas"), FontSize = 12, Background = new SolidColorBrush(Color.FromRgb(233, 226, 245)) });
             else if (inline is LineBreakInline) target.Add(new LineBreak());
             else if (inline is EmphasisInline emphasis)
             {
-                Span span = emphasis.DelimiterChar == '~' ? new Span { TextDecorations = TextDecorations.Strikethrough } : emphasis.DelimiterCount >= 2 ? new Bold() : new Italic();
+                Span span = emphasis.DelimiterChar == '~' ? new Span { TextDecorations = TextDecorations.Strikethrough } : emphasis.DelimiterCount >= 2 ? new Bold { FontWeight = FontWeights.Medium } : new Italic();
                 Inlines(span.Inlines, emphasis); target.Add(span);
             }
             else if (inline is LinkInline link)

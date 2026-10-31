@@ -22,8 +22,8 @@ public partial class MainWindow
         }
         Message.Visibility = replyExpanded ? Visibility.Collapsed : Visibility.Visible;
         ExpandedReply.Visibility = replyExpanded ? Visibility.Visible : Visibility.Collapsed;
-        ExpandGlyph.Expanded = replyExpanded;
-        ExpandButton.ToolTip = replyExpanded ? "말풍선 작게" : "말풍선 크게";
+        ExpandGlyph.Kind = replyExpanded ? BubbleGlyphKind.Collapse : BubbleGlyphKind.Expand;
+        ExpandButton.ToolTip = replyExpanded ? "말풍선 접기" : "말풍선 펼치기";
         replyReader?.UpdateText(Message.Text);
         UpdateSceneBounds();
     }

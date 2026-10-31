@@ -163,10 +163,12 @@ public partial class MainWindow
         UpdateDialoguePosition();
         BubblePanel.TailRight = flip; UserBubble.TailRight = !flip; FlipMenu.IsChecked = flip;
         bool sharing = settings.ScreenSharing.IsChecked == true;
-        ScreenSharingIndicator.Text = sharing ? "▣" : "▢";
-        string sharingDescription = sharing ? "화면 함께 전송 켜짐" : "화면 함께 전송 꺼짐";
-        ScreenSharingIndicator.ToolTip = sharingDescription + " · 설정에서 변경";
-        System.Windows.Automation.AutomationProperties.SetName(ScreenSharingIndicator, sharingDescription);
+        ScreenSharingIndicator.Kind = sharing ? BubbleGlyphKind.Monitor : BubbleGlyphKind.MonitorOff;
+        string sharingDescription = sharing ? "화면 함께 보내기 켜짐" : "화면 함께 보내기 꺼짐";
+        ScreenSharingButton.ToolTip = sharingDescription;
+        ScreenSharingButton.Foreground = (System.Windows.Media.Brush)FindResource(sharing ? "BubbleAccent" : "BubbleMuted");
+        System.Windows.Automation.AutomationProperties.SetName(ScreenSharingButton, sharingDescription);
+        UpdateBubblePresentation();
         UpdateBubbleBounds(); SchedulePreferencesSave();
     }
     private void UpdateDialoguePosition()

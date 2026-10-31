@@ -50,10 +50,11 @@ public partial class MainWindow
 
     private void SetConnected(bool value, string text)
     {
-        connected = value; Status.Text = text; SendButton.IsEnabled = value && !sending; Input.IsEnabled = true;
+        connected = value; Status.Text = text; Input.IsEnabled = true;
         StopButton.IsEnabled = value;
         Character.Opacity = value ? 1 : .55;
         ConnectionNotice.Visibility = value || text == "기기 확인 중…" ? Visibility.Collapsed : Visibility.Visible;
+        UpdateBubblePresentation();
     }
     private void StopConnection()
     {
@@ -287,6 +288,7 @@ public partial class MainWindow
     private void InputChanged(object sender, System.Windows.Controls.TextChangedEventArgs e)
     {
         inputRevision++;
+        UpdateBubblePresentation();
         if (!string.IsNullOrEmpty(Input.Text) && ComposerPanel.Visibility == Visibility.Visible) PresentUserBubble();
     }
     private void SetCurrentConversation(string? id)
@@ -427,13 +429,19 @@ public partial class MainWindow
             pendingScreenConversation = null;
             // Another stream may still be validating this request's screen.
             if (earlyMoves.TryGetValue(context.ConversationId, out var buffered)) buffered.RemoveAll(x => !moveLifetime.IsVerifying(x.Job));
-            sending = false; messageSend.Exit(); SendButton.IsEnabled = connected;
+            sending = false; messageSend.Exit(); UpdateBubblePresentation();
         }
     }
     private async void CancelClick(object sender, RoutedEventArgs e)
     {
         if (!connected || client is null || connection is null || currentConversation is null) return;
-        try { await client.SendAsync(HttpMethod.Post, PathFor(currentConversation) + "/cancel", new { }, connection.Token); }
+        var local = client; var conversation = currentConversation; var reply = assistantBubbleKey;
+        try
+        {
+            await local.SendAsync(HttpMethod.Post, PathFor(conversation) + "/cancel", new { }, connection.Token);
+            if (ReferenceEquals(local, client) && conversation == currentConversation && reply == assistantBubbleKey)
+            { replyWasStopped = true; UpdateBubblePresentation(); }
+        }
         catch (Exception ex) { ShowError(ex); }
     }
     private void OpenWebClick(object sender, RoutedEventArgs e) => OpenWeb();

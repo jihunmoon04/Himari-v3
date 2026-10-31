@@ -33,11 +33,12 @@ public partial class MainWindow
     private void OpenReplyBubble(string conversation, string? job) => ShowAssistantBubble($"{conversation}:{job}");
     private void ShowAssistantBubble(string? key)
     {
-        if (key is null || key != assistantBubbleKey) assistantBubbleSequence = ++bubbleSequence;
+        if (key is null || key != assistantBubbleKey) { assistantBubbleSequence = ++bubbleSequence; replyWasStopped = false; ResetCopyFeedback(); }
         assistantBubbleKey = key;
         assistantBubbleCloseDue = false;
         bubbleTimer.Stop();
         BubblePanel.Visibility = Visibility.Visible;
+        UpdateBubblePresentation();
         ArrangeBubbles(); UpdateSceneBounds(); ExpireBubbles();
     }
     private void AssistantBubbleExpired()

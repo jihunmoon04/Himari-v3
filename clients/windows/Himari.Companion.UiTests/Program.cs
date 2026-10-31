@@ -55,7 +55,7 @@ internal static class Program
             var pixel = new byte[4]; bitmap.CopyPixels(new Int32Rect(20, 20, 1, 1), pixel, 4, 0);
             return Color.FromArgb(pixel[3], pixel[2], pixel[1], pixel[0]);
         }
-        Check(Fill(true) == Color.FromRgb(255, 253, 244) && Fill(false) == Color.FromRgb(240, 235, 255), "rendered user bubble is cream and Himari bubble is lavender");
+        Check(Fill(true) == Color.FromRgb(255, 253, 243) && Fill(false) == Color.FromRgb(242, 237, 255), "rendered user bubble is cream and Himari bubble is lavender");
         var timeline = new MainWindow();
         object? Timeline(string method, params object?[] args) => typeof(MainWindow).GetMethod(method, BindingFlags.NonPublic | BindingFlags.Instance)!.Invoke(timeline, args);
         var oldUser = (FrameworkElement)timeline.FindName("UserBubble");
@@ -190,7 +190,8 @@ internal static class Program
         status.Text = "연결됨";
         Check(userStatus.Visibility == Visibility.Collapsed, "routine connected status does not add a chat row");
         status.Text = "화면을 보내지 못해 글만 보냈습니다.";
-        Check(userStatus.Visibility == Visibility.Visible && userStatus.Text == status.Text, "screen delivery warnings remain visible inside user bubble");
+        Check(userStatus.Visibility == Visibility.Visible && userStatus.Text == "화면 없이 글만 보냈어요.", "screen delivery warning uses concise bubble copy");
+        Check((string)((FrameworkElement)companion.FindName("UserStatusPanel")).ToolTip == status.Text, "warning tooltip retains the full diagnostic text");
         companion.Close();
         foreach (bool partialLive in new[] { false, true })
         {
