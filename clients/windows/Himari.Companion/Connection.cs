@@ -432,7 +432,8 @@ public partial class MainWindow
             sending = false; messageSend.Exit(); UpdateBubblePresentation();
         }
     }
-    private async void CancelClick(object sender, RoutedEventArgs e)
+    private async void CancelClick(object sender, RoutedEventArgs e) => await RequestCancel();
+    private async Task RequestCancel()
     {
         if (!connected || client is null || connection is null || currentConversation is null) return;
         var local = client; var conversation = currentConversation; var reply = assistantBubbleKey;
@@ -440,7 +441,7 @@ public partial class MainWindow
         {
             await local.SendAsync(HttpMethod.Post, PathFor(conversation) + "/cancel", new { }, connection.Token);
             if (ReferenceEquals(local, client) && conversation == currentConversation && reply == assistantBubbleKey)
-            { replyWasStopped = true; UpdateBubblePresentation(); }
+            { replyStopRequested = true; UpdateBubblePresentation(); }
         }
         catch (Exception ex) { ShowError(ex); }
     }

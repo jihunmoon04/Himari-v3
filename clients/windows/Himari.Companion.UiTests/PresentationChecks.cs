@@ -63,12 +63,15 @@ internal static class PresentationChecks
         string copied = ""; typeof(MainWindow).GetField("copyText", Private)!.SetValue(w, (Action<string>)(value => copied = value));
         message.Text = "**복사할 원문**"; ((Button)w.FindName("CopyReplyButton")).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
         check(copied == "**복사할 원문**" && ((BubbleGlyph)w.FindName("CopyReplyGlyph")).Kind == BubbleGlyphKind.Check, "footer copy preserves full Markdown source and shows confirmation glyph");
+        typeof(MainWindow).GetField("copyText", Private)!.SetValue(w, (Action<string>)(_ => throw new ExternalException("clipboard busy")));
+        ((Button)w.FindName("CopyReplyButton")).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+        check(((TextBlock)w.FindName("Status")).Text == "복사하지 못했어요. 다시 시도해 주세요.", "clipboard contention shows an error without closing the app");
         var status = (TextBlock)w.FindName("Status"); var userStatus = (TextBlock)w.FindName("UserStatus");
         var stop = (Button)w.FindName("StopButton"); var copy = (Button)w.FindName("CopyReplyButton"); var replyStatus = (TextBlock)w.FindName("ReplyStatus");
         stop.Visibility = Visibility.Visible; status.Text = "답변 중…"; Pump();
         check(copy.Visibility == Visibility.Collapsed && replyStatus.Text == "답변 중이에요…" && userStatus.Visibility == Visibility.Collapsed, "streaming replaces copy with stop and shows progress only in assistant bubble");
-        typeof(MainWindow).GetField("replyWasStopped", Private)!.SetValue(w, true); stop.Visibility = Visibility.Collapsed; Pump();
-        check(copy.Visibility == Visibility.Visible && replyStatus.Text == "답변을 멈췄어요.", "completed cancellation retains answer and shows consistent stop feedback");
+        typeof(MainWindow).GetField("replyStopRequested", Private)!.SetValue(w, true); stop.Visibility = Visibility.Collapsed; Pump();
+        check(copy.Visibility == Visibility.Visible && replyStatus.Text == "답변 중지 요청을 보냈어요.", "cancel acknowledgement retains answer and reports only the request");
         Call(w, "OpenReplyBubble", "c", "new-footer-reply"); status.Text = "연결됨"; Pump();
         check(replyStatus.Visibility == Visibility.Collapsed && ((BubbleGlyph)w.FindName("CopyReplyGlyph")).Kind == BubbleGlyphKind.Copy, "new reply clears old stop and copy feedback");
         status.Text = "화면을 보내지 못해 글만 보냈습니다."; Pump();
@@ -194,6 +197,41 @@ internal static class PresentationChecks
         var foreground = (IntPtr)typeof(MainWindow).GetMethod("GetForegroundWindow", BindingFlags.Static | BindingFlags.NonPublic)!.Invoke(null, null)!;
         check(!(bool)Call(w, "IsChatWindow", foreground)! && !input.IsKeyboardFocused, "shortcut with no previous work window releases foreground and keyboard input");
         w.Close(); Pump();
+        foreach (bool newerReply in new[] { false, true })
+        {
+            var race = new MainWindow(true); var transport = new ReplyReconnectHandler { DeferCancel = true };
+            var server = new ServerClient("https://example.com/", "test", transport); using var token = new CancellationTokenSource();
+            void Field(string name, object? value) => typeof(MainWindow).GetField(name, Private)!.SetValue(race, value);
+            Field("client", server); Field("connection", token); Field("currentConversation", "c");
+            Call(race, "SetConnected", true, "연결됨"); Call(race, "OpenReplyBubble", "c", "j1");
+            var raceStop = (Button)race.FindName("StopButton"); raceStop.Visibility = Visibility.Visible;
+            var cancellation = (Task)Call(race, "RequestCancel")!;
+            // The stream completes normally before the HTTP cancellation acknowledgement.
+            raceStop.Visibility = Visibility.Collapsed;
+            if (newerReply) Call(race, "OpenReplyBubble", "c", "j2");
+            transport.ReleaseCancel();
+            Until(() => cancellation.IsCompleted); cancellation.GetAwaiter().GetResult();
+            Pump();
+            var text = ((TextBlock)race.FindName("ReplyStatus")).Text;
+            check(newerReply ? text == "" : text == "답변 중지 요청을 보냈어요.", "late cancel response never claims completion or affects a newer reply");
+            race.Close(); server.Dispose();
+        }
+        foreach (bool flipped in new[] { false, true })
+        {
+            var legacy = new MainWindow(true) { Left = 120, Top = 100, Width = 520, Height = 700 };
+            var legacySettings = (Window)typeof(MainWindow).GetField("settings", Private)!.GetValue(legacy)!;
+            ((CheckBox)legacySettings.FindName("FacingLeft")).IsChecked = flipped;
+            typeof(MainWindow).GetField("loadedOnce", Private)!.SetValue(legacy, true);
+            legacy.Show(); Pump();
+            var character = (FrameworkElement)legacy.FindName("Character");
+            var a = character.PointToScreen(new Point(0, 0)); var b = character.PointToScreen(new Point(character.ActualWidth, character.ActualHeight));
+            var before = new Point(Math.Min(a.X, b.X), Math.Min(a.Y, b.Y));
+            typeof(MainWindow).GetField("legacyWindowPosition", Private)!.SetValue(legacy, true);
+            Call(legacy, "InitializeDialogueHost"); legacy.UpdateLayout();
+            a = character.PointToScreen(new Point(0, 0)); b = character.PointToScreen(new Point(character.ActualWidth, character.ActualHeight));
+            check(Math.Abs(Math.Min(a.X, b.X) - before.X) <= 2 && Math.Abs(Math.Min(a.Y, b.Y) - before.Y) <= 2, "legacy window migration preserves the visible character position in both orientations");
+            legacy.Close();
+        }
         Console.WriteLine("Detached windows, four screen corners, vertical modes, type-to-chat and native Markdown checks passed.");
     }
     private static void Save(Window window, string path)

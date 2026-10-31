@@ -8,7 +8,7 @@ namespace Himari.Companion;
 
 public partial class MainWindow
 {
-    private bool replyWasStopped;
+    private bool replyStopRequested;
     private BubbleStatusAction bubbleStatusAction;
     private readonly DispatcherTimer copiedTimer = new() { Interval = TimeSpan.FromSeconds(1.5) };
     private Action<string> copyText = System.Windows.Clipboard.SetText;
@@ -46,7 +46,7 @@ public partial class MainWindow
         StatusActionText.Text = notice.Action == BubbleStatusAction.Settings ? "연결 설정" : "확인";
         System.Windows.Automation.AutomationProperties.SetName(StatusActionButton, StatusActionText.Text);
         bool streaming = StopButton.Visibility == Visibility.Visible;
-        ReplyStatus.Text = replyWasStopped ? streaming ? "답변을 멈추는 중이에요…" : "답변을 멈췄어요." : streaming ? "답변 중이에요…" : "";
+        ReplyStatus.Text = replyStopRequested ? "답변 중지 요청을 보냈어요." : streaming ? "답변 중이에요…" : "";
         ReplyStatus.Visibility = ReplyStatus.Text.Length == 0 ? Visibility.Collapsed : Visibility.Visible;
         CopyReplyButton.Visibility = streaming ? Visibility.Collapsed : Visibility.Visible;
         CopyReplyButton.IsEnabled = !string.IsNullOrWhiteSpace(Message.Text);
@@ -69,7 +69,7 @@ public partial class MainWindow
             CopyReplyButton.ToolTip = "복사했어요.";
             copiedTimer.Stop(); copiedTimer.Start();
         }
-        catch (System.Runtime.InteropServices.COMException) { Status.Text = "복사하지 못했어요. 다시 시도해 주세요."; }
+        catch (System.Runtime.InteropServices.ExternalException) { Status.Text = "복사하지 못했어요. 다시 시도해 주세요."; }
     }
     private void ResetCopyFeedback()
     {

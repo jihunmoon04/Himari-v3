@@ -389,6 +389,9 @@ internal sealed class ReplyReconnectHandler : HttpMessageHandler
     internal int Posts, Sequence = 1;
     internal string Job = "old", Live = "";
     internal bool DeferAcceptance;
+    internal bool DeferCancel;
+    private readonly TaskCompletionSource<HttpResponseMessage> cancellation = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    internal void ReleaseCancel() => cancellation.SetResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("{}") });
     private readonly TaskCompletionSource<HttpResponseMessage> acceptance = new(TaskCreationOptions.RunContinuationsAsynchronously);
     internal void ReleaseAcceptance() => acceptance.SetResult(new HttpResponseMessage(HttpStatusCode.Accepted) { Content = new StringContent("{\"job_id\":\"j\"}", Encoding.UTF8, "application/json") });
     private bool liveSent;
@@ -398,6 +401,7 @@ internal sealed class ReplyReconnectHandler : HttpMessageHandler
     {
         string body; var status = HttpStatusCode.OK;
         string path = request.RequestUri!.AbsolutePath;
+        if (request.Method == HttpMethod.Post && path.EndsWith("/cancel") && DeferCancel) return cancellation.Task.WaitAsync(ct);
         if (request.Method == HttpMethod.Post && path.EndsWith("/messages"))
         {
             Posts++; Job = "j"; Sequence = 2;
