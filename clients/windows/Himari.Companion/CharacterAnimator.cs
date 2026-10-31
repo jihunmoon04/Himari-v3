@@ -25,12 +25,17 @@ internal sealed class CharacterAnimator
     private static readonly string?[] TalkCycle = ["small", "wide", "small", null];
     private static readonly (string Eyes, int Ms)[] Blink = [("half", 60), ("closed", 90), ("half", 60)];
     private static readonly TimeSpan DoubleBlinkGap = TimeSpan.FromMilliseconds(120);
+    // Short one-shots played now and then while idle, 30-90 s apart (owner request 2026-10-31).
+    private static readonly string[] Extras = ["glance", "ahoge", "twinkle"];
 
     private readonly CharacterManifest manifest;
     private readonly Random random;
+    private readonly Random extrasRandom;
     private readonly List<AnimationRequest> requests = [];
     private readonly AnimationRequest idle;
-    private AnimationRequest? sleep;
+    private AnimationRequest? sleep, yawn;
+    private TimeSpan extraAt;
+    private string? lastExtra;
     private AnimationRequest current;
     private TimeSpan currentStart;
     private long order;
@@ -44,9 +49,12 @@ internal sealed class CharacterAnimator
     {
         this.manifest = manifest;
         random = new Random(seed);
+        // Its own sequence, so adding extras leaves the blink schedule unchanged.
+        extrasRandom = new Random(seed + 1);
         idle = current = new AnimationRequest("idle", AnimationLayer.Ambient, now, null, order++);
         currentStart = now;
         ScheduleBlink(now);
+        ScheduleExtra(now);
     }
 
     internal string Mood { get => mood; set => mood = value is not null && manifest.Faces.ContainsKey(value) ? value : "neutral"; }
@@ -76,23 +84,36 @@ internal sealed class CharacterAnimator
         talkStop = start + TalkStep * Math.Max(1, steps);
     }
 
-    // Dozing plays the sleep clip when the art has one; until then it only closes the eyes.
+    // Dozing yawns, then plays the sleep clip, when the art has them; without a sleep clip it
+    // only closes the eyes. Waking ends both at once, then stretches once there is stretch art
+    // (on hold until arms can be raised, owner review 2026-10-31).
     internal void SetSleeping(bool value, TimeSpan now)
     {
         if (value == sleeping) return;
         sleeping = value;
         if (!manifest.Clips.ContainsKey("sleep")) return;
-        if (value) sleep = Request("sleep", AnimationLayer.Ambient, now);
-        else if (sleep is not null) { Release(sleep, now); sleep = null; }
+        if (value)
+        {
+            var start = now;
+            if (manifest.Clips.TryGetValue("yawn", out var y)) { yawn = Request("yawn", AnimationLayer.Ambient, now); start += y.Length; }
+            sleep = new AnimationRequest("sleep", AnimationLayer.Ambient, start, null, order++);
+            requests.Add(sleep);
+            return;
+        }
+        foreach (var r in new[] { yawn, sleep }) if (r is not null) Release(r, now);
+        yawn = sleep = null;
+        if (manifest.Clips.ContainsKey("stretch")) Request("stretch", AnimationLayer.Ambient, now);
     }
 
     internal CharacterPose Pose(TimeSpan now)
     {
         var (clip, frame) = BodyFrame(now);
         var face = manifest.Faces[Mood];
-        // Talking wakes the eyes even in a sleep frame; otherwise the frame, then dozing, decide.
-        string? eyes = Talking(now) ? BlinkEyes(now) : frame.Eyes ?? (sleeping ? "closed" : BlinkEyes(now));
-        string? mouth = frame.Mouth ?? TalkMouth(now);
+        // Talking wakes the eyes and moves the mouth even in a frame that forces them;
+        // otherwise the frame, then dozing, decide.
+        bool talking = Talking(now);
+        string? eyes = talking ? BlinkEyes(now) : frame.Eyes ?? (sleeping ? "closed" : BlinkEyes(now));
+        string? mouth = talking ? TalkMouth(now) : frame.Mouth;
         return new(current.Clip, Array.IndexOf(clip.Frames, frame), Mood,
             eyes is not null && face.Eyes?.ContainsKey(eyes) == true ? eyes : null,
             mouth is not null && face.Mouth?.ContainsKey(mouth) == true ? mouth : null);
@@ -102,7 +123,7 @@ internal sealed class CharacterAnimator
     internal TimeSpan NextChange(TimeSpan now)
     {
         BodyFrame(now);
-        var next = new List<TimeSpan> { BodyBoundary(now), BlinkBoundary(now) };
+        var next = new List<TimeSpan> { BodyBoundary(now), BlinkBoundary(now), extraAt };
         foreach (var r in requests) if (r.End is { } end && end > now) next.Add(end);
         if (talkStart is { } start && (talkStop is null || talkStop > now))
             next.Add(start + TalkStep * ((long)Math.Floor((now - start) / TalkStep) + 1));
@@ -112,6 +133,7 @@ internal sealed class CharacterAnimator
     private (CharacterClip Clip, ClipFrame Frame) BodyFrame(TimeSpan now)
     {
         requests.RemoveAll(r => r.End is { } end && end <= now && r != current);
+        if (now >= extraAt) PlayExtra(now);
         var active = requests.Where(r => r.Start <= now && (r.End is null || r.End > now))
             .OrderByDescending(r => r.Layer).ThenByDescending(r => r.Order).FirstOrDefault() ?? idle;
         if (active != current)
@@ -140,6 +162,22 @@ internal sealed class CharacterAnimator
         if (!clip.Loop && elapsed >= clip.Length.TotalMilliseconds) return now + TimeSpan.FromSeconds(1);
         foreach (var f in clip.Frames) { edge += f.Ms; if (edge > position) return now + TimeSpan.FromMilliseconds(edge - position); }
         return now + TimeSpan.FromSeconds(1);
+    }
+
+    private void ScheduleExtra(TimeSpan after) => extraAt = after + TimeSpan.FromSeconds(extrasRandom.Next(30, 91));
+
+    // Only over plain idle: not while dozing, talking or showing any other clip, and only
+    // extras the current mood can show (happy has no glance eyes, PR #145 review).
+    private void PlayExtra(TimeSpan now)
+    {
+        ScheduleExtra(now);
+        bool idleShown = !requests.Any(r => r.Start <= now && (r.End is null || r.End > now));
+        var eyes = manifest.Faces[Mood].Eyes;
+        var choices = Extras.Where(c => c != lastExtra && manifest.Clips.TryGetValue(c, out var clip)
+            && clip.Frames.All(f => f.Eyes is null || eyes?.ContainsKey(f.Eyes) == true)).ToList();
+        if (!idleShown || sleeping || Talking(now) || choices.Count == 0) return;
+        lastExtra = choices[extrasRandom.Next(choices.Count)];
+        Request(lastExtra, AnimationLayer.Ambient, now);
     }
 
     private bool Talking(TimeSpan now) => talkStart is not null && (talkStop is null || talkStop > now);
