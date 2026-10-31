@@ -22,7 +22,8 @@ internal sealed record CharacterManifest(int Version, int[] Canvas, string Sheet
         if (manifest.Clips is null || manifest.Faces is null) throw new InvalidDataException("character manifest needs clips and faces");
         if (!manifest.Clips.TryGetValue("idle", out var idle) || idle is null || !idle.Loop) throw new InvalidDataException("character manifest needs a looping idle clip");
         foreach (var (name, clip) in manifest.Clips)
-            if (clip?.Frames is not { Length: > 0 } || clip.Frames.Any(f => f is null || f.Ms <= 0 || !IsRect(f.Src) || f.Face is not [_, _]))
+            if (clip?.Frames is not { Length: > 0 } || clip.Frames.Any(f => f is null || f.Ms <= 0 || !IsRect(f.Src) || f.Face is not [_, _])
+                || clip.LoopFrom < 0 || clip.LoopFrom >= clip.Frames.Length || clip.LoopFrom > 0 && !clip.Loop)
                 throw new InvalidDataException($"clip {name}");
         if (!manifest.Faces.ContainsKey("neutral")) throw new InvalidDataException("character manifest needs a neutral face");
         foreach (var (name, face) in manifest.Faces)
@@ -52,11 +53,23 @@ internal sealed record CharacterManifest(int Version, int[] Canvas, string Sheet
 }
 
 internal sealed record FaceArea(int[] Origin, int[] Size);
-internal sealed record CharacterClip(bool Loop, ClipFrame[] Frames)
+// A loop with LoopFrom > 0 plays its first LoopFrom frames once (falling asleep), then
+// repeats the rest.
+internal sealed record CharacterClip(bool Loop, ClipFrame[] Frames, int LoopFrom = 0)
 {
     internal TimeSpan Length => TimeSpan.FromMilliseconds(Frames.Sum(f => f.Ms));
+    internal double IntroMs => Frames.Take(LoopFrom).Sum(f => f.Ms);
+
+    // Time into the clip, in ms, for the frame shown after elapsed ms of play.
+    internal double Position(double elapsed)
+    {
+        double total = Length.TotalMilliseconds, intro = IntroMs;
+        if (!Loop) return Math.Min(elapsed, total - 1);
+        return elapsed < intro ? elapsed : intro + (elapsed - intro) % (total - intro);
+    }
 }
 // Eyes and Mouth, when present, force that variant for the frame (for example closed eyes while dozing).
+// Forced eyes open while the character talks.
 internal sealed record ClipFrame(int[] Src, int Ms, int[] Face, string? Eyes = null, string? Mouth = null);
 internal sealed record CharacterFace(int[] Src, Dictionary<string, FaceVariant>? Eyes = null, Dictionary<string, FaceVariant>? Mouth = null);
 internal sealed record FaceVariant(int[] Src, int[] At);

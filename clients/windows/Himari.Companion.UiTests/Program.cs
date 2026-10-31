@@ -84,7 +84,8 @@ internal static class Program
         foreach (var (file, pose) in new[] {
             ("idle-1-neutral", new CharacterPose("idle", 0, "neutral", null, null)),
             ("idle-2-happy", new CharacterPose("idle", 1, "happy", null, null)),
-            ("idle-1-neutral-closed-wide", new CharacterPose("idle", 0, "neutral", "closed", "wide")) })
+            ("idle-1-neutral-closed-wide", new CharacterPose("idle", 0, "neutral", "closed", "wide")),
+            ("sleep-4-neutral-closed", new CharacterPose("sleep", 3, "neutral", "closed", null)) })
         {
             renderer.Render(pose);
             using var reference = System.IO.File.OpenRead(System.IO.Path.Combine(AppContext.BaseDirectory, "Fixtures", "character", file + ".png"));
