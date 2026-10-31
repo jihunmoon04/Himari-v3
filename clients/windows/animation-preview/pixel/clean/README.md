@@ -101,11 +101,11 @@ aseprite -b --script-param in=happy.png --script-param neutral=neutral.png --scr
 | `body.aseprite` | 몸 동작. 태그 하나가 동작 하나(`idle` 6프레임, 그 뒤로 `sleep`, `yawn`, `glance`, `ahoge`, `twinkle`). 숨긴 레이어 `@face`의 1×1 점이 그 프레임에서 얼굴을 놓을 자리다(쉬는 자세 (101, 47), 숨쉬기 프레임은 1px 위). 숨긴 `@eyes`, `@mouth`의 셀 데이터는 그 프레임의 눈·입을 강제한다. |
 | `faces.aseprite` | 얼굴 33×26. 표정마다 프레임 하나, 태그 이름이 표정 이름. 그룹 `eyes/half`, `eyes/closed`, `mouth/small`, `mouth/wide`에 기본 얼굴과 다른 픽셀만 그린다(happy는 눈 변형이 없다). 숨긴 `@body`는 맞춰 볼 몸 그림이다. 턱의 손(129 이상, 66 이상)은 몸 쪽이라 비워 둔다. |
 
-- **처음 만들기**: `../tools/sources.lua`가 `idle-test.aseprite`, `neutral-face.aseprite`, `moods/`에서 두 원본을 한 번 만들었다. 그대로 다시 돌리면 고친 `faces.aseprite`를 덮어쓴다. 숨쉬기를 바꿀 때는 `idle-test.lua`를 고쳐 돌린 뒤 `--script-param only=body`로 `body.aseprite`만 다시 만든다.
+- **처음 만들기**: `../tools/sources.lua`가 `idle-test.aseprite`, `neutral-face.aseprite`, `moods/`에서 두 원본을 한 번 만들었다. 그대로 다시 돌리면 고친 `faces.aseprite`를 덮어쓴다. 숨쉬기를 바꿀 때는 `idle-test.lua`를 고쳐 돌린 뒤 `--script-param only=body`로 `body.aseprite`만 다시 만들고, 이어서 `legs.lua`(아래 "다리 교체")와 `clips.lua`를 돌린다.
 - **neutral 눈·입 다시 그림**(소유자 검토 2026-10-31): `../tools/neutral-variants.lua`가 `faces.aseprite`의 neutral 변형을 고쳤다. 반쯤 감은 눈은 뜬 눈의 속눈썹처럼 오른쪽으로 내려가고, 감은 눈은 선 위의 갈색 채움을 없앴다. 두 경우 모두 바깥쪽 속눈썹 끝을 눈마다 2px 줄였다. 말하는 입은 다문 입 선의 두 끝 (112,65), (116,67)을 그대로 두고 가운데가 벌어진다. 그래서 `frames/`의 낱장과는 이제 다르다.
 - **내보내기**: 원본을 고친 뒤 `../tools/export.lua`를 돌린다(`pixel/`에서 실행).
   - 같은 그림 조각은 시트에 한 번만 넣는다(지금 78조각, 1002×1674).
-  - UI 테스트가 비교할 기준 그림 8장(`idle-1-neutral`, `idle-2-happy`, `idle-1-neutral-closed-wide`, `sleep-4-neutral-closed`, `yawn-3-neutral-closed-wide`, `glance-2-sad-left`, `ahoge-2-neutral`, `twinkle-3-neutral`)도 함께 쓴다.
+  - UI 테스트가 비교할 기준 그림 8장(`idle-1-neutral`, `idle-2-happy`, `idle-1-neutral-closed-wide`, `sleep-4-neutral-closed`, `yawn-2-happy`, `glance-2-sad-left`, `ahoge-2-neutral`, `twinkle-3-neutral`)도 함께 쓴다.
   - 다음 중 하나라도 어기면 아무것도 쓰지 않고 실패한다: 색 인덱스 모드와 `himari-32.gpl` 팔레트, 모든 몸 프레임의 `@face` 점, 모든 동작의 첫 프레임과 단발 동작의 마지막 프레임 = idle 첫 프레임, 반복 동작의 `loopFrom`, 표정 8종.
 
 ```
@@ -135,7 +135,27 @@ aseprite -b --script-param body=clean/body.aseprite --script-param log=clips.txt
 
 같은 `clips.lua`가 만든다. 모두 쉬는 자세로 시작해서 쉬는 자세로 끝나는 단발 동작이다. 길이와 동작은 [설계 문서 §5.4](../../../../../docs/companion-animation-v0.1.md)에 있다.
 
-- **`yawn`**: `@eyes` `closed`와 `@mouth` `wide`로 얼굴을 강제한다. 입 그림은 말하기의 큰 입을 그대로 쓴다.
+- **`yawn`**: 반쯤 감은 눈 → 손으로 입을 가린 자세 그림 → 반쯤 감은 눈. 자세 그림은 `poses/yawn-hand.png`이고, `clips.lua`의 `POSES`에 적은 상자(98–170열, 40–105행)만 상체 레이어에 붙인다. 다른 레이어는 그 상자를 비우고, `@face` 셀 데이터 `own`으로 표정 얼굴을 얹지 않게 한다.
+
+## 다리 교체 (`../tools/legs.lua`)
+
+소유자 결정(2026-10-31): 허벅지가 짧게 접혀 무릎이 높던 다리를, 허벅지가 좌석을 따라 나오고 다리를 꼰 새 그림(`poses/legs.png`)으로 바꿨다. 새 그림은 소유자가 붙여 넣은 382×445 그림을 `pose.lua`로 변환했다(도트 약 2.23px, 상체는 neutral과 같았다).
+
+- idle 여섯 프레임의 상자(100–176열, 106–195행)를 새 그림으로 바꾼다. 다리는 움직이지 않으므로 `base` 레이어에 넣고, 새 허벅지가 덮는 상체 레이어의 무릎 쪽 픽셀은 `base`로 옮긴다.
+- 상체가 숨쉬며 1px 올라갈 때 틈이 생기지 않도록 상자 바로 위 줄을 `underlay`에 복사한다. 186행 아래는 neutral에 있던 자리만 받는다(붙여 넣은 그림 가장자리의 잡티).
+- 쉬는 자세와 숨쉬기 프레임의 한 칸짜리 구멍 수를 로그에 쓴다. 바꾸기 전과 같다.
+- 잠들 때 상체가 내려가도 무릎 위 치마 단은 `clips.lua`가 제자리에 두고 상체보다 앞에 그린다. 경계는 치마 단을 따라 (104, 104)에서 (152, 97)까지 비스듬히 자르고, 내려가는 상체는 그 뒤로 들어간다. 같이 내려가면 치마 단이 허벅지를 덮어 경계가 흐려졌다(소유자 검토 2026-10-31).
+
+```
+aseprite -b --script-param body=clean/body.aseprite --script-param conv=clean/poses/legs.png --script-param neutral=clean/neutral.png --script-param log=legs.txt --script tools/legs.lua
+aseprite -b --script-param body=clean/body.aseprite --script-param log=clips.txt --script tools/clips.lua
+```
+
+`neutral.png`과 `neutral-*`, `moods/`는 예전 다리 그대로인 기록이다. 앱의 그림은 `body.aseprite`가 기준이다.
+
+## 자세 그림 변환 (`../tools/pose.lua`)
+
+Codex가 그린 1230×1278 그림을 neutral과 같은 205×206 도트로 옮긴다. 도트 격자(약 6.02×6.26px)의 위치를 찾고, 칸마다 가장 흔한 색을 골라 원본 32색 중 가장 가까운 색(CIELAB)으로 바꾼 뒤, 원본과 가장 잘 맞도록 ±3px 안에서 위치를 맞춘다. 결과 그림과 원본과의 차이 지도를 쓴다. 생성 그림은 바꾸지 말라는 부분도 조금씩 바뀌므로, 바뀐 부분만 상자로 잘라 쓴다. 붙여 넣은 작은 그림은 `sx`, `sy`(도트 크기), `ox`, `oy`(neutral (0, 0) 칸의 왼쪽 위가 그림에서 놓이는 자리 근처), `bg=corner`(왼쪽 위 색을 투명으로)를 준다.
 - **`glance`**: idle과 같은 숨쉬기에 `@eyes` `left` → `right`. 눈 그림은 `../tools/glance-variants.lua`가 `faces.aseprite`에 그린다(`eyes/left`, `eyes/right`).
 - **`ahoge`**: 상체 레이어에서 아호게 윗부분(20–25행, 108–128열)만 1px씩 좌우로 옮긴다. 뿌리는 그대로다.
 - **기지개는 보류**: 어깨만 올리는 작은 기지개는 기지개로 읽히지 않아 뺐다(소유자 검토 2026-10-31). 팔을 드는 그림이 생기면 `stretch`로 넣는다.

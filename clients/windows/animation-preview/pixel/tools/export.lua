@@ -88,6 +88,8 @@ for _, tag in ipairs(body.tags) do
     local img = flatten(f)
     frames[#frames + 1] = { piece = add(img), ms = math.floor(body.frames[f].duration * 1000 + .5),
                             face = { cel.position.x - FX, cel.position.y - FY }, img = img }
+    -- "own" on the face marker: the frame is a drawing with its own face; draw no mood face.
+    if cel.data == "own" then frames[#frames].ownFace = true end
     for key, l in pairs({ eyes = eyesMarker, mouth = mouthMarker }) do
       local forced = l:cel(f)
       if forced and forced.data ~= "" then frames[#frames][key] = forced.data end
@@ -157,6 +159,7 @@ for ci, c in ipairs(clips) do
   lines[#lines + 1] = string.format('    "%s": { "loop": %s%s, "frames": [', c.name, tostring(c.loop), from)
   for fi, f in ipairs(c.frames) do
     local eyes = (f.eyes and string.format(', "eyes": "%s"', f.eyes) or "") .. (f.mouth and string.format(', "mouth": "%s"', f.mouth) or "")
+      .. (f.ownFace and ', "ownFace": true' or "")
     lines[#lines + 1] = string.format('      { "src": %s, "ms": %d, "face": [%d, %d]%s }%s', src(f.piece), f.ms, f.face[1], f.face[2], eyes, fi < #c.frames and "," or "")
   end
   lines[#lines + 1] = "    ] }" .. (ci < #clips and "," or "")
@@ -194,8 +197,9 @@ local function render(clip, frame, mood, eyes, mouth)
   local f = c.frames[frame]
   local img = f.img:clone()
   local ox, oy = FX + f.face[1], FY + f.face[2]
-  img:drawImage(moods[mood].piece.img, Point(ox, oy))
-  for _, v in ipairs({ eyes and moods[mood].eyes[eyes], mouth and moods[mood].mouth[mouth] }) do
+  if f.ownFace then mood, eyes, mouth = nil, nil, nil end
+  if mood then img:drawImage(moods[mood].piece.img, Point(ox, oy)) end
+  for _, v in ipairs({ eyes and moods[mood].eyes[eyes] or false, mouth and moods[mood].mouth[mouth] or false }) do
     if v then img:drawImage(v.piece.img, Point(ox + v.at[1], oy + v.at[2])) end
   end
   local s = Sprite(W, H, ColorMode.INDEXED)
@@ -208,7 +212,7 @@ local refs = {
   { "idle-2-happy", "idle", 2, "happy" },
   { "idle-1-neutral-closed-wide", "idle", 1, "neutral", "closed", "wide" },
   { "sleep-4-neutral-closed", "sleep", 4, "neutral", "closed" },
-  { "yawn-3-neutral-closed-wide", "yawn", 3, "neutral", "closed", "wide" },
+  { "yawn-2-happy", "yawn", 2, "happy" },
   { "glance-2-sad-left", "glance", 2, "sad", "left" },
   { "ahoge-2-neutral", "ahoge", 2, "neutral" },
   { "twinkle-3-neutral", "twinkle", 3, "neutral" },

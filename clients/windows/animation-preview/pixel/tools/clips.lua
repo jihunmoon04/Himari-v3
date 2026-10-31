@@ -4,6 +4,9 @@
 -- waits for art with raised arms (owner review: shoulders alone did not read as one). Re-running replaces all of them; it refuses when another clip lies after idle.
 --   * Offsets are relative to the rest pose (idle frame 1), down is positive.
 --   * The hidden @eyes and @mouth layers' cel data force that frame's eyes or mouth.
+--   * A pose frame replaces a box of the rest pose with a converted generated drawing
+--     (clean/poses, made by pose.lua); its @face cel data "own" tells the app to draw
+--     no mood face over it, because the drawing has its own face (and a hand over it).
 --   * A tag's user data "loopFrom=N" (1-based) makes a loop play its first N-1 frames once.
 --   * Moving parts opens see-through gaps where they met the still base; each frame's
 --     enclosed gaps are filled with the rest pose's pixels on a bottom "fill" layer.
@@ -42,13 +45,22 @@ do
   CLIPS[#CLIPS + 1] = { name = "sleep", loopFrom = 4, frames = frames }
 end
 
--- yawn (before dozing): the head tips back a pixel, eyes shut, mouth wide open behind
--- the hand on the cheek, then back.
+-- Generated drawings converted to the sprite (pose.lua) and the box taken from each.
+local POSES = {
+  -- requests/big-motions-v1/yawn-hand-2.png: the cheek hand covers the yawning mouth.
+  ["yawn-hand"] = { box = { 98, 40, 170, 105 } },
+}
+for name, p in pairs(POSES) do
+  local s = app.open(app.fs.joinPath(app.fs.filePath(P.body), "poses", name .. ".png"))
+  p.img = Image(s.width, s.height, ColorMode.INDEXED); p.img:drawSprite(s, 1); s:close()
+end
+app.activeSprite = spr
+
+-- yawn (before dozing): eyes droop, the hand moves from the cheek over the yawning mouth
+-- (owner request 2026-10-31), then back.
 CLIPS[#CLIPS + 1] = { name = "yawn", frames = {
-  frame(200, 0, 0, 0, { eyes = "half" }),
-  frame(250, -1, 0, -1, { eyes = "closed", mouth = "small" }),
-  frame(1100, -1, -1, -1, { eyes = "closed", mouth = "wide" }),
-  frame(250, 0, -1, 0, { eyes = "closed", mouth = "small" }),
+  frame(250, 0, 0, 0, { eyes = "half" }),
+  frame(1400, 0, 0, 0, { pose = "yawn-hand" }),
   frame(300, 0, 0, 0, { eyes = "half" }),
   frame(100, 0, 0, 0),
 } }
@@ -186,15 +198,46 @@ local zLayer, eyesLayer, mouthLayer, fillLayer = layer("zzz"), layer("@eyes", tr
 fillLayer.stackIndex = 1
 local own = { [zLayer] = true, [eyesLayer] = true, [mouthLayer] = true, [fillLayer] = true }
 local upperBody = find(find(spr.layers, "upper (breathing)").layers, "body")
+local marker = find(spr.layers, "@face")
 local haloLayer = find(spr.layers, "halo")
 
+-- The lap (skirt hem over the thighs, canvas, rest pose) stays put when the upper body sinks:
+-- moving it down slid the hem over the thighs and blurred their line (owner review 2026-10-31).
+-- The cut follows the hem diagonally, from (104, 104) up to (152, 97), and the lap stays in
+-- front: the sinking body slides behind it.
+local LAP = { x0 = 104, y0 = 104, x1 = 152, y1 = 97 }
+local function inLap(x, y)
+  return x >= LAP.x0 and x <= LAP.x1 and y >= LAP.y0 + (LAP.y1 - LAP.y0) * (x - LAP.x0) / (LAP.x1 - LAP.x0)
+end
+local function anchorLap(img, pos, dy)
+  local out = Image(spr.width, spr.height, ColorMode.INDEXED)
+  local function src(x, y) x, y = x - pos.x, y - pos.y
+    if x < 0 or y < 0 or x >= img.width or y >= img.height then return 0 end
+    return img:getPixel(x, y) end
+  for y = 0, spr.height - 1 do for x = 0, spr.width - 1 do
+    -- Inside the lap the thighs (base layer) show too, so the sinking body is cut there.
+    out:drawPixel(x, y, inLap(x, y) and src(x, y) or src(x, y - dy))
+  end end
+  return out
+end
+
+-- A pose frame: every part is cleared inside the box and the upper body takes the drawing.
+local function posed(img, pos, pose, l)
+  local out = Image(spr.width, spr.height, ColorMode.INDEXED)
+  for it in img:pixels() do if it() ~= 0 then out:drawPixel(pos.x + it.x, pos.y + it.y, it()) end end
+  local b = pose.box
+  for y = b[2], b[4] do for x = b[1], b[3] do out:drawPixel(x, y, l == upperBody and pose.img:getPixel(x, y) or 0) end end
+  return out, Point(0, 0)
+end
 local function place(l, dst, dy, f)
   if l.isGroup then for _, c in ipairs(l.layers) do place(c, dst, dy, f) end; return end
   local cel = l:cel(1)
   if not cel then return end
   local img, pos = cel.image:clone(), cel.position
+  if f.pose and l.name ~= "@face" then img, pos = posed(img, pos, POSES[f.pose], l) end
   if l == upperBody and f.ahoge then img = sway(img, pos, f.ahoge) end
   if l == haloLayer and f.twinkle then img, pos = twinkle(img, pos, f.twinkle) end
+  if l == upperBody and dy > 0 then img, pos, dy = anchorLap(img, pos, dy), Point(0, 0), 0 end
   spr:newCel(l, dst, img, Point(pos.x, pos.y + dy))
 end
 local function mark(l, n, value)
@@ -250,9 +293,11 @@ for _, clip in ipairs(CLIPS) do
       end
       spr:newCel(zLayer, n, zs, Point(0, 0))
     end
+    if f.pose then marker:cel(n).data = "own" end
     mark(eyesLayer, n, f.eyes)
     mark(mouthLayer, n, f.mouth)
-    log:write(string.format("%s frame %d: filled %d enclosed pixels\n", clip.name, i, fillGaps(n)))
+    -- A pose frame is the drawing as it is: gaps there are part of it, not seams.
+    log:write(string.format("%s frame %d: filled %d enclosed pixels\n", clip.name, i, f.pose and 0 or fillGaps(n)))
   end
   spans[#spans + 1] = { clip, first, first + #clip.frames - 1 }
 end

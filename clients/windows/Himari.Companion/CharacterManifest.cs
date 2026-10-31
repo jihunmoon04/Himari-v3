@@ -69,7 +69,8 @@ internal sealed record CharacterClip(bool Loop, ClipFrame[] Frames, int LoopFrom
     }
 }
 // Eyes and Mouth, when present, force that variant for the frame (for example closed eyes while dozing).
-// Forced eyes open while the character talks.
-internal sealed record ClipFrame(int[] Src, int Ms, int[] Face, string? Eyes = null, string? Mouth = null);
+// Forced eyes open while the character talks. OwnFace: the frame is a drawing with its own
+// face (a hand over the yawning mouth), so no mood face, eyes or mouth go over it.
+internal sealed record ClipFrame(int[] Src, int Ms, int[] Face, string? Eyes = null, string? Mouth = null, bool OwnFace = false);
 internal sealed record CharacterFace(int[] Src, Dictionary<string, FaceVariant>? Eyes = null, Dictionary<string, FaceVariant>? Mouth = null);
 internal sealed record FaceVariant(int[] Src, int[] At);
