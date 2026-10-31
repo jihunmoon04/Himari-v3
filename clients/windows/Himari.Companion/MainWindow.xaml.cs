@@ -31,11 +31,15 @@ public partial class MainWindow : Window
     private bool sleeping;
     private DateTime lastIdleCheck = DateTime.MinValue;
     private int demoVersion;
+    private int chatFocusVersion;
 
-    public MainWindow()
+    public MainWindow() : this(false) { }
+    internal MainWindow(bool offline)
     {
         InitializeComponent();
         _ = new ComposerInput(Input, SendMessage);
+        SetupTypeToChat(this);
+        Message.SourceChanged += (_, _) => replyReader?.UpdateText(Message.Text);
         settings = new SettingsWindow();
         settings.ConnectionStatus.SetBinding(System.Windows.Controls.TextBlock.TextProperty, new System.Windows.Data.Binding("Text") { Source = Status });
         settings.PairButton.Click += PairClick;
@@ -63,11 +67,13 @@ public partial class MainWindow : Window
         tray.DoubleClick += (_, _) => ToggleVisible();
         timer.Tick += (_, _) => UpdateFrame();
         timer.Start();
-        SourceInitialized += (_, _) => SetupWindowControls();
-        Loaded += async (_, _) => { if (loadedOnce) return; loadedOnce = true; settings.Owner = this; UpdateSceneBounds(); await RestoreConnection(); };
+        SourceInitialized += (_, _) => { if (!offline) { SetupWindowControls(); SetupForegroundTracking(); } };
+        Loaded += async (_, _) => { if (loadedOnce) return; loadedOnce = true; settings.Owner = this; InitializeDialogueHost(); UpdateSceneBounds(); if (!offline) await RestoreConnection(); };
         Closing += (_, _) => { settings.AllowClose = true; };
         Closing += (_, _) => RestoreMoveHomeOnClose();
-        Closed += (_, _) => { CancelMovePreview(); lifetime.Cancel(); StopConnection(); timer.Stop(); CleanupWindowControls(); tray.Visible = false; tray.Dispose(); menu.Dispose(); };
+        Closed += (_, _) => { CleanupForegroundTracking(); dialogueHost?.Close(); CancelMovePreview(); lifetime.Cancel(); StopConnection(); timer.Stop(); CleanupWindowControls(); tray.Visible = false; tray.Dispose(); menu.Dispose(); };
+        IsVisibleChanged += (_, _) => UpdateSceneBounds();
+        Activated += (_, _) => { UpdateFullscreenPresentation(); FocusComposerIfOpen(); };
         UpdateFrame();
     }
 
@@ -92,10 +98,21 @@ public partial class MainWindow : Window
     }
     private void OpenChat()
     {
+        int version = ++chatFocusVersion;
         if (awaitingAnswer && !string.IsNullOrWhiteSpace(Message.Text)) ShowAssistantBubble(assistantBubbleKey);
         OpenComposer();
+        if (dialogueHost is not null && IsVisible) dialogueHost.Activate();
         // The first time the composer appears its editor is not laid out yet and refuses focus.
-        if (!Input.Focus()) Dispatcher.BeginInvoke(DispatcherPriority.Input, () => Input.Focus());
+        if (!Input.Focus()) Dispatcher.BeginInvoke(DispatcherPriority.Input, new Action(() =>
+        {
+            if (version == chatFocusVersion && ComposerPanel.Visibility == Visibility.Visible && IsChatWindow(GetForegroundWindow())) Input.Focus();
+        }));
+    }
+    private void FocusComposerIfOpen()
+    {
+        int version = chatFocusVersion;
+        if (ComposerPanel.Visibility == Visibility.Visible)
+            Dispatcher.BeginInvoke(DispatcherPriority.Input, new Action(() => { if (version == chatFocusVersion && ComposerPanel.Visibility == Visibility.Visible && IsChatWindow(GetForegroundWindow())) { dialogueHost?.Activate(); Input.Focus(); } }));
     }
     private void OpenComposer()
     {

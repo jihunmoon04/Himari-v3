@@ -23,6 +23,7 @@ public partial class MainWindow
         // Change grid rows, not parents: moving a live TextBox must retain focus,
         // selection, its draft and any IME composition.
         bool userFirst = userBubbleSequence <= assistantBubbleSequence;
+        if (bubblesBelow) userFirst = !userFirst;
         Grid.SetRow(UserBubble, userFirst ? 0 : 1);
         Grid.SetRow(BubblePanel, userFirst ? 1 : 0);
         bool both = UserBubble.Visibility == Visibility.Visible && BubblePanel.Visibility == Visibility.Visible;
@@ -48,7 +49,8 @@ public partial class MainWindow
         userBubbleTimer.Stop(); userBubbleCloseDue = true; ExpireBubbles();
     }
     private FrameworkElement? OldestVisibleBubble() => new[] { UserBubble, BubblePanel }
-        .Where(bubble => bubble.Visibility == Visibility.Visible).OrderBy(Grid.GetRow).FirstOrDefault();
+        .Where(bubble => bubble.Visibility == Visibility.Visible)
+        .OrderBy(bubble => bubble == UserBubble ? userBubbleSequence : assistantBubbleSequence).FirstOrDefault();
     private void ExpireBubbles()
     {
         var oldest = OldestVisibleBubble();

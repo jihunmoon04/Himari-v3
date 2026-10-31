@@ -6,8 +6,11 @@
       <local:PixelBubble x:Name="BubblePanel" Grid.Row="1" Width="300" MaxHeight="320" HorizontalAlignment="Center" TailRight="False" Visibility="Collapsed">
         <Grid><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
           <TextBlock Text="히마리" FontSize="11" FontWeight="SemiBold" Foreground="#71668F" Margin="0,0,0,7"/>
-          <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"><TextBlock x:Name="Message" Text="" TextWrapping="Wrap" FontSize="15" LineHeight="23" Foreground="#34304A"/></ScrollViewer>
-          <Button x:Name="StopButton" Grid.Row="2" Width="30" Height="28" MinHeight="28" Padding="6" Margin="0,8,0,0" HorizontalAlignment="Right" ToolTip="답변 멈춤" AutomationProperties.Name="답변 멈춤" Click="CancelClick" Visibility="Collapsed"><local:PixelGlyph Stop="True" Width="16" Height="16"/></Button>
+          <local:MarkdownView Grid.Row="1" x:Name="Message" FontSize="15" Foreground="#34304A"/>
+          <DockPanel Grid.Row="2" Margin="0,8,0,0" LastChildFill="False">
+            <Button Content="확장 보기" Padding="7,3" MinHeight="24" FontSize="11" Click="ExpandReplyClick" AutomationProperties.Name="답변 확장 보기"/>
+            <Button x:Name="StopButton" DockPanel.Dock="Right" Width="30" Height="28" MinHeight="28" Padding="6" HorizontalAlignment="Right" ToolTip="답변 멈춤" AutomationProperties.Name="답변 멈춤" Click="CancelClick" Visibility="Collapsed"><local:PixelGlyph Stop="True" Width="16" Height="16"/></Button>
+          </DockPanel>
         </Grid>
       </local:PixelBubble>
       <local:PixelBubble x:Name="UserBubble" Width="300" MaxHeight="260" HorizontalAlignment="Center" IsUser="True" TailRight="True" Visibility="Collapsed">

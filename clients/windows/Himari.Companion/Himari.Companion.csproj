@@ -11,9 +11,14 @@
     <NoWarn>$(NoWarn);WFO0003</NoWarn>
   </PropertyGroup>
   <ItemGroup>
+    <PackageReference Include="Markdig" Version="1.3.2" />
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.4191.47" />
     <Resource Include="..\animation-preview\pixel\moods\*.png" Link="Assets\%(Filename)%(Extension)" />
     <Resource Include="..\animation-preview\pixel\blink.png" Link="Assets\blink.png" />
     <Resource Include="..\animation-preview\pixel\talk.png" Link="Assets\talk.png" />
     <Resource Include="Assets\himari.json" />
+    <Content Include="Reader\**\*" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="..\..\..\src\himari\interfaces\web\static\rich_text.js" Link="Reader\assets\rich_text.js" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="..\..\..\src\himari\interfaces\web\static\katex\**\*" Link="Reader\assets\katex\%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

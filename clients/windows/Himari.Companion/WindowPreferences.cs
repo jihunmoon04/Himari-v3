@@ -4,7 +4,8 @@ using System.Text.Json;
 namespace Himari.Companion;
 
 internal sealed record WindowPreferences(double Left, double Top, double CharacterHeight, bool MoveEnabled = true,
-    bool ScreenSharing = true, bool FacingLeft = false, double BubbleMinimum = 8, double SecondsPer100 = 8, string ChatHotkey = "Alt+Q")
+    bool ScreenSharing = true, bool FacingLeft = false, double BubbleMinimum = 8, double SecondsPer100 = 8, string ChatHotkey = "Alt+Q",
+    string BubblePlacement = "상하 자동", int LayoutVersion = 0)
 {
     internal static WindowPreferences Normalize(WindowPreferences value, double left, double top, double width, double height, double windowWidth, double windowHeight)
     {
@@ -16,7 +17,8 @@ internal sealed record WindowPreferences(double Left, double Top, double Charact
         y = Math.Clamp(y, top, Math.Max(top, top + height - windowHeight));
         return value with { Left = x, Top = y, CharacterHeight = size,
             BubbleMinimum = DialoguePolicy.Finite(value.BubbleMinimum, 8, 3, 30), SecondsPer100 = DialoguePolicy.Finite(value.SecondsPer100, 8, 3, 30),
-            ChatHotkey = DialoguePolicy.Hotkeys.Contains(value.ChatHotkey) ? value.ChatHotkey : "Alt+Q" };
+            ChatHotkey = DialoguePolicy.Hotkeys.Contains(value.ChatHotkey) ? value.ChatHotkey : "Alt+Q",
+            BubblePlacement = DialoguePolicy.BubblePlacements.Contains(value.BubblePlacement) ? value.BubblePlacement : "상하 자동" };
     }
     internal static string PathName => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "HIMARI", "window.json");
     internal static WindowPreferences? Load()

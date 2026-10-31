@@ -12,6 +12,8 @@ public sealed class PixelBubble : Decorator
 {
     public static readonly DependencyProperty IsUserProperty = DependencyProperty.Register(nameof(IsUser), typeof(bool), typeof(PixelBubble), new FrameworkPropertyMetadata(false, FrameworkPropertyMetadataOptions.AffectsRender));
     public static readonly DependencyProperty TailRightProperty = DependencyProperty.Register(nameof(TailRight), typeof(bool), typeof(PixelBubble), new FrameworkPropertyMetadata(true, FrameworkPropertyMetadataOptions.AffectsRender));
+    public static readonly DependencyProperty TailTopProperty = DependencyProperty.Register(nameof(TailTop), typeof(bool), typeof(PixelBubble), new FrameworkPropertyMetadata(false, FrameworkPropertyMetadataOptions.AffectsRender | FrameworkPropertyMetadataOptions.AffectsArrange));
+    public bool TailTop { get => (bool)GetValue(TailTopProperty); set => SetValue(TailTopProperty, value); }
     public bool IsUser { get => (bool)GetValue(IsUserProperty); set => SetValue(IsUserProperty, value); }
     public bool TailRight { get => (bool)GetValue(TailRightProperty); set => SetValue(TailRightProperty, value); }
     public PixelBubble() { SnapsToDevicePixels = true; UseLayoutRounding = true; RenderOptions.SetEdgeMode(this, EdgeMode.Aliased); }
@@ -23,13 +25,15 @@ public sealed class PixelBubble : Decorator
     }
     protected override Size ArrangeOverride(Size size)
     {
-        Child?.Arrange(new Rect(18, 14, Math.Max(0, size.Width - 36), Math.Max(0, size.Height - 44)));
+        Child?.Arrange(new Rect(18, TailTop ? 30 : 14, Math.Max(0, size.Width - 36), Math.Max(0, size.Height - 44)));
         return size;
     }
     protected override void OnRender(DrawingContext dc)
     {
         double w = Math.Floor(ActualWidth / 4) * 4, h = Math.Floor((ActualHeight - 16) / 4) * 4;
         if (w < 48 || h < 24) return;
+        // Flip the frame only; text and input retain their normal orientation.
+        if (TailTop) dc.PushTransform(new ScaleTransform(1, -1, 0, (h + 16) / 2));
         var edge = Brush(IsUser ? "#625972" : "#60538F");
         var fill = Brush(IsUser ? "#FFFDF4" : "#F0EBFF");
         double x = TailRight ? w - 52 : 28;
@@ -42,6 +46,7 @@ public sealed class PixelBubble : Decorator
         dc.DrawGeometry(fill, null, Frame(4, 4, w - 8, h - 8));
         dc.DrawRectangle(Brush("#FFFFFF"), null, new Rect(12, 4, Math.Max(0, w - 24), 4));
         dc.DrawRectangle(Brush(IsUser ? "#E4DDCF" : "#DCD2F0"), null, new Rect(12, h - 8, Math.Max(0, w - 24), 4));
+        if (TailTop) dc.Pop();
     }
     private static SolidColorBrush Brush(string color) { var brush = new SolidColorBrush((System.Windows.Media.Color)System.Windows.Media.ColorConverter.ConvertFromString(color)); brush.Freeze(); return brush; }
     private static Geometry Frame(double x, double y, double w, double h) => Polygon(new Point(x + 12,y), new Point(x + w - 12,y), new Point(x + w - 12,y + 4), new Point(x + w - 4,y + 4), new Point(x + w - 4,y + 12), new Point(x + w,y + 12), new Point(x + w,y + h - 12), new Point(x + w - 4,y + h - 12), new Point(x + w - 4,y + h - 4), new Point(x + w - 12,y + h - 4), new Point(x + w - 12,y + h), new Point(x + 12,y + h), new Point(x + 12,y + h - 4), new Point(x + 4,y + h - 4), new Point(x + 4,y + h - 12), new Point(x,y + h - 12), new Point(x,y + 12), new Point(x + 4,y + 12), new Point(x + 4,y + 4), new Point(x + 12,y + 4));

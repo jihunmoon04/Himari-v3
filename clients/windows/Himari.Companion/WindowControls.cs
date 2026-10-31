@@ -40,6 +40,9 @@ public partial class MainWindow
     private void SetupPresentationControls()
     {
         settings.ChatHotkey.ItemsSource = DialoguePolicy.Hotkeys;
+        settings.BubblePlacement.ItemsSource = DialoguePolicy.BubblePlacements;
+        settings.BubblePlacement.SelectedIndex = 0;
+        settings.BubblePlacement.SelectionChanged += (_, _) => { UpdateSceneBounds(); SchedulePreferencesSave(); };
         settings.ChatHotkey.SelectedItem = "Alt+Q";
         settings.ChatHotkey.SelectionChanged += (_, _) => { if (hotKeySource is not null && !changingHotkey) RegisterSelectedHotkey(); };
         settings.ScreenSharing.Checked += (_, _) => PresentationChanged();
@@ -48,7 +51,8 @@ public partial class MainWindow
         settings.FacingLeft.Unchecked += (_, _) => PresentationChanged();
         settings.BubbleMinimum.ValueChanged += (_, _) => PresentationChanged();
         settings.SecondsPer100.ValueChanged += (_, _) => PresentationChanged();
-        UserBubble.SizeChanged += (_, _) => UpdateBubbleBounds();
+        UserBubble.SizeChanged += (_, _) => UpdateSceneBounds();
+        BubblePanel.SizeChanged += (_, _) => UpdateSceneBounds();
         SizeChanged += (_, _) => UpdateBubbleBounds();
         DpiChanged += (_, _) => UpdateSceneBounds();
         PresentationChanged();
@@ -58,18 +62,22 @@ public partial class MainWindow
         var saved = WindowPreferences.Load();
         if (saved is not null)
         {
-            var p = WindowPreferences.Normalize(saved, SystemParameters.VirtualScreenLeft, SystemParameters.VirtualScreenTop, SystemParameters.VirtualScreenWidth, SystemParameters.VirtualScreenHeight, Width, Height);
+            double height = saved.LayoutVersion >= 1 ? DialoguePolicy.Finite(saved.CharacterHeight, 330, 200, 400) : Height;
+            double width = saved.LayoutVersion >= 1 && Character.Source is { Height: > 0 } image ? height * image.Width / image.Height : Width;
+            var p = WindowPreferences.Normalize(saved, SystemParameters.VirtualScreenLeft, SystemParameters.VirtualScreenTop, SystemParameters.VirtualScreenWidth, SystemParameters.VirtualScreenHeight, width, height);
             Left = p.Left; Top = p.Top; SizeSlider.Value = p.CharacterHeight;
+            legacyWindowPosition = p.LayoutVersion < 1;
             settings.MoveEnabled.IsChecked = p.MoveEnabled;
             settings.ScreenSharing.IsChecked = p.ScreenSharing; settings.FacingLeft.IsChecked = p.FacingLeft;
             settings.BubbleMinimum.Value = p.BubbleMinimum; settings.SecondsPer100.Value = p.SecondsPer100;
             settings.ChatHotkey.SelectedItem = p.ChatHotkey; registeredHotkey = p.ChatHotkey;
+            settings.BubblePlacement.SelectedItem = p.BubblePlacement;
         }
         preferencesLoaded = true;
         saveTimer.Tick += (_, _) => { saveTimer.Stop(); SaveWindowPreferences(); };
         bubbleTimer.Tick += (_, _) => AssistantBubbleExpired();
         userBubbleTimer.Tick += (_, _) => UserBubbleExpired();
-        LocationChanged += (_, _) => SchedulePreferencesSave();
+        LocationChanged += (_, _) => { UpdateSceneBounds(); SchedulePreferencesSave(); };
         hotKeySource = HwndSource.FromHwnd(new WindowInteropHelper(this).Handle);
         if (hotKeySource is not null) { hotKeySource.AddHook(HotKeyHook); RegisterSelectedHotkey(); }
     }
@@ -96,12 +104,12 @@ public partial class MainWindow
         if (msg == HotKeyMessage && wParam.ToInt32() == HotKeyId)
         {
             var foreground = GetForegroundWindow();
-            if (DialoguePolicy.HotkeyCloses(foreground == hwnd, ComposerPanel.Visibility == Visibility.Visible)) CloseChat();
+            if (DialoguePolicy.HotkeyCloses(IsChatWindow(foreground), ComposerPanel.Visibility == Visibility.Visible)) CloseChat();
             else
             {
                 // Only a window that was in front at this press may pick the capture monitor;
                 // opening from Himari itself must not reuse an older remembered window.
-                bool fromWork = IsWindow(foreground) && !OwnWindow(foreground);
+                bool fromWork = EligibleWorkWindow(foreground);
                 workWindow.Remember(foreground, _ => fromWork);
                 captureFromWorkWindow = fromWork;
                 if (!IsVisible) Show(); Activate(); OpenChat();
@@ -110,19 +118,20 @@ public partial class MainWindow
         }
         return IntPtr.Zero;
     }
-    // Hiding the composer never depends on a previous window: without one Himari simply stays.
+    // Without a surviving work window, deactivate without selecting an unrelated app.
     private void CloseChat()
     {
+        chatFocusVersion++;
         System.Windows.Input.Keyboard.ClearFocus();
-        if (!string.IsNullOrWhiteSpace(Input.Text)) HideUserBubble();
-        else
+        // Like Alt+Tab, switching focus does not dismiss or replace the editor.
+        if (string.IsNullOrEmpty(Input.Text)) ScheduleUserBubbleClose();
+        if (!workWindow.Return(window => IsWindow(window) && IsWindowVisible(window) && RestoreWindow(window)))
         {
-            ComposerPanel.Visibility = Visibility.Collapsed;
-            UserSent.Visibility = string.IsNullOrEmpty(UserSent.Text) ? Visibility.Collapsed : Visibility.Visible;
-            if (UserSent.Visibility != Visibility.Visible) HideUserBubble();
-            else ScheduleUserBubbleClose();
+            // SetActiveWindow(NULL) alone can reactivate an owned WPF window. Give
+            // the desktop focus, leaving other applications and our visuals in place.
+            if (!SetForegroundWindow(GetShellWindow())) SetActiveWindow(IntPtr.Zero);
         }
-        workWindow.Return(window => IsWindow(window) && IsWindowVisible(window) && RestoreWindow(window));
+        UpdateFullscreenPresentation();
     }
     private static bool RestoreWindow(IntPtr window)
     {
@@ -132,6 +141,7 @@ public partial class MainWindow
     private void CharacterSizeChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
     {
         if (Character is not null) Character.Height = e.NewValue;
+        if (dialogueHost is not null) ResizeCharacterWindow();
         if (DialogueStack is not null) UpdateDialoguePosition();
         UpdateSceneBounds(); SchedulePreferencesSave();
     }
@@ -151,6 +161,7 @@ public partial class MainWindow
     }
     private void UpdateDialoguePosition()
     {
+        if (dialogueHost is not null) { UpdateSceneBounds(); return; }
         bool flip = settings.FacingLeft.IsChecked == true;
         DialogueStack.HorizontalAlignment = flip ? System.Windows.HorizontalAlignment.Left : System.Windows.HorizontalAlignment.Right;
         double bottom = Math.Max(0, Character.Height - 10);
@@ -160,28 +171,13 @@ public partial class MainWindow
     }
     private void UpdateSceneBounds()
     {
-        if (!IsLoaded || sizingScene || autoMoveActive || movePreviewActive) { UpdateBubbleBounds(); return; }
-        sizingScene = true;
-        try
-        {
-            var handle = new WindowInteropHelper(this).Handle;
-            var work = Forms.Screen.FromHandle(handle).WorkingArea;
-            var dpi = VisualTreeHelper.GetDpi(this);
-            if (!GetWindowRect(handle, out var current)) return;
-            int gap = (int)Math.Ceiling(8 * dpi.DpiScaleY);
-            double maximum = Math.Max(100, work.Height / dpi.DpiScaleY - 16);
-            Height = Math.Clamp((current.Bottom - work.Top - gap) / dpi.DpiScaleY, Math.Min(maximum, Character.Height + 160), maximum);
-            int physicalHeight = (int)Math.Ceiling(Height * dpi.DpiScaleY);
-            int top = Math.Clamp(current.Bottom - physicalHeight, work.Top + gap, Math.Max(work.Top + gap, work.Bottom - physicalHeight - gap));
-            int left = Math.Clamp(current.Left, work.Left, Math.Max(work.Left, work.Right - (current.Right - current.Left)));
-            SetWindowPos(handle, IntPtr.Zero, left, top, 0, 0, 0x0015);
-            UpdateBubbleBounds();
-        }
-        finally { sizingScene = false; }
+        if (dialogueHost is not null) { PositionDialogueHost(); return; }
+        UpdateBubbleBounds();
     }
     private void UpdateBubbleBounds()
     {
         if (UserBubble is null || BubblePanel is null || Character is null) return;
+        if (dialogueHost is not null) { PositionDialogueHost(); return; }
         double available = Math.Max(100, Height - Math.Max(0, Character.Height - 10) - 16);
         UserBubble.MaxHeight = Math.Max(80, BubblePanel.Visibility == Visibility.Visible ? Math.Min(280, available * .55) : Math.Min(340, available));
         double user = UserBubble.Visibility == Visibility.Visible ? Math.Min(UserBubble.ActualHeight, UserBubble.MaxHeight) + 8 : 0;
@@ -230,7 +226,7 @@ public partial class MainWindow
     private void SaveWindowPreferences()
     {
         if (!preferencesLoaded || !double.IsFinite(Left) || !double.IsFinite(Top)) return;
-        try { new WindowPreferences(Left, Top, SizeSlider.Value, settings.MoveEnabled.IsChecked == true, settings.ScreenSharing.IsChecked == true, settings.FacingLeft.IsChecked == true, settings.BubbleMinimum.Value, settings.SecondsPer100.Value, registeredHotkey).Save(); }
+        try { new WindowPreferences(Left, Top, SizeSlider.Value, settings.MoveEnabled.IsChecked == true, settings.ScreenSharing.IsChecked == true, settings.FacingLeft.IsChecked == true, settings.BubbleMinimum.Value, settings.SecondsPer100.Value, registeredHotkey, settings.BubblePlacement.SelectedItem as string ?? "상하 자동", 1).Save(); }
         catch (Exception ex) when (ex is System.IO.IOException or UnauthorizedAccessException) { System.Diagnostics.Trace.TraceWarning("HIMARI: could not save window preferences: {0}", ex.Message); }
     }
     private void CleanupWindowControls()

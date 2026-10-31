@@ -6,7 +6,7 @@ using Himari.Companion;
 static void Check(bool value, string message) { if (!value) throw new Exception(message); }
 var legacyPresentation = JsonSerializer.Deserialize<WindowPreferences>("{\"Left\":10,\"Top\":20,\"CharacterHeight\":330,\"MoveEnabled\":true}")!;
 Check(legacyPresentation.ScreenSharing && !legacyPresentation.FacingLeft && legacyPresentation.ChatHotkey == "Alt+Q", "old preferences migrate to requested capture default and one-handed hotkey");
-var newPresentation = legacyPresentation with { ScreenSharing = false, FacingLeft = true, BubbleMinimum = 12, SecondsPer100 = 20, ChatHotkey = "Ctrl+Space" };
+var newPresentation = legacyPresentation with { ScreenSharing = false, FacingLeft = true, BubbleMinimum = 12, SecondsPer100 = 20, ChatHotkey = "Ctrl+Space", BubblePlacement = "하 고정", LayoutVersion = 1 };
 Check(JsonSerializer.Deserialize<WindowPreferences>(JsonSerializer.Serialize(newPresentation)) == newPresentation, "presentation settings persist without losing opt-out or orientation");
 var safePresentation = WindowPreferences.Normalize(newPresentation with { BubbleMinimum = double.NaN, SecondsPer100 = 999, ChatHotkey = "invalid" }, 0, 0, 1920, 1080, 520, 700);
 Check(safePresentation.BubbleMinimum == 8 && safePresentation.SecondsPer100 == 30 && safePresentation.ChatHotkey == "Alt+Q", "invalid presentation settings are normalized");
@@ -18,8 +18,11 @@ Check(hotkeySelection.Select("Alt+Q", _ => true, () => unregistered++), "initial
 var keyAttempts = new List<string>();
 Check(!hotkeySelection.Select("Ctrl+Space", key => { keyAttempts.Add(key); return key == "Alt+Q"; }, () => unregistered++) && hotkeySelection.Current == "Alt+Q" && hotkeySelection.IsRegistered, "shortcut collision restores previous registration and selection");
 Check(keyAttempts.SequenceEqual(new[] { "Ctrl+Space", "Alt+Q" }) && unregistered == 1, "failed change restores previous key after releasing it");
-Check(!DialoguePolicy.HotkeyCloses(true, false) && !DialoguePolicy.HotkeyCloses(false, false) && !DialoguePolicy.HotkeyCloses(false, true), "shortcut opens the composer at startup, when idle in front and from other windows");
-Check(DialoguePolicy.HotkeyCloses(true, true), "shortcut closes only the composer already in front");
+Check(!DialoguePolicy.HotkeyCloses(false, false) && !DialoguePolicy.HotkeyCloses(false, true), "shortcut enters Himari from other windows regardless of editor state");
+Check(DialoguePolicy.HotkeyCloses(true, true) && DialoguePolicy.HotkeyCloses(true, false), "shortcut switches away even when the companion editor is hidden");
+Check(legacyPresentation.BubblePlacement == "상하 자동", "old preferences default to automatic vertical placement");
+Check(DialoguePolicy.BubblesBelow("상하 자동", 200, 540) && !DialoguePolicy.BubblesBelow("상하 자동", 700, 540), "automatic placement follows monitor midpoint");
+Check(!DialoguePolicy.BubblesBelow("상 고정", 100, 540) && DialoguePolicy.BubblesBelow("하 고정", 900, 540), "fixed placement does not flip near an edge");
 var workHistory = new WorkWindowHistory(); int restores = 0;
 Check(!workHistory.Return(_ => { restores++; return true; }) && restores == 0, "no work window is restored before entry");
 workHistory.Remember(new IntPtr(10), _ => true);
