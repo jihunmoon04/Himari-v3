@@ -192,27 +192,32 @@ def message_of(event: ConversationEvent) -> Message | None:
     return None
 
 
-def next_part(events: Sequence[ConversationEvent], cursor: int) -> Part | None:
+def next_part(events: Sequence[ConversationEvent], cursor: int,
+              last: tuple[int, datetime] | None = None) -> Part | None:
     """The part a pass reads next: the Events after ``cursor``, cut at a turn
     (a user message) boundary once their messages pass PASS_INPUT_CHARS;
     None without a user message after the cursor. Every turn fits one part,
-    as one message is at most MESSAGE_CHARS (§4.2)."""
+    as one message is at most MESSAGE_CHARS (§4.2). ``events`` may hold only
+    the messages (the rest left out as they were read); ``last`` is then the
+    sequence and time of the last Event read, where an uncut part ends. A
+    part cut short ends just before the user message that did not fit."""
     after = [e for e in events if e.sequence > cursor]
     if not any(isinstance(e.payload, UserMessage) for e in after):
         return None
     messages: list[Message] = []
     size = 0
-    end = after[-1]
-    for index, event in enumerate(after):
+    end = last or (after[-1].sequence, after[-1].created_at)
+    before = after[0].created_at
+    for event in after:
         message = message_of(event)
-        if message is None:
-            continue
-        if message.role == "user" and messages and size + len(message.text) > PASS_INPUT_CHARS:
-            end = after[index - 1]  # the turn before this one is the part's last
+        if message is not None and message.role == "user" and messages and size + len(message.text) > PASS_INPUT_CHARS:
+            end = (event.sequence - 1, before)  # the turn before this one is the part's last
             break
-        messages.append(message)
-        size += len(message.text)
-    return Part(cursor, end.sequence, tuple(messages), end.created_at)
+        before = event.created_at
+        if message is not None:
+            messages.append(message)
+            size += len(message.text)
+    return Part(cursor, end[0], tuple(messages), end[1])
 
 
 def waits(part: Part, *, open_loops: bool, now: datetime) -> bool:
@@ -308,11 +313,11 @@ def parse_date(value: object, zone: str) -> tuple[str, datetime] | None:
             end = datetime.combine(day + timedelta(days=1), time(), tzinfo=ZoneInfo(zone)) - timedelta(microseconds=1)
             return value, end.astimezone(UTC)
         moment = datetime.fromisoformat(value)
-    except ValueError:
+        if moment.tzinfo is None:
+            return None
+        return value, moment.astimezone(UTC)
+    except (ValueError, OverflowError):  # not a date, or one at the calendar's edge (9999-12-31)
         return None
-    if moment.tzinfo is None:
-        return None
-    return value, moment.astimezone(UTC)
 
 
 def _within(instant: datetime, now: datetime, bounds: tuple[timedelta, timedelta]) -> bool:
@@ -340,6 +345,37 @@ def _consent(evidence: Sequence[int], users: Mapping[int, str]) -> str:
     if any(word in t for t in texts for word in REMEMBER_REQUESTS):
         return "asked"
     return "silent"
+
+
+type _Date = tuple[str, datetime] | None
+
+
+def _dates(raw: Mapping[str, Any], category: MemoryCategory, target: Memory | None, zone: str) -> tuple[_Date, _Date]:
+    """A note's due date (loops) and end (other facts). A field given but not a
+    date is a ValueError. An update that leaves a field out keeps the note's
+    value (as long as the category still has that field); null clears it.
+    The field the category does not have is ignored."""
+    def field(key: str, kept: _Date) -> _Date:
+        if key not in raw:
+            return kept
+        value = raw[key]
+        if value is None or (isinstance(value, str) and not value.strip()):
+            return None
+        parsed = parse_date(value, zone)
+        if parsed is None:
+            raise ValueError(f"{key} is not a date")
+        return parsed
+
+    loop = category is MemoryCategory.LOOP
+    kept_due: _Date = None
+    kept_valid: _Date = None
+    if target is not None and target.due_at is not None and target.due_instant is not None:
+        kept_due = (target.due_at, target.due_instant)
+    if target is not None and target.valid_until is not None and target.valid_instant is not None:
+        kept_valid = (target.valid_until, target.valid_instant)
+    due = field("due", kept_due) if loop else None
+    valid = field("valid_until", kept_valid) if not loop else None
+    return due, valid
 
 
 def plan_items(answer: Mapping[str, Any], part: Part, notes: Sequence[Memory], *, kind: PassKind, now: datetime,
@@ -387,12 +423,16 @@ def plan_items(answer: Mapping[str, Any], part: Part, notes: Sequence[Memory], *
             items.append(drop("incomplete"))
             continue
         category = MemoryCategory(category_value)
-        due = parse_date(raw.get("due"), zone) if category is MemoryCategory.LOOP else None
-        valid = parse_date(raw.get("valid_until"), zone) if category is not MemoryCategory.LOOP else None
-        if due is not None and not _within(due[1], now, LOOP_DUE_RANGE):
+        try:
+            due, valid = _dates(raw, category, target, zone)
+        except ValueError:
+            items.append(drop("bad_date"))
+            continue
+        # Only a date the answer gives is held to the range: one an update kept stays as it was.
+        if due is not None and "due" in raw and not _within(due[1], now, LOOP_DUE_RANGE):
             items.append(drop("past_due" if due[1] < now else "bad_date"))
             continue
-        if valid is not None and not _within(valid[1], now, VALID_UNTIL_RANGE):
+        if valid is not None and "valid_until" in raw and not _within(valid[1], now, VALID_UNTIL_RANGE):
             items.append(drop("bad_date"))
             continue
         action = PassAction.ADD if target is None else PassAction.UPDATE

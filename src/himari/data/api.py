@@ -1243,6 +1243,11 @@ class MemoryPassLog(Protocol):
         Conversation id after ``after``: a page of at most ``limit``."""
         ...
 
+    async def last_event(self, scope: TrustedScope) -> tuple[int, datetime] | None:
+        """The sequence and time of the Conversation's last Event (none: None).
+        NOT_AUTHORIZED for one that is gone or trashed."""
+        ...
+
     async def unfinished_work(self, scope: TrustedScope) -> bool:
         """A Run PREPARED, DISPATCH_CLAIMED or RECEIVED, or a Tool execution
         EXECUTION_CLAIMED (§4.1). Waiting for the user is not unfinished."""

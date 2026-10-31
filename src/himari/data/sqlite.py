@@ -2768,6 +2768,13 @@ class SqliteData:
                                          _cursor(r) if r["through_sequence"] is not None else MemoryCursor(),
                                          datetime.fromisoformat(r["last_at"])) for r in rows)
 
+    async def last_event(self, scope: TrustedScope) -> tuple[int, datetime] | None:
+        with self._tx() as tx:
+            tx.authorized(scope)
+            row = tx.one("SELECT sequence, created_at FROM events WHERE conversation_id=? ORDER BY sequence DESC"
+                         " LIMIT 1", scope.conversation_id)
+            return None if row is None else (int(row["sequence"]), datetime.fromisoformat(row["created_at"]))
+
     async def unfinished_work(self, scope: TrustedScope) -> bool:
         with self._tx() as tx:
             tx.owned(scope)
@@ -2887,9 +2894,23 @@ class SqliteData:
             return None if row["raw_response_body"] is None else bytes(row["raw_response_body"])
 
     @staticmethod
+    def _settle_calls(tx: _Tx, pass_id: str) -> None:
+        """§4.8, before a pass ends: a call that may have been sent and has no
+        recorded outcome is counted as its reservation used (``uncertain``);
+        one stored but never sent is not counted (``abandoned``)."""
+        uncertain = tx.one("SELECT COALESCE(SUM(reserved_tokens), 0) AS n FROM memory_pass_calls WHERE pass_id=?"
+                           " AND status='dispatched'", pass_id)
+        assert uncertain is not None
+        tx.execute("UPDATE memory_pass_calls SET status='uncertain' WHERE pass_id=? AND status='dispatched'", pass_id)
+        tx.execute("UPDATE memory_pass_calls SET status='abandoned' WHERE pass_id=? AND status='prepared'", pass_id)
+        tx.execute("UPDATE memory_passes SET reserved_tokens=0, unmetered_tokens=unmetered_tokens+? WHERE pass_id=?",
+                   int(uncertain["n"]), pass_id)
+
+    @staticmethod
     def _count_failure(tx: _Tx, row: sqlite3.Row, status: PassStatus, error: str, retry_after: datetime) -> PassStatus:
         """§4.5: a RUNNING pass ends as ``status`` (FAILED or INTERRUPTED),
         or SKIPPED when it is the live part's last allowed failure."""
+        SqliteData._settle_calls(tx, row["pass_id"])
         now = _timestamp(datetime.now(UTC))
         final = status
         if row["kind"] == PassKind.LIVE.value:
@@ -2903,7 +2924,7 @@ class SqliteData:
                 else:
                     cursor = dataclasses.replace(cursor, failures=failures, retry_after=retry_after)
                 SqliteData._write_cursor(tx, ConversationId(row["conversation_id"]), cursor)
-        tx.execute("UPDATE memory_passes SET status=?, error=?, reserved_tokens=0, finished_at=? WHERE pass_id=?",
+        tx.execute("UPDATE memory_passes SET status=?, error=?, finished_at=? WHERE pass_id=?",
                    final.value, error[:200], now, row["pass_id"])
         return final
 
@@ -2930,7 +2951,8 @@ class SqliteData:
             return len(rows)
 
     def _discard(self, tx: _Tx, pass_id: str, reason: str) -> PassApplied:
-        tx.execute("UPDATE memory_passes SET status='discarded', error=?, reserved_tokens=0, finished_at=?"
+        self._settle_calls(tx, pass_id)
+        tx.execute("UPDATE memory_passes SET status='discarded', error=?, finished_at=?"
                    " WHERE pass_id=?", reason, _timestamp(datetime.now(UTC)), pass_id)
         return PassApplied(PassStatus.DISCARDED, reason=reason)
 
@@ -3046,8 +3068,8 @@ class SqliteData:
                     baseline_sequence=0 if done else cursor.baseline_sequence))
             else:
                 tx.execute("UPDATE memory_passes SET status='retried' WHERE pass_id=?", row["retry_of"])
-            tx.execute("UPDATE memory_passes SET status='applied', reserved_tokens=0, finished_at=? WHERE pass_id=?",
-                       stamp, pass_id)
+            self._settle_calls(tx, pass_id)
+            tx.execute("UPDATE memory_passes SET status='applied', finished_at=? WHERE pass_id=?", stamp, pass_id)
             return PassApplied(PassStatus.APPLIED, tuple(outcomes), episode_id)
 
     def _write_episode(self, tx: _Tx, row: sqlite3.Row, kind: PassKind, plan: EpisodePlan, now: datetime) -> int | None:

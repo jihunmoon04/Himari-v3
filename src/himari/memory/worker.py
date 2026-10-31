@@ -22,6 +22,7 @@ from zoneinfo import ZoneInfo
 
 from himari.common import ConversationId, PrincipalId, TrustedScope
 from himari.data.api import (
+    AssistantFinal,
     ConversationEvent,
     DataError,
     DataErrorCode,
@@ -34,11 +35,13 @@ from himari.data.api import (
     RawNoResponse,
     RawReceived,
     RawUncertain,
+    UserMessage,
 )
 from himari.memory.api import ActivityProbe, MemoryPassSettings, PassOutcome
 from himari.memory.passes import (
     PASS_MAX_OUTPUT_TOKENS,
     AnswerError,
+    Part,
     answer_text,
     model_input,
     next_part,
@@ -61,9 +64,10 @@ SCAN_PAGE = 50
 PASSES_AT_ONCE = 2  # in the server (§4.8)
 MAX_PARTS_PER_READ = 20  # parts one read goes through before it lets others in
 CALLS_PER_PASS = 2  # a malformed answer is asked once more (§4.3)
+EVENTS_PAGE = 200  # Events read at a time while a part is collected
 
 
-class MemoryPassData(MemoryStore, MemoryPassLog, Protocol):
+class MemoryPassData(MemoryStore, MemoryPassLog, Protocol):  # what the worker reads and writes
     async def read_events(self, scope: TrustedScope, *, after_sequence: int = 0,
                           limit: int | None = None) -> Sequence[ConversationEvent]: ...
 
@@ -194,6 +198,26 @@ class MemoryPasses:
                     break
         return outcomes
 
+    async def _read_part(self, scope: TrustedScope, cursor: int, last: tuple[int, datetime]) -> Part | None:
+        """The next part, read EVENTS_PAGE Events at a time up to ``last`` (the
+        snapshot), stopping as soon as the part is cut short (review P2-3).
+        Only the messages are kept; Tool events are read and let go page by page."""
+        kept: list[ConversationEvent] = []
+        after = cursor
+        end = (cursor, last[1])
+        while after < last[0]:
+            page = [e for e in await self._data.read_events(scope, after_sequence=after, limit=EVENTS_PAGE)
+                    if e.sequence <= last[0]]
+            if not page:
+                break
+            kept.extend(e for e in page if isinstance(e.payload, (UserMessage, AssistantFinal)))
+            after = page[-1].sequence
+            end = (after, page[-1].created_at)
+            found = next_part(kept, cursor, end)
+            if found is not None and found.through_sequence < after:
+                return found  # cut short: the rest is the next part's
+        return next_part(kept, cursor, last if after >= last[0] else end)
+
     def _day_start(self, now: datetime) -> datetime:
         zone = ZoneInfo(self._settings.time_zone)
         return datetime.combine(now.astimezone(zone).date(), time(), tzinfo=zone).astimezone(UTC)
@@ -210,16 +234,16 @@ class MemoryPasses:
             cursor = await self._data.read_memory_cursor(scope)
             if cursor.retry_after is not None and cursor.retry_after > now:
                 return PassOutcome.WAITING
-            events = await self._data.read_events(scope, after_sequence=cursor.through_sequence)
+            last = await self._data.last_event(scope)
+            if last is None or last[0] <= cursor.through_sequence:
+                return PassOutcome.NOTHING
+            if now - last[1] < self._settings.idle:
+                return PassOutcome.WAITING
+            part = await self._read_part(scope, cursor.through_sequence, last)
         except DataError as error:
             if error.code in (DataErrorCode.NOT_AUTHORIZED, DataErrorCode.NOT_FOUND):
                 return PassOutcome.NOTHING  # gone or trashed
             raise
-        if not events:
-            return PassOutcome.NOTHING
-        if now - events[-1].created_at < self._settings.idle:
-            return PassOutcome.WAITING
-        part = next_part(events, cursor.through_sequence)
         if part is None:
             return PassOutcome.NOTHING
         notes = await self._data.list_memories(scope.principal_id)
@@ -236,7 +260,7 @@ class MemoryPasses:
             return PassOutcome.DEFERRED
         try:
             pass_id = await self._data.begin_pass(scope, PassStart(
-                PassKind.LIVE, cursor.through_sequence, part.through_sequence, events[-1].sequence,
+                PassKind.LIVE, cursor.through_sequence, part.through_sequence, last[0],
                 self._provider.provider_key, self._settings.model_id, part.omitted))
         except DataError as error:
             if error.code is DataErrorCode.NOT_FOUND:
@@ -258,9 +282,15 @@ class MemoryPasses:
         except Exception as error:
             await self._failed(pass_id, type(error).__name__)
             raise
-        items = plan_items(answer, part, shown, kind=PassKind.LIVE, now=now, zone=zone)
-        episode = plan_episode(answer, part, previous, kind=PassKind.LIVE)
-        result = await self._data.apply_pass(pass_id, items, episode, now=self._clock())
+        try:
+            items = plan_items(answer, part, shown, kind=PassKind.LIVE, now=now, zone=zone)
+            episode = plan_episode(answer, part, previous, kind=PassKind.LIVE)
+            result = await self._data.apply_pass(pass_id, items, episode, now=self._clock())
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:  # the pass never stays RUNNING over an answer it could not use (review P1)
+            await self._failed(pass_id, f"could not apply: {type(error).__name__}")
+            raise
         if result.status is PassStatus.APPLIED:
             return PassOutcome.APPLIED
         log.info("memory pass %s of %s discarded: %s", pass_id, scope.conversation_id, result.reason)

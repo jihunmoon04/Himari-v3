@@ -1527,6 +1527,10 @@ class InMemoryData:
                 break
         return tuple(due)
 
+    async def last_event(self, scope: TrustedScope) -> tuple[int, datetime] | None:
+        conv = self._store._authorized(scope)
+        return (conv.events[-1].sequence, conv.events[-1].created_at) if conv.events else None
+
     async def unfinished_work(self, scope: TrustedScope) -> bool:
         return self._unfinished(self._store._owned(scope))
 
@@ -1624,8 +1628,27 @@ class InMemoryData:
         assert response is None or isinstance(response, bytes)
         return response
 
+    def _settle_calls(self, owner: PrincipalId, mp: MemoryPass) -> MemoryPass:
+        """§4.8, before a pass ends: a call that may have been sent and has no
+        recorded outcome counts as its reservation used; one never sent does not."""
+        uncertain = 0
+        for (pass_id, _), row in self._store.pass_calls.items():
+            if pass_id != mp.pass_id:
+                continue
+            if row["status"] == "dispatched":
+                reserved = row["reserved"]
+                assert isinstance(reserved, int)
+                uncertain += reserved
+                row["status"] = "uncertain"
+            elif row["status"] == "prepared":
+                row["status"] = "abandoned"
+        settled = replace(mp, reserved_tokens=0, unmetered_tokens=mp.unmetered_tokens + uncertain)
+        self._put_pass(owner, settled)
+        return settled
+
     def _count_failure(self, owner: PrincipalId, mp: MemoryPass, status: PassStatus, error: str,
                        retry_after: datetime) -> PassStatus:
+        mp = self._settle_calls(owner, mp)
         final = status
         if mp.kind is PassKind.LIVE:
             cursor = self._store.memory_cursors.get(mp.conversation_id, MemoryCursor())
@@ -1637,8 +1660,7 @@ class InMemoryData:
                 else:
                     cursor = replace(cursor, failures=failures, retry_after=retry_after)
                 self._store.memory_cursors[mp.conversation_id] = cursor
-        self._put_pass(owner, replace(mp, status=final, error=error[:200], reserved_tokens=0,
-                                      finished_at=datetime.now(UTC)))
+        self._put_pass(owner, replace(mp, status=final, error=error[:200], finished_at=datetime.now(UTC)))
         return final
 
     async def fail_pass(self, pass_id: str, error: str, retry_after: datetime) -> PassStatus:
@@ -1692,8 +1714,8 @@ class InMemoryData:
             return PassApplied(mp.status, reason="not_running")
         why = self._pass_checks(owner, mp)
         if why is not None:
-            self._put_pass(owner, replace(mp, status=PassStatus.DISCARDED, error=why, reserved_tokens=0,
-                                          finished_at=datetime.now(UTC)))
+            mp = self._settle_calls(owner, mp)
+            self._put_pass(owner, replace(mp, status=PassStatus.DISCARDED, error=why, finished_at=datetime.now(UTC)))
             return PassApplied(PassStatus.DISCARDED, reason=why)
         outcomes: list[str] = []
         for item in items:
@@ -1750,7 +1772,8 @@ class InMemoryData:
             assert mp.retry_of is not None
             skipped_owner, skipped = self._store.memory_passes[mp.retry_of]
             self._put_pass(skipped_owner, replace(skipped, status=PassStatus.RETRIED))
-        self._put_pass(owner, replace(mp, status=PassStatus.APPLIED, reserved_tokens=0, finished_at=now))
+        mp = self._settle_calls(owner, self._store.memory_passes[pass_id][1])
+        self._put_pass(owner, replace(mp, status=PassStatus.APPLIED, finished_at=now))
         return PassApplied(PassStatus.APPLIED, tuple(outcomes), episode_id)
 
     def _write_episode(self, owner: PrincipalId, mp: MemoryPass, plan: EpisodePlan, now: datetime) -> int | None:

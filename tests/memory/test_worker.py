@@ -292,3 +292,55 @@ def test_closing_cancels_timers_and_takes_no_new_work(closed_first: bool) -> Non
         assert provider.sent == []
 
     asyncio.run(scenario())
+
+
+def test_a_pass_whose_answer_cannot_be_applied_ends_failed_and_the_next_one_may_begin(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    # PR #135 review P1: an error after the answer left the pass RUNNING and blocked the principal.
+    from himari.memory import worker
+
+    def broken(*_: object, **__: object) -> list[object]:
+        raise RuntimeError("planning failed")
+
+    async def scenario() -> None:
+        data, provider, _, passes = setup(reply(BUILDS), reply(BUILDS))
+        await turn(data, SCOPE, "I build HIMARI, the companion agent.")
+        await turn(data, OTHER, "Another conversation with enough words.")
+        monkeypatch.setattr(worker, "plan_items", broken)
+        with pytest.raises(RuntimeError):
+            await passes.read(SCOPE)
+        (record,) = await data.list_passes(SCOPE)
+        assert record.status is PassStatus.FAILED and record.error == "could not apply: RuntimeError"
+        assert await data.read_pass_response(record.pass_id, 1) is not None  # the answer is kept
+        monkeypatch.undo()
+        assert (await passes.read(OTHER))[0] is PassOutcome.APPLIED
+
+    asyncio.run(scenario())
+
+
+def test_events_are_read_a_page_at_a_time_and_only_until_the_part_is_cut(monkeypatch: pytest.MonkeyPatch) -> None:
+    # PR #135 review P2-3: a long Conversation was read whole before it was cut.
+    from himari.memory import worker
+
+    monkeypatch.setattr(worker, "EVENTS_PAGE", 2)
+
+    async def scenario() -> None:
+        first: dict[str, object] = {"op": "add", "category": "project", "text": "Part one.", "evidence": [1]}
+        data, provider, _, passes = setup(reply(first), reply())
+        for text in ("a" * 15_000, "b" * 15_000, "c" * 30, "d" * 30):
+            await turn(data, SCOPE, text)
+        reads: list[tuple[int, int | None]] = []
+        original = data.read_events
+
+        async def counted(scope: TrustedScope, *, after_sequence: int = 0, limit: int | None = None) -> object:
+            reads.append((after_sequence, limit))
+            return await original(scope, after_sequence=after_sequence, limit=limit)
+
+        data.read_events = counted  # type: ignore[method-assign, assignment]
+        assert await passes.read(SCOPE) == [PassOutcome.APPLIED, PassOutcome.APPLIED, PassOutcome.NOTHING]
+        # The first pass read Events 1–4 and stopped: 3 did not fit. The second read 3–8.
+        assert reads == [(0, 2), (2, 2), (2, 2), (4, 2), (6, 2)]
+        assert [(p.from_sequence, p.through_sequence, p.snapshot_sequence) for p in await data.list_passes(SCOPE)] == [
+            (0, 2, 8), (2, 8, 8)]
+
+    asyncio.run(scenario())

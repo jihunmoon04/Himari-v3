@@ -221,3 +221,37 @@ def test_an_episode_needs_a_user_message_of_the_part_and_extends_only_a_live_pre
     for bad in ({**good, "user_evidence": []}, {**good, "user_evidence": [2]}, {**good, "himari_context": [1]}):
         assert plan_episode(answer(episode=bad), PART, previous, kind=PassKind.LIVE) is None
     assert plan_episode(answer(), PART, previous, kind=PassKind.LIVE) is None
+
+
+def test_a_date_at_the_calendars_edge_or_not_a_date_drops_the_note() -> None:
+    # PR #135 review P1 (9999-12-31 overflowed) and P2-2 (an unreadable date made a loop without one).
+    assert parse_date("9999-12-31", SEOUL) is None and parse_date("0001-01-01T00:00+09:00", SEOUL) is None
+    items = plan_items(answer(
+        {"op": "add", "category": "loop", "text": "Far.", "evidence": [1], "due": "9999-12-31"},
+        {"op": "add", "category": "loop", "text": "Interview.", "evidence": [1], "due": "next Friday"},
+        {"op": "add", "category": "user", "text": "Away.", "evidence": [1], "valid_until": "soon"},
+        {"op": "add", "category": "loop", "text": "Some day.", "evidence": [1], "due": None},
+        {"op": "add", "category": "user", "text": "A fact.", "evidence": [1], "due": "next Friday"},
+    ), PART, [], kind=PassKind.LIVE, now=NOW, zone=SEOUL)
+    assert [(i.action, i.reason) for i in items] == [
+        (PassAction.DROP, "bad_date"), (PassAction.DROP, "bad_date"), (PassAction.DROP, "bad_date"),
+        (PassAction.ADD, None), (PassAction.ADD, None)]  # no date given; a fact's due is not its field
+    assert (items[3].due_at, items[4].due_at) == (None, None)
+
+
+def test_an_update_keeps_the_dates_it_leaves_out_and_clears_one_set_to_null() -> None:
+    # PR #135 review P2-1: rewording an open loop kept its date only by chance.
+    overdue = NOW - timedelta(days=2)
+    shown = [note(5, "Interview.", MemoryCategory.LOOP, due_at="2026-10-29", due_instant=overdue),
+             note(6, "Away.", valid_until="2026-11-07", valid_instant=NOW + timedelta(days=7))]
+    items = plan_items(answer(
+        {"op": "update", "id": "m5", "text": "Interview at Kakao.", "evidence": [1]},
+        {"op": "update", "id": "m6", "text": "Away in Busan.", "evidence": [1]},
+        {"op": "update", "id": "m5", "text": "Interview, no date.", "evidence": [1], "due": None},
+        {"op": "update", "id": "m6", "category": "project", "text": "Works from Busan.", "evidence": [1]},
+    ), PART, shown, kind=PassKind.LIVE, now=NOW, zone=SEOUL)
+    assert [(i.action, i.due_at, i.due_instant, i.valid_until) for i in items] == [
+        (PassAction.UPDATE, "2026-10-29", overdue, None),  # kept, though past: only given dates are ranged
+        (PassAction.UPDATE, None, None, "2026-11-07"),
+        (PassAction.UPDATE, None, None, None),
+        (PassAction.UPDATE, None, None, "2026-11-07")]  # a project may still have an end

@@ -431,3 +431,40 @@ def test_the_cleanup_drops_stale_loops_expired_facts_old_retired_notes_and_propo
         assert (await data.read_pass_outcomes(pass_id))[5] == "discarded"
 
     asyncio.run(scenario())
+
+
+def test_a_call_that_may_have_been_sent_counts_its_reservation_whatever_ends_the_pass() -> None:
+    # PR #135 review P1: failing, interrupting or discarding a pass never drops an unsettled reservation.
+    async def scenario() -> None:
+        store, data = fresh(SCOPE, OTHER)
+        since = datetime.now(UTC) - timedelta(minutes=1)
+        last = await turn(data, SCOPE, "I build HIMARI.")
+        failed = await live(data, SCOPE, last)
+        sent = await data.prepare_pass_call(failed, b"{}", "application/json", 800)
+        await data.mark_pass_call_dispatched(failed, sent)  # sent, no answer recorded
+        await data.fail_pass(failed, "timeout", NOW)
+        assert (await data.read_pass(failed)).unmetered_tokens == 800
+
+        never = await live(data, SCOPE, last)
+        await data.prepare_pass_call(never, b"{}", "application/json", 500)  # stored, never sent
+        await data.fail_pass(never, "provider refused before send", NOW)
+        assert (await data.read_pass(never)).charged_tokens == 0
+
+        other = await turn(data, OTHER, "I write Python.")
+        cut = await live(data, OTHER, other)
+        call = await data.prepare_pass_call(cut, b"{}", "application/json", 700)
+        await data.mark_pass_call_dispatched(cut, call)
+        data = data_for(restart(store))
+        await data.interrupt_running_passes(NOW)  # a stop while it waited for the answer
+        record = await data.read_pass(cut)
+        assert (record.status, record.reserved_tokens, record.unmetered_tokens) == (PassStatus.INTERRUPTED, 0, 700)
+
+        discarded = await live(data, OTHER, other, start=0)
+        call = await data.prepare_pass_call(discarded, b"{}", "application/json", 300)
+        await data.mark_pass_call_dispatched(discarded, call)
+        await data.append_event(OTHER, user("one more"))
+        assert (await data.apply_pass(discarded, [], None, now=NOW)).status is PassStatus.DISCARDED
+        assert (await data.read_pass(discarded)).unmetered_tokens == 300
+        assert await data.pass_usage(ME, since) == 800 + 700 + 300
+
+    asyncio.run(scenario())
