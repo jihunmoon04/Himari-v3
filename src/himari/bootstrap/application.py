@@ -74,9 +74,20 @@ from himari.common import (
     TrustedScope,
     WorkspaceId,
 )
-from himari.control.api import ContextStatus, ControlError, ControlErrorCode, JobStatus, ModelCatalog, ModelOffer, ResolvedModel
+from himari.control.api import (
+    ContextStatus,
+    ControlError,
+    ControlErrorCode,
+    JobListener,
+    JobStatus,
+    ModelCatalog,
+    ModelOffer,
+    ResolvedModel,
+)
 from himari.control.driver import NO_PROGRESS_RUNS
 from himari.control.runner import SEEN_SECONDS, BackgroundRunner
+from himari.memory.api import MemoryPassSettings
+from himari.memory.worker import MemoryPasses
 from himari.data.api import (
     MessageOrigin,
     MAX_LIST_LIMIT,
@@ -653,6 +664,64 @@ async def _server_launchers(config: McpConfig, root: Path) -> LauncherFor | None
     return launcher_for
 
 
+class _JobListeners:
+    """The Runner's one listener, passing each job event on to several (V3-P85:
+    the event stream and memory passes). One that fails is logged; the others
+    still hear it."""
+
+    def __init__(self, *listeners: JobListener) -> None:
+        self.listeners = list(listeners)
+
+    def _each(self, call: Callable[[JobListener], None]) -> None:
+        for listener in self.listeners:
+            try:
+                call(listener)
+            except Exception:  # noqa: BLE001 — a listener is not the job
+                log.exception("a job listener failed")
+
+    def job_started(self, scope: TrustedScope, origin: MessageOrigin | None, status: JobStatus) -> None:
+        self._each(lambda listener: listener.job_started(scope, origin, status))
+
+    def accepted(self, scope: TrustedScope) -> None:
+        self._each(lambda listener: listener.accepted(scope))
+
+    def run_ended(self, scope: TrustedScope) -> None:
+        self._each(lambda listener: listener.run_ended(scope))
+
+    def job_ended(self, scope: TrustedScope, status: JobStatus) -> None:
+        self._each(lambda listener: listener.job_ended(scope, status))
+
+
+class _RunnerActivity:
+    """V3-P85 §4.1: whether this process runs a job of the Conversation."""
+
+    def __init__(self, runner: BackgroundRunner) -> None:
+        self._runner = runner
+
+    def running(self, scope: TrustedScope) -> bool:
+        return scope.conversation_id in self._runner.running(scope.principal_id)
+
+
+def memory_pass_settings(provider: ProviderAdapter, *, memory: bool, auto: bool, model_id: str | None,
+                         idle_minutes: int, daily_tokens: int,
+                         time_zone: str) -> tuple[MemoryPassSettings | None, str]:
+    """V3-P85 §4.8, §12: the settings memory passes run with, or None, and
+    the status told at startup. Only a model the Provider declares checked
+    for them (Q6) is taken."""
+    if not memory:
+        return None, "off (HIMARI_MEMORY=0)"
+    if not auto:
+        return None, "off (HIMARI_MEMORY_AUTO=0)"
+    if model_id is None:
+        return None, "off (no HIMARI_MEMORY_MODEL)"
+    capabilities = provider.describe_capabilities(model_id)
+    if not capabilities.memory_passes:
+        return None, f"off ({model_id} is not checked for memory passes)"
+    effort = "low" if "low" in capabilities.reasoning_efforts else None
+    return (MemoryPassSettings(model_id, effort, timedelta(minutes=idle_minutes), daily_tokens, time_zone),
+            f"on ({model_id}, after {idle_minutes} quiet minutes, {daily_tokens:,} tokens a day each)")
+
+
 @dataclass
 class _Lifecycle:
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
@@ -685,6 +754,9 @@ class Application:
     documents: DocumentReader | None = None  # read_document's reader (V3-P70); None: not offered
     toolkit: Toolkit | None = field(default=None, repr=False)  # its checked folder, open until close()
     memory_enabled: bool = False  # V3-P71 §9: the memory Tools and notes (HIMARI_MEMORY)
+    # V3-P85 §12: memory passes (None: they do not run) and why, as told at startup.
+    memory_passes: MemoryPasses | None = field(default=None, repr=False)
+    auto_memory: str = "off"
     conversation_search_enabled: bool = False  # V3-P72 §9 (HIMARI_CONVERSATION_SEARCH)
     streaming_enabled: bool = False  # V3-P73 §9 (HIMARI_STREAMING)
     companion_enabled: bool = False  # V3-P83 §3 (HIMARI_COMPANION): pairing and device tokens
@@ -744,6 +816,10 @@ class Application:
         documents_dir: str | None = None,  # V3-P70 §6.2: HIMARI_DOCUMENTS_DIR; None: no documents
         documents_owners: frozenset[int] = frozenset({0}),  # who may own the toolkit: root (tests add their user)
         memory: bool = True,  # V3-P71 §9: HIMARI_MEMORY=0 turns it off (the notes stay)
+        memory_auto: bool = True,  # V3-P85 §12: HIMARI_MEMORY_AUTO=0 turns memory passes off
+        memory_model: str | None = None,  # HIMARI_MEMORY_MODEL: their model; None: they do not run
+        memory_idle_minutes: int = 10,  # HIMARI_MEMORY_IDLE_MINUTES: quiet before a pass
+        memory_daily_tokens: int = 1_000_000,  # HIMARI_MEMORY_DAILY_TOKENS: each principal's daily budget
         conversation_search: bool = True,  # V3-P72 §9: HIMARI_CONVERSATION_SEARCH=0 turns its Tools off
         streaming: bool = True,  # V3-P73 §9: HIMARI_STREAMING=0 asks no model for a stream
         companion: bool = True,  # V3-P83 §3: HIMARI_COMPANION=0 refuses pairing and device tokens
@@ -884,8 +960,9 @@ class Application:
             raise
         assert isinstance(runtime.data, SqliteData)
         events = CompanionEvents(hub, runtime.data)
+        listeners = _JobListeners(events)
         runner = BackgroundRunner(runtime.driver, unattended_runs=unattended_runs, seen_seconds=turn.seen_seconds,
-                                  listener=events)
+                                  listener=listeners)
         application = cls(root, store, runtime.data, runtime, runner, inside, state, model_id,
                           default_budget.limit_tokens, secret, mcp, turn, tuple(unverified), trash_days,
                           file_max_bytes, uploads_work, views, tuple(image_models), reader, toolkit,
@@ -894,6 +971,14 @@ class Application:
                           changes=changes,
                           machine_principals=frozenset(PrincipalId(p) for p in machine_principals),
                           hub=hub, events=events)
+        settings, application.auto_memory = memory_pass_settings(
+            provider, memory=memory, auto=memory_auto, model_id=memory_model, idle_minutes=memory_idle_minutes,
+            daily_tokens=memory_daily_tokens, time_zone=time_zone)
+        if settings is not None:
+            passes = MemoryPasses(runtime.data, provider, settings, _RunnerActivity(runner))
+            listeners.listeners.append(passes)
+            application.memory_passes = passes
+            await passes.start()
         application._ticking = asyncio.create_task(hub.run(), name="presence-tick")
         if cleanup_seconds is not None:
             application._cleanup = asyncio.create_task(application._purge_periodically(cleanup_seconds),
@@ -1796,13 +1881,30 @@ class Application:
                 await self.clean_files()
             except Exception:  # noqa: BLE001 — the next round tries again
                 log.exception("file cleanup failed")
+            try:
+                await self.clean_memories()
+            except Exception:  # noqa: BLE001 — the next round tries again
+                log.exception("memory cleanup failed")
             await asyncio.sleep(seconds)
+
+    async def clean_memories(self, now: datetime | None = None) -> None:
+        """V3-P85 §5.1, §5.2, §5.4, §4.9: stale loops, expired facts, retired
+        notes and proposals left too long; then memory passes look for work
+        they missed (§4.1)."""
+        cleaned = await self.data.clean_memories(datetime.now(UTC) if now is None else now)
+        if any((cleaned.stale_loops, cleaned.expired_facts, cleaned.retired, cleaned.proposals)):
+            log.info("memory cleanup: %d stale loop(s), %d expired fact(s), %d retired note(s), %d proposal(s)",
+                     cleaned.stale_loops, cleaned.expired_facts, cleaned.retired, cleaned.proposals)
+        if self.memory_passes is not None:
+            self.memory_passes.scan_soon()
 
     async def close(self, grace_seconds: float = 30.0) -> None:
         for task in (self._cleanup, self._ticking):
             if task is not None:
                 task.cancel()
                 await asyncio.gather(task, return_exceptions=True)  # its own cancellation, not ours
+        if self.memory_passes is not None:
+            await self.memory_passes.close()  # a pass cut short is counted at the next start (V3-P85 §4.5)
         try:
             await self.runner.shutdown(grace_seconds)
             if self.events is not None:

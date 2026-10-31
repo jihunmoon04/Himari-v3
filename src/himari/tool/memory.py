@@ -39,7 +39,9 @@ MEMORY_SEARCH = ToolId("memory_search")
 MEMORY_TOOL_IDS = frozenset({MEMORY_SAVE, MEMORY_FORGET, MEMORY_SEARCH})
 SEARCH_LIMIT = 20  # notes one memory_search returns
 
-_CATEGORIES = [c.value for c in MemoryCategory]
+# Open loops (V3-P85 §5.5) reach the Tools with their due dates in a later part; until then the model
+# writes and searches the four kinds of V3-P71.
+_CATEGORIES = [c.value for c in MemoryCategory if c is not MemoryCategory.LOOP]
 _NOTE_ID = re.compile(r"m?([1-9][0-9]{0,9})")
 _ID_ARG: dict[str, JsonValue] = {"type": "string", "description": "A note's id, as m12."}
 # An optional argument also takes null: models send an unused one as null or ""

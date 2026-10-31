@@ -10,7 +10,8 @@ from datetime import UTC, datetime, timedelta
 from himari.data.api import Memory, MemoryCategory, MemoryOrigin, PersistedStateBasis
 from himari.prompt.api import CORE_MEMORY_CHARS, MEMORY_ABOUT, CurrentStateProjection, state_block, user_memory_data
 
-USER, PREFERENCE, PROJECT, REFERENCE = MemoryCategory
+USER, PREFERENCE, PROJECT, REFERENCE = (MemoryCategory.USER, MemoryCategory.PREFERENCE, MemoryCategory.PROJECT,
+                                         MemoryCategory.REFERENCE)
 NOW = datetime(2026, 10, 24, tzinfo=UTC)
 BASIS = PersistedStateBasis(0, 0, (), (), ())
 

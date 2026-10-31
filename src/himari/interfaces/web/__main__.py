@@ -83,6 +83,9 @@ def main(argv: list[str] | None = None) -> int:
                                              file_store_max_bytes=config.file_store_max_bytes,
                                              file_keep_days=config.file_keep_days,
                                              documents_dir=config.documents_dir, memory=config.memory,
+                                             memory_auto=config.memory_auto, memory_model=config.memory_model,
+                                             memory_idle_minutes=config.memory_idle_minutes,
+                                             memory_daily_tokens=config.memory_daily_tokens,
                                              conversation_search=config.conversation_search,
                                              streaming=config.streaming, companion=config.companion,
                                              time_zone=config.time_zone,
@@ -99,6 +102,7 @@ def main(argv: list[str] | None = None) -> int:
         if not application.memory_enabled:  # V3-P71 §9
             print("HIMARI web: memory is off (HIMARI_MEMORY=0): models neither save nor see notes; "
                   "you can still manage them", file=sys.stderr, flush=True)
+        print(f"HIMARI web: automatic memory {application.auto_memory}", file=sys.stderr, flush=True)  # V3-P85 §12
         if not application.conversation_search_enabled:  # V3-P72 §9
             print("HIMARI web: conversation search is off (HIMARI_CONVERSATION_SEARCH=0)", file=sys.stderr, flush=True)
         if not application.streaming_enabled:  # V3-P73 §9

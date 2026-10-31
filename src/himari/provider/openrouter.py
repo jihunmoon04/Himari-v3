@@ -364,6 +364,8 @@ class OpenRouterAdapter:
             # V3-P62 §9 B1: OpenRouter keeps one session on one provider from the first request,
             # so its prompt cache can serve the growing history. An opaque per-Conversation value.
             body["session_id"] = options.session_key
+        if options.max_output_tokens is not None:  # V3-P85 §4.8: a memory pass's cap, reasoning included
+            body["max_tokens"] = options.max_output_tokens
         streamed = options.stream and caps.streaming  # V3-P73 §3.1: checked models only
         if streamed:
             body["stream"] = True

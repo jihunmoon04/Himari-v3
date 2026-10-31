@@ -36,7 +36,12 @@ toolkit's folder (installed by root with scripts/install_documents.py). Unset,
 read_document is not offered and run_command has no document libraries.
 
 Memory (V3-P71 §9): ``HIMARI_MEMORY=0`` turns the memory Tools and notes off
-(the notes stay and can be seen); on by default.
+(the notes stay and can be seen); on by default. Automatic memory (V3-P85
+§12): ``HIMARI_MEMORY_MODEL`` names the model of memory passes (one the
+provider declares checked for them; unset: none run), ``HIMARI_MEMORY_AUTO=0``
+turns them off, ``HIMARI_MEMORY_IDLE_MINUTES`` (1..240, default 10) is how long
+a conversation stays quiet first, ``HIMARI_MEMORY_DAILY_TOKENS`` (default
+1,000,000) each principal's daily estimate-based budget.
 
 Conversation search (V3-P72 §9): ``HIMARI_CONVERSATION_SEARCH=0`` turns
 conversation_search and conversation_read off; on by default.
@@ -86,6 +91,10 @@ FILE_STORE_MAX_VAR = "HIMARI_FILE_STORE_MAX_BYTES"  # V3-P66: the whole file sto
 FILE_KEEP_DAYS_VAR = "HIMARI_FILE_KEEP_DAYS"  # V3-P66: unused this long, a stored file expires
 DOCUMENTS_DIR_VAR = "HIMARI_DOCUMENTS_DIR"  # V3-P70: the documents toolkit; unset: no documents
 MEMORY_VAR = "HIMARI_MEMORY"  # V3-P71: 0 turns memory off
+MEMORY_AUTO_VAR = "HIMARI_MEMORY_AUTO"  # V3-P85: 0 turns memory passes off
+MEMORY_MODEL_VAR = "HIMARI_MEMORY_MODEL"  # V3-P85: their model; unset: none run
+MEMORY_IDLE_VAR = "HIMARI_MEMORY_IDLE_MINUTES"  # V3-P85: quiet before a pass
+MEMORY_TOKENS_VAR = "HIMARI_MEMORY_DAILY_TOKENS"  # V3-P85: each principal's daily budget
 CONVERSATION_SEARCH_VAR = "HIMARI_CONVERSATION_SEARCH"  # V3-P72: 0 turns it off
 STREAMING_VAR = "HIMARI_STREAMING"  # V3-P73: 0 turns it off
 COMPANION_VAR = "HIMARI_COMPANION"  # V3-P83: 0 turns devices off
@@ -142,6 +151,10 @@ class WebConfig:
     file_keep_days: int = DEFAULT_FILE_KEEP_DAYS
     documents_dir: str | None = None
     memory: bool = True
+    memory_auto: bool = True  # V3-P85 §12
+    memory_model: str | None = None
+    memory_idle_minutes: int = 10
+    memory_daily_tokens: int = 1_000_000
     conversation_search: bool = True
     streaming: bool = True
     companion: bool = True  # V3-P83
@@ -251,6 +264,10 @@ class WebConfig:
             file_keep_days=keep_days,
             documents_dir=documents_dir,
             memory=_flag(source.get(MEMORY_VAR), MEMORY_VAR, default=True),
+            memory_auto=_flag(source.get(MEMORY_AUTO_VAR), MEMORY_AUTO_VAR, default=True),
+            memory_model=source.get(MEMORY_MODEL_VAR, "").strip() or None,
+            memory_idle_minutes=_required(source.get(MEMORY_IDLE_VAR), MEMORY_IDLE_VAR, 10, 1, 240),
+            memory_daily_tokens=_required(source.get(MEMORY_TOKENS_VAR), MEMORY_TOKENS_VAR, 1_000_000, 10_000, 10**9),
             conversation_search=_flag(source.get(CONVERSATION_SEARCH_VAR), CONVERSATION_SEARCH_VAR, default=True),
             streaming=_flag(source.get(STREAMING_VAR), STREAMING_VAR, default=True),
             companion=_flag(source.get(COMPANION_VAR), COMPANION_VAR, default=True),
