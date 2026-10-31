@@ -68,7 +68,8 @@ checkPalette(body)
 local W, H = body.width, body.height
 local bodyLayers = layers(body)
 local marker = bodyLayers["@face"] or fail("body.aseprite has no @face layer")
-local eyesMarker = bodyLayers["@eyes"] -- optional: a cel's user data forces that frame's eyes
+-- Optional: a cel's user data forces that frame's eyes or mouth.
+local eyesMarker, mouthMarker = bodyLayers["@eyes"], bodyLayers["@mouth"]
 local clips, restKey = {}, nil
 local function flatten(frame)
   local img = Image(W, H, ColorMode.INDEXED)
@@ -87,8 +88,10 @@ for _, tag in ipairs(body.tags) do
     local img = flatten(f)
     frames[#frames + 1] = { piece = add(img), ms = math.floor(body.frames[f].duration * 1000 + .5),
                             face = { cel.position.x - FX, cel.position.y - FY }, img = img }
-    local forced = eyesMarker and eyesMarker:cel(f)
-    if forced and forced.data ~= "" then frames[#frames].eyes = forced.data end
+    for key, l in pairs({ eyes = eyesMarker, mouth = mouthMarker }) do
+      local forced = l:cel(f)
+      if forced and forced.data ~= "" then frames[#frames][key] = forced.data end
+    end
   end
   clips[#clips + 1] = { name = tag.name, loop = tag.repeats == 0, loopFrom = loopFrom - 1, frames = frames }
   if tag.name == "idle" then restKey = frames[1].piece end
@@ -153,7 +156,7 @@ for ci, c in ipairs(clips) do
   local from = c.loopFrom > 0 and string.format(', "loopFrom": %d', c.loopFrom) or ""
   lines[#lines + 1] = string.format('    "%s": { "loop": %s%s, "frames": [', c.name, tostring(c.loop), from)
   for fi, f in ipairs(c.frames) do
-    local eyes = f.eyes and string.format(', "eyes": "%s"', f.eyes) or ""
+    local eyes = (f.eyes and string.format(', "eyes": "%s"', f.eyes) or "") .. (f.mouth and string.format(', "mouth": "%s"', f.mouth) or "")
     lines[#lines + 1] = string.format('      { "src": %s, "ms": %d, "face": [%d, %d]%s }%s', src(f.piece), f.ms, f.face[1], f.face[2], eyes, fi < #c.frames and "," or "")
   end
   lines[#lines + 1] = "    ] }" .. (ci < #clips and "," or "")

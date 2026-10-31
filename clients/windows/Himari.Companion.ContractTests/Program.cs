@@ -358,9 +358,9 @@ using (var cancelledHistory = new CancellationTokenSource())
 var shipped = CharacterManifest.Parse(File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "character.json")));
 Check(shipped.Width == 205 && shipped.Height == 206 && new[] { "neutral", "happy", "excited", "sad", "surprised", "thinking", "embarrassed", "worried" }.All(shipped.Faces.ContainsKey),
     "shipped manifest covers the server's eight moods on the 205x206 canvas");
-Check(shipped.Faces["neutral"].Eyes!.Keys.Order().SequenceEqual(["closed", "half"]) && shipped.Faces["neutral"].Mouth!.Keys.Order().SequenceEqual(["small", "wide"]), "neutral has blink and talk variants");
+Check(shipped.Faces["neutral"].Eyes!.Keys.Order().SequenceEqual(["closed", "half", "left", "right"]) && shipped.Faces["neutral"].Mouth!.Keys.Order().SequenceEqual(["small", "wide"]), "neutral has blink and talk variants");
 Check(shipped.Faces.All(f => f.Value.Mouth?.Keys.Order().SequenceEqual(["small", "wide"]) == true)
-    && shipped.Faces.Where(f => f.Key != "happy").All(f => f.Value.Eyes?.Keys.Order().SequenceEqual(["closed", "half"]) == true)
+    && shipped.Faces.Where(f => f.Key != "happy").All(f => f.Value.Eyes?.Keys.Order().SequenceEqual(["closed", "half", "left", "right"]) == true)
     && shipped.Faces["happy"].Eyes is null,
     "every mood talks; every mood but happy (eyes already closed in a smile) blinks");
 var shippedSleep = shipped.Clips["sleep"];
@@ -480,6 +480,56 @@ noSleepArt.SetSleeping(true, Ms(100));
 Check(noSleepArt.Pose(Ms(200)) is { Clip: "idle", Eyes: "closed" }, "without sleep art, dozing only closes the eyes");
 noSleepArt.SetTalking(true, Ms(300));
 Check(noSleepArt.Pose(Ms(310)) is { Eyes: not "closed", Mouth: "small" }, "talking wakes the eyes");
+var shippedClips = shipped.Clips;
+Check(new[] { "yawn", "glance", "ahoge", "twinkle" }.All(c => shippedClips.TryGetValue(c, out var clip) && !clip.Loop && clip.Frames[0].Src.SequenceEqual(shippedClips["idle"].Frames[0].Src))
+    && shippedClips["yawn"].Frames.Any(f => f.Eyes == "closed" && f.Mouth == "wide")
+    && shippedClips["glance"].Frames.Any(f => f.Eyes == "left") && shippedClips["glance"].Frames.Any(f => f.Eyes == "right"),
+    "the shipped extras are one-shots from the rest pose; the yawn opens the mouth wide, the glance looks both ways");
+var one = new ClipFrame([0, 0, 1, 1], 100, [0, 0]);
+var sequenced = animationManifest with
+{
+    Clips = new(animationManifest.Clips)
+    {
+        ["yawn"] = new(false, [one with { Eyes = "closed", Mouth = "wide" }, one]),
+        ["stretch"] = new(false, [one with { Eyes = "closed" }, one]),
+    }
+};
+var dozing = new CharacterAnimator(sequenced, 7, TimeSpan.Zero);
+dozing.SetSleeping(true, Ms(100));
+Check(dozing.Pose(Ms(150)) is { Clip: "yawn", Eyes: "closed", Mouth: "wide" }, "dozing yawns first");
+dozing.SetTalking(true, Ms(160));
+Check(dozing.Pose(Ms(170)) is { Clip: "yawn", Mouth: "small" }, "talking moves the mouth even in a frame that forces it");
+dozing.SetTalking(false, Ms(170));
+Check(dozing.Pose(Ms(350)).Clip == "sleep", "the sleep follows the yawn");
+dozing.SetSleeping(false, Ms(400));
+Check(dozing.Pose(Ms(410)).Clip == "stretch" && dozing.Pose(Ms(610)).Clip == "idle", "waking stretches once, then idles");
+dozing.SetSleeping(true, Ms(1000));
+dozing.SetSleeping(false, Ms(1050));
+Check(dozing.Pose(Ms(1060)).Clip == "stretch" && dozing.Pose(Ms(1400)).Clip == "idle", "waking during the yawn drops the yawn and the sleep still to come");
+var extrasManifest = animationManifest with
+{
+    Clips = new(animationManifest.Clips) { ["glance"] = new(false, [one]), ["ahoge"] = new(false, [one]), ["twinkle"] = new(false, [one]) }
+};
+var fidget = new CharacterAnimator(extrasManifest, 7, TimeSpan.Zero);
+var extraStarts = new List<(double At, string Clip)>();
+string? shownClip = null;
+for (double t = 0; t <= 600_000; t += 50)
+{
+    if (t == 300_000) fidget.SetSleeping(true, Ms(t));
+    if (t == 400_000) fidget.SetSleeping(false, Ms(t));
+    var clip = fidget.Pose(Ms(t)).Clip;
+    if (clip != shownClip && clip is "glance" or "ahoge" or "twinkle") extraStarts.Add((t, clip));
+    shownClip = clip;
+}
+var extraGaps = extraStarts.Zip(extraStarts.Skip(1), (a, b) => b.At - a.At).Where((g, i) => extraStarts[i + 1].At < 300_000 || extraStarts[i].At > 400_000).ToList();
+Check(extraStarts.Count >= 6 && extraGaps.All(g => g >= 30_000 && g <= 90_100)
+    && extraStarts.Zip(extraStarts.Skip(1)).All(p => p.First.Clip != p.Second.Clip)
+    && !extraStarts.Any(e => e.At >= 300_000 && e.At < 400_000)
+    && extraStarts.Select(e => e.Clip).Distinct().Count() == 3,
+    "extras play every 30-90 s over idle, never the same twice in a row and never while dozing");
+var busy = new CharacterAnimator(extrasManifest, 7, TimeSpan.Zero);
+busy.Request("roll", AnimationLayer.Directed, Ms(0));
+Check(Enumerable.Range(0, 2000).All(i => busy.Pose(Ms(i * 100)).Clip == "roll"), "extras wait while another clip plays");
 Console.WriteLine("Contract transport checks passed.");
 
 using (var screenClient = new ServerClient("https://example.com/", "test", new ScreenProtocolHandler()))
