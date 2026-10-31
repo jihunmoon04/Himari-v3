@@ -3,7 +3,9 @@
 -- himari-32.gpl, align, and write the whole converted sprite plus a diff map against
 -- neutral (changed pixels bright, unchanged dimmed) to decide what to composite.
 -- Usage: aseprite -b --script-param in=requests/big-motions-v1/yawn-hand-2.png
---   --script-param neutral=clean/neutral.png --script-param out=x.png --script-param diff=d.png --script tools/pose.lua
+--   --script-param neutral=clean/neutral.png --script-param out=x.png --script-param diff=d.png
+--   [--script-param log=pose.txt] --script tools/pose.lua
+-- The log (grid offset, shift, match) is optional (PR #146 review).
 -- A smaller copy (a pasted screenshot) takes its dot size and where neutral's (0, 0) falls:
 --   --script-param sx=2.24 --script-param sy=2.24 --script-param ox=-52 --script-param oy=-7
 -- and bg=corner turns the top-left colour into transparency.
@@ -48,7 +50,7 @@ end
 
 local src = app.open(P["in"])
 local img = src.cels[1].image
-if src.colorMode ~= ColorMode.RGB then fail("expected an RGB image") end
+if src.colorMode ~= ColorMode.RGB then error("expected an RGB image", 0) end
 local SW, SH = src.width, src.height
 if P.bg == "corner" then
   img = img:clone()
@@ -130,6 +132,8 @@ for y = 0, H - 1 do for x = 0, W - 1 do
 end end
 local o = Sprite(W, H, ColorMode.INDEXED); o:setPalette(pal); o.transparentColor = 0; o.cels[1].image = out; o:saveAs(P.out)
 local d = Sprite(W, H, ColorMode.RGB); d.cels[1].image = diff; d:resize(W * 3, H * 3); d:saveAs(P.diff)
-local log = io.open(P.log, "w")
-log:write(string.format("grid offset %.2f,%.2f shift %d,%d match %d (of opaque/4) changed %d\n", bo.ox, bo.oy, dx, dy, s, changed))
-log:close()
+if P.log then
+  local log = io.open(P.log, "w")
+  log:write(string.format("grid offset %.2f,%.2f shift %d,%d match %d (of opaque/4) changed %d\n", bo.ox, bo.oy, dx, dy, s, changed))
+  log:close()
+end
