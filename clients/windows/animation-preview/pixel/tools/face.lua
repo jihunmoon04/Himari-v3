@@ -63,9 +63,10 @@ local function mouthWide(img)
 end
 
 -- Frames 1-4 blink (open, half, closed, half), 5-7 talk (small, wide, small); frame 1 is the rest pose.
+-- Names are the app's resource file names (Assets/<name>.png); repeated frames share one file.
 local plan = {
-  { name = "open" }, { eyes = half }, { eyes = closed }, { eyes = half },
-  { mouth = mouthSmall }, { mouth = mouthWide }, { mouth = mouthSmall },
+  { name = "open" }, { name = "blink-half", eyes = half }, { name = "blink-closed", eyes = closed }, { name = "blink-half", eyes = half },
+  { name = "talk-small", mouth = mouthSmall }, { name = "talk-wide", mouth = mouthWide }, { name = "talk-small", mouth = mouthSmall },
 }
 local DURATION = { 2600, 60, 90, 60, 120, 140, 120 }
 for i = 2, #plan do spr:newFrame(1) end
@@ -84,9 +85,13 @@ local blink = spr:newTag(1, 4); blink.name = "blink"
 local talk = spr:newTag(5, 7); talk.name = "talk"; talk.aniDir = AniDir.PING_PONG
 spr:saveAs(P.out)
 
--- Per-frame PNGs for the app, plus a 6x close-up strip of the face for review.
-for i = 1, #plan do
-  local img = Image(spr.spec); img:drawSprite(spr, i)
-  local s = Sprite(spr.spec); s:setPalette(spr.palettes[1]); s.cels[1].image = img
-  s:saveAs(string.format(P.frames, i)); s:close()
+-- One PNG per distinct frame, written straight into the app's frames directory.
+local written = {}
+for i, f in ipairs(plan) do
+  if not written[f.name] then
+    written[f.name] = true
+    local img = Image(spr.spec); img:drawSprite(spr, i)
+    local s = Sprite(spr.spec); s:setPalette(spr.palettes[1]); s.cels[1].image = img
+    s:saveAs(app.fs.joinPath(P.frames, f.name .. ".png")); s:close()
+  end
 end

@@ -68,10 +68,10 @@ aseprite -b --script-param in=neutral-parts.aseprite --script-param out=idle-tes
 - **고정 기준**: 눈을 감을 때 눈을 가로지르는 머리카락 가닥은 그대로 둔다.
 - **편집 방법**: 색은 모두 `himari-32.gpl` 안에서 골랐다. 프레임을 손볼 때는 Aseprite에서 해당 레이어를 직접 고치거나 `face.lua`의 좌표를 고쳐 다시 만든다.
 - **미리보기**: `blink-x3.gif`, `talk-x3.gif`, 얼굴 확대 비교 `face-strip.png`(뜬 눈, 반, 감음, 작은 입, 큰 입)
-- **앱용 낱장**: `frames/`에 205×206 PNG로 있다. `open`, `blink-half`, `blink-closed`, `talk-small`, `talk-wide`
+- **앱용 낱장**: `face.lua`가 `frames/`에 205×206 PNG로 바로 쓴다. 파일 이름(`open`, `blink-half`, `blink-closed`, `talk-small`, `talk-wide`)이 앱 리소스 이름이므로, 다시 만들면 다음 빌드에 그대로 반영된다.
 
 ```
-aseprite -b --script-param in=neutral-parts.aseprite --script-param out=neutral-face.aseprite --script-param frames=f%d.png --script face.lua
+aseprite -b --script-param in=neutral-parts.aseprite --script-param out=neutral-face.aseprite --script-param frames=frames --script face.lua
 aseprite -b neutral-face.aseprite --tag blink --scale 3 --save-as blink-x3.gif
 ```
 
