@@ -85,7 +85,11 @@ internal static class Program
             ("idle-1-neutral", new CharacterPose("idle", 0, "neutral", null, null)),
             ("idle-2-happy", new CharacterPose("idle", 1, "happy", null, null)),
             ("idle-1-neutral-closed-wide", new CharacterPose("idle", 0, "neutral", "closed", "wide")),
-            ("sleep-4-neutral-closed", new CharacterPose("sleep", 3, "neutral", "closed", null)) })
+            ("sleep-4-neutral-closed", new CharacterPose("sleep", 3, "neutral", "closed", null)),
+            ("yawn-3-neutral-closed-wide", new CharacterPose("yawn", 2, "neutral", "closed", "wide")),
+            ("glance-2-sad-left", new CharacterPose("glance", 1, "sad", "left", null)),
+            ("ahoge-2-neutral", new CharacterPose("ahoge", 1, "neutral", null, null)),
+            ("twinkle-3-neutral", new CharacterPose("twinkle", 2, "neutral", null, null)) })
         {
             renderer.Render(pose);
             using var reference = System.IO.File.OpenRead(System.IO.Path.Combine(AppContext.BaseDirectory, "Fixtures", "character", file + ".png"));

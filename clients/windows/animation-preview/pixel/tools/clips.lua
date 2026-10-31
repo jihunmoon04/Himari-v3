@@ -171,6 +171,15 @@ for _, t in ipairs(spr.tags) do
     error("clips: " .. t.name .. " lies after idle and is not built here", 0)
   end
 end
+-- Every frame about to be deleted must belong to a clip built here; untagged frames
+-- could be hand work (PR #145 review).
+for n = idleEnd + 1, #spr.frames do
+  local covered = false
+  for _, t in ipairs(spr.tags) do
+    if owned[t.name] and t.fromFrame.frameNumber <= n and n <= t.toFrame.frameNumber then covered = true end
+  end
+  if not covered then error("clips: frame " .. n .. " after idle belongs to no clip built here", 0) end
+end
 for i = #spr.tags, 1, -1 do if spr.tags[i] ~= idleTag then spr:deleteTag(spr.tags[i]) end end
 while #spr.frames > idleEnd do spr:deleteFrame(#spr.frames) end
 local zLayer, eyesLayer, mouthLayer, fillLayer = layer("zzz"), layer("@eyes", true), layer("@mouth", true), layer("fill")

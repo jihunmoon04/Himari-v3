@@ -166,12 +166,15 @@ internal sealed class CharacterAnimator
 
     private void ScheduleExtra(TimeSpan after) => extraAt = after + TimeSpan.FromSeconds(extrasRandom.Next(30, 91));
 
-    // Only over plain idle: not while dozing, talking or showing any other clip.
+    // Only over plain idle: not while dozing, talking or showing any other clip, and only
+    // extras the current mood can show (happy has no glance eyes, PR #145 review).
     private void PlayExtra(TimeSpan now)
     {
         ScheduleExtra(now);
         bool idleShown = !requests.Any(r => r.Start <= now && (r.End is null || r.End > now));
-        var choices = Extras.Where(manifest.Clips.ContainsKey).Where(c => c != lastExtra).ToList();
+        var eyes = manifest.Faces[Mood].Eyes;
+        var choices = Extras.Where(c => c != lastExtra && manifest.Clips.TryGetValue(c, out var clip)
+            && clip.Frames.All(f => f.Eyes is null || eyes?.ContainsKey(f.Eyes) == true)).ToList();
         if (!idleShown || sleeping || Talking(now) || choices.Count == 0) return;
         lastExtra = choices[extrasRandom.Next(choices.Count)];
         Request(lastExtra, AnimationLayer.Ambient, now);

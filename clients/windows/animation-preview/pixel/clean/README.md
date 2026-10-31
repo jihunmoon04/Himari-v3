@@ -105,7 +105,7 @@ aseprite -b --script-param in=happy.png --script-param neutral=neutral.png --scr
 - **neutral 눈·입 다시 그림**(소유자 검토 2026-10-31): `../tools/neutral-variants.lua`가 `faces.aseprite`의 neutral 변형을 고쳤다. 반쯤 감은 눈은 뜬 눈의 속눈썹처럼 오른쪽으로 내려가고, 감은 눈은 선 위의 갈색 채움을 없앴다. 두 경우 모두 바깥쪽 속눈썹 끝을 눈마다 2px 줄였다. 말하는 입은 다문 입 선의 두 끝 (112,65), (116,67)을 그대로 두고 가운데가 벌어진다. 그래서 `frames/`의 낱장과는 이제 다르다.
 - **내보내기**: 원본을 고친 뒤 `../tools/export.lua`를 돌린다(`pixel/`에서 실행).
   - 같은 그림 조각은 시트에 한 번만 넣는다(지금 78조각, 1002×1674).
-  - UI 테스트가 비교할 기준 그림 4장(`idle-1-neutral`, `idle-2-happy`, `idle-1-neutral-closed-wide`, `sleep-4-neutral-closed`)도 함께 쓴다.
+  - UI 테스트가 비교할 기준 그림 8장(`idle-1-neutral`, `idle-2-happy`, `idle-1-neutral-closed-wide`, `sleep-4-neutral-closed`, `yawn-3-neutral-closed-wide`, `glance-2-sad-left`, `ahoge-2-neutral`, `twinkle-3-neutral`)도 함께 쓴다.
   - 다음 중 하나라도 어기면 아무것도 쓰지 않고 실패한다: 색 인덱스 모드와 `himari-32.gpl` 팔레트, 모든 몸 프레임의 `@face` 점, 모든 동작의 첫 프레임과 단발 동작의 마지막 프레임 = idle 첫 프레임, 반복 동작의 `loopFrom`, 표정 8종.
 
 ```
@@ -116,7 +116,7 @@ aseprite -b --script-param body=clean/body.aseprite --script-param faces=clean/f
 
 ## 졸기
 
-`../tools/clips.lua`(처음 이름 `sleep.lua`)가 `body.aseprite`의 파츠를 움직여 idle 뒤의 동작을 모두 만든다. 다시 돌리면 idle 뒤를 지우고 새로 만든다. 이 스크립트가 만들지 않는 동작이 idle 뒤에 있으면 아무것도 하지 않고 실패한다(PR #144 검수). idle을 다시 만들었다면(`sources.lua only=body`) 이것도 다시 돌린다. 아래는 `sleep`이고, 나머지 동작은 그다음 절에 있다.
+`../tools/clips.lua`(처음 이름 `sleep.lua`)가 `body.aseprite`의 파츠를 움직여 idle 뒤의 동작을 모두 만든다. 다시 돌리면 idle 뒤를 지우고 새로 만든다. 이 스크립트가 만들지 않는 동작이나 태그 없는 프레임이 idle 뒤에 있으면 아무것도 하지 않고 실패한다(PR #144, #145 검수). idle을 다시 만들었다면(`sources.lua only=body`) 이것도 다시 돌린다. 아래는 `sleep`이고, 나머지 동작은 그다음 절에 있다.
 
 - **잠들기**(앞 3프레임, 한 번): 반쯤 감은 눈 → 고개 1px → 고개 2px와 감은 눈. 태그 사용자 데이터 `loopFrom=4`가 반복 시작이다.
 - **자는 중**(500ms × 12): 고개 2px 아래 3초, 1px 아래 3초. 머리카락 끝은 한 칸, 헤일로는 두 칸 늦게 따라간다.

@@ -208,6 +208,10 @@ local refs = {
   { "idle-2-happy", "idle", 2, "happy" },
   { "idle-1-neutral-closed-wide", "idle", 1, "neutral", "closed", "wide" },
   { "sleep-4-neutral-closed", "sleep", 4, "neutral", "closed" },
+  { "yawn-3-neutral-closed-wide", "yawn", 3, "neutral", "closed", "wide" },
+  { "glance-2-sad-left", "glance", 2, "sad", "left" },
+  { "ahoge-2-neutral", "ahoge", 2, "neutral" },
+  { "twinkle-3-neutral", "twinkle", 3, "neutral" },
 }
 for _, r in ipairs(refs) do
   local s = render(r[2], r[3], r[4], r[5], r[6])

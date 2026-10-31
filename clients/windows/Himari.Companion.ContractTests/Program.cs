@@ -527,6 +527,14 @@ Check(extraStarts.Count >= 6 && extraGaps.All(g => g >= 30_000 && g <= 90_100)
     && !extraStarts.Any(e => e.At >= 300_000 && e.At < 400_000)
     && extraStarts.Select(e => e.Clip).Distinct().Count() == 3,
     "extras play every 30-90 s over idle, never the same twice in a row and never while dozing");
+var glanceManifest = extrasManifest with { Clips = new(extrasManifest.Clips) { ["glance"] = new(false, [one with { Eyes = "left" }]) } };
+var cheerful = new CharacterAnimator(glanceManifest, 7, TimeSpan.Zero) { Mood = "happy" };
+var cheerfulClips = new HashSet<string>();
+for (double t = 0; t <= 600_000; t += 50) cheerfulClips.Add(cheerful.Pose(Ms(t)).Clip);
+var plainGlance = new CharacterAnimator(glanceManifest, 7, TimeSpan.Zero);
+var plainClips = new HashSet<string>();
+for (double t = 0; t <= 600_000; t += 50) plainClips.Add(plainGlance.Pose(Ms(t)).Clip);
+Check(!cheerfulClips.Contains("glance") && cheerfulClips.Contains("ahoge") && plainClips.Contains("glance"), "a mood without glance eyes never glances");
 var busy = new CharacterAnimator(extrasManifest, 7, TimeSpan.Zero);
 busy.Request("roll", AnimationLayer.Directed, Ms(0));
 Check(Enumerable.Range(0, 2000).All(i => busy.Pose(Ms(i * 100)).Clip == "roll"), "extras wait while another clip plays");
