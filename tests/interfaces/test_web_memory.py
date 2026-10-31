@@ -364,6 +364,7 @@ def test_proposals_are_kept_or_discarded_and_the_timeline_pages_and_edits(server
     proposals = server.client.get("/api/memories/proposals").json()["proposals"]
     assert [(p["kind"], p["text"], p["conversation"]["id"]) for p in proposals] == [
         ("sensitive", "Pills.", cid), ("past", "Lived in Tokyo.", cid)]
+    assert [p["evidence"] for p in proposals] == [[], []]
     keep = server.client.post(f"/api/memories/proposals/{proposals[1]['pass_id']}/1", json={"decision": "keep"},
                               headers=SEND)
     assert keep.status_code == 201 and keep.json()["kept_by_user"] is True
@@ -408,6 +409,8 @@ def test_a_stale_suggestion_is_refused_then_kept_without_its_date(server: Server
     pass_id = passed(server, scope, "An old plan.", [
         PassItem(0, "{}", PassAction.PROPOSE, "proposed", category=MemoryCategory.LOOP, text="Dentist.",
                  due_at="2026-01-01", due_instant=datetime.now(UTC) - timedelta(days=30))])
+    (waiting,) = server.client.get("/api/memories/proposals").json()["proposals"]
+    assert waiting["evidence"] == []  # this record cites none; a pass's cites its user messages
     stale = server.client.post(f"/api/memories/proposals/{pass_id}/0", json={"decision": "keep"}, headers=SEND)
     assert stale.status_code == 422 and stale.json()["error"]["code"] == "stale_date"
     kept = server.client.post(f"/api/memories/proposals/{pass_id}/0", json={"decision": "keep", "due": None},
@@ -434,3 +437,5 @@ def test_lines_carry_their_evidence_and_a_cursor_must_have_a_zone(server: Server
     assert [line["items"][0]["text"] for line in newest] == ["Writes Go."]  # at most the newest PASS_LINES_LIMIT
     naive = base64.urlsafe_b64encode(b"2026-10-31T12:00:00|5").decode()
     assert server.client.get(f"/api/episodes?cursor={naive}").status_code == 400
+    squared = base64.urlsafe_b64encode("2026-10-31T12:00:00+00:00|\u00b2".encode()).decode()  # "²".isdigit()
+    assert server.client.get(f"/api/episodes?cursor={squared}").status_code == 400

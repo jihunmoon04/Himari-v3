@@ -750,8 +750,14 @@ def proposal_view(proposal: Proposal, previews: dict[ConversationId, str] | None
         planned = json.loads(record.planned or "{}")
     except ValueError:
         planned = {}
+    try:
+        cited = json.loads(record.proposal).get("evidence")
+    except (ValueError, AttributeError):
+        cited = None
     return {"pass_id": record.pass_id, "item": record.item,
             "kind": "sensitive" if record.outcome == "sensitive_proposed" else "past",
+            # the user messages it rests on (checked when it was planned, V3-P85 §4.4), to read before keeping it
+            "evidence": [n for n in cited if isinstance(n, int)] if isinstance(cited, list) else [],
             "category": planned.get("category"), "text": planned.get("text"), "due": planned.get("due_at"),
             "valid_until": planned.get("valid_until"), "created_at": _time(record.created_at),
             "conversation": {"id": proposal.conversation_id, "title": proposal.title,
@@ -779,7 +785,7 @@ def read_episode_cursor(cursor: str) -> tuple[datetime, int]:
         moment = datetime.fromisoformat(when)
     except (ValueError, UnicodeDecodeError) as error:
         raise ApiError(400, "invalid_argument", "not a timeline cursor") from error
-    if moment.tzinfo is None or not number.isdigit():  # one the page did not get from us (PR #138 review)
+    if moment.tzinfo is None or not re.fullmatch(r"[0-9]{1,18}", number):  # not one we gave (PR #138 review)
         raise ApiError(400, "invalid_argument", "not a timeline cursor")
     return moment, int(number)
 

@@ -990,9 +990,22 @@ def run_passes(base: str, token: str, shots: str | None, root: str) -> list[str]
         expect(page.locator(".memory-group").first).to_contain_text("auto")
         if shots:
             page.screenshot(path=os.path.join(shots, "41-memory-loops-suggestions.png"))
+        # Before keeping it: Compare (the notes of its kind) and Source (what the user said; PR #138 re-review).
+        page.click("#memory-suggestions button[aria-label='Compare with About you']")
+        expect(page.locator('.memory-group[data-category="user"]')).to_have_class(re.compile("is-revealed"))
+        page.click("#memory-suggestions button[aria-label='Go to the message: Takes pills.']")
+        expect(page.locator('#timeline > .item-user[data-sequence="1"]')).to_have_class(re.compile("is-revealed"),
+                                                                                       timeout=10000)
+        page.goto(base + "/settings/memory")
         page.click("#memory-suggestions button[aria-label='Keep: Takes pills.']")
         expect(page.locator("#status-bar")).to_have_text("Kept. HIMARI uses it from the next message.", timeout=5000)
-        # A suggestion whose date passed long ago: kept only without it, after asking (PR #138 review).
+        # A suggestion whose date passed long ago: kept only without it, after asking (PR #138 review); called
+        # off, nothing is said to be kept.
+        page.locator("#memory-suggestions button[aria-label^='Keep:']").first.click()
+        expect(page.locator("#confirm-dialog")).to_contain_text("Its date (2026-09-01) has passed.", timeout=5000)
+        page.click("#confirm-cancel")
+        expect(page.locator("#status-bar")).to_have_text("Nothing was kept; the suggestion is still waiting.",
+                                                         timeout=5000)
         page.locator("#memory-suggestions button[aria-label^='Keep:']").first.click()
         expect(page.locator("#confirm-dialog")).to_contain_text("Its date (2026-09-01) has passed.", timeout=5000)
         page.click("#confirm-ok")

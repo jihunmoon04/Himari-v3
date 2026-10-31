@@ -3411,6 +3411,21 @@ function paintSuggestions(proposals) {
       link.type = "button";
       link.addEventListener("click", () => openConversation(proposal.conversation.id));
       meta.append(link);
+      if (proposal.evidence && proposal.evidence.length) { // what the user said, read before keeping it
+        const source = el("button", "link-button memory-source-link", "Source");
+        source.type = "button";
+        source.setAttribute("aria-label", `Go to the message: ${proposal.text}`);
+        source.addEventListener("click", () => openAtEvent(proposal.conversation.id, proposal.evidence[0])
+          .catch((e) => status(e.message, "error")));
+        meta.append(" · ", source);
+      }
+    }
+    if (label) { // §10.2: the notes of the same kind it would join
+      const compare = el("button", "link-button memory-source-link", "Compare");
+      compare.type = "button";
+      compare.setAttribute("aria-label", `Compare with ${label[1]}`);
+      compare.addEventListener("click", () => revealGroup(proposal.category));
+      meta.append(" · ", compare);
     }
     main.append(meta);
     const actions = el("div", "memory-row-actions");
@@ -3428,11 +3443,14 @@ function paintSuggestions(proposals) {
 }
 
 async function decideProposals(proposals, decision) {
+  let done = 0; // kept or discarded here
+  let left = 0; // left waiting: a keep the user did not confirm
   let refused = null;
   for (const p of proposals) {
     const path = `/api/memories/proposals/${encodeURIComponent(p.pass_id)}/${p.item}`;
     try {
       await api("POST", path, { decision });
+      done += 1;
     } catch (error) {
       if (error.kind === "http" && error.status === 422 && error.code === "stale_date") {
         // PR #138 review: kept as it is, the cleanup would take it at once — keep it without its date, or not at all.
@@ -3440,16 +3458,34 @@ async function decideProposals(proposals, decision) {
         if (await confirmAction("Keep it without its date?", [p.text, `Its date (${date}) has passed.`], "Keep")) {
           try {
             await api("POST", path, { decision, due: null, valid_until: null });
+            done += 1;
           } catch (again) {
             refused = again;
           }
+        } else {
+          left += 1;
         }
       } else if (error.kind !== "http" || error.status !== 409) refused = error; // 409: decided elsewhere already
     }
   }
+  // Told as it went (PR #138 re-review): never "Kept" for a keep the user called off.
+  const verb = decision === "keep" ? "Kept" : "Discarded";
+  const counted = proposals.length > 1 ? ` ${done} of ${proposals.length}` : "";
   if (refused) status(refused.message, refused.kind === "http" ? "warn" : "error");
-  else status(decision === "keep" ? "Kept. HIMARI uses it from the next message." : "Discarded.", "ok");
+  else if (!done && left) status("Nothing was kept; the suggestion is still waiting.", "warn");
+  else if (left) status(`${verb}${counted}; ${left} still waiting.`, "warn");
+  else if (done) status(decision === "keep" ? `${verb}${counted}. HIMARI uses it from the next message.`
+    : `${verb}${counted}.`, "ok");
   await loadMemory();
+}
+
+/* §10.2's Compare: the notes of a suggestion's kind, scrolled to and marked for a moment. */
+function revealGroup(category) {
+  const group = $("memory-groups").querySelector(`[data-category="${category}"]`);
+  if (!group) return;
+  group.scrollIntoView({ block: "start" });
+  group.classList.add("is-revealed");
+  setTimeout(() => group.classList.remove("is-revealed"), 2000);
 }
 
 function paintMemory() {
@@ -3463,6 +3499,7 @@ function paintMemory() {
   for (const [category, label] of MEMORY_CATEGORIES) {
     const notes = listing.memories.filter((note) => note.category === category);
     const group = el("section", "memory-group");
+    group.dataset.category = category;
     const head = el("div", "memory-group-head");
     const add = el("button", "link-button", "Add");
     add.type = "button";
