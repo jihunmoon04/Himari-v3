@@ -165,6 +165,7 @@ internal static class PresentationChecks
         int windowCount = System.Windows.Application.Current.Windows.Count;
         double compactWidth = answer.Width;
         double anchoredLeft = w.Left, anchoredTop = w.Top;
+        double userX = user.PointToScreen(new Point()).X;
         Call(w, "ExpandReplyClick", w, new RoutedEventArgs()); Pump();
         var inlineReader = (ReplyReader)typeof(MainWindow).GetField("replyReader", Private)!.GetValue(w)!;
         Until(() => (bool)typeof(ReplyReader).GetField("ready", Private)!.GetValue(inlineReader)!);
@@ -174,10 +175,12 @@ internal static class PresentationChecks
         Pump();
         check(System.Windows.Application.Current.Windows.Count == windowCount && answer.Width > compactWidth && Window.GetWindow(inlineReader) == host, "expansion enlarges existing pixel bubble without creating another window");
         check(w.Left == anchoredLeft && w.Top == anchoredTop, "expanding content keeps character anchored");
+        check(user.Visibility == Visibility.Visible && Math.Abs(user.PointToScreen(new Point()).X - userX) <= 2, "expanding the reply leaves the user bubble at its own anchor");
         check(toolbar.TranslatePoint(new Point(), answer).Y >= replyContent.TranslatePoint(new Point(0, replyContent.ActualHeight), answer).Y, "expanded reader also keeps the toolbar outside its scrolling content");
         if (screenshots is not null) Save(host, System.IO.Path.Combine(screenshots, "06-expanded-inline.png"));
         Call(w, "ExpandReplyClick", w, new RoutedEventArgs()); Pump();
         check(answer.Width == compactWidth && input.Text == "IME 초안", "collapsing restores compact bubble and preserves draft");
+        check(Math.Abs(user.PointToScreen(new Point()).X - userX) <= 2, "collapsing keeps the user bubble where it was");
         ((ComboBox)settings.FindName("ChatHotkey")).SelectedItem = "Alt+Shift+Q";
         Call(w, "SetupChatHotkey");
         check((bool)typeof(MainWindow).GetProperty("hotKeyRegistered", Private)!.GetValue(w)!, "OS accepted the real global hotkey registration");
@@ -216,9 +219,21 @@ internal static class PresentationChecks
             check(newerReply ? text == "" : text == "답변 중지 요청을 보냈어요.", "late cancel response never claims completion or affects a newer reply");
             race.Close(); server.Dispose();
         }
+        {
+            // A fresh process: the first composer above a character at the bottom of the screen.
+            var fresh = new MainWindow(true);
+            fresh.Show(); Pump();
+            fresh.Left = area.Left + 60; fresh.Top = area.Bottom - fresh.Height; Pump();
+            var freshHost = (Window)typeof(MainWindow).GetField("dialogueHost", Private)!.GetValue(fresh)!;
+            Call(fresh, "OpenChat"); Pump();
+            var freshUser = (PixelBubble)fresh.FindName("UserBubble");
+            double gap = fresh.Top - (freshUser.TranslatePoint(new Point(0, freshUser.ActualHeight), freshHost).Y + freshHost.Top);
+            check(gap >= 0 && gap <= 16, "first composer after start sits directly above a bottom character");
+            fresh.Close(); Pump();
+        }
         foreach (bool flipped in new[] { false, true })
         {
-            var legacy = new MainWindow(true) { Left = 120, Top = 100, Width = 520, Height = 700 };
+            var legacy =new MainWindow(true) { Left = 120, Top = 100, Width = 520, Height = 700 };
             var legacySettings = (Window)typeof(MainWindow).GetField("settings", Private)!.GetValue(legacy)!;
             ((CheckBox)legacySettings.FindName("FacingLeft")).IsChecked = flipped;
             typeof(MainWindow).GetField("loadedOnce", Private)!.SetValue(legacy, true);

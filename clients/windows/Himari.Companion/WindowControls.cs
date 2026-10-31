@@ -122,7 +122,11 @@ public partial class MainWindow
                 bool fromWork = EligibleWorkWindow(foreground);
                 workWindow.Remember(foreground, _ => fromWork);
                 captureFromWorkWindow = fromWork;
-                if (!IsVisible) Show(); Activate(); OpenChat();
+                // Over fullscreen, activating the small character window raises the taskbar;
+                // OpenChat activates the monitor-sized dialogue host directly instead.
+                if (!IsVisible) Show();
+                if (CoverScreen() is null) Activate();
+                OpenChat();
             }
             handled = true;
         }

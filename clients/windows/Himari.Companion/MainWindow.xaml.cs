@@ -74,7 +74,13 @@ public partial class MainWindow : Window
         Closing += (_, _) => RestoreMoveHomeOnClose();
         Closed += (_, _) => { CleanupBubblePresentation(); replyReader?.Dispose(); CleanupForegroundTracking(); dialogueHost?.Close(); CancelMovePreview(); lifetime.Cancel(); StopConnection(); timer.Stop(); CleanupWindowControls(); tray.Visible = false; tray.Dispose(); menu.Dispose(); };
         IsVisibleChanged += (_, _) => UpdateSceneBounds();
-        Activated += (_, _) => { UpdateFullscreenPresentation(); FocusComposerIfOpen(); };
+        Activated += (_, _) =>
+        {
+            UpdateFullscreenPresentation();
+            // Alt+Tab selects the character window; over fullscreen hand focus to the dialogue host.
+            if (CoverScreen() is not null && ComposerPanel.Visibility != Visibility.Visible) Dispatcher.BeginInvoke(new Action(OpenChat));
+            else FocusComposerIfOpen();
+        };
         UpdateFrame();
     }
 

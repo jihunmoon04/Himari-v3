@@ -23,6 +23,8 @@ internal static class FullscreenChecks
             while (await Console.In.ReadLineAsync() is { } command)
                 await window.Dispatcher.InvokeAsync(() =>
                 {
+                    // Chrome keeps fullscreen one pixel short while it is in the background.
+                    if (command == "chrome") { window.Height = SystemParameters.PrimaryScreenHeight - 1 / VisualTreeHelper.GetDpi(window).DpiScaleY; window.UpdateLayout(); Console.WriteLine("chrome"); Console.Out.Flush(); }
                     if (command == "normal") { window.Width = 500; window.Height = 400; window.Left = 100; window.Top = 100; window.UpdateLayout(); Console.WriteLine("normal"); Console.Out.Flush(); }
                     else if (command == "exit") window.Close();
                 });
@@ -59,13 +61,29 @@ internal static class FullscreenChecks
                 return;
             }
             Until(() => history.Target == fullscreen);
+            Until(() => marks.GetValueOrDefault(hwnd));
+            check(GetForegroundWindow() == fullscreen, "companion is marked fullscreen before switching, while the fullscreen window is in front");
+            Call("OpenComposer"); Until(() => ((Window)typeof(MainWindow).GetField("dialogueHost", Private)!.GetValue(w)!).IsVisible);
+            var host = (Window)typeof(MainWindow).GetField("dialogueHost", Private)!.GetValue(w)!;
+            var monitor = System.Windows.Forms.Screen.FromHandle(fullscreen).Bounds;
+            Until(() => host.Width * VisualTreeHelper.GetDpi(host).DpiScaleX >= monitor.Width - 1);
+            check(Math.Abs(host.Left * VisualTreeHelper.GetDpi(host).DpiScaleX - monitor.Left) <= 1 && host.Height * VisualTreeHelper.GetDpi(host).DpiScaleY >= monitor.Height - 1,
+                "over a fullscreen window the dialogue host spans the monitor so Windows keeps the taskbar down");
+            check(WindowFromPoint(new System.Drawing.Point(monitor.Left + 4, monitor.Top + 4)) == fullscreen, "transparent parts of the spanning host pass the mouse to the fullscreen window");
+            fixture.StandardInput.WriteLine("chrome"); fixture.StandardInput.Flush(); var shrunk = fixture.StandardOutput.ReadLineAsync(); Until(() => shrunk.IsCompleted);
+            Call("UpdateFullscreenPresentation"); Call("UpdateSceneBounds");
+            check(host.Height * VisualTreeHelper.GetDpi(host).DpiScaleY >= monitor.Height - 1, "a fullscreen window one pixel short (Chrome in the background) keeps the cover");
+            var bubble = (FrameworkElement)w.FindName("UserBubble");
+            var at = bubble.PointToScreen(new Point(bubble.ActualWidth / 2, bubble.ActualHeight / 2));
+            check(WindowFromPoint(new System.Drawing.Point((int)at.X, (int)at.Y)) == new WindowInteropHelper(host).Handle, "the bubble itself still receives the mouse");
             void Hotkey() => Call("HotKeyHook", hwnd, 0x0312, new IntPtr(0x4849), IntPtr.Zero, false);
             Hotkey(); Until(() => marks.GetValueOrDefault(hwnd));
             var input = (System.Windows.Controls.TextBox)w.FindName("Input"); input.Text = "전체화면에서도 보존할 초안";
             check((bool)Call("IsChatWindow", GetForegroundWindow())!, "Alt+Q enters detached chat over a fullscreen foreign process");
             var bottom = new System.Drawing.Point(50, (int)(SystemParameters.PrimaryScreenHeight * VisualTreeHelper.GetDpi(w).DpiScaleY) - 8);
             Until(() => WindowFromPoint(bottom) == fullscreen);
-            Hotkey(); Until(() => GetForegroundWindow() == fullscreen && !marks.GetValueOrDefault(hwnd));
+            // Back on the fullscreen window, the mark stays ready for the next switch.
+            Hotkey(); Until(() => GetForegroundWindow() == fullscreen && marks.GetValueOrDefault(hwnd));
             check(input.Text == "전체화면에서도 보존할 초안", "Alt+Q restores fullscreen target and keeps draft");
             w.Activate(); Until(() => marks.GetValueOrDefault(hwnd));
             check(WindowFromPoint(bottom) == fullscreen, "ordinary activation (Alt+Tab path) retains fullscreen taskbar ordering");
