@@ -6,13 +6,15 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import timedelta
+from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from himari.bootstrap.application import Application, _JobListeners, memory_pass_settings
 from himari.common import ConversationId, PrincipalId, TextBlock, TrustedScope
-from himari.memory.api import MemoryPassSettings
-from himari.provider.api import NormalizedFinal
+from himari.data.api import PassStatus
+from himari.memory.api import MemoryPassSettings, PassOutcome
+from himari.provider.api import NativeInvocationOutcome, NativeNoResponse, NativePreparedRequest, NormalizedFinal
 from himari.provider.scripted import ScriptedAdapter
 
 ME = PrincipalId("operator")
@@ -104,6 +106,86 @@ def test_a_conversation_is_read_once_it_went_quiet_after_its_job(tmp_path: Path)
             assert [n.text for n in await app.data.list_memories(ME)] == ["Builds HIMARI."]
             (record,) = await app.data.list_passes(scope)
             assert (record.from_sequence, record.through_sequence) == (0, 2)
+        finally:
+            await app.close()
+
+    asyncio.run(scenario())
+
+
+class Hanging(ScriptedAdapter):
+    """Sends and never answers: the process stops while it waits."""
+
+    def __init__(self) -> None:
+        super().__init__(memory_passes=True)
+        self.waiting = asyncio.Event()
+
+    async def invoke_prepared(self, request: NativePreparedRequest, sink: object = None,
+                              capture: object = None) -> NativeInvocationOutcome:
+        if b"memory-pass-input" not in request.body:
+            return await super().invoke_prepared(request)
+        self.sent.append(request)
+        self.waiting.set()
+        await asyncio.Event().wait()
+        raise AssertionError("never answered")
+
+
+def test_on_sqlite_a_failure_and_a_stop_mid_call_are_counted_and_the_part_is_read_after_a_restart(
+        tmp_path: Path) -> None:
+    # PR #135 re-review: a Provider failure and a process restart together, on the real store.
+    async def wait_for(check: Callable[[], Awaitable[bool]]) -> None:
+        for _ in range(200):
+            if await check():
+                return
+            await asyncio.sleep(0.02)
+        raise AssertionError("timed out")
+
+    async def scenario() -> None:
+        quick = MemoryPassSettings("scripted-model", idle=timedelta(milliseconds=30))
+        failing = ScriptedAdapter([NormalizedFinal((TextBlock("Nice!"),)), NativeNoResponse("http_500")],
+                                  memory_passes=True)
+        app = await Application.open(tmp_path / "data", failing, model_id="scripted-model", sandbox=False,
+                                     cleanup_seconds=None, memory_model="scripted-model")
+        assert app.memory_passes is not None
+        app.memory_passes._settings = quick  # noqa: SLF001
+        scope = TrustedScope(ME, await app.create_conversation(ME))
+        await app.send(scope, "I build HIMARI, the companion agent.")
+        await app.runner.wait(scope)
+
+        async def failed_once() -> bool:
+            return (await app.data.read_memory_cursor(scope)).failures == 1
+
+        await wait_for(failed_once)
+        await app.close()
+
+        hanging = Hanging()
+        app = await Application.open(tmp_path / "data", hanging, model_id="scripted-model", sandbox=False,
+                                     cleanup_seconds=None, memory_model="scripted-model")
+        assert app.memory_passes is not None
+        app.memory_passes._settings = quick  # noqa: SLF001
+        app.memory_passes._clock = lambda: datetime.now(UTC) + timedelta(hours=1)  # noqa: SLF001 — past the retry
+        task = asyncio.create_task(app.memory_passes.read(scope))
+        await asyncio.wait_for(hanging.waiting.wait(), 5)
+        task.cancel()  # the stop: the pass is left RUNNING, its call sent
+        await asyncio.gather(task, return_exceptions=True)
+        await app.close()
+
+        note = {"op": "add", "category": "project", "text": "Builds HIMARI.", "evidence": [1]}
+        answering = ScriptedAdapter([NormalizedFinal((TextBlock(json.dumps({"notes": [note], "episode": None})),))],
+                                    memory_passes=True)
+        app = await Application.open(tmp_path / "data", answering, model_id="scripted-model", sandbox=False,
+                                     cleanup_seconds=None, memory_model="scripted-model")
+        try:
+            passes = app.memory_passes
+            assert passes is not None
+            first, cut = await app.data.list_passes(scope)
+            assert (first.status, first.error, first.unmetered_tokens > 0) == (PassStatus.FAILED, "http_500", True)
+            assert (cut.status, cut.reserved_tokens, cut.unmetered_tokens > 0) == (PassStatus.INTERRUPTED, 0, True)
+            cursor = await app.data.read_memory_cursor(scope)
+            assert (cursor.through_sequence, cursor.failures) == (0, 2)  # counted at this start
+            passes._clock = lambda: datetime.now(UTC) + timedelta(hours=2)  # noqa: SLF001
+            assert await passes.read(scope) == [PassOutcome.APPLIED, PassOutcome.NOTHING]
+            assert [n.text for n in await app.data.list_memories(ME)] == ["Builds HIMARI."]
+            assert (await app.data.read_memory_cursor(scope)).failures == 0
         finally:
             await app.close()
 

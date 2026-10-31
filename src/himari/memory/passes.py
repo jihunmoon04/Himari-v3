@@ -88,9 +88,13 @@ MEMORY_PASS_INSTRUCTIONS = (
     "himari_context (HIMARI seqs used). Use extend to rewrite the last episode when this part continues it. "
     "No episode (null) for a greeting or a few words. When past_range is true this part is older than the "
     "saved notes: do not propose what they already cover or what a newer note replaced.\n"
-    'Answer with one JSON object only: {"notes": [{"op": "add|update|forget", "id": "m12 (update, forget)", '
-    '"category": "...", "text": "...", "evidence": [seq], "due": null, "valid_until": null, "sensitive": false}], '
-    '"episode": {"op": "add|extend", "text": "...", "user_evidence": [seq], "himari_context": [seq]} or null}'
+    "Answer with one JSON object only, shaped like this example: "
+    '{"notes": [{"op": "add", "category": "project", "text": "...", "evidence": [1], "due": null, '
+    '"valid_until": null, "sensitive": false}, {"op": "update", "id": "m3", "category": "user", "text": "...", '
+    '"evidence": [3]}, {"op": "forget", "id": "m5", "evidence": [3]}], '
+    '"episode": {"op": "add", "text": "...", "user_evidence": [1, 3], "himari_context": [2]}}. '
+    'An id is a saved note\'s id from memories, given only with update and forget. "notes" may be empty; '
+    '"episode" is null when there is none.'
 )
 
 _CATEGORIES = [c.value for c in MemoryCategory]
@@ -105,7 +109,7 @@ ANSWER_SCHEMA: dict[str, Any] = {
             "required": ["op"],
             "properties": {
                 "op": {"enum": ["add", "update", "forget"]},
-                "id": {"type": ["string", "null"], "pattern": "^m?[1-9][0-9]{0,9}$"},
+                "id": {"type": ["string", "null"]},  # read by plan_items: an unreadable one names no note
                 "category": {"type": ["string", "null"], "enum": [*_CATEGORIES, None]},
                 "text": {"type": ["string", "null"]},
                 "evidence": _SEQS,

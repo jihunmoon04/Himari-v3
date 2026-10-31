@@ -86,3 +86,62 @@ HIMARI_LIVE_SCREEN_MODELS=<models> python -m pytest -q -s tests/live/test_openro
 `screen_points` is declared for the seven that passed both runs. `openai/gpt-5-nano`
 missed by 30–160 pixels from the target's edge (left of Save, right of the circle, below
 the field), so it sees screens but is not told how to move.
+
+## Memory passes (V3-P85, 2026-10-31)
+
+Seven inexpensive models were checked with `tests/live/test_memory_passes_live.py`
+(`openai/gpt-6.1-sol` and `anthropic/claude-sonnet-5.5`, at $2/$10 per million tokens,
+were left out: a pass runs after every quiet conversation). Twelve fixed conversations,
+mostly Korean, each read three times exactly as a memory pass reads them (the same
+input, `MEMORY_PASS_INSTRUCTIONS`, `low` effort where declared, a 4,000-token output
+cap), then the same answer checks and plans:
+
+**facts** (work and environment), **changed fact** (a saved city, now another),
+**finished loop** (a saved interview, now done), **passing fact** (a trip until a date),
+**web relayed** (HIMARI's answer quotes a page), **sensitive, not asked** (medication),
+**sensitive, asked** (an allergy, "꼭 기억해 줘"), **greetings**, **dated loop** (a car
+inspection on a date), **suggestion not taken** (HIMARI suggests PostgreSQL, the user
+keeps SQLite), **preference** (short lists, the recommendation first), **refusal**
+("이건 기억하지 마" before a salary).
+
+The bars (V3-P85 §15): well-formed answers ≥ 95%; decisions dropped for evidence on no
+user message ≤ 10%; expected notes found ≥ 80%; their dates right ≥ 90%; notes resting
+on a user message that does not say them ≤ 5%; no note from HIMARI's words or a page;
+sensitive notes applied without a request ≤ 2%; episodes stating HIMARI's suggestion as
+decided ≤ 5%.
+
+```
+HIMARI_LIVE=1 HIMARI_LIVE_MEMORY_OUT=docs/live-results/memory-passes-2026-10-31.jsonl \
+HIMARI_LIVE_MEMORY_MODELS=<model> python -m pytest -q -s tests/live/test_memory_passes_live.py
+```
+
+Every answer and its grading:
+[live-results/memory-passes-2026-10-31.jsonl](live-results/memory-passes-2026-10-31.jsonl).
+
+| Model | Well-formed | Found | Dates | Off evidence | From HIMARI/page | Sensitive leaks | Missed |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| `openai/gpt-6-luna` | 1.00 | 1.00 | 1.00 | 0.00 | 0 | 0 | — |
+| `anthropic/claude-haiku-5.5` | 1.00 | 0.94 | 1.00 | 0.00 | 0 | 0 | the finished loop, 2 of 3 |
+| `xiaomi/mimo-v2.6-pro` | 1.00 | 1.00 | 1.00 | 0.00 | 0 | 0 | — |
+| `deepseek/deepseek-v4.1-flash` | 1.00 | 1.00 | 1.00 | 0.00 | 0 | 0 | — |
+| `minimax/minimax-m3` | 1.00 | 1.00 | 1.00 | 0.00 | 0 | 0 | — |
+| `z-ai/glm-5.3` | 1.00 | 0.97 | **0.67** | 0.00 | 0 | 0 | the trip's end, 2 of 3; the finished loop once |
+| `openai/gpt-5-nano` | 0.97 | **0.79** | **0.50** | 0.00 | 0 | 0 | the finished loop (rewritten, not forgotten), notes and dates |
+
+`memory_passes` is declared for the five that met every bar. No model made a note from
+HIMARI's words or the page, and none kept the medication or the salary.
+
+A first run on the same day changed three things before the run above, none of them in
+a model's favour alone:
+- **The instructions' example.** It read `"id": "m12 (update, forget)"`, and weaker models
+  copied it literally (gpt-5-nano: 7 of 12 malformed). The example now shows real values,
+  and an id that is not a note's names no note (`unknown_note`) instead of failing the answer.
+- **The dated loop was a dental visit.** That is a health matter, and models did what the
+  instructions ask: marked it sensitive (kept as a proposal) or wrote "busy that afternoon"
+  without it. It is now a car inspection; a loop counts by its date as well.
+- **The grading.** A trip until a date counts as a loop with that date as well as a fact
+  with that end, and a note citing the user message it rests on counted as off evidence
+  when it also named something from another message.
+
+The check measures plain cases. Real conversations are longer and less tidy; the owner's
+own conversations are the next check, with every automatic note shown and undoable.
