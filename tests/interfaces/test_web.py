@@ -302,6 +302,7 @@ def test_the_server_info_is_for_the_signed_in_operator(server: Server) -> None:
                     "images": False,  # V3-P67: no image sandbox in this test
                     "documents": {"read": False, "scripts": False, "libraries": {}},  # V3-P70: no toolkit
                     "memory": True,  # V3-P71 §9: on unless HIMARI_MEMORY=0
+                    "auto_memory": "off (no HIMARI_MEMORY_MODEL)",  # V3-P85 §12
                     "conversation_search": True,  # V3-P72 §9: on unless HIMARI_CONVERSATION_SEARCH=0
                     "streaming": True,  # V3-P73 §9: on unless HIMARI_STREAMING=0
                     "models": [{"id": "scripted-model", "default_effort": None, "efforts": [], "window_known": False,
@@ -1104,7 +1105,7 @@ def test_trash_restore_and_delete_for_good(server: Server) -> None:
     assert (folder / "plan.txt").read_text() == "draft"
     assert server.client.get(f"/api/conversations/{cid}/delete-notice").json() == {
         "servers": [], "unconfigured": [], "running": False, "trash_days": 30,
-        "memory_count": 0}  # inside/… is HIMARI's own
+        "memory_count": 0, "episode_count": 0}  # inside/… is HIMARI's own
 
     for refused, code in [(server.client.delete(f"/api/conversations/{cid}", headers={"origin": ORIGIN}),
                            "not_in_trash"),

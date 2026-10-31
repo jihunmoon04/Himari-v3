@@ -367,3 +367,45 @@ def test_a_pass_is_told_the_zone_of_the_device_the_last_message_came_from() -> N
         assert "America/New_York" in json.dumps(sent)
 
     asyncio.run(scenario())
+
+
+def test_a_backfill_reads_the_part_before_the_upgrade_and_only_proposes() -> None:
+    async def scenario() -> None:
+        tokyo: dict[str, object] = {"op": "add", "category": "user", "text": "Lived in Tokyo.", "evidence": [1]}
+        talked = {"op": "add", "text": "Talked about Tokyo.", "user_evidence": [1], "himari_context": []}
+        data, provider, _, passes = setup(reply(tokyo, episode=talked))
+        await turn(data, SCOPE, "I live in Tokyo, by the way.")
+        await turn(data, SCOPE, "Something after the upgrade.")
+        data._store.memory_cursors[SCOPE.conversation_id] = MemoryCursor(4, 0, None, 2, 0)  # noqa: SLF001 — as v15 left it
+        applied: list[TrustedScope] = []
+        passes.on_applied = applied.append
+        assert await passes.backfill(SCOPE) == [PassOutcome.APPLIED, PassOutcome.NOTHING]
+        assert await data.list_memories(ME) == ()  # a proposal, not a note
+        (proposal,) = await data.list_proposals(ME)
+        assert (proposal.kind, proposal.record.outcome) == (PassKind.BACKFILL, "proposed")
+        assert [e.text for e in await data.list_episodes(ME)] == ["Talked about Tokyo."]
+        assert await data.read_memory_cursor(SCOPE) == MemoryCursor(4, 0, None, 0, 0)  # done: no baseline left
+        assert applied == [SCOPE]
+        assert b'\\"past_range\\": true' in provider.sent[0].body  # the request says the part is past
+
+    asyncio.run(scenario())
+
+
+def test_a_retry_reads_a_skipped_part_once_more() -> None:
+    async def scenario() -> None:
+        later = [LATER]
+        builds: dict[str, object] = {"op": "add", "category": "project", "text": "Builds HIMARI.", "evidence": [1]}
+        data, provider, _, passes = setup(*(NativeNoResponse("http_500") for _ in range(3)), reply(builds))
+        passes._clock = lambda: datetime.now(UTC) + later[0]  # noqa: SLF001
+        await turn(data, SCOPE, "I build HIMARI, the companion agent.")
+        for _ in range(3):
+            await passes.read(SCOPE)
+            later[0] += timedelta(hours=1)
+        (*_, skipped) = await data.list_passes(SCOPE)
+        assert skipped.status is PassStatus.SKIPPED
+        assert await passes.retry(SCOPE, skipped.pass_id) is PassOutcome.APPLIED
+        assert (await data.read_pass(skipped.pass_id)).status is PassStatus.RETRIED
+        assert await data.list_memories(ME) == () and len(await data.list_proposals(ME)) == 1
+        assert await passes.retry(SCOPE, skipped.pass_id) is PassOutcome.NOTHING  # retried once
+
+    asyncio.run(scenario())

@@ -42,7 +42,10 @@ what a save says then, leaving with an unsaved edit, a delete for good taking th
 note, and the narrow layout. An eleventh (V3-P78) keeps drafts: one per
 conversation and Home, back after a reload and an ended session, a send
 accepted after the user left, another tab that changes nothing, and a
-sign-out that deletes them.
+sign-out that deletes them. A twelfth (V3-P85, "passes") shows a memory pass's line
+after the event it read (opened, an Undo, a sensitive note to review), the
+Memory screen's open loops with their dates, a suggestion kept, a loop added
+with a date, the Timeline (an edit) and the narrow layout.
 
 Requires: pip install playwright && playwright install chromium
 Usage:    python scripts/ui_smoke.py [--screenshots DIR] [--only main,compaction,...]
@@ -916,6 +919,116 @@ def on_server(root: str, call: Any) -> Any:
     return asyncio.run_coroutine_threadsafe(call(application), loop).result(10)
 
 
+def run_passes(base: str, token: str, shots: str | None, root: str) -> list[str]:
+    """V3-P85 part 4: a memory pass's line after the event it read (opened, an Undo), the Memory screen's open
+    loops with their dates, a suggestion kept, the Timeline (an edit), and the narrow layout."""
+    from datetime import UTC, datetime, timedelta
+
+    from himari.data.api import EpisodePlan, MemoryCategory, PassAction, PassItem, PassKind, PassStart
+
+    errors: list[str] = []
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page(viewport={"width": 1280, "height": 860}, locale="en-US")
+        page.on("console", lambda m: errors.append(m.text)
+                if m.type == "error" and not re.search(r"40[49]|ERR_FAILED", m.text) else None)
+        page.on("pageerror", lambda e: errors.append(str(e)))
+        page.goto(base)
+        page.fill("#login-token", token)
+        page.click("#login-submit")
+        new_chat(page)
+        page.fill("#composer-text", "I build HIMARI. My interview is on Nov 4. I take pills.")
+        page.press("#composer-text", "Enter")
+        expect(page.locator(".item-assistant").last).to_contain_text("ok.", timeout=10000)
+        conversation_id = page.url.rsplit("/", 1)[-1]
+        scope = TrustedScope(OPERATOR, ConversationId(conversation_id))
+        now = datetime.now(UTC)
+
+        async def seed(app: Application) -> str:
+            last = (await app.data.last_event(scope))[0]
+            pass_id = await app.data.begin_pass(scope, PassStart(PassKind.LIVE, 0, last, last, "p", "m"))
+            await app.data.apply_pass(pass_id, [
+                PassItem(0, "{}", PassAction.ADD, category=MemoryCategory.PROJECT, text="Builds HIMARI."),
+                PassItem(1, "{}", PassAction.ADD, category=MemoryCategory.LOOP, text="Interview at Kakao.",
+                         due_at="2026-11-04", due_instant=now + timedelta(days=4)),
+                PassItem(2, "{}", PassAction.PROPOSE, "sensitive_proposed", category=MemoryCategory.USER,
+                         text="Takes pills."),
+            ], EpisodePlan("Talked about HIMARI and an interview.", now, now, (1,), (2,)), now=now)
+            return pass_id
+
+        on_server(root, seed)
+        page.reload()
+        line = page.locator("#timeline > .item-pass")
+        expect(line).to_have_count(1, timeout=10000)
+        expect(line.locator(".item-pass-summary")).to_have_text(
+            "HIMARI remembered 2 things · 1 sensitive note waiting for you")
+        assert page.evaluate("[...document.querySelectorAll('#timeline > *')].pop().classList.contains('item-pass')")
+        line.locator(".item-pass-summary").click()
+        items = line.locator(".item-pass-item")
+        expect(items).to_have_count(3)
+        expect(items.nth(1)).to_contain_text("Open loop")
+        expect(items.nth(1)).to_contain_text("(due 2026-11-04)")
+        expect(items.nth(2).locator("button")).to_have_text("Review")
+        if shots:
+            page.screenshot(path=os.path.join(shots, "40-pass-line.png"))
+        items.first.locator(".item-memory-undo").click()
+        expect(page.locator("#status-bar")).to_have_text("HIMARI no longer remembers it.", timeout=5000)
+        expect(items.first.locator(".item-memory-done")).to_have_text("Undone")
+        assert [n.text for n in on_server(root, lambda app: app.memories(OPERATOR))] == ["Interview at Kakao."]
+
+        items.nth(2).locator("button").click()  # Review: the Memory screen and its suggestion
+        expect(page.locator("#memory-suggestions")).to_contain_text("Takes pills.", timeout=10000)
+        expect(page.locator("#memory-suggestions")).to_contain_text("Sensitive: kept only if you choose")
+        expect(page.locator("#memory-suggestions")).to_contain_text("“I build HIMARI. My interview")  # its preview
+        expect(page.locator(".memory-group").first).to_contain_text("Open loops")
+        expect(page.locator(".memory-group").first).to_contain_text("Due 2026-11-04")
+        expect(page.locator(".memory-group").first).to_contain_text("auto")
+        if shots:
+            page.screenshot(path=os.path.join(shots, "41-memory-loops-suggestions.png"))
+        page.locator("#memory-suggestions button", has_text="Keep").first.click()
+        expect(page.locator("#status-bar")).to_have_text("Kept. HIMARI uses it from the next message.", timeout=5000)
+        expect(page.locator("#memory-suggestions")).to_be_hidden()
+        expect(page.locator("#memory-groups")).to_contain_text("auto · kept by you")
+
+        # A loop of the user's own, with a date from the form.
+        loops = page.locator(".memory-group").first
+        loops.locator("button", has_text="Add").click()
+        form = loops.locator(".memory-form")
+        form.locator(".memory-form-text").fill("Car inspection.")
+        form.locator(".memory-form-date").fill("2026-11-03")
+        form.locator("button[type=submit]").click()
+        expect(page.locator("#status-bar")).to_contain_text("Saved.", timeout=5000)
+        notes = on_server(root, lambda app: app.memories(OPERATOR))
+        inspection = next(n for n in notes if n.text == "Car inspection.")
+        assert (inspection.category, inspection.due_at) == (MemoryCategory.LOOP, "2026-11-03")
+
+        page.click("#memory-tab-timeline")
+        rows = page.locator("#memory-timeline .memory-row")
+        expect(rows).to_have_count(1, timeout=10000)
+        expect(rows.first).to_contain_text("Talked about HIMARI and an interview.")
+        rows.first.locator("button", has_text="Edit").click()
+        page.locator("#memory-timeline .memory-form-text").fill("We planned the interview.")
+        page.locator("#memory-timeline button[type=submit]").click()
+        expect(rows.first).to_contain_text("We planned the interview.", timeout=5000)
+        expect(rows.first).to_contain_text("edited by you")
+        if shots:
+            page.screenshot(path=os.path.join(shots, "42-memory-timeline.png"))
+
+        # A fresh page at the narrow size, with the session cookie of the signed-in one.
+        narrow = browser.new_context(viewport={"width": 390, "height": 800}, locale="en-US",
+                                     storage_state=page.context.storage_state()).new_page()
+        narrow.goto(base + "/settings/memory")
+        expect(narrow.locator(".memory-group").first).to_contain_text("Open loops", timeout=10000)
+        assert narrow.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
+        narrow.click("#memory-tab-timeline")
+        expect(narrow.locator("#memory-timeline .memory-row")).to_have_count(1, timeout=10000)
+        assert narrow.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
+        if shots:
+            narrow.screenshot(path=os.path.join(shots, "43-memory-narrow.png"))
+        browser.close()
+    return errors
+
+
 def run_memory(base: str, token: str, shots: str | None, root: str, provider: ScriptedAdapter) -> list[str]:
     from himari.data.api import MemoryCategory
 
@@ -1114,7 +1227,7 @@ def run_memory(base: str, token: str, shots: str | None, root: str, provider: Sc
 
 
 SCENARIOS = ("main", "compaction", "budget", "trash", "files", "images", "work", "instructions", "memory",
-             "streaming", "drafts", "addresses", "activity", "polish", "devices")
+             "streaming", "drafts", "addresses", "activity", "polish", "devices", "passes")
 
 
 def run_drafts(base: str, token: str, shots: str | None) -> list[str]:
@@ -1857,6 +1970,16 @@ def main() -> int:
                 errors += run_memory(f"http://127.0.0.1:{PORT + 8}",
                                      Path(memory, "control", "operator.secret").read_text().strip(),
                                      args.screenshots, memory, provider)
+            finally:
+                server.should_exit = True
+                time.sleep(0.5)
+        if "passes" in only:  # V3-P85 part 4
+            passes = os.path.join(tmp, "passes")
+            server = serve(passes, PORT + 15, ScriptedAdapter([NormalizedFinal((TextBlock("ok."),))] * 4))
+            try:
+                errors += run_passes(f"http://127.0.0.1:{PORT + 15}",
+                                     Path(passes, "control", "operator.secret").read_text().strip(),
+                                     args.screenshots, passes)
             finally:
                 server.should_exit = True
                 time.sleep(0.5)

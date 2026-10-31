@@ -7,6 +7,7 @@ import io
 import sys
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -119,3 +120,64 @@ def test_a_saved_note_is_one_line_in_the_conversation(harness: Harness) -> None:
 
 def test_status_says_whether_memory_is_on(harness: Harness) -> None:
     assert "memory: on" in harness.run("status")[1].splitlines()
+
+
+# --- V3-P85 §12: loops and dates, episodes, passes, proposals, backfill and retry ------------------------------
+
+
+def seed_pass(harness: Harness, cid: str, items: list[Any], episode: Any = None) -> str:
+    from datetime import UTC, datetime
+
+    from himari.common import ConversationId, PrincipalId, TextBlock, TrustedScope
+    from himari.data.api import PassKind, PassStart, UserMessage
+
+    app, portal = harness.application, harness.test_client.portal
+    assert app is not None and portal is not None
+    scope = TrustedScope(PrincipalId("operator"), ConversationId(cid))
+    portal.call(app.data.append_event, scope, UserMessage((TextBlock("Things worth remembering."),)))
+    found = portal.call(app.data.last_event, scope)
+    assert found is not None
+    last = found[0]
+    cursor = portal.call(app.data.read_memory_cursor, scope).through_sequence
+    pass_id: str = portal.call(app.data.begin_pass, scope, PassStart(PassKind.LIVE, cursor, last, last, "p", "m"))
+    portal.call(lambda: app.data.apply_pass(pass_id, items, episode, now=datetime.now(UTC)))
+    return pass_id
+
+
+def test_a_loop_is_added_with_its_date_and_listed_first(harness: Harness) -> None:
+    assert harness.run("memory", "add", "loop", "Interview at Kakao.", "--due", "2026-11-04")[0] == cli.EXIT_OK
+    harness.run("memory", "add", "user", "Away in Jeju.", "--until", "2026-01-01")
+    out = harness.run("memory")[1]
+    assert out.startswith("loop:\n  m1  Interview at Kakao.  [due 2026-11-04")
+    assert "m2  Away in Jeju.  [ended 2026-01-01]" in out
+    assert harness.run("memory", "edit", "m1", "Interview.", "--due", "none")[0] == cli.EXIT_OK
+    assert "m1  Interview.  (added by you" in harness.run("memory")[1]
+    assert "automatic memory: off (no HIMARI_MEMORY_MODEL)" in harness.run("status")[1].splitlines()
+
+
+def test_episodes_passes_and_proposals_from_the_command_line(harness: Harness) -> None:
+    from datetime import UTC, datetime
+
+    from himari.data.api import EpisodePlan, MemoryCategory, PassAction, PassItem
+
+    cid = harness.run("new")[1].strip()
+    now = datetime.now(UTC)
+    pass_id = seed_pass(harness, cid, [
+        PassItem(0, "{}", PassAction.ADD, category=MemoryCategory.PROJECT, text="Builds HIMARI."),
+        PassItem(1, "{}", PassAction.PROPOSE, "sensitive_proposed", category=MemoryCategory.USER, text="Pills.")],
+        EpisodePlan("Talked about HIMARI.", now, now, (1,), ()))
+    code, out, err = harness.run("memory", "episodes")
+    assert code == cli.EXIT_OK and out.startswith("e1  ") and out.rstrip().endswith("Talked about HIMARI.")
+    assert err == "(1 episode)\n"
+    out = harness.run("memory", "passes", cid)[1]
+    assert f"{pass_id} (through event 1):" in out and "  0  remembered  Builds HIMARI.  (undo in the web)" in out
+    code, out, err = harness.run("memory", "proposals")
+    assert out == f"{pass_id}/1  [user] Pills.  (sensitive)\n" and "1 waiting" in err
+    assert harness.run("memory", "proposals", "keep", f"{pass_id}/1") == (cli.EXIT_OK, "", f"({pass_id}/1: kept)\n")
+    assert harness.run("memory", "proposals")[2] == "(no suggestions waiting)\n"
+    assert "Pills.  (from" in harness.run("memory")[1] and "kept by you" in harness.run("memory")[1]
+    assert harness.run("memory", "rm", "e1", "--yes")[2].endswith("(deleted)\n")
+    assert harness.run("memory", "episodes")[2] == "(no episodes)\n"
+    code, _, err = harness.run("memory", "backfill", cid)
+    assert code == cli.EXIT_FAILED and err.startswith("refused (memory_passes_off)")
+    assert harness.run("memory", "proposals", "maybe", "x/1")[0] == cli.EXIT_USAGE

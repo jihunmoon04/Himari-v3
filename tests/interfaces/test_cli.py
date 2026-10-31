@@ -692,7 +692,9 @@ def test_status_rename_and_a_closed_question_in_the_history(harness: Harness) ->
     code, out, _ = harness.run("status")
     assert code == cli.EXIT_OK
     assert out.splitlines() == ["model: m", "commands: unavailable on this host", "context budget: 128,000 tokens",
-                                "documents: off", "memory: on", "conversation search: on", "streaming: on"]
+                                "documents: off", "memory: on",
+                                "automatic memory: off (no HIMARI_MEMORY_MODEL)", "conversation search: on",
+                                "streaming: on"]
     cid = harness.run("new")[1].strip()
     assert harness.run("rename", cid, "Trip plans")[0] == cli.EXIT_OK
     assert "Trip plans" in harness.run("list")[1]

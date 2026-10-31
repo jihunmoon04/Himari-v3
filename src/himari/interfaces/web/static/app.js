@@ -217,6 +217,8 @@ const app = {
   activityTimer: null,
   activityAsked: new Set(), // ids not in the list that the list was read again for once (§3.3)
   events: null, // V3-P83 §8.1: the open event stream (EventSource), while the page shows
+  passLines: [], // V3-P85 §10.1: the open conversation's memory passes, as last read
+  memoryTab: "notes", // V3-P85 §10.3: the Memory screen's tab
   eventsFailed: false, // it failed and has not said hello again: the activity is read every 5 s meanwhile
   activityTicket: 0, // the latest /activity read: an older answer is dropped (review N3)
   listTicket: 0, // the latest list read
@@ -590,6 +592,12 @@ function openEvents() {
     fromStream(JSON.parse(event.data).activity);
   });
   source.addEventListener("activity", (event) => { if (app.events === source) fromStream(JSON.parse(event.data)); });
+  // V3-P85 §10.1: a memory pass wrote the open conversation's lines (or its job moved on): while it is
+  // not being polled, its lines are read again.
+  source.addEventListener("conversation", (event) => {
+    if (app.events !== source || app.pollTimer !== null) return;
+    if (JSON.parse(event.data).conversation === app.conversationId) loadPassLines(app.generation);
+  });
   source.onerror = () => {
     if (app.events !== source) return;
     if (source.readyState === EventSource.CLOSED) app.events = null; // refused (e.g. too many): read, try later
@@ -1837,6 +1845,88 @@ function placeDivider() {
   else timeline.append(divider);
 }
 
+/* V3-P85 §10.1: what each memory pass did, after the event it read through — one dim line that opens to
+   its items, each with Undo while the note is as the pass left it. The server decides what an Undo puts back. */
+const PASS_ACTIONS = { remembered: "Remembered", updated: "Updated", forgot: "Forgot", open_loop: "Open loop",
+                       closed_loop: "Closed loop", waiting: "Waiting for you" };
+
+async function loadPassLines(generation) {
+  const id = app.conversationId;
+  if (!id) return;
+  let answer;
+  try {
+    answer = await api("GET", `/api/conversations/${encodeURIComponent(id)}/memory-passes`);
+  } catch {
+    return; // shown the next time
+  }
+  if (generation !== app.generation || id !== app.conversationId) return;
+  app.passLines = answer.passes;
+  paintPassLines();
+}
+
+function paintPassLines() {
+  const timeline = $("timeline");
+  for (const old of timeline.querySelectorAll(":scope > .item-pass")) old.remove();
+  for (const line of app.passLines || []) {
+    const node = passLine(line);
+    node.dataset.sequence = String(line.through_sequence);
+    const after = [...timeline.children].find((n) => Number(n.dataset.sequence) > line.through_sequence);
+    if (after) timeline.insertBefore(node, after);
+    else timeline.append(node);
+  }
+}
+
+function passLine(line) {
+  const details = el("details", "item item-pass");
+  const done = line.items.filter((item) => item.action !== "waiting").length;
+  const waiting = line.items.length - done;
+  const said = [];
+  if (done) said.push(`HIMARI remembered ${done} thing${done === 1 ? "" : "s"}`);
+  if (waiting) said.push(`${waiting} sensitive note${waiting === 1 ? "" : "s"} waiting for you`);
+  details.append(el("summary", "item-pass-summary", said.join(" · ")));
+  const list = el("ul", "item-pass-items");
+  for (const item of line.items) {
+    const row = el("li", "item-memory item-pass-item");
+    row.append(el("span", "item-memory-action", PASS_ACTIONS[item.action] || item.action),
+               el("span", "item-memory-text", item.due ? `${item.text} (due ${item.due})` : item.text));
+    if (item.undo) {
+      const undo = el("button", "link-button item-memory-undo", "Undo");
+      undo.type = "button";
+      undo.setAttribute("aria-label", `Undo: ${PASS_ACTIONS[item.action] || item.action} ${item.text}`);
+      undo.addEventListener("click", () => undoPassItem(line, item, undo));
+      row.append(undo);
+    } else if (item.action === "waiting") {
+      const review = el("button", "link-button item-memory-undo", "Review");
+      review.type = "button";
+      review.addEventListener("click", () => showMemory().catch((e) => status(e.message, "error")));
+      row.append(review);
+    }
+    list.append(row);
+  }
+  details.append(list);
+  return details;
+}
+
+async function undoPassItem(line, item, button) {
+  const path = `/api/conversations/${encodeURIComponent(app.conversationId)}/memory-passes/`
+    + `${encodeURIComponent(line.pass_id)}/${item.item}/undo`;
+  button.disabled = true;
+  try {
+    await api("POST", path);
+    button.replaceWith(el("span", "item-memory-done", "Undone"));
+    status(item.action === "remembered" || item.action === "open_loop" ? "HIMARI no longer remembers it."
+      : "The note is back as it was.", "ok");
+  } catch (error) {
+    if (error.kind === "http" && (error.status === 404 || error.status === 409)) {
+      button.remove(); // it cannot be undone any more
+      status(error.status === 409 ? "The note was changed since; see Settings › Memory." : error.message, "warn");
+    } else {
+      button.disabled = false;
+      status(error.message, error.kind === "http" ? "warn" : "error");
+    }
+  }
+}
+
 function applyContext(context) {
   app.context = context;
   const pair = $("chat-menu-context-pair");
@@ -2367,6 +2457,7 @@ function poll(generation) {
         loadList(true).then(markSelected).catch(() => {});
         readActivity(); // this one stopped working, or now waits (V3-P80 §3.3)
         loadContext(generation);
+        loadPassLines(generation); // a pass may have read it meanwhile
         loadServerInfo(); // a command may have found the sandbox broken
         loadToolSources(generation); // and close the views of a source turned off elsewhere
         loadModel(generation); // a stored choice may have been changed elsewhere
@@ -2426,6 +2517,7 @@ async function openConversation(id, { created = false, via = "push" } = {}) {
   closePicker();
   closePromptForm();
   $("timeline").replaceChildren();
+  app.passLines = []; // V3-P85 §10.1: read again with the conversation
   markSelected();
   showSurface("chat", via);
   if (moving === null) {
@@ -2452,7 +2544,10 @@ async function openConversation(id, { created = false, via = "push" } = {}) {
     app.announceAfter = Infinity; // the history read first is not news (its first successful read sets the mark)
     const detail = await refresh(generation);
     if (detail && detail.job.running) poll(generation);
-    else if (detail) loadContext(generation);
+    else if (detail) {
+      loadContext(generation);
+      loadPassLines(generation);
+    }
   } catch (error) {
     if (generation !== app.generation) return;
     if (error.status === 404) { // not here (trashed, deleted, or never): Home, and Back does not come back (§3.3)
@@ -3035,8 +3130,17 @@ async function purgeConversation(item, button) {
    sends the revision it started from; a note changed elsewhere since is
    shown with the user's text kept in the box, and saving again replaces it. */
 
-const MEMORY_CATEGORIES = [["user", "About you"], ["preference", "Preferences"], ["project", "Projects"],
-                           ["reference", "References"]];
+const MEMORY_CATEGORIES = [["loop", "Open loops"], ["user", "About you"], ["preference", "Preferences"],
+                           ["project", "Projects"], ["reference", "References"]]; // loops first (V3-P85 §10.2)
+
+/* The zone a date the user writes ends in (V3-P85 §5.3): the browser's. */
+function browserZone() {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || null;
+  } catch {
+    return null;
+  }
+}
 
 function memorySource(note) {
   const meta = el("span", "row-meta memory-source");
@@ -3053,7 +3157,9 @@ function memorySource(note) {
     link.addEventListener("click", () => openConversation(note.source.conversation));
     meta.append("From ", link);
   }
-  meta.append(` · ${note.origin === "model" ? "HIMARI" : "edited by you"} · ${when}`);
+  const who = note.origin === "extractor" ? (note.kept_by_user ? "auto · kept by you" : "auto")
+    : note.origin === "model" ? "HIMARI" : "edited by you";
+  meta.append(` · ${who} · ${when}`);
   return meta;
 }
 
@@ -3089,6 +3195,18 @@ function memoryForm(note, category, row) {
   select.setAttribute("aria-label", "Category");
   for (const [value, label] of MEMORY_CATEGORIES) select.append(option(value, label));
   select.value = note ? note.category : category;
+  // V3-P85 §10.2: a loop's due date, another note's last day; a date only (a time the note has stays unless changed)
+  const date = el("input", "memory-form-date");
+  date.type = "date";
+  const dateOf = (n) => (n ? (n.category === "loop" ? n.due : n.valid_until) || "" : "").slice(0, 10);
+  const startDate = dateOf(note);
+  date.value = startDate;
+  const dateLabel = () => {
+    const loop = select.value === "loop";
+    date.setAttribute("aria-label", loop ? "Due date (optional)" : "Valid until (optional)");
+    date.title = loop ? "Due date (optional)" : "Valid until (optional)";
+  };
+  select.addEventListener("change", dateLabel);
   const text = el("textarea", "memory-form-text");
   text.rows = 3;
   text.value = note ? note.text : "";
@@ -3101,12 +3219,14 @@ function memoryForm(note, category, row) {
   const cancel = el("button", "link-button", "Cancel");
   cancel.type = "button";
   const bar = el("div", "memory-form-bar");
-  bar.append(select, cancel, save);
+  dateLabel();
+  bar.append(select, date, cancel, save);
   form.append(text, conflict, bar);
   let revision = note ? note.revision : null;
   let unsure = false; // the last save's answer was lost: look before saving again
   let newest = 0; // the highest note id known when a new note was first sent
-  form.dirty = () => text.value !== (note ? note.text : "") || select.value !== (note ? note.category : category);
+  form.dirty = () => text.value !== (note ? note.text : "") || select.value !== (note ? note.category : category)
+    || date.value !== startDate;
   cancel.addEventListener("click", () => loadMemory().catch((e) => status(e.message, "error")));
   const saved = async () => {
     // Off, the note is kept but no model reads it (§9; integration review C3).
@@ -3118,6 +3238,10 @@ function memoryForm(note, category, row) {
     event.preventDefault();
     save.disabled = true;
     const body = { category: select.value, text: text.value };
+    if (!note || date.value !== startDate) { // a new note's dates, or a changed one; else the note keeps its own
+      body[select.value === "loop" ? "due" : "valid_until"] = date.value || null;
+      body.time_zone = browserZone();
+    }
     if (unsure) {
       const done = await memorySaved(note, revision, newest, body);
       if (done) {
@@ -3173,7 +3297,12 @@ function memoryForm(note, category, row) {
 function memoryRow(note) {
   const li = el("li", "memory-row");
   const main = el("div", "memory-row-main");
-  main.append(el("p", "memory-text", note.text), memorySource(note));
+  main.append(el("p", "memory-text", note.text));
+  if (note.due) main.append(el("span", `memory-date${note.overdue ? " is-overdue" : ""}`,
+                               `Due ${note.due.slice(0, 10)}${note.overdue ? " · overdue" : ""}`));
+  if (note.valid_until) main.append(el("span", `memory-date${note.expired ? " is-ended" : ""}`,
+                                       `${note.expired ? "Ended" : "Until"} ${note.valid_until.slice(0, 10)}`));
+  main.append(memorySource(note));
   const actions = el("div", "memory-row-actions");
   const edit = el("button", "link-button", "Edit");
   edit.type = "button";
@@ -3201,8 +3330,93 @@ async function deleteMemory(note) {
   await loadMemory();
 }
 
+/* V3-P85 §10.3: whether automatic memory runs here, and what it did lately. */
+function paintAutoMemory(auto) {
+  const line = $("memory-auto");
+  line.replaceChildren();
+  if (!auto) return;
+  if (!auto.running) {
+    line.textContent = `Automatic memory: ${auto.told}.`;
+    return;
+  }
+  const last = auto.last_applied_at ? ` · last read ${localDate(auto.last_applied_at)}` : "";
+  line.append(`Automatic memory: on · ${auto.model}${last} · today ${Number(auto.today_tokens).toLocaleString()} `
+              + "tokens");
+  const skipped = auto.skipped || [];
+  if (skipped.length) {
+    line.append(` · ${skipped.length} part${skipped.length === 1 ? "" : "s"} skipped: `);
+    const link = el("button", "link-button memory-source-link", "open");
+    link.type = "button";
+    link.addEventListener("click", () => openConversation(skipped[0].conversation));
+    line.append(link);
+  }
+}
+
+/* V3-P85 §10.2: notes waiting for the user — from an older conversation, or sensitive without a request. */
+function paintSuggestions(proposals) {
+  const box = $("memory-suggestions");
+  box.replaceChildren();
+  box.hidden = !proposals.length;
+  if (!proposals.length) return;
+  const head = el("div", "memory-group-head");
+  const all = el("div", "memory-row-actions");
+  for (const [label, decision] of [["Keep all", "keep"], ["Discard all", "discard"]]) {
+    const button = el("button", "link-button", label);
+    button.type = "button";
+    button.addEventListener("click", () => decideProposals(proposals, decision));
+    all.append(button);
+  }
+  head.append(el("h2", "memory-group-title", `Suggestions (${proposals.length})`), all);
+  const list = el("ul", "rows memory-list");
+  for (const proposal of proposals) {
+    const li = el("li", "memory-row");
+    const main = el("div", "memory-row-main");
+    const label = MEMORY_CATEGORIES.find(([value]) => value === proposal.category);
+    main.append(el("p", "memory-text", proposal.text));
+    if (proposal.due) main.append(el("span", "memory-date", `Due ${proposal.due.slice(0, 10)}`));
+    const meta = el("span", "row-meta memory-source");
+    meta.append(proposal.kind === "sensitive" ? "Sensitive: kept only if you choose · " : "From an older conversation · ",
+                `${label ? label[1] : proposal.category} · `);
+    if (proposal.conversation.in_trash) meta.append("a conversation in the trash");
+    else {
+      const link = el("button", "link-button memory-source-link", `“${conversationName(proposal.conversation)}”`);
+      link.type = "button";
+      link.addEventListener("click", () => openConversation(proposal.conversation.id));
+      meta.append(link);
+    }
+    main.append(meta);
+    const actions = el("div", "memory-row-actions");
+    for (const [text, decision] of [["Keep", "keep"], ["Discard", "discard"]]) {
+      const button = el("button", `link-button${decision === "discard" ? " danger-link" : ""}`, text);
+      button.type = "button";
+      button.setAttribute("aria-label", `${text}: ${proposal.text}`);
+      button.addEventListener("click", () => decideProposals([proposal], decision));
+      actions.append(button);
+    }
+    li.append(main, actions);
+    list.append(li);
+  }
+  box.append(head, list);
+}
+
+async function decideProposals(proposals, decision) {
+  let refused = null;
+  for (const p of proposals) {
+    try {
+      await api("POST", `/api/memories/proposals/${encodeURIComponent(p.pass_id)}/${p.item}`, { decision });
+    } catch (error) {
+      if (error.kind !== "http" || error.status !== 409) refused = error; // 409: decided elsewhere already
+    }
+  }
+  if (refused) status(refused.message, refused.kind === "http" ? "warn" : "error");
+  else status(decision === "keep" ? "Kept. HIMARI uses it from the next message." : "Discarded.", "ok");
+  await loadMemory();
+}
+
 function paintMemory() {
   const listing = app.memory;
+  paintAutoMemory(listing.auto);
+  paintSuggestions(listing.proposals || []);
   $("memory-off").hidden = listing.enabled;
   $("memory-count").textContent = `${listing.memories.length.toLocaleString()} of ${listing.max_count.toLocaleString()}`;
   const groups = $("memory-groups");
@@ -3230,10 +3444,121 @@ function paintMemory() {
 
 async function loadMemory() {
   const generation = app.generation;
-  const listing = await api("GET", "/api/memories");
+  const [listing, proposals] = await Promise.all([
+    api("GET", "/api/memories"),
+    api("GET", "/api/memories/proposals").catch(() => ({ proposals: [] })),
+  ]);
   if (generation !== app.generation || $("surface-memory").hidden) return;
-  app.memory = listing;
+  app.memory = { ...listing, proposals: proposals.proposals };
   paintMemory(); // closes any open form
+}
+
+/* ------------------------------------------------- the Timeline (V3-P85 §10.3) */
+
+function showMemoryTab(tab) {
+  app.memoryTab = tab;
+  for (const [name, panel] of [["notes", "memory-notes"], ["timeline", "memory-timeline"]]) {
+    $(`memory-tab-${name}`).setAttribute("aria-selected", String(name === tab));
+    $(panel).hidden = name !== tab;
+  }
+  if (tab === "timeline") loadTimeline(null).catch((e) => status(e.message, "error"));
+}
+
+function timelineWhen(episode) {
+  const start = new Date(episode.started_at);
+  const end = new Date(episode.ended_at);
+  const day = start.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+  const clock = (d) => d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+  return start.toDateString() === end.toDateString() ? `${day} ${clock(start)}–${clock(end)}`
+    : `${day} ${clock(start)} – ${end.toLocaleDateString()} ${clock(end)}`;
+}
+
+function episodeRow(episode) {
+  const li = el("li", "memory-row");
+  const main = el("div", "memory-row-main");
+  main.append(el("p", "memory-text", episode.text));
+  const meta = el("span", "row-meta memory-source");
+  meta.append(`${timelineWhen(episode)} · `);
+  const link = el("button", "link-button memory-source-link", `“${conversationName(episode.conversation)}”`);
+  link.type = "button";
+  link.addEventListener("click", () => openConversation(episode.conversation.id));
+  meta.append(link, episode.origin === "user" ? " · edited by you" : "");
+  main.append(meta);
+  const actions = el("div", "memory-row-actions");
+  const edit = el("button", "link-button", "Edit");
+  edit.type = "button";
+  edit.setAttribute("aria-label", `Edit episode e${episode.id}`);
+  edit.addEventListener("click", () => episodeForm(episode, li));
+  const remove = el("button", "link-button danger-link", "Delete");
+  remove.type = "button";
+  remove.setAttribute("aria-label", `Delete episode e${episode.id}`);
+  remove.addEventListener("click", async () => {
+    if (!(await confirmAction("Delete this episode?", [episode.text], "Delete"))) return;
+    try {
+      await api("DELETE", `/api/episodes/${episode.id}?revision=${episode.revision}`);
+      li.remove();
+      status("Deleted.", "ok");
+    } catch (error) {
+      status(error.status === 409 ? "The episode was changed elsewhere; look at it again." : error.message, "warn");
+    }
+  });
+  actions.append(edit, remove);
+  li.append(main, actions);
+  return li;
+}
+
+function episodeForm(episode, li) {
+  const form = el("form", "memory-form");
+  const text = el("textarea", "memory-form-text");
+  text.rows = 3;
+  text.value = episode.text;
+  text.setAttribute("aria-label", `Episode e${episode.id}`);
+  const save = el("button", "primary-button", "Save");
+  save.type = "submit";
+  const cancel = el("button", "link-button", "Cancel");
+  cancel.type = "button";
+  cancel.addEventListener("click", () => li.replaceWith(episodeRow(episode)));
+  const bar = el("div", "memory-form-bar");
+  bar.append(cancel, save);
+  form.append(text, bar);
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    save.disabled = true;
+    try {
+      const saved = await api("PUT", `/api/episodes/${episode.id}`, { text: text.value, revision: episode.revision });
+      li.replaceWith(episodeRow({ ...episode, text: saved.text, origin: saved.origin, revision: saved.revision }));
+      status("Saved.", "ok");
+    } catch (error) {
+      save.disabled = false;
+      status(error.status === 409 ? "The episode was changed elsewhere; open the Timeline again." : error.message,
+             "warn");
+    }
+  });
+  li.replaceChildren(form);
+  text.focus();
+}
+
+async function loadTimeline(cursor) {
+  const generation = app.generation;
+  const box = $("memory-timeline");
+  const page = await api("GET", `/api/episodes?limit=30${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`);
+  if (generation !== app.generation || $("surface-memory").hidden) return;
+  let list = box.querySelector(".memory-list");
+  if (!cursor || !list) {
+    box.replaceChildren();
+    list = el("ul", "rows memory-list");
+    box.append(list);
+  }
+  box.querySelector(".memory-timeline-more")?.remove();
+  for (const episode of page.episodes) list.append(episodeRow(episode));
+  if (!list.children.length) box.append(el("p", "hint memory-group-empty",
+                                           "Nothing yet. After a conversation goes quiet, what you did together shows here."));
+  if (page.next) {
+    const more = el("button", "link-button memory-timeline-more", "Show more");
+    more.type = "button";
+    more.addEventListener("click", () => loadTimeline(page.next).catch((e) => status(e.message, "error")));
+    box.append(more);
+  }
 }
 
 async function showMemory({ via = "push" } = {}) {
@@ -3247,7 +3572,10 @@ async function showMemory({ via = "push" } = {}) {
   markSelected();
   app.memory = null;
   $("memory-groups").replaceChildren();
+  $("memory-suggestions").replaceChildren();
+  $("memory-timeline").replaceChildren();
   $("memory-count").textContent = "Loading…";
+  showMemoryTab("notes");
   showSurface("memory", via);
   closeNav();
   $("topbar-title").textContent = "Memory";
@@ -4248,6 +4576,8 @@ async function boot() {
   $("chat-menu-effort-select").addEventListener("change", (event) =>
     setModel($("chat-menu-model-select").value || null, event.target.value || null));
   $("composer-pause").addEventListener("click", () => stopConversation("pause"));
+  $("memory-tab-notes").addEventListener("click", () => showMemoryTab("notes")); // V3-P85 §10.3
+  $("memory-tab-timeline").addEventListener("click", () => showMemoryTab("timeline"));
   $("stop-continue").addEventListener("click", () => {
     $("stop-continue").disabled = true;  // one Continue per click; the next detail enables it again
     resumeConversation();

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -16,7 +17,7 @@ from testkit import final  # noqa: E402
 
 from himari.bootstrap.application import Application  # noqa: E402
 from himari.bootstrap.operator import derive_cli_bearer  # noqa: E402
-from himari.common import CallId, ToolCall, ToolId  # noqa: E402
+from himari.common import CallId, PrincipalId, ToolCall, ToolId  # noqa: E402
 from himari.data.api import MAX_MEMORIES, MAX_MEMORY_CHARS  # noqa: E402
 from himari.interfaces.web import app as web  # noqa: E402
 from himari.interfaces.web.config import WebConfig  # noqa: E402
@@ -72,8 +73,11 @@ def server(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Server]:
 
 def test_add_edit_delete_and_list(server: Server) -> None:
     server.sign_in()
-    assert server.listing() == {"memories": [], "max_count": MAX_MEMORIES, "max_chars": MAX_MEMORY_CHARS,
-                                "enabled": True}
+    listing = server.listing()
+    assert {k: v for k, v in listing.items() if k != "auto"} == {
+        "memories": [], "max_count": MAX_MEMORIES, "max_chars": MAX_MEMORY_CHARS, "max_loop_chars": 300,
+        "enabled": True}
+    assert listing["auto"]["running"] is False and listing["auto"]["told"] == "off (no HIMARI_MEMORY_MODEL)"
     added = server.add("preference", "  Short lists.\r\n")
     assert added.status_code == 201
     body = added.json()
@@ -262,3 +266,135 @@ def test_himari_streaming_turns_it_off() -> None:  # V3-P73 §9
     assert (off.streaming, off.conversation_search, off.memory) == (False, True, True)
     with pytest.raises(WebConfigError):
         WebConfig.from_env({**base, "HIMARI_STREAMING": "maybe"})
+
+
+# --- V3-P85 part 4: loops and dates, pass lines and Undo, proposals, the Timeline ----------------------------
+
+
+def call(server: Server, fn: Any, *args: Any, **kwargs: Any) -> Any:
+    assert server.client.portal is not None
+    return server.client.portal.call(lambda: fn(*args, **kwargs))
+
+
+def conversation(server: Server) -> tuple[str, Any]:
+    from himari.common import ConversationId, PrincipalId, TrustedScope
+
+    created = server.client.post("/api/conversations", json={}, headers=SEND)
+    assert created.status_code in (200, 201), created.text
+    cid = created.json()["id"]
+    return cid, TrustedScope(PrincipalId("operator"), ConversationId(cid))
+
+
+def passed(server: Server, scope: Any, said: str, items: list[Any], episode: Any = None) -> str:
+    """A user message and an applied live pass over it, straight through Data."""
+    from himari.common import TextBlock
+    from himari.data.api import PassKind, PassStart, UserMessage
+
+    app = server.application
+    assert app is not None
+    call(server, app.data.append_event, scope, UserMessage((TextBlock(said),)))
+    last = call(server, app.data.last_event, scope)[0]
+    cursor = call(server, app.data.read_memory_cursor, scope).through_sequence
+    pass_id: str = call(server, app.data.begin_pass, scope, PassStart(PassKind.LIVE, cursor, last, last, "p", "m"))
+    call(server, app.data.apply_pass, pass_id, items, episode, now=datetime.now(UTC))
+    return pass_id
+
+
+def test_a_loop_has_its_date_in_the_browsers_zone_and_an_edit_keeps_or_clears_it(server: Server) -> None:
+    server.sign_in()
+    added = server.client.post("/api/memories", json={"category": "loop", "text": "Interview.", "due": "2026-11-04",
+                                                      "time_zone": "Asia/Seoul"}, headers=SEND)
+    assert added.status_code == 201 and (added.json()["due"], added.json()["valid_until"]) == ("2026-11-04", None)
+    note = call(server, server.application.data.read_memory, PrincipalId("operator"), 1)  # type: ignore[union-attr]
+    assert note.due_instant == datetime(2026, 11, 4, 14, 59, 59, 999999, tzinfo=UTC)
+    kept = server.client.put("/api/memories/1", json={"category": "loop", "text": "Interview at Kakao.",
+                                                      "revision": 1}, headers=SEND)
+    assert kept.status_code == 200 and kept.json()["due"] == "2026-11-04"  # neither date named: kept
+    cleared = server.client.put("/api/memories/1", json={"category": "loop", "text": "Interview.", "revision": 2,
+                                                         "due": None}, headers=SEND)
+    assert cleared.status_code == 200 and cleared.json()["due"] is None
+    fact = server.client.post("/api/memories", json={"category": "user", "text": "Away.", "valid_until": "2026-01-01",
+                                                     "due": "2026-11-04"}, headers=SEND)
+    assert fact.status_code == 201 and (fact.json()["valid_until"], fact.json()["expired"], fact.json()["due"]) == (
+        "2026-01-01", True, None)
+    bad = server.client.post("/api/memories", json={"category": "loop", "text": "x", "due": "next Friday"},
+                             headers=SEND)
+    assert bad.status_code == 422 and bad.json()["error"]["code"] == "invalid_date"
+
+
+def test_a_pass_shows_its_lines_after_the_event_it_read_and_each_can_be_undone(server: Server) -> None:
+    from himari.data.api import MemoryCategory, PassAction, PassItem
+
+    server.sign_in()
+    cid, scope = conversation(server)
+    first = passed(server, scope, "I build HIMARI. Interview on Nov 4.", [
+        PassItem(0, "{}", PassAction.ADD, category=MemoryCategory.PROJECT, text="Builds HIMARI."),
+        PassItem(1, "{}", PassAction.ADD, category=MemoryCategory.LOOP, text="Interview."),
+        PassItem(2, "{}", PassAction.PROPOSE, "sensitive_proposed", category=MemoryCategory.USER, text="Pills."),
+        PassItem(3, "{}", PassAction.DROP, "bad_evidence")])
+    passed(server, scope, "The interview went well.", [
+        PassItem(0, "{}", PassAction.FORGET, memory_id=2, expected_revision=1)])
+    lines = server.client.get(f"/api/conversations/{cid}/memory-passes").json()["passes"]
+    assert [(p["through_sequence"], [(i["action"], i["text"], i["undo"]) for i in p["items"]]) for p in lines] == [
+        (1, [("remembered", "Builds HIMARI.", True), ("open_loop", "Interview.", False),
+             ("waiting", "Pills.", False)]),
+        (2, [("closed_loop", "Interview.", True)])]  # the loop moved on since the first pass: no Undo there
+    back = server.client.post(f"/api/conversations/{cid}/memory-passes/{lines[1]['pass_id']}/0/undo", headers=SEND)
+    assert back.status_code == 200 and back.json()["memory"]["text"] == "Interview."
+    again = server.client.post(f"/api/conversations/{cid}/memory-passes/{lines[1]['pass_id']}/0/undo", headers=SEND)
+    assert again.status_code == 404
+    removed = server.client.post(f"/api/conversations/{cid}/memory-passes/{first}/0/undo", headers=SEND)
+    assert removed.status_code == 200 and removed.json() == {"memory": None}
+    assert [m["text"] for m in server.listing()["memories"]] == ["Interview."]
+    other, _ = conversation(server)
+    elsewhere = server.client.post(f"/api/conversations/{other}/memory-passes/{first}/1/undo", headers=SEND)
+    assert elsewhere.status_code == 404  # a pass is undone in its own conversation only
+
+
+def test_proposals_are_kept_or_discarded_and_the_timeline_pages_and_edits(server: Server) -> None:
+    from himari.data.api import EpisodePlan, MemoryCategory, PassAction, PassItem
+
+    server.sign_in()
+    cid, scope = conversation(server)
+    now = datetime.now(UTC)
+    passed(server, scope, "Things.", [
+        PassItem(0, "{}", PassAction.PROPOSE, "sensitive_proposed", category=MemoryCategory.USER, text="Pills."),
+        PassItem(1, "{}", PassAction.PROPOSE, "proposed", category=MemoryCategory.USER, text="Lived in Tokyo.")],
+        EpisodePlan("Talked about things.", now, now, (1,), ()))
+    proposals = server.client.get("/api/memories/proposals").json()["proposals"]
+    assert [(p["kind"], p["text"], p["conversation"]["id"]) for p in proposals] == [
+        ("sensitive", "Pills.", cid), ("past", "Lived in Tokyo.", cid)]
+    keep = server.client.post(f"/api/memories/proposals/{proposals[1]['pass_id']}/1", json={"decision": "keep"},
+                              headers=SEND)
+    assert keep.status_code == 201 and keep.json()["kept_by_user"] is True
+    drop = server.client.post(f"/api/memories/proposals/{proposals[0]['pass_id']}/0", json={"decision": "discard"},
+                              headers=SEND)
+    assert drop.status_code == 204
+    twice = server.client.post(f"/api/memories/proposals/{proposals[0]['pass_id']}/0", json={"decision": "keep"},
+                               headers=SEND)
+    assert twice.status_code == 409 and twice.json()["error"]["code"] == "already_decided"
+    for n in range(2):
+        passed(server, scope, f"More {n}.", [], EpisodePlan(f"Later {n}.", now + timedelta(hours=n + 1),
+                                                            now + timedelta(hours=n + 1), (1,), ()))
+    page = server.client.get("/api/episodes?limit=2").json()
+    assert [e["text"] for e in page["episodes"]] == ["Later 1.", "Later 0."] and page["next"]
+    rest = server.client.get(f"/api/episodes?limit=2&cursor={page['next']}").json()
+    assert [e["text"] for e in rest["episodes"]] == ["Talked about things."] and rest["next"] is None
+    first = page["episodes"][0]
+    edited = server.client.put(f"/api/episodes/{first['id']}", json={"text": "My words.", "revision": 1}, headers=SEND)
+    assert edited.status_code == 200 and edited.json()["origin"] == "user"
+    stale = server.client.put(f"/api/episodes/{first['id']}", json={"text": "x", "revision": 1}, headers=SEND)
+    assert stale.status_code == 409
+    assert server.client.delete(f"/api/episodes/{first['id']}?revision=2", headers=SEND).status_code == 204
+    assert server.client.get("/api/episodes?cursor=bad").status_code == 400
+    notice = server.client.get(f"/api/conversations/{cid}/delete-notice").json()
+    assert (notice["memory_count"], notice["episode_count"]) == (1, 2)
+
+
+def test_a_backfill_or_retry_says_when_memory_passes_do_not_run(server: Server) -> None:
+    server.sign_in()
+    cid, _ = conversation(server)
+    off = server.client.post("/api/memory-passes/backfill", json={"conversation_id": cid}, headers=SEND)
+    assert off.status_code == 409 and off.json()["error"]["code"] == "memory_passes_off"
+    assert server.client.post(f"/api/conversations/{cid}/memory-passes/x/retry", headers=SEND).status_code == 409
+    assert server.client.get("/api/server").json()["auto_memory"] == "off (no HIMARI_MEMORY_MODEL)"
