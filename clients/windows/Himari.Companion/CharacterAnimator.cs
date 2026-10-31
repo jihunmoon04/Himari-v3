@@ -10,6 +10,9 @@ internal sealed class AnimationRequest
     internal TimeSpan Start { get; }
     internal TimeSpan? End { get; set; }
     internal long Order { get; }
+    // A one-shot clip requested without a duration: it ends after one full play, counted
+    // from whenever it is shown (again), not from the request.
+    internal bool PlaysOnce { get; set; }
 }
 
 internal sealed record CharacterPose(string Clip, int Frame, string Mood, string? Eyes, string? Mouth);
@@ -51,9 +54,8 @@ internal sealed class CharacterAnimator
     internal AnimationRequest Request(string clip, AnimationLayer layer, TimeSpan now, TimeSpan? duration = null)
     {
         if (!manifest.Clips.TryGetValue(clip, out var c)) throw new ArgumentException($"unknown clip {clip}", nameof(clip));
-        // A one-shot clip without a duration ends when it has played once.
-        TimeSpan? end = duration is { } d ? now + d : c.Loop ? null : now + c.Length;
-        var request = new AnimationRequest(clip, layer, now, end, order++);
+        // A one-shot clip without a duration ends when it has played once (see BodyFrame).
+        var request = new AnimationRequest(clip, layer, now, duration is { } d ? now + d : null, order++) { PlaysOnce = duration is null && !c.Loop };
         requests.Add(request);
         return request;
     }
@@ -61,6 +63,7 @@ internal sealed class CharacterAnimator
     internal void Release(AnimationRequest request, TimeSpan now)
     {
         if (request == idle) return;
+        request.PlaysOnce = false;
         if (request.End is null || request.End > now) request.End = now;
     }
 
@@ -117,7 +120,10 @@ internal sealed class CharacterAnimator
             bool ended = current.End is { } e && e <= now;
             currentStart = ended && current.End > active.Start ? current.End.Value : active.Start;
             if (ended) requests.Remove(current);
+            // An interrupted one-shot plays in full again when it comes back.
+            else if (current.PlaysOnce) current.End = null;
             current = active;
+            if (current.PlaysOnce) current.End = currentStart + manifest.Clips[current.Clip].Length;
         }
         var clip = manifest.Clips[current.Clip];
         double t = (now - currentStart).TotalMilliseconds, total = clip.Length.TotalMilliseconds;

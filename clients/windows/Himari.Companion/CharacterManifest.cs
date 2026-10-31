@@ -17,12 +17,35 @@ internal sealed record CharacterManifest(int Version, int[] Canvas, string Sheet
         var manifest = JsonSerializer.Deserialize<CharacterManifest>(json, Options) ?? throw new InvalidDataException("empty character manifest");
         if (manifest.Version != SupportedVersion) throw new InvalidDataException($"character manifest version {manifest.Version}, expected {SupportedVersion}");
         if (manifest.Canvas is not [> 0, > 0]) throw new InvalidDataException("character canvas");
-        if (!manifest.Clips.TryGetValue("idle", out var idle) || !idle.Loop) throw new InvalidDataException("character manifest needs a looping idle clip");
+        if (string.IsNullOrWhiteSpace(manifest.Sheet)) throw new InvalidDataException("character sheet");
+        if (manifest.Face?.Origin is not [>= 0, >= 0] || manifest.Face.Size is not [> 0, > 0]) throw new InvalidDataException("character face area");
+        if (manifest.Clips is null || manifest.Faces is null) throw new InvalidDataException("character manifest needs clips and faces");
+        if (!manifest.Clips.TryGetValue("idle", out var idle) || idle is null || !idle.Loop) throw new InvalidDataException("character manifest needs a looping idle clip");
         foreach (var (name, clip) in manifest.Clips)
-            if (clip.Frames.Length == 0 || clip.Frames.Any(f => f.Ms <= 0 || f.Src.Length != 4 || f.Face.Length != 2)) throw new InvalidDataException($"clip {name}");
+            if (clip?.Frames is not { Length: > 0 } || clip.Frames.Any(f => f is null || f.Ms <= 0 || !IsRect(f.Src) || f.Face is not [_, _]))
+                throw new InvalidDataException($"clip {name}");
         if (!manifest.Faces.ContainsKey("neutral")) throw new InvalidDataException("character manifest needs a neutral face");
+        foreach (var (name, face) in manifest.Faces)
+        {
+            if (face is null || !IsRect(face.Src)) throw new InvalidDataException($"face {name}");
+            foreach (var variant in (face.Eyes ?? []).Concat(face.Mouth ?? []))
+                if (variant.Value is null || !IsRect(variant.Value.Src) || variant.Value.At is not [_, _]) throw new InvalidDataException($"face {name} variant {variant.Key}");
+        }
         return manifest;
     }
+
+    // Every src must lie inside the loaded sheet; checked once at startup so a bad export
+    // fails there instead of while drawing.
+    internal void CheckSheet(int width, int height)
+    {
+        var rects = Clips.SelectMany(c => c.Value.Frames.Select(f => (c.Key, f.Src)))
+            .Concat(Faces.SelectMany(f => new[] { (f.Key, f.Value.Src) }
+                .Concat((f.Value.Eyes ?? []).Concat(f.Value.Mouth ?? []).Select(v => ($"{f.Key}/{v.Key}", v.Value.Src)))));
+        foreach (var (name, src) in rects)
+            if (src[0] + src[2] > width || src[1] + src[3] > height) throw new InvalidDataException($"{name} lies outside the {width}x{height} sheet");
+    }
+
+    private static bool IsRect(int[]? src) => src is [>= 0, >= 0, > 0, > 0];
 
     internal int Width => Canvas[0];
     internal int Height => Canvas[1];

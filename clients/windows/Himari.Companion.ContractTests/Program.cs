@@ -360,11 +360,20 @@ Check(shipped.Width == 205 && shipped.Height == 206 && new[] { "neutral", "happy
     "shipped manifest covers the server's eight moods on the 205x206 canvas");
 Check(shipped.Faces["neutral"].Eyes!.Keys.Order().SequenceEqual(["closed", "half"]) && shipped.Faces["neutral"].Mouth!.Keys.Order().SequenceEqual(["small", "wide"]), "neutral has blink and talk variants");
 foreach (var bad in new[] { "{\"version\":2,\"canvas\":[1,1],\"sheet\":\"s\",\"face\":{\"origin\":[0,0],\"size\":[1,1]},\"clips\":{},\"faces\":{}}",
-                            "{\"version\":1,\"canvas\":[1,1],\"sheet\":\"s\",\"face\":{\"origin\":[0,0],\"size\":[1,1]},\"clips\":{},\"faces\":{\"neutral\":{\"src\":[0,0,1,1]}}}" })
+                            "{\"version\":1,\"canvas\":[1,1],\"sheet\":\"s\",\"face\":{\"origin\":[0,0],\"size\":[1,1]},\"clips\":{},\"faces\":{\"neutral\":{\"src\":[0,0,1,1]}}}",
+                            "{\"version\":1,\"canvas\":[1,1],\"sheet\":\"s\",\"face\":{\"origin\":[0,0],\"size\":[0,1]},\"clips\":{\"idle\":{\"loop\":true,\"frames\":[{\"src\":[0,0,1,1],\"ms\":1,\"face\":[0,0]}]}},\"faces\":{\"neutral\":{\"src\":[0,0,1,1]}}}",
+                            "{\"version\":1,\"canvas\":[1,1],\"sheet\":\"s\",\"clips\":{\"idle\":{\"loop\":true,\"frames\":[{\"src\":[0,0,1,1],\"ms\":1,\"face\":[0,0]}]}},\"faces\":{\"neutral\":{\"src\":[0,0,1,1]}}}",
+                            "{\"version\":1,\"canvas\":[1,1],\"sheet\":\"s\",\"face\":{\"origin\":[0,0],\"size\":[1,1]},\"clips\":{\"idle\":{\"loop\":true,\"frames\":[{\"src\":[0,0,-1,1],\"ms\":1,\"face\":[0,0]}]}},\"faces\":{\"neutral\":{\"src\":[0,0,1,1]}}}",
+                            "{\"version\":1,\"canvas\":[1,1],\"sheet\":\"s\",\"face\":{\"origin\":[0,0],\"size\":[1,1]},\"clips\":{\"idle\":{\"loop\":true,\"frames\":[{\"src\":[0,0,1,1],\"ms\":1,\"face\":[0,0]}]}},\"faces\":{\"neutral\":{\"src\":[0,0,1,1],\"eyes\":{\"half\":{\"src\":[0,0,1,1],\"at\":[0]}}}}}" })
 {
     try { CharacterManifest.Parse(bad); Check(false, "invalid character manifest is rejected"); }
     catch (InvalidDataException) { }
 }
+var shippedRects = shipped.Clips.Values.SelectMany(c => c.Frames.Select(f => f.Src)).Concat(shipped.Faces.Values.Select(f => f.Src)).ToList();
+int sheetRight = shippedRects.Max(r => r[0] + r[2]), sheetBottom = shippedRects.Max(r => r[1] + r[3]);
+shipped.CheckSheet(sheetRight, sheetBottom);
+try { shipped.CheckSheet(sheetRight, sheetBottom - 1); Check(false, "a src outside the sheet is rejected"); }
+catch (InvalidDataException) { }
 static TimeSpan Ms(double value) => TimeSpan.FromMilliseconds(value);
 var frame = new ClipFrame([0, 0, 1, 1], 100, [0, 0]);
 var animationManifest = shipped with
@@ -389,6 +398,27 @@ animator.Release(roll, Ms(560));
 Check(animator.Pose(Ms(570)).Clip == "wave" && animator.Pose(Ms(570)).Frame == 0, "after the higher request ends, the lower one restarts from its first frame");
 Check(animator.Pose(Ms(680)).Clip == "wave" && animator.Pose(Ms(680)).Frame == 1 && animator.Pose(Ms(780)).Clip == "idle" && animator.Pose(Ms(780)).Frame == 0,
     "a one-shot clip plays once and hands back to idle from its first frame");
+// A one-shot covered almost to its end still plays in full when it comes back (PR #142 review).
+var hidden = new CharacterAnimator(animationManifest, 7, TimeSpan.Zero);
+hidden.Request("wave", AnimationLayer.Reaction, Ms(0));
+Check(hidden.Pose(Ms(10)) is { Clip: "wave", Frame: 0 }, "the one-shot starts when requested");
+var cover = hidden.Request("roll", AnimationLayer.Directed, Ms(50));
+Check(hidden.Pose(Ms(60)).Clip == "roll", "a higher layer covers the one-shot");
+hidden.Release(cover, Ms(190));
+Check(hidden.Pose(Ms(195)) is { Clip: "wave", Frame: 0 } && hidden.Pose(Ms(295)) is { Clip: "wave", Frame: 1 } && hidden.Pose(Ms(385)).Clip == "wave"
+    && hidden.NextChange(Ms(385)) == Ms(390) && hidden.Pose(Ms(395)).Clip == "idle",
+    "a covered one-shot replays from its first frame for its full 200 ms");
+var longHidden = new CharacterAnimator(animationManifest, 7, TimeSpan.Zero);
+longHidden.Request("wave", AnimationLayer.Reaction, Ms(0));
+longHidden.Pose(Ms(10));
+var longCover = longHidden.Request("roll", AnimationLayer.Directed, Ms(50));
+longHidden.Pose(Ms(60));
+longHidden.Release(longCover, Ms(300));
+Check(longHidden.Pose(Ms(305)) is { Clip: "wave", Frame: 0 } && longHidden.Pose(Ms(495)).Clip == "wave" && longHidden.Pose(Ms(505)).Clip == "idle",
+    "a one-shot covered past its original end still comes back and plays in full");
+var dropped = hidden.Request("wave", AnimationLayer.Reaction, Ms(400));
+hidden.Release(dropped, Ms(450));
+Check(hidden.Pose(Ms(460)).Clip == "idle", "releasing a one-shot ends it at once");
 animator.Mood = "happy";
 Check(animator.Pose(Ms(800)).Mood == "happy", "mood comes from the server");
 animator.Mood = "unknown";

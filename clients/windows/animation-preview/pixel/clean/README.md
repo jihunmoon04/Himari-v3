@@ -106,7 +106,7 @@ aseprite -b --script-param in=happy.png --script-param neutral=neutral.png --scr
 - **내보내기**: 원본을 고친 뒤 `../tools/export.lua`를 돌린다(`pixel/`에서 실행).
   - 같은 그림 조각은 시트에 한 번만 넣는다(지금 18조각, 820×412).
   - UI 테스트가 비교할 기준 그림 3장(`idle-1-neutral`, `idle-2-happy`, `idle-1-neutral-closed-wide`)도 함께 쓴다.
-  - 다음 중 하나라도 어기면 아무것도 쓰지 않고 실패한다: 색 인덱스 모드와 `himari-32.gpl` 팔레트, 모든 몸 프레임의 `@face` 점, 모든 동작의 첫 프레임 = idle 첫 프레임, 표정 8종.
+  - 다음 중 하나라도 어기면 아무것도 쓰지 않고 실패한다: 색 인덱스 모드와 `himari-32.gpl` 팔레트, 모든 몸 프레임의 `@face` 점, 모든 동작의 첫 프레임과 단발 동작의 마지막 프레임 = idle 첫 프레임, 표정 8종.
 
 ```
 aseprite -b --script-param body=clean/body.aseprite --script-param faces=clean/faces.aseprite --script-param palette=clean/himari-32.gpl --script-param out=../../Himari.Companion/Assets --script-param refs=../../Himari.Companion.UiTests/Fixtures/character --script tools/export.lua

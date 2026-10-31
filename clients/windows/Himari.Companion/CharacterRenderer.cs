@@ -38,6 +38,7 @@ internal sealed class CharacterRenderer
         var manifest = CharacterManifest.Parse(json.ReadToEnd());
         using var png = Resource(manifest.Sheet);
         var image = BitmapFrame.Create(png, BitmapCreateOptions.PreservePixelFormat, BitmapCacheOption.OnLoad);
+        manifest.CheckSheet(image.PixelWidth, image.PixelHeight);
         return new CharacterRenderer(manifest, image);
     }
 

@@ -88,6 +88,8 @@ end
 if not restKey then fail("body.aseprite has no idle tag") end
 for _, c in ipairs(clips) do
   if c.frames[1].piece ~= restKey then fail(c.name .. " does not start from the rest pose (idle frame 1)") end
+  -- A one-shot hands back to idle frame 1, so it must also end there (a loop wraps to its own start).
+  if not c.loop and c.frames[#c.frames].piece ~= restKey then fail(c.name .. " does not end on the rest pose (idle frame 1)") end
 end
 
 -- Faces.
