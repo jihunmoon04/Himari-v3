@@ -68,6 +68,7 @@ checkPalette(body)
 local W, H = body.width, body.height
 local bodyLayers = layers(body)
 local marker = bodyLayers["@face"] or fail("body.aseprite has no @face layer")
+local eyesMarker = bodyLayers["@eyes"] -- optional: a cel's user data forces that frame's eyes
 local clips, restKey = {}, nil
 local function flatten(frame)
   local img = Image(W, H, ColorMode.INDEXED)
@@ -76,16 +77,29 @@ local function flatten(frame)
 end
 for _, tag in ipairs(body.tags) do
   local frames = {}
+  -- A loop may play some opening frames once: user data "loopFrom=N" (1-based) on the tag.
+  local raw = (tag.data or ""):match("loopFrom=(%S*)")
+  local loopFrom = raw == nil and 1 or (raw:match("^%d+$") and tonumber(raw))
+  if not loopFrom then fail(tag.name .. " has a malformed loopFrom: " .. raw) end
+  if loopFrom < 1 or loopFrom > tag.frames or (loopFrom > 1 and tag.repeats ~= 0) then fail(tag.name .. " has a bad loopFrom") end
   for f = tag.fromFrame.frameNumber, tag.toFrame.frameNumber do
     local cel = marker:cel(f) or fail("frame " .. f .. " of " .. tag.name .. " has no @face marker")
     local img = flatten(f)
     frames[#frames + 1] = { piece = add(img), ms = math.floor(body.frames[f].duration * 1000 + .5),
                             face = { cel.position.x - FX, cel.position.y - FY }, img = img }
+    local forced = eyesMarker and eyesMarker:cel(f)
+    if forced and forced.data ~= "" then frames[#frames].eyes = forced.data end
   end
-  clips[#clips + 1] = { name = tag.name, loop = tag.repeats == 0, frames = frames }
+  clips[#clips + 1] = { name = tag.name, loop = tag.repeats == 0, loopFrom = loopFrom - 1, frames = frames }
   if tag.name == "idle" then restKey = frames[1].piece end
 end
 if not restKey then fail("body.aseprite has no idle tag") end
+for i, a in ipairs(body.tags) do
+  for j = i + 1, #body.tags do
+    local b = body.tags[j]
+    if a.fromFrame.frameNumber <= b.toFrame.frameNumber and b.fromFrame.frameNumber <= a.toFrame.frameNumber then fail(a.name .. " and " .. b.name .. " share frames") end
+  end
+end
 for _, c in ipairs(clips) do
   if c.frames[1].piece ~= restKey then fail(c.name .. " does not start from the rest pose (idle frame 1)") end
   -- A one-shot hands back to idle frame 1, so it must also end there (a loop wraps to its own start).
@@ -136,9 +150,11 @@ local function src(p) return string.format("[%d, %d, %d, %d]", p.x, p.y, p.img.w
 local lines = { "{", '  "version": 1,', string.format('  "canvas": [%d, %d],', W, H), '  "sheet": "character.png",',
   string.format('  "face": { "origin": [%d, %d], "size": [%d, %d] },', FX, FY, FW, FH), '  "clips": {' }
 for ci, c in ipairs(clips) do
-  lines[#lines + 1] = string.format('    "%s": { "loop": %s, "frames": [', c.name, tostring(c.loop))
+  local from = c.loopFrom > 0 and string.format(', "loopFrom": %d', c.loopFrom) or ""
+  lines[#lines + 1] = string.format('    "%s": { "loop": %s%s, "frames": [', c.name, tostring(c.loop), from)
   for fi, f in ipairs(c.frames) do
-    lines[#lines + 1] = string.format('      { "src": %s, "ms": %d, "face": [%d, %d] }%s', src(f.piece), f.ms, f.face[1], f.face[2], fi < #c.frames and "," or "")
+    local eyes = f.eyes and string.format(', "eyes": "%s"', f.eyes) or ""
+    lines[#lines + 1] = string.format('      { "src": %s, "ms": %d, "face": [%d, %d]%s }%s', src(f.piece), f.ms, f.face[1], f.face[2], eyes, fi < #c.frames and "," or "")
   end
   lines[#lines + 1] = "    ] }" .. (ci < #clips and "," or "")
 end
@@ -188,6 +204,7 @@ local refs = {
   { "idle-1-neutral", "idle", 1, "neutral" },
   { "idle-2-happy", "idle", 2, "happy" },
   { "idle-1-neutral-closed-wide", "idle", 1, "neutral", "closed", "wide" },
+  { "sleep-4-neutral-closed", "sleep", 4, "neutral", "closed" },
 }
 for _, r in ipairs(refs) do
   local s = render(r[2], r[3], r[4], r[5], r[6])

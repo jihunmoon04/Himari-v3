@@ -5,7 +5,7 @@
 - `neutral.png`: 205×206, 투명 배경, 색 32개(인덱스 0은 투명)
 - `neutral.aseprite`: 같은 그림의 Aseprite 원본(레이어 1개)
 - `neutral-x6.png`: 6배 최근접 확대 미리보기
-- `himari-32.gpl`: 공통 팔레트. 새 프레임과 표정도 이 팔레트만 사용한다.
+- `himari-32.gpl`: 공통 팔레트. 새 프레임과 표정도 이 팔레트만 사용한다. 원래 32색이고, 졸기의 zzz용 하늘색 두 개(33, 34)를 나중에 더했다.
 
 ## 만든 방법
 
@@ -98,21 +98,38 @@ aseprite -b --script-param in=happy.png --script-param neutral=neutral.png --scr
 
 | 파일 | 내용 |
 |---|---|
-| `body.aseprite` | 몸 동작. 태그 하나가 동작 하나(지금은 `idle` 6프레임). 숨긴 레이어 `@face`의 1×1 점이 그 프레임에서 얼굴을 놓을 자리다(쉬는 자세 (101, 47), 숨쉬기 프레임은 1px 위). |
+| `body.aseprite` | 몸 동작. 태그 하나가 동작 하나(`idle` 6프레임, `sleep` 15프레임). 숨긴 레이어 `@face`의 1×1 점이 그 프레임에서 얼굴을 놓을 자리다(쉬는 자세 (101, 47), 숨쉬기 프레임은 1px 위). 숨긴 `@eyes`의 셀 데이터는 그 프레임의 눈을 강제한다. |
 | `faces.aseprite` | 얼굴 33×26. 표정마다 프레임 하나, 태그 이름이 표정 이름. 그룹 `eyes/half`, `eyes/closed`, `mouth/small`, `mouth/wide`에 기본 얼굴과 다른 픽셀만 그린다(happy는 눈 변형이 없다). 숨긴 `@body`는 맞춰 볼 몸 그림이다. 턱의 손(129 이상, 66 이상)은 몸 쪽이라 비워 둔다. |
 
 - **처음 만들기**: `../tools/sources.lua`가 `idle-test.aseprite`, `neutral-face.aseprite`, `moods/`에서 두 원본을 한 번 만들었다. 그대로 다시 돌리면 고친 `faces.aseprite`를 덮어쓴다. 숨쉬기를 바꿀 때는 `idle-test.lua`를 고쳐 돌린 뒤 `--script-param only=body`로 `body.aseprite`만 다시 만든다.
 - **neutral 눈·입 다시 그림**(소유자 검토 2026-10-31): `../tools/neutral-variants.lua`가 `faces.aseprite`의 neutral 변형을 고쳤다. 반쯤 감은 눈은 뜬 눈의 속눈썹처럼 오른쪽으로 내려가고, 감은 눈은 선 위의 갈색 채움을 없앴다. 두 경우 모두 바깥쪽 속눈썹 끝을 눈마다 2px 줄였다. 말하는 입은 다문 입 선의 두 끝 (112,65), (116,67)을 그대로 두고 가운데가 벌어진다. 그래서 `frames/`의 낱장과는 이제 다르다.
 - **내보내기**: 원본을 고친 뒤 `../tools/export.lua`를 돌린다(`pixel/`에서 실행).
-  - 같은 그림 조각은 시트에 한 번만 넣는다(지금 40조각, 1013×424).
-  - UI 테스트가 비교할 기준 그림 3장(`idle-1-neutral`, `idle-2-happy`, `idle-1-neutral-closed-wide`)도 함께 쓴다.
-  - 다음 중 하나라도 어기면 아무것도 쓰지 않고 실패한다: 색 인덱스 모드와 `himari-32.gpl` 팔레트, 모든 몸 프레임의 `@face` 점, 모든 동작의 첫 프레임과 단발 동작의 마지막 프레임 = idle 첫 프레임, 표정 8종.
+  - 같은 그림 조각은 시트에 한 번만 넣는다(지금 54조각, 1007×1056).
+  - UI 테스트가 비교할 기준 그림 4장(`idle-1-neutral`, `idle-2-happy`, `idle-1-neutral-closed-wide`, `sleep-4-neutral-closed`)도 함께 쓴다.
+  - 다음 중 하나라도 어기면 아무것도 쓰지 않고 실패한다: 색 인덱스 모드와 `himari-32.gpl` 팔레트, 모든 몸 프레임의 `@face` 점, 모든 동작의 첫 프레임과 단발 동작의 마지막 프레임 = idle 첫 프레임, 반복 동작의 `loopFrom`, 표정 8종.
 
 ```
 aseprite -b --script-param body=clean/body.aseprite --script-param faces=clean/faces.aseprite --script-param palette=clean/himari-32.gpl --script-param out=../../Himari.Companion/Assets --script-param refs=../../Himari.Companion.UiTests/Fixtures/character --script tools/export.lua
 ```
 
 결과물(시트, JSON, 기준 그림)은 저장소에 넣는다. 빌드와 CI에는 Aseprite가 없다.
+
+## 졸기
+
+`../tools/sleep.lua`가 `body.aseprite`의 파츠를 움직여 `sleep` 태그를 idle 뒤에 붙인다. 다시 돌리면 기존 `sleep`을 지우고 새로 만든다. idle 뒤의 프레임을 모두 지우므로, `sleep` 말고 다른 동작이 idle 뒤에 있으면 아무것도 하지 않고 실패한다(PR #144 검수). idle을 다시 만들었다면(`sources.lua only=body`) 이것도 다시 돌린다.
+
+- **잠들기**(앞 3프레임, 한 번): 반쯤 감은 눈 → 고개 1px → 고개 2px와 감은 눈. 태그 사용자 데이터 `loopFrom=4`가 반복 시작이다.
+- **자는 중**(500ms × 12): 고개 2px 아래 3초, 1px 아래 3초. 머리카락 끝은 한 칸, 헤일로는 두 칸 늦게 따라간다.
+- **zzz**: `zzz` 레이어. z 하나가 12칸(6초) 동안 머리 오른쪽에서 작고 흐리게 나타나, 떠오르며 3px에서 7px로 커지고, 위에서 흐려지며 사라진다. 세 개가 4칸 간격이라 늘 "zzz"로 보인다(소유자 검토 2026-10-31: 커지면서 위에서 사라지게).
+  - **색**: 파스텔 하늘색(인덱스 33)에 연한 파랑 테두리(34). 처음 고른 진한 하늘색·파랑은 이질적이라 바꿨다.
+  - **모양**: 위아래 획이 한 칸씩 어긋난 기울어진 z이고, 테두리는 대각선을 건너뛰어 모서리가 둥글게 보인다.
+  - **흐려짐**: 색인 팔레트라 반투명이 없다. 처음 칸과 마지막 두 칸은 테두리를 빼고, 마지막 칸은 픽셀을 한 칸씩 건너뛴다. 더 옅은 색을 쓰면 어두운 바탕화면에서 오히려 빛나 보여서 쓰지 않았다. 캐릭터에 파랑이 없어 이 두 색을 `himari-32.gpl` 끝에 더했다. `--script-param palette=clean/himari-32.gpl --script-param faces=clean/faces.aseprite`를 주면 두 원본의 팔레트도 이 파일로 맞춘다.
+- **태그**: 프레임을 idle 바로 뒤에 넣으면 Aseprite가 idle 태그를 늘린다. 스크립트가 idle 끝을 되돌리고, `export.lua`는 태그끼리 프레임이 겹치면 실패한다.
+- **틈 메우기**: 파츠를 내리면 휠체어 쪽과 만나던 자리가 빈다. 바깥과 이어지지 않은 투명 픽셀을 쉬는 자세 색으로 맨 아래 `fill` 레이어에 채운다.
+
+```
+aseprite -b --script-param body=clean/body.aseprite --script-param log=sleep.txt --script tools/sleep.lua
+```
 
 ## 다른 표정의 눈·입
 

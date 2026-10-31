@@ -363,12 +363,20 @@ Check(shipped.Faces.All(f => f.Value.Mouth?.Keys.Order().SequenceEqual(["small",
     && shipped.Faces.Where(f => f.Key != "happy").All(f => f.Value.Eyes?.Keys.Order().SequenceEqual(["closed", "half"]) == true)
     && shipped.Faces["happy"].Eyes is null,
     "every mood talks; every mood but happy (eyes already closed in a smile) blinks");
+var shippedSleep = shipped.Clips["sleep"];
+Check(shippedSleep is { Loop: true, LoopFrom: > 0 } && shippedSleep.Frames[0].Src.SequenceEqual(shipped.Clips["idle"].Frames[0].Src)
+    && shippedSleep.Frames.Take(shippedSleep.LoopFrom).Any(f => f.Eyes == "half") && shippedSleep.Frames.Skip(shippedSleep.LoopFrom).All(f => f.Eyes == "closed")
+    && Math.Abs(shippedSleep.Length.TotalMilliseconds - shippedSleep.IntroMs - 6000) < 1 && shippedSleep.Frames.Skip(shippedSleep.LoopFrom).All(f => f.Face[1] > 0),
+    "the shipped sleep clip nods off from the rest pose, then breathes every 6 s with the head lowered and the eyes closed");
+Check(shipped.Clips["idle"].Frames.Length == 6 && shipped.Clips["idle"].Frames.All(f => f.Eyes is null), "idle keeps its own six frames, none of the sleep frames");
 foreach (var bad in new[] { "{\"version\":2,\"canvas\":[1,1],\"sheet\":\"s\",\"face\":{\"origin\":[0,0],\"size\":[1,1]},\"clips\":{},\"faces\":{}}",
                             "{\"version\":1,\"canvas\":[1,1],\"sheet\":\"s\",\"face\":{\"origin\":[0,0],\"size\":[1,1]},\"clips\":{},\"faces\":{\"neutral\":{\"src\":[0,0,1,1]}}}",
                             "{\"version\":1,\"canvas\":[1,1],\"sheet\":\"s\",\"face\":{\"origin\":[0,0],\"size\":[0,1]},\"clips\":{\"idle\":{\"loop\":true,\"frames\":[{\"src\":[0,0,1,1],\"ms\":1,\"face\":[0,0]}]}},\"faces\":{\"neutral\":{\"src\":[0,0,1,1]}}}",
                             "{\"version\":1,\"canvas\":[1,1],\"sheet\":\"s\",\"clips\":{\"idle\":{\"loop\":true,\"frames\":[{\"src\":[0,0,1,1],\"ms\":1,\"face\":[0,0]}]}},\"faces\":{\"neutral\":{\"src\":[0,0,1,1]}}}",
                             "{\"version\":1,\"canvas\":[1,1],\"sheet\":\"s\",\"face\":{\"origin\":[0,0],\"size\":[1,1]},\"clips\":{\"idle\":{\"loop\":true,\"frames\":[{\"src\":[0,0,-1,1],\"ms\":1,\"face\":[0,0]}]}},\"faces\":{\"neutral\":{\"src\":[0,0,1,1]}}}",
-                            "{\"version\":1,\"canvas\":[1,1],\"sheet\":\"s\",\"face\":{\"origin\":[0,0],\"size\":[1,1]},\"clips\":{\"idle\":{\"loop\":true,\"frames\":[{\"src\":[0,0,1,1],\"ms\":1,\"face\":[0,0]}]}},\"faces\":{\"neutral\":{\"src\":[0,0,1,1],\"eyes\":{\"half\":{\"src\":[0,0,1,1],\"at\":[0]}}}}}" })
+                            "{\"version\":1,\"canvas\":[1,1],\"sheet\":\"s\",\"face\":{\"origin\":[0,0],\"size\":[1,1]},\"clips\":{\"idle\":{\"loop\":true,\"frames\":[{\"src\":[0,0,1,1],\"ms\":1,\"face\":[0,0]}]}},\"faces\":{\"neutral\":{\"src\":[0,0,1,1],\"eyes\":{\"half\":{\"src\":[0,0,1,1],\"at\":[0]}}}}}",
+                            "{\"version\":1,\"canvas\":[1,1],\"sheet\":\"s\",\"face\":{\"origin\":[0,0],\"size\":[1,1]},\"clips\":{\"idle\":{\"loop\":true,\"loopFrom\":1,\"frames\":[{\"src\":[0,0,1,1],\"ms\":1,\"face\":[0,0]}]}},\"faces\":{\"neutral\":{\"src\":[0,0,1,1]}}}",
+                            "{\"version\":1,\"canvas\":[1,1],\"sheet\":\"s\",\"face\":{\"origin\":[0,0],\"size\":[1,1]},\"clips\":{\"idle\":{\"loop\":true,\"frames\":[{\"src\":[0,0,1,1],\"ms\":1,\"face\":[0,0]}]},\"wave\":{\"loop\":false,\"loopFrom\":1,\"frames\":[{\"src\":[0,0,1,1],\"ms\":1,\"face\":[0,0]},{\"src\":[0,0,1,1],\"ms\":1,\"face\":[0,0]}]}},\"faces\":{\"neutral\":{\"src\":[0,0,1,1]}}}" })
 {
     try { CharacterManifest.Parse(bad); Check(false, "invalid character manifest is rejected"); }
     catch (InvalidDataException) { }
@@ -391,6 +399,7 @@ var animationManifest = shipped with
         ["wave"] = new(false, [frame, frame with { Src = [2, 0, 1, 1] }]),
         ["roll"] = new(true, [frame, frame with { Src = [3, 0, 1, 1] }]),
         ["sleep"] = new(true, [frame with { Eyes = "closed" }]),
+        ["doze"] = new(true, [frame with { Eyes = "half" }, frame with { Src = [4, 0, 1, 1], Eyes = "closed" }, frame with { Src = [5, 0, 1, 1], Eyes = "closed" }], LoopFrom: 1),
     }
 };
 // The first blink comes 2.5 s at the earliest, so the checks before 1.4 s see open eyes.
@@ -458,7 +467,15 @@ sleepy.SetSleeping(true, Ms(100));
 Check(sleepy.Pose(Ms(200)) is { Clip: "sleep", Eyes: "closed" }, "dozing plays the sleep clip, which forces closed eyes");
 sleepy.SetSleeping(false, Ms(300));
 Check(sleepy.Pose(Ms(310)).Clip == "idle", "waking returns to idle");
-var noSleepArt = new CharacterAnimator(shipped, 7, TimeSpan.Zero);
+sleepy.SetSleeping(true, Ms(400));
+sleepy.SetTalking(true, Ms(500));
+Check(sleepy.Pose(Ms(510)) is { Clip: "sleep", Eyes: not "closed", Mouth: "small" }, "talking opens the eyes even in a sleep frame");
+var dozer = new CharacterAnimator(animationManifest, 7, TimeSpan.Zero);
+dozer.Request("doze", AnimationLayer.Directed, Ms(0));
+Check(new[] { 50, 150, 250, 350, 450, 550 }.Select(t => dozer.Pose(Ms(t)).Frame).SequenceEqual([0, 1, 2, 1, 2, 1]), "a clip with an intro plays it once, then loops the rest");
+Check(dozer.Pose(Ms(50)).Eyes == "half" && dozer.Pose(Ms(350)).Eyes == "closed", "frames force their eyes");
+Check(dozer.NextChange(Ms(320)) == Ms(400) && dozer.NextChange(Ms(50)) == Ms(100), "the next change follows the loop after the intro");
+var noSleepArt = new CharacterAnimator(shipped with { Clips = new() { ["idle"] = shipped.Clips["idle"] } }, 7, TimeSpan.Zero);
 noSleepArt.SetSleeping(true, Ms(100));
 Check(noSleepArt.Pose(Ms(200)) is { Clip: "idle", Eyes: "closed" }, "without sleep art, dozing only closes the eyes");
 noSleepArt.SetTalking(true, Ms(300));

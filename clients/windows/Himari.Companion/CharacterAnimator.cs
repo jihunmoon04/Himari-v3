@@ -90,7 +90,8 @@ internal sealed class CharacterAnimator
     {
         var (clip, frame) = BodyFrame(now);
         var face = manifest.Faces[Mood];
-        string? eyes = frame.Eyes ?? (sleeping && !Talking(now) ? "closed" : BlinkEyes(now));
+        // Talking wakes the eyes even in a sleep frame; otherwise the frame, then dozing, decide.
+        string? eyes = Talking(now) ? BlinkEyes(now) : frame.Eyes ?? (sleeping ? "closed" : BlinkEyes(now));
         string? mouth = frame.Mouth ?? TalkMouth(now);
         return new(current.Clip, Array.IndexOf(clip.Frames, frame), Mood,
             eyes is not null && face.Eyes?.ContainsKey(eyes) == true ? eyes : null,
@@ -126,8 +127,7 @@ internal sealed class CharacterAnimator
             if (current.PlaysOnce) current.End = currentStart + manifest.Clips[current.Clip].Length;
         }
         var clip = manifest.Clips[current.Clip];
-        double t = (now - currentStart).TotalMilliseconds, total = clip.Length.TotalMilliseconds;
-        t = clip.Loop ? t % total : Math.Min(t, total - 1);
+        double t = clip.Position((now - currentStart).TotalMilliseconds);
         foreach (var f in clip.Frames) { if (t < f.Ms) return (clip, f); t -= f.Ms; }
         return (clip, clip.Frames[^1]);
     }
@@ -136,9 +136,9 @@ internal sealed class CharacterAnimator
     {
         var clip = manifest.Clips[current.Clip];
         if (clip.Frames.Length == 1) return now + TimeSpan.FromSeconds(1);
-        double elapsed = (now - currentStart).TotalMilliseconds, total = clip.Length.TotalMilliseconds;
-        double cycle = clip.Loop ? Math.Floor(elapsed / total) * total : 0, edge = cycle;
-        foreach (var f in clip.Frames) { edge += f.Ms; if (edge > elapsed) return currentStart + TimeSpan.FromMilliseconds(edge); }
+        double elapsed = (now - currentStart).TotalMilliseconds, position = clip.Position(elapsed), edge = 0;
+        if (!clip.Loop && elapsed >= clip.Length.TotalMilliseconds) return now + TimeSpan.FromSeconds(1);
+        foreach (var f in clip.Frames) { edge += f.Ms; if (edge > position) return now + TimeSpan.FromMilliseconds(edge - position); }
         return now + TimeSpan.FromSeconds(1);
     }
 
