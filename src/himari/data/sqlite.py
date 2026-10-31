@@ -142,6 +142,7 @@ from himari.data.api import (
     PassStart,
     PassStatus,
     PROPOSAL_KEEP,
+    RecentEpisode,
     RETIRED_KEEP,
     EXPIRED_KEEP,
     SKIP_AFTER_FAILURES,
@@ -2563,7 +2564,9 @@ class SqliteData:
             self._check_room(tx, principal)
             assert change.category is not None and change.text is not None
             self._write_memory(tx, principal, Memory(change.memory_id, change.category, change.text,
-                                                     MemoryOrigin.MODEL, scope.conversation_id, call, 1, now, now))
+                                                     MemoryOrigin.MODEL, scope.conversation_id, call, 1, now, now,
+                                                     due_at=change.due_at, due_instant=change.due_instant,
+                                                     valid_until=change.valid_until, valid_instant=change.valid_instant))
             return
         note = self._read_memory(tx, principal, change.memory_id)
         if change.expected_revision != note.revision:
@@ -2575,7 +2578,8 @@ class SqliteData:
         self._write_memory(tx, principal, dataclasses.replace(
             note, category=change.category, text=change.text, origin=MemoryOrigin.MODEL,
             source_conversation=scope.conversation_id, source_call=call, revision=note.revision + 1, updated_at=now,
-            source_pass=None, source_item=None, user_approved_at=None))
+            source_pass=None, source_item=None, user_approved_at=None, due_at=change.due_at,
+            due_instant=change.due_instant, valid_until=change.valid_until, valid_instant=change.valid_instant))
 
     async def list_memories(self, principal: PrincipalId) -> tuple[Memory, ...]:
         with self._tx() as tx:
@@ -2630,7 +2634,11 @@ class SqliteData:
             note = dataclasses.replace(current, category=category, text=text, origin=before.origin,
                                        source_conversation=source,
                                        source_call=None if source is None else before.source_call,
-                                       revision=current.revision + 1, updated_at=datetime.now(UTC))
+                                       revision=current.revision + 1, updated_at=datetime.now(UTC),
+                                       due_at=before.due_at, due_instant=before.due_instant,
+                                       valid_until=before.valid_until, valid_instant=before.valid_instant,
+                                       source_pass=before.source_pass, source_item=before.source_item,
+                                       user_approved_at=before.user_approved_at)
             self._write_memory(tx, principal, note)
             return note
 
@@ -2744,6 +2752,45 @@ class SqliteData:
     )
     _EPISODE_COLUMNS = ("episode_id, conversation_id, from_sequence, through_sequence, started_at, ended_at, text,"
                         " user_sequences, himari_sequences, origin, source_pass, revision, created_at, updated_at")
+
+    def _recent_rows(self, tx: _Tx, principal: PrincipalId, where: str, *params: object, limit: int,
+                     order: str = "e.ended_at DESC, e.episode_id DESC",
+                     order_params: Sequence[object] = ()) -> tuple[RecentEpisode, ...]:
+        columns = ", ".join(f"e.{c.strip()}" for c in self._EPISODE_COLUMNS.split(","))
+        rows = tx.all(f"SELECT {columns}, c.title FROM episodes e JOIN conversations c"
+                      " ON c.conversation_id=e.conversation_id WHERE e.owner=? AND c.trashed_at IS NULL"
+                      f"{where} ORDER BY {order} LIMIT ?", principal, *params, *order_params, limit)
+        return tuple(RecentEpisode(_episode(r), r["title"]) for r in rows)
+
+    async def recent_episodes(self, principal: PrincipalId, *, since: datetime, besides: ConversationId | None,
+                              limit: int) -> tuple[RecentEpisode, ...]:
+        with self._tx() as tx:
+            return self._recent_rows(tx, principal, " AND e.ended_at >= ? AND e.conversation_id != ?",
+                                     _timestamp(since), besides or "", limit=limit)
+
+    async def count_episodes(self, principal: PrincipalId) -> int:
+        with self._tx() as tx:
+            row = tx.one("SELECT COUNT(*) AS n FROM episodes WHERE owner=?", principal)
+            assert row is not None
+            return int(row["n"])
+
+    async def find_episodes(self, principal: PrincipalId, words: Sequence[str], *, start: datetime | None = None,
+                            end: datetime | None = None, limit: int = 200) -> tuple[RecentEpisode, ...]:
+        folded = list(dict.fromkeys(rules.fold(w) for w in words if w.strip()))
+        where = "".join([" AND e.ended_at >= ?" if start is not None else "",
+                         " AND e.ended_at <= ?" if end is not None else "",
+                         (" AND (" + " OR ".join("instr(e.folded, ?) > 0" for _ in folded) + ")") if folded else ""])
+        params = [*([_timestamp(start)] if start is not None else []), *([_timestamp(end)] if end is not None else []),
+                  *folded]
+        if folded:
+            order = ("(" + " + ".join("(instr(e.folded, ?) > 0)" for _ in folded) + ") DESC,"
+                     " e.ended_at DESC, e.episode_id DESC")
+        elif start is not None or end is not None:
+            order = "e.ended_at, e.episode_id"
+        else:
+            order = "e.ended_at DESC, e.episode_id DESC"
+        with self._tx() as tx:
+            return self._recent_rows(tx, principal, where, *params, limit=limit, order=order, order_params=folded)
 
     async def read_memory_cursor(self, scope: TrustedScope) -> MemoryCursor:
         with self._tx() as tx:

@@ -344,3 +344,26 @@ def test_events_are_read_a_page_at_a_time_and_only_until_the_part_is_cut(monkeyp
             (0, 2, 8), (2, 8, 8)]
 
     asyncio.run(scenario())
+
+
+def test_a_pass_is_told_the_zone_of_the_device_the_last_message_came_from() -> None:
+    from himari.data.api import MessageOrigin, OriginKind
+
+    async def scenario() -> None:
+        data, provider, _, passes = setup(reply())
+        asked: list[MessageOrigin | None] = []
+
+        async def zone_for(scope: TrustedScope, origin: MessageOrigin | None) -> str:
+            asked.append(origin)
+            return "America/New_York"
+
+        passes._zone_for = zone_for  # noqa: SLF001
+        desk = MessageOrigin(OriginKind.DEVICE, "d3")
+        await data.append_event(SCOPE, UserMessage((TextBlock("I build HIMARI from the web."),)))
+        await data.append_event(SCOPE, UserMessage((TextBlock("And now from my desk."),), origin=desk))
+        assert (await passes.read(SCOPE))[0] is PassOutcome.APPLIED
+        assert asked == [desk]
+        sent = json.loads(provider.sent[0].body)
+        assert "America/New_York" in json.dumps(sent)
+
+    asyncio.run(scenario())

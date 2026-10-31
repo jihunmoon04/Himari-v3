@@ -29,6 +29,7 @@ from himari.data.api import (
     MemoryCategory,
     MemoryPassLog,
     MemoryStore,
+    MessageOrigin,
     PassKind,
     PassStart,
     PassStatus,
@@ -77,7 +78,7 @@ class MemoryPasses:
 
     def __init__(self, data: MemoryPassData, provider: ProviderAdapter, settings: MemoryPassSettings,
                  probe: ActivityProbe, *, clock: Callable[[], datetime] | None = None,
-                 zone_for: Callable[[TrustedScope], Awaitable[str]] | None = None) -> None:
+                 zone_for: Callable[[TrustedScope, MessageOrigin | None], Awaitable[str]] | None = None) -> None:
         self._data = data
         self._provider = provider
         self._settings = settings
@@ -251,7 +252,7 @@ class MemoryPasses:
             return PassOutcome.WAITING
         previous = await self._data.last_episode(scope)
         shown = shown_notes(notes)
-        zone = self._settings.time_zone if self._zone_for is None else await self._zone_for(scope)
+        zone = self._settings.time_zone if self._zone_for is None else await self._zone_for(scope, part.origin)
         options = RequestOptions(self._settings.model_id, self._settings.reasoning_effort,
                                  provider_key=self._provider.provider_key, max_output_tokens=PASS_MAX_OUTPUT_TOKENS)
         asked = model_input(request_data(part, shown, previous, now=now, zone=zone, kind=PassKind.LIVE), options)

@@ -17,6 +17,8 @@ import json
 import mimetypes
 import re
 import unicodedata
+from datetime import UTC, date, time
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -996,13 +998,46 @@ class MemoryChange(DeepFrozen):
 
     SAVE of a new note: ``memory_id`` from ``allocate_memory_id``, no
     ``expected_revision``. SAVE of an existing note and FORGET: the note's
-    id and the revision the Tool read."""
+    id and the revision the Tool read. A SAVE writes the note's dates as
+    given (V3-P85 §5.3): a loop's due, a fact's end, each with its instant."""
 
     kind: MemoryChangeKind
     memory_id: int
     category: MemoryCategory | None = None  # SAVE only
     text: str | None = None  # SAVE only
     expected_revision: int | None = None
+    due_at: str | None = None  # SAVE of a loop
+    due_instant: datetime | None = None
+    valid_until: str | None = None  # SAVE of another note
+    valid_instant: datetime | None = None
+
+
+def parse_note_date(value: object, zone: str) -> tuple[str, datetime] | None:
+    """V3-P85 §5.3: a note's date as written and as the instant compared — a
+    date (``2026-11-04``: its end of day in ``zone``) or a time with its UTC
+    offset; None for anything else (no offset, not a date, the calendar's edge)."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    value = value.strip()
+    try:
+        if len(value) == 10:
+            day = date.fromisoformat(value)
+            end = datetime.combine(day + timedelta(days=1), time(), tzinfo=ZoneInfo(zone)) - timedelta(microseconds=1)
+            return value, end.astimezone(UTC)
+        moment = datetime.fromisoformat(value)
+        if moment.tzinfo is None:
+            return None
+        return value, moment.astimezone(UTC)
+    except (ValueError, OverflowError, ZoneInfoNotFoundError):
+        return None
+
+
+@dataclass(frozen=True)
+class RecentEpisode(DeepFrozen):
+    """An episode with its Conversation's title, as the Current State shows it (§8)."""
+
+    episode: Episode
+    title: str | None
 
 
 class MemoryStore(Protocol):
@@ -1047,6 +1082,25 @@ class MemoryStore(Protocol):
 
     async def count_source_memories(self, scope: TrustedScope) -> int:
         """The notes this Conversation's calls wrote: deleted with it."""
+        ...
+
+    async def recent_episodes(self, principal: PrincipalId, *, since: datetime, besides: ConversationId | None,
+                              limit: int) -> tuple[RecentEpisode, ...]:
+        """V3-P85 §8: the newest episodes ended since ``since`` (at most
+        ``limit``, newest first), with their Conversation's title — not of
+        ``besides`` (the Conversation asking) nor of one in the trash."""
+        ...
+
+    async def count_episodes(self, principal: PrincipalId) -> int: ...
+
+    async def find_episodes(self, principal: PrincipalId, words: Sequence[str], *, start: datetime | None = None,
+                            end: datetime | None = None, limit: int = 200) -> tuple[RecentEpisode, ...]:
+        """V3-P85 §9: episodes that ended in [start, end] holding any of the
+        folded ``words`` (none: all of them), not of a Conversation in the
+        trash, ranked before the ``limit`` is taken (PR #137 review): with
+        words, most words held first, then newest (a word given twice counts
+        once); without words but with a day, in time order (oldest first);
+        with neither, newest first."""
         ...
 
 

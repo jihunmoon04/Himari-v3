@@ -861,3 +861,44 @@ rev. 3의 P1 둘은 해결, 민감정보 거부 표현은 개선으로 판정했
 - **배포하면:** `HIMARI_MEMORY_MODEL`을 위 다섯 중 하나로 두면 자동 기억이 켜진다. 비워 두면 지금처럼 꺼져 있다.
   - 권고: `deepseek/deepseek-v4.1-flash`(가장 싸고 모든 기준 1.00) 또는 `openai/gpt-6-luna`.
   - 대화 안의 자동 기억 줄과 Undo(4단계)가 아직 없으므로, 켜기 전에 4단계를 먼저 하거나 켠 뒤 `himari` DB와 로그로 살펴보는 쪽을 소유자가 정한다.
+
+## 22. 구현 노트 — 3단계: Prompt와 Tool (2026-10-31)
+
+소유자 결정(2026-10-31): 자동 기억은 4단계(대화 안 자동 기억 줄, Undo, 타임라인)를 마친 뒤 켠다. 그래서 이 단계를 배포해도 `HIMARI_MEMORY_MODEL`은 비워 둔다. 모델이 직접 쓰는 열린 고리와 날짜, 최근 일화 주입은 이 단계부터 동작한다(일화는 자동 기억이 켜진 뒤에 생긴다).
+
+- **Current State(§8):** `user_memory_data(memories, episodes, episode_count, now)`.
+  - `notes`: 끝난 사실(`valid_instant` < now)은 빼고, 남은 사실에는 `valid_until`을 붙인다. 끝난 `project`·`reference`는 `searchable`에서도 뺀다.
+  - `loops`: 날짜 순(없는 것은 뒤), 지난 것은 `overdue`, `LOOPS_CHARS`(1,000자). 넘는 것은 `not_shown.loop`.
+  - `recent_episodes`: Driver가 턴 시작에 읽은 최근 7일 일화 5개(지금 대화·휴지통 제외, `MemoryStore.recent_episodes`), `EPISODES_CHARS`(1,500자).
+    - `when`은 `now`의 시간대로 쓴다(`2026-10-30T20:10+09:00/21:40`, 날이 다르면 둘 다 전체).
+    - `conversation`은 80자로 자른다.
+  - `searchable.episodes`: `count_episodes`. 기억도 일화도 없으면 `user_memory`가 없다.
+- **`MEMORY_NOTE`(고정 문장):** 고리·최근 일화·자동 기억, `loop`과 `due`·`valid_until`, 끝난 고리 지우기, 일화 검색을 더했다. 배포 때 한 번 캐시가 깨진다.
+  - 기존 테스트 하나(`test_a_compaction_request_does_not_carry_them`)는 문맥 예산을 빠듯하게 맞춰 두어서, 2,900 → 3,400토큰으로 넓혔다.
+- **Tool(§5.5):**
+  - `memory_save`가 `loop` 분류와 `due`·`valid_until`을 받는다.
+    - 날짜만 쓰면 그날의 끝을 서버 시간대(`HIMARI_TIME_ZONE`)로 정한다. 시각은 오프셋이 있어야 한다.
+    - 범위는 §4.4와 같다. 고리의 글은 300자다.
+    - 고칠 때 주지 않은 날짜(키가 없거나 `""`)는 지키고, `null`로 보내면 지운다(22.1에서 고침). 분류를 바꾸면 그 칸이 사라진다.
+    - 사실의 `due`, 고리의 `valid_until`은 무시한다.
+  - `MemoryChange`가 날짜를 싣고, Data가 Tool 결과와 같은 트랜잭션에서 쓴다.
+  - Tool 결과의 기억 모습(`_note_view`)과 Undo의 이전 상태(`_memory_before`, `restore_memory`)가 날짜·출처 작업·사용자 승인까지 되돌린다. 이전 기록에는 이 칸이 없어 비어 있는 것으로 읽는다.
+  - `memory_search`가 `kind`(`notes`·`episodes`·`all`)와 `from`·`to`(날짜)를 받는다.
+    - 노트 줄은 `m15 [loop due 2026-11-04] …`, 끝난 사실은 `(expired)`.
+    - 일화 줄은 `e8 2026-10-30 20:10–21:40 "제목": …`, 많아야 10개.
+    - 일화는 Data의 `find_episodes`(접은 글의 부분 문자열, 휴지통 제외)로 찾는다. 순위는 Data가 정한 뒤 자른다: 낱말이 있으면 맞은 낱말 수 → 최신, 낱말 없이 기간만 있으면 시간순, 둘 다 없으면 최신순.
+- **작업자의 시간대(1단계 §20에서 미룬 것):** `Part.origin`(구간의 마지막 사용자 메시지를 보낸 곳)으로 bootstrap의 `zone_for`가 presence에서 그 기기의 시간대를 찾는다. 모르는 시간대면 서버 시간대다.
+- **검증:**
+  - Prompt 4개: 고리 순서와 `overdue`·끝난 사실·`valid_until`, 고리 한도, 최근 일화의 `when`·제목·한도·`searchable`, `MEMORY_NOTE`.
+  - Data 2개 × 두 백엔드: Tool의 날짜와 Undo, 최근 일화와 찾기.
+  - Tool 4개: 저장·날짜 검사, 고칠 때 날짜 보존, 검색의 고리·끝난 사실, 일화 검색.
+  - bootstrap 1개: 다른 대화의 일화와 고리가 새 턴의 Current State에 들어가고, 자기 대화의 일화는 빠짐.
+  - worker 1개: 보낸 기기의 `origin`으로 시간대를 물음.
+
+### 22.1 구현 검수 (PR #137, `230174d`): READY_WITH_CORRECTIONS
+
+| # | 지적 | 고침 |
+| --- | --- | --- |
+| P2 | `memory_search`의 `from`을 그날 끝에서 24시간 빼서 정해, 23·25시간인 날(서머타임 전환일)의 첫 한 시간이 빠짐 | 그날의 현지 자정을 만들어 UTC로 바꾼다. 뉴욕의 2026-11-01(25시간)에서 00:30 일화가 검색되는지 확인 |
+| P2 | Data가 최신 200개를 먼저 자르고 Tool이 그 안에서 순위를 매겨, 낱말이 더 많이 맞는 오래된 일화가 후보에서 빠질 수 있음 | `find_episodes`가 순위를 정한 뒤 자른다(맞은 낱말 수 → 최신, 기간만 있으면 시간순). Tool은 그 순서를 그대로 쓴다 |
+| P2 | `due: null`로 날짜를 지울 수 없음 | 키가 없거나 `""`면 지키고, 명시적 `null`이면 지운다(`valid_until`도). 자동 기억 작업의 규칙(§4.4 rev. 4 P2-1)과 같다. 잘못 지워져도 대화 안 줄과 Undo로 되돌린다 |

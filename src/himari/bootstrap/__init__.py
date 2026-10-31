@@ -88,7 +88,7 @@ def build_runtime(
         snapshot = await data.get_latest_snapshot(scope)
         return snapshot.covers_through_sequence if snapshot is not None and read_summary(snapshot) else None
 
-    registry = ToolRegistry([AskUserTool(), *tools, *(memory_tools(data) if memory else ()),
+    registry = ToolRegistry([AskUserTool(), *tools, *(memory_tools(data, time_zone=time_zone or "UTC") if memory else ()),
                              *(conversation_search_tools(data, compacted_through) if conversation_search else ())],
                             allow_require_user=allow_require_user_tools)
     environments = tuple(environments)

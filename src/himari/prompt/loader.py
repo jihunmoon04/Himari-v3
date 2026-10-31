@@ -37,6 +37,7 @@ from himari.data.api import (
     FileCatalog,
     FileRecord,
     Memory,
+    RecentEpisode,
     PersistedStateBasis,
     StateQuery,
     ToolExecutionRecord,
@@ -83,6 +84,8 @@ class ContextLoader:
         user_instructions: str = "",  # the turn's, read by Control when it started (V3-P69 §5)
         memories: tuple[Memory, ...] | None = None,  # the turn's notes, read with them (V3-P71 §5.4)
         now: datetime | None = None,  # when the turn started (V3-P83 §6.3)
+        episodes: tuple[RecentEpisode, ...] = (),  # the turn's recent episodes, read with the notes (V3-P85 §8)
+        episode_count: int = 0,
     ) -> PromptInputs:
         snapshot = await self._log.get_latest_snapshot(scope)
         events: tuple[ConversationEvent, ...] = ()
@@ -131,6 +134,8 @@ class ContextLoader:
             attachments=attachments,
             user_instructions=user_instructions,
             memories=memories,
+            episodes=episodes,
+            episode_count=episode_count,
             now=now,
             time_zone=self._time_zone,
         )
