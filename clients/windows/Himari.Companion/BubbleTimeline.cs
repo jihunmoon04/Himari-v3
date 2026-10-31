@@ -27,7 +27,7 @@ public partial class MainWindow
         Grid.SetRow(UserBubble, userFirst ? 0 : 1);
         Grid.SetRow(BubblePanel, userFirst ? 1 : 0);
         bool both = UserBubble.Visibility == Visibility.Visible && BubblePanel.Visibility == Visibility.Visible;
-        UserBubble.Margin = new Thickness(0, both && !userFirst ? 8 : 0, 0, 0);
+        UserBubble.Margin = new Thickness(UserBubble.Margin.Left, both && !userFirst ? 8 : 0, 0, 0);
         BubblePanel.Margin = new Thickness(0, both && userFirst ? 8 : 0, 0, 0);
     }
     private void OpenReplyBubble(string conversation, string? job) => ShowAssistantBubble($"{conversation}:{job}");

@@ -4,6 +4,7 @@ using System.Windows.Controls.Primitives;
 using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Media;
+using System.Windows.Threading;
 using Brushes = System.Windows.Media.Brushes;
 using Size = System.Windows.Size;
 using Panel = System.Windows.Controls.Panel;
@@ -58,11 +59,26 @@ public partial class MainWindow
         Height = Character.Height;
     }
 
+    private bool sceneRepositionPending;
+    private string? hostCoversScreen;
+
+    // The character's monitor, when a fullscreen work window there is in front or under the chat.
+    private string? CoverScreen()
+    {
+        var work = FullscreenWorkScreen();
+        var mine = System.Windows.Forms.Screen.FromHandle(new WindowInteropHelper(this).Handle);
+        return work is not null && work.DeviceName == mine.DeviceName ? work.DeviceName : null;
+    }
+
     private void PositionDialogueHost()
     {
-        if (dialogueHost is null || sizingScene) return;
-        if (!IsVisible || (UserBubble.Visibility != Visibility.Visible && BubblePanel.Visibility != Visibility.Visible))
-        { dialogueHost.Hide(); UpdateFullscreenPresentation(); return; }
+        if (dialogueHost is null) return;
+        // Bubble sizes settle during this pass (first show, templates); never drop that change.
+        if (sizingScene) { sceneRepositionPending = true; return; }
+        // Over fullscreen the empty host stays up: Alt+Tab activates the character window before
+        // anything can open a bubble, and the Shell decides at that moment from the top window.
+        if (!IsVisible || (UserBubble.Visibility != Visibility.Visible && BubblePanel.Visibility != Visibility.Visible && CoverScreen() is null))
+        { dialogueHost.Hide(); hostCoversScreen = null; UpdateFullscreenPresentation(); return; }
         sizingScene = true;
         try
         {
@@ -75,33 +91,65 @@ public partial class MainWindow
                 (character.Top + character.Bottom) / 2.0, screen.Bounds.Top + screen.Bounds.Height / 2.0);
             if (bubblesBelow != below) { bubblesBelow = below; ArrangeBubbles(); }
             BubblePanel.TailTop = UserBubble.TailTop = below;
+            // Keep the bubbles against the character even if the host is momentarily taller.
+            DialogueStack.VerticalAlignment = below ? VerticalAlignment.Top : VerticalAlignment.Bottom;
+            // Measure without a previous cover's offset; it is reapplied below when still covering.
+            DialogueStack.Margin = new Thickness(0);
             double sideSpace = below ? area.Bottom - character.Bottom - 8 : character.Top - area.Top - 8;
             // Fixed-side modes retain their direction at an edge; only the bubbles may overlap
             // the character when that side cannot fit even the minimum usable editor.
             double available = Math.Min(Math.Max(240, sideSpace / dpi.DpiScaleY), Math.Max(240, area.Height / dpi.DpiScaleY - 16));
-            dialogueHost.Width = Math.Min(replyExpanded ? 644 : 304, area.Width / dpi.DpiScaleX);
-            DialogueStack.Width = dialogueHost.Width;
-            BubblePanel.Width = Math.Min(replyExpanded ? 620 : 280, dialogueHost.Width);
-            UserBubble.Width = Math.Min(280, dialogueHost.Width);
+            double stackWidth = Math.Min(replyExpanded ? 644 : 304, area.Width / dpi.DpiScaleX);
+            DialogueStack.Width = stackWidth;
+            BubblePanel.Width = Math.Min(replyExpanded ? 620 : 280, stackWidth);
+            UserBubble.Width = Math.Min(280, stackWidth);
             UserBubble.MaxHeight = BubblePanel.Visibility == Visibility.Visible ? Math.Min(280, available * .5) : Math.Min(340, available);
-            UserBubble.Measure(new Size(dialogueHost.Width, available));
+            UserBubble.Measure(new Size(stackWidth, available));
             double user = UserBubble.Visibility == Visibility.Visible ? UserBubble.DesiredSize.Height + 8 : 0;
             BubblePanel.MaxHeight = Math.Max(60, available - user);
             if (replyReader is not null) replyReader.Height = Math.Clamp(replyReader.ContentHeight, 22, Math.Max(22, BubblePanel.MaxHeight - 28 - ReplyToolbar.DesiredSize.Height - (ReplyStatus.Visibility == Visibility.Visible ? 26 : 0)));
-            DialogueStack.Measure(new Size(dialogueHost.Width, available));
-            dialogueHost.Height = Math.Max(1, Math.Min(available, DialogueStack.DesiredSize.Height));
-            double width = dialogueHost.Width * dpi.DpiScaleX, height = dialogueHost.Height * dpi.DpiScaleY;
+            DialogueStack.Measure(new Size(stackWidth, available));
+            double stackHeight = Math.Max(1, Math.Min(available, DialogueStack.DesiredSize.Height));
+            double width = stackWidth * dpi.DpiScaleX, height = stackHeight * dpi.DpiScaleY;
             bool flip = settings.FacingLeft.IsChecked == true;
             double center = (character.Left + character.Right) / 2.0 + (flip ? -48 : 48) * dpi.DpiScaleX;
             int x = (int)Math.Round(Math.Clamp(center - width / 2, area.Left, Math.Max(area.Left, area.Right - width)));
+            // The user bubble keeps its compact anchor; only the reply widens around the character.
+            double compact = Math.Min(304, area.Width / dpi.DpiScaleX) * dpi.DpiScaleX;
+            double compactX = Math.Clamp(center - compact / 2, area.Left, Math.Max(area.Left, area.Right - compact));
+            double userLeft = (compactX - x) / dpi.DpiScaleX + (compact / dpi.DpiScaleX - UserBubble.Width) / 2;
+            UserBubble.HorizontalAlignment = System.Windows.HorizontalAlignment.Left;
+            UserBubble.Margin = new Thickness(Math.Clamp(userLeft, 0, Math.Max(0, stackWidth - UserBubble.Width)), UserBubble.Margin.Top, 0, 0);
             double y = below ? character.Bottom + 8 : character.Top - height - 8;
             int top = (int)Math.Round(Math.Clamp(y, area.Top, Math.Max(area.Top, area.Bottom - height)));
             var hostHandle = new WindowInteropHelper(dialogueHost).EnsureHandle();
+            // Over a fullscreen window the host spans that monitor, transparent and click-through
+            // outside the bubbles, so Windows treats it as fullscreen and keeps the taskbar down.
+            hostCoversScreen = CoverScreen();
+            if (hostCoversScreen is not null)
+            {
+                var bounds = screen.Bounds;
+                dialogueHost.Width = bounds.Width / dpi.DpiScaleX; dialogueHost.Height = bounds.Height / dpi.DpiScaleY;
+                DialogueStack.HorizontalAlignment = System.Windows.HorizontalAlignment.Left;
+                DialogueStack.Margin = new Thickness((x - bounds.Left) / dpi.DpiScaleX, below ? (top - bounds.Top) / dpi.DpiScaleY : 0,
+                    0, below ? 0 : (bounds.Bottom - top - height) / dpi.DpiScaleY);
+                x = bounds.Left; top = bounds.Top;
+            }
+            else
+            {
+                dialogueHost.Width = stackWidth; dialogueHost.Height = stackHeight;
+                DialogueStack.HorizontalAlignment = System.Windows.HorizontalAlignment.Stretch;
+            }
             SetWindowPos(hostHandle, IntPtr.Zero, x, top, 0, 0, 0x0015);
             if (!dialogueHost.IsVisible) { dialogueHost.Show(); shellFullscreen?.Forget(hostHandle); }
             UpdateFullscreenPresentation();
         }
         finally { sizingScene = false; }
+        if (sceneRepositionPending)
+        {
+            sceneRepositionPending = false;
+            Dispatcher.BeginInvoke(DispatcherPriority.Loaded, new Action(PositionDialogueHost));
+        }
     }
 
     private void SetupTypeToChat(Window window)

@@ -69,12 +69,18 @@ public partial class MainWindow : Window
         timer.Tick += (_, _) => UpdateFrame();
         timer.Start();
         SourceInitialized += (_, _) => { if (!offline) { SetupWindowControls(); SetupForegroundTracking(); } };
-        Loaded += async (_, _) => { if (loadedOnce) return; loadedOnce = true; settings.Owner = this; InitializeDialogueHost(); UpdateSceneBounds(); if (!offline) { if (!preferencesLoaded) SetupWindowControls(); SetupChatHotkey(); await RestoreConnection(); } };
+        Loaded += async (_, _) => { if (loadedOnce) return; loadedOnce = true; InitializeDialogueHost(); UpdateSceneBounds(); if (!offline) { if (!preferencesLoaded) SetupWindowControls(); SetupChatHotkey(); await RestoreConnection(); } };
         Closing += (_, _) => { settings.AllowClose = true; };
         Closing += (_, _) => RestoreMoveHomeOnClose();
         Closed += (_, _) => { CleanupBubblePresentation(); replyReader?.Dispose(); CleanupForegroundTracking(); dialogueHost?.Close(); CancelMovePreview(); lifetime.Cancel(); StopConnection(); timer.Stop(); CleanupWindowControls(); tray.Visible = false; tray.Dispose(); menu.Dispose(); };
         IsVisibleChanged += (_, _) => UpdateSceneBounds();
-        Activated += (_, _) => { UpdateFullscreenPresentation(); FocusComposerIfOpen(); };
+        Activated += (_, _) =>
+        {
+            UpdateFullscreenPresentation();
+            // Alt+Tab selects the character window; over fullscreen hand focus to the dialogue host.
+            if (CoverScreen() is not null && ComposerPanel.Visibility != Visibility.Visible) Dispatcher.BeginInvoke(new Action(OpenChat));
+            else FocusComposerIfOpen();
+        };
         UpdateFrame();
     }
 
