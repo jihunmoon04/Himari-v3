@@ -433,8 +433,29 @@ def _memory_before(previous: object) -> Memory | None:
             return None
         call = CallRef(RunId(run), CallId(call_id)) if isinstance(run, str) and isinstance(call_id, str) else None
     epoch = datetime.fromtimestamp(0, UTC)  # restore_memory keeps the note's own times
+
+    def moment(key: str) -> datetime | None:  # V3-P85: older records have no dates (None)
+        value = previous.get(key)
+        try:
+            return datetime.fromisoformat(value) if isinstance(value, str) else None
+        except ValueError:
+            return None
+
+    def text_of(key: str) -> str | None:
+        value = previous.get(key)
+        return value if isinstance(value, str) else None
+
+    due_at, due_instant = text_of("due"), moment("due_instant")
+    valid_until, valid_instant = text_of("valid_until"), moment("valid_instant")
+    item = previous.get("source_item")
     return Memory(memory_id, MemoryCategory(category), text, MemoryOrigin(origin),
-                  None if conversation is None else ConversationId(conversation), call, 0, epoch, epoch)
+                  None if conversation is None else ConversationId(conversation), call, 0, epoch, epoch,
+                  due_at=due_at if due_instant is not None else None,
+                  due_instant=due_instant if due_at is not None else None,
+                  valid_until=valid_until if valid_instant is not None else None,
+                  valid_instant=valid_instant if valid_until is not None else None,
+                  source_pass=text_of("source_pass"), source_item=item if isinstance(item, int) else None,
+                  user_approved_at=moment("user_approved_at"))
 
 
 class ModelRefused(LookupError):
@@ -931,6 +952,7 @@ class Application:
             base = DEFAULT_INSTRUCTIONS if instructions is None else instructions
             zones = frozenset(available_timezones())
             hub = PresenceHub(time_zones=zones.__contains__)  # a device's zone that is not known is ignored (§5)
+            presence = CompanionPresence(DeviceRegistry(SqliteData(store)), hub, time_zone, enabled=companion)
             runtime = build_runtime(provider, store=store, environments=[inside, *([machine] if machine else [])],
                                     tools=[*tools, *mcp.handlers, *mcp.resource_tools],
                                     models=catalog,
@@ -947,8 +969,7 @@ class Application:
                                     file_max_bytes=file_max_bytes, memory=memory,
                                     conversation_search=conversation_search, streaming=streaming,
                                     time_zone=time_zone,
-                                    presence=CompanionPresence(DeviceRegistry(SqliteData(store)), hub, time_zone,
-                                                               enabled=companion))
+                                    presence=presence)
         except BaseException:
             try:
                 if mcp is not None:
@@ -975,7 +996,12 @@ class Application:
             provider, memory=memory, auto=memory_auto, model_id=memory_model, idle_minutes=memory_idle_minutes,
             daily_tokens=memory_daily_tokens, time_zone=time_zone)
         if settings is not None:
-            passes = MemoryPasses(runtime.data, provider, settings, _RunnerActivity(runner))
+            async def zone_for(scope: TrustedScope, origin: MessageOrigin | None) -> str:
+                """V3-P85 §4.2: the zone of the device the part's last message came from, else the server's."""
+                found = (await presence.read(scope.principal_id, origin)).time_zone
+                return found if found in zones else time_zone
+
+            passes = MemoryPasses(runtime.data, provider, settings, _RunnerActivity(runner), zone_for=zone_for)
             listeners.listeners.append(passes)
             application.memory_passes = passes
             await passes.start()

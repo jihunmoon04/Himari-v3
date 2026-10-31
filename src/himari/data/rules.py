@@ -242,8 +242,16 @@ def check_memory_change(change: object) -> MemoryChange:
         if change.category is not None or change.text is not None or change.expected_revision is None:
             raise DataError(DataErrorCode.INVALID_ARGUMENT, "forgetting names a note and its revision only")
         return change
-    return MemoryChange(MemoryChangeKind.SAVE, change.memory_id, check_memory_category(change.category),
-                        check_memory_text(change.text), change.expected_revision)
+    category = check_memory_category(change.category)
+    loop = category is MemoryCategory.LOOP
+    if (change.due_at is None) != (change.due_instant is None) or \
+            (change.valid_until is None) != (change.valid_instant is None):
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, "a date comes with its instant")
+    if (not loop and change.due_at is not None) or (loop and change.valid_until is not None):
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, "a loop has a due date, a fact an end")
+    return MemoryChange(MemoryChangeKind.SAVE, change.memory_id, category, check_note_text(category, change.text),
+                        change.expected_revision, change.due_at, change.due_instant, change.valid_until,
+                        change.valid_instant)
 
 
 _CATEGORY_ORDER = {category: index for index, category in enumerate(MemoryCategory)}

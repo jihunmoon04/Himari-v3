@@ -190,3 +190,40 @@ def test_on_sqlite_a_failure_and_a_stop_mid_call_are_counted_and_the_part_is_rea
             await app.close()
 
     asyncio.run(scenario())
+
+
+def test_a_turn_sees_the_loops_and_the_recent_episodes_of_other_conversations(tmp_path: Path) -> None:
+    # V3-P85 §8: read when the turn starts, its own Conversation's episodes left out.
+    from himari.data.api import EpisodePlan, MemoryCategory, PassKind, PassStart
+    from himari.prompt.api import state_block
+
+    async def scenario() -> None:
+        adapter = ScriptedAdapter([NormalizedFinal((TextBlock("ok"),))] * 3)
+        app = await Application.open(tmp_path / "data", adapter, model_id="scripted-model", sandbox=False,
+                                     cleanup_seconds=None)
+        try:
+            earlier = TrustedScope(ME, await app.create_conversation(ME))
+            await app.send(earlier, "Let's fix the bubbles in the companion app.")
+            await app.runner.wait(earlier)
+            await app.data.rename_conversation(earlier, "말풍선")
+            last = (await app.data.read_events(earlier))[-1].sequence
+            pass_id = await app.data.begin_pass(earlier, PassStart(PassKind.LIVE, 0, last, last, "p", "m"))
+            now = datetime.now(UTC)
+            await app.data.apply_pass(pass_id, [], EpisodePlan("Fixed the bubbles together.", now, now, (1,), ()),
+                                      now=now)
+            await app.add_memory(ME, MemoryCategory.LOOP, "Interview on Nov 4.")
+            await app.send(earlier, "And one more thing.")  # its own episode: not shown here
+            await app.runner.wait(earlier)
+            own = adapter.prepared_inputs[-1].current_state
+            assert own.episodes == () and own.episode_count == 1
+            fresh = TrustedScope(ME, await app.create_conversation(ME))
+            await app.send(fresh, "Where were we?")
+            await app.runner.wait(fresh)
+            state = adapter.prepared_inputs[-1].current_state
+            assert [(f.episode.text, f.title) for f in state.episodes] == [("Fixed the bubbles together.", "말풍선")]
+            block = state_block(state)
+            assert block is not None and "recent_episodes" in block and "Interview on Nov 4." in block
+        finally:
+            await app.close()
+
+    asyncio.run(scenario())

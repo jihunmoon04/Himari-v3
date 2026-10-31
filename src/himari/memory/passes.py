@@ -18,7 +18,7 @@ import json
 import unicodedata
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, time, timedelta, tzinfo
+from datetime import datetime, timedelta, tzinfo
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -33,12 +33,14 @@ from himari.data.api import (
     Memory,
     MemoryCategory,
     MemoryOrigin,
+    MessageOrigin,
     PassAction,
     PassItem,
     PassKind,
     PersistedStateBasis,
     PromptBasis,
     UserMessage,
+    parse_note_date,
 )
 from himari.prompt.api import CurrentStateProjection, ModelInput, RequestOptions, UserTurn, json_data
 
@@ -154,6 +156,7 @@ class Part:
     through_sequence: int
     messages: tuple[Message, ...]
     last_event_at: datetime
+    origin: MessageOrigin | None = None  # where its last user message came from: the user's zone (§4.2)
 
     @property
     def user_chars(self) -> int:
@@ -212,6 +215,7 @@ def next_part(events: Sequence[ConversationEvent], cursor: int,
     size = 0
     end = last or (after[-1].sequence, after[-1].created_at)
     before = after[0].created_at
+    origin: MessageOrigin | None = None
     for event in after:
         message = message_of(event)
         if message is not None and message.role == "user" and messages and size + len(message.text) > PASS_INPUT_CHARS:
@@ -221,7 +225,9 @@ def next_part(events: Sequence[ConversationEvent], cursor: int,
         if message is not None:
             messages.append(message)
             size += len(message.text)
-    return Part(cursor, end[0], tuple(messages), end[1])
+            if isinstance(event.payload, UserMessage):
+                origin = event.payload.origin
+    return Part(cursor, end[0], tuple(messages), end[1], origin)
 
 
 def waits(part: Part, *, open_loops: bool, now: datetime) -> bool:
@@ -306,22 +312,8 @@ def parse_answer(text: str) -> dict[str, Any]:
 
 
 def parse_date(value: object, zone: str) -> tuple[str, datetime] | None:
-    """§5.3: a date (its end of day in ``zone``) or an offset time, as written
-    and as its instant; None for anything else (no offset, not a date)."""
-    if not isinstance(value, str) or not value.strip():
-        return None
-    value = value.strip()
-    try:
-        if len(value) == 10:
-            day = date.fromisoformat(value)
-            end = datetime.combine(day + timedelta(days=1), time(), tzinfo=ZoneInfo(zone)) - timedelta(microseconds=1)
-            return value, end.astimezone(UTC)
-        moment = datetime.fromisoformat(value)
-        if moment.tzinfo is None:
-            return None
-        return value, moment.astimezone(UTC)
-    except (ValueError, OverflowError):  # not a date, or one at the calendar's edge (9999-12-31)
-        return None
+    """§5.3, as Data and the Tools read a note's date (``parse_note_date``)."""
+    return parse_note_date(value, zone)
 
 
 def _within(instant: datetime, now: datetime, bounds: tuple[timedelta, timedelta]) -> bool:

@@ -9,7 +9,7 @@ single-threaded asyncio (the transaction boundaries T1–T9, T7a, T-R).
 from __future__ import annotations
 
 import itertools
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 
@@ -95,6 +95,7 @@ from himari.data.api import (
     PassStart,
     PassStatus,
     PROPOSAL_KEEP,
+    RecentEpisode,
     RETIRED_KEEP,
     EXPIRED_KEEP,
     SKIP_AFTER_FAILURES,
@@ -1431,7 +1432,9 @@ class InMemoryData:
                 raise DataError(DataErrorCode.LIMIT_EXCEEDED, f"{MAX_MEMORIES} notes are kept at most")
             assert change.category is not None and change.text is not None
             return key, Memory(change.memory_id, change.category, change.text, MemoryOrigin.MODEL,
-                               scope.conversation_id, call, 1, now, now)
+                               scope.conversation_id, call, 1, now, now, due_at=change.due_at,
+                               due_instant=change.due_instant, valid_until=change.valid_until,
+                               valid_instant=change.valid_instant)
         note = self._memory(principal, change.memory_id)
         if change.expected_revision != note.revision:
             raise DataError(DataErrorCode.VERSION_CONFLICT, f"m{note.memory_id} is at revision {note.revision}")
@@ -1441,7 +1444,8 @@ class InMemoryData:
         return key, replace(note, category=change.category, text=change.text, origin=MemoryOrigin.MODEL,
                             source_conversation=scope.conversation_id, source_call=call,
                             revision=note.revision + 1, updated_at=now, source_pass=None, source_item=None,
-                            user_approved_at=None)
+                            user_approved_at=None, due_at=change.due_at, due_instant=change.due_instant,
+                            valid_until=change.valid_until, valid_instant=change.valid_instant)
 
     async def list_memories(self, principal: PrincipalId) -> tuple[Memory, ...]:
         return rules.order_memories(m for (owner, _), m in self._store.memories.items() if owner == principal)
@@ -1489,7 +1493,10 @@ class InMemoryData:
                 raise DataError(DataErrorCode.NOT_FOUND, "the conversation it came from was deleted")
         note = replace(current, category=category, text=text, origin=before.origin, source_conversation=source,
                        source_call=None if source is None else before.source_call,
-                       revision=current.revision + 1, updated_at=datetime.now(UTC))
+                       revision=current.revision + 1, updated_at=datetime.now(UTC), due_at=before.due_at,
+                       due_instant=before.due_instant, valid_until=before.valid_until,
+                       valid_instant=before.valid_instant, source_pass=before.source_pass,
+                       source_item=before.source_item, user_approved_at=before.user_approved_at)
         self._store.memories[(principal, note.memory_id)] = note
         return note
 
@@ -1505,6 +1512,32 @@ class InMemoryData:
         return (any(r.record.status in (RunStatus.PREPARED, RunStatus.DISPATCH_CLAIMED, RunStatus.RECEIVED)
                     for r in conv.runs.values())
                 or any(e.status is ToolExecutionStatus.EXECUTION_CLAIMED for e in conv.executions.values()))
+
+    def _with_titles(self, episodes: Iterable[Episode], limit: int) -> tuple[RecentEpisode, ...]:
+        found: list[RecentEpisode] = []
+        for episode in episodes:  # newest first
+            conv = self._store._conversations.get(episode.conversation_id)
+            if conv is None or conv.trashed_at is not None:
+                continue
+            found.append(RecentEpisode(episode, conv.title))
+            if len(found) == limit:
+                break
+        return tuple(found)
+
+    async def recent_episodes(self, principal: PrincipalId, *, since: datetime, besides: ConversationId | None,
+                              limit: int) -> tuple[RecentEpisode, ...]:
+        return self._with_titles((e for e in self._episodes_of(principal)
+                                  if e.ended_at >= since and e.conversation_id != besides), limit)
+
+    async def count_episodes(self, principal: PrincipalId) -> int:
+        return sum(1 for owner, _ in self._store.episodes if owner == principal)
+
+    async def find_episodes(self, principal: PrincipalId, words: Sequence[str], *, start: datetime | None = None,
+                            end: datetime | None = None, limit: int = 200) -> tuple[RecentEpisode, ...]:
+        folded = [rules.fold(w) for w in words if w.strip()]
+        return self._with_titles((e for e in self._episodes_of(principal)
+                                  if (start is None or e.ended_at >= start) and (end is None or e.ended_at <= end)
+                                  and (not folded or any(w in rules.fold(e.text) for w in folded))), limit)
 
     async def read_memory_cursor(self, scope: TrustedScope) -> MemoryCursor:
         self._store._owned(scope)

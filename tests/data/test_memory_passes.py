@@ -9,14 +9,30 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from testkit import SCOPE, data_for, new_store, restart, user
 
-from himari.common import ConversationId, RawRepresentation, RunId, TextBlock, TokenUsage, TrustedScope
+from himari.common import (
+    CallId,
+    CallRef,
+    ConversationId,
+    ModelToolResult,
+    PrincipalId,
+    RawRepresentation,
+    RunId,
+    TextBlock,
+    TokenUsage,
+    ToolCall,
+    ToolId,
+    TrustedScope,
+)
 from himari.data.api import (
     MAX_MEMORIES,
     AssistantFinal,
+    AssistantToolCalls,
     DataError,
     DataErrorCode,
     EpisodePlan,
     MemoryCategory,
+    MemoryChange,
+    MemoryChangeKind,
     MemoryCursor,
     MemoryOrigin,
     PassAction,
@@ -28,6 +44,8 @@ from himari.data.api import (
     RawNoResponse,
     RawReceived,
     RunPreparation,
+    ToolCompletion,
+    ToolExecutionStatus,
 )
 from himari.data.memory import InMemoryData, InMemoryStore
 from himari.data.sqlite import SqliteData, SqliteStore
@@ -488,5 +506,65 @@ def test_the_daily_usage_counts_each_call_on_the_day_it_was_prepared() -> None:
                                                                  TokenUsage(input_tokens=400, output_tokens=50)))
         assert await data.pass_usage(ME, midnight) == 450
         assert await data.pass_usage(ME, midnight - timedelta(days=1)) == 1450
+
+    asyncio.run(scenario())
+
+
+# --- part 3: the Tools' dates, Undo's, and the episodes the Current State reads ------------------------------
+
+
+async def committed(data: Data, scope: TrustedScope, change: MemoryChange) -> None:
+    run_id = await prepared_run(data, scope)
+    await data.mark_dispatch(scope, run_id)
+    await data.record_raw_outcome(scope, run_id, RawReceived(b"{}", "application/json"))
+    await data.project_model_output(scope, run_id, AssistantToolCalls((ToolCall(CallId("c0"), 0,
+                                                                                ToolId("memory_save"), {}),)))
+    await data.commit_tool_outcome(scope, CallRef(run_id, CallId("c0")), ToolCompletion(
+        ToolExecutionStatus.SUCCEEDED, ModelToolResult((TextBlock("Saved."),)), memory_change=change))
+
+
+def test_a_tool_writes_a_loops_date_and_an_undo_puts_the_dates_back() -> None:
+    async def scenario() -> None:
+        _, data = fresh()
+        due = NOW + timedelta(days=4)
+        loop_id = await data.allocate_memory_id(ME)
+        await committed(data, SCOPE, MemoryChange(MemoryChangeKind.SAVE, loop_id, LOOP, "Interview.",
+                                                  due_at="2026-11-04", due_instant=due))
+        before = await data.read_memory(ME, loop_id)
+        assert (before.origin, before.due_at, before.due_instant) == (MemoryOrigin.MODEL, "2026-11-04", due)
+        await committed(data, SCOPE, MemoryChange(MemoryChangeKind.SAVE, loop_id, LOOP, "Interview, no date.",
+                                                  expected_revision=1))
+        assert (await data.read_memory(ME, loop_id)).due_at is None  # the Tool decided: no date
+        restored = await data.restore_memory(ME, before, expected_revision=2)
+        assert (restored.text, restored.due_at, restored.due_instant) == ("Interview.", "2026-11-04", due)
+        with pytest.raises(DataError) as error:  # a loop has a date, not an end
+            await committed(data, SCOPE, MemoryChange(MemoryChangeKind.SAVE, await data.allocate_memory_id(ME),
+                                                      LOOP, "Trip.", valid_until="2026-11-06", valid_instant=due))
+        assert code(error) is DataErrorCode.INVALID_ARGUMENT
+
+    asyncio.run(scenario())
+
+
+def test_recent_episodes_leave_out_the_asking_conversation_the_trash_and_the_old() -> None:
+    async def scenario() -> None:
+        third = TrustedScope(ME, ConversationId("conv_third"))
+        store, data = fresh(SCOPE, OTHER, third)
+        store.create_conversation(TrustedScope(PrincipalId("bob"), ConversationId("conv_bob")))
+        for scope, text, ended in ((SCOPE, "Here.", NOW), (OTHER, "Over there.", NOW - timedelta(hours=1)),
+                                   (third, "Long ago.", NOW - timedelta(days=9))):
+            last = await turn(data, scope, f"{text} with words enough")
+            pass_id = await live(data, scope, last)
+            await data.apply_pass(pass_id, [], EpisodePlan(text, ended, ended, (1,), ()), now=NOW)
+        await data.rename_conversation(OTHER, "Over")
+        found = await data.recent_episodes(ME, since=NOW - timedelta(days=7), besides=SCOPE.conversation_id, limit=5)
+        assert [(f.episode.text, f.title) for f in found] == [("Over there.", "Over")]
+        assert await data.count_episodes(ME) == 3 and await data.count_episodes(PrincipalId("bob")) == 0
+        await data.trash_conversation(OTHER)
+        assert await data.recent_episodes(ME, since=NOW - timedelta(days=7), besides=None, limit=5) == (
+            await data.recent_episodes(ME, since=NOW - timedelta(days=7), besides=OTHER.conversation_id, limit=5))
+        assert [f.episode.text for f in await data.find_episodes(ME, ["LONG"])] == ["Long ago."]  # folded
+        assert [f.episode.text for f in await data.find_episodes(ME, [], start=NOW - timedelta(days=10),
+                                                                 end=NOW - timedelta(days=8))] == ["Long ago."]
+        assert [f.episode.text for f in await data.find_episodes(ME, [])] == ["Here.", "Long ago."]  # not the trash
 
     asyncio.run(scenario())
