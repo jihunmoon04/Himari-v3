@@ -45,8 +45,9 @@ for y = 0, H - 1 do
   for x = 0, W - 1 do layerOf[y * W + x] = classify(x, y, img:getPixel(x, y)) end
 end
 local function part(x, y) if x < 0 or y < 0 or x >= W or y >= H then return nil end; return layerOf[y * W + x] end
--- Direction each moving part travels in the idle motion: the upper body lifts, the hair tail sinks.
-local MOVES = { body = -1, eyes = -1, mouth = -1, ["hair tail"] = 1 }
+-- Direction each moving part travels in the idle motion: the upper body lifts and the hair
+-- tail follows it up a moment later.
+local MOVES = { body = -1, eyes = -1, mouth = -1, ["hair tail"] = -1 }
 local GROUP = { body = "upper", eyes = "upper", mouth = "upper", ["hair tail"] = "tail" }
 
 -- A moving part reveals what lies behind its trailing seam; repeat its two seam rows

@@ -353,6 +353,109 @@ using (var cancelledHistory = new CancellationTokenSource())
     try { await HistoryReader.ReadAsync((_, _) => throw new Exception("unexpected page"), null, cancelledHistory.Token); throw new Exception("history cancellation ignored"); }
     catch (OperationCanceledException) { }
 }
+
+// Character animation (docs/companion-animation-v0.1.md §5), driven with explicit times.
+var shipped = CharacterManifest.Parse(File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "character.json")));
+Check(shipped.Width == 205 && shipped.Height == 206 && new[] { "neutral", "happy", "excited", "sad", "surprised", "thinking", "embarrassed", "worried" }.All(shipped.Faces.ContainsKey),
+    "shipped manifest covers the server's eight moods on the 205x206 canvas");
+Check(shipped.Faces["neutral"].Eyes!.Keys.Order().SequenceEqual(["closed", "half"]) && shipped.Faces["neutral"].Mouth!.Keys.Order().SequenceEqual(["small", "wide"]), "neutral has blink and talk variants");
+foreach (var bad in new[] { "{\"version\":2,\"canvas\":[1,1],\"sheet\":\"s\",\"face\":{\"origin\":[0,0],\"size\":[1,1]},\"clips\":{},\"faces\":{}}",
+                            "{\"version\":1,\"canvas\":[1,1],\"sheet\":\"s\",\"face\":{\"origin\":[0,0],\"size\":[1,1]},\"clips\":{},\"faces\":{\"neutral\":{\"src\":[0,0,1,1]}}}",
+                            "{\"version\":1,\"canvas\":[1,1],\"sheet\":\"s\",\"face\":{\"origin\":[0,0],\"size\":[0,1]},\"clips\":{\"idle\":{\"loop\":true,\"frames\":[{\"src\":[0,0,1,1],\"ms\":1,\"face\":[0,0]}]}},\"faces\":{\"neutral\":{\"src\":[0,0,1,1]}}}",
+                            "{\"version\":1,\"canvas\":[1,1],\"sheet\":\"s\",\"clips\":{\"idle\":{\"loop\":true,\"frames\":[{\"src\":[0,0,1,1],\"ms\":1,\"face\":[0,0]}]}},\"faces\":{\"neutral\":{\"src\":[0,0,1,1]}}}",
+                            "{\"version\":1,\"canvas\":[1,1],\"sheet\":\"s\",\"face\":{\"origin\":[0,0],\"size\":[1,1]},\"clips\":{\"idle\":{\"loop\":true,\"frames\":[{\"src\":[0,0,-1,1],\"ms\":1,\"face\":[0,0]}]}},\"faces\":{\"neutral\":{\"src\":[0,0,1,1]}}}",
+                            "{\"version\":1,\"canvas\":[1,1],\"sheet\":\"s\",\"face\":{\"origin\":[0,0],\"size\":[1,1]},\"clips\":{\"idle\":{\"loop\":true,\"frames\":[{\"src\":[0,0,1,1],\"ms\":1,\"face\":[0,0]}]}},\"faces\":{\"neutral\":{\"src\":[0,0,1,1],\"eyes\":{\"half\":{\"src\":[0,0,1,1],\"at\":[0]}}}}}" })
+{
+    try { CharacterManifest.Parse(bad); Check(false, "invalid character manifest is rejected"); }
+    catch (InvalidDataException) { }
+}
+var shippedRects = shipped.Clips.Values.SelectMany(c => c.Frames.Select(f => f.Src)).Concat(shipped.Faces.Values.Select(f => f.Src)).ToList();
+int sheetRight = shippedRects.Max(r => r[0] + r[2]), sheetBottom = shippedRects.Max(r => r[1] + r[3]);
+shipped.CheckSheet(sheetRight, sheetBottom);
+try { shipped.CheckSheet(sheetRight, sheetBottom - 1); Check(false, "a src outside the sheet is rejected"); }
+catch (InvalidDataException) { }
+static TimeSpan Ms(double value) => TimeSpan.FromMilliseconds(value);
+var frame = new ClipFrame([0, 0, 1, 1], 100, [0, 0]);
+var animationManifest = shipped with
+{
+    Clips = new()
+    {
+        ["idle"] = new(true, [frame, frame with { Src = [1, 0, 1, 1], Ms = 300 }]),
+        ["wave"] = new(false, [frame, frame with { Src = [2, 0, 1, 1] }]),
+        ["roll"] = new(true, [frame, frame with { Src = [3, 0, 1, 1] }]),
+        ["sleep"] = new(true, [frame with { Eyes = "closed" }]),
+    }
+};
+// The first blink comes 2.5 s at the earliest, so the checks before 1.4 s see open eyes.
+var animator = new CharacterAnimator(animationManifest, 7, TimeSpan.Zero);
+Check(animator.Pose(Ms(50)) == new CharacterPose("idle", 0, "neutral", null, null) && animator.Pose(Ms(150)).Frame == 1 && animator.Pose(Ms(450)).Frame == 0,
+    "idle loops through its frames");
+Check(animator.NextChange(Ms(150)) == Ms(400), "the animator sleeps until the next frame boundary");
+var wave = animator.Request("wave", AnimationLayer.Reaction, Ms(500));
+var roll = animator.Request("roll", AnimationLayer.Directed, Ms(520));
+Check(animator.Pose(Ms(530)).Clip == "roll" && animator.Pose(Ms(530)).Frame == 0, "a higher layer interrupts at once from its first frame");
+animator.Release(roll, Ms(560));
+Check(animator.Pose(Ms(570)).Clip == "wave" && animator.Pose(Ms(570)).Frame == 0, "after the higher request ends, the lower one restarts from its first frame");
+Check(animator.Pose(Ms(680)).Clip == "wave" && animator.Pose(Ms(680)).Frame == 1 && animator.Pose(Ms(780)).Clip == "idle" && animator.Pose(Ms(780)).Frame == 0,
+    "a one-shot clip plays once and hands back to idle from its first frame");
+// A one-shot covered almost to its end still plays in full when it comes back (PR #142 review).
+var hidden = new CharacterAnimator(animationManifest, 7, TimeSpan.Zero);
+hidden.Request("wave", AnimationLayer.Reaction, Ms(0));
+Check(hidden.Pose(Ms(10)) is { Clip: "wave", Frame: 0 }, "the one-shot starts when requested");
+var cover = hidden.Request("roll", AnimationLayer.Directed, Ms(50));
+Check(hidden.Pose(Ms(60)).Clip == "roll", "a higher layer covers the one-shot");
+hidden.Release(cover, Ms(190));
+Check(hidden.Pose(Ms(195)) is { Clip: "wave", Frame: 0 } && hidden.Pose(Ms(295)) is { Clip: "wave", Frame: 1 } && hidden.Pose(Ms(385)).Clip == "wave"
+    && hidden.NextChange(Ms(385)) == Ms(390) && hidden.Pose(Ms(395)).Clip == "idle",
+    "a covered one-shot replays from its first frame for its full 200 ms");
+var longHidden = new CharacterAnimator(animationManifest, 7, TimeSpan.Zero);
+longHidden.Request("wave", AnimationLayer.Reaction, Ms(0));
+longHidden.Pose(Ms(10));
+var longCover = longHidden.Request("roll", AnimationLayer.Directed, Ms(50));
+longHidden.Pose(Ms(60));
+longHidden.Release(longCover, Ms(300));
+Check(longHidden.Pose(Ms(305)) is { Clip: "wave", Frame: 0 } && longHidden.Pose(Ms(495)).Clip == "wave" && longHidden.Pose(Ms(505)).Clip == "idle",
+    "a one-shot covered past its original end still comes back and plays in full");
+var dropped = hidden.Request("wave", AnimationLayer.Reaction, Ms(400));
+hidden.Release(dropped, Ms(450));
+Check(hidden.Pose(Ms(460)).Clip == "idle", "releasing a one-shot ends it at once");
+animator.Mood = "happy";
+Check(animator.Pose(Ms(800)).Mood == "happy", "mood comes from the server");
+animator.Mood = "unknown";
+Check(animator.Pose(Ms(800)).Mood == "neutral", "an unknown mood falls back to neutral");
+animator.SetTalking(true, Ms(1000));
+Check(animator.Pose(Ms(1010)).Mouth == "small" && animator.Pose(Ms(1140)).Mouth == "wide" && animator.Pose(Ms(1270)).Mouth == "small" && animator.Pose(Ms(1400)).Mouth is null,
+    "talking cycles small, wide, small, closed in 130 ms steps");
+animator.SetTalking(false, Ms(1150));
+Check(animator.Pose(Ms(1200)).Mouth == "wide" && animator.Pose(Ms(1260)).Mouth is null, "when talking stops the current step finishes, then the mouth closes");
+animator.Mood = "happy";
+animator.SetTalking(true, Ms(1300));
+Check(animator.Pose(Ms(1310)).Mouth is null && animator.Pose(Ms(1310)).Eyes is null, "a mood without the variant keeps its own face");
+animator.SetTalking(false, Ms(1310)); animator.Mood = "neutral";
+var blinks = new List<(double Start, string Eyes)>();
+string? previous = null;
+for (double t = 1400; t < 31400; t += 10)
+{
+    var eyes = animator.Pose(Ms(t)).Eyes;
+    if (eyes != previous) { blinks.Add((t, eyes ?? "open")); previous = eyes; }
+}
+var opens = blinks.Where((b, i) => b.Eyes == "half" && (i == 0 || blinks[i - 1].Eyes == "open")).Select(b => b.Start).ToList();
+// The second half of a double blink follows 330 ms after the first; count it with the first.
+var starts = opens.Where((t, i) => i == 0 || t - opens[i - 1] > 1000).ToList();
+var gaps = starts.Zip(starts.Skip(1), (a, b) => b - a).ToList();
+Check(starts.Count >= 5 && gaps.All(g => g >= 2500 + 210 - 10 && g <= 6000 + 540 + 10), "blinks come every 2.5-6 s after the previous one");
+Check(blinks.Select(b => b.Eyes).Where(e => e != "open").Take(3).SequenceEqual(["half", "closed", "half"]), "a blink is half, closed, half");
+Check(opens.Count > starts.Count && opens.Zip(opens.Skip(1), (a, b) => b - a).Any(g => Math.Abs(g - 330) <= 10), "some blinks are double, 120 ms apart");
+var sleepy = new CharacterAnimator(animationManifest, 7, TimeSpan.Zero);
+sleepy.SetSleeping(true, Ms(100));
+Check(sleepy.Pose(Ms(200)) is { Clip: "sleep", Eyes: "closed" }, "dozing plays the sleep clip, which forces closed eyes");
+sleepy.SetSleeping(false, Ms(300));
+Check(sleepy.Pose(Ms(310)).Clip == "idle", "waking returns to idle");
+var noSleepArt = new CharacterAnimator(shipped, 7, TimeSpan.Zero);
+noSleepArt.SetSleeping(true, Ms(100));
+Check(noSleepArt.Pose(Ms(200)) is { Clip: "idle", Eyes: "closed" }, "without sleep art, dozing only closes the eyes");
+noSleepArt.SetTalking(true, Ms(300));
+Check(noSleepArt.Pose(Ms(310)) is { Eyes: not "closed", Mouth: "small" }, "talking wakes the eyes");
 Console.WriteLine("Contract transport checks passed.");
 
 using (var screenClient = new ServerClient("https://example.com/", "test", new ScreenProtocolHandler()))

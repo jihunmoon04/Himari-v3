@@ -18,5 +18,8 @@
     <Compile Include="..\Himari.Companion\ScreenSafety.cs" Link="ScreenSafety.cs" />
     <Compile Include="..\Himari.Companion\TextRecovery.cs" Link="TextRecovery.cs" />
     <Compile Include="..\Himari.Companion\ScreenHistory.cs" Link="ScreenHistory.cs" />
+    <Compile Include="..\Himari.Companion\CharacterManifest.cs" Link="CharacterManifest.cs" />
+    <Compile Include="..\Himari.Companion\CharacterAnimator.cs" Link="CharacterAnimator.cs" />
+    <None Include="..\Himari.Companion\Assets\character.json" Link="character.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

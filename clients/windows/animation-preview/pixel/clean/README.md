@@ -42,14 +42,14 @@ aseprite -b --script-param in=n6.png --script-param colors=32 --script-param out
 
 ## 움직임 시험
 
-`../tools/idle-test.lua`로 파츠를 움직여 4프레임 대기 동작을 만들었다. 결과는 `idle-test.aseprite`이고, `idle-test-x3.gif`는 3배 확대 GIF다.
+`../tools/idle-test.lua`로 파츠를 움직여 6프레임 숨쉬기 동작을 만들었다. 결과는 `idle-test.aseprite`이고, `idle-test-x3.gif`는 3배 확대 GIF다. 한 번 숨쉬는 데 4초(올라간 상태 약 2초, 내려온 상태 약 2초)다.
 
-- 상체 그룹: 0, −1, −1, 0px
-- 헤일로: 0, −1, −2, −1px
-- 머리카락 끝: 0, 0, +1, 0px
-- 프레임 길이: 400, 300, 400, 300ms
+- 상체 그룹: 0, −1, −1, −1, 0, 0px
+- 머리카락 끝: 0, 0, −1, −1, −1, 0px. 상체보다 250ms 늦게 같은 방향으로 따라간다(소유자 검토 2026-10-31: 반대로 움직이면 어색함).
+- 헤일로: 0, −1, −1, −2, −2, −1px
+- 프레임 길이: 1250, 250, 750, 1000, 250, 500ms
 
-스크립트는 쉬는 자세에서 불투명하던 안쪽 픽셀이 투명해진 개수를 센다. 세 프레임 모두 0이다.
+스크립트는 쉬는 자세에서 불투명하던 안쪽 픽셀이 투명해진 개수를 센다. 다섯 프레임 모두 0이다. 머리카락 끝도 위로 움직이므로 `split.lua`의 `underlay`는 그 아래쪽 이음선을 채운다.
 
 ```
 aseprite -b --script-param in=neutral.png --script-param out=neutral-parts.aseprite --script-param debug=neutral-parts-map.png --script split.lua
@@ -68,7 +68,7 @@ aseprite -b --script-param in=neutral-parts.aseprite --script-param out=idle-tes
 - **고정 기준**: 눈을 감을 때 눈을 가로지르는 머리카락 가닥은 그대로 둔다.
 - **편집 방법**: 색은 모두 `himari-32.gpl` 안에서 골랐다. 프레임을 손볼 때는 Aseprite에서 해당 레이어를 직접 고치거나 `face.lua`의 좌표를 고쳐 다시 만든다.
 - **미리보기**: `blink-x3.gif`, `talk-x3.gif`, 얼굴 확대 비교 `face-strip.png`(뜬 눈, 반, 감음, 작은 입, 큰 입)
-- **앱용 낱장**: `face.lua`가 `frames/`에 205×206 PNG로 바로 쓴다. 파일 이름(`open`, `blink-half`, `blink-closed`, `talk-small`, `talk-wide`)이 앱 리소스 이름이므로, 다시 만들면 다음 빌드에 그대로 반영된다.
+- **낱장**: `face.lua`가 `frames/`에 205×206 PNG로 쓴다(`open`, `blink-half`, `blink-closed`, `talk-small`, `talk-wide`). 앱은 이제 이 낱장을 쓰지 않는다(아래 "앱 자산").
 
 ```
 aseprite -b --script-param in=neutral-parts.aseprite --script-param out=neutral-face.aseprite --script-param frames=frames --script face.lua
@@ -91,3 +91,25 @@ aseprite -b --script-param in=happy.png --script-param neutral=neutral.png --scr
 ```
 
 깜빡임과 말하기는 아직 neutral에만 있다. 다른 표정에서 쓰려면 그 표정의 눈과 입 영역에 같은 방식으로 프레임을 그려야 한다.
+
+## 앱 자산: 원본과 내보내기
+
+앱은 `Himari.Companion/Assets/character.png`(색 인덱스 시트 한 장)와 `character.json`만 쓴다. 형식과 재생 규칙은 [docs/companion-animation-v0.1.md](../../../../../docs/companion-animation-v0.1.md)에 있다. 이제 그림을 고칠 원본은 아래 두 파일이다. 위의 `neutral-*`, `frames/`, `moods/`는 만든 과정의 기록이다.
+
+| 파일 | 내용 |
+|---|---|
+| `body.aseprite` | 몸 동작. 태그 하나가 동작 하나(지금은 `idle` 6프레임). 숨긴 레이어 `@face`의 1×1 점이 그 프레임에서 얼굴을 놓을 자리다(쉬는 자세 (101, 47), 숨쉬기 프레임은 1px 위). |
+| `faces.aseprite` | 얼굴 33×26. 표정마다 프레임 하나, 태그 이름이 표정 이름. 그룹 `eyes/half`, `eyes/closed`, `mouth/small`, `mouth/wide`에 기본 얼굴과 다른 픽셀만 그린다(지금은 neutral 프레임에만 있음). 숨긴 `@body`는 맞춰 볼 몸 그림이다. 턱의 손(129 이상, 66 이상)은 몸 쪽이라 비워 둔다. |
+
+- **처음 만들기**: `../tools/sources.lua`가 `idle-test.aseprite`, `neutral-face.aseprite`, `moods/`에서 두 원본을 한 번 만들었다. 그대로 다시 돌리면 고친 `faces.aseprite`를 덮어쓴다. 숨쉬기를 바꿀 때는 `idle-test.lua`를 고쳐 돌린 뒤 `--script-param only=body`로 `body.aseprite`만 다시 만든다.
+- **neutral 눈·입 다시 그림**(소유자 검토 2026-10-31): `../tools/neutral-variants.lua`가 `faces.aseprite`의 neutral 변형을 고쳤다. 반쯤 감은 눈은 뜬 눈의 속눈썹처럼 오른쪽으로 내려가고, 감은 눈은 선 위의 갈색 채움을 없앴다. 두 경우 모두 바깥쪽 속눈썹 끝을 눈마다 2px 줄였다. 말하는 입은 다문 입 선의 두 끝 (112,65), (116,67)을 그대로 두고 가운데가 벌어진다. 그래서 `frames/`의 낱장과는 이제 다르다.
+- **내보내기**: 원본을 고친 뒤 `../tools/export.lua`를 돌린다(`pixel/`에서 실행).
+  - 같은 그림 조각은 시트에 한 번만 넣는다(지금 18조각, 820×412).
+  - UI 테스트가 비교할 기준 그림 3장(`idle-1-neutral`, `idle-2-happy`, `idle-1-neutral-closed-wide`)도 함께 쓴다.
+  - 다음 중 하나라도 어기면 아무것도 쓰지 않고 실패한다: 색 인덱스 모드와 `himari-32.gpl` 팔레트, 모든 몸 프레임의 `@face` 점, 모든 동작의 첫 프레임과 단발 동작의 마지막 프레임 = idle 첫 프레임, 표정 8종.
+
+```
+aseprite -b --script-param body=clean/body.aseprite --script-param faces=clean/faces.aseprite --script-param palette=clean/himari-32.gpl --script-param out=../../Himari.Companion/Assets --script-param refs=../../Himari.Companion.UiTests/Fixtures/character --script tools/export.lua
+```
+
+결과물(시트, JSON, 기준 그림)은 저장소에 넣는다. 빌드와 CI에는 Aseprite가 없다.

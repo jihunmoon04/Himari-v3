@@ -58,25 +58,56 @@ internal static class Program
         Check(Fill(true) == Color.FromRgb(255, 253, 243) && Fill(false) == Color.FromRgb(242, 237, 255), "rendered user bubble is cream and Himari bubble is lavender");
         var timeline = new MainWindow();
         object? Timeline(string method, params object?[] args) => typeof(MainWindow).GetMethod(method, BindingFlags.NonPublic | BindingFlags.Instance)!.Invoke(timeline, args);
-        // Every mood and animation frame the app can select must load as a 205x206 sprite.
-        void SetField(string name, object value) => typeof(MainWindow).GetField(name, BindingFlags.NonPublic | BindingFlags.Instance)!.SetValue(timeline, value);
-        string Shown(string mood, bool talking, bool sleeping, double elapsedMs)
+        // Character art (docs/companion-animation-v0.1.md §7): every piece lies inside the sheet,
+        // every frame and mood renders, and composed poses match export.lua's references pixel for pixel.
+        var renderer = (CharacterRenderer)typeof(MainWindow).GetField("character", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(timeline)!;
+        var manifest = renderer.Manifest;
+        var sheetImage = BitmapFrame.Create(Application.GetResourceStream(new Uri("pack://application:,,,/Himari.Companion;component/Assets/" + manifest.Sheet))!.Stream);
+        bool InSheet(int[] src) => src[0] >= 0 && src[1] >= 0 && src[2] > 0 && src[3] > 0 && src[0] + src[2] <= sheetImage.PixelWidth && src[1] + src[3] <= sheetImage.PixelHeight;
+        var pieces = manifest.Clips.Values.SelectMany(c => c.Frames).Select(f => f.Src)
+            .Concat(manifest.Faces.Values.SelectMany(f => new[] { f.Src }.Concat((f.Eyes?.Values ?? Enumerable.Empty<FaceVariant>()).Concat(f.Mouth?.Values ?? Enumerable.Empty<FaceVariant>()).Select(v => v.Src)))).ToList();
+        Check(pieces.All(InSheet) && manifest.Clips.Values.SelectMany(c => c.Frames).All(f => f.Src[2] == manifest.Width && f.Src[3] == manifest.Height),
+            "every character piece lies inside the sheet and body frames fill the canvas");
+        foreach (var (clipName, clip) in manifest.Clips)
+            for (int i = 0; i < clip.Frames.Length; i++)
+                foreach (var (moodName, face) in manifest.Faces)
+                    foreach (var eyes in (face.Eyes?.Keys ?? Enumerable.Empty<string>()).Prepend(null))
+                        foreach (var mouth in (face.Mouth?.Keys ?? Enumerable.Empty<string>()).Prepend(null))
+                            renderer.Render(new CharacterPose(clipName, i, moodName, eyes, mouth));
+        int[] Pixels(BitmapSource source)
         {
-            SetField("mood", mood); SetField("talking", talking); SetField("sleeping", sleeping);
-            SetField("lastIdleCheck", DateTime.UtcNow); SetField("started", DateTime.UtcNow.AddMilliseconds(-elapsedMs));
-            Timeline("UpdateFrame");
-            var source = (BitmapImage)((Image)timeline.FindName("Character")).Source;
-            Check(source.PixelWidth == 205 && source.PixelHeight == 206, $"{source.UriSource} loads as a 205x206 pixel sprite");
-            return System.IO.Path.GetFileNameWithoutExtension(source.UriSource.AbsolutePath);
+            var bgra = new FormatConvertedBitmap(source, PixelFormats.Bgra32, null, 0);
+            var pixels = new int[bgra.PixelWidth * bgra.PixelHeight];
+            bgra.CopyPixels(pixels, bgra.PixelWidth * 4, 0);
+            return pixels;
         }
-        foreach (var mood in new[] { "happy", "excited", "sad", "surprised", "thinking", "embarrassed", "worried" })
-            Check(Shown(mood, false, false, 0) == mood && Shown(mood, true, false, 190) == mood, $"{mood} shows its own sprite, without neutral's talk frames");
-        Check(Shown("neutral", false, false, 1000) == "neutral" && Shown("neutral", false, false, 3830) == "blink-half"
-            && Shown("neutral", false, false, 3900) == "blink-closed" && Shown("neutral", false, false, 3975) == "blink-half", "neutral blinks half, closed, half at the end of each 4 s cycle");
-        Check(Shown("neutral", true, false, 60) == "talk-small" && Shown("neutral", true, false, 190) == "talk-wide"
-            && Shown("neutral", true, false, 450) == "neutral", "talking cycles small, wide, small and closed mouth frames");
-        Check(Shown("neutral", false, true, 1000) == "blink-closed", "a sleeping character keeps its eyes closed");
-        Shown("neutral", false, false, 0);
+        foreach (var (file, pose) in new[] {
+            ("idle-1-neutral", new CharacterPose("idle", 0, "neutral", null, null)),
+            ("idle-2-happy", new CharacterPose("idle", 1, "happy", null, null)),
+            ("idle-1-neutral-closed-wide", new CharacterPose("idle", 0, "neutral", "closed", "wide")) })
+        {
+            renderer.Render(pose);
+            using var reference = System.IO.File.OpenRead(System.IO.Path.Combine(AppContext.BaseDirectory, "Fixtures", "character", file + ".png"));
+            Check(Pixels(renderer.Bitmap).SequenceEqual(Pixels(BitmapFrame.Create(reference, BitmapCreateOptions.None, BitmapCacheOption.OnLoad))), $"{file} matches the exported reference pixel for pixel");
+        }
+        var characterImage = (Image)timeline.FindName("Character");
+        Check(characterImage.Source == renderer.Bitmap && renderer.Bitmap.PixelWidth == 205 && renderer.Bitmap.PixelHeight == 206, "the character image shows the composed 205x206 bitmap");
+        Timeline("SetMood", "happy"); Timeline("SetTalking", true);
+        Check(renderer.Shown is { Mood: "happy", Mouth: null }, "mood reaches the character; happy has no talk art, so its face stays");
+        Timeline("SetMood", "neutral"); Timeline("SetTalking", true);
+        Check(renderer.Shown is { Mood: "neutral", Mouth: "small" }, "talking starts the mouth at once");
+        Timeline("SetTalking", false);
+        var inspect = (SettingsWindow)typeof(MainWindow).GetField("settings", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(timeline)!;
+        inspect.EyesSelector.SelectedIndex = 3; inspect.MouthSelector.SelectedIndex = 3;
+        Check(renderer.Shown is { Eyes: "closed", Mouth: "wide" } && inspect.PoseText.Text.Contains("closed"), "the animation inspect holds eyes and mouth on a chosen variant");
+        Timeline("SetMood", "happy");
+        Check(renderer.Shown is { Mood: "happy", Eyes: null, Mouth: null } && inspect.PoseText.Text.Contains("그림이 없어"), "the inspect says when a mood lacks the chosen variant");
+        Timeline("SetMood", "neutral");
+        inspect.PausePreview.IsChecked = true;
+        var paused = renderer.Shown!;
+        inspect.StepButton.RaiseEvent(new RoutedEventArgs(System.Windows.Controls.Primitives.ButtonBase.ClickEvent));
+        Check(renderer.Shown != paused && renderer.Shown!.Frame != paused.Frame, "stepping a paused preview shows the next body frame");
+        inspect.PausePreview.IsChecked = false; inspect.EyesSelector.SelectedIndex = 0; inspect.MouthSelector.SelectedIndex = 0;
         var oldUser = (FrameworkElement)timeline.FindName("UserBubble");
         var reply = (FrameworkElement)timeline.FindName("BubblePanel");
         var draftInput = (TextBox)timeline.FindName("Input");
