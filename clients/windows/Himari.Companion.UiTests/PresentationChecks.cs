@@ -199,6 +199,30 @@ internal static class PresentationChecks
         w.Activate(); Call(w, "CloseChat"); Pump();
         var foreground = (IntPtr)typeof(MainWindow).GetMethod("GetForegroundWindow", BindingFlags.Static | BindingFlags.NonPublic)!.Invoke(null, null)!;
         check(!(bool)Call(w, "IsChatWindow", foreground)! && !input.IsKeyboardFocused, "shortcut with no previous work window releases foreground and keyboard input");
+        {
+            // Stand in for a fullscreen foreground window; Windows may refuse this process the real one.
+            var probe = typeof(MainWindow).GetField("fullscreenWorkProbe", Private)!;
+            var monitor = System.Windows.Forms.Screen.FromHandle(new WindowInteropHelper(w).Handle);
+            bool Covers() => host.IsVisible && host.Width * VisualTreeHelper.GetDpi(host).DpiScaleX >= monitor.Bounds.Width - 1
+                && host.Height * VisualTreeHelper.GetDpi(host).DpiScaleY >= monitor.Bounds.Height - 1;
+            input.Clear(); Call(w, "CloseBubble"); Call(w, "HideUserBubble"); Pump();
+            check(!host.IsVisible, "with no bubbles and no fullscreen window the dialogue host is hidden");
+            probe.SetValue(w, (Func<System.Windows.Forms.Screen?>)(() => monitor));
+            Call(w, "UpdateSceneBounds"); Pump();
+            check(Covers() && user.Visibility == Visibility.Collapsed && answer.Visibility == Visibility.Collapsed,
+                "over fullscreen the empty host already spans the monitor before Alt+Tab activates the character");
+            int activations = 0; void Count(object? s, EventArgs e) => activations++;
+            w.Activated += Count;
+            w.Hide(); Pump();
+            check(!host.IsVisible, "hiding the character from the tray also hides the cover");
+            Call(w, "HotKeyHook", IntPtr.Zero, 0x0312, new IntPtr(0x4849), IntPtr.Zero, false); Pump();
+            w.Activated -= Count;
+            check(w.IsVisible && activations == 0 && Covers() && ((FrameworkElement)w.FindName("ComposerPanel")).Visibility == Visibility.Visible,
+                "Alt+Q from the tray over fullscreen shows the character without activating it and opens chat in the cover");
+            probe.SetValue(w, null); Call(w, "UpdateSceneBounds"); Pump();
+            check(host.IsVisible && !Covers() && host.Width <= 320, "leaving fullscreen returns the host to the bubble's own size");
+            check(settings.Owner is null && !settings.Topmost, "settings is an ordinary window that other windows can cover");
+        }
         w.Close(); Pump();
         foreach (bool newerReply in new[] { false, true })
         {

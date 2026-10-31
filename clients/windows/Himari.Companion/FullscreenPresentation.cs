@@ -10,6 +10,8 @@ public partial class MainWindow
     private ForegroundEvent? foregroundCallback;
     private IntPtr foregroundHook;
     private ShellFullscreen? shellFullscreen;
+    // UI tests stand in for a fullscreen foreground window, which Windows may not grant them.
+    private Func<System.Windows.Forms.Screen?>? fullscreenWorkProbe = null;
     private readonly System.Windows.Threading.DispatcherTimer fullscreenTimer = new() { Interval = TimeSpan.FromMilliseconds(300) };
     [DllImport("user32.dll")] private static extern IntPtr SetActiveWindow(IntPtr window);
     [DllImport("user32.dll")] private static extern IntPtr GetShellWindow();
@@ -47,6 +49,7 @@ public partial class MainWindow
     // The monitor of a fullscreen work window that is in front, or that we are chatting over.
     private System.Windows.Forms.Screen? FullscreenWorkScreen()
     {
+        if (fullscreenWorkProbe is not null) return fullscreenWorkProbe();
         IntPtr foreground = GetForegroundWindow();
         if (!(IsChatWindow(foreground) || foreground == lastWorkWindow || ShellSwitcher(foreground)) || !EligibleWorkWindow(lastWorkWindow)
             || IsIconic(lastWorkWindow) || !GetWindowRect(lastWorkWindow, out var rect)) return null;
@@ -62,7 +65,8 @@ public partial class MainWindow
         bool preserve = FullscreenWorkScreen() is not null;
         // The mark alone does not keep Windows 11's taskbar down; the dialogue host also
         // covers that monitor (see PositionDialogueHost), so follow changes in either direction.
-        if (dialogueHost is { IsVisible: true } && !sizingScene && hostCoversScreen != CoverScreen())
+        // A hidden host counts as not covering, so entering fullscreen with no bubbles shows it.
+        if (dialogueHost is not null && IsVisible && !sizingScene && (dialogueHost.IsVisible ? hostCoversScreen : null) != CoverScreen())
             Dispatcher.BeginInvoke(new Action(UpdateSceneBounds));
         shellFullscreen.Mark(new WindowInteropHelper(this).Handle, preserve && IsVisible);
         if (dialogueHost is not null) shellFullscreen.Mark(new WindowInteropHelper(dialogueHost).Handle, preserve && dialogueHost.IsVisible);

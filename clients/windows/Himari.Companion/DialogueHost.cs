@@ -75,7 +75,9 @@ public partial class MainWindow
         if (dialogueHost is null) return;
         // Bubble sizes settle during this pass (first show, templates); never drop that change.
         if (sizingScene) { sceneRepositionPending = true; return; }
-        if (!IsVisible || (UserBubble.Visibility != Visibility.Visible && BubblePanel.Visibility != Visibility.Visible))
+        // Over fullscreen the empty host stays up: Alt+Tab activates the character window before
+        // anything can open a bubble, and the Shell decides at that moment from the top window.
+        if (!IsVisible || (UserBubble.Visibility != Visibility.Visible && BubblePanel.Visibility != Visibility.Visible && CoverScreen() is null))
         { dialogueHost.Hide(); hostCoversScreen = null; UpdateFullscreenPresentation(); return; }
         sizingScene = true;
         try
