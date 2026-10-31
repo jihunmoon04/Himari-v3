@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+from datetime import datetime
 import json
 import re
 import unicodedata
@@ -56,6 +57,7 @@ from himari.data.api import (
     PassItem,
     PassKind,
     NoteDates,
+    STALE_DUE,
 )
 
 
@@ -468,6 +470,16 @@ def extends(plan: EpisodePlan, kind: PassKind, previous: Episode | None) -> bool
 def overlaps(a_from: int, a_through: int, b_from: int, b_through: int) -> bool:
     """Two parts (from exclusive, through inclusive) share an Event."""
     return a_from < b_through and b_from < a_through
+
+
+def check_fresh(note: Memory, now: datetime) -> Memory:
+    """A kept proposal (V3-P85 §10.2) must not be one the hourly cleanup takes
+    at once: STALE_DATE for a loop due STALE_DUE ago or a fact past its end."""
+    if note.due_instant is not None and note.due_instant < now - STALE_DUE:
+        raise DataError(DataErrorCode.STALE_DATE, f"its date {note.due_at} has passed")
+    if note.valid_instant is not None and note.valid_instant < now:
+        raise DataError(DataErrorCode.STALE_DATE, f"it held until {note.valid_until}")
+    return note
 
 
 def dated(note: Memory, dates: NoteDates | None) -> Memory:

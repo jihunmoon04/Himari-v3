@@ -34,6 +34,7 @@ from himari.data.api import (
     MemoryChange,
     MemoryChangeKind,
     MemoryCursor,
+    NoteDates,
     MemoryOrigin,
     PassAction,
     PassItem,
@@ -732,5 +733,61 @@ def test_the_status_counts_todays_tokens_the_last_applied_pass_and_recent_troubl
         assert summary.charged_today == 300 and summary.failed == 2
         assert [p.status for p in summary.skipped] == [PassStatus.SKIPPED]
         assert summary.last_applied_at is not None and summary.last_applied_at >= since
+
+    asyncio.run(scenario())
+
+
+def test_a_proposal_kept_with_a_passed_date_is_refused_unless_its_date_is_dropped_or_moved() -> None:
+    # PR #138 review: kept as it was, the hourly cleanup would take it at once.
+    async def scenario() -> None:
+        _, data = fresh()
+        last = await turn(data, SCOPE, "Old plans.")
+        pass_id = await live(data, SCOPE, last)
+        long_ago, now = NOW - timedelta(days=20), datetime.now(UTC)
+        await data.apply_pass(pass_id, [
+            PassItem(0, "{}", PassAction.PROPOSE, "proposed", category=LOOP, text="Dentist.", due_at="2026-10-11",
+                     due_instant=now - timedelta(days=20)),
+            PassItem(1, "{}", PassAction.PROPOSE, "proposed", category=USER, text="Away.", valid_until="2026-10-20",
+                     valid_instant=now - timedelta(days=1)),
+            PassItem(2, "{}", PassAction.PROPOSE, "proposed", category=LOOP, text="Overdue a little.",
+                     due_at="2026-10-28", due_instant=now - timedelta(days=3)),
+        ], None, now=long_ago)
+        for item in (0, 1):
+            with pytest.raises(DataError) as error:
+                await data.decide_proposal(ME, pass_id, item, keep=True, now=now)
+            assert code(error) is DataErrorCode.STALE_DATE
+        assert len(await data.list_proposals(ME)) == 3  # still waiting
+        undated = await data.decide_proposal(ME, pass_id, 0, keep=True, now=now, dates=NoteDates())
+        assert undated is not None and (undated.text, undated.due_at) == ("Dentist.", None)
+        moved = await data.decide_proposal(ME, pass_id, 1, keep=True, now=now,
+                                           dates=NoteDates(valid_until="2026-12-01",
+                                                           valid_instant=now + timedelta(days=30)))
+        assert moved is not None and moved.valid_until == "2026-12-01"
+        recent = await data.decide_proposal(ME, pass_id, 2, keep=True, now=now)  # overdue, not yet the cleanup's
+        assert recent is not None and recent.due_at == "2026-10-28"
+
+    asyncio.run(scenario())
+
+
+def test_the_lines_read_the_newest_passes_with_their_shown_items_at_once() -> None:
+    async def scenario() -> None:
+        _, data = fresh()
+        ids = []
+        for n in range(3):
+            last = await turn(data, SCOPE, f"Part {n} with words enough")
+            pass_id = await live(data, SCOPE, last)
+            await data.apply_pass(pass_id, [add(0, f"Note {n}."), PassItem(1, "{}", PassAction.DROP, "bad_evidence")],
+                                  None, now=NOW)
+            ids.append(pass_id)
+        last = await turn(data, SCOPE, "Nothing to remember here")
+        quiet = await live(data, SCOPE, last)
+        await data.apply_pass(quiet, [PassItem(0, "{}", PassAction.DROP, "no_evidence")], None, now=NOW)
+        found = await data.applied_pass_items(SCOPE, limit=2)
+        assert [p.pass_id for p, _ in found] == ids[1:]  # the newest two that show something, oldest first
+        assert [[r.outcome for r in records] for _, records in found] == [["applied"], ["applied"]]
+        notes = {n.text: n.memory_id for n in await data.list_memories(ME)}
+        assert await data.memory_revisions(ME, [notes["Note 0."], notes["Note 2."], 999]) == {
+            notes["Note 0."]: (1, False), notes["Note 2."]: (1, False)}
+        assert await data.memory_revisions(ME, []) == {}
 
     asyncio.run(scenario())

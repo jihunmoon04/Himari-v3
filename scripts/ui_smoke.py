@@ -931,7 +931,7 @@ def run_passes(base: str, token: str, shots: str | None, root: str) -> list[str]
         browser = p.chromium.launch()
         page = browser.new_page(viewport={"width": 1280, "height": 860}, locale="en-US")
         page.on("console", lambda m: errors.append(m.text)
-                if m.type == "error" and not re.search(r"40[49]|ERR_FAILED", m.text) else None)
+                if m.type == "error" and not re.search(r"40[49]|422|ERR_FAILED", m.text) else None)  # 422: stale, on purpose
         page.on("pageerror", lambda e: errors.append(str(e)))
         page.goto(base)
         page.fill("#login-token", token)
@@ -948,11 +948,14 @@ def run_passes(base: str, token: str, shots: str | None, root: str) -> list[str]
             last = (await app.data.last_event(scope))[0]
             pass_id = await app.data.begin_pass(scope, PassStart(PassKind.LIVE, 0, last, last, "p", "m"))
             await app.data.apply_pass(pass_id, [
-                PassItem(0, "{}", PassAction.ADD, category=MemoryCategory.PROJECT, text="Builds HIMARI."),
-                PassItem(1, "{}", PassAction.ADD, category=MemoryCategory.LOOP, text="Interview at Kakao.",
-                         due_at="2026-11-04", due_instant=now + timedelta(days=4)),
-                PassItem(2, "{}", PassAction.PROPOSE, "sensitive_proposed", category=MemoryCategory.USER,
+                PassItem(0, '{"evidence": [1]}', PassAction.ADD, category=MemoryCategory.PROJECT,
+                         text="Builds HIMARI."),
+                PassItem(1, '{"evidence": [1]}', PassAction.ADD, category=MemoryCategory.LOOP,
+                         text="Interview at Kakao.", due_at="2026-11-04", due_instant=now + timedelta(days=4)),
+                PassItem(2, '{"evidence": [1]}', PassAction.PROPOSE, "sensitive_proposed", category=MemoryCategory.USER,
                          text="Takes pills."),
+                PassItem(3, '{"evidence": [1]}', PassAction.PROPOSE, "sensitive_proposed", category=MemoryCategory.LOOP,
+                         text="Doctor in September.", due_at="2026-09-01", due_instant=now - timedelta(days=60)),
             ], EpisodePlan("Talked about HIMARI and an interview.", now, now, (1,), (2,)), now=now)
             return pass_id
 
@@ -961,14 +964,16 @@ def run_passes(base: str, token: str, shots: str | None, root: str) -> list[str]
         line = page.locator("#timeline > .item-pass")
         expect(line).to_have_count(1, timeout=10000)
         expect(line.locator(".item-pass-summary")).to_have_text(
-            "HIMARI remembered 2 things · 1 sensitive note waiting for you")
+            "HIMARI remembered 2 things · 2 sensitive notes waiting for you")
         assert page.evaluate("[...document.querySelectorAll('#timeline > *')].pop().classList.contains('item-pass')")
         line.locator(".item-pass-summary").click()
         items = line.locator(".item-pass-item")
-        expect(items).to_have_count(3)
+        expect(items).to_have_count(4)
         expect(items.nth(1)).to_contain_text("Open loop")
         expect(items.nth(1)).to_contain_text("(due 2026-11-04)")
-        expect(items.nth(2).locator("button")).to_have_text("Review")
+        expect(items.nth(2).locator("button", has_text="Review")).to_have_count(1)
+        items.nth(1).locator("button", has_text="Source").click()  # PR #138 review: to the message it rests on
+        expect(page.locator('#timeline > .item-user[data-sequence="1"]')).to_have_class(re.compile("is-revealed"))
         if shots:
             page.screenshot(path=os.path.join(shots, "40-pass-line.png"))
         items.first.locator(".item-memory-undo").click()
@@ -976,7 +981,7 @@ def run_passes(base: str, token: str, shots: str | None, root: str) -> list[str]
         expect(items.first.locator(".item-memory-done")).to_have_text("Undone")
         assert [n.text for n in on_server(root, lambda app: app.memories(OPERATOR))] == ["Interview at Kakao."]
 
-        items.nth(2).locator("button").click()  # Review: the Memory screen and its suggestion
+        items.nth(2).locator("button", has_text="Review").click()  # Review: the Memory screen and its suggestion
         expect(page.locator("#memory-suggestions")).to_contain_text("Takes pills.", timeout=10000)
         expect(page.locator("#memory-suggestions")).to_contain_text("Sensitive: kept only if you choose")
         expect(page.locator("#memory-suggestions")).to_contain_text("“I build HIMARI. My interview")  # its preview
@@ -985,9 +990,15 @@ def run_passes(base: str, token: str, shots: str | None, root: str) -> list[str]
         expect(page.locator(".memory-group").first).to_contain_text("auto")
         if shots:
             page.screenshot(path=os.path.join(shots, "41-memory-loops-suggestions.png"))
-        page.locator("#memory-suggestions button", has_text="Keep").first.click()
+        page.click("#memory-suggestions button[aria-label='Keep: Takes pills.']")
         expect(page.locator("#status-bar")).to_have_text("Kept. HIMARI uses it from the next message.", timeout=5000)
-        expect(page.locator("#memory-suggestions")).to_be_hidden()
+        # A suggestion whose date passed long ago: kept only without it, after asking (PR #138 review).
+        page.locator("#memory-suggestions button[aria-label^='Keep:']").first.click()
+        expect(page.locator("#confirm-dialog")).to_contain_text("Its date (2026-09-01) has passed.", timeout=5000)
+        page.click("#confirm-ok")
+        expect(page.locator("#memory-suggestions")).to_be_hidden(timeout=5000)
+        doctor = next(n for n in on_server(root, lambda app: app.memories(OPERATOR)) if n.text == "Doctor in September.")
+        assert doctor.due_at is None
         expect(page.locator("#memory-groups")).to_contain_text("auto · kept by you")
 
         # A loop of the user's own, with a date from the form.
@@ -1011,6 +1022,11 @@ def run_passes(base: str, token: str, shots: str | None, root: str) -> list[str]
         page.locator("#memory-timeline button[type=submit]").click()
         expect(rows.first).to_contain_text("We planned the interview.", timeout=5000)
         expect(rows.first).to_contain_text("edited by you")
+        rows.first.locator("button", has_text="HIMARI's replies").click()  # the conversation, at what it rests on
+        expect(page.locator('#timeline > .item-assistant[data-sequence="2"]')).to_have_class(
+            re.compile("is-revealed"), timeout=10000)
+        page.goto(base + "/settings/memory")
+        page.click("#memory-tab-timeline")
         if shots:
             page.screenshot(path=os.path.join(shots, "42-memory-timeline.png"))
 

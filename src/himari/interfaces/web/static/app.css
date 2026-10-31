@@ -3538,12 +3538,21 @@ details > summary {
 }
 
 .item-memory-action::after,
-.item-memory-text:has(+ .item-memory-undo, + .item-memory-done)::after {
+.item-memory-text:has(+ .item-memory-undo, + .item-memory-done, + .item-memory-link)::after {
   content: " ·";
   font-weight: 400;
 }
 
-.item-memory-undo {
+/* After a link the dot is its own box, so the link's underline stops before it. */
+.item-memory-link:has(+ .item-memory-undo, + .item-memory-done)::after {
+  content: "·";
+  display: inline-block;
+  margin-left: 0.3em;
+  text-decoration: none;
+}
+
+.item-memory-undo,
+.item-memory-link {
   padding: 0;
   font-size: 13px;
   text-decoration: underline;
@@ -3627,6 +3636,13 @@ details > summary {
   background: var(--surface-raised);
   color: var(--text);
   font: inherit;
+}
+
+/* What a note or an episode rests on, gone to from its Source link: marked for a moment. */
+.is-revealed {
+  border-radius: var(--radius-md);
+  box-shadow: 0 0 0 2px var(--warn-edge);
+  transition: box-shadow 0.3s;
 }
 
 .memory-timeline-more {

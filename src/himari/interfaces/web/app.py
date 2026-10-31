@@ -329,6 +329,10 @@ class EpisodeEditBody(_Body):
 
 class ProposalBody(_Body):
     decision: Literal["keep", "discard"]
+    # A keep may give the note's dates instead of the proposal's (null: none), e.g. after a stale_date refusal.
+    due: str | None = None
+    valid_until: str | None = None
+    time_zone: str | None = Field(default=None, max_length=64)
 
 
 class BackfillBody(_Body):
@@ -737,7 +741,7 @@ def auto_memory_view(status: AutoMemoryStatus) -> dict[str, Any]:
 def pass_line_view(line: PassLine) -> dict[str, Any]:
     return {"pass_id": line.pass_id, "through_sequence": line.through_sequence,
             "items": [{"item": i.item, "action": i.action, "id": i.memory_id, "text": i.text, "due": i.due,
-                       "undo": i.undo} for i in line.items]}
+                       "undo": i.undo, "evidence": list(i.evidence)} for i in line.items]}
 
 
 def proposal_view(proposal: Proposal, previews: dict[ConversationId, str] | None = None) -> dict[str, Any]:
@@ -772,9 +776,12 @@ def episode_cursor(episode: Episode) -> str:
 def read_episode_cursor(cursor: str) -> tuple[datetime, int]:
     try:
         when, number = base64.urlsafe_b64decode(cursor.encode()).decode().rsplit("|", 1)
-        return datetime.fromisoformat(when), int(number)
+        moment = datetime.fromisoformat(when)
     except (ValueError, UnicodeDecodeError) as error:
         raise ApiError(400, "invalid_argument", "not a timeline cursor") from error
+    if moment.tzinfo is None or not number.isdigit():  # one the page did not get from us (PR #138 review)
+        raise ApiError(400, "invalid_argument", "not a timeline cursor")
+    return moment, int(number)
 
 
 def note_dates(body: MemoryBody, server_zone: str, *, editing: bool) -> NoteDates | None:
@@ -850,6 +857,7 @@ MEMORY_REFUSALS: dict[DataErrorCode, tuple[int, str, str]] = {
                                                 f"{MAX_LOOP_CHARS:,})."),
     DataErrorCode.LIMIT_EXCEEDED: (422, "memory_full", f"At most {MAX_MEMORIES:,} notes are kept; delete one first."),
     DataErrorCode.INVALID_ARGUMENT: (422, "invalid_memory", "A note needs some text and no control characters."),
+    DataErrorCode.STALE_DATE: (422, "stale_date", "Its date has passed: keep it with a new date or without one."),
 }
 
 
@@ -1893,8 +1901,21 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
     async def decide_proposal(pass_id: str, item: int, body: ProposalBody, request: Request,
                               who: PrincipalId = Depends(principal)) -> Response:
         application = himari(request)
+        dates = None
+        if {"due", "valid_until"} & body.model_fields_set:
+            zone = body.time_zone if body.time_zone and body.time_zone in available_timezones() else \
+                application.time_zone
+            parsed = []
+            for value in (body.due, body.valid_until):
+                found = None if value is None or not value.strip() else parse_note_date(value, zone)
+                if value is not None and value.strip() and found is None:
+                    raise ApiError(422, "invalid_date", "A date is YYYY-MM-DD, or a time with its UTC offset.")
+                parsed.append(found)
+            due, valid = parsed
+            dates = NoteDates(None if due is None else due[0], None if due is None else due[1],
+                              None if valid is None else valid[0], None if valid is None else valid[1])
         try:
-            note = await application.decide_proposal(who, pass_id, item, body.decision == "keep")
+            note = await application.decide_proposal(who, pass_id, item, body.decision == "keep", dates)
         except DataError as error:
             if error.code is DataErrorCode.NOT_FOUND:
                 raise ApiError(404, "not_found", "No such suggestion: its conversation may have been deleted.") from None

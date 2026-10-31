@@ -969,7 +969,8 @@ def cmd_instructions(session: Session, args: argparse.Namespace, read: Callable[
 
 MEMORY_USAGE = ("usage: himari memory | memory add CATEGORY TEXT|- [--due D] [--until D]"
                 " | memory edit ID TEXT|- [--category C] [--due D|none] [--until D|none] | memory rm ID|eID [--yes]"
-                " | memory episodes | memory passes CONVERSATION | memory proposals [keep|discard PASS/ITEM ...]"
+                " | memory episodes | memory passes CONVERSATION"
+                " | memory proposals [keep|discard PASS/ITEM ... [--due D|none] [--until D|none]]"
                 " | memory backfill CONVERSATION | memory retry CONVERSATION PASS")
 MEMORY_CATEGORIES = ("loop", "user", "preference", "project", "reference")  # loops first (V3-P85 §10.2)
 MEMORY_ACTIONS = ("add", "edit", "rm", "episodes", "passes", "proposals", "backfill", "retry")
@@ -1068,13 +1069,19 @@ def _memory_more(session: Session, args: argparse.Namespace, rest: list[str]) ->
             session.note(MEMORY_USAGE)
             return EXIT_USAGE
         failed = False
+        choice: dict[str, Any] = {"decision": decision}
+        for key, raw in (("due", args.due), ("valid_until", args.until)):  # a keep with the user's dates
+            given, value = _date_option(raw)
+            if given:
+                choice[key] = value
         for target in ids:
             pass_id, item = target.split("/")
             try:
-                session.client.post(f"/api/memories/proposals/{pass_id}/{item}", {"decision": decision})
+                session.client.post(f"/api/memories/proposals/{pass_id}/{item}", choice)
                 session.note(f"({target}: {'kept' if decision == 'keep' else 'discarded'})")
             except ServerRefused as error:
-                session.note(f"{target}: refused ({error.code}): {error}")
+                hint = " (keep it with --due/--until DATE, or none)" if error.code == "stale_date" else ""
+                session.note(f"{target}: refused ({error.code}): {error}{hint}")
                 failed = True
         return EXIT_FAILED if failed else EXIT_OK
     try:
@@ -1117,7 +1124,7 @@ def cmd_memory(session: Session, args: argparse.Namespace, read: Callable[[str],
              or (action in ("episodes",) and (rest or args.category or args.yes or dated))
              or (action in ("passes", "backfill") and (len(rest) != 1 or args.category or args.yes or dated))
              or (action == "retry" and (len(rest) != 2 or args.category or args.yes or dated))
-             or (action == "proposals" and (args.category or args.yes or dated)))
+             or (action == "proposals" and (args.category or args.yes or (dated and rest[:1] != ["keep"]))))
     if wrong:
         session.note(MEMORY_USAGE)
         return EXIT_USAGE

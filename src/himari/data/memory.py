@@ -1547,6 +1547,14 @@ class InMemoryData:
         retired = self._store.retired_memories.get((principal, memory_id))
         return None if retired is None else (retired[0].revision, True)
 
+    async def memory_revisions(self, principal: PrincipalId, memory_ids: Sequence[int]) -> dict[int, tuple[int, bool]]:
+        found: dict[int, tuple[int, bool]] = {}
+        for memory_id in memory_ids:
+            state = await self.memory_revision(principal, memory_id)
+            if state is not None:
+                found[memory_id] = state
+        return found
+
     async def count_source_episodes(self, scope: TrustedScope) -> int:
         self._store._owned(scope)
         return len(self._episodes_of(scope.principal_id, scope.conversation_id))
@@ -1940,6 +1948,20 @@ class InMemoryData:
         return tuple(self._item_record(p, i, row) for (p, i), row in sorted(self._store.pass_items.items())
                      if p == pass_id)
 
+    async def applied_pass_items(self, scope: TrustedScope, *,
+                                 limit: int) -> tuple[tuple[MemoryPass, tuple[PassItemRecord, ...]], ...]:
+        self._store._owned(scope)
+        shown = ("applied", "kept", "sensitive_proposed")
+        found: list[tuple[MemoryPass, tuple[PassItemRecord, ...]]] = []
+        for _, mp in self._store.memory_passes.values():  # in creation order
+            if mp.conversation_id != scope.conversation_id or mp.status is not PassStatus.APPLIED:
+                continue
+            items = tuple(self._item_record(p, i, row) for (p, i), row in sorted(self._store.pass_items.items())
+                          if p == mp.pass_id and row["outcome"] in shown)
+            if items:
+                found.append((mp, items))
+        return tuple(found[-limit:])
+
     async def list_proposals(self, principal: PrincipalId) -> tuple[Proposal, ...]:
         order = {p: n for n, p in enumerate(self._store.memory_passes)}
         found: list[tuple[datetime, int, int, Proposal]] = []
@@ -1954,7 +1976,7 @@ class InMemoryData:
         return tuple(p for *_, p in sorted(found, key=lambda f: f[:3]))
 
     async def decide_proposal(self, principal: PrincipalId, pass_id: str, item: int, *, keep: bool,
-                              now: datetime) -> Memory | None:
+                              now: datetime, dates: NoteDates | None = None) -> Memory | None:
         found = self._store.memory_passes.get(pass_id)
         row = None if found is None or found[0] != principal else self._store.pass_items.get((pass_id, item))
         if found is None or row is None:
@@ -1970,11 +1992,12 @@ class InMemoryData:
             text = rules.check_note_text(planned.category, planned.text)
             if self._memory_count(principal) >= MAX_MEMORIES:
                 raise DataError(DataErrorCode.LIMIT_EXCEEDED, f"{MAX_MEMORIES} notes are kept at most")
-            note = Memory(self._new_memory_id(principal), planned.category, text, MemoryOrigin.EXTRACTOR,
-                          found[1].conversation_id, None, 1, now, now, due_at=planned.due_at,
-                          due_instant=planned.due_instant, valid_until=planned.valid_until,
-                          valid_instant=planned.valid_instant, source_pass=pass_id, source_item=item,
-                          user_approved_at=now)
+            proposed = Memory(0, planned.category, text, MemoryOrigin.EXTRACTOR, found[1].conversation_id, None, 1,
+                              now, now, due_at=planned.due_at, due_instant=planned.due_instant,
+                              valid_until=planned.valid_until, valid_instant=planned.valid_instant,
+                              source_pass=pass_id, source_item=item, user_approved_at=now)
+            proposed = rules.check_fresh(proposed if dates is None else rules.dated(proposed, dates), now)
+            note = replace(proposed, memory_id=self._new_memory_id(principal))
             self._store.memories[(principal, note.memory_id)] = note
         row.update(outcome="kept" if keep else "discarded", decided_at=now,
                    target=row["target"] if note is None else f"m{note.memory_id}")

@@ -398,3 +398,39 @@ def test_a_backfill_or_retry_says_when_memory_passes_do_not_run(server: Server) 
     assert off.status_code == 409 and off.json()["error"]["code"] == "memory_passes_off"
     assert server.client.post(f"/api/conversations/{cid}/memory-passes/x/retry", headers=SEND).status_code == 409
     assert server.client.get("/api/server").json()["auto_memory"] == "off (no HIMARI_MEMORY_MODEL)"
+
+
+def test_a_stale_suggestion_is_refused_then_kept_without_its_date(server: Server) -> None:
+    from himari.data.api import MemoryCategory, PassAction, PassItem
+
+    server.sign_in()
+    _, scope = conversation(server)
+    pass_id = passed(server, scope, "An old plan.", [
+        PassItem(0, "{}", PassAction.PROPOSE, "proposed", category=MemoryCategory.LOOP, text="Dentist.",
+                 due_at="2026-01-01", due_instant=datetime.now(UTC) - timedelta(days=30))])
+    stale = server.client.post(f"/api/memories/proposals/{pass_id}/0", json={"decision": "keep"}, headers=SEND)
+    assert stale.status_code == 422 and stale.json()["error"]["code"] == "stale_date"
+    kept = server.client.post(f"/api/memories/proposals/{pass_id}/0", json={"decision": "keep", "due": None},
+                              headers=SEND)
+    assert kept.status_code == 201 and (kept.json()["text"], kept.json()["due"]) == ("Dentist.", None)
+
+
+def test_lines_carry_their_evidence_and_a_cursor_must_have_a_zone(server: Server, monkeypatch: pytest.MonkeyPatch) -> None:
+    import base64
+
+    from himari.bootstrap import application as app_module
+    from himari.data.api import MemoryCategory, PassAction, PassItem
+
+    server.sign_in()
+    cid, scope = conversation(server)
+    passed(server, scope, "I build HIMARI.", [PassItem(0, '{"evidence": [1]}', PassAction.ADD,
+                                                       category=MemoryCategory.PROJECT, text="Builds HIMARI.")])
+    passed(server, scope, "I write Go.", [PassItem(0, '{"evidence": [2]}', PassAction.ADD,
+                                                   category=MemoryCategory.USER, text="Writes Go.")])
+    lines = server.client.get(f"/api/conversations/{cid}/memory-passes").json()["passes"]
+    assert [[i["evidence"] for i in line["items"]] for line in lines] == [[[1]], [[2]]]
+    monkeypatch.setattr(app_module, "PASS_LINES_LIMIT", 1)
+    newest = server.client.get(f"/api/conversations/{cid}/memory-passes").json()["passes"]
+    assert [line["items"][0]["text"] for line in newest] == ["Writes Go."]  # at most the newest PASS_LINES_LIMIT
+    naive = base64.urlsafe_b64encode(b"2026-10-31T12:00:00|5").decode()
+    assert server.client.get(f"/api/episodes?cursor={naive}").status_code == 400

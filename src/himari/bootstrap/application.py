@@ -415,6 +415,7 @@ class PassLineItem:
     text: str
     due: str | None
     undo: bool  # the note is as the pass left it (a retired one within its days): an Undo is offered
+    evidence: tuple[int, ...] = ()  # the user messages it rests on, to go to (§10.1)
 
 
 @dataclass(frozen=True)
@@ -432,6 +433,12 @@ def _planned(text: str | None) -> dict[str, Any]:
     except ValueError:
         return {}
     return value if isinstance(value, dict) else {}
+
+
+def _evidence(record: PassItemRecord) -> tuple[int, ...]:
+    """The user messages a decision cited (checked when it was planned, §4.4)."""
+    cited = _planned(record.proposal).get("evidence")
+    return tuple(n for n in cited if isinstance(n, int)) if isinstance(cited, list) else ()
 
 
 def _pass_action(record: PassItemRecord) -> str | None:
@@ -743,6 +750,9 @@ class AutoMemoryStatus:
     model_id: str | None
     daily_tokens: int | None
     summary: PassSummary
+
+
+PASS_LINES_LIMIT = 200  # the newest applied passes a conversation shows lines for (PR #138 review)
 
 
 class MemoryPassesOff(RuntimeError):
@@ -1626,40 +1636,40 @@ class Application:
     async def memory_pass_lines(self, scope: TrustedScope) -> tuple[PassLine, ...]:
         """§10.1: this Conversation's applied passes that did something to show,
         each item with whether an Undo is offered now. Authorizes like any read."""
-        lines: list[PassLine] = []
         now = datetime.now(UTC)
-        for found in await self.data.list_passes(scope):
-            if found.status is not PassStatus.APPLIED:
-                continue
-            items: list[PassLineItem] = []
-            for record in await self.data.read_pass_items(found.pass_id):
-                item = await self._pass_line_item(scope.principal_id, record, now)
-                if item is not None:
-                    items.append(item)
+        found = await self.data.applied_pass_items(scope, limit=PASS_LINES_LIMIT)  # two reads, however many (review)
+        targets = [int(r.target.removeprefix("m")) for _, records in found for r in records
+                   if r.target is not None and r.target.removeprefix("m").isdigit()]
+        states = await self.data.memory_revisions(scope.principal_id, targets)
+        lines: list[PassLine] = []
+        for memory_pass, records in found:
+            items = tuple(item for record in records if (item := self._pass_line_item(record, states, now)) is not None)
             if items:
-                lines.append(PassLine(found.pass_id, found.through_sequence, tuple(items)))
+                lines.append(PassLine(memory_pass.pass_id, memory_pass.through_sequence, items))
         return tuple(lines)
 
-    async def _pass_line_item(self, principal: PrincipalId, record: PassItemRecord,
-                              now: datetime) -> PassLineItem | None:
+    @staticmethod
+    def _pass_line_item(record: PassItemRecord, states: Mapping[int, tuple[int, bool]],
+                        now: datetime) -> PassLineItem | None:
         planned, previous = _planned(record.planned), _planned(record.previous)
         memory_id = None if record.target is None else int(record.target.removeprefix("m"))
         if record.outcome in ("sensitive_proposed", "kept"):
             text = str(planned.get("text") or "")
             return PassLineItem(record.item, "waiting" if record.outcome == "sensitive_proposed" else "remembered",
-                                memory_id, text, planned.get("due_at"), False)
+                                memory_id, text, planned.get("due_at"), False, _evidence(record))
         action = _pass_action(record)
         if action is None or memory_id is None:
             return None
         loop = (previous if action == "forget" else planned).get("category") == MemoryCategory.LOOP.value
-        state = await self.data.memory_revision(principal, memory_id)
+        state = states.get(memory_id)
         if action == "forget":
             undo = (state == (record.written_revision, True) and record.created_at > now - RETIRED_KEEP)
             return PassLineItem(record.item, "closed_loop" if loop else "forgot", memory_id,
-                                str(previous.get("text") or ""), previous.get("due_at"), undo)
+                                str(previous.get("text") or ""), previous.get("due_at"), undo, _evidence(record))
         undo = state == (record.written_revision, False)
         shown = "open_loop" if loop and action == "add" else "remembered" if action == "add" else "updated"
-        return PassLineItem(record.item, shown, memory_id, str(planned.get("text") or ""), planned.get("due_at"), undo)
+        return PassLineItem(record.item, shown, memory_id, str(planned.get("text") or ""), planned.get("due_at"), undo,
+                            _evidence(record))
 
     async def undo_pass_item(self, scope: TrustedScope, pass_id: str, item: int) -> Memory | None:
         """§10.1: undo what one item of this Conversation's pass did, from its
@@ -1688,8 +1698,11 @@ class Application:
     async def proposals(self, principal: PrincipalId) -> tuple[Proposal, ...]:
         return await self.data.list_proposals(principal)
 
-    async def decide_proposal(self, principal: PrincipalId, pass_id: str, item: int, keep: bool) -> Memory | None:
-        return await self.data.decide_proposal(principal, pass_id, item, keep=keep, now=datetime.now(UTC))
+    async def decide_proposal(self, principal: PrincipalId, pass_id: str, item: int, keep: bool,
+                              dates: NoteDates | None = None) -> Memory | None:
+        """``dates``: the user's, in place of the proposal's (a passed date dropped or moved)."""
+        return await self.data.decide_proposal(principal, pass_id, item, keep=keep, now=datetime.now(UTC),
+                                               dates=dates)
 
     async def episodes(self, principal: PrincipalId, before: tuple[datetime, int] | None,
                        limit: int) -> tuple[RecentEpisode, ...]:

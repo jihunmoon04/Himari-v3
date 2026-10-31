@@ -66,6 +66,7 @@ class DataErrorCode(Enum):
     RAW_PERSISTENCE_UNAVAILABLE = "raw_persistence_unavailable"
     INVALID_STATE_TRANSITION = "invalid_state_transition"
     INVALID_ARGUMENT = "invalid_argument"
+    STALE_DATE = "stale_date"  # V3-P85: a kept proposal would carry a date already past use
     # V3-P66: files
     LIMIT_EXCEEDED = "limit_exceeded"  # too many staged uploads, or too much presented in the hour
     TOO_LARGE = "too_large"  # one file over the operator's limit
@@ -1111,6 +1112,10 @@ class MemoryStore(Protocol):
         """A note's revision and whether it is retired; None when there is no such note."""
         ...
 
+    async def memory_revisions(self, principal: PrincipalId, memory_ids: Sequence[int]) -> dict[int, tuple[int, bool]]:
+        """``memory_revision`` of many notes in one read; a note that is not there is left out."""
+        ...
+
     async def count_source_episodes(self, scope: TrustedScope) -> int:
         """The episodes of this Conversation: deleted with it (V3-P85 §10.3)."""
         ...
@@ -1506,18 +1511,27 @@ class MemoryPassLog(Protocol):
         """Each item as recorded, by item. NOT_FOUND for no such pass."""
         ...
 
+    async def applied_pass_items(self, scope: TrustedScope, *,
+                                 limit: int) -> tuple[tuple[MemoryPass, tuple[PassItemRecord, ...]], ...]:
+        """§10.1 in one read (PR #138 review): this Conversation's newest ``limit``
+        APPLIED passes that did something to show (an item applied, kept, or a
+        sensitive proposal), oldest first, each with those items by item."""
+        ...
+
     async def list_proposals(self, principal: PrincipalId) -> tuple[Proposal, ...]:
         """V3-P85 §10.2: the principal's proposals nobody kept or discarded, oldest first."""
         ...
 
     async def decide_proposal(self, principal: PrincipalId, pass_id: str, item: int, *, keep: bool,
-                              now: datetime) -> Memory | None:
+                              now: datetime, dates: NoteDates | None = None) -> Memory | None:
         """Keep (the note it names, added now: EXTRACTOR, its pass as source,
-        ``user_approved_at`` set) or discard a proposal; the note kept, or
-        None. NOT_FOUND when the pass is not the principal's (or is gone);
-        VERSION_CONFLICT when the item is not a proposal still waiting; for a
-        keep, the note's own checks (TOO_LARGE, INVALID_ARGUMENT,
-        LIMIT_EXCEEDED), after which it still waits."""
+        ``user_approved_at`` set; ``dates`` given replace the proposal's) or
+        discard a proposal; the note kept, or None. NOT_FOUND when the pass is
+        not the principal's (or is gone); VERSION_CONFLICT when the item is
+        not a proposal still waiting; STALE_DATE when the note would keep a
+        date the cleanup takes at once (a loop due STALE_DUE ago, a fact past
+        its end — PR #138 review); for a keep, the note's own checks
+        (TOO_LARGE, INVALID_ARGUMENT, LIMIT_EXCEEDED). After a refusal it still waits."""
         ...
 
     async def pass_summary(self, principal: PrincipalId, *, day_start: datetime, since: datetime) -> PassSummary:

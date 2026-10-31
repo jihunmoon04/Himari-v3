@@ -1889,6 +1889,13 @@ function passLine(line) {
     const row = el("li", "item-memory item-pass-item");
     row.append(el("span", "item-memory-action", PASS_ACTIONS[item.action] || item.action),
                el("span", "item-memory-text", item.due ? `${item.text} (due ${item.due})` : item.text));
+    if (item.evidence && item.evidence.length) { // PR #138 review: the message it rests on, to check it
+      const source = el("button", "link-button item-memory-link", "Source");
+      source.type = "button";
+      source.setAttribute("aria-label", `Go to the message: ${item.text}`);
+      source.addEventListener("click", () => revealEvent(item.evidence[0]));
+      row.append(source);
+    }
     if (item.undo) {
       const undo = el("button", "link-button item-memory-undo", "Undo");
       undo.type = "button";
@@ -1905,6 +1912,27 @@ function passLine(line) {
   }
   details.append(list);
   return details;
+}
+
+/* Scroll to a conversation's event and mark it for a moment (V3-P85 §10.1, §10.3): what a note or an
+   episode rests on. A folded work block holding it is opened. */
+function revealEvent(sequence) {
+  const node = $("timeline").querySelector(`[data-sequence="${Number(sequence)}"]`);
+  if (!node) {
+    status("That message is not shown here any more.", "warn");
+    return;
+  }
+  for (let up = node.parentElement; up && up.id !== "timeline"; up = up.parentElement) {
+    if (up.tagName === "DETAILS") up.open = true;
+  }
+  node.scrollIntoView({ block: "center" });
+  node.classList.add("is-revealed");
+  setTimeout(() => node.classList.remove("is-revealed"), 2000);
+}
+
+async function openAtEvent(conversationId, sequence) {
+  await openConversation(conversationId);
+  if (app.conversationId === conversationId) revealEvent(sequence);
 }
 
 async function undoPassItem(line, item, button) {
@@ -3402,10 +3430,21 @@ function paintSuggestions(proposals) {
 async function decideProposals(proposals, decision) {
   let refused = null;
   for (const p of proposals) {
+    const path = `/api/memories/proposals/${encodeURIComponent(p.pass_id)}/${p.item}`;
     try {
-      await api("POST", `/api/memories/proposals/${encodeURIComponent(p.pass_id)}/${p.item}`, { decision });
+      await api("POST", path, { decision });
     } catch (error) {
-      if (error.kind !== "http" || error.status !== 409) refused = error; // 409: decided elsewhere already
+      if (error.kind === "http" && error.status === 422 && error.code === "stale_date") {
+        // PR #138 review: kept as it is, the cleanup would take it at once — keep it without its date, or not at all.
+        const date = p.due || p.valid_until;
+        if (await confirmAction("Keep it without its date?", [p.text, `Its date (${date}) has passed.`], "Keep")) {
+          try {
+            await api("POST", path, { decision, due: null, valid_until: null });
+          } catch (again) {
+            refused = again;
+          }
+        }
+      } else if (error.kind !== "http" || error.status !== 409) refused = error; // 409: decided elsewhere already
     }
   }
   if (refused) status(refused.message, refused.kind === "http" ? "warn" : "error");
@@ -3483,6 +3522,15 @@ function episodeRow(episode) {
   link.type = "button";
   link.addEventListener("click", () => openConversation(episode.conversation.id));
   meta.append(link, episode.origin === "user" ? " · edited by you" : "");
+  for (const [label, sequences] of [["Your messages", episode.user_sequences],
+                                    ["HIMARI's replies", episode.himari_sequences]]) {
+    if (!sequences || !sequences.length) continue;
+    const go = el("button", "link-button memory-source-link", label);
+    go.type = "button";
+    go.addEventListener("click", () => openAtEvent(episode.conversation.id, sequences[0])
+      .catch((e) => status(e.message, "error")));
+    meta.append(" · ", go);
+  }
   main.append(meta);
   const actions = el("div", "memory-row-actions");
   const edit = el("button", "link-button", "Edit");
