@@ -40,7 +40,7 @@ from himari.prompt.api import (
     UserTurn,
     time_line,
 )
-from himari.prompt.compaction import anchors, context_key, part_anchor, read_summary
+from himari.prompt.compaction import anchors, context_key, part_anchor, read_summary, state_key
 from himari.prompt.system import fit_notes, system_text
 
 
@@ -93,6 +93,7 @@ class Composer:
                 snapshot_revision=snapshot_revision,
                 artifact_revisions={a.artifact_id: a.revision for a in basis.artifacts},
                 context_key=context_key(inputs),
+                state_key=state_key(inputs),
             ),
             source_notes=fit_notes(inputs.source_notes),
             attachments=inputs.attachments,

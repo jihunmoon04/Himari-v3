@@ -202,6 +202,9 @@ class PromptBasis(DeepFrozen):
     # Opaque digest of what the input was composed under besides history and
     # state (model, instructions, Tool catalog); set by Prompt (V3-P48).
     context_key: str | None = None
+    # Opaque digest of the runtime state's parts no revision tracks (memory,
+    # recent episodes, presence); set by Prompt (V3-P89 post-merge review P1).
+    state_key: str | None = None
 
 
 @dataclass(frozen=True)

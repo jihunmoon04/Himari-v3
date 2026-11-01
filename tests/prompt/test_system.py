@@ -120,3 +120,22 @@ def test_one_principle_names_what_is_information() -> None:
     for kind in ("runtime state", "tool results", "<attachment>", "<file_reference>", "web pages",
                  "notes from tool servers", "saved memories", "window or media titles"):
         assert kind in principle, kind
+
+
+def test_an_operators_several_instructions_stay_in_order_before_the_sections() -> None:
+    """V3-P89 post-merge review P2: the operator's own instructions replace only the base — every
+    string of them, in order — and HIMARI's sections follow."""
+    sections = system_text(inputs(instructions=("First rule.", "Second rule.", "Third rule.")))
+    assert sections[:3] == ("First rule.", "Second rule.", "Third rule.")
+    assert sections[3].startswith("# What instructs you") and BASE_INSTRUCTIONS[0] not in "\n".join(sections)
+
+
+def test_the_state_key_is_kept_with_the_runs_basis() -> None:
+    """Stored as JSON with the basis: an older Run has none (and its measurement counts the state again)."""
+    from himari.data import codec
+    from himari.data.api import PromptBasis
+
+    basis = PromptBasis(3, 1, None, {}, "context", "state")
+    assert codec.prompt_basis_from(codec.prompt_basis(basis)) == basis
+    older = '{"event_sequence": 3, "state_revision": 1, "snapshot_revision": null, "artifact_revisions": {}}'
+    assert codec.prompt_basis_from(older).state_key is None

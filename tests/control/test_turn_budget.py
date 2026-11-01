@@ -200,8 +200,8 @@ def test_the_measured_estimate_counts_the_turn_state() -> None:
                             state_basis=PersistedStateBasis(1, 0, (), (), ()), observations=(),
                             request_options=RequestOptions("m"), trigger_refs=(), usage_mark=mark)
 
-    key = Composer().compose(prompt_inputs(None)).prompt_basis.context_key
-    measured = prompt_inputs(UsageMark(500, 1, None, key, 0))
+    basis = Composer().compose(prompt_inputs(None)).prompt_basis
+    measured = prompt_inputs(UsageMark(500, 1, None, basis.context_key, 0, state_key=basis.state_key))
     plain = Composer().compose(measured)
     turn = Turn(budget=30_000, max_runs=None)
     for _ in range(3):

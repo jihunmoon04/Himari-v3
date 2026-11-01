@@ -355,6 +355,7 @@ class UsageMark(DeepFrozen):
     context_key: str | None = None  # PromptBasis.context_key of that Run
     state_revision: int | None = None
     provider_key: str | None = None  # the Provider that measured it (RunRecord)
+    state_key: str | None = None  # PromptBasis.state_key of that Run
 
 
 @dataclass(frozen=True)

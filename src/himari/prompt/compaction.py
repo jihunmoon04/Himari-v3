@@ -105,6 +105,8 @@ from himari.prompt.api import (
     json_data,
     state_block,
     turn_state_data,
+    presence_data,
+    user_memory_data,
 )
 from himari.prompt.system import fit_notes, system_text
 
@@ -244,6 +246,34 @@ def context_key(inputs: PromptInputs) -> str:
         "tools": [[d.tool_id, d.description, thaw(d.input_schema)] for d in inputs.tool_catalog],
     }
     return hashlib.sha256(json.dumps(data, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+
+
+# Counters that move with the clock alone: left out of the state key, so a minute
+# passing does not count as a change (their few digits barely change the size).
+_CLOCK_COUNTERS = frozenset({"for_minutes", "idle_minutes", "lasted_minutes", "ended_minutes_ago"})
+
+
+def _without_clock(value: object) -> object:
+    if isinstance(value, dict):
+        return {k: _without_clock(v) for k, v in value.items() if k not in _CLOCK_COUNTERS}
+    if isinstance(value, list):
+        return [_without_clock(v) for v in value]
+    return value
+
+
+def state_key(inputs: PromptInputs) -> str:
+    """V3-P89 post-merge review P1: digest of the runtime state's parts that no
+    revision tracks — user_memory (notes with their dates, loops, recent
+    episodes) and presence — as they are rendered. When it differs from the
+    measured Run's, the estimate counts the whole state again (as for a new
+    state revision). ``now`` and the clock's counters are left out."""
+    data = {
+        "user_memory": None if inputs.memories is None else user_memory_data(
+            inputs.memories, inputs.episodes, inputs.episode_count, inputs.now),
+        "presence": None if inputs.presence is None else _without_clock(presence_data(inputs.presence)),
+    }
+    return hashlib.sha256(json.dumps(thaw(data), ensure_ascii=False, sort_keys=True,
+                                     default=str).encode()).hexdigest()
 
 
 def read_summary(snapshot: PromptSnapshot | None) -> str | None:
@@ -413,8 +443,8 @@ class Compactor:
             for part in model_input.conversation
             if not isinstance(part, CompressedHistory) and part_anchor(part, by_event, by_run) > mark.event_sequence
         )
-        if mark.state_revision != basis.state_revision:
-            added += state_tokens(model_input)
+        if mark.state_revision != basis.state_revision or mark.state_key != basis.state_key:
+            added += state_tokens(model_input)  # the whole state again: memory and presence change apart (V3-P89)
         else:
             added += turn_state_tokens(model_input)  # changes every Run, apart from the state's revision (V3-P62 B4)
         return ContextEstimate(mark.input_tokens + added, measured=True)
