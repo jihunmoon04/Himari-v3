@@ -74,11 +74,11 @@ public partial class MainWindow : Window
         tray.DoubleClick += (_, _) => ToggleVisible();
         timer.Tick += (_, _) => UpdateFrame();
         timer.Start();
-        SourceInitialized += (_, _) => { if (!offline) { SetupWindowControls(); SetupForegroundTracking(); } };
+        SourceInitialized += (_, _) => { if (!offline) { SetupWindowControls(); SetupForegroundTracking(); SetupActivitySignals(); } };
         Loaded += async (_, _) => { if (loadedOnce) return; loadedOnce = true; InitializeDialogueHost(); UpdateSceneBounds(); if (!offline) { if (!preferencesLoaded) SetupWindowControls(); SetupChatHotkey(); await RestoreConnection(); } };
         Closing += (_, _) => { settings.AllowClose = true; };
         Closing += (_, _) => RestoreMoveHomeOnClose();
-        Closed += (_, _) => { CleanupBubblePresentation(); replyReader?.Dispose(); CleanupForegroundTracking(); dialogueHost?.Close(); CancelMovePreview(); lifetime.Cancel(); StopConnection(); timer.Stop(); CleanupWindowControls(); tray.Visible = false; tray.Dispose(); menu.Dispose(); };
+        Closed += (_, _) => { CleanupActivitySignals(); CleanupBubblePresentation(); replyReader?.Dispose(); CleanupForegroundTracking(); dialogueHost?.Close(); CancelMovePreview(); lifetime.Cancel(); StopConnection(); timer.Stop(); CleanupWindowControls(); tray.Visible = false; tray.Dispose(); menu.Dispose(); };
         IsVisibleChanged += (_, _) => UpdateSceneBounds();
         Activated += (_, _) =>
         {

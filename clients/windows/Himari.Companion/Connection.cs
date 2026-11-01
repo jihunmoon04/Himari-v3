@@ -134,6 +134,7 @@ public partial class MainWindow
         if (unknownText is { } pending && pending.Server.SameDevice(local)) unknownText = pending with { Server = local };
         StopConnection();
         client = local;
+        serverTakesSignals = false; quietUntil = null; UpdateQuietMenu();  // learnt again from the new server
         var cts = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token); connection = cts;
         PairPanel.Visibility = Visibility.Collapsed;
         SetConnected(false, "기기 확인 중…");
@@ -150,6 +151,7 @@ public partial class MainWindow
                 var info = await local.SendAsync(HttpMethod.Get, "/api/device", null, timeout.Token);
                 if (cts.IsCancellationRequested || !ReferenceEquals(local, client)) return;
                 deviceId = Str(Prop(info, "device"), "device_id") ?? throw new InvalidOperationException("기기 응답이 올바르지 않습니다.");
+                ServerFeatures(info);
                 await RefreshConversations(Str(Prop(info, "recent_conversation"), "id"), timeout.Token);
                 if (cts.IsCancellationRequested || !ReferenceEquals(local, client)) return;
                 _ = EventLoop(local, cts.Token); _ = PresenceLoop(local, cts.Token); return;
@@ -467,18 +469,31 @@ public partial class MainWindow
         if (!GetLastInputInfo(ref info)) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
         return (int)Math.Min(unchecked((uint)Environment.TickCount - info.Time) / 1000, 2592000u);
     }
+    /// <summary>What GET /api/device and hello say of the server (V3-P88 §14): whether it takes the activity signals, and the quiet.</summary>
+    private void ServerFeatures(JsonElement info)
+    {
+        bool takes = Prop(Prop(info, "features"), "presence_signals") is { ValueKind: JsonValueKind.Number } version && version.GetInt32() == 1;
+        if (takes && !serverTakesSignals) signalSchedule.Urgent();
+        serverTakesSignals = takes;
+        QuietFromServer(info, "quiet_until");
+    }
     private async Task PresenceLoop(ServerClient local, CancellationToken ct)
     {
-        DateTime last = DateTime.MinValue; bool wasIdle = false;
+        bool wasIdle = false;
         while (!ct.IsCancellationRequested)
         {
             try
             {
                 int idle = IdleSeconds();
-                if ((DateTime.UtcNow - last).TotalSeconds >= 60 || (wasIdle && idle < 300))
+                var now = DateTime.UtcNow;
+                if (serverTakesSignals) ObserveSignals(now);  // V3-P88: the program in front, media, microphone and camera
+                if (signalSchedule.Due(now) || (wasIdle && idle < 300))
                 {
                     string zone = TimeZoneInfo.TryConvertWindowsIdToIanaId(TimeZoneInfo.Local.Id, out var iana) ? iana : TimeZoneInfo.Local.Id;
-                    await local.SendAsync(HttpMethod.Post, "/api/device/presence", new { idle_seconds = idle, time_zone = zone }, ct); last = DateTime.UtcNow;
+                    var body = PresenceSignal(idle, zone, now);
+                    await local.SendAsync(HttpMethod.Post, "/api/device/presence", body, ct);
+                    signalSchedule.Sent(now);  // the after mark goes only once it was accepted
+                    ShowSignalPreview(body);
                 }
                 wasIdle = idle >= 300;
             }

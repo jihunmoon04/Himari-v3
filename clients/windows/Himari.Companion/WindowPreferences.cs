@@ -5,7 +5,7 @@ namespace Himari.Companion;
 
 internal sealed record WindowPreferences(double Left, double Top, double CharacterHeight, bool MoveEnabled = true,
     bool ScreenSharing = true, bool FacingLeft = false, double BubbleMinimum = 8, double SecondsPer100 = 8, string ChatHotkey = "Alt+Q",
-    string BubblePlacement = "상하 자동", int LayoutVersion = 0)
+    string BubblePlacement = "상하 자동", int LayoutVersion = 0, SignalSettings? Signals = null)
 {
     internal static WindowPreferences Normalize(WindowPreferences value, double left, double top, double width, double height, double windowWidth, double windowHeight)
     {
