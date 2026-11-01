@@ -34,19 +34,36 @@ internal static class Program
         Check(!Key(System.Windows.Input.Key.Enter).Handled && sent == 1, "Shift+Enter is left to multiline textbox");
         modifiers = ModifierKeys.None;
         var composition = new TextComposition(InputManager.Current, input, "가", TextCompositionAutoComplete.Off);
-        input.RaiseEvent(new TextCompositionEventArgs(Keyboard.PrimaryDevice, composition) { RoutedEvent = TextCompositionManager.PreviewTextInputStartEvent });
-        Check(!Key(System.Windows.Input.Key.Enter).Handled && sent == 1, "Enter during IME composition does not send");
+        void Compose(RoutedEvent stage) => input.RaiseEvent(new TextCompositionEventArgs(Keyboard.PrimaryDevice, composition) { RoutedEvent = stage });
+        void Pump()
+        {
+            var frame = new DispatcherFrame();
+            Dispatcher.CurrentDispatcher.BeginInvoke(DispatcherPriority.ApplicationIdle, new Action(() => frame.Continue = false));
+            Dispatcher.PushFrame(frame);
+        }
+        Compose(TextCompositionManager.PreviewTextInputStartEvent);
+        Check(Key(System.Windows.Input.Key.Enter).Handled && sent == 1, "Enter during IME composition never reaches the multiline textbox");
         Check(!Key(System.Windows.Input.Key.ImeProcessed).Handled && sent == 1, "IME-processed key is left to IME");
-        input.RaiseEvent(new TextCompositionEventArgs(Keyboard.PrimaryDevice, composition) { RoutedEvent = TextCompositionManager.PreviewTextInputEvent });
-        Check(!Key(System.Windows.Input.Key.Enter).Handled && sent == 1, "commit Enter is guarded until input dispatch finishes");
-        var frame = new DispatcherFrame();
-        Dispatcher.CurrentDispatcher.BeginInvoke(DispatcherPriority.ApplicationIdle, new Action(() => frame.Continue = false));
-        Dispatcher.PushFrame(frame);
-        Check(Key(System.Windows.Input.Key.Enter).Handled && sent == 2 && routed == 6, "next Enter sends after IME commit on real routed event path");
+        Compose(TextCompositionManager.PreviewTextInputEvent);
+        Pump();
+        Check(sent == 2, "Enter during a composition sends once the commit has landed");
+        // Korean IME commits the last syllable and passes the same Enter on.
+        Compose(TextCompositionManager.PreviewTextInputStartEvent);
+        Compose(TextCompositionManager.PreviewTextInputEvent);
+        Check(Key(System.Windows.Input.Key.Enter).Handled && sent == 2, "Korean commit Enter is not left to the textbox as a newline");
+        Pump();
+        Check(sent == 3, "Korean commit Enter sends after the commit");
+        Compose(TextCompositionManager.PreviewTextInputStartEvent);
+        modifiers = ModifierKeys.Shift;
+        Check(!Key(System.Windows.Input.Key.Enter).Handled && sent == 3, "Shift+Enter during a composition is left to multiline textbox");
+        modifiers = ModifierKeys.None;
+        Compose(TextCompositionManager.PreviewTextInputEvent);
+        Pump();
+        Check(Key(System.Windows.Input.Key.Enter).Handled && sent == 4 && routed == 7, "Enter after the commit settles sends at once on real routed event path");
         var normal = new TextComposition(InputManager.Current, input, "a", TextCompositionAutoComplete.On);
         input.RaiseEvent(new TextCompositionEventArgs(Keyboard.PrimaryDevice, normal) { RoutedEvent = TextCompositionManager.PreviewTextInputStartEvent });
         input.RaiseEvent(new TextCompositionEventArgs(Keyboard.PrimaryDevice, normal) { RoutedEvent = TextCompositionManager.PreviewTextInputEvent });
-        Check(Key(System.Windows.Input.Key.Enter).Handled && sent == 3, "ordinary text followed immediately by Enter is not mistaken for IME");
+        Check(Key(System.Windows.Input.Key.Enter).Handled && sent == 5, "ordinary text followed immediately by Enter is not mistaken for IME");
         Color Fill(bool isUser)
         {
             var bubble = new PixelBubble { IsUser = isUser, Child = new Border() };
@@ -119,15 +136,17 @@ internal static class Program
         var replyTimer = (DispatcherTimer)typeof(MainWindow).GetField("bubbleTimer", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(timeline)!;
         Timeline("OpenComposer"); draftInput.Text = "첫 질문"; draftInput.Clear(); Timeline("ShowSentMessage", "첫 질문");
         Timeline("OpenReplyBubble", "c", "j1");
-        Check(Grid.GetRow(oldUser) == 0 && Grid.GetRow(reply) == 1, "reply arrives beneath the earlier user message");
+        Check(Grid.GetRow(oldUser) < Grid.GetRow(reply), "reply arrives beneath the earlier user message");
         Timeline("ShowSentMessage", "첫 질문");
-        Check(Grid.GetRow(oldUser) == 0 && Grid.GetRow(reply) == 1, "late send acknowledgement preserves chronological order");
+        Check(Grid.GetRow(oldUser) < Grid.GetRow(reply), "late send acknowledgement preserves chronological order");
         var originalParent = oldUser.Parent;
         Timeline("OpenComposer"); draftInput.Text = "다음 초안"; draftInput.Select(1, 3);
         Timeline("OpenReplyBubble", "c", "j1");
-        Check(Grid.GetRow(reply) == 0 && Grid.GetRow(oldUser) == 1 && oldUser.Parent == originalParent && draftInput.SelectedText == "음 초", "new draft moves below the prior reply and reconnecting that same reply neither reorders nor reparents its editor");
+        Check(Grid.GetRow(reply) < Grid.GetRow(oldUser) && oldUser.Parent == originalParent && draftInput.SelectedText == "음 초", "new draft moves below the prior reply and reconnecting that same reply neither reorders nor reparents its editor");
         Timeline("OpenReplyBubble", "c", "j2");
-        Check(Grid.GetRow(oldUser) == 0 && Grid.GetRow(reply) == 1, "a new reply moves to the bottom even if a previous reply remained visible");
+        Check(Grid.GetRow(reply) < Grid.GetRow(oldUser), "a new reply comes in above the open editor, which always stays last");
+        // The first message went into the stack when the editor reopened; the single-bubble checks below start without it.
+        Timeline("ClearHistory");
         draftInput.Clear(); Timeline("ShowSentMessage", new string('가', 100)); Timeline("ScheduleBubbleClose", "짧은 답변");
         Timeline("AssistantBubbleExpired");
         Check(oldUser.Visibility == Visibility.Visible && reply.Visibility == Visibility.Visible && !replyTimer.IsEnabled, "a newer short answer cannot disappear ahead of an older long user message");
@@ -213,7 +232,7 @@ internal static class Program
                 var userBounds = user.TransformToAncestor(content).TransformBounds(new Rect(user.RenderSize));
                 Check(assistantBounds.Top >= 0 && userBounds.Bottom <= 700 - size + 14, "both bubbles fit above character at supported sizes");
                 Check(Math.Abs(assistantBounds.Left + assistantBounds.Width / 2 - userBounds.Left - userBounds.Width / 2) < 1 &&
-                    (assistantLatest ? userBounds.Bottom <= assistantBounds.Top : assistantBounds.Bottom <= userBounds.Top), "the newer bubble stays below the older on the same center line in either speaker order");
+                    assistantBounds.Bottom <= userBounds.Top, "the open editor stays below the reply on the same center line whichever came last");
                 var characterBounds = character.TransformToAncestor(content).TransformBounds(new Rect(character.RenderSize));
                 double gazeOffset = userBounds.Left + userBounds.Width / 2 - characterBounds.Left - characterBounds.Width / 2;
                 Check(flipped ? gazeOffset < 0 : gazeOffset > 0, "shared conversation center follows the character gaze in both directions");

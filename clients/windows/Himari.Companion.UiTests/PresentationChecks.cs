@@ -104,7 +104,8 @@ internal static class PresentationChecks
             check(w.Left == left && w.Top == top, "changing bubble side keeps character anchored");
         }
         var area = SystemParameters.WorkArea;
-        mode.SelectedItem = "하 고정"; Call(w, "OpenReplyBubble", "c", "vertical-order"); Call(w, "OpenComposer"); Pump();
+        // Earlier steps left a sent message in the stack, which would expire first.
+        Call(w, "ClearHistory"); mode.SelectedItem = "하 고정"; Call(w, "OpenReplyBubble", "c", "vertical-order"); Call(w, "OpenComposer"); Pump();
         check(Grid.GetRow(user) < Grid.GetRow(answer), "below mode mirrors stack order so new draft stays closest to character");
         Call(w, "AssistantBubbleExpired"); Pump();
         check(answer.Visibility == Visibility.Collapsed && user.Visibility == Visibility.Visible, "below mode expires oldest reply first even when it occupies bottom row");
@@ -123,11 +124,40 @@ internal static class PresentationChecks
         input.Clear(); Call(w, "ShowSentMessage", "질문"); w.Activate(); Keyboard.Focus(w); Pump();
         w.RaiseEvent(new KeyEventArgs(Keyboard.PrimaryDevice, source, Environment.TickCount, Key.A) { RoutedEvent = Keyboard.PreviewKeyDownEvent }); Pump();
         check(input.IsKeyboardFocused && ((FrameworkElement)w.FindName("ComposerPanel")).Visibility == Visibility.Visible, "printable key focuses editor before text/IME composition arrives");
+        var composer = (FrameworkElement)w.FindName("ComposerPanel"); var sentText = (FrameworkElement)w.FindName("UserSent");
+        // The keystroke above moved the first message into the stack; these checks start without it.
+        var past = (StackPanel)w.FindName("History");
+        Call(w, "ClearHistory"); Call(w, "ShowSentMessage", "질문"); Pump();
+        check(input.IsKeyboardFocused && composer.DesiredSize.Height == 0 && sentText.Visibility == Visibility.Visible,
+            "a sent bubble shows only the sent text while its hidden editor keeps focus for the next IME keystroke");
+        Call(w, "AssistantBubbleExpired"); Call(w, "UserBubbleExpired"); Pump();
+        check(input.IsKeyboardFocused && user.Visibility == Visibility.Visible && user.DesiredSize.Height == 0 && user.Opacity == 0,
+            "an expired sent bubble disappears but still holds editor focus");
+        input.Text = "다음"; Pump();
+        check(input.IsKeyboardFocused && composer.DesiredSize.Height > 0 && sentText.Visibility == Visibility.Collapsed && user.DesiredSize.Height > 0 && user.Opacity == 1 && past.Children.Count == 0,
+            "typing after a send opens a new editor bubble and never brings back an expired one");
+        input.Clear(); Call(w, "CloseBubble"); Call(w, "ShowSentMessage", "둘째 질문"); message.Text = "둘째 답변"; Call(w, "OpenReplyBubble", "c", "stack-1"); Pump();
+        input.Text = "셋째"; Pump();
+        check(past.Children.Count == 1 && sentText.Visibility == Visibility.Collapsed && answer.Visibility == Visibility.Visible && Grid.GetRow(past) < Grid.GetRow(answer) && Grid.GetRow(answer) < Grid.GetRow(user),
+            "typing moves the sent message up into the stack above the reply, like a text conversation");
+        input.Clear(); Call(w, "ShowSentMessage", "셋째"); Call(w, "OpenReplyBubble", "c", "stack-2"); message.Text = "셋째 답변"; Pump();
+        check(past.Children.Count == 2 && ((PixelBubble)past.Children[0]).IsUser && !((PixelBubble)past.Children[1]).IsUser && sentText.Visibility == Visibility.Visible && Grid.GetRow(user) < Grid.GetRow(answer),
+            "a new reply moves the earlier one into the stack while the newest message stays live above it");
+        for (int i = 0; i < 4; i++)
+        {
+            input.Text = "더"; Pump(); input.Clear(); Call(w, "ShowSentMessage", $"질문 {i}"); Call(w, "OpenReplyBubble", "c", $"stack-more-{i}"); message.Text = $"답변 {i}"; Pump();
+        }
+        check(past.Children.Count == 4 && user.Visibility == Visibility.Visible && answer.Visibility == Visibility.Visible, "at most six bubbles are shown; the oldest leave the stack first");
+        if (screenshots is not null) { System.IO.Directory.CreateDirectory(screenshots); Save(host, System.IO.Path.Combine(screenshots, "06-stacked-conversation.png")); }
+        var oldestLeft = past.Children[1];
+        Call(w, "PastBubbleExpired", 0); Pump();
+        check(past.Children.Count == 3 && past.Children[0] == oldestLeft, "each stacked bubble expires on its own time, oldest first");
+        Call(w, "ClearHistory"); input.Clear(); answer.Visibility = Visibility.Visible; Pump();
         input.Text = "IME 초안"; input.Select(0, 3);
         var ime = new TextComposition(InputManager.Current, input, "가", TextCompositionAutoComplete.Off);
         input.RaiseEvent(new TextCompositionEventArgs(Keyboard.PrimaryDevice, ime) { RoutedEvent = TextCompositionManager.PreviewTextInputStartEvent });
         mode.SelectedItem = "상 고정"; Pump();
-        var enter = new KeyEventArgs(Keyboard.PrimaryDevice, source, Environment.TickCount, Key.Enter) { RoutedEvent = Keyboard.PreviewKeyDownEvent }; input.RaiseEvent(enter);
+        var enter = new KeyEventArgs(Keyboard.PrimaryDevice, source, Environment.TickCount, Key.ImeProcessed) { RoutedEvent = Keyboard.PreviewKeyDownEvent }; input.RaiseEvent(enter);
         check(!enter.Handled && input.SelectedText == "IME", "moving the detached bubble retains active IME composition and selection");
         message.Text = "## 오늘 할 일\n\n**선생님**, 바로 이어서 이야기할 수 있어요.\n\n- 입력창 자동 열기\n- 말풍선 위치 선택\n\n| 기능 | 상태 |\n|---|---|\n| 대화 | 준비 |";
         if (screenshots is not null)
@@ -205,7 +235,7 @@ internal static class PresentationChecks
             var monitor = System.Windows.Forms.Screen.FromHandle(new WindowInteropHelper(w).Handle);
             bool Covers() => host.IsVisible && host.Width * VisualTreeHelper.GetDpi(host).DpiScaleX >= monitor.Bounds.Width - 1
                 && host.Height * VisualTreeHelper.GetDpi(host).DpiScaleY >= monitor.Bounds.Height - 1;
-            input.Clear(); Call(w, "CloseBubble"); Call(w, "HideUserBubble"); Pump();
+            input.Clear(); Call(w, "ClearHistory"); Call(w, "CloseBubble"); Call(w, "HideUserBubble"); Pump();
             check(!host.IsVisible, "with no bubbles and no fullscreen window the dialogue host is hidden");
             probe.SetValue(w, (Func<System.Windows.Forms.Screen?>)(() => monitor));
             Call(w, "UpdateSceneBounds"); Pump();

@@ -2,7 +2,8 @@
   <Grid>
     <TextBlock x:Name="Status" Text="연결되지 않음" Visibility="Collapsed"/>
     <Grid x:Name="DialogueStack" Width="304" HorizontalAlignment="Right" VerticalAlignment="Bottom" Margin="0,0,50,320" TextElement.Foreground="{StaticResource BubbleInk}" TextElement.FontSize="14">
-      <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+      <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+      <StackPanel x:Name="History" HorizontalAlignment="Center" Visibility="Collapsed"/>
       <local:PixelBubble x:Name="BubblePanel" Grid.Row="1" Width="280" MaxHeight="320" HorizontalAlignment="Center" TailRight="False" Visibility="Collapsed">
         <Grid><Grid.RowDefinitions><RowDefinition Height="*"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
           <Grid x:Name="ReplyContent"><local:MarkdownView x:Name="Message" FontSize="14" Foreground="{StaticResource BubbleInk}"/>
@@ -18,7 +19,7 @@
           </Border>
         </Grid>
       </local:PixelBubble>
-      <local:PixelBubble x:Name="UserBubble" Width="280" MaxHeight="260" HorizontalAlignment="Center" IsUser="True" TailRight="True" Visibility="Collapsed">
+      <local:PixelBubble x:Name="UserBubble" Grid.Row="2" Width="280" MaxHeight="260" HorizontalAlignment="Center" IsUser="True" TailRight="True" Visibility="Collapsed">
         <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"><StackPanel>
           <TextBlock x:Name="UserSent" TextWrapping="Wrap" FontSize="14" LineHeight="22" Margin="0" Visibility="Collapsed"/>
           <StackPanel x:Name="ComposerPanel" Visibility="Collapsed">

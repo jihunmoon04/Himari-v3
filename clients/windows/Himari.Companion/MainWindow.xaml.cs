@@ -34,6 +34,7 @@ public partial class MainWindow : Window
     private DateTime lastIdleCheck = DateTime.MinValue;
     private int demoVersion;
     private int chatFocusVersion;
+    private bool activatedOnce;
 
     public MainWindow() : this(false) { }
     internal MainWindow(bool offline)
@@ -44,6 +45,9 @@ public partial class MainWindow : Window
         Character.Source = character.Bitmap;
         _ = new ComposerInput(Input, SendMessage);
         SetupTypeToChat(this);
+        // Picking a conversation leaves focus in the list, where typing searches it.
+        Conversations.DropDownClosed += (_, _) => FocusComposerIfOpen();
+        Input.LostKeyboardFocus += (_, _) => StashedComposerLostFocus();
         Message.SourceChanged += (_, _) => { replyReader?.UpdateText(Message.Text); UpdateBubblePresentation(); };
         settings = new SettingsWindow();
         settings.ConnectionStatus.SetBinding(System.Windows.Controls.TextBlock.TextProperty, new System.Windows.Data.Binding("Text") { Source = Status });
@@ -83,8 +87,14 @@ public partial class MainWindow : Window
         Activated += (_, _) =>
         {
             UpdateFullscreenPresentation();
+            bool first = !activatedOnce; activatedOnce = true;
             // Alt+Tab selects the character window; over fullscreen hand focus to the dialogue host.
-            if (CoverScreen() is not null && ComposerPanel.Visibility != Visibility.Visible) Dispatcher.BeginInvoke(new Action(OpenChat));
+            // Elsewhere too the editor opens on activation: a keystroke typed into the window
+            // first loses its IME composition when focus moves. A click opens chat on release, and
+            // the window's first activation at startup opens nothing.
+            bool pointer = System.Windows.Input.Mouse.LeftButton == System.Windows.Input.MouseButtonState.Pressed
+                || System.Windows.Input.Mouse.RightButton == System.Windows.Input.MouseButtonState.Pressed;
+            if (ComposerPanel.Visibility != Visibility.Visible && (CoverScreen() is not null || !first && !pointer)) Dispatcher.BeginInvoke(new Action(OpenChat));
             else FocusComposerIfOpen();
         };
         UpdateFrame();
@@ -130,12 +140,12 @@ public partial class MainWindow : Window
     private void OpenComposer()
     {
         if (UserBubble.Visibility != Visibility.Visible && string.IsNullOrWhiteSpace(Input.Text)) { UserSent.Text = ""; UserSent.Visibility = Visibility.Collapsed; }
-        UserSent.Visibility = Visibility.Collapsed;
+        FreezeSentBubble(); UserSent.Visibility = Visibility.Collapsed;
         PresentUserBubble(); UserBubble.Visibility = Visibility.Visible; ComposerPanel.Visibility = Visibility.Visible;
         ArrangeBubbles(); UpdateSceneBounds(); ExpireBubbles();
     }
     private void ConversationMenuClick(object sender, RoutedEventArgs e) { OpenComposer(); ChatTools.Visibility = Visibility.Visible; ChatTools.IsExpanded = true; }
-    private void CloseBubbleClick(object sender, RoutedEventArgs e) { CloseBubble(); HideUserBubble(); }
+    private void CloseBubbleClick(object sender, RoutedEventArgs e) { ClearHistory(); CloseBubble(); HideUserBubble(); }
     private void FlipClick(object sender, RoutedEventArgs e) => settings.FacingLeft.IsChecked = FlipMenu.IsChecked;
     private void ChatClick(object sender, RoutedEventArgs e) => OpenChat();
     private void SettingsClick(object sender, RoutedEventArgs e) => ShowSettings();

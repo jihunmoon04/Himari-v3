@@ -284,6 +284,7 @@ public partial class MainWindow
     private async void NewConversationClick(object sender, RoutedEventArgs e)
     {
         if (!connected || client is null || connection is null) return;
+        FocusComposerIfOpen();
         try { var created = await client.SendAsync(HttpMethod.Post, "/api/conversations", new { }, connection.Token); await RefreshConversations(Str(created, "id"), connection.Token); }
         catch (Exception ex) { ShowError(ex); }
     }
@@ -291,13 +292,18 @@ public partial class MainWindow
     {
         inputRevision++;
         UpdateBubblePresentation();
-        if (!string.IsNullOrEmpty(Input.Text) && ComposerPanel.Visibility == Visibility.Visible) PresentUserBubble();
+        if (!string.IsNullOrEmpty(Input.Text) && ComposerPanel.Visibility == Visibility.Visible)
+        {
+            // Typing after a send starts a new bubble below the sent one.
+            FreezeSentBubble();
+            UserSent.Visibility = Visibility.Collapsed; PresentUserBubble();
+        }
     }
     private void SetCurrentConversation(string? id)
     {
         if (currentConversation != id)
         {
-            inputRevision++; CloseBubble(); awaitingAnswer = false;
+            inputRevision++; CloseBubble(); ClearHistory(); awaitingAnswer = false;
             UserSent.Text = ""; UserSent.Visibility = Visibility.Collapsed;
         }
         currentConversation = id;
@@ -314,9 +320,19 @@ public partial class MainWindow
         if (!messageSend.TryEnter()) return;
         var local = client; var ct = connection.Token;
         var context = new SendContext(local, currentConversation, inputRevision);
+        // What is on screen moves up into the stack; the new message comes in below it.
+        frozenSent = null; FreezeThrough(long.MaxValue);
         sending = true;
         PresentUserBubble();
         SendButton.IsEnabled = false;
+        // Like a text message, the text leaves the editor at once and shows as sent. It returns
+        // to an empty editor if the server did not take it, so it can be sent again as before.
+        bool taken = false;
+        if (text.Length > 0)
+        {
+            UserSent.Text = text; Input.Clear(); UserSent.Visibility = Visibility.Visible;
+            ShowSentOnly(false); ArrangeBubbles(); UpdateSceneBounds();
+        }
         LocalScreen? screen = null;
         bool screenFailed = false;
         int beforeSequence = 0;
@@ -356,12 +372,14 @@ public partial class MainWindow
             {
                 response = await local.SendAsync(HttpMethod.Post, PathFor(context.ConversationId) + "/messages", screen is null ? new { text } : new { text, screen = screen.FileId }, ct);
                 if (recoveryOwner?.SameDevice(local) != true) return;
+                taken = true;
                 unresolvedScreen = null;
                 if (screen is { Ready: true }) previousScreenIds[context.ConversationId] = screen.FileId;
             }
             catch (ApiException ex) when (screen is not null && ex.Code == "screen_already_sent")
             {
                 if (recoveryOwner?.SameDevice(local) != true) return;
+                taken = true;
                 unresolvedScreen = null;
                 if (screen.Ready) previousScreenIds[context.ConversationId] = screen.FileId;
                 var detail = await local.SendAsync(HttpMethod.Get, PathFor(context.ConversationId), null, ct);
@@ -404,6 +422,7 @@ public partial class MainWindow
                 if (recoveryOwner?.SameDevice(local) != true) return;
                 unknownText = new(local, context.ConversationId, text, deviceId ?? "", beforeSequence);
                 await CheckUnknownText(false, ct);
+                taken = unknownText is null; // the history showed it was accepted
                 if (MessageFailures.Classify(ex) == MessageFailure.Closed) Status.Text = "이 대화는 닫혔습니다. 메시지가 기록됐을 수 있으니 기록을 확인해 주세요.";
                 return;
             }
@@ -431,7 +450,13 @@ public partial class MainWindow
             pendingScreenConversation = null;
             // Another stream may still be validating this request's screen.
             if (earlyMoves.TryGetValue(context.ConversationId, out var buffered)) buffered.RemoveAll(x => !moveLifetime.IsVerifying(x.Job));
-            sending = false; messageSend.Exit(); UpdateBubblePresentation();
+            sending = false; messageSend.Exit();
+            if (!taken && text.Length > 0 && string.IsNullOrEmpty(Input.Text) && currentConversation == context.ConversationId)
+            {
+                if (frozenSent is { } past && past.Text == text && history.Contains(past)) RemoveHistory(past);
+                UserSent.Visibility = Visibility.Collapsed; OpenComposer(); Input.Text = text; Input.CaretIndex = text.Length;
+            }
+            UpdateBubblePresentation();
         }
     }
     private async void CancelClick(object sender, RoutedEventArgs e) => await RequestCancel();
