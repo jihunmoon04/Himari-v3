@@ -311,7 +311,8 @@ public partial class MainWindow
     }
     // A message the server did not take is never lost: it returns to an empty editor in its own
     // conversation, or else stays as an unsent bubble beside the newer draft.
-    private void KeepUnsent(string text, string conversation)
+    // An unknown outcome is tied to that bubble, so confirming it never marks another with the same text.
+    private void KeepUnsent(string text, string conversation, UnknownText? unknown)
     {
         var past = frozenSent is { } frozen && frozen.Text == text && history.Contains(frozen) ? frozen : null;
         if (currentConversation == conversation && string.IsNullOrEmpty(Input.Text))
@@ -321,7 +322,9 @@ public partial class MainWindow
             return;
         }
         if (past is null && UserSent.Visibility == Visibility.Visible && UserSent.Text == text) { UserSent.Visibility = Visibility.Collapsed; DropEmptyUserBubble(); }
-        MarkUnsent(past ?? AddHistory(text, true, TimeSpan.FromSeconds(1)), conversation);
+        past ??= AddHistory(text, true, TimeSpan.FromSeconds(1));
+        if (unknown is not null && ReferenceEquals(unknownText, unknown)) unknownText = unknown with { Attempt = past };
+        MarkUnsent(past, conversation);
         ArrangeBubbles(); UpdateSceneBounds();
     }
     private void SendClick(object sender, RoutedEventArgs e) => SendMessage();
@@ -352,7 +355,7 @@ public partial class MainWindow
         // Like a text message, the text leaves the editor at once and shows as sent. It returns
         // to an empty editor if the server did not take it, or stays as an unsent bubble beside
         // a newer draft, so it can be sent again.
-        bool taken = false;
+        bool taken = false; UnknownText? attemptUnknown = null;
         if (text.Length > 0 && unsent is null)
         {
             UserSent.Text = text; Input.Clear(); UserSent.Visibility = Visibility.Visible;
@@ -367,7 +370,7 @@ public partial class MainWindow
             {
                 var check = await CheckUnknownText(true, ct);
                 // The earlier send of this same text was recorded after all: nothing to send or restore.
-                if (check == UnknownTextCheck.Confirmed && earlier.Conversation == context.ConversationId && earlier.Text == text) taken = true;
+                if (check == UnknownTextCheck.Confirmed && earlier.Conversation == context.ConversationId && earlier.Text == text && earlier.Attempt == unsent) taken = true;
                 if (check != UnknownTextCheck.Clear) return;
             }
             if (unresolvedScreen is { } retry)
@@ -451,7 +454,7 @@ public partial class MainWindow
             catch (Exception ex) when (screen is null && MessageFailures.Classify(ex) is MessageFailure.Unknown or MessageFailure.Closed)
             {
                 if (recoveryOwner?.SameDevice(local) != true) return;
-                unknownText = new(local, context.ConversationId, text, deviceId ?? "", beforeSequence);
+                unknownText = attemptUnknown = new(local, context.ConversationId, text, deviceId ?? "", beforeSequence);
                 await CheckUnknownText(false, ct);
                 taken = unknownText is null; // the history showed it was accepted
                 if (MessageFailures.Classify(ex) == MessageFailure.Closed) Status.Text = "이 대화는 닫혔습니다. 메시지가 기록됐을 수 있으니 기록을 확인해 주세요.";
@@ -482,7 +485,7 @@ public partial class MainWindow
             // Another stream may still be validating this request's screen.
             if (earlyMoves.TryGetValue(context.ConversationId, out var buffered)) buffered.RemoveAll(x => !moveLifetime.IsVerifying(x.Job));
             sending = false; messageSend.Exit();
-            if (!taken && text.Length > 0) KeepUnsent(text, context.ConversationId);
+            if (!taken && text.Length > 0) KeepUnsent(text, context.ConversationId, attemptUnknown);
             UpdateBubblePresentation();
         }
     }

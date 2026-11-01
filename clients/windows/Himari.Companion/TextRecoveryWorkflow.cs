@@ -6,7 +6,8 @@ namespace Himari.Companion;
 
 public partial class MainWindow
 {
-    private sealed record UnknownText(ServerClient Server, string Conversation, string Text, string Device, int After);
+    // Attempt: the unsent bubble of that very send, when it stays as one.
+    private sealed record UnknownText(ServerClient Server, string Conversation, string Text, string Device, int After, PastBubble? Attempt = null);
     private UnknownText? unknownText;
     // Clear: nothing stands in the way of a new send. Confirmed: the history showed the earlier
     // send was recorded, so that text must not be sent or restored again. Held: still unknown.
@@ -30,7 +31,7 @@ public partial class MainWindow
         {
             unknownText = null;
             if (currentConversation == pending.Conversation && Input.Text.Trim() == pending.Text) Input.Clear();
-            if (!ConfirmUnsent(pending.Text, pending.Conversation) && currentConversation == pending.Conversation) ShowSentMessage(pending.Text);
+            if (!ConfirmUnsent(pending) && currentConversation == pending.Conversation) ShowSentMessage(pending.Text);
             Status.Text = "기록에서 이전 메시지의 접수를 확인했습니다.";
             UpdateUnsentBubbles();
             return UnknownTextCheck.Confirmed;

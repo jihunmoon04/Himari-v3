@@ -473,6 +473,32 @@ internal static class Program
             Check(Get("frozenSent") is null && history.Count == 0, "switching conversations drops the stack and its reference to the message being sent");
             editor.Clear(); transport.ReleaseAcceptance(); Until(() => !Sending());
             Check(sentLine.Visibility == Visibility.Visible && sentLine.Text == "D 질문", "a late acceptance after switching back shows the message instead of trusting a removed bubble");
+            // Same text twice: the first is refused, the second's outcome is unknown and later found recorded.
+            Call("HideUserBubble"); Call("ClearHistory"); editor.Clear();
+            transport.ResetAcceptance(); editor.Text = "같은 질문"; Call("SendMessage"); Until(() => transport.Posts == 5);
+            Call("OpenComposer"); editor.Text = "초안 1";
+            transport.ReleaseFailure(HttpStatusCode.TooManyRequests, "busy"); Until(() => !Sending());
+            editor.Clear(); transport.ResetAcceptance(); editor.Text = "같은 질문"; Call("SendMessage"); Until(() => transport.Posts == 6);
+            Call("OpenComposer"); editor.Text = "초안 2";
+            transport.ReleaseFailure(HttpStatusCode.BadGateway, "http_error"); Until(() => !Sending());
+            Check(history.Count == 2 && (string?)Past(0, "UnsentConversation") == "c" && (string?)Past(1, "UnsentConversation") == "c", "both attempts with the same text stay unsent");
+            transport.AcceptedText = "같은 질문";
+            var check = (Task)Call("CheckUnknownText", false, CancellationToken.None)!; Until(() => check.IsCompleted);
+            Check((string?)Past(0, "UnsentConversation") == "c" && Past(1, "UnsentConversation") is null,
+                "confirming the unknown attempt marks only its own bubble sent, never the refused one with the same text");
+            transport.AcceptedText = null;
+            // More unsent messages than the stack may show: none is lost, at most six bubbles are shown.
+            Call("ClearHistory"); editor.Text = "남은 초안";
+            for (int i = 0; i < 8; i++) Call("KeepUnsent", $"못 보낸 {i}", "c", null);
+            var stack = (StackPanel)unsentWindow.FindName("History");
+            int Shown() => stack.Children.Cast<UIElement>().Count(child => child.Visibility == Visibility.Visible)
+                + (((FrameworkElement)unsentWindow.FindName("UserBubble")).Visibility == Visibility.Visible ? 1 : 0)
+                + (((FrameworkElement)unsentWindow.FindName("BubblePanel")).Visibility == Visibility.Visible ? 1 : 0);
+            Check(history.Count == 8 && Shown() == 6 && ((UIElement)Past(0, "Bubble")!).Visibility == Visibility.Collapsed && ((UIElement)Past(7, "Bubble")!).Visibility == Visibility.Visible,
+                "unsent messages past the six-bubble limit are kept hidden, oldest first");
+            Check(((TextBlock)Past(3, "UnsentNote")!).Text.Contains("3개 더"), "the oldest shown unsent message says how many wait hidden");
+            ((Button)((StackPanel)((Button)Past(7, "RetryButton")!).Parent).Children[2]).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Check(history.Count == 7 && Shown() == 6 && ((UIElement)Past(2, "Bubble")!).Visibility == Visibility.Visible, "removing one brings a hidden unsent message back");
             unsentWindow.Close();
         }
         PresentationChecks.Run(Check, args.Length == 2 && args[0] == "--screenshots" ? args[1] : null);

@@ -35,6 +35,7 @@ public partial class MainWindow
     private readonly List<PastBubble> history = [];
     // The message being sent, once it moved into the stack before the server answered.
     private PastBubble? frozenSent;
+    private int hiddenUnsent;
     private PastBubble? OldestExpiring => history.FirstOrDefault(past => past.UnsentConversation is null);
 
     // A sent bubble shows only what was sent, like a text message. Its editor keeps keyboard
@@ -174,24 +175,28 @@ public partial class MainWindow
         past.UnsentPanel!.Visibility = Visibility.Visible;
         UpdateUnsentBubbles();
     }
-    // The server recorded it after all: it becomes an ordinary sent bubble again.
-    private bool ConfirmUnsent(string text, string conversation)
+    // The server recorded that attempt after all: its own bubble, never another with the same
+    // text, becomes an ordinary sent bubble again.
+    private bool ConfirmUnsent(UnknownText pending)
     {
-        var past = history.FirstOrDefault(p => p.UnsentConversation == conversation && p.Text == text);
-        if (past is null) return false;
+        if (pending.Attempt is not { } past || !history.Contains(past) || past.UnsentConversation is null) return false;
         past.UnsentConversation = null; past.UnsentPanel!.Visibility = Visibility.Collapsed;
-        past.Timer.Interval = TimeSpan.FromSeconds(DialoguePolicy.Duration(text, settings.BubbleMinimum.Value, settings.SecondsPer100.Value)); past.Timer.Start();
+        past.Timer.Interval = TimeSpan.FromSeconds(DialoguePolicy.Duration(past.Text, settings.BubbleMinimum.Value, settings.SecondsPer100.Value)); past.Timer.Start();
         ArrangeBubbles(); UpdateSceneBounds();
         return true;
     }
     private void UpdateUnsentBubbles()
     {
+        bool first = true;
         foreach (var past in history)
         {
             if (past.UnsentConversation is not { } conversation || past.UnsentNote is null || past.RetryButton is null) continue;
+            if (past.Bubble.Visibility != Visibility.Visible) continue;
             bool here = conversation == currentConversation;
-            past.UnsentNote.Text = !here ? "다른 대화에서 보내지 못한 메시지예요."
-                : unknownText is { } unknown && unknown.Conversation == conversation && unknown.Text == past.Text ? "보냈는지 확인하지 못했어요." : "보내지 못했어요.";
+            past.UnsentNote.Text = (!here ? "다른 대화에서 보내지 못한 메시지예요."
+                : unknownText?.Attempt == past ? "보냈는지 확인하지 못했어요." : "보내지 못했어요.")
+                + (first && hiddenUnsent > 0 ? $" 앞에 보내지 못한 메시지가 {hiddenUnsent}개 더 있어요." : "");
+            first = false;
             // It goes back to the conversation it was written for, never to another.
             past.RetryButton.IsEnabled = here && connected && !sending;
         }
@@ -203,8 +208,12 @@ public partial class MainWindow
 
     private void PlaceHistory()
     {
-        int live = (UserBubbleShown ? 1 : 0) + (BubblePanel.Visibility == Visibility.Visible ? 1 : 0);
-        while (history.Count + live > MaxBubbles && OldestExpiring is { } oldest) RemoveHistory(oldest, false);
+        int live = (UserBubbleShown ? 1 : 0) + (BubblePanel.Visibility == Visibility.Visible ? 1 : 0), room = Math.Max(0, MaxBubbles - live);
+        while (history.Count > room && OldestExpiring is { } oldest) RemoveHistory(oldest, false);
+        // Only unsent messages remain beyond the limit. They are kept, not shown: the older ones
+        // wait hidden and come back as room frees, and the oldest shown one says how many wait.
+        hiddenUnsent = Math.Max(0, history.Count - room);
+        for (int i = 0; i < history.Count; i++) history[i].Bubble.Visibility = i < hiddenUnsent ? Visibility.Collapsed : Visibility.Visible;
         // The newest bubble is always the one next to the character.
         var order = bubblesBelow ? Enumerable.Reverse(history).ToList() : history;
         if (!History.Children.Cast<UIElement>().SequenceEqual(order.Select(past => past.Bubble)))
@@ -212,8 +221,14 @@ public partial class MainWindow
             History.Children.Clear();
             foreach (var past in order) History.Children.Add(past.Bubble);
         }
-        for (int i = 0; i < order.Count; i++) { order[i].Bubble.Margin = new Thickness(0, i > 0 ? 8 : 0, 0, 0); order[i].Bubble.TailTop = bubblesBelow; }
-        History.Visibility = history.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+        bool above = false;
+        foreach (var past in order)
+        {
+            past.Bubble.Margin = new Thickness(0, above ? 8 : 0, 0, 0); past.Bubble.TailTop = bubblesBelow;
+            above |= past.Bubble.Visibility == Visibility.Visible;
+        }
+        UpdateUnsentBubbles();
+        History.Visibility = history.Count > hiddenUnsent ? Visibility.Visible : Visibility.Collapsed;
         History.HorizontalAlignment = UserBubble.HorizontalAlignment;
         History.Margin = new Thickness(UserBubble.HorizontalAlignment == System.Windows.HorizontalAlignment.Left ? UserBubble.Margin.Left : 0, bubblesBelow && live > 0 ? 8 : 0, 0, 0);
     }
@@ -236,14 +251,14 @@ public partial class MainWindow
         Grid.SetRow(History, bubblesBelow ? 2 : 0);
         Grid.SetRow(UserBubble, live + (userFirst ? 0 : 1));
         Grid.SetRow(BubblePanel, live + (userFirst ? 1 : 0));
-        bool gap = history.Count > 0 && !bubblesBelow;
+        PlaceHistory();
+        bool gap = History.Visibility == Visibility.Visible && !bubblesBelow;
         foreach (var bubble in userFirst ? new FrameworkElement[] { UserBubble, BubblePanel } : [BubblePanel, UserBubble])
         {
             bool shown = bubble == UserBubble ? UserBubbleShown : bubble.Visibility == Visibility.Visible;
             bubble.Margin = new Thickness(bubble.Margin.Left, shown && gap ? 8 : 0, 0, 0);
             gap |= shown;
         }
-        PlaceHistory();
     }
     private void OpenReplyBubble(string conversation, string? job) => ShowAssistantBubble($"{conversation}:{job}");
     private void ShowAssistantBubble(string? key)
