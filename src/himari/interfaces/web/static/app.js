@@ -263,6 +263,9 @@ const app = {
   leaveAgreed: false, // "Leave without saving?" answered yes, until the surface changes
   leaveAsked: false, // that question is open
   instructionsTicket: 0, // the latest load: an older answer is not applied
+  persona: null, // V3-P89 §4: the saved companion persona {text, revision, updated_at, max_chars, companion}
+  personaConflict: null, // a version saved elsewhere since: "Save" replaces it, "Discard" loads it
+  savingPersona: false,
   instructionsLoading: false,
   memory: null, // the last /api/memories answer (V3-P71 §7.2)
   registeredFolders: null, // the last /api/workspaces items, for the attach field (V3-P74 §10.3)
@@ -3000,6 +3003,73 @@ async function loadInstructions() {
   paintInstructions();
 }
 
+/* V3-P89 §4: the companion persona, a second, simpler box: a save made elsewhere since is
+   shown, and the next Save replaces it only after the user was told (as the instructions). */
+function personaDirty() {
+  return app.persona !== null && $("persona-text").value !== app.persona.text;
+}
+
+function paintPersona() {
+  const saved = app.persona;
+  const text = $("persona-text").value;
+  const count = characters(text);
+  const counter = $("persona-count");
+  counter.textContent = saved === null ? "Loading…" : `${count.toLocaleString()} / ${saved.max_chars.toLocaleString()}`;
+  const over = saved !== null && count > saved.max_chars;
+  counter.classList.toggle("is-over", over);
+  $("persona-off").hidden = saved === null || saved.companion;
+  $("persona-text").readOnly = app.savingPersona || saved === null;
+  $("persona-save").disabled = saved === null || app.savingPersona || over
+    || (!personaDirty() && app.personaConflict === null);
+  $("persona-discard").disabled = app.savingPersona || (!personaDirty() && app.personaConflict === null);
+  $("persona-saved").textContent = !saved || saved.updated_at === null ? ""
+    : `Saved ${new Date(saved.updated_at).toLocaleString()}`;
+}
+
+async function loadPersona() {
+  const saved = await api("GET", "/api/instructions/persona");
+  if ($("surface-instructions").hidden) return;
+  app.persona = saved;
+  app.personaConflict = null;
+  $("persona-text").value = saved.text;
+  paintPersona();
+}
+
+async function savePersona() {
+  if (app.savingPersona || app.persona === null) return;
+  app.savingPersona = true;
+  paintPersona();
+  const text = $("persona-text").value;
+  try {
+    const revision = app.personaConflict ? app.personaConflict.revision : app.persona.revision;
+    const saved = await api("PUT", "/api/instructions/persona", { text, revision });
+    app.persona = saved;
+    app.personaConflict = null;
+    $("persona-text").value = saved.text;
+    status("Persona saved. Applies from the next message.", "ok");
+  } catch (error) {
+    if (error.code === "revision_conflict") {
+      app.personaConflict = await api("GET", "/api/instructions/persona").catch(() => null);
+      status("The persona was changed elsewhere. Save again to replace it with yours, or Discard to load it.", "warn");
+    } else {
+      status(error.message, "error");
+    }
+  } finally {
+    app.savingPersona = false;
+    paintPersona();
+  }
+}
+
+function discardPersona() {
+  const latest = app.personaConflict || app.persona;
+  if (latest) {
+    app.persona = latest;
+    $("persona-text").value = latest.text;
+  }
+  app.personaConflict = null;
+  paintPersona();
+}
+
 async function showInstructions({ via = "push" } = {}) {
   if (!$("surface-instructions").hidden && (app.instructions !== null || app.instructionsLoading)) {
     closeNav(); // shown, and loaded or loading: nothing to start again
@@ -3018,15 +3088,20 @@ async function showInstructions({ via = "push" } = {}) {
     app.conflictRevision = null;
     $("instructions-conflict").hidden = true;
     $("instructions-text").value = "";
+    app.persona = null;
+    app.personaConflict = null;
+    $("persona-text").value = "";
     showSurface("instructions", via);
     $("topbar-title").textContent = "Instructions";
     status("");
   }
   closeNav();
   paintInstructions();
+  paintPersona();
   app.instructionsLoading = true;
   try {
     await loadInstructions(); // a failure says so; clicking Instructions again retries (review C3)
+    if (app.persona === null) await loadPersona();
   } finally {
     app.instructionsLoading = false;
   }
@@ -3111,12 +3186,13 @@ async function mayLeave() {
   const instructions = !$("surface-instructions").hidden;
   if (instructions && app.instructionsSave) await app.instructionsSave; // a save under way ends first (N1)
   // An open memory form with changes asks the same way (PR #77 review C2).
-  const dirty = instructions ? instructionsDirty() : memoryDirty();
+  const dirty = instructions ? instructionsDirty() || personaDirty() : memoryDirty();
   if (!dirty || app.leaveAgreed) return true;
   if (app.leaveAsked) return false; // one question at a time; a second navigation waits for none (re-review N4)
   app.leaveAsked = true;
   try {
-    const what = instructions ? "Your changes to the instructions are not saved." : "Your changes to a memory are not saved.";
+    const what = instructions ? "Your changes to the instructions or the persona are not saved."
+      : "Your changes to a memory are not saved.";
     app.leaveAgreed = await confirmAction("Leave without saving?", [what], "Leave");
   } finally {
     app.leaveAsked = false;
@@ -4588,6 +4664,12 @@ async function boot() {
   $("instructions-overwrite").addEventListener("click", () => saveInstructions(true));
   $("instructions-discard").addEventListener("click", () => discardInstructions().catch((e) => status(e.message, "error")));
   $("instructions-load").addEventListener("click", () => loadInstructions().catch((e) => status(e.message, "error")));
+  $("persona-text").addEventListener("input", () => {
+    app.leaveAgreed = false;
+    paintPersona();
+  });
+  $("persona-save").addEventListener("click", () => savePersona());
+  $("persona-discard").addEventListener("click", () => discardPersona());
   // V3-P78 §3.3: what waits to be kept goes now (Safari may not finish it; the short delay is the guarantee).
   const keepNow = () => {
     if (app.placeTouched && typeof app.place === "string") drafts.set(app.place, composerDraft());
@@ -4614,7 +4696,8 @@ async function boot() {
     showLogin({ signingOut: true });
   });
   window.addEventListener("beforeunload", (event) => {
-    const unsaved = app.instructionsDraft !== null || (!$("surface-instructions").hidden && instructionsDirty())
+    const unsaved = app.instructionsDraft !== null
+      || (!$("surface-instructions").hidden && (instructionsDirty() || personaDirty()))
       || memoryDirty() || filesSurface.dirty || filesPanel.dirty;
     if (!unsaved) return;
     event.preventDefault(); // unsaved: the browser asks

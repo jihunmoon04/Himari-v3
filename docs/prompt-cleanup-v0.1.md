@@ -353,3 +353,18 @@ B1·B2·C1·C2 해결 확인. 새 지적 둘:
 | N2 (P3) | §2와 Q2에 rev. 1 문구가 남음 | §2 7번(출처 규칙은 `# Memory`에), Q2(바탕은 대화·도구만)를 고침 |
 
 검수자 의견: N1을 보완하면 READY.
+
+## 14. 구현 노트 (2026-11-01)
+
+- **글:** `prompt.api`에 새 글(원칙은 `system.principle_section`, `MEMORY_SECTION`, 반려 절의 `COMPANION_HEAD`·`PERSONA_RULE`·`SPEAKING_RULE`·`EXPRESSION_RULE`·`ACTIVITY_RULE`·`SCREEN_NOTE`, `PERSONA_HEADER`·`companion_persona_section`, `TURN_GUIDANCE`(control에서 옮김)). 옛 `COMPANION_NOTE`·`ACTIVITY_NOTE`·`MEMORY_NOTE`는 없앴다.
+- **조립:** 새 모듈 `prompt/system.py`의 `system_text(inputs)`가 시스템 글 전체를 최종 순서로 만든다(바탕 → 원칙 → 메시지와 시각 → 도구로 일하기 → {기억} → {반려} → {Tool server notes} → {페르소나} → {사용자 지시문}). `fit_notes`·`CUT`·`BASE_INSTRUCTIONS`도 여기에 있다. Composer의 `stable_prefix`는 이것을 쓰고, `compaction.context_key`도 같은 함수를 부른다(모듈 순환 없음: `system`은 `api`만 가져옴).
+- **`ModelInput.system` 대신 `stable_prefix`:** 설계는 새 필드 이름을 썼지만, 기존 `ModelInput.stable_prefix`가 이제 **노트까지 포함한 최종 시스템 글**이다(뜻만 넓힘, 이름 유지). 공급자(`openrouter._messages`)는 그것을 이어 붙이기만 하고, 토큰 추정(`request_tokens`)도 따로 노트를 더하지 않는다.
+- **`SystemSpec`:** `PromptInputs.system`(조건: `companion`, `memory`, `attachments`, `file_references`, `turn_guidance`, `documents`)과 `PromptInputs.companion_persona`. `Application.open`이 `SystemSpec`을 넘긴다(`instructions`는 바탕만). **`build_runtime`의 기본값은 `system=None`**(시험용 "주어진 글 그대로" 모드: 기억 절과 턴 규칙만 뒤에 붙음). 크기에 맞춘 시험 열네 개를 다시 맞추지 않으려는 선택이고, 운영 경로(`Application.open`)는 늘 절을 조립한다.
+- **`context_key`:** 조각 대신 `system_text(inputs)` 전체 + `fit_notes()`를 거친 data 노트(`[source, text]`) + 모델·공급자·추론 강도·시간대·`screen_points`·기억·도구 목록.
+- **페르소나:** `InstructionScope.COMPANION_PERSONA`(스키마 변경 없음, `rules.check_instruction_scope`가 두 값을 받음), Driver `_read_user`가 함께 읽어 `PromptInputs.companion_persona`로, 반려 켬일 때만 들어감. `GET/PUT /api/instructions/persona`(응답에 `companion`), Web Instructions 화면의 두 번째 칸(저장·버리기·글자 수·반려 꺼짐 안내·떠날 때 확인·다른 곳에서 바뀌면 경고 후 "다시 Save면 덮어씀"), CLI `himari instructions --persona`.
+- **기억 도구:** `memory_forget` 설명에 "or it is a loop that is done".
+- **실제 모델 확인 뒤 고친 문장:** 첫 비교에서 **기기에서 온 말이 새 글에서 길어졌다**(claude-haiku-5.5·deepseek-v4.1-flash가 코드 블록과 목록으로 답함, 0/2). `SPEAKING_RULE`을 "spoken by the character: at most four short sentences, with no code blocks, lists or headings"로 바꾼 뒤 다시 쟀다.
+- **실제 모델 확인**(`tests/live/test_prompt_cleanup_live.py`, 결과 `docs/live-results/prompt-cleanup-2026-11-01.jsonl`, 옛 글은 `tests/live/fixtures/system-before-v3-p89.txt`): 다섯 모델 × 아홉 장면 × 옛 글·새 글 각 2번. **옛 글 78/90, 새 글 87/90, 나빠진 장면 없음.** 좋아진 것은 모두 기기 말하기(옛 글이 오히려 자주 길었다). 주입 셋(첨부 이름, 저장된 기억, 미디어 제목)은 두 글 모두 모든 모델이 따르지 않음. 페르소나(Web·기기) 호칭 유지는 mimo-v2.6-pro의 Web 한 번을 빼고 모두(옛 글도 같은 비율). `memory_save`는 mimo가 도구 인자를 JSON이 아닌 글로 내는 일이 옛 글 2번·새 글 1번(모델의 출력 문제). 한계: 옛 글 장면도 `<runtime_state>` 안의 `about` 문구(`MEMORY_ABOUT`·`PRESENCE_ABOUT`)는 새 것을 썼다. 결과가 매번 꽤 흔들린다(같은 옛 글이 한 번은 2/2, 다음엔 0/2).
+- **크기:** 운영 조건의 시스템 글이 약 4,000자 → 약 4,600자(설계 §3.7의 "약 3,700자" 예상보다 크다: 절 머리글, 원칙, 페르소나 머리말). 크기에 맞춘 시험 넷(압축 표시 둘·압축 요청·턴 예산)의 수치를 다시 맞췄다.
+- **시험:** `tests/prompt/test_system.py`(절과 조건, 순서, 바탕에 기억 약속 없음, 주어진 글 모드, 이스케이프, `context_key`가 페르소나·스위치·data 노트를 따름, 대화 프롬프트에 3인칭 HIMARI 없음, 원칙 문단), 순서 시험을 새 계약으로 고침(`test_in_the_provider_request_the_server_notes_come_before_the_users_own_text`), 페르소나(앱·Web·CLI), ui_smoke `instructions`에 페르소나 칸.
+- 기억 작업·압축 프롬프트는 그대로다.

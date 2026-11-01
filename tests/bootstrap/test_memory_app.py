@@ -15,7 +15,7 @@ from himari.common import CallId, CallRef, PrincipalId, TextBlock, ToolCall, Too
 import pytest
 
 from himari.data.api import DataError, DataErrorCode, Memory, MemoryCategory, MemoryOrigin, ToolResultRecord
-from himari.prompt.api import MEMORY_NOTE, ModelInput, ToolGroupTurn, state_block
+from himari.prompt.api import MEMORY_SECTION, ModelInput, ToolGroupTurn, state_block
 from himari.provider.api import NormalizedFinal, NormalizedToolCalls
 from himari.provider.scripted import ScriptedAdapter
 
@@ -70,7 +70,7 @@ def test_a_saved_note_reaches_the_model_from_the_next_turn(tmp_path: Path) -> No
                                                                           scope.conversation_id)
             await turn(app, scope, "next")
             assert texts(adapter.prepared_inputs[-1]) == ["Uses Go at work."]
-            assert MEMORY_NOTE in adapter.prepared_inputs[-1].stable_prefix
+            assert MEMORY_SECTION in adapter.prepared_inputs[-1].stable_prefix
             tools = {d.tool_id for d in adapter.prepared_inputs[-1].tool_catalog}
             assert {"memory_save", "memory_forget", "memory_search"} <= tools
         finally:
@@ -207,7 +207,7 @@ def test_memory_off_offers_no_tools_and_no_notes(tmp_path: Path) -> None:
             scope = TrustedScope(ME, await app.create_conversation(ME))
             await turn(app, scope)
             (sent,) = adapter.prepared_inputs
-            assert texts(sent) is None and MEMORY_NOTE not in sent.stable_prefix
+            assert texts(sent) is None and MEMORY_SECTION not in sent.stable_prefix
             assert not {d.tool_id for d in sent.tool_catalog} & {"memory_save", "memory_forget", "memory_search"}
             assert state_block(sent.current_state) is None or "user_memory" not in (state_block(sent.current_state) or "")
         finally:

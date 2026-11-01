@@ -425,7 +425,7 @@ def test_a_compacted_conversation_shows_where_the_summary_takes_over(tmp_path: P
                                                                       monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(cli, "POLL_SECONDS", 0.01)
     # The budget is sized for a prompt without the memory Tools and note (V3-P71).
-    harness = Harness(tmp_path, context_tokens=2800, turn={"memory": False, "conversation_search": False})  # sized without the memory and search Tools
+    harness = Harness(tmp_path, context_tokens=3300, turn={"memory": False, "conversation_search": False})  # sized without the memory and search Tools
     with harness.test_client:
         cid = harness.run("new")[1].strip()
         harness.queue(*[final("SUMMARY of the start")] * 12)  # every answer and every summary alike
@@ -454,7 +454,7 @@ def test_a_compacted_conversation_shows_where_the_summary_takes_over(tmp_path: P
 def test_a_compacted_conversation_on_an_ascii_terminal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # PR #16 review B1: the divider is the CLI's own mark too; it never raises.
     monkeypatch.setattr(cli, "POLL_SECONDS", 0.01)
-    harness = Harness(tmp_path, context_tokens=2800, turn={"memory": False, "conversation_search": False})  # sized without the memory and search Tools
+    harness = Harness(tmp_path, context_tokens=3300, turn={"memory": False, "conversation_search": False})  # sized without the memory and search Tools
     with harness.test_client:
         cid = harness.run("new")[1].strip()
         harness.queue(*[final("SUMMARY 요약 ─ done")] * 12)
@@ -726,7 +726,7 @@ def test_a_refusal_says_why(harness: Harness) -> None:
 def test_compacting_with_an_open_question_says_why(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # PR #24 review C1: the reason of WAITING_FOR_USER / NOTHING_TO_COMPACT is shown too.
     monkeypatch.setattr(cli, "POLL_SECONDS", 0.01)
-    harness = Harness(tmp_path, context_tokens=2800, turn={"memory": False, "conversation_search": False})  # sized without the memory and search Tools
+    harness = Harness(tmp_path, context_tokens=3300, turn={"memory": False, "conversation_search": False})  # sized without the memory and search Tools
     with harness.test_client:
         cid = harness.run("new")[1].strip()
         harness.queue(calls(("ask_user", {"question": "Which file?"})))

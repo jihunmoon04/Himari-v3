@@ -836,6 +836,26 @@ def run_instructions(base: str, token: str, shots: str | None, root: str, provid
         expect(page.locator(".item-assistant").last).to_contain_text("네, 알겠습니다.", timeout=10000)
         assert "<user_instructions>\nAnswer in Korean.\nKeep it short.\n</user_instructions>" in \
             provider.prepared_inputs[-1].stable_prefix[-1]
+        # V3-P89 §4: the companion persona, its own box under the instructions, before them in the request
+        page.click("#nav-appearance")
+        page.click("#nav-instructions")
+        persona = page.locator("#persona-text")
+        expect(page.locator("#persona-count")).to_have_text("0 / 10,000", timeout=5000)
+        expect(page.locator("#persona-off")).to_be_hidden()  # companion mode is on here
+        expect(page.locator("#persona-save")).to_be_disabled()
+        persona.fill("Call me 선생님.")
+        page.click("#persona-save")
+        expect(page.locator("#status-bar")).to_have_text("Persona saved. Applies from the next message.", timeout=5000)
+        expect(page.locator("#persona-saved")).to_contain_text("Saved ")
+        if shots:
+            page.screenshot(path=os.path.join(shots, "16b-instructions-persona.png"), full_page=True)
+        new_chat(page, "#nav-new-chat")
+        page.fill("#composer-text", "hi again")
+        page.press("#composer-text", "Enter")
+        expect(page.locator(".item-assistant").last).to_contain_text("네, 알겠습니다.", timeout=10000)
+        sent = "\n".join(provider.prepared_inputs[-1].stable_prefix)
+        assert "<companion_persona>\nCall me 선생님.\n</companion_persona>" in sent
+        assert sent.index("<companion_persona>") < sent.index("<user_instructions>")
         # Changed elsewhere meanwhile: refused, the text kept, the user chooses.
         page.click("#nav-appearance")
         page.click("#nav-instructions")
@@ -2017,7 +2037,7 @@ def main() -> int:
                 time.sleep(0.5)
         if "instructions" in only:
             instructions = os.path.join(tmp, "instructions")
-            provider = ScriptedAdapter([NormalizedFinal((TextBlock("네, 알겠습니다."),))])
+            provider = ScriptedAdapter([NormalizedFinal((TextBlock("네, 알겠습니다."),))] * 4)
             server = serve(instructions, PORT + 7, provider)
             try:
                 errors += run_instructions(f"http://127.0.0.1:{PORT + 7}",

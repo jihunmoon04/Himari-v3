@@ -899,10 +899,12 @@ MAX_INSTRUCTIONS_CHARS = 10_000  # code points, after newlines are normalized (Q
 
 
 class InstructionScope(Enum):
-    """Whose conversations a text applies to. Only USER now; a project or lab
-    scope is added by its packet (V3-P69 §3.1)."""
+    """Whose conversations a text applies to (V3-P69 §3.1); a project or lab
+    scope is added by its packet."""
 
     USER = "user"  # every Conversation of the principal
+    # V3-P89 §4: who HIMARI is as the user's companion; told only with the companion on
+    COMPANION_PERSONA = "companion_persona"
 
 
 @dataclass(frozen=True)

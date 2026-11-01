@@ -17,7 +17,8 @@ from testkit import SCOPE, RecordingTool, calls, final, runtime, text_result, us
 
 from himari.common import (AttachmentRef, CallId, CallRef, ConversationId, EventId, ModelToolResult, RunId,
                            TextBlock, TokenUsage, ToolId, TrustedScope)
-from himari.control.api import TURN_GUIDANCE, DriveState, StopSignal, TurnUsage
+from himari.control.api import DriveState, StopSignal, TurnUsage
+from himari.prompt.api import TURN_GUIDANCE
 from himari.control.driver import PAUSED_COMPACTING, session_key
 from himari.control.runner import UNATTENDED_REASON, BackgroundRunner
 from himari.control.turn import MIN_OUTPUT_RESERVE, Turn
@@ -88,7 +89,7 @@ def test_the_defaults_keep_todays_policy() -> None:
         result = await rt.driver.drive(SCOPE, user("go"))
         assert result.state is DriveState.RUN_LIMIT_REACHED and len(adapter.prepared_inputs) == 16
         assert all(i.turn_state is None for i in adapter.prepared_inputs)
-        assert all(TURN_GUIDANCE not in i.stable_prefix for i in adapter.prepared_inputs)
+        assert all(TURN_GUIDANCE not in "\n".join(i.stable_prefix) for i in adapter.prepared_inputs)
         assert len(reader.invocations) == 16
 
     run(case)
@@ -178,10 +179,10 @@ def test_low_and_last_are_told_as_data_and_the_rule_is_in_the_system_prompt() ->
     async def case() -> None:
         rt, adapter = runtime([final("ok")], context_budget=BIG, max_runs_per_drive=None, turn_budget=1_000_000)
         await rt.driver.drive(SCOPE, user("hi"))
-        assert adapter.prepared_inputs[0].stable_prefix[-1] == TURN_GUIDANCE
+        assert TURN_GUIDANCE in "\n".join(adapter.prepared_inputs[0].stable_prefix)  # in "Working with tools"
         plain, adapter2 = runtime([final("ok")], context_budget=BIG)
         await plain.driver.drive(SCOPE, user("hi"))
-        assert TURN_GUIDANCE not in adapter2.prepared_inputs[0].stable_prefix
+        assert TURN_GUIDANCE not in "\n".join(adapter2.prepared_inputs[0].stable_prefix)
 
     run(case)
 

@@ -153,6 +153,7 @@ from himari.data.api import (
     FileRecord,
     ImageStatus,
     Device,
+    InstructionScope,
     Instructions,
     Memory,
     MemoryCategory,
@@ -1872,14 +1873,31 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
     async def write_instructions(body: InstructionsBody, request: Request,
                                  who: PrincipalId = Depends(principal)) -> dict[str, Any]:
         """Saved at once, used from each conversation's next turn."""
+        return instructions_view(await save_instructions(himari(request), who, body, InstructionScope.USER))
+
+    @app.get("/api/instructions/persona")
+    async def read_persona(request: Request, who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+        """V3-P89 §4: the companion persona, told only while the companion is on (``companion``)."""
+        application = himari(request)
+        return {**instructions_view(await application.instructions(who, InstructionScope.COMPANION_PERSONA)),
+                "companion": application.companion_enabled}
+
+    @app.put("/api/instructions/persona")
+    async def write_persona(body: InstructionsBody, request: Request,
+                            who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+        application = himari(request)
+        saved = await save_instructions(application, who, body, InstructionScope.COMPANION_PERSONA)
+        return {**instructions_view(saved), "companion": application.companion_enabled}
+
+    async def save_instructions(application: Application, who: PrincipalId, body: InstructionsBody,
+                                scope: InstructionScope) -> Instructions:
         try:
-            saved = await himari(request).set_instructions(who, body.text, body.revision)
+            return await application.set_instructions(who, body.text, body.revision, scope)
         except DataError as error:
             if error.code not in INSTRUCTIONS_REFUSALS:
                 raise
             status, code, message = INSTRUCTIONS_REFUSALS[error.code]
             raise ApiError(status, code, message) from None
-        return instructions_view(saved)
 
     async def memory_titles(application: Application, who: PrincipalId,
                             notes: Iterable[Memory]) -> dict[ConversationId, tuple[str | None, str]]:

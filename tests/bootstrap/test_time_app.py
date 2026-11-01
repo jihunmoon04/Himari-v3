@@ -8,7 +8,7 @@ from pathlib import Path
 
 from himari.bootstrap.application import Application
 from himari.common import CallId, PrincipalId, TextBlock, ToolCall, ToolId, TrustedScope
-from himari.prompt.api import COMPANION_NOTE, TIME_NOTE, UserTurn
+from himari.prompt.api import COMPANION_HEAD, TIME_NOTE, UserTurn
 from himari.provider.api import NormalizedFinal, NormalizedToolCalls
 from himari.provider.scripted import ScriptedAdapter
 
@@ -43,7 +43,7 @@ def test_a_turn_is_told_when_it_started_and_the_message_when_it_came(tmp_path: P
             assert isinstance(turn, UserTurn)
             line = turn.blocks[0]
             assert isinstance(line, TextBlock) and line.text.startswith("<time>") and line.text.endswith("+09:00</time>")
-            assert TIME_NOTE in first.stable_prefix and COMPANION_NOTE in first.stable_prefix
+            assert TIME_NOTE in "\n".join(first.stable_prefix) and COMPANION_HEAD in first.stable_prefix[5]  # its own section
         finally:
             await app.close()
 
@@ -59,7 +59,7 @@ def test_with_the_companion_off_the_time_is_still_told(tmp_path: Path) -> None:
             await app.send(scope, "hello")
             await app.runner.wait(scope)
             (sent,) = adapter.prepared_inputs
-            assert TIME_NOTE in sent.stable_prefix and COMPANION_NOTE not in sent.stable_prefix
+            assert TIME_NOTE in "\n".join(sent.stable_prefix) and COMPANION_HEAD not in "\n".join(sent.stable_prefix)
             now = sent.current_state.now
             assert now is not None and str(now.tzinfo) == "Europe/London"
         finally:

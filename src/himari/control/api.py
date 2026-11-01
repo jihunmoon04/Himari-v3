@@ -265,16 +265,7 @@ class LiveOutput(DeepFrozen):
     chars: int = 0  # the text's length (also when the text was left out)
 
 
-# The rule for the turn's state, for HIMARI's system instructions when the
-# turn guards are on (V3-P62 §8): fixed text, so the cached prefix stays; the
-# runtime state carries only the numbers and flags it refers to.
-TURN_GUIDANCE = (
-    "Turn budget. The runtime state may carry `turn_budget` and `progress`. When `turn_budget.low` is "
-    "true, finish with what you have, or ask the user (ask_user) whether to go on. When `turn_budget.last` "
-    "is true, this is likely the last step of the turn: tool calls made now run, but you see their results "
-    "only if the user continues, so answer now or ask. `progress.repeated` lists calls that got the same "
-    "result again in this turn: do not repeat them unless something has changed."
-)
+# The turn's rule for the system text (TURN_GUIDANCE) is the Prompt module's (V3-P89 §3.3).
 
 
 class ConversationDriver(Protocol):

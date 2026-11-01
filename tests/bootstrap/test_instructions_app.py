@@ -8,6 +8,7 @@ import hashlib
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 
+from himari.prompt.system import BASE_INSTRUCTIONS
 from himari.bootstrap.application import Application
 from himari.common import CallId, PrincipalId, TextBlock, ToolCall, ToolId, TrustedScope
 from himari.prompt.api import USER_INSTRUCTIONS_HEADER, ModelInput, ToolGroupTurn
@@ -86,7 +87,7 @@ def test_a_turn_keeps_the_text_it_started_with_and_the_next_turn_reads_the_new_o
             assert text_in(adapter.prepared_inputs[-1]) == "Answer in English &amp; be &lt;brief&gt;."
             # After the operator's instructions and notes, before the server notes: last in the prefix here.
             prefix = adapter.prepared_inputs[-1].stable_prefix
-            assert prefix[0] == "You are HIMARI, a helpful assistant." and prefix[-1] == section_of(
+            assert prefix[0] == BASE_INSTRUCTIONS[0] and prefix[-1] == section_of(
                 adapter.prepared_inputs[-1])
             assert (await app.instructions(ALICE)).text == "Answer in English & be <brief>."  # stored as written
         finally:
@@ -225,28 +226,34 @@ def test_two_principals_running_at_once_each_get_their_own(tmp_path: Path) -> No
     asyncio.run(scenario())
 
 
-def test_in_the_provider_request_they_come_before_the_server_notes() -> None:
-    # PR #67 review C3: operator instructions and notes, then the user's, then the MCP servers' notes.
+def test_in_the_provider_request_the_server_notes_come_before_the_users_own_text() -> None:
+    # V3-P89 review B1 (reversing PR #67 review C3's order): the Prompt module decides the final order —
+    # HIMARI's text, the tool servers' notes, then the user's persona and instructions last; the
+    # Provider joins it as it is and adds nothing.
     import json
     from dataclasses import replace
 
     from himari.data.api import PersistedStateBasis
-    from himari.prompt.api import NOTES_HEADER, PromptInputs, RequestOptions, SourceNote
+    from himari.prompt.api import NOTES_HEADER, PERSONA_HEADER, PromptInputs, RequestOptions, SourceNote, SystemSpec
     from himari.prompt.composer import Composer
     from himari.provider.openrouter import OpenRouterAdapter
 
-    inputs = PromptInputs(instructions=("You are HIMARI.", "A system note."), tool_catalog=(), events=(),
+    inputs = PromptInputs(instructions=("You are HIMARI.",), tool_catalog=(), events=(),
                           tool_executions=(), snapshot=None, state_basis=PersistedStateBasis(0, 0, (), (), ()),
                           observations=(), request_options=RequestOptions("m"), trigger_refs=(),
-                          source_notes=(SourceNote("calliope", "system", "Calliope's notes."),))
-    model_input = Composer().compose(replace(inputs, user_instructions="Answer in Korean."))
+                          source_notes=(SourceNote("calliope", "system", "Calliope's notes."),),
+                          system=SystemSpec(companion=True, memory=True))
+    model_input = Composer().compose(replace(inputs, user_instructions="Answer in Korean.",
+                                             companion_persona="Call me 선생님."))
     body = json.loads(OpenRouterAdapter("sk-test").prepare_native_request(model_input).body)
     system = body["messages"][0]
     assert system["role"] == "system"
     content = system["content"]
-    order = [content.index(part) for part in ("You are HIMARI.", "A system note.", USER_INSTRUCTIONS_HEADER,
-                                              "Answer in Korean.", NOTES_HEADER, "Calliope's notes.")]
+    order = [content.index(part) for part in ("You are HIMARI.", "# What instructs you", "# Memory", "# Companion",
+                                              NOTES_HEADER, "Calliope's notes.", PERSONA_HEADER, "Call me 선생님.",
+                                              USER_INSTRUCTIONS_HEADER, "Answer in Korean.")]
     assert order == sorted(order)
+    assert content.count(NOTES_HEADER) == 1 and content.endswith("</user_instructions>")
 
 
 def test_a_compaction_request_does_not_carry_them(tmp_path: Path) -> None:
@@ -255,7 +262,7 @@ def test_a_compaction_request_does_not_carry_them(tmp_path: Path) -> None:
 
     async def scenario() -> None:
         adapter = ScriptedAdapter([NormalizedFinal((TextBlock("SUMMARY"),))] * 12)
-        app = await opened(tmp_path, adapter, context_tokens=3500,  # sized without the search Tools, with SCREEN_NOTE, V3-P85's MEMORY_NOTE and V3-P88's ACTIVITY_NOTE
+        app = await opened(tmp_path, adapter, context_tokens=3800,  # sized without the search Tools, with V3-P89's system text
                            conversation_search=False)
         try:
             await app.set_instructions(ALICE, "ZQX rule.", 0)
@@ -273,3 +280,30 @@ def test_a_compaction_request_does_not_carry_them(tmp_path: Path) -> None:
             await app.close()
 
     asyncio.run(scenario())
+
+
+def test_the_companion_persona_is_told_only_with_the_companion_on(tmp_path: Path) -> None:
+    """V3-P89 §4 (owner A): read with the instructions at the turn's start, in every conversation
+    while the companion is on; kept but not told while it is off."""
+    from himari.data.api import InstructionScope
+    from himari.prompt.api import PERSONA_HEADER
+
+    async def scenario(companion: bool) -> str:
+        adapter = ScriptedAdapter([NormalizedFinal((TextBlock("응"),))])
+        root = tmp_path / str(companion)
+        root.mkdir()
+        app = await opened(root, adapter, companion=companion)
+        try:
+            saved = await app.set_instructions(ALICE, "Call me 선생님.", 0, InstructionScope.COMPANION_PERSONA)
+            assert saved.revision == 1 and (await app.instructions(ALICE)).text == ""  # the instructions apart
+            scope = TrustedScope(ALICE, await app.create_conversation(ALICE))
+            await app.send(scope, "hi")
+            await app.runner.wait(scope)
+            return "\n".join(adapter.prepared_inputs[0].stable_prefix)
+        finally:
+            await app.close()
+
+    told = asyncio.run(scenario(True))
+    assert PERSONA_HEADER in told and "Call me 선생님." in told and "# Companion" in told
+    off = asyncio.run(scenario(False))
+    assert "Call me 선생님." not in off and "# Companion" not in off

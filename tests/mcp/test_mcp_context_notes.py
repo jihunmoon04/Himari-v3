@@ -27,9 +27,10 @@ from himari.prompt.api import (
     RequestOptions,
     SourceNote,
     UserTurn,
+    notes_section,
 )
 from himari.prompt.compaction import context_key, request_tokens, tokens_of_text
-from himari.prompt.composer import CUT, fit_notes
+from himari.prompt.system import CUT, fit_notes
 from himari.provider.openrouter import OpenRouterAdapter
 from himari.provider.scripted import ScriptedAdapter
 
@@ -108,8 +109,10 @@ def test_the_operator_places_them_as_data_or_not_at_all(tmp_path: Path) -> None:
 
 
 def model_input(notes: tuple[SourceNote, ...]) -> ModelInput:
+    """As the Composer makes it (V3-P89 review B1): the "system" notes are a section of the system text."""
+    section = notes_section(notes)
     return ModelInput(
-        stable_prefix=("You are HIMARI.",),
+        stable_prefix=("You are HIMARI.", *((section,) if section is not None else ())),
         tool_catalog=(),
         conversation=(UserTurn(EventId("e1"), (TextBlock("hi"),)),),
         current_state=CurrentStateProjection(basis=EMPTY_STATE),

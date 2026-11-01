@@ -45,7 +45,15 @@ from himari.data.api import (
     view_state,
 )
 from himari.environment.api import BindingObservation, EnvironmentPlugin
-from himari.prompt.api import AttachmentInfo, PromptInputs, RequestOptions, SourceNote, UsageMark, attachment_key
+from himari.prompt.api import (
+    AttachmentInfo,
+    PromptInputs,
+    RequestOptions,
+    SourceNote,
+    SystemSpec,
+    UsageMark,
+    attachment_key,
+)
 from himari.prompt.compaction import read_summary
 from himari.tool.api import ExternalAccess, ToolCatalog
 
@@ -65,8 +73,10 @@ class ContextLoader:
         files: FileCatalog | None = None,  # None: attachments render as unavailable (V3-P66)
         environments: Mapping[EnvironmentKind, EnvironmentPlugin] | None = None,  # observed (V3-P74 §10.5)
         time_zone: str | None = None,  # the time lines' zone (V3-P83 §6.4); None: no time lines
+        system: SystemSpec | None = None,  # V3-P89: the system text's sections; None: the instructions as given
     ) -> None:
         self._time_zone = time_zone
+        self._system = system
         self._files = files
         self._environments = dict(environments or {})
         self._log = log
@@ -86,6 +96,7 @@ class ContextLoader:
         now: datetime | None = None,  # when the turn started (V3-P83 §6.3)
         episodes: tuple[RecentEpisode, ...] = (),  # the turn's recent episodes, read with the notes (V3-P85 §8)
         episode_count: int = 0,
+        companion_persona: str = "",  # the turn's, read with the instructions (V3-P89 §4)
     ) -> PromptInputs:
         snapshot = await self._log.get_latest_snapshot(scope)
         events: tuple[ConversationEvent, ...] = ()
@@ -133,6 +144,8 @@ class ContextLoader:
             source_notes=tuple(n for n in self._source_notes if n.source in enabled),
             attachments=attachments,
             user_instructions=user_instructions,
+            system=self._system,
+            companion_persona=companion_persona,
             memories=memories,
             episodes=episodes,
             episode_count=episode_count,

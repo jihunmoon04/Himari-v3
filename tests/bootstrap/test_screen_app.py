@@ -64,8 +64,7 @@ def test_a_screen_is_named_here_attached_once_and_never_placed(tmp_path: Path) -
             turn = sent.conversation[-1]
             assert isinstance(turn, UserTurn)
             assert turn.blocks[-1] == AttachmentRef(record.file_id, 1, screen=True)
-            prefix = sent.stable_prefix
-            assert prefix.index(SCREEN_MOVE_NOTE) == prefix.index(SCREEN_NOTE) + 1  # §5: it points
+            assert SCREEN_NOTE + " " + SCREEN_MOVE_NOTE in "\n".join(sent.stable_prefix)  # §5: it points
         finally:
             await app.close()
 
@@ -73,7 +72,7 @@ def test_a_screen_is_named_here_attached_once_and_never_placed(tmp_path: Path) -
 
 
 def test_the_move_note_only_for_a_model_that_points_and_neither_with_the_companion_off(tmp_path: Path) -> None:
-    async def scenario(companion: bool, **options: bool) -> tuple[str, ...]:
+    async def scenario(companion: bool, **options: bool) -> str:
         adapter = answers(**options)
         place = tmp_path / str(len(list(tmp_path.iterdir())))
         place.mkdir()
@@ -82,7 +81,7 @@ def test_the_move_note_only_for_a_model_that_points_and_neither_with_the_compani
             scope = TrustedScope(ME, await app.create_conversation(ME))
             await app.send(scope, "hi")
             await app.runner.wait(scope)
-            return adapter.prepared_inputs[0].stable_prefix
+            return "\n".join(adapter.prepared_inputs[0].stable_prefix)
         finally:
             await app.close()
 

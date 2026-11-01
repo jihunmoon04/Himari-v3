@@ -842,7 +842,9 @@ textarea {
 .instructions > .hint,
 .instructions-text,
 .instructions-bar,
-.instructions-conflict {
+.instructions-conflict,
+.persona > h2,
+.persona > .hint {
   max-width: var(--reading-max);
   margin-left: auto;
   margin-right: auto;
@@ -4305,4 +4307,18 @@ button.files-crumb:hover { background: var(--surface-hover); color: var(--text);
 .device-signals {
   display: block;
   overflow-wrap: anywhere;
+}
+
+/* V3-P89 §4: the companion persona under the instructions. */
+.persona {
+  margin-top: var(--space-6, 32px);
+}
+
+.persona > h2 {
+  font-size: 1.05rem;
+  margin-bottom: var(--space-1, 4px);
+}
+
+.persona-text {
+  min-height: 160px;
 }

@@ -34,16 +34,14 @@ from himari.prompt.api import (
     PromptError,
     PromptErrorCode,
     PromptInputs,
-    SCREEN_MOVE_NOTE,
-    SCREEN_NOTE,
     TIME_GAP,
     SourceNote,
     ToolGroupTurn,
     UserTurn,
     time_line,
-    user_instructions_section,
 )
 from himari.prompt.compaction import anchors, context_key, part_anchor, read_summary
+from himari.prompt.system import fit_notes, system_text
 
 
 class Composer:
@@ -138,31 +136,5 @@ def timed(history: list[HistoryPart], inputs: PromptInputs) -> list[HistoryPart]
     return out
 
 
-CUT = "\n[… cut]"
-
-
-def stable_prefix(inputs: PromptInputs) -> tuple[str, ...]:
-    """The operator's instructions and notes, then the user's (V3-P69 §4).
-    SCREEN_MOVE_NOTE follows SCREEN_NOTE for a model that points on a screen
-    (V3-P84 §5): which model it is is part of the context key already."""
-    instructions = inputs.instructions
-    if inputs.request_options.screen_points and SCREEN_NOTE in instructions:
-        at = instructions.index(SCREEN_NOTE) + 1
-        instructions = (*instructions[:at], SCREEN_MOVE_NOTE, *instructions[at:])
-    section = user_instructions_section(inputs.user_instructions)
-    return instructions if section is None else (*instructions, section)
-
-
-def fit_notes(notes: tuple[SourceNote, ...]) -> tuple[SourceNote, ...]:
-    """Each server's notes cut to NOTE_CHARS, and all of them together to
-    NOTES_TOTAL_CHARS (V3-P60 §3); a note left with no room is dropped."""
-    out: list[SourceNote] = []
-    room = NOTES_TOTAL_CHARS
-    for note in notes:
-        limit = min(NOTE_CHARS, room)
-        if limit <= len(CUT):
-            break
-        text = note.text if len(note.text) <= limit else note.text[: limit - len(CUT)] + CUT
-        out.append(SourceNote(note.source, note.placement, text))
-        room -= len(text)
-    return tuple(out)
+# V3-P89: the system text (and the notes, cut once) are built in himari.prompt.system.
+stable_prefix = system_text
