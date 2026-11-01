@@ -556,7 +556,8 @@ Check(ActivityCatalog.MediaAppName("SpotifyAB.SpotifyMusic_zpdnekdrzrea0!Spotify
 var t0 = new DateTime(2026, 11, 1, 9, 0, 0, DateTimeKind.Utc);
 var tracker = new ActivityTracker();
 Check(!tracker.Known && tracker.Current(t0) is null, "nothing is known before the first look");
-Check(tracker.Observe(new("coding", "Visual Studio Code"), t0) && tracker.Current(t0.AddMinutes(45))!.ForSeconds == 2700, "the first look is taken at once and counts on");
+Check(tracker.Observe(new("coding", "Visual Studio Code", Program: "Code"), t0) && tracker.Current(t0.AddMinutes(45))!.ForSeconds == 2700
+    && tracker.Current(t0)!.Program == "Code", "the first look is taken at once, counts on and keeps its executable");
 Check(!tracker.Observe(new("chat", "KakaoTalk"), t0.AddMinutes(45)) && !tracker.Observe(new("coding", "Visual Studio Code"), t0.AddMinutes(45.5))
     && tracker.Current(t0.AddMinutes(46))!.Category == "coding" && tracker.Current(t0.AddMinutes(46))!.ForSeconds == 2760, "a glance at a messenger does not end the coding");
 Check(!tracker.Observe(new("game", "Some Game", true), t0.AddMinutes(50)) && !tracker.Observe(new("game", "Some Game", true), t0.AddMinutes(50.5)), "a new category waits for 60 seconds");
@@ -568,7 +569,7 @@ Check(!tracker.Known && tracker.Observe(new("document", "Word"), t0.AddMinutes(7
 
 var plain = new SignalSettings();
 Check(!plain.Media && !plain.Titles && plain.Activity && plain.MicCamera, "media and titles are off by default (owner Q2, Q3)");
-var coding = new ActivityState("coding", "Visual Studio Code", 2700.4, false, "secret.docx - Word");
+var coding = new ActivityState("coding", "Visual Studio Code", 2700.4, false, "secret.docx - Word", "Code");
 var oldServer = PresenceBody.Build(3, "Asia/Seoul", false, false, "unlock", coding, true, null, true, true, plain);
 Check(oldServer.Keys.OrderBy(k => k).SequenceEqual(new[] { "idle_seconds", "time_zone" }), "an older server gets only what it knows");
 var locked = PresenceBody.Build(3, "Asia/Seoul", true, true, "unlock", coding, true, new MediaInfo("Song", null, null), true, true, plain with { Media = true });
@@ -577,7 +578,13 @@ var full = PresenceBody.Build(3, "Asia/Seoul", true, false, "unlock", coding, tr
 var activityBody = (Dictionary<string, object?>)full["activity"]!;
 Check((string)full["after"]! == "unlock" && (int)activityBody["for_seconds"]! == 2700 && (string)activityBody["app"]! == "Visual Studio Code" && (string)activityBody["title"]! == "secret.docx - Word", "an unlocked signal carries the after mark, the activity and, when chosen, its title");
 Check((string)((Dictionary<string, object?>)full["media"]!)["title"]! == "Song" && (bool)full["mic_or_camera"]! == false, "media text is cleaned; mic and camera say false when known");
-var noTitle = PresenceBody.Build(3, "z", true, false, null, coding with { App = "KakaoTalk" }, true, null, true, null, plain with { Titles = true });
+var vsCode = coding with { Program = "Code" };  // shown as "Visual Studio Code", listed by its executable
+var listed = PresenceBody.Build(3, "z", true, false, null, vsCode, true, null, true, null, plain with { Titles = true, TitleExclusions = "code.exe" });
+Check(!((Dictionary<string, object?>)listed["activity"]!).ContainsKey("title") && (string)((Dictionary<string, object?>)listed["activity"]!)["app"]! == "Visual Studio Code",
+    "a title is left out by the executable's name, whatever the program calls itself (PR #150 review B1)");
+var unknownProgram = PresenceBody.Build(3, "z", true, false, null, coding with { Program = null }, true, null, true, null, plain with { Titles = true });
+Check(!((Dictionary<string, object?>)unknownProgram["activity"]!).ContainsKey("title"), "with no executable known, no title goes");
+var noTitle = PresenceBody.Build(3, "z", true, false, null, coding with { App = "KakaoTalk", Program = "KakaoTalk" }, true, null, true, null, plain with { Titles = true });
 Check(!((Dictionary<string, object?>)noTitle["activity"]!).ContainsKey("title") && !noTitle.ContainsKey("after") && !noTitle.ContainsKey("mic_or_camera"), "an excluded program's title, an absent mark and an unknown mic are left out");
 var off = PresenceBody.Build(3, "z", true, false, null, coding, true, null, true, true, plain with { Activity = false, MicCamera = false });
 Check(!off.ContainsKey("activity") && !off.ContainsKey("media") && !off.ContainsKey("mic_or_camera"), "a signal turned off is absent (the server drops what it had)");
@@ -593,21 +600,40 @@ Check(!MicCamera.InUse([(@"C:#Program Files#Zoom#bin#Zoom.exe", 100, 200), (@"C:
     "stopped, excluded, this app's own and never-used entries do not");
 
 var schedule = new SignalSchedule();
+void SendNow(DateTime at) { var ticket = schedule.Begin(); schedule.Sent(ticket, ticket.After is not null, at); }
 Check(schedule.Due(t0), "the first signal goes at once");
-schedule.Sent(t0);
+SendNow(t0);
 Check(!schedule.Due(t0.AddSeconds(30)) && schedule.Due(t0.AddSeconds(60)), "then every 60 seconds");
 schedule.Mark("resume");
 Check(schedule.Due(t0.AddSeconds(31)) && schedule.After == "resume", "an unlock or a wake goes at once with its mark");
-schedule.Sent(t0.AddSeconds(31));
-Check(schedule.After is null, "the mark goes once it was accepted");
+SendNow(t0.AddSeconds(31));
+Check(schedule.After is null && !schedule.Due(t0.AddSeconds(31)), "the mark goes once a body carrying it was accepted");
 schedule.SeeMedia(new MediaInfo("A", null, null), true);
 Check(schedule.Due(t0.AddSeconds(32)), "a media change goes");
-schedule.Sent(t0.AddSeconds(32));
+SendNow(t0.AddSeconds(32));
 schedule.SeeMedia(new MediaInfo("B", null, null), true);
 Check(!schedule.Due(t0.AddSeconds(35)) && schedule.Due(t0.AddSeconds(42)), "but at most every 10 seconds");
-schedule.Sent(t0.AddSeconds(42));
+SendNow(t0.AddSeconds(42));
 schedule.SeeMicCamera(true);
 Check(schedule.Due(t0.AddSeconds(43)), "the microphone starting goes at once");
+SendNow(t0.AddSeconds(43));
+// PR #150 review B2: what happens while a request is on its way is not lost when it is accepted
+var onTheWay = schedule.Begin();
+schedule.Urgent();  // the screen locked meanwhile
+schedule.Sent(onTheWay, false, t0.AddSeconds(44));
+Check(schedule.Due(t0.AddSeconds(44)), "a lock while a request is on its way is still sent");
+SendNow(t0.AddSeconds(45));
+onTheWay = schedule.Begin();
+schedule.Mark("unlock");  // unlocked meanwhile: the body on its way has no mark
+schedule.Sent(onTheWay, false, t0.AddSeconds(46));
+Check(schedule.After == "unlock" && schedule.Due(t0.AddSeconds(46)), "an unlock while a request is on its way keeps its mark");
+var carrying = schedule.Begin();
+schedule.Sent(carrying, false, t0.AddSeconds(47));  // built while locked: the mark was not in the body
+Check(schedule.After == "unlock", "a mark the body did not carry is kept");
+carrying = schedule.Begin();
+schedule.Mark("resume");  // a newer mark while the older one is on its way
+schedule.Sent(carrying, true, t0.AddSeconds(48));
+Check(schedule.After == "resume" && schedule.Due(t0.AddSeconds(48)), "a newer mark is kept when an older one is accepted");
 
 var evening = new DateTimeOffset(2026, 11, 1, 22, 30, 0, TimeSpan.FromHours(9));
 Check(QuietTimes.NextMorning(evening) == new DateTimeOffset(2026, 11, 2, 8, 0, 0, TimeSpan.FromHours(9))

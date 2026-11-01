@@ -139,8 +139,8 @@ public partial class MainWindow
         else signalSchedule.SeeMicCamera(null);
     }
 
-    private Dictionary<string, object?> PresenceSignal(int idle, string zone, DateTime now) => PresenceBody.Build(
-        idle, zone, serverTakesSignals, sessionLocked, signalSchedule.After, activityTracker.Current(now),
+    private Dictionary<string, object?> PresenceSignal(int idle, string zone, DateTime now, string? after) => PresenceBody.Build(
+        idle, zone, serverTakesSignals, sessionLocked, after, activityTracker.Current(now),
         activityTracker.Known, latestMedia, latestMediaKnown, latestMicCamera, signalSettings, titleExclusions);
 
     /// <summary>What is in front; null when it is HIMARI's own window (what was there is kept, §4.1).</summary>
@@ -160,7 +160,7 @@ public partial class MainWindow
         bool fullscreen = exclusive || (!IsIconic(window) && GetWindowRect(window, out var rect)
             && CoversMonitor(rect, System.Windows.Forms.Screen.FromHandle(window).Bounds));
         string category = ActivityCatalog.Classify(program, path, title.ToString(), exclusive, categoryOverrides);
-        return new ActivityObservation(category, ProgramName(program, path), fullscreen, title.ToString());
+        return new ActivityObservation(category, ProgramName(program, path), fullscreen, title.ToString(), program);
     }
 
     private static string? ProcessPath(uint pid)

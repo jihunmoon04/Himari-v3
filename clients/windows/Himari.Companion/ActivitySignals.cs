@@ -115,11 +115,17 @@ internal static class ActivityCatalog
     }
 }
 
-/// <summary>What is in front now, as read: <c>Category</c> null means nothing is (the desktop).</summary>
-internal sealed record ActivityObservation(string? Category, string? App = null, bool Fullscreen = false, string? Title = null);
+/// <summary>
+/// What is in front now, as read: <c>Category</c> null means nothing is (the desktop). <c>Program</c> is the
+/// executable's key ("code"), what the user's lists name; <c>App</c> its display name ("Visual Studio Code"),
+/// what the server is told (PR #150 review B1).
+/// </summary>
+internal sealed record ActivityObservation(string? Category, string? App = null, bool Fullscreen = false, string? Title = null,
+    string? Program = null);
 
 /// <summary>An activity as sent (V3-P88 §4): <c>ForSeconds</c> is how long its category has gone on.</summary>
-internal sealed record ActivityState(string Category, string? App, double ForSeconds, bool Fullscreen, string? Title);
+internal sealed record ActivityState(string Category, string? App, double ForSeconds, bool Fullscreen, string? Title,
+    string? Program = null);
 
 /// <summary>
 /// V3-P88 §4.1: a change of category counts only once it held for <see cref="StableSeconds"/> — a glance at a
@@ -159,7 +165,8 @@ internal sealed class ActivityTracker
     internal bool Known => started;
 
     internal ActivityState? Current(DateTime now) => stable is null ? null
-        : new ActivityState(stable.Category!, stable.App, Math.Max(0, (now - stableSince).TotalSeconds), stable.Fullscreen, stable.Title);
+        : new ActivityState(stable.Category!, stable.App, Math.Max(0, (now - stableSince).TotalSeconds), stable.Fullscreen, stable.Title,
+            stable.Program);
 }
 
 internal sealed record MediaInfo(string Title, string? Artist, string? App);
@@ -227,10 +234,14 @@ internal static class PresenceBody
         var body = new Dictionary<string, object?> { ["category"] = activity.Category, ["for_seconds"] = (int)activity.ForSeconds,
             ["fullscreen"] = activity.Fullscreen };
         if (Cut(activity.App, NameChars) is { } app) body["app"] = app;
-        if (settings.Titles && Cut(activity.Title, TitleChars) is { } title && !excluded.Contains(ActivityCatalog.ProgramKey(activity.App)))
-            body["title"] = title;
+        if (settings.Titles && Cut(activity.Title, TitleChars) is { } title && !Excluded(activity, excluded)) body["title"] = title;
         return body;
     }
+
+    /// <summary>Lists name executables: the program's key decides; with none known, no title goes (review B1).</summary>
+    private static bool Excluded(ActivityState activity, IReadOnlySet<string> excluded) =>
+        string.IsNullOrEmpty(activity.Program) || excluded.Contains(ActivityCatalog.ProgramKey(activity.Program))
+        || excluded.Contains(ActivityCatalog.ProgramKey(activity.App));
 
     internal static string? Cut(string? text, int chars)
     {
@@ -242,38 +253,53 @@ internal static class PresenceBody
     }
 }
 
+/// <summary>What one send was built from: a change after it, or a mark it did not carry, stays due.</summary>
+internal readonly record struct SendTicket(long Generation, bool MediaPending, long Mark, string? After);
+
 /// <summary>
 /// When a presence signal goes out (V3-P88 §14): every 60 s, at once on a change of session, activity, microphone
 /// or camera, or the user's settings, and for media at most every 10 s. The <c>after</c> mark rides on every send
-/// until one is accepted.
+/// until one that carried it is accepted. A send takes a <see cref="SendTicket"/> when its body is built; what
+/// changes while the request is on its way (a lock, an unlock) is still due afterwards (PR #150 review B2).
 /// </summary>
 internal sealed class SignalSchedule
 {
     internal const double PeriodSeconds = 60, MediaSeconds = 10;
     private DateTime lastSent = DateTime.MinValue, lastMedia = DateTime.MinValue;
-    private bool urgent, mediaChanged;
+    private long urgentAt, urgentSent, mediaAt, mediaSent, markAt;  // generations: a change bumps, a send settles
+    private long generation;
     private MediaInfo? media; private bool mediaKnown;
     private bool? micOrCamera;
     internal string? After { get; private set; }
 
-    internal void Urgent() => urgent = true;
-    internal void Mark(string after) { After = after; urgent = true; }
+    private bool UrgentDue => urgentAt > urgentSent;
+    private bool MediaDue => mediaAt > mediaSent;
+
+    internal void Urgent() => urgentAt = ++generation;
+    internal void Mark(string after) { After = after; markAt = ++generation; urgentAt = generation; }
 
     internal void SeeMedia(MediaInfo? value, bool known)
     {
         if (known == mediaKnown && Equals(value, media)) return;
-        media = value; mediaKnown = known; mediaChanged = true;
+        media = value; mediaKnown = known; mediaAt = ++generation;
     }
 
-    internal void SeeMicCamera(bool? value) { if (value != micOrCamera) { micOrCamera = value; urgent = true; } }
+    internal void SeeMicCamera(bool? value) { if (value != micOrCamera) { micOrCamera = value; Urgent(); } }
 
-    internal bool Due(DateTime now) => urgent || (now - lastSent).TotalSeconds >= PeriodSeconds
-        || (mediaChanged && (now - lastMedia).TotalSeconds >= MediaSeconds);
+    internal bool Due(DateTime now) => UrgentDue || (now - lastSent).TotalSeconds >= PeriodSeconds
+        || (MediaDue && (now - lastMedia).TotalSeconds >= MediaSeconds);
 
-    internal void Sent(DateTime now)
+    /// <summary>Taken when the body is built; the body carries <see cref="SendTicket.After"/>.</summary>
+    internal SendTicket Begin() => new(generation, MediaDue, markAt, After);
+
+    /// <summary>The send was accepted. <paramref name="carriedAfter"/>: the body had the mark (not when locked).</summary>
+    internal void Sent(SendTicket ticket, bool carriedAfter, DateTime now)
     {
-        lastSent = now; urgent = false; After = null;
-        if (mediaChanged) { mediaChanged = false; lastMedia = now; }
+        lastSent = now;
+        urgentSent = Math.Max(urgentSent, ticket.Generation);
+        if (ticket.MediaPending) lastMedia = now;  // it carried a media change: the next waits 10 s
+        mediaSent = Math.Max(mediaSent, ticket.Generation);
+        if (carriedAfter && ticket.After is not null && markAt == ticket.Mark) After = null;  // no newer mark since
     }
 }
 

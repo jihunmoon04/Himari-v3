@@ -490,9 +490,10 @@ public partial class MainWindow
                 if (signalSchedule.Due(now) || (wasIdle && idle < 300))
                 {
                     string zone = TimeZoneInfo.TryConvertWindowsIdToIanaId(TimeZoneInfo.Local.Id, out var iana) ? iana : TimeZoneInfo.Local.Id;
-                    var body = PresenceSignal(idle, zone, now);
+                    var ticket = signalSchedule.Begin();  // what changes while the request is on its way stays due
+                    var body = PresenceSignal(idle, zone, now, ticket.After);
                     await local.SendAsync(HttpMethod.Post, "/api/device/presence", body, ct);
-                    signalSchedule.Sent(now);  // the after mark goes only once it was accepted
+                    signalSchedule.Sent(ticket, body.ContainsKey("after"), now);  // the mark goes once a body carrying it was accepted
                     ShowSignalPreview(body);
                 }
                 wasIdle = idle >= 300;
