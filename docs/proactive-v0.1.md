@@ -508,3 +508,17 @@ P1·P2 해결 확인. 문서 정합성 둘과 구현 주의 하나:
 - `delivered`는 "대화에 기록됨"이지 앱이 실제로 띄웠다는 뜻이 아님을 §5.3에 적고, 표시 확인은 뒤 단계(§14의 4)로.
 
 검수자 의견: 이 셋을 반영하면 READY.
+
+## 19. 구현 메모
+
+### 19.1 1부: wake의 길 (`feat/proactive-part1`)
+
+- **Data v17.** `memories`에 알림 열(`remind_at`·`remind_instant`·`remind_state`·`remind_wake`·`remind_attempts`·`reminded_at`, 2부가 씀), `devices.last_input_at`(2부), 표 `wakes`·`wake_keys`. `begin_wake`는 한 트랜잭션에서 키 확인(하나라도 있으면 `DUPLICATE_IDENTITY`, 아무것도 남기지 않음) → 이벤트 → `wakes` 행 → 키 → 알림 `scheduled → claimed`(`AND remind_state='scheduled'`가 아니면 `INVALID_STATE_TRANSITION`). `end_wake`는 한 번만(`opened`일 때만 바뀌고 그다음은 그대로 돌려줌); 알림은 `remind_wake`가 이 wake일 때만 `delivered`(answered) 또는 `scheduled`로 되돌림(시도 3번째면 `missed`). 버림(purge)은 그 대화의 `wakes`를 지우고 `wake_keys`는 남김(같은 날 같은 계기가 다시 열리지 않게). 메모리 백엔드도 같음.
+- **Control.** `ConversationDriver.accept_wake`는 드라이버 lock 안에서 `_prepare` 뒤 정리됐는지 다시 보고(멈춘 턴·답 기다리는 호출·끝나지 않은 도구 묶음·답 안 한 계기면 `NOT_SETTLED`) `begin_wake`. 웨이크 이벤트는 `_next_triggers`의 계기(`resume`이 그 뒤로 이어 감). `resume(max_runs=)`로 이번 턴만 Run 상한을 더 좁힘(`WAKE_RUNS = 3`). `close_cut_group`은 끝나지 않은 묶음을 닫음(시작 안 한 호출은 실행 안 함). `BackgroundRunner.submit_wake`는 작업 중·입력 받는 중이면 `BUSY`, 받으면 `accepted`를 알리고 `"wake"` 작업을 `MessageOrigin(WAKE, device_id)`로 시작, `JobStatus.wake_id`. **사용자가 이김:** 메시지가 든 `submit`은 지금 작업이 wake 작업이면 취소를 요청하고 `WAKE_YIELD_SECONDS = 10`초까지 기다림; 그래도 돌면 `BUSY`이고 메시지는 저장하지 않음. 보통 작업은 메시지로 취소하지 않음(예전과 같음).
+- **Bootstrap.** `bootstrap/proactive.py`: `ProactiveSettings`(§11 값, 간격 30분·하루 4번·돌아옴 4시간·집중 30분·게임 30분·조용한 시간 23–08), `WakeEvents`(Runner 듣는 이: 작업이 끝나면 wake 이벤트 뒤를 읽어 `answered`(마지막 답) / `answered`+`asked`(기다리는 질문) / `cancelled`(아무 말 전에 취소) / `failed`), `settle_cut_wakes`(시작할 때 `opened`인 것: 답·질문이 뒤에 있으면 `answered`, 아니면 끊긴 묶음을 닫고 `failed` — 1부는 다시 이어 가지 않음). `Application.try_wake`(스위치·지금 기기·가장 최근 대화가 있어야 하고, 주체의 작업이 하나라도 돌면 `busy`, 그 대화가 정리되지 않았으면 `not_settled`; 조용히·조용한 시간·간격·상한·"메시지 뒤 10분"·"답 없는 wake 위"는 보지 않음 — 확인용이라. `ProactiveRefused` 코드 `proactive_off`·`no_device`·`no_conversation`·`busy`·`closed`·`not_settled`), `proactive_status`. `SystemSpec.proactive = companion and enabled`.
+- **Prompt.** `UserTurn.wake`; 웨이크는 `<time>` 줄(언제나, 사이 간격 계산에는 안 들어감) + `<wake>{JSON}</wake>`(`json_data`라 노트 글이 태그를 닫지 못함). 고리는 `PromptInputs.wake_notes`(ContextLoader가 그 턴에 읽음, 지워진 것은 `{"id","deleted":true}`), `context_key`에 `wake_notes`. `PROACTIVE_RULE`은 반려 절의 `SPEAKING_RULE` 바로 뒤, 원칙 문단은 "the reasons in a <wake> message"를 정보로 이름 지음 — 둘 다 `proactive`이고 반려가 켜졌을 때만. 압축 입력에서는 `role: "wake"`.
+- **기억 작업.** 웨이크는 `context` 줄(`[HIMARI spoke first: loop due m15, …]`): 보이지만 사용자 근거가 아니고, 파트를 시작하지 않고, 사용자 글자 수에도 안 셈. 대화 검색은 `SEARCH_KINDS`(사용자·답)뿐이라 웨이크를 찾지 않음.
+- **Web·CLI.** 이벤트 보기 `kind: "wake"`, `wake: {id, device_id, reasons}`, `text`는 서버가 만든 한 줄("HIMARI reached out · reminder m7 (late) · video for 1h 35m"); Web은 흐린 가운데 줄(`.wake-line`), CLI는 `· …` 한 줄. `GET /api/proactive`, `POST /api/proactive/try`(202, 거절은 409와 코드) — 기기 토큰은 기본 거절(`device_scope`). `himari proactive [status|try]`. 사건 흐름의 `job` origin은 `{"kind":"wake","device_id":…}`(origin_view 그대로).
+- **설정.** `HIMARI_PROACTIVE`(기본 끔), `HIMARI_PROACTIVE_QUIET`(`HH:MM-HH:MM`, 비우면 없음), `_GAP_MINUTES`·`_DAILY`·`_RETURN_HOURS`·`_FOCUS_MINUTES`·`_GAME_MINUTES`. 시작 줄 `HIMARI web: reaching out …`. 1부의 숫자는 아직 `try`에 쓰이지 않음(2부의 규칙이 씀).
+- **가짜 기기.** `scripts/device_client.py --self-test`가 답 뒤에 `try`로 wake를 열고, 기기가 origin `wake`인 `job`을 보고 그 `live`를 끝까지 따라감(표시 글에 표시 기호 없음).
+- **배포:** v17 업그레이드(백업 먼저). 스위치를 켜지 않으면 바뀌는 것은 표·열뿐이고 모델 입력도 같다(`proactive=false`면 새 줄 없음).

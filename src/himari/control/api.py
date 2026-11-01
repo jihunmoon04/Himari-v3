@@ -15,7 +15,7 @@ from enum import Enum
 from typing import Protocol, runtime_checkable
 
 from himari.common import CallRef, ConversationId, DeepFrozen, PrincipalId, RunId, TrustedScope
-from himari.data.api import ConversationEvent, MessageOrigin, ModelSetting, RecoveryReport, UserMessage
+from himari.data.api import ConversationEvent, MessageOrigin, ModelSetting, RecoveryReport, UserMessage, WakeReason
 from himari.prompt.api import ContextBudget, PresenceView
 from himari.provider.api import OutputDelta
 
@@ -151,6 +151,9 @@ class ModelCatalog(DeepFrozen):
 class ControlErrorCode(Enum):
     BUSY = "busy"  # another driver holds this Conversation in this process
     CLOSED = "closed"  # the Conversation is being moved to the trash, or is there (V3-P65)
+    # V3-P87 §6.1 (re-review P1): a wake opens only in a settled Conversation — no
+    # waiting call, no unfinished tool group, no recovery needed, no unanswered trigger
+    NOT_SETTLED = "not_settled"
 
 
 class ControlError(Exception):
@@ -278,7 +281,8 @@ class ConversationDriver(Protocol):
         ...
 
     async def resume(self, scope: TrustedScope, *, stop: StopSignal | None = None,
-                     progress: TurnProgress | None = None) -> DriveResult:
+                     progress: TurnProgress | None = None,
+                     max_runs: int | None = None) -> DriveResult:
         """Continue without new user input: restart cleanup, project stored
         responses, finish never-claimed PENDING calls, then start the next
         Run if one is due. Same BUSY rule as ``drive``."""
@@ -299,6 +303,19 @@ class ConversationDriver(Protocol):
         recent tail becomes the summary (one plan, possibly a chain of calls).
         Starts no Run. COMPACTED, NOTHING_TO_COMPACT, COMPACTION_FAILED, or
         WAITING_FOR_USER while a question is open. Same BUSY rule."""
+        ...
+
+    async def accept_wake(self, scope: TrustedScope, reasons: Sequence[WakeReason], device_id: str, *,
+                          keys: Sequence[str] = (), reminders: Sequence[int] = ()) -> ConversationEvent:
+        """V3-P87 §4.1, §6.1: record a wake (``WakeStore.begin_wake``) under this
+        Conversation's lock, after restart cleanup, only when it is settled —
+        else NOT_SETTLED, nothing written. ``resume`` then answers it."""
+        ...
+
+    async def close_cut_group(self, scope: TrustedScope, reason: str) -> bool:
+        """V3-P87 §4.4 (re-review P1): settle an unfinished tool group left by a
+        job a restart cut — calls never started are not run, finished ones keep
+        their effects; whether there was one."""
         ...
 
     async def cancel(self, scope: TrustedScope) -> DriveResult:
@@ -329,6 +346,7 @@ class JobStatus(DeepFrozen):
     finished_at: datetime | None = None
     stop_requested: StopRequest | None = None  # asked of the running job (V3-P55)
     turn_usage: TurnUsage | None = None  # the latest report of the job's drive (V3-P62 §7)
+    wake_id: str | None = None  # V3-P87: the wake this job answers (a server-opened turn)
 
     @property
     def job_id(self) -> str | None:

@@ -117,6 +117,9 @@ from himari.data.api import (
     ToolResultRecord,
     TriggerRef,
     UserMessage,
+    Wake,
+    WakeReason,
+    WakeStore,
 )
 from himari.prompt.api import (
     RECENT_DAYS,
@@ -219,6 +222,7 @@ class Driver:
         *,
         settings: ConversationModelSettings | None = None,  # None: every Conversation uses the default model
         user_instructions: InstructionsStore | None = None,  # None: no user instructions (V3-P69)
+        wakes: WakeStore | None = None,  # V3-P87: server-opened turns; None: none are accepted
         memories: MemoryStore | None = None,  # None: memory is off (V3-P71)
         max_runs_per_drive: int | None = 16,
         planner: CompactionPlanner | None = None,
@@ -247,6 +251,8 @@ class Driver:
         self._user_instructions = user_instructions
         self._memories = memories
         self._max_runs = max_runs_per_drive
+        self._wakes = wakes
+        self._limits: dict[ConversationId, int | None] = {}  # this drive's Run limit (V3-P87 §4.2)
         self._turn_budget = turn_budget
         self._no_progress_runs = no_progress_runs
         self._planner = planner
@@ -272,9 +278,29 @@ class Driver:
             return await self._drive_locked(scope, message)
 
     async def resume(self, scope: TrustedScope, *, stop: StopSignal | None = None,
-                     progress: TurnProgress | None = None) -> DriveResult:
-        async with self._exclusive(scope, stop, progress):
+                     progress: TurnProgress | None = None, max_runs: int | None = None) -> DriveResult:
+        """``max_runs``: a tighter Run limit for this drive (V3-P87 §4.2: a wake's turn)."""
+        async with self._exclusive(scope, stop, progress, max_runs):
             return await self._resume_locked(scope)
+
+    async def accept_wake(self, scope: TrustedScope, reasons: Sequence[WakeReason], device_id: str, *,
+                          keys: Sequence[str] = (), reminders: Sequence[int] = ()) -> ConversationEvent:
+        if self._wakes is None:
+            raise ControlError(ControlErrorCode.NOT_SETTLED, "this server keeps no wakes")
+        async with self._exclusive(scope):
+            _, stop = await self._prepare(scope)
+            if (stop is not None or await self._log.find_waiting_call(scope) is not None
+                    or await self._unfinished_group(scope) is not None or await self._next_triggers(scope)):
+                raise ControlError(ControlErrorCode.NOT_SETTLED, scope.conversation_id)
+            return await self._wakes.begin_wake(scope, reasons, device_id, keys=keys, reminders=reminders)
+
+    async def close_cut_group(self, scope: TrustedScope, reason: str) -> bool:
+        async with self._exclusive(scope):
+            await self._prepare(scope)
+            if await self._unfinished_group(scope) is None:
+                return False
+            await self._close_latest_group(scope, reason)
+            return True
 
     async def cancel(self, scope: TrustedScope) -> DriveResult:
         async with self._exclusive(scope):
@@ -383,7 +409,7 @@ class Driver:
 
     @contextlib.asynccontextmanager
     async def _exclusive(self, scope: TrustedScope, stop: StopSignal | None = None,
-                         progress: TurnProgress | None = None) -> AsyncIterator[None]:
+                         progress: TurnProgress | None = None, max_runs: int | None = None) -> AsyncIterator[None]:
         lock = self._locks.setdefault(scope.conversation_id, asyncio.Lock())
         if lock.locked():
             raise ControlError(ControlErrorCode.BUSY, scope.conversation_id)
@@ -393,7 +419,10 @@ class Driver:
             self._turn_models[scope.conversation_id] = model
             self._turn_users[scope.conversation_id] = user
             self._signals[scope.conversation_id] = stop if stop is not None else StopSignal()
-            self._turns[scope.conversation_id] = Turn(self._turn_budget, self._max_runs, progress,
+            limit = self._max_runs if max_runs is None else (
+                max_runs if self._max_runs is None else min(max_runs, self._max_runs))
+            self._limits[scope.conversation_id] = limit
+            self._turns[scope.conversation_id] = Turn(self._turn_budget, limit, progress,
                                                       model.offer.max_output_tokens)
             self._outputs[scope.conversation_id] = progress if isinstance(progress, OutputProgress) else None
             try:
@@ -402,6 +431,7 @@ class Driver:
                 del self._outputs[scope.conversation_id]
                 del self._signals[scope.conversation_id]
                 del self._turns[scope.conversation_id]
+                self._limits.pop(scope.conversation_id, None)
                 del self._turn_models[scope.conversation_id]
                 del self._turn_users[scope.conversation_id]
                 self._turn_presences.pop(scope.conversation_id, None)
@@ -604,7 +634,7 @@ class Driver:
                 case AssistantToolCalls() if event.origin_run_id is not None:
                     triggers.append(CompletedGroupRef(event.origin_run_id))
                     break
-                case UserMessage(answers_call=None):
+                case UserMessage(answers_call=None) | Wake():  # V3-P87 §3.2: a wake is a trigger too
                     triggers.append(EventRef(event.event_id))
         return tuple(reversed(triggers))
 
@@ -711,7 +741,8 @@ class Driver:
         while True:
             if (stopped := boundary()) is not None:  # a stop outranks every limit
                 return stopped
-            if self._max_runs is not None and turn.steps >= self._max_runs:
+            limit = self._limits.get(scope.conversation_id, self._max_runs)
+            if limit is not None and turn.steps >= limit:
                 return result(DriveState.RUN_LIMIT_REACHED, detail=f"{turn.steps} steps")
             if self._no_progress_runs is not None and turn.empty_streak >= self._no_progress_runs:
                 return result(DriveState.NO_PROGRESS,

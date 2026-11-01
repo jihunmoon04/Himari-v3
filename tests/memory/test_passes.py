@@ -255,3 +255,18 @@ def test_an_update_keeps_the_dates_it_leaves_out_and_clears_one_set_to_null() ->
         (PassAction.UPDATE, None, None, "2026-11-07"),
         (PassAction.UPDATE, None, None, None),
         (PassAction.UPDATE, None, None, "2026-11-07")]  # a project may still have an end
+
+
+def test_a_wake_is_context_never_the_users_words() -> None:
+    """V3-P87 §8.3: why HIMARI spoke first is shown, but it is not evidence, starts no part and counts no chars."""
+    from himari.data.api import Wake, WakeKind, WakeReason
+
+    wake = ConversationEvent(EventId("e2"), CONV, 2, EventKind.WAKE,
+                             Wake("wake_1", (WakeReason(WakeKind.LOOP_DUE, memory_id=15),
+                                             WakeReason(WakeKind.FOCUS, activity="coding", minutes=40)), "d1"), 1, NOW)
+    assert next_part([wake], 0) is None  # a wake alone is nothing to read
+    part = next_part([said(1, "면접 준비해야 해"), wake, answered(3, "면접 준비는 잘 돼가?")], 0)
+    assert part is not None
+    roles = [(m.role, m.text) for m in part.messages]
+    assert roles[1] == ("context", "[HIMARI spoke first: loop due m15, focus coding]")
+    assert part.user_chars == len("면접 준비해야 해")

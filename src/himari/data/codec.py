@@ -44,6 +44,9 @@ from himari.data.api import (
     OriginKind,
     PromptBasis,
     ToolResultRecord,
+    Wake,
+    WakeKind,
+    WakeReason,
     TriggerRef,
     UserMessage,
 )
@@ -184,6 +187,8 @@ def payload(value: EventPayload) -> str:
             })
         case ToolResultRecord(call=call, model_result=result):
             return dumps({"call": _call_ref(call), "model_result": _model_result_obj(result)})
+        case Wake(wake_id=wake_id, reasons=reasons, device_id=device_id):
+            return dumps({"wake_id": wake_id, "reasons": wake_reasons(reasons), "device_id": device_id})
     raise TypeError(f"not an event payload: {type(value).__name__}")
 
 
@@ -204,7 +209,37 @@ def payload_from(kind: EventKind, text: str) -> EventPayload:
             return AssistantToolCalls(calls, _blocks_from(data["commentary"]))
         case EventKind.TOOL_RESULT:
             return ToolResultRecord(_call_ref_from(data["call"]), _model_result_obj_from(data["model_result"]))
+        case EventKind.WAKE:
+            return Wake(str(data["wake_id"]), wake_reasons_from(data["reasons"]), str(data["device_id"]))
     raise ValueError(f"unknown event kind {kind!r}")
+
+
+def wake_reasons(reasons: tuple[WakeReason, ...] | list[WakeReason]) -> list[dict[str, object]]:
+    """V3-P87 §3.2: each reason with only the fields it has."""
+    out = []
+    for r in reasons:
+        item: dict[str, object] = {"kind": r.kind.value}
+        for name in ("memory_id", "away_minutes", "via", "activity", "minutes"):
+            value = getattr(r, name)
+            if value is not None:
+                item[name] = value
+        if r.late:
+            item["late"] = True
+        out.append(item)
+    return out
+
+
+def wake_reasons_from(value: object) -> tuple[WakeReason, ...]:
+    def opt_int(v: object) -> int | None:
+        return None if v is None else int(cast(Any, v))
+
+    def opt_str(v: object) -> str | None:
+        return None if v is None else str(v)
+
+    return tuple(WakeReason(WakeKind(str(d["kind"])), opt_int(d.get("memory_id")), opt_int(d.get("away_minutes")),
+                            opt_str(d.get("via")), opt_str(d.get("activity")), opt_int(d.get("minutes")),
+                            bool(d.get("late", False)))
+                 for d in (_obj(v) for v in cast(list[object], value)))
 
 
 # --- Run metadata ---------------------------------------------------------------------

@@ -58,6 +58,9 @@ from himari.data.api import (
     PassKind,
     NoteDates,
     STALE_DUE,
+    MAX_WAKE_REASONS,
+    WakeKind,
+    WakeReason,
 )
 
 
@@ -176,8 +179,19 @@ def check_origin(origin: object) -> None:
         return
     if not isinstance(origin, MessageOrigin) or not isinstance(origin.kind, OriginKind):
         raise DataError(DataErrorCode.INVALID_ARGUMENT, "not a message origin")
+    if origin.kind is OriginKind.WAKE:  # V3-P87 §4.1: a job's origin, never a message's
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, "a message does not come from a wake")
     if (origin.kind is OriginKind.DEVICE) != isinstance(origin.device_id, str) or origin.device_id == "":
         raise DataError(DataErrorCode.INVALID_ARGUMENT, "a device origin names its device, and only it")
+
+
+def check_wake(reasons: object, device_id: object) -> None:
+    """V3-P87 §3.2: one to MAX_WAKE_REASONS reasons, and the device it is spoken on."""
+    if not isinstance(reasons, (list, tuple)) or not 1 <= len(reasons) <= MAX_WAKE_REASONS \
+            or not all(isinstance(r, WakeReason) and isinstance(r.kind, WakeKind) for r in reasons):
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, f"a wake has 1..{MAX_WAKE_REASONS} reasons")
+    if not isinstance(device_id, str) or not device_id:
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, "a wake names the device it is spoken on")
 
 
 def check_workspace_location(location: object) -> str:

@@ -6,7 +6,9 @@ uploads its screen and sends a message with it (V3-P84 §4), follows
 ``live`` of that job (by its ``job_id``, §6.3) to ``done`` — the text
 without marks, each mood and each move at its place — reads the recorded
 answer's ``display``, and sends the same screen again as an app that lost
-the answer would (409 ``screen_already_sent``, §7.8).
+the answer would (409 ``screen_already_sent``, §7.8). When the server speaks
+first (V3-P87), its job starts with origin ``wake`` and this device's id; the
+device follows that job's ``live`` like its own.
 
     python scripts/device_client.py --server https://himari.example --code ABCD-EFGH "안녕"
     python scripts/device_client.py --self-test
@@ -29,7 +31,7 @@ import tempfile
 import threading
 import time
 import zlib
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -88,6 +90,9 @@ class Report:
     locked_current: str | None = "unset"
     unlocked_current: str | None = "unset"
     quiet: dict[str, Any] | None = None
+    # V3-P87: a job the server opened to speak first on this device, and what live sent for it
+    wake_job_id: str | None = None
+    wake_text: str = ""
 
 
 def screen_png(width: int = 1280, height: int = 720) -> bytes:
@@ -118,7 +123,9 @@ async def pair(http: httpx.AsyncClient, code: str, token: str) -> tuple[dict[str
     raise RuntimeError("pairing kept failing")
 
 
-async def run(server: str, code: str, text: str, *, verify: bool = True) -> Report:
+async def run(server: str, code: str, text: str, *, verify: bool = True,
+              wake: Callable[[], Awaitable[None]] | None = None) -> Report:
+    """``wake``: makes the server speak first once the answer is in (the self-test's ``try``)."""
     report = Report()
     async with httpx.AsyncClient(base_url=server, timeout=60, verify=verify) as http:
         report.device, token = await pair(http, code, new_token())
@@ -173,6 +180,13 @@ async def run(server: str, code: str, text: str, *, verify: bool = True) -> Repo
             report.display = [i for i in items if i["kind"] == "assistant_final"][-1]["display"]
             response = await http.post(f"/api/conversations/{report.conversation}/messages", json=message)
             report.screen_again = Refused(response).code if response.status_code != 202 else None
+            if wake is not None:
+                await wake()
+                spoken = {"kind": "wake", "device_id": report.device["device_id"]}
+                started = await next_named(events, "job", lambda d: d.get("state") == "started"
+                                           and d.get("origin") == spoken)
+                report.wake_job_id = started.get("job_id")
+                report.wake_text = await spoken_text(http, report.conversation, report.wake_job_id)
         finally:
             reader.cancel()
             await asyncio.gather(reader, return_exceptions=True)
@@ -245,6 +259,20 @@ async def follow(http: httpx.AsyncClient, report: Report) -> None:
             report.moves += [(m["at"], m["x"], m["y"]) for m in fresh]
 
 
+async def spoken_text(http: httpx.AsyncClient, conversation: str, job_id: str | None) -> str:
+    """What live sent for one job, to its ``done`` (V3-P87: a wake's job, followed like the device's own)."""
+    text = ""
+    async with http.stream("GET", f"/api/conversations/{conversation}/live") as response:
+        if response.status_code != 200:
+            raise Refused(response)
+        async for name, data in frames(response):
+            if name in ("snapshot", "delta") and data.get("job_id") == job_id:
+                text = data["text"] if name == "snapshot" else text + data["text"]
+            elif name == "done":
+                return text
+    return text
+
+
 def show(report: Report) -> None:
     print(f"paired: {report.device['name']} ({report.device['device_id']}); the same pairing again: {report.resent}")
     print(f"hello: current device {report.hello['current_device']}, moods {', '.join(report.hello['moods'])}")
@@ -255,18 +283,21 @@ def show(report: Report) -> None:
           f"the same screen again: {report.screen_again}")
     print(f"signals: {report.signals}; current when locked: {report.locked_current}, after the unlock: "
           f"{report.unlocked_current}; quiet: {report.quiet}")
+    print(f"spoke first: job {report.wake_job_id}, {report.wake_text!r}")
     print(f"events: {', '.join(report.events)}")
 
 
 # --- self test ---------------------------------------------------------------------------------
 
 ANSWER = "[[mood:happy]]안녕! 오늘은 `[[mood:sad]]` 대신 [[mood:thinking]]뭘 할까? [[move:1043,88]]여기 봐!"
+FIRST = "[[mood:happy]]아직 거기 있어?"  # V3-P87: what the scripted model says when the server opens the turn
 
 
 def self_test() -> int:
     import uvicorn
 
     from himari.bootstrap.application import Application
+    from himari.bootstrap.proactive import ProactiveSettings
     from himari.common import PrincipalId, TextBlock
     from himari.interfaces.web.app import create_app
     from himari.interfaces.web.config import WebConfig
@@ -281,9 +312,10 @@ def self_test() -> int:
         opened: dict[str, Any] = {}
 
         async def opener() -> Application:
-            provider = ScriptedAdapter([NormalizedFinal((TextBlock(ANSWER),))], streaming=True, piece_delay=0.01,
-                                       first_delay=0.5)
-            application = await Application.open(root, provider, model_id="scripted-model", sandbox=False)
+            provider = ScriptedAdapter([NormalizedFinal((TextBlock(ANSWER),)), NormalizedFinal((TextBlock(FIRST),))],
+                                       streaming=True, piece_delay=0.01, first_delay=0.5)
+            application = await Application.open(root, provider, model_id="scripted-model", sandbox=False,
+                                                 proactive=ProactiveSettings(enabled=True))
             opened["app"], opened["loop"] = application, asyncio.get_running_loop()
             return application
 
@@ -301,7 +333,12 @@ def self_test() -> int:
         try:
             made = asyncio.run_coroutine_threadsafe(opened["app"].devices.create(PrincipalId("operator"), "데스크톱"),
                                                     opened["loop"]).result(10)
-            report = asyncio.run(run(f"http://127.0.0.1:{port}", made.code, "안녕"))
+
+            async def wake() -> None:  # the operator's try (V3-P87 §11), on the server's loop
+                await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(
+                    opened["app"].try_wake(PrincipalId("operator")), opened["loop"]))
+
+            report = asyncio.run(run(f"http://127.0.0.1:{port}", made.code, "안녕", wake=wake))
         finally:
             server.should_exit = True
     show(report)
@@ -337,6 +374,8 @@ def check(report: Report) -> list[str]:
         "the unlock makes it current again": report.unlocked_current == "d1",
         "the quiet reaches the device's stream": report.quiet is not None and report.quiet.get("until") is not None,
         "a device gets no signals notices": "devices" not in report.events,
+        "a wake's job is spoken on this device": report.wake_job_id is not None and report.wake_job_id != report.job_id,
+        "live sends the first words without marks": report.wake_text == "아직 거기 있어?",
     }
     return [name for name, ok in wanted.items() if not ok]
 

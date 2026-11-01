@@ -203,6 +203,8 @@ class Printer:
             else:  # files only: no empty box (PR #60 review C7)
                 self.line("You:" if not answers else "You (answer):")
             self.files(event.get("attachments") or [])
+        elif kind == "wake":  # V3-P87 §9
+            self.line(f"· {text}")
         elif kind == "assistant_final":
             self.block(self.speaker(self.changed_model(event)), text)
         elif kind == "assistant_tool_calls":
@@ -973,6 +975,23 @@ def cmd_instructions(session: Session, args: argparse.Namespace, read: Callable[
     return EXIT_OK
 
 
+def cmd_proactive(session: Session, args: argparse.Namespace) -> int:
+    """V3-P87 §11: ``status`` (the default) or ``try`` — a TRY wake now, in the most
+    recent conversation, spoken on the current device."""
+    if args.action == "try":
+        try:
+            opened = session.client.post("/api/proactive/try", {})
+        except ServerRefused as error:
+            session.note(f"refused ({error.code}): {error}")
+            return EXIT_FAILED
+        session.note(f"HIMARI speaks first in {opened['conversation']} (job {opened['job_id']})")
+        return EXIT_OK
+    status = session.client.get("/api/proactive")
+    session.printer.line(f"Reaching out: {status['told']}")
+    session.printer.line(f"Current device: {status.get('current_device') or 'none (away)'}")
+    return EXIT_OK
+
+
 MEMORY_USAGE = ("usage: himari memory | memory add CATEGORY TEXT|- [--due D] [--until D]"
                 " | memory edit ID TEXT|- [--category C] [--due D|none] [--until D|none] | memory rm ID|eID [--yes]"
                 " | memory episodes | memory passes CONVERSATION"
@@ -1667,6 +1686,8 @@ def parser() -> argparse.ArgumentParser:
     instructions.add_argument("--yes", action="store_true", help="clear without asking")
     instructions.add_argument("--persona", action="store_true",
                               help="your companion persona instead (used while companion mode is on)")
+    proactive = sub.add_parser("proactive", help="speaking first: show the switch, or try it now")
+    proactive.add_argument("action", nargs="?", choices=["status", "try"], default="status")
     memory = sub.add_parser("memory", help="the notes and episodes HIMARI keeps about you")
     memory.add_argument("action", nargs="?", choices=list(MEMORY_ACTIONS))
     memory.add_argument("rest", nargs="*", help="add: CATEGORY TEXT|-; edit: ID TEXT|-; rm: ID or eID; passes and "
@@ -1699,7 +1720,7 @@ COMMANDS: dict[str, Callable[[Session, argparse.Namespace], int]] = {
     "chat": cmd_chat, "list": cmd_list, "show": cmd_show, "new": cmd_new, "send": cmd_send, "continue": cmd_continue,
     "compact": cmd_compact, "tools": cmd_tools, "model": cmd_model, "pause": cmd_pause, "cancel": cmd_cancel,
     "status": cmd_status, "rename": cmd_rename, "delete": cmd_delete, "trash": cmd_trash, "restore": cmd_restore,
-    "files": cmd_files, "download": cmd_download, "instructions": cmd_instructions, "memory": cmd_memory,
+    "files": cmd_files, "download": cmd_download, "instructions": cmd_instructions, "memory": cmd_memory, "proactive": cmd_proactive,
     "workspace": cmd_workspace, "attach": cmd_attach, "detach": cmd_detach, "workdir": cmd_workdir,
 }
 

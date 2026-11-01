@@ -17,6 +17,7 @@ def test_event_kinds_follow_ask_user_model() -> None:
         "assistant_final",
         "assistant_tool_calls",
         "tool_result",
+        "wake",  # V3-P87 §3: a server-opened turn's trigger
     }
 
 

@@ -70,6 +70,8 @@ from dataclasses import dataclass
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from himari.bootstrap.proactive import ProactiveSettings, parse_quiet
+
 HOST_VAR = "HIMARI_WEB_HOST"
 PORT_VAR = "HIMARI_WEB_PORT"
 SANDBOX_PORT_VAR = "HIMARI_WEB_SANDBOX_PORT"
@@ -101,6 +103,14 @@ COMPANION_VAR = "HIMARI_COMPANION"  # V3-P83: 0 turns devices off
 TIME_ZONE_VAR = "HIMARI_TIME_ZONE"  # V3-P83: the zone the model is told the time in
 MACHINE_SOCKET_VAR = "HIMARI_MACHINE_SOCKET"  # V3-P74: the runner's socket; unset: no machine Environment
 MACHINE_PRINCIPALS_VAR = "HIMARI_MACHINE_PRINCIPALS"  # V3-P74: whose new Conversations use it
+# V3-P87 §11: speaking first, and its throttling
+PROACTIVE_VAR = "HIMARI_PROACTIVE"
+PROACTIVE_QUIET_VAR = "HIMARI_PROACTIVE_QUIET"
+PROACTIVE_GAP_VAR = "HIMARI_PROACTIVE_GAP_MINUTES"
+PROACTIVE_DAILY_VAR = "HIMARI_PROACTIVE_DAILY"
+PROACTIVE_RETURN_VAR = "HIMARI_PROACTIVE_RETURN_HOURS"
+PROACTIVE_FOCUS_VAR = "HIMARI_PROACTIVE_FOCUS_MINUTES"
+PROACTIVE_GAME_VAR = "HIMARI_PROACTIVE_GAME_MINUTES"
 DEFAULT_FILE_MAX_BYTES = 32 * 1024 * 1024  # as data.api
 DEFAULT_FILE_STORE_MAX_BYTES = 1024 * 1024 * 1024
 DEFAULT_FILE_KEEP_DAYS = 30
@@ -161,6 +171,7 @@ class WebConfig:
     time_zone: str = DEFAULT_TIME_ZONE  # V3-P83 §6.4
     machine_socket: str | None = None  # V3-P74
     machine_principals: tuple[str, ...] = ("operator",)
+    proactive: ProactiveSettings = ProactiveSettings()  # V3-P87 §11
 
     @property
     def view_port(self) -> int:
@@ -274,6 +285,7 @@ class WebConfig:
             time_zone=_time_zone(source.get(TIME_ZONE_VAR)),
             machine_socket=machine_socket,
             machine_principals=machine_principals,
+            proactive=_proactive(source),
         )
 
 
@@ -284,6 +296,23 @@ def _non_empty(value: str | None, default: str, name: str) -> str:
     if not value:
         raise WebConfigError(f"{name} must not be empty when set")
     return value
+
+
+def _proactive(source: Mapping[str, str]) -> ProactiveSettings:
+    """V3-P87 §11: off unless HIMARI_PROACTIVE; 0 turns a trigger off where the setting allows."""
+    try:
+        quiet_start, quiet_end = parse_quiet(source.get(PROACTIVE_QUIET_VAR))
+    except ValueError:
+        raise WebConfigError(f"{PROACTIVE_QUIET_VAR} must be HH:MM-HH:MM, or empty for no quiet hours") from None
+    return ProactiveSettings(
+        enabled=_flag(source.get(PROACTIVE_VAR), PROACTIVE_VAR, default=False),
+        quiet_start=quiet_start, quiet_end=quiet_end,
+        gap_minutes=_required(source.get(PROACTIVE_GAP_VAR), PROACTIVE_GAP_VAR, 30, 0, 24 * 60),
+        daily=_required(source.get(PROACTIVE_DAILY_VAR), PROACTIVE_DAILY_VAR, 4, 0, 48),
+        return_hours=_required(source.get(PROACTIVE_RETURN_VAR), PROACTIVE_RETURN_VAR, 4, 0, 72),
+        focus_minutes=_required(source.get(PROACTIVE_FOCUS_VAR), PROACTIVE_FOCUS_VAR, 30, 0, 24 * 60),
+        game_minutes=_required(source.get(PROACTIVE_GAME_VAR), PROACTIVE_GAME_VAR, 30, 0, 24 * 60),
+    )
 
 
 def _port(value: str | None, name: str = PORT_VAR, *, default: int = DEFAULT_PORT) -> int:

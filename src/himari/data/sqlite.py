@@ -183,11 +183,16 @@ from himari.data.api import (
     UiCsp,
     UiResource,
     UserMessage,
+    REMINDER_ATTEMPTS,
+    Wake,
+    WakeReason,
+    WakeRecord,
+    WakeStatus,
 )
 
 # v3: compaction_runs; v4: external_settings; v5: ui_resources; v6: model_settings;
 # v7: the trash (all upgraded in place); v1 is refused
-SCHEMA_VERSION = 16
+SCHEMA_VERSION = 17
 APPLICATION_ID = 0x48494D41  # "HIMA": written into the database header (PRAGMA application_id)
 
 _TERMINAL_COMPLETIONS = frozenset(
@@ -204,6 +209,7 @@ _KIND_OF: dict[type, EventKind] = {
     AssistantFinal: EventKind.ASSISTANT_FINAL,
     AssistantToolCalls: EventKind.ASSISTANT_TOOL_CALLS,
     ToolResultRecord: EventKind.TOOL_RESULT,
+    Wake: EventKind.WAKE,
 }
 
 # ``seq`` columns are rowid aliases: creation order, as dict insertion order
@@ -586,9 +592,41 @@ CREATE TABLE presence_settings (
     quiet_until TEXT
 ) STRICT;
 """
+# v17: server-opened turns (V3-P87 §3.3): the wakes and the keys that keep them from
+# repeating; a reminder's delivery on its loop (§5.3); each device's last input (§5.2).
+_V17_ADDITIONS = """
+ALTER TABLE memories ADD COLUMN remind_at TEXT;
+ALTER TABLE memories ADD COLUMN remind_instant TEXT;
+ALTER TABLE memories ADD COLUMN remind_state TEXT;
+ALTER TABLE memories ADD COLUMN remind_wake TEXT;
+ALTER TABLE memories ADD COLUMN remind_attempts INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE memories ADD COLUMN reminded_at TEXT;
+ALTER TABLE devices ADD COLUMN last_input_at TEXT;
+CREATE TABLE wakes (
+    wake_id TEXT PRIMARY KEY,
+    owner TEXT NOT NULL,
+    conversation_id TEXT NOT NULL REFERENCES conversations,
+    event_sequence INTEGER NOT NULL,
+    reasons TEXT NOT NULL,
+    device_id TEXT NOT NULL,
+    status TEXT NOT NULL,
+    asked INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    ended_at TEXT
+) STRICT;
+CREATE INDEX wakes_by_owner ON wakes (owner, created_at);
+CREATE INDEX wakes_opened ON wakes (status) WHERE status = 'opened';
+CREATE TABLE wake_keys (
+    owner TEXT NOT NULL,
+    key TEXT NOT NULL,
+    wake_id TEXT,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (owner, key)
+) STRICT;
+"""
 _ADDITIONS = (_V3_ADDITIONS, _V4_ADDITIONS, _V5_ADDITIONS, _V6_ADDITIONS, _V7_ADDITIONS, _V8_ADDITIONS,
               _V9_ADDITIONS, _V10_ADDITIONS, _V11_ADDITIONS, _V12_ADDITIONS,
-              _V13_ADDITIONS, _V14_ADDITIONS, _V15_ADDITIONS, _V16_ADDITIONS)  # what each version from v3 added
+              _V13_ADDITIONS, _V14_ADDITIONS, _V15_ADDITIONS, _V16_ADDITIONS, _V17_ADDITIONS)  # what each version from v3 added
 _SCHEMA = _SCHEMA_V2 + "".join(_ADDITIONS)
 # An older version → (its exact schema, what brings it to SCHEMA_VERSION).
 _UPGRADES = {
@@ -1164,6 +1202,14 @@ def _fill_memory_cursors(tx: _Tx) -> None:
     tx.execute("INSERT INTO memory_cursors (conversation_id, through_sequence, failures, retry_after,"
                " baseline_sequence, backfill_through) SELECT conversation_id, MAX(sequence), 0, NULL, MAX(sequence), 0"
                " FROM events GROUP BY conversation_id")
+
+
+def _wake(row: sqlite3.Row) -> WakeRecord:
+    return WakeRecord(row["wake_id"], PrincipalId(row["owner"]), ConversationId(row["conversation_id"]),
+                      int(row["event_sequence"]), codec.wake_reasons_from(json.loads(row["reasons"])),
+                      row["device_id"], WakeStatus(row["status"]), bool(row["asked"]),
+                      datetime.fromisoformat(row["created_at"]),
+                      None if row["ended_at"] is None else datetime.fromisoformat(row["ended_at"]))
 
 
 def _timestamp(moment: datetime) -> str:
@@ -2301,6 +2347,7 @@ class SqliteData:
         "DELETE FROM memory_pass_items WHERE pass_id IN (SELECT pass_id FROM memory_passes WHERE conversation_id=?)",
         "DELETE FROM memory_pass_calls WHERE pass_id IN (SELECT pass_id FROM memory_passes WHERE conversation_id=?)",
         "DELETE FROM memory_passes WHERE conversation_id=?",
+        "DELETE FROM wakes WHERE conversation_id=?",  # V3-P87 (its keys stay: what was said is not said again)
         "DELETE FROM conversations WHERE conversation_id=?",
     )
 
@@ -2755,6 +2802,72 @@ class SqliteData:
         with self._tx() as tx:
             tx.execute("UPDATE devices SET last_seen_at=? WHERE owner=? AND device_id=? AND revoked_at IS NULL",
                        _timestamp(at), principal, device_id)
+
+    # --- WakeStore (V3-P87) -------------------------------------------------------------
+
+    async def begin_wake(self, scope: TrustedScope, reasons: Sequence[WakeReason], device_id: str, *,
+                         keys: Sequence[str] = (), reminders: Sequence[int] = ()) -> ConversationEvent:
+        rules.check_wake(reasons, device_id)
+        with self._tx() as tx:
+            tx.authorized(scope)
+            if self._waiting(tx, scope) is not None:
+                raise DataError(DataErrorCode.INVALID_STATE_TRANSITION, "an ask_user call is waiting")
+            now = _timestamp(datetime.now(UTC))
+            wake_id = tx.new_id("wake")
+            for key in keys:
+                if tx.one("SELECT 1 FROM wake_keys WHERE owner=? AND key=?", scope.principal_id, key) is not None:
+                    raise DataError(DataErrorCode.DUPLICATE_IDENTITY, f"wake key {key!r} was taken")
+                tx.execute("INSERT INTO wake_keys (owner, key, wake_id, created_at) VALUES (?, ?, ?, ?)",
+                           scope.principal_id, key, wake_id, now)
+            for memory_id in reminders:
+                claimed = tx.execute("UPDATE memories SET remind_state='claimed', remind_wake=? WHERE owner=?"
+                                     " AND memory_id=? AND remind_state='scheduled' AND retired_at IS NULL",
+                                     wake_id, scope.principal_id, memory_id)
+                if claimed.rowcount != 1:
+                    raise DataError(DataErrorCode.INVALID_STATE_TRANSITION, f"reminder m{memory_id} is not waiting")
+            event = self._new_event(tx, scope, Wake(wake_id, tuple(reasons), device_id), None)
+            tx.execute("INSERT INTO wakes (wake_id, owner, conversation_id, event_sequence, reasons, device_id,"
+                       " status, asked, created_at, ended_at) VALUES (?, ?, ?, ?, ?, ?, 'opened', 0, ?, NULL)",
+                       wake_id, scope.principal_id, scope.conversation_id, event.sequence,
+                       codec.dumps(codec.wake_reasons(tuple(reasons))), device_id, now)
+            return event
+
+    async def end_wake(self, principal: PrincipalId, wake_id: str, status: WakeStatus, *,
+                       asked: bool = False) -> WakeRecord:
+        if status is WakeStatus.OPENED:
+            raise DataError(DataErrorCode.INVALID_ARGUMENT, "a wake ends answered, cancelled or failed")
+        with self._tx() as tx:
+            row = tx.one("SELECT * FROM wakes WHERE owner=? AND wake_id=?", principal, wake_id)
+            if row is None:
+                raise DataError(DataErrorCode.NOT_FOUND, f"no wake {wake_id}")
+            if row["status"] != WakeStatus.OPENED.value:
+                return _wake(row)  # ended already: once
+            now = _timestamp(datetime.now(UTC))
+            tx.execute("UPDATE wakes SET status=?, asked=?, ended_at=? WHERE wake_id=?",
+                       status.value, int(asked and status is WakeStatus.ANSWERED), now, wake_id)
+            # §5.3 (re-review P2): only reminders still claimed by this very wake
+            if status is WakeStatus.ANSWERED:
+                tx.execute("UPDATE memories SET remind_state='delivered', reminded_at=?, remind_wake=NULL"
+                           " WHERE owner=? AND remind_state='claimed' AND remind_wake=?", now, principal, wake_id)
+            else:
+                tx.execute("UPDATE memories SET remind_attempts=remind_attempts+1, remind_wake=NULL,"
+                           " remind_state=CASE WHEN remind_attempts+1 >= ? THEN 'missed' ELSE 'scheduled' END"
+                           " WHERE owner=? AND remind_state='claimed' AND remind_wake=?",
+                           REMINDER_ATTEMPTS, principal, wake_id)
+            ended = tx.one("SELECT * FROM wakes WHERE wake_id=?", wake_id)
+            assert ended is not None
+            return _wake(ended)
+
+    async def read_wake(self, principal: PrincipalId, wake_id: str) -> WakeRecord:
+        with self._tx() as tx:
+            row = tx.one("SELECT * FROM wakes WHERE owner=? AND wake_id=?", principal, wake_id)
+            if row is None:
+                raise DataError(DataErrorCode.NOT_FOUND, f"no wake {wake_id}")
+            return _wake(row)
+
+    async def opened_wakes(self) -> tuple[WakeRecord, ...]:
+        with self._tx() as tx:
+            return tuple(_wake(r) for r in tx.all("SELECT * FROM wakes WHERE status='opened' ORDER BY created_at"))
 
     async def read_quiet(self, principal: PrincipalId) -> datetime | None:
         with self._tx() as tx:

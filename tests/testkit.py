@@ -23,8 +23,8 @@ from himari.common import (
     ToolId,
     TrustedScope,
 )
-from himari.control.api import ModelCatalog
-from himari.data.api import ArtifactMutation, BindingAuthority, UserMessage, ViewMaker
+from himari.control.api import ControlError, ControlErrorCode, ModelCatalog
+from himari.data.api import ArtifactMutation, BindingAuthority, ConversationEvent, UserMessage, ViewMaker, WakeReason
 from himari.data.memory import InMemoryData, InMemoryStore
 from himari.data.sqlite import SqliteData, SqliteStore
 from himari.environment.api import BindingObservation, ConnectionStatus
@@ -43,6 +43,10 @@ from himari.tool.api import (
 )
 
 SCOPE = TrustedScope(PrincipalId("alice"), ConversationId("conv_1"))
+V17_UNDO = ("DROP TABLE wake_keys", "DROP INDEX wakes_opened", "DROP INDEX wakes_by_owner", "DROP TABLE wakes",
+            "ALTER TABLE devices DROP COLUMN last_input_at",
+            *(f"ALTER TABLE memories DROP COLUMN {c}" for c in ("reminded_at", "remind_attempts", "remind_wake",
+                                                                  "remind_state", "remind_instant", "remind_at")))
 V15_UNDO = ("DROP INDEX memory_pass_items_by_outcome", "DROP TABLE memory_pass_items", "DROP TABLE memory_pass_calls",
             "DROP INDEX memory_passes_by_owner", "DROP INDEX memory_passes_by_conversation", "DROP TABLE memory_passes",
             "DROP TABLE memory_cursors", "DROP INDEX episodes_by_conversation", "DROP INDEX episodes_by_time",
@@ -101,6 +105,17 @@ def forget_unknown_policy(store: Store) -> list[CallRef]:
 
 class SimulatedCrash(BaseException):
     """Escapes every ``except Exception``: models the process dying here."""
+
+
+class NoWakes:
+    """For a fake ConversationDriver: a server keeping no wakes (V3-P87)."""
+
+    async def accept_wake(self, scope: TrustedScope, reasons: Sequence[WakeReason], device_id: str, *,
+                          keys: Sequence[str] = (), reminders: Sequence[int] = ()) -> ConversationEvent:
+        raise ControlError(ControlErrorCode.NOT_SETTLED, "this fake keeps no wakes")
+
+    async def close_cut_group(self, scope: TrustedScope, reason: str) -> bool:
+        return False
 
 
 def user(text: str) -> UserMessage:
