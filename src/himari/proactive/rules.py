@@ -13,7 +13,17 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
-from himari.data.api import MAX_WAKE_REASONS, Memory, MemoryCategory, WakeKind, WakeReason, WakeRecord, WakeStatus
+from himari.data.api import (
+    MAX_WAKE_REASONS,
+    REMIND_LATE,
+    REMIND_ON_TIME,
+    Memory,
+    MemoryCategory,
+    WakeKind,
+    WakeReason,
+    WakeRecord,
+    WakeStatus,
+)
 from himari.presence.api import DeviceState
 
 CHECK_IN_WINDOW = timedelta(hours=24)  # §5.1: a loop is spoken of within a day of its moment, else expired
@@ -147,6 +157,30 @@ def loop_candidates(loops: Iterable[Memory], now: datetime
     return due, expired, upcoming
 
 
+def _fresh(returned: Return | None, device_id: str | None, now: datetime) -> bool:
+    """§5.2: a return on the device still current, past the user's RETURN_WAIT, not older than RETURN_FRESH."""
+    return returned is not None and returned.device_id == device_id and RETURN_WAIT <= now - returned.at <= RETURN_FRESH
+
+
+def reminder_candidates(loops: Iterable[Memory], returned: Return | None, device_id: str | None,
+                        now: datetime) -> list[Candidate]:
+    """§5.3: a scheduled reminder whose moment came — on time within REMIND_ON_TIME; after
+    that (Q9), late at a fresh return that came after its on-time window, until REMIND_LATE
+    (then Data marks it missed). No key: its delivery state keeps it from repeating."""
+    out: list[Candidate] = []
+    for note in loops:
+        moment = note.remind_instant
+        if note.category is not MemoryCategory.LOOP or note.remind_state != "scheduled" or moment is None \
+                or moment > now:
+            continue
+        if now - moment < REMIND_ON_TIME:
+            out.append(Candidate(WakeReason(WakeKind.REMINDER, memory_id=note.memory_id), None, moment))
+        elif now - moment < REMIND_LATE and _fresh(returned, device_id, now) and returned is not None \
+                and returned.at >= moment + REMIND_ON_TIME:
+            out.append(Candidate(WakeReason(WakeKind.REMINDER, memory_id=note.memory_id, late=True), None, moment))
+    return out
+
+
 def return_candidate(returned: Return | None, device_id: str | None, last_user_message_at: datetime | None,
                      settings: ProactiveSettings, now: datetime) -> Candidate | None:
     """§5.2 (Q3): greeted when the user was away RETURN_HOURS or more, said nothing
@@ -154,7 +188,7 @@ def return_candidate(returned: Return | None, device_id: str | None, last_user_m
     current one, and the record is fresh."""
     if returned is None or settings.return_hours <= 0 or returned.away_minutes is None:
         return None
-    if returned.device_id != device_id or not RETURN_WAIT <= now - returned.at <= RETURN_FRESH:
+    if not _fresh(returned, device_id, now):
         return None
     if returned.away_minutes < settings.return_hours * 60:
         return None
@@ -192,7 +226,7 @@ def activity_candidates(device_id: str | None, device: DeviceState | None, setti
 def candidates(s: Situation) -> tuple[list[Candidate], list[str], datetime | None]:
     """Every trigger's candidate (§5), the loop keys to expire, the next loop moment."""
     due, expired, upcoming = loop_candidates(s.loops, s.now)
-    found = list(due)
+    found = reminder_candidates(s.loops, s.returned, s.device_id, s.now) + due
     back = return_candidate(s.returned, s.device_id, s.last_user_message_at, s.settings, s.now)
     if back is not None:
         found.append(back)

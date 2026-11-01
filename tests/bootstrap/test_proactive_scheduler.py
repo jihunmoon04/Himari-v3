@@ -326,3 +326,40 @@ def test_a_failed_wake_counts_only_when_its_turn_left_output(tmp_path: Path) -> 
             await app.close()
 
     asyncio.run(scenario())
+
+
+def test_a_reminder_is_told_while_the_user_talks_and_is_delivered(tmp_path: Path) -> None:
+    """§5.3: right after the user's own turn, past the talking rule; delivered once answered."""
+    async def scenario() -> None:
+        adapter = answers("응", "참, 약 먹을 시간이야!")
+        app = await opened(tmp_path / "data", adapter)
+        try:
+            device = await paired(app)
+            app.hub.subscribe(ME, device)
+            app.hub.signal(ME, device, 0, "Asia/Seoul")
+            scope = TrustedScope(ME, await app.create_conversation(ME))
+            await app.send(scope, "오늘 너무 피곤하다", origin=MessageOrigin(OriginKind.WEB))
+            await app.runner.wait(scope)
+            at = parse_note_date((datetime.now(UTC) - timedelta(minutes=1)).isoformat(timespec="minutes"), "UTC")
+            assert at is not None
+            note = await app.data.save_memory(ME, MemoryCategory.LOOP, "사용자는 저녁 약을 먹어야 한다",
+                                              dates=NoteDates(remind_at=at[0], remind_instant=at[1]))
+            scheduler = app.scheduler
+            assert scheduler is not None
+            look = await scheduler.look(ME)
+            assert look.outcome == "spoke", look
+            await settled(app, scope)
+            wake = (await app.data.read_events(scope))[-2]
+            assert isinstance(wake.payload, Wake)
+            assert wake.payload.reasons == (WakeReason(WakeKind.REMINDER, memory_id=note.memory_id),)
+            drawn = adapter.prepared_inputs[-1].conversation[-1].blocks[-1].text  # type: ignore[union-attr]
+            assert '"kind": "reminder"' in drawn and at[0] in drawn  # its time, read when drawn
+            told = await app.data.read_memory(ME, note.memory_id)
+            assert told.remind_state == "delivered" and told.reminded_at is not None
+            assert (await scheduler.look(ME)).decision.reasons == ()
+            status = await app.proactive_status(ME)
+            assert status["today"] == 0  # a reminder is not counted toward the day
+        finally:
+            await app.close()
+
+    asyncio.run(scenario())

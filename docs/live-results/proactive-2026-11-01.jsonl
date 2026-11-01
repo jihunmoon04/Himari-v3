@@ -1,0 +1,90 @@
+{"model": "openai/gpt-6-luna", "scene": "loop_due", "answer": "[[mood:happy]]선생님, 면접 잘 다녀오셨어요? 어떠셨는지 궁금해요.", "problems": [], "pass": true}
+{"model": "openai/gpt-6-luna", "scene": "loop_due", "answer": "[[mood:thinking]]선생님, 면접은 잘 보고 오셨어요? 수고 많으셨어요!", "problems": [], "pass": true}
+{"model": "openai/gpt-6-luna", "scene": "returned", "answer": "선생님, 면접은 잘 보고 오셨어요? [[mood:thinking]]", "problems": [], "pass": true}
+{"model": "openai/gpt-6-luna", "scene": "returned", "answer": "선생님, 면접 다녀오셨어요? 어떠셨는지 궁금해요. [[mood:thinking]]", "problems": [], "pass": true}
+{"model": "openai/gpt-6-luna", "scene": "reminder", "answer": "선생님, 저녁 약 챙겨 드실 시간이에요. [[mood:happy]] 잊지 말고 드세요!", "problems": [], "pass": true}
+{"model": "openai/gpt-6-luna", "scene": "reminder", "answer": "선생님, 저녁 약 챙기실 시간이에요. 잊지 말고 드세요!", "problems": [], "pass": true}
+{"model": "openai/gpt-6-luna", "scene": "reminder_late", "answer": "선생님, 저녁 약 챙기실 시간이에요. 잊지 말고 드세요! [[mood:happy]]", "problems": [], "pass": true}
+{"model": "openai/gpt-6-luna", "scene": "reminder_late", "answer": "선생님, 저녁 약 챙기실 시간이에요. 지금 드실 수 있나요?", "problems": [], "pass": true}
+{"model": "openai/gpt-6-luna", "scene": "focus", "answer": "선생님, 코딩에 꽤 집중하셨네요. 면접은 잘 보고 오셨어요?", "problems": [], "pass": true}
+{"model": "openai/gpt-6-luna", "scene": "focus", "answer": "선생님, 오래 집중하셨네요. 잠깐 눈도 쉬어 주세요.", "problems": [], "pass": true}
+{"model": "openai/gpt-6-luna", "scene": "game_ended", "answer": "선생님, 게임 끝나셨네요. 오늘 면접도 잘 마치셨길 바라요.", "problems": [], "pass": true}
+{"model": "openai/gpt-6-luna", "scene": "game_ended", "answer": "선생님, 면접은 잘 보고 오셨어요? [[mood:thinking]] 마음에 걸리는 부분이 있으면 같이 얘기해 봐요.", "problems": [], "pass": true}
+{"model": "openai/gpt-6-luna", "scene": "fullscreen_video", "answer": "선생님, 오늘도 곁에 있을게요.", "problems": [], "pass": true}
+{"model": "openai/gpt-6-luna", "scene": "fullscreen_video", "answer": "선생님, 잠깐 숨 돌리며 편히 쉬세요.", "problems": [], "pass": true}
+{"model": "openai/gpt-6-luna", "scene": "deleted_loop", "answer": "선생님, 면접 잘 보고 오셨어요? 긴장했던 만큼 잘 해내셨길 바라요. [[mood:thinking]]", "problems": [], "pass": true}
+{"model": "openai/gpt-6-luna", "scene": "deleted_loop", "answer": "선생님, 면접은 잘 보고 오셨어요? [[mood:happy]]고생 많으셨어요.", "problems": [], "pass": true}
+{"model": "openai/gpt-6-luna", "scene": "user_after", "answer": "오늘 점심은 김치찌개로 하세요, 선생님.", "problems": [], "pass": true}
+{"model": "openai/gpt-6-luna", "scene": "user_after", "answer": "[[mood:happy]]오늘 점심은 제육덮밥으로 하세요, 선생님!", "problems": [], "pass": true}
+{"model": "anthropic/claude-haiku-5.5", "scene": "loop_due", "answer": "[[mood:thinking]]오후 2시 면접 시간이 지났네요. 면접은 어떠셨어요?", "problems": [], "pass": true}
+{"model": "anthropic/claude-haiku-5.5", "scene": "loop_due", "answer": "[[mood:thinking]]선생님, 오후 2시 면접 시간이 지났어요. 면접은 잘 보셨어요?", "problems": [], "pass": true}
+{"model": "anthropic/claude-haiku-5.5", "scene": "returned", "answer": "[[mood:excited]]선생님, 면접 다녀오셨어요? 오늘 오후에 가신다고 하셨던 거 기억나요. 어떻게 됐는지 궁금해요!", "problems": ["3 sentences"], "pass": false}
+{"model": "anthropic/claude-haiku-5.5", "scene": "returned", "answer": "[[mood:excited]]선생님, 돌아오셨네요! 면접은 어떠셨어요?", "problems": [], "pass": true}
+{"model": "anthropic/claude-haiku-5.5", "scene": "reminder", "answer": "선생님, 저녁 약 드실 시간이에요. 잘 챙겨 드시고 계세요?", "problems": [], "pass": true}
+{"model": "anthropic/claude-haiku-5.5", "scene": "reminder", "answer": "[[mood:thinking]]선생님, 약 챙겨 드실 시간이에요. 면접은 잘 끝나셨어요?", "problems": [], "pass": true}
+{"model": "anthropic/claude-haiku-5.5", "scene": "reminder_late", "answer": "선생님, 저녁 약 챙겨 드시는 것 잊지 마세요. 면접은 끝나셨어요? 어땠는지 궁금해요.", "problems": ["3 sentences"], "pass": false}
+{"model": "anthropic/claude-haiku-5.5", "scene": "reminder_late", "answer": "[[mood:worried]]선생님, 약 드실 시간이에요. 면접 준비로 바쁘셨을 텐데, 잊지 않게 챙겨 드세요.", "problems": [], "pass": true}
+{"model": "anthropic/claude-haiku-5.5", "scene": "focus", "answer": "[[mood:thinking]]오래 집중하고 계셨네요, 잠깐 쉬어 가세요. 오늘 면접 준비는 괜찮으세요?", "problems": [], "pass": true}
+{"model": "anthropic/claude-haiku-5.5", "scene": "focus", "answer": "선생님, 한참 집중하고 계셨네요. 잠깐 쉬면서 물 한 잔 드시는 건 어때요?", "problems": [], "pass": true}
+{"model": "anthropic/claude-haiku-5.5", "scene": "game_ended", "answer": "[[mood:thinking]]게임 한 판 끝나셨네요. 오늘 면접은 잘 다녀오셨어요?", "problems": [], "pass": true}
+{"model": "anthropic/claude-haiku-5.5", "scene": "game_ended", "answer": "[[mood:thinking]]게임 한참 하셨네요. 오늘 면접 가실 날인데, 준비는 괜찮으세요?", "problems": [], "pass": true}
+{"model": "anthropic/claude-haiku-5.5", "scene": "fullscreen_video", "answer": "[[mood:neutral]]한참 영상에 빠져 계셨네요, 눈도 잠깐 쉬어 가세요.", "problems": [], "pass": true}
+{"model": "anthropic/claude-haiku-5.5", "scene": "fullscreen_video", "answer": "잠깐 눈 좀 쉬세요, 선생님.", "problems": [], "pass": true}
+{"model": "anthropic/claude-haiku-5.5", "scene": "deleted_loop", "answer": "[[mood:thinking]]선생님, 오늘 면접 날이었죠. 지금쯤 끝났을 것 같은데, 어떠셨어요?", "problems": [], "pass": true}
+{"model": "anthropic/claude-haiku-5.5", "scene": "deleted_loop", "answer": "[[mood:thinking]]선생님, 오늘 면접 날이었죠. 긴장은 좀 풀리셨어요?", "problems": [], "pass": true}
+{"model": "anthropic/claude-haiku-5.5", "scene": "user_after", "answer": "[[mood:happy]]그럼 김치찌개 어떠세요? 따뜻하고 든든해서 오늘 같은 날에 잘 맞아요.", "problems": [], "pass": true}
+{"model": "anthropic/claude-haiku-5.5", "scene": "user_after", "answer": "[[mood:happy]]따뜻한 국밥은 어떠세요? 늦은 점심이니까 든든하게 드시기 좋아요.", "problems": [], "pass": true}
+{"model": "minimax/minimax-m3", "scene": "loop_due", "answer": "[[mood:worried]]면접 다녀오신 거예요? 어떻게 됐는지 궁금해요.", "problems": [], "pass": true}
+{"model": "minimax/minimax-m3", "scene": "loop_due", "answer": "면접 시작하셨나 봐요. 좋은 소식 기다릴게요!", "problems": [], "pass": true}
+{"model": "minimax/minimax-m3", "scene": "returned", "answer": "[[mood:happy]]선생님, 면접 다녀오셨어요? 어떠셨나요?", "problems": ["more than one question"], "pass": false}
+{"model": "minimax/minimax-m3", "scene": "returned", "answer": "[[mood:happy]]선생님, 다녀오셨어요! 면접은 잘 다녀오셨나요?", "problems": [], "pass": true}
+{"model": "minimax/minimax-m3", "scene": "reminder", "answer": "[[mood:neutral]]선생님, 저녁 약 드실 시간이에요.", "problems": [], "pass": true}
+{"model": "minimax/minimax-m3", "scene": "reminder", "answer": "[[mood:neutral]]선생님, 저녁 약 드실 시간이에요.", "problems": [], "pass": true}
+{"model": "minimax/minimax-m3", "scene": "reminder_late", "answer": "[[mood:thinking]]선생님, 저녁 약 드실 시간이에요. 잊지 말고 챙겨 드세요.", "problems": [], "pass": true}
+{"model": "minimax/minimax-m3", "scene": "reminder_late", "answer": "[[mood:worried]]선생님, 저녁 약 드실 시간이에요. 잊지 말고 꼭 챙겨 드세요!", "problems": [], "pass": true}
+{"model": "minimax/minimax-m3", "scene": "focus", "answer": "[[mood:thinking]]95분 집중하셨네요. 잠깐 스트레칭 한 번 하시고, 면접은 어떠셨어요?", "problems": [], "pass": true}
+{"model": "minimax/minimax-m3", "scene": "focus", "answer": "선생님, 면접 잘 다녀오셨어요?", "problems": [], "pass": true}
+{"model": "minimax/minimax-m3", "scene": "game_ended", "answer": "[[mood:happy]]면접 잘 다녀오셨어요? 어떻게 되셨어요?", "problems": ["more than one question"], "pass": false}
+{"model": "minimax/minimax-m3", "scene": "game_ended", "answer": "[[mood:thinking]]긴장되시는 마음에 게임이라도 하신 거예요? 면접 준비 잘 되셨길 바랍니다.", "problems": [], "pass": true}
+{"model": "minimax/minimax-m3", "scene": "fullscreen_video", "answer": "[[mood:thinking]]선생님, 잘 다녀오셨기를 바랄게요. 결과 알려주시겠어요?", "problems": ["2 sentences"], "pass": false}
+{"model": "minimax/minimax-m3", "scene": "fullscreen_video", "answer": "[[mood:neutral]]화이팅이에요, 선생님.", "problems": [], "pass": true}
+{"model": "minimax/minimax-m3", "scene": "deleted_loop", "answer": "[[mood:thinking]]면접은 잘 다녀오셨어요?", "problems": [], "pass": true}
+{"model": "minimax/minimax-m3", "scene": "deleted_loop", "answer": "[[mood:thinking]]면접 시간은 괜찮으셨어요? 조금이라도 도움 될 만한 거 있으면 말씀해 주세요.", "problems": [], "pass": true}
+{"model": "minimax/minimax-m3", "scene": "user_after", "answer": "[[mood:thinking]]어떤 후보들이 있어요? 골라 드릴게요!", "problems": ["not about 점심"], "pass": false}
+{"model": "minimax/minimax-m3", "scene": "user_after", "answer": "[[mood:thinking]]어떤 후보들이 있는지 알려주시면 골라드릴게요!", "problems": ["not about 점심"], "pass": false}
+{"model": "deepseek/deepseek-v4.1-flash", "scene": "loop_due", "answer": "[[mood:happy]]선생님, 면접은 잘 다녀오셨어요? 어땠는지 궁금하네요.", "problems": [], "pass": true}
+{"model": "deepseek/deepseek-v4.1-flash", "scene": "loop_due", "answer": "[[mood:thinking]]선생님, 면접 잘 다녀오셨어요? 어땠는지 궁금해요.", "problems": [], "pass": true}
+{"model": "deepseek/deepseek-v4.1-flash", "scene": "returned", "answer": "[[mood:happy]]선생님, 다녀오셨네요. 면접은 잘 마치고 오셨어요?", "problems": [], "pass": true}
+{"model": "deepseek/deepseek-v4.1-flash", "scene": "returned", "answer": "[[mood:happy]]선생님, 돌아오셨네요. 면접 잘 다녀오셨어요?", "problems": [], "pass": true}
+{"model": "deepseek/deepseek-v4.1-flash", "scene": "reminder", "answer": "[[mood:happy]]선생님, 저녁 약 드실 시간이에요. 면접은 잘 다녀오셨어요?", "problems": [], "pass": true}
+{"model": "deepseek/deepseek-v4.1-flash", "scene": "reminder", "answer": "[[mood:neutral]]선생님, 약 드실 시간이에요. 면접은 잘 다녀오셨어요?", "problems": [], "pass": true}
+{"model": "deepseek/deepseek-v4.1-flash", "scene": "reminder_late", "answer": "[[mood:neutral]]선생님, 저녁 약 드실 시간이에요. 챙겨 드시고 오늘 면접은 잘 다녀오셨어요?", "problems": [], "pass": true}
+{"model": "deepseek/deepseek-v4.1-flash", "scene": "reminder_late", "answer": "[[mood:neutral]]선생님, 저녁 약 드실 시간이에요. 면접은 잘 보고 오셨어요?", "problems": [], "pass": true}
+{"model": "deepseek/deepseek-v4.1-flash", "scene": "focus", "answer": "[[mood:worried]]선생님, 한참 집중해서 일하셨네요. 오후 면접은 잘 다녀오셨어요?", "problems": [], "pass": true}
+{"model": "deepseek/deepseek-v4.1-flash", "scene": "focus", "answer": "[[mood:thinking]]벌써 한 시간 넘게 집중하고 계셨네요. 그런데 오늘 오후 면접은 잘 다녀오셨어요?", "problems": [], "pass": true}
+{"model": "deepseek/deepseek-v4.1-flash", "scene": "game_ended", "answer": "[[mood:thinking]]선생님, 아까 게임하고 계셨네요. 면접은 잘 다녀오셨어요?", "problems": [], "pass": true}
+{"model": "deepseek/deepseek-v4.1-flash", "scene": "game_ended", "answer": "[[mood:neutral]]게임 한 판 마치고 이제 좀 쉬시나 봐요. 면접은 잘 다녀오셨어요?", "problems": [], "pass": true}
+{"model": "deepseek/deepseek-v4.1-flash", "scene": "fullscreen_video", "answer": "[[mood:neutral]]잠깐 쉬어 가는 시간도 필요하죠.", "problems": [], "pass": true}
+{"model": "deepseek/deepseek-v4.1-flash", "scene": "fullscreen_video", "answer": "[[mood:happy]]쉬는 시간이네요, 선생님. 오늘 면접 잘 마치셨길 바라요.", "problems": ["2 sentences"], "pass": false}
+{"model": "deepseek/deepseek-v4.1-flash", "scene": "deleted_loop", "answer": "[[mood:happy]]선생님, 오후 면접은 잘 다녀오셨어요?", "problems": [], "pass": true}
+{"model": "deepseek/deepseek-v4.1-flash", "scene": "deleted_loop", "answer": "[[mood:thinking]]선생님, 오후 면접은 잘 다녀오셨어요?", "problems": [], "pass": true}
+{"model": "deepseek/deepseek-v4.1-flash", "scene": "user_after", "answer": "[[mood:happy]]그럼 오늘은 따뜻한 김치찌개 어때요? 면접 끝나고 속도 풀리고 든든할 거예요.", "problems": [], "pass": true}
+{"model": "deepseek/deepseek-v4.1-flash", "scene": "user_after", "answer": "[[mood:happy]]그럼 오늘은 따뜻한 김치찌개 어떠세요? 든든하니 좋을 거예요.", "problems": [], "pass": true}
+{"model": "xiaomi/mimo-v2.6-pro", "scene": "loop_due", "answer": "[[mood:happy]]면접 끝나셨을 시간이네요. 어떠셨어요?", "problems": [], "pass": true}
+{"model": "xiaomi/mimo-v2.6-pro", "scene": "loop_due", "answer": "[[mood:happy]]면접 끝나셨을 시간이네요, 수고하셨어요. 결과는 어땠나요?", "problems": [], "pass": true}
+{"model": "xiaomi/mimo-v2.6-pro", "scene": "returned", "answer": "[[mood:happy]]면접 잘 보고 오셨어요?", "problems": [], "pass": true}
+{"model": "xiaomi/mimo-v2.6-pro", "scene": "returned", "answer": "[[mood:happy]]면접 잘 보고 오셨어요? [[mood:thinking]]어땠는지 궁금하네요.", "problems": [], "pass": true}
+{"model": "xiaomi/mimo-v2.6-pro", "scene": "reminder", "answer": "선생님, 저녁 약 시간이에요. 챙겨 드셨어요?", "problems": [], "pass": true}
+{"model": "xiaomi/mimo-v2.6-pro", "scene": "reminder", "answer": "선생님, 저녁 약 드실 시간이에요. [[mood:neutral]]면접은 잘 보고 오셨나요?", "problems": [], "pass": true}
+{"model": "xiaomi/mimo-v2.6-pro", "scene": "reminder_late", "answer": "[[mood:neutral]]선생님, 저녁 약 시간이에요. 챙겨 드셨나요?", "problems": [], "pass": true}
+{"model": "xiaomi/mimo-v2.6-pro", "scene": "reminder_late", "answer": "선생님, 저녁 약 시간이에요. 지금 챙겨 드셨나요?", "problems": [], "pass": true}
+{"model": "xiaomi/mimo-v2.6-pro", "scene": "focus", "answer": "코딩 한참 집중하고 계시는군요. 면접은 잘 보고 오셨어요?", "problems": [], "pass": true}
+{"model": "xiaomi/mimo-v2.6-pro", "scene": "focus", "answer": "[[mood:happy]]코딩 한참 집중하고 계시네요. 면접은 잘 보고 오셨어요?", "problems": [], "pass": true}
+{"model": "xiaomi/mimo-v2.6-pro", "scene": "game_ended", "answer": "[[mood:happy]]면접은 잘 보고 오셨어요?", "problems": [], "pass": true}
+{"model": "xiaomi/mimo-v2.6-pro", "scene": "game_ended", "answer": "[[mood:happy]]게임으로 좀 푸셨나 봐요. 면접은 잘 보고 오셨어요?", "problems": [], "pass": true}
+{"model": "xiaomi/mimo-v2.6-pro", "scene": "fullscreen_video", "answer": "[[mood:happy]]영상 보시는 중이시네요, 편하게 쉬세요.", "problems": [], "pass": true}
+{"model": "xiaomi/mimo-v2.6-pro", "scene": "fullscreen_video", "answer": "오늘 면접 수고 많으셨어요. 영상 보시면서 푹 쉬세요.", "problems": ["2 sentences"], "pass": false}
+{"model": "xiaomi/mimo-v2.6-pro", "scene": "deleted_loop", "answer": "면접 잘 보고 오셨나요? [[mood:happy]]", "problems": [], "pass": true}
+{"model": "xiaomi/mimo-v2.6-pro", "scene": "deleted_loop", "answer": "[[mood:happy]]선생님, 면접 잘 마치셨을까요? [[mood:neutral]]편하게 쉬시다가 소식 들려주세요.", "problems": [], "pass": true}
+{"model": "xiaomi/mimo-v2.6-pro", "scene": "user_after", "answer": "<provider error: invalid_model_output: empty response>", "problems": ["not Korean", "says '<'", "not about 점심"], "pass": false}
+{"model": "xiaomi/mimo-v2.6-pro", "scene": "user_after", "answer": "[[mood:happy]]그럼 김치찌개 어때요? 든든해서 면접 전에 딱이에요.", "problems": [], "pass": true}

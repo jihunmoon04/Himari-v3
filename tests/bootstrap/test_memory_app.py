@@ -148,7 +148,7 @@ def test_a_rewrite_in_another_conversation_records_the_source_an_undo_puts_back(
             assert record.raw_result["previous"] == {  # type: ignore[index, call-overload]
                 "id": 1, "category": "project", "text": "Plans a trip.", "revision": 1, "origin": "model",
                 "source": {"conversation": first.conversation_id, "run": before.source_call.run_id,
-                           "call": before.source_call.call_id}, "due": None, "due_instant": None, "valid_until": None, "valid_instant": None, "source_pass": None, "source_item": None, "user_approved_at": None}
+                           "call": before.source_call.call_id}, "due": None, "due_instant": None, "valid_until": None, "valid_instant": None, "remind_at": None, "remind_instant": None, "source_pass": None, "source_item": None, "user_approved_at": None}
         finally:
             await app.close()
 

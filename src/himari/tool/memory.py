@@ -47,6 +47,7 @@ SEARCH_LIMIT = 20  # notes one memory_search returns
 EPISODE_LIMIT = 10  # episodes it returns (V3-P85 §5.5)
 DUE_RANGE = (timedelta(days=-1), timedelta(days=2 * 365))  # as memory passes take them (V3-P85 §4.4)
 VALID_RANGE = (timedelta(0), timedelta(days=365))
+REMIND_RANGE = (timedelta(minutes=-5), timedelta(days=365))  # V3-P87 §5.3: ahead (a moment ago passes: "now")
 
 _CATEGORIES = [c.value for c in MemoryCategory]
 _KINDS = ["notes", "episodes", "all"]
@@ -105,6 +106,7 @@ def _note_view(note: Memory) -> dict[str, JsonValue]:
     return {"id": note.memory_id, "category": note.category.value, "text": note.text, "revision": note.revision,
             "origin": note.origin.value, "source": source, "due": note.due_at, "due_instant": _moment(note.due_instant),
             "valid_until": note.valid_until, "valid_instant": _moment(note.valid_instant),
+            "remind_at": note.remind_at, "remind_instant": _moment(note.remind_instant),
             "source_pass": note.source_pass, "source_item": note.source_item,
             "user_approved_at": _moment(note.user_approved_at)}
 
@@ -114,6 +116,8 @@ def note_line(note: Memory, now: datetime) -> str:
     tag = note.category.value
     if note.category is MemoryCategory.LOOP and note.due_at:
         tag += f" due {note.due_at}"
+    if note.category is MemoryCategory.LOOP and note.remind_at and note.remind_state in ("scheduled", "claimed"):
+        tag += f" remind {note.remind_at}"
     expired = " (expired)" if note.valid_instant is not None and note.valid_instant < now else ""
     until = f" until {note.valid_until}" if note.valid_until and not expired else ""
     return f"m{note.memory_id} [{tag}] {note.text}{until} ({note.updated_at.date().isoformat()}){expired}"
@@ -173,10 +177,12 @@ def _date_arg(args: Mapping[str, JsonValue], key: str, kept: _Date, zone: str, n
     return parsed
 
 
-def _dated(due: _Date, valid: _Date) -> tuple[str | None, datetime | None, str | None, datetime | None]:
+def _dated(due: _Date, valid: _Date, remind: _Date = None
+           ) -> tuple[str | None, datetime | None, str | None, datetime | None, str | None, datetime | None]:
     """MemoryChange's date fields, in their order."""
     return (None if due is None else due[0], None if due is None else due[1],
-            None if valid is None else valid[0], None if valid is None else valid[1])
+            None if valid is None else valid[0], None if valid is None else valid[1],
+            None if remind is None else remind[0], None if remind is None else remind[1])
 
 
 class MemorySave:
@@ -189,14 +195,17 @@ class MemorySave:
         "work and environment), preference (how they like answers and work done), project (what they are "
         "working on, goals, decisions), reference (paths, links, names they use), loop (something ahead: a "
         "plan, a promise, an appointment; give due when there is a date). A fact that holds only for a while "
-        "gets valid_until. Dates are YYYY-MM-DD or a time with its UTC offset; a rewrite keeps a date it does "
-        "not give, and null removes it.",
+        "gets valid_until. Give a loop remind_at only when the user asked to be reminded at a time: the exact "
+        "time with its UTC offset, worked out from now for \"in 30 minutes\". Dates are YYYY-MM-DD or a time "
+        "with its UTC offset; a rewrite keeps a date it does not give, and null removes it.",
         {"category": {"type": "string", "enum": list(_CATEGORIES)},
          "text": {"type": "string", "description": "One or two self-contained sentences."},
          "replaces": {**_ID_ARG, "type": ["string", "null"],
                       "description": "Only to rewrite an existing note: its id, as m12. Leave it out for a new note."},
          "due": {**_DATE_ARG, "description": "A loop's date, if known; null removes it from the note."},
-         "valid_until": {**_DATE_ARG, "description": "The last day a passing fact holds; null removes it."}},
+         "valid_until": {**_DATE_ARG, "description": "The last day a passing fact holds; null removes it."},
+         "remind_at": {**_DATE_ARG, "description": "A loop only: when the user asked to be reminded, a time with "
+                                                    "its UTC offset; null removes the reminder."}},
         ["category", "text"], EffectProfile.SCOPED_WRITE)
 
     def __init__(self, store: MemoryStore, *, time_zone: str = "UTC",
@@ -237,9 +246,18 @@ class MemorySave:
         valid = _date_arg(args, "valid_until", kept_valid, self._zone, now, VALID_RANGE) if not loop else None
         if isinstance(due, str) or isinstance(valid, str):
             return _failed(due if isinstance(due, str) else str(valid))
+        kept_remind = (previous.remind_at, previous.remind_instant) if previous is not None \
+            and previous.remind_at and previous.remind_instant is not None else None
+        if not loop and _given(args.get("remind_at")):
+            return _failed("only a loop has remind_at")
+        remind = _date_arg(args, "remind_at", kept_remind, self._zone, now, REMIND_RANGE) if loop else None
+        if isinstance(remind, str):
+            return _failed(remind)
+        if remind is not None and remind is not kept_remind and len(remind[0]) == 10:
+            return _failed("remind_at is a time with its UTC offset, not a day")
         if previous is not None:
             change = MemoryChange(MemoryChangeKind.SAVE, previous.memory_id, category, text, previous.revision,
-                                  *_dated(due, valid))
+                                  *_dated(due, valid, remind))
         else:
             same = _fold(text)
             for note in await self._store.list_memories(principal):
@@ -247,11 +265,11 @@ class MemorySave:
                     return ToolOutcome(ToolStatus.SUCCEEDED, _text(f"Already saved as m{note.memory_id}."),
                                        raw_result={"memory": _note_view(note), "unchanged": True})
             change = MemoryChange(MemoryChangeKind.SAVE, await self._store.allocate_memory_id(principal), category,
-                                  text, None, *_dated(due, valid))
+                                  text, None, *_dated(due, valid, remind))
         verb = "Saved" if previous is None else "Updated"
         written = {"id": change.memory_id, "category": category.value, "text": text,
                    "revision": 1 if previous is None else previous.revision + 1, "due": change.due_at,
-                   "valid_until": change.valid_until}
+                   "valid_until": change.valid_until, "remind_at": change.remind_at}
         return ToolOutcome(ToolStatus.SUCCEEDED, _text(f"{verb} m{change.memory_id} ({category.value})."),
                            raw_result={"memory": written, "previous": None if previous is None else _note_view(previous)},
                            memory_change=change)

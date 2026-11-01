@@ -273,13 +273,15 @@ def check_memory_change(change: object) -> MemoryChange:
     category = check_memory_category(change.category)
     loop = category is MemoryCategory.LOOP
     if (change.due_at is None) != (change.due_instant is None) or \
-            (change.valid_until is None) != (change.valid_instant is None):
+            (change.valid_until is None) != (change.valid_instant is None) or \
+            (change.remind_at is None) != (change.remind_instant is None):
         raise DataError(DataErrorCode.INVALID_ARGUMENT, "a date comes with its instant")
-    if (not loop and change.due_at is not None) or (loop and change.valid_until is not None):
-        raise DataError(DataErrorCode.INVALID_ARGUMENT, "a loop has a due date, a fact an end")
+    if (not loop and (change.due_at is not None or change.remind_at is not None)) or \
+            (loop and change.valid_until is not None):
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, "a loop has a due date and a reminder, a fact an end")
     return MemoryChange(MemoryChangeKind.SAVE, change.memory_id, category, check_note_text(category, change.text),
                         change.expected_revision, change.due_at, change.due_instant, change.valid_until,
-                        change.valid_instant)
+                        change.valid_instant, change.remind_at, change.remind_instant)
 
 
 _CATEGORY_ORDER = {category: index for index, category in enumerate(MemoryCategory)}
@@ -514,11 +516,23 @@ def dated(note: Memory, dates: NoteDates | None) -> Memory:
         return dataclasses.replace(note, due_at=note.due_at if loop else None,
                                    due_instant=note.due_instant if loop else None,
                                    valid_until=None if loop else note.valid_until,
-                                   valid_instant=None if loop else note.valid_instant)
+                                   valid_instant=None if loop else note.valid_instant,
+                                   remind_at=note.remind_at if loop else None,
+                                   remind_instant=note.remind_instant if loop else None)
     if (dates.due_at is None) != (dates.due_instant is None) or \
-            (dates.valid_until is None) != (dates.valid_instant is None):
+            (dates.valid_until is None) != (dates.valid_instant is None) or \
+            (dates.remind_at is None) != (dates.remind_instant is None):
         raise DataError(DataErrorCode.INVALID_ARGUMENT, "a date comes with its instant")
-    if (not loop and dates.due_at is not None) or (loop and dates.valid_until is not None):
-        raise DataError(DataErrorCode.INVALID_ARGUMENT, "a loop has a due date, a fact an end")
+    if (not loop and (dates.due_at is not None or dates.remind_at is not None)) or \
+            (loop and dates.valid_until is not None):
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, "a loop has a due date and a reminder, a fact an end")
     return dataclasses.replace(note, due_at=dates.due_at, due_instant=dates.due_instant,
-                               valid_until=dates.valid_until, valid_instant=dates.valid_instant)
+                               valid_until=dates.valid_until, valid_instant=dates.valid_instant,
+                               remind_at=dates.remind_at, remind_instant=dates.remind_instant)
+
+
+def unreminded(note: Memory) -> Memory:
+    """V3-P87 §5.3: only a loop keeps a reminder (a note that stops being one loses it)."""
+    if note.category is MemoryCategory.LOOP or note.remind_at is None:
+        return note
+    return dataclasses.replace(note, remind_at=None, remind_instant=None, remind_state=None, reminded_at=None)
