@@ -30,7 +30,7 @@ import time
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from himari.common import JsonValue, PrincipalId
 from himari.presence.api import (
@@ -152,6 +152,10 @@ class PresenceHub:
         self._noticed: dict[PrincipalId, tuple[float, int]] = {}  # the last notice: when, which revision
         self._pending: set[PrincipalId] = set()  # a notice is due at the window's end
         self._returned: dict[PrincipalId, Returned] = {}
+        # V3-P87 §5.2, §7: told when a return is recorded (before the signal's own input is),
+        # and each signal's input as a wall time with whether the screen is locked
+        self.on_returned: Callable[[PrincipalId, Returned], None] | None = None
+        self.on_input: Callable[[PrincipalId, str, datetime, bool], None] | None = None
 
     # --- EventHub ------------------------------------------------------------------------
 
@@ -220,6 +224,9 @@ class PresenceHub:
         if _shown(device) != shown:
             self._changed(principal)
         self._decide(principal)
+        if self.on_input is not None:  # after the return (if any) was told: its away ends before this input
+            self.on_input(principal, device_id, self._wall() - timedelta(seconds=now - device.input_at),
+                          device.locked)
 
     def _take(self, device: _Device, snapshot: Signals, now: float) -> None:
         """§2.1: the snapshot replaces what was kept; §4.4: an ended activity is kept as the one before."""
@@ -256,6 +263,10 @@ class PresenceHub:
 
     def current(self, principal: PrincipalId) -> str | None:
         return self._current.get(principal)
+
+    def present(self) -> tuple[PrincipalId, ...]:
+        """The principals with a current device (V3-P87 §7: whom the scheduler looks at)."""
+        return tuple(self._current)
 
     @property
     def signals_epoch(self) -> str:
@@ -349,10 +360,10 @@ class PresenceHub:
         if chosen is not None:
             device = devices[chosen]
             if device.after is not None:
-                self._returned[principal] = Returned(chosen, self._wall(), device.after[0])
+                self._return(principal, Returned(chosen, self._wall(), device.after[0]))
                 device.after = None
             elif device.back and chosen != was:
-                self._returned[principal] = Returned(chosen, self._wall(), "reconnect")
+                self._return(principal, Returned(chosen, self._wall(), "reconnect"))
             device.back = False
         for device_id in connected - {chosen}:
             devices[device_id].back = False  # heard again but not where the user is: not a return later
@@ -371,6 +382,11 @@ class PresenceHub:
             self._changed(principal)  # review B1: connected and current are on the Devices screen too
         if not devices:
             self._devices.pop(principal, None)
+
+    def _return(self, principal: PrincipalId, returned: Returned) -> None:
+        self._returned[principal] = returned
+        if self.on_returned is not None:
+            self.on_returned(principal, returned)
 
     def _forget_signals(self, principal: PrincipalId, device: _Device) -> None:
         """Gone (§2.1): every signal is cleared, the activity before too (review C1); not an end (§4.4)."""

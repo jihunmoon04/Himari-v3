@@ -115,3 +115,69 @@ def test_a_group_an_ended_wake_left_does_not_keep_the_next_one_out() -> None:
     assert asyncio.run(rt.driver.resume(SCOPE, max_runs=3)).state is DriveState.COMPLETED
     assert len(look.invocations) == 3
 
+
+
+def test_a_wake_that_said_something_keeps_its_keys() -> None:
+    """Part 2: only a wake cut before any word gives its keys back."""
+    first = tool("first")
+    first.crash_next = True
+    rt, _ = runtime([calls(("fake/first", {}))], env_tools=[first])
+    rt.store.activate_environment(SCOPE, FAKE, WorkspaceId("ws_1"))
+    asyncio.run(rt.driver.accept_wake(SCOPE, TRY, "d1", keys=("loop:m1:x",)))
+    with pytest.raises(SimulatedCrash):
+        asyncio.run(rt.driver.resume(SCOPE, max_runs=3))
+    rt2, _ = runtime([], store=restart(rt.store), env_tools=[first])
+    assert settle(rt2) == 1
+    assert asyncio.run(rt2.data.taken_keys(SCOPE.principal_id, ("loop:m1:x",))) == frozenset({"loop:m1:x"})
+
+
+def test_a_wake_cut_before_a_word_is_tried_again_after_the_restart() -> None:
+    """PR #156 review P1: restart → failed → keys back → a new wake opens → the model answers.
+    The next turn draws both wakes, the new one last."""
+    from himari.prompt.api import UserTurn
+
+    loop_key = ("loop:m1:2026-11-04T14:00+09:00",)
+    rt, provider = runtime([SimulatedCrash("provider call")])
+    first = asyncio.run(rt.driver.accept_wake(SCOPE, TRY, "d1", keys=loop_key))
+    with pytest.raises(SimulatedCrash):
+        asyncio.run(rt.driver.resume(SCOPE, max_runs=3))
+
+    rt2, provider2 = runtime([final("면접 어땠어?")], store=restart(rt.store))
+    assert settle(rt2) == 1
+    record = asyncio.run(rt2.data.read_wake(SCOPE.principal_id, first.payload.wake_id))  # type: ignore[union-attr]
+    assert record.status is WakeStatus.FAILED
+    assert asyncio.run(rt2.data.taken_keys(SCOPE.principal_id, loop_key)) == frozenset()
+    second = asyncio.run(rt2.driver.accept_wake(SCOPE, TRY, "d1", keys=loop_key))  # no longer NOT_SETTLED
+    result = asyncio.run(rt2.driver.resume(SCOPE, max_runs=3))
+    assert result.state is DriveState.COMPLETED
+    drawn = provider2.prepared_inputs[-1].conversation
+    assert [isinstance(p, UserTurn) and p.wake for p in drawn] == [True, True]
+    assert asyncio.run(rt2.data.taken_keys(SCOPE.principal_id, loop_key)) == frozenset(loop_key)
+    kinds = [e.kind.value for e in asyncio.run(rt2.data.read_events(SCOPE))]
+    assert kinds == ["wake", "wake", "assistant_final"]
+    assert second.payload.wake_id != first.payload.wake_id  # type: ignore[union-attr]
+
+
+def test_an_opened_wake_or_a_users_message_still_keeps_a_new_wake_out() -> None:
+    rt, _ = runtime([])
+    asyncio.run(rt.driver.accept_wake(SCOPE, TRY, "d1"))
+    with pytest.raises(ControlError) as refused:  # opened: its job runs (or will be settled)
+        asyncio.run(rt.driver.accept_wake(SCOPE, TRY, "d1"))
+    assert refused.value.code is ControlErrorCode.NOT_SETTLED
+    rt2, _ = runtime([])
+    asyncio.run(rt2.data.append_event(SCOPE, user("hi")))
+    with pytest.raises(ControlError) as refused:  # the user's message waits for its answer
+        asyncio.run(rt2.driver.accept_wake(SCOPE, TRY, "d1"))
+    assert refused.value.code is ControlErrorCode.NOT_SETTLED
+
+
+def test_a_withdrawn_wake_is_cancelled_gives_its_keys_back_and_blocks_nothing() -> None:
+    """PR #156 re-review P2-1: the wake the Runner never started."""
+    rt, _ = runtime([final("왔어?")])
+    first = asyncio.run(rt.driver.accept_wake(SCOPE, TRY, "d1", keys=("k",)))
+    asyncio.run(rt.driver.withdraw_wake(SCOPE, first.payload.wake_id))  # type: ignore[union-attr]
+    record = asyncio.run(rt.data.read_wake(SCOPE.principal_id, first.payload.wake_id))  # type: ignore[union-attr]
+    assert record.status is WakeStatus.CANCELLED
+    assert asyncio.run(rt.data.taken_keys(SCOPE.principal_id, ("k",))) == frozenset()
+    asyncio.run(rt.driver.accept_wake(SCOPE, TRY, "d1", keys=("k",)))
+    assert asyncio.run(rt.driver.resume(SCOPE, max_runs=3)).state is DriveState.COMPLETED

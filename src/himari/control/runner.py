@@ -199,13 +199,18 @@ class BackgroundRunner:
         await asyncio.wait([task], timeout=WAKE_YIELD_SECONDS)  # never cancels the task itself
 
     async def submit_wake(self, scope: TrustedScope, reasons: Sequence[WakeReason], device_id: str, *,
-                          keys: Sequence[str] = (), reminders: Sequence[int] = ()) -> JobStatus:
+                          keys: Sequence[str] = (), reminders: Sequence[int] = (), alone: bool = False) -> JobStatus:
         """V3-P87 §4.1: record the wake (NOT_SETTLED, DataError DUPLICATE_IDENTITY /
         INVALID_STATE_TRANSITION as the driver and Data refuse) and start its
         job, spoken on ``device_id``, at most WAKE_RUNS Runs. BUSY while a job
-        runs or an input is being accepted; CLOSED in the trash."""
+        runs or an input is being accepted — with ``alone`` (§6.1, PR #156 review
+        P2), in any of the principal's Conversations; CLOSED in the trash. These
+        checks run before the first await: the caller's own checks just before
+        the call hold with them."""
         self._check_open(scope)
         if self._running_in(scope.conversation_id) or self._admitting.get(scope.conversation_id):
+            raise ControlError(ControlErrorCode.BUSY, scope.conversation_id)
+        if alone and self.running(scope.principal_id):
             raise ControlError(ControlErrorCode.BUSY, scope.conversation_id)
         self._admit(scope.conversation_id)
         try:
@@ -213,16 +218,23 @@ class BackgroundRunner:
         finally:
             self._admit(scope.conversation_id, -1)
         assert isinstance(event.payload, Wake)
+        refusal = (ControlErrorCode.CLOSED if scope.conversation_id in self._closed
+                   else ControlErrorCode.BUSY if alone and self.running(scope.principal_id) else None)
+        if refusal is not None:
+            # PR #156 re-review P2-1: while the wake was recorded, a job started in another of
+            # the principal's Conversations (or this one is being closed). The user wins: the
+            # wake never starts; it is withdrawn (cancelled, its keys back: it said nothing).
+            # No await from this check to _start below, so a wake job never runs beside
+            # another job of the principal.
+            await self._driver.withdraw_wake(scope, event.payload.wake_id)
+            self._tell(lambda listener: listener.accepted(scope))  # its Event is there: the views read again
+            raise ControlError(refusal, scope.conversation_id)
         self._tell(lambda listener: listener.accepted(scope))
         key = self._key(scope)
         self._wake_jobs[key] = event.payload.wake_id
-        try:
-            return self._start(scope, lambda s, stop, progress: self._driver.resume(s, stop=stop, progress=progress,
-                                                                                  max_runs=WAKE_RUNS),
-                               "wake", MessageOrigin(OriginKind.WAKE, device_id), wake_id=event.payload.wake_id)
-        except ControlError:
-            self._wake_jobs.pop(key, None)  # closed meanwhile: the wake stays opened; a restart settles it
-            raise
+        return self._start(scope, lambda s, stop, progress: self._driver.resume(s, stop=stop, progress=progress,
+                                                                              max_runs=WAKE_RUNS),
+                           "wake", MessageOrigin(OriginKind.WAKE, device_id), wake_id=event.payload.wake_id)
 
     def _check_open(self, scope: TrustedScope) -> None:
         if scope.conversation_id in self._closed:

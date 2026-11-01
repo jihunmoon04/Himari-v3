@@ -2264,6 +2264,13 @@ class SqliteData:
                           " ORDER BY last_activity DESC, c.rowid DESC LIMIT ?", principal, workspace_id, limit)
             return tuple(self._summary(r) for r in rows)
 
+    async def last_user_message_at(self, principal: PrincipalId) -> datetime | None:
+        with self._tx() as tx:
+            row = tx.one("SELECT MAX(e.created_at) AS at FROM events e JOIN conversations o"
+                         " ON o.conversation_id=e.conversation_id"
+                         " WHERE o.owner=? AND o.trashed_at IS NULL AND e.kind='user_message'", principal)
+            return None if row is None or row["at"] is None else datetime.fromisoformat(row["at"])
+
     async def most_recent_user_conversation(self, principal: PrincipalId) -> ConversationSummary | None:
         with self._tx() as tx:
             row = tx.one(
@@ -2803,6 +2810,22 @@ class SqliteData:
             tx.execute("UPDATE devices SET last_seen_at=? WHERE owner=? AND device_id=? AND revoked_at IS NULL",
                        _timestamp(at), principal, device_id)
 
+    async def record_input(self, principal: PrincipalId, device_id: str, at: datetime) -> None:
+        with self._tx() as tx:
+            row = tx.one("SELECT last_input_at FROM devices WHERE owner=? AND device_id=? AND revoked_at IS NULL",
+                         principal, device_id)
+            known = None if row is None else _moment(row["last_input_at"])
+            if row is None or (known is not None and known >= at):
+                return
+            tx.execute("UPDATE devices SET last_input_at=? WHERE owner=? AND device_id=?",
+                       _timestamp(at), principal, device_id)
+
+    async def read_inputs(self, principal: PrincipalId) -> Mapping[str, datetime]:
+        with self._tx() as tx:
+            rows = tx.all("SELECT device_id, last_input_at FROM devices WHERE owner=? AND revoked_at IS NULL"
+                          " AND last_input_at IS NOT NULL", principal)
+            return {r["device_id"]: datetime.fromisoformat(r["last_input_at"]) for r in rows}
+
     # --- WakeStore (V3-P87) -------------------------------------------------------------
 
     async def begin_wake(self, scope: TrustedScope, reasons: Sequence[WakeReason], device_id: str, *,
@@ -2868,6 +2891,32 @@ class SqliteData:
     async def opened_wakes(self) -> tuple[WakeRecord, ...]:
         with self._tx() as tx:
             return tuple(_wake(r) for r in tx.all("SELECT * FROM wakes WHERE status='opened' ORDER BY created_at"))
+
+    async def wakes_since(self, principal: PrincipalId, since: datetime) -> tuple[WakeRecord, ...]:
+        with self._tx() as tx:
+            return tuple(_wake(r) for r in tx.all("SELECT * FROM wakes WHERE owner=? AND created_at>=?"
+                                                  " ORDER BY created_at", principal, _timestamp(since)))
+
+    async def taken_keys(self, principal: PrincipalId, keys: Sequence[str]) -> frozenset[str]:
+        wanted = list(dict.fromkeys(keys))
+        if not wanted:
+            return frozenset()
+        with self._tx() as tx:
+            rows = tx.all(f"SELECT key FROM wake_keys WHERE owner=? AND key IN ({', '.join('?' * len(wanted))})",
+                          principal, *wanted)
+            return frozenset(r["key"] for r in rows)
+
+    async def release_keys(self, principal: PrincipalId, wake_id: str) -> None:
+        with self._tx() as tx:
+            tx.execute("DELETE FROM wake_keys WHERE owner=? AND wake_id=?", principal, wake_id)
+
+    async def expire_keys(self, principal: PrincipalId, keys: Sequence[str]) -> None:
+        if not keys:
+            return
+        with self._tx() as tx:
+            now = _timestamp(datetime.now(UTC))
+            tx.executemany("INSERT INTO wake_keys (owner, key, wake_id, created_at) VALUES (?, ?, NULL, ?)"
+                           " ON CONFLICT (owner, key) DO NOTHING", [(principal, k, now) for k in dict.fromkeys(keys)])
 
     async def read_quiet(self, principal: PrincipalId) -> datetime | None:
         with self._tx() as tx:

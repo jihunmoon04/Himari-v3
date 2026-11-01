@@ -5,7 +5,7 @@ locks and unlocks, the return record, the activity before, and the Web's
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -294,3 +294,18 @@ def test_the_activity_before_expiring_is_told_to_the_web(hub: PresenceHub, clock
         hub.signal(ME, "d1", 0, None, full(activity=None))
         hub.tick()
     assert hub.states(ME)["d1"].before is None and hub.signals_revision(ME) > shown
+
+
+def test_a_return_is_told_before_the_input_that_came_with_it(hub: PresenceHub, clock: Clock) -> None:
+    """V3-P87 §5.2, §7: the scheduler measures the time away up to the input before the return."""
+    told: list[tuple[object, ...]] = []
+    hub.on_returned = lambda principal, returned: told.append(("returned", returned.device_id, returned.via))
+    hub.on_input = lambda principal, device_id, at, locked: told.append(("input", device_id, at, locked))
+    hub.subscribe(ME, "d1")
+    hub.signal(ME, "d1", 30, None, full(session=Session.LOCKED))
+    assert told == [("input", "d1", WALL - timedelta(seconds=30), True)]
+    clock.now += 3600
+    told.clear()
+    hub.signal(ME, "d1", 0, None, full(after=After.UNLOCK))
+    assert told == [("returned", "d1", "unlock"), ("input", "d1", WALL, False)]
+    assert hub.present() == (ME,)

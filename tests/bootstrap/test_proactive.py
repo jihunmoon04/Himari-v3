@@ -11,10 +11,11 @@ from pathlib import Path
 import pytest
 
 from himari.bootstrap.application import Application
-from himari.bootstrap.proactive import ProactiveRefused, ProactiveSettings, parse_quiet, wake_outcome
+from himari.bootstrap.proactive import ProactiveRefused, parse_quiet, wake_outcome
 from himari.common import ASK_USER_TOOL_ID, CallId, PrincipalId, TextBlock, ToolCall, ToolId, TrustedScope
 from himari.control.api import DriveResult, DriveState, JobStatus
 from himari.data.api import EventKind, MessageOrigin, OriginKind, WakeKind, WakeReason, WakeStatus
+from himari.proactive import ProactiveSettings
 from himari.prompt.api import PROACTIVE_RULE, UserTurn
 from himari.provider.api import NormalizedFinal, NormalizedToolCalls
 from himari.provider.scripted import ScriptedAdapter
@@ -70,7 +71,7 @@ def test_try_speaks_first_on_the_current_device(tmp_path: Path) -> None:
             assert any(PROACTIVE_RULE in part for part in sent.stable_prefix)
             last = sent.conversation[-1]
             assert isinstance(last, UserTurn) and last.wake
-            assert app.proactive_status(ME)["current_device"] == device
+            assert (await app.proactive_status(ME))["current_device"] == device
         finally:
             await app.close()
 
@@ -128,13 +129,16 @@ def test_a_restart_settles_the_wakes_it_cut(tmp_path: Path) -> None:
         scope = TrustedScope(ME, await app.create_conversation(ME))
         await app.send(scope, "안녕", origin=MessageOrigin(OriginKind.WEB))
         await app.runner.wait(scope)
-        silent = await app.data.begin_wake(scope, (WakeReason(WakeKind.TRY),), "d1")  # cut before speaking
+        silent = await app.data.begin_wake(scope, (WakeReason(WakeKind.TRY),), "d1",
+                                           keys=("loop:m1:2026-11-04",))  # cut before speaking
         await app.close()
         again = await opened(tmp_path, ScriptedAdapter([]), proactive=ON)
         try:
             record = await again.data.read_wake(ME, silent.payload.wake_id)  # type: ignore[union-attr]
             assert record.status is WakeStatus.FAILED
             assert await again.data.opened_wakes() == ()
+            # it said nothing: its key is given back, so the loop may still be spoken of (part 2)
+            assert await again.data.taken_keys(ME, ("loop:m1:2026-11-04",)) == frozenset()
         finally:
             await again.close()
 

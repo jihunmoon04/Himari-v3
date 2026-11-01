@@ -222,6 +222,7 @@ class _Device:
     pairing_hash: bytes | None = None
     pairing_failures: int = 0
     revoked: bool = False
+    last_input_at: datetime | None = None  # V3-P87 §5.2
 
 
 class InMemoryStore:
@@ -1143,6 +1144,12 @@ class InMemoryData:
         rows.sort(key=lambda row: (row[0].last_activity_at, row[1]), reverse=True)
         return tuple(summary for summary, _ in rows[:limit])
 
+    async def last_user_message_at(self, principal: PrincipalId) -> datetime | None:
+        times = [e.created_at for conv in self._store._conversations.values()
+                 if conv.owner == principal and conv.trashed_at is None
+                 for e in conv.events if e.kind is EventKind.USER_MESSAGE]
+        return max(times, default=None)
+
     async def most_recent_user_conversation(self, principal: PrincipalId) -> ConversationSummary | None:
         best: tuple[datetime, int, ConversationId, _Conversation] | None = None
         for i, (cid, conv) in enumerate(self._store._conversations.items()):
@@ -1423,6 +1430,15 @@ class InMemoryData:
         if row is not None and not row.revoked:
             row.device = replace(row.device, last_seen_at=at)
 
+    async def record_input(self, principal: PrincipalId, device_id: str, at: datetime) -> None:
+        row = self._store.devices.get((principal, device_id))
+        if row is not None and not row.revoked and (row.last_input_at is None or row.last_input_at < at):
+            row.last_input_at = at
+
+    async def read_inputs(self, principal: PrincipalId) -> Mapping[str, datetime]:
+        return {device_id: row.last_input_at for (owner, device_id), row in self._store.devices.items()
+                if owner == principal and not row.revoked and row.last_input_at is not None}
+
     # --- WakeStore (V3-P87) -------------------------------------------------------------
 
     async def begin_wake(self, scope: TrustedScope, reasons: Sequence[WakeReason], device_id: str, *,
@@ -1478,6 +1494,21 @@ class InMemoryData:
 
     async def opened_wakes(self) -> tuple[WakeRecord, ...]:
         return tuple(r for r in self._store.wakes.values() if r.status is WakeStatus.OPENED)
+
+    async def wakes_since(self, principal: PrincipalId, since: datetime) -> tuple[WakeRecord, ...]:
+        return tuple(sorted((r for r in self._store.wakes.values() if r.principal == principal
+                             and r.created_at >= since), key=lambda r: r.created_at))
+
+    async def taken_keys(self, principal: PrincipalId, keys: Sequence[str]) -> frozenset[str]:
+        return frozenset(k for k in keys if (principal, k) in self._store.wake_keys)
+
+    async def release_keys(self, principal: PrincipalId, wake_id: str) -> None:
+        for key in [k for k, w in self._store.wake_keys.items() if k[0] == principal and w == wake_id]:
+            del self._store.wake_keys[key]
+
+    async def expire_keys(self, principal: PrincipalId, keys: Sequence[str]) -> None:
+        for key in keys:
+            self._store.wake_keys.setdefault((principal, key), None)
 
     async def read_quiet(self, principal: PrincipalId) -> datetime | None:
         return self._store.quiet.get(principal)

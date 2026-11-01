@@ -1503,6 +1503,23 @@ class WakeStore(Protocol):
         """Every principal's wakes still opened (a restart settles them, §4.4)."""
         ...
 
+    async def wakes_since(self, principal: PrincipalId, since: datetime) -> tuple[WakeRecord, ...]:
+        """V3-P87 §6.2: the principal's wakes created at or after ``since``, oldest first."""
+        ...
+
+    async def taken_keys(self, principal: PrincipalId, keys: Sequence[str]) -> frozenset[str]:
+        """§5: those of ``keys`` a wake took, or that were expired."""
+        ...
+
+    async def expire_keys(self, principal: PrincipalId, keys: Sequence[str]) -> None:
+        """§5.1: take ``keys`` with no wake — past their window, never spoken. A key taken already stays."""
+        ...
+
+    async def release_keys(self, principal: PrincipalId, wake_id: str) -> None:
+        """§4.4 (part 2): give back the keys of a wake a restart cut before it said
+        anything, so a trigger still in its window may be spoken of again."""
+        ...
+
 
 class MemoryPassLog(Protocol):
     """V3-P85: the record and the application of memory passes. A pass reads a
@@ -1722,6 +1739,15 @@ class DeviceStore(Protocol):
 
     async def touch_device(self, principal: PrincipalId, device_id: str, at: datetime) -> None:
         """Records when it was last seen; nothing for an unknown device."""
+        ...
+
+    async def record_input(self, principal: PrincipalId, device_id: str, at: datetime) -> None:
+        """V3-P87 §5.2: the device's last input (``devices.last_input_at``), never
+        moved back; nothing for an unknown or revoked device."""
+        ...
+
+    async def read_inputs(self, principal: PrincipalId) -> Mapping[str, datetime]:
+        """Each unrevoked device's last input, as recorded."""
         ...
 
     async def read_quiet(self, principal: PrincipalId) -> datetime | None:
@@ -2208,6 +2234,11 @@ class ConversationCatalog(Protocol):
     async def most_recent_user_conversation(self, principal: PrincipalId) -> ConversationSummary | None:
         """V3-P83 §8.2: outside the trash, the Conversation whose latest user
         message (answers included) is the latest; None without any."""
+        ...
+
+    async def last_user_message_at(self, principal: PrincipalId) -> datetime | None:
+        """V3-P87 §6.1: when the principal's latest user message (answers included)
+        came, in any Conversation outside the trash; None without any."""
         ...
 
     async def list_waiting_conversations(self, principal: PrincipalId) -> Sequence[ConversationId]:
