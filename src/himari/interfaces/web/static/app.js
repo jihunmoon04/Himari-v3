@@ -266,6 +266,8 @@ const app = {
   persona: null, // V3-P89 §4: the saved companion persona {text, revision, updated_at, max_chars, companion}
   personaConflict: null, // a version saved elsewhere since: "Save" replaces it, "Discard" loads it
   savingPersona: false,
+  personaTicket: 0, // the latest persona load: an older answer is not applied (PR #152 review P2)
+  personaLoading: false,
   instructionsLoading: false,
   memory: null, // the last /api/memories answer (V3-P71 §7.2)
   registeredFolders: null, // the last /api/workspaces items, for the attach field (V3-P74 §10.3)
@@ -3026,9 +3028,18 @@ function paintPersona() {
     : `Saved ${new Date(saved.updated_at).toLocaleString()}`;
 }
 
+/* Only the latest load, while the surface is shown, is applied, and never over text typed since
+   (PR #152 review P2, as loadInstructions). A failure leaves the box unloaded: Instructions retries it. */
 async function loadPersona() {
-  const saved = await api("GET", "/api/instructions/persona");
-  if ($("surface-instructions").hidden) return;
+  const ticket = ++app.personaTicket;
+  app.personaLoading = true;
+  let saved;
+  try {
+    saved = await api("GET", "/api/instructions/persona");
+  } finally {
+    if (ticket === app.personaTicket) app.personaLoading = false;
+  }
+  if (ticket !== app.personaTicket || $("surface-instructions").hidden || personaDirty()) return;
   app.persona = saved;
   app.personaConflict = null;
   $("persona-text").value = saved.text;
@@ -3072,7 +3083,10 @@ function discardPersona() {
 
 async function showInstructions({ via = "push" } = {}) {
   if (!$("surface-instructions").hidden && (app.instructions !== null || app.instructionsLoading)) {
-    closeNav(); // shown, and loaded or loading: nothing to start again
+    closeNav(); // shown, and loaded or loading: nothing to start again — but a persona that failed to load
+    if (app.persona === null && !app.personaLoading && !app.instructionsLoading) {
+      await loadPersona(); // is read again alone, the instructions and their draft untouched (PR #152 review P2)
+    }
     return;
   }
   if ($("surface-instructions").hidden) {
@@ -3090,6 +3104,8 @@ async function showInstructions({ via = "push" } = {}) {
     $("instructions-text").value = "";
     app.persona = null;
     app.personaConflict = null;
+    app.personaTicket += 1; // a load still on its way from an earlier visit is not applied
+    app.personaLoading = false;
     $("persona-text").value = "";
     showSurface("instructions", via);
     $("topbar-title").textContent = "Instructions";

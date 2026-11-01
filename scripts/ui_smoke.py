@@ -836,11 +836,23 @@ def run_instructions(base: str, token: str, shots: str | None, root: str, provid
         expect(page.locator(".item-assistant").last).to_contain_text("네, 알겠습니다.", timeout=10000)
         assert "<user_instructions>\nAnswer in Korean.\nKeep it short.\n</user_instructions>" in \
             provider.prepared_inputs[-1].stable_prefix[-1]
-        # V3-P89 §4: the companion persona, its own box under the instructions, before them in the request
+        # V3-P89 §4: the companion persona, its own box under the instructions, before them in the request.
+        # Its load failing once leaves it unloaded; Instructions again reads only it (PR #152 review P2).
+        page.route("**/api/instructions/persona", lambda route: route.fulfill(
+            status=503, content_type="application/json", body='{"error": {"code": "unavailable", "message": "x"}}'))
         page.click("#nav-appearance")
         page.click("#nav-instructions")
+        expect(text).to_have_value("Answer in Korean.\nKeep it short.", timeout=5000)
         persona = page.locator("#persona-text")
+        expect(page.locator("#persona-count")).to_have_text("Loading…")
+        expect(persona).not_to_be_editable()
+        page.unroute("**/api/instructions/persona")
+        text.fill("Answer in Korean.\nKeep it short.\nDraft.")  # a draft of the instructions survives the retry
+        page.click("#nav-appearance")
+        page.click("#nav-instructions")
         expect(page.locator("#persona-count")).to_have_text("0 / 10,000", timeout=5000)
+        expect(text).to_have_value("Answer in Korean.\nKeep it short.\nDraft.")
+        page.click("#instructions-discard")
         expect(page.locator("#persona-off")).to_be_hidden()  # companion mode is on here
         expect(page.locator("#persona-save")).to_be_disabled()
         persona.fill("Call me 선생님.")
