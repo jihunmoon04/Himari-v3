@@ -56,6 +56,7 @@ from himari.data.api import (
     PromptSnapshot,
     ToolExecutionRecord,
     TriggerRef,
+    Wake,
 )
 from himari.environment.api import BindingObservation
 from himari.tool.api import ToolDefinition
@@ -108,6 +109,7 @@ class CompressedHistory(DeepFrozen):
 class UserTurn(DeepFrozen):
     event_id: EventId
     blocks: tuple[ContentBlock, ...]
+    wake: bool = False  # V3-P87 §8.1: the server opened this turn; the block is a <wake> line, not the user's
 
 
 @dataclass(frozen=True)
@@ -304,6 +306,7 @@ class SystemSpec(DeepFrozen):
     file_references: bool = False  # the machine Environment: the <file_reference> line is explained
     turn_guidance: bool = False  # the turn guards are on
     documents: tuple[str, ...] = ()
+    proactive: bool = False  # V3-P87 §8.2: HIMARI may speak first (with the companion on)
 
 
 @dataclass(frozen=True)
@@ -331,6 +334,9 @@ class PromptInputs(DeepFrozen):
     # read with the instructions; it is told only with ``system.companion``.
     system: SystemSpec | None = None
     companion_persona: str = ""
+    # V3-P87 §8.4: the notes the history's wakes point at, read when the turn is
+    # composed (a deleted one is absent); the context key hashes them.
+    wake_notes: Mapping[int, Memory] = FrozenMap()
     memories: tuple[Memory, ...] | None = None  # the turn's notes (V3-P71 §5.4); None: memory is off
     # V3-P85 §8: the turn's recent episodes of other Conversations, and how many episodes there are.
     episodes: tuple[RecentEpisode, ...] = ()
@@ -725,6 +731,37 @@ ACTIVITY_RULE = (
     "are doing: do not describe it back (the program, a title, how long) unless they ask or it changes your answer. "
     "After a long stretch of work, a break may be welcome."
 )
+# V3-P87 §8.2: right after SPEAKING_RULE when HIMARI may speak first.
+PROACTIVE_RULE = (
+    "- Speaking first: a user-role message that is only a <wake> block comes from the server, not the user: it "
+    "opened this turn for the reasons in it, and the user has said nothing. Speak first, the way a friend would: one "
+    "or two short sentences, at most one question; one short sentence when presence.now_doing shows a fullscreen "
+    "video or game or the microphone or camera in use. Do not mention the wake block, the server or note ids. If a "
+    "reason no longer fits what you know, greet or say something small instead. If the user wrote after a wake, "
+    "answer the user."
+)
+
+
+def wake_text(wake: Wake, notes: Mapping[int, Memory]) -> str:
+    """V3-P87 §8.1: the wake as the model reads it — JSON, escaped like the state;
+    a loop's text read now (a deleted one says so), never copied into the Event."""
+    reasons: list[dict[str, object]] = []
+    for reason in wake.reasons:
+        item: dict[str, object] = {"kind": reason.kind.value}
+        if reason.memory_id is not None:
+            note = notes.get(reason.memory_id)
+            item["loop"] = {"id": f"m{reason.memory_id}", "deleted": True} if note is None else {
+                "id": f"m{note.memory_id}", "text": note.text, **({"due": note.due_at} if note.due_at else {})}
+        for name in ("via", "away_minutes", "activity", "minutes"):
+            value = getattr(reason, name)
+            if value is not None:
+                item[name] = value
+        if reason.late:
+            item["late"] = True
+        reasons.append(item)
+    return "<wake>" + json_data({"reasons": reasons}) + "</wake>"
+
+
 # V3-P84 §5: SCREEN_MOVE_NOTE follows only for a model whose points on a screen
 # were checked (RequestOptions.screen_points).
 SCREEN_NOTE = "- Screens: an attachment with \"screen\": true is the user's screen when they sent the message."

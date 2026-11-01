@@ -24,7 +24,7 @@ import httpx  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 from mcp_fake import URL as MCP_URL  # noqa: E402
 from mcp_fake import FakeMcpServer  # noqa: E402
-from testkit import calls, final  # noqa: E402
+from testkit import NoWakes, calls, final  # noqa: E402
 
 from himari.bootstrap.application import Application  # noqa: E402
 from himari.bootstrap.operator import OPERATOR, derive_cli_bearer  # noqa: E402
@@ -193,7 +193,7 @@ def test_continue_answers_an_accepted_message(harness: Harness) -> None:
     assert code == 0 and out.splitlines() == ["HIMARI:", f"{INDENT}answered"]
 
 
-class Gated:
+class Gated(NoWakes):
     def __init__(self) -> None:
         self.release = threading.Event()
 
@@ -205,7 +205,7 @@ class Gated:
         pass
 
     async def resume(self, scope: TrustedScope, *, stop: StopSignal | None = None,
-                     progress: TurnProgress | None = None) -> DriveResult:
+                     progress: TurnProgress | None = None, max_runs: int | None = None) -> DriveResult:
         import asyncio
 
         await asyncio.to_thread(self.release.wait, 10)
@@ -621,7 +621,7 @@ def test_server_prompts_from_the_cli(tmp_path: Path, monkeypatch: pytest.MonkeyP
         assert "written" in shown
 
 
-class StopsWhenCancelled:
+class StopsWhenCancelled(NoWakes):
     """A running job that ends only when it is cancelled (V3-P55)."""
 
     async def drive(self, scope: TrustedScope, message: UserMessage, *, stop: StopSignal | None = None,
@@ -632,7 +632,7 @@ class StopsWhenCancelled:
         pass
 
     async def resume(self, scope: TrustedScope, *, stop: StopSignal | None = None,
-                     progress: TurnProgress | None = None) -> DriveResult:
+                     progress: TurnProgress | None = None, max_runs: int | None = None) -> DriveResult:
         assert stop is not None
         await asyncio.wait_for(stop.cancelled(), 10)
         return DriveResult(DriveState.CANCELLED)
@@ -714,7 +714,7 @@ def test_a_refusal_says_why(harness: Harness) -> None:
 
     class Refusing(Gated):
         async def resume(self, scope: TrustedScope, *, stop: StopSignal | None = None,
-                     progress: TurnProgress | None = None) -> DriveResult:
+                     progress: TurnProgress | None = None, max_runs: int | None = None) -> DriveResult:
             return DriveResult(DriveState.REQUEST_REJECTED, detail="context_budget_exceeded: about 950 tokens > 900")
 
     harness.application.runner = BackgroundRunner(Refusing())
@@ -1017,3 +1017,10 @@ def test_the_documents_line() -> None:
     assert (cli.documents_line({"read": True, "scripts": True, "libraries": {"openpyxl": "3.1.5", "pypdf": "6"}})
             == "documents: read on, scripts on (openpyxl 3.1.5, pypdf 6)")
     assert cli.documents_line({"read": True, "libraries": "not a dict"}) == "documents: read on, scripts off"
+
+
+def test_a_wake_is_one_dim_line() -> None:
+    """V3-P87 §9."""
+    out = io.StringIO()
+    cli.Printer(out).event({"sequence": 4, "kind": "wake", "text": "HIMARI reached out · a try"})
+    assert out.getvalue().splitlines() == ["· HIMARI reached out · a try"]

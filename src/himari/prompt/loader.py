@@ -33,15 +33,19 @@ from himari.common import AttachmentRef, ContentBlock, EnvironmentKind, FileId, 
 from himari.data.api import (
     ConversationEvent,
     ConversationLog,
+    DataError,
+    DataErrorCode,
     EventKind,
     FileCatalog,
     FileRecord,
     Memory,
+    MemoryStore,
     RecentEpisode,
     PersistedStateBasis,
     StateQuery,
     ToolExecutionRecord,
     TriggerRef,
+    Wake,
     view_state,
 )
 from himari.environment.api import BindingObservation, EnvironmentPlugin
@@ -74,7 +78,9 @@ class ContextLoader:
         environments: Mapping[EnvironmentKind, EnvironmentPlugin] | None = None,  # observed (V3-P74 §10.5)
         time_zone: str | None = None,  # the time lines' zone (V3-P83 §6.4); None: no time lines
         system: SystemSpec | None = None,  # V3-P89: the system text's sections; None: the instructions as given
+        memories: MemoryStore | None = None,  # V3-P87 §8.4: the notes the history's wakes point at
     ) -> None:
+        self._memories = memories
         self._time_zone = time_zone
         self._system = system
         self._files = files
@@ -85,6 +91,21 @@ class ContextLoader:
         self._instructions = tuple(instructions)
         self._external_access = external_access
         self._source_notes = tuple(sorted(source_notes, key=lambda n: n.source))
+
+    async def _wake_notes(self, scope: TrustedScope, events: Sequence[ConversationEvent]) -> dict[int, Memory]:
+        """V3-P87 §8.1: each note a wake in this history points at, read now; a deleted one is left out."""
+        wanted = sorted({r.memory_id for e in events if isinstance(e.payload, Wake) for r in e.payload.reasons
+                         if r.memory_id is not None})
+        found: dict[int, Memory] = {}
+        if self._memories is None:
+            return found
+        for memory_id in wanted:
+            try:
+                found[memory_id] = await self._memories.read_memory(scope.principal_id, memory_id)
+            except DataError as error:
+                if error.code is not DataErrorCode.NOT_FOUND:
+                    raise
+        return found
 
     async def load(
         self,
@@ -146,6 +167,7 @@ class ContextLoader:
             user_instructions=user_instructions,
             system=self._system,
             companion_persona=companion_persona,
+            wake_notes=await self._wake_notes(scope, events),
             memories=memories,
             episodes=episodes,
             episode_count=episode_count,

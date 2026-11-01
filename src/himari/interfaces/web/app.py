@@ -52,7 +52,7 @@ import threading
 import time
 import unicodedata
 from urllib.parse import quote
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -98,6 +98,7 @@ from himari.bootstrap.application import (
 )
 from himari.bootstrap.changes import ChangeConflict, ChangeDiff, ChangesView
 from himari.bootstrap.companion import origin_view
+from himari.bootstrap.proactive import ProactiveRefused
 from himari.bootstrap.explorer import PDF_APPEND_MAX_BYTES, ExplorerRefused, Listing, ShownFile
 from himari.bootstrap.operator import OPERATOR, derive_cli_bearer, verify_operator_token
 from himari.bootstrap.mcp_defaults import McpDefaultsConflict
@@ -170,6 +171,9 @@ from himari.data.api import (
     Proposal,
     RecentEpisode,
     parse_note_date,
+    Wake,
+    WakeKind,
+    WakeReason,
 )
 from himari.interfaces.web import event_stream, live
 from himari.interfaces.web.config import WebConfig
@@ -658,6 +662,39 @@ def delete_notice_view(notice: DeleteNotice) -> dict[str, Any]:
             "trash_days": notice.trash_days, "memory_count": notice.memories, "episode_count": notice.episodes}
 
 
+def wake_reason_view(reason: WakeReason) -> dict[str, Any]:
+    out: dict[str, Any] = {"kind": reason.kind.value}
+    for name in ("memory_id", "away_minutes", "via", "activity", "minutes"):
+        if (value := getattr(reason, name)) is not None:
+            out[name] = value
+    if reason.late:
+        out["late"] = True
+    return out
+
+
+def _span(minutes: int) -> str:
+    return f"{minutes}m" if minutes < 60 else f"{minutes // 60}h {minutes % 60}m" if minutes % 60 else f"{minutes // 60}h"
+
+
+def wake_summary(reasons: Sequence[WakeReason]) -> str:
+    """V3-P87 §9: why HIMARI reached out, in the page's English, from the reasons only."""
+    parts = []
+    for r in reasons:
+        if r.kind is WakeKind.LOOP_DUE:
+            parts.append(f"open loop m{r.memory_id}")
+        elif r.kind is WakeKind.REMINDER:
+            parts.append(f"reminder m{r.memory_id}" + (" (late)" if r.late else ""))
+        elif r.kind is WakeKind.RETURNED:
+            parts.append(f"you were away {_span(r.away_minutes or 0)}")
+        elif r.kind is WakeKind.FOCUS:
+            parts.append(f"{r.activity or 'focus'} for {_span(r.minutes or 0)}")
+        elif r.kind is WakeKind.GAME_ENDED:
+            parts.append(f"a game ended after {_span(r.minutes or 0)}")
+        else:
+            parts.append("a try")
+    return "HIMARI reached out · " + " · ".join(parts)
+
+
 def event_view(event: ConversationEvent, views: dict[CallRef, tuple[bool, bool]] | None = None,
                models: dict[RunId, str] | None = None, files: Files | None = None,
                presented: dict[CallRef, list[FileRecord]] | None = None,
@@ -700,6 +737,10 @@ def event_view(event: ConversationEvent, views: dict[CallRef, tuple[bool, bool]]
                           **({"display": display_view(_question(c.arguments))} if c.tool_id == ASK_USER_TOOL_ID
                              else {})}
                          for c in sorted(payload.calls, key=lambda c: c.ordinal)]
+    elif isinstance(payload, Wake):  # V3-P87 §9: a dim line, not a bubble
+        view["wake"] = {"id": payload.wake_id, "device_id": payload.device_id,
+                        "reasons": [wake_reason_view(r) for r in payload.reasons]}
+        view["text"] = wake_summary(payload.reasons)
     elif isinstance(payload, ToolResultRecord):
         view["run_id"] = payload.call.run_id
         view["call_id"] = payload.call.call_id
@@ -927,6 +968,17 @@ def device_view(device: Device, connected: bool = False, current: bool = False) 
             "connected": connected, "current": current, "created_at": _time(device.created_at),
             "paired_at": _time(device.paired_at), "last_seen_at": _time(device.last_seen_at),
             "pairing_expires_at": None if device.paired_at is not None else _time(device.pairing_expires_at)}
+
+
+# V3-P87 §11: why a try opened no wake.
+PROACTIVE_REFUSALS = {
+    "proactive_off": "Speaking first is off on this server (HIMARI_PROACTIVE).",
+    "no_device": "No device is current: open the app and use the computer first.",
+    "no_conversation": "There is no conversation to speak in yet.",
+    "busy": "A conversation is working; try again when it is done.",
+    "closed": "The most recent conversation is being moved to the trash.",
+    "not_settled": "The most recent conversation waits for an answer or a recovery first.",
+}
 
 
 # How a refused device write answers (V3-P83 appendix A.1): status, code, message.
@@ -1863,6 +1915,22 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
         """Saved at once, used from the next turn (one under way keeps its model)."""
         view = await himari(request).set_model(scope_of(conversation_id, who), body.model, body.effort)
         return model_choice_view(view)
+
+    # -- speaking first (V3-P87 §11) -------------------------------------------------------
+
+    @app.get("/api/proactive")
+    async def read_proactive(request: Request, who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+        return himari(request).proactive_status(who)
+
+    @app.post("/api/proactive/try", status_code=202)
+    async def try_proactive(request: Request, who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+        """A TRY wake now (the operator's, never a device's: refused by default)."""
+        try:
+            conversation, status = await himari(request).try_wake(who)
+        except ProactiveRefused as refused:
+            raise ApiError(409, refused.code, PROACTIVE_REFUSALS.get(refused.code, "HIMARI cannot speak first now.")) \
+                from None
+        return {"conversation": conversation, "job_id": status.job_id, "wake_id": status.wake_id}
 
     @app.get("/api/instructions")
     async def read_instructions(request: Request, who: PrincipalId = Depends(principal)) -> dict[str, Any]:

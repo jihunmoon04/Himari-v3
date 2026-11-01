@@ -72,7 +72,10 @@ from playwright.sync_api import expect, sync_playwright  # noqa: E402
 
 from himari.bootstrap.application import Application  # noqa: E402
 from himari.bootstrap.operator import OPERATOR  # noqa: E402
-from himari.common import ASK_USER_TOOL_ID, CallId, ConversationId, TextBlock, ToolCall, ToolId, TrustedScope  # noqa: E402
+from himari.bootstrap.proactive import ProactiveSettings  # noqa: E402
+from himari.common import (  # noqa: E402
+    ASK_USER_TOOL_ID, CallId, ConversationId, PrincipalId, TextBlock, ToolCall, ToolId, TrustedScope,
+)
 from himari.data.api import UserMessage  # noqa: E402
 from himari.interfaces.web.app import create_app  # noqa: E402
 from himari.interfaces.web.config import WebConfig  # noqa: E402
@@ -102,14 +105,15 @@ OPENED: dict[str, tuple[Application, asyncio.AbstractEventLoop]] = {}  # root ->
 
 def serve(root: str, port: int = PORT, provider: ScriptedAdapter | None = None,
           context_tokens: int | None = None, turn_budget: int = 3_000_000, memory: bool = True,
-          conversation_search: bool = True) -> uvicorn.Server:
+          conversation_search: bool = True, proactive: bool = False) -> uvicorn.Server:
     config = WebConfig("127.0.0.1", port, frozenset({"127.0.0.1"}), frozenset({f"http://127.0.0.1:{port}"}), False,
                        root, "scripted-model", None, False)
 
     async def opener() -> Application:
         application = await Application.open(root, provider or scripted(), model_id="scripted-model", sandbox=False,
                                              context_tokens=context_tokens, turn_budget=turn_budget, memory=memory,
-                                             conversation_search=conversation_search)
+                                             conversation_search=conversation_search,
+                                             proactive=ProactiveSettings(enabled=proactive))
         OPENED[root] = (application, asyncio.get_running_loop())
         return application
 
@@ -951,6 +955,47 @@ def on_server(root: str, call: Any) -> Any:
     return asyncio.run_coroutine_threadsafe(call(application), loop).result(10)
 
 
+def run_wake(base: str, token: str, shots: str | None, root: str) -> list[str]:
+    """V3-P87 §9: when HIMARI speaks first, a dim line says why, then its words as an answer."""
+    import base64
+    import secrets
+
+    async def current(app: Application) -> None:  # a paired app that is in use: the current device
+        made = await app.devices.create(PrincipalId("operator"), "Desk")
+        device_token = "hd_" + base64.urlsafe_b64encode(secrets.token_bytes(32)).decode().rstrip("=")
+        device = (await app.devices.pair(made.code, device_token)).device.device_id
+        app.hub.subscribe(PrincipalId("operator"), device)
+        app.hub.signal(PrincipalId("operator"), device, 0, "Asia/Seoul")
+
+    errors: list[str] = []
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page(viewport={"width": 1280, "height": 860}, locale="en-US")
+        page.on("console", lambda m: errors.append(m.text) if m.type == "error" else None)
+        page.on("pageerror", lambda e: errors.append(str(e)))
+        page.goto(base)
+        page.fill("#login-token", token)
+        page.click("#login-submit")
+        expect(page.locator("#surface-home")).to_be_visible()
+        new_chat(page)
+        page.fill("#composer-text", "hi")
+        page.press("#composer-text", "Enter")
+        expect(page.locator(".item-assistant").last).to_contain_text("hello", timeout=10000)
+        on_server(root, current)
+        on_server(root, lambda app: app.try_wake(PrincipalId("operator")))
+        line = page.locator("#timeline .wake-line")
+        expect(line).to_have_text("HIMARI reached out · a try", timeout=15000)
+        expect(page.locator(".item-assistant").last).to_contain_text("still there?", timeout=10000)
+        assert page.locator("#timeline .wake-line + *").count() == 1  # the answer follows the line
+        if shots:
+            page.screenshot(path=os.path.join(shots, "40-wake.png"))
+        page.reload()  # drawn again from the recorded events
+        expect(page.locator("#timeline .wake-line")).to_have_text("HIMARI reached out · a try", timeout=10000)
+        expect(page.locator(".item-user")).to_have_count(1)  # the wake is not the user's message
+        browser.close()
+    return errors
+
+
 def run_passes(base: str, token: str, shots: str | None, root: str) -> list[str]:
     """V3-P85 part 4: a memory pass's line after the event it read (opened, an Undo), the Memory screen's open
     loops with their dates, a suggestion kept, the Timeline (an edit), and the narrow layout."""
@@ -1288,7 +1333,7 @@ def run_memory(base: str, token: str, shots: str | None, root: str, provider: Sc
 
 
 SCENARIOS = ("main", "compaction", "budget", "trash", "files", "images", "work", "instructions", "memory",
-             "streaming", "drafts", "addresses", "activity", "polish", "devices", "passes")
+             "streaming", "drafts", "addresses", "activity", "polish", "devices", "passes", "wake")
 
 
 def run_drafts(base: str, token: str, shots: str | None) -> list[str]:
@@ -2076,6 +2121,18 @@ def main() -> int:
                 errors += run_passes(f"http://127.0.0.1:{PORT + 15}",
                                      Path(passes, "control", "operator.secret").read_text().strip(),
                                      args.screenshots, passes)
+            finally:
+                server.should_exit = True
+                time.sleep(0.5)
+        if "wake" in only:  # V3-P87 part 1
+            woken = os.path.join(tmp, "wake")
+            server = serve(woken, PORT + 16, ScriptedAdapter([NormalizedFinal((TextBlock("hello"),)),
+                                                             NormalizedFinal((TextBlock("still there?"),))]),
+                           proactive=True)
+            try:
+                errors += run_wake(f"http://127.0.0.1:{PORT + 16}",
+                                   Path(woken, "control", "operator.secret").read_text().strip(),
+                                   args.screenshots, woken)
             finally:
                 server.should_exit = True
                 time.sleep(0.5)

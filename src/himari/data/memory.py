@@ -135,6 +135,11 @@ from himari.data.api import (
     TrashedConversation,
     UiResource,
     UserMessage,
+    REMINDER_ATTEMPTS,
+    Wake,
+    WakeReason,
+    WakeRecord,
+    WakeStatus,
 )
 
 _TERMINAL_COMPLETIONS = frozenset(
@@ -151,6 +156,7 @@ _KIND_OF: dict[type, EventKind] = {
     AssistantFinal: EventKind.ASSISTANT_FINAL,
     AssistantToolCalls: EventKind.ASSISTANT_TOOL_CALLS,
     ToolResultRecord: EventKind.TOOL_RESULT,
+    Wake: EventKind.WAKE,
 }
 
 
@@ -243,6 +249,11 @@ class InMemoryStore:
         self.workspace_owners: dict[WorkspaceId, PrincipalId] = {}
         self.devices: dict[tuple[PrincipalId, str], _Device] = {}  # V3-P83, in creation order; revoked ones stay
         self.quiet: dict[PrincipalId, datetime] = {}  # V3-P88 §6.2
+        # V3-P87 §3.3: wakes by id, the keys taken (→ wake id), and each loop's reminder
+        # delivery (state, claiming wake, attempts) by (principal, memory id)
+        self.wakes: dict[str, WakeRecord] = {}
+        self.wake_keys: dict[tuple[PrincipalId, str], str | None] = {}
+        self.reminders: dict[tuple[PrincipalId, int], tuple[str, str | None, int]] = {}
         self.device_ids: dict[PrincipalId, int] = {}
 
     # --- admin helpers (trusted setup paths, not model-reachable) --------
@@ -1185,6 +1196,8 @@ class InMemoryData:
         if conv.purge_started_at is None:
             raise DataError(DataErrorCode.INVALID_STATE_TRANSITION, f"{scope.conversation_id} is not being deleted")
         del self._store._conversations[scope.conversation_id]
+        for wake_id in [w for w, r in self._store.wakes.items() if r.conversation_id == scope.conversation_id]:
+            del self._store.wakes[wake_id]  # V3-P87 (its keys stay)
         for key in [k for k, m in self._store.memories.items()
                     if k[0] == scope.principal_id and m.source_conversation == scope.conversation_id]:
             del self._store.memories[key]  # D5: the notes its calls wrote go with it
@@ -1409,6 +1422,62 @@ class InMemoryData:
         row = self._store.devices.get((principal, device_id))
         if row is not None and not row.revoked:
             row.device = replace(row.device, last_seen_at=at)
+
+    # --- WakeStore (V3-P87) -------------------------------------------------------------
+
+    async def begin_wake(self, scope: TrustedScope, reasons: Sequence[WakeReason], device_id: str, *,
+                         keys: Sequence[str] = (), reminders: Sequence[int] = ()) -> ConversationEvent:
+        rules.check_wake(reasons, device_id, keys, reminders)
+        conv = self._conv(scope)
+        if self._waiting(conv) is not None:
+            raise DataError(DataErrorCode.INVALID_STATE_TRANSITION, "an ask_user call is waiting")
+        for key in keys:
+            if (scope.principal_id, key) in self._store.wake_keys:
+                raise DataError(DataErrorCode.DUPLICATE_IDENTITY, f"wake key {key!r} was taken")
+        for memory_id in reminders:
+            state = self._store.reminders.get((scope.principal_id, memory_id))
+            if state is None or state[0] != "scheduled" or (scope.principal_id, memory_id) not in self._store.memories:
+                raise DataError(DataErrorCode.INVALID_STATE_TRANSITION, f"reminder m{memory_id} is not waiting")
+        wake_id = self._store.new_id("wake")  # nothing above wrote: one step, as the transaction
+        for key in keys:
+            self._store.wake_keys[(scope.principal_id, key)] = wake_id
+        for memory_id in reminders:
+            _, _, attempts = self._store.reminders[(scope.principal_id, memory_id)]
+            self._store.reminders[(scope.principal_id, memory_id)] = ("claimed", wake_id, attempts)
+        event = self._new_event(conv, scope, Wake(wake_id, tuple(reasons), device_id), None)
+        self._store.wakes[wake_id] = WakeRecord(wake_id, scope.principal_id, scope.conversation_id, event.sequence,
+                                                tuple(reasons), device_id, WakeStatus.OPENED, False,
+                                                datetime.now(UTC), None)
+        return event
+
+    async def end_wake(self, principal: PrincipalId, wake_id: str, status: WakeStatus, *,
+                       asked: bool = False) -> WakeRecord:
+        if status is WakeStatus.OPENED:
+            raise DataError(DataErrorCode.INVALID_ARGUMENT, "a wake ends answered, cancelled or failed")
+        record = await self.read_wake(principal, wake_id)
+        if record.status is not WakeStatus.OPENED:
+            return record
+        ended = replace(record, status=status, asked=asked and status is WakeStatus.ANSWERED,
+                        ended_at=datetime.now(UTC))
+        self._store.wakes[wake_id] = ended
+        for key, (state, claimer, attempts) in list(self._store.reminders.items()):
+            if key[0] != principal or state != "claimed" or claimer != wake_id:
+                continue  # §5.3 (re-review P2): only what this very wake still claims
+            if status is WakeStatus.ANSWERED:
+                self._store.reminders[key] = ("delivered", None, attempts)
+            else:
+                self._store.reminders[key] = ("missed" if attempts + 1 >= REMINDER_ATTEMPTS else "scheduled", None,
+                                              attempts + 1)
+        return ended
+
+    async def read_wake(self, principal: PrincipalId, wake_id: str) -> WakeRecord:
+        record = self._store.wakes.get(wake_id)
+        if record is None or record.principal != principal:
+            raise DataError(DataErrorCode.NOT_FOUND, f"no wake {wake_id}")
+        return record
+
+    async def opened_wakes(self) -> tuple[WakeRecord, ...]:
+        return tuple(r for r in self._store.wakes.values() if r.status is WakeStatus.OPENED)
 
     async def read_quiet(self, principal: PrincipalId) -> datetime | None:
         return self._store.quiet.get(principal)

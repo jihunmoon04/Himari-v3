@@ -90,7 +90,8 @@ def main(argv: list[str] | None = None) -> int:
                                              streaming=config.streaming, companion=config.companion,
                                              time_zone=config.time_zone,
                                              machine_socket=config.machine_socket,
-                                             machine_principals=config.machine_principals)
+                                             machine_principals=config.machine_principals,
+                                             proactive=config.proactive)
         print(f"HIMARI web: http://{config.host}:{config.port}/ — sign in with the token in "
               f"{application.data_root / 'control' / 'operator.secret'} (sandbox: {application.sandbox_state.value}, "
               f"context budget: {application.context_tokens} tokens; {turn_text(application.turn)})",
@@ -103,6 +104,7 @@ def main(argv: list[str] | None = None) -> int:
             print("HIMARI web: memory is off (HIMARI_MEMORY=0): models neither save nor see notes; "
                   "you can still manage them", file=sys.stderr, flush=True)
         print(f"HIMARI web: automatic memory {application.auto_memory}", file=sys.stderr, flush=True)  # V3-P85 §12
+        print(f"HIMARI web: reaching out {application.proactive.describe()}", file=sys.stderr, flush=True)  # V3-P87
         if not application.conversation_search_enabled:  # V3-P72 §9
             print("HIMARI web: conversation search is off (HIMARI_CONVERSATION_SEARCH=0)", file=sys.stderr, flush=True)
         if not application.streaming_enabled:  # V3-P73 §9

@@ -238,6 +238,9 @@ def context_key(inputs: PromptInputs) -> str:
         # the same way (review C1, N1): whatever changes either re-estimates.
         "system": list(system_text(inputs)),
         "data_notes": [[n.source, n.text] for n in fit_notes(inputs.source_notes) if n.placement == "data"],
+        # V3-P87 §8.4 (review P1-1): the notes the history's wakes point at, as drawn: one changed,
+        # an earlier wake's line changes length, so the measurement is not used
+        "wake_notes": sorted([i, n.text, n.due_at] for i, n in inputs.wake_notes.items()),
         "time_zone": inputs.time_zone,  # V3-P83 §6.4: the time lines change with it
         "screen_points": options.screen_points,  # V3-P84 §5: screens' sizes (the system text has the moves)
         "memories": None if inputs.memories is None else [  # V3-P71: and so does a note
@@ -321,6 +324,8 @@ def _items(parts: Sequence[HistoryPart], attachments: Mapping[str, AttachmentInf
     items: list[dict[str, object]] = []
     for part in parts:
         match part:
+            case UserTurn(blocks=blocks, wake=True):  # V3-P87: the server opened that turn, not the user
+                items.append({"role": "wake", "text": _blocks_text(blocks, attachments)})
             case UserTurn(blocks=blocks):
                 items.append({"role": "user", "text": _blocks_text(blocks, attachments)})
             case AssistantTurn(blocks=blocks):

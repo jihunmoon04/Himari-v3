@@ -1731,6 +1731,11 @@ function renderEvent(event) {
     timeline.append(renderMessage(event));
     return;
   }
+  if (event.kind === "wake") { // V3-P87 §9: HIMARI spoke first — a dim line, then its answer as usual
+    closeWork();
+    timeline.append(el("div", "wake-line", event.text));
+    return;
+  }
   if (event.kind === "assistant_final") {
     closeWork();
     timeline.append(renderMessage(event, changedModel(event.model)));

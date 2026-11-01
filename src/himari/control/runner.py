@@ -55,7 +55,7 @@ from himari.control.api import (
     TurnProgress,
     TurnUsage,
 )
-from himari.data.api import DataError, MessageOrigin, UserMessage
+from himari.data.api import DataError, MessageOrigin, OriginKind, UserMessage, Wake, WakeReason
 from himari.provider.api import OutputDelta
 
 log = logging.getLogger(__name__)
@@ -71,6 +71,8 @@ def _classify(error: BaseException) -> str:
 
 UNATTENDED_REASON = "paused: no client was reading this conversation"
 SEEN_SECONDS = 60.0  # V3-P62 O2
+WAKE_RUNS = 3  # V3-P87 §4.2: a server-opened turn stays short
+WAKE_YIELD_SECONDS = 10.0  # §4.3: how long a message waits for the wake job it cancels
 
 
 class _Live:
@@ -151,6 +153,7 @@ class BackgroundRunner:
         self._runs: dict[_Key, int] = {}  # Runs reported by the running job
         self._unattended: dict[_Key, int] = {}  # of them, run while no client read the Conversation
         self._closed: set[ConversationId] = set()  # V3-P65: taking no work
+        self._wake_jobs: dict[_Key, str] = {}  # V3-P87: the running (or last) job's wake, by Conversation
         self._held: set[ConversationId] = set()  # V3-P76: starting no work for now
         self._admitting: dict[ConversationId, int] = {}  # inputs inside driver.accept
         self._admitted: dict[ConversationId, asyncio.Event] = {}  # set when the last one is done
@@ -167,6 +170,8 @@ class BackgroundRunner:
 
     async def submit(self, scope: TrustedScope, message: UserMessage | None) -> JobStatus:
         self._check_open(scope)
+        if message is not None:
+            await self._yield_wake(scope)
         if self._running_in(scope.conversation_id):
             raise ControlError(ControlErrorCode.BUSY, scope.conversation_id)
         if message is not None:
@@ -181,6 +186,43 @@ class BackgroundRunner:
         # Closed meanwhile: the input stays recorded, unanswered; _start refuses.
         return self._start(scope, lambda s, stop, progress: self._driver.resume(s, stop=stop, progress=progress),
                            "drive", None if message is None else message.origin)
+
+    async def _yield_wake(self, scope: TrustedScope) -> None:
+        """V3-P87 §4.3 (the user wins): a running wake job is asked to cancel and
+        given WAKE_YIELD_SECONDS to end; still running, the message is refused
+        BUSY by the caller, never accepted beside it (one job per Conversation)."""
+        key = self._key(scope)
+        task = self._tasks.get(key)
+        if task is None or task.done() or key not in self._wake_jobs:
+            return
+        self.cancel(scope)
+        await asyncio.wait([task], timeout=WAKE_YIELD_SECONDS)  # never cancels the task itself
+
+    async def submit_wake(self, scope: TrustedScope, reasons: Sequence[WakeReason], device_id: str, *,
+                          keys: Sequence[str] = (), reminders: Sequence[int] = ()) -> JobStatus:
+        """V3-P87 §4.1: record the wake (NOT_SETTLED, DataError DUPLICATE_IDENTITY /
+        INVALID_STATE_TRANSITION as the driver and Data refuse) and start its
+        job, spoken on ``device_id``, at most WAKE_RUNS Runs. BUSY while a job
+        runs or an input is being accepted; CLOSED in the trash."""
+        self._check_open(scope)
+        if self._running_in(scope.conversation_id) or self._admitting.get(scope.conversation_id):
+            raise ControlError(ControlErrorCode.BUSY, scope.conversation_id)
+        self._admit(scope.conversation_id)
+        try:
+            event = await self._driver.accept_wake(scope, reasons, device_id, keys=keys, reminders=reminders)
+        finally:
+            self._admit(scope.conversation_id, -1)
+        assert isinstance(event.payload, Wake)
+        self._tell(lambda listener: listener.accepted(scope))
+        key = self._key(scope)
+        self._wake_jobs[key] = event.payload.wake_id
+        try:
+            return self._start(scope, lambda s, stop, progress: self._driver.resume(s, stop=stop, progress=progress,
+                                                                                  max_runs=WAKE_RUNS),
+                               "wake", MessageOrigin(OriginKind.WAKE, device_id), wake_id=event.payload.wake_id)
+        except ControlError:
+            self._wake_jobs.pop(key, None)  # closed meanwhile: the wake stays opened; a restart settles it
+            raise
 
     def _check_open(self, scope: TrustedScope) -> None:
         if scope.conversation_id in self._closed:
@@ -239,7 +281,7 @@ class BackgroundRunner:
         if self._running(key):
             raise ControlError(ControlErrorCode.BUSY, scope.conversation_id)
         for kept in (self._status, self._tasks, self._signals, self._runs, self._unattended, self._live,
-                     self._live_versions):
+                     self._live_versions, self._wake_jobs):
             kept.pop(key, None)
         self._seen.pop(scope.conversation_id, None)
         self._notify_live(key)
@@ -288,12 +330,15 @@ class BackgroundRunner:
 
     def _start(self, scope: TrustedScope,
                job: Callable[[TrustedScope, StopSignal, TurnProgress], Awaitable[DriveResult]],
-               name: str, origin: MessageOrigin | None = None) -> JobStatus:
+               name: str, origin: MessageOrigin | None = None, *, wake_id: str | None = None) -> JobStatus:
         """Synchronous: nothing closes the Conversation between this check and the start."""
         self._check_open(scope)
         key = self._key(scope)
+        if wake_id is None:
+            self._wake_jobs.pop(key, None)
         previous = self._status.get(key, JobStatus(running=False))
-        status = JobStatus(running=True, generation=previous.generation + 1, started_at=datetime.now(UTC))
+        status = JobStatus(running=True, generation=previous.generation + 1, started_at=datetime.now(UTC),
+                           wake_id=wake_id)
         self._status[key] = status
         signal = self._signals[key] = StopSignal()
         self.seen(scope)  # the client that started it is connected

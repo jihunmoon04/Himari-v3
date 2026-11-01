@@ -41,6 +41,7 @@ from himari.data.api import (
     PromptBasis,
     UserMessage,
     parse_note_date,
+    Wake,
 )
 from himari.prompt.api import CurrentStateProjection, ModelInput, RequestOptions, UserTurn, json_data
 
@@ -142,7 +143,7 @@ def fold(text: str) -> str:
 @dataclass(frozen=True)
 class Message:
     sequence: int
-    role: str  # "user" | "himari"
+    role: str  # "user" | "himari" | "context" (V3-P87: a wake; never evidence)
     at: datetime
     text: str
     omitted: int = 0  # characters left out of its middle (§4.2)
@@ -196,7 +197,21 @@ def message_of(event: ConversationEvent) -> Message | None:
         text = "\n".join(b.text for b in payload.blocks if isinstance(b, TextBlock))
         text = split_marks(text, complete=True)[0]
         return Message(event.sequence, "himari", event.created_at, text[:ASSISTANT_CHARS])
+    if isinstance(payload, Wake):  # V3-P87 §8.3: why HIMARI spoke first — context, never the user's words
+        return Message(event.sequence, "context", event.created_at, wake_context(payload))
     return None
+
+
+def wake_context(wake: Wake) -> str:
+    reasons = []
+    for r in wake.reasons:
+        what = r.kind.value.replace("_", " ")
+        if r.memory_id is not None:
+            what += f" m{r.memory_id}"
+        if r.activity is not None:
+            what += f" {r.activity}"
+        reasons.append(what)
+    return f"[HIMARI spoke first: {', '.join(reasons)}]"
 
 
 def next_part(events: Sequence[ConversationEvent], cursor: int,

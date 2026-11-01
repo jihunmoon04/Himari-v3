@@ -4322,3 +4322,12 @@ button.files-crumb:hover { background: var(--surface-hover); color: var(--text);
 .persona-text {
   min-height: 160px;
 }
+
+/* V3-P87 §9: why HIMARI spoke first. */
+.wake-line {
+  max-width: var(--reading-max);
+  margin: var(--space-3, 12px) auto var(--space-1, 4px);
+  color: var(--text-muted, #777);
+  font-size: 0.85rem;
+  text-align: center;
+}

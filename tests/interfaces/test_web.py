@@ -19,7 +19,7 @@ pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient  # noqa: E402
 from mcp_fake import URL as MCP_URL  # noqa: E402
 from mcp_fake import ECHO_SCHEMA, VIEW_HTML, VIEW_URI, FakeMcpServer, view_entry  # noqa: E402
-from testkit import calls, final  # noqa: E402
+from testkit import NoWakes, calls, final  # noqa: E402
 
 from himari.bootstrap import application as bootstrap  # noqa: E402
 from himari.bootstrap.application import (  # noqa: E402
@@ -448,7 +448,7 @@ def test_invalid_messages_and_pages_are_refused(server: Server) -> None:
                                headers={"origin": ORIGIN}).status_code == 400
 
 
-class GatedDriver:
+class GatedDriver(NoWakes):
     def __init__(self) -> None:
         self.release = threading.Event()
 
@@ -460,7 +460,7 @@ class GatedDriver:
         pass
 
     async def resume(self, scope: TrustedScope, *, stop: StopSignal | None = None,
-                     progress: TurnProgress | None = None) -> DriveResult:
+                     progress: TurnProgress | None = None, max_runs: int | None = None) -> DriveResult:
         await asyncio.to_thread(self.release.wait, 10)
         return DriveResult(DriveState.COMPLETED)
 
@@ -754,7 +754,7 @@ class RefusingDriver(GatedDriver):
         self.detail = detail
 
     async def resume(self, scope: TrustedScope, *, stop: StopSignal | None = None,
-                     progress: TurnProgress | None = None) -> DriveResult:
+                     progress: TurnProgress | None = None, max_runs: int | None = None) -> DriveResult:
         return DriveResult(DriveState.REQUEST_REJECTED, detail=self.detail)
 
 
@@ -1183,7 +1183,7 @@ class StubbornDriver(GatedDriver):
     """A job that ignores being stopped until released (Q-40: a stuck command)."""
 
     async def resume(self, scope: TrustedScope, *, stop: StopSignal | None = None,
-                     progress: TurnProgress | None = None) -> DriveResult:
+                     progress: TurnProgress | None = None, max_runs: int | None = None) -> DriveResult:
         while not self.release.is_set():
             try:
                 await asyncio.sleep(0.01)

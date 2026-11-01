@@ -22,6 +22,7 @@ from himari.data.api import (
     ToolExecutionRecord,
     ToolResultRecord,
     UserMessage,
+    Wake,
 )
 from himari.prompt.api import (
     AssistantTurn,
@@ -39,6 +40,7 @@ from himari.prompt.api import (
     ToolGroupTurn,
     UserTurn,
     time_line,
+    wake_text,
 )
 from himari.prompt.compaction import anchors, context_key, current_state, part_anchor, read_summary, state_key
 from himari.prompt.system import fit_notes, system_text
@@ -66,6 +68,9 @@ class Composer:
                     history.append(replace(group, continuation=inputs.continuations.get(event.origin_run_id)))
                 case ToolResultRecord():
                     pass  # rendered inside its group, in ordinal order
+                case Wake():  # V3-P87 §8.1: a user-role line the server wrote
+                    history.append(UserTurn(event.event_id, (TextBlock(wake_text(event.payload, inputs.wake_notes)),),
+                                            wake=True))
         summary = read_summary(inputs.snapshot)
         snapshot_revision = None
         if summary is not None and inputs.snapshot is not None:
@@ -125,7 +130,10 @@ def timed(history: list[HistoryPart], inputs: PromptInputs) -> list[HistoryPart]
     out: list[HistoryPart] = []
     previous = None
     for part in history:
-        if isinstance(part, UserTurn):
+        if isinstance(part, UserTurn) and part.wake:  # V3-P87 §8.3: always timed, never a gap's start
+            part = replace(part, blocks=(TextBlock(time_line(received[part.event_id], inputs.time_zone)),
+                                         *part.blocks))
+        elif isinstance(part, UserTurn):
             moment = received[part.event_id]
             if previous is None or moment - previous > TIME_GAP:
                 part = replace(part, blocks=(TextBlock(time_line(moment, inputs.time_zone)), *part.blocks))

@@ -84,7 +84,7 @@ from himari.control.api import (
     ModelOffer,
     ResolvedModel,
 )
-from himari.control.driver import NO_PROGRESS_RUNS
+from himari.control.driver import NO_PROGRESS_RUNS, Driver
 from himari.control.runner import SEEN_SECONDS, BackgroundRunner
 from himari.memory.api import MemoryPassSettings, PassOutcome
 from himari.memory.worker import MemoryPasses
@@ -129,9 +129,12 @@ from himari.data.api import (
     clean_file_name,
     clean_media_type,
     view_state,
+    WakeKind,
+    WakeReason,
 )
 from himari.data.sqlite import SqliteData, SqliteStore
 from himari.bootstrap.companion import CompanionEvents, CompanionPresence
+from himari.bootstrap.proactive import ProactiveRefused, ProactiveSettings, WakeEvents, settle_cut_wakes
 from himari.presence.api import Devices
 from himari.presence.devices import DeviceRegistry
 from himari.presence.hub import PresenceHub
@@ -871,6 +874,9 @@ class Application:
     hub: PresenceHub = field(default_factory=PresenceHub, repr=False)
     events: CompanionEvents | None = field(default=None, repr=False)
     _ticking: asyncio.Task[None] | None = field(default=None, repr=False)
+    # V3-P87: speaking first (HIMARI_PROACTIVE…), and the listener that ends each wake with its job
+    proactive: ProactiveSettings = field(default_factory=ProactiveSettings)
+    _wake_events: WakeEvents | None = field(default=None, repr=False)
     devices: Devices = field(init=False, repr=False)  # V3-P83 §4: pairing and device tokens
 
     def __post_init__(self) -> None:
@@ -916,7 +922,9 @@ class Application:
         time_zone: str = DEFAULT_TIME_ZONE,  # V3-P83 §6.4: HIMARI_TIME_ZONE, the zone the model is told the time in
         machine_socket: str | None = None,  # V3-P74: HIMARI_MACHINE_SOCKET; None: no machine Environment
         machine_principals: Iterable[str] = ("operator",),  # whose new Conversations use it (Q1)
+        proactive: ProactiveSettings | None = None,  # V3-P87 §11: HIMARI_PROACTIVE…; None: off
     ) -> Application:
+        speaking_first = proactive if proactive is not None else ProactiveSettings()
         if file_max_bytes < 1 or file_max_bytes > file_store_max_bytes:
             raise ValueError("a file's limit must be positive and within the file store's (V3-P66)")
         if turn_budget is None and max_runs is None:
@@ -1028,6 +1036,7 @@ class Application:
                                     instructions=base,  # V3-P89: the base; the sections are the Prompt module's
                                     system=SystemSpec(companion=companion, attachments=uploads_work,
                                                       file_references=machine is not None,
+                                                      proactive=companion and speaking_first.enabled,
                                                       documents=_documents_notes(reader, toolkit, scripts == "on")),
                                     external_defaults=mcp.defaults,
                                     source_notes=[SourceNote(source, note.placement, note.text)
@@ -1049,7 +1058,8 @@ class Application:
             raise
         assert isinstance(runtime.data, SqliteData)
         events = CompanionEvents(hub, runtime.data)
-        listeners = _JobListeners(events)
+        wake_events = WakeEvents(runtime.data)
+        listeners = _JobListeners(events, wake_events)
         runner = BackgroundRunner(runtime.driver, unattended_runs=unattended_runs, seen_seconds=turn.seen_seconds,
                                   listener=listeners)
         application = cls(root, store, runtime.data, runtime, runner, inside, state, model_id,
@@ -1061,6 +1071,10 @@ class Application:
                           machine_principals=frozenset(PrincipalId(p) for p in machine_principals),
                           hub=hub, events=events)
         application.time_zone = time_zone
+        application.proactive = speaking_first
+        application._wake_events = wake_events
+        assert isinstance(runtime.driver, Driver)
+        await settle_cut_wakes(runtime.data, runtime.driver)  # V3-P87 §4.4: before any new wake
         settings, application.auto_memory = memory_pass_settings(
             provider, memory=memory, auto=memory_auto, model_id=memory_model, idle_minutes=memory_idle_minutes,
             daily_tokens=memory_daily_tokens, time_zone=time_zone)
@@ -2120,6 +2134,8 @@ class Application:
             await self.runner.shutdown(grace_seconds)
             if self.events is not None:
                 await self.events.aclose()
+            if self._wake_events is not None:
+                await self._wake_events.aclose()
         finally:
             try:
                 await self.mcp.aclose()
@@ -2129,6 +2145,35 @@ class Application:
                         self.inside.sandbox.toolkit_fd = None  # the number may be reused once closed (review N8)
                     self.toolkit.close()
                 self.store.close()
+
+    # --- speaking first (V3-P87) ----------------------------------------------------------
+
+    async def try_wake(self, principal: PrincipalId) -> tuple[ConversationId, JobStatus]:
+        """§11: open a TRY wake now in the most recent conversation, spoken on the
+        current device — past the user's quiet, the quiet hours, gap and daily
+        limit (and the ten minutes after a message), never while a job runs or
+        in a conversation that is not settled. ProactiveRefused."""
+        if not (self.proactive.enabled and self.companion_enabled):
+            raise ProactiveRefused("proactive_off")
+        device = self.hub.current(principal)
+        if device is None:
+            raise ProactiveRefused("no_device")
+        recent = await self.data.most_recent_user_conversation(principal)
+        if recent is None:
+            raise ProactiveRefused("no_conversation")
+        if self.runner.running(principal):  # §6.1: never while any of the user's conversations works
+            raise ProactiveRefused("busy")
+        scope = TrustedScope(principal, recent.conversation_id)
+        try:
+            status = await self.runner.submit_wake(scope, (WakeReason(WakeKind.TRY),), device)
+        except ControlError as error:
+            raise ProactiveRefused(error.code.value) from None
+        return recent.conversation_id, status
+
+    def proactive_status(self, principal: PrincipalId) -> dict[str, object]:
+        """§11 (part 1): the switch and where HIMARI would speak now."""
+        return {"enabled": self.proactive.enabled and self.companion_enabled, "told": self.proactive.describe(),
+                "current_device": self.hub.current(principal)}
 
     def check_layout(self) -> None:
         """Re-verify the private directories (e.g. before serving)."""

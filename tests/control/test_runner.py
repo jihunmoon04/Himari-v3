@@ -6,7 +6,7 @@ import asyncio
 from collections.abc import Awaitable, Callable
 
 import pytest
-from testkit import SCOPE, calls, final, runtime, user
+from testkit import SCOPE, NoWakes, calls, final, runtime, user
 
 from himari.common import ASK_USER_TOOL_ID, ConversationId, PrincipalId, TrustedScope
 from himari.control.api import (ControlError, ControlErrorCode, DriveResult, DriveState, JobStatus, StopRequest,
@@ -17,7 +17,7 @@ from himari.data.api import DataError, DataErrorCode, MessageOrigin, OriginKind,
 FOREIGN = TrustedScope(PrincipalId("mallory"), SCOPE.conversation_id)
 
 
-class GatedDriver:
+class GatedDriver(NoWakes):
     """Each call waits for ``release`` and then returns or raises ``outcome``."""
 
     def __init__(self) -> None:
@@ -46,7 +46,7 @@ class GatedDriver:
         self.calls.append((scope, message))
 
     async def resume(self, scope: TrustedScope, *, stop: StopSignal | None = None,
-                     progress: TurnProgress | None = None) -> DriveResult:
+                     progress: TurnProgress | None = None, max_runs: int | None = None) -> DriveResult:
         self.signals.append(stop)
         return await self._call(scope, None)
 
@@ -511,7 +511,7 @@ class Reporting(GatedDriver):
     """Two Runs reported, then the outcome."""
 
     async def resume(self, scope: TrustedScope, *, stop: StopSignal | None = None,
-                     progress: TurnProgress | None = None) -> DriveResult:
+                     progress: TurnProgress | None = None, max_runs: int | None = None) -> DriveResult:
         assert progress is not None
         progress.report(TurnUsage(runs=1))
         progress.report(TurnUsage(runs=1, input_tokens=5))  # the same Run's later report: no new Run

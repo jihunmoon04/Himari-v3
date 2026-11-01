@@ -97,6 +97,7 @@ class EventKind(Enum):
     ASSISTANT_FINAL = "assistant_final"
     ASSISTANT_TOOL_CALLS = "assistant_tool_calls"
     TOOL_RESULT = "tool_result"
+    WAKE = "wake"  # V3-P87 §3: the server opened this turn
 
 
 class OriginKind(Enum):
@@ -105,6 +106,7 @@ class OriginKind(Enum):
     DEVICE = "device"  # a paired device's token
     WEB = "web"  # the Web session cookie
     CLI = "cli"  # the operator's bearer token
+    WAKE = "wake"  # V3-P87 §4.1: a job the server opened, spoken on ``device_id``; never a message's origin
 
 
 @dataclass(frozen=True)
@@ -137,7 +139,41 @@ class ToolResultRecord(DeepFrozen):
     model_result: ModelToolResult
 
 
-type EventPayload = UserMessage | AssistantFinal | AssistantToolCalls | ToolResultRecord
+class WakeKind(Enum):
+    """V3-P87 §3.2: why the server opened a turn."""
+
+    LOOP_DUE = "loop_due"
+    RETURNED = "returned"
+    REMINDER = "reminder"
+    FOCUS = "focus"
+    GAME_ENDED = "game_ended"
+    TRY = "try"  # the operator's try (§11)
+
+
+@dataclass(frozen=True)
+class WakeReason(DeepFrozen):
+    """One reason a wake carries. A loop's or reminder's text is never copied
+    here — only its id; the prompt reads the note when it draws the wake."""
+
+    kind: WakeKind
+    memory_id: int | None = None  # LOOP_DUE, REMINDER
+    away_minutes: int | None = None  # RETURNED
+    via: str | None = None  # RETURNED: "unlock", "resume", "reconnect"
+    activity: str | None = None  # FOCUS: the category
+    minutes: int | None = None  # FOCUS: how long it has gone on; GAME_ENDED: how long the game lasted
+    late: bool = False  # REMINDER only: past its 24-hour window (§5.3)
+
+
+@dataclass(frozen=True)
+class Wake(DeepFrozen):
+    """V3-P87 §3.2: the Event a server-opened turn answers (a Run's trigger)."""
+
+    wake_id: str
+    reasons: tuple[WakeReason, ...]
+    device_id: str  # where it is spoken: the current device when it opened
+
+
+type EventPayload = UserMessage | AssistantFinal | AssistantToolCalls | ToolResultRecord | Wake
 type AssistantOutput = AssistantFinal | AssistantToolCalls
 
 
@@ -1413,6 +1449,59 @@ class MemoryCleanup(DeepFrozen):
     expired_facts: int = 0
     retired: int = 0
     proposals: int = 0
+
+
+MAX_WAKE_REASONS = 4  # V3-P87 §6.4
+REMINDER_ATTEMPTS = 3  # V3-P87 §5.3: a reminder whose wakes ended unanswered this often is missed
+
+
+class WakeStatus(Enum):
+    OPENED = "opened"
+    ANSWERED = "answered"  # a final answer, or an ask_user question left (``asked``)
+    CANCELLED = "cancelled"  # no assistant output; the user won (§4.3)
+    FAILED = "failed"
+
+
+@dataclass(frozen=True)
+class WakeRecord(DeepFrozen):
+    wake_id: str
+    principal: PrincipalId
+    conversation_id: ConversationId
+    event_sequence: int
+    reasons: tuple[WakeReason, ...]
+    device_id: str
+    status: WakeStatus
+    asked: bool
+    created_at: datetime
+    ended_at: datetime | None
+
+
+class WakeStore(Protocol):
+    """V3-P87 §3.3: the server-opened turns and what keeps them from repeating."""
+
+    async def begin_wake(self, scope: TrustedScope, reasons: Sequence[WakeReason], device_id: str, *,
+                         keys: Sequence[str] = (), reminders: Sequence[int] = ()) -> ConversationEvent:
+        """One transaction (§3.3): each key is taken (DUPLICATE_IDENTITY when one
+        was taken already), each reminder goes ``scheduled → claimed``
+        (INVALID_STATE_TRANSITION when it is not scheduled), the wake Event is
+        appended and its record written. Refused as an Event is (trash, an
+        ask_user call waiting). INVALID_ARGUMENT: no reason, or more than
+        MAX_WAKE_REASONS."""
+        ...
+
+    async def end_wake(self, principal: PrincipalId, wake_id: str, status: WakeStatus, *,
+                       asked: bool = False) -> WakeRecord:
+        """``opened → status``, once (a later call changes nothing). The
+        reminders it claimed (§5.3), only while still claimed by it: ANSWERED →
+        delivered; else back to scheduled with one more attempt, missed at
+        the third."""
+        ...
+
+    async def read_wake(self, principal: PrincipalId, wake_id: str) -> WakeRecord: ...
+
+    async def opened_wakes(self) -> tuple[WakeRecord, ...]:
+        """Every principal's wakes still opened (a restart settles them, §4.4)."""
+        ...
 
 
 class MemoryPassLog(Protocol):

@@ -12,7 +12,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
-from testkit import SCOPE, V15_UNDO, text_result, user
+from testkit import V17_UNDO, SCOPE, V15_UNDO, text_result, user
 
 from himari.common import CallId, CallRef, ConversationId, RawRepresentation, ToolCall, ToolId, TrustedScope
 from himari.data.api import (
@@ -79,6 +79,8 @@ async def fill(data: SqliteData, scope: TrustedScope) -> None:
     await data.prepare_run(scope, preparation(RunPurpose.COMPACTION))
     await data.set_external_setting(scope, "fake", False)
     await data.set_model_setting(scope, ModelSetting("m", None))
+    from himari.data.api import WakeKind, WakeReason
+    await data.begin_wake(scope, (WakeReason(WakeKind.TRY),), "d1")  # V3-P87: a wake and its record
 
 
 def rows_of(conn: sqlite3.Connection, conversation_id: str) -> dict[str, int]:
@@ -136,7 +138,7 @@ def v6_database(path: Path) -> None:
     store.close()
     conn = sqlite3.connect(path, isolation_level=None)
     try:
-        for statement in ("DROP TABLE presence_settings", *V15_UNDO, "DROP TABLE device_ids", "DROP INDEX devices_by_pairing", "DROP INDEX devices_by_token",
+        for statement in (*V17_UNDO, "DROP TABLE presence_settings", *V15_UNDO, "DROP TABLE device_ids", "DROP INDEX devices_by_pairing", "DROP INDEX devices_by_token",
                           "DROP TABLE devices", "DROP INDEX bindings_by_workspace", "DROP TABLE workspaces",
                           "DROP TABLE event_text", "DROP TABLE memory_ids", "DROP INDEX memories_by_source",
                           "DROP TABLE memories",
