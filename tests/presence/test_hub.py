@@ -81,7 +81,7 @@ def test_ten_minutes_without_input_is_away(hub: PresenceHub, clock: Clock) -> No
     clock.now += 11
     hub.signal(ME, "d1", 601, None)  # the signal comes, the input does not
     assert hub.current(ME) is None
-    assert drained(web)[-1] == StreamEvent("current", {"device_id": None})
+    assert [e for e in drained(web) if e.name != "devices"][-1] == StreamEvent("current", {"device_id": None})
 
 
 def test_idle_seconds_are_cut_and_unknown_zones_ignored(hub: PresenceHub) -> None:

@@ -20,6 +20,7 @@
     <Compile Include="..\Himari.Companion\ScreenHistory.cs" Link="ScreenHistory.cs" />
     <Compile Include="..\Himari.Companion\CharacterManifest.cs" Link="CharacterManifest.cs" />
     <Compile Include="..\Himari.Companion\CharacterAnimator.cs" Link="CharacterAnimator.cs" />
+    <Compile Include="..\Himari.Companion\ActivitySignals.cs" Link="ActivitySignals.cs" />
     <None Include="..\Himari.Companion\Assets\character.json" Link="character.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

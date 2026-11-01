@@ -301,7 +301,20 @@
             <p class="devices-code-value" id="devices-code-value"></p>
           </div>
           <p class="memory-off" id="devices-off" hidden>Devices are turned off on this server; their tokens are kept.</p>
+          <!-- V3-P88 §6.2: the user's "quiet", the only do-not-disturb. -->
+          <div class="devices-quiet" id="devices-quiet" hidden>
+            <p class="devices-quiet-state" id="devices-quiet-state"></p>
+            <div class="devices-quiet-actions">
+              <button type="button" class="link-button" id="devices-quiet-hour">Quiet 1 hour</button>
+              <button type="button" class="link-button" id="devices-quiet-morning">Until morning</button>
+              <button type="button" class="link-button" id="devices-quiet-clear" hidden>Clear</button>
+            </div>
+          </div>
           <ul class="rows memory-list devices-list" id="devices-list"></ul>
+          <!-- V3-P88 §8, §9: what the apps tell, and where it goes. -->
+          <p class="hint devices-signals-note" id="devices-signals-note" hidden>Under each device is what its app
+            tells HIMARI now. It is sent to the model with each message and kept in that conversation's run records
+            until the conversation is deleted.</p>
           <p class="hint devices-empty" id="devices-empty" hidden>No devices yet.</p>
         </section>
 

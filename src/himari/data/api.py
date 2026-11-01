@@ -1630,6 +1630,15 @@ class DeviceStore(Protocol):
         """Records when it was last seen; nothing for an unknown device."""
         ...
 
+    async def read_quiet(self, principal: PrincipalId) -> datetime | None:
+        """V3-P88 §6.2: until when the user asked HIMARI to stay quiet, as
+        written (a past moment may come back: the caller compares)."""
+        ...
+
+    async def write_quiet(self, principal: PrincipalId, until: datetime | None) -> None:
+        """Sets it, or clears it with None."""
+        ...
+
 
 # --- Conversation search (V3-P72) -------------------------------------------
 

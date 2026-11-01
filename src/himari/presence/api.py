@@ -16,6 +16,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from enum import Enum
 from typing import Protocol
 
 from himari.common import DeepFrozen, JsonValue, PrincipalId
@@ -65,6 +66,13 @@ class DeviceCaller(DeepFrozen):
     device: Device
 
 
+MAX_QUIET = timedelta(days=7)  # V3-P88 §6.2
+
+
+class QuietTooLong(Exception):
+    """A quiet that would end more than MAX_QUIET from now."""
+
+
 class PairingRefused(Exception):
     """Why a pairing failed (appendix A.1): ``pairing_invalid``,
     ``pairing_expired``, ``pairing_used``, ``invalid_token``, ``token_in_use``
@@ -100,6 +108,15 @@ class Devices(Protocol):
 
     async def revoke(self, principal: PrincipalId, device_id: str) -> None: ...
 
+    async def quiet(self, principal: PrincipalId) -> datetime | None:
+        """V3-P88 §6.2: until when the user asked HIMARI to stay quiet; None when not now."""
+        ...
+
+    async def set_quiet(self, principal: PrincipalId, until: datetime | None) -> datetime | None:
+        """Sets it (a past moment, or None, clears it) and returns what is kept.
+        QuietTooLong past MAX_QUIET."""
+        ...
+
 
 # --- Presence and the event stream (§5, §6.1, §8.1) ------------------------------------------
 
@@ -111,16 +128,98 @@ TICK_SECONDS = 15.0  # the current device is decided again this often: time alon
 MAX_IDLE_SECONDS = 30 * 24 * 3600  # a signal's idle_seconds is cut to this
 MAX_STREAMS = 16  # event streams of one principal, devices and Web tabs together
 QUEUE_EVENTS = 256  # what one subscriber may have waiting; past it the stream is closed
+BEFORE_SECONDS = 1800.0  # V3-P88 §4.4: an ended activity is kept this long, then forgotten
+NOTICE_SECONDS = 10.0  # V3-P88 §8.1: a principal's ``devices`` notices come at most this often
+
+
+# --- Activity signals (V3-P88) ----------------------------------------------------------------
+
+
+class Session(Enum):
+    ACTIVE = "active"
+    LOCKED = "locked"
+
+
+class After(Enum):
+    """V3-P88 §3: the first signal after the screen was unlocked or the computer woke."""
+
+    UNLOCK = "unlock"
+    RESUME = "resume"
+
+
+@dataclass(frozen=True)
+class ActivitySignal(DeepFrozen):
+    """§4: the program in front, classified by the app. ``category`` is one of
+    ``ACTIVITIES``; ``for_seconds`` how long that category has gone on when
+    the signal was sent; ``title`` only when the user turned it on."""
+
+    category: str
+    app: str | None = None
+    for_seconds: float = 0.0
+    fullscreen: bool | None = None
+    title: str | None = None
+
+
+@dataclass(frozen=True)
+class MediaSignal(DeepFrozen):
+    """§5: what plays now (only while playing)."""
+
+    title: str
+    artist: str | None = None
+    app: str | None = None
+
+
+@dataclass(frozen=True)
+class Signals(DeepFrozen):
+    """One signal's whole snapshot of a device (§2.1): a field the app did not
+    send is unknown, and what the server had for it is dropped. ``*_known``
+    tell an absent ``activity``/``media`` (unknown) from a null one (seen:
+    none)."""
+
+    session: Session | None = None
+    activity_known: bool = False
+    activity: ActivitySignal | None = None
+    media_known: bool = False
+    media: MediaSignal | None = None
+    mic_or_camera: bool | None = None
+    after: After | None = None
+
+
+@dataclass(frozen=True)
+class EndedActivity(DeepFrozen):
+    """§4.4: the activity before the current one, kept BEFORE_SECONDS."""
+
+    category: str
+    app: str | None
+    lasted_seconds: float
+    ended_seconds_ago: float
+
+
+@dataclass(frozen=True)
+class Returned(DeepFrozen):
+    """§3: the latest return — a device that became current by an unlock, a
+    wake, or (the fallback) by connecting again after it was gone."""
+
+    device_id: str
+    at: datetime
+    via: str  # "unlock", "resume", "reconnect"
 
 
 @dataclass(frozen=True)
 class DeviceState(DeepFrozen):
-    """A device as Presence knows it now; ``idle_seconds`` is None before its first signal."""
+    """A device as Presence knows it now; ``idle_seconds`` is None before its
+    first signal. The activity signals (V3-P88) are None when unknown;
+    ``activity.for_seconds`` is counted to now."""
 
     device_id: str
     connected: bool
     idle_seconds: float | None
     time_zone: str | None
+    locked: bool = False
+    activity: ActivitySignal | None = None
+    media: MediaSignal | None = None
+    mic_or_camera: bool | None = None
+    before: EndedActivity | None = None
 
 
 @dataclass(frozen=True)
@@ -163,11 +262,30 @@ class EventHub(Protocol):
         """To every stream of the principal."""
         ...
 
+    def publish_web(self, principal: PrincipalId, name: str, data: JsonValue) -> None:
+        """To the principal's Web streams only, never a device's (V3-P88 §8.1)."""
+        ...
+
 
 class Presence(Protocol):
-    def signal(self, principal: PrincipalId, device_id: str, idle_seconds: float, time_zone: str | None) -> None:
+    def signal(self, principal: PrincipalId, device_id: str, idle_seconds: float, time_zone: str | None,
+               signals: Signals | None = None) -> None:
         """A device's input activity (§5): ``idle_seconds`` since the last input
-        anywhere on it; ``time_zone`` an IANA name, or None when unknown."""
+        anywhere on it; ``time_zone`` an IANA name, or None when unknown.
+        ``signals`` (V3-P88): the rest of the snapshot; None as all unknown."""
+        ...
+
+    @property
+    def signals_epoch(self) -> str:
+        """V3-P88 §8.1: new each time the server starts; revisions compare only within it."""
+        ...
+
+    def signals_revision(self, principal: PrincipalId) -> int:
+        """Goes up whenever what the Web shows of a device's signals changes."""
+        ...
+
+    def returned(self, principal: PrincipalId) -> Returned | None:
+        """V3-P88 §3: the principal's latest return, if any since the server started."""
         ...
 
     def states(self, principal: PrincipalId) -> dict[str, DeviceState]:

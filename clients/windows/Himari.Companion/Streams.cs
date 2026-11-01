@@ -21,6 +21,7 @@ public partial class MainWindow
                     {
                         delay = 1; SetConnected(true, "연결됨");
                         deviceId = Str(Prop(data, "device"), "device_id") ?? deviceId;
+                        ServerFeatures(data);
                         bool returned = UpdateCurrent(Str(data, "current_device"));
                         await HelloReconciliation.ApplyAsync(
                             async () => { if (currentConversation is null || (returned && string.IsNullOrWhiteSpace(Input.Text))) await RefreshConversations(Str(Prop(data, "recent_conversation"), "id"), ct); },
@@ -57,6 +58,7 @@ public partial class MainWindow
                             await RefreshConversations(Str(Prop(info, "recent_conversation"), "id"), ct);
                         }
                     }
+                    else if (type == "quiet") QuietFromServer(data, "until");  // V3-P88 §6.2: set on any device or the Web
                     else if (type == "revoked")
                     {
                         DeleteActiveIfCurrent(local); StopConnection(); PairPanel.Visibility = Visibility.Visible;

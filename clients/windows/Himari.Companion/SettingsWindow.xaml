@@ -1,7 +1,7 @@
 <Window x:Class="Himari.Companion.SettingsWindow" xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" Title="히마리 설정" Width="560" Height="540" MinWidth="460" MinHeight="420" WindowStartupLocation="CenterScreen" Background="#F7F5FA" FontFamily="Malgun Gothic, Segoe UI" FontSize="13" Foreground="#34304A" UseLayoutRounding="True">
   <Grid Margin="22">
     <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
-    <StackPanel Margin="0,0,0,18"><TextBlock Text="히마리 설정" FontSize="23" FontWeight="SemiBold"/><TextBlock Text="연결과 캐릭터, 대화 화면을 내게 맞게 조정하세요." Style="{StaticResource Hint}" Margin="0,5,0,0"/></StackPanel>
+    <StackPanel Margin="0,0,0,18"><TextBlock Text="히마리 설정" FontSize="23" FontWeight="SemiBold"/><TextBlock Text="연결과 캐릭터, 대화 화면, 활동 신호를 내게 맞게 조정하세요." Style="{StaticResource Hint}" Margin="0,5,0,0"/></StackPanel>
     <TabControl Grid.Row="1" Background="Transparent" BorderThickness="0">
       <TabItem Header="연결"><ScrollViewer VerticalScrollBarVisibility="Auto"><StackPanel Margin="0,14,8,0">
         <Border Style="{StaticResource SectionCard}"><StackPanel>
@@ -67,6 +67,28 @@
           <TextBlock Text="Enter로 보내기 · Shift+Enter로 줄바꿈" Style="{StaticResource Hint}"/>
           <CheckBox x:Name="ScreenSharing" Content="메시지를 보낼 때 화면 함께 첨부" IsChecked="True" Margin="0,12,0,0"/>
           <TextBlock Text="기본으로 켜져 있습니다. 보내는 순간의 모니터 화면이 서버와 모델에 전달됩니다. 여기서 끄면 글만 보냅니다." Style="{StaticResource Hint}" Margin="0,4,0,0"/>
+        </StackPanel></Border>
+      </StackPanel></ScrollViewer></TabItem>
+      <TabItem Header="활동 신호"><ScrollViewer VerticalScrollBarVisibility="Auto"><StackPanel Margin="0,14,8,0">
+        <Border Style="{StaticResource SectionCard}"><StackPanel>
+          <TextBlock Text="히마리에게 알릴 것" FontSize="16" FontWeight="SemiBold"/>
+          <TextBlock Text="지금 하는 일을 알면 히마리가 상황에 맞게 대화합니다. 보낸 내용은 대화할 때마다 모델에 함께 전달되고, 그 대화를 지우기 전까지 서버의 실행 기록에 남습니다. Web의 Devices 화면에서도 볼 수 있습니다." Style="{StaticResource Hint}" Margin="0,5,0,12"/>
+          <CheckBox x:Name="SendActivity" Content="지금 하는 일 (프로그램 분류와 이름, 이어 한 시간)" IsChecked="True"/>
+          <CheckBox x:Name="SendTitles" Content="창 제목도 보내기" Margin="0,8,0,0"/>
+          <TextBlock Text="문서 이름, 대화 상대, 보는 페이지가 들어 있을 수 있습니다. 아래 프로그램의 제목은 보내지 않습니다 (한 줄에 하나, 실행 파일 이름)." Style="{StaticResource Hint}" FontSize="12" Margin="0,3,0,4"/>
+          <TextBox x:Name="TitleExclusions" AcceptsReturn="True" TextWrapping="Wrap" Height="70" VerticalScrollBarVisibility="Auto" AutomationProperties.Name="제목을 보내지 않을 프로그램"/>
+          <CheckBox x:Name="SendMedia" Content="재생 중인 음악·영상" Margin="0,12,0,0"/>
+          <TextBlock Text="제목·아티스트·앱을 보냅니다. 유튜브 영상 제목처럼 다른 사람이 쓴 글도 모델에 전달됩니다." Style="{StaticResource Hint}" FontSize="12" Margin="0,3,0,0"/>
+          <CheckBox x:Name="SendMicCamera" Content="마이크·카메라 사용 중 (통화 추정)" IsChecked="True" Margin="0,12,0,0"/>
+          <TextBlock Text="통화 중일 수 있으면 히마리가 짧게 답합니다. 먼저 말 걸기를 막지는 않습니다 — 막으려면 캐릭터 메뉴의 조용히를 쓰세요. 아래 프로그램이 마이크를 써도 알리지 않습니다." Style="{StaticResource Hint}" FontSize="12" Margin="0,3,0,4"/>
+          <TextBox x:Name="MicExclusions" AcceptsReturn="True" TextWrapping="Wrap" Height="56" VerticalScrollBarVisibility="Auto" AutomationProperties.Name="마이크 사용을 알리지 않을 프로그램"/>
+          <Label Content="분류 바꾸기" Target="{Binding ElementName=CategoryOverrides}" Padding="0,12,0,4"/>
+          <TextBlock Text="한 줄에 하나, 예: obsidian=document. 분류: coding, document, browsing, video, game, chat, design, other" Style="{StaticResource Hint}" FontSize="12" Margin="0,0,0,4"/>
+          <TextBox x:Name="CategoryOverrides" AcceptsReturn="True" TextWrapping="Wrap" Height="56" VerticalScrollBarVisibility="Auto" AutomationProperties.Name="분류 바꾸기"/>
+        </StackPanel></Border>
+        <Border Style="{StaticResource SectionCard}"><StackPanel>
+          <TextBlock Text="마지막으로 보낸 내용" FontSize="16" FontWeight="SemiBold"/>
+          <TextBox x:Name="SignalPreview" IsReadOnly="True" TextWrapping="Wrap" FontFamily="Consolas, Malgun Gothic" FontSize="12" Margin="0,10,0,0" BorderThickness="0" Background="Transparent" Text="아직 보내지 않았습니다." AutomationProperties.Name="마지막으로 보낸 활동 신호"/>
         </StackPanel></Border>
       </StackPanel></ScrollViewer></TabItem>
     </TabControl>

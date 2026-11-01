@@ -308,6 +308,11 @@ class RawRepresentation(Enum):
 # apps working (they draw an unknown mood as "neutral"); removing one does not.
 MOODS = ("neutral", "happy", "excited", "sad", "surprised", "thinking", "embarrassed", "worried")
 
+# What a device says the user is doing (V3-P88 §4.1): the app classifies the
+# program in front into one of these. Adding one keeps old servers working
+# (they take an unknown one as "other").
+ACTIVITIES = ("coding", "document", "browsing", "video", "game", "chat", "design", "other")
+
 # ``[[mood:NAME]]`` (V3-P83 §7.2). A name outside MOODS still comes out of
 # the text, as "neutral"; inside code (a fenced block, or inline code closed
 # on the same line within INLINE_CODE_CHARS) it is text.

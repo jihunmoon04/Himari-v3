@@ -255,7 +255,7 @@ def test_a_compaction_request_does_not_carry_them(tmp_path: Path) -> None:
 
     async def scenario() -> None:
         adapter = ScriptedAdapter([NormalizedFinal((TextBlock("SUMMARY"),))] * 12)
-        app = await opened(tmp_path, adapter, context_tokens=3400,  # sized without the search Tools, with SCREEN_NOTE and V3-P85's MEMORY_NOTE
+        app = await opened(tmp_path, adapter, context_tokens=3500,  # sized without the search Tools, with SCREEN_NOTE, V3-P85's MEMORY_NOTE and V3-P88's ACTIVITY_NOTE
                            conversation_search=False)
         try:
             await app.set_instructions(ALICE, "ZQX rule.", 0)

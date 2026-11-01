@@ -72,7 +72,9 @@ public partial class MainWindow
             settings.BubbleMinimum.Value = p.BubbleMinimum; settings.SecondsPer100.Value = p.SecondsPer100;
             settings.ChatHotkey.SelectedItem = p.ChatHotkey; registeredHotkey = p.ChatHotkey;
             settings.BubblePlacement.SelectedItem = p.BubblePlacement;
+            LoadSignalControls(p.Signals ?? new SignalSettings());
         }
+        else LoadSignalControls(new SignalSettings());
         preferencesLoaded = true;
         saveTimer.Tick += (_, _) => { saveTimer.Stop(); SaveWindowPreferences(); };
         bubbleTimer.Tick += (_, _) => AssistantBubbleExpired();
@@ -244,7 +246,7 @@ public partial class MainWindow
     private void SaveWindowPreferences()
     {
         if (!preferencesLoaded || !double.IsFinite(Left) || !double.IsFinite(Top)) return;
-        try { new WindowPreferences(Left, Top, SizeSlider.Value, settings.MoveEnabled.IsChecked == true, settings.ScreenSharing.IsChecked == true, settings.FacingLeft.IsChecked == true, settings.BubbleMinimum.Value, settings.SecondsPer100.Value, registeredHotkey, settings.BubblePlacement.SelectedItem as string ?? "상하 자동", 1).Save(); }
+        try { new WindowPreferences(Left, Top, SizeSlider.Value, settings.MoveEnabled.IsChecked == true, settings.ScreenSharing.IsChecked == true, settings.FacingLeft.IsChecked == true, settings.BubbleMinimum.Value, settings.SecondsPer100.Value, registeredHotkey, settings.BubblePlacement.SelectedItem as string ?? "상하 자동", 1, ReadSignalControls()).Save(); }
         catch (Exception ex) when (ex is System.IO.IOException or UnauthorizedAccessException) { System.Diagnostics.Trace.TraceWarning("HIMARI: could not save window preferences: {0}", ex.Message); }
     }
     private void CleanupWindowControls()

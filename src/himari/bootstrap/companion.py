@@ -18,8 +18,8 @@ from zoneinfo import ZoneInfo
 from himari.common import ConversationId, PrincipalId, TrustedScope
 from himari.control.api import JobStatus, TurnPresence
 from himari.data.api import MessageOrigin, OriginKind
-from himari.presence.api import Devices, EventHub, Presence
-from himari.prompt.api import DevicePresence, PresenceView
+from himari.presence.api import DeviceState, Devices, EventHub, Presence
+from himari.prompt.api import BeforePresence, DevicePresence, MediaPresence, NowDoing, PresenceView
 
 log = logging.getLogger(__name__)
 
@@ -135,10 +135,32 @@ class CompanionPresence:
             state = states.get(device.device_id)
             if state is not None and state.connected:
                 idle = None if state.idle_seconds is None else int(state.idle_seconds // 60)
-                shown.append(DevicePresence(device.name, True, idle_minutes=idle))
+                shown.append(DevicePresence(device.name, True, idle_minutes=idle, locked=state.locked))
             else:
                 seen = device.last_seen_at
                 shown.append(DevicePresence(device.name, False, last_seen=None if seen is None
                                             else seen.astimezone(self._zone).date().isoformat()))
-        view = PresenceView(sent, None if current is None else names.get(current), tuple(shown))
+        current_state = None if current is None else states.get(current)
+        quiet = await self._devices.quiet(principal)
+        view = PresenceView(sent, None if current is None else names.get(current), tuple(shown),
+                            now_doing=None if current_state is None else now_doing(current_state),
+                            quiet_until=None if quiet is None
+                            else quiet.astimezone(self._zone).isoformat(timespec="minutes"))
         return TurnPresence(view, time_zone)
+
+
+def now_doing(state: DeviceState) -> NowDoing | None:
+    """V3-P88 §7: the current device's signals; None when nothing is known."""
+    activity, media, before = state.activity, state.media, state.before
+    doing = NowDoing(
+        activity=None if activity is None else activity.category,
+        app=None if activity is None else activity.app,
+        for_minutes=None if activity is None else int(activity.for_seconds // 60),
+        fullscreen=None if activity is None else activity.fullscreen,
+        title=None if activity is None else activity.title,
+        media=None if media is None else MediaPresence(media.title, media.artist, media.app),
+        mic_or_camera=state.mic_or_camera is True,
+        before=None if before is None else BeforePresence(before.category, before.app,
+                                                          int(before.lasted_seconds // 60),
+                                                          int(before.ended_seconds_ago // 60)))
+    return None if doing == NowDoing() else doing
