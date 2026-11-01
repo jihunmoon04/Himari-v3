@@ -202,6 +202,9 @@ class PromptBasis(DeepFrozen):
     # Opaque digest of what the input was composed under besides history and
     # state (model, instructions, Tool catalog); set by Prompt (V3-P48).
     context_key: str | None = None
+    # Opaque digest of the runtime state's parts no revision tracks (memory,
+    # recent episodes, presence); set by Prompt (V3-P89 post-merge review P1).
+    state_key: str | None = None
 
 
 @dataclass(frozen=True)
@@ -899,10 +902,12 @@ MAX_INSTRUCTIONS_CHARS = 10_000  # code points, after newlines are normalized (Q
 
 
 class InstructionScope(Enum):
-    """Whose conversations a text applies to. Only USER now; a project or lab
-    scope is added by its packet (V3-P69 §3.1)."""
+    """Whose conversations a text applies to (V3-P69 §3.1); a project or lab
+    scope is added by its packet."""
 
     USER = "user"  # every Conversation of the principal
+    # V3-P89 §4: who HIMARI is as the user's companion; told only with the companion on
+    COMPANION_PERSONA = "companion_persona"
 
 
 @dataclass(frozen=True)

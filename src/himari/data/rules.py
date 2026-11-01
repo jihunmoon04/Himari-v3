@@ -111,8 +111,8 @@ def check_model_setting(setting: object) -> None:
 
 
 def check_instruction_scope(scope: object) -> None:
-    if scope is not InstructionScope.USER:
-        raise DataError(DataErrorCode.INVALID_ARGUMENT, "only the user's own instructions are offered")
+    if not isinstance(scope, InstructionScope):
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, "only the user's own instructions and persona are offered")
 
 
 def check_instructions(scope: object, text: object) -> str:

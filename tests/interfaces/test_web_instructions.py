@@ -132,3 +132,22 @@ def test_sign_in_origin_and_the_cli_bearer(server: Server) -> None:
     saved = server.client.put("/api/instructions", json={"text": "from cli", "revision": 0},
                               headers={"authorization": f"Bearer {bearer}"})
     assert saved.status_code == 200 and saved.json()["revision"] == 1
+
+
+def test_the_companion_persona_is_its_own_text(server: Server) -> None:
+    """V3-P89 §4: a second text with the same rules, saying whether companion mode uses it."""
+    server.sign_in()
+    persona = server.client.get("/api/instructions/persona").json()
+    assert persona == {"text": "", "revision": 0, "updated_at": None, "max_chars": MAX_INSTRUCTIONS_CHARS,
+                       "companion": True}
+    saved = server.client.put("/api/instructions/persona", json={"text": "Call me 선생님.", "revision": 0},
+                              headers={"origin": ORIGIN})
+    assert saved.status_code == 200 and saved.json()["revision"] == 1
+    assert server.client.get("/api/instructions").json()["text"] == ""  # the instructions are untouched
+    stale = server.client.put("/api/instructions/persona", json={"text": "x", "revision": 0},
+                              headers={"origin": ORIGIN})
+    assert stale.status_code == 409 and stale.json()["error"]["code"] == "revision_conflict"
+    too_long = server.client.put("/api/instructions/persona",
+                                 json={"text": "가" * (MAX_INSTRUCTIONS_CHARS + 1), "revision": 1},
+                                 headers={"origin": ORIGIN})
+    assert too_long.status_code == 422 and too_long.json()["error"]["code"] == "too_large"

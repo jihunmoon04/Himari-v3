@@ -103,10 +103,11 @@ from himari.prompt.api import (
     image_tokens,
     tool_images,
     json_data,
-    notes_section,
     state_block,
     turn_state_data,
+    state_data,
 )
+from himari.prompt.system import fit_notes, system_text
 
 BYTES_PER_TOKEN = 3
 MESSAGE_OVERHEAD_TOKENS = 4  # role and framing of one native message
@@ -217,10 +218,7 @@ def turn_state_tokens(model_input: ModelInput) -> int:
 
 def request_tokens(model_input: ModelInput) -> int:
     """Pessimistic estimate of a whole request from its UTF-8 size."""
-    total = sum(tokens_of_text(text) for text in model_input.stable_prefix)
-    section = notes_section(model_input.source_notes)
-    if section is not None:
-        total += tokens_of_text(section)
+    total = sum(tokens_of_text(text) for text in model_input.stable_prefix)  # the notes are in it (V3-P89)
     for definition in model_input.tool_catalog:
         total += tokens_of_text(definition.tool_id + definition.description) + _json_tokens(definition.input_schema)
     plan = image_plan(model_input)
@@ -235,16 +233,52 @@ def context_key(inputs: PromptInputs) -> str:
         "provider": options.provider_key,
         "model": options.model_id,
         "reasoning_effort": options.reasoning_effort,
-        "instructions": list(inputs.instructions),
-        "user_instructions": inputs.user_instructions,  # V3-P69: a change re-estimates
+        # V3-P89 §7: the composed system text (instructions, sections, "system" notes, persona and
+        # the user's instructions), and the "data" notes as the runtime state carries them, cut
+        # the same way (review C1, N1): whatever changes either re-estimates.
+        "system": list(system_text(inputs)),
+        "data_notes": [[n.source, n.text] for n in fit_notes(inputs.source_notes) if n.placement == "data"],
         "time_zone": inputs.time_zone,  # V3-P83 §6.4: the time lines change with it
-        "screen_points": options.screen_points,  # V3-P84 §5: SCREEN_MOVE_NOTE and screens' sizes
+        "screen_points": options.screen_points,  # V3-P84 §5: screens' sizes (the system text has the moves)
         "memories": None if inputs.memories is None else [  # V3-P71: and so does a note
             [m.memory_id, m.category.value, m.text] for m in inputs.memories],
-        "source_notes": [[n.source, n.placement, n.text] for n in inputs.source_notes],
         "tools": [[d.tool_id, d.description, thaw(d.input_schema)] for d in inputs.tool_catalog],
     }
     return hashlib.sha256(json.dumps(data, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+
+
+# Counters that move with the clock alone: left out of the state key, so a minute
+# passing does not count as a change (their few digits barely change the size).
+_CLOCK_COUNTERS = frozenset({"for_minutes", "idle_minutes", "lasted_minutes", "ended_minutes_ago"})
+
+
+def _without_clock(value: object) -> object:
+    if isinstance(value, dict):
+        return {k: _without_clock(v) for k, v in value.items() if k not in _CLOCK_COUNTERS}
+    if isinstance(value, list):
+        return [_without_clock(v) for v in value]
+    return value
+
+
+def state_key(inputs: PromptInputs) -> str:
+    """V3-P89 post-merge review P1, PR #152 re-review P1: digest of the runtime
+    state **as it is rendered** — Environment observations (connection, paths,
+    workspaces), memory (notes with their dates, loops, recent episodes),
+    presence, "data" notes, artifacts — since much of it changes apart from the
+    state's revision. When it differs from the measured Run's, the estimate
+    counts the whole state again (as for a new state revision). Left out: ``now``,
+    the clock's counters and the turn's state (counted every Run anyway)."""
+    data = dict(state_data(current_state(inputs), fit_notes(inputs.source_notes)))
+    data.pop("now", None)
+    return hashlib.sha256(json.dumps(thaw(_without_clock(data)), ensure_ascii=False, sort_keys=True,
+                                     default=str).encode()).hexdigest()
+
+
+def current_state(inputs: PromptInputs) -> CurrentStateProjection:
+    """The state the Composer renders for these inputs (one place for both)."""
+    return CurrentStateProjection(basis=inputs.state_basis, observations=inputs.observations,
+                                  memories=inputs.memories, now=inputs.now, presence=inputs.presence,
+                                  episodes=inputs.episodes, episode_count=inputs.episode_count)
 
 
 def read_summary(snapshot: PromptSnapshot | None) -> str | None:
@@ -414,8 +448,8 @@ class Compactor:
             for part in model_input.conversation
             if not isinstance(part, CompressedHistory) and part_anchor(part, by_event, by_run) > mark.event_sequence
         )
-        if mark.state_revision != basis.state_revision:
-            added += state_tokens(model_input)
+        if mark.state_revision != basis.state_revision or mark.state_key != basis.state_key:
+            added += state_tokens(model_input)  # the whole state again: memory and presence change apart (V3-P89)
         else:
             added += turn_state_tokens(model_input)  # changes every Run, apart from the state's revision (V3-P62 B4)
         return ContextEstimate(mark.input_tokens + added, measured=True)

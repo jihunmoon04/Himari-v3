@@ -1,4 +1,4 @@
-"""Live check of ACTIVITY_NOTE (V3-P88 §7, §11): opt-in, ``HIMARI_LIVE=1`` plus
+"""Live check of the companion section's activity rules (V3-P88 §7, §11; V3-P89 §3.5): opt-in, ``HIMARI_LIVE=1`` plus
 the key. For each model in ``HIMARI_LIVE_ACTIVITY_MODELS``, four scenes, each
 asked twice, with ``presence.now_doing`` in the runtime state as HIMARI sends
 it from a device:
@@ -28,9 +28,6 @@ from himari.bootstrap import read_env_file
 from himari.common import EventId, TextBlock, split_marks
 from himari.data.api import PersistedStateBasis, PromptBasis
 from himari.prompt.api import (
-    ACTIVITY_NOTE,
-    COMPANION_NOTE,
-    TIME_NOTE,
     CurrentStateProjection,
     DevicePresence,
     MediaPresence,
@@ -38,8 +35,10 @@ from himari.prompt.api import (
     NowDoing,
     PresenceView,
     RequestOptions,
+    SystemSpec,
     UserTurn,
 )
+from himari.prompt.system import BASE_INSTRUCTIONS, companion_section, messages_section, principle_section
 from himari.provider.api import NativeReceived, NormalizedFinal
 from himari.provider.openrouter import OpenRouterAdapter
 
@@ -82,8 +81,8 @@ def answer(model: str, doing: NowDoing, said: str) -> str:
     presence = PresenceView(("device", "데스크톱"), "데스크톱", (DevicePresence("데스크톱", True, idle_minutes=0),),
                             now_doing=doing)
     state = CurrentStateProjection(PersistedStateBasis(0, 0, (), (), ()), now=NOW, presence=presence)
-    model_input = ModelInput(stable_prefix=("You are HIMARI, the user's companion.", TIME_NOTE, COMPANION_NOTE,
-                                            ACTIVITY_NOTE),
+    model_input = ModelInput(stable_prefix=(*BASE_INSTRUCTIONS, principle_section(False),
+                                            messages_section(SystemSpec()), companion_section(False)),  # V3-P89
                              tool_catalog=(), conversation=(UserTurn(EventId("e"), (TextBlock(said),)),),
                              current_state=state, request_options=RequestOptions(model), trigger_refs=(),
                              prompt_basis=PromptBasis(0, 0), attachments={})

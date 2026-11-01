@@ -260,7 +260,7 @@ class MemorySave:
 class MemoryForget:
     definition = _definition(
         MEMORY_FORGET,
-        "Delete a saved note about the user: when they ask you to forget it, or it turned out to be wrong.",
+        "Delete a saved note about the user: when they ask you to forget it, it turned out to be wrong, or it is a loop that is done.",
         {"id": _ID_ARG}, ["id"], EffectProfile.SCOPED_WRITE)
 
     def __init__(self, store: MemoryStore) -> None:

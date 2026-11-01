@@ -73,7 +73,6 @@ from himari.prompt.api import (
     image_plan,
     tool_images,
     json_data,
-    notes_section,
     state_block,
 )
 from himari.provider.api import (
@@ -405,10 +404,7 @@ class OpenRouterAdapter:
     def _messages(self, model_input: ModelInput, *, breakpoint: bool) -> list[dict[str, Any]]:
         model_id = model_input.request_options.model_id
         messages: list[dict[str, Any]] = []
-        system = [*model_input.stable_prefix]
-        notes = notes_section(model_input.source_notes)
-        if notes is not None:
-            system.append(notes)
+        system = [*model_input.stable_prefix]  # in its final order, notes included (V3-P89 review B1)
         if system:
             messages.append({"role": "system", "content": "\n\n".join(system)})
         attachments = model_input.attachments

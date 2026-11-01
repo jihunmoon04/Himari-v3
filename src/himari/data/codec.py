@@ -238,6 +238,7 @@ def prompt_basis(basis: PromptBasis) -> str:
         "snapshot_revision": basis.snapshot_revision,
         "artifact_revisions": dict(basis.artifact_revisions),
         "context_key": basis.context_key,
+        "state_key": basis.state_key,
     })
 
 
@@ -250,6 +251,7 @@ def prompt_basis_from(text: str) -> PromptBasis:
         None if snapshot is None else int(snapshot),
         {ArtifactId(k): int(v) for k, v in _obj(data["artifact_revisions"]).items()},
         _optional_str(data.get("context_key")),  # absent in Runs stored before V3-P48
+        _optional_str(data.get("state_key")),  # absent in Runs stored before V3-P89
     )
 
 
