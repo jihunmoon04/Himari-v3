@@ -569,3 +569,10 @@ P1·P2 해결 확인. 문서 정합성 둘과 구현 주의 하나:
 - **실제 모델 확인**(`tests/live/test_proactive_live.py`, 결과 `docs/live-results/proactive-2026-11-01.jsonl`): 9장면(지난 고리, 돌아옴, 알림, 늦은 알림, 오래 집중, 게임 끝남, 전체 화면 영상, 지운 고리, wake 뒤 사용자 메시지) × 2번 × 5모델. 판정: 두 문장 이하(전체 화면은 한 문장), 질문 하나 이하, 한국어, wake·서버·번호를 말하지 않음, 표정 표시 문법.
   - "Speaking first" 줄을 두 번 다듬음: 70/90 → 77/90 → **80/90**(gpt-6-luna 18, deepseek-v4.1-flash 17, claude-haiku-5.5 16, mimo-v2.6-pro 16, minimax-m3 13). 바뀐 말: "about those reasons only: at most two short sentences in all, and only one of them a question; when … fullscreen … one short sentence and no question".
   - 남은 실패는 대부분 가벼움(짧은 질문 둘 "다녀오셨어요? 어떠셨어요?", 전체 화면에서 두 문장). 모델 밖의 실패: deepseek가 도구 없이 도구 호출 문법을 지어냄(2회), mimo 빈 응답(1회). **minimax-m3만 80% 아래.** 통과한 모델에만 먼저 말 걸기를 허락할지는 소유자가 정한다(§13).
+
+### 19.7 검수 (PR #157, `a661e60`): NOT_READY → 고침
+
+- **P1-1 정리 작업이 기다리는 알림의 고리를 지움:** 날짜 없는 고리는 90일, 날짜 지난 고리는 14일이면 지워졌다(알림은 1년 뒤까지 받음). 이제 알림이 `scheduled`·`claimed`인 고리는 그 정리에서 빠진다(`PENDING_REMINDERS`); 전한 뒤(`delivered`)나 놓친 뒤(`missed`)는 원래 규칙. 두 백엔드.
+- **P1-2 자동 기억 수정의 Undo가 알림을 잃음:** Undo가 읽는 기록(`rules.memory_json`)에 `remind_at`·`remind_instant`를 넣고 `memory_from_record`가 되살린다(알림 전의 기록은 알림 없이 그대로 읽힘). 같은 알림으로 되돌리면 전달 상태도 지켜진다.
+- **P2-1 retire 뒤 복구의 상태가 백엔드마다 다름:** 메모리 백엔드가 retire 기록을 먼저 지우고 쓰는 바람에 알림을 새로 쓴 것으로 보고 `scheduled`로 되돌렸다. 이제 retire 기록이 있는 동안 쓰고 지운다 — SQLite처럼 `delivered`가 남는다.
+- 시험(두 백엔드): 1년 안 알림의 고리가 정리 시각을 지나도 남고, 알림을 전한 뒤에 정리됨; 자동 수정 → Undo → 알림·상태 유지(옛 기록도 읽힘); 전달 → retire → 복구 → `delivered`. 고치기 전 코드에서는 P1 둘이 두 백엔드에서, P2-1이 메모리 백엔드에서 실패하는 것을 확인함.

@@ -480,6 +480,7 @@ def memory_json(note: Memory) -> str:
                        "source_pass": note.source_pass, "source_item": note.source_item,
                        "due_at": note.due_at, "due_instant": moment(note.due_instant),
                        "valid_until": note.valid_until, "valid_instant": moment(note.valid_instant),
+                       "remind_at": note.remind_at, "remind_instant": moment(note.remind_instant),
                        "user_approved_at": moment(note.user_approved_at), "revision": note.revision},
                       ensure_ascii=False, sort_keys=True)
 

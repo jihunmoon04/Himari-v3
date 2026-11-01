@@ -140,6 +140,7 @@ from himari.data.api import (
     WakeReason,
     WakeRecord,
     WakeStatus,
+    PENDING_REMINDERS,
 )
 
 _TERMINAL_COMPLETIONS = frozenset(
@@ -1685,9 +1686,9 @@ class InMemoryData:
         if self._memory_count(principal) >= MAX_MEMORIES:
             raise DataError(DataErrorCode.LIMIT_EXCEEDED, f"{MAX_MEMORIES} notes are kept at most")
         back = replace(note, revision=note.revision + 1, updated_at=now)
+        self._put_memory(principal, back)  # while still retired: its reminder keeps how it was delivered (as SQLite)
         del self._store.retired_memories[(principal, memory_id)]
-        self._put_memory(principal, back)
-        return back
+        return self._memory(principal, memory_id)
 
     async def memory_revision(self, principal: PrincipalId, memory_id: int) -> tuple[int, bool] | None:
         note = self._store.memories.get((principal, memory_id))
@@ -2165,6 +2166,7 @@ class InMemoryData:
     async def clean_memories(self, now: datetime) -> MemoryCleanup:
         notes = self._store.memories
         loops = [k for k, m in notes.items() if m.category is MemoryCategory.LOOP
+                 and self._store.reminders.get(k, ("",))[0] not in PENDING_REMINDERS  # V3-P87: kept till it is told
                  and ((m.due_instant is not None and m.due_instant < now - STALE_DUE)
                       or (m.due_instant is None and m.updated_at < now - STALE_UNDATED))]
         for key in loops:

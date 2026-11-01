@@ -1417,7 +1417,10 @@ def memory_from_record(previous: str) -> Memory | None:
                       int(raw["revision"]), epoch, epoch, due_at=raw.get("due_at"), due_instant=moment("due_instant"),
                       valid_until=raw.get("valid_until"), valid_instant=moment("valid_instant"),
                       source_pass=raw.get("source_pass"), source_item=raw.get("source_item"),
-                      user_approved_at=moment("user_approved_at"))
+                      user_approved_at=moment("user_approved_at"),
+                      # V3-P87 §5.3 (PR #157 review P1-2); records before it have none
+                      remind_at=raw.get("remind_at") if raw.get("remind_instant") else None,
+                      remind_instant=moment("remind_instant") if raw.get("remind_at") else None)
     except (ValueError, KeyError, TypeError, AttributeError):
         return None
 
@@ -1463,6 +1466,7 @@ class MemoryCleanup(DeepFrozen):
 
 
 MAX_WAKE_REASONS = 4
+PENDING_REMINDERS = frozenset({"scheduled", "claimed"})  # §5.3: a loop with one is not cleaned up as stale
 REMIND_ON_TIME = timedelta(hours=24)  # §5.3: a reminder is told on time within this of its moment
 REMIND_LATE = timedelta(days=7)  # §5.3 (Q9): after that, at a later return, until this; then missed  # V3-P87 §6.4
 REMINDER_ATTEMPTS = 3  # V3-P87 §5.3: a reminder whose wakes ended unanswered this often is missed

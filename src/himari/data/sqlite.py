@@ -3553,8 +3553,9 @@ class SqliteData:
     async def clean_memories(self, now: datetime) -> MemoryCleanup:
         with self._tx() as tx:
             loops = tx.execute(
-                "DELETE FROM memories WHERE category='loop' AND retired_at IS NULL AND ((due_instant IS NOT NULL"
-                " AND due_instant < ?) OR (due_instant IS NULL AND updated_at < ?))",
+                "DELETE FROM memories WHERE category='loop' AND retired_at IS NULL"
+                " AND (remind_state IS NULL OR remind_state NOT IN ('scheduled', 'claimed'))"  # V3-P87: kept till told
+                " AND ((due_instant IS NOT NULL AND due_instant < ?) OR (due_instant IS NULL AND updated_at < ?))",
                 _timestamp(now - STALE_DUE), _timestamp(now - STALE_UNDATED)).rowcount
             expired = tx.execute("DELETE FROM memories WHERE valid_instant IS NOT NULL AND valid_instant < ?",
                                  _timestamp(now - EXPIRED_KEEP)).rowcount
