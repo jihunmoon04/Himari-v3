@@ -182,8 +182,11 @@ def test_an_unknown_activity_is_not_an_end(hub: PresenceHub) -> None:
 def test_devices_notices_go_to_the_web_only_with_no_content(hub: PresenceHub, clock: Clock) -> None:
     web, device = hub.subscribe(ME), hub.subscribe(ME, "d1")
     hub.signal(ME, "d1", 0, None, full())
+    clock.now += NOTICE_SECONDS
+    hub.tick()  # the signal and the device becoming current: one notice now, the latest at the window's end
     notices = [e for e in drained(web) if e.name == "devices"]
-    assert notices == [StreamEvent("devices", {"epoch": hub.signals_epoch, "revision": hub.signals_revision(ME)})]
+    assert notices[-1] == StreamEvent("devices", {"epoch": hub.signals_epoch, "revision": hub.signals_revision(ME)})
+    assert all(set(e.data) == {"epoch", "revision"} for e in notices)  # type: ignore[arg-type]
     assert not [e for e in drained(device) if e.name == "devices"]
 
 
@@ -224,3 +227,56 @@ def test_a_revoked_device_takes_its_return_with_it(hub: PresenceHub) -> None:
     hub.signal(ME, "d1", 0, None, full())
     hub.revoked(ME, "d1")
     assert hub.returned(ME) is None and "d1" not in hub.states(ME)
+
+
+def test_connected_and_current_changes_reach_the_web_without_signals(hub: PresenceHub, clock: Clock) -> None:
+    """PR #149 review B1: a device with no signals that goes away still changes what the Devices screen shows."""
+    web = hub.subscribe(ME)
+    hub.subscribe(ME, "d1")
+    hub.signal(ME, "d1", 0, None)  # an old app: no signals at all
+    before = hub.signals_revision(ME)
+    clock.now += 121
+    hub.tick()
+    assert not hub.states(ME)["d1"].connected and hub.signals_revision(ME) > before
+    clock.now += NOTICE_SECONDS
+    hub.tick()
+    assert [e for e in drained(web) if e.name == "devices"][-1].data == {
+        "epoch": hub.signals_epoch, "revision": hub.signals_revision(ME)}
+
+
+def test_an_unlock_signalled_before_the_stream_opens_is_still_the_return(hub: PresenceHub, clock: Clock) -> None:
+    """PR #149 review B2: the app's presence and event loops start apart; the mark waits for the stream."""
+    hub.subscribe(ME, "b")
+    hub.signal(ME, "b", 0, None, full())
+    hub.signal(ME, "a", 0, None, full(after=After.RESUME))  # no stream yet: not connected
+    assert hub.current(ME) == "b" and hub.states(ME)["a"].activity == CODING  # kept, not wiped
+    clock.now += 5
+    hub.signal(ME, "b", 0, None, full())
+    hub.subscribe(ME, "a")  # the stream opens: a takes over past the switch delay
+    assert hub.current(ME) == "a"
+    assert hub.returned(ME) is not None and (hub.returned(ME).device_id, hub.returned(ME).via) == ("a", "resume")  # type: ignore[union-attr]
+
+
+def test_a_mark_that_never_became_current_expires(hub: PresenceHub, clock: Clock) -> None:
+    hub.subscribe(ME, "b")
+    hub.signal(ME, "b", 0, None, full())
+    hub.signal(ME, "a", 0, None, full(after=After.UNLOCK))
+    clock.now += 125
+    hub.signal(ME, "b", 0, None, full())
+    hub.signal(ME, "a", 0, None, full())
+    hub.subscribe(ME, "a")
+    assert hub.current(ME) == "b"  # the old mark is not taken any more
+
+
+def test_gone_clears_the_activity_before_too(hub: PresenceHub, clock: Clock) -> None:
+    """PR #149 review C1."""
+    hub.subscribe(ME, "d1")
+    hub.signal(ME, "d1", 0, None, full(activity=GAME))
+    clock.now += 60
+    hub.signal(ME, "d1", 0, None, full(activity=None))
+    assert hub.states(ME)["d1"].before is not None
+    clock.now += 121
+    hub.tick()
+    hub.subscribe(ME, "d1")
+    hub.signal(ME, "d1", 0, None, full(activity=CODING))
+    assert hub.states(ME)["d1"].before is None

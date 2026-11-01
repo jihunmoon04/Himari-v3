@@ -8,14 +8,18 @@ of the principal gets ``current``.
 
 Activity signals (V3-P88): each signal is the device's whole snapshot
 (§2.1) and replaces what was kept. A locked device is never current; a
-signal marked ``after`` (an unlock or a wake) makes its device current at
-once, past the switch delay (§3), and is kept as the principal's return,
-like a device that becomes current by connecting again (the fallback). An
-activity that ends — another category, or none in front — is kept as the
-one before for BEFORE_SECONDS (§4.4); unknown, locked or gone is not an
-end. What the Web shows changes the principal's revision, told to the Web
-streams only as ``devices`` with no content, at most every NOTICE_SECONDS
-but never losing the last change (§8.1).
+signal marked ``after`` (an unlock or a wake) makes its device current
+past the switch delay (§3) as soon as it can be — at once, or when its
+stream opens if the signal came first (PR #149 review B2) — and that is
+kept as the principal's return, like a device that becomes current after
+it was gone (the fallback). An activity that ends — another category, or
+none in front — is kept as the one before for BEFORE_SECONDS (§4.4);
+unknown or locked is not an end. A device gone (its last signal too old,
+or its stream closed past the reopen gap) loses all its signals, the one
+before too (review C1). Whatever the Web's Devices screen shows —
+signals, connected, current — changes the principal's revision (review
+B1), told to the Web streams only as ``devices`` with no content, at most
+every NOTICE_SECONDS but never losing the last change (§8.1).
 """
 
 from __future__ import annotations
@@ -120,7 +124,10 @@ class _Device:
     media: MediaSignal | None = None
     mic_or_camera: bool | None = None
     before: _Ended | None = None  # §4.4
-    gone: bool = True  # not connected since its signals were last cleared (or never heard of)
+    gone: bool = True  # its signals were cleared since it was last heard of (or it never was)
+    back: bool = True  # gone since it was last current: becoming current is a return ("reconnect")
+    after: tuple[str, float] | None = None  # an unlock or wake not yet taken (review B2): which, when
+    seen: tuple[bool, bool] = (False, False)  # connected and current as the Web was last told
 
 
 def _shown(device: _Device) -> tuple[object, ...]:
@@ -199,26 +206,20 @@ class PresenceHub:
         now = self._clock()
         snapshot = signals or Signals()
         device = self._device(principal, device_id)
-        was_connected = self._connected(principal, device_id, now)
-        was_current = self._current.get(principal)
         shown = _shown(device)
         device.signal_at = now
         device.input_at = now - min(max(idle_seconds, 0.0), MAX_IDLE_SECONDS)
         if time_zone is not None and (self._time_zones is None or self._time_zones(time_zone)):
             device.time_zone = time_zone  # an unknown name is ignored (§5)
         self._take(device, snapshot, now)
-        forced = snapshot.after is not None and not device.locked
-        reconnected = device.gone or not was_connected
         device.gone = False
-        self._decide(principal, forced=device_id if forced else None)
-        if self._current.get(principal) == device_id:
-            if forced:
-                assert snapshot.after is not None
-                self._returned[principal] = Returned(device_id, self._wall(), snapshot.after.value)
-            elif reconnected and was_current != device_id:
-                self._returned[principal] = Returned(device_id, self._wall(), "reconnect")
+        if snapshot.after is not None and not device.locked:
+            device.after = (snapshot.after.value, now)  # taken when the device can be current (review B2)
+        elif device.locked:
+            device.after = None
         if _shown(device) != shown:
             self._changed(principal)
+        self._decide(principal)
 
     def _take(self, device: _Device, snapshot: Signals, now: float) -> None:
         """§2.1: the snapshot replaces what was kept; §4.4: an ended activity is kept as the one before."""
@@ -308,41 +309,73 @@ class PresenceHub:
         return self._open(principal, device_id) or (
             device.closed_at is not None and now - device.closed_at <= REOPEN_SECONDS)
 
-    def _decide(self, principal: PrincipalId, *, forced: str | None = None) -> None:
+    def _gone(self, principal: PrincipalId, device: _Device, now: float) -> bool:
+        """V3-P88 §2.1: no fresh signal, or its stream closed past the reopen gap. A
+        device whose signal came before its stream first opened is not gone (review B2)."""
+        if device.signal_at is None or now - device.signal_at > SIGNAL_SECONDS:
+            return True
+        return device.closed_at is not None and now - device.closed_at > REOPEN_SECONDS
+
+    def _decide(self, principal: PrincipalId) -> None:
         """§6.1: among connected, unlocked devices with input within
         CANDIDATE_SECONDS, the latest input — but the current one stays until
-        it had none for SWITCH_SECONDS, unless ``forced`` (V3-P88 §3: an
-        unlock or a wake) is a candidate. None of them: away. A change is
-        published. A device no longer connected loses its signals (§2.1)."""
+        it had none for SWITCH_SECONDS, unless a candidate has an unlock or a
+        wake not yet taken (V3-P88 §3): it takes over, and that is the return.
+        None of them: away. A change is published. A device gone loses its
+        signals (§2.1); one that was gone and becomes current has come back."""
         now = self._clock()
         devices = self._devices.get(principal, {})
-        for device_id, device in devices.items():
-            if not device.gone and not self._connected(principal, device_id, now):
+        for device in devices.values():
+            if not device.gone and self._gone(principal, device, now):
                 self._forget_signals(principal, device)
+            if device.after is not None and now - device.after[1] > SIGNAL_SECONDS:
+                device.after = None  # never became current while it was fresh
+            if device.before is not None and now - device.before.ended_at > BEFORE_SECONDS:
+                device.before = None
+        connected = {device_id for device_id in devices if self._connected(principal, device_id, now)}
         inputs = {device_id: d.input_at for device_id, d in devices.items()
                   if d.input_at is not None and now - d.input_at <= CANDIDATE_SECONDS and not d.locked
-                  and self._connected(principal, device_id, now)}
+                  and device_id in connected}
         was = self._current.get(principal)
         chosen = max(inputs, key=lambda device_id: (inputs[device_id], device_id), default=None)
-        if forced is not None and forced in inputs:
-            chosen = forced
+        marked = [device_id for device_id in inputs if devices[device_id].after is not None]
+        if marked:
+            chosen = max(marked, key=lambda device_id: devices[device_id].after[1])  # type: ignore[index]
         elif was in inputs and chosen != was and now - inputs[was] <= SWITCH_SECONDS:
             chosen = was  # no flapping between two computers used by turns
+        if chosen is not None:
+            device = devices[chosen]
+            if device.after is not None:
+                self._returned[principal] = Returned(chosen, self._wall(), device.after[0])
+                device.after = None
+            elif device.back and chosen != was:
+                self._returned[principal] = Returned(chosen, self._wall(), "reconnect")
+            device.back = False
+        for device_id in connected - {chosen}:
+            devices[device_id].back = False  # heard again but not where the user is: not a return later
         if chosen is None:
             self._current.pop(principal, None)
         else:
             self._current[principal] = chosen
         if chosen != was:
             self.publish(principal, "current", {"device_id": chosen})
+        seen_changed = False
+        for device_id, device in devices.items():
+            seen = (device_id in connected, device_id == chosen)
+            if seen != device.seen:
+                device.seen, seen_changed = seen, True
+        if seen_changed:
+            self._changed(principal)  # review B1: connected and current are on the Devices screen too
         if not devices:
             self._devices.pop(principal, None)
 
     def _forget_signals(self, principal: PrincipalId, device: _Device) -> None:
-        """Gone (§2.1): its signals are cleared; an activity that was going on did not end (§4.4)."""
+        """Gone (§2.1): every signal is cleared, the activity before too (review C1); not an end (§4.4)."""
         shown = _shown(device)
-        device.gone = True
+        device.gone = device.back = True
         device.locked = False
         device.activity = device.activity_at = device.media = device.mic_or_camera = None
+        device.before = device.after = None
         if _shown(device) != shown:
             self._changed(principal)
 
