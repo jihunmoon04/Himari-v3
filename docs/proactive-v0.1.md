@@ -112,6 +112,7 @@ class WakeReason(DeepFrozen):
     via: str | None = None        # RETURNED: "unlock" | "resume" | "reconnect"
     activity: str | None = None   # FOCUS: the category ("coding", "document", "design")
     minutes: int | None = None    # FOCUS: how long it has gone on; GAME_ENDED: how long the game lasted
+    late: bool = False            # REMINDER only: past its 24-hour window, told at a later return (§5.3)
 
 
 @dataclass(frozen=True)
@@ -241,6 +242,7 @@ wake 작업이 도는 중에 그 대화에 사용자 메시지가 오면, 지금
   - **경합(재검수 P2):** wake가 끝날 때의 갱신(`delivered` 또는 `scheduled`로 되돌림)은 **`remind_state = claimed AND remind_wake = 끝나는 wake`**일 때만 한다. 그 사이 사용자가 알림을 고쳤거나(`scheduled`, `remind_wake` 비움) 고리를 지웠으면 그 갱신은 아무것도 바꾸지 않는다. 그래서 고친 알림이 옛 wake 때문에 `delivered`가 되지 않는다.
   - **제때와 늦은 알림(Q9):** `remind_at`에서 24시간 안이면 제때 말한다. 그 안에 지금 기기가 없어서 말하지 못했으면, 7일 안의 **다음 돌아옴 기록**에서 "늦은 알림"으로 말한다(이유에 `"late": true`, 모델은 "어제 9시에 알려 달라던 거, 그때 못 전했어"처럼). 7일이 지나면 `missed`. 늦은 알림도 조절 규칙의 예외는 같다.
   - 서버가 `claimed`인 채로 재시작되면, 그 wake의 상태(§4.4)를 따라 `delivered` 또는 `scheduled`로 정리한다.
+  - **`delivered`의 뜻(재검수 의견, 이 패킷의 한계):** wake 턴의 최종 답이나 질문이 **대화에 기록되었다**는 뜻이다. 앱이 그 말풍선을 실제로 띄웠는지(또는 뒤에 음성으로 말했는지)는 확인하지 않는다. 답이 만들어지는 중에 기기 연결이 끊기면 알림은 `delivered`로 적히지만 사용자는 못 볼 수 있다. 앱은 다시 연결되면 지금처럼 자기 기기의 끝난 작업 답을 복구해 띄운다(V3-P83 §9, 앱의 "늦은 답 복구"). 표시 확인(앱이 "봤다"를 알림)은 뒤 단계다(§14).
 
 ### 5.4 활동 (V3-P88 신호, Q1)
 
@@ -427,7 +429,7 @@ V3-P89 뒤로 시스템 글은 Prompt가 절로 조립한다(바탕 → 원칙 �
 1. **작업 중 메시지:** `BUSY` 대신 받아 두었다가 다음 Run 사이에 넣는다. 그러면 §4.3의 특례가 일반 규칙이 된다.
 2. **화면을 보고 반응:** 화면을 보는 Tool(V3-P84 2단계)이 생기면 활동 신호보다 자세한 계기를 더한다. 캐릭터 반응(팝콘 등, V3-P86 갈래 2)은 앱이 같은 신호로 혼자 한다.
 3. **모델이 말할지 정하기:** 싼 모델로 "지금 말할 만한가"를 먼저 묻고, 아니면 턴을 열지 않는다(Q7의 B를 대화 밖에서).
-4. **알림 센터:** 앱이 꺼져 있거나 다른 창이 전체 화면일 때 Windows 알림으로.
+4. **알림 센터와 표시 확인:** 앱이 꺼져 있거나 다른 창이 전체 화면일 때 Windows 알림으로. 앱이 알림 말풍선을 실제로 띄웠음을 서버에 알려 `delivered`를 "보였음"으로 좁히기(§5.3의 한계).
 5. **여러 주체.**
 
 ## 15. 소유자 질문
@@ -453,7 +455,7 @@ V3-P89 뒤로 시스템 글은 Prompt가 절로 조립한다(바탕 → 원칙 �
 | `data` | v17: `EventKind.WAKE`, `Wake`·`WakeReason`, `wakes`·`wake_keys`, `begin_wake`, `memories.remind_at`·`reminded_at`, `devices.last_input_at`, `OriginKind.WAKE` |
 | `presence` | 마지막 입력을 Data에 쓰기(10분, 잠기거나 자리 비움이 될 때), 돌아옴 기록이 생길 때의 `on_returned` 콜백 |
 | `proactive` (새, 계층 3) | 계기·조절 규칙·고르기·합치기 순수 함수. 입력은 `DeviceState`(활동 신호)·`Returned`·조용히·고리·wake 기록. `common`, `data.api`, `presence.api`만 |
-| `prompt` | wake 그리기, `system.py`의 `PROACTIVE_RULE`(반려 절)과 원칙의 `<wake>`, `SystemSpec.proactive`, `PromptInputs.wake_notes`와 `state_key`, 시각 줄 간격에서 빼기, `MEMORY_SECTION`·`memory_save` 설명의 `remind_at` |
+| `prompt` | wake 그리기, `system.py`의 `PROACTIVE_RULE`(반려 절)과 원칙의 `<wake>`, `SystemSpec.proactive`, `PromptInputs.wake_notes`와 그것을 해시하는 `context_key`(§8.4), 시각 줄 간격에서 빼기, `MEMORY_SECTION`·`memory_save` 설명의 `remind_at` |
 | `control` | `submit_wake`, `accept_wake`, wake 작업의 Run 상한, 사용자가 이김, `_next_triggers`의 wake, `sent_from`에서 빼기 |
 | `memory` | 입력에서 wake를 문맥 줄로 |
 | `tool`(기억 도구) | `memory_save`의 `remind_at` |
@@ -466,7 +468,7 @@ V3-P89 뒤로 시스템 글은 Prompt가 절로 조립한다(바탕 → 원칙 �
 
 ## 17. 구현 단계
 
-1. **1부: wake의 길.** Data v17(`wake`, `wakes`·`wake_keys`, `begin_wake`), `submit_wake`·사용자가 이김·Run 상한, 모든 소비자의 wake 처리(Prompt·기억 작업·검색·압축·Web·CLI), 반려 절의 "Speaking first"와 원칙의 `<wake>`, `wake_notes`와 `state_key`, `try`와 `status`, 사건 흐름의 `origin`, 가짜 기기 스크립트. 이것만으로 `try`로 앱에서 볼 수 있다.
+1. **1부: wake의 길.** Data v17(`wake`, `wakes`·`wake_keys`, `begin_wake`), `submit_wake`·사용자가 이김·Run 상한, 모든 소비자의 wake 처리(Prompt·기억 작업·검색·압축·Web·CLI), 반려 절의 "Speaking first"와 원칙의 `<wake>`, `wake_notes`와 `context_key`, `try`와 `status`, 사건 흐름의 `origin`, 가짜 기기 스크립트. 이것만으로 `try`로 앱에서 볼 수 있다.
 2. **2부: 계기와 스케줄러.** `himari.proactive` 순수 함수, `Ticker`(정리 루프 옮김), 고리·돌아옴·알림·활동, `remind_at`(도구·기억 화면), `last_input_at`, `on_returned`, 설정 상태 줄, 실제 모델 확인.
 3. **앱:** §10(이 저장소에서, 1부와 함께 또는 뒤에).
 
@@ -495,3 +497,12 @@ V3-P89 뒤로 시스템 글은 Prompt가 절로 조립한다(바탕 → 원칙 �
 | P2 | 알림을 고친 뒤 옛 wake가 끝나면 고친 알림까지 `delivered`가 될 수 있음 | 끝날 때의 갱신은 `claimed`이고 `remind_wake`가 그 wake일 때만(§5.3) |
 
 검수자 의견: P1이 반영되면 READY.
+
+### 18.2 재검수 (`85385ac`): READY_WITH_CORRECTIONS → 고침
+
+P1·P2 해결 확인. 문서 정합성 둘과 구현 주의 하나:
+- `WakeReason`에 `late: bool = False`(알림만, §3.2).
+- §16·§17의 "`wake_notes`와 `state_key`"를 `context_key`로 통일(§8.4와 같게).
+- `delivered`는 "대화에 기록됨"이지 앱이 실제로 띄웠다는 뜻이 아님을 §5.3에 적고, 표시 확인은 뒤 단계(§14의 4)로.
+
+검수자 의견: 이 셋을 반영하면 READY.
