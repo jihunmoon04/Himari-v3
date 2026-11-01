@@ -218,7 +218,7 @@ public partial class MainWindow
     private void ShowSentMessage(string text)
     {
         // Typing or a reply already moved it into the stack while it was on its way.
-        if (frozenSent is not null && frozenSent.Text == text) { awaitingAnswer = false; return; }
+        if (frozenSent is { } past && past.Text == text && history.Contains(past)) { awaitingAnswer = false; return; }
         UserSent.Text = string.IsNullOrEmpty(text) ? "화면을 보냈습니다." : text;
         bool hasDraft = !string.IsNullOrEmpty(Input.Text);
         UserSent.Visibility = hasDraft ? Visibility.Collapsed : Visibility.Visible;

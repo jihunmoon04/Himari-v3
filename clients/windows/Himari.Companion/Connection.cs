@@ -303,17 +303,35 @@ public partial class MainWindow
     {
         if (currentConversation != id)
         {
-            inputRevision++; CloseBubble(); ClearHistory(); awaitingAnswer = false;
+            inputRevision++; CloseBubble(); ClearStack(keepUnsent: true); awaitingAnswer = false;
             UserSent.Text = ""; UserSent.Visibility = Visibility.Collapsed;
         }
         currentConversation = id;
+        UpdateUnsentBubbles();
+    }
+    // A message the server did not take is never lost: it returns to an empty editor in its own
+    // conversation, or else stays as an unsent bubble beside the newer draft.
+    private void KeepUnsent(string text, string conversation)
+    {
+        var past = frozenSent is { } frozen && frozen.Text == text && history.Contains(frozen) ? frozen : null;
+        if (currentConversation == conversation && string.IsNullOrEmpty(Input.Text))
+        {
+            if (past is not null) RemoveHistory(past);
+            UserSent.Visibility = Visibility.Collapsed; OpenComposer(); Input.Text = text; Input.CaretIndex = text.Length;
+            return;
+        }
+        if (past is null && UserSent.Visibility == Visibility.Visible && UserSent.Text == text) { UserSent.Visibility = Visibility.Collapsed; DropEmptyUserBubble(); }
+        MarkUnsent(past ?? AddHistory(text, true, TimeSpan.FromSeconds(1)), conversation);
+        ArrangeBubbles(); UpdateSceneBounds();
     }
     private void SendClick(object sender, RoutedEventArgs e) => SendMessage();
-    private async void SendMessage()
+    private void SendMessage() => SendMessageCore(null);
+    // An unsent message is sent again from its bubble, leaving any newer draft in the editor.
+    private async void SendMessageCore(PastBubble? unsent)
     {
         if (pairingInProgress) { Status.Text = "기기 연결 작업이 끝난 뒤 메시지를 보내 주세요."; return; }
         if (!connected || client is null || connection is null || currentConversation is null) return;
-        string text = Input.Text.Trim(); int length = text.EnumerateRunes().Count();
+        string text = unsent?.Text ?? Input.Text.Trim(); int length = text.EnumerateRunes().Count();
         bool wantsScreen = settings.ScreenSharing.IsChecked == true;
         if (length > 32000 || (length == 0 && !wantsScreen && unresolvedScreen is null)) { Status.Text = "메시지를 입력하거나 화면 첨부를 선택해 주세요 (최대 32,000자)."; return; }
         if (unresolvedScreen is { } unresolved && (unresolved.Conversation != currentConversation || unresolved.Text != text)) { Status.Text = "이전 화면 메시지의 전송 여부를 먼저 확인해 주세요. 원래 대화와 입력으로 돌아가 다시 보내기를 누르세요."; return; }
@@ -322,13 +340,20 @@ public partial class MainWindow
         var context = new SendContext(local, currentConversation, inputRevision);
         // What is on screen moves up into the stack; the new message comes in below it.
         frozenSent = null; FreezeThrough(long.MaxValue);
+        if (unsent is not null)
+        {
+            RemoveHistory(unsent, false);
+            frozenSent = AddHistory(text, true, TimeSpan.FromSeconds(DialoguePolicy.Duration(text, settings.BubbleMinimum.Value, settings.SecondsPer100.Value)));
+            ArrangeBubbles(); UpdateSceneBounds();
+        }
         sending = true;
         PresentUserBubble();
-        SendButton.IsEnabled = false;
+        SendButton.IsEnabled = false; UpdateUnsentBubbles();
         // Like a text message, the text leaves the editor at once and shows as sent. It returns
-        // to an empty editor if the server did not take it, so it can be sent again as before.
+        // to an empty editor if the server did not take it, or stays as an unsent bubble beside
+        // a newer draft, so it can be sent again.
         bool taken = false;
-        if (text.Length > 0)
+        if (text.Length > 0 && unsent is null)
         {
             UserSent.Text = text; Input.Clear(); UserSent.Visibility = Visibility.Visible;
             ShowSentOnly(false); ArrangeBubbles(); UpdateSceneBounds();
@@ -338,7 +363,13 @@ public partial class MainWindow
         int beforeSequence = 0;
         try
         {
-            if (unknownText is not null && !await CheckUnknownText(true, ct)) return;
+            if (unknownText is { } earlier)
+            {
+                var check = await CheckUnknownText(true, ct);
+                // The earlier send of this same text was recorded after all: nothing to send or restore.
+                if (check == UnknownTextCheck.Confirmed && earlier.Conversation == context.ConversationId && earlier.Text == text) taken = true;
+                if (check != UnknownTextCheck.Clear) return;
+            }
             if (unresolvedScreen is { } retry)
             {
                 if (DateTimeOffset.UtcNow - retry.Screen.CapturedAt > TimeSpan.FromMinutes(10)) { unresolvedScreen = null; Status.Text = "이전 화면이 만료되었습니다. 전송 여부를 기록에서 확인한 뒤 다시 보내세요. 중복될 수 있습니다."; return; }
@@ -384,7 +415,7 @@ public partial class MainWindow
                 if (screen.Ready) previousScreenIds[context.ConversationId] = screen.FileId;
                 var detail = await local.SendAsync(HttpMethod.Get, PathFor(context.ConversationId), null, ct);
                 await RecoverMoveJob(context.ConversationId, Str(Prop(detail, "job"), "job_id"), local, ct);
-                if (context.IsCurrent(client, currentConversation, connected)) { if (context.CanClear(client, currentConversation, connected, inputRevision)) Input.Clear(); ShowSentMessage(text); await ReadConversation(context.ConversationId, ct); Status.Text = "이전에 보낸 화면 메시지를 확인했습니다."; }
+                if (context.IsCurrent(client, currentConversation, connected)) { if (unsent is null && context.CanClear(client, currentConversation, connected, inputRevision)) Input.Clear(); ShowSentMessage(text); await ReadConversation(context.ConversationId, ct); Status.Text = "이전에 보낸 화면 메시지를 확인했습니다."; }
                 return;
             }
             catch (ApiException ex) when (screen is not null && MessageFailures.Classify(ex) == MessageFailure.Closed)
@@ -429,7 +460,7 @@ public partial class MainWindow
             string? jobId = Str(response, "job_id");
             WaitForReply(local, context.ConversationId, jobId, beforeSequence);
             if (jobId is not null && localScreens.Count > 0) await RecoverMoveJob(context.ConversationId, jobId, local, ct, screen);
-            if (context.CanClear(client, currentConversation, connected, inputRevision)) Input.Clear();
+            if (unsent is null && context.CanClear(client, currentConversation, connected, inputRevision)) Input.Clear();
             if (context.IsCurrent(client, currentConversation, connected)) ShowSentMessage(text);
             if (context.IsCurrent(client, currentConversation, connected) && !liveDisplays.ContainsKey(context.ConversationId) && (jobId is null || moveLifetime.CanStart(jobId)))
             { Status.Text = screenFailed ? "화면을 보내지 못해 글만 보냈습니다." : "답변을 기다리는 중…"; SetMood("thinking"); }
@@ -451,11 +482,7 @@ public partial class MainWindow
             // Another stream may still be validating this request's screen.
             if (earlyMoves.TryGetValue(context.ConversationId, out var buffered)) buffered.RemoveAll(x => !moveLifetime.IsVerifying(x.Job));
             sending = false; messageSend.Exit();
-            if (!taken && text.Length > 0 && string.IsNullOrEmpty(Input.Text) && currentConversation == context.ConversationId)
-            {
-                if (frozenSent is { } past && past.Text == text && history.Contains(past)) RemoveHistory(past);
-                UserSent.Visibility = Visibility.Collapsed; OpenComposer(); Input.Text = text; Input.CaretIndex = text.Length;
-            }
+            if (!taken && text.Length > 0) KeepUnsent(text, context.ConversationId);
             UpdateBubblePresentation();
         }
     }

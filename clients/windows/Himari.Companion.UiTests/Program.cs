@@ -412,6 +412,69 @@ internal static class Program
             Check(answer.Visibility == Visibility.Collapsed && !timer.IsEnabled, "later refresh does not reopen the ordered delivery answer");
             ordering.Close();
         }
+        {
+            // A message the server did not take is never lost or shown as sent, and one it did take
+            // is never offered again (PR #154 review).
+            var unsentWindow = new MainWindow();
+            object? Call(string method, params object?[] args) => typeof(MainWindow).GetMethod(method, BindingFlags.NonPublic | BindingFlags.Instance)!.Invoke(unsentWindow, args);
+            void Field(string field, object? value) => typeof(MainWindow).GetField(field, BindingFlags.NonPublic | BindingFlags.Instance)!.SetValue(unsentWindow, value);
+            object? Get(string field) => typeof(MainWindow).GetField(field, BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(unsentWindow);
+            void Until(Func<bool> ready)
+            {
+                var unsentFrame = new DispatcherFrame(); var poll = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(10) };
+                var deadline = DateTime.UtcNow.AddSeconds(5);
+                poll.Tick += (_, _) => { if (ready() || DateTime.UtcNow >= deadline) unsentFrame.Continue = false; };
+                if (!ready()) { poll.Start(); Dispatcher.PushFrame(unsentFrame); poll.Stop(); }
+                Check(ready(), "unsent message operation completes within test deadline");
+            }
+            bool Sending() => (bool)Get("sending")!;
+            var transport = new ReplyReconnectHandler { DeferAcceptance = true };
+            var server = new ServerClient("https://example.com/", "device-one", transport);
+            using var connectionToken = new CancellationTokenSource();
+            Field("client", server); Field("recoveryOwner", server); Field("connection", connectionToken); Field("currentConversation", "c"); Field("deviceId", "d");
+            ((CheckBox)((Window)Get("settings")!).FindName("ScreenSharing")).IsChecked = false;
+            var editor = (TextBox)unsentWindow.FindName("Input"); var sentLine = (TextBlock)unsentWindow.FindName("UserSent");
+            var history = (System.Collections.IList)Get("history")!;
+            object? Past(int index, string property) => history[index]!.GetType().GetProperty(property, BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(history[index]);
+            Call("SetConnected", true, "연결됨");
+            editor.Text = "A 질문"; Call("SendMessage"); Until(() => transport.Posts == 1);
+            Call("OpenComposer"); editor.Text = "B 초안";
+            transport.ReleaseFailure(HttpStatusCode.TooManyRequests, "busy"); Until(() => !Sending());
+            Check(editor.Text == "B 초안" && history.Count == 1 && (string?)Past(0, "Text") == "A 질문" && (string?)Past(0, "UnsentConversation") == "c" && sentLine.Visibility == Visibility.Collapsed,
+                "A sent, B typed, A refused: B stays in the editor and A stays as an unsent bubble, not a sent one");
+            if (args.Length == 2 && args[0] == "--screenshots")
+            {
+                var unsentStack = (FrameworkElement)unsentWindow.FindName("History");
+                unsentStack.Measure(new Size(304, double.PositiveInfinity)); unsentStack.Arrange(new Rect(unsentStack.DesiredSize)); unsentStack.UpdateLayout();
+                var image = new RenderTargetBitmap((int)Math.Ceiling(unsentStack.ActualWidth), (int)Math.Ceiling(unsentStack.ActualHeight), 96, 96, PixelFormats.Pbgra32); image.Render(unsentStack);
+                var png = new PngBitmapEncoder(); png.Frames.Add(BitmapFrame.Create(image)); System.IO.Directory.CreateDirectory(args[1]);
+                using var file = System.IO.File.Create(System.IO.Path.Combine(args[1], "13-unsent-message.png")); png.Save(file);
+            }
+            Call("PastBubbleExpired", 0);
+            Check(history.Count == 1, "an unsent message does not expire");
+            var retry = (Button)Past(0, "RetryButton")!;
+            Check(retry.IsEnabled, "an unsent message can be sent again in its own conversation");
+            transport.DeferAcceptance = false;
+            retry.RaiseEvent(new RoutedEventArgs(Button.ClickEvent)); Until(() => transport.Posts == 2 && !Sending());
+            Check(editor.Text == "B 초안" && history.Count == 1 && Past(0, "UnsentConversation") is null, "sending it again from its bubble leaves the newer draft in place and shows it as sent");
+            editor.Clear(); Call("ClearHistory");
+            transport.Fail = (HttpStatusCode.BadGateway, "http_error");
+            editor.Text = "C 질문"; Call("SendMessage"); Until(() => transport.Posts == 3 && !Sending());
+            Check(editor.Text == "C 질문" && Get("unknownText") is not null, "a send whose outcome is unknown returns to an empty editor");
+            transport.Fail = null; transport.AcceptedText = "C 질문";
+            Call("SendMessage"); Until(() => !Sending());
+            Check(transport.Posts == 3 && editor.Text == "" && Get("unknownText") is null && sentLine.Visibility == Visibility.Visible && sentLine.Text == "C 질문",
+                "a resend that finds the earlier send recorded neither posts again nor puts it back in the editor");
+            transport.AcceptedText = null; transport.ResetAcceptance(); transport.DeferAcceptance = true;
+            editor.Text = "D 질문"; Call("SendMessage"); Until(() => transport.Posts == 4);
+            Call("OpenComposer"); editor.Text = "E 초안";
+            Check(Get("frozenSent") is not null, "typing during a send moves the message into the stack");
+            Call("SetCurrentConversation", "other"); Call("SetCurrentConversation", "c");
+            Check(Get("frozenSent") is null && history.Count == 0, "switching conversations drops the stack and its reference to the message being sent");
+            editor.Clear(); transport.ReleaseAcceptance(); Until(() => !Sending());
+            Check(sentLine.Visibility == Visibility.Visible && sentLine.Text == "D 질문", "a late acceptance after switching back shows the message instead of trusting a removed bubble");
+            unsentWindow.Close();
+        }
         PresentationChecks.Run(Check, args.Length == 2 && args[0] == "--screenshots" ? args[1] : null);
         if (args.Contains("--native-presentation")) FullscreenChecks.Run(Check);
         if (args.Length == 2 && args[0] == "--screenshots")
@@ -466,8 +529,14 @@ internal sealed class ReplyReconnectHandler : HttpMessageHandler
     internal bool DeferCancel;
     private readonly TaskCompletionSource<HttpResponseMessage> cancellation = new(TaskCreationOptions.RunContinuationsAsynchronously);
     internal void ReleaseCancel() => cancellation.SetResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("{}") });
-    private readonly TaskCompletionSource<HttpResponseMessage> acceptance = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private TaskCompletionSource<HttpResponseMessage> acceptance = new(TaskCreationOptions.RunContinuationsAsynchronously);
     internal void ReleaseAcceptance() => acceptance.SetResult(new HttpResponseMessage(HttpStatusCode.Accepted) { Content = new StringContent("{\"job_id\":\"j\"}", Encoding.UTF8, "application/json") });
+    internal void ReleaseFailure(HttpStatusCode status, string code) => acceptance.SetResult(Error(status, code));
+    internal void ResetAcceptance() => acceptance = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    // A POST that fails at once, and a user message the server's history shows as recorded.
+    internal (HttpStatusCode Status, string Code)? Fail;
+    internal string? AcceptedText;
+    private static HttpResponseMessage Error(HttpStatusCode status, string code) => new(status) { Content = new StringContent(JsonSerializer.Serialize(new { error = new { code } }), Encoding.UTF8, "application/json") };
     private bool liveSent;
     // Reconnection replaces HttpClient but the fake server's state survives it.
     protected override void Dispose(bool disposing) { }
@@ -480,6 +549,7 @@ internal sealed class ReplyReconnectHandler : HttpMessageHandler
         {
             Posts++; Job = "j"; Sequence = 2;
             if (DeferAcceptance) return acceptance.Task.WaitAsync(ct);
+            if (Fail is { } fail) return Task.FromResult(Error(fail.Status, fail.Code));
             body = "{\"job_id\":\"j\"}"; status = HttpStatusCode.Accepted;
         }
         else if (path.EndsWith("/live"))
@@ -489,7 +559,11 @@ internal sealed class ReplyReconnectHandler : HttpMessageHandler
             return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(Live, Encoding.UTF8, "text/event-stream") });
         }
         else if (path.EndsWith("/events"))
-            body = JsonSerializer.Serialize(new { items = new[] { new { sequence = Complete ? Math.Max(3, Sequence) : 1, kind = "assistant_final", display = new { text = Complete ? "복구된 최종 답변" : "이전 답변", moods = Array.Empty<object>() } } } });
+        {
+            var items = new List<object> { new { sequence = Complete ? Math.Max(3, Sequence) : 1, kind = "assistant_final", display = new { text = Complete ? "복구된 최종 답변" : "이전 답변", moods = Array.Empty<object>() } } };
+            if (AcceptedText is not null) items.Add(new { sequence = 10, kind = "user_message", text = AcceptedText, origin = new { kind = "device", device_id = "d" } });
+            body = JsonSerializer.Serialize(new { items });
+        }
         else
             body = JsonSerializer.Serialize(new { conversation = new { last_sequence = Complete ? Math.Max(3, Sequence) : Sequence }, job = new { running = Posts > 0 && !Complete, job_id = Job } });
         return Task.FromResult(new HttpResponseMessage(status) { Content = new StringContent(body, Encoding.UTF8, "application/json") });

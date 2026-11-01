@@ -53,6 +53,7 @@ public partial class MainWindow
         SendButton.Tag = string.IsNullOrWhiteSpace(Input.Text) ? "" : "ready";
         SendButton.IsEnabled = connected && !sending && (!string.IsNullOrWhiteSpace(Input.Text) || settings.ScreenSharing.IsChecked == true || unresolvedScreen is not null);
         SendButton.ToolTip = string.IsNullOrWhiteSpace(Input.Text) && settings.ScreenSharing.IsChecked == true ? "화면만 보내기 · Enter" : "보내기 · Enter";
+        UpdateUnsentBubbles();
     }
     private void ScreenSharingClick(object sender, RoutedEventArgs e)
     {

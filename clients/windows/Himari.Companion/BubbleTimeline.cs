@@ -1,6 +1,9 @@
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Threading;
+using Button = System.Windows.Controls.Button;
+using Orientation = System.Windows.Controls.Orientation;
+using Brush = System.Windows.Media.Brush;
 
 namespace Himari.Companion;
 
@@ -22,10 +25,17 @@ public partial class MainWindow
         internal bool User { get; } = user;
         internal DispatcherTimer Timer { get; } = new();
         internal bool Due { get; set; }
+        // A message the server did not take stays, without expiring, until it is sent again or
+        // removed: the conversation it belongs to, and its note and actions.
+        internal string? UnsentConversation { get; set; }
+        internal FrameworkElement? UnsentPanel { get; set; }
+        internal TextBlock? UnsentNote { get; set; }
+        internal Button? RetryButton { get; set; }
     }
     private readonly List<PastBubble> history = [];
     // The message being sent, once it moved into the stack before the server answered.
     private PastBubble? frozenSent;
+    private PastBubble? OldestExpiring => history.FirstOrDefault(past => past.UnsentConversation is null);
 
     // A sent bubble shows only what was sent, like a text message. Its editor keeps keyboard
     // focus at zero height (a keystroke typed into an unfocused window loses its IME
@@ -68,10 +78,10 @@ public partial class MainWindow
     private PastBubble AddHistory(string text, bool user, TimeSpan remaining)
     {
         FrameworkElement content = user
-            ? new ScrollViewer { VerticalScrollBarVisibility = ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled, Content = new TextBlock { Text = text, TextWrapping = TextWrapping.Wrap, FontSize = 14, LineHeight = 22 } }
+            ? new StackPanel { Children = { new ScrollViewer { VerticalScrollBarVisibility = ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled, MaxHeight = 200, Content = new TextBlock { Text = text, TextWrapping = TextWrapping.Wrap, FontSize = 14, LineHeight = 22 } } } }
             // It renders when Text is set, before joining the tree, so nothing is inherited yet.
             : new MarkdownView { FontFamily = Message.FontFamily, FontSize = 14, Foreground = Message.Foreground, Text = text };
-        var bubble = new PixelBubble { IsUser = user, TailRight = user, TailTop = bubblesBelow, Width = UserBubble.Width, MaxHeight = user ? 260 : 320, HorizontalAlignment = System.Windows.HorizontalAlignment.Left, Child = content };
+        var bubble = new PixelBubble { IsUser = user, TailRight = user, TailTop = bubblesBelow, Width = UserBubble.Width, MaxHeight = user ? double.PositiveInfinity : 320, HorizontalAlignment = System.Windows.HorizontalAlignment.Left, Child = content };
         var past = new PastBubble(bubble, text, user);
         past.Timer.Interval = remaining;
         past.Timer.Tick += (_, _) => { past.Timer.Stop(); past.Due = true; ExpireBubbles(); };
@@ -125,18 +135,76 @@ public partial class MainWindow
     private void RemoveHistory(PastBubble past, bool relayout = true)
     {
         past.Timer.Stop(); history.Remove(past); History.Children.Remove(past.Bubble);
+        if (frozenSent == past) frozenSent = null;
         if (relayout) { ArrangeBubbles(); UpdateSceneBounds(); }
     }
-    private void ClearHistory()
+    // Unsent messages are kept unless asked otherwise: they exist nowhere else.
+    private void ClearHistory() => ClearStack(keepUnsent: false);
+    private void ClearStack(bool keepUnsent)
     {
-        if (history.Count == 0) return;
-        foreach (var past in history.ToList()) RemoveHistory(past, false);
+        var gone = history.Where(past => !keepUnsent || past.UnsentConversation is null).ToList();
+        if (gone.Count == 0) return;
+        foreach (var past in gone) RemoveHistory(past, false);
         ArrangeBubbles(); UpdateSceneBounds();
     }
+
+    private void MarkUnsent(PastBubble past, string conversation)
+    {
+        past.UnsentConversation = conversation; past.Timer.Stop(); past.Due = false;
+        if (past.UnsentPanel is null && past.Bubble.Child is StackPanel content)
+        {
+            var warning = (Brush)FindResource("BubbleWarning");
+            Button Action(string label, Action click)
+            {
+                var button = new Button { Style = (Style)FindResource("BubbleTextButton"), Margin = new Thickness(6, 0, 0, 0), Foreground = warning, Content = new TextBlock { Text = label, TextDecorations = TextDecorations.Underline } };
+                System.Windows.Automation.AutomationProperties.SetName(button, label);
+                button.Click += (_, _) => click();
+                return button;
+            }
+            var note = new TextBlock { Style = (Style)FindResource("BubbleStatusText"), Foreground = warning };
+            var glyph = new BubbleGlyph { Kind = BubbleGlyphKind.Warning, Width = 14, Height = 14, Margin = new Thickness(0, 2, 6, 0), VerticalAlignment = VerticalAlignment.Top, Foreground = warning };
+            var row = new DockPanel { Children = { glyph, note } }; DockPanel.SetDock(glyph, Dock.Left);
+            var retry = Action("다시 보내기", () => RetryUnsent(past));
+            var actions = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = System.Windows.HorizontalAlignment.Right, Margin = new Thickness(0, 4, 0, 0),
+                Children = { retry, Action("복사", () => { try { copyText(past.Text); } catch (Exception) { } }), Action("지우기", () => RemoveHistory(past)) } };
+            var panel = new Border { BorderBrush = (Brush)FindResource("BubbleSeparator"), BorderThickness = new Thickness(0, 1, 0, 0), Margin = new Thickness(0, 7, 0, 0), Padding = new Thickness(0, 7, 0, 0), Child = new StackPanel { Children = { row, actions } } };
+            content.Children.Add(panel);
+            past.UnsentPanel = panel; past.UnsentNote = note; past.RetryButton = retry;
+        }
+        past.UnsentPanel!.Visibility = Visibility.Visible;
+        UpdateUnsentBubbles();
+    }
+    // The server recorded it after all: it becomes an ordinary sent bubble again.
+    private bool ConfirmUnsent(string text, string conversation)
+    {
+        var past = history.FirstOrDefault(p => p.UnsentConversation == conversation && p.Text == text);
+        if (past is null) return false;
+        past.UnsentConversation = null; past.UnsentPanel!.Visibility = Visibility.Collapsed;
+        past.Timer.Interval = TimeSpan.FromSeconds(DialoguePolicy.Duration(text, settings.BubbleMinimum.Value, settings.SecondsPer100.Value)); past.Timer.Start();
+        ArrangeBubbles(); UpdateSceneBounds();
+        return true;
+    }
+    private void UpdateUnsentBubbles()
+    {
+        foreach (var past in history)
+        {
+            if (past.UnsentConversation is not { } conversation || past.UnsentNote is null || past.RetryButton is null) continue;
+            bool here = conversation == currentConversation;
+            past.UnsentNote.Text = !here ? "다른 대화에서 보내지 못한 메시지예요."
+                : unknownText is { } unknown && unknown.Conversation == conversation && unknown.Text == past.Text ? "보냈는지 확인하지 못했어요." : "보내지 못했어요.";
+            // It goes back to the conversation it was written for, never to another.
+            past.RetryButton.IsEnabled = here && connected && !sending;
+        }
+    }
+    private void RetryUnsent(PastBubble past)
+    {
+        if (!sending && history.Contains(past) && past.UnsentConversation == currentConversation) SendMessageCore(past);
+    }
+
     private void PlaceHistory()
     {
         int live = (UserBubbleShown ? 1 : 0) + (BubblePanel.Visibility == Visibility.Visible ? 1 : 0);
-        while (history.Count > 0 && history.Count + live > MaxBubbles) RemoveHistory(history[0], false);
+        while (history.Count + live > MaxBubbles && OldestExpiring is { } oldest) RemoveHistory(oldest, false);
         // The newest bubble is always the one next to the character.
         var order = bubblesBelow ? Enumerable.Reverse(history).ToList() : history;
         if (!History.Children.Cast<UIElement>().SequenceEqual(order.Select(past => past.Bubble)))
@@ -210,14 +278,13 @@ public partial class MainWindow
         .OrderBy(bubble => bubble == UserBubble ? userBubbleSequence : assistantBubbleSequence).FirstOrDefault();
     private void ExpireBubbles()
     {
-        // The stack is older than the live bubbles and empties first.
-        if (history.Count > 0)
+        // The stack is older than the live bubbles and empties first; unsent messages wait for the user.
+        if (OldestExpiring is { } past)
         {
-            var past = history[0];
             if (!past.Due) return;
             if (past.Bubble.IsMouseOver || past.User && sending) { RetryExpiry(past.Timer); return; }
             RemoveHistory(past);
-            if (history.Count > 0) { if (history[0].Due) RetryExpiry(history[0].Timer); return; }
+            if (OldestExpiring is { } next) { if (next.Due) RetryExpiry(next.Timer); return; }
             if (userBubbleCloseDue && UserBubble.Visibility == Visibility.Visible) RetryExpiry(userBubbleTimer);
             if (assistantBubbleCloseDue && BubblePanel.Visibility == Visibility.Visible) RetryExpiry(bubbleTimer);
             return;
