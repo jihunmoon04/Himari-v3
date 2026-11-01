@@ -216,6 +216,12 @@ local refs = {
   { "glance-2-sad-left", "glance", 2, "sad", "left" },
   { "ahoge-2-neutral", "ahoge", 2, "neutral" },
   { "twinkle-3-neutral", "twinkle", 3, "neutral" },
+  -- stretch: a blink on a face moved by (-1, 0), a mood face at (-1, 1) over new legs, an
+  -- own-face frame (the mood must not show) and the lifted upper body.
+  { "stretch-4-sad-closed", "stretch", 4, "sad", "closed" },
+  { "stretch-5-worried", "stretch", 5, "worried" },
+  { "stretch-8-happy", "stretch", 8, "happy" },
+  { "stretch-9-neutral", "stretch", 9, "neutral" },
 }
 for _, r in ipairs(refs) do
   local s = render(r[2], r[3], r[4], r[5], r[6])
