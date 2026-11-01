@@ -46,6 +46,7 @@ public partial class MainWindow
                         }
                         if (state == "ended" && id is not null)
                         {
+                            if (id == wakeElsewhere) wakeElsewhere = null;  // HIMARI finished speaking there
                             EndMoveJob(id, Str(data, "job_id"));
                             if (id == currentConversation && Str(data, "outcome") is null && Prop(data, "error").ValueKind is not (JsonValueKind.Null or JsonValueKind.Undefined)) Status.Text = "작업 중 문제가 생겼습니다. Web에서 확인해 주세요.";
                         }
@@ -188,7 +189,7 @@ public partial class MainWindow
             {
                 liveStreams.Remove(id); liveDisplays.Remove(id); source.Dispose();
                 if (currentConversation == id) { SetTalking(false); StopButton.Visibility = Visibility.Collapsed; SetMood("neutral"); _ = ScheduleBubbleAfterMoves(id); }
-                if (connected && currentConversation == id) Status.Text = "연결됨";
+                if (connected && currentConversation == id) Status.Text = JobOrigin.Status(wakeElsewhere, currentConversation, "연결됨");
                 if (currentConversation == id && connection is not null)
                     try { await ReadConversation(id, connection.Token); } catch (Exception ex) { ShowError(ex); }
             }

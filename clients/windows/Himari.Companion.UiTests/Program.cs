@@ -609,7 +609,17 @@ internal static class Program
                 Check(shown == (meanwhile == "picked" ? "c" : "a"), "typing or picking a conversation while the list is read keeps the user where they are");
                 Check(((TextBlock)follow.FindName("Status")).Text.Contains("다른 대화에서"), "the status line tells where HIMARI spoke instead");
             }
-            if (meanwhile == "typed") Check(editor.Text == "A에 보낼 말", "the draft stays with the conversation it was written in");
+            if (meanwhile == "typed")
+            {
+                Check(editor.Text == "A에 보낼 말", "the draft stays with the conversation it was written in");
+                // PR #159 re-review P2: reading A afterwards (as hello and activity do) keeps the notice
+                Field("connected", true);  // connected, the read writes the status line
+                var reading = (Task)Call("ReadConversation", "a", followToken.Token)!;
+                Until(() => reading.IsCompleted); reading.GetAwaiter().GetResult();
+                Check(((TextBlock)follow.FindName("Status")).Text == JobOrigin.WakeNotice, "reading the shown conversation does not wipe the wake notice");
+                Call("SetCurrentConversation", "b");
+                Check((string?)Value("wakeElsewhere") is null, "opening that conversation ends the notice");
+            }
             follow.Close();
         }
         app.Shutdown();

@@ -24,6 +24,13 @@ internal static class JobOrigin
     internal static bool StillFollow(string? before, string? now, long revisionBefore, long revisionNow, string draft) =>
         before == now && revisionBefore == revisionNow && string.IsNullOrWhiteSpace(draft);
 
+    internal const string WakeNotice = "히마리가 다른 대화에서 말을 걸었어요. 대화 목록에서 열 수 있어요.";
+
+    /// <summary>The status line (PR #159 re-review P2): while HIMARI speaks first in a conversation
+    /// the user has not opened, its notice stays in place of the usual status.</summary>
+    internal static string Status(string? wakeElsewhere, string? current, string usual) =>
+        wakeElsewhere is not null && wakeElsewhere != current ? WakeNotice : usual;
+
     private static string? Kind(JsonElement origin) => Text(origin, "kind");
 
     private static string? Text(JsonElement element, string name) =>
