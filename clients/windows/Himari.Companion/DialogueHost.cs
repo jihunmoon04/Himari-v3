@@ -77,7 +77,7 @@ public partial class MainWindow
         if (sizingScene) { sceneRepositionPending = true; return; }
         // Over fullscreen the empty host stays up: Alt+Tab activates the character window before
         // anything can open a bubble, and the Shell decides at that moment from the top window.
-        if (!IsVisible || (UserBubble.Visibility != Visibility.Visible && BubblePanel.Visibility != Visibility.Visible && CoverScreen() is null))
+        if (!IsVisible || (UserBubble.Visibility != Visibility.Visible && BubblePanel.Visibility != Visibility.Visible && history.Count == 0 && CoverScreen() is null))
         { dialogueHost.Hide(); hostCoversScreen = null; UpdateFullscreenPresentation(); return; }
         sizingScene = true;
         try
@@ -105,23 +105,29 @@ public partial class MainWindow
             UserBubble.Width = Math.Min(280, stackWidth);
             UserBubble.MaxHeight = BubblePanel.Visibility == Visibility.Visible ? Math.Min(280, available * .5) : Math.Min(340, available);
             UserBubble.Measure(new Size(stackWidth, available));
-            double user = UserBubble.Visibility == Visibility.Visible ? UserBubble.DesiredSize.Height + 8 : 0;
+            double user = UserBubbleShown ? UserBubble.DesiredSize.Height + 8 : 0;
             BubblePanel.MaxHeight = Math.Max(60, available - user);
             if (replyReader is not null) replyReader.Height = Math.Clamp(replyReader.ContentHeight, 22, Math.Max(22, BubblePanel.MaxHeight - 28 - ReplyToolbar.DesiredSize.Height - (ReplyStatus.Visibility == Visibility.Visible ? 26 : 0)));
-            DialogueStack.Measure(new Size(stackWidth, available));
-            double stackHeight = Math.Max(1, Math.Min(available, DialogueStack.DesiredSize.Height));
-            double width = stackWidth * dpi.DpiScaleX, height = stackHeight * dpi.DpiScaleY;
+            double width = stackWidth * dpi.DpiScaleX;
             bool flip = settings.FacingLeft.IsChecked == true;
             double center = (character.Left + character.Right) / 2.0 + (flip ? -48 : 48) * dpi.DpiScaleX;
             int x = (int)Math.Round(Math.Clamp(center - width / 2, area.Left, Math.Max(area.Left, area.Right - width)));
-            // The user bubble keeps its compact anchor; only the reply widens around the character.
+            // The user bubble and the stack keep their compact anchor; only the reply widens around the character.
             double compact = Math.Min(304, area.Width / dpi.DpiScaleX) * dpi.DpiScaleX;
             double compactX = Math.Clamp(center - compact / 2, area.Left, Math.Max(area.Left, area.Right - compact));
             double userLeft = (compactX - x) / dpi.DpiScaleX + (compact / dpi.DpiScaleX - UserBubble.Width) / 2;
             UserBubble.HorizontalAlignment = System.Windows.HorizontalAlignment.Left;
             UserBubble.Margin = new Thickness(Math.Clamp(userLeft, 0, Math.Max(0, stackWidth - UserBubble.Width)), UserBubble.Margin.Top, 0, 0);
-            double y = below ? character.Bottom + 8 : character.Top - height - 8;
-            int top = (int)Math.Round(Math.Clamp(y, area.Top, Math.Max(area.Top, area.Bottom - height)));
+            foreach (PixelBubble past in History.Children) { past.Width = UserBubble.Width; past.TailTop = below; }
+            PlaceHistory();
+            // Only the live bubbles are kept on screen; earlier ones in the stack may run past its edge.
+            DialogueStack.Measure(new Size(stackWidth, double.PositiveInfinity));
+            double pastHeight = History.Visibility == Visibility.Visible ? History.DesiredSize.Height : 0;
+            double liveHeight = Math.Max(1, Math.Min(available, DialogueStack.DesiredSize.Height - pastHeight));
+            double stackHeight = liveHeight + pastHeight;
+            double height = stackHeight * dpi.DpiScaleY, live = liveHeight * dpi.DpiScaleY;
+            double y = below ? character.Bottom + 8 : character.Top - live - 8;
+            int top = (int)Math.Round(Math.Clamp(y, area.Top, Math.Max(area.Top, area.Bottom - live)) - (below ? 0 : height - live));
             var hostHandle = new WindowInteropHelper(dialogueHost).EnsureHandle();
             // Over a fullscreen window the host spans that monitor, transparent and click-through
             // outside the bubbles, so Windows treats it as fullscreen and keeps the taskbar down.

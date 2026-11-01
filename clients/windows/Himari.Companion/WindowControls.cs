@@ -200,7 +200,7 @@ public partial class MainWindow
         if (dialogueHost is not null) { PositionDialogueHost(); return; }
         double available = Math.Max(100, Height - Math.Max(0, Character.Height - 10) - 16);
         UserBubble.MaxHeight = Math.Max(80, BubblePanel.Visibility == Visibility.Visible ? Math.Min(280, available * .55) : Math.Min(340, available));
-        double user = UserBubble.Visibility == Visibility.Visible ? Math.Min(UserBubble.ActualHeight, UserBubble.MaxHeight) + 8 : 0;
+        double user = UserBubbleShown ? Math.Min(UserBubble.ActualHeight, UserBubble.MaxHeight) + 8 : 0;
         BubblePanel.MaxHeight = Math.Max(60, available - user);
     }
     private void SchedulePreferencesSave()
@@ -217,10 +217,12 @@ public partial class MainWindow
     }
     private void ShowSentMessage(string text)
     {
+        // Typing or a reply already moved it into the stack while it was on its way.
+        if (frozenSent is { } past && past.Text == text && history.Contains(past)) { awaitingAnswer = false; return; }
         UserSent.Text = string.IsNullOrEmpty(text) ? "화면을 보냈습니다." : text;
         bool hasDraft = !string.IsNullOrEmpty(Input.Text);
         UserSent.Visibility = hasDraft ? Visibility.Collapsed : Visibility.Visible;
-        ComposerPanel.Visibility = hasDraft ? Visibility.Visible : Visibility.Collapsed;
+        ShowSentOnly(hasDraft);
         // A late 202 must not move this request below a reply already received.
         if (userBubbleSequence == 0) PresentUserBubble();
         UserBubble.Visibility = Visibility.Visible; awaitingAnswer = false;
@@ -230,11 +232,13 @@ public partial class MainWindow
     {
         userBubbleCloseDue = false;
         userBubbleTimer.Stop(); userBubbleTimer.Interval = TimeSpan.FromSeconds(DialoguePolicy.Duration(UserSent.Text, settings.BubbleMinimum.Value, settings.SecondsPer100.Value)); userBubbleTimer.Start();
+        userBubbleDueAt = DateTime.UtcNow + userBubbleTimer.Interval;
     }
     private void ScheduleBubbleClose(string text)
     {
         assistantBubbleCloseDue = false;
         bubbleTimer.Stop(); bubbleTimer.Interval = TimeSpan.FromSeconds(DialoguePolicy.Duration(text, settings.BubbleMinimum.Value, settings.SecondsPer100.Value)); bubbleTimer.Start();
+        assistantBubbleDueAt = DateTime.UtcNow + bubbleTimer.Interval;
     }
     private async Task ScheduleBubbleAfterMoves(string conversation)
     {

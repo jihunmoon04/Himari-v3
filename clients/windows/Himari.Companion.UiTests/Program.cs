@@ -34,19 +34,36 @@ internal static class Program
         Check(!Key(System.Windows.Input.Key.Enter).Handled && sent == 1, "Shift+Enter is left to multiline textbox");
         modifiers = ModifierKeys.None;
         var composition = new TextComposition(InputManager.Current, input, "가", TextCompositionAutoComplete.Off);
-        input.RaiseEvent(new TextCompositionEventArgs(Keyboard.PrimaryDevice, composition) { RoutedEvent = TextCompositionManager.PreviewTextInputStartEvent });
-        Check(!Key(System.Windows.Input.Key.Enter).Handled && sent == 1, "Enter during IME composition does not send");
+        void Compose(RoutedEvent stage) => input.RaiseEvent(new TextCompositionEventArgs(Keyboard.PrimaryDevice, composition) { RoutedEvent = stage });
+        void Pump()
+        {
+            var frame = new DispatcherFrame();
+            Dispatcher.CurrentDispatcher.BeginInvoke(DispatcherPriority.ApplicationIdle, new Action(() => frame.Continue = false));
+            Dispatcher.PushFrame(frame);
+        }
+        Compose(TextCompositionManager.PreviewTextInputStartEvent);
+        Check(Key(System.Windows.Input.Key.Enter).Handled && sent == 1, "Enter during IME composition never reaches the multiline textbox");
         Check(!Key(System.Windows.Input.Key.ImeProcessed).Handled && sent == 1, "IME-processed key is left to IME");
-        input.RaiseEvent(new TextCompositionEventArgs(Keyboard.PrimaryDevice, composition) { RoutedEvent = TextCompositionManager.PreviewTextInputEvent });
-        Check(!Key(System.Windows.Input.Key.Enter).Handled && sent == 1, "commit Enter is guarded until input dispatch finishes");
-        var frame = new DispatcherFrame();
-        Dispatcher.CurrentDispatcher.BeginInvoke(DispatcherPriority.ApplicationIdle, new Action(() => frame.Continue = false));
-        Dispatcher.PushFrame(frame);
-        Check(Key(System.Windows.Input.Key.Enter).Handled && sent == 2 && routed == 6, "next Enter sends after IME commit on real routed event path");
+        Compose(TextCompositionManager.PreviewTextInputEvent);
+        Pump();
+        Check(sent == 2, "Enter during a composition sends once the commit has landed");
+        // Korean IME commits the last syllable and passes the same Enter on.
+        Compose(TextCompositionManager.PreviewTextInputStartEvent);
+        Compose(TextCompositionManager.PreviewTextInputEvent);
+        Check(Key(System.Windows.Input.Key.Enter).Handled && sent == 2, "Korean commit Enter is not left to the textbox as a newline");
+        Pump();
+        Check(sent == 3, "Korean commit Enter sends after the commit");
+        Compose(TextCompositionManager.PreviewTextInputStartEvent);
+        modifiers = ModifierKeys.Shift;
+        Check(!Key(System.Windows.Input.Key.Enter).Handled && sent == 3, "Shift+Enter during a composition is left to multiline textbox");
+        modifiers = ModifierKeys.None;
+        Compose(TextCompositionManager.PreviewTextInputEvent);
+        Pump();
+        Check(Key(System.Windows.Input.Key.Enter).Handled && sent == 4 && routed == 7, "Enter after the commit settles sends at once on real routed event path");
         var normal = new TextComposition(InputManager.Current, input, "a", TextCompositionAutoComplete.On);
         input.RaiseEvent(new TextCompositionEventArgs(Keyboard.PrimaryDevice, normal) { RoutedEvent = TextCompositionManager.PreviewTextInputStartEvent });
         input.RaiseEvent(new TextCompositionEventArgs(Keyboard.PrimaryDevice, normal) { RoutedEvent = TextCompositionManager.PreviewTextInputEvent });
-        Check(Key(System.Windows.Input.Key.Enter).Handled && sent == 3, "ordinary text followed immediately by Enter is not mistaken for IME");
+        Check(Key(System.Windows.Input.Key.Enter).Handled && sent == 5, "ordinary text followed immediately by Enter is not mistaken for IME");
         Color Fill(bool isUser)
         {
             var bubble = new PixelBubble { IsUser = isUser, Child = new Border() };
@@ -119,15 +136,17 @@ internal static class Program
         var replyTimer = (DispatcherTimer)typeof(MainWindow).GetField("bubbleTimer", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(timeline)!;
         Timeline("OpenComposer"); draftInput.Text = "첫 질문"; draftInput.Clear(); Timeline("ShowSentMessage", "첫 질문");
         Timeline("OpenReplyBubble", "c", "j1");
-        Check(Grid.GetRow(oldUser) == 0 && Grid.GetRow(reply) == 1, "reply arrives beneath the earlier user message");
+        Check(Grid.GetRow(oldUser) < Grid.GetRow(reply), "reply arrives beneath the earlier user message");
         Timeline("ShowSentMessage", "첫 질문");
-        Check(Grid.GetRow(oldUser) == 0 && Grid.GetRow(reply) == 1, "late send acknowledgement preserves chronological order");
+        Check(Grid.GetRow(oldUser) < Grid.GetRow(reply), "late send acknowledgement preserves chronological order");
         var originalParent = oldUser.Parent;
         Timeline("OpenComposer"); draftInput.Text = "다음 초안"; draftInput.Select(1, 3);
         Timeline("OpenReplyBubble", "c", "j1");
-        Check(Grid.GetRow(reply) == 0 && Grid.GetRow(oldUser) == 1 && oldUser.Parent == originalParent && draftInput.SelectedText == "음 초", "new draft moves below the prior reply and reconnecting that same reply neither reorders nor reparents its editor");
+        Check(Grid.GetRow(reply) < Grid.GetRow(oldUser) && oldUser.Parent == originalParent && draftInput.SelectedText == "음 초", "new draft moves below the prior reply and reconnecting that same reply neither reorders nor reparents its editor");
         Timeline("OpenReplyBubble", "c", "j2");
-        Check(Grid.GetRow(oldUser) == 0 && Grid.GetRow(reply) == 1, "a new reply moves to the bottom even if a previous reply remained visible");
+        Check(Grid.GetRow(reply) < Grid.GetRow(oldUser), "a new reply comes in above the open editor, which always stays last");
+        // The first message went into the stack when the editor reopened; the single-bubble checks below start without it.
+        Timeline("ClearHistory");
         draftInput.Clear(); Timeline("ShowSentMessage", new string('가', 100)); Timeline("ScheduleBubbleClose", "짧은 답변");
         Timeline("AssistantBubbleExpired");
         Check(oldUser.Visibility == Visibility.Visible && reply.Visibility == Visibility.Visible && !replyTimer.IsEnabled, "a newer short answer cannot disappear ahead of an older long user message");
@@ -213,7 +232,7 @@ internal static class Program
                 var userBounds = user.TransformToAncestor(content).TransformBounds(new Rect(user.RenderSize));
                 Check(assistantBounds.Top >= 0 && userBounds.Bottom <= 700 - size + 14, "both bubbles fit above character at supported sizes");
                 Check(Math.Abs(assistantBounds.Left + assistantBounds.Width / 2 - userBounds.Left - userBounds.Width / 2) < 1 &&
-                    (assistantLatest ? userBounds.Bottom <= assistantBounds.Top : assistantBounds.Bottom <= userBounds.Top), "the newer bubble stays below the older on the same center line in either speaker order");
+                    assistantBounds.Bottom <= userBounds.Top, "the open editor stays below the reply on the same center line whichever came last");
                 var characterBounds = character.TransformToAncestor(content).TransformBounds(new Rect(character.RenderSize));
                 double gazeOffset = userBounds.Left + userBounds.Width / 2 - characterBounds.Left - characterBounds.Width / 2;
                 Check(flipped ? gazeOffset < 0 : gazeOffset > 0, "shared conversation center follows the character gaze in both directions");
@@ -393,6 +412,130 @@ internal static class Program
             Check(answer.Visibility == Visibility.Collapsed && !timer.IsEnabled, "later refresh does not reopen the ordered delivery answer");
             ordering.Close();
         }
+        {
+            // A message the server did not take is never lost or shown as sent, and one it did take
+            // is never offered again (PR #154 review).
+            var unsentWindow = new MainWindow();
+            object? Call(string method, params object?[] args) => typeof(MainWindow).GetMethod(method, BindingFlags.NonPublic | BindingFlags.Instance)!.Invoke(unsentWindow, args);
+            void Field(string field, object? value) => typeof(MainWindow).GetField(field, BindingFlags.NonPublic | BindingFlags.Instance)!.SetValue(unsentWindow, value);
+            object? Get(string field) => typeof(MainWindow).GetField(field, BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(unsentWindow);
+            void Until(Func<bool> ready)
+            {
+                var unsentFrame = new DispatcherFrame(); var poll = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(10) };
+                var deadline = DateTime.UtcNow.AddSeconds(5);
+                poll.Tick += (_, _) => { if (ready() || DateTime.UtcNow >= deadline) unsentFrame.Continue = false; };
+                if (!ready()) { poll.Start(); Dispatcher.PushFrame(unsentFrame); poll.Stop(); }
+                Check(ready(), "unsent message operation completes within test deadline");
+            }
+            bool Sending() => (bool)Get("sending")!;
+            var transport = new ReplyReconnectHandler { DeferAcceptance = true };
+            var server = new ServerClient("https://example.com/", "device-one", transport);
+            using var connectionToken = new CancellationTokenSource();
+            Field("client", server); Field("recoveryOwner", server); Field("connection", connectionToken); Field("currentConversation", "c"); Field("deviceId", "d");
+            ((CheckBox)((Window)Get("settings")!).FindName("ScreenSharing")).IsChecked = false;
+            var editor = (TextBox)unsentWindow.FindName("Input"); var sentLine = (TextBlock)unsentWindow.FindName("UserSent");
+            var history = (System.Collections.IList)Get("history")!;
+            object? Past(int index, string property) => history[index]!.GetType().GetProperty(property, BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(history[index]);
+            Call("SetConnected", true, "연결됨");
+            editor.Text = "A 질문"; Call("SendMessage"); Until(() => transport.Posts == 1);
+            Call("OpenComposer"); editor.Text = "B 초안";
+            transport.ReleaseFailure(HttpStatusCode.TooManyRequests, "busy"); Until(() => !Sending());
+            Check(editor.Text == "B 초안" && history.Count == 1 && (string?)Past(0, "Text") == "A 질문" && (string?)Past(0, "UnsentConversation") == "c" && sentLine.Visibility == Visibility.Collapsed,
+                "A sent, B typed, A refused: B stays in the editor and A stays as an unsent bubble, not a sent one");
+            if (args.Length == 2 && args[0] == "--screenshots")
+            {
+                var unsentStack = (FrameworkElement)unsentWindow.FindName("History");
+                unsentStack.Measure(new Size(304, double.PositiveInfinity)); unsentStack.Arrange(new Rect(unsentStack.DesiredSize)); unsentStack.UpdateLayout();
+                var image = new RenderTargetBitmap((int)Math.Ceiling(unsentStack.ActualWidth), (int)Math.Ceiling(unsentStack.ActualHeight), 96, 96, PixelFormats.Pbgra32); image.Render(unsentStack);
+                var png = new PngBitmapEncoder(); png.Frames.Add(BitmapFrame.Create(image)); System.IO.Directory.CreateDirectory(args[1]);
+                using var file = System.IO.File.Create(System.IO.Path.Combine(args[1], "13-unsent-message.png")); png.Save(file);
+            }
+            Call("PastBubbleExpired", 0);
+            Check(history.Count == 1, "an unsent message does not expire");
+            var retry = (Button)Past(0, "RetryButton")!;
+            Check(retry.IsEnabled, "an unsent message can be sent again in its own conversation");
+            transport.DeferAcceptance = false;
+            retry.RaiseEvent(new RoutedEventArgs(Button.ClickEvent)); Until(() => transport.Posts == 2 && !Sending());
+            Check(editor.Text == "B 초안" && history.Count == 1 && Past(0, "UnsentConversation") is null, "sending it again from its bubble leaves the newer draft in place and shows it as sent");
+            editor.Clear(); Call("ClearHistory");
+            transport.Fail = (HttpStatusCode.BadGateway, "http_error");
+            editor.Text = "C 질문"; Call("SendMessage"); Until(() => transport.Posts == 3 && !Sending());
+            Check(editor.Text == "C 질문" && Get("unknownText") is not null, "a send whose outcome is unknown returns to an empty editor");
+            transport.Fail = null; transport.AcceptedText = "C 질문";
+            Call("SendMessage"); Until(() => !Sending());
+            Check(transport.Posts == 3 && editor.Text == "" && Get("unknownText") is null && sentLine.Visibility == Visibility.Visible && sentLine.Text == "C 질문",
+                "a resend that finds the earlier send recorded neither posts again nor puts it back in the editor");
+            transport.AcceptedText = null; transport.ResetAcceptance(); transport.DeferAcceptance = true;
+            editor.Text = "D 질문"; Call("SendMessage"); Until(() => transport.Posts == 4);
+            Call("OpenComposer"); editor.Text = "E 초안";
+            Check(Get("frozenSent") is not null, "typing during a send moves the message into the stack");
+            Call("SetCurrentConversation", "other"); Call("SetCurrentConversation", "c");
+            Check(Get("frozenSent") is null && history.Count == 0, "switching conversations drops the stack and its reference to the message being sent");
+            editor.Clear(); transport.ReleaseAcceptance(); Until(() => !Sending());
+            Check(sentLine.Visibility == Visibility.Visible && sentLine.Text == "D 질문", "a late acceptance after switching back shows the message instead of trusting a removed bubble");
+            // Same text twice: the first is refused, the second's outcome is unknown and later found recorded.
+            Call("HideUserBubble"); Call("ClearHistory"); editor.Clear();
+            transport.ResetAcceptance(); editor.Text = "같은 질문"; Call("SendMessage"); Until(() => transport.Posts == 5);
+            Call("OpenComposer"); editor.Text = "초안 1";
+            transport.ReleaseFailure(HttpStatusCode.TooManyRequests, "busy"); Until(() => !Sending());
+            editor.Clear(); transport.ResetAcceptance(); editor.Text = "같은 질문"; Call("SendMessage"); Until(() => transport.Posts == 6);
+            Call("OpenComposer"); editor.Text = "초안 2";
+            transport.ReleaseFailure(HttpStatusCode.BadGateway, "http_error"); Until(() => !Sending());
+            Check(history.Count == 2 && (string?)Past(0, "UnsentConversation") == "c" && (string?)Past(1, "UnsentConversation") == "c", "both attempts with the same text stay unsent");
+            transport.AcceptedText = "같은 질문";
+            var check = (Task)Call("CheckUnknownText", false, CancellationToken.None)!; Until(() => check.IsCompleted);
+            Check((string?)Past(0, "UnsentConversation") == "c" && Past(1, "UnsentConversation") is null,
+                "confirming the unknown attempt marks only its own bubble sent, never the refused one with the same text");
+            transport.AcceptedText = null;
+            // More unsent messages than the stack may show: none is lost, at most six bubbles are shown.
+            Call("ClearHistory"); editor.Text = "남은 초안";
+            for (int i = 0; i < 8; i++) Call("KeepUnsent", $"못 보낸 {i}", "c", null, false);
+            var stack = (StackPanel)unsentWindow.FindName("History");
+            int Shown() => stack.Children.Cast<UIElement>().Count(child => child.Visibility == Visibility.Visible)
+                + (((FrameworkElement)unsentWindow.FindName("UserBubble")).Visibility == Visibility.Visible ? 1 : 0)
+                + (((FrameworkElement)unsentWindow.FindName("BubblePanel")).Visibility == Visibility.Visible ? 1 : 0);
+            Check(history.Count == 8 && Shown() == 6 && ((UIElement)Past(0, "Bubble")!).Visibility == Visibility.Collapsed && ((UIElement)Past(7, "Bubble")!).Visibility == Visibility.Visible,
+                "unsent messages past the six-bubble limit are kept hidden, oldest first");
+            Check(((TextBlock)Past(3, "UnsentNote")!).Text.Contains("3개 더"), "the oldest shown unsent message says how many wait hidden");
+            ((Button)((StackPanel)((Button)Past(7, "RetryButton")!).Parent).Children[2]).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Check(history.Count == 7 && Shown() == 6 && ((UIElement)Past(2, "Bubble")!).Visibility == Visibility.Visible, "removing one brings a hidden unsent message back");
+            // Unknown A, sent again from its bubble, the resend declined, then A found recorded.
+            Call("ClearHistory"); Call("HideUserBubble"); editor.Clear();
+            transport.ResetAcceptance(); transport.DeferAcceptance = true; editor.Text = "확인 안 된 질문"; Call("SendMessage"); Until(() => Sending() && transport.Posts == 7);
+            Call("OpenComposer"); editor.Text = "다음 초안";
+            transport.ReleaseFailure(HttpStatusCode.BadGateway, "http_error"); Until(() => !Sending());
+            var attempt = history[0];
+            Field("confirmResend", (Func<bool>)(() => false));
+            ((Button)Past(0, "RetryButton")!).RaiseEvent(new RoutedEventArgs(Button.ClickEvent)); Until(() => !Sending());
+            Check(transport.Posts == 7 && history.Count == 1 && ReferenceEquals(history[0], attempt) && (string?)Past(0, "UnsentConversation") == "c" && editor.Text == "다음 초안",
+                "a declined resend leaves the same bubble unsent and the draft untouched");
+            transport.AcceptedText = "확인 안 된 질문";
+            var found = (Task)Call("CheckUnknownText", false, CancellationToken.None)!; Until(() => found.IsCompleted);
+            Check(history.Count == 1 && Past(0, "UnsentConversation") is null && ((UIElement)Past(0, "UnsentPanel")!).Visibility == Visibility.Collapsed && sentLine.Visibility != Visibility.Visible,
+                "when the attempt is later found recorded, that same bubble becomes sent and loses its resend action, with no second copy");
+            // Unknown A back in the editor, then typed again by the user as a new draft before A is found recorded.
+            Field("confirmResend", null); transport.AcceptedText = null; Call("ClearHistory"); Call("HideUserBubble"); editor.Clear();
+            transport.DeferAcceptance = false; transport.Fail = (HttpStatusCode.BadGateway, "http_error");
+            editor.Text = "다시 쓴 질문"; Call("SendMessage"); Until(() => !Sending());
+            Check(editor.Text == "다시 쓴 질문" && Get("unknownText") is not null, "the unknown attempt's text returns to the empty editor");
+            editor.Clear(); editor.Text = "다시 쓴 질문"; transport.Fail = null; transport.AcceptedText = "다시 쓴 질문";
+            found = (Task)Call("CheckUnknownText", false, CancellationToken.None)!; Until(() => found.IsCompleted);
+            Check(editor.Text == "다시 쓴 질문" && Get("unknownText") is null, "confirming the earlier attempt never clears a new draft that merely has the same text");
+            // Six unsent messages and an open editor fill the stack; one is sent again and falls due on its way.
+            Call("ClearHistory"); Call("HideUserBubble"); Call("OpenComposer"); editor.Text = "열린 초안";
+            for (int i = 0; i < 6; i++) Call("KeepUnsent", $"묶음 {i}", "c", null, false);
+            var resent = history[5]; int posts = transport.Posts;
+            transport.ResetAcceptance(); transport.DeferAcceptance = true;
+            ((Button)Past(5, "RetryButton")!).RaiseEvent(new RoutedEventArgs(Button.ClickEvent)); Until(() => Sending() && transport.Posts == posts + 1);
+            Check(history.Contains(resent) && ((UIElement)Past(history.IndexOf(resent), "Bubble")!).Visibility == Visibility.Visible && history.Count == 6 && Shown() == 6,
+                "the six-bubble limit never trims the message being sent again, and hides an older unsent one instead");
+            Call("PastBubbleExpired", history.IndexOf(resent));
+            Check(history.Contains(resent), "a bubble falling due on its way stays until the send ends");
+            transport.ReleaseAcceptance(); Until(() => !Sending());
+            Check(!history.Contains(resent) && history.Count == 5 && Enumerable.Range(0, 5).All(i => (string?)Past(i, "UnsentConversation") == "c") && editor.Text == "열린 초안",
+                "once accepted, the overdue bubble expires at once and every other unsent message is kept");
+            unsentWindow.Close();
+        }
         PresentationChecks.Run(Check, args.Length == 2 && args[0] == "--screenshots" ? args[1] : null);
         if (args.Contains("--native-presentation")) FullscreenChecks.Run(Check);
         if (args.Length == 2 && args[0] == "--screenshots")
@@ -447,8 +590,14 @@ internal sealed class ReplyReconnectHandler : HttpMessageHandler
     internal bool DeferCancel;
     private readonly TaskCompletionSource<HttpResponseMessage> cancellation = new(TaskCreationOptions.RunContinuationsAsynchronously);
     internal void ReleaseCancel() => cancellation.SetResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("{}") });
-    private readonly TaskCompletionSource<HttpResponseMessage> acceptance = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private TaskCompletionSource<HttpResponseMessage> acceptance = new(TaskCreationOptions.RunContinuationsAsynchronously);
     internal void ReleaseAcceptance() => acceptance.SetResult(new HttpResponseMessage(HttpStatusCode.Accepted) { Content = new StringContent("{\"job_id\":\"j\"}", Encoding.UTF8, "application/json") });
+    internal void ReleaseFailure(HttpStatusCode status, string code) => acceptance.SetResult(Error(status, code));
+    internal void ResetAcceptance() => acceptance = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    // A POST that fails at once, and a user message the server's history shows as recorded.
+    internal (HttpStatusCode Status, string Code)? Fail;
+    internal string? AcceptedText;
+    private static HttpResponseMessage Error(HttpStatusCode status, string code) => new(status) { Content = new StringContent(JsonSerializer.Serialize(new { error = new { code } }), Encoding.UTF8, "application/json") };
     private bool liveSent;
     // Reconnection replaces HttpClient but the fake server's state survives it.
     protected override void Dispose(bool disposing) { }
@@ -461,6 +610,7 @@ internal sealed class ReplyReconnectHandler : HttpMessageHandler
         {
             Posts++; Job = "j"; Sequence = 2;
             if (DeferAcceptance) return acceptance.Task.WaitAsync(ct);
+            if (Fail is { } fail) return Task.FromResult(Error(fail.Status, fail.Code));
             body = "{\"job_id\":\"j\"}"; status = HttpStatusCode.Accepted;
         }
         else if (path.EndsWith("/live"))
@@ -470,7 +620,11 @@ internal sealed class ReplyReconnectHandler : HttpMessageHandler
             return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(Live, Encoding.UTF8, "text/event-stream") });
         }
         else if (path.EndsWith("/events"))
-            body = JsonSerializer.Serialize(new { items = new[] { new { sequence = Complete ? Math.Max(3, Sequence) : 1, kind = "assistant_final", display = new { text = Complete ? "복구된 최종 답변" : "이전 답변", moods = Array.Empty<object>() } } } });
+        {
+            var items = new List<object> { new { sequence = Complete ? Math.Max(3, Sequence) : 1, kind = "assistant_final", display = new { text = Complete ? "복구된 최종 답변" : "이전 답변", moods = Array.Empty<object>() } } };
+            if (AcceptedText is not null) items.Add(new { sequence = 10, kind = "user_message", text = AcceptedText, origin = new { kind = "device", device_id = "d" } });
+            body = JsonSerializer.Serialize(new { items });
+        }
         else
             body = JsonSerializer.Serialize(new { conversation = new { last_sequence = Complete ? Math.Max(3, Sequence) : Sequence }, job = new { running = Posts > 0 && !Complete, job_id = Job } });
         return Task.FromResult(new HttpResponseMessage(status) { Content = new StringContent(body, Encoding.UTF8, "application/json") });
