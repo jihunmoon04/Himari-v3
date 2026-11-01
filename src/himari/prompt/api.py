@@ -57,6 +57,7 @@ from himari.data.api import (
     ToolExecutionRecord,
     TriggerRef,
     Wake,
+    WakeKind,
 )
 from himari.environment.api import BindingObservation
 from himari.tool.api import ToolDefinition
@@ -88,6 +89,8 @@ class RequestOptions(DeepFrozen):
     image_input: bool = False
     # And points on a screen where it says (V3-P84 §5); set by the Driver.
     screen_points: bool = False
+    # And may speak first (V3-P87 §13): the "Speaking first" line only then; set by the Driver.
+    speaks_first: bool = False
     # Ask for the answer as a stream (V3-P73 §3.1); set by the Driver right before
     # the request is prepared, only for a Run that answers the user.
     stream: bool = False
@@ -611,8 +614,10 @@ def user_memory_data(memories: Sequence[Memory], episodes: Sequence[RecentEpisod
     for note in open_loops:
         if not full and len(note.text) <= room:
             overdue = now is not None and note.due_instant is not None and note.due_instant < now
+            reminding = note.remind_at is not None and note.remind_state in ("scheduled", "claimed")
             loops.append({"id": f"m{note.memory_id}", "text": note.text, **({"due": note.due_at} if note.due_at else {}),
-                          **({"overdue": True} if overdue else {})})
+                          **({"overdue": True} if overdue else {}),
+                          **({"remind_at": note.remind_at} if reminding else {})})  # V3-P87 §5.3
             room -= len(note.text)
         else:
             full = True
@@ -734,11 +739,11 @@ ACTIVITY_RULE = (
 # V3-P87 §8.2: right after SPEAKING_RULE when HIMARI may speak first.
 PROACTIVE_RULE = (
     "- Speaking first: a user-role message that is only a <wake> block comes from the server, not the user: it "
-    "opened this turn for the reasons in it, and the user has said nothing. Speak first, the way a friend would: one "
-    "or two short sentences, at most one question; one short sentence when presence.now_doing shows a fullscreen "
-    "video or game or the microphone or camera in use. Do not mention the wake block, the server or note ids. If a "
-    "reason no longer fits what you know, greet or say something small instead. If the user wrote after a wake, "
-    "answer the user."
+    "opened this turn for the reasons in it, and the user has said nothing. Speak first, the way a friend would, "
+    "about those reasons only: at most two short sentences in all, and only one of them a question; when "
+    "presence.now_doing shows a fullscreen video or game or the microphone or camera in use, one short sentence and "
+    "no question. Do not mention the wake block, the server or note ids. If a reason no longer fits what you know, "
+    "greet or say something small instead. If the user wrote after a wake, answer the user."
 )
 
 
@@ -751,7 +756,8 @@ def wake_text(wake: Wake, notes: Mapping[int, Memory]) -> str:
         if reason.memory_id is not None:
             note = notes.get(reason.memory_id)
             item["loop"] = {"id": f"m{reason.memory_id}", "deleted": True} if note is None else {
-                "id": f"m{note.memory_id}", "text": note.text, **({"due": note.due_at} if note.due_at else {})}
+                "id": f"m{note.memory_id}", "text": note.text, **({"due": note.due_at} if note.due_at else {}),
+                **({"remind_at": note.remind_at} if reason.kind is WakeKind.REMINDER and note.remind_at else {})}
         for name in ("via", "away_minutes", "activity", "minutes"):
             value = getattr(reason, name)
             if value is not None:

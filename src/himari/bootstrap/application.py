@@ -134,10 +134,19 @@ from himari.data.api import (
 )
 from himari.data.sqlite import SqliteData, SqliteStore
 from himari.bootstrap.companion import CompanionEvents, CompanionPresence
-from himari.bootstrap.proactive import ProactiveRefused, ProactiveSettings, WakeEvents, settle_cut_wakes
+from himari.bootstrap.proactive import (
+    PROACTIVE_SECONDS,
+    Inputs,
+    ProactiveRefused,
+    ProactiveScheduler,
+    WakeEvents,
+    settle_cut_wakes,
+)
+from himari.bootstrap.schedule import Ticker
 from himari.presence.api import Devices
 from himari.presence.devices import DeviceRegistry
 from himari.presence.hub import PresenceHub
+from himari.proactive import ProactiveSettings
 from himari.documents import TMP_BYTES, DocumentReader, Toolkit, ToolkitRefused, open_toolkit, worker_roots
 from himari.environment.inside import INSIDE, InsideEnvironment, InsideFiles
 from himari.imaging import ImageViews, runtime_roots
@@ -500,6 +509,7 @@ def _memory_before(previous: object) -> Memory | None:
 
     due_at, due_instant = text_of("due"), moment("due_instant")
     valid_until, valid_instant = text_of("valid_until"), moment("valid_instant")
+    remind_at, remind_instant = text_of("remind_at"), moment("remind_instant")  # V3-P87 §5.3
     item = previous.get("source_item")
     return Memory(memory_id, MemoryCategory(category), text, MemoryOrigin(origin),
                   None if conversation is None else ConversationId(conversation), call, 0, epoch, epoch,
@@ -508,7 +518,9 @@ def _memory_before(previous: object) -> Memory | None:
                   valid_until=valid_until if valid_instant is not None else None,
                   valid_instant=valid_instant if valid_until is not None else None,
                   source_pass=text_of("source_pass"), source_item=item if isinstance(item, int) else None,
-                  user_approved_at=moment("user_approved_at"))
+                  user_approved_at=moment("user_approved_at"),
+                  remind_at=remind_at if remind_instant is not None else None,
+                  remind_instant=remind_instant if remind_at is not None else None)
 
 
 class ModelRefused(LookupError):
@@ -867,7 +879,6 @@ class Application:
     # V3-P65 §7.3: one lifecycle lock per Conversation (P0: one server process),
     # kept only while some call holds or waits for it (PR #56 review C1).
     _lifecycle: dict[ConversationId, _Lifecycle] = field(default_factory=dict, repr=False)
-    _cleanup: asyncio.Task[None] | None = field(default=None, repr=False)
     _mcp_defaults_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
     # V3-P83 §5, §8.1: who is connected, the current device and the event stream (one per
     # server), and the Runner's listener that publishes on it.
@@ -877,6 +888,10 @@ class Application:
     # V3-P87: speaking first (HIMARI_PROACTIVE…), and the listener that ends each wake with its job
     proactive: ProactiveSettings = field(default_factory=ProactiveSettings)
     _wake_events: WakeEvents | None = field(default=None, repr=False)
+    # V3-P87 §7: the periodic jobs (purge, proactive), the devices' last inputs and the scheduler
+    ticker: Ticker = field(default_factory=Ticker, repr=False)
+    inputs: Inputs | None = field(default=None, repr=False)
+    scheduler: ProactiveScheduler | None = field(default=None, repr=False)
     devices: Devices = field(init=False, repr=False)  # V3-P83 §4: pairing and device tokens
 
     def __post_init__(self) -> None:
@@ -1091,8 +1106,19 @@ class Application:
             await passes.start()
         application._ticking = asyncio.create_task(hub.run(), name="presence-tick")
         if cleanup_seconds is not None:
-            application._cleanup = asyncio.create_task(application._purge_periodically(cleanup_seconds),
-                                                       name="trash-cleanup")
+            application.ticker.add("purge", cleanup_seconds, application._purge_round)
+        if companion:  # V3-P87 §5.2: the devices' last inputs, kept whether or not HIMARI speaks first
+            application.inputs = Inputs(runtime.data)
+            hub.on_input = application.inputs.seen
+            if speaking_first.enabled:
+                ticker = application.ticker
+                scheduler = ProactiveScheduler(runtime.data, hub, application.devices, runner, application.inputs,
+                                               speaking_first, time_zone, zones=zones,
+                                               poke=lambda after: ticker.poke("proactive", after))
+                hub.on_returned = scheduler.returned
+                application.scheduler = scheduler
+                ticker.add("proactive", PROACTIVE_SECONDS, scheduler.run)
+        application.ticker.start()
         return application
 
     def seen(self, scope: TrustedScope) -> None:
@@ -2096,21 +2122,20 @@ class Application:
             log.exception("could not drop stale staged uploads")
         await self.data.sweep_blobs(now)
 
-    async def _purge_periodically(self, seconds: float) -> None:
-        while True:
-            try:
-                await self.purge_due()
-            except Exception:  # noqa: BLE001 — the next round tries again
-                log.exception("trash cleanup failed")
-            try:
-                await self.clean_files()
-            except Exception:  # noqa: BLE001 — the next round tries again
-                log.exception("file cleanup failed")
-            try:
-                await self.clean_memories()
-            except Exception:  # noqa: BLE001 — the next round tries again
-                log.exception("memory cleanup failed")
-            await asyncio.sleep(seconds)
+    async def _purge_round(self) -> None:
+        """The Ticker's ``purge`` (V3-P87 §7: the old cleanup loop, the same period)."""
+        try:
+            await self.purge_due()
+        except Exception:  # noqa: BLE001 — the next round tries again
+            log.exception("trash cleanup failed")
+        try:
+            await self.clean_files()
+        except Exception:  # noqa: BLE001 — the next round tries again
+            log.exception("file cleanup failed")
+        try:
+            await self.clean_memories()
+        except Exception:  # noqa: BLE001 — the next round tries again
+            log.exception("memory cleanup failed")
 
     async def clean_memories(self, now: datetime | None = None) -> None:
         """V3-P85 §5.1, §5.2, §5.4, §4.9: stale loops, expired facts, retired
@@ -2124,7 +2149,8 @@ class Application:
             self.memory_passes.scan_soon()
 
     async def close(self, grace_seconds: float = 30.0) -> None:
-        for task in (self._cleanup, self._ticking):
+        await self.ticker.close()
+        for task in (self._ticking,):
             if task is not None:
                 task.cancel()
                 await asyncio.gather(task, return_exceptions=True)  # its own cancellation, not ours
@@ -2136,6 +2162,8 @@ class Application:
                 await self.events.aclose()
             if self._wake_events is not None:
                 await self._wake_events.aclose()
+            if self.inputs is not None:
+                await self.inputs.aclose()
         finally:
             try:
                 await self.mcp.aclose()
@@ -2170,10 +2198,16 @@ class Application:
             raise ProactiveRefused(error.code.value) from None
         return recent.conversation_id, status
 
-    def proactive_status(self, principal: PrincipalId) -> dict[str, object]:
-        """§11 (part 1): the switch and where HIMARI would speak now."""
-        return {"enabled": self.proactive.enabled and self.companion_enabled, "told": self.proactive.describe(),
-                "current_device": self.hub.current(principal)}
+    async def proactive_status(self, principal: PrincipalId) -> dict[str, object]:
+        """§11: the switch, where HIMARI would speak now, today's count, the next loop and the last look."""
+        quiet = self.proactive
+        status: dict[str, object] = {"enabled": self.proactive.enabled and self.companion_enabled,
+                                     "told": self.proactive.describe(), "current_device": self.hub.current(principal),
+                                     "quiet_hours": None if quiet.quiet_start is None or quiet.quiet_end is None
+                                     else f"{quiet.quiet_start:%H:%M}-{quiet.quiet_end:%H:%M}"}
+        if self.scheduler is not None:
+            status.update(await self.scheduler.status(principal))
+        return status
 
     def check_layout(self) -> None:
         """Re-verify the private directories (e.g. before serving)."""

@@ -43,7 +43,7 @@ def inputs(*events: ConversationEvent, notes: dict[int, Memory] | None = None,
            spec: SystemSpec | None = None) -> PromptInputs:
     return PromptInputs(instructions=BASE_INSTRUCTIONS, tool_catalog=(), events=events, tool_executions=(),
                         snapshot=None, state_basis=PersistedStateBasis(len(events), 0, (), (), ()), observations=(),
-                        request_options=RequestOptions("m"), trigger_refs=(), time_zone="Asia/Seoul",
+                        request_options=RequestOptions("m", speaks_first=True), trigger_refs=(), time_zone="Asia/Seoul",
                         wake_notes=notes or {}, system=spec)
 
 
@@ -98,3 +98,29 @@ def test_the_context_key_follows_the_wakes_notes() -> None:
 def test_a_summary_sees_the_wake_as_the_servers() -> None:
     (turn,) = Composer().compose(inputs(event(1, WAKE, AT), notes={15: LOOP})).conversation
     assert _items([turn])[0]["role"] == "wake"
+
+
+def test_a_reminder_shows_on_its_loop_and_in_its_wake() -> None:
+    """V3-P87 §5.3: the model sees a pending reminder on the loop, and its time in a reminder wake."""
+    from himari.prompt.api import user_memory_data, wake_text
+
+    reminded = replace(LOOP, remind_at="2026-11-04T21:30+09:00", remind_instant=AT, remind_state="scheduled")
+    data = user_memory_data((reminded,))
+    assert data is not None
+    loops = data["loops"]
+    assert isinstance(loops, list) and loops[0]["remind_at"] == "2026-11-04T21:30+09:00"
+    delivered = user_memory_data((replace(reminded, remind_state="delivered"),))
+    assert delivered is not None and "remind_at" not in delivered["loops"][0]  # type: ignore[index]
+    reminder = Wake("wake_2", (WakeReason(WakeKind.REMINDER, memory_id=15, late=True),), "d1")
+    told = json.loads(wake_text(reminder, {15: reminded})[6:-7])["reasons"][0]
+    assert told == {"kind": "reminder", "loop": {"id": "m15", "text": LOOP.text, "due": LOOP.due_at,
+                                                 "remind_at": "2026-11-04T21:30+09:00"}, "late": True}
+    loop_due = json.loads(wake_text(WAKE, {15: reminded})[6:-7])["reasons"][0]
+    assert "remind_at" not in loop_due["loop"]  # a loop's check-in does not talk about its reminder
+
+
+def test_no_speaking_first_line_for_a_model_that_was_not_checked() -> None:
+    """V3-P87 §13 (owner 2026-11-01): the line follows the model too."""
+    unchecked = replace(inputs(spec=SystemSpec(companion=True, proactive=True)), request_options=RequestOptions("m"))
+    text = "\n".join(system_text(unchecked))
+    assert PROACTIVE_RULE not in text and "<wake> message" not in text

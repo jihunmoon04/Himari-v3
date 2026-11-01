@@ -284,32 +284,64 @@ class Driver:
         async with self._exclusive(scope, stop, progress, max_runs):
             return await self._resume_locked(scope)
 
+    async def resume_wake(self, scope: TrustedScope, wake_id: str, *, stop: StopSignal | None = None,
+                          progress: TurnProgress | None = None, max_runs: int | None = None) -> DriveResult:
+        """V3-P87 (PR #158 review P2-1): a wake's turn. The model is resolved again for
+        this turn: changed meanwhile to one not checked for speaking first, the wake is
+        withdrawn (cancelled, keys back) and no Run is made."""
+        async with self._exclusive(scope, stop, progress, max_runs):
+            if not self._provider.describe_capabilities(self._turn_model(scope).model_id).speaks_first:
+                await self.withdraw_wake(scope, wake_id)
+                return DriveResult(DriveState.CANCELLED, detail=ControlErrorCode.MODEL_UNCHECKED.value)
+            return await self._resume_locked(scope)
+
     async def accept_wake(self, scope: TrustedScope, reasons: Sequence[WakeReason], device_id: str, *,
                           keys: Sequence[str] = (), reminders: Sequence[int] = ()) -> ConversationEvent:
         if self._wakes is None:
             raise ControlError(ControlErrorCode.NOT_SETTLED, "this server keeps no wakes")
         async with self._exclusive(scope):
+            if not self._provider.describe_capabilities(self._turn_model(scope).model_id).speaks_first:
+                # V3-P87 §13 (owner 2026-11-01): only on a model that passed the speaking-first check
+                raise ControlError(ControlErrorCode.MODEL_UNCHECKED, self._turn_model(scope).model_id)
             _, stop = await self._prepare(scope)
             triggers = await self._next_triggers(scope)
-            unanswered = any(isinstance(t, EventRef) for t in triggers)  # a user message or a wake (§6.1)
-            if (stop is not None or unanswered or await self._log.find_waiting_call(scope) is not None
+            if (stop is not None or await self._log.find_waiting_call(scope) is not None
                     or await self._unfinished_group(scope) is not None
-                    or (triggers and not await self._left_by_a_wake(scope))):
+                    or (triggers and not await self._left_by_ended_wakes(scope, triggers))):
                 raise ControlError(ControlErrorCode.NOT_SETTLED, scope.conversation_id)
             return await self._wakes.begin_wake(scope, reasons, device_id, keys=keys, reminders=reminders)
 
-    async def _left_by_a_wake(self, scope: TrustedScope) -> bool:
-        """V3-P87 §6.1, §13 (PR #153 review P2-1): a finished tool group the model has
-        not answered blocks a new wake unless an ended wake's turn left it (closed at
-        a restart, or stopped at its Run cap): the next turn shows its results. Left
-        by the user's turn (e.g. paused between Runs), it is the user's work: blocked."""
+    async def _left_by_ended_wakes(self, scope: TrustedScope, triggers: Sequence[TriggerRef]) -> bool:
+        """V3-P87 §6.1, §13: what the model has not answered blocks a new wake —
+        a user message, a wake still opened, or a finished tool group of the
+        user's turn (e.g. paused between Runs: the user's work). What ended wakes
+        left does not (PR #153 review P2-1, PR #156 review P1): a wake cut by a
+        restart before any word (failed, its keys given back), a group closed at
+        a restart or stopped at a wake's Run cap. The next turn draws them all,
+        the new wake last; "Speaking first" speaks to the reasons it is given."""
         assert self._wakes is not None
         events = await self._log.read_events(scope)
-        last = next((e for e in reversed(events) if isinstance(e.payload, (UserMessage, Wake))), None)
-        if last is None or not isinstance(last.payload, Wake):
-            return False
-        record = await self._wakes.read_wake(scope.principal_id, last.payload.wake_id)
-        return record.status is not WakeStatus.OPENED
+        by_id = {e.event_id: e for e in events}
+        for trigger in triggers:
+            if isinstance(trigger, EventRef):
+                event = by_id.get(trigger.event_id)
+                if event is None or not isinstance(event.payload, Wake) or not await self._ended(scope, event.payload):
+                    return False
+        if any(isinstance(t, CompletedGroupRef) for t in triggers):
+            last = next((e for e in reversed(events) if isinstance(e.payload, (UserMessage, Wake))), None)
+            if last is None or not isinstance(last.payload, Wake) or not await self._ended(scope, last.payload):
+                return False
+        return True
+
+    async def _ended(self, scope: TrustedScope, wake: Wake) -> bool:
+        assert self._wakes is not None
+        return (await self._wakes.read_wake(scope.principal_id, wake.wake_id)).status is not WakeStatus.OPENED
+
+    async def withdraw_wake(self, scope: TrustedScope, wake_id: str) -> None:
+        if self._wakes is None:
+            return
+        await self._wakes.end_wake(scope.principal_id, wake_id, WakeStatus.CANCELLED)
+        await self._wakes.release_keys(scope.principal_id, wake_id)
 
     async def close_cut_group(self, scope: TrustedScope, reason: str) -> bool:
         async with self._exclusive(scope):
@@ -510,7 +542,8 @@ class Driver:
         capabilities = self._provider.describe_capabilities(model.model_id)
         return RequestOptions(model.model_id, model.reasoning_effort, provider_key=self._provider.provider_key,
                               session_key=session_key(scope), image_input=capabilities.image_input,
-                              screen_points=capabilities.image_input and capabilities.screen_points)
+                              screen_points=capabilities.image_input and capabilities.screen_points,
+                              speaks_first=capabilities.speaks_first)
 
     def _options_for(self, scope: TrustedScope) -> RequestOptions:
         return self._request_options(scope, self._turn_model(scope))

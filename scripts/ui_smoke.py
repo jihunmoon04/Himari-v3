@@ -72,7 +72,7 @@ from playwright.sync_api import expect, sync_playwright  # noqa: E402
 
 from himari.bootstrap.application import Application  # noqa: E402
 from himari.bootstrap.operator import OPERATOR  # noqa: E402
-from himari.bootstrap.proactive import ProactiveSettings  # noqa: E402
+from himari.proactive import ProactiveSettings  # noqa: E402
 from himari.common import (  # noqa: E402
     ASK_USER_TOOL_ID, CallId, ConversationId, PrincipalId, TextBlock, ToolCall, ToolId, TrustedScope,
 )
@@ -992,6 +992,38 @@ def run_wake(base: str, token: str, shots: str | None, root: str) -> list[str]:
         page.reload()  # drawn again from the recorded events
         expect(page.locator("#timeline .wake-line")).to_have_text("HIMARI reached out · a try", timeout=10000)
         expect(page.locator(".item-user")).to_have_count(1)  # the wake is not the user's message
+        # V3-P87 part 2b: the status line under Devices (a try is not counted toward the day) ...
+        page.click("#nav-appearance")
+        page.click("#nav-devices")
+        expect(page.locator("#devices-reaching")).to_have_text("Reaching out: on · quiet 23:00–08:00 · today 0 of 4",
+                                                               timeout=10000)
+        # ... and a loop's reminder on the memory screen: shown for loops only, kept, then cleared
+        page.click("#nav-appearance")
+        page.click("#nav-memory")
+        expect(page.locator("#surface-memory")).to_be_visible(timeout=5000)
+        page.get_by_role("button", name="Add to Open loops").click()
+        form = page.locator("#surface-memory .memory-form")
+        form.locator(".memory-form-text").fill("Take the evening medicine.")
+        remind = form.locator(".memory-form-remind")
+        expect(remind).to_be_visible()
+        form.locator(".memory-form-category").select_option("user")
+        expect(remind).to_be_hidden()
+        form.locator(".memory-form-category").select_option("loop")
+        remind.fill("2030-01-02T21:30")
+        form.locator("button[type=submit]").click()
+        expect(page.locator("#status-bar")).to_contain_text("Saved.", timeout=5000)
+        row = page.locator(".memory-row", has_text="Take the evening medicine.")
+        expect(row.locator(".memory-remind")).to_contain_text("Reminds you at", timeout=5000)
+        expect(row.locator(".memory-remind")).to_contain_text("Jan")
+        if shots:
+            page.screenshot(path=os.path.join(shots, "41-reminder.png"))
+        row.get_by_role("button", name=re.compile("^Edit note")).click()
+        edit = page.locator("#surface-memory .memory-form")
+        expect(edit.locator(".memory-form-remind")).to_have_value("2030-01-02T21:30")
+        edit.locator(".memory-form-remind").fill("")
+        edit.locator("button[type=submit]").click()
+        expect(page.locator(".memory-row", has_text="Take the evening medicine.").locator(".memory-remind")).to_have_count(
+            0, timeout=5000)
         browser.close()
     return errors
 

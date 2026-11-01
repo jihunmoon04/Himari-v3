@@ -56,7 +56,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterat
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from zoneinfo import available_timezones
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError, available_timezones
 from importlib import resources
 from typing import Annotated, Any, BinaryIO, Literal
 
@@ -98,7 +98,7 @@ from himari.bootstrap.application import (
 )
 from himari.bootstrap.changes import ChangeConflict, ChangeDiff, ChangesView
 from himari.bootstrap.companion import origin_view
-from himari.bootstrap.proactive import ProactiveRefused
+from himari.bootstrap.proactive import ProactiveRefused, loop_moment
 from himari.bootstrap.explorer import PDF_APPEND_MAX_BYTES, ExplorerRefused, Listing, ShownFile
 from himari.bootstrap.operator import OPERATOR, derive_cli_bearer, verify_operator_token
 from himari.bootstrap.mcp_defaults import McpDefaultsConflict
@@ -421,6 +421,9 @@ class MemoryBody(_Body):
     # Both left out on an edit keep the note's. A bare date ends in ``time_zone`` (the browser's), else the server's.
     due: str | None = None
     valid_until: str | None = None
+    # V3-P87 §5.3: a loop's reminder — a time with its offset, or the browser's local
+    # "YYYY-MM-DDTHH:MM" (read in ``time_zone``); null clears. Left out on an edit: kept.
+    remind_at: str | None = None
     time_zone: str | None = Field(default=None, max_length=64)
 
 
@@ -662,6 +665,17 @@ def delete_notice_view(notice: DeleteNotice) -> dict[str, Any]:
             "trash_days": notice.trash_days, "memory_count": notice.memories, "episode_count": notice.episodes}
 
 
+def _plain(value: Any) -> Any:
+    """Times as the API writes them, in nested dicts and lists (V3-P87 status)."""
+    if isinstance(value, datetime):
+        return _time(value)
+    if isinstance(value, dict):
+        return {k: _plain(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_plain(v) for v in value]
+    return value
+
+
 def wake_reason_view(reason: WakeReason) -> dict[str, Any]:
     out: dict[str, Any] = {"kind": reason.kind.value}
     for name in ("memory_id", "away_minutes", "via", "activity", "minutes"):
@@ -865,7 +879,11 @@ def memory_view(note: Memory, titles: dict[ConversationId, tuple[str | None, str
             "revision": note.revision, "created_at": _time(note.created_at), "updated_at": _time(note.updated_at),
             "due": note.due_at, "overdue": note.due_instant is not None and note.due_instant < now,
             "valid_until": note.valid_until, "expired": note.valid_instant is not None and note.valid_instant < now,
-            "kept_by_user": note.user_approved_at is not None}
+            "kept_by_user": note.user_approved_at is not None,
+            # V3-P87 §9: when HIMARI checks in on a loop, and its reminder and how it went
+            "checks_in_at": _time(loop_moment(note)), "remind_at": note.remind_at,
+            "remind_instant": _time(note.remind_instant), "remind_state": note.remind_state,
+            "reminded_at": _time(note.reminded_at)}
 
 
 def auto_memory_view(status: AutoMemoryStatus) -> dict[str, Any]:
@@ -929,25 +947,52 @@ def read_episode_cursor(cursor: str) -> tuple[datetime, int]:
     return moment, int(number)
 
 
-def note_dates(body: MemoryBody, server_zone: str, *, editing: bool) -> NoteDates | None:
+def _reminder(value: str, zone: str) -> tuple[str, datetime] | None:
+    """V3-P87 §5.3: a time with its offset, or a local "YYYY-MM-DDTHH:MM" read in ``zone``; never a day."""
+    value = value.strip()
+    if len(value) == 16 and value[10] == "T":
+        try:
+            local = datetime.fromisoformat(value).replace(tzinfo=ZoneInfo(zone))
+        except (ValueError, ZoneInfoNotFoundError):
+            return None
+        value = local.isoformat(timespec="minutes")
+    found = parse_note_date(value, zone)
+    return None if found is None or len(found[0]) == 10 else found
+
+
+def note_dates(body: MemoryBody, server_zone: str, *, editing: bool, current: Memory | None = None
+               ) -> NoteDates | None:
     """V3-P85 §10.2: the dates a note body gives; None (keep the note's) for an
-    edit that names neither. A date that does not read is a 422."""
-    if editing and not ({"due", "valid_until"} & body.model_fields_set):
+    edit that names none. On an edit a date not named stays as the note has it
+    (``current``). A date that does not read is a 422."""
+    named = {"due", "valid_until", "remind_at"} & body.model_fields_set
+    if editing and not named:
         return None
     zone = body.time_zone if body.time_zone and body.time_zone in available_timezones() else server_zone
     parsed: list[tuple[str, datetime] | None] = []
-    for value in (body.due, body.valid_until):
+    for name, value in (("due", body.due), ("valid_until", body.valid_until)):
         found = None if value is None or not value.strip() else parse_note_date(value, zone)
         if value is not None and value.strip() and found is None:
             raise ApiError(422, "invalid_date", "A date is YYYY-MM-DD, or a time with its UTC offset.")
+        kept = None if current is None else ((current.due_at, current.due_instant) if name == "due"
+                                              else (current.valid_until, current.valid_instant))
+        if editing and name not in named and kept is not None and kept[0] is not None and kept[1] is not None:
+            found = (kept[0], kept[1])
         parsed.append(found)
     due, valid = parsed
+    remind = None if body.remind_at is None or not body.remind_at.strip() else _reminder(body.remind_at, zone)
+    if body.remind_at is not None and body.remind_at.strip() and remind is None:
+        raise ApiError(422, "invalid_date", "A reminder is a time: YYYY-MM-DDTHH:MM, or with its UTC offset.")
+    if editing and "remind_at" not in named and current is not None and current.remind_at is not None \
+            and current.remind_instant is not None:
+        remind = (current.remind_at, current.remind_instant)
     if body.category == "loop":
         valid = None
     else:
-        due = None
+        due = remind = None
     return NoteDates(None if due is None else due[0], None if due is None else due[1],
-                     None if valid is None else valid[0], None if valid is None else valid[1])
+                     None if valid is None else valid[0], None if valid is None else valid[1],
+                     None if remind is None else remind[0], None if remind is None else remind[1])
 
 
 def pairing_token(raw: bytes) -> str | None:
@@ -978,6 +1023,7 @@ PROACTIVE_REFUSALS = {
     "busy": "A conversation is working; try again when it is done.",
     "closed": "The most recent conversation is being moved to the trash.",
     "not_settled": "The most recent conversation waits for an answer or a recovery first.",
+    "model_unchecked": "The most recent conversation's model was not checked for speaking first; choose another.",
 }
 
 
@@ -1920,7 +1966,8 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
 
     @app.get("/api/proactive")
     async def read_proactive(request: Request, who: PrincipalId = Depends(principal)) -> dict[str, Any]:
-        return himari(request).proactive_status(who)
+        status: dict[str, Any] = _plain(await himari(request).proactive_status(who))
+        return status
 
     @app.post("/api/proactive/try", status_code=202)
     async def try_proactive(request: Request, who: PrincipalId = Depends(principal)) -> dict[str, Any]:
@@ -2011,8 +2058,10 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
                           who: PrincipalId = Depends(principal)) -> dict[str, Any]:
         application = himari(request)
         try:
+            current = await application.data.read_memory(who, memory_id)
             note = await application.edit_memory(who, memory_id, MemoryCategory(body.category), body.text,
-                                                 body.revision, note_dates(body, application.time_zone, editing=True))
+                                                 body.revision, note_dates(body, application.time_zone, editing=True,
+                                                                           current=current))
         except DataError as error:
             raise memory_refused(error) from None
         return memory_view(note, await memory_titles(application, who, (note,)))

@@ -989,6 +989,15 @@ def cmd_proactive(session: Session, args: argparse.Namespace) -> int:
     status = session.client.get("/api/proactive")
     session.printer.line(f"Reaching out: {status['told']}")
     session.printer.line(f"Current device: {status.get('current_device') or 'none (away)'}")
+    if "today" in status:
+        session.printer.line(f"Today: {status['today']} of {status['daily']}"
+                             + (f" (last at {status['last_wake_at']})" if status.get("last_wake_at") else ""))
+        session.printer.line(f"Next loop check-in: {status.get('next_loop_at') or 'none'}")
+        session.printer.line(f"Next reminder: {status.get('next_reminder_at') or 'none'}")
+        look = status.get("last_look")
+        if isinstance(look, dict):
+            held = ", ".join(look.get("held") or [])
+            session.printer.line(f"Last look: {look.get('outcome')} at {look.get('at')}" + (f" (held: {held})" if held else ""))
     return EXIT_OK
 
 

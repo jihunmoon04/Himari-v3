@@ -582,7 +582,8 @@ def test_quiet_is_the_users_for_every_device(server: Server) -> None:
 def test_speaking_first_routes_are_the_operators(server: Server) -> None:
     server.sign_in()
     status = server.client.get("/api/proactive").json()
-    assert status == {"enabled": False, "told": "off (HIMARI_PROACTIVE=0)", "current_device": None}
+    assert status == {"enabled": False, "told": "off (HIMARI_PROACTIVE=0)", "current_device": None,
+                      "quiet_hours": "23:00-08:00"}
     refused = server.client.post("/api/proactive/try", headers=SEND)
     assert refused.status_code == 409 and refused.json()["error"]["code"] == "proactive_off"
     token = server.paired()

@@ -528,3 +528,75 @@ P1·P2 해결 확인. 문서 정합성 둘과 구현 주의 하나:
 - **P2-1 재시작 통합 테스트:** `tests/integration/test_wake_restart.py`(메모리·SQLite 둘 다). wake 턴의 묶음에서 첫 호출은 성공, 둘째는 claim 전에 죽고, 셋째는 시작 안 함 → 재시작 → `settle_cut_wakes`: 첫 호출 `SUCCEEDED` 그대로(다시 실행 안 함), 둘째·셋째 `CANCELLED`(`CUT_REASON`), 모델 호출 없음, wake `failed`, 새 wake가 열리고 셋째는 끝까지 실행되지 않음. `REQUIRE_USER`의 결과 모르는 호출이면 다시 실행하지 않고 새 wake는 `NOT_SETTLED`.
   - 이 테스트가 찾은 것: 닫힌 묶음은 모델이 아직 답하지 않은 계기(`CompletedGroupRef`)라 `accept_wake`가 새 wake를 계속 막았다(사용자가 말할 때까지). §6.1의 "답하지 않은 계기"는 사용자 메시지나 wake이고 §13은 "묶음이 닫힌 뒤에 새 wake"이므로, **끝난 wake의 턴이 남긴 묶음**(재시작으로 닫힘, Run 상한에서 멈춤)은 막지 않는다 — 새 wake 턴이 그 결과를 함께 본다. 사용자의 턴이 남긴 묶음(Run 사이에서 멈춤 등)은 사용자의 일이라 계속 막는다(`Driver._left_by_a_wake`: 마지막 사용자 메시지·wake 이벤트가 wake이고 그 기록이 `opened`가 아님).
 - **P2-2 `begin_wake` 인자:** `rules.check_wake`가 두 백엔드에서 똑같이 거절(`INVALID_ARGUMENT`, 아무것도 쓰지 않음): 같은 열쇠 두 번·빈 열쇠, `reminders`가 REMINDER 이유들의 노트와 정확히 같지 않음(이유 없는 알림, 알림을 싣지 않은 REMINDER 이유, 두 번, 다른 노트, 같은 노트의 이유 두 번, 노트 없는 REMINDER 이유).
+
+### 19.3 2부의 첫 PR(2a): 계기와 스케줄러 (`feat/proactive-part2`)
+
+알림(§5.3의 `remind_at`·도구·기억 화면·늦은 알림), 설정 화면의 상태 줄, 실제 모델 확인은 다음 PR(2b)에서 한다. 규칙 함수는 알림의 예외를 이미 안다.
+
+- **`himari.proactive`(새, 계층 3, `common`·`data`·`presence`만):** `ProactiveSettings`(bootstrap에서 옮김), `Situation`(시계와 읽은 상태) → `decide(situation, taken)` → `Decision`(이유·열쇠·알림·`expired` 열쇠·`blocked`·`held`·`next_at`).
+  - 고리: `loop_moment` — 시각이 있으면 +1시간, 날짜만이면 그날 18:00(날짜의 `due_instant`는 그 시간대의 하루 끝이라 다음 자정 − 6시간). 24시간 창, 넘으면 `expired` 열쇠. 열쇠 `loop:m<번호>:<due_at>`.
+  - 돌아옴: 4시간 이상, 기록 뒤 20초~10분, 돌아온 기기 = 지금 기기, 자리 비움 시작 뒤(그리고 돌아온 뒤 20초 안) 사용자 메시지 없음. 마지막 입력을 모르면(처음 쓰는 기기) 인사하지 않음. 열쇠 `return:<기기>:<분>`.
+  - 활동: FOCUS(`coding`·`document`·`design`·`video`, 30분), GAME_ENDED(30분 이상, 끝난 지 10분 안). 열쇠의 시작·끝 시각은 길이에서 거꾸로 세므로 틱마다 1초쯤 흔들려 분 경계를 넘을 수 있다 → 앞뒤 1분 열쇠도 함께 확인(`aliases`).
+  - 규칙 순서: 지금 기기 없음 → 작업 중 → (여기까지 알림도 막힘) → 조용히 → 대화 중(10분) → 답 없는 wake → 조용한 시간(기기 시간대, 자정 넘김) → 간격 → 하루 상한(기기 시간대의 하루, 알림만인 wake는 안 셈). **운영자의 `try`는 간격과 하루 상한에 세지 않는다**(시험이라).
+  - 합치기: 알림 → 고리(말할 시각 순) → 활동 → 돌아옴, 4개까지, 나머지는 `held`(다음 틱).
+- **`bootstrap/schedule.py` `Ticker`:** 이름 붙인 주기 작업. `purge`(옛 정리 루프, 같은 주기, 시작할 때 바로 한 번), `proactive`(30초, 돌아옴 기록 뒤 21초에 한 번 더 `poke`). 한 작업의 예외는 로그만 남고 다른 작업과 다음 차례는 돈다.
+- **마지막 입력(`Inputs`):** presence의 `on_input`(신호마다, 벽시계로 바꾼 입력 시각과 잠김 여부)을 받아, 이 프로세스 안에서는 모두 기억하고 Data(`devices.last_input_at`, 뒤로 가지 않음)에는 10분에 한 번, 잠기면 바로 쓴다. 반려 기능이 켜져 있으면 먼저 말 걸기가 꺼져 있어도 쓴다.
+- **돌아옴(`on_returned`):** presence가 돌아옴 기록을 만들 때(그 신호의 입력보다 먼저) 부른다. 스케줄러가 그때까지 아는 가장 늦은 입력(이 프로세스의 것 + Data의 것)으로 자리 비움 길이를 잰다. 서버가 시작된 뒤 처음 듣는 주체면 Data를 먼저 읽고 잰다(그 읽기는 이 신호의 입력이 쓰이기 전). 그래서 재시작 뒤의 `reconnect`는 짧게 재진다.
+- **스케줄러(`ProactiveScheduler`):** 지금 기기가 있는 주체마다 `Situation`을 읽는다(최근 대화, 그 끝 40개 이벤트로 "답 없는 wake", 기억의 고리, 26시간의 wake, 조용히, 마지막 사용자 메시지, 작업 중). 후보의 열쇠를 한 번에 물어(`taken_keys`) `decide`, `expired`를 쓰고(`expire_keys`), 이유가 있으면 `submit_wake`. `BUSY`·`NOT_SETTLED`·`CLOSED`·열쇠 경합은 그 틱을 건너뛰고 상태에 남긴다.
+- **상태:** `GET /api/proactive`와 `himari proactive status`에 오늘 횟수/상한, 마지막 wake, 다음 고리 시각, 마지막 판단(결과, 막힌 이유로 미룬 이유들)을 더함.
+- **재시작(§4.4와 다름):** 이어 가지 않는다. 시작할 때는 기기가 아직 다시 붙지 않아 §6.1(지금 기기)을 통과할 수 없으므로 설계의 "이어 간다" 갈래는 열리지 않는다. 대신 **아무 말도 하기 전에 끊긴 wake**(wake 뒤에 이벤트가 없음)는 `failed`로 적고 열쇠를 돌려준다(`release_keys`). 계기가 아직 창 안이면 스케줄러가 새 wake로 다시 말한다. 한마디라도 한 wake(도구 묶음 포함)는 열쇠를 지킨다.
+- **Data(스키마 변경 없음, v17 그대로):** `wakes_since`, `taken_keys`, `expire_keys`(`wake_id` 없이), `release_keys`, `record_input`·`read_inputs`, `last_user_message_at`. 두 백엔드 같음.
+
+### 19.4 검수 (PR #156, `dd6376a`): NOT_READY → 고침
+
+- **P1 말하기 전 끊긴 wake가 다음 wake를 막음:** 열쇠를 돌려줘도 그 wake 이벤트가 답하지 않은 계기(`EventRef`)로 남아 `accept_wake`가 `NOT_SETTLED`를 냈다. 이제 `Driver._left_by_ended_wakes`가 계기를 하나씩 본다: 사용자 메시지, **아직 열린** wake, 사용자 턴이 남긴 묶음은 막고, **끝난** wake(재시작으로 `failed`, 사용자가 이겨 `cancelled`)의 계기와 끝난 wake가 남긴 묶음은 막지 않는다. 다음 턴은 그것들을 다 그리고 새 wake를 마지막에 둔다(앞 wake는 같은 이유의 `<wake>` 줄로 그대로 보임 — 기록을 숨기지 않음).
+  - 같이 고친 것: 말하기 전 끊긴 wake가 **간격**에 걸려 30분 동안 다시 말하지 못했다. 간격과 하루 상한은 이제 **말했거나 말하는 중인 wake**(`opened`·`answered`)만 센다(`proactive.spoke`). 실행 중 실패한 wake는 열쇠를 지키므로 같은 계기를 되풀이하지 않는다.
+  - 시험: 두 백엔드에서 재시작 → `failed` → 열쇠 반환 → 새 wake → 모델 답(두 `<wake>`가 그려짐, 열쇠 다시 잡힘), 실제 앱의 스케줄러로 같은 흐름, 열린 wake·사용자 메시지는 계속 막음.
+- **P2 읽은 뒤 바뀐 것:** 스케줄러가 wake를 열기 직전에 마지막 사용자 메시지(알림만이 아니면 "대화 중")와 지금 기기를 다시 보고, `submit_wake(alone=True)`가 그 주체의 **어느 대화에서든** 작업이 돌면 `BUSY`. 다시 본 것과 Runner의 검사 사이에 `await`가 없어 함께 성립한다. 남는 틈은 `accept_wake` 안의 기다림뿐이고, 그 대화의 메시지는 Driver lock이 막는다.
+
+### 19.5 재검수 (PR #156, `0ed2f28`): READY_WITH_CORRECTIONS → 고침
+
+- **P2-1 `alone` 검사 뒤의 틈:** `accept_wake`를 기다리는 동안 다른 대화에서 작업이 시작될 수 있었다. 이제 `submit_wake`가 기다림 **뒤에** 한 번 더 본다: 그 주체의 작업이 돌면(또는 이 대화가 닫히는 중이면) wake 작업을 시작하지 않고 `Driver.withdraw_wake`로 거둔다(`cancelled`, 알림은 되돌림, 열쇠 반환 — 한마디도 안 했으므로). 이 확인에서 `_start`까지 `await`가 없어 wake 작업이 다른 작업 곁에서 도는 일은 없다. 사용자가 이긴다(사용자의 작업은 막지 않음). 시험: `accept_wake` 안에서 실제로 기다리는 사이 다른 대화의 작업을 시작하는 끼어들기.
+- **P2-2 출력이 있는 `failed`:** `spoke`가 `failed`라도 그 턴이 출력(최종 답, 진행 글, 도구 호출)을 남겼으면 센다. 스케줄러가 26시간 안의 `failed` wake마다 그 wake 뒤를 다음 메시지·wake까지 읽어(`Situation.said`) 넘긴다. 읽지 못하면 말한 것으로 센다. `wake_turn`은 다음 wake에서도 끊는다(뒤 wake의 출력이 앞 wake 몫이 되지 않게; 작업 종료·재시작 정리에서는 열린 wake 뒤에 다른 wake가 올 수 없어 바뀌는 것이 없다).
+
+### 19.6 2부의 둘째 PR(2b): 알림, 상태 줄, 실제 모델 확인 (`feat/proactive-part2b`)
+
+- **Data(스키마 그대로, v17):** `Memory`에 `remind_at`·`remind_instant`·`remind_state`·`reminded_at`, `MemoryChange`·`NoteDates`에 `remind_at`·`remind_instant`. 모든 노트 쓰기가 한 곳(SQLite `_write_memory`, 메모리 `_put_memory`)을 지난다: 고리가 아니면 알림을 지움, 알림이 **새로 쓰이면**(다른 시각이거나 지워짐) `scheduled`(없으면 상태 없음)·시도 0·`remind_wake` 비움·`reminded_at` 비움, **그대로면** 전달 상태를 지킴(그래서 자동 기억이 글을 고쳐도, 사용자가 다른 날짜를 고쳐도 `delivered`가 유지됨). 자동 기억은 `remind_at`을 쓰지 않는다(그 경로에 인자가 없음). 저장·복원은 다시 읽은 노트(상태 포함)를 돌려준다. `miss_reminders(principal, before)`: 7일 지난 `scheduled` → `missed`. 되돌리기(Undo)는 알림도 되살린다.
+- **`memory_save`:** `remind_at`(고리만, 오프셋 있는 시각만 — 날짜만이면 거절, 5분 전~1년 뒤). 설명에 "Give a loop remind_at only when the user asked to be reminded at a time: the exact time with its UTC offset, worked out from now for "in 30 minutes"". 다시 쓰기에서 주지 않으면 지킴, `null`이면 지움. `memory_search` 줄에 `remind …`(아직 전하지 않은 것만).
+- **계기(`reminder_candidates`):** `scheduled`이고 시각이 지난 고리. 24시간 안이면 제때(Q8대로 조용히·대화 중·답 없는 wake·조용한 시간·간격·하루 상한을 넘음, 지금 기기·작업 중은 기다림). 그 뒤 7일 안이면 **제때 창이 끝난 뒤 생긴** 새 돌아옴 기록(길이는 상관없음)에서 `late: true`로. 열쇠 없음(전달 상태가 막음). 합칠 때 맨 앞. 스케줄러가 판단할 때마다 `miss_reminders(now − 7일)`.
+- **모델에게:** 기억의 `loops`에 아직 전하지 않은 알림의 `remind_at`, 알림 wake의 `loop`에 `remind_at`(고리 확인 wake에는 없음). `context_key`의 `wake_notes`에 `remind_at`.
+- **Web:** 기억 화면의 고리 줄 — "Reminds you at …" / "Reminded …" / "Missed reminder at …", 없으면 아직 오지 않은 "Checks in after …"(설계의 "Checked in Nov 4"는 하지 않음: 열쇠가 wake인지 만료인지 화면에서 알 길이 없어서). 편집 폼에 고리일 때만 보이는 `datetime-local` "Remind me at"(브라우저 시간대로 보냄, 서버가 그 시간대로 읽음). 편집에서 이름을 대지 않은 날짜는 노트의 것을 지킴(전에는 고리의 `due`만 고쳐도 다른 날짜가 비었을 수 있음). Settings > Devices 아래 "Reaching out: on · quiet 23:00–08:00 · today 1 of 4"(꺼져 있으면 이유). `GET /api/proactive`에 `quiet_hours`·`next_reminder_at`; CLI `Next reminder`.
+- **실제 모델 확인**(`tests/live/test_proactive_live.py`, 결과 `docs/live-results/proactive-2026-11-01.jsonl`): 9장면(지난 고리, 돌아옴, 알림, 늦은 알림, 오래 집중, 게임 끝남, 전체 화면 영상, 지운 고리, wake 뒤 사용자 메시지) × 2번 × 5모델. 판정: 두 문장 이하(전체 화면은 한 문장), 질문 하나 이하, 한국어, wake·서버·번호를 말하지 않음, 표정 표시 문법.
+  - "Speaking first" 줄을 두 번 다듬음: 70/90 → 77/90 → **80/90**(gpt-6-luna 18, deepseek-v4.1-flash 17, claude-haiku-5.5 16, mimo-v2.6-pro 16, minimax-m3 13). 바뀐 말: "about those reasons only: at most two short sentences in all, and only one of them a question; when … fullscreen … one short sentence and no question".
+  - 남은 실패는 대부분 가벼움(짧은 질문 둘 "다녀오셨어요? 어떠셨어요?", 전체 화면에서 두 문장). 모델 밖의 실패: deepseek가 도구 없이 도구 호출 문법을 지어냄(2회), mimo 빈 응답(1회). **minimax-m3만 80% 아래.** 통과한 모델에만 먼저 말 걸기를 허락할지는 소유자가 정한다(§13).
+
+### 19.7 검수 (PR #157, `a661e60`): NOT_READY → 고침
+
+- **P1-1 정리 작업이 기다리는 알림의 고리를 지움:** 날짜 없는 고리는 90일, 날짜 지난 고리는 14일이면 지워졌다(알림은 1년 뒤까지 받음). 이제 알림이 `scheduled`·`claimed`인 고리는 그 정리에서 빠진다(`PENDING_REMINDERS`); 전한 뒤(`delivered`)나 놓친 뒤(`missed`)는 원래 규칙. 두 백엔드.
+- **P1-2 자동 기억 수정의 Undo가 알림을 잃음:** Undo가 읽는 기록(`rules.memory_json`)에 `remind_at`·`remind_instant`를 넣고 `memory_from_record`가 되살린다(알림 전의 기록은 알림 없이 그대로 읽힘). 같은 알림으로 되돌리면 전달 상태도 지켜진다.
+- **P2-1 retire 뒤 복구의 상태가 백엔드마다 다름:** 메모리 백엔드가 retire 기록을 먼저 지우고 쓰는 바람에 알림을 새로 쓴 것으로 보고 `scheduled`로 되돌렸다. 이제 retire 기록이 있는 동안 쓰고 지운다 — SQLite처럼 `delivered`가 남는다.
+- 시험(두 백엔드): 1년 안 알림의 고리가 정리 시각을 지나도 남고, 알림을 전한 뒤에 정리됨; 자동 수정 → Undo → 알림·상태 유지(옛 기록도 읽힘); 전달 → retire → 복구 → `delivered`. 고치기 전 코드에서는 P1 둘이 두 백엔드에서, P2-1이 메모리 백엔드에서 실패하는 것을 확인함.
+
+### 19.8 재검수 (PR #157, `e52f458`): READY_WITH_CORRECTIONS → 고침
+
+- **P2-1 같은 문구의 고리에 새 알림:** `memory_save`의 "Already saved" 검사가 알림을 보지 않아, 이미 있는 고리를 같은 문구와 `remind_at`으로 다시 저장하면 알림이 붙지 않았다. 이제 알림이 주어졌고 그 고리의 것과 다르면 그 고리의 수정으로 쓴다(글은 그 고리의 것, `due`는 주지 않으면 그 고리의 것, "Updated m1"). 알림 없이 같은 문구면 예전처럼 "Already saved".
+- **P2-2 자동 기억이 기다리는 알림을 지움:** 알림이 `scheduled`·`claimed`인 고리는 자동 기억이 **잊거나(`FORGET`) 고리 아닌 것으로 바꾸지(`UPDATE`의 다른 범주)** 못한다 — Data의 `decide_item`이 `reminder_pending`으로 거절하고(권위), 계획 단계도 `forget`을 미리 떨어뜨린다. 고리인 채로 글만 고치는 것은 된다(알림은 지켜짐). 사용자와 모델의 `memory_forget`은 그대로 지울 수 있다. 알림을 전한 뒤에는 예전 규칙.
+  - 같이 고친 것: 메모리 백엔드가 자동 기억을 적용할 때 노트를 전달 상태 없이 읽고 있었다(SQLite는 읽음) — 이제 같은 상태로 판정한다.
+
+### 19.9 소유자 결정 (2026-11-01): 기준에 못 미친 모델은 먼저 말 걸지 않음
+
+- `ProviderCapabilities.speaks_first`: 실제 모델 확인(§19.6)에서 80% 이상 통과한 모델만 — gpt-6-luna(18/18), deepseek-v4.1-flash(17), claude-haiku-5.5(16), mimo-v2.6-pro(16). minimax-m3(13/18)은 빠짐. 확인하지 않은 모델(gpt-5-nano, gpt-6.1-sol, claude-sonnet-5.5, glm-5.3)도 다른 능력과 같은 원칙으로 꺼져 있다(확인하면 켤 수 있음).
+- 그 대화의 모델이 `speaks_first`가 아니면: `accept_wake`가 `MODEL_UNCHECKED`(스케줄러는 그 틱을 건너뜀, `try`는 409 `model_unchecked`), 시스템 글의 "Speaking first" 줄과 원칙의 `<wake>`도 넣지 않는다(`RequestOptions.speaks_first`). 사용자가 대화의 모델을 바꾸면 그 다음 판단부터 따른다.
+- **검수(PR #158, `5c9b8de`) P2-1 받은 뒤 모델이 바뀜:** `accept_wake`는 모델 A로 확인하지만 작업의 턴은 모델을 다시 고른다. 이제 wake 작업은 `Driver.resume_wake`로 돈다: 그 턴의 모델이 `speaks_first`가 아니면 Run 없이 wake를 거둔다(`cancelled`, 열쇠 반환, 결과 `CANCELLED`/`model_unchecked`). 시험: `try`가 받은 뒤 첫 Run 전에 모델의 능력을 바꿈 → Run 없음, wake `cancelled`.
+
+### 19.10 앱 (`feat/proactive-app`, §10)
+
+- `JobOrigin`(새, WPF 밖이라 ContractTests가 Linux에서 시험): `IsOwn(origin, device)` — `device`나 **`wake`**이고 이 기기를 이름 지음; `IsWake`; `Follow(current, conversation, draft)` — 지금 보는 대화가 아니고 입력 중이 아닐 때만 옮김.
+- `Streams.cs`: `job started`가 이 기기의 wake이고 다른 대화면 `Follow`일 때 `RefreshConversations(그 대화)`로 옮기고, 아니면 상태 줄("히마리가 다른 대화에서 말을 걸었어요. 대화 목록에서 열 수 있어요."). 그다음은 자기 작업과 같은 길(`RecoverMoveJob`, `StartLive` → 말풍선·표정·이동). 재연결의 `hello`/`activity`도 `IsOwn`으로 wake 작업의 `live`를 다시 연다.
+- `HistoryReader`: wake 이벤트를 "(히마리가 먼저 말을 걸었어요)" 한 줄로.
+- 설계의 "입력 중이면 말풍선만 띄우고 누르면 옮김"은 상태 줄 알림으로 줄였다(말풍선은 그 대화의 `live`에 묶여 있어 다른 대화의 말을 띄우면 지금 대화의 말풍선과 섞인다). 사용자가 그 대화를 열면 이어지는 `live`나 기록으로 본다.
+- 확인: 앱·UiTests·ContractTests가 Linux의 .NET 10 SDK로 경고 없이 빌드(기존 `confirmResend` 경고 하나만), ContractTests 통과. UiTests와 실제 PC 확인은 Windows에서(소유자).
+- **검수(PR #159, `6fddcc2`) P1 옮기는 도중의 입력:** `Follow` 확인과 실제 전환 사이에 대화 목록을 읽는 HTTP 기다림이 있어, 그동안 A에 쓰기 시작한 글이 B로 옮겨질 수 있었다. 이제 `FollowWake`가 목록을 읽은 **뒤** 다시 본다(`JobOrigin.StillFollow`: 같은 대화, 입력 리비전 그대로 — 글을 고치거나 대화를 바꾸면 오름 —, 입력창이 빔). 그 확인에서 전환(`ShowConversations`, 동기)까지 `await`가 없다. 바뀌었으면 옮기지 않고 상태 줄. `RefreshConversations`는 읽기(`LoadConversations`)와 보이기(`ShowConversations`)로 나눔.
+- **P2-1 재연결 뒤의 wake:** `hello`/`activity`로 다시 찾은 wake 작업도 `RecoverAndStartLive(..., wake: true)`가 먼저 `FollowWake`를 거친다(같은 확인).
+- 시험: ContractTests에 `StillFollow`; UiTests에 느린 목록 응답(`SlowListHandler`) 중 아무것도 안 함 → B로 옮김, 입력함 → A에 남고 글 유지·상태 줄, 다른 대화를 고름 → 그 대화에 남음(빌드 확인, 실행은 Windows).
+- **재검수(PR #159, `ed9cbe3`) P2 알림이 바로 지워짐:** 입력 중이라 옮기지 않고 띄운 알림을 곧이은 대화 읽기(`hello`·`activity`)가 "연결됨"으로 덮었다. 이제 앱이 그 대화를 기억하고(`wakeElsewhere`) 상태 줄을 쓰는 곳이 `JobOrigin.Status`를 거친다: 그 대화를 열거나 그 wake 작업이 끝날 때까지 알림이 남는다. 시험: ContractTests(`Status`), UiTests(입력 중 → 알림 → 연결된 채 지금 대화를 읽어도 알림 유지 → 그 대화를 열면 끝).

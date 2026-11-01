@@ -1026,6 +1026,13 @@ class Memory(DeepFrozen):
     source_item: int | None = None
     # A proposal the user kept (§10.2): automatic passes leave it alone.
     user_approved_at: datetime | None = None
+    # V3-P87 §5.3: a loop's reminder, as written and as its instant, and how it was
+    # delivered (scheduled, claimed, delivered, missed; None without one). A new
+    # remind_at schedules it afresh; automatic passes never write one.
+    remind_at: str | None = None
+    remind_instant: datetime | None = None
+    remind_state: str | None = None
+    reminded_at: datetime | None = None
 
 
 class MemoryChangeKind(Enum):
@@ -1053,6 +1060,8 @@ class MemoryChange(DeepFrozen):
     due_instant: datetime | None = None
     valid_until: str | None = None  # SAVE of another note
     valid_instant: datetime | None = None
+    remind_at: str | None = None  # SAVE of a loop the user asked to be reminded of (V3-P87 §5.3)
+    remind_instant: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -1063,6 +1072,8 @@ class NoteDates(DeepFrozen):
     due_instant: datetime | None = None
     valid_until: str | None = None
     valid_instant: datetime | None = None
+    remind_at: str | None = None  # a loop's reminder (V3-P87 §5.3)
+    remind_instant: datetime | None = None
 
 
 def parse_note_date(value: object, zone: str) -> tuple[str, datetime] | None:
@@ -1406,7 +1417,10 @@ def memory_from_record(previous: str) -> Memory | None:
                       int(raw["revision"]), epoch, epoch, due_at=raw.get("due_at"), due_instant=moment("due_instant"),
                       valid_until=raw.get("valid_until"), valid_instant=moment("valid_instant"),
                       source_pass=raw.get("source_pass"), source_item=raw.get("source_item"),
-                      user_approved_at=moment("user_approved_at"))
+                      user_approved_at=moment("user_approved_at"),
+                      # V3-P87 §5.3 (PR #157 review P1-2); records before it have none
+                      remind_at=raw.get("remind_at") if raw.get("remind_instant") else None,
+                      remind_instant=moment("remind_instant") if raw.get("remind_at") else None)
     except (ValueError, KeyError, TypeError, AttributeError):
         return None
 
@@ -1451,7 +1465,10 @@ class MemoryCleanup(DeepFrozen):
     proposals: int = 0
 
 
-MAX_WAKE_REASONS = 4  # V3-P87 §6.4
+MAX_WAKE_REASONS = 4
+PENDING_REMINDERS = frozenset({"scheduled", "claimed"})  # §5.3: a loop with one is not cleaned up as stale
+REMIND_ON_TIME = timedelta(hours=24)  # §5.3: a reminder is told on time within this of its moment
+REMIND_LATE = timedelta(days=7)  # §5.3 (Q9): after that, at a later return, until this; then missed  # V3-P87 §6.4
 REMINDER_ATTEMPTS = 3  # V3-P87 §5.3: a reminder whose wakes ended unanswered this often is missed
 
 
@@ -1501,6 +1518,28 @@ class WakeStore(Protocol):
 
     async def opened_wakes(self) -> tuple[WakeRecord, ...]:
         """Every principal's wakes still opened (a restart settles them, §4.4)."""
+        ...
+
+    async def wakes_since(self, principal: PrincipalId, since: datetime) -> tuple[WakeRecord, ...]:
+        """V3-P87 §6.2: the principal's wakes created at or after ``since``, oldest first."""
+        ...
+
+    async def taken_keys(self, principal: PrincipalId, keys: Sequence[str]) -> frozenset[str]:
+        """§5: those of ``keys`` a wake took, or that were expired."""
+        ...
+
+    async def expire_keys(self, principal: PrincipalId, keys: Sequence[str]) -> None:
+        """§5.1: take ``keys`` with no wake — past their window, never spoken. A key taken already stays."""
+        ...
+
+    async def miss_reminders(self, principal: PrincipalId, before: datetime) -> int:
+        """§5.3 (Q9): scheduled reminders whose moment is before ``before`` become
+        missed (shown on the memory screen); how many."""
+        ...
+
+    async def release_keys(self, principal: PrincipalId, wake_id: str) -> None:
+        """§4.4 (part 2): give back the keys of a wake a restart cut before it said
+        anything, so a trigger still in its window may be spoken of again."""
         ...
 
 
@@ -1722,6 +1761,15 @@ class DeviceStore(Protocol):
 
     async def touch_device(self, principal: PrincipalId, device_id: str, at: datetime) -> None:
         """Records when it was last seen; nothing for an unknown device."""
+        ...
+
+    async def record_input(self, principal: PrincipalId, device_id: str, at: datetime) -> None:
+        """V3-P87 §5.2: the device's last input (``devices.last_input_at``), never
+        moved back; nothing for an unknown or revoked device."""
+        ...
+
+    async def read_inputs(self, principal: PrincipalId) -> Mapping[str, datetime]:
+        """Each unrevoked device's last input, as recorded."""
         ...
 
     async def read_quiet(self, principal: PrincipalId) -> datetime | None:
@@ -2208,6 +2256,11 @@ class ConversationCatalog(Protocol):
     async def most_recent_user_conversation(self, principal: PrincipalId) -> ConversationSummary | None:
         """V3-P83 §8.2: outside the trash, the Conversation whose latest user
         message (answers included) is the latest; None without any."""
+        ...
+
+    async def last_user_message_at(self, principal: PrincipalId) -> datetime | None:
+        """V3-P87 §6.1: when the principal's latest user message (answers included)
+        came, in any Conversation outside the trash; None without any."""
         ...
 
     async def list_waiting_conversations(self, principal: PrincipalId) -> Sequence[ConversationId]:

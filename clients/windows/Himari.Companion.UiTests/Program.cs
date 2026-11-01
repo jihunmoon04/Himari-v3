@@ -580,8 +580,54 @@ internal static class Program
             Snapshot("03-new-draft-below-reply");
             preview.Close();
         }
+        // V3-P87 §10 (PR #159 review P1): following a wake checks again once the conversation list is read.
+        foreach (string meanwhile in new[] { "nothing", "typed", "picked" })
+        {
+            var follow = new MainWindow();
+            object? Call(string method, params object?[] arguments) => typeof(MainWindow).GetMethod(method, BindingFlags.NonPublic | BindingFlags.Instance)!.Invoke(follow, arguments);
+            void Field(string field, object? value) => typeof(MainWindow).GetField(field, BindingFlags.NonPublic | BindingFlags.Instance)!.SetValue(follow, value);
+            object? Value(string field) => typeof(MainWindow).GetField(field, BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(follow);
+            void Until(Func<bool> ready)
+            {
+                var untilFrame = new DispatcherFrame(); var poll = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(10) };
+                var deadline = DateTime.UtcNow.AddSeconds(5);
+                poll.Tick += (_, _) => { if (ready() || DateTime.UtcNow >= deadline) untilFrame.Continue = false; };
+                if (!ready()) { poll.Start(); Dispatcher.PushFrame(untilFrame); poll.Stop(); }
+                Check(ready(), "asynchronous UI operation completed within test deadline");
+            }
+            var slow = new SlowListHandler();
+            var local = new ServerClient("https://example.com/", "device-one", slow);
+            using var followToken = new CancellationTokenSource();
+            Field("client", local); Field("connection", followToken); Field("currentConversation", "a"); Field("deviceId", "d");
+            var editor = (TextBox)follow.FindName("Input");
+            var following = (Task)Call("FollowWake", "b", local, followToken.Token)!;
+            Until(() => slow.ListAsked);  // the list is on its way
+            if (meanwhile == "typed") editor.Text = "A에 보낼 말";
+            if (meanwhile == "picked") Call("SetCurrentConversation", "c");
+            slow.ReleaseList();
+            Until(() => following.IsCompleted); following.GetAwaiter().GetResult();
+            var shown = (string?)Value("currentConversation");
+            if (meanwhile == "nothing") Check(shown == "b", "a wake moves the app to its conversation when nothing changed meanwhile");
+            else
+            {
+                Check(shown == (meanwhile == "picked" ? "c" : "a"), "typing or picking a conversation while the list is read keeps the user where they are");
+                Check(((TextBlock)follow.FindName("Status")).Text.Contains("다른 대화에서"), "the status line tells where HIMARI spoke instead");
+            }
+            if (meanwhile == "typed")
+            {
+                Check(editor.Text == "A에 보낼 말", "the draft stays with the conversation it was written in");
+                // PR #159 re-review P2: reading A afterwards (as hello and activity do) keeps the notice
+                Field("connected", true);  // connected, the read writes the status line
+                var reading = (Task)Call("ReadConversation", "a", followToken.Token)!;
+                Until(() => reading.IsCompleted); reading.GetAwaiter().GetResult();
+                Check(((TextBlock)follow.FindName("Status")).Text == JobOrigin.WakeNotice, "reading the shown conversation does not wipe the wake notice");
+                Call("SetCurrentConversation", "b");
+                Check((string?)Value("wakeElsewhere") is null, "opening that conversation ends the notice");
+            }
+            follow.Close();
+        }
         app.Shutdown();
-        Console.WriteLine("WPF keyboard, IME, bubble colors/order/expiry, layout and reply reconnect checks passed.");
+        Console.WriteLine("WPF keyboard, IME, bubble colors/order/expiry, layout, reply reconnect and wake follow checks passed.");
     }
 }
 
@@ -635,4 +681,26 @@ internal sealed class ReplyReconnectHandler : HttpMessageHandler
     }
     private static async Task<HttpResponseMessage> UntilCancelled(CancellationToken ct)
     { await Task.Delay(Timeout.Infinite, ct); throw new OperationCanceledException(ct); }
+}
+
+/// <summary>V3-P87 §10: a server whose conversation list comes only when released.</summary>
+internal sealed class SlowListHandler : HttpMessageHandler
+{
+    private readonly TaskCompletionSource list = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    internal volatile bool ListAsked;
+    internal void ReleaseList() => list.SetResult();
+    protected override void Dispose(bool disposing) { }
+    protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+    {
+        string path = request.RequestUri!.AbsolutePath, body;
+        if (path == "/api/conversations")
+        {
+            ListAsked = true;
+            await list.Task.WaitAsync(ct);
+            body = JsonSerializer.Serialize(new { items = new[] { new { id = "a", title = "A" }, new { id = "b", title = "B" }, new { id = "c", title = "C" } } });
+        }
+        else if (path.EndsWith("/events")) body = JsonSerializer.Serialize(new { items = Array.Empty<object>() });
+        else body = JsonSerializer.Serialize(new { conversation = new { last_sequence = 1 }, job = new { running = false, job_id = "w" } });
+        return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(body, Encoding.UTF8, "application/json") };
+    }
 }

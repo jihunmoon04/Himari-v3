@@ -68,6 +68,9 @@ class ProviderCapabilities(DeepFrozen):
     # Memory passes may use it (V3-P85 §4.8, Q6): only for models whose answers
     # passed the live memory check (well-formed, grounded, sensitive words marked).
     memory_passes: bool = False
+    # HIMARI may speak first in a conversation on it (V3-P87 §13, owner 2026-11-01):
+    # only models that passed 80% of the live speaking-first check.
+    speaks_first: bool = False
 
 
 @runtime_checkable

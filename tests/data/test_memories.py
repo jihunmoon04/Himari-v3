@@ -335,3 +335,71 @@ def test_restore_is_per_principal() -> None:
         assert code(error) is DataErrorCode.NOT_FOUND
 
     asyncio.run(scenario())
+
+
+# --- V3-P87 §5.3: a loop's reminder -----------------------------------------------------
+
+def test_a_reminder_is_scheduled_when_written_and_again_when_moved() -> None:
+    from datetime import UTC, datetime, timedelta
+
+    from himari.data.api import NoteDates, WakeKind, WakeReason, WakeStatus, parse_note_date
+
+    async def scenario() -> None:
+        store, data = fresh()
+        at = parse_note_date("2026-11-04T09:00+09:00", "UTC")
+        assert at is not None
+        call = await tool_call(data)
+        memory_id = await data.allocate_memory_id(ME)
+        await data.commit_tool_outcome(SCOPE, call, saved(MemoryChange(
+            MemoryChangeKind.SAVE, memory_id, MemoryCategory.LOOP, "약 먹기", remind_at=at[0], remind_instant=at[1])))
+        note = await data.read_memory(ME, memory_id)
+        assert (note.remind_at, note.remind_instant, note.remind_state) == (at[0], at[1], "scheduled")
+        # delivered by a wake, then rewritten with the same reminder: it stays delivered
+        wake = await data.begin_wake(SCOPE, (WakeReason(WakeKind.REMINDER, memory_id=memory_id),), "d1",
+                                     reminders=(memory_id,))
+        await data.end_wake(ME, wake.payload.wake_id, WakeStatus.ANSWERED)  # type: ignore[union-attr]
+        done = await data.read_memory(ME, memory_id)
+        assert done.remind_state == "delivered" and done.reminded_at is not None
+        same = await data.save_memory(ME, MemoryCategory.LOOP, "약 먹기!", memory_id=memory_id,
+                                      expected_revision=done.revision)
+        assert same.remind_at == at[0] and (await data.read_memory(ME, memory_id)).remind_state == "delivered"
+        # moved by the user: scheduled afresh
+        later = parse_note_date("2026-11-04T10:00+09:00", "UTC")
+        assert later is not None
+        moved = await data.save_memory(ME, MemoryCategory.LOOP, "약 먹기!", memory_id=memory_id,
+                                       expected_revision=same.revision,
+                                       dates=NoteDates(remind_at=later[0], remind_instant=later[1]))
+        read = await data.read_memory(ME, memory_id)
+        assert (read.remind_at, read.remind_state, read.reminded_at) == (later[0], "scheduled", None)
+        # it stops being a loop: the reminder goes
+        fact = await data.save_memory(ME, MemoryCategory.PROJECT, "약 먹기!", memory_id=memory_id,
+                                      expected_revision=moved.revision)
+        assert (fact.remind_at, (await data.read_memory(ME, memory_id)).remind_state) == (None, None)
+        # read back after a restart, as written
+        data = data_for(restart(store))
+        assert (await data.read_memory(ME, memory_id)).remind_at is None
+        # a week past its moment, a scheduled reminder is missed
+        old = await data.save_memory(ME, MemoryCategory.LOOP, "물 마시기", dates=NoteDates(
+            remind_at=at[0], remind_instant=at[1]))
+        assert await data.miss_reminders(ME, at[1] - timedelta(seconds=1)) == 0
+        assert await data.miss_reminders(ME, datetime(2026, 11, 12, tzinfo=UTC)) == 1
+        assert (await data.read_memory(ME, old.memory_id)).remind_state == "missed"
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("case", ["fact", "half"])
+def test_a_reminder_is_a_loops_and_comes_with_its_instant(case: str) -> None:
+    from himari.data.api import NoteDates, parse_note_date
+
+    async def scenario() -> None:
+        _, data = fresh()
+        at = parse_note_date("2026-11-04T09:00+09:00", "UTC")
+        assert at is not None
+        dates = NoteDates(remind_at=at[0], remind_instant=at[1]) if case == "fact" else NoteDates(remind_at=at[0])
+        category = MemoryCategory.PROJECT if case == "fact" else MemoryCategory.LOOP
+        with pytest.raises(DataError) as refused:
+            await data.save_memory(ME, category, "약 먹기", dates=dates)
+        assert code(refused) is DataErrorCode.INVALID_ARGUMENT
+
+    asyncio.run(scenario())

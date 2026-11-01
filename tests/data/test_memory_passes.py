@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 
@@ -789,5 +790,123 @@ def test_the_lines_read_the_newest_passes_with_their_shown_items_at_once() -> No
         assert await data.memory_revisions(ME, [notes["Note 0."], notes["Note 2."], 999]) == {
             notes["Note 0."]: (1, False), notes["Note 2."]: (1, False)}
         assert await data.memory_revisions(ME, []) == {}
+
+    asyncio.run(scenario())
+
+
+# --- V3-P87 §5.3 (PR #157 review): a reminder survives the cleanup, an Undo and a retirement -------------
+
+async def reminded_loop(data: Data, text: str, remind: datetime, due: tuple[str, datetime] | None = None) -> int:
+    """A loop the model saved with a reminder (passes may rewrite or retire its notes)."""
+    memory_id = await data.allocate_memory_id(ME)
+    await committed(data, SCOPE, MemoryChange(MemoryChangeKind.SAVE, memory_id, LOOP, text,
+                                              due_at=None if due is None else due[0],
+                                              due_instant=None if due is None else due[1],
+                                              remind_at=remind.isoformat(timespec="minutes"), remind_instant=remind))
+    return memory_id
+
+
+def test_the_cleanup_keeps_a_loop_until_its_reminder_is_told() -> None:
+    """P1-1: undated and untouched for 90 days, or 14 days past its date: kept while its reminder waits."""
+    from himari.data.api import WakeKind, WakeReason, WakeStatus
+
+    async def scenario() -> None:
+        _, data = fresh()
+        now = datetime.now(UTC).replace(second=0, microsecond=0)
+        later = now + timedelta(days=200)
+        undated = await reminded_loop(data, "Renew the passport.", later)
+        dated = await reminded_loop(data, "Dentist.", later, ("2026-01-01", now - timedelta(days=20)))
+        cleaned = await data.clean_memories(later - timedelta(days=1))  # both stale by the old rules
+        assert cleaned.stale_loops == 0
+        assert {n.memory_id for n in await data.list_memories(ME)} == {undated, dated}
+        wake = await data.begin_wake(SCOPE, (WakeReason(WakeKind.REMINDER, memory_id=undated),), "d1",
+                                     reminders=(undated,))
+        cleaned = await data.clean_memories(later - timedelta(days=1))  # claimed: still waiting to be told
+        assert cleaned.stale_loops == 0
+        await data.end_wake(ME, wake.payload.wake_id, WakeStatus.ANSWERED)  # type: ignore[union-attr]
+        cleaned = await data.clean_memories(later + timedelta(days=1))  # told: the usual rule again
+        assert cleaned.stale_loops == 1 and [n.memory_id for n in await data.list_memories(ME)] == [dated]
+
+    asyncio.run(scenario())
+
+
+def test_undoing_an_automatic_rewrite_keeps_the_reminder() -> None:
+    """P1-2: the record a pass keeps for Undo holds the reminder; an older record without one reads as before."""
+    async def scenario() -> None:
+        _, data = fresh()
+        remind = (NOW + timedelta(days=3)).replace(second=0, microsecond=0)
+        memory_id = await reminded_loop(data, "Take the medicine.", remind)
+        last = await turn(data, SCOPE, "It is the evening pills.")
+        rewrite = await live(data, SCOPE, last)
+        result = await data.apply_pass(rewrite, [PassItem(0, "{}", PassAction.UPDATE, memory_id=memory_id,
+                                                          expected_revision=1, category=LOOP,
+                                                          text="Take the evening pills.")], None, now=NOW)
+        assert result.outcomes == ("applied",)
+        rewritten = await data.read_memory(ME, memory_id)
+        assert (rewritten.remind_instant, rewritten.remind_state) == (remind, "scheduled")  # a pass keeps it
+        (record,) = await data.read_pass_items(rewrite)
+        before = memory_from_record(record.previous or "")
+        assert before is not None and (before.remind_at, before.remind_instant) == (
+            remind.isoformat(timespec="minutes"), remind)
+        back = await data.restore_memory(ME, before, expected_revision=rewritten.revision)  # the Undo
+        assert (back.text, back.remind_instant, back.remind_state) == ("Take the medicine.", remind, "scheduled")
+        old = json.loads(record.previous or "{}")
+        old.pop("remind_at"), old.pop("remind_instant")
+        assert memory_from_record(json.dumps(old)) is not None  # a record from before reminders
+
+    asyncio.run(scenario())
+
+
+def test_a_retired_loop_brought_back_keeps_how_its_reminder_went() -> None:
+    """P2-1: delivered, retired by a pass, brought back by Undo: still delivered, in both backends."""
+    from himari.data.api import WakeKind, WakeReason, WakeStatus
+
+    async def scenario() -> None:
+        _, data = fresh()
+        remind = (datetime.now(UTC) - timedelta(minutes=5)).replace(second=0, microsecond=0)
+        memory_id = await reminded_loop(data, "Call mom.", remind)
+        wake = await data.begin_wake(SCOPE, (WakeReason(WakeKind.REMINDER, memory_id=memory_id),), "d1",
+                                     reminders=(memory_id,))
+        await data.end_wake(ME, wake.payload.wake_id, WakeStatus.ANSWERED)  # type: ignore[union-attr]
+        last = await turn(data, SCOPE, "I called her.")
+        forget = await live(data, SCOPE, last)
+        retired_at = datetime.now(UTC)
+        await data.apply_pass(forget, [PassItem(0, "{}", PassAction.FORGET, memory_id=memory_id,
+                                                expected_revision=1)], None, now=retired_at)
+        back = await data.unretire_memory(ME, memory_id, expected_revision=2, now=retired_at)
+        assert (back.remind_instant, back.remind_state) == (remind, "delivered")
+        assert (await data.read_memory(ME, memory_id)).remind_state == "delivered"
+
+    asyncio.run(scenario())
+
+
+def test_a_pass_neither_forgets_nor_retypes_a_loop_whose_reminder_waits() -> None:
+    """PR #157 re-review P2-2: refused while scheduled (or claimed); a rewrite as a loop goes on; told, as before."""
+    from himari.data.api import WakeKind, WakeReason, WakeStatus
+
+    async def scenario() -> None:
+        _, data = fresh()
+        remind = (datetime.now(UTC) - timedelta(minutes=5)).replace(second=0, microsecond=0)
+        memory_id = await reminded_loop(data, "Take the medicine.", remind)
+        last = await turn(data, SCOPE, "About the medicine.")
+        first = await live(data, SCOPE, last)
+        result = await data.apply_pass(first, [
+            PassItem(0, "{}", PassAction.FORGET, memory_id=memory_id, expected_revision=1),
+            PassItem(1, "{}", PassAction.UPDATE, memory_id=memory_id, expected_revision=1, category=PROJECT,
+                     text="Medicine."),
+            PassItem(2, "{}", PassAction.UPDATE, memory_id=memory_id, expected_revision=1, category=LOOP,
+                     text="Take the evening medicine."),
+        ], None, now=NOW)
+        assert result.outcomes == ("reminder_pending", "reminder_pending", "applied")
+        kept = await data.read_memory(ME, memory_id)
+        assert (kept.category, kept.text, kept.remind_state) == (LOOP, "Take the evening medicine.", "scheduled")
+        wake = await data.begin_wake(SCOPE, (WakeReason(WakeKind.REMINDER, memory_id=memory_id),), "d1",
+                                     reminders=(memory_id,))
+        await data.end_wake(ME, wake.payload.wake_id, WakeStatus.ANSWERED)  # type: ignore[union-attr]
+        last = await turn(data, SCOPE, "Took it.")
+        second = await live(data, SCOPE, last)
+        done = await data.apply_pass(second, [PassItem(0, "{}", PassAction.FORGET, memory_id=memory_id,
+                                                       expected_revision=kept.revision)], None, now=NOW)
+        assert done.outcomes == ("applied",)  # told: an automatic pass may forget it
 
     asyncio.run(scenario())

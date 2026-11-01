@@ -5,16 +5,17 @@ wakes it cut."""
 from __future__ import annotations
 
 import asyncio
-from datetime import time
+from datetime import UTC, datetime, time
 from pathlib import Path
 
 import pytest
 
 from himari.bootstrap.application import Application
-from himari.bootstrap.proactive import ProactiveRefused, ProactiveSettings, parse_quiet, wake_outcome
+from himari.bootstrap.proactive import ProactiveRefused, parse_quiet, wake_outcome
 from himari.common import ASK_USER_TOOL_ID, CallId, PrincipalId, TextBlock, ToolCall, ToolId, TrustedScope
 from himari.control.api import DriveResult, DriveState, JobStatus
 from himari.data.api import EventKind, MessageOrigin, OriginKind, WakeKind, WakeReason, WakeStatus
+from himari.proactive import ProactiveSettings
 from himari.prompt.api import PROACTIVE_RULE, UserTurn
 from himari.provider.api import NormalizedFinal, NormalizedToolCalls
 from himari.provider.scripted import ScriptedAdapter
@@ -70,7 +71,7 @@ def test_try_speaks_first_on_the_current_device(tmp_path: Path) -> None:
             assert any(PROACTIVE_RULE in part for part in sent.stable_prefix)
             last = sent.conversation[-1]
             assert isinstance(last, UserTurn) and last.wake
-            assert app.proactive_status(ME)["current_device"] == device
+            assert (await app.proactive_status(ME))["current_device"] == device
         finally:
             await app.close()
 
@@ -128,13 +129,16 @@ def test_a_restart_settles_the_wakes_it_cut(tmp_path: Path) -> None:
         scope = TrustedScope(ME, await app.create_conversation(ME))
         await app.send(scope, "안녕", origin=MessageOrigin(OriginKind.WEB))
         await app.runner.wait(scope)
-        silent = await app.data.begin_wake(scope, (WakeReason(WakeKind.TRY),), "d1")  # cut before speaking
+        silent = await app.data.begin_wake(scope, (WakeReason(WakeKind.TRY),), "d1",
+                                           keys=("loop:m1:2026-11-04",))  # cut before speaking
         await app.close()
         again = await opened(tmp_path, ScriptedAdapter([]), proactive=ON)
         try:
             record = await again.data.read_wake(ME, silent.payload.wake_id)  # type: ignore[union-attr]
             assert record.status is WakeStatus.FAILED
             assert await again.data.opened_wakes() == ()
+            # it said nothing: its key is given back, so the loop may still be spoken of (part 2)
+            assert await again.data.taken_keys(ME, ("loop:m1:2026-11-04",)) == frozenset()
         finally:
             await again.close()
 
@@ -165,8 +169,6 @@ CANCELLED = JobStatus(running=False, result=DriveResult(DriveState.CANCELLED))
 ])
 def test_how_a_wake_ends(status: JobStatus | None, after: list[str], waiting: bool,
                          outcome: tuple[WakeStatus, bool]) -> None:
-    from datetime import UTC, datetime
-
     from himari.common import CallRef, ConversationId, EventId, RunId
     from himari.data.api import AssistantFinal, AssistantToolCalls, ConversationEvent, UserMessage
 
@@ -188,3 +190,58 @@ def test_quiet_hours_parse() -> None:
     for wrong in ("22:30", "late-early"):
         with pytest.raises(ValueError):
             parse_quiet(wrong)
+
+
+def test_only_a_checked_model_speaks_first(tmp_path: Path) -> None:
+    """V3-P87 §13, owner 2026-11-01: a model under the speaking-first bar gets no wake and no "Speaking first" line."""
+    async def scenario() -> None:
+        adapter = ScriptedAdapter([NormalizedFinal((TextBlock("응"),))], speaks_first=False)
+        app = await opened(tmp_path, adapter, proactive=ON)
+        try:
+            await current_device(app)
+            scope = TrustedScope(ME, await app.create_conversation(ME))
+            await app.send(scope, "안녕", origin=MessageOrigin(OriginKind.WEB))
+            await app.runner.wait(scope)
+            assert not any(PROACTIVE_RULE in part for part in adapter.prepared_inputs[-1].stable_prefix)
+            with pytest.raises(ProactiveRefused) as refused:
+                await app.try_wake(ME)
+            assert refused.value.code == "model_unchecked"
+            assert await app.data.opened_wakes() == () and await app.data.wakes_since(
+                ME, datetime(2026, 1, 1, tzinfo=UTC)) == ()
+        finally:
+            await app.close()
+
+    asyncio.run(scenario())
+
+
+def test_the_checked_models_are_the_ones_that_passed() -> None:
+    from himari.provider.openrouter import KNOWN_CAPABILITIES
+
+    assert {m for m, c in KNOWN_CAPABILITIES.items() if c.speaks_first} == {
+        "openai/gpt-6-luna", "anthropic/claude-haiku-5.5", "xiaomi/mimo-v2.6-pro", "deepseek/deepseek-v4.1-flash"}
+    assert not KNOWN_CAPABILITIES["minimax/minimax-m3"].speaks_first  # 13 of 18: under the bar
+
+
+def test_a_model_changed_before_the_wakes_turn_withdraws_it(tmp_path: Path) -> None:
+    """PR #158 review P2-1: admitted on a checked model, the conversation's model changes
+    before the job's first Run; the turn checks again, makes no Run and withdraws the wake."""
+    async def scenario() -> None:
+        adapter = ScriptedAdapter([NormalizedFinal((TextBlock("응"),)), NormalizedFinal((TextBlock("왔어?"),))])
+        app = await opened(tmp_path, adapter, proactive=ON)
+        try:
+            await current_device(app)
+            scope = TrustedScope(ME, await app.create_conversation(ME))
+            await app.send(scope, "안녕", origin=MessageOrigin(OriginKind.WEB))
+            await app.runner.wait(scope)
+            sent = len(adapter.sent)
+            _, status = await app.try_wake(ME)  # admitted: the job has not run yet
+            adapter._speaks_first = False  # the model the next turn resolves is not checked
+            done = await app.runner.wait(scope)
+            assert done.result is not None and done.result.state is DriveState.CANCELLED
+            assert done.result.detail == "model_unchecked"
+            assert len(adapter.sent) == sent  # no Run
+            assert await ended(app, status.wake_id or "") is WakeStatus.CANCELLED
+        finally:
+            await app.close()
+
+    asyncio.run(scenario())

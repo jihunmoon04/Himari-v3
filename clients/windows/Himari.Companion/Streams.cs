@@ -39,11 +39,14 @@ public partial class MainWindow
                         string? id = Str(data, "conversation"), state = Str(data, "state");
                         if (state == "started" && IsOwn(Prop(data, "origin")) && id is not null)
                         {
+                            // V3-P87 §10: HIMARI speaks first in that conversation (FollowWake).
+                            if (JobOrigin.IsWake(Prop(data, "origin")) && id != currentConversation) await FollowWake(id, local, ct);
                             await RecoverMoveJob(id, Str(data, "job_id"), local, ct);
                             StartLive(id, local, ct, Str(data, "job_id"));
                         }
                         if (state == "ended" && id is not null)
                         {
+                            if (id == wakeElsewhere) wakeElsewhere = null;  // HIMARI finished speaking there
                             EndMoveJob(id, Str(data, "job_id"));
                             if (id == currentConversation && Str(data, "outcome") is null && Prop(data, "error").ValueKind is not (JsonValueKind.Null or JsonValueKind.Undefined)) Status.Text = "작업 중 문제가 생겼습니다. Web에서 확인해 주세요.";
                         }
@@ -94,7 +97,7 @@ public partial class MainWindow
         bool returned = awaySince is DateTime since && DateTime.UtcNow - since > TimeSpan.FromMinutes(10);
         awaySince = null; return returned;
     }
-    private bool IsOwn(JsonElement origin) => Str(origin, "kind") == "device" && Str(origin, "device_id") == deviceId && deviceId is not null;
+    private bool IsOwn(JsonElement origin) => JobOrigin.IsOwn(origin, deviceId);
     private void CancelLive()
     {
         foreach (var stream in liveStreams.Values) { stream.Cancel(); stream.Dispose(); }
@@ -105,13 +108,16 @@ public partial class MainWindow
         foreach (var job in Items(Prop(activity, "working")))
         {
             string? id = Str(job, "id");
-            if (id is not null && IsOwn(Prop(job, "origin"))) _ = RecoverAndStartLive(id, Str(job, "job_id"), local, ct);
+            if (id is not null && IsOwn(Prop(job, "origin")))
+                _ = RecoverAndStartLive(id, Str(job, "job_id"), local, ct, JobOrigin.IsWake(Prop(job, "origin")));
         }
     }
-    private async Task RecoverAndStartLive(string id, string? job, ServerClient local, CancellationToken ct)
+    private async Task RecoverAndStartLive(string id, string? job, ServerClient local, CancellationToken ct, bool wake = false)
     {
         try
         {
+            // PR #159 review P2-1: a wake found running after a reconnect is followed like a new one
+            if (wake && id != currentConversation) await FollowWake(id, local, ct);
             job = await ScreenHistory.ResolveJobIdAsync(local, id, job, ct);
             await RecoverMoveJob(id, job, local, ct);
             if (!ct.IsCancellationRequested && ReferenceEquals(local, client)) StartLive(id, local, ct, job);
@@ -183,7 +189,7 @@ public partial class MainWindow
             {
                 liveStreams.Remove(id); liveDisplays.Remove(id); source.Dispose();
                 if (currentConversation == id) { SetTalking(false); StopButton.Visibility = Visibility.Collapsed; SetMood("neutral"); _ = ScheduleBubbleAfterMoves(id); }
-                if (connected && currentConversation == id) Status.Text = "연결됨";
+                if (connected && currentConversation == id) Status.Text = JobOrigin.Status(wakeElsewhere, currentConversation, "연결됨");
                 if (currentConversation == id && connection is not null)
                     try { await ReadConversation(id, connection.Token); } catch (Exception ex) { ShowError(ex); }
             }
