@@ -346,13 +346,14 @@ public partial class MainWindow
         var context = new SendContext(local, currentConversation, inputRevision);
         // What is on screen moves up into the stack; the new message comes in below it.
         frozenSent = null; FreezeThrough(long.MaxValue);
+        // Sending before any layout: the six-bubble limit never trims the message on its way.
+        sending = true;
         if (unsent is not null)
         {
             // The same bubble, and so the same attempt, moves to the end and shows as sent while it goes again.
             history.Remove(unsent); history.Add(unsent); ShowAsSent(unsent); frozenSent = unsent;
             ArrangeBubbles(); UpdateSceneBounds();
         }
-        sending = true;
         PresentUserBubble();
         SendButton.IsEnabled = false; UpdateUnsentBubbles();
         // Like a text message, the text leaves the editor at once and shows as sent. It returns
@@ -490,6 +491,8 @@ public partial class MainWindow
             if (earlyMoves.TryGetValue(context.ConversationId, out var buffered)) buffered.RemoveAll(x => !moveLifetime.IsVerifying(x.Job));
             sending = false; messageSend.Exit();
             if (!taken && text.Length > 0) KeepUnsent(text, context.ConversationId, attemptUnknown, unsent is not null);
+            // A bubble that fell due while it was held for the send expires now, not at the next event.
+            if (history.Any(past => past.Due)) ExpireBubbles();
             UpdateBubblePresentation();
         }
     }

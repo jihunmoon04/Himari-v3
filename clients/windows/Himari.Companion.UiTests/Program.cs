@@ -521,6 +521,19 @@ internal static class Program
             editor.Clear(); editor.Text = "다시 쓴 질문"; transport.Fail = null; transport.AcceptedText = "다시 쓴 질문";
             found = (Task)Call("CheckUnknownText", false, CancellationToken.None)!; Until(() => found.IsCompleted);
             Check(editor.Text == "다시 쓴 질문" && Get("unknownText") is null, "confirming the earlier attempt never clears a new draft that merely has the same text");
+            // Six unsent messages and an open editor fill the stack; one is sent again and falls due on its way.
+            Call("ClearHistory"); Call("HideUserBubble"); Call("OpenComposer"); editor.Text = "열린 초안";
+            for (int i = 0; i < 6; i++) Call("KeepUnsent", $"묶음 {i}", "c", null, false);
+            var resent = history[5]; int posts = transport.Posts;
+            transport.ResetAcceptance(); transport.DeferAcceptance = true;
+            ((Button)Past(5, "RetryButton")!).RaiseEvent(new RoutedEventArgs(Button.ClickEvent)); Until(() => Sending() && transport.Posts == posts + 1);
+            Check(history.Contains(resent) && ((UIElement)Past(history.IndexOf(resent), "Bubble")!).Visibility == Visibility.Visible && history.Count == 6 && Shown() == 6,
+                "the six-bubble limit never trims the message being sent again, and hides an older unsent one instead");
+            Call("PastBubbleExpired", history.IndexOf(resent));
+            Check(history.Contains(resent), "a bubble falling due on its way stays until the send ends");
+            transport.ReleaseAcceptance(); Until(() => !Sending());
+            Check(!history.Contains(resent) && history.Count == 5 && Enumerable.Range(0, 5).All(i => (string?)Past(i, "UnsentConversation") == "c") && editor.Text == "열린 초안",
+                "once accepted, the overdue bubble expires at once and every other unsent message is kept");
             unsentWindow.Close();
         }
         PresentationChecks.Run(Check, args.Length == 2 && args[0] == "--screenshots" ? args[1] : null);

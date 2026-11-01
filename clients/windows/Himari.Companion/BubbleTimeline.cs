@@ -186,7 +186,7 @@ public partial class MainWindow
     }
     private void ShowAsSent(PastBubble past)
     {
-        past.UnsentConversation = null; past.UnsentPanel!.Visibility = Visibility.Collapsed;
+        past.UnsentConversation = null; past.UnsentPanel!.Visibility = Visibility.Collapsed; past.Due = false;
         past.Timer.Interval = TimeSpan.FromSeconds(DialoguePolicy.Duration(past.Text, settings.BubbleMinimum.Value, settings.SecondsPer100.Value)); past.Timer.Start();
     }
     private void UpdateUnsentBubbles()
