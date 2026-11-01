@@ -28,6 +28,7 @@ from himari.proactive.rules import (
     loop_candidates,
     loop_moment,
     return_candidate,
+    spoke,
 )
 
 __all__ = [
@@ -52,4 +53,5 @@ __all__ = [
     "loop_candidates",
     "loop_moment",
     "return_candidate",
+    "spoke",
 ]

@@ -37,6 +37,7 @@ from himari.presence.hub import PresenceHub
 from himari.proactive import ProactiveSettings as ProactiveSettings  # re-exported for the interfaces
 from himari.proactive import (
     RETURN_WAIT,
+    TALKING,
     Decision,
     Return,
     Situation,
@@ -44,6 +45,7 @@ from himari.proactive import (
     candidates,
     decide,
     local_midnight,
+    spoke,
 )
 
 log = logging.getLogger(__name__)
@@ -347,9 +349,18 @@ class ProactiveScheduler:
         if recent is None:
             return "no_conversation"
         scope = TrustedScope(principal, recent.conversation_id)
+        # PR #156 review P2: what may have changed since the look read it, checked again —
+        # the last await is here, so these checks and the Runner's (no job of the
+        # principal anywhere, before its first await) hold together.
+        said = await self._data.last_user_message_at(principal)
+        only_reminders = all(r.kind is WakeKind.REMINDER for r in decision.reasons)
+        if not only_reminders and said is not None and self._clock() - said < TALKING:
+            return "talking"
+        if self._hub.current(principal) != device_id:
+            return "no_device"
         try:
             await self._runner.submit_wake(scope, decision.reasons, device_id, keys=decision.keys,
-                                           reminders=decision.reminders)
+                                           reminders=decision.reminders, alone=True)
         except ControlError as error:  # busy, closed, not settled: the next look tries again
             return error.code.value
         except DataError as error:  # a key taken meanwhile, a reminder changed meanwhile
@@ -372,8 +383,8 @@ class ProactiveScheduler:
     async def status(self, principal: PrincipalId) -> dict[str, object]:
         situation, _ = await self.situation(principal)
         midnight = local_midnight(situation.now, situation.zone)
-        today = [w for w in situation.wakes if w.created_at >= midnight
-                 and not all(r.kind in (WakeKind.TRY, WakeKind.REMINDER) for r in w.reasons)]
+        today = [w for w in situation.wakes if w.created_at >= midnight and spoke(w)
+                 and not all(r.kind is WakeKind.REMINDER for r in w.reasons)]
         look = self.looks.get(principal)
         _, _, upcoming = candidates(situation)
         return {

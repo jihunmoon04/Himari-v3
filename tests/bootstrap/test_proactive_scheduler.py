@@ -8,7 +8,9 @@ import asyncio
 import base64
 import secrets
 from datetime import UTC, datetime, timedelta
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 from himari.bootstrap.application import Application
 from himari.bootstrap.proactive import INPUT_EVERY, Inputs, away_minutes
@@ -17,7 +19,7 @@ from himari.common import PrincipalId, TextBlock, TrustedScope
 from himari.data.api import (EventKind, MemoryCategory, MessageOrigin, NoteDates, OriginKind, Wake, WakeKind,
                              WakeReason, parse_note_date)
 from himari.data.sqlite import SqliteData, SqliteStore
-from himari.presence.api import After, Returned, Signals
+from himari.presence.api import After, Returned, Session, Signals
 from himari.proactive import ProactiveSettings
 from himari.provider.api import NormalizedFinal
 from himari.provider.scripted import ScriptedAdapter
@@ -201,5 +203,92 @@ def test_the_ticker_keeps_its_jobs_apart() -> None:
         await asyncio.sleep(0.05)
         assert runs.count("good") == 3
         await ticker.close()
+
+    asyncio.run(scenario())
+
+
+def test_a_loop_cut_by_a_restart_before_a_word_is_spoken_of_after_it(tmp_path: Path) -> None:
+    """PR #156 review P1, over the scheduler: the wake's keys come back and the next look speaks."""
+    async def scenario() -> None:
+        root = tmp_path / "data"
+        app = await opened(root, answers("응"))
+        device = await paired(app)
+        scope = TrustedScope(ME, await app.create_conversation(ME))
+        await app.send(scope, "내일 면접이야", origin=MessageOrigin(OriginKind.WEB))
+        await app.runner.wait(scope)
+        due = parse_note_date((datetime.now(UTC) - timedelta(hours=2)).isoformat(timespec="minutes"), "UTC")
+        assert due is not None
+        note = await app.data.save_memory(ME, MemoryCategory.LOOP, "사용자는 면접이 있다",
+                                          dates=NoteDates(due_at=due[0], due_instant=due[1]))
+        key = f"loop:m{note.memory_id}:{due[0]}"
+        reasons = (WakeReason(WakeKind.LOOP_DUE, memory_id=note.memory_id),)
+        cut = await app.data.begin_wake(scope, reasons, device, keys=(key,))  # recorded; the server stops at once
+        await app.close()
+
+        adapter = answers("면접 어땠어?")
+        app = await opened(root, adapter)
+        try:
+            assert (await app.data.read_wake(ME, cut.payload.wake_id)).status.value == "failed"  # type: ignore[union-attr]
+            app.hub.subscribe(ME, device)
+            app.hub.signal(ME, device, 0, "Asia/Seoul")
+            scheduler = app.scheduler
+            assert scheduler is not None
+            scheduler._clock = lambda: datetime.now(UTC) + timedelta(minutes=15)
+            look = await scheduler.look(ME)
+            assert look.outcome == "spoke", look
+            await settled(app, scope)
+            kinds = [e.kind.value for e in await app.data.read_events(scope)]
+            assert kinds[-3:] == ["wake", "wake", "assistant_final"]
+            assert await app.data.taken_keys(ME, (key,)) == frozenset({key})
+            assert (await scheduler.look(ME)).decision.reasons == ()
+        finally:
+            await app.close()
+
+    asyncio.run(scenario())
+
+
+def test_what_changed_after_the_look_read_it_is_checked_again(tmp_path: Path) -> None:
+    """PR #156 review P2: a job started elsewhere, the device changed, or the user spoke
+    between the look's reads and the wake: no wake, and the next look sees it."""
+    async def scenario() -> None:
+        app = await opened(tmp_path / "data", answers("응"))
+        try:
+            device = await paired(app)
+            app.hub.subscribe(ME, device)
+            app.hub.signal(ME, device, 0, "Asia/Seoul")
+            scope = TrustedScope(ME, await app.create_conversation(ME))
+            await app.send(scope, "내일 면접이야", origin=MessageOrigin(OriginKind.WEB))
+            await app.runner.wait(scope)
+            due = parse_note_date((datetime.now(UTC) - timedelta(hours=2)).isoformat(timespec="minutes"), "UTC")
+            assert due is not None
+            await app.data.save_memory(ME, MemoryCategory.LOOP, "사용자는 면접이 있다",
+                                       dates=NoteDates(due_at=due[0], due_instant=due[1]))
+            scheduler = app.scheduler
+            assert scheduler is not None
+            scheduler._clock = lambda: datetime.now(UTC) + timedelta(minutes=15)
+            read = scheduler.situation
+
+            def after_read(change: Callable[[], None]) -> None:
+                async def situation(principal: PrincipalId) -> Any:
+                    found = await read(principal)
+                    change()
+                    return found
+
+                scheduler.situation = situation  # type: ignore[method-assign]
+
+            runner = app.runner
+            running = runner.running
+            after_read(lambda: setattr(runner, "running", lambda principal: (scope.conversation_id,)))
+            assert (await scheduler.look(ME)).outcome == "busy"  # a job started in another conversation
+            runner.running = running  # type: ignore[method-assign]
+            after_read(lambda: app.hub.signal(ME, device, 0, "Asia/Seoul", Signals(session=Session.LOCKED)))
+            assert (await scheduler.look(ME)).outcome == "no_device"  # the screen locked
+            app.hub.signal(ME, device, 0, "Asia/Seoul", Signals(after=After.UNLOCK))
+            after_read(lambda: scheduler.__setattr__("_clock", lambda: datetime.now(UTC)))  # the user just spoke
+            assert (await scheduler.look(ME)).outcome == "talking"
+            assert await app.data.opened_wakes() == () and await app.data.wakes_since(ME, datetime.min.replace(
+                tzinfo=UTC)) == ()
+        finally:
+            await app.close()
 
     asyncio.run(scenario())

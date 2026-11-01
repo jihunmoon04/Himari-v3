@@ -546,3 +546,10 @@ P1·P2 해결 확인. 문서 정합성 둘과 구현 주의 하나:
 - **상태:** `GET /api/proactive`와 `himari proactive status`에 오늘 횟수/상한, 마지막 wake, 다음 고리 시각, 마지막 판단(결과, 막힌 이유로 미룬 이유들)을 더함.
 - **재시작(§4.4와 다름):** 이어 가지 않는다. 시작할 때는 기기가 아직 다시 붙지 않아 §6.1(지금 기기)을 통과할 수 없으므로 설계의 "이어 간다" 갈래는 열리지 않는다. 대신 **아무 말도 하기 전에 끊긴 wake**(wake 뒤에 이벤트가 없음)는 `failed`로 적고 열쇠를 돌려준다(`release_keys`). 계기가 아직 창 안이면 스케줄러가 새 wake로 다시 말한다. 한마디라도 한 wake(도구 묶음 포함)는 열쇠를 지킨다.
 - **Data(스키마 변경 없음, v17 그대로):** `wakes_since`, `taken_keys`, `expire_keys`(`wake_id` 없이), `release_keys`, `record_input`·`read_inputs`, `last_user_message_at`. 두 백엔드 같음.
+
+### 19.4 검수 (PR #156, `dd6376a`): NOT_READY → 고침
+
+- **P1 말하기 전 끊긴 wake가 다음 wake를 막음:** 열쇠를 돌려줘도 그 wake 이벤트가 답하지 않은 계기(`EventRef`)로 남아 `accept_wake`가 `NOT_SETTLED`를 냈다. 이제 `Driver._left_by_ended_wakes`가 계기를 하나씩 본다: 사용자 메시지, **아직 열린** wake, 사용자 턴이 남긴 묶음은 막고, **끝난** wake(재시작으로 `failed`, 사용자가 이겨 `cancelled`)의 계기와 끝난 wake가 남긴 묶음은 막지 않는다. 다음 턴은 그것들을 다 그리고 새 wake를 마지막에 둔다(앞 wake는 같은 이유의 `<wake>` 줄로 그대로 보임 — 기록을 숨기지 않음).
+  - 같이 고친 것: 말하기 전 끊긴 wake가 **간격**에 걸려 30분 동안 다시 말하지 못했다. 간격과 하루 상한은 이제 **말했거나 말하는 중인 wake**(`opened`·`answered`)만 센다(`proactive.spoke`). 실행 중 실패한 wake는 열쇠를 지키므로 같은 계기를 되풀이하지 않는다.
+  - 시험: 두 백엔드에서 재시작 → `failed` → 열쇠 반환 → 새 wake → 모델 답(두 `<wake>`가 그려짐, 열쇠 다시 잡힘), 실제 앱의 스케줄러로 같은 흐름, 열린 wake·사용자 메시지는 계속 막음.
+- **P2 읽은 뒤 바뀐 것:** 스케줄러가 wake를 열기 직전에 마지막 사용자 메시지(알림만이 아니면 "대화 중")와 지금 기기를 다시 보고, `submit_wake(alone=True)`가 그 주체의 **어느 대화에서든** 작업이 돌면 `BUSY`. 다시 본 것과 Runner의 검사 사이에 `await`가 없어 함께 성립한다. 남는 틈은 `accept_wake` 안의 기다림뿐이고, 그 대화의 메시지는 Driver lock이 막는다.

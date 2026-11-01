@@ -228,3 +228,13 @@ def test_candidates_merge_into_one_wake_in_order_up_to_four() -> None:
     merged = decide(situation(loops=loops[:1], returned=back(), device=device(coding(40))))
     assert [r.kind for r in merged.reasons] == [WakeKind.LOOP_DUE, WakeKind.FOCUS, WakeKind.RETURNED]
     assert len(merged.keys) == 3 and merged.held == ()
+
+
+def test_a_wake_that_said_nothing_counts_toward_neither_the_gap_nor_the_day() -> None:
+    """PR #156 review P1: a wake cut before a word (failed) or cancelled as the user won."""
+    silent = tuple(replace(wake(NOW - timedelta(minutes=m)), status=s)
+                   for m, s in ((1, WakeStatus.FAILED), (2, WakeStatus.CANCELLED), (3, WakeStatus.FAILED),
+                                (4, WakeStatus.CANCELLED), (5, WakeStatus.FAILED)))
+    assert decide(situation(loops=DUE, wakes=silent)).reasons
+    opened = (replace(wake(NOW - timedelta(minutes=1)), status=WakeStatus.OPENED),)
+    assert decide(situation(loops=DUE, wakes=opened)).blocked == "gap"

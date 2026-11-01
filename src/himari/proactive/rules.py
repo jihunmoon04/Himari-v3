@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
-from himari.data.api import MAX_WAKE_REASONS, Memory, MemoryCategory, WakeKind, WakeReason, WakeRecord
+from himari.data.api import MAX_WAKE_REASONS, Memory, MemoryCategory, WakeKind, WakeReason, WakeRecord, WakeStatus
 from himari.presence.api import DeviceState
 
 CHECK_IN_WINDOW = timedelta(hours=24)  # §5.1: a loop is spoken of within a day of its moment, else expired
@@ -221,6 +221,13 @@ _TRY = frozenset({WakeKind.TRY})
 _REMINDER = frozenset({WakeKind.REMINDER})
 
 
+def spoke(record: WakeRecord) -> bool:
+    """§6.2: a wake the gap and the daily limit count — one that spoke or is speaking.
+    Not one that said nothing (failed, or cancelled as the user won: PR #156 review
+    P1, a wake cut by a restart is tried again at once), nor the operator's try (§11)."""
+    return record.status in (WakeStatus.OPENED, WakeStatus.ANSWERED) and not _only(record, _TRY)
+
+
 def _blocked(s: Situation, reminders_only: bool) -> str | None:
     """§6.1–§6.2 in order: the first rule that keeps what is due from being spoken.
     A reminder (``reminders_only``) passes the user's quiet (Q8), the talking
@@ -239,7 +246,7 @@ def _blocked(s: Situation, reminders_only: bool) -> str | None:
         return "unanswered"
     if in_quiet_hours(s.now, s.zone, s.settings.quiet_start, s.settings.quiet_end):
         return "quiet_hours"
-    counted = [w for w in s.wakes if not _only(w, _TRY)]  # a try is the operator's test (§11)
+    counted = [w for w in s.wakes if spoke(w)]
     last = max((w.created_at for w in counted), default=None)
     if last is not None and s.now - last < timedelta(minutes=s.settings.gap_minutes):
         return "gap"

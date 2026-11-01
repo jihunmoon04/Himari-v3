@@ -174,3 +174,24 @@ def test_an_ordinary_job_is_never_cancelled_by_a_message() -> None:
         await runner.wait(SCOPE)
 
     asyncio.run(scenario())
+
+
+def test_a_wake_alone_is_refused_while_another_conversation_works() -> None:
+    """PR #156 review P2: §6.1 holds for every conversation of the principal."""
+    from himari.common import ConversationId
+
+    other = TrustedScope(SCOPE.principal_id, ConversationId("conv_other"))
+    driver = WakeDriver()
+    runner = BackgroundRunner(driver)  # type: ignore[arg-type]
+
+    async def scenario() -> None:
+        await runner.submit(other, None)
+        with pytest.raises(ControlError) as refused:
+            await runner.submit_wake(SCOPE, TRY, "d1", alone=True)
+        assert refused.value.code is ControlErrorCode.BUSY and driver.wakes == []
+        await runner.submit_wake(SCOPE, TRY, "d1")  # without ``alone`` (the operator's try checks it itself)
+        driver.release.set()
+        await runner.wait(other)
+        await runner.wait(SCOPE)
+
+    asyncio.run(scenario())

@@ -199,13 +199,18 @@ class BackgroundRunner:
         await asyncio.wait([task], timeout=WAKE_YIELD_SECONDS)  # never cancels the task itself
 
     async def submit_wake(self, scope: TrustedScope, reasons: Sequence[WakeReason], device_id: str, *,
-                          keys: Sequence[str] = (), reminders: Sequence[int] = ()) -> JobStatus:
+                          keys: Sequence[str] = (), reminders: Sequence[int] = (), alone: bool = False) -> JobStatus:
         """V3-P87 §4.1: record the wake (NOT_SETTLED, DataError DUPLICATE_IDENTITY /
         INVALID_STATE_TRANSITION as the driver and Data refuse) and start its
         job, spoken on ``device_id``, at most WAKE_RUNS Runs. BUSY while a job
-        runs or an input is being accepted; CLOSED in the trash."""
+        runs or an input is being accepted — with ``alone`` (§6.1, PR #156 review
+        P2), in any of the principal's Conversations; CLOSED in the trash. These
+        checks run before the first await: the caller's own checks just before
+        the call hold with them."""
         self._check_open(scope)
         if self._running_in(scope.conversation_id) or self._admitting.get(scope.conversation_id):
+            raise ControlError(ControlErrorCode.BUSY, scope.conversation_id)
+        if alone and self.running(scope.principal_id):
             raise ControlError(ControlErrorCode.BUSY, scope.conversation_id)
         self._admit(scope.conversation_id)
         try:
