@@ -138,6 +138,9 @@ public partial class MainWindow
     private async Task LiveLoop(string id, ServerClient local, CancellationToken ct, string? expectedJob)
     {
         var display = new LiveDisplayState(); int delay = 1; bool opened = false; string? liveJob = expectedJob;
+        // Cache identity even before the first SSE frame, so returning to this
+        // conversation can restore preparation without opening another stream.
+        if (liveJob is not null) liveDisplays[id] = (liveJob, display);
         try
         {
             while (!ct.IsCancellationRequested)
@@ -153,7 +156,7 @@ public partial class MainWindow
                             liveJob = Str(data, "job_id");
                             display.Apply(type, Str(data, "run_id"), Str(data, "text") ?? "", Prop(data, "moods"), Prop(data, "tools"));
                             ReceiveMoves(id, Str(data, "job_id"), Str(data, "run_id"), type == "snapshot", Prop(data, "moves"), display.Text.EnumerateRunes().Count());
-                            liveDisplays[id] = (display.Text, display.Mood);
+                            liveDisplays[id] = (liveJob, display);
                             if (id == currentConversation)
                             {
                                 UpdateReplyProgress(id, liveJob, display);

@@ -48,6 +48,20 @@ internal static class ReplyProgressChecks
         var refresh = (Task)Call("ReadConversation", "c", cancellation.Token)!; Until(() => refresh.IsCompleted); refresh.GetAwaiter().GetResult();
         check(message.Text == "" && progress.Visibility == Visibility.Visible, "history refresh before the first snapshot cannot populate the pending answer");
         Call("StartLive", "c", server, cancellation.Token, "j");
+        Task ReadCurrent()
+        {
+            var read = (Task)Call("ReadConversation", "c", cancellation.Token)!;
+            Until(() => read.IsCompleted); read.GetAwaiter().GetResult(); return read;
+        }
+        void ReturnToConversation()
+        {
+            Call("SetCurrentConversation", "other");
+            check(progress.Visibility == Visibility.Collapsed && !tick.IsEnabled, "leaving a conversation clears its visible preparation");
+            Call("SetCurrentConversation", "c"); ReadCurrent();
+        }
+        ReturnToConversation();
+        check(bubble.Visibility == Visibility.Visible && progress.Visibility == Visibility.Visible && message.Text == "" && handler.LiveRequests == 1 && !readTimer.IsEnabled,
+            "A to B to A restores preparation before any SSE frame without opening another stream");
         handler.Live.Push("snapshot", new { job_id = "j", run_id = "r", text = "", tools = Array.Empty<string>(), thinking = true });
         Until(() => (string?)Get("replyProgressRun") == "r" && tick.IsEnabled);
         string word = label.Text;
@@ -63,6 +77,9 @@ internal static class ReplyProgressChecks
         }
         handler.Live.Push("delta", new { job_id = "j", run_id = "r", tools = new[] { "web.search" } });
         Until(() => label.Text == "Preparing web.search…");
+        ReturnToConversation();
+        check(progress.Visibility == Visibility.Visible && label.Text == "Preparing web.search…" && (string?)Get("replyProgressRun") == "r" && handler.LiveRequests == 1,
+            "returning during silent SSE restores the cached run and tool activity immediately");
         handler.Live.Push("snapshot", new { job_id = "j", run_id = "r2", text = "", tools = Array.Empty<string>() });
         Until(() => (string?)Get("replyProgressRun") == "r2");
         check(!label.Text.Contains("web.search"), "new run clears old tool activity");
@@ -79,6 +96,27 @@ internal static class ReplyProgressChecks
         handler.Live.Push("done", new { });
         Until(() => !((Dictionary<string, CancellationTokenSource>)Get("liveStreams")!).ContainsKey("c"));
         check(progress.Visibility == Visibility.Collapsed && bubble.Visibility == Visibility.Collapsed && !tick.IsEnabled, "bodyless completion leaves no orphan waiting bubble");
+        foreach (bool requestBeforePreparation in new[] { true, false })
+        {
+            handler.Job = "old-job"; handler.Running = false;
+            var delayed = new TaskCompletionSource<HttpResponseMessage>(TaskCreationOptions.RunContinuationsAsynchronously);
+            handler.DeferredDetail = delayed;
+            string nextJob = requestBeforePreparation ? "new-before-response" : "new-before-request";
+            if (!requestBeforePreparation) Call("BeginReplyProgress", "c", nextJob);
+            var staleRead = (Task)Call("ReadConversation", "c", cancellation.Token)!;
+            check(!staleRead.IsCompleted, "old job detail is deliberately held in transport");
+            if (requestBeforePreparation) Call("BeginReplyProgress", "c", nextJob);
+            string currentLabel = label.Text;
+            delayed.SetResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("{\"conversation\":{\"last_sequence\":1},\"job\":{\"running\":false,\"job_id\":\"old-job\"}}") });
+            Until(() => staleRead.IsCompleted); staleRead.GetAwaiter().GetResult();
+            check(progress.Visibility == Visibility.Visible && bubble.Visibility == Visibility.Visible && label.Text == currentLabel && message.Text == "" &&
+                ((Button)w.FindName("StopButton")).Visibility == Visibility.Visible && !readTimer.IsEnabled && (string?)Get("replyProgressJob") == nextJob,
+                "old job HTTP detail cannot close or alter the new preparation, stop button or source text");
+            handler.Job = nextJob; ReadCurrent();
+            check(progress.Visibility == Visibility.Collapsed && bubble.Visibility == Visibility.Collapsed && !tick.IsEnabled &&
+                ((Button)w.FindName("StopButton")).Visibility == Visibility.Collapsed,
+                "matching completed job detail still clears preparation and stop state");
+        }
         Call("BeginReplyProgress", "other", "foreign");
         check(progress.Visibility == Visibility.Collapsed, "another conversation cannot show waiting in the current one");
         Call("BeginReplyProgress", "c", "new-job"); Call("CloseBubbleClick", w, new RoutedEventArgs()); Call("BeginReplyProgress", "c", "new-job");
@@ -91,10 +129,18 @@ internal static class ReplyProgressChecks
     private sealed class ProgressHandler : HttpMessageHandler
     {
         internal readonly ProgressStream Live = new();
+        internal int LiveRequests;
+        internal string Job = "j";
+        internal bool Running = true;
+        internal TaskCompletionSource<HttpResponseMessage>? DeferredDetail;
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
         {
             bool live = request.RequestUri!.AbsolutePath.EndsWith("/live");
-            string body = request.Method == HttpMethod.Post ? "{\"job_id\":\"j\"}" : request.RequestUri.AbsolutePath.EndsWith("/events") ? "{\"items\":[]}" : "{\"conversation\":{\"last_sequence\":1},\"job\":{\"running\":true,\"job_id\":\"j\"}}";
+            if (live) LiveRequests++;
+            if (request.Method == HttpMethod.Get && request.RequestUri.AbsolutePath == "/api/conversations/c" && DeferredDetail is { } delayed)
+            { DeferredDetail = null; return delayed.Task.WaitAsync(ct); }
+            string body = request.Method == HttpMethod.Post ? JsonSerializer.Serialize(new { job_id = Job }) : request.RequestUri.AbsolutePath.EndsWith("/events") ? "{\"items\":[]}" :
+                JsonSerializer.Serialize(new { conversation = new { last_sequence = 1 }, job = new { running = Running, job_id = Job } });
             return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = live ? new StreamContent(Live) : new StringContent(body) });
         }
     }

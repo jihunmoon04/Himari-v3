@@ -6,6 +6,7 @@ public partial class MainWindow
 {
     private string? replyProgressConversation, replyProgressJob, replyProgressRun, replyProgressTool;
     private string? dismissedReplyProgress;
+    private long replyPreparationVersion;
     private bool ReplyPreparing => replyProgressConversation == currentConversation && replyProgressConversation is not null;
 
     private void BeginReplyProgress(string conversation, string? job)
@@ -16,6 +17,7 @@ public partial class MainWindow
         // A late HTTP acknowledgement must not erase text already received through Live.
         if (assistantBubbleKey == key && !string.IsNullOrEmpty(Message.Text)) return;
         if (replyProgressConversation == conversation && replyProgressJob == job) return;
+        replyPreparationVersion++;
         OpenReplyBubble(conversation, job);
         replyProgressConversation = conversation; replyProgressJob = job;
         replyProgressRun = replyProgressTool = null;

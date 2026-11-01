@@ -16,7 +16,7 @@ public partial class MainWindow
     private ServerClient? recoveryOwner;
     private CancellationTokenSource? connection;
     private readonly Dictionary<string, CancellationTokenSource> liveStreams = new();
-    private readonly Dictionary<string, (string Text, string Mood)> liveDisplays = new();
+    private readonly Dictionary<string, (string? Job, LiveDisplayState Display)> liveDisplays = new();
     private sealed record PendingReply(ServerClient Server, string Job, int After);
     private readonly Dictionary<string, PendingReply> pendingReplies = new();
     private readonly HashSet<string> completedReplies = new();
@@ -246,9 +246,16 @@ public partial class MainWindow
     {
         var local = client;
         if (local is null) return;
+        long preparationVersion = replyPreparationVersion;
         var detail = await local.SendAsync(HttpMethod.Get, PathFor(id), null, ct);
         var question = ConversationView.Question(detail);
         if (ct.IsCancellationRequested || !ReferenceEquals(local, client) || id != currentConversation) return;
+        string? detailJob = Str(Prop(detail, "job"), "job_id");
+        // A request started before a new preparation must not change its stop button,
+        // status, question or body. Also reject mismatched job data read afterwards.
+        if (preparationVersion != replyPreparationVersion ||
+            ReplyPreparing && detailJob != replyProgressJob ||
+            liveStreams.ContainsKey(id) && liveDisplays.TryGetValue(id, out var active) && active.Job is not null && active.Job != detailJob) return;
         // Acceptance can arrive after job ended and a bodyless Live done. Probe
         // again once the waiter exists, leaving a still-running display alone.
         if (completedReplyOnly && (ConversationView.IsRunning(detail) ||
@@ -260,7 +267,16 @@ public partial class MainWindow
             ConversationView.IsRunning(detail) ? "이 대화는 작업 중입니다. 새 대화를 열 수 있습니다." : "연결됨");
         if (question is not null) { awaitingAnswer = true; Message.Text = question; OpenReplyBubble(id, Str(Prop(detail, "job"), "job_id")); OpenComposer(); if (IsChatWindow(GetForegroundWindow())) { dialogueHost?.Activate(); Input.Focus(); } return; }
         awaitingAnswer = false;
-        if (liveDisplays.TryGetValue(id, out var display)) { Message.Text = display.Text; SetMood(display.Mood); return; }
+        if (liveStreams.ContainsKey(id) && liveDisplays.TryGetValue(id, out var live) && live.Job == detailJob)
+        {
+            if (ConversationView.IsRunning(detail)) UpdateReplyProgress(id, live.Job, live.Display);
+            Message.Text = live.Display.Text;
+            SetMood(ReplyPreparing ? "thinking" : live.Display.Mood);
+            return;
+        }
+        // An accepted request can still be waiting for its first Live connection.
+        if (ConversationView.IsRunning(detail) && pendingReplies.TryGetValue(id, out var accepted) &&
+            accepted.Server.SameDevice(local) && accepted.Job == detailJob) BeginReplyProgress(id, detailJob);
         // Until Live arrives, a history refresh must not fill the pending reply
         // with an older final (or the empty-conversation greeting).
         if (ReplyPreparing) return;
@@ -280,7 +296,7 @@ public partial class MainWindow
             if (lastText is not null || after == 0) break;
             after = Math.Max(0, after - 100);
         }
-        if (ct.IsCancellationRequested || !ReferenceEquals(local, client) || id != currentConversation || liveStreams.ContainsKey(id)) return;
+        if (ct.IsCancellationRequested || !ReferenceEquals(local, client) || id != currentConversation || liveStreams.ContainsKey(id) || preparationVersion != replyPreparationVersion) return;
         bool recoveredReply = false;
         if (!string.IsNullOrWhiteSpace(lastText) && pendingReplies.TryGetValue(id, out var pending) &&
             pending.Server.SameDevice(local) && finalSequence > pending.After &&
@@ -289,7 +305,7 @@ public partial class MainWindow
             // A new job may have started while history was being read. Do not
             // label another answer as the one this app was waiting for.
             var latest = await local.SendAsync(HttpMethod.Get, PathFor(id), null, ct);
-            if (ct.IsCancellationRequested || !ReferenceEquals(local, client) || id != currentConversation || liveStreams.ContainsKey(id)) return;
+            if (ct.IsCancellationRequested || !ReferenceEquals(local, client) || id != currentConversation || liveStreams.ContainsKey(id) || preparationVersion != replyPreparationVersion) return;
             if (!ConversationView.IsRunning(latest) && Str(Prop(latest, "job"), "job_id") == pending.Job &&
                 pendingReplies.TryGetValue(id, out var current) && ReferenceEquals(current, pending))
             { CompleteReply(id, pending.Job); recoveredReply = true; }

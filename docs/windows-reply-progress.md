@@ -55,3 +55,21 @@ screen attachment, Stop, and network loss/reconnect on the user's desktop.
 Self-review corrections: clear preparation on a saved-final/question refresh as
 well as Live completion; clear tool state between runs; stop empty-answer reading
 timers; distinguish explicit dismissal from ordinary conversation/transport cleanup.
+
+## PR #160 review follow-up
+
+- P2-1: retain the job identity and full Live display state (run and latest tool)
+  for each open stream, including the period before its first frame. Selecting
+  a running conversation restores its preparation from that cache or its accepted
+  pending request. It does not require another SSE frame or a second connection.
+- P2-2: detail reads capture the preparation generation before awaiting HTTP.
+  A new preparation invalidates earlier reads, and a mismatched job cannot change
+  the current preparation or live display. The checks precede stop/status/question
+  updates; generation is rechecked after history/recovery awaits as well.
+- Regression coverage: A → B → A without any SSE frame, return during silent SSE
+  with a cached tool/run, and delayed old-job detail both requested before and
+  after a new preparation. Matching completion still clears the waiting UI.
+- Revalidation: `--reply-progress-only`, `--reply-flow-only`, and the Windows
+  contract suite passed. The build retains the existing CS0649 `confirmResend`
+  warning. The unfiltered UI suite was not rerun for this follow-up; its previously
+  documented baseline failure remains outside this claim.
