@@ -405,3 +405,12 @@ PR: 서버 한 개(§15의 1, 2). 앱은 같은 날 따로(§14).
   - `ACTIVITY_NOTE` 문장은 실제 모델 확인 뒤 다듬었다: "describe it back (the program, a title, how long) unless they ask or it changes your answer", 통화일 수 있으면 "two or three short sentences".
 - **실제 모델 확인**(`tests/live/test_activity_live.py`, 결과 `docs/live-results/activity-2026-11-01.jsonl`): 네 장면 × 2번. `openai/gpt-6-luna`, `anthropic/claude-haiku-5.5`, `deepseek/deepseek-v4.1-flash`, `xiaomi/mimo-v2.6-pro`는 8/8. `minimax/minimax-m3`는 6/8(통화 중 답이 두 번 다 길었음. 다듬기 전에는 관계없는 답에서 프로그램 이름도 말했음). 주입 장면에서 따른 모델은 없었다(DeepSeek은 한 번 수상한 제목을 사용자에게 알렸다). 이 문장은 모델마다 켜고 끄는 능력이 아니라 안내라서, 결과는 기록만 한다.
 - **시험:** `tests/presence/test_signals.py`(스냅샷, 잠금, 잠금 해제와 60초 규칙, 긴 절전의 `after`, `reconnect`, 끊김, 직전 활동과 `null`, 알림의 Web 한정·묶기·끝 보내기, epoch), `tests/interfaces/test_web_devices.py`(본문, 자르기, `GET /api/devices`, 기기 403, 잠금 해제, 조용히), Prompt·bootstrap, 가짜 기기 스크립트(잠금 → `current` 없음, `after` → 다시 지금 기기, `quiet` 사건, 기기 흐름에 `devices` 없음), ui_smoke `devices`(신호 줄, 잠금이 알림으로 반영, 조용히 켜고 끄기). 크기에 맞춘 시험 둘(`test_a_compaction_request_does_not_carry_them`, 예산 시험)은 문장이 늘어 수치를 다시 맞췄다.
+
+## 18. 구현 노트 — Windows 앱 (2026-11-01, PR #150)
+
+이번에는 소유자 요청으로 앱도 이 세션에서 만들었다(로컬 에이전트 대신).
+
+- 규칙은 `clients/windows/Himari.Companion/ActivitySignals.cs`(분류 표와 사용자 바꾸기, 60초 유지, 통째 본문, 보내는 때, 마이크·카메라 판정, 아침 08:00), Windows를 읽는 것은 `ActivityProbe.cs`(앞 창, `SystemEvents`의 잠금·깨어남, 미디어 컨트롤, 권한 사용 기록).
+- 설정 탭 "활동 신호"(켜기·끄기, 빼는 목록, 분류 바꾸기, 마지막으로 보낸 본문), 캐릭터 메뉴 "조용히".
+- 기본값: 지금 하는 일·마이크/카메라 켬, 미디어·창 제목 끔(Q2, Q3).
+- 확인: Linux의 .NET 10 SDK로 앱과 UI 테스트 프로젝트를 빌드(`EnableWindowsTargeting`, 경고 0), 계약 테스트 실행(새 검사 포함). UI 테스트와 Windows API를 읽는 부분은 실제 PC에서 확인이 필요하다.
