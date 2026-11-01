@@ -169,3 +169,15 @@ def test_an_opened_wake_or_a_users_message_still_keeps_a_new_wake_out() -> None:
     with pytest.raises(ControlError) as refused:  # the user's message waits for its answer
         asyncio.run(rt2.driver.accept_wake(SCOPE, TRY, "d1"))
     assert refused.value.code is ControlErrorCode.NOT_SETTLED
+
+
+def test_a_withdrawn_wake_is_cancelled_gives_its_keys_back_and_blocks_nothing() -> None:
+    """PR #156 re-review P2-1: the wake the Runner never started."""
+    rt, _ = runtime([final("왔어?")])
+    first = asyncio.run(rt.driver.accept_wake(SCOPE, TRY, "d1", keys=("k",)))
+    asyncio.run(rt.driver.withdraw_wake(SCOPE, first.payload.wake_id))  # type: ignore[union-attr]
+    record = asyncio.run(rt.data.read_wake(SCOPE.principal_id, first.payload.wake_id))  # type: ignore[union-attr]
+    assert record.status is WakeStatus.CANCELLED
+    assert asyncio.run(rt.data.taken_keys(SCOPE.principal_id, ("k",))) == frozenset()
+    asyncio.run(rt.driver.accept_wake(SCOPE, TRY, "d1", keys=("k",)))
+    assert asyncio.run(rt.driver.resume(SCOPE, max_runs=3)).state is DriveState.COMPLETED

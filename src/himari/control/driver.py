@@ -323,6 +323,12 @@ class Driver:
         assert self._wakes is not None
         return (await self._wakes.read_wake(scope.principal_id, wake.wake_id)).status is not WakeStatus.OPENED
 
+    async def withdraw_wake(self, scope: TrustedScope, wake_id: str) -> None:
+        if self._wakes is None:
+            return
+        await self._wakes.end_wake(scope.principal_id, wake_id, WakeStatus.CANCELLED)
+        await self._wakes.release_keys(scope.principal_id, wake_id)
+
     async def close_cut_group(self, scope: TrustedScope, reason: str) -> bool:
         async with self._exclusive(scope):
             await self._prepare(scope)

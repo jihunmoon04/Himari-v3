@@ -238,3 +238,10 @@ def test_a_wake_that_said_nothing_counts_toward_neither_the_gap_nor_the_day() ->
     assert decide(situation(loops=DUE, wakes=silent)).reasons
     opened = (replace(wake(NOW - timedelta(minutes=1)), status=WakeStatus.OPENED),)
     assert decide(situation(loops=DUE, wakes=opened)).blocked == "gap"
+
+
+def test_a_failed_wake_that_left_output_counts() -> None:
+    """PR #156 re-review P2-2: failed is not always silent."""
+    failed = replace(wake(NOW - timedelta(minutes=5)), status=WakeStatus.FAILED)
+    assert decide(situation(loops=DUE, wakes=(failed,))).reasons  # said nothing
+    assert decide(situation(loops=DUE, wakes=(failed,), said=frozenset({failed.wake_id}))).blocked == "gap"

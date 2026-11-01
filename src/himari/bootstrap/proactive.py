@@ -76,12 +76,14 @@ def parse_quiet(value: str | None) -> tuple[time | None, time | None]:
 
 def wake_turn(after: Sequence[ConversationEvent]) -> tuple[list[ConversationEvent], bool]:
     """The wake's own Events: those after it up to the user's next message (the
-    user's turn is not the wake's, review of part 1). And whether that message
-    answered one of the wake's questions."""
+    user's turn is not the wake's, review of part 1) or the next wake. And
+    whether that message answered one of the wake's questions."""
     own: list[ConversationEvent] = []
     for event in after:
         if isinstance(event.payload, UserMessage):
             return own, event.payload.answers_call is not None
+        if isinstance(event.payload, Wake):  # the next wake's turn is its own (re-review P2-2)
+            return own, False
         own.append(event)
     return own, False
 
@@ -323,13 +325,33 @@ class ProactiveScheduler:
         unanswered = recent is not None and await self._unanswered(TrustedScope(principal, recent.conversation_id),
                                                                    recent.last_sequence)
         loops = tuple(m for m in await self._data.list_memories(principal) if m.category is MemoryCategory.LOOP)
+        wakes = await self._data.wakes_since(principal, now - WAKES_READ)
         return Situation(
             now=now, settings=self.settings, zone=zone, device_id=device_id, device=device,
             quiet_until=await self._devices.quiet(principal),
             last_user_message_at=await self._data.last_user_message_at(principal),
             working=bool(self._runner.running(principal)), unanswered_wake=unanswered,
-            wakes=await self._data.wakes_since(principal, now - WAKES_READ), loops=loops,
-            returned=self._returns.get(principal)), recent
+            wakes=wakes, loops=loops, returned=self._returns.get(principal),
+            said=await self._said(principal, wakes)), recent
+
+    async def _said(self, principal: PrincipalId, wakes: Sequence[WakeRecord]) -> frozenset[str]:
+        """PR #156 re-review P2-2: of the failed wakes, those whose turn left assistant
+        output (a final answer, progress or tool calls) before the next message or
+        wake. One that cannot be read counts as having spoken."""
+        said: set[str] = set()
+        for record in wakes:
+            if record.status is not WakeStatus.FAILED:
+                continue
+            try:
+                after = await self._data.read_events(TrustedScope(principal, record.conversation_id),
+                                                     after_sequence=record.event_sequence, limit=TAIL_EVENTS)
+            except DataError:
+                said.add(record.wake_id)
+                continue
+            own, _ = wake_turn(after)
+            if any(isinstance(e.payload, (AssistantFinal, AssistantToolCalls)) for e in own) or len(own) == TAIL_EVENTS:
+                said.add(record.wake_id)
+        return frozenset(said)
 
     async def look(self, principal: PrincipalId) -> Look:
         situation, recent = await self.situation(principal)
@@ -383,7 +405,7 @@ class ProactiveScheduler:
     async def status(self, principal: PrincipalId) -> dict[str, object]:
         situation, _ = await self.situation(principal)
         midnight = local_midnight(situation.now, situation.zone)
-        today = [w for w in situation.wakes if w.created_at >= midnight and spoke(w)
+        today = [w for w in situation.wakes if w.created_at >= midnight and spoke(w, situation.said)
                  and not all(r.kind is WakeKind.REMINDER for r in w.reasons)]
         look = self.looks.get(principal)
         _, _, upcoming = candidates(situation)

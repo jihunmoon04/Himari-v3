@@ -292,3 +292,37 @@ def test_what_changed_after_the_look_read_it_is_checked_again(tmp_path: Path) ->
             await app.close()
 
     asyncio.run(scenario())
+
+
+def test_a_failed_wake_counts_only_when_its_turn_left_output(tmp_path: Path) -> None:
+    """PR #156 re-review P2-2: tool calls then a failure count toward the gap; a silent failure does not."""
+    from himari.common import CallId, ToolCall, ToolId
+    from himari.data.api import WakeStatus
+    from himari.provider.api import NormalizedToolCalls
+
+    async def scenario() -> None:
+        calls = NormalizedToolCalls((ToolCall(CallId("c0"), 0, ToolId("nowhere/tool"), {}),), (TextBlock("찾아볼게"),))
+        app = await opened(tmp_path / "data", ScriptedAdapter([NormalizedFinal((TextBlock("응"),)), calls]))
+        try:
+            device = await paired(app)
+            app.hub.subscribe(ME, device)
+            app.hub.signal(ME, device, 0, "Asia/Seoul")
+            scope = TrustedScope(ME, await app.create_conversation(ME))
+            await app.send(scope, "안녕", origin=MessageOrigin(OriginKind.WEB))
+            await app.runner.wait(scope)
+            _, status = await app.try_wake(ME)
+            await settled(app, scope)
+            loud = await app.data.read_wake(ME, status.wake_id or "")
+            assert loud.status is WakeStatus.FAILED  # its tool calls, then the script ran out
+            scheduler = app.scheduler
+            assert scheduler is not None
+            situation, _ = await scheduler.situation(ME)
+            assert loud.wake_id in situation.said
+            silent = await app.data.begin_wake(scope, (WakeReason(WakeKind.LOOP_DUE, memory_id=1),), device)
+            await app.data.end_wake(ME, silent.payload.wake_id, WakeStatus.FAILED)  # type: ignore[union-attr]
+            situation, _ = await scheduler.situation(ME)
+            assert silent.payload.wake_id not in situation.said and loud.wake_id in situation.said  # type: ignore[union-attr]
+        finally:
+            await app.close()
+
+    asyncio.run(scenario())

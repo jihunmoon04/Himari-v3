@@ -87,6 +87,7 @@ class Situation:
     wakes: tuple[WakeRecord, ...]  # the wakes of the last day and more
     loops: tuple[Memory, ...]
     returned: Return | None
+    said: frozenset[str] = frozenset()  # ended wakes (failed) whose turn left assistant output
 
 
 @dataclass(frozen=True)
@@ -221,11 +222,16 @@ _TRY = frozenset({WakeKind.TRY})
 _REMINDER = frozenset({WakeKind.REMINDER})
 
 
-def spoke(record: WakeRecord) -> bool:
-    """§6.2: a wake the gap and the daily limit count — one that spoke or is speaking.
-    Not one that said nothing (failed, or cancelled as the user won: PR #156 review
-    P1, a wake cut by a restart is tried again at once), nor the operator's try (§11)."""
-    return record.status in (WakeStatus.OPENED, WakeStatus.ANSWERED) and not _only(record, _TRY)
+def spoke(record: WakeRecord, said: frozenset[str] = frozenset()) -> bool:
+    """§6.2: a wake the gap and the daily limit count — one that spoke or is speaking:
+    opened, answered, or failed after its turn left output (``said``: progress or tool
+    calls, PR #156 re-review P2-2). Not one that said nothing (failed before a word, or
+    cancelled as the user won: PR #156 review P1, a wake cut by a restart is tried again
+    at once), nor the operator's try (§11)."""
+    if _only(record, _TRY):
+        return False
+    return record.status in (WakeStatus.OPENED, WakeStatus.ANSWERED) or (
+        record.status is WakeStatus.FAILED and record.wake_id in said)
 
 
 def _blocked(s: Situation, reminders_only: bool) -> str | None:
@@ -246,7 +252,7 @@ def _blocked(s: Situation, reminders_only: bool) -> str | None:
         return "unanswered"
     if in_quiet_hours(s.now, s.zone, s.settings.quiet_start, s.settings.quiet_end):
         return "quiet_hours"
-    counted = [w for w in s.wakes if spoke(w)]
+    counted = [w for w in s.wakes if spoke(w, s.said)]
     last = max((w.created_at for w in counted), default=None)
     if last is not None and s.now - last < timedelta(minutes=s.settings.gap_minutes):
         return "gap"

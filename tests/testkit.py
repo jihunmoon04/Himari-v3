@@ -117,6 +117,9 @@ class NoWakes:
     async def close_cut_group(self, scope: TrustedScope, reason: str) -> bool:
         return False
 
+    async def withdraw_wake(self, scope: TrustedScope, wake_id: str) -> None:
+        pass
+
 
 def user(text: str) -> UserMessage:
     return UserMessage(blocks=(TextBlock(text),))

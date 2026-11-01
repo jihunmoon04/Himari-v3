@@ -312,6 +312,12 @@ class ConversationDriver(Protocol):
         else NOT_SETTLED, nothing written. ``resume`` then answers it."""
         ...
 
+    async def withdraw_wake(self, scope: TrustedScope, wake_id: str) -> None:
+        """V3-P87 (PR #156 re-review P2-1): a wake recorded but never started —
+        ended CANCELLED (its reminders go back) and its keys given back, as it
+        said nothing."""
+        ...
+
     async def close_cut_group(self, scope: TrustedScope, reason: str) -> bool:
         """V3-P87 §4.4 (re-review P1): settle an unfinished tool group left by a
         job a restart cut — calls never started are not run, finished ones keep
