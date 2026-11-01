@@ -27,6 +27,7 @@ public partial class MainWindow
     private GlobalSystemMediaTransportControlsSessionManager? mediaManager;
     private readonly Dictionary<string, string> programNames = new(StringComparer.OrdinalIgnoreCase);
     private DateTimeOffset? quietUntil;
+    private readonly System.Windows.Threading.DispatcherTimer quietTimer = new();
     private bool signalControlsLoading;
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetWindowText(IntPtr hwnd, StringBuilder text, int count);
@@ -50,11 +51,15 @@ public partial class MainWindow
         }
         foreach (var text in new[] { s.TitleExclusions, s.MicExclusions, s.CategoryOverrides })
             text.LostFocus += (_, _) => SignalSettingsChanged();
+        quietTimer.Tick += (_, _) => UpdateQuietMenu();  // the quiet ends by itself (PR #150 re-review P2)
         UpdateQuietMenu();
     }
 
+    private void CharacterMenuOpened(object sender, RoutedEventArgs e) => UpdateQuietMenu();  // judged at this moment
+
     private void CleanupActivitySignals()
     {
+        quietTimer.Stop();
         SystemEvents.SessionSwitch -= SessionSwitched;  // static events: they would keep this window alive
         SystemEvents.PowerModeChanged -= PowerModeChanged;
     }
@@ -274,7 +279,10 @@ public partial class MainWindow
 
     private void UpdateQuietMenu()
     {
-        bool on = quietUntil is { } end && end > DateTimeOffset.Now;
+        var left = quietUntil is { } until ? until - DateTimeOffset.Now : TimeSpan.Zero;
+        bool on = left > TimeSpan.Zero;
+        quietTimer.Stop();
+        if (on) { quietTimer.Interval = left + TimeSpan.FromSeconds(1); quietTimer.Start(); }
         QuietState.Header = serverTakesSignals ? QuietTimes.Describe(quietUntil, DateTimeOffset.Now) : "서버가 아직 조용히를 지원하지 않아요";
         QuietHourMenu.IsEnabled = QuietMorningMenu.IsEnabled = serverTakesSignals && client is not null;
         QuietOffMenu.IsEnabled = serverTakesSignals && client is not null && on;

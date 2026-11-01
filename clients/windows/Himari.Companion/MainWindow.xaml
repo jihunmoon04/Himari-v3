@@ -43,7 +43,7 @@
       </local:PixelBubble>
     </Grid>
     <Image x:Name="Character" Height="330" HorizontalAlignment="Center" VerticalAlignment="Bottom" Margin="0,0,80,4" RenderTransformOrigin="0.5,0.5" RenderOptions.BitmapScalingMode="NearestNeighbor" MouseLeftButtonDown="CharacterMouseDown" MouseMove="CharacterMouseMove" MouseLeftButtonUp="CharacterMouseUp" ToolTip="클릭해 대화 · 우클릭해 메뉴 · 드래그해 이동">
-      <Image.ContextMenu><ContextMenu>
+      <Image.ContextMenu><ContextMenu Opened="CharacterMenuOpened">
         <MenuItem Header="대화 입력" Click="ChatClick"/><MenuItem Header="대화 선택" Click="ConversationMenuClick"/><MenuItem Header="새 대화" Click="NewConversationClick"/><MenuItem Header="대화 기록" Click="HistoryClick"/>
         <Separator/><MenuItem x:Name="QuietMenu" Header="조용히"><MenuItem x:Name="QuietState" IsEnabled="False"/><Separator/><MenuItem x:Name="QuietHourMenu" Header="1시간 조용히" Click="QuietHourClick"/><MenuItem x:Name="QuietMorningMenu" Header="내일 아침까지 조용히" Click="QuietMorningClick"/><MenuItem x:Name="QuietOffMenu" Header="조용히 끄기" Click="QuietOffClick"/></MenuItem>
         <Separator/><MenuItem x:Name="FlipMenu" Header="좌우 반전" IsCheckable="True" Click="FlipClick"/><MenuItem Header="설정" Click="SettingsClick"/><MenuItem Header="말풍선 닫기" Click="CloseBubbleClick"/>
