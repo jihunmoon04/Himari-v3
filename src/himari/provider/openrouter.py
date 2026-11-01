@@ -115,12 +115,17 @@ CONNECT_SECONDS = 10.0  # of a streamed request; reading waits the adapter's tim
 # fixed conversations read three times (tests/live/test_memory_passes_live.py,
 # 2026-10-31; V3-P85 §15): z-ai/glm-5.3 left a passing fact without its end,
 # openai/gpt-5-nano missed notes and dates.
+# speaks_first: only models that passed at least 80% of the speaking-first check —
+# nine scenes twice: short, one question, Korean, no word of the wake, marks well
+# formed (tests/live/test_proactive_live.py, 2026-11-01; V3-P87 §13; owner: models
+# under it are left out): minimax/minimax-m3 passed 13 of 18; the rest were not checked.
 # streaming: only models whose streamed answers, merged reasoning replayed in
 # the next Tool turn and mid-stream cancel were checked live
 # (tests/live/test_openrouter_stream_live.py, 2026-10-24; V3-P73 §9).
 KNOWN_CAPABILITIES: Mapping[str, ProviderCapabilities] = {
     "openai/gpt-6-luna": ProviderCapabilities(
         model_id="openai/gpt-6-luna",
+        speaks_first=True,  # V3-P87: 18 of 18 in the speaking-first check, live 2026-11-01
         memory_passes=True,  # V3-P85: every bar of the memory check, live 2026-10-31
         screen_points=True,  # V3-P84: 8+ of 10 points on target, live 2026-10-30
         image_input=True,  # V3-P67: user-message and after-group images read back, live 2026-10-22
@@ -141,6 +146,7 @@ KNOWN_CAPABILITIES: Mapping[str, ProviderCapabilities] = {
     ),
     "anthropic/claude-haiku-5.5": ProviderCapabilities(
         model_id="anthropic/claude-haiku-5.5",
+        speaks_first=True,  # V3-P87: 16 of 18 in the speaking-first check, live 2026-11-01
         memory_passes=True,  # V3-P85: every bar of the memory check, live 2026-10-31
         screen_points=True,  # V3-P84: 8+ of 10 points on target, live 2026-10-30
         image_input=True,  # V3-P67: user-message and after-group images read back, live 2026-10-22
@@ -174,6 +180,7 @@ KNOWN_CAPABILITIES: Mapping[str, ProviderCapabilities] = {
     ),
     "xiaomi/mimo-v2.6-pro": ProviderCapabilities(
         model_id="xiaomi/mimo-v2.6-pro",
+        speaks_first=True,  # V3-P87: 16 of 18 in the speaking-first check, live 2026-11-01
         memory_passes=True,  # V3-P85: every bar of the memory check, live 2026-10-31
         screen_points=True,  # V3-P84: 8+ of 10 points on target, live 2026-10-30
         streaming=True,  # V3-P73: live response, tool replay and cancel checked 2026-10-24
@@ -191,6 +198,7 @@ KNOWN_CAPABILITIES: Mapping[str, ProviderCapabilities] = {
     ),
     "deepseek/deepseek-v4.1-flash": ProviderCapabilities(
         model_id="deepseek/deepseek-v4.1-flash",
+        speaks_first=True,  # V3-P87: 17 of 18 in the speaking-first check, live 2026-11-01
         memory_passes=True,  # V3-P85: every bar of the memory check, live 2026-10-31
         screen_points=True,  # V3-P84: 8+ of 10 points on target, live 2026-10-30
         streaming=True,  # V3-P73: live response, tool replay and cancel checked 2026-10-24

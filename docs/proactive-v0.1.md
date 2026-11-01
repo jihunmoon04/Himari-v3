@@ -582,3 +582,8 @@ P1·P2 해결 확인. 문서 정합성 둘과 구현 주의 하나:
 - **P2-1 같은 문구의 고리에 새 알림:** `memory_save`의 "Already saved" 검사가 알림을 보지 않아, 이미 있는 고리를 같은 문구와 `remind_at`으로 다시 저장하면 알림이 붙지 않았다. 이제 알림이 주어졌고 그 고리의 것과 다르면 그 고리의 수정으로 쓴다(글은 그 고리의 것, `due`는 주지 않으면 그 고리의 것, "Updated m1"). 알림 없이 같은 문구면 예전처럼 "Already saved".
 - **P2-2 자동 기억이 기다리는 알림을 지움:** 알림이 `scheduled`·`claimed`인 고리는 자동 기억이 **잊거나(`FORGET`) 고리 아닌 것으로 바꾸지(`UPDATE`의 다른 범주)** 못한다 — Data의 `decide_item`이 `reminder_pending`으로 거절하고(권위), 계획 단계도 `forget`을 미리 떨어뜨린다. 고리인 채로 글만 고치는 것은 된다(알림은 지켜짐). 사용자와 모델의 `memory_forget`은 그대로 지울 수 있다. 알림을 전한 뒤에는 예전 규칙.
   - 같이 고친 것: 메모리 백엔드가 자동 기억을 적용할 때 노트를 전달 상태 없이 읽고 있었다(SQLite는 읽음) — 이제 같은 상태로 판정한다.
+
+### 19.9 소유자 결정 (2026-11-01): 기준에 못 미친 모델은 먼저 말 걸지 않음
+
+- `ProviderCapabilities.speaks_first`: 실제 모델 확인(§19.6)에서 80% 이상 통과한 모델만 — gpt-6-luna(18/18), deepseek-v4.1-flash(17), claude-haiku-5.5(16), mimo-v2.6-pro(16). minimax-m3(13/18)은 빠짐. 확인하지 않은 모델(gpt-5-nano, gpt-6.1-sol, claude-sonnet-5.5, glm-5.3)도 다른 능력과 같은 원칙으로 꺼져 있다(확인하면 켤 수 있음).
+- 그 대화의 모델이 `speaks_first`가 아니면: `accept_wake`가 `MODEL_UNCHECKED`(스케줄러는 그 틱을 건너뜀, `try`는 409 `model_unchecked`), 시스템 글의 "Speaking first" 줄과 원칙의 `<wake>`도 넣지 않는다(`RequestOptions.speaks_first`). 사용자가 대화의 모델을 바꾸면 그 다음 판단부터 따른다.

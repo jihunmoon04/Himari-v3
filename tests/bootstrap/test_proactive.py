@@ -5,7 +5,7 @@ wakes it cut."""
 from __future__ import annotations
 
 import asyncio
-from datetime import time
+from datetime import UTC, datetime, time
 from pathlib import Path
 
 import pytest
@@ -169,8 +169,6 @@ CANCELLED = JobStatus(running=False, result=DriveResult(DriveState.CANCELLED))
 ])
 def test_how_a_wake_ends(status: JobStatus | None, after: list[str], waiting: bool,
                          outcome: tuple[WakeStatus, bool]) -> None:
-    from datetime import UTC, datetime
-
     from himari.common import CallRef, ConversationId, EventId, RunId
     from himari.data.api import AssistantFinal, AssistantToolCalls, ConversationEvent, UserMessage
 
@@ -192,3 +190,33 @@ def test_quiet_hours_parse() -> None:
     for wrong in ("22:30", "late-early"):
         with pytest.raises(ValueError):
             parse_quiet(wrong)
+
+
+def test_only_a_checked_model_speaks_first(tmp_path: Path) -> None:
+    """V3-P87 §13, owner 2026-11-01: a model under the speaking-first bar gets no wake and no "Speaking first" line."""
+    async def scenario() -> None:
+        adapter = ScriptedAdapter([NormalizedFinal((TextBlock("응"),))], speaks_first=False)
+        app = await opened(tmp_path, adapter, proactive=ON)
+        try:
+            await current_device(app)
+            scope = TrustedScope(ME, await app.create_conversation(ME))
+            await app.send(scope, "안녕", origin=MessageOrigin(OriginKind.WEB))
+            await app.runner.wait(scope)
+            assert not any(PROACTIVE_RULE in part for part in adapter.prepared_inputs[-1].stable_prefix)
+            with pytest.raises(ProactiveRefused) as refused:
+                await app.try_wake(ME)
+            assert refused.value.code == "model_unchecked"
+            assert await app.data.opened_wakes() == () and await app.data.wakes_since(
+                ME, datetime(2026, 1, 1, tzinfo=UTC)) == ()
+        finally:
+            await app.close()
+
+    asyncio.run(scenario())
+
+
+def test_the_checked_models_are_the_ones_that_passed() -> None:
+    from himari.provider.openrouter import KNOWN_CAPABILITIES
+
+    assert {m for m, c in KNOWN_CAPABILITIES.items() if c.speaks_first} == {
+        "openai/gpt-6-luna", "anthropic/claude-haiku-5.5", "xiaomi/mimo-v2.6-pro", "deepseek/deepseek-v4.1-flash"}
+    assert not KNOWN_CAPABILITIES["minimax/minimax-m3"].speaks_first  # 13 of 18: under the bar

@@ -89,6 +89,8 @@ class RequestOptions(DeepFrozen):
     image_input: bool = False
     # And points on a screen where it says (V3-P84 §5); set by the Driver.
     screen_points: bool = False
+    # And may speak first (V3-P87 §13): the "Speaking first" line only then; set by the Driver.
+    speaks_first: bool = False
     # Ask for the answer as a stream (V3-P73 §3.1); set by the Driver right before
     # the request is prepared, only for a Run that answers the user.
     stream: bool = False

@@ -154,6 +154,8 @@ class ControlErrorCode(Enum):
     # V3-P87 §6.1 (re-review P1): a wake opens only in a settled Conversation — no
     # waiting call, no unfinished tool group, no recovery needed, no unanswered trigger
     NOT_SETTLED = "not_settled"
+    # V3-P87 §13 (owner 2026-11-01): the Conversation's model did not pass the speaking-first check
+    MODEL_UNCHECKED = "model_unchecked"
 
 
 class ControlError(Exception):

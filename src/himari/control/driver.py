@@ -289,6 +289,9 @@ class Driver:
         if self._wakes is None:
             raise ControlError(ControlErrorCode.NOT_SETTLED, "this server keeps no wakes")
         async with self._exclusive(scope):
+            if not self._provider.describe_capabilities(self._turn_model(scope).model_id).speaks_first:
+                # V3-P87 §13 (owner 2026-11-01): only on a model that passed the speaking-first check
+                raise ControlError(ControlErrorCode.MODEL_UNCHECKED, self._turn_model(scope).model_id)
             _, stop = await self._prepare(scope)
             triggers = await self._next_triggers(scope)
             if (stop is not None or await self._log.find_waiting_call(scope) is not None
@@ -528,7 +531,8 @@ class Driver:
         capabilities = self._provider.describe_capabilities(model.model_id)
         return RequestOptions(model.model_id, model.reasoning_effort, provider_key=self._provider.provider_key,
                               session_key=session_key(scope), image_input=capabilities.image_input,
-                              screen_points=capabilities.image_input and capabilities.screen_points)
+                              screen_points=capabilities.image_input and capabilities.screen_points,
+                              speaks_first=capabilities.speaks_first)
 
     def _options_for(self, scope: TrustedScope) -> RequestOptions:
         return self._request_options(scope, self._turn_model(scope))
