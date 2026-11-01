@@ -387,3 +387,11 @@ B1·B2·C1·C2 해결 확인. 새 지적 둘:
 | P1 | `context_key`·`state_revision`이 최근 일화·`presence`·기억의 날짜를 따라가지 않음 | `1eeb13d`에서 이미 고침(`state_key`, §14.1). 검수자가 권한 세 경우(일화만, 활동만, 기한만)는 `test_memory_or_presence_changed_since_the_measurement_adds_the_whole_state`가 덮는다 |
 | P2 | `loadPersona()`에 늦은 응답 막기가 없음(다시 들어와 고치는 중에 첫 응답이 덮어씀) | `personaTicket`: 가장 최근 요청만, 화면이 보일 때만, 그 사이 고친 글이 있으면 덮지 않음. 화면에 다시 들어올 때 이전 요청을 무효로 함 |
 | P2 | 지시문은 읽고 페르소나만 실패하면 Instructions를 다시 눌러도 조기 반환으로 재시도가 막힘 | 화면이 보이고 지시문이 읽혀 있어도 페르소나가 없으면 **페르소나만** 다시 읽음(지시문과 그 초안은 그대로). ui_smoke `instructions`에 한 번 실패 → 다시 누름 → 페르소나만 읽힘(지시문 초안 유지) 단계를 더함. 고치기 전 코드에서는 이 단계가 실패함을 확인 |
+
+### 14.3 구현 재검수 (`111806c`): NOT_READY → 고침
+
+§14.2의 셋은 해결 확인. 새 지적 하나:
+
+| # | 지적 | 반영 |
+| --- | --- | --- |
+| P1 | `state_key`가 Environment 관측(`connection`, `working_directory`, `read`, `network`, `git_push`, `workspaces`)을 빼먹음. `ContextLoader._observe()`가 매 턴 새로 읽어 리비전과 따로 바뀜(offline → online에 폴더 목록이 생기는 등) | 조각을 하나씩 더하는 대신 **렌더링된 상태 데이터 전체**를 해시한다: `api.state_block`을 `state_data`(JSON 이전의 dict)와 블록으로 나누고, `state_key`가 `state_data(current_state(inputs), fit_notes(…))`에서 `now`, 시계로만 움직이는 수, 턴 상태(어차피 매 Run 셈)를 뺀 것을 해시. `observed_at`은 상태에 렌더링되지 않으므로 들어가지 않는다. Composer와 `state_key`가 같은 `current_state(inputs)`를 쓴다. 앞으로 상태에 무엇이 더해져도 따로 손대지 않아도 된다. 시험: 같은 리비전에서 offline → online, 폴더가 늘어남, 작업 디렉터리가 바뀜이 각각 새 키이고 측정값에 상태 전체가 더해짐, 다시 관측되기만 하면 같은 키 |

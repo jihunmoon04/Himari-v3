@@ -126,9 +126,9 @@ def test_a_measurement_under_another_composition_is_not_used(change: str) -> Non
 
 def test_a_state_change_since_the_measurement_adds_the_whole_state() -> None:
     events = history("q1", "a1", "q2")
-    basis = Composer().compose(inputs(events)).prompt_basis
-    key, state = basis.context_key, basis.state_key
     note = PersistedStateBasis(len(events), 0, (), (), (Artifact(ArtifactId("a1"), "note", 1, "<" * 300),))
+    basis = Composer().compose(dataclasses.replace(inputs(events), state_basis=note)).prompt_basis
+    key, state = basis.context_key, basis.state_key  # the state as measured: the artifact was there
     same = dataclasses.replace(inputs(events, mark=UsageMark(500, 3, None, key, 0, state_key=state)), state_basis=note)
     changed = dataclasses.replace(inputs(events, mark=UsageMark(500, 3, None, key, -1, state_key=state)),
                                   state_basis=note)
@@ -343,3 +343,42 @@ def test_memory_or_presence_changed_since_the_measurement_adds_the_whole_state()
     assert grown.measured and grown.tokens >= 500 + 1500 // 3  # the whole state again, episodes included
     unknown = dataclasses.replace(base, usage_mark=dataclasses.replace(mark, state_key=None))  # a Run from before
     assert Compactor().estimate(unknown, Composer().compose(unknown)).tokens > 500
+
+
+def test_environment_observations_changed_since_the_measurement_add_the_whole_state() -> None:
+    """PR #152 re-review P1: what an Environment is observed to be (online, its folders, its working
+    directory) is read every turn, apart from the state's revision; ``observed_at`` is not shown."""
+    from datetime import UTC, datetime, timedelta
+
+    from himari.common import BindingId, EnvironmentInstanceId, EnvironmentKind, WorkspaceId
+    from himari.data.api import BindingAuthority, EnvironmentActivation
+    from himari.environment.api import BindingObservation, ConnectionStatus, ObservedWorkspace
+    from himari.prompt.compaction import state_key
+
+    at = datetime(2026, 11, 1, 9, 0, tzinfo=UTC)
+    binding = BindingId("bind_1")
+    basis = PersistedStateBasis(
+        3, 0, (EnvironmentActivation(EnvironmentInstanceId("env_1"), EnvironmentKind("machine"), binding),),
+        (BindingAuthority(binding, EnvironmentInstanceId("env_1"), EnvironmentKind("machine"), WorkspaceId("ws_1"),
+                          1),), ())
+    offline = BindingObservation(binding, ConnectionStatus.OFFLINE, at)
+    online = BindingObservation(binding, ConnectionStatus.ONLINE, at, working_directory="/srv/a",
+                                workspaces=(ObservedWorkspace("/srv/a", "A"),))
+    events = history("q1", "a1", "q2")
+    base = dataclasses.replace(inputs(events), state_basis=basis, observations=(offline,))
+    key = state_key(base)
+    assert state_key(dataclasses.replace(base, observations=(dataclasses.replace(
+        offline, observed_at=at + timedelta(seconds=30)),))) == key  # observed again, nothing new
+    keys = [state_key(dataclasses.replace(base, observations=(observed,))) for observed in (
+        online,  # offline → online, with its folders
+        dataclasses.replace(online, workspaces=(ObservedWorkspace("/srv/a", "A"), ObservedWorkspace("/srv/b", "B"))),
+        dataclasses.replace(online, working_directory="/srv/b"),
+    )]
+    assert key not in keys and len(set(keys)) == 3  # each change is a new key
+    composed = Composer().compose(base)
+    mark = UsageMark(500, 3, None, composed.prompt_basis.context_key, 0, state_key=composed.prompt_basis.state_key)
+    measured = dataclasses.replace(base, usage_mark=mark)
+    assert Compactor().estimate(measured, Composer().compose(measured)).tokens == 500
+    grown = dataclasses.replace(measured, observations=(online,))
+    estimate = Compactor().estimate(grown, Composer().compose(grown))
+    assert estimate.measured and estimate.tokens > 500  # the whole state again, the folders included

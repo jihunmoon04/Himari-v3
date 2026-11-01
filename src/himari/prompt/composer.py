@@ -40,7 +40,7 @@ from himari.prompt.api import (
     UserTurn,
     time_line,
 )
-from himari.prompt.compaction import anchors, context_key, part_anchor, read_summary, state_key
+from himari.prompt.compaction import anchors, context_key, current_state, part_anchor, read_summary, state_key
 from himari.prompt.system import fit_notes, system_text
 
 
@@ -81,10 +81,7 @@ class Composer:
             stable_prefix=stable_prefix(inputs),
             tool_catalog=inputs.tool_catalog,
             conversation=tuple(history),
-            current_state=CurrentStateProjection(basis=basis, observations=inputs.observations,
-                                                 memories=inputs.memories, now=inputs.now,
-                                                 presence=inputs.presence, episodes=inputs.episodes,
-                                                 episode_count=inputs.episode_count),
+            current_state=current_state(inputs),
             request_options=inputs.request_options,
             trigger_refs=inputs.trigger_refs,
             prompt_basis=PromptBasis(

@@ -105,8 +105,7 @@ from himari.prompt.api import (
     json_data,
     state_block,
     turn_state_data,
-    presence_data,
-    user_memory_data,
+    state_data,
 )
 from himari.prompt.system import fit_notes, system_text
 
@@ -262,18 +261,24 @@ def _without_clock(value: object) -> object:
 
 
 def state_key(inputs: PromptInputs) -> str:
-    """V3-P89 post-merge review P1: digest of the runtime state's parts that no
-    revision tracks — user_memory (notes with their dates, loops, recent
-    episodes) and presence — as they are rendered. When it differs from the
-    measured Run's, the estimate counts the whole state again (as for a new
-    state revision). ``now`` and the clock's counters are left out."""
-    data = {
-        "user_memory": None if inputs.memories is None else user_memory_data(
-            inputs.memories, inputs.episodes, inputs.episode_count, inputs.now),
-        "presence": None if inputs.presence is None else _without_clock(presence_data(inputs.presence)),
-    }
-    return hashlib.sha256(json.dumps(thaw(data), ensure_ascii=False, sort_keys=True,
+    """V3-P89 post-merge review P1, PR #152 re-review P1: digest of the runtime
+    state **as it is rendered** — Environment observations (connection, paths,
+    workspaces), memory (notes with their dates, loops, recent episodes),
+    presence, "data" notes, artifacts — since much of it changes apart from the
+    state's revision. When it differs from the measured Run's, the estimate
+    counts the whole state again (as for a new state revision). Left out: ``now``,
+    the clock's counters and the turn's state (counted every Run anyway)."""
+    data = dict(state_data(current_state(inputs), fit_notes(inputs.source_notes)))
+    data.pop("now", None)
+    return hashlib.sha256(json.dumps(thaw(_without_clock(data)), ensure_ascii=False, sort_keys=True,
                                      default=str).encode()).hexdigest()
+
+
+def current_state(inputs: PromptInputs) -> CurrentStateProjection:
+    """The state the Composer renders for these inputs (one place for both)."""
+    return CurrentStateProjection(basis=inputs.state_basis, observations=inputs.observations,
+                                  memories=inputs.memories, now=inputs.now, presence=inputs.presence,
+                                  episodes=inputs.episodes, episode_count=inputs.episode_count)
 
 
 def read_summary(snapshot: PromptSnapshot | None) -> str | None:
