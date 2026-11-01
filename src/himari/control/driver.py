@@ -204,6 +204,7 @@ class _UserContext(NamedTuple):
     now: datetime | None  # V3-P83 §6.3; None: the Driver has no time zone
     episodes: tuple[RecentEpisode, ...] = ()  # V3-P85 §8: of other Conversations, lately
     episode_count: int = 0
+    persona: str = ""  # V3-P89 §4: the companion persona, read with the instructions
 
 
 class Driver:
@@ -418,16 +419,20 @@ class Driver:
         return self._models.resolve(setting)
 
     async def _read_user(self, scope: TrustedScope) -> _UserContext:
-        text = "" if self._user_instructions is None else (
-            await self._user_instructions.read_instructions(scope.principal_id, InstructionScope.USER)).text
+        text = persona = ""
+        if self._user_instructions is not None:
+            text = (await self._user_instructions.read_instructions(scope.principal_id, InstructionScope.USER)).text
+            persona = (await self._user_instructions.read_instructions(
+                scope.principal_id, InstructionScope.COMPANION_PERSONA)).text
         now = self._clock()
         if self._memories is None:
-            return _UserContext(text, None, None if self._zone is None else now.astimezone(self._zone))
+            return _UserContext(text, None, None if self._zone is None else now.astimezone(self._zone), persona=persona)
         notes = await self._memories.list_memories(scope.principal_id)
         episodes = await self._memories.recent_episodes(scope.principal_id, since=now - RECENT_DAYS,
                                                         besides=scope.conversation_id, limit=RECENT_EPISODES)
         count = await self._memories.count_episodes(scope.principal_id)
-        return _UserContext(text, notes, None if self._zone is None else now.astimezone(self._zone), episodes, count)
+        return _UserContext(text, notes, None if self._zone is None else now.astimezone(self._zone), episodes, count,
+                            persona)
 
     async def _situated(self, scope: TrustedScope, inputs: PromptInputs, *, turn: bool = True) -> PromptInputs:
         """``inputs`` with where the user is (V3-P83 §6.2) and the time in the

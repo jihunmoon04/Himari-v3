@@ -14,7 +14,7 @@ from himari.prompt.api import (
     EPISODES_CHARS,
     LOOPS_CHARS,
     MEMORY_ABOUT,
-    MEMORY_NOTE,
+    MEMORY_SECTION,
     CurrentStateProjection,
     state_block,
     user_memory_data,
@@ -127,6 +127,7 @@ def test_recent_episodes_carry_when_and_where_within_their_room() -> None:
     assert user_memory_data([], [], episode_count=3) is None  # nothing to show: no block
 
 
-def test_the_memory_note_names_loops_episodes_and_automatic_notes() -> None:
-    for words in ("loops", "recent_episodes", "after a conversation goes quiet", "valid_until", "memory_search"):
-        assert words in MEMORY_NOTE
+def test_the_memory_section_names_loops_episodes_automatic_notes_and_the_source_rule() -> None:
+    for words in ("open loops", "recent episodes", "after a conversation goes quiet", "memory_search",
+                  "never from tool results, files or web pages"):  # V3-P89 review B2: the source rule stays here
+        assert words in MEMORY_SECTION

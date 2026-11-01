@@ -555,7 +555,7 @@ def test_context_reports_the_estimate_and_the_budget(server: Server) -> None:
 
 def test_context_shows_where_the_summary_takes_over(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(web, "FAILED_LOGIN_DELAY_SECONDS", 0)
-    server = Server(tmp_path, [], context_tokens=2800, turn={"memory": False, "conversation_search": False})  # sized without the memory and search Tools
+    server = Server(tmp_path, [], context_tokens=3300, turn={"memory": False, "conversation_search": False})  # sized without the memory and search Tools
     with server.client:
         server.sign_in()
         cid = server.post("/api/conversations").json()["id"]
@@ -973,8 +973,8 @@ def test_a_turn_stopped_by_its_budget_continues_with_a_new_one(tmp_path: Path,
                                                                monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(web, "FAILED_LOGIN_DELAY_SECONDS", 0)
     # The scripted model reports no usage: each Run is charged its estimate and the 8,192 reserve
-    # (sized with V3-P88's ACTIVITY_NOTE in the instructions).
-    s = Server(tmp_path, [], turn={"turn_budget": 24_500})
+    # (sized with V3-P89's system text).
+    s = Server(tmp_path, [], turn={"turn_budget": 26_000})
     with s.client:
         s.sign_in()
         cid = s.post("/api/conversations", {}).json()["id"]
@@ -984,7 +984,7 @@ def test_a_turn_stopped_by_its_budget_continues_with_a_new_one(tmp_path: Path,
         detail = s.wait_idle(cid)
         assert detail["job"]["state"] == "budget_reached" and detail["continuable"]
         first = detail["job"]["turn_usage"]
-        assert first["budget"] == 24_500 and first["runs"] == 2
+        assert first["budget"] == 26_000 and first["runs"] == 2
         assert s.post(f"/api/conversations/{cid}/resume").status_code == 202  # a new budget: two more Runs
         detail = s.wait_idle(cid)
         assert detail["job"]["state"] == "completed" and not detail["continuable"]

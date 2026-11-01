@@ -165,17 +165,10 @@ from himari.mcp.prompts import PromptContentError, prompt_text
 from himari.mcp.stdio import ProcessLauncher
 from himari.mcp.tools import LauncherFor, McpConnection, PromptArgument, SourceStatus, connect
 from himari.prompt.api import (
-    ATTACHMENT_NOTE,
-    FILE_REFERENCE_NOTE,
     DOCUMENTS_READ_NOTE,
-    ACTIVITY_NOTE,
-    COMPANION_NOTE,
-    SCREEN_NOTE,
-    PROGRESS_NOTE,
-    TIME_NOTE,
-    TOOL_IMAGES_NOTE,
     ContextBudget,
     SourceNote,
+    SystemSpec,
     documents_script_note,
 )
 from himari.provider.api import ProviderAdapter
@@ -1032,11 +1025,10 @@ class Application:
             runtime = build_runtime(provider, store=store, environments=[inside, *([machine] if machine else [])],
                                     tools=[*tools, *mcp.handlers, *mcp.resource_tools],
                                     models=catalog,
-                                    instructions=(*base, *((ATTACHMENT_NOTE,) if uploads_work else ()),
-                                                  *((FILE_REFERENCE_NOTE,) if machine is not None else ()),
-                                                  TOOL_IMAGES_NOTE, PROGRESS_NOTE, TIME_NOTE,
-                                                  *((COMPANION_NOTE, ACTIVITY_NOTE, SCREEN_NOTE) if companion else ()),
-                                                  *_documents_notes(reader, toolkit, scripts == "on")),
+                                    instructions=base,  # V3-P89: the base; the sections are the Prompt module's
+                                    system=SystemSpec(companion=companion, attachments=uploads_work,
+                                                      file_references=machine is not None,
+                                                      documents=_documents_notes(reader, toolkit, scripts == "on")),
                                     external_defaults=mcp.defaults,
                                     source_notes=[SourceNote(source, note.placement, note.text)
                                                   for source, note in mcp.notes.items()],
@@ -1602,15 +1594,18 @@ class Application:
 
     # --- the user's instructions (V3-P69) ----------------------------------------------
 
-    async def instructions(self, principal: PrincipalId) -> Instructions:
-        """The instructions the user wrote for every Conversation."""
-        return await self.data.read_instructions(principal, InstructionScope.USER)
+    async def instructions(self, principal: PrincipalId,
+                           scope: InstructionScope = InstructionScope.USER) -> Instructions:
+        """The instructions the user wrote for every Conversation, or (V3-P89 §4)
+        their companion persona, which is told only with the companion on."""
+        return await self.data.read_instructions(principal, scope)
 
-    async def set_instructions(self, principal: PrincipalId, text: str, revision: int) -> Instructions:
+    async def set_instructions(self, principal: PrincipalId, text: str, revision: int,
+                               scope: InstructionScope = InstructionScope.USER) -> Instructions:
         """Saved at once, used from each Conversation's next turn (§5); a turn
         under way keeps the text it started with. DataError VERSION_CONFLICT
         (written since ``revision`` was read), TOO_LARGE or INVALID_ARGUMENT."""
-        return await self.data.write_instructions(principal, InstructionScope.USER, text, revision)
+        return await self.data.write_instructions(principal, scope, text, revision)
 
     # --- memory (V3-P71) ----------------------------------------------------------------
 

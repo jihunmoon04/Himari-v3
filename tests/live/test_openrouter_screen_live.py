@@ -22,7 +22,8 @@ from testkit import image_model_input
 
 from himari.bootstrap import read_env_file
 from himari.common import AttachmentRef, EventId, FileId, TextBlock, split_marks
-from himari.prompt.api import COMPANION_NOTE, SCREEN_MOVE_NOTE, SCREEN_NOTE, AttachmentInfo, UserTurn
+from himari.prompt.api import AttachmentInfo, UserTurn
+from himari.prompt.system import companion_section
 from himari.provider.api import NativeReceived, NormalizedFinal, ProviderCapabilities
 from himari.provider.openrouter import KNOWN_CAPABILITIES, OpenRouterAdapter
 
@@ -103,7 +104,7 @@ def point(model: str, ask: str, png: bytes) -> tuple[int, int] | None:
                           view_media_type="image/png", view_width=WIDTH, view_height=HEIGHT, view_bytes=len(png))
     turn = UserTurn(EventId("e"), (TextBlock(ask), AttachmentRef(FileId("f"), 1, screen=True)))
     model_input = image_model_input([turn], {"f#1": info}, image_input=True, screen_points=True, model=model)
-    model_input = replace(model_input, stable_prefix=("You are HIMARI.", COMPANION_NOTE, SCREEN_NOTE, SCREEN_MOVE_NOTE))
+    model_input = replace(model_input, stable_prefix=("You are HIMARI.", companion_section(True)))  # V3-P89 §3.5
     outcome = asyncio.run(adapter.invoke_prepared(adapter.prepare_native_request(model_input)))
     assert isinstance(outcome, NativeReceived), outcome
     output = adapter.normalize(outcome)

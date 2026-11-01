@@ -909,13 +909,16 @@ def write_exactly(out: TextIO, text: str) -> None:
     out.flush()
 
 
-INSTRUCTIONS_USAGE = "usage: himari instructions [set FILE|- | clear [--yes]]"
+INSTRUCTIONS_USAGE = "usage: himari instructions [--persona] [set FILE|- | clear [--yes]]"
 
 
 def cmd_instructions(session: Session, args: argparse.Namespace, read: Callable[[str], str] = input) -> int:
-    """V3-P69 §8: show, ``set FILE|-``, or ``clear`` the user's instructions.
-    Shown into a file or a pipe, the text is written exactly as stored, so
+    """V3-P69 §8: show, ``set FILE|-``, or ``clear`` the user's instructions —
+    or, with ``--persona`` (V3-P89 §4), their companion persona. Shown into a
+    file or a pipe, the text is written exactly as stored, so
     ``himari instructions > f; himari instructions set f`` changes nothing."""
+    path = "/api/instructions/persona" if args.persona else "/api/instructions"
+    what = "companion persona" if args.persona else "instructions"
     if ((args.action is None and args.file is not None) or (args.action == "set" and args.file is None)
             or (args.action == "clear" and args.file is not None) or (args.yes and args.action != "clear")):
         session.note(INSTRUCTIONS_USAGE)
@@ -925,7 +928,7 @@ def cmd_instructions(session: Session, args: argparse.Namespace, read: Callable[
         try:
             if args.file == "-":
                 if _is_terminal(sys.stdin):
-                    session.note("(reading the instructions from standard input; end with Ctrl-D)")
+                    session.note(f"(reading the {what} from standard input; end with Ctrl-D)")
                 raw = getattr(sys.stdin, "buffer", None)  # bytes: invalid UTF-8 is "cannot read", not a crash
                 text = raw.read().decode("utf-8-sig") if raw is not None else sys.stdin.read().removeprefix("\ufeff")
             else:
@@ -934,10 +937,12 @@ def cmd_instructions(session: Session, args: argparse.Namespace, read: Callable[
         except (OSError, UnicodeDecodeError) as error:
             session.note(f"cannot read {safe_line(args.file)}: {safe_line(str(error))}")
             return EXIT_USAGE
-    current = session.client.get("/api/instructions")
+    current = session.client.get(path)
+    if args.persona and not current.get("companion", True):
+        session.note("(companion mode is off on this server: the persona is kept but not used)")
     if args.action is None:
         if not current["text"]:
-            session.note("(no instructions)")
+            session.note(f"(no {what})")
         elif _is_terminal(session.printer.out):
             session.printer.line(instructions_text(current["text"], session.printer.encoding))
         else:
@@ -945,11 +950,12 @@ def cmd_instructions(session: Session, args: argparse.Namespace, read: Callable[
         return EXIT_OK
     if args.action == "clear":
         if not current["text"]:
-            session.note("(no instructions)")
+            session.note(f"(no {what})")
             return EXIT_OK
         if not args.yes:
             try:
-                answer = read("Clear your instructions for every conversation? [y/N] ").strip().lower()
+                answer = read("Clear your companion persona? [y/N] " if args.persona
+                              else "Clear your instructions for every conversation? [y/N] ").strip().lower()
             except (EOFError, KeyboardInterrupt):
                 answer = ""
             if answer not in ("y", "yes"):
@@ -957,7 +963,7 @@ def cmd_instructions(session: Session, args: argparse.Namespace, read: Callable[
                 return EXIT_OK
     # Saved from the revision just read: a change made elsewhere since is refused, never overwritten.
     try:
-        session.client.put("/api/instructions", {"text": text, "revision": current["revision"]})
+        session.client.put(path, {"text": text, "revision": current["revision"]})
     except ServerRefused as error:
         if error.code != "revision_conflict":
             raise
@@ -1659,6 +1665,8 @@ def parser() -> argparse.ArgumentParser:
     instructions.add_argument("action", nargs="?", choices=["set", "clear"])
     instructions.add_argument("file", nargs="?", help="set: a UTF-8 text file, or - for standard input")
     instructions.add_argument("--yes", action="store_true", help="clear without asking")
+    instructions.add_argument("--persona", action="store_true",
+                              help="your companion persona instead (used while companion mode is on)")
     memory = sub.add_parser("memory", help="the notes and episodes HIMARI keeps about you")
     memory.add_argument("action", nargs="?", choices=list(MEMORY_ACTIONS))
     memory.add_argument("rest", nargs="*", help="add: CATEGORY TEXT|-; edit: ID TEXT|-; rm: ID or eID; passes and "

@@ -203,3 +203,15 @@ def test_slash_instructions_in_a_chat(harness: Harness) -> None:
     out, _ = chat("/instructions")
     assert out.splitlines()[-3:] == ["Your instructions (every conversation):", f"{INDENT}Answer in Korean.",
                                      f"{INDENT}Be brief."]
+
+
+def test_the_persona_with_its_flag(harness: Harness, tmp_path: Path) -> None:
+    """V3-P89 §4: ``--persona`` shows, sets and clears the companion persona, the instructions apart."""
+    assert harness.run("instructions", "--persona") == (cli.EXIT_OK, "", "(no companion persona)\n")
+    (tmp_path / "persona.md").write_text("Call me 선생님.\n", encoding="utf-8")
+    assert harness.run("instructions", "--persona", "set", "persona.md")[0] == cli.EXIT_OK
+    assert harness.run("instructions", "--persona")[1] == "Call me 선생님.\n"
+    assert harness.text() == ""  # the instructions are untouched
+    code, _, err = harness.run("instructions", "--persona", "clear", "--yes")
+    assert code == cli.EXIT_OK and "cleared" in err
+    assert harness.run("instructions", "--persona") == (cli.EXIT_OK, "", "(no companion persona)\n")

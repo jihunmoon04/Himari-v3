@@ -9,19 +9,20 @@ same database file).
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from himari.control.ask_user import AskUserTool
-from himari.control.api import TURN_GUIDANCE, ModelCatalog, ModelOffer, PresenceSource
+from himari.control.api import ModelCatalog, ModelOffer, PresenceSource
 from himari.control.driver import Driver
 from himari.common import TrustedScope
 from himari.data.memory import InMemoryData, InMemoryStore
 from himari.data.sqlite import SqliteData, SqliteStore
 from himari.environment.api import EnvironmentPlugin
-from himari.prompt.api import MEMORY_NOTE, ContextBudget, SourceNote
+from himari.prompt.api import MEMORY_SECTION, TURN_GUIDANCE, ContextBudget, SourceNote, SystemSpec
 from himari.prompt.compaction import Compactor, read_summary
 from himari.prompt.composer import Composer
 from himari.prompt.loader import ContextLoader
+from himari.prompt.system import BASE_INSTRUCTIONS
 from himari.provider.api import ProviderAdapter, ReadsImageCopies
 from himari.data.api import DEFAULT_FILE_MAX_BYTES, ViewMaker
 from himari.tool.access import ConfiguredExternalAccess
@@ -32,7 +33,7 @@ from himari.tool.conversation_search import conversation_search_tools
 from himari.tool.memory import memory_tools
 from himari.tool.registry import ToolRegistry
 
-DEFAULT_INSTRUCTIONS = ("You are HIMARI, a helpful assistant.",)
+DEFAULT_INSTRUCTIONS = BASE_INSTRUCTIONS  # V3-P89 §3.1: the operator's base; its own replaces only this
 
 
 type Store = InMemoryStore | SqliteStore
@@ -73,11 +74,16 @@ def build_runtime(
     source_notes: Sequence[SourceNote] = (),  # tool server notes (V3-P60); used for enabled sources only
     image_views: ViewMaker | None = None,  # model copies of images (V3-P67); None: images are not prepared
     file_max_bytes: int = DEFAULT_FILE_MAX_BYTES,
-    memory: bool = False,  # V3-P71: the memory Tools, MEMORY_NOTE and the notes in the state
+    memory: bool = False,  # V3-P71: the memory Tools, the memory section and the notes in the state
     conversation_search: bool = False,  # V3-P72: conversation_search and conversation_read
     streaming: bool = False,  # V3-P73: answering Runs ask for a stream (models that declare it)
     time_zone: str | None = None,  # V3-P83 §6.4: the turn's time and the time lines; None: the model is not told
     presence: PresenceSource | None = None,  # V3-P83 §6.2: where the user is; None: the model is not told
+    # V3-P89 §6: what the system text's sections follow besides ``memory`` and ``turn_budget``
+    # (which this sets); the text and its order are the Prompt module's. None: ``instructions``
+    # as given, with no sections — only the memory section and the turn rule are added after
+    # them as before (callers with their own base text: tests). Application.open always gives one.
+    system: SystemSpec | None = None,
 ) -> Runtime:
     store = store if store is not None else InMemoryStore()
     data = SqliteData(store) if isinstance(store, SqliteStore) else InMemoryData(store)
@@ -108,14 +114,16 @@ def build_runtime(
         capabilities = provider.describe_capabilities(model_id)
         models = ModelCatalog((ModelOffer(model_id, reasoning_effort, capabilities.reasoning_efforts, context_budget,
                                           capabilities.max_output_tokens),), model_id)
-    if memory:
-        instructions = (*instructions, MEMORY_NOTE)
-    if turn_budget is not None:  # the rule for the turn's state, fixed in the system prompt (V3-P62 §8)
-        instructions = (*instructions, TURN_GUIDANCE)
+    # the turn's rule is in the system text when the turn guards are on (V3-P62 §8)
+    spec = None if system is None else replace(system, memory=memory, turn_guidance=turn_budget is not None)
+    if spec is None:
+        instructions = (*instructions, *((MEMORY_SECTION,) if memory else ()),
+                        *((TURN_GUIDANCE,) if turn_budget is not None else ()))
     driver = Driver(
         log=data,
         loader=ContextLoader(data, data, registry, instructions, access, source_notes, files=data,
-                             environments={env.kind: env for env in environments}, time_zone=time_zone),
+                             environments={env.kind: env for env in environments}, time_zone=time_zone,
+                             system=spec),
         composer=Composer(),
         provider=provider,
         dispatcher=dispatcher,

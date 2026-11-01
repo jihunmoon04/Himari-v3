@@ -21,7 +21,9 @@ def open_app(tmp_path: Path, **options: Any) -> Application:
 
 
 def instructions(app: Application) -> tuple[str, ...]:
-    return tuple(app.runtime.driver._loader._instructions)  # type: ignore[attr-defined]
+    """The base and the documents sentences the system text is built with (V3-P89 §6)."""
+    loader: Any = app.runtime.driver._loader
+    return (*loader._instructions, *loader._system.documents)
 
 
 @pytest.mark.parametrize("documents_dir", [None, "/nonexistent/documents"])
