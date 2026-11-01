@@ -590,3 +590,6 @@ P1·P2 해결 확인. 문서 정합성 둘과 구현 주의 하나:
 - `HistoryReader`: wake 이벤트를 "(히마리가 먼저 말을 걸었어요)" 한 줄로.
 - 설계의 "입력 중이면 말풍선만 띄우고 누르면 옮김"은 상태 줄 알림으로 줄였다(말풍선은 그 대화의 `live`에 묶여 있어 다른 대화의 말을 띄우면 지금 대화의 말풍선과 섞인다). 사용자가 그 대화를 열면 이어지는 `live`나 기록으로 본다.
 - 확인: 앱·UiTests·ContractTests가 Linux의 .NET 10 SDK로 경고 없이 빌드(기존 `confirmResend` 경고 하나만), ContractTests 통과. UiTests와 실제 PC 확인은 Windows에서(소유자).
+- **검수(PR #159, `6fddcc2`) P1 옮기는 도중의 입력:** `Follow` 확인과 실제 전환 사이에 대화 목록을 읽는 HTTP 기다림이 있어, 그동안 A에 쓰기 시작한 글이 B로 옮겨질 수 있었다. 이제 `FollowWake`가 목록을 읽은 **뒤** 다시 본다(`JobOrigin.StillFollow`: 같은 대화, 입력 리비전 그대로 — 글을 고치거나 대화를 바꾸면 오름 —, 입력창이 빔). 그 확인에서 전환(`ShowConversations`, 동기)까지 `await`가 없다. 바뀌었으면 옮기지 않고 상태 줄. `RefreshConversations`는 읽기(`LoadConversations`)와 보이기(`ShowConversations`)로 나눔.
+- **P2-1 재연결 뒤의 wake:** `hello`/`activity`로 다시 찾은 wake 작업도 `RecoverAndStartLive(..., wake: true)`가 먼저 `FollowWake`를 거친다(같은 확인).
+- 시험: ContractTests에 `StillFollow`; UiTests에 느린 목록 응답(`SlowListHandler`) 중 아무것도 안 함 → B로 옮김, 입력함 → A에 남고 글 유지·상태 줄, 다른 대화를 고름 → 그 대화에 남음(빌드 확인, 실행은 Windows).

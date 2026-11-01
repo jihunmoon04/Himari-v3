@@ -358,6 +358,7 @@ Check(JobOrigin.IsOwn(Origin(new { kind = "device", device_id = "d1" }), "d1") &
 Check(!JobOrigin.IsOwn(Origin(new { kind = "wake", device_id = "d2" }), "d1") && !JobOrigin.IsOwn(Origin(new { kind = "web" }), "d1") && !JobOrigin.IsOwn(Origin(new { kind = "wake", device_id = "d1" }), null), "another device's wake, the Web, or no device id are not");
 Check(JobOrigin.IsWake(Origin(new { kind = "wake", device_id = "d1" })) && !JobOrigin.IsWake(Origin(new { kind = "device", device_id = "d1" })) && !JobOrigin.IsWake(default), "a wake is told apart");
 Check(JobOrigin.Follow("c1", "c2", "") && JobOrigin.Follow(null, "c2", "  ") && !JobOrigin.Follow("c2", "c2", "") && !JobOrigin.Follow("c1", "c2", "쓰는 중"), "follow a wake to its conversation unless shown already or the user is typing");
+Check(JobOrigin.StillFollow("c1", "c1", 4, 4, "") && !JobOrigin.StillFollow("c1", "c1", 4, 5, "") && !JobOrigin.StillFollow("c1", "c3", 4, 4, "") && !JobOrigin.StillFollow("c1", "c1", 4, 4, "a"), "once the list is read: not when the user typed, picked another conversation or the editor holds text");
 using (var cancelledHistory = new CancellationTokenSource())
 {
     cancelledHistory.Cancel();

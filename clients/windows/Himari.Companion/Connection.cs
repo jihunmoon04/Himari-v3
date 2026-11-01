@@ -194,22 +194,45 @@ public partial class MainWindow
     private async Task RefreshConversations(string? preferred, CancellationToken ct)
     {
         if (client is null) return;
+        var list = await LoadConversations(client, ct);
+        ShowConversations(list, preferred ?? currentConversation);
+        if (currentConversation is not null) await ReadConversation(currentConversation, ct);
+    }
+    private async Task<List<Conversation>> LoadConversations(ServerClient local, CancellationToken ct)
+    {
         var list = new List<Conversation>(); int offset = 0;
         while (true)
         {
-            var data = await client.SendAsync(HttpMethod.Get, $"/api/conversations?limit=50&offset={offset}", null, ct);
+            var data = await local.SendAsync(HttpMethod.Get, $"/api/conversations?limit=50&offset={offset}", null, ct);
             list.AddRange(Items(Prop(data, "items")).Select(x => new Conversation(Str(x, "id") ?? "", Str(x, "title") ?? "새 대화")).Where(x => x.Id.Length > 0));
             var nextValue = Prop(data, "next_offset");
             if (nextValue.ValueKind != JsonValueKind.Number || !nextValue.TryGetInt32(out var next) || next <= offset) break;
             offset = next;
         }
-        string? chosen = preferred ?? currentConversation;
+        return list;
+    }
+    private void ShowConversations(List<Conversation> list, string? chosen)
+    {
         changingSelection = true; Conversations.ItemsSource = list;
         Conversations.SelectedItem = list.FirstOrDefault(x => x.Id == chosen) ?? list.FirstOrDefault();
         changingSelection = false;
         SetCurrentConversation((Conversations.SelectedItem as Conversation)?.Id);
+    }
+    /// <summary>V3-P87 §10: go to the conversation a wake on this device speaks in — unless it
+    /// is shown, or the user is typing. Checked again once the list is read (PR #159 review
+    /// P1): typing or another conversation picked meanwhile keeps the user where they are;
+    /// no await between that check and the switch.</summary>
+    private async Task FollowWake(string id, ServerClient local, CancellationToken ct)
+    {
+        string? before = currentConversation; long revision = inputRevision;
+        if (!JobOrigin.Follow(before, id, Input.Text)) { if (id != currentConversation) TellWakeElsewhere(); return; }
+        var list = await LoadConversations(local, ct);
+        if (ct.IsCancellationRequested || !ReferenceEquals(local, client)) return;
+        if (!JobOrigin.StillFollow(before, currentConversation, revision, inputRevision, Input.Text)) { TellWakeElsewhere(); return; }
+        ShowConversations(list, id);
         if (currentConversation is not null) await ReadConversation(currentConversation, ct);
     }
+    private void TellWakeElsewhere() => Status.Text = "히마리가 다른 대화에서 말을 걸었어요. 대화 목록에서 열 수 있어요.";
     private async void ConversationChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
     {
         if (changingSelection) return;

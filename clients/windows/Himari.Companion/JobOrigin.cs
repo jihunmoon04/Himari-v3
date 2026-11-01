@@ -18,6 +18,12 @@ internal static class JobOrigin
     internal static bool Follow(string? current, string conversation, string draft) =>
         current != conversation && string.IsNullOrWhiteSpace(draft);
 
+    /// <summary>Still follow once the conversation list is read (PR #159 review P1): the same
+    /// conversation shown, nothing typed or switched since (the input revision moves on every
+    /// edit and switch), and the editor empty.</summary>
+    internal static bool StillFollow(string? before, string? now, long revisionBefore, long revisionNow, string draft) =>
+        before == now && revisionBefore == revisionNow && string.IsNullOrWhiteSpace(draft);
+
     private static string? Kind(JsonElement origin) => Text(origin, "kind");
 
     private static string? Text(JsonElement element, string name) =>

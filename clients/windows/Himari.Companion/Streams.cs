@@ -39,13 +39,8 @@ public partial class MainWindow
                         string? id = Str(data, "conversation"), state = Str(data, "state");
                         if (state == "started" && IsOwn(Prop(data, "origin")) && id is not null)
                         {
-                            if (JobOrigin.IsWake(Prop(data, "origin")) && id != currentConversation)
-                            {
-                                // V3-P87 §10: HIMARI speaks first in that conversation. Go there unless the
-                                // user is typing; then the text stays where it is and the status tells.
-                                if (JobOrigin.Follow(currentConversation, id, Input.Text)) await RefreshConversations(id, ct);
-                                else Status.Text = "히마리가 다른 대화에서 말을 걸었어요. 대화 목록에서 열 수 있어요.";
-                            }
+                            // V3-P87 §10: HIMARI speaks first in that conversation (FollowWake).
+                            if (JobOrigin.IsWake(Prop(data, "origin")) && id != currentConversation) await FollowWake(id, local, ct);
                             await RecoverMoveJob(id, Str(data, "job_id"), local, ct);
                             StartLive(id, local, ct, Str(data, "job_id"));
                         }
@@ -112,13 +107,16 @@ public partial class MainWindow
         foreach (var job in Items(Prop(activity, "working")))
         {
             string? id = Str(job, "id");
-            if (id is not null && IsOwn(Prop(job, "origin"))) _ = RecoverAndStartLive(id, Str(job, "job_id"), local, ct);
+            if (id is not null && IsOwn(Prop(job, "origin")))
+                _ = RecoverAndStartLive(id, Str(job, "job_id"), local, ct, JobOrigin.IsWake(Prop(job, "origin")));
         }
     }
-    private async Task RecoverAndStartLive(string id, string? job, ServerClient local, CancellationToken ct)
+    private async Task RecoverAndStartLive(string id, string? job, ServerClient local, CancellationToken ct, bool wake = false)
     {
         try
         {
+            // PR #159 review P2-1: a wake found running after a reconnect is followed like a new one
+            if (wake && id != currentConversation) await FollowWake(id, local, ct);
             job = await ScreenHistory.ResolveJobIdAsync(local, id, job, ct);
             await RecoverMoveJob(id, job, local, ct);
             if (!ct.IsCancellationRequested && ReferenceEquals(local, client)) StartLive(id, local, ct, job);
