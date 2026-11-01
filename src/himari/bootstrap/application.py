@@ -509,6 +509,7 @@ def _memory_before(previous: object) -> Memory | None:
 
     due_at, due_instant = text_of("due"), moment("due_instant")
     valid_until, valid_instant = text_of("valid_until"), moment("valid_instant")
+    remind_at, remind_instant = text_of("remind_at"), moment("remind_instant")  # V3-P87 §5.3
     item = previous.get("source_item")
     return Memory(memory_id, MemoryCategory(category), text, MemoryOrigin(origin),
                   None if conversation is None else ConversationId(conversation), call, 0, epoch, epoch,
@@ -517,7 +518,9 @@ def _memory_before(previous: object) -> Memory | None:
                   valid_until=valid_until if valid_instant is not None else None,
                   valid_instant=valid_instant if valid_until is not None else None,
                   source_pass=text_of("source_pass"), source_item=item if isinstance(item, int) else None,
-                  user_approved_at=moment("user_approved_at"))
+                  user_approved_at=moment("user_approved_at"),
+                  remind_at=remind_at if remind_instant is not None else None,
+                  remind_instant=remind_instant if remind_at is not None else None)
 
 
 class ModelRefused(LookupError):
@@ -2197,8 +2200,11 @@ class Application:
 
     async def proactive_status(self, principal: PrincipalId) -> dict[str, object]:
         """§11: the switch, where HIMARI would speak now, today's count, the next loop and the last look."""
+        quiet = self.proactive
         status: dict[str, object] = {"enabled": self.proactive.enabled and self.companion_enabled,
-                                     "told": self.proactive.describe(), "current_device": self.hub.current(principal)}
+                                     "told": self.proactive.describe(), "current_device": self.hub.current(principal),
+                                     "quiet_hours": None if quiet.quiet_start is None or quiet.quiet_end is None
+                                     else f"{quiet.quiet_start:%H:%M}-{quiet.quiet_end:%H:%M}"}
         if self.scheduler is not None:
             status.update(await self.scheduler.status(principal))
         return status

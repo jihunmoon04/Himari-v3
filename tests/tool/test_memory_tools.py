@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
+from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -60,7 +61,7 @@ def test_a_new_note_is_handed_over_with_an_allocated_id() -> None:
     assert outcome.status is ToolStatus.SUCCEEDED and said(outcome) == "Saved m1 (preference)."
     assert outcome.memory_change == MemoryChange(MemoryChangeKind.SAVE, 1, MemoryCategory.PREFERENCE, "Short lists.")
     assert outcome.raw_result == {"memory": {"id": 1, "category": "preference", "text": "Short lists.", "revision": 1,
-                                             "due": None, "valid_until": None}, "previous": None}
+                                             "due": None, "valid_until": None, "remind_at": None}, "previous": None}
     assert asyncio.run(data.list_memories(ME)) == ()  # nothing is written until the result is committed
 
 
@@ -73,7 +74,7 @@ def test_a_rewrite_names_the_revision_it_read_and_keeps_the_old_text() -> None:
                                                  expected_revision=1)
     assert outcome.raw_result["previous"] == {  # type: ignore[index, call-overload]
         "id": 1, "category": "project", "text": "Lives in Seoul.", "revision": 1, "origin": "user", "source": None,
-        "due": None, "due_instant": None, "valid_until": None, "valid_instant": None, "source_pass": None, "source_item": None, "user_approved_at": None}
+        "due": None, "due_instant": None, "valid_until": None, "valid_instant": None, "remind_at": None, "remind_instant": None, "source_pass": None, "source_item": None, "user_approved_at": None}
     missing = run(MemorySave(data), data, category="project", text="x", replaces="m9")
     assert missing.status is ToolStatus.FAILED and said(missing) == "No note m9." and missing.memory_change is None
 
@@ -138,7 +139,7 @@ def test_forget() -> None:
     assert said(outcome) == "Forgot m1."
     assert outcome.memory_change == MemoryChange(MemoryChangeKind.FORGET, 1, expected_revision=1)
     assert outcome.raw_result == {"memory": {"id": 1, "category": "user", "text": "Old.", "revision": 1,
-                                             "origin": "user", "source": None, "due": None, "due_instant": None, "valid_until": None, "valid_instant": None, "source_pass": None, "source_item": None, "user_approved_at": None}}
+                                             "origin": "user", "source": None, "due": None, "due_instant": None, "valid_until": None, "valid_instant": None, "remind_at": None, "remind_instant": None, "source_pass": None, "source_item": None, "user_approved_at": None}}
     assert said(run(MemoryForget(data), data, id="m2")) == "No note m2."
     assert said(run(MemoryForget(data), data, id="one")) == "id is a note's id, as m12"
 
@@ -299,3 +300,48 @@ def test_a_day_that_starts_a_clock_change_is_searched_from_its_local_midnight() 
     search = MemorySearch(data, time_zone="America/New_York", clock=lambda: NOW)
     found = said(run(search, data, kind="episodes", **{"from": "2026-11-01", "to": "2026-11-01"})).splitlines()
     assert [line.split(": ", 1)[1] for line in found] == ["Just after midnight."]
+
+
+def test_a_loop_takes_a_reminder_when_asked_at_a_time() -> None:
+    """V3-P87 §5.3: a time with its offset, only on a loop; kept on a rewrite that does not give it."""
+    data = fresh()
+    outcome = run(saving(data), data, category="loop", text="Take the medicine.", remind_at="2026-10-31T21:30+09:00")
+    change = outcome.memory_change
+    assert change is not None and (change.remind_at, change.remind_instant) == (
+        "2026-10-31T21:30+09:00", datetime(2026, 10, 31, 12, 30, tzinfo=UTC))
+    raw = outcome.raw_result
+    assert isinstance(raw, Mapping)
+    memory = raw["memory"]
+    assert isinstance(memory, Mapping) and memory["remind_at"] == "2026-10-31T21:30+09:00"
+    for args, why in (({"category": "user", "remind_at": "2026-10-31T21:30+09:00"}, "only a loop"),
+                      ({"remind_at": "2026-11-01"}, "not a day"),
+                      ({"remind_at": "2026-10-31T21:30"}, "remind_at is a date"),
+                      ({"remind_at": "2026-10-30T09:00+09:00"}, "out of range")):
+        refused = run(saving(data), data, **{"category": "loop", "text": "x", **args})
+        assert refused.status is ToolStatus.FAILED and why in said(refused), args
+    asyncio.run(data.save_memory(ME, MemoryCategory.USER, "placeholder"))
+    stored = asyncio.run(data.read_memory(ME, 2))
+    asyncio.run(data.restore_memory(ME, replace(stored, category=MemoryCategory.LOOP, text="Medicine.",
+                                                remind_at=change.remind_at, remind_instant=change.remind_instant),
+                                    expected_revision=1))
+    kept = run(saving(data), data, category="loop", text="Medicine at night.", replaces="m2").memory_change
+    assert kept is not None and kept.remind_at == change.remind_at
+    cleared = run(saving(data), data, category="loop", text="Medicine.", replaces="m2", remind_at=None).memory_change
+    assert cleared is not None and cleared.remind_at is None
+    assert "remind_at only when the user asked to be reminded at a time" in MemorySave.definition.description
+
+
+def test_a_reminder_for_a_loop_saved_already_is_set_on_it() -> None:
+    """PR #157 re-review P2-1: the same loop again with a reminder is no "Already saved"."""
+    data = fresh()
+    asyncio.run(data.save_memory(ME, MemoryCategory.LOOP, "Take the medicine."))
+    stored = asyncio.run(data.read_memory(ME, 1))
+    asyncio.run(data.restore_memory(ME, replace(stored, due_at="2026-11-04", due_instant=NOW + timedelta(days=4)),
+                                    expected_revision=1))
+    outcome = run(saving(data), data, category="loop", text="take the medicine.", remind_at="2026-10-31T21:30+09:00")
+    change = outcome.memory_change
+    assert said(outcome) == "Updated m1 (loop)." and change is not None
+    assert (change.memory_id, change.expected_revision, change.text, change.due_at, change.remind_at) == (
+        1, 2, "Take the medicine.", "2026-11-04", "2026-10-31T21:30+09:00")  # its text and due kept
+    again = run(saving(data), data, category="loop", text="Take the medicine.")  # no reminder given: as before
+    assert said(again) == "Already saved as m1." and again.memory_change is None

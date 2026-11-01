@@ -30,11 +30,13 @@ from himari.data.api import (
     MemoryCategory,
     Wake,
     WakeKind,
+    REMIND_LATE,
 )
 from himari.data.sqlite import SqliteData
 from himari.presence.api import Devices, Returned
 from himari.presence.hub import PresenceHub
 from himari.proactive import ProactiveSettings as ProactiveSettings  # re-exported for the interfaces
+from himari.proactive import loop_moment as loop_moment
 from himari.proactive import (
     RETURN_WAIT,
     TALKING,
@@ -354,6 +356,8 @@ class ProactiveScheduler:
         return frozenset(said)
 
     async def look(self, principal: PrincipalId) -> Look:
+        if missed := await self._data.miss_reminders(principal, self._clock() - REMIND_LATE):  # §5.3 (Q9)
+            log.info("%d reminder(s) missed", missed)
         situation, recent = await self.situation(principal)
         found, expired, _ = candidates(situation)
         taken = await self._data.taken_keys(principal, candidate_keys(found, expired))
@@ -409,10 +413,12 @@ class ProactiveScheduler:
                  and not all(r.kind is WakeKind.REMINDER for r in w.reasons)]
         look = self.looks.get(principal)
         _, _, upcoming = candidates(situation)
+        reminders = [n.remind_instant for n in situation.loops if n.remind_state == "scheduled"
+                     and n.remind_instant is not None and n.remind_instant > situation.now]
         return {
             "today": len(today), "daily": self.settings.daily,
             "last_wake_at": max((w.created_at for w in situation.wakes), default=None),
-            "next_loop_at": upcoming,
+            "next_loop_at": upcoming, "next_reminder_at": min(reminders, default=None),
             "last_look": None if look is None else {
                 "at": look.at, "outcome": look.outcome,
                 "held": [c.reason.kind.value for c in look.decision.held]},

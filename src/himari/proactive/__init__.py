@@ -27,6 +27,7 @@ from himari.proactive.rules import (
     local_midnight,
     loop_candidates,
     loop_moment,
+    reminder_candidates,
     return_candidate,
     spoke,
 )
@@ -52,6 +53,7 @@ __all__ = [
     "local_midnight",
     "loop_candidates",
     "loop_moment",
+    "reminder_candidates",
     "return_candidate",
     "spoke",
 ]

@@ -439,3 +439,33 @@ def test_lines_carry_their_evidence_and_a_cursor_must_have_a_zone(server: Server
     assert server.client.get(f"/api/episodes?cursor={naive}").status_code == 400
     squared = base64.urlsafe_b64encode("2026-10-31T12:00:00+00:00|\u00b2".encode()).decode()  # "²".isdigit()
     assert server.client.get(f"/api/episodes?cursor={squared}").status_code == 400
+
+
+def test_a_loops_reminder_from_the_browser_kept_moved_or_cleared(server: Server) -> None:
+    """V3-P87 §5.3, §9: the browser's local time in its zone; an edit that does not name it keeps it."""
+    server.sign_in()
+    added = server.client.post("/api/memories", json={"category": "loop", "text": "Medicine.", "due": "2026-11-04",
+                                                      "remind_at": "2026-11-04T21:30", "time_zone": "Asia/Seoul"},
+                               headers=SEND)
+    body = added.json()
+    assert added.status_code == 201, body
+    assert (body["remind_at"], body["remind_instant"], body["remind_state"]) == (
+        "2026-11-04T21:30+09:00", "2026-11-04T12:30:00+00:00", "scheduled")
+    assert body["checks_in_at"] == "2026-11-04T09:00:00+00:00"  # its date's 18:00 in Seoul
+    kept = server.client.put("/api/memories/1", json={"category": "loop", "text": "Medicine at night.",
+                                                      "due": "2026-11-05", "revision": 1}, headers=SEND).json()
+    assert (kept["due"], kept["remind_at"], kept["remind_state"]) == ("2026-11-05", "2026-11-04T21:30+09:00",
+                                                                       "scheduled")
+    moved = server.client.put("/api/memories/1", json={"category": "loop", "text": "Medicine.", "revision": 2,
+                                                       "remind_at": "2026-11-04T22:00+09:00"}, headers=SEND).json()
+    assert (moved["remind_at"], moved["due"]) == ("2026-11-04T22:00+09:00", "2026-11-05")
+    cleared = server.client.put("/api/memories/1", json={"category": "loop", "text": "Medicine.", "revision": 3,
+                                                         "remind_at": None}, headers=SEND).json()
+    assert (cleared["remind_at"], cleared["remind_state"]) == (None, None)
+    for bad in ("2026-11-04", "tonight"):
+        refused = server.client.post("/api/memories", json={"category": "loop", "text": "x", "remind_at": bad},
+                                     headers=SEND)
+        assert refused.status_code == 422 and refused.json()["error"]["code"] == "invalid_date", bad
+    fact = server.client.post("/api/memories", json={"category": "user", "text": "Away.",
+                                                     "remind_at": "2026-11-04T21:30+09:00"}, headers=SEND).json()
+    assert fact["remind_at"] is None  # only a loop has a reminder

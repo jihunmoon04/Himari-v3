@@ -140,6 +140,7 @@ from himari.data.api import (
     WakeReason,
     WakeRecord,
     WakeStatus,
+    PENDING_REMINDERS,
 )
 
 _TERMINAL_COMPLETIONS = frozenset(
@@ -255,6 +256,7 @@ class InMemoryStore:
         self.wakes: dict[str, WakeRecord] = {}
         self.wake_keys: dict[tuple[PrincipalId, str], str | None] = {}
         self.reminders: dict[tuple[PrincipalId, int], tuple[str, str | None, int]] = {}
+        self.reminded_at: dict[tuple[PrincipalId, int], datetime] = {}
         self.device_ids: dict[PrincipalId, int] = {}
 
     # --- admin helpers (trusted setup paths, not model-reachable) --------
@@ -886,7 +888,7 @@ class InMemoryData:
             if note is None:
                 del self._store.memories[key]
             else:
-                self._store.memories[key] = note
+                self._put_memory(key[0], note)
         conv.artifacts.update(staged)
         conv.files.extend(presented)
         self._mark_attached(images)
@@ -1481,6 +1483,7 @@ class InMemoryData:
                 continue  # §5.3 (re-review P2): only what this very wake still claims
             if status is WakeStatus.ANSWERED:
                 self._store.reminders[key] = ("delivered", None, attempts)
+                self._store.reminded_at[key] = ended.ended_at or datetime.now(UTC)
             else:
                 self._store.reminders[key] = ("missed" if attempts + 1 >= REMINDER_ATTEMPTS else "scheduled", None,
                                               attempts + 1)
@@ -1501,6 +1504,16 @@ class InMemoryData:
 
     async def taken_keys(self, principal: PrincipalId, keys: Sequence[str]) -> frozenset[str]:
         return frozenset(k for k in keys if (principal, k) in self._store.wake_keys)
+
+    async def miss_reminders(self, principal: PrincipalId, before: datetime) -> int:
+        missed = 0
+        for (owner, memory_id), note in self._store.memories.items():
+            state = self._store.reminders.get((owner, memory_id))
+            if owner == principal and state is not None and state[0] == "scheduled" \
+                    and note.remind_instant is not None and note.remind_instant < before:
+                self._store.reminders[(owner, memory_id)] = ("missed", None, state[2])
+                missed += 1
+        return missed
 
     async def release_keys(self, principal: PrincipalId, wake_id: str) -> None:
         for key in [k for k, w in self._store.wake_keys.items() if k[0] == principal and w == wake_id]:
@@ -1525,7 +1538,30 @@ class InMemoryData:
         note = self._store.memories.get((principal, memory_id)) if isinstance(memory_id, int) else None
         if note is None:
             raise DataError(DataErrorCode.NOT_FOUND, f"no note m{memory_id}")
-        return note
+        return self._reminded(principal, note)
+
+    def _reminded(self, principal: PrincipalId, note: Memory) -> Memory:
+        """A note with how its reminder was delivered (kept beside it, as wakes change it)."""
+        state = self._store.reminders.get((principal, note.memory_id))
+        return replace(note, remind_state=None if state is None else state[0],
+                       reminded_at=self._store.reminded_at.get((principal, note.memory_id)))
+
+    def _put_memory(self, principal: PrincipalId, note: Memory) -> None:
+        """Every note write, as SQLite's _write_memory (V3-P87 §5.3): only a loop keeps
+        a reminder; one written anew is scheduled afresh, one written as it was keeps
+        its delivery."""
+        note = rules.unreminded(note)
+        key = (principal, note.memory_id)
+        old = self._store.memories.get(key)
+        if old is None and key in self._store.retired_memories:
+            old = self._store.retired_memories[key][0]
+        if old is None or (old.remind_at, old.remind_instant) != (note.remind_at, note.remind_instant):
+            if note.remind_at is None:
+                self._store.reminders.pop(key, None)
+            else:
+                self._store.reminders[key] = ("scheduled", None, 0)
+            self._store.reminded_at.pop(key, None)
+        self._store.memories[key] = replace(note, remind_state=None, reminded_at=None)
 
     def _memory_count(self, principal: PrincipalId) -> int:
         return sum(1 for owner, _ in self._store.memories if owner == principal)
@@ -1549,7 +1585,8 @@ class InMemoryData:
             return key, Memory(change.memory_id, change.category, change.text, MemoryOrigin.MODEL,
                                scope.conversation_id, call, 1, now, now, due_at=change.due_at,
                                due_instant=change.due_instant, valid_until=change.valid_until,
-                               valid_instant=change.valid_instant)
+                               valid_instant=change.valid_instant, remind_at=change.remind_at,
+                               remind_instant=change.remind_instant)
         note = self._memory(principal, change.memory_id)
         if change.expected_revision != note.revision:
             raise DataError(DataErrorCode.VERSION_CONFLICT, f"m{note.memory_id} is at revision {note.revision}")
@@ -1560,10 +1597,12 @@ class InMemoryData:
                             source_conversation=scope.conversation_id, source_call=call,
                             revision=note.revision + 1, updated_at=now, source_pass=None, source_item=None,
                             user_approved_at=None, due_at=change.due_at, due_instant=change.due_instant,
-                            valid_until=change.valid_until, valid_instant=change.valid_instant)
+                            valid_until=change.valid_until, valid_instant=change.valid_instant,
+                            remind_at=change.remind_at, remind_instant=change.remind_instant)
 
     async def list_memories(self, principal: PrincipalId) -> tuple[Memory, ...]:
-        return rules.order_memories(m for (owner, _), m in self._store.memories.items() if owner == principal)
+        return rules.order_memories(self._reminded(owner, m) for (owner, _), m in self._store.memories.items()
+                                    if owner == principal)
 
     async def read_memory(self, principal: PrincipalId, memory_id: int) -> Memory:
         return self._memory(principal, memory_id)
@@ -1588,8 +1627,8 @@ class InMemoryData:
             note = replace(current, category=category, text=text, origin=MemoryOrigin.USER,
                            revision=current.revision + 1, updated_at=now)
         note = rules.dated(note, dates)
-        self._store.memories[(principal, note.memory_id)] = note
-        return note
+        self._put_memory(principal, note)
+        return self._memory(principal, note.memory_id)  # with its reminder's state
 
     async def delete_memory(self, principal: PrincipalId, memory_id: int,
                             expected_revision: int | None = None) -> Memory:
@@ -1613,10 +1652,11 @@ class InMemoryData:
                        source_call=None if source is None else before.source_call,
                        revision=current.revision + 1, updated_at=datetime.now(UTC), due_at=before.due_at,
                        due_instant=before.due_instant, valid_until=before.valid_until,
-                       valid_instant=before.valid_instant, source_pass=before.source_pass,
+                       valid_instant=before.valid_instant, remind_at=before.remind_at,
+                       remind_instant=before.remind_instant, source_pass=before.source_pass,
                        source_item=before.source_item, user_approved_at=before.user_approved_at)
-        self._store.memories[(principal, note.memory_id)] = note
-        return note
+        self._put_memory(principal, note)
+        return self._memory(principal, note.memory_id)  # with its reminder's state
 
     async def count_source_memories(self, scope: TrustedScope) -> int:
         self._store._owned(scope)
@@ -1646,9 +1686,9 @@ class InMemoryData:
         if self._memory_count(principal) >= MAX_MEMORIES:
             raise DataError(DataErrorCode.LIMIT_EXCEEDED, f"{MAX_MEMORIES} notes are kept at most")
         back = replace(note, revision=note.revision + 1, updated_at=now)
+        self._put_memory(principal, back)  # while still retired: its reminder keeps how it was delivered (as SQLite)
         del self._store.retired_memories[(principal, memory_id)]
-        self._store.memories[(principal, memory_id)] = back
-        return back
+        return self._memory(principal, memory_id)
 
     async def memory_revision(self, principal: PrincipalId, memory_id: int) -> tuple[int, bool] | None:
         note = self._store.memories.get((principal, memory_id))
@@ -1951,6 +1991,7 @@ class InMemoryData:
         for item in items:
             note = (self._store.memories.get((owner, item.memory_id))
                     if item.memory_id is not None and item.action in (PassAction.UPDATE, PassAction.FORGET) else None)
+            note = None if note is None else self._reminded(owner, note)  # with its reminder's state (as SQLite)
             outcome, action, normal = rules.decide_item(item, mp.kind, note, self._memory_count(owner))
             target: str | None = None
             previous: str | None = None
@@ -1961,7 +2002,7 @@ class InMemoryData:
                                mp.conversation_id, None, 1, now, now, due_at=normal.due_at,
                                due_instant=normal.due_instant, valid_until=normal.valid_until,
                                valid_instant=normal.valid_instant, source_pass=pass_id, source_item=item.item)
-                self._store.memories[(owner, added.memory_id)] = added
+                self._put_memory(owner, added)
                 target, written = f"m{added.memory_id}", 1
             elif action is PassAction.UPDATE:
                 assert note is not None and normal.category is not None and normal.text is not None
@@ -1971,7 +2012,7 @@ class InMemoryData:
                                   source_item=item.item, due_at=normal.due_at, due_instant=normal.due_instant,
                                   valid_until=normal.valid_until, valid_instant=normal.valid_instant,
                                   revision=note.revision + 1, updated_at=now)
-                self._store.memories[(owner, note.memory_id)] = changed
+                self._put_memory(owner, changed)
                 target, written = f"m{note.memory_id}", changed.revision
             elif action is PassAction.FORGET:
                 assert note is not None
@@ -2108,7 +2149,7 @@ class InMemoryData:
                               source_pass=pass_id, source_item=item, user_approved_at=now)
             proposed = rules.check_fresh(proposed if dates is None else rules.dated(proposed, dates), now)
             note = replace(proposed, memory_id=self._new_memory_id(principal))
-            self._store.memories[(principal, note.memory_id)] = note
+            self._put_memory(principal, note)
         row.update(outcome="kept" if keep else "discarded", decided_at=now,
                    target=row["target"] if note is None else f"m{note.memory_id}")
         return note
@@ -2126,6 +2167,7 @@ class InMemoryData:
     async def clean_memories(self, now: datetime) -> MemoryCleanup:
         notes = self._store.memories
         loops = [k for k, m in notes.items() if m.category is MemoryCategory.LOOP
+                 and self._store.reminders.get(k, ("",))[0] not in PENDING_REMINDERS  # V3-P87: kept till it is told
                  and ((m.due_instant is not None and m.due_instant < now - STALE_DUE)
                       or (m.due_instant is None and m.updated_at < now - STALE_UNDATED))]
         for key in loops:

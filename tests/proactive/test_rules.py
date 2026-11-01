@@ -245,3 +245,58 @@ def test_a_failed_wake_that_left_output_counts() -> None:
     failed = replace(wake(NOW - timedelta(minutes=5)), status=WakeStatus.FAILED)
     assert decide(situation(loops=DUE, wakes=(failed,))).reasons  # said nothing
     assert decide(situation(loops=DUE, wakes=(failed,), said=frozenset({failed.wake_id}))).blocked == "gap"
+
+
+# --- §5.3 reminders -----------------------------------------------------------------------
+
+def reminding(memory_id: int, at: datetime, state: str = "scheduled") -> Memory:
+    return replace(loop(memory_id, "2026-11-10"), remind_at=at.isoformat(), remind_instant=at, remind_state=state)
+
+
+def test_a_reminder_is_told_on_time_past_the_soft_rules() -> None:
+    """Q8: past the user's quiet too; the talking rule, an unanswered wake, quiet hours, the gap, the day."""
+    note = reminding(7, NOW - timedelta(minutes=1))
+    soft = dict(quiet_until=NOW + timedelta(hours=1), last_user_message_at=NOW - timedelta(minutes=1),
+                unanswered_wake=True, now=NOW, wakes=tuple(wake(NOW - timedelta(minutes=m)) for m in (5, 60, 120, 180)))
+    decided = decide(situation(loops=(note,), **soft))
+    assert decided.reasons == (WakeReason(WakeKind.REMINDER, memory_id=7),) and decided.reminders == (7,)
+    assert decided.keys == ()  # its delivery state keeps it from repeating, not a key
+    night = decide(situation(loops=(reminding(7, datetime(2026, 11, 4, 14, 59, tzinfo=UTC)),),
+                             now=datetime(2026, 11, 4, 15, 0, tzinfo=UTC)))  # 00:00 KST
+    assert night.reminders == (7,)
+
+
+@pytest.mark.parametrize(("changes", "blocked"), [
+    ({"device_id": None, "device": None}, "no_device"),
+    ({"working": True}, "working"),
+])
+def test_a_reminder_waits_for_a_device_and_the_end_of_work(changes: dict[str, object], blocked: str) -> None:
+    decided = decide(situation(loops=(reminding(7, NOW - timedelta(minutes=1)),), **changes))
+    assert decided.reasons == () and decided.blocked == blocked
+
+
+def test_only_a_scheduled_reminder_whose_moment_came() -> None:
+    for note in (reminding(7, NOW + timedelta(minutes=1)), reminding(7, NOW - timedelta(minutes=1), "claimed"),
+                 reminding(7, NOW - timedelta(minutes=1), "delivered"), reminding(7, NOW - timedelta(minutes=1), "missed")):
+        assert decide(situation(loops=(note,))).reasons == ()
+
+
+def test_a_reminder_past_its_day_is_told_late_at_the_next_return() -> None:
+    """Q9: within seven days, at a return after its on-time window; the return need not be long."""
+    yesterday = reminding(7, NOW - timedelta(hours=30))
+    assert decide(situation(loops=(yesterday,))).reasons == ()  # no return: it waits
+    short = back(minutes=20)  # not a greeting (under four hours), but a return
+    decided = decide(situation(loops=(yesterday,), returned=short))
+    assert decided.reasons == (WakeReason(WakeKind.REMINDER, memory_id=7, late=True),)
+    # a return (fresh) that came while it could still be told on time does not count as the later one
+    just_past = reminding(7, NOW - timedelta(hours=24, minutes=5))
+    inside = back(at=NOW - timedelta(minutes=8), minutes=20)  # 23 h 57 min after its moment
+    assert decide(situation(loops=(just_past,), returned=inside)).reasons == ()
+    assert decide(situation(loops=(just_past,), returned=back(at=NOW - timedelta(minutes=4), minutes=20))).reasons
+    week = reminding(7, NOW - timedelta(days=7, minutes=1))
+    assert decide(situation(loops=(week,), returned=short)).reasons == ()  # past seven days: Data marks it missed
+
+
+def test_a_reminder_comes_first_in_a_merged_wake() -> None:
+    decided = decide(situation(loops=(*DUE, reminding(7, NOW - timedelta(minutes=1))), returned=back()))
+    assert [r.kind for r in decided.reasons] == [WakeKind.REMINDER, WakeKind.LOOP_DUE, WakeKind.RETURNED]

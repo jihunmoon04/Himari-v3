@@ -3341,6 +3341,17 @@ function memoryForm(note, category, row) {
     date.title = loop ? "Due date (optional)" : "Valid until (optional)";
   };
   select.addEventListener("change", dateLabel);
+  // V3-P87 §5.3: a loop's reminder, a local time in the browser's zone (shown for loops only)
+  const remind = el("input", "memory-form-remind");
+  remind.type = "datetime-local";
+  remind.setAttribute("aria-label", "Remind me at (optional)");
+  remind.title = "Remind me at (optional)";
+  const startRemind = note && note.remind_instant && ["scheduled", "claimed"].includes(note.remind_state)
+    ? localInput(note.remind_instant) : "";
+  remind.value = startRemind;
+  const remindShown = () => { remind.hidden = select.value !== "loop"; };
+  select.addEventListener("change", remindShown);
+  remindShown();
   const text = el("textarea", "memory-form-text");
   text.rows = 3;
   text.value = note ? note.text : "";
@@ -3354,13 +3365,13 @@ function memoryForm(note, category, row) {
   cancel.type = "button";
   const bar = el("div", "memory-form-bar");
   dateLabel();
-  bar.append(select, date, cancel, save);
+  bar.append(select, date, remind, cancel, save);
   form.append(text, conflict, bar);
   let revision = note ? note.revision : null;
   let unsure = false; // the last save's answer was lost: look before saving again
   let newest = 0; // the highest note id known when a new note was first sent
   form.dirty = () => text.value !== (note ? note.text : "") || select.value !== (note ? note.category : category)
-    || date.value !== startDate;
+    || date.value !== startDate || remind.value !== startRemind;
   cancel.addEventListener("click", () => loadMemory().catch((e) => status(e.message, "error")));
   const saved = async () => {
     // Off, the note is kept but no model reads it (§9; integration review C3).
@@ -3374,6 +3385,10 @@ function memoryForm(note, category, row) {
     const body = { category: select.value, text: text.value };
     if (!note || date.value !== startDate) { // a new note's dates, or a changed one; else the note keeps its own
       body[select.value === "loop" ? "due" : "valid_until"] = date.value || null;
+      body.time_zone = browserZone();
+    }
+    if (select.value === "loop" && (!note || remind.value !== startRemind)) { // else it keeps its reminder
+      body.remind_at = remind.value || null;
       body.time_zone = browserZone();
     }
     if (unsure) {
@@ -3428,6 +3443,31 @@ function memoryForm(note, category, row) {
   text.focus();
 }
 
+/* "2026-11-04T09:00" in the browser's zone, for a datetime-local input. */
+function localInput(iso) {
+  const at = new Date(iso);
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${at.getFullYear()}-${pad(at.getMonth() + 1)}-${pad(at.getDate())}T${pad(at.getHours())}:${pad(at.getMinutes())}`;
+}
+
+function shortTime(iso) {
+  return new Date(iso).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+}
+
+/* V3-P87 §9: a loop's reminder and how it went, else when HIMARI checks in on it. */
+function reminderLine(note) {
+  if (note.category !== "loop") return null;
+  if (note.remind_instant && ["scheduled", "claimed"].includes(note.remind_state))
+    return el("span", "memory-date memory-remind", `Reminds you at ${shortTime(note.remind_instant)}`);
+  if (note.remind_state === "delivered" && note.reminded_at)
+    return el("span", "memory-date", `Reminded ${shortTime(note.reminded_at)}`);
+  if (note.remind_state === "missed" && note.remind_instant)
+    return el("span", "memory-date is-overdue", `Missed reminder at ${shortTime(note.remind_instant)}`);
+  if (note.checks_in_at && new Date(note.checks_in_at) > new Date())
+    return el("span", "memory-date", `Checks in after ${shortTime(note.checks_in_at)}`);
+  return null;
+}
+
 function memoryRow(note) {
   const li = el("li", "memory-row");
   const main = el("div", "memory-row-main");
@@ -3436,6 +3476,8 @@ function memoryRow(note) {
                                `Due ${note.due.slice(0, 10)}${note.overdue ? " · overdue" : ""}`));
   if (note.valid_until) main.append(el("span", `memory-date${note.expired ? " is-ended" : ""}`,
                                        `${note.expired ? "Ended" : "Until"} ${note.valid_until.slice(0, 10)}`));
+  const reminder = reminderLine(note);
+  if (reminder) main.append(reminder);
   main.append(memorySource(note));
   const actions = el("div", "memory-row-actions");
   const edit = el("button", "link-button", "Edit");
@@ -4466,6 +4508,26 @@ async function loadDevicesList() {
   $("devices-signals-note").hidden = !listing.items.some((device) => device.paired);
   quietState(listing.quiet_until);
   $("devices-list").replaceChildren(...listing.items.map(deviceRow));
+  reachingLine(listing.enabled).catch(() => { $("devices-reaching").hidden = true; });
+}
+
+/* V3-P87 §9: "Reaching out: on · quiet 23:00–08:00 · today 1 of 4", or why it is off. */
+async function reachingLine(enabled) {
+  const line = $("devices-reaching");
+  if (!enabled) {
+    line.hidden = true;
+    return;
+  }
+  const reaching = await api("GET", "/api/proactive");
+  if ($("surface-devices").hidden) return;
+  if (!reaching.enabled) {
+    line.textContent = `Reaching out: ${reaching.told}`;
+  } else {
+    const quiet = reaching.quiet_hours ? `quiet ${reaching.quiet_hours.replace("-", "–")}` : "no quiet hours";
+    const today = typeof reaching.today === "number" ? ` · today ${reaching.today} of ${reaching.daily}` : "";
+    line.textContent = `Reaching out: on · ${quiet}${today}`;
+  }
+  line.hidden = false;
 }
 
 async function showDevices({ via = "push" } = {}) {

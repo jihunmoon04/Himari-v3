@@ -3630,7 +3630,8 @@ details > summary {
   text-decoration: line-through;
 }
 
-.memory-form-date {
+.memory-form-date,
+.memory-form-remind {
   max-width: 100%;
   padding: 2px var(--space-1);
   border: 1px solid var(--border-strong);

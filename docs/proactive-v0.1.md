@@ -558,3 +558,27 @@ P1·P2 해결 확인. 문서 정합성 둘과 구현 주의 하나:
 
 - **P2-1 `alone` 검사 뒤의 틈:** `accept_wake`를 기다리는 동안 다른 대화에서 작업이 시작될 수 있었다. 이제 `submit_wake`가 기다림 **뒤에** 한 번 더 본다: 그 주체의 작업이 돌면(또는 이 대화가 닫히는 중이면) wake 작업을 시작하지 않고 `Driver.withdraw_wake`로 거둔다(`cancelled`, 알림은 되돌림, 열쇠 반환 — 한마디도 안 했으므로). 이 확인에서 `_start`까지 `await`가 없어 wake 작업이 다른 작업 곁에서 도는 일은 없다. 사용자가 이긴다(사용자의 작업은 막지 않음). 시험: `accept_wake` 안에서 실제로 기다리는 사이 다른 대화의 작업을 시작하는 끼어들기.
 - **P2-2 출력이 있는 `failed`:** `spoke`가 `failed`라도 그 턴이 출력(최종 답, 진행 글, 도구 호출)을 남겼으면 센다. 스케줄러가 26시간 안의 `failed` wake마다 그 wake 뒤를 다음 메시지·wake까지 읽어(`Situation.said`) 넘긴다. 읽지 못하면 말한 것으로 센다. `wake_turn`은 다음 wake에서도 끊는다(뒤 wake의 출력이 앞 wake 몫이 되지 않게; 작업 종료·재시작 정리에서는 열린 wake 뒤에 다른 wake가 올 수 없어 바뀌는 것이 없다).
+
+### 19.6 2부의 둘째 PR(2b): 알림, 상태 줄, 실제 모델 확인 (`feat/proactive-part2b`)
+
+- **Data(스키마 그대로, v17):** `Memory`에 `remind_at`·`remind_instant`·`remind_state`·`reminded_at`, `MemoryChange`·`NoteDates`에 `remind_at`·`remind_instant`. 모든 노트 쓰기가 한 곳(SQLite `_write_memory`, 메모리 `_put_memory`)을 지난다: 고리가 아니면 알림을 지움, 알림이 **새로 쓰이면**(다른 시각이거나 지워짐) `scheduled`(없으면 상태 없음)·시도 0·`remind_wake` 비움·`reminded_at` 비움, **그대로면** 전달 상태를 지킴(그래서 자동 기억이 글을 고쳐도, 사용자가 다른 날짜를 고쳐도 `delivered`가 유지됨). 자동 기억은 `remind_at`을 쓰지 않는다(그 경로에 인자가 없음). 저장·복원은 다시 읽은 노트(상태 포함)를 돌려준다. `miss_reminders(principal, before)`: 7일 지난 `scheduled` → `missed`. 되돌리기(Undo)는 알림도 되살린다.
+- **`memory_save`:** `remind_at`(고리만, 오프셋 있는 시각만 — 날짜만이면 거절, 5분 전~1년 뒤). 설명에 "Give a loop remind_at only when the user asked to be reminded at a time: the exact time with its UTC offset, worked out from now for "in 30 minutes"". 다시 쓰기에서 주지 않으면 지킴, `null`이면 지움. `memory_search` 줄에 `remind …`(아직 전하지 않은 것만).
+- **계기(`reminder_candidates`):** `scheduled`이고 시각이 지난 고리. 24시간 안이면 제때(Q8대로 조용히·대화 중·답 없는 wake·조용한 시간·간격·하루 상한을 넘음, 지금 기기·작업 중은 기다림). 그 뒤 7일 안이면 **제때 창이 끝난 뒤 생긴** 새 돌아옴 기록(길이는 상관없음)에서 `late: true`로. 열쇠 없음(전달 상태가 막음). 합칠 때 맨 앞. 스케줄러가 판단할 때마다 `miss_reminders(now − 7일)`.
+- **모델에게:** 기억의 `loops`에 아직 전하지 않은 알림의 `remind_at`, 알림 wake의 `loop`에 `remind_at`(고리 확인 wake에는 없음). `context_key`의 `wake_notes`에 `remind_at`.
+- **Web:** 기억 화면의 고리 줄 — "Reminds you at …" / "Reminded …" / "Missed reminder at …", 없으면 아직 오지 않은 "Checks in after …"(설계의 "Checked in Nov 4"는 하지 않음: 열쇠가 wake인지 만료인지 화면에서 알 길이 없어서). 편집 폼에 고리일 때만 보이는 `datetime-local` "Remind me at"(브라우저 시간대로 보냄, 서버가 그 시간대로 읽음). 편집에서 이름을 대지 않은 날짜는 노트의 것을 지킴(전에는 고리의 `due`만 고쳐도 다른 날짜가 비었을 수 있음). Settings > Devices 아래 "Reaching out: on · quiet 23:00–08:00 · today 1 of 4"(꺼져 있으면 이유). `GET /api/proactive`에 `quiet_hours`·`next_reminder_at`; CLI `Next reminder`.
+- **실제 모델 확인**(`tests/live/test_proactive_live.py`, 결과 `docs/live-results/proactive-2026-11-01.jsonl`): 9장면(지난 고리, 돌아옴, 알림, 늦은 알림, 오래 집중, 게임 끝남, 전체 화면 영상, 지운 고리, wake 뒤 사용자 메시지) × 2번 × 5모델. 판정: 두 문장 이하(전체 화면은 한 문장), 질문 하나 이하, 한국어, wake·서버·번호를 말하지 않음, 표정 표시 문법.
+  - "Speaking first" 줄을 두 번 다듬음: 70/90 → 77/90 → **80/90**(gpt-6-luna 18, deepseek-v4.1-flash 17, claude-haiku-5.5 16, mimo-v2.6-pro 16, minimax-m3 13). 바뀐 말: "about those reasons only: at most two short sentences in all, and only one of them a question; when … fullscreen … one short sentence and no question".
+  - 남은 실패는 대부분 가벼움(짧은 질문 둘 "다녀오셨어요? 어떠셨어요?", 전체 화면에서 두 문장). 모델 밖의 실패: deepseek가 도구 없이 도구 호출 문법을 지어냄(2회), mimo 빈 응답(1회). **minimax-m3만 80% 아래.** 통과한 모델에만 먼저 말 걸기를 허락할지는 소유자가 정한다(§13).
+
+### 19.7 검수 (PR #157, `a661e60`): NOT_READY → 고침
+
+- **P1-1 정리 작업이 기다리는 알림의 고리를 지움:** 날짜 없는 고리는 90일, 날짜 지난 고리는 14일이면 지워졌다(알림은 1년 뒤까지 받음). 이제 알림이 `scheduled`·`claimed`인 고리는 그 정리에서 빠진다(`PENDING_REMINDERS`); 전한 뒤(`delivered`)나 놓친 뒤(`missed`)는 원래 규칙. 두 백엔드.
+- **P1-2 자동 기억 수정의 Undo가 알림을 잃음:** Undo가 읽는 기록(`rules.memory_json`)에 `remind_at`·`remind_instant`를 넣고 `memory_from_record`가 되살린다(알림 전의 기록은 알림 없이 그대로 읽힘). 같은 알림으로 되돌리면 전달 상태도 지켜진다.
+- **P2-1 retire 뒤 복구의 상태가 백엔드마다 다름:** 메모리 백엔드가 retire 기록을 먼저 지우고 쓰는 바람에 알림을 새로 쓴 것으로 보고 `scheduled`로 되돌렸다. 이제 retire 기록이 있는 동안 쓰고 지운다 — SQLite처럼 `delivered`가 남는다.
+- 시험(두 백엔드): 1년 안 알림의 고리가 정리 시각을 지나도 남고, 알림을 전한 뒤에 정리됨; 자동 수정 → Undo → 알림·상태 유지(옛 기록도 읽힘); 전달 → retire → 복구 → `delivered`. 고치기 전 코드에서는 P1 둘이 두 백엔드에서, P2-1이 메모리 백엔드에서 실패하는 것을 확인함.
+
+### 19.8 재검수 (PR #157, `e52f458`): READY_WITH_CORRECTIONS → 고침
+
+- **P2-1 같은 문구의 고리에 새 알림:** `memory_save`의 "Already saved" 검사가 알림을 보지 않아, 이미 있는 고리를 같은 문구와 `remind_at`으로 다시 저장하면 알림이 붙지 않았다. 이제 알림이 주어졌고 그 고리의 것과 다르면 그 고리의 수정으로 쓴다(글은 그 고리의 것, `due`는 주지 않으면 그 고리의 것, "Updated m1"). 알림 없이 같은 문구면 예전처럼 "Already saved".
+- **P2-2 자동 기억이 기다리는 알림을 지움:** 알림이 `scheduled`·`claimed`인 고리는 자동 기억이 **잊거나(`FORGET`) 고리 아닌 것으로 바꾸지(`UPDATE`의 다른 범주)** 못한다 — Data의 `decide_item`이 `reminder_pending`으로 거절하고(권위), 계획 단계도 `forget`을 미리 떨어뜨린다. 고리인 채로 글만 고치는 것은 된다(알림은 지켜짐). 사용자와 모델의 `memory_forget`은 그대로 지울 수 있다. 알림을 전한 뒤에는 예전 규칙.
+  - 같이 고친 것: 메모리 백엔드가 자동 기억을 적용할 때 노트를 전달 상태 없이 읽고 있었다(SQLite는 읽음) — 이제 같은 상태로 판정한다.

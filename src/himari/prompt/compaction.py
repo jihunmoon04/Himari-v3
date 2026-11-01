@@ -240,7 +240,7 @@ def context_key(inputs: PromptInputs) -> str:
         "data_notes": [[n.source, n.text] for n in fit_notes(inputs.source_notes) if n.placement == "data"],
         # V3-P87 §8.4 (review P1-1): the notes the history's wakes point at, as drawn: one changed,
         # an earlier wake's line changes length, so the measurement is not used
-        "wake_notes": sorted([i, n.text, n.due_at] for i, n in inputs.wake_notes.items()),
+        "wake_notes": sorted([i, n.text, n.due_at, n.remind_at] for i, n in inputs.wake_notes.items()),
         "time_zone": inputs.time_zone,  # V3-P83 §6.4: the time lines change with it
         "screen_points": options.screen_points,  # V3-P84 §5: screens' sizes (the system text has the moves)
         "memories": None if inputs.memories is None else [  # V3-P71: and so does a note

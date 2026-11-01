@@ -1131,7 +1131,9 @@ def _memory(row: sqlite3.Row) -> Memory:
                   datetime.fromisoformat(row["updated_at"]), due_at=row["due_at"],
                   due_instant=_moment(row["due_instant"]), valid_until=row["valid_until"],
                   valid_instant=_moment(row["valid_instant"]), source_pass=row["source_pass"],
-                  source_item=row["source_item"], user_approved_at=_moment(row["user_approved_at"]))
+                  source_item=row["source_item"], user_approved_at=_moment(row["user_approved_at"]),
+                  remind_at=row["remind_at"], remind_instant=_moment(row["remind_instant"]),
+                  remind_state=row["remind_state"], reminded_at=_moment(row["reminded_at"]))
 
 
 def _episode(row: sqlite3.Row) -> Episode:
@@ -2572,7 +2574,7 @@ class SqliteData:
 
     _MEMORY_COLUMNS = ("memory_id, category, text, origin, source_conversation, source_run, source_call, revision,"
                        " created_at, updated_at, due_at, due_instant, valid_until, valid_instant, source_pass,"
-                       " source_item, user_approved_at")
+                       " source_item, user_approved_at, remind_at, remind_instant, remind_state, reminded_at")
 
     def _read_memory(self, tx: _Tx, principal: PrincipalId, memory_id: object) -> Memory:
         """A live note: a retired one (V3-P85 §5.4) is not found."""
@@ -2603,10 +2605,20 @@ class SqliteData:
 
     @staticmethod
     def _write_memory(tx: _Tx, principal: PrincipalId, note: Memory) -> None:
+        """Every note write. V3-P87 §5.3: only a loop keeps a reminder; a reminder
+        written anew (another moment, or gone) starts its delivery afresh —
+        scheduled (none without one), no claim, no attempt — and one written as
+        it was keeps how it was delivered."""
+        note = rules.unreminded(note)
         call = note.source_call
 
         def moment(value: datetime | None) -> str | None:
             return None if value is None else _timestamp(value)
+
+        before = tx.one("SELECT remind_at, remind_instant FROM memories WHERE owner=? AND memory_id=?",
+                        principal, note.memory_id)
+        anew = before is None or (before["remind_at"], before["remind_instant"]) != (
+            note.remind_at, moment(note.remind_instant))
 
         tx.execute("INSERT INTO memories (owner, memory_id, category, text, origin, source_conversation, source_run,"
                    " source_call, revision, created_at, updated_at, due_at, due_instant, valid_until, valid_instant,"
@@ -2624,6 +2636,11 @@ class SqliteData:
                    None if call is None else call.call_id, note.revision, _timestamp(note.created_at),
                    _timestamp(note.updated_at), note.due_at, moment(note.due_instant), note.valid_until,
                    moment(note.valid_instant), note.source_pass, note.source_item, moment(note.user_approved_at))
+        if anew:
+            tx.execute("UPDATE memories SET remind_at=?, remind_instant=?, remind_state=?, remind_wake=NULL,"
+                       " remind_attempts=0, reminded_at=NULL WHERE owner=? AND memory_id=?",
+                       note.remind_at, moment(note.remind_instant), None if note.remind_at is None else "scheduled",
+                       principal, note.memory_id)
 
     def _apply_memory(self, tx: _Tx, scope: TrustedScope, call: CallRef, change: MemoryChange) -> None:
         """A Tool's change, in the commit's transaction: its errors roll the commit back."""
@@ -2638,7 +2655,9 @@ class SqliteData:
             self._write_memory(tx, principal, Memory(change.memory_id, change.category, change.text,
                                                      MemoryOrigin.MODEL, scope.conversation_id, call, 1, now, now,
                                                      due_at=change.due_at, due_instant=change.due_instant,
-                                                     valid_until=change.valid_until, valid_instant=change.valid_instant))
+                                                     valid_until=change.valid_until, valid_instant=change.valid_instant,
+                                                     remind_at=change.remind_at,
+                                                     remind_instant=change.remind_instant))
             return
         note = self._read_memory(tx, principal, change.memory_id)
         if change.expected_revision != note.revision:
@@ -2651,7 +2670,8 @@ class SqliteData:
             note, category=change.category, text=change.text, origin=MemoryOrigin.MODEL,
             source_conversation=scope.conversation_id, source_call=call, revision=note.revision + 1, updated_at=now,
             source_pass=None, source_item=None, user_approved_at=None, due_at=change.due_at,
-            due_instant=change.due_instant, valid_until=change.valid_until, valid_instant=change.valid_instant))
+            due_instant=change.due_instant, valid_until=change.valid_until, valid_instant=change.valid_instant,
+            remind_at=change.remind_at, remind_instant=change.remind_instant))
 
     async def list_memories(self, principal: PrincipalId) -> tuple[Memory, ...]:
         with self._tx() as tx:
@@ -2685,7 +2705,7 @@ class SqliteData:
                                revision=current.revision + 1, updated_at=now)
             note = rules.dated(note, dates)
             self._write_memory(tx, principal, note)
-            return note
+            return self._read_memory(tx, principal, note.memory_id)  # with its reminder's state
 
     async def delete_memory(self, principal: PrincipalId, memory_id: int,
                             expected_revision: int | None = None) -> Memory:
@@ -2712,10 +2732,11 @@ class SqliteData:
                                        revision=current.revision + 1, updated_at=datetime.now(UTC),
                                        due_at=before.due_at, due_instant=before.due_instant,
                                        valid_until=before.valid_until, valid_instant=before.valid_instant,
+                                       remind_at=before.remind_at, remind_instant=before.remind_instant,
                                        source_pass=before.source_pass, source_item=before.source_item,
                                        user_approved_at=before.user_approved_at)
             self._write_memory(tx, principal, note)
-            return note
+            return self._read_memory(tx, principal, note.memory_id)
 
     # --- DeviceStore (V3-P83 §4) ----------------------------------------------------
 
@@ -2905,6 +2926,11 @@ class SqliteData:
             rows = tx.all(f"SELECT key FROM wake_keys WHERE owner=? AND key IN ({', '.join('?' * len(wanted))})",
                           principal, *wanted)
             return frozenset(r["key"] for r in rows)
+
+    async def miss_reminders(self, principal: PrincipalId, before: datetime) -> int:
+        with self._tx() as tx:
+            return tx.execute("UPDATE memories SET remind_state='missed' WHERE owner=? AND remind_state='scheduled'"
+                              " AND remind_instant<? AND retired_at IS NULL", principal, _timestamp(before)).rowcount
 
     async def release_keys(self, principal: PrincipalId, wake_id: str) -> None:
         with self._tx() as tx:
@@ -3527,8 +3553,9 @@ class SqliteData:
     async def clean_memories(self, now: datetime) -> MemoryCleanup:
         with self._tx() as tx:
             loops = tx.execute(
-                "DELETE FROM memories WHERE category='loop' AND retired_at IS NULL AND ((due_instant IS NOT NULL"
-                " AND due_instant < ?) OR (due_instant IS NULL AND updated_at < ?))",
+                "DELETE FROM memories WHERE category='loop' AND retired_at IS NULL"
+                " AND (remind_state IS NULL OR remind_state NOT IN ('scheduled', 'claimed'))"  # V3-P87: kept till told
+                " AND ((due_instant IS NOT NULL AND due_instant < ?) OR (due_instant IS NULL AND updated_at < ?))",
                 _timestamp(now - STALE_DUE), _timestamp(now - STALE_UNDATED)).rowcount
             expired = tx.execute("DELETE FROM memories WHERE valid_instant IS NOT NULL AND valid_instant < ?",
                                  _timestamp(now - EXPIRED_KEEP)).rowcount
