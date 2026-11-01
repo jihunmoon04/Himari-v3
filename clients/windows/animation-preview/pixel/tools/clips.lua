@@ -1,7 +1,8 @@
 -- Build every clip after idle in body.aseprite from the rest pose's part layers
 -- (V3-P86): sleep (PR B), then the extras (owner request 2026-10-31): a yawn before
--- dozing and the occasional glance, ahoge sway and halo twinkle. A stretch after waking
--- waits for art with raised arms (owner review: shoulders alone did not read as one). Re-running replaces all of them; it refuses when another clip lies after idle.
+-- dozing and the occasional glance, ahoge sway and halo twinkle; and the stretch after
+-- waking (owner request 2026-11-01), from the key poses stretch.py converted into
+-- clean/poses/stretch. Re-running replaces all of them; it refuses when another clip lies after idle.
 --   * Offsets are relative to the rest pose (idle frame 1), down is positive.
 --   * The hidden @eyes and @mouth layers' cel data force that frame's eyes or mouth.
 --   * A pose frame replaces a box of the rest pose with a converted generated drawing
@@ -64,6 +65,36 @@ CLIPS[#CLIPS + 1] = { name = "yawn", frames = {
   frame(300, 0, 0, 0, { eyes = "half" }),
   frame(100, 0, 0, 0),
 } }
+
+-- stretch (after waking): the arms rise from the cheek to clasped overhead while the legs
+-- uncross and stretch out, the upper body rises 1 px twice, then all folds back. stretch.json
+-- lists the frames: "upper" replaces the upper-body layer (and empties the other upper parts
+-- and the halo, which the drawing carries), "legs" replaces the base layer's legs zone, and
+-- "face" is where the mood face goes, or "own" for a drawing with its own closed-eye face.
+local STRETCH = { images = {} }
+do
+  local dir = app.fs.joinPath(app.fs.filePath(P.body), "poses", "stretch")
+  local fh = assert(io.open(app.fs.joinPath(dir, "stretch.json"), "r"))
+  local meta = json.decode(fh:read("a")); fh:close()
+  STRETCH.zone = meta.legsZone
+  local function load(name)
+    local s = app.open(app.fs.joinPath(dir, name .. ".png"))
+    local img, cel = Image(s.width, s.height, ColorMode.INDEXED), s.cels[1]
+    -- Pixel by pixel: drawImage drops some palette indices (see README).
+    for it in cel.image:pixels() do if it() ~= 0 then img:drawPixel(cel.position.x + it.x, cel.position.y + it.y, it()) end end
+    s:close()
+    return img
+  end
+  local frames = {}
+  for _, m in ipairs(meta.frames) do
+    for _, key in ipairs({ "upper", "legs" }) do
+      if m[key] and not STRETCH.images[m[key]] then STRETCH.images[m[key]] = load(m[key]) end
+    end
+    frames[#frames + 1] = frame(m.ms, 0, 0, 0, { stretch = { upper = m.upper, legs = m.legs, face = m.face } })
+  end
+  CLIPS[#CLIPS + 1] = { name = "stretch", frames = frames }
+end
+app.activeSprite = spr
 
 -- glance: the idle breath, looking left for 1.65 s and then right for 1.25 s.
 CLIPS[#CLIPS + 1] = { name = "glance", frames = {
@@ -229,11 +260,43 @@ local function posed(img, pos, pose, l)
   for y = b[2], b[4] do for x = b[1], b[3] do out:drawPixel(x, y, l == upperBody and pose.img:getPixel(x, y) or 0) end end
   return out, Point(0, 0)
 end
+-- A stretch frame's legs: the rest base with its legs zone replaced, transparent pixels too.
+local function withLegs(img, pos, legs)
+  local out = Image(spr.width, spr.height, ColorMode.INDEXED)
+  local zx, zy = STRETCH.zone[1], STRETCH.zone[2]
+  for it in img:pixels() do if it() ~= 0 then out:drawPixel(pos.x + it.x, pos.y + it.y, it()) end end
+  for y = zy, spr.height - 1 do for x = zx, spr.width - 1 do out:drawPixel(x, y, legs:getPixel(x, y)) end end
+  return out, Point(0, 0)
+end
+-- The rest upper body over new legs: in the legs zone it drops the pixels that repeat the
+-- rest base (the lap drawn on both layers), so the new legs show there.
+local function withoutRestLap(img, pos)
+  local base = find(spr.layers, "base"):cel(1)
+  local out = Image(spr.width, spr.height, ColorMode.INDEXED)
+  local zx, zy = STRETCH.zone[1], STRETCH.zone[2]
+  for it in img:pixels() do
+    local v, x, y = it(), pos.x + it.x, pos.y + it.y
+    local bx, by = x - base.position.x, y - base.position.y
+    local under = (bx >= 0 and by >= 0 and bx < base.image.width and by < base.image.height) and base.image:getPixel(bx, by) or 0
+    if v ~= 0 and not (x >= zx and y >= zy and v == under) then out:drawPixel(x, y, v) end
+  end
+  return out, Point(0, 0)
+end
 local function place(l, dst, dy, f)
   if l.isGroup then for _, c in ipairs(l.layers) do place(c, dst, dy, f) end; return end
+  local s = f.stretch
+  if s and s.upper and l.name ~= "@face" and l.name ~= "base" and l.name ~= "hair tail" then
+    -- The drawing carries the whole upper body and the halo.
+    if l == upperBody then spr:newCel(l, dst, STRETCH.images[s.upper]:clone(), Point(0, 0)) end
+    return
+  end
+  -- Over new legs the underlay (seam rows hidden under the rest upper body) would show.
+  if s and s.legs and l.name == "underlay" then return end
   local cel = l:cel(1)
   if not cel then return end
   local img, pos = cel.image:clone(), cel.position
+  if s and s.legs and l.name == "base" then img, pos = withLegs(img, pos, STRETCH.images[s.legs]) end
+  if s and s.legs and l == upperBody then img, pos = withoutRestLap(img, pos) end
   if f.pose and l.name ~= "@face" then img, pos = posed(img, pos, POSES[f.pose], l) end
   if l == upperBody and f.ahoge then img = sway(img, pos, f.ahoge) end
   if l == haloLayer and f.twinkle then img, pos = twinkle(img, pos, f.twinkle) end
@@ -294,10 +357,15 @@ for _, clip in ipairs(CLIPS) do
       spr:newCel(zLayer, n, zs, Point(0, 0))
     end
     if f.pose then marker:cel(n).data = "own" end
+    if f.stretch and f.stretch.face == "own" then marker:cel(n).data = "own"
+    elseif f.stretch and f.stretch.face then
+      local at = marker:cel(1).position
+      marker:cel(n).position = Point(at.x + f.stretch.face[1], at.y + f.stretch.face[2])
+    end
     mark(eyesLayer, n, f.eyes)
     mark(mouthLayer, n, f.mouth)
-    -- A pose frame is the drawing as it is: gaps there are part of it, not seams.
-    log:write(string.format("%s frame %d: filled %d enclosed pixels\n", clip.name, i, f.pose and 0 or fillGaps(n)))
+    -- A pose or stretch frame is the drawing as it is: gaps there are part of it, not seams.
+    log:write(string.format("%s frame %d: filled %d enclosed pixels\n", clip.name, i, (f.pose or f.stretch) and 0 or fillGaps(n)))
   end
   spans[#spans + 1] = { clip, first, first + #clip.frames - 1 }
 end

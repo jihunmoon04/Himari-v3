@@ -158,7 +158,7 @@ aseprite -b --script-param body=clean/body.aseprite --script-param log=clips.txt
 Codex가 그린 1230×1278 그림을 neutral과 같은 205×206 도트로 옮긴다. 도트 격자(약 6.02×6.26px)의 위치를 찾고, 칸마다 가장 흔한 색을 골라 원본 32색 중 가장 가까운 색(CIELAB)으로 바꾼 뒤, 원본과 가장 잘 맞도록 ±3px 안에서 위치를 맞춘다. 결과 그림과 원본과의 차이 지도를 쓴다. 생성 그림은 바꾸지 말라는 부분도 조금씩 바뀌므로, 바뀐 부분만 상자로 잘라 쓴다. 붙여 넣은 작은 그림은 `sx`, `sy`(도트 크기), `ox`, `oy`(neutral (0, 0) 칸의 왼쪽 위가 그림에서 놓이는 자리 근처), `bg=corner`(왼쪽 위 색을 투명으로)를 준다.
 - **`glance`**: idle과 같은 숨쉬기에 `@eyes` `left` → `right`. 눈 그림은 `../tools/glance-variants.lua`가 `faces.aseprite`에 그린다(`eyes/left`, `eyes/right`).
 - **`ahoge`**: 상체 레이어에서 아호게 윗부분(20–25행, 108–128열)만 1px씩 좌우로 옮긴다. 뿌리는 그대로다.
-- **기지개는 보류**: 어깨만 올리는 작은 기지개는 기지개로 읽히지 않아 뺐다(소유자 검토 2026-10-31). 팔을 드는 그림이 생기면 `stretch`로 넣는다.
+- **`stretch`**: 아래 "기지개"에 따로 적었다. 처음 시험한 어깨만 올리는 작은 기지개는 기지개로 읽히지 않아 뺐다(소유자 검토 2026-10-31).
 - **`twinkle`**: 헤일로 오른쪽 위 (131, 10)에 4방향 별(흰 중심, 분홍 끝)이 작게 → 크게 → 작게 두 번 반짝이고, 헤일로 별의 위아래 끝이 1px 길어진다.
 
 ```
@@ -195,4 +195,23 @@ aseprite -b --script-param faces=clean/faces.aseprite --script tools/mood-varian
 
 ```
 aseprite -b --script-param faces=clean/faces.aseprite --script-param log=face-hand.txt --script tools/face-hand.lua
+```
+
+## 기지개 (`../tools/stretch.py`)
+
+소유자 요청(2026-11-01): 깬 직후에 트는 `stretch`. 볼에 댄 손에서 팔을 들어 머리 위에서 깍지 끼는 동안 꼰 다리를 풀어 앞으로 쭉 펴고, 다 뻗은 상태에서 상체를 1px씩 두 번 올렸다 내린 뒤 펼 때의 역순으로 접는다(19프레임, 5.2초).
+
+- **그림**: 소유자가 준 생성 그림 두 장이다. 상체 7장면(`himari-stretch-seven-keyposes.png`)과 다리 8장면(`himari-leg-stretch-eight-keyposes.png`). 저장소에는 넣지 않았고(`build/animation-reference/`, git 무시), 변환 결과만 `poses/stretch/`에 있다.
+- **변환**: `stretch.py`가 장면마다 잘라 배경을 지우고, 상체는 머리(78–150열, 18–82행)에, 다리는 휠체어(다리 상자 밖)에 맞춰 크기와 위치를 찾는다. 도트 한 칸이 그림의 약 2.5–2.8px이다. 칸 가운데 절반의 가장 흔한 색을 `himari-32.gpl`로 옮긴다(`pose.lua`와 같은 방식).
+  - 상체: 이웃 장면에서 따라 들어온 조각을 지우고, 그림의 크고 크림색인 헤일로를 지운 뒤 쉬는 자세의 헤일로를 얹는다. 96행 위는 그림이, 118행 위는 아래에 아무것도 없을 때만 그림이 보인다. 얼굴 위치는 표정 얼굴의 어두운 선(눈, 눈썹)이 가장 잘 맞는 곳이다.
+  - 다리: 98열 오른쪽, 102행 아래(다리 영역)를 그림으로 바꾼다. 휠체어 바퀴와 등받이는 쉬는 자세 그대로다.
+  - 다리 순서는 그림 번호가 아니라 꼰 정도로 정했다. 펼 때 L3(쉬는 자세와 비슷) → L2(위 다리를 들어 풂) → L4 → L6 → L7 → L8(쭉 폄). 접을 때는 그 역순이다(소유자 검토: 펼 때도 접을 때의 역순이 자연스럽다).
+- **결과**: `poses/stretch/upper-<n>.png`(상체 레이어), `upper-7-lift1.png`(1px 올린 것), `legs-<n>.png`(다리 영역), `stretch.json`(정렬값, 얼굴 위치, 프레임 목록). 정렬 탐색은 몇 분 걸려서 `stretch.json`에 남기고 다시 쓴다. 처음부터 다시 찾으려면 `--refit`을 준다.
+- **`clips.lua`**: `stretch.json`의 프레임 목록대로 만든다. `upper`가 있으면 상체 레이어가 그 그림이 되고 다른 상체 파츠와 헤일로는 비운다. `legs`가 있으면 `base`의 다리 영역을 바꾸고, 쉬는 상체를 쓰는 프레임에서는 `underlay`와, 다리 영역에서 `base`와 겹쳐 그린 무릎 픽셀을 뺀다. 눈을 감은 6–7장면은 `@face`가 `own`이다. 틈 메우기는 하지 않는다.
+- **필요한 것**: Python 3과 numpy, Pillow, PATH의 `aseprite`(쉬는 자세 레이어를 읽는다).
+- **남은 손질**: 손가락 테두리가 덩어리져 보인다. 6–7장면은 원래 그림에 옆머리 똥머리와 리본이 없다. 오른쪽 팔걸이 근처에서 그림의 팔걸이와 겹친 자리가 있다. Aseprite에서 `body.aseprite`의 해당 프레임을 고치면 되지만, `clips.lua`를 다시 돌리면 덮어쓰므로 고친 것은 `poses/stretch/`의 그림에 해야 한다.
+
+```
+python -I tools/stretch.py --sheets ../../../../build/animation-reference
+aseprite -b --script-param body=clean/body.aseprite --script-param log=clips.txt --script tools/clips.lua
 ```
