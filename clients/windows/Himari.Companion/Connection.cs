@@ -312,13 +312,16 @@ public partial class MainWindow
     // A message the server did not take is never lost: it returns to an empty editor in its own
     // conversation, or else stays as an unsent bubble beside the newer draft.
     // An unknown outcome is tied to that bubble, so confirming it never marks another with the same text.
-    private void KeepUnsent(string text, string conversation, UnknownText? unknown)
+    // One sent again from its bubble goes back to that bubble, never to the editor.
+    private void KeepUnsent(string text, string conversation, UnknownText? unknown, bool fromBubble)
     {
         var past = frozenSent is { } frozen && frozen.Text == text && history.Contains(frozen) ? frozen : null;
-        if (currentConversation == conversation && string.IsNullOrEmpty(Input.Text))
+        if (!fromBubble && currentConversation == conversation && string.IsNullOrEmpty(Input.Text))
         {
             if (past is not null) RemoveHistory(past);
             UserSent.Visibility = Visibility.Collapsed; OpenComposer(); Input.Text = text; Input.CaretIndex = text.Length;
+            // The text stays this attempt's only while untouched; once edited it is the user's own draft.
+            if (unknown is not null && ReferenceEquals(unknownText, unknown)) unknownText = unknown with { Restored = inputRevision };
             return;
         }
         if (past is null && UserSent.Visibility == Visibility.Visible && UserSent.Text == text) { UserSent.Visibility = Visibility.Collapsed; DropEmptyUserBubble(); }
@@ -345,8 +348,8 @@ public partial class MainWindow
         frozenSent = null; FreezeThrough(long.MaxValue);
         if (unsent is not null)
         {
-            RemoveHistory(unsent, false);
-            frozenSent = AddHistory(text, true, TimeSpan.FromSeconds(DialoguePolicy.Duration(text, settings.BubbleMinimum.Value, settings.SecondsPer100.Value)));
+            // The same bubble, and so the same attempt, moves to the end and shows as sent while it goes again.
+            history.Remove(unsent); history.Add(unsent); ShowAsSent(unsent); frozenSent = unsent;
             ArrangeBubbles(); UpdateSceneBounds();
         }
         sending = true;
@@ -370,7 +373,8 @@ public partial class MainWindow
             {
                 var check = await CheckUnknownText(true, ct);
                 // The earlier send of this same text was recorded after all: nothing to send or restore.
-                if (check == UnknownTextCheck.Confirmed && earlier.Conversation == context.ConversationId && earlier.Text == text && earlier.Attempt == unsent) taken = true;
+                if (check == UnknownTextCheck.Confirmed && earlier.Conversation == context.ConversationId && earlier.Text == text
+                    && (unsent is not null ? earlier.Attempt == unsent : earlier.Attempt is null && earlier.Restored == context.InputRevision)) taken = true;
                 if (check != UnknownTextCheck.Clear) return;
             }
             if (unresolvedScreen is { } retry)
@@ -485,7 +489,7 @@ public partial class MainWindow
             // Another stream may still be validating this request's screen.
             if (earlyMoves.TryGetValue(context.ConversationId, out var buffered)) buffered.RemoveAll(x => !moveLifetime.IsVerifying(x.Job));
             sending = false; messageSend.Exit();
-            if (!taken && text.Length > 0) KeepUnsent(text, context.ConversationId, attemptUnknown);
+            if (!taken && text.Length > 0) KeepUnsent(text, context.ConversationId, attemptUnknown, unsent is not null);
             UpdateBubblePresentation();
         }
     }

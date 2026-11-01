@@ -36,7 +36,8 @@ public partial class MainWindow
     // The message being sent, once it moved into the stack before the server answered.
     private PastBubble? frozenSent;
     private int hiddenUnsent;
-    private PastBubble? OldestExpiring => history.FirstOrDefault(past => past.UnsentConversation is null);
+    // The message on its way is never trimmed or expired: its bubble is that attempt's identity.
+    private PastBubble? OldestExpiring => history.FirstOrDefault(past => past.UnsentConversation is null && !(sending && past == frozenSent));
 
     // A sent bubble shows only what was sent, like a text message. Its editor keeps keyboard
     // focus at zero height (a keystroke typed into an unfocused window loses its IME
@@ -180,10 +181,13 @@ public partial class MainWindow
     private bool ConfirmUnsent(UnknownText pending)
     {
         if (pending.Attempt is not { } past || !history.Contains(past) || past.UnsentConversation is null) return false;
+        ShowAsSent(past); ArrangeBubbles(); UpdateSceneBounds();
+        return true;
+    }
+    private void ShowAsSent(PastBubble past)
+    {
         past.UnsentConversation = null; past.UnsentPanel!.Visibility = Visibility.Collapsed;
         past.Timer.Interval = TimeSpan.FromSeconds(DialoguePolicy.Duration(past.Text, settings.BubbleMinimum.Value, settings.SecondsPer100.Value)); past.Timer.Start();
-        ArrangeBubbles(); UpdateSceneBounds();
-        return true;
     }
     private void UpdateUnsentBubbles()
     {

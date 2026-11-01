@@ -489,7 +489,7 @@ internal static class Program
             transport.AcceptedText = null;
             // More unsent messages than the stack may show: none is lost, at most six bubbles are shown.
             Call("ClearHistory"); editor.Text = "남은 초안";
-            for (int i = 0; i < 8; i++) Call("KeepUnsent", $"못 보낸 {i}", "c", null);
+            for (int i = 0; i < 8; i++) Call("KeepUnsent", $"못 보낸 {i}", "c", null, false);
             var stack = (StackPanel)unsentWindow.FindName("History");
             int Shown() => stack.Children.Cast<UIElement>().Count(child => child.Visibility == Visibility.Visible)
                 + (((FrameworkElement)unsentWindow.FindName("UserBubble")).Visibility == Visibility.Visible ? 1 : 0)
@@ -499,6 +499,28 @@ internal static class Program
             Check(((TextBlock)Past(3, "UnsentNote")!).Text.Contains("3개 더"), "the oldest shown unsent message says how many wait hidden");
             ((Button)((StackPanel)((Button)Past(7, "RetryButton")!).Parent).Children[2]).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
             Check(history.Count == 7 && Shown() == 6 && ((UIElement)Past(2, "Bubble")!).Visibility == Visibility.Visible, "removing one brings a hidden unsent message back");
+            // Unknown A, sent again from its bubble, the resend declined, then A found recorded.
+            Call("ClearHistory"); Call("HideUserBubble"); editor.Clear();
+            transport.ResetAcceptance(); transport.DeferAcceptance = true; editor.Text = "확인 안 된 질문"; Call("SendMessage"); Until(() => Sending() && transport.Posts == 7);
+            Call("OpenComposer"); editor.Text = "다음 초안";
+            transport.ReleaseFailure(HttpStatusCode.BadGateway, "http_error"); Until(() => !Sending());
+            var attempt = history[0];
+            Field("confirmResend", (Func<bool>)(() => false));
+            ((Button)Past(0, "RetryButton")!).RaiseEvent(new RoutedEventArgs(Button.ClickEvent)); Until(() => !Sending());
+            Check(transport.Posts == 7 && history.Count == 1 && ReferenceEquals(history[0], attempt) && (string?)Past(0, "UnsentConversation") == "c" && editor.Text == "다음 초안",
+                "a declined resend leaves the same bubble unsent and the draft untouched");
+            transport.AcceptedText = "확인 안 된 질문";
+            var found = (Task)Call("CheckUnknownText", false, CancellationToken.None)!; Until(() => found.IsCompleted);
+            Check(history.Count == 1 && Past(0, "UnsentConversation") is null && ((UIElement)Past(0, "UnsentPanel")!).Visibility == Visibility.Collapsed && sentLine.Visibility != Visibility.Visible,
+                "when the attempt is later found recorded, that same bubble becomes sent and loses its resend action, with no second copy");
+            // Unknown A back in the editor, then typed again by the user as a new draft before A is found recorded.
+            Field("confirmResend", null); transport.AcceptedText = null; Call("ClearHistory"); Call("HideUserBubble"); editor.Clear();
+            transport.DeferAcceptance = false; transport.Fail = (HttpStatusCode.BadGateway, "http_error");
+            editor.Text = "다시 쓴 질문"; Call("SendMessage"); Until(() => !Sending());
+            Check(editor.Text == "다시 쓴 질문" && Get("unknownText") is not null, "the unknown attempt's text returns to the empty editor");
+            editor.Clear(); editor.Text = "다시 쓴 질문"; transport.Fail = null; transport.AcceptedText = "다시 쓴 질문";
+            found = (Task)Call("CheckUnknownText", false, CancellationToken.None)!; Until(() => found.IsCompleted);
+            Check(editor.Text == "다시 쓴 질문" && Get("unknownText") is null, "confirming the earlier attempt never clears a new draft that merely has the same text");
             unsentWindow.Close();
         }
         PresentationChecks.Run(Check, args.Length == 2 && args[0] == "--screenshots" ? args[1] : null);

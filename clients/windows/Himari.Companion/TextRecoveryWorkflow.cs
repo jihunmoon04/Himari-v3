@@ -6,9 +6,13 @@ namespace Himari.Companion;
 
 public partial class MainWindow
 {
-    // Attempt: the unsent bubble of that very send, when it stays as one.
-    private sealed record UnknownText(ServerClient Server, string Conversation, string Text, string Device, int After, PastBubble? Attempt = null);
+    // Attempt: the unsent bubble of that very send, when it stays as one. Restored: the editor
+    // revision when its text went back to the editor, so only that untouched text is its own.
+    private sealed record UnknownText(ServerClient Server, string Conversation, string Text, string Device, int After, PastBubble? Attempt = null, long? Restored = null);
     private UnknownText? unknownText;
+    // Replaced in tests, like copyText.
+    private Func<bool>? confirmResend;
+    private bool AskResend() => System.Windows.MessageBox.Show(this, "이전 메시지가 이미 기록됐을 수 있습니다. 다시 보내면 중복될 수 있어요. 현재 입력을 보내시겠어요?", "전송 여부 확인", MessageBoxButton.YesNo, MessageBoxImage.Question) == MessageBoxResult.Yes;
     // Clear: nothing stands in the way of a new send. Confirmed: the history showed the earlier
     // send was recorded, so that text must not be sent or restored again. Held: still unknown.
     private enum UnknownTextCheck { Clear, Confirmed, Held }
@@ -30,7 +34,7 @@ public partial class MainWindow
         if (confirmed)
         {
             unknownText = null;
-            if (currentConversation == pending.Conversation && Input.Text.Trim() == pending.Text) Input.Clear();
+            if (currentConversation == pending.Conversation && pending.Restored == inputRevision && Input.Text.Trim() == pending.Text) Input.Clear();
             if (!ConfirmUnsent(pending) && currentConversation == pending.Conversation) ShowSentMessage(pending.Text);
             Status.Text = "기록에서 이전 메시지의 접수를 확인했습니다.";
             UpdateUnsentBubbles();
@@ -38,7 +42,7 @@ public partial class MainWindow
         }
         Status.Text = "이전 메시지의 접수 여부를 확인하지 못했습니다. 다시 보내면 중복될 수 있습니다.";
         if (!ask) return UnknownTextCheck.Held;
-        if (System.Windows.MessageBox.Show(this, "이전 메시지가 이미 기록됐을 수 있습니다. 다시 보내면 중복될 수 있어요. 현재 입력을 보내시겠어요?", "전송 여부 확인", MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes) return UnknownTextCheck.Held;
+        if (!(confirmResend ?? AskResend)()) return UnknownTextCheck.Held;
         unknownText = null; return UnknownTextCheck.Clear;
     }
 }
