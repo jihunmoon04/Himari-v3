@@ -217,6 +217,7 @@ const app = {
   activityTimer: null,
   activityAsked: new Set(), // ids not in the list that the list was read again for once (§3.3)
   events: null, // V3-P83 §8.1: the open event stream (EventSource), while the page shows
+  signals: null, // V3-P88 §8.1: the Devices screen's (epoch, revision) of what the apps tell
   passLines: [], // V3-P85 §10.1: the open conversation's memory passes, as last read
   memoryTab: "notes", // V3-P85 §10.3: the Memory screen's tab
   eventsFailed: false, // it failed and has not said hello again: the activity is read every 5 s meanwhile
@@ -589,7 +590,14 @@ function openEvents() {
     if (app.events !== source) return;
     app.eventsFailed = false;
     clearTimeout(app.activityTimer);
-    fromStream(JSON.parse(event.data).activity);
+    const hello = JSON.parse(event.data);
+    fromStream(hello.activity);
+    if (hello.signals) signalsNotice(hello.signals);
+  });
+  // V3-P88 §8.1: what an app tells changed (no content: the Devices screen reads it again).
+  source.addEventListener("devices", (event) => { if (app.events === source) signalsNotice(JSON.parse(event.data)); });
+  source.addEventListener("quiet", () => {
+    if (app.events === source && !$("surface-devices").hidden) loadDevicesList().catch(() => {});
   });
   source.addEventListener("activity", (event) => { if (app.events === source) fromStream(JSON.parse(event.data)); });
   // V3-P85 §10.1: a memory pass wrote the open conversation's lines (or its job moved on): while it is
@@ -4193,10 +4201,75 @@ async function showFolders({ via = "push" } = {}) {
 
 /* V3-P83 §4.1: add a device (its code is shown once), rename, revoke. */
 
+/* V3-P88 §8.1: the signals the screen shows, as (epoch, revision). Another epoch is another server start:
+ * whatever its number, read again; within one epoch only a larger number is newer. */
+function signalsNewer(seen, shown) {
+  if (!shown) return true;
+  return seen.epoch !== shown.epoch || seen.revision > shown.revision;
+}
+
+function signalsNotice(seen) {
+  if ($("surface-devices").hidden || !signalsNewer(seen, app.signals)) return;
+  loadDevicesList().catch(() => {});
+}
+
+function minutesText(seconds) {
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
+}
+
+/* What the server knows now of a device's app (V3-P88 §8), the same as the model is told. */
+function signalsText(device) {
+  const signals = device.signals || {};
+  if (!device.connected || !signals.session) return "";
+  if (signals.session === "locked") return "Locked";
+  const parts = ["Active"];
+  const activity = signals.activity;
+  if (activity) {
+    parts.push(`${activity.category}${activity.app ? ` in ${activity.app}` : ""} for ${minutesText(activity.for_seconds)}`);
+    if (activity.fullscreen) parts.push("fullscreen");
+    if (activity.title) parts.push(`“${activity.title}”`);
+  }
+  if (signals.media) parts.push(`playing ${signals.media.title}${signals.media.artist ? ` – ${signals.media.artist}` : ""}`);
+  if (signals.mic_or_camera) parts.push("microphone or camera in use");
+  if (signals.before) {
+    parts.push(`before: ${signals.before.category} for ${minutesText(signals.before.lasted_seconds)}, ended ${minutesText(signals.before.ended_seconds_ago)} ago`);
+  }
+  return parts.join(" · ");
+}
+
+function quietState(until) {
+  const on = Boolean(until);
+  $("devices-quiet-state").textContent = on
+    ? `Quiet until ${new Date(until).toLocaleString([], { weekday: "short", hour: "2-digit", minute: "2-digit" })}: HIMARI does not speak first.`
+    : "HIMARI may speak first. Turn on quiet when you do not want that.";
+  $("devices-quiet-clear").hidden = !on;
+}
+
+async function setQuiet(until) {
+  try {
+    const answer = await api("PUT", "/api/presence/quiet", { until: until === null ? null : until.toISOString() });
+    quietState(answer.until);
+    status(answer.until ? "Quiet is on." : "Quiet is off.", "ok");
+  } catch (error) {
+    status(error.message, "error");
+  }
+}
+
+function nextMorning() {
+  const morning = new Date();
+  morning.setHours(8, 0, 0, 0);
+  if (morning <= new Date()) morning.setDate(morning.getDate() + 1);
+  return morning;
+}
+
 function deviceRow(device) {
   const li = el("li", "memory-row");
   const main = el("div", "memory-row-main");
   main.append(el("p", "memory-text", device.name));
+  const told = signalsText(device);
+  if (told) main.append(el("span", "row-meta device-signals", told));
   if (!device.paired) {
     main.append(el("span", "row-meta", `Waiting for its code until ${new Date(device.pairing_expires_at).toLocaleTimeString()}`));
   } else {
@@ -4281,9 +4354,16 @@ async function loadDevicesList() {
   const generation = app.generation;
   const listing = await api("GET", "/api/devices");
   if (generation !== app.generation || $("surface-devices").hidden) return;
+  const seen = { epoch: listing.signals_epoch, revision: listing.signals_revision };
+  const shown = app.signals;
+  if (shown && seen.epoch === shown.epoch && seen.revision < shown.revision) return; // a later read is drawn already
+  app.signals = seen;
   $("devices-off").hidden = listing.enabled;
   $("devices-add").hidden = !listing.enabled;
   $("devices-empty").hidden = listing.items.length > 0;
+  $("devices-quiet").hidden = !listing.enabled;
+  $("devices-signals-note").hidden = !listing.items.some((device) => device.paired);
+  quietState(listing.quiet_until);
   $("devices-list").replaceChildren(...listing.items.map(deviceRow));
 }
 
@@ -4297,6 +4377,7 @@ async function showDevices({ via = "push" } = {}) {
   leavePlace();
   markSelected();
   $("devices-list").replaceChildren();
+  app.signals = null; // read afresh
   $("devices-code").hidden = true; // a code is shown once, right after it was made
   showSurface("devices", via);
   closeNav();
@@ -4487,6 +4568,9 @@ async function boot() {
     showDevices().catch((e) => status(e.message, "error"));
   });
   $("devices-add").addEventListener("submit", addDevice);
+  $("devices-quiet-hour").addEventListener("click", () => setQuiet(new Date(Date.now() + 3600 * 1000)));
+  $("devices-quiet-morning").addEventListener("click", () => setQuiet(nextMorning()));
+  $("devices-quiet-clear").addEventListener("click", () => setQuiet(null));
   $("chat-menu-attach").addEventListener("submit", attachFolder);
   $("nav-instructions").addEventListener("click", () => {
     $("appearance-dialog").close();

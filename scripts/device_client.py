@@ -29,8 +29,9 @@ import tempfile
 import threading
 import time
 import zlib
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -82,6 +83,11 @@ class Report:
     screen_again: str | None = None  # the error code of sending the same screen again
     display: dict[str, Any] = field(default_factory=dict)  # the recorded answer's
     events: list[str] = field(default_factory=list)  # the event stream's, in order
+    # V3-P88: whether the server takes the signals, and what a lock, an unlock and a quiet told
+    signals: bool = False
+    locked_current: str | None = "unset"
+    unlocked_current: str | None = "unset"
+    quiet: dict[str, Any] | None = None
 
 
 def screen_png(width: int = 1280, height: int = 720) -> bytes:
@@ -137,6 +143,8 @@ async def run(server: str, code: str, text: str, *, verify: bool = True) -> Repo
             if response.status_code != 204:
                 raise Refused(response)
             report.current_device = (await http.get("/api/device")).json()["current_device"]
+            if report.hello.get("features", {}).get("presence_signals") == 1:  # V3-P88 §14: only then
+                await signals(http, events, report)
             recent = report.hello["recent_conversation"]
             if recent is None:
                 response = await http.post("/api/conversations", json={})
@@ -169,6 +177,45 @@ async def run(server: str, code: str, text: str, *, verify: bool = True) -> Repo
             reader.cancel()
             await asyncio.gather(reader, return_exceptions=True)
     return report
+
+
+SIGNAL = {"idle_seconds": 0, "time_zone": TIME_ZONE, "session": "active",
+          "activity": {"category": "coding", "app": "Visual Studio Code", "for_seconds": 120, "fullscreen": False},
+          "media": None, "mic_or_camera": False}
+
+
+async def next_named(events: asyncio.Queue[tuple[str, Any]], name: str,
+                     wanted: Callable[[Any], bool] = lambda data: True) -> Any:
+    """The next ``name`` event that is ``wanted`` (earlier ones, e.g. the first signal's ``current``, are passed)."""
+    while True:
+        got, data = await asyncio.wait_for(events.get(), 30)
+        if got == name and wanted(data):
+            return data
+
+
+async def signals(http: httpx.AsyncClient, events: asyncio.Queue[tuple[str, Any]], report: Report) -> None:
+    """V3-P88: the whole snapshot; a lock leaves the device away at once, the first signal after the
+    unlock (marked ``after``) makes it current again; the user's quiet reaches every stream."""
+    async def send(body: dict[str, Any]) -> None:
+        response = await http.post("/api/device/presence", json=body)
+        if response.status_code != 204:
+            raise Refused(response)
+
+    report.signals = True
+    await send(SIGNAL)
+    await send({"idle_seconds": 0, "time_zone": TIME_ZONE, "session": "locked"})
+    report.locked_current = (await next_named(events, "current", lambda d: d["device_id"] is None))["device_id"]
+    await send({**SIGNAL, "after": "unlock"})
+    report.unlocked_current = (await next_named(events, "current", lambda d: d["device_id"] is not None))["device_id"]
+    until = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
+    response = await http.put("/api/presence/quiet", json={"until": until})
+    if response.status_code != 200:
+        raise Refused(response)
+    report.quiet = await next_named(events, "quiet")
+    response = await http.put("/api/presence/quiet", json={"until": None})
+    if response.status_code != 200:
+        raise Refused(response)
+    await next_named(events, "quiet")
 
 
 async def follow(http: httpx.AsyncClient, report: Report) -> None:
@@ -206,6 +253,8 @@ def show(report: Report) -> None:
     print(f"moods: {report.moods}")
     print(f"screen: {report.screen.get('name')}; moves: {report.moves}; job: {report.job_id}; "
           f"the same screen again: {report.screen_again}")
+    print(f"signals: {report.signals}; current when locked: {report.locked_current}, after the unlock: "
+          f"{report.unlocked_current}; quiet: {report.quiet}")
     print(f"events: {', '.join(report.events)}")
 
 
@@ -283,6 +332,11 @@ def check(report: Report) -> list[str]:
         and report.started_job_id == report.job_id and report.live_job_ids == {report.job_id},
         "the same screen again is refused as sent": report.screen_again == "screen_already_sent",
         "the stream told the job's start and end": "job" in report.events and "conversation" in report.events,
+        "the server takes the activity signals": report.signals,
+        "a lock leaves the device away at once": report.locked_current is None,
+        "the unlock makes it current again": report.unlocked_current == "d1",
+        "the quiet reaches the device's stream": report.quiet is not None and report.quiet.get("until") is not None,
+        "a device gets no signals notices": "devices" not in report.events,
     }
     return [name for name, ok in wanted.items() if not ok]
 

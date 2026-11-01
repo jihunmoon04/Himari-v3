@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import secrets
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
 
@@ -14,7 +14,7 @@ from himari.bootstrap.companion import CompanionEvents
 from himari.common import CallId, ConversationId, PrincipalId, TextBlock, ToolCall, ToolId, TrustedScope, thaw
 from himari.control.api import DriveResult, DriveState, JobStatus
 from himari.data.api import MessageOrigin, OriginKind
-from himari.presence.api import StreamEvent, Subscription
+from himari.presence.api import ActivitySignal, Session, Signals, StreamEvent, Subscription
 from himari.presence.hub import PresenceHub
 from himari.prompt.api import DevicePresence, PresenceView
 from himari.provider.api import NormalizedFinal, NormalizedToolCalls
@@ -107,6 +107,34 @@ def test_the_model_is_told_where_the_user_is(tmp_path: Path) -> None:
             last = adapter.prepared_inputs[-1].current_state
             assert last.presence is not None and last.presence.sent_from == ("web", None)
             assert last.now is not None and last.now.utcoffset() == timedelta(hours=9)  # the server's
+        finally:
+            await app.close()
+
+    asyncio.run(scenario())
+
+
+def test_the_model_is_told_what_the_current_device_shows_and_the_quiet(tmp_path: Path) -> None:
+    """V3-P88 §7: the current device's signals and the user's quiet, read when the turn starts."""
+    async def scenario() -> None:
+        adapter = ScriptedAdapter([NormalizedFinal((TextBlock("hi"),))])
+        app = await opened(tmp_path, adapter)
+        try:
+            desk = await paired(app)
+            app.hub.subscribe(ME, desk)
+            app.hub.signal(ME, desk, 0, "Asia/Seoul", Signals(
+                session=Session.ACTIVE, activity_known=True, activity=ActivitySignal("coding", "Code", 2700.0, False),
+                media_known=True, media=None, mic_or_camera=True))
+            until = datetime.now(UTC) + timedelta(hours=1)
+            await app.devices.set_quiet(ME, until)
+            scope = TrustedScope(ME, await app.create_conversation(ME))
+            await app.send(scope, "hello", origin=MessageOrigin(OriginKind.DEVICE, desk))
+            await app.runner.wait(scope)
+            told = adapter.prepared_inputs[0].current_state.presence
+            assert told is not None and told.now_doing is not None
+            assert (told.now_doing.activity, told.now_doing.app, told.now_doing.for_minutes) == ("coding", "Code", 45)
+            assert told.now_doing.mic_or_camera and told.now_doing.media is None
+            assert told.quiet_until is not None and datetime.fromisoformat(told.quiet_until).utcoffset() == timedelta(
+                hours=9)
         finally:
             await app.close()
 

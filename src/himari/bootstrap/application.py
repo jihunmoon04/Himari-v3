@@ -168,6 +168,7 @@ from himari.prompt.api import (
     ATTACHMENT_NOTE,
     FILE_REFERENCE_NOTE,
     DOCUMENTS_READ_NOTE,
+    ACTIVITY_NOTE,
     COMPANION_NOTE,
     SCREEN_NOTE,
     PROGRESS_NOTE,
@@ -1034,7 +1035,7 @@ class Application:
                                     instructions=(*base, *((ATTACHMENT_NOTE,) if uploads_work else ()),
                                                   *((FILE_REFERENCE_NOTE,) if machine is not None else ()),
                                                   TOOL_IMAGES_NOTE, PROGRESS_NOTE, TIME_NOTE,
-                                                  *((COMPANION_NOTE, SCREEN_NOTE) if companion else ()),
+                                                  *((COMPANION_NOTE, ACTIVITY_NOTE, SCREEN_NOTE) if companion else ()),
                                                   *_documents_notes(reader, toolkit, scripts == "on")),
                                     external_defaults=mcp.defaults,
                                     source_notes=[SourceNote(source, note.placement, note.text)

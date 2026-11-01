@@ -1865,6 +1865,41 @@ def run_devices(base: str, token: str, shots: str | None) -> list[str]:
         expect(page.locator("#surface-devices")).to_be_visible()
         expect(page.locator("#devices-code")).to_be_hidden()
         expect(rows.first).to_contain_text("Last seen")
+
+        # V3-P88 §8: what the app tells, shown as the server knows it; the page follows the notices
+        import urllib.request
+
+        bearer = {"authorization": f"Bearer {device_token}"}
+
+        def hold_stream() -> None:  # the app's event stream: connected needs it open
+            with urllib.request.urlopen(urllib.request.Request(base + "/api/events", headers=bearer)) as stream:
+                while stream.read(1):
+                    pass
+
+        threading.Thread(target=hold_stream, daemon=True).start()
+        time.sleep(0.5)
+        status, _ = http(base, "POST", "/api/device/presence", bearer, {
+            "idle_seconds": 0, "session": "active", "mic_or_camera": True,
+            "activity": {"category": "coding", "app": "Visual Studio Code", "for_seconds": 2700},
+            "media": {"title": "Song", "artist": "Singer"}})
+        assert status == 204, status
+        expect(rows.first).to_contain_text("coding in Visual Studio Code for 45m", timeout=15000)
+        expect(rows.first).to_contain_text("playing Song – Singer")
+        expect(rows.first).to_contain_text("microphone or camera in use")
+        expect(page.locator("#devices-signals-note")).to_be_visible()
+        status, _ = http(base, "POST", "/api/device/presence", bearer, {"idle_seconds": 0, "session": "locked"})
+        assert status == 204, status
+        expect(rows.first.locator(".device-signals")).to_have_text("Locked", timeout=15000)  # the window's end
+        expect(page.locator("#devices-quiet-state")).to_contain_text("HIMARI may speak first")
+        page.click("#devices-quiet-hour")
+        expect(page.locator("#devices-quiet-state")).to_contain_text("Quiet until")
+        status, started = http(base, "GET", "/api/device", bearer)
+        assert status == 200 and started["quiet_until"], started  # the user's, for every device
+        if shots:
+            page.screenshot(path=os.path.join(shots, "30b-devices-signals.png"))
+        page.click("#devices-quiet-clear")
+        expect(page.locator("#devices-quiet-state")).to_contain_text("HIMARI may speak first")
+        expect(page.locator("#devices-quiet-clear")).to_be_hidden()
         rows.first.get_by_role("button", name="Rename Desk").click()
         rows.first.locator("input").fill("Big desk")
         rows.first.locator("button[type=submit]").click()
