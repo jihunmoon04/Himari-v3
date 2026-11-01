@@ -2807,7 +2807,7 @@ class SqliteData:
 
     async def begin_wake(self, scope: TrustedScope, reasons: Sequence[WakeReason], device_id: str, *,
                          keys: Sequence[str] = (), reminders: Sequence[int] = ()) -> ConversationEvent:
-        rules.check_wake(reasons, device_id)
+        rules.check_wake(reasons, device_id, keys, reminders)
         with self._tx() as tx:
             tx.authorized(scope)
             if self._waiting(tx, scope) is not None:

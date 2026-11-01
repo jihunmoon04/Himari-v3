@@ -185,13 +185,23 @@ def check_origin(origin: object) -> None:
         raise DataError(DataErrorCode.INVALID_ARGUMENT, "a device origin names its device, and only it")
 
 
-def check_wake(reasons: object, device_id: object) -> None:
-    """V3-P87 §3.2: one to MAX_WAKE_REASONS reasons, and the device it is spoken on."""
+def check_wake(reasons: object, device_id: object, keys: object = (), reminders: object = ()) -> None:
+    """V3-P87 §3.2: one to MAX_WAKE_REASONS reasons, and the device it is spoken on;
+    distinct non-empty keys; the reminders it claims are exactly the notes of its
+    REMINDER reasons, each once (PR #153 review P2-2: both backends refuse alike)."""
     if not isinstance(reasons, (list, tuple)) or not 1 <= len(reasons) <= MAX_WAKE_REASONS \
             or not all(isinstance(r, WakeReason) and isinstance(r.kind, WakeKind) for r in reasons):
         raise DataError(DataErrorCode.INVALID_ARGUMENT, f"a wake has 1..{MAX_WAKE_REASONS} reasons")
     if not isinstance(device_id, str) or not device_id:
         raise DataError(DataErrorCode.INVALID_ARGUMENT, "a wake names the device it is spoken on")
+    if not isinstance(keys, (list, tuple)) or not all(isinstance(k, str) and k for k in keys) \
+            or len(set(keys)) != len(keys):
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, "a wake's keys are distinct, non-empty strings")
+    noted = [r.memory_id for r in reasons if r.kind is WakeKind.REMINDER]
+    if not isinstance(reminders, (list, tuple)) \
+            or not all(isinstance(m, int) and not isinstance(m, bool) for m in reminders) \
+            or None in noted or len(set(noted)) != len(noted) or sorted(reminders) != sorted(noted):
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, "a wake claims exactly the notes of its reminder reasons")
 
 
 def check_workspace_location(location: object) -> str:

@@ -522,3 +522,9 @@ P1·P2 해결 확인. 문서 정합성 둘과 구현 주의 하나:
 - **설정.** `HIMARI_PROACTIVE`(기본 끔), `HIMARI_PROACTIVE_QUIET`(`HH:MM-HH:MM`, 비우면 없음), `_GAP_MINUTES`·`_DAILY`·`_RETURN_HOURS`·`_FOCUS_MINUTES`·`_GAME_MINUTES`. 시작 줄 `HIMARI web: reaching out …`. 1부의 숫자는 아직 `try`에 쓰이지 않음(2부의 규칙이 씀).
 - **가짜 기기.** `scripts/device_client.py --self-test`가 답 뒤에 `try`로 wake를 열고, 기기가 origin `wake`인 `job`을 보고 그 `live`를 끝까지 따라감(표시 글에 표시 기호 없음).
 - **배포:** v17 업그레이드(백업 먼저). 스위치를 켜지 않으면 바뀌는 것은 표·열뿐이고 모델 입력도 같다(`proactive=false`면 새 줄 없음).
+
+### 19.2 검수 (PR #153, `82cbd53`): READY_WITH_CORRECTIONS → 고침
+
+- **P2-1 재시작 통합 테스트:** `tests/integration/test_wake_restart.py`(메모리·SQLite 둘 다). wake 턴의 묶음에서 첫 호출은 성공, 둘째는 claim 전에 죽고, 셋째는 시작 안 함 → 재시작 → `settle_cut_wakes`: 첫 호출 `SUCCEEDED` 그대로(다시 실행 안 함), 둘째·셋째 `CANCELLED`(`CUT_REASON`), 모델 호출 없음, wake `failed`, 새 wake가 열리고 셋째는 끝까지 실행되지 않음. `REQUIRE_USER`의 결과 모르는 호출이면 다시 실행하지 않고 새 wake는 `NOT_SETTLED`.
+  - 이 테스트가 찾은 것: 닫힌 묶음은 모델이 아직 답하지 않은 계기(`CompletedGroupRef`)라 `accept_wake`가 새 wake를 계속 막았다(사용자가 말할 때까지). §6.1의 "답하지 않은 계기"는 사용자 메시지나 wake이고 §13은 "묶음이 닫힌 뒤에 새 wake"이므로, **끝난 wake의 턴이 남긴 묶음**(재시작으로 닫힘, Run 상한에서 멈춤)은 막지 않는다 — 새 wake 턴이 그 결과를 함께 본다. 사용자의 턴이 남긴 묶음(Run 사이에서 멈춤 등)은 사용자의 일이라 계속 막는다(`Driver._left_by_a_wake`: 마지막 사용자 메시지·wake 이벤트가 wake이고 그 기록이 `opened`가 아님).
+- **P2-2 `begin_wake` 인자:** `rules.check_wake`가 두 백엔드에서 똑같이 거절(`INVALID_ARGUMENT`, 아무것도 쓰지 않음): 같은 열쇠 두 번·빈 열쇠, `reminders`가 REMINDER 이유들의 노트와 정확히 같지 않음(이유 없는 알림, 알림을 싣지 않은 REMINDER 이유, 두 번, 다른 노트, 같은 노트의 이유 두 번, 노트 없는 REMINDER 이유).

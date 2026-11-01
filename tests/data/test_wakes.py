@@ -160,3 +160,29 @@ def test_a_purge_takes_its_wakes() -> None:
     asyncio.run(data.begin_purge(SCOPE))
     asyncio.run(data.purge_conversation(SCOPE))
     assert asyncio.run(data.opened_wakes()) == ()
+
+
+def test_keys_and_reminders_are_checked_alike_in_both_backends() -> None:
+    """PR #153 review P2-2: a repeated key, or reminders that are not exactly the
+    notes of the reminder reasons, are refused before anything is written."""
+    store = new_store()
+    data, memory_id = opened(store)
+    make_reminder(store, memory_id)
+    reminded = (WakeReason(WakeKind.REMINDER, memory_id=memory_id),)
+    for reasons, keys, reminders in (
+        (TRY, ("k", "k"), ()),  # the same key twice
+        (TRY, ("",), ()),  # an empty key
+        (TRY, (), (memory_id,)),  # a reminder without its reason
+        (reminded, (), ()),  # a reminder reason that claims nothing
+        (reminded, (), (memory_id, memory_id)),  # claimed twice
+        (reminded, (), (memory_id + 1,)),  # another note
+        (reminded * 2, (), (memory_id,)),  # the same note's reason twice
+        ((WakeReason(WakeKind.REMINDER),), (), ()),  # a reminder reason with no note
+    ):
+        with pytest.raises(DataError) as refused:
+            asyncio.run(data.begin_wake(SCOPE, reasons, "d1", keys=keys, reminders=reminders))
+        assert refused.value.code is DataErrorCode.INVALID_ARGUMENT, (reasons, keys, reminders)
+    assert len(asyncio.run(data.read_events(SCOPE))) == 0  # nothing written
+    assert reminder(store, memory_id) == ("scheduled", None, 0)
+    asyncio.run(data.begin_wake(SCOPE, reminded, "d1", keys=("k",), reminders=(memory_id,)))  # the right shape
+    assert reminder(store, memory_id)[0] == "claimed"

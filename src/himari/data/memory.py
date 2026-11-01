@@ -1427,7 +1427,7 @@ class InMemoryData:
 
     async def begin_wake(self, scope: TrustedScope, reasons: Sequence[WakeReason], device_id: str, *,
                          keys: Sequence[str] = (), reminders: Sequence[int] = ()) -> ConversationEvent:
-        rules.check_wake(reasons, device_id)
+        rules.check_wake(reasons, device_id, keys, reminders)
         conv = self._conv(scope)
         if self._waiting(conv) is not None:
             raise DataError(DataErrorCode.INVALID_STATE_TRANSITION, "an ask_user call is waiting")
