@@ -99,7 +99,7 @@ aseprite -b --script-param in=happy.png --script-param neutral=neutral.png --scr
 | 파일 | 내용 |
 |---|---|
 | `body.aseprite` | 몸 동작. 태그 하나가 동작 하나(`idle` 6프레임, 그 뒤로 `sleep`, `yawn`, `glance`, `ahoge`, `twinkle`). 숨긴 레이어 `@face`의 1×1 점이 그 프레임에서 얼굴을 놓을 자리다(쉬는 자세 (101, 47), 숨쉬기 프레임은 1px 위). 숨긴 `@eyes`, `@mouth`의 셀 데이터는 그 프레임의 눈·입을 강제한다. |
-| `faces.aseprite` | 얼굴 33×26. 표정마다 프레임 하나, 태그 이름이 표정 이름. 그룹 `eyes/half`, `eyes/closed`, `mouth/small`, `mouth/wide`에 기본 얼굴과 다른 픽셀만 그린다(happy는 눈 변형이 없다). 숨긴 `@body`는 맞춰 볼 몸 그림이다. 턱의 손(129 이상, 66 이상)은 몸 쪽이라 비워 둔다. |
+| `faces.aseprite` | 얼굴 33×26. 표정마다 프레임 하나, 태그 이름이 표정 이름. 그룹 `eyes/half`, `eyes/closed`, `mouth/small`, `mouth/wide`에 기본 얼굴과 다른 픽셀만 그린다(happy는 눈 변형이 없다). 숨긴 `@body`는 맞춰 볼 몸 그림이다. 턱의 손(129 이상, 66 이상)과 그 왼쪽 턱선 아래의 손가락(68–72행, 아래 "얼굴에서 손 빼기")은 몸 쪽이라 비워 둔다. |
 
 - **처음 만들기**: `../tools/sources.lua`가 `idle-test.aseprite`, `neutral-face.aseprite`, `moods/`에서 두 원본을 한 번 만들었다. 그대로 다시 돌리면 고친 `faces.aseprite`를 덮어쓴다. 숨쉬기를 바꿀 때는 `idle-test.lua`를 고쳐 돌린 뒤 `--script-param only=body`로 `body.aseprite`만 다시 만들고, 이어서 `legs.lua`(아래 "다리 교체")와 `clips.lua`를 돌린다.
 - **neutral 눈·입 다시 그림**(소유자 검토 2026-10-31): `../tools/neutral-variants.lua`가 `faces.aseprite`의 neutral 변형을 고쳤다. 반쯤 감은 눈은 뜬 눈의 속눈썹처럼 오른쪽으로 내려가고, 감은 눈은 선 위의 갈색 채움을 없앴다. 두 경우 모두 바깥쪽 속눈썹 끝을 눈마다 2px 줄였다. 말하는 입은 다문 입 선의 두 끝 (112,65), (116,67)을 그대로 두고 가운데가 벌어진다. 그래서 `frames/`의 낱장과는 이제 다르다.
@@ -184,3 +184,15 @@ aseprite -b --script-param faces=clean/faces.aseprite --script tools/mood-varian
 ```
 
 다시 돌리면 7종의 변형을 새로 그린다(neutral은 건드리지 않는다). 특정 표정만 손으로 고쳤다면 그 표정은 `--script-param only=<표정>`으로 따로 다루거나 다시 돌리지 않는다.
+
+## 얼굴에서 손 빼기 (`../tools/face-hand.lua`)
+
+소유자 요청(2026-11-01): 쉬는 자세에서 왼손이 턱을 받치고 있어서, 그 자세에서 잘라 낸 표정 8종의 얼굴 사각형에 턱선 오른쪽 아래의 손가락이 함께 들어 있었다. 손이 다른 곳에 있는 프레임(기지개)에서는 손가락만 턱에 떠 보였다.
+
+- `faces.aseprite`의 `face` 레이어에서 표정마다 같은 43칸을 지운다. 손가락 윗선(68행)과 턱선((123, 68), (121, 69), (118, 70), (117, 71)) 아래, 기존 손 자리(129열) 왼쪽이다(68행 124–128, 69행 122–128, 70행 120–128, 71·72행 118–128). 턱선은 얼굴에 남긴다.
+- 몸 프레임은 그 자리에 같은 손을 이미 갖고 있다(43칸 중 42칸이 neutral 얼굴과 같고, 나머지 한 칸은 neutral 얼굴에서 투명). 그래서 neutral의 쉬는 자세는 그대로이고(`idle-1-neutral` 기준 그림 불변), 다른 표정은 손 자리가 neutral의 손으로 바뀌어 6–10칸(thinking은 30칸) 달라진다.
+- 다시 돌려도 지울 것이 없으면 아무것도 바꾸지 않는다. 돌린 뒤에는 `export.lua`로 다시 내보낸다.
+
+```
+aseprite -b --script-param faces=clean/faces.aseprite --script-param log=face-hand.txt --script tools/face-hand.lua
+```
