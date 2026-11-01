@@ -1,6 +1,12 @@
 # 먼저 말 걸기와 스케줄러 (V3-P87 설계 초안 v0.1)
 
-상태: **Proposed**, rev. 2. 소유자 질문 Q1~Q8(§15)이 남아 있다.
+상태: **Proposed**, rev. 3. 소유자 질문 Q1~Q8(§15)이 남아 있다.
+
+**rev. 3(2026-11-01, V3-P89 프롬프트 정비가 머지·배포된 뒤):** 시스템 글이 절로 나뉘고 Prompt 모듈이 최종 순서를 정하게 되었다(`prompt/system.py`). 그에 맞춘다(§8.2).
+- 따로 붙던 `PROACTIVE_NOTE` 대신 **반려 절의 한 줄 "Speaking first"**. 먼저 말 걸기가 켜져 있을 때만(`SystemSpec.proactive`). 말하기 길이(기기 네 문장, 먼저 말 걸기 한두 문장, 전체 화면·마이크면 한 문장)가 모두 반려 절 한 곳에 있다.
+- 원칙 문단(`# What instructs you`)이 `<wake>` 메시지를 "정보"로 이름 짓는다(그 메시지의 이유는 지시가 아니다).
+- wake가 가리키는 고리의 글은 그릴 때 읽으므로, 그 글을 `state_key`에 넣는다(V3-P89의 토큰 추정 규칙, §8.4).
+- 자기 지칭은 "you"(V3-P89 §5).
 
 **rev. 2(2026-11-01, 소유자 요청: 활동 신호 V3-P88을 먼저 하고 이 초안을 고침):** V3-P88(PR #148 설계, #149 서버·#150 앱, 머지됨·배포 전)이 준 신호를 쓴다.
 - **방해 금지 = 사용자가 켠 "조용히"(`quiet_until`)뿐**(V3-P88 Q1 소유자 결정). 전체 화면과 마이크·카메라 사용은 막지 않는다. 말을 짧게 하라는 정보로만 쓴다(§6.1, §8.2).
@@ -153,7 +159,7 @@ class Wake(DeepFrozen):
 wake 작업이 도는 중에 그 대화에 사용자 메시지가 오면, 지금은 `BUSY`가 된다. HIMARI가 먼저 말을 꺼냈다고 사용자가 말을 못 하는 것은 거꾸로다.
 
 - `submit`이 돌고 있는 작업이 `wake`이면: 그 작업을 취소하고, 끝나기를 10초까지 기다린 뒤 메시지를 받는다.
-- 취소된 wake의 답이 이미 확정됐으면 그대로 남는다. 확정 전이면 wake 이벤트만 남고, 다음 Run의 계기에 wake와 사용자 메시지가 함께 들어간다. `PROACTIVE_NOTE`가 "사용자가 그 뒤에 말했으면 사용자에게 답하라"고 말한다(§8.2).
+- 취소된 wake의 답이 이미 확정됐으면 그대로 남는다. 확정 전이면 wake 이벤트만 남고, 다음 Run의 계기에 wake와 사용자 메시지가 함께 들어간다. 반려 절의 "Speaking first" 줄이 "사용자가 그 뒤에 말했으면 사용자에게 답하라"고 말한다(§8.2).
 - 다른 작업(사용자가 시킨 일)은 지금처럼 `BUSY`다. 일반적인 해결은 "작업 중 메시지" 패킷이다.
 
 ### 4.4 재시작
@@ -195,7 +201,7 @@ wake 작업이 도는 중에 그 대화에 사용자 메시지가 오면, 지금
 - **고리에 붙인다:** 알림은 "HIMARI에게 부탁한 다음 일"이라서 이미 열린 고리의 뜻 안에 있다. 새 저장소를 만들지 않고 `loop` 기억에 `remind_at`을 더한다.
   - 기억 화면의 고리 목록에서 보이고, 고치고, 지울 수 있다(V3-P85 §10.2를 넓힘).
   - `due`(일이 있는 때)와 `remind_at`(말해 줄 때)은 다르다. 둘 다 있을 수 있다.
-- **누가 쓰나:** 모델의 `memory_save`(`loop`, 새 인자 `remind_at`)와 사용자(기억 화면). **자동 기억은 쓰지 않는다.** 알림은 사용자가 그 턴에서 부탁한 것이어야 한다. `MEMORY_NOTE`에 "remind_at only when the user asked to be reminded at a time"을 더한다.
+- **누가 쓰나:** 모델의 `memory_save`(`loop`, 새 인자 `remind_at`)와 사용자(기억 화면). **자동 기억은 쓰지 않는다.** 알림은 사용자가 그 턴에서 부탁한 것이어야 한다. `memory_save` 설명에 "remind_at only when the user asked to be reminded at a time"을 더한다(V3-P89 뒤로 저장 규칙은 도구 설명에 있다. 기억 절에는 출처 규칙만).
   - 상대 시각("30분 뒤")은 모델이 `now`(V3-P83 §6.4)로 계산해 절대 시각으로 쓴다. 날짜 규칙은 V3-P85 §5.3과 같다(시간대 없는 시각은 서버 시간대).
 - **말할 시각:** `remind_at` 그대로. 창은 24시간.
 - **조절 규칙의 예외:** 사용자가 정한 시각이므로 조용한 시간, 간격, 하루 상한을 보지 않는다. 사용자의 조용히를 넘을지는 Q8. **지금 기기는 필요하다.** 자리에 없으면 다음 돌아옴 기록이 생길 때(§5.2, 자리 비움 길이는 보지 않음) 말한다. "아까 알려 달라던 거…"
@@ -270,24 +276,35 @@ wake 작업이 도는 중에 그 대화에 사용자 메시지가 오면, 지금
 
 - JSON은 Current State처럼 `json_data`로 인코딩한다. 고리의 글이 블록을 닫을 수 없다.
 - 고리는 **그릴 때** 읽는다(§3.2). 지워졌으면 `{"kind": "loop_due", "loop": {"id": "m15", "deleted": true}}`. 그래서 고리를 고치거나 지우면 그 wake의 그림이 바뀌고 그 대화의 캐시가 한 번 깨진다. 드물어서 받아들인다.
-- 사용자가 메시지에 `<wake>…</wake>`를 직접 칠 수는 있다. 시각 줄과 같이, 그 사람은 사용자 자신뿐이라 보안 경계가 아니다. Prompt는 wake 이벤트만 "블록 하나뿐인 메시지"로 그리고, `PROACTIVE_NOTE`도 그 모양만 wake라고 말한다.
+- 사용자가 메시지에 `<wake>…</wake>`를 직접 칠 수는 있다. 시각 줄과 같이, 그 사람은 사용자 자신뿐이라 보안 경계가 아니다. Prompt는 wake 이벤트만 "블록 하나뿐인 메시지"로 그리고, "Speaking first" 줄도 그 모양만 wake라고 말한다.
 
-### 8.2 `PROACTIVE_NOTE`
+### 8.2 시스템 글 (V3-P89의 절 구조 안에서)
 
-스위치가 켜져 있을 때 시스템 문장에 늘 있다(고정 문장, 캐시를 깨지 않음).
+V3-P89 뒤로 시스템 글은 Prompt가 절로 조립한다(바탕 → 원칙 → 메시지와 시각 → 도구로 일하기 → 기억 → 반려 → Tool server notes → 페르소나 → 사용자 지시문). 먼저 말 걸기는 새 절을 만들지 않고 **두 곳에 한 줄씩** 더한다. 조건은 `SystemSpec.proactive`(= `HIMARI_PROACTIVE` 켜짐 **그리고** 반려 켜짐).
+
+**반려 절의 "Speaking first" 줄** (`PROACTIVE_RULE`, `SPEAKING_RULE` 바로 뒤):
 
 ```
-A user-role message that is only a <wake> block is not from the user: the server
-opened this turn for the reasons in it, and the user has said nothing. Speak first,
-briefly — one or two sentences in the user's language, the way a friend would — and
-ask at most one question. Do not mention the wake block, the server, or note ids.
-If a reason no longer fits what you know, greet or say something small instead.
-When presence.now_doing shows a fullscreen video or game, or the microphone or camera
-in use, keep it to one short sentence. If the user wrote after a wake, answer the user.
+- Speaking first: a user-role message that is only a <wake> block comes from the server,
+  not the user: it opened this turn for the reasons in it, and the user has said nothing.
+  Speak first, the way a friend would: one or two short sentences, at most one question;
+  one short sentence when presence.now_doing shows a fullscreen video or game or the
+  microphone or camera in use. Do not mention the wake block, the server or note ids. If
+  a reason no longer fits what you know, greet or say something small instead. If the
+  user wrote after a wake, answer the user.
 ```
 
-- 표정 표시(`[[mood:…]]`)는 보통처럼 쓴다.
-- 문장은 실제 모델 확인(§13)에서 다듬는다.
+- **말하기 길이는 반려 절 한 곳에(V3-P89 §3.5):** "Speaking"(기기에서 온 말: 네 문장 이내, 코드 블록·목록·제목 없음, 통화 추정이면 두세 문장)과 "Speaking first"(한두 문장, 전체 화면·마이크면 한 문장)가 나란히 있다. wake 턴의 답은 늘 기기에서 말해지므로 "Speaking"의 형식 규칙(코드 블록·목록 없음)도 함께 따른다.
+- **원칙 문단:** 먼저 말 걸기가 켜져 있으면 정보 목록에 "the reasons in a <wake> message"를 더한다(`principle_section(persona, wake)`). wake 이유는 서버가 쓴 정보이지 지시가 아니고, 무엇을 할지는 이 "Speaking first" 줄이 말한다.
+- 표정 표시(`[[mood:…]]`)는 보통처럼 쓴다("Expression" 줄 그대로).
+- 고정 문장이라 캐시를 깨지 않는다. 스위치를 켜고 끄면 시스템 글이 바뀌고, `context_key`가 조립된 시스템 글 전체를 해시하므로(V3-P89 §7) 토큰을 다시 잰다.
+- 문장은 실제 모델 확인(§13)에서 다듬는다. V3-P89의 `tests/live/test_prompt_cleanup_live.py`와 같은 방식으로 장면을 더한다.
+
+### 8.4 토큰 추정 (V3-P89의 `state_key`)
+
+- wake 이벤트는 **대화 기록**이라 측정한 Run 뒤에 생긴 것은 지금처럼 이벤트로 더해진다.
+- 다만 wake의 그림은 가리키는 고리의 **지금** 글을 읽는다(§3.2, §8.1). 측정한 Run 앞에 있던 wake라도 그 고리를 고치면 그림의 크기가 바뀐다. 그래서 Loader가 기록 안의 wake가 가리키는 고리를 읽어 `PromptInputs.wake_notes`(번호 → 글·날짜, 지워졌으면 없음)로 넘기고, **`state_key`가 그것도 해시한다.** 바뀌면 상태 전체를 다시 더하는 보수적 길을 탄다(V3-P89 §14.1). 고리의 글은 600자를 넘지 않으므로 상태 전체를 다시 더하는 쪽이 늘 더 크다.
+- 압축 요약 뒤로 접힌 wake는 요약 안의 글이라 해당 없다.
 
 ### 8.3 다른 소비자
 
@@ -353,7 +370,7 @@ in use, keep it to one short sentence. If the user wrote after a wake, answer th
   - **순수 함수:** 고리의 말할 시각(시각/날짜만, 시간대), 24시간 창과 `expired`, 날짜를 고친 고리의 새 열쇠, 돌아옴(`unlock`·`resume`·`reconnect`, 4시간 경계를 Data의 마지막 입력으로, 재시작 뒤의 `reconnect`는 인사 안 함, 10분 지난 기록, 돌아온 기기 ≠ 지금 기기, 20초 안의 메시지로 취소, 다른 대화의 메시지), 활동(집중 2시간 경계·분류·같은 집중에 한 번·쉬고 다시, 게임 30분 경계·끝난 지 10분·신호 없음), 알림(조용한 시간·상한 무시, Q8대로 조용히, 자리 비움이면 다음 돌아옴에), 사용자의 조용히, 전체 화면·마이크는 막지 않음, 조용한 시간(자정을 넘는 범위, 기기 시간대), 간격, 하루 상한(시간대의 하루), 답 없는 말, 작업 중, `ask_user` 대기, 합치기와 4개 상한·순서.
   - **Data:** v16 → v17 업그레이드와 백업, `begin_wake`의 원자성(열쇠 중복이면 이벤트도 없음), 휴지통 대화 거절, SQLite·메모리 백엔드 일치, `remind_at` 쓰기·고치기·지우기, `last_input_at`.
   - **Control:** `submit_wake`의 `BUSY`·`CLOSED`, 계기에 wake가 들어감, Run 상한 3, 사용자가 이김(확정 전 취소 → 다음 계기에 둘 다, 확정 뒤 → 답 남음), 재시작 뒤 10분 안 wake 이어 가기와 그 밖 `failed`.
-  - **Prompt:** wake 그리기(지운 고리, JSON 인코딩, 시각 줄), `PROACTIVE_NOTE`는 스위치일 때만, 시각 줄 간격에서 빠짐, `sent_from`에서 빠짐.
+  - **Prompt:** wake 그리기(지운 고리, JSON 인코딩, 시각 줄), "Speaking first" 줄과 원칙의 `<wake>`는 `SystemSpec.proactive`일 때만(반려 꺼짐이면 없음), 반려 절 안에서 "Speaking" 바로 뒤, 대화 프롬프트에 3인칭 HIMARI 없음, 시각 줄 간격에서 빠짐, `sent_from`에서 빠짐. `state_key`가 wake가 가리키는 고리의 글을 따름(고치면 키가 바뀜, 지우면 바뀜), 스위치를 켜고 끄면 `context_key`가 바뀜.
   - **기억 작업:** wake의 `seq`를 근거로 댄 기억이 떨어짐, 문맥 줄로 그려짐.
   - **사건 흐름:** `job`의 wake `origin`, `hello`.
   - **스케줄러:** 한 작업의 예외가 다른 작업을 멈추지 않음, `purge`가 옮긴 뒤에도 같은 주기.
@@ -391,7 +408,7 @@ in use, keep it to one short sentence. If the user wrote after a wake, answer th
 | `data` | v17: `EventKind.WAKE`, `Wake`·`WakeReason`, `wakes`·`wake_keys`, `begin_wake`, `memories.remind_at`·`reminded_at`, `devices.last_input_at`, `OriginKind.WAKE` |
 | `presence` | 마지막 입력을 Data에 쓰기(10분, 잠기거나 자리 비움이 될 때), 돌아옴 기록이 생길 때의 `on_returned` 콜백 |
 | `proactive` (새, 계층 3) | 계기·조절 규칙·고르기·합치기 순수 함수. 입력은 `DeviceState`(활동 신호)·`Returned`·조용히·고리·wake 기록. `common`, `data.api`, `presence.api`만 |
-| `prompt` | wake 그리기, `PROACTIVE_NOTE`, 시각 줄 간격에서 빼기, `MEMORY_NOTE`의 `remind_at` |
+| `prompt` | wake 그리기, `system.py`의 `PROACTIVE_RULE`(반려 절)과 원칙의 `<wake>`, `SystemSpec.proactive`, `PromptInputs.wake_notes`와 `state_key`, 시각 줄 간격에서 빼기, `MEMORY_SECTION`·`memory_save` 설명의 `remind_at` |
 | `control` | `submit_wake`, `accept_wake`, wake 작업의 Run 상한, 사용자가 이김, `_next_triggers`의 wake, `sent_from`에서 빼기 |
 | `memory` | 입력에서 wake를 문맥 줄로 |
 | `tool`(기억 도구) | `memory_save`의 `remind_at` |
@@ -404,7 +421,7 @@ in use, keep it to one short sentence. If the user wrote after a wake, answer th
 
 ## 17. 구현 단계
 
-1. **1부: wake의 길.** Data v17(`wake`, `wakes`·`wake_keys`, `begin_wake`), `submit_wake`·사용자가 이김·Run 상한, 모든 소비자의 wake 처리(Prompt·기억 작업·검색·압축·Web·CLI), `PROACTIVE_NOTE`, `try`와 `status`, 사건 흐름의 `origin`, 가짜 기기 스크립트. 이것만으로 `try`로 앱에서 볼 수 있다.
+1. **1부: wake의 길.** Data v17(`wake`, `wakes`·`wake_keys`, `begin_wake`), `submit_wake`·사용자가 이김·Run 상한, 모든 소비자의 wake 처리(Prompt·기억 작업·검색·압축·Web·CLI), 반려 절의 "Speaking first"와 원칙의 `<wake>`, `wake_notes`와 `state_key`, `try`와 `status`, 사건 흐름의 `origin`, 가짜 기기 스크립트. 이것만으로 `try`로 앱에서 볼 수 있다.
 2. **2부: 계기와 스케줄러.** `himari.proactive` 순수 함수, `Ticker`(정리 루프 옮김), 고리·돌아옴·알림·활동, `remind_at`(도구·기억 화면), `last_input_at`, `on_returned`, 설정 상태 줄, 실제 모델 확인.
 3. **앱:** §10(이 저장소에서, 1부와 함께 또는 뒤에).
 
