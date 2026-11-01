@@ -23,7 +23,7 @@ from himari.common import (
     ToolId,
     TrustedScope,
 )
-from himari.control.api import ControlError, ControlErrorCode, ModelCatalog
+from himari.control.api import ControlError, ControlErrorCode, DriveResult, ModelCatalog, StopSignal, TurnProgress
 from himari.data.api import ArtifactMutation, BindingAuthority, ConversationEvent, UserMessage, ViewMaker, WakeReason
 from himari.data.memory import InMemoryData, InMemoryStore
 from himari.data.sqlite import SqliteData, SqliteStore
@@ -119,6 +119,12 @@ class NoWakes:
 
     async def withdraw_wake(self, scope: TrustedScope, wake_id: str) -> None:
         pass
+
+    async def resume_wake(self, scope: TrustedScope, wake_id: str, *, stop: StopSignal | None = None,
+                          progress: TurnProgress | None = None, max_runs: int | None = None) -> DriveResult:
+        resume = getattr(self, "resume")  # the fake's own
+        result: DriveResult = await resume(scope, stop=stop, progress=progress, max_runs=max_runs)
+        return result
 
 
 def user(text: str) -> UserMessage:

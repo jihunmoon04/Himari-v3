@@ -154,6 +154,8 @@ class ControlErrorCode(Enum):
     # V3-P87 §6.1 (re-review P1): a wake opens only in a settled Conversation — no
     # waiting call, no unfinished tool group, no recovery needed, no unanswered trigger
     NOT_SETTLED = "not_settled"
+    # V3-P87 §13 (owner 2026-11-01): the Conversation's model did not pass the speaking-first check
+    MODEL_UNCHECKED = "model_unchecked"
 
 
 class ControlError(Exception):
@@ -310,6 +312,11 @@ class ConversationDriver(Protocol):
         """V3-P87 §4.1, §6.1: record a wake (``WakeStore.begin_wake``) under this
         Conversation's lock, after restart cleanup, only when it is settled —
         else NOT_SETTLED, nothing written. ``resume`` then answers it."""
+        ...
+
+    async def resume_wake(self, scope: TrustedScope, wake_id: str, *, stop: StopSignal | None = None,
+                          progress: TurnProgress | None = None, max_runs: int | None = None) -> DriveResult:
+        """V3-P87: ``resume`` for a wake's turn, its model checked again for speaking first."""
         ...
 
     async def withdraw_wake(self, scope: TrustedScope, wake_id: str) -> None:

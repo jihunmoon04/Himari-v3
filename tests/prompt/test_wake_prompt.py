@@ -43,7 +43,7 @@ def inputs(*events: ConversationEvent, notes: dict[int, Memory] | None = None,
            spec: SystemSpec | None = None) -> PromptInputs:
     return PromptInputs(instructions=BASE_INSTRUCTIONS, tool_catalog=(), events=events, tool_executions=(),
                         snapshot=None, state_basis=PersistedStateBasis(len(events), 0, (), (), ()), observations=(),
-                        request_options=RequestOptions("m"), trigger_refs=(), time_zone="Asia/Seoul",
+                        request_options=RequestOptions("m", speaks_first=True), trigger_refs=(), time_zone="Asia/Seoul",
                         wake_notes=notes or {}, system=spec)
 
 
@@ -117,3 +117,10 @@ def test_a_reminder_shows_on_its_loop_and_in_its_wake() -> None:
                                                  "remind_at": "2026-11-04T21:30+09:00"}, "late": True}
     loop_due = json.loads(wake_text(WAKE, {15: reminded})[6:-7])["reasons"][0]
     assert "remind_at" not in loop_due["loop"]  # a loop's check-in does not talk about its reminder
+
+
+def test_no_speaking_first_line_for_a_model_that_was_not_checked() -> None:
+    """V3-P87 §13 (owner 2026-11-01): the line follows the model too."""
+    unchecked = replace(inputs(spec=SystemSpec(companion=True, proactive=True)), request_options=RequestOptions("m"))
+    text = "\n".join(system_text(unchecked))
+    assert PROACTIVE_RULE not in text and "<wake> message" not in text
