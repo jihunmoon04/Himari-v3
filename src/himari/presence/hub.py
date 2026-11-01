@@ -325,13 +325,16 @@ class PresenceHub:
         signals (§2.1); one that was gone and becomes current has come back."""
         now = self._clock()
         devices = self._devices.get(principal, {})
+        expired = False
         for device in devices.values():
             if not device.gone and self._gone(principal, device, now):
                 self._forget_signals(principal, device)
             if device.after is not None and now - device.after[1] > SIGNAL_SECONDS:
                 device.after = None  # never became current while it was fresh
             if device.before is not None and now - device.before.ended_at > BEFORE_SECONDS:
-                device.before = None
+                device.before, expired = None, True  # the Devices screen showed it (re-review P2)
+        if expired:
+            self._changed(principal)
         connected = {device_id for device_id in devices if self._connected(principal, device_id, now)}
         inputs = {device_id: d.input_at for device_id, d in devices.items()
                   if d.input_at is not None and now - d.input_at <= CANDIDATE_SECONDS and not d.locked

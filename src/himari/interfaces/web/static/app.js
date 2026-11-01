@@ -218,6 +218,7 @@ const app = {
   activityAsked: new Set(), // ids not in the list that the list was read again for once (§3.3)
   events: null, // V3-P83 §8.1: the open event stream (EventSource), while the page shows
   signals: null, // V3-P88 §8.1: the Devices screen's (epoch, revision) of what the apps tell
+  quietTimer: 0, // V3-P88 §6.2: redraws the quiet line when it ends
   passLines: [], // V3-P85 §10.1: the open conversation's memory passes, as last read
   memoryTab: "notes", // V3-P85 §10.3: the Memory screen's tab
   eventsFailed: false, // it failed and has not said hello again: the activity is read every 5 s meanwhile
@@ -4240,7 +4241,10 @@ function signalsText(device) {
 }
 
 function quietState(until) {
-  const on = Boolean(until);
+  clearTimeout(app.quietTimer);
+  const left = until ? new Date(until).getTime() - Date.now() : 0;
+  const on = left > 0;
+  if (on) app.quietTimer = setTimeout(() => quietState(null), left + 500); // it ends by itself (re-review P2)
   $("devices-quiet-state").textContent = on
     ? `Quiet until ${new Date(until).toLocaleString([], { weekday: "short", hour: "2-digit", minute: "2-digit" })}: HIMARI does not speak first.`
     : "HIMARI may speak first. Turn on quiet when you do not want that.";

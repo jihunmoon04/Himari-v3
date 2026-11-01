@@ -280,3 +280,17 @@ def test_gone_clears_the_activity_before_too(hub: PresenceHub, clock: Clock) -> 
     hub.subscribe(ME, "d1")
     hub.signal(ME, "d1", 0, None, full(activity=CODING))
     assert hub.states(ME)["d1"].before is None
+
+
+def test_the_activity_before_expiring_is_told_to_the_web(hub: PresenceHub, clock: Clock) -> None:
+    """PR #149 re-review P2: GET /api/devices stops showing it, so the open screen must hear."""
+    hub.subscribe(ME, "d1")
+    hub.signal(ME, "d1", 0, None, full(activity=GAME))
+    clock.now += 60
+    hub.signal(ME, "d1", 0, None, full(activity=None))
+    shown = hub.signals_revision(ME)
+    for _ in range(int(BEFORE_SECONDS // 50) + 1):  # the app keeps signalling; ticks pass
+        clock.now += 50
+        hub.signal(ME, "d1", 0, None, full(activity=None))
+        hub.tick()
+    assert hub.states(ME)["d1"].before is None and hub.signals_revision(ME) > shown
