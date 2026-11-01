@@ -878,3 +878,35 @@ def test_a_retired_loop_brought_back_keeps_how_its_reminder_went() -> None:
         assert (await data.read_memory(ME, memory_id)).remind_state == "delivered"
 
     asyncio.run(scenario())
+
+
+def test_a_pass_neither_forgets_nor_retypes_a_loop_whose_reminder_waits() -> None:
+    """PR #157 re-review P2-2: refused while scheduled (or claimed); a rewrite as a loop goes on; told, as before."""
+    from himari.data.api import WakeKind, WakeReason, WakeStatus
+
+    async def scenario() -> None:
+        _, data = fresh()
+        remind = (datetime.now(UTC) - timedelta(minutes=5)).replace(second=0, microsecond=0)
+        memory_id = await reminded_loop(data, "Take the medicine.", remind)
+        last = await turn(data, SCOPE, "About the medicine.")
+        first = await live(data, SCOPE, last)
+        result = await data.apply_pass(first, [
+            PassItem(0, "{}", PassAction.FORGET, memory_id=memory_id, expected_revision=1),
+            PassItem(1, "{}", PassAction.UPDATE, memory_id=memory_id, expected_revision=1, category=PROJECT,
+                     text="Medicine."),
+            PassItem(2, "{}", PassAction.UPDATE, memory_id=memory_id, expected_revision=1, category=LOOP,
+                     text="Take the evening medicine."),
+        ], None, now=NOW)
+        assert result.outcomes == ("reminder_pending", "reminder_pending", "applied")
+        kept = await data.read_memory(ME, memory_id)
+        assert (kept.category, kept.text, kept.remind_state) == (LOOP, "Take the evening medicine.", "scheduled")
+        wake = await data.begin_wake(SCOPE, (WakeReason(WakeKind.REMINDER, memory_id=memory_id),), "d1",
+                                     reminders=(memory_id,))
+        await data.end_wake(ME, wake.payload.wake_id, WakeStatus.ANSWERED)  # type: ignore[union-attr]
+        last = await turn(data, SCOPE, "Took it.")
+        second = await live(data, SCOPE, last)
+        done = await data.apply_pass(second, [PassItem(0, "{}", PassAction.FORGET, memory_id=memory_id,
+                                                       expected_revision=kept.revision)], None, now=NOW)
+        assert done.outcomes == ("applied",)  # told: an automatic pass may forget it
+
+    asyncio.run(scenario())

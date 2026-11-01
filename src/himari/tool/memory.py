@@ -261,11 +261,22 @@ class MemorySave:
         else:
             same = _fold(text)
             for note in await self._store.list_memories(principal):
-                if note.category is category and _fold(note.text) == same:
-                    return ToolOutcome(ToolStatus.SUCCEEDED, _text(f"Already saved as m{note.memory_id}."),
-                                       raw_result={"memory": _note_view(note), "unchanged": True})
-            change = MemoryChange(MemoryChangeKind.SAVE, await self._store.allocate_memory_id(principal), category,
-                                  text, None, *_dated(due, valid, remind))
+                if note.category is not category or _fold(note.text) != same:
+                    continue
+                if remind is not None and (note.remind_at, note.remind_instant) != remind:
+                    # PR #157 re-review P2-1: the same loop asked to remind (again, or at another
+                    # time): its reminder is set on that note, its due kept unless given.
+                    previous = note
+                    named = "due" in args and (args["due"] is None or _given(args["due"]))
+                    its_due = (note.due_at, note.due_instant) if note.due_at and note.due_instant is not None else None
+                    change = MemoryChange(MemoryChangeKind.SAVE, note.memory_id, category, note.text, note.revision,
+                                          *_dated(due if named else its_due, None, remind))
+                    break
+                return ToolOutcome(ToolStatus.SUCCEEDED, _text(f"Already saved as m{note.memory_id}."),
+                                   raw_result={"memory": _note_view(note), "unchanged": True})
+            else:
+                change = MemoryChange(MemoryChangeKind.SAVE, await self._store.allocate_memory_id(principal), category,
+                                      text, None, *_dated(due, valid, remind))
         verb = "Saved" if previous is None else "Updated"
         written = {"id": change.memory_id, "category": category.value, "text": text,
                    "revision": 1 if previous is None else previous.revision + 1, "due": change.due_at,

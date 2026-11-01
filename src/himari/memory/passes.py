@@ -42,6 +42,7 @@ from himari.data.api import (
     UserMessage,
     parse_note_date,
     Wake,
+    PENDING_REMINDERS,
 )
 from himari.prompt.api import CurrentStateProjection, ModelInput, RequestOptions, UserTurn, json_data
 
@@ -421,6 +422,9 @@ def plan_items(answer: Mapping[str, Any], part: Part, notes: Sequence[Memory], *
                 continue
             if target.origin is MemoryOrigin.USER or target.user_approved_at is not None:
                 items.append(drop("user_owned"))
+                continue
+            if op == "forget" and target.remind_state in PENDING_REMINDERS:  # Data refuses it too (V3-P87)
+                items.append(drop("reminder_pending"))
                 continue
             if op == "forget":
                 items.append(PassItem(index, proposal, PassAction.FORGET, memory_id=target.memory_id,

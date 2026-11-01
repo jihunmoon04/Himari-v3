@@ -270,3 +270,13 @@ def test_a_wake_is_context_never_the_users_words() -> None:
     roles = [(m.role, m.text) for m in part.messages]
     assert roles[1] == ("context", "[HIMARI spoke first: loop due m15, focus coding]")
     assert part.user_chars == len("면접 준비해야 해")
+
+
+def test_a_pass_does_not_forget_a_loop_whose_reminder_waits() -> None:
+    """V3-P87 (PR #157 re-review P2-2): dropped here, and refused by Data as well."""
+    waiting = note(5, "Take the medicine.", MemoryCategory.LOOP, remind_state="scheduled")
+    told = note(6, "Call mom.", MemoryCategory.LOOP, remind_state="delivered")
+    items = plan_items(answer({"op": "forget", "id": "m5", "evidence": [1]},
+                              {"op": "forget", "id": "m6", "evidence": [1]}),
+                       PART, [waiting, told], kind=PassKind.LIVE, now=NOW, zone=SEOUL)
+    assert [(i.action, i.reason) for i in items] == [(PassAction.DROP, "reminder_pending"), (PassAction.FORGET, None)]

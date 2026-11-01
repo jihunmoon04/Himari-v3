@@ -61,6 +61,7 @@ from himari.data.api import (
     MAX_WAKE_REASONS,
     WakeKind,
     WakeReason,
+    PENDING_REMINDERS,
 )
 
 
@@ -450,6 +451,12 @@ def decide_item(item: PassItem, kind: PassKind, note: Memory | None,
             return "user_owned", None, item
         if item.expected_revision != note.revision:
             return "revision_conflict", None, item
+        if note.remind_state in PENDING_REMINDERS and (item.action is PassAction.FORGET
+                                                       or item.category is not MemoryCategory.LOOP):
+            # V3-P87 §5.3 (PR #157 re-review P2-2): a reminder the user asked for waits to be told; an
+            # automatic pass neither forgets its loop nor makes it something else (the user and the
+            # model's memory_forget still can)
+            return "reminder_pending", None, item
         if item.action is PassAction.FORGET:
             return "applied", PassAction.FORGET, item
         return "applied", PassAction.UPDATE, _check_item_fields(item)

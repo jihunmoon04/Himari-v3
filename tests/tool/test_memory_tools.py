@@ -329,3 +329,19 @@ def test_a_loop_takes_a_reminder_when_asked_at_a_time() -> None:
     cleared = run(saving(data), data, category="loop", text="Medicine.", replaces="m2", remind_at=None).memory_change
     assert cleared is not None and cleared.remind_at is None
     assert "remind_at only when the user asked to be reminded at a time" in MemorySave.definition.description
+
+
+def test_a_reminder_for_a_loop_saved_already_is_set_on_it() -> None:
+    """PR #157 re-review P2-1: the same loop again with a reminder is no "Already saved"."""
+    data = fresh()
+    asyncio.run(data.save_memory(ME, MemoryCategory.LOOP, "Take the medicine."))
+    stored = asyncio.run(data.read_memory(ME, 1))
+    asyncio.run(data.restore_memory(ME, replace(stored, due_at="2026-11-04", due_instant=NOW + timedelta(days=4)),
+                                    expected_revision=1))
+    outcome = run(saving(data), data, category="loop", text="take the medicine.", remind_at="2026-10-31T21:30+09:00")
+    change = outcome.memory_change
+    assert said(outcome) == "Updated m1 (loop)." and change is not None
+    assert (change.memory_id, change.expected_revision, change.text, change.due_at, change.remind_at) == (
+        1, 2, "Take the medicine.", "2026-11-04", "2026-10-31T21:30+09:00")  # its text and due kept
+    again = run(saving(data), data, category="loop", text="Take the medicine.")  # no reminder given: as before
+    assert said(again) == "Already saved as m1." and again.memory_change is None

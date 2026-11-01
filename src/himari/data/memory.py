@@ -1991,6 +1991,7 @@ class InMemoryData:
         for item in items:
             note = (self._store.memories.get((owner, item.memory_id))
                     if item.memory_id is not None and item.action in (PassAction.UPDATE, PassAction.FORGET) else None)
+            note = None if note is None else self._reminded(owner, note)  # with its reminder's state (as SQLite)
             outcome, action, normal = rules.decide_item(item, mp.kind, note, self._memory_count(owner))
             target: str | None = None
             previous: str | None = None
