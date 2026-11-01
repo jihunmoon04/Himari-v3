@@ -662,6 +662,17 @@ def delete_notice_view(notice: DeleteNotice) -> dict[str, Any]:
             "trash_days": notice.trash_days, "memory_count": notice.memories, "episode_count": notice.episodes}
 
 
+def _plain(value: Any) -> Any:
+    """Times as the API writes them, in nested dicts and lists (V3-P87 status)."""
+    if isinstance(value, datetime):
+        return _time(value)
+    if isinstance(value, dict):
+        return {k: _plain(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_plain(v) for v in value]
+    return value
+
+
 def wake_reason_view(reason: WakeReason) -> dict[str, Any]:
     out: dict[str, Any] = {"kind": reason.kind.value}
     for name in ("memory_id", "away_minutes", "via", "activity", "minutes"):
@@ -1920,7 +1931,8 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
 
     @app.get("/api/proactive")
     async def read_proactive(request: Request, who: PrincipalId = Depends(principal)) -> dict[str, Any]:
-        return himari(request).proactive_status(who)
+        status: dict[str, Any] = _plain(await himari(request).proactive_status(who))
+        return status
 
     @app.post("/api/proactive/try", status_code=202)
     async def try_proactive(request: Request, who: PrincipalId = Depends(principal)) -> dict[str, Any]:

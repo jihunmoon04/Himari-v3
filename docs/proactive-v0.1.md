@@ -528,3 +528,21 @@ P1·P2 해결 확인. 문서 정합성 둘과 구현 주의 하나:
 - **P2-1 재시작 통합 테스트:** `tests/integration/test_wake_restart.py`(메모리·SQLite 둘 다). wake 턴의 묶음에서 첫 호출은 성공, 둘째는 claim 전에 죽고, 셋째는 시작 안 함 → 재시작 → `settle_cut_wakes`: 첫 호출 `SUCCEEDED` 그대로(다시 실행 안 함), 둘째·셋째 `CANCELLED`(`CUT_REASON`), 모델 호출 없음, wake `failed`, 새 wake가 열리고 셋째는 끝까지 실행되지 않음. `REQUIRE_USER`의 결과 모르는 호출이면 다시 실행하지 않고 새 wake는 `NOT_SETTLED`.
   - 이 테스트가 찾은 것: 닫힌 묶음은 모델이 아직 답하지 않은 계기(`CompletedGroupRef`)라 `accept_wake`가 새 wake를 계속 막았다(사용자가 말할 때까지). §6.1의 "답하지 않은 계기"는 사용자 메시지나 wake이고 §13은 "묶음이 닫힌 뒤에 새 wake"이므로, **끝난 wake의 턴이 남긴 묶음**(재시작으로 닫힘, Run 상한에서 멈춤)은 막지 않는다 — 새 wake 턴이 그 결과를 함께 본다. 사용자의 턴이 남긴 묶음(Run 사이에서 멈춤 등)은 사용자의 일이라 계속 막는다(`Driver._left_by_a_wake`: 마지막 사용자 메시지·wake 이벤트가 wake이고 그 기록이 `opened`가 아님).
 - **P2-2 `begin_wake` 인자:** `rules.check_wake`가 두 백엔드에서 똑같이 거절(`INVALID_ARGUMENT`, 아무것도 쓰지 않음): 같은 열쇠 두 번·빈 열쇠, `reminders`가 REMINDER 이유들의 노트와 정확히 같지 않음(이유 없는 알림, 알림을 싣지 않은 REMINDER 이유, 두 번, 다른 노트, 같은 노트의 이유 두 번, 노트 없는 REMINDER 이유).
+
+### 19.3 2부의 첫 PR(2a): 계기와 스케줄러 (`feat/proactive-part2`)
+
+알림(§5.3의 `remind_at`·도구·기억 화면·늦은 알림), 설정 화면의 상태 줄, 실제 모델 확인은 다음 PR(2b)에서 한다. 규칙 함수는 알림의 예외를 이미 안다.
+
+- **`himari.proactive`(새, 계층 3, `common`·`data`·`presence`만):** `ProactiveSettings`(bootstrap에서 옮김), `Situation`(시계와 읽은 상태) → `decide(situation, taken)` → `Decision`(이유·열쇠·알림·`expired` 열쇠·`blocked`·`held`·`next_at`).
+  - 고리: `loop_moment` — 시각이 있으면 +1시간, 날짜만이면 그날 18:00(날짜의 `due_instant`는 그 시간대의 하루 끝이라 다음 자정 − 6시간). 24시간 창, 넘으면 `expired` 열쇠. 열쇠 `loop:m<번호>:<due_at>`.
+  - 돌아옴: 4시간 이상, 기록 뒤 20초~10분, 돌아온 기기 = 지금 기기, 자리 비움 시작 뒤(그리고 돌아온 뒤 20초 안) 사용자 메시지 없음. 마지막 입력을 모르면(처음 쓰는 기기) 인사하지 않음. 열쇠 `return:<기기>:<분>`.
+  - 활동: FOCUS(`coding`·`document`·`design`·`video`, 30분), GAME_ENDED(30분 이상, 끝난 지 10분 안). 열쇠의 시작·끝 시각은 길이에서 거꾸로 세므로 틱마다 1초쯤 흔들려 분 경계를 넘을 수 있다 → 앞뒤 1분 열쇠도 함께 확인(`aliases`).
+  - 규칙 순서: 지금 기기 없음 → 작업 중 → (여기까지 알림도 막힘) → 조용히 → 대화 중(10분) → 답 없는 wake → 조용한 시간(기기 시간대, 자정 넘김) → 간격 → 하루 상한(기기 시간대의 하루, 알림만인 wake는 안 셈). **운영자의 `try`는 간격과 하루 상한에 세지 않는다**(시험이라).
+  - 합치기: 알림 → 고리(말할 시각 순) → 활동 → 돌아옴, 4개까지, 나머지는 `held`(다음 틱).
+- **`bootstrap/schedule.py` `Ticker`:** 이름 붙인 주기 작업. `purge`(옛 정리 루프, 같은 주기, 시작할 때 바로 한 번), `proactive`(30초, 돌아옴 기록 뒤 21초에 한 번 더 `poke`). 한 작업의 예외는 로그만 남고 다른 작업과 다음 차례는 돈다.
+- **마지막 입력(`Inputs`):** presence의 `on_input`(신호마다, 벽시계로 바꾼 입력 시각과 잠김 여부)을 받아, 이 프로세스 안에서는 모두 기억하고 Data(`devices.last_input_at`, 뒤로 가지 않음)에는 10분에 한 번, 잠기면 바로 쓴다. 반려 기능이 켜져 있으면 먼저 말 걸기가 꺼져 있어도 쓴다.
+- **돌아옴(`on_returned`):** presence가 돌아옴 기록을 만들 때(그 신호의 입력보다 먼저) 부른다. 스케줄러가 그때까지 아는 가장 늦은 입력(이 프로세스의 것 + Data의 것)으로 자리 비움 길이를 잰다. 서버가 시작된 뒤 처음 듣는 주체면 Data를 먼저 읽고 잰다(그 읽기는 이 신호의 입력이 쓰이기 전). 그래서 재시작 뒤의 `reconnect`는 짧게 재진다.
+- **스케줄러(`ProactiveScheduler`):** 지금 기기가 있는 주체마다 `Situation`을 읽는다(최근 대화, 그 끝 40개 이벤트로 "답 없는 wake", 기억의 고리, 26시간의 wake, 조용히, 마지막 사용자 메시지, 작업 중). 후보의 열쇠를 한 번에 물어(`taken_keys`) `decide`, `expired`를 쓰고(`expire_keys`), 이유가 있으면 `submit_wake`. `BUSY`·`NOT_SETTLED`·`CLOSED`·열쇠 경합은 그 틱을 건너뛰고 상태에 남긴다.
+- **상태:** `GET /api/proactive`와 `himari proactive status`에 오늘 횟수/상한, 마지막 wake, 다음 고리 시각, 마지막 판단(결과, 막힌 이유로 미룬 이유들)을 더함.
+- **재시작(§4.4와 다름):** 이어 가지 않는다. 시작할 때는 기기가 아직 다시 붙지 않아 §6.1(지금 기기)을 통과할 수 없으므로 설계의 "이어 간다" 갈래는 열리지 않는다. 대신 **아무 말도 하기 전에 끊긴 wake**(wake 뒤에 이벤트가 없음)는 `failed`로 적고 열쇠를 돌려준다(`release_keys`). 계기가 아직 창 안이면 스케줄러가 새 wake로 다시 말한다. 한마디라도 한 wake(도구 묶음 포함)는 열쇠를 지킨다.
+- **Data(스키마 변경 없음, v17 그대로):** `wakes_since`, `taken_keys`, `expire_keys`(`wake_id` 없이), `release_keys`, `record_input`·`read_inputs`, `last_user_message_at`. 두 백엔드 같음.

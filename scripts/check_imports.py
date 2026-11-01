@@ -41,6 +41,7 @@ LAYERS = {
     "imaging": 2,  # model copies of images (V3-P67): the sandbox and Data's file types, nothing else
     "documents": 2,  # reading documents (V3-P70): the sandbox and Data's file types, nothing else
     "environment": 3,
+    "proactive": 3,  # when HIMARI speaks first (V3-P87 §7): pure rules over Data's and Presence's types
     "mcp": 3,  # a connector plugin: provides Tools through tool.api only, like an Environment
     "prompt": 4,
     "provider": 5,
@@ -57,6 +58,7 @@ ONLY_FROM = {
     "documents": frozenset({"common", "sandbox", "data"}),
     "runner": frozenset({"common", "sandbox"}),
     "presence": frozenset({"common", "data"}),
+    "proactive": frozenset({"common", "data", "presence"}),
     "memory": frozenset({"common", "data", "prompt", "provider"}),
 }
 # Packages that may import another package's private modules (rule 7).

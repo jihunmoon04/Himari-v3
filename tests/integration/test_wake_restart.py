@@ -115,3 +115,17 @@ def test_a_group_an_ended_wake_left_does_not_keep_the_next_one_out() -> None:
     assert asyncio.run(rt.driver.resume(SCOPE, max_runs=3)).state is DriveState.COMPLETED
     assert len(look.invocations) == 3
 
+
+
+def test_a_wake_that_said_something_keeps_its_keys() -> None:
+    """Part 2: only a wake cut before any word gives its keys back."""
+    first = tool("first")
+    first.crash_next = True
+    rt, _ = runtime([calls(("fake/first", {}))], env_tools=[first])
+    rt.store.activate_environment(SCOPE, FAKE, WorkspaceId("ws_1"))
+    asyncio.run(rt.driver.accept_wake(SCOPE, TRY, "d1", keys=("loop:m1:x",)))
+    with pytest.raises(SimulatedCrash):
+        asyncio.run(rt.driver.resume(SCOPE, max_runs=3))
+    rt2, _ = runtime([], store=restart(rt.store), env_tools=[first])
+    assert settle(rt2) == 1
+    assert asyncio.run(rt2.data.taken_keys(SCOPE.principal_id, ("loop:m1:x",))) == frozenset({"loop:m1:x"})

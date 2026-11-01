@@ -186,3 +186,34 @@ def test_keys_and_reminders_are_checked_alike_in_both_backends() -> None:
     assert reminder(store, memory_id) == ("scheduled", None, 0)
     asyncio.run(data.begin_wake(SCOPE, reminded, "d1", keys=("k",), reminders=(memory_id,)))  # the right shape
     assert reminder(store, memory_id)[0] == "claimed"
+
+
+def test_part_two_reads_alike_in_both_backends() -> None:
+    """V3-P87 part 2: the recent wakes, the keys taken or expired, the latest user
+    message and each device's last input (never moved back)."""
+    from datetime import UTC, datetime, timedelta
+
+    store = new_store()
+    data, _ = opened(store)
+    before = datetime.now(UTC) - timedelta(seconds=1)
+    assert asyncio.run(data.last_user_message_at(SCOPE.principal_id)) is None
+    first = asyncio.run(data.begin_wake(SCOPE, TRY, "d1", keys=("a",))).payload.wake_id  # type: ignore[union-attr]
+    assert [w.wake_id for w in asyncio.run(data.wakes_since(SCOPE.principal_id, before))] == [first]
+    assert asyncio.run(data.wakes_since(SCOPE.principal_id, datetime.now(UTC) + timedelta(seconds=1))) == ()
+    asyncio.run(data.expire_keys(SCOPE.principal_id, ("b", "a")))
+    assert asyncio.run(data.taken_keys(SCOPE.principal_id, ("a", "b", "c"))) == frozenset({"a", "b"})
+    assert asyncio.run(data.taken_keys(SCOPE.principal_id, ())) == frozenset()
+    with pytest.raises(DataError):  # an expired key is taken
+        asyncio.run(data.begin_wake(SCOPE, TRY, "d1", keys=("b",)))
+    asyncio.run(data.end_wake(SCOPE.principal_id, first, WakeStatus.ANSWERED))
+    asyncio.run(data.append_event(SCOPE, user("hi")))
+    said = asyncio.run(data.last_user_message_at(SCOPE.principal_id))
+    assert said is not None and said >= before
+    device = asyncio.run(data.add_device(SCOPE.principal_id, "PC", b"p" * 32, datetime.now(UTC) + timedelta(hours=1)))
+    at = datetime(2026, 11, 4, 9, 0, tzinfo=UTC)
+    asyncio.run(data.record_input(SCOPE.principal_id, device.device_id, at))
+    asyncio.run(data.record_input(SCOPE.principal_id, device.device_id, at - timedelta(hours=1)))
+    asyncio.run(data.record_input(SCOPE.principal_id, "nobody", at))
+    assert asyncio.run(data.read_inputs(SCOPE.principal_id)) == {device.device_id: at}
+    asyncio.run(data.revoke_device(SCOPE.principal_id, device.device_id))
+    assert asyncio.run(data.read_inputs(SCOPE.principal_id)) == {}

@@ -297,7 +297,7 @@ def self_test() -> int:
     import uvicorn
 
     from himari.bootstrap.application import Application
-    from himari.bootstrap.proactive import ProactiveSettings
+    from himari.proactive import ProactiveSettings
     from himari.common import PrincipalId, TextBlock
     from himari.interfaces.web.app import create_app
     from himari.interfaces.web.config import WebConfig

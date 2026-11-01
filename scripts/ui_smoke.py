@@ -72,7 +72,7 @@ from playwright.sync_api import expect, sync_playwright  # noqa: E402
 
 from himari.bootstrap.application import Application  # noqa: E402
 from himari.bootstrap.operator import OPERATOR  # noqa: E402
-from himari.bootstrap.proactive import ProactiveSettings  # noqa: E402
+from himari.proactive import ProactiveSettings  # noqa: E402
 from himari.common import (  # noqa: E402
     ASK_USER_TOOL_ID, CallId, ConversationId, PrincipalId, TextBlock, ToolCall, ToolId, TrustedScope,
 )
