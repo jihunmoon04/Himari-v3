@@ -204,8 +204,10 @@ def main():
         with open(path, "rb") as fh:
             sources[name] = hashlib.sha256(fh.read()).hexdigest()
         known = old.get("sources", {}).get(name)
-        if known and known != sources[name]:
-            sys.exit(f"stretch: {name} is not the sheet the kept fits were found on; run with --refit")
+        if known != sources[name] and (fits["upper"] or fits["legs"]):
+            # Kept fits without a recorded hash (older metadata) are not trusted either.
+            sys.exit(f"stretch: {name} is not the sheet the kept fits were found on"
+                     f"{'' if known else ' (none recorded)'}; run with --refit")
 
     L = rest_layers(a.aseprite)
     base, tail, halo, body = L["base"], L["hair tail"], L["halo"], L["body"]

@@ -104,7 +104,7 @@ aseprite -b --script-param in=happy.png --script-param neutral=neutral.png --scr
 - **처음 만들기**: `../tools/sources.lua`가 `idle-test.aseprite`, `neutral-face.aseprite`, `moods/`에서 두 원본을 한 번 만들었다. 그대로 다시 돌리면 고친 `faces.aseprite`를 덮어쓴다. 숨쉬기를 바꿀 때는 `idle-test.lua`를 고쳐 돌린 뒤 `--script-param only=body`로 `body.aseprite`만 다시 만들고, 이어서 `legs.lua`(아래 "다리 교체")와 `clips.lua`를 돌린다.
 - **neutral 눈·입 다시 그림**(소유자 검토 2026-10-31): `../tools/neutral-variants.lua`가 `faces.aseprite`의 neutral 변형을 고쳤다. 반쯤 감은 눈은 뜬 눈의 속눈썹처럼 오른쪽으로 내려가고, 감은 눈은 선 위의 갈색 채움을 없앴다. 두 경우 모두 바깥쪽 속눈썹 끝을 눈마다 2px 줄였다. 말하는 입은 다문 입 선의 두 끝 (112,65), (116,67)을 그대로 두고 가운데가 벌어진다. 그래서 `frames/`의 낱장과는 이제 다르다.
 - **내보내기**: 원본을 고친 뒤 `../tools/export.lua`를 돌린다(`pixel/`에서 실행).
-  - 같은 그림 조각은 시트에 한 번만 넣는다(지금 78조각, 1002×1674).
+  - 같은 그림 조각은 시트에 한 번만 넣는다(지금 86조각, 1002×2086).
   - UI 테스트가 비교할 기준 그림 12장(`idle-1-neutral`, `idle-2-happy`, `idle-1-neutral-closed-wide`, `sleep-4-neutral-closed`, `yawn-2-happy`, `glance-2-sad-left`, `ahoge-2-neutral`, `twinkle-3-neutral`, `stretch-4-sad-closed`, `stretch-5-worried`, `stretch-8-happy`, `stretch-9-neutral`)도 함께 쓴다.
   - 다음 중 하나라도 어기면 아무것도 쓰지 않고 실패한다: 색 인덱스 모드와 `himari-32.gpl` 팔레트, 모든 몸 프레임의 `@face` 점, 모든 동작의 첫 프레임과 단발 동작의 마지막 프레임 = idle 첫 프레임, 반복 동작의 `loopFrom`, 표정 8종.
 
