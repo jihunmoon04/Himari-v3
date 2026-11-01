@@ -26,6 +26,7 @@ public partial class MainWindow
     }
     private void CleanupBubblePresentation()
     {
+        ReplyProgress.Reset();
         copiedTimer.Stop();
         if (bubblePresentationChanged is null) return;
         StatusTextDescriptor.RemoveValueChanged(Status, bubblePresentationChanged);
@@ -46,7 +47,12 @@ public partial class MainWindow
         StatusActionText.Text = notice.Action == BubbleStatusAction.Settings ? "연결 설정" : "확인";
         System.Windows.Automation.AutomationProperties.SetName(StatusActionButton, StatusActionText.Text);
         bool streaming = StopButton.Visibility == Visibility.Visible;
-        ReplyStatus.Text = replyStopRequested ? "답변 중지 요청을 보냈어요." : streaming ? "답변 중이에요…" : "";
+        if (ReplyPreparing) ReplyProgress.Show($"{replyProgressConversation}:{replyProgressJob}:{replyProgressRun}", replyProgressTool, connected, replyStopRequested);
+        else ReplyProgress.Reset();
+        Message.Visibility = ReplyPreparing || replyExpanded ? Visibility.Collapsed : Visibility.Visible;
+        ExpandedReply.Visibility = !ReplyPreparing && replyExpanded ? Visibility.Visible : Visibility.Collapsed;
+        ExpandButton.Visibility = ReplyPreparing ? Visibility.Collapsed : Visibility.Visible;
+        ReplyStatus.Text = ReplyPreparing ? "" : replyStopRequested ? "답변 중지 요청을 보냈어요." : streaming ? "답변 중이에요…" : "";
         ReplyStatus.Visibility = ReplyStatus.Text.Length == 0 ? Visibility.Collapsed : Visibility.Visible;
         CopyReplyButton.Visibility = streaming ? Visibility.Collapsed : Visibility.Visible;
         CopyReplyButton.IsEnabled = !string.IsNullOrWhiteSpace(Message.Text);

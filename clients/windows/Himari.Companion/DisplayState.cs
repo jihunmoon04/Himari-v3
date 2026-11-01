@@ -25,11 +25,16 @@ internal sealed class LiveDisplayState
     private readonly StringBuilder text = new();
     private string? run;
     internal string Text => text.ToString();
+    internal string? RunId => run;
+    internal string? LastTool { get; private set; }
     internal string Mood { get; private set; } = "neutral";
-    internal void Apply(string type, string? runId, string chunk, JsonElement marks)
+    internal void Apply(string type, string? runId, string chunk, JsonElement marks, JsonElement tools = default)
     {
-        if (type == "snapshot" || runId != run) { text.Clear(); run = runId; Mood = "neutral"; }
+        if (type == "snapshot" || runId != run) { text.Clear(); run = runId; Mood = "neutral"; LastTool = null; }
         text.Append(chunk);
+        if (tools.ValueKind == JsonValueKind.Array)
+            foreach (var tool in tools.EnumerateArray())
+                if (tool.ValueKind == JsonValueKind.String) LastTool = tool.GetString();
         Mood = DisplayState.Mood(marks, Text.EnumerateRunes().Count(), Mood);
     }
 }

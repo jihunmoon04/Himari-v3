@@ -211,6 +211,7 @@ public partial class MainWindow
     private void OpenBubble() => ShowAssistantBubble(null);
     private void CloseBubble()
     {
+        EndReplyProgress();
         bubbleTimer.Stop(); assistantBubbleCloseDue = false; BubblePanel.Visibility = Visibility.Collapsed;
         ReturnFromMove(); ArrangeBubbles(); UpdateBubbleBounds();
         if (userBubbleCloseDue && UserBubble.Visibility == Visibility.Visible) RetryExpiry(userBubbleTimer);

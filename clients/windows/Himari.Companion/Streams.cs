@@ -102,6 +102,8 @@ public partial class MainWindow
     {
         foreach (var stream in liveStreams.Values) { stream.Cancel(); stream.Dispose(); }
         liveStreams.Clear(); liveDisplays.Clear();
+        EndReplyProgress(closeEmpty: true);
+        StopButton.Visibility = Visibility.Collapsed;
     }
     private void StartOwnJobs(JsonElement activity, ServerClient local, CancellationToken ct)
     {
@@ -129,11 +131,16 @@ public partial class MainWindow
     {
         if (liveStreams.ContainsKey(id)) return;
         var source = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        liveStreams[id] = source; _ = LiveLoop(id, local, source.Token, expectedJob);
+        liveStreams[id] = source;
+        BeginReplyProgress(id, expectedJob);
+        _ = LiveLoop(id, local, source.Token, expectedJob);
     }
     private async Task LiveLoop(string id, ServerClient local, CancellationToken ct, string? expectedJob)
     {
         var display = new LiveDisplayState(); int delay = 1; bool opened = false; string? liveJob = expectedJob;
+        // Cache identity even before the first SSE frame, so returning to this
+        // conversation can restore preparation without opening another stream.
+        if (liveJob is not null) liveDisplays[id] = (liveJob, display);
         try
         {
             while (!ct.IsCancellationRequested)
@@ -147,15 +154,16 @@ public partial class MainWindow
                         if (type is "snapshot" or "delta")
                         {
                             liveJob = Str(data, "job_id");
-                            display.Apply(type, Str(data, "run_id"), Str(data, "text") ?? "", Prop(data, "moods"));
+                            display.Apply(type, Str(data, "run_id"), Str(data, "text") ?? "", Prop(data, "moods"), Prop(data, "tools"));
                             ReceiveMoves(id, Str(data, "job_id"), Str(data, "run_id"), type == "snapshot", Prop(data, "moves"), display.Text.EnumerateRunes().Count());
-                            liveDisplays[id] = (display.Text, display.Mood);
+                            liveDisplays[id] = (liveJob, display);
                             if (id == currentConversation)
                             {
+                                UpdateReplyProgress(id, liveJob, display);
                                 if (!opened && display.Text.Length > 0) { OpenReplyBubble(id, liveJob); opened = true; }
                                 Message.Text = display.Text;
-                                SetMood(display.Mood);
-                                SetTalking(true);
+                                SetMood(display.Text.Length == 0 ? "thinking" : display.Mood);
+                                SetTalking(display.Text.Length > 0);
                                 StopButton.Visibility = Visibility.Visible;
                                 Status.Text = "답변 중…";
                             }
@@ -188,7 +196,12 @@ public partial class MainWindow
             if (liveStreams.TryGetValue(id, out var source) && source.Token == ct && !ct.IsCancellationRequested)
             {
                 liveStreams.Remove(id); liveDisplays.Remove(id); source.Dispose();
-                if (currentConversation == id) { SetTalking(false); StopButton.Visibility = Visibility.Collapsed; SetMood("neutral"); _ = ScheduleBubbleAfterMoves(id); }
+                if (currentConversation == id)
+                {
+                    bool hadPreparation = ReplyPreparing;
+                    EndReplyProgress(closeEmpty: true); SetTalking(false); StopButton.Visibility = Visibility.Collapsed; SetMood("neutral");
+                    if (!hadPreparation || display.Text.Length > 0) _ = ScheduleBubbleAfterMoves(id);
+                }
                 if (connected && currentConversation == id) Status.Text = JobOrigin.Status(wakeElsewhere, currentConversation, "연결됨");
                 if (currentConversation == id && connection is not null)
                     try { await ReadConversation(id, connection.Token); } catch (Exception ex) { ShowError(ex); }
