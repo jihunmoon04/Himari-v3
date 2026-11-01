@@ -8,6 +8,7 @@
         <Grid><Grid.RowDefinitions><RowDefinition Height="*"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
           <Grid x:Name="ReplyContent"><local:MarkdownView x:Name="Message" FontSize="14" Foreground="{StaticResource BubbleInk}"/>
             <ContentControl x:Name="ExpandedReply" Visibility="Collapsed"/>
+            <local:ReplyProgressView x:Name="ReplyProgress" Visibility="Collapsed" TextElement.Foreground="{StaticResource BubbleMuted}"/>
           </Grid>
           <TextBlock x:Name="ReplyStatus" Grid.Row="1" Style="{StaticResource BubbleStatusText}" Margin="0,8,0,0" Visibility="Collapsed"/>
           <Border x:Name="ReplyToolbar" Grid.Row="2" Margin="-8,8,-8,-4" Padding="6,4" BorderBrush="{StaticResource BubbleSeparator}" BorderThickness="0,1,0,0">

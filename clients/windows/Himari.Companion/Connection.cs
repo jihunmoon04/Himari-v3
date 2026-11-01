@@ -255,11 +255,15 @@ public partial class MainWindow
             !pendingReplies.TryGetValue(id, out var awaited) || !awaited.Server.SameDevice(local) ||
             Str(Prop(detail, "job"), "job_id") != awaited.Job)) return;
         StopButton.Visibility = ConversationView.IsRunning(detail) ? Visibility.Visible : Visibility.Collapsed;
+        if (!ConversationView.IsRunning(detail) || question is not null) EndReplyProgress(closeEmpty: true);
         if (connected) Status.Text = JobOrigin.Status(wakeElsewhere, currentConversation,
             ConversationView.IsRunning(detail) ? "이 대화는 작업 중입니다. 새 대화를 열 수 있습니다." : "연결됨");
         if (question is not null) { awaitingAnswer = true; Message.Text = question; OpenReplyBubble(id, Str(Prop(detail, "job"), "job_id")); OpenComposer(); if (IsChatWindow(GetForegroundWindow())) { dialogueHost?.Activate(); Input.Focus(); } return; }
         awaitingAnswer = false;
         if (liveDisplays.TryGetValue(id, out var display)) { Message.Text = display.Text; SetMood(display.Mood); return; }
+        // Until Live arrives, a history refresh must not fill the pending reply
+        // with an older final (or the empty-conversation greeting).
+        if (ReplyPreparing) return;
         var sequence = Prop(Prop(detail, "conversation"), "last_sequence");
         int lastSequence = sequence.ValueKind == JsonValueKind.Number && sequence.TryGetInt32(out int n) ? n : 0;
         int after = Math.Max(0, lastSequence - 100), finalSequence = 0; string? lastText = null; string lastMood = "neutral";
@@ -497,7 +501,7 @@ public partial class MainWindow
             if (unsent is null && context.CanClear(client, currentConversation, connected, inputRevision)) Input.Clear();
             if (context.IsCurrent(client, currentConversation, connected)) ShowSentMessage(text);
             if (context.IsCurrent(client, currentConversation, connected) && !liveDisplays.ContainsKey(context.ConversationId) && (jobId is null || moveLifetime.CanStart(jobId)))
-            { Status.Text = screenFailed ? "화면을 보내지 못해 글만 보냈습니다." : "답변을 기다리는 중…"; SetMood("thinking"); }
+            { Status.Text = screenFailed ? "화면을 보내지 못해 글만 보냈습니다." : "답변을 기다리는 중…"; SetMood("thinking"); BeginReplyProgress(context.ConversationId, jobId); }
             if (context.IsCurrent(client, currentConversation, connected) && jobId is not null &&
                 pendingReplies.TryGetValue(context.ConversationId, out var pendingReply) && pendingReply.Job == jobId)
             {

@@ -145,7 +145,11 @@ public partial class MainWindow : Window
         ArrangeBubbles(); UpdateSceneBounds(); ExpireBubbles();
     }
     private void ConversationMenuClick(object sender, RoutedEventArgs e) { OpenComposer(); ChatTools.Visibility = Visibility.Visible; ChatTools.IsExpanded = true; }
-    private void CloseBubbleClick(object sender, RoutedEventArgs e) { ClearStack(keepUnsent: true); CloseBubble(); HideUserBubble(); }
+    private void CloseBubbleClick(object sender, RoutedEventArgs e)
+    {
+        if (ReplyPreparing) dismissedReplyProgress = $"{replyProgressConversation}:{replyProgressJob}";
+        ClearStack(keepUnsent: true); CloseBubble(); HideUserBubble();
+    }
     private void FlipClick(object sender, RoutedEventArgs e) => settings.FacingLeft.IsChecked = FlipMenu.IsChecked;
     private void ChatClick(object sender, RoutedEventArgs e) => OpenChat();
     private void SettingsClick(object sender, RoutedEventArgs e) => ShowSettings();
