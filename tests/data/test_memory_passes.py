@@ -732,7 +732,7 @@ def test_the_status_counts_todays_tokens_the_last_applied_pass_and_recent_troubl
         summary = await data.pass_summary(ME, day_start=since, since=since)
         assert summary.charged_today == 300 and summary.failed == 2
         assert [p.status for p in summary.skipped] == [PassStatus.SKIPPED]
-        assert summary.last_applied_at is not None and summary.last_applied_at >= since
+        assert summary.last_applied_at == NOW  # the applied pass's own time, not the real clock
 
     asyncio.run(scenario())
 
