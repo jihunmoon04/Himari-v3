@@ -123,7 +123,7 @@ def system_text(inputs: PromptInputs) -> tuple[str, ...]:
     persona = told_persona(inputs)
     out = list(inputs.instructions)
     if spec is not None:
-        proactive = spec.proactive and spec.companion
+        proactive = spec.proactive and spec.companion and inputs.request_options.speaks_first
         out.append(principle_section(persona, proactive))
         out.append(messages_section(spec))
         out.append(tools_section(spec))

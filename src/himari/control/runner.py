@@ -232,9 +232,10 @@ class BackgroundRunner:
         self._tell(lambda listener: listener.accepted(scope))
         key = self._key(scope)
         self._wake_jobs[key] = event.payload.wake_id
-        return self._start(scope, lambda s, stop, progress: self._driver.resume(s, stop=stop, progress=progress,
-                                                                              max_runs=WAKE_RUNS),
-                           "wake", MessageOrigin(OriginKind.WAKE, device_id), wake_id=event.payload.wake_id)
+        wake_id = event.payload.wake_id
+        return self._start(scope, lambda s, stop, progress: self._driver.resume_wake(
+            s, wake_id, stop=stop, progress=progress, max_runs=WAKE_RUNS),
+                           "wake", MessageOrigin(OriginKind.WAKE, device_id), wake_id=wake_id)
 
     def _check_open(self, scope: TrustedScope) -> None:
         if scope.conversation_id in self._closed:

@@ -129,8 +129,10 @@ def encode_output(output: NormalizedModelOutput) -> bytes:
 class ScriptedAdapter:
     def __init__(self, script: Iterable[ScriptStep] = (), *, streaming: bool = False,
                  piece_delay: float = 0.0, first_delay: float = 0.0, image_input: bool = False,
-                 screen_points: bool = False, memory_passes: bool = False) -> None:
+                 screen_points: bool = False, memory_passes: bool = False, speaks_first: bool = True) -> None:
+        """``speaks_first``: on, as the wake tests expect (V3-P87); off to see a model refused."""
         self._script = list(script)
+        self._speaks_first = speaks_first
         self._streaming = streaming
         self._image_input = image_input
         self._screen_points = screen_points
@@ -150,7 +152,7 @@ class ScriptedAdapter:
     def describe_capabilities(self, model_id: str) -> ProviderCapabilities:
         return ProviderCapabilities(model_id=model_id, parallel_tool_calls=True, streaming=self._streaming,
                                     image_input=self._image_input, screen_points=self._screen_points,
-                                    memory_passes=self._memory_passes)
+                                    memory_passes=self._memory_passes, speaks_first=self._speaks_first)
 
     def prepare_native_request(self, model_input: ModelInput) -> NativePreparedRequest:
         body = json.dumps(

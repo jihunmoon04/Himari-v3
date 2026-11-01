@@ -131,6 +131,10 @@ class WakeDriver:
     async def withdraw_wake(self, scope: TrustedScope, wake_id: str) -> None:
         self.withdrawn.append(wake_id)
 
+    async def resume_wake(self, scope: TrustedScope, wake_id: str, *, stop: StopSignal | None = None,
+                          progress: TurnProgress | None = None, max_runs: int | None = None) -> DriveResult:
+        return await self.resume(scope, stop=stop, progress=progress, max_runs=max_runs)
+
 
 def test_the_users_message_wins_over_a_wake() -> None:
     driver = WakeDriver()

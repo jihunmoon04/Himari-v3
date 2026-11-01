@@ -1023,6 +1023,7 @@ PROACTIVE_REFUSALS = {
     "busy": "A conversation is working; try again when it is done.",
     "closed": "The most recent conversation is being moved to the trash.",
     "not_settled": "The most recent conversation waits for an answer or a recovery first.",
+    "model_unchecked": "The most recent conversation's model was not checked for speaking first; choose another.",
 }
 
 

@@ -103,7 +103,7 @@ def model_input(scene: Scene, model: str):  # type: ignore[no-untyped-def]
                             now_doing=scene.doing)
     inputs = PromptInputs(instructions=BASE_INSTRUCTIONS, tool_catalog=(), events=tuple(events), tool_executions=(),
                           snapshot=None, state_basis=PersistedStateBasis(len(events), 0, (), (), ()), observations=(),
-                          request_options=RequestOptions(model), trigger_refs=(),
+                          request_options=RequestOptions(model, speaks_first=True), trigger_refs=(),
                           system=SystemSpec(companion=True, memory=True, attachments=True, proactive=True),
                           companion_persona=PERSONA, memories=tuple(scene.notes.values()), now=NOW + timedelta(
                               seconds=40), presence=presence, time_zone="Asia/Seoul", wake_notes=scene.notes)
