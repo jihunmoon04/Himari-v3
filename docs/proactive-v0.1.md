@@ -588,3 +588,15 @@ P1·P2 해결 확인. 문서 정합성 둘과 구현 주의 하나:
 - `ProviderCapabilities.speaks_first`: 실제 모델 확인(§19.6)에서 80% 이상 통과한 모델만 — gpt-6-luna(18/18), deepseek-v4.1-flash(17), claude-haiku-5.5(16), mimo-v2.6-pro(16). minimax-m3(13/18)은 빠짐. 확인하지 않은 모델(gpt-5-nano, gpt-6.1-sol, claude-sonnet-5.5, glm-5.3)도 다른 능력과 같은 원칙으로 꺼져 있다(확인하면 켤 수 있음).
 - 그 대화의 모델이 `speaks_first`가 아니면: `accept_wake`가 `MODEL_UNCHECKED`(스케줄러는 그 틱을 건너뜀, `try`는 409 `model_unchecked`), 시스템 글의 "Speaking first" 줄과 원칙의 `<wake>`도 넣지 않는다(`RequestOptions.speaks_first`). 사용자가 대화의 모델을 바꾸면 그 다음 판단부터 따른다.
 - **검수(PR #158, `5c9b8de`) P2-1 받은 뒤 모델이 바뀜:** `accept_wake`는 모델 A로 확인하지만 작업의 턴은 모델을 다시 고른다. 이제 wake 작업은 `Driver.resume_wake`로 돈다: 그 턴의 모델이 `speaks_first`가 아니면 Run 없이 wake를 거둔다(`cancelled`, 열쇠 반환, 결과 `CANCELLED`/`model_unchecked`). 시험: `try`가 받은 뒤 첫 Run 전에 모델의 능력을 바꿈 → Run 없음, wake `cancelled`.
+
+### 19.10 앱 (`feat/proactive-app`, §10)
+
+- `JobOrigin`(새, WPF 밖이라 ContractTests가 Linux에서 시험): `IsOwn(origin, device)` — `device`나 **`wake`**이고 이 기기를 이름 지음; `IsWake`; `Follow(current, conversation, draft)` — 지금 보는 대화가 아니고 입력 중이 아닐 때만 옮김.
+- `Streams.cs`: `job started`가 이 기기의 wake이고 다른 대화면 `Follow`일 때 `RefreshConversations(그 대화)`로 옮기고, 아니면 상태 줄("히마리가 다른 대화에서 말을 걸었어요. 대화 목록에서 열 수 있어요."). 그다음은 자기 작업과 같은 길(`RecoverMoveJob`, `StartLive` → 말풍선·표정·이동). 재연결의 `hello`/`activity`도 `IsOwn`으로 wake 작업의 `live`를 다시 연다.
+- `HistoryReader`: wake 이벤트를 "(히마리가 먼저 말을 걸었어요)" 한 줄로.
+- 설계의 "입력 중이면 말풍선만 띄우고 누르면 옮김"은 상태 줄 알림으로 줄였다(말풍선은 그 대화의 `live`에 묶여 있어 다른 대화의 말을 띄우면 지금 대화의 말풍선과 섞인다). 사용자가 그 대화를 열면 이어지는 `live`나 기록으로 본다.
+- 확인: 앱·UiTests·ContractTests가 Linux의 .NET 10 SDK로 경고 없이 빌드(기존 `confirmResend` 경고 하나만), ContractTests 통과. UiTests와 실제 PC 확인은 Windows에서(소유자).
+- **검수(PR #159, `6fddcc2`) P1 옮기는 도중의 입력:** `Follow` 확인과 실제 전환 사이에 대화 목록을 읽는 HTTP 기다림이 있어, 그동안 A에 쓰기 시작한 글이 B로 옮겨질 수 있었다. 이제 `FollowWake`가 목록을 읽은 **뒤** 다시 본다(`JobOrigin.StillFollow`: 같은 대화, 입력 리비전 그대로 — 글을 고치거나 대화를 바꾸면 오름 —, 입력창이 빔). 그 확인에서 전환(`ShowConversations`, 동기)까지 `await`가 없다. 바뀌었으면 옮기지 않고 상태 줄. `RefreshConversations`는 읽기(`LoadConversations`)와 보이기(`ShowConversations`)로 나눔.
+- **P2-1 재연결 뒤의 wake:** `hello`/`activity`로 다시 찾은 wake 작업도 `RecoverAndStartLive(..., wake: true)`가 먼저 `FollowWake`를 거친다(같은 확인).
+- 시험: ContractTests에 `StillFollow`; UiTests에 느린 목록 응답(`SlowListHandler`) 중 아무것도 안 함 → B로 옮김, 입력함 → A에 남고 글 유지·상태 줄, 다른 대화를 고름 → 그 대화에 남음(빌드 확인, 실행은 Windows).
+- **재검수(PR #159, `ed9cbe3`) P2 알림이 바로 지워짐:** 입력 중이라 옮기지 않고 띄운 알림을 곧이은 대화 읽기(`hello`·`activity`)가 "연결됨"으로 덮었다. 이제 앱이 그 대화를 기억하고(`wakeElsewhere`) 상태 줄을 쓰는 곳이 `JobOrigin.Status`를 거친다: 그 대화를 열거나 그 wake 작업이 끝날 때까지 알림이 남는다. 시험: ContractTests(`Status`), UiTests(입력 중 → 알림 → 연결된 채 지금 대화를 읽어도 알림 유지 → 그 대화를 열면 끝).

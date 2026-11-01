@@ -23,6 +23,7 @@ public partial class MainWindow
     private string? deviceId, currentConversation;
     private bool connected, changingSelection, sending;
     private long inputRevision;
+    private string? wakeElsewhere;  // V3-P87: a conversation HIMARI speaks first in that the user has not opened
     private DateTime? awaySince;
     private readonly ConnectionGate connectionChange = new();
     private readonly ConnectionGate messageSend = new();
@@ -194,22 +195,45 @@ public partial class MainWindow
     private async Task RefreshConversations(string? preferred, CancellationToken ct)
     {
         if (client is null) return;
+        var list = await LoadConversations(client, ct);
+        ShowConversations(list, preferred ?? currentConversation);
+        if (currentConversation is not null) await ReadConversation(currentConversation, ct);
+    }
+    private async Task<List<Conversation>> LoadConversations(ServerClient local, CancellationToken ct)
+    {
         var list = new List<Conversation>(); int offset = 0;
         while (true)
         {
-            var data = await client.SendAsync(HttpMethod.Get, $"/api/conversations?limit=50&offset={offset}", null, ct);
+            var data = await local.SendAsync(HttpMethod.Get, $"/api/conversations?limit=50&offset={offset}", null, ct);
             list.AddRange(Items(Prop(data, "items")).Select(x => new Conversation(Str(x, "id") ?? "", Str(x, "title") ?? "새 대화")).Where(x => x.Id.Length > 0));
             var nextValue = Prop(data, "next_offset");
             if (nextValue.ValueKind != JsonValueKind.Number || !nextValue.TryGetInt32(out var next) || next <= offset) break;
             offset = next;
         }
-        string? chosen = preferred ?? currentConversation;
+        return list;
+    }
+    private void ShowConversations(List<Conversation> list, string? chosen)
+    {
         changingSelection = true; Conversations.ItemsSource = list;
         Conversations.SelectedItem = list.FirstOrDefault(x => x.Id == chosen) ?? list.FirstOrDefault();
         changingSelection = false;
         SetCurrentConversation((Conversations.SelectedItem as Conversation)?.Id);
+    }
+    /// <summary>V3-P87 §10: go to the conversation a wake on this device speaks in — unless it
+    /// is shown, or the user is typing. Checked again once the list is read (PR #159 review
+    /// P1): typing or another conversation picked meanwhile keeps the user where they are;
+    /// no await between that check and the switch.</summary>
+    private async Task FollowWake(string id, ServerClient local, CancellationToken ct)
+    {
+        string? before = currentConversation; long revision = inputRevision;
+        if (!JobOrigin.Follow(before, id, Input.Text)) { if (id != currentConversation) TellWakeElsewhere(id); return; }
+        var list = await LoadConversations(local, ct);
+        if (ct.IsCancellationRequested || !ReferenceEquals(local, client)) return;
+        if (!JobOrigin.StillFollow(before, currentConversation, revision, inputRevision, Input.Text)) { TellWakeElsewhere(id); return; }
+        ShowConversations(list, id);
         if (currentConversation is not null) await ReadConversation(currentConversation, ct);
     }
+    private void TellWakeElsewhere(string id) { wakeElsewhere = id; Status.Text = JobOrigin.WakeNotice; }
     private async void ConversationChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
     {
         if (changingSelection) return;
@@ -231,7 +255,8 @@ public partial class MainWindow
             !pendingReplies.TryGetValue(id, out var awaited) || !awaited.Server.SameDevice(local) ||
             Str(Prop(detail, "job"), "job_id") != awaited.Job)) return;
         StopButton.Visibility = ConversationView.IsRunning(detail) ? Visibility.Visible : Visibility.Collapsed;
-        if (connected) Status.Text = ConversationView.IsRunning(detail) ? "이 대화는 작업 중입니다. 새 대화를 열 수 있습니다." : "연결됨";
+        if (connected) Status.Text = JobOrigin.Status(wakeElsewhere, currentConversation,
+            ConversationView.IsRunning(detail) ? "이 대화는 작업 중입니다. 새 대화를 열 수 있습니다." : "연결됨");
         if (question is not null) { awaitingAnswer = true; Message.Text = question; OpenReplyBubble(id, Str(Prop(detail, "job"), "job_id")); OpenComposer(); if (IsChatWindow(GetForegroundWindow())) { dialogueHost?.Activate(); Input.Focus(); } return; }
         awaitingAnswer = false;
         if (liveDisplays.TryGetValue(id, out var display)) { Message.Text = display.Text; SetMood(display.Mood); return; }
@@ -307,6 +332,7 @@ public partial class MainWindow
             UserSent.Text = ""; UserSent.Visibility = Visibility.Collapsed;
         }
         currentConversation = id;
+        if (id is not null && id == wakeElsewhere) wakeElsewhere = null;  // opened: told
         UpdateUnsentBubbles();
     }
     // A message the server did not take is never lost: it returns to an empty editor in its own

@@ -24,6 +24,7 @@ internal static class HistoryReader
                 if (kind == "user_message" && item.TryGetProperty("text", out var userText) && userText.ValueKind == JsonValueKind.String) content = userText.GetString();
                 else if (kind == "assistant_final" && item.TryGetProperty("display", out var display) && display.ValueKind == JsonValueKind.Object && display.TryGetProperty("text", out var answer) && answer.ValueKind == JsonValueKind.String) content = answer.GetString();
                 if (!string.IsNullOrEmpty(content)) text.Append(kind == "user_message" ? "선생님\n" : "히마리\n").Append(content).Append("\n\n");
+                else if (kind == "wake") text.Append("(히마리가 먼저 말을 걸었어요)\n\n");  // V3-P87 §9: the server opened that turn
             }
             progress?.Invoke(text.ToString());
             if (count < 100) return text.ToString();
