@@ -14,11 +14,13 @@ from himari.data.api import Device, DeviceStore, PairingResult
 from himari.presence.api import (
     CODE_ALPHABET,
     CODE_LENGTH,
+    MAX_QUIET,
     PAIRING_TTL,
     TOUCH_INTERVAL,
     DeviceCaller,
     PairingCode,
     PairingRefused,
+    QuietTooLong,
     normalize_code,
     show_code,
     token_shape_ok,
@@ -104,3 +106,15 @@ class DeviceRegistry:
 
     async def revoke(self, principal: PrincipalId, device_id: str) -> None:
         await self._store.revoke_device(principal, device_id)
+
+    async def quiet(self, principal: PrincipalId) -> datetime | None:
+        until = await self._store.read_quiet(principal)
+        return until if until is not None and until > self._clock() else None
+
+    async def set_quiet(self, principal: PrincipalId, until: datetime | None) -> datetime | None:
+        now = self._clock()
+        if until is not None and until - now > MAX_QUIET:
+            raise QuietTooLong
+        kept = until if until is not None and until > now else None  # a past moment clears it
+        await self._store.write_quiet(principal, kept)
+        return kept

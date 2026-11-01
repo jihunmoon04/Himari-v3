@@ -4271,3 +4271,38 @@ button.files-crumb:hover { background: var(--surface-hover); color: var(--text);
   letter-spacing: 0.12em;
   user-select: all;
 }
+
+/* V3-P88: the user's quiet and what each app tells. */
+.devices > .devices-add,
+.devices > .devices-code,
+.devices > .devices-quiet,
+.devices > .devices-signals-note {
+  max-width: var(--reading-max);
+  margin-left: auto;
+  margin-right: auto;
+}
+
+.devices-quiet {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 16px;
+  margin-top: 12px;
+  margin-bottom: 12px;
+}
+
+.devices-quiet-state {
+  margin: 0;
+}
+
+.devices-quiet-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.device-signals {
+  display: block;
+  overflow-wrap: anywhere;
+}

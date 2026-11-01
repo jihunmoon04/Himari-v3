@@ -8,6 +8,7 @@ import json
 import secrets
 import time
 from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -37,6 +38,7 @@ SEND = {"origin": ORIGIN}
 ALLOWED = {
     ("GET", "/api/device"),
     ("POST", "/api/device/presence"),
+    ("PUT", "/api/presence/quiet"),  # V3-P88 §6.2
     ("GET", "/api/events"),
     ("GET", "/api/conversations"),
     ("GET", "/api/conversations/activity"),
@@ -385,9 +387,11 @@ def test_the_event_stream_starts_with_hello(server: Server) -> None:
     name, hello = frames_of(response.text)[0]
     assert name == "hello" and hello == {
         "device": {"device_id": "d1", "name": "데스크톱"}, "moods": list(MOODS), "current_device": None,
-        "recent_conversation": {"id": cid, "title": None}, "activity": {"working": [], "waiting": []}}
+        "recent_conversation": {"id": cid, "title": None}, "features": {"presence_signals": 1},
+        "quiet_until": None, "activity": {"working": [], "waiting": []}}  # a device gets no signals revision
     web_hello = frames_of(server.client.get("/api/events").text)[0][1]
     assert web_hello["device"] is None and web_hello["recent_conversation"]["id"] == cid
+    assert web_hello["signals"] == {"epoch": server.app.hub.signals_epoch, "revision": 0}
     assert server.client.portal.call(server.app.hub.open_streams, OPERATOR) == 0  # type: ignore[union-attr]
 
 
@@ -480,3 +484,94 @@ def test_what_a_screen_may_be(server: Server, monkeypatch: pytest.MonkeyPatch) -
                                   json={"text": "x", "screen": web_upload.json()["file_id"],
                                         "attachments": [web_upload.json()["file_id"]]}, headers=me)
     assert (response.status_code, error_code(response)) == (403, "device_scope")  # still one screen only
+
+
+# --- V3-P88: activity signals --------------------------------------------------------------------
+
+SIGNAL = {"idle_seconds": 2, "time_zone": "Asia/Seoul", "session": "active",
+          "activity": {"category": "video", "app": "Chrome", "for_seconds": 2700, "fullscreen": True},
+          "media": {"title": "밤양갱", "artist": "비비", "app": "Spotify"}, "mic_or_camera": False}
+
+
+def test_signals_are_kept_whole_and_shown_to_the_web_only(server: Server) -> None:
+    """V3-P88 §2.1, §8.1: the body replaces the device's snapshot; GET /api/devices shows it, to the Web only."""
+    me = server.as_device(server.paired())
+    server.client.portal.call(lambda: server.app.hub.subscribe(OPERATOR, "d1"))  # type: ignore[union-attr]
+    assert server.device.post("/api/device/presence", json=SIGNAL, headers=me).status_code == 204
+    listing = server.client.get("/api/devices").json()
+    (item,) = listing["items"]
+    assert item["signals"]["session"] == "active" and item["signals"]["media"]["title"] == "밤양갱"
+    assert item["signals"]["activity"]["category"] == "video" and item["signals"]["activity"]["fullscreen"] is True
+    assert item["signals"]["mic_or_camera"] is False
+    assert listing["signals_epoch"] == server.app.hub.signals_epoch and listing["signals_revision"] >= 1
+    # media turned off in the app: absent, so the song is gone; a game that closed is the one before
+    body = {k: v for k, v in SIGNAL.items() if k != "media"} | {"activity": None}
+    assert server.device.post("/api/device/presence", json=body, headers=me).status_code == 204
+    (item,) = server.client.get("/api/devices").json()["items"]
+    assert "media" not in item["signals"] and "activity" not in item["signals"]
+    assert item["signals"]["before"]["category"] == "video"
+    response = server.device.get("/api/devices", headers=me)
+    assert response.status_code == 403  # a device never reads the others' signals
+
+
+def test_signal_text_is_cleaned_and_unknown_categories_are_other(server: Server) -> None:
+    me = server.as_device(server.paired())
+    server.client.portal.call(lambda: server.app.hub.subscribe(OPERATOR, "d1"))  # type: ignore[union-attr]
+    body = {"idle_seconds": 0, "activity": {"category": "knitting", "app": "A\u0000pp\n" + "x" * 100,
+                                            "title": "t" * 300},
+            "media": {"title": "​  "}}
+    assert server.device.post("/api/device/presence", json=body, headers=me).status_code == 204
+    (item,) = server.client.get("/api/devices").json()["items"]
+    activity = item["signals"]["activity"]
+    assert activity["category"] == "other" and activity["app"].startswith("A pp x") and len(activity["app"]) == 64
+    assert len(activity["title"]) == 120
+    assert "media" not in item["signals"]  # nothing left of the title: no media
+    for bad in ({"idle_seconds": 0, "session": "asleep"}, {"idle_seconds": 0, "after": "lunch"},
+                {"idle_seconds": 0, "activity": {"app": "x"}}, {"idle_seconds": 0, "mic_or_camera": "yes"},
+                {"idle_seconds": 0, "activity": {"category": "coding", "for_seconds": -1}},
+                {"idle_seconds": 0, "activity": {"category": "coding", "extra": 1}}):
+        assert server.device.post("/api/device/presence", json=bad, headers=me).status_code == 400, bad
+
+
+def test_an_unlock_mark_makes_the_device_current_past_the_switch_delay(server: Server) -> None:
+    a = server.as_device(server.paired("데스크톱"))
+    b = server.as_device(server.paired("노트북"))
+    for device_id in ("d1", "d2"):
+        server.app.hub.subscribe(OPERATOR, device_id)  # the hub is plain: no loop needed
+    server.device.post("/api/device/presence", json={"idle_seconds": 0, "session": "locked"}, headers=a)
+    server.device.post("/api/device/presence", json={"idle_seconds": 0, "session": "active"}, headers=b)
+    assert server.client.get("/api/device").json()["current_device"] == "d2"
+    server.device.post("/api/device/presence", json={"idle_seconds": 0, "session": "active", "after": "unlock"},
+                       headers=a)
+    assert server.client.get("/api/device").json()["current_device"] == "d1"
+    returned = server.app.hub.returned(OPERATOR)
+    assert returned is not None and (returned.device_id, returned.via) == ("d1", "unlock")
+
+
+def test_quiet_is_the_users_for_every_device(server: Server) -> None:
+    """V3-P88 §6.2: a device or the Web sets it; every stream hears; past clears; seven days at most."""
+    me = server.as_device(server.paired())
+    device_stream = server.client.portal.call(lambda: server.app.hub.subscribe(OPERATOR, "d1"))  # type: ignore[union-attr]
+    until = (datetime.now(UTC) + timedelta(hours=1)).astimezone(timezone(timedelta(hours=9)))
+    response = server.device.request("PUT", "/api/presence/quiet", json={"until": until.isoformat()}, headers=me)
+    assert response.status_code == 200 and datetime.fromisoformat(response.json()["until"]) == until
+    assert datetime.fromisoformat(server.client.get("/api/devices").json()["quiet_until"]) == until
+    assert datetime.fromisoformat(server.device.get("/api/device", headers=me).json()["quiet_until"]) == until
+
+    async def names() -> list[tuple[str, Any]]:
+        out = []
+        while (event := await device_stream.next(0)) is not None:
+            out.append((event.name, event.data))
+        return out
+
+    assert server.client.portal is not None
+    assert ("quiet", {"until": until.isoformat()}) in server.client.portal.call(names)
+    past = (datetime.now(UTC) - timedelta(minutes=1)).isoformat()
+    assert server.client.put("/api/presence/quiet", json={"until": past}, headers=SEND).json() == {"until": None}
+    assert server.client.get("/api/devices").json()["quiet_until"] is None
+    server.client.put("/api/presence/quiet", json={"until": until.isoformat()}, headers=SEND)
+    assert server.client.put("/api/presence/quiet", json={"until": None}, headers=SEND).json() == {"until": None}
+    for bad, code in (((datetime.now(UTC) + timedelta(days=8)).isoformat(), "quiet_too_long"),
+                      ("2026-11-01T08:00:00", "invalid_time"), ("tomorrow", "invalid_time")):
+        response = server.client.put("/api/presence/quiet", json={"until": bad}, headers=SEND)
+        assert (response.status_code, error_code(response)) == (400, code), bad

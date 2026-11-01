@@ -187,7 +187,7 @@ from himari.data.api import (
 
 # v3: compaction_runs; v4: external_settings; v5: ui_resources; v6: model_settings;
 # v7: the trash (all upgraded in place); v1 is refused
-SCHEMA_VERSION = 15
+SCHEMA_VERSION = 16
 APPLICATION_ID = 0x48494D41  # "HIMA": written into the database header (PRAGMA application_id)
 
 _TERMINAL_COMPLETIONS = frozenset(
@@ -579,9 +579,16 @@ CREATE TABLE memory_pass_items (
 ) STRICT;
 CREATE INDEX memory_pass_items_by_outcome ON memory_pass_items (outcome, created_at);
 """
+# v16: a principal's "quiet" (V3-P88 §6.2): until when HIMARI does not speak first.
+_V16_ADDITIONS = """
+CREATE TABLE presence_settings (
+    owner TEXT PRIMARY KEY,
+    quiet_until TEXT
+) STRICT;
+"""
 _ADDITIONS = (_V3_ADDITIONS, _V4_ADDITIONS, _V5_ADDITIONS, _V6_ADDITIONS, _V7_ADDITIONS, _V8_ADDITIONS,
               _V9_ADDITIONS, _V10_ADDITIONS, _V11_ADDITIONS, _V12_ADDITIONS,
-              _V13_ADDITIONS, _V14_ADDITIONS, _V15_ADDITIONS)  # what each version from v3 added
+              _V13_ADDITIONS, _V14_ADDITIONS, _V15_ADDITIONS, _V16_ADDITIONS)  # what each version from v3 added
 _SCHEMA = _SCHEMA_V2 + "".join(_ADDITIONS)
 # An older version → (its exact schema, what brings it to SCHEMA_VERSION).
 _UPGRADES = {
@@ -2748,6 +2755,17 @@ class SqliteData:
         with self._tx() as tx:
             tx.execute("UPDATE devices SET last_seen_at=? WHERE owner=? AND device_id=? AND revoked_at IS NULL",
                        _timestamp(at), principal, device_id)
+
+    async def read_quiet(self, principal: PrincipalId) -> datetime | None:
+        with self._tx() as tx:
+            row = tx.one("SELECT quiet_until FROM presence_settings WHERE owner=?", principal)
+            return None if row is None else _moment(row["quiet_until"])
+
+    async def write_quiet(self, principal: PrincipalId, until: datetime | None) -> None:
+        with self._tx() as tx:
+            tx.execute("INSERT INTO presence_settings (owner, quiet_until) VALUES (?, ?)"
+                       " ON CONFLICT (owner) DO UPDATE SET quiet_until=excluded.quiet_until",
+                       principal, None if until is None else _timestamp(until))
 
     async def count_source_memories(self, scope: TrustedScope) -> int:
         with self._tx() as tx:

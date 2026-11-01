@@ -50,6 +50,7 @@ import re
 import secrets
 import threading
 import time
+import unicodedata
 from urllib.parse import quote
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator, Mapping
 from contextlib import asynccontextmanager
@@ -100,8 +101,20 @@ from himari.bootstrap.companion import origin_view
 from himari.bootstrap.explorer import PDF_APPEND_MAX_BYTES, ExplorerRefused, Listing, ShownFile
 from himari.bootstrap.operator import OPERATOR, derive_cli_bearer, verify_operator_token
 from himari.bootstrap.mcp_defaults import McpDefaultsConflict
-from himari.presence.api import PairingRefused, TooManyStreams, is_device_token
+from himari.presence.api import (
+    ActivitySignal,
+    After,
+    DeviceState,
+    MediaSignal,
+    PairingRefused,
+    QuietTooLong,
+    Session,
+    Signals,
+    TooManyStreams,
+    is_device_token,
+)
 from himari.common import (
+    ACTIVITIES,
     ASK_USER_TOOL_ID,
     MOODS,
     AttachmentRef,
@@ -266,12 +279,96 @@ class DeviceNameBody(_Body):
     name: str = Field(max_length=200)  # Data checks the 40-character limit after trimming
 
 
+class ActivityBody(_Body):
+    """V3-P88 §4: the program in front, as the app classified it."""
+
+    category: str = Field(max_length=64)
+    app: str | None = Field(default=None, max_length=1000)
+    for_seconds: float = Field(default=0, ge=0, le=30 * 24 * 3600, allow_inf_nan=False)
+    fullscreen: StrictBool | None = None
+    title: str | None = Field(default=None, max_length=1000)
+
+
+class MediaBody(_Body):
+    """V3-P88 §5: what plays now."""
+
+    title: str = Field(max_length=1000)
+    artist: str | None = Field(default=None, max_length=1000)
+    app: str | None = Field(default=None, max_length=1000)
+
+
 class PresenceBody(_Body):
     """V3-P83 §5: seconds since the last input anywhere on the device (cut to
-    30 days), and its IANA time zone (an unknown one is ignored)."""
+    30 days), and its IANA time zone (an unknown one is ignored). V3-P88:
+    the rest of the device's snapshot (§2.1) — an absent field is unknown,
+    a null ``activity``/``media`` is none."""
 
     idle_seconds: float = Field(ge=0, allow_inf_nan=False)
     time_zone: str | None = Field(default=None, max_length=64)
+    session: Literal["active", "locked"] | None = None
+    after: Literal["unlock", "resume"] | None = None
+    activity: ActivityBody | None = None
+    media: MediaBody | None = None
+    mic_or_camera: StrictBool | None = None
+
+
+class QuietBody(_Body):
+    """V3-P88 §6.2: until when (with its UTC offset), or null to end it."""
+
+    until: str | None = Field(max_length=64)
+
+
+# V3-P88 §4.2, §5: how much of the app's text is kept.
+SIGNAL_NAME_CHARS = 64
+SIGNAL_TITLE_CHARS = 120
+
+
+def signal_text(raw: str | None, limit: int) -> str | None:
+    """Control characters out, spaces collapsed, cut to ``limit``; None when nothing is left."""
+    if raw is None:
+        return None
+    kept = " ".join("".join(" " if unicodedata.category(c) in ("Cc", "Cf", "Zl", "Zp") else c for c in raw).split())
+    return kept[:limit] or None
+
+
+def presence_signals(body: PresenceBody) -> Signals:
+    """The body as the hub's snapshot (§2.1): a category outside ACTIVITIES is ``other`` (§4.1)."""
+    sent = body.model_fields_set
+    activity = None
+    if body.activity is not None:
+        given = body.activity
+        activity = ActivitySignal(given.category if given.category in ACTIVITIES else "other",
+                                  signal_text(given.app, SIGNAL_NAME_CHARS), float(given.for_seconds),
+                                  given.fullscreen, signal_text(given.title, SIGNAL_TITLE_CHARS))
+    media = None
+    if body.media is not None and (title := signal_text(body.media.title, SIGNAL_TITLE_CHARS)) is not None:
+        media = MediaSignal(title, signal_text(body.media.artist, SIGNAL_TITLE_CHARS),
+                            signal_text(body.media.app, SIGNAL_NAME_CHARS))
+    return Signals(session=None if body.session is None else Session(body.session),
+                   activity_known="activity" in sent, activity=activity,
+                   media_known="media" in sent, media=media, mic_or_camera=body.mic_or_camera,
+                   after=None if body.after is None else After(body.after))
+
+
+def signals_view(state: DeviceState | None) -> dict[str, Any]:
+    """V3-P88 §8.1: what the server knows now of a connected device, as the Web shows it."""
+    if state is None or not state.connected:
+        return {}
+    view: dict[str, Any] = {"session": "locked" if state.locked else "active"}
+    if (activity := state.activity) is not None:
+        view["activity"] = {"category": activity.category, "for_seconds": int(activity.for_seconds),
+                            **{k: v for k, v in (("app", activity.app), ("fullscreen", activity.fullscreen),
+                                                 ("title", activity.title)) if v is not None}}
+    if (media := state.media) is not None:
+        view["media"] = {"title": media.title, **{k: v for k, v in (("artist", media.artist), ("app", media.app))
+                                                  if v is not None}}
+    if state.mic_or_camera is not None:
+        view["mic_or_camera"] = state.mic_or_camera
+    if (before := state.before) is not None:
+        view["before"] = {"category": before.category, "lasted_seconds": int(before.lasted_seconds),
+                          "ended_seconds_ago": int(before.ended_seconds_ago),
+                          **({"app": before.app} if before.app is not None else {})}
+    return view
 
 
 class CreateBody(_Body):
@@ -2209,11 +2306,36 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
 
     @app.get("/api/devices")
     async def list_devices(request: Request, who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+        """The Web only (a device is refused): each device with what the server knows of it now (V3-P88 §8.1)."""
         application = himari(request)
-        states, current = application.hub.states(who), application.hub.current(who)
-        return {"items": [device_view(d, d.device_id in states and states[d.device_id].connected,
-                                      d.device_id == current) for d in await application.devices.list(who)],
-                "enabled": application.companion_enabled}
+        hub = application.hub
+        epoch, revision = hub.signals_epoch, hub.signals_revision(who)  # before the states: a later notice rereads
+        states, current = hub.states(who), hub.current(who)
+        quiet = await application.devices.quiet(who)
+        return {"items": [{**device_view(d, d.device_id in states and states[d.device_id].connected,
+                                         d.device_id == current), "signals": signals_view(states.get(d.device_id))}
+                          for d in await application.devices.list(who)],
+                "enabled": application.companion_enabled, "signals_epoch": epoch, "signals_revision": revision,
+                "quiet_until": _time(quiet)}
+
+    @app.put("/api/presence/quiet")
+    async def set_quiet(body: QuietBody, request: Request, by: Caller = Depends(caller)) -> dict[str, Any]:
+        """V3-P88 §6.2: the user's "quiet", for every device and the Web; a device may call it."""
+        until = None
+        if body.until is not None:
+            try:
+                until = datetime.fromisoformat(body.until)
+            except ValueError:
+                until = None
+            if until is None or until.utcoffset() is None:
+                raise ApiError(400, "invalid_time", "Give a time with its UTC offset, or null.")
+        application = himari(request)
+        try:
+            kept = await application.devices.set_quiet(by.principal, until)
+        except QuietTooLong:
+            raise ApiError(400, "quiet_too_long", "Quiet lasts at most seven days.") from None
+        application.hub.publish(by.principal, "quiet", {"until": _time(kept)})
+        return {"until": _time(kept)}
 
     @app.post("/api/devices", status_code=201)
     async def add_device(body: DeviceNameBody, request: Request, who: PrincipalId = Depends(principal)) -> dict[str, Any]:
@@ -2273,17 +2395,21 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
     async def device_state(application: Application, by: Caller) -> dict[str, Any]:
         """What ``GET /api/device`` and ``hello`` both say (appendix A.2, A.3)."""
         recent = await application.data.most_recent_user_conversation(by.principal)
+        quiet = await application.devices.quiet(by.principal)
         return {"device": None if by.device is None else {"device_id": by.device.device_id, "name": by.device.name},
                 "moods": list(MOODS), "current_device": application.hub.current(by.principal),
                 "recent_conversation": None if recent is None else {"id": recent.conversation_id,
-                                                                    "title": recent.title}}
+                                                                    "title": recent.title},
+                "features": {"presence_signals": 1},  # V3-P88 §14: an app sends the new fields only then
+                "quiet_until": _time(quiet)}
 
     @app.post("/api/device/presence", status_code=204)
     async def device_presence(body: PresenceBody, request: Request, by: Caller = Depends(caller)) -> None:
         """A device's input activity (§5)."""
         if by.device is None:
             raise ApiError(403, "not_a_device", "Only a device sends its activity.")
-        himari(request).hub.signal(by.principal, by.device.device_id, body.idle_seconds, body.time_zone)
+        himari(request).hub.signal(by.principal, by.device.device_id, body.idle_seconds, body.time_zone,
+                                   presence_signals(body))
 
     @app.get("/api/events")
     async def read_events_stream(request: Request, by: Caller = Depends(caller)) -> StreamingResponse:
@@ -2297,6 +2423,9 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
         try:
             assert application.events is not None
             hello = {**await device_state(application, by), "activity": await application.events.activity(by.principal)}
+            if by.device is None:  # V3-P88 §8.1: the Web compares, and rereads the devices when it differs
+                hello["signals"] = {"epoch": application.hub.signals_epoch,
+                                    "revision": application.hub.signals_revision(by.principal)}
         except BaseException:
             application.hub.unsubscribe(subscription)
             raise

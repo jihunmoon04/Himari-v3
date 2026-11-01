@@ -242,6 +242,7 @@ class InMemoryStore:
         self.workspaces: dict[WorkspaceId, RegisteredWorkspace] = {}
         self.workspace_owners: dict[WorkspaceId, PrincipalId] = {}
         self.devices: dict[tuple[PrincipalId, str], _Device] = {}  # V3-P83, in creation order; revoked ones stay
+        self.quiet: dict[PrincipalId, datetime] = {}  # V3-P88 §6.2
         self.device_ids: dict[PrincipalId, int] = {}
 
     # --- admin helpers (trusted setup paths, not model-reachable) --------
@@ -1408,6 +1409,15 @@ class InMemoryData:
         row = self._store.devices.get((principal, device_id))
         if row is not None and not row.revoked:
             row.device = replace(row.device, last_seen_at=at)
+
+    async def read_quiet(self, principal: PrincipalId) -> datetime | None:
+        return self._store.quiet.get(principal)
+
+    async def write_quiet(self, principal: PrincipalId, until: datetime | None) -> None:
+        if until is None:
+            self._store.quiet.pop(principal, None)
+        else:
+            self._store.quiet[principal] = until
 
     # --- MemoryStore (V3-P71) ---------------------------------------------------------
 

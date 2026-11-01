@@ -388,3 +388,48 @@ B1~B4 해결, C1~C3 반영 확인. 새 지적 넷:
 | N2 | 긴 절전 뒤에는 120초 무신호로 `locked`가 지워져 `locked → active` 전환을 못 봄 | 앱이 `after: "unlock"/"resume"`를 붙여 서버 기억과 무관하게 앎, 그것도 잃으면 `reconnect` 대비 경로, 자리 비움 길이는 V3-P87의 영속 `last_input_at`(§3, §10) |
 | N3 | 10초 묶기가 마지막 바뀜을 버릴 수 있음 | 구간 끝에 최신 번호를 한 번 꼭 보냄(§8.1) |
 | N4 | `activity: null`이 직전 활동의 끝인지 불명확 | `null`은 끝, 필드 빠짐·잠김·끊김은 끝이 아님(§4.4) |
+
+## 17. 구현 노트 — 서버 (2026-11-01)
+
+PR: 서버 한 개(§15의 1, 2). 앱은 같은 날 따로(§14).
+
+- **Data v16:** `presence_settings(owner, quiet_until)`. `DeviceStore.read_quiet`·`write_quiet`(SQLite·메모리). 업그레이드 시험에 v15 → v16을 더했다.
+- **presence:** `Signals`(통째 스냅샷, `activity_known`·`media_known`으로 빠짐과 `null`을 가름), `ActivitySignal`, `MediaSignal`, `EndedActivity`, `Returned`, `Session`, `After`. `PresenceHub.signal(…, signals)`가 스냅샷을 통째 바꾸고, 잠긴 기기를 후보에서 빼고, `after`가 붙은 신호의 기기를 60초 규칙을 넘어 지금 기기로 하고, 돌아옴(`unlock`·`resume`·`reconnect`)을 둔다. 끊긴 기기의 신호는 `_decide`가 지운다(잠김·끊김·빠짐은 활동의 끝이 아님).
+  - `signals_revision`은 **Web에 보이는 것**이 바뀔 때만 오른다. 이어 한 시간(`for_seconds`)만 바뀌는 60초 신호는 번호를 올리지 않는다(Web은 읽을 때 지금까지 센 값을 받음).
+  - 묶기: 바뀜이 생기면 곧바로, 10초 안이면 실행 중인 루프의 타이머(`call_later`)로 구간 끝에 한 번. 루프가 없으면(시험) `tick`이 보낸다.
+- **조용히:** `Devices.quiet`·`set_quiet`(지난 시각은 지움, 7일 넘으면 `QuietTooLong`). `PUT /api/presence/quiet`는 기기 허용 목록에 더했다(경로 전체를 도는 기본 거부 시험이 지킴). UTC 차이가 없는 시각은 400 `invalid_time`.
+- **Web 경로:** `PresenceBody`의 새 필드는 엄격 검사(`extra="forbid"` 유지)한 뒤 서버가 자른다(이름 64자, 제목 120자, 제어 문자·줄바꿈은 빈칸). 목록 밖 분류는 `other`. `GET /api/device`·`hello`에 `features.presence_signals = 1`과 `quiet_until`, Web의 `hello`에만 `signals {epoch, revision}`.
+- **Web 화면:** Devices에 기기마다 신호 줄(`Active · coding in Visual Studio Code for 45m · …` / `Locked`), 조용히 줄(`Quiet 1 hour`·`Until morning`·`Clear`), 보관 안내 한 줄. `devices`·`quiet` 사건과 `hello`의 `(epoch, revision)`으로 다시 읽는다. 추가 폼·코드 상자도 목록과 같은 폭으로 맞췄다(전에는 화면 폭 전체).
+- **설계와 다른 점:**
+  - `ACTIVITY_NOTE`는 "신호를 받은 적이 있는 주체에게만"(§7)이 아니라 **`COMPANION_NOTE`와 늘 함께**다. 신호가 오고 감에 따라 시스템 문장이 바뀌면 캐시가 깨지기 때문이다. 신호가 없으면 `now_doing`이 없어 문장이 가리키는 것이 없을 뿐이다.
+  - `ACTIVITY_NOTE` 문장은 실제 모델 확인 뒤 다듬었다: "describe it back (the program, a title, how long) unless they ask or it changes your answer", 통화일 수 있으면 "two or three short sentences".
+- **실제 모델 확인**(`tests/live/test_activity_live.py`, 결과 `docs/live-results/activity-2026-11-01.jsonl`): 네 장면 × 2번. `openai/gpt-6-luna`, `anthropic/claude-haiku-5.5`, `deepseek/deepseek-v4.1-flash`, `xiaomi/mimo-v2.6-pro`는 8/8. `minimax/minimax-m3`는 6/8(통화 중 답이 두 번 다 길었음. 다듬기 전에는 관계없는 답에서 프로그램 이름도 말했음). 주입 장면에서 따른 모델은 없었다(DeepSeek은 한 번 수상한 제목을 사용자에게 알렸다). 이 문장은 모델마다 켜고 끄는 능력이 아니라 안내라서, 결과는 기록만 한다.
+- **시험:** `tests/presence/test_signals.py`(스냅샷, 잠금, 잠금 해제와 60초 규칙, 긴 절전의 `after`, `reconnect`, 끊김, 직전 활동과 `null`, 알림의 Web 한정·묶기·끝 보내기, epoch), `tests/interfaces/test_web_devices.py`(본문, 자르기, `GET /api/devices`, 기기 403, 잠금 해제, 조용히), Prompt·bootstrap, 가짜 기기 스크립트(잠금 → `current` 없음, `after` → 다시 지금 기기, `quiet` 사건, 기기 흐름에 `devices` 없음), ui_smoke `devices`(신호 줄, 잠금이 알림으로 반영, 조용히 켜고 끄기). 크기에 맞춘 시험 둘(`test_a_compaction_request_does_not_carry_them`, 예산 시험)은 문장이 늘어 수치를 다시 맞췄다.
+
+## 18. 구현 노트 — Windows 앱 (2026-11-01, PR #150)
+
+이번에는 소유자 요청으로 앱도 이 세션에서 만들었다(로컬 에이전트 대신).
+
+- 규칙은 `clients/windows/Himari.Companion/ActivitySignals.cs`(분류 표와 사용자 바꾸기, 60초 유지, 통째 본문, 보내는 때, 마이크·카메라 판정, 아침 08:00), Windows를 읽는 것은 `ActivityProbe.cs`(앞 창, `SystemEvents`의 잠금·깨어남, 미디어 컨트롤, 권한 사용 기록).
+- 설정 탭 "활동 신호"(켜기·끄기, 빼는 목록, 분류 바꾸기, 마지막으로 보낸 본문), 캐릭터 메뉴 "조용히".
+- 기본값: 지금 하는 일·마이크/카메라 켬, 미디어·창 제목 끔(Q2, Q3).
+- 확인: Linux의 .NET 10 SDK로 앱과 UI 테스트 프로젝트를 빌드(`EnableWindowsTargeting`, 경고 0), 계약 테스트 실행(새 검사 포함). UI 테스트와 Windows API를 읽는 부분은 실제 PC에서 확인이 필요하다.
+
+### 18.1 구현 검수 (PR #149·#150, 2026-11-01): 둘 다 NOT_READY
+
+소유자가 붙여 준 정적 검수. 지적을 코드와 대조해 모두 맞음을 확인했다.
+
+| # | 지적 | 반영 |
+| --- | --- | --- |
+| #149 B1 | 신호가 없는 기기가 끊겨도 `_shown`이 같아 `devices` 알림이 없음(Web은 `current`를 보지 않음) | Devices 화면에 보이는 것 전부 — 신호, 연결됨, 지금 기기 — 가 번호를 올린다(`_decide`가 기기마다 `(connected, current)`를 비교) |
+| #149 B2 | 앱의 접속 신호가 사건 흐름보다 먼저 오면 `after` 기록이 사라짐 | `after`는 기기에 맡겨 두고(신호 120초 동안), 그 기기가 지금 기기가 될 수 있을 때 `_decide`가 받아 돌아옴으로 기록. `reconnect`도 `_decide`에서(`back` 표시). 덤으로 찾은 문제: 흐름이 처음 열리기 전의 신호는 "연결 안 됨"이라 바로 지워졌다 → "사라짐"을 `신호가 오래됨 또는 흐름이 닫힌 지 30초 넘음`으로 다시 정의 |
+| #149 C1 | 끊겨도 직전 활동이 남음 | 사라지면 직전 활동도 지움, 30분 지난 것은 `_decide`에서 정리. §4.4의 "끊김은 끝이 아님"은 그대로(끊김이 직전 활동을 만들지 않음) |
+| #150 B1 | 창 제목 빼기를 표시 이름(`FileDescription`)으로 비교해 `code.exe`를 빼도 제목이 감 | 활동에 실행 파일 이름(`Program`)과 표시 이름(`App`)을 따로 두고, 빼기는 실행 파일 이름으로 |
+| #150 B2 | HTTP를 기다리는 사이의 잠금·해제가 `Sent()`에 지워짐, 싣지 않은 `after`도 지워짐 | `SignalSchedule.Begin()`이 세대를 담은 표를 주고, `Sent(표, after를 실었는지)`는 그 뒤에 바뀐 것을 지우지 않음. `after`는 실려서 받아들여졌을 때만 지움 |
+| #150 C2 | Windows 실기 미검증 | 그대로 남음(소유자 PC에서 확인) |
+
+### 18.2 재검수 (`f6b9235`·`9ebdf12`): 둘 다 READY_WITH_CORRECTIONS
+
+B1·B2·C1 해결 확인. 새 P2 둘:
+- 직전 활동이 30분 지나 지워져도 Web에 알리지 않음 → `_decide`가 지울 때 번호를 올린다(시험 추가).
+- 조용히가 끝나도 열린 화면이 그대로 → Web은 끝나는 시각에 다시 그리고(타이머), 앱은 캐릭터 메뉴를 열 때와 끝나는 시각에 다시 판정한다.
