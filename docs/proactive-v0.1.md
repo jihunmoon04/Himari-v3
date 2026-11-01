@@ -587,3 +587,4 @@ P1·P2 해결 확인. 문서 정합성 둘과 구현 주의 하나:
 
 - `ProviderCapabilities.speaks_first`: 실제 모델 확인(§19.6)에서 80% 이상 통과한 모델만 — gpt-6-luna(18/18), deepseek-v4.1-flash(17), claude-haiku-5.5(16), mimo-v2.6-pro(16). minimax-m3(13/18)은 빠짐. 확인하지 않은 모델(gpt-5-nano, gpt-6.1-sol, claude-sonnet-5.5, glm-5.3)도 다른 능력과 같은 원칙으로 꺼져 있다(확인하면 켤 수 있음).
 - 그 대화의 모델이 `speaks_first`가 아니면: `accept_wake`가 `MODEL_UNCHECKED`(스케줄러는 그 틱을 건너뜀, `try`는 409 `model_unchecked`), 시스템 글의 "Speaking first" 줄과 원칙의 `<wake>`도 넣지 않는다(`RequestOptions.speaks_first`). 사용자가 대화의 모델을 바꾸면 그 다음 판단부터 따른다.
+- **검수(PR #158, `5c9b8de`) P2-1 받은 뒤 모델이 바뀜:** `accept_wake`는 모델 A로 확인하지만 작업의 턴은 모델을 다시 고른다. 이제 wake 작업은 `Driver.resume_wake`로 돈다: 그 턴의 모델이 `speaks_first`가 아니면 Run 없이 wake를 거둔다(`cancelled`, 열쇠 반환, 결과 `CANCELLED`/`model_unchecked`). 시험: `try`가 받은 뒤 첫 Run 전에 모델의 능력을 바꿈 → Run 없음, wake `cancelled`.

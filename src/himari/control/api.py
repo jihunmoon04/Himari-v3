@@ -314,6 +314,11 @@ class ConversationDriver(Protocol):
         else NOT_SETTLED, nothing written. ``resume`` then answers it."""
         ...
 
+    async def resume_wake(self, scope: TrustedScope, wake_id: str, *, stop: StopSignal | None = None,
+                          progress: TurnProgress | None = None, max_runs: int | None = None) -> DriveResult:
+        """V3-P87: ``resume`` for a wake's turn, its model checked again for speaking first."""
+        ...
+
     async def withdraw_wake(self, scope: TrustedScope, wake_id: str) -> None:
         """V3-P87 (PR #156 re-review P2-1): a wake recorded but never started —
         ended CANCELLED (its reminders go back) and its keys given back, as it

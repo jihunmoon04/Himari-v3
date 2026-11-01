@@ -284,6 +284,17 @@ class Driver:
         async with self._exclusive(scope, stop, progress, max_runs):
             return await self._resume_locked(scope)
 
+    async def resume_wake(self, scope: TrustedScope, wake_id: str, *, stop: StopSignal | None = None,
+                          progress: TurnProgress | None = None, max_runs: int | None = None) -> DriveResult:
+        """V3-P87 (PR #158 review P2-1): a wake's turn. The model is resolved again for
+        this turn: changed meanwhile to one not checked for speaking first, the wake is
+        withdrawn (cancelled, keys back) and no Run is made."""
+        async with self._exclusive(scope, stop, progress, max_runs):
+            if not self._provider.describe_capabilities(self._turn_model(scope).model_id).speaks_first:
+                await self.withdraw_wake(scope, wake_id)
+                return DriveResult(DriveState.CANCELLED, detail=ControlErrorCode.MODEL_UNCHECKED.value)
+            return await self._resume_locked(scope)
+
     async def accept_wake(self, scope: TrustedScope, reasons: Sequence[WakeReason], device_id: str, *,
                           keys: Sequence[str] = (), reminders: Sequence[int] = ()) -> ConversationEvent:
         if self._wakes is None:
