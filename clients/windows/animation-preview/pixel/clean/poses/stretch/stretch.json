@@ -1,5 +1,9 @@
 {
  "note": "written by tools/stretch.py; clips.lua builds the stretch clip from frames",
+ "sources": {
+  "himari-stretch-seven-keyposes.png": "1b22af3da8cb152d1fe1b568bcbfca98945b8e34d7597ec0cfbdbd3181ba6bda",
+  "himari-leg-stretch-eight-keyposes.png": "4b44c3b6e1b2fc9160d2b3e1702f446e009eca2cf01a36dda1188cb1dcdc1061"
+ },
  "legsZone": [
   98,
   102

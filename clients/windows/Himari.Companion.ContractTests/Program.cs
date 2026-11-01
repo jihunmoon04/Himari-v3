@@ -369,6 +369,22 @@ Check(shippedSleep is { Loop: true, LoopFrom: > 0 } && shippedSleep.Frames[0].Sr
     && Math.Abs(shippedSleep.Length.TotalMilliseconds - shippedSleep.IntroMs - 6000) < 1 && shippedSleep.Frames.Skip(shippedSleep.LoopFrom).All(f => f.Face[1] > 0),
     "the shipped sleep clip nods off from the rest pose, then breathes every 6 s with the head lowered and the eyes closed");
 Check(shipped.Clips["idle"].Frames.Length == 6 && shipped.Clips["idle"].Frames.All(f => f.Eyes is null), "idle keeps its own six frames, none of the sleep frames");
+var shippedStretch = shipped.Clips["stretch"];
+var restSrc = shipped.Clips["idle"].Frames[0].Src;
+Check(shippedStretch is { Loop: false, Frames.Length: 19 } && Math.Abs(shippedStretch.Length.TotalMilliseconds - 5160) < 1
+    && shippedStretch.Frames[0].Src.SequenceEqual(restSrc) && shippedStretch.Frames[^1].Src.SequenceEqual(restSrc),
+    "the shipped stretch plays 19 frames in 5.16 s, from the rest pose back to it");
+Check(Enumerable.Range(0, 19).All(i => shippedStretch.Frames[i].Src.SequenceEqual(shippedStretch.Frames[18 - i].Src)
+        && shippedStretch.Frames[i].Face.SequenceEqual(shippedStretch.Frames[18 - i].Face) && shippedStretch.Frames[i].OwnFace == shippedStretch.Frames[18 - i].OwnFace),
+    "the shipped stretch folds back the way it unfolded");
+Check(shippedStretch.Frames.Select((f, i) => (f, i)).Where(x => x.f.OwnFace).Select(x => x.i).SequenceEqual(Enumerable.Range(6, 7))
+    && shippedStretch.Frames.Skip(7).Take(5).Select(f => string.Join(",", f.Src)).Distinct().Count() == 2,
+    "only the arms-overhead frames keep their own closed-eye face, where the upper body rises and settles");
+var waking = new CharacterAnimator(shipped, 7, TimeSpan.Zero);
+waking.SetSleeping(true, Ms(1000));
+waking.SetSleeping(false, Ms(9000));
+Check(waking.Pose(Ms(9010)) is { Clip: "stretch", Frame: 0 } && waking.Pose(Ms(9000 + 5150)) is { Clip: "stretch", Frame: 18 } && waking.Pose(Ms(9000 + 5170)).Clip == "idle",
+    "waking plays the shipped stretch through once, then idles");
 foreach (var bad in new[] { "{\"version\":2,\"canvas\":[1,1],\"sheet\":\"s\",\"face\":{\"origin\":[0,0],\"size\":[1,1]},\"clips\":{},\"faces\":{}}",
                             "{\"version\":1,\"canvas\":[1,1],\"sheet\":\"s\",\"face\":{\"origin\":[0,0],\"size\":[1,1]},\"clips\":{},\"faces\":{\"neutral\":{\"src\":[0,0,1,1]}}}",
                             "{\"version\":1,\"canvas\":[1,1],\"sheet\":\"s\",\"face\":{\"origin\":[0,0],\"size\":[0,1]},\"clips\":{\"idle\":{\"loop\":true,\"frames\":[{\"src\":[0,0,1,1],\"ms\":1,\"face\":[0,0]}]}},\"faces\":{\"neutral\":{\"src\":[0,0,1,1]}}}",

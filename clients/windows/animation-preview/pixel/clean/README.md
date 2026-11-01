@@ -105,7 +105,7 @@ aseprite -b --script-param in=happy.png --script-param neutral=neutral.png --scr
 - **neutral 눈·입 다시 그림**(소유자 검토 2026-10-31): `../tools/neutral-variants.lua`가 `faces.aseprite`의 neutral 변형을 고쳤다. 반쯤 감은 눈은 뜬 눈의 속눈썹처럼 오른쪽으로 내려가고, 감은 눈은 선 위의 갈색 채움을 없앴다. 두 경우 모두 바깥쪽 속눈썹 끝을 눈마다 2px 줄였다. 말하는 입은 다문 입 선의 두 끝 (112,65), (116,67)을 그대로 두고 가운데가 벌어진다. 그래서 `frames/`의 낱장과는 이제 다르다.
 - **내보내기**: 원본을 고친 뒤 `../tools/export.lua`를 돌린다(`pixel/`에서 실행).
   - 같은 그림 조각은 시트에 한 번만 넣는다(지금 78조각, 1002×1674).
-  - UI 테스트가 비교할 기준 그림 8장(`idle-1-neutral`, `idle-2-happy`, `idle-1-neutral-closed-wide`, `sleep-4-neutral-closed`, `yawn-2-happy`, `glance-2-sad-left`, `ahoge-2-neutral`, `twinkle-3-neutral`)도 함께 쓴다.
+  - UI 테스트가 비교할 기준 그림 12장(`idle-1-neutral`, `idle-2-happy`, `idle-1-neutral-closed-wide`, `sleep-4-neutral-closed`, `yawn-2-happy`, `glance-2-sad-left`, `ahoge-2-neutral`, `twinkle-3-neutral`, `stretch-4-sad-closed`, `stretch-5-worried`, `stretch-8-happy`, `stretch-9-neutral`)도 함께 쓴다.
   - 다음 중 하나라도 어기면 아무것도 쓰지 않고 실패한다: 색 인덱스 모드와 `himari-32.gpl` 팔레트, 모든 몸 프레임의 `@face` 점, 모든 동작의 첫 프레임과 단발 동작의 마지막 프레임 = idle 첫 프레임, 반복 동작의 `loopFrom`, 표정 8종.
 
 ```
@@ -201,7 +201,8 @@ aseprite -b --script-param faces=clean/faces.aseprite --script-param log=face-ha
 
 소유자 요청(2026-11-01): 깬 직후에 트는 `stretch`. 볼에 댄 손에서 팔을 들어 머리 위에서 깍지 끼는 동안 꼰 다리를 풀어 앞으로 쭉 펴고, 다 뻗은 상태에서 상체를 1px씩 두 번 올렸다 내린 뒤 펼 때의 역순으로 접는다(19프레임, 5.2초).
 
-- **그림**: 소유자가 준 생성 그림 두 장이다. 상체 7장면(`himari-stretch-seven-keyposes.png`)과 다리 8장면(`himari-leg-stretch-eight-keyposes.png`). 저장소에는 넣지 않았고(`build/animation-reference/`, git 무시), 변환 결과만 `poses/stretch/`에 있다.
+- **그림**: 소유자가 이미지 생성 도구로 만들어 2026-11-01에 준 그림 두 장이다. 상체 7장면(`himari-stretch-seven-keyposes.png`, 1312×1199)과 다리 8장면(`himari-leg-stretch-eight-keyposes.png`, 1536×1024). 저장소에는 넣지 않았고(소유자 PC의 `build/animation-reference/`, git 무시), 변환 결과만 `poses/stretch/`에 있다. 하품의 Codex 그림(`requests/big-motions-v1/`)과 같은 방식이다.
+  - `stretch.json`의 `sources`에 두 그림의 SHA-256이 있다. `stretch.py`는 같은 이름의 그림이 이 해시와 다르면 저장된 정렬값으로 변환하지 않고 멈춘다(`--refit`이면 새로 찾는다). 원본이 없어도 앱 실행, `clips.lua`, `export.lua`는 커밋된 `poses/stretch/`만으로 다시 만들 수 있다. 원본이 필요한 것은 변환을 다시 할 때뿐이다.
 - **변환**: `stretch.py`가 장면마다 잘라 배경을 지우고, 상체는 머리(78–150열, 18–82행)에, 다리는 휠체어(다리 상자 밖)에 맞춰 크기와 위치를 찾는다. 도트 한 칸이 그림의 약 2.5–2.8px이다. 칸 가운데 절반의 가장 흔한 색을 `himari-32.gpl`로 옮긴다(`pose.lua`와 같은 방식).
   - 상체: 이웃 장면에서 따라 들어온 조각을 지우고, 그림의 크고 크림색인 헤일로를 지운 뒤 쉬는 자세의 헤일로를 얹는다. 96행 위는 그림이, 118행 위는 아래에 아무것도 없을 때만 그림이 보인다. 얼굴 위치는 표정 얼굴의 어두운 선(눈, 눈썹)이 가장 잘 맞는 곳이다.
   - 다리: 98열 오른쪽, 102행 아래(다리 영역)를 그림으로 바꾼다. 휠체어 바퀴와 등받이는 쉬는 자세 그대로다.

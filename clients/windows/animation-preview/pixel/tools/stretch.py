@@ -15,7 +15,7 @@ Run from clients/windows/animation-preview/pixel:
   python -I tools/stretch.py --sheets ../../../../build/animation-reference
 then the clips.lua and export.lua commands in clean/README.md.
 """
-import argparse, json, os, shutil, subprocess, sys, tempfile
+import argparse, hashlib, json, os, shutil, subprocess, sys, tempfile
 import numpy as np
 from PIL import Image, ImageDraw
 
@@ -194,6 +194,18 @@ def main():
     meta_path = os.path.join(OUT, "stretch.json")
     old = json.load(open(meta_path)) if os.path.exists(meta_path) and not a.refit else {}
     fits = {"upper": old.get("fits", {}).get("upper", {}), "legs": old.get("fits", {}).get("legs", {})}
+    # The sheets are not in the repository; their hashes say whether these are the ones the
+    # kept fits were found on.
+    sources = {}
+    for name in (STRETCH_SHEET, LEGS_SHEET):
+        path = os.path.join(a.sheets, name)
+        if not os.path.exists(path):
+            sys.exit(f"stretch: {path} is missing (see clean/README.md, 기지개)")
+        with open(path, "rb") as fh:
+            sources[name] = hashlib.sha256(fh.read()).hexdigest()
+        known = old.get("sources", {}).get(name)
+        if known and known != sources[name]:
+            sys.exit(f"stretch: {name} is not the sheet the kept fits were found on; run with --refit")
 
     L = rest_layers(a.aseprite)
     base, tail, halo, body = L["base"], L["hair tail"], L["halo"], L["body"]
@@ -275,7 +287,7 @@ def main():
             f["legs"] = f"legs-{l}"
         frames.append(f)
     meta = {"note": "written by tools/stretch.py; clips.lua builds the stretch clip from frames",
-            "legsZone": list(LEGS), "fits": fits, "faces": {str(k): v for k, v in faces.items()}, "frames": frames}
+            "sources": sources, "legsZone": list(LEGS), "fits": fits, "faces": {str(k): v for k, v in faces.items()}, "frames": frames}
     with open(meta_path, "w", encoding="utf-8") as fh:
         json.dump(meta, fh, indent=1)
     print(f"stretch: {len(frames)} frames, {sum(f['ms'] for f in frames)} ms, faces {faces}")
