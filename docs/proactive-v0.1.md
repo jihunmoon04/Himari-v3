@@ -582,3 +582,11 @@ P1·P2 해결 확인. 문서 정합성 둘과 구현 주의 하나:
 - **P2-1 같은 문구의 고리에 새 알림:** `memory_save`의 "Already saved" 검사가 알림을 보지 않아, 이미 있는 고리를 같은 문구와 `remind_at`으로 다시 저장하면 알림이 붙지 않았다. 이제 알림이 주어졌고 그 고리의 것과 다르면 그 고리의 수정으로 쓴다(글은 그 고리의 것, `due`는 주지 않으면 그 고리의 것, "Updated m1"). 알림 없이 같은 문구면 예전처럼 "Already saved".
 - **P2-2 자동 기억이 기다리는 알림을 지움:** 알림이 `scheduled`·`claimed`인 고리는 자동 기억이 **잊거나(`FORGET`) 고리 아닌 것으로 바꾸지(`UPDATE`의 다른 범주)** 못한다 — Data의 `decide_item`이 `reminder_pending`으로 거절하고(권위), 계획 단계도 `forget`을 미리 떨어뜨린다. 고리인 채로 글만 고치는 것은 된다(알림은 지켜짐). 사용자와 모델의 `memory_forget`은 그대로 지울 수 있다. 알림을 전한 뒤에는 예전 규칙.
   - 같이 고친 것: 메모리 백엔드가 자동 기억을 적용할 때 노트를 전달 상태 없이 읽고 있었다(SQLite는 읽음) — 이제 같은 상태로 판정한다.
+
+### 19.10 앱 (`feat/proactive-app`, §10)
+
+- `JobOrigin`(새, WPF 밖이라 ContractTests가 Linux에서 시험): `IsOwn(origin, device)` — `device`나 **`wake`**이고 이 기기를 이름 지음; `IsWake`; `Follow(current, conversation, draft)` — 지금 보는 대화가 아니고 입력 중이 아닐 때만 옮김.
+- `Streams.cs`: `job started`가 이 기기의 wake이고 다른 대화면 `Follow`일 때 `RefreshConversations(그 대화)`로 옮기고, 아니면 상태 줄("히마리가 다른 대화에서 말을 걸었어요. 대화 목록에서 열 수 있어요."). 그다음은 자기 작업과 같은 길(`RecoverMoveJob`, `StartLive` → 말풍선·표정·이동). 재연결의 `hello`/`activity`도 `IsOwn`으로 wake 작업의 `live`를 다시 연다.
+- `HistoryReader`: wake 이벤트를 "(히마리가 먼저 말을 걸었어요)" 한 줄로.
+- 설계의 "입력 중이면 말풍선만 띄우고 누르면 옮김"은 상태 줄 알림으로 줄였다(말풍선은 그 대화의 `live`에 묶여 있어 다른 대화의 말을 띄우면 지금 대화의 말풍선과 섞인다). 사용자가 그 대화를 열면 이어지는 `live`나 기록으로 본다.
+- 확인: 앱·UiTests·ContractTests가 Linux의 .NET 10 SDK로 경고 없이 빌드(기존 `confirmResend` 경고 하나만), ContractTests 통과. UiTests와 실제 PC 확인은 Windows에서(소유자).

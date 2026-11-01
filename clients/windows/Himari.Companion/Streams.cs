@@ -39,6 +39,13 @@ public partial class MainWindow
                         string? id = Str(data, "conversation"), state = Str(data, "state");
                         if (state == "started" && IsOwn(Prop(data, "origin")) && id is not null)
                         {
+                            if (JobOrigin.IsWake(Prop(data, "origin")) && id != currentConversation)
+                            {
+                                // V3-P87 §10: HIMARI speaks first in that conversation. Go there unless the
+                                // user is typing; then the text stays where it is and the status tells.
+                                if (JobOrigin.Follow(currentConversation, id, Input.Text)) await RefreshConversations(id, ct);
+                                else Status.Text = "히마리가 다른 대화에서 말을 걸었어요. 대화 목록에서 열 수 있어요.";
+                            }
                             await RecoverMoveJob(id, Str(data, "job_id"), local, ct);
                             StartLive(id, local, ct, Str(data, "job_id"));
                         }
@@ -94,7 +101,7 @@ public partial class MainWindow
         bool returned = awaySince is DateTime since && DateTime.UtcNow - since > TimeSpan.FromMinutes(10);
         awaySince = null; return returned;
     }
-    private bool IsOwn(JsonElement origin) => Str(origin, "kind") == "device" && Str(origin, "device_id") == deviceId && deviceId is not null;
+    private bool IsOwn(JsonElement origin) => JobOrigin.IsOwn(origin, deviceId);
     private void CancelLive()
     {
         foreach (var stream in liveStreams.Values) { stream.Cancel(); stream.Dispose(); }

@@ -347,6 +347,17 @@ var pageTwo = JsonSerializer.SerializeToElement(new { items = new[] { new { sequ
 var requestedPages = new List<int>();
 string historyText = await HistoryReader.ReadAsync((after, ct) => { requestedPages.Add(after); return Task.FromResult(after == 0 ? pageOne : pageTwo); }, null, CancellationToken.None);
 Check(requestedPages.SequenceEqual(new[] { 0, 100 }) && historyText.Contains("<hello>") && historyText.Contains("안녕하세요") && !historyText.Contains("private tool result") && !historyText.Contains("[[mood:"), "history pages and display text");
+// V3-P87 §9, §10: a wake in the history, and whose a job is
+var wakeHistory = JsonSerializer.SerializeToElement(new { items = new object[] {
+    new { sequence = 1, kind = "wake", text = "HIMARI reached out · a try" },
+    new { sequence = 2, kind = "assistant_final", display = new { text = "아직 거기 있어?" } } } });
+string wakeText = await HistoryReader.ReadAsync((_, _) => Task.FromResult(wakeHistory), null, CancellationToken.None);
+Check(wakeText == "(히마리가 먼저 말을 걸었어요)\n\n히마리\n아직 거기 있어?\n\n" && !wakeText.Contains("reached out"), "a wake shows as one line before HIMARI's words");
+JsonElement Origin(object value) => JsonSerializer.SerializeToElement(value);
+Check(JobOrigin.IsOwn(Origin(new { kind = "device", device_id = "d1" }), "d1") && JobOrigin.IsOwn(Origin(new { kind = "wake", device_id = "d1" }), "d1"), "a job this device speaks: its message's or a wake on it");
+Check(!JobOrigin.IsOwn(Origin(new { kind = "wake", device_id = "d2" }), "d1") && !JobOrigin.IsOwn(Origin(new { kind = "web" }), "d1") && !JobOrigin.IsOwn(Origin(new { kind = "wake", device_id = "d1" }), null), "another device's wake, the Web, or no device id are not");
+Check(JobOrigin.IsWake(Origin(new { kind = "wake", device_id = "d1" })) && !JobOrigin.IsWake(Origin(new { kind = "device", device_id = "d1" })) && !JobOrigin.IsWake(default), "a wake is told apart");
+Check(JobOrigin.Follow("c1", "c2", "") && JobOrigin.Follow(null, "c2", "  ") && !JobOrigin.Follow("c2", "c2", "") && !JobOrigin.Follow("c1", "c2", "쓰는 중"), "follow a wake to its conversation unless shown already or the user is typing");
 using (var cancelledHistory = new CancellationTokenSource())
 {
     cancelledHistory.Cancel();
