@@ -19,7 +19,7 @@ from himari.common import PrincipalId, TextBlock, TrustedScope
 from himari.data.api import (EventKind, MemoryCategory, MessageOrigin, NoteDates, OriginKind, Wake, WakeKind,
                              WakeReason, parse_note_date)
 from himari.data.sqlite import SqliteData, SqliteStore
-from himari.presence.api import After, Returned, Session, Signals
+from himari.presence.api import After, Returned, Session, Signals, Sleep
 from himari.proactive import ProactiveSettings
 from himari.provider.api import NormalizedFinal
 from himari.provider.scripted import ScriptedAdapter
@@ -359,6 +359,80 @@ def test_a_reminder_is_told_while_the_user_talks_and_is_delivered(tmp_path: Path
             assert (await scheduler.look(ME)).decision.reasons == ()
             status = await app.proactive_status(ME)
             assert status["today"] == 0  # a reminder is not counted toward the day
+        finally:
+            await app.close()
+
+    asyncio.run(scenario())
+
+
+def asleep_signals(sleep: Sleep | None = Sleep.IDLE) -> Signals:
+    return Signals(session=Session.ACTIVE, sleep_known=True, sleep=sleep)
+
+
+async def told_while_asleep(app: Application, adapter: ScriptedAdapter) -> tuple[str, TrustedScope, int]:
+    """V3-P90 §5.1: the character sleeps (idle); a reminder comes due; it is told and marked told."""
+    device = await paired(app)
+    app.hub.subscribe(ME, device)
+    app.hub.signal(ME, device, 0, "Asia/Seoul", asleep_signals(None))
+    scope = TrustedScope(ME, await app.create_conversation(ME))
+    await app.send(scope, "나 잠깐 나갔다 올게", origin=MessageOrigin(OriginKind.WEB))
+    await app.runner.wait(scope)
+    app.hub.signal(ME, device, 700, "Asia/Seoul", asleep_signals())
+    at = parse_note_date((datetime.now(UTC) - timedelta(minutes=1)).isoformat(timespec="minutes"), "UTC")
+    assert at is not None
+    note = await app.data.save_memory(ME, MemoryCategory.LOOP, "사용자는 저녁 약을 먹어야 한다",
+                                      dates=NoteDates(remind_at=at[0], remind_instant=at[1]))
+    scheduler = app.scheduler
+    assert scheduler is not None
+    look = await scheduler.look(ME)
+    assert look.outcome == "spoke", look
+    await settled(app, scope)
+    wake = (await app.data.read_events(scope))[-2]
+    assert isinstance(wake.payload, Wake)
+    assert wake.payload.reasons == (WakeReason(WakeKind.REMINDER, memory_id=note.memory_id, asleep=True),)
+    assert (await app.data.read_memory(ME, note.memory_id)).remind_state == "told"
+    return device, scope, note.memory_id
+
+
+def test_a_reminder_told_while_asleep_is_seen_at_a_return_soon_after(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        adapter = answers("다녀와!", "약 먹을 시간이야!")
+        app = await opened(tmp_path / "data", adapter)
+        try:
+            device, _, memory_id = await told_while_asleep(app, adapter)
+            app.hub.signal(ME, device, 0, "Asia/Seoul", asleep_signals(None))  # the user comes to the bubble
+            scheduler = app.scheduler
+            assert scheduler is not None
+            for _ in range(50):
+                if ME in scheduler._returns:
+                    break
+                await asyncio.sleep(0.01)
+            look = await scheduler.look(ME)
+            assert look.decision.reasons == () and look.decision.seen == (memory_id,)
+            assert (await app.data.read_memory(ME, memory_id)).remind_state == "delivered"
+        finally:
+            await app.close()
+
+    asyncio.run(scenario())
+
+
+def test_a_reminder_told_while_asleep_is_seen_by_a_message_in_its_conversation(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        adapter = answers("다녀와!", "약 먹을 시간이야!", "응 잘했어")
+        app = await opened(tmp_path / "data", adapter)
+        try:
+            _, scope, memory_id = await told_while_asleep(app, adapter)
+            other = TrustedScope(ME, await app.create_conversation(ME))
+            await app.send(other, "다른 얘기", origin=MessageOrigin(OriginKind.WEB))
+            await app.runner.wait(other)
+            scheduler = app.scheduler
+            assert scheduler is not None
+            await scheduler.look(ME)
+            assert (await app.data.read_memory(ME, memory_id)).remind_state == "told"  # elsewhere: not seen
+            await app.send(scope, "먹었어", origin=MessageOrigin(OriginKind.WEB))
+            await app.runner.wait(scope)
+            await scheduler.look(ME)
+            assert (await app.data.read_memory(ME, memory_id)).remind_state == "delivered"
         finally:
             await app.close()
 

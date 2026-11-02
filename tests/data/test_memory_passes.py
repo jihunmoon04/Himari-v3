@@ -830,6 +830,25 @@ def test_the_cleanup_keeps_a_loop_until_its_reminder_is_told() -> None:
     asyncio.run(scenario())
 
 
+def test_the_cleanup_keeps_a_loop_told_while_the_character_slept() -> None:
+    """V3-P90 §5.1 (re-review P1-5): told to a sleeping device and not seen yet, it still waits."""
+    from himari.data.api import WakeKind, WakeReason, WakeStatus
+
+    async def scenario() -> None:
+        _, data = fresh()
+        now = datetime.now(UTC).replace(second=0, microsecond=0)
+        later = now + timedelta(days=200)
+        dated = await reminded_loop(data, "Dentist.", later, ("2026-01-01", now - timedelta(days=20)))
+        wake = await data.begin_wake(SCOPE, (WakeReason(WakeKind.REMINDER, memory_id=dated, asleep=True),), "d1",
+                                     reminders=(dated,))
+        await data.end_wake(ME, wake.payload.wake_id, WakeStatus.ANSWERED)  # type: ignore[union-attr]
+        assert (await data.clean_memories(later + timedelta(days=1))).stale_loops == 0
+        await data.see_reminders(ME, (dated,))
+        assert (await data.clean_memories(later + timedelta(days=1))).stale_loops == 1
+
+    asyncio.run(scenario())
+
+
 def test_undoing_an_automatic_rewrite_keeps_the_reminder() -> None:
     """P1-2: the record a pass keeps for Undo holds the reminder; an older record without one reads as before."""
     async def scenario() -> None:

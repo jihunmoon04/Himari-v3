@@ -137,6 +137,7 @@ from himari.data.api import (
     UserMessage,
     REMINDER_ATTEMPTS,
     Wake,
+    WakeKind,
     WakeReason,
     WakeRecord,
     WakeStatus,
@@ -1452,9 +1453,10 @@ class InMemoryData:
         for key in keys:
             if (scope.principal_id, key) in self._store.wake_keys:
                 raise DataError(DataErrorCode.DUPLICATE_IDENTITY, f"wake key {key!r} was taken")
-        for memory_id in reminders:
+        for memory_id in reminders:  # V3-P90 §5.1: a told one is told again
             state = self._store.reminders.get((scope.principal_id, memory_id))
-            if state is None or state[0] != "scheduled" or (scope.principal_id, memory_id) not in self._store.memories:
+            if state is None or state[0] not in ("scheduled", "told") \
+                    or (scope.principal_id, memory_id) not in self._store.memories:
                 raise DataError(DataErrorCode.INVALID_STATE_TRANSITION, f"reminder m{memory_id} is not waiting")
         wake_id = self._store.new_id("wake")  # nothing above wrote: one step, as the transaction
         for key in keys:
@@ -1478,12 +1480,16 @@ class InMemoryData:
         ended = replace(record, status=status, asked=asked and status is WakeStatus.ANSWERED,
                         ended_at=datetime.now(UTC))
         self._store.wakes[wake_id] = ended
+        asleep = {r.memory_id for r in record.reasons if r.kind is WakeKind.REMINDER and r.asleep}
         for key, (state, claimer, attempts) in list(self._store.reminders.items()):
             if key[0] != principal or state != "claimed" or claimer != wake_id:
                 continue  # §5.3 (re-review P2): only what this very wake still claims
             if status is WakeStatus.ANSWERED:
-                self._store.reminders[key] = ("delivered", None, attempts)
+                told = key[1] in asleep  # V3-P90 §5.1: told to a sleeping device, not seen yet
+                self._store.reminders[key] = ("told", wake_id, attempts) if told else ("delivered", None, attempts)
                 self._store.reminded_at[key] = ended.ended_at or datetime.now(UTC)
+            elif key in self._store.reminded_at:  # V3-P90 §5.1: told before, so told still
+                self._store.reminders[key] = ("told", wake_id, attempts)
             else:
                 self._store.reminders[key] = ("missed" if attempts + 1 >= REMINDER_ATTEMPTS else "scheduled", None,
                                               attempts + 1)
@@ -1509,11 +1515,27 @@ class InMemoryData:
         missed = 0
         for (owner, memory_id), note in self._store.memories.items():
             state = self._store.reminders.get((owner, memory_id))
-            if owner == principal and state is not None and state[0] == "scheduled" \
+            if owner == principal and state is not None and state[0] in ("scheduled", "told") \
                     and note.remind_instant is not None and note.remind_instant < before:
                 self._store.reminders[(owner, memory_id)] = ("missed", None, state[2])
                 missed += 1
         return missed
+
+    async def told_reminders(self, principal: PrincipalId) -> tuple[tuple[int, str, datetime], ...]:
+        return tuple(sorted((memory_id, claimer, self._store.reminded_at[(owner, memory_id)])
+                            for (owner, memory_id), (state, claimer, _) in self._store.reminders.items()
+                            if owner == principal and state == "told" and claimer is not None
+                            and (owner, memory_id) in self._store.memories
+                            and (owner, memory_id) in self._store.reminded_at))
+
+    async def see_reminders(self, principal: PrincipalId, memory_ids: Sequence[int]) -> int:
+        seen = 0
+        for memory_id in dict.fromkeys(memory_ids):
+            state = self._store.reminders.get((principal, memory_id))
+            if state is not None and state[0] == "told":
+                self._store.reminders[(principal, memory_id)] = ("delivered", None, state[2])
+                seen += 1
+        return seen
 
     async def release_keys(self, principal: PrincipalId, wake_id: str) -> None:
         for key in [k for k, w in self._store.wake_keys.items() if k[0] == principal and w == wake_id]:

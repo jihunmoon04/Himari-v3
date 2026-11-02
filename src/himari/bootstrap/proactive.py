@@ -40,9 +40,11 @@ from himari.proactive import loop_moment as loop_moment
 from himari.proactive import (
     RETURN_WAIT,
     TALKING,
+    TALKING_KINDS,
     Decision,
     Return,
     Situation,
+    Told,
     candidate_keys,
     candidates,
     decide,
@@ -305,7 +307,11 @@ class ProactiveScheduler:
                                                   away_minutes(returned, known))
 
             task.add_done_callback(keep)
-        self._poke(RETURN_WAIT.total_seconds() + 1)  # §5.2: look again once the user had their 20 seconds
+        state = self._hub.states(principal).get(returned.device_id)
+        if state is not None and state.sleeps:  # V3-P90 §5.2: the app checked the wake already
+            self._poke(1)
+        else:
+            self._poke(RETURN_WAIT.total_seconds() + 1)  # §5.2: look again once the user had their 20 seconds
 
     # --- the job ---
 
@@ -328,13 +334,41 @@ class ProactiveScheduler:
                                                                    recent.last_sequence)
         loops = tuple(m for m in await self._data.list_memories(principal) if m.category is MemoryCategory.LOOP)
         wakes = await self._data.wakes_since(principal, now - WAKES_READ)
+        told = tuple(t for t, _ in await self._told(principal))
         return Situation(
             now=now, settings=self.settings, zone=zone, device_id=device_id, device=device,
             quiet_until=await self._devices.quiet(principal),
             last_user_message_at=await self._data.last_user_message_at(principal),
             working=bool(self._runner.running(principal)), unanswered_wake=unanswered,
             wakes=wakes, loops=loops, returned=self._returns.get(principal),
-            said=await self._said(principal, wakes)), recent
+            said=await self._said(principal, wakes), told=told), recent
+
+    async def _told(self, principal: PrincipalId) -> list[tuple[Told, WakeRecord]]:
+        """V3-P90 §5.1: the reminders told to a sleeping device and not seen yet, with the
+        wake that told them. One whose wake cannot be read is left out (and stays told)."""
+        out: list[tuple[Told, WakeRecord]] = []
+        for memory_id, wake_id, at in await self._data.told_reminders(principal):
+            try:
+                record = await self._data.read_wake(principal, wake_id)
+            except DataError:
+                continue
+            out.append((Told(memory_id, record.device_id, at), record))
+        return out
+
+    async def _see_answered(self, principal: PrincipalId) -> None:
+        """V3-P90 §5.1: a told reminder is seen once the user wrote in the conversation it was
+        told in (after its wake). A message elsewhere is not: the user may not have seen it."""
+        seen: list[int] = []
+        for told, record in await self._told(principal):
+            try:
+                after = await self._data.read_events(TrustedScope(principal, record.conversation_id),
+                                                     after_sequence=record.event_sequence, limit=TAIL_EVENTS)
+            except DataError:
+                continue
+            if any(isinstance(e.payload, UserMessage) for e in after):
+                seen.append(told.memory_id)
+        if seen:
+            await self._data.see_reminders(principal, seen)
 
     async def _said(self, principal: PrincipalId, wakes: Sequence[WakeRecord]) -> frozenset[str]:
         """PR #156 re-review P2-2: of the failed wakes, those whose turn left assistant
@@ -358,10 +392,13 @@ class ProactiveScheduler:
     async def look(self, principal: PrincipalId) -> Look:
         if missed := await self._data.miss_reminders(principal, self._clock() - REMIND_LATE):  # §5.3 (Q9)
             log.info("%d reminder(s) missed", missed)
+        await self._see_answered(principal)
         situation, recent = await self.situation(principal)
         found, expired, _ = candidates(situation)
         taken = await self._data.taken_keys(principal, candidate_keys(found, expired))
         decision = decide(situation, taken)
+        if decision.seen:  # V3-P90 §5.1: the user came back to the bubble left up
+            await self._data.see_reminders(principal, decision.seen)
         if decision.expired:
             await self._data.expire_keys(principal, decision.expired)
         outcome = decision.blocked or "nothing"
@@ -379,8 +416,8 @@ class ProactiveScheduler:
         # the last await is here, so these checks and the Runner's (no job of the
         # principal anywhere, before its first await) hold together.
         said = await self._data.last_user_message_at(principal)
-        only_reminders = all(r.kind is WakeKind.REMINDER for r in decision.reasons)
-        if not only_reminders and said is not None and self._clock() - said < TALKING:
+        held = any(r.kind in TALKING_KINDS for r in decision.reasons)  # V3-P90 §5: not a reminder, not a return
+        if held and said is not None and self._clock() - said < TALKING:
             return "talking"
         if self._hub.current(principal) != device_id:
             return "no_device"

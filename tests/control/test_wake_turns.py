@@ -59,6 +59,29 @@ def test_a_wake_turn_stops_at_its_run_cap() -> None:
     assert len(provider.prepared_inputs) > WAKE_RUNS
 
 
+
+def test_a_wake_turn_runs_only_tools_that_read() -> None:
+    """V3-P90 §5.6: the user did not ask for this turn; the next one, theirs, runs everything."""
+    from testkit import RecordingTool
+
+    from himari.tool.api import EffectProfile
+
+    reader = RecordingTool("look")
+    writer = RecordingTool("write", effect=EffectProfile.SCOPED_WRITE)
+    step = calls(("look", {}), ("write", {}))
+    rt, _ = runtime([step, final("날씨 좋네!"), step, final("적어 뒀어")], tools=(reader, writer))
+    runner = BackgroundRunner(rt.driver)
+
+    async def scenario() -> None:
+        await runner.submit_wake(SCOPE, TRY, "d1")
+        await runner.wait(SCOPE)
+        assert len(reader.invocations) == 1 and writer.invocations == []
+        await runner.submit(SCOPE, user("적어 줘"))
+        await runner.wait(SCOPE)
+        assert len(reader.invocations) == 2 and len(writer.invocations) == 1
+
+    asyncio.run(scenario())
+
 def test_a_wake_opens_only_in_a_settled_conversation() -> None:
     """§4.1: a waiting question is not a place to speak first; nothing is recorded."""
     rt, _ = runtime([calls((ASK_USER_TOOL_ID, {"question": "어디로?"}))])

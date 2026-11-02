@@ -122,7 +122,7 @@ class Devices(Protocol):
 
 SIGNAL_SECONDS = 120.0  # connected: its stream open and a signal within this
 REOPEN_SECONDS = 30.0  # still connected this long after its stream closed (a reopen's gap)
-CANDIDATE_SECONDS = 600.0  # the current device had input within this
+CANDIDATE_SECONDS = 600.0  # the current device had input within this (V3-P90: unless it sends ``sleep``)
 SWITCH_SECONDS = 60.0  # another device takes over only once the current one had none for this
 TICK_SECONDS = 15.0  # the current device is decided again this often: time alone makes the user away
 MAX_IDLE_SECONDS = 30 * 24 * 3600  # a signal's idle_seconds is cut to this
@@ -138,6 +138,13 @@ NOTICE_SECONDS = 10.0  # V3-P88 §8.1: a principal's ``devices`` notices come at
 class Session(Enum):
     ACTIVE = "active"
     LOCKED = "locked"
+
+
+class Sleep(Enum):
+    """V3-P90 §3.1: why the app's character sleeps. An app that sends ``sleep`` decides it."""
+
+    IDLE = "idle"  # no input for a while (the screen may be on)
+    DISPLAY_OFF = "display_off"
 
 
 class After(Enum):
@@ -183,6 +190,10 @@ class Signals(DeepFrozen):
     media: MediaSignal | None = None
     mic_or_camera: bool | None = None
     after: After | None = None
+    # V3-P90 §3.1: an app that sends ``sleep`` (``sleep_known``) decides when its character
+    # sleeps; None with it known is awake. One that does not keeps the V3-P88 rules.
+    sleep_known: bool = False
+    sleep: Sleep | None = None
 
 
 @dataclass(frozen=True)
@@ -198,11 +209,13 @@ class EndedActivity(DeepFrozen):
 @dataclass(frozen=True)
 class Returned(DeepFrozen):
     """§3: the latest return — a device that became current by an unlock, a
-    wake, or (the fallback) by connecting again after it was gone."""
+    wake, or (the fallback) by connecting again after it was gone. V3-P90 §3.3:
+    an app that sends ``sleep`` returns when it wakes from sleep ("wake", or
+    "unlock" when the unlock woke it)."""
 
     device_id: str
     at: datetime
-    via: str  # "unlock", "resume", "reconnect"
+    via: str  # "unlock", "resume", "reconnect", "wake"
 
 
 @dataclass(frozen=True)
@@ -220,6 +233,8 @@ class DeviceState(DeepFrozen):
     media: MediaSignal | None = None
     mic_or_camera: bool | None = None
     before: EndedActivity | None = None
+    sleeps: bool = False  # V3-P90 §3.2: it sends ``sleep`` (it stays current while asleep)
+    sleep: str | None = None  # "idle", "display_off"; None: awake (or an app that does not send it)
 
 
 @dataclass(frozen=True)

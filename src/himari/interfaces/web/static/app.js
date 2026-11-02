@@ -3461,6 +3461,8 @@ function reminderLine(note) {
     return el("span", "memory-date memory-remind", `Reminds you at ${shortTime(note.remind_instant)}`);
   if (note.remind_state === "delivered" && note.reminded_at)
     return el("span", "memory-date", `Reminded ${shortTime(note.reminded_at)}`);
+  if (note.remind_state === "told" && note.reminded_at)  // V3-P90 §5.1: said while the character slept
+    return el("span", "memory-date memory-remind", `Reminded ${shortTime(note.reminded_at)}, not seen yet`);
   if (note.remind_state === "missed" && note.remind_instant)
     return el("span", "memory-date is-overdue", `Missed reminder at ${shortTime(note.remind_instant)}`);
   if (note.checks_in_at && new Date(note.checks_in_at) > new Date())

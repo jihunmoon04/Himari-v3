@@ -111,6 +111,7 @@ from himari.presence.api import (
     QuietTooLong,
     Session,
     Signals,
+    Sleep,
     TooManyStreams,
     is_device_token,
 )
@@ -306,7 +307,8 @@ class PresenceBody(_Body):
     """V3-P83 §5: seconds since the last input anywhere on the device (cut to
     30 days), and its IANA time zone (an unknown one is ignored). V3-P88:
     the rest of the device's snapshot (§2.1) — an absent field is unknown,
-    a null ``activity``/``media`` is none."""
+    a null ``activity``/``media`` is none. V3-P90 §3.1: ``sleep`` (null:
+    awake) from an app that decides when its character sleeps."""
 
     idle_seconds: float = Field(ge=0, allow_inf_nan=False)
     time_zone: str | None = Field(default=None, max_length=64)
@@ -315,6 +317,7 @@ class PresenceBody(_Body):
     activity: ActivityBody | None = None
     media: MediaBody | None = None
     mic_or_camera: StrictBool | None = None
+    sleep: Literal["idle", "display_off"] | None = None
 
 
 class QuietBody(_Body):
@@ -352,7 +355,8 @@ def presence_signals(body: PresenceBody) -> Signals:
     return Signals(session=None if body.session is None else Session(body.session),
                    activity_known="activity" in sent, activity=activity,
                    media_known="media" in sent, media=media, mic_or_camera=body.mic_or_camera,
-                   after=None if body.after is None else After(body.after))
+                   after=None if body.after is None else After(body.after),
+                   sleep_known="sleep" in sent, sleep=None if body.sleep is None else Sleep(body.sleep))
 
 
 def signals_view(state: DeviceState | None) -> dict[str, Any]:
@@ -369,6 +373,8 @@ def signals_view(state: DeviceState | None) -> dict[str, Any]:
                                                   if v is not None}}
     if state.mic_or_camera is not None:
         view["mic_or_camera"] = state.mic_or_camera
+    if state.sleeps:  # V3-P90 §3.1
+        view["sleep"] = state.sleep
     if (before := state.before) is not None:
         view["before"] = {"category": before.category, "lasted_seconds": int(before.lasted_seconds),
                           "ended_seconds_ago": int(before.ended_seconds_ago),
@@ -2535,7 +2541,8 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
                 "moods": list(MOODS), "current_device": application.hub.current(by.principal),
                 "recent_conversation": None if recent is None else {"id": recent.conversation_id,
                                                                     "title": recent.title},
-                "features": {"presence_signals": 1},  # V3-P88 §14: an app sends the new fields only then
+                # V3-P88 §14, V3-P90 §3.1: an app sends the new fields only then
+                "features": {"presence_signals": 1, "sleep_signals": 1},
                 "quiet_until": _time(quiet)}
 
     @app.post("/api/device/presence", status_code=204)

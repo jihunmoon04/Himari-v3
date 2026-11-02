@@ -20,6 +20,12 @@ before too (review C1). Whatever the Web's Devices screen shows —
 signals, connected, current — changes the principal's revision (review
 B1), told to the Web streams only as ``devices`` with no content, at most
 every NOTICE_SECONDS but never losing the last change (§8.1).
+
+Sleep (V3-P90 §3): an app that sends ``sleep`` decides when its character
+sleeps. Its device stays a candidate while asleep (connected, unlocked),
+the input a sleeping signal carries is not its last input (a login, a
+bumped mouse: §3.4), and waking from sleep is a return that takes over
+the current device like an unlock.
 """
 
 from __future__ import annotations
@@ -45,6 +51,7 @@ from himari.presence.api import (
     SWITCH_SECONDS,
     TICK_SECONDS,
     ActivitySignal,
+    After,
     DeviceState,
     EndedActivity,
     MediaSignal,
@@ -128,13 +135,15 @@ class _Device:
     back: bool = True  # gone since it was last current: becoming current is a return ("reconnect")
     after: tuple[str, float] | None = None  # an unlock or wake not yet taken (review B2): which, when
     seen: tuple[bool, bool] = (False, False)  # connected and current as the Web was last told
+    sleeps: bool = False  # V3-P90: its last signal carried ``sleep``
+    sleep: str | None = None  # asleep ("idle", "display_off"); None: awake
 
 
 def _shown(device: _Device) -> tuple[object, ...]:
     """What the Web shows of a device's signals, but for the running time (counted when read)."""
     activity = None if device.activity is None else replace(device.activity, for_seconds=0.0)
     before = None if device.before is None else (device.before.category, device.before.app, device.before.ended_at)
-    return (device.locked, activity, device.media, device.mic_or_camera, before)
+    return (device.locked, activity, device.media, device.mic_or_camera, before, device.sleep)
 
 
 class PresenceHub:
@@ -212,21 +221,37 @@ class PresenceHub:
         device = self._device(principal, device_id)
         shown = _shown(device)
         device.signal_at = now
-        device.input_at = now - min(max(idle_seconds, 0.0), MAX_IDLE_SECONDS)
+        resting = device.sleeps and (device.locked or device.sleep is not None)  # before this signal
+        asleep = snapshot.sleep_known and snapshot.sleep is not None
+        # V3-P90 §3.4: a sleeping signal's input is not the last input — but the one that
+        # puts an awake device to sleep carries the input before the sleep, and is kept
+        counted = not asleep or (device.sleeps and not resting and not device.gone)
+        if counted:
+            device.input_at = now - min(max(idle_seconds, 0.0), MAX_IDLE_SECONDS)
         if time_zone is not None and (self._time_zones is None or self._time_zones(time_zone)):
             device.time_zone = time_zone  # an unknown name is ignored (§5)
         self._take(device, snapshot, now)
         device.gone = False
-        if snapshot.after is not None and not device.locked:
+        device.sleeps = snapshot.sleep_known
+        device.sleep = snapshot.sleep.value if asleep and snapshot.sleep is not None and not device.locked else None
+        if device.sleeps:
+            # V3-P90 §3.2–§3.3: waking from sleep (or from the lock) takes over and is the
+            # return; an unlock that woke it is named so. A resume alone is neither.
+            if resting and not device.locked and device.sleep is None:
+                device.after = ("unlock" if snapshot.after is After.UNLOCK else "wake", now)
+            elif device.locked or device.sleep is not None:
+                device.after = None
+        elif snapshot.after is not None and not device.locked:
             device.after = (snapshot.after.value, now)  # taken when the device can be current (review B2)
         elif device.locked:
             device.after = None
         if _shown(device) != shown:
             self._changed(principal)
         self._decide(principal)
-        if self.on_input is not None:  # after the return (if any) was told: its away ends before this input
+        if self.on_input is not None and counted and device.input_at is not None:
+            # after the return (if any) was told: its away ends before this input
             self.on_input(principal, device_id, self._wall() - timedelta(seconds=now - device.input_at),
-                          device.locked)
+                          device.locked or asleep)
 
     def _take(self, device: _Device, snapshot: Signals, now: float) -> None:
         """§2.1: the snapshot replaces what was kept; §4.4: an ended activity is kept as the one before."""
@@ -259,7 +284,7 @@ class PresenceHub:
         return DeviceState(device_id, self._connected(principal, device_id, now),
                            None if d.input_at is None else now - d.input_at, d.time_zone,
                            locked=d.locked, activity=activity, media=d.media, mic_or_camera=d.mic_or_camera,
-                           before=before)
+                           before=before, sleeps=d.sleeps, sleep=d.sleep)
 
     def current(self, principal: PrincipalId) -> str | None:
         return self._current.get(principal)
@@ -347,9 +372,11 @@ class PresenceHub:
         if expired:
             self._changed(principal)
         connected = {device_id for device_id in devices if self._connected(principal, device_id, now)}
-        inputs = {device_id: d.input_at for device_id, d in devices.items()
-                  if d.input_at is not None and now - d.input_at <= CANDIDATE_SECONDS and not d.locked
-                  and device_id in connected}
+        # V3-P90 §3.2: a device that sends ``sleep`` stays a candidate while asleep
+        inputs = {device_id: d.input_at if d.input_at is not None else float("-inf")
+                  for device_id, d in devices.items()
+                  if device_id in connected and not d.locked
+                  and (d.sleeps or (d.input_at is not None and now - d.input_at <= CANDIDATE_SECONDS))}
         was = self._current.get(principal)
         chosen = max(inputs, key=lambda device_id: (inputs[device_id], device_id), default=None)
         marked = [device_id for device_id in inputs if devices[device_id].after is not None]
@@ -362,9 +389,10 @@ class PresenceHub:
             if device.after is not None:
                 self._return(principal, Returned(chosen, self._wall(), device.after[0]))
                 device.after = None
-            elif device.back and chosen != was:
+            elif device.back and chosen != was and device.sleep is None:
                 self._return(principal, Returned(chosen, self._wall(), "reconnect"))
-            device.back = False
+            if device.sleep is None:  # asleep, it has not come back yet: its wake will say so
+                device.back = False
         for device_id in connected - {chosen}:
             devices[device_id].back = False  # heard again but not where the user is: not a return later
         if chosen is None:
@@ -393,6 +421,7 @@ class PresenceHub:
         shown = _shown(device)
         device.gone = device.back = True
         device.locked = False
+        device.sleep = None
         device.activity = device.activity_at = device.media = device.mic_or_camera = None
         device.before = device.after = None
         if _shown(device) != shown:

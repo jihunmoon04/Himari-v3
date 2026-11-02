@@ -2,8 +2,13 @@
 
 Every trigger gives a ``Candidate``; ``decide`` keeps those whose key no wake
 took yet, applies the rules and merges what may speak into one wake.
-Reminders (§5.3) take the rules' exceptions: they come with part 2b, the
-rules here know them already.
+
+V3-P90 §5: each kind of wake has only the rules that fit it. A reminder is
+held back only by no device, work and a screen that is off — a sleeping
+character wakes to tell it (then it is ``told`` until the user sees it); a
+return (waking from sleep) by the user's quiet; a loop also by talking, an
+unanswered wake, the quiet hours and the gap. The daily limit is for the
+activity triggers only.
 """
 
 from __future__ import annotations
@@ -29,23 +34,30 @@ from himari.presence.api import DeviceState
 CHECK_IN_WINDOW = timedelta(hours=24)  # §5.1: a loop is spoken of within a day of its moment, else expired
 RETURN_FRESH = timedelta(minutes=10)  # §5.2: a return older than this is not greeted
 RETURN_WAIT = timedelta(seconds=20)  # §5.2: the user may speak first after an unlock
+# V3-P90 §5.2: an app that sends ``sleep`` checked the wake already — no wait, and a
+# return held back is let go sooner
+SLEEP_RETURN_FRESH = timedelta(minutes=3)
+TOLD_SEEN = timedelta(minutes=10)  # V3-P90 §5.1: a return this soon after a told reminder saw it
 TALKING = timedelta(minutes=10)  # §6.1: a user message this recent means the user is talking
 GAME_RECENT = timedelta(minutes=10)  # §5.4: a game that ended this recently
 ACTIVITY_FOCUS = frozenset({"coding", "document", "design", "video"})  # §5.4 (video: owner, 2026-11-01)
+# V3-P90 §5: the kinds the talking rule holds back (a reminder and a return are not)
+TALKING_KINDS = frozenset({WakeKind.LOOP_DUE, WakeKind.FOCUS, WakeKind.GAME_ENDED})
 # §6.4: the order reasons are told in, and kept when over MAX_WAKE_REASONS
 MERGE_ORDER = (WakeKind.REMINDER, WakeKind.LOOP_DUE, WakeKind.FOCUS, WakeKind.GAME_ENDED, WakeKind.RETURNED)
 
 
 @dataclass(frozen=True)
 class ProactiveSettings:
-    """V3-P87 §11, with the owner's numbers (§15; changed 2026-11-01: gap 30 min, focus 30 min)."""
+    """V3-P87 §11, with the owner's numbers (§15; changed 2026-11-01: focus 30 min;
+    V3-P90 §8: gap 15 min, a return after an hour away)."""
 
     enabled: bool = False  # HIMARI_PROACTIVE
     quiet_start: time | None = time(23, 0)  # HIMARI_PROACTIVE_QUIET "23:00-08:00"; None: no quiet hours
     quiet_end: time | None = time(8, 0)
-    gap_minutes: int = 30
-    daily: int = 4
-    return_hours: int = 4  # 0: no greeting on a return
+    gap_minutes: int = 15  # V3-P90: for a loop and the activity triggers
+    daily: int = 4  # the activity triggers only (V3-P90)
+    return_hours: int = 1  # 0: no greeting on a return
     focus_minutes: int = 30  # 0: no FOCUS
     game_minutes: int = 30  # 0: no GAME_ENDED
 
@@ -67,6 +79,15 @@ class Return:
     at: datetime
     via: str
     away_minutes: int | None
+
+
+@dataclass(frozen=True)
+class Told:
+    """V3-P90 §5.1: a reminder told to a sleeping device, not seen yet: by which device, when."""
+
+    memory_id: int
+    device_id: str
+    at: datetime
 
 
 @dataclass(frozen=True)
@@ -98,6 +119,7 @@ class Situation:
     loops: tuple[Memory, ...]
     returned: Return | None
     said: frozenset[str] = frozenset()  # ended wakes (failed) whose turn left assistant output
+    told: tuple[Told, ...] = ()  # V3-P90 §5.1: reminders told to a sleeping device, not seen yet
 
 
 @dataclass(frozen=True)
@@ -112,6 +134,7 @@ class Decision:
     blocked: str | None = None
     held: tuple[Candidate, ...] = ()  # due, but held back by ``blocked`` (or past the reasons' limit)
     next_at: datetime | None = None  # the next loop's moment, for the status
+    seen: tuple[int, ...] = ()  # V3-P90 §5.1: told reminders a return shows the user saw
 
 
 def _minute(moment: datetime) -> str:
@@ -157,38 +180,69 @@ def loop_candidates(loops: Iterable[Memory], now: datetime
     return due, expired, upcoming
 
 
-def _fresh(returned: Return | None, device_id: str | None, now: datetime) -> bool:
-    """§5.2: a return on the device still current, past the user's RETURN_WAIT, not older than RETURN_FRESH."""
-    return returned is not None and returned.device_id == device_id and RETURN_WAIT <= now - returned.at <= RETURN_FRESH
+def _fresh(returned: Return | None, device_id: str | None, now: datetime, sleeps: bool = False) -> bool:
+    """§5.2: a return on the device still current, past the user's RETURN_WAIT, not older than
+    RETURN_FRESH. V3-P90 §5.2: on a device that sends ``sleep``, at once and for SLEEP_RETURN_FRESH."""
+    wait, fresh = (timedelta(0), SLEEP_RETURN_FRESH) if sleeps else (RETURN_WAIT, RETURN_FRESH)
+    return returned is not None and returned.device_id == device_id and wait <= now - returned.at <= fresh
+
+
+def seen_reminders(told: Iterable[Told], returned: Return | None, device_id: str | None, now: datetime,
+                   sleeps: bool = False) -> tuple[int, ...]:
+    """V3-P90 §5.1: told reminders a fresh return shows the user saw — on the device they
+    were told on, within TOLD_SEEN of the telling (the bubble was left up there)."""
+    if returned is None or not _fresh(returned, device_id, now, sleeps):
+        return ()
+    return tuple(t.memory_id for t in told
+                 if t.device_id == returned.device_id and timedelta(0) <= returned.at - t.at <= TOLD_SEEN)
 
 
 def reminder_candidates(loops: Iterable[Memory], returned: Return | None, device_id: str | None,
-                        now: datetime) -> list[Candidate]:
+                        now: datetime, *, sleeps: bool = False, asleep: bool = False,
+                        told: Iterable[Told] = ()) -> list[Candidate]:
     """§5.3: a scheduled reminder whose moment came — on time within REMIND_ON_TIME; after
     that (Q9), late at a fresh return that came after its on-time window, until REMIND_LATE
-    (then Data marks it missed). No key: its delivery state keeps it from repeating."""
+    (then Data marks it missed). No key: its delivery state keeps it from repeating.
+    V3-P90 §5.1: told to a sleeping device (``asleep``), it is marked so; a told one the
+    user did not see is told again (``again``) at a fresh return."""
+    told = tuple(told)
+    fresh = _fresh(returned, device_id, now, sleeps)
+    seen = set(seen_reminders(told, returned, device_id, now, sleeps))
+    told_at = {t.memory_id: t.at for t in told}
     out: list[Candidate] = []
     for note in loops:
         moment = note.remind_instant
-        if note.category is not MemoryCategory.LOOP or note.remind_state != "scheduled" or moment is None \
-                or moment > now:
+        if note.category is not MemoryCategory.LOOP or moment is None or moment > now:
+            continue
+        if note.remind_state == "told":  # again at a return after the telling (not one before it)
+            when = told_at.get(note.memory_id)
+            if fresh and returned is not None and when is not None and returned.at >= when                     and note.memory_id not in seen and now - moment < REMIND_LATE:
+                out.append(Candidate(WakeReason(WakeKind.REMINDER, memory_id=note.memory_id, again=True),
+                                     None, moment))
+            continue
+        if note.remind_state != "scheduled":
             continue
         if now - moment < REMIND_ON_TIME:
-            out.append(Candidate(WakeReason(WakeKind.REMINDER, memory_id=note.memory_id), None, moment))
-        elif now - moment < REMIND_LATE and _fresh(returned, device_id, now) and returned is not None \
+            out.append(Candidate(WakeReason(WakeKind.REMINDER, memory_id=note.memory_id, asleep=asleep),
+                                 None, moment))
+        elif now - moment < REMIND_LATE and fresh and returned is not None \
                 and returned.at >= moment + REMIND_ON_TIME:
             out.append(Candidate(WakeReason(WakeKind.REMINDER, memory_id=note.memory_id, late=True), None, moment))
     return out
 
 
 def return_candidate(returned: Return | None, device_id: str | None, last_user_message_at: datetime | None,
-                     settings: ProactiveSettings, now: datetime) -> Candidate | None:
+                     settings: ProactiveSettings, now: datetime, *, sleeps: bool = False,
+                     told: Iterable[Told] = ()) -> Candidate | None:
     """§5.2 (Q3): greeted when the user was away RETURN_HOURS or more, said nothing
     meanwhile (nor in the RETURN_WAIT after it), on the device that is still the
-    current one, and the record is fresh."""
+    current one, and the record is fresh. V3-P90 §5.2: not when the return shows a
+    reminder told while it slept was seen (the user came to it)."""
     if returned is None or settings.return_hours <= 0 or returned.away_minutes is None:
         return None
-    if not _fresh(returned, device_id, now):
+    if not _fresh(returned, device_id, now, sleeps):
+        return None
+    if seen_reminders(told, returned, device_id, now, sleeps):
         return None
     if returned.away_minutes < settings.return_hours * 60:
         return None
@@ -223,11 +277,18 @@ def activity_candidates(device_id: str | None, device: DeviceState | None, setti
     return out
 
 
+def _sleeps(s: Situation) -> bool:
+    return s.device is not None and s.device.sleeps
+
+
 def candidates(s: Situation) -> tuple[list[Candidate], list[str], datetime | None]:
     """Every trigger's candidate (§5), the loop keys to expire, the next loop moment."""
     due, expired, upcoming = loop_candidates(s.loops, s.now)
-    found = reminder_candidates(s.loops, s.returned, s.device_id, s.now) + due
-    back = return_candidate(s.returned, s.device_id, s.last_user_message_at, s.settings, s.now)
+    asleep = s.device is not None and s.device.sleep is not None
+    found = reminder_candidates(s.loops, s.returned, s.device_id, s.now, sleeps=_sleeps(s), asleep=asleep,
+                                told=s.told) + due
+    back = return_candidate(s.returned, s.device_id, s.last_user_message_at, s.settings, s.now,
+                            sleeps=_sleeps(s), told=s.told)
     if back is not None:
         found.append(back)
     found += activity_candidates(s.device_id, s.device, s.settings, s.now)
@@ -268,18 +329,25 @@ def spoke(record: WakeRecord, said: frozenset[str] = frozenset()) -> bool:
         record.status is WakeStatus.FAILED and record.wake_id in said)
 
 
-def _blocked(s: Situation, reminders_only: bool) -> str | None:
-    """§6.1–§6.2 in order: the first rule that keeps what is due from being spoken.
-    A reminder (``reminders_only``) passes the user's quiet (Q8), the talking
-    rule, an unanswered wake, the quiet hours, the gap and the daily limit."""
+def _blocked(s: Situation, kind: WakeKind) -> str | None:
+    """V3-P90 §5 in order: the first rule that keeps a wake of this ``kind`` from being
+    spoken. A reminder passes all but no device, work and a screen that is off (a
+    sleeping character wakes for it, Q8 of V3-P87 still: past the user's quiet); a
+    return passes all but the user's quiet; the daily limit holds back the activity
+    triggers only."""
     if s.device_id is None:
         return "no_device"
     if s.working:
         return "working"
-    if reminders_only:
-        return None
+    sleep = None if s.device is None else s.device.sleep
+    if kind is WakeKind.REMINDER:
+        return "display_off" if sleep == "display_off" else None
+    if sleep is not None:
+        return "asleep"
     if s.quiet_until is not None and s.quiet_until > s.now:
         return "quiet"
+    if kind is WakeKind.RETURNED:
+        return None
     if s.last_user_message_at is not None and s.now - s.last_user_message_at < TALKING:
         return "talking"
     if s.unanswered_wake:
@@ -290,6 +358,8 @@ def _blocked(s: Situation, reminders_only: bool) -> str | None:
     last = max((w.created_at for w in counted), default=None)
     if last is not None and s.now - last < timedelta(minutes=s.settings.gap_minutes):
         return "gap"
+    if kind is WakeKind.LOOP_DUE:
+        return None
     midnight = local_midnight(s.now, s.zone)
     today = [w for w in counted if w.created_at >= midnight and not _only(w, _REMINDER)]
     if len(today) >= s.settings.daily:
@@ -301,22 +371,24 @@ def decide(s: Situation, taken: frozenset[str] = frozenset()) -> Decision:
     """§5–§6.4: what to speak of now, in one wake, or why not. ``taken``: those of the
     candidates' keys (``candidates``) a wake took or that expired."""
     found, expired, upcoming = candidates(s)
+    seen = seen_reminders(s.told, s.returned, s.device_id, s.now, _sleeps(s))
     due = [c for c in found if not taken.intersection(c.keys)]
     expired_now = tuple(k for k in expired if k not in taken)
     if not due:
-        return Decision(expired=expired_now, next_at=upcoming)
-    reminders = [c for c in due if c.reason.kind is WakeKind.REMINDER]
-    blocked = _blocked(s, reminders_only=False)
-    speakable = due if blocked is None else (reminders if _blocked(s, reminders_only=True) is None else [])
+        return Decision(expired=expired_now, next_at=upcoming, seen=seen)
+    rules = [_blocked(s, c.reason.kind) for c in due]
+    blocked = next((rule for rule in rules if rule is not None), None)
+    speakable = [c for c, rule in zip(due, rules, strict=True) if rule is None]
     if not speakable:
-        return Decision(expired=expired_now, blocked=blocked, held=tuple(due), next_at=upcoming)
+        return Decision(expired=expired_now, blocked=blocked, held=tuple(due), next_at=upcoming, seen=seen)
     ordered = sorted(speakable, key=lambda c: (MERGE_ORDER.index(c.reason.kind), c.since))
     chosen, over = ordered[:MAX_WAKE_REASONS], ordered[MAX_WAKE_REASONS:]
     held = tuple(over) + tuple(c for c in due if c not in speakable)
     return Decision(reasons=tuple(c.reason for c in chosen), keys=tuple(c.key for c in chosen if c.key is not None),
                     reminders=tuple(c.reason.memory_id for c in chosen if c.reason.kind is WakeKind.REMINDER
                                     and c.reason.memory_id is not None),
-                    expired=expired_now, blocked=blocked if held else None, held=held, next_at=upcoming)
+                    expired=expired_now, blocked=blocked if held else None, held=held, next_at=upcoming,
+                    seen=seen)
 
 
 def candidate_keys(found: Sequence[Candidate], expired: Sequence[str]) -> tuple[str, ...]:
