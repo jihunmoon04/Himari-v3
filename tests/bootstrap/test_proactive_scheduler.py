@@ -82,7 +82,7 @@ def test_a_due_loop_is_spoken_of_once(tmp_path: Path) -> None:
             again = await scheduler.look(ME)
             assert again.outcome == "nothing" and again.decision.reasons == ()  # its key is taken
             status = await app.proactive_status(ME)
-            assert status["today"] == 0 and status["daily"] == 4  # V3-P90 §5.4: a loop is not counted
+            assert status["today"] == 0 and status["daily"] == 6  # V3-P90 §7.4: free wakes only
             assert status["last_look"] == {"at": again.at, "outcome": "nothing", "held": []}
         finally:
             await app.close()
@@ -433,6 +433,71 @@ def test_a_reminder_told_while_asleep_is_seen_by_a_message_in_its_conversation(t
             await app.runner.wait(scope)
             await scheduler.look(ME)
             assert (await app.data.read_memory(ME, memory_id)).remind_state == "delivered"
+        finally:
+            await app.close()
+
+    asyncio.run(scenario())
+
+
+def working_signals(minutes: float) -> Signals:
+    from himari.presence.api import TaskSignal
+
+    return Signals(session=Session.ACTIVE, sleep_known=True, task=TaskSignal("work", minutes * 60))
+
+
+def test_a_free_wake_that_passes_leaves_nothing_but_a_count(tmp_path: Path) -> None:
+    """V3-P90 §7: fifteen minutes into a task the model is asked; a pass is never seen, and counts."""
+    async def scenario() -> None:
+        adapter = answers("응", "[[pass]]")
+        app = await opened(tmp_path / "data", adapter)
+        try:
+            device = await paired(app)
+            app.hub.subscribe(ME, device)
+            scope = TrustedScope(ME, await app.create_conversation(ME))
+            await app.send(scope, "일 시작한다", origin=MessageOrigin(OriginKind.WEB))
+            await app.runner.wait(scope)
+            app.hub.signal(ME, device, 0, "Asia/Seoul", working_signals(16))
+            scheduler = app.scheduler
+            assert scheduler is not None
+            # the user's message started the cycle: its first step is fifteen minutes after it
+            scheduler._clock = lambda: datetime.now(UTC) + timedelta(minutes=16)
+            app.hub.signal(ME, device, 0, "Asia/Seoul", working_signals(27))
+            look = await scheduler.look(ME)
+            assert look.outcome == "spoke" and look.decision.reasons[0].kind is WakeKind.FREE, look
+            await settled(app, scope)
+            kinds = [e.kind for e in await app.data.read_events(scope)]
+            assert EventKind.WAKE not in kinds  # passed: it never was
+            status = await app.proactive_status(ME)
+            assert status["today"] == 0 and status["attempts"] == 1
+        finally:
+            await app.close()
+
+    asyncio.run(scenario())
+
+
+def test_a_free_wake_that_speaks_is_shown_and_answered(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        adapter = answers("응", "한참 했네, 물 한 잔 어때?")
+        app = await opened(tmp_path / "data", adapter)
+        try:
+            device = await paired(app)
+            app.hub.subscribe(ME, device)
+            scope = TrustedScope(ME, await app.create_conversation(ME))
+            await app.send(scope, "일 시작한다", origin=MessageOrigin(OriginKind.WEB))
+            await app.runner.wait(scope)
+            scheduler = app.scheduler
+            assert scheduler is not None
+            scheduler._clock = lambda: datetime.now(UTC) + timedelta(minutes=16)
+            app.hub.signal(ME, device, 0, "Asia/Seoul", working_signals(27))
+            assert (await scheduler.look(ME)).outcome == "spoke"
+            await settled(app, scope)
+            wake, answer = (await app.data.read_events(scope))[-2:]
+            assert isinstance(wake.payload, Wake) and answer.kind is EventKind.ASSISTANT_FINAL
+            record = await app.data.read_wake(ME, wake.payload.wake_id)
+            assert record.status.value == "answered"
+            assert "A free wake" in "\n".join(adapter.prepared_inputs[-1].stable_prefix)  # its line, for a checked model
+            status = await app.proactive_status(ME)
+            assert status["today"] == 1 and status["attempts"] == 1
         finally:
             await app.close()
 

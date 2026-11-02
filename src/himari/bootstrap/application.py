@@ -1114,7 +1114,8 @@ class Application:
                 ticker = application.ticker
                 scheduler = ProactiveScheduler(runtime.data, hub, application.devices, runner, application.inputs,
                                                speaking_first, time_zone, zones=zones,
-                                               poke=lambda after: ticker.poke("proactive", after))
+                                               poke=lambda after: ticker.poke("proactive", after),
+                                               free_ok=runtime.driver.free_wake_ok)
                 hub.on_returned = scheduler.returned
                 application.scheduler = scheduler
                 ticker.add("proactive", PROACTIVE_SECONDS, scheduler.run)

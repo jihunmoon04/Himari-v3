@@ -9,7 +9,7 @@ import pytest
 
 from himari.common import ConversationId, PrincipalId
 from himari.data.api import Memory, MemoryCategory, MemoryOrigin, WakeKind, WakeReason, WakeRecord, WakeStatus, parse_note_date
-from himari.presence.api import ActivitySignal, DeviceState, EndedActivity, TaskEnded
+from himari.presence.api import ActivitySignal, DeviceState, EndedActivity, TaskEnded, TaskSignal
 from himari.proactive import (
     CHECK_IN_WINDOW,
     ProactiveSettings,
@@ -402,14 +402,6 @@ def test_a_reminder_comes_first_in_a_merged_wake() -> None:
     assert [r.kind for r in decided.reasons] == [WakeKind.REMINDER, WakeKind.LOOP_DUE, WakeKind.RETURNED]
 
 
-def test_the_day_counts_only_the_old_activity_wakes_once_each() -> None:
-    """PR #163 review P2-1: what the status's day counts — a merged wake once, a loop or a return never."""
-    from himari.proactive import activity_wake
-
-    assert activity_wake(wake(NOW, WakeKind.FOCUS, WakeKind.LOOP_DUE)) and activity_wake(wake(NOW, WakeKind.GAME_ENDED))
-    assert not activity_wake(wake(NOW, WakeKind.RETURNED)) and not activity_wake(wake(NOW, WakeKind.TASK_ENDED))
-
-
 def test_a_told_reminder_with_no_teller_is_told_again_at_the_next_return() -> None:
     """PR #163 re-review P2: its wake is gone, so no return shows it was seen."""
     told = (Told(7, None, NOW - timedelta(minutes=2)),)
@@ -417,3 +409,72 @@ def test_a_told_reminder_with_no_teller_is_told_again_at_the_next_return() -> No
                                loops=(to_remind(state="told"),), told=told))
     assert decided.seen == () and decided.reasons[0] == WakeReason(WakeKind.REMINDER, memory_id=7, again=True)
 
+
+# --- V3-P90 §6.2, §7: the free wake ------------------------------------------------------------
+
+def working(minutes: float, group: str = "work") -> DeviceState:
+    return replace(device(), task=TaskSignal(group, minutes * 60))
+
+
+def free_at(minutes_ago: float, status: WakeStatus = WakeStatus.ANSWERED) -> WakeRecord:
+    at = NOW - timedelta(minutes=minutes_ago)
+    return WakeRecord(f"wf{minutes_ago}", PrincipalId("operator"), ConversationId("c"), 1,
+                      (WakeReason(WakeKind.FREE, group="work", minutes=1, step=1),), "d1", status, False, at, at)
+
+
+def test_the_first_free_wake_comes_fifteen_minutes_into_a_task() -> None:
+    assert decide(situation(device=working(14), free_ok=True)).reasons == ()
+    decided = decide(situation(device=working(16), free_ok=True))
+    assert decided.reasons == (WakeReason(WakeKind.FREE, group="work", minutes=16, step=1),)
+    assert decided.keys == ("free:d1:2026-11-04T06:44Z:1",)
+    assert decide(situation(device=working(16))).reasons == ()  # the model was not checked for it
+    assert decide(situation(device=working(16), free_ok=True, settings=replace(ON, free_steps=()))).reasons == ()
+
+
+def test_the_steps_grow_and_wait_from_the_latest_wake() -> None:
+    """15 → +30 → +60 (the last repeated); a pass is a step; any wake restarts the wait, not the step."""
+    task = working(100)
+    one = free_at(80, WakeStatus.PASSED)  # step 1 at minute 20
+    assert decide(situation(device=task, wakes=(one,), free_ok=True)).reasons[0].step == 2  # 80 ≥ 30
+    two = free_at(29)
+    assert decide(situation(device=task, wakes=(one, two), free_ok=True)).reasons == ()  # step 3 waits 60
+    later = situation(now=NOW + timedelta(minutes=32), device=working(132), wakes=(one, two), free_ok=True)
+    assert decide(later).reasons[0].step == 3
+    looped = (one, replace(free_at(70), wake_id="x"), replace(free_at(61), wake_id="y"))
+    assert decide(situation(device=task, wakes=looped, free_ok=True)).reasons[0].step == 4  # 60 again
+    other = (one, replace(wake(NOW - timedelta(minutes=20), WakeKind.LOOP_DUE), wake_id="loop"))
+    assert decide(situation(device=task, wakes=other, free_ok=True)).reasons == ()  # waits 30 from that loop
+
+
+def test_a_user_message_starts_a_new_cycle_whose_first_step_opens_again() -> None:
+    """PR #162 review P1-8: 09:00 task, 09:15 step 1, 09:25 a message, 09:40 step 1 again — another key."""
+    first = decide(situation(device=working(16), free_ok=True))
+    message = NOW + timedelta(minutes=10)
+    again = situation(now=message + timedelta(minutes=15, seconds=5), device=working(41), free_ok=True,
+                      last_user_message_at=message, wakes=(free_at(-1),))
+    decided = decide(again, frozenset(first.keys))
+    assert decided.reasons[0].step == 1 and decided.keys != first.keys
+
+
+def test_a_free_wake_is_held_by_every_rule_and_its_budget() -> None:
+    """A message also starts a new cycle, so talking never finds one due (the wait runs from it)."""
+    task = working(20)
+    for changes, blocked in (({"device": replace(task, sleeps=True, sleep="idle")}, "asleep"),
+                             ({"now": datetime(2026, 11, 4, 14, 30, tzinfo=UTC)}, "quiet_hours"),  # 23:30 KST
+                             ({"unanswered_wake": True}, "unanswered"),
+                             ({"quiet_until": NOW + timedelta(hours=1)}, "quiet")):
+        decided = decide(situation(**{"device": task, "free_ok": True, **changes}))
+        assert decided.reasons == () and decided.blocked == blocked, changes
+    # earlier today, before this task: six spoke, or twelve opened (passes count toward the cost)
+    spoken = tuple(replace(free_at(20 + 20 * i), wake_id=f"s{i}") for i in range(6))
+    assert decide(situation(device=working(16), wakes=spoken, free_ok=True)).blocked == "daily"
+    assert decide(situation(device=working(16), wakes=spoken[1:], free_ok=True)).reasons != ()
+    passes = tuple(replace(free_at(20 + 20 * i, WakeStatus.PASSED), wake_id=f"p{i}") for i in range(12))
+    assert decide(situation(device=working(16), wakes=passes, free_ok=True)).blocked == "attempts"
+
+
+def test_a_free_wake_goes_alone() -> None:
+    """V3-P90 §7.3: never merged — another wake due goes first, the free one waits."""
+    decided = decide(situation(device=working(16), loops=DUE, free_ok=True))
+    assert [r.kind for r in decided.reasons] == [WakeKind.LOOP_DUE]
+    assert [c.reason.kind for c in decided.held] == [WakeKind.FREE]

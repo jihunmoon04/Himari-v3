@@ -121,7 +121,8 @@ class NoWakes:
         pass
 
     async def resume_wake(self, scope: TrustedScope, wake_id: str, *, stop: StopSignal | None = None,
-                          progress: TurnProgress | None = None, max_runs: int | None = None) -> DriveResult:
+                          progress: TurnProgress | None = None, max_runs: int | None = None,
+                          free: bool = False) -> DriveResult:
         resume = getattr(self, "resume")  # the fake's own
         result: DriveResult = await resume(scope, stop=stop, progress=progress, max_runs=max_runs)
         return result

@@ -72,6 +72,7 @@ def _classify(error: BaseException) -> str:
 UNATTENDED_REASON = "paused: no client was reading this conversation"
 SEEN_SECONDS = 60.0  # V3-P62 O2
 WAKE_RUNS = 3  # V3-P87 §4.2: a server-opened turn stays short
+FREE_RUNS = 2  # V3-P90 §7.3: a free wake — one to look (the screen tool, later), one to speak
 WAKE_YIELD_SECONDS = 10.0  # §4.3: how long a message waits for the wake job it cancels
 
 
@@ -122,6 +123,10 @@ class _JobProgress:
     def report(self, usage: TurnUsage) -> None:
         self._runner._reported(self._key, self._signal, usage)
 
+    def reveal(self) -> None:
+        """V3-P90 §7.3: the free wake decided to speak (Data says so already): show its job now."""
+        self._runner._reveal(self._key, self._signal)
+
     def output_started(self, run_id: RunId) -> None:
         self._runner._live_changed(self._key, self._signal, run_id, lambda live: None, start=True)
 
@@ -154,6 +159,7 @@ class BackgroundRunner:
         self._unattended: dict[_Key, int] = {}  # of them, run while no client read the Conversation
         self._closed: set[ConversationId] = set()  # V3-P65: taking no work
         self._wake_jobs: dict[_Key, str] = {}  # V3-P87: the running (or last) job's wake, by Conversation
+        self._origins: dict[_Key, MessageOrigin | None] = {}  # the running job's origin, for a later reveal
         self._held: set[ConversationId] = set()  # V3-P76: starting no work for now
         self._admitting: dict[ConversationId, int] = {}  # inputs inside driver.accept
         self._admitted: dict[ConversationId, asyncio.Event] = {}  # set when the last one is done
@@ -199,7 +205,8 @@ class BackgroundRunner:
         await asyncio.wait([task], timeout=WAKE_YIELD_SECONDS)  # never cancels the task itself
 
     async def submit_wake(self, scope: TrustedScope, reasons: Sequence[WakeReason], device_id: str, *,
-                          keys: Sequence[str] = (), reminders: Sequence[int] = (), alone: bool = False) -> JobStatus:
+                          keys: Sequence[str] = (), reminders: Sequence[int] = (), alone: bool = False,
+                          free: bool = False) -> JobStatus:
         """V3-P87 §4.1: record the wake (NOT_SETTLED, DataError DUPLICATE_IDENTITY /
         INVALID_STATE_TRANSITION as the driver and Data refuse) and start its
         job, spoken on ``device_id``, at most WAKE_RUNS Runs. BUSY while a job
@@ -227,15 +234,17 @@ class BackgroundRunner:
             # No await from this check to _start below, so a wake job never runs beside
             # another job of the principal.
             await self._driver.withdraw_wake(scope, event.payload.wake_id)
-            self._tell(lambda listener: listener.accepted(scope))  # its Event is there: the views read again
+            if not free:
+                self._tell(lambda listener: listener.accepted(scope))  # its Event is there: the views read again
             raise ControlError(refusal, scope.conversation_id)
-        self._tell(lambda listener: listener.accepted(scope))
+        if not free:  # V3-P90 §7.3: a free wake's Event is not shown until it speaks
+            self._tell(lambda listener: listener.accepted(scope))
         key = self._key(scope)
         self._wake_jobs[key] = event.payload.wake_id
         wake_id = event.payload.wake_id
         return self._start(scope, lambda s, stop, progress: self._driver.resume_wake(
-            s, wake_id, stop=stop, progress=progress, max_runs=WAKE_RUNS),
-                           "wake", MessageOrigin(OriginKind.WAKE, device_id), wake_id=wake_id)
+            s, wake_id, stop=stop, progress=progress, max_runs=FREE_RUNS if free else WAKE_RUNS, free=free),
+                           "wake", MessageOrigin(OriginKind.WAKE, device_id), wake_id=wake_id, hidden=free)
 
     def _check_open(self, scope: TrustedScope) -> None:
         if scope.conversation_id in self._closed:
@@ -343,15 +352,17 @@ class BackgroundRunner:
 
     def _start(self, scope: TrustedScope,
                job: Callable[[TrustedScope, StopSignal, TurnProgress], Awaitable[DriveResult]],
-               name: str, origin: MessageOrigin | None = None, *, wake_id: str | None = None) -> JobStatus:
-        """Synchronous: nothing closes the Conversation between this check and the start."""
+               name: str, origin: MessageOrigin | None = None, *, wake_id: str | None = None,
+               hidden: bool = False) -> JobStatus:
+        """Synchronous: nothing closes the Conversation between this check and the start. ``hidden``
+        (V3-P90 §7.3): a free wake's job — told to no one until it reveals itself."""
         self._check_open(scope)
         key = self._key(scope)
         if wake_id is None:
             self._wake_jobs.pop(key, None)
         previous = self._status.get(key, JobStatus(running=False))
         status = JobStatus(running=True, generation=previous.generation + 1, started_at=datetime.now(UTC),
-                           wake_id=wake_id)
+                           wake_id=wake_id, hidden=hidden)
         self._status[key] = status
         signal = self._signals[key] = StopSignal()
         self.seen(scope)  # the client that started it is connected
@@ -361,8 +372,20 @@ class BackgroundRunner:
         progress = _JobProgress(self, key, signal)
         self._tasks[key] = asyncio.create_task(self._run(key, scope, lambda s: job(s, signal, progress)),
                                                name=f"{name}:{scope.conversation_id}")
-        self._tell(lambda listener: listener.job_started(scope, origin, status))
+        self._origins[key] = origin
+        if not hidden:
+            self._tell(lambda listener: listener.job_started(scope, origin, status))
         return status
+
+    def _reveal(self, key: _Key, signal: StopSignal) -> None:
+        """V3-P90 §7.3: a hidden job shows itself — its job event goes now, its Event is read."""
+        status = self._status.get(key)
+        if self._signals.get(key) is not signal or status is None or not status.hidden:
+            return
+        status = self._status[key] = replace(status, hidden=False)
+        scope, origin = TrustedScope(*key), self._origins.get(key)
+        self._tell(lambda listener: listener.accepted(scope))
+        self._tell(lambda listener: listener.job_started(scope, origin, status))
 
     def _reported(self, key: _Key, signal: StopSignal, usage: TurnUsage) -> None:
         if self._signals.get(key) is not signal:
@@ -370,7 +393,7 @@ class BackgroundRunner:
         self._status[key] = replace(self._status[key], turn_usage=usage)
         new_runs = usage.runs - self._runs.get(key, 0)
         self._runs[key] = usage.runs
-        if new_runs:
+        if new_runs and not self._status[key].hidden:  # V3-P90 §7.3: a hidden job tells nothing
             self._tell(lambda listener: listener.run_ended(TrustedScope(*key)))
         if self._unattended_runs is None:
             return
@@ -463,8 +486,18 @@ class BackgroundRunner:
     def status(self, scope: TrustedScope) -> JobStatus:
         return self._status.get(self._key(scope), JobStatus(running=False))
 
+    def shown_status(self, scope: TrustedScope) -> JobStatus:
+        """What the views are told (V3-P90 §7.3): a hidden job is not running for them."""
+        status = self.status(scope)
+        return replace(status, running=False) if status.hidden and status.running else status
+
     def running(self, principal: PrincipalId) -> Sequence[ConversationId]:
         return tuple(key[1] for key, task in self._tasks.items() if key[0] == principal and not task.done())
+
+    def shown_running(self, principal: PrincipalId) -> Sequence[ConversationId]:
+        """``running`` as the views are told: without a hidden job (V3-P90 §7.3)."""
+        return tuple(cid for cid in self.running(principal)
+                     if not self._status.get((principal, cid), JobStatus(running=False)).hidden)
 
     async def wait(self, scope: TrustedScope) -> JobStatus:
         task = self._tasks.get(self._key(scope))

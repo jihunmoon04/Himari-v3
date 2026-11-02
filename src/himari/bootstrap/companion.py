@@ -91,6 +91,8 @@ class CompanionEvents:
         self._hub.publish(scope.principal_id, "conversation", {"conversation": scope.conversation_id})
 
     def job_ended(self, scope: TrustedScope, status: JobStatus) -> None:
+        if status.hidden:  # V3-P90 §7.3: a free wake that never showed itself ends unseen too
+            return
         self._working.pop((scope.principal_id, scope.conversation_id), None)
         outcome = None if status.result is None else status.result.state.value
         self._hub.publish(scope.principal_id, "job", {"conversation": scope.conversation_id, "state": "ended",

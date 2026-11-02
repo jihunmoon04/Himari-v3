@@ -322,3 +322,64 @@ def test_a_told_reminder_whose_telling_was_purged_has_no_teller() -> None:
     assert asyncio.run(data.told_reminders(SCOPE.principal_id)) == ((memory_id, None, at),)
     assert asyncio.run(data.see_answered_reminders(SCOPE.principal_id)) == 0
 
+
+
+# --- V3-P90 §7.3: a free wake's states --------------------------------------------------------
+
+FREE = (WakeReason(WakeKind.FREE, group="work", minutes=16, step=1),)
+
+
+def free_run(data: InMemoryData | SqliteData, event: object) -> object:
+    from himari.common import RawRepresentation
+    from himari.data.api import EventRef, PromptBasis, RawReceived, RunPreparation
+
+    async def go() -> object:
+        run_id = await data.prepare_run(SCOPE, RunPreparation(b"", "t", RawRepresentation.ADAPTER_SERIALIZED,
+                                                              (EventRef(event.event_id),), PromptBasis(0, 0), "p", "m"))  # type: ignore[attr-defined]
+        await data.mark_dispatch(SCOPE, run_id)
+        await data.record_raw_outcome(SCOPE, run_id, RawReceived(b"", "t"))
+        return run_id
+    return asyncio.run(go())
+
+
+def test_a_free_wake_is_hidden_until_shown_and_gone_once_passed() -> None:
+    store = new_store()
+    data, _ = opened(store)
+    event = asyncio.run(data.begin_wake(SCOPE, FREE, "d1", keys=("free:d1:x:1",)))
+    wake_id = event.payload.wake_id  # type: ignore[union-attr]
+    assert asyncio.run(data.unshown_wakes(SCOPE)) == frozenset({event.sequence})
+    run_id = free_run(data, event)
+    assert asyncio.run(data.wake_of_run(SCOPE, run_id)).wake_id == wake_id  # type: ignore[arg-type,union-attr]
+    asyncio.run(data.finalize_hidden_run(SCOPE, run_id, wake_id, WakeStatus.PASSED))  # type: ignore[arg-type]
+    assert asyncio.run(data.read_wake(SCOPE.principal_id, wake_id)).status is WakeStatus.PASSED
+    assert asyncio.run(data.read_run(SCOPE, run_id)).status.value == "projected"  # type: ignore[arg-type]
+    assert asyncio.run(data.read_events(SCOPE)) == ()  # it never was
+    assert asyncio.run(data.unshown_wakes(SCOPE)) == frozenset()
+    assert asyncio.run(data.wake_of_run(SCOPE, run_id)) is not None  # type: ignore[arg-type]  # still found by its Run
+    assert asyncio.run(data.opened_wakes()) == ()
+    again = data_for(restart(store))
+    assert asyncio.run(again.read_events(SCOPE)) == ()
+
+
+def test_a_shown_free_wake_is_speaking_and_ends_as_any_wake() -> None:
+    store = new_store()
+    data, _ = opened(store)
+    wake_id = asyncio.run(data.begin_wake(SCOPE, FREE, "d1")).payload.wake_id  # type: ignore[union-attr]
+    assert asyncio.run(data.reveal_wake(SCOPE.principal_id, wake_id))
+    assert not asyncio.run(data.reveal_wake(SCOPE.principal_id, wake_id))  # once
+    assert [w.status for w in asyncio.run(data.opened_wakes())] == [WakeStatus.SPEAKING]  # still in progress
+    assert len(asyncio.run(data.read_events(SCOPE))) == 1 and asyncio.run(data.unshown_wakes(SCOPE)) == frozenset()
+    kept = asyncio.run(data.end_wake(SCOPE.principal_id, wake_id, WakeStatus.DROPPED))
+    assert kept.status is WakeStatus.SPEAKING  # a shown wake never becomes hidden
+    assert asyncio.run(data.end_wake(SCOPE.principal_id, wake_id, WakeStatus.ANSWERED)).status is WakeStatus.ANSWERED
+    with pytest.raises(DataError):
+        asyncio.run(data.end_wake(SCOPE.principal_id, wake_id, WakeStatus.SPEAKING))
+
+
+def test_a_free_wake_dropped_before_it_spoke_is_gone_and_cannot_be_shown() -> None:
+    store = new_store()
+    data, _ = opened(store)
+    wake_id = asyncio.run(data.begin_wake(SCOPE, FREE, "d1")).payload.wake_id  # type: ignore[union-attr]
+    assert asyncio.run(data.end_wake(SCOPE.principal_id, wake_id, WakeStatus.DROPPED)).status is WakeStatus.DROPPED
+    assert not asyncio.run(data.reveal_wake(SCOPE.principal_id, wake_id))
+    assert asyncio.run(data.read_events(SCOPE)) == ()

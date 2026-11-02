@@ -8,8 +8,9 @@ held back only by no device, work and a screen that is off — a sleeping
 character wakes to tell it (then it is ``told`` until the user sees it); a
 return (waking from sleep) by the user's quiet; a game or a video that just
 ended (§5.3) also by talking, and is let go, not held, past ENDED_FRESH; a
-loop also by an unanswered wake, the quiet hours and the gap. A long focus
-and a game's end by the program in front (V3-P87 §5.4) are made no more.
+loop also by an unanswered wake, the quiet hours and the gap; a free wake
+(§6.2, §7) by all of those and its day's budget. A long focus and a game's
+end by the program in front (V3-P87 §5.4) are made no more.
 """
 
 from __future__ import annotations
@@ -29,6 +30,7 @@ from himari.data.api import (
     WakeReason,
     WakeRecord,
     WakeStatus,
+    free_wake,
 )
 from himari.presence.api import DeviceState
 
@@ -42,12 +44,11 @@ TOLD_SEEN = timedelta(minutes=10)  # V3-P90 §5.1: a return this soon after a to
 TALKING = timedelta(minutes=10)  # §6.1: a user message this recent means the user is talking
 ENDED_FRESH = timedelta(minutes=3)  # V3-P90 §5.3: a task's end is spoken of this soon, else let go
 ENDED_GROUPS = frozenset({"game", "video"})  # V3-P90 §5.3: the ends the app can tell clearly
-# V3-P90 §5.4: the activity triggers (V3-P87's, made no more), the only ones the daily limit counts
-ACTIVITY_KINDS = frozenset({WakeKind.FOCUS, WakeKind.GAME_ENDED})
 # V3-P90 §5: the kinds the talking rule holds back (a reminder and a return are not)
-TALKING_KINDS = frozenset({WakeKind.LOOP_DUE, WakeKind.TASK_ENDED, WakeKind.FOCUS, WakeKind.GAME_ENDED})
+TALKING_KINDS = frozenset({WakeKind.LOOP_DUE, WakeKind.TASK_ENDED, WakeKind.FREE, WakeKind.FOCUS,
+                           WakeKind.GAME_ENDED})
 # §6.4, V3-P90 §4: the order reasons are told in, and kept when over MAX_WAKE_REASONS
-MERGE_ORDER = (WakeKind.REMINDER, WakeKind.LOOP_DUE, WakeKind.TASK_ENDED, WakeKind.RETURNED)
+MERGE_ORDER = (WakeKind.REMINDER, WakeKind.LOOP_DUE, WakeKind.TASK_ENDED, WakeKind.FREE, WakeKind.RETURNED)
 
 
 @dataclass(frozen=True)
@@ -58,8 +59,10 @@ class ProactiveSettings:
     enabled: bool = False  # HIMARI_PROACTIVE
     quiet_start: time | None = time(23, 0)  # HIMARI_PROACTIVE_QUIET "23:00-08:00"; None: no quiet hours
     quiet_end: time | None = time(8, 0)
-    gap_minutes: int = 15  # V3-P90: for a loop and the activity triggers
-    daily: int = 4  # the activity triggers only (V3-P90)
+    gap_minutes: int = 15  # V3-P90: for a loop and a free wake
+    daily: int = 6  # V3-P90 §7.4: free wakes that spoke, a day
+    attempts: int = 12  # V3-P90 §7.4: free wakes opened (passes too), a day — the cost's limit
+    free_steps: tuple[int, ...] = (15, 30, 60)  # V3-P90 §6.2: minutes to each free wake, the last repeated; (): none
     return_hours: int = 1  # 0: no greeting on a return
     ended_minutes: int = 60  # V3-P90 §5.3: a game or a video this long; 0: no TASK_ENDED
 
@@ -69,7 +72,8 @@ class ProactiveSettings:
             return "off (HIMARI_PROACTIVE=0)"
         quiet = "no quiet hours" if self.quiet_start is None or self.quiet_end is None else \
             f"quiet {self.quiet_start:%H:%M}-{self.quiet_end:%H:%M}"
-        return f"on ({quiet}, gap {self.gap_minutes}m, {self.daily} a day)"
+        free = "no free wakes" if not self.free_steps else f"{self.daily} free a day"
+        return f"on ({quiet}, gap {self.gap_minutes}m, {free})"
 
 
 @dataclass(frozen=True)
@@ -124,6 +128,7 @@ class Situation:
     returned: Return | None
     said: frozenset[str] = frozenset()  # ended wakes (failed) whose turn left assistant output
     told: tuple[Told, ...] = ()  # V3-P90 §5.1: reminders told to a sleeping device, not seen yet
+    free_ok: bool = False  # V3-P90 §7.5: the conversation's model was checked for free wakes
 
 
 @dataclass(frozen=True)
@@ -273,6 +278,28 @@ def task_ended_candidate(device_id: str | None, device: DeviceState | None, sett
                      key, at, aliases)
 
 
+def free_candidate(s: Situation) -> Candidate | None:
+    """V3-P90 §6.2: the same task went on long enough. A cycle starts with the task, or again with a
+    user message after it (the step goes back to the first); each free wake of the cycle (a pass too)
+    is a step; the wait runs from the cycle's start or the latest wake of any kind since. Its key names
+    the cycle's start and the step, so a new cycle opens its first step again (PR #162 review P1-8)."""
+    task = None if s.device is None else s.device.task
+    if not s.free_ok or not s.settings.free_steps or s.device_id is None or task is None:
+        return None
+    cycle = s.now - timedelta(seconds=task.for_seconds)
+    if s.last_user_message_at is not None and s.last_user_message_at > cycle:
+        cycle = s.last_user_message_at
+    since = [w for w in s.wakes if w.created_at >= cycle]
+    step = sum(1 for w in since if free_wake(w.reasons))
+    wait_from = max([cycle, *(w.created_at for w in since)])
+    minutes = s.settings.free_steps[min(step, len(s.settings.free_steps) - 1)]
+    if s.now - wait_from < timedelta(minutes=minutes):
+        return None
+    key, aliases = _around(f"free:{s.device_id}", cycle)  # a task's start moves by a second from look to look
+    return Candidate(WakeReason(WakeKind.FREE, group=task.group, minutes=int(task.for_seconds // 60), step=step + 1),
+                     f"{key}:{step + 1}", s.now, tuple(f"{a}:{step + 1}" for a in aliases))
+
+
 def _sleeps(s: Situation) -> bool:
     return s.device is not None and s.device.sleeps
 
@@ -289,6 +316,8 @@ def candidates(s: Situation) -> tuple[list[Candidate], list[str], datetime | Non
         found.append(back)
     if (ended := task_ended_candidate(s.device_id, s.device, s.settings, s.now)) is not None:
         found.append(ended)
+    if (free := free_candidate(s)) is not None:
+        found.append(free)
     return found, expired, upcoming
 
 
@@ -313,21 +342,15 @@ def _only(record: WakeRecord, kinds: frozenset[WakeKind]) -> bool:
 _TRY = frozenset({WakeKind.TRY})
 
 
-def activity_wake(record: WakeRecord) -> bool:
-    """V3-P90 §5.4 (PR #163 review P2-1): a wake the daily limit counts — one with an
-    activity trigger among its reasons, once however many reasons it merged."""
-    return any(r.kind in ACTIVITY_KINDS for r in record.reasons)
-
-
 def spoke(record: WakeRecord, said: frozenset[str] = frozenset()) -> bool:
     """§6.2: a wake the gap and the daily limit count — one that spoke or is speaking:
-    opened, answered, or failed after its turn left output (``said``: progress or tool
+    opened, speaking, answered, or failed after its turn left output (``said``: progress or tool
     calls, PR #156 re-review P2-2). Not one that said nothing (failed before a word, or
     cancelled as the user won: PR #156 review P1, a wake cut by a restart is tried again
-    at once), nor the operator's try (§11)."""
+    at once), nor a free wake that passed or was dropped (V3-P90 §7.3), nor the operator's try (§11)."""
     if _only(record, _TRY):
         return False
-    return record.status in (WakeStatus.OPENED, WakeStatus.ANSWERED) or (
+    return record.status in (WakeStatus.OPENED, WakeStatus.SPEAKING, WakeStatus.ANSWERED) or (
         record.status is WakeStatus.FAILED and record.wake_id in said)
 
 
@@ -362,12 +385,15 @@ def _blocked(s: Situation, kind: WakeKind) -> str | None:
     last = max((w.created_at for w in counted), default=None)
     if last is not None and s.now - last < timedelta(minutes=s.settings.gap_minutes):
         return "gap"
-    if kind is WakeKind.LOOP_DUE:
+    if kind is not WakeKind.FREE:
         return None
+    # V3-P90 §7.4: a free wake's day — those that spoke, and all opened (a pass costs too)
     midnight = local_midnight(s.now, s.zone)
-    today = [w for w in counted if w.created_at >= midnight and activity_wake(w)]
-    if len(today) >= s.settings.daily:
+    today = [w for w in s.wakes if w.created_at >= midnight and free_wake(w.reasons)]
+    if sum(1 for w in today if spoke(w, s.said)) >= s.settings.daily:
         return "daily"
+    if len(today) >= s.settings.attempts:
+        return "attempts"
     return None
 
 
@@ -383,6 +409,8 @@ def decide(s: Situation, taken: frozenset[str] = frozenset()) -> Decision:
     rules = [_blocked(s, c.reason.kind) for c in due]
     blocked = next((rule for rule in rules if rule is not None), None)
     speakable = [c for c, rule in zip(due, rules, strict=True) if rule is None]
+    if any(c.reason.kind is not WakeKind.FREE for c in speakable):  # V3-P90 §7.3: a free wake goes alone
+        speakable = [c for c in speakable if c.reason.kind is not WakeKind.FREE]
     if not speakable:
         return Decision(expired=expired_now, blocked=blocked, held=tuple(due), next_at=upcoming, seen=seen)
     ordered = sorted(speakable, key=lambda c: (MERGE_ORDER.index(c.reason.kind), c.since))
