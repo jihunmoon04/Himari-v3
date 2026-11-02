@@ -601,3 +601,18 @@ P1-1~P1-9 모두 PASS. 새 지적을 코드와 대조했다: Run은 응답을 �
 - **알린 wake가 지워짐:** 대화를 영구 삭제하면 알린 wake도 사라져 `told` 알림이 고립되었다. 이제 `told_reminders`가 알린 wake 없이도 그 알림을 돌려주고(`None`), 스케줄러는 기기를 모름(`Told.device_id = None`)으로 둔다. 어느 돌아옴도 "봤다"가 되지 않으므로 다음 돌아옴에 다시 알린다(7일이면 놓침).
 - **40개 한도:** "그 대화에 그 뒤 사용자 메시지"를 스케줄러가 이벤트 40개만 읽어 찾던 것을 Data의 한 쿼리(`see_answered_reminders`)로 바꿨다. 대화가 얼마나 이어졌든 찾는다.
 
+### 17.2 앱 1단계: 잠들기와 깨기 (`feat/proactive-v2-app1`)
+
+§15의 2단계. 서버 1단계(PR #163)와 맞물린다.
+
+- **`SleepPolicy`(새, WPF 밖, ContractTests):** 잠든 채 시작, 무입력 600초·화면 꺼짐·잠금이면 잠듦, 조용한 활동(재생, 통화, 전체 화면)은 무입력으로 잠들지 않음, 깸 확인(처음 입력 5초 뒤부터 15초 안의 입력), `WakeNow`(키·히마리 클릭·입력창·잠금 해제), `FallAsleep`(절전 해제 뒤).
+- **`SleepControls`(새):** Windows를 읽는다. 화면 전원은 `RegisterPowerSettingNotification(GUID_CONSOLE_DISPLAY_STATE)`, 어느 키든 눌린 것은 raw input(`RIDEV_INPUTSINK`, 눌렸다는 것만, 어느 키인지는 읽지 않음), 재생은 미디어 세션 전부의 `Playing`, 통화는 V3-P88의 마이크·카메라 판정, 전체 화면은 `SHQueryUserNotificationState`(busy·D3D·발표). 셋은 사용자의 보내기 설정과 상관없이 앱 안에서만 읽는다(§2.2). 깨어 있을 때 5초마다.
+- **신호:** `features.sleep_signals`일 때만 `sleep`(잠금 본문은 뺌). 잠이 바뀌면 바로 보낸다(presence 루프의 2초 기다림을 깨움).
+- **애니메이션:** 잠들기·깨기는 `SleepPolicy`를 따른다(5분 → 10분). 깨면 기지개. `CharacterAnimator.SetSleeping(..., stretch)`.
+- **알림으로 잠깐 깸(§2.4):** 잠든 채 이 기기의 wake 작업이 오면 기지개 없이 깨서 말하고, 끝나면 다시 잠든다. 그 말풍선은 닫히지 않고(`ScheduleBubbleClose`가 미룸) 사용자가 깨우면 그때부터 보통처럼 닫힌다.
+- **기지개 뒤에 말함(§5.2):** wake 작업의 첫 글은 그 깸의 기지개가 끝날 때까지 기다린다(`StretchLeft`).
+- **기준 기기 스크립트:** 잠 장면(`sleep: "idle"`이어도 지금 기기, `null`로 깸).
+- **시험:** ContractTests(`SleepPolicy`, `sleep` 본문, 기지개 없는 깸), UiTests(잠든 채 알림 → 말풍선 남음 → 깨우면 닫히기 시작, 깸의 기지개 시간). 이 PC(Windows)에서 앱 빌드·ContractTests·UiTests 모두 통과. 기존 UiTests는 캐릭터가 깨어 있다고 보고 표정을 확인하므로 처음에 깨운다(`Awake`).
+
+**설계와 다르게 한 것:** 없음. 다만 "깸 확인"의 처음 입력은 `GetLastInputInfo`가 주는 마지막 입력 시각으로 본다(0.25초마다). 키는 raw input으로 바로 깨므로, 확인을 거치는 것은 사실상 마우스다.
+

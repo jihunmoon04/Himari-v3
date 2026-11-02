@@ -14,6 +14,15 @@ using Himari.Companion;
 
 internal static class Program
 {
+    // V3-P90 §2.3: a window starts asleep; awake at once, with no stretch, for checks of the awake character.
+    internal static void Awake(MainWindow window)
+    {
+        const BindingFlags inside = BindingFlags.NonPublic | BindingFlags.Instance;
+        ((SleepPolicy)typeof(MainWindow).GetField("sleepPolicy", inside)!.GetValue(window)!).WakeNow();
+        var now = (TimeSpan)typeof(MainWindow).GetMethod("AnimationNow", inside)!.Invoke(window, null)!;
+        ((CharacterAnimator)typeof(MainWindow).GetField("animator", inside)!.GetValue(window)!).SetSleeping(false, now, stretch: false);
+    }
+
     [STAThread] private static void Main(string[] args)
     {
         if (args.Contains("--fullscreen-fixture")) { FullscreenChecks.Fixture(); return; }
@@ -80,6 +89,7 @@ internal static class Program
         Check(Fill(true) == Color.FromRgb(255, 253, 243) && Fill(false) == Color.FromRgb(242, 237, 255), "rendered user bubble is cream and Himari bubble is lavender");
         var timeline = new MainWindow();
         object? Timeline(string method, params object?[] args) => typeof(MainWindow).GetMethod(method, BindingFlags.NonPublic | BindingFlags.Instance)!.Invoke(timeline, args);
+        Awake(timeline);  // V3-P90 §2.3: the app starts asleep; these checks look at the awake character
         // Scope reply-flow verification independently of artwork and foreground-input checks.
         if (!args.Contains("--reply-flow-only"))
         {
@@ -317,7 +327,7 @@ internal static class Program
             if (partialLive)
             {
                 transport.Live = "event: snapshot\ndata: {\"job_id\":\"j\",\"run_id\":\"r\",\"text\":\"답변 앞부분\",\"moods\":[]}\n\n";
-                Call("StartLive", "c", first, connectionToken.Token, "j");
+                Call("StartLive", "c", first, connectionToken.Token, "j", false);
                 Until(() => ((MarkdownView)recovery.FindName("Message")).Text == "답변 앞부분");
                 Call("OpenComposer"); editor.Text = "연결이 끊겨도 남길 새 초안";
             }
@@ -343,7 +353,7 @@ internal static class Program
             Check(answer.Visibility == Visibility.Collapsed && !readingTimer.IsEnabled, "repeated refresh does not reopen or restart an already recovered answer");
             Call("WaitForReply", restored, "c", "j2", 3);
             transport.Job = "j2"; transport.Live = "event: snapshot\ndata: {\"job_id\":\"j2\",\"run_id\":\"r2\",\"text\":\"정상 Live 답변\",\"moods\":[]}\n\nevent: done\ndata: {}\n\n";
-            Finish((Task)Call("LiveLoop", "c", restored, CancellationToken.None, "j2")!);
+            Finish((Task)Call("LiveLoop", "c", restored, CancellationToken.None, "j2", false)!);
             Call("CloseBubble");
             Call("WaitForReply", restored, "c", "j2", 3); // A late HTTP acknowledgement must not re-arm done.
             transport.Sequence = 5;
@@ -359,7 +369,7 @@ internal static class Program
             transport.Job = "j5"; transport.Sequence = 9;
             Call("WaitForReply", restored, "c", "j5", 7);
             transport.Live = "event: done\ndata: {}\n\n";
-            Call("StartLive", "c", restored, CancellationToken.None, "j5");
+            Call("StartLive", "c", restored, CancellationToken.None, "j5", false);
             Until(() => answer.Visibility == Visibility.Visible && readingTimer.IsEnabled);
             Check(((MarkdownView)recovery.FindName("Message")).Text == "복구된 최종 답변", "done without a Live snapshot still recovers and opens saved final");
             Call("CloseBubble");
@@ -407,7 +417,7 @@ internal static class Program
             transport.Complete = true;
             Call("EndMoveJob", "c", "j");
             transport.Live = (hasLiveBody ? "event: snapshot\ndata: {\"job_id\":\"j\",\"run_id\":\"r\",\"text\":\"복구된 최종 답변\",\"moods\":[]}\n\n" : "") + "event: done\ndata: {}\n\n";
-            Call("StartLive", "c", server, connectionToken.Token, "j"); Until(() => !LiveActive());
+            Call("StartLive", "c", server, connectionToken.Token, "j", false); Until(() => !LiveActive());
             if (doneBeforeAcceptance)
             {
                 Check(Sending() && (answer.Visibility == Visibility.Visible) == hasLiveBody, "job ended and Live done finish before HTTP 202 is released");
@@ -640,6 +650,25 @@ internal static class Program
             follow.Close();
         }
         app.Shutdown();
+        // V3-P90 §2.4: a reminder told while asleep wakes it for its words only, and its bubble stays until the user wakes it
+        {
+            var napping = new MainWindow(true);
+            const BindingFlags inside = BindingFlags.NonPublic | BindingFlags.Instance;
+            object? Nap(string method, params object?[] args) => typeof(MainWindow).GetMethod(method, inside)!.Invoke(napping, args);
+            T NapField<T>(string field) => (T)typeof(MainWindow).GetField(field, inside)!.GetValue(napping)!;
+            var policy = NapField<SleepPolicy>("sleepPolicy");
+            Check(policy.Asleep, "a window starts asleep");
+            Nap("WakeJobArrived", "c");
+            Check(NapField<bool>("reminderAwake") && NapField<bool>("bubbleUntilAwake"), "a wake while asleep is a reminder's: awake for its words");
+            Nap("ScheduleBubbleClose", "약 먹을 시간이야!");
+            Check(!NapField<DispatcherTimer>("bubbleTimer").IsEnabled, "its bubble does not start to close while asleep");
+            Nap("WakeJobEnded", "c");
+            Check(!NapField<bool>("reminderAwake") && policy.Asleep && !NapField<DispatcherTimer>("bubbleTimer").IsEnabled, "said, asleep again, the bubble still up");
+            Nap("WakeFromUser");
+            Check(!policy.Asleep && NapField<DispatcherTimer>("bubbleTimer").IsEnabled && !NapField<bool>("bubbleUntilAwake"), "the user wakes it: the bubble now closes as usual");
+            Check((TimeSpan)Nap("StretchLeft")! > TimeSpan.Zero, "a wake from sleep stretches, and a wake's words wait for it (§5.2)");
+            napping.Close();
+        }
         Console.WriteLine("WPF keyboard, IME, bubble colors/order/expiry, layout, reply reconnect and wake follow checks passed.");
     }
 }

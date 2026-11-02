@@ -47,7 +47,7 @@ internal static class ReplyProgressChecks
         check(((Button)w.FindName("CopyReplyButton")).Visibility == Visibility.Collapsed && ((Button)w.FindName("ExpandButton")).Visibility == Visibility.Collapsed && ((Button)w.FindName("StopButton")).Visibility == Visibility.Visible, "waiting offers stop and hides unavailable copy/expand");
         var refresh = (Task)Call("ReadConversation", "c", cancellation.Token)!; Until(() => refresh.IsCompleted); refresh.GetAwaiter().GetResult();
         check(message.Text == "" && progress.Visibility == Visibility.Visible, "history refresh before the first snapshot cannot populate the pending answer");
-        Call("StartLive", "c", server, cancellation.Token, "j");
+        Call("StartLive", "c", server, cancellation.Token, "j", false);
         Task ReadCurrent()
         {
             var read = (Task)Call("ReadConversation", "c", cancellation.Token)!;

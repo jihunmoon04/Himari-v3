@@ -90,6 +90,9 @@ class Report:
     locked_current: str | None = "unset"
     unlocked_current: str | None = "unset"
     quiet: dict[str, Any] | None = None
+    # V3-P90 §3: a server that takes ``sleep`` keeps a sleeping device current, and what it said then
+    sleep_signals: bool = False
+    asleep_current: str | None = "unset"
     # V3-P87: a job the server opened to speak first on this device, and what live sent for it
     wake_job_id: str | None = None
     wake_text: str = ""
@@ -221,6 +224,11 @@ async def signals(http: httpx.AsyncClient, events: asyncio.Queue[tuple[str, Any]
     report.locked_current = (await next_named(events, "current", lambda d: d["device_id"] is None))["device_id"]
     await send({**SIGNAL, "after": "unlock"})
     report.unlocked_current = (await next_named(events, "current", lambda d: d["device_id"] is not None))["device_id"]
+    if report.hello.get("features", {}).get("sleep_signals") == 1:  # V3-P90 §3.1: only then
+        report.sleep_signals = True
+        await send({**SIGNAL, "idle_seconds": 700, "sleep": "idle"})  # the character fell asleep
+        report.asleep_current = (await http.get("/api/device")).json()["current_device"]
+        await send({**SIGNAL, "sleep": None})  # woke (the user's second input): the return
     until = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
     response = await http.put("/api/presence/quiet", json={"until": until})
     if response.status_code != 200:
@@ -283,6 +291,7 @@ def show(report: Report) -> None:
           f"the same screen again: {report.screen_again}")
     print(f"signals: {report.signals}; current when locked: {report.locked_current}, after the unlock: "
           f"{report.unlocked_current}; quiet: {report.quiet}")
+    print(f"sleep: {report.sleep_signals}; current while asleep: {report.asleep_current}")
     print(f"spoke first: job {report.wake_job_id}, {report.wake_text!r}")
     print(f"events: {', '.join(report.events)}")
 
@@ -372,6 +381,8 @@ def check(report: Report) -> list[str]:
         "the server takes the activity signals": report.signals,
         "a lock leaves the device away at once": report.locked_current is None,
         "the unlock makes it current again": report.unlocked_current == "d1",
+        "the server takes sleep": report.sleep_signals,
+        "asleep, the device stays current": report.asleep_current == "d1",
         "the quiet reaches the device's stream": report.quiet is not None and report.quiet.get("until") is not None,
         "a device gets no signals notices": "devices" not in report.events,
         "a wake's job is spoken on this device": report.wake_job_id is not None and report.wake_job_id != report.job_id,

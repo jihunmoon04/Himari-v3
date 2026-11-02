@@ -85,9 +85,9 @@ internal sealed class CharacterAnimator
     }
 
     // Dozing yawns, then plays the sleep clip, when the art has them; without a sleep clip it
-    // only closes the eyes. Waking ends both at once, then stretches once there is stretch art
-    // (on hold until arms can be raised, owner review 2026-10-31).
-    internal void SetSleeping(bool value, TimeSpan now)
+    // only closes the eyes. Waking ends both at once, then stretches once there is stretch art.
+    // ``stretch`` false: woken only to say something (a reminder, V3-P90 §2.4), asleep again after.
+    internal void SetSleeping(bool value, TimeSpan now, bool stretch = true)
     {
         if (value == sleeping) return;
         sleeping = value;
@@ -102,7 +102,7 @@ internal sealed class CharacterAnimator
         }
         foreach (var r in new[] { yawn, sleep }) if (r is not null) Release(r, now);
         yawn = sleep = null;
-        if (manifest.Clips.ContainsKey("stretch")) Request("stretch", AnimationLayer.Ambient, now);
+        if (stretch && manifest.Clips.ContainsKey("stretch")) Request("stretch", AnimationLayer.Ambient, now);
     }
 
     internal CharacterPose Pose(TimeSpan now)

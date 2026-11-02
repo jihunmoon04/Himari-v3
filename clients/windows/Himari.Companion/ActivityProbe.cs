@@ -20,6 +20,7 @@ public partial class MainWindow
     private IReadOnlySet<string> micExclusions = SignalSettings.Names(SignalSettings.DefaultMicExclusions);
     private IReadOnlyDictionary<string, string> categoryOverrides = new Dictionary<string, string>();
     private bool serverTakesSignals;  // GET /api/device or hello said features.presence_signals = 1 (§14)
+    private bool serverTakesSleep;  // and features.sleep_signals = 1 (V3-P90 §3.1)
     private bool sessionLocked;
     private MediaInfo? latestMedia; private bool latestMediaKnown; private bool mediaReading;
     private DateTime lastMediaRead = DateTime.MinValue, lastMicRead = DateTime.MinValue;
@@ -70,11 +71,13 @@ public partial class MainWindow
         if (e.Reason is SessionSwitchReason.SessionLock or SessionSwitchReason.ConsoleDisconnect or SessionSwitchReason.RemoteDisconnect)
         {
             sessionLocked = true; activityTracker.Reset(); signalSchedule.Urgent();
+            ObserveSleep();  // V3-P90 §2.1: locked is asleep
         }
         else if (e.Reason is SessionSwitchReason.SessionUnlock or SessionSwitchReason.ConsoleConnect or SessionSwitchReason.RemoteConnect)
         {
             if (!sessionLocked) return;
             sessionLocked = false; activityTracker.Reset(); signalSchedule.Mark("unlock");  // §3: the device takes over at once
+            WakeFromUser();  // V3-P90 §2.3: an unlock wakes it at once
         }
     }));
 
@@ -84,6 +87,7 @@ public partial class MainWindow
         activityTracker.Reset();
         // A computer that locks on sleep wakes to its lock screen: the unlock is the return then.
         if (!sessionLocked) signalSchedule.Mark("resume");
+        if (sleepPolicy.FallAsleep()) SleepChanged();  // V3-P90 §2.1: it goes on asleep; the user's use wakes it
     }));
 
     /// <summary>The user changed what is sent: read the controls, save, and send at once (§14).</summary>
@@ -146,7 +150,8 @@ public partial class MainWindow
 
     private Dictionary<string, object?> PresenceSignal(int idle, string zone, DateTime now, string? after) => PresenceBody.Build(
         idle, zone, serverTakesSignals, sessionLocked, after, activityTracker.Current(now),
-        activityTracker.Known, latestMedia, latestMediaKnown, latestMicCamera, signalSettings, titleExclusions);
+        activityTracker.Known, latestMedia, latestMediaKnown, latestMicCamera, signalSettings, titleExclusions,
+        serverTakesSleep, sleepPolicy.Reason);
 
     /// <summary>What is in front; null when it is HIMARI's own window (what was there is kept, §4.1).</summary>
     private ActivityObservation? ReadForeground()

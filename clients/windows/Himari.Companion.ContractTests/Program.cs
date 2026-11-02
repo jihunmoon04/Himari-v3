@@ -398,6 +398,10 @@ waking.SetSleeping(true, Ms(1000));
 waking.SetSleeping(false, Ms(9000));
 Check(waking.Pose(Ms(9010)) is { Clip: "stretch", Frame: 0 } && waking.Pose(Ms(9000 + 5150)) is { Clip: "stretch", Frame: 18 } && waking.Pose(Ms(9000 + 5170)).Clip == "idle",
     "waking plays the shipped stretch through once, then idles");
+var toldAwake = new CharacterAnimator(shipped, 7, TimeSpan.Zero);
+toldAwake.SetSleeping(true, Ms(1000));
+toldAwake.SetSleeping(false, Ms(9000), stretch: false);
+Check(toldAwake.Pose(Ms(9010)).Clip == "idle", "woken only to tell a reminder, it does not stretch (V3-P90 §2.4)");
 foreach (var bad in new[] { "{\"version\":2,\"canvas\":[1,1],\"sheet\":\"s\",\"face\":{\"origin\":[0,0],\"size\":[1,1]},\"clips\":{},\"faces\":{}}",
                             "{\"version\":1,\"canvas\":[1,1],\"sheet\":\"s\",\"face\":{\"origin\":[0,0],\"size\":[1,1]},\"clips\":{},\"faces\":{\"neutral\":{\"src\":[0,0,1,1]}}}",
                             "{\"version\":1,\"canvas\":[1,1],\"sheet\":\"s\",\"face\":{\"origin\":[0,0],\"size\":[0,1]},\"clips\":{\"idle\":{\"loop\":true,\"frames\":[{\"src\":[0,0,1,1],\"ms\":1,\"face\":[0,0]}]}},\"faces\":{\"neutral\":{\"src\":[0,0,1,1]}}}",
@@ -621,6 +625,47 @@ var nothing = PresenceBody.Build(3, "z", true, false, null, null, true, null, tr
 string wire = JsonSerializer.Serialize(nothing, JsonSerializerOptions.Web);
 Check(wire.Contains("\"activity\":null") && wire.Contains("\"media\":null"), "nothing in front and nothing playing go as null, not absent");
 Check(PresenceBody.Cut(new string('가', 200), PresenceBody.TitleChars)!.Length == 120 && PresenceBody.Cut(" \n ", 10) is null, "text is cut to its limit and blank is none");
+
+// V3-P90 §3.1: sleep goes only to a server that takes it; null is awake; a locked body leaves it out
+var noSleepServer = PresenceBody.Build(3, "z", true, false, null, null, true, null, true, null, plain, serverTakesSleep: false, sleep: "idle");
+Check(!noSleepServer.ContainsKey("sleep"), "a server without sleep_signals gets no sleep field");
+var awakeBody = PresenceBody.Build(3, "z", true, false, null, null, true, null, true, null, plain, serverTakesSleep: true, sleep: null);
+Check(awakeBody.ContainsKey("sleep") && awakeBody["sleep"] is null && JsonSerializer.Serialize(awakeBody, JsonSerializerOptions.Web).Contains("\"sleep\":null"),
+    "awake goes as null, not absent");
+Check((string)PresenceBody.Build(3, "z", true, false, null, null, true, null, true, null, plain, serverTakesSleep: true, sleep: "display_off")["sleep"]! == "display_off",
+    "the screen off goes as display_off");
+Check(!PresenceBody.Build(3, "z", true, true, null, null, true, null, true, null, plain, serverTakesSleep: true, sleep: "idle").ContainsKey("sleep"),
+    "a locked body leaves sleep out (the server keeps it)");
+
+// V3-P90 §2: when the character sleeps and wakes
+var s0 = new DateTime(2026, 11, 2, 9, 0, 0, DateTimeKind.Utc);
+var dozing0 = new SleepPolicy();
+Check(dozing0.Asleep && dozing0.Reason == "idle", "the app starts asleep (§2.3)");
+Check(!dozing0.Observe(s0, s0.AddSeconds(-3600), true, false, false) && dozing0.Asleep, "no input since: still asleep");
+dozing0.Observe(s0.AddSeconds(1), s0.AddSeconds(1), true, false, false);  // a bump
+dozing0.Observe(s0.AddSeconds(3), s0.AddSeconds(2), true, false, false);  // the same bump, under 5 s
+Check(dozing0.Asleep, "inputs within five seconds of the first are one: still asleep");
+Check(dozing0.Observe(s0.AddSeconds(7), s0.AddSeconds(6.5), true, false, false) && !dozing0.Asleep && dozing0.Reason is null,
+    "an input 5 to 15 s after the first wakes it");
+Check(!dozing0.Observe(s0.AddSeconds(8), s0.AddSeconds(8), true, false, false), "awake, using it: no change");
+Check(dozing0.Observe(s0.AddSeconds(608), s0.AddSeconds(8), true, false, false) && dozing0.Reason == "idle", "ten minutes without input: asleep");
+var bumped = new SleepPolicy();
+bumped.Observe(s0, s0, true, false, false);
+bumped.Observe(s0.AddSeconds(16), s0, true, false, false);  // nothing followed it
+Check(!bumped.Observe(s0.AddSeconds(20), s0.AddSeconds(20), true, false, false) && bumped.Asleep, "an input past 15 s starts over as a first");
+Check(bumped.Observe(s0.AddSeconds(26), s0.AddSeconds(26), true, false, false) && !bumped.Asleep, "and the one 5 s after it wakes");
+var quietPolicy = new SleepPolicy(); quietPolicy.WakeNow();
+Check(!quietPolicy.Observe(s0.AddHours(1), s0, true, false, true) && !quietPolicy.Asleep, "playing, a call or fullscreen: no sleep however long (§2.2)");
+Check(quietPolicy.Observe(s0.AddHours(1), s0, false, false, true) && quietPolicy.Reason == "display_off", "the screen off sleeps it even then");
+Check(quietPolicy.Observe(s0.AddHours(1).AddSeconds(1), s0, true, false, true) && quietPolicy.Reason == "idle" && quietPolicy.Asleep,
+    "the screen on again: asleep still, now idle");
+var lockedPolicy = new SleepPolicy(); lockedPolicy.WakeNow();
+Check(lockedPolicy.Observe(s0, s0, true, true, false) && lockedPolicy.Asleep && lockedPolicy.Locked, "a lock is asleep at once");
+Check(!lockedPolicy.Observe(s0.AddSeconds(30), s0.AddSeconds(30), true, true, false) && lockedPolicy.Asleep, "the lock screen's typing does not wake it");
+Check(lockedPolicy.WakeNow() && !lockedPolicy.Asleep && !lockedPolicy.Locked, "the unlock wakes it at once");
+var afterSuspend = new SleepPolicy(); afterSuspend.WakeNow();
+Check(afterSuspend.FallAsleep() && afterSuspend.Asleep && !afterSuspend.FallAsleep(), "after the computer's sleep it goes on asleep");
+Check(afterSuspend.WakeNow() && !afterSuspend.WakeNow(), "a key or a click wakes it once");
 
 var excluded = SignalSettings.Names(SignalSettings.DefaultMicExclusions);
 Check(MicCamera.InUse([(@"C:#Program Files#Zoom#bin#Zoom.exe", 100, 0)], excluded, @"C:\Apps\Himari.Companion.exe"), "another program using the microphone counts");

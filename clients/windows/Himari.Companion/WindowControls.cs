@@ -237,6 +237,7 @@ public partial class MainWindow
     }
     private void ScheduleBubbleClose(string text)
     {
+        if (bubbleUntilAwake && sleepPolicy.Asleep) return;  // V3-P90 §2.4: a reminder told while asleep stays up
         assistantBubbleCloseDue = false;
         bubbleTimer.Stop(); bubbleTimer.Interval = TimeSpan.FromSeconds(DialoguePolicy.Duration(text, settings.BubbleMinimum.Value, settings.SecondsPer100.Value)); bubbleTimer.Start();
         assistantBubbleDueAt = DateTime.UtcNow + bubbleTimer.Interval;
