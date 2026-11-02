@@ -253,6 +253,7 @@ class RefusalRule(Enum):
     SOURCE_DISABLED = "source_disabled"
     ENVIRONMENT_INACTIVE = "environment_inactive"
     BINDING = "binding"
+    READ_ONLY = "read_only"  # V3-P90 §5.6: a turn the user did not ask for runs only Tools that read
 
     @property
     def by_input(self) -> bool:
@@ -270,6 +271,7 @@ class ToolDispatcher(Protocol):
         calls: Sequence[ToolCall],
         *,
         pause: Callable[[], bool] | None = None,
+        read_only: bool = False,
     ) -> GroupDispatchResult:
         """Runs only never-claimed PENDING calls (so it is also the resume
         path, TOOL-04). Unknown tool / invalid arguments / binding failures
@@ -282,7 +284,11 @@ class ToolDispatcher(Protocol):
         call (``ask_user``) is not paused: it waits for the user anyway.
         Cancelled (asyncio) during a call, the call is left as it is —
         PENDING if it was not claimed, claimed otherwise — for
-        ``cancel_group`` to settle."""
+        ``cancel_group`` to settle.
+
+        ``read_only`` (V3-P90 §5.6, a server-opened turn): a call of a Tool
+        whose ``effect_profile`` is not READ is DENIED and never runs (a
+        suspending ``ask_user`` still waits for the user)."""
         ...
 
     async def cancel_group(self, scope: TrustedScope, run_id: RunId, reason: str) -> GroupDispatchResult:

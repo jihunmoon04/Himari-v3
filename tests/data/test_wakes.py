@@ -152,6 +152,72 @@ def test_only_the_claiming_wake_settles_a_reminder() -> None:
     assert reminder(store, memory_id) == ("scheduled", None, 0)
 
 
+
+# --- V3-P90 §5.1: told to a sleeping device ---------------------------------------------------
+
+def told(store: Store) -> tuple[InMemoryData | SqliteData, int, str]:
+    """A reminder told to a sleeping device: claimed by a wake marked ``asleep``, answered."""
+    data, memory_id = opened(store)
+    make_reminder(store, memory_id)
+    wake_id = asyncio.run(data.begin_wake(SCOPE, (WakeReason(WakeKind.REMINDER, memory_id=memory_id, asleep=True),),
+                                          "d1", reminders=(memory_id,))).payload.wake_id  # type: ignore[union-attr]
+    asyncio.run(data.end_wake(SCOPE.principal_id, wake_id, WakeStatus.ANSWERED))
+    return data, memory_id, wake_id
+
+
+def test_a_reminder_told_to_a_sleeping_device_is_told_not_delivered() -> None:
+    store = new_store()
+    data, memory_id, wake_id = told(store)
+    assert reminder(store, memory_id)[:2] == ("told", wake_id)
+    ((noted, teller, at),) = asyncio.run(data.told_reminders(SCOPE.principal_id))
+    assert (noted, teller) == (memory_id, wake_id)
+    note = next(n for n in asyncio.run(data.list_memories(SCOPE.principal_id)) if n.memory_id == memory_id)
+    assert note.remind_state == "told" and note.reminded_at == at
+    again = data_for(restart(store))  # kept across a restart, its moment too
+    assert asyncio.run(again.told_reminders(SCOPE.principal_id)) == ((memory_id, wake_id, at),)
+
+
+def test_a_told_reminder_seen_is_delivered() -> None:
+    store = new_store()
+    data, memory_id, _ = told(store)
+    assert asyncio.run(data.see_reminders(SCOPE.principal_id, (memory_id, memory_id + 99))) == 1
+    assert reminder(store, memory_id)[:2] == ("delivered", None)
+    assert asyncio.run(data.told_reminders(SCOPE.principal_id)) == ()
+    assert asyncio.run(data.see_reminders(SCOPE.principal_id, (memory_id,))) == 0  # once
+
+
+def test_a_told_reminder_told_again_is_delivered_or_stays_told() -> None:
+    store = new_store()
+    data, memory_id, _ = told(store)
+    reason = (WakeReason(WakeKind.REMINDER, memory_id=memory_id, again=True),)
+    failed = asyncio.run(data.begin_wake(SCOPE, reason, "d1", reminders=(memory_id,))).payload.wake_id  # type: ignore[union-attr]
+    assert reminder(store, memory_id)[:2] == ("claimed", failed)
+    asyncio.run(data.end_wake(SCOPE.principal_id, failed, WakeStatus.FAILED))
+    assert reminder(store, memory_id) == ("told", None, 0)  # told before: told still, no attempt counted
+    spoken = asyncio.run(data.begin_wake(SCOPE, reason, "d1", reminders=(memory_id,))).payload.wake_id  # type: ignore[union-attr]
+    asyncio.run(data.end_wake(SCOPE.principal_id, spoken, WakeStatus.ANSWERED))
+    assert reminder(store, memory_id)[:2] == ("delivered", None)
+
+
+def test_a_told_reminder_never_seen_is_missed() -> None:
+    from datetime import UTC, datetime, timedelta
+
+    store = new_store()
+    data, memory_id, _ = told(store)
+    moment = datetime(2026, 11, 2, 0, 0, tzinfo=UTC)
+    if isinstance(store, SqliteStore):
+        store.connection.execute("UPDATE memories SET remind_instant=? WHERE memory_id=?",
+                                 (moment.isoformat(timespec="microseconds"), memory_id))
+        store.connection.commit()
+    else:
+        from dataclasses import replace
+
+        key = (SCOPE.principal_id, memory_id)
+        store.memories[key] = replace(store.memories[key], remind_instant=moment)
+    assert asyncio.run(data.miss_reminders(SCOPE.principal_id, moment)) == 0
+    assert asyncio.run(data.miss_reminders(SCOPE.principal_id, moment + timedelta(days=1))) == 1
+    assert reminder(store, memory_id)[0] == "missed"
+
 def test_a_purge_takes_its_wakes() -> None:
     store = new_store()
     data, _ = opened(store)
@@ -217,3 +283,42 @@ def test_part_two_reads_alike_in_both_backends() -> None:
     assert asyncio.run(data.read_inputs(SCOPE.principal_id)) == {device.device_id: at}
     asyncio.run(data.revoke_device(SCOPE.principal_id, device.device_id))
     assert asyncio.run(data.read_inputs(SCOPE.principal_id)) == {}
+
+
+def test_a_failed_telling_again_keeps_the_first_teller() -> None:
+    """PR #163 review P1-3: told on A; telling it again on B fails — the teller stays A's wake,
+    so a return to B is not taken for seeing it."""
+    store = new_store()
+    data, memory_id, teller = told(store)
+    ((_, first, at),) = asyncio.run(data.told_reminders(SCOPE.principal_id))
+    assert first == teller
+    reason = (WakeReason(WakeKind.REMINDER, memory_id=memory_id, again=True),)
+    failed = asyncio.run(data.begin_wake(SCOPE, reason, "d2", reminders=(memory_id,))).payload.wake_id  # type: ignore[union-attr]
+    asyncio.run(data.end_wake(SCOPE.principal_id, failed, WakeStatus.FAILED))
+    assert asyncio.run(data.told_reminders(SCOPE.principal_id)) == ((memory_id, teller, at),)
+    assert asyncio.run(data_for(restart(store)).told_reminders(SCOPE.principal_id)) == ((memory_id, teller, at),)
+
+
+def test_a_told_reminder_is_seen_by_a_message_after_its_telling_in_its_conversation() -> None:
+    """V3-P90 §5.1 (PR #163 re-review P2): read by Data in one look, however long the
+    Conversation went on; a message before the telling or elsewhere is not one."""
+    store = new_store()
+    data, memory_id, _ = told(store)
+    assert asyncio.run(data.see_answered_reminders(SCOPE.principal_id)) == 0
+    asyncio.run(data.append_event(SCOPE, user("먹었어")))
+    assert asyncio.run(data.see_answered_reminders(SCOPE.principal_id)) == 1
+    assert reminder(store, memory_id)[0] == "delivered"
+
+
+def test_a_told_reminder_whose_telling_was_purged_has_no_teller() -> None:
+    """PR #163 re-review P2: purged with its Conversation, the wake no longer says where it was
+    told — the reminder stays told (the next return tells it again), with no teller."""
+    store = new_store()
+    data, memory_id, _ = told(store)
+    ((_, _, at),) = asyncio.run(data.told_reminders(SCOPE.principal_id))
+    asyncio.run(data.trash_conversation(SCOPE))
+    asyncio.run(data.begin_purge(SCOPE))
+    asyncio.run(data.purge_conversation(SCOPE))
+    assert asyncio.run(data.told_reminders(SCOPE.principal_id)) == ((memory_id, None, at),)
+    assert asyncio.run(data.see_answered_reminders(SCOPE.principal_id)) == 0
+

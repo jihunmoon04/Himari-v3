@@ -5,6 +5,7 @@ locks and unlocks, the return record, the activity before, and the Web's
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -18,6 +19,7 @@ from himari.presence.api import (
     MediaSignal,
     Session,
     Signals,
+    Sleep,
     StreamEvent,
 )
 from himari.presence.hub import PresenceHub
@@ -309,3 +311,144 @@ def test_a_return_is_told_before_the_input_that_came_with_it(hub: PresenceHub, c
     hub.signal(ME, "d1", 0, None, full(after=After.UNLOCK))
     assert told == [("returned", "d1", "unlock"), ("input", "d1", WALL, False)]
     assert hub.present() == (ME,)
+
+
+# --- V3-P90 §3: an app that sends ``sleep`` -------------------------------------------------
+
+def sleeping(sleep: Sleep | None = Sleep.IDLE, session: Session = Session.ACTIVE,
+             after: After | None = None) -> Signals:
+    return replace(full(session=session, after=after), sleep_known=True, sleep=sleep)
+
+
+def recorder(hub: PresenceHub) -> list[tuple[object, ...]]:
+    told: list[tuple[object, ...]] = []
+    hub.on_returned = lambda principal, returned: told.append(("returned", returned.device_id, returned.via))
+    hub.on_input = lambda principal, device_id, at, locked: told.append(("input", device_id, at, locked))
+    return told
+
+
+def test_a_sleeping_device_stays_current(hub: PresenceHub, clock: Clock) -> None:
+    """§3.2: no ten minutes' input needed — the character sleeps, the user may still be near."""
+    hub.subscribe(ME, "d1")
+    hub.signal(ME, "d1", 0, None, sleeping(None))
+    hub.signal(ME, "d1", 600, None, sleeping())
+    clock.now += 3600
+    hub.signal(ME, "d1", 4200, None, sleeping())
+    hub.tick()
+    state = hub.states(ME)["d1"]
+    assert hub.current(ME) == "d1" and state.sleeps and state.sleep == "idle"
+    hub.signal(ME, "d1", 4300, None, sleeping(Sleep.DISPLAY_OFF))
+    assert hub.current(ME) == "d1" and hub.states(ME)["d1"].sleep == "display_off"
+    hub.signal(ME, "d1", 0, None, sleeping(session=Session.LOCKED))
+    assert hub.current(ME) is None  # locked is still away
+
+
+def test_an_old_app_keeps_the_ten_minutes(hub: PresenceHub, clock: Clock) -> None:
+    hub.subscribe(ME, "d1")
+    hub.signal(ME, "d1", 0, None, full())
+    clock.now += 601
+    hub.signal(ME, "d1", 601, None, full())
+    assert hub.current(ME) is None and not hub.states(ME)["d1"].sleeps
+
+
+def test_waking_from_sleep_is_the_return_and_its_input_comes_after(hub: PresenceHub, clock: Clock) -> None:
+    """§3.3, §3.4: the time away ends at the input before the sleep, not at the waking input."""
+    told = recorder(hub)
+    hub.subscribe(ME, "d1")
+    hub.signal(ME, "d1", 0, None, sleeping(None))
+    told.clear()
+    clock.now += 600
+    hub.signal(ME, "d1", 600, None, sleeping())  # falls asleep: the input before the sleep is kept
+    assert told == [("input", "d1", WALL - timedelta(seconds=600), True)]
+    told.clear()
+    clock.now += 3600
+    hub.signal(ME, "d1", 2, None, sleeping())  # a bumped mouse while asleep: not an input
+    assert told == []
+    hub.signal(ME, "d1", 0, None, sleeping(None))
+    assert told == [("returned", "d1", "wake"), ("input", "d1", WALL, False)]
+
+
+def test_the_login_before_the_app_started_is_not_the_last_input(hub: PresenceHub, clock: Clock) -> None:
+    """§3.4 (review P1-1): the app starts asleep; the login's input comes with that first signal."""
+    told = recorder(hub)
+    hub.subscribe(ME, "d1")
+    hub.signal(ME, "d1", 3, None, sleeping())
+    assert told == []  # the last input stays what Data had before the computer was off
+    hub.signal(ME, "d1", 0, None, sleeping(None))
+    assert told == [("returned", "d1", "wake"), ("input", "d1", WALL, False)]
+
+
+def test_waking_takes_over_from_a_computer_in_use(hub: PresenceHub, clock: Clock) -> None:
+    """§3.2 (review P1-2): like an unlock, past the switch delay."""
+    hub.subscribe(ME, "a")
+    hub.subscribe(ME, "b")
+    hub.signal(ME, "a", 0, None, sleeping())
+    hub.signal(ME, "b", 0, None, full())
+    assert hub.current(ME) == "b"
+    clock.now += 5
+    hub.signal(ME, "b", 0, None, full())  # in use 5 s ago
+    hub.signal(ME, "a", 0, None, sleeping(None))
+    assert hub.current(ME) == "a"
+    assert (hub.returned(ME).device_id, hub.returned(ME).via) == ("a", "wake")  # type: ignore[union-attr]
+
+
+def test_an_unlock_that_wakes_it_is_named_so_and_a_resume_alone_is_no_return(
+        hub: PresenceHub, clock: Clock) -> None:
+    hub.subscribe(ME, "d1")
+    hub.signal(ME, "d1", 0, None, sleeping(None))
+    first = hub.returned(ME)
+    hub.signal(ME, "d1", 0, None, sleeping(session=Session.LOCKED))
+    clock.now += 60
+    hub.signal(ME, "d1", 0, None, sleeping(None, after=After.UNLOCK))
+    assert hub.returned(ME) != first and hub.returned(ME).via == "unlock"  # type: ignore[union-attr]
+    unlocked = hub.returned(ME)
+    hub.signal(ME, "d1", 700, None, sleeping())
+    clock.now += 60
+    hub.signal(ME, "d1", 760, None, sleeping(after=After.RESUME))  # the app wakes asleep
+    assert hub.returned(ME) == unlocked
+
+
+def test_a_sleeping_device_back_after_it_was_gone_is_no_return_until_it_wakes(
+        hub: PresenceHub, clock: Clock) -> None:
+    hub.subscribe(ME, "d1")
+    hub.signal(ME, "d1", 0, None, sleeping(None))
+    first = hub.returned(ME)
+    hub.signal(ME, "d1", 600, None, sleeping())
+    clock.now += 4 * 3600  # suspended: no signal
+    hub.tick()
+    assert hub.current(ME) is None
+    hub.subscribe(ME, "d1")
+    hub.signal(ME, "d1", 5, None, sleeping())
+    assert hub.current(ME) == "d1" and hub.returned(ME) == first  # current, asleep: not back yet
+    hub.signal(ME, "d1", 0, None, sleeping(None))
+    assert hub.returned(ME) != first and hub.returned(ME).via == "wake"  # type: ignore[union-attr]
+
+
+def test_a_lock_that_leaves_sleep_out_keeps_the_app_known_and_the_unlock_returns(
+        hub: PresenceHub, clock: Clock) -> None:
+    """PR #163 review P1-2: the lock signal may leave ``sleep`` out (§3.1); the unlock is still
+    the return, and the lock screen's typing is not the last input."""
+    told = recorder(hub)
+    hub.subscribe(ME, "d1")
+    hub.signal(ME, "d1", 0, None, sleeping(None))
+    told.clear()
+    clock.now += 60
+    hub.signal(ME, "d1", 30, None, full(session=Session.LOCKED))  # no sleep field
+    assert hub.states(ME)["d1"].sleeps
+    assert told == [("input", "d1", WALL - timedelta(seconds=30), True)]  # the input before the lock
+    told.clear()
+    clock.now += 3 * 3600
+    hub.signal(ME, "d1", 1, None, full(session=Session.LOCKED))  # typing the password
+    assert told == []
+    hub.signal(ME, "d1", 0, None, sleeping(None, after=After.UNLOCK))
+    assert told == [("returned", "d1", "unlock"), ("input", "d1", WALL, False)]
+
+
+def test_an_old_app_locked_keeps_the_v3_p88_inputs(hub: PresenceHub, clock: Clock) -> None:
+    told = recorder(hub)
+    hub.subscribe(ME, "d1")
+    hub.signal(ME, "d1", 0, None, full())
+    told.clear()
+    hub.signal(ME, "d1", 30, None, full(session=Session.LOCKED))
+    hub.signal(ME, "d1", 1, None, full(session=Session.LOCKED))
+    assert [t[0] for t in told] == ["input", "input"] and not hub.states(ME)["d1"].sleeps

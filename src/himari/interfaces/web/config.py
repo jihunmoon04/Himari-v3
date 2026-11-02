@@ -307,9 +307,9 @@ def _proactive(source: Mapping[str, str]) -> ProactiveSettings:
     return ProactiveSettings(
         enabled=_flag(source.get(PROACTIVE_VAR), PROACTIVE_VAR, default=False),
         quiet_start=quiet_start, quiet_end=quiet_end,
-        gap_minutes=_required(source.get(PROACTIVE_GAP_VAR), PROACTIVE_GAP_VAR, 30, 0, 24 * 60),
+        gap_minutes=_required(source.get(PROACTIVE_GAP_VAR), PROACTIVE_GAP_VAR, 15, 0, 24 * 60),  # V3-P90 §8
         daily=_required(source.get(PROACTIVE_DAILY_VAR), PROACTIVE_DAILY_VAR, 4, 0, 48),
-        return_hours=_required(source.get(PROACTIVE_RETURN_VAR), PROACTIVE_RETURN_VAR, 4, 0, 72),
+        return_hours=_required(source.get(PROACTIVE_RETURN_VAR), PROACTIVE_RETURN_VAR, 1, 0, 72),  # V3-P90 §8
         focus_minutes=_required(source.get(PROACTIVE_FOCUS_VAR), PROACTIVE_FOCUS_VAR, 30, 0, 24 * 60),
         game_minutes=_required(source.get(PROACTIVE_GAME_VAR), PROACTIVE_GAME_VAR, 30, 0, 24 * 60),
     )

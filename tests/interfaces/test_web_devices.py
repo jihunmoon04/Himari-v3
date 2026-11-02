@@ -387,7 +387,7 @@ def test_the_event_stream_starts_with_hello(server: Server) -> None:
     name, hello = frames_of(response.text)[0]
     assert name == "hello" and hello == {
         "device": {"device_id": "d1", "name": "데스크톱"}, "moods": list(MOODS), "current_device": None,
-        "recent_conversation": {"id": cid, "title": None}, "features": {"presence_signals": 1},
+        "recent_conversation": {"id": cid, "title": None}, "features": {"presence_signals": 1, "sleep_signals": 1},
         "quiet_until": None, "activity": {"working": [], "waiting": []}}  # a device gets no signals revision
     web_hello = frames_of(server.client.get("/api/events").text)[0][1]
     assert web_hello["device"] is None and web_hello["recent_conversation"]["id"] == cid
@@ -611,7 +611,7 @@ def test_a_wake_is_shown_as_a_line_with_its_reasons() -> None:
 def test_speaking_first_settings_from_the_environment() -> None:
     base = {"HIMARI_WEB_ALLOWED_HOSTS": "localhost", "HIMARI_DATA_ROOT": "/tmp/x", "HIMARI_MODEL": "m"}
     off = WebConfig.from_env(base).proactive
-    assert not off.enabled and (off.gap_minutes, off.daily, off.focus_minutes) == (30, 4, 30)
+    assert not off.enabled and (off.gap_minutes, off.daily, off.focus_minutes, off.return_hours) == (15, 4, 30, 1)
     on = WebConfig.from_env({**base, "HIMARI_PROACTIVE": "1", "HIMARI_PROACTIVE_QUIET": "",
                              "HIMARI_PROACTIVE_GAP_MINUTES": "45"}).proactive
     assert on.enabled and on.quiet_start is None and on.gap_minutes == 45

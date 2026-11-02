@@ -34,6 +34,9 @@ P0 scheduling is sequential in original ordinal order; parallel scheduling
   call that passed it has started and is not stopped by a later change
   (as with any Tool already running).
 - ``ask_user`` (suspending) is never run; it stays PENDING.
+- ``read_only`` (V3-P90 §5.6, a turn HIMARI opened itself): a Tool whose
+  ``effect_profile`` is not READ — files, commands, memory writes, External
+  Tools judged to write — is DENIED with "not run" and never runs.
 - Pause and cancel (V3-P55): ``pause`` stops the group before the next
   call starts (PAUSED); ``cancel_group`` closes never-started calls with a
   CANCELLED result and settles claimed ones as uncertain.
@@ -144,6 +147,11 @@ def _blocks(record: ToolExecutionRecord) -> bool:
     return _uncertain(record) and record.unknown_outcome is not UnknownOutcomePolicy.REPORT_TO_MODEL
 
 
+# V3-P90 §5.6: what the model is told of a call a server-opened turn does not run
+READ_ONLY_RESULT = ("not run: when you speak first, only tools that read run;"
+                    " ask the user, and do it once they answer")
+
+
 class _Denied(Exception):
     """A refusal before running, with the rule that made it (V3-P62 §4)."""
 
@@ -180,6 +188,7 @@ class Dispatcher:
         calls: Sequence[ToolCall],
         *,
         pause: Callable[[], bool] | None = None,
+        read_only: bool = False,
     ) -> GroupDispatchResult:
         count = len(await self._log.read_tool_executions(scope, run_id))
         paused = False
@@ -196,7 +205,7 @@ class Dispatcher:
             if pause is not None and not self._suspending(record) and pause():
                 paused = True  # nothing more starts; the rest stays PENDING for resume
                 break
-            rule = await self._run_one(scope, record)
+            rule = await self._run_one(scope, record, read_only)
             if rule is not None:
                 refusals[record.call.call_id] = rule
         records = await self._log.read_tool_executions(scope, run_id)
@@ -228,7 +237,8 @@ class Dispatcher:
                 # never the current registry.
                 await self._log.commit_unknown_outcome(scope, record.call, UNKNOWN_OUTCOME_RESULT)
 
-    async def _run_one(self, scope: TrustedScope, record: ToolExecutionRecord) -> RefusalRule | None:
+    async def _run_one(self, scope: TrustedScope, record: ToolExecutionRecord,
+                       read_only: bool = False) -> RefusalRule | None:
         """Runs one call; the rule if the Dispatcher refused it before running."""
         handler = self._registry.get(record.tool_id)
         if handler is None:
@@ -238,6 +248,9 @@ class Dispatcher:
         if d.completion is Completion.SUSPENDING:
             return None  # stays PENDING; Control turns this into WAITING_FOR_USER
         record_event = d.conversation_record is ConversationRecord.FULL
+        if read_only and d.effect_profile is not EffectProfile.READ:
+            await self._commit(scope, record.call, _error(ToolStatus.DENIED, READ_ONLY_RESULT), record_event)
+            return RefusalRule.READ_ONLY
         try:
             await self._check_source(scope, d)
             if d.origin is ToolOrigin.EXTERNAL:  # an untrusted schema runs only in a killable child

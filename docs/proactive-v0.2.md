@@ -569,3 +569,35 @@ P1-1~P1-9 모두 PASS. 새 지적을 코드와 대조했다: Run은 응답을 �
 | # | 지적 | 반영 |
 | --- | --- | --- |
 | P1-10 | 이벤트 없이 Run을 끝내는 계약이 없어 재시작 뒤 `[[pass]]`가 답으로 살아날 수 있음 | `finalize_hidden_run`(한 트랜잭션: Run `PROJECTED`·이벤트 없음 + wake `passed`/`dropped`), 판정 함수 `free_wake_verdict`를 살아 있는 흐름과 `_prepare`가 같이 씀, 재시작 정리와의 순서, `RECEIVED` 직후·트랜잭션 전후의 재시작 시험(§7.3, §11, §13) |
+
+## 17. 구현 메모
+
+### 17.1 서버 1단계: 잠과 돌아옴 (`feat/proactive-v2-server1`)
+
+§15의 1단계. 앱은 아직 `sleep`을 보내지 않으므로, 옛 앱의 동작은 그대로다(시험으로 지킴).
+
+- **presence:** `Signals.sleep_known`·`sleep`(`Sleep.IDLE`·`DISPLAY_OFF`), `DeviceState.sleeps`·`sleep`. `sleep`을 보내는 기기는 잠들어도 후보(10분 입력 조건 없음). 잠든 신호의 입력은 `input_at`·`on_input`에 쓰지 않고, 깨어 있다가 잠드는 신호 하나만 그 직전 입력으로 쓴다(바로 기록). 잠듦·잠금 → 깸이면 `after`(`wake`, 잠금 해제면 `unlock`)로 바로 넘겨받고 돌아옴이 된다. `reconnect` 돌아옴은 깨어 있는 기기에만. Web의 기기 보기에 `sleep`.
+- **규칙:** `_blocked(s, kind)`가 wake 종류마다(§5 표). 깬 기기의 돌아옴은 기다림 0, 3분까지(`SLEEP_RETURN_FRESH`); 옛 앱은 20초·10분 그대로. 잠든(`idle`) 기기의 알림은 이유에 `asleep`. `Told`·`seen_reminders`·`Decision.seen`. 하루 상한은 활동 계기(`focus`·`game_ended`, 3단계에서 바뀜)에만, 간격 기본 15분, 돌아옴 기본 1시간.
+- **Data:** `WakeReason.asleep`·`again`, `remind_state` `told`(`PENDING_REMINDERS`에 넣어 정리·자동 기억의 지움에서 지킴), `end_wake`의 `told` 전이, `told_reminders`·`see_reminders`, `miss_reminders`가 `told`도. 두 저장소 같게.
+- **스케줄러:** 매 판단 앞에 `told` 알림을 말한 그 대화에 사용자 메시지가 있으면 `see_reminders`, 판단의 `seen`도 `see_reminders`. 대화 중 다시 확인은 대화 중 규칙을 받는 종류(`TALKING_KINDS`)에만. 깬 기기의 돌아옴은 1초 뒤 판단.
+- **도구(§5.6):** `ToolDispatcher.dispatch_group(..., read_only)`, `RefusalRule.READ_ONLY`. `Driver.resume_wake`가 그 턴 동안 켬(끝나지 않은 묶음을 이어 갈 때도).
+- **Web:** `PresenceBody.sleep`, `features.sleep_signals`, 기억 화면의 "Reminded …, not seen yet".
+
+**설계와 다르게 한 것 / 더 정한 것:**
+- **다시 알림은 알린 뒤의 돌아옴에만.** 시험에서 드러남: 알리기 전에 생긴 돌아옴 기록(3분 안)으로 곧바로 다시 알렸다. `returned.at ≥ told.at`일 때만.
+- **`sleep`을 보내는 기기의 `after: "resume"`은 무시한다.** 설계(§3.3)는 "넘겨받기만"이었으나, 절전 뒤의 앱은 잠든 채라 넘겨받을 까닭이 없고 깸이 넘겨받는다.
+- `told`에서 되돌릴 때(다시 알림이 실패) `remind_wake`는 그 실패한 wake로 남는다. 다음 확인(그 대화의 메시지)은 그 wake의 대화를 본다. 둘 다 최근 대화라 같다.
+- 가짜 기기 스크립트의 잠 장면(§9)은 앱 1단계와 같이 한다.
+
+**검수(PR #163, `bdc0a49`): NOT_READY → 고침.** 지적을 코드와 대조했다. 모두 맞다.
+
+| # | 지적 | 고침 |
+| --- | --- | --- |
+| P1-2 | 잠금 신호가 `sleep`을 빼면 `device.sleeps`가 거짓이 되어 잠금 해제 돌아옴을 놓침 | `sleep`을 빼고 온 **잠금** 신호는 앞의 `sleeps`를 지킨다. 그런 기기의 잠금 신호 입력도 마지막 입력이 아니다(잠금 화면에서 비밀번호를 치는 입력). 잠그는 신호 하나만 그 직전 입력을 바로 쓴다. 옛 앱은 V3-P88 그대로 |
+| P1-3 | 다시 알림이 실패하면 `remind_wake`가 실패한 wake(다른 기기)를 가리켜, 그 기기의 돌아옴이 "봤다"가 됨 | `told`의 알린 wake는 `remind_wake`가 아니라 **`reminded_at`에 끝난 답한 wake**로 찾는다(`told`가 될 때 둘은 한 트랜잭션의 같은 시각). 실패해 `told`로 돌아가면 `remind_wake`는 비우고 `reminded_at`은 그대로. 두 저장소 같게, 재시작 시험 |
+| P2-1 | 하루 상한이 알림 밖의 모든 wake를 셈 | 활동 이유(`focus`·`game_ended`)가 있는 wake만, 합친 wake는 한 번(`activity_wake`). `status`의 `today`도 같은 것을 셈 |
+
+**재검수(PR #163, `d828c84`): READY_WITH_CORRECTIONS → 고침.** 앞의 셋은 PASS. 보완 둘:
+- **알린 wake가 지워짐:** 대화를 영구 삭제하면 알린 wake도 사라져 `told` 알림이 고립되었다. 이제 `told_reminders`가 알린 wake 없이도 그 알림을 돌려주고(`None`), 스케줄러는 기기를 모름(`Told.device_id = None`)으로 둔다. 어느 돌아옴도 "봤다"가 되지 않으므로 다음 돌아옴에 다시 알린다(7일이면 놓침).
+- **40개 한도:** "그 대화에 그 뒤 사용자 메시지"를 스케줄러가 이벤트 40개만 읽어 찾던 것을 Data의 한 쿼리(`see_answered_reminders`)로 바꿨다. 대화가 얼마나 이어졌든 찾는다.
+

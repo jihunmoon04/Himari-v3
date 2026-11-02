@@ -162,6 +162,8 @@ class WakeReason(DeepFrozen):
     activity: str | None = None  # FOCUS: the category
     minutes: int | None = None  # FOCUS: how long it has gone on; GAME_ENDED: how long the game lasted
     late: bool = False  # REMINDER only: past its 24-hour window (§5.3)
+    asleep: bool = False  # REMINDER only (V3-P90 §5.1): told to a sleeping device, so ``told`` once answered
+    again: bool = False  # REMINDER only (V3-P90 §5.1): told before to a sleeping device, not seen; told again
 
 
 @dataclass(frozen=True)
@@ -1466,7 +1468,8 @@ class MemoryCleanup(DeepFrozen):
 
 
 MAX_WAKE_REASONS = 4
-PENDING_REMINDERS = frozenset({"scheduled", "claimed"})  # §5.3: a loop with one is not cleaned up as stale
+# §5.3: a loop with one is not cleaned up as stale; V3-P90 §5.1: nor one told but not seen yet
+PENDING_REMINDERS = frozenset({"scheduled", "claimed", "told"})
 REMIND_ON_TIME = timedelta(hours=24)  # §5.3: a reminder is told on time within this of its moment
 REMIND_LATE = timedelta(days=7)  # §5.3 (Q9): after that, at a later return, until this; then missed  # V3-P87 §6.4
 REMINDER_ATTEMPTS = 3  # V3-P87 §5.3: a reminder whose wakes ended unanswered this often is missed
@@ -1499,8 +1502,9 @@ class WakeStore(Protocol):
     async def begin_wake(self, scope: TrustedScope, reasons: Sequence[WakeReason], device_id: str, *,
                          keys: Sequence[str] = (), reminders: Sequence[int] = ()) -> ConversationEvent:
         """One transaction (§3.3): each key is taken (DUPLICATE_IDENTITY when one
-        was taken already), each reminder goes ``scheduled → claimed``
-        (INVALID_STATE_TRANSITION when it is not scheduled), the wake Event is
+        was taken already), each reminder goes ``scheduled → claimed`` or, told
+        again (V3-P90 §5.1), ``told → claimed`` (INVALID_STATE_TRANSITION when it
+        is neither), the wake Event is
         appended and its record written. Refused as an Event is (trash, an
         ask_user call waiting). INVALID_ARGUMENT: no reason, or more than
         MAX_WAKE_REASONS."""
@@ -1510,8 +1514,10 @@ class WakeStore(Protocol):
                        asked: bool = False) -> WakeRecord:
         """``opened → status``, once (a later call changes nothing). The
         reminders it claimed (§5.3), only while still claimed by it: ANSWERED →
-        delivered; else back to scheduled with one more attempt, missed at
-        the third."""
+        delivered, or ``told`` when its reason says it was told to a sleeping
+        device (V3-P90 §5.1: the wake stays its teller, ``reminded_at`` the
+        moment); else one told before goes back to told, and one never told
+        back to scheduled with one more attempt, missed at the third."""
         ...
 
     async def read_wake(self, principal: PrincipalId, wake_id: str) -> WakeRecord: ...
@@ -1533,8 +1539,26 @@ class WakeStore(Protocol):
         ...
 
     async def miss_reminders(self, principal: PrincipalId, before: datetime) -> int:
-        """§5.3 (Q9): scheduled reminders whose moment is before ``before`` become
-        missed (shown on the memory screen); how many."""
+        """§5.3 (Q9): scheduled (and, V3-P90 §5.1, told) reminders whose moment is before
+        ``before`` become missed (shown on the memory screen); how many."""
+        ...
+
+    async def told_reminders(self, principal: PrincipalId) -> tuple[tuple[int, str | None, datetime], ...]:
+        """V3-P90 §5.1: the reminders told to a sleeping device and not seen yet — the
+        note, the wake that told it (the answered one that ended at its ``reminded_at``,
+        not one that tried again and failed; None once that wake is gone with its
+        Conversation, PR #163 re-review P2), when."""
+        ...
+
+    async def see_answered_reminders(self, principal: PrincipalId) -> int:
+        """V3-P90 §5.1: told reminders become delivered when a user message came after the
+        wake that told them, in its Conversation — however long that Conversation went
+        on since (PR #163 re-review P2). How many."""
+        ...
+
+    async def see_reminders(self, principal: PrincipalId, memory_ids: Sequence[int]) -> int:
+        """V3-P90 §5.1: those of ``memory_ids`` still told become delivered (the user saw
+        them); ``reminded_at`` stays the telling. How many."""
         ...
 
     async def release_keys(self, principal: PrincipalId, wake_id: str) -> None:

@@ -15,6 +15,7 @@ from himari.proactive import (
     ProactiveSettings,
     Return,
     Situation,
+    Told,
     candidate_keys,
     candidates,
     decide,
@@ -35,8 +36,9 @@ def loop(memory_id: int, due: str, category: MemoryCategory = MemoryCategory.LOO
                   due_at=parsed[0], due_instant=parsed[1])
 
 
-def device(activity: ActivitySignal | None = None, before: EndedActivity | None = None) -> DeviceState:
-    return DeviceState("d1", True, 0.0, SEOUL, activity=activity, before=before)
+def device(activity: ActivitySignal | None = None, before: EndedActivity | None = None, *,
+           sleeps: bool = False, sleep: str | None = None) -> DeviceState:
+    return DeviceState("d1", True, 0.0, SEOUL, activity=activity, before=before, sleeps=sleeps, sleep=sleep)
 
 
 def wake(at: datetime, *kinds: WakeKind) -> WakeRecord:
@@ -98,7 +100,7 @@ def test_a_return_after_four_hours_is_greeted_once() -> None:
 
 
 @pytest.mark.parametrize(("returned", "changes"), [
-    (back(minutes=239), {}),  # under four hours
+    (back(minutes=59), {}),  # under an hour (V3-P90 §8)
     (back(minutes=None), {}),  # no input known before it (a fresh start)
     (back(device_id="d2"), {}),  # the user moved to another computer since
     (back(at=NOW - timedelta(seconds=10)), {}),  # the 20 seconds the user may speak first in
@@ -172,14 +174,97 @@ DUE = (loop(1, "2026-11-04T14:00+09:00"),)
     ({"last_user_message_at": NOW - timedelta(minutes=9)}, "talking"),
     ({"unanswered_wake": True}, "unanswered"),
     ({"now": datetime(2026, 11, 4, 14, 30, tzinfo=UTC)}, "quiet_hours"),  # 23:30 KST
-    ({"wakes": (wake(NOW - timedelta(minutes=29)),)}, "gap"),
-    ({"wakes": tuple(wake(NOW - timedelta(hours=h)) for h in (1, 2, 3, 4))}, "daily"),
+    ({"wakes": (wake(NOW - timedelta(minutes=14)),)}, "gap"),  # V3-P90 §8: 15 minutes
+    ({"device": device(sleeps=True, sleep="idle")}, "asleep"),  # V3-P90 §5: waits for the wake
 ])
 def test_what_holds_a_trigger_back(changes: dict[str, object], blocked: str) -> None:
     decided = decide(situation(loops=DUE, **changes))
     if blocked == "quiet_hours":  # the loop's day is past its window then: use one due that evening
         decided = decide(situation(loops=(loop(1, "2026-11-04T22:00+09:00"),), **changes))
     assert decided.reasons == () and decided.blocked == blocked and decided.held
+
+
+def test_the_daily_limit_holds_back_the_activity_triggers_only() -> None:
+    """V3-P90 §5.4: a loop is not counted against the day; a long focus still is."""
+    day = tuple(wake(NOW - timedelta(hours=h), WakeKind.FOCUS) for h in (1, 2, 3, 4))
+    assert decide(situation(loops=DUE, wakes=day)).reasons == (WakeReason(WakeKind.LOOP_DUE, memory_id=1),)
+    focus = decide(situation(device=device(coding(31)), wakes=day))
+    assert focus.reasons == () and focus.blocked == "daily"
+
+
+# --- V3-P90: sleep, the return, told reminders -----------------------------------------------
+
+SLEEPER = device(sleeps=True)
+
+
+def test_a_wake_from_sleep_is_greeted_at_once_and_after_an_hour() -> None:
+    """§5.2: no 20 seconds to wait (the app checked the wake); an hour away is enough."""
+    now_back = back(minutes=61, at=NOW, via="wake")
+    assert decide(situation(device=SLEEPER, returned=now_back)).reasons == (
+        WakeReason(WakeKind.RETURNED, away_minutes=61, via="wake"),)
+    assert decide(situation(device=SLEEPER, returned=back(minutes=59, at=NOW, via="wake"))).reasons == ()
+    # held back for three minutes at most
+    assert decide(situation(device=SLEEPER, returned=back(at=NOW - timedelta(minutes=4), via="wake"))).reasons == ()
+
+
+@pytest.mark.parametrize("changes", [
+    {"now": datetime(2026, 11, 4, 17, 0, tzinfo=UTC)},  # 02:00 KST: the user woke the computer
+    {"unanswered_wake": True},  # what was left unanswered before the absence
+    {"wakes": (wake(NOW - timedelta(minutes=5)),)},  # no gap
+    {"wakes": tuple(wake(NOW - timedelta(hours=h)) for h in (1, 2, 3, 4))},  # no daily limit
+])
+def test_a_return_passes_the_rules_of_the_other_wakes(changes: dict[str, object]) -> None:
+    """§5.2: only the user's quiet holds a return back."""
+    returned = back(at=changes.get("now", NOW), via="wake")  # type: ignore[arg-type]
+    assert decide(situation(device=SLEEPER, returned=returned, **changes)).reasons != ()
+    quiet = decide(situation(device=SLEEPER, returned=returned, quiet_until=NOW + timedelta(days=1), **changes))
+    assert quiet.reasons == () and quiet.blocked == "quiet"
+
+
+def to_remind(memory_id: int = 7, at: datetime = NOW - timedelta(minutes=1), state: str = "scheduled") -> Memory:
+    return replace(loop(memory_id, "2026-11-05"), remind_instant=at, remind_state=state)
+
+
+def test_a_sleeping_device_is_woken_for_a_reminder_only() -> None:
+    """§5.1: an idle sleep: the reminder is spoken (marked asleep); a screen that is off waits."""
+    idle = device(sleeps=True, sleep="idle")
+    decided = decide(situation(device=idle, loops=(to_remind(), *DUE)))
+    assert decided.reasons == (WakeReason(WakeKind.REMINDER, memory_id=7, asleep=True),)
+    assert [c.reason.kind for c in decided.held] == [WakeKind.LOOP_DUE] and decided.blocked == "asleep"
+    off = decide(situation(device=device(sleeps=True, sleep="display_off"), loops=(to_remind(),)))
+    assert off.reasons == () and off.blocked == "display_off"
+    awake = decide(situation(device=SLEEPER, loops=(to_remind(),)))
+    assert awake.reasons == (WakeReason(WakeKind.REMINDER, memory_id=7),)
+
+
+def test_a_told_reminder_seen_at_a_return_soon_after() -> None:
+    """§5.1, §5.2: back on that device within ten minutes — seen, and no greeting."""
+    told = (Told(7, "d1", NOW - timedelta(minutes=8)),)
+    decided = decide(situation(device=SLEEPER, returned=back(at=NOW, via="wake"),
+                               loops=(to_remind(state="told"),), told=told))
+    assert decided.reasons == () and decided.seen == (7,)
+
+
+@pytest.mark.parametrize("told", [
+    Told(7, "d1", NOW - timedelta(minutes=11)),  # came back later
+    Told(7, "d2", NOW - timedelta(minutes=2)),  # told on another computer
+])
+def test_a_told_reminder_is_told_again_at_a_later_return(told: Told) -> None:
+    decided = decide(situation(device=SLEEPER, returned=back(at=NOW, via="wake"),
+                               loops=(to_remind(state="told"),), told=(told,)))
+    assert decided.seen == ()
+    assert decided.reasons == (WakeReason(WakeKind.REMINDER, memory_id=7, again=True),
+                               WakeReason(WakeKind.RETURNED, away_minutes=290, via="wake"))
+
+
+def test_a_told_reminder_waits_for_a_return() -> None:
+    told = (Told(7, "d1", NOW - timedelta(minutes=30)),)
+    assert decide(situation(device=SLEEPER, loops=(to_remind(state="told"),), told=told)).reasons == ()
+    # a return from before the telling is not one after it
+    earlier = back(at=NOW - timedelta(minutes=1), via="wake")
+    later_told = (Told(7, "d1", NOW - timedelta(seconds=30)),)
+    assert decide(situation(device=SLEEPER, returned=earlier, loops=(to_remind(state="told"),),
+                            told=later_told)).reasons == (WakeReason(WakeKind.RETURNED, away_minutes=290, via="wake"),)
 
 
 def test_what_does_not_hold_it_back() -> None:
@@ -300,3 +385,24 @@ def test_a_reminder_past_its_day_is_told_late_at_the_next_return() -> None:
 def test_a_reminder_comes_first_in_a_merged_wake() -> None:
     decided = decide(situation(loops=(*DUE, reminding(7, NOW - timedelta(minutes=1))), returned=back()))
     assert [r.kind for r in decided.reasons] == [WakeKind.REMINDER, WakeKind.LOOP_DUE, WakeKind.RETURNED]
+
+
+def test_merged_wakes_count_once_toward_the_day_and_only_with_an_activity() -> None:
+    """PR #163 review P2-1: returns and loops do not use up the activity triggers' day."""
+    others = (wake(NOW - timedelta(hours=1), WakeKind.RETURNED), wake(NOW - timedelta(hours=2)),
+              wake(NOW - timedelta(hours=3), WakeKind.LOOP_DUE, WakeKind.RETURNED),
+              wake(NOW - timedelta(hours=4)))
+    assert decide(situation(device=device(coding(31)), wakes=others)).reasons != ()
+    merged = tuple(wake(NOW - timedelta(hours=h), WakeKind.FOCUS, WakeKind.LOOP_DUE) for h in (1, 2, 3))
+    assert decide(situation(device=device(coding(31)), wakes=merged)).reasons != ()  # three, not six
+    full = (*merged, wake(NOW - timedelta(hours=4), WakeKind.GAME_ENDED))
+    assert decide(situation(device=device(coding(31)), wakes=full)).blocked == "daily"
+
+
+def test_a_told_reminder_with_no_teller_is_told_again_at_the_next_return() -> None:
+    """PR #163 re-review P2: its wake is gone, so no return shows it was seen."""
+    told = (Told(7, None, NOW - timedelta(minutes=2)),)
+    decided = decide(situation(device=SLEEPER, returned=back(at=NOW, via="wake"),
+                               loops=(to_remind(state="told"),), told=told))
+    assert decided.seen == () and decided.reasons[0] == WakeReason(WakeKind.REMINDER, memory_id=7, again=True)
+

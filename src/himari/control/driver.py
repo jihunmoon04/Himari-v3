@@ -254,6 +254,7 @@ class Driver:
         self._max_runs = max_runs_per_drive
         self._wakes = wakes
         self._limits: dict[ConversationId, int | None] = {}  # this drive's Run limit (V3-P87 §4.2)
+        self._read_only: set[ConversationId] = set()  # a wake's turn: only Tools that read run (V3-P90 §5.6)
         self._turn_budget = turn_budget
         self._no_progress_runs = no_progress_runs
         self._planner = planner
@@ -293,7 +294,12 @@ class Driver:
             if not self._provider.describe_capabilities(self._turn_model(scope).model_id).speaks_first:
                 await self.withdraw_wake(scope, wake_id)
                 return DriveResult(DriveState.CANCELLED, detail=ControlErrorCode.MODEL_UNCHECKED.value)
-            return await self._resume_locked(scope)
+            # V3-P90 §5.6: the user did not ask for this turn — what writes does not run
+            self._read_only.add(scope.conversation_id)
+            try:
+                return await self._resume_locked(scope)
+            finally:
+                self._read_only.discard(scope.conversation_id)
 
     async def accept_wake(self, scope: TrustedScope, reasons: Sequence[WakeReason], device_id: str, *,
                           keys: Sequence[str] = (), reminders: Sequence[int] = ()) -> ConversationEvent:
@@ -735,8 +741,9 @@ class Driver:
         signal = self._stop(scope)
         try:
             group = await self._interruptible(
-                scope, lambda: self._dispatcher.dispatch_group(scope, run_id, payload.calls,
-                                                               pause=lambda: signal.pause_requested))
+                scope, lambda: self._dispatcher.dispatch_group(
+                    scope, run_id, payload.calls, pause=lambda: signal.pause_requested,
+                    read_only=scope.conversation_id in self._read_only))
         except _Cancelled:
             return await self._dispatcher.cancel_group(scope, run_id, CANCELLED_RESULT)
         if signal.cancel_requested:  # arrived as the group stopped (e.g. PAUSED): close what did not start

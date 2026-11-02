@@ -101,6 +101,43 @@ def test_only_effectful_environment_and_external_tools_are_claimed_before_runnin
     asyncio.run(scenario())
 
 
+
+def test_a_read_only_group_runs_only_tools_that_read() -> None:
+    """V3-P90 §5.6: a turn HIMARI opened itself — what writes is DENIED and never runs."""
+    async def scenario() -> None:
+        store = InMemoryStore()
+        store.create_conversation(SCOPE)
+        data = InMemoryData(store)
+        write = StatusProbe(data, "write_note", kind=None)
+        read = StatusProbe(data, "remote/read", kind=None, source="remote", effect=EffectProfile.READ)
+        unknown = StatusProbe(data, "remote/run", kind=None, source="remote", effect=EffectProfile.UNKNOWN)
+        dispatcher = Dispatcher(ToolRegistry([write, read, unknown]), data, data, data,
+                                ConfiguredExternalAccess({"remote": True}, data))
+        run_id = await data.prepare_run(
+            SCOPE, RunPreparation(b"", "t", RawRepresentation.ADAPTER_SERIALIZED, (), PromptBasis(0, 0), "p", "m")
+        )
+        await data.mark_dispatch(SCOPE, run_id)
+        await data.record_raw_outcome(SCOPE, run_id, RawReceived(b"", "t"))
+        group = (
+            ToolCall(CallId("a"), 0, ToolId("write_note"), {}),
+            ToolCall(CallId("b"), 1, ToolId("remote/read"), {}),
+            ToolCall(CallId("c"), 2, ToolId("remote/run"), {}),
+        )
+        await data.project_model_output(SCOPE, run_id, AssistantToolCalls(group))
+        write.run_id = read.run_id = unknown.run_id = run_id
+
+        result = await dispatcher.dispatch_group(SCOPE, run_id, group, read_only=True)
+
+        assert result.state is GroupState.COMPLETED
+        assert write.seen == [] and unknown.seen == [] and read.seen == [ToolExecutionStatus.PENDING]
+        records = await data.read_tool_executions(SCOPE, run_id)
+        assert [r.status for r in records] == [ToolExecutionStatus.DENIED, ToolExecutionStatus.SUCCEEDED,
+                                               ToolExecutionStatus.DENIED]
+        assert "not run" in records[0].model_result.blocks[0].text  # type: ignore[union-attr]
+        assert {str(c) for c in result.refusals} == {"a", "c"}
+
+    asyncio.run(scenario())
+
 async def _one_external_call(dispatcher: Dispatcher, data: InMemoryData, probe: StatusProbe) -> ToolExecutionStatus:
     run_id = await data.prepare_run(
         SCOPE, RunPreparation(b"", "t", RawRepresentation.ADAPTER_SERIALIZED, (), PromptBasis(0, 0), "p", "m")
