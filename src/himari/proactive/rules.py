@@ -267,7 +267,8 @@ def task_ended_candidate(device_id: str | None, device: DeviceState | None, sett
     if ended.lasted_seconds < settings.ended_minutes * 60 or ended.ended_seconds_ago > ENDED_FRESH.total_seconds():
         return None
     at = now - timedelta(seconds=ended.ended_seconds_ago)
-    key, aliases = _around(f"ended:{device_id}", at)
+    # PR #165 review P2-1: its group in the key — a game and a video that end a minute apart are two ends
+    key, aliases = _around(f"ended:{device_id}:{ended.group}", at)
     return Candidate(WakeReason(WakeKind.TASK_ENDED, group=ended.group, minutes=int(ended.lasted_seconds // 60)),
                      key, at, aliases)
 

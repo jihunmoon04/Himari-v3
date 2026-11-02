@@ -127,7 +127,7 @@ def ended(group: str = "game", lasted_minutes: float = 95, ago: float = 60) -> D
 def test_a_game_or_a_video_that_just_ended() -> None:
     decided = decide(situation(device=ended()))
     assert decided.reasons == (WakeReason(WakeKind.TASK_ENDED, group="game", minutes=95),)
-    assert decided.keys == ("ended:d1:2026-11-04T06:59Z",)
+    assert decided.keys == ("ended:d1:game:2026-11-04T06:59Z",)
     assert decide(situation(device=ended("video", 61))).reasons == (
         WakeReason(WakeKind.TASK_ENDED, group="video", minutes=61),)
     # a moment later, the end counted back across a minute: still taken
@@ -143,6 +143,15 @@ def test_a_game_or_a_video_that_just_ended() -> None:
 ])
 def test_an_end_that_is_not_spoken_of(state: DeviceState) -> None:
     assert decide(situation(device=state)).reasons == ()
+
+
+def test_a_game_and_a_video_ending_a_minute_apart_are_two_ends() -> None:
+    """PR #165 review P2-1: the group is in the key; the same end told again is still one."""
+    game = decide(situation(device=ended("game", ago=70)))
+    video = decide(situation(device=ended("video", ago=10)), frozenset(game.keys))
+    assert video.reasons == (WakeReason(WakeKind.TASK_ENDED, group="video", minutes=95),)
+    again = situation(now=NOW + timedelta(seconds=50), device=ended("game", ago=120))  # the app repeats it
+    assert decide(again, frozenset(game.keys)).reasons == ()
 
 
 def test_an_end_is_off_at_zero_minutes() -> None:

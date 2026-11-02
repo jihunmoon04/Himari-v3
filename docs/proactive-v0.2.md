@@ -634,7 +634,7 @@ P1-1~P1-9 모두 PASS. 새 지적을 코드와 대조했다: Run은 응답을 �
 
 - **presence:** `TaskSignal(group, for_seconds)`, `TaskEnded(group, lasted_seconds, ended_seconds_ago)`, `Signals.task`·`task_ended`, `DeviceState.task`(이어진 시간은 지금까지 셈)·`task_ended`(끝난 지 얼마, 3분 = `TASK_ENDED_SECONDS`까지). 앱이 같은 끝을 3분 동안 거듭 실어 보내도 끝난 시각은 5초 안이면 그대로 둔다(열쇠가 흔들리지 않게). 잠금·끊김은 둘 다 지운다. Web 기기 보기에 둘 다.
 - **Web:** `PresenceBody.task`(`work`·`video`·`game`), `task_ended`, `features.task_signals`.
-- **규칙:** `task_ended_candidate` — `game`·`video`만(§5.3, `work`의 끝은 말하지 않음), `ENDED_MINUTES`(60) 이상, 끝난 지 3분(`ENDED_FRESH`) 안. 열쇠 `ended:<기기>:<끝난 분>`(±1분 별칭). 막는 것: 기기 없음, 작업 중, 잠듦, 조용히, 최근 10분 메시지(`TALKING_KINDS`에 넣음). 23–08시·답 없는 wake·간격·하루 상한은 보지 않는다. 3분이 지나면 후보가 아니므로 미루지 않고 버린다. 합치는 순서: 알림 → 고리 → 작업 끝남 → 돌아옴.
+- **규칙:** `task_ended_candidate` — `game`·`video`만(§5.3, `work`의 끝은 말하지 않음), `ENDED_MINUTES`(60) 이상, 끝난 지 3분(`ENDED_FRESH`) 안. 열쇠 `ended:<기기>:<종류>:<끝난 분>`(±1분 별칭. 검수 PR #165 P2-1: 종류를 넣어 1분 사이에 끝난 게임과 영상이 서로 막지 않는다). 막는 것: 기기 없음, 작업 중, 잠듦, 조용히, 최근 10분 메시지(`TALKING_KINDS`에 넣음). 23–08시·답 없는 wake·간격·하루 상한은 보지 않는다. 3분이 지나면 후보가 아니므로 미루지 않고 버린다. 합치는 순서: 알림 → 고리 → 작업 끝남 → 돌아옴.
 - **오래 집중·게임 끝남(V3-P87 §5.4)을 더 만들지 않는다.** `FOCUS`·`GAME_ENDED` 값은 지난 wake를 읽으려고 남긴다. 설정 `HIMARI_PROACTIVE_FOCUS_MINUTES`·`_GAME_MINUTES`는 없애고 `HIMARI_PROACTIVE_ENDED_MINUTES`(60)를 둔다. 하루 상한(`HIMARI_PROACTIVE_DAILY`)은 이제 막을 계기가 없지만 자유 wake(5단계)의 예산으로 바꿀 때 함께 정리한다.
 - **Data:** `WakeKind.TASK_ENDED`, `WakeReason.group`(codec). 스키마 그대로.
 - **모델·화면:** `<wake>`에 `group`, 그리고 **서버 1단계에서 빠졌던 `again`**(다시 알림)을 그린다. Web의 wake 줄과 요약도 같게("a game ended after 1h 35m", "reminder m15 (again)").
