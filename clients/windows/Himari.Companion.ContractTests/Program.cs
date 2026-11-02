@@ -1,4 +1,4 @@
-using System.Net;
+﻿using System.Net;
 using System.Text;
 using System.Text.Json;
 using Himari.Companion;
@@ -666,6 +666,82 @@ Check(lockedPolicy.WakeNow() && !lockedPolicy.Asleep && !lockedPolicy.Locked, "t
 var afterSuspend = new SleepPolicy(); afterSuspend.WakeNow();
 Check(afterSuspend.FallAsleep() && afterSuspend.Asleep && !afterSuspend.FallAsleep(), "after the computer's sleep it goes on asleep");
 Check(afterSuspend.WakeNow() && !afterSuspend.WakeNow(), "a key or a click wakes it once");
+
+// V3-P90 §6.1, §5.3: the main task, and the games and videos that clearly end
+TaskTracker Run(TaskTracker tracker, DateTime from, int seconds, Func<int, string?> category, bool gameAlive = true,
+    bool playing = false, int sessions = 0, bool own = false, MediaSession[]? media = null, string? program = null)
+{
+    var listed = media ?? Enumerable.Range(0, sessions).Select(_ => new MediaSession("player", playing)).ToArray();
+    for (int i = 0; i <= seconds; i += 2) tracker.Observe(from.AddSeconds(i), category(i), own, gameAlive, listed, program);
+    return tracker;
+}
+var t0k = new DateTime(2026, 11, 2, 9, 0, 0, DateTimeKind.Utc);
+Check(TaskTracker.GroupOf("coding") == "work" && TaskTracker.GroupOf("design") == "work" && TaskTracker.GroupOf("browsing") is null
+    && TaskTracker.GroupOf("chat") is null && TaskTracker.GroupOf(null) is null, "work groups coding, documents and design; the rest is neutral");
+var split = Run(new TaskTracker(), t0k, 30 * 60, i => i / 60 % 2 == 0 ? "coding" : "browsing");
+Check(split.Current(t0k.AddMinutes(30))?.Group == "work", "code and browser in turns (a split screen) is one work task");
+var started = Run(new TaskTracker(), t0k, 100, _ => "coding");
+Check(started.Current(t0k.AddSeconds(100)) is null, "under two minutes of non-neutral time: no task yet");
+var since = Run(new TaskTracker(), t0k, 20 * 60, _ => "document");
+Check(since.Current(t0k.AddMinutes(20)) is { Group: "work" } w && w.ForSeconds is > 17 * 60 and < 18 * 60 + 1,
+    "a task counts from when it became the main one");
+var mixed = Run(new TaskTracker(), t0k, 10 * 60, i => i % 8 < 4 ? "coding" : "browsing");  // half: 150 s of 300
+Check(mixed.Current(t0k.AddMinutes(10))?.Group == "work", "neutral does not count against the task");
+var neutral = Run(new TaskTracker(), t0k, 10 * 60, _ => "coding");
+Run(neutral, t0k.AddMinutes(10), 4 * 60, _ => "browsing");
+Check(neutral.Current(t0k.AddMinutes(14)) is null, "neutral alone for minutes leaves no task");
+var ownWindow = Run(new TaskTracker(), t0k, 10 * 60, _ => "coding");
+Run(ownWindow, t0k.AddMinutes(10), 5 * 60, _ => null, own: true);
+Check(ownWindow.Current(t0k.AddMinutes(15))?.Group == "work", "HIMARI's own window counts as what was before");
+var gaming = Run(new TaskTracker(), t0k, 90 * 60, _ => "game");
+Check(gaming.Current(t0k.AddMinutes(90))?.Group == "game" && gaming.Ended(t0k.AddMinutes(90)) is null, "a game going on has no end");
+Check(gaming.Observe(t0k.AddMinutes(90).AddSeconds(2), null, false, false, []), "the game's program ended: its end is new");
+Check(gaming.Ended(t0k.AddMinutes(91)) is { Group: "game" } g && g.LastedSeconds > 85 * 60 && g.EndedSecondsAgo is > 50 and < 70,
+    "it lasted from when it became the task to its program's end");
+Check(gaming.Ended(t0k.AddMinutes(94)) is null, "an end is carried three minutes");
+var paused = Run(new TaskTracker(), t0k, 70 * 60, _ => "video", playing: true, sessions: 1);
+Run(paused, t0k.AddMinutes(70), 10 * 60, _ => "video", playing: false, sessions: 1);
+Check(paused.Ended(t0k.AddMinutes(80)) is null && paused.Current(t0k.AddMinutes(80))?.Group == "video", "a pause alone is no end");
+var closed = Run(new TaskTracker(), t0k, 70 * 60, _ => "video", playing: true, sessions: 1);
+closed.Observe(t0k.AddMinutes(70).AddSeconds(2), "browsing", false, true, []);
+Check(closed.Ended(t0k.AddMinutes(71)) is { Group: "video" } v && v.LastedSeconds > 65 * 60, "the video's session gone is its end");
+var movedOn = Run(new TaskTracker(), t0k, 70 * 60, _ => "video", playing: true, sessions: 1);
+Run(movedOn, t0k.AddMinutes(70), 6 * 60, _ => "coding", playing: false, sessions: 1);
+Check(movedOn.Ended(t0k.AddMinutes(74)) is { Group: "video" } moved && moved.LastedSeconds < 71 * 60,
+    "paused, and the task moved to work: the video ended where it last played");
+var asleepTask = Run(new TaskTracker(), t0k, 70 * 60, _ => "game");
+asleepTask.Reset();
+Check(asleepTask.Current(t0k.AddMinutes(70)) is null && !asleepTask.Observe(t0k.AddMinutes(71), null, false, false, [])
+    && asleepTask.Ended(t0k.AddMinutes(71)) is null, "asleep, the task ends and no end is told");
+// PR #166 review P1: an end told just before the lock is not told again on waking
+var endedThenLocked = Run(new TaskTracker(), t0k, 90 * 60, _ => "game");
+endedThenLocked.Observe(t0k.AddMinutes(90).AddSeconds(2), null, false, false, []);
+Check(endedThenLocked.Ended(t0k.AddMinutes(91)) is not null, "the game's end is carried");
+endedThenLocked.Reset();
+Check(endedThenLocked.Ended(t0k.AddMinutes(91)) is null, "locked or asleep, a carried end is dropped too");
+// PR #166 review P2: music playing in another program is not the video's session
+MediaSession[] both = [new("chrome", true), new("Spotify", true)];
+var withMusic = Run(new TaskTracker(), t0k, 70 * 60, _ => "video", media: both, program: "chrome");
+withMusic.Observe(t0k.AddMinutes(70).AddSeconds(2), "video", false, true, [new MediaSession("Spotify", true)], "chrome");
+Check(withMusic.Ended(t0k.AddMinutes(71)) is { Group: "video" }, "the video's own session gone is its end, music playing elsewhere or not");
+var musicOnly = Run(new TaskTracker(), t0k, 70 * 60, _ => "video", media: both, program: "chrome");
+Run(musicOnly, t0k.AddMinutes(70), 6 * 60, _ => "coding", media: [new("chrome", false), new("Spotify", true)], program: "code");
+Check(musicOnly.Ended(t0k.AddMinutes(74)) is { Group: "video" }, "the video paused and the task moved on: ended, though music still plays");
+var unmatched = Run(new TaskTracker(), t0k, 70 * 60, _ => "video", media: [new("Microsoft.ZuneVideo", true)], program: "Video.UI");
+unmatched.Observe(t0k.AddMinutes(70).AddSeconds(2), "video", false, true, [], "Video.UI");
+Check(unmatched.Ended(t0k.AddMinutes(71)) is { Group: "video" }, "with no session matched to the program, any session counts, as before");
+var working = Run(new TaskTracker(), t0k, 70 * 60, _ => "coding");
+Run(working, t0k.AddMinutes(70), 10 * 60, _ => "browsing");
+Check(working.Ended(t0k.AddMinutes(80)) is null, "the end of work is never told");
+var taskBody = PresenceBody.Build(3, "z", true, false, null, coding, true, null, true, null, plain, serverTakesTask: true,
+    task: new TaskState("work", 1500.7), taskEnded: new TaskEndedState("game", 5700.2, 30.9));
+Check(JsonSerializer.Serialize(taskBody, JsonSerializerOptions.Web).Contains("\"task\":{\"group\":\"work\",\"for_seconds\":1500}")
+    && ((Dictionary<string, object?>)taskBody["task_ended"]!)["lasted_seconds"] is 5700, "the task and an end go when the server takes them");
+Check(!PresenceBody.Build(3, "z", true, false, null, coding, true, null, true, null, plain, serverTakesTask: false, task: new TaskState("work", 1)).ContainsKey("task")
+    && !PresenceBody.Build(3, "z", true, false, null, coding, true, null, true, null, plain with { Activity = false }, serverTakesTask: true, task: new TaskState("work", 1)).ContainsKey("task"),
+    "not to a server without task_signals, nor with the activity turned off");
+Check(PresenceBody.Build(3, "z", true, false, null, coding, true, null, true, null, plain, serverTakesTask: true) is var none && none.ContainsKey("task") && none["task"] is null && !none.ContainsKey("task_ended"),
+    "no task goes as null; no end is left out");
 
 var excluded = SignalSettings.Names(SignalSettings.DefaultMicExclusions);
 Check(MicCamera.InUse([(@"C:#Program Files#Zoom#bin#Zoom.exe", 100, 0)], excluded, @"C:\Apps\Himari.Companion.exe"), "another program using the microphone counts");

@@ -21,6 +21,9 @@ public partial class MainWindow
     private IReadOnlyDictionary<string, string> categoryOverrides = new Dictionary<string, string>();
     private bool serverTakesSignals;  // GET /api/device or hello said features.presence_signals = 1 (§14)
     private bool serverTakesSleep;  // and features.sleep_signals = 1 (V3-P90 §3.1)
+    private bool serverTakesTask;  // and features.task_signals = 1 (V3-P90 §3.1)
+    private readonly TaskTracker taskTracker = new();
+    private uint lastGamePid;  // V3-P90 §5.3: the last game in front, whose program's end is the game's end
     private bool sessionLocked;
     private MediaInfo? latestMedia; private bool latestMediaKnown; private bool mediaReading;
     private DateTime lastMediaRead = DateTime.MinValue, lastMicRead = DateTime.MinValue;
@@ -35,6 +38,7 @@ public partial class MainWindow
     [DllImport("shell32.dll")] private static extern int SHQueryUserNotificationState(out int state);
     [DllImport("kernel32.dll", SetLastError = true)] private static extern IntPtr OpenProcess(uint access, bool inherit, uint process);
     [DllImport("kernel32.dll")] private static extern bool CloseHandle(IntPtr handle);
+    [DllImport("kernel32.dll")] private static extern bool GetExitCodeProcess(IntPtr process, out uint code);
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern bool QueryFullProcessImageName(IntPtr process, int flags, StringBuilder path, ref int size);
     private const uint ProcessQueryLimitedInformation = 0x1000;
@@ -128,12 +132,19 @@ public partial class MainWindow
         ApplySignalSettings(value);
     }
 
-    /// <summary>Reads what the loop sends next: the program in front, media, microphone and camera.</summary>
+    /// <summary>Reads what the loop sends next: the program in front, the task, media, microphone and camera.</summary>
     private void ObserveSignals(DateTime now)
     {
         var s = signalSettings;
-        if (!sessionLocked && s.Activity && ReadForeground() is { } observation && activityTracker.Observe(observation, now))
-            signalSchedule.Urgent();
+        if (!sessionLocked && s.Activity)
+        {
+            var observation = ReadForeground();  // null: HIMARI's own window
+            if (observation is not null && activityTracker.Observe(observation, now)) signalSchedule.Urgent();
+            // V3-P90 §6.1, §5.3: the main task and a game or video that ended; asleep, there is none
+            if (serverTakesTask && !sleepPolicy.Asleep
+                && taskTracker.Observe(now, observation?.Category, observation is null, GameAlive(), mediaSessions, observation?.Program))
+                signalSchedule.Urgent();
+        }
         if (s.Media)
         {
             if ((now - lastMediaRead).TotalSeconds >= 5 && !mediaReading) { lastMediaRead = now; _ = RefreshMedia(); }
@@ -151,7 +162,7 @@ public partial class MainWindow
     private Dictionary<string, object?> PresenceSignal(int idle, string zone, DateTime now, string? after) => PresenceBody.Build(
         idle, zone, serverTakesSignals, sessionLocked, after, activityTracker.Current(now),
         activityTracker.Known, latestMedia, latestMediaKnown, latestMicCamera, signalSettings, titleExclusions,
-        serverTakesSleep, sleepPolicy.Reason);
+        serverTakesSleep, sleepPolicy.Reason, serverTakesTask, taskTracker.Current(now), taskTracker.Ended(now));
 
     /// <summary>What is in front; null when it is HIMARI's own window (what was there is kept, §4.1).</summary>
     private ActivityObservation? ReadForeground()
@@ -170,7 +181,28 @@ public partial class MainWindow
         bool fullscreen = exclusive || (!IsIconic(window) && GetWindowRect(window, out var rect)
             && CoversMonitor(rect, System.Windows.Forms.Screen.FromHandle(window).Bounds));
         string category = ActivityCatalog.Classify(program, path, title.ToString(), exclusive, categoryOverrides);
+        if (category == "game") lastGamePid = pid;
         return new ActivityObservation(category, ProgramName(program, path), fullscreen, title.ToString(), program);
+    }
+
+    /// <summary>V3-P90 §5.3: whether the last game's program still runs (unknown counts as running).</summary>
+    private bool GameAlive()
+    {
+        if (lastGamePid == 0) return true;
+        IntPtr handle = OpenProcess(ProcessQueryLimitedInformation, false, lastGamePid);
+        if (handle == IntPtr.Zero)
+        {
+            bool gone = Marshal.GetLastWin32Error() == 87;  // ERROR_INVALID_PARAMETER: no such process
+            if (gone) lastGamePid = 0;
+            return !gone;
+        }
+        try
+        {
+            bool running = !GetExitCodeProcess(handle, out uint code) || code == 259;  // STILL_ACTIVE
+            if (!running) lastGamePid = 0;
+            return running;
+        }
+        finally { CloseHandle(handle); }
     }
 
     private static string? ProcessPath(uint pid)
