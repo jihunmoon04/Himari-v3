@@ -387,7 +387,7 @@ def test_the_event_stream_starts_with_hello(server: Server) -> None:
     name, hello = frames_of(response.text)[0]
     assert name == "hello" and hello == {
         "device": {"device_id": "d1", "name": "데스크톱"}, "moods": list(MOODS), "current_device": None,
-        "recent_conversation": {"id": cid, "title": None}, "features": {"presence_signals": 1, "sleep_signals": 1},
+        "recent_conversation": {"id": cid, "title": None}, "features": {"presence_signals": 1, "sleep_signals": 1, "task_signals": 1},
         "quiet_until": None, "activity": {"working": [], "waiting": []}}  # a device gets no signals revision
     web_hello = frames_of(server.client.get("/api/events").text)[0][1]
     assert web_hello["device"] is None and web_hello["recent_conversation"]["id"] == cid
@@ -611,10 +611,32 @@ def test_a_wake_is_shown_as_a_line_with_its_reasons() -> None:
 def test_speaking_first_settings_from_the_environment() -> None:
     base = {"HIMARI_WEB_ALLOWED_HOSTS": "localhost", "HIMARI_DATA_ROOT": "/tmp/x", "HIMARI_MODEL": "m"}
     off = WebConfig.from_env(base).proactive
-    assert not off.enabled and (off.gap_minutes, off.daily, off.focus_minutes, off.return_hours) == (15, 4, 30, 1)
+    assert not off.enabled and (off.gap_minutes, off.daily, off.ended_minutes, off.return_hours) == (15, 4, 60, 1)
     on = WebConfig.from_env({**base, "HIMARI_PROACTIVE": "1", "HIMARI_PROACTIVE_QUIET": "",
                              "HIMARI_PROACTIVE_GAP_MINUTES": "45"}).proactive
     assert on.enabled and on.quiet_start is None and on.gap_minutes == 45
     for name, bad in (("HIMARI_PROACTIVE_QUIET", "late"), ("HIMARI_PROACTIVE_DAILY", "99")):
         with pytest.raises(WebConfigError):
             WebConfig.from_env({**base, name: bad})
+
+
+def test_the_task_and_its_end_are_kept_and_shown(server: Server) -> None:
+    """V3-P90 §3.1: ``task`` and ``task_ended`` from the app; the Web sees them; a lock drops both."""
+    me = server.as_device(server.paired())
+    server.client.portal.call(lambda: server.app.hub.subscribe(OPERATOR, "d1"))  # type: ignore[union-attr]
+    body = {**SIGNAL, "task": {"group": "work", "for_seconds": 1500},
+            "task_ended": {"group": "game", "lasted_seconds": 5700, "ended_seconds_ago": 30}}
+    assert server.device.post("/api/device/presence", json=body, headers=me).status_code == 204
+    (item,) = server.client.get("/api/devices").json()["items"]
+    assert item["signals"]["task"]["group"] == "work" and item["signals"]["task"]["for_seconds"] >= 1500
+    assert item["signals"]["task_ended"]["group"] == "game" and item["signals"]["task_ended"]["lasted_seconds"] == 5700
+    state = server.app.hub.states(OPERATOR)["d1"]
+    assert state.task is not None and state.task_ended is not None and 30 <= state.task_ended.ended_seconds_ago < 40
+    locked = {"idle_seconds": 0, "session": "locked"}
+    assert server.device.post("/api/device/presence", json=locked, headers=me).status_code == 204
+    state = server.app.hub.states(OPERATOR)["d1"]
+    assert state.task is None and state.task_ended is None
+    for bad in ({"idle_seconds": 0, "task": {"group": "browsing", "for_seconds": 1}},
+                {"idle_seconds": 0, "task": {"group": "work", "for_seconds": -1}},
+                {"idle_seconds": 0, "task_ended": {"group": "game", "lasted_seconds": 1}}):
+        assert server.device.post("/api/device/presence", json=bad, headers=me).status_code == 400, bad

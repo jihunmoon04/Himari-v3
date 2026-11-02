@@ -758,12 +758,14 @@ def wake_text(wake: Wake, notes: Mapping[int, Memory]) -> str:
             item["loop"] = {"id": f"m{reason.memory_id}", "deleted": True} if note is None else {
                 "id": f"m{note.memory_id}", "text": note.text, **({"due": note.due_at} if note.due_at else {}),
                 **({"remind_at": note.remind_at} if reason.kind is WakeKind.REMINDER and note.remind_at else {})}
-        for name in ("via", "away_minutes", "activity", "minutes"):
+        for name in ("via", "away_minutes", "activity", "group", "minutes"):
             value = getattr(reason, name)
             if value is not None:
                 item[name] = value
         if reason.late:
             item["late"] = True
+        if reason.again:  # V3-P90 §5.1: told while the character slept, not seen: told again
+            item["again"] = True
         reasons.append(item)
     return "<wake>" + json_data({"reasons": reasons}) + "</wake>"
 

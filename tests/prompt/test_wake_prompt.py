@@ -124,3 +124,15 @@ def test_no_speaking_first_line_for_a_model_that_was_not_checked() -> None:
     unchecked = replace(inputs(spec=SystemSpec(companion=True, proactive=True)), request_options=RequestOptions("m"))
     text = "\n".join(system_text(unchecked))
     assert PROACTIVE_RULE not in text and "<wake> message" not in text
+
+
+def test_a_reminder_told_again_and_an_end_are_drawn() -> None:
+    """V3-P90 §5.1, §5.3: the model reads that a reminder is told again, and what ended."""
+    from himari.prompt.api import wake_text
+
+    again = Wake("wake_3", (WakeReason(WakeKind.REMINDER, memory_id=15, again=True),
+                            WakeReason(WakeKind.TASK_ENDED, group="game", minutes=95)), "d1")
+    reminder, game = json.loads(wake_text(again, {15: LOOP})[6:-7])["reasons"]
+    assert reminder["again"] is True and "late" not in reminder
+    assert game == {"kind": "task_ended", "group": "game", "minutes": 95}
+

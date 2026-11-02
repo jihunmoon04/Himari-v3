@@ -49,6 +49,7 @@ from himari.presence.api import (
     REOPEN_SECONDS,
     SIGNAL_SECONDS,
     SWITCH_SECONDS,
+    TASK_ENDED_SECONDS,
     TICK_SECONDS,
     ActivitySignal,
     After,
@@ -59,6 +60,8 @@ from himari.presence.api import (
     Session,
     Signals,
     StreamEvent,
+    TaskEnded,
+    TaskSignal,
     TooManyStreams,
 )
 
@@ -137,13 +140,18 @@ class _Device:
     seen: tuple[bool, bool] = (False, False)  # connected and current as the Web was last told
     sleeps: bool = False  # V3-P90: its last signal carried ``sleep``
     sleep: str | None = None  # asleep ("idle", "display_off"); None: awake
+    task: TaskSignal | None = None  # V3-P90 §6.1
+    task_at: float | None = None  # when ``task`` came (its for_seconds counts on from there)
+    task_ended: tuple[str, float, float] | None = None  # V3-P90 §5.3: group, lasted, when it ended (monotonic)
 
 
 def _shown(device: _Device) -> tuple[object, ...]:
     """What the Web shows of a device's signals, but for the running time (counted when read)."""
     activity = None if device.activity is None else replace(device.activity, for_seconds=0.0)
     before = None if device.before is None else (device.before.category, device.before.app, device.before.ended_at)
-    return (device.locked, activity, device.media, device.mic_or_camera, before, device.sleep)
+    task = None if device.task is None else device.task.group
+    ended = None if device.task_ended is None else (device.task_ended[0], device.task_ended[2])
+    return (device.locked, activity, device.media, device.mic_or_camera, before, device.sleep, task, ended)
 
 
 class PresenceHub:
@@ -263,7 +271,18 @@ class PresenceHub:
         device.locked = snapshot.session is Session.LOCKED
         if device.locked:  # nothing is in front of a locked screen; not an end either
             device.activity = device.activity_at = device.media = device.mic_or_camera = None
+            device.task = device.task_at = device.task_ended = None
             return
+        # V3-P90 §3.1: what goes on, and what ended (kept with its moment, so a repeat does not move it)
+        device.task, device.task_at = snapshot.task, (now if snapshot.task is not None else None)
+        if (ended := snapshot.task_ended) is None:
+            device.task_ended = None
+        else:
+            at = now - min(max(ended.ended_seconds_ago, 0.0), TASK_ENDED_SECONDS)
+            same = device.task_ended is not None and device.task_ended[0] == ended.group \
+                and abs(device.task_ended[2] - at) < 5
+            if not same:
+                device.task_ended = (ended.group, ended.lasted_seconds, at)
         old, old_at = device.activity, device.activity_at
         new = snapshot.activity if snapshot.activity_known else None
         if old is not None and old_at is not None and snapshot.activity_known and (
@@ -286,10 +305,16 @@ class PresenceHub:
         before = None
         if d.before is not None and now - d.before.ended_at <= BEFORE_SECONDS:
             before = EndedActivity(d.before.category, d.before.app, d.before.lasted_seconds, now - d.before.ended_at)
+        task = d.task
+        if task is not None and d.task_at is not None:
+            task = replace(task, for_seconds=task.for_seconds + (now - d.task_at))
+        ended = None
+        if d.task_ended is not None and now - d.task_ended[2] <= TASK_ENDED_SECONDS:
+            ended = TaskEnded(d.task_ended[0], d.task_ended[1], now - d.task_ended[2])
         return DeviceState(device_id, self._connected(principal, device_id, now),
                            None if d.input_at is None else now - d.input_at, d.time_zone,
                            locked=d.locked, activity=activity, media=d.media, mic_or_camera=d.mic_or_camera,
-                           before=before, sleeps=d.sleeps, sleep=d.sleep)
+                           before=before, sleeps=d.sleeps, sleep=d.sleep, task=task, task_ended=ended)
 
     def current(self, principal: PrincipalId) -> str | None:
         return self._current.get(principal)
@@ -429,6 +454,7 @@ class PresenceHub:
         device.sleep = None
         device.activity = device.activity_at = device.media = device.mic_or_camera = None
         device.before = device.after = None
+        device.task = device.task_at = device.task_ended = None
         if _shown(device) != shown:
             self._changed(principal)
 

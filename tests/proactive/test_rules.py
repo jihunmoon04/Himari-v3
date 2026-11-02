@@ -9,7 +9,7 @@ import pytest
 
 from himari.common import ConversationId, PrincipalId
 from himari.data.api import Memory, MemoryCategory, MemoryOrigin, WakeKind, WakeReason, WakeRecord, WakeStatus, parse_note_date
-from himari.presence.api import ActivitySignal, DeviceState, EndedActivity
+from himari.presence.api import ActivitySignal, DeviceState, EndedActivity, TaskEnded
 from himari.proactive import (
     CHECK_IN_WINDOW,
     ProactiveSettings,
@@ -118,48 +118,71 @@ def test_a_message_before_the_absence_does_not_stop_the_greeting() -> None:
     assert decide(situation(returned=back(), last_user_message_at=long_ago)).reasons != ()
 
 
-# --- §5.4 activity ------------------------------------------------------------------------
+# --- V3-P90 §5.3 a game or a video that ended ----------------------------------------------
 
-def coding(minutes: float, category: str = "coding") -> ActivitySignal:
-    return ActivitySignal(category, "Code", minutes * 60)
-
-
-def test_a_long_focus_once_per_stretch() -> None:
-    assert decide(situation(device=device(coding(29)))).reasons == ()
-    first = decide(situation(device=device(coding(31))))
-    assert first.reasons == (WakeReason(WakeKind.FOCUS, activity="coding", minutes=31),)
-    # the same stretch a little later, its start counted back across a minute: still taken
-    later = situation(now=NOW + timedelta(minutes=20, seconds=40), device=device(coding(51 + 40 / 60 + 0.01)))
-    assert decide(later, frozenset(first.keys)).reasons == ()
-    found, expired, _ = candidates(later)
-    assert set(first.keys) & set(candidate_keys(found, expired))
-    # a new stretch after a break
-    again = situation(now=NOW + timedelta(hours=2), device=device(coding(31)))
-    assert decide(again, frozenset(first.keys)).reasons != ()
+def ended(group: str = "game", lasted_minutes: float = 95, ago: float = 60) -> DeviceState:
+    return replace(device(), task_ended=TaskEnded(group, lasted_minutes * 60, ago))
 
 
-@pytest.mark.parametrize("category", ["document", "design", "video"])
-def test_focus_counts_documents_designs_and_videos(category: str) -> None:
-    assert decide(situation(device=device(coding(30, category)))).reasons[0].activity == category
+def test_a_game_or_a_video_that_just_ended() -> None:
+    decided = decide(situation(device=ended()))
+    assert decided.reasons == (WakeReason(WakeKind.TASK_ENDED, group="game", minutes=95),)
+    assert decided.keys == ("ended:d1:game:2026-11-04T06:59Z",)
+    assert decide(situation(device=ended("video", 61))).reasons == (
+        WakeReason(WakeKind.TASK_ENDED, group="video", minutes=61),)
+    # a moment later, the end counted back across a minute: still taken
+    later = situation(now=NOW + timedelta(seconds=40), device=ended(ago=100.5))
+    assert decide(later, frozenset(decided.keys)).reasons == ()
 
 
-@pytest.mark.parametrize("category", ["game", "chat", "browsing", "music"])
-def test_other_activities_are_no_focus(category: str) -> None:
-    assert decide(situation(device=device(coding(90, category)))).reasons == ()
+@pytest.mark.parametrize("state", [
+    ended(lasted_minutes=59),  # under an hour
+    ended(ago=181),  # past three minutes: let go, not held
+    ended("work"),  # the end of work is not told (§5.3)
+    device(),  # no task ended
+])
+def test_an_end_that_is_not_spoken_of(state: DeviceState) -> None:
+    assert decide(situation(device=state)).reasons == ()
 
 
-def test_a_game_that_just_ended() -> None:
-    ended = EndedActivity("game", "Game", 95 * 60, 120)
-    assert decide(situation(device=device(before=ended))).reasons == (
-        WakeReason(WakeKind.GAME_ENDED, minutes=95),)
-    for before in (replace(ended, lasted_seconds=29 * 60), replace(ended, ended_seconds_ago=11 * 60),
-                   replace(ended, category="video")):
-        assert decide(situation(device=device(before=before))).reasons == ()
-    assert decide(situation(device=device(before=ended), settings=replace(ON, game_minutes=0))).reasons == ()
+def test_a_game_and_a_video_ending_a_minute_apart_are_two_ends() -> None:
+    """PR #165 review P2-1: the group is in the key; the same end told again is still one."""
+    game = decide(situation(device=ended("game", ago=70)))
+    video = decide(situation(device=ended("video", ago=10)), frozenset(game.keys))
+    assert video.reasons == (WakeReason(WakeKind.TASK_ENDED, group="video", minutes=95),)
+    again = situation(now=NOW + timedelta(seconds=50), device=ended("game", ago=120))  # the app repeats it
+    assert decide(again, frozenset(game.keys)).reasons == ()
 
 
-def test_no_signals_no_activity_trigger() -> None:
-    assert decide(situation(device=DeviceState("d1", True, 0.0, None))).reasons == ()
+def test_an_end_is_off_at_zero_minutes() -> None:
+    assert decide(situation(device=ended(), settings=replace(ON, ended_minutes=0))).reasons == ()
+
+
+def test_the_activity_in_front_is_no_trigger_any_more() -> None:
+    """V3-P90 §4: a long focus and a game's end by the program in front are made no more."""
+    long_focus = replace(device(ActivitySignal("coding", "Code", 3 * 3600)),
+                         before=EndedActivity("game", "Game", 95 * 60, 60))
+    assert decide(situation(device=long_focus)).reasons == ()
+
+
+@pytest.mark.parametrize(("changes", "blocked"), [
+    ({"device": replace(ended(), sleeps=True, sleep="idle")}, "asleep"),
+    ({"quiet_until": NOW + timedelta(minutes=5)}, "quiet"),
+    ({"last_user_message_at": NOW - timedelta(minutes=9)}, "talking"),
+    ({"working": True}, "working"),
+])
+def test_what_holds_an_end_back(changes: dict[str, object], blocked: str) -> None:
+    decided = decide(situation(**{"device": ended(), **changes}))
+    assert decided.reasons == () and decided.blocked == blocked
+
+
+@pytest.mark.parametrize("changes", [
+    {"now": datetime(2026, 11, 4, 16, 0, tzinfo=UTC)},  # 01:00 KST: the game ended, the user is up
+    {"unanswered_wake": True},
+    {"wakes": (wake(NOW - timedelta(minutes=2)),)},  # no gap
+])
+def test_an_end_passes_the_hours_the_gap_and_an_unanswered_wake(changes: dict[str, object]) -> None:
+    assert decide(situation(device=ended(), **changes)).reasons != ()
 
 
 # --- §6 rules -----------------------------------------------------------------------------
@@ -182,14 +205,6 @@ def test_what_holds_a_trigger_back(changes: dict[str, object], blocked: str) -> 
     if blocked == "quiet_hours":  # the loop's day is past its window then: use one due that evening
         decided = decide(situation(loops=(loop(1, "2026-11-04T22:00+09:00"),), **changes))
     assert decided.reasons == () and decided.blocked == blocked and decided.held
-
-
-def test_the_daily_limit_holds_back_the_activity_triggers_only() -> None:
-    """V3-P90 §5.4: a loop is not counted against the day; a long focus still is."""
-    day = tuple(wake(NOW - timedelta(hours=h), WakeKind.FOCUS) for h in (1, 2, 3, 4))
-    assert decide(situation(loops=DUE, wakes=day)).reasons == (WakeReason(WakeKind.LOOP_DUE, memory_id=1),)
-    focus = decide(situation(device=device(coding(31)), wakes=day))
-    assert focus.reasons == () and focus.blocked == "daily"
 
 
 # --- V3-P90: sleep, the return, told reminders -----------------------------------------------
@@ -305,13 +320,13 @@ def test_the_day_is_the_devices_day() -> None:
 
 def test_candidates_merge_into_one_wake_in_order_up_to_four() -> None:
     loops = tuple(loop(i, f"2026-11-04T{9 + i:02d}:00+09:00") for i in range(1, 5))  # all due by 16:00 KST
-    decided = decide(situation(loops=loops, returned=back(), device=device(coding(40))))
+    decided = decide(situation(loops=loops, returned=back(), device=ended()))
     kinds = [r.kind for r in decided.reasons]
     assert kinds == [WakeKind.LOOP_DUE] * 4  # loops first, in their moments' order
     assert [r.memory_id for r in decided.reasons] == [1, 2, 3, 4]
-    assert {c.reason.kind for c in decided.held} == {WakeKind.FOCUS, WakeKind.RETURNED}  # the next look
-    merged = decide(situation(loops=loops[:1], returned=back(), device=device(coding(40))))
-    assert [r.kind for r in merged.reasons] == [WakeKind.LOOP_DUE, WakeKind.FOCUS, WakeKind.RETURNED]
+    assert {c.reason.kind for c in decided.held} == {WakeKind.TASK_ENDED, WakeKind.RETURNED}  # the next look
+    merged = decide(situation(loops=loops[:1], returned=back(), device=ended()))
+    assert [r.kind for r in merged.reasons] == [WakeKind.LOOP_DUE, WakeKind.TASK_ENDED, WakeKind.RETURNED]
     assert len(merged.keys) == 3 and merged.held == ()
 
 
@@ -387,16 +402,12 @@ def test_a_reminder_comes_first_in_a_merged_wake() -> None:
     assert [r.kind for r in decided.reasons] == [WakeKind.REMINDER, WakeKind.LOOP_DUE, WakeKind.RETURNED]
 
 
-def test_merged_wakes_count_once_toward_the_day_and_only_with_an_activity() -> None:
-    """PR #163 review P2-1: returns and loops do not use up the activity triggers' day."""
-    others = (wake(NOW - timedelta(hours=1), WakeKind.RETURNED), wake(NOW - timedelta(hours=2)),
-              wake(NOW - timedelta(hours=3), WakeKind.LOOP_DUE, WakeKind.RETURNED),
-              wake(NOW - timedelta(hours=4)))
-    assert decide(situation(device=device(coding(31)), wakes=others)).reasons != ()
-    merged = tuple(wake(NOW - timedelta(hours=h), WakeKind.FOCUS, WakeKind.LOOP_DUE) for h in (1, 2, 3))
-    assert decide(situation(device=device(coding(31)), wakes=merged)).reasons != ()  # three, not six
-    full = (*merged, wake(NOW - timedelta(hours=4), WakeKind.GAME_ENDED))
-    assert decide(situation(device=device(coding(31)), wakes=full)).blocked == "daily"
+def test_the_day_counts_only_the_old_activity_wakes_once_each() -> None:
+    """PR #163 review P2-1: what the status's day counts — a merged wake once, a loop or a return never."""
+    from himari.proactive import activity_wake
+
+    assert activity_wake(wake(NOW, WakeKind.FOCUS, WakeKind.LOOP_DUE)) and activity_wake(wake(NOW, WakeKind.GAME_ENDED))
+    assert not activity_wake(wake(NOW, WakeKind.RETURNED)) and not activity_wake(wake(NOW, WakeKind.TASK_ENDED))
 
 
 def test_a_told_reminder_with_no_teller_is_told_again_at_the_next_return() -> None:

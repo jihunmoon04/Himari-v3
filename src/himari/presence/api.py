@@ -130,6 +130,7 @@ MAX_STREAMS = 16  # event streams of one principal, devices and Web tabs togethe
 QUEUE_EVENTS = 256  # what one subscriber may have waiting; past it the stream is closed
 BEFORE_SECONDS = 1800.0  # V3-P88 §4.4: an ended activity is kept this long, then forgotten
 NOTICE_SECONDS = 10.0  # V3-P88 §8.1: a principal's ``devices`` notices come at most this often
+TASK_ENDED_SECONDS = 180.0  # V3-P90 §5.3: a task's end is kept this long (the app carries it as long)
 
 
 # --- Activity signals (V3-P88) ----------------------------------------------------------------
@@ -176,6 +177,26 @@ class MediaSignal(DeepFrozen):
     app: str | None = None
 
 
+TASK_GROUPS = ("work", "video", "game")  # V3-P90 §6.1: the app's task groups (browsing, chat, other: neutral)
+
+
+@dataclass(frozen=True)
+class TaskSignal(DeepFrozen):
+    """V3-P90 §6.1: the task that goes on — its group, and how long it has gone on when sent."""
+
+    group: str
+    for_seconds: float = 0.0
+
+
+@dataclass(frozen=True)
+class TaskEnded(DeepFrozen):
+    """V3-P90 §5.3: a game or a video that clearly ended — how long it lasted, how long ago it ended."""
+
+    group: str
+    lasted_seconds: float
+    ended_seconds_ago: float
+
+
 @dataclass(frozen=True)
 class Signals(DeepFrozen):
     """One signal's whole snapshot of a device (§2.1): a field the app did not
@@ -194,6 +215,9 @@ class Signals(DeepFrozen):
     # sleeps; None with it known is awake. One that does not keeps the V3-P88 rules.
     sleep_known: bool = False
     sleep: Sleep | None = None
+    # V3-P90 §3.1: the task that goes on, and one that just ended (absent: unknown, null: none)
+    task: TaskSignal | None = None
+    task_ended: TaskEnded | None = None
 
 
 @dataclass(frozen=True)
@@ -235,6 +259,8 @@ class DeviceState(DeepFrozen):
     before: EndedActivity | None = None
     sleeps: bool = False  # V3-P90 §3.2: it sends ``sleep`` (it stays current while asleep)
     sleep: str | None = None  # "idle", "display_off"; None: awake (or an app that does not send it)
+    task: TaskSignal | None = None  # V3-P90 §6.1: ``for_seconds`` counted to now
+    task_ended: TaskEnded | None = None  # V3-P90 §5.3: ``ended_seconds_ago`` counted to now
 
 
 @dataclass(frozen=True)

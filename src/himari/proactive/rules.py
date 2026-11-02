@@ -6,9 +6,10 @@ took yet, applies the rules and merges what may speak into one wake.
 V3-P90 §5: each kind of wake has only the rules that fit it. A reminder is
 held back only by no device, work and a screen that is off — a sleeping
 character wakes to tell it (then it is ``told`` until the user sees it); a
-return (waking from sleep) by the user's quiet; a loop also by talking, an
-unanswered wake, the quiet hours and the gap. The daily limit is for the
-activity triggers only.
+return (waking from sleep) by the user's quiet; a game or a video that just
+ended (§5.3) also by talking, and is let go, not held, past ENDED_FRESH; a
+loop also by an unanswered wake, the quiet hours and the gap. A long focus
+and a game's end by the program in front (V3-P87 §5.4) are made no more.
 """
 
 from __future__ import annotations
@@ -39,14 +40,14 @@ RETURN_WAIT = timedelta(seconds=20)  # §5.2: the user may speak first after an 
 SLEEP_RETURN_FRESH = timedelta(minutes=3)
 TOLD_SEEN = timedelta(minutes=10)  # V3-P90 §5.1: a return this soon after a told reminder saw it
 TALKING = timedelta(minutes=10)  # §6.1: a user message this recent means the user is talking
-GAME_RECENT = timedelta(minutes=10)  # §5.4: a game that ended this recently
-ACTIVITY_FOCUS = frozenset({"coding", "document", "design", "video"})  # §5.4 (video: owner, 2026-11-01)
-# V3-P90 §5.4: the activity triggers, the only ones the daily limit counts and holds back
+ENDED_FRESH = timedelta(minutes=3)  # V3-P90 §5.3: a task's end is spoken of this soon, else let go
+ENDED_GROUPS = frozenset({"game", "video"})  # V3-P90 §5.3: the ends the app can tell clearly
+# V3-P90 §5.4: the activity triggers (V3-P87's, made no more), the only ones the daily limit counts
 ACTIVITY_KINDS = frozenset({WakeKind.FOCUS, WakeKind.GAME_ENDED})
 # V3-P90 §5: the kinds the talking rule holds back (a reminder and a return are not)
-TALKING_KINDS = frozenset({WakeKind.LOOP_DUE, WakeKind.FOCUS, WakeKind.GAME_ENDED})
-# §6.4: the order reasons are told in, and kept when over MAX_WAKE_REASONS
-MERGE_ORDER = (WakeKind.REMINDER, WakeKind.LOOP_DUE, WakeKind.FOCUS, WakeKind.GAME_ENDED, WakeKind.RETURNED)
+TALKING_KINDS = frozenset({WakeKind.LOOP_DUE, WakeKind.TASK_ENDED, WakeKind.FOCUS, WakeKind.GAME_ENDED})
+# §6.4, V3-P90 §4: the order reasons are told in, and kept when over MAX_WAKE_REASONS
+MERGE_ORDER = (WakeKind.REMINDER, WakeKind.LOOP_DUE, WakeKind.TASK_ENDED, WakeKind.RETURNED)
 
 
 @dataclass(frozen=True)
@@ -60,8 +61,7 @@ class ProactiveSettings:
     gap_minutes: int = 15  # V3-P90: for a loop and the activity triggers
     daily: int = 4  # the activity triggers only (V3-P90)
     return_hours: int = 1  # 0: no greeting on a return
-    focus_minutes: int = 30  # 0: no FOCUS
-    game_minutes: int = 30  # 0: no GAME_ENDED
+    ended_minutes: int = 60  # V3-P90 §5.3: a game or a video this long; 0: no TASK_ENDED
 
     def describe(self) -> str:
         """The startup line and the status (§11)."""
@@ -257,28 +257,20 @@ def return_candidate(returned: Return | None, device_id: str | None, last_user_m
                      f"return:{returned.device_id}:{_minute(returned.at)}", returned.at)
 
 
-def activity_candidates(device_id: str | None, device: DeviceState | None, settings: ProactiveSettings,
-                        now: datetime) -> list[Candidate]:
-    """§5.4: a long focus (once per stretch) and a game that just ended."""
-    if device_id is None or device is None:
-        return []
-    out: list[Candidate] = []
-    activity = device.activity
-    if (settings.focus_minutes > 0 and activity is not None and activity.category in ACTIVITY_FOCUS
-            and activity.for_seconds >= settings.focus_minutes * 60):
-        started = now - timedelta(seconds=activity.for_seconds)
-        key, aliases = _around(f"focus:{device_id}", started)
-        out.append(Candidate(WakeReason(WakeKind.FOCUS, activity=activity.category,
-                                        minutes=int(activity.for_seconds // 60)), key, now, aliases))
-    before = device.before
-    if (settings.game_minutes > 0 and before is not None and before.category == "game"
-            and before.lasted_seconds >= settings.game_minutes * 60
-            and before.ended_seconds_ago <= GAME_RECENT.total_seconds()):
-        ended = now - timedelta(seconds=before.ended_seconds_ago)
-        key, aliases = _around(f"game:{device_id}", ended)
-        out.append(Candidate(WakeReason(WakeKind.GAME_ENDED, minutes=int(before.lasted_seconds // 60)),
-                             key, ended, aliases))
-    return out
+def task_ended_candidate(device_id: str | None, device: DeviceState | None, settings: ProactiveSettings,
+                         now: datetime) -> Candidate | None:
+    """V3-P90 §5.3: a game or a video the app saw clearly end, after ENDED_MINUTES or more, within
+    ENDED_FRESH of its end (held back longer, it is let go: "did the game end?" nine minutes on is odd)."""
+    ended = None if device is None else device.task_ended
+    if device_id is None or ended is None or settings.ended_minutes <= 0 or ended.group not in ENDED_GROUPS:
+        return None
+    if ended.lasted_seconds < settings.ended_minutes * 60 or ended.ended_seconds_ago > ENDED_FRESH.total_seconds():
+        return None
+    at = now - timedelta(seconds=ended.ended_seconds_ago)
+    # PR #165 review P2-1: its group in the key — a game and a video that end a minute apart are two ends
+    key, aliases = _around(f"ended:{device_id}:{ended.group}", at)
+    return Candidate(WakeReason(WakeKind.TASK_ENDED, group=ended.group, minutes=int(ended.lasted_seconds // 60)),
+                     key, at, aliases)
 
 
 def _sleeps(s: Situation) -> bool:
@@ -295,7 +287,8 @@ def candidates(s: Situation) -> tuple[list[Candidate], list[str], datetime | Non
                             sleeps=_sleeps(s), told=s.told)
     if back is not None:
         found.append(back)
-    found += activity_candidates(s.device_id, s.device, s.settings, s.now)
+    if (ended := task_ended_candidate(s.device_id, s.device, s.settings, s.now)) is not None:
+        found.append(ended)
     return found, expired, upcoming
 
 
@@ -359,6 +352,8 @@ def _blocked(s: Situation, kind: WakeKind) -> str | None:
         return None
     if s.last_user_message_at is not None and s.now - s.last_user_message_at < TALKING:
         return "talking"
+    if kind is WakeKind.TASK_ENDED:  # V3-P90 §5.3: a new thing that happened — no gap, no day, no hours
+        return None
     if s.unanswered_wake:
         return "unanswered"
     if in_quiet_hours(s.now, s.zone, s.settings.quiet_start, s.settings.quiet_end):
