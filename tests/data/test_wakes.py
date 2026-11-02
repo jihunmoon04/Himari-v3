@@ -411,3 +411,28 @@ def test_a_runs_wake_is_its_own_before_an_earlier_wakes_group() -> None:
              for name, r in (("b_first", b_first), ("b_after_tools", b_after_tools), ("a_after_tools", a_after_tools))}
     assert owner == {"b_first": b.payload.wake_id, "b_after_tools": b.payload.wake_id,  # type: ignore[union-attr]
                      "a_after_tools": a.payload.wake_id}  # type: ignore[union-attr]
+
+
+def test_a_users_run_beside_an_older_free_wakes_group_is_no_wakes() -> None:
+    """PR #167 re-review P1-8: a Run that names the user's message is the user's, though an older free
+    wake's tool group is among its triggers. Both backends."""
+    from himari.common import RawRepresentation
+    from himari.data.api import CompletedGroupRef, EventRef, PromptBasis, RunPreparation
+
+    store = new_store()
+    data, _ = opened(store)
+
+    def run(*refs: object) -> object:
+        async def go() -> object:
+            return await data.prepare_run(SCOPE, RunPreparation(b"", "t", RawRepresentation.ADAPTER_SERIALIZED,
+                                                                tuple(refs), PromptBasis(0, 0), "p", "m"))  # type: ignore[arg-type]
+        return asyncio.run(go())
+
+    a = asyncio.run(data.begin_wake(SCOPE, FREE, "d1"))
+    a_run = run(EventRef(a.event_id))
+    asyncio.run(data.end_wake(SCOPE.principal_id, a.payload.wake_id, WakeStatus.FAILED))  # type: ignore[union-attr]
+    message = asyncio.run(data.append_event(SCOPE, user("[[pass]]가 뭐야?")))
+    users = run(CompletedGroupRef(a_run), EventRef(message.event_id))  # type: ignore[arg-type]
+    assert asyncio.run(data.wake_of_run(SCOPE, users)) is None  # type: ignore[arg-type]
+    after_tools = run(CompletedGroupRef(users))  # type: ignore[arg-type]
+    assert asyncio.run(data.wake_of_run(SCOPE, after_tools)) is None  # type: ignore[arg-type]  # still the user's

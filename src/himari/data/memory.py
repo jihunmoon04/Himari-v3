@@ -1533,7 +1533,7 @@ class InMemoryData:
         conv = self._conv(scope)
         level: list[RunId] = [run_id]
         seen: set[RunId] = set()
-        while level and len(seen) < 32:  # as SQLite: level by level, a level's latest (PR #167 re-review P1-7)
+        while level and len(seen) < 32:  # as SQLite (PR #167 re-review P1-7, P1-8)
             ids: set[str] = set()
             below: list[RunId] = []
             for current in level:
@@ -1545,11 +1545,10 @@ class InMemoryData:
                         ids.add(ref.event_id)
                     elif isinstance(ref, CompletedGroupRef):
                         below.append(ref.run_id)
-            sequences = {e.sequence for e in conv.events if e.event_id in ids}
-            found = [w for w in self._store.wakes.values() if w.conversation_id == scope.conversation_id
-                     and w.event_sequence in sequences and free_wake(w.reasons)]
-            if found:
-                return max(found, key=lambda w: w.event_sequence)
+            if ids:
+                last = max((e.sequence for e in conv.events if e.event_id in ids), default=None)
+                return next((w for w in self._store.wakes.values() if w.conversation_id == scope.conversation_id
+                             and w.event_sequence == last and free_wake(w.reasons)), None)
             level = below
         return None
 

@@ -275,3 +275,25 @@ def test_a_pass_with_spaces_around_it_is_never_shown(pieces: tuple[str, ...]) ->
     asyncio.run(scenario())
     assert shown == []
 
+
+
+def test_a_users_answer_after_a_failed_free_wake_keeps_its_words() -> None:
+    """PR #167 re-review P1-8: the wake ran out of Runs after a tool round; the user's next turn is the
+    user's — a literal [[pass]] in its answer stays."""
+    from testkit import RecordingTool
+
+    step = calls(("look", {}))
+    rt, runner, _ = free_runner(step, step, final("[[pass]]는 히마리가 조용히 있겠다는 표시야."),
+                                tools=(RecordingTool("look"),))
+
+    async def scenario() -> None:
+        await runner.submit_wake(SCOPE, FREE, "d1", free=True)
+        done = await runner.wait(SCOPE)
+        assert done.result is not None and done.result.state is DriveState.RUN_LIMIT_REACHED
+        await runner.submit(SCOPE, user("[[pass]]가 뭐야?"))
+        await runner.wait(SCOPE)
+        answer = (await rt.data.read_events(SCOPE))[-1]  # type: ignore[attr-defined]
+        assert isinstance(answer.payload, AssistantFinal)
+        assert answer.payload.blocks == (TextBlock("[[pass]]는 히마리가 조용히 있겠다는 표시야."),)
+
+    asyncio.run(scenario())

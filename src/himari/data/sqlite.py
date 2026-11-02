@@ -2950,9 +2950,10 @@ class SqliteData:
     async def wake_of_run(self, scope: TrustedScope, run_id: RunId) -> WakeRecord | None:
         with self._tx() as tx:
             tx.authorized(scope)
-            # PR #167 review P1-2: a Run after a tool round is triggered by that round: follow it back.
-            # Re-review P1-7: level by level — the wake a Run names itself first, and of a level the
-            # latest, so an earlier wake's group left among a new wake's triggers never takes it.
+            # PR #167 review P1-2: a Run that only goes on after a tool round is triggered by that
+            # round: follow it back. Re-review P1-7, P1-8: a Run that names any Event is decided
+            # there — its latest Event is a free wake's, or the Run is no free wake's (a user's
+            # message answered beside an older wake's group never becomes that wake's).
             level: list[RunId] = [run_id]
             seen: set[RunId] = set()
             while level and len(seen) < 32:
@@ -2968,12 +2969,14 @@ class SqliteData:
                         elif isinstance(ref, CompletedGroupRef):
                             below.append(ref.run_id)
                 if ids:
-                    rows = tx.all(f"SELECT w.* FROM wakes w JOIN events e ON e.conversation_id=w.conversation_id"
-                                  f" AND e.sequence=w.event_sequence WHERE w.conversation_id=? AND e.event_id IN"
-                                  f" ({', '.join('?' * len(ids))}) ORDER BY w.event_sequence DESC",
+                    last = tx.one(f"SELECT sequence FROM events WHERE conversation_id=? AND event_id IN"
+                                  f" ({', '.join('?' * len(ids))}) ORDER BY sequence DESC LIMIT 1",
                                   scope.conversation_id, *ids)
-                    if found := next((w for w in (_wake(r) for r in rows) if free_wake(w.reasons)), None):
-                        return found
+                    row = None if last is None else tx.one(
+                        "SELECT * FROM wakes WHERE conversation_id=? AND event_sequence=?",
+                        scope.conversation_id, last["sequence"])
+                    wake = None if row is None else _wake(row)
+                    return wake if wake is not None and free_wake(wake.reasons) else None
                 level = below
             return None
 
