@@ -244,7 +244,7 @@ class BackgroundRunner:
         wake_id = event.payload.wake_id
         return self._start(scope, lambda s, stop, progress: self._driver.resume_wake(
             s, wake_id, stop=stop, progress=progress, max_runs=FREE_RUNS if free else WAKE_RUNS, free=free),
-                           "wake", MessageOrigin(OriginKind.WAKE, device_id), wake_id=wake_id, hidden=free)
+                           "wake", MessageOrigin(OriginKind.WAKE, device_id), wake_id=wake_id, free=free)
 
     def _check_open(self, scope: TrustedScope) -> None:
         if scope.conversation_id in self._closed:
@@ -353,16 +353,16 @@ class BackgroundRunner:
     def _start(self, scope: TrustedScope,
                job: Callable[[TrustedScope, StopSignal, TurnProgress], Awaitable[DriveResult]],
                name: str, origin: MessageOrigin | None = None, *, wake_id: str | None = None,
-               hidden: bool = False) -> JobStatus:
-        """Synchronous: nothing closes the Conversation between this check and the start. ``hidden``
-        (V3-P90 §7.3): a free wake's job — told to no one until it reveals itself."""
+               free: bool = False) -> JobStatus:
+        """Synchronous: nothing closes the Conversation between this check and the start. ``free``
+        (V3-P90 §7.3): a free wake's job — hidden, told to no one until it reveals itself."""
         self._check_open(scope)
         key = self._key(scope)
         if wake_id is None:
             self._wake_jobs.pop(key, None)
         previous = self._status.get(key, JobStatus(running=False))
         status = JobStatus(running=True, generation=previous.generation + 1, started_at=datetime.now(UTC),
-                           wake_id=wake_id, hidden=hidden)
+                           wake_id=wake_id, hidden=free, free=free)
         self._status[key] = status
         signal = self._signals[key] = StopSignal()
         self.seen(scope)  # the client that started it is connected
@@ -373,7 +373,7 @@ class BackgroundRunner:
         self._tasks[key] = asyncio.create_task(self._run(key, scope, lambda s: job(s, signal, progress)),
                                                name=f"{name}:{scope.conversation_id}")
         self._origins[key] = origin
-        if not hidden:
+        if not free:
             self._tell(lambda listener: listener.job_started(scope, origin, status))
         return status
 

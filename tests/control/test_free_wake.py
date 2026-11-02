@@ -79,6 +79,7 @@ def test_a_free_wake_that_speaks_shows_itself_first_and_loses_its_pass() -> None
 
     asyncio.run(scenario())
     assert [s.hidden for s in told.started] == [False] and told.accepts == 1 and not told.ended[-1].hidden
+    assert told.started[0].free and told.started[0].wake_id is not None  # V3-P90 §9: its job event says so
 
 
 def test_a_tool_call_shows_it_before_the_tool_runs_and_a_pass_after_it_says_nothing() -> None:

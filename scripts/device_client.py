@@ -94,6 +94,7 @@ class Report:
     sleep_signals: bool = False
     asleep_current: str | None = "unset"
     task_signals: bool = False  # V3-P90 §3.1: the server took a task and a game's end
+    free_wake_screen: bool = False  # V3-P90 §9: the server took the app's screen setting
     # V3-P87: a job the server opened to speak first on this device, and what live sent for it
     wake_job_id: str | None = None
     wake_text: str = ""
@@ -235,6 +236,10 @@ async def signals(http: httpx.AsyncClient, events: asyncio.Queue[tuple[str, Any]
                     "task_ended": {"group": "game", "lasted_seconds": 5700, "ended_seconds_ago": 5}})
         await send({**SIGNAL, "task": None})  # the end is carried no more: nothing goes on
         report.task_signals = True
+    if report.hello.get("features", {}).get("free_wake_screen") == 1:  # V3-P90 §9: only then
+        await send({**SIGNAL, "features": {"free_wake_screen": True}})
+        await send({**SIGNAL, "features": {"free_wake_screen": False}})  # off again, as the app starts
+        report.free_wake_screen = True
     until = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
     response = await http.put("/api/presence/quiet", json={"until": until})
     if response.status_code != 200:
@@ -297,7 +302,8 @@ def show(report: Report) -> None:
           f"the same screen again: {report.screen_again}")
     print(f"signals: {report.signals}; current when locked: {report.locked_current}, after the unlock: "
           f"{report.unlocked_current}; quiet: {report.quiet}")
-    print(f"sleep: {report.sleep_signals}; current while asleep: {report.asleep_current}; task: {report.task_signals}")
+    print(f"sleep: {report.sleep_signals}; current while asleep: {report.asleep_current}; task: {report.task_signals}; "
+          f"screen setting: {report.free_wake_screen}")
     print(f"spoke first: job {report.wake_job_id}, {report.wake_text!r}")
     print(f"events: {', '.join(report.events)}")
 
@@ -390,6 +396,7 @@ def check(report: Report) -> list[str]:
         "the server takes sleep": report.sleep_signals,
         "asleep, the device stays current": report.asleep_current == "d1",
         "the server takes the task and its end": report.task_signals,
+        "the server takes the screen setting": report.free_wake_screen,
         "the quiet reaches the device's stream": report.quiet is not None and report.quiet.get("until") is not None,
         "a device gets no signals notices": "devices" not in report.events,
         "a wake's job is spoken on this device": report.wake_job_id is not None and report.wake_job_id != report.job_id,

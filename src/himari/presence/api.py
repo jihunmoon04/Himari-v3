@@ -218,6 +218,9 @@ class Signals(DeepFrozen):
     # V3-P90 §3.1: the task that goes on, and one that just ended (absent: unknown, null: none)
     task: TaskSignal | None = None
     task_ended: TaskEnded | None = None
+    # V3-P90 §9: the app's setting "send the screen to a free wake" (its ``features``); unsent is off.
+    # Kept only, for the screen tool (§10).
+    free_wake_screen: bool = False
 
 
 @dataclass(frozen=True)
@@ -261,6 +264,7 @@ class DeviceState(DeepFrozen):
     sleep: str | None = None  # "idle", "display_off"; None: awake (or an app that does not send it)
     task: TaskSignal | None = None  # V3-P90 §6.1: ``for_seconds`` counted to now
     task_ended: TaskEnded | None = None  # V3-P90 §5.3: ``ended_seconds_ago`` counted to now
+    free_wake_screen: bool = False  # V3-P90 §9: the app's setting, kept for the screen tool (§10)
 
 
 @dataclass(frozen=True)

@@ -363,6 +363,7 @@ class JobStatus(DeepFrozen):
     turn_usage: TurnUsage | None = None  # the latest report of the job's drive (V3-P62 §7)
     wake_id: str | None = None  # V3-P87: the wake this job answers (a server-opened turn)
     hidden: bool = False  # V3-P90 §7.3: a free wake's job not shown yet — no job event, not working
+    free: bool = False  # V3-P90 §9: a free wake's job (its job event says so once shown)
 
     @property
     def job_id(self) -> str | None:

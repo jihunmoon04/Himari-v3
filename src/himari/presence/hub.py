@@ -143,6 +143,7 @@ class _Device:
     task: TaskSignal | None = None  # V3-P90 §6.1
     task_at: float | None = None  # when ``task`` came (its for_seconds counts on from there)
     task_ended: tuple[str, float, float] | None = None  # V3-P90 §5.3: group, lasted, when it ended (monotonic)
+    free_wake_screen: bool = False  # V3-P90 §9: a locked body does not carry it, so it is kept then
 
 
 def _shown(device: _Device) -> tuple[object, ...]:
@@ -151,7 +152,8 @@ def _shown(device: _Device) -> tuple[object, ...]:
     before = None if device.before is None else (device.before.category, device.before.app, device.before.ended_at)
     task = None if device.task is None else device.task.group
     ended = None if device.task_ended is None else (device.task_ended[0], device.task_ended[2])
-    return (device.locked, activity, device.media, device.mic_or_camera, before, device.sleep, task, ended)
+    return (device.locked, activity, device.media, device.mic_or_camera, before, device.sleep, task, ended,
+            device.free_wake_screen)
 
 
 class PresenceHub:
@@ -273,6 +275,7 @@ class PresenceHub:
             device.activity = device.activity_at = device.media = device.mic_or_camera = None
             device.task = device.task_at = device.task_ended = None
             return
+        device.free_wake_screen = snapshot.free_wake_screen
         # V3-P90 §3.1: what goes on, and what ended (kept with its moment, so a repeat does not move it)
         device.task, device.task_at = snapshot.task, (now if snapshot.task is not None else None)
         if (ended := snapshot.task_ended) is None:
@@ -314,7 +317,8 @@ class PresenceHub:
         return DeviceState(device_id, self._connected(principal, device_id, now),
                            None if d.input_at is None else now - d.input_at, d.time_zone,
                            locked=d.locked, activity=activity, media=d.media, mic_or_camera=d.mic_or_camera,
-                           before=before, sleeps=d.sleeps, sleep=d.sleep, task=task, task_ended=ended)
+                           before=before, sleeps=d.sleeps, sleep=d.sleep, task=task, task_ended=ended,
+                           free_wake_screen=d.free_wake_screen)
 
     def current(self, principal: PrincipalId) -> str | None:
         return self._current.get(principal)
@@ -455,6 +459,7 @@ class PresenceHub:
         device.activity = device.activity_at = device.media = device.mic_or_camera = None
         device.before = device.after = None
         device.task = device.task_at = device.task_ended = None
+        device.free_wake_screen = False
         if _shown(device) != shown:
             self._changed(principal)
 

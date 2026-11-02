@@ -77,7 +77,8 @@ class CompanionEvents:
     def job_started(self, scope: TrustedScope, origin: MessageOrigin | None, status: JobStatus) -> None:
         self._working[(scope.principal_id, scope.conversation_id)] = (origin, status.job_id)
         self._hub.publish(scope.principal_id, "job", {"conversation": scope.conversation_id, "state": "started",
-                                                      "origin": origin_view(origin), "job_id": status.job_id})
+                                                      "origin": origin_view(origin), "job_id": status.job_id,
+                                                      **({"free": True} if status.free else {})})  # V3-P90 §9
         self.activity_changed(scope.principal_id)
 
     def accepted(self, scope: TrustedScope) -> None:

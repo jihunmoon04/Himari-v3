@@ -4361,7 +4361,7 @@ function minutesText(seconds) {
   return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
 }
 
-/* What the server knows now of a device's app (V3-P88 §8), the same as the model is told. */
+/* What the server knows now of a device's app (V3-P88 §8), the same as the model is told; V3-P90 §9: and the screen setting. */
 function signalsText(device) {
   const signals = device.signals || {};
   if (!device.connected || !signals.session) return "";
@@ -4375,6 +4375,7 @@ function signalsText(device) {
   }
   if (signals.media) parts.push(`playing ${signals.media.title}${signals.media.artist ? ` – ${signals.media.artist}` : ""}`);
   if (signals.mic_or_camera) parts.push("microphone or camera in use");
+  if (signals.free_wake_screen) parts.push("screen allowed for free wakes");
   if (signals.before) {
     parts.push(`before: ${signals.before.category} for ${minutesText(signals.before.lasted_seconds)}, ended ${minutesText(signals.before.ended_seconds_ago)} ago`);
   }
