@@ -1,6 +1,9 @@
 # 먼저 말 걸기 2단계: 잠들기, 다섯 가지 wake, 자유 wake (V3-P90 설계 초안 v0.2)
 
-상태: **Proposed**, rev. 5. 소유자와 정한 내용(2026-11-02)을 정리한 초안. 소유자 결정 Q1~Q5(§14, Q2·Q3은 소유자 변경).
+상태: **Proposed**, rev. 6. 소유자와 정한 내용(2026-11-02)을 정리한 초안. 소유자 결정 Q1~Q5(§14, Q2·Q3은 소유자 변경).
+
+**rev. 6(다섯 번째 검수 반영, §16.4):**
+- P1-10: 숨긴 wake의 Run은 `finalize_hidden_run`이 **한 트랜잭션에서** `PROJECTED`(이벤트 없음)와 wake `passed`/`dropped`로 끝낸다. 살아 있는 흐름과 재시작 복구(`_prepare`)가 같은 판정 함수를 써서, 재시작 뒤에 `[[pass]]`가 답으로 살아나지 않는다(§7.3).
 
 **rev. 5(네 번째 검수 반영, §16.3):**
 - P1-9: 끝난 숨긴 wake(`passed`·`dropped`)는 서버 안에서도 **없던 것**이다. 다음 Run의 계기(`_next_triggers`), 답하지 않은 wake 판단(`_unanswered`), Prompt·압축·기억 작업에서 한 판단으로 건너뛴다. pass의 답은 이벤트로 기록하지 않는다(§7.3).
@@ -349,6 +352,21 @@
   - 그래서 앞부분만 `[[pass]]`처럼 보이다가 문장이 붙는 경우는 말하기다. 쥐는 길이는 많아야 `[[pass]]` 8자와 표정 표시뿐이라 말하기의 지연은 거의 없다.
   - 진행 중인 출력(생각, 중간 글)은 이 판정 전에 밖으로 나가지 않는다.
 - **기록:** pass하면 `wakes.status = "passed"`(스키마는 그대로, `status`는 글 열). **pass의 답(`[[pass]]`)은 이벤트로 기록하지 않는다**(Run 기록에는 결과와 사용량이 남는다). 그래서 `passed`·`dropped` wake가 대화 기록에 남기는 것은 **wake 이벤트 하나뿐**이다(도구를 부르면 드러내므로 숨긴 wake에는 도구 묶음이 없다. 화면 tool이 생기면 그 묶음도 같이 숨긴다, §10).
+- **숨긴 wake의 Run을 끝내는 계약(검수 P1-10):** 지금 Run은 공급자 응답을 받으면 `RECEIVED`(원본 저장)가 되고, `project_model_output`이 어시스턴트 이벤트를 만들며 `PROJECTED`(`projected_event_id`)로 끝난다. 재시작 때 `RECEIVED`로 남은 Run은 `Driver._prepare`가 저장된 원본을 다시 정규화해 투영한다. 그대로면 pass의 Run이 재시작 뒤 `[[pass]]` 답으로 살아난다. 그래서:
+  - **새 Data 연산 `finalize_hidden_run(scope, run_id, wake_id, status)`**(`status`는 `PASSED` 또는 `DROPPED`): **한 트랜잭션에서** Run을 `RECEIVED → PROJECTED`(`projected_event_id` 비움, 이벤트 없음)로, wake를 `opened → status`로 바꾼다. 둘 다 바꿀 수 있을 때만 바꾸고(Run이 `RECEIVED`, wake가 `opened`), 아니면 아무것도 바꾸지 않고 지금 상태를 돌려준다. 그래서 pass의 Run이 `RECEIVED`로 남는 때는 이 트랜잭션 전뿐이다.
+  - **판정은 함수 하나(`free_wake_verdict(normalized, wake_status)`)**: 정규화한 출력과 wake 상태로 `project`(보통의 투영), `passed`, `dropped`를 정한다. 살아 있는 흐름의 끝과 재시작 복구가 **같은 함수**를 쓴다.
+
+| wake 상태 | 정규화한 출력 | 판정 |
+| --- | --- | --- |
+| `speaking` | 무엇이든 | `project` (지금처럼 이벤트, 뒤의 `[[pass]]`는 뗌) |
+| `opened` | 최종 답이 `[[pass]]`이거나 비어 있음(표정 표시만) | `passed` |
+| `opened` | 그 밖(글이 있는 답, 도구 호출) | `dropped`. 살아 있는 흐름에서는 그 전에 드러내므로 `speaking`이다. `opened`인 채 이 출력이 있으면 드러내기 전에 끊긴 것이다(재시작). 이제 와서 보이지 않는다 |
+| `passed`, `dropped` | 무엇이든 | 투영하지 않음. Run이 아직 `RECEIVED`면 `PROJECTED`(이벤트 없음)로만 닫는다 |
+| `answered`·`cancelled`·`failed` | 무엇이든 | 지금 규칙 그대로 |
+
+  - **`Driver._project`(살아 있는 흐름과 `_prepare` 모두)**: Run의 계기가 이유가 모두 `free`인 wake이면 먼저 판정을 묻고, `passed`·`dropped`면 `finalize_hidden_run`, `project`면 지금처럼 `project_model_output`.
+  - **재시작 정리(§7.3 위, `opened` 자유 wake → `dropped`)와의 순서**: 어느 쪽이 먼저 돌아도 결과가 같다. 정리가 먼저면 그 wake의 `RECEIVED` Run은 판정 함수로 `passed`/`dropped`를 정해 `finalize_hidden_run`을 부르고, 받지 못한 Run(`PREPARED`·`DISPATCH_CLAIMED`)은 지금의 `recover_interrupted` 규칙 뒤 wake만 `dropped`로 닫는다. `_prepare`가 먼저면 같은 판정으로 같은 연산을 부른다. 뒤에 온 쪽은 이미 끝난 것을 보고 아무것도 바꾸지 않는다.
+  - **이벤트 없는 `PROJECTED` Run을 읽는 곳**: 지금 `projected_event_id`로 이벤트를 찾는 곳(`sqlite.py`의 `projected_event_id IS NOT NULL` 조건, `memory.py`의 같은 조건)은 이미 비어 있는 Run을 건너뛴다. 구현 때 Run을 읽는 나머지 곳(사용량 합계, 작업 진행)이 이벤트 없는 `PROJECTED`를 받아들이는지 확인하고 시험한다. 사용량은 Run에 그대로 남아 하루 토큰 합(§7.4)에 들어간다.
 - **숨긴 wake의 계약(검수 P1-9):** 두 집합을 나눈다.
 
 | 집합 | 상태(이유가 모두 `free`인 wake) | 뜻 |
@@ -441,6 +459,7 @@
 - 진행 중은 `opened`·`speaking`(§7.3, 검수 P1-7). `end_wake`는 둘 모두에서 닫고(`speaking`에서는 `answered`·`cancelled`·`failed`만), 새 `reveal_wake`가 `opened → speaking`을 한다. 재시작 때 끝나지 않은 wake를 찾는 곳(지금 `status = 'opened'`, 부분 색인 `wakes_opened`)은 `speaking`도 본다. 색인은 그대로 두고 `speaking`은 따로 읽는다(드물고 적다). 색인을 바꾸려면 v18이 필요하므로 하지 않는다.
 - 알림 이유의 `asleep: true`는 `begin_wake`가 그 순간 기기의 `sleep`을 보고 적는다. wake가 끝날 때 이 값으로 `delivered`와 `told`를 가른다(§5.1). `claimed`로 바꾸는 갱신은 `scheduled`와 `told`에서 모두 할 수 있고, 되돌릴 때는 `reminded_at`으로 원래 상태를 안다(§5.1).
 - `reminded_at`의 뜻: 마지막으로 말한 때(`told`·`delivered`). `clean_memories`의 보호 목록에 `told`(§5.1).
+- 새 연산 `finalize_hidden_run`(§7.3): Run `RECEIVED → PROJECTED`(`projected_event_id` 비움)와 wake `opened → passed/dropped`를 한 트랜잭션에서. 둘 다 바꿀 수 있을 때만.
 - `spoke()`는 `PASSED`·`DROPPED`를 말한 것으로 세지 않는다(`SPEAKING`은 셈: 말하는 중이다). 오늘의 자유 wake 시도 수는 `wakes`에서 이유가 모두 `free`인 줄을 센다.
 
 ## 12. 모듈 경계
@@ -449,9 +468,9 @@
 | --- | --- |
 | `presence` | `Signals`·`DeviceState`에 `sleep`·`task`·`task_ended`, `_decide`의 후보 규칙, 깬 신호의 바로 넘겨받기와 돌아옴, 잠든 신호의 입력을 세지 않음(§3) |
 | `proactive` (순수) | 계기: `free`, `task_ended`; `focus`·`game_ended` 계기를 뺌; `_blocked`를 wake마다의 표(§5)로; 타이머(§6.2); 예산(§7.4) |
-| `data` | `WakeKind`·`WakeStatus` 값, `passed` 기록, 시도 수 읽기, 알림의 `told` 상태와 그 전이 |
+| `data` | `finalize_hidden_run`, `WakeKind`·`WakeStatus` 값, `passed` 기록, 시도 수 읽기, 알림의 `told` 상태와 그 전이 |
 | `prompt` | `PROACTIVE_RULE` 문장, `now_doing.task`, 숨긴 wake(`passed`·`dropped`) 건너뛰기, `context_key` |
-| `control` / `runner` | 숨긴 wake 판단 하나(`hidden_wake`)와 `_next_triggers`에서 건너뛰기, pass의 답을 이벤트로 쓰지 않기, 모든 wake에서 `READ`가 아닌 도구를 실행하지 않고 "not run"으로 닫기, 자유 wake의 Run 상한 2와 도구 호출 때 드러내기, 판정 버퍼링, `speaking`을 쓴 뒤에 `job` 내기, `passed`·`dropped`로 끝내기, 재시작 정리, `free_wake` 능력 확인 |
+| `control` / `runner` | `free_wake_verdict`와 `_project`(살아 있는 흐름·`_prepare`)에서 `finalize_hidden_run` 부르기, 숨긴 wake 판단 하나(`hidden_wake`)와 `_next_triggers`에서 건너뛰기, pass의 답을 이벤트로 쓰지 않기, 모든 wake에서 `READ`가 아닌 도구를 실행하지 않고 "not run"으로 닫기, 자유 wake의 Run 상한 2와 도구 호출 때 드러내기, 판정 버퍼링, `speaking`을 쓴 뒤에 `job` 내기, `passed`·`dropped`로 끝내기, 재시작 정리, `free_wake` 능력 확인 |
 | `interfaces` (기록) | `opened`·`passed`인 자유 wake의 이벤트를 `events`·새 이벤트 알림·작업 상태에서 빼기 |
 | `provider` | `ProviderCapabilities.free_wake` 목록 |
 | `bootstrap` | `_unanswered`가 숨긴 wake를 건너뜀, 설정, 스케줄러가 `task`·`sleep`을 `Situation`에 넣음, `on_returned` 바로 판단 |
@@ -467,6 +486,7 @@
 - **알림(P1-3, P1-5):** 깨어 있는 기기 → `delivered`; `idle` 기기 → `told`(`reminded_at` 기록); 그 대화의 사용자 메시지 → `delivered`; 다른 대화의 메시지 → `told` 그대로; 그 기기의 10분 안 돌아옴 → `delivered`·인사 없음; 10분 뒤 또는 다른 기기의 돌아옴 → `again`으로 다시 실림 → `delivered`; 그 wake 실패 → `told`(`reminded_at`으로 앎); 7일 → `missed`; 기한이 오래 지난 고리의 `told` 알림이 기억 정리에서 지워지지 않음; `told`인 채로 재시작 → 상태와 10분 판정이 그대로.
 - **runner/driver(P1-4, P1-6, P2-1):** pass면 `job` 사건·`live`·기록·작업 상태 어디에도 없고 `passed`; 판정 버퍼: `[[pass]]` → pass, 빈 답 → pass, `[[pass]] 아냐` → 말하기("아냐"), `[[pa`에서 끝남 → 말하기("[[pa"), `[[mood:happy]][[pass]]` → pass; 드러낼 때 DB `speaking`이 `job`보다 먼저; 도구 호출 → 실행 전에 `speaking`·`job`, 뒤의 `[[pass]]`는 뗌, 남는 글 없음 → 보이는 `failed`; 드러내기 전 사용자 메시지 → `dropped`, 아무것도 보이지 않음, 10초 안에 끝나지 않으면 `BUSY`; 재시작: `opened` 자유 wake → `dropped`(숨김), `speaking` → `answered`/`failed`(보임); `free`와 알림이 합쳐진 wake → 처음부터 보이고 pass 불가, Run 상한 3; pass한 wake가 다음 요청·기억 작업·기록에 없음, `context_key`가 바뀜, `free_wake`가 아닌 모델은 자유 wake를 열지 않음.
 - **숨긴 wake(검수 P1-9):** pass → 대화 기록에 wake 이벤트 하나뿐(`AssistantFinal` 없음); `dropped` wake 뒤 사용자 메시지 → 그 Run의 계기는 사용자 메시지뿐, 모델 입력에 그 wake 없음; `passed` 뒤에 `_unanswered`가 거짓, 그래서 다음 wake가 열림; 보이는 wake가 답을 못 받은 뒤 숨긴 wake → `_unanswered`가 여전히 참; **재시작 뒤 `dropped`가 남은 대화**에서 사용자 메시지가 보통으로 처리되고, 그 뒤 새 wake가 `NOT_SETTLED` 없이 열림; 압축 요약·기억 작업 입력에 숨긴 wake 없음; 하루 시도 수와 타이머 단계는 숨긴 wake를 셈; `context_key`가 숨긴 wake 번호로 바뀜.
+- **pass의 Run과 재시작(검수 P1-10):** 응답 받음(`RECEIVED`) 직후 재시작 → `_prepare`가 판정해 `passed`, Run `PROJECTED`·이벤트 없음, 기록에 `[[pass]]` 없음; `finalize_hidden_run` 뒤 재시작 → 아무것도 바뀌지 않음; 트랜잭션 중 실패 → Run `RECEIVED`·wake `opened` 그대로(둘 중 하나만 바뀌지 않음), 재시작 뒤 같은 결과; `opened`인데 저장된 응답이 글 있는 답 → `dropped`, 이벤트 없음; 재시작 정리와 `_prepare`의 순서를 바꿔도 같은 결과; 이벤트 없는 `PROJECTED` Run이 사용량 합계에 들어가고 다른 Run 읽기를 깨지 않음; 살아 있는 pass와 복구된 pass가 같은 판정 함수.
 - **타이머(재검수 P2, 검수 P1-8):** 사용자 메시지 → 단계 처음, 그 메시지부터 15분; 다른 wake → 단계 그대로, 그 wake부터; 자유 wake(pass 포함) → 단계 오름. 09:00 작업 → 09:15 단계 1 → 09:25 메시지 → 09:40 단계 1이 **열림**(새 주기의 열쇠); 같은 주기의 같은 단계는 재시작 뒤에도 한 번; 작업 시작 시각이 1초 흔들려 분이 바뀌어도 같은 열쇠(별칭).
 - **진행 중 상태(검수 P1-7):** 작업이 끝났지만 wake가 아직 `speaking`인 사이에 `accept_wake` → `NOT_SETTLED`; `_ended`가 `speaking`을 끝나지 않음으로 봄; `end_wake`의 `speaking → answered/failed`, `speaking → passed`는 아무것도 바꾸지 않음; 끝난 wake에 `reveal_wake`는 아무것도 바꾸지 않음.
 - **도구(검수 P2, Q6):** 모든 wake 종류(알림·돌아옴·작업 끝남·고리·자유)에서 `READ` 도구는 실행, `SCOPED_WRITE`·`UNKNOWN`·`memory_save`·`memory_forget`은 실행하지 않고 "not run" 결과(묶음은 닫힘, 다시 실행되지 않음), `ask_user`는 그대로, 사용자가 답한 뒤의 턴은 모든 도구. 자유 wake는 실행하지 않은 호출에도 드러냄.
@@ -541,3 +561,11 @@ P1-7·P1-8·도구 제한 모두 PASS. 새 지적을 코드와 대조했다: `Co
 | # | 지적 | 반영 |
 | --- | --- | --- |
 | P1-9 | `dropped` wake가 다음 Run의 계기로 들어감, `passed`의 답이 다음 wake를 막을 수 있음, 내부 제외가 `passed`에만 적혀 있음 | "보이지 않음"(`opened`·`passed`·`dropped`)과 "없던 것"(`passed`·`dropped`)을 나누고, 없던 것을 한 판단으로 모든 읽는 곳(`_next_triggers`, `_unanswered`, Prompt, 압축, 기억 작업)에서 건너뜀. pass의 답은 이벤트로 기록하지 않음. 원본·시도 수·타이머는 그대로. 재시작 뒤 `dropped`가 남은 대화의 시험(§7.3, §13) |
+
+### 16.4 다섯 번째 검수 (`06f8cad`): READY_WITH_CORRECTIONS(새 P1 하나) → rev. 6
+
+P1-1~P1-9 모두 PASS. 새 지적을 코드와 대조했다: Run은 응답을 받으면 `RECEIVED`, `project_model_output`이 이벤트를 만들며 `PROJECTED`, 재시작 때 `Driver._prepare`가 `RECEIVED` Run의 저장된 원본을 다시 정규화해 `_project`로 투영한다. `runs.projected_event_id`는 비어 있을 수 있다. 맞다.
+
+| # | 지적 | 반영 |
+| --- | --- | --- |
+| P1-10 | 이벤트 없이 Run을 끝내는 계약이 없어 재시작 뒤 `[[pass]]`가 답으로 살아날 수 있음 | `finalize_hidden_run`(한 트랜잭션: Run `PROJECTED`·이벤트 없음 + wake `passed`/`dropped`), 판정 함수 `free_wake_verdict`를 살아 있는 흐름과 `_prepare`가 같이 씀, 재시작 정리와의 순서, `RECEIVED` 직후·트랜잭션 전후의 재시작 시험(§7.3, §11, §13) |
