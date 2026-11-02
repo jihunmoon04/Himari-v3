@@ -189,6 +189,9 @@ from himari.data.api import (
     WakeReason,
     WakeRecord,
     WakeStatus,
+    free_wake,
+    EventRef,
+    CompletedGroupRef,
 )
 
 # v3: compaction_runs; v4: external_settings; v5: ui_resources; v6: model_settings;
@@ -1586,8 +1589,11 @@ class SqliteData:
     ) -> Sequence[ConversationEvent]:
         with self._tx() as tx:
             tx.authorized(scope)
+            # V3-P90 §7.3 (PR #162 review P1-9): a free wake that passed or was dropped never was
             rows = tx.all(
-                "SELECT * FROM events WHERE conversation_id=? AND sequence>? ORDER BY sequence LIMIT ?",
+                "SELECT * FROM events e WHERE conversation_id=? AND sequence>? AND NOT (kind='wake' AND EXISTS"
+                " (SELECT 1 FROM wakes w WHERE w.conversation_id=e.conversation_id AND w.event_sequence=e.sequence"
+                " AND w.status IN ('passed', 'dropped'))) ORDER BY sequence LIMIT ?",
                 scope.conversation_id, after_sequence, -1 if limit is None else limit,
             )
             return tuple(_event(r) for r in rows)
@@ -2879,14 +2885,15 @@ class SqliteData:
 
     async def end_wake(self, principal: PrincipalId, wake_id: str, status: WakeStatus, *,
                        asked: bool = False) -> WakeRecord:
-        if status is WakeStatus.OPENED:
+        if status.in_progress:
             raise DataError(DataErrorCode.INVALID_ARGUMENT, "a wake ends answered, cancelled or failed")
         with self._tx() as tx:
             row = tx.one("SELECT * FROM wakes WHERE owner=? AND wake_id=?", principal, wake_id)
             if row is None:
                 raise DataError(DataErrorCode.NOT_FOUND, f"no wake {wake_id}")
-            if row["status"] != WakeStatus.OPENED.value:
-                return _wake(row)  # ended already: once
+            was = WakeStatus(row["status"])
+            if not was.in_progress or (was is WakeStatus.SPEAKING and status in (WakeStatus.PASSED, WakeStatus.DROPPED)):
+                return _wake(row)  # ended already, once; a shown wake never becomes hidden
             now = _timestamp(datetime.now(UTC))
             tx.execute("UPDATE wakes SET status=?, asked=?, ended_at=? WHERE wake_id=?",
                        status.value, int(asked and status is WakeStatus.ANSWERED), now, wake_id)
@@ -2921,7 +2928,65 @@ class SqliteData:
 
     async def opened_wakes(self) -> tuple[WakeRecord, ...]:
         with self._tx() as tx:
-            return tuple(_wake(r) for r in tx.all("SELECT * FROM wakes WHERE status='opened' ORDER BY created_at"))
+            return tuple(_wake(r) for r in tx.all("SELECT * FROM wakes WHERE status IN ('opened', 'speaking')"
+                                                  " ORDER BY created_at"))
+
+    async def reveal_wake(self, principal: PrincipalId, wake_id: str) -> bool:
+        with self._tx() as tx:
+            return tx.execute("UPDATE wakes SET status='speaking' WHERE owner=? AND wake_id=? AND status='opened'",
+                              principal, wake_id).rowcount == 1
+
+    async def finalize_hidden_run(self, scope: TrustedScope, run_id: RunId, wake_id: str, status: WakeStatus) -> None:
+        if status not in (WakeStatus.PASSED, WakeStatus.DROPPED):
+            raise DataError(DataErrorCode.INVALID_ARGUMENT, "a hidden wake ends passed or dropped")
+        with self._tx() as tx:
+            tx.authorized(scope)
+            run = self._run_row(tx, scope, run_id)
+            if run["status"] == RunStatus.RECEIVED.value:
+                self._set_run(tx, run_id, RunStatus.PROJECTED)  # no event: projected_event_id stays NULL
+            tx.execute("UPDATE wakes SET status=?, ended_at=? WHERE owner=? AND wake_id=? AND status='opened'",
+                       status.value, _timestamp(datetime.now(UTC)), scope.principal_id, wake_id)
+
+    async def wake_of_run(self, scope: TrustedScope, run_id: RunId) -> WakeRecord | None:
+        with self._tx() as tx:
+            tx.authorized(scope)
+            # PR #167 review P1-2: a Run that only goes on after a tool round is triggered by that
+            # round: follow it back. Re-review P1-7, P1-8: a Run that names any Event is decided
+            # there — its latest Event is a free wake's, or the Run is no free wake's (a user's
+            # message answered beside an older wake's group never becomes that wake's).
+            level: list[RunId] = [run_id]
+            seen: set[RunId] = set()
+            while level and len(seen) < 32:
+                ids: list[str] = []
+                below: list[RunId] = []
+                for current in level:
+                    if current in seen:
+                        continue
+                    seen.add(current)
+                    for ref in codec.trigger_refs_from(self._run_row(tx, scope, current)["trigger_refs"]):
+                        if isinstance(ref, EventRef):
+                            ids.append(ref.event_id)
+                        elif isinstance(ref, CompletedGroupRef):
+                            below.append(ref.run_id)
+                if ids:
+                    last = tx.one(f"SELECT sequence FROM events WHERE conversation_id=? AND event_id IN"
+                                  f" ({', '.join('?' * len(ids))}) ORDER BY sequence DESC LIMIT 1",
+                                  scope.conversation_id, *ids)
+                    row = None if last is None else tx.one(
+                        "SELECT * FROM wakes WHERE conversation_id=? AND event_sequence=?",
+                        scope.conversation_id, last["sequence"])
+                    wake = None if row is None else _wake(row)
+                    return wake if wake is not None and free_wake(wake.reasons) else None
+                level = below
+            return None
+
+    async def unshown_wakes(self, scope: TrustedScope) -> frozenset[int]:
+        with self._tx() as tx:
+            tx.authorized(scope)
+            rows = tx.all("SELECT event_sequence, reasons FROM wakes WHERE conversation_id=? AND status='opened'",
+                          scope.conversation_id)
+            return frozenset(int(r["event_sequence"]) for r in rows
+                             if free_wake(codec.wake_reasons_from(json.loads(r["reasons"]))))
 
     async def wakes_since(self, principal: PrincipalId, since: datetime) -> tuple[WakeRecord, ...]:
         with self._tx() as tx:

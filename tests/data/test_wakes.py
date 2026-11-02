@@ -322,3 +322,117 @@ def test_a_told_reminder_whose_telling_was_purged_has_no_teller() -> None:
     assert asyncio.run(data.told_reminders(SCOPE.principal_id)) == ((memory_id, None, at),)
     assert asyncio.run(data.see_answered_reminders(SCOPE.principal_id)) == 0
 
+
+
+# --- V3-P90 §7.3: a free wake's states --------------------------------------------------------
+
+FREE = (WakeReason(WakeKind.FREE, group="work", minutes=16, step=1),)
+
+
+def free_run(data: InMemoryData | SqliteData, event: object) -> object:
+    from himari.common import RawRepresentation
+    from himari.data.api import EventRef, PromptBasis, RawReceived, RunPreparation
+
+    async def go() -> object:
+        run_id = await data.prepare_run(SCOPE, RunPreparation(b"", "t", RawRepresentation.ADAPTER_SERIALIZED,
+                                                              (EventRef(event.event_id),), PromptBasis(0, 0), "p", "m"))  # type: ignore[attr-defined]
+        await data.mark_dispatch(SCOPE, run_id)
+        await data.record_raw_outcome(SCOPE, run_id, RawReceived(b"", "t"))
+        return run_id
+    return asyncio.run(go())
+
+
+def test_a_free_wake_is_hidden_until_shown_and_gone_once_passed() -> None:
+    store = new_store()
+    data, _ = opened(store)
+    event = asyncio.run(data.begin_wake(SCOPE, FREE, "d1", keys=("free:d1:x:1",)))
+    wake_id = event.payload.wake_id  # type: ignore[union-attr]
+    assert asyncio.run(data.unshown_wakes(SCOPE)) == frozenset({event.sequence})
+    run_id = free_run(data, event)
+    assert asyncio.run(data.wake_of_run(SCOPE, run_id)).wake_id == wake_id  # type: ignore[arg-type,union-attr]
+    asyncio.run(data.finalize_hidden_run(SCOPE, run_id, wake_id, WakeStatus.PASSED))  # type: ignore[arg-type]
+    assert asyncio.run(data.read_wake(SCOPE.principal_id, wake_id)).status is WakeStatus.PASSED
+    assert asyncio.run(data.read_run(SCOPE, run_id)).status.value == "projected"  # type: ignore[arg-type]
+    assert asyncio.run(data.read_events(SCOPE)) == ()  # it never was
+    assert asyncio.run(data.unshown_wakes(SCOPE)) == frozenset()
+    assert asyncio.run(data.wake_of_run(SCOPE, run_id)) is not None  # type: ignore[arg-type]  # still found by its Run
+    assert asyncio.run(data.opened_wakes()) == ()
+    again = data_for(restart(store))
+    assert asyncio.run(again.read_events(SCOPE)) == ()
+
+
+def test_a_shown_free_wake_is_speaking_and_ends_as_any_wake() -> None:
+    store = new_store()
+    data, _ = opened(store)
+    wake_id = asyncio.run(data.begin_wake(SCOPE, FREE, "d1")).payload.wake_id  # type: ignore[union-attr]
+    assert asyncio.run(data.reveal_wake(SCOPE.principal_id, wake_id))
+    assert not asyncio.run(data.reveal_wake(SCOPE.principal_id, wake_id))  # once
+    assert [w.status for w in asyncio.run(data.opened_wakes())] == [WakeStatus.SPEAKING]  # still in progress
+    assert len(asyncio.run(data.read_events(SCOPE))) == 1 and asyncio.run(data.unshown_wakes(SCOPE)) == frozenset()
+    kept = asyncio.run(data.end_wake(SCOPE.principal_id, wake_id, WakeStatus.DROPPED))
+    assert kept.status is WakeStatus.SPEAKING  # a shown wake never becomes hidden
+    assert asyncio.run(data.end_wake(SCOPE.principal_id, wake_id, WakeStatus.ANSWERED)).status is WakeStatus.ANSWERED
+    with pytest.raises(DataError):
+        asyncio.run(data.end_wake(SCOPE.principal_id, wake_id, WakeStatus.SPEAKING))
+
+
+def test_a_free_wake_dropped_before_it_spoke_is_gone_and_cannot_be_shown() -> None:
+    store = new_store()
+    data, _ = opened(store)
+    wake_id = asyncio.run(data.begin_wake(SCOPE, FREE, "d1")).payload.wake_id  # type: ignore[union-attr]
+    assert asyncio.run(data.end_wake(SCOPE.principal_id, wake_id, WakeStatus.DROPPED)).status is WakeStatus.DROPPED
+    assert not asyncio.run(data.reveal_wake(SCOPE.principal_id, wake_id))
+    assert asyncio.run(data.read_events(SCOPE)) == ()
+
+
+def test_a_runs_wake_is_its_own_before_an_earlier_wakes_group() -> None:
+    """PR #167 re-review P1-7: wake A's tool group left among wake B's first Run's triggers — that Run
+    is B's; B's Run after its own tool round is B's; A's later Run is A's. Both backends."""
+    from himari.common import RawRepresentation
+    from himari.data.api import CompletedGroupRef, EventRef, PromptBasis, RunPreparation
+
+    store = new_store()
+    data, _ = opened(store)
+
+    def run(*refs: object) -> object:
+        async def go() -> object:
+            return await data.prepare_run(SCOPE, RunPreparation(b"", "t", RawRepresentation.ADAPTER_SERIALIZED,
+                                                                tuple(refs), PromptBasis(0, 0), "p", "m"))  # type: ignore[arg-type]
+        return asyncio.run(go())
+
+    a = asyncio.run(data.begin_wake(SCOPE, FREE, "d1"))
+    a_run = run(EventRef(a.event_id))
+    asyncio.run(data.end_wake(SCOPE.principal_id, a.payload.wake_id, WakeStatus.FAILED))  # type: ignore[union-attr]
+    b = asyncio.run(data.begin_wake(SCOPE, FREE, "d1"))
+    b_first = run(CompletedGroupRef(a_run), EventRef(b.event_id))  # type: ignore[arg-type]
+    b_after_tools = run(CompletedGroupRef(b_first))  # type: ignore[arg-type]
+    a_after_tools = run(CompletedGroupRef(a_run))  # type: ignore[arg-type]
+    owner = {name: asyncio.run(data.wake_of_run(SCOPE, r)).wake_id  # type: ignore[arg-type,union-attr]
+             for name, r in (("b_first", b_first), ("b_after_tools", b_after_tools), ("a_after_tools", a_after_tools))}
+    assert owner == {"b_first": b.payload.wake_id, "b_after_tools": b.payload.wake_id,  # type: ignore[union-attr]
+                     "a_after_tools": a.payload.wake_id}  # type: ignore[union-attr]
+
+
+def test_a_users_run_beside_an_older_free_wakes_group_is_no_wakes() -> None:
+    """PR #167 re-review P1-8: a Run that names the user's message is the user's, though an older free
+    wake's tool group is among its triggers. Both backends."""
+    from himari.common import RawRepresentation
+    from himari.data.api import CompletedGroupRef, EventRef, PromptBasis, RunPreparation
+
+    store = new_store()
+    data, _ = opened(store)
+
+    def run(*refs: object) -> object:
+        async def go() -> object:
+            return await data.prepare_run(SCOPE, RunPreparation(b"", "t", RawRepresentation.ADAPTER_SERIALIZED,
+                                                                tuple(refs), PromptBasis(0, 0), "p", "m"))  # type: ignore[arg-type]
+        return asyncio.run(go())
+
+    a = asyncio.run(data.begin_wake(SCOPE, FREE, "d1"))
+    a_run = run(EventRef(a.event_id))
+    asyncio.run(data.end_wake(SCOPE.principal_id, a.payload.wake_id, WakeStatus.FAILED))  # type: ignore[union-attr]
+    message = asyncio.run(data.append_event(SCOPE, user("[[pass]]가 뭐야?")))
+    users = run(CompletedGroupRef(a_run), EventRef(message.event_id))  # type: ignore[arg-type]
+    assert asyncio.run(data.wake_of_run(SCOPE, users)) is None  # type: ignore[arg-type]
+    after_tools = run(CompletedGroupRef(users))  # type: ignore[arg-type]
+    assert asyncio.run(data.wake_of_run(SCOPE, after_tools)) is None  # type: ignore[arg-type]  # still the user's

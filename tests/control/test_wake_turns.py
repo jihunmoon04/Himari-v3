@@ -155,7 +155,8 @@ class WakeDriver:
         self.withdrawn.append(wake_id)
 
     async def resume_wake(self, scope: TrustedScope, wake_id: str, *, stop: StopSignal | None = None,
-                          progress: TurnProgress | None = None, max_runs: int | None = None) -> DriveResult:
+                          progress: TurnProgress | None = None, max_runs: int | None = None,
+                          free: bool = False) -> DriveResult:
         return await self.resume(scope, stop=stop, progress=progress, max_runs=max_runs)
 
 

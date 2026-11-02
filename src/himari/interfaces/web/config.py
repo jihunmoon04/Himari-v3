@@ -107,7 +107,9 @@ MACHINE_PRINCIPALS_VAR = "HIMARI_MACHINE_PRINCIPALS"  # V3-P74: whose new Conver
 PROACTIVE_VAR = "HIMARI_PROACTIVE"
 PROACTIVE_QUIET_VAR = "HIMARI_PROACTIVE_QUIET"
 PROACTIVE_GAP_VAR = "HIMARI_PROACTIVE_GAP_MINUTES"
-PROACTIVE_DAILY_VAR = "HIMARI_PROACTIVE_DAILY"
+PROACTIVE_FREE_DAILY_VAR = "HIMARI_PROACTIVE_FREE_DAILY"  # V3-P90 §7.4 (HIMARI_PROACTIVE_DAILY is no more)
+PROACTIVE_FREE_ATTEMPTS_VAR = "HIMARI_PROACTIVE_FREE_ATTEMPTS"
+PROACTIVE_FREE_STEPS_VAR = "HIMARI_PROACTIVE_FREE_STEPS"
 PROACTIVE_RETURN_VAR = "HIMARI_PROACTIVE_RETURN_HOURS"
 PROACTIVE_ENDED_VAR = "HIMARI_PROACTIVE_ENDED_MINUTES"  # V3-P90 §8 (was _FOCUS_MINUTES, _GAME_MINUTES)
 DEFAULT_FILE_MAX_BYTES = 32 * 1024 * 1024  # as data.api
@@ -307,10 +309,27 @@ def _proactive(source: Mapping[str, str]) -> ProactiveSettings:
         enabled=_flag(source.get(PROACTIVE_VAR), PROACTIVE_VAR, default=False),
         quiet_start=quiet_start, quiet_end=quiet_end,
         gap_minutes=_required(source.get(PROACTIVE_GAP_VAR), PROACTIVE_GAP_VAR, 15, 0, 24 * 60),  # V3-P90 §8
-        daily=_required(source.get(PROACTIVE_DAILY_VAR), PROACTIVE_DAILY_VAR, 4, 0, 48),
+        daily=_required(source.get(PROACTIVE_FREE_DAILY_VAR), PROACTIVE_FREE_DAILY_VAR, 6, 0, 48),
+        attempts=_required(source.get(PROACTIVE_FREE_ATTEMPTS_VAR), PROACTIVE_FREE_ATTEMPTS_VAR, 12, 0, 96),
+        free_steps=_steps(source.get(PROACTIVE_FREE_STEPS_VAR)),
         return_hours=_required(source.get(PROACTIVE_RETURN_VAR), PROACTIVE_RETURN_VAR, 1, 0, 72),  # V3-P90 §8
         ended_minutes=_required(source.get(PROACTIVE_ENDED_VAR), PROACTIVE_ENDED_VAR, 60, 0, 24 * 60),
     )
+
+
+def _steps(value: str | None) -> tuple[int, ...]:
+    """V3-P90 §7.4: ``"15,30,60"`` (minutes to each free wake, the last repeated); unset: that; empty: no free wake."""
+    if value is None:
+        return (15, 30, 60)
+    if not value.strip():
+        return ()
+    try:
+        steps = tuple(int(part) for part in value.split(","))
+    except ValueError:
+        raise WebConfigError(f"{PROACTIVE_FREE_STEPS_VAR} is minutes, like 15,30,60") from None
+    if not all(1 <= step <= 24 * 60 for step in steps):
+        raise WebConfigError(f"{PROACTIVE_FREE_STEPS_VAR}: each step is 1 to 1440 minutes")
+    return steps
 
 
 def _port(value: str | None, name: str = PORT_VAR, *, default: int = DEFAULT_PORT) -> int:

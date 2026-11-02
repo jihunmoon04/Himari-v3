@@ -1828,7 +1828,7 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
         """V3-P80 §3.2: which Conversations work now and which wait for an answer. Not a read of any one of
         them: it never counts as the user being there (``seen``, V3-P62 §5)."""
         application, who = himari(request), by.principal
-        return {"working": sorted(application.runner.running(who)),
+        return {"working": sorted(application.runner.shown_running(who)),  # V3-P90 §7.3: not a hidden one
                 "waiting": sorted(await application.data.list_waiting_conversations(who))}
 
     @app.post("/api/conversations", status_code=201)
@@ -1848,7 +1848,7 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
                 if record.call == waiting and record.tool_id == ASK_USER_TOOL_ID:
                     asked = _question(record.arguments)
                     question = {"call_id": waiting.call_id, "question": asked, "display": display_view(asked)}
-        job = application.runner.status(scope)
+        job = application.runner.shown_status(scope)  # V3-P90 §7.3: a hidden free wake is not working
         # An accepted input (or finished Tool results) with no assistant
         # output after it — e.g. the server stopped before the job ran.
         last = await application.data.read_events(scope, after_sequence=summary.last_sequence - 1, limit=1) \
@@ -1916,6 +1916,8 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
             raise ApiError(400, "invalid_argument", f"after >= 0 and limit 1..{MAX_EVENTS_PAGE}")
         application, scope = himari(request), scope_of(conversation_id, who)
         events = await application.data.read_events(scope, after_sequence=after, limit=limit)
+        if unshown := await application.data.unshown_wakes(scope):  # V3-P90 §7.3: a free wake not shown yet
+            events = tuple(e for e in events if e.sequence not in unshown)
         application.seen(scope)  # a client is reading (V3-P62 §5): only after the read was authorized
         runs = [e.origin_run_id for e in events if isinstance(e.payload, AssistantToolCalls) and e.origin_run_id]
         runs += [e.payload.call.run_id for e in events if isinstance(e.payload, ToolResultRecord)]
@@ -2297,7 +2299,7 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
                            who: PrincipalId = Depends(principal)) -> dict[str, Any]:
         application, scope = himari(request), scope_of(conversation_id, who)
         changes = await application.file_changes(scope)
-        return changes_view(changes, application.runner.status(scope).running)
+        return changes_view(changes, application.runner.shown_status(scope).running)
 
     @app.get("/api/conversations/{conversation_id}/changes/diff")
     async def file_change_diff(conversation_id: str, path: str, request: Request,

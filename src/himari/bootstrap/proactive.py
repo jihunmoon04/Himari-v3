@@ -30,6 +30,7 @@ from himari.data.api import (
     MemoryCategory,
     Wake,
     REMIND_LATE,
+    free_wake,
 )
 from himari.data.sqlite import SqliteData
 from himari.presence.api import Devices, Returned
@@ -44,7 +45,6 @@ from himari.proactive import (
     Return,
     Situation,
     Told,
-    activity_wake,
     candidate_keys,
     candidates,
     decide,
@@ -113,6 +113,11 @@ def wake_outcome(status: JobStatus | None, after: Sequence[ConversationEvent],
 
 async def end_wake_of(data: SqliteData, scope: TrustedScope, wake_id: str, status: JobStatus | None) -> WakeRecord:
     record = await data.read_wake(scope.principal_id, wake_id)
+    if status is not None and status.hidden or (status is None and record.status is WakeStatus.OPENED
+                                                and free_wake(record.reasons)):
+        # V3-P90 §7.3: a free wake that never showed itself — the user won, it failed, a restart cut
+        # it — ends unseen (a pass ended so already: no change)
+        return await data.end_wake(scope.principal_id, wake_id, WakeStatus.DROPPED)
     after = await data.read_events(scope, after_sequence=record.event_sequence)
     waiting = await data.find_waiting_call(scope) is not None
     outcome, asked = wake_outcome(status, after, waiting)
@@ -164,6 +169,12 @@ async def settle_cut_wakes(data: SqliteData, driver: Driver) -> int:
     settled = 0
     for record in await data.opened_wakes():
         scope = TrustedScope(record.principal, record.conversation_id)
+        if record.status is WakeStatus.OPENED and free_wake(record.reasons):
+            # V3-P90 §7.3: never shown — dropped, keys kept (the step is used); a Run it left
+            # received is finalized with no Event when the Conversation is next driven
+            await data.end_wake(record.principal, record.wake_id, WakeStatus.DROPPED)
+            settled += 1
+            continue
         try:
             after = await data.read_events(scope, after_sequence=record.event_sequence)
             waiting = await data.find_waiting_call(scope) is not None
@@ -277,7 +288,8 @@ class ProactiveScheduler:
     def __init__(self, data: SqliteData, hub: PresenceHub, devices: Devices, runner: BackgroundRunner,
                  inputs: Inputs, settings: ProactiveSettings, server_zone: str, *,
                  zones: frozenset[str] = frozenset(), clock: Callable[[], datetime] = lambda: datetime.now(UTC),
-                 poke: Callable[[float], None] = lambda after: None) -> None:
+                 poke: Callable[[float], None] = lambda after: None,
+                 free_ok: Callable[[TrustedScope], Awaitable[bool]] | None = None) -> None:
         self._data, self._hub, self._devices, self._runner = data, hub, devices, runner
         self._inputs = inputs
         self.settings = settings
@@ -285,6 +297,7 @@ class ProactiveScheduler:
         self._zones = zones
         self._clock = clock
         self._poke = poke
+        self._free_ok = free_ok  # V3-P90 §7.5: whether the Conversation's model may take a free wake
         self._returns: dict[PrincipalId, Return] = {}
         self.looks: dict[PrincipalId, Look] = {}
 
@@ -335,13 +348,14 @@ class ProactiveScheduler:
         loops = tuple(m for m in await self._data.list_memories(principal) if m.category is MemoryCategory.LOOP)
         wakes = await self._data.wakes_since(principal, now - WAKES_READ)
         told = await self._told(principal)
+        free_ok = recent is not None and self.settings.free_steps != () and self._free_ok is not None             and await self._free_ok(TrustedScope(principal, recent.conversation_id))
         return Situation(
             now=now, settings=self.settings, zone=zone, device_id=device_id, device=device,
             quiet_until=await self._devices.quiet(principal),
             last_user_message_at=await self._data.last_user_message_at(principal),
             working=bool(self._runner.running(principal)), unanswered_wake=unanswered,
             wakes=wakes, loops=loops, returned=self._returns.get(principal),
-            said=await self._said(principal, wakes), told=told), recent
+            said=await self._said(principal, wakes), told=told, free_ok=free_ok), recent
 
     async def _told(self, principal: PrincipalId) -> tuple[Told, ...]:
         """V3-P90 §5.1: the reminders told to a sleeping device and not seen yet, with the
@@ -412,7 +426,7 @@ class ProactiveScheduler:
             return "no_device"
         try:
             await self._runner.submit_wake(scope, decision.reasons, device_id, keys=decision.keys,
-                                           reminders=decision.reminders, alone=True)
+                                           reminders=decision.reminders, alone=True, free=free_wake(decision.reasons))
         except ControlError as error:  # busy, closed, not settled: the next look tries again
             return error.code.value
         except DataError as error:  # a key taken meanwhile, a reminder changed meanwhile
@@ -435,14 +449,15 @@ class ProactiveScheduler:
     async def status(self, principal: PrincipalId) -> dict[str, object]:
         situation, _ = await self.situation(principal)
         midnight = local_midnight(situation.now, situation.zone)
-        today = [w for w in situation.wakes if w.created_at >= midnight and spoke(w, situation.said)
-                 and activity_wake(w)]  # V3-P90 §5.4: what the daily limit counts
+        free_today = [w for w in situation.wakes if w.created_at >= midnight and free_wake(w.reasons)]
+        today = [w for w in free_today if spoke(w, situation.said)]  # V3-P90 §7.4: what the daily limit counts
         look = self.looks.get(principal)
         _, _, upcoming = candidates(situation)
         reminders = [n.remind_instant for n in situation.loops if n.remind_state == "scheduled"
                      and n.remind_instant is not None and n.remind_instant > situation.now]
         return {
             "today": len(today), "daily": self.settings.daily,
+            "attempts": len(free_today), "free_attempts": self.settings.attempts,
             "last_wake_at": max((w.created_at for w in situation.wakes), default=None),
             "next_loop_at": upcoming, "next_reminder_at": min(reminders, default=None),
             "last_look": None if look is None else {

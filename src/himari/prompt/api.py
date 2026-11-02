@@ -91,6 +91,8 @@ class RequestOptions(DeepFrozen):
     screen_points: bool = False
     # And may speak first (V3-P87 §13): the "Speaking first" line only then; set by the Driver.
     speaks_first: bool = False
+    # And may take a free wake (V3-P90 §7.5): its line, and [[pass]], only then; set by the Driver.
+    free_wake: bool = False
     # Ask for the answer as a stream (V3-P73 §3.1); set by the Driver right before
     # the request is prepared, only for a Run that answers the user.
     stream: bool = False
@@ -737,6 +739,13 @@ ACTIVITY_RULE = (
     "After a long stretch of work, a break may be welcome."
 )
 # V3-P87 §8.2: right after SPEAKING_RULE when HIMARI may speak first.
+# V3-P90 §7.2: after "Speaking first", for a model checked for free wakes
+FREE_RULE = (
+    "- A free wake: a <wake> whose reasons are all \"free\" has no news — the same task just went on. Say "
+    "something short that fits what the user is doing, or answer exactly [[pass]] to stay silent when nothing "
+    "fits or it is a bad moment (a call, a tense fullscreen game, the same thing you said last time). Keep to "
+    "that: do not start other work, and use no tool unless what you say needs it."
+)
 PROACTIVE_RULE = (
     "- Speaking first: a user-role message that is only a <wake> block comes from the server, not the user: it "
     "opened this turn for the reasons in it, and the user has said nothing. Speak first, the way a friend would, "

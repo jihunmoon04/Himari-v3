@@ -141,6 +141,9 @@ from himari.data.api import (
     WakeReason,
     WakeRecord,
     WakeStatus,
+    free_wake,
+    EventRef,
+    CompletedGroupRef,
     PENDING_REMINDERS,
 )
 
@@ -718,7 +721,10 @@ class InMemoryData:
     async def read_events(
         self, scope: TrustedScope, *, after_sequence: int = 0, limit: int | None = None
     ) -> Sequence[ConversationEvent]:
-        events = [e for e in self._conv(scope).events if e.sequence > after_sequence]
+        hidden = {w.event_sequence for w in self._store.wakes.values() if w.conversation_id == scope.conversation_id
+                  and w.status in (WakeStatus.PASSED, WakeStatus.DROPPED)}  # V3-P90 §7.3: never was
+        events = [e for e in self._conv(scope).events if e.sequence > after_sequence
+                  and not (e.kind is EventKind.WAKE and e.sequence in hidden)]
         return tuple(events if limit is None else events[:limit])
 
     async def prepare_run(self, scope: TrustedScope, preparation: RunPreparation) -> RunId:
@@ -1472,10 +1478,11 @@ class InMemoryData:
 
     async def end_wake(self, principal: PrincipalId, wake_id: str, status: WakeStatus, *,
                        asked: bool = False) -> WakeRecord:
-        if status is WakeStatus.OPENED:
+        if status.in_progress:
             raise DataError(DataErrorCode.INVALID_ARGUMENT, "a wake ends answered, cancelled or failed")
         record = await self.read_wake(principal, wake_id)
-        if record.status is not WakeStatus.OPENED:
+        if not record.status.in_progress or (record.status is WakeStatus.SPEAKING
+                                             and status in (WakeStatus.PASSED, WakeStatus.DROPPED)):
             return record
         ended = replace(record, status=status, asked=asked and status is WakeStatus.ANSWERED,
                         ended_at=datetime.now(UTC))
@@ -1502,7 +1509,54 @@ class InMemoryData:
         return record
 
     async def opened_wakes(self) -> tuple[WakeRecord, ...]:
-        return tuple(r for r in self._store.wakes.values() if r.status is WakeStatus.OPENED)
+        return tuple(r for r in self._store.wakes.values() if r.status.in_progress)
+
+    async def reveal_wake(self, principal: PrincipalId, wake_id: str) -> bool:
+        record = await self.read_wake(principal, wake_id)
+        if record.status is not WakeStatus.OPENED:
+            return False
+        self._store.wakes[wake_id] = replace(record, status=WakeStatus.SPEAKING)
+        return True
+
+    async def finalize_hidden_run(self, scope: TrustedScope, run_id: RunId, wake_id: str, status: WakeStatus) -> None:
+        if status not in (WakeStatus.PASSED, WakeStatus.DROPPED):
+            raise DataError(DataErrorCode.INVALID_ARGUMENT, "a hidden wake ends passed or dropped")
+        conv = self._conv(scope)
+        run = self._run(conv, run_id)
+        record = await self.read_wake(scope.principal_id, wake_id)
+        if run.record.status is RunStatus.RECEIVED:  # one step, as the transaction: nothing above wrote
+            run.record = replace(run.record, status=RunStatus.PROJECTED)
+        if record.status is WakeStatus.OPENED:
+            self._store.wakes[wake_id] = replace(record, status=status, ended_at=datetime.now(UTC))
+
+    async def wake_of_run(self, scope: TrustedScope, run_id: RunId) -> WakeRecord | None:
+        conv = self._conv(scope)
+        level: list[RunId] = [run_id]
+        seen: set[RunId] = set()
+        while level and len(seen) < 32:  # as SQLite (PR #167 re-review P1-7, P1-8)
+            ids: set[str] = set()
+            below: list[RunId] = []
+            for current in level:
+                if current in seen:
+                    continue
+                seen.add(current)
+                for ref in self._run(conv, current).record.trigger_refs:
+                    if isinstance(ref, EventRef):
+                        ids.add(ref.event_id)
+                    elif isinstance(ref, CompletedGroupRef):
+                        below.append(ref.run_id)
+            if ids:
+                last = max((e.sequence for e in conv.events if e.event_id in ids), default=None)
+                return next((w for w in self._store.wakes.values() if w.conversation_id == scope.conversation_id
+                             and w.event_sequence == last and free_wake(w.reasons)), None)
+            level = below
+        return None
+
+    async def unshown_wakes(self, scope: TrustedScope) -> frozenset[int]:
+        self._conv(scope)
+        return frozenset(w.event_sequence for w in self._store.wakes.values()
+                         if w.conversation_id == scope.conversation_id and w.status is WakeStatus.OPENED
+                         and free_wake(w.reasons))
 
     async def wakes_since(self, principal: PrincipalId, since: datetime) -> tuple[WakeRecord, ...]:
         return tuple(sorted((r for r in self._store.wakes.values() if r.principal == principal

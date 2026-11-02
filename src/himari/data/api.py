@@ -148,6 +148,7 @@ class WakeKind(Enum):
     FOCUS = "focus"  # V3-P87; no longer made (V3-P90), still read
     GAME_ENDED = "game_ended"  # V3-P87; no longer made (V3-P90), still read
     TASK_ENDED = "task_ended"  # V3-P90 §5.3: a game or a video that clearly ended
+    FREE = "free"  # V3-P90 §7: no news — the same task went on; the model may pass
     TRY = "try"  # the operator's try (§11)
 
 
@@ -165,7 +166,8 @@ class WakeReason(DeepFrozen):
     late: bool = False  # REMINDER only: past its 24-hour window (§5.3)
     asleep: bool = False  # REMINDER only (V3-P90 §5.1): told to a sleeping device, so ``told`` once answered
     again: bool = False  # REMINDER only (V3-P90 §5.1): told before to a sleeping device, not seen; told again
-    group: str | None = None  # TASK_ENDED (V3-P90 §5.3): "game" or "video"
+    group: str | None = None  # TASK_ENDED (V3-P90 §5.3): "game" or "video"; FREE: the task's group
+    step: int | None = None  # FREE (V3-P90 §6.2): which of the timer's steps, from 1
 
 
 @dataclass(frozen=True)
@@ -1478,10 +1480,23 @@ REMINDER_ATTEMPTS = 3  # V3-P87 §5.3: a reminder whose wakes ended unanswered t
 
 
 class WakeStatus(Enum):
-    OPENED = "opened"
+    OPENED = "opened"  # a free wake (V3-P90 §7.3): not shown yet
+    SPEAKING = "speaking"  # V3-P90 §7.3: a free wake decided to speak, shown; still in progress
     ANSWERED = "answered"  # a final answer, or an ask_user question left (``asked``)
     CANCELLED = "cancelled"  # no assistant output; the user won (§4.3)
     FAILED = "failed"
+    PASSED = "passed"  # V3-P90 §7.3: a free wake the model passed — never shown
+    DROPPED = "dropped"  # V3-P90 §7.3: a free wake that ended before it was shown — never shown
+
+    @property
+    def in_progress(self) -> bool:
+        """V3-P90 §7.3 (PR #162 review P1-7): opened or speaking — not ended."""
+        return self in (WakeStatus.OPENED, WakeStatus.SPEAKING)
+
+
+def free_wake(reasons: Sequence[WakeReason]) -> bool:
+    """V3-P90 §7.3: a wake whose reasons are all FREE — its own path (hidden until it speaks, may pass)."""
+    return bool(reasons) and all(r.kind is WakeKind.FREE for r in reasons)
 
 
 @dataclass(frozen=True)
@@ -1514,7 +1529,8 @@ class WakeStore(Protocol):
 
     async def end_wake(self, principal: PrincipalId, wake_id: str, status: WakeStatus, *,
                        asked: bool = False) -> WakeRecord:
-        """``opened → status``, once (a later call changes nothing). The
+        """``opened → status`` (V3-P90: ``speaking →`` answered, cancelled or failed), once (a later call
+        changes nothing). The
         reminders it claimed (§5.3), only while still claimed by it: ANSWERED →
         delivered, or ``told`` when its reason says it was told to a sleeping
         device (V3-P90 §5.1: the wake stays its teller, ``reminded_at`` the
@@ -1525,7 +1541,28 @@ class WakeStore(Protocol):
     async def read_wake(self, principal: PrincipalId, wake_id: str) -> WakeRecord: ...
 
     async def opened_wakes(self) -> tuple[WakeRecord, ...]:
-        """Every principal's wakes still opened (a restart settles them, §4.4)."""
+        """Every principal's wakes still in progress — opened or speaking (a restart settles them, §4.4)."""
+        ...
+
+    async def reveal_wake(self, principal: PrincipalId, wake_id: str) -> bool:
+        """V3-P90 §7.3: a free wake decided to speak — ``opened → speaking``, before it is shown.
+        False (and nothing changes) when it is not opened (ended meanwhile, the user won)."""
+        ...
+
+    async def finalize_hidden_run(self, scope: TrustedScope, run_id: RunId, wake_id: str, status: WakeStatus) -> None:
+        """V3-P90 §7.3 (PR #162 review P1-10): one transaction — the Run ``RECEIVED → PROJECTED`` with
+        no event, the free wake ``opened → status`` (PASSED or DROPPED). Each only from where it should
+        be: a Run no longer RECEIVED stays, a wake no longer opened stays."""
+        ...
+
+    async def wake_of_run(self, scope: TrustedScope, run_id: RunId) -> WakeRecord | None:
+        """V3-P90 §7.3: the free wake whose Event is among the Run's triggers, if any (a passed or
+        dropped one too, whose Event ``read_events`` no longer gives)."""
+        ...
+
+    async def unshown_wakes(self, scope: TrustedScope) -> frozenset[int]:
+        """V3-P90 §7.3: the event sequences of this Conversation's free wakes not shown yet (opened).
+        Passed and dropped ones never come out of ``read_events`` at all."""
         ...
 
     async def wakes_since(self, principal: PrincipalId, since: datetime) -> tuple[WakeRecord, ...]:

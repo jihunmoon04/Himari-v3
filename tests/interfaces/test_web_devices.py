@@ -611,13 +611,17 @@ def test_a_wake_is_shown_as_a_line_with_its_reasons() -> None:
 def test_speaking_first_settings_from_the_environment() -> None:
     base = {"HIMARI_WEB_ALLOWED_HOSTS": "localhost", "HIMARI_DATA_ROOT": "/tmp/x", "HIMARI_MODEL": "m"}
     off = WebConfig.from_env(base).proactive
-    assert not off.enabled and (off.gap_minutes, off.daily, off.ended_minutes, off.return_hours) == (15, 4, 60, 1)
+    assert not off.enabled and (off.gap_minutes, off.daily, off.ended_minutes, off.return_hours) == (15, 6, 60, 1)
     on = WebConfig.from_env({**base, "HIMARI_PROACTIVE": "1", "HIMARI_PROACTIVE_QUIET": "",
                              "HIMARI_PROACTIVE_GAP_MINUTES": "45"}).proactive
     assert on.enabled and on.quiet_start is None and on.gap_minutes == 45
-    for name, bad in (("HIMARI_PROACTIVE_QUIET", "late"), ("HIMARI_PROACTIVE_DAILY", "99")):
+    for name, bad in (("HIMARI_PROACTIVE_QUIET", "late"), ("HIMARI_PROACTIVE_FREE_DAILY", "99"),
+                      ("HIMARI_PROACTIVE_FREE_STEPS", "15,soon"), ("HIMARI_PROACTIVE_FREE_STEPS", "0")):
         with pytest.raises(WebConfigError):
             WebConfig.from_env({**base, name: bad})
+    free = WebConfig.from_env({**base, "HIMARI_PROACTIVE_FREE_STEPS": "20,40", "HIMARI_PROACTIVE_FREE_ATTEMPTS": "3"}).proactive
+    assert (free.free_steps, free.attempts, off.free_steps) == ((20, 40), 3, (15, 30, 60))
+    assert WebConfig.from_env({**base, "HIMARI_PROACTIVE_FREE_STEPS": ""}).proactive.free_steps == ()  # no free wakes
 
 
 def test_the_task_and_its_end_are_kept_and_shown(server: Server) -> None:

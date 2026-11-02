@@ -71,6 +71,9 @@ class ProviderCapabilities(DeepFrozen):
     # HIMARI may speak first in a conversation on it (V3-P87 §13, owner 2026-11-01):
     # only models that passed 80% of the live speaking-first check.
     speaks_first: bool = False
+    # A free wake may open on it (V3-P90 §7.5): only models that passed the live free-wake
+    # check (speak when it fits, [[pass]] when it does not). None yet.
+    free_wake: bool = False
 
 
 @runtime_checkable

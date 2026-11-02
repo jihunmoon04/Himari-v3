@@ -315,8 +315,10 @@ class ConversationDriver(Protocol):
         ...
 
     async def resume_wake(self, scope: TrustedScope, wake_id: str, *, stop: StopSignal | None = None,
-                          progress: TurnProgress | None = None, max_runs: int | None = None) -> DriveResult:
-        """V3-P87: ``resume`` for a wake's turn, its model checked again for speaking first."""
+                          progress: TurnProgress | None = None, max_runs: int | None = None,
+                          free: bool = False) -> DriveResult:
+        """V3-P87: ``resume`` for a wake's turn, its model checked again for speaking first.
+        ``free`` (V3-P90 §7.3): a free wake's — held until it speaks, finalized unseen if it passes."""
         ...
 
     async def withdraw_wake(self, scope: TrustedScope, wake_id: str) -> None:
@@ -360,6 +362,7 @@ class JobStatus(DeepFrozen):
     stop_requested: StopRequest | None = None  # asked of the running job (V3-P55)
     turn_usage: TurnUsage | None = None  # the latest report of the job's drive (V3-P62 §7)
     wake_id: str | None = None  # V3-P87: the wake this job answers (a server-opened turn)
+    hidden: bool = False  # V3-P90 §7.3: a free wake's job not shown yet — no job event, not working
 
     @property
     def job_id(self) -> str | None:

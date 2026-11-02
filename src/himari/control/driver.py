@@ -73,7 +73,16 @@ from datetime import UTC, datetime
 from typing import NamedTuple
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from himari.common import ASK_USER_TOOL_ID, CallRef, ConversationId, RunId, TrustedScope
+from himari.common import (
+    ASK_USER_TOOL_ID,
+    CallRef,
+    ContentBlock,
+    ConversationId,
+    RunId,
+    TextBlock,
+    TrustedScope,
+    split_marks,
+)
 from himari.control.api import (
     ContextStatus,
     ControlError,
@@ -87,6 +96,7 @@ from himari.control.api import (
     StopSignal,
     TurnPresence,
     TurnProgress,
+    TurnUsage,
 )
 from himari.control.turn import Turn
 from himari.data.api import (
@@ -121,6 +131,7 @@ from himari.data.api import (
     WakeReason,
     WakeStore,
     WakeStatus,
+    free_wake,
 )
 from himari.prompt.api import (
     RECENT_DAYS,
@@ -255,6 +266,7 @@ class Driver:
         self._wakes = wakes
         self._limits: dict[ConversationId, int | None] = {}  # this drive's Run limit (V3-P87 §4.2)
         self._read_only: set[ConversationId] = set()  # a wake's turn: only Tools that read run (V3-P90 §5.6)
+        self._free: dict[ConversationId, _Held] = {}  # a free wake's turn: its output held till it speaks (§7.3)
         self._turn_budget = turn_budget
         self._no_progress_runs = no_progress_runs
         self._planner = planner
@@ -286,20 +298,37 @@ class Driver:
             return await self._resume_locked(scope)
 
     async def resume_wake(self, scope: TrustedScope, wake_id: str, *, stop: StopSignal | None = None,
-                          progress: TurnProgress | None = None, max_runs: int | None = None) -> DriveResult:
+                          progress: TurnProgress | None = None, max_runs: int | None = None,
+                          free: bool = False) -> DriveResult:
         """V3-P87 (PR #158 review P2-1): a wake's turn. The model is resolved again for
         this turn: changed meanwhile to one not checked for speaking first, the wake is
-        withdrawn (cancelled, keys back) and no Run is made."""
-        async with self._exclusive(scope, stop, progress, max_runs):
-            if not self._provider.describe_capabilities(self._turn_model(scope).model_id).speaks_first:
+        withdrawn (cancelled, keys back) and no Run is made. ``free`` (V3-P90 §7.3): what it
+        writes is held until it speaks; a pass shows nothing."""
+        held = _Held(progress, wake_id, lambda: self._show_free(scope, wake_id)) if free else None
+        async with self._exclusive(scope, stop, held if held is not None else progress, max_runs):
+            capabilities = self._provider.describe_capabilities(self._turn_model(scope).model_id)
+            if not capabilities.speaks_first or (free and not capabilities.free_wake):
                 await self.withdraw_wake(scope, wake_id)
                 return DriveResult(DriveState.CANCELLED, detail=ControlErrorCode.MODEL_UNCHECKED.value)
+            if held is not None:
+                self._free[scope.conversation_id] = held
             # V3-P90 §5.6: the user did not ask for this turn — what writes does not run
             self._read_only.add(scope.conversation_id)
             try:
                 return await self._resume_locked(scope)
             finally:
                 self._read_only.discard(scope.conversation_id)
+                self._free.pop(scope.conversation_id, None)
+
+    async def _show_free(self, scope: TrustedScope, wake_id: str) -> bool:
+        """V3-P90 §7.3: Data says speaking first; False when the wake ended meanwhile (the user won)."""
+        return self._wakes is not None and await self._wakes.reveal_wake(scope.principal_id, wake_id)
+
+    async def free_wake_ok(self, scope: TrustedScope) -> bool:
+        """V3-P90 §7.5: whether a free wake may open here — the Conversation's model, as a turn starting
+        now would resolve it, was checked for speaking first and for free wakes."""
+        capabilities = self._provider.describe_capabilities((await self._resolve_model(scope)).model_id)
+        return capabilities.speaks_first and capabilities.free_wake
 
     async def accept_wake(self, scope: TrustedScope, reasons: Sequence[WakeReason], device_id: str, *,
                           keys: Sequence[str] = (), reminders: Sequence[int] = ()) -> ConversationEvent:
@@ -341,12 +370,16 @@ class Driver:
 
     async def _ended(self, scope: TrustedScope, wake: Wake) -> bool:
         assert self._wakes is not None
-        return (await self._wakes.read_wake(scope.principal_id, wake.wake_id)).status is not WakeStatus.OPENED
+        # V3-P90 §7.3 (PR #167 review P1-1): speaking is still in progress
+        return not (await self._wakes.read_wake(scope.principal_id, wake.wake_id)).status.in_progress
 
     async def withdraw_wake(self, scope: TrustedScope, wake_id: str) -> None:
         if self._wakes is None:
             return
-        await self._wakes.end_wake(scope.principal_id, wake_id, WakeStatus.CANCELLED)
+        record = await self._wakes.read_wake(scope.principal_id, wake_id)
+        # V3-P90 §7.3 (PR #167 review P2-5): a free wake withdrawn before it spoke was never shown
+        hidden = record.status is WakeStatus.OPENED and free_wake(record.reasons)
+        await self._wakes.end_wake(scope.principal_id, wake_id, WakeStatus.DROPPED if hidden else WakeStatus.CANCELLED)
         await self._wakes.release_keys(scope.principal_id, wake_id)
 
     async def close_cut_group(self, scope: TrustedScope, reason: str) -> bool:
@@ -549,7 +582,8 @@ class Driver:
         return RequestOptions(model.model_id, model.reasoning_effort, provider_key=self._provider.provider_key,
                               session_key=session_key(scope), image_input=capabilities.image_input,
                               screen_points=capabilities.image_input and capabilities.screen_points,
-                              speaks_first=capabilities.speaks_first)
+                              speaks_first=capabilities.speaks_first,
+                              free_wake=capabilities.speaks_first and capabilities.free_wake)
 
     def _options_for(self, scope: TrustedScope) -> RequestOptions:
         return self._request_options(scope, self._turn_model(scope))
@@ -660,12 +694,37 @@ class Driver:
         except ProviderError as exc:
             await self._log.record_projection_failure(scope, run_id, exc.code.value)
             return None  # like a live invalid output: raw kept, nothing enters history
-        await self._project(scope, run_id, normalized)
+        try:
+            await self._project(scope, run_id, normalized)
+        except _NothingSaid:
+            pass  # closed with no Event: the wake that showed itself fails as any cut wake
         return None
 
     async def _project(
         self, scope: TrustedScope, run_id: RunId, normalized: NormalizedModelOutput
-    ) -> ConversationEvent:
+    ) -> ConversationEvent | None:
+        """The Run's output as an Event. V3-P90 §7.3 (PR #162 review P1-10): a free wake's Run —
+        live, or stored and found at a restart — is judged by ``free_wake_verdict``; one that does not
+        speak is finalized with no Event (None), one that speaks is shown first and loses its [[pass]]."""
+        held = self._free.get(scope.conversation_id)
+        if held is not None:
+            await held.settled()  # a reveal begun while it streamed is done first
+        wake = None if self._wakes is None else await self._wakes.wake_of_run(scope, run_id)
+        if wake is not None and self._wakes is not None:
+            live = held is not None and held.wake_id == wake.wake_id
+            verdict = free_wake_verdict(normalized, wake.status, live=live)
+            if verdict is not None:
+                await self._wakes.finalize_hidden_run(scope, run_id, wake.wake_id, verdict)
+                return None
+            if wake.status is WakeStatus.OPENED and held is not None and live and not await held.show():
+                await self._wakes.finalize_hidden_run(scope, run_id, wake.wake_id, WakeStatus.DROPPED)
+                return None  # the user won meanwhile
+            normalized = without_pass(normalized)
+            if isinstance(normalized, NormalizedFinal) and not split_marks(_text(normalized.blocks), complete=True)[0].strip():
+                # PR #167 review P1-2: shown, then only [[pass]]: no empty answer — the Run closes with no
+                # Event and the wake fails, as one that said nothing more (§7.3)
+                await self._wakes.finalize_hidden_run(scope, run_id, wake.wake_id, WakeStatus.DROPPED)
+                raise _NothingSaid(run_id)
         if isinstance(normalized, NormalizedFinal):
             output: AssistantFinal | AssistantToolCalls = AssistantFinal(normalized.blocks)
         else:
@@ -895,7 +954,12 @@ class Driver:
                 await self._log.record_projection_failure(scope, run_id, exc.code.value)
                 return result(DriveState.INVALID_MODEL_OUTPUT, detail=str(exc))
 
-            event = await self._project(scope, run_id, normalized)
+            try:
+                event = await self._project(scope, run_id, normalized)
+            except _NothingSaid:
+                return result(DriveState.INVALID_MODEL_OUTPUT, detail="only [[pass]] after speaking")
+            if event is None:  # V3-P90 §7.3: a free wake that passed (or could not show itself)
+                return result(DriveState.COMPLETED, detail="passed")
             if isinstance(normalized, NormalizedFinal):
                 return result(DriveState.COMPLETED, final_event=event)
             group = await self._dispatch(scope, run_id, AssistantToolCalls(normalized.calls, normalized.commentary))
@@ -1063,3 +1127,141 @@ def _uncertain(error_code: str, capture: RawCapture | None) -> RawUncertain:
     """An uncertain outcome with what arrived of a stream, if anything (V3-P73 §5.3)."""
     body = capture.body() if capture is not None else None
     return RawUncertain(error_code, body, capture.content_type if body is not None and capture else "")
+
+
+# --- V3-P90 §7.3: a free wake ---------------------------------------------------------------
+
+PASS = "[[pass]]"
+
+
+def _text(blocks: Sequence[ContentBlock]) -> str:
+    return "".join(b.text for b in blocks if isinstance(b, TextBlock))
+
+
+def free_wake_verdict(normalized: NormalizedModelOutput, status: WakeStatus, *, live: bool) -> WakeStatus | None:
+    """What a free wake's Run comes to (PR #162 review P1-10), the same live and at a restart: None to
+    project it (shown, or to be shown now), else the hidden end to finalize it with. Passed or dropped
+    already: that. Opened: a final answer that is only [[pass]] (marks aside), or nothing, passes; any
+    other answer or a tool call speaks — live; found at a restart, it was never shown, so dropped."""
+    if status in (WakeStatus.PASSED, WakeStatus.DROPPED):
+        return status
+    if status is not WakeStatus.OPENED:
+        return None
+    if isinstance(normalized, NormalizedFinal):
+        plain = split_marks(_text(normalized.blocks), complete=True)[0].strip()
+        if plain in ("", PASS):
+            return WakeStatus.PASSED
+    return None if live else WakeStatus.DROPPED
+
+
+def without_pass(normalized: NormalizedModelOutput) -> NormalizedModelOutput:
+    """A free wake that speaks: its [[pass]] taken out of what is recorded and shown."""
+    def clean(blocks: tuple[ContentBlock, ...]) -> tuple[ContentBlock, ...]:
+        return tuple(dataclasses.replace(b, text=b.text.replace(PASS, "")) if isinstance(b, TextBlock) else b
+                     for b in blocks)
+    if isinstance(normalized, NormalizedFinal):
+        return dataclasses.replace(normalized, blocks=clean(normalized.blocks))
+    return dataclasses.replace(normalized, commentary=clean(normalized.commentary))
+
+
+class _NothingSaid(Exception):
+    """A shown free wake whose answer was only [[pass]]: its Run closed with no Event (PR #167 review P1-2)."""
+
+
+class _PassFilter:
+    """[[pass]] taken out of a stream of text whose pieces may cut it (PR #167 review P2-3): the end
+    that could still be its start is held for the next piece, or for the end."""
+
+    def __init__(self) -> None:
+        self._held = ""
+
+    def feed(self, text: str) -> str:
+        text = (self._held + text).replace(PASS, "")
+        keep = next((n for n in range(min(len(PASS) - 1, len(text)), 0, -1) if PASS.startswith(text[-n:])), 0)
+        self._held = text[len(text) - keep:] if keep else ""
+        return text[:len(text) - keep] if keep else text
+
+    def flush(self) -> str:
+        held, self._held = self._held, ""
+        return held
+
+
+class _Held:
+    """A free wake's progress (V3-P90 §7.3): usage goes on to the runner; what is written is held
+    until the wake speaks, then handed on, and from then on as it comes, with [[pass]] taken out.
+    It speaks the moment its text can no longer be [[pass]] (marks aside), or a tool call starts
+    (PR #167 review P2-4): Data says speaking first (``show_in_data``), then the runner shows the job
+    and what was held. Nothing of a pass is ever shown."""
+
+    def __init__(self, progress: TurnProgress | None, wake_id: str, show_in_data: Callable[[], Awaitable[bool]]) -> None:
+        self._progress = progress
+        self.wake_id = wake_id
+        self._show_in_data = show_in_data
+        self._shown = False
+        self._showing: asyncio.Task[bool] | None = None
+        self._raw = ""  # what it wrote before it was shown, marks and all
+        self._filter = _PassFilter()
+        self._calls: list[Callable[[OutputProgress], None]] = []
+
+    def report(self, usage: TurnUsage) -> None:
+        if self._progress is not None:
+            self._progress.report(usage)
+
+    def _pass_on(self, call: Callable[[OutputProgress], None]) -> None:
+        if not isinstance(self._progress, OutputProgress):
+            return
+        if self._shown:
+            call(self._progress)
+        else:
+            self._calls.append(call)
+
+    def output_started(self, run_id: RunId) -> None:
+        self._pass_on(lambda p: p.output_started(run_id))
+
+    def output(self, run_id: RunId, delta: OutputDelta) -> None:
+        if not self._shown and self._showing is None:
+            self._raw += delta.text
+            # PR #167 re-review P1-6: spaces after the mark ("[[pass]] ") do not make it speak
+            plain = split_marks(self._raw, complete=False)[0].strip()
+            if delta.tool is not None or (plain and not PASS.startswith(plain)):
+                self._begin()
+        text = self._filter.feed(delta.text) if delta.text else ""
+        if text or delta.tool is not None or delta.thinking:
+            delta = dataclasses.replace(delta, text=text)
+            self._pass_on(lambda p: p.output(run_id, delta))
+
+    def output_ended(self, run_id: RunId) -> None:
+        if rest := self._filter.flush():
+            self._pass_on(lambda p: p.output(run_id, OutputDelta(text=rest)))
+        self._pass_on(lambda p: p.output_ended(run_id))
+
+    def _begin(self) -> None:
+        try:
+            self._showing = asyncio.get_running_loop().create_task(self.show())
+        except RuntimeError:  # no loop (a test drives it by hand): the projection shows it
+            pass
+
+    async def show(self) -> bool:
+        """Data first, then the job and what was held. False: the wake ended meanwhile (the user won)."""
+        if self._shown:
+            return True
+        if not await self._show_in_data():
+            return False
+        self.reveal()
+        return True
+
+    async def settled(self) -> None:
+        if self._showing is not None:
+            await self._showing
+
+    def reveal(self) -> None:
+        if self._shown:
+            return
+        self._shown = True
+        reveal = getattr(self._progress, "reveal", None)
+        if callable(reveal):
+            reveal()  # the runner shows the job first, then what was written
+        if isinstance(self._progress, OutputProgress):
+            for call in self._calls:
+                call(self._progress)
+        self._calls.clear()

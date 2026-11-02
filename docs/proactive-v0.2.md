@@ -659,3 +659,41 @@ P1-1~P1-9 모두 PASS. 새 지적을 코드와 대조했다: Run은 응답을 �
 | P1 | `Reset()`이 이미 생긴 끝(`ended`)을 지우지 않아, 끝난 직후 잠그거나 잠들면 깬 뒤 지난 끝이 다시 실림 | `Reset()`이 끝도 지운다. 시험: 게임 끝 → 잠금 → 끝 없음 |
 | P2 | 영상의 끝을 Windows 전체 미디어 세션 수로 판단해, 다른 프로그램의 음악이 있으면 영상 세션이 사라져도 끝으로 보지 못함 | 영상이 주 작업인 동안 **앞 창 프로그램과 같은 앱**(`MediaAppName` = 프로그램 키)에서 재생된 세션을 그 영상의 세션으로 기억하고, 재생 중·사라짐을 그 세션들로만 본다. 맞춘 세션이 없으면(UWP처럼 이름이 다름) 지금처럼 모든 세션. 시험: 음악과 함께 보다 영상 세션만 사라짐 → 끝, 음악은 계속인데 영상 멈춤 + 작업이 일로 → 끝, 맞춘 세션 없음 → 예전 규칙 |
 
+### 17.5 서버 3단계: 자유 wake (`feat/proactive-v2-server3`)
+
+§15의 5단계.
+
+- **Data:** `WakeKind.FREE`, `WakeReason.step`, `WakeStatus.SPEAKING`·`PASSED`·`DROPPED`와 `in_progress`(opened·speaking), `free_wake(reasons)`. `reveal_wake`(opened → speaking), `finalize_hidden_run`(Run RECEIVED → PROJECTED 이벤트 없이 + wake opened → passed/dropped, 한 트랜잭션), `wake_of_run`, `unshown_wakes`. `end_wake`는 speaking에서도 닫되(answered·cancelled·failed) 보인 wake를 숨기지 않는다. `opened_wakes`는 speaking도. **`read_events`는 passed·dropped wake의 이벤트를 내지 않는다** — 그래서 다음 Run의 계기, 답 없는 wake 판단, Prompt, 압축, 기억 작업, 기록이 모두 한 곳에서 그것을 "없던 것"으로 본다(§7.3 P1-9). 두 저장소 같게, 스키마 그대로.
+- **규칙:** `free_candidate` — 주기(작업 시작, 그 뒤의 사용자 메시지면 그 메시지)부터 단계(그 주기의 자유 wake 수, pass 포함), 기다림은 주기 시작이나 그 뒤 가장 늦은 wake부터, `free_steps`(15,30,60, 마지막 반복). 열쇠 `free:<기기>:<주기 시작 분>:<단계>`(±1분 별칭). 막는 것: 모든 규칙 + 하루 말함 `daily`(6)·시도 `attempts`(12). 모델이 확인되지 않으면(`free_ok`) 후보가 없다.
+- **Runner:** `submit_wake(..., free=True)` — 작업은 `hidden`으로 시작해 `job` 사건·`accepted`·`run_ended`를 내지 않고, 작업 목록(`shown_running`)과 대화의 작업 상태(`shown_status`)에서 빠진다. 드러내면(`reveal`) 그때 `accepted`와 `job started`. 숨긴 채 끝나면 `job ended`도 내지 않는다(`CompanionEvents`). Run 상한 `FREE_RUNS` 2.
+- **Driver:** 자유 wake 턴의 출력은 `_Held`가 쥔다. `_project`가 `free_wake_verdict`로 판정 — 살아 있는 턴이면 pass/빈 답 → `finalize_hidden_run(PASSED)`, 그 밖(글, 도구 호출) → `reveal_wake` 뒤 runner에 드러냄을 알리고 쥔 출력을 흘린 다음 `[[pass]]`를 떼고 투영. 재시작 뒤 `_prepare`가 찾은 RECEIVED Run은 같은 함수로 passed/dropped(한 번도 보이지 않았으므로). 모든 wake의 읽는 도구만(§5.6)은 그대로.
+- **wake 끝:** 숨긴 채 끝난 작업(사용자가 이김, 오류)은 `DROPPED`. 재시작 정리(`settle_cut_wakes`)는 opened 자유 wake를 `DROPPED`로(열쇠는 그대로: 그 단계는 쓴 것), speaking은 보통 wake처럼.
+- **Prompt:** `RequestOptions.free_wake`, 반려 절의 `FREE_RULE`(§7.2 문장, 도구는 꼭 필요할 때만).
+- **능력:** `ProviderCapabilities.free_wake`. **실제 모델 확인 전이라 OpenRouter 목록의 어느 모델도 켜지 않았다.** 그래서 운영에서는 아직 자유 wake가 열리지 않는다(§7.5). `free_ok`는 스케줄러가 최근 대화의 모델로 묻는다.
+- **설정:** `HIMARI_PROACTIVE_FREE_STEPS`(`15,30,60`, 빈 값이면 없음), `_FREE_DAILY`(6), `_FREE_ATTEMPTS`(12). `HIMARI_PROACTIVE_DAILY`는 없앴다. 상태의 `today`/`daily`는 자유 wake의 말함, `attempts`/`free_attempts`를 더했다.
+- **Web:** 활동 목록·대화 작업 상태·변경 화면은 숨긴 작업을 보지 않고, `events`는 아직 보이지 않은 자유 wake의 이벤트를 뺀다.
+
+**설계와 다르게 한 것:**
+- **자유 wake는 다른 계기와 합치지 않는다.** 다른 wake가 같은 때에 나오면 그것이 먼저 말하고, 자유 wake는 기다린다(간격 15분 뒤). 합친 wake의 길(설계 §7.3의 "보통의 wake 길")이 필요 없어진다.
+- **`context_key`에 숨긴 wake를 넣지 않았다.** 숨긴 wake는 기록에서 빠지기만 하므로(늘어나지 않음) 추정은 크게 잡힐 뿐 넘치지 않는다.
+- **드러낸 `job`의 origin에 `"free": true`를 넣지 않았다.** 앱은 지금처럼 wake로 다룬다(앱 3단계에서 필요하면 더함).
+- 실제 모델 확인 장면(`tests/live`)은 아직 없다. 소유자가 확인을 돌리고 통과한 모델에 `free_wake`를 켜야 한다.
+
+**검수(PR #167, `990ad40`): NOT_READY → 고침.** 지적을 코드와 대조했다. 모두 맞다.
+
+| # | 지적 | 고침 |
+| --- | --- | --- |
+| P1-1 | `Driver._ended`가 아직 `status is not OPENED` — speaking을 끝난 것으로 봄(설계 P1-7을 구현에서 놓침) | `not status.in_progress`. 시험: 보였지만 답 없이 작업이 끝나고 아직 정리 전인 speaking wake가 다음 wake를 막고, failed로 끝나면 막지 않음 |
+| P1-2 | 도구를 부른 뒤의 Run은 `CompletedGroupRef`로 시작해 `wake_of_run`이 wake를 찾지 못함 → `[[pass]]`가 답에 남음 | `wake_of_run`이 도구 묶음을 거슬러 그 wake까지 찾는다(두 저장소). 보인 뒤 `[[pass]]`를 떼고 남는 글이 없으면 빈 답을 쓰지 않고 Run을 이벤트 없이 닫고 작업은 `INVALID_MODEL_OUTPUT`(wake는 보이는 실패 `failed`) |
+| P2-3 | 조각마다 `replace`해서 `[[pa` + `ss]]`처럼 나뉜 표시가 남음 | `_PassFilter`: `[[pass]]`의 앞부분일 수 있는 끝은 다음 조각(또는 끝)까지 쥔다 |
+| P2-4 | Run이 끝나야 드러냄 | rev. 3 설계대로 되돌렸다: 흐름 중에 표정 표시를 뗀 글이 `[[pass]]`의 앞부분이 아니게 되거나 도구 호출이 시작되면 그 순간 드러낸다(Data의 `speaking` 먼저, 그다음 runner의 job과 쥐었던 출력). 투영은 그 드러냄을 기다린다. 흐름이 아닌 Run과 재시작은 끝에서 같은 판정 함수 |
+| P2-5 | 시작 전에 거둔 자유 wake가 `cancelled`로 기록에 보임 | `withdraw_wake`는 보인 적 없는 자유 wake를 `dropped`로 닫는다(열쇠는 지금처럼 돌려줌) |
+
+그래서 위 "설계와 다르게 한 것"의 첫 항목(Run 끝에서 한 번에 판정)은 없앴다.
+
+**재검수(PR #167, `31ab78b`): P1-6 → 고침.** 흐름 중의 판정이 앞 공백만 떼어(`lstrip`), `[[pass]]` 뒤에 공백·줄바꿈이 오면 `[[pass]]`의 앞부분이 아니라고 보고 드러냈다(그 wake는 이제 pass로 끝날 수 없다). 양쪽을 뗀다(`strip`). 시험: `[[pass]]`+공백, 줄바꿈, 표정 표시와 공백, 조각으로 나뉜 표시와 공백 — 어느 것도 드러내지 않음.
+
+**재검수(PR #167, `dcc7c76`): P1-7 → 고침.** 앞의 자유 wake A가 남긴 도구 묶음은 새 자유 wake B의 첫 Run 계기에 B의 이벤트와 함께 들어갈 수 있다(끝난 wake가 남긴 묶음은 새 wake를 막지 않으므로). `wake_of_run`이 거슬러 찾은 wake 가운데 아무것이나 골라 A를 그 Run의 wake로 볼 수 있었다. 이제 **한 단계씩**: Run이 직접 가리키는 wake를 먼저 보고, 없을 때만 도구 묶음을 한 단계 거슬러 가며, 한 단계에서 여럿이면 가장 늦은 wake. 그래서 B의 첫 Run은 B, B가 도구를 부른 뒤의 Run도 B(한 단계 위에서 B를 만남), A의 뒤 Run은 A. 두 저장소 시험.
+
+**재검수(PR #167, `3612e33`): P1-8 → 고침.** 사용자 메시지로 시작한 Run도 직접 가리키는 이벤트에 자유 wake가 없으면 도구 묶음을 거슬러 가, 앞서 도구를 부르다 끝난 자유 wake를 그 Run의 wake로 볼 수 있었다(그러면 사용자 답의 `[[pass]]` 글자가 지워짐). 이제 **이벤트를 하나라도 직접 가리키는 Run은 그 단계에서 정한다**: 그 가운데 가장 늦은 이벤트가 자유 wake면 그 wake, 아니면(사용자 메시지 등) 자유 wake의 Run이 아니다. 거슬러 가는 것은 이벤트 없이 도구 묶음만 가리키는 Run(도구 뒤에 이어지는 Run)뿐이다. 시험: 두 저장소(사용자 Run과 그 뒤의 도구 Run은 wake 없음), Driver(자유 wake가 도구 뒤 Run 상한에 걸린 다음 사용자 질문의 답에 `[[pass]]` 글자가 남음).
+

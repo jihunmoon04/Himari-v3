@@ -198,7 +198,7 @@ def test_accepting_and_the_turn(server: Server, kit: RunnerKit, monkeypatch: pyt
     refused(server.post(f"/api/conversations/{cid}/changes/accept", {}), 400, "invalid_argument")
     application = server.application
     assert application is not None
-    running = type("Status", (), {"running": True})()
+    running = type("Status", (), {"running": True, "hidden": False})()
     with monkeypatch.context() as m:  # §6: while a turn runs, nothing is accepted or reverted
         m.setattr(application.runner, "status", lambda scope: running)
         m.setattr(application.runner, "_running_in", lambda conversation_id: True)
