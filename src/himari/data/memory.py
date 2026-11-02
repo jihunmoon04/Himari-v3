@@ -143,6 +143,7 @@ from himari.data.api import (
     WakeStatus,
     free_wake,
     EventRef,
+    CompletedGroupRef,
     PENDING_REMINDERS,
 )
 
@@ -1530,8 +1531,19 @@ class InMemoryData:
 
     async def wake_of_run(self, scope: TrustedScope, run_id: RunId) -> WakeRecord | None:
         conv = self._conv(scope)
-        run = self._run(conv, run_id)
-        ids = {t.event_id for t in run.record.trigger_refs if isinstance(t, EventRef)}
+        ids: set[str] = set()
+        runs: list[RunId] = [run_id]
+        seen: set[RunId] = set()
+        while runs and len(seen) < 32:  # PR #167 review P1-2: back through the tool rounds
+            current = runs.pop()
+            if current in seen:
+                continue
+            seen.add(current)
+            for ref in self._run(conv, current).record.trigger_refs:
+                if isinstance(ref, EventRef):
+                    ids.add(ref.event_id)
+                elif isinstance(ref, CompletedGroupRef):
+                    runs.append(ref.run_id)
         sequences = {e.sequence for e in conv.events if e.event_id in ids}
         return next((w for w in self._store.wakes.values() if w.conversation_id == scope.conversation_id
                      and w.event_sequence in sequences and free_wake(w.reasons)), None)

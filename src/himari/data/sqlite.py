@@ -191,6 +191,7 @@ from himari.data.api import (
     WakeStatus,
     free_wake,
     EventRef,
+    CompletedGroupRef,
 )
 
 # v3: compaction_runs; v4: external_settings; v5: ui_resources; v6: model_settings;
@@ -2949,8 +2950,20 @@ class SqliteData:
     async def wake_of_run(self, scope: TrustedScope, run_id: RunId) -> WakeRecord | None:
         with self._tx() as tx:
             tx.authorized(scope)
-            run = self._run_row(tx, scope, run_id)
-            ids = [t.event_id for t in codec.trigger_refs_from(run["trigger_refs"]) if isinstance(t, EventRef)]
+            # PR #167 review P1-2: a Run after a tool round is triggered by that round: follow it back
+            ids: list[str] = []
+            runs: list[RunId] = [run_id]
+            seen: set[RunId] = set()
+            while runs and len(seen) < 32:
+                current = runs.pop()
+                if current in seen:
+                    continue
+                seen.add(current)
+                for ref in codec.trigger_refs_from(self._run_row(tx, scope, current)["trigger_refs"]):
+                    if isinstance(ref, EventRef):
+                        ids.append(ref.event_id)
+                    elif isinstance(ref, CompletedGroupRef):
+                        runs.append(ref.run_id)
             if not ids:
                 return None
             rows = tx.all(f"SELECT w.* FROM wakes w JOIN events e ON e.conversation_id=w.conversation_id"

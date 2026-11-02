@@ -81,7 +81,8 @@ def test_a_free_wake_that_speaks_shows_itself_first_and_loses_its_pass() -> None
     assert [s.hidden for s in told.started] == [False] and told.accepts == 1 and not told.ended[-1].hidden
 
 
-def test_a_tool_call_shows_it_before_the_tool_runs() -> None:
+def test_a_tool_call_shows_it_before_the_tool_runs_and_a_pass_after_it_says_nothing() -> None:
+    """PR #167 review P1-2: the Run after the tool round is the same wake's — its [[pass]] is never an answer."""
     from testkit import RecordingTool
 
     look = RecordingTool("look")
@@ -89,14 +90,110 @@ def test_a_tool_call_shows_it_before_the_tool_runs() -> None:
 
     async def scenario() -> None:
         started = await runner.submit_wake(SCOPE, FREE, "d1", free=True)
-        await runner.wait(SCOPE)
+        done = await runner.wait(SCOPE)
+        assert done.result is not None and done.result.state is DriveState.INVALID_MODEL_OUTPUT  # a visible failure
         wake = await rt.data.read_wake(SCOPE.principal_id, started.wake_id)  # type: ignore[attr-defined]
         assert wake.status is WakeStatus.SPEAKING and len(look.invocations) == 1
-        kinds = [e.kind for e in await rt.data.read_events(SCOPE)]  # type: ignore[attr-defined]
-        assert kinds[0] is EventKind.WAKE and EventKind.ASSISTANT_TOOL_CALLS in kinds  # no pass after showing
+        events = await rt.data.read_events(SCOPE)  # type: ignore[attr-defined]
+        assert events[0].kind is EventKind.WAKE and not any(isinstance(e.payload, AssistantFinal) for e in events)
 
     asyncio.run(scenario())
     assert len(told.started) == 1
+
+
+def test_after_a_tool_round_the_pass_mark_is_taken_out_of_the_answer() -> None:
+    from testkit import RecordingTool
+
+    rt, runner, _ = free_runner(calls(("look", {})), final("[[pass]] 날씨 좋네!"), tools=(RecordingTool("look"),))
+
+    async def scenario() -> None:
+        await runner.submit_wake(SCOPE, FREE, "d1", free=True)
+        await runner.wait(SCOPE)
+        answer = (await rt.data.read_events(SCOPE))[-1]  # type: ignore[attr-defined]
+        assert isinstance(answer.payload, AssistantFinal) and answer.payload.blocks == (TextBlock(" 날씨 좋네!"),)
+
+    asyncio.run(scenario())
+
+
+def test_a_speaking_wake_is_in_progress_for_the_next_wake() -> None:
+    """PR #167 review P1-1: shown, its job over with no answer, not ended yet (the race before the
+    bootstrap's listener ends it) — it keeps the next wake out; ended, it does not."""
+    from himari.control.api import ControlError, ControlErrorCode
+
+    rt, _ = runtime([])
+
+    async def scenario() -> None:
+        event = await rt.data.begin_wake(SCOPE, FREE, "d1")
+        assert isinstance(event.payload, Wake)
+        wake_id = event.payload.wake_id
+        assert await rt.data.reveal_wake(SCOPE.principal_id, wake_id)
+        with pytest.raises(ControlError) as refused:
+            await rt.driver.accept_wake(SCOPE, FREE, "d1")
+        assert refused.value.code is ControlErrorCode.NOT_SETTLED
+        await rt.data.end_wake(SCOPE.principal_id, wake_id, WakeStatus.FAILED)
+        assert (await rt.driver.accept_wake(SCOPE, FREE, "d1")).kind is EventKind.WAKE
+
+    asyncio.run(scenario())
+
+
+def test_a_free_wake_withdrawn_before_it_spoke_is_dropped_unseen() -> None:
+    """PR #167 review P2-5: the model turned out unchecked — never shown, so dropped, not cancelled."""
+    from himari.provider.scripted import ScriptedAdapter
+
+    adapter = ScriptedAdapter([final("x")], free_wake=False)
+    rt, _ = runtime(provider=adapter)
+    runner = BackgroundRunner(rt.driver)
+
+    async def scenario() -> None:
+        started = await runner.submit_wake(SCOPE, FREE, "d1", free=True)
+        await runner.wait(SCOPE)
+        assert started.wake_id is not None
+        wake = await rt.data.read_wake(SCOPE.principal_id, started.wake_id)
+        assert wake.status is WakeStatus.DROPPED and await rt.data.read_events(SCOPE) == ()
+
+    asyncio.run(scenario())
+
+
+def test_the_pass_mark_is_taken_out_of_a_stream_that_cuts_it() -> None:
+    """PR #167 review P2-3."""
+    from himari.control.driver import _PassFilter
+
+    stream = _PassFilter()
+    assert stream.feed("[[pa") == "" and stream.feed("ss]] 안녕") == " 안녕"
+    assert stream.feed("다[") == "다" and stream.flush() == "["
+    assert stream.feed("[[pass]][[pass]]응") == "응"
+
+
+def test_it_speaks_as_soon_as_it_cannot_be_a_pass() -> None:
+    """PR #167 review P2-4: shown while it streams — Data first, then the job, then what was held."""
+    from himari.control.driver import _Held
+    from himari.provider.api import OutputDelta
+
+    order: list[str] = []
+
+    class Progress:
+        def report(self, usage: object) -> None: ...
+        def output_started(self, run_id: object) -> None: order.append("started")
+        def output(self, run_id: object, delta: OutputDelta) -> None: order.append(delta.text)
+        def output_ended(self, run_id: object) -> None: order.append("ended")
+        def reveal(self) -> None: order.append("job")
+
+    async def in_data() -> bool:
+        order.append("data")
+        return True
+
+    async def scenario() -> None:
+        held = _Held(Progress(), "wake_1", in_data)
+        held.output_started("r")  # type: ignore[arg-type]
+        held.output("r", OutputDelta(text="[[mood:happy]][[pa"))  # type: ignore[arg-type]
+        await asyncio.sleep(0)
+        assert order == []  # could still be a pass
+        held.output("r", OutputDelta(text="ss]]한참"))  # type: ignore[arg-type]
+        await held.settled()
+        held.output("r", OutputDelta(text=" 했네"))  # type: ignore[arg-type]
+        assert order[:3] == ["data", "job", "started"] and "".join(order[3:]) == "[[mood:happy]]한참 했네"
+
+    asyncio.run(scenario())
 
 
 def test_a_free_wake_runs_two_runs_at_most() -> None:
