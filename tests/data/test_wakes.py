@@ -383,3 +383,31 @@ def test_a_free_wake_dropped_before_it_spoke_is_gone_and_cannot_be_shown() -> No
     assert asyncio.run(data.end_wake(SCOPE.principal_id, wake_id, WakeStatus.DROPPED)).status is WakeStatus.DROPPED
     assert not asyncio.run(data.reveal_wake(SCOPE.principal_id, wake_id))
     assert asyncio.run(data.read_events(SCOPE)) == ()
+
+
+def test_a_runs_wake_is_its_own_before_an_earlier_wakes_group() -> None:
+    """PR #167 re-review P1-7: wake A's tool group left among wake B's first Run's triggers — that Run
+    is B's; B's Run after its own tool round is B's; A's later Run is A's. Both backends."""
+    from himari.common import RawRepresentation
+    from himari.data.api import CompletedGroupRef, EventRef, PromptBasis, RunPreparation
+
+    store = new_store()
+    data, _ = opened(store)
+
+    def run(*refs: object) -> object:
+        async def go() -> object:
+            return await data.prepare_run(SCOPE, RunPreparation(b"", "t", RawRepresentation.ADAPTER_SERIALIZED,
+                                                                tuple(refs), PromptBasis(0, 0), "p", "m"))  # type: ignore[arg-type]
+        return asyncio.run(go())
+
+    a = asyncio.run(data.begin_wake(SCOPE, FREE, "d1"))
+    a_run = run(EventRef(a.event_id))
+    asyncio.run(data.end_wake(SCOPE.principal_id, a.payload.wake_id, WakeStatus.FAILED))  # type: ignore[union-attr]
+    b = asyncio.run(data.begin_wake(SCOPE, FREE, "d1"))
+    b_first = run(CompletedGroupRef(a_run), EventRef(b.event_id))  # type: ignore[arg-type]
+    b_after_tools = run(CompletedGroupRef(b_first))  # type: ignore[arg-type]
+    a_after_tools = run(CompletedGroupRef(a_run))  # type: ignore[arg-type]
+    owner = {name: asyncio.run(data.wake_of_run(SCOPE, r)).wake_id  # type: ignore[arg-type,union-attr]
+             for name, r in (("b_first", b_first), ("b_after_tools", b_after_tools), ("a_after_tools", a_after_tools))}
+    assert owner == {"b_first": b.payload.wake_id, "b_after_tools": b.payload.wake_id,  # type: ignore[union-attr]
+                     "a_after_tools": a.payload.wake_id}  # type: ignore[union-attr]

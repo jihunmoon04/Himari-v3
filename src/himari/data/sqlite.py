@@ -2950,27 +2950,32 @@ class SqliteData:
     async def wake_of_run(self, scope: TrustedScope, run_id: RunId) -> WakeRecord | None:
         with self._tx() as tx:
             tx.authorized(scope)
-            # PR #167 review P1-2: a Run after a tool round is triggered by that round: follow it back
-            ids: list[str] = []
-            runs: list[RunId] = [run_id]
+            # PR #167 review P1-2: a Run after a tool round is triggered by that round: follow it back.
+            # Re-review P1-7: level by level — the wake a Run names itself first, and of a level the
+            # latest, so an earlier wake's group left among a new wake's triggers never takes it.
+            level: list[RunId] = [run_id]
             seen: set[RunId] = set()
-            while runs and len(seen) < 32:
-                current = runs.pop()
-                if current in seen:
-                    continue
-                seen.add(current)
-                for ref in codec.trigger_refs_from(self._run_row(tx, scope, current)["trigger_refs"]):
-                    if isinstance(ref, EventRef):
-                        ids.append(ref.event_id)
-                    elif isinstance(ref, CompletedGroupRef):
-                        runs.append(ref.run_id)
-            if not ids:
-                return None
-            rows = tx.all(f"SELECT w.* FROM wakes w JOIN events e ON e.conversation_id=w.conversation_id"
-                          f" AND e.sequence=w.event_sequence WHERE w.conversation_id=? AND e.event_id IN"
-                          f" ({', '.join('?' * len(ids))})", scope.conversation_id, *ids)
-            found = [_wake(r) for r in rows]
-            return next((w for w in found if free_wake(w.reasons)), None)
+            while level and len(seen) < 32:
+                ids: list[str] = []
+                below: list[RunId] = []
+                for current in level:
+                    if current in seen:
+                        continue
+                    seen.add(current)
+                    for ref in codec.trigger_refs_from(self._run_row(tx, scope, current)["trigger_refs"]):
+                        if isinstance(ref, EventRef):
+                            ids.append(ref.event_id)
+                        elif isinstance(ref, CompletedGroupRef):
+                            below.append(ref.run_id)
+                if ids:
+                    rows = tx.all(f"SELECT w.* FROM wakes w JOIN events e ON e.conversation_id=w.conversation_id"
+                                  f" AND e.sequence=w.event_sequence WHERE w.conversation_id=? AND e.event_id IN"
+                                  f" ({', '.join('?' * len(ids))}) ORDER BY w.event_sequence DESC",
+                                  scope.conversation_id, *ids)
+                    if found := next((w for w in (_wake(r) for r in rows) if free_wake(w.reasons)), None):
+                        return found
+                level = below
+            return None
 
     async def unshown_wakes(self, scope: TrustedScope) -> frozenset[int]:
         with self._tx() as tx:
