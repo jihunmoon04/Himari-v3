@@ -164,6 +164,27 @@ def test_nothing_is_told_without_a_paired_device_or_with_the_companion_off(tmp_p
     assert asyncio.run(scenario(companion=True, pair=True)) is not None
 
 
+def test_a_free_wakes_job_event_says_free() -> None:
+    """V3-P90 §9: a free wake's job (sent once it speaks) carries ``free``; any other job has none."""
+    class NoneWaiting:
+        async def list_waiting_conversations(self, principal: PrincipalId) -> list[Any]:
+            return []
+
+    async def scenario() -> list[Any]:
+        hub = PresenceHub()
+        events = CompanionEvents(hub, NoneWaiting())
+        stream = hub.subscribe(ME)
+        wake = MessageOrigin(OriginKind.WAKE, "d1")
+        events.job_started(TrustedScope(ME, ConversationId("c1")), wake, JobStatus(running=True, wake_id="w1", free=True))
+        events.job_started(TrustedScope(ME, ConversationId("c2")), wake, JobStatus(running=True, wake_id="w2"))
+        got = [thaw(e.data) for e in await drained(stream) if e.name == "job"]
+        await events.aclose()
+        return got
+
+    free, other = asyncio.run(scenario())
+    assert free["free"] is True and free["origin"] == {"kind": "wake", "device_id": "d1"} and "free" not in other
+
+
 def test_an_older_activity_read_never_lands_after_a_newer_one() -> None:
     """PR #124 review B1: the read for a job's start is slow; the read for its end, later, finishes first.
     Only the latest change's read is published."""

@@ -743,6 +743,16 @@ Check(!PresenceBody.Build(3, "z", true, false, null, coding, true, null, true, n
 Check(PresenceBody.Build(3, "z", true, false, null, coding, true, null, true, null, plain, serverTakesTask: true) is var none && none.ContainsKey("task") && none["task"] is null && !none.ContainsKey("task_ended"),
     "no task goes as null; no end is left out");
 
+// V3-P90 §9: the screen setting goes in features to a server that takes them, off by default, even with the activity off
+var featured = PresenceBody.Build(3, "z", true, false, null, coding, true, null, true, null, plain with { Activity = false, FreeWakeScreen = true },
+    serverTakesFeatures: true);
+Check(JsonSerializer.Serialize(featured, JsonSerializerOptions.Web).Contains("\"features\":{\"free_wake_screen\":true}"), "the screen setting goes in features");
+Check(PresenceBody.Build(3, "z", true, false, null, coding, true, null, true, null, plain, serverTakesFeatures: true)["features"] is Dictionary<string, object?> defaulted
+    && defaulted["free_wake_screen"] is false, "off by default, and said so");
+Check(!PresenceBody.Build(3, "z", true, false, null, coding, true, null, true, null, plain with { FreeWakeScreen = true }).ContainsKey("features")
+    && !PresenceBody.Build(3, "z", true, true, null, null, true, null, true, null, plain with { FreeWakeScreen = true }, serverTakesFeatures: true).ContainsKey("features"),
+    "not to a server without free_wake_screen, nor in a locked body (the server keeps it)");
+
 var excluded = SignalSettings.Names(SignalSettings.DefaultMicExclusions);
 Check(MicCamera.InUse([(@"C:#Program Files#Zoom#bin#Zoom.exe", 100, 0)], excluded, @"C:\Apps\Himari.Companion.exe"), "another program using the microphone counts");
 Check(!MicCamera.InUse([(@"C:#Program Files#Zoom#bin#Zoom.exe", 100, 200), (@"C:#obs#bin#64bit#obs64.exe", 100, 0),
@@ -792,6 +802,9 @@ Check(QuietTimes.Describe(null, evening).Contains("먼저 말을 걸 수") && Qu
 var withSignals = new WindowPreferences(1, 2, 330, Signals: new SignalSettings(Media: true, TitleExclusions: "a"));
 Check(JsonSerializer.Deserialize<WindowPreferences>(JsonSerializer.Serialize(withSignals)) is { Signals: { Media: true, TitleExclusions: "a", Activity: true } }, "signal settings persist");
 Check(JsonSerializer.Deserialize<WindowPreferences>("{\"Left\":1,\"Top\":2,\"CharacterHeight\":330}")!.Signals is null, "old preferences have no signals (the defaults are used)");
+Check(JsonSerializer.Deserialize<WindowPreferences>(JsonSerializer.Serialize(withSignals with { Signals = new SignalSettings(FreeWakeScreen: true) })) is { Signals.FreeWakeScreen: true }
+    && JsonSerializer.Deserialize<WindowPreferences>("{\"Left\":1,\"Top\":2,\"CharacterHeight\":330,\"Signals\":{\"Media\":true}}") is { Signals: { Media: true, FreeWakeScreen: false } },
+    "the screen setting persists; saved signals without it are off (V3-P90 §9)");
 
 Console.WriteLine("Contract transport checks passed.");
 

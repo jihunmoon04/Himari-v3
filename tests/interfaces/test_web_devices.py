@@ -387,7 +387,8 @@ def test_the_event_stream_starts_with_hello(server: Server) -> None:
     name, hello = frames_of(response.text)[0]
     assert name == "hello" and hello == {
         "device": {"device_id": "d1", "name": "데스크톱"}, "moods": list(MOODS), "current_device": None,
-        "recent_conversation": {"id": cid, "title": None}, "features": {"presence_signals": 1, "sleep_signals": 1, "task_signals": 1},
+        "recent_conversation": {"id": cid, "title": None}, "features": {"presence_signals": 1, "sleep_signals": 1, "task_signals": 1,
+                                                                      "free_wake_screen": 1},
         "quiet_until": None, "activity": {"working": [], "waiting": []}}  # a device gets no signals revision
     web_hello = frames_of(server.client.get("/api/events").text)[0][1]
     assert web_hello["device"] is None and web_hello["recent_conversation"]["id"] == cid
@@ -622,6 +623,29 @@ def test_speaking_first_settings_from_the_environment() -> None:
     free = WebConfig.from_env({**base, "HIMARI_PROACTIVE_FREE_STEPS": "20,40", "HIMARI_PROACTIVE_FREE_ATTEMPTS": "3"}).proactive
     assert (free.free_steps, free.attempts, off.free_steps) == ((20, 40), 3, (15, 30, 60))
     assert WebConfig.from_env({**base, "HIMARI_PROACTIVE_FREE_STEPS": ""}).proactive.free_steps == ()  # no free wakes
+
+
+def test_the_free_wake_screen_setting_is_kept_through_a_lock(server: Server) -> None:
+    """V3-P90 §9: the app's setting comes in ``features``; unsent is off; a locked body keeps it; kept only."""
+    me = server.as_device(server.paired())
+    server.client.portal.call(lambda: server.app.hub.subscribe(OPERATOR, "d1"))  # type: ignore[union-attr]
+
+    def kept() -> bool:
+        return server.app.hub.states(OPERATOR)["d1"].free_wake_screen
+
+    assert server.device.post("/api/device/presence", json={**SIGNAL, "features": {"free_wake_screen": True}},
+                              headers=me).status_code == 204
+    (item,) = server.client.get("/api/devices").json()["items"]
+    assert kept() and item["signals"]["free_wake_screen"] is True
+    locked = {"idle_seconds": 0, "session": "locked"}
+    assert server.device.post("/api/device/presence", json=locked, headers=me).status_code == 204
+    assert kept()  # nothing is sent while locked
+    assert server.device.post("/api/device/presence", json=SIGNAL, headers=me).status_code == 204
+    (item,) = server.client.get("/api/devices").json()["items"]
+    assert not kept() and "free_wake_screen" not in item["signals"]  # an awake body without it: off
+    for bad in ({"idle_seconds": 0, "features": {"free_wake_screen": "yes"}},
+                {"idle_seconds": 0, "features": {"screen": True}}):
+        assert server.device.post("/api/device/presence", json=bad, headers=me).status_code == 400, bad
 
 
 def test_the_task_and_its_end_are_kept_and_shown(server: Server) -> None:

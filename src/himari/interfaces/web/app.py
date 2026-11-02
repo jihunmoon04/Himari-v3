@@ -321,12 +321,20 @@ class TaskEndedBody(_Body):
     ended_seconds_ago: float = Field(ge=0, le=MAX_IDLE_SECONDS, allow_inf_nan=False)
 
 
+class PresenceFeaturesBody(_Body):
+    """V3-P90 §9: the app's own settings the server keeps."""
+
+    free_wake_screen: StrictBool = False
+
+
 class PresenceBody(_Body):
     """V3-P83 §5: seconds since the last input anywhere on the device (cut to
     30 days), and its IANA time zone (an unknown one is ignored). V3-P88:
     the rest of the device's snapshot (§2.1) — an absent field is unknown,
     a null ``activity``/``media`` is none. V3-P90 §3.1: ``sleep`` (null:
-    awake) from an app that decides when its character sleeps."""
+    awake) from an app that decides when its character sleeps. §9:
+    ``features`` (unsent: every one off), only to a server that announces
+    ``features.free_wake_screen``."""
 
     idle_seconds: float = Field(ge=0, allow_inf_nan=False)
     time_zone: str | None = Field(default=None, max_length=64)
@@ -338,6 +346,7 @@ class PresenceBody(_Body):
     sleep: Literal["idle", "display_off"] | None = None
     task: TaskBody | None = None
     task_ended: TaskEndedBody | None = None
+    features: PresenceFeaturesBody | None = None
 
 
 class QuietBody(_Body):
@@ -379,7 +388,8 @@ def presence_signals(body: PresenceBody) -> Signals:
                    sleep_known="sleep" in sent, sleep=None if body.sleep is None else Sleep(body.sleep),
                    task=None if body.task is None else TaskSignal(body.task.group, float(body.task.for_seconds)),
                    task_ended=None if (ended := body.task_ended) is None else TaskEnded(
-                       ended.group, float(ended.lasted_seconds), float(ended.ended_seconds_ago)))
+                       ended.group, float(ended.lasted_seconds), float(ended.ended_seconds_ago)),
+                   free_wake_screen=body.features is not None and body.features.free_wake_screen)
 
 
 def signals_view(state: DeviceState | None) -> dict[str, Any]:
@@ -407,6 +417,8 @@ def signals_view(state: DeviceState | None) -> dict[str, Any]:
         view["before"] = {"category": before.category, "lasted_seconds": int(before.lasted_seconds),
                           "ended_seconds_ago": int(before.ended_seconds_ago),
                           **({"app": before.app} if before.app is not None else {})}
+    if state.free_wake_screen:  # V3-P90 §9: a setting, not told to the model
+        view["free_wake_screen"] = True
     return view
 
 
@@ -2575,7 +2587,7 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
                 "recent_conversation": None if recent is None else {"id": recent.conversation_id,
                                                                     "title": recent.title},
                 # V3-P88 §14, V3-P90 §3.1: an app sends the new fields only then
-                "features": {"presence_signals": 1, "sleep_signals": 1, "task_signals": 1},
+                "features": {"presence_signals": 1, "sleep_signals": 1, "task_signals": 1, "free_wake_screen": 1},
                 "quiet_until": _time(quiet)}
 
     @app.post("/api/device/presence", status_code=204)

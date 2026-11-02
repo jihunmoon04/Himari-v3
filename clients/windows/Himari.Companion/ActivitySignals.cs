@@ -4,9 +4,11 @@ namespace Himari.Companion;
 // logic (the contract tests run it anywhere); reading Windows itself is in ActivityProbe.cs.
 
 /// <summary>What the user chose to send (V3-P88 §4.3, §5, §6.1, Q2, Q3): media and titles are off by default.</summary>
+/// <summary>What is sent (V3-P88 §14). <c>FreeWakeScreen</c> (V3-P90 §9): the screen may go to a free wake — kept by the
+/// server only, for the screen tool (§10).</summary>
 internal sealed record SignalSettings(bool Activity = true, bool Media = false, bool Titles = false, bool MicCamera = true,
     string TitleExclusions = SignalSettings.DefaultTitleExclusions, string MicExclusions = SignalSettings.DefaultMicExclusions,
-    string CategoryOverrides = "")
+    string CategoryOverrides = "", bool FreeWakeScreen = false)
 {
     internal const string DefaultTitleExclusions = "kakaotalk\ndiscord\nslack\ntelegram\nline\nwhatsapp\nsignal\n1password\nbitwarden\nkeepass\nkeepassxc";
     internal const string DefaultMicExclusions = "obs64\nobs32\nsoundrecorder\nwindowssoundrecorder\nvoicerecorder";
@@ -199,7 +201,7 @@ internal static class MicCamera
 
 /// <summary>The presence body (V3-P88 §2.1, §14): the whole snapshot; a signal the user turned off is left out.
 /// V3-P90 §3.1: <c>sleep</c> (null awake, "idle", "display_off") when the server takes it; a locked body leaves
-/// it out (the server keeps it).</summary>
+/// it out (the server keeps it). §9: <c>features</c>, the app's settings the server keeps, likewise.</summary>
 internal static class PresenceBody
 {
     internal const int NameChars = 64, TitleChars = 120;
@@ -207,7 +209,7 @@ internal static class PresenceBody
     internal static Dictionary<string, object?> Build(int idleSeconds, string timeZone, bool serverTakesSignals, bool locked,
         string? after, ActivityState? activity, bool activityKnown, MediaInfo? media, bool mediaKnown, bool? micOrCamera,
         SignalSettings settings, IReadOnlySet<string>? titleExclusions = null, bool serverTakesSleep = false, string? sleep = null,
-        bool serverTakesTask = false, TaskState? task = null, TaskEndedState? taskEnded = null)
+        bool serverTakesTask = false, TaskState? task = null, TaskEndedState? taskEnded = null, bool serverTakesFeatures = false)
     {
         var body = new Dictionary<string, object?> { ["idle_seconds"] = idleSeconds, ["time_zone"] = timeZone };
         if (!serverTakesSignals) return body;  // an older server refuses fields it does not know
@@ -215,6 +217,8 @@ internal static class PresenceBody
         if (after is not null && !locked) body["after"] = after;
         if (locked) return body;  // nothing is in front of a locked screen
         if (serverTakesSleep) body["sleep"] = sleep;
+        if (serverTakesFeatures)
+            body["features"] = new Dictionary<string, object?> { ["free_wake_screen"] = settings.FreeWakeScreen };
         if (serverTakesTask && settings.Activity)  // V3-P90 §3.1: the task is the activity's, sent only with it
         {
             body["task"] = task is null ? null : new Dictionary<string, object?> { ["group"] = task.Group, ["for_seconds"] = (int)task.ForSeconds };
