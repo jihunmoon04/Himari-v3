@@ -40,9 +40,12 @@ public partial class MainWindow
         try
         {
             if (!excluded) foreach (var window in visible.Reverse()) window.Hide();
-            await Task.Delay(200, ct); // let the desktop compositor remove our windows
+            // Let the desktop compositor remove our windows: hiding takes a few frames,
+            // an exclusion only the next composed ones.
+            await Task.Delay(excluded ? 50 : 200, ct);
             ct.ThrowIfCancellationRequested();
-            return ScreenCapture.Capture(bounds);
+            // Copying, scaling and encoding stay off the UI thread; the process is per-monitor aware.
+            return await Task.Run(() => ScreenCapture.Capture(bounds), ct);
         }
         finally
         {
