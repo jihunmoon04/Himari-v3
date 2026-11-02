@@ -2,10 +2,13 @@
 For each model in ``HIMARI_LIVE_PROMPT_MODELS``, every scene twice: a short Korean
 conversation, then a <wake> the server wrote (a loop past its moment, a return, a
 reminder on time and late, a long focus, a game that ended, a fullscreen video, a
-deleted loop) — or the user writing after a wake. Each answer is checked: short (two
-sentences; one with a fullscreen video), at most one question, Korean, no word of the
-wake, the server or a note id, and its mood marks well formed. With
-``HIMARI_LIVE_PROMPT_OUT`` set to a file, every answer is appended as one JSON line."""
+deleted loop; V3-P90: a game or a video that ended, a reminder told again) — or the user
+writing after a wake. Each answer is checked: short (two sentences; one with a fullscreen
+video), at most one question, Korean, no word of the wake, the server or a note id, and its
+mood marks well formed. V3-P90 §7.5: the free wake, each scene three times — it speaks after
+a long stretch of work, and answers [[pass]] in a call, in a fullscreen game, and rather than
+say again what it said last time. With ``HIMARI_LIVE_PROMPT_OUT`` set to a file, every answer
+is appended as one JSON line."""
 
 from __future__ import annotations
 
@@ -21,6 +24,7 @@ import pytest
 
 from himari.bootstrap import read_env_file
 from himari.common import ConversationId, EventId, TextBlock, split_marks
+from himari.control.driver import PASS
 from himari.data.api import (
     AssistantFinal,
     ConversationEvent,
@@ -34,7 +38,15 @@ from himari.data.api import (
     WakeKind,
     WakeReason,
 )
-from himari.prompt.api import DevicePresence, NowDoing, PresenceView, PromptInputs, RequestOptions, SystemSpec
+from himari.prompt.api import (
+    DevicePresence,
+    MediaPresence,
+    NowDoing,
+    PresenceView,
+    PromptInputs,
+    RequestOptions,
+    SystemSpec,
+)
 from himari.prompt.composer import Composer
 from himari.prompt.system import BASE_INSTRUCTIONS
 from himari.provider.api import NativeReceived, NormalizedFinal, NormalizedToolCalls, ProviderError
@@ -66,6 +78,14 @@ class Scene:
     sentences: int = 2
     after: str | None = None  # the user wrote this after the wake (answer the user)
     mentions: tuple[str, ...] = ()  # any of these in the answer (what it is about)
+    # V3-P90 §7.5, a free wake: "speak", "pass", or "fresh" ([[pass]], or words without ``repeats``)
+    expect: str = "speak"
+    previous: str | None = None  # what the last free wake said, 30 minutes ago, unanswered
+    repeats: tuple[str, ...] = ()
+
+    @property
+    def free(self) -> bool:
+        return all(r.kind is WakeKind.FREE for r in self.reasons)
 
 
 SCENES = [
@@ -80,9 +100,34 @@ SCENES = [
     Scene("fullscreen_video", (WakeReason(WakeKind.FOCUS, activity="video", minutes=50),),
           doing=NowDoing(activity="video", app="Chrome", for_minutes=50, fullscreen=True), sentences=1),
     Scene("deleted_loop", (WakeReason(WakeKind.LOOP_DUE, memory_id=15),), {}),
+    # V3-P90 §5.3, §5.1: the ends the app tells, and a reminder told to a sleeping device, not seen
+    Scene("task_ended_game", (WakeReason(WakeKind.TASK_ENDED, group="game", minutes=95),),
+          doing=NowDoing(activity="browsing", app="Chrome", for_minutes=1)),
+    Scene("task_ended_video", (WakeReason(WakeKind.TASK_ENDED, group="video", minutes=70),),
+          doing=NowDoing(activity="chat", app="KakaoTalk", for_minutes=1)),
+    Scene("reminder_again", (WakeReason(WakeKind.REMINDER, memory_id=21, again=True),), {21: PILLS},
+          mentions=("약",)),
     Scene("user_after", (WakeReason(WakeKind.LOOP_DUE, memory_id=15),), {15: LOOP},
           after="그건 됐고, 점심 뭐 먹을지 하나만 골라 줘.", sentences=4,
           mentions=("점심", "먹", "추천", "어때", "어떠", "드시", "드세")),
+]
+
+
+# V3-P90 §7.5: the free wake's scenes (run with RequestOptions.free_wake)
+LAST_TIME = "[[mood:happy]]선생님, 한참 하셨네요. 물 한 잔 마시고 오시는 건 어때요?"
+FREE_SCENES = [
+    Scene("free_long_work", (WakeReason(WakeKind.FREE, group="work", minutes=125, step=4),),
+          doing=NowDoing(activity="coding", app="Visual Studio Code", for_minutes=125)),
+    Scene("free_writing", (WakeReason(WakeKind.FREE, group="work", minutes=50, step=2),),
+          doing=NowDoing(activity="document", app="Microsoft Word", for_minutes=50)),
+    Scene("free_call", (WakeReason(WakeKind.FREE, group="work", minutes=40, step=2),), expect="pass",
+          doing=NowDoing(activity="chat", app="Zoom", for_minutes=40, mic_or_camera=True)),
+    Scene("free_fullscreen_game", (WakeReason(WakeKind.FREE, group="game", minutes=80, step=3),), expect="pass",
+          doing=NowDoing(activity="game", app="League of Legends", for_minutes=80, fullscreen=True)),
+    Scene("free_said_it", (WakeReason(WakeKind.FREE, group="work", minutes=75, step=3),), expect="fresh",
+          doing=NowDoing(activity="coding", app="Visual Studio Code", for_minutes=75,
+                         media=MediaPresence("lofi hip hop radio", None, "YouTube")),
+          previous=LAST_TIME, repeats=("물",)),
 ]
 
 
@@ -96,14 +141,20 @@ def model_input(scene: Scene, model: str):  # type: ignore[no-untyped-def]
     events = [event(1, UserMessage((TextBlock("오늘 오후에 면접 보러 가. 좀 긴장된다."),)), earlier),
               event(2, AssistantFinal((TextBlock("[[mood:happy]]선생님이라면 잘하실 거예요. 다녀와서 얘기해 주세요!"),)),
                     earlier + timedelta(seconds=20)),
-              event(3, Wake("w1", scene.reasons, "d1"), NOW)]
+]
+    if scene.previous is not None:  # the last free wake, a step before, and what it said
+        before = (WakeReason(WakeKind.FREE, group="work", minutes=45, step=2),)
+        events += [event(3, Wake("w0", before, "d1"), NOW - timedelta(minutes=30)),
+                   event(4, AssistantFinal((TextBlock(scene.previous),)), NOW - timedelta(minutes=30, seconds=-8))]
+    events.append(event(len(events) + 1, Wake("w1", scene.reasons, "d1"), NOW))
     if scene.after is not None:
-        events.append(event(4, UserMessage((TextBlock(scene.after),)), NOW + timedelta(seconds=30)))
+        events.append(event(len(events) + 1, UserMessage((TextBlock(scene.after),)), NOW + timedelta(seconds=30)))
     presence = PresenceView(("device", "데스크톱"), "데스크톱", (DevicePresence("데스크톱", True, idle_minutes=0),),
                             now_doing=scene.doing)
     inputs = PromptInputs(instructions=BASE_INSTRUCTIONS, tool_catalog=(), events=tuple(events), tool_executions=(),
                           snapshot=None, state_basis=PersistedStateBasis(len(events), 0, (), (), ()), observations=(),
-                          request_options=RequestOptions(model, speaks_first=True), trigger_refs=(),
+                          request_options=RequestOptions(model, speaks_first=True, free_wake=scene.free),
+                          trigger_refs=(),
                           system=SystemSpec(companion=True, memory=True, attachments=True, proactive=True),
                           companion_persona=PERSONA, memories=tuple(scene.notes.values()), now=NOW + timedelta(
                               seconds=40), presence=presence, time_zone="Asia/Seoul", wake_notes=scene.notes)
@@ -146,14 +197,22 @@ def problems(scene: Scene, raw: str) -> list[str]:
     return found
 
 
-@pytest.mark.parametrize("model", MODELS)
-def test_speaking_first_is_short_and_about_its_reasons(model: str) -> None:
-    results = []
-    scenes = [s for s in SCENES if not ONLY or s.name in ONLY]
-    for scene in scenes:
-        for _ in range(2):
-            raw = answer(scene, model)
-            results.append((scene.name, raw, problems(scene, raw)))
+def free_problems(scene: Scene, raw: str) -> list[str]:
+    """V3-P90 §7.5: judged as the Driver does (``free_wake_verdict``): only [[pass]] (marks aside), or
+    nothing, passes; anything else speaks, with its [[pass]] taken out."""
+    plain = split_marks(raw, complete=True)[0].strip()
+    if plain in ("", PASS):
+        return ["passed"] if scene.expect == "speak" else []
+    if scene.expect == "pass":
+        return [f"spoke ({scene.name})"]
+    spoken = raw.replace(PASS, "")
+    found = problems(scene, spoken)
+    shown = split_marks(spoken, complete=True)[0]
+    found += [f"said {word!r} again" for word in scene.repeats if word in shown]
+    return found
+
+
+def report(model: str, results: list[tuple[str, str, list[str]]]) -> int:
     out = os.environ.get("HIMARI_LIVE_PROMPT_OUT")
     if out:
         with open(out, "a", encoding="utf-8") as kept:
@@ -164,4 +223,28 @@ def test_speaking_first_is_short_and_about_its_reasons(model: str) -> None:
     for name, raw, found in results:
         print(f"{model} {name}: {'ok' if not found else found} — {split_marks(raw, complete=True)[0][:120]!r}")
     print(f"{model}: {passed}/{len(results)}")
+    return passed
+
+
+@pytest.mark.parametrize("model", MODELS)
+def test_speaking_first_is_short_and_about_its_reasons(model: str) -> None:
+    results = []
+    scenes = [s for s in SCENES if not ONLY or s.name in ONLY]
+    for scene in scenes:
+        for _ in range(2):
+            raw = answer(scene, model)
+            results.append((scene.name, raw, problems(scene, raw)))
+    passed = report(model, results)
+    assert passed >= len(results) * 0.8, [(n, f) for n, _, f in results if f]
+
+
+@pytest.mark.parametrize("model", MODELS)
+def test_a_free_wake_speaks_when_it_fits_and_passes_when_not(model: str) -> None:
+    """V3-P90 §7.5: 80% of the free wake's scenes, each three times."""
+    results = []
+    for scene in [s for s in FREE_SCENES if not ONLY or s.name in ONLY]:
+        for _ in range(3):
+            raw = answer(scene, model)
+            results.append((scene.name, raw, free_problems(scene, raw)))
+    passed = report(model, results)
     assert passed >= len(results) * 0.8, [(n, f) for n, _, f in results if f]

@@ -767,7 +767,7 @@ def wake_text(wake: Wake, notes: Mapping[int, Memory]) -> str:
             item["loop"] = {"id": f"m{reason.memory_id}", "deleted": True} if note is None else {
                 "id": f"m{note.memory_id}", "text": note.text, **({"due": note.due_at} if note.due_at else {}),
                 **({"remind_at": note.remind_at} if reason.kind is WakeKind.REMINDER and note.remind_at else {})}
-        for name in ("via", "away_minutes", "activity", "group", "minutes"):
+        for name in ("via", "away_minutes", "activity", "group", "minutes", "step"):  # V3-P90 §7.1: a free one's step
             value = getattr(reason, name)
             if value is not None:
                 item[name] = value

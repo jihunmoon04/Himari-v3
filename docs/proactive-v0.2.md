@@ -733,3 +733,24 @@ P1-1~P1-9 모두 PASS. 새 지적을 코드와 대조했다: Run은 응답을 �
 - **실제 모델 확인(§7.5):** 자유 wake 장면을 `tests/live`에 두고 모델을 돌려 본다. 통과한 모델에만 `free_wake`를 켠다. 그 전에는 운영에서 자유 wake가 열리지 않는다.
 - **화면 tool(§10).**
 - **소유자의 실제 PC 확인:** 잠·깸, 알림, 작업 끝남.
+
+### 17.7 실제 모델 확인: 자유 wake (`feat/proactive-v2-live`)
+
+§7.5, §13의 "실제 모델". `tests/live/test_proactive_live.py`에 더했다.
+
+- **자유 wake 장면** (`RequestOptions.free_wake`, 장면마다 3번):
+
+  | 장면 | 상황 | 바라는 것 |
+  | --- | --- | --- |
+  | `free_long_work` | VS Code 125분, 단계 4 | 말함 |
+  | `free_writing` | Word 50분, 단계 2 | 말함 |
+  | `free_call` | Zoom 40분, 마이크·카메라 사용 중 | pass |
+  | `free_fullscreen_game` | 전체 화면 게임 80분 | pass |
+  | `free_said_it` | 30분 전 자유 wake가 "물 한 잔" 권함(답 없음), 코딩 75분 | pass, 또는 "물" 없이 다른 말 |
+
+- **판정:** Driver의 `free_wake_verdict`와 같다. 표정 표시를 뺀 글이 `[[pass]]`뿐이거나 비었으면 pass다. 그 밖은 말함이고, 말함은 기존 판정(두 문장 이하, 질문 하나 이하, 한국어, wake·서버·번호 금지, 표정 표시 문법)을 `[[pass]]` 뗀 글에 적용한다. 모델마다 15번 중 80%(12번) 이상이면 통과.
+- **기존 말 걸기 장면에 더함:** `task_ended_game`, `task_ended_video`(서버 2단계의 새 계기), `reminder_again`(잠든 채 알린 것을 다시). 옛 `focus`·`game_ended` 장면은 2026-11-01 결과와 비교하려고 남겼다.
+- **프롬프트:** 자유 wake의 `<wake>`에 `step`을 그린다(§7.1의 예와 같게). 서버 3단계에서 빠졌던 것.
+- §7.1의 "`now_doing`에 `task` 더함"은 하지 않았다. wake 이유에 `group`과 `minutes`가 이미 있다.
+
+**결과:** (돌린 뒤 적는다) `docs/live-results/proactive-2026-11-03.jsonl`. 통과한 모델에 `free_wake=True`.
