@@ -584,8 +584,9 @@ public partial class MainWindow
     {
         bool takes = Prop(Prop(info, "features"), "presence_signals") is { ValueKind: JsonValueKind.Number } version && version.GetInt32() == 1;
         bool sleeps = Prop(Prop(info, "features"), "sleep_signals") is { ValueKind: JsonValueKind.Number } sleep && sleep.GetInt32() == 1;
-        if ((takes && !serverTakesSignals) || (sleeps && !serverTakesSleep)) signalSchedule.Urgent();
-        serverTakesSignals = takes; serverTakesSleep = sleeps;  // V3-P90 §3.1
+        bool tasks = Prop(Prop(info, "features"), "task_signals") is { ValueKind: JsonValueKind.Number } task && task.GetInt32() == 1;
+        if ((takes && !serverTakesSignals) || (sleeps && !serverTakesSleep) || (tasks && !serverTakesTask)) signalSchedule.Urgent();
+        serverTakesSignals = takes; serverTakesSleep = sleeps; serverTakesTask = tasks;  // V3-P90 §3.1
         QuietFromServer(info, "quiet_until");
     }
     private async Task PresenceLoop(ServerClient local, CancellationToken ct)

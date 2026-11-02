@@ -206,7 +206,8 @@ internal static class PresenceBody
 
     internal static Dictionary<string, object?> Build(int idleSeconds, string timeZone, bool serverTakesSignals, bool locked,
         string? after, ActivityState? activity, bool activityKnown, MediaInfo? media, bool mediaKnown, bool? micOrCamera,
-        SignalSettings settings, IReadOnlySet<string>? titleExclusions = null, bool serverTakesSleep = false, string? sleep = null)
+        SignalSettings settings, IReadOnlySet<string>? titleExclusions = null, bool serverTakesSleep = false, string? sleep = null,
+        bool serverTakesTask = false, TaskState? task = null, TaskEndedState? taskEnded = null)
     {
         var body = new Dictionary<string, object?> { ["idle_seconds"] = idleSeconds, ["time_zone"] = timeZone };
         if (!serverTakesSignals) return body;  // an older server refuses fields it does not know
@@ -214,6 +215,13 @@ internal static class PresenceBody
         if (after is not null && !locked) body["after"] = after;
         if (locked) return body;  // nothing is in front of a locked screen
         if (serverTakesSleep) body["sleep"] = sleep;
+        if (serverTakesTask && settings.Activity)  // V3-P90 §3.1: the task is the activity's, sent only with it
+        {
+            body["task"] = task is null ? null : new Dictionary<string, object?> { ["group"] = task.Group, ["for_seconds"] = (int)task.ForSeconds };
+            if (taskEnded is not null)
+                body["task_ended"] = new Dictionary<string, object?> { ["group"] = taskEnded.Group,
+                    ["lasted_seconds"] = (int)taskEnded.LastedSeconds, ["ended_seconds_ago"] = (int)taskEnded.EndedSecondsAgo };
+        }
         if (settings.Activity && activityKnown)
         {
             body["activity"] = activity is null ? null : ActivityBody(activity, settings,
