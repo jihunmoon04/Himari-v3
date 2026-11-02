@@ -30,7 +30,6 @@ public partial class MainWindow : Window
     private bool loadedOnce;
     private string mood = "neutral";
     private bool talking;
-    private bool sleeping;
     private DateTime lastIdleCheck = DateTime.MinValue;
     private int demoVersion;
     private int chatFocusVersion;
@@ -48,6 +47,9 @@ public partial class MainWindow : Window
         // Picking a conversation leaves focus in the list, where typing searches it.
         Conversations.DropDownClosed += (_, _) => FocusComposerIfOpen();
         Input.LostKeyboardFocus += (_, _) => StashedComposerLostFocus();
+        // V3-P90 §2.3 (PR #164 review P1-1): typing to HIMARI wakes it; its box keeping the focus does not
+        Input.PreviewKeyDown += (_, _) => WakeFromUser();
+        Input.PreviewTextInput += (_, _) => WakeFromUser();
         Message.SourceChanged += (_, _) => { replyReader?.UpdateText(Message.Text); UpdateBubblePresentation(); };
         settings = new SettingsWindow();
         settings.ConnectionStatus.SetBinding(System.Windows.Controls.TextBlock.TextProperty, new System.Windows.Data.Binding("Text") { Source = Status });
@@ -78,11 +80,11 @@ public partial class MainWindow : Window
         tray.DoubleClick += (_, _) => ToggleVisible();
         timer.Tick += (_, _) => UpdateFrame();
         timer.Start();
-        SourceInitialized += (_, _) => { if (!offline) { SetupWindowControls(); SetupForegroundTracking(); SetupActivitySignals(); } };
+        SourceInitialized += (_, _) => { if (!offline) { SetupWindowControls(); SetupForegroundTracking(); SetupActivitySignals(); SetupSleepControls(); } };
         Loaded += async (_, _) => { if (loadedOnce) return; loadedOnce = true; InitializeDialogueHost(); UpdateSceneBounds(); if (!offline) { if (!preferencesLoaded) SetupWindowControls(); SetupChatHotkey(); await RestoreConnection(); } };
         Closing += (_, _) => { settings.AllowClose = true; };
         Closing += (_, _) => RestoreMoveHomeOnClose();
-        Closed += (_, _) => { CleanupActivitySignals(); CleanupBubblePresentation(); replyReader?.Dispose(); CleanupForegroundTracking(); dialogueHost?.Close(); CancelMovePreview(); lifetime.Cancel(); StopConnection(); timer.Stop(); CleanupWindowControls(); tray.Visible = false; tray.Dispose(); menu.Dispose(); };
+        Closed += (_, _) => { CleanupSleepControls(); CleanupActivitySignals(); CleanupBubblePresentation(); replyReader?.Dispose(); CleanupForegroundTracking(); dialogueHost?.Close(); CancelMovePreview(); lifetime.Cancel(); StopConnection(); timer.Stop(); CleanupWindowControls(); tray.Visible = false; tray.Dispose(); menu.Dispose(); };
         IsVisibleChanged += (_, _) => UpdateSceneBounds();
         Activated += (_, _) =>
         {
@@ -121,6 +123,7 @@ public partial class MainWindow : Window
     }
     private void OpenChat()
     {
+        WakeFromUser();  // V3-P90 §2.3: clicking HIMARI wakes it at once
         int version = ++chatFocusVersion;
         if (awaitingAnswer && !string.IsNullOrWhiteSpace(Message.Text)) ShowAssistantBubble(assistantBubbleKey);
         OpenComposer();
@@ -175,22 +178,24 @@ public partial class MainWindow : Window
     private void SetTalking(bool value) { talking = value; UpdateFrame(); }
     private void UpdateFrame()
     {
-        // Check for input every 2 s, and every 0.25 s while dozing so any key or mouse move
-        // wakes the character almost at once (PR #144 review).
-        if ((DateTime.UtcNow - lastIdleCheck).TotalSeconds >= (sleeping ? 0.25 : 2))
+        // Check for input every 2 s, and every 0.25 s while asleep so the wake's second input is
+        // seen soon (V3-P90 §2.3; PR #144 review).
+        bool asleep = sleepPolicy.Asleep;
+        if ((DateTime.UtcNow - lastIdleCheck).TotalSeconds >= (asleep ? 0.25 : 2))
         {
             lastIdleCheck = DateTime.UtcNow;
-            try { sleeping = IdleSeconds() >= 300; }
-            catch (System.ComponentModel.Win32Exception) { sleeping = false; }
+            ObserveSleep();
+            asleep = sleepPolicy.Asleep;
         }
         var now = AnimationNow();
         animator.Mood = mood;
         animator.SetTalking(talking || settings.TalkPreview.IsChecked == true, now);
-        animator.SetSleeping(settings.SleepPreview.IsChecked == true || sleeping && !Input.IsKeyboardFocusWithin, now);
+        // A reminder wakes it for its words only: no stretch, asleep again after (§2.4).
+        animator.SetSleeping(settings.SleepPreview.IsChecked == true || asleep && !reminderAwake, now, stretch: !asleep);
         character.Render(PreviewPose(animator.Pose(now)));
         // Wake for the next pose, and at least as often as the idle check.
         double wait = settings.PausePreview.IsChecked == true ? 2000 : (animator.NextChange(now) - now).TotalMilliseconds / animationSpeed;
-        timer.Interval = TimeSpan.FromMilliseconds(Math.Clamp(wait, 10, sleeping ? 250 : 2000));
+        timer.Interval = TimeSpan.FromMilliseconds(Math.Clamp(wait, 10, asleep ? 250 : 2000));
     }
     private async void DemoClick(object sender, RoutedEventArgs e)
     {

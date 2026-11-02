@@ -40,11 +40,12 @@ public partial class MainWindow
                         if (state == "started" && IsOwn(Prop(data, "origin")) && id is not null)
                         {
                             // V3-P87 §10: HIMARI speaks first in that conversation (FollowWake).
-                            if (JobOrigin.IsWake(Prop(data, "origin")) && id != currentConversation) await FollowWake(id, local, ct);
+                            bool wake = JobOrigin.IsWake(Prop(data, "origin"));
+                            if (wake && id != currentConversation) await FollowWake(id, local, ct);
                             // The verification is reserved before its first read; moves arriving
                             // meanwhile wait in earlyMoves, so text need not wait for history reads.
                             var verification = RecoverMoveJob(id, Str(data, "job_id"), local, ct);
-                            StartLive(id, local, ct, Str(data, "job_id"));
+                            StartLive(id, local, ct, Str(data, "job_id"), wake);
                             await verification;
                         }
                         if (state == "ended" && id is not null)
@@ -125,21 +126,24 @@ public partial class MainWindow
             if (wake && id != currentConversation) await FollowWake(id, local, ct);
             job = await ScreenHistory.ResolveJobIdAsync(local, id, job, ct);
             var verification = RecoverMoveJob(id, job, local, ct);  // reserved before its first read, as for a started job
-            if (!ct.IsCancellationRequested && ReferenceEquals(local, client)) StartLive(id, local, ct, job);
+            if (!ct.IsCancellationRequested && ReferenceEquals(local, client)) StartLive(id, local, ct, job, wake);
             await verification;
         }
         catch (OperationCanceledException) { }
-        catch (Exception) { if (!ct.IsCancellationRequested && ReferenceEquals(local, client)) StartLive(id, local, ct); }
+        catch (Exception) { if (!ct.IsCancellationRequested && ReferenceEquals(local, client)) StartLive(id, local, ct, wake: wake); }
     }
-    private void StartLive(string id, ServerClient local, CancellationToken ct, string? expectedJob = null)
+    private void StartLive(string id, ServerClient local, CancellationToken ct, string? expectedJob = null, bool wake = false)
     {
         if (liveStreams.ContainsKey(id)) return;
         var source = CancellationTokenSource.CreateLinkedTokenSource(ct);
         liveStreams[id] = source;
+        // V3-P90 §2.4: asleep, a reminder wakes it for its words — here, where a wake's live starts, so a
+        // reconnect's recovery does it as the live event does (PR #164 review P2-2), and only once per live
+        if (wake) WakeJobArrived(source.Token);
         BeginReplyProgress(id, expectedJob);
-        _ = LiveLoop(id, local, source.Token, expectedJob);
+        _ = LiveLoop(id, local, source.Token, expectedJob, wake);
     }
-    private async Task LiveLoop(string id, ServerClient local, CancellationToken ct, string? expectedJob)
+    private async Task LiveLoop(string id, ServerClient local, CancellationToken ct, string? expectedJob, bool wake = false)
     {
         var display = new LiveDisplayState(); int delay = 1; bool opened = false; string? liveJob = expectedJob;
         // Cache identity even before the first SSE frame, so returning to this
@@ -164,6 +168,9 @@ public partial class MainWindow
                             if (id == currentConversation)
                             {
                                 UpdateReplyProgress(id, liveJob, display);
+                                // V3-P90 §5.2: a wake's first words wait for the stretch of the wake that brought them
+                                if (!opened && display.Text.Length > 0 && wake && StretchLeft() is { Ticks: > 0 } left)
+                                    await Task.Delay(left, ct);
                                 if (!opened && display.Text.Length > 0) { OpenReplyBubble(id, liveJob); opened = true; }
                                 Message.Text = display.Text;
                                 SetMood(display.Text.Length == 0 ? "thinking" : display.Mood);
@@ -197,6 +204,7 @@ public partial class MainWindow
         }
         finally
         {
+            if (wake) WakeJobEnded(ct);  // V3-P90 §2.4: a reminder's words said, asleep again (its bubble stays)
             if (liveStreams.TryGetValue(id, out var source) && source.Token == ct && !ct.IsCancellationRequested)
             {
                 liveStreams.Remove(id); liveDisplays.Remove(id); source.Dispose();

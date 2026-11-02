@@ -572,18 +572,20 @@ public partial class MainWindow
 
     [StructLayout(LayoutKind.Sequential)] private struct LastInput { internal uint Size, Time; }
     [DllImport("user32.dll", SetLastError = true)] private static extern bool GetLastInputInfo(ref LastInput info);
-    private static int IdleSeconds()
+    private static int IdleSeconds() => (int)Math.Min(IdleMilliseconds() / 1000, 2592000u);
+    private static uint IdleMilliseconds()
     {
         var info = new LastInput { Size = (uint)Marshal.SizeOf<LastInput>() };
         if (!GetLastInputInfo(ref info)) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
-        return (int)Math.Min(unchecked((uint)Environment.TickCount - info.Time) / 1000, 2592000u);
+        return unchecked((uint)Environment.TickCount - info.Time);
     }
     /// <summary>What GET /api/device and hello say of the server (V3-P88 §14): whether it takes the activity signals, and the quiet.</summary>
     private void ServerFeatures(JsonElement info)
     {
         bool takes = Prop(Prop(info, "features"), "presence_signals") is { ValueKind: JsonValueKind.Number } version && version.GetInt32() == 1;
-        if (takes && !serverTakesSignals) signalSchedule.Urgent();
-        serverTakesSignals = takes;
+        bool sleeps = Prop(Prop(info, "features"), "sleep_signals") is { ValueKind: JsonValueKind.Number } sleep && sleep.GetInt32() == 1;
+        if ((takes && !serverTakesSignals) || (sleeps && !serverTakesSleep)) signalSchedule.Urgent();
+        serverTakesSignals = takes; serverTakesSleep = sleeps;  // V3-P90 §3.1
         QuietFromServer(info, "quiet_until");
     }
     private async Task PresenceLoop(ServerClient local, CancellationToken ct)
@@ -609,7 +611,7 @@ public partial class MainWindow
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { return; }
             catch (Exception) { /* Event stream owns connection status and retries. */ }
-            try { await Task.Delay(TimeSpan.FromSeconds(2), ct); } catch (OperationCanceledException) { return; }
+            try { await PresenceWait(TimeSpan.FromSeconds(2), ct); } catch (OperationCanceledException) { return; }  // V3-P90: a sleep change goes at once
         }
     }
 }

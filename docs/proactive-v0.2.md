@@ -601,3 +601,30 @@ P1-1~P1-9 모두 PASS. 새 지적을 코드와 대조했다: Run은 응답을 �
 - **알린 wake가 지워짐:** 대화를 영구 삭제하면 알린 wake도 사라져 `told` 알림이 고립되었다. 이제 `told_reminders`가 알린 wake 없이도 그 알림을 돌려주고(`None`), 스케줄러는 기기를 모름(`Told.device_id = None`)으로 둔다. 어느 돌아옴도 "봤다"가 되지 않으므로 다음 돌아옴에 다시 알린다(7일이면 놓침).
 - **40개 한도:** "그 대화에 그 뒤 사용자 메시지"를 스케줄러가 이벤트 40개만 읽어 찾던 것을 Data의 한 쿼리(`see_answered_reminders`)로 바꿨다. 대화가 얼마나 이어졌든 찾는다.
 
+### 17.2 앱 1단계: 잠들기와 깨기 (`feat/proactive-v2-app1`)
+
+§15의 2단계. 서버 1단계(PR #163)와 맞물린다.
+
+- **`SleepPolicy`(새, WPF 밖, ContractTests):** 잠든 채 시작, 무입력 600초·화면 꺼짐·잠금이면 잠듦, 조용한 활동(재생, 통화, 전체 화면)은 무입력으로 잠들지 않음, 깸 확인(처음 입력 5초 뒤부터 15초 안의 입력), `WakeNow`(키·히마리 클릭·입력창·잠금 해제), `FallAsleep`(절전 해제 뒤).
+- **`SleepControls`(새):** Windows를 읽는다. 화면 전원은 `RegisterPowerSettingNotification(GUID_CONSOLE_DISPLAY_STATE)`, 어느 키든 눌린 것은 raw input(`RIDEV_INPUTSINK`, 눌렸다는 것만, 어느 키인지는 읽지 않음), 재생은 미디어 세션 전부의 `Playing`, 통화는 V3-P88의 마이크·카메라 판정, 전체 화면은 `SHQueryUserNotificationState`(busy·D3D·발표). 셋은 사용자의 보내기 설정과 상관없이 앱 안에서만 읽는다(§2.2). 깨어 있을 때 5초마다.
+- **신호:** `features.sleep_signals`일 때만 `sleep`(잠금 본문은 뺌). 잠이 바뀌면 바로 보낸다(presence 루프의 2초 기다림을 깨움).
+- **애니메이션:** 잠들기·깨기는 `SleepPolicy`를 따른다(5분 → 10분). 깨면 기지개. `CharacterAnimator.SetSleeping(..., stretch)`.
+- **알림으로 잠깐 깸(§2.4):** 잠든 채 이 기기의 wake 작업이 오면 기지개 없이 깨서 말하고, 끝나면 다시 잠든다. 그 말풍선은 닫히지 않고(`ScheduleBubbleClose`가 미룸) 사용자가 깨우면 그때부터 보통처럼 닫힌다.
+- **기지개 뒤에 말함(§5.2):** wake 작업의 첫 글은 그 깸의 기지개가 끝날 때까지 기다린다(`StretchLeft`).
+- **기준 기기 스크립트:** 잠 장면(`sleep: "idle"`이어도 지금 기기, `null`로 깸).
+- **시험:** ContractTests(`SleepPolicy`, `sleep` 본문, 기지개 없는 깸), UiTests(잠든 채 알림 → 말풍선 남음 → 깨우면 닫히기 시작, 깸의 기지개 시간). 이 PC(Windows)에서 앱 빌드·ContractTests·UiTests 모두 통과. 기존 UiTests는 캐릭터가 깨어 있다고 보고 표정을 확인하므로 처음에 깨운다(`Awake`).
+
+**설계와 다르게 한 것:** 없음. 다만 "깸 확인"의 처음 입력은 `GetLastInputInfo`가 주는 마지막 입력 시각으로 본다(0.25초마다). 키는 raw input으로 바로 깨므로, 확인을 거치는 것은 사실상 마우스다.
+
+**검수(PR #164, `bd22e21`): NOT_READY → 고침.** 지적을 코드와 대조했다. 맞다.
+
+| # | 지적 | 고침 |
+| --- | --- | --- |
+| P1-1 | 입력창에 포커스가 남아 있기만 해도(`IsKeyboardFocusWithin`) 매 프레임 깨워, 실제 입력 없이 서버에 깸(돌아옴)이 감 | 포커스 검사를 없앴다. 입력창의 `PreviewKeyDown`·`PreviewTextInput`(실제로 친 것)과 히마리 클릭만 깨운다. 다른 창에서의 키는 지금처럼 raw input |
+| P2-2 | 재연결의 복구(`StartOwnJobs` → `RecoverAndStartLive`)에서는 잠든 채 온 알림의 상태(잠깐 깸, 말풍선 남김)를 세우지 않음 | 그 일을 wake의 live가 **실제로 시작되는 한 곳(`StartLive`)**으로 옮겼다. 실시간 `job started`와 복구가 같은 길이고, 같은 작업이 여러 번 알려져도 live가 이미 있으면 다시 하지 않는다 |
+
+시험(UiTests): 입력창을 연 채 프레임을 돌려도 잠든 채, 입력창에 키 → 깸; 복구 경로의 `StartLive`(wake)가 말풍선 남김을 세움, 두 번 알려도 같음. 시험 창은 활성 창이 아니라 실제 키보드 포커스를 받지 못하므로, "포커스만 있음"은 포커스 검사 자체를 없앤 것으로 막는다.
+
+**재검수(PR #164, `7e274fa`): READY_WITH_CORRECTIONS → 고침.** P1-1·P2-2는 PASS. 보완 하나:
+- **P2-3 재연결 경합:** 잠든 채 알림을 말하는 live가 재연결로 취소되고 같은 대화의 새 live가 시작된 뒤, 이전 live의 `finally`가 늦게 돌면 대화 ID만 보고 잠깐 깸을 풀어 새 live가 말하는 중에 다시 잠들었다. 이제 잠깐 깸을 세운 **live의 토큰**을 기억하고(`reminderLive`), 그 live의 끝만 풀게 했다. 시험(UiTests): 이전 live 취소 → 새 live가 깨움 → 이전 live가 늦게 끝남 → 깬 채, 새 live가 끝남 → 잠듦.
+
