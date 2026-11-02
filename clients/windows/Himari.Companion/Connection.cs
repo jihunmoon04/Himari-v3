@@ -424,10 +424,6 @@ public partial class MainWindow
                     && (unsent is not null ? earlier.Attempt == unsent : earlier.Attempt is null && earlier.Restored == context.InputRevision)) taken = true;
                 if (check != UnknownTextCheck.Clear) return;
             }
-            // Both screen and text requests need a history boundary so an old
-            // answer is never mistaken for a newly completed reply after reconnect.
-            // It is read while the screen is captured and uploaded: an earlier boundary only widens the window.
-            var boundary = local.SendAsync(HttpMethod.Get, PathFor(context.ConversationId), null, ct);
             if (unresolvedScreen is { } retry)
             {
                 if (DateTimeOffset.UtcNow - retry.Screen.CapturedAt > TimeSpan.FromMinutes(10)) { unresolvedScreen = null; Status.Text = "이전 화면이 만료되었습니다. 전송 여부를 기록에서 확인한 뒤 다시 보내세요. 중복될 수 있습니다."; return; }
@@ -451,7 +447,10 @@ public partial class MainWindow
             }
             if (screen is not null || localScreens.Count > 0) pendingScreenConversation = context.ConversationId;
             submittedScreen = screen; submittedConversation = context.ConversationId;
-            var before = await boundary;
+            // Both screen and text requests need a history boundary so an old
+            // answer is never mistaken for a newly completed reply after reconnect.
+            // It is read after the upload: an earlier job may finish while the screen goes (PR #161 review P1).
+            var before = await local.SendAsync(HttpMethod.Get, PathFor(context.ConversationId), null, ct);
             var seq = Prop(Prop(before, "conversation"), "last_sequence");
             if (seq.ValueKind == JsonValueKind.Number) seq.TryGetInt32(out beforeSequence);
             JsonElement response;
