@@ -145,8 +145,9 @@ class WakeKind(Enum):
     LOOP_DUE = "loop_due"
     RETURNED = "returned"
     REMINDER = "reminder"
-    FOCUS = "focus"
-    GAME_ENDED = "game_ended"
+    FOCUS = "focus"  # V3-P87; no longer made (V3-P90), still read
+    GAME_ENDED = "game_ended"  # V3-P87; no longer made (V3-P90), still read
+    TASK_ENDED = "task_ended"  # V3-P90 §5.3: a game or a video that clearly ended
     TRY = "try"  # the operator's try (§11)
 
 
@@ -160,10 +161,11 @@ class WakeReason(DeepFrozen):
     away_minutes: int | None = None  # RETURNED
     via: str | None = None  # RETURNED: "unlock", "resume", "reconnect"
     activity: str | None = None  # FOCUS: the category
-    minutes: int | None = None  # FOCUS: how long it has gone on; GAME_ENDED: how long the game lasted
+    minutes: int | None = None  # FOCUS: how long it has gone on; GAME_ENDED, TASK_ENDED: how long it lasted
     late: bool = False  # REMINDER only: past its 24-hour window (§5.3)
     asleep: bool = False  # REMINDER only (V3-P90 §5.1): told to a sleeping device, so ``told`` once answered
     again: bool = False  # REMINDER only (V3-P90 §5.1): told before to a sleeping device, not seen; told again
+    group: str | None = None  # TASK_ENDED (V3-P90 §5.3): "game" or "video"
 
 
 @dataclass(frozen=True)

@@ -21,6 +21,8 @@ from himari.presence.api import (
     Signals,
     Sleep,
     StreamEvent,
+    TaskEnded,
+    TaskSignal,
 )
 from himari.presence.hub import PresenceHub
 
@@ -452,3 +454,17 @@ def test_an_old_app_locked_keeps_the_v3_p88_inputs(hub: PresenceHub, clock: Cloc
     hub.signal(ME, "d1", 30, None, full(session=Session.LOCKED))
     hub.signal(ME, "d1", 1, None, full(session=Session.LOCKED))
     assert [t[0] for t in told] == ["input", "input"] and not hub.states(ME)["d1"].sleeps
+
+
+def test_a_task_end_repeated_keeps_its_moment(hub: PresenceHub, clock: Clock) -> None:
+    """V3-P90 §3.1, §5.3: the app carries an end for three minutes; told again, it is the same end."""
+    hub.subscribe(ME, "d1")
+    hub.signal(ME, "d1", 0, None, replace(full(), task_ended=TaskEnded("game", 5700, 10)))
+    clock.now += 60
+    hub.signal(ME, "d1", 0, None, replace(full(), task=TaskSignal("work", 30), task_ended=TaskEnded("game", 5700, 70.5)))
+    state = hub.states(ME)["d1"]
+    assert state.task_ended is not None and state.task_ended.ended_seconds_ago == 70
+    assert state.task is not None and state.task.group == "work"
+    clock.now += 200
+    hub.signal(ME, "d1", 0, None, full())  # no longer carried
+    assert hub.states(ME)["d1"].task_ended is None and hub.states(ME)["d1"].task is None

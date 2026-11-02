@@ -103,6 +103,7 @@ from himari.bootstrap.explorer import PDF_APPEND_MAX_BYTES, ExplorerRefused, Lis
 from himari.bootstrap.operator import OPERATOR, derive_cli_bearer, verify_operator_token
 from himari.bootstrap.mcp_defaults import McpDefaultsConflict
 from himari.presence.api import (
+    MAX_IDLE_SECONDS,
     ActivitySignal,
     After,
     DeviceState,
@@ -112,6 +113,8 @@ from himari.presence.api import (
     Session,
     Signals,
     Sleep,
+    TaskEnded,
+    TaskSignal,
     TooManyStreams,
     is_device_token,
 )
@@ -303,6 +306,21 @@ class MediaBody(_Body):
     app: str | None = Field(default=None, max_length=1000)
 
 
+class TaskBody(_Body):
+    """V3-P90 §6.1: the task that goes on."""
+
+    group: Literal["work", "video", "game"]
+    for_seconds: float = Field(ge=0, le=MAX_IDLE_SECONDS, allow_inf_nan=False)
+
+
+class TaskEndedBody(_Body):
+    """V3-P90 §5.3: a task that clearly ended (the app sends games and videos)."""
+
+    group: Literal["work", "video", "game"]
+    lasted_seconds: float = Field(ge=0, le=MAX_IDLE_SECONDS, allow_inf_nan=False)
+    ended_seconds_ago: float = Field(ge=0, le=MAX_IDLE_SECONDS, allow_inf_nan=False)
+
+
 class PresenceBody(_Body):
     """V3-P83 §5: seconds since the last input anywhere on the device (cut to
     30 days), and its IANA time zone (an unknown one is ignored). V3-P88:
@@ -318,6 +336,8 @@ class PresenceBody(_Body):
     media: MediaBody | None = None
     mic_or_camera: StrictBool | None = None
     sleep: Literal["idle", "display_off"] | None = None
+    task: TaskBody | None = None
+    task_ended: TaskEndedBody | None = None
 
 
 class QuietBody(_Body):
@@ -356,7 +376,10 @@ def presence_signals(body: PresenceBody) -> Signals:
                    activity_known="activity" in sent, activity=activity,
                    media_known="media" in sent, media=media, mic_or_camera=body.mic_or_camera,
                    after=None if body.after is None else After(body.after),
-                   sleep_known="sleep" in sent, sleep=None if body.sleep is None else Sleep(body.sleep))
+                   sleep_known="sleep" in sent, sleep=None if body.sleep is None else Sleep(body.sleep),
+                   task=None if body.task is None else TaskSignal(body.task.group, float(body.task.for_seconds)),
+                   task_ended=None if (ended := body.task_ended) is None else TaskEnded(
+                       ended.group, float(ended.lasted_seconds), float(ended.ended_seconds_ago)))
 
 
 def signals_view(state: DeviceState | None) -> dict[str, Any]:
@@ -375,6 +398,11 @@ def signals_view(state: DeviceState | None) -> dict[str, Any]:
         view["mic_or_camera"] = state.mic_or_camera
     if state.sleeps:  # V3-P90 §3.1
         view["sleep"] = state.sleep
+    if (task := state.task) is not None:
+        view["task"] = {"group": task.group, "for_seconds": int(task.for_seconds)}
+    if (ended := state.task_ended) is not None:
+        view["task_ended"] = {"group": ended.group, "lasted_seconds": int(ended.lasted_seconds),
+                              "ended_seconds_ago": int(ended.ended_seconds_ago)}
     if (before := state.before) is not None:
         view["before"] = {"category": before.category, "lasted_seconds": int(before.lasted_seconds),
                           "ended_seconds_ago": int(before.ended_seconds_ago),
@@ -684,11 +712,12 @@ def _plain(value: Any) -> Any:
 
 def wake_reason_view(reason: WakeReason) -> dict[str, Any]:
     out: dict[str, Any] = {"kind": reason.kind.value}
-    for name in ("memory_id", "away_minutes", "via", "activity", "minutes"):
+    for name in ("memory_id", "away_minutes", "via", "activity", "group", "minutes"):
         if (value := getattr(reason, name)) is not None:
             out[name] = value
-    if reason.late:
-        out["late"] = True
+    for flag in ("late", "again"):
+        if getattr(reason, flag):
+            out[flag] = True
     return out
 
 
@@ -703,13 +732,15 @@ def wake_summary(reasons: Sequence[WakeReason]) -> str:
         if r.kind is WakeKind.LOOP_DUE:
             parts.append(f"open loop m{r.memory_id}")
         elif r.kind is WakeKind.REMINDER:
-            parts.append(f"reminder m{r.memory_id}" + (" (late)" if r.late else ""))
+            parts.append(f"reminder m{r.memory_id}" + (" (late)" if r.late else " (again)" if r.again else ""))
         elif r.kind is WakeKind.RETURNED:
             parts.append(f"you were away {_span(r.away_minutes or 0)}")
         elif r.kind is WakeKind.FOCUS:
             parts.append(f"{r.activity or 'focus'} for {_span(r.minutes or 0)}")
         elif r.kind is WakeKind.GAME_ENDED:
             parts.append(f"a game ended after {_span(r.minutes or 0)}")
+        elif r.kind is WakeKind.TASK_ENDED:
+            parts.append(f"{'a game' if r.group == 'game' else 'a video'} ended after {_span(r.minutes or 0)}")
         else:
             parts.append("a try")
     return "HIMARI reached out · " + " · ".join(parts)
@@ -2542,7 +2573,7 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
                 "recent_conversation": None if recent is None else {"id": recent.conversation_id,
                                                                     "title": recent.title},
                 # V3-P88 §14, V3-P90 §3.1: an app sends the new fields only then
-                "features": {"presence_signals": 1, "sleep_signals": 1},
+                "features": {"presence_signals": 1, "sleep_signals": 1, "task_signals": 1},
                 "quiet_until": _time(quiet)}
 
     @app.post("/api/device/presence", status_code=204)
