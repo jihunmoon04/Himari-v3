@@ -41,8 +41,11 @@ public partial class MainWindow
                         {
                             // V3-P87 §10: HIMARI speaks first in that conversation (FollowWake).
                             if (JobOrigin.IsWake(Prop(data, "origin")) && id != currentConversation) await FollowWake(id, local, ct);
-                            await RecoverMoveJob(id, Str(data, "job_id"), local, ct);
+                            // The verification is reserved before its first read; moves arriving
+                            // meanwhile wait in earlyMoves, so text need not wait for history reads.
+                            var verification = RecoverMoveJob(id, Str(data, "job_id"), local, ct);
                             StartLive(id, local, ct, Str(data, "job_id"));
+                            await verification;
                         }
                         if (state == "ended" && id is not null)
                         {
@@ -121,8 +124,9 @@ public partial class MainWindow
             // PR #159 review P2-1: a wake found running after a reconnect is followed like a new one
             if (wake && id != currentConversation) await FollowWake(id, local, ct);
             job = await ScreenHistory.ResolveJobIdAsync(local, id, job, ct);
-            await RecoverMoveJob(id, job, local, ct);
+            var verification = RecoverMoveJob(id, job, local, ct);  // reserved before its first read, as for a started job
             if (!ct.IsCancellationRequested && ReferenceEquals(local, client)) StartLive(id, local, ct, job);
+            await verification;
         }
         catch (OperationCanceledException) { }
         catch (Exception) { if (!ct.IsCancellationRequested && ReferenceEquals(local, client)) StartLive(id, local, ct); }

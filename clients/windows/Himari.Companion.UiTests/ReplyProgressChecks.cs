@@ -124,6 +124,57 @@ internal static class ReplyProgressChecks
         Call("BeginReplyProgress", "c", "reconnect-job"); Call("CancelLive");
         check(bubble.Visibility == Visibility.Collapsed && !tick.IsEnabled, "disconnect clears waiting and its timer");
         w.Close();
+        ScreenBoundary(check, flags);
+    }
+
+    // PR #161 review P1: an earlier job may write its final while the screen uploads. The
+    // history boundary is read after the upload, so that final is never taken for this reply.
+    private static void ScreenBoundary(Action<bool, string> check, BindingFlags flags)
+    {
+        var w = new MainWindow(true); w.Show();
+        object? Call(string method, params object?[] args) => typeof(MainWindow).GetMethod(method, flags)!.Invoke(w, args);
+        void Set(string field, object? value) => typeof(MainWindow).GetField(field, flags)!.SetValue(w, value);
+        object? Get(string field) => typeof(MainWindow).GetField(field, flags)!.GetValue(w);
+        void Until(Func<bool> ready)
+        {
+            var frame = new DispatcherFrame(); var timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(10) };
+            var deadline = DateTime.UtcNow.AddSeconds(8);
+            timer.Tick += (_, _) => { if (ready() || DateTime.UtcNow >= deadline) frame.Continue = false; };
+            timer.Start(); Dispatcher.PushFrame(frame); timer.Stop();
+            check(ready(), "screen send step finishes within deadline");
+        }
+        var handler = new UploadHandler();
+        using var server = new ServerClient("https://example.com/", "test", handler);
+        using var cancellation = new CancellationTokenSource();
+        Set("client", server); Set("recoveryOwner", server); Set("connection", cancellation); Set("currentConversation", "c");
+        var settings = (Window)Get("settings")!; ((CheckBox)settings.FindName("ScreenSharing")).IsChecked = true;
+        Call("SetConnected", true, "연결됨");
+        ((TextBox)w.FindName("Input")).Text = "화면 보고 답해 줘"; Call("SendMessage");
+        Until(() => handler.UploadStarted);
+        handler.Sequence = 5;  // the earlier job's final is recorded while the screen uploads
+        handler.Upload.SetResult(new HttpResponseMessage(HttpStatusCode.Created) { Content = new StringContent("{\"file_id\":\"f\"}") });
+        Until(() => !(bool)Get("sending")!);
+        var pending = ((System.Collections.IDictionary)Get("pendingReplies")!)["c"];
+        int after = pending is null ? -1 : (int)pending.GetType().GetProperty("After")!.GetValue(pending)!;
+        check(handler.Posts == 1 && after == 5, $"history boundary is read after the screen upload (after={after})");
+        w.Close();
+    }
+
+    private sealed class UploadHandler : HttpMessageHandler
+    {
+        internal readonly TaskCompletionSource<HttpResponseMessage> Upload = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        internal volatile bool UploadStarted;
+        internal volatile int Sequence = 1, Posts;
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+        {
+            string path = request.RequestUri!.AbsolutePath;
+            if (path.EndsWith("/uploads")) { UploadStarted = true; return Upload.Task.WaitAsync(ct); }
+            if (path.EndsWith("/live")) return Task.Delay(Timeout.Infinite, ct).ContinueWith(_ => new HttpResponseMessage(), TaskScheduler.Default);
+            if (request.Method == HttpMethod.Post && path.EndsWith("/messages")) Posts++;
+            string body = request.Method == HttpMethod.Post ? "{\"job_id\":\"j\"}" : path.EndsWith("/events") ? "{\"items\":[]}" :
+                JsonSerializer.Serialize(new { conversation = new { last_sequence = Sequence }, job = new { running = Posts > 0, job_id = Posts > 0 ? "j" : "old" } });
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(body) });
+        }
     }
 
     private sealed class ProgressHandler : HttpMessageHandler

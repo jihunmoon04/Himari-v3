@@ -449,6 +449,7 @@ public partial class MainWindow
             submittedScreen = screen; submittedConversation = context.ConversationId;
             // Both screen and text requests need a history boundary so an old
             // answer is never mistaken for a newly completed reply after reconnect.
+            // It is read after the upload: an earlier job may finish while the screen goes (PR #161 review P1).
             var before = await local.SendAsync(HttpMethod.Get, PathFor(context.ConversationId), null, ct);
             var seq = Prop(Prop(before, "conversation"), "last_sequence");
             if (seq.ValueKind == JsonValueKind.Number) seq.TryGetInt32(out beforeSequence);
