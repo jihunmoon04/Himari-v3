@@ -47,6 +47,9 @@ public partial class MainWindow : Window
         // Picking a conversation leaves focus in the list, where typing searches it.
         Conversations.DropDownClosed += (_, _) => FocusComposerIfOpen();
         Input.LostKeyboardFocus += (_, _) => StashedComposerLostFocus();
+        // V3-P90 §2.3 (PR #164 review P1-1): typing to HIMARI wakes it; its box keeping the focus does not
+        Input.PreviewKeyDown += (_, _) => WakeFromUser();
+        Input.PreviewTextInput += (_, _) => WakeFromUser();
         Message.SourceChanged += (_, _) => { replyReader?.UpdateText(Message.Text); UpdateBubblePresentation(); };
         settings = new SettingsWindow();
         settings.ConnectionStatus.SetBinding(System.Windows.Controls.TextBlock.TextProperty, new System.Windows.Data.Binding("Text") { Source = Status });
@@ -181,7 +184,6 @@ public partial class MainWindow : Window
         if ((DateTime.UtcNow - lastIdleCheck).TotalSeconds >= (asleep ? 0.25 : 2))
         {
             lastIdleCheck = DateTime.UtcNow;
-            if (Input.IsKeyboardFocusWithin) WakeFromUser();  // typing to HIMARI
             ObserveSleep();
             asleep = sleepPolicy.Asleep;
         }

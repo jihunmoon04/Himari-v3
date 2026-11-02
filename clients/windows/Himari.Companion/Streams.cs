@@ -41,7 +41,6 @@ public partial class MainWindow
                         {
                             // V3-P87 §10: HIMARI speaks first in that conversation (FollowWake).
                             bool wake = JobOrigin.IsWake(Prop(data, "origin"));
-                            if (wake) WakeJobArrived(id);  // V3-P90 §2.4: asleep, a reminder wakes it for its words
                             if (wake && id != currentConversation) await FollowWake(id, local, ct);
                             // The verification is reserved before its first read; moves arriving
                             // meanwhile wait in earlyMoves, so text need not wait for history reads.
@@ -138,6 +137,9 @@ public partial class MainWindow
         if (liveStreams.ContainsKey(id)) return;
         var source = CancellationTokenSource.CreateLinkedTokenSource(ct);
         liveStreams[id] = source;
+        // V3-P90 §2.4: asleep, a reminder wakes it for its words — here, where a wake's live starts, so a
+        // reconnect's recovery does it as the live event does (PR #164 review P2-2), and only once per live
+        if (wake) WakeJobArrived(id);
         BeginReplyProgress(id, expectedJob);
         _ = LiveLoop(id, local, source.Token, expectedJob, wake);
     }

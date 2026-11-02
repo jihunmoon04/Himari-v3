@@ -1,4 +1,4 @@
-using System.Windows;
+﻿using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Interop;
@@ -667,6 +667,24 @@ internal static class Program
             Nap("WakeFromUser");
             Check(!policy.Asleep && NapField<DispatcherTimer>("bubbleTimer").IsEnabled && !NapField<bool>("bubbleUntilAwake"), "the user wakes it: the bubble now closes as usual");
             Check((TimeSpan)Nap("StretchLeft")! > TimeSpan.Zero, "a wake from sleep stretches, and a wake's words wait for it (§5.2)");
+            // PR #164 review P1-1: HIMARI's box keeping the focus is not the user; typing in it is
+            napping.Show(); var box = (TextBox)napping.FindName("Input");
+            Nap("OpenComposer"); box.Focus();
+            policy.FallAsleep();
+            typeof(MainWindow).GetField("lastIdleCheck", inside)!.SetValue(napping, DateTime.MinValue);
+            Nap("UpdateFrame");
+            Check(policy.Asleep, "HIMARI's box open, with no key typed, does not wake it");
+            box.RaiseEvent(new KeyEventArgs(Keyboard.PrimaryDevice, source, 0, System.Windows.Input.Key.A) { RoutedEvent = Keyboard.PreviewKeyDownEvent });
+            Check(!policy.Asleep, "a key typed in the box wakes it");
+            // PR #164 review P2-2: a wake's live started by a reconnect's recovery restores the reminder's state
+            policy.FallAsleep(); Nap("CloseBubble");
+            typeof(MainWindow).GetField("bubbleUntilAwake", inside)!.SetValue(napping, false);
+            using var gone = new CancellationTokenSource(); gone.Cancel();
+            using var nowhere = new ServerClient("https://example.com/", "test", new HttpClientHandler());
+            Nap("StartLive", "c", nowhere, gone.Token, "j9", true);
+            Check(NapField<bool>("bubbleUntilAwake"), "a recovered wake while asleep keeps its bubble up");
+            Nap("StartLive", "c", nowhere, gone.Token, "j9", true);  // told again: the same state
+            Check(NapField<bool>("bubbleUntilAwake") && policy.Asleep, "told twice, the state stays the same");
             napping.Close();
         }
         Console.WriteLine("WPF keyboard, IME, bubble colors/order/expiry, layout, reply reconnect and wake follow checks passed.");
