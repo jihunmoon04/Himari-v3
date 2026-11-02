@@ -1,6 +1,9 @@
 # 먼저 말 걸기 2단계: 잠들기, 다섯 가지 wake, 자유 wake (V3-P90 설계 초안 v0.2)
 
-상태: **Proposed**, rev. 4. 소유자와 정한 내용(2026-11-02)을 정리한 초안. 소유자 결정 Q1~Q5(§14, Q2·Q3은 소유자 변경).
+상태: **Proposed**, rev. 5. 소유자와 정한 내용(2026-11-02)을 정리한 초안. 소유자 결정 Q1~Q5(§14, Q2·Q3은 소유자 변경).
+
+**rev. 5(네 번째 검수 반영, §16.3):**
+- P1-9: 끝난 숨긴 wake(`passed`·`dropped`)는 서버 안에서도 **없던 것**이다. 다음 Run의 계기(`_next_triggers`), 답하지 않은 wake 판단(`_unanswered`), Prompt·압축·기억 작업에서 한 판단으로 건너뛴다. pass의 답은 이벤트로 기록하지 않는다(§7.3).
 
 **rev. 4(세 번째 검수 반영, §16.2):**
 - P1-7: `speaking`도 끝나지 않은 wake다. Driver의 "끝났나"(`_ended`)와 Data의 `end_wake`가 `opened`·`speaking`을 모두 진행 중으로 본다(§7.3, §11).
@@ -291,7 +294,7 @@
 ```
 
 - 지금 하는 일의 자세한 것은 그 턴의 Current State `presence.now_doing`에서 본다(V3-P88 §7): 분류, 프로그램 이름, 이어진 시간, 전체 화면, 직전 활동, 재생 중인 미디어(켰을 때), 창 제목(켰을 때), 마이크·카메라. `now_doing`에 `task`(`group`, `for_minutes`)를 더한다.
-- 대화 기록에는 앞선 wake와 그 말이 있으므로 모델은 같은 말을 되풀이하지 않을 수 있다(pass한 wake는 보이지 않는다, §7.3).
+- 대화 기록에는 앞선 wake와 그 말이 있으므로 모델은 같은 말을 되풀이하지 않을 수 있다(숨긴 wake는 보이지 않는다, §7.3).
 
 ### 7.2 "Speaking first" 줄에 더함
 
@@ -345,10 +348,31 @@
   - 흐름이 끝났을 때 `v`가 정확히 `[[pass]]`이거나 비어 있으면 **pass**다.
   - 그래서 앞부분만 `[[pass]]`처럼 보이다가 문장이 붙는 경우는 말하기다. 쥐는 길이는 많아야 `[[pass]]` 8자와 표정 표시뿐이라 말하기의 지연은 거의 없다.
   - 진행 중인 출력(생각, 중간 글)은 이 판정 전에 밖으로 나가지 않는다.
-- **기록:** `wakes.status = "passed"`(스키마는 그대로, `status`는 글 열). wake 이벤트와 pass 답은 Data에 남지만 **어디에도 보이지 않는다**:
-  - 모델 입력(Prompt), 압축 요약, 기억 작업, 대화 검색, Web·CLI·앱 기록에서 건너뛴다.
-  - 그 이벤트를 건너뛰는지는 `wakes.status`로 정하므로, Loader가 기록 안의 `passed` wake 번호를 `PromptInputs`로 넘기고 **`context_key`가 해시한다**(V3-P87 §8.4의 `wake_notes`와 같은 방식). pass는 대화 끝에서 생기므로 캐시가 깨지는 곳은 끝 가까이다.
-  - 답하지 않은 wake(§5)로 세지 않는다. 사용자가 그 뒤에 말해도 다음 Run의 계기에 넣지 않는다.
+- **기록:** pass하면 `wakes.status = "passed"`(스키마는 그대로, `status`는 글 열). **pass의 답(`[[pass]]`)은 이벤트로 기록하지 않는다**(Run 기록에는 결과와 사용량이 남는다). 그래서 `passed`·`dropped` wake가 대화 기록에 남기는 것은 **wake 이벤트 하나뿐**이다(도구를 부르면 드러내므로 숨긴 wake에는 도구 묶음이 없다. 화면 tool이 생기면 그 묶음도 같이 숨긴다, §10).
+- **숨긴 wake의 계약(검수 P1-9):** 두 집합을 나눈다.
+
+| 집합 | 상태(이유가 모두 `free`인 wake) | 뜻 |
+| --- | --- | --- |
+| **보이지 않음** | `opened`, `passed`, `dropped` | 밖으로 내보내지 않는다 |
+| **없던 것** | `passed`, `dropped` | 안에서도 없던 것으로 친다(끝난 숨긴 wake) |
+
+  - `opened`가 "없던 것"에 들지 않는 까닭: 그 wake 자신의 Run은 그 이벤트를 계기로 돈다.
+  - **"없던 것"은 판단 하나(`hidden_wake(event, status)`)로 정하고, 이벤트를 읽는 곳마다 그 이벤트를 건너뛴다.** 서버가 기록을 읽는 곳(지금 코드와 대조):
+
+| 읽는 곳 | 지금 | 바뀜 |
+| --- | --- | --- |
+| `Driver._next_triggers` | 마지막 어시스턴트 출력 뒤의 `Wake`를 상태와 상관없이 계기로 모음 | 없던 것은 계기가 아님. 그래서 `dropped` wake 뒤에 사용자가 말해도 그 계기는 사용자 메시지뿐이다 |
+| `Driver._left_by_ended_wakes`(정리된 대화 확인) | 끝난 wake의 계기는 막지 않음 | 없던 것은 계기에 없으므로 볼 일이 없다(같은 결과) |
+| `ProactiveScheduler._unanswered` | 마지막 이벤트가 `AssistantFinal`이고 그 앞 계기가 `Wake`면 답하지 않음 | 없던 것을 건너뛰고 본다. 숨긴 wake 뒤에도 그 앞의 보이는 wake가 답을 받지 못했으면 여전히 답하지 않음이다 |
+| Prompt(Loader·그리기) | wake를 그림 | 없던 것은 그리지 않음. Loader가 없던 것의 wake 번호를 `PromptInputs`로 넘기고 **`context_key`가 해시한다**(V3-P87 §8.4의 `wake_notes`와 같은 방식). 숨긴 wake는 대화 끝에서 생기므로 캐시가 깨지는 곳은 끝 가까이다 |
+| 압축 요약 | 문맥 한 줄로 그림 | 없던 것은 빼고 요약 |
+| 기억 작업(V3-P85) | 문맥 한 줄 | 없던 것은 빼고 읽음(커서는 지나감) |
+| 대화 검색 | wake는 글이 없음 | 그대로(검색 결과에 없음) |
+| `events` 응답, 새 이벤트 알림, Web·CLI·앱 기록 | wake를 보임 | **보이지 않음** 집합 전부를 뺀다(위 표시 격리) |
+| `most_recent_user_conversation`, `sent_from`, 시각 줄의 간격 | wake를 세지 않음 | 그대로 |
+
+  - **남기는 것:** Data의 원본 이벤트와 `wakes` 줄, 하루 시도 수(§7.4), 타이머의 단계와 "마지막 상호작용"(§6.2)은 숨긴 wake도 센다. 사용량은 Run 기록에 있다.
+  - 사용자가 숨긴 wake 뒤에 말하면 보통의 사용자 턴이다. 모델은 그 wake를 보지 못한다.
 - **세기:** `passed`·`dropped`는 하루 시도 수에는 세고, 말한 수와 15분 간격(§5)에는 세지 않는다. 타이머의 단계는 오른다(§6.2). 오르지 않으면 30초 뒤 다음 판단에서 바로 다시 부른다.
 - **이벤트를 아예 쓰지 않는 길은 택하지 않는다:** Driver의 Run은 계기 이벤트가 있어야 하고(V3-001), 재시작·사용자가 이김·알림 상태가 모두 그 이벤트에 묶여 있다. 숨기는 쪽이 고칠 곳이 적다.
 
@@ -398,7 +422,7 @@
   - **막 깨는 중(돌아옴):** 기지개가 끝날 때까지 받은 글을 쥐고 있다가 끝나면 말풍선을 연다. 모델의 첫 글자까지 1–3초 걸리므로 대개 기다림이 짧다.
   - **자유 wake:** 서버가 말하기로 정한 뒤에야 `job`이 오므로(`free: true`) 앱은 보통의 wake처럼 다룬다. pass한 자유 wake는 앱에 아무것도 오지 않는다(§7.3).
   - 대화 옮기기·상태 줄은 V3-P87 §19.10 그대로.
-- **기록:** pass한 wake는 서버가 보내지 않는다(§7.3). `HistoryReader`는 바뀌지 않는다.
+- **기록:** 보이지 않는 자유 wake(`opened`·`passed`·`dropped`)는 서버가 보내지 않는다(§7.3). `HistoryReader`는 바뀌지 않는다.
 - **설정 창:** "자유 wake에 화면 보내기"(기본 끔). 이번에는 저장만 하고 서버에 `features`로 알린다. 쓰는 것은 화면 tool 때(§10).
 - 가짜 기기 스크립트(`scripts/device_client.py`)에 장면을 더한다: 잠듦 → 알림 wake(잠든 채) → 깸 → 돌아옴 wake, `task`로 자유 wake → pass(글 없음), `task_ended`.
 
@@ -426,11 +450,11 @@
 | `presence` | `Signals`·`DeviceState`에 `sleep`·`task`·`task_ended`, `_decide`의 후보 규칙, 깬 신호의 바로 넘겨받기와 돌아옴, 잠든 신호의 입력을 세지 않음(§3) |
 | `proactive` (순수) | 계기: `free`, `task_ended`; `focus`·`game_ended` 계기를 뺌; `_blocked`를 wake마다의 표(§5)로; 타이머(§6.2); 예산(§7.4) |
 | `data` | `WakeKind`·`WakeStatus` 값, `passed` 기록, 시도 수 읽기, 알림의 `told` 상태와 그 전이 |
-| `prompt` | `PROACTIVE_RULE` 문장, `now_doing.task`, pass한 wake 건너뛰기, `context_key` |
-| `control` / `runner` | 모든 wake에서 `READ`가 아닌 도구를 실행하지 않고 "not run"으로 닫기, 자유 wake의 Run 상한 2와 도구 호출 때 드러내기, 판정 버퍼링, `speaking`을 쓴 뒤에 `job` 내기, `passed`·`dropped`로 끝내기, 재시작 정리, `free_wake` 능력 확인 |
+| `prompt` | `PROACTIVE_RULE` 문장, `now_doing.task`, 숨긴 wake(`passed`·`dropped`) 건너뛰기, `context_key` |
+| `control` / `runner` | 숨긴 wake 판단 하나(`hidden_wake`)와 `_next_triggers`에서 건너뛰기, pass의 답을 이벤트로 쓰지 않기, 모든 wake에서 `READ`가 아닌 도구를 실행하지 않고 "not run"으로 닫기, 자유 wake의 Run 상한 2와 도구 호출 때 드러내기, 판정 버퍼링, `speaking`을 쓴 뒤에 `job` 내기, `passed`·`dropped`로 끝내기, 재시작 정리, `free_wake` 능력 확인 |
 | `interfaces` (기록) | `opened`·`passed`인 자유 wake의 이벤트를 `events`·새 이벤트 알림·작업 상태에서 빼기 |
 | `provider` | `ProviderCapabilities.free_wake` 목록 |
-| `bootstrap` | 설정, 스케줄러가 `task`·`sleep`을 `Situation`에 넣음, `on_returned` 바로 판단 |
+| `bootstrap` | `_unanswered`가 숨긴 wake를 건너뜀, 설정, 스케줄러가 `task`·`sleep`을 `Situation`에 넣음, `on_returned` 바로 판단 |
 | `interfaces` | 설정 읽기, `features.sleep_signals`, 신호 검증, status·Web 상태 줄 |
 | Windows 앱 | §2, §6.1, §9 |
 
@@ -442,6 +466,7 @@
   - P1-2: A를 쓰는 중(입력 10초 전) B가 잠에서 깸 → B가 바로 지금 기기, 돌아옴의 기기 = 지금 기기. 돌아옴 뒤 다른 기기로 옮김 → 인사 없음.
 - **알림(P1-3, P1-5):** 깨어 있는 기기 → `delivered`; `idle` 기기 → `told`(`reminded_at` 기록); 그 대화의 사용자 메시지 → `delivered`; 다른 대화의 메시지 → `told` 그대로; 그 기기의 10분 안 돌아옴 → `delivered`·인사 없음; 10분 뒤 또는 다른 기기의 돌아옴 → `again`으로 다시 실림 → `delivered`; 그 wake 실패 → `told`(`reminded_at`으로 앎); 7일 → `missed`; 기한이 오래 지난 고리의 `told` 알림이 기억 정리에서 지워지지 않음; `told`인 채로 재시작 → 상태와 10분 판정이 그대로.
 - **runner/driver(P1-4, P1-6, P2-1):** pass면 `job` 사건·`live`·기록·작업 상태 어디에도 없고 `passed`; 판정 버퍼: `[[pass]]` → pass, 빈 답 → pass, `[[pass]] 아냐` → 말하기("아냐"), `[[pa`에서 끝남 → 말하기("[[pa"), `[[mood:happy]][[pass]]` → pass; 드러낼 때 DB `speaking`이 `job`보다 먼저; 도구 호출 → 실행 전에 `speaking`·`job`, 뒤의 `[[pass]]`는 뗌, 남는 글 없음 → 보이는 `failed`; 드러내기 전 사용자 메시지 → `dropped`, 아무것도 보이지 않음, 10초 안에 끝나지 않으면 `BUSY`; 재시작: `opened` 자유 wake → `dropped`(숨김), `speaking` → `answered`/`failed`(보임); `free`와 알림이 합쳐진 wake → 처음부터 보이고 pass 불가, Run 상한 3; pass한 wake가 다음 요청·기억 작업·기록에 없음, `context_key`가 바뀜, `free_wake`가 아닌 모델은 자유 wake를 열지 않음.
+- **숨긴 wake(검수 P1-9):** pass → 대화 기록에 wake 이벤트 하나뿐(`AssistantFinal` 없음); `dropped` wake 뒤 사용자 메시지 → 그 Run의 계기는 사용자 메시지뿐, 모델 입력에 그 wake 없음; `passed` 뒤에 `_unanswered`가 거짓, 그래서 다음 wake가 열림; 보이는 wake가 답을 못 받은 뒤 숨긴 wake → `_unanswered`가 여전히 참; **재시작 뒤 `dropped`가 남은 대화**에서 사용자 메시지가 보통으로 처리되고, 그 뒤 새 wake가 `NOT_SETTLED` 없이 열림; 압축 요약·기억 작업 입력에 숨긴 wake 없음; 하루 시도 수와 타이머 단계는 숨긴 wake를 셈; `context_key`가 숨긴 wake 번호로 바뀜.
 - **타이머(재검수 P2, 검수 P1-8):** 사용자 메시지 → 단계 처음, 그 메시지부터 15분; 다른 wake → 단계 그대로, 그 wake부터; 자유 wake(pass 포함) → 단계 오름. 09:00 작업 → 09:15 단계 1 → 09:25 메시지 → 09:40 단계 1이 **열림**(새 주기의 열쇠); 같은 주기의 같은 단계는 재시작 뒤에도 한 번; 작업 시작 시각이 1초 흔들려 분이 바뀌어도 같은 열쇠(별칭).
 - **진행 중 상태(검수 P1-7):** 작업이 끝났지만 wake가 아직 `speaking`인 사이에 `accept_wake` → `NOT_SETTLED`; `_ended`가 `speaking`을 끝나지 않음으로 봄; `end_wake`의 `speaking → answered/failed`, `speaking → passed`는 아무것도 바꾸지 않음; 끝난 wake에 `reveal_wake`는 아무것도 바꾸지 않음.
 - **도구(검수 P2, Q6):** 모든 wake 종류(알림·돌아옴·작업 끝남·고리·자유)에서 `READ` 도구는 실행, `SCOPED_WRITE`·`UNKNOWN`·`memory_save`·`memory_forget`은 실행하지 않고 "not run" 결과(묶음은 닫힘, 다시 실행되지 않음), `ask_user`는 그대로, 사용자가 답한 뒤의 턴은 모든 도구. 자유 wake는 실행하지 않은 호출에도 드러냄.
@@ -508,3 +533,11 @@ rev. 3의 여섯 항목은 모두 PASS. 새 지적을 코드와 대조했다: `D
 | P1-7 | `speaking`을 끝난 상태로 오인, `end_wake`가 `speaking`을 닫지 못함 | 진행 중 = `opened`·`speaking`을 한 곳에 두고 모든 판단이 그것을 씀, `end_wake` 전이 표, `reveal_wake`, 경합 시험(§7.3, §11, §13) |
 | P1-8 | 사용자 메시지로 단계가 처음으로 돌아가면 같은 열쇠 때문에 다시 열리지 않음 | 열쇠에 주기 시작 시각(작업 시작 또는 그 메시지), 예와 시험(§6.2, §13) |
 | P2 | 드러냄은 승인이 아님, 쓰는 도구는 막아야 | 자유 wake는 `READ` 도구만 실행, 나머지는 "not run" 결과. 소유자 결정 Q6으로 모든 wake에 같게(§5.6, §7.3, §14) |
+
+### 16.3 네 번째 검수 (`ec04e4f`): READY_WITH_CORRECTIONS(새 P1 하나) → rev. 5
+
+P1-7·P1-8·도구 제한 모두 PASS. 새 지적을 코드와 대조했다: `ConversationDriver._next_triggers()`는 마지막 `AssistantFinal`·도구 묶음 뒤의 `UserMessage`와 `Wake`를 상태를 보지 않고 모은다, `ProactiveScheduler._unanswered()`는 마지막 이벤트가 `AssistantFinal`이고 그 앞의 계기가 `Wake`면 참이다. 맞다.
+
+| # | 지적 | 반영 |
+| --- | --- | --- |
+| P1-9 | `dropped` wake가 다음 Run의 계기로 들어감, `passed`의 답이 다음 wake를 막을 수 있음, 내부 제외가 `passed`에만 적혀 있음 | "보이지 않음"(`opened`·`passed`·`dropped`)과 "없던 것"(`passed`·`dropped`)을 나누고, 없던 것을 한 판단으로 모든 읽는 곳(`_next_triggers`, `_unanswered`, Prompt, 압축, 기억 작업)에서 건너뜀. pass의 답은 이벤트로 기록하지 않음. 원본·시도 수·타이머는 그대로. 재시작 뒤 `dropped`가 남은 대화의 시험(§7.3, §13) |
