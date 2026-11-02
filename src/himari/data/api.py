@@ -1545,7 +1545,8 @@ class WakeStore(Protocol):
 
     async def told_reminders(self, principal: PrincipalId) -> tuple[tuple[int, str, datetime], ...]:
         """V3-P90 §5.1: the reminders told to a sleeping device and not seen yet — the
-        note, the wake that told it, when."""
+        note, the wake that told it (the answered one that ended at its ``reminded_at``,
+        not one that tried again and failed), when."""
         ...
 
     async def see_reminders(self, principal: PrincipalId, memory_ids: Sequence[int]) -> int:

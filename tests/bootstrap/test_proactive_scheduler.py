@@ -82,7 +82,7 @@ def test_a_due_loop_is_spoken_of_once(tmp_path: Path) -> None:
             again = await scheduler.look(ME)
             assert again.outcome == "nothing" and again.decision.reasons == ()  # its key is taken
             status = await app.proactive_status(ME)
-            assert status["today"] == 1 and status["daily"] == 4
+            assert status["today"] == 0 and status["daily"] == 4  # V3-P90 §5.4: a loop is not counted
             assert status["last_look"] == {"at": again.at, "outcome": "nothing", "held": []}
         finally:
             await app.close()

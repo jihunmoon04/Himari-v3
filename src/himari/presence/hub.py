@@ -223,16 +223,21 @@ class PresenceHub:
         device.signal_at = now
         resting = device.sleeps and (device.locked or device.sleep is not None)  # before this signal
         asleep = snapshot.sleep_known and snapshot.sleep is not None
-        # V3-P90 §3.4: a sleeping signal's input is not the last input — but the one that
-        # puts an awake device to sleep carries the input before the sleep, and is kept
-        counted = not asleep or (device.sleeps and not resting and not device.gone)
+        locking = snapshot.session is Session.LOCKED
+        # V3-P90 §3.1 (PR #163 review P1-2): a lock signal may leave ``sleep`` out; the app
+        # still sends it, and is known by it until a signal of its own says otherwise
+        sleeper = snapshot.sleep_known or (locking and device.sleeps)
+        # V3-P90 §3.4: a sleeping or locked signal's input is not the last input (a login, a
+        # bumped mouse, the lock screen's typing) — but the one that puts an awake device to
+        # sleep or locks it carries the input before, and is kept
+        counted = not (sleeper and (asleep or locking)) or (device.sleeps and not resting and not device.gone)
         if counted:
             device.input_at = now - min(max(idle_seconds, 0.0), MAX_IDLE_SECONDS)
         if time_zone is not None and (self._time_zones is None or self._time_zones(time_zone)):
             device.time_zone = time_zone  # an unknown name is ignored (§5)
         self._take(device, snapshot, now)
         device.gone = False
-        device.sleeps = snapshot.sleep_known
+        device.sleeps = sleeper
         device.sleep = snapshot.sleep.value if asleep and snapshot.sleep is not None and not device.locked else None
         if device.sleeps:
             # V3-P90 §3.2–§3.3: waking from sleep (or from the lock) takes over and is the
@@ -251,7 +256,7 @@ class PresenceHub:
         if self.on_input is not None and counted and device.input_at is not None:
             # after the return (if any) was told: its away ends before this input
             self.on_input(principal, device_id, self._wall() - timedelta(seconds=now - device.input_at),
-                          device.locked or asleep)
+                          device.locked or asleep)  # written at once: the input before the rest
 
     def _take(self, device: _Device, snapshot: Signals, now: float) -> None:
         """§2.1: the snapshot replaces what was kept; §4.4: an ended activity is kept as the one before."""

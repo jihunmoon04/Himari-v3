@@ -41,6 +41,8 @@ TOLD_SEEN = timedelta(minutes=10)  # V3-P90 §5.1: a return this soon after a to
 TALKING = timedelta(minutes=10)  # §6.1: a user message this recent means the user is talking
 GAME_RECENT = timedelta(minutes=10)  # §5.4: a game that ended this recently
 ACTIVITY_FOCUS = frozenset({"coding", "document", "design", "video"})  # §5.4 (video: owner, 2026-11-01)
+# V3-P90 §5.4: the activity triggers, the only ones the daily limit counts and holds back
+ACTIVITY_KINDS = frozenset({WakeKind.FOCUS, WakeKind.GAME_ENDED})
 # V3-P90 §5: the kinds the talking rule holds back (a reminder and a return are not)
 TALKING_KINDS = frozenset({WakeKind.LOOP_DUE, WakeKind.FOCUS, WakeKind.GAME_ENDED})
 # §6.4: the order reasons are told in, and kept when over MAX_WAKE_REASONS
@@ -314,7 +316,12 @@ def _only(record: WakeRecord, kinds: frozenset[WakeKind]) -> bool:
 
 
 _TRY = frozenset({WakeKind.TRY})
-_REMINDER = frozenset({WakeKind.REMINDER})
+
+
+def activity_wake(record: WakeRecord) -> bool:
+    """V3-P90 §5.4 (PR #163 review P2-1): a wake the daily limit counts — one with an
+    activity trigger among its reasons, once however many reasons it merged."""
+    return any(r.kind in ACTIVITY_KINDS for r in record.reasons)
 
 
 def spoke(record: WakeRecord, said: frozenset[str] = frozenset()) -> bool:
@@ -361,7 +368,7 @@ def _blocked(s: Situation, kind: WakeKind) -> str | None:
     if kind is WakeKind.LOOP_DUE:
         return None
     midnight = local_midnight(s.now, s.zone)
-    today = [w for w in counted if w.created_at >= midnight and not _only(w, _REMINDER)]
+    today = [w for w in counted if w.created_at >= midnight and activity_wake(w)]
     if len(today) >= s.settings.daily:
         return "daily"
     return None

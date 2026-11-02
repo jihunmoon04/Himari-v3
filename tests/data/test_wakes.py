@@ -193,7 +193,7 @@ def test_a_told_reminder_told_again_is_delivered_or_stays_told() -> None:
     failed = asyncio.run(data.begin_wake(SCOPE, reason, "d1", reminders=(memory_id,))).payload.wake_id  # type: ignore[union-attr]
     assert reminder(store, memory_id)[:2] == ("claimed", failed)
     asyncio.run(data.end_wake(SCOPE.principal_id, failed, WakeStatus.FAILED))
-    assert reminder(store, memory_id) == ("told", failed, 0)  # told before: told still, no attempt counted
+    assert reminder(store, memory_id) == ("told", None, 0)  # told before: told still, no attempt counted
     spoken = asyncio.run(data.begin_wake(SCOPE, reason, "d1", reminders=(memory_id,))).payload.wake_id  # type: ignore[union-attr]
     asyncio.run(data.end_wake(SCOPE.principal_id, spoken, WakeStatus.ANSWERED))
     assert reminder(store, memory_id)[:2] == ("delivered", None)
@@ -283,3 +283,17 @@ def test_part_two_reads_alike_in_both_backends() -> None:
     assert asyncio.run(data.read_inputs(SCOPE.principal_id)) == {device.device_id: at}
     asyncio.run(data.revoke_device(SCOPE.principal_id, device.device_id))
     assert asyncio.run(data.read_inputs(SCOPE.principal_id)) == {}
+
+
+def test_a_failed_telling_again_keeps_the_first_teller() -> None:
+    """PR #163 review P1-3: told on A; telling it again on B fails — the teller stays A's wake,
+    so a return to B is not taken for seeing it."""
+    store = new_store()
+    data, memory_id, teller = told(store)
+    ((_, first, at),) = asyncio.run(data.told_reminders(SCOPE.principal_id))
+    assert first == teller
+    reason = (WakeReason(WakeKind.REMINDER, memory_id=memory_id, again=True),)
+    failed = asyncio.run(data.begin_wake(SCOPE, reason, "d2", reminders=(memory_id,))).payload.wake_id  # type: ignore[union-attr]
+    asyncio.run(data.end_wake(SCOPE.principal_id, failed, WakeStatus.FAILED))
+    assert asyncio.run(data.told_reminders(SCOPE.principal_id)) == ((memory_id, teller, at),)
+    assert asyncio.run(data_for(restart(store)).told_reminders(SCOPE.principal_id)) == ((memory_id, teller, at),)

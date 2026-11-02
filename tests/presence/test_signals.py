@@ -422,3 +422,33 @@ def test_a_sleeping_device_back_after_it_was_gone_is_no_return_until_it_wakes(
     assert hub.current(ME) == "d1" and hub.returned(ME) == first  # current, asleep: not back yet
     hub.signal(ME, "d1", 0, None, sleeping(None))
     assert hub.returned(ME) != first and hub.returned(ME).via == "wake"  # type: ignore[union-attr]
+
+
+def test_a_lock_that_leaves_sleep_out_keeps_the_app_known_and_the_unlock_returns(
+        hub: PresenceHub, clock: Clock) -> None:
+    """PR #163 review P1-2: the lock signal may leave ``sleep`` out (§3.1); the unlock is still
+    the return, and the lock screen's typing is not the last input."""
+    told = recorder(hub)
+    hub.subscribe(ME, "d1")
+    hub.signal(ME, "d1", 0, None, sleeping(None))
+    told.clear()
+    clock.now += 60
+    hub.signal(ME, "d1", 30, None, full(session=Session.LOCKED))  # no sleep field
+    assert hub.states(ME)["d1"].sleeps
+    assert told == [("input", "d1", WALL - timedelta(seconds=30), True)]  # the input before the lock
+    told.clear()
+    clock.now += 3 * 3600
+    hub.signal(ME, "d1", 1, None, full(session=Session.LOCKED))  # typing the password
+    assert told == []
+    hub.signal(ME, "d1", 0, None, sleeping(None, after=After.UNLOCK))
+    assert told == [("returned", "d1", "unlock"), ("input", "d1", WALL, False)]
+
+
+def test_an_old_app_locked_keeps_the_v3_p88_inputs(hub: PresenceHub, clock: Clock) -> None:
+    told = recorder(hub)
+    hub.subscribe(ME, "d1")
+    hub.signal(ME, "d1", 0, None, full())
+    told.clear()
+    hub.signal(ME, "d1", 30, None, full(session=Session.LOCKED))
+    hub.signal(ME, "d1", 1, None, full(session=Session.LOCKED))
+    assert [t[0] for t in told] == ["input", "input"] and not hub.states(ME)["d1"].sleeps

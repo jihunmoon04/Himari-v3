@@ -186,7 +186,7 @@ def test_what_holds_a_trigger_back(changes: dict[str, object], blocked: str) -> 
 
 def test_the_daily_limit_holds_back_the_activity_triggers_only() -> None:
     """V3-P90 §5.4: a loop is not counted against the day; a long focus still is."""
-    day = tuple(wake(NOW - timedelta(hours=h)) for h in (1, 2, 3, 4))
+    day = tuple(wake(NOW - timedelta(hours=h), WakeKind.FOCUS) for h in (1, 2, 3, 4))
     assert decide(situation(loops=DUE, wakes=day)).reasons == (WakeReason(WakeKind.LOOP_DUE, memory_id=1),)
     focus = decide(situation(device=device(coding(31)), wakes=day))
     assert focus.reasons == () and focus.blocked == "daily"
@@ -385,3 +385,15 @@ def test_a_reminder_past_its_day_is_told_late_at_the_next_return() -> None:
 def test_a_reminder_comes_first_in_a_merged_wake() -> None:
     decided = decide(situation(loops=(*DUE, reminding(7, NOW - timedelta(minutes=1))), returned=back()))
     assert [r.kind for r in decided.reasons] == [WakeKind.REMINDER, WakeKind.LOOP_DUE, WakeKind.RETURNED]
+
+
+def test_merged_wakes_count_once_toward_the_day_and_only_with_an_activity() -> None:
+    """PR #163 review P2-1: returns and loops do not use up the activity triggers' day."""
+    others = (wake(NOW - timedelta(hours=1), WakeKind.RETURNED), wake(NOW - timedelta(hours=2)),
+              wake(NOW - timedelta(hours=3), WakeKind.LOOP_DUE, WakeKind.RETURNED),
+              wake(NOW - timedelta(hours=4)))
+    assert decide(situation(device=device(coding(31)), wakes=others)).reasons != ()
+    merged = tuple(wake(NOW - timedelta(hours=h), WakeKind.FOCUS, WakeKind.LOOP_DUE) for h in (1, 2, 3))
+    assert decide(situation(device=device(coding(31)), wakes=merged)).reasons != ()  # three, not six
+    full = (*merged, wake(NOW - timedelta(hours=4), WakeKind.GAME_ENDED))
+    assert decide(situation(device=device(coding(31)), wakes=full)).blocked == "daily"

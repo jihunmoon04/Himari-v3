@@ -1488,8 +1488,8 @@ class InMemoryData:
                 told = key[1] in asleep  # V3-P90 §5.1: told to a sleeping device, not seen yet
                 self._store.reminders[key] = ("told", wake_id, attempts) if told else ("delivered", None, attempts)
                 self._store.reminded_at[key] = ended.ended_at or datetime.now(UTC)
-            elif key in self._store.reminded_at:  # V3-P90 §5.1: told before, so told still
-                self._store.reminders[key] = ("told", wake_id, attempts)
+            elif key in self._store.reminded_at:  # V3-P90 §5.1: told before, its teller and moment kept
+                self._store.reminders[key] = ("told", None, attempts)
             else:
                 self._store.reminders[key] = ("missed" if attempts + 1 >= REMINDER_ATTEMPTS else "scheduled", None,
                                               attempts + 1)
@@ -1522,11 +1522,17 @@ class InMemoryData:
         return missed
 
     async def told_reminders(self, principal: PrincipalId) -> tuple[tuple[int, str, datetime], ...]:
-        return tuple(sorted((memory_id, claimer, self._store.reminded_at[(owner, memory_id)])
-                            for (owner, memory_id), (state, claimer, _) in self._store.reminders.items()
-                            if owner == principal and state == "told" and claimer is not None
-                            and (owner, memory_id) in self._store.memories
-                            and (owner, memory_id) in self._store.reminded_at))
+        """As SQLite: the teller is the answered wake that ended at its reminded_at (PR #163 review P1-3)."""
+        out: list[tuple[int, str, datetime]] = []
+        for (owner, memory_id), (state, _, _) in sorted(self._store.reminders.items()):
+            at = self._store.reminded_at.get((owner, memory_id))
+            if owner != principal or state != "told" or at is None or (owner, memory_id) not in self._store.memories:
+                continue
+            tellers = sorted(w.wake_id for w in self._store.wakes.values() if w.principal == principal
+                             and w.status is WakeStatus.ANSWERED and w.ended_at == at)
+            if tellers:
+                out.append((memory_id, tellers[0], at))
+        return tuple(out)
 
     async def see_reminders(self, principal: PrincipalId, memory_ids: Sequence[int]) -> int:
         seen = 0

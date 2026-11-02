@@ -29,7 +29,6 @@ from himari.data.api import (
     DataError,
     MemoryCategory,
     Wake,
-    WakeKind,
     REMIND_LATE,
 )
 from himari.data.sqlite import SqliteData
@@ -45,6 +44,7 @@ from himari.proactive import (
     Return,
     Situation,
     Told,
+    activity_wake,
     candidate_keys,
     candidates,
     decide,
@@ -447,7 +447,7 @@ class ProactiveScheduler:
         situation, _ = await self.situation(principal)
         midnight = local_midnight(situation.now, situation.zone)
         today = [w for w in situation.wakes if w.created_at >= midnight and spoke(w, situation.said)
-                 and not all(r.kind is WakeKind.REMINDER for r in w.reasons)]
+                 and activity_wake(w)]  # V3-P90 §5.4: what the daily limit counts
         look = self.looks.get(principal)
         _, _, upcoming = candidates(situation)
         reminders = [n.remind_instant for n in situation.loops if n.remind_state == "scheduled"

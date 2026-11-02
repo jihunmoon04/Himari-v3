@@ -2901,8 +2901,9 @@ class SqliteData:
                 tx.execute("UPDATE memories SET remind_state='delivered', reminded_at=?, remind_wake=NULL"
                            " WHERE owner=? AND remind_state='claimed' AND remind_wake=?", now, principal, wake_id)
             else:
-                tx.execute("UPDATE memories SET remind_state='told' WHERE owner=? AND remind_state='claimed'"
-                           " AND remind_wake=? AND reminded_at IS NOT NULL", principal, wake_id)  # V3-P90 §5.1
+                tx.execute("UPDATE memories SET remind_state='told', remind_wake=NULL WHERE owner=?"
+                           " AND remind_state='claimed' AND remind_wake=? AND reminded_at IS NOT NULL",
+                           principal, wake_id)  # V3-P90 §5.1: told before, its teller and moment kept
                 tx.execute("UPDATE memories SET remind_attempts=remind_attempts+1, remind_wake=NULL,"
                            " remind_state=CASE WHEN remind_attempts+1 >= ? THEN 'missed' ELSE 'scheduled' END"
                            " WHERE owner=? AND remind_state='claimed' AND remind_wake=?",
@@ -2944,11 +2945,17 @@ class SqliteData:
 
     async def told_reminders(self, principal: PrincipalId) -> tuple[tuple[int, str, datetime], ...]:
         with self._tx() as tx:
-            rows = tx.all("SELECT memory_id, remind_wake, reminded_at FROM memories WHERE owner=?"
-                          " AND remind_state='told' AND retired_at IS NULL AND remind_wake IS NOT NULL"
-                          " AND reminded_at IS NOT NULL ORDER BY memory_id", principal)
-            return tuple((int(r["memory_id"]), str(r["remind_wake"]), datetime.fromisoformat(r["reminded_at"]))
-                         for r in rows)
+            # PR #163 review P1-3: the wake that told it ended at its reminded_at (one moment, one
+            # transaction); a wake that tried to tell it again and failed is not its teller
+            rows = tx.all("SELECT m.memory_id, w.wake_id, m.reminded_at FROM memories m JOIN wakes w"
+                          " ON w.owner=m.owner AND w.ended_at=m.reminded_at AND w.status='answered'"
+                          " WHERE m.owner=? AND m.remind_state='told' AND m.retired_at IS NULL"
+                          " ORDER BY m.memory_id, w.wake_id", principal)
+            told: dict[int, tuple[int, str, datetime]] = {}
+            for r in rows:
+                told.setdefault(int(r["memory_id"]), (int(r["memory_id"]), str(r["wake_id"]),
+                                                      datetime.fromisoformat(r["reminded_at"])))
+            return tuple(told.values())
 
     async def see_reminders(self, principal: PrincipalId, memory_ids: Sequence[int]) -> int:
         wanted = list(dict.fromkeys(memory_ids))
