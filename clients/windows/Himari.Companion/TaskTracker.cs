@@ -6,6 +6,9 @@ internal sealed record TaskState(string Group, double ForSeconds);
 /// <summary>A game or a video that clearly ended (V3-P90 §5.3): how long it lasted, how long ago it ended.</summary>
 internal sealed record TaskEndedState(string Group, double LastedSeconds, double EndedSecondsAgo);
 
+/// <summary>A media session as Windows lists it: the app's key ("chrome", like a program's key) and whether it plays.</summary>
+internal readonly record struct MediaSession(string App, bool Playing);
+
 /// <summary>
 /// V3-P90 §6.1, §5.3: the main task over the last <see cref="Window"/> and the games and videos that clearly end.
 /// Pure: the caller passes the time and what it read, so tests drive it without Windows.
@@ -16,8 +19,10 @@ internal sealed record TaskEndedState(string Group, double LastedSeconds, double
 /// <item>The main task: of the window's non-neutral time — at least <see cref="MinTask"/> of it — the group with more
 /// than half. Neutral time does not break it; neutral alone long enough leaves none. It goes on while it stays the
 /// same; sleep ends it (<see cref="Reset"/>).</item>
-/// <item>A game ends when its program ends; a video when its media session is gone, or once paused and the main task
-/// moved off it (a pause alone is no end). The end is carried for <see cref="Carried"/>; the end of work is never told.</item>
+/// <item>A game ends when its program ends; a video when its media sessions are gone, or once paused and the main task
+/// moved off it (a pause alone is no end). A video's sessions are those that played from the program in front while
+/// it was the task, so music playing elsewhere is not it (PR #166 review P2); with none matched, any session counts.
+/// The end is carried for <see cref="Carried"/>; the end of work is never told.</item>
 /// </list>
 /// </summary>
 internal sealed class TaskTracker
@@ -44,6 +49,7 @@ internal sealed class TaskTracker
         internal DateTime LastMain { get; set; }
         internal DateTime? LastPlaying { get; set; }
         internal bool SawSession { get; set; }
+        internal HashSet<string> Sources { get; } = new(StringComparer.OrdinalIgnoreCase);  // a video's own sessions
     }
 
     internal static string? GroupOf(string? category) => category switch
@@ -55,11 +61,11 @@ internal sealed class TaskTracker
     };
 
     /// <summary>
-    /// One look: the category in front (<paramref name="own"/>: HIMARI's window), whether the last game's program
-    /// still runs, whether something plays and how many media sessions there are. True when the main task changed
-    /// or a task's end is new.
+    /// One look: the category in front (<paramref name="own"/>: HIMARI's window) and its program's key, whether the
+    /// last game's program still runs, and the media sessions. True when the main task changed or a task's end is new.
     /// </summary>
-    internal bool Observe(DateTime now, string? category, bool own, bool gameAlive, bool mediaPlaying, int mediaSessions)
+    internal bool Observe(DateTime now, string? category, bool own, bool gameAlive, IReadOnlyCollection<MediaSession> sessions,
+        string? program = null)
     {
         string? group = own ? lastGroup : GroupOf(category);
         if (!own) lastGroup = group;
@@ -81,11 +87,15 @@ internal sealed class TaskTracker
         }
         if (open is not null)
         {
-            if (mediaPlaying) open.LastPlaying = now;
-            if (mediaSessions > 0) open.SawSession = true;
+            if (open.Group == "video" && main == "video" && !own && !string.IsNullOrEmpty(program))
+                foreach (var session in sessions) if (session.Playing && session.App.Equals(program, StringComparison.OrdinalIgnoreCase)) open.Sources.Add(session.App);
+            var mine = open.Sources.Count > 0 ? sessions.Where(s => open.Sources.Contains(s.App)).ToList() : sessions.ToList();
+            bool playing = mine.Any(s => s.Playing);
+            if (playing) open.LastPlaying = now;
+            if (mine.Count > 0) open.SawSession = true;
             bool over = open.Group == "game"
                 ? !gameAlive
-                : (open.SawSession && mediaSessions == 0) || (!mediaPlaying && main != "video");
+                : (open.SawSession && mine.Count == 0) || (!playing && main != "video");
             if (over)
             {
                 DateTime lastOn = open.Group == "video" && open.LastPlaying is { } played ? played : open.LastMain;
@@ -104,9 +114,10 @@ internal sealed class TaskTracker
         ? new TaskEndedState(e.Group, e.Lasted, Math.Max(0, (now - e.At).TotalSeconds))
         : null;
 
-    /// <summary>Asleep or locked (§6.1): the task ends, and no end is told (nobody is there to hear it).</summary>
+    /// <summary>Asleep or locked (§6.1): the task ends, and no end is told (nobody is there to hear it) — nor one
+    /// told just before, which would come back stale on waking (PR #166 review P1).</summary>
     internal void Reset()
     {
-        samples.Clear(); lastAt = null; lastGroup = null; main = null; open = null;
+        samples.Clear(); lastAt = null; lastGroup = null; main = null; open = null; ended = null;
     }
 }

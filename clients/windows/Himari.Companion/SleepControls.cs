@@ -12,7 +12,7 @@ public partial class MainWindow
     private readonly SleepPolicy sleepPolicy = new();
     private bool displayOn = true;
     private bool quietPlaying, quietCall;
-    private int mediaSessions;  // V3-P90 §5.3: a video's session gone is its end
+    private IReadOnlyList<MediaSession> mediaSessions = [];  // V3-P90 §5.3: a video's own session gone is its end
     private DateTime lastQuietRead = DateTime.MinValue;
     private bool reminderAwake;  // a reminder wakes it for its words only (§2.4): no stretch, asleep after
     private CancellationToken reminderLive;  // the live that woke it: only that one ends it (PR #164 re-review P2-3)
@@ -114,10 +114,9 @@ public partial class MainWindow
         try
         {
             mediaManager ??= await GlobalSystemMediaTransportControlsSessionManager.RequestAsync();
-            var sessions = mediaManager.GetSessions();
-            mediaSessions = sessions.Count;
-            quietPlaying = sessions.Any(s =>
-                s.GetPlaybackInfo()?.PlaybackStatus == GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing);
+            mediaSessions = mediaManager.GetSessions().Select(s => new MediaSession(ActivityCatalog.MediaAppName(s.SourceAppUserModelId) ?? "",
+                s.GetPlaybackInfo()?.PlaybackStatus == GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing)).ToList();
+            quietPlaying = mediaSessions.Any(s => s.Playing);
         }
         catch (Exception ex) when (ex is COMException or InvalidOperationException or UnauthorizedAccessException) { quietPlaying = false; }
     }

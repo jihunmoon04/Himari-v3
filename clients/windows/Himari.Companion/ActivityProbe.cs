@@ -142,7 +142,7 @@ public partial class MainWindow
             if (observation is not null && activityTracker.Observe(observation, now)) signalSchedule.Urgent();
             // V3-P90 §6.1, §5.3: the main task and a game or video that ended; asleep, there is none
             if (serverTakesTask && !sleepPolicy.Asleep
-                && taskTracker.Observe(now, observation?.Category, observation is null, GameAlive(), quietPlaying, mediaSessions))
+                && taskTracker.Observe(now, observation?.Category, observation is null, GameAlive(), mediaSessions, observation?.Program))
                 signalSchedule.Urgent();
         }
         if (s.Media)
