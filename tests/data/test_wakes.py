@@ -297,3 +297,28 @@ def test_a_failed_telling_again_keeps_the_first_teller() -> None:
     asyncio.run(data.end_wake(SCOPE.principal_id, failed, WakeStatus.FAILED))
     assert asyncio.run(data.told_reminders(SCOPE.principal_id)) == ((memory_id, teller, at),)
     assert asyncio.run(data_for(restart(store)).told_reminders(SCOPE.principal_id)) == ((memory_id, teller, at),)
+
+
+def test_a_told_reminder_is_seen_by_a_message_after_its_telling_in_its_conversation() -> None:
+    """V3-P90 §5.1 (PR #163 re-review P2): read by Data in one look, however long the
+    Conversation went on; a message before the telling or elsewhere is not one."""
+    store = new_store()
+    data, memory_id, _ = told(store)
+    assert asyncio.run(data.see_answered_reminders(SCOPE.principal_id)) == 0
+    asyncio.run(data.append_event(SCOPE, user("먹었어")))
+    assert asyncio.run(data.see_answered_reminders(SCOPE.principal_id)) == 1
+    assert reminder(store, memory_id)[0] == "delivered"
+
+
+def test_a_told_reminder_whose_telling_was_purged_has_no_teller() -> None:
+    """PR #163 re-review P2: purged with its Conversation, the wake no longer says where it was
+    told — the reminder stays told (the next return tells it again), with no teller."""
+    store = new_store()
+    data, memory_id, _ = told(store)
+    ((_, _, at),) = asyncio.run(data.told_reminders(SCOPE.principal_id))
+    asyncio.run(data.trash_conversation(SCOPE))
+    asyncio.run(data.begin_purge(SCOPE))
+    asyncio.run(data.purge_conversation(SCOPE))
+    assert asyncio.run(data.told_reminders(SCOPE.principal_id)) == ((memory_id, None, at),)
+    assert asyncio.run(data.see_answered_reminders(SCOPE.principal_id)) == 0
+

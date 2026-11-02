@@ -397,3 +397,12 @@ def test_merged_wakes_count_once_toward_the_day_and_only_with_an_activity() -> N
     assert decide(situation(device=device(coding(31)), wakes=merged)).reasons != ()  # three, not six
     full = (*merged, wake(NOW - timedelta(hours=4), WakeKind.GAME_ENDED))
     assert decide(situation(device=device(coding(31)), wakes=full)).blocked == "daily"
+
+
+def test_a_told_reminder_with_no_teller_is_told_again_at_the_next_return() -> None:
+    """PR #163 re-review P2: its wake is gone, so no return shows it was seen."""
+    told = (Told(7, None, NOW - timedelta(minutes=2)),)
+    decided = decide(situation(device=SLEEPER, returned=back(at=NOW, via="wake"),
+                               loops=(to_remind(state="told"),), told=told))
+    assert decided.seen == () and decided.reasons[0] == WakeReason(WakeKind.REMINDER, memory_id=7, again=True)
+

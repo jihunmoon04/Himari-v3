@@ -2943,19 +2943,29 @@ class SqliteData:
                               " AND remind_state IN ('scheduled', 'told')"  # V3-P90 §5.1: told, never seen
                               " AND remind_instant<? AND retired_at IS NULL", principal, _timestamp(before)).rowcount
 
-    async def told_reminders(self, principal: PrincipalId) -> tuple[tuple[int, str, datetime], ...]:
+    async def told_reminders(self, principal: PrincipalId) -> tuple[tuple[int, str | None, datetime], ...]:
         with self._tx() as tx:
             # PR #163 review P1-3: the wake that told it ended at its reminded_at (one moment, one
-            # transaction); a wake that tried to tell it again and failed is not its teller
-            rows = tx.all("SELECT m.memory_id, w.wake_id, m.reminded_at FROM memories m JOIN wakes w"
+            # transaction); a wake that tried to tell it again and failed is not its teller.
+            # Re-review P2: a teller purged with its Conversation leaves it with none.
+            rows = tx.all("SELECT m.memory_id, w.wake_id, m.reminded_at FROM memories m LEFT JOIN wakes w"
                           " ON w.owner=m.owner AND w.ended_at=m.reminded_at AND w.status='answered'"
                           " WHERE m.owner=? AND m.remind_state='told' AND m.retired_at IS NULL"
-                          " ORDER BY m.memory_id, w.wake_id", principal)
-            told: dict[int, tuple[int, str, datetime]] = {}
+                          " AND m.reminded_at IS NOT NULL ORDER BY m.memory_id, w.wake_id", principal)
+            told: dict[int, tuple[int, str | None, datetime]] = {}
             for r in rows:
-                told.setdefault(int(r["memory_id"]), (int(r["memory_id"]), str(r["wake_id"]),
+                told.setdefault(int(r["memory_id"]), (int(r["memory_id"]), r["wake_id"],
                                                       datetime.fromisoformat(r["reminded_at"])))
             return tuple(told.values())
+
+    async def see_answered_reminders(self, principal: PrincipalId) -> int:
+        with self._tx() as tx:
+            return tx.execute(
+                "UPDATE memories SET remind_state='delivered', remind_wake=NULL WHERE owner=?"
+                " AND remind_state='told' AND retired_at IS NULL AND EXISTS (SELECT 1 FROM wakes w"
+                " JOIN events e ON e.conversation_id=w.conversation_id AND e.sequence>w.event_sequence"
+                " AND e.kind='user_message' WHERE w.owner=memories.owner AND w.ended_at=memories.reminded_at"
+                " AND w.status='answered')", principal).rowcount
 
     async def see_reminders(self, principal: PrincipalId, memory_ids: Sequence[int]) -> int:
         wanted = list(dict.fromkeys(memory_ids))

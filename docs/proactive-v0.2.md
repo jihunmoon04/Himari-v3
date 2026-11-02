@@ -597,3 +597,7 @@ P1-1~P1-9 모두 PASS. 새 지적을 코드와 대조했다: Run은 응답을 �
 | P1-3 | 다시 알림이 실패하면 `remind_wake`가 실패한 wake(다른 기기)를 가리켜, 그 기기의 돌아옴이 "봤다"가 됨 | `told`의 알린 wake는 `remind_wake`가 아니라 **`reminded_at`에 끝난 답한 wake**로 찾는다(`told`가 될 때 둘은 한 트랜잭션의 같은 시각). 실패해 `told`로 돌아가면 `remind_wake`는 비우고 `reminded_at`은 그대로. 두 저장소 같게, 재시작 시험 |
 | P2-1 | 하루 상한이 알림 밖의 모든 wake를 셈 | 활동 이유(`focus`·`game_ended`)가 있는 wake만, 합친 wake는 한 번(`activity_wake`). `status`의 `today`도 같은 것을 셈 |
 
+**재검수(PR #163, `d828c84`): READY_WITH_CORRECTIONS → 고침.** 앞의 셋은 PASS. 보완 둘:
+- **알린 wake가 지워짐:** 대화를 영구 삭제하면 알린 wake도 사라져 `told` 알림이 고립되었다. 이제 `told_reminders`가 알린 wake 없이도 그 알림을 돌려주고(`None`), 스케줄러는 기기를 모름(`Told.device_id = None`)으로 둔다. 어느 돌아옴도 "봤다"가 되지 않으므로 다음 돌아옴에 다시 알린다(7일이면 놓침).
+- **40개 한도:** "그 대화에 그 뒤 사용자 메시지"를 스케줄러가 이벤트 40개만 읽어 찾던 것을 Data의 한 쿼리(`see_answered_reminders`)로 바꿨다. 대화가 얼마나 이어졌든 찾는다.
+

@@ -1543,10 +1543,17 @@ class WakeStore(Protocol):
         ``before`` become missed (shown on the memory screen); how many."""
         ...
 
-    async def told_reminders(self, principal: PrincipalId) -> tuple[tuple[int, str, datetime], ...]:
+    async def told_reminders(self, principal: PrincipalId) -> tuple[tuple[int, str | None, datetime], ...]:
         """V3-P90 §5.1: the reminders told to a sleeping device and not seen yet — the
         note, the wake that told it (the answered one that ended at its ``reminded_at``,
-        not one that tried again and failed), when."""
+        not one that tried again and failed; None once that wake is gone with its
+        Conversation, PR #163 re-review P2), when."""
+        ...
+
+    async def see_answered_reminders(self, principal: PrincipalId) -> int:
+        """V3-P90 §5.1: told reminders become delivered when a user message came after the
+        wake that told them, in its Conversation — however long that Conversation went
+        on since (PR #163 re-review P2). How many."""
         ...
 
     async def see_reminders(self, principal: PrincipalId, memory_ids: Sequence[int]) -> int:

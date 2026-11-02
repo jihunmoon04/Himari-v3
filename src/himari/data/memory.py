@@ -1521,18 +1521,31 @@ class InMemoryData:
                 missed += 1
         return missed
 
-    async def told_reminders(self, principal: PrincipalId) -> tuple[tuple[int, str, datetime], ...]:
-        """As SQLite: the teller is the answered wake that ended at its reminded_at (PR #163 review P1-3)."""
-        out: list[tuple[int, str, datetime]] = []
+    def _tellers(self, principal: PrincipalId) -> list[tuple[int, WakeRecord | None, datetime]]:
+        """As SQLite: the teller is the answered wake that ended at its reminded_at (PR #163
+        review P1-3); None once it was purged with its Conversation (re-review P2)."""
+        out: list[tuple[int, WakeRecord | None, datetime]] = []
         for (owner, memory_id), (state, _, _) in sorted(self._store.reminders.items()):
             at = self._store.reminded_at.get((owner, memory_id))
             if owner != principal or state != "told" or at is None or (owner, memory_id) not in self._store.memories:
                 continue
-            tellers = sorted(w.wake_id for w in self._store.wakes.values() if w.principal == principal
-                             and w.status is WakeStatus.ANSWERED and w.ended_at == at)
-            if tellers:
-                out.append((memory_id, tellers[0], at))
-        return tuple(out)
+            tellers = sorted((w for w in self._store.wakes.values() if w.principal == principal
+                              and w.status is WakeStatus.ANSWERED and w.ended_at == at), key=lambda w: w.wake_id)
+            out.append((memory_id, tellers[0] if tellers else None, at))
+        return out
+
+    async def told_reminders(self, principal: PrincipalId) -> tuple[tuple[int, str | None, datetime], ...]:
+        return tuple((memory_id, None if teller is None else teller.wake_id, at)
+                     for memory_id, teller, at in self._tellers(principal))
+
+    async def see_answered_reminders(self, principal: PrincipalId) -> int:
+        seen = []
+        for memory_id, teller, _ in self._tellers(principal):
+            conv = None if teller is None else self._store._conversations.get(teller.conversation_id)
+            if conv is not None and teller is not None and any(
+                    e.kind is EventKind.USER_MESSAGE and e.sequence > teller.event_sequence for e in conv.events):
+                seen.append(memory_id)
+        return await self.see_reminders(principal, seen)
 
     async def see_reminders(self, principal: PrincipalId, memory_ids: Sequence[int]) -> int:
         seen = 0

@@ -85,10 +85,12 @@ class Return:
 
 @dataclass(frozen=True)
 class Told:
-    """V3-P90 §5.1: a reminder told to a sleeping device, not seen yet: by which device, when."""
+    """V3-P90 §5.1: a reminder told to a sleeping device, not seen yet: by which device, when.
+    ``device_id`` None: its wake is gone (purged) — no return can show it was seen, so the
+    next one tells it again."""
 
     memory_id: int
-    device_id: str
+    device_id: str | None
     at: datetime
 
 
