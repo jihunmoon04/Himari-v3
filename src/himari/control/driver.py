@@ -1221,7 +1221,8 @@ class _Held:
     def output(self, run_id: RunId, delta: OutputDelta) -> None:
         if not self._shown and self._showing is None:
             self._raw += delta.text
-            plain = split_marks(self._raw, complete=False)[0].lstrip()
+            # PR #167 re-review P1-6: spaces after the mark ("[[pass]] ") do not make it speak
+            plain = split_marks(self._raw, complete=False)[0].strip()
             if delta.tool is not None or (plain and not PASS.startswith(plain)):
                 self._begin()
         text = self._filter.feed(delta.text) if delta.text else ""

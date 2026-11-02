@@ -9,7 +9,7 @@ import asyncio
 import pytest
 from testkit import SCOPE, calls, final, runtime, user
 
-from himari.common import TextBlock, TrustedScope
+from himari.common import RunId, TextBlock, TrustedScope
 from himari.control.api import DriveState, JobStatus
 from himari.control.driver import PASS, free_wake_verdict, without_pass
 from himari.control.runner import FREE_RUNS, BackgroundRunner
@@ -247,3 +247,31 @@ def test_the_verdict_is_the_same_live_and_at_a_restart(output: object, status: W
 
 def test_a_spoken_pass_mark_is_taken_out() -> None:
     assert without_pass(NormalizedFinal((TextBlock(f"{PASS}응"),))) == NormalizedFinal((TextBlock("응"),))
+
+
+@pytest.mark.parametrize("pieces", [
+    ("[[pass]]", " "),
+    ("[[pass]]\n",),
+    ("[[mood:happy]] [[pass]] ", "\n"),
+    ("  [[pa", "ss]]", "  "),
+])
+def test_a_pass_with_spaces_around_it_is_never_shown(pieces: tuple[str, ...]) -> None:
+    """PR #167 re-review P1-6: what is left of a pass but spaces never starts the showing."""
+    from himari.control.driver import _Held
+    from himari.provider.api import OutputDelta
+
+    shown: list[str] = []
+
+    async def in_data() -> bool:
+        shown.append("data")
+        return True
+
+    async def scenario() -> None:
+        held = _Held(None, "wake_1", in_data)
+        for piece in pieces:
+            held.output(RunId("r"), OutputDelta(text=piece))
+        await held.settled()
+
+    asyncio.run(scenario())
+    assert shown == []
+
