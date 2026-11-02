@@ -14,7 +14,7 @@ public partial class MainWindow
     private bool quietPlaying, quietCall;
     private DateTime lastQuietRead = DateTime.MinValue;
     private bool reminderAwake;  // a reminder wakes it for its words only (§2.4): no stretch, asleep after
-    private string? reminderConversation;
+    private CancellationToken reminderLive;  // the live that woke it: only that one ends it (PR #164 re-review P2-3)
     private bool bubbleUntilAwake;  // that reminder's bubble stays until the user wakes it (§2.4)
     private DateTime stretchUntil = DateTime.MinValue;  // a wake's words wait for the stretch (§5.2)
     private TaskCompletionSource presenceNudge = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -120,18 +120,21 @@ public partial class MainWindow
 
     private static bool FullscreenNow() => SHQueryUserNotificationState(out int state) == 0 && state is 2 or 3 or 4;  // busy, D3D, presentation
 
-    /// <summary>§2.4: a wake for this device while asleep is a reminder — it wakes for its words, and its bubble stays.</summary>
-    private void WakeJobArrived(string conversation)
+    /// <summary>§2.4: a wake for this device while asleep is a reminder — it wakes for its words, and its bubble
+    /// stays. <paramref name="live"/>: the live that speaks them, the only one whose end puts it back to sleep.</summary>
+    private void WakeJobArrived(CancellationToken live)
     {
         if (!sleepPolicy.Asleep || sleepPolicy.Locked) return;
-        reminderAwake = true; reminderConversation = conversation; bubbleUntilAwake = true;
+        reminderAwake = true; reminderLive = live; bubbleUntilAwake = true;
         UpdateFrame();
     }
 
-    private void WakeJobEnded(string conversation)
+    /// <summary>A live ended: if it is the one that woke it, asleep again (the bubble stays). A live cancelled by a
+    /// reconnect that ends after the new one started is not that one.</summary>
+    private void WakeJobEnded(CancellationToken live)
     {
-        if (!reminderAwake || reminderConversation != conversation) return;
-        reminderAwake = false; reminderConversation = null;  // asleep again; the bubble stays
+        if (!reminderAwake || reminderLive != live) return;
+        reminderAwake = false; reminderLive = default;
         UpdateFrame();
     }
 

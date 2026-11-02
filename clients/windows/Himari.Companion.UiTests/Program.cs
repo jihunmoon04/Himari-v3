@@ -658,11 +658,16 @@ internal static class Program
             T NapField<T>(string field) => (T)typeof(MainWindow).GetField(field, inside)!.GetValue(napping)!;
             var policy = NapField<SleepPolicy>("sleepPolicy");
             Check(policy.Asleep, "a window starts asleep");
-            Nap("WakeJobArrived", "c");
+            using var oldLive = new CancellationTokenSource(); using var newLive = new CancellationTokenSource();
+            Nap("WakeJobArrived", oldLive.Token);
             Check(NapField<bool>("reminderAwake") && NapField<bool>("bubbleUntilAwake"), "a wake while asleep is a reminder's: awake for its words");
             Nap("ScheduleBubbleClose", "약 먹을 시간이야!");
             Check(!NapField<DispatcherTimer>("bubbleTimer").IsEnabled, "its bubble does not start to close while asleep");
-            Nap("WakeJobEnded", "c");
+            // PR #164 re-review P2-3: a reconnect cancels the live and opens a new one; the old one ends late
+            oldLive.Cancel(); Nap("WakeJobArrived", newLive.Token);
+            Nap("WakeJobEnded", oldLive.Token);
+            Check(NapField<bool>("reminderAwake"), "the cancelled live ending late does not put it back to sleep mid-words");
+            Nap("WakeJobEnded", newLive.Token);
             Check(!NapField<bool>("reminderAwake") && policy.Asleep && !NapField<DispatcherTimer>("bubbleTimer").IsEnabled, "said, asleep again, the bubble still up");
             Nap("WakeFromUser");
             Check(!policy.Asleep && NapField<DispatcherTimer>("bubbleTimer").IsEnabled && !NapField<bool>("bubbleUntilAwake"), "the user wakes it: the bubble now closes as usual");

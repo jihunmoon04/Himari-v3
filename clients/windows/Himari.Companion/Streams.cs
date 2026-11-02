@@ -139,7 +139,7 @@ public partial class MainWindow
         liveStreams[id] = source;
         // V3-P90 §2.4: asleep, a reminder wakes it for its words — here, where a wake's live starts, so a
         // reconnect's recovery does it as the live event does (PR #164 review P2-2), and only once per live
-        if (wake) WakeJobArrived(id);
+        if (wake) WakeJobArrived(source.Token);
         BeginReplyProgress(id, expectedJob);
         _ = LiveLoop(id, local, source.Token, expectedJob, wake);
     }
@@ -204,7 +204,7 @@ public partial class MainWindow
         }
         finally
         {
-            if (wake) WakeJobEnded(id);  // V3-P90 §2.4: a reminder's words said, asleep again (its bubble stays)
+            if (wake) WakeJobEnded(ct);  // V3-P90 §2.4: a reminder's words said, asleep again (its bubble stays)
             if (liveStreams.TryGetValue(id, out var source) && source.Token == ct && !ct.IsCancellationRequested)
             {
                 liveStreams.Remove(id); liveDisplays.Remove(id); source.Dispose();
