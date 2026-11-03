@@ -66,6 +66,14 @@ failures. Haiku omitted one requested move; MiniMax asked for screenshots instea
 of calling on all three error scenes, missed moves and repeated a refused call.
 Existing `free_wake`/`screen_points` declarations are retained.
 
+Following PR #174 review, ordinary screen-tool live regression defaults to the six
+enabled models. Set `HIMARI_LIVE_SCREEN_TOOL_SWEEP=1` for the full image-model
+comparison, or select models explicitly with `HIMARI_LIVE_SCREEN_TOOL_MODELS`.
+Future v2 traces save normalized output kinds, redacted argument objects and screen
+grading context for independent regrading of every group. The original 213 records
+remain unchanged and are labelled `legacy_partial` when replayed; their missing
+arguments are not reconstructed. See [the trace format and commands](screen-tool-v0.1.md#161-pr-174-검수-후-테스트-정비).
+
 ## Images (V3-P67, 2026-10-22)
 
 `architecture.input_modalities` lists `image` for every model above except `z-ai/glm-5.3`.

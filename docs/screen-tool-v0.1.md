@@ -283,4 +283,26 @@ HIMARI_LIVE=1 HIMARI_LIVE_SCREEN_TOOL_OUT=build/screen-tool-live.jsonl \
   python -m pytest -q -s tests/live/test_screen_tool_live.py
 ```
 
-기본은 이미지 지원 8개를 모두 시험하므로, 미달 모델이 있으면 실패한다. `HIMARI_LIVE_SCREEN_TOOL_MODELS`로 모델을 좁힐 수 있다. 저장된 판정만 다시 확인하려면 `HIMARI_LIVE_SCREEN_TOOL_REPLAY=docs/live-results/screen-tool-2026-11-03.jsonl`을 설정한다(네트워크 호출 없음). `tests/provider/test_screen_tool_check.py`는 채점기의 회귀와 활성화된 모델이 이 결과의 통과 모델과 일치함을 오프라인으로 확인한다.
+기본은 `screen_tool`이 켜진 6개 모델의 회귀 검사다. 미달 모델을 포함한 이미지 모델 전체 비교는 `HIMARI_LIVE_SCREEN_TOOL_SWEEP=1`을 명시한다. 전체 비교에서는 미달 모델이 있으면 실패한다. `HIMARI_LIVE_SCREEN_TOOL_MODELS`로 모델을 직접 고를 수도 있다(전체 비교 옵션과 동시 사용 금지, 빈 목록·중복·미지원 모델은 오류).
+
+저장된 판정만 다시 확인하려면 `HIMARI_LIVE_SCREEN_TOOL_REPLAY=docs/live-results/screen-tool-2026-11-03.jsonl`을 설정한다(네트워크 호출 없음, 기본 대상은 같은 6개). 과거 8개 모델의 미달 결과까지 확인하려면 여기에 `HIMARI_LIVE_SCREEN_TOOL_SWEEP=1`을 더한다. `tests/provider/test_screen_tool_check.py`는 채점기의 회귀와 활성화된 모델이 이 결과의 통과 모델과 일치함을 오프라인으로 확인한다.
+
+### 16.1 PR #174 검수 후 테스트 정비
+
+향후 라이브 기록은 `trace_version: 2`를 쓴다. `outcome`에 정상 응답·응답 없음·불확실·Provider 오류·후속 요청 생략을 구별하고, 정상 응답은 `output.kind`에 `final`/`tool_calls`, 답변/commentary 및 각 호출의 인자 객체를 보관한다. 화면 답에는 그때의 정답 문자열·표적 사각형·좌표 검사 여부도 `context`로 저장한다. 재채점은 저장된 `pass`·`problems`를 신뢰하지 않고 이 관측값으로 모든 무리의 판정을 다시 계산한다. 누락·알 수 없는 형식은 실패한다. 현재 화면 그림 생성기가 바뀌어도 저장한 정답 기준으로 평가한다.
+
+**평가 장면 완전성(PR #175 검수 P2):** 모델별로 필요한 `(group, scene, attempt)`를 정확히 한 번씩 요구한다. 호출은 `error`·`setting`, 미호출은 `lunch`·`already_attached`, 화면 해석은 `error_result`·`setting_result`, 거절은 `refused`를 각 1·2·3회 검사한다. 기존 자유 wake 모델은 추가로 `free_choice`, 발화 `free_work`·`free_writing`, 침묵 `free_call`·`free_match`를 각 3회 검사한다. 중복, 예상 밖 무리·장면, 빠진 시도, 정수가 아닌 시도는 통과 건수와 무관하게 실패다. 화면 결과는 같은 모델·장면·시도의 유일한 호출과 대응해야 한다. 실패한 호출은 실패로 기록한 후속 생략과 짝지어 5/6 기준에 포함할 수 있지만, 성공한 호출 뒤의 실제 결과 누락은 재생기가 실패 항목을 채워도 완전성 실패로 남는다.
+
+화면 도구의 유효 인자는 `{}`뿐이다. 비어 있지 않은 인자는 키·값을 모두 가리고 개수와 비어 있지 않다는 사실만 유지해, 민감한 인자를 남기지 않으면서 같은 인자 검사를 재현한다. 다른 도구 이름은 `other_tool`로, 답변/commentary·오류에 포함된 현재 API 키는 `[redacted]`로 바꾼다. reasoning·continuation·인증 헤더는 기록하지 않는다. 이 형식은 현재 채점에 필요한 정보만 보존하며, 숨긴 인자의 실제 값을 평가하는 새 기준에는 쓸 수 없다.
+
+기존 213건 파일은 변경하거나 인자를 추측해 채워 넣지 않는다. 이전 형식의 반환 결과에는 `replay_mode: legacy_partial`을 붙여 호출·화면 해석 판정은 최초 기록에 의존함을 알린다. v2는 `replay_mode: independent`로 구별한다. 이번 테스트 정비는 오프라인 모의 모델로 수집→JSONL 저장→독립 재채점까지 확인하며 추가 유료 호출을 하지 않는다.
+
+```sh
+# 활성화된 모델의 일반 회귀 (유료)
+HIMARI_LIVE=1 python -m pytest -q -s tests/live/test_screen_tool_live.py
+# 전체 이미지 모델 비교 (유료, 미달 모델도 포함)
+HIMARI_LIVE=1 HIMARI_LIVE_SCREEN_TOOL_SWEEP=1 python -m pytest -q -s tests/live/test_screen_tool_live.py
+# 보관한 응답으로만 재검증 (무료)
+HIMARI_LIVE_SCREEN_TOOL_REPLAY=docs/live-results/screen-tool-2026-11-03.jsonl \
+  python -m pytest -q -s tests/live/test_screen_tool_live.py
+```
