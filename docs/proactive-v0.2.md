@@ -301,16 +301,21 @@
 
 ### 7.2 "Speaking first" 줄에 더함
 
-반려 절의 `PROACTIVE_RULE`에 한 문장을 더한다(문장은 실제 모델 확인에서 다듬는다).
+반려 절의 `PROACTIVE_RULE` 뒤에 `FREE_RULE`을 둔다. 문장은 실제 모델 확인에서 다듬었다(§17.7, 2026-11-03).
 
 ```
-  A wake whose reasons are all "free" has no news: say something short that fits what the
-  user is doing, or answer exactly [[pass]] to stay silent when nothing fits or it is a bad
-  moment (a call, a tense fullscreen game, the same thing you said last time). Keep to that:
-  do not start other work, and do not use tools unless they are needed for what you say.
+- A free wake: a <wake> whose reasons are all "free" has no news — the same task just went on. The line
+  above says how to speak, not whether, and a free wake has no reasons to keep to: say something short that
+  fits the moment. Only when the user should not be interrupted — they seem to be in a call or a meeting (a
+  call or meeting app with the microphone or camera on), in the middle of a match, or you would only say
+  again what you said last time — answer exactly [[pass]] to stay silent. A fullscreen video, or the
+  microphone or camera alone, is no reason to stay silent. Keep to that: do not start other work, and use
+  no tool unless what you say needs it.
 ```
 
 - 이 문장은 `speaks_first`이고 자유 wake가 켜진 대화에만 들어간다(고정 문장, 캐시를 깨지 않음).
+- **역할 나눔(§17.7):** `PROACTIVE_RULE`은 모든 wake의 **말하는 방식**(짧게, 질문은 하나까지), `FREE_RULE`은 자유 wake의 **말할지 말지**. 마이크·카메라와 전체 화면은 막는 신호가 아니다(V3-P88 Q1 B): 통화인지, 경기 중인지는 모델이 `now_doing`의 프로그램과 함께 판단한다.
+- 자유 wake에는 지켜야 할 이유가 없으므로 열린 고리나 최근 이야기를 꺼내도 된다. 그렇다고 문장에 적지는 않는다(적으면 고리 쪽으로 더 기운다, 소유자 2026-11-03).
 
 ### 7.3 pass
 
@@ -733,3 +738,56 @@ P1-1~P1-9 모두 PASS. 새 지적을 코드와 대조했다: Run은 응답을 �
 - **실제 모델 확인(§7.5):** 자유 wake 장면을 `tests/live`에 두고 모델을 돌려 본다. 통과한 모델에만 `free_wake`를 켠다. 그 전에는 운영에서 자유 wake가 열리지 않는다.
 - **화면 tool(§10).**
 - **소유자의 실제 PC 확인:** 잠·깸, 알림, 작업 끝남.
+
+### 17.7 실제 모델 확인: 자유 wake (`feat/proactive-v2-live`)
+
+§7.5, §13의 "실제 모델". `tests/live/test_proactive_live.py`에 더했다.
+
+목적: 어느 모델에 `free_wake`를 켤지 정한다. 처음 돌린 결과(2026-11-02)에서 드러난 문제를 고치고 다시 쟀다.
+
+- **처음 결과에서 드러난 것:** pass 장면(통화, 전체 화면 게임)에서 네 모델 모두 말을 걸었다(gpt-6-luna 11/15, deepseek-v4.1-flash 10/15, claude-haiku-5.5 12/15, mimo-v2.6-pro 13/15). 원인은 두 문장의 충돌: `PROACTIVE_RULE`의 "전체 화면·마이크·카메라면 **한 문장, 질문 없이**"(말하라는 지시)와 `FREE_RULE`의 "통화·전체 화면 게임이면 **[[pass]]**". 모델은 앞의 것을 따라 한 문장으로 말했다.
+- **서버가 막는 길은 택하지 않음(소유자):** `mic_or_camera`는 통화가 아닐 때도 켜지고, 전체 화면이어도 영상처럼 말 걸어도 괜찮을 때가 있다.
+
+**바꾼 것**
+
+- **`PROACTIVE_RULE`(모든 wake):** "두 문장 이하, 전체 화면·마이크·카메라면 한 문장" → **"short, and at most one question"**. 바깥 한계는 `SPEAKING_RULE`의 네 문장. 자유 wake는 말할지를 먼저 정하고 wake의 말은 원래 짧으므로, wake만의 숫자 제한은 뺐다(소유자). 질문 하나 제한은 남김(소유자).
+- **`FREE_RULE`(§7.2):** 위 줄은 말하는 방식일 뿐이라고 먼저 밝히고, 기본은 말함, pass는 통화·회의로 보일 때, 경기 중, 같은 말 되풀이일 때만. "전체 화면 영상이나 마이크·카메라만으로는 조용할 이유가 아님". 지켜야 할 이유가 없다고 적어 열린 고리를 막지 않되, 고리를 꺼내라는 말은 넣지 않음. 시험한 다른 문구: "할 말이 없으면 pass"를 앞에 둔 문장은 mimo가 지나치게 넘김(말함 2/12). 기본 방향을 "usually about what the user is doing"으로 준 문장은 면접 이야기를 거의 줄이지 못하고 마이크만 켜진 장면의 pass를 늘려 되돌림.
+- **장면(장면마다 3번):**
+
+  | 장면 | 상황 | 바라는 것 | 무리 |
+  | --- | --- | --- | --- |
+  | `free_long_work` | VS Code 125분, 단계 4 | 말함 | 말함 |
+  | `free_writing` | Word 50분, 단계 2 | 말함 | 말함 |
+  | `free_settled` | 앞 대화가 끝난 이야기, VS Code 90분 | 말함 | 말함 |
+  | `free_mic_not_call` | VS Code 60분, 마이크 켜짐 | 말함 | 말함 |
+  | `free_fullscreen_video` | 전체 화면 YouTube 다큐 50분 | 말함 | 말함 |
+  | `free_call` | 작업 40분, Zoom이 앞에 온 지 2분, 마이크·카메라 켜짐 | pass | pass |
+  | `free_fullscreen_game` | 전체 화면 게임 80분 | 둘 다 맞음 | 둘 다 |
+  | `free_said_it` | 16분 전 자유 wake가 "물 한 잔"을 권함 → 사용자 "응 고마워" → 새 주기 단계 1 | pass, 또는 "물" 없이 다른 말 | 둘 다 |
+
+  - `free_call`은 처음에 "Zoom 40분"이었으나 앱에서 생길 수 없다(PR #169 검수 P2-1): `chat`은 중립이라 3분 넘게 앞에 있으면 주 작업이 없어져 자유 wake가 열리지 않는다. 앱이 보낼 수 있는 모양(작업이 이어지는 중 통화 앱이 앞에 옴)으로 바꿔 모델마다 6번 다시 쟀다: 네 모델 모두 6/6 pass(`docs/live-results/proactive-2026-11-03-call.jsonl`). 아래 결과표의 pass 열은 바꾸기 전 장면이다.
+  - `free_said_it`은 처음에 "답 없음"이었으나 운영에서 생기지 않는다(답 없는 wake는 다음 자유 wake를 막음, §5). 그래서 사용자가 답한 모양으로 바꿈. "물" 검사는 "물론"에 걸리지 않게 함.
+- **판정:** Driver의 `free_wake_verdict`와 같다(표정 표시를 뺀 글이 `[[pass]]`뿐이거나 비면 pass). 말함은 기존 판정(네 문장 이하, 질문 하나 이하, 한국어, wake·서버·번호 금지, 표정 표시 문법)을 `[[pass]]` 뗀 글에 적용.
+- **통과선(무리마다):** pass 3/3(통화에 끼어드는 비용이 가장 큼), 말함 5/6(13/15), 둘 다 5/6. 처음의 "15번 합쳐 80%"는 장면별 실패를 가렸다(haiku가 게임에서 3번 중 2번 말하고도 통과).
+- **기존 말 걸기 장면에 더함:** `task_ended_game`, `task_ended_video`(서버 2단계의 새 계기), `reminder_again`(잠든 채 알린 것을 다시). 옛 `focus`·`game_ended` 장면은 2026-11-01 결과와 비교하려고 남겼다. 판정은 네 문장 이하로(위 `PROACTIVE_RULE`).
+- **프롬프트:** 자유 wake의 `<wake>`에 `step`을 그린다(§7.1의 예와 같게). 서버 3단계에서 빠졌던 것.
+- §7.1의 "`now_doing`에 `task` 더함"은 하지 않았다. wake 이유에 `group`과 `minutes`가 이미 있다.
+
+**결과(2026-11-03)** `docs/live-results/proactive-2026-11-03.jsonl`
+
+| 모델 | 자유: pass | 자유: 말함 | 자유: 둘 다 | 말 걸기(24번, 80%) | `free_wake` |
+| --- | --- | --- | --- | --- | --- |
+| claude-haiku-5.5 | 3/3 | 14/15 | 6/6 | 20/24 | **켬** |
+| deepseek-v4.1-flash | 3/3 | 15/15 | 6/6 | 21/24 | **켬** |
+| mimo-v2.6-pro | 3/3 | 13/15 | 6/6 | 23/24 | **켬** |
+| gpt-6-luna | 3/3 | 13/15 | 4/6 | 24/24 | 끔(`free_said_it`에서 "물"을 다시 2번) |
+
+- 통화와 전체 화면 게임은 네 모델 모두 넘김(게임은 deepseek만 2번 말함, 둘 다 맞음).
+- 열린 이야기가 없을 때(`free_settled`) 12번 모두 하는 일에 맞는 말("한 시간 반째 코딩이네요, 잠깐 어깨 펴세요").
+- 열린 이야기가 있으면 그것을 꺼낸다: 앞 대화의 면접(같은 날, 히마리가 "다녀와서 얘기해 주세요"라고 함)을 말한 답 중 haiku 15/15, deepseek 15/16, mimo 13/14, luna 10/13. 자연스러운 결과로 받아들임(소유자).
+- 문장 수: 대부분 1~3문장. haiku가 가장 길다(자유 wake에서 주로 3문장).
+- 말 걸기 실패: 질문 둘(haiku 4번, deepseek 2번, "면접 다녀오셨어요? 어떠셨어요?"), 모델이 지어낸 도구 호출 글(mimo 1번, deepseek 1번).
+
+**받아들인 한계(소유자 2026-11-03, PR #169 검수 P2-1):** 통화를 뒤에 두고 다른 프로그램을 앞에 두면 서버가 받는 것은 그 프로그램과 `mic_or_camera: true`뿐이라 `free_mic_not_call`(말함이 정답)과 구별할 수 없다. 켠 세 모델은 이때 대부분 말한다(3차 `free_mic_not_call`: haiku 3/3, deepseek 3/3, mimo 2/3). 앱은 소리를 내지 않으므로 통화 상대에게 들리지 않고 말풍선만 뜬다. 화면 공유 중이면 보인다. 사용자는 "조용히"로 막는다. 고칠 길(다음 패킷): 앱은 ConsentStore에서 마이크·카메라를 쓰는 프로그램을 이미 읽으므로(`MicCamera.InUse`) 그 이름을 함께 보내고(`features`로 알림, 마이크·카메라 보내기 설정을 따름) `FREE_RULE`이 "통화·회의 앱이 마이크나 카메라를 쓰는 중"을 보게 한다.
+
+**남긴 것:** 답 없는 wake가 다음 고리·자유 wake를 막는 규칙(§5)은 그대로 둔다(소유자 2026-11-03). 인사(돌아옴)나 가벼운 자유 wake에 답하지 않으면 사용자가 쓸 때까지 자유 wake가 열리지 않는다. 운영에서 보고 정한다.

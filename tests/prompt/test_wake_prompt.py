@@ -136,3 +136,12 @@ def test_a_reminder_told_again_and_an_end_are_drawn() -> None:
     assert reminder["again"] is True and "late" not in reminder
     assert game == {"kind": "task_ended", "group": "game", "minutes": 95}
 
+
+
+def test_a_free_wake_is_drawn_with_its_task_and_step() -> None:
+    """V3-P90 §7.1: the task's group, how long it went on, and which of the timer's steps."""
+    from himari.prompt.api import wake_text
+
+    free = Wake("wake_4", (WakeReason(WakeKind.FREE, group="work", minutes=47, step=2),), "d1")
+    assert json.loads(wake_text(free, {})[6:-7])["reasons"] == [{"kind": "free", "group": "work", "minutes": 47,
+                                                                 "step": 2}]
