@@ -342,6 +342,7 @@ public partial class MainWindow
     // after input settles, so moving to our dialogue host or back before then keeps the editor.
     private bool focusDismissPending;
     private Func<bool>? chatForegroundProbe = null;  // native foreground substitution in offline UI tests
+    private bool ChatHasForeground => chatForegroundProbe?.Invoke() ?? IsChatWindow(GetForegroundWindow());
     private void DismissUserBubbleIfUnfocused()
     {
         if (focusDismissPending || lifetime.IsCancellationRequested) return;
@@ -350,7 +351,7 @@ public partial class MainWindow
         {
             focusDismissPending = false;
             if (lifetime.IsCancellationRequested || sending || unresolvedScreen is not null || unknownText is not null) return;
-            if (chatForegroundProbe?.Invoke() ?? IsChatWindow(GetForegroundWindow())) return;
+            if (ChatHasForeground) return;
             if (UserBubble.Visibility != Visibility.Visible) return;
             if (UserSent.Visibility == Visibility.Visible && !string.IsNullOrEmpty(UserSent.Text))
             {
