@@ -915,7 +915,8 @@ def context_view(status: ContextStatus | None) -> dict[str, Any]:
 
 def model_view(view: ModelView) -> dict[str, Any]:
     return {"id": view.model_id, "default_effort": view.default_effort, "efforts": list(view.efforts),
-            "window_known": view.window_known, "default": view.is_default, "images": view.images}
+            "window_known": view.window_known, "default": view.is_default, "images": view.images,
+            "companion": view.companion}
 
 
 def instructions_view(record: Instructions) -> dict[str, Any]:

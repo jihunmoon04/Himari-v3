@@ -554,6 +554,7 @@ class ModelView:
     window_known: bool  # the Provider declares its window (an unknown model's is not checked)
     is_default: bool
     images: bool = False  # the Provider sends it images (V3-P67 §7.1)
+    companion: bool = False  # all companion features verified (V3-P83/84/87/90/91)
 
 
 @dataclass(frozen=True)
@@ -856,6 +857,8 @@ class Application:
     uploads_work: bool = True  # the no-replace rename placing needs works here (review N2)
     views: ViewMaker | None = None  # model copies of images (V3-P67 §3.1); None or unavailable: no copies
     image_models: tuple[str, ...] = ()  # offered models that get images (V3-P67 §7.1)
+    companion_models: tuple[str, ...] = ()  # offered models that satisfy all companion features
+    companion_models_only: bool = False  # only companion-verified models offered / selectable
     documents: DocumentReader | None = None  # read_document's reader (V3-P70); None: not offered
     toolkit: Toolkit | None = field(default=None, repr=False)  # its checked folder, open until close()
     memory_enabled: bool = False  # V3-P71 §9: the memory Tools and notes (HIMARI_MEMORY)
@@ -936,6 +939,7 @@ class Application:
         conversation_search: bool = True,  # V3-P72 §9: HIMARI_CONVERSATION_SEARCH=0 turns its Tools off
         streaming: bool = True,  # V3-P73 §9: HIMARI_STREAMING=0 asks no model for a stream
         companion: bool = True,  # V3-P83 §3: HIMARI_COMPANION=0 refuses pairing and device tokens
+        companion_models_only: bool = False,  # only models satisfying all companion features (needs screen_tool, screen_points, image_input, speaks_first, free_wake)
         time_zone: str = DEFAULT_TIME_ZONE,  # V3-P83 §6.4: HIMARI_TIME_ZONE, the zone the model is told the time in
         machine_socket: str | None = None,  # V3-P74: HIMARI_MACHINE_SOCKET; None: no machine Environment
         machine_principals: Iterable[str] = ("operator",),  # whose new Conversations use it (Q1)
@@ -952,6 +956,7 @@ class Application:
         offers: list[ModelOffer] = []
         unverified: list[str] = []
         image_models: list[str] = []
+        companion_models: list[str] = []
         for offered, effort in models or ((model_id, None),):
             if offered == model_id and effort is None:
                 effort = reasoning_effort
@@ -969,6 +974,15 @@ class Application:
                 unverified.append(offered)
             if capabilities.image_input:
                 image_models.append(offered)
+            if capabilities.companion:
+                companion_models.append(offered)
+        if companion and companion_models_only:
+            if model_id not in companion_models:
+                raise ValueError(f"the default model {model_id!r} does not satisfy companion requirements "
+                                 "(needs screen_tool, screen_points, image_input, speaks_first, free_wake)")
+            unmet = [o.model_id for o in offers if o.model_id not in companion_models]
+            if unmet:
+                raise ValueError(f"models not verified for companion mode offered under companion_models_only: {unmet}")
         catalog = ModelCatalog(tuple(offers), model_id)  # duplicates, the default, efforts (§3)
         default_budget = catalog.default.budget
         assert default_budget is not None
@@ -1082,7 +1096,8 @@ class Application:
                                   listener=listeners)
         application = cls(root, store, runtime.data, runtime, runner, inside, state, model_id,
                           default_budget.limit_tokens, secret, mcp, turn, tuple(unverified), trash_days,
-                          file_max_bytes, uploads_work, views, tuple(image_models), reader, toolkit,
+                          file_max_bytes, uploads_work, views, tuple(image_models),
+                          tuple(companion_models), companion_models_only, reader, toolkit,
                           memory_enabled=memory, conversation_search_enabled=conversation_search,
                           streaming_enabled=streaming, companion_enabled=companion, machine=machine,
                           changes=changes,
@@ -1500,7 +1515,8 @@ class Application:
         catalog = self.runtime.models
         return tuple(ModelView(o.model_id, o.default_effort, ordered_efforts(o.efforts),
                                o.model_id not in self.unverified_models, o.model_id == catalog.default_model,
-                               o.model_id in self.image_models)
+                               o.model_id in self.image_models,
+                               o.model_id in self.companion_models)
                      for o in catalog.offers)
 
     def _choice_view(self, setting: ModelSetting | None, resolved: ResolvedModel) -> ModelChoiceView:
@@ -1529,6 +1545,9 @@ class Application:
             if effort is not None and effort not in offer.efforts:
                 offered = ", ".join(ordered_efforts(offer.efforts)) or "none"
                 raise ModelRefused("invalid_effort", f"Reasoning efforts for this model: {offered}.")
+            if self.companion_enabled and self.companion_models_only and offer.model_id not in self.companion_models:
+                raise ModelRefused("companion_unsupported",
+                                   f"Model {offer.model_id} does not satisfy companion requirements.")
             setting = ModelSetting(model_id, effort)
         await self.data.set_model_setting(scope, setting)
         return await self.model_choice(scope)

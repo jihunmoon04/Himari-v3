@@ -34,6 +34,27 @@ The live checks do not establish comparative quality or reliable Korean chess
 commentary. Sonnet rejected the probe's forced named `tool_choice`; continuation
 passed with the automatic tool selection HIMARI actually uses.
 
+## Companion models (V3-P92, 2026-11-03)
+
+A model supporting all companion agent features requires:
+- `image_input` (V3-P67): reading user images and tool result images.
+- `screen_points` (V3-P84): placing `[[move:X,Y]]` on desktop coordinates within tolerance.
+- `screen_tool` (V3-P91): requesting and parsing active desktop screens on demand.
+- `speaks_first` (V3-P87): proactive speaking on background wake events (wake/reminders).
+- `free_wake` (V3-P90): contextual free wake judgment (answering or passing with `[[pass]]`).
+
+Only three models satisfy all five requirements simultaneously:
+1. `anthropic/claude-haiku-5.5`
+2. `xiaomi/mimo-v2.6-pro`
+3. `deepseek/deepseek-v4.1-flash`
+
+Excluded from all-feature companion mode:
+- `openai/gpt-6-luna`: passes `speaks_first`, `screen_points`, and `screen_tool`, but failed `free_wake` (repeating prior wake output).
+- `openai/gpt-6.1-sol` and `anthropic/claude-sonnet-5.5`: lack verified `speaks_first` and `free_wake`.
+- `openai/gpt-5-nano`, `minimax/minimax-m3`, and `z-ai/glm-5.3`: lack `screen_tool` and/or `screen_points`.
+
+When `HIMARI_COMPANION_MODELS_ONLY=1` is configured, only verified companion models can be offered or selected.
+
 ## Screen tool (V3-P91, 2026-11-03)
 
 `tests/live/test_screen_tool_live.py` checked the eight image models with synthetic

@@ -306,7 +306,7 @@ def test_the_server_info_is_for_the_signed_in_operator(server: Server) -> None:
                     "conversation_search": True,  # V3-P72 §9: on unless HIMARI_CONVERSATION_SEARCH=0
                     "streaming": True,  # V3-P73 §9: on unless HIMARI_STREAMING=0
                     "models": [{"id": "scripted-model", "default_effort": None, "efforts": [], "window_known": False,
-                                "default": True, "images": False}],
+                                "default": True, "images": False, "companion": False}],
                     "turn": {"token_budget": 3_000_000, "unattended_runs": 20, "max_runs": None,
                              "no_progress_runs": 3, "seen_seconds": 60.0}}  # V3-P62's defaults
 
@@ -1035,9 +1035,9 @@ def test_the_offered_models_and_a_conversations_choice(model_server: Server) -> 
     server.sign_in()
     assert server.client.get("/api/server").json()["models"] == [
         {"id": "big", "default_effort": "low", "efforts": ["low", "high", "max"], "window_known": True,
-         "default": False, "images": False},
+         "default": False, "images": False, "companion": False},
         {"id": "scripted-model", "default_effort": None, "efforts": [], "window_known": False, "default": True,
-         "images": False},
+         "images": False, "companion": False},
     ]
     cid = server.post("/api/conversations").json()["id"]
     assert server.client.get(f"/api/conversations/{cid}/model").json() == {

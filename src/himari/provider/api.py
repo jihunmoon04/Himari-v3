@@ -77,6 +77,14 @@ class ProviderCapabilities(DeepFrozen):
     # It is offered the screen Tool (V3-P91 §9): only models that take images and passed
     # the live screen-tool check (look when the answer needs the screen, not otherwise). None yet.
     screen_tool: bool = False
+    # All companion features verified (V3-P83, P84, P87, P90, P91):
+    # image_input, screen_points, screen_tool, speaks_first, and free_wake.
+    companion: bool = False
+
+    @property
+    def companion_capable(self) -> bool:
+        return (self.image_input and self.screen_points and self.screen_tool
+                and self.speaks_first and self.free_wake)
 
 
 @runtime_checkable
