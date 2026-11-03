@@ -2237,14 +2237,19 @@ class SqliteData:
         *,
         title: str | None = None,
         activations: Sequence[InitialActivation] = (),
+        model_setting: ModelSetting | None = None,
     ) -> ConversationId:
         title = rules.normalize_title(title)
         rules.check_activations(activations)
-        with self._tx() as tx:  # T0: the Conversation and its activations, or nothing
+        rules.check_model_setting(model_setting)
+        with self._tx() as tx:  # T0: the Conversation, its activations, and initial model, or nothing
             scope = TrustedScope(principal, ConversationId(tx.new_id("conv")))
             tx.insert_conversation(scope, title)
             for activation in activations:
                 tx.activate(scope, activation.environment_kind, activation.workspace_id, None)
+            if model_setting is not None:
+                tx.execute("INSERT INTO model_settings (conversation_id, model_id, reasoning_effort) VALUES (?, ?, ?)",
+                           scope.conversation_id, model_setting.model_id, model_setting.reasoning_effort)
             return scope.conversation_id
 
     _SUMMARY = (
@@ -2290,13 +2295,22 @@ class SqliteData:
             return None if row is None or row["at"] is None else datetime.fromisoformat(row["at"])
 
     async def most_recent_user_conversation(self, principal: PrincipalId) -> ConversationSummary | None:
+        rows = await self.list_user_conversations(principal, limit=1)
+        return rows[0] if rows else None
+
+    async def list_user_conversations(
+        self, principal: PrincipalId, *, limit: int = 50, offset: int = 0
+    ) -> Sequence[ConversationSummary]:
+        rules.check_page(limit, offset)
         with self._tx() as tx:
-            row = tx.one(
-                f"{self._SUMMARY} WHERE c.conversation_id=(SELECT e.conversation_id FROM events e"
-                " JOIN conversations o ON o.conversation_id=e.conversation_id"
-                " WHERE o.owner=? AND o.trashed_at IS NULL AND e.kind='user_message'"
-                " ORDER BY e.created_at DESC, o.rowid DESC LIMIT 1)", principal)
-            return None if row is None else self._summary(row)
+            rows = tx.all(
+                f"{self._SUMMARY} WHERE c.owner=? AND c.trashed_at IS NULL"
+                " AND EXISTS (SELECT 1 FROM events e WHERE e.conversation_id=c.conversation_id"
+                " AND e.kind='user_message')"
+                " ORDER BY (SELECT MAX(e.created_at) FROM events e"
+                " WHERE e.conversation_id=c.conversation_id AND e.kind='user_message') DESC, c.rowid DESC"
+                " LIMIT ? OFFSET ?", principal, limit, offset)
+            return tuple(self._summary(row) for row in rows)
 
     async def list_conversations(
         self, principal: PrincipalId, *, limit: int = 50, offset: int = 0, trashed: bool = False

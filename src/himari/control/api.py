@@ -311,13 +311,17 @@ class ConversationDriver(Protocol):
                           keys: Sequence[str] = (), reminders: Sequence[int] = ()) -> ConversationEvent:
         """V3-P87 §4.1, §6.1: record a wake (``WakeStore.begin_wake``) under this
         Conversation's lock, after restart cleanup, only when it is settled —
-        else NOT_SETTLED, nothing written. ``resume`` then answers it."""
+        else NOT_SETTLED, nothing written. MODEL_UNCHECKED before persistence
+        unless the model supports speaking first and, on a companion server,
+        declares verified companion support. ``resume_wake`` then answers it."""
         ...
 
     async def resume_wake(self, scope: TrustedScope, wake_id: str, *, stop: StopSignal | None = None,
                           progress: TurnProgress | None = None, max_runs: int | None = None,
                           free: bool = False) -> DriveResult:
-        """V3-P87: ``resume`` for a wake's turn, its model checked again for speaking first.
+        """V3-P87, V3-P92: ``resume`` for a wake's turn, its model checked again
+        against the admission qualification. No longer qualified: withdraw the wake,
+        release its claims and return CANCELLED with detail=model_unchecked, no Run.
         ``free`` (V3-P90 §7.3): a free wake's — held until it speaks, finalized unseen if it passes."""
         ...
 

@@ -915,7 +915,8 @@ def context_view(status: ContextStatus | None) -> dict[str, Any]:
 
 def model_view(view: ModelView) -> dict[str, Any]:
     return {"id": view.model_id, "default_effort": view.default_effort, "efforts": list(view.efforts),
-            "window_known": view.window_known, "default": view.is_default, "images": view.images}
+            "window_known": view.window_known, "default": view.is_default, "images": view.images,
+            "companion": view.companion}
 
 
 def instructions_view(record: Instructions) -> dict[str, Any]:
@@ -1866,7 +1867,12 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
     async def create_conversation(body: CreateBody, request: Request,
                                   by: Caller = Depends(caller)) -> dict[str, Any]:
         application, who = himari(request), by.principal
-        cid = await application.create_conversation(who, title=body.title)
+        initial_model: str | None = None
+        if by.origin.kind == OriginKind.DEVICE:
+            if application.companion_default_model is None:
+                raise ApiError(503, "no_companion_model", "No companion-capable model is offered on this server.")
+            initial_model = application.companion_default_model
+        cid = await application.create_conversation(who, title=body.title, initial_model=initial_model)
         return summary_view(await application.data.read_conversation(scope_of(cid, who)))
 
     async def _detail(application: Application, scope: TrustedScope) -> dict[str, Any]:
@@ -2599,7 +2605,8 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
 
     async def device_state(application: Application, by: Caller) -> dict[str, Any]:
         """What ``GET /api/device`` and ``hello`` both say (appendix A.2, A.3)."""
-        recent = await application.data.most_recent_user_conversation(by.principal)
+        recent = (await application.data.most_recent_user_conversation(by.principal) if by.device is None
+                  else await application.recent_companion_conversation(by.principal))
         quiet = await application.devices.quiet(by.principal)
         return {"device": None if by.device is None else {"device_id": by.device.device_id, "name": by.device.name},
                 "moods": list(MOODS), "current_device": application.hub.current(by.principal),

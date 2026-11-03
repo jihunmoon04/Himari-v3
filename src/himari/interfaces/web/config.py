@@ -100,6 +100,8 @@ MEMORY_TOKENS_VAR = "HIMARI_MEMORY_DAILY_TOKENS"  # V3-P85: each principal's dai
 CONVERSATION_SEARCH_VAR = "HIMARI_CONVERSATION_SEARCH"  # V3-P72: 0 turns it off
 STREAMING_VAR = "HIMARI_STREAMING"  # V3-P73: 0 turns it off
 COMPANION_VAR = "HIMARI_COMPANION"  # V3-P83: 0 turns devices off
+COMPANION_DEFAULT_MODEL_VAR = "HIMARI_COMPANION_DEFAULT_MODEL"  # default companion model for companion devices
+COMPANION_MODELS_ONLY_VAR = "HIMARI_COMPANION_MODELS_ONLY"  # 1: only companion-verified models offered
 TIME_ZONE_VAR = "HIMARI_TIME_ZONE"  # V3-P83: the zone the model is told the time in
 MACHINE_SOCKET_VAR = "HIMARI_MACHINE_SOCKET"  # V3-P74: the runner's socket; unset: no machine Environment
 MACHINE_PRINCIPALS_VAR = "HIMARI_MACHINE_PRINCIPALS"  # V3-P74: whose new Conversations use it
@@ -169,6 +171,8 @@ class WebConfig:
     conversation_search: bool = True
     streaming: bool = True
     companion: bool = True  # V3-P83
+    companion_default_model: str | None = None  # V3-P92: automatic preference unless explicitly configured
+    companion_models_only: bool = False  # only companion-verified models offered
     time_zone: str = DEFAULT_TIME_ZONE  # V3-P83 §6.4
     machine_socket: str | None = None  # V3-P74
     machine_principals: tuple[str, ...] = ("operator",)
@@ -283,6 +287,8 @@ class WebConfig:
             conversation_search=_flag(source.get(CONVERSATION_SEARCH_VAR), CONVERSATION_SEARCH_VAR, default=True),
             streaming=_flag(source.get(STREAMING_VAR), STREAMING_VAR, default=True),
             companion=_flag(source.get(COMPANION_VAR), COMPANION_VAR, default=True),
+            companion_default_model=source.get(COMPANION_DEFAULT_MODEL_VAR, "").strip() or None,
+            companion_models_only=_flag(source.get(COMPANION_MODELS_ONLY_VAR), COMPANION_MODELS_ONLY_VAR, default=False),
             time_zone=_time_zone(source.get(TIME_ZONE_VAR)),
             machine_socket=machine_socket,
             machine_principals=machine_principals,

@@ -292,6 +292,7 @@ class ProactiveScheduler:
 
     def __init__(self, data: SqliteData, hub: PresenceHub, devices: Devices, runner: BackgroundRunner,
                  inputs: Inputs, settings: ProactiveSettings, server_zone: str, *,
+                 recent: Callable[[PrincipalId], Awaitable[ConversationSummary | None]],
                  zones: frozenset[str] = frozenset(), clock: Callable[[], datetime] = lambda: datetime.now(UTC),
                  poke: Callable[[float], None] = lambda after: None,
                  free_ok: Callable[[TrustedScope], Awaitable[bool]] | None = None) -> None:
@@ -302,6 +303,7 @@ class ProactiveScheduler:
         self._zones = zones
         self._clock = clock
         self._poke = poke
+        self._recent = recent
         self._free_ok = free_ok  # V3-P90 §7.5: whether the Conversation's model may take a free wake
         self._returns: dict[PrincipalId, Return] = {}
         self.looks: dict[PrincipalId, Look] = {}
@@ -347,7 +349,7 @@ class ProactiveScheduler:
         device_id = self._hub.current(principal)
         device = None if device_id is None else self._hub.states(principal).get(device_id)
         zone = device.time_zone if device is not None and device.time_zone in self._zones else self._zone
-        recent = await self._data.most_recent_user_conversation(principal)
+        recent = await self._recent(principal)
         unanswered = recent is not None and await self._unanswered(TrustedScope(principal, recent.conversation_id),
                                                                    recent.last_sequence)
         loops = tuple(m for m in await self._data.list_memories(principal) if m.category is MemoryCategory.LOOP)

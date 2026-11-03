@@ -52,7 +52,7 @@ async def ended(app: Application, wake_id: str) -> WakeStatus:
 
 def test_try_speaks_first_on_the_current_device(tmp_path: Path) -> None:
     async def scenario() -> None:
-        adapter = ScriptedAdapter([NormalizedFinal((TextBlock("응"),)), NormalizedFinal((TextBlock("왔어?"),))])
+        adapter = ScriptedAdapter([NormalizedFinal((TextBlock("응"),)), NormalizedFinal((TextBlock("왔어?"),))], companion=True)
         app = await opened(tmp_path, adapter, proactive=ON)
         try:
             device = await current_device(app)
@@ -108,7 +108,7 @@ def test_try_is_refused_with_a_reason(tmp_path: Path) -> None:
 def test_try_never_speaks_over_a_waiting_question(tmp_path: Path) -> None:
     async def scenario() -> None:
         ask = NormalizedToolCalls((ToolCall(CallId("c0"), 0, ToolId(ASK_USER_TOOL_ID), {"question": "어디?"}),))
-        app = await opened(tmp_path, ScriptedAdapter([ask]), proactive=ON)
+        app = await opened(tmp_path, ScriptedAdapter([ask], companion=True), proactive=ON)
         try:
             await current_device(app)
             scope = TrustedScope(ME, await app.create_conversation(ME))
@@ -205,7 +205,11 @@ def test_only_a_checked_model_speaks_first(tmp_path: Path) -> None:
             assert not any(PROACTIVE_RULE in part for part in adapter.prepared_inputs[-1].stable_prefix)
             with pytest.raises(ProactiveRefused) as refused:
                 await app.try_wake(ME)
-            assert refused.value.code == "model_unchecked"
+            assert refused.value.code == "no_conversation"  # no eligible companion conversation
+            from himari.control.api import ControlError, ControlErrorCode
+            with pytest.raises(ControlError) as unchecked:
+                await app.runtime.driver.accept_wake(scope, (WakeReason(WakeKind.TRY),), "d1")
+            assert unchecked.value.code is ControlErrorCode.MODEL_UNCHECKED
             assert await app.data.opened_wakes() == () and await app.data.wakes_since(
                 ME, datetime(2026, 1, 1, tzinfo=UTC)) == ()
         finally:
@@ -226,7 +230,7 @@ def test_a_model_changed_before_the_wakes_turn_withdraws_it(tmp_path: Path) -> N
     """PR #158 review P2-1: admitted on a checked model, the conversation's model changes
     before the job's first Run; the turn checks again, makes no Run and withdraws the wake."""
     async def scenario() -> None:
-        adapter = ScriptedAdapter([NormalizedFinal((TextBlock("응"),)), NormalizedFinal((TextBlock("왔어?"),))])
+        adapter = ScriptedAdapter([NormalizedFinal((TextBlock("응"),)), NormalizedFinal((TextBlock("왔어?"),))], companion=True)
         app = await opened(tmp_path, adapter, proactive=ON)
         try:
             await current_device(app)
@@ -236,6 +240,7 @@ def test_a_model_changed_before_the_wakes_turn_withdraws_it(tmp_path: Path) -> N
             sent = len(adapter.sent)
             _, status = await app.try_wake(ME)  # admitted: the job has not run yet
             adapter._speaks_first = False  # the model the next turn resolves is not checked
+            adapter._companion = False  # Keep the declaration consistent with the simulated capability downgrade.
             done = await app.runner.wait(scope)
             assert done.result is not None and done.result.state is DriveState.CANCELLED
             assert done.result.detail == "model_unchecked"

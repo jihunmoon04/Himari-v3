@@ -88,6 +88,8 @@ def main(argv: list[str] | None = None) -> int:
                                              memory_daily_tokens=config.memory_daily_tokens,
                                              conversation_search=config.conversation_search,
                                              streaming=config.streaming, companion=config.companion,
+                                             companion_default_model=config.companion_default_model,
+                                             companion_models_only=config.companion_models_only,
                                              time_zone=config.time_zone,
                                              machine_socket=config.machine_socket,
                                              machine_principals=config.machine_principals,

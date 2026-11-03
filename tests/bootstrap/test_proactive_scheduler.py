@@ -29,7 +29,7 @@ ON = ProactiveSettings(enabled=True, quiet_start=None, quiet_end=None)
 
 
 def answers(*texts: str) -> ScriptedAdapter:
-    return ScriptedAdapter([NormalizedFinal((TextBlock(t),)) for t in texts])
+    return ScriptedAdapter([NormalizedFinal((TextBlock(t),)) for t in texts], companion=True)
 
 
 async def opened(root: Path, adapter: ScriptedAdapter, settings: ProactiveSettings = ON) -> Application:
@@ -183,26 +183,33 @@ def test_the_ticker_keeps_its_jobs_apart() -> None:
     async def scenario() -> None:
         ticker = Ticker()
         runs: list[str] = []
+        repeated = asyncio.Event()
+        good_runs = [asyncio.Event() for _ in range(3)]
 
         async def failing() -> None:
             runs.append("bad")
+            if runs.count("bad") >= 2:
+                repeated.set()
             raise RuntimeError("boom")
 
         async def good() -> None:
             runs.append("good")
+            good_runs[runs.count("good") - 1].set()
 
         ticker.add("bad", 0.01, failing)
         ticker.add("good", 3600, good)
         ticker.start()
-        await asyncio.sleep(0.05)
-        assert runs.count("bad") >= 2 and runs.count("good") == 1  # the failure goes on, the other is not stopped
-        ticker.poke("good")
-        await asyncio.sleep(0.01)
-        assert runs.count("good") == 2
-        ticker.poke("good", after=0.02)
-        await asyncio.sleep(0.05)
-        assert runs.count("good") == 3
-        await ticker.close()
+        try:
+            await asyncio.wait_for(asyncio.gather(repeated.wait(), good_runs[0].wait()), 2)
+            assert runs.count("bad") >= 2 and runs.count("good") == 1
+            ticker.poke("good")
+            await asyncio.wait_for(good_runs[1].wait(), 2)
+            assert runs.count("good") == 2
+            ticker.poke("good", after=0.02)
+            await asyncio.wait_for(good_runs[2].wait(), 2)
+            assert runs.count("good") == 3
+        finally:
+            await ticker.close()
 
     asyncio.run(scenario())
 
@@ -302,7 +309,7 @@ def test_a_failed_wake_counts_only_when_its_turn_left_output(tmp_path: Path) -> 
 
     async def scenario() -> None:
         calls = NormalizedToolCalls((ToolCall(CallId("c0"), 0, ToolId("nowhere/tool"), {}),), (TextBlock("찾아볼게"),))
-        app = await opened(tmp_path / "data", ScriptedAdapter([NormalizedFinal((TextBlock("응"),)), calls]))
+        app = await opened(tmp_path / "data", ScriptedAdapter([NormalizedFinal((TextBlock("응"),)), calls], companion=True))
         try:
             device = await paired(app)
             app.hub.subscribe(ME, device)
@@ -467,6 +474,10 @@ def test_a_free_wake_that_passes_leaves_nothing_but_a_count(tmp_path: Path) -> N
             await settled(app, scope)
             kinds = [e.kind for e in await app.data.read_events(scope)]
             assert EventKind.WAKE not in kinds  # passed: it never was
+            wake_id = app.runner.status(scope).wake_id
+            assert wake_id is not None
+            record = await app.data.read_wake(ME, wake_id)
+            scheduler._clock = lambda: record.created_at  # Read counters on the persisted wake's day, even near midnight.
             status = await app.proactive_status(ME)
             assert status["today"] == 0 and status["attempts"] == 1
         finally:
@@ -532,6 +543,7 @@ def test_a_free_wake_that_speaks_is_shown_and_answered(tmp_path: Path) -> None:
             record = await app.data.read_wake(ME, wake.payload.wake_id)
             assert record.status.value == "answered"
             assert "A free wake" in "\n".join(adapter.prepared_inputs[-1].stable_prefix)  # its line, for a checked model
+            scheduler._clock = lambda: record.created_at  # The earlier +16 minutes may have crossed local midnight.
             status = await app.proactive_status(ME)
             assert status["today"] == 1 and status["attempts"] == 1
         finally:

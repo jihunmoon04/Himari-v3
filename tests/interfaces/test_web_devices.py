@@ -9,6 +9,7 @@ import secrets
 import time
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta, timezone
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +31,7 @@ from himari.interfaces.web.config import WebConfig, WebConfigError  # noqa: E402
 from himari.presence import devices as presence_devices  # noqa: E402
 from himari.provider.api import NormalizedToolCalls  # noqa: E402
 from himari.provider.scripted import ScriptedAdapter  # noqa: E402
+from himari.provider.api import ProviderCapabilities  # noqa: E402
 
 ORIGIN = "http://testserver"
 SEND = {"origin": ORIGIN}
@@ -88,13 +90,15 @@ class Bare:
 
 
 class Server:
-    def __init__(self, tmp_path: Path, companion: bool = True) -> None:
-        self.provider = ScriptedAdapter([])
+    def __init__(self, tmp_path: Path, companion: bool = True, *, provider: ScriptedAdapter | None = None,
+                 model_id: str = "scripted-model", models: tuple[tuple[str, str | None], ...] = ()) -> None:
+        self.provider = provider if provider is not None else ScriptedAdapter([], companion=companion)
         self.application: Application | None = None
 
         async def opener() -> Application:
-            self.application = await Application.open(tmp_path / "data", self.provider, model_id="scripted-model",
-                                                      sandbox=False, cleanup_seconds=None, companion=companion)
+            self.application = await Application.open(tmp_path / "data", self.provider, model_id=model_id,
+                                                      models=models, sandbox=False, cleanup_seconds=None,
+                                                      companion=companion)
             return self.application
 
         config = WebConfig(host="127.0.0.1", port=8765, allowed_hosts=frozenset({"testserver"}),
@@ -706,3 +710,127 @@ def test_the_task_and_its_end_are_kept_and_shown(server: Server) -> None:
                 {"idle_seconds": 0, "task": {"group": "work", "for_seconds": -1}},
                 {"idle_seconds": 0, "task_ended": {"group": "game", "lasted_seconds": 1}}):
         assert server.device.post("/api/device/presence", json=bad, headers=me).status_code == 400, bad
+
+
+def test_device_conversation_uses_companion_default_model(server: Server) -> None:
+    """Option A: A new conversation created by a device automatically binds to companion_default_model."""
+    me = server.as_device(server.paired())
+    assert server.app.companion_default_model == "scripted-model"
+
+    # Device creates conversation -> automatically bound to companion_default_model
+    device_cid = server.device.post("/api/conversations", json={}, headers=me).json()["id"]
+
+    # Web client signs in and creates conversation -> follows server default (scripted-model)
+    server.sign_in()
+    web_cid = server.client.post("/api/conversations", json={}, headers=SEND).json()["id"]
+    web_model = server.client.get(f"/api/conversations/{web_cid}/model").json()
+    assert web_model["model"] == "scripted-model"
+    assert web_model["chosen"] is None
+    assert web_model["fallback"] is None
+
+    device_model = server.client.get(f"/api/conversations/{device_cid}/model").json()
+    assert device_model["model"] == "scripted-model"
+    assert device_model["chosen"] == {"model": "scripted-model", "effort": None}
+    assert device_model["fallback"] is None
+
+    # If no companion model is offered, device conversation creation is refused with 503
+    server.client.cookies.clear()
+    server.app.companion_default_model = None
+    refused = server.device.post("/api/conversations", json={}, headers=me)
+    assert refused.status_code == 503
+    assert refused.json()["error"]["code"] == "no_companion_model"
+
+
+@pytest.fixture
+def mixed_server(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Server]:
+    class MixedProvider(ScriptedAdapter):
+        def describe_capabilities(self, model_id: str) -> ProviderCapabilities:
+            caps = super().describe_capabilities(model_id)
+            return replace(caps, companion=False, free_wake=False) if model_id == "standard-model" else caps
+
+    monkeypatch.setattr(event_stream, "MAX_SECONDS", 0.02)
+    provider = MixedProvider([final("응") for _ in range(5)], companion=True)
+    s = Server(tmp_path, provider=provider, model_id="standard-model",
+               models=(("standard-model", None), ("companion-model", None)))
+    with s.client:
+        s.sign_in()
+        yield s
+
+
+def test_device_does_not_reuse_an_incompatible_recent_web_conversation(mixed_server: Server) -> None:
+    s = mixed_server
+    me = s.as_device(s.paired())
+    web_cid = s.client.post("/api/conversations", json={}, headers=SEND).json()["id"]
+    assert s.client.post(f"/api/conversations/{web_cid}/messages", json={"text": "web"}, headers=SEND).status_code == 202
+    s.wait(web_cid)
+    assert s.provider.prepared_inputs[-1].request_options.model_id == "standard-model"
+    assert s.client.get("/api/device").json()["recent_conversation"]["id"] == web_cid
+    assert s.device.get("/api/device", headers=me).json()["recent_conversation"] is None
+    assert frames_of(s.device.get("/api/events", headers=me).text)[0][1]["recent_conversation"] is None
+    sent = len(s.provider.sent)
+    before = s.client.get(f"/api/conversations/{web_cid}/events").json()["items"]
+    refused = s.device.post(f"/api/conversations/{web_cid}/messages", json={"text": "device"}, headers=me)
+    assert refused.status_code == 400 and error_code(refused) == "companion_unsupported"
+    assert s.client.get(f"/api/conversations/{web_cid}/events").json()["items"] == before
+    assert len(s.provider.sent) == sent
+    # The reference client creates a new conversation when recent_conversation is null.
+    cid = s.device.post("/api/conversations", json={}, headers=me).json()["id"]
+    assert cid != web_cid
+    assert s.device.post(f"/api/conversations/{cid}/messages", json={"text": "device"}, headers=me).status_code == 202
+    s.wait(cid)
+    assert s.provider.prepared_inputs[-1].request_options.model_id == "companion-model"
+    assert s.device.get("/api/device", headers=me).json()["recent_conversation"]["id"] == cid
+
+
+@pytest.mark.parametrize("with_screen", [False, True])
+def test_device_message_is_refused_after_web_changes_its_model(mixed_server: Server, with_screen: bool) -> None:
+    s = mixed_server
+    me = s.as_device(s.paired())
+    cid = s.device.post("/api/conversations", json={}, headers=me).json()["id"]
+    assert s.device.post(f"/api/conversations/{cid}/messages", json={"text": "first"}, headers=me).status_code == 202
+    s.wait(cid)
+    body = {"text": "must not run"}
+    if with_screen:
+        uploaded = s.device.post(f"/api/conversations/{cid}/uploads", content=png(),
+                                 headers={**me, "content-type": "image/png"})
+        assert uploaded.status_code == 201
+        body["screen"] = uploaded.json()["file_id"]
+    changed = s.client.put(f"/api/conversations/{cid}/model", json={"model": "standard-model"}, headers=SEND)
+    assert changed.status_code == 200
+    assert s.device.get("/api/device", headers=me).json()["recent_conversation"] is None
+    sent = len(s.provider.sent)
+    before = s.client.get(f"/api/conversations/{cid}/events").json()["items"]
+    refused = s.device.post(f"/api/conversations/{cid}/messages", json=body, headers=me)
+    assert refused.status_code == 400 and error_code(refused) == "companion_unsupported"
+    assert len(s.provider.sent) == sent
+    assert s.client.get(f"/api/conversations/{cid}/events").json()["items"] == before
+    if with_screen:
+        assert s.client.put(f"/api/conversations/{cid}/model", json={"model": "companion-model"},
+                            headers=SEND).status_code == 200
+        assert s.device.post(f"/api/conversations/{cid}/messages", json=body, headers=me).status_code == 202
+        s.wait(cid)  # The refused send did not consume the staged screen.
+    else:
+        assert s.client.post(f"/api/conversations/{cid}/messages", json={"text": "web remains allowed"},
+                             headers=SEND).status_code == 202
+        s.wait(cid)
+        assert s.provider.prepared_inputs[-1].request_options.model_id == "standard-model"
+
+
+def test_device_reconnect_reuses_the_latest_compatible_conversation(mixed_server: Server) -> None:
+    s = mixed_server
+    me = s.as_device(s.paired())
+    eligible = []
+    for _ in range(2):
+        cid = s.device.post("/api/conversations", json={}, headers=me).json()["id"]
+        assert s.device.post(f"/api/conversations/{cid}/messages", json={"text": "hello"}, headers=me).status_code == 202
+        s.wait(cid)
+        eligible.append(cid)
+    web = s.client.post("/api/conversations", json={}, headers=SEND).json()["id"]
+    assert s.client.post(f"/api/conversations/{web}/messages", json={"text": "Web Luna"}, headers=SEND).status_code == 202
+    s.wait(web)
+    assert s.client.get("/api/device").json()["recent_conversation"]["id"] == web
+    assert s.device.get("/api/device", headers=me).json()["recent_conversation"]["id"] == eligible[-1]
+    assert frames_of(s.device.get("/api/events", headers=me).text)[0][1]["recent_conversation"]["id"] == eligible[-1]
+    assert s.client.put(f"/api/conversations/{eligible[-1]}/model", json={"model": "standard-model"},
+                        headers=SEND).status_code == 200
+    assert s.device.get("/api/device", headers=me).json()["recent_conversation"]["id"] == eligible[0]

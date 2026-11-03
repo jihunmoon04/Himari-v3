@@ -99,6 +99,7 @@ from himari.data.api import (
     RecentEpisode,
     memory_from_record,
     MessageOrigin,
+    OriginKind,
     MAX_LIST_LIMIT,
     ConversationSummary,
     DEFAULT_FILE_MAX_BYTES,
@@ -219,6 +220,7 @@ class TurnSettings:
 # Default request budget: the model's window, capped so that a long
 # Conversation is compacted before each request costs a whole large window.
 DEFAULT_CONTEXT_TOKENS = 200_000
+DEFAULT_COMPANION_MODEL = "deepseek/deepseek-v4.1-flash"
 UNKNOWN_WINDOW_TOKENS = 128_000  # a model whose window the Provider does not declare
 DEFAULT_OUTPUT_TOKENS = 32_000  # room kept for an answer when the model declares no maximum
 
@@ -554,6 +556,7 @@ class ModelView:
     window_known: bool  # the Provider declares its window (an unknown model's is not checked)
     is_default: bool
     images: bool = False  # the Provider sends it images (V3-P67 §7.1)
+    companion: bool = False  # all companion features verified (V3-P83/84/87/90/91)
 
 
 @dataclass(frozen=True)
@@ -856,6 +859,9 @@ class Application:
     uploads_work: bool = True  # the no-replace rename placing needs works here (review N2)
     views: ViewMaker | None = None  # model copies of images (V3-P67 §3.1); None or unavailable: no copies
     image_models: tuple[str, ...] = ()  # offered models that get images (V3-P67 §7.1)
+    companion_models: tuple[str, ...] = ()  # offered models that satisfy all companion features
+    companion_default_model: str | None = None  # V3-P92: default companion model for companion devices
+    companion_models_only: bool = False  # only companion-verified models offered / selectable
     documents: DocumentReader | None = None  # read_document's reader (V3-P70); None: not offered
     toolkit: Toolkit | None = field(default=None, repr=False)  # its checked folder, open until close()
     memory_enabled: bool = False  # V3-P71 §9: the memory Tools and notes (HIMARI_MEMORY)
@@ -936,6 +942,8 @@ class Application:
         conversation_search: bool = True,  # V3-P72 §9: HIMARI_CONVERSATION_SEARCH=0 turns its Tools off
         streaming: bool = True,  # V3-P73 §9: HIMARI_STREAMING=0 asks no model for a stream
         companion: bool = True,  # V3-P83 §3: HIMARI_COMPANION=0 refuses pairing and device tokens
+        companion_default_model: str | None = None,  # V3-P92: None selects the offered companion default automatically
+        companion_models_only: bool = False,  # only models satisfying all companion features (needs screen_tool, screen_points, image_input, speaks_first, free_wake)
         time_zone: str = DEFAULT_TIME_ZONE,  # V3-P83 §6.4: HIMARI_TIME_ZONE, the zone the model is told the time in
         machine_socket: str | None = None,  # V3-P74: HIMARI_MACHINE_SOCKET; None: no machine Environment
         machine_principals: Iterable[str] = ("operator",),  # whose new Conversations use it (Q1)
@@ -952,6 +960,7 @@ class Application:
         offers: list[ModelOffer] = []
         unverified: list[str] = []
         image_models: list[str] = []
+        companion_models: list[str] = []
         for offered, effort in models or ((model_id, None),):
             if offered == model_id and effort is None:
                 effort = reasoning_effort
@@ -969,6 +978,27 @@ class Application:
                 unverified.append(offered)
             if capabilities.image_input:
                 image_models.append(offered)
+            if capabilities.companion and capabilities.companion_capable:
+                companion_models.append(offered)
+        if companion and companion_models_only:
+            if model_id not in companion_models:
+                raise ValueError(f"the default model {model_id!r} does not satisfy companion requirements "
+                                 "(needs screen_tool, screen_points, image_input, speaks_first, free_wake)")
+            unmet = [o.model_id for o in offers if o.model_id not in companion_models]
+            if unmet:
+                raise ValueError(f"models not verified for companion mode offered under companion_models_only: {unmet}")
+        resolved_companion_default: str | None = None
+        if companion:
+            if companion_default_model is not None:
+                if companion_default_model not in [o.model_id for o in offers]:
+                    raise ValueError(f"the companion default model {companion_default_model!r} is not offered")
+                if companion_default_model not in companion_models:
+                    raise ValueError(f"the companion default model {companion_default_model!r} does not satisfy companion requirements "
+                                     "(needs screen_tool, screen_points, image_input, speaks_first, free_wake)")
+                resolved_companion_default = companion_default_model
+            elif companion_models:
+                resolved_companion_default = (DEFAULT_COMPANION_MODEL if DEFAULT_COMPANION_MODEL in companion_models
+                                              else model_id if model_id in companion_models else companion_models[0])
         catalog = ModelCatalog(tuple(offers), model_id)  # duplicates, the default, efforts (§3)
         default_budget = catalog.default.budget
         assert default_budget is not None
@@ -1082,7 +1112,8 @@ class Application:
                                   listener=listeners)
         application = cls(root, store, runtime.data, runtime, runner, inside, state, model_id,
                           default_budget.limit_tokens, secret, mcp, turn, tuple(unverified), trash_days,
-                          file_max_bytes, uploads_work, views, tuple(image_models), reader, toolkit,
+                          file_max_bytes, uploads_work, views, tuple(image_models),
+                          tuple(companion_models), resolved_companion_default, companion_models_only, reader, toolkit,
                           memory_enabled=memory, conversation_search_enabled=conversation_search,
                           streaming_enabled=streaming, companion_enabled=companion, machine=machine,
                           changes=changes,
@@ -1121,6 +1152,7 @@ class Application:
                 scheduler = ProactiveScheduler(runtime.data, hub, application.devices, runner, application.inputs,
                                                speaking_first, time_zone, zones=zones,
                                                poke=lambda after: ticker.poke("proactive", after),
+                                               recent=application.recent_companion_conversation,
                                                free_ok=runtime.driver.free_wake_ok)
                 hub.on_returned = scheduler.returned
                 application.scheduler = scheduler
@@ -1500,7 +1532,8 @@ class Application:
         catalog = self.runtime.models
         return tuple(ModelView(o.model_id, o.default_effort, ordered_efforts(o.efforts),
                                o.model_id not in self.unverified_models, o.model_id == catalog.default_model,
-                               o.model_id in self.image_models)
+                               o.model_id in self.image_models,
+                               o.model_id in self.companion_models)
                      for o in catalog.offers)
 
     def _choice_view(self, setting: ModelSetting | None, resolved: ResolvedModel) -> ModelChoiceView:
@@ -1511,6 +1544,33 @@ class Application:
         read (NOT_AUTHORIZED)."""
         setting = await self.data.read_model_setting(scope)
         return self._choice_view(setting, self.runtime.models.resolve(setting))
+
+    async def require_companion_model(self, scope: TrustedScope) -> None:
+        """A device may reuse a Conversation only on a currently offered companion model.
+
+        Check the resolved choice, including fallback from a model removed since it was saved.
+        The Driver checks its pinned execution model again before any request is sent.
+        """
+        if (await self.model_choice(scope)).model_id not in self.companion_models:
+            raise ModelRefused("companion_unsupported",
+                               "This conversation needs a companion model for device messages. Choose one on the Web.")
+
+    async def recent_companion_conversation(self, principal: PrincipalId) -> ConversationSummary | None:
+        """The latest user conversation whose next turn resolves to an offered companion model.
+
+        Shared by device reconnects, scheduled wakes/reminders and manual tries.
+        Scan past incompatible conversations, including models removed from the catalog.
+        """
+        if not self.companion_models:
+            return None
+        offset = 0
+        while batch := await self.data.list_user_conversations(principal, offset=offset):
+            for conversation in batch:
+                choice = await self.model_choice(TrustedScope(principal, conversation.conversation_id))
+                if choice.model_id in self.companion_models:
+                    return conversation
+            offset += len(batch)
+        return None
 
     async def set_model(self, scope: TrustedScope, model_id: str | None, effort: str | None) -> ModelChoiceView:
         """This Conversation's choice, kept as made even if it is the default
@@ -1529,6 +1589,9 @@ class Application:
             if effort is not None and effort not in offer.efforts:
                 offered = ", ".join(ordered_efforts(offer.efforts)) or "none"
                 raise ModelRefused("invalid_effort", f"Reasoning efforts for this model: {offered}.")
+            if self.companion_enabled and self.companion_models_only and offer.model_id not in self.companion_models:
+                raise ModelRefused("companion_unsupported",
+                                   f"Model {offer.model_id} does not satisfy companion requirements.")
             setting = ModelSetting(model_id, effort)
         await self.data.set_model_setting(scope, setting)
         return await self.model_choice(scope)
@@ -1830,17 +1893,21 @@ class Application:
             raise DataError(DataErrorCode.NOT_FOUND, "this change cannot be undone")
         return await self.data.restore_memory(principal, before, expected_revision=revision)
 
-    async def create_conversation(self, principal: PrincipalId, *, title: str | None = None) -> ConversationId:
+    async def create_conversation(self, principal: PrincipalId, *, title: str | None = None,
+                                  initial_model: str | None = None) -> ConversationId:
         """T0 with the principal's Inside Workspace activated (provisioned
         first) — or, for a machine principal, the machine Environment (V3-P74
         Q1: new Conversations only; its folder is made on first use)."""
+        setting = ModelSetting(initial_model, None) if initial_model is not None else None
         if self.machine is not None and principal in self.machine_principals:
             return await self.data.create_conversation(
-                principal, title=title, activations=(InitialActivation(MACHINE, machine_workspace_for(principal)),))
+                principal, title=title, activations=(InitialActivation(MACHINE, machine_workspace_for(principal)),),
+                model_setting=setting)
         workspace = workspace_for(principal)
         self.inside.provision(workspace)
         return await self.data.create_conversation(
-            principal, title=title, activations=(InitialActivation(INSIDE, workspace),)
+            principal, title=title, activations=(InitialActivation(INSIDE, workspace),),
+            model_setting=setting,
         )
 
     # --- files (V3-P66) ----------------------------------------------------------------
@@ -1921,6 +1988,8 @@ class Application:
         user's screen and never placed in the Workspace (§4.4); attached once,
         in the message's own transaction (T1)."""
         await self.data.read_conversation(scope)  # 404 before a job is started (or a file read) for a foreign id
+        if origin is not None and origin.kind is OriginKind.DEVICE:
+            await self.require_companion_model(scope)
         if screen is not None:
             async with self._exclusive(scope.conversation_id):
                 (record,) = await self.data.check_attachments(scope, [screen])
@@ -2184,7 +2253,7 @@ class Application:
     # --- speaking first (V3-P87) ----------------------------------------------------------
 
     async def try_wake(self, principal: PrincipalId) -> tuple[ConversationId, JobStatus]:
-        """§11: open a TRY wake now in the most recent conversation, spoken on the
+        """§11: open a TRY wake now in the most recent companion conversation, spoken on the
         current device — past the user's quiet, the quiet hours, gap and daily
         limit (and the ten minutes after a message), never while a job runs or
         in a conversation that is not settled. ProactiveRefused."""
@@ -2193,7 +2262,7 @@ class Application:
         device = self.hub.current(principal)
         if device is None:
             raise ProactiveRefused("no_device")
-        recent = await self.data.most_recent_user_conversation(principal)
+        recent = await self.recent_companion_conversation(principal)
         if recent is None:
             raise ProactiveRefused("no_conversation")
         if self.runner.running(principal):  # §6.1: never while any of the user's conversations works

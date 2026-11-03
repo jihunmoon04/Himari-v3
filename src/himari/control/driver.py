@@ -159,6 +159,7 @@ from himari.provider.api import (
     NormalizedToolCalls,
     OutputDelta,
     ProviderAdapter,
+    ProviderCapabilities,
     ProviderError,
     RawCapture,
 )
@@ -246,6 +247,7 @@ class Driver:
         time_zone: str | None = None,  # V3-P83 §6.4: the zone the turn's time is shown in; None: not shown
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         presence: PresenceSource | None = None,  # V3-P83 §6.2: where the user is; None: not told
+        companion: bool = False,  # V3-P92: device turns require a verified companion model
     ) -> None:
         if any((planner is None) != (offer.budget is None) for offer in models.offers):
             raise ValueError("a context budget needs a compaction planner and vice versa, for every model")
@@ -276,6 +278,7 @@ class Driver:
         self._zone = None if time_zone is None else ZoneInfo(time_zone)
         self._clock = clock
         self._presence = presence
+        self._companion = companion
         # Where the user is, read at the turn's first request — after its message
         # is recorded and the restart cleanup is done (V3-P83 §6.3).
         self._turn_presences: dict[ConversationId, TurnPresence] = {}  # of the drive holding the lock
@@ -305,13 +308,13 @@ class Driver:
                           progress: TurnProgress | None = None, max_runs: int | None = None,
                           free: bool = False) -> DriveResult:
         """V3-P87 (PR #158 review P2-1): a wake's turn. The model is resolved again for
-        this turn: changed meanwhile to one not checked for speaking first, the wake is
+        this turn: changed meanwhile to one not qualified for the wake, the wake is
         withdrawn (cancelled, keys back) and no Run is made. ``free`` (V3-P90 §7.3): what it
         writes is held until it speaks; a pass shows nothing."""
         held = _Held(progress, wake_id, lambda: self._show_free(scope, wake_id)) if free else None
         async with self._exclusive(scope, stop, held if held is not None else progress, max_runs):
             capabilities = self._provider.describe_capabilities(self._turn_model(scope).model_id)
-            if not capabilities.speaks_first or (free and not capabilities.free_wake):
+            if not self._wake_model_ok(capabilities) or (free and not capabilities.free_wake):
                 await self.withdraw_wake(scope, wake_id)
                 return DriveResult(DriveState.CANCELLED, detail=ControlErrorCode.MODEL_UNCHECKED.value)
             if held is not None:
@@ -336,15 +339,20 @@ class Driver:
         """V3-P90 §7.5: whether a free wake may open here — the Conversation's model, as a turn starting
         now would resolve it, was checked for speaking first and for free wakes."""
         capabilities = self._provider.describe_capabilities((await self._resolve_model(scope)).model_id)
-        return capabilities.speaks_first and capabilities.free_wake
+        return self._wake_model_ok(capabilities) and capabilities.free_wake
+
+    def _wake_model_ok(self, capabilities: ProviderCapabilities) -> bool:
+        """Admission and resumed execution enforce the same companion qualification."""
+        return capabilities.speaks_first and (
+            not self._companion or (capabilities.companion and capabilities.companion_capable))
 
     async def accept_wake(self, scope: TrustedScope, reasons: Sequence[WakeReason], device_id: str, *,
                           keys: Sequence[str] = (), reminders: Sequence[int] = ()) -> ConversationEvent:
         if self._wakes is None:
             raise ControlError(ControlErrorCode.NOT_SETTLED, "this server keeps no wakes")
         async with self._exclusive(scope):
-            if not self._provider.describe_capabilities(self._turn_model(scope).model_id).speaks_first:
-                # V3-P87 §13 (owner 2026-11-01): only on a model that passed the speaking-first check
+            if not self._wake_model_ok(self._provider.describe_capabilities(self._turn_model(scope).model_id)):
+                # V3-P87 §13, V3-P92: reject before wake/key/reminder persistence, just as at execution.
                 raise ControlError(ControlErrorCode.MODEL_UNCHECKED, self._turn_model(scope).model_id)
             _, stop = await self._prepare(scope)
             triggers = await self._next_triggers(scope)
@@ -764,6 +772,21 @@ class Driver:
         an unfinished group completed still triggers the Run. Empty if the
         last assistant output is a FINAL with nothing after it."""
         events = await self._log.read_events(scope)
+        if self._companion and scope.conversation_id not in self._turn_sources:
+            # A resumed tool round still belongs to the last input, even when compaction
+            # folded that input out of Prompt's tail. Reuse this complete persisted read.
+            for event in reversed(events):
+                if isinstance(event.payload, AssistantFinal):
+                    break
+                if isinstance(event.payload, UserMessage):
+                    origin = event.payload.origin
+                    self._turn_sources[scope.conversation_id] = TurnSource(
+                        origin.device_id if origin is not None and origin.kind is OriginKind.DEVICE else None)
+                    break
+                if isinstance(event.payload, Wake):
+                    self._turn_sources[scope.conversation_id] = TurnSource(
+                        event.payload.device_id, TurnWake.FREE if free_wake(event.payload.reasons) else TurnWake.OTHER)
+                    break
         triggers: list[TriggerRef] = []
         for event in reversed(events):
             match event.payload:
@@ -891,6 +914,12 @@ class Driver:
             try:
                 inputs = await self._situated(scope, await self._loader.load(
                     scope, triggers, self._options_for(scope), *self._turn_user(scope)))
+                source = self._turn_sources.get(scope.conversation_id)
+                if self._companion and source is not None and source.device_id is not None:
+                    caps = self._provider.describe_capabilities(self._turn_model(scope).model_id)
+                    if not (caps.companion and caps.companion_capable):
+                        return result(DriveState.REQUEST_REJECTED,
+                                      detail="companion_unsupported: the device turn requires a companion model")
                 model_input = self._compose(scope, inputs)
                 model_input, refusal, estimate = await self._fit_budget(scope, triggers, inputs, model_input,
                                                                         compactions)

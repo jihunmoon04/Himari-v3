@@ -571,6 +571,7 @@ def model_command(session: Session, conversation_id: str, words: list[str]) -> i
     for model in session.client.get("/api/server").get("models") or []:
         efforts = model.get("efforts") or []
         about = [part for part in ("default" if model.get("default") else None,
+                                   "companion" if model.get("companion") else None,
                                    f"reasoning: {', '.join(efforts)} (default {model.get('default_effort') or 'none'})"
                                    if efforts else None,
                                    None if model.get("window_known") else "unverified") if part]

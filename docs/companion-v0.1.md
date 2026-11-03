@@ -205,6 +205,7 @@ CREATE TABLE device_ids (owner TEXT PRIMARY KEY, last_id INTEGER NOT NULL) STRIC
   - 코덱의 선택 필드다. `payload_schema_version`은 1 그대로이고(선택 필드를 더한 앞선 예와 같음), 옛 이벤트는 `origin` 없이 읽힌다.
   - 모델 입력의 과거 메시지에는 넣지 않는다(§6.2).
 - **`ConversationCatalog.most_recent_user_conversation(principal)`(검수 C7):** 휴지통 밖에서, 마지막 사용자 메시지(질문의 답 포함)가 가장 늦은 대화. SQLite와 메모리 저장소 둘 다, 계약 시험 묶음에 넣는다.
+- **V3-P92 `ConversationCatalog.list_user_conversations(principal, limit, offset)`:** 위와 같은 사용자 메시지 순서의 페이지 조회. 같은 시각에는 최신 생성 id부터, 빈 대화와 휴지통은 제외한다. Application이 현재 모델 선택을 해석해 가장 최근의 호환 반려 대화를 찾는다.
 - **`created_at` 주석과 Data 계약(검수 C8):** "관측용"을 "관측용. 시각 줄로 모델에게도 보임(V3-P83 §6.4). 순서의 기준은 여전히 `sequence`"로 고친다.
 - 업그레이드는 V3-P65의 업그레이드 전 백업 경로를 탄다.
 
@@ -581,6 +582,8 @@ Authorization: Bearer hd_…
   "limits": {"message_chars": 32000}
 }
 ```
+
+V3-P92: 기기에게 주는 `recent_conversation`은 현재 해석된 모델이 검증된 반려 모델인 대화 중 마지막 사용자 메시지(질문 답 포함)가 가장 최근인 대화다. 최신 Web 대화가 비반려 모델이면 그 앞의 호환 대화를 찾으며, 저장 모델이 사라진 경우에도 현재 fallback 결과로 판단한다. 휴지통과 사용자 메시지가 없는 대화는 제외한다. 호환 대화가 하나도 없을 때만 `null`이며 기기는 반려 기본 모델로 새 대화를 만든다. 이 규칙은 A.3의 `hello`, 스케줄러의 선제 발화·알림, `try_wake()`에도 같다. 호환 대화가 없으면 wake·알림 claim을 만들지 않으며 `try_wake()`는 `no_conversation`이다. 이미 알고 있는 대화 id라도 비반려 모델에 기기 메시지를 보내면 입력·화면을 소비하기 전에 400 `companion_unsupported`로 거부한다. Web이 보던 기존 대화와 모델 선택은 바꾸지 않는다. Driver는 wake·키·알림 claim을 영속화하기 전에 반려 자격을 검사(`model_unchecked`)하고, 접수 뒤 모델이 바뀌면 wake를 철회하고 claim을 반환한다. 실제 실행 모델도 재검사해 비반려 모델의 Run과 압축 요청을 보내지 않는다.
 
 `POST /api/device/presence` 몸 `{"idle_seconds": 12, "time_zone": "Asia/Seoul"}` → 204. `idle_seconds`는 0 이상의 수(30일로 자름), `time_zone`은 64자까지. 틀린 몸은 400, 기기가 아닌 호출은 403 `not_a_device`.
 

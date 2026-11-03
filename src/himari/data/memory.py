@@ -265,10 +265,20 @@ class InMemoryStore:
 
     # --- admin helpers (trusted setup paths, not model-reachable) --------
 
-    def create_conversation(self, scope: TrustedScope, *, title: str | None = None) -> None:
+    def create_conversation(
+        self,
+        scope: TrustedScope,
+        *,
+        title: str | None = None,
+        model_setting: ModelSetting | None = None,
+    ) -> None:
         if scope.conversation_id in self._conversations:
             raise DataError(DataErrorCode.DUPLICATE_IDENTITY, scope.conversation_id)
-        self._conversations[scope.conversation_id] = _Conversation(owner=scope.principal_id, title=title)
+        self._conversations[scope.conversation_id] = _Conversation(
+            owner=scope.principal_id,
+            title=title,
+            model=model_setting,
+        )
 
     def activate_environment(
         self,
@@ -1119,11 +1129,13 @@ class InMemoryData:
         *,
         title: str | None = None,
         activations: Sequence[InitialActivation] = (),
+        model_setting: ModelSetting | None = None,
     ) -> ConversationId:
         title = rules.normalize_title(title)
         rules.check_activations(activations)
+        rules.check_model_setting(model_setting)
         scope = TrustedScope(principal, ConversationId(self._store.new_id("conv")))
-        self._store.create_conversation(scope, title=title)
+        self._store.create_conversation(scope, title=title, model_setting=model_setting)
         for activation in activations:  # validated above: cannot fail half way
             self._store.activate_environment(scope, activation.environment_kind, activation.workspace_id)
         return scope.conversation_id
@@ -1163,14 +1175,22 @@ class InMemoryData:
         return max(times, default=None)
 
     async def most_recent_user_conversation(self, principal: PrincipalId) -> ConversationSummary | None:
-        best: tuple[datetime, int, ConversationId, _Conversation] | None = None
+        rows = await self.list_user_conversations(principal, limit=1)
+        return rows[0] if rows else None
+
+    async def list_user_conversations(
+        self, principal: PrincipalId, *, limit: int = 50, offset: int = 0
+    ) -> Sequence[ConversationSummary]:
+        rules.check_page(limit, offset)
+        rows: list[tuple[datetime, int, ConversationId, _Conversation]] = []
         for i, (cid, conv) in enumerate(self._store._conversations.items()):
             if conv.owner != principal or conv.trashed_at is not None:
                 continue
             times = [e.created_at for e in conv.events if e.kind is EventKind.USER_MESSAGE]
-            if times and (best is None or (max(times), i) > best[:2]):
-                best = (max(times), i, cid, conv)
-        return None if best is None else self._summary(best[2], best[3])
+            if times:
+                rows.append((max(times), i, cid, conv))
+        rows.sort(key=lambda row: row[:2], reverse=True)
+        return tuple(self._summary(cid, conv) for _, _, cid, conv in rows[offset:offset + limit])
 
     async def list_conversations(
         self, principal: PrincipalId, *, limit: int = 50, offset: int = 0, trashed: bool = False

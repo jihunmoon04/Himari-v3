@@ -142,6 +142,7 @@ def build_runtime(
         streaming=streaming,
         time_zone=time_zone,
         presence=presence,
+        companion=spec is not None and spec.companion,
     )
     return Runtime(store=store, data=data, registry=registry, driver=driver, access=access, models=models)
 

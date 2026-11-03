@@ -50,7 +50,7 @@ def answers(n: int = 1, **options: bool) -> ScriptedAdapter:
 
 def test_a_screen_is_named_here_attached_once_and_never_placed(tmp_path: Path) -> None:
     async def scenario() -> None:
-        adapter = answers(image_input=True, screen_points=True)
+        adapter = answers(companion=True)
         app = await opened(tmp_path, adapter)
         try:
             scope = TrustedScope(ME, await app.create_conversation(ME))
@@ -99,7 +99,7 @@ def test_the_move_note_only_for_a_model_that_points_and_neither_with_the_compani
 
 def test_a_screen_is_a_png_or_a_jpeg(tmp_path: Path) -> None:
     async def scenario() -> None:
-        app = await opened(tmp_path, answers())
+        app = await opened(tmp_path, answers(companion=True))
         try:
             scope = TrustedScope(ME, await app.create_conversation(ME))
             before = app.data.blobs.rows.live_total()
@@ -160,7 +160,7 @@ def test_a_broken_screen_is_refused_and_repeating_it_takes_no_more_room(tmp_path
 
 def looks_then_answers() -> ScriptedAdapter:
     return ScriptedAdapter([NormalizedToolCalls((ToolCall(CallId("c0"), 0, ToolId("look_at_screen"), {}),)),
-                            NormalizedFinal((TextBlock("보여요"),))], image_input=True, screen_tool=True)
+                            NormalizedFinal((TextBlock("보여요"),))], companion=True)
 
 
 async def screen_request(stream: Subscription) -> dict[str, object]:
