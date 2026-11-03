@@ -138,8 +138,11 @@ FREE_SCENES = [
     Scene("free_fullscreen_video", (WakeReason(WakeKind.FREE, group="video", minutes=50, step=2),),
           doing=NowDoing(activity="video", app="Chrome", for_minutes=50, fullscreen=True,
                          media=MediaPresence("우주 다큐멘터리 2부", None, "YouTube"))),
+    # PR #169 review P2-1: a call the app can tell — the work went on 40 minutes and Zoom came in front two minutes
+    # ago (chat is neutral: three minutes of it alone and there is no main task, so no free wake). A call behind
+    # another program in front reads as free_mic_not_call: the signals cannot tell them apart (§17.7).
     Scene("free_call", (WakeReason(WakeKind.FREE, group="work", minutes=40, step=2),), expect="pass",
-          doing=NowDoing(activity="chat", app="Zoom", for_minutes=40, mic_or_camera=True)),
+          doing=NowDoing(activity="chat", app="Zoom", for_minutes=2, mic_or_camera=True)),
     Scene("free_fullscreen_game", (WakeReason(WakeKind.FREE, group="game", minutes=80, step=3),), expect="either",
           doing=NowDoing(activity="game", app="League of Legends", for_minutes=80, fullscreen=True)),
     Scene("free_said_it", (WakeReason(WakeKind.FREE, group="work", minutes=75, step=1),), expect="either",
