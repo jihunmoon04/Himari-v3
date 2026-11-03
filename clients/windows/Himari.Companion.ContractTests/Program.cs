@@ -753,6 +753,44 @@ Check(!PresenceBody.Build(3, "z", true, false, null, coding, true, null, true, n
     && !PresenceBody.Build(3, "z", true, true, null, null, true, null, true, null, plain with { FreeWakeScreen = true }, serverTakesFeatures: true).ContainsKey("features"),
     "not to a server without free_wake_screen, nor in a locked body (the server keeps it)");
 
+// V3-P91 §7.1: "look when HIMARI needs to" is on by default and goes in features only to a server that takes it
+Check(new SignalSettings().ScreenLook, "screen look is on by default");
+Check(JsonSerializer.Serialize(PresenceBody.Build(3, "z", true, false, null, coding, true, null, true, null, plain, serverTakesFeatures: true,
+    serverTakesScreenLook: true), JsonSerializerOptions.Web).Contains("\"features\":{\"free_wake_screen\":false,\"screen_look\":true}"),
+    "both settings go together");
+Check(PresenceBody.Build(3, "z", true, false, null, coding, true, null, true, null, plain with { ScreenLook = false }, serverTakesScreenLook: true)["features"]
+    is Dictionary<string, object?> looks && looks["screen_look"] is false && !looks.ContainsKey("free_wake_screen"), "turned off is said, alone");
+Check(PresenceBody.Build(3, "z", true, false, null, coding, true, null, true, null, plain, serverTakesFeatures: true)["features"]
+    is Dictionary<string, object?> older && !older.ContainsKey("screen_look"), "not to a server without screen_look");
+
+// V3-P91 §7.2, §14 Q10: when the app captures for HIMARI, and why not
+var titleNames = SignalSettings.Names(SignalSettings.DefaultTitleExclusions);
+Check(ScreenRequestPolicy.Refusal(true, false, "code", titleNames) is null, "an ordinary program is captured");
+Check(ScreenRequestPolicy.Refusal(true, false, null, titleNames) is null, "nothing known in front is captured");
+Check(ScreenRequestPolicy.Refusal(false, false, "code", titleNames) == "turned_off", "turned off");
+Check(ScreenRequestPolicy.Refusal(true, true, "code", titleNames) == "asleep", "asleep or locked");
+Check(ScreenRequestPolicy.Refusal(true, false, @"C:\Program Files\Kakao\KakaoTalk.exe", titleNames) == "excluded"
+    && ScreenRequestPolicy.Refusal(true, false, "1Password", titleNames) == "excluded", "a program whose titles are not sent is not captured");
+Check(ScreenRequestPolicy.Refusal(false, true, "kakaotalk", titleNames) == "turned_off", "the setting is said first");
+
+// V3-P91 §4.2: the screen goes to its request as bytes, a refusal as its reason; an ended request is 410
+var screenAnswers = new ScreenAnswerHandler();
+using (var screenClient = new ServerClient("https://example.com/", "test", screenAnswers))
+{
+    await screenClient.AnswerScreenAsync("sr_a/b", [0x89, 0x50], "image/png", CancellationToken.None);
+    await screenClient.RefuseScreenAsync("sr_c", "excluded", CancellationToken.None);
+    Check(screenAnswers.Seen.SequenceEqual(new[] { "POST /api/device/screens/sr_a%2Fb image/png 2", "POST /api/device/screens/sr_c/refuse application/json {\"reason\":\"excluded\"}" }),
+        "the screen and the refusal reach their request");
+    bool gone = false;
+    try { await screenClient.AnswerScreenAsync("sr_ended", [1], "image/jpeg", CancellationToken.None); }
+    catch (ApiException ex) when (ex.Status == HttpStatusCode.Gone && ex.Code == "request_ended") { gone = true; }
+    Check(gone, "an ended request is 410 request_ended");
+}
+
+// V3-P91 §14 Q9: the one-time switch is saved, unset in older preferences
+Check(JsonSerializer.Deserialize<WindowPreferences>("{\"Left\":1,\"Top\":2,\"CharacterHeight\":330}")!.ScreenSharingReset is false,
+    "older preferences have not been switched");
+
 var excluded = SignalSettings.Names(SignalSettings.DefaultMicExclusions);
 Check(MicCamera.InUse([(@"C:#Program Files#Zoom#bin#Zoom.exe", 100, 0)], excluded, @"C:\Apps\Himari.Companion.exe"), "another program using the microphone counts");
 Check(!MicCamera.InUse([(@"C:#Program Files#Zoom#bin#Zoom.exe", 100, 200), (@"C:#obs#bin#64bit#obs64.exe", 100, 0),
@@ -989,4 +1027,18 @@ sealed class ScenarioHandler : HttpMessageHandler
         return Json(answered ? "{\"waiting\":null}" : "{\"waiting\":{\"question\":{\"display\":{\"text\":\"어떻게 할까요?\"}}}}" );
     }
     private static HttpResponseMessage Json(string value) => new(HttpStatusCode.OK) { Content = new StringContent(value, Encoding.UTF8, "application/json") };
+}
+sealed class ScreenAnswerHandler : HttpMessageHandler
+{
+    internal List<string> Seen { get; } = [];
+    protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+    {
+        string path = request.RequestUri!.AbsolutePath;
+        if (path.EndsWith("/sr_ended"))
+            return new(HttpStatusCode.Gone) { Content = new StringContent("{\"error\":{\"code\":\"request_ended\"}}", Encoding.UTF8, "application/json") };
+        var bytes = await request.Content!.ReadAsByteArrayAsync(cancellationToken);
+        string type = request.Content.Headers.ContentType!.MediaType!;
+        Seen.Add($"{request.Method} {request.RequestUri.AbsolutePath} {type} " + (type == "application/json" ? Encoding.UTF8.GetString(bytes) : bytes.Length.ToString()));
+        return new(HttpStatusCode.NoContent);
+    }
 }

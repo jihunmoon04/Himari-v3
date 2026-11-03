@@ -65,8 +65,14 @@
           <TextBlock x:Name="HotkeyStatus" Style="{StaticResource Hint}" Margin="0,6,0,8"/>
           <TextBlock Text="히마리와 직전 작업 창을 오갑니다. 이전 작업 창이 없으면 히마리의 입력 포커스를 해제합니다. 히마리가 활성화된 동안 글자를 치면 바로 입력창이 열리고, 작성 중인 글은 유지합니다." Style="{StaticResource Hint}" Margin="0,0,0,10"/>
           <TextBlock Text="Enter로 보내기 · Shift+Enter로 줄바꿈" Style="{StaticResource Hint}"/>
-          <CheckBox x:Name="ScreenSharing" Content="메시지를 보낼 때 화면 함께 첨부" IsChecked="True" Margin="0,12,0,0"/>
-          <TextBlock Text="기본으로 켜져 있습니다. 보내는 순간의 모니터 화면이 서버와 모델에 전달됩니다. 여기서 끄면 글만 보냅니다." Style="{StaticResource Hint}" Margin="0,4,0,0"/>
+        </StackPanel></Border>
+        <Border Style="{StaticResource SectionCard}"><StackPanel>
+          <TextBlock Text="화면" FontSize="16" FontWeight="SemiBold"/>
+          <CheckBox x:Name="ScreenLook" Content="히마리가 필요할 때 화면 보기" IsChecked="True" Margin="0,12,0,0"/>
+          <TextBlock Text="히마리가 화면을 봐야 답할 수 있을 때 지금 화면을 한 장 찍어 봅니다. 찍을 때마다 말풍선에 표시합니다. 서버가 이 기능을 지원할 때만 쓰입니다." Style="{StaticResource Hint}" Margin="0,4,0,0"/>
+          <CheckBox x:Name="ScreenSharing" Content="메시지를 보낼 때마다 화면 함께 첨부" IsChecked="True" Margin="0,12,0,0"/>
+          <TextBlock Text="보내는 순간의 모니터 화면이 서버와 모델에 전달됩니다. 메시지 하나에만 붙이려면 입력창의 화면 단추를 누르세요." Style="{StaticResource Hint}" Margin="0,4,0,0"/>
+          <TextBlock x:Name="ScreenSharingNotice" Text="화면은 이제 히마리가 필요할 때 봅니다. 메시지마다 붙이려면 다시 켜세요." TextWrapping="Wrap" Foreground="#51466F" Margin="0,6,0,0" Visibility="Collapsed"/>
         </StackPanel></Border>
       </StackPanel></ScrollViewer></TabItem>
       <TabItem Header="활동 신호"><ScrollViewer VerticalScrollBarVisibility="Auto"><StackPanel Margin="0,14,8,0">
@@ -75,7 +81,7 @@
           <TextBlock Text="지금 하는 일을 알면 히마리가 상황에 맞게 대화합니다. 보낸 내용은 대화할 때마다 모델에 함께 전달되고, 그 대화를 지우기 전까지 서버의 실행 기록에 남습니다. Web의 Devices 화면에서도 볼 수 있습니다." Style="{StaticResource Hint}" Margin="0,5,0,12"/>
           <CheckBox x:Name="SendActivity" Content="지금 하는 일 (프로그램 분류와 이름, 이어 한 시간)" IsChecked="True"/>
           <CheckBox x:Name="SendTitles" Content="창 제목도 보내기" Margin="0,8,0,0"/>
-          <TextBlock Text="문서 이름, 대화 상대, 보는 페이지가 들어 있을 수 있습니다. 아래 프로그램의 제목은 보내지 않습니다 (한 줄에 하나, 실행 파일 이름)." Style="{StaticResource Hint}" FontSize="12" Margin="0,3,0,4"/>
+          <TextBlock Text="문서 이름, 대화 상대, 보는 페이지가 들어 있을 수 있습니다. 아래 프로그램의 제목은 보내지 않습니다 (한 줄에 하나, 실행 파일 이름). 히마리가 스스로 화면을 볼 때도 이 프로그램이 앞에 있으면 찍지 않습니다." Style="{StaticResource Hint}" FontSize="12" Margin="0,3,0,4"/>
           <TextBox x:Name="TitleExclusions" AcceptsReturn="True" TextWrapping="Wrap" Height="70" VerticalScrollBarVisibility="Auto" AutomationProperties.Name="제목을 보내지 않을 프로그램"/>
           <CheckBox x:Name="SendMedia" Content="재생 중인 음악·영상" Margin="0,12,0,0"/>
           <TextBlock Text="제목·아티스트·앱을 보냅니다. 유튜브 영상 제목처럼 다른 사람이 쓴 글도 모델에 전달됩니다." Style="{StaticResource Hint}" FontSize="12" Margin="0,3,0,0"/>

@@ -66,6 +66,7 @@ public partial class MainWindow
                         }
                     }
                     else if (type == "quiet") QuietFromServer(data, "until");  // V3-P88 §6.2: set on any device or the Web
+                    else if (type == "screen_request") _ = AnswerScreenRequest(local, data, ct);  // V3-P91 §4.1: not waited on here
                     else if (type == "revoked")
                     {
                         DeleteActiveIfCurrent(local); StopConnection(); PairPanel.Visibility = Visibility.Visible;
