@@ -1234,7 +1234,7 @@ class _Held:
         self._show_in_data = show_in_data
         self._shown = False
         self._showing: asyncio.Task[bool] | None = None
-        self._raw = ""  # what it wrote before it was shown, marks and all
+        self._raw = ""  # what this Run wrote before it was shown, marks and all
         self._filter = _PassFilter()
         self._calls: list[Callable[[OutputProgress], None]] = []
 
@@ -1251,6 +1251,9 @@ class _Held:
             self._calls.append(call)
 
     def output_started(self, run_id: RunId) -> None:
+        # PR #173 P1: the pass verdict is per Run; keep the held progress across Runs so a
+        # later spoken answer can still reveal the preceding screen call.
+        self._raw = ""
         self._pass_on(lambda p: p.output_started(run_id))
 
     def output(self, run_id: RunId, delta: OutputDelta) -> None:

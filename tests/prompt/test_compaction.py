@@ -12,6 +12,7 @@ from himari.common import ArtifactId, ConversationId, EventId, RunId, TextBlock
 from himari.data.api import (
     Artifact,
     AssistantFinal,
+    AssistantToolCalls,
     ConversationEvent,
     EventKind,
     EventPayload,
@@ -19,6 +20,9 @@ from himari.data.api import (
     PromptBasis,
     PromptSnapshot,
     UserMessage,
+    Wake,
+    WakeKind,
+    WakeReason,
 )
 from himari.prompt.api import (
     AssistantTurn,
@@ -26,6 +30,7 @@ from himari.prompt.api import (
     ToolGroupTurn,
     CompressedHistory,
     ContextBudget,
+    HistoryPart,
     PromptError,
     PromptErrorCode,
     PromptInputs,
@@ -48,11 +53,12 @@ from himari.prompt.compaction import (
 from himari.tool.api import EffectProfile, ToolDefinition, WorkspaceRequirement
 from himari.prompt.composer import Composer
 
-KINDS = {UserMessage: EventKind.USER_MESSAGE, AssistantFinal: EventKind.ASSISTANT_FINAL}
+KINDS = {UserMessage: EventKind.USER_MESSAGE, AssistantFinal: EventKind.ASSISTANT_FINAL,
+         AssistantToolCalls: EventKind.ASSISTANT_TOOL_CALLS, Wake: EventKind.WAKE}
 
 
 def event(seq: int, payload: EventPayload) -> ConversationEvent:
-    run = RunId(f"r{seq}") if isinstance(payload, AssistantFinal) else None
+    run = RunId(f"r{seq}") if isinstance(payload, (AssistantFinal, AssistantToolCalls)) else None
     return ConversationEvent(EventId(f"e{seq}"), ConversationId("c"), seq, KINDS[type(payload)], payload, 1,
                              datetime(2026, 1, 1, tzinfo=UTC), run)
 
@@ -182,6 +188,42 @@ def test_nothing_is_planned_below_the_threshold_or_with_nothing_to_fold() -> Non
     single = inputs(history("x" * 3000))
     decision = Compactor().decide(single, Composer().compose(single), budget)
     assert decision.estimate.tokens > 1000 and decision.compaction is None
+
+
+@pytest.mark.parametrize("older", [False, True])
+@pytest.mark.parametrize("keep_recent", [0.001, 0.25])
+@pytest.mark.parametrize("finished", [False, True])
+def test_an_unfinished_free_wake_and_its_tool_group_stay_out_of_every_summary(
+    older: bool, keep_recent: float, finished: bool,
+) -> None:
+    prefix = history("old question", "old answer") if older else ()
+    wake = event(len(prefix) + 1, Wake("w1", (WakeReason(WakeKind.FREE),), "d1"))
+    call = ToolCall(CallId("c1"), 0, ToolId("look_at_screen"), {})
+    tool = event(wake.sequence + 1, AssistantToolCalls((call,)))
+    assert tool.origin_run_id is not None
+    parts: tuple[HistoryPart, ...] = (
+        *Composer().compose(inputs(prefix)).conversation,
+        UserTurn(wake.event_id, (TextBlock("hidden wake"),), wake=True),
+        ToolGroupTurn(tool.origin_run_id, (), (call,), {call.call_id: ModelToolResult((TextBlock("screen"),))}),
+    )
+    events = (*prefix, wake, tool)
+    if finished:
+        blocks = (TextBlock("spoken answer"),)
+        answer = event(tool.sequence + 1, AssistantFinal(blocks))
+        events = (*events, answer)
+        parts = (*parts, AssistantTurn(answer.event_id, blocks))
+    data = inputs(events)
+    model_input = dataclasses.replace(Composer().compose(inputs(prefix)), conversation=parts)
+    compactor = Compactor()
+    plan = compactor.plan_now(data, model_input, ContextBudget(limit_tokens=4000, keep_recent=keep_recent))
+    if not older and not finished:
+        assert plan is None  # Nothing may be folded, even if the context is too large.
+    else:
+        assert plan is not None
+        assert (plan.covers_through_sequence >= wake.sequence) is finished
+        text = repr(plan.pieces)
+        assert ("hidden wake" in text) is finished
+        assert ("look_at_screen" in text) is finished
 
 
 def test_the_summarizer_input_is_escaped_data() -> None:
