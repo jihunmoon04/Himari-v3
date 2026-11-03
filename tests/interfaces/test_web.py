@@ -105,6 +105,8 @@ def queue(server: Server, *steps: ScriptStep) -> None:
 
 def test_configuration_rules() -> None:
     base = {"HIMARI_DATA_ROOT": "/srv/himari"}
+    assert WebConfig.from_env(base).companion_default_model is None
+    assert WebConfig.from_env({**base, "HIMARI_COMPANION_DEFAULT_MODEL": " companion/model "}).companion_default_model == "companion/model"
     assert WebConfig.from_env(base).allowed_origins == {"http://127.0.0.1:8765", "http://localhost:8765"}
     with pytest.raises(WebConfigError, match="wildcards"):
         WebConfig.from_env({**base, "HIMARI_WEB_ALLOWED_HOSTS": "*"})

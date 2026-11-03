@@ -363,7 +363,7 @@ def self_test() -> int:
                                         NormalizedToolCalls((ToolCall(CallId("c0"), 0, ToolId("look_at_screen"), {}),)),
                                         NormalizedFinal((TextBlock(SEEN),))],
                                        streaming=True, piece_delay=0.01, first_delay=0.5, image_input=True,
-                                       screen_tool=True)
+                                       screen_tool=True, companion=True)
             application = await Application.open(root, provider, model_id="scripted-model", sandbox=False,
                                                  proactive=ProactiveSettings(enabled=True))
             opened["app"], opened["loop"] = application, asyncio.get_running_loop()

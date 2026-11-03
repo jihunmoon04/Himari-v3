@@ -246,6 +246,7 @@ class Driver:
         time_zone: str | None = None,  # V3-P83 §6.4: the zone the turn's time is shown in; None: not shown
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         presence: PresenceSource | None = None,  # V3-P83 §6.2: where the user is; None: not told
+        companion: bool = False,  # V3-P92: device turns require a verified companion model
     ) -> None:
         if any((planner is None) != (offer.budget is None) for offer in models.offers):
             raise ValueError("a context budget needs a compaction planner and vice versa, for every model")
@@ -276,6 +277,7 @@ class Driver:
         self._zone = None if time_zone is None else ZoneInfo(time_zone)
         self._clock = clock
         self._presence = presence
+        self._companion = companion
         # Where the user is, read at the turn's first request — after its message
         # is recorded and the restart cleanup is done (V3-P83 §6.3).
         self._turn_presences: dict[ConversationId, TurnPresence] = {}  # of the drive holding the lock
@@ -764,6 +766,21 @@ class Driver:
         an unfinished group completed still triggers the Run. Empty if the
         last assistant output is a FINAL with nothing after it."""
         events = await self._log.read_events(scope)
+        if self._companion and scope.conversation_id not in self._turn_sources:
+            # A resumed tool round still belongs to the last input, even when compaction
+            # folded that input out of Prompt's tail. Reuse this complete persisted read.
+            for event in reversed(events):
+                if isinstance(event.payload, AssistantFinal):
+                    break
+                if isinstance(event.payload, UserMessage):
+                    origin = event.payload.origin
+                    self._turn_sources[scope.conversation_id] = TurnSource(
+                        origin.device_id if origin is not None and origin.kind is OriginKind.DEVICE else None)
+                    break
+                if isinstance(event.payload, Wake):
+                    self._turn_sources[scope.conversation_id] = TurnSource(
+                        event.payload.device_id, TurnWake.FREE if free_wake(event.payload.reasons) else TurnWake.OTHER)
+                    break
         triggers: list[TriggerRef] = []
         for event in reversed(events):
             match event.payload:
@@ -891,6 +908,12 @@ class Driver:
             try:
                 inputs = await self._situated(scope, await self._loader.load(
                     scope, triggers, self._options_for(scope), *self._turn_user(scope)))
+                source = self._turn_sources.get(scope.conversation_id)
+                if self._companion and source is not None and source.device_id is not None:
+                    caps = self._provider.describe_capabilities(self._turn_model(scope).model_id)
+                    if not (caps.companion and caps.companion_capable):
+                        return result(DriveState.REQUEST_REJECTED,
+                                      detail="companion_unsupported: the device turn requires a companion model")
                 model_input = self._compose(scope, inputs)
                 model_input, refusal, estimate = await self._fit_budget(scope, triggers, inputs, model_input,
                                                                         compactions)

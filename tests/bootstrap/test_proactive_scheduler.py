@@ -29,7 +29,7 @@ ON = ProactiveSettings(enabled=True, quiet_start=None, quiet_end=None)
 
 
 def answers(*texts: str) -> ScriptedAdapter:
-    return ScriptedAdapter([NormalizedFinal((TextBlock(t),)) for t in texts])
+    return ScriptedAdapter([NormalizedFinal((TextBlock(t),)) for t in texts], companion=True)
 
 
 async def opened(root: Path, adapter: ScriptedAdapter, settings: ProactiveSettings = ON) -> Application:
@@ -302,7 +302,7 @@ def test_a_failed_wake_counts_only_when_its_turn_left_output(tmp_path: Path) -> 
 
     async def scenario() -> None:
         calls = NormalizedToolCalls((ToolCall(CallId("c0"), 0, ToolId("nowhere/tool"), {}),), (TextBlock("찾아볼게"),))
-        app = await opened(tmp_path / "data", ScriptedAdapter([NormalizedFinal((TextBlock("응"),)), calls]))
+        app = await opened(tmp_path / "data", ScriptedAdapter([NormalizedFinal((TextBlock("응"),)), calls], companion=True))
         try:
             device = await paired(app)
             app.hub.subscribe(ME, device)

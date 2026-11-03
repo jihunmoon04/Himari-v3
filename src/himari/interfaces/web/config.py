@@ -171,7 +171,7 @@ class WebConfig:
     conversation_search: bool = True
     streaming: bool = True
     companion: bool = True  # V3-P83
-    companion_default_model: str | None = "deepseek/deepseek-v4.1-flash"  # V3-P92
+    companion_default_model: str | None = None  # V3-P92: automatic preference unless explicitly configured
     companion_models_only: bool = False  # only companion-verified models offered
     time_zone: str = DEFAULT_TIME_ZONE  # V3-P83 §6.4
     machine_socket: str | None = None  # V3-P74
@@ -287,7 +287,7 @@ class WebConfig:
             conversation_search=_flag(source.get(CONVERSATION_SEARCH_VAR), CONVERSATION_SEARCH_VAR, default=True),
             streaming=_flag(source.get(STREAMING_VAR), STREAMING_VAR, default=True),
             companion=_flag(source.get(COMPANION_VAR), COMPANION_VAR, default=True),
-            companion_default_model=source.get(COMPANION_DEFAULT_MODEL_VAR, "").strip() or "deepseek/deepseek-v4.1-flash",
+            companion_default_model=source.get(COMPANION_DEFAULT_MODEL_VAR, "").strip() or None,
             companion_models_only=_flag(source.get(COMPANION_MODELS_ONLY_VAR), COMPANION_MODELS_ONLY_VAR, default=False),
             time_zone=_time_zone(source.get(TIME_ZONE_VAR)),
             machine_socket=machine_socket,

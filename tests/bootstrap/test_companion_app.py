@@ -52,7 +52,7 @@ async def paired(app: Application, name: str = "데스크톱") -> str:
 
 def test_the_runners_events_reach_the_stream(tmp_path: Path) -> None:
     async def scenario() -> None:
-        app = await opened(tmp_path, ScriptedAdapter(two_runs()))
+        app = await opened(tmp_path, ScriptedAdapter(two_runs(), companion=True))
         try:
             scope = TrustedScope(ME, await app.create_conversation(ME))
             stream = app.hub.subscribe(ME)
@@ -85,7 +85,7 @@ def test_the_runners_events_reach_the_stream(tmp_path: Path) -> None:
 
 def test_the_model_is_told_where_the_user_is(tmp_path: Path) -> None:
     async def scenario() -> None:
-        adapter = ScriptedAdapter([*two_runs(), NormalizedFinal((TextBlock("web"),))])
+        adapter = ScriptedAdapter([*two_runs(), NormalizedFinal((TextBlock("web"),))], companion=True)
         app = await opened(tmp_path, adapter)
         try:
             desk = await paired(app)
@@ -116,7 +116,7 @@ def test_the_model_is_told_where_the_user_is(tmp_path: Path) -> None:
 def test_the_model_is_told_what_the_current_device_shows_and_the_quiet(tmp_path: Path) -> None:
     """V3-P88 §7: the current device's signals and the user's quiet, read when the turn starts."""
     async def scenario() -> None:
-        adapter = ScriptedAdapter([NormalizedFinal((TextBlock("hi"),))])
+        adapter = ScriptedAdapter([NormalizedFinal((TextBlock("hi"),))], companion=True)
         app = await opened(tmp_path, adapter)
         try:
             desk = await paired(app)
@@ -143,7 +143,7 @@ def test_the_model_is_told_what_the_current_device_shows_and_the_quiet(tmp_path:
 
 def test_nothing_is_told_without_a_paired_device_or_with_the_companion_off(tmp_path: Path) -> None:
     async def scenario(companion: bool, pair: bool) -> PresenceView | None:
-        adapter = ScriptedAdapter([NormalizedFinal((TextBlock("hi"),))])
+        adapter = ScriptedAdapter([NormalizedFinal((TextBlock("hi"),))], companion=True)
         root = tmp_path / f"{companion}-{pair}"
         root.mkdir()
         app = await opened(root, adapter, companion=companion)

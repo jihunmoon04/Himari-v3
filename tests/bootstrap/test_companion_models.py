@@ -11,8 +11,21 @@ from himari.common import PrincipalId, TrustedScope
 from himari.provider.api import ProviderCapabilities
 from himari.provider.openrouter import KNOWN_CAPABILITIES
 from himari.provider.scripted import ScriptedAdapter
+from himari.control.api import DriveState
+from himari.data.api import MessageOrigin, ModelSetting, OriginKind, PromptBasis, UserMessage, Wake, WakeKind, WakeReason
+from himari.common import TextBlock
+from testkit import calls, final
 
 ALICE = PrincipalId("alice")
+
+
+def mixed_provider() -> FakeProvider:
+    return FakeProvider({
+        "standard-model": ProviderCapabilities("standard-model", speaks_first=True, context_tokens=100_000),
+        "companion-model": ProviderCapabilities("companion-model", image_input=True, screen_points=True,
+                                                screen_tool=True, speaks_first=True, free_wake=True, companion=True,
+                                                context_tokens=100_000),
+    })
 
 
 class FakeProvider(ScriptedAdapter):
@@ -89,6 +102,126 @@ def test_application_companion_model_views(tmp_path: Path) -> None:
         assert views["standard-b"].companion is False
         await app.close()
 
+    asyncio.run(run())
+
+
+def test_explicit_unoffered_companion_default_is_a_startup_error(tmp_path: Path) -> None:
+    async def run() -> None:
+        app = None
+        try:
+            with pytest.raises(ValueError, match="companion default model.*not offered"):
+                app = await Application.open(tmp_path / "app", mixed_provider(), model_id="standard-model",
+                                             models=(("standard-model", None), ("companion-model", None)),
+                                             companion_default_model="missing-model", sandbox=False)
+        finally:
+            if app is not None:
+                await app.close()
+    asyncio.run(run())
+
+
+def test_automatic_companion_default_prefers_deepseek_only_when_offered(tmp_path: Path) -> None:
+    async def run() -> None:
+        from dataclasses import replace
+        from himari.bootstrap.application import DEFAULT_COMPANION_MODEL
+
+        provider = mixed_provider()
+        for preferred in (False, True):
+            models: tuple[tuple[str, str | None], ...] = (("standard-model", None), ("companion-model", None))
+            if preferred:
+                provider._models[DEFAULT_COMPANION_MODEL] = replace(provider._models["companion-model"],
+                                                                    model_id=DEFAULT_COMPANION_MODEL)
+                models = (*models, (DEFAULT_COMPANION_MODEL, None))
+            app = await Application.open(tmp_path / str(preferred), provider, model_id="standard-model",
+                                         models=models, sandbox=False)
+            try:
+                assert app.companion_default_model == (DEFAULT_COMPANION_MODEL if preferred else "companion-model")
+            finally:
+                await app.close()
+    asyncio.run(run())
+
+
+def test_device_rejects_removed_model_fallback_while_web_can_use_it(tmp_path: Path) -> None:
+    async def run() -> None:
+        provider = mixed_provider()
+        provider.extend([final("web answer")])
+        app = await Application.open(tmp_path / "app", provider, model_id="standard-model",
+                                     models=(("standard-model", None), ("companion-model", None)), sandbox=False)
+        try:
+            cid = await app.create_conversation(ALICE, initial_model="companion-model")
+            scope = TrustedScope(ALICE, cid)
+            await app.data.set_model_setting(scope, ModelSetting("retired-model", None))
+            assert (await app.model_choice(scope)).model_id == "standard-model"
+            with pytest.raises(ModelRefused, match="companion model"):
+                await app.send(scope, "device", origin=MessageOrigin(OriginKind.DEVICE, "d1"))
+            assert await app.data.read_events(scope) == () and not provider.sent
+            await app.send(scope, "web", origin=MessageOrigin(OriginKind.WEB))
+            await app.runner.wait(scope)
+            assert provider.prepared_inputs[-1].request_options.model_id == "standard-model"
+        finally:
+            await app.close()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("wake", [False, True])
+def test_device_execution_rechecks_the_resolved_model_after_acceptance(tmp_path: Path, wake: bool) -> None:
+    async def run() -> None:
+        provider = mixed_provider()
+        provider.extend([final("반가워요")])
+        app = await Application.open(tmp_path / "app", provider, model_id="standard-model",
+                                     models=(("standard-model", None), ("companion-model", None)),
+                                     companion_default_model="companion-model", sandbox=False)
+        try:
+            cid = await app.create_conversation(ALICE, initial_model="companion-model")
+            scope = TrustedScope(ALICE, cid)
+            driver = app.runtime.driver
+            if wake:
+                event = await driver.accept_wake(scope, (WakeReason(WakeKind.TRY),), "d1")
+                assert isinstance(event.payload, Wake)
+                wake_id = event.payload.wake_id
+            else:
+                await driver.accept(scope, UserMessage((TextBlock("hello"),), origin=MessageOrigin(OriginKind.DEVICE, "d1")))
+            # Web may change the saved model between durable acceptance and background execution.
+            await app.set_model(scope, "standard-model", None)
+            done = await driver.resume_wake(scope, wake_id) if wake else await driver.resume(scope)
+            assert done.state is DriveState.REQUEST_REJECTED and "companion_unsupported" in done.detail
+            assert not provider.sent and not done.run_ids and not done.compaction_run_ids
+            await app.set_model(scope, "companion-model", None)
+            done = await driver.resume_wake(scope, wake_id) if wake else await driver.resume(scope)
+            assert done.state is DriveState.COMPLETED
+            assert (await app.data.read_run(scope, done.run_ids[-1])).model_id == "companion-model"
+        finally:
+            await app.close()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("folded", [False, True])
+def test_resuming_a_device_tool_round_cannot_lose_the_companion_gate(tmp_path: Path, folded: bool) -> None:
+    async def run() -> None:
+        provider = mixed_provider()
+        provider.extend([calls(("inside/read_file", {"path": "missing.txt"})), final("finished")])
+        app = await Application.open(tmp_path / "app", provider, model_id="standard-model",
+                                     models=(("standard-model", None), ("companion-model", None)), sandbox=False)
+        try:
+            cid = await app.create_conversation(ALICE, initial_model="companion-model")
+            scope = TrustedScope(ALICE, cid)
+            driver = app.runtime.driver
+            await driver.accept(scope, UserMessage((TextBlock("look"),), origin=MessageOrigin(OriginKind.DEVICE, "d1")))
+            assert (await driver.resume(scope, max_runs=1)).state is DriveState.RUN_LIMIT_REACHED
+            assert len(provider.sent) == 1
+            if folded:
+                state = await app.data.read_current_state_basis(scope)
+                await app.data.replace_latest_snapshot(scope, expected_revision=None, schema_version=1,
+                                                       body={"summary": "earlier device input"}, covers_through_sequence=1,
+                                                       basis=PromptBasis(1, state.state_revision))
+            await app.set_model(scope, "standard-model", None)
+            done = await driver.resume(scope)
+            assert done.state is DriveState.REQUEST_REJECTED and "companion_unsupported" in done.detail
+            assert len(provider.sent) == 1
+            await app.set_model(scope, "companion-model", None)
+            assert (await driver.resume(scope)).state is DriveState.COMPLETED
+            assert provider.prepared_inputs[-1].request_options.model_id == "companion-model"
+        finally:
+            await app.close()
     asyncio.run(run())
 
 

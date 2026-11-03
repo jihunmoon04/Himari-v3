@@ -52,7 +52,7 @@ async def ended(app: Application, wake_id: str) -> WakeStatus:
 
 def test_try_speaks_first_on_the_current_device(tmp_path: Path) -> None:
     async def scenario() -> None:
-        adapter = ScriptedAdapter([NormalizedFinal((TextBlock("응"),)), NormalizedFinal((TextBlock("왔어?"),))])
+        adapter = ScriptedAdapter([NormalizedFinal((TextBlock("응"),)), NormalizedFinal((TextBlock("왔어?"),))], companion=True)
         app = await opened(tmp_path, adapter, proactive=ON)
         try:
             device = await current_device(app)
@@ -226,7 +226,7 @@ def test_a_model_changed_before_the_wakes_turn_withdraws_it(tmp_path: Path) -> N
     """PR #158 review P2-1: admitted on a checked model, the conversation's model changes
     before the job's first Run; the turn checks again, makes no Run and withdraws the wake."""
     async def scenario() -> None:
-        adapter = ScriptedAdapter([NormalizedFinal((TextBlock("응"),)), NormalizedFinal((TextBlock("왔어?"),))])
+        adapter = ScriptedAdapter([NormalizedFinal((TextBlock("응"),)), NormalizedFinal((TextBlock("왔어?"),))], companion=True)
         app = await opened(tmp_path, adapter, proactive=ON)
         try:
             await current_device(app)
@@ -236,6 +236,7 @@ def test_a_model_changed_before_the_wakes_turn_withdraws_it(tmp_path: Path) -> N
             sent = len(adapter.sent)
             _, status = await app.try_wake(ME)  # admitted: the job has not run yet
             adapter._speaks_first = False  # the model the next turn resolves is not checked
+            adapter._companion = False  # Keep the declaration consistent with the simulated capability downgrade.
             done = await app.runner.wait(scope)
             assert done.result is not None and done.result.state is DriveState.CANCELLED
             assert done.result.detail == "model_unchecked"

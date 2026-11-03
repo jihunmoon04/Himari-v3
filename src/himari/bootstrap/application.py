@@ -99,6 +99,7 @@ from himari.data.api import (
     RecentEpisode,
     memory_from_record,
     MessageOrigin,
+    OriginKind,
     MAX_LIST_LIMIT,
     ConversationSummary,
     DEFAULT_FILE_MAX_BYTES,
@@ -219,6 +220,7 @@ class TurnSettings:
 # Default request budget: the model's window, capped so that a long
 # Conversation is compacted before each request costs a whole large window.
 DEFAULT_CONTEXT_TOKENS = 200_000
+DEFAULT_COMPANION_MODEL = "deepseek/deepseek-v4.1-flash"
 UNKNOWN_WINDOW_TOKENS = 128_000  # a model whose window the Provider does not declare
 DEFAULT_OUTPUT_TOKENS = 32_000  # room kept for an answer when the model declares no maximum
 
@@ -940,7 +942,7 @@ class Application:
         conversation_search: bool = True,  # V3-P72 §9: HIMARI_CONVERSATION_SEARCH=0 turns its Tools off
         streaming: bool = True,  # V3-P73 §9: HIMARI_STREAMING=0 asks no model for a stream
         companion: bool = True,  # V3-P83 §3: HIMARI_COMPANION=0 refuses pairing and device tokens
-        companion_default_model: str | None = "deepseek/deepseek-v4.1-flash",  # V3-P92: default companion model
+        companion_default_model: str | None = None,  # V3-P92: None selects the offered companion default automatically
         companion_models_only: bool = False,  # only models satisfying all companion features (needs screen_tool, screen_points, image_input, speaks_first, free_wake)
         time_zone: str = DEFAULT_TIME_ZONE,  # V3-P83 §6.4: HIMARI_TIME_ZONE, the zone the model is told the time in
         machine_socket: str | None = None,  # V3-P74: HIMARI_MACHINE_SOCKET; None: no machine Environment
@@ -988,19 +990,15 @@ class Application:
         resolved_companion_default: str | None = None
         if companion:
             if companion_default_model is not None:
-                if companion_default_model in [o.model_id for o in offers]:
-                    if companion_default_model not in companion_models:
-                        raise ValueError(f"the companion default model {companion_default_model!r} does not satisfy companion requirements "
-                                         "(needs screen_tool, screen_points, image_input, speaks_first, free_wake)")
-                    resolved_companion_default = companion_default_model
-                elif companion_models:
-                    resolved_companion_default = companion_models[0]
-                else:
-                    resolved_companion_default = None
+                if companion_default_model not in [o.model_id for o in offers]:
+                    raise ValueError(f"the companion default model {companion_default_model!r} is not offered")
+                if companion_default_model not in companion_models:
+                    raise ValueError(f"the companion default model {companion_default_model!r} does not satisfy companion requirements "
+                                     "(needs screen_tool, screen_points, image_input, speaks_first, free_wake)")
+                resolved_companion_default = companion_default_model
             elif companion_models:
-                resolved_companion_default = model_id if model_id in companion_models else companion_models[0]
-            else:
-                resolved_companion_default = None
+                resolved_companion_default = (DEFAULT_COMPANION_MODEL if DEFAULT_COMPANION_MODEL in companion_models
+                                              else model_id if model_id in companion_models else companion_models[0])
         catalog = ModelCatalog(tuple(offers), model_id)  # duplicates, the default, efforts (§3)
         default_budget = catalog.default.budget
         assert default_budget is not None
@@ -1546,6 +1544,16 @@ class Application:
         setting = await self.data.read_model_setting(scope)
         return self._choice_view(setting, self.runtime.models.resolve(setting))
 
+    async def require_companion_model(self, scope: TrustedScope) -> None:
+        """A device may reuse a Conversation only on a currently offered companion model.
+
+        Check the resolved choice, including fallback from a model removed since it was saved.
+        The Driver checks its pinned execution model again before any request is sent.
+        """
+        if (await self.model_choice(scope)).model_id not in self.companion_models:
+            raise ModelRefused("companion_unsupported",
+                               "This conversation needs a companion model for device messages. Choose one on the Web.")
+
     async def set_model(self, scope: TrustedScope, model_id: str | None, effort: str | None) -> ModelChoiceView:
         """This Conversation's choice, kept as made even if it is the default
         model (V3-P64 Q2); ``model_id`` None: follow the default. No effort:
@@ -1962,6 +1970,8 @@ class Application:
         user's screen and never placed in the Workspace (§4.4); attached once,
         in the message's own transaction (T1)."""
         await self.data.read_conversation(scope)  # 404 before a job is started (or a file read) for a foreign id
+        if origin is not None and origin.kind is OriginKind.DEVICE:
+            await self.require_companion_model(scope)
         if screen is not None:
             async with self._exclusive(scope.conversation_id):
                 (record,) = await self.data.check_attachments(scope, [screen])

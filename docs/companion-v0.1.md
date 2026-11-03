@@ -582,6 +582,8 @@ Authorization: Bearer hd_…
 }
 ```
 
+V3-P92: 기기에게 주는 `recent_conversation`은 현재 해석된 모델이 검증된 반려 모델일 때만 위 값을 준다. 최신 대화가 일반 Web 모델이거나 저장된 모델이 사라져 비반려 모델로 fallback하면 `null`이며, 기기는 반려 기본 모델로 새 대화를 만든다. 이미 알고 있는 대화 id라도 비반려 모델에 기기 메시지를 보내면 입력·화면을 소비하기 전에 400 `companion_unsupported`로 거부한다. Web이 보던 기존 대화와 모델 선택은 바꾸지 않는다. 이 규칙은 A.3의 `hello`에도 같다. 접수 뒤 모델이 바뀐 경우에는 실제 실행 모델을 다시 확인해 비반려 모델의 Run과 압축 요청을 보내지 않는다.
+
 `POST /api/device/presence` 몸 `{"idle_seconds": 12, "time_zone": "Asia/Seoul"}` → 204. `idle_seconds`는 0 이상의 수(30일로 자름), `time_zone`은 64자까지. 틀린 몸은 400, 기기가 아닌 호출은 403 `not_a_device`.
 
 ### A.3 `GET /api/events`

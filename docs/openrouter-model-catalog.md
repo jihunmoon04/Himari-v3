@@ -53,7 +53,11 @@ Excluded from all-feature companion mode:
 - `openai/gpt-6.1-sol` and `anthropic/claude-sonnet-5.5`: lack verified `speaks_first` and `free_wake`.
 - `openai/gpt-5-nano`, `minimax/minimax-m3`, and `z-ai/glm-5.3`: lack `screen_tool` and/or `screen_points`.
 
-When `HIMARI_COMPANION=1`, conversations initiated by a companion device automatically bind to `HIMARI_COMPANION_DEFAULT_MODEL` (default: `deepseek/deepseek-v4.1-flash`), ensuring verified companion capabilities without exposing management endpoints to devices. When `HIMARI_COMPANION_MODELS_ONLY=1` is configured, only verified companion models can be offered or selected server-wide. `ProviderCapabilities` validates that `companion=True` strictly requires `companion_capable=True`.
+When `HIMARI_COMPANION=1`, new device conversations bind atomically to a verified companion model. If `HIMARI_COMPANION_DEFAULT_MODEL` is unset, prefer `deepseek/deepseek-v4.1-flash` when offered; otherwise use the server default if companion-capable, then the first offered companion model. No eligible model means device conversation creation is refused with `503 no_companion_model`, while Web/CLI remain available. An explicitly configured model must be offered and verified; a typo or missing offer is a startup error, never a silent substitution.
+
+Existing conversations retain their saved choice. Device messages on an incompatible resolved model are refused with `400 companion_unsupported` before recording input or consuming a screen. This includes fallback after a saved model is removed. Device `GET /api/device` and SSE `hello` report `recent_conversation: null` when the latest conversation is incompatible, so clients create a new companion conversation. Web discovery and general model selection are unchanged. The Driver also checks the turn's pinned execution model before any answering or compaction request for device messages and wakes, closing the acceptance-to-execution race without changing an in-flight turn's model.
+
+When `HIMARI_COMPANION_MODELS_ONLY=1` is configured, only verified companion models can be offered or selected server-wide. `ProviderCapabilities` validates that `companion=True` strictly requires `companion_capable=True`. The reference device client's self-test and device/wake test providers declare companion capability explicitly; their full request/response checks use scripted outputs, with no paid provider calls.
 
 ## Screen tool (V3-P91, 2026-11-03)
 
