@@ -384,10 +384,11 @@ public partial class MainWindow
         if (pairingInProgress) { Status.Text = "기기 연결 작업이 끝난 뒤 메시지를 보내 주세요."; return; }
         if (!connected || client is null || connection is null || currentConversation is null) return;
         string text = unsent?.Text ?? Input.Text.Trim(); int length = text.EnumerateRunes().Count();
-        bool wantsScreen = settings.ScreenSharing.IsChecked == true;
+        bool wantsScreen = WantsScreen;
         if (length > 32000 || (length == 0 && !wantsScreen && unresolvedScreen is null)) { Status.Text = "메시지를 입력하거나 화면 첨부를 선택해 주세요 (최대 32,000자)."; return; }
         if (unresolvedScreen is { } unresolved && (unresolved.Conversation != currentConversation || unresolved.Text != text)) { Status.Text = "이전 화면 메시지의 전송 여부를 먼저 확인해 주세요. 원래 대화와 입력으로 돌아가 다시 보내기를 누르세요."; return; }
         if (!messageSend.TryEnter()) return;
+        if (screenOnce) { screenOnce = false; UpdateScreenButton(); }  // §7.3: it goes with this message, then the button lets go
         var local = client; var ct = connection.Token;
         var context = new SendContext(local, currentConversation, inputRevision);
         // What is on screen moves up into the stack; the new message comes in below it.
@@ -586,10 +587,13 @@ public partial class MainWindow
         bool sleeps = Prop(Prop(info, "features"), "sleep_signals") is { ValueKind: JsonValueKind.Number } sleep && sleep.GetInt32() == 1;
         bool tasks = Prop(Prop(info, "features"), "task_signals") is { ValueKind: JsonValueKind.Number } task && task.GetInt32() == 1;
         bool features = Prop(Prop(info, "features"), "free_wake_screen") is { ValueKind: JsonValueKind.Number } screen && screen.GetInt32() == 1;
+        bool looks = Prop(Prop(info, "features"), "screen_look") is { ValueKind: JsonValueKind.Number } look && look.GetInt32() == 1;
         if ((takes && !serverTakesSignals) || (sleeps && !serverTakesSleep) || (tasks && !serverTakesTask)
-            || (features && !serverTakesFeatures)) signalSchedule.Urgent();
+            || (features && !serverTakesFeatures) || (looks && !serverTakesScreenLook)) signalSchedule.Urgent();
         serverTakesSignals = takes; serverTakesSleep = sleeps; serverTakesTask = tasks;  // V3-P90 §3.1
         serverTakesFeatures = features;  // V3-P90 §9
+        serverTakesScreenLook = looks;  // V3-P91 §7.1
+        if (looks) ScreenSharingOffOnce();  // V3-P91 §7.3, §14 Q9
         QuietFromServer(info, "quiet_until");
     }
     private async Task PresenceLoop(ServerClient local, CancellationToken ct)

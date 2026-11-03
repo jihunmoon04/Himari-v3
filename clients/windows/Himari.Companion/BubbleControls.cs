@@ -57,13 +57,16 @@ public partial class MainWindow
         CopyReplyButton.Visibility = streaming ? Visibility.Collapsed : Visibility.Visible;
         CopyReplyButton.IsEnabled = !string.IsNullOrWhiteSpace(Message.Text);
         SendButton.Tag = string.IsNullOrWhiteSpace(Input.Text) ? "" : "ready";
-        SendButton.IsEnabled = connected && !sending && (!string.IsNullOrWhiteSpace(Input.Text) || settings.ScreenSharing.IsChecked == true || unresolvedScreen is not null);
-        SendButton.ToolTip = string.IsNullOrWhiteSpace(Input.Text) && settings.ScreenSharing.IsChecked == true ? "화면만 보내기 · Enter" : "보내기 · Enter";
+        SendButton.IsEnabled = connected && !sending && (!string.IsNullOrWhiteSpace(Input.Text) || WantsScreen || unresolvedScreen is not null);
+        SendButton.ToolTip = string.IsNullOrWhiteSpace(Input.Text) && WantsScreen ? "화면만 보내기 · Enter" : "보내기 · Enter";
         UpdateUnsentBubbles();
     }
+    /// <summary>V3-P91 §7.3: the next message, or every one (that is set in the settings only).</summary>
+    private bool WantsScreen => settings.ScreenSharing.IsChecked == true || screenOnce;
     private void ScreenSharingClick(object sender, RoutedEventArgs e)
     {
-        settings.ScreenSharing.IsChecked = settings.ScreenSharing.IsChecked != true;
+        if (settings.ScreenSharing.IsChecked == true) Status.Text = "메시지마다 화면을 붙이는 것은 설정의 대화 화면 탭에서 끕니다.";
+        else { screenOnce = !screenOnce; UpdateScreenButton(); UpdateBubblePresentation(); }
         FocusComposerIfOpen();
     }
     private void CopyReplyClick(object sender, RoutedEventArgs e)

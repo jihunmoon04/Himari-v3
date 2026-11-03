@@ -753,6 +753,83 @@ Check(!PresenceBody.Build(3, "z", true, false, null, coding, true, null, true, n
     && !PresenceBody.Build(3, "z", true, true, null, null, true, null, true, null, plain with { FreeWakeScreen = true }, serverTakesFeatures: true).ContainsKey("features"),
     "not to a server without free_wake_screen, nor in a locked body (the server keeps it)");
 
+// V3-P91 §7.1: "look when HIMARI needs to" is on by default and goes in features only to a server that takes it
+Check(new SignalSettings().ScreenLook, "screen look is on by default");
+Check(JsonSerializer.Serialize(PresenceBody.Build(3, "z", true, false, null, coding, true, null, true, null, plain, serverTakesFeatures: true,
+    serverTakesScreenLook: true), JsonSerializerOptions.Web).Contains("\"features\":{\"free_wake_screen\":false,\"screen_look\":true}"),
+    "both settings go together");
+Check(PresenceBody.Build(3, "z", true, false, null, coding, true, null, true, null, plain with { ScreenLook = false }, serverTakesScreenLook: true)["features"]
+    is Dictionary<string, object?> looks && looks["screen_look"] is false && !looks.ContainsKey("free_wake_screen"), "turned off is said, alone");
+Check(PresenceBody.Build(3, "z", true, false, null, coding, true, null, true, null, plain, serverTakesFeatures: true)["features"]
+    is Dictionary<string, object?> older && !older.ContainsKey("screen_look"), "not to a server without screen_look");
+
+// V3-P91 §7.2, §14 Q10: when the app captures for HIMARI, and why not
+var titleNames = SignalSettings.Names(SignalSettings.DefaultTitleExclusions);
+Check(ScreenRequestPolicy.Refusal(true, false, ["code", "explorer"], titleNames) is null, "ordinary programs are captured");
+Check(ScreenRequestPolicy.Refusal(true, false, [null], titleNames) is null && ScreenRequestPolicy.Refusal(true, false, [], titleNames) is null,
+    "an unknown program or none excludes nothing");
+Check(ScreenRequestPolicy.Refusal(false, false, ["code"], titleNames) == "turned_off", "turned off");
+Check(ScreenRequestPolicy.Refusal(true, true, ["code"], titleNames) == "asleep", "asleep or locked");
+Check(ScreenRequestPolicy.Refusal(true, false, ["code", @"C:\Program Files\Kakao\KakaoTalk.exe"], titleNames) == "excluded"
+    && ScreenRequestPolicy.Refusal(true, false, ["1Password"], titleNames) == "excluded", "a program whose titles are not sent is not captured, in front or not");
+Check(ScreenRequestPolicy.Refusal(false, true, ["kakaotalk"], titleNames) == "turned_off", "the setting is said first");
+// PR #172 review P1-1: VS Code on monitor A, a password manager on monitor B, the capture takes B (the pointer is there)
+PixelRect monitorA = new(0, 0, 1920, 1080), monitorB = new(1920, 0, 2560, 1440);
+VisibleWindow[] desktop = [new("code", new(0, 0, 1920, 1040)), new("1password", new(2200, 100, 900, 700)), new("explorer", new(-5, 1030, 300, 40))];
+Check(ScreenRequestPolicy.Refusal(true, false, ScreenWindows.On(desktop, monitorB), titleNames) == "excluded",
+    "the monitor that is captured is the one checked");
+Check(ScreenRequestPolicy.Refusal(true, false, ScreenWindows.On(desktop, monitorA), titleNames) is null, "the other monitor is captured");
+Check(ScreenWindows.On([new("1password", new(1920, 0, 800, 600))], monitorA).Count() == 0
+    && ScreenWindows.On([new("1password", new(1919, 0, 800, 600))], monitorA).Count() == 1, "a window counts on a monitor it overlaps, and only then");
+
+// PR #172 re-review P2-3: everything is checked again after the capture — turned off or locked meanwhile drops the image
+var settingDuring = new SignalSettings();
+bool lockedDuring = false;
+string? CheckNow() => ScreenRequestPolicy.Refusal(settingDuring.ScreenLook, lockedDuring, ScreenWindows.On(desktop, monitorA), titleNames);
+var turnedOffMidway = await GuardedCapture.RunAsync(CheckNow, async () => { await Task.Yield(); settingDuring = settingDuring with { ScreenLook = false }; return "image"; });
+Check(turnedOffMidway == ("turned_off", null), "turned off during the capture: no image");
+settingDuring = new SignalSettings();
+var lockedMidway = await GuardedCapture.RunAsync(CheckNow, async () => { await Task.Yield(); lockedDuring = true; return "image"; });
+Check(lockedMidway == ("asleep", null), "locked during the capture: no image");
+lockedDuring = false;
+int captures = 0;
+Check(await GuardedCapture.RunAsync(CheckNow, () => { captures++; return Task.FromResult("image"); }) == (null, "image") && captures == 1, "unchanged: the image goes");
+settingDuring = settingDuring with { ScreenLook = false };
+Check(await GuardedCapture.RunAsync(CheckNow, () => { captures++; return Task.FromResult("image"); }) == ("turned_off", null) && captures == 1,
+    "refused before: it does not capture");
+
+// PR #172 review P2-2: captures run one at a time, so one never shows the windows in the middle of another
+var captureGate = new CaptureGate();
+var captureLog = new List<string>();
+var firstHolds = new TaskCompletionSource();
+var firstCapture = captureGate.RunAsync(async () => { captureLog.Add("hide 1"); await firstHolds.Task; captureLog.Add("show 1"); return 1; }, Timeout.InfiniteTimeSpan, CancellationToken.None);
+var secondCapture = captureGate.RunAsync(async () => { captureLog.Add("hide 2"); await Task.Yield(); captureLog.Add("show 2"); return 2; }, Timeout.InfiniteTimeSpan, CancellationToken.None);
+await Task.Delay(50);
+Check(captureLog.SequenceEqual(new[] { "hide 1" }), "the second capture waits for the first");
+Check(await captureGate.RunAsync(() => Task.FromResult(3), TimeSpan.FromMilliseconds(20), CancellationToken.None) is (false, 0),
+    "a request that cannot wait long gives up (it refuses, the server waits 15 s)");
+firstHolds.SetResult();
+Check(await firstCapture == (true, 1) && await secondCapture == (true, 2) && captureLog.SequenceEqual(new[] { "hide 1", "show 1", "hide 2", "show 2" }),
+    "then it runs, after the first has shown the windows again");
+
+// V3-P91 §4.2: the screen goes to its request as bytes, a refusal as its reason; an ended request is 410
+var screenAnswers = new ScreenAnswerHandler();
+using (var screenClient = new ServerClient("https://example.com/", "test", screenAnswers))
+{
+    await screenClient.AnswerScreenAsync("sr_a/b", [0x89, 0x50], "image/png", CancellationToken.None);
+    await screenClient.RefuseScreenAsync("sr_c", "excluded", CancellationToken.None);
+    Check(screenAnswers.Seen.SequenceEqual(new[] { "POST /api/device/screens/sr_a%2Fb image/png 2", "POST /api/device/screens/sr_c/refuse application/json {\"reason\":\"excluded\"}" }),
+        "the screen and the refusal reach their request");
+    bool gone = false;
+    try { await screenClient.AnswerScreenAsync("sr_ended", [1], "image/jpeg", CancellationToken.None); }
+    catch (ApiException ex) when (ex.Status == HttpStatusCode.Gone && ex.Code == "request_ended") { gone = true; }
+    Check(gone, "an ended request is 410 request_ended");
+}
+
+// V3-P91 §14 Q9: the one-time switch is saved, unset in older preferences
+Check(JsonSerializer.Deserialize<WindowPreferences>("{\"Left\":1,\"Top\":2,\"CharacterHeight\":330}")!.ScreenSharingReset is false,
+    "older preferences have not been switched");
+
 var excluded = SignalSettings.Names(SignalSettings.DefaultMicExclusions);
 Check(MicCamera.InUse([(@"C:#Program Files#Zoom#bin#Zoom.exe", 100, 0)], excluded, @"C:\Apps\Himari.Companion.exe"), "another program using the microphone counts");
 Check(!MicCamera.InUse([(@"C:#Program Files#Zoom#bin#Zoom.exe", 100, 200), (@"C:#obs#bin#64bit#obs64.exe", 100, 0),
@@ -989,4 +1066,18 @@ sealed class ScenarioHandler : HttpMessageHandler
         return Json(answered ? "{\"waiting\":null}" : "{\"waiting\":{\"question\":{\"display\":{\"text\":\"어떻게 할까요?\"}}}}" );
     }
     private static HttpResponseMessage Json(string value) => new(HttpStatusCode.OK) { Content = new StringContent(value, Encoding.UTF8, "application/json") };
+}
+sealed class ScreenAnswerHandler : HttpMessageHandler
+{
+    internal List<string> Seen { get; } = [];
+    protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+    {
+        string path = request.RequestUri!.AbsolutePath;
+        if (path.EndsWith("/sr_ended"))
+            return new(HttpStatusCode.Gone) { Content = new StringContent("{\"error\":{\"code\":\"request_ended\"}}", Encoding.UTF8, "application/json") };
+        var bytes = await request.Content!.ReadAsByteArrayAsync(cancellationToken);
+        string type = request.Content.Headers.ContentType!.MediaType!;
+        Seen.Add($"{request.Method} {request.RequestUri.AbsolutePath} {type} " + (type == "application/json" ? Encoding.UTF8.GetString(bytes) : bytes.Length.ToString()));
+        return new(HttpStatusCode.NoContent);
+    }
 }

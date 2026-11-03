@@ -52,6 +52,9 @@
         <Separator/><MenuItem Header="숨기기" Click="HideClick"/><MenuItem Header="종료" Click="ExitClick"/>
       </ContextMenu></Image.ContextMenu>
     </Image>
+    <Border x:Name="ScreenLookNotice" HorizontalAlignment="Center" VerticalAlignment="Top" Margin="0,8,0,0" Padding="7,3" CornerRadius="3" Background="#F4F0FA" BorderBrush="#B9AEDB" BorderThickness="1" IsHitTestVisible="False" Visibility="Collapsed" AutomationProperties.Name="화면 보는 중">
+      <StackPanel Orientation="Horizontal"><local:BubbleGlyph Kind="Monitor" Width="14" Height="14" Foreground="{StaticResource BubbleAccent}" Margin="0,0,5,0" VerticalAlignment="Center"/><TextBlock Text="화면 보는 중" FontSize="12" Foreground="#51466F" VerticalAlignment="Center"/></StackPanel>
+    </Border>
     <Button x:Name="ConnectionNotice" Width="24" Height="24" MinHeight="24" Padding="0" Content="!" FontWeight="Bold" Foreground="#80501D" Background="#FFF5DB" BorderBrush="#B69254" HorizontalAlignment="Center" VerticalAlignment="Bottom" Margin="220,0,0,24" Visibility="Collapsed" ToolTip="{Binding Text, ElementName=Status}" AutomationProperties.Name="연결 상태 확인" AutomationProperties.HelpText="{Binding Text, ElementName=Status}" Click="SettingsClick"/>
   </Grid>
 </Window>

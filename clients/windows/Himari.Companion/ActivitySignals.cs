@@ -5,10 +5,11 @@ namespace Himari.Companion;
 
 /// <summary>What the user chose to send (V3-P88 §4.3, §5, §6.1, Q2, Q3): media and titles are off by default.</summary>
 /// <summary>What is sent (V3-P88 §14). <c>FreeWakeScreen</c> (V3-P90 §9): the screen may go to a free wake — kept by the
-/// server only, for the screen tool (§10).</summary>
+/// server only, for the screen tool (§10). <c>ScreenLook</c> (V3-P91 §7.1): HIMARI may look at the screen when it needs
+/// to — on by default, sent likewise.</summary>
 internal sealed record SignalSettings(bool Activity = true, bool Media = false, bool Titles = false, bool MicCamera = true,
     string TitleExclusions = SignalSettings.DefaultTitleExclusions, string MicExclusions = SignalSettings.DefaultMicExclusions,
-    string CategoryOverrides = "", bool FreeWakeScreen = false)
+    string CategoryOverrides = "", bool FreeWakeScreen = false, bool ScreenLook = true)
 {
     internal const string DefaultTitleExclusions = "kakaotalk\ndiscord\nslack\ntelegram\nline\nwhatsapp\nsignal\n1password\nbitwarden\nkeepass\nkeepassxc";
     internal const string DefaultMicExclusions = "obs64\nobs32\nsoundrecorder\nwindowssoundrecorder\nvoicerecorder";
@@ -201,7 +202,8 @@ internal static class MicCamera
 
 /// <summary>The presence body (V3-P88 §2.1, §14): the whole snapshot; a signal the user turned off is left out.
 /// V3-P90 §3.1: <c>sleep</c> (null awake, "idle", "display_off") when the server takes it; a locked body leaves
-/// it out (the server keeps it). §9: <c>features</c>, the app's settings the server keeps, likewise.</summary>
+/// it out (the server keeps it). §9: <c>features</c>, the app's settings the server keeps, likewise — each one only to a
+/// server that says it takes it (V3-P91 §7.1: <c>screen_look</c>).</summary>
 internal static class PresenceBody
 {
     internal const int NameChars = 64, TitleChars = 120;
@@ -209,7 +211,8 @@ internal static class PresenceBody
     internal static Dictionary<string, object?> Build(int idleSeconds, string timeZone, bool serverTakesSignals, bool locked,
         string? after, ActivityState? activity, bool activityKnown, MediaInfo? media, bool mediaKnown, bool? micOrCamera,
         SignalSettings settings, IReadOnlySet<string>? titleExclusions = null, bool serverTakesSleep = false, string? sleep = null,
-        bool serverTakesTask = false, TaskState? task = null, TaskEndedState? taskEnded = null, bool serverTakesFeatures = false)
+        bool serverTakesTask = false, TaskState? task = null, TaskEndedState? taskEnded = null, bool serverTakesFeatures = false,
+        bool serverTakesScreenLook = false)
     {
         var body = new Dictionary<string, object?> { ["idle_seconds"] = idleSeconds, ["time_zone"] = timeZone };
         if (!serverTakesSignals) return body;  // an older server refuses fields it does not know
@@ -217,8 +220,13 @@ internal static class PresenceBody
         if (after is not null && !locked) body["after"] = after;
         if (locked) return body;  // nothing is in front of a locked screen
         if (serverTakesSleep) body["sleep"] = sleep;
-        if (serverTakesFeatures)
-            body["features"] = new Dictionary<string, object?> { ["free_wake_screen"] = settings.FreeWakeScreen };
+        if (serverTakesFeatures || serverTakesScreenLook)
+        {
+            var features = new Dictionary<string, object?>();
+            if (serverTakesFeatures) features["free_wake_screen"] = settings.FreeWakeScreen;
+            if (serverTakesScreenLook) features["screen_look"] = settings.ScreenLook;
+            body["features"] = features;
+        }
         if (serverTakesTask && settings.Activity)  // V3-P90 §3.1: the task is the activity's, sent only with it
         {
             body["task"] = task is null ? null : new Dictionary<string, object?> { ["group"] = task.Group, ["for_seconds"] = (int)task.ForSeconds };
@@ -333,4 +341,20 @@ internal static class QuietTimes
     internal static string Describe(DateTimeOffset? until, DateTimeOffset now) => until is not { } end || end <= now
         ? "히마리가 먼저 말을 걸 수 있어요"
         : $"조용히: {end.ToLocalTime():M월 d일 HH:mm}까지";
+}
+
+/// <summary>V3-P91 §7.2: whether the app takes a screen request now, or the reason it gives the server.</summary>
+internal static class ScreenRequestPolicy
+{
+    /// <summary>Null: capture. <paramref name="programs"/> are those with a window on the monitor to be captured
+    /// (<c>ScreenWindows.On</c>), checked against the title exclusions (§14 Q10); an unknown one excludes nothing.</summary>
+    internal static string? Refusal(bool screenLook, bool asleep, IEnumerable<string?> programs, IReadOnlySet<string> excluded)
+    {
+        if (!screenLook) return "turned_off";
+        if (asleep) return "asleep";  // asleep, locked or the display off (V3-P90 §2)
+        return Excludes(programs, excluded) ? "excluded" : null;
+    }
+
+    internal static bool Excludes(IEnumerable<string?> programs, IReadOnlySet<string> excluded) =>
+        programs.Any(p => !string.IsNullOrEmpty(p) && excluded.Contains(ActivityCatalog.ProgramKey(p)));
 }

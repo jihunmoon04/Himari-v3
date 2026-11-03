@@ -18,6 +18,8 @@ public partial class MainWindow
     private readonly WorkWindowHistory workWindow = new();
     private IntPtr lastWorkWindow => workWindow.Target;
     private bool captureFromWorkWindow;
+    private bool screenSharingReset;  // V3-P91 §14 Q9, saved
+    private bool screenOnce;  // V3-P91 §7.3: the composer's button puts the screen on the next message only
     private bool awaitingAnswer;
     private readonly DispatcherTimer saveTimer = new() { Interval = TimeSpan.FromMilliseconds(750) };
     private readonly DispatcherTimer bubbleTimer = new();
@@ -47,6 +49,7 @@ public partial class MainWindow
         settings.ChatHotkey.SelectionChanged += (_, _) => { if (hotKeySource is not null && !changingHotkey) RegisterSelectedHotkey(); };
         settings.ScreenSharing.Checked += (_, _) => PresentationChanged();
         settings.ScreenSharing.Unchecked += (_, _) => PresentationChanged();
+        settings.ScreenSharing.Checked += (_, _) => settings.ScreenSharingNotice.Visibility = Visibility.Collapsed;
         settings.FacingLeft.Checked += (_, _) => PresentationChanged();
         settings.FacingLeft.Unchecked += (_, _) => PresentationChanged();
         settings.BubbleMinimum.ValueChanged += (_, _) => PresentationChanged();
@@ -69,6 +72,7 @@ public partial class MainWindow
             legacyWindowPosition = p.LayoutVersion < 1;
             settings.MoveEnabled.IsChecked = p.MoveEnabled;
             settings.ScreenSharing.IsChecked = p.ScreenSharing; settings.FacingLeft.IsChecked = p.FacingLeft;
+            screenSharingReset = p.ScreenSharingReset;
             settings.BubbleMinimum.Value = p.BubbleMinimum; settings.SecondsPer100.Value = p.SecondsPer100;
             settings.ChatHotkey.SelectedItem = p.ChatHotkey; registeredHotkey = p.ChatHotkey;
             settings.BubblePlacement.SelectedItem = p.BubblePlacement;
@@ -170,14 +174,19 @@ public partial class MainWindow
         Character.RenderTransform = new ScaleTransform(flip ? -1 : 1, 1);
         UpdateDialoguePosition();
         BubblePanel.TailRight = flip; UserBubble.TailRight = !flip; FlipMenu.IsChecked = flip;
-        bool sharing = settings.ScreenSharing.IsChecked == true;
+        UpdateScreenButton();
+        UpdateBubblePresentation();
+        UpdateBubbleBounds(); SchedulePreferencesSave();
+    }
+    /// <summary>V3-P91 §7.3: on with "attach to every message" (set in the settings) or for the next message only.</summary>
+    private void UpdateScreenButton()
+    {
+        bool every = settings.ScreenSharing.IsChecked == true, sharing = every || screenOnce;
         ScreenSharingIndicator.Kind = sharing ? BubbleGlyphKind.Monitor : BubbleGlyphKind.MonitorOff;
-        string sharingDescription = sharing ? "화면 함께 보내기 켜짐" : "화면 함께 보내기 꺼짐";
+        string sharingDescription = every ? "메시지마다 화면 함께 보내기 켜짐 (설정)" : screenOnce ? "이번 메시지에 화면 붙임" : "이번 메시지에 화면 붙이기";
         ScreenSharingButton.ToolTip = sharingDescription;
         ScreenSharingButton.Foreground = (System.Windows.Media.Brush)FindResource(sharing ? "BubbleAccent" : "BubbleMuted");
         System.Windows.Automation.AutomationProperties.SetName(ScreenSharingButton, sharingDescription);
-        UpdateBubblePresentation();
-        UpdateBubbleBounds(); SchedulePreferencesSave();
     }
     private void UpdateDialoguePosition()
     {
@@ -252,7 +261,7 @@ public partial class MainWindow
     private void SaveWindowPreferences()
     {
         if (!preferencesLoaded || !double.IsFinite(Left) || !double.IsFinite(Top)) return;
-        try { new WindowPreferences(Left, Top, SizeSlider.Value, settings.MoveEnabled.IsChecked == true, settings.ScreenSharing.IsChecked == true, settings.FacingLeft.IsChecked == true, settings.BubbleMinimum.Value, settings.SecondsPer100.Value, registeredHotkey, settings.BubblePlacement.SelectedItem as string ?? "상하 자동", 1, ReadSignalControls()).Save(); }
+        try { new WindowPreferences(Left, Top, SizeSlider.Value, settings.MoveEnabled.IsChecked == true, settings.ScreenSharing.IsChecked == true, settings.FacingLeft.IsChecked == true, settings.BubbleMinimum.Value, settings.SecondsPer100.Value, registeredHotkey, settings.BubblePlacement.SelectedItem as string ?? "상하 자동", 1, ReadSignalControls(), screenSharingReset).Save(); }
         catch (Exception ex) when (ex is System.IO.IOException or UnauthorizedAccessException) { System.Diagnostics.Trace.TraceWarning("HIMARI: could not save window preferences: {0}", ex.Message); }
     }
     private void CleanupWindowControls()

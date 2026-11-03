@@ -5,8 +5,10 @@ namespace Himari.Companion;
 
 internal sealed record WindowPreferences(double Left, double Top, double CharacterHeight, bool MoveEnabled = true,
     bool ScreenSharing = true, bool FacingLeft = false, double BubbleMinimum = 8, double SecondsPer100 = 8, string ChatHotkey = "Alt+Q",
-    string BubblePlacement = "상하 자동", int LayoutVersion = 0, SignalSettings? Signals = null)
+    string BubblePlacement = "상하 자동", int LayoutVersion = 0, SignalSettings? Signals = null, bool ScreenSharingReset = false)
 {
+    // ScreenSharingReset (V3-P91 §14 Q9): "attach to every message" was turned off once, when the server first said it
+    // can ask for the screen; it is never turned off again.
     internal static WindowPreferences Normalize(WindowPreferences value, double left, double top, double width, double height, double windowWidth, double windowHeight)
     {
         double x = double.IsFinite(value.Left) ? value.Left : left;

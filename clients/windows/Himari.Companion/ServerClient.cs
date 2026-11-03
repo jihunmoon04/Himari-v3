@@ -61,6 +61,20 @@ internal sealed class ServerClient : IDisposable
         using var response = await http.SendAsync(request, ct);
         return await ReadAsync(response, ct);
     }
+    /// <summary>V3-P91 §4.2: the screen a request asked for. 410 (request_ended) when it ended meanwhile.</summary>
+    internal async Task AnswerScreenAsync(string requestId, byte[] bytes, string contentType, CancellationToken ct)
+    {
+        if (contentType is not ("image/png" or "image/jpeg")) throw new ArgumentException("Unsupported screen image format.", nameof(contentType));
+        if (bytes.Length == 0 || bytes.Length > 8 * 1024 * 1024) throw new ArgumentException("Invalid screen image size.", nameof(bytes));
+        using var request = Request(HttpMethod.Post, "/api/device/screens/" + Uri.EscapeDataString(requestId));
+        request.Content = new ByteArrayContent(bytes);
+        request.Content.Headers.ContentType = new MediaTypeHeaderValue(contentType);
+        using var response = await http.SendAsync(request, ct);
+        await ReadAsync(response, ct);
+    }
+    /// <summary>V3-P91 §4.2: no screen for this request, and why (capture_failed, excluded, turned_off, asleep).</summary>
+    internal Task RefuseScreenAsync(string requestId, string reason, CancellationToken ct) =>
+        SendAsync(HttpMethod.Post, "/api/device/screens/" + Uri.EscapeDataString(requestId) + "/refuse", new { reason }, ct);
     private static async Task<JsonElement> ReadAsync(HttpResponseMessage response, CancellationToken ct)
     {
         if (response.StatusCode == HttpStatusCode.NoContent) return default;

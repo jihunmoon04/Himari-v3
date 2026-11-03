@@ -81,10 +81,24 @@ internal static class PresentationChecks
         status.Text = "이전 메시지의 접수 여부를 확인하지 못했습니다. 다시 보내면 중복될 수 있습니다."; Pump();
         check(userStatus.Text == "보냈는지 확인이 필요해요." && ((TextBlock)w.FindName("StatusActionText")).Text == "확인", "uncertain delivery points to confirmation rather than resubmitting automatically");
         Call(w, "SetConnected", false, "연결되지 않음");
-        bool sharing = ((CheckBox)settings.FindName("ScreenSharing")).IsChecked == true;
+        var every = (CheckBox)settings.FindName("ScreenSharing"); var glyph = (BubbleGlyph)w.FindName("ScreenSharingIndicator");
+        every.IsChecked = true;
         Call(w, "ScreenSharingClick", w, new RoutedEventArgs());
-        check(((CheckBox)settings.FindName("ScreenSharing")).IsChecked != sharing && ((BubbleGlyph)w.FindName("ScreenSharingIndicator")).Kind == BubbleGlyphKind.MonitorOff, "attachment action changes the next message setting and matching glyph");
+        check(every.IsChecked == true && glyph.Kind == BubbleGlyphKind.Monitor, "V3-P91 §7.3: with every message on, the button leaves that setting alone");
+        every.IsChecked = false;
         Call(w, "ScreenSharingClick", w, new RoutedEventArgs());
+        check(every.IsChecked == false && glyph.Kind == BubbleGlyphKind.Monitor, "the button puts the screen on the next message only");
+        Call(w, "ScreenSharingClick", w, new RoutedEventArgs());
+        check(glyph.Kind == BubbleGlyphKind.MonitorOff, "pressed again, it lets go");
+        every.IsChecked = true; Call(w, "ScreenSharingOffOnce");
+        var notice = (TextBlock)settings.FindName("ScreenSharingNotice");
+        check(every.IsChecked == false && notice.Visibility == Visibility.Visible, "§14 Q9: the first server that asks for the screen turns every-message off once, with a note");
+        every.IsChecked = true; Call(w, "ScreenSharingOffOnce");
+        check(every.IsChecked == true && notice.Visibility == Visibility.Collapsed, "and never again; turning it back on hides the note");
+        var shown = (List<VisibleWindow>)Call(w, "VisibleWindows")!;
+        string own = ActivityCatalog.ProgramKey(Environment.ProcessPath);
+        check(shown.All(x => x.Frame.Width > 0 && x.Frame.Height > 0) && !shown.Any(x => string.Equals(x.Program, own, StringComparison.OrdinalIgnoreCase)),
+            "V3-P91 §14 Q10: the windows checked for a screen request have a visible frame and leave out HIMARI's own");
         Call(w, "SetConnected", true, "연결됨"); ((CheckBox)settings.FindName("ScreenSharing")).IsChecked = false; input.Clear();
         check(!((Button)w.FindName("SendButton")).IsEnabled, "blank text with no attachment has no send action");
         var attachmentButton = (Button)w.FindName("ScreenSharingButton"); attachmentButton.Focus();
@@ -92,6 +106,7 @@ internal static class PresentationChecks
         check(attachmentButton.IsKeyboardFocused, "Space on a toolbar button is reserved for its action rather than opening composer");
         attachmentButton.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
         check(((Button)w.FindName("SendButton")).IsEnabled && ((Button)w.FindName("SendButton")).ToolTip.ToString()!.StartsWith("화면만 보내기"), "one-line composer retains screen-only sending when sharing is enabled");
+        attachmentButton.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));  // let go of the next-message screen
         Call(w, "SetConnected", false, "연결되지 않음");
         Call(w, "CloseBubble");
         Call(w, "OpenChat"); Pump();
