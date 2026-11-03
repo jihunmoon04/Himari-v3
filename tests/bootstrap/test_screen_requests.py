@@ -8,7 +8,7 @@ import pytest
 
 from himari.bootstrap.screens import ENDED_KEEP_SECONDS, Answer, ScreenRequests
 from himari.common import ConversationId, PrincipalId, TrustedScope, thaw
-from himari.presence.api import Session, Signals, Sleep, StreamEvent, Subscription
+from himari.presence.api import QUEUE_EVENTS, Session, Signals, Sleep, StreamEvent, Subscription
 from himari.presence.hub import PresenceHub
 from himari.tool.api import ScreenRefusal
 
@@ -161,5 +161,20 @@ def test_an_image_after_viewing_was_turned_off_is_not_given(then: Signals, free_
         hub.signal(ME, "d1", 1, "Asia/Seoul", then)
         assert requests.deliver(ME, "d1", request_id, b"image") is Answer.ENDED
         assert await looking is refusal
+
+    asyncio.run(scenario())
+
+
+def test_a_full_stream_is_away_at_once_not_a_timeout() -> None:
+    """A stream whose queue is full is ended, not sent to: nothing waits for an answer that cannot come."""
+    async def scenario() -> None:
+        hub, stream = hub_with()
+        await names(stream)  # empty what the signal put there
+        for _ in range(QUEUE_EVENTS):
+            assert hub.publish_device(ME, "d1", "filler", None)
+        assert not hub.publish_device(ME, "d1", "filler", None)  # full: that stream is ended
+        assert not hub.publish_device(ME, "d1", "filler", None)  # and none is left
+        requests = ScreenRequests(hub, wait_seconds=10)
+        assert await asyncio.wait_for(requests.look(SCOPE, "d1"), 1) is ScreenRefusal.AWAY
 
     asyncio.run(scenario())

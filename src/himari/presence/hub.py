@@ -214,12 +214,16 @@ class PresenceHub:
         self._push(principal, StreamEvent(name, data), web_only=True)
 
     def publish_device(self, principal: PrincipalId, device_id: str, name: str, data: JsonValue) -> bool:
-        """V3-P91 §4.1: to that device's streams only; False when none is open."""
-        streams = [s for s in self._subscriptions.get(principal, ()) if s.device_id == device_id]
+        """V3-P91 §4.1: to that device's streams only; False when none took it (none open, or each
+        one full — and so ended)."""
+        streams = [s for s in self._subscriptions.get(principal, ()) if s.device_id == device_id and not s.ended]
+        taken = False
         for subscription in streams:
-            if not subscription.push(StreamEvent(name, data)):
+            if subscription.push(StreamEvent(name, data)):
+                taken = True
+            else:
                 self.unsubscribe(subscription)
-        return bool(streams)
+        return taken
 
     def _push(self, principal: PrincipalId, event: StreamEvent, *, web_only: bool) -> None:
         for subscription in list(self._subscriptions.get(principal, ())):
