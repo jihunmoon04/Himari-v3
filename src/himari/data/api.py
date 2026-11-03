@@ -2333,6 +2333,14 @@ class ConversationCatalog(Protocol):
         message (answers included) is the latest; None without any."""
         ...
 
+    async def list_user_conversations(
+        self, principal: PrincipalId, *, limit: int = 50, offset: int = 0
+    ) -> Sequence[ConversationSummary]:
+        """Outside the trash, Conversations with user messages (answers included),
+        ordered by latest user message, newest id first on ties. Same paging
+        bounds as ``list_conversations``; assistant activity does not reorder them."""
+        ...
+
     async def last_user_message_at(self, principal: PrincipalId) -> datetime | None:
         """V3-P87 §6.1: when the principal's latest user message (answers included)
         came, in any Conversation outside the trash; None without any."""

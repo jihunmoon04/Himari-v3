@@ -159,6 +159,7 @@ from himari.provider.api import (
     NormalizedToolCalls,
     OutputDelta,
     ProviderAdapter,
+    ProviderCapabilities,
     ProviderError,
     RawCapture,
 )
@@ -307,13 +308,13 @@ class Driver:
                           progress: TurnProgress | None = None, max_runs: int | None = None,
                           free: bool = False) -> DriveResult:
         """V3-P87 (PR #158 review P2-1): a wake's turn. The model is resolved again for
-        this turn: changed meanwhile to one not checked for speaking first, the wake is
+        this turn: changed meanwhile to one not qualified for the wake, the wake is
         withdrawn (cancelled, keys back) and no Run is made. ``free`` (V3-P90 §7.3): what it
         writes is held until it speaks; a pass shows nothing."""
         held = _Held(progress, wake_id, lambda: self._show_free(scope, wake_id)) if free else None
         async with self._exclusive(scope, stop, held if held is not None else progress, max_runs):
             capabilities = self._provider.describe_capabilities(self._turn_model(scope).model_id)
-            if not capabilities.speaks_first or (free and not capabilities.free_wake):
+            if not self._wake_model_ok(capabilities) or (free and not capabilities.free_wake):
                 await self.withdraw_wake(scope, wake_id)
                 return DriveResult(DriveState.CANCELLED, detail=ControlErrorCode.MODEL_UNCHECKED.value)
             if held is not None:
@@ -338,15 +339,20 @@ class Driver:
         """V3-P90 §7.5: whether a free wake may open here — the Conversation's model, as a turn starting
         now would resolve it, was checked for speaking first and for free wakes."""
         capabilities = self._provider.describe_capabilities((await self._resolve_model(scope)).model_id)
-        return capabilities.speaks_first and capabilities.free_wake
+        return self._wake_model_ok(capabilities) and capabilities.free_wake
+
+    def _wake_model_ok(self, capabilities: ProviderCapabilities) -> bool:
+        """Admission and resumed execution enforce the same companion qualification."""
+        return capabilities.speaks_first and (
+            not self._companion or (capabilities.companion and capabilities.companion_capable))
 
     async def accept_wake(self, scope: TrustedScope, reasons: Sequence[WakeReason], device_id: str, *,
                           keys: Sequence[str] = (), reminders: Sequence[int] = ()) -> ConversationEvent:
         if self._wakes is None:
             raise ControlError(ControlErrorCode.NOT_SETTLED, "this server keeps no wakes")
         async with self._exclusive(scope):
-            if not self._provider.describe_capabilities(self._turn_model(scope).model_id).speaks_first:
-                # V3-P87 §13 (owner 2026-11-01): only on a model that passed the speaking-first check
+            if not self._wake_model_ok(self._provider.describe_capabilities(self._turn_model(scope).model_id)):
+                # V3-P87 §13, V3-P92: reject before wake/key/reminder persistence, just as at execution.
                 raise ControlError(ControlErrorCode.MODEL_UNCHECKED, self._turn_model(scope).model_id)
             _, stop = await self._prepare(scope)
             triggers = await self._next_triggers(scope)

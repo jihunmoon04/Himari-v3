@@ -814,3 +814,23 @@ def test_device_message_is_refused_after_web_changes_its_model(mixed_server: Ser
                              headers=SEND).status_code == 202
         s.wait(cid)
         assert s.provider.prepared_inputs[-1].request_options.model_id == "standard-model"
+
+
+def test_device_reconnect_reuses_the_latest_compatible_conversation(mixed_server: Server) -> None:
+    s = mixed_server
+    me = s.as_device(s.paired())
+    eligible = []
+    for _ in range(2):
+        cid = s.device.post("/api/conversations", json={}, headers=me).json()["id"]
+        assert s.device.post(f"/api/conversations/{cid}/messages", json={"text": "hello"}, headers=me).status_code == 202
+        s.wait(cid)
+        eligible.append(cid)
+    web = s.client.post("/api/conversations", json={}, headers=SEND).json()["id"]
+    assert s.client.post(f"/api/conversations/{web}/messages", json={"text": "Web Luna"}, headers=SEND).status_code == 202
+    s.wait(web)
+    assert s.client.get("/api/device").json()["recent_conversation"]["id"] == web
+    assert s.device.get("/api/device", headers=me).json()["recent_conversation"]["id"] == eligible[-1]
+    assert frames_of(s.device.get("/api/events", headers=me).text)[0][1]["recent_conversation"]["id"] == eligible[-1]
+    assert s.client.put(f"/api/conversations/{eligible[-1]}/model", json={"model": "standard-model"},
+                        headers=SEND).status_code == 200
+    assert s.device.get("/api/device", headers=me).json()["recent_conversation"]["id"] == eligible[0]

@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import secrets
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 import pytest
 
@@ -11,8 +14,11 @@ from himari.common import PrincipalId, TrustedScope
 from himari.provider.api import ProviderCapabilities
 from himari.provider.openrouter import KNOWN_CAPABILITIES
 from himari.provider.scripted import ScriptedAdapter
-from himari.control.api import DriveState
-from himari.data.api import MessageOrigin, ModelSetting, OriginKind, PromptBasis, UserMessage, Wake, WakeKind, WakeReason
+from himari.control.api import ControlError, ControlErrorCode, DriveState
+from himari.data.api import (MemoryCategory, MessageOrigin, ModelSetting, NoteDates, OriginKind, PromptBasis,
+                             UserMessage, Wake, WakeKind, WakeReason, WakeStatus, parse_note_date)
+from himari.bootstrap.proactive import ProactiveRefused
+from himari.proactive import ProactiveSettings
 from himari.common import TextBlock
 from testkit import calls, final
 
@@ -183,12 +189,147 @@ def test_device_execution_rechecks_the_resolved_model_after_acceptance(tmp_path:
             # Web may change the saved model between durable acceptance and background execution.
             await app.set_model(scope, "standard-model", None)
             done = await driver.resume_wake(scope, wake_id) if wake else await driver.resume(scope)
-            assert done.state is DriveState.REQUEST_REJECTED and "companion_unsupported" in done.detail
+            if wake:
+                assert done.state is DriveState.CANCELLED and done.detail == "model_unchecked"
+                assert (await app.data.read_wake(ALICE, wake_id)).status is WakeStatus.CANCELLED
+            else:
+                assert done.state is DriveState.REQUEST_REJECTED and "companion_unsupported" in done.detail
             assert not provider.sent and not done.run_ids and not done.compaction_run_ids
             await app.set_model(scope, "companion-model", None)
+            if wake:
+                event = await driver.accept_wake(scope, (WakeReason(WakeKind.TRY),), "d1")
+                assert isinstance(event.payload, Wake)
+                wake_id = event.payload.wake_id
             done = await driver.resume_wake(scope, wake_id) if wake else await driver.resume(scope)
             assert done.state is DriveState.COMPLETED
             assert (await app.data.read_run(scope, done.run_ids[-1])).model_id == "companion-model"
+        finally:
+            await app.close()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("kind", [WakeKind.TRY, WakeKind.LOOP_DUE, WakeKind.REMINDER])
+@pytest.mark.parametrize("compatible", [False, True])
+def test_wakes_select_the_latest_compatible_user_conversation(
+    tmp_path: Path, kind: WakeKind, compatible: bool
+) -> None:
+    """A newer Luna-like Web conversation never steals a wake or a reminder from the companion."""
+    async def run() -> None:
+        provider = mixed_provider()
+        provider.extend([final("first"), final("web"), final("안녕하세요")])
+        app = await Application.open(tmp_path / "app", provider, model_id="standard-model",
+                                     models=(("standard-model", None), ("companion-model", None)), sandbox=False,
+                                     cleanup_seconds=None,
+                                     proactive=ProactiveSettings(enabled=True, quiet_start=None, quiet_end=None))
+        try:
+            await app.ticker.close()  # drive the scheduler explicitly; no wall-clock job may race this test
+            made = await app.devices.create(ALICE, "desktop")
+            token = "hd_" + base64.urlsafe_b64encode(secrets.token_bytes(32)).decode().rstrip("=")
+            device = (await app.devices.pair(made.code, token)).device.device_id
+            app.hub.subscribe(ALICE, device)
+            app.hub.signal(ALICE, device, 0, "Asia/Seoul")
+            older = None
+            if compatible:
+                older = TrustedScope(ALICE, await app.create_conversation(ALICE, initial_model="companion-model"))
+                await app.send(older, "first", origin=MessageOrigin(OriginKind.WEB))
+                await app.runner.wait(older)
+            recent = TrustedScope(ALICE, await app.create_conversation(ALICE))
+            await app.send(recent, "latest Web message", origin=MessageOrigin(OriginKind.WEB))
+            await app.runner.wait(recent)
+            untouched = await app.data.read_events(recent)
+            sent = len(provider.sent)
+            note = None
+            scheduler = app.scheduler
+            assert scheduler is not None
+            if kind is not WakeKind.TRY:
+                ago = timedelta(minutes=1) if kind is WakeKind.REMINDER else timedelta(hours=2)
+                at = parse_note_date((datetime.now(UTC) - ago).isoformat(timespec="minutes"), "UTC")
+                assert at is not None
+                dates = (NoteDates(remind_at=at[0], remind_instant=at[1]) if kind is WakeKind.REMINDER
+                         else NoteDates(due_at=at[0], due_instant=at[1]))
+                note = await app.data.save_memory(ALICE, MemoryCategory.LOOP, "약속을 알려 주세요", dates=dates)
+                scheduler._clock = lambda: datetime.now(UTC) + timedelta(minutes=15)
+            if kind is WakeKind.TRY:
+                if compatible:
+                    cid, _ = await app.try_wake(ALICE)
+                    assert older is not None and cid == older.conversation_id
+                else:
+                    with pytest.raises(ProactiveRefused) as refused:
+                        await app.try_wake(ALICE)
+                    assert refused.value.code == "no_conversation"
+            else:
+                look = await scheduler.look(ALICE)
+                assert look.outcome == ("spoke" if compatible else "no_conversation")
+            if compatible:
+                assert older is not None
+                status = await app.runner.wait(older)
+                assert status.result is not None and status.result.state is DriveState.COMPLETED
+                assert status.wake_id is not None
+                for _ in range(100):
+                    record = await app.data.read_wake(ALICE, status.wake_id)
+                    if not record.status.in_progress:
+                        break
+                    await asyncio.sleep(0.01)
+                assert record.status is WakeStatus.ANSWERED and record.conversation_id == older.conversation_id
+                assert record.reasons[0].kind is kind
+                assert provider.prepared_inputs[-1].request_options.model_id == "companion-model"
+                assert len(provider.sent) == sent + 1
+            else:
+                assert len(provider.sent) == sent
+                assert await app.data.wakes_since(ALICE, datetime(2026, 1, 1, tzinfo=UTC)) == ()
+            if note is not None and kind is WakeKind.REMINDER:
+                saved = await app.data.read_memory(ALICE, note.memory_id)
+                assert saved.remind_state == ("delivered" if compatible else "scheduled")
+            assert await app.data.read_events(recent) == untouched
+        finally:
+            await app.close()
+    asyncio.run(run())
+
+
+def test_wake_admission_rejects_non_companion_before_persisting_or_claiming_reminder(tmp_path: Path) -> None:
+    async def run() -> None:
+        app = await Application.open(tmp_path / "app", mixed_provider(), model_id="standard-model",
+                                     models=(("standard-model", None), ("companion-model", None)), sandbox=False)
+        try:
+            scope = TrustedScope(ALICE, await app.create_conversation(ALICE, initial_model="companion-model"))
+            # Selection was valid; a Web model change wins before admission.
+            await app.set_model(scope, "standard-model", None)
+            at = parse_note_date(datetime.now(UTC).isoformat(timespec="minutes"), "UTC")
+            assert at is not None
+            note = await app.data.save_memory(ALICE, MemoryCategory.LOOP, "알림",
+                                              dates=NoteDates(remind_at=at[0], remind_instant=at[1]))
+            key = "reminder:test"
+            assert not await app.runtime.driver.free_wake_ok(scope)
+            for reason in (WakeReason(WakeKind.TRY), WakeReason(WakeKind.REMINDER, memory_id=note.memory_id)):
+                with pytest.raises(ControlError) as refused:
+                    await app.runtime.driver.accept_wake(scope, (reason,), "d1", keys=(key,),
+                                                         reminders=(note.memory_id,))
+                assert refused.value.code is ControlErrorCode.MODEL_UNCHECKED
+            assert await app.data.read_events(scope) == ()
+            assert await app.data.opened_wakes() == ()
+            assert await app.data.taken_keys(ALICE, (key,)) == frozenset()
+            assert (await app.data.read_memory(ALICE, note.memory_id)).remind_state == "scheduled"
+        finally:
+            await app.close()
+    asyncio.run(run())
+
+
+def test_companion_recent_search_continues_past_a_page_and_resolves_removed_models(tmp_path: Path) -> None:
+    async def run() -> None:
+        app = await Application.open(tmp_path / "app", mixed_provider(), model_id="standard-model",
+                                     models=(("standard-model", None), ("companion-model", None)), sandbox=False)
+        try:
+            older = TrustedScope(ALICE, await app.create_conversation(ALICE, initial_model="companion-model"))
+            await app.data.append_event(older, UserMessage((TextBlock("companion"),)))
+            for i in range(51):
+                scope = TrustedScope(ALICE, await app.data.create_conversation(ALICE))
+                await app.data.append_event(scope, UserMessage((TextBlock(str(i)),)))
+                if i == 50:
+                    await app.data.set_model_setting(scope, ModelSetting("removed-companion-model", None))
+            recent = await app.recent_companion_conversation(ALICE)
+            assert recent is not None and recent.conversation_id == older.conversation_id
+            await app.data.trash_conversation(older)
+            assert await app.recent_companion_conversation(ALICE) is None
         finally:
             await app.close()
     asyncio.run(run())

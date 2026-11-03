@@ -6,7 +6,10 @@ import asyncio
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from testkit import SCOPE, data_for, new_store, restart, user
+from testkit import SCOPE, data_for, final, new_store, restart, user
+
+from himari.bootstrap import build_runtime
+from himari.provider.scripted import ScriptedAdapter
 
 from himari.common import ConversationId, PrincipalId, TextBlock, TrustedScope
 from himari.data.api import (
@@ -53,6 +56,34 @@ def test_a_device_is_paired_once_with_its_code_and_found_by_its_token_after_a_re
         assert found is not None and found[0] == ME and found[1].device_id == "d1"
         assert [d.device_id for d in await data.list_devices(ME)] == ["d1"]
 
+    asyncio.run(scenario())
+
+
+def test_user_conversation_pages_follow_user_messages_not_assistant_activity() -> None:
+    async def scenario() -> None:
+        store = new_store()
+        first, second = SCOPE, TrustedScope(ME, ConversationId("conv_2"))
+        empty = TrustedScope(ME, ConversationId("empty"))
+        foreign = TrustedScope(PrincipalId("mallory"), ConversationId("foreign"))
+        for scope in (first, second, empty, foreign):
+            store.create_conversation(scope)
+        data = data_for(store)
+        await data.append_event(first, user("one"))
+        await data.append_event(second, user("two"))
+        runtime = build_runtime(ScriptedAdapter([final("late assistant")]), store=store)
+        await runtime.driver.resume(first)
+        await data.append_event(foreign, user("foreign"))
+        assert [c.conversation_id for c in await data.list_user_conversations(ME)] == [
+            second.conversation_id, first.conversation_id]
+        assert (await data.list_user_conversations(ME, limit=1))[0].conversation_id == second.conversation_id
+        assert (await data.list_user_conversations(ME, limit=1, offset=1))[0].conversation_id == first.conversation_id
+        assert await data.list_user_conversations(ME, offset=2) == ()
+        for page in ({"limit": 0}, {"offset": -1}):
+            with pytest.raises(DataError) as invalid:
+                await data.list_user_conversations(ME, **page)
+            assert invalid.value.code is DataErrorCode.INVALID_ARGUMENT
+        await data.trash_conversation(second)
+        assert [c.conversation_id for c in await data.list_user_conversations(ME)] == [first.conversation_id]
     asyncio.run(scenario())
 
 

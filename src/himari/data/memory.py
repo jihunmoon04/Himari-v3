@@ -1175,14 +1175,22 @@ class InMemoryData:
         return max(times, default=None)
 
     async def most_recent_user_conversation(self, principal: PrincipalId) -> ConversationSummary | None:
-        best: tuple[datetime, int, ConversationId, _Conversation] | None = None
+        rows = await self.list_user_conversations(principal, limit=1)
+        return rows[0] if rows else None
+
+    async def list_user_conversations(
+        self, principal: PrincipalId, *, limit: int = 50, offset: int = 0
+    ) -> Sequence[ConversationSummary]:
+        rules.check_page(limit, offset)
+        rows: list[tuple[datetime, int, ConversationId, _Conversation]] = []
         for i, (cid, conv) in enumerate(self._store._conversations.items()):
             if conv.owner != principal or conv.trashed_at is not None:
                 continue
             times = [e.created_at for e in conv.events if e.kind is EventKind.USER_MESSAGE]
-            if times and (best is None or (max(times), i) > best[:2]):
-                best = (max(times), i, cid, conv)
-        return None if best is None else self._summary(best[2], best[3])
+            if times:
+                rows.append((max(times), i, cid, conv))
+        rows.sort(key=lambda row: row[:2], reverse=True)
+        return tuple(self._summary(cid, conv) for _, _, cid, conv in rows[offset:offset + limit])
 
     async def list_conversations(
         self, principal: PrincipalId, *, limit: int = 50, offset: int = 0, trashed: bool = False

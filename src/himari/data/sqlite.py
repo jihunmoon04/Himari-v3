@@ -2295,13 +2295,22 @@ class SqliteData:
             return None if row is None or row["at"] is None else datetime.fromisoformat(row["at"])
 
     async def most_recent_user_conversation(self, principal: PrincipalId) -> ConversationSummary | None:
+        rows = await self.list_user_conversations(principal, limit=1)
+        return rows[0] if rows else None
+
+    async def list_user_conversations(
+        self, principal: PrincipalId, *, limit: int = 50, offset: int = 0
+    ) -> Sequence[ConversationSummary]:
+        rules.check_page(limit, offset)
         with self._tx() as tx:
-            row = tx.one(
-                f"{self._SUMMARY} WHERE c.conversation_id=(SELECT e.conversation_id FROM events e"
-                " JOIN conversations o ON o.conversation_id=e.conversation_id"
-                " WHERE o.owner=? AND o.trashed_at IS NULL AND e.kind='user_message'"
-                " ORDER BY e.created_at DESC, o.rowid DESC LIMIT 1)", principal)
-            return None if row is None else self._summary(row)
+            rows = tx.all(
+                f"{self._SUMMARY} WHERE c.owner=? AND c.trashed_at IS NULL"
+                " AND EXISTS (SELECT 1 FROM events e WHERE e.conversation_id=c.conversation_id"
+                " AND e.kind='user_message')"
+                " ORDER BY (SELECT MAX(e.created_at) FROM events e"
+                " WHERE e.conversation_id=c.conversation_id AND e.kind='user_message') DESC, c.rowid DESC"
+                " LIMIT ? OFFSET ?", principal, limit, offset)
+            return tuple(self._summary(row) for row in rows)
 
     async def list_conversations(
         self, principal: PrincipalId, *, limit: int = 50, offset: int = 0, trashed: bool = False

@@ -108,7 +108,7 @@ def test_try_is_refused_with_a_reason(tmp_path: Path) -> None:
 def test_try_never_speaks_over_a_waiting_question(tmp_path: Path) -> None:
     async def scenario() -> None:
         ask = NormalizedToolCalls((ToolCall(CallId("c0"), 0, ToolId(ASK_USER_TOOL_ID), {"question": "어디?"}),))
-        app = await opened(tmp_path, ScriptedAdapter([ask]), proactive=ON)
+        app = await opened(tmp_path, ScriptedAdapter([ask], companion=True), proactive=ON)
         try:
             await current_device(app)
             scope = TrustedScope(ME, await app.create_conversation(ME))
@@ -205,7 +205,11 @@ def test_only_a_checked_model_speaks_first(tmp_path: Path) -> None:
             assert not any(PROACTIVE_RULE in part for part in adapter.prepared_inputs[-1].stable_prefix)
             with pytest.raises(ProactiveRefused) as refused:
                 await app.try_wake(ME)
-            assert refused.value.code == "model_unchecked"
+            assert refused.value.code == "no_conversation"  # no eligible companion conversation
+            from himari.control.api import ControlError, ControlErrorCode
+            with pytest.raises(ControlError) as unchecked:
+                await app.runtime.driver.accept_wake(scope, (WakeReason(WakeKind.TRY),), "d1")
+            assert unchecked.value.code is ControlErrorCode.MODEL_UNCHECKED
             assert await app.data.opened_wakes() == () and await app.data.wakes_since(
                 ME, datetime(2026, 1, 1, tzinfo=UTC)) == ()
         finally:

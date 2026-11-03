@@ -1152,6 +1152,7 @@ class Application:
                 scheduler = ProactiveScheduler(runtime.data, hub, application.devices, runner, application.inputs,
                                                speaking_first, time_zone, zones=zones,
                                                poke=lambda after: ticker.poke("proactive", after),
+                                               recent=application.recent_companion_conversation,
                                                free_ok=runtime.driver.free_wake_ok)
                 hub.on_returned = scheduler.returned
                 application.scheduler = scheduler
@@ -1553,6 +1554,23 @@ class Application:
         if (await self.model_choice(scope)).model_id not in self.companion_models:
             raise ModelRefused("companion_unsupported",
                                "This conversation needs a companion model for device messages. Choose one on the Web.")
+
+    async def recent_companion_conversation(self, principal: PrincipalId) -> ConversationSummary | None:
+        """The latest user conversation whose next turn resolves to an offered companion model.
+
+        Shared by device reconnects, scheduled wakes/reminders and manual tries.
+        Scan past incompatible conversations, including models removed from the catalog.
+        """
+        if not self.companion_models:
+            return None
+        offset = 0
+        while batch := await self.data.list_user_conversations(principal, offset=offset):
+            for conversation in batch:
+                choice = await self.model_choice(TrustedScope(principal, conversation.conversation_id))
+                if choice.model_id in self.companion_models:
+                    return conversation
+            offset += len(batch)
+        return None
 
     async def set_model(self, scope: TrustedScope, model_id: str | None, effort: str | None) -> ModelChoiceView:
         """This Conversation's choice, kept as made even if it is the default
@@ -2235,7 +2253,7 @@ class Application:
     # --- speaking first (V3-P87) ----------------------------------------------------------
 
     async def try_wake(self, principal: PrincipalId) -> tuple[ConversationId, JobStatus]:
-        """§11: open a TRY wake now in the most recent conversation, spoken on the
+        """§11: open a TRY wake now in the most recent companion conversation, spoken on the
         current device — past the user's quiet, the quiet hours, gap and daily
         limit (and the ten minutes after a message), never while a job runs or
         in a conversation that is not settled. ProactiveRefused."""
@@ -2244,7 +2262,7 @@ class Application:
         device = self.hub.current(principal)
         if device is None:
             raise ProactiveRefused("no_device")
-        recent = await self.data.most_recent_user_conversation(principal)
+        recent = await self.recent_companion_conversation(principal)
         if recent is None:
             raise ProactiveRefused("no_conversation")
         if self.runner.running(principal):  # §6.1: never while any of the user's conversations works

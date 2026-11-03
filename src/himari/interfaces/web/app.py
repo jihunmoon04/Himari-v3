@@ -2605,11 +2605,8 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
 
     async def device_state(application: Application, by: Caller) -> dict[str, Any]:
         """What ``GET /api/device`` and ``hello`` both say (appendix A.2, A.3)."""
-        recent = await application.data.most_recent_user_conversation(by.principal)
-        if by.device is not None and recent is not None:
-            choice = await application.model_choice(TrustedScope(by.principal, recent.conversation_id))
-            if choice.model_id not in application.companion_models:
-                recent = None  # The device creates a new companion conversation; the Web's choice stays intact.
+        recent = (await application.data.most_recent_user_conversation(by.principal) if by.device is None
+                  else await application.recent_companion_conversation(by.principal))
         quiet = await application.devices.quiet(by.principal)
         return {"device": None if by.device is None else {"device_id": by.device.device_id, "name": by.device.name},
                 "moods": list(MOODS), "current_device": application.hub.current(by.principal),
