@@ -338,16 +338,26 @@ public partial class MainWindow
         ArrangeBubbles(); UpdateBubbleBounds();
         if (assistantBubbleCloseDue && BubblePanel.Visibility == Visibility.Visible) RetryExpiry(bubbleTimer);
     }
+    // Foreground changes can arrive through both windows and WinEvent. Check once,
+    // after input settles, so moving to our dialogue host or back before then keeps the editor.
+    private bool focusDismissPending;
+    private Func<bool>? chatForegroundProbe = null;  // native foreground substitution in offline UI tests
     private void DismissUserBubbleIfUnfocused()
     {
+        if (focusDismissPending || lifetime.IsCancellationRequested) return;
+        focusDismissPending = true;
         Dispatcher.BeginInvoke(DispatcherPriority.ApplicationIdle, new Action(() =>
         {
-            if (sending) return;
-            IntPtr foreground = GetForegroundWindow();
-            if (IsChatWindow(foreground)) return;
-            if (!UserBubbleShown && UserBubble.Visibility != Visibility.Visible) return;
+            focusDismissPending = false;
+            if (lifetime.IsCancellationRequested || sending || unresolvedScreen is not null || unknownText is not null) return;
+            if (chatForegroundProbe?.Invoke() ?? IsChatWindow(GetForegroundWindow())) return;
+            if (UserBubble.Visibility != Visibility.Visible) return;
             if (UserSent.Visibility == Visibility.Visible && !string.IsNullOrEmpty(UserSent.Text))
             {
+                // History precedes every live bubble. Move an older finished reply first,
+                // keeping a question or a reply still being written live with its controls.
+                if (BubblePanel.Visibility == Visibility.Visible && assistantBubbleSequence < userBubbleSequence
+                    && (awaitingAnswer || !FreezeReply())) return;
                 FreezeSent();
             }
             HideUserBubble();

@@ -22,7 +22,7 @@ internal static class DialoguePolicy
     internal static bool BubblesBelow(string placement, double characterCenter, double monitorCenter) =>
         placement == "하 고정" || (placement != "상 고정" && characterCenter < monitorCenter);
     internal static bool KeepUserBubble(bool hovered, bool focused, string draft, bool sending, bool unresolved) =>
-        sending || unresolved || focused || (hovered && !string.IsNullOrWhiteSpace(draft));
+        hovered || focused || !string.IsNullOrWhiteSpace(draft) || sending || unresolved;
 }
 
 internal sealed class HotkeyState

@@ -145,7 +145,7 @@ public partial class MainWindow
     {
         chatFocusVersion++;
         System.Windows.Input.Keyboard.ClearFocus();
-        // Like Alt+Tab, switching focus does not dismiss or replace the editor.
+        // Keep the draft; dismiss its editor only once focus really reached another window.
         if (string.IsNullOrEmpty(Input.Text)) ScheduleUserBubbleClose();
         if (!workWindow.Return(window => IsWindow(window) && IsWindowVisible(window) && RestoreWindow(window)))
         {
@@ -154,6 +154,7 @@ public partial class MainWindow
             if (!SetForegroundWindow(GetShellWindow())) SetActiveWindow(IntPtr.Zero);
         }
         UpdateFullscreenPresentation();
+        DismissUserBubbleIfUnfocused();
     }
     private static bool RestoreWindow(IntPtr window)
     {

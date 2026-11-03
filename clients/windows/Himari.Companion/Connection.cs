@@ -542,6 +542,8 @@ public partial class MainWindow
             // A bubble that fell due while it was held for the send expires now, not at the next event.
             if (history.Any(past => past.Due)) ExpireBubbles();
             UpdateBubblePresentation();
+            // Focus may have left during the POST, while its bubble was protected.
+            DismissUserBubbleIfUnfocused();
         }
     }
     private async void CancelClick(object sender, RoutedEventArgs e) => await RequestCancel();
