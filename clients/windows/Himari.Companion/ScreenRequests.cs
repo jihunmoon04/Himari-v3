@@ -32,6 +32,11 @@ public partial class MainWindow
                 return;
             }
             var captured = outcome.Screen;
+            if (ScreenRefusalNow([]) is { } late)  // the last moment before it goes: turned off or locked since
+            {
+                await local.RefuseScreenAsync(requestId, late, ct);
+                return;
+            }
             await local.AnswerScreenAsync(requestId, captured.Bytes, captured.ContentType, ct);
             // §6: the job's moves are on the screen it last saw.
             if (Str(data, "job_id") is { Length: > 0 } jobId && Str(data, "conversation") is { } conversation && moveLifetime.CanBind(jobId))
@@ -45,21 +50,26 @@ public partial class MainWindow
         }
     }
 
-    /// <summary>Chooses the monitor, checks the programs that show on it, captures it, and checks again: a window of
-    /// an excluded program that came in meanwhile drops the image.</summary>
+    /// <summary>Why the screen may not go now: the setting, asleep or locked, and the programs given.</summary>
+    private string? ScreenRefusalNow(IEnumerable<string?> programs) =>
+        ScreenRequestPolicy.Refusal(signalSettings.ScreenLook, sleepPolicy.Asleep || sessionLocked, programs, titleExclusions);
+
+    /// <summary>Chooses the monitor, then checks everything — the setting, the lock, the programs that show on that
+    /// monitor — before the capture and again after it (<see cref="GuardedCapture"/>): turned off, locked, or an
+    /// excluded window come in meanwhile, the image is dropped.</summary>
     private async Task<(string? Refusal, CapturedScreen? Screen)> CaptureForRequestAsync(CancellationToken ct)
     {
         var bounds = CaptureBounds();
         var monitor = new PixelRect(bounds.Left, bounds.Top, bounds.Width, bounds.Height);
-        if (ScreenRequestPolicy.Refusal(signalSettings.ScreenLook, sleepPolicy.Asleep || sessionLocked,
-                ScreenWindows.On(VisibleWindows(), monitor), titleExclusions) is { } reason)
-            return (reason, null);
-        ShowScreenLookNotice();
-        CapturedScreen captured;
-        try { captured = await CaptureMonitorAsync(bounds, ct); }
+        try
+        {
+            return await GuardedCapture.RunAsync(() => ScreenRefusalNow(ScreenWindows.On(VisibleWindows(), monitor)), async () =>
+            {
+                ShowScreenLookNotice();
+                return await CaptureMonitorAsync(bounds, ct);
+            });
+        }
         catch (Exception ex) when (ex is not OperationCanceledException) { return ("capture_failed", null); }
-        if (ScreenRequestPolicy.Excludes(ScreenWindows.On(VisibleWindows(), monitor), titleExclusions)) return ("excluded", null);
-        return (null, captured);
     }
 
     /// <summary>The top-level windows that show: visible, not minimized, not cloaked (another virtual desktop), not

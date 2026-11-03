@@ -782,6 +782,22 @@ Check(ScreenRequestPolicy.Refusal(true, false, ScreenWindows.On(desktop, monitor
 Check(ScreenWindows.On([new("1password", new(1920, 0, 800, 600))], monitorA).Count() == 0
     && ScreenWindows.On([new("1password", new(1919, 0, 800, 600))], monitorA).Count() == 1, "a window counts on a monitor it overlaps, and only then");
 
+// PR #172 re-review P2-3: everything is checked again after the capture — turned off or locked meanwhile drops the image
+var settingDuring = new SignalSettings();
+bool lockedDuring = false;
+string? CheckNow() => ScreenRequestPolicy.Refusal(settingDuring.ScreenLook, lockedDuring, ScreenWindows.On(desktop, monitorA), titleNames);
+var turnedOffMidway = await GuardedCapture.RunAsync(CheckNow, async () => { await Task.Yield(); settingDuring = settingDuring with { ScreenLook = false }; return "image"; });
+Check(turnedOffMidway == ("turned_off", null), "turned off during the capture: no image");
+settingDuring = new SignalSettings();
+var lockedMidway = await GuardedCapture.RunAsync(CheckNow, async () => { await Task.Yield(); lockedDuring = true; return "image"; });
+Check(lockedMidway == ("asleep", null), "locked during the capture: no image");
+lockedDuring = false;
+int captures = 0;
+Check(await GuardedCapture.RunAsync(CheckNow, () => { captures++; return Task.FromResult("image"); }) == (null, "image") && captures == 1, "unchanged: the image goes");
+settingDuring = settingDuring with { ScreenLook = false };
+Check(await GuardedCapture.RunAsync(CheckNow, () => { captures++; return Task.FromResult("image"); }) == ("turned_off", null) && captures == 1,
+    "refused before: it does not capture");
+
 // PR #172 review P2-2: captures run one at a time, so one never shows the windows in the middle of another
 var captureGate = new CaptureGate();
 var captureLog = new List<string>();

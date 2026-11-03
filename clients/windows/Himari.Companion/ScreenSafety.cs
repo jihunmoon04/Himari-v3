@@ -42,6 +42,18 @@ internal static class ScreenWindows
             && w.Frame.Top < monitor.Top + monitor.Height && monitor.Top < w.Frame.Top + w.Frame.Height).Select(w => w.Program);
 }
 
+internal static class GuardedCapture
+{
+    /// <summary>V3-P91 §7.2: <paramref name="check"/> (why not, or null) before the capture and again after it; the
+    /// image is kept only when both say null. The capture does not start on a refusal.</summary>
+    internal static async Task<(string? Refusal, T? Value)> RunAsync<T>(Func<string?> check, Func<Task<T>> capture) where T : class
+    {
+        if (check() is { } before) return (before, null);
+        var value = await capture();
+        return check() is { } after ? (after, null) : (null, value);
+    }
+}
+
 /// <summary>One capture at a time (V3-P84: the companion is never in the image). Without the capture exclusion the
 /// windows are hidden and shown again; two captures at once would show them in the middle of the other.</summary>
 internal sealed class CaptureGate
