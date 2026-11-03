@@ -34,6 +34,38 @@ The live checks do not establish comparative quality or reliable Korean chess
 commentary. Sonnet rejected the probe's forced named `tool_choice`; continuation
 passed with the automatic tool selection HIMARI actually uses.
 
+## Screen tool (V3-P91, 2026-11-03)
+
+`tests/live/test_screen_tool_live.py` checked the eight image models with synthetic
+1280×720 screens, three tries per scene. Minimums: call/no-call/read 5/6 each;
+acknowledge an unavailable screen without another call 3/3. For existing free-wake
+models, also require speaking after an ordinary work screen 5/6, passing after an
+ongoing call/match 6/6, and a valid initial free choice 3/3. Every model scored 6/6
+on no-call scenes. A read requires a screen-only label and, when already declared,
+a move on the requested target (24-pixel tolerance).
+
+| Model | Call | Read | Refusal | Free speak / pass | screen_tool |
+| --- | ---: | ---: | ---: | --- | --- |
+| `openai/gpt-6-luna` | 6/6 | 6/6 | 3/3 | not enabled for free wakes | on |
+| `openai/gpt-6.1-sol` | 6/6 | 6/6 | 3/3 | not enabled for free wakes | on |
+| `anthropic/claude-sonnet-5.5` | 6/6 | 6/6 | 3/3 | not enabled for free wakes | on |
+| `anthropic/claude-haiku-5.5` | 6/6 | 5/6 | 3/3 | 6/6 / 6/6 | on |
+| `xiaomi/mimo-v2.6-pro` | 6/6 | 6/6 | 3/3 | 6/6 / 6/6 | on |
+| `deepseek/deepseek-v4.1-flash` | 6/6 | 6/6 | 3/3 | 6/6 / 6/6 | on |
+| `openai/gpt-5-nano` | 0/6 | 0/6 (not requested) | 3/3 | not enabled for free wakes | off |
+| `minimax/minimax-m3` | 3/6 | 0/6 (3 not requested) | 2/3 | not enabled for free wakes | off |
+
+204 actual API calls; nine missed-call follow-ups are retained as failed reads,
+not removed from the denominator. See the
+[saved answers, usage and verdicts](live-results/screen-tool-2026-11-03.jsonl) and
+[test method, grader corrections and limits](screen-tool-v0.1.md#16-실제-모델-확인-2026-11-03).
+Two mechanical grading defects (dots in filenames and Korean refusal variants)
+were corrected by replaying the same responses; ten corrected rows keep their
+initial verdict as `initial_problems`. No extra paid requests were made to replace
+failures. Haiku omitted one requested move; MiniMax asked for screenshots instead
+of calling on all three error scenes, missed moves and repeated a refused call.
+Existing `free_wake`/`screen_points` declarations are retained.
+
 ## Images (V3-P67, 2026-10-22)
 
 `architecture.input_modalities` lists `image` for every model above except `z-ai/glm-5.3`.

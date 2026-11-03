@@ -122,6 +122,9 @@ CONNECT_SECONDS = 10.0  # of a streamed request; reading waits the adapter's tim
 # streaming: only models whose streamed answers, merged reasoning replayed in
 # the next Tool turn and mid-stream cancel were checked live
 # (tests/live/test_openrouter_stream_live.py, 2026-10-24; V3-P73 §9).
+# screen_tool: the six models that passed request/no-request, screen-result and refusal bars
+# (tests/live/test_screen_tool_live.py, 2026-11-03; V3-P91 §9). Existing free-wake models also
+# passed separate speaking and silent post-screen scenes; this does not grant free_wake to others.
 KNOWN_CAPABILITIES: Mapping[str, ProviderCapabilities] = {
     "openai/gpt-6-luna": ProviderCapabilities(
         model_id="openai/gpt-6-luna",
@@ -130,6 +133,7 @@ KNOWN_CAPABILITIES: Mapping[str, ProviderCapabilities] = {
         memory_passes=True,  # V3-P85: every bar of the memory check, live 2026-10-31
         screen_points=True,  # V3-P84: 8+ of 10 points on target, live 2026-10-30
         image_input=True,  # V3-P67: user-message and after-group images read back, live 2026-10-22
+        screen_tool=True,  # V3-P91: call 6/6, no-call 6/6, read 6/6, refuse 3/3, live 2026-11-03
         reasoning_efforts=REASONING_EFFORTS,
         parallel_tool_calls=True,
         context_tokens=1_050_000,  # OpenRouter /api/v1/models context_length, 2026-10-14
@@ -152,6 +156,7 @@ KNOWN_CAPABILITIES: Mapping[str, ProviderCapabilities] = {
         memory_passes=True,  # V3-P85: every bar of the memory check, live 2026-10-31
         screen_points=True,  # V3-P84: 8+ of 10 points on target, live 2026-10-30
         image_input=True,  # V3-P67: user-message and after-group images read back, live 2026-10-22
+        screen_tool=True,  # V3-P91: read 5/6; other bars met, free speak/pass 6/6 each, live 2026-11-03
         reasoning_efforts=REASONING_EFFORTS,
         parallel_tool_calls=True,
         context_tokens=1_000_000,  # OpenRouter /api/v1/models context_length, 2026-10-14
@@ -167,6 +172,7 @@ KNOWN_CAPABILITIES: Mapping[str, ProviderCapabilities] = {
         screen_points=True,  # V3-P84: 8+ of 10 points on target, live 2026-10-30
         streaming=True,  # V3-P73: live response, tool replay and cancel checked 2026-10-24
         image_input=True,  # V3-P67: user-message and after-group images read back, live 2026-10-22
+        screen_tool=True,  # V3-P91: call/no-call/read 6/6, refuse 3/3, live 2026-11-03
         reasoning_efforts=frozenset({"low", "medium", "high"}),
         context_tokens=1_050_000,
         max_output_tokens=128_000,
@@ -176,6 +182,7 @@ KNOWN_CAPABILITIES: Mapping[str, ProviderCapabilities] = {
         screen_points=True,  # V3-P84: 8+ of 10 points on target, live 2026-10-30
         streaming=True,  # V3-P73: live response, tool replay and cancel checked 2026-10-24
         image_input=True,  # V3-P67: user-message and after-group images read back, live 2026-10-22
+        screen_tool=True,  # V3-P91: call/no-call/read 6/6, refuse 3/3, live 2026-11-03
         reasoning_efforts=frozenset({"low", "medium", "high"}),
         context_tokens=1_000_000,
         max_output_tokens=128_000,
@@ -188,6 +195,7 @@ KNOWN_CAPABILITIES: Mapping[str, ProviderCapabilities] = {
         screen_points=True,  # V3-P84: 8+ of 10 points on target, live 2026-10-30
         streaming=True,  # V3-P73: live response, tool replay and cancel checked 2026-10-24
         image_input=True,  # V3-P67: user-message and after-group images read back, live 2026-10-22
+        screen_tool=True,  # V3-P91: every bar met, free speak/pass 6/6 each, live 2026-11-03
         context_tokens=1_048_576,
         max_output_tokens=131_072,
     ),
@@ -207,6 +215,7 @@ KNOWN_CAPABILITIES: Mapping[str, ProviderCapabilities] = {
         screen_points=True,  # V3-P84: 8+ of 10 points on target, live 2026-10-30
         streaming=True,  # V3-P73: live response, tool replay and cancel checked 2026-10-24
         image_input=True,  # V3-P67: user-message and after-group images read back, live 2026-10-22
+        screen_tool=True,  # V3-P91: every bar met, free speak/pass 6/6 each, live 2026-11-03
         reasoning_efforts=frozenset({"low", "medium", "high"}),
         context_tokens=1_048_576,
         max_output_tokens=943_718,
