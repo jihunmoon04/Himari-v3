@@ -145,3 +145,19 @@ def test_a_free_wake_is_drawn_with_its_task_and_step() -> None:
     free = Wake("wake_4", (WakeReason(WakeKind.FREE, group="work", minutes=47, step=2),), "d1")
     assert json.loads(wake_text(free, {})[6:-7])["reasons"] == [{"kind": "free", "group": "work", "minutes": 47,
                                                                  "step": 2}]
+
+
+def test_the_free_wakes_screen_line_only_with_the_screen_tool() -> None:
+    """V3-P91 §8: "you may look first, and still [[pass]]" follows the free wake's line, for a model
+    offered the screen Tool."""
+    from himari.prompt.api import FREE_RULE, FREE_SCREEN_RULE
+
+    spec = SystemSpec(companion=True, proactive=True)
+
+    def text(*, free_wake: bool = False, screen_tool: bool = False) -> str:
+        options = RequestOptions("m", speaks_first=True, free_wake=free_wake, screen_tool=screen_tool)
+        return "\n".join(system_text(replace(inputs(spec=spec), request_options=options)))
+
+    both = text(free_wake=True, screen_tool=True)
+    assert FREE_SCREEN_RULE in both and both.index(FREE_RULE) < both.index(FREE_SCREEN_RULE)
+    assert FREE_SCREEN_RULE not in text(free_wake=True) and FREE_SCREEN_RULE not in text(screen_tool=True)

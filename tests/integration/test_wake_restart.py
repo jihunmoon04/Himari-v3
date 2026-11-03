@@ -181,3 +181,33 @@ def test_a_withdrawn_wake_is_cancelled_gives_its_keys_back_and_blocks_nothing() 
     assert asyncio.run(rt.data.taken_keys(SCOPE.principal_id, ("k",))) == frozenset()
     asyncio.run(rt.driver.accept_wake(SCOPE, TRY, "d1", keys=("k",)))
     assert asyncio.run(rt.driver.resume(SCOPE, max_runs=3)).state is DriveState.COMPLETED
+
+
+def test_a_free_wake_cut_while_it_looked_is_dropped_and_its_look_never_runs_again() -> None:
+    """V3-P91 §8: a free wake held its screen group when the process died — at the restart the group is
+    closed and the wake dropped, so none of it is seen, and the user's next turn does not look for it."""
+    from himari.data.api import ToolResultRecord
+
+    free = (WakeReason(WakeKind.FREE, group="work", minutes=16, step=1),)
+    look = RecordingTool("look_at_screen", effect=EffectProfile.READ)
+    look.crash_next = True
+    rt, _ = runtime([calls(("look_at_screen", {}))], tools=(look,))
+    wake = asyncio.run(rt.driver.accept_wake(SCOPE, free, "d1"))
+    wake_id = wake.payload.wake_id  # type: ignore[union-attr]
+    with pytest.raises(SimulatedCrash):
+        asyncio.run(rt.driver.resume_wake(SCOPE, wake_id, free=True, max_runs=2))
+    assert asyncio.run(rt.data.read_wake(SCOPE.principal_id, wake_id)).held_run_id is not None
+
+    rt2, provider2 = runtime([final("응, 뭐 도와줄까?")], store=restart(rt.store), tools=(look,))
+    assert settle(rt2) == 1
+    record = asyncio.run(rt2.data.read_wake(SCOPE.principal_id, wake_id))
+    assert record.status is WakeStatus.DROPPED
+    held = asyncio.run(rt2.data.read_tool_executions(SCOPE, record.held_run_id))  # type: ignore[arg-type]
+    assert [e.status for e in held] == [ToolExecutionStatus.CANCELLED]
+    assert asyncio.run(rt2.data.read_events(SCOPE)) == ()  # nor its call, nor the closed result
+    assert provider2.sent == []
+
+    asyncio.run(rt2.driver.drive(SCOPE, user("안녕")))
+    assert len(look.invocations) == 1  # only the cut one
+    events = asyncio.run(rt2.data.read_events(SCOPE))
+    assert not any(isinstance(e.payload, ToolResultRecord) for e in events) and len(provider2.sent) == 1

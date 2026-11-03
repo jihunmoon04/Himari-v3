@@ -121,6 +121,10 @@ class ToolInvocation(DeepFrozen):
     arguments: Mapping[str, JsonValue]
 
 
+# V3-P91 §3.1: the screen Tool's id. Control knows it too: in a free wake it alone runs unshown (§8).
+SCREEN_TOOL_ID = ToolId("look_at_screen")
+
+
 class TurnWake(Enum):
     """V3-P91 §3.4: whether the turn is a server-opened one, and which."""
 

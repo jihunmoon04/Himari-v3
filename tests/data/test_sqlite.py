@@ -276,6 +276,7 @@ _ADDED_IN = {
          "ALTER TABLE devices DROP COLUMN last_input_at",
          *(f"ALTER TABLE memories DROP COLUMN {c}" for c in ("reminded_at", "remind_attempts", "remind_wake",
                                                                "remind_state", "remind_instant", "remind_at"))),
+    18: ("ALTER TABLE wakes DROP COLUMN held_run_id",),
 }
 
 
@@ -290,13 +291,13 @@ def old_database(path: Path, version: int) -> None:
            f"PRAGMA user_version={version}")
 
 
-@pytest.mark.parametrize("version", [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16])
+@pytest.mark.parametrize("version", [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17])
 def test_an_older_database_is_upgraded_in_place_and_keeps_its_data(tmp_path: Path, version: int) -> None:
     path = tmp_path / "h.db"
     old_database(path, version)
     store = SqliteStore(path)
     try:
-        assert store.connection.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 17
+        assert store.connection.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 18
         data = SqliteData(store)
         events = asyncio.run(data.read_events(SCOPE))
         assert [e.payload.blocks for e in events] == [(TextBlock(f"from v{version}"),)]  # type: ignore[union-attr]
@@ -322,13 +323,14 @@ def test_an_older_database_is_upgraded_in_place_and_keeps_its_data(tmp_path: Pat
         asyncio.run(data.write_quiet(SCOPE.principal_id, datetime(2026, 11, 1, tzinfo=UTC)))  # the v16 table
         assert asyncio.run(data.read_quiet(SCOPE.principal_id)) == datetime(2026, 11, 1, tzinfo=UTC)
         assert asyncio.run(data.opened_wakes()) == ()  # the v17 tables
+        assert "held_run_id" in [r[1] for r in store.connection.execute("PRAGMA table_info(wakes)")]  # the v18 column
         asyncio.run(data.trash_conversation(SCOPE))  # and the v7 columns
     finally:
         store.close()
-    SqliteStore(path).close()  # and it opens as a plain v17 database afterwards
+    SqliteStore(path).close()  # and it opens as a plain v18 database afterwards
 
 
-@pytest.mark.parametrize("version", [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16])
+@pytest.mark.parametrize("version", [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17])
 @pytest.mark.parametrize("change", ["CREATE TABLE extra (x)", "PRAGMA application_id=1", "DROP TABLE artifacts"])
 def test_only_an_exact_older_database_is_upgraded(tmp_path: Path, version: int, change: str) -> None:
     path = tmp_path / "h.db"
@@ -339,7 +341,7 @@ def test_only_an_exact_older_database_is_upgraded(tmp_path: Path, version: int, 
     conn = sqlite3.connect(path)
     try:
         assert conn.execute("PRAGMA user_version").fetchone()[0] == version  # refused, never repaired
-        assert not conn.execute("SELECT 1 FROM sqlite_master WHERE name='wakes'").fetchall()  # v17's
+        assert "held_run_id" not in [r[1] for r in conn.execute("PRAGMA table_info(wakes)")]  # v18's
     finally:
         conn.close()
     assert not list(tmp_path.glob("*.bak*"))  # refused before any backup

@@ -25,6 +25,7 @@ from himari.prompt.api import (
     NOTES_TOTAL_CHARS,
     PERSONA_RULE,
     FREE_RULE,
+    FREE_SCREEN_RULE,
     PROACTIVE_RULE,
     PROGRESS_NOTE,
     SCREEN_MOVE_NOTE,
@@ -89,12 +90,14 @@ def tools_section(spec: SystemSpec) -> str:
     return _bullets("# Working with tools", lines)
 
 
-def companion_section(screen_points: bool, proactive: bool = False, free: bool = False) -> str:
+def companion_section(screen_points: bool, proactive: bool = False, free: bool = False, screen_tool: bool = False) -> str:
     """V3-P89 §3.5; the screen moves only for a model whose points were checked
     (V3-P84 §5); "Speaking first" right after "Speaking" when HIMARI may speak first (V3-P87 §8.2),
-    and the free wake's line after it for a model checked for those (V3-P90 §7.2)."""
+    and the free wake's line after it for a model checked for those (V3-P90 §7.2) — with the screen
+    Tool's line when it is offered (V3-P91 §8)."""
     screens = SCREEN_NOTE + (" " + SCREEN_MOVE_NOTE if screen_points else "")
-    speaking = (SPEAKING_RULE, PROACTIVE_RULE, *((FREE_RULE,) if free else ())) if proactive else (SPEAKING_RULE,)
+    free_lines = (FREE_RULE, *((FREE_SCREEN_RULE,) if screen_tool else ())) if free else ()
+    speaking = (SPEAKING_RULE, PROACTIVE_RULE, *free_lines) if proactive else (SPEAKING_RULE,)
     return "\n".join((COMPANION_HEAD, PERSONA_RULE, *speaking, EXPRESSION_RULE, ACTIVITY_RULE, screens))
 
 
@@ -133,7 +136,8 @@ def system_text(inputs: PromptInputs) -> tuple[str, ...]:
             out.append(MEMORY_SECTION)
         if spec.companion:
             out.append(companion_section(inputs.request_options.screen_points, proactive,
-                                         proactive and inputs.request_options.free_wake))
+                                         proactive and inputs.request_options.free_wake,
+                                         inputs.request_options.screen_tool))
     notes = notes_section(fit_notes(inputs.source_notes))
     if notes is not None:
         out.append(notes)  # a tool server's text comes before the user's own (review B1)

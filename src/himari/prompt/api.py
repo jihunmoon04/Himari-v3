@@ -757,6 +757,11 @@ FREE_RULE = (
     "alone, is no reason to stay silent. Keep to that: do not start other work, and use no tool unless what you say"
     " needs it."
 )
+# V3-P91 §8: after FREE_RULE, for a model offered the screen Tool. Worded again in the live check (§9).
+FREE_SCREEN_RULE = (
+    "- If seeing the screen would change what you say in a free wake, you may look first; you can still answer "
+    "[[pass]] after looking."
+)
 PROACTIVE_RULE = (
     "- Speaking first: a user-role message that is only a <wake> block comes from the server, not the user: it "
     "opened this turn for the reasons in it, and the user has said nothing. Speak first, the way a friend would, "

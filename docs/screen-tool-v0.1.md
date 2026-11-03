@@ -170,11 +170,14 @@ data: {"request_id": "sr_…", "conversation": "c_…", "job_id": "…"}
 - 도구는 목록에 있지만(§3.2), 실행은 **자유 wake이고 그 기기의 `free_wake_screen`이 켜져 있을 때만**이다. 다른 wake(알림·돌아옴·고리·작업 끝남)에서는 거절(Q6).
 - **이 도구만 드러냄의 예외다.** 지금 자유 wake는 도구 호출이 시작되면 드러난다(V3-P90 §7.3, `_Held`). `look_at_screen` 호출은 드러내지 않고 숨긴 채 실행한다. 그 뒤 Run의 답으로 판정한다: `[[pass]]`면 숨긴 채 끝(화면을 보고 넘김), 말하면 드러냄.
   - 숨긴 동안의 도구 묶음도 `finalize_hidden_run`의 대상이다. pass로 끝나면 그 호출과 결과는 기록에 보이지 않는다(`read_events`가 숨긴 wake의 이벤트를 빼는 것과 같은 판단으로, 그 wake 턴의 도구 이벤트도 뺀다).
-  - 다른 도구를 부르면 지금처럼 드러난다.
+  - 다른 도구를 부르거나 도구 앞에 말을 쓰면 지금처럼 드러난다.
+  - **구현(Data v18):** 숨긴 채 보는 Run은 wake 기록의 `held_run_id`로 남긴다(`hold_wake_run`, Run의 출력보다 먼저 써서 이벤트가 생길 때 이미 숨겨져 있음). wake 하나에 한 Run뿐이다. wake가 `opened`인 동안 그 Run의 이벤트(호출·결과)는 `unshown_wakes`에 들어가 Web에 보이지 않고, `passed`·`dropped`이면 `read_events`에서 빠진다(Prompt·압축·기억 작업도 같음). 말하면(`speaking`) 그대로 보인다(사용자는 히마리가 본 것을 안다).
+  - 판정은 `looks_unshown`: 화면 도구만 부르고 `[[pass]]` 말고는 아무것도 쓰지 않은 Run. 흐름 중에는 `_Held`가 화면 도구의 호출로는 드러내지 않는다.
+  - **재시작:** 숨긴 채 보던 중에 서버가 꺼지면, 재시작 정리가 그 묶음을 닫고(시작 안 한 호출은 실행 안 함) wake를 `dropped`로 한다. 다음 사용자 턴이 그 화면 요청을 대신 실행하지 않는다.
 - Run 상한 2(`FREE_RUNS`)가 "화면 한 번 + 말하기 한 번"을 담는다. 화면을 본 뒤 또 도구를 부르면 상한에 걸려 끝난다(보인 실패).
 - 앱은 찍을 때 표시를 띄운다(§7.2). 그래서 pass한 자유 wake도 사용자는 "화면 보는 중"을 볼 수 있다. 사용자는 찍힌 것을 알아야 한다(V3-P90 §10).
 - 비용: 화면을 본 자유 wake는 Run 2번과 이미지 1장이다. 하루 시도 12번이 그대로 상한이다. 운영해 보고 다시 본다.
-- `FREE_RULE`에 한 문장: `If seeing the screen would change what you say, you may look first; you can still answer [[pass]] after looking.` (실제 모델 확인에서 다듬음)
+- `FREE_RULE` 다음에 한 줄 `FREE_SCREEN_RULE`(화면 도구를 받은 모델에게만): `If seeing the screen would change what you say in a free wake, you may look first; you can still answer [[pass]] after looking.` (실제 모델 확인에서 다듬음)
 
 ## 9. 어느 모델에서 (Q7)
 

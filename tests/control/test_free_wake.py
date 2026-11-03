@@ -298,3 +298,77 @@ def test_a_users_answer_after_a_failed_free_wake_keeps_its_words() -> None:
         assert answer.payload.blocks == (TextBlock("[[pass]]는 히마리가 조용히 있겠다는 표시야."),)
 
     asyncio.run(scenario())
+
+
+# --- V3-P91 §8: the screen Tool is the one tool a free wake runs unshown ------------------------
+
+def test_a_free_wake_that_looks_and_passes_was_never_there() -> None:
+    from testkit import RecordingTool
+
+    look = RecordingTool("look_at_screen")
+    rt, runner, told = free_runner(calls(("look_at_screen", {})), final("[[pass]]"), tools=(look,))
+
+    async def scenario() -> None:
+        started = await runner.submit_wake(SCOPE, FREE, "d1", free=True)
+        done = await runner.wait(SCOPE)
+        assert done.result is not None and done.result.state is DriveState.COMPLETED and done.hidden
+        wake = await rt.data.read_wake(SCOPE.principal_id, started.wake_id)  # type: ignore[attr-defined]
+        assert wake.status is WakeStatus.PASSED and wake.held_run_id is not None and len(look.invocations) == 1
+        assert await rt.data.read_events(SCOPE) == ()  # type: ignore[attr-defined]  # nor the look
+        assert await rt.data.unshown_wakes(SCOPE) == frozenset()  # type: ignore[attr-defined]
+
+    asyncio.run(scenario())
+    assert told.started == [] and told.accepts == 0
+
+
+def test_a_free_wake_that_looks_and_speaks_shows_the_look_too() -> None:
+    from testkit import RecordingTool
+
+    from himari.data.api import AssistantToolCalls, ToolResultRecord
+
+    rt, runner, told = free_runner(calls(("look_at_screen", {})), final("[[pass]] 그 오류, 괄호 하나 빠졌어"),
+                                   tools=(RecordingTool("look_at_screen"),))
+
+    async def scenario() -> None:
+        started = await runner.submit_wake(SCOPE, FREE, "d1", free=True)
+        await runner.wait(SCOPE)
+        wake = await rt.data.read_wake(SCOPE.principal_id, started.wake_id)  # type: ignore[attr-defined]
+        assert wake.status is WakeStatus.SPEAKING
+        kinds = [type(e.payload) for e in await rt.data.read_events(SCOPE)]  # type: ignore[attr-defined]
+        assert kinds == [Wake, AssistantToolCalls, ToolResultRecord, AssistantFinal]
+
+    asyncio.run(scenario())
+    assert len(told.started) == 1 and not told.started[0].hidden
+
+
+def test_another_tool_or_words_beside_the_look_speak() -> None:
+    from himari.common import CallId, ToolCall, ToolId
+    from himari.control.driver import looks_unshown
+
+    look, other = ToolCall(CallId("a"), 0, ToolId("look_at_screen"), {}), ToolCall(CallId("b"), 1, ToolId("web_search"), {})
+    assert looks_unshown(NormalizedToolCalls((look,))) and looks_unshown(NormalizedToolCalls((look,), (TextBlock("[[pass]] "),)))
+    assert not looks_unshown(NormalizedToolCalls((look, other)))
+    assert not looks_unshown(NormalizedToolCalls((look,), (TextBlock("화면 좀 볼게"),)))
+    assert not looks_unshown(NormalizedFinal((TextBlock("[[pass]]"),)))
+
+
+def test_the_screen_tools_call_does_not_show_a_streaming_free_wake() -> None:
+    from himari.control.driver import _Held
+    from himari.provider.api import OutputDelta
+
+    shown: list[str] = []
+
+    async def in_data() -> bool:
+        shown.append("data")
+        return True
+
+    async def scenario() -> None:
+        held = _Held(None, "wake_1", in_data)
+        held.output("r", OutputDelta(tool="look_at_screen"))  # type: ignore[arg-type]
+        await held.settled()
+        assert shown == []  # V3-P91 §8: it looks unshown
+        held.output("r", OutputDelta(tool="web_search"))  # type: ignore[arg-type]
+        await held.settled()
+        assert shown == ["data"]  # PR #167 review P2-4: any other tool speaks
+
+    asyncio.run(scenario())

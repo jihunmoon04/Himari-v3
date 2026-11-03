@@ -156,12 +156,13 @@ from himari.provider.api import (
     NativeUncertain,
     NormalizedFinal,
     NormalizedModelOutput,
+    NormalizedToolCalls,
     OutputDelta,
     ProviderAdapter,
     ProviderError,
     RawCapture,
 )
-from himari.tool.api import GroupDispatchResult, GroupState, ToolDispatcher, TurnSource, TurnWake
+from himari.tool.api import SCREEN_TOOL_ID, GroupDispatchResult, GroupState, ToolDispatcher, TurnSource, TurnWake
 
 
 MAX_COMPACTIONS_PER_RUN = 4
@@ -726,6 +727,14 @@ class Driver:
         wake = None if self._wakes is None else await self._wakes.wake_of_run(scope, run_id)
         if wake is not None and self._wakes is not None:
             live = held is not None and held.wake_id == wake.wake_id
+            if (live and wake.status is WakeStatus.OPENED and looks_unshown(normalized)
+                    and await self._wakes.hold_wake_run(scope, wake.wake_id, run_id)):
+                # V3-P91 §8: it looks at the screen still unshown, held before its events exist; the
+                # next Run's answer decides — [[pass]] and none of it was ever seen
+                normalized = without_pass(normalized)
+                wake = None
+        if wake is not None and self._wakes is not None:
+            live = held is not None and held.wake_id == wake.wake_id
             verdict = free_wake_verdict(normalized, wake.status, live=live)
             if verdict is not None:
                 await self._wakes.finalize_hidden_run(scope, run_id, wake.wake_id, verdict)
@@ -1170,6 +1179,15 @@ def free_wake_verdict(normalized: NormalizedModelOutput, status: WakeStatus, *, 
     return None if live else WakeStatus.DROPPED
 
 
+def looks_unshown(normalized: NormalizedModelOutput) -> bool:
+    """V3-P91 §8: a free wake's Run that only calls the screen Tool, writing nothing but [[pass]] (marks
+    aside): it looks without being shown. Any other Tool, or words, and it speaks (V3-P90 §7.3)."""
+    if not isinstance(normalized, NormalizedToolCalls) or not normalized.calls:
+        return False
+    plain = split_marks(_text(normalized.commentary), complete=True)[0].strip()
+    return plain in ("", PASS) and all(call.tool_id == SCREEN_TOOL_ID for call in normalized.calls)
+
+
 def without_pass(normalized: NormalizedModelOutput) -> NormalizedModelOutput:
     """A free wake that speaks: its [[pass]] taken out of what is recorded and shown."""
     def clean(blocks: tuple[ContentBlock, ...]) -> tuple[ContentBlock, ...]:
@@ -1206,8 +1224,9 @@ class _Held:
     """A free wake's progress (V3-P90 §7.3): usage goes on to the runner; what is written is held
     until the wake speaks, then handed on, and from then on as it comes, with [[pass]] taken out.
     It speaks the moment its text can no longer be [[pass]] (marks aside), or a tool call starts
-    (PR #167 review P2-4): Data says speaking first (``show_in_data``), then the runner shows the job
-    and what was held. Nothing of a pass is ever shown."""
+    (PR #167 review P2-4) — but the screen Tool's (V3-P91 §8: it looks unshown): Data says speaking
+    first (``show_in_data``), then the runner shows the job and what was held. Nothing of a pass is
+    ever shown."""
 
     def __init__(self, progress: TurnProgress | None, wake_id: str, show_in_data: Callable[[], Awaitable[bool]]) -> None:
         self._progress = progress
@@ -1239,7 +1258,8 @@ class _Held:
             self._raw += delta.text
             # PR #167 re-review P1-6: spaces after the mark ("[[pass]] ") do not make it speak
             plain = split_marks(self._raw, complete=False)[0].strip()
-            if delta.tool is not None or (plain and not PASS.startswith(plain)):
+            # V3-P91 §8: the screen Tool alone does not make it speak; the projection holds its group
+            if (delta.tool is not None and delta.tool != SCREEN_TOOL_ID) or (plain and not PASS.startswith(plain)):
                 self._begin()
         text = self._filter.feed(delta.text) if delta.text else ""
         if text or delta.tool is not None or delta.thinking:
