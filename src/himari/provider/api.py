@@ -81,6 +81,20 @@ class ProviderCapabilities(DeepFrozen):
     # image_input, screen_points, screen_tool, speaks_first, and free_wake.
     companion: bool = False
 
+    def __post_init__(self) -> None:
+        if self.companion and not self.companion_capable:
+            unmet = [k for k, v in [
+                ("image_input", self.image_input),
+                ("screen_points", self.screen_points),
+                ("screen_tool", self.screen_tool),
+                ("speaks_first", self.speaks_first),
+                ("free_wake", self.free_wake),
+            ] if not v]
+            raise ValueError(
+                f"Model {self.model_id!r} cannot declare companion=True "
+                f"without all companion capabilities: {', '.join(unmet)}"
+            )
+
     @property
     def companion_capable(self) -> bool:
         return (self.image_input and self.screen_points and self.screen_tool

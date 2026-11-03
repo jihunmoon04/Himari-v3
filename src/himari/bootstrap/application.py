@@ -858,6 +858,7 @@ class Application:
     views: ViewMaker | None = None  # model copies of images (V3-P67 §3.1); None or unavailable: no copies
     image_models: tuple[str, ...] = ()  # offered models that get images (V3-P67 §7.1)
     companion_models: tuple[str, ...] = ()  # offered models that satisfy all companion features
+    companion_default_model: str | None = None  # V3-P92: default companion model for companion devices
     companion_models_only: bool = False  # only companion-verified models offered / selectable
     documents: DocumentReader | None = None  # read_document's reader (V3-P70); None: not offered
     toolkit: Toolkit | None = field(default=None, repr=False)  # its checked folder, open until close()
@@ -939,6 +940,7 @@ class Application:
         conversation_search: bool = True,  # V3-P72 §9: HIMARI_CONVERSATION_SEARCH=0 turns its Tools off
         streaming: bool = True,  # V3-P73 §9: HIMARI_STREAMING=0 asks no model for a stream
         companion: bool = True,  # V3-P83 §3: HIMARI_COMPANION=0 refuses pairing and device tokens
+        companion_default_model: str | None = "deepseek/deepseek-v4.1-flash",  # V3-P92: default companion model
         companion_models_only: bool = False,  # only models satisfying all companion features (needs screen_tool, screen_points, image_input, speaks_first, free_wake)
         time_zone: str = DEFAULT_TIME_ZONE,  # V3-P83 §6.4: HIMARI_TIME_ZONE, the zone the model is told the time in
         machine_socket: str | None = None,  # V3-P74: HIMARI_MACHINE_SOCKET; None: no machine Environment
@@ -974,7 +976,7 @@ class Application:
                 unverified.append(offered)
             if capabilities.image_input:
                 image_models.append(offered)
-            if capabilities.companion:
+            if capabilities.companion and capabilities.companion_capable:
                 companion_models.append(offered)
         if companion and companion_models_only:
             if model_id not in companion_models:
@@ -983,6 +985,20 @@ class Application:
             unmet = [o.model_id for o in offers if o.model_id not in companion_models]
             if unmet:
                 raise ValueError(f"models not verified for companion mode offered under companion_models_only: {unmet}")
+        resolved_companion_default: str | None = None
+        if companion:
+            if companion_default_model is not None and companion_default_model in [o.model_id for o in offers]:
+                if companion_default_model not in companion_models:
+                    raise ValueError(f"the companion default model {companion_default_model!r} does not satisfy companion requirements "
+                                     "(needs screen_tool, screen_points, image_input, speaks_first, free_wake)")
+                resolved_companion_default = companion_default_model
+            elif companion_models:
+                resolved_companion_default = (
+                    companion_default_model if companion_default_model in companion_models
+                    else (model_id if model_id in companion_models else companion_models[0])
+                )
+            else:
+                resolved_companion_default = companion_default_model
         catalog = ModelCatalog(tuple(offers), model_id)  # duplicates, the default, efforts (§3)
         default_budget = catalog.default.budget
         assert default_budget is not None
@@ -1097,7 +1113,7 @@ class Application:
         application = cls(root, store, runtime.data, runtime, runner, inside, state, model_id,
                           default_budget.limit_tokens, secret, mcp, turn, tuple(unverified), trash_days,
                           file_max_bytes, uploads_work, views, tuple(image_models),
-                          tuple(companion_models), companion_models_only, reader, toolkit,
+                          tuple(companion_models), resolved_companion_default, companion_models_only, reader, toolkit,
                           memory_enabled=memory, conversation_search_enabled=conversation_search,
                           streaming_enabled=streaming, companion_enabled=companion, machine=machine,
                           changes=changes,
@@ -1849,18 +1865,23 @@ class Application:
             raise DataError(DataErrorCode.NOT_FOUND, "this change cannot be undone")
         return await self.data.restore_memory(principal, before, expected_revision=revision)
 
-    async def create_conversation(self, principal: PrincipalId, *, title: str | None = None) -> ConversationId:
+    async def create_conversation(self, principal: PrincipalId, *, title: str | None = None,
+                                  initial_model: str | None = None) -> ConversationId:
         """T0 with the principal's Inside Workspace activated (provisioned
         first) — or, for a machine principal, the machine Environment (V3-P74
         Q1: new Conversations only; its folder is made on first use)."""
         if self.machine is not None and principal in self.machine_principals:
-            return await self.data.create_conversation(
+            cid = await self.data.create_conversation(
                 principal, title=title, activations=(InitialActivation(MACHINE, machine_workspace_for(principal)),))
-        workspace = workspace_for(principal)
-        self.inside.provision(workspace)
-        return await self.data.create_conversation(
-            principal, title=title, activations=(InitialActivation(INSIDE, workspace),)
-        )
+        else:
+            workspace = workspace_for(principal)
+            self.inside.provision(workspace)
+            cid = await self.data.create_conversation(
+                principal, title=title, activations=(InitialActivation(INSIDE, workspace),)
+            )
+        if initial_model is not None:
+            await self.data.set_model_setting(TrustedScope(principal, cid), ModelSetting(initial_model, None))
+        return cid
 
     # --- files (V3-P66) ----------------------------------------------------------------
 

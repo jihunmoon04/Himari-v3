@@ -53,7 +53,7 @@ Excluded from all-feature companion mode:
 - `openai/gpt-6.1-sol` and `anthropic/claude-sonnet-5.5`: lack verified `speaks_first` and `free_wake`.
 - `openai/gpt-5-nano`, `minimax/minimax-m3`, and `z-ai/glm-5.3`: lack `screen_tool` and/or `screen_points`.
 
-When `HIMARI_COMPANION_MODELS_ONLY=1` is configured, only verified companion models can be offered or selected.
+When `HIMARI_COMPANION=1`, conversations initiated by a companion device automatically bind to `HIMARI_COMPANION_DEFAULT_MODEL` (default: `deepseek/deepseek-v4.1-flash`), ensuring verified companion capabilities without exposing management endpoints to devices. When `HIMARI_COMPANION_MODELS_ONLY=1` is configured, only verified companion models can be offered or selected server-wide. `ProviderCapabilities` validates that `companion=True` strictly requires `companion_capable=True`.
 
 ## Screen tool (V3-P91, 2026-11-03)
 

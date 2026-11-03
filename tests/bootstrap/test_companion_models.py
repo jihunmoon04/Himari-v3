@@ -204,3 +204,86 @@ def test_companion_models_only_set_model_refused(tmp_path: Path) -> None:
         await app2.close()
 
     asyncio.run(run())
+
+
+def test_provider_capabilities_companion_invariant() -> None:
+    """P2: companion=True without all 5 companion capabilities must raise ValueError."""
+    # Lacks free_wake and speaks_first:
+    with pytest.raises(ValueError, match="cannot declare companion=True without all companion capabilities: speaks_first, free_wake"):
+        ProviderCapabilities(
+            "incomplete-1",
+            image_input=True,
+            screen_points=True,
+            screen_tool=True,
+            speaks_first=False,
+            free_wake=False,
+            companion=True,
+        )
+
+    # Valid model with all 5 capabilities passes:
+    valid = ProviderCapabilities(
+        "complete-1",
+        image_input=True,
+        screen_points=True,
+        screen_tool=True,
+        speaks_first=True,
+        free_wake=True,
+        companion=True,
+    )
+    assert valid.companion is True
+    assert valid.companion_capable is True
+
+
+def test_companion_default_model_and_device_conversation(tmp_path: Path) -> None:
+    """Option A: companion devices default to companion_default_model on new conversation."""
+    async def run() -> None:
+        provider = FakeProvider({
+            "companion-deepseek": ProviderCapabilities(
+                "companion-deepseek", image_input=True, screen_points=True, screen_tool=True,
+                speaks_first=True, free_wake=True, companion=True, context_tokens=100_000,
+            ),
+            "standard-luna": ProviderCapabilities(
+                "standard-luna", image_input=True, screen_points=True, screen_tool=True,
+                speaks_first=True, free_wake=False, companion=False, context_tokens=100_000,
+            ),
+        })
+
+        # 1. Reject if companion_default_model is an offered model that is not companion capable
+        with pytest.raises(ValueError, match="the companion default model 'standard-luna' does not satisfy companion requirements"):
+            await Application.open(
+                tmp_path / "app_err",
+                provider,
+                model_id="standard-luna",
+                models=(("standard-luna", None), ("companion-deepseek", None)),
+                companion_default_model="standard-luna",
+                sandbox=False,
+            )
+
+        # 2. Server with standard-luna default and companion-deepseek for companion devices
+        app = await Application.open(
+            tmp_path / "app_ok",
+            provider,
+            model_id="standard-luna",
+            models=(("standard-luna", None), ("companion-deepseek", None)),
+            companion_default_model="companion-deepseek",
+            sandbox=False,
+        )
+        assert app.model_id == "standard-luna"
+        assert app.companion_default_model == "companion-deepseek"
+
+        # Web / CLI conversation (initial_model is None) follows server default model (standard-luna)
+        web_cid = await app.create_conversation(ALICE)
+        web_choice = await app.model_choice(TrustedScope(ALICE, web_cid))
+        assert web_choice.model_id == "standard-luna"
+        assert web_choice.chosen is None
+
+        # Device conversation (initial_model set to companion_default_model) uses companion-deepseek
+        device_cid = await app.create_conversation(ALICE, initial_model=app.companion_default_model)
+        device_choice = await app.model_choice(TrustedScope(ALICE, device_cid))
+        assert device_choice.model_id == "companion-deepseek"
+        assert device_choice.chosen is not None
+        assert device_choice.chosen.model_id == "companion-deepseek"
+
+        await app.close()
+
+    asyncio.run(run())

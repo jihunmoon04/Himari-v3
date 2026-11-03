@@ -706,3 +706,22 @@ def test_the_task_and_its_end_are_kept_and_shown(server: Server) -> None:
                 {"idle_seconds": 0, "task": {"group": "work", "for_seconds": -1}},
                 {"idle_seconds": 0, "task_ended": {"group": "game", "lasted_seconds": 1}}):
         assert server.device.post("/api/device/presence", json=bad, headers=me).status_code == 400, bad
+
+
+def test_device_conversation_uses_companion_default_model(server: Server) -> None:
+    """Option A: A new conversation created by a device automatically binds to companion_default_model."""
+    me = server.as_device(server.paired())
+    server.app.companion_default_model = "deepseek/deepseek-v4.1-flash"
+
+    # Device creates conversation -> automatically bound to companion_default_model
+    device_cid = server.device.post("/api/conversations", json={}, headers=me).json()["id"]
+
+    # Web client signs in and creates conversation -> follows server default (scripted-model)
+    server.sign_in()
+    web_cid = server.client.post("/api/conversations", json={}, headers=SEND).json()["id"]
+    web_model = server.client.get(f"/api/conversations/{web_cid}/model").json()
+    assert web_model["model"] == "scripted-model"
+    assert web_model["chosen"] is None
+
+    device_model = server.client.get(f"/api/conversations/{device_cid}/model").json()
+    assert device_model["chosen"] == {"model": "deepseek/deepseek-v4.1-flash", "effort": None}

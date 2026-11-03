@@ -1867,7 +1867,8 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
     async def create_conversation(body: CreateBody, request: Request,
                                   by: Caller = Depends(caller)) -> dict[str, Any]:
         application, who = himari(request), by.principal
-        cid = await application.create_conversation(who, title=body.title)
+        initial_model = application.companion_default_model if by.origin.kind == OriginKind.DEVICE else None
+        cid = await application.create_conversation(who, title=body.title, initial_model=initial_model)
         return summary_view(await application.data.read_conversation(scope_of(cid, who)))
 
     async def _detail(application: Application, scope: TrustedScope) -> dict[str, Any]:
