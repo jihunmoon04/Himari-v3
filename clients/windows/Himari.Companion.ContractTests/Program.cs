@@ -29,7 +29,8 @@ workHistory.Remember(new IntPtr(10), _ => true);
 workHistory.Remember(new IntPtr(20), _ => false);
 Check(workHistory.Target == new IntPtr(10) && workHistory.Return(window => { restores++; return window == new IntPtr(10); }), "own windows do not overwrite previous work target");
 Check(!workHistory.Return(_ => false) && workHistory.Target == new IntPtr(10), "closed or denied work target fails safely without switching elsewhere");
-Check(DialoguePolicy.KeepUserBubble(false,false,"draft",false,false) && DialoguePolicy.KeepUserBubble(false,false,"",false,true) && DialoguePolicy.KeepUserBubble(false,true,"",false,false), "auto-hide preserves draft, unresolved delivery and active input");
+Check(DialoguePolicy.KeepUserBubble(false,true,"draft",false,false) && DialoguePolicy.KeepUserBubble(true,false,"draft",false,false) && DialoguePolicy.KeepUserBubble(false,false,"",false,true) && DialoguePolicy.KeepUserBubble(false,true,"",false,false), "auto-hide preserves focused/hovered draft, unresolved delivery and active input");
+Check(!DialoguePolicy.KeepUserBubble(false,false,"draft",false,false), "unfocused draft does not keep bubble visible indefinitely");
 Check(!DialoguePolicy.KeepUserBubble(false,false,"",false,false), "sent bubble may expire when no interaction needs it");
 foreach (bool textOnlyFollowUp in new[] { false, true })
 foreach (string quickScenario in new[] { "completed", "already-completed", "different-job", "different-screen", "no_sandbox", "view_expired" })

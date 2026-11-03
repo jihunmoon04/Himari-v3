@@ -338,4 +338,19 @@ public partial class MainWindow
         ArrangeBubbles(); UpdateBubbleBounds();
         if (assistantBubbleCloseDue && BubblePanel.Visibility == Visibility.Visible) RetryExpiry(bubbleTimer);
     }
+    private void DismissUserBubbleIfUnfocused()
+    {
+        Dispatcher.BeginInvoke(DispatcherPriority.ApplicationIdle, new Action(() =>
+        {
+            if (sending) return;
+            IntPtr foreground = GetForegroundWindow();
+            if (IsChatWindow(foreground)) return;
+            if (!UserBubbleShown && UserBubble.Visibility != Visibility.Visible) return;
+            if (UserSent.Visibility == Visibility.Visible && !string.IsNullOrEmpty(UserSent.Text))
+            {
+                FreezeSent();
+            }
+            HideUserBubble();
+        }));
+    }
 }
