@@ -74,6 +74,9 @@ class ProviderCapabilities(DeepFrozen):
     # A free wake may open on it (V3-P90 §7.5): only models that passed the live free-wake
     # check (speak when it fits, [[pass]] when it does not). None yet.
     free_wake: bool = False
+    # It is offered the screen Tool (V3-P91 §9): only models that take images and passed
+    # the live screen-tool check (look when the answer needs the screen, not otherwise). None yet.
+    screen_tool: bool = False
 
 
 @runtime_checkable

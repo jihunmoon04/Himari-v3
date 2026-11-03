@@ -56,12 +56,14 @@ class ToolRegistry:
                          if h.definition.external_source is not None)
 
     def catalog(
-        self, active_kinds: frozenset[EnvironmentKind], enabled_sources: frozenset[str] = frozenset()
+        self, active_kinds: frozenset[EnvironmentKind], enabled_sources: frozenset[str] = frozenset(),
+        capabilities: frozenset[str] = frozenset(),
     ) -> Sequence[ToolDefinition]:
         visible = [
             d
             for d in (h.definition for h in self._handlers.values())
             if (d.environment_kind is None or d.environment_kind in active_kinds)
             and (d.external_source is None or d.external_source in enabled_sources)
+            and (d.requires is None or d.requires in capabilities)
         ]
         return tuple(sorted(visible, key=lambda d: d.tool_id))

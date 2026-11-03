@@ -116,6 +116,7 @@ from himari.data.api import (
     RecentEpisode,
     MemoryStore,
     MessageOrigin,
+    OriginKind,
     RawNoResponse,
     RawReceived,
     RawRunOutcome,
@@ -160,7 +161,7 @@ from himari.provider.api import (
     ProviderError,
     RawCapture,
 )
-from himari.tool.api import GroupDispatchResult, GroupState, ToolDispatcher
+from himari.tool.api import GroupDispatchResult, GroupState, ToolDispatcher, TurnSource, TurnWake
 
 
 MAX_COMPACTIONS_PER_RUN = 4
@@ -277,6 +278,8 @@ class Driver:
         # Where the user is, read at the turn's first request — after its message
         # is recorded and the restart cleanup is done (V3-P83 §6.3).
         self._turn_presences: dict[ConversationId, TurnPresence] = {}  # of the drive holding the lock
+        # V3-P91 §3.4: where the turn speaks — a wake's device, or the device its user message came from
+        self._turn_sources: dict[ConversationId, TurnSource] = {}
         self._outputs: dict[ConversationId, OutputProgress | None] = {}  # of the drive holding the lock
         self._locks: dict[ConversationId, asyncio.Lock] = {}
         self._signals: dict[ConversationId, StopSignal] = {}  # of the drive holding the lock
@@ -314,6 +317,10 @@ class Driver:
                 self._free[scope.conversation_id] = held
             # V3-P90 §5.6: the user did not ask for this turn — what writes does not run
             self._read_only.add(scope.conversation_id)
+            if self._wakes is not None:  # V3-P91 §3.4: the device the wake speaks on
+                record = await self._wakes.read_wake(scope.principal_id, wake_id)
+                self._turn_sources[scope.conversation_id] = TurnSource(
+                    record.device_id, TurnWake.FREE if free else TurnWake.OTHER)
             try:
                 return await self._resume_locked(scope)
             finally:
@@ -523,6 +530,7 @@ class Driver:
                 del self._turn_models[scope.conversation_id]
                 del self._turn_users[scope.conversation_id]
                 self._turn_presences.pop(scope.conversation_id, None)
+                self._turn_sources.pop(scope.conversation_id, None)
 
     def _stop(self, scope: TrustedScope) -> StopSignal:
         return self._signals[scope.conversation_id]
@@ -556,6 +564,11 @@ class Driver:
         """``inputs`` with where the user is (V3-P83 §6.2) and the time in the
         zone of the device the message came from (§6.4) — read once per turn
         (``turn``), or now for the next turn's context."""
+        if turn and scope.conversation_id not in self._turn_sources:
+            # V3-P91 §3.4: the device the turn's message came from (a wake's was set already)
+            origin = sent_from(inputs.events)
+            self._turn_sources[scope.conversation_id] = TurnSource(
+                origin.device_id if origin is not None and origin.kind is OriginKind.DEVICE else None)
         if self._presence is None:
             return inputs
         found = self._turn_presences.get(scope.conversation_id) if turn else None
@@ -583,7 +596,8 @@ class Driver:
                               session_key=session_key(scope), image_input=capabilities.image_input,
                               screen_points=capabilities.image_input and capabilities.screen_points,
                               speaks_first=capabilities.speaks_first,
-                              free_wake=capabilities.speaks_first and capabilities.free_wake)
+                              free_wake=capabilities.speaks_first and capabilities.free_wake,
+                              screen_tool=capabilities.image_input and capabilities.screen_tool)
 
     def _options_for(self, scope: TrustedScope) -> RequestOptions:
         return self._request_options(scope, self._turn_model(scope))
@@ -802,7 +816,9 @@ class Driver:
             group = await self._interruptible(
                 scope, lambda: self._dispatcher.dispatch_group(
                     scope, run_id, payload.calls, pause=lambda: signal.pause_requested,
-                    read_only=scope.conversation_id in self._read_only))
+                    read_only=scope.conversation_id in self._read_only,
+                    turn=self._turn_sources.get(scope.conversation_id),
+                    capabilities=self._options_for(scope).tool_capabilities))
         except _Cancelled:
             return await self._dispatcher.cancel_group(scope, run_id, CANCELLED_RESULT)
         if signal.cancel_requested:  # arrived as the group stopped (e.g. PAUSED): close what did not start

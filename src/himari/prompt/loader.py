@@ -152,7 +152,9 @@ class ContextLoader:
         enabled = frozenset() if self._external_access is None else await self._external_access.enabled_sources(scope)
         return PromptInputs(
             instructions=self._instructions,
-            tool_catalog=tuple(self._catalog.catalog(active, enabled)),
+            # V3-P91 §3.2: a Tool that needs a model capability is offered only with it
+            tool_catalog=tuple(self._catalog.catalog(
+                active, enabled, request_options.tool_capabilities)),
             events=events,
             tool_executions=tuple(executions),
             snapshot=snapshot,

@@ -221,6 +221,9 @@ class Signals(DeepFrozen):
     # V3-P90 §9: the app's setting "send the screen to a free wake" (its ``features``); unsent is off.
     # Kept only, for the screen tool (§10).
     free_wake_screen: bool = False
+    # V3-P91 §7.1: the app's setting "look at the screen when HIMARI needs to" (its ``features``); unsent
+    # is off — an app that does not send it does not answer screen requests either.
+    screen_look: bool = False
 
 
 @dataclass(frozen=True)
@@ -265,6 +268,7 @@ class DeviceState(DeepFrozen):
     task: TaskSignal | None = None  # V3-P90 §6.1: ``for_seconds`` counted to now
     task_ended: TaskEnded | None = None  # V3-P90 §5.3: ``ended_seconds_ago`` counted to now
     free_wake_screen: bool = False  # V3-P90 §9: the app's setting, kept for the screen tool (§10)
+    screen_look: bool = False  # V3-P91 §7.1: the app takes screen requests
 
 
 @dataclass(frozen=True)

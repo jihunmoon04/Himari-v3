@@ -144,6 +144,7 @@ class _Device:
     task_at: float | None = None  # when ``task`` came (its for_seconds counts on from there)
     task_ended: tuple[str, float, float] | None = None  # V3-P90 §5.3: group, lasted, when it ended (monotonic)
     free_wake_screen: bool = False  # V3-P90 §9: a locked body does not carry it, so it is kept then
+    screen_look: bool = False  # V3-P91 §7.1: likewise
 
 
 def _shown(device: _Device) -> tuple[object, ...]:
@@ -153,7 +154,7 @@ def _shown(device: _Device) -> tuple[object, ...]:
     task = None if device.task is None else device.task.group
     ended = None if device.task_ended is None else (device.task_ended[0], device.task_ended[2])
     return (device.locked, activity, device.media, device.mic_or_camera, before, device.sleep, task, ended,
-            device.free_wake_screen)
+            device.free_wake_screen, device.screen_look)
 
 
 class PresenceHub:
@@ -211,6 +212,18 @@ class PresenceHub:
 
     def publish_web(self, principal: PrincipalId, name: str, data: JsonValue) -> None:
         self._push(principal, StreamEvent(name, data), web_only=True)
+
+    def publish_device(self, principal: PrincipalId, device_id: str, name: str, data: JsonValue) -> bool:
+        """V3-P91 §4.1: to that device's streams only; False when none took it (none open, or each
+        one full — and so ended)."""
+        streams = [s for s in self._subscriptions.get(principal, ()) if s.device_id == device_id and not s.ended]
+        taken = False
+        for subscription in streams:
+            if subscription.push(StreamEvent(name, data)):
+                taken = True
+            else:
+                self.unsubscribe(subscription)
+        return taken
 
     def _push(self, principal: PrincipalId, event: StreamEvent, *, web_only: bool) -> None:
         for subscription in list(self._subscriptions.get(principal, ())):
@@ -276,6 +289,7 @@ class PresenceHub:
             device.task = device.task_at = device.task_ended = None
             return
         device.free_wake_screen = snapshot.free_wake_screen
+        device.screen_look = snapshot.screen_look
         # V3-P90 §3.1: what goes on, and what ended (kept with its moment, so a repeat does not move it)
         device.task, device.task_at = snapshot.task, (now if snapshot.task is not None else None)
         if (ended := snapshot.task_ended) is None:
@@ -318,7 +332,7 @@ class PresenceHub:
                            None if d.input_at is None else now - d.input_at, d.time_zone,
                            locked=d.locked, activity=activity, media=d.media, mic_or_camera=d.mic_or_camera,
                            before=before, sleeps=d.sleeps, sleep=d.sleep, task=task, task_ended=ended,
-                           free_wake_screen=d.free_wake_screen)
+                           free_wake_screen=d.free_wake_screen, screen_look=d.screen_look)
 
     def current(self, principal: PrincipalId) -> str | None:
         return self._current.get(principal)
@@ -459,7 +473,7 @@ class PresenceHub:
         device.activity = device.activity_at = device.media = device.mic_or_camera = None
         device.before = device.after = None
         device.task = device.task_at = device.task_ended = None
-        device.free_wake_screen = False
+        device.free_wake_screen = device.screen_look = False
         if _shown(device) != shown:
             self._changed(principal)
 

@@ -93,12 +93,20 @@ class RequestOptions(DeepFrozen):
     speaks_first: bool = False
     # And may take a free wake (V3-P90 §7.5): its line, and [[pass]], only then; set by the Driver.
     free_wake: bool = False
+    # And is offered the screen Tool (V3-P91 §3.2): the catalog keeps it only then; set by the Driver.
+    screen_tool: bool = False
     # Ask for the answer as a stream (V3-P73 §3.1); set by the Driver right before
     # the request is prepared, only for a Run that answers the user.
     stream: bool = False
     # The most the answer may take, reasoning included (V3-P85 §4.8); None: the
     # model's own limit. Only memory passes set it.
     max_output_tokens: int | None = None
+
+    @property
+    def tool_capabilities(self) -> frozenset[str]:
+        """The capabilities a Tool may ``require`` (V3-P91 §3.2): what the catalog offers and the
+        Dispatcher runs."""
+        return frozenset({"screen_tool"}) if self.screen_tool else frozenset()
 
 
 # --- Provider-neutral history (CPP §6.1) ------------------------------------
@@ -783,7 +791,10 @@ def wake_text(wake: Wake, notes: Mapping[int, Memory]) -> str:
 
 # V3-P84 §5: SCREEN_MOVE_NOTE follows only for a model whose points on a screen
 # were checked (RequestOptions.screen_points).
-SCREEN_NOTE = "- Screens: an attachment with \"screen\": true is the user's screen when they sent the message."
+SCREEN_NOTE = (
+    "- Screens: an attachment with \"screen\": true is the user's screen when they sent the message, or when "
+    "you looked with a tool."
+)
 SCREEN_MOVE_NOTE = (
     "Its width and height are the pixels of the image you see. To move your character to a spot on the latest "
     "screen, write [[move:X,Y]] in that image's pixels where you start talking about it, e.g. "

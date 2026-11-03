@@ -10,6 +10,7 @@ call's result attaches when it is committed (T7).
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 
 from himari.common import AttachmentRef, CallRef, TrustedScope
 from himari.data.api import (
@@ -41,8 +42,10 @@ class StoredResultImages:
         try:
             blob = await self._blobs.put(scope.principal_id, _once(image.data), self._max_bytes)
             setup = await self._blobs.prepare_image(scope.principal_id, blob, self._views)
+            # V3-P91 §5.1: a screen is named as a device's screen is (V3-P84 §4.1)
+            stem = f"screen-{datetime.now(UTC):%Y%m%d-%H%M%S}" if image.screen else f"image-{number}"
             record = await self._files.stage_tool_file(
-                scope, call, blob, f"image-{number}.{image_extension(sniffed.media_type)}", sniffed.media_type, setup)
+                scope, call, blob, f"{stem}.{image_extension(sniffed.media_type)}", sniffed.media_type, setup)
         except (DataError, OSError):  # e.g. the file store is full, a disk error (review N10)
             return "[an image was returned but could not be kept]"
-        return AttachmentRef(record.file_id, record.version)
+        return AttachmentRef(record.file_id, record.version, screen=image.screen)
