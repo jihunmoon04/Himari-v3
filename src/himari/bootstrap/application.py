@@ -987,18 +987,20 @@ class Application:
                 raise ValueError(f"models not verified for companion mode offered under companion_models_only: {unmet}")
         resolved_companion_default: str | None = None
         if companion:
-            if companion_default_model is not None and companion_default_model in [o.model_id for o in offers]:
-                if companion_default_model not in companion_models:
-                    raise ValueError(f"the companion default model {companion_default_model!r} does not satisfy companion requirements "
-                                     "(needs screen_tool, screen_points, image_input, speaks_first, free_wake)")
-                resolved_companion_default = companion_default_model
+            if companion_default_model is not None:
+                if companion_default_model in [o.model_id for o in offers]:
+                    if companion_default_model not in companion_models:
+                        raise ValueError(f"the companion default model {companion_default_model!r} does not satisfy companion requirements "
+                                         "(needs screen_tool, screen_points, image_input, speaks_first, free_wake)")
+                    resolved_companion_default = companion_default_model
+                elif companion_models:
+                    resolved_companion_default = companion_models[0]
+                else:
+                    resolved_companion_default = None
             elif companion_models:
-                resolved_companion_default = (
-                    companion_default_model if companion_default_model in companion_models
-                    else (model_id if model_id in companion_models else companion_models[0])
-                )
+                resolved_companion_default = model_id if model_id in companion_models else companion_models[0]
             else:
-                resolved_companion_default = companion_default_model
+                resolved_companion_default = None
         catalog = ModelCatalog(tuple(offers), model_id)  # duplicates, the default, efforts (§3)
         default_budget = catalog.default.budget
         assert default_budget is not None
@@ -1870,18 +1872,17 @@ class Application:
         """T0 with the principal's Inside Workspace activated (provisioned
         first) — or, for a machine principal, the machine Environment (V3-P74
         Q1: new Conversations only; its folder is made on first use)."""
+        setting = ModelSetting(initial_model, None) if initial_model is not None else None
         if self.machine is not None and principal in self.machine_principals:
-            cid = await self.data.create_conversation(
-                principal, title=title, activations=(InitialActivation(MACHINE, machine_workspace_for(principal)),))
-        else:
-            workspace = workspace_for(principal)
-            self.inside.provision(workspace)
-            cid = await self.data.create_conversation(
-                principal, title=title, activations=(InitialActivation(INSIDE, workspace),)
-            )
-        if initial_model is not None:
-            await self.data.set_model_setting(TrustedScope(principal, cid), ModelSetting(initial_model, None))
-        return cid
+            return await self.data.create_conversation(
+                principal, title=title, activations=(InitialActivation(MACHINE, machine_workspace_for(principal)),),
+                model_setting=setting)
+        workspace = workspace_for(principal)
+        self.inside.provision(workspace)
+        return await self.data.create_conversation(
+            principal, title=title, activations=(InitialActivation(INSIDE, workspace),),
+            model_setting=setting,
+        )
 
     # --- files (V3-P66) ----------------------------------------------------------------
 

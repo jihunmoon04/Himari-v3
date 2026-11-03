@@ -89,7 +89,7 @@ class Bare:
 
 class Server:
     def __init__(self, tmp_path: Path, companion: bool = True) -> None:
-        self.provider = ScriptedAdapter([])
+        self.provider = ScriptedAdapter([], companion=companion)
         self.application: Application | None = None
 
         async def opener() -> Application:
@@ -711,7 +711,7 @@ def test_the_task_and_its_end_are_kept_and_shown(server: Server) -> None:
 def test_device_conversation_uses_companion_default_model(server: Server) -> None:
     """Option A: A new conversation created by a device automatically binds to companion_default_model."""
     me = server.as_device(server.paired())
-    server.app.companion_default_model = "deepseek/deepseek-v4.1-flash"
+    assert server.app.companion_default_model == "scripted-model"
 
     # Device creates conversation -> automatically bound to companion_default_model
     device_cid = server.device.post("/api/conversations", json={}, headers=me).json()["id"]
@@ -722,6 +722,16 @@ def test_device_conversation_uses_companion_default_model(server: Server) -> Non
     web_model = server.client.get(f"/api/conversations/{web_cid}/model").json()
     assert web_model["model"] == "scripted-model"
     assert web_model["chosen"] is None
+    assert web_model["fallback"] is None
 
     device_model = server.client.get(f"/api/conversations/{device_cid}/model").json()
-    assert device_model["chosen"] == {"model": "deepseek/deepseek-v4.1-flash", "effort": None}
+    assert device_model["model"] == "scripted-model"
+    assert device_model["chosen"] == {"model": "scripted-model", "effort": None}
+    assert device_model["fallback"] is None
+
+    # If no companion model is offered, device conversation creation is refused with 503
+    server.client.cookies.clear()
+    server.app.companion_default_model = None
+    refused = server.device.post("/api/conversations", json={}, headers=me)
+    assert refused.status_code == 503
+    assert refused.json()["error"]["code"] == "no_companion_model"

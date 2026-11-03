@@ -233,6 +233,21 @@ def test_provider_capabilities_companion_invariant() -> None:
     assert valid.companion is True
     assert valid.companion_capable is True
 
+    # P2: DeepFrozen.__post_init__ preserves deep-freezing of mutable collections
+    mutable_efforts = {"low", "high"}
+    frozen_caps = ProviderCapabilities(
+        "complete-2",
+        reasoning_efforts=mutable_efforts,  # type: ignore[arg-type]
+        image_input=True,
+        screen_points=True,
+        screen_tool=True,
+        speaks_first=True,
+        free_wake=True,
+        companion=True,
+    )
+    assert isinstance(frozen_caps.reasoning_efforts, frozenset)
+    assert frozen_caps.reasoning_efforts == frozenset({"low", "high"})
+
 
 def test_companion_default_model_and_device_conversation(tmp_path: Path) -> None:
     """Option A: companion devices default to companion_default_model on new conversation."""
@@ -283,6 +298,30 @@ def test_companion_default_model_and_device_conversation(tmp_path: Path) -> None
         assert device_choice.model_id == "companion-deepseek"
         assert device_choice.chosen is not None
         assert device_choice.chosen.model_id == "companion-deepseek"
+        assert web_choice.fallback is None
+        assert device_choice.fallback is None
+
+        # Verify actual Run execution records the model_id of the chosen model
+        from testkit import final
+        provider.extend([final("안녕!"), final("반가워!")])
+
+        web_scope = TrustedScope(ALICE, web_cid)
+        await app.send(web_scope, text="hi from web")
+        while app.runner.status(web_scope).running:
+            await asyncio.sleep(0.01)
+        web_events = await app.data.read_events(web_scope)
+        web_run_id = next(e.origin_run_id for e in web_events if e.origin_run_id is not None)
+        web_run = await app.data.read_run(web_scope, web_run_id)
+        assert web_run.model_id == "standard-luna"
+
+        device_scope = TrustedScope(ALICE, device_cid)
+        await app.send(device_scope, text="hi from device")
+        while app.runner.status(device_scope).running:
+            await asyncio.sleep(0.01)
+        device_events = await app.data.read_events(device_scope)
+        device_run_id = next(e.origin_run_id for e in device_events if e.origin_run_id is not None)
+        device_run = await app.data.read_run(device_scope, device_run_id)
+        assert device_run.model_id == "companion-deepseek"
 
         await app.close()
 

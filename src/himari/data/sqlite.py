@@ -2237,14 +2237,19 @@ class SqliteData:
         *,
         title: str | None = None,
         activations: Sequence[InitialActivation] = (),
+        model_setting: ModelSetting | None = None,
     ) -> ConversationId:
         title = rules.normalize_title(title)
         rules.check_activations(activations)
-        with self._tx() as tx:  # T0: the Conversation and its activations, or nothing
+        rules.check_model_setting(model_setting)
+        with self._tx() as tx:  # T0: the Conversation, its activations, and initial model, or nothing
             scope = TrustedScope(principal, ConversationId(tx.new_id("conv")))
             tx.insert_conversation(scope, title)
             for activation in activations:
                 tx.activate(scope, activation.environment_kind, activation.workspace_id, None)
+            if model_setting is not None:
+                tx.execute("INSERT INTO model_settings (conversation_id, model_id, reasoning_effort) VALUES (?, ?, ?)",
+                           scope.conversation_id, model_setting.model_id, model_setting.reasoning_effort)
             return scope.conversation_id
 
     _SUMMARY = (

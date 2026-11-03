@@ -1867,7 +1867,11 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
     async def create_conversation(body: CreateBody, request: Request,
                                   by: Caller = Depends(caller)) -> dict[str, Any]:
         application, who = himari(request), by.principal
-        initial_model = application.companion_default_model if by.origin.kind == OriginKind.DEVICE else None
+        initial_model: str | None = None
+        if by.origin.kind == OriginKind.DEVICE:
+            if application.companion_default_model is None:
+                raise ApiError(503, "no_companion_model", "No companion-capable model is offered on this server.")
+            initial_model = application.companion_default_model
         cid = await application.create_conversation(who, title=body.title, initial_model=initial_model)
         return summary_view(await application.data.read_conversation(scope_of(cid, who)))
 

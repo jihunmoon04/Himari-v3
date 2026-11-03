@@ -130,9 +130,12 @@ class ScriptedAdapter:
     def __init__(self, script: Iterable[ScriptStep] = (), *, streaming: bool = False,
                  piece_delay: float = 0.0, first_delay: float = 0.0, image_input: bool = False,
                  screen_points: bool = False, memory_passes: bool = False, speaks_first: bool = True,
-                 free_wake: bool = True, screen_tool: bool = False) -> None:
+                 free_wake: bool = True, screen_tool: bool = False, companion: bool = False) -> None:
         """``speaks_first``, ``free_wake``: on, as the wake tests expect (V3-P87, V3-P90); off to see a model refused."""
         self._script = list(script)
+        self._companion = companion
+        if companion:
+            image_input = screen_points = screen_tool = speaks_first = free_wake = True
         self._speaks_first = speaks_first
         self._free_wake = free_wake
         self._screen_tool = screen_tool  # V3-P91: the screen Tool is offered (with image_input)
@@ -156,7 +159,8 @@ class ScriptedAdapter:
         return ProviderCapabilities(model_id=model_id, parallel_tool_calls=True, streaming=self._streaming,
                                     image_input=self._image_input, screen_points=self._screen_points,
                                     memory_passes=self._memory_passes, speaks_first=self._speaks_first,
-                                    free_wake=self._free_wake, screen_tool=self._screen_tool)
+                                    free_wake=self._free_wake, screen_tool=self._screen_tool,
+                                    companion=self._companion)
 
     def prepare_native_request(self, model_input: ModelInput) -> NativePreparedRequest:
         body = json.dumps(

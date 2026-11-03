@@ -82,6 +82,7 @@ class ProviderCapabilities(DeepFrozen):
     companion: bool = False
 
     def __post_init__(self) -> None:
+        super().__post_init__()
         if self.companion and not self.companion_capable:
             unmet = [k for k, v in [
                 ("image_input", self.image_input),

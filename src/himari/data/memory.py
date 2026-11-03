@@ -265,10 +265,20 @@ class InMemoryStore:
 
     # --- admin helpers (trusted setup paths, not model-reachable) --------
 
-    def create_conversation(self, scope: TrustedScope, *, title: str | None = None) -> None:
+    def create_conversation(
+        self,
+        scope: TrustedScope,
+        *,
+        title: str | None = None,
+        model_setting: ModelSetting | None = None,
+    ) -> None:
         if scope.conversation_id in self._conversations:
             raise DataError(DataErrorCode.DUPLICATE_IDENTITY, scope.conversation_id)
-        self._conversations[scope.conversation_id] = _Conversation(owner=scope.principal_id, title=title)
+        self._conversations[scope.conversation_id] = _Conversation(
+            owner=scope.principal_id,
+            title=title,
+            model=model_setting,
+        )
 
     def activate_environment(
         self,
@@ -1119,11 +1129,13 @@ class InMemoryData:
         *,
         title: str | None = None,
         activations: Sequence[InitialActivation] = (),
+        model_setting: ModelSetting | None = None,
     ) -> ConversationId:
         title = rules.normalize_title(title)
         rules.check_activations(activations)
+        rules.check_model_setting(model_setting)
         scope = TrustedScope(principal, ConversationId(self._store.new_id("conv")))
-        self._store.create_conversation(scope, title=title)
+        self._store.create_conversation(scope, title=title, model_setting=model_setting)
         for activation in activations:  # validated above: cannot fail half way
             self._store.activate_environment(scope, activation.environment_kind, activation.workspace_id)
         return scope.conversation_id
