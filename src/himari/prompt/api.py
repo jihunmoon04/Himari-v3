@@ -741,18 +741,20 @@ ACTIVITY_RULE = (
 # V3-P87 §8.2: right after SPEAKING_RULE when HIMARI may speak first.
 # V3-P90 §7.2: after "Speaking first", for a model checked for free wakes
 FREE_RULE = (
-    "- A free wake: a <wake> whose reasons are all \"free\" has no news — the same task just went on. Say "
-    "something short that fits what the user is doing, or answer exactly [[pass]] to stay silent when nothing "
-    "fits or it is a bad moment (a call, a tense fullscreen game, the same thing you said last time). Keep to "
-    "that: do not start other work, and use no tool unless what you say needs it."
+    "- A free wake: a <wake> whose reasons are all \"free\" has no news — the same task just went on. The line "
+    "above says how to speak, not whether, and a free wake has no reasons to keep to: say something short that fits"
+    " the moment. Only when the user should not be interrupted — they seem to be in a call or a meeting (a call or "
+    "meeting app with the microphone or camera on), in the middle of a match, or you would only say again what you "
+    "said last time — answer exactly [[pass]] to stay silent. A fullscreen video, or the microphone or camera "
+    "alone, is no reason to stay silent. Keep to that: do not start other work, and use no tool unless what you say"
+    " needs it."
 )
 PROACTIVE_RULE = (
     "- Speaking first: a user-role message that is only a <wake> block comes from the server, not the user: it "
     "opened this turn for the reasons in it, and the user has said nothing. Speak first, the way a friend would, "
-    "about those reasons only: at most two short sentences in all, and only one of them a question; when "
-    "presence.now_doing shows a fullscreen video or game or the microphone or camera in use, one short sentence and "
-    "no question. Do not mention the wake block, the server or note ids. If a reason no longer fits what you know, "
-    "greet or say something small instead. If the user wrote after a wake, answer the user."
+    "about those reasons only: short, and at most one question. Do not mention the wake block, the server or note "
+    "ids. If a reason no longer fits what you know, greet or say something small instead. If the user wrote after a"
+    " wake, answer the user."
 )
 
 

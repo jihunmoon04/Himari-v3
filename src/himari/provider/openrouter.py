@@ -125,7 +125,8 @@ CONNECT_SECONDS = 10.0  # of a streamed request; reading waits the adapter's tim
 KNOWN_CAPABILITIES: Mapping[str, ProviderCapabilities] = {
     "openai/gpt-6-luna": ProviderCapabilities(
         model_id="openai/gpt-6-luna",
-        speaks_first=True,  # V3-P87: 18 of 18 in the speaking-first check, live 2026-11-01
+        speaks_first=True,  # V3-P87: 18 of 18 in the speaking-first check, live 2026-11-01; V3-P90: 24 of 24
+        # free_wake off (V3-P90 §7.5): 4 of 6 in the either scenes — said the last free wake's words again
         memory_passes=True,  # V3-P85: every bar of the memory check, live 2026-10-31
         screen_points=True,  # V3-P84: 8+ of 10 points on target, live 2026-10-30
         image_input=True,  # V3-P67: user-message and after-group images read back, live 2026-10-22
@@ -146,7 +147,8 @@ KNOWN_CAPABILITIES: Mapping[str, ProviderCapabilities] = {
     ),
     "anthropic/claude-haiku-5.5": ProviderCapabilities(
         model_id="anthropic/claude-haiku-5.5",
-        speaks_first=True,  # V3-P87: 16 of 18 in the speaking-first check, live 2026-11-01
+        speaks_first=True,  # V3-P87: 16 of 18 in the speaking-first check, live 2026-11-01; V3-P90: 20 of 24
+        free_wake=True,  # V3-P90 §7.5: free-wake check pass 3/3, speak 14/15, either 6/6, live 2026-11-03
         memory_passes=True,  # V3-P85: every bar of the memory check, live 2026-10-31
         screen_points=True,  # V3-P84: 8+ of 10 points on target, live 2026-10-30
         image_input=True,  # V3-P67: user-message and after-group images read back, live 2026-10-22
@@ -180,7 +182,8 @@ KNOWN_CAPABILITIES: Mapping[str, ProviderCapabilities] = {
     ),
     "xiaomi/mimo-v2.6-pro": ProviderCapabilities(
         model_id="xiaomi/mimo-v2.6-pro",
-        speaks_first=True,  # V3-P87: 16 of 18 in the speaking-first check, live 2026-11-01
+        speaks_first=True,  # V3-P87: 16 of 18 in the speaking-first check, live 2026-11-01; V3-P90: 23 of 24
+        free_wake=True,  # V3-P90 §7.5: free-wake check pass 3/3, speak 13/15, either 6/6, live 2026-11-03
         memory_passes=True,  # V3-P85: every bar of the memory check, live 2026-10-31
         screen_points=True,  # V3-P84: 8+ of 10 points on target, live 2026-10-30
         streaming=True,  # V3-P73: live response, tool replay and cancel checked 2026-10-24
@@ -198,7 +201,8 @@ KNOWN_CAPABILITIES: Mapping[str, ProviderCapabilities] = {
     ),
     "deepseek/deepseek-v4.1-flash": ProviderCapabilities(
         model_id="deepseek/deepseek-v4.1-flash",
-        speaks_first=True,  # V3-P87: 17 of 18 in the speaking-first check, live 2026-11-01
+        speaks_first=True,  # V3-P87: 17 of 18 in the speaking-first check, live 2026-11-01; V3-P90: 21 of 24
+        free_wake=True,  # V3-P90 §7.5: free-wake check pass 3/3, speak 15/15, either 6/6, live 2026-11-03
         memory_passes=True,  # V3-P85: every bar of the memory check, live 2026-10-31
         screen_points=True,  # V3-P84: 8+ of 10 points on target, live 2026-10-30
         streaming=True,  # V3-P73: live response, tool replay and cancel checked 2026-10-24
