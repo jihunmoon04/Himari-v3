@@ -28,3 +28,31 @@ internal sealed class MoveJobLifetime
     internal void CompleteLive(string job) { ended.Add(job); liveClosed.Add(job); }
     internal void Reset() { ended.Clear(); liveClosed.Clear(); verifying.Clear(); }
 }
+
+/// <summary>A window that shows: its program (null when unknown) and its visible frame, in physical pixels.</summary>
+internal readonly record struct VisibleWindow(string? Program, PixelRect Frame);
+
+internal static class ScreenWindows
+{
+    /// <summary>V3-P91 §14 Q10: the programs with a window on the monitor that is captured — any window that shows
+    /// there, in front or not, so what is checked is what the image can hold.</summary>
+    internal static IEnumerable<string?> On(IEnumerable<VisibleWindow> windows, PixelRect monitor) =>
+        windows.Where(w => w.Frame.Width > 0 && w.Frame.Height > 0
+            && w.Frame.Left < monitor.Left + monitor.Width && monitor.Left < w.Frame.Left + w.Frame.Width
+            && w.Frame.Top < monitor.Top + monitor.Height && monitor.Top < w.Frame.Top + w.Frame.Height).Select(w => w.Program);
+}
+
+/// <summary>One capture at a time (V3-P84: the companion is never in the image). Without the capture exclusion the
+/// windows are hidden and shown again; two captures at once would show them in the middle of the other.</summary>
+internal sealed class CaptureGate
+{
+    private readonly SemaphoreSlim gate = new(1, 1);
+
+    /// <summary>Runs <paramref name="work"/> alone; false when the gate did not open within <paramref name="wait"/>.</summary>
+    internal async Task<(bool Ran, T? Value)> RunAsync<T>(Func<Task<T>> work, TimeSpan wait, CancellationToken ct)
+    {
+        if (!await gate.WaitAsync(wait, ct)) return (false, default);
+        try { return (true, await work()); }
+        finally { gate.Release(); }
+    }
+}

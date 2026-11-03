@@ -765,13 +765,36 @@ Check(PresenceBody.Build(3, "z", true, false, null, coding, true, null, true, nu
 
 // V3-P91 §7.2, §14 Q10: when the app captures for HIMARI, and why not
 var titleNames = SignalSettings.Names(SignalSettings.DefaultTitleExclusions);
-Check(ScreenRequestPolicy.Refusal(true, false, "code", titleNames) is null, "an ordinary program is captured");
-Check(ScreenRequestPolicy.Refusal(true, false, null, titleNames) is null, "nothing known in front is captured");
-Check(ScreenRequestPolicy.Refusal(false, false, "code", titleNames) == "turned_off", "turned off");
-Check(ScreenRequestPolicy.Refusal(true, true, "code", titleNames) == "asleep", "asleep or locked");
-Check(ScreenRequestPolicy.Refusal(true, false, @"C:\Program Files\Kakao\KakaoTalk.exe", titleNames) == "excluded"
-    && ScreenRequestPolicy.Refusal(true, false, "1Password", titleNames) == "excluded", "a program whose titles are not sent is not captured");
-Check(ScreenRequestPolicy.Refusal(false, true, "kakaotalk", titleNames) == "turned_off", "the setting is said first");
+Check(ScreenRequestPolicy.Refusal(true, false, ["code", "explorer"], titleNames) is null, "ordinary programs are captured");
+Check(ScreenRequestPolicy.Refusal(true, false, [null], titleNames) is null && ScreenRequestPolicy.Refusal(true, false, [], titleNames) is null,
+    "an unknown program or none excludes nothing");
+Check(ScreenRequestPolicy.Refusal(false, false, ["code"], titleNames) == "turned_off", "turned off");
+Check(ScreenRequestPolicy.Refusal(true, true, ["code"], titleNames) == "asleep", "asleep or locked");
+Check(ScreenRequestPolicy.Refusal(true, false, ["code", @"C:\Program Files\Kakao\KakaoTalk.exe"], titleNames) == "excluded"
+    && ScreenRequestPolicy.Refusal(true, false, ["1Password"], titleNames) == "excluded", "a program whose titles are not sent is not captured, in front or not");
+Check(ScreenRequestPolicy.Refusal(false, true, ["kakaotalk"], titleNames) == "turned_off", "the setting is said first");
+// PR #172 review P1-1: VS Code on monitor A, a password manager on monitor B, the capture takes B (the pointer is there)
+PixelRect monitorA = new(0, 0, 1920, 1080), monitorB = new(1920, 0, 2560, 1440);
+VisibleWindow[] desktop = [new("code", new(0, 0, 1920, 1040)), new("1password", new(2200, 100, 900, 700)), new("explorer", new(-5, 1030, 300, 40))];
+Check(ScreenRequestPolicy.Refusal(true, false, ScreenWindows.On(desktop, monitorB), titleNames) == "excluded",
+    "the monitor that is captured is the one checked");
+Check(ScreenRequestPolicy.Refusal(true, false, ScreenWindows.On(desktop, monitorA), titleNames) is null, "the other monitor is captured");
+Check(ScreenWindows.On([new("1password", new(1920, 0, 800, 600))], monitorA).Count() == 0
+    && ScreenWindows.On([new("1password", new(1919, 0, 800, 600))], monitorA).Count() == 1, "a window counts on a monitor it overlaps, and only then");
+
+// PR #172 review P2-2: captures run one at a time, so one never shows the windows in the middle of another
+var captureGate = new CaptureGate();
+var captureLog = new List<string>();
+var firstHolds = new TaskCompletionSource();
+var firstCapture = captureGate.RunAsync(async () => { captureLog.Add("hide 1"); await firstHolds.Task; captureLog.Add("show 1"); return 1; }, Timeout.InfiniteTimeSpan, CancellationToken.None);
+var secondCapture = captureGate.RunAsync(async () => { captureLog.Add("hide 2"); await Task.Yield(); captureLog.Add("show 2"); return 2; }, Timeout.InfiniteTimeSpan, CancellationToken.None);
+await Task.Delay(50);
+Check(captureLog.SequenceEqual(new[] { "hide 1" }), "the second capture waits for the first");
+Check(await captureGate.RunAsync(() => Task.FromResult(3), TimeSpan.FromMilliseconds(20), CancellationToken.None) is (false, 0),
+    "a request that cannot wait long gives up (it refuses, the server waits 15 s)");
+firstHolds.SetResult();
+Check(await firstCapture == (true, 1) && await secondCapture == (true, 2) && captureLog.SequenceEqual(new[] { "hide 1", "show 1", "hide 2", "show 2" }),
+    "then it runs, after the first has shown the windows again");
 
 // V3-P91 §4.2: the screen goes to its request as bytes, a refusal as its reason; an ended request is 410
 var screenAnswers = new ScreenAnswerHandler();

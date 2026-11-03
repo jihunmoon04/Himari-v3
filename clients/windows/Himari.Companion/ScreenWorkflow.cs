@@ -29,11 +29,20 @@ public partial class MainWindow
     [DllImport("user32.dll")] private static extern bool GetWindowRect(IntPtr hwnd, out NativeRect rect);
     [DllImport("user32.dll")] private static extern bool SetWindowPos(IntPtr hwnd, IntPtr after, int x, int y, int cx, int cy, uint flags);
 
-    private async Task<CapturedScreen> CaptureScreenAsync(CancellationToken ct)
-    {
-        // Choose before hiding: hiding the composer changes the foreground window.
-        var bounds = captureFromWorkWindow && OwnWindow(GetForegroundWindow()) && IsWindow(lastWorkWindow) && IsWindowVisible(lastWorkWindow)
+    private readonly CaptureGate captureGate = new();  // one capture at a time, for messages and screen requests (V3-P84, V3-P91)
+
+    /// <summary>The monitor a capture takes. Chosen before hiding: hiding the composer changes the foreground window.</summary>
+    private System.Drawing.Rectangle CaptureBounds() =>
+        captureFromWorkWindow && OwnWindow(GetForegroundWindow()) && IsWindow(lastWorkWindow) && IsWindowVisible(lastWorkWindow)
             ? Forms.Screen.FromHandle(lastWorkWindow).Bounds : ScreenCapture.SelectMonitor();
+
+    /// <summary>A message's screen, taken alone (<see cref="captureGate"/>).</summary>
+    private async Task<CapturedScreen> CaptureScreenAsync(CancellationToken ct) =>
+        (await captureGate.RunAsync(() => CaptureMonitorAsync(CaptureBounds(), ct), Timeout.InfiniteTimeSpan, ct)).Value!;
+
+    /// <summary>Captures <paramref name="bounds"/> without the companion's windows; the caller holds the gate.</summary>
+    private async Task<CapturedScreen> CaptureMonitorAsync(System.Drawing.Rectangle bounds, CancellationToken ct)
+    {
         var visible = System.Windows.Application.Current.Windows.Cast<Window>().Where(w => w.IsVisible).ToArray();
         bool excluded = OperatingSystem.IsWindowsVersionAtLeast(10, 0, 19041) &&
             visible.All(w => ScreenCapture.TryExcludeWindow(new WindowInteropHelper(w).Handle));

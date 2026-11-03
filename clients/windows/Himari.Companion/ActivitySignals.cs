@@ -346,13 +346,15 @@ internal static class QuietTimes
 /// <summary>V3-P91 §7.2: whether the app takes a screen request now, or the reason it gives the server.</summary>
 internal static class ScreenRequestPolicy
 {
-    /// <summary>Null: capture. The program in front is checked against the title exclusions (§14 Q10); with none known
-    /// (the desktop, HIMARI itself with nothing before it) there is no program to exclude.</summary>
-    internal static string? Refusal(bool screenLook, bool asleep, string? program, IReadOnlySet<string> excluded)
+    /// <summary>Null: capture. <paramref name="programs"/> are those with a window on the monitor to be captured
+    /// (<c>ScreenWindows.On</c>), checked against the title exclusions (§14 Q10); an unknown one excludes nothing.</summary>
+    internal static string? Refusal(bool screenLook, bool asleep, IEnumerable<string?> programs, IReadOnlySet<string> excluded)
     {
         if (!screenLook) return "turned_off";
         if (asleep) return "asleep";  // asleep, locked or the display off (V3-P90 §2)
-        if (!string.IsNullOrEmpty(program) && excluded.Contains(ActivityCatalog.ProgramKey(program))) return "excluded";
-        return null;
+        return Excludes(programs, excluded) ? "excluded" : null;
     }
+
+    internal static bool Excludes(IEnumerable<string?> programs, IReadOnlySet<string> excluded) =>
+        programs.Any(p => !string.IsNullOrEmpty(p) && excluded.Contains(ActivityCatalog.ProgramKey(p)));
 }

@@ -95,6 +95,10 @@ internal static class PresentationChecks
         check(every.IsChecked == false && notice.Visibility == Visibility.Visible, "§14 Q9: the first server that asks for the screen turns every-message off once, with a note");
         every.IsChecked = true; Call(w, "ScreenSharingOffOnce");
         check(every.IsChecked == true && notice.Visibility == Visibility.Collapsed, "and never again; turning it back on hides the note");
+        var shown = (List<VisibleWindow>)Call(w, "VisibleWindows")!;
+        string own = ActivityCatalog.ProgramKey(Environment.ProcessPath);
+        check(shown.All(x => x.Frame.Width > 0 && x.Frame.Height > 0) && !shown.Any(x => string.Equals(x.Program, own, StringComparison.OrdinalIgnoreCase)),
+            "V3-P91 §14 Q10: the windows checked for a screen request have a visible frame and leave out HIMARI's own");
         Call(w, "SetConnected", true, "연결됨"); ((CheckBox)settings.FindName("ScreenSharing")).IsChecked = false; input.Clear();
         check(!((Button)w.FindName("SendButton")).IsEnabled, "blank text with no attachment has no send action");
         var attachmentButton = (Button)w.FindName("ScreenSharingButton"); attachmentButton.Focus();

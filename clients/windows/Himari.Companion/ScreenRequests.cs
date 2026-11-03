@@ -1,4 +1,5 @@
 using System.Net;
+using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Windows;
 
@@ -8,7 +9,14 @@ namespace Himari.Companion;
 // screen, shows that it looked, and posts the image to the request — or says why not.
 public partial class MainWindow
 {
+    private static readonly TimeSpan ScreenGateWait = TimeSpan.FromSeconds(10);  // the server waits 15 (§4.3)
     private int screenLookNoticeVersion;
+
+    private delegate bool EnumWindowsProc(IntPtr window, IntPtr data);
+    [DllImport("user32.dll")] private static extern bool EnumWindows(EnumWindowsProc callback, IntPtr data);
+    [DllImport("dwmapi.dll")] private static extern int DwmGetWindowAttribute(IntPtr window, int attribute, out int value, int size);
+    [DllImport("dwmapi.dll")] private static extern int DwmGetWindowAttribute(IntPtr window, int attribute, out NativeRect value, int size);
+    private const int DwmCloaked = 14, DwmExtendedFrameBounds = 9;
 
     private async Task AnswerScreenRequest(ServerClient local, JsonElement data, CancellationToken ct)
     {
@@ -16,21 +24,14 @@ public partial class MainWindow
         if (string.IsNullOrEmpty(requestId)) return;
         try
         {
-            // §7.2: what is in front decides; HIMARI's own window keeps what was there before it (§14 Q10).
-            string? program = ReadForeground() is { } seen ? seen.Program : activityTracker.Current(DateTime.UtcNow)?.Program;
-            if (ScreenRequestPolicy.Refusal(signalSettings.ScreenLook, sleepPolicy.Asleep || sessionLocked, program, titleExclusions) is { } reason)
+            // One capture at a time; what is checked is the monitor that is captured (§14 Q10).
+            var (ran, outcome) = await captureGate.RunAsync(() => CaptureForRequestAsync(ct), ScreenGateWait, ct);
+            if (!ran || outcome.Refusal is not null || outcome.Screen is null)
             {
-                await local.RefuseScreenAsync(requestId, reason, ct);
+                await local.RefuseScreenAsync(requestId, ran ? outcome.Refusal ?? "capture_failed" : "capture_failed", ct);
                 return;
             }
-            ShowScreenLookNotice();
-            CapturedScreen captured;
-            try { captured = await CaptureScreenAsync(ct); }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                await local.RefuseScreenAsync(requestId, "capture_failed", ct);
-                return;
-            }
+            var captured = outcome.Screen;
             await local.AnswerScreenAsync(requestId, captured.Bytes, captured.ContentType, ct);
             // §6: the job's moves are on the screen it last saw.
             if (Str(data, "job_id") is { Length: > 0 } jobId && Str(data, "conversation") is { } conversation && moveLifetime.CanBind(jobId))
@@ -42,6 +43,44 @@ public partial class MainWindow
         {
             System.Diagnostics.Trace.TraceWarning("HIMARI: could not answer a screen request: {0}", ex.Message);
         }
+    }
+
+    /// <summary>Chooses the monitor, checks the programs that show on it, captures it, and checks again: a window of
+    /// an excluded program that came in meanwhile drops the image.</summary>
+    private async Task<(string? Refusal, CapturedScreen? Screen)> CaptureForRequestAsync(CancellationToken ct)
+    {
+        var bounds = CaptureBounds();
+        var monitor = new PixelRect(bounds.Left, bounds.Top, bounds.Width, bounds.Height);
+        if (ScreenRequestPolicy.Refusal(signalSettings.ScreenLook, sleepPolicy.Asleep || sessionLocked,
+                ScreenWindows.On(VisibleWindows(), monitor), titleExclusions) is { } reason)
+            return (reason, null);
+        ShowScreenLookNotice();
+        CapturedScreen captured;
+        try { captured = await CaptureMonitorAsync(bounds, ct); }
+        catch (Exception ex) when (ex is not OperationCanceledException) { return ("capture_failed", null); }
+        if (ScreenRequestPolicy.Excludes(ScreenWindows.On(VisibleWindows(), monitor), titleExclusions)) return ("excluded", null);
+        return (null, captured);
+    }
+
+    /// <summary>The top-level windows that show: visible, not minimized, not cloaked (another virtual desktop), not
+    /// HIMARI's own; each with its visible frame (not the resize border, which reaches the next monitor).</summary>
+    private List<VisibleWindow> VisibleWindows()
+    {
+        var found = new List<VisibleWindow>();
+        var programs = new Dictionary<uint, string>();
+        EnumWindows((window, _) =>
+        {
+            if (!IsWindowVisible(window) || IsIconic(window) || OwnWindow(window)) return true;
+            if (DwmGetWindowAttribute(window, DwmCloaked, out int cloaked, sizeof(int)) == 0 && cloaked != 0) return true;
+            if (DwmGetWindowAttribute(window, DwmExtendedFrameBounds, out NativeRect frame, Marshal.SizeOf<NativeRect>()) != 0
+                && !GetWindowRect(window, out frame)) return true;
+            GetWindowThreadProcessId(window, out uint pid);
+            if (!programs.TryGetValue(pid, out var program))
+                programs[pid] = program = ActivityCatalog.ProgramKey(ProcessPath(pid)) is { Length: > 0 } key ? key : SafeProcessName(pid);
+            found.Add(new(program.Length > 0 ? program : null, new(frame.Left, frame.Top, frame.Right - frame.Left, frame.Bottom - frame.Top)));
+            return true;
+        }, IntPtr.Zero);
+        return found;
     }
 
     /// <summary>§7.2: a small "looking at the screen" for two seconds, shown while it captures (the window is left out of it).</summary>
