@@ -9,7 +9,7 @@ model reads. Offered only to a model checked for it (``requires``).
 
 from __future__ import annotations
 
-from himari.common import ModelToolResult, TextBlock, ToolId
+from himari.common import ConversationId, ModelToolResult, RunId, TextBlock, ToolId
 from himari.tool.api import (
     EffectProfile,
     ResultImage,
@@ -33,6 +33,7 @@ DESCRIPTION = (
     "sees that you looked."
 )
 CAPTURED = "Screen captured."
+ALREADY_LOOKED = "You already looked at the screen in this step; it is in the earlier result."
 NO_DEVICE = "The user is not at a device that can show the screen."
 NOT_THIS_TURN = "Screen viewing is not available in this turn."
 REFUSALS = {
@@ -51,6 +52,8 @@ def _failed(message: str) -> ToolOutcome:
 class ScreenTool:
     def __init__(self, source: ScreenSource) -> None:
         self._source = source
+        # §3.1: the Run each conversation last looked in; a Run's calls run one after another
+        self._looked: dict[ConversationId, RunId] = {}
 
     @property
     def definition(self) -> ToolDefinition:
@@ -66,6 +69,10 @@ class ScreenTool:
             return _failed(NO_DEVICE)
         if turn.wake is TurnWake.OTHER:  # §8 (Q6): a wake with its own reasons has no need of it
             return _failed(NOT_THIS_TURN)
+        if ctx.run_id is not None:
+            if self._looked.get(ctx.scope.conversation_id) == ctx.run_id:  # §3.1: not the same screen twice
+                return _failed(ALREADY_LOOKED)
+            self._looked[ctx.scope.conversation_id] = ctx.run_id
         found = await self._source.look(ctx.scope, turn.device_id, free_wake=turn.wake is TurnWake.FREE)
         if isinstance(found, ScreenRefusal):
             return _failed(REFUSALS[found])

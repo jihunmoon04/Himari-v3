@@ -6,7 +6,7 @@ import asyncio
 
 import pytest
 
-from himari.common import CallId, ConversationId, PrincipalId, TextBlock, TrustedScope
+from himari.common import CallId, ConversationId, PrincipalId, RunId, TextBlock, TrustedScope
 from himari.tool.api import (
     EffectProfile,
     ScreenRefusal,
@@ -18,6 +18,7 @@ from himari.tool.api import (
 )
 from himari.tool.registry import ToolRegistry
 from himari.tool.screen import (
+    ALREADY_LOOKED,
     CAPTURED,
     LOOK_AT_SCREEN,
     NO_DEVICE,
@@ -88,3 +89,18 @@ def test_each_refusal_is_a_sentence_for_the_model(refusal: ScreenRefusal) -> Non
     outcome = run(ScreenTool(Source(refusal)), TurnSource("d1"))
     assert outcome.status is ToolStatus.FAILED and text(outcome) == REFUSALS[refusal]
     assert outcome.model_result.is_error and outcome.result_images == ()
+
+
+def test_a_run_looks_once() -> None:
+    async def scenario() -> list[str]:
+        source = Source()
+        tool = ScreenTool(source)
+        out: list[str] = []
+        for run_id in ("r1", "r1", "r2"):
+            ctx = ToolContext(scope=SCOPE, artifacts=None, turn=TurnSource("d1"),  # type: ignore[arg-type]
+                              run_id=RunId(run_id))
+            out.append(text(await tool.run(CALL, ctx)))
+        assert len(source.asked) == 2  # §3.1: the second call of r1 does not ask again
+        return out
+
+    assert asyncio.run(scenario()) == [CAPTURED, ALREADY_LOOKED, CAPTURED]

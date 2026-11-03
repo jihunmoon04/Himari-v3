@@ -817,7 +817,8 @@ class Driver:
                 scope, lambda: self._dispatcher.dispatch_group(
                     scope, run_id, payload.calls, pause=lambda: signal.pause_requested,
                     read_only=scope.conversation_id in self._read_only,
-                    turn=self._turn_sources.get(scope.conversation_id)))
+                    turn=self._turn_sources.get(scope.conversation_id),
+                    capabilities=self._options_for(scope).tool_capabilities))
         except _Cancelled:
             return await self._dispatcher.cancel_group(scope, run_id, CANCELLED_RESULT)
         if signal.cancel_requested:  # arrived as the group stopped (e.g. PAUSED): close what did not start

@@ -20,6 +20,7 @@ from himari.tool.api import (
     AppView,
     EffectProfile,
     GroupState,
+    RefusalRule,
     ToolContext,
     ToolDefinition,
     ToolInvocation,
@@ -37,7 +38,7 @@ class StatusProbe:
     """Records its own ToolExecution status as seen from inside ``run``."""
 
     def __init__(self, data: InMemoryData, tool_id: str, *, kind: str | None, source: str | None = None,
-                 effect: EffectProfile = EffectProfile.SCOPED_WRITE) -> None:
+                 effect: EffectProfile = EffectProfile.SCOPED_WRITE, requires: str | None = None) -> None:
         self._data = data
         self.definition = ToolDefinition(
             tool_id=ToolId(tool_id),
@@ -47,6 +48,7 @@ class StatusProbe:
             effect_profile=effect,
             environment_kind=FAKE if kind else None,
             external_source=source,
+            requires=requires,
         )
         self.seen: list[ToolExecutionStatus] = []
         self.run_id: RunId | None = None
@@ -137,6 +139,33 @@ def test_a_read_only_group_runs_only_tools_that_read() -> None:
         assert {str(c) for c in result.refusals} == {"a", "c"}
 
     asyncio.run(scenario())
+
+
+def test_a_tool_the_model_was_not_offered_does_not_run() -> None:
+    """V3-P91 §3.2: a Tool that ``requires`` a capability runs only with it, as it is offered."""
+    async def scenario(capabilities: frozenset[str]) -> ToolExecutionStatus:
+        store = InMemoryStore()
+        store.create_conversation(SCOPE)
+        data = InMemoryData(store)
+        screen = StatusProbe(data, "look_at_screen", kind=None, effect=EffectProfile.READ, requires="screen_tool")
+        dispatcher = Dispatcher(ToolRegistry([screen]), data, data, data)
+        run_id = await data.prepare_run(
+            SCOPE, RunPreparation(b"", "t", RawRepresentation.ADAPTER_SERIALIZED, (), PromptBasis(0, 0), "p", "m")
+        )
+        await data.mark_dispatch(SCOPE, run_id)
+        await data.record_raw_outcome(SCOPE, run_id, RawReceived(b"", "t"))
+        group = (ToolCall(CallId("a"), 0, ToolId("look_at_screen"), {}),)
+        await data.project_model_output(SCOPE, run_id, AssistantToolCalls(group))
+        screen.run_id = run_id
+        result = await dispatcher.dispatch_group(SCOPE, run_id, group, capabilities=capabilities)
+        assert (screen.seen == []) is (not capabilities)
+        if not capabilities:
+            assert result.refusals == {CallId("a"): RefusalRule.UNKNOWN_TOOL}
+        (record,) = await data.read_tool_executions(SCOPE, run_id)
+        return record.status
+
+    assert asyncio.run(scenario(frozenset())) is ToolExecutionStatus.DENIED
+    assert asyncio.run(scenario(frozenset({"screen_tool"}))) is ToolExecutionStatus.SUCCEEDED
 
 async def _one_external_call(dispatcher: Dispatcher, data: InMemoryData, probe: StatusProbe) -> ToolExecutionStatus:
     run_id = await data.prepare_run(

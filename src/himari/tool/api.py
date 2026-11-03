@@ -149,6 +149,7 @@ class ToolContext(DeepFrozen):
     # so each Environment sees its own. Never a host path.
     workspace: ConversationWorkspace | None = None
     turn: TurnSource | None = None  # V3-P91 §3.4: None when the Driver did not say (a resume after a restart)
+    run_id: RunId | None = None  # the Run whose group this call is in (V3-P91 §3.1: one screen per Run)
 
 
 class SchemaError(ValueError):
@@ -315,8 +316,13 @@ class ToolDispatcher(Protocol):
         pause: Callable[[], bool] | None = None,
         read_only: bool = False,
         turn: TurnSource | None = None,
+        capabilities: frozenset[str] = frozenset(),
     ) -> GroupDispatchResult:
         """``turn`` (V3-P91 §3.4): where the turn speaks, handed to each call's context.
+
+        ``capabilities`` (V3-P91 §3.2): the model capabilities of the turn, as given to the
+        catalog. A call of a Tool that ``requires`` one the model lacks is DENIED as an
+        unknown tool and never runs — it was not offered.
 
         Runs only never-claimed PENDING calls (so it is also the resume
         path, TOOL-04). Unknown tool / invalid arguments / binding failures

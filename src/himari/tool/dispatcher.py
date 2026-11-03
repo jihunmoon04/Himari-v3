@@ -191,6 +191,7 @@ class Dispatcher:
         pause: Callable[[], bool] | None = None,
         read_only: bool = False,
         turn: TurnSource | None = None,
+        capabilities: frozenset[str] = frozenset(),
     ) -> GroupDispatchResult:
         count = len(await self._log.read_tool_executions(scope, run_id))
         paused = False
@@ -207,7 +208,7 @@ class Dispatcher:
             if pause is not None and not self._suspending(record) and pause():
                 paused = True  # nothing more starts; the rest stays PENDING for resume
                 break
-            rule = await self._run_one(scope, record, read_only, turn)
+            rule = await self._run_one(scope, record, read_only, turn, capabilities)
             if rule is not None:
                 refusals[record.call.call_id] = rule
         records = await self._log.read_tool_executions(scope, run_id)
@@ -240,9 +241,12 @@ class Dispatcher:
                 await self._log.commit_unknown_outcome(scope, record.call, UNKNOWN_OUTCOME_RESULT)
 
     async def _run_one(self, scope: TrustedScope, record: ToolExecutionRecord,
-                       read_only: bool = False, turn: TurnSource | None = None) -> RefusalRule | None:
+                       read_only: bool = False, turn: TurnSource | None = None,
+                       capabilities: frozenset[str] = frozenset()) -> RefusalRule | None:
         """Runs one call; the rule if the Dispatcher refused it before running."""
         handler = self._registry.get(record.tool_id)
+        if handler is not None and handler.definition.requires not in (None, *capabilities):
+            handler = None  # V3-P91 §3.2: not offered to this model, so unknown to it as well
         if handler is None:
             await self._commit(scope, record.call, _error(ToolStatus.DENIED, f"unknown tool {record.tool_id}"), True)
             return RefusalRule.UNKNOWN_TOOL
@@ -276,7 +280,8 @@ class Dispatcher:
             await self._log.claim_tool_execution(
                 scope, record.call, unknown_outcome=d.unknown_outcome, record_event=record_event
             )
-        ctx = ToolContext(scope=scope, artifacts=self._artifacts, binding=binding, workspace=workspace, turn=turn)
+        ctx = ToolContext(scope=scope, artifacts=self._artifacts, binding=binding, workspace=workspace, turn=turn,
+                          run_id=record.call.run_id)
         invocation = ToolInvocation(record.tool_id, record.call.call_id, record.arguments)
         try:
             outcome = await handler.run(invocation, ctx)

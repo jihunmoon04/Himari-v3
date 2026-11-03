@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 
-from himari.bootstrap.screens import Answer, ScreenRequests
+import pytest
+
+from himari.bootstrap.screens import ENDED_KEEP_SECONDS, Answer, ScreenRequests
 from himari.common import ConversationId, PrincipalId, TrustedScope, thaw
 from himari.presence.api import Session, Signals, Sleep, StreamEvent, Subscription
 from himari.presence.hub import PresenceHub
@@ -54,7 +56,8 @@ def test_the_device_is_asked_alone_and_its_image_comes_back() -> None:
         assert requests.deliver(ME, "d1", request_id, b"image") is Answer.TAKEN
         assert requests.deliver(ME, "d1", request_id, b"again") is Answer.ENDED  # answered, not yet gone
         assert await looking == b"image"
-        assert requests.deliver(ME, "d1", request_id, b"late") is Answer.UNKNOWN  # gone with its call
+        assert requests.deliver(ME, "d1", request_id, b"late") is Answer.ENDED  # §4.2: ended, not unknown
+        assert requests.deliver(ME, "d2", request_id, b"late") is Answer.UNKNOWN  # still not another's
         assert "screen_request" not in await names(other) + await names(web)
 
     asyncio.run(scenario())
@@ -115,12 +118,48 @@ def test_nothing_in_time_is_a_timeout_and_a_cancelled_call_ends_its_request() ->
         requests = ScreenRequests(hub, wait_seconds=0.05)
         assert await requests.look(SCOPE, "d1") is ScreenRefusal.TIMEOUT
         late = await request_on(stream)
-        assert requests.deliver(ME, "d1", str(late["request_id"]), b"x") is Answer.UNKNOWN
+        assert requests.deliver(ME, "d1", str(late["request_id"]), b"x") is Answer.ENDED  # 410, not 404
         slow = ScreenRequests(hub, wait_seconds=10)
         looking = asyncio.create_task(slow.look(SCOPE, "d1"))
         asked = await request_on(stream)
         looking.cancel()  # the job stopped
         await asyncio.gather(looking, return_exceptions=True)
-        assert slow.deliver(ME, "d1", str(asked["request_id"]), b"x") is Answer.UNKNOWN
+        assert slow.deliver(ME, "d1", str(asked["request_id"]), b"x") is Answer.ENDED
+        assert slow.refuse(ME, "d1", str(asked["request_id"]), "capture_failed") is Answer.ENDED
+        assert slow.deliver(ME, "d1", "sr_never", b"x") is Answer.UNKNOWN
+
+    asyncio.run(scenario())
+
+
+def test_an_ended_request_is_forgotten_after_a_while() -> None:
+    async def scenario() -> None:
+        hub, stream = hub_with()
+        now = [0.0]
+        requests = ScreenRequests(hub, wait_seconds=0.05, clock=lambda: now[0])
+        assert await requests.look(SCOPE, "d1") is ScreenRefusal.TIMEOUT
+        request_id = str((await request_on(stream))["request_id"])
+        now[0] = ENDED_KEEP_SECONDS - 1
+        assert requests.deliver(ME, "d1", request_id, b"x") is Answer.ENDED
+        now[0] = ENDED_KEEP_SECONDS + 1
+        assert requests.deliver(ME, "d1", request_id, b"x") is Answer.UNKNOWN
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(("then", "free_wake", "refusal"), [
+    (Signals(session=Session.ACTIVE), False, ScreenRefusal.TURNED_OFF),  # viewing turned off
+    (Signals(session=Session.LOCKED, screen_look=True), False, ScreenRefusal.AWAY),  # locked
+    (Signals(session=Session.ACTIVE, screen_look=True), True, ScreenRefusal.NOT_HERE),  # free wake's setting off
+])
+def test_an_image_after_viewing_was_turned_off_is_not_given(then: Signals, free_wake: bool,
+                                                           refusal: ScreenRefusal) -> None:
+    async def scenario() -> None:
+        hub, stream = hub_with(Signals(session=Session.ACTIVE, screen_look=True, free_wake_screen=True))
+        requests = ScreenRequests(hub)
+        looking = asyncio.create_task(requests.look(SCOPE, "d1", free_wake=free_wake))
+        request_id = str((await request_on(stream))["request_id"])
+        hub.signal(ME, "d1", 1, "Asia/Seoul", then)
+        assert requests.deliver(ME, "d1", request_id, b"image") is Answer.ENDED
+        assert await looking is refusal
 
     asyncio.run(scenario())

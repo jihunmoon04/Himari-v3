@@ -154,7 +154,7 @@ class ContextLoader:
             instructions=self._instructions,
             # V3-P91 §3.2: a Tool that needs a model capability is offered only with it
             tool_catalog=tuple(self._catalog.catalog(
-                active, enabled, frozenset({"screen_tool"}) if request_options.screen_tool else frozenset())),
+                active, enabled, request_options.tool_capabilities)),
             events=events,
             tool_executions=tuple(executions),
             snapshot=snapshot,

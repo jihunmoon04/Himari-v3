@@ -102,6 +102,12 @@ class RequestOptions(DeepFrozen):
     # model's own limit. Only memory passes set it.
     max_output_tokens: int | None = None
 
+    @property
+    def tool_capabilities(self) -> frozenset[str]:
+        """The capabilities a Tool may ``require`` (V3-P91 §3.2): what the catalog offers and the
+        Dispatcher runs."""
+        return frozenset({"screen_tool"}) if self.screen_tool else frozenset()
+
 
 # --- Provider-neutral history (CPP §6.1) ------------------------------------
 
