@@ -39,7 +39,7 @@ public partial class MainWindow
         // Moving between windows never reparents the editor again, including during IME input.
         SetupTypeToChat(dialogueHost);
         dialogueHost.Activated += (_, _) => UpdateFullscreenPresentation();
-        dialogueHost.Deactivated += (_, _) => Dispatcher.BeginInvoke(new Action(UpdateFullscreenPresentation));
+        dialogueHost.Deactivated += (_, _) => Dispatcher.BeginInvoke(new Action(() => { UpdateFullscreenPresentation(); DismissUserBubbleIfUnfocused(); }));
         dialogueHost.DpiChanged += (_, _) => Dispatcher.BeginInvoke(new Action(UpdateSceneBounds));
         Character.Margin = new Thickness(0);
         ConnectionNotice.HorizontalAlignment = System.Windows.HorizontalAlignment.Right;
