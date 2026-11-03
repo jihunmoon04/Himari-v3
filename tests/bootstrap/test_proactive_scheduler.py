@@ -459,7 +459,7 @@ def test_a_free_wake_that_passes_leaves_nothing_but_a_count(tmp_path: Path) -> N
             app.hub.signal(ME, device, 0, "Asia/Seoul", working_signals(16))
             scheduler = app.scheduler
             assert scheduler is not None
-            # the user's message started the cycle: its first step is fifteen minutes after it
+            # 27 minutes into the task, the message 16 minutes ago (past talking): step 1 is due
             scheduler._clock = lambda: datetime.now(UTC) + timedelta(minutes=16)
             app.hub.signal(ME, device, 0, "Asia/Seoul", working_signals(27))
             look = await scheduler.look(ME)

@@ -279,16 +279,15 @@ def task_ended_candidate(device_id: str | None, device: DeviceState | None, sett
 
 
 def free_candidate(s: Situation) -> Candidate | None:
-    """V3-P90 §6.2: the same task went on long enough. A cycle starts with the task, or again with a
-    user message after it (the step goes back to the first); each free wake of the cycle (a pass too)
-    is a step; the wait runs from the cycle's start or the latest wake of any kind since. Its key names
-    the cycle's start and the step, so a new cycle opens its first step again (PR #162 review P1-8)."""
+    """V3-P90 §6.2: the same task went on long enough. A cycle is the task (it starts again only when
+    the task starts or changes); each free wake of the cycle (a pass too) is a step; the wait runs from
+    the task's start or the latest wake of any kind since. A user message changes neither (owner
+    2026-11-03): it holds a free wake back for TALKING only, then the one due opens. Its key names the
+    cycle's start and the step, so a new task opens its first step again (PR #162 review P1-8)."""
     task = None if s.device is None else s.device.task
     if not s.free_ok or not s.settings.free_steps or s.device_id is None or task is None:
         return None
     cycle = s.now - timedelta(seconds=task.for_seconds)
-    if s.last_user_message_at is not None and s.last_user_message_at > cycle:
-        cycle = s.last_user_message_at
     since = [w for w in s.wakes if w.created_at >= cycle]
     step = sum(1 for w in since if free_wake(w.reasons))
     wait_from = max([cycle, *(w.created_at for w in since)])
