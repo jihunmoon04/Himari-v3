@@ -459,7 +459,7 @@ def test_a_free_wake_that_passes_leaves_nothing_but_a_count(tmp_path: Path) -> N
             app.hub.signal(ME, device, 0, "Asia/Seoul", working_signals(16))
             scheduler = app.scheduler
             assert scheduler is not None
-            # the user's message started the cycle: its first step is fifteen minutes after it
+            # 27 minutes into the task, the message 16 minutes ago (past talking): step 1 is due
             scheduler._clock = lambda: datetime.now(UTC) + timedelta(minutes=16)
             app.hub.signal(ME, device, 0, "Asia/Seoul", working_signals(27))
             look = await scheduler.look(ME)
@@ -469,6 +469,42 @@ def test_a_free_wake_that_passes_leaves_nothing_but_a_count(tmp_path: Path) -> N
             assert EventKind.WAKE not in kinds  # passed: it never was
             status = await app.proactive_status(ME)
             assert status["today"] == 0 and status["attempts"] == 1
+        finally:
+            await app.close()
+
+    asyncio.run(scenario())
+
+
+def test_a_task_longer_than_the_wakes_read_keeps_its_steps(tmp_path: Path) -> None:
+    """PR #170 review P2-1: a task 27 hours on, its two free wakes older than WAKES_READ — the step is
+    still the third (counted back to the task's start), not the first again under a taken key."""
+    from himari.data.api import WakeStatus
+    from himari.proactive.rules import _minute
+
+    async def scenario() -> None:
+        adapter = answers("응", "[[pass]]")
+        app = await opened(tmp_path / "data", adapter)
+        try:
+            device = await paired(app)
+            app.hub.subscribe(ME, device)
+            scope = TrustedScope(ME, await app.create_conversation(ME))
+            await app.send(scope, "일 시작한다", origin=MessageOrigin(OriginKind.WEB))
+            await app.runner.wait(scope)
+            later = datetime.now(UTC) + timedelta(hours=27)
+            cycle = later - timedelta(hours=27, minutes=20)  # the task started 20 minutes before those wakes
+            for step in (1, 2):
+                event = await app.data.begin_wake(scope, (WakeReason(WakeKind.FREE, group="work", minutes=step,
+                                                                     step=step),), device,
+                                                  keys=(f"free:{device}:{_minute(cycle)}:{step}",))
+                assert isinstance(event.payload, Wake)
+                await app.data.end_wake(ME, event.payload.wake_id, WakeStatus.DROPPED)  # passed, unseen
+            scheduler = app.scheduler
+            assert scheduler is not None
+            scheduler._clock = lambda: later
+            app.hub.signal(ME, device, 0, "Asia/Seoul", working_signals(27 * 60 + 20))
+            look = await scheduler.look(ME)
+            assert look.outcome == "spoke" and look.decision.reasons[0].step == 3, look
+            await settled(app, scope)
         finally:
             await app.close()
 

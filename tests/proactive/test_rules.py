@@ -446,20 +446,41 @@ def test_the_steps_grow_and_wait_from_the_latest_wake() -> None:
     assert decide(situation(device=task, wakes=other, free_ok=True)).reasons == ()  # waits 30 from that loop
 
 
-def test_a_user_message_starts_a_new_cycle_whose_first_step_opens_again() -> None:
-    """PR #162 review P1-8: 09:00 task, 09:15 step 1, 09:25 a message, 09:40 step 1 again — another key."""
+def test_a_user_message_holds_the_step_due_for_ten_minutes_only() -> None:
+    """Owner 2026-11-03: a message neither starts the steps again nor restarts the wait. Task at 0, step 1
+    at 15, the user talks at 44: step 2, due at 45, is held by talking and opens at 54; step 3 at 114."""
+    start = NOW - timedelta(minutes=45)
+
+    def at(minute: float, wakes: tuple[WakeRecord, ...]) -> Situation:
+        return situation(now=start + timedelta(minutes=minute), device=working(minute), free_ok=True,
+                         last_user_message_at=start + timedelta(minutes=44), wakes=wakes)
+
+    one = replace(free_at(0), created_at=start + timedelta(minutes=15))
+    held = decide(at(45, (one,)))
+    assert held.reasons == () and held.blocked == "talking" and held.held[0].reason.step == 2
+    assert decide(at(53.9, (one,))).reasons == ()
+    two = decide(at(54, (one,)))
+    assert two.reasons == (WakeReason(WakeKind.FREE, group="work", minutes=54, step=2),)
+    assert two.keys[0].endswith(":2")  # the same cycle: the task's start, not the message
+    spoke = replace(free_at(0), wake_id="two", created_at=start + timedelta(minutes=54))
+    assert decide(at(113, (one, spoke))).reasons == ()
+    assert decide(at(114, (one, spoke))).reasons[0].step == 3
+
+
+def test_a_new_task_starts_the_steps_again() -> None:
+    """PR #162 review P1-8: a task that starts again (or changes) is a new cycle — its first step opens
+    again, under another key."""
     first = decide(situation(device=working(16), free_ok=True))
-    message = NOW + timedelta(minutes=10)
-    again = situation(now=message + timedelta(minutes=15, seconds=5), device=working(41), free_ok=True,
-                      last_user_message_at=message, wakes=(free_at(-1),))
-    decided = decide(again, frozenset(first.keys))
-    assert decided.reasons[0].step == 1 and decided.keys != first.keys
+    later = NOW + timedelta(minutes=30)
+    again = decide(situation(now=later, device=working(16), free_ok=True, wakes=(free_at(-1),)),
+                   frozenset(first.keys))
+    assert again.reasons[0].step == 1 and again.keys != first.keys
 
 
 def test_a_free_wake_is_held_by_every_rule_and_its_budget() -> None:
-    """A message also starts a new cycle, so talking never finds one due (the wait runs from it)."""
     task = working(20)
     for changes, blocked in (({"device": replace(task, sleeps=True, sleep="idle")}, "asleep"),
+                             ({"last_user_message_at": NOW - timedelta(minutes=9)}, "talking"),
                              ({"now": datetime(2026, 11, 4, 14, 30, tzinfo=UTC)}, "quiet_hours"),  # 23:30 KST
                              ({"unanswered_wake": True}, "unanswered"),
                              ({"quiet_until": NOW + timedelta(hours=1)}, "quiet")):

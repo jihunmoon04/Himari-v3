@@ -196,7 +196,7 @@ async def settle_cut_wakes(data: SqliteData, driver: Driver) -> int:
 
 INPUT_EVERY = timedelta(minutes=10)  # §3.3: a device's last input is written at most this often (and when locked)
 PROACTIVE_SECONDS = 30.0  # §7: the scheduler's period
-WAKES_READ = timedelta(hours=26)  # enough for the gap and the device's day (§6.2)
+WAKES_READ = timedelta(hours=26)  # enough for the gap and the device's day (§6.2); a task's steps read further
 TAIL_EVENTS = 40  # §6.1: how far back the most recent conversation is read for an unanswered wake
 
 
@@ -346,7 +346,12 @@ class ProactiveScheduler:
         unanswered = recent is not None and await self._unanswered(TrustedScope(principal, recent.conversation_id),
                                                                    recent.last_sequence)
         loops = tuple(m for m in await self._data.list_memories(principal) if m.category is MemoryCategory.LOOP)
-        wakes = await self._data.wakes_since(principal, now - WAKES_READ)
+        read_from = now - WAKES_READ
+        if device is not None and device.task is not None:
+            # V3-P90 §6.2 (PR #170 review P2-1): a task's steps count every free wake since it started,
+            # however long it went on — read back to its start, or the step would fall to a taken key
+            read_from = min(read_from, now - timedelta(seconds=device.task.for_seconds))
+        wakes = await self._data.wakes_since(principal, read_from)
         told = await self._told(principal)
         free_ok = recent is not None and self.settings.free_steps != () and self._free_ok is not None             and await self._free_ok(TrustedScope(principal, recent.conversation_id))
         return Situation(
