@@ -1,0 +1,251 @@
+# 화면 도구: 모델이 필요할 때 화면을 봄 (V3-P91 설계 초안 v0.1)
+
+상태: **Proposed**. 소유자 결정(2026-11-03): §13의 Q1~Q8 모두 권고대로. 열린 질문은 §14의 두 가지다.
+
+> 소유자(2026-11-02): "지금은 항상 보내는 화면을 모델이 요청하면 보내는 걸로 바꿀 수 있는지 확인하고 진행하고 싶어." → V3-P90 §10에서 자리를 정하고(그 자리에서 찍는 도구, 자유 wake에는 설정이 켜졌을 때만), 이 문서에서 설계한다.
+
+앞선 결정
+- **V3-P84 화면 1단계**([companion-screen-v0.1.md](companion-screen-v0.1.md)):
+  - 앱이 보내는 순간에 찍습니다. 앞의 창이 있는 모니터를, 캐릭터를 뺀 채로, 긴 변 1,280픽셀·115만 픽셀 이하로 찍습니다.
+  - 기기가 올린 화면은 메시지의 `screen`으로 붙습니다(`AttachmentRef.screen`).
+  - 작업 폴더에 복사하지 않고, 보관소 규칙(올린 뒤 30일)을 따릅니다.
+  - 모델에게는 최근 두 장만 이미지로 갑니다. `screen_points` 모델은 가장 최근 화면의 크기를 받아 `[[move:X,Y]]`로 캐릭터를 옮깁니다.
+  - 1단계 표의 2단계가 "모델이 필요할 때 스스로 화면을 봄"이다. 이 문서가 그것이다.
+- **V3-P83 §2.1:** PC에 직접 하는 행동은 뒤 단계의 `pc` Environment로 하기로 적어 두었다. 이 문서는 그것을 만들지 않는다(§13 Q1).
+- **V3-P90:** 모든 wake는 읽는 도구만 실행한다(§5.6). 자유 wake는 말하기 전까지 숨기고, 도구를 부르면 드러낸다(§7.3). 화면 도구는 자유 wake의 "앱 설정이 켜졌을 때만", "보고도 pass할 수 있음"으로 자리만 잡았다(§10). 앱 설정 "그냥 말 걸 때 화면 보기 허용"은 이미 presence의 `features.free_wake_screen`으로 서버에 간다(§17.6).
+- **V3-P67:** 도구가 돌려준 이미지는 Dispatcher가 보관소에 두고 결과 끝에 첨부로 붙인다(`ToolOutcome.result_images`).
+
+## 1. 범위
+
+**하는 것**
+- 모델이 부르는 도구 `companion/look_at_screen`. 그 턴의 기기에 화면을 요청하고, 앱이 찍어 보낸 그림을 결과로 받는다(§2–§5).
+- 서버→기기 요청(사건 흐름의 새 사건)과 기기→서버 응답(새 끝점)(§4).
+- 도구로 받은 화면도 이동 `[[move:X,Y]]`의 기준(§6).
+- 앱 설정 "히마리가 필요할 때 화면 보기", 찍을 때의 표시, 자동 첨부의 기본값 바꾸기(§7).
+- 자유 wake에서의 예외(§8), 실제 모델 확인과 `screen_tool` 능력(§9).
+
+**하지 않는 것**
+- `pc` Environment, PC의 파일·명령(V3-P84 3단계).
+- 영역·창 하나만 찍기, 여러 모니터 한 번에, 동영상.
+- 클릭·입력. 캐릭터는 가리키기만 한다.
+
+## 2. 흐름
+
+```
+사용자(앱): "이 에러 뭐야?"               (자동 첨부 꺼짐: 글만 감)
+모델:  look_at_screen {}                  → Run 1 끝(도구 호출)
+서버:  그 턴의 기기에 사건 screen_request {request_id, conversation, job_id}
+앱:   말풍선에 "화면 보는 중" 표시 → 지금처럼 찍음(§3 of V3-P84)
+      POST /api/device/screens/{request_id}  (이미지 바이트)
+서버:  도구 결과 = 그 화면(screen=true, 크기)        (15초 안에 오지 않으면 "보지 못함")
+모델:  "[[mood:thinking]]아, [[move:812,430]]여기 빨간 줄 보이시죠? 경로가 틀렸어요."   → Run 2
+앱:   그 화면의 좌표로 캐릭터 이동
+```
+
+- 도구를 부르면 턴에 Run이 하나 더 들고(V3-001), 찍어 올리는 데 1–3초가 더해진다.
+- 화면이 필요 없는 대화에서는 이미지가 실리지 않는다. 지금은 자동 첨부로 메시지마다 약 1,200토큰(1280×720)이 붙고 최근 두 장이 요청마다 다시 실린다.
+
+## 3. 도구
+
+### 3.1 정의
+
+| 항목 | 값 |
+| --- | --- |
+| id | `companion/look_at_screen` |
+| 인자 | 없음 (`{}`) |
+| 설명(모델에게) | "See the user's screen now, on the computer this conversation is happening on. Use it when what the user asks or what you want to say depends on what is on their screen and you have no recent screen. The user sees that you looked." |
+| `effect_profile` | `READ` (아무것도 바꾸지 않음. wake의 읽는 도구만 규칙에서 실행됨) |
+| `workspace_requirement` | `NONE` |
+| 결과 | 성공: 글 한 줄(`"Screen captured."`)과 화면 첨부 하나. 실패: 이유 한 줄(§3.3) |
+
+- 같은 Run에서 두 번 부르면 두 번째는 실행하지 않고 "already looked in this step" 결과를 낸다(같은 화면을 두 번 찍지 않음).
+
+### 3.2 언제 목록에 있나 (프롬프트 캐시)
+
+- 도구 목록은 시스템 앞부분에 있어서 턴마다 바뀌면 캐시가 깨진다. 그래서 **목록에 넣는 조건은 대화 단위로 고정**하고, 턴마다 달라지는 조건은 **실행할 때 거절**로 처리한다.
+- 목록에 넣는 조건: `HIMARI_COMPANION`이 켜짐, 그리고 대화의 모델이 `screen_tool`(§9). 모델을 바꾸면 `context_key`가 이미 바뀌므로 캐시가 섞이지 않는다.
+- 그 밖의 도구 목록은 지금처럼 고정 순서다. `ToolCatalog.catalog`에 요청 옵션의 `screen_tool`을 넘겨 거른다(지금은 Environment 종류와 외부 출처만 거름).
+
+### 3.3 실행할 때 거절 (결과 문장)
+
+| 경우 | 결과 문장(모델에게) |
+| --- | --- |
+| 그 턴에 기기가 없음(Web·CLI에서 보낸 메시지, Q2) | `The user is not at a device that can show the screen.` |
+| 그 기기의 앱 설정 "필요할 때 화면 보기"가 꺼짐 | `The user turned off screen viewing.` |
+| 기기가 연결되어 있지 않음, 잠듦·잠금·화면 꺼짐(Q3) | `The screen cannot be seen now (the computer is away or locked).` |
+| 앱이 찍지 못함(보안 데스크톱 등), 거절함 | `The screen could not be captured.` |
+| 15초 안에 오지 않음 | `The screen did not arrive in time.` |
+| 자유 wake가 아닌 wake(Q6), 자유 wake인데 그 설정이 꺼짐 | `Screen viewing is not available in this turn.` |
+
+- 거절은 실패 결과(`FAILED`)이고 모델은 그것을 보고 말한다("화면을 볼 수 없어요, 어떤 에러인지 알려 주실래요?").
+- "기기가 없음"을 먼저 본다. 그래서 Web 턴에서는 앱에 아무 요청도 가지 않는다.
+
+### 3.4 그 턴의 기기
+
+- **기기에서 보낸 메시지로 시작한 턴:** 그 메시지의 `MessageOrigin.device_id`.
+- **wake:** `Wake.device_id`(그 wake를 말하는 기기).
+- **Web·CLI 메시지:** 없음.
+- 도구를 부른 Run의 계기(trigger)를 거슬러 그 턴을 연 이벤트를 찾는다(V3-P90의 `wake_of_run`과 같은 방식: 도구 묶음만 가리키는 Run은 한 단계씩 거슬러 감). Driver가 찾아 `ToolContext.device_id`로 넘긴다. Dispatcher는 지금처럼 scope만 확인하고 이 값을 손대지 않는다.
+- 지금 기기(presence의 current)가 아니라 **그 턴의 기기**다. 사용자가 다른 PC로 옮겼어도 말을 건 그 PC의 화면이다. 그 PC가 잠들었거나 끊겼으면 거절(§3.3).
+
+## 4. 서버 ↔ 앱
+
+### 4.1 요청: 사건 흐름의 `screen_request`
+
+```
+event: screen_request
+data: {"request_id": "sr_…", "conversation": "c_…", "job_id": "…"}
+```
+
+- **그 기기의 흐름에만** 보낸다. 지금 `EventHub.publish`는 주체의 모든 흐름(다른 기기와 Web 포함)에 보내므로, `publish_device(principal, device_id, name, data)`를 더한다.
+- `request_id`는 추측할 수 없는 값(`secrets.token_urlsafe`)이고, 그 기기·그 대화·그 호출에 묶인다. 한 번만 쓴다.
+- 그 기기의 흐름이 열려 있지 않으면 보내지 않고 바로 "the computer is away" 거절.
+- 기다리는 요청은 프로세스 메모리에만 둔다. 재시작하면 기다리던 도구 호출은 V3-047의 "결과를 모름"으로 끝난다(`READ`라 다시 실행해도 되지만, 이미 끝난 턴의 화면을 다시 찍지 않도록 다시 실행하지 않음).
+
+### 4.2 응답: `POST /api/device/screens/{request_id}`
+
+- 기기 토큰만. 본문은 이미지 바이트(PNG·JPEG, 서버가 바이트로 판정), 8 MiB까지 — V3-P84 §4.1의 기기 업로드 규칙 그대로(`not_a_screen`, `file_too_large`).
+- 앱이 찍지 못하면 `POST /api/device/screens/{request_id}/refuse {"reason": "capture_failed" | "turned_off" | "asleep"}`.
+- 응답 코드: 204(받음), 404(모르는 요청이거나 다른 기기의 요청), 410(이미 끝남: 시간 넘김, 작업 멈춤, 이미 받음).
+- 대화 업로드(`…/uploads`)를 쓰지 않는다. 그러면 "올려 두었지만 붙지 않은" 파일이 생기고 24시간 정리를 기다린다. 이 끝점은 받은 바이트를 바로 도구 결과로 넘긴다.
+
+### 4.3 시간과 취소
+
+- 도구는 **15초** 기다린다. 앱은 보통 1–3초.
+- 작업을 멈추거나(V3-P55) 사용자가 이기면(V3-P87 §4.3) 기다리던 요청은 끝나고, 늦게 온 응답은 410.
+- 앱은 410을 조용히 버리고 표시만 닫는다.
+
+## 5. Data와 모델에게 가는 것
+
+### 5.1 결과 이미지
+
+- `ResultImage`에 `screen: bool = False`를 더한다. 화면이면 `StoredResultImages`가 이름을 `screen-<UTC 시각>.png`(`.jpg`)로 하고, 결과 첨부는 `AttachmentRef(file_id, version, screen=True)`다. 스키마는 바뀌지 않는다(V3-P84 §4.3의 `screen` 그대로).
+- 보관은 V3-P84 §4.4와 같다: 작업 폴더에 복사하지 않음, 올린 뒤 30일, 1 GiB, 대화를 지우면 함께.
+- Web의 기록에는 도구 결과의 이미지로 보인다(지금의 도구 이미지 보기).
+
+### 5.2 화면 줄과 "가장 최근 화면"
+
+- 지금 Composer는 사용자 메시지의 첨부에서 화면을 센다. **도구 결과의 화면도 이벤트 순서대로 같이 센다.**
+  - 이미지로 가는 화면은 최근 두 장(`SCREENS_SHOWN`)으로 그대로이고, 메시지 첨부와 도구 결과를 합쳐 센다.
+  - `width`·`height`는 가장 최근 화면에만(`screen_points` 모델).
+- `SCREEN_NOTE` 문장을 넓힌다: `An attachment with "screen": true is the user's screen — when they sent the message, or when you looked with a tool.`
+
+## 6. 이동 `[[move:X,Y]]`
+
+- 앱은 작업마다 이동의 기준 화면(`MoveContext`)을 정해 둔다(V3-P84 rev. 2 B1). 지금은 작업이 시작될 때 앱이 붙인 화면이다.
+- **앱이 자기 작업의 `screen_request`에 화면을 보내면, 그 작업의 기준 화면을 그 화면으로 바꾼다.** 도구 결과 다음 Run의 이동은 그 화면의 좌표다. 앱이 직접 찍었으므로 좌표 변환(모니터 사각형, 배율)을 안다.
+- 같은 작업에서 두 번 보면 마지막 화면이 기준이다. 서버의 "가장 최근 화면"과 같다(§5.2).
+- 다른 작업의 요청(`job_id`가 다름)에 보낸 화면은 기준을 바꾸지 않는다.
+
+## 7. 앱
+
+### 7.1 설정과 서버에 알림
+
+- **"히마리가 필요할 때 화면 보기"** (기본 켬, Q4). "히마리에게 알릴 것"이 아니라 "대화 화면"의 화면 칸에 둔다. 설명: "히마리가 화면을 봐야 답할 수 있을 때 지금 화면을 한 장 찍어 봅니다. 찍을 때마다 말풍선에 표시합니다."
+- 서버에는 presence의 `features`로 알린다(V3-P90 §17.6의 방식): `{"screen_look": true|false}`. 서버가 `features.screen_look: 1`을 알릴 때만 보낸다. 잠긴 몸에는 없고, 서버는 그동안 값을 지닌다.
+- 앱은 설정이 꺼져 있으면 요청이 와도 찍지 않고 `refuse {"reason": "turned_off"}`(서버가 알기 전에 온 요청).
+
+### 7.2 찍을 때
+
+- V3-P84 §3.2–§3.3 그대로(앞의 창이 있는 모니터, 캐릭터 제외, 1,280픽셀, PNG/JPEG).
+- 앱이 잠들어 있거나(V3-P90 §2), 잠겨 있거나, 화면이 꺼져 있으면 찍지 않고 `refuse {"reason": "asleep"}`. 서버도 먼저 거절하지만(§3.3), 사이에 잠든 경우를 위해 앱도 본다.
+- **표시:** 찍기 직전에 말풍선(또는 캐릭터 옆)에 작은 "화면 보는 중" 표시를 2초 띄운다. 지금 메시지에 화면이 붙을 때의 아이콘과 같은 모양. 자유 wake가 아직 숨어 있어도 띄운다(§8).
+
+### 7.3 자동 첨부 (Q5)
+
+- 지금 "메시지를 보낼 때 화면 함께 첨부"는 기본 켬이다. 서버가 `features.screen_look`을 알리면 **기본을 끔으로 바꾼다.**
+- 입력창의 화면 단추는 지금 이 설정 자체를 켜고 끈다. 이것을 **그 메시지 하나에만 붙이는 단추**로 바꾼다(누르면 이번 메시지에 화면이 붙음, 보내면 풀림). 자동 첨부는 설정 창에서만 켠다.
+- 저장된 값을 어떻게 할지는 §14의 열린 질문 1.
+- 도구가 없는 모델(`screen_tool`이 아님)의 대화에서는 자동 첨부가 꺼져 있으면 화면이 가지 않는다. 사용자는 단추로 붙인다. 앱은 대화의 모델을 모르므로 구별하지 않는다.
+
+## 8. 자유 wake (V3-P90 §10)
+
+- 도구는 목록에 있지만(§3.2), 실행은 **자유 wake이고 그 기기의 `free_wake_screen`이 켜져 있을 때만**이다. 다른 wake(알림·돌아옴·고리·작업 끝남)에서는 거절(Q6).
+- **이 도구만 드러냄의 예외다.** 지금 자유 wake는 도구 호출이 시작되면 드러난다(V3-P90 §7.3, `_Held`). `companion/look_at_screen` 호출은 드러내지 않고 숨긴 채 실행한다. 그 뒤 Run의 답으로 판정한다: `[[pass]]`면 숨긴 채 끝(화면을 보고 넘김), 말하면 드러냄.
+  - 숨긴 동안의 도구 묶음도 `finalize_hidden_run`의 대상이다. pass로 끝나면 그 호출과 결과는 기록에 보이지 않는다(`read_events`가 숨긴 wake의 이벤트를 빼는 것과 같은 판단으로, 그 wake 턴의 도구 이벤트도 뺀다).
+  - 다른 도구를 부르면 지금처럼 드러난다.
+- Run 상한 2(`FREE_RUNS`)가 "화면 한 번 + 말하기 한 번"을 담는다. 화면을 본 뒤 또 도구를 부르면 상한에 걸려 끝난다(보인 실패).
+- 앱은 찍을 때 표시를 띄운다(§7.2). 그래서 pass한 자유 wake도 사용자는 "화면 보는 중"을 볼 수 있다. 사용자는 찍힌 것을 알아야 한다(V3-P90 §10).
+- 비용: 화면을 본 자유 wake는 Run 2번과 이미지 1장이다. 하루 시도 12번이 그대로 상한이다. 운영해 보고 다시 본다.
+- `FREE_RULE`에 한 문장: `If seeing the screen would change what you say, you may look first; you can still answer [[pass]] after looking.` (실제 모델 확인에서 다듬음)
+
+## 9. 어느 모델에서 (Q7)
+
+- `ProviderCapabilities.screen_tool`을 둔다. `image_input`이고, 아래 실제 모델 확인을 통과한 모델만 켠다.
+- **확인 장면** (`tests/live/test_screen_tool_live.py`, 장면마다 3번):
+
+  | 장면 | 바라는 것 |
+  | --- | --- |
+  | 기기에서 "이 에러 뭐야?"(화면 없음) | 부름 |
+  | 기기에서 "이거 어디서 바꿔?"(화면 없음) | 부름 |
+  | 기기에서 "점심 뭐 먹지" | 부르지 않음 |
+  | 기기에서 화면을 붙여 보낸 질문(방금 화면 있음) | 부르지 않음 |
+  | 부른 뒤 결과 화면(설정 창 그림)을 받음 | 그 화면에 맞는 답, `screen_points` 모델이면 `[[move]]`가 목표 안 |
+  | Web에서 "내 화면 봐 줘" → 거절 결과 | 볼 수 없다고 말함, 다시 부르지 않음 |
+  | 자유 wake(설정 켬): 코딩 90분 | 부르든 말든 맞음, 부르면 그 뒤 말하거나 pass |
+
+- 통과선: "부름"·"부르지 않음" 무리마다 5/6, 결과 화면 답 5/6. 통과하지 못한 모델은 지금처럼 자동 첨부나 단추로만 화면을 본다.
+
+## 10. 보안과 사생활
+
+- 화면은 사용자가 켜 둔 설정 아래에서만, 그 턴의 기기에서만, 깨어 있을 때만 찍는다. Web·CLI 턴에서는 PC 화면을 찍지 않는다.
+- 찍을 때마다 앱이 표시한다. 숨긴 자유 wake도.
+- 요청 id는 추측할 수 없고 그 기기 토큰만 응답할 수 있다. 다른 기기·Web은 404.
+- 받은 화면은 지금 화면과 같은 보관 규칙이고, 모델 공급자에게 요청마다 간다.
+
+## 11. 모듈 경계
+
+| 모듈 | 하는 일 |
+| --- | --- |
+| `tool` | `companion/look_at_screen` 처리기(`tool/screen.py`). 화면을 얻는 길은 포트 `ScreenSource`(`tool.api`)로만: `look(scope, device_id, call) → bytes | 거절 이유`. `ToolContext.device_id`, `ResultImage.screen`, 카탈로그의 `screen_tool` 거르기 |
+| `presence` | `EventHub.publish_device`, `features.screen_look` 지님 |
+| `control` | Driver가 Run의 계기에서 턴의 기기를 찾아 `ToolContext`로; 자유 wake의 드러냄 예외(이 도구) |
+| `prompt` | 도구 결과의 화면을 화면 줄에 셈, `SCREEN_NOTE`, `FREE_RULE` 한 문장 |
+| `provider` | `screen_tool` 능력 |
+| `bootstrap` | `ScreenSource` 구현: 기다리는 요청 표, presence로 사건 보내기, 15초, 취소 |
+| `interfaces` | `POST /api/device/screens/{id}`(와 `/refuse`), `features.screen_look`, presence의 `features.screen_look` |
+| 앱 | `screen_request` 받기, 설정, 표시, 찍어 보내기, 이동 기준 바꾸기, 자동 첨부 기본값과 단추 |
+
+`tool`은 `presence`를 가져오지 않는다(같은 계층 2). 기기에 닿는 일은 `bootstrap`이 포트 뒤에서 한다.
+
+## 12. 검증 계획
+
+- **도구:** 기기 턴에서 화면을 받으면 결과에 `screen=true` 첨부 하나; Web 턴은 앱에 요청 없이 거절; 설정 꺼짐·잠듦·끊김·15초 넘김·앱 거절마다 그 문장; 같은 Run의 두 번째 호출은 실행하지 않음; 작업 멈춤이면 기다림이 끝나고 늦은 응답 410.
+- **끝점:** 다른 기기의 토큰 404, PNG·JPEG가 아니면 400, 8 MiB 넘으면 413, 두 번째 응답 410.
+- **사건:** `screen_request`는 그 기기의 흐름에만(다른 기기·Web에 없음).
+- **Prompt:** 메시지 화면과 도구 화면을 합쳐 최근 두 장, 크기는 가장 최근 것에만; 도구 결과 화면 뒤의 이동 안내.
+- **자유 wake:** 화면을 보고 pass → 기록에 도구 이벤트도 없음, `passed`; 보고 말함 → 드러남, 도구 이벤트 보임; 다른 도구 → 지금처럼 드러남; 설정 꺼짐 → 거절 문장; 알림 wake에서 → 거절.
+- **카탈로그:** `screen_tool` 모델에만 목록에 있음, 턴마다 바뀌지 않음(같은 대화의 Web 턴과 기기 턴의 `stable_prefix`가 같음).
+- **앱(ContractTests):** `screen_request` 처리(설정 꺼짐·잠듦이면 거절), 이동 기준이 자기 작업의 화면으로 바뀜, 다른 작업은 아님, 410 버림, `features.screen_look`. 화면 단추가 한 번만 붙임.
+- **실제 모델:** §9.
+
+## 13. 소유자 결정 (2026-11-03): 모두 권고대로
+
+| Q | 질문 | 결정 |
+| --- | --- | --- |
+| Q1 | 도구 형태 | 반려 도구 하나(`companion/look_at_screen`). `pc` Environment는 파일·명령 단계에서 |
+| Q2 | 어느 기기 | 기기에서 보낸 메시지는 그 기기, 자유 wake는 그 wake의 기기, Web·CLI 턴에는 없음(목록에는 있고 실행 때 거절, §3.2) |
+| Q3 | 언제 찍지 않나 | 앱이 깨어 있을 때만. 잠듦·잠금·화면 꺼짐·끊김이면 거절 |
+| Q4 | 설정과 표시 | "히마리가 필요할 때 화면 보기" 기본 켬, 찍을 때마다 표시. 자유 wake용은 따로(기본 끔) |
+| Q5 | 자동 첨부 | 서버가 도구를 알리면 기본 끔, 단추는 그 메시지 하나에만 붙임 |
+| Q6 | 다른 wake | 자유 wake만(설정이 켜졌을 때). 이 도구는 드러냄의 예외, 보고도 pass 가능 |
+| Q7 | 어느 모델 | `image_input` + 실제 확인 통과 → `screen_tool` |
+| Q8 | 이동 | 도구로 찍은 화면도 이동 기준(앱이 그 작업의 기준을 바꿈) |
+
+## 14. 열린 질문
+
+1. **이미 저장된 자동 첨부 값.** 저장값에는 "기본이라 켜짐"과 "직접 켬"이 구별되지 않는다.
+   - 권고: 서버가 처음 `features.screen_look`을 알릴 때 **한 번 끔으로 바꾸고**, 설정 창의 그 칸 아래에 "화면은 이제 히마리가 필요할 때 봅니다. 메시지마다 붙이려면 다시 켜세요."를 한 번 보인다. 원래 요청("항상 보내는 화면을 요청할 때 보내는 걸로")에 맞다.
+   - 다른 길: 저장값을 그대로 둠(이미 쓰는 사람은 계속 자동 첨부).
+2. **앞의 창이 민감한 프로그램이면 찍지 않을까.** 지금 "창 제목을 보내지 않을 프로그램" 목록(카카오톡, 디스코드, 1Password 등)이 있다.
+   - 권고: 도구 요청일 때는 앞의 창이 그 목록의 프로그램이면 찍지 않고 `refuse {"reason": "excluded"}`, 모델에게는 "The screen could not be captured." 사용자가 직접 붙이는 단추는 지금처럼 찍는다(사용자가 고른 것).
+   - 다른 길: 목록과 상관없이 찍음(표시가 있으므로).
+
+## 15. 구현 단계
+
+1. **서버:** 도구·포트·카탈로그 거르기, `ToolContext.device_id`, `publish_device`, 끝점, 기다리는 요청 표, `ResultImage.screen`, Prompt의 화면 셈과 `SCREEN_NOTE`, `screen_tool`(아직 어느 모델도 켜지 않음), 가짜 기기 스크립트 장면.
+2. **앱:** `screen_request` 처리, 설정과 `features.screen_look`, 표시, 이동 기준, 자동 첨부 기본값과 한 번 붙이기 단추.
+3. **자유 wake:** 드러냄 예외와 숨긴 도구 이벤트, `FREE_RULE` 문장.
+4. **실제 모델 확인:** §9 장면, 통과한 모델에 `screen_tool`.
+
+1·2가 원래 요청(요청할 때 보냄)을 푼다. 3은 그 위에 쌓는다.
