@@ -6,6 +6,7 @@ import json
 import asyncio
 import importlib.util
 from pathlib import Path
+from typing import Any
 
 import pytest
 from screen_tool_check import (
@@ -80,6 +81,79 @@ def test_enabled_models_have_complete_passing_live_evidence() -> None:
     # Replaying fixed grading preserves failures and makes no model calls.
     corrected = [row for row in rows if "initial_problems" in row]
     assert corrected and all(row["pass"] for row in corrected)
+
+
+@pytest.fixture
+def screen_inventory() -> list[dict[str, Any]]:
+    """All required Haiku scene/attempt observations, with positive control verdicts."""
+    scenes = {
+        "call": ("error", "setting"), "no_call": ("lunch", "already_attached"),
+        "read": ("error_result", "setting_result"), "refuse": ("refused",), "choice": ("free_choice",),
+        "speak": ("free_work", "free_writing"), "pass": ("free_call", "free_match"),
+    }
+    return [{"model": "anthropic/claude-haiku-5.5", "group": group, "scene": scene, "attempt": attempt,
+             "pass": True, "problems": []}
+            for group, names in scenes.items() for scene in names for attempt in range(1, 4)]
+
+
+def test_complete_screen_inventory_is_order_independent(screen_inventory: list[dict[str, Any]]) -> None:
+    assert failed_groups(list(reversed(screen_inventory)), ["anthropic/claude-haiku-5.5"]) == []
+
+
+@pytest.mark.parametrize("group", ["call", "no_call", "read", "refuse", "choice", "speak", "pass"])
+def test_repeated_scene_records_cannot_replace_required_attempts(
+    screen_inventory: list[dict[str, Any]], group: str,
+) -> None:
+    mine = [r for r in screen_inventory if r["group"] == group]
+    duplicated = [r for r in screen_inventory if r["group"] != group] + [dict(mine[0]) for _ in mine]
+    assert len(duplicated) == len(screen_inventory)  # Identical totals and all cached results pass.
+    for rows in (duplicated, review_results(duplicated)):
+        failures = failed_groups(rows, ["anthropic/claude-haiku-5.5"])
+        assert group in {g for _, g, *_ in failures}
+
+
+@pytest.mark.parametrize("group", ["call", "read"])
+@pytest.mark.parametrize(("field", "value"), [
+    ("scene", "unknown_scene"), ("scene", None), ("scene", ["error"]),
+    ("attempt", 0), ("attempt", 4), ("attempt", "1"), ("attempt", True), ("attempt", 1.0), ("attempt", {}),
+])
+def test_invalid_scene_or_attempt_cannot_pass_on_counts(
+    screen_inventory: list[dict[str, Any]], group: str, field: str, value: object,
+) -> None:
+    row = next(r for r in screen_inventory if r["group"] == group)
+    row[field] = value
+    for rows in (screen_inventory, review_results(screen_inventory)):
+        assert group in {g for _, g, *_ in failed_groups(rows, [row["model"]])}
+
+
+def test_unexpected_inventory_groups_are_rejected(screen_inventory: list[dict[str, Any]]) -> None:
+    screen_inventory.append({**screen_inventory[0], "group": "unknown_group"})
+    assert failed_groups(screen_inventory, ["anthropic/claude-haiku-5.5"])
+
+
+def test_missing_followup_cannot_be_hidden_by_a_synthesized_failure(screen_inventory: list[dict[str, Any]]) -> None:
+    row = next(r for r in screen_inventory if r["group"] == "read")
+    screen_inventory.remove(row)
+    reviewed = review_results(screen_inventory)
+    assert len(reviewed) == 36  # Replay fills the gap, but it is still a missing observation.
+    assert "read" in {g for _, g, *_ in failed_groups(reviewed, [row["model"]])}
+
+
+def test_successful_followup_requires_its_matching_successful_call(screen_inventory: list[dict[str, Any]]) -> None:
+    call = next(r for r in screen_inventory if r["group"] == "call")
+    call.update({"pass": False, "problems": ["did not call screen tool"]})
+    assert {g for _, g, *_ in failed_groups(screen_inventory, [call["model"]])} == {"read"}
+
+
+def test_failed_call_with_an_explicit_skipped_followup_keeps_the_five_of_six_bar(
+    screen_inventory: list[dict[str, Any]],
+) -> None:
+    call = next(r for r in screen_inventory if r["group"] == "call")
+    call.update({"pass": False, "problems": ["did not call screen tool"]})
+    followup = next(r for r in screen_inventory if r["group"] == "read" and r["scene"] == call["scene"] + "_result"
+                    and r["attempt"] == call["attempt"])
+    followup.update({"pass": False, "problems": ["no valid call to continue"], "not_requested": True})
+    assert failed_groups(screen_inventory, [call["model"]]) == []
 
 
 def test_model_selection_defaults_to_enabled_and_requires_an_explicit_full_sweep() -> None:

@@ -291,6 +291,8 @@ HIMARI_LIVE=1 HIMARI_LIVE_SCREEN_TOOL_OUT=build/screen-tool-live.jsonl \
 
 향후 라이브 기록은 `trace_version: 2`를 쓴다. `outcome`에 정상 응답·응답 없음·불확실·Provider 오류·후속 요청 생략을 구별하고, 정상 응답은 `output.kind`에 `final`/`tool_calls`, 답변/commentary 및 각 호출의 인자 객체를 보관한다. 화면 답에는 그때의 정답 문자열·표적 사각형·좌표 검사 여부도 `context`로 저장한다. 재채점은 저장된 `pass`·`problems`를 신뢰하지 않고 이 관측값으로 모든 무리의 판정을 다시 계산한다. 누락·알 수 없는 형식은 실패한다. 현재 화면 그림 생성기가 바뀌어도 저장한 정답 기준으로 평가한다.
 
+**평가 장면 완전성(PR #175 검수 P2):** 모델별로 필요한 `(group, scene, attempt)`를 정확히 한 번씩 요구한다. 호출은 `error`·`setting`, 미호출은 `lunch`·`already_attached`, 화면 해석은 `error_result`·`setting_result`, 거절은 `refused`를 각 1·2·3회 검사한다. 기존 자유 wake 모델은 추가로 `free_choice`, 발화 `free_work`·`free_writing`, 침묵 `free_call`·`free_match`를 각 3회 검사한다. 중복, 예상 밖 무리·장면, 빠진 시도, 정수가 아닌 시도는 통과 건수와 무관하게 실패다. 화면 결과는 같은 모델·장면·시도의 유일한 호출과 대응해야 한다. 실패한 호출은 실패로 기록한 후속 생략과 짝지어 5/6 기준에 포함할 수 있지만, 성공한 호출 뒤의 실제 결과 누락은 재생기가 실패 항목을 채워도 완전성 실패로 남는다.
+
 화면 도구의 유효 인자는 `{}`뿐이다. 비어 있지 않은 인자는 키·값을 모두 가리고 개수와 비어 있지 않다는 사실만 유지해, 민감한 인자를 남기지 않으면서 같은 인자 검사를 재현한다. 다른 도구 이름은 `other_tool`로, 답변/commentary·오류에 포함된 현재 API 키는 `[redacted]`로 바꾼다. reasoning·continuation·인증 헤더는 기록하지 않는다. 이 형식은 현재 채점에 필요한 정보만 보존하며, 숨긴 인자의 실제 값을 평가하는 새 기준에는 쓸 수 없다.
 
 기존 213건 파일은 변경하거나 인자를 추측해 채워 넣지 않는다. 이전 형식의 반환 결과에는 `replay_mode: legacy_partial`을 붙여 호출·화면 해석 판정은 최초 기록에 의존함을 알린다. v2는 `replay_mode: independent`로 구별한다. 이번 테스트 정비는 오프라인 모의 모델로 수집→JSONL 저장→독립 재채점까지 확인하며 추가 유료 호출을 하지 않는다.

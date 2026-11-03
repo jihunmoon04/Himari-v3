@@ -41,6 +41,15 @@ class NoDevice:
 
 SCREEN = ScreenTool(NoDevice()).definition
 TRACE_VERSION = 2
+SCENES_BY_GROUP = {
+    "call": ("error", "setting"),
+    "no_call": ("lunch", "already_attached"),
+    "read": ("error_result", "setting_result"),
+    "refuse": ("refused",),
+    "choice": ("free_choice",),
+    "speak": ("free_work", "free_writing"),
+    "pass": ("free_call", "free_match"),
+}
 
 
 def select_models(environment: Mapping[str, str]) -> list[str]:
@@ -332,7 +341,8 @@ def review_results(recorded: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]
         row.update(problems=problems, **{"pass": not problems, "grader_revision": 2})
     # A missed request is a failed read, not a smaller denominator. No paid call was made for these rows.
     for row in tuple(rows):
-        if row["group"] != "call":
+        if (row["group"] != "call" or row.get("scene") not in SCENES_BY_GROUP["call"]
+                or type(row.get("attempt")) is not int or row["attempt"] not in range(1, 4)):
             continue
         if not any(r["model"] == row["model"] and r["scene"] == row["scene"] + "_result"
                    and r["attempt"] == row["attempt"] for r in rows):
@@ -346,13 +356,40 @@ def review_results(recorded: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]
     return rows
 
 
+def _matched_followup(row: Mapping[str, Any], calls: Sequence[Mapping[str, Any]]) -> bool:
+    scene = row.get("scene")
+    if not isinstance(scene, str) or not scene.endswith("_result"):
+        return False
+    parents = [c for c in calls if c.get("scene") == scene.removesuffix("_result")
+               and c.get("attempt") == row.get("attempt")]
+    if len(parents) != 1:
+        return False
+    skipped = row.get("not_requested") is True or row.get("outcome") == "not_requested"
+    if parents[0].get("pass"):
+        return not skipped  # A replay-generated gap after a good call is still a missing observation.
+    return skipped and not row.get("pass")  # A missed call contributes a failed, explicitly skipped read.
+
+
 def failed_groups(rows: Sequence[Mapping[str, Any]], models: Sequence[str]) -> list[tuple[str, str, int, int]]:
     failures = []
     for model in models:
-        for group, (needed, total) in requirements(model).items():
-            mine = [r for r in rows if r["model"] == model and r["group"] == group]
+        model_rows = [r for r in rows if r.get("model") == model]
+        groups = requirements(model)
+        unexpected = [r for r in model_rows if not isinstance(r.get("group"), str) or r["group"] not in groups]
+        if unexpected:
+            failures.append((model, "unexpected records", 0, len(unexpected)))
+        calls = [r for r in model_rows if r.get("group") == "call"]
+        for group, (needed, total) in groups.items():
+            mine = [r for r in model_rows if r.get("group") == group]
             hits = sum(bool(row["pass"]) for row in mine)
-            if len(mine) != total or hits < needed:
+            expected = {(scene, attempt) for scene in SCENES_BY_GROUP[group] for attempt in range(1, 4)}
+            # Exact types matter: bool/float attempt 1 must not impersonate integer attempt 1.
+            actual = [(r["scene"], r["attempt"]) for r in mine
+                      if isinstance(r.get("scene"), str) and type(r.get("attempt")) is int]
+            complete = (len(actual) == len(mine) == total and len(set(actual)) == len(actual)
+                        and set(actual) == expected)
+            paired = group != "read" or all(_matched_followup(row, calls) for row in mine)
+            if not complete or not paired or hits < needed:
                 failures.append((model, group, hits, len(mine)))
     return failures
 
