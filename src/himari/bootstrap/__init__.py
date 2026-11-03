@@ -26,11 +26,12 @@ from himari.prompt.system import BASE_INSTRUCTIONS
 from himari.provider.api import ProviderAdapter, ReadsImageCopies
 from himari.data.api import DEFAULT_FILE_MAX_BYTES, ViewMaker
 from himari.tool.access import ConfiguredExternalAccess
-from himari.tool.api import ToolHandler
+from himari.tool.api import ScreenSource, ToolHandler
 from himari.tool.dispatcher import Dispatcher
 from himari.tool.images import StoredResultImages
 from himari.tool.conversation_search import conversation_search_tools
 from himari.tool.memory import memory_tools
+from himari.tool.screen import ScreenTool
 from himari.tool.registry import ToolRegistry
 
 DEFAULT_INSTRUCTIONS = BASE_INSTRUCTIONS  # V3-P89 §3.1: the operator's base; its own replaces only this
@@ -79,6 +80,7 @@ def build_runtime(
     streaming: bool = False,  # V3-P73: answering Runs ask for a stream (models that declare it)
     time_zone: str | None = None,  # V3-P83 §6.4: the turn's time and the time lines; None: the model is not told
     presence: PresenceSource | None = None,  # V3-P83 §6.2: where the user is; None: the model is not told
+    screen: ScreenSource | None = None,  # V3-P91: the screen Tool asks devices through it; None: no screen Tool
     # V3-P89 §6: what the system text's sections follow besides ``memory`` and ``turn_budget``
     # (which this sets); the text and its order are the Prompt module's. None: ``instructions``
     # as given, with no sections — only the memory section and the turn rule are added after
@@ -95,7 +97,8 @@ def build_runtime(
         return snapshot.covers_through_sequence if snapshot is not None and read_summary(snapshot) else None
 
     registry = ToolRegistry([AskUserTool(), *tools, *(memory_tools(data, time_zone=time_zone or "UTC") if memory else ()),
-                             *(conversation_search_tools(data, compacted_through) if conversation_search else ())],
+                             *(conversation_search_tools(data, compacted_through) if conversation_search else ()),
+                             *((ScreenTool(screen),) if screen is not None else ())],
                             allow_require_user=allow_require_user_tools)
     environments = tuple(environments)
     for env in environments:

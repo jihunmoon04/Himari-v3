@@ -258,3 +258,37 @@ def test_a_job_started_elsewhere_while_the_wake_is_recorded_withdraws_it() -> No
         await runner.wait(other)
 
     asyncio.run(scenario())
+
+
+def test_the_screen_tool_knows_the_wakes_device_and_kind() -> None:
+    """V3-P91 §3.4, §8: a wake speaks on its device; only a free wake may look (with its own setting)."""
+    from himari.tool.api import ScreenRefusal
+    from himari.tool.screen import NOT_THIS_TURN, REFUSALS, ScreenTool
+
+    class Source:
+        def __init__(self) -> None:
+            self.asked: list[tuple[str, bool]] = []
+
+        async def look(self, scope: TrustedScope, device_id: str, *, free_wake: bool = False) -> ScreenRefusal:
+            self.asked.append((device_id, free_wake))
+            return ScreenRefusal.NOT_HERE
+
+    source = Source()
+    step = calls(("look_at_screen", {}))
+    rt, provider = runtime([step, final("음"), step, final("[[pass]] 화면 봤어")], tools=(ScreenTool(source),))
+    runner = BackgroundRunner(rt.driver)
+
+    async def scenario() -> None:
+        await runner.submit_wake(SCOPE, TRY, "d7")
+        await runner.wait(SCOPE)
+        assert source.asked == []  # a wake with its own reasons does not look
+        free = (WakeReason(WakeKind.FREE, group="work", minutes=20, step=1),)
+        await runner.submit_wake(SCOPE, free, "d7", free=True)
+        await runner.wait(SCOPE)
+        assert source.asked == [("d7", True)]
+
+    asyncio.run(scenario())
+    texts = ["".join(getattr(b, "text", "") for b in result.blocks)
+             for sent in provider.prepared_inputs for turn in sent.conversation
+             if hasattr(turn, "results") for result in turn.results.values()]
+    assert NOT_THIS_TURN in texts and REFUSALS[ScreenRefusal.NOT_HERE] in texts

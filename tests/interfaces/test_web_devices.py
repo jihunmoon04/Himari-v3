@@ -48,6 +48,8 @@ ALLOWED = {
     ("GET", "/api/conversations/{conversation_id}/live"),
     ("POST", "/api/conversations/{conversation_id}/messages"),
     ("POST", "/api/conversations/{conversation_id}/uploads"),  # a screen only (V3-P84 §4.1)
+    ("POST", "/api/device/screens/{request_id}"),  # V3-P91 §4.2
+    ("POST", "/api/device/screens/{request_id}/refuse"),
     ("POST", "/api/conversations/{conversation_id}/pause"),
     ("POST", "/api/conversations/{conversation_id}/resume"),
     ("POST", "/api/conversations/{conversation_id}/cancel"),
@@ -388,7 +390,7 @@ def test_the_event_stream_starts_with_hello(server: Server) -> None:
     assert name == "hello" and hello == {
         "device": {"device_id": "d1", "name": "데스크톱"}, "moods": list(MOODS), "current_device": None,
         "recent_conversation": {"id": cid, "title": None}, "features": {"presence_signals": 1, "sleep_signals": 1, "task_signals": 1,
-                                                                      "free_wake_screen": 1},
+                                                                      "free_wake_screen": 1, "screen_look": 1},
         "quiet_until": None, "activity": {"working": [], "waiting": []}}  # a device gets no signals revision
     web_hello = frames_of(server.client.get("/api/events").text)[0][1]
     assert web_hello["device"] is None and web_hello["recent_conversation"]["id"] == cid
@@ -623,6 +625,42 @@ def test_speaking_first_settings_from_the_environment() -> None:
     free = WebConfig.from_env({**base, "HIMARI_PROACTIVE_FREE_STEPS": "20,40", "HIMARI_PROACTIVE_FREE_ATTEMPTS": "3"}).proactive
     assert (free.free_steps, free.attempts, off.free_steps) == ((20, 40), 3, (15, 30, 60))
     assert WebConfig.from_env({**base, "HIMARI_PROACTIVE_FREE_STEPS": ""}).proactive.free_steps == ()  # no free wakes
+
+
+def test_a_screen_answer_comes_from_a_device_for_a_request_it_was_asked(server: Server) -> None:
+    """V3-P91 §4.2: only a device answers; an unknown request is 404; a screen is a PNG or JPEG, at most
+    SCREEN_MAX_BYTES; a refusal names one of the app's reasons."""
+    from himari.bootstrap.application import SCREEN_MAX_BYTES
+
+    me = server.as_device(server.paired())
+    url = "/api/device/screens/sr_nothing"
+    response = server.client.post(url, content=png(), headers=SEND)  # the Web
+    assert (response.status_code, error_code(response)) == (403, "not_a_device")
+    response = server.device.post(url, content=png(), headers=me)
+    assert (response.status_code, error_code(response)) == (404, "not_found")
+    response = server.device.post(url, content=b"GIF89a....", headers=me)
+    assert (response.status_code, error_code(response)) == (400, "not_a_screen")
+    response = server.device.post(url, content=bytes([0x89]) + b"PNG" + bytes(SCREEN_MAX_BYTES), headers=me)
+    assert (response.status_code, error_code(response)) == (413, "request_too_large")  # the body limit's own
+    response = server.device.post(url, content=bytes([0x89]) + b"PNG" + bytes(SCREEN_MAX_BYTES - 64), headers=me)
+    assert (response.status_code, error_code(response)) == (400, "not_a_screen")  # just under it: read and judged
+    response = server.device.post(url + "/refuse", json={"reason": "excluded"}, headers=me)
+    assert (response.status_code, error_code(response)) == (404, "not_found")
+    response = server.device.post(url + "/refuse", json={"reason": "bored"}, headers=me)
+    assert response.status_code == 400
+
+
+def test_the_screen_look_setting_comes_in_features(server: Server) -> None:
+    """V3-P91 §7.1: like the free wake's setting — unsent is off, kept through a lock."""
+    me = server.as_device(server.paired())
+    server.client.portal.call(lambda: server.app.hub.subscribe(OPERATOR, "d1"))  # type: ignore[union-attr]
+    body = {**SIGNAL, "features": {"free_wake_screen": False, "screen_look": True}}
+    assert server.device.post("/api/device/presence", json=body, headers=me).status_code == 204
+    assert server.app.hub.states(OPERATOR)["d1"].screen_look
+    (item,) = server.client.get("/api/devices").json()["items"]
+    assert item["signals"]["screen_look"] is True
+    assert server.device.post("/api/device/presence", json=SIGNAL, headers=me).status_code == 204
+    assert not server.app.hub.states(OPERATOR)["d1"].screen_look
 
 
 def test_the_free_wake_screen_setting_is_kept_through_a_lock(server: Server) -> None:

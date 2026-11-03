@@ -134,6 +134,7 @@ from himari.data.api import (
 )
 from himari.data.sqlite import SqliteData, SqliteStore
 from himari.bootstrap.companion import CompanionEvents, CompanionPresence
+from himari.bootstrap.screens import ScreenRequests
 from himari.bootstrap.proactive import (
     PROACTIVE_SECONDS,
     Inputs,
@@ -884,6 +885,7 @@ class Application:
     # server), and the Runner's listener that publishes on it.
     hub: PresenceHub = field(default_factory=PresenceHub, repr=False)
     events: CompanionEvents | None = field(default=None, repr=False)
+    screens: ScreenRequests | None = field(default=None, repr=False)  # V3-P91 §4: None with the companion off
     _ticking: asyncio.Task[None] | None = field(default=None, repr=False)
     # V3-P87: speaking first (HIMARI_PROACTIVE…), and the listener that ends each wake with its job
     proactive: ProactiveSettings = field(default_factory=ProactiveSettings)
@@ -1045,6 +1047,7 @@ class Application:
             zones = frozenset(available_timezones())
             hub = PresenceHub(time_zones=zones.__contains__)  # a device's zone that is not known is ignored (§5)
             presence = CompanionPresence(DeviceRegistry(SqliteData(store)), hub, time_zone, enabled=companion)
+            screens = ScreenRequests(hub) if companion else None  # V3-P91: the screen Tool's requests
             runtime = build_runtime(provider, store=store, environments=[inside, *([machine] if machine else [])],
                                     tools=[*tools, *mcp.handlers, *mcp.resource_tools],
                                     models=catalog,
@@ -1061,7 +1064,7 @@ class Application:
                                     file_max_bytes=file_max_bytes, memory=memory,
                                     conversation_search=conversation_search, streaming=streaming,
                                     time_zone=time_zone,
-                                    presence=presence)
+                                    presence=presence, screen=screens)
         except BaseException:
             try:
                 if mcp is not None:
@@ -1087,6 +1090,9 @@ class Application:
                           hub=hub, events=events)
         application.time_zone = time_zone
         application.proactive = speaking_first
+        if screens is not None:
+            screens.job_of = lambda scope: runner.status(scope).job_id  # §6: the app's move context
+            application.screens = screens
         application._wake_events = wake_events
         assert isinstance(runtime.driver, Driver)
         await settle_cut_wakes(runtime.data, runtime.driver)  # V3-P87 §4.4: before any new wake

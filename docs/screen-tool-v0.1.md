@@ -18,7 +18,7 @@
 ## 1. 범위
 
 **하는 것**
-- 모델이 부르는 도구 `companion/look_at_screen`. 그 턴의 기기에 화면을 요청하고, 앱이 찍어 보낸 그림을 결과로 받는다(§2–§5).
+- 모델이 부르는 도구 `look_at_screen`. 그 턴의 기기에 화면을 요청하고, 앱이 찍어 보낸 그림을 결과로 받는다(§2–§5).
 - 서버→기기 요청(사건 흐름의 새 사건)과 기기→서버 응답(새 끝점)(§4).
 - 도구로 받은 화면도 이동 `[[move:X,Y]]`의 기준(§6).
 - 앱 설정 "히마리가 필요할 때 화면 보기", 찍을 때의 표시, 자동 첨부의 기본값 바꾸기(§7).
@@ -51,7 +51,7 @@
 
 | 항목 | 값 |
 | --- | --- |
-| id | `companion/look_at_screen` |
+| id | `look_at_screen` |
 | 인자 | 없음 (`{}`) |
 | 설명(모델에게) | "See the user's screen now, on the computer this conversation is happening on. Use it when what the user asks or what you want to say depends on what is on their screen and you have no recent screen. The user sees that you looked." |
 | `effect_profile` | `READ` (아무것도 바꾸지 않음. wake의 읽는 도구만 규칙에서 실행됨) |
@@ -162,7 +162,7 @@ data: {"request_id": "sr_…", "conversation": "c_…", "job_id": "…"}
 ## 8. 자유 wake (V3-P90 §10)
 
 - 도구는 목록에 있지만(§3.2), 실행은 **자유 wake이고 그 기기의 `free_wake_screen`이 켜져 있을 때만**이다. 다른 wake(알림·돌아옴·고리·작업 끝남)에서는 거절(Q6).
-- **이 도구만 드러냄의 예외다.** 지금 자유 wake는 도구 호출이 시작되면 드러난다(V3-P90 §7.3, `_Held`). `companion/look_at_screen` 호출은 드러내지 않고 숨긴 채 실행한다. 그 뒤 Run의 답으로 판정한다: `[[pass]]`면 숨긴 채 끝(화면을 보고 넘김), 말하면 드러냄.
+- **이 도구만 드러냄의 예외다.** 지금 자유 wake는 도구 호출이 시작되면 드러난다(V3-P90 §7.3, `_Held`). `look_at_screen` 호출은 드러내지 않고 숨긴 채 실행한다. 그 뒤 Run의 답으로 판정한다: `[[pass]]`면 숨긴 채 끝(화면을 보고 넘김), 말하면 드러냄.
   - 숨긴 동안의 도구 묶음도 `finalize_hidden_run`의 대상이다. pass로 끝나면 그 호출과 결과는 기록에 보이지 않는다(`read_events`가 숨긴 wake의 이벤트를 빼는 것과 같은 판단으로, 그 wake 턴의 도구 이벤트도 뺀다).
   - 다른 도구를 부르면 지금처럼 드러난다.
 - Run 상한 2(`FREE_RUNS`)가 "화면 한 번 + 말하기 한 번"을 담는다. 화면을 본 뒤 또 도구를 부르면 상한에 걸려 끝난다(보인 실패).
@@ -198,7 +198,7 @@ data: {"request_id": "sr_…", "conversation": "c_…", "job_id": "…"}
 
 | 모듈 | 하는 일 |
 | --- | --- |
-| `tool` | `companion/look_at_screen` 처리기(`tool/screen.py`). 화면을 얻는 길은 포트 `ScreenSource`(`tool.api`)로만: `look(scope, device_id, call) → bytes | 거절 이유`. `ToolContext.device_id`, `ResultImage.screen`, 카탈로그의 `screen_tool` 거르기 |
+| `tool` | `look_at_screen` 처리기(`tool/screen.py`). 화면을 얻는 길은 포트 `ScreenSource`(`tool.api`)로만: `look(scope, device_id, call) → bytes | 거절 이유`. `ToolContext.device_id`, `ResultImage.screen`, 카탈로그의 `screen_tool` 거르기 |
 | `presence` | `EventHub.publish_device`, `features.screen_look` 지님 |
 | `control` | Driver가 Run의 계기에서 턴의 기기를 찾아 `ToolContext`로; 자유 wake의 드러냄 예외(이 도구) |
 | `prompt` | 도구 결과의 화면을 화면 줄에 셈, `SCREEN_NOTE`, `FREE_RULE` 한 문장 |
@@ -224,7 +224,7 @@ data: {"request_id": "sr_…", "conversation": "c_…", "job_id": "…"}
 
 | Q | 질문 | 결정 |
 | --- | --- | --- |
-| Q1 | 도구 형태 | 반려 도구 하나(`companion/look_at_screen`). `pc` Environment는 파일·명령 단계에서 |
+| Q1 | 도구 형태 | 반려 도구 하나(`look_at_screen`). `pc` Environment는 파일·명령 단계에서 |
 | Q2 | 어느 기기 | 기기에서 보낸 메시지는 그 기기, 자유 wake는 그 wake의 기기, Web·CLI 턴에는 없음(목록에는 있고 실행 때 거절, §3.2) |
 | Q3 | 언제 찍지 않나 | 앱이 깨어 있을 때만. 잠듦·잠금·화면 꺼짐·끊김이면 거절 |
 | Q4 | 설정과 표시 | "히마리가 필요할 때 화면 보기" 기본 켬, 찍을 때마다 표시. 자유 wake용은 따로(기본 끔) |

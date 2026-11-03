@@ -98,6 +98,10 @@ class Report:
     # V3-P87: a job the server opened to speak first on this device, and what live sent for it
     wake_job_id: str | None = None
     wake_text: str = ""
+    # V3-P91: the model looked at the screen — the request the device got, its answer, what was said after
+    look_job_id: str | None = "unset"
+    look_answer: int | None = None
+    look_text: str = ""
 
 
 def screen_png(width: int = 1280, height: int = 720) -> bytes:
@@ -192,6 +196,8 @@ async def run(server: str, code: str, text: str, *, verify: bool = True,
                                            and d.get("origin") == spoken)
                 report.wake_job_id = started.get("job_id")
                 report.wake_text = await spoken_text(http, report.conversation, report.wake_job_id)
+            if report.hello.get("features", {}).get("screen_look") == 1:  # V3-P91 §7.1: only then
+                await look(http, events, report)
         finally:
             reader.cancel()
             await asyncio.gather(reader, return_exceptions=True)
@@ -278,6 +284,23 @@ async def follow(http: httpx.AsyncClient, report: Report) -> None:
             report.moves += [(m["at"], m["x"], m["y"]) for m in fresh]
 
 
+async def look(http: httpx.AsyncClient, events: asyncio.Queue[tuple[str, Any]], report: Report) -> None:
+    """V3-P91 §2: a message with no screen; the model looks; the request comes to this device; the app answers."""
+    response = await http.post("/api/device/presence", json={**SIGNAL, "features": {"screen_look": True}})
+    if response.status_code != 204:
+        raise Refused(response)
+    response = await http.post(f"/api/conversations/{report.conversation}/messages", json={"text": "이 화면 뭐야?"})
+    if response.status_code != 202:
+        raise Refused(response)
+    job_id = response.json()["job_id"]
+    asked = await next_named(events, "screen_request", lambda d: d.get("conversation") == report.conversation)
+    report.look_job_id = asked.get("job_id") if asked.get("job_id") == job_id else f"other: {asked.get('job_id')}"
+    response = await http.post(f"/api/device/screens/{asked['request_id']}", content=screen_png(),
+                               headers={"content-type": "image/png"})
+    report.look_answer = response.status_code
+    report.look_text = await spoken_text(http, report.conversation, job_id)
+
+
 async def spoken_text(http: httpx.AsyncClient, conversation: str, job_id: str | None) -> str:
     """What live sent for one job, to its ``done`` (V3-P87: a wake's job, followed like the device's own)."""
     text = ""
@@ -305,6 +328,7 @@ def show(report: Report) -> None:
     print(f"sleep: {report.sleep_signals}; current while asleep: {report.asleep_current}; task: {report.task_signals}; "
           f"screen setting: {report.free_wake_screen}")
     print(f"spoke first: job {report.wake_job_id}, {report.wake_text!r}")
+    print(f"looked: job {report.look_job_id}, answered {report.look_answer}, then {report.look_text!r}")
     print(f"events: {', '.join(report.events)}")
 
 
@@ -312,6 +336,7 @@ def show(report: Report) -> None:
 
 ANSWER = "[[mood:happy]]안녕! 오늘은 `[[mood:sad]]` 대신 [[mood:thinking]]뭘 할까? [[move:1043,88]]여기 봐!"
 FIRST = "[[mood:happy]]아직 거기 있어?"  # V3-P87: what the scripted model says when the server opens the turn
+SEEN = "[[mood:thinking]]빈 화면이네!"  # V3-P91: what it says after it looked
 
 
 def self_test() -> int:
@@ -322,7 +347,8 @@ def self_test() -> int:
     from himari.common import PrincipalId, TextBlock
     from himari.interfaces.web.app import create_app
     from himari.interfaces.web.config import WebConfig
-    from himari.provider.api import NormalizedFinal
+    from himari.common import CallId, ToolCall, ToolId
+    from himari.provider.api import NormalizedFinal, NormalizedToolCalls
     from himari.provider.scripted import ScriptedAdapter
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -333,8 +359,11 @@ def self_test() -> int:
         opened: dict[str, Any] = {}
 
         async def opener() -> Application:
-            provider = ScriptedAdapter([NormalizedFinal((TextBlock(ANSWER),)), NormalizedFinal((TextBlock(FIRST),))],
-                                       streaming=True, piece_delay=0.01, first_delay=0.5)
+            provider = ScriptedAdapter([NormalizedFinal((TextBlock(ANSWER),)), NormalizedFinal((TextBlock(FIRST),)),
+                                        NormalizedToolCalls((ToolCall(CallId("c0"), 0, ToolId("look_at_screen"), {}),)),
+                                        NormalizedFinal((TextBlock(SEEN),))],
+                                       streaming=True, piece_delay=0.01, first_delay=0.5, image_input=True,
+                                       screen_tool=True)
             application = await Application.open(root, provider, model_id="scripted-model", sandbox=False,
                                                  proactive=ProactiveSettings(enabled=True))
             opened["app"], opened["loop"] = application, asyncio.get_running_loop()
@@ -401,6 +430,10 @@ def check(report: Report) -> list[str]:
         "a device gets no signals notices": "devices" not in report.events,
         "a wake's job is spoken on this device": report.wake_job_id is not None and report.wake_job_id != report.job_id,
         "live sends the first words without marks": report.wake_text == "아직 거기 있어?",
+        "the screen request names this device's job": report.look_job_id is not None
+        and report.look_job_id != "unset" and not str(report.look_job_id).startswith("other"),
+        "the requested screen is taken": report.look_answer == 204,
+        "it speaks after it looked": report.look_text == "빈 화면이네!",
     }
     return [name for name, ok in wanted.items() if not ok]
 

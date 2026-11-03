@@ -98,6 +98,7 @@ from himari.bootstrap.application import (
 )
 from himari.bootstrap.changes import ChangeConflict, ChangeDiff, ChangesView
 from himari.bootstrap.companion import origin_view
+from himari.bootstrap.screens import Answer
 from himari.bootstrap.proactive import ProactiveRefused, loop_moment
 from himari.bootstrap.explorer import PDF_APPEND_MAX_BYTES, ExplorerRefused, Listing, ShownFile
 from himari.bootstrap.operator import OPERATOR, derive_cli_bearer, verify_operator_token
@@ -138,6 +139,8 @@ from himari.common import (
 )
 from himari.control.api import ContextStatus, ControlError, ControlErrorCode, JobStatus, TurnUsage
 from himari.data.api import (
+    IMAGE_HEAD_BYTES,
+    sniff_image,
     ALREADY_SENT,
     MAX_ATTACHED_WORKSPACES,
     MAX_ATTACHMENTS,
@@ -325,6 +328,7 @@ class PresenceFeaturesBody(_Body):
     """V3-P90 §9: the app's own settings the server keeps."""
 
     free_wake_screen: StrictBool = False
+    screen_look: StrictBool = False  # V3-P91 §7.1
 
 
 class PresenceBody(_Body):
@@ -347,6 +351,17 @@ class PresenceBody(_Body):
     task: TaskBody | None = None
     task_ended: TaskEndedBody | None = None
     features: PresenceFeaturesBody | None = None
+
+
+class ScreenRefuseBody(_Body):
+    """V3-P91 §4.2: why the app sends no screen."""
+
+    reason: Literal["capture_failed", "excluded", "turned_off", "asleep"]
+
+
+SCREEN_TYPES_TAKEN = frozenset({"image/png", "image/jpeg"})  # V3-P84 §4.1: a screen is one of these
+SCREEN_ANSWERS = {Answer.UNKNOWN: (404, "not_found", "No such screen request for this device."),
+                  Answer.ENDED: (410, "request_ended", "The screen request has ended.")}
 
 
 class QuietBody(_Body):
@@ -389,7 +404,8 @@ def presence_signals(body: PresenceBody) -> Signals:
                    task=None if body.task is None else TaskSignal(body.task.group, float(body.task.for_seconds)),
                    task_ended=None if (ended := body.task_ended) is None else TaskEnded(
                        ended.group, float(ended.lasted_seconds), float(ended.ended_seconds_ago)),
-                   free_wake_screen=body.features is not None and body.features.free_wake_screen)
+                   free_wake_screen=body.features is not None and body.features.free_wake_screen,
+                   screen_look=body.features is not None and body.features.screen_look)
 
 
 def signals_view(state: DeviceState | None) -> dict[str, Any]:
@@ -419,6 +435,8 @@ def signals_view(state: DeviceState | None) -> dict[str, Any]:
                           **({"app": before.app} if before.app is not None else {})}
     if state.free_wake_screen:  # V3-P90 §9: a setting, not told to the model
         view["free_wake_screen"] = True
+    if state.screen_look:  # V3-P91 §7.1: likewise
+        view["screen_look"] = True
     return view
 
 
@@ -1157,6 +1175,7 @@ FILE_REFUSALS: dict[DataErrorCode, tuple[int, str, str]] = {
     DataErrorCode.BLOB_EXPIRED: (410, "file_expired", "The file has expired: it was not used for a long time."),
 }
 UPLOAD_PATH = re.compile(r"^/api/conversations/[^/]+/uploads$")
+SCREEN_PATH = re.compile(r"^/api/device/screens/[^/]+$")  # V3-P91 §4.2: a screen of at most SCREEN_MAX_BYTES
 SAVE_BODY_BYTES = 3 * 1024 * 1024  # a saved file of 1 MiB as JSON, escapes included (V3-P75 §7.7)
 SURFACE_PATHS = ("/files", "/trash", "/settings/instructions", "/settings/memory", "/settings/folders",
                  "/settings/devices")  # V3-P79 §3.1, V3-P83
@@ -2587,7 +2606,8 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
                 "recent_conversation": None if recent is None else {"id": recent.conversation_id,
                                                                     "title": recent.title},
                 # V3-P88 §14, V3-P90 §3.1: an app sends the new fields only then
-                "features": {"presence_signals": 1, "sleep_signals": 1, "task_signals": 1, "free_wake_screen": 1},
+                "features": {"presence_signals": 1, "sleep_signals": 1, "task_signals": 1, "free_wake_screen": 1,
+                             "screen_look": 1},
                 "quiet_until": _time(quiet)}
 
     @app.post("/api/device/presence", status_code=204)
@@ -2597,6 +2617,44 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
             raise ApiError(403, "not_a_device", "Only a device sends its activity.")
         himari(request).hub.signal(by.principal, by.device.device_id, body.idle_seconds, body.time_zone,
                                    presence_signals(body))
+
+    def screen_answer(answer: Answer) -> None:
+        if answer is not Answer.TAKEN:
+            status, code, message = SCREEN_ANSWERS[answer]
+            raise ApiError(status, code, message)
+
+    @app.post("/api/device/screens/{request_id}", status_code=204)
+    async def device_screen(request_id: str, request: Request, by: Caller = Depends(caller)) -> None:
+        """V3-P91 §4.2: the screen a request asked for — a PNG or JPEG of at most SCREEN_MAX_BYTES, from
+        the device it was asked of. 404 for a request it does not know, 410 for one that just ended."""
+        application = himari(request)
+        if by.device is None:
+            raise ApiError(403, "not_a_device", "Only a device sends its screen.")
+        if application.screens is None:
+            raise ApiError(404, "not_found", "No such screen request for this device.")
+        declared = request.headers.get("content-length", "")
+        if declared.isdigit() and int(declared) > SCREEN_MAX_BYTES:
+            raise ApiError(413, "file_too_large", "The file is larger than this server takes.")
+        image = bytearray()
+        async for chunk in request.stream():
+            image += chunk
+            if len(image) > SCREEN_MAX_BYTES:
+                raise ApiError(413, "file_too_large", "The file is larger than this server takes.")
+        sniffed = sniff_image(bytes(image[:IMAGE_HEAD_BYTES]))
+        if sniffed is None or sniffed.media_type not in SCREEN_TYPES_TAKEN:
+            raise ApiError(400, "not_a_screen", "A screen is a PNG or JPEG image.")
+        screen_answer(application.screens.deliver(by.principal, by.device.device_id, request_id, bytes(image)))
+
+    @app.post("/api/device/screens/{request_id}/refuse", status_code=204)
+    async def device_screen_refuse(request_id: str, body: ScreenRefuseBody, request: Request,
+                                   by: Caller = Depends(caller)) -> None:
+        """V3-P91 §4.2: the app sends no screen, and why."""
+        application = himari(request)
+        if by.device is None:
+            raise ApiError(403, "not_a_device", "Only a device answers a screen request.")
+        if application.screens is None:
+            raise ApiError(404, "not_found", "No such screen request for this device.")
+        screen_answer(application.screens.refuse(by.principal, by.device.device_id, request_id, body.reason))
 
     @app.get("/api/events")
     async def read_events_stream(request: Request, by: Caller = Depends(caller)) -> StreamingResponse:
@@ -2650,7 +2708,8 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
     app.add_middleware(BodyLimitMiddleware, exempt=lambda method, path: method == "POST" and bool(UPLOAD_PATH.match(path)),
                        larger=lambda method, path: SAVE_BODY_BYTES if (method, path) in SAVE_ROUTES
                        else PDF_APPEND_MAX_BYTES if method == "POST" and path == PDF_APPEND_PATH
-                       else PAIR_BODY_BYTES if method == "POST" and path == PAIR_PATH else None)
+                       else PAIR_BODY_BYTES if method == "POST" and path == PAIR_PATH
+                       else SCREEN_MAX_BYTES if method == "POST" and SCREEN_PATH.match(path) else None)
     app.add_middleware(OriginGuardMiddleware, allowed_origins=config.allowed_origins)
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=sorted(config.allowed_hosts))
     app.add_middleware(SecurityHeadersMiddleware, csp=page_csp(config.sandbox_origins))

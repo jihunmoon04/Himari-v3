@@ -101,6 +101,9 @@ class ToolDefinition(DeepFrozen):
     # Use REQUIRE_USER for effects the model cannot verify with other Tools
     # (e.g. sending a message to a third party).
     unknown_outcome: UnknownOutcomePolicy = UnknownOutcomePolicy.REPORT_TO_MODEL
+    # V3-P91 §3.2: a model capability the Tool needs to be offered (e.g. "screen_tool"); the
+    # catalog leaves it out for a model without it. None: offered to every model.
+    requires: str | None = None
 
     @property
     def origin(self) -> ToolOrigin:
@@ -118,6 +121,23 @@ class ToolInvocation(DeepFrozen):
     arguments: Mapping[str, JsonValue]
 
 
+class TurnWake(Enum):
+    """V3-P91 §3.4: whether the turn is a server-opened one, and which."""
+
+    NONE = "none"  # the user's turn
+    FREE = "free"  # a free wake (V3-P90 §7)
+    OTHER = "other"  # any other wake: a reminder, a return, a loop, a task's end
+
+
+@dataclass(frozen=True)
+class TurnSource(DeepFrozen):
+    """V3-P91 §3.4: where the turn speaks — the device of the message that started it, or of the
+    wake; None for the Web and the CLI. Set by the Driver, passed through by the Dispatcher."""
+
+    device_id: str | None
+    wake: TurnWake = TurnWake.NONE
+
+
 @dataclass(frozen=True)
 class ToolContext(DeepFrozen):
     """What a handler may use. Write effects on Data go through ToolOutcome."""
@@ -128,6 +148,7 @@ class ToolContext(DeepFrozen):
     # The working directory of *this* Binding (its Workspace + cwd, DATA-11),
     # so each Environment sees its own. Never a host path.
     workspace: ConversationWorkspace | None = None
+    turn: TurnSource | None = None  # V3-P91 §3.4: None when the Driver did not say (a resume after a restart)
 
 
 class SchemaError(ValueError):
@@ -156,6 +177,7 @@ class ResultImage(DeepFrozen):
 
     data: bytes
     media_type: str = ""
+    screen: bool = False  # V3-P91 §5.1: the user's screen — named screen-…, attached with screen=true
 
 
 class ResultImageStore(Protocol):
@@ -210,11 +232,31 @@ class ToolCatalog(Protocol):
     """TOOL-01."""
 
     def catalog(
-        self, active_kinds: frozenset[EnvironmentKind], enabled_sources: frozenset[str] = frozenset()
+        self, active_kinds: frozenset[EnvironmentKind], enabled_sources: frozenset[str] = frozenset(),
+        capabilities: frozenset[str] = frozenset(),
     ) -> Sequence[ToolDefinition]:
         """Internal Tools + ask_user + Tools of kinds with an active Instance
-        + External Tools of enabled sources. Stable order (prefix-cache
+        + External Tools of enabled sources, each only when the model has the
+        capability it ``requires`` (V3-P91 §3.2). Stable order (prefix-cache
         friendly). Exposure is not authorization."""
+        ...
+
+
+class ScreenRefusal(Enum):
+    """V3-P91 §3.3: why a screen could not be had."""
+
+    AWAY = "away"  # the device is not connected, or asleep, locked, its display off
+    TURNED_OFF = "turned_off"  # the app's setting is off (or an app that does not take requests)
+    NOT_HERE = "not_here"  # a free wake whose device does not allow its screen (V3-P90 §10)
+    CAPTURE_FAILED = "capture_failed"  # the app could not capture, or would not (an excluded program in front)
+    TIMEOUT = "timeout"  # nothing came in time
+
+
+class ScreenSource(Protocol):
+    """V3-P91 §11: how the screen Tool gets a device's screen — Bootstrap asks the device."""
+
+    async def look(self, scope: TrustedScope, device_id: str, *, free_wake: bool = False) -> bytes | ScreenRefusal:
+        """The image's bytes (PNG or JPEG) the device sent, or why not. Cancelled, the request ends."""
         ...
 
 
@@ -272,8 +314,11 @@ class ToolDispatcher(Protocol):
         *,
         pause: Callable[[], bool] | None = None,
         read_only: bool = False,
+        turn: TurnSource | None = None,
     ) -> GroupDispatchResult:
-        """Runs only never-claimed PENDING calls (so it is also the resume
+        """``turn`` (V3-P91 §3.4): where the turn speaks, handed to each call's context.
+
+        Runs only never-claimed PENDING calls (so it is also the resume
         path, TOOL-04). Unknown tool / invalid arguments / binding failures
         become DENIED or FAILED results, not exceptions. Uncertain calls of
         REPORT_TO_MODEL Tools get an "outcome unknown" result instead of
