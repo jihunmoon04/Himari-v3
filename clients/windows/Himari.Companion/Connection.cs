@@ -265,7 +265,17 @@ public partial class MainWindow
         if (!ConversationView.IsRunning(detail) || question is not null) EndReplyProgress(closeEmpty: true);
         if (connected) Status.Text = JobOrigin.Status(wakeElsewhere, currentConversation,
             ConversationView.IsRunning(detail) ? "이 대화는 작업 중입니다. 새 대화를 열 수 있습니다." : "연결됨");
-        if (question is not null) { awaitingAnswer = true; Message.Text = question; OpenReplyBubble(id, Str(Prop(detail, "job"), "job_id")); OpenComposer(); if (IsChatWindow(GetForegroundWindow())) { dialogueHost?.Activate(); Input.Focus(); } return; }
+        if (question is not null)
+        {
+            // Archive the previous reply before assigning the new question. Opening
+            // its bubble can clear awaitingAnswer while freezing that older reply.
+            OpenReplyBubble(id, detailJob);
+            awaitingAnswer = true; Message.Text = question;
+            // A background refresh may show the question, but only the user's
+            // return to chat should reopen the hidden editor and its draft.
+            if (ChatHasForeground) { OpenComposer(); dialogueHost?.Activate(); Input.Focus(); }
+            return;
+        }
         awaitingAnswer = false;
         if (liveStreams.ContainsKey(id) && liveDisplays.TryGetValue(id, out var live) && live.Job == detailJob)
         {
@@ -542,6 +552,8 @@ public partial class MainWindow
             // A bubble that fell due while it was held for the send expires now, not at the next event.
             if (history.Any(past => past.Due)) ExpireBubbles();
             UpdateBubblePresentation();
+            // Focus may have left during the POST, while its bubble was protected.
+            DismissUserBubbleIfUnfocused();
         }
     }
     private async void CancelClick(object sender, RoutedEventArgs e) => await RequestCancel();

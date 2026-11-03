@@ -36,6 +36,10 @@ internal static class PresentationChecks
         check(MarkdownView.SafeLink("javascript:alert(1)") is null && MarkdownView.SafeLink("file:///C:/private") is null && MarkdownView.SafeLink("https://example.com") is not null, "reader links permit only explicit web/mail schemes");
         using var source = new HwndSource(new HwndSourceParameters("HIMARI type-to-chat check") { Width = 1, Height = 1, WindowStyle = unchecked((int)0x80000000) });
         var w = new MainWindow(true) { Left = SystemParameters.WorkArea.Left + 60, Top = SystemParameters.WorkArea.Top + 20 };
+        // Layout and synthetic keyboard routing model an active chat even when Windows
+        // refuses a background runner native activation. Restore the real probe for CloseChat below.
+        var foregroundProbe = typeof(MainWindow).GetField("chatForegroundProbe", Private)!;
+        foregroundProbe.SetValue(w, new Func<bool>(() => true));
         w.Show(); Pump();
         var host = (Window)typeof(MainWindow).GetField("dialogueHost", Private)!.GetValue(w)!;
         var settings = (Window)typeof(MainWindow).GetField("settings", Private)!.GetValue(w)!;
@@ -132,10 +136,14 @@ internal static class PresentationChecks
             check(host.Left >= area.Left - 1 && host.Top >= area.Top - 1 && host.Left + host.Width <= area.Right + 1 && host.Top + host.Height <= area.Bottom + 1, "detached bubble remains inside monitor work area at all corners");
         }
         input.Clear(); Call(w, "ShowSentMessage", "질문"); Call(w, "OpenReplyBubble", "c", "j"); message.Text = "**답변**이 끝났어요."; Pump();
-        w.Activate(); Keyboard.Focus(w); Pump();
+        // Settle activation first, then target this synthetic composition at the
+        // character window. A pump after Keyboard.Focus lets the queued editor
+        // focus run, so the event would be delivered to the wrong test target.
+        w.Activate(); Pump(); Keyboard.Focus(w);
         var composition = new TextComposition(InputManager.Current, w, "가");
         w.RaiseEvent(new TextCompositionEventArgs(Keyboard.PrimaryDevice, composition) { RoutedEvent = TextCompositionManager.PreviewTextInputEvent }); Pump();
-        check(input.Text == "가" && input.IsKeyboardFocused && user.Visibility == Visibility.Visible, "first character after a completed reply opens composer and is retained exactly once");
+        check(input.Text == "가" && input.IsKeyboardFocused && user.Visibility == Visibility.Visible,
+            $"first character after a completed reply opens composer and is retained exactly once (text={input.Text}, focused={input.IsKeyboardFocused}, visible={user.Visibility})");
         input.Clear(); Call(w, "ShowSentMessage", "질문"); w.Activate(); Keyboard.Focus(w); Pump();
         w.RaiseEvent(new KeyEventArgs(Keyboard.PrimaryDevice, source, Environment.TickCount, Key.A) { RoutedEvent = Keyboard.PreviewKeyDownEvent }); Pump();
         check(input.IsKeyboardFocused && ((FrameworkElement)w.FindName("ComposerPanel")).Visibility == Visibility.Visible, "printable key focuses editor before text/IME composition arrives");
@@ -241,9 +249,12 @@ internal static class PresentationChecks
         if (!input.IsKeyboardFocused) { PostMessage(hotkeySource.Handle, 0x0312, new IntPtr(0x4849), IntPtr.Zero); Pump(); }
         check(host.IsVisible && ((FrameworkElement)w.FindName("ComposerPanel")).Visibility == Visibility.Visible && input.IsKeyboardFocused, "actual WM_HOTKEY routing reopens detached composer and focuses input");
         Console.WriteLine("WebView2 expanded reader: tables, KaTeX, scrollable code and hostile-content checks passed.");
+        foregroundProbe.SetValue(w, null);
         w.Activate(); Call(w, "CloseChat"); Pump();
         var foreground = (IntPtr)typeof(MainWindow).GetMethod("GetForegroundWindow", BindingFlags.Static | BindingFlags.NonPublic)!.Invoke(null, null)!;
         check(!(bool)Call(w, "IsChatWindow", foreground)! && !input.IsKeyboardFocused, "shortcut with no previous work window releases foreground and keyboard input");
+        check(user.Visibility == Visibility.Collapsed && input.Text == "IME 초안", "external shortcut focus dismissal preserves the draft");
+        foregroundProbe.SetValue(w, new Func<bool>(() => true));
         {
             // Stand in for a fullscreen foreground window; Windows may refuse this process the real one.
             var probe = typeof(MainWindow).GetField("fullscreenWorkProbe", Private)!;

@@ -14,6 +14,16 @@ using Himari.Companion;
 
 internal static class Program
 {
+    // Offscreen conversation checks model a chat the user is still reading. Native
+    // foreground changes are tested separately by FocusLossChecks/PresentationChecks.
+    private static MainWindow ChatWindow()
+    {
+        var window = new MainWindow();
+        typeof(MainWindow).GetField("chatForegroundProbe", BindingFlags.NonPublic | BindingFlags.Instance)!
+            .SetValue(window, new Func<bool>(() => true));
+        return window;
+    }
+
     // V3-P90 §2.3: a window starts asleep; awake at once, with no stretch, for checks of the awake character.
     internal static void Awake(MainWindow window)
     {
@@ -27,6 +37,16 @@ internal static class Program
     {
         if (args.Contains("--fullscreen-fixture")) { FullscreenChecks.Fixture(); return; }
         var app = new App(); app.InitializeComponent(); app.ShutdownMode = ShutdownMode.OnExplicitShutdown;
+        if (args.Contains("--presentation-only"))
+        {
+            PresentationChecks.Run((ok, message) => { if (!ok) throw new Exception(message); }, null);
+            Console.WriteLine("Detached presentation UI checks passed."); app.Shutdown(); return;
+        }
+        if (args.Contains("--focus-loss-only"))
+        {
+            FocusLossChecks.Run((ok, message) => { if (!ok) throw new Exception(message); });
+            Console.WriteLine("User bubble focus-loss UI checks passed."); app.Shutdown(); return;
+        }
         if (args.Contains("--reply-progress-only"))
         {
             ReplyProgressChecks.Run((ok, message) => { if (!ok) throw new Exception(message); }, args.Length == 3 && args[1] == "--screenshots" ? args[2] : null);
@@ -87,7 +107,7 @@ internal static class Program
             return Color.FromArgb(pixel[3], pixel[2], pixel[1], pixel[0]);
         }
         Check(Fill(true) == Color.FromRgb(255, 253, 243) && Fill(false) == Color.FromRgb(242, 237, 255), "rendered user bubble is cream and Himari bubble is lavender");
-        var timeline = new MainWindow();
+        var timeline = ChatWindow();
         object? Timeline(string method, params object?[] args) => typeof(MainWindow).GetMethod(method, BindingFlags.NonPublic | BindingFlags.Instance)!.Invoke(timeline, args);
         Awake(timeline);  // V3-P90 §2.3: the app starts asleep; these checks look at the awake character
         // Scope reply-flow verification independently of artwork and foreground-input checks.
@@ -220,7 +240,7 @@ internal static class Program
         draftInput.Clear(); Timeline("CloseChat");
         Check(composerPanel.Visibility == Visibility.Visible, "switching focus leaves an empty composer available until ordinary expiry");
         timeline.Close();
-        var companion = new MainWindow();
+        var companion = ChatWindow();
         var settings = (Window)typeof(MainWindow).GetField("settings", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(companion)!;
         var assistant = (FrameworkElement)companion.FindName("BubblePanel");
         var user = (FrameworkElement)companion.FindName("UserBubble");
@@ -292,7 +312,7 @@ internal static class Program
         companion.Close();
         foreach (bool partialLive in new[] { false, true })
         {
-            var recovery = new MainWindow();
+            var recovery = ChatWindow();
             object? Call(string method, params object?[] args) => typeof(MainWindow).GetMethod(method, BindingFlags.NonPublic | BindingFlags.Instance)!.Invoke(recovery, args);
             void Field(string field, object? value) => typeof(MainWindow).GetField(field, BindingFlags.NonPublic | BindingFlags.Instance)!.SetValue(recovery, value);
             void Finish(Task task)
@@ -384,7 +404,7 @@ internal static class Program
         foreach (bool doneBeforeAcceptance in new[] { true, false })
         foreach (bool hasLiveBody in new[] { false, true })
         {
-            var ordering = new MainWindow();
+            var ordering = ChatWindow();
             object? Call(string method, params object?[] args) => typeof(MainWindow).GetMethod(method, BindingFlags.NonPublic | BindingFlags.Instance)!.Invoke(ordering, args);
             void Field(string field, object? value) => typeof(MainWindow).GetField(field, BindingFlags.NonPublic | BindingFlags.Instance)!.SetValue(ordering, value);
             void Until(Func<bool> ready)
@@ -438,7 +458,7 @@ internal static class Program
         {
             // A message the server did not take is never lost or shown as sent, and one it did take
             // is never offered again (PR #154 review).
-            var unsentWindow = new MainWindow();
+            var unsentWindow = ChatWindow();
             object? Call(string method, params object?[] args) => typeof(MainWindow).GetMethod(method, BindingFlags.NonPublic | BindingFlags.Instance)!.Invoke(unsentWindow, args);
             void Field(string field, object? value) => typeof(MainWindow).GetField(field, BindingFlags.NonPublic | BindingFlags.Instance)!.SetValue(unsentWindow, value);
             object? Get(string field) => typeof(MainWindow).GetField(field, BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(unsentWindow);
@@ -562,6 +582,7 @@ internal static class Program
                 "once accepted, the overdue bubble expires at once and every other unsent message is kept");
             unsentWindow.Close();
         }
+        FocusLossChecks.Run(Check);
         ReplyProgressChecks.Run(Check, args.Length == 2 && args[0] == "--screenshots" ? args[1] : null);
         if (!args.Contains("--reply-flow-only")) PresentationChecks.Run(Check, args.Length == 2 && args[0] == "--screenshots" ? args[1] : null);
         if (args.Contains("--native-presentation")) FullscreenChecks.Run(Check);
@@ -570,7 +591,7 @@ internal static class Program
             // Render actual controls without opening a connected app, using credentials,
             // saving preferences, registering hotkeys, or capturing the desktop.
             System.IO.Directory.CreateDirectory(args[1]);
-            var preview = new MainWindow();
+            var preview = ChatWindow();
             object? Preview(string method, params object?[] values) => typeof(MainWindow).GetMethod(method, BindingFlags.NonPublic | BindingFlags.Instance)!.Invoke(preview, values);
             var previewSettings = (Window)typeof(MainWindow).GetField("settings", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(preview)!;
             ((CheckBox)previewSettings.FindName("ScreenSharing")).IsChecked = false;
@@ -606,7 +627,7 @@ internal static class Program
         // V3-P87 §10 (PR #159 review P1): following a wake checks again once the conversation list is read.
         foreach (string meanwhile in new[] { "nothing", "typed", "picked" })
         {
-            var follow = new MainWindow();
+            var follow = ChatWindow();
             object? Call(string method, params object?[] arguments) => typeof(MainWindow).GetMethod(method, BindingFlags.NonPublic | BindingFlags.Instance)!.Invoke(follow, arguments);
             void Field(string field, object? value) => typeof(MainWindow).GetField(field, BindingFlags.NonPublic | BindingFlags.Instance)!.SetValue(follow, value);
             object? Value(string field) => typeof(MainWindow).GetField(field, BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(follow);

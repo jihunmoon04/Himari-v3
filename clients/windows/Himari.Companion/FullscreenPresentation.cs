@@ -40,9 +40,10 @@ public partial class MainWindow
             workWindow.Remember(window, EligibleWorkWindow);
             // Observe Alt+Tab as well as our own shortcut. No key interception is involved.
             UpdateFullscreenPresentation();
+            DismissUserBubbleIfUnfocused();
         };
         foregroundHook = SetWinEventHook(3, 3, IntPtr.Zero, foregroundCallback, 0, 0, 0);
-        Deactivated += (_, _) => Dispatcher.BeginInvoke(new Action(UpdateFullscreenPresentation));
+        Deactivated += (_, _) => Dispatcher.BeginInvoke(new Action(() => { UpdateFullscreenPresentation(); DismissUserBubbleIfUnfocused(); }));
         UpdateFullscreenPresentation();
     }
 
