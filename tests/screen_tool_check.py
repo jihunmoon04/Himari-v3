@@ -7,12 +7,12 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 
 from PIL import Image, ImageDraw, ImageFont
 
 from himari.common import (
-    AttachmentRef, CallId, ConversationId, EventId, FileId, ModelToolResult, ProviderContinuation,
+    AttachmentRef, CallId, ConversationId, EventId, FileId, JsonValue, ModelToolResult, ProviderContinuation,
     RunId, TextBlock, ToolCall, ToolId, TrustedScope, split_marks,
 )
 from himari.data.api import (
@@ -40,6 +40,68 @@ class NoDevice:
 
 
 SCREEN = ScreenTool(NoDevice()).definition
+TRACE_VERSION = 2
+
+
+def select_models(environment: Mapping[str, str]) -> list[str]:
+    """Regression by default; an explicit sweep includes rejected image models too."""
+    explicit = environment.get("HIMARI_LIVE_SCREEN_TOOL_MODELS")
+    sweep = environment.get("HIMARI_LIVE_SCREEN_TOOL_SWEEP", "0")
+    if sweep not in ("0", "1"):
+        raise ValueError("HIMARI_LIVE_SCREEN_TOOL_SWEEP must be 0 or 1")
+    if explicit is not None and sweep == "1":
+        raise ValueError("choose SCREEN_TOOL_MODELS or SCREEN_TOOL_SWEEP, not both")
+    models = [m.strip() for m in explicit.split(",") if m.strip()] if explicit is not None else [
+        name for name, caps in KNOWN_CAPABILITIES.items() if caps.image_input and (sweep == "1" or caps.screen_tool)]
+    if not models or len(set(models)) != len(models):
+        raise ValueError("screen-tool model selection must be nonempty and contain no duplicates")
+    if any(m not in KNOWN_CAPABILITIES or not KNOWN_CAPABILITIES[m].image_input for m in models):
+        raise ValueError("screen-tool checks require declared image models")
+    return models
+
+
+def redact_text(text: str, secrets: Sequence[str] = ()) -> str:
+    for secret in secrets:
+        if secret:
+            text = text.replace(secret, "[redacted]")
+    return text
+
+
+def record_output(output: NormalizedModelOutput, secrets: Sequence[str] = ()) -> dict[str, Any]:
+    """Keep exactly what the graders need. No reasoning or arbitrary argument content.
+
+    look_at_screen accepts only {}: every nonempty argument object fails. Replace all its
+    keys/values while preserving emptiness/count, so replay reaches the identical verdict.
+    Unknown tool names are also unnecessary; retain their distinction from look_at_screen.
+    """
+    text = redact_text(output_text(output), secrets)
+    if isinstance(output, NormalizedFinal):
+        return {"kind": "final", "text": text}
+    return {"kind": "tool_calls", "text": text, "calls": [
+        {"tool_id": LOOK_AT_SCREEN if call.tool_id == LOOK_AT_SCREEN else "other_tool",
+         "arguments": {f"redacted_arg_{i}": "[redacted]" for i, _ in enumerate(call.arguments)},
+         "arguments_redacted": bool(call.arguments)} for call in output.calls]}
+
+
+def restore_output(saved: object) -> NormalizedModelOutput:
+    if not isinstance(saved, dict) or not isinstance(saved.get("text"), str):
+        raise ValueError("missing normalized output text")
+    blocks = (TextBlock(saved["text"]),)
+    if saved.get("kind") == "final":
+        return NormalizedFinal(blocks)
+    if saved.get("kind") != "tool_calls" or not isinstance(saved.get("calls"), list):
+        raise ValueError("unknown normalized output kind")
+    calls = []
+    for index, call in enumerate(saved["calls"]):
+        if (not isinstance(call, dict) or not isinstance(call.get("tool_id"), str)
+                or not isinstance(call.get("arguments"), dict)
+                or not all(isinstance(k, str) for k in call["arguments"])):
+            raise ValueError("invalid saved tool call")
+        calls.append(ToolCall(CallId(f"saved_{index}"), index, ToolId(call["tool_id"]),
+                              cast(dict[str, JsonValue], call["arguments"])))
+    if not calls:
+        raise ValueError("empty saved tool group")
+    return NormalizedToolCalls(tuple(calls), blocks)
 
 
 @dataclass(frozen=True)
@@ -192,14 +254,71 @@ def requirements(model: str) -> dict[str, tuple[int, int]]:
     return groups
 
 
+def screen_context(found: Picture, points: bool) -> dict[str, Any]:
+    return {"expected": found.expected, "target": list(found.target) if found.target is not None else None,
+            "screen_points": points}
+
+
+def judge_output(group: str, output: NormalizedModelOutput, context: object = None) -> list[str]:
+    if group == "call":
+        return call_problems(output)
+    if group == "no_call":
+        return final_problems(output)
+    if group == "refuse":
+        return refusal_problems(output)
+    if group == "choice":
+        return choice_problems(output)
+    if group in ("speak", "pass"):
+        return free_problems(output, speak=group == "speak")
+    if group != "read":
+        raise ValueError("unknown grading group")
+    if (not isinstance(context, dict) or not isinstance(context.get("expected"), str) or not context["expected"]
+            or not isinstance(context.get("screen_points"), bool)):
+        raise ValueError("missing screen grading context")
+    target = context.get("target")
+    if target is not None and (not isinstance(target, list) or len(target) != 4
+                               or not all(type(n) is int for n in target)):
+        raise ValueError("invalid screen target")
+    if context["screen_points"] and target is None:
+        raise ValueError("missing screen target")
+    found = Picture("saved", b"", context["expected"],
+                    None if target is None else cast(tuple[int, int, int, int], tuple(target)))
+    return screen_problems(output, found, context["screen_points"])
+
+
+def trace_problems(row: Mapping[str, Any]) -> list[str]:
+    """Recompute v2 verdicts from observations; cached pass/problems never decide a result."""
+    if row.get("trace_version") != TRACE_VERSION:
+        return ["unsupported trace version"]
+    outcome = row.get("outcome")
+    if outcome in ("no_response", "uncertain", "provider_error", "not_requested"):
+        error = row.get("error_code")
+        return [error] if isinstance(error, str) and error else ["missing recorded failure reason"]
+    if outcome != "model_output":
+        return ["unknown recorded outcome"]
+    try:
+        output = restore_output(row.get("output"))
+        return judge_output(row.get("group", ""), output, row.get("context"))
+    except ValueError as error:
+        return [f"invalid trace: {error}"]
+
+
 def review_results(recorded: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     """Replay saved answers without paid calls; preserve original verdicts when the grader changed.
 
     The first sweep counted dots in filenames as sentences and missed Korean refusal variants.
-    Call/reading verdicts stay as captured: the original trace did not store call arguments.
+    v2 traces independently recompute every verdict. The original v1 archive lacks call
+    arguments and screen context; its call/reading verdicts remain partial legacy evidence.
     """
     rows = [dict(row) for row in recorded]
     for row in rows:
+        if "trace_version" in row:
+            problems = trace_problems(row)
+            if "problems" in row and problems != row["problems"]:
+                row.setdefault("initial_problems", row["problems"])
+            row.update(problems=problems, **{"pass": not problems, "replay_mode": "independent"})
+            continue
+        row["replay_mode"] = "legacy_partial"
         if row["group"] not in ("speak", "pass", "refuse", "choice") or "answer" not in row:
             continue
         if row.get("calls"):
@@ -217,9 +336,13 @@ def review_results(recorded: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]
             continue
         if not any(r["model"] == row["model"] and r["scene"] == row["scene"] + "_result"
                    and r["attempt"] == row["attempt"] for r in rows):
-            rows.append({"model": row["model"], "scene": row["scene"] + "_result", "group": "read",
-                         "attempt": row["attempt"], "pass": False, "problems": ["no valid call to continue"],
-                         "not_requested": True})
+            reason = "missing follow-up result" if row["pass"] else "no valid call to continue"
+            missing = {"model": row["model"], "scene": row["scene"] + "_result", "group": "read",
+                       "attempt": row["attempt"], "pass": False, "problems": [reason], "not_requested": True,
+                       "replay_mode": row["replay_mode"]}
+            if "trace_version" in row:
+                missing.update(trace_version=TRACE_VERSION, outcome="not_requested", error_code=reason)
+            rows.append(missing)
     return rows
 
 

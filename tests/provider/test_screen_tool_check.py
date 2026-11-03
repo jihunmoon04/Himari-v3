@@ -3,16 +3,21 @@
 from __future__ import annotations
 
 import json
+import asyncio
+import importlib.util
 from pathlib import Path
 
+import pytest
 from screen_tool_check import (
     after_look, call_problems, choice_problems, failed_groups, free_problems, model_input, picture, refusal_problems,
-    review_results, screen_problems,
+    TRACE_VERSION, record_output, restore_output, review_results, screen_context, screen_problems, select_models,
 )
 from testkit import calls, final
 
-from himari.prompt.api import NowDoing
+from himari.prompt.api import ModelInput, NowDoing, ToolGroupTurn, UserTurn, blocks_text
+from himari.provider.api import NativePreparedRequest, NormalizedModelOutput
 from himari.provider.openrouter import KNOWN_CAPABILITIES, OpenRouterAdapter
+from himari.provider.scripted import ScriptedAdapter
 
 
 def test_always_pass_cannot_pass_the_post_screen_speaking_gate() -> None:
@@ -75,3 +80,147 @@ def test_enabled_models_have_complete_passing_live_evidence() -> None:
     # Replaying fixed grading preserves failures and makes no model calls.
     corrected = [row for row in rows if "initial_problems" in row]
     assert corrected and all(row["pass"] for row in corrected)
+
+
+def test_model_selection_defaults_to_enabled_and_requires_an_explicit_full_sweep() -> None:
+    enabled = {m for m, c in KNOWN_CAPABILITIES.items() if c.screen_tool}
+    assert set(select_models({})) == enabled and len(enabled) == 6
+    all_images = select_models({"HIMARI_LIVE_SCREEN_TOOL_SWEEP": "1"})
+    assert len(all_images) == 8 and set(all_images) - enabled == {"openai/gpt-5-nano", "minimax/minimax-m3"}
+    assert select_models({"HIMARI_LIVE_SCREEN_TOOL_MODELS": " openai/gpt-5-nano "}) == ["openai/gpt-5-nano"]
+
+
+@pytest.mark.parametrize("environment", [
+    {"HIMARI_LIVE_SCREEN_TOOL_MODELS": ""},
+    {"HIMARI_LIVE_SCREEN_TOOL_MODELS": "unknown/model"},
+    {"HIMARI_LIVE_SCREEN_TOOL_MODELS": "z-ai/glm-5.3"},
+    {"HIMARI_LIVE_SCREEN_TOOL_MODELS": "openai/gpt-5-nano,openai/gpt-5-nano"},
+    {"HIMARI_LIVE_SCREEN_TOOL_SWEEP": "yes"},
+    {"HIMARI_LIVE_SCREEN_TOOL_SWEEP": "1", "HIMARI_LIVE_SCREEN_TOOL_MODELS": "openai/gpt-5-nano"},
+])
+def test_invalid_model_selection_cannot_silently_pass(environment: dict[str, str]) -> None:
+    with pytest.raises(ValueError):
+        select_models(environment)
+
+
+@pytest.mark.parametrize(("group", "good", "bad"), [
+    ("call", calls(("look_at_screen", {})), calls(("look_at_screen", {"password": "private"}))),
+    ("no_call", final("비빔밥 드실래요?"), calls(("look_at_screen", {}))),
+    ("read", final("Ocean 테마예요. [[move:790,325]]"), final("Ocean 테마예요. [[move:20,20]]")),
+    ("refuse", final("화면을 볼 수 없어요."), calls(("look_at_screen", {}))),
+    ("choice", calls(("look_at_screen", {})), calls(("look_at_screen", {"anything": 1}))),
+    ("speak", final("잠깐 쉬실래요?"), final("[[pass]]")),
+    ("pass", final("[[pass]]"), final("잘 되고 있네요.")),
+])
+def test_v2_regrades_every_group_from_json_without_trusting_cached_verdicts(
+    group: str, good: NormalizedModelOutput, bad: NormalizedModelOutput,
+) -> None:
+    for output, expected in ((good, True), (bad, False)):
+        row = {"trace_version": TRACE_VERSION, "model": "anthropic/claude-haiku-5.5", "scene": "test",
+               "attempt": 1, "group": group, "outcome": "model_output", "output": record_output(output),
+               "context": screen_context(picture("theme"), True), "pass": not expected,
+               "problems": ["wrong cached result"] if expected else []}
+        saved = json.loads(json.dumps(row))
+        reviewed = review_results([saved])[0]
+        assert reviewed["pass"] is expected and reviewed["replay_mode"] == "independent"
+        assert reviewed["initial_problems"] == saved["problems"]
+
+
+def test_arguments_and_secrets_are_redacted_without_turning_a_bad_call_into_an_empty_one() -> None:
+    secret = "test-private-key"
+    output = calls(("look_at_screen", {secret: {"password": "another-secret", "items": [1, 2]}}),
+                   commentary=f"확인할게요 {secret}")
+    saved = record_output(output, (secret,))
+    serialized = json.dumps(saved)
+    assert secret not in serialized and "another-secret" not in serialized and "password" not in serialized
+    assert saved["kind"] == "tool_calls" and saved["calls"][0]["arguments_redacted"] is True
+    assert call_problems(restore_output(json.loads(serialized))) == call_problems(output)
+    assert record_output(calls((secret, {})), (secret,))["calls"][0]["tool_id"] != secret
+    assert secret not in json.dumps(record_output(final(f"현재 값은 {secret}예요."), (secret,)))
+
+
+def test_v2_replay_uses_saved_screen_context_and_labels_legacy_evidence(monkeypatch: pytest.MonkeyPatch) -> None:
+    row = {"trace_version": TRACE_VERSION, "group": "read", "model": "openai/gpt-6-luna", "scene": "setting_result",
+           "attempt": 1, "outcome": "model_output", "output": record_output(final("Ocean [[move:790,325]] 테마예요.")),
+           "context": screen_context(picture("theme"), True)}
+    monkeypatch.setattr("screen_tool_check.picture", lambda _: (_ for _ in ()).throw(AssertionError("new fixture")))
+    assert review_results([row])[0]["pass"] is True
+    legacy = {"model": "openai/gpt-6-luna", "scene": "setting_result", "attempt": 1, "group": "read",
+              "pass": False, "problems": ["old failure"], "answer": "Ocean 테마예요."}
+    assert review_results([legacy])[0]["replay_mode"] == "legacy_partial"
+    assert review_results([legacy])[0]["pass"] is False
+
+
+@pytest.mark.parametrize("observation", [
+    {"trace_version": 99, "outcome": "model_output"},
+    {"outcome": "model_output", "output": {"kind": "final", "text": 123}},
+    {"outcome": "model_output", "output": {"kind": "tool_calls", "text": "", "calls": [{"tool_id": "look_at_screen"}]}},
+    {"outcome": "model_output", "output": {"kind": "final", "text": "Ocean 테마예요."}},  # no screen context
+    {"outcome": "no_response", "error_code": "http_429"},
+    {"outcome": "uncertain", "error_code": "timeout"},
+    {"outcome": "provider_error", "error_code": "invalid_model_output"},
+    {"outcome": "not_requested", "error_code": "no valid call to continue"},
+])
+def test_invalid_or_failed_v2_observations_never_reuse_a_cached_pass(observation: dict[str, object]) -> None:
+    row = {"trace_version": TRACE_VERSION, "model": "openai/gpt-6-luna", "group": "read", "scene": "setting_result",
+           "attempt": 1, "pass": True, "problems": [], **observation}
+    assert review_results([row])[0]["pass"] is False
+
+
+@pytest.mark.parametrize("bad_calls", [False, True])
+def test_live_recording_and_replay_work_end_to_end_without_network(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, bad_calls: bool,
+) -> None:
+    path = Path(__file__).resolve().parents[1] / "live/test_screen_tool_live.py"
+    spec = importlib.util.spec_from_file_location("screen_live_under_test", path)
+    assert spec is not None and spec.loader is not None
+    live = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(live)
+    made: list[ModelInput] = []
+
+    class OfflineAdapter(ScriptedAdapter):
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            super().__init__()
+
+        def prepare_native_request(self, request: ModelInput) -> NativePreparedRequest:
+            made.append(request)
+            image = next(iter(request.attachments.values()), None)
+            text = " ".join(blocks_text(p.blocks, {}) for p in request.conversation if isinstance(p, UserTurn))
+            output: NormalizedModelOutput
+            if any(isinstance(p, ToolGroupTurn) for p in request.conversation):
+                if image is None:
+                    output = final("화면을 볼 수 없어요.")
+                elif image.view_key in ("call", "match"):
+                    output = final("[[pass]]")
+                elif image.view_key == "theme":
+                    output = final("Ocean 테마예요. [[move:790,325]]")
+                elif image.view_key == "error":
+                    output = final("item_count가 문제예요. [[move:300,295]]")
+                else:
+                    output = final("잠깐 쉬실래요?")
+            elif image is not None or "점심" in text:
+                output = final("잘 보고 있어요.")
+            elif any(isinstance(p, UserTurn) and p.wake for p in request.conversation):
+                output = final("잠깐 쉬실래요?")
+            else:
+                output = calls(("look_at_screen", {"password": "private-value"} if bad_calls else {}))
+            self.extend([output])
+            return super().prepare_native_request(request)
+
+    out = tmp_path / "results.jsonl"
+    monkeypatch.setenv("HIMARI_LIVE_SCREEN_TOOL_OUT", str(out))
+    monkeypatch.setattr(live, "OpenRouterAdapter", OfflineAdapter)
+    monkeypatch.setattr(live, "MODELS", ["anthropic/claude-haiku-5.5"])
+    monkeypatch.setattr(live, "KEY", "test-not-a-real-key")
+    rows = asyncio.run(live.sweep())
+    assert len(rows) == 36 and len(made) == (30 if bad_calls else 36)
+    failed = failed_groups(rows, live.MODELS)
+    assert {group for _, group, *_ in failed} == ({"call", "read"} if bad_calls else set())
+    disk = [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines()]
+    assert all(r["trace_version"] == TRACE_VERSION for r in disk)
+    assert "test-not-a-real-key" not in out.read_text(encoding="utf-8")
+    assert "private-value" not in out.read_text(encoding="utf-8")
+    assert sum(r.get("not_requested", False) for r in disk) == (6 if bad_calls else 0)
+    for row in disk:
+        row.update({"pass": bad_calls, "problems": [] if bad_calls else ["tampered cache"]})
+    assert failed_groups(review_results(disk), live.MODELS) == failed
