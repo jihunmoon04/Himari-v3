@@ -73,11 +73,15 @@ from collections.abc import Callable, Mapping, Sequence
 
 from himari.common import AttachmentRef, ContentBlock, EventId, FrozenMap, JsonValue, RunId, TextBlock, thaw
 from himari.data.api import (
+    AssistantFinal,
     AssistantToolCalls,
     ConversationEvent,
     PersistedStateBasis,
     PromptBasis,
     PromptSnapshot,
+    UserMessage,
+    Wake,
+    free_wake,
 )
 from himari.prompt.api import (
     TOOL_IMAGES_HEADER,
@@ -488,6 +492,16 @@ class Compactor:
         first_user = next((i for i in range(start, len(parts)) if isinstance(parts[i], UserTurn)), None)
         if first_user is not None and first_user > 0:
             start = first_user  # a clean boundary: the tail starts with a user message
+        # PR #173 P2: a free wake may still pass after looking at the screen. Until its
+        # final answer (or the next turn), keep the wake AND every subsequent tool group
+        # exact: a snapshot cannot undo having summarized a wake later hidden by Data.
+        # This also conservatively protects a wake already revealed by streaming.
+        latest = next((e for e in reversed(inputs.events)
+                       if isinstance(e.payload, (UserMessage, AssistantFinal, Wake))), None)
+        if latest is not None and isinstance(latest.payload, Wake) and free_wake(latest.payload.reasons):
+            boundary = next((i for i, p in enumerate(parts)
+                             if isinstance(p, UserTurn) and p.event_id == latest.event_id), start)
+            start = min(start, boundary)
         if start == 0:
             return None
         previous = read_summary(inputs.snapshot)

@@ -721,10 +721,13 @@ class InMemoryData:
     async def read_events(
         self, scope: TrustedScope, *, after_sequence: int = 0, limit: int | None = None
     ) -> Sequence[ConversationEvent]:
-        hidden = {w.event_sequence for w in self._store.wakes.values() if w.conversation_id == scope.conversation_id
-                  and w.status in (WakeStatus.PASSED, WakeStatus.DROPPED)}  # V3-P90 §7.3: never was
+        gone = [w for w in self._store.wakes.values() if w.conversation_id == scope.conversation_id
+                and w.status in (WakeStatus.PASSED, WakeStatus.DROPPED)]  # V3-P90 §7.3: never was
+        hidden = {w.event_sequence for w in gone}
+        held = {w.held_run_id for w in gone if w.held_run_id is not None}  # V3-P91 §8: what it looked at, with it
         events = [e for e in self._conv(scope).events if e.sequence > after_sequence
-                  and not (e.kind is EventKind.WAKE and e.sequence in hidden)]
+                  and not (e.kind is EventKind.WAKE and e.sequence in hidden)
+                  and not (e.origin_run_id is not None and e.origin_run_id in held)]
         return tuple(events if limit is None else events[:limit])
 
     async def prepare_run(self, scope: TrustedScope, preparation: RunPreparation) -> RunId:
@@ -1529,6 +1532,16 @@ class InMemoryData:
         if record.status is WakeStatus.OPENED:
             self._store.wakes[wake_id] = replace(record, status=status, ended_at=datetime.now(UTC))
 
+    async def hold_wake_run(self, scope: TrustedScope, wake_id: str, run_id: RunId) -> bool:
+        self._run(self._conv(scope), run_id)
+        record = await self.read_wake(scope.principal_id, wake_id)
+        if record.conversation_id != scope.conversation_id or record.status is not WakeStatus.OPENED:
+            return False
+        if record.held_run_id is None:
+            self._store.wakes[wake_id] = replace(record, held_run_id=run_id)
+            return True
+        return record.held_run_id == run_id
+
     async def wake_of_run(self, scope: TrustedScope, run_id: RunId) -> WakeRecord | None:
         conv = self._conv(scope)
         level: list[RunId] = [run_id]
@@ -1553,10 +1566,12 @@ class InMemoryData:
         return None
 
     async def unshown_wakes(self, scope: TrustedScope) -> frozenset[int]:
-        self._conv(scope)
-        return frozenset(w.event_sequence for w in self._store.wakes.values()
-                         if w.conversation_id == scope.conversation_id and w.status is WakeStatus.OPENED
-                         and free_wake(w.reasons))
+        conv = self._conv(scope)
+        opened = [w for w in self._store.wakes.values()
+                  if w.conversation_id == scope.conversation_id and w.status is WakeStatus.OPENED and free_wake(w.reasons)]
+        held = {w.held_run_id for w in opened if w.held_run_id is not None}  # V3-P91 §8
+        return frozenset({w.event_sequence for w in opened}
+                         | {e.sequence for e in conv.events if e.origin_run_id is not None and e.origin_run_id in held})
 
     async def wakes_since(self, principal: PrincipalId, since: datetime) -> tuple[WakeRecord, ...]:
         return tuple(sorted((r for r in self._store.wakes.values() if r.principal == principal

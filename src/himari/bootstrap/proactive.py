@@ -172,6 +172,11 @@ async def settle_cut_wakes(data: SqliteData, driver: Driver) -> int:
         if record.status is WakeStatus.OPENED and free_wake(record.reasons):
             # V3-P90 §7.3: never shown — dropped, keys kept (the step is used); a Run it left
             # received is finalized with no Event when the Conversation is next driven
+            if record.held_run_id is not None:  # V3-P91 §8: its screen group is closed, never run on a later turn
+                try:
+                    await driver.close_cut_group(scope, CUT_REASON)
+                except Exception:  # noqa: BLE001 — still dropped: its events go with it
+                    log.exception("could not close the screen group of wake %s", record.wake_id)
             await data.end_wake(record.principal, record.wake_id, WakeStatus.DROPPED)
             settled += 1
             continue

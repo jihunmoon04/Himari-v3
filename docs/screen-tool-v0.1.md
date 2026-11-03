@@ -170,11 +170,16 @@ data: {"request_id": "sr_…", "conversation": "c_…", "job_id": "…"}
 - 도구는 목록에 있지만(§3.2), 실행은 **자유 wake이고 그 기기의 `free_wake_screen`이 켜져 있을 때만**이다. 다른 wake(알림·돌아옴·고리·작업 끝남)에서는 거절(Q6).
 - **이 도구만 드러냄의 예외다.** 지금 자유 wake는 도구 호출이 시작되면 드러난다(V3-P90 §7.3, `_Held`). `look_at_screen` 호출은 드러내지 않고 숨긴 채 실행한다. 그 뒤 Run의 답으로 판정한다: `[[pass]]`면 숨긴 채 끝(화면을 보고 넘김), 말하면 드러냄.
   - 숨긴 동안의 도구 묶음도 `finalize_hidden_run`의 대상이다. pass로 끝나면 그 호출과 결과는 기록에 보이지 않는다(`read_events`가 숨긴 wake의 이벤트를 빼는 것과 같은 판단으로, 그 wake 턴의 도구 이벤트도 뺀다).
-  - 다른 도구를 부르면 지금처럼 드러난다.
+  - 다른 도구를 부르거나 도구 앞에 말을 쓰면 지금처럼 드러난다.
+  - **구현(Data v18):** 숨긴 채 보는 Run은 wake 기록의 `held_run_id`로 남긴다(`hold_wake_run`, Run의 출력보다 먼저 써서 이벤트가 생길 때 이미 숨겨져 있음). wake 하나에 한 Run뿐이다. wake가 `opened`인 동안 그 Run의 이벤트(호출·결과)는 `unshown_wakes`에 들어가 Web에 보이지 않고, `passed`·`dropped`이면 `read_events`에서 빠진다(Prompt·압축·기억 작업도 같음). 말하면(`speaking`) 그대로 보인다(사용자는 히마리가 본 것을 안다).
+  - 판정은 `looks_unshown`: 화면 도구만 부르고 `[[pass]]` 말고는 아무것도 쓰지 않은 Run. 흐름 중에는 `_Held`가 화면 도구의 호출로는 드러내지 않는다.
+  - **연속 Run 스트리밍(PR #173 검수 P1):** `_Held.output_started`에서 그 Run의 텍스트 판정 버퍼만 비운다. 첫 Run의 commentary가 `[[pass]]`이고 다음 Run도 `[[pass]]`여도 합쳐서 발화로 판정하지 않는다. 진행 이력 버퍼는 유지하므로, 다음 Run에서 말하면 앞의 화면 호출까지 순서대로 공개한다.
+  - **압축 경계(PR #173 검수 P2):** 자유 wake의 최종 답이 나오거나 다음 턴이 시작되기 전에는 wake와 그 뒤의 모든 도구 묶음을 요약하지 않는다. 앞의 대화만 압축할 수 있고, 앞의 대화가 없으면 압축하지 않는다(컨텍스트 상한 검사는 그대로). 이미 스트리밍으로 드러난 wake도 최종 답 전까지 보수적으로 보호한다. `passed`·`dropped`로 끝나면 `read_events`에서 빠질 정보가 스냅샷으로 먼저 들어가는 것을 막는다.
+  - **재시작:** 숨긴 채 보던 중에 서버가 꺼지면, 재시작 정리가 그 묶음을 닫고(시작 안 한 호출은 실행 안 함) wake를 `dropped`로 한다. 다음 사용자 턴이 그 화면 요청을 대신 실행하지 않는다.
 - Run 상한 2(`FREE_RUNS`)가 "화면 한 번 + 말하기 한 번"을 담는다. 화면을 본 뒤 또 도구를 부르면 상한에 걸려 끝난다(보인 실패).
 - 앱은 찍을 때 표시를 띄운다(§7.2). 그래서 pass한 자유 wake도 사용자는 "화면 보는 중"을 볼 수 있다. 사용자는 찍힌 것을 알아야 한다(V3-P90 §10).
 - 비용: 화면을 본 자유 wake는 Run 2번과 이미지 1장이다. 하루 시도 12번이 그대로 상한이다. 운영해 보고 다시 본다.
-- `FREE_RULE`에 한 문장: `If seeing the screen would change what you say, you may look first; you can still answer [[pass]] after looking.` (실제 모델 확인에서 다듬음)
+- `FREE_RULE` 다음에 한 줄 `FREE_SCREEN_RULE`(화면 도구를 받은 모델에게만): `If seeing the screen would change what you say in a free wake, you may look first; you can still answer [[pass]] after looking.` (실제 모델 확인에서 다듬음)
 
 ## 9. 어느 모델에서 (Q7)
 

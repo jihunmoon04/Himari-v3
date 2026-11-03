@@ -361,6 +361,43 @@ def test_a_free_wake_is_hidden_until_shown_and_gone_once_passed() -> None:
     assert asyncio.run(again.read_events(SCOPE)) == ()
 
 
+@pytest.mark.parametrize("end", ["passed", "dropped", "spoke"])
+def test_a_free_wakes_screen_group_is_unshown_and_goes_with_it(end: str) -> None:
+    """V3-P91 §8: the Run a free wake holds (it looked at the screen) — its call and result — is unshown
+    while the wake is, never was once it passed or was dropped, and is seen once it speaks."""
+    from himari.common import CallId, CallRef, ModelToolResult, TextBlock, ToolCall, ToolId
+    from himari.data.api import AssistantToolCalls, ToolCompletion, ToolExecutionStatus
+
+    store = new_store()
+    data, _ = opened(store)
+    event = asyncio.run(data.begin_wake(SCOPE, FREE, "d1"))
+    wake_id = event.payload.wake_id  # type: ignore[union-attr]
+    run_id = free_run(data, event)
+    other = free_run(data, event)
+    assert asyncio.run(data.hold_wake_run(SCOPE, wake_id, run_id))  # type: ignore[arg-type]
+    assert asyncio.run(data.hold_wake_run(SCOPE, wake_id, run_id))  # type: ignore[arg-type]  # held already
+    assert not asyncio.run(data.hold_wake_run(SCOPE, wake_id, other))  # type: ignore[arg-type]  # one Run only
+    call = ToolCall(CallId("c0"), 0, ToolId("look_at_screen"), {})
+    asyncio.run(data.project_model_output(SCOPE, run_id, AssistantToolCalls((call,))))  # type: ignore[arg-type]
+    asyncio.run(data.commit_tool_outcome(SCOPE, CallRef(run_id, call.call_id), ToolCompletion(  # type: ignore[arg-type]
+        ToolExecutionStatus.SUCCEEDED, ModelToolResult((TextBlock("Screen captured."),)))))
+    held = [e.sequence for e in asyncio.run(data.read_events(SCOPE)) if e.origin_run_id == run_id]
+    assert len(held) == 2  # the call and its result
+    assert asyncio.run(data.unshown_wakes(SCOPE)) == frozenset({event.sequence, *held})
+    assert asyncio.run(data.read_wake(SCOPE.principal_id, wake_id)).held_run_id == run_id
+    if end == "spoke":
+        assert asyncio.run(data.reveal_wake(SCOPE.principal_id, wake_id))
+        assert len(asyncio.run(data.read_events(SCOPE))) == 3 and asyncio.run(data.unshown_wakes(SCOPE)) == frozenset()
+        assert not asyncio.run(data.hold_wake_run(SCOPE, wake_id, run_id))  # type: ignore[arg-type]  # not opened
+        return
+    if end == "passed":
+        asyncio.run(data.finalize_hidden_run(SCOPE, other, wake_id, WakeStatus.PASSED))  # type: ignore[arg-type]
+    else:
+        asyncio.run(data.end_wake(SCOPE.principal_id, wake_id, WakeStatus.DROPPED))
+    assert asyncio.run(data.read_events(SCOPE)) == () and asyncio.run(data.unshown_wakes(SCOPE)) == frozenset()
+    assert asyncio.run(data_for(restart(store)).read_events(SCOPE)) == ()
+
+
 def test_a_shown_free_wake_is_speaking_and_ends_as_any_wake() -> None:
     store = new_store()
     data, _ = opened(store)

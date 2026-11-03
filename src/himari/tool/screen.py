@@ -9,11 +9,12 @@ model reads. Offered only to a model checked for it (``requires``).
 
 from __future__ import annotations
 
-from himari.common import ConversationId, ModelToolResult, RunId, TextBlock, ToolId
+from himari.common import ConversationId, ModelToolResult, RunId, TextBlock
 from himari.tool.api import (
     EffectProfile,
     ResultImage,
     ScreenRefusal,
+    SCREEN_TOOL_ID,
     ScreenSource,
     ToolContext,
     ToolDefinition,
@@ -24,7 +25,7 @@ from himari.tool.api import (
     WorkspaceRequirement,
 )
 
-LOOK_AT_SCREEN = ToolId("look_at_screen")
+LOOK_AT_SCREEN = SCREEN_TOOL_ID
 SCREEN_TOOL = "screen_tool"  # the model capability it requires (V3-P91 §9)
 
 DESCRIPTION = (

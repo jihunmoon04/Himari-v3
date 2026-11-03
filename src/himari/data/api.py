@@ -1511,6 +1511,9 @@ class WakeRecord(DeepFrozen):
     asked: bool
     created_at: datetime
     ended_at: datetime | None
+    # V3-P91 §8: the Run whose screen-Tool group a free wake ran unshown; its events are unshown and
+    # gone with the wake (``unshown_wakes``, ``read_events``). None: it held none.
+    held_run_id: RunId | None = None
 
 
 class WakeStore(Protocol):
@@ -1555,14 +1558,22 @@ class WakeStore(Protocol):
         be: a Run no longer RECEIVED stays, a wake no longer opened stays."""
         ...
 
+    async def hold_wake_run(self, scope: TrustedScope, wake_id: str, run_id: RunId) -> bool:
+        """V3-P91 §8: an opened free wake runs this Run's tool group (it only looks at the screen) without
+        being shown — recorded before the Run's output is, so its events are never seen unless the wake
+        speaks. True when held (or held already); False — nothing changes — when the wake is no longer
+        opened or holds another Run."""
+        ...
+
     async def wake_of_run(self, scope: TrustedScope, run_id: RunId) -> WakeRecord | None:
         """V3-P90 §7.3: the free wake whose Event is among the Run's triggers, if any (a passed or
         dropped one too, whose Event ``read_events`` no longer gives)."""
         ...
 
     async def unshown_wakes(self, scope: TrustedScope) -> frozenset[int]:
-        """V3-P90 §7.3: the event sequences of this Conversation's free wakes not shown yet (opened).
-        Passed and dropped ones never come out of ``read_events`` at all."""
+        """V3-P90 §7.3: the event sequences of this Conversation's free wakes not shown yet (opened), and
+        of the events of the Run each holds (V3-P91 §8). Passed and dropped ones never come out of
+        ``read_events`` at all, their held Run's events neither."""
         ...
 
     async def wakes_since(self, principal: PrincipalId, since: datetime) -> tuple[WakeRecord, ...]:

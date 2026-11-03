@@ -196,7 +196,7 @@ from himari.data.api import (
 
 # v3: compaction_runs; v4: external_settings; v5: ui_resources; v6: model_settings;
 # v7: the trash (all upgraded in place); v1 is refused
-SCHEMA_VERSION = 17
+SCHEMA_VERSION = 18
 APPLICATION_ID = 0x48494D41  # "HIMA": written into the database header (PRAGMA application_id)
 
 _TERMINAL_COMPLETIONS = frozenset(
@@ -628,9 +628,14 @@ CREATE TABLE wake_keys (
     PRIMARY KEY (owner, key)
 ) STRICT;
 """
+# v18: the Run whose screen-Tool group a free wake ran unshown (V3-P91 §8), hidden with it.
+_V18_ADDITIONS = """
+ALTER TABLE wakes ADD COLUMN held_run_id TEXT;
+"""
 _ADDITIONS = (_V3_ADDITIONS, _V4_ADDITIONS, _V5_ADDITIONS, _V6_ADDITIONS, _V7_ADDITIONS, _V8_ADDITIONS,
               _V9_ADDITIONS, _V10_ADDITIONS, _V11_ADDITIONS, _V12_ADDITIONS,
-              _V13_ADDITIONS, _V14_ADDITIONS, _V15_ADDITIONS, _V16_ADDITIONS, _V17_ADDITIONS)  # what each version from v3 added
+              _V13_ADDITIONS, _V14_ADDITIONS, _V15_ADDITIONS, _V16_ADDITIONS, _V17_ADDITIONS,
+              _V18_ADDITIONS)  # what each version from v3 added
 _SCHEMA = _SCHEMA_V2 + "".join(_ADDITIONS)
 # An older version → (its exact schema, what brings it to SCHEMA_VERSION).
 _UPGRADES = {
@@ -1215,7 +1220,8 @@ def _wake(row: sqlite3.Row) -> WakeRecord:
                       int(row["event_sequence"]), codec.wake_reasons_from(json.loads(row["reasons"])),
                       row["device_id"], WakeStatus(row["status"]), bool(row["asked"]),
                       datetime.fromisoformat(row["created_at"]),
-                      None if row["ended_at"] is None else datetime.fromisoformat(row["ended_at"]))
+                      None if row["ended_at"] is None else datetime.fromisoformat(row["ended_at"]),
+                      None if row["held_run_id"] is None else RunId(row["held_run_id"]))
 
 
 def _timestamp(moment: datetime) -> str:
@@ -1589,10 +1595,13 @@ class SqliteData:
     ) -> Sequence[ConversationEvent]:
         with self._tx() as tx:
             tx.authorized(scope)
-            # V3-P90 §7.3 (PR #162 review P1-9): a free wake that passed or was dropped never was
+            # V3-P90 §7.3 (PR #162 review P1-9): a free wake that passed or was dropped never was, nor the
+            # events of the Run it held (V3-P91 §8)
             rows = tx.all(
                 "SELECT * FROM events e WHERE conversation_id=? AND sequence>? AND NOT (kind='wake' AND EXISTS"
                 " (SELECT 1 FROM wakes w WHERE w.conversation_id=e.conversation_id AND w.event_sequence=e.sequence"
+                " AND w.status IN ('passed', 'dropped'))) AND NOT (e.origin_run_id IS NOT NULL AND EXISTS"
+                " (SELECT 1 FROM wakes w WHERE w.conversation_id=e.conversation_id AND w.held_run_id=e.origin_run_id"
                 " AND w.status IN ('passed', 'dropped'))) ORDER BY sequence LIMIT ?",
                 scope.conversation_id, after_sequence, -1 if limit is None else limit,
             )
@@ -2947,6 +2956,17 @@ class SqliteData:
             tx.execute("UPDATE wakes SET status=?, ended_at=? WHERE owner=? AND wake_id=? AND status='opened'",
                        status.value, _timestamp(datetime.now(UTC)), scope.principal_id, wake_id)
 
+    async def hold_wake_run(self, scope: TrustedScope, wake_id: str, run_id: RunId) -> bool:
+        with self._tx() as tx:
+            tx.authorized(scope)
+            self._run_row(tx, scope, run_id)
+            tx.execute("UPDATE wakes SET held_run_id=? WHERE owner=? AND wake_id=? AND conversation_id=?"
+                       " AND status='opened' AND held_run_id IS NULL",
+                       run_id, scope.principal_id, wake_id, scope.conversation_id)
+            row = tx.one("SELECT held_run_id FROM wakes WHERE owner=? AND wake_id=? AND conversation_id=?"
+                         " AND status='opened'", scope.principal_id, wake_id, scope.conversation_id)
+            return row is not None and row["held_run_id"] == run_id
+
     async def wake_of_run(self, scope: TrustedScope, run_id: RunId) -> WakeRecord | None:
         with self._tx() as tx:
             tx.authorized(scope)
@@ -2983,10 +3003,13 @@ class SqliteData:
     async def unshown_wakes(self, scope: TrustedScope) -> frozenset[int]:
         with self._tx() as tx:
             tx.authorized(scope)
-            rows = tx.all("SELECT event_sequence, reasons FROM wakes WHERE conversation_id=? AND status='opened'",
-                          scope.conversation_id)
-            return frozenset(int(r["event_sequence"]) for r in rows
-                             if free_wake(codec.wake_reasons_from(json.loads(r["reasons"]))))
+            rows = tx.all("SELECT event_sequence, reasons, held_run_id FROM wakes WHERE conversation_id=?"
+                          " AND status='opened'", scope.conversation_id)
+            opened = [r for r in rows if free_wake(codec.wake_reasons_from(json.loads(r["reasons"])))]
+            held = [r["held_run_id"] for r in opened if r["held_run_id"] is not None]  # V3-P91 §8
+            events = tx.all(f"SELECT sequence FROM events WHERE conversation_id=? AND origin_run_id IN"
+                            f" ({', '.join('?' * len(held))})", scope.conversation_id, *held) if held else []
+            return frozenset({int(r["event_sequence"]) for r in opened} | {int(r["sequence"]) for r in events})
 
     async def wakes_since(self, principal: PrincipalId, since: datetime) -> tuple[WakeRecord, ...]:
         with self._tx() as tx:
