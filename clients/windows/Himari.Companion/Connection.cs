@@ -269,9 +269,13 @@ public partial class MainWindow
         if (!ConversationView.IsRunning(detail) || question is not null) EndReplyProgress(closeEmpty: true);
         if (connected) Status.Text = JobOrigin.Status(wakeElsewhere, currentConversation,
             ConversationView.IsRunning(detail) ? "이 대화는 작업 중입니다. 새 대화를 열 수 있습니다." : "연결됨");
+        var sequence = Prop(Prop(detail, "conversation"), "last_sequence");
+        int lastSequence = sequence.ValueKind == JsonValueKind.Number && sequence.TryGetInt32(out int n) ? n : 0;
         if (question is not null)
         {
-            await RefreshPresentedFilesAsync(local, id, ct);
+            var asked = await ReadReplyHistoryAsync(local, id, lastSequence, needsFinal: false, ct);
+            if (ct.IsCancellationRequested || !ReferenceEquals(local, client) || id != currentConversation) return;
+            await RefreshPresentedFilesAsync(local, id, asked.Turn.Files, ct);
             if (ct.IsCancellationRequested || !ReferenceEquals(local, client) || id != currentConversation) return;
             // Archive the previous reply before assigning the new question. Opening
             // its bubble can clear awaitingAnswer while freezing that older reply.
@@ -296,52 +300,12 @@ public partial class MainWindow
         // Until Live arrives, a history refresh must not fill the pending reply
         // with an older final (or the empty-conversation greeting).
         if (ReplyPreparing) return;
-        var sequence = Prop(Prop(detail, "conversation"), "last_sequence");
-        int lastSequence = sequence.ValueKind == JsonValueKind.Number && sequence.TryGetInt32(out int n) ? n : 0;
-        int after = Math.Max(0, lastSequence - 100), finalSequence = 0, latestPresentedSequence = 0;
-        string? lastText = null; string lastMood = "neutral";
-        var presentedSequences = new Dictionary<(string FileId, int Version), int>();
-        while (true)
-        {
-            var history = await local.SendAsync(HttpMethod.Get, PathFor(id) + $"/events?after={after}&limit=100", null, ct);
-            var page = Items(Prop(history, "items")).ToList();
-            foreach (var item in page)
-            {
-                if (Prop(item, "sequence").ValueKind != JsonValueKind.Number || !Prop(item, "sequence").TryGetInt32(out int itemSequence) || itemSequence > lastSequence)
-                    continue;
-                if (Str(item, "kind") == "assistant_final")
-                {
-                    var finalDisplay = Prop(item, "display"); var value = Str(finalDisplay, "text");
-                    if (value is not null && itemSequence >= finalSequence)
-                    {
-                        lastText = value; finalSequence = itemSequence;
-                        lastMood = DisplayState.Mood(Prop(finalDisplay, "moods"), value.EnumerateRunes().Count());
-                    }
-                }
-                else if (Str(item, "kind") == "tool_result")
-                {
-                    foreach (var pf in Items(Prop(item, "presented_files")))
-                    {
-                        if (Str(pf, "file_id") is { Length: > 0 } pfId &&
-                            Prop(pf, "version").ValueKind == JsonValueKind.Number &&
-                            Prop(pf, "version").TryGetInt32(out int pfVer) && pfVer >= 1)
-                        {
-                            if (!presentedSequences.TryGetValue((pfId, pfVer), out int prevSeq) || itemSequence > prevSeq)
-                                presentedSequences[(pfId, pfVer)] = itemSequence;
-                            if (itemSequence > latestPresentedSequence)
-                                latestPresentedSequence = itemSequence;
-                        }
-                    }
-                }
-            }
-            bool pendingNeedsEarlierPage = pendingReplies.TryGetValue(id, out var waiting) &&
-                waiting.Server.SameDevice(local) && after > waiting.After &&
-                finalSequence <= waiting.After && latestPresentedSequence <= waiting.After;
-            if ((lastText is not null && !pendingNeedsEarlierPage) || after == 0) break;
-            after = Math.Max(0, after - 100);
-        }
+        var read = await ReadReplyHistoryAsync(local, id, lastSequence, needsFinal: true, ct);
+        string? lastText = read.LastText; string lastMood = read.LastMood;
+        int finalSequence = read.FinalSequence;
+        var presentedSequences = read.PresentedSequences;
         if (ct.IsCancellationRequested || !ReferenceEquals(local, client) || id != currentConversation || liveStreams.ContainsKey(id) || preparationVersion != replyPreparationVersion) return;
-        bool hasUndismissedFiles = await RefreshPresentedFilesAsync(local, id, ct);
+        bool hasUndismissedFiles = await RefreshPresentedFilesAsync(local, id, read.Turn.Files, ct);
         if (ct.IsCancellationRequested || !ReferenceEquals(local, client) || id != currentConversation || liveStreams.ContainsKey(id) || preparationVersion != replyPreparationVersion) return;
         bool recoveredReply = false;
         if (pendingReplies.TryGetValue(id, out var pending) && pending.Server.SameDevice(local) &&
@@ -373,6 +337,63 @@ public partial class MainWindow
         {
             SetTalking(false); OpenReplyBubble(id, Str(Prop(detail, "job"), "job_id")); _ = ScheduleBubbleAfterMoves(id);
         }
+    }
+    private sealed record ReplyHistory(
+        string? LastText, string LastMood, int FinalSequence,
+        Dictionary<(string FileId, int Version), int> PresentedSequences, ReplyTurn Turn);
+
+    /// <summary>Reads recent events backwards, 100 at a time, until it has the latest
+    /// final (when <paramref name="needsFinal"/>) and the start of the latest reply turn.</summary>
+    private async Task<ReplyHistory> ReadReplyHistoryAsync(ServerClient local, string id, int lastSequence, bool needsFinal, CancellationToken ct)
+    {
+        int after = Math.Max(0, lastSequence - 100), finalSequence = 0, latestPresentedSequence = 0;
+        string? lastText = null; string lastMood = "neutral";
+        var presentedSequences = new Dictionary<(string FileId, int Version), int>();
+        var events = new Dictionary<int, JsonElement>();
+        var turn = ReplyTurn.Find([]);
+        while (true)
+        {
+            var history = await local.SendAsync(HttpMethod.Get, PathFor(id) + $"/events?after={after}&limit=100", null, ct);
+            var page = Items(Prop(history, "items")).ToList();
+            foreach (var item in page)
+            {
+                if (Prop(item, "sequence").ValueKind != JsonValueKind.Number || !Prop(item, "sequence").TryGetInt32(out int itemSequence) || itemSequence > lastSequence)
+                    continue;
+                events[itemSequence] = item;
+                if (Str(item, "kind") == "assistant_final")
+                {
+                    var finalDisplay = Prop(item, "display"); var value = Str(finalDisplay, "text");
+                    if (value is not null && itemSequence >= finalSequence)
+                    {
+                        lastText = value; finalSequence = itemSequence;
+                        lastMood = DisplayState.Mood(Prop(finalDisplay, "moods"), value.EnumerateRunes().Count());
+                    }
+                }
+                else if (Str(item, "kind") == "tool_result")
+                {
+                    foreach (var pf in Items(Prop(item, "presented_files")))
+                    {
+                        if (Str(pf, "file_id") is { Length: > 0 } pfId &&
+                            Prop(pf, "version").ValueKind == JsonValueKind.Number &&
+                            Prop(pf, "version").TryGetInt32(out int pfVer) && pfVer >= 1)
+                        {
+                            if (!presentedSequences.TryGetValue((pfId, pfVer), out int prevSeq) || itemSequence > prevSeq)
+                                presentedSequences[(pfId, pfVer)] = itemSequence;
+                            if (itemSequence > latestPresentedSequence)
+                                latestPresentedSequence = itemSequence;
+                        }
+                    }
+                }
+            }
+            turn = ReplyTurn.Find(events.Values);
+            bool pendingNeedsEarlierPage = pendingReplies.TryGetValue(id, out var waiting) &&
+                waiting.Server.SameDevice(local) && after > waiting.After &&
+                finalSequence <= waiting.After && latestPresentedSequence <= waiting.After;
+            bool haveFinal = !needsFinal || (lastText is not null && !pendingNeedsEarlierPage);
+            if ((haveFinal && turn.Bounded) || after == 0) break;
+            after = Math.Max(0, after - 100);
+        }
+        return new ReplyHistory(lastText, lastMood, finalSequence, presentedSequences, turn);
     }
     private void WaitForReply(ServerClient server, string conversation, string? job, int after)
     {

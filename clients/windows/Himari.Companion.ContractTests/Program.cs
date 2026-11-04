@@ -966,6 +966,30 @@ Check(PresentedFileNames.SanitizeSaveFileName("...") == "download" && PresentedF
 Check(PresentedFileNames.FormatSize(512) == "512 B" && PresentedFileNames.FormatSize(2048) == "2 KB" && PresentedFileNames.VersionLabel(2) == "v2",
     "formats size and version labels");
 
+// V3-P93 §6.3: a reply bubble shows only the files presented in the latest reply turn.
+JsonElement TurnEvent(int sequence, string kind, string? fileId = null, int version = 1) => JsonSerializer.SerializeToElement(
+    fileId is null ? new { sequence, kind } as object : new { sequence, kind, presented_files = new[] { new { file_id = fileId, version } } });
+var laterTurn = ReplyTurn.Find([TurnEvent(1, "user_message"), TurnEvent(2, "tool_result", "f1"), TurnEvent(3, "assistant_final"),
+    TurnEvent(4, "user_message"), TurnEvent(5, "assistant_final")]);
+Check(laterTurn.Bounded && laterTurn.Files.Count == 0, "a file from an earlier turn is not shown with a later reply");
+var fileTurn = ReplyTurn.Find([TurnEvent(6, "assistant_final"), TurnEvent(4, "user_message"), TurnEvent(5, "tool_result", "f2", 2),
+    TurnEvent(2, "tool_result", "f1"), TurnEvent(1, "user_message"), TurnEvent(3, "assistant_final")]);
+Check(fileTurn.Bounded && fileTurn.Files.SetEquals([("f2", 2)]), "files of the latest turn are found regardless of page order");
+var wakeTurn = ReplyTurn.Find([TurnEvent(3, "assistant_final"), TurnEvent(7, "tool_result", "f3"), TurnEvent(8, "assistant_final"),
+    TurnEvent(9, "assistant_final")]);
+Check(wakeTurn.Bounded && wakeTurn.Files.Count == 0, "a wake reply without a user message starts a new turn after the previous final");
+var wakeQuestion = ReplyTurn.Find([TurnEvent(1, "user_message"), TurnEvent(2, "tool_result", "f1"), TurnEvent(3, "assistant_final"),
+    TurnEvent(4, "wake"), TurnEvent(5, "assistant_tool_calls")]);
+Check(wakeQuestion.Bounded && wakeQuestion.Files.Count == 0, "a wake that asks a question does not carry the earlier turn's file");
+var toolCallsAfterFinal = ReplyTurn.Find([TurnEvent(1, "user_message"), TurnEvent(2, "tool_result", "f1"), TurnEvent(3, "assistant_final"),
+    TurnEvent(4, "assistant_tool_calls")]);
+Check(toolCallsAfterFinal.Bounded && toolCallsAfterFinal.Files.Count == 0, "tool calls after a final open a new turn");
+var chainedCalls = ReplyTurn.Find([TurnEvent(1, "user_message"), TurnEvent(2, "assistant_tool_calls"), TurnEvent(3, "tool_result", "f1"),
+    TurnEvent(4, "assistant_tool_calls"), TurnEvent(5, "tool_result", "f2")]);
+Check(chainedCalls.Bounded && chainedCalls.Files.SetEquals([("f1", 1), ("f2", 1)]), "chained tool calls inside one turn keep its files");
+var openTurn =ReplyTurn.Find([TurnEvent(101, "tool_result", "f4"), TurnEvent(102, "assistant_final")]);
+Check(!openTurn.Bounded && openTurn.Files.SetEquals([("f4", 1)]), "a window without the turn start asks for an earlier page");
+
 string tempSaveDir = Path.Combine(Path.GetTempPath(), "himari-contract-save-" + Guid.NewGuid().ToString("N"));
 Directory.CreateDirectory(tempSaveDir);
 try

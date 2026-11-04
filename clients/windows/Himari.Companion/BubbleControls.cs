@@ -134,8 +134,16 @@ public partial class MainWindow
         }
     }
 
-    private async Task<bool> RefreshPresentedFilesAsync(ServerClient local, string conversationId, CancellationToken ct)
+    /// <summary>V3-P93 §6.3: the reply bubble shows only the files presented in the
+    /// latest reply turn (<paramref name="turnFiles"/>); earlier ones stay in history.</summary>
+    private async Task<bool> RefreshPresentedFilesAsync(ServerClient local, string conversationId,
+        IReadOnlySet<(string FileId, int Version)> turnFiles, CancellationToken ct)
     {
+        if (turnFiles.Count == 0)
+        {
+            if (currentFileCards.Count > 0) { ClearPresentedFileCards(); UpdateBubblePresentation(); UpdateSceneBounds(); }
+            return false;
+        }
         if (!generationState.ServerTakesFileDownload)
         {
             if (currentFileCards.Count > 0) { ClearPresentedFileCards(); UpdateBubblePresentation(); UpdateSceneBounds(); }
@@ -149,7 +157,7 @@ public partial class MainWindow
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
         catch (Exception) { return false; }
         if (ct.IsCancellationRequested || !ReferenceEquals(local, client) || conversationId != currentConversation) return false;
-        return ReconcilePresentedFiles(local, conversationId, items);
+        return ReconcilePresentedFiles(local, conversationId, items.Where(i => turnFiles.Contains((i.FileId, i.Version))).ToList());
     }
 
     private bool ReconcilePresentedFiles(ServerClient local, string conversationId, IReadOnlyList<PresentedFileItem> items)

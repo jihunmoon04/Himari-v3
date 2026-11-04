@@ -868,6 +868,24 @@ internal static class Program
             Until(() => readTask.IsCompleted); readTask.GetAwaiter().GetResult();
             Check(pendingReplies.Contains("c") && bubble.Visibility == Visibility.Collapsed,
                 "older presented file from an earlier turn is not mistaken for a newer job's reply");
+
+            // 6b. PR #183 review P2: a wake that waits on a question does not show the earlier turn's file card.
+            Check(cards.Count == 1, "the earlier turn's file card is shown before the wake");
+            handler.WakeQuestion = true;
+            handler.LastSequence = 5;
+            readTask = (Task)Call("ReadConversation", "c", cts.Token)!;
+            Until(() => readTask.IsCompleted); readTask.GetAwaiter().GetResult();
+            Check(cards.Count == 0 && filesPanel.Children.Count == 0 && filesScroll.Visibility == Visibility.Collapsed,
+                "a wake question shows no file card from the earlier turn");
+            handler.WakeQuestion = false;
+
+            // 7. A later reply in the same conversation does not show the earlier turn's file card.
+            handler.LaterTurn = true;
+            handler.LastSequence = 5;
+            readTask = (Task)Call("ReadConversation", "c", cts.Token)!;
+            Until(() => readTask.IsCompleted); readTask.GetAwaiter().GetResult();
+            Check(cards.Count == 0 && filesPanel.Children.Count == 0 && filesScroll.Visibility == Visibility.Collapsed,
+                "a later reply without presented files shows no file card from an earlier turn");
         }
         finally
         {
@@ -959,6 +977,8 @@ internal sealed class PresentedFileUiHandler(byte[] payload, string sha256) : Ht
     internal int Downloads;
     internal string CurrentJob = "j1";
     internal int LastSequence = 2;
+    internal bool LaterTurn;
+    internal bool WakeQuestion;
     protected override void Dispose(bool disposing) { }
     protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
     {
@@ -1013,21 +1033,41 @@ internal sealed class PresentedFileUiHandler(byte[] payload, string sha256) : Ht
         {
             string eventsJson = JsonSerializer.Serialize(new
             {
-                items = new object[]
-                {
-                    new
+                items = WakeQuestion
+                    ? new object[]
                     {
-                        sequence = 2,
-                        kind = "tool_result",
-                        presented_files = new[] { new { file_id = "f1", version = 1, name = "../nested/summary.md" } }
+                        new { sequence = 1, kind = "user_message" },
+                        new { sequence = 2, kind = "tool_result", presented_files = new[] { new { file_id = "f1", version = 1, name = "../nested/summary.md" } } },
+                        new { sequence = 3, kind = "assistant_final", display = new { text = "파일 드렸어요", moods = Array.Empty<object>() } },
+                        new { sequence = 4, kind = "wake" },
+                        new { sequence = 5, kind = "assistant_tool_calls" }
                     }
-                }
+                    : LaterTurn
+                    ? new object[]
+                    {
+                        new { sequence = 1, kind = "user_message" },
+                        new { sequence = 2, kind = "tool_result", presented_files = new[] { new { file_id = "f1", version = 1, name = "../nested/summary.md" } } },
+                        new { sequence = 3, kind = "assistant_final", display = new { text = "파일 드렸어요", moods = Array.Empty<object>() } },
+                        new { sequence = 4, kind = "user_message" },
+                        new { sequence = 5, kind = "assistant_final", display = new { text = "다음 답변", moods = Array.Empty<object>() } }
+                    }
+                    : new object[]
+                    {
+                        new
+                        {
+                            sequence = 2,
+                            kind = "tool_result",
+                            presented_files = new[] { new { file_id = "f1", version = 1, name = "../nested/summary.md" } }
+                        }
+                    }
             });
             return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(eventsJson, Encoding.UTF8, "application/json") });
         }
         return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
         {
-            Content = new StringContent($"{{\"conversation\":{{\"last_sequence\":{LastSequence}}},\"job\":{{\"running\":false,\"job_id\":\"{CurrentJob}\"}}}}", Encoding.UTF8, "application/json")
+            Content = new StringContent(WakeQuestion
+                ? $"{{\"conversation\":{{\"last_sequence\":{LastSequence}}},\"job\":{{\"running\":true,\"job_id\":\"w1\"}},\"waiting\":{{\"question\":{{\"display\":{{\"text\":\"이거 확인해 볼래요?\"}}}}}}}}"
+                : $"{{\"conversation\":{{\"last_sequence\":{LastSequence}}},\"job\":{{\"running\":false,\"job_id\":\"{CurrentJob}\"}}}}", Encoding.UTF8, "application/json")
         });
     }
 }
