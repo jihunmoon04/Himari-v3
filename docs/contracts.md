@@ -6,6 +6,10 @@
 >
 > 상세한 설계 근거는 [decisions.md](decisions.md), [data-contract-v0.2.md](data-contract-v0.2.md), [current-state-contract-v0.1.md](current-state-contract-v0.1.md), [prompt-composition.md](prompt-composition.md), [data-and-tools.md](data-and-tools.md), [open-questions.md](open-questions.md)에 남겨 둔다. 내용이 충돌하면 명시적으로 사용자 승인을 받은 **Confirmed Decision**을 우선하고, 충돌을 이 문서에 드러내 수정한다.
 
+> **V3-P93 설계 제안(구현 전):** [인터페이스 능력과 반려 파일 수신](interface-capabilities-v0.1.md)은
+> Data의 턴 출처 스냅샷, Control/Prompt의 인터페이스 투영, FILE-04의 기기 제공 파일 전용
+> 조회·다운로드 허용 범위를 제안한다. 기존 Port/DTO와 기기 기본 거부 정책은 이 설계 PR에서 바뀌지 않는다.
+
 ## 1. 목적과 설계 원칙
 
 **목표:** 모듈이 자신이 소유한 공개 계약을 유지하는 한 구현, 알고리즘, 저장 방식, Provider SDK, Environment 백엔드를 교체하더라도 소비 모듈의 내부 구현을 수정할 필요가 없어야 한다.
