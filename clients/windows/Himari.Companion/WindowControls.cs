@@ -17,6 +17,10 @@ public partial class MainWindow
     private string registeredHotkey { get => hotkeyState.Current; set => hotkeyState.Current = value; }
     private readonly WorkWindowHistory workWindow = new();
     private IntPtr lastWorkWindow => workWindow.Target;
+    // Replaced by offline UI checks, without activating the user's applications.
+    private Func<IntPtr>? foregroundWindowProbe = null;
+    private Func<IntPtr, bool>? restoreWindowProbe = null;
+    private IntPtr CurrentForegroundWindow => foregroundWindowProbe?.Invoke() ?? GetForegroundWindow();
     private bool captureFromWorkWindow;
     private bool screenSharingReset;  // V3-P91 §14 Q9, saved
     private bool screenOnce;  // V3-P91 §7.3: the composer's button puts the screen on the next message only
@@ -119,14 +123,13 @@ public partial class MainWindow
     {
         if (msg == HotKeyMessage && wParam.ToInt32() == HotKeyId)
         {
-            var foreground = GetForegroundWindow();
+            var foreground = CurrentForegroundWindow;
             if (DialoguePolicy.HotkeyCloses(IsChatWindow(foreground), ComposerPanel.Visibility == Visibility.Visible)) CloseChat();
             else
             {
                 // Only a window that was in front at this press may pick the capture monitor;
                 // opening from Himari itself must not reuse an older remembered window.
-                bool fromWork = EligibleWorkWindow(foreground);
-                workWindow.Remember(foreground, _ => fromWork);
+                bool fromWork = workWindow.Enter(foreground, EligibleWorkWindow);
                 captureFromWorkWindow = fromWork;
                 // Over fullscreen, activating the small character window raises the taskbar;
                 // OpenChat activates the monitor-sized dialogue host directly instead. Show()
@@ -147,7 +150,8 @@ public partial class MainWindow
         System.Windows.Input.Keyboard.ClearFocus();
         // Keep the draft; dismiss its editor only once focus really reached another window.
         if (string.IsNullOrEmpty(Input.Text)) ScheduleUserBubbleClose();
-        if (!workWindow.Return(window => IsWindow(window) && IsWindowVisible(window) && RestoreWindow(window)))
+        if (!workWindow.Return(window => IsWindow(window) && IsWindowVisible(window)
+            && (restoreWindowProbe?.Invoke(window) ?? RestoreWindow(window))))
         {
             // SetActiveWindow(NULL) alone can reactivate an owned WPF window. Give
             // the desktop focus, leaving other applications and our visuals in place.
