@@ -50,6 +50,8 @@ from himari.data.api import (
     RunStatus,
     ToolExecutionStatus,
     UserMessage,
+    InterfaceKind,
+    InterfaceSnapshot,
 )
 from himari.prompt.api import AssistantTurn, ToolGroupTurn, UserTurn
 from himari.provider.api import (
@@ -898,7 +900,8 @@ def test_input_accepted_after_an_unfinished_group_closes_it_and_triggers_the_run
 
     assert result.state is DriveState.COMPLETED and len(read.invocations) == 1
     run = asyncio.run(rt2.data.read_run(SCOPE, result.run_ids[0]))
-    accepted = [e for e in asyncio.run(rt2.data.read_events(SCOPE)) if e.payload == user("and also this")][0]
+    expected = dataclasses.replace(user("and also this"), interface=InterfaceSnapshot(InterfaceKind.UNKNOWN))
+    accepted = [e for e in asyncio.run(rt2.data.read_events(SCOPE)) if e.payload == expected][0]
     assert EventRef(accepted.event_id) in run.trigger_refs
     assert any(isinstance(t, CompletedGroupRef) for t in run.trigger_refs)
     conversation = provider2.prepared_inputs[0].conversation

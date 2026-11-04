@@ -115,11 +115,58 @@ class MessageOrigin(DeepFrozen):
     device_id: str | None = None  # DEVICE only
 
 
+class InterfaceKind(Enum):
+    WEB = "web"
+    CLI = "cli"
+    WINDOWS_COMPANION = "windows_companion"
+    UNKNOWN = "unknown"
+
+
+@dataclass(frozen=True)
+class InterfaceCapabilities(DeepFrozen):
+    """User-interface support, never model capabilities or execution permissions."""
+
+    file_download: bool = False
+    workspace_browser: bool = False
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if type(self.file_download) is not bool or type(self.workspace_browser) is not bool:
+            raise ValueError("interface capabilities must be booleans")
+
+
+@dataclass(frozen=True)
+class InterfaceSnapshot(DeepFrozen):
+    """V3-P93: server-resolved support when this input/wake was accepted."""
+
+    kind: InterfaceKind
+    capabilities: InterfaceCapabilities = InterfaceCapabilities()
+    version: int = 1
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if type(self.version) is not int or self.version != 1 or not isinstance(self.kind, InterfaceKind):
+            raise ValueError("unsupported interface snapshot")
+        if not isinstance(self.capabilities, InterfaceCapabilities):
+            raise ValueError("invalid interface capabilities")
+        if self.kind is InterfaceKind.UNKNOWN and self.capabilities != InterfaceCapabilities():
+            raise ValueError("unknown interfaces cannot declare capabilities")
+
+
+def interface_kind(origin: MessageOrigin | None) -> InterfaceKind:
+    """Only an authenticated origin selects the interface; missing/legacy is unknown."""
+    if not isinstance(origin, MessageOrigin):
+        return InterfaceKind.UNKNOWN
+    return {OriginKind.WEB: InterfaceKind.WEB, OriginKind.CLI: InterfaceKind.CLI,
+            OriginKind.DEVICE: InterfaceKind.WINDOWS_COMPANION}.get(origin.kind, InterfaceKind.UNKNOWN)
+
+
 @dataclass(frozen=True)
 class UserMessage(DeepFrozen):
     blocks: tuple[ContentBlock, ...]
     answers_call: CallRef | None = None  # set only via answer_pending_call (T7a)
     origin: MessageOrigin | None = None  # V3-P83: set by the entry point; None for older messages
+    interface: InterfaceSnapshot | None = None  # V3-P93: server-owned; None on legacy inputs
 
 
 @dataclass(frozen=True)
@@ -177,6 +224,7 @@ class Wake(DeepFrozen):
     wake_id: str
     reasons: tuple[WakeReason, ...]
     device_id: str  # where it is spoken: the current device when it opened
+    interface: InterfaceSnapshot | None = None  # V3-P93: captured with the wake, not live presence
 
 
 type EventPayload = UserMessage | AssistantFinal | AssistantToolCalls | ToolResultRecord | Wake
@@ -1520,7 +1568,8 @@ class WakeStore(Protocol):
     """V3-P87 §3.3: the server-opened turns and what keeps them from repeating."""
 
     async def begin_wake(self, scope: TrustedScope, reasons: Sequence[WakeReason], device_id: str, *,
-                         keys: Sequence[str] = (), reminders: Sequence[int] = ()) -> ConversationEvent:
+                         keys: Sequence[str] = (), reminders: Sequence[int] = (),
+                         interface: InterfaceSnapshot | None = None) -> ConversationEvent:
         """One transaction (§3.3): each key is taken (DUPLICATE_IDENTITY when one
         was taken already), each reminder goes ``scheduled → claimed`` or, told
         again (V3-P90 §5.1), ``told → claimed`` (INVALID_STATE_TRANSITION when it

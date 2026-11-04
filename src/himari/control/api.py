@@ -15,7 +15,9 @@ from enum import Enum
 from typing import Protocol, runtime_checkable
 
 from himari.common import CallRef, ConversationId, DeepFrozen, PrincipalId, RunId, TrustedScope
-from himari.data.api import ConversationEvent, MessageOrigin, ModelSetting, RecoveryReport, UserMessage, WakeReason
+from himari.data.api import (
+    ConversationEvent, InterfaceSnapshot, MessageOrigin, ModelSetting, RecoveryReport, UserMessage, WakeReason,
+)
 from himari.prompt.api import ContextBudget, PresenceView
 from himari.provider.api import OutputDelta
 
@@ -404,6 +406,12 @@ class TurnPresence(DeepFrozen):
 
     view: PresenceView | None = None
     time_zone: str | None = None
+
+
+class InterfaceSource(Protocol):
+    async def read(self, scope: TrustedScope, origin: MessageOrigin | None) -> InterfaceSnapshot:
+        """V3-P93: server-resolved interface at input acceptance, not live model permissions."""
+        ...
 
 
 class PresenceSource(Protocol):

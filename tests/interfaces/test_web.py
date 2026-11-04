@@ -39,7 +39,7 @@ from himari.interfaces.web import app as web  # noqa: E402
 from himari.interfaces.web.config import MIN_TURN_BUDGET, WebConfig, WebConfigError  # noqa: E402
 from himari.interfaces.web.sandbox import SandboxGrant, SandboxSigner, create_sandbox_app, view_csp  # noqa: E402
 from himari.provider.api import ProviderCapabilities  # noqa: E402
-from himari.provider.scripted import ScriptedAdapter, ScriptStep  # noqa: E402
+from himari.provider.scripted import Measured, ScriptedAdapter, ScriptStep  # noqa: E402
 
 ORIGIN = "http://testserver"
 
@@ -557,11 +557,11 @@ def test_context_reports_the_estimate_and_the_budget(server: Server) -> None:
 
 def test_context_shows_where_the_summary_takes_over(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(web, "FAILED_LOGIN_DELAY_SECONDS", 0)
-    server = Server(tmp_path, [], context_tokens=3300, turn={"memory": False, "conversation_search": False})  # sized without the memory and search Tools
+    server = Server(tmp_path, [], context_tokens=10000, turn={"memory": False, "conversation_search": False})
     with server.client:
         server.sign_in()
         cid = server.post("/api/conversations").json()["id"]
-        queue(server, *[final("SUMMARY <of> the start")] * 12)  # every answer and every summary alike
+        queue(server, *[Measured(final("SUMMARY <of> the start"), 9000)] * 12)  # every answer and every summary alike
         for text in ("가" * 550, "가" * 550, "가" * 550, "next"):
             server.post(f"/api/conversations/{cid}/messages", {"text": text})
             server.wait_idle(cid)

@@ -48,6 +48,7 @@ from himari.data.api import (
     MAX_IMAGE_BYTES_PER_REQUEST,
     MAX_IMAGES_PER_REQUEST,
     ConversationEvent,
+    InterfaceSnapshot,
     Memory,
     RecentEpisode,
     MemoryCategory,
@@ -219,6 +220,7 @@ class CurrentStateProjection(DeepFrozen):
     presence: PresenceView | None = None  # V3-P83 §6.2; None: not told
     episodes: tuple[RecentEpisode, ...] = ()  # V3-P85 §8, read with the notes
     episode_count: int = 0
+    interface: InterfaceSnapshot | None = None  # V3-P93: accepted input, not live presence
 
 
 NOTE_CHARS = 4_000  # one tool server's notes the model gets (V3-P60 §3)
@@ -359,6 +361,7 @@ class PromptInputs(DeepFrozen):
     now: datetime | None = None
     time_zone: str | None = None
     presence: PresenceView | None = None  # V3-P83 §6.2, set by the Driver when the turn started
+    interface: InterfaceSnapshot | None = None  # V3-P93: accepted input, not live presence
 
 
 @dataclass(frozen=True)
@@ -732,9 +735,12 @@ PERSONA_RULE = (
     "allows."
 )
 SPEAKING_RULE = (
-    "- Speaking: when runtime_state.presence.sent_from is a device, your answer is spoken by the character: at most "
-    "four short sentences, with no code blocks, lists or headings. Put long material (code, lists, documents) in a "
-    "file, or say you will continue on the Web. When presence.now_doing shows the microphone or camera in use, the "
+    "- Speaking: when runtime_state.interface.kind is windows_companion, your answer is spoken by the character: at most "
+    "four short sentences, with no code blocks, lists or headings. You may prepare long material (code, lists, "
+    "documents) in a file for later Web download even when interface.capabilities.file_download is false. "
+    "Only after present_file succeeds, say the file is prepared and direct the user to the same conversation "
+    "on the Web to download it when this interface cannot. Do not claim it was received or saved locally. "
+    "When presence.now_doing shows the microphone or camera in use, the "
     "user may be in a call: two or three short sentences."
 )
 EXPRESSION_RULE = (
@@ -825,7 +831,7 @@ def documents_script_note(modules: Sequence[str], fonts: Sequence[str]) -> str:
     if fonts:
         note += (f" For Korean or other non-Latin text in a PDF, register {' and '.join(fonts)} from the folder in "
                  "$HIMARI_FONTS with reportlab.")
-    return note + " Give finished files to the user with present_file."
+    return note + " Prepare finished files in the conversation with present_file; interface capabilities govern delivery."
 
 
 # V3-P69 §4: the user's instructions go after the operator's and the notes
@@ -1145,4 +1151,12 @@ def state_data(state: CurrentStateProjection, notes: Sequence[SourceNote] = (),
         data["now"] = time_text(state.now)
     if state.presence is not None:
         data["presence"] = presence_data(state.presence)
+    if state.interface is not None:
+        data["interface"] = {
+            "kind": state.interface.kind.value,
+            "capabilities": {
+                "file_download": state.interface.capabilities.file_download,
+                "workspace_browser": state.interface.capabilities.workspace_browser,
+            },
+        }
     return data

@@ -182,6 +182,9 @@ from himari.data.api import (
     TrashedConversation,
     UiCsp,
     UiResource,
+    InterfaceSnapshot,
+    MessageOrigin,
+    OriginKind,
     UserMessage,
     REMINDER_ATTEMPTS,
     Wake,
@@ -1577,6 +1580,7 @@ class SqliteData:
             if message.answers_call is not None:
                 raise DataError(DataErrorCode.INVALID_STATE_TRANSITION, "answers go through T7a")
             rules.check_origin(message.origin)
+            rules.check_interface(message.interface, message.origin)
             if self._waiting(tx, scope) is not None:
                 raise DataError(
                     DataErrorCode.INVALID_STATE_TRANSITION, "an ask_user call is waiting; use answer_pending_call"
@@ -1897,6 +1901,7 @@ class SqliteData:
             if self._waiting(tx, scope) != call:
                 raise DataError(DataErrorCode.ALREADY_COMMITTED, f"{call.call_id} is not waiting")
             rules.check_origin(answer.origin)
+            rules.check_interface(answer.interface, answer.origin)
             record = self._execution_row(tx, scope, call)
             self._attach(tx, scope, answer.blocks)
             result = ModelToolResult(blocks=answer.blocks)
@@ -2880,8 +2885,10 @@ class SqliteData:
     # --- WakeStore (V3-P87) -------------------------------------------------------------
 
     async def begin_wake(self, scope: TrustedScope, reasons: Sequence[WakeReason], device_id: str, *,
-                         keys: Sequence[str] = (), reminders: Sequence[int] = ()) -> ConversationEvent:
+                         keys: Sequence[str] = (), reminders: Sequence[int] = (),
+                         interface: InterfaceSnapshot | None = None) -> ConversationEvent:
         rules.check_wake(reasons, device_id, keys, reminders)
+        rules.check_interface(interface, MessageOrigin(OriginKind.DEVICE, device_id))
         with self._tx() as tx:
             tx.authorized(scope)
             if self._waiting(tx, scope) is not None:
@@ -2899,7 +2906,7 @@ class SqliteData:
                                      " AND retired_at IS NULL", wake_id, scope.principal_id, memory_id)
                 if claimed.rowcount != 1:
                     raise DataError(DataErrorCode.INVALID_STATE_TRANSITION, f"reminder m{memory_id} is not waiting")
-            event = self._new_event(tx, scope, Wake(wake_id, tuple(reasons), device_id), None)
+            event = self._new_event(tx, scope, Wake(wake_id, tuple(reasons), device_id, interface), None)
             tx.execute("INSERT INTO wakes (wake_id, owner, conversation_id, event_sequence, reasons, device_id,"
                        " status, asked, created_at, ended_at) VALUES (?, ?, ?, ?, ?, ?, 'opened', 0, ?, NULL)",
                        wake_id, scope.principal_id, scope.conversation_id, event.sequence,

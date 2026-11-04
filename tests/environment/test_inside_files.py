@@ -100,7 +100,7 @@ def test_present_file_stores_the_bytes_and_carries_them_with_the_result(
     (folder / "report.md").write_text("# done")
     outcome = run(env, "present_file", path="report.md")
     assert outcome.status is ToolStatus.SUCCEEDED
-    assert text(outcome) == "Presented report.md to the user (6 bytes)."  # no version (review B3)
+    assert text(outcome) == "Prepared report.md in the conversation (6 bytes)."  # no version (review B3)
     given, = outcome.presented_files
     assert (given.name, given.media_type, given.workspace_path) == (
         "report.md", "text/markdown", "/workspace/conversations/c1/report.md")

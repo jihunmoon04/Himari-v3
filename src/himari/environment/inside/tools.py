@@ -538,9 +538,10 @@ class PresentFile(_InsideTool):
     Workspace file, and running it again only stores the same bytes."""
 
     name = "present_file"
-    description = ("Give a workspace file to the user: they get a download card in the conversation. "
+    description = ("Prepare a workspace file in the conversation. Whether the user can download it depends on "
+                   "runtime_state.interface.capabilities.file_download; this does not confirm local saving. "
                    "The file's bytes at this moment are kept; later edits need another call.")
-    properties = {"path": {"type": "string", "description": "File to give to the user."}}
+    properties = {"path": {"type": "string", "description": "File to prepare in the conversation."}}
     required = ["path"]
 
     async def run(self, invocation: ToolInvocation, ctx: ToolContext) -> ToolOutcome:
@@ -617,7 +618,7 @@ async def present(files: InsideFiles, ctx: ToolContext, raw_path: object, fetch:
         raise
     name = clean_file_name(posixpath.basename(shown))
     presented = PresentedFile(blob, name, clean_media_type(None, name), shown)
-    return ToolOutcome(ToolStatus.SUCCEEDED, _text(f"Presented {name} to the user ({_size(blob.size)})."),
+    return ToolOutcome(ToolStatus.SUCCEEDED, _text(f"Prepared {name} in the conversation ({_size(blob.size)})."),
                        raw_result={"path": shown, "size": blob.size, "sha256": blob.sha256},
                        presented_files=(presented,))
 

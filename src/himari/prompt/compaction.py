@@ -285,7 +285,8 @@ def current_state(inputs: PromptInputs) -> CurrentStateProjection:
     """The state the Composer renders for these inputs (one place for both)."""
     return CurrentStateProjection(basis=inputs.state_basis, observations=inputs.observations,
                                   memories=inputs.memories, now=inputs.now, presence=inputs.presence,
-                                  episodes=inputs.episodes, episode_count=inputs.episode_count)
+                                  episodes=inputs.episodes, episode_count=inputs.episode_count,
+                                  interface=inputs.interface)
 
 
 def read_summary(snapshot: PromptSnapshot | None) -> str | None:

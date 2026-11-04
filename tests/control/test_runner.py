@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from collections.abc import Awaitable, Callable
 
 import pytest
@@ -12,7 +13,7 @@ from himari.common import ASK_USER_TOOL_ID, ConversationId, PrincipalId, Trusted
 from himari.control.api import (ControlError, ControlErrorCode, DriveResult, DriveState, JobStatus, StopRequest,
                                 StopSignal, TurnProgress, TurnUsage)
 from himari.control.runner import BackgroundRunner
-from himari.data.api import DataError, DataErrorCode, MessageOrigin, OriginKind, UserMessage
+from himari.data.api import DataError, DataErrorCode, InterfaceKind, InterfaceSnapshot, MessageOrigin, OriginKind, UserMessage
 
 FOREIGN = TrustedScope(PrincipalId("mallory"), SCOPE.conversation_id)
 
@@ -205,7 +206,8 @@ def test_submit_commits_the_input_before_returning() -> None:
     async def scenario() -> None:
         await runner.submit(SCOPE, user("plan a trip"))
         events = await rt.data.read_events(SCOPE)  # no await has let the job run yet
-        assert [e.payload for e in events] == [user("plan a trip")] and provider.sent == []
+        assert [e.payload for e in events] == [replace(user("plan a trip"), interface=InterfaceSnapshot(InterfaceKind.UNKNOWN))]
+        assert provider.sent == []
         await runner.wait(SCOPE)
         await runner.submit(SCOPE, user("Seoul"))
         answered = (await rt.data.read_events(SCOPE))[-2:]

@@ -14,7 +14,7 @@ from himari.common import CallId, PrincipalId, TextBlock, ToolCall, ToolId, Trus
 from himari.prompt.api import USER_INSTRUCTIONS_HEADER, ModelInput, ToolGroupTurn
 from himari.provider.api import NativeInvocationOutcome, NativePreparedRequest, NativeReceived, NormalizedFinal, OutputSink, RawCapture
 from himari.provider.api import NormalizedModelOutput, NormalizedToolCalls
-from himari.provider.scripted import ScriptedAdapter, encode_output
+from himari.provider.scripted import Measured, ScriptedAdapter, encode_output
 
 ALICE, BOB = PrincipalId("alice"), PrincipalId("bob")
 
@@ -261,8 +261,9 @@ def test_a_compaction_request_does_not_carry_them(tmp_path: Path) -> None:
     from himari.prompt.compaction import COMPACTION_INSTRUCTIONS
 
     async def scenario() -> None:
-        adapter = ScriptedAdapter([NormalizedFinal((TextBlock("SUMMARY"),))] * 12)
-        app = await opened(tmp_path, adapter, context_tokens=3800,  # sized without the search Tools, with V3-P89's system text
+        adapter = ScriptedAdapter([Measured(NormalizedFinal((TextBlock("SUMMARY"),)), 9000)] * 12)
+        # Measured usage triggers compaction independently of the system text's length.
+        app = await opened(tmp_path, adapter, context_tokens=10000,
                            conversation_search=False)
         try:
             await app.set_instructions(ALICE, "ZQX rule.", 0)

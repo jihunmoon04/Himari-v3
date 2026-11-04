@@ -135,6 +135,7 @@ from himari.data.api import (
 )
 from himari.data.sqlite import SqliteData, SqliteStore
 from himari.bootstrap.companion import CompanionEvents, CompanionPresence
+from himari.bootstrap.interfaces import ConfiguredInterfaces
 from himari.bootstrap.screens import ScreenRequests
 from himari.bootstrap.proactive import (
     PROACTIVE_SECONDS,
@@ -1078,6 +1079,7 @@ class Application:
             hub = PresenceHub(time_zones=zones.__contains__)  # a device's zone that is not known is ignored (§5)
             presence = CompanionPresence(DeviceRegistry(SqliteData(store)), hub, time_zone, enabled=companion)
             screens = ScreenRequests(hub) if companion else None  # V3-P91: the screen Tool's requests
+            machine_allowed = frozenset(PrincipalId(p) for p in machine_principals)
             runtime = build_runtime(provider, store=store, environments=[inside, *([machine] if machine else [])],
                                     tools=[*tools, *mcp.handlers, *mcp.resource_tools],
                                     models=catalog,
@@ -1094,7 +1096,11 @@ class Application:
                                     file_max_bytes=file_max_bytes, memory=memory,
                                     conversation_search=conversation_search, streaming=streaming,
                                     time_zone=time_zone,
-                                    presence=presence, screen=screens)
+                                    presence=presence, screen=screens,
+                                    # Stored-blob downloads do not require upload placement (renameat2).
+                                    interfaces=ConfiguredInterfaces(file_download=True,
+                                                                    workspace_browser=machine is not None,
+                                                                    workspace_principals=machine_allowed))
         except BaseException:
             try:
                 if mcp is not None:
@@ -1117,7 +1123,7 @@ class Application:
                           memory_enabled=memory, conversation_search_enabled=conversation_search,
                           streaming_enabled=streaming, companion_enabled=companion, machine=machine,
                           changes=changes,
-                          machine_principals=frozenset(PrincipalId(p) for p in machine_principals),
+                          machine_principals=machine_allowed,
                           hub=hub, events=events)
         application.time_zone = time_zone
         application.proactive = speaking_first

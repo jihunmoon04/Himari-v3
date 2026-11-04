@@ -12,7 +12,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 
 from himari.control.ask_user import AskUserTool
-from himari.control.api import ModelCatalog, ModelOffer, PresenceSource
+from himari.control.api import InterfaceSource, ModelCatalog, ModelOffer, PresenceSource
 from himari.control.driver import Driver
 from himari.common import TrustedScope
 from himari.data.memory import InMemoryData, InMemoryStore
@@ -80,6 +80,7 @@ def build_runtime(
     streaming: bool = False,  # V3-P73: answering Runs ask for a stream (models that declare it)
     time_zone: str | None = None,  # V3-P83 §6.4: the turn's time and the time lines; None: the model is not told
     presence: PresenceSource | None = None,  # V3-P83 §6.2: where the user is; None: the model is not told
+    interfaces: InterfaceSource | None = None,  # V3-P93: captured with each input
     screen: ScreenSource | None = None,  # V3-P91: the screen Tool asks devices through it; None: no screen Tool
     # V3-P89 §6: what the system text's sections follow besides ``memory`` and ``turn_budget``
     # (which this sets); the text and its order are the Prompt module's. None: ``instructions``
@@ -142,6 +143,7 @@ def build_runtime(
         streaming=streaming,
         time_zone=time_zone,
         presence=presence,
+        interfaces=interfaces,
         companion=spec is not None and spec.companion,
     )
     return Runtime(store=store, data=data, registry=registry, driver=driver, access=access, models=models)

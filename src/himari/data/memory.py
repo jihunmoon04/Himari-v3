@@ -134,6 +134,9 @@ from himari.data.api import (
     ToolResultRecord,
     TrashedConversation,
     UiResource,
+    InterfaceSnapshot,
+    MessageOrigin,
+    OriginKind,
     UserMessage,
     REMINDER_ATTEMPTS,
     Wake,
@@ -717,6 +720,7 @@ class InMemoryData:
         if message.answers_call is not None:
             raise DataError(DataErrorCode.INVALID_STATE_TRANSITION, "answers go through T7a")
         rules.check_origin(message.origin)
+        rules.check_interface(message.interface, message.origin)
         if self._waiting(conv) is not None:
             raise DataError(
                 DataErrorCode.INVALID_STATE_TRANSITION, "an ask_user call is waiting; use answer_pending_call"
@@ -984,6 +988,7 @@ class InMemoryData:
         if self._waiting(conv) != call:
             raise DataError(DataErrorCode.ALREADY_COMMITTED, f"{call.call_id} is not waiting")
         rules.check_origin(answer.origin)
+        rules.check_interface(answer.interface, answer.origin)
         record = self._execution(conv, call)
         self._mark_attached(self._attach(conv, answer.blocks))
         result = ModelToolResult(blocks=answer.blocks)
@@ -1474,8 +1479,10 @@ class InMemoryData:
     # --- WakeStore (V3-P87) -------------------------------------------------------------
 
     async def begin_wake(self, scope: TrustedScope, reasons: Sequence[WakeReason], device_id: str, *,
-                         keys: Sequence[str] = (), reminders: Sequence[int] = ()) -> ConversationEvent:
+                         keys: Sequence[str] = (), reminders: Sequence[int] = (),
+                         interface: InterfaceSnapshot | None = None) -> ConversationEvent:
         rules.check_wake(reasons, device_id, keys, reminders)
+        rules.check_interface(interface, MessageOrigin(OriginKind.DEVICE, device_id))
         conv = self._conv(scope)
         if self._waiting(conv) is not None:
             raise DataError(DataErrorCode.INVALID_STATE_TRANSITION, "an ask_user call is waiting")
@@ -1493,7 +1500,7 @@ class InMemoryData:
         for memory_id in reminders:
             _, _, attempts = self._store.reminders[(scope.principal_id, memory_id)]
             self._store.reminders[(scope.principal_id, memory_id)] = ("claimed", wake_id, attempts)
-        event = self._new_event(conv, scope, Wake(wake_id, tuple(reasons), device_id), None)
+        event = self._new_event(conv, scope, Wake(wake_id, tuple(reasons), device_id, interface), None)
         self._store.wakes[wake_id] = WakeRecord(wake_id, scope.principal_id, scope.conversation_id, event.sequence,
                                                 tuple(reasons), device_id, WakeStatus.OPENED, False,
                                                 datetime.now(UTC), None)

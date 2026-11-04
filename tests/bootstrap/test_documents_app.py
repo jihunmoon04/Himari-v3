@@ -59,7 +59,9 @@ def test_the_sentences() -> None:
     assert read == DOCUMENTS_READ_NOTE
     assert "it can import pypdfium2, docx, reportlab, PIL, which PYTHONPATH" in script  # known names, in order
     assert "register NanumGothic-Regular.ttf and NanumGothic-Bold.ttf from the folder in $HIMARI_FONTS" in script
-    assert "evil" not in script and "not with -I or -E" in script and script.endswith("with present_file.")
+    assert "evil" not in script and "not with -I or -E" in script
+    assert "Prepare finished files in the conversation with present_file" in script
+    assert script.endswith("interface capabilities govern delivery.")
     _, no_fonts = _documents_notes(Reader(), Kit(None), True)  # type: ignore[arg-type]
     assert "HIMARI_FONTS" not in no_fonts
 

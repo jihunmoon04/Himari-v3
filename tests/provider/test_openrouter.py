@@ -36,6 +36,9 @@ from himari.data.api import (
     BindingAuthority,
     ConversationWorkspace,
     EnvironmentActivation,
+    InterfaceCapabilities,
+    InterfaceKind,
+    InterfaceSnapshot,
     PersistedStateBasis,
     PromptBasis,
 )
@@ -100,6 +103,21 @@ def group(*calls: tuple[str, int, str, str], commentary: str = "") -> ToolGroupT
 
 
 ADAPTER = OpenRouterAdapter(KEY)
+
+
+def test_interface_state_follows_the_same_cache_breakpoint_and_tools() -> None:
+    mi = model_input((UserTurn(EventId("e1"), (TextBlock("hi"),)),), model=CACHING)
+    web = dataclasses.replace(mi, current_state=dataclasses.replace(mi.current_state, interface=InterfaceSnapshot(
+        InterfaceKind.WEB, InterfaceCapabilities(True, True))))
+    desk = dataclasses.replace(mi, current_state=dataclasses.replace(mi.current_state, interface=InterfaceSnapshot(
+        InterfaceKind.WINDOWS_COMPANION)))
+    web_wire, desk_wire = body(ADAPTER, web), body(ADAPTER, desk)
+    assert web_wire["tools"] == desk_wire["tools"]
+    assert web_wire["messages"][:-1] == desk_wire["messages"][:-1]
+    assert web_wire["messages"][-1] != desk_wire["messages"][-1]
+    assert web_wire["messages"][-2]["content"][-1]["cache_control"] == {"type": "ephemeral"}
+    assert "cache_control" not in str(web_wire["messages"][-1])
+    assert '"windows_companion"' in desk_wire["messages"][-1]["content"]
 
 
 def marked(text: str) -> list[dict[str, Any]]:

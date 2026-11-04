@@ -21,7 +21,10 @@ from himari.bootstrap.application import (
 )
 from himari.common import AttachmentRef, PrincipalId, TextBlock, TrustedScope
 from himari.control.api import ControlError, ControlErrorCode, JobStatus
-from himari.data.api import MAX_STAGED_UPLOADS, DataError, DataErrorCode, UserMessage
+from himari.data.api import (
+    MAX_STAGED_UPLOADS, DataError, DataErrorCode, InterfaceKind, InterfaceSnapshot, MessageOrigin, OriginKind, UserMessage,
+)
+from himari.environment.inside import InsideEnvironment
 from himari.environment.inside import WorkspaceBusy
 from himari.prompt.api import ATTACHMENT_NOTE, PROGRESS_NOTE, TOOL_IMAGES_NOTE
 from himari.provider.scripted import ScriptedAdapter
@@ -64,7 +67,8 @@ def test_a_sent_attachment_is_placed_and_the_model_is_told_where(tmp_path: Path)
             info = first.attachments[f"{record.file_id}#1"]
             assert info.path == f"/workspace/conversations/{scope.conversation_id}/uploads/notes.txt"
             events = await app.data.read_events(scope)
-            assert events[0].payload == UserMessage((TextBlock("please read"), AttachmentRef(record.file_id, 1)))
+            assert events[0].payload == UserMessage((TextBlock("please read"), AttachmentRef(record.file_id, 1)),
+                                                   interface=InterfaceSnapshot(InterfaceKind.UNKNOWN))
             result = (await app.data.read_tool_executions(scope, events[1].origin_run_id))[0]  # type: ignore[arg-type]
             assert "hello there" in result.model_result.blocks[0].text  # type: ignore[union-attr]
             # the model's later edit does not change the attachment
@@ -97,6 +101,53 @@ def test_a_presented_file_can_be_downloaded(tmp_path: Path) -> None:
                 assert handle.read() == b"a,b\n1,2\n"
         finally:
             await app.close()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("origin_kind", [OriginKind.WEB, OriginKind.CLI, OriginKind.DEVICE])
+def test_upload_placement_failure_preserves_file_preparation_and_existing_downloads(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, origin_kind: OriginKind) -> None:
+    monkeypatch.setattr(InsideEnvironment, "placement_works", lambda self: False)
+
+    async def scenario() -> None:
+        root = tmp_path / "data"
+        origin = MessageOrigin(origin_kind, "d1" if origin_kind is OriginKind.DEVICE else None)
+        provider = ScriptedAdapter([calls(("inside/present_file", {"path": "out.csv"})), final("prepared")],
+                                   companion=True)
+        app = await open_app(root, provider)
+        try:
+            assert not app.uploads_work
+            scope, folder = await conversation(app)
+            folder.mkdir(parents=True, exist_ok=True)
+            (folder / "out.csv").write_bytes(b"a,b\n1,2\n")
+            with pytest.raises(FilesUnavailable):
+                await app.upload(scope, "new.txt", None, chunks(b"upload"))
+            await app.send(scope, "prepare this for the Web", origin=origin)
+            await app.runner.wait(scope)
+            (prepared,) = await app.files(scope)
+            assert prepared.call is not None and prepared.name == "out.csv"
+            assert all(mi.current_state.interface is not None for mi in provider.prepared_inputs)
+            assert all(mi.current_state.interface.capabilities.file_download is (origin_kind is not OriginKind.DEVICE)
+                       for mi in provider.prepared_inputs if mi.current_state.interface is not None)
+        finally:
+            await app.close()
+
+        # Reopen with upload placement still unavailable: the existing immutable file remains downloadable.
+        next_provider = ScriptedAdapter([final("ready")], companion=True)
+        again = await open_app(root, next_provider)
+        try:
+            assert not again.uploads_work
+            _, handle = await again.download(scope, prepared.file_id, prepared.version)
+            with handle:
+                assert handle.read() == b"a,b\n1,2\n"
+            await again.send(scope, "can I receive it here?", origin=origin)
+            await again.runner.wait(scope)
+            snapshot = next_provider.prepared_inputs[0].current_state.interface
+            assert snapshot is not None
+            assert snapshot.capabilities.file_download is (origin_kind is not OriginKind.DEVICE)
+        finally:
+            await again.close()
 
     asyncio.run(scenario())
 
@@ -137,7 +188,8 @@ def test_a_retry_after_busy_places_the_file_once(tmp_path: Path) -> None:
             await app.send(scope, "", [record.file_id])
             await app.runner.wait(scope)
             assert sorted(p.name for p in (folder / "uploads").iterdir()) == ["r.pdf"]
-            assert (await app.data.read_events(scope))[0].payload == UserMessage((AttachmentRef(record.file_id, 1),))
+            assert (await app.data.read_events(scope))[0].payload == UserMessage(
+                (AttachmentRef(record.file_id, 1),), interface=InterfaceSnapshot(InterfaceKind.UNKNOWN))
         finally:
             await app.close()
 
