@@ -50,6 +50,8 @@ def test_reading_requires_the_screen_only_label_and_the_correct_point() -> None:
     assert refusal_problems(final("화면을 가져올 수 없다고 나와요.")) == []
     assert refusal_problems(final("화면 확인이 어려워요.")) == []
     assert refusal_problems(final("화면이 안 잡혀요.")) == []
+    assert refusal_problems(final("죄송해요, 화면을 못 봤어요.")) == []
+    assert refusal_problems(final("화면을 보여 줄 수 있는 기기에서 연결돼 있지 않다고 나오네요.")) == []
     assert refusal_problems(final("지금은 화면을 보여줄 수 없는 상태예요.")) == []
     assert refusal_problems(final("화면에 오류가 없어요.")) == ["did not acknowledge unavailable screen"]
     assert refusal_problems(final("화면에 오류가 있네요.")) == ["did not acknowledge unavailable screen"]

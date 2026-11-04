@@ -170,4 +170,4 @@ def test_the_free_wake_engages_with_the_task() -> None:
 
     assert "Talk with them about it" in FREE_RULE and "instead of saying you will leave them be" in FREE_RULE
     assert "no news" not in FREE_RULE and "use no tool" not in FREE_RULE
-    assert "look first" in FREE_SCREEN_RULE and "[[pass]]" in FREE_SCREEN_RULE
+    assert "look first" in FREE_SCREEN_RULE and "answer exactly [[pass]], not that you will wait" in FREE_SCREEN_RULE

@@ -153,6 +153,7 @@ KNOWN_CAPABILITIES: Mapping[str, ProviderCapabilities] = {
         model_id="anthropic/claude-haiku-5.5",
         speaks_first=True,  # V3-P87: 16 of 18 in the speaking-first check, live 2026-11-01; V3-P90: 20 of 24
         free_wake=True,  # V3-P90 §7.5: free-wake check pass 3/3, speak 14/15, either 6/6, live 2026-11-03
+        # 2026-11-04 engaging FREE_RULE: pass 3/3, speak 14/15, either 6/6
         memory_passes=True,  # V3-P85: every bar of the memory check, live 2026-10-31
         screen_points=True,  # V3-P84: 8+ of 10 points on target, live 2026-10-30
         image_input=True,  # V3-P67: user-message and after-group images read back, live 2026-10-22
@@ -194,6 +195,7 @@ KNOWN_CAPABILITIES: Mapping[str, ProviderCapabilities] = {
         model_id="xiaomi/mimo-v2.6-pro",
         speaks_first=True,  # V3-P87: 16 of 18 in the speaking-first check, live 2026-11-01; V3-P90: 23 of 24
         free_wake=True,  # V3-P90 §7.5: free-wake check pass 3/3, speak 13/15, either 6/6, live 2026-11-03
+        # 2026-11-04 engaging FREE_RULE: pass 3/3, speak 14/15, either 6/6; screen bars all met
         memory_passes=True,  # V3-P85: every bar of the memory check, live 2026-10-31
         screen_points=True,  # V3-P84: 8+ of 10 points on target, live 2026-10-30
         streaming=True,  # V3-P73: live response, tool replay and cancel checked 2026-10-24
@@ -215,6 +217,7 @@ KNOWN_CAPABILITIES: Mapping[str, ProviderCapabilities] = {
         model_id="deepseek/deepseek-v4.1-flash",
         speaks_first=True,  # V3-P87: 17 of 18 in the speaking-first check, live 2026-11-01; V3-P90: 21 of 24
         free_wake=True,  # V3-P90 §7.5: free-wake check pass 3/3, speak 15/15, either 6/6, live 2026-11-03
+        # 2026-11-04 engaging FREE_RULE: pass 3/3, speak 13/15, either 6/6; screen bars all met
         memory_passes=True,  # V3-P85: every bar of the memory check, live 2026-10-31
         screen_points=True,  # V3-P84: 8+ of 10 points on target, live 2026-10-30
         streaming=True,  # V3-P73: live response, tool replay and cancel checked 2026-10-24
@@ -229,6 +232,8 @@ KNOWN_CAPABILITIES: Mapping[str, ProviderCapabilities] = {
         model_id="deepseek/deepseek-v4.1-flash-1017",
         speaks_first=True,  # live 2026-11-04: 22/24
         free_wake=True,  # pass 3/3, speak 14/15, either 6/6
+        # 2026-11-04 engaging FREE_RULE: pass 3/3, speak 14/15, either 6/6; screen bars all met (after the
+        # "not that you will wait" line: a call screen got "조용히 기다릴게요" once before it)
         memory_passes=True,  # 36 fixtures: all memory acceptance bars met
         screen_points=True,  # 8/10 (24-pixel tolerance)
         streaming=True,  # chunks, Tool continuation and mid-stream cancel checked live

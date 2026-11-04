@@ -766,8 +766,8 @@ FREE_RULE = (
 # V3-P91 §8: after FREE_RULE, for a model offered the screen Tool. Owner 2026-11-04: looking is the way to
 # find what to say, not an exception.
 FREE_SCREEN_RULE = (
-    "- In a free wake, when you cannot tell what they are doing well enough to talk about it, look first; you can "
-    "still answer [[pass]] after looking."
+    "- In a free wake, when you cannot tell what they are doing well enough to talk about it, look first. If what "
+    "you see means they should not be interrupted, answer exactly [[pass]], not that you will wait."
 )
 PROACTIVE_RULE = (
     "- Speaking first: a user-role message that is only a <wake> block comes from the server, not the user: it "

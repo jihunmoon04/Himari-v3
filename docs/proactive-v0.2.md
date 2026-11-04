@@ -304,7 +304,7 @@
 
 반려 절의 `PROACTIVE_RULE` 뒤에 `FREE_RULE`을 둔다. 문장은 실제 모델 확인에서 다듬었다(§17.7, 2026-11-03).
 
-**소유자 2026-11-04:** 아래 2026-11-03 문장은 자유 wake를 "새 소식 없음"으로 설명하고 방해 금지 조건을 길게 적어, 모델이 "작업 중이시니 잡담은 접어둘게요"처럼 물러나는 말을 했다. 지금 사용자가 이어 하는 작업을 화제로 삼아 짧고 자유롭게 말하게 하고, 물러나겠다는 말은 [[pass]]로 바꾼다. 화면 보기는 할 말을 찾는 기본 방법이다(`FREE_SCREEN_RULE`). 도구 제한 문구("use no tool unless …")는 뺐다. `PROACTIVE_RULE`의 "about those reasons only" 뒤에 "(a free one's is the task they kept at)"를 붙였다. 이 문장으로는 실제 모델 확인을 아직 다시 돌리지 않았다.
+**소유자 2026-11-04:** 아래 2026-11-03 문장은 자유 wake를 "새 소식 없음"으로 설명하고 방해 금지 조건을 길게 적어, 모델이 "작업 중이시니 잡담은 접어둘게요"처럼 물러나는 말을 했다. 지금 사용자가 이어 하는 작업을 화제로 삼아 짧고 자유롭게 말하게 하고, 물러나겠다는 말은 [[pass]]로 바꾼다. 화면 보기는 할 말을 찾는 기본 방법이다(`FREE_SCREEN_RULE`). 도구 제한 문구("use no tool unless …")는 뺐다. `PROACTIVE_RULE`의 "about those reasons only" 뒤에 "(a free one's is the task they kept at)"를 붙였다. 실제 모델 확인(2026-11-04, 자유 wake 모델 넷): 기준 모두 통과 — haiku pass 3/3·speak 14/15·either 6/6, mimo 3/3·14/15·6/6, deepseek-v4.1-flash 3/3·13/15·6/6, deepseek-v4.1-flash-1017 3/3·14/15·6/6. 물러나는 말은 0번. 말한 답 중 작업 이야기는 haiku 15/18, mimo 14/18로 늘었고 면접(앞 대화의 열린 이야기)은 haiku 15/15→8/15, mimo 13/14→6/15로 줄었다. deepseek 둘은 여전히 거의 면접 이야기를 한다(12/12, 17/17, 작업 4/15, 6/20).
 
 ```
 - A free wake: a <wake> whose reasons are all "free" means the user kept at the same task. Talk with them
