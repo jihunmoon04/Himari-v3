@@ -1018,9 +1018,50 @@ try
     Check(racedExistingFailed && File.ReadAllText(racedExistingPath) == "modified-during-download" && Directory.GetFiles(tempSaveDir, "*.part").Length == 0,
         "existing file modified after save dialog approval is never overwritten");
 
-    // PR #181 review P1: an existing file approved for overwrite and unchanged during download is replaced cleanly,
-    // and holding the FileShare.None kernel handle across verification + in-place write blocks any concurrent TOCTOU modification between check and write.
+    // PR #181 review P1: if replacement commit fails (either via injected I/O error or OS rename failure inside AtomicReplaceOverOpenTarget),
+    // the original file is never truncated or modified and remains intact at its path.
     File.WriteAllText(racedExistingPath, "approved-v2");
+    bool commitFailureCaught = false;
+    var failingCommitTarget = ApprovedSaveTarget.Capture(racedExistingPath) with
+    {
+        OnBeforeCommitTempMove = () => throw new IOException("simulated replacement commit failure")
+    };
+    try
+    {
+        await fileClient.DownloadPresentedFileAsync("c1", "f1", 2, failingCommitTarget, validBytes.Length, validSha, CancellationToken.None);
+    }
+    catch (IOException ex) when (ex.Message.Contains("simulated replacement commit failure"))
+    {
+        commitFailureCaught = true;
+    }
+    bool kernelRenameFailureCaught = false;
+    var kernelFailingTarget = ApprovedSaveTarget.Capture(racedExistingPath) with
+    {
+        OnBeforeCommitTempMove = () =>
+        {
+            foreach (string partFile in Directory.GetFiles(tempSaveDir, "*.part"))
+                File.Delete(partFile);
+        }
+    };
+    try
+    {
+        await fileClient.DownloadPresentedFileAsync("c1", "f1", 2, kernelFailingTarget, validBytes.Length, validSha, CancellationToken.None);
+    }
+    catch (IOException)
+    {
+        kernelRenameFailureCaught = true;
+    }
+    Check(commitFailureCaught
+        && kernelRenameFailureCaught
+        && File.Exists(racedExistingPath)
+        && File.ReadAllText(racedExistingPath) == "approved-v2"
+        && Directory.GetFiles(tempSaveDir, "*.part").Length == 0,
+        "replacement commit failure preserves the original file intact without truncation or partial write");
+
+    // PR #181 review P1: an existing file approved for overwrite and unchanged during download is replaced atomically via .part move,
+    // holding the FileShare.None kernel handle blocks TOCTOU modification, and any other hard link to the original inode keeps its original bytes.
+    string hardLinkSiblingPath = Path.Combine(tempSaveDir, "hardlink-sibling.txt");
+    Check(HardLinkHelper.Create(hardLinkSiblingPath, racedExistingPath), "hard link created for original file preservation check");
     bool externalWriteBlocked = false;
     bool externalMoveBlocked = false;
     string intruderPath = Path.Combine(tempSaveDir, "intruder.txt");
@@ -1037,9 +1078,13 @@ try
         }
     };
     await fileClient.DownloadPresentedFileAsync("c1", "f1", 2, lockedTarget, validBytes.Length, validSha, CancellationToken.None);
-    Check(externalWriteBlocked && externalMoveBlocked && File.ReadAllBytes(racedExistingPath).SequenceEqual(validBytes)
-        && Directory.GetFiles(tempSaveDir, "*.part").Length == 0,
-        "FileShare.None handle held from verification through in-place replacement blocks TOCTOU writes/renames between check and write");
+    Check(externalWriteBlocked
+        && externalMoveBlocked
+        && File.ReadAllBytes(racedExistingPath).SequenceEqual(validBytes)
+        && File.ReadAllText(hardLinkSiblingPath) == "approved-v2"
+        && Directory.GetFiles(tempSaveDir, "*.part").Length == 0
+        && Directory.GetFiles(tempSaveDir, "*.bak").Length == 0,
+        "FileShare.None handle + atomic .part replacement blocks TOCTOU writes/renames and leaves sibling hard links untouched");
 }
 finally
 {
@@ -1278,4 +1323,13 @@ sealed class PresentedFileHandler(byte[] bytes, string sha256) : HttpMessageHand
         }
         return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(bytes) });
     }
+}
+
+static class HardLinkHelper
+{
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", EntryPoint = "CreateHardLinkW", SetLastError = true, CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+    private static extern bool CreateHardLink(string lpFileName, string lpExistingFileName, IntPtr lpSecurityAttributes);
+
+    public static bool Create(string newLinkPath, string existingFilePath) =>
+        CreateHardLink(newLinkPath, existingFilePath, IntPtr.Zero);
 }

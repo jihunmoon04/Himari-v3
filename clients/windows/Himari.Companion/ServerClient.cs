@@ -100,8 +100,9 @@ internal readonly record struct FileHandleIdentity(
     ulong FileSize);
 
 /// <summary>V3-P93 §6.3 (PR #181 review P1): state of the user-selected save path at dialog confirmation time.
-/// New paths commit with overwrite:false; approved existing files verify handle identity/timestamps/content and
-/// replace bytes in-place on the same FileShare.None kernel handle so no TOCTOU gap exists between check and write.</summary>
+/// New paths commit with overwrite:false; approved existing files verify handle identity/timestamps/content on a
+/// FileShare.None handle, stage the original via handle rename, and atomically move the verified .part into place
+/// (restoring the original on any failure without ever truncating in-place or mutating other hard links).</summary>
 internal sealed record ApprovedSaveTarget(
     string FullPath,
     bool ExistedAtSelection,
@@ -109,6 +110,21 @@ internal sealed record ApprovedSaveTarget(
     string? ExistingSha256)
 {
     internal Action? OnAfterVerifyBeforeReplace { get; init; }
+    internal Action? OnBeforeCommitTempMove { get; init; }
+
+    private const uint GenericRead = 0x80000000;
+    private const uint GenericWrite = 0x40000000;
+    private const uint DeleteAccess = 0x00010000;
+    private const uint FileShareNone = 0;
+    private const uint FileShareDelete = 0x00000004;
+    private const uint OpenExisting = 3;
+    private const uint FileAttributeNormal = 0x00000080;
+    private const int ErrorFileNotFound = 2;
+    private const int ErrorPathNotFound = 3;
+    private const int ErrorAccessDenied = 5;
+    private const int FileRenameInfoEx = 22;
+    private const int FileRenameReplaceIfExists = 0x00000001;
+    private const int FileRenamePosixSemantics = 0x00000002;
 
     [StructLayout(LayoutKind.Sequential)]
     private struct FILETIME
@@ -136,6 +152,55 @@ internal sealed record ApprovedSaveTarget(
 
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool GetFileInformationByHandle(SafeFileHandle hFile, out BY_HANDLE_FILE_INFORMATION lpFileInformation);
+
+    [DllImport("kernel32.dll", EntryPoint = "CreateFileW", SetLastError = true, CharSet = CharSet.Unicode)]
+    private static extern SafeFileHandle CreateFile(
+        string lpFileName,
+        uint dwDesiredAccess,
+        uint dwShareMode,
+        IntPtr lpSecurityAttributes,
+        uint dwCreationDisposition,
+        uint dwFlagsAndAttributes,
+        IntPtr hTemplateFile);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool SetFileInformationByHandle(
+        SafeFileHandle hFile,
+        int FileInformationClass,
+        IntPtr lpFileInformation,
+        uint dwBufferSize);
+
+    private static void AtomicReplaceOverOpenTarget(string tempPath, string targetPath)
+    {
+        using SafeFileHandle tempHandle = CreateFile(
+            tempPath,
+            GenericRead | DeleteAccess,
+            FileShareNone,
+            IntPtr.Zero,
+            OpenExisting,
+            FileAttributeNormal,
+            IntPtr.Zero);
+        if (tempHandle.IsInvalid)
+            throw new IOException("검증된 임시 파일을 열 수 없습니다.", Marshal.GetExceptionForHR(Marshal.GetHRForLastWin32Error()));
+        byte[] nameBytes = Encoding.Unicode.GetBytes(targetPath + "\0");
+        int headerSize = IntPtr.Size * 2 + 4;
+        int totalSize = headerSize + nameBytes.Length;
+        IntPtr buffer = Marshal.AllocHGlobal(totalSize);
+        try
+        {
+            for (int i = 0; i < headerSize; i++) Marshal.WriteByte(buffer, i, 0);
+            Marshal.WriteInt32(buffer, 0, FileRenameReplaceIfExists | FileRenamePosixSemantics);
+            Marshal.WriteIntPtr(buffer, IntPtr.Size, IntPtr.Zero);
+            Marshal.WriteInt32(buffer, IntPtr.Size * 2, targetPath.Length * sizeof(char));
+            Marshal.Copy(nameBytes, 0, IntPtr.Add(buffer, headerSize), nameBytes.Length);
+            if (!SetFileInformationByHandle(tempHandle, FileRenameInfoEx, buffer, (uint)totalSize))
+                throw new IOException("검증된 임시 파일로 대상 파일을 원자적으로 교체할 수 없습니다.", Marshal.GetExceptionForHR(Marshal.GetHRForLastWin32Error()));
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(buffer);
+        }
+    }
 
     private static FileHandleIdentity ReadHandleIdentity(SafeFileHandle handle)
     {
@@ -191,40 +256,38 @@ internal sealed record ApprovedSaveTarget(
         }
         if (Directory.Exists(FullPath))
             throw new SaveTargetChangedException("다운로드 중 대상 경로가 폴더로 바뀌어 덮어쓰기를 중단했습니다.");
-        using (var tempStream = new FileStream(tempPath, FileMode.Open, FileAccess.Read, FileShare.None))
+        SafeFileHandle handle = CreateFile(
+            FullPath,
+            GenericRead | GenericWrite,
+            FileShareDelete,
+            IntPtr.Zero,
+            OpenExisting,
+            FileAttributeNormal,
+            IntPtr.Zero);
+        if (handle.IsInvalid)
         {
-            FileStream existingStream;
-            try
-            {
-                existingStream = new FileStream(FullPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
-            }
-            catch (FileNotFoundException ex)
-            {
-                throw new SaveTargetChangedException("다운로드 중 대상 파일이 사라져 덮어쓰기를 중단했습니다.", ex);
-            }
-            catch (UnauthorizedAccessException ex) when (Directory.Exists(FullPath))
-            {
-                throw new SaveTargetChangedException("다운로드 중 대상 경로가 폴더로 바뀌어 덮어쓰기를 중단했습니다.", ex);
-            }
-            using (existingStream)
-            {
-                var currentIdentity = ReadHandleIdentity(existingStream.SafeFileHandle);
-                if (currentIdentity != ExistingIdentity || (ulong)existingStream.Length != ExistingIdentity.FileSize)
-                    throw new SaveTargetChangedException("다운로드 중 대상 파일이 변경되어 덮어쓰기를 중단했습니다.");
-                existingStream.Position = 0;
-                string currentSha256 = Convert.ToHexString(SHA256.HashData(existingStream)).ToLowerInvariant();
-                if (!string.Equals(currentSha256, ExistingSha256, StringComparison.OrdinalIgnoreCase))
-                    throw new SaveTargetChangedException("다운로드 중 대상 파일이 변경되어 덮어쓰기를 중단했습니다.");
-                // While existingStream is held with FileShare.None, no other handle can open, modify, delete, or rename FullPath.
-                OnAfterVerifyBeforeReplace?.Invoke();
-                existingStream.Position = 0;
-                existingStream.SetLength(0);
-                tempStream.Position = 0;
-                tempStream.CopyTo(existingStream);
-                existingStream.Flush(flushToDisk: true);
-            }
+            int err = Marshal.GetLastWin32Error();
+            handle.Dispose();
+            if (err is ErrorFileNotFound or ErrorPathNotFound)
+                throw new SaveTargetChangedException("다운로드 중 대상 파일이 사라져 덮어쓰기를 중단했습니다.");
+            if (err == ErrorAccessDenied && Directory.Exists(FullPath))
+                throw new SaveTargetChangedException("다운로드 중 대상 경로가 폴더로 바뀌어 덮어쓰기를 중단했습니다.");
+            throw new IOException("대상 파일을 잠글 수 없습니다.", Marshal.GetExceptionForHR(Marshal.GetHRForLastWin32Error()));
         }
-        File.Delete(tempPath);
+        using var existingStream = new FileStream(handle, FileAccess.ReadWrite);
+        var currentIdentity = ReadHandleIdentity(handle);
+        if (currentIdentity != ExistingIdentity || (ulong)existingStream.Length != ExistingIdentity.FileSize)
+            throw new SaveTargetChangedException("다운로드 중 대상 파일이 변경되어 덮어쓰기를 중단했습니다.");
+        existingStream.Position = 0;
+        string currentSha256 = Convert.ToHexString(SHA256.HashData(existingStream)).ToLowerInvariant();
+        if (!string.Equals(currentSha256, ExistingSha256, StringComparison.OrdinalIgnoreCase))
+            throw new SaveTargetChangedException("다운로드 중 대상 파일이 변경되어 덮어쓰기를 중단했습니다.");
+        // While existingStream is held open with GenericRead|GenericWrite and FileShareDelete (no read/write sharing),
+        // external writes and standard Win32 moves/overwrites are rejected by the kernel, while FileRenameInfoEx with
+        // FILE_RENAME_REPLACE_IF_EXISTS | FILE_RENAME_POSIX_SEMANTICS atomically replaces the directory entry in a single call.
+        OnAfterVerifyBeforeReplace?.Invoke();
+        OnBeforeCommitTempMove?.Invoke();
+        AtomicReplaceOverOpenTarget(tempPath, FullPath);
     }
 }
 internal sealed class ServerClient : IDisposable
