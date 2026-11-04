@@ -1,5 +1,7 @@
 # CurrentState Contract v0.1 — Draft for Review
 
+> **V3-P93 추가 제안(구현 전):** 턴별 인터페이스 스냅샷의 원본·투영·재개·state_key 경계는 [인터페이스 능력과 반려 파일 수신](interface-capabilities-v0.1.md) §3·§4를 참조한다. 읽기 투영이 실행 권한이 아니라는 이 문서의 원칙을 유지한다.
+
 > 작성: 2026-10-13 · 상태: **PROPOSED / NOT FROZEN**.
 >
 > 이미 확정된 원칙: **Current State는 Cache-first Prompt의 Conversation 뒤에 위치**하며, **활성 Workspace/Environment는 Artifact가 아닌 운영 상태**다. 아래 DTO, 기본 Binding 스코프, 합성 및 동시성 프로토콜은 검토용 권고안이다.
