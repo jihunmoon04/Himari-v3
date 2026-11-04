@@ -148,7 +148,7 @@ def test_a_free_wake_is_drawn_with_its_task_and_step() -> None:
 
 
 def test_the_free_wakes_screen_line_only_with_the_screen_tool() -> None:
-    """V3-P91 §8: "you may look first, and still [[pass]]" follows the free wake's line, for a model
+    """V3-P91 §8: "look first, and still [[pass]]" follows the free wake's line, for a model
     offered the screen Tool."""
     from himari.prompt.api import FREE_RULE, FREE_SCREEN_RULE
 
@@ -161,3 +161,13 @@ def test_the_free_wakes_screen_line_only_with_the_screen_tool() -> None:
     both = text(free_wake=True, screen_tool=True)
     assert FREE_SCREEN_RULE in both and both.index(FREE_RULE) < both.index(FREE_SCREEN_RULE)
     assert FREE_SCREEN_RULE not in text(free_wake=True) and FREE_SCREEN_RULE not in text(screen_tool=True)
+
+
+def test_the_free_wake_engages_with_the_task() -> None:
+    """Owner 2026-11-04: the task is the topic, saying you will leave them be is a [[pass]], and looking
+    at the screen is how to find what to say — not an exception to a no-tool rule."""
+    from himari.prompt.api import FREE_RULE, FREE_SCREEN_RULE
+
+    assert "Talk with them about it" in FREE_RULE and "instead of saying you will leave them be" in FREE_RULE
+    assert "no news" not in FREE_RULE and "use no tool" not in FREE_RULE
+    assert "look first" in FREE_SCREEN_RULE and "[[pass]]" in FREE_SCREEN_RULE

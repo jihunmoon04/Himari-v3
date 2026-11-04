@@ -58,7 +58,7 @@ def test_reading_requires_the_screen_only_label_and_the_correct_point() -> None:
 def test_checks_use_the_production_system_screen_tool_and_image_wire_format() -> None:
     model = "anthropic/claude-haiku-5.5"
     before = model_input(model, free=True, doing=NowDoing(app="Chrome", mic_or_camera=True))
-    assert "you may look first" in "\n".join(before.stable_prefix)
+    assert "look first" in "\n".join(before.stable_prefix)
     request = after_look(before, found=picture("call"))
     adapter = OpenRouterAdapter("not-used", blobs=lambda _: picture("call").png)
     body = json.loads(adapter.prepare_native_request(request).body)

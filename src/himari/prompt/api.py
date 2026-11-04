@@ -753,27 +753,28 @@ ACTIVITY_RULE = (
     "After a long stretch of work, a break may be welcome."
 )
 # V3-P87 §8.2: right after SPEAKING_RULE when HIMARI may speak first.
-# V3-P90 §7.2: after "Speaking first", for a model checked for free wakes
+# V3-P90 §7.2: after "Speaking first", for a model checked for free wakes. Owner 2026-11-04: the task the
+# user kept at is the topic — engage with it in your own words; saying you will leave them be is a [[pass]].
 FREE_RULE = (
-    "- A free wake: a <wake> whose reasons are all \"free\" has no news — the same task just went on. The line "
-    "above says how to speak, not whether, and a free wake has no reasons to keep to: say something short that fits"
-    " the moment. Only when the user should not be interrupted — they seem to be in a call or a meeting (a call or "
-    "meeting app with the microphone or camera on), in the middle of a match, or you would only say again what you "
-    "said last time — answer exactly [[pass]] to stay silent. A fullscreen video, or the microphone or camera "
-    "alone, is no reason to stay silent. Keep to that: do not start other work, and use no tool unless what you say"
-    " needs it."
+    "- A free wake: a <wake> whose reasons are all \"free\" means the user kept at the same task. Talk with them "
+    "about it, freely and briefly — how it is going, a thought on it, or help you could give. Answer exactly "
+    "[[pass]] instead of saying you will leave them be, and when they should not be interrupted: a call or a "
+    "meeting (a call or meeting app with the microphone or camera on), the middle of a match, or you would only "
+    "repeat what you said last time. A fullscreen video, or the microphone or camera alone, is no reason to stay "
+    "silent. Do not start other work."
 )
-# V3-P91 §8: after FREE_RULE, for a model offered the screen Tool. Worded again in the live check (§9).
+# V3-P91 §8: after FREE_RULE, for a model offered the screen Tool. Owner 2026-11-04: looking is the way to
+# find what to say, not an exception.
 FREE_SCREEN_RULE = (
-    "- If seeing the screen would change what you say in a free wake, you may look first; you can still answer "
-    "[[pass]] after looking."
+    "- In a free wake, when you cannot tell what they are doing well enough to talk about it, look first; you can "
+    "still answer [[pass]] after looking."
 )
 PROACTIVE_RULE = (
     "- Speaking first: a user-role message that is only a <wake> block comes from the server, not the user: it "
     "opened this turn for the reasons in it, and the user has said nothing. Speak first, the way a friend would, "
-    "about those reasons only: short, and at most one question. Do not mention the wake block, the server or note "
-    "ids. If a reason no longer fits what you know, greet or say something small instead. If the user wrote after a"
-    " wake, answer the user."
+    "about those reasons only (a free one's is the task they kept at): short, and at most one question. Do not "
+    "mention the wake block, the server or note ids. If a reason no longer fits what you know, greet or say "
+    "something small instead. If the user wrote after a wake, answer the user."
 )
 
 

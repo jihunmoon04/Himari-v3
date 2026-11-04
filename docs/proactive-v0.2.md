@@ -304,6 +304,19 @@
 
 반려 절의 `PROACTIVE_RULE` 뒤에 `FREE_RULE`을 둔다. 문장은 실제 모델 확인에서 다듬었다(§17.7, 2026-11-03).
 
+**소유자 2026-11-04:** 아래 2026-11-03 문장은 자유 wake를 "새 소식 없음"으로 설명하고 방해 금지 조건을 길게 적어, 모델이 "작업 중이시니 잡담은 접어둘게요"처럼 물러나는 말을 했다. 지금 사용자가 이어 하는 작업을 화제로 삼아 짧고 자유롭게 말하게 하고, 물러나겠다는 말은 [[pass]]로 바꾼다. 화면 보기는 할 말을 찾는 기본 방법이다(`FREE_SCREEN_RULE`). 도구 제한 문구("use no tool unless …")는 뺐다. `PROACTIVE_RULE`의 "about those reasons only" 뒤에 "(a free one's is the task they kept at)"를 붙였다. 이 문장으로는 실제 모델 확인을 아직 다시 돌리지 않았다.
+
+```
+- A free wake: a <wake> whose reasons are all "free" means the user kept at the same task. Talk with them
+  about it, freely and briefly — how it is going, a thought on it, or help you could give. Answer exactly
+  [[pass]] instead of saying you will leave them be, and when they should not be interrupted: a call or a
+  meeting (a call or meeting app with the microphone or camera on), the middle of a match, or you would only
+  repeat what you said last time. A fullscreen video, or the microphone or camera alone, is no reason to
+  stay silent. Do not start other work.
+```
+
+2026-11-03 문장(바뀌기 전):
+
 ```
 - A free wake: a <wake> whose reasons are all "free" has no news — the same task just went on. The line
   above says how to speak, not whether, and a free wake has no reasons to keep to: say something short that
@@ -708,7 +721,7 @@ P1-1~P1-9 모두 PASS. 새 지적을 코드와 대조했다: Run은 응답을 �
 §15의 6단계. 서버와 앱을 함께 고쳤다.
 
 - **job의 `free`(서버):** `JobStatus.free`. 자유 wake 작업이 드러날 때 내는 `job` 사건(`state: started`)의 최상위에 `"free": true`를 싣는다. origin 안에는 넣지 않는다. 다른 작업의 사건에는 이 키가 없다. origin은 `{"kind": "wake", "device_id": …}` 그대로다. 앱은 이 값을 읽지 않고 지금처럼 보통 wake로 다루며(§9), 옛 앱도 똑같이 동작한다.
-- **화면 설정(앱):** 설정 창 "히마리에게 알릴 것" 칸 끝에 "그냥 말 걸 때 화면 보기 허용"을 더했다(기본 끔). `SignalSettings.FreeWakeScreen`으로 다른 신호 설정과 함께 저장한다. 예전 설정 파일에는 이 값이 없으므로 꺼진 것으로 읽는다.
+- **화면 설정(앱):** 설정 창 "히마리에게 알릴 것" 칸 끝에 "그냥 말 걸 때 화면 보기 허용"을 더했다(기본 끔 → **소유자 2026-11-04: 기본 켬**). `SignalSettings.FreeWakeScreen`으로 다른 신호 설정과 함께 저장한다. 그 전에 저장된 설정은 한 번 켜고(`WindowPreferences.FeaturesOn`), 그 뒤 사용자가 끄면 그대로 둔다.
 - **알림(앱 → 서버):** presence 몸에 `features: {"free_wake_screen": true|false}`를 싣는다. 서버가 `features.free_wake_screen: 1`을 알릴 때만 보낸다(옛 서버는 모르는 필드를 거절한다). 활동 신호를 꺼도 보낸다(신호가 아니라 설정이다). 잠긴 몸에는 싣지 않는다.
 - **서버가 지님:** `PresenceFeaturesBody`, `Signals.free_wake_screen`, `DeviceState.free_wake_screen`.
   - 잠긴 몸이 오면 값을 그대로 둔다.
