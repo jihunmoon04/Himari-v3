@@ -1018,11 +1018,28 @@ try
     Check(racedExistingFailed && File.ReadAllText(racedExistingPath) == "modified-during-download" && Directory.GetFiles(tempSaveDir, "*.part").Length == 0,
         "existing file modified after save dialog approval is never overwritten");
 
-    // PR #181 review P1: an existing file approved for overwrite and unchanged during download is replaced cleanly.
-    var unchangedTarget = ApprovedSaveTarget.Capture(racedExistingPath);
-    await fileClient.DownloadPresentedFileAsync("c1", "f1", 2, unchangedTarget, validBytes.Length, validSha, CancellationToken.None);
-    Check(File.ReadAllBytes(racedExistingPath).SequenceEqual(validBytes),
-        "unchanged approved existing file is replaced by verified download");
+    // PR #181 review P1: an existing file approved for overwrite and unchanged during download is replaced cleanly,
+    // and holding the FileShare.None kernel handle across verification + in-place write blocks any concurrent TOCTOU modification between check and write.
+    File.WriteAllText(racedExistingPath, "approved-v2");
+    bool externalWriteBlocked = false;
+    bool externalMoveBlocked = false;
+    string intruderPath = Path.Combine(tempSaveDir, "intruder.txt");
+    File.WriteAllText(intruderPath, "intruder-bytes");
+    var lockedTarget = ApprovedSaveTarget.Capture(racedExistingPath) with
+    {
+        OnAfterVerifyBeforeReplace = () =>
+        {
+            try { File.WriteAllText(racedExistingPath, "toctou-overwrite"); }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { externalWriteBlocked = true; }
+            try { File.Move(intruderPath, racedExistingPath, overwrite: true); }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { externalMoveBlocked = true; }
+            if (File.Exists(intruderPath)) File.Delete(intruderPath);
+        }
+    };
+    await fileClient.DownloadPresentedFileAsync("c1", "f1", 2, lockedTarget, validBytes.Length, validSha, CancellationToken.None);
+    Check(externalWriteBlocked && externalMoveBlocked && File.ReadAllBytes(racedExistingPath).SequenceEqual(validBytes)
+        && Directory.GetFiles(tempSaveDir, "*.part").Length == 0,
+        "FileShare.None handle held from verification through in-place replacement blocks TOCTOU writes/renames between check and write");
 }
 finally
 {

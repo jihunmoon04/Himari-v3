@@ -4,9 +4,11 @@ using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using Microsoft.Win32.SafeHandles;
 
 namespace Himari.Companion;
 
@@ -89,16 +91,65 @@ internal sealed class SaveTargetChangedException : IOException
     internal SaveTargetChangedException(string message, Exception innerException) : base(message, innerException) { }
 }
 
+internal readonly record struct FileHandleIdentity(
+    uint VolumeSerialNumber,
+    uint FileIndexHigh,
+    uint FileIndexLow,
+    ulong CreationTimeTicks,
+    ulong LastWriteTimeTicks,
+    ulong FileSize);
+
 /// <summary>V3-P93 §6.3 (PR #181 review P1): state of the user-selected save path at dialog confirmation time.
-/// New paths commit with overwrite:false; approved existing files verify identity/content before replacement.</summary>
+/// New paths commit with overwrite:false; approved existing files verify handle identity/timestamps/content and
+/// replace bytes in-place on the same FileShare.None kernel handle so no TOCTOU gap exists between check and write.</summary>
 internal sealed record ApprovedSaveTarget(
     string FullPath,
     bool ExistedAtSelection,
-    long ExistingLength,
-    DateTime ExistingCreationTimeUtc,
-    DateTime ExistingLastWriteTimeUtc,
+    FileHandleIdentity ExistingIdentity,
     string? ExistingSha256)
 {
+    internal Action? OnAfterVerifyBeforeReplace { get; init; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct FILETIME
+    {
+        public uint DateTimeLow;
+        public uint DateTimeHigh;
+        public readonly ulong Ticks => ((ulong)DateTimeHigh << 32) | DateTimeLow;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct BY_HANDLE_FILE_INFORMATION
+    {
+        public uint FileAttributes;
+        public FILETIME CreationTime;
+        public FILETIME LastAccessTime;
+        public FILETIME LastWriteTime;
+        public uint VolumeSerialNumber;
+        public uint FileSizeHigh;
+        public uint FileSizeLow;
+        public uint NumberOfLinks;
+        public uint FileIndexHigh;
+        public uint FileIndexLow;
+        public readonly ulong FileSize => ((ulong)FileSizeHigh << 32) | FileSizeLow;
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool GetFileInformationByHandle(SafeFileHandle hFile, out BY_HANDLE_FILE_INFORMATION lpFileInformation);
+
+    private static FileHandleIdentity ReadHandleIdentity(SafeFileHandle handle)
+    {
+        if (!GetFileInformationByHandle(handle, out var info))
+            throw new IOException("대상 파일의 핸들 정보를 확인할 수 없습니다.", Marshal.GetExceptionForHR(Marshal.GetHRForLastWin32Error()));
+        return new FileHandleIdentity(
+            info.VolumeSerialNumber,
+            info.FileIndexHigh,
+            info.FileIndexLow,
+            info.CreationTime.Ticks,
+            info.LastWriteTime.Ticks,
+            info.FileSize);
+    }
+
     internal static ApprovedSaveTarget Capture(string destinationPath)
     {
         if (string.IsNullOrWhiteSpace(destinationPath))
@@ -106,22 +157,21 @@ internal sealed record ApprovedSaveTarget(
         string fullPath = Path.GetFullPath(destinationPath);
         if (Directory.Exists(fullPath))
             throw new IOException("선택한 저장 경로가 폴더입니다.");
-        var info = new FileInfo(fullPath);
-        if (!info.Exists)
-            return new ApprovedSaveTarget(fullPath, false, 0, DateTime.MinValue, DateTime.MinValue, null);
+        if (!File.Exists(fullPath))
+            return new ApprovedSaveTarget(fullPath, false, default, null);
         try
         {
             using var stream = new FileStream(fullPath, FileMode.Open, FileAccess.Read, FileShare.Read);
-            long length = stream.Length;
+            var identityBefore = ReadHandleIdentity(stream.SafeFileHandle);
             string sha256 = Convert.ToHexString(SHA256.HashData(stream)).ToLowerInvariant();
-            info.Refresh();
-            if (!info.Exists)
-                return new ApprovedSaveTarget(fullPath, false, 0, DateTime.MinValue, DateTime.MinValue, null);
-            return new ApprovedSaveTarget(fullPath, true, length, info.CreationTimeUtc, info.LastWriteTimeUtc, sha256);
+            var identityAfter = ReadHandleIdentity(stream.SafeFileHandle);
+            if (identityBefore != identityAfter)
+                throw new SaveTargetChangedException("저장 위치를 확인하는 중 대상 파일이 변경되었습니다.");
+            return new ApprovedSaveTarget(fullPath, true, identityAfter, sha256);
         }
         catch (FileNotFoundException)
         {
-            return new ApprovedSaveTarget(fullPath, false, 0, DateTime.MinValue, DateTime.MinValue, null);
+            return new ApprovedSaveTarget(fullPath, false, default, null);
         }
     }
 
@@ -141,36 +191,40 @@ internal sealed record ApprovedSaveTarget(
         }
         if (Directory.Exists(FullPath))
             throw new SaveTargetChangedException("다운로드 중 대상 경로가 폴더로 바뀌어 덮어쓰기를 중단했습니다.");
-        var currentInfo = new FileInfo(FullPath);
-        if (!currentInfo.Exists ||
-            currentInfo.CreationTimeUtc != ExistingCreationTimeUtc ||
-            currentInfo.LastWriteTimeUtc != ExistingLastWriteTimeUtc ||
-            currentInfo.Length != ExistingLength)
+        using (var tempStream = new FileStream(tempPath, FileMode.Open, FileAccess.Read, FileShare.None))
         {
-            throw new SaveTargetChangedException("다운로드 중 대상 파일이 변경되어 덮어쓰기를 중단했습니다.");
+            FileStream existingStream;
+            try
+            {
+                existingStream = new FileStream(FullPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+            }
+            catch (FileNotFoundException ex)
+            {
+                throw new SaveTargetChangedException("다운로드 중 대상 파일이 사라져 덮어쓰기를 중단했습니다.", ex);
+            }
+            catch (UnauthorizedAccessException ex) when (Directory.Exists(FullPath))
+            {
+                throw new SaveTargetChangedException("다운로드 중 대상 경로가 폴더로 바뀌어 덮어쓰기를 중단했습니다.", ex);
+            }
+            using (existingStream)
+            {
+                var currentIdentity = ReadHandleIdentity(existingStream.SafeFileHandle);
+                if (currentIdentity != ExistingIdentity || (ulong)existingStream.Length != ExistingIdentity.FileSize)
+                    throw new SaveTargetChangedException("다운로드 중 대상 파일이 변경되어 덮어쓰기를 중단했습니다.");
+                existingStream.Position = 0;
+                string currentSha256 = Convert.ToHexString(SHA256.HashData(existingStream)).ToLowerInvariant();
+                if (!string.Equals(currentSha256, ExistingSha256, StringComparison.OrdinalIgnoreCase))
+                    throw new SaveTargetChangedException("다운로드 중 대상 파일이 변경되어 덮어쓰기를 중단했습니다.");
+                // While existingStream is held with FileShare.None, no other handle can open, modify, delete, or rename FullPath.
+                OnAfterVerifyBeforeReplace?.Invoke();
+                existingStream.Position = 0;
+                existingStream.SetLength(0);
+                tempStream.Position = 0;
+                tempStream.CopyTo(existingStream);
+                existingStream.Flush(flushToDisk: true);
+            }
         }
-        string currentSha256;
-        try
-        {
-            using var existingStream = new FileStream(FullPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
-            if (existingStream.Length != ExistingLength)
-                throw new SaveTargetChangedException("다운로드 중 대상 파일이 변경되어 덮어쓰기를 중단했습니다.");
-            currentSha256 = Convert.ToHexString(SHA256.HashData(existingStream)).ToLowerInvariant();
-        }
-        catch (FileNotFoundException ex)
-        {
-            throw new SaveTargetChangedException("다운로드 중 대상 파일이 사라져 덮어쓰기를 중단했습니다.", ex);
-        }
-        currentInfo.Refresh();
-        if (!currentInfo.Exists ||
-            currentInfo.CreationTimeUtc != ExistingCreationTimeUtc ||
-            currentInfo.LastWriteTimeUtc != ExistingLastWriteTimeUtc ||
-            currentInfo.Length != ExistingLength ||
-            !string.Equals(currentSha256, ExistingSha256, StringComparison.OrdinalIgnoreCase))
-        {
-            throw new SaveTargetChangedException("다운로드 중 대상 파일이 변경되어 덮어쓰기를 중단했습니다.");
-        }
-        File.Move(tempPath, FullPath, overwrite: true);
+        File.Delete(tempPath);
     }
 }
 internal sealed class ServerClient : IDisposable
