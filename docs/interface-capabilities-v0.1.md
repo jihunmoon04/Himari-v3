@@ -341,7 +341,10 @@ X-Himari-Connection-Generation: <이 SSE hello에서 받은 값>
 고정 시스템/도구 설명. Windows 다운로드 능력은 아직 false다.
 
 실제 포트는 Control의 `InterfaceSource.read(scope, origin)`이며 Bootstrap의
-`ConfiguredInterfaces`를 주입한다. Web/CLI의 파일 지원은 서버의 파일 배치 가능 여부,
+`ConfiguredInterfaces`를 주입한다. Web/CLI의 파일 수신은 서버의 기존 불변 보관본 다운로드
+서비스를 따른다. 이 서비스는 Application이 열리면 제공되며 업로드 배치 검사
+(`uploads_work`/`renameat2`)의 성공 여부와 독립적이다. 배치가 불가능해도 이미 제공한
+파일은 다운로드할 수 있고, 모델이 읽을 수 있는 파일을 `present_file`로 준비할 수도 있다.
 Web 탐색은 Machine 구성과 해당 사용자의 Machine 허용 목록을 따른다. 기기는 협상 구현 전까지 두 능력이 false다.
 Control은 원본 전체 로그에서 최신 입력(질문 답변 포함)을 읽어 압축된 Prompt tail과
 독립적으로 복원한다. 입력 없는 resume에서는 능력 소스를 다시 조회하지 않는다.

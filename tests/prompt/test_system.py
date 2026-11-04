@@ -55,11 +55,21 @@ def test_interface_switch_only_changes_runtime_state_and_its_key() -> None:
     assert len({state_key(web), state_key(desk), state_key(cli)}) == 3
     assert Composer().compose(web).tool_catalog == Composer().compose(desk).tool_catalog
     assert "Call me 선생님." in text(desk)  # P89 scope A: persona remains in every interface
-    assert "different states" in text(web) and "otherwise offer to continue on the Web" in text(desk)
+    assert "different states" in text(web) and "same conversation on the Web" in text(desk)
     assert state_data(current_state(desk))["interface"] == {
         "kind": "windows_companion", "capabilities": {"file_download": False, "workspace_browser": False}}
     assert state_data(current_state(web))["interface"] == {
         "kind": "web", "capabilities": {"file_download": True, "workspace_browser": True}}
+
+
+def test_companion_may_prepare_files_for_web_while_local_download_is_unavailable() -> None:
+    desk = inputs(interface=InterfaceSnapshot(InterfaceKind.WINDOWS_COMPANION))
+    composed = text(desk)
+    assert "for later Web download even when interface.capabilities.file_download is false" in composed
+    assert "Only after present_file succeeds, say the file is prepared" in composed
+    assert "same conversation on the Web to download" in composed
+    assert "Do not claim it was received or saved locally" in composed
+    assert "file only when interface.capabilities.file_download is true" not in composed
 
 
 def test_every_section_in_order_with_everything_on() -> None:

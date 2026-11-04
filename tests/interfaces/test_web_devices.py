@@ -211,7 +211,7 @@ def test_each_message_keeps_where_it_came_from(server: Server) -> None:
     snapshots = [mi.current_state.interface for mi in server.provider.prepared_inputs]
     assert [s.kind.value for s in snapshots if s is not None] == ["windows_companion", "windows_companion", "web", "cli"]
     assert all(s is not None for s in snapshots)
-    assert [s.capabilities.file_download for s in snapshots if s is not None] == [False, False, server.app.uploads_work, server.app.uploads_work]
+    assert [s.capabilities.file_download for s in snapshots if s is not None] == [False, False, True, True]
     items = server.device.get(f"/api/conversations/{cid}/events", headers=server.as_device(token)).json()["items"]
     shown = [i["origin"] for i in items if i["kind"] == "user_message"]  # V3-P84 §7.8: an app finds its own
     assert shown == [{"kind": "device", "device_id": "d1"}] * 2 + [{"kind": "web"}, {"kind": "cli"}]

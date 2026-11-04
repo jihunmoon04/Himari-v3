@@ -1097,7 +1097,8 @@ class Application:
                                     conversation_search=conversation_search, streaming=streaming,
                                     time_zone=time_zone,
                                     presence=presence, screen=screens,
-                                    interfaces=ConfiguredInterfaces(files=uploads_work,
+                                    # Stored-blob downloads do not require upload placement (renameat2).
+                                    interfaces=ConfiguredInterfaces(file_download=True,
                                                                     workspace_browser=machine is not None,
                                                                     workspace_principals=machine_allowed))
         except BaseException:

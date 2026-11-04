@@ -10,7 +10,7 @@ from himari.data.api import InterfaceCapabilities, InterfaceKind, InterfaceSnaps
 
 @dataclass(frozen=True)
 class ConfiguredInterfaces:
-    files: bool = False
+    file_download: bool = False
     workspace_browser: bool = False
     workspace_principals: frozenset[PrincipalId] = frozenset()
 
@@ -18,6 +18,6 @@ class ConfiguredInterfaces:
         kind = interface_kind(origin)
         # Device file support stays false until the connection-generation/file protocol exists.
         return InterfaceSnapshot(kind, InterfaceCapabilities(
-            file_download=self.files and kind in (InterfaceKind.WEB, InterfaceKind.CLI),
+            file_download=self.file_download and kind in (InterfaceKind.WEB, InterfaceKind.CLI),
             workspace_browser=(self.workspace_browser and kind is InterfaceKind.WEB
                                and scope.principal_id in self.workspace_principals)))

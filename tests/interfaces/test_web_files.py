@@ -18,6 +18,7 @@ from testkit import calls, final  # noqa: E402
 from himari.bootstrap.application import Application, workspace_for  # noqa: E402
 from himari.bootstrap.operator import OPERATOR  # noqa: E402
 from himari.data.api import DataError, DataErrorCode  # noqa: E402
+from himari.environment.inside import InsideEnvironment  # noqa: E402
 from himari.interfaces.web import app as web  # noqa: E402
 from himari.interfaces.web.config import WebConfig, WebConfigError  # noqa: E402
 from himari.provider.scripted import ScriptedAdapter, ScriptStep  # noqa: E402
@@ -116,9 +117,20 @@ def test_html_never_opens_on_this_origin_and_names_are_escaped(server: Server) -
         f"/api/conversations/{cid}/files/{korean['file_id']}/1").headers["content-disposition"]
 
 
-def test_a_presented_file_comes_with_its_tool_result(server: Server) -> None:
+@pytest.mark.parametrize("uploads_work", [True, False])
+def test_a_presented_file_comes_with_its_tool_result(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, uploads_work: bool) -> None:
+    monkeypatch.setattr(InsideEnvironment, "placement_works", lambda self: uploads_work)
+    s = Server(tmp_path)
+    with s.client:
+        s.sign_in()
+        check_presented_download(s, uploads_work)
+
+
+def check_presented_download(server: Server, uploads_work: bool) -> None:
     cid = server.new()
     assert server.application is not None
+    assert server.application.uploads_work is uploads_work
     folder = Path(server.application.inside.host_root(workspace_for(OPERATOR))) / "conversations" / cid
     folder.mkdir(parents=True, exist_ok=True)
     (folder / "out.csv").write_text("a,b\n")
@@ -130,6 +142,10 @@ def test_a_presented_file_comes_with_its_tool_result(server: Server) -> None:
     given, = result["presented_files"]
     assert (given["name"], given["version"], given["origin"]) == ("out.csv", 1, "presented")
     assert server.client.get(f"/api/conversations/{cid}/files/{given['file_id']}/1").content == b"a,b\n"
+    snapshot = server.provider.prepared_inputs[-1].current_state.interface
+    assert snapshot is not None and snapshot.capabilities.file_download
+    if not uploads_work:
+        assert error(server.upload(cid, "new.txt", b"x")) == (409, "files_unavailable")
 
 
 def test_the_error_table(server: Server, monkeypatch: pytest.MonkeyPatch) -> None:

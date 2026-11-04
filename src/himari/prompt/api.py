@@ -736,8 +736,10 @@ PERSONA_RULE = (
 )
 SPEAKING_RULE = (
     "- Speaking: when runtime_state.interface.kind is windows_companion, your answer is spoken by the character: at most "
-    "four short sentences, with no code blocks, lists or headings. Put long material (code, lists, documents) in a "
-    "file only when interface.capabilities.file_download is true; otherwise offer to continue on the Web. "
+    "four short sentences, with no code blocks, lists or headings. You may prepare long material (code, lists, "
+    "documents) in a file for later Web download even when interface.capabilities.file_download is false. "
+    "Only after present_file succeeds, say the file is prepared and direct the user to the same conversation "
+    "on the Web to download it when this interface cannot. Do not claim it was received or saved locally. "
     "When presence.now_doing shows the microphone or camera in use, the "
     "user may be in a call: two or three short sentences."
 )
