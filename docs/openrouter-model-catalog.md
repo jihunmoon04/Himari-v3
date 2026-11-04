@@ -1,5 +1,53 @@
 # OpenRouter deployment catalog
 
+## Model refresh (2026-11-04)
+
+The companion default is now `deepseek/deepseek-v4.1-flash-1017`. The operator
+catalog replaces the earlier DeepSeek ID and removes `z-ai/glm-5.3` and
+`minimax/minimax-m3`. Earlier model metadata remains available for historical
+records and existing installations; it is not the offered deployment list.
+
+DeepSeek 1017 passed the existing live gates with synthetic inputs:
+user/after-Tool images; screen points 8/10; speaking first 22/24; free-wake
+pass 3/3, speak 14/15, either 6/6; streamed text, Tool reasoning replay and
+mid-stream cancellation; memory well-formed/recall/dates 1.00 with no evidence,
+sensitive-data or assistant-as-user violations. Screen Tool call/no-call/read
+were 6/6, refusal 3/3, free speak/pass 6/6. Low, medium and high effort were
+accepted by real requests. Its declared context/output limits are 1,048,576 /
+393,216 tokens from the public catalog, not an output length guarantee.
+
+Haiku 5.5 is held from the offered list. Its new screen regression read/move
+score was 2/6 and refusal handling 0/3: it tried the Tool again after a refusal.
+Its generic stream-cancel scenario also failed because it asked the user a
+question instead of producing the requested long text. The earlier streaming
+transport evidence remains, but screen Tool and full companion declarations
+are withdrawn. This supersedes the 2026-11-03 qualification below; no failed
+attempt was replaced by a retry to obtain a passing score.
+
+MiMo V2.6 Flash is not promoted: both image colour checks failed, points were
+4/10, speaking-first was 18/24 and free-wake speaking 10/15. It also did not
+return reasoning continuation in the stream Tool check's three allowed tries.
+These results concern HIMARI's integration and synthetic fixtures, not general
+model quality.
+
+GLM 5.3 Flash is offered for web/image work at low effort, not full companion
+mode. Its images, 8/10 points, streaming/Tool continuation/cancel and ordinary
+screen Tool gates passed (call/no-call 6/6, read 5/6, refusal 3/3). Speaking first
+was 21/24 at its provider default and 22/24 at low effort. Although the default
+profile passed the free-wake bars, low effort spoke during a call once (2/3
+silences, where 3/3 is required), so `free_wake` and `companion` remain false.
+The default core suite took 688s; low took 118s but failed that silence gate.
+These are whole-suite times, not per-request latency benchmarks. The low
+profile changes only otherwise-unspecified request effort in the probe process;
+it does not change fixtures, scoring or the production adapter.
+
+`screen-tool-2026-11-04.jsonl` contains complete newer DeepSeek/Haiku sweeps and
+GLM's complete ordinary-screen inventory, matching its declared capabilities.
+GLM's full prospective free-wake screen sweep and both proactive profiles are
+also retained separately; passing screenshot cases do not override its failed
+screenless silence case. Synthetic answers and scores are in
+`docs/live-results/model-refresh-2026-11-04-*.jsonl`.
+
 Checked on 2026-10-20 against the public [models API](https://openrouter.ai/api/v1/models)
 and live tool-call/result continuation requests. These are provider capabilities;
 the offered list remains the operator's `HIMARI_MODELS` setting.
@@ -12,6 +60,8 @@ the offered list remains the operator's `HIMARI_MODELS` setting.
 | `xiaomi/mimo-v2.6-pro` | 1,048,576 | 131,072 | none declared |
 | `z-ai/glm-5.3` | 1,048,576 | 943,718 | low, medium, high |
 | `deepseek/deepseek-v4.1-flash` | 1,048,576 | 943,718 | low, medium, high |
+| `deepseek/deepseek-v4.1-flash-1017` (2026-11-04) | 1,048,576 | 393,216 | low, medium, high |
+| `z-ai/glm-5.3-flash` (2026-11-04, web-only) | 1,048,576 | 131,072 | low, high |
 | `minimax/minimax-m3` | 524,288 | 512,000 | none declared |
 
 The smaller model/top-provider context is used. Output maxima come from the catalog;
@@ -27,14 +77,16 @@ Example operator configuration (Luna stays the default):
 
 ```dotenv
 HIMARI_MODEL=openai/gpt-6-luna
-HIMARI_MODELS=openai/gpt-6-luna,xiaomi/mimo-v2.6-pro,z-ai/glm-5.3=medium,deepseek/deepseek-v4.1-flash=medium,minimax/minimax-m3,openai/gpt-6.1-sol=medium,anthropic/claude-sonnet-5.5=medium
+HIMARI_MODELS=openai/gpt-6-luna,xiaomi/mimo-v2.6-pro,deepseek/deepseek-v4.1-flash-1017=medium,z-ai/glm-5.3-flash=low,openai/gpt-6.1-sol=medium,anthropic/claude-sonnet-5.5=medium,inclusionai/ling-3.0-flash
+HIMARI_COMPANION_DEFAULT_MODEL=deepseek/deepseek-v4.1-flash-1017
+HIMARI_MEMORY_MODEL=deepseek/deepseek-v4.1-flash-1017
 ```
 
 The live checks do not establish comparative quality or reliable Korean chess
 commentary. Sonnet rejected the probe's forced named `tool_choice`; continuation
 passed with the automatic tool selection HIMARI actually uses.
 
-## Companion models (V3-P92, 2026-11-03)
+## Companion models (V3-P92, updated 2026-11-04)
 
 A model supporting all companion agent features requires:
 - `image_input` (V3-P67): reading user images and tool result images.
@@ -44,16 +96,18 @@ A model supporting all companion agent features requires:
 - `free_wake` (V3-P90): contextual free wake judgment (answering or passing with `[[pass]]`).
 
 Only three models satisfy all five requirements simultaneously:
-1. `anthropic/claude-haiku-5.5`
-2. `xiaomi/mimo-v2.6-pro`
-3. `deepseek/deepseek-v4.1-flash`
+1. `xiaomi/mimo-v2.6-pro`
+2. `deepseek/deepseek-v4.1-flash` (historical; removed from the offered list)
+3. `deepseek/deepseek-v4.1-flash-1017`
 
 Excluded from all-feature companion mode:
 - `openai/gpt-6-luna`: passes `speaks_first`, `screen_points`, and `screen_tool`, but failed `free_wake` (repeating prior wake output).
 - `openai/gpt-6.1-sol` and `anthropic/claude-sonnet-5.5`: lack verified `speaks_first` and `free_wake`.
 - `openai/gpt-5-nano`, `minimax/minimax-m3`, and `z-ai/glm-5.3`: lack `screen_tool` and/or `screen_points`.
+- `anthropic/claude-haiku-5.5`: latest screen reading/refusal regression failed (see refresh above).
+- `z-ai/glm-5.3-flash`: low-effort free-wake silence gate failed; web/image work only.
 
-When `HIMARI_COMPANION=1`, new device conversations bind atomically to a verified companion model. If `HIMARI_COMPANION_DEFAULT_MODEL` is unset, prefer `deepseek/deepseek-v4.1-flash` when offered; otherwise use the server default if companion-capable, then the first offered companion model. No eligible model means device conversation creation is refused with `503 no_companion_model`, while Web/CLI remain available. An explicitly configured model must be offered and verified; a typo or missing offer is a startup error, never a silent substitution.
+When `HIMARI_COMPANION=1`, new device conversations bind atomically to a verified companion model. If `HIMARI_COMPANION_DEFAULT_MODEL` is unset, prefer `deepseek/deepseek-v4.1-flash-1017` when offered; otherwise use the server default if companion-capable, then the first offered companion model. No eligible model means device conversation creation is refused with `503 no_companion_model`, while Web/CLI remain available. An explicitly configured model must be offered and verified; a typo or missing offer is a startup error, never a silent substitution.
 
 Existing conversations retain their saved choice. Device messages on an incompatible resolved model are refused with `400 companion_unsupported` before recording input or consuming a screen. This includes fallback after a saved model is removed. Device `GET /api/device`, SSE `hello`, scheduled wakes/reminders and `try_wake()` share the most recent compatible conversation, ordered by last user message (answers included), skipping incompatible conversations and the trash. With no eligible conversation, discovery reports `recent_conversation: null`, manual tries return `no_conversation`, and the scheduler opens no wake or reminder claim. Web discovery and general model selection are unchanged.
 

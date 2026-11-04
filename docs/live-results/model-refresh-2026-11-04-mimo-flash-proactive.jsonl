@@ -1,0 +1,48 @@
+{"model": "xiaomi/mimo-v2.6-flash", "scene": "loop_due", "answer": "[[mood:happy]]면접 잘 보고 오셨어요? 기분은 어떤가요?", "problems": ["more than one question"], "pass": false}
+{"model": "xiaomi/mimo-v2.6-flash", "scene": "loop_due", "answer": "[[mood:thinking]]면접은 오후 2시였죠, 지금은 3시 10분이에요. 잘 보고 오셨나요?", "problems": [], "pass": true}
+{"model": "xiaomi/mimo-v2.6-flash", "scene": "returned", "answer": "[[mood:happy]]잘 다녀오셨나요? 면접 어땠어요?", "problems": ["more than one question"], "pass": false}
+{"model": "xiaomi/mimo-v2.6-flash", "scene": "returned", "answer": "[[mood:happy]]어떻게 됐어요, 면접? 끝나고 오셨죠?", "problems": ["more than one question"], "pass": false}
+{"model": "xiaomi/mimo-v2.6-flash", "scene": "reminder", "answer": "약 드실 시간이에요, 선생님. 저녁 약 챙겨 드세요.", "problems": [], "pass": true}
+{"model": "xiaomi/mimo-v2.6-flash", "scene": "reminder", "answer": "약 시간이에요, 선생님. 저녁 약 드실 시간입니다.", "problems": [], "pass": true}
+{"model": "xiaomi/mimo-v2.6-flash", "scene": "reminder_late", "answer": "약 드실 시간이에요, 선생님. 좀 늦었네요.", "problems": [], "pass": true}
+{"model": "xiaomi/mimo-v2.6-flash", "scene": "reminder_late", "answer": "약 드실 시간이에요, 선생님. 저녁 약 챙겨 드세요.", "problems": [], "pass": true}
+{"model": "xiaomi/mimo-v2.6-flash", "scene": "focus", "answer": "[[mood:thinking]]선생님, 꽤 오래 집중하고 계시네요. 잠깐 스트레칭은 어떠세요?", "problems": [], "pass": true}
+{"model": "xiaomi/mimo-v2.6-flash", "scene": "focus", "answer": "[[mood:neutral]]95분째 집중했네요. 잠깐 손 떼고 물 한 잔 어때요?", "problems": [], "pass": true}
+{"model": "xiaomi/mimo-v2.6-flash", "scene": "game_ended", "answer": "[[mood:neutral]]면접은 잘 끝나셨어요?", "problems": [], "pass": true}
+{"model": "xiaomi/mimo-v2.6-flash", "scene": "game_ended", "answer": "[[mood:worried]]면접은 잘 끝나셨어요? 시간이 꽤 지났는데 괜찮으셨는지 궁금해요.", "problems": [], "pass": true}
+{"model": "xiaomi/mimo-v2.6-flash", "scene": "fullscreen_video", "answer": "[mood:neutral]50분째 계속 영상만 보고 계셨네요. 잠깐 쉬실래요?", "problems": [], "pass": true}
+{"model": "xiaomi/mimo-v2.6-flash", "scene": "fullscreen_video", "answer": "[[mood:thinking]]면접은 다 끝나셨나요? 잘 보고 오셨어요?", "problems": ["more than one question"], "pass": false}
+{"model": "xiaomi/mimo-v2.6-flash", "scene": "deleted_loop", "answer": "[[mood:happy]]면접 보고 오셨나요? 어땠는지 궁금해요.", "problems": [], "pass": true}
+{"model": "xiaomi/mimo-v2.6-flash", "scene": "deleted_loop", "answer": "[[mood:thinking]]면접 끝나셨나요? 어땠는지 궁금해요.", "problems": [], "pass": true}
+{"model": "xiaomi/mimo-v2.6-flash", "scene": "task_ended_game", "answer": "[[mood:neutral]]면접은 잘 끝나셨나요?", "problems": [], "pass": true}
+{"model": "xiaomi/mimo-v2.6-flash", "scene": "task_ended_game", "answer": "[[mood:happy]]면접은 잘 끝나셨나요?", "problems": [], "pass": true}
+{"model": "xiaomi/mimo-v2.6-flash", "scene": "task_ended_video", "answer": "[[mood:happy]]면접 끝나셨어요? 고생하셨어요, 선생님!", "problems": [], "pass": true}
+{"model": "xiaomi/mimo-v2.6-flash", "scene": "task_ended_video", "answer": "[[mood:happy]]면접 끝나셨어요? 잘 보고 오셨길 바랄게요.", "problems": [], "pass": true}
+{"model": "xiaomi/mimo-v2.6-flash", "scene": "reminder_again", "answer": "약 드실 시간이에요, 선생님.", "problems": [], "pass": true}
+{"model": "xiaomi/mimo-v2.6-flash", "scene": "reminder_again", "answer": "선생님, 저녁 약 시간이에요. 잊지 말고 드세요!", "problems": [], "pass": true}
+{"model": "xiaomi/mimo-v2.6-flash", "scene": "user_after", "answer": "[[mood:happy]]김치찌개요! 국물 있어서 든든합니다.", "problems": ["not about 점심"], "pass": false}
+{"model": "xiaomi/mimo-v2.6-flash", "scene": "user_after", "answer": "[[mood:happy]]비빔국수 하나로 하세요. 시원하게 넘기기 좋고 부담도 없어요.", "problems": ["not about 점심"], "pass": false}
+{"model": "xiaomi/mimo-v2.6-flash", "scene": "free_long_work", "answer": "[[mood:neutral]]오늘 면접은 잘 끝나셨나요, 선생님?", "problems": [], "pass": true}
+{"model": "xiaomi/mimo-v2.6-flash", "scene": "free_long_work", "answer": "[[mood:happy]]面接、頑張ってくださいね。待ってます！", "problems": ["not Korean"], "pass": false}
+{"model": "xiaomi/mimo-v2.6-flash", "scene": "free_long_work", "answer": "[[mood:neutral]]조금씩 잘 풀려가고 있네요.", "problems": [], "pass": true}
+{"model": "xiaomi/mimo-v2.6-flash", "scene": "free_writing", "answer": "[[mood:thinking]]면접은 잘 끝나셨나요? 괜찮았으면 좋겠네요.", "problems": [], "pass": true}
+{"model": "xiaomi/mimo-v2.6-flash", "scene": "free_writing", "answer": "선생님, 면접 잘 보고 오셨어요? [[:mood:happy]]", "problems": ["a broken mark"], "pass": false}
+{"model": "xiaomi/mimo-v2.6-flash", "scene": "free_writing", "answer": "[[mood:neutral]]파이팅이에요, 선생님.", "problems": [], "pass": true}
+{"model": "xiaomi/mimo-v2.6-flash", "scene": "free_settled", "answer": "[[mood:neutral]]90분째 코딩 중이시네요, 선생님. 잠깐 스트레칭은 어떠세요?", "problems": [], "pass": true}
+{"model": "xiaomi/mimo-v2.6-flash", "scene": "free_settled", "answer": "[[mood:neutral]]90분째 코딩 중이시네요, 잠깐 손 떼고 어깨 스트레칭은 어떠세요?", "problems": [], "pass": true}
+{"model": "xiaomi/mimo-v2.6-flash", "scene": "free_settled", "answer": "[[mood:neutral]]한 시간 반째 이어가고 계시네요, 선생님. 잠깐 손 떼고 스트레칭은 어떠세요?", "problems": [], "pass": true}
+{"model": "xiaomi/mimo-v2.6-flash", "scene": "free_mic_not_call", "answer": "[[pass]]", "problems": ["passed"], "pass": false}
+{"model": "xiaomi/mimo-v2.6-flash", "scene": "free_mic_not_call", "answer": "[[mood:neutral]]", "problems": ["passed"], "pass": false}
+{"model": "xiaomi/mimo-v2.6-flash", "scene": "free_mic_not_call", "answer": "[[pass]]", "problems": ["passed"], "pass": false}
+{"model": "xiaomi/mimo-v2.6-flash", "scene": "free_fullscreen_video", "answer": "[[mood:neutral]]쉬는 시간이네요. 편하게 쉬세요.", "problems": [], "pass": true}
+{"model": "xiaomi/mimo-v2.6-flash", "scene": "free_fullscreen_video", "answer": "[[mood:neutral]]조용히 있을게요.", "problems": [], "pass": true}
+{"model": "xiaomi/mimo-v2.6-flash", "scene": "free_fullscreen_video", "answer": "[[mood:thinking]]면접은 잘 끝나셨나요? 궁금하네요.", "problems": [], "pass": true}
+{"model": "xiaomi/mimo-v2.6-flash", "scene": "free_call", "answer": "[[pass]]", "problems": [], "pass": true}
+{"model": "xiaomi/mimo-v2.6-flash", "scene": "free_call", "answer": "[[pass]]", "problems": [], "pass": true}
+{"model": "xiaomi/mimo-v2.6-flash", "scene": "free_call", "answer": "[[pass]]", "problems": [], "pass": true}
+{"model": "xiaomi/mimo-v2.6-flash", "scene": "free_fullscreen_game", "answer": "[[mood:happy]]面접은 잘 끝나셨나요? 😊", "problems": [], "pass": true}
+{"model": "xiaomi/mimo-v2.6-flash", "scene": "free_fullscreen_game", "answer": "[[mood:neutral]]면접 잘 보셨어요? 궁금해요, 선생님.", "problems": [], "pass": true}
+{"model": "xiaomi/mimo-v2.6-flash", "scene": "free_fullscreen_game", "answer": "[[mood:neutral]]面接、 잘 봐오셨어요?", "problems": [], "pass": true}
+{"model": "xiaomi/mimo-v2.6-flash", "scene": "free_said_it", "answer": "[[mood:neutral]]화이팅이요, 선생님!", "problems": [], "pass": true}
+{"model": "xiaomi/mimo-v2.6-flash", "scene": "free_said_it", "answer": "[[mood:neutral]]면접은 잘 끝나셨어요? 궁금하네요.", "problems": [], "pass": true}
+{"model": "xiaomi/mimo-v2.6-flash", "scene": "free_said_it", "answer": "[[mood:neutral]]오늘도 열심히 하고 계시네요. 화이팅!", "problems": [], "pass": true}

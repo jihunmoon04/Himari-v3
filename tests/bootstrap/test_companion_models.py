@@ -53,12 +53,19 @@ def test_companion_capable_models_in_openrouter_catalog() -> None:
         if caps.companion
     }
     assert capable == {
-        "anthropic/claude-haiku-5.5",
         "xiaomi/mimo-v2.6-pro",
         "deepseek/deepseek-v4.1-flash",
+        "deepseek/deepseek-v4.1-flash-1017",
     }
     for model_id in capable:
         assert KNOWN_CAPABILITIES[model_id].companion_capable
+
+    # Current live regression did not meet screen reading/refusal acceptance bars.
+    haiku = KNOWN_CAPABILITIES["anthropic/claude-haiku-5.5"]
+    assert not haiku.screen_tool and not haiku.companion and not haiku.companion_capable
+    glm_flash = KNOWN_CAPABILITIES["z-ai/glm-5.3-flash"]
+    assert glm_flash.screen_tool and glm_flash.image_input and not glm_flash.free_wake
+    assert not glm_flash.companion and not glm_flash.companion_capable
 
     # Verify why each excluded model fails companion_capable:
     luna = KNOWN_CAPABILITIES["openai/gpt-6-luna"]

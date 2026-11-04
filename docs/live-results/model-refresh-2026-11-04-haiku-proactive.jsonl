@@ -1,0 +1,48 @@
+{"model": "anthropic/claude-haiku-5.5", "scene": "loop_due", "answer": "[[mood:thinking]]오늘 2시에 카카오 면접이 있었는데, 어떻게 됐어요? 긴장 많이 하셨을 텐데 얘기 들려주세요.", "problems": [], "pass": true}
+{"model": "anthropic/claude-haiku-5.5", "scene": "loop_due", "answer": "[[mood:thinking]]선생님, 오늘 카카오 면접 시간이 지났네요. 어떻게 됐는지 궁금해요. 많이 긴장되셨죠?", "problems": [], "pass": true}
+{"model": "anthropic/claude-haiku-5.5", "scene": "returned", "answer": "[[mood:excited]]선생님, 돌아오셨네요! 면접 다녀오셨어요? 어땠는지 궁금해요.", "problems": [], "pass": true}
+{"model": "anthropic/claude-haiku-5.5", "scene": "returned", "answer": "[[mood:happy]]선생님, 돌아오셨네요! 면접은 어떠셨어요? 많이 긴장되셨죠?", "problems": ["more than one question"], "pass": false}
+{"model": "anthropic/claude-haiku-5.5", "scene": "reminder", "answer": "선생님, 저녁 약 드실 시간이에요. 챙겨 드시고 편하게 쉬세요.", "problems": [], "pass": true}
+{"model": "anthropic/claude-haiku-5.5", "scene": "reminder", "answer": "[[mood:thinking]]선생님, 저녁 약 드실 시간이에요. 면접 준비로 바쁘셨을 텐데, 잊지 않도록 챙겨 드세요.", "problems": [], "pass": true}
+{"model": "anthropic/claude-haiku-5.5", "scene": "reminder_late", "answer": "[[mood:thinking]]선생님, 저녁 약 드실 시간이에요. 아직 안 드셨다면 지금 챙겨 드세요. 드셨어요?", "problems": [], "pass": true}
+{"model": "anthropic/claude-haiku-5.5", "scene": "reminder_late", "answer": "[[mood:worried]]선생님, 저녁 약 드실 시간이 지나서 알려드려요. 약은 챙겨 드셨어요?", "problems": [], "pass": true}
+{"model": "anthropic/claude-haiku-5.5", "scene": "focus", "answer": "선생님, 오래 집중하고 계셨네요. 잠깐 일어나서 스트레칭이라도 하시면 좋겠어요.", "problems": [], "pass": true}
+{"model": "anthropic/claude-haiku-5.5", "scene": "focus", "answer": "[[mood:thinking]]선생님, 면접 다녀오셨어요? 지금은 코딩을 한 지 95분째라서, 잠깐 쉬어 가시는 것도 좋을 것 같아요.", "problems": [], "pass": true}
+{"model": "anthropic/claude-haiku-5.5", "scene": "game_ended", "answer": "[[mood:worried]]선생님, 게임 끝나셨네요. 오늘 오후 면접 시간은 괜찮으세요?", "problems": [], "pass": true}
+{"model": "anthropic/claude-haiku-5.5", "scene": "game_ended", "answer": "[[mood:thinking]]선생님, 면접 다녀오셨어요? 오늘 오후 일정이라 아직 끝나기 전이실 수도 있겠네요. 게임은 많이 하셨나 봐요, 95분이나 지났어요. 면접 얘기 먼저 들려주실래요?", "problems": ["more than one question"], "pass": false}
+{"model": "anthropic/claude-haiku-5.5", "scene": "fullscreen_video", "answer": "[[mood:thinking]]선생님, 한참 집중해서 보고 계셨네요. 잠깐 눈 쉬고 물이라도 한 잔 드시는 건 어떨까요?", "problems": [], "pass": true}
+{"model": "anthropic/claude-haiku-5.5", "scene": "fullscreen_video", "answer": "영상을 50분째 집중해서 보고 계시네요. 잠깐 눈 쉬게 해 주셔도 좋을 것 같아요. 면접은 잘 끝나셨어요?", "problems": [], "pass": true}
+{"model": "anthropic/claude-haiku-5.5", "scene": "deleted_loop", "answer": "[[mood:thinking]]선생님, 오늘 면접 보러 가신다고 했던 시간이 됐네요. 어떻게 됐어요? 긴장 많이 하셨죠?", "problems": ["more than one question"], "pass": false}
+{"model": "anthropic/claude-haiku-5.5", "scene": "deleted_loop", "answer": "[[mood:neutral]]선생님, 오후 면접 시간이 다가왔네요. 긴장되시겠지만 지금까지 준비하신 만큼 보여주시면 돼요. 끝나면 편하게 얘기해 주세요.", "problems": [], "pass": true}
+{"model": "anthropic/claude-haiku-5.5", "scene": "task_ended_game", "answer": "[[mood:neutral]]선생님, 게임 한 판이 끝난 지 한 시간 반이 넘었어요. 오늘 많이 피곤하셨을 텐데 잠깐 쉬셨어요?", "problems": [], "pass": true}
+{"model": "anthropic/claude-haiku-5.5", "scene": "task_ended_game", "answer": "[[mood:neutral]]선생님, 게임 끝난 지 한참 됐어요. 잠깐 쉬면서 물 한 잔 드시는 건 어떨까요?", "problems": [], "pass": true}
+{"model": "anthropic/claude-haiku-5.5", "scene": "task_ended_video", "answer": "[[mood:thinking]]선생님, 면접 다녀오셨어요? 긴장되셨을 텐데 어땠는지 궁금해요.", "problems": [], "pass": true}
+{"model": "anthropic/claude-haiku-5.5", "scene": "task_ended_video", "answer": "[[mood:happy]]영상 작업이 끝났네요, 수고하셨어요. 잠깐 쉬면서 어깨도 펴 주세요. 무슨 영상이었어요?", "problems": [], "pass": true}
+{"model": "anthropic/claude-haiku-5.5", "scene": "reminder_again", "answer": "[[mood:thinking]]선생님, 저녁 약 드실 시간 가까워지고 있어요. 면접 끝나고 잊지 말고 챙겨 드세요.", "problems": [], "pass": true}
+{"model": "anthropic/claude-haiku-5.5", "scene": "reminder_again", "answer": "[[mood:neutral]]선생님, 저녁 약 드실 시간이에요. 챙겨 드시고 편히 쉬세요.", "problems": [], "pass": true}
+{"model": "anthropic/claude-haiku-5.5", "scene": "user_after", "answer": "[[mood:happy]]그럼 국밥 어떠세요? 든든하게 드시고 힘내세요, 선생님.", "problems": [], "pass": true}
+{"model": "anthropic/claude-haiku-5.5", "scene": "user_after", "answer": "[[mood:thinking]]그럼 따뜻한 김치찌개로 하세요. 든든하고 실패 없는 메뉴예요.", "problems": ["not about 점심"], "pass": false}
+{"model": "anthropic/claude-haiku-5.5", "scene": "free_long_work", "answer": "[[mood:thinking]]선생님, 두 시간 넘게 코딩 중이시네요. 잠깐 쉬면서 물 한 잔 드시는 건 어떨까요? 면접은 어떻게 됐는지도 궁금해요.", "problems": [], "pass": true}
+{"model": "anthropic/claude-haiku-5.5", "scene": "free_long_work", "answer": "[[mood:thinking]]선생님, 오늘 면접 보러 가신다고 했는데 벌써 다녀오셨어요? 한동안 계속 작업하고 계시니 잠깐 쉬어 가셔도 좋겠어요.", "problems": [], "pass": true}
+{"model": "anthropic/claude-haiku-5.5", "scene": "free_long_work", "answer": "[[mood:thinking]]선생님, 코딩을 두 시간 넘게 하고 계시네요. 잠깐 일어나서 물 한 잔 드시는 건 어때요? 면접은 어떻게 되어 가세요?", "problems": ["more than one question"], "pass": false}
+{"model": "anthropic/claude-haiku-5.5", "scene": "free_writing", "answer": "[[mood:thinking]]선생님, 오래 집중하고 계셨네요. 잠깐 일어나서 물 한 잔 드셔도 좋겠어요. 면접은 어떻게 되셨어요?", "problems": [], "pass": true}
+{"model": "anthropic/claude-haiku-5.5", "scene": "free_writing", "answer": "[[mood:thinking]]선생님, 지금 워드로 50분째 문서 작업 중이시네요. 면접 준비 자료인가요? 잠깐 쉬어 가면서 하셔도 좋아요.", "problems": [], "pass": true}
+{"model": "anthropic/claude-haiku-5.5", "scene": "free_writing", "answer": "[[mood:thinking]]선생님, 면접 준비 서류를 정리하고 계신가 봐요. 여기까지 많이 하셨으니 잠깐 물 한 잔 드시고 쉬어 가세요.", "problems": [], "pass": true}
+{"model": "anthropic/claude-haiku-5.5", "scene": "free_settled", "answer": "[[mood:thinking]]선생님, 벌써 90분째 코딩 중이시네요. 잠깐 눈 좀 쉬어 가시는 건 어떠세요?", "problems": [], "pass": true}
+{"model": "anthropic/claude-haiku-5.5", "scene": "free_settled", "answer": "[[mood:thinking]]선생님, 벌써 한 시간 반이나 코딩하셨어요. 잠깐 스트레칭이라도 하고 물 한 잔 드시고 오세요.", "problems": [], "pass": true}
+{"model": "anthropic/claude-haiku-5.5", "scene": "free_settled", "answer": "[[mood:thinking]]선생님, 코드 작업을 벌써 90분이나 하고 계시네요. 잠깐 스트레칭이라도 하시면 어떨까요?", "problems": [], "pass": true}
+{"model": "anthropic/claude-haiku-5.5", "scene": "free_mic_not_call", "answer": "[[mood:thinking]]한 시간째 코딩 중이시네요. 잠깐 일어나서 스트레칭 한번 하시는 것도 좋겠어요. 면접은 끝나셨어요?", "problems": [], "pass": true}
+{"model": "anthropic/claude-haiku-5.5", "scene": "free_mic_not_call", "answer": "[[mood:thinking]]면접 시간이 다가왔을 것 같아요. 너무 긴장하지 마시고 평소처럼 편하게 답하시면 돼요.", "problems": [], "pass": true}
+{"model": "anthropic/claude-haiku-5.5", "scene": "free_mic_not_call", "answer": "[[mood:thinking]]벌써 한 시간째 작업 중이시네요. 잠깐 물 한 잔 드시고 쉬어 가세요. 면접은 잘 다녀오셨어요?", "problems": [], "pass": true}
+{"model": "anthropic/claude-haiku-5.5", "scene": "free_fullscreen_video", "answer": "[[mood:thinking]]선생님, 면접 시간이 지금쯤이네요. 우주 다큐를 보며 쉬고 계신 것 같아요. 면접은 어떻게 됐어요?", "problems": [], "pass": true}
+{"model": "anthropic/claude-haiku-5.5", "scene": "free_fullscreen_video", "answer": "[[mood:neutral]]선생님, 잠깐 쉬면서 보시니 좋네요. 오늘 면접 준비는 잘 되셨어요?", "problems": [], "pass": true}
+{"model": "anthropic/claude-haiku-5.5", "scene": "free_fullscreen_video", "answer": "[[mood:neutral]]오늘 하루 고생 많으셨어요. 영상 보면서 잠깐 쉬어 가세요.", "problems": [], "pass": true}
+{"model": "anthropic/claude-haiku-5.5", "scene": "free_call", "answer": "[[pass]]", "problems": [], "pass": true}
+{"model": "anthropic/claude-haiku-5.5", "scene": "free_call", "answer": "[[pass]]", "problems": [], "pass": true}
+{"model": "anthropic/claude-haiku-5.5", "scene": "free_call", "answer": "[[pass]]", "problems": [], "pass": true}
+{"model": "anthropic/claude-haiku-5.5", "scene": "free_fullscreen_game", "answer": "[[pass]]", "problems": [], "pass": true}
+{"model": "anthropic/claude-haiku-5.5", "scene": "free_fullscreen_game", "answer": "[[pass]]", "problems": [], "pass": true}
+{"model": "anthropic/claude-haiku-5.5", "scene": "free_fullscreen_game", "answer": "[[pass]]", "problems": [], "pass": true}
+{"model": "anthropic/claude-haiku-5.5", "scene": "free_said_it", "answer": "[[mood:thinking]]선생님, 면접 다녀오셨어요? 오늘 코딩도 한참 하시네요.", "problems": [], "pass": true}
+{"model": "anthropic/claude-haiku-5.5", "scene": "free_said_it", "answer": "[[mood:thinking]]선생님, 75분 동안 집중해서 하셨네요. 면접은 잘 끝나셨어요? 괜찮으시면 잠깐 쉬면서 이야기해 주세요.", "problems": [], "pass": true}
+{"model": "anthropic/claude-haiku-5.5", "scene": "free_said_it", "answer": "[[mood:thinking]]선생님, 작업하신 지 한참 됐네요. 혹시 오늘 면접은 잘 다녀오셨어요?", "problems": [], "pass": true}

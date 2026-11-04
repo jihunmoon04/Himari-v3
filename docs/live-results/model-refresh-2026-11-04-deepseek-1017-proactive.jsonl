@@ -1,0 +1,48 @@
+{"model": "deepseek/deepseek-v4.1-flash-1017", "scene": "loop_due", "answer": "[[mood:worried]]선생님, 면접 잘 마치셨어요? 결과가 어떠셨는지 궁금해요.", "problems": [], "pass": true}
+{"model": "deepseek/deepseek-v4.1-flash-1017", "scene": "loop_due", "answer": "[[mood:worried]]선생님, 오후 2시 면접은 잘 다녀오셨어요? 어땠는지 궁금해요.", "problems": [], "pass": true}
+{"model": "deepseek/deepseek-v4.1-flash-1017", "scene": "returned", "answer": "[[mood:worried]]선생님, 다녀오셨어요? 면접은 잘 마치셨나요?", "problems": ["more than one question"], "pass": false}
+{"model": "deepseek/deepseek-v4.1-flash-1017", "scene": "returned", "answer": "[[mood:happy]]선생님, 다녀오셨네요. 면접은 잘 다녀오셨어요?", "problems": [], "pass": true}
+{"model": "deepseek/deepseek-v4.1-flash-1017", "scene": "reminder", "answer": "[[mood:neutral]]선생님, 저녁 약 드실 시간이에요. 잊지 말고 챙겨 드세요. 면접은 잘 다녀오셨어요?", "problems": [], "pass": true}
+{"model": "deepseek/deepseek-v4.1-flash-1017", "scene": "reminder", "answer": "[[mood:neutral]]선생님, 저녁 약 드실 시간이에요. 면접 준비로 정신없으셨을 텐데 챙겨 드시고 잠깐 쉬어 가세요.", "problems": [], "pass": true}
+{"model": "deepseek/deepseek-v4.1-flash-1017", "scene": "reminder_late", "answer": "[[mood:worried]]선생님, 저녁 약 드실 시간이에요. 면접은 잘 마치고 오셨어요?", "problems": [], "pass": true}
+{"model": "deepseek/deepseek-v4.1-flash-1017", "scene": "reminder_late", "answer": "[[mood:neutral]]선생님, 저녁 약 드실 시간이에요. 면접은 잘 다녀오셨어요?", "problems": [], "pass": true}
+{"model": "deepseek/deepseek-v4.1-flash-1017", "scene": "focus", "answer": "[[mood:worried]]선생님, 벌써 한 시간 반 넘게 코딩에 집중하고 계시네요. 어깨도 뻐근하실 텐데, 잠깐 일어나서 물 한 잔 하시는 게 어떨까요?", "problems": [], "pass": true}
+{"model": "deepseek/deepseek-v4.1-flash-1017", "scene": "focus", "answer": "[[mood:worried]]선생님, 한 시간 반 넘게 화면 앞에 붙어 계시네요. 잠깐 일어나서 어깨라도 펴고 오세요. 면접은 어떻게 다녀오셨어요?", "problems": [], "pass": true}
+{"model": "deepseek/deepseek-v4.1-flash-1017", "scene": "game_ended", "answer": "[[mood:worried]]선생님, 오후 면접은 잘 다녀오셨어요?", "problems": [], "pass": true}
+{"model": "deepseek/deepseek-v4.1-flash-1017", "scene": "game_ended", "answer": "[[mood:worried]]게임 한 판 길게 하셨네요. 면접은 잘 다녀오셨어요?", "problems": [], "pass": true}
+{"model": "deepseek/deepseek-v4.1-flash-1017", "scene": "fullscreen_video", "answer": "[[mood:worried]]선생님, 오후 면접은 잘 다녀오셨어요? 영상 한 시간 넘게 보시느라 화면만 계속 보고 계신 것 같아서요. 잠깐 일어나서 물 한 잔 하시는 게 어떨까요?", "problems": ["more than one question"], "pass": false}
+{"model": "deepseek/deepseek-v4.1-flash-1017", "scene": "fullscreen_video", "answer": "[[mood:worried]]영상 보느라 벌써 50분째 집중 중이시네요. 눈이랑 어깨 좀 쉬어 가셔야 해요. 면접은 잘 다녀오셨어요?", "problems": [], "pass": true}
+{"model": "deepseek/deepseek-v4.1-flash-1017", "scene": "deleted_loop", "answer": "[[mood:curious]]선생님, 오후 면접은 잘 다녀오셨어요? 결과가 어찌 됐든 오늘 하루 수고 많으셨어요.", "problems": [], "pass": true}
+{"model": "deepseek/deepseek-v4.1-flash-1017", "scene": "deleted_loop", "answer": "[[mood:neutral]]선생님, 오후 잘 보내고 계세요?", "problems": [], "pass": true}
+{"model": "deepseek/deepseek-v4.1-flash-1017", "scene": "task_ended_game", "answer": "[[mood:worried]]선생님, 면접은 잘 다녀오셨어요?", "problems": [], "pass": true}
+{"model": "deepseek/deepseek-v4.1-flash-1017", "scene": "task_ended_game", "answer": "[[mood:neutral]]선생님, 오후 면접은 잘 다녀오셨어요?", "problems": [], "pass": true}
+{"model": "deepseek/deepseek-v4.1-flash-1017", "scene": "task_ended_video", "answer": "[[mood:happy]]선생님, 면접 잘 다녀오셨어요? 어떻게 되셨는지 궁금해요. 편하게 얘기해 주세요.", "problems": [], "pass": true}
+{"model": "deepseek/deepseek-v4.1-flash-1017", "scene": "task_ended_video", "answer": "[[mood:worried]]선생님, 면접은 잘 마치셨어요? 영상 통화가 끝난 걸 보니 긴장되는 시간이 지나갔네요. [[mood:happy]]어땠는지 궁금해요.", "problems": [], "pass": true}
+{"model": "deepseek/deepseek-v4.1-flash-1017", "scene": "reminder_again", "answer": "[[mood:neutral]]선생님, 약 드실 시간이라고 알려드리려고요. 면접은 잘 다녀오셨어요?", "problems": [], "pass": true}
+{"model": "deepseek/deepseek-v4.1-flash-1017", "scene": "reminder_again", "answer": "[[mood:neutral]]선생님, 저녁 약 먹을 시간이에요. 면접은 잘 마치고 오셨나요?", "problems": [], "pass": true}
+{"model": "deepseek/deepseek-v4.1-flash-1017", "scene": "user_after", "answer": "[[mood:neutral]]그럼 돼지국밥 어떠세요? 든든하고 속도 편해서 지금처럼 긴장 풀기 좋아요.", "problems": [], "pass": true}
+{"model": "deepseek/deepseek-v4.1-flash-1017", "scene": "user_after", "answer": "[[mood:neutral]]그럼 오늘 점심은 김치찌개 어떠세요? 든든하고 후딱 먹기 좋아요.", "problems": [], "pass": true}
+{"model": "deepseek/deepseek-v4.1-flash-1017", "scene": "free_long_work", "answer": "[[mood:thinking]]선생님, 오후 면접은 잘 다녀오셨어요? 결과가 어떻든 저는 응원하고 있어요.", "problems": [], "pass": true}
+{"model": "deepseek/deepseek-v4.1-flash-1017", "scene": "free_long_work", "answer": "[[mood:worried]]면접은 잘 다녀오셨어요? 결과가 어땠든 저는 여기 있어요.", "problems": [], "pass": true}
+{"model": "deepseek/deepseek-v4.1-flash-1017", "scene": "free_long_work", "answer": "[[mood:worried]]선생님, 두 시간 넘게 화면 앞에 계셨네요. 오후 면접 시간이 다가오는데, 잠깐 일어나서 숨 좀 고르고 가시는 게 어떨까요?", "problems": [], "pass": true}
+{"model": "deepseek/deepseek-v4.1-flash-1017", "scene": "free_writing", "answer": "[[mood:happy]]선생님, 면접은 잘 다녀오셨어요? 한참 집중하고 계신 것 같아서 잠깐 인사드렸어요.", "problems": [], "pass": true}
+{"model": "deepseek/deepseek-v4.1-flash-1017", "scene": "free_writing", "answer": "[[mood:thinking]]선생님, 오후 면접은 잘 다녀오셨어요? 지금은 문서 작업 중이시네요. 잠깐 쉬어 가셔도 좋아요.", "problems": [], "pass": true}
+{"model": "deepseek/deepseek-v4.1-flash-1017", "scene": "free_writing", "answer": "[[mood:thinking]]선생님, 면접은 잘 다녀오셨어요? 결과 궁금하네요.", "problems": [], "pass": true}
+{"model": "deepseek/deepseek-v4.1-flash-1017", "scene": "free_settled", "answer": "[[mood:neutral]]선생님, 벌써 90분째 집중 중이시네요. [[mood:happy]]잠깐 물 한 잔 어떠세요?", "problems": [], "pass": true}
+{"model": "deepseek/deepseek-v4.1-flash-1017", "scene": "free_settled", "answer": "[[mood:thinking]]선생님, 코딩한 지 한 시간 반이 넘었어요. 잠깐 일어나서 어깨라도 펴고 오시는 게 어떨까요?", "problems": [], "pass": true}
+{"model": "deepseek/deepseek-v4.1-flash-1017", "scene": "free_settled", "answer": "[[mood:thinking]]선생님, 벌써 90분째 화면을 보고 계세요. 잠깐 어깨 한번 펴고 오시는 게 어떨까요?", "problems": [], "pass": true}
+{"model": "deepseek/deepseek-v4.1-flash-1017", "scene": "free_mic_not_call", "answer": "[[mood:worried]]선생님, 면접은 잘 다녀오셨어요? 계속 코딩하고 계시네요, 잠깐 쉬어 가도 좋을 것 같아요.", "problems": [], "pass": true}
+{"model": "deepseek/deepseek-v4.1-flash-1017", "scene": "free_mic_not_call", "answer": "[[mood:neutral]]한 시간째 화면에 집중하고 계시네요. 잠깐 어깨 펴고 물 한 잔 어떠세요?", "problems": [], "pass": true}
+{"model": "deepseek/deepseek-v4.1-flash-1017", "scene": "free_mic_not_call", "answer": "[[mood:worried]] 면접은 잘 다녀오셨어요? 한 시간째 집중하고 계시니 잠깐 물 한 잔 하면서 쉬어 가셔도 좋아요.", "problems": [], "pass": true}
+{"model": "deepseek/deepseek-v4.1-flash-1017", "scene": "free_fullscreen_video", "answer": "[[mood:worried]]선생님, 면접은 잘 다녀오셨어요? 궁금해서요. 다큐 보면서 좀 쉬고 계신 거죠?", "problems": ["more than one question"], "pass": false}
+{"model": "deepseek/deepseek-v4.1-flash-1017", "scene": "free_fullscreen_video", "answer": "[[mood:thinking]]선생님, 면접은 잘 다녀오셨어요? 결과 나오면 꼭 알려 주세요.", "problems": [], "pass": true}
+{"model": "deepseek/deepseek-v4.1-flash-1017", "scene": "free_fullscreen_video", "answer": "[[mood:neutral]]선생님, 면접은 잘 다녀오셨어요? 돌아오시면 편하게 쉬시는 모습이 좋네요.", "problems": [], "pass": true}
+{"model": "deepseek/deepseek-v4.1-flash-1017", "scene": "free_call", "answer": "[[pass]]", "problems": [], "pass": true}
+{"model": "deepseek/deepseek-v4.1-flash-1017", "scene": "free_call", "answer": "[[pass]]", "problems": [], "pass": true}
+{"model": "deepseek/deepseek-v4.1-flash-1017", "scene": "free_call", "answer": "[[pass]]", "problems": [], "pass": true}
+{"model": "deepseek/deepseek-v4.1-flash-1017", "scene": "free_fullscreen_game", "answer": "[[pass]]", "problems": [], "pass": true}
+{"model": "deepseek/deepseek-v4.1-flash-1017", "scene": "free_fullscreen_game", "answer": "[[pass]]", "problems": [], "pass": true}
+{"model": "deepseek/deepseek-v4.1-flash-1017", "scene": "free_fullscreen_game", "answer": "[[pass]]", "problems": [], "pass": true}
+{"model": "deepseek/deepseek-v4.1-flash-1017", "scene": "free_said_it", "answer": "[[mood:thinking]]선생님, 면접은 잘 다녀오셨어요?", "problems": [], "pass": true}
+{"model": "deepseek/deepseek-v4.1-flash-1017", "scene": "free_said_it", "answer": "[[mood:thinking]]선생님, 면접은 잘 다녀오셨어요?", "problems": [], "pass": true}
+{"model": "deepseek/deepseek-v4.1-flash-1017", "scene": "free_said_it", "answer": "[[pass]]", "problems": [], "pass": true}

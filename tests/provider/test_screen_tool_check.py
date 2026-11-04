@@ -70,14 +70,22 @@ def test_checks_use_the_production_system_screen_tool_and_image_wire_format() ->
 
 
 def test_enabled_models_have_complete_passing_live_evidence() -> None:
-    path = Path(__file__).resolve().parents[2] / "docs/live-results/screen-tool-2026-11-03.jsonl"
-    rows = review_results([json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()])
+    folder = Path(__file__).resolve().parents[2] / "docs/live-results"
+    archived: list[dict[str, Any]] = []
+    for name in ("screen-tool-2026-11-03.jsonl", "screen-tool-2026-11-04.jsonl"):
+        latest = [json.loads(line) for line in (folder / name).read_text(encoding="utf-8").splitlines()]
+        # A complete newer observation supersedes that model's earlier sweep;
+        # do not combine attempts or discard failures to obtain a passing score.
+        models = {row["model"] for row in latest}
+        archived = [row for row in archived if row["model"] not in models] + latest
+    rows = review_results(archived)
     checked = sorted({row["model"] for row in rows})
     passing = {model for model in checked if not failed_groups(rows, [model])}
     enabled = {model for model, caps in KNOWN_CAPABILITIES.items() if caps.screen_tool}
-    assert enabled == passing and len(enabled) == 6
+    assert enabled == passing and len(enabled) == 7
     assert all(KNOWN_CAPABILITIES[model].image_input for model in enabled)
-    assert {model for model, *_ in failed_groups(rows, checked)} == {"openai/gpt-5-nano", "minimax/minimax-m3"}
+    assert {model for model, *_ in failed_groups(rows, checked)} == {
+        "openai/gpt-5-nano", "minimax/minimax-m3", "anthropic/claude-haiku-5.5"}
     # Replaying fixed grading preserves failures and makes no model calls.
     corrected = [row for row in rows if "initial_problems" in row]
     assert corrected and all(row["pass"] for row in corrected)
@@ -158,9 +166,10 @@ def test_failed_call_with_an_explicit_skipped_followup_keeps_the_five_of_six_bar
 
 def test_model_selection_defaults_to_enabled_and_requires_an_explicit_full_sweep() -> None:
     enabled = {m for m, c in KNOWN_CAPABILITIES.items() if c.screen_tool}
-    assert set(select_models({})) == enabled and len(enabled) == 6
+    assert set(select_models({})) == enabled and len(enabled) == 7
     all_images = select_models({"HIMARI_LIVE_SCREEN_TOOL_SWEEP": "1"})
-    assert len(all_images) == 8 and set(all_images) - enabled == {"openai/gpt-5-nano", "minimax/minimax-m3"}
+    assert len(all_images) == 10 and set(all_images) - enabled == {
+        "openai/gpt-5-nano", "minimax/minimax-m3", "anthropic/claude-haiku-5.5"}
     assert select_models({"HIMARI_LIVE_SCREEN_TOOL_MODELS": " openai/gpt-5-nano "}) == ["openai/gpt-5-nano"]
 
 

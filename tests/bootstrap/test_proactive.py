@@ -222,7 +222,8 @@ def test_the_checked_models_are_the_ones_that_passed() -> None:
     from himari.provider.openrouter import KNOWN_CAPABILITIES
 
     assert {m for m, c in KNOWN_CAPABILITIES.items() if c.speaks_first} == {
-        "openai/gpt-6-luna", "anthropic/claude-haiku-5.5", "xiaomi/mimo-v2.6-pro", "deepseek/deepseek-v4.1-flash"}
+        "openai/gpt-6-luna", "anthropic/claude-haiku-5.5", "xiaomi/mimo-v2.6-pro", "deepseek/deepseek-v4.1-flash",
+        "deepseek/deepseek-v4.1-flash-1017", "z-ai/glm-5.3-flash"}
     assert not KNOWN_CAPABILITIES["minimax/minimax-m3"].speaks_first  # 13 of 18: under the bar
 
 

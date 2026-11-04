@@ -298,5 +298,5 @@ def test_only_the_models_checked_live_declare_streaming() -> None:
     assert {m for m, c in KNOWN_CAPABILITIES.items() if c.streaming} == {
         "openai/gpt-6-luna", "anthropic/claude-haiku-5.5", "openai/gpt-6.1-sol",
         "anthropic/claude-sonnet-5.5", "xiaomi/mimo-v2.6-pro", "z-ai/glm-5.3",
-        "deepseek/deepseek-v4.1-flash", "minimax/minimax-m3",
+        "deepseek/deepseek-v4.1-flash", "deepseek/deepseek-v4.1-flash-1017", "minimax/minimax-m3", "z-ai/glm-5.3-flash",
     }

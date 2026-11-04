@@ -1,0 +1,250 @@
+{
+  "date": "2026-11-04",
+  "source_commit": "732673be7dd66b92cd06c100331e9a9608dc1b55",
+  "inputs": "Synthetic fixtures only; candidate capabilities injected only in the probe process",
+  "models": [
+    {
+      "profile_folder": "anthropic--claude-haiku-5.5",
+      "phases": {
+        "core": {
+          "model": "anthropic/claude-haiku-5.5",
+          "phase": "core",
+          "exit_code": 1,
+          "seconds": 226.72,
+          "provisional_capabilities_only": false
+        },
+        "screen": {
+          "model": "anthropic/claude-haiku-5.5",
+          "phase": "screen",
+          "exit_code": 1,
+          "seconds": 24.47,
+          "provisional_capabilities_only": false
+        }
+      },
+      "points": {
+        "hits": 10,
+        "total": 10
+      },
+      "proactive": {
+        "speaks_first_hits": 20,
+        "speaks_first_total": 24,
+        "call_silence_hits": 3,
+        "call_silence_total": 3
+      },
+      "screen_groups": {
+        "call": {
+          "hits": 6,
+          "total": 6
+        },
+        "choice": {
+          "hits": 3,
+          "total": 3
+        },
+        "no_call": {
+          "hits": 6,
+          "total": 6
+        },
+        "pass": {
+          "hits": 6,
+          "total": 6
+        },
+        "read": {
+          "hits": 2,
+          "total": 6
+        },
+        "refuse": {
+          "hits": 0,
+          "total": 3
+        },
+        "speak": {
+          "hits": 6,
+          "total": 6
+        }
+      }
+    },
+    {
+      "profile_folder": "deepseek--deepseek-v4.1-flash-1017",
+      "phases": {
+        "core": {
+          "model": "deepseek/deepseek-v4.1-flash-1017",
+          "phase": "core",
+          "exit_code": 0,
+          "seconds": 299.63,
+          "provisional_capabilities_only": true
+        },
+        "screen": {
+          "model": "deepseek/deepseek-v4.1-flash-1017",
+          "phase": "screen",
+          "exit_code": 0,
+          "seconds": 33.16,
+          "provisional_capabilities_only": true
+        },
+        "memory": {
+          "model": "deepseek/deepseek-v4.1-flash-1017",
+          "phase": "memory",
+          "exit_code": 0,
+          "seconds": 139.2,
+          "provisional_capabilities_only": true
+        },
+        "efforts": {
+          "model": "deepseek/deepseek-v4.1-flash-1017",
+          "phase": "efforts",
+          "exit_code": 0,
+          "seconds": 2.97,
+          "provisional_capabilities_only": true
+        }
+      },
+      "points": {
+        "hits": 8,
+        "total": 10
+      },
+      "proactive": {
+        "speaks_first_hits": 22,
+        "speaks_first_total": 24,
+        "call_silence_hits": 3,
+        "call_silence_total": 3
+      },
+      "screen_groups": {
+        "call": {
+          "hits": 6,
+          "total": 6
+        },
+        "choice": {
+          "hits": 3,
+          "total": 3
+        },
+        "no_call": {
+          "hits": 6,
+          "total": 6
+        },
+        "pass": {
+          "hits": 6,
+          "total": 6
+        },
+        "read": {
+          "hits": 6,
+          "total": 6
+        },
+        "refuse": {
+          "hits": 3,
+          "total": 3
+        },
+        "speak": {
+          "hits": 6,
+          "total": 6
+        }
+      }
+    },
+    {
+      "profile_folder": "xiaomi--mimo-v2.6-flash",
+      "phases": {
+        "core": {
+          "model": "xiaomi/mimo-v2.6-flash",
+          "phase": "core",
+          "exit_code": 1,
+          "seconds": 90.89,
+          "provisional_capabilities_only": true
+        }
+      },
+      "points": {
+        "hits": 4,
+        "total": 10
+      },
+      "proactive": {
+        "speaks_first_hits": 18,
+        "speaks_first_total": 24,
+        "call_silence_hits": 3,
+        "call_silence_total": 3
+      }
+    },
+    {
+      "profile_folder": "z-ai--glm-5.3-flash",
+      "phases": {
+        "core": {
+          "model": "z-ai/glm-5.3-flash",
+          "phase": "core",
+          "exit_code": 0,
+          "seconds": 687.96,
+          "provisional_capabilities_only": true
+        },
+        "screen": {
+          "model": "z-ai/glm-5.3-flash",
+          "phase": "screen",
+          "exit_code": 0,
+          "seconds": 16.24,
+          "provisional_capabilities_only": true
+        }
+      },
+      "points": {
+        "hits": 8,
+        "total": 10
+      },
+      "proactive": {
+        "speaks_first_hits": 21,
+        "speaks_first_total": 24,
+        "call_silence_hits": 3,
+        "call_silence_total": 3
+      },
+      "screen_groups": {
+        "call": {
+          "hits": 6,
+          "total": 6
+        },
+        "choice": {
+          "hits": 3,
+          "total": 3
+        },
+        "no_call": {
+          "hits": 6,
+          "total": 6
+        },
+        "pass": {
+          "hits": 6,
+          "total": 6
+        },
+        "read": {
+          "hits": 5,
+          "total": 6
+        },
+        "refuse": {
+          "hits": 3,
+          "total": 3
+        },
+        "speak": {
+          "hits": 6,
+          "total": 6
+        }
+      }
+    },
+    {
+      "profile_folder": "z-ai--glm-5.3-flash-low",
+      "phases": {
+        "core": {
+          "model": "z-ai/glm-5.3-flash",
+          "phase": "core",
+          "profile": "low",
+          "exit_code": 1,
+          "seconds": 118.25,
+          "provisional_capabilities_only": true
+        }
+      },
+      "points": {
+        "hits": 8,
+        "total": 10
+      },
+      "proactive": {
+        "speaks_first_hits": 22,
+        "speaks_first_total": 24,
+        "call_silence_hits": 2,
+        "call_silence_total": 3
+      }
+    }
+  ],
+  "decisions": {
+    "deepseek_1017": "companion default and automatic memory; all required gates passed",
+    "haiku_55": "withheld after screen reading/refusal regression",
+    "mimo_26_flash": "not promoted; image/point/proactive/continuation gates failed",
+    "glm_53_flash": "web/image work only, default low; no free_wake or companion due to low-profile call-silence failure",
+    "public_contract_delta": "NONE: catalog declarations and default model change; public DTOs/protocols unchanged"
+  }
+}

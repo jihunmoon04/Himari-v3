@@ -156,8 +156,10 @@ KNOWN_CAPABILITIES: Mapping[str, ProviderCapabilities] = {
         memory_passes=True,  # V3-P85: every bar of the memory check, live 2026-10-31
         screen_points=True,  # V3-P84: 8+ of 10 points on target, live 2026-10-30
         image_input=True,  # V3-P67: user-message and after-group images read back, live 2026-10-22
-        screen_tool=True,  # V3-P91: read 5/6; other bars met, free speak/pass 6/6 each, live 2026-11-03
-        companion=True,  # all companion features verified (V3-P83, P84, P87, P90, P91)
+        # 2026-11-04 regression: screen read/move 2/6 and refusal 0/3.
+        # Keep the previously verified capabilities; do not offer full companion mode.
+        screen_tool=False,
+        companion=False,
         reasoning_efforts=REASONING_EFFORTS,
         parallel_tool_calls=True,
         context_tokens=1_000_000,  # OpenRouter /api/v1/models context_length, 2026-10-14
@@ -222,6 +224,34 @@ KNOWN_CAPABILITIES: Mapping[str, ProviderCapabilities] = {
         reasoning_efforts=frozenset({"low", "medium", "high"}),
         context_tokens=1_048_576,
         max_output_tokens=943_718,
+    ),
+    "deepseek/deepseek-v4.1-flash-1017": ProviderCapabilities(
+        model_id="deepseek/deepseek-v4.1-flash-1017",
+        speaks_first=True,  # live 2026-11-04: 22/24
+        free_wake=True,  # pass 3/3, speak 14/15, either 6/6
+        memory_passes=True,  # 36 fixtures: all memory acceptance bars met
+        screen_points=True,  # 8/10 (24-pixel tolerance)
+        streaming=True,  # chunks, Tool continuation and mid-stream cancel checked live
+        image_input=True,  # user images and images after a Tool group
+        screen_tool=True,  # call/no-call/read 6/6, refusal 3/3; free speak/pass 6/6
+        companion=True,
+        reasoning_efforts=frozenset({"low", "medium", "high"}),  # all accepted live
+        context_tokens=1_048_576,
+        max_output_tokens=393_216,  # OpenRouter top-provider limit, 2026-11-04
+    ),
+    "z-ai/glm-5.3-flash": ProviderCapabilities(
+        model_id="z-ai/glm-5.3-flash",
+        image_input=True,  # user and after-Tool images, live 2026-11-04
+        screen_points=True,  # 8/10
+        screen_tool=True,  # call/no-call 6/6, read 5/6, refusal 3/3
+        speaks_first=True,  # 21/24 default, 22/24 configured low
+        # Low-effort free wakes interrupted a call once (2/3 passes): web-only.
+        free_wake=False,
+        companion=False,
+        streaming=True,  # text, Tool continuation and mid-stream cancel passed
+        reasoning_efforts=frozenset({"low", "high"}),  # screen/production profile and stream Tool check
+        context_tokens=1_048_576,
+        max_output_tokens=131_072,
     ),
     "minimax/minimax-m3": ProviderCapabilities(
         model_id="minimax/minimax-m3",

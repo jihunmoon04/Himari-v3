@@ -227,7 +227,7 @@ class TurnSettings:
 # Default request budget: the model's window, capped so that a long
 # Conversation is compacted before each request costs a whole large window.
 DEFAULT_CONTEXT_TOKENS = 200_000
-DEFAULT_COMPANION_MODEL = "deepseek/deepseek-v4.1-flash"
+DEFAULT_COMPANION_MODEL = "deepseek/deepseek-v4.1-flash-1017"
 UNKNOWN_WINDOW_TOKENS = 128_000  # a model whose window the Provider does not declare
 DEFAULT_OUTPUT_TOKENS = 32_000  # room kept for an answer when the model declares no maximum
 
