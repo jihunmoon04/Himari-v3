@@ -831,31 +831,33 @@ internal static class Program
                 "corrupted download fails SHA-256 verification, leaves no file, and does not show saved");
             handler.CorruptBytes = false;
 
-            // 4b. PR #181 review P1: if a file is created or modified at destination during download, save refuses to overwrite it.
+            // 4b. A filename created during download is preserved; an existing name is rejected before HTTP.
             handler.OnBeforeDownload = () => System.IO.File.WriteAllText(targetFile, "created-mid-download");
             saveButton.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
             Until(() => !(bool)card.GetType().GetProperty("Saving", inside)!.GetValue(card)! && handler.Downloads == 2);
             Check(System.IO.File.ReadAllText(targetFile) == "created-mid-download"
                 && !(bool)card.GetType().GetProperty("Saved", inside)!.GetValue(card)!
-                && stateText.Visibility == Visibility.Visible && stateText.Text.Contains("변경되어 덮어쓰지"),
+                && stateText.Visibility == Visibility.Visible && stateText.Text.Contains("새 이름으로 저장"),
                 "file created at destination during download is not overwritten");
 
-            handler.OnBeforeDownload = () => System.IO.File.WriteAllText(targetFile, "modified-after-approval");
+            handler.OnBeforeDownload = () => throw new Exception("existing path must be rejected before HTTP");
             saveButton.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
-            Until(() => !(bool)card.GetType().GetProperty("Saving", inside)!.GetValue(card)! && handler.Downloads == 3);
-            Check(System.IO.File.ReadAllText(targetFile) == "modified-after-approval"
+            Check(handler.Downloads == 2 && System.IO.File.ReadAllText(targetFile) == "created-mid-download"
                 && !(bool)card.GetType().GetProperty("Saved", inside)!.GetValue(card)!
-                && stateText.Visibility == Visibility.Visible && stateText.Text.Contains("변경되어 덮어쓰지"),
-                "existing file modified during download after overwrite approval is not overwritten");
+                && stateText.Visibility == Visibility.Visible && stateText.Text.Contains("새 이름으로 저장"),
+                "existing filename is rejected before download and asks for a new name");
             handler.OnBeforeDownload = null;
 
-            // 5. Valid download writes verified file and marks card as 저장됨 / 다시 저장.
+            // 5. Retry with a new filename publishes verified bytes and marks the card saved.
+            string retryFile = System.IO.Path.Combine(saveDir, "summary (2).md");
+            Field("chooseSavePath", new Func<string, string?>(_ => retryFile));
             saveButton.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
-            Until(() => !(bool)card.GetType().GetProperty("Saving", inside)!.GetValue(card)! && handler.Downloads == 4);
-            Check(System.IO.File.Exists(targetFile) && System.IO.File.ReadAllBytes(targetFile).SequenceEqual(payload)
+            Until(() => !(bool)card.GetType().GetProperty("Saving", inside)!.GetValue(card)! && handler.Downloads == 3);
+            Check(System.IO.File.Exists(retryFile) && System.IO.File.ReadAllBytes(retryFile).SequenceEqual(payload)
+                && System.IO.File.ReadAllText(targetFile) == "created-mid-download"
                 && (bool)card.GetType().GetProperty("Saved", inside)!.GetValue(card)!
                 && stateText.Text == "저장됨" && saveButtonText.Text == "다시 저장",
-                "successful verified save writes destination file and updates card to 저장됨");
+                "retry with new filename saves verified bytes and preserves the existing file at its path");
 
             // 6. PR #181 review P2: an older presented file (ToolResult sequence <= pending.After) does not complete a newer failed job.
             Call("CloseBubble");

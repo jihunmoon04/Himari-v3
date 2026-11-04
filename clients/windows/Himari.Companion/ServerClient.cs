@@ -91,26 +91,14 @@ internal sealed class SaveTargetChangedException : IOException
     internal SaveTargetChangedException(string message, Exception innerException) : base(message, innerException) { }
 }
 
-internal readonly record struct FileHandleIdentity(
-    uint VolumeSerialNumber,
-    uint FileIndexHigh,
-    uint FileIndexLow,
-    ulong CreationTimeTicks,
-    ulong LastWriteTimeTicks,
-    ulong FileSize);
-
-/// <summary>V3-P93 §6.3 (PR #181 review P1): state of the user-selected save path at dialog confirmation time.
-/// New paths commit with overwrite:false; approved existing files verify handle identity/timestamps/content on a
-/// FileShare.None handle, stage the original via handle rename, and atomically move the verified .part into place
-/// (restoring the original on any failure without ever truncating in-place or mutating other hard links).</summary>
-internal sealed record ApprovedSaveTarget(
-    string FullPath,
-    bool ExistedAtSelection,
-    FileHandleIdentity ExistingIdentity,
-    string? ExistingSha256)
+/// <summary>V3-P93 §6.3: publish a verified download only to a new filename.
+/// The exclusive .part handle is renamed once with ReplaceIfExists = FALSE.
+/// Existing files are never opened, staged, replaced, or restored.</summary>
+internal sealed record ApprovedSaveTarget
 {
-    internal Action? OnAfterVerifyBeforeReplace { get; init; }
-    internal Action? OnBeforeCommitTempMove { get; init; }
+    internal const string PathConflictMessage = "같은 이름의 파일이나 폴더가 있어요. 새 이름으로 저장해 주세요.";
+    internal string FullPath { get; }
+    private ApprovedSaveTarget(string fullPath) => FullPath = fullPath;
     internal Action<SafeFileHandle>? OnBeforeCommitTempHandleMove { get; init; }
 
     private const uint GenericRead = 0x80000000;
@@ -118,42 +106,8 @@ internal sealed record ApprovedSaveTarget(
     private const uint DeleteAccess = 0x00010000;
     private const uint FileShareNone = 0;
     private const uint CreateNewDisposition = 1;
-    private const uint OpenExisting = 3;
     private const uint FileAttributeNormal = 0x00000080;
-    private const int ErrorFileNotFound = 2;
-    private const int ErrorPathNotFound = 3;
-    private const int ErrorAccessDenied = 5;
-    private const int ErrorFileExists = 80;
-    private const int ErrorAlreadyExists = 183;
     private const int FileRenameInfo = 3;
-    private const int FileDispositionInfo = 4;
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct FILETIME
-    {
-        public uint DateTimeLow;
-        public uint DateTimeHigh;
-        public readonly ulong Ticks => ((ulong)DateTimeHigh << 32) | DateTimeLow;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct BY_HANDLE_FILE_INFORMATION
-    {
-        public uint FileAttributes;
-        public FILETIME CreationTime;
-        public FILETIME LastAccessTime;
-        public FILETIME LastWriteTime;
-        public uint VolumeSerialNumber;
-        public uint FileSizeHigh;
-        public uint FileSizeLow;
-        public uint NumberOfLinks;
-        public uint FileIndexHigh;
-        public uint FileIndexLow;
-        public readonly ulong FileSize => ((ulong)FileSizeHigh << 32) | FileSizeLow;
-    }
-
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern bool GetFileInformationByHandle(SafeFileHandle hFile, out BY_HANDLE_FILE_INFORMATION lpFileInformation);
 
     [DllImport("kernel32.dll", EntryPoint = "CreateFileW", SetLastError = true, CharSet = CharSet.Unicode)]
     private static extern SafeFileHandle CreateFile(
@@ -187,7 +141,7 @@ internal sealed record ApprovedSaveTarget(
         return handle;
     }
 
-    private static void RenameOpenHandle(SafeFileHandle handle, string targetPath, out int win32Error)
+    private static void RenameOpenHandle(SafeFileHandle handle, string targetPath)
     {
         if (handle.IsInvalid || handle.IsClosed)
             throw new IOException("열린 파일 핸들이 유효하지 않습니다.");
@@ -204,42 +158,13 @@ internal sealed record ApprovedSaveTarget(
             Marshal.Copy(nameBytes, 0, IntPtr.Add(buffer, headerSize), nameBytes.Length);
             if (!SetFileInformationByHandle(handle, FileRenameInfo, buffer, (uint)totalSize))
             {
-                win32Error = Marshal.GetLastWin32Error();
                 throw new IOException("열린 파일 핸들의 경로를 원자적으로 전환할 수 없습니다.", Marshal.GetExceptionForHR(Marshal.GetHRForLastWin32Error()));
             }
-            win32Error = 0;
         }
         finally
         {
             Marshal.FreeHGlobal(buffer);
         }
-    }
-
-    private static bool TryDeleteOpenHandleOnClose(SafeFileHandle handle)
-    {
-        IntPtr buffer = Marshal.AllocHGlobal(1);
-        try
-        {
-            Marshal.WriteByte(buffer, 0, 1);
-            return SetFileInformationByHandle(handle, FileDispositionInfo, buffer, 1);
-        }
-        finally
-        {
-            Marshal.FreeHGlobal(buffer);
-        }
-    }
-
-    private static FileHandleIdentity ReadHandleIdentity(SafeFileHandle handle)
-    {
-        if (!GetFileInformationByHandle(handle, out var info))
-            throw new IOException("대상 파일의 핸들 정보를 확인할 수 없습니다.", Marshal.GetExceptionForHR(Marshal.GetHRForLastWin32Error()));
-        return new FileHandleIdentity(
-            info.VolumeSerialNumber,
-            info.FileIndexHigh,
-            info.FileIndexLow,
-            info.CreationTime.Ticks,
-            info.LastWriteTime.Ticks,
-            info.FileSize);
     }
 
     internal static ApprovedSaveTarget Capture(string destinationPath)
@@ -247,102 +172,27 @@ internal sealed record ApprovedSaveTarget(
         if (string.IsNullOrWhiteSpace(destinationPath))
             throw new ArgumentException("저장 경로가 올바르지 않습니다.", nameof(destinationPath));
         string fullPath = Path.GetFullPath(destinationPath);
-        if (Directory.Exists(fullPath))
-            throw new IOException("선택한 저장 경로가 폴더입니다.");
-        if (!File.Exists(fullPath))
-            return new ApprovedSaveTarget(fullPath, false, default, null);
-        try
-        {
-            using var stream = new FileStream(fullPath, FileMode.Open, FileAccess.Read, FileShare.Read);
-            var identityBefore = ReadHandleIdentity(stream.SafeFileHandle);
-            string sha256 = Convert.ToHexString(SHA256.HashData(stream)).ToLowerInvariant();
-            var identityAfter = ReadHandleIdentity(stream.SafeFileHandle);
-            if (identityBefore != identityAfter)
-                throw new SaveTargetChangedException("저장 위치를 확인하는 중 대상 파일이 변경되었습니다.");
-            return new ApprovedSaveTarget(fullPath, true, identityAfter, sha256);
-        }
-        catch (FileNotFoundException)
-        {
-            return new ApprovedSaveTarget(fullPath, false, default, null);
-        }
+        if (File.Exists(fullPath) || Directory.Exists(fullPath))
+            throw new SaveTargetChangedException(PathConflictMessage);
+        return new ApprovedSaveTarget(fullPath);
     }
 
     internal void CommitMove(SafeFileHandle tempHandle)
     {
-        if (!ExistedAtSelection)
-        {
-            try
-            {
-                RenameOpenHandle(tempHandle, FullPath, out _);
-            }
-            catch (IOException ex) when (File.Exists(FullPath) || Directory.Exists(FullPath))
-            {
-                throw new SaveTargetChangedException("다운로드 중 같은 경로에 파일이 생성되어 덮어쓰기를 중단했습니다.", ex);
-            }
-            return;
-        }
-        if (Directory.Exists(FullPath))
-            throw new SaveTargetChangedException("다운로드 중 대상 경로가 폴더로 바뀌어 덮어쓰기를 중단했습니다.");
-        SafeFileHandle handle = CreateFile(
-            FullPath,
-            GenericRead | DeleteAccess,
-            FileShareNone,
-            IntPtr.Zero,
-            OpenExisting,
-            FileAttributeNormal,
-            IntPtr.Zero);
-        if (handle.IsInvalid)
-        {
-            int err = Marshal.GetLastWin32Error();
-            handle.Dispose();
-            if (err is ErrorFileNotFound or ErrorPathNotFound)
-                throw new SaveTargetChangedException("다운로드 중 대상 파일이 사라져 덮어쓰기를 중단했습니다.");
-            if (err == ErrorAccessDenied && Directory.Exists(FullPath))
-                throw new SaveTargetChangedException("다운로드 중 대상 경로가 폴더로 바뀌어 덮어쓰기를 중단했습니다.");
-            throw new IOException("대상 파일을 잠글 수 없습니다.", Marshal.GetExceptionForHR(Marshal.GetHRForLastWin32Error()));
-        }
-        string directory = Path.GetDirectoryName(FullPath) ?? Path.GetTempPath();
-        string backupPath = Path.Combine(directory, $".{Path.GetFileName(FullPath)}.{Guid.NewGuid():N}.bak");
-        bool deleteBackupAfterClose = false;
+        OnBeforeCommitTempHandleMove?.Invoke(tempHandle);
         try
         {
-            using var existingStream = new FileStream(handle, FileAccess.Read);
-            var currentIdentity = ReadHandleIdentity(handle);
-            if (currentIdentity != ExistingIdentity || (ulong)existingStream.Length != ExistingIdentity.FileSize)
-                throw new SaveTargetChangedException("다운로드 중 대상 파일이 변경되어 덮어쓰기를 중단했습니다.");
-            existingStream.Position = 0;
-            string currentSha256 = Convert.ToHexString(SHA256.HashData(existingStream)).ToLowerInvariant();
-            if (!string.Equals(currentSha256, ExistingSha256, StringComparison.OrdinalIgnoreCase))
-                throw new SaveTargetChangedException("다운로드 중 대상 파일이 변경되어 덮어쓰기를 중단했습니다.");
-            // Both handle (FullPath) and tempHandle (.part) are held with FileShare.None (dwShareMode = 0),
-            // blocking even DELETE-only / POSIX-rename opens on either file.
-            OnAfterVerifyBeforeReplace?.Invoke();
-            RenameOpenHandle(handle, backupPath, out _);
-            try
-            {
-                OnBeforeCommitTempMove?.Invoke();
-                OnBeforeCommitTempHandleMove?.Invoke(tempHandle);
-                RenameOpenHandle(tempHandle, FullPath, out _);
-            }
-            catch (Exception ex)
-            {
-                if (File.Exists(FullPath) || Directory.Exists(FullPath))
-                    throw new SaveTargetChangedException("다운로드 중 대상 경로에 다른 파일이 생성되어 덮어쓰기를 중단했습니다.", ex);
-                try { RenameOpenHandle(handle, FullPath, out _); } catch { }
-                throw;
-            }
-            if (!TryDeleteOpenHandleOnClose(handle))
-                deleteBackupAfterClose = true;
+            // Capture is only an early UX check. This single kernel rename enforces no overwrite
+            // even if another process creates the destination after the dialog closes.
+            RenameOpenHandle(tempHandle, FullPath);
         }
-        finally
+        catch (IOException ex) when (File.Exists(FullPath) || Directory.Exists(FullPath))
         {
-            if (deleteBackupAfterClose && File.Exists(backupPath))
-            {
-                try { File.Delete(backupPath); } catch { }
-            }
+            throw new SaveTargetChangedException(PathConflictMessage, ex);
         }
     }
 }
+
 internal sealed class ServerClient : IDisposable
 {
     internal const string GenerationHeader = "X-Himari-Connection-Generation";

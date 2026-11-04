@@ -294,16 +294,8 @@ public partial class MainWindow
 
     private string? ChooseSavePathDialog(string suggestedFileName)
     {
-        var dialog = new Microsoft.Win32.SaveFileDialog
-        {
-            Title = "파일 저장",
-            FileName = suggestedFileName,
-            OverwritePrompt = true,
-            AddExtension = false,
-            Filter = "모든 파일 (*.*)|*.*"
-        };
         Window owner = dialogueHost is { IsVisible: true } ? dialogueHost : this;
-        return dialog.ShowDialog(owner) == true ? dialog.FileName : null;
+        return PresentedFileSaveDialog.ChoosePath(owner, suggestedFileName);
     }
 
     private async Task SavePresentedFileAsync(PresentedFileCardState card)
@@ -318,6 +310,13 @@ public partial class MainWindow
             string? destination = (chooseSavePath ?? ChooseSavePathDialog)(suggested);
             if (!string.IsNullOrWhiteSpace(destination))
                 destinationTarget = ApprovedSaveTarget.Capture(destination);
+        }
+        catch (SaveTargetChangedException ex)
+        {
+            card.ErrorMessage = ex.Message;
+            UpdatePresentedFileCard(card);
+            DismissUserBubbleIfUnfocused();
+            return;
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
         {
@@ -378,7 +377,7 @@ public partial class MainWindow
             else if (ex is ApiException { Code: "device_scope" } || ex is ApiException { Status: HttpStatusCode.Unauthorized })
                 card.ErrorMessage = "저장 권한이 없습니다.";
             else if (ex is SaveTargetChangedException)
-                card.ErrorMessage = "저장 중 대상 파일이 변경되어 덮어쓰지 않았어요.";
+                card.ErrorMessage = ex.Message;
             else if (ex is InvalidDataException)
                 card.ErrorMessage = "파일 검증에 실패해 저장하지 않았어요.";
             else if (ex is OperationCanceledException)

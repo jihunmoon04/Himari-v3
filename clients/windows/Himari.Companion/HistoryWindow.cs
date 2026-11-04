@@ -106,19 +106,18 @@ internal sealed class HistoryWindow : Window
     }
     private async Task SaveFromHistoryAsync(ServerClient client, string conversationId, PresentedFileItem item, string suggestedName, System.Windows.Controls.Button button, TextBlock statusLabel, CancellationToken ct)
     {
-        var dialog = new Microsoft.Win32.SaveFileDialog
-        {
-            Title = "파일 저장",
-            FileName = suggestedName,
-            OverwritePrompt = true,
-            AddExtension = false,
-            Filter = "모든 파일 (*.*)|*.*"
-        };
-        if (dialog.ShowDialog(this) != true || string.IsNullOrWhiteSpace(dialog.FileName)) return;
+        string? destination = PresentedFileSaveDialog.ChoosePath(this, suggestedName);
+        if (string.IsNullOrWhiteSpace(destination)) return;
         ApprovedSaveTarget target;
         try
         {
-            target = ApprovedSaveTarget.Capture(dialog.FileName);
+            target = ApprovedSaveTarget.Capture(destination);
+        }
+        catch (SaveTargetChangedException ex)
+        {
+            statusLabel.Text = ex.Message;
+            statusLabel.Visibility = Visibility.Visible;
+            return;
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
         {
@@ -142,7 +141,7 @@ internal sealed class HistoryWindow : Window
             button.Content = "저장";
             button.IsEnabled = true;
             statusLabel.Text = ex is SaveTargetChangedException
-                ? "저장 중 대상 파일이 변경되어 덮어쓰지 않았어요."
+                ? ex.Message
                 : ex is InvalidDataException
                     ? "파일 검증에 실패해 저장하지 않았어요."
                     : ex is ApiException { Code: "file_expired" }
