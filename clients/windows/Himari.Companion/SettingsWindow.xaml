@@ -80,10 +80,10 @@
           <TextBlock Text="히마리에게 알릴 것" FontSize="16" FontWeight="SemiBold"/>
           <TextBlock Text="지금 하는 일을 알면 히마리가 상황에 맞게 대화합니다. 보낸 내용은 대화할 때마다 모델에 함께 전달되고, 그 대화를 지우기 전까지 서버의 실행 기록에 남습니다. Web의 Devices 화면에서도 볼 수 있습니다." Style="{StaticResource Hint}" Margin="0,5,0,12"/>
           <CheckBox x:Name="SendActivity" Content="지금 하는 일 (프로그램 분류와 이름, 이어 한 시간)" IsChecked="True"/>
-          <CheckBox x:Name="SendTitles" Content="창 제목도 보내기" Margin="0,8,0,0"/>
+          <CheckBox x:Name="SendTitles" Content="창 제목도 보내기" IsChecked="True" Margin="0,8,0,0"/>
           <TextBlock Text="문서 이름, 대화 상대, 보는 페이지가 들어 있을 수 있습니다. 아래 프로그램의 제목은 보내지 않습니다 (한 줄에 하나, 실행 파일 이름). 히마리가 스스로 화면을 볼 때도 이 프로그램이 그 화면에 보이면 찍지 않습니다." Style="{StaticResource Hint}" FontSize="12" Margin="0,3,0,4"/>
           <TextBox x:Name="TitleExclusions" AcceptsReturn="True" TextWrapping="Wrap" Height="70" VerticalScrollBarVisibility="Auto" AutomationProperties.Name="제목을 보내지 않을 프로그램"/>
-          <CheckBox x:Name="SendMedia" Content="재생 중인 음악·영상" Margin="0,12,0,0"/>
+          <CheckBox x:Name="SendMedia" Content="재생 중인 음악·영상" IsChecked="True" Margin="0,12,0,0"/>
           <TextBlock Text="제목·아티스트·앱을 보냅니다. 유튜브 영상 제목처럼 다른 사람이 쓴 글도 모델에 전달됩니다." Style="{StaticResource Hint}" FontSize="12" Margin="0,3,0,0"/>
           <CheckBox x:Name="SendMicCamera" Content="마이크·카메라 사용 중 (통화 추정)" IsChecked="True" Margin="0,12,0,0"/>
           <TextBlock Text="통화 중일 수 있으면 히마리가 짧게 답합니다. 먼저 말 걸기를 막지는 않습니다 — 막으려면 캐릭터 메뉴의 조용히를 쓰세요. 아래 프로그램이 마이크를 써도 알리지 않습니다." Style="{StaticResource Hint}" FontSize="12" Margin="0,3,0,4"/>
@@ -91,7 +91,7 @@
           <Label Content="분류 바꾸기" Target="{Binding ElementName=CategoryOverrides}" Padding="0,12,0,4"/>
           <TextBlock Text="한 줄에 하나, 예: obsidian=document. 분류: coding, document, browsing, video, game, chat, design, other" Style="{StaticResource Hint}" FontSize="12" Margin="0,0,0,4"/>
           <TextBox x:Name="CategoryOverrides" AcceptsReturn="True" TextWrapping="Wrap" Height="56" VerticalScrollBarVisibility="Auto" AutomationProperties.Name="분류 바꾸기"/>
-          <CheckBox x:Name="FreeWakeScreen" Content="그냥 말 걸 때 화면 보기 허용" Margin="0,12,0,0"/>
+          <CheckBox x:Name="FreeWakeScreen" Content="그냥 말 걸 때 화면 보기 허용" IsChecked="True" Margin="0,12,0,0"/>
           <TextBlock Text="알릴 일이 없어도 히마리가 가끔 먼저 말을 겁니다. 켜 두면 그때 지금 화면을 볼 수 있게 됩니다. 화면을 보는 기능이 생기면 쓰이고, 지금은 설정만 저장됩니다. 화면을 볼 때는 말풍선에 표시합니다." Style="{StaticResource Hint}" FontSize="12" Margin="0,3,0,0"/>
         </StackPanel></Border>
         <Border Style="{StaticResource SectionCard}"><StackPanel>

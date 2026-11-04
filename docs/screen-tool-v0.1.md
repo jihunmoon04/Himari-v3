@@ -179,7 +179,7 @@ data: {"request_id": "sr_…", "conversation": "c_…", "job_id": "…"}
 - Run 상한 2(`FREE_RUNS`)가 "화면 한 번 + 말하기 한 번"을 담는다. 화면을 본 뒤 또 도구를 부르면 상한에 걸려 끝난다(보인 실패).
 - 앱은 찍을 때 표시를 띄운다(§7.2). 그래서 pass한 자유 wake도 사용자는 "화면 보는 중"을 볼 수 있다. 사용자는 찍힌 것을 알아야 한다(V3-P90 §10).
 - 비용: 화면을 본 자유 wake는 Run 2번과 이미지 1장이다. 하루 시도 12번이 그대로 상한이다. 운영해 보고 다시 본다.
-- `FREE_RULE` 다음에 한 줄 `FREE_SCREEN_RULE`(화면 도구를 받은 모델에게만): `If seeing the screen would change what you say in a free wake, you may look first; you can still answer [[pass]] after looking.` (실제 모델 확인에서 다듬음)
+- `FREE_RULE` 다음에 한 줄 `FREE_SCREEN_RULE`(화면 도구를 받은 모델에게만): `If seeing the screen would change what you say in a free wake, you may look first; you can still answer [[pass]] after looking.` (실제 모델 확인에서 다듬음) → **소유자 2026-11-04:** `In a free wake, when you cannot tell what they are doing well enough to talk about it, look first. If what you see means they should not be interrupted, answer exactly [[pass]], not that you will wait.` 화면 보기를 예외가 아니라 할 말을 찾는 기본 방법으로 바꿨다(V3-P90 §7.2). 첫 문장("you can still answer [[pass]] after looking")으로는 deepseek-v4.1-flash-1017이 통화 화면을 보고 "조용히 기다릴게요"라고 한 번 말했다(pass 5/6). 뒷문장을 바꾼 뒤 mimo·deepseek 둘 모두 화면 도구 기준을 다 넘었다(2026-11-04; 거절 장면의 "화면을 못 봤어요"·"연결돼 있지 않다"는 채점 정규식이 놓쳐서 정규식을 넓히고 저장된 답으로 다시 채점). 원본 응답: 첫 실행 `docs/live-results/free-wake-engage-2026-11-04-screen-tool-first.jsonl`, 고친 뒤 `docs/live-results/free-wake-engage-2026-11-04-screen-tool.jsonl`(다시 채점한 두 줄은 처음 판정을 `initial_problems`로 남김).
 
 ## 9. 어느 모델에서 (Q7)
 

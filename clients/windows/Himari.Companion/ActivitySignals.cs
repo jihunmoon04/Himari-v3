@@ -3,14 +3,18 @@ namespace Himari.Companion;
 // V3-P88 activity signals: what the app tells the server the user is doing. Everything here is plain
 // logic (the contract tests run it anywhere); reading Windows itself is in ActivityProbe.cs.
 
-/// <summary>What the user chose to send (V3-P88 §4.3, §5, §6.1, Q2, Q3): media and titles are off by default.</summary>
-/// <summary>What is sent (V3-P88 §14). <c>FreeWakeScreen</c> (V3-P90 §9): the screen may go to a free wake — kept by the
-/// server only, for the screen tool (§10). <c>ScreenLook</c> (V3-P91 §7.1): HIMARI may look at the screen when it needs
-/// to — on by default, sent likewise.</summary>
-internal sealed record SignalSettings(bool Activity = true, bool Media = false, bool Titles = false, bool MicCamera = true,
+/// <summary>What the user chose to send (V3-P88 §4.3, §5, §6.1, §14). <c>FreeWakeScreen</c> (V3-P90 §9): the screen may
+/// go to a free wake — kept by the server only, for the screen tool (§10). <c>ScreenLook</c> (V3-P91 §7.1): HIMARI may
+/// look at the screen when it needs to. Every feature is on by default (owner 2026-11-04); the user turns off what
+/// they do not want, and the title exclusions still apply.</summary>
+internal sealed record SignalSettings(bool Activity = true, bool Media = true, bool Titles = true, bool MicCamera = true,
     string TitleExclusions = SignalSettings.DefaultTitleExclusions, string MicExclusions = SignalSettings.DefaultMicExclusions,
-    string CategoryOverrides = "", bool FreeWakeScreen = false, bool ScreenLook = true)
+    string CategoryOverrides = "", bool FreeWakeScreen = true, bool ScreenLook = true)
 {
+    /// <summary>Owner 2026-11-04: the features that used to be off by default, turned on once for saved settings
+    /// (<see cref="WindowPreferences.FeaturesOn"/>); a later choice to turn one off is kept.</summary>
+    internal SignalSettings WithFeaturesOn() => this with { Media = true, Titles = true, FreeWakeScreen = true };
+
     internal const string DefaultTitleExclusions = "kakaotalk\ndiscord\nslack\ntelegram\nline\nwhatsapp\nsignal\n1password\nbitwarden\nkeepass\nkeepassxc";
     internal const string DefaultMicExclusions = "obs64\nobs32\nsoundrecorder\nwindowssoundrecorder\nvoicerecorder";
 

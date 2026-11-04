@@ -643,8 +643,10 @@ Check(tracker.Observe(new(null), t0.AddMinutes(61)) && tracker.Current(t0.AddMin
 tracker.Reset();
 Check(!tracker.Known && tracker.Observe(new("document", "Word"), t0.AddMinutes(70)) && tracker.Current(t0.AddMinutes(70))!.Category == "document", "after a lock the next look is taken at once");
 
-var plain = new SignalSettings();
-Check(!plain.Media && !plain.Titles && plain.Activity && plain.MicCamera, "media and titles are off by default (owner Q2, Q3)");
+Check(new SignalSettings() is { Activity: true, Media: true, Titles: true, MicCamera: true, FreeWakeScreen: true, ScreenLook: true },
+    "every feature is on by default (owner 2026-11-04)");
+// The checks below send only what each one turns on.
+var plain = new SignalSettings(Media: false, Titles: false, FreeWakeScreen: false);
 var coding = new ActivityState("coding", "Visual Studio Code", 2700.4, false, "secret.docx - Word", "Code");
 var oldServer = PresenceBody.Build(3, "Asia/Seoul", false, false, "unlock", coding, true, null, true, true, plain);
 Check(oldServer.Keys.OrderBy(k => k).SequenceEqual(new[] { "idle_seconds", "time_zone" }), "an older server gets only what it knows");
@@ -923,8 +925,17 @@ var withSignals = new WindowPreferences(1, 2, 330, Signals: new SignalSettings(M
 Check(JsonSerializer.Deserialize<WindowPreferences>(JsonSerializer.Serialize(withSignals)) is { Signals: { Media: true, TitleExclusions: "a", Activity: true } }, "signal settings persist");
 Check(JsonSerializer.Deserialize<WindowPreferences>("{\"Left\":1,\"Top\":2,\"CharacterHeight\":330}")!.Signals is null, "old preferences have no signals (the defaults are used)");
 Check(JsonSerializer.Deserialize<WindowPreferences>(JsonSerializer.Serialize(withSignals with { Signals = new SignalSettings(FreeWakeScreen: true) })) is { Signals.FreeWakeScreen: true }
-    && JsonSerializer.Deserialize<WindowPreferences>("{\"Left\":1,\"Top\":2,\"CharacterHeight\":330,\"Signals\":{\"Media\":true}}") is { Signals: { Media: true, FreeWakeScreen: false } },
-    "the screen setting persists; saved signals without it are off (V3-P90 §9)");
+    && JsonSerializer.Deserialize<WindowPreferences>(JsonSerializer.Serialize(withSignals with { Signals = new SignalSettings(FreeWakeScreen: false) })) is { Signals.FreeWakeScreen: false },
+    "the free wake's screen setting persists both ways (V3-P90 §9)");
+// Owner 2026-11-04: saved settings from before get titles, media and the free wake's screen turned on once.
+var savedOff = JsonSerializer.Deserialize<WindowPreferences>(
+    "{\"Left\":1,\"Top\":2,\"CharacterHeight\":330,\"Signals\":{\"Media\":false,\"Titles\":false,\"FreeWakeScreen\":false,\"ScreenLook\":false}}")!;
+Check(!savedOff.FeaturesOn && savedOff.LoadSignals() is { Media: true, Titles: true, FreeWakeScreen: true, ScreenLook: false },
+    "saved settings from before turn the once-off features on, and keep the user's other choices");
+Check((savedOff with { FeaturesOn = true }).LoadSignals() is { Media: false, Titles: false, FreeWakeScreen: false },
+    "after the one-time turn-on, a feature the user turned off stays off");
+Check(JsonSerializer.Deserialize<WindowPreferences>("{\"Left\":1,\"Top\":2,\"CharacterHeight\":330}")!.LoadSignals() == new SignalSettings(),
+    "old preferences without signals load the defaults");
 
 // V3-P93 §6.1: per-SSE connection generation and file_download negotiation
 var genState = new ConnectionGenerationState();

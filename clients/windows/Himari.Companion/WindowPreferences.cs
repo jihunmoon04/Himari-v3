@@ -5,10 +5,16 @@ namespace Himari.Companion;
 
 internal sealed record WindowPreferences(double Left, double Top, double CharacterHeight, bool MoveEnabled = true,
     bool ScreenSharing = true, bool FacingLeft = false, double BubbleMinimum = 8, double SecondsPer100 = 8, string ChatHotkey = "Alt+Q",
-    string BubblePlacement = "상하 자동", int LayoutVersion = 0, SignalSettings? Signals = null, bool ScreenSharingReset = false)
+    string BubblePlacement = "상하 자동", int LayoutVersion = 0, SignalSettings? Signals = null, bool ScreenSharingReset = false,
+    bool FeaturesOn = false)
 {
     // ScreenSharingReset (V3-P91 §14 Q9): "attach to every message" was turned off once, when the server first said it
     // can ask for the screen; it is never turned off again.
+    // FeaturesOn (owner 2026-11-04): titles, media and the free wake's screen, once off by default, were turned on
+    // once for saved settings; a later choice to turn one off is kept.
+
+    /// <summary>The signal settings to load: saved ones get the features turned on once.</summary>
+    internal SignalSettings LoadSignals() => FeaturesOn ? Signals ?? new SignalSettings() : (Signals ?? new SignalSettings()).WithFeaturesOn();
     internal static WindowPreferences Normalize(WindowPreferences value, double left, double top, double width, double height, double windowWidth, double windowHeight)
     {
         double x = double.IsFinite(value.Left) ? value.Left : left;
