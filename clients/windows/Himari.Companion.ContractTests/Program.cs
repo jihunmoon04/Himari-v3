@@ -978,7 +978,16 @@ Check(fileTurn.Bounded && fileTurn.Files.SetEquals([("f2", 2)]), "files of the l
 var wakeTurn = ReplyTurn.Find([TurnEvent(3, "assistant_final"), TurnEvent(7, "tool_result", "f3"), TurnEvent(8, "assistant_final"),
     TurnEvent(9, "assistant_final")]);
 Check(wakeTurn.Bounded && wakeTurn.Files.Count == 0, "a wake reply without a user message starts a new turn after the previous final");
-var openTurn = ReplyTurn.Find([TurnEvent(101, "tool_result", "f4"), TurnEvent(102, "assistant_final")]);
+var wakeQuestion = ReplyTurn.Find([TurnEvent(1, "user_message"), TurnEvent(2, "tool_result", "f1"), TurnEvent(3, "assistant_final"),
+    TurnEvent(4, "wake"), TurnEvent(5, "assistant_tool_calls")]);
+Check(wakeQuestion.Bounded && wakeQuestion.Files.Count == 0, "a wake that asks a question does not carry the earlier turn's file");
+var toolCallsAfterFinal = ReplyTurn.Find([TurnEvent(1, "user_message"), TurnEvent(2, "tool_result", "f1"), TurnEvent(3, "assistant_final"),
+    TurnEvent(4, "assistant_tool_calls")]);
+Check(toolCallsAfterFinal.Bounded && toolCallsAfterFinal.Files.Count == 0, "tool calls after a final open a new turn");
+var chainedCalls = ReplyTurn.Find([TurnEvent(1, "user_message"), TurnEvent(2, "assistant_tool_calls"), TurnEvent(3, "tool_result", "f1"),
+    TurnEvent(4, "assistant_tool_calls"), TurnEvent(5, "tool_result", "f2")]);
+Check(chainedCalls.Bounded && chainedCalls.Files.SetEquals([("f1", 1), ("f2", 1)]), "chained tool calls inside one turn keep its files");
+var openTurn =ReplyTurn.Find([TurnEvent(101, "tool_result", "f4"), TurnEvent(102, "assistant_final")]);
 Check(!openTurn.Bounded && openTurn.Files.SetEquals([("f4", 1)]), "a window without the turn start asks for an earlier page");
 
 string tempSaveDir = Path.Combine(Path.GetTempPath(), "himari-contract-save-" + Guid.NewGuid().ToString("N"));

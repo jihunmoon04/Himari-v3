@@ -15,8 +15,8 @@ internal static class ConversationView
 }
 
 /// <summary>V3-P93 §6.3: the files presented in the latest reply turn only.
-/// A turn starts at a user message, or at the first event after an assistant
-/// final (a wake reply has no user message). Files from earlier turns stay in
+/// A turn starts at a user message or a wake, or at the first event after an
+/// assistant final. Files from earlier turns stay in
 /// the history window, not in the current reply bubble.</summary>
 internal sealed class ReplyTurn
 {
@@ -42,8 +42,10 @@ internal sealed class ReplyTurn
         bool bounded = false, closed = false;
         foreach (var (_, kind, item) in ordered)
         {
-            if (kind is not ("user_message" or "assistant_final" or "tool_result")) continue;
-            if (closed || kind == "user_message") { files.Clear(); bounded = true; closed = false; }
+            if (kind is not ("user_message" or "wake" or "assistant_tool_calls" or "assistant_final" or "tool_result")) continue;
+            // A user message or a wake opens a turn; any event after a final opens one
+            // too. Tool calls inside a turn keep it open.
+            if (closed || kind is "user_message" or "wake") { files.Clear(); bounded = true; closed = false; }
             if (kind == "assistant_final") closed = true;
             else if (kind == "tool_result" && Get(item, "presented_files") is { ValueKind: JsonValueKind.Array } presented)
             {
