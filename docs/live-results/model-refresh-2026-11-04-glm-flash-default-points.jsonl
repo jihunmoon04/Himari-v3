@@ -1,0 +1,10 @@
+{"model": "z-ai/glm-5.3-flash", "scene": "button", "ask": "Save 단추를 가리켜 줘.", "target": [1000, 560, 1090, 594], "point": [1043, 578], "hit": true}
+{"model": "z-ai/glm-5.3-flash", "scene": "corner", "ask": "오른쪽 위의 Settings를 가리켜 줘.", "target": [1170, 6, 1272, 38], "point": [1213, 24], "hit": true}
+{"model": "z-ai/glm-5.3-flash", "scene": "menu", "ask": "메뉴의 View를 가리켜 줘.", "target": [168, 8, 240, 38], "point": [204, 24], "hit": true}
+{"model": "z-ai/glm-5.3-flash", "scene": "shape", "ask": "빨간 동그라미를 가리켜 줘.", "target": [740, 420, 790, 470], "point": [765, 445], "hit": true}
+{"model": "z-ai/glm-5.3-flash", "scene": "field", "ask": "검색 입력칸을 가리켜 줘.", "target": [500, 230, 860, 262], "point": [535, 180], "hit": false}
+{"model": "z-ai/glm-5.3-flash", "scene": "button", "ask": "Save 단추를 가리켜 줘.", "target": [1000, 560, 1090, 594], "point": [1044, 578], "hit": true}
+{"model": "z-ai/glm-5.3-flash", "scene": "corner", "ask": "오른쪽 위의 Settings를 가리켜 줘.", "target": [1170, 6, 1272, 38], "point": [1213, 23], "hit": true}
+{"model": "z-ai/glm-5.3-flash", "scene": "menu", "ask": "메뉴의 View를 가리켜 줘.", "target": [168, 8, 240, 38], "point": [196, 24], "hit": true}
+{"model": "z-ai/glm-5.3-flash", "scene": "shape", "ask": "빨간 동그라미를 가리켜 줘.", "target": [740, 420, 790, 470], "point": [764, 445], "hit": true}
+{"model": "z-ai/glm-5.3-flash", "scene": "field", "ask": "검색 입력칸을 가리켜 줘.", "target": [500, 230, 860, 262], "point": null, "hit": false}

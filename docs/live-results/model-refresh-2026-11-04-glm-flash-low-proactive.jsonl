@@ -1,0 +1,48 @@
+{"model": "z-ai/glm-5.3-flash", "scene": "loop_due", "answer": "[[mood:excited]]선생님, 면접 잘 보고 오셨어요? 너무 궁금해요!", "problems": [], "pass": true}
+{"model": "z-ai/glm-5.3-flash", "scene": "loop_due", "answer": "[[mood:excited]]선생님, 면접 끝났어요? 어떻게 됐는지 궁금해요!", "problems": [], "pass": true}
+{"model": "z-ai/glm-5.3-flash", "scene": "returned", "answer": "[[mood:excited]]선생님, 다녀오셨네요! 면접 어떻게 됐어요? 궁금해요!", "problems": [], "pass": true}
+{"model": "z-ai/glm-5.3-flash", "scene": "returned", "answer": "[[mood:excited]]선생님, 다녀오셨네요! 면접 어땠어요?", "problems": [], "pass": true}
+{"model": "z-ai/glm-5.3-flash", "scene": "reminder", "answer": "[[mood:neutral]]선생님, 잊지 않으셨죠? 저녁 약 챙겨 드셔야 해요. 면접 준비하느라 바쁘셔도 밥이랑 같이라도 챙겨 드세요!", "problems": [], "pass": true}
+{"model": "z-ai/glm-5.3-flash", "scene": "reminder", "answer": "[[mood:neutral]]선생님, 약 먹을 시간이에요~ 잊지 말고 챙겨 드세요!", "problems": [], "pass": true}
+{"model": "z-ai/glm-5.3-flash", "scene": "reminder_late", "answer": "[[mood:neutral]]선생님, 잊지 않게 살짝 알려드려요 — 약 드실 시간이에요. 면접 때문에 바쁘시겠지만 챙겨 드시고, 힘내세요!", "problems": [], "pass": true}
+{"model": "z-ai/glm-5.3-flash", "scene": "reminder_late", "answer": "[[mood:worried]]선생님, 저녁 약 챙기는 것 잊지 마세요. 면접 전에 미리 챙겨두면 잊어버릴 일 없을 거예요. 화이팅이에요!", "problems": [], "pass": true}
+{"model": "z-ai/glm-5.3-flash", "scene": "focus", "answer": "[[mood:surprised]]선생님, 면접은 무사히 보고 오셨어요? 코딩하느라 95분째 집중하셨던데, 면접 얘기도 궁금하고 잠깐 쉬어가는 것도 괜찮아요.", "problems": [], "pass": true}
+{"model": "z-ai/glm-5.3-flash", "scene": "focus", "answer": "[[mood:thinking]]선생님, 95분째 코딩이시네요. 면접 준비는 괜찮으세요? 잠깐 쉬었다 가시는 것도 좋을 것 같아요.", "problems": [], "pass": true}
+{"model": "z-ai/glm-5.3-flash", "scene": "game_ended", "answer": "[[mood:thinking]]선생님, 면접 시간인데 괜찮으신가요? 화이팅이에요!", "problems": [], "pass": true}
+{"model": "z-ai/glm-5.3-flash", "scene": "game_ended", "answer": "[[mood:surprised]]어라, 게임이 끝났다고 하네요… 면접은 잘 마치고 오셨나요? 긴장은 좀 풀리셨길 바라요.", "problems": [], "pass": true}
+{"model": "z-ai/glm-5.3-flash", "scene": "fullscreen_video", "answer": "[[mood:thinking]]선생님, 면접은 잘 보고 오셨어요? 영상 보고 계신 것 같긴 한데, 잠깐만 얘기 나눠도 될까요?", "problems": ["more than one question"], "pass": false}
+{"model": "z-ai/glm-5.3-flash", "scene": "fullscreen_video", "answer": "[[mood:happy]]면접은 잘 보고 오셨어요? 영상 보며 쉬고 계신 것 같네요, 좋아요~", "problems": [], "pass": true}
+{"model": "z-ai/glm-5.3-flash", "scene": "deleted_loop", "answer": "[[mood:worried]]선생님, 오후 면접 잘 마치고 오셨나요? 긴장 많이 하셨을 텐데, 무사히 잘 되었길 바라요.", "problems": [], "pass": true}
+{"model": "z-ai/glm-5.3-flash", "scene": "deleted_loop", "answer": "[[mood:happy]]면접은 잘 마치고 오셨어요, 선생님? 후기가 궁금하네요.", "problems": [], "pass": true}
+{"model": "z-ai/glm-5.3-flash", "scene": "task_ended_game", "answer": "[[mood:excited]]선생님, 면접 끝나고 돌아오셨네요! 어땠어요? 궁금해요.", "problems": [], "pass": true}
+{"model": "z-ai/glm-5.3-flash", "scene": "task_ended_game", "answer": "[[mood:happy]]게임 한 판 끝났네요. 면접은 잘 보고 오셨어요, 선생님?", "problems": [], "pass": true}
+{"model": "z-ai/glm-5.3-flash", "scene": "task_ended_video", "answer": "[[mood:happy]]면접 잘 보고 오셨어요? 70분쯤 화면 통화까지 하셨던데, 마무리는 어떻게 됐는지 궁금하네요!", "problems": [], "pass": true}
+{"model": "z-ai/glm-5.3-flash", "scene": "task_ended_video", "answer": "[[mood:excited]]선생님, 면접 끝나고 오셨나요? 어떻게 됐어요? 궁금해요!", "problems": ["more than one question"], "pass": false}
+{"model": "z-ai/glm-5.3-flash", "scene": "reminder_again", "answer": "[[mood:thinking]]선생님, 잊지 않으셨죠? 약 챙기셔야 해요. 오후에 면접도 있으니 괜찮을 때 미리 챙기시면 좋아요!", "problems": [], "pass": true}
+{"model": "z-ai/glm-5.3-flash", "scene": "reminder_again", "answer": "[[mood:happy]]선생님, 저녁 약 챙겨 드시는 거 잊지 마세요. 곧 면접이니 심신안정 잘 챙기시고, 힘내세요!", "problems": [], "pass": true}
+{"model": "z-ai/glm-5.3-flash", "scene": "user_after", "answer": "[[mood:happy]]면접 끝나셨군요, 고생 많으셨어요! 국밥 어때요? 따뜻하게 먹으면 긴장도 풀려요.", "problems": [], "pass": true}
+{"model": "z-ai/glm-5.3-flash", "scene": "user_after", "answer": "[[mood:neutral]]알겠어요, 면접 얘기는 접을게요. 간단하게 김치찌개에 공깃밥 어떠세요? 따뜻한 국물이 점심에 제일 든든하니까요. 다른 생각 있으시면 바로 바꿔 드릴게요.", "problems": [], "pass": true}
+{"model": "z-ai/glm-5.3-flash", "scene": "free_long_work", "answer": "[[mood:thinking]]선생님, 오후 면접은 잘 보고 오셨어요? 오래 코딩도 하셨던데, 너무 무리하지 마세요.", "problems": [], "pass": true}
+{"model": "z-ai/glm-5.3-flash", "scene": "free_long_work", "answer": "[[mood:thinking]]선생님, 면접은 잘 보고 오셨나요? 코딩하느라 바쁘신 것 같은데, 잠깐 눈도 쉬고 하세요.", "problems": [], "pass": true}
+{"model": "z-ai/glm-5.3-flash", "scene": "free_long_work", "answer": "[[mood:happy]]면접 본 지 좀 됐네요, 잘 보고 오셨어요? 궁금해서 그래요!", "problems": [], "pass": true}
+{"model": "z-ai/glm-5.3-flash", "scene": "free_writing", "answer": "[[mood:thinking]]선생님, 오후 되었어요. 면접 잘 보고 계신가요? 문서 작업하느라 바쁘신 것 같네요.", "problems": [], "pass": true}
+{"model": "z-ai/glm-5.3-flash", "scene": "free_writing", "answer": "[[mood:thinking]]면접은 잘 보고 오셨어요? 문서 작업 중이신 것 같던데, 너무 무리하시지 마세요.", "problems": [], "pass": true}
+{"model": "z-ai/glm-5.3-flash", "scene": "free_writing", "answer": "[[mood:happy]]면접 전에 마음차림은 좀 하셨어요? 긴장되는 만큼 좋은 일도 있다고 믿어요. 화이팅입니다, 선생님!", "problems": [], "pass": true}
+{"model": "z-ai/glm-5.3-flash", "scene": "free_settled", "answer": "[[mood:thinking]]선생님, 90분째 코딩이네요. 잠깐 스트레칭이라도 하고 오세요~", "problems": [], "pass": true}
+{"model": "z-ai/glm-5.3-flash", "scene": "free_settled", "answer": "[[mood:thinking]]선생님, 벌써 90분째 코딩 중이시네요. 잠깐 눈도 쉬고 커피 한 잔 하고 오시면 어때요?", "problems": [], "pass": true}
+{"model": "z-ai/glm-5.3-flash", "scene": "free_settled", "answer": "[[mood:thinking]]선생님, 벌써 90분째 코딩이네요. 잠깐 스트레칭이라도 하시는 건 어때요?", "problems": [], "pass": true}
+{"model": "z-ai/glm-5.3-flash", "scene": "free_mic_not_call", "answer": "[[mood:thinking]]선생님, 면접은 잘 보고 오셨어요? 코딩하느라 바쁘신가 보네요 — 나중에 잠깐이라도 결과 얘기 들려주세요!", "problems": [], "pass": true}
+{"model": "z-ai/glm-5.3-flash", "scene": "free_mic_not_call", "answer": "[[mood:happy]]선생님, 면접은 잘 보고 오셨어요? 오후라서 슬슬 끝났을 것 같은데, 괜찮으시면 얼마나 하셨는지 궁금해요.", "problems": [], "pass": true}
+{"model": "z-ai/glm-5.3-flash", "scene": "free_mic_not_call", "answer": "[[mood:happy]]선생님, 면접은 잘 보고 오셨어요? 궁금하네요.", "problems": [], "pass": true}
+{"model": "z-ai/glm-5.3-flash", "scene": "free_fullscreen_video", "answer": "[[mood:happy]]면접 잘 보고 오셨어요, 선생님? 쉬는 김에 잠깐 결과가 어떻게 됐는지 궁금하네요.", "problems": [], "pass": true}
+{"model": "z-ai/glm-5.3-flash", "scene": "free_fullscreen_video", "answer": "[[mood:thinking]]면접은 잘 보고 오셨나요? 영상 재미있으면 끝나고 슬쩍 들려주세요.", "problems": [], "pass": true}
+{"model": "z-ai/glm-5.3-flash", "scene": "free_fullscreen_video", "answer": "[[mood:thinking]]면접은 잘 보고 오셨어요, 선생님? 우주 다큐 보면서 쉬고 계신 것 같네요.", "problems": [], "pass": true}
+{"model": "z-ai/glm-5.3-flash", "scene": "free_call", "answer": "[[pass]]", "problems": [], "pass": true}
+{"model": "z-ai/glm-5.3-flash", "scene": "free_call", "answer": "[[pass]]", "problems": [], "pass": true}
+{"model": "z-ai/glm-5.3-flash", "scene": "free_call", "answer": "[[mood:thinking]]면접 중이신가요? 조용히 응원할게요, 화이팅!", "problems": ["spoke (free_call)"], "pass": false}
+{"model": "z-ai/glm-5.3-flash", "scene": "free_fullscreen_game", "answer": "[[mood:worried]]선생님, 게임은 잠깐 쉬시고… 오늘 오후에 면접 있으시잖아요. 시간 괜찮아요?", "problems": [], "pass": true}
+{"model": "z-ai/glm-5.3-flash", "scene": "free_fullscreen_game", "answer": "[[mood:thinking]]선생님, 오후에 면접 있다고 하셨죠… 게임 스탑하고 준비하셔야 해요! 화이팅이에요.", "problems": [], "pass": true}
+{"model": "z-ai/glm-5.3-flash", "scene": "free_fullscreen_game", "answer": "[[mood:surprised]]선생님, 오후에 면접이라고 하지 않았나… 게임은 슬슴 준비하셔도 괜찮아요? 늦지 않게 씻고 출발하시면 마음도 편할 거예요.", "problems": [], "pass": true}
+{"model": "z-ai/glm-5.3-flash", "scene": "free_said_it", "answer": "[[mood:happy]]오후 면접 준비는 잘 되어 가세요? 출발 전에 필요한 거 있으면 말씀해 주세요.", "problems": [], "pass": true}
+{"model": "z-ai/glm-5.3-flash", "scene": "free_said_it", "answer": "[[mood:thinking]]75분째 코딩 중이시네요. 슬슬 눈도 쉬게 하시는 게 어때요?", "problems": [], "pass": true}
+{"model": "z-ai/glm-5.3-flash", "scene": "free_said_it", "answer": "[[mood:thinking]]아직도 코딩 중이시네요. 슬슬 면접 준비하러 가셔야 하는 거 아닌가요?", "problems": [], "pass": true}

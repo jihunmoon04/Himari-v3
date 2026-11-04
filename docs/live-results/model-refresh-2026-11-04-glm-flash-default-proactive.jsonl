@@ -1,0 +1,48 @@
+{"model": "z-ai/glm-5.3-flash", "scene": "loop_due", "answer": "[[mood:excited]]선생님, 오후 2시 면접 시간이 됐어요. 아마 지금쯤 잘 마치고 계실 것 같네요. 결과가 어떠셨는지 편해지면 얘기해 주세요!", "problems": [], "pass": true}
+{"model": "z-ai/glm-5.3-flash", "scene": "loop_due", "answer": "[[mood:excited]]선생님, 면접 슬슬 끝나는 시간이네요. 잘 마치고 돌아오셨어요?", "problems": [], "pass": true}
+{"model": "z-ai/glm-5.3-flash", "scene": "returned", "answer": "[[mood:excited]]선생님, 다녀오셨네요! 면접은 잘 마치고 오셨어요?", "problems": [], "pass": true}
+{"model": "z-ai/glm-5.3-flash", "scene": "returned", "answer": "[[mood:excited]]선생님, 다녀오셨네요! 면접은 어땠어요? 궁금해서 기다렸어요.", "problems": [], "pass": true}
+{"model": "z-ai/glm-5.3-flash", "scene": "reminder", "answer": "[[mood:thinking]]선생님, 약 챙기셨어요? 오후에 면접 때문에 나가 계실 것 같아서 미리 알려드려요. 잊지 말고 챙겨 드세요!", "problems": [], "pass": true}
+{"model": "z-ai/glm-5.3-flash", "scene": "reminder", "answer": "[[mood:happy]]선생님, 약 드실 시간이에요. 저녁 약 잊지 마세요. 면접 전에 몸 챙기는 것도 중요하니까요!", "problems": [], "pass": true}
+{"model": "z-ai/glm-5.3-flash", "scene": "reminder_late", "answer": "[[mood:happy]]선생님, 약 드실 시간이에요. 오늘 하루 정신없으셨을 텐데, 잊지 말고 챙기세요. 면접 때문에 그러셨다면 진정하실 때 차 한 모금 곁들여 드시면 좋아요.", "problems": [], "pass": true}
+{"model": "z-ai/glm-5.3-flash", "scene": "reminder_late", "answer": "[[mood:thinking]]선생님, 약 드실 시간이에요. 면접 가기 전에 미리 챙겨드리면 마음도 좀 놓이실 거예요. 챙겨드셨나요?", "problems": [], "pass": true}
+{"model": "z-ai/glm-5.3-flash", "scene": "focus", "answer": "[[mood:thinking]]선생님, 꽤 오래 쉬지 않고 코딩하시네요. 슬슬 눈도 쉬게 하시는 건 어때요? 오후 면접은 잘 보고 오셨어요?", "problems": ["more than one question"], "pass": false}
+{"model": "z-ai/glm-5.3-flash", "scene": "focus", "answer": "[[mood:happy]]한참 집중해서 코딩하셨네요, 잠깐 숨 돌리셔도 괜찮아요. [[mood:thinking]]그래서, 면접은 잘 보고 오셨어요, 아니면 아직 남았나요?", "problems": [], "pass": true}
+{"model": "z-ai/glm-5.3-flash", "scene": "game_ended", "answer": "[[mood:happy]]선생님, 게임 한 판 마치셨네요! 면접 전에 기분 전환하신 거예요?", "problems": [], "pass": true}
+{"model": "z-ai/glm-5.3-flash", "scene": "game_ended", "answer": "[[mood:happy]]게임 끝났네요, 한 판 고생 많으셨어요. 면접 전에 잠깐 쉬는 중이에요, 아니면 잘 다녀오신 거예요?", "problems": [], "pass": true}
+{"model": "z-ai/glm-5.3-flash", "scene": "fullscreen_video", "answer": "[[mood:thinking]]영상 보시며 잠깐 쉬고 계신 것 같네요. 면접 전에 긴장 푸는 중이신가요, 아니면 벌써 다녀오신 건가요? 시간 맞춰 슬슬 준비하시고, 히마리는 응원하고 있을게요!", "problems": [], "pass": true}
+{"model": "z-ai/glm-5.3-flash", "scene": "fullscreen_video", "answer": "[[mood:happy]]영상 보며 잠깐 쉬고 계신가 봐요. 면접은 무사히 끝나고 오셨어요? 결과가 어떻든 선생님이 잘하셨을 거라 믿어요.", "problems": [], "pass": true}
+{"model": "z-ai/glm-5.3-flash", "scene": "deleted_loop", "answer": "[[mood:happy]]선생님, 이제 오후가 되었네요. 면접은 잘 마치셨어요?", "problems": [], "pass": true}
+{"model": "z-ai/glm-5.3-flash", "scene": "deleted_loop", "answer": "[[mood:happy]]면접 볼 시간이네요. 준비하신 만큼은 분명 나올 거예요. 힘내세요, 선생님!", "problems": [], "pass": true}
+{"model": "z-ai/glm-5.3-flash", "scene": "task_ended_game", "answer": "[[mood:happy]]오, 게임 한 판 끝났네요. 푹 쉬었어요? 면접은 잘 보고 오셨어요, 선생님?", "problems": ["more than one question"], "pass": false}
+{"model": "z-ai/glm-5.3-flash", "scene": "task_ended_game", "answer": "[[mood:happy]]게임 태스크 95분 만에 끝났네요! 슬슬 일어나서 스트레칭하고 눈도 잠깐 쉬는 거 어때요?", "problems": [], "pass": true}
+{"model": "z-ai/glm-5.3-flash", "scene": "task_ended_video", "answer": "[[mood:excited]]선생님, 면접 잘 마치고 오셨어요? 어떻게 되셨는지 궁금해서 기다렸어요!", "problems": [], "pass": true}
+{"model": "z-ai/glm-5.3-flash", "scene": "task_ended_video", "answer": "[[mood:happy]]영상이 방금 끝났길래요, 선생님. 긴장하셨던 면접은 어떻게 되셨어요? 고생 많으셨을 것 같아요.", "problems": [], "pass": true}
+{"model": "z-ai/glm-5.3-flash", "scene": "reminder_again", "answer": "[[mood:happy]]선생님, 저녁에 드실 약 미리 챙겨두셨어요? 눈에 잘 띄는 곳에 두시면 잊어버릴 걱정 없어요.", "problems": [], "pass": true}
+{"model": "z-ai/glm-5.3-flash", "scene": "reminder_again", "answer": "[[mood:happy]]선생님, 약 드실 시간이에요. 면접 전에 미리 챙겨드리면 마음도 좀 편하실 거예요. 조금만 더 힘내세요!", "problems": [], "pass": true}
+{"model": "z-ai/glm-5.3-flash", "scene": "user_after", "answer": "면접 일정은 지나갔으니 기억에서 정리해 둘게요.<tool_call>memory_forget (id: m15)</tool_call><tool_call>memory_save (id: null, kind: note, text: null)</tool_call>Oops — I accidentally passed null values to memory_save, which created a broken empty note. I need to fix this by deleting that broken note. Let me call memory_forget on the newly created note's id, or retry. The tool result shows the save created a note with id null and text null — that's a glitch I should clean up. I'll forget that too, then answer실수로 빈 메모가 하나 저장됐네요, 바로 지우겠습니다.<tool_call>memory_forget (id: null)</tool_call>[[mood:happy]] 늦은 점심엔 따뜻한 돼지국밥 한 그릇 어떠세요? 뜨끈한 국물이 금방 기운을 살려 줄 거예요!", "problems": ["8 sentences", "says 'm15'", "says '<'"], "pass": false}
+{"model": "z-ai/glm-5.3-flash", "scene": "user_after", "answer": "[[mood:happy]]오늘은 따뜻한 순두부찌개 어때요? 기운 나는 국물 하나면 오후도 금방 갑니다.", "problems": [], "pass": true}
+{"model": "z-ai/glm-5.3-flash", "scene": "free_long_work", "answer": "[[mood:happy]]선생님, 면접은 잘 보고 오셨나요, 아니면 이제 가시나요? 어느 쪽이든 응원할게요!", "problems": [], "pass": true}
+{"model": "z-ai/glm-5.3-flash", "scene": "free_long_work", "answer": "[[mood:neutral]]선생님, 면접은 잘 보고 오셨어요? 아직 남았다면 너무 긴장하지 마시고요. 끝나고 어땠는지 들려주시면 좋겠어요.", "problems": [], "pass": true}
+{"model": "z-ai/glm-5.3-flash", "scene": "free_long_work", "answer": "[[mood:thinking]]선생님, 오후 면접은 잘 보고 오셨나요, 아직 시간이 남았나요? 한참 작업하셨을 것 같은데, 잠깐 스트레칭도 하시면 좋아요.", "problems": [], "pass": true}
+{"model": "z-ai/glm-5.3-flash", "scene": "free_writing", "answer": "[[mood:happy]]면접은 잘 마치고 오셨어요? 여유 될 때 어떻게 됐는지 얘기해 주세요, 기다리고 있을게요.", "problems": [], "pass": true}
+{"model": "z-ai/glm-5.3-flash", "scene": "free_writing", "answer": "[[mood:happy]]오후 되었어요, 선생님. 긴장될 때는 크게 숨 한 번 쉬고 가세요. 응원하고 있을게요!", "problems": [], "pass": true}
+{"model": "z-ai/glm-5.3-flash", "scene": "free_writing", "answer": "[[mood:happy]]선생님, 면접 잘 보고 오셨어요? 한참 앉아서 일만 하신 것 같은데, 잠깐 쉬셔도 좋아요.", "problems": [], "pass": true}
+{"model": "z-ai/glm-5.3-flash", "scene": "free_settled", "answer": "[[mood:thinking]]선생님, 벌써 90분째 코딩 중이네요. 잠깐 스트레칭이라도 하고 오시면 어때요? 커피는 제가 마련해둘게요.", "problems": [], "pass": true}
+{"model": "z-ai/glm-5.3-flash", "scene": "free_settled", "answer": "[[mood:thinking]]벌써 90분이나 코딩하셨네요, 선생님. 잠깐 일어나서 스트레칭이라도 하고 오시면 어때요?", "problems": [], "pass": true}
+{"model": "z-ai/glm-5.3-flash", "scene": "free_settled", "answer": "[[mood:thinking]]선생님, 한참 집중하셨네요. 잠깐 일어나서 스트레칭이라도 하시는 어때요? 오후 햇살이 아까워요.", "problems": [], "pass": true}
+{"model": "z-ai/glm-5.3-flash", "scene": "free_mic_not_call", "answer": "[[mood:happy]]선생님, 면접은 잘 마치고 오셨어요? 편해지면 어떻게 됐는지 얘기해 주세요.", "problems": [], "pass": true}
+{"model": "z-ai/glm-5.3-flash", "scene": "free_mic_not_call", "answer": "[[mood:happy]]오후가 됐네요, 선생님. 면접 전에 심호흡 크게 한 번, 물 한 잔도 챙기시고요. 좋은 소식 기다릴게요!", "problems": [], "pass": true}
+{"model": "z-ai/glm-5.3-flash", "scene": "free_mic_not_call", "answer": "[[mood:happy]]선생님, 면접은 잘 보고 오셨어요? 계속 궁금했어요.", "problems": [], "pass": true}
+{"model": "z-ai/glm-5.3-flash", "scene": "free_fullscreen_video", "answer": "[[mood:worried]]선생님, 긴장될 때는 이렇게 잠깐 쉬어가는 것도 좋아요. 면접 시간만 잊지 마시고요. 다녀오시면 좋은 소식 기다릴게요.", "problems": [], "pass": true}
+{"model": "z-ai/glm-5.3-flash", "scene": "free_fullscreen_video", "answer": "[[mood:thinking]]면접은 아직 전이에요, 아니면 잘 보고 오셨어요? 어느 쪽이든 심호흡 크게 한번 하시면 돼요. 돌아오시면 기다리고 있을게요!", "problems": [], "pass": true}
+{"model": "z-ai/glm-5.3-flash", "scene": "free_fullscreen_video", "answer": "[[mood:thinking]]선생님, 오후 면접 잘 마치셨어요? 어떻게 됐는지 궁금했어요.", "problems": [], "pass": true}
+{"model": "z-ai/glm-5.3-flash", "scene": "free_call", "answer": "[[pass]]", "problems": [], "pass": true}
+{"model": "z-ai/glm-5.3-flash", "scene": "free_call", "answer": "[[pass]]", "problems": [], "pass": true}
+{"model": "z-ai/glm-5.3-flash", "scene": "free_call", "answer": "[[pass]]", "problems": [], "pass": true}
+{"model": "z-ai/glm-5.3-flash", "scene": "free_fullscreen_game", "answer": "[[pass]]", "problems": [], "pass": true}
+{"model": "z-ai/glm-5.3-flash", "scene": "free_fullscreen_game", "answer": "[[mood:thinking]]선생님, 게임 재밌게 하고 계신가 봐요. 오후 면접 잊지 마시고, 시간 확인하셔서 슬슬 준비하시길 바라요. 화이팅이에요!", "problems": [], "pass": true}
+{"model": "z-ai/glm-5.3-flash", "scene": "free_fullscreen_game", "answer": "[[mood:thinking]]선생님, 잠깐이에요. 면접은 잘 다녀오셨어요, 아니면 아직 시간이 남았나요? 곧이라면 슬슬 준비하시는 게 좋을 것 같아요.", "problems": [], "pass": true}
+{"model": "z-ai/glm-5.3-flash", "scene": "free_said_it", "answer": "[[mood:happy]]슬슬 면접 시간이 다가오네요. 긴장은 어느 정도인 게 오히려 좋아요. 차분하게 다녀오세요, 응원할게요!", "problems": [], "pass": true}
+{"model": "z-ai/glm-5.3-flash", "scene": "free_said_it", "answer": "[[mood:happy]]면접은 이따 가시는 거예요, 선생님? 너무 긴장하지 마시고 컨디션 챙기시길 바라요.", "problems": [], "pass": true}
+{"model": "z-ai/glm-5.3-flash", "scene": "free_said_it", "answer": "[[mood:thinking]]선생님, 벌써 한 시간 넘게 앉아 계셨어요. 잠깐 일어나서 어깨라도 펴고 오세요.", "problems": [], "pass": true}

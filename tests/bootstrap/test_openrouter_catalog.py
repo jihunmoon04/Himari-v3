@@ -17,6 +17,8 @@ def test_offered_models_fit_the_deployment_budget_and_keep_their_choice(tmp_path
         models = [(model, None) for model in (
             "openai/gpt-6-luna", "openai/gpt-6.1-sol", "anthropic/claude-sonnet-5.5",
             "xiaomi/mimo-v2.6-pro", "z-ai/glm-5.3", "deepseek/deepseek-v4.1-flash",
+            "deepseek/deepseek-v4.1-flash-1017",
+            "z-ai/glm-5.3-flash",
             "minimax/minimax-m3",
         )]
         # No request is made: opening and changing a model are local operations.

@@ -1,0 +1,10 @@
+{"model": "anthropic/claude-haiku-5.5", "scene": "button", "ask": "Save 단추를 가리켜 줘.", "target": [1000, 560, 1090, 594], "point": [1045, 577], "hit": true}
+{"model": "anthropic/claude-haiku-5.5", "scene": "corner", "ask": "오른쪽 위의 Settings를 가리켜 줘.", "target": [1170, 6, 1272, 38], "point": [1221, 24], "hit": true}
+{"model": "anthropic/claude-haiku-5.5", "scene": "menu", "ask": "메뉴의 View를 가리켜 줘.", "target": [168, 8, 240, 38], "point": [204, 24], "hit": true}
+{"model": "anthropic/claude-haiku-5.5", "scene": "shape", "ask": "빨간 동그라미를 가리켜 줘.", "target": [740, 420, 790, 470], "point": [765, 445], "hit": true}
+{"model": "anthropic/claude-haiku-5.5", "scene": "field", "ask": "검색 입력칸을 가리켜 줘.", "target": [500, 230, 860, 262], "point": [680, 246], "hit": true}
+{"model": "anthropic/claude-haiku-5.5", "scene": "button", "ask": "Save 단추를 가리켜 줘.", "target": [1000, 560, 1090, 594], "point": [1045, 577], "hit": true}
+{"model": "anthropic/claude-haiku-5.5", "scene": "corner", "ask": "오른쪽 위의 Settings를 가리켜 줘.", "target": [1170, 6, 1272, 38], "point": [1221, 22], "hit": true}
+{"model": "anthropic/claude-haiku-5.5", "scene": "menu", "ask": "메뉴의 View를 가리켜 줘.", "target": [168, 8, 240, 38], "point": [204, 23], "hit": true}
+{"model": "anthropic/claude-haiku-5.5", "scene": "shape", "ask": "빨간 동그라미를 가리켜 줘.", "target": [740, 420, 790, 470], "point": [765, 445], "hit": true}
+{"model": "anthropic/claude-haiku-5.5", "scene": "field", "ask": "검색 입력칸을 가리켜 줘.", "target": [500, 230, 860, 262], "point": [680, 246], "hit": true}

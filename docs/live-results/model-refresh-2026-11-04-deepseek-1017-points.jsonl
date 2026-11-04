@@ -1,0 +1,10 @@
+{"model": "deepseek/deepseek-v4.1-flash-1017", "scene": "button", "ask": "Save 단추를 가리켜 줘.", "target": [1000, 560, 1090, 594], "point": [1045, 577], "hit": true}
+{"model": "deepseek/deepseek-v4.1-flash-1017", "scene": "corner", "ask": "오른쪽 위의 Settings를 가리켜 줘.", "target": [1170, 6, 1272, 38], "point": [1220, 23], "hit": true}
+{"model": "deepseek/deepseek-v4.1-flash-1017", "scene": "menu", "ask": "메뉴의 View를 가리켜 줘.", "target": [168, 8, 240, 38], "point": [200, 25], "hit": true}
+{"model": "deepseek/deepseek-v4.1-flash-1017", "scene": "shape", "ask": "빨간 동그라미를 가리켜 줘.", "target": [740, 420, 790, 470], "point": [965, 628], "hit": false}
+{"model": "deepseek/deepseek-v4.1-flash-1017", "scene": "field", "ask": "검색 입력칸을 가리켜 줘.", "target": [500, 230, 860, 262], "point": [680, 247], "hit": true}
+{"model": "deepseek/deepseek-v4.1-flash-1017", "scene": "button", "ask": "Save 단추를 가리켜 줘.", "target": [1000, 560, 1090, 594], "point": [1045, 577], "hit": true}
+{"model": "deepseek/deepseek-v4.1-flash-1017", "scene": "corner", "ask": "오른쪽 위의 Settings를 가리켜 줘.", "target": [1170, 6, 1272, 38], "point": [1220, 24], "hit": true}
+{"model": "deepseek/deepseek-v4.1-flash-1017", "scene": "menu", "ask": "메뉴의 View를 가리켜 줘.", "target": [168, 8, 240, 38], "point": [200, 27], "hit": true}
+{"model": "deepseek/deepseek-v4.1-flash-1017", "scene": "shape", "ask": "빨간 동그라미를 가리켜 줘.", "target": [740, 420, 790, 470], "point": [878, 620], "hit": false}
+{"model": "deepseek/deepseek-v4.1-flash-1017", "scene": "field", "ask": "검색 입력칸을 가리켜 줘.", "target": [500, 230, 860, 262], "point": [680, 248], "hit": true}
