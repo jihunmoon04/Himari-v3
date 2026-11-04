@@ -36,7 +36,13 @@ internal static class Program
     [STAThread] private static void Main(string[] args)
     {
         if (args.Contains("--fullscreen-fixture")) { FullscreenChecks.Fixture(); return; }
+        if (args.Contains("--work-window-fixture")) { HotkeyReturnChecks.Fixture(); return; }
         var app = new App(); app.InitializeComponent(); app.ShutdownMode = ShutdownMode.OnExplicitShutdown;
+        if (args.Contains("--hotkey-return-only"))
+        {
+            HotkeyReturnChecks.Run((ok, message) => { if (!ok) throw new Exception(message); });
+            Console.WriteLine("Shortcut return-target UI checks passed."); app.Shutdown(); return;
+        }
         if (args.Contains("--presentation-only"))
         {
             PresentationChecks.Run((ok, message) => { if (!ok) throw new Exception(message); }, null);
@@ -582,6 +588,7 @@ internal static class Program
                 "once accepted, the overdue bubble expires at once and every other unsent message is kept");
             unsentWindow.Close();
         }
+        HotkeyReturnChecks.Run(Check);
         FocusLossChecks.Run(Check);
         ReplyProgressChecks.Run(Check, args.Length == 2 && args[0] == "--screenshots" ? args[1] : null);
         if (!args.Contains("--reply-flow-only")) PresentationChecks.Run(Check, args.Length == 2 && args[0] == "--screenshots" ? args[1] : null);

@@ -45,6 +45,22 @@ internal sealed class HotkeyState
 internal sealed class WorkWindowHistory
 {
     internal IntPtr Target { get; private set; }
-    internal void Remember(IntPtr window, Func<IntPtr, bool> eligible) { if (window != IntPtr.Zero && eligible(window)) Target = window; }
+    private bool pinned;
+    internal void Remember(IntPtr window, Func<IntPtr, bool> eligible)
+    { if (!pinned && window != IntPtr.Zero && eligible(window)) Target = window; }
+    // An explicit shortcut entry replaces the target even when this source cannot
+    // be restored: it must never silently reuse an older application's window.
+    internal bool Enter(IntPtr window, Func<IntPtr, bool> eligible)
+    {
+        pinned = true;
+        Target = window != IntPtr.Zero && eligible(window) ? window : IntPtr.Zero;
+        return Target != IntPtr.Zero;
+    }
+    // Only a verified current external foreground ends the previous chat visit.
+    internal void ObserveExternal(IntPtr window, Func<IntPtr, bool> eligible)
+    {
+        pinned = false;
+        Target = window != IntPtr.Zero && eligible(window) ? window : IntPtr.Zero;
+    }
     internal bool Return(Func<IntPtr, bool> restore) => Target != IntPtr.Zero && restore(Target);
 }

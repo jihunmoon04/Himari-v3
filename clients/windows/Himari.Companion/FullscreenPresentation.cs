@@ -18,7 +18,6 @@ public partial class MainWindow
     [DllImport("user32.dll")] private static extern IntPtr SetWinEventHook(uint min, uint max, IntPtr module, ForegroundEvent callback, uint process, uint thread, uint flags);
     [DllImport("user32.dll")] private static extern bool UnhookWinEvent(IntPtr hook);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetClassName(IntPtr window, StringBuilder text, int count);
-    [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern IntPtr GetProp(IntPtr window, string name);
 
     private bool IsChatWindow(IntPtr window) => window != IntPtr.Zero &&
         (window == new WindowInteropHelper(this).Handle || (dialogueHost is not null && window == new WindowInteropHelper(dialogueHost).Handle));
@@ -34,10 +33,10 @@ public partial class MainWindow
     {
         shellFullscreen = new ShellFullscreen();
         fullscreenTimer.Tick += (_, _) => UpdateFullscreenPresentation();
-        workWindow.Remember(GetForegroundWindow(), EligibleWorkWindow);
+        workWindow.Remember(CurrentForegroundWindow, EligibleWorkWindow);
         foregroundCallback = (_, _, window, _, _, _, _) =>
         {
-            workWindow.Remember(window, EligibleWorkWindow);
+            ObserveForeground(window);
             // Observe Alt+Tab as well as our own shortcut. No key interception is involved.
             UpdateFullscreenPresentation();
             DismissUserBubbleIfUnfocused();
@@ -47,11 +46,19 @@ public partial class MainWindow
         UpdateFullscreenPresentation();
     }
 
+    private void ObserveForeground(IntPtr window)
+    {
+        // WinEvent notifications may be queued across a shortcut entry. An older
+        // application's event cannot replace the source pinned by that shortcut.
+        if (window == IntPtr.Zero || window != CurrentForegroundWindow || OwnWindow(window) || ShellSwitcher(window)) return;
+        workWindow.ObserveExternal(window, EligibleWorkWindow);
+    }
+
     // The monitor of a fullscreen work window that is in front, or that we are chatting over.
     private System.Windows.Forms.Screen? FullscreenWorkScreen()
     {
         if (fullscreenWorkProbe is not null) return fullscreenWorkProbe();
-        IntPtr foreground = GetForegroundWindow();
+        IntPtr foreground = CurrentForegroundWindow;
         if (!(IsChatWindow(foreground) || foreground == lastWorkWindow || ShellSwitcher(foreground)) || !EligibleWorkWindow(lastWorkWindow)
             || IsIconic(lastWorkWindow) || !GetWindowRect(lastWorkWindow, out var rect)) return null;
         var screen = System.Windows.Forms.Screen.FromHandle(lastWorkWindow);
@@ -84,7 +91,8 @@ public partial class MainWindow
     private static bool ShellSwitcher(IntPtr window)
     {
         if (window == IntPtr.Zero) return false;
-        if (GetProp(window, "NonRudeHWND") != IntPtr.Zero) return true;
+        // NonRudeHWND is also used by ordinary applications such as Notepad;
+        // only the known Shell switcher classes identify a transient switcher here.
         var name = new StringBuilder(64); GetClassName(window, name, name.Capacity);
         return name.ToString() is "ForegroundStaging" or "XamlExplorerHostIslandWindow" or "MultitaskingViewFrame" or "TaskSwitcherWnd";
     }
