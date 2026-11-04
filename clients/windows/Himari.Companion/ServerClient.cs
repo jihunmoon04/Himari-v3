@@ -111,20 +111,22 @@ internal sealed record ApprovedSaveTarget(
 {
     internal Action? OnAfterVerifyBeforeReplace { get; init; }
     internal Action? OnBeforeCommitTempMove { get; init; }
+    internal Action<SafeFileHandle>? OnBeforeCommitTempHandleMove { get; init; }
 
     private const uint GenericRead = 0x80000000;
     private const uint GenericWrite = 0x40000000;
     private const uint DeleteAccess = 0x00010000;
     private const uint FileShareNone = 0;
-    private const uint FileShareDelete = 0x00000004;
+    private const uint CreateNewDisposition = 1;
     private const uint OpenExisting = 3;
     private const uint FileAttributeNormal = 0x00000080;
     private const int ErrorFileNotFound = 2;
     private const int ErrorPathNotFound = 3;
     private const int ErrorAccessDenied = 5;
-    private const int FileRenameInfoEx = 22;
-    private const int FileRenameReplaceIfExists = 0x00000001;
-    private const int FileRenamePosixSemantics = 0x00000002;
+    private const int ErrorFileExists = 80;
+    private const int ErrorAlreadyExists = 183;
+    private const int FileRenameInfo = 3;
+    private const int FileDispositionInfo = 4;
 
     [StructLayout(LayoutKind.Sequential)]
     private struct FILETIME
@@ -170,18 +172,25 @@ internal sealed record ApprovedSaveTarget(
         IntPtr lpFileInformation,
         uint dwBufferSize);
 
-    private static void AtomicReplaceOverOpenTarget(string tempPath, string targetPath)
+    internal static SafeFileHandle CreateExclusiveTempFile(string tempPath)
     {
-        using SafeFileHandle tempHandle = CreateFile(
+        SafeFileHandle handle = CreateFile(
             tempPath,
-            GenericRead | DeleteAccess,
+            GenericRead | GenericWrite | DeleteAccess,
             FileShareNone,
             IntPtr.Zero,
-            OpenExisting,
+            CreateNewDisposition,
             FileAttributeNormal,
             IntPtr.Zero);
-        if (tempHandle.IsInvalid)
-            throw new IOException("검증된 임시 파일을 열 수 없습니다.", Marshal.GetExceptionForHR(Marshal.GetHRForLastWin32Error()));
+        if (handle.IsInvalid)
+            throw new IOException("임시 다운로드 파일을 생성할 수 없습니다.", Marshal.GetExceptionForHR(Marshal.GetHRForLastWin32Error()));
+        return handle;
+    }
+
+    private static void RenameOpenHandle(SafeFileHandle handle, string targetPath, out int win32Error)
+    {
+        if (handle.IsInvalid || handle.IsClosed)
+            throw new IOException("열린 파일 핸들이 유효하지 않습니다.");
         byte[] nameBytes = Encoding.Unicode.GetBytes(targetPath + "\0");
         int headerSize = IntPtr.Size * 2 + 4;
         int totalSize = headerSize + nameBytes.Length;
@@ -189,12 +198,30 @@ internal sealed record ApprovedSaveTarget(
         try
         {
             for (int i = 0; i < headerSize; i++) Marshal.WriteByte(buffer, i, 0);
-            Marshal.WriteInt32(buffer, 0, FileRenameReplaceIfExists | FileRenamePosixSemantics);
-            Marshal.WriteIntPtr(buffer, IntPtr.Size, IntPtr.Zero);
+            Marshal.WriteInt32(buffer, 0, 0); // ReplaceIfExists = FALSE
+            Marshal.WriteIntPtr(buffer, IntPtr.Size, IntPtr.Zero); // RootDirectory = NULL
             Marshal.WriteInt32(buffer, IntPtr.Size * 2, targetPath.Length * sizeof(char));
             Marshal.Copy(nameBytes, 0, IntPtr.Add(buffer, headerSize), nameBytes.Length);
-            if (!SetFileInformationByHandle(tempHandle, FileRenameInfoEx, buffer, (uint)totalSize))
-                throw new IOException("검증된 임시 파일로 대상 파일을 원자적으로 교체할 수 없습니다.", Marshal.GetExceptionForHR(Marshal.GetHRForLastWin32Error()));
+            if (!SetFileInformationByHandle(handle, FileRenameInfo, buffer, (uint)totalSize))
+            {
+                win32Error = Marshal.GetLastWin32Error();
+                throw new IOException("열린 파일 핸들의 경로를 원자적으로 전환할 수 없습니다.", Marshal.GetExceptionForHR(Marshal.GetHRForLastWin32Error()));
+            }
+            win32Error = 0;
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(buffer);
+        }
+    }
+
+    private static bool TryDeleteOpenHandleOnClose(SafeFileHandle handle)
+    {
+        IntPtr buffer = Marshal.AllocHGlobal(1);
+        try
+        {
+            Marshal.WriteByte(buffer, 0, 1);
+            return SetFileInformationByHandle(handle, FileDispositionInfo, buffer, 1);
         }
         finally
         {
@@ -240,13 +267,13 @@ internal sealed record ApprovedSaveTarget(
         }
     }
 
-    internal void CommitMove(string tempPath)
+    internal void CommitMove(SafeFileHandle tempHandle)
     {
         if (!ExistedAtSelection)
         {
             try
             {
-                File.Move(tempPath, FullPath, overwrite: false);
+                RenameOpenHandle(tempHandle, FullPath, out _);
             }
             catch (IOException ex) when (File.Exists(FullPath) || Directory.Exists(FullPath))
             {
@@ -258,8 +285,8 @@ internal sealed record ApprovedSaveTarget(
             throw new SaveTargetChangedException("다운로드 중 대상 경로가 폴더로 바뀌어 덮어쓰기를 중단했습니다.");
         SafeFileHandle handle = CreateFile(
             FullPath,
-            GenericRead | GenericWrite,
-            FileShareDelete,
+            GenericRead | DeleteAccess,
+            FileShareNone,
             IntPtr.Zero,
             OpenExisting,
             FileAttributeNormal,
@@ -274,20 +301,46 @@ internal sealed record ApprovedSaveTarget(
                 throw new SaveTargetChangedException("다운로드 중 대상 경로가 폴더로 바뀌어 덮어쓰기를 중단했습니다.");
             throw new IOException("대상 파일을 잠글 수 없습니다.", Marshal.GetExceptionForHR(Marshal.GetHRForLastWin32Error()));
         }
-        using var existingStream = new FileStream(handle, FileAccess.ReadWrite);
-        var currentIdentity = ReadHandleIdentity(handle);
-        if (currentIdentity != ExistingIdentity || (ulong)existingStream.Length != ExistingIdentity.FileSize)
-            throw new SaveTargetChangedException("다운로드 중 대상 파일이 변경되어 덮어쓰기를 중단했습니다.");
-        existingStream.Position = 0;
-        string currentSha256 = Convert.ToHexString(SHA256.HashData(existingStream)).ToLowerInvariant();
-        if (!string.Equals(currentSha256, ExistingSha256, StringComparison.OrdinalIgnoreCase))
-            throw new SaveTargetChangedException("다운로드 중 대상 파일이 변경되어 덮어쓰기를 중단했습니다.");
-        // While existingStream is held open with GenericRead|GenericWrite and FileShareDelete (no read/write sharing),
-        // external writes and standard Win32 moves/overwrites are rejected by the kernel, while FileRenameInfoEx with
-        // FILE_RENAME_REPLACE_IF_EXISTS | FILE_RENAME_POSIX_SEMANTICS atomically replaces the directory entry in a single call.
-        OnAfterVerifyBeforeReplace?.Invoke();
-        OnBeforeCommitTempMove?.Invoke();
-        AtomicReplaceOverOpenTarget(tempPath, FullPath);
+        string directory = Path.GetDirectoryName(FullPath) ?? Path.GetTempPath();
+        string backupPath = Path.Combine(directory, $".{Path.GetFileName(FullPath)}.{Guid.NewGuid():N}.bak");
+        bool deleteBackupAfterClose = false;
+        try
+        {
+            using var existingStream = new FileStream(handle, FileAccess.Read);
+            var currentIdentity = ReadHandleIdentity(handle);
+            if (currentIdentity != ExistingIdentity || (ulong)existingStream.Length != ExistingIdentity.FileSize)
+                throw new SaveTargetChangedException("다운로드 중 대상 파일이 변경되어 덮어쓰기를 중단했습니다.");
+            existingStream.Position = 0;
+            string currentSha256 = Convert.ToHexString(SHA256.HashData(existingStream)).ToLowerInvariant();
+            if (!string.Equals(currentSha256, ExistingSha256, StringComparison.OrdinalIgnoreCase))
+                throw new SaveTargetChangedException("다운로드 중 대상 파일이 변경되어 덮어쓰기를 중단했습니다.");
+            // Both handle (FullPath) and tempHandle (.part) are held with FileShare.None (dwShareMode = 0),
+            // blocking even DELETE-only / POSIX-rename opens on either file.
+            OnAfterVerifyBeforeReplace?.Invoke();
+            RenameOpenHandle(handle, backupPath, out _);
+            try
+            {
+                OnBeforeCommitTempMove?.Invoke();
+                OnBeforeCommitTempHandleMove?.Invoke(tempHandle);
+                RenameOpenHandle(tempHandle, FullPath, out _);
+            }
+            catch (Exception ex)
+            {
+                if (File.Exists(FullPath) || Directory.Exists(FullPath))
+                    throw new SaveTargetChangedException("다운로드 중 대상 경로에 다른 파일이 생성되어 덮어쓰기를 중단했습니다.", ex);
+                try { RenameOpenHandle(handle, FullPath, out _); } catch { }
+                throw;
+            }
+            if (!TryDeleteOpenHandleOnClose(handle))
+                deleteBackupAfterClose = true;
+        }
+        finally
+        {
+            if (deleteBackupAfterClose && File.Exists(backupPath))
+            {
+                try { File.Delete(backupPath); } catch { }
+            }
+        }
     }
 }
 internal sealed class ServerClient : IDisposable
@@ -414,34 +467,34 @@ internal sealed class ServerClient : IDisposable
                 await ReadAsync(response, ct);
                 return;
             }
-            long totalBytes = 0;
-            string actualSha256;
-            using (var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256))
+            using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+            await using var source = await response.Content.ReadAsStreamAsync(ct);
+            using SafeFileHandle tempHandle = ApprovedSaveTarget.CreateExclusiveTempFile(tempPath);
+            await using (var target = new FileStream(tempHandle, FileAccess.ReadWrite, 81920, isAsync: false))
             {
-                await using var source = await response.Content.ReadAsStreamAsync(ct);
-                await using (var target = new FileStream(tempPath, FileMode.CreateNew, FileAccess.Write, FileShare.None, 81920, useAsync: true))
+                byte[] buffer = new byte[81920];
+                long totalBytes = 0;
+                while (true)
                 {
-                    byte[] buffer = new byte[81920];
-                    while (true)
-                    {
-                        int read = await source.ReadAsync(buffer.AsMemory(), ct);
-                        if (read <= 0) break;
-                        totalBytes += read;
-                        if (totalBytes > expectedSize || totalBytes > MaxPresentedFileBytes)
-                            throw new InvalidDataException("파일 크기가 예상과 다릅니다.");
-                        hash.AppendData(buffer, 0, read);
-                        await target.WriteAsync(buffer.AsMemory(0, read), ct);
-                    }
-                    await target.FlushAsync(ct);
+                    int read = await source.ReadAsync(buffer.AsMemory(), ct);
+                    if (read <= 0) break;
+                    totalBytes += read;
+                    if (totalBytes > expectedSize || totalBytes > MaxPresentedFileBytes)
+                        throw new InvalidDataException("파일 크기가 예상과 다릅니다.");
+                    hash.AppendData(buffer, 0, read);
+                    await target.WriteAsync(buffer.AsMemory(0, read), ct);
                 }
-                actualSha256 = Convert.ToHexString(hash.GetHashAndReset()).ToLowerInvariant();
+                await target.FlushAsync(ct);
+                target.Flush(flushToDisk: true);
+                string actualSha256 = Convert.ToHexString(hash.GetHashAndReset()).ToLowerInvariant();
+                if (totalBytes != expectedSize || target.Length != expectedSize)
+                    throw new InvalidDataException("파일 크기가 예상과 다릅니다.");
+                if (!string.Equals(actualSha256, expectedSha256.Trim(), StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidDataException("파일 무결성(SHA-256) 검증에 실패했습니다.");
+                ct.ThrowIfCancellationRequested();
+                // tempHandle remains open with FileShare.None from creation through verification and atomic rename.
+                destinationTarget.CommitMove(tempHandle);
             }
-            if (totalBytes != expectedSize)
-                throw new InvalidDataException("파일 크기가 예상과 다릅니다.");
-            if (!string.Equals(actualSha256, expectedSha256.Trim(), StringComparison.OrdinalIgnoreCase))
-                throw new InvalidDataException("파일 무결성(SHA-256) 검증에 실패했습니다.");
-            ct.ThrowIfCancellationRequested();
-            destinationTarget.CommitMove(tempPath);
         }
         finally
         {

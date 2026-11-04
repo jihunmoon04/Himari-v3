@@ -1,7 +1,14 @@
+using System.Diagnostics;
 using System.Net;
 using System.Text;
 using System.Text.Json;
 using Himari.Companion;
+
+if (args.Length == 4 && args[0] == "--posix-rename-helper")
+{
+    bool renamed = HardLinkHelper.TryPosixRename(args[1], args[2], replaceIfExists: args[3] == "true");
+    Environment.Exit(renamed ? 0 : 2);
+}
 
 static void Check(bool value, string message) { if (!value) throw new Exception(message); }
 var legacyPresentation = JsonSerializer.Deserialize<WindowPreferences>("{\"Left\":10,\"Top\":20,\"CharacterHeight\":330,\"MoveEnabled\":true}")!;
@@ -1018,8 +1025,8 @@ try
     Check(racedExistingFailed && File.ReadAllText(racedExistingPath) == "modified-during-download" && Directory.GetFiles(tempSaveDir, "*.part").Length == 0,
         "existing file modified after save dialog approval is never overwritten");
 
-    // PR #181 review P1: if replacement commit fails (either via injected I/O error or OS rename failure inside AtomicReplaceOverOpenTarget),
-    // the original file is never truncated or modified and remains intact at its path.
+    // PR #181 review P1: if replacement commit fails (either via injected I/O error or OS rename failure on tempHandle),
+    // the original file is never truncated or modified and is atomically restored at its path.
     File.WriteAllText(racedExistingPath, "approved-v2");
     bool commitFailureCaught = false;
     var failingCommitTarget = ApprovedSaveTarget.Capture(racedExistingPath) with
@@ -1037,11 +1044,7 @@ try
     bool kernelRenameFailureCaught = false;
     var kernelFailingTarget = ApprovedSaveTarget.Capture(racedExistingPath) with
     {
-        OnBeforeCommitTempMove = () =>
-        {
-            foreach (string partFile in Directory.GetFiles(tempSaveDir, "*.part"))
-                File.Delete(partFile);
-        }
+        OnBeforeCommitTempHandleMove = handle => handle.Close()
     };
     try
     {
@@ -1055,16 +1058,51 @@ try
         && kernelRenameFailureCaught
         && File.Exists(racedExistingPath)
         && File.ReadAllText(racedExistingPath) == "approved-v2"
-        && Directory.GetFiles(tempSaveDir, "*.part").Length == 0,
-        "replacement commit failure preserves the original file intact without truncation or partial write");
+        && Directory.GetFiles(tempSaveDir, "*.part").Length == 0
+        && Directory.GetFiles(tempSaveDir, "*.bak").Length == 0,
+        "replacement commit failure restores the original file intact without truncation or partial write");
 
-    // PR #181 review P1: an existing file approved for overwrite and unchanged during download is replaced atomically via .part move,
-    // holding the FileShare.None kernel handle blocks TOCTOU modification, and any other hard link to the original inode keeps its original bytes.
+    // PR #181 review P2: if an intruder file B is created at the target path during the staging transition,
+    // ReplaceIfExists=FALSE refuses to overwrite file B and preserves the staged original file A as well.
+    bool intruderCollisionRefused = false;
+    var intruderCollisionTarget = ApprovedSaveTarget.Capture(racedExistingPath) with
+    {
+        OnBeforeCommitTempMove = () => File.WriteAllText(racedExistingPath, "intruder-file-B")
+    };
+    try
+    {
+        await fileClient.DownloadPresentedFileAsync("c1", "f1", 2, intruderCollisionTarget, validBytes.Length, validSha, CancellationToken.None);
+    }
+    catch (SaveTargetChangedException)
+    {
+        intruderCollisionRefused = true;
+    }
+    string[] preservedBackups = Directory.GetFiles(tempSaveDir, "*.bak");
+    Check(intruderCollisionRefused
+        && File.ReadAllText(racedExistingPath) == "intruder-file-B"
+        && preservedBackups.Length == 1
+        && File.ReadAllText(preservedBackups[0]) == "approved-v2"
+        && Directory.GetFiles(tempSaveDir, "*.part").Length == 0,
+        "ReplaceIfExists=FALSE never overwrites an intruder file B and preserves the staged original file A");
+    File.Delete(preservedBackups[0]);
+    File.WriteAllText(racedExistingPath, "approved-v2");
+
+    // PR #181 review P1 & P2: an existing file approved for overwrite and unchanged during download is replaced atomically via .part move,
+    // holding FileShare.None on both the target handle and the .part handle blocks standard and POSIX (FILE_SHARE_DELETE / FileRenameInfoEx)
+    // writes/renames on both files, and any other hard link to the original inode keeps its original bytes.
     string hardLinkSiblingPath = Path.Combine(tempSaveDir, "hardlink-sibling.txt");
     Check(HardLinkHelper.Create(hardLinkSiblingPath, racedExistingPath), "hard link created for original file preservation check");
     bool externalWriteBlocked = false;
     bool externalMoveBlocked = false;
+    bool posixRenameAwayBlocked = false;
+    bool posixReplaceOverBlocked = false;
+    bool childProcessPosixRenameBlocked = false;
+    bool childProcessPosixReplaceBlocked = false;
+    bool partWriteBlocked = false;
+    bool partPosixRenameBlocked = false;
+    bool childProcessPartPosixRenameBlocked = false;
     string intruderPath = Path.Combine(tempSaveDir, "intruder.txt");
+    string stolenPath = Path.Combine(tempSaveDir, "stolen.txt");
     File.WriteAllText(intruderPath, "intruder-bytes");
     var lockedTarget = ApprovedSaveTarget.Capture(racedExistingPath) with
     {
@@ -1074,17 +1112,33 @@ try
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { externalWriteBlocked = true; }
             try { File.Move(intruderPath, racedExistingPath, overwrite: true); }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { externalMoveBlocked = true; }
+            posixRenameAwayBlocked = !HardLinkHelper.TryPosixRename(racedExistingPath, stolenPath, replaceIfExists: false);
+            posixReplaceOverBlocked = !HardLinkHelper.TryPosixRename(intruderPath, racedExistingPath, replaceIfExists: true);
+            childProcessPosixRenameBlocked = !HardLinkHelper.TryPosixRenameInChildProcess(racedExistingPath, stolenPath, replaceIfExists: false);
+            childProcessPosixReplaceBlocked = !HardLinkHelper.TryPosixRenameInChildProcess(intruderPath, racedExistingPath, replaceIfExists: true);
+            string partPath = Directory.GetFiles(tempSaveDir, "*.part").Single();
+            try { File.WriteAllText(partPath, "tampered-part"); }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { partWriteBlocked = true; }
+            partPosixRenameBlocked = !HardLinkHelper.TryPosixRename(partPath, stolenPath, replaceIfExists: false);
+            childProcessPartPosixRenameBlocked = !HardLinkHelper.TryPosixRenameInChildProcess(partPath, stolenPath, replaceIfExists: false);
             if (File.Exists(intruderPath)) File.Delete(intruderPath);
         }
     };
     await fileClient.DownloadPresentedFileAsync("c1", "f1", 2, lockedTarget, validBytes.Length, validSha, CancellationToken.None);
     Check(externalWriteBlocked
         && externalMoveBlocked
+        && posixRenameAwayBlocked
+        && posixReplaceOverBlocked
+        && childProcessPosixRenameBlocked
+        && childProcessPosixReplaceBlocked
+        && partWriteBlocked
+        && partPosixRenameBlocked
+        && childProcessPartPosixRenameBlocked
         && File.ReadAllBytes(racedExistingPath).SequenceEqual(validBytes)
         && File.ReadAllText(hardLinkSiblingPath) == "approved-v2"
         && Directory.GetFiles(tempSaveDir, "*.part").Length == 0
         && Directory.GetFiles(tempSaveDir, "*.bak").Length == 0,
-        "FileShare.None handle + atomic .part replacement blocks TOCTOU writes/renames and leaves sibling hard links untouched");
+        "FileShare.None on both target and .part handles blocks in-process and second-process POSIX FileRenameInfoEx races and leaves sibling hard links untouched");
 }
 finally
 {
@@ -1327,9 +1381,78 @@ sealed class PresentedFileHandler(byte[] bytes, string sha256) : HttpMessageHand
 
 static class HardLinkHelper
 {
+    private const uint DeleteAccess = 0x00010000;
+    private const uint ShareAll = 0x00000001 | 0x00000002 | 0x00000004;
+    private const uint OpenExisting = 3;
+    private const uint FileAttributeNormal = 0x00000080;
+    private const int FileRenameInfoEx = 22;
+    private const int FileRenameReplaceIfExists = 0x00000001;
+    private const int FileRenamePosixSemantics = 0x00000002;
+
     [System.Runtime.InteropServices.DllImport("kernel32.dll", EntryPoint = "CreateHardLinkW", SetLastError = true, CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
     private static extern bool CreateHardLink(string lpFileName, string lpExistingFileName, IntPtr lpSecurityAttributes);
 
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", EntryPoint = "CreateFileW", SetLastError = true, CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+    private static extern Microsoft.Win32.SafeHandles.SafeFileHandle CreateFile(
+        string lpFileName,
+        uint dwDesiredAccess,
+        uint dwShareMode,
+        IntPtr lpSecurityAttributes,
+        uint dwCreationDisposition,
+        uint dwFlagsAndAttributes,
+        IntPtr hTemplateFile);
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool SetFileInformationByHandle(
+        Microsoft.Win32.SafeHandles.SafeFileHandle hFile,
+        int FileInformationClass,
+        IntPtr lpFileInformation,
+        uint dwBufferSize);
+
     public static bool Create(string newLinkPath, string existingFilePath) =>
         CreateHardLink(newLinkPath, existingFilePath, IntPtr.Zero);
+
+    public static bool TryPosixRename(string sourcePath, string targetPath, bool replaceIfExists)
+    {
+        using var handle = CreateFile(sourcePath, DeleteAccess, ShareAll, IntPtr.Zero, OpenExisting, FileAttributeNormal, IntPtr.Zero);
+        if (handle.IsInvalid) return false;
+        byte[] nameBytes = Encoding.Unicode.GetBytes(targetPath + "\0");
+        int headerSize = IntPtr.Size * 2 + 4;
+        int totalSize = headerSize + nameBytes.Length;
+        IntPtr buffer = System.Runtime.InteropServices.Marshal.AllocHGlobal(totalSize);
+        try
+        {
+            for (int i = 0; i < headerSize; i++) System.Runtime.InteropServices.Marshal.WriteByte(buffer, i, 0);
+            int flags = FileRenamePosixSemantics | (replaceIfExists ? FileRenameReplaceIfExists : 0);
+            System.Runtime.InteropServices.Marshal.WriteInt32(buffer, 0, flags);
+            System.Runtime.InteropServices.Marshal.WriteIntPtr(buffer, IntPtr.Size, IntPtr.Zero);
+            System.Runtime.InteropServices.Marshal.WriteInt32(buffer, IntPtr.Size * 2, targetPath.Length * sizeof(char));
+            System.Runtime.InteropServices.Marshal.Copy(nameBytes, 0, IntPtr.Add(buffer, headerSize), nameBytes.Length);
+            return SetFileInformationByHandle(handle, FileRenameInfoEx, buffer, (uint)totalSize);
+        }
+        finally
+        {
+            System.Runtime.InteropServices.Marshal.FreeHGlobal(buffer);
+        }
+    }
+
+    public static bool TryPosixRenameInChildProcess(string sourcePath, string targetPath, bool replaceIfExists)
+    {
+        var psi = new ProcessStartInfo(Environment.ProcessPath!)
+        {
+            UseShellExecute = false,
+            CreateNoWindow = true
+        };
+        psi.ArgumentList.Add("--posix-rename-helper");
+        psi.ArgumentList.Add(sourcePath);
+        psi.ArgumentList.Add(targetPath);
+        psi.ArgumentList.Add(replaceIfExists ? "true" : "false");
+        using var proc = Process.Start(psi)!;
+        if (!proc.WaitForExit(5000))
+        {
+            proc.Kill();
+            throw new Exception("child POSIX rename helper timed out");
+        }
+        return proc.ExitCode == 0;
+    }
 }
