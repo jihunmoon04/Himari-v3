@@ -151,6 +151,7 @@ public partial class MainWindow : Window
     private void CloseBubbleClick(object sender, RoutedEventArgs e)
     {
         if (ReplyPreparing) dismissedReplyProgress = $"{replyProgressConversation}:{replyProgressJob}";
+        DismissCurrentFileCards();
         ClearStack(keepUnsent: true); CloseBubble(); HideUserBubble();
     }
     private void FlipClick(object sender, RoutedEventArgs e) => settings.FacingLeft.IsChecked = FlipMenu.IsChecked;

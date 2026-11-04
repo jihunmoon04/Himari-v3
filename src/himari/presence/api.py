@@ -288,6 +288,11 @@ class Subscription(Protocol):
     def device_id(self) -> str | None: ...
 
     @property
+    def connection_generation(self) -> str | None:
+        """V3-P93 §6.1.1: this device stream's unpredictable generation id; None for Web streams."""
+        ...
+
+    @property
     def finished(self) -> bool:
         """Closed and everything sent: the stream ends."""
         ...
@@ -318,10 +323,22 @@ class EventHub(Protocol):
 
 class Presence(Protocol):
     def signal(self, principal: PrincipalId, device_id: str, idle_seconds: float, time_zone: str | None,
-               signals: Signals | None = None) -> None:
+               signals: Signals | None = None, *, connection_generation: str | None = None,
+               file_download: bool | None = None) -> bool:
         """A device's input activity (§5): ``idle_seconds`` since the last input
         anywhere on it; ``time_zone`` an IANA name, or None when unknown.
-        ``signals`` (V3-P88): the rest of the snapshot; None as all unknown."""
+        ``signals`` (V3-P88): the rest of the snapshot; None as all unknown.
+        V3-P93 §6.1: when ``connection_generation`` is given, atomically checks
+        that it matches the device's open stream and records ``file_download`` on
+        that stream only (False when the generation is stale or closed)."""
+        ...
+
+    def valid_generation(self, principal: PrincipalId, device_id: str, generation: str) -> bool:
+        """V3-P93 §6.1: whether ``generation`` names the device's open event stream now."""
+        ...
+
+    def device_file_download(self, principal: PrincipalId, device_id: str) -> bool:
+        """V3-P93 §3.2: whether the device's open event stream has confirmed ``file_download=True``."""
         ...
 
     @property

@@ -158,7 +158,8 @@ def interface_kind(origin: MessageOrigin | None) -> InterfaceKind:
     if not isinstance(origin, MessageOrigin):
         return InterfaceKind.UNKNOWN
     return {OriginKind.WEB: InterfaceKind.WEB, OriginKind.CLI: InterfaceKind.CLI,
-            OriginKind.DEVICE: InterfaceKind.WINDOWS_COMPANION}.get(origin.kind, InterfaceKind.UNKNOWN)
+            OriginKind.DEVICE: InterfaceKind.WINDOWS_COMPANION,
+            OriginKind.WAKE: InterfaceKind.WINDOWS_COMPANION}.get(origin.kind, InterfaceKind.UNKNOWN)
 
 
 @dataclass(frozen=True)
@@ -798,6 +799,18 @@ class FileCatalog(Protocol):
                               ) -> Mapping[CallRef, Sequence[FileRecord]]:
         """The files each call presented (calls without any are left out);
         never its Tool images (V3-P67, review C4)."""
+        ...
+
+    async def read_presented_files(self, scope: TrustedScope, *, limit: int = 50,
+                                   offset: int = 0) -> Sequence[FileRecord]:
+        """V3-P93 §6.2: presented files of succeeded, publicly visible Tool calls
+        in this Conversation, filtered before paging, newest first."""
+        ...
+
+    async def read_presented_file(self, scope: TrustedScope, file_id: FileId,
+                                  version: int) -> FileRecord | None:
+        """V3-P93 §6.2: one presented file of a succeeded, publicly visible Tool
+        call in this Conversation, or None if not found or not publicly presented."""
         ...
 
     async def presented_bytes_since(self, scope: TrustedScope, since: datetime) -> int: ...

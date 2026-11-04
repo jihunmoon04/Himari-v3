@@ -13,7 +13,7 @@ internal static class MessageFailures
         if (api.Code == "screen_already_sent") return MessageFailure.AlreadySent;
         if (api.Code == "conversation_closed") return MessageFailure.Closed;
         if (api.Status is HttpStatusCode.RequestEntityTooLarge or HttpStatusCode.TooManyRequests ||
-            api.Code is "invalid_argument" or "attachment_refused" or "device_scope" or "companion_off" or "not_found" or "busy" or "not_a_screen") return MessageFailure.Rejected;
+            api.Code is "invalid_argument" or "attachment_refused" or "device_scope" or "companion_off" or "not_found" or "busy" or "not_a_screen" or "stale_connection_generation" or "connection_generation_required") return MessageFailure.Rejected;
         return MessageFailure.Unknown;
     }
 }

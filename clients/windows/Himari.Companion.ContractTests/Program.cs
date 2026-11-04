@@ -1,7 +1,37 @@
-﻿using System.Net;
+using System.Diagnostics;
+using System.Net;
 using System.Text;
 using System.Text.Json;
 using Himari.Companion;
+
+if (args.Length == 4 && args[0] == "--posix-rename-helper")
+{
+    bool renamed = HardLinkHelper.TryPosixRename(args[1], args[2], replaceIfExists: args[3] == "true");
+    Environment.Exit(renamed ? 0 : 2);
+}
+
+// Parent kills this process without unwinding the download's finally block.
+if (args.Length == 3 && args[0] == "--save-crash-helper")
+{
+    string crashPath = Path.Combine(args[1], "download.txt");
+    string crashMode = args[2];
+    byte[] crashBytes = Encoding.UTF8.GetBytes("verified-file-contents");
+    string crashSha = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(crashBytes)).ToLowerInvariant();
+    var crashTarget = ApprovedSaveTarget.Capture(crashPath);
+    void WaitForKill()
+    {
+        Console.WriteLine("SAVE_CRASH_READY");
+        Console.Out.Flush();
+        Thread.Sleep(Timeout.Infinite);
+    }
+    if (crashMode == "before-collision") File.WriteAllText(crashPath, "original-before-crash");
+    if (crashMode != "after-commit")
+        crashTarget = crashTarget with { OnBeforeCommitTempHandleMove = _ => WaitForKill() };
+    using var crashClient = new ServerClient("https://example.com/", "test", new PresentedFileHandler(crashBytes, crashSha));
+    await crashClient.DownloadPresentedFileAsync("c1", "f1", 2, crashTarget, crashBytes.Length, crashSha, CancellationToken.None);
+    WaitForKill();
+    return;
+}
 
 static void Check(bool value, string message) { if (!value) throw new Exception(message); }
 var legacyPresentation = JsonSerializer.Deserialize<WindowPreferences>("{\"Left\":10,\"Top\":20,\"CharacterHeight\":330,\"MoveEnabled\":true}")!;
@@ -896,6 +926,239 @@ Check(JsonSerializer.Deserialize<WindowPreferences>(JsonSerializer.Serialize(wit
     && JsonSerializer.Deserialize<WindowPreferences>("{\"Left\":1,\"Top\":2,\"CharacterHeight\":330,\"Signals\":{\"Media\":true}}") is { Signals: { Media: true, FreeWakeScreen: false } },
     "the screen setting persists; saved signals without it are off (V3-P90 §9)");
 
+// V3-P93 §6.1: per-SSE connection generation and file_download negotiation
+var genState = new ConnectionGenerationState();
+Check(genState.ActiveGeneration is null, "starts with no active generation");
+genState.UpdateServerFeatures(fileDownload: true, connectionGeneration: false);
+Check(!genState.OnHello("gen-1") && genState.ActiveGeneration is null, "requires both server features");
+genState.UpdateServerFeatures(fileDownload: true, connectionGeneration: true);
+Check(genState.OnHello("gen-1") && genState.ActiveGeneration == "gen-1", "hello sets active generation when server supports both");
+Check(JsonSerializer.Serialize(ConnectionGenerationState.BuildMessageBody("안녕", null, genState.ActiveGeneration)).Contains("\"client_features\":{\"file_download\":true}"),
+    "negotiated message body carries client_features.file_download");
+Check(!JsonSerializer.Serialize(ConnectionGenerationState.BuildMessageBody("안녕", null, null)).Contains("client_features"),
+    "unnegotiated message body omits client_features");
+var activePresence = PresenceBody.Build(3, "z", true, false, null, coding, true, null, true, null, plain,
+    serverTakesFeatures: true, serverTakesScreenLook: true, serverTakesFileDownload: true);
+Check(JsonSerializer.Serialize(activePresence, JsonSerializerOptions.Web).Contains("\"file_download\":true"),
+    "active presence carries features.file_download=true");
+var lockedWithDownload = PresenceBody.Build(3, "z", true, true, null, null, true, null, true, null, plain,
+    serverTakesFeatures: true, serverTakesFileDownload: true);
+Check(JsonSerializer.Serialize(lockedWithDownload, JsonSerializerOptions.Web).Contains("\"features\":{\"file_download\":true}"),
+    "locked presence preserves file_download on the active subscription");
+genState.OnHello("gen-2");
+Check(!genState.OnStaleFailure("gen-1") && genState.ActiveGeneration == "gen-2",
+    "late 409 from an older generation does not clear a newer hello's generation");
+Check(genState.OnStaleFailure("gen-2") && genState.ActiveGeneration is null,
+    "409 for the current generation clears it until the next hello");
+Check(MessageFailures.Classify(new ApiException(HttpStatusCode.Conflict, "stale_connection_generation")) == MessageFailure.Rejected
+    && MessageFailures.Classify(new ApiException(HttpStatusCode.Conflict, "connection_generation_required")) == MessageFailure.Rejected
+    && MessageFailures.ReuseScreen(new ApiException(HttpStatusCode.Conflict, "stale_connection_generation")),
+    "generation 409s are classified as rejected before recording and preserve staged screens");
+
+// V3-P93 §6.3: Windows filename sanitization and presented file streaming/verification
+Check(PresentedFileNames.SanitizeSaveFileName("../../secret/report.pdf") == "report.pdf", "strips relative path traversal");
+Check(PresentedFileNames.SanitizeSaveFileName(@"C:\Windows\System32\cmd.exe") == "cmd.exe", "strips Windows drive path");
+Check(PresentedFileNames.SanitizeSaveFileName("a:b*c?.txt . ") == "a_b_c_.txt", "replaces invalid chars and trims trailing dots/spaces");
+Check(PresentedFileNames.SanitizeSaveFileName("CON.txt") == "_CON.txt" && PresentedFileNames.SanitizeSaveFileName("lpt1") == "_lpt1",
+    "prefixes reserved Windows device names");
+Check(PresentedFileNames.SanitizeSaveFileName("...") == "download" && PresentedFileNames.SanitizeSaveFileName("") == "download",
+    "falls back to download for empty or dot-only names");
+Check(PresentedFileNames.FormatSize(512) == "512 B" && PresentedFileNames.FormatSize(2048) == "2 KB" && PresentedFileNames.VersionLabel(2) == "v2",
+    "formats size and version labels");
+
+string tempSaveDir = Path.Combine(Path.GetTempPath(), "himari-contract-save-" + Guid.NewGuid().ToString("N"));
+Directory.CreateDirectory(tempSaveDir);
+try
+{
+    byte[] validBytes = Encoding.UTF8.GetBytes("verified-file-contents");
+    string validSha = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(validBytes)).ToLowerInvariant();
+    var fileHandler = new PresentedFileHandler(validBytes, validSha);
+    using var fileClient = new ServerClient("https://example.com/", "token-1", fileHandler);
+    await fileClient.SendAsync(HttpMethod.Post, "/api/device/presence", new { idle_seconds = 1 }, CancellationToken.None, "gen-abc");
+    Check(fileHandler.LastGenerationHeader == "gen-abc", "SendAsync attaches X-Himari-Connection-Generation when provided");
+    var listedFiles = await fileClient.ReadAllPresentedFilesAsync("c1", CancellationToken.None);
+    Check(listedFiles.Count == 2 && listedFiles[0].Version == 2 && listedFiles[1].Version == 1,
+        "ReadAllPresentedFilesAsync pages through all presented file versions");
+
+    string targetPath = Path.Combine(tempSaveDir, "saved.txt");
+    await fileClient.DownloadPresentedFileAsync("c1", "f1", 2, targetPath, validBytes.Length, validSha, CancellationToken.None);
+    Check(File.Exists(targetPath) && File.ReadAllBytes(targetPath).SequenceEqual(validBytes)
+        && Directory.GetFiles(tempSaveDir, "*.part").Length == 0,
+        "DownloadPresentedFileAsync verifies size and SHA-256 before moving into place");
+
+    // Hash mismatch publishes no file and cleans up .part temporary file.
+    string badHashPath = Path.Combine(tempSaveDir, "bad-hash.txt");
+    bool hashFailed = false;
+    try
+    {
+        await fileClient.DownloadPresentedFileAsync("c1", "f1", 2, badHashPath, validBytes.Length, new string('0', 64), CancellationToken.None);
+    }
+    catch (InvalidDataException) { hashFailed = true; }
+    Check(hashFailed && !File.Exists(badHashPath) && Directory.GetFiles(tempSaveDir, "*.part").Length == 0,
+        "SHA-256 mismatch aborts before move and cleans up temporary file");
+
+    // Size mismatch (truncated or oversized) aborts and cleans up temporary file.
+    string badSizePath = Path.Combine(tempSaveDir, "bad-size.txt");
+    bool sizeFailed = false;
+    try
+    {
+        await fileClient.DownloadPresentedFileAsync("c1", "f1", 2, badSizePath, validBytes.Length + 5, validSha, CancellationToken.None);
+    }
+    catch (InvalidDataException) { sizeFailed = true; }
+    Check(sizeFailed && !File.Exists(badSizePath) && Directory.GetFiles(tempSaveDir, "*.part").Length == 0,
+        "size mismatch aborts and leaves no destination or temporary file");
+
+    // 410 file_expired surfaces ApiException and leaves no file.
+    string expiredPath = Path.Combine(tempSaveDir, "expired.txt");
+    bool expiredFailed = false;
+    try
+    {
+        await fileClient.DownloadPresentedFileAsync("c1", "f_expired", 1, expiredPath, validBytes.Length, validSha, CancellationToken.None);
+    }
+    catch (ApiException ex) when (ex.Status == HttpStatusCode.Gone && ex.Code == "file_expired") { expiredFailed = true; }
+    Check(expiredFailed && !File.Exists(expiredPath) && Directory.GetFiles(tempSaveDir, "*.part").Length == 0,
+        "410 file_expired surfaces ApiException and cleans up temporary file");
+
+    // PR #181 review P1: a new destination path selected in the dialog refuses overwrite if a file appears during download.
+    string racedNewPath = Path.Combine(tempSaveDir, "raced-new.txt");
+    var newTarget = ApprovedSaveTarget.Capture(racedNewPath);
+    File.WriteAllText(racedNewPath, "created-during-download");
+    bool racedNewFailed = false;
+    try
+    {
+        await fileClient.DownloadPresentedFileAsync("c1", "f1", 2, newTarget, validBytes.Length, validSha, CancellationToken.None);
+    }
+    catch (SaveTargetChangedException) { racedNewFailed = true; }
+    Check(racedNewFailed && File.ReadAllText(racedNewPath) == "created-during-download" && Directory.GetFiles(tempSaveDir, "*.part").Length == 0,
+        "file created after save dialog selection is never overwritten");
+
+    // Existing filenames are rejected before any network request; originals and hard links stay in place.
+    string originalPath = Path.Combine(tempSaveDir, "original.txt");
+    string siblingPath = Path.Combine(tempSaveDir, "hardlink-sibling.txt");
+    File.WriteAllText(originalPath, "keep-original");
+    Check(HardLinkHelper.Create(siblingPath, originalPath), "create original sibling hard link");
+    int requestsBeforeConflict = fileHandler.DownloadRequests;
+    bool existingRefused = false;
+    try
+    {
+        await fileClient.DownloadPresentedFileAsync("c1", "f1", 2, originalPath, validBytes.Length, validSha, CancellationToken.None);
+    }
+    catch (SaveTargetChangedException) { existingRefused = true; }
+    Check(existingRefused && fileHandler.DownloadRequests == requestsBeforeConflict
+        && File.ReadAllText(originalPath) == "keep-original" && File.ReadAllText(siblingPath) == "keep-original"
+        && Directory.GetFiles(tempSaveDir, "*.bak").Length == 0,
+        "existing filenames are rejected before download without moving originals or sibling hard links");
+
+    // The destination can become a directory after selection too.
+    string directoryPath = Path.Combine(tempSaveDir, "directory-target");
+    var directoryTarget = ApprovedSaveTarget.Capture(directoryPath);
+    Directory.CreateDirectory(directoryPath);
+    bool directoryRefused = false;
+    try
+    {
+        await fileClient.DownloadPresentedFileAsync("c1", "f1", 2, directoryTarget, validBytes.Length, validSha, CancellationToken.None);
+    }
+    catch (SaveTargetChangedException) { directoryRefused = true; }
+    Check(directoryRefused && Directory.Exists(directoryPath) && Directory.GetFiles(tempSaveDir, "*.part").Length == 0,
+        "directory created during download is preserved and temporary file is cleaned up");
+
+    // Collision injected immediately before the only rename must never relocate or overwrite the intruder.
+    string collisionPath = Path.Combine(tempSaveDir, "collision.txt");
+    var collisionTarget = ApprovedSaveTarget.Capture(collisionPath) with
+    {
+        OnBeforeCommitTempHandleMove = _ => File.WriteAllText(collisionPath, "intruder-file")
+    };
+    bool collisionRefused = false;
+    try
+    {
+        await fileClient.DownloadPresentedFileAsync("c1", "f1", 2, collisionTarget, validBytes.Length, validSha, CancellationToken.None);
+    }
+    catch (SaveTargetChangedException) { collisionRefused = true; }
+    Check(collisionRefused && File.ReadAllText(collisionPath) == "intruder-file"
+        && Directory.GetFiles(tempSaveDir, "*.bak").Length == 0 && Directory.GetFiles(tempSaveDir, "*.part").Length == 0,
+        "ReplaceIfExists=FALSE rejects a commit-time collision without staging any backup");
+
+    // A kernel rename failure also publishes nothing and requires no original-file rollback.
+    string failedPath = Path.Combine(tempSaveDir, "failed-commit.txt");
+    var failedTarget = ApprovedSaveTarget.Capture(failedPath) with { OnBeforeCommitTempHandleMove = handle => handle.Close() };
+    bool renameFailed = false;
+    try
+    {
+        await fileClient.DownloadPresentedFileAsync("c1", "f1", 2, failedTarget, validBytes.Length, validSha, CancellationToken.None);
+    }
+    catch (IOException) { renameFailed = true; }
+    Check(renameFailed && !File.Exists(failedPath) && File.ReadAllText(originalPath) == "keep-original"
+        && Directory.GetFiles(tempSaveDir, "*.part").Length == 0 && Directory.GetFiles(tempSaveDir, "*.bak").Length == 0,
+        "failed rename leaves existing files at their original paths and cleans the temporary download");
+
+    // Keep the exclusive .part protection, including DELETE-only/POSIX opens in a separate process.
+    bool partWriteBlocked = false, partMoveBlocked = false, partPosixRenameBlocked = false;
+    bool partPosixReplaceBlocked = false, childPartRenameBlocked = false, childPartReplaceBlocked = false;
+    string protectedPath = Path.Combine(tempSaveDir, "protected.txt");
+    string intruderPath = Path.Combine(tempSaveDir, "intruder.txt");
+    string stolenPath = Path.Combine(tempSaveDir, "stolen.txt");
+    File.WriteAllText(intruderPath, "intruder-bytes");
+    var protectedTarget = ApprovedSaveTarget.Capture(protectedPath) with
+    {
+        OnBeforeCommitTempHandleMove = _ =>
+        {
+            string partPath = Directory.GetFiles(tempSaveDir, "*.part").Single();
+            try { File.WriteAllText(partPath, "tampered-part"); }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { partWriteBlocked = true; }
+            try { File.Move(partPath, stolenPath); }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { partMoveBlocked = true; }
+            partPosixRenameBlocked = !HardLinkHelper.TryPosixRename(partPath, stolenPath, replaceIfExists: false);
+            partPosixReplaceBlocked = !HardLinkHelper.TryPosixRename(intruderPath, partPath, replaceIfExists: true);
+            childPartRenameBlocked = !HardLinkHelper.TryPosixRenameInChildProcess(partPath, stolenPath, replaceIfExists: false);
+            childPartReplaceBlocked = !HardLinkHelper.TryPosixRenameInChildProcess(intruderPath, partPath, replaceIfExists: true);
+        }
+    };
+    await fileClient.DownloadPresentedFileAsync("c1", "f1", 2, protectedTarget, validBytes.Length, validSha, CancellationToken.None);
+    Check(partWriteBlocked && partMoveBlocked && partPosixRenameBlocked && partPosixReplaceBlocked
+        && childPartRenameBlocked && childPartReplaceBlocked && !File.Exists(stolenPath)
+        && File.ReadAllBytes(protectedPath).SequenceEqual(validBytes)
+        && File.ReadAllText(intruderPath) == "intruder-bytes" && Directory.GetFiles(tempSaveDir, "*.part").Length == 0,
+        "exclusive .part handle blocks writes and in-process/second-process POSIX renames through commit");
+
+    // Kill real child downloads on either side of publication. No catch/finally-based recovery can run.
+    foreach (string crashMode in new[] { "before-commit", "before-collision", "after-commit" })
+    {
+        string crashDirectory = Path.Combine(tempSaveDir, crashMode);
+        Directory.CreateDirectory(crashDirectory);
+        var start = new ProcessStartInfo(Environment.ProcessPath!)
+        {
+            UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true
+        };
+        start.ArgumentList.Add("--save-crash-helper");
+        start.ArgumentList.Add(crashDirectory);
+        start.ArgumentList.Add(crashMode);
+        using var process = Process.Start(start)!;
+        try
+        {
+            Check(await process.StandardOutput.ReadLineAsync().WaitAsync(TimeSpan.FromSeconds(10)) == "SAVE_CRASH_READY",
+                "child reached crash checkpoint: " + crashMode);
+        }
+        finally
+        {
+            if (!process.HasExited) process.Kill(entireProcessTree: true);
+            await process.WaitForExitAsync();
+        }
+        string crashPath = Path.Combine(crashDirectory, "download.txt");
+        Check(crashMode == "before-commit" ? !File.Exists(crashPath)
+            : crashMode == "before-collision" ? File.ReadAllText(crashPath) == "original-before-crash"
+            : File.ReadAllBytes(crashPath).SequenceEqual(validBytes),
+            "forced termination preserves destination path and complete bytes: " + crashMode);
+        Check(Directory.GetFiles(crashDirectory, "*.bak").Length == 0
+            && Directory.GetFiles(crashDirectory, "*.part").Length == (crashMode == "after-commit" ? 0 : 1),
+            "crash leaves only an unpublished .part before commit, never an original-file backup: " + crashMode);
+    }
+
+}
+finally
+{
+    try { Directory.Delete(tempSaveDir, recursive: true); } catch (IOException) { }
+}
+
 Console.WriteLine("Contract transport checks passed.");
 
 using (var screenClient = new ServerClient("https://example.com/", "test", new ScreenProtocolHandler()))
@@ -1092,5 +1355,120 @@ sealed class ScreenAnswerHandler : HttpMessageHandler
         string type = request.Content.Headers.ContentType!.MediaType!;
         Seen.Add($"{request.Method} {request.RequestUri.AbsolutePath} {type} " + (type == "application/json" ? Encoding.UTF8.GetString(bytes) : bytes.Length.ToString()));
         return new(HttpStatusCode.NoContent);
+    }
+}
+
+sealed class PresentedFileHandler(byte[] bytes, string sha256) : HttpMessageHandler
+{
+    public string? LastGenerationHeader;
+    public int DownloadRequests;
+    protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+    {
+        LastGenerationHeader = request.Headers.TryGetValues(ServerClient.GenerationHeader, out var values) ? values.SingleOrDefault() : null;
+        string path = request.RequestUri!.AbsolutePath;
+        if (path == "/api/device/presence") return Task.FromResult(new HttpResponseMessage(HttpStatusCode.NoContent));
+        if (path == "/api/device/conversations/c1/presented-files")
+        {
+            bool firstPage = request.RequestUri.Query.Contains("offset=0");
+            string json = firstPage
+                ? JsonSerializer.Serialize(new
+                {
+                    items = new[] { new { file_id = "f1", version = 2, name = "report.txt", media_type = "text/plain", size = bytes.Length, sha256, created_at = "2026-11-04T12:00:00Z", expired = false } },
+                    next_offset = (int?)1
+                })
+                : JsonSerializer.Serialize(new
+                {
+                    items = new[] { new { file_id = "f1", version = 1, name = "report.txt", media_type = "text/plain", size = bytes.Length, sha256, created_at = "2026-11-04T11:00:00Z", expired = false } },
+                    next_offset = (int?)null
+                });
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(json, Encoding.UTF8, "application/json") });
+        }
+        DownloadRequests++;
+        if (path.EndsWith("/f_expired/1"))
+        {
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.Gone)
+            {
+                Content = new StringContent("{\"error\":{\"code\":\"file_expired\"}}", Encoding.UTF8, "application/json")
+            });
+        }
+        return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(bytes) });
+    }
+}
+
+static class HardLinkHelper
+{
+    private const uint DeleteAccess = 0x00010000;
+    private const uint ShareAll = 0x00000001 | 0x00000002 | 0x00000004;
+    private const uint OpenExisting = 3;
+    private const uint FileAttributeNormal = 0x00000080;
+    private const int FileRenameInfoEx = 22;
+    private const int FileRenameReplaceIfExists = 0x00000001;
+    private const int FileRenamePosixSemantics = 0x00000002;
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", EntryPoint = "CreateHardLinkW", SetLastError = true, CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+    private static extern bool CreateHardLink(string lpFileName, string lpExistingFileName, IntPtr lpSecurityAttributes);
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", EntryPoint = "CreateFileW", SetLastError = true, CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+    private static extern Microsoft.Win32.SafeHandles.SafeFileHandle CreateFile(
+        string lpFileName,
+        uint dwDesiredAccess,
+        uint dwShareMode,
+        IntPtr lpSecurityAttributes,
+        uint dwCreationDisposition,
+        uint dwFlagsAndAttributes,
+        IntPtr hTemplateFile);
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool SetFileInformationByHandle(
+        Microsoft.Win32.SafeHandles.SafeFileHandle hFile,
+        int FileInformationClass,
+        IntPtr lpFileInformation,
+        uint dwBufferSize);
+
+    public static bool Create(string newLinkPath, string existingFilePath) =>
+        CreateHardLink(newLinkPath, existingFilePath, IntPtr.Zero);
+
+    public static bool TryPosixRename(string sourcePath, string targetPath, bool replaceIfExists)
+    {
+        using var handle = CreateFile(sourcePath, DeleteAccess, ShareAll, IntPtr.Zero, OpenExisting, FileAttributeNormal, IntPtr.Zero);
+        if (handle.IsInvalid) return false;
+        byte[] nameBytes = Encoding.Unicode.GetBytes(targetPath + "\0");
+        int headerSize = IntPtr.Size * 2 + 4;
+        int totalSize = headerSize + nameBytes.Length;
+        IntPtr buffer = System.Runtime.InteropServices.Marshal.AllocHGlobal(totalSize);
+        try
+        {
+            for (int i = 0; i < headerSize; i++) System.Runtime.InteropServices.Marshal.WriteByte(buffer, i, 0);
+            int flags = FileRenamePosixSemantics | (replaceIfExists ? FileRenameReplaceIfExists : 0);
+            System.Runtime.InteropServices.Marshal.WriteInt32(buffer, 0, flags);
+            System.Runtime.InteropServices.Marshal.WriteIntPtr(buffer, IntPtr.Size, IntPtr.Zero);
+            System.Runtime.InteropServices.Marshal.WriteInt32(buffer, IntPtr.Size * 2, targetPath.Length * sizeof(char));
+            System.Runtime.InteropServices.Marshal.Copy(nameBytes, 0, IntPtr.Add(buffer, headerSize), nameBytes.Length);
+            return SetFileInformationByHandle(handle, FileRenameInfoEx, buffer, (uint)totalSize);
+        }
+        finally
+        {
+            System.Runtime.InteropServices.Marshal.FreeHGlobal(buffer);
+        }
+    }
+
+    public static bool TryPosixRenameInChildProcess(string sourcePath, string targetPath, bool replaceIfExists)
+    {
+        var psi = new ProcessStartInfo(Environment.ProcessPath!)
+        {
+            UseShellExecute = false,
+            CreateNoWindow = true
+        };
+        psi.ArgumentList.Add("--posix-rename-helper");
+        psi.ArgumentList.Add(sourcePath);
+        psi.ArgumentList.Add(targetPath);
+        psi.ArgumentList.Add(replaceIfExists ? "true" : "false");
+        using var proc = Process.Start(psi)!;
+        if (!proc.WaitForExit(5000))
+        {
+            proc.Kill();
+            throw new Exception("child POSIX rename helper timed out");
+        }
+        return proc.ExitCode == 0;
     }
 }

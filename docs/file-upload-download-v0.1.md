@@ -131,6 +131,12 @@ class FileCatalog(Protocol):
     async def read_call_files(self, scope: TrustedScope, calls: Sequence[CallRef]
                               ) -> Mapping[CallRef, Sequence[FileRecord]]:
         """호출마다 건넨 파일(이벤트 보기의 카드, 검수 C8)."""
+    async def read_presented_files(self, scope: TrustedScope, *, limit: int = 50,
+                                   offset: int = 0) -> Sequence[FileRecord]:
+        """V3-P93 §6.2: 공개된 ToolResult에 연결되고 성공한 PRESENTED 파일만 페이지 전에 걸러 최신순으로."""
+    async def read_presented_file(self, scope: TrustedScope, file_id: FileId,
+                                  version: int) -> FileRecord | None:
+        """V3-P93 §6.2: 기기 다운로드용 단일 공개 제공 파일 버전 조회."""
     async def presented_bytes_since(self, scope: TrustedScope, since: datetime) -> int:
         """그 대화에서 since 뒤에 건넨 파일 크기의 합(건네기 한도, §7.1)."""
 

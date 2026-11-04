@@ -232,8 +232,10 @@ CREATE TABLE device_ids (owner TEXT PRIMARY KEY, last_id INTEGER NOT NULL) STRIC
 | GET | `/api/conversations/{id}` | |
 | GET | `/api/conversations/{id}/events` | |
 | GET | `/api/conversations/{id}/live` | |
-| POST | `/api/conversations/{id}/messages` | **`references`·`attachments`가 비어 있지 않으면 403 `device_scope`**. 글만 |
+| POST | `/api/conversations/{id}/messages` | **`references`·`attachments`가 비어 있지 않으면 403 `device_scope`**. 글(및 V3-P84 `screen`)만 |
 | POST | `/api/conversations/{id}/pause`, `/resume`, `/cancel`, `/dismiss` | |
+| GET | `/api/device/conversations/{id}/presented-files` | V3-P93: 성공적으로 공개된 제공 파일 목록만 |
+| GET | `/api/device/conversations/{id}/presented-files/{file_id}/{version}` | V3-P93: 공개된 제공 파일 바이트 다운로드 |
 
 그 밖의 모든 경로는 기기에게 403 `device_scope`다. 예를 들면 다음과 같다.
 - 기억·지시문·설정·기기 관리, 모델·Tool 켜고 끄기, 프롬프트(`prompts`·`expand`)

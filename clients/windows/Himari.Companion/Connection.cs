@@ -62,6 +62,8 @@ public partial class MainWindow
         // Transport shutdown must not erase delivery evidence or replay counters.
         ReturnFromMove();
         CancelLive();
+        CancelFileDownloads();
+        generationState.Reset();
         connection?.Cancel(); connection?.Dispose(); connection = null;
         client?.Dispose(); client = null; connected = false;
     }
@@ -130,6 +132,7 @@ public partial class MainWindow
             moveJobs.Clear(); localScreens.Clear(); previousScreenIds.Clear(); earlyMoves.Clear(); moveVerifications.Clear(); moveLifetime.Reset();
             submittedScreen = null; submittedConversation = null; unresolvedScreen = null; unknownText = null;
             pendingReplies.Clear(); completedReplies.Clear();
+            savedFileCards.Clear(); dismissedFileCards.Clear(); ClearPresentedFileCards();
         }
         recoveryOwner = local;
         if (unknownText is { } pending && pending.Server.SameDevice(local)) unknownText = pending with { Server = local };
@@ -188,6 +191,7 @@ public partial class MainWindow
             "pairing_used" => "이미 사용된 코드입니다. Web에서 새 코드를 발급해 주세요.",
             "pairing_busy" => "서버가 혼잡합니다. 잠시 후 다시 시도해 주세요.",
             "token_in_use" => "기기 토큰이 충돌했습니다. 다시 시도해 주세요.",
+            "stale_connection_generation" or "connection_generation_required" => "연결 상태가 갱신되었습니다. 다시 보내 주세요.",
             _ => "요청 실패: " + api.Code
         } : ex is ArgumentException ? ex.Message : "연결하지 못했습니다. 서버 주소와 VPN을 확인해 주세요.";
         if (ex is ApiException { Code: "device_scope" }) Trace.TraceWarning("HIMARI device_scope: client requested an unauthorized route.");
@@ -267,6 +271,8 @@ public partial class MainWindow
             ConversationView.IsRunning(detail) ? "이 대화는 작업 중입니다. 새 대화를 열 수 있습니다." : "연결됨");
         if (question is not null)
         {
+            await RefreshPresentedFilesAsync(local, id, ct);
+            if (ct.IsCancellationRequested || !ReferenceEquals(local, client) || id != currentConversation) return;
             // Archive the previous reply before assigning the new question. Opening
             // its bubble can clear awaitingAnswer while freezing that older reply.
             OpenReplyBubble(id, detailJob);
@@ -292,37 +298,81 @@ public partial class MainWindow
         if (ReplyPreparing) return;
         var sequence = Prop(Prop(detail, "conversation"), "last_sequence");
         int lastSequence = sequence.ValueKind == JsonValueKind.Number && sequence.TryGetInt32(out int n) ? n : 0;
-        int after = Math.Max(0, lastSequence - 100), finalSequence = 0; string? lastText = null; string lastMood = "neutral";
+        int after = Math.Max(0, lastSequence - 100), finalSequence = 0, latestPresentedSequence = 0;
+        string? lastText = null; string lastMood = "neutral";
+        var presentedSequences = new Dictionary<(string FileId, int Version), int>();
         while (true)
         {
             var history = await local.SendAsync(HttpMethod.Get, PathFor(id) + $"/events?after={after}&limit=100", null, ct);
             var page = Items(Prop(history, "items")).ToList();
             foreach (var item in page)
-                if (Str(item, "kind") == "assistant_final" && Prop(item, "sequence").ValueKind == JsonValueKind.Number && Prop(item, "sequence").TryGetInt32(out int itemSequence) && itemSequence <= lastSequence)
+            {
+                if (Prop(item, "sequence").ValueKind != JsonValueKind.Number || !Prop(item, "sequence").TryGetInt32(out int itemSequence) || itemSequence > lastSequence)
+                    continue;
+                if (Str(item, "kind") == "assistant_final")
                 {
                     var finalDisplay = Prop(item, "display"); var value = Str(finalDisplay, "text");
-                    if (value is not null) { lastText = value; finalSequence = itemSequence; lastMood = DisplayState.Mood(Prop(finalDisplay, "moods"), value.EnumerateRunes().Count()); }
+                    if (value is not null && itemSequence >= finalSequence)
+                    {
+                        lastText = value; finalSequence = itemSequence;
+                        lastMood = DisplayState.Mood(Prop(finalDisplay, "moods"), value.EnumerateRunes().Count());
+                    }
                 }
-            if (lastText is not null || after == 0) break;
+                else if (Str(item, "kind") == "tool_result")
+                {
+                    foreach (var pf in Items(Prop(item, "presented_files")))
+                    {
+                        if (Str(pf, "file_id") is { Length: > 0 } pfId &&
+                            Prop(pf, "version").ValueKind == JsonValueKind.Number &&
+                            Prop(pf, "version").TryGetInt32(out int pfVer) && pfVer >= 1)
+                        {
+                            if (!presentedSequences.TryGetValue((pfId, pfVer), out int prevSeq) || itemSequence > prevSeq)
+                                presentedSequences[(pfId, pfVer)] = itemSequence;
+                            if (itemSequence > latestPresentedSequence)
+                                latestPresentedSequence = itemSequence;
+                        }
+                    }
+                }
+            }
+            bool pendingNeedsEarlierPage = pendingReplies.TryGetValue(id, out var waiting) &&
+                waiting.Server.SameDevice(local) && after > waiting.After &&
+                finalSequence <= waiting.After && latestPresentedSequence <= waiting.After;
+            if ((lastText is not null && !pendingNeedsEarlierPage) || after == 0) break;
             after = Math.Max(0, after - 100);
         }
         if (ct.IsCancellationRequested || !ReferenceEquals(local, client) || id != currentConversation || liveStreams.ContainsKey(id) || preparationVersion != replyPreparationVersion) return;
+        bool hasUndismissedFiles = await RefreshPresentedFilesAsync(local, id, ct);
+        if (ct.IsCancellationRequested || !ReferenceEquals(local, client) || id != currentConversation || liveStreams.ContainsKey(id) || preparationVersion != replyPreparationVersion) return;
         bool recoveredReply = false;
-        if (!string.IsNullOrWhiteSpace(lastText) && pendingReplies.TryGetValue(id, out var pending) &&
-            pending.Server.SameDevice(local) && finalSequence > pending.After &&
+        if (pendingReplies.TryGetValue(id, out var pending) && pending.Server.SameDevice(local) &&
             !ConversationView.IsRunning(detail) && Str(Prop(detail, "job"), "job_id") == pending.Job)
         {
-            // A new job may have started while history was being read. Do not
-            // label another answer as the one this app was waiting for.
-            var latest = await local.SendAsync(HttpMethod.Get, PathFor(id), null, ct);
-            if (ct.IsCancellationRequested || !ReferenceEquals(local, client) || id != currentConversation || liveStreams.ContainsKey(id) || preparationVersion != replyPreparationVersion) return;
-            if (!ConversationView.IsRunning(latest) && Str(Prop(latest, "job"), "job_id") == pending.Job &&
-                pendingReplies.TryGetValue(id, out var current) && ReferenceEquals(current, pending))
-            { CompleteReply(id, pending.Job); recoveredReply = true; }
+            bool hasNewTextReply = !string.IsNullOrWhiteSpace(lastText) && finalSequence > pending.After;
+            bool hasNewPresentedFiles = hasUndismissedFiles && currentFileCards.Values.Any(c =>
+                !dismissedFileCards.Contains(c.Key) &&
+                presentedSequences.TryGetValue((c.Item.FileId, c.Item.Version), out int seq) &&
+                seq > pending.After);
+            if (hasNewTextReply || hasNewPresentedFiles)
+            {
+                // A new job may have started while history was being read. Do not
+                // label another answer as the one this app was waiting for.
+                var latest = await local.SendAsync(HttpMethod.Get, PathFor(id), null, ct);
+                if (ct.IsCancellationRequested || !ReferenceEquals(local, client) || id != currentConversation || liveStreams.ContainsKey(id) || preparationVersion != replyPreparationVersion) return;
+                if (!ConversationView.IsRunning(latest) && Str(Prop(latest, "job"), "job_id") == pending.Job &&
+                  pendingReplies.TryGetValue(id, out var current) && ReferenceEquals(current, pending))
+                {
+                    CompleteReply(id, pending.Job);
+                    recoveredReply = true;
+                    if (!hasNewTextReply) { lastText = null; lastMood = "neutral"; }
+                }
+            }
         }
-        Message.Text = lastText ?? "대화를 시작해 주세요.";
+        Message.Text = lastText ?? (currentFileCards.Count > 0 ? "" : "대화를 시작해 주세요.");
         SetMood(lastText is null ? "neutral" : lastMood);
-        if (recoveredReply) { SetTalking(false); OpenReplyBubble(id, Str(Prop(detail, "job"), "job_id")); _ = ScheduleBubbleAfterMoves(id); }
+        if (recoveredReply)
+        {
+            SetTalking(false); OpenReplyBubble(id, Str(Prop(detail, "job"), "job_id")); _ = ScheduleBubbleAfterMoves(id);
+        }
     }
     private void WaitForReply(ServerClient server, string conversation, string? job, int after)
     {
@@ -358,6 +408,7 @@ public partial class MainWindow
     {
         if (currentConversation != id)
         {
+            dismissedFileCards.Clear(); ClearPresentedFileCards();
             inputRevision++; CloseBubble(); ClearStack(keepUnsent: true); awaitingAnswer = false;
             UserSent.Text = ""; UserSent.Visibility = Visibility.Collapsed;
         }
@@ -464,10 +515,12 @@ public partial class MainWindow
             var before = await local.SendAsync(HttpMethod.Get, PathFor(context.ConversationId), null, ct);
             var seq = Prop(Prop(before, "conversation"), "last_sequence");
             if (seq.ValueKind == JsonValueKind.Number) seq.TryGetInt32(out beforeSequence);
+            string? messageGeneration = generationState.ActiveGeneration;
+            var messageBody = ConnectionGenerationState.BuildMessageBody(text, screen?.FileId, messageGeneration);
             JsonElement response;
             try
             {
-                response = await local.SendAsync(HttpMethod.Post, PathFor(context.ConversationId) + "/messages", screen is null ? new { text } : new { text, screen = screen.FileId }, ct);
+                response = await local.SendAsync(HttpMethod.Post, PathFor(context.ConversationId) + "/messages", messageBody, ct, messageGeneration);
                 if (recoveryOwner?.SameDevice(local) != true) return;
                 taken = true;
                 unresolvedScreen = null;
@@ -502,6 +555,8 @@ public partial class MainWindow
             catch (ApiException ex) when (screen is not null && MessageFailures.ReuseScreen(ex))
             {
                 if (recoveryOwner?.SameDevice(local) != true) return;
+                if (ex.Code is "stale_connection_generation" or "connection_generation_required" && ReferenceEquals(local, client))
+                    generationState.OnStaleFailure(messageGeneration);
                 unresolvedScreen = (context.ConversationId, text, screen);
                 Status.Text = "전송이 거절됐습니다. 원인을 해결한 뒤 10분 안에는 같은 화면으로 다시 보낼 수 있습니다.";
                 return;
@@ -522,6 +577,11 @@ public partial class MainWindow
                 taken = unknownText is null; // the history showed it was accepted
                 if (MessageFailures.Classify(ex) == MessageFailure.Closed) Status.Text = "이 대화는 닫혔습니다. 메시지가 기록됐을 수 있으니 기록을 확인해 주세요.";
                 return;
+            }
+            catch (ApiException ex) when (ex.Code is "stale_connection_generation" or "connection_generation_required")
+            {
+                if (ReferenceEquals(local, client)) generationState.OnStaleFailure(messageGeneration);
+                throw;
             }
             string? jobId = Str(response, "job_id");
             WaitForReply(local, context.ConversationId, jobId, beforeSequence);
@@ -600,8 +660,11 @@ public partial class MainWindow
         bool tasks = Prop(Prop(info, "features"), "task_signals") is { ValueKind: JsonValueKind.Number } task && task.GetInt32() == 1;
         bool features = Prop(Prop(info, "features"), "free_wake_screen") is { ValueKind: JsonValueKind.Number } screen && screen.GetInt32() == 1;
         bool looks = Prop(Prop(info, "features"), "screen_look") is { ValueKind: JsonValueKind.Number } look && look.GetInt32() == 1;
+        bool fileDownload = Prop(Prop(info, "features"), "file_download") is { ValueKind: JsonValueKind.Number } fd && fd.GetInt32() == 1;
+        bool connGen = Prop(Prop(info, "features"), "connection_generation") is { ValueKind: JsonValueKind.Number } cg && cg.GetInt32() == 1;
+        bool genUrgent = generationState.UpdateServerFeatures(fileDownload, connGen);
         if ((takes && !serverTakesSignals) || (sleeps && !serverTakesSleep) || (tasks && !serverTakesTask)
-            || (features && !serverTakesFeatures) || (looks && !serverTakesScreenLook)) signalSchedule.Urgent();
+            || (features && !serverTakesFeatures) || (looks && !serverTakesScreenLook) || genUrgent) signalSchedule.Urgent();
         serverTakesSignals = takes; serverTakesSleep = sleeps; serverTakesTask = tasks;  // V3-P90 §3.1
         serverTakesFeatures = features;  // V3-P90 §9
         serverTakesScreenLook = looks;  // V3-P91 §7.1
@@ -621,11 +684,22 @@ public partial class MainWindow
                 if (signalSchedule.Due(now) || (wasIdle && idle < 300))
                 {
                     string zone = TimeZoneInfo.TryConvertWindowsIdToIanaId(TimeZoneInfo.Local.Id, out var iana) ? iana : TimeZoneInfo.Local.Id;
+                    string? generation = generationState.ActiveGeneration;
                     var ticket = signalSchedule.Begin();  // what changes while the request is on its way stays due
-                    var body = PresenceSignal(idle, zone, now, ticket.After);
-                    await local.SendAsync(HttpMethod.Post, "/api/device/presence", body, ct);
-                    signalSchedule.Sent(ticket, body.ContainsKey("after"), now);  // the mark goes once a body carrying it was accepted
-                    ShowSignalPreview(body);
+                    var body = PresenceSignal(idle, zone, now, ticket.After, generation is not null);
+                    try
+                    {
+                        await local.SendAsync(HttpMethod.Post, "/api/device/presence", body, ct, generation);
+                        if (ReferenceEquals(local, client) && generation == generationState.ActiveGeneration)
+                        {
+                            signalSchedule.Sent(ticket, body.ContainsKey("after"), now);  // the mark goes once a body carrying it was accepted
+                            ShowSignalPreview(body);
+                        }
+                    }
+                    catch (ApiException ex) when (ex.Code is "stale_connection_generation" or "connection_generation_required")
+                    {
+                        if (ReferenceEquals(local, client)) generationState.OnStaleFailure(generation);
+                    }
                 }
                 wasIdle = idle >= 300;
             }

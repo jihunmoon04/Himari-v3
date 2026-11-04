@@ -52,6 +52,8 @@ ALLOWED = {
     ("POST", "/api/conversations/{conversation_id}/uploads"),  # a screen only (V3-P84 §4.1)
     ("POST", "/api/device/screens/{request_id}"),  # V3-P91 §4.2
     ("POST", "/api/device/screens/{request_id}/refuse"),
+    ("GET", "/api/device/conversations/{conversation_id}/presented-files"),  # V3-P93 §6.2
+    ("GET", "/api/device/conversations/{conversation_id}/presented-files/{file_id}/{version}"),
     ("POST", "/api/conversations/{conversation_id}/pause"),
     ("POST", "/api/conversations/{conversation_id}/resume"),
     ("POST", "/api/conversations/{conversation_id}/cancel"),
@@ -406,13 +408,18 @@ def test_the_event_stream_starts_with_hello(server: Server) -> None:
     response = server.device.get("/api/events", headers=me)
     assert response.status_code == 200 and response.headers["content-type"].startswith("text/event-stream")
     name, hello = frames_of(response.text)[0]
+    generation = hello.pop("connection_generation", None)
+    assert isinstance(generation, str) and len(generation) >= 32
+    assert "connection_generation" not in server.device.get("/api/device", headers=me).json()
     assert name == "hello" and hello == {
         "device": {"device_id": "d1", "name": "데스크톱"}, "moods": list(MOODS), "current_device": None,
         "recent_conversation": {"id": cid, "title": None}, "features": {"presence_signals": 1, "sleep_signals": 1, "task_signals": 1,
-                                                                      "free_wake_screen": 1, "screen_look": 1},
+                                                                      "free_wake_screen": 1, "screen_look": 1,
+                                                                      "file_download": 1, "connection_generation": 1},
         "quiet_until": None, "activity": {"working": [], "waiting": []}}  # a device gets no signals revision
     web_hello = frames_of(server.client.get("/api/events").text)[0][1]
     assert web_hello["device"] is None and web_hello["recent_conversation"]["id"] == cid
+    assert "connection_generation" not in web_hello
     assert web_hello["signals"] == {"epoch": server.app.hub.signals_epoch, "revision": 0}
     assert server.client.portal.call(server.app.hub.open_streams, OPERATOR) == 0  # type: ignore[union-attr]
 
@@ -849,3 +856,183 @@ def test_device_reconnect_reuses_the_latest_compatible_conversation(mixed_server
     assert s.client.put(f"/api/conversations/{eligible[-1]}/model", json={"model": "standard-model"},
                         headers=SEND).status_code == 200
     assert s.device.get("/api/device", headers=me).json()["recent_conversation"]["id"] == eligible[0]
+
+
+def test_connection_generation_negotiation_for_presence_messages_and_wakes(server: Server) -> None:
+    me = server.as_device(server.paired("데스크톱"))
+    other = server.as_device(server.paired("노트북"))
+    cid = server.device.post("/api/conversations", json={}, headers=me).json()["id"]
+
+    # Without an active stream, any generation header is 409 stale_connection_generation.
+    gen_header = {**me, web.GENERATION_HEADER: "stale-gen"}
+    resp = server.device.post("/api/device/presence", json={"idle_seconds": 0}, headers=gen_header)
+    assert (resp.status_code, error_code(resp)) == (409, "stale_connection_generation")
+    resp = server.device.post(f"/api/conversations/{cid}/messages", json={"text": "hi"}, headers=gen_header)
+    assert (resp.status_code, error_code(resp)) == (409, "stale_connection_generation")
+
+    # Declaring file_download or client_features without the generation header is 409 connection_generation_required.
+    resp = server.device.post(
+        "/api/device/presence", json={"idle_seconds": 0, "features": {"file_download": True}}, headers=me
+    )
+    assert (resp.status_code, error_code(resp)) == (409, "connection_generation_required")
+    resp = server.device.post(
+        f"/api/conversations/{cid}/messages",
+        json={"text": "hi", "client_features": {"file_download": True}},
+        headers=me,
+    )
+    assert (resp.status_code, error_code(resp)) == (409, "connection_generation_required")
+    assert server.device.get(f"/api/conversations/{cid}/events", headers=me).json()["items"] == []
+
+    # Open active stream for d1 and d2.
+    sub1 = server.client.portal.call(lambda: server.app.hub.subscribe(OPERATOR, "d1"))  # type: ignore[union-attr]
+    sub2 = server.client.portal.call(lambda: server.app.hub.subscribe(OPERATOR, "d2"))  # type: ignore[union-attr]
+    assert sub1.connection_generation is not None and sub2.connection_generation is not None
+
+    # d1 cannot use d2's generation header.
+    wrong_gen = {**me, web.GENERATION_HEADER: sub2.connection_generation}
+    resp = server.device.post(
+        "/api/device/presence", json={"idle_seconds": 0, "features": {"file_download": True}}, headers=wrong_gen
+    )
+    assert (resp.status_code, error_code(resp)) == (409, "stale_connection_generation")
+
+    # Matching active generation confirms presence file_download=True on sub1.
+    me_gen = {**me, web.GENERATION_HEADER: sub1.connection_generation}
+    assert server.device.post(
+        "/api/device/presence",
+        json={"idle_seconds": 0, "session": "active", "features": {"file_download": True}},
+        headers=me_gen,
+    ).status_code == 204
+    assert server.app.hub.device_file_download(OPERATOR, "d1") is True
+    assert server.app.hub.device_file_download(OPERATOR, "d2") is False
+
+    # Legacy presence signal without generation header does not clear sub1's file_download=True.
+    assert server.device.post("/api/device/presence", json={"idle_seconds": 1}, headers=me).status_code == 204
+    assert server.app.hub.device_file_download(OPERATOR, "d1") is True
+
+    # Legacy message without client_features does not borrow presence's file_download=True.
+    server.provider.extend([final("legacy reply"), final("negotiated reply")])
+    assert server.device.post(f"/api/conversations/{cid}/messages", json={"text": "legacy"}, headers=me).status_code == 202
+    server.wait(cid)
+    legacy_snap = server.provider.prepared_inputs[-1].current_state.interface
+    assert legacy_snap is not None and legacy_snap.capabilities.file_download is False
+
+    # Negotiated message with matching generation and client_features.file_download=True gets file_download=True.
+    assert server.device.post(
+        f"/api/conversations/{cid}/messages",
+        json={"text": "modern", "client_features": {"file_download": True}},
+        headers=me_gen,
+    ).status_code == 202
+    server.wait(cid)
+    snap = server.provider.prepared_inputs[-1].current_state.interface
+    assert snap is not None
+    assert snap.kind.value == "windows_companion"
+    assert snap.capabilities.file_download is True and snap.capabilities.workspace_browser is False
+
+    # Replacing sub1 immediately resets wake capability to False and rejects me_gen.
+    sub1_next = server.client.portal.call(lambda: server.app.hub.subscribe(OPERATOR, "d1"))  # type: ignore[union-attr]
+    assert server.app.hub.device_file_download(OPERATOR, "d1") is False
+    resp = server.device.post(
+        f"/api/conversations/{cid}/messages",
+        json={"text": "stale", "client_features": {"file_download": True}},
+        headers=me_gen,
+    )
+    assert (resp.status_code, error_code(resp)) == (409, "stale_connection_generation")
+    items = server.device.get(f"/api/conversations/{cid}/events", headers=me).json()["items"]
+    assert [i["text"] for i in items if i["kind"] == "user_message"] == ["legacy", "modern"]
+    server.client.portal.call(lambda: server.app.hub.unsubscribe(sub1_next))  # type: ignore[union-attr]
+    server.client.portal.call(lambda: server.app.hub.unsubscribe(sub2))  # type: ignore[union-attr]
+
+
+def test_device_presented_files_list_and_download_scope(server: Server) -> None:
+    from testkit import calls as tool_calls
+    from himari.bootstrap.application import workspace_for
+
+    me = server.as_device(server.paired("데스크톱"))
+    other_device = server.as_device(server.paired("노트북"))
+    cid = server.device.post("/api/conversations", json={}, headers=me).json()["id"]
+    other_cid = server.device.post("/api/conversations", json={}, headers=me).json()["id"]
+
+    # Upload a screen and a web upload in cid; neither may appear in presented-files or be downloaded by a device.
+    screen_up = server.device.post(
+        f"/api/conversations/{cid}/uploads", content=png(), headers={**me, "content-type": "image/png"}
+    ).json()
+    web_up = server.client.post(
+        f"/api/conversations/{cid}/uploads?name=secret.txt", content=b"secret", headers=SEND
+    ).json()
+
+    folder = Path(server.app.inside.host_root(workspace_for(OPERATOR))) / "conversations" / cid
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "report.txt").write_bytes(b"version-1")
+    server.provider.extend([tool_calls(("inside/present_file", {"path": "report.txt"})), final("v1 ready")])
+    assert server.client.post(f"/api/conversations/{cid}/messages", json={"text": "make v1"}, headers=SEND).status_code == 202
+    server.wait(cid)
+
+    (folder / "report.txt").write_bytes(b"version-2-longer")
+    server.provider.extend([tool_calls(("inside/present_file", {"path": "report.txt"})), final("v2 ready")])
+    assert server.client.post(f"/api/conversations/{cid}/messages", json={"text": "make v2"}, headers=SEND).status_code == 202
+    server.wait(cid)
+
+    listed = server.device.get(f"/api/device/conversations/{cid}/presented-files?limit=1&offset=0", headers=me)
+    assert listed.status_code == 200, listed.text
+    page1 = listed.json()
+    assert page1["next_offset"] == 1 and len(page1["items"]) == 1
+    v2_item = page1["items"][0]
+    assert (v2_item["name"], v2_item["version"], v2_item["size"], v2_item["expired"]) == ("report.txt", 2, 16, False)
+    assert "workspace_path" not in v2_item and "blob_key" not in v2_item
+
+    page2 = server.device.get(f"/api/device/conversations/{cid}/presented-files?limit=1&offset=1", headers=other_device).json()
+    assert page2["next_offset"] == 2 and len(page2["items"]) == 1
+    v1_item = page2["items"][0]
+    assert (v1_item["file_id"], v1_item["version"], v1_item["size"]) == (v2_item["file_id"], 1, 9)
+
+    page3 = server.device.get(f"/api/device/conversations/{cid}/presented-files?limit=1&offset=2", headers=me).json()
+    assert page3["next_offset"] is None and page3["items"] == []
+
+    # Both versions download their immutable bytes with attachment headers.
+    dl_v1 = server.device.get(
+        f"/api/device/conversations/{cid}/presented-files/{v1_item['file_id']}/1", headers=me
+    )
+    dl_v2 = server.device.get(
+        f"/api/device/conversations/{cid}/presented-files/{v2_item['file_id']}/2", headers=other_device
+    )
+    assert dl_v1.status_code == 200 and dl_v1.content == b"version-1"
+    assert dl_v2.status_code == 200 and dl_v2.content == b"version-2-longer"
+    assert dl_v2.headers["content-type"] == "application/octet-stream"
+    assert "attachment;" in dl_v2.headers["content-disposition"]
+    assert dl_v2.headers["x-content-type-options"] == "nosniff"
+    assert "sandbox" in dl_v2.headers.get_list("content-security-policy")
+
+    # Uploads, screens, wrong conversation, and missing versions are 404 on the device route.
+    for bad_url in (
+        f"/api/device/conversations/{cid}/presented-files/{screen_up['file_id']}/1",
+        f"/api/device/conversations/{cid}/presented-files/{web_up['file_id']}/1",
+        f"/api/device/conversations/{other_cid}/presented-files/{v1_item['file_id']}/1",
+        f"/api/device/conversations/{cid}/presented-files/{v1_item['file_id']}/3",
+    ):
+        resp = server.device.get(bad_url, headers=me)
+        assert (resp.status_code, error_code(resp)) == (404, "not_found"), bad_url
+
+    # General Web file routes still refuse device tokens with 403 device_scope.
+    for web_url in (
+        f"/api/conversations/{cid}/files",
+        f"/api/conversations/{cid}/files/{v1_item['file_id']}/1",
+    ):
+        resp = server.device.get(web_url, headers=me)
+        assert (resp.status_code, error_code(resp)) == (403, "device_scope"), web_url
+
+    # Trashing the conversation makes both list and download 404.
+    assert server.client.post(f"/api/conversations/{cid}/trash", headers=SEND).status_code == 200
+    assert (
+        server.device.get(f"/api/device/conversations/{cid}/presented-files", headers=me).status_code,
+        server.device.get(
+            f"/api/device/conversations/{cid}/presented-files/{v1_item['file_id']}/1", headers=me
+        ).status_code,
+    ) == (404, 404)
+    assert server.client.post(f"/api/conversations/{cid}/restore", headers=SEND).status_code == 204
+
+    # Revoking the device immediately blocks access with 401.
+    assert server.client.delete("/api/devices/d1", headers=SEND).status_code == 204
+    assert server.device.get(f"/api/device/conversations/{cid}/presented-files", headers=me).status_code == 401
+    assert server.device.get(
+        f"/api/device/conversations/{cid}/presented-files/{v1_item['file_id']}/1", headers=me
+    ).status_code == 401

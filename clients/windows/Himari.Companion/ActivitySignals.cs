@@ -212,19 +212,25 @@ internal static class PresenceBody
         string? after, ActivityState? activity, bool activityKnown, MediaInfo? media, bool mediaKnown, bool? micOrCamera,
         SignalSettings settings, IReadOnlySet<string>? titleExclusions = null, bool serverTakesSleep = false, string? sleep = null,
         bool serverTakesTask = false, TaskState? task = null, TaskEndedState? taskEnded = null, bool serverTakesFeatures = false,
-        bool serverTakesScreenLook = false)
+        bool serverTakesScreenLook = false, bool serverTakesFileDownload = false)
     {
         var body = new Dictionary<string, object?> { ["idle_seconds"] = idleSeconds, ["time_zone"] = timeZone };
         if (!serverTakesSignals) return body;  // an older server refuses fields it does not know
         body["session"] = locked ? "locked" : "active";
         if (after is not null && !locked) body["after"] = after;
-        if (locked) return body;  // nothing is in front of a locked screen
+        if (locked)
+        {
+            if (serverTakesFileDownload)
+                body["features"] = new Dictionary<string, object?> { ["file_download"] = true };
+            return body;  // nothing is in front of a locked screen
+        }
         if (serverTakesSleep) body["sleep"] = sleep;
-        if (serverTakesFeatures || serverTakesScreenLook)
+        if (serverTakesFeatures || serverTakesScreenLook || serverTakesFileDownload)
         {
             var features = new Dictionary<string, object?>();
             if (serverTakesFeatures) features["free_wake_screen"] = settings.FreeWakeScreen;
             if (serverTakesScreenLook) features["screen_look"] = settings.ScreenLook;
+            if (serverTakesFileDownload) features["file_download"] = true;
             body["features"] = features;
         }
         if (serverTakesTask && settings.Activity)  // V3-P90 §3.1: the task is the activity's, sent only with it
@@ -357,4 +363,60 @@ internal static class ScreenRequestPolicy
 
     internal static bool Excludes(IEnumerable<string?> programs, IReadOnlySet<string> excluded) =>
         programs.Any(p => !string.IsNullOrEmpty(p) && excluded.Contains(ActivityCatalog.ProgramKey(p)));
+}
+
+/// <summary>V3-P93 §6.1: per-SSE connection generation and file download capability negotiation.</summary>
+internal sealed class ConnectionGenerationState
+{
+    internal bool ServerTakesFileDownload { get; private set; }
+    internal bool ServerTakesConnectionGeneration { get; private set; }
+    internal string? Generation { get; private set; }
+
+    internal string? ActiveGeneration =>
+        ServerTakesFileDownload && ServerTakesConnectionGeneration && !string.IsNullOrEmpty(Generation)
+            ? Generation
+            : null;
+
+    internal bool UpdateServerFeatures(bool fileDownload, bool connectionGeneration)
+    {
+        bool newlyEnabled = (fileDownload && !ServerTakesFileDownload)
+            || (connectionGeneration && !ServerTakesConnectionGeneration);
+        ServerTakesFileDownload = fileDownload;
+        ServerTakesConnectionGeneration = connectionGeneration;
+        if (!fileDownload || !connectionGeneration) Generation = null;
+        return newlyEnabled && ActiveGeneration is not null;
+    }
+
+    internal bool OnHello(string? generation)
+    {
+        string? normalized = string.IsNullOrWhiteSpace(generation) ? null : generation;
+        Generation = normalized;
+        return ActiveGeneration is not null;
+    }
+
+    internal void ClearGeneration() => Generation = null;
+
+    internal void Reset()
+    {
+        ServerTakesFileDownload = false;
+        ServerTakesConnectionGeneration = false;
+        Generation = null;
+    }
+
+    /// <summary>§6.1.3: a stale 409 clears only the generation that sent it, never a newer hello's generation.</summary>
+    internal bool OnStaleFailure(string? requestGeneration)
+    {
+        if (requestGeneration is null || Generation != requestGeneration) return false;
+        Generation = null;
+        return true;
+    }
+
+    internal static object BuildMessageBody(string text, string? screen, string? activeGeneration) =>
+        activeGeneration is not null
+            ? (screen is null
+                ? new { text, client_features = new { file_download = true } }
+                : new { text, screen, client_features = new { file_download = true } })
+            : (screen is null
+                ? new { text }
+                : new { text, screen });
 }

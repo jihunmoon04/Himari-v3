@@ -57,6 +57,12 @@ from zoneinfo import available_timezones
 import httpx
 
 from himari.bootstrap import DEFAULT_INSTRUCTIONS, Runtime, build_runtime
+from himari.bootstrap.interfaces import (
+    ConfiguredInterfaces,
+    ConnectionGenerationRequired as ConnectionGenerationRequired,
+    StaleConnectionGeneration as StaleConnectionGeneration,
+    device_input_negotiation,
+)
 from himari.bootstrap.operator import check_private_dir, ensure_operator_secret, ensure_private_dir
 from himari.bootstrap.mcp_defaults import McpDefaultsConflict, read_defaults, write_defaults
 from himari.common import (
@@ -1100,7 +1106,9 @@ class Application:
                                     # Stored-blob downloads do not require upload placement (renameat2).
                                     interfaces=ConfiguredInterfaces(file_download=True,
                                                                     workspace_browser=machine is not None,
-                                                                    workspace_principals=machine_allowed))
+                                                                    workspace_principals=machine_allowed,
+                                                                    hub=hub,
+                                                                    companion_enabled=companion))
         except BaseException:
             try:
                 if mcp is not None:
@@ -1981,7 +1989,8 @@ class Application:
 
     async def send(self, scope: TrustedScope, text: str, attachments: Sequence[FileId] = (),
                    references: Sequence[ReferenceRequest] = (), origin: MessageOrigin | None = None,
-                   screen: FileId | None = None) -> JobStatus:
+                   screen: FileId | None = None, *, connection_generation: str | None = None,
+                   client_file_download: bool | None = None) -> JobStatus:
         """A user message. With attachments (§5.1, under the lifecycle lock):
         1 the T1 checks as a read; 2 refused while a job runs; 3 the uploads
         placed in ``uploads/`` under the Workspace write lock (waited for at
@@ -1993,50 +2002,57 @@ class Application:
         ``screen`` (V3-P84 §4.2): a staged PNG or JPEG upload, attached as the
         user's screen and never placed in the Workspace (§4.4); attached once,
         in the message's own transaction (T1)."""
+        if origin is not None and origin.kind is OriginKind.DEVICE:
+            if connection_generation is None and client_file_download is not None:
+                raise ConnectionGenerationRequired
+            if connection_generation is not None and not self.hub.valid_generation(
+                    scope.principal_id, origin.device_id or "", connection_generation):
+                raise StaleConnectionGeneration
         await self.data.read_conversation(scope)  # 404 before a job is started (or a file read) for a foreign id
         if origin is not None and origin.kind is OriginKind.DEVICE:
             await self.require_companion_model(scope)
-        if screen is not None:
+        with device_input_negotiation(connection_generation, client_file_download):
+            if screen is not None:
+                async with self._exclusive(scope.conversation_id):
+                    (record,) = await self.data.check_attachments(scope, [screen])
+                    if record.image_type not in SCREEN_TYPES:
+                        raise ScreenRefused("not a PNG or JPEG image")
+                    if self.runner.status(scope).running:
+                        raise ControlError(ControlErrorCode.BUSY, scope.conversation_id)
+                    said = ((TextBlock(text),) if text else ()) + (AttachmentRef(record.file_id, 1, screen=True),)
+                    return await self.runner.submit(scope, UserMessage(said, origin=origin))
+            pointed: tuple[ContentBlock, ...] = ()
+            if references:
+                explorer = self.explorer(scope.principal_id)
+                pointed = tuple([await explorer.reference(r.path, r.identity, r.start, r.end, r.sha256)
+                                 for r in references])
+            if not attachments:
+                return await self.runner.submit(scope, UserMessage(((TextBlock(text),) if text else ()) + pointed,
+                                                                   origin=origin))
             async with self._exclusive(scope.conversation_id):
-                (record,) = await self.data.check_attachments(scope, [screen])
-                if record.image_type not in SCREEN_TYPES:
-                    raise ScreenRefused("not a PNG or JPEG image")
+                records = await self.data.check_attachments(scope, attachments)
                 if self.runner.status(scope).running:
                     raise ControlError(ControlErrorCode.BUSY, scope.conversation_id)
-                said = ((TextBlock(text),) if text else ()) + (AttachmentRef(record.file_id, 1, screen=True),)
-                return await self.runner.submit(scope, UserMessage(said, origin=origin))
-        pointed: tuple[ContentBlock, ...] = ()
-        if references:
-            explorer = self.explorer(scope.principal_id)
-            pointed = tuple([await explorer.reference(r.path, r.identity, r.start, r.end, r.sha256)
-                             for r in references])
-        if not attachments:
-            return await self.runner.submit(scope, UserMessage(((TextBlock(text),) if text else ()) + pointed,
-                                                               origin=origin))
-        async with self._exclusive(scope.conversation_id):
-            records = await self.data.check_attachments(scope, attachments)
-            if self.runner.status(scope).running:
-                raise ControlError(ControlErrorCode.BUSY, scope.conversation_id)
-            workspace_id, cwd = await self._workspace(scope)
-            machine = self.machine if self.machine is not None and self.machine.owns(workspace_id) else None
-            try:
-                if machine is not None:
-                    locked = machine.locked(workspace_id, PLACE_LOCK_SECONDS, conversation_id=scope.conversation_id,
-                                            cwd_relative=cwd)
-                    placer = _machine_placer(machine, scope.conversation_id, cwd)
-                else:
-                    locked = self.inside.locked(workspace_id, PLACE_LOCK_SECONDS)
-                    placer = _inside_placer(self.inside, workspace_id, cwd)
-                async with locked:
-                    # Read again under the lock: another tab may have placed them (review C4).
-                    fresh = await self.data.read_file_records(scope, [(r.file_id, r.version) for r in records])
-                    for index, record in enumerate(fresh):
-                        await self._place(scope, placer, record, first=index == 0)
-            except MachineUnavailable:
-                raise FilesUnavailable(scope.conversation_id) from None
-            blocks = ((TextBlock(text),) if text else ()) + tuple(AttachmentRef(r.file_id, r.version) for r in records) \
-                + pointed
-            return await self.runner.submit(scope, UserMessage(blocks, origin=origin))
+                workspace_id, cwd = await self._workspace(scope)
+                machine = self.machine if self.machine is not None and self.machine.owns(workspace_id) else None
+                try:
+                    if machine is not None:
+                        locked = machine.locked(workspace_id, PLACE_LOCK_SECONDS, conversation_id=scope.conversation_id,
+                                                cwd_relative=cwd)
+                        placer = _machine_placer(machine, scope.conversation_id, cwd)
+                    else:
+                        locked = self.inside.locked(workspace_id, PLACE_LOCK_SECONDS)
+                        placer = _inside_placer(self.inside, workspace_id, cwd)
+                    async with locked:
+                        # Read again under the lock: another tab may have placed them (review C4).
+                        fresh = await self.data.read_file_records(scope, [(r.file_id, r.version) for r in records])
+                        for index, record in enumerate(fresh):
+                            await self._place(scope, placer, record, first=index == 0)
+                except MachineUnavailable:
+                    raise FilesUnavailable(scope.conversation_id) from None
+                blocks = ((TextBlock(text),) if text else ()) + tuple(AttachmentRef(r.file_id, r.version) for r in records) \
+                    + pointed
+                return await self.runner.submit(scope, UserMessage(blocks, origin=origin))
 
     async def _place(self, scope: TrustedScope, placer: _Placer, record: FileRecord, *, first: bool) -> None:
         """One upload into ``uploads/`` (§5.2), its path recorded before it is
@@ -2093,6 +2109,20 @@ class Application:
         if not found:
             raise DataError(DataErrorCode.NOT_FOUND, file_id)
         record = found[0]
+        return record, self.data.blobs.open(record.blob)
+
+    async def presented_files(self, scope: TrustedScope, *, limit: int = 50,
+                              offset: int = 0) -> Sequence[FileRecord]:
+        """V3-P93 §6.2: presented files of succeeded, publicly visible Tool calls
+        in this Conversation, filtered before paging."""
+        return await self.data.read_presented_files(scope, limit=limit, offset=offset)
+
+    async def download_presented_file(self, scope: TrustedScope, file_id: FileId,
+                                      version: int) -> tuple[FileRecord, BinaryIO]:
+        """V3-P93 §6.2: a publicly presented file's stored bytes, for a device."""
+        record = await self.data.read_presented_file(scope, file_id, version)
+        if record is None:
+            raise DataError(DataErrorCode.NOT_FOUND, file_id)
         return record, self.data.blobs.open(record.blob)
 
     # --- the trash (V3-P65 §7) --------------------------------------------------------
