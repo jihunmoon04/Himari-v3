@@ -82,6 +82,97 @@ internal sealed class ApiException(HttpStatusCode status, string code) : Excepti
     internal HttpStatusCode Status { get; } = status;
     internal string Code { get; } = code;
 }
+
+internal sealed class SaveTargetChangedException : IOException
+{
+    internal SaveTargetChangedException(string message) : base(message) { }
+    internal SaveTargetChangedException(string message, Exception innerException) : base(message, innerException) { }
+}
+
+/// <summary>V3-P93 §6.3 (PR #181 review P1): state of the user-selected save path at dialog confirmation time.
+/// New paths commit with overwrite:false; approved existing files verify identity/content before replacement.</summary>
+internal sealed record ApprovedSaveTarget(
+    string FullPath,
+    bool ExistedAtSelection,
+    long ExistingLength,
+    DateTime ExistingCreationTimeUtc,
+    DateTime ExistingLastWriteTimeUtc,
+    string? ExistingSha256)
+{
+    internal static ApprovedSaveTarget Capture(string destinationPath)
+    {
+        if (string.IsNullOrWhiteSpace(destinationPath))
+            throw new ArgumentException("저장 경로가 올바르지 않습니다.", nameof(destinationPath));
+        string fullPath = Path.GetFullPath(destinationPath);
+        if (Directory.Exists(fullPath))
+            throw new IOException("선택한 저장 경로가 폴더입니다.");
+        var info = new FileInfo(fullPath);
+        if (!info.Exists)
+            return new ApprovedSaveTarget(fullPath, false, 0, DateTime.MinValue, DateTime.MinValue, null);
+        try
+        {
+            using var stream = new FileStream(fullPath, FileMode.Open, FileAccess.Read, FileShare.Read);
+            long length = stream.Length;
+            string sha256 = Convert.ToHexString(SHA256.HashData(stream)).ToLowerInvariant();
+            info.Refresh();
+            if (!info.Exists)
+                return new ApprovedSaveTarget(fullPath, false, 0, DateTime.MinValue, DateTime.MinValue, null);
+            return new ApprovedSaveTarget(fullPath, true, length, info.CreationTimeUtc, info.LastWriteTimeUtc, sha256);
+        }
+        catch (FileNotFoundException)
+        {
+            return new ApprovedSaveTarget(fullPath, false, 0, DateTime.MinValue, DateTime.MinValue, null);
+        }
+    }
+
+    internal void CommitMove(string tempPath)
+    {
+        if (!ExistedAtSelection)
+        {
+            try
+            {
+                File.Move(tempPath, FullPath, overwrite: false);
+            }
+            catch (IOException ex) when (File.Exists(FullPath) || Directory.Exists(FullPath))
+            {
+                throw new SaveTargetChangedException("다운로드 중 같은 경로에 파일이 생성되어 덮어쓰기를 중단했습니다.", ex);
+            }
+            return;
+        }
+        if (Directory.Exists(FullPath))
+            throw new SaveTargetChangedException("다운로드 중 대상 경로가 폴더로 바뀌어 덮어쓰기를 중단했습니다.");
+        var currentInfo = new FileInfo(FullPath);
+        if (!currentInfo.Exists ||
+            currentInfo.CreationTimeUtc != ExistingCreationTimeUtc ||
+            currentInfo.LastWriteTimeUtc != ExistingLastWriteTimeUtc ||
+            currentInfo.Length != ExistingLength)
+        {
+            throw new SaveTargetChangedException("다운로드 중 대상 파일이 변경되어 덮어쓰기를 중단했습니다.");
+        }
+        string currentSha256;
+        try
+        {
+            using var existingStream = new FileStream(FullPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+            if (existingStream.Length != ExistingLength)
+                throw new SaveTargetChangedException("다운로드 중 대상 파일이 변경되어 덮어쓰기를 중단했습니다.");
+            currentSha256 = Convert.ToHexString(SHA256.HashData(existingStream)).ToLowerInvariant();
+        }
+        catch (FileNotFoundException ex)
+        {
+            throw new SaveTargetChangedException("다운로드 중 대상 파일이 사라져 덮어쓰기를 중단했습니다.", ex);
+        }
+        currentInfo.Refresh();
+        if (!currentInfo.Exists ||
+            currentInfo.CreationTimeUtc != ExistingCreationTimeUtc ||
+            currentInfo.LastWriteTimeUtc != ExistingLastWriteTimeUtc ||
+            currentInfo.Length != ExistingLength ||
+            !string.Equals(currentSha256, ExistingSha256, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new SaveTargetChangedException("다운로드 중 대상 파일이 변경되어 덮어쓰기를 중단했습니다.");
+        }
+        File.Move(tempPath, FullPath, overwrite: true);
+    }
+}
 internal sealed class ServerClient : IDisposable
 {
     internal const string GenerationHeader = "X-Himari-Connection-Generation";
@@ -159,22 +250,40 @@ internal sealed class ServerClient : IDisposable
         return items;
     }
 
-    internal async Task DownloadPresentedFileAsync(
+    internal Task DownloadPresentedFileAsync(
         string conversationId,
         string fileId,
         int version,
         string destinationPath,
         long expectedSize,
         string expectedSha256,
+        CancellationToken ct) =>
+        DownloadPresentedFileAsync(
+            conversationId,
+            fileId,
+            version,
+            ApprovedSaveTarget.Capture(destinationPath),
+            expectedSize,
+            expectedSha256,
+            ct);
+
+    internal async Task DownloadPresentedFileAsync(
+        string conversationId,
+        string fileId,
+        int version,
+        ApprovedSaveTarget destinationTarget,
+        long expectedSize,
+        string expectedSha256,
         CancellationToken ct)
     {
+        ArgumentNullException.ThrowIfNull(destinationTarget);
         if (expectedSize < 0 || expectedSize > MaxPresentedFileBytes)
             throw new InvalidDataException("파일 크기가 허용 범위를 벗어났습니다.");
         if (string.IsNullOrWhiteSpace(expectedSha256) || expectedSha256.Trim().Length != 64)
             throw new InvalidDataException("파일 해시 정보가 올바르지 않습니다.");
-        string fullDestination = Path.GetFullPath(destinationPath);
+        string fullDestination = destinationTarget.FullPath;
         string directory = Path.GetDirectoryName(fullDestination)
-            ?? throw new ArgumentException("저장 경로가 올바르지 않습니다.", nameof(destinationPath));
+            ?? throw new ArgumentException("저장 경로가 올바르지 않습니다.", nameof(destinationTarget));
         Directory.CreateDirectory(directory);
         string tempPath = Path.Combine(directory, $".himari-download-{Guid.NewGuid():N}.part");
         try
@@ -215,7 +324,7 @@ internal sealed class ServerClient : IDisposable
             if (!string.Equals(actualSha256, expectedSha256.Trim(), StringComparison.OrdinalIgnoreCase))
                 throw new InvalidDataException("파일 무결성(SHA-256) 검증에 실패했습니다.");
             ct.ThrowIfCancellationRequested();
-            File.Move(tempPath, fullDestination, overwrite: true);
+            destinationTarget.CommitMove(tempPath);
         }
         finally
         {

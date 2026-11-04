@@ -41,14 +41,14 @@ public partial class MainWindow
     private BubbleStatusAction bubbleStatusAction;
     private readonly DispatcherTimer copiedTimer = new() { Interval = TimeSpan.FromSeconds(1.5) };
     private Action<string> copyText = System.Windows.Clipboard.SetText;
-    private Func<string, string?>? chooseSavePath;
+    private Func<string, string?>? chooseSavePath = null;
     private bool saveDialogOpen;
     private readonly Dictionary<PresentedFileCardKey, PresentedFileCardState> currentFileCards = new();
     private readonly HashSet<PresentedFileCardKey> savedFileCards = new();
     private readonly HashSet<PresentedFileCardKey> dismissedFileCards = new();
     private readonly HashSet<CancellationTokenSource> activeFileDownloads = new();
     private bool HasActiveFileCardInteraction =>
-        saveDialogOpen || currentFileCards.Values.Any(c => c.Saving || (!c.Item.Expired && !c.Saved));
+        saveDialogOpen || currentFileCards.Values.Any(c => c.Saving);
     private static readonly DependencyPropertyDescriptor StatusTextDescriptor = DependencyPropertyDescriptor.FromProperty(TextBlock.TextProperty, typeof(TextBlock));
     private static readonly DependencyPropertyDescriptor StopVisibilityDescriptor = DependencyPropertyDescriptor.FromProperty(UIElement.VisibilityProperty, typeof(System.Windows.Controls.Button));
     private EventHandler? bubblePresentationChanged;
@@ -311,17 +311,26 @@ public partial class MainWindow
         if (!connected || client is not { } local || connection is null || card.Saving || card.Item.Expired) return;
         if (card.Key.ConversationId != currentConversation || !local.MatchesCard(card.Key)) return;
         string suggested = PresentedFileNames.SanitizeSaveFileName(card.Item.Name);
-        string? destination;
+        ApprovedSaveTarget? destinationTarget = null;
         saveDialogOpen = true;
         try
         {
-            destination = (chooseSavePath ?? ChooseSavePathDialog)(suggested);
+            string? destination = (chooseSavePath ?? ChooseSavePathDialog)(suggested);
+            if (!string.IsNullOrWhiteSpace(destination))
+                destinationTarget = ApprovedSaveTarget.Capture(destination);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
+        {
+            card.ErrorMessage = "저장 위치를 확인하지 못했어요. 다시 시도해 주세요.";
+            UpdatePresentedFileCard(card);
+            DismissUserBubbleIfUnfocused();
+            return;
         }
         finally
         {
             saveDialogOpen = false;
         }
-        if (string.IsNullOrWhiteSpace(destination))
+        if (destinationTarget is null)
         {
             DismissUserBubbleIfUnfocused();
             return;
@@ -344,7 +353,7 @@ public partial class MainWindow
                 card.Key.ConversationId,
                 card.Item.FileId,
                 card.Item.Version,
-                destination,
+                destinationTarget,
                 card.Item.Size,
                 card.Item.Sha256,
                 downloadCts.Token);
@@ -354,7 +363,6 @@ public partial class MainWindow
             card.ErrorMessage = null;
             savedFileCards.Add(card.Key);
             UpdatePresentedFileCard(card);
-            if (assistantBubbleCloseDue && BubblePanel.Visibility == Visibility.Visible) RetryExpiry(bubbleTimer);
         }
         catch (Exception ex)
         {
@@ -369,6 +377,8 @@ public partial class MainWindow
                 card.ErrorMessage = "서버에서 파일을 찾을 수 없어요.";
             else if (ex is ApiException { Code: "device_scope" } || ex is ApiException { Status: HttpStatusCode.Unauthorized })
                 card.ErrorMessage = "저장 권한이 없습니다.";
+            else if (ex is SaveTargetChangedException)
+                card.ErrorMessage = "저장 중 대상 파일이 변경되어 덮어쓰지 않았어요.";
             else if (ex is InvalidDataException)
                 card.ErrorMessage = "파일 검증에 실패해 저장하지 않았어요.";
             else if (ex is OperationCanceledException)
@@ -380,6 +390,7 @@ public partial class MainWindow
         finally
         {
             activeFileDownloads.Remove(downloadCts);
+            if (assistantBubbleCloseDue && BubblePanel.Visibility == Visibility.Visible) RetryExpiry(bubbleTimer);
             UpdateSceneBounds();
             DismissUserBubbleIfUnfocused();
         }

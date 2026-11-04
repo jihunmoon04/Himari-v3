@@ -298,39 +298,78 @@ public partial class MainWindow
         if (ReplyPreparing) return;
         var sequence = Prop(Prop(detail, "conversation"), "last_sequence");
         int lastSequence = sequence.ValueKind == JsonValueKind.Number && sequence.TryGetInt32(out int n) ? n : 0;
-        int after = Math.Max(0, lastSequence - 100), finalSequence = 0; string? lastText = null; string lastMood = "neutral";
+        int after = Math.Max(0, lastSequence - 100), finalSequence = 0, latestPresentedSequence = 0;
+        string? lastText = null; string lastMood = "neutral";
+        var presentedSequences = new Dictionary<(string FileId, int Version), int>();
         while (true)
         {
             var history = await local.SendAsync(HttpMethod.Get, PathFor(id) + $"/events?after={after}&limit=100", null, ct);
             var page = Items(Prop(history, "items")).ToList();
             foreach (var item in page)
-                if (Str(item, "kind") == "assistant_final" && Prop(item, "sequence").ValueKind == JsonValueKind.Number && Prop(item, "sequence").TryGetInt32(out int itemSequence) && itemSequence <= lastSequence)
+            {
+                if (Prop(item, "sequence").ValueKind != JsonValueKind.Number || !Prop(item, "sequence").TryGetInt32(out int itemSequence) || itemSequence > lastSequence)
+                    continue;
+                if (Str(item, "kind") == "assistant_final")
                 {
                     var finalDisplay = Prop(item, "display"); var value = Str(finalDisplay, "text");
-                    if (value is not null) { lastText = value; finalSequence = itemSequence; lastMood = DisplayState.Mood(Prop(finalDisplay, "moods"), value.EnumerateRunes().Count()); }
+                    if (value is not null && itemSequence >= finalSequence)
+                    {
+                        lastText = value; finalSequence = itemSequence;
+                        lastMood = DisplayState.Mood(Prop(finalDisplay, "moods"), value.EnumerateRunes().Count());
+                    }
                 }
-            if (lastText is not null || after == 0) break;
+                else if (Str(item, "kind") == "tool_result")
+                {
+                    foreach (var pf in Items(Prop(item, "presented_files")))
+                    {
+                        if (Str(pf, "file_id") is { Length: > 0 } pfId &&
+                            Prop(pf, "version").ValueKind == JsonValueKind.Number &&
+                            Prop(pf, "version").TryGetInt32(out int pfVer) && pfVer >= 1)
+                        {
+                            if (!presentedSequences.TryGetValue((pfId, pfVer), out int prevSeq) || itemSequence > prevSeq)
+                                presentedSequences[(pfId, pfVer)] = itemSequence;
+                            if (itemSequence > latestPresentedSequence)
+                                latestPresentedSequence = itemSequence;
+                        }
+                    }
+                }
+            }
+            bool pendingNeedsEarlierPage = pendingReplies.TryGetValue(id, out var waiting) &&
+                waiting.Server.SameDevice(local) && after > waiting.After &&
+                finalSequence <= waiting.After && latestPresentedSequence <= waiting.After;
+            if ((lastText is not null && !pendingNeedsEarlierPage) || after == 0) break;
             after = Math.Max(0, after - 100);
         }
         if (ct.IsCancellationRequested || !ReferenceEquals(local, client) || id != currentConversation || liveStreams.ContainsKey(id) || preparationVersion != replyPreparationVersion) return;
         bool hasUndismissedFiles = await RefreshPresentedFilesAsync(local, id, ct);
         if (ct.IsCancellationRequested || !ReferenceEquals(local, client) || id != currentConversation || liveStreams.ContainsKey(id) || preparationVersion != replyPreparationVersion) return;
         bool recoveredReply = false;
-        if ((!string.IsNullOrWhiteSpace(lastText) || hasUndismissedFiles) && pendingReplies.TryGetValue(id, out var pending) &&
-            pending.Server.SameDevice(local) && (finalSequence > pending.After || hasUndismissedFiles) &&
+        if (pendingReplies.TryGetValue(id, out var pending) && pending.Server.SameDevice(local) &&
             !ConversationView.IsRunning(detail) && Str(Prop(detail, "job"), "job_id") == pending.Job)
         {
-            // A new job may have started while history was being read. Do not
-            // label another answer as the one this app was waiting for.
-            var latest = await local.SendAsync(HttpMethod.Get, PathFor(id), null, ct);
-            if (ct.IsCancellationRequested || !ReferenceEquals(local, client) || id != currentConversation || liveStreams.ContainsKey(id) || preparationVersion != replyPreparationVersion) return;
-            if (!ConversationView.IsRunning(latest) && Str(Prop(latest, "job"), "job_id") == pending.Job &&
-              pendingReplies.TryGetValue(id, out var current) && ReferenceEquals(current, pending))
-            { CompleteReply(id, pending.Job); recoveredReply = true; }
+            bool hasNewTextReply = !string.IsNullOrWhiteSpace(lastText) && finalSequence > pending.After;
+            bool hasNewPresentedFiles = hasUndismissedFiles && currentFileCards.Values.Any(c =>
+                !dismissedFileCards.Contains(c.Key) &&
+                presentedSequences.TryGetValue((c.Item.FileId, c.Item.Version), out int seq) &&
+                seq > pending.After);
+            if (hasNewTextReply || hasNewPresentedFiles)
+            {
+                // A new job may have started while history was being read. Do not
+                // label another answer as the one this app was waiting for.
+                var latest = await local.SendAsync(HttpMethod.Get, PathFor(id), null, ct);
+                if (ct.IsCancellationRequested || !ReferenceEquals(local, client) || id != currentConversation || liveStreams.ContainsKey(id) || preparationVersion != replyPreparationVersion) return;
+                if (!ConversationView.IsRunning(latest) && Str(Prop(latest, "job"), "job_id") == pending.Job &&
+                  pendingReplies.TryGetValue(id, out var current) && ReferenceEquals(current, pending))
+                {
+                    CompleteReply(id, pending.Job);
+                    recoveredReply = true;
+                    if (!hasNewTextReply) { lastText = null; lastMood = "neutral"; }
+                }
+            }
         }
         Message.Text = lastText ?? (currentFileCards.Count > 0 ? "" : "대화를 시작해 주세요.");
         SetMood(lastText is null ? "neutral" : lastMood);
-        if (recoveredReply || (hasUndismissedFiles && BubblePanel.Visibility != Visibility.Visible))
+        if (recoveredReply)
         {
             SetTalking(false); OpenReplyBubble(id, Str(Prop(detail, "job"), "job_id")); _ = ScheduleBubbleAfterMoves(id);
         }

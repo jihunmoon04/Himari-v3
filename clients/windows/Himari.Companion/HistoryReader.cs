@@ -25,6 +25,16 @@ internal static class HistoryReader
                 else if (kind == "assistant_final" && item.TryGetProperty("display", out var display) && display.ValueKind == JsonValueKind.Object && display.TryGetProperty("text", out var answer) && answer.ValueKind == JsonValueKind.String) content = answer.GetString();
                 if (!string.IsNullOrEmpty(content)) text.Append(kind == "user_message" ? "선생님\n" : "히마리\n").Append(content).Append("\n\n");
                 else if (kind == "wake") text.Append("(히마리가 먼저 말을 걸었어요)\n\n");  // V3-P87 §9: the server opened that turn
+                else if (kind == "tool_result" && item.TryGetProperty("presented_files", out var files) && files.ValueKind == JsonValueKind.Array)
+                {
+                    foreach (var file in files.EnumerateArray())
+                    {
+                        if (file.ValueKind != JsonValueKind.Object) continue;
+                        string rawName = file.TryGetProperty("name", out var n2) && n2.ValueKind == JsonValueKind.String ? n2.GetString() ?? "download" : "download";
+                        int ver = file.TryGetProperty("version", out var v2) && v2.ValueKind == JsonValueKind.Number && v2.TryGetInt32(out int vn) ? vn : 1;
+                        text.Append("히마리 (파일)\n").Append(PresentedFileNames.SanitizeSaveFileName(rawName)).Append(" · ").Append(PresentedFileNames.VersionLabel(ver)).Append("\n\n");
+                    }
+                }
             }
             progress?.Invoke(text.ToString());
             if (count < 100) return text.ToString();

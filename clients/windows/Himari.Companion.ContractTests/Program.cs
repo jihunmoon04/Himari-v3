@@ -988,6 +988,41 @@ try
     catch (ApiException ex) when (ex.Status == HttpStatusCode.Gone && ex.Code == "file_expired") { expiredFailed = true; }
     Check(expiredFailed && !File.Exists(expiredPath) && Directory.GetFiles(tempSaveDir, "*.part").Length == 0,
         "410 file_expired surfaces ApiException and cleans up temporary file");
+
+    // PR #181 review P1: a new destination path selected in the dialog refuses overwrite if a file appears during download.
+    string racedNewPath = Path.Combine(tempSaveDir, "raced-new.txt");
+    var newTarget = ApprovedSaveTarget.Capture(racedNewPath);
+    Check(!newTarget.ExistedAtSelection, "new path is recorded as non-existent at selection time");
+    File.WriteAllText(racedNewPath, "created-during-download");
+    bool racedNewFailed = false;
+    try
+    {
+        await fileClient.DownloadPresentedFileAsync("c1", "f1", 2, newTarget, validBytes.Length, validSha, CancellationToken.None);
+    }
+    catch (SaveTargetChangedException) { racedNewFailed = true; }
+    Check(racedNewFailed && File.ReadAllText(racedNewPath) == "created-during-download" && Directory.GetFiles(tempSaveDir, "*.part").Length == 0,
+        "file created after save dialog selection is never overwritten");
+
+    // PR #181 review P1: an existing file approved for overwrite refuses replacement if modified during download.
+    string racedExistingPath = Path.Combine(tempSaveDir, "raced-existing.txt");
+    File.WriteAllText(racedExistingPath, "approved-before-download");
+    var existingTarget = ApprovedSaveTarget.Capture(racedExistingPath);
+    Check(existingTarget.ExistedAtSelection, "existing path captures baseline identity/hash at selection time");
+    File.WriteAllText(racedExistingPath, "modified-during-download");
+    bool racedExistingFailed = false;
+    try
+    {
+        await fileClient.DownloadPresentedFileAsync("c1", "f1", 2, existingTarget, validBytes.Length, validSha, CancellationToken.None);
+    }
+    catch (SaveTargetChangedException) { racedExistingFailed = true; }
+    Check(racedExistingFailed && File.ReadAllText(racedExistingPath) == "modified-during-download" && Directory.GetFiles(tempSaveDir, "*.part").Length == 0,
+        "existing file modified after save dialog approval is never overwritten");
+
+    // PR #181 review P1: an existing file approved for overwrite and unchanged during download is replaced cleanly.
+    var unchangedTarget = ApprovedSaveTarget.Capture(racedExistingPath);
+    await fileClient.DownloadPresentedFileAsync("c1", "f1", 2, unchangedTarget, validBytes.Length, validSha, CancellationToken.None);
+    Check(File.ReadAllBytes(racedExistingPath).SequenceEqual(validBytes),
+        "unchanged approved existing file is replaced by verified download");
 }
 finally
 {

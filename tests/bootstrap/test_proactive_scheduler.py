@@ -275,7 +275,7 @@ def test_what_changed_after_the_look_read_it_is_checked_again(tmp_path: Path) ->
             scheduler._clock = lambda: datetime.now(UTC) + timedelta(minutes=15)
             read = scheduler.situation
 
-            def after_read(change: Callable[[], None]) -> None:
+            def after_read(change: Callable[[], object]) -> None:
                 async def situation(principal: PrincipalId) -> Any:
                     found = await read(principal)
                     change()

@@ -913,7 +913,8 @@ def test_connection_generation_negotiation_for_presence_messages_and_wakes(serve
     server.provider.extend([final("legacy reply"), final("negotiated reply")])
     assert server.device.post(f"/api/conversations/{cid}/messages", json={"text": "legacy"}, headers=me).status_code == 202
     server.wait(cid)
-    assert server.provider.prepared_inputs[-1].current_state.interface.capabilities.file_download is False
+    legacy_snap = server.provider.prepared_inputs[-1].current_state.interface
+    assert legacy_snap is not None and legacy_snap.capabilities.file_download is False
 
     # Negotiated message with matching generation and client_features.file_download=True gets file_download=True.
     assert server.device.post(
@@ -923,6 +924,7 @@ def test_connection_generation_negotiation_for_presence_messages_and_wakes(serve
     ).status_code == 202
     server.wait(cid)
     snap = server.provider.prepared_inputs[-1].current_state.interface
+    assert snap is not None
     assert snap.kind.value == "windows_companion"
     assert snap.capabilities.file_download is True and snap.capabilities.workspace_browser is False
 

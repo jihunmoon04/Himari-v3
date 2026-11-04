@@ -775,15 +775,17 @@ internal static class Program
             editor.Clear();
             handler.RejectStaleGeneration = false;
 
-            // 2. Reading conversation with presented files opens bubble and renders deduplicated card with sanitized name.
+            // 2. Pending reply recovery with a new presented file (ToolResult sequence > pending.After) opens bubble and renders card.
+            Call("WaitForReply", server, "c", "j1", 1);
             var readTask = (Task)Call("ReadConversation", "c", cts.Token)!;
             Until(() => readTask.IsCompleted); readTask.GetAwaiter().GetResult();
             var bubble = (FrameworkElement)fileWindow.FindName("BubblePanel");
             var filesScroll = (FrameworkElement)fileWindow.FindName("PresentedFilesScroll");
             var filesPanel = (StackPanel)fileWindow.FindName("PresentedFilesPanel");
             var cards = (System.Collections.IDictionary)Value("currentFileCards")!;
-            Check(bubble.Visibility == Visibility.Visible && filesScroll.Visibility == Visibility.Visible && filesPanel.Children.Count == 1 && cards.Count == 1,
-                "presented file card is shown in the conversation bubble");
+            var pendingReplies = (System.Collections.IDictionary)Value("pendingReplies")!;
+            Check(bubble.Visibility == Visibility.Visible && filesScroll.Visibility == Visibility.Visible && filesPanel.Children.Count == 1 && cards.Count == 1 && !pendingReplies.Contains("c"),
+                "presented file from current job recovers pending reply and shows card in conversation bubble");
 
             // Repeated refresh does not duplicate the card.
             readTask = (Task)Call("ReadConversation", "c", cts.Token)!;
@@ -797,6 +799,17 @@ internal static class Program
             var saveButtonText = (TextBlock)card.GetType().GetProperty("SaveButtonText", inside)!.GetValue(card)!;
             Check(nameText.Text == "summary.md" && saveButtonText.Text == "저장" && stateText.Visibility == Visibility.Collapsed,
                 "card sanitizes path-prefixed server filename and starts in unsaved state");
+
+            // 2b. PR #181 review P2: an idle unsaved file card does not block bubble auto-expiry, while an open save dialog does.
+            Call("HideUserBubble");
+            Field("saveDialogOpen", true);
+            Call("AssistantBubbleExpired");
+            Check(bubble.Visibility == Visibility.Visible, "open save dialog blocks bubble auto-expiry");
+            Field("saveDialogOpen", false);
+            Call("AssistantBubbleExpired");
+            Check(bubble.Visibility == Visibility.Collapsed, "idle unsaved file card does not block bubble auto-expiry");
+            Call("OpenReplyBubble", "c", "j1");
+            Check(bubble.Visibility == Visibility.Visible, "reply bubble reopened for save interaction checks");
 
             // 3. Save dialog cancellation makes no download request and keeps draft/state intact.
             Call("OpenComposer"); editor.Text = "저장 취소 중 유지할 초안";
@@ -816,15 +829,43 @@ internal static class Program
             Check(!System.IO.File.Exists(targetFile) && !(bool)card.GetType().GetProperty("Saved", inside)!.GetValue(card)!
                 && stateText.Visibility == Visibility.Visible && stateText.Text.Contains("검증"),
                 "corrupted download fails SHA-256 verification, leaves no file, and does not show saved");
-
-            // 5. Valid download writes verified file and marks card as 저장됨 / 다시 저장.
             handler.CorruptBytes = false;
+
+            // 4b. PR #181 review P1: if a file is created or modified at destination during download, save refuses to overwrite it.
+            handler.OnBeforeDownload = () => System.IO.File.WriteAllText(targetFile, "created-mid-download");
             saveButton.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
             Until(() => !(bool)card.GetType().GetProperty("Saving", inside)!.GetValue(card)! && handler.Downloads == 2);
+            Check(System.IO.File.ReadAllText(targetFile) == "created-mid-download"
+                && !(bool)card.GetType().GetProperty("Saved", inside)!.GetValue(card)!
+                && stateText.Visibility == Visibility.Visible && stateText.Text.Contains("변경되어 덮어쓰지"),
+                "file created at destination during download is not overwritten");
+
+            handler.OnBeforeDownload = () => System.IO.File.WriteAllText(targetFile, "modified-after-approval");
+            saveButton.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Until(() => !(bool)card.GetType().GetProperty("Saving", inside)!.GetValue(card)! && handler.Downloads == 3);
+            Check(System.IO.File.ReadAllText(targetFile) == "modified-after-approval"
+                && !(bool)card.GetType().GetProperty("Saved", inside)!.GetValue(card)!
+                && stateText.Visibility == Visibility.Visible && stateText.Text.Contains("변경되어 덮어쓰지"),
+                "existing file modified during download after overwrite approval is not overwritten");
+            handler.OnBeforeDownload = null;
+
+            // 5. Valid download writes verified file and marks card as 저장됨 / 다시 저장.
+            saveButton.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Until(() => !(bool)card.GetType().GetProperty("Saving", inside)!.GetValue(card)! && handler.Downloads == 4);
             Check(System.IO.File.Exists(targetFile) && System.IO.File.ReadAllBytes(targetFile).SequenceEqual(payload)
                 && (bool)card.GetType().GetProperty("Saved", inside)!.GetValue(card)!
                 && stateText.Text == "저장됨" && saveButtonText.Text == "다시 저장",
                 "successful verified save writes destination file and updates card to 저장됨");
+
+            // 6. PR #181 review P2: an older presented file (ToolResult sequence <= pending.After) does not complete a newer failed job.
+            Call("CloseBubble");
+            handler.CurrentJob = "j2";
+            handler.LastSequence = 5;
+            Call("WaitForReply", server, "c", "j2", 4);
+            readTask = (Task)Call("ReadConversation", "c", cts.Token)!;
+            Until(() => readTask.IsCompleted); readTask.GetAwaiter().GetResult();
+            Check(pendingReplies.Contains("c") && bubble.Visibility == Visibility.Collapsed,
+                "older presented file from an earlier turn is not mistaken for a newer job's reply");
         }
         finally
         {
@@ -912,7 +953,10 @@ internal sealed class PresentedFileUiHandler(byte[] payload, string sha256) : Ht
 {
     internal bool RejectStaleGeneration;
     internal bool CorruptBytes;
+    internal Action? OnBeforeDownload;
     internal int Downloads;
+    internal string CurrentJob = "j1";
+    internal int LastSequence = 2;
     protected override void Dispose(bool disposing) { }
     protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
     {
@@ -928,7 +972,7 @@ internal sealed class PresentedFileUiHandler(byte[] payload, string sha256) : Ht
             }
             return Task.FromResult(new HttpResponseMessage(HttpStatusCode.Accepted)
             {
-                Content = new StringContent("{\"job_id\":\"j1\"}", Encoding.UTF8, "application/json")
+                Content = new StringContent($"{{\"job_id\":\"{CurrentJob}\"}}", Encoding.UTF8, "application/json")
             });
         }
         if (path == "/api/device/conversations/c/presented-files")
@@ -959,14 +1003,29 @@ internal sealed class PresentedFileUiHandler(byte[] payload, string sha256) : Ht
         if (path == "/api/device/conversations/c/presented-files/f1/1")
         {
             Downloads++;
+            OnBeforeDownload?.Invoke();
             byte[] data = CorruptBytes ? Encoding.UTF8.GetBytes(new string('x', payload.Length)) : payload;
             return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(data) });
         }
         if (path.EndsWith("/events"))
-            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("{\"items\":[]}", Encoding.UTF8, "application/json") });
+        {
+            string eventsJson = JsonSerializer.Serialize(new
+            {
+                items = new object[]
+                {
+                    new
+                    {
+                        sequence = 2,
+                        kind = "tool_result",
+                        presented_files = new[] { new { file_id = "f1", version = 1, name = "../nested/summary.md" } }
+                    }
+                }
+            });
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(eventsJson, Encoding.UTF8, "application/json") });
+        }
         return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
         {
-            Content = new StringContent("{\"conversation\":{\"last_sequence\":1},\"job\":{\"running\":false,\"job_id\":\"j1\"}}", Encoding.UTF8, "application/json")
+            Content = new StringContent($"{{\"conversation\":{{\"last_sequence\":{LastSequence}}},\"job\":{{\"running\":false,\"job_id\":\"{CurrentJob}\"}}}}", Encoding.UTF8, "application/json")
         });
     }
 }

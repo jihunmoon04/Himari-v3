@@ -106,7 +106,7 @@ def test_read_presented_files_filters_before_pagination_and_excludes_hidden_wake
     from collections.abc import AsyncIterator
     from testkit import FAKE, text_result
     from himari.common import (
-        AttachmentRef, CallId, CallRef, FileId, RawRepresentation, ToolCall, ToolId, TrustedScope, WorkspaceId,
+        AttachmentRef, CallId, CallRef, EventId, FileId, RawRepresentation, ToolCall, ToolId, TrustedScope, WorkspaceId,
     )
     from himari.data.api import (
         NO_IMAGE, AssistantToolCalls, EventRef, InitialActivation, PresentedFile, PromptBasis, RawReceived,
@@ -127,7 +127,7 @@ def test_read_presented_files_filters_before_pagination_and_excludes_hidden_wake
         scope = TrustedScope(SCOPE.principal_id, cid)
         other_scope = TrustedScope(SCOPE.principal_id, other_cid)
 
-        async def make_call(target: TrustedScope, trigger_event_id: str | None = None) -> CallRef:
+        async def make_call(target: TrustedScope, trigger_event_id: EventId | None = None) -> CallRef:
             refs = () if trigger_event_id is None else (EventRef(trigger_event_id),)
             run_id = await data.prepare_run(
                 target,
