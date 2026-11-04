@@ -387,6 +387,22 @@ def test_memory_or_presence_changed_since_the_measurement_adds_the_whole_state()
     assert Compactor().estimate(unknown, Composer().compose(unknown)).tokens > 500
 
 
+def test_interface_changed_since_the_measurement_recounts_state_without_invalidating_context() -> None:
+    from himari.data.api import InterfaceCapabilities, InterfaceKind, InterfaceSnapshot
+
+    base = dataclasses.replace(inputs(history("q1", "a1", "q2")), interface=InterfaceSnapshot(InterfaceKind.WINDOWS_COMPANION))
+    composed = Composer().compose(base)
+    mark = UsageMark(500, 3, None, composed.prompt_basis.context_key, 0, state_key=composed.prompt_basis.state_key)
+    same = dataclasses.replace(base, usage_mark=mark)
+    assert Compactor().estimate(same, Composer().compose(same)).tokens == 500
+    changed = dataclasses.replace(same, interface=InterfaceSnapshot(InterfaceKind.WEB, InterfaceCapabilities(True, True)))
+    wire = Composer().compose(changed)
+    assert wire.prompt_basis.context_key == composed.prompt_basis.context_key
+    assert wire.prompt_basis.state_key != composed.prompt_basis.state_key
+    estimate = Compactor().estimate(changed, wire)
+    assert estimate.measured and estimate.tokens > 500
+
+
 def test_environment_observations_changed_since_the_measurement_add_the_whole_state() -> None:
     """PR #152 re-review P1: what an Environment is observed to be (online, its folders, its working
     directory) is read every turn, apart from the state's revision; ``observed_at`` is not shown."""

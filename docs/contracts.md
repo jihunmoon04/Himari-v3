@@ -6,10 +6,12 @@
 >
 > 상세한 설계 근거는 [decisions.md](decisions.md), [data-contract-v0.2.md](data-contract-v0.2.md), [current-state-contract-v0.1.md](current-state-contract-v0.1.md), [prompt-composition.md](prompt-composition.md), [data-and-tools.md](data-and-tools.md), [open-questions.md](open-questions.md)에 남겨 둔다. 내용이 충돌하면 명시적으로 사용자 승인을 받은 **Confirmed Decision**을 우선하고, 충돌을 이 문서에 드러내 수정한다.
 
-> **V3-P93 설계 제안(구현 전):** [인터페이스 능력과 반려 파일 수신](interface-capabilities-v0.1.md)은
+> **V3-P93 설계 병합 / 1단계 구현:** [인터페이스 능력과 반려 파일 수신](interface-capabilities-v0.1.md)은
 > Data의 턴 출처 스냅샷, Control/Prompt의 인터페이스 투영, FILE-04의 기기 제공 파일 전용
-> 조회·다운로드 허용 범위 및 Presence/EventHub의 연결 세대별 기능 선언을 제안한다.
-> 기존 Port/DTO와 기기 기본 거부 정책은 이 설계 PR에서 바뀌지 않는다.
+> 조회·다운로드 허용 범위 및 Presence/EventHub의 연결 세대별 기능 선언을 정의한다.
+> 1단계는 `UserMessage.interface`/`Wake.interface`, Control `InterfaceSource`,
+> Prompt의 입력/state 인터페이스 필드를 구현한다(DATA-01 및 WakeStore, CTRL-01/02/06, PROMPT-01).
+> 기기 파일 API·연결 세대·Windows 저장은 2단계 예정이다. 기기 파일 기본 거부는 유지한다.
 
 ## 1. 목적과 설계 원칙
 

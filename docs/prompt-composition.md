@@ -1,6 +1,6 @@
 # Prompt Composition
 
-> **V3-P93 추가 제안(구현 전):** [인터페이스 능력과 반려 파일 수신](interface-capabilities-v0.1.md) §4는 같은 모델·설정의 Web/Windows 전환에서 시스템/도구 정의를 고정하고 현재 능력은 Conversation 뒤 runtime state로 투영하는 안이다. 서버 전역 설정 변경과 실제 Provider 캐시 수치 검증은 구분한다.
+> **V3-P93 1단계 구현:** [인터페이스 능력과 반려 파일 수신](interface-capabilities-v0.1.md) §4는 같은 모델·설정의 Web/Windows 전환에서 시스템/도구 정의를 고정하고 현재 능력은 Conversation 뒤 runtime state로 투영한다. 서버 전역 설정 변경과 실제 Provider 캐시 수치 검증은 구분한다.
 
 > **새 경계 검토 초안:** [Control–Prompt–Provider v0.1](control-prompt-provider-v0.1.md)에서 Prompt의 provider-neutral input/coverage, Provider의 native request preparation과 exact raw 보존, Tool 그룹 배리어를 구체화합니다. 아직 확정된 API는 아닙니다. Contract
 

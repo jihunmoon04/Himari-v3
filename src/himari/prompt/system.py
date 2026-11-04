@@ -72,8 +72,20 @@ def _bullets(head: str, lines: list[str]) -> str:
     return head + "\n" + "\n".join(line if line.startswith("- ") else f"- {line}" for line in lines)
 
 
+INTERFACE_RULE = (
+    "runtime_state.interface describes the interface of this turn, separately from the user's current device "
+    "presence and your workspace tools. A missing or false capability is unavailable. When file_download is "
+    "false, do not promise a downloadable file or say the user received one; offer a usable alternative such as "
+    "continuing on the Web. When workspace_browser is false, do not direct the user to a workspace browser in "
+    "this interface. Report a file as prepared only after present_file succeeds. It prepares an immutable file "
+    "in the conversation; it does not mean the client "
+    "downloaded it or saved it locally. A prepared file, a downloadable file and a locally saved file are "
+    "different states. These capabilities describe delivery, never permission to execute tools."
+)
+
+
 def messages_section(spec: SystemSpec) -> str:
-    lines = [TIME_NOTE]
+    lines = [TIME_NOTE, INTERFACE_RULE]
     if spec.attachments:
         lines.append(ATTACHMENT_NOTE)
     if spec.file_references:

@@ -1,11 +1,12 @@
 # 인터페이스 능력과 반려 파일 수신 (V3-P93 설계 초안 v0.1)
 
-> 2026-11-04 · **Proposed / 구현 전**, rev. 2 · 기준 코드 `c3b3f9c`(#178 병합).
+> 2026-11-04 · **설계 병합 / 1단계 구현**, rev. 3 · 설계 기준 `18e945a`(#179 병합).
 >
 > 소유자 요청: 반려 대화에서 파일을 받을 수 없는 현재 제한을 모델에게 알리고,
 > 이후 Windows 파일 수신을 지원한다. 시스템 프롬프트에는 해석 규칙을 고정하고
 > 현재 상태는 runtime state로 전달해 인터페이스 전환에 따른 접두부 변경을 줄인다.
-> Workspace 탐색은 후속 범위로 둔다. 이 PR은 설계만 제안하며 아래 API는 아직 없다.
+> Workspace 탐색은 후속 범위로 둔다. 1단계는 턴 스냅샷과 프롬프트를 구현한다.
+> Windows 파일 API·연결 세대 협상·저장 UI는 2단계 예정이며 아직 없다.
 
 관련: [반려 앱 V3-P83](companion-v0.1.md), [파일 V3-P66](file-upload-download-v0.1.md),
 [프롬프트 정비 V3-P89](prompt-cleanup-v0.1.md), [Current State](current-state-contract-v0.1.md),
@@ -123,8 +124,11 @@ persona 편집, 모델 변경까지 캐시가 유지된다는 보장은 이 설�
 Composer의 `UserTurn` 목록이나 화면에 보이는 마지막 사용자 말풍선을 역탐색하지 않는다.
 `ask_user` 답변은 Tool 그룹 결과 안에 렌더링되더라도 원본 Data의 입력 sequence로 선택한다.
 
-선택 필드의 원자적 기록·읽기·롤백 호환은 구현 PR에서 두 Data 백엔드에 검증한다.
-이 설계만으로 스키마 버전 불변이나 마이그레이션 불필요를 단정하지 않는다.
+1단계는 두 Data 백엔드의 입력·wake 트랜잭션에 선택 필드를 함께 기록한다.
+SQLite payload JSON에만 추가하며 테이블·`payload_schema_version`·DB v18은 유지한다.
+옛 기록의 선택 필드 누락은 `None`으로 읽는다. 병합 기준 `18e945a`의 실제 코덱으로 새
+`UserMessage`/`Wake`를 읽어 추가 메타데이터를 무시하는 롤백 읽기 호환도 확인했다.
+구버전 서버는 이 스냅샷을 활용하지 않으므로 새 인터페이스 설명은 제공하지 않는다.
 동시 Web/기기 턴의 스냅샷은 대화/턴별로 격리한다.
 
 스냅샷은 접수 당시의 설명이다. 도중에 토큰이 철회되거나 서비스가 꺼져도 실행 권한을
@@ -331,10 +335,17 @@ X-Himari-Connection-Generation: <이 SSE hello에서 받은 값>
 
 ## 7. 구현 패킷과 수용 기준
 
-### 구현 PR 1 — 인터페이스 상태 + 프롬프트
+### 구현 PR 1 — 인터페이스 상태 + 프롬프트 (구현)
 
 대상: Bootstrap/Control의 인터페이스 해석, Data 입력·wake 스냅샷, Prompt DTO/렌더링/해시,
 고정 시스템/도구 설명. Windows 다운로드 능력은 아직 false다.
+
+실제 포트는 Control의 `InterfaceSource.read(scope, origin)`이며 Bootstrap의
+`ConfiguredInterfaces`를 주입한다. Web/CLI의 파일 지원은 서버의 파일 배치 가능 여부,
+Web 탐색은 Machine 구성과 해당 사용자의 Machine 허용 목록을 따른다. 기기는 협상 구현 전까지 두 능력이 false다.
+Control은 원본 전체 로그에서 최신 입력(질문 답변 포함)을 읽어 압축된 Prompt tail과
+독립적으로 복원한다. 입력 없는 resume에서는 능력 소스를 다시 조회하지 않는다.
+기존 presence는 현재 활동을 설명하며 인터페이스를 선택하지 않는다.
 
 필수 검증:
 
@@ -368,13 +379,14 @@ Presence의 Subscription/subscribe/signal 경계와 Windows의 SSE별 HTTP 귀�
 - 기존 파일/화면/기기 권한 및 Windows 포커스·질문·말풍선 회귀.
 
 두 구현 PR은 공개 DTO/포트 또는 인증 계약을 바꾸므로 각각 전체 pytest와 관련 Windows
-계약/UI 검사를 수행한다. 이 설계 PR은 문서만 바꾸므로 pytest 범위는 NONE이다.
+계약/UI 검사를 수행한다. 설계 PR #179은 문서만 바꾸므로 pytest 범위는 NONE이었다.
+1단계는 Windows 코드·프로토콜을 변경하지 않으므로 Windows 검사는 해당하지 않으며,
+기기 클라이언트 자체 통합 테스트로 기존 연결/대화 경로를 확인한다.
 실제 모델/Provider 캐시 수치 확인은 오프라인 검사와 구분해 보고한다.
 
 ## 8. 설계 검수에서 확인할 선택
 
-아래가 이번 제안의 기본안이다. 구현 전에 이 문서의 검수로 확정하며 기존 결정의 승인을
-소급해서 주장하지 않는다.
+아래 선택을 담은 설계 PR #179이 병합되었다. 1단계 구현과 2단계 예정 범위는 §7로 구분한다.
 
 | 선택 | 권고안 |
 | --- | --- |

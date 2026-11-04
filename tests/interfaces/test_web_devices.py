@@ -208,9 +208,24 @@ def test_each_message_keeps_where_it_came_from(server: Server) -> None:
     found = server.client.portal.call(origins)  # type: ignore[union-attr]
     device = MessageOrigin(OriginKind.DEVICE, "d1")
     assert found == [device, device, MessageOrigin(OriginKind.WEB), MessageOrigin(OriginKind.CLI)]
+    snapshots = [mi.current_state.interface for mi in server.provider.prepared_inputs]
+    assert [s.kind.value for s in snapshots if s is not None] == ["windows_companion", "windows_companion", "web", "cli"]
+    assert all(s is not None for s in snapshots)
+    assert [s.capabilities.file_download for s in snapshots if s is not None] == [False, False, server.app.uploads_work, server.app.uploads_work]
     items = server.device.get(f"/api/conversations/{cid}/events", headers=server.as_device(token)).json()["items"]
     shown = [i["origin"] for i in items if i["kind"] == "user_message"]  # V3-P84 §7.8: an app finds its own
     assert shown == [{"kind": "device", "device_id": "d1"}] * 2 + [{"kind": "web"}, {"kind": "cli"}]
+
+
+def test_clients_cannot_supply_an_interface_snapshot(server: Server) -> None:
+    cid = server.client.post("/api/conversations", json={}, headers=SEND).json()["id"]
+    token = server.paired()
+    spoofed = {"text": "hi", "interface": {"version": 1, "kind": "web", "capabilities": {
+        "file_download": True, "workspace_browser": True}}}
+    assert server.client.post(f"/api/conversations/{cid}/messages", json=spoofed, headers=SEND).status_code == 400
+    assert server.device.post(f"/api/conversations/{cid}/messages", json=spoofed,
+                              headers=server.as_device(token)).status_code == 400
+    assert server.provider.prepared_inputs == []
 
 
 def test_a_device_sends_text_only_and_sees_no_trash(server: Server) -> None:

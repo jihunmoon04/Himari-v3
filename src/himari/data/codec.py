@@ -42,6 +42,9 @@ from himari.data.api import (
     EventRef,
     MessageOrigin,
     OriginKind,
+    InterfaceCapabilities,
+    InterfaceKind,
+    InterfaceSnapshot,
     PromptBasis,
     ToolResultRecord,
     Wake,
@@ -167,6 +170,23 @@ def _origin_from(value: object) -> MessageOrigin:
     return MessageOrigin(OriginKind(str(data["kind"])), None if device is None else str(device))
 
 
+def interface_snapshot(value: InterfaceSnapshot) -> dict[str, object]:
+    return {"version": value.version, "kind": value.kind.value,
+            "capabilities": {"file_download": value.capabilities.file_download,
+                             "workspace_browser": value.capabilities.workspace_browser}}
+
+
+def _interface_from(value: object) -> InterfaceSnapshot | None:
+    if value is None:
+        return None
+    data = _obj(value)
+    caps = _obj(data["capabilities"])
+    if type(data["version"]) is not int or type(caps["file_download"]) is not bool or type(caps["workspace_browser"]) is not bool:
+        raise ValueError("malformed interface snapshot")
+    return InterfaceSnapshot(InterfaceKind(data["kind"]),
+                             InterfaceCapabilities(caps["file_download"], caps["workspace_browser"]), data["version"])
+
+
 def payload(value: EventPayload) -> str:
     match value:
         case UserMessage(blocks=blocks, answers_call=answers, origin=origin):
@@ -174,6 +194,8 @@ def payload(value: EventPayload) -> str:
                                        "answers_call": None if answers is None else _call_ref(answers)}
             if origin is not None:  # V3-P83: an optional field; older messages have none
                 data["origin"] = _origin(origin)
+            if value.interface is not None:
+                data["interface"] = interface_snapshot(value.interface)
             return dumps(data)
         case AssistantFinal(blocks=blocks):
             return dumps({"blocks": _blocks(blocks)})
@@ -188,7 +210,10 @@ def payload(value: EventPayload) -> str:
         case ToolResultRecord(call=call, model_result=result):
             return dumps({"call": _call_ref(call), "model_result": _model_result_obj(result)})
         case Wake(wake_id=wake_id, reasons=reasons, device_id=device_id):
-            return dumps({"wake_id": wake_id, "reasons": wake_reasons(reasons), "device_id": device_id})
+            data = {"wake_id": wake_id, "reasons": wake_reasons(reasons), "device_id": device_id}
+            if value.interface is not None:
+                data["interface"] = interface_snapshot(value.interface)
+            return dumps(data)
     raise TypeError(f"not an event payload: {type(value).__name__}")
 
 
@@ -198,7 +223,7 @@ def payload_from(kind: EventKind, text: str) -> EventPayload:
         case EventKind.USER_MESSAGE:
             answers, origin = data.get("answers_call"), data.get("origin")
             return UserMessage(_blocks_from(data["blocks"]), None if answers is None else _call_ref_from(answers),
-                               None if origin is None else _origin_from(origin))
+                               None if origin is None else _origin_from(origin), _interface_from(data.get("interface")))
         case EventKind.ASSISTANT_FINAL:
             return AssistantFinal(_blocks_from(data["blocks"]))
         case EventKind.ASSISTANT_TOOL_CALLS:
@@ -210,7 +235,8 @@ def payload_from(kind: EventKind, text: str) -> EventPayload:
         case EventKind.TOOL_RESULT:
             return ToolResultRecord(_call_ref_from(data["call"]), _model_result_obj_from(data["model_result"]))
         case EventKind.WAKE:
-            return Wake(str(data["wake_id"]), wake_reasons_from(data["reasons"]), str(data["device_id"]))
+            return Wake(str(data["wake_id"]), wake_reasons_from(data["reasons"]), str(data["device_id"]),
+                        _interface_from(data.get("interface")))
     raise ValueError(f"unknown event kind {kind!r}")
 
 

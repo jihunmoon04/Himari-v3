@@ -330,9 +330,10 @@ class PresentFile(_MachineTool):
     """``machine/present_file`` (V3-P66 §7.1): any file the model can read."""
 
     name = "present_file"
-    description = ("Give a file to the user: they get a download card in the conversation. The file's bytes at "
+    description = ("Prepare a file in the conversation. Whether the user can download it depends on "
+                   "runtime_state.interface.capabilities.file_download; this does not confirm local saving. The file's bytes at "
                    "this moment are kept; later edits need another call. " + _PATHS)
-    properties = {"path": {"type": "string", "description": "File to give to the user."}}
+    properties = {"path": {"type": "string", "description": "File to prepare in the conversation."}}
     required = ["path"]
 
     async def act(self, args: Mapping[str, Any], cwd: str, roots: list[str], ctx: ToolContext,

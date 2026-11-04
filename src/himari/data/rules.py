@@ -43,6 +43,8 @@ from himari.data.api import (
     MemoryChange,
     MemoryChangeKind,
     MessageOrigin,
+    InterfaceSnapshot,
+    interface_kind,
     ModelSetting,
     OriginKind,
     ToolCompletion,
@@ -172,6 +174,11 @@ def check_device_name_free(name: str, others: Iterable[str]) -> None:
     """Names are unique among a principal's devices that are not revoked, case ignored."""
     if any(other.casefold() == name.casefold() for other in others):
         raise DataError(DataErrorCode.DUPLICATE_IDENTITY, "another device has that name")
+
+
+def check_interface(snapshot: InterfaceSnapshot | None, origin: MessageOrigin | None) -> None:
+    if snapshot is not None and (not isinstance(snapshot, InterfaceSnapshot) or snapshot.kind is not interface_kind(origin)):
+        raise DataError(DataErrorCode.INVALID_ARGUMENT, "interface does not match the input origin")
 
 
 def check_origin(origin: object) -> None:

@@ -24,6 +24,10 @@ from himari.prompt.api import (
     SystemSpec,
 )
 from himari.prompt.compaction import context_key
+from himari.prompt.compaction import current_state, state_key
+from himari.data.api import InterfaceCapabilities, InterfaceKind, InterfaceSnapshot
+from himari.prompt.api import state_data
+from himari.prompt.composer import Composer
 from himari.prompt.system import BASE_INSTRUCTIONS, principle_section, system_text
 
 ALL = SystemSpec(companion=True, memory=True, attachments=True, file_references=True, turn_guidance=True,
@@ -39,6 +43,23 @@ def inputs(spec: SystemSpec | None = ALL, **more: object) -> PromptInputs:
 
 def text(given: PromptInputs) -> str:
     return "\n\n".join(system_text(given))
+
+
+def test_interface_switch_only_changes_runtime_state_and_its_key() -> None:
+    web = inputs(companion_persona="Call me 선생님.", interface=InterfaceSnapshot(
+        InterfaceKind.WEB, InterfaceCapabilities(True, True)))
+    desk = replace(web, interface=InterfaceSnapshot(InterfaceKind.WINDOWS_COMPANION))
+    cli = replace(web, interface=InterfaceSnapshot(InterfaceKind.CLI, InterfaceCapabilities(True, False)))
+    assert system_text(web) == system_text(desk) == system_text(cli)
+    assert context_key(web) == context_key(desk) == context_key(cli)
+    assert len({state_key(web), state_key(desk), state_key(cli)}) == 3
+    assert Composer().compose(web).tool_catalog == Composer().compose(desk).tool_catalog
+    assert "Call me 선생님." in text(desk)  # P89 scope A: persona remains in every interface
+    assert "different states" in text(web) and "otherwise offer to continue on the Web" in text(desk)
+    assert state_data(current_state(desk))["interface"] == {
+        "kind": "windows_companion", "capabilities": {"file_download": False, "workspace_browser": False}}
+    assert state_data(current_state(web))["interface"] == {
+        "kind": "web", "capabilities": {"file_download": True, "workspace_browser": True}}
 
 
 def test_every_section_in_order_with_everything_on() -> None:

@@ -92,6 +92,7 @@ from himari.control.api import (
     ModelCatalog,
     OutputProgress,
     PresenceSource,
+    InterfaceSource,
     ResolvedModel,
     StopSignal,
     TurnPresence,
@@ -116,6 +117,8 @@ from himari.data.api import (
     RecentEpisode,
     MemoryStore,
     MessageOrigin,
+    InterfaceSnapshot,
+    interface_kind,
     OriginKind,
     RawNoResponse,
     RawReceived,
@@ -248,6 +251,7 @@ class Driver:
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         presence: PresenceSource | None = None,  # V3-P83 §6.2: where the user is; None: not told
         companion: bool = False,  # V3-P92: device turns require a verified companion model
+        interfaces: InterfaceSource | None = None,
     ) -> None:
         if any((planner is None) != (offer.budget is None) for offer in models.offers):
             raise ValueError("a context budget needs a compaction planner and vice versa, for every model")
@@ -279,6 +283,8 @@ class Driver:
         self._clock = clock
         self._presence = presence
         self._companion = companion
+        self._interfaces = interfaces
+        self._turn_inputs: dict[ConversationId, UserMessage | Wake] = {}
         # Where the user is, read at the turn's first request — after its message
         # is recorded and the restart cleanup is done (V3-P83 §6.3).
         self._turn_presences: dict[ConversationId, TurnPresence] = {}  # of the drive holding the lock
@@ -360,7 +366,9 @@ class Driver:
                     or await self._unfinished_group(scope) is not None
                     or (triggers and not await self._left_by_ended_wakes(scope, triggers))):
                 raise ControlError(ControlErrorCode.NOT_SETTLED, scope.conversation_id)
-            return await self._wakes.begin_wake(scope, reasons, device_id, keys=keys, reminders=reminders)
+            interface = await self._interface_at_acceptance(scope, MessageOrigin(OriginKind.DEVICE, device_id))
+            return await self._wakes.begin_wake(scope, reasons, device_id, keys=keys, reminders=reminders,
+                                                interface=interface)
 
     async def _left_by_ended_wakes(self, scope: TrustedScope, triggers: Sequence[TriggerRef]) -> bool:
         """V3-P87 §6.1, §13: what the model has not answered blocks a new wake —
@@ -505,6 +513,7 @@ class Driver:
         async with self._exclusive(scope):
             await self._prepare(scope)  # a stop is reported by the following resume
             waiting = await self._log.find_waiting_call(scope)
+            message = await self._capture_interface(scope, message)
             if waiting is not None:
                 await self._log.answer_pending_call(scope, waiting, message)  # T7a
             else:
@@ -540,6 +549,7 @@ class Driver:
                 del self._turn_users[scope.conversation_id]
                 self._turn_presences.pop(scope.conversation_id, None)
                 self._turn_sources.pop(scope.conversation_id, None)
+                self._turn_inputs.pop(scope.conversation_id, None)
 
     def _stop(self, scope: TrustedScope) -> StopSignal:
         return self._signals[scope.conversation_id]
@@ -569,20 +579,61 @@ class Driver:
         return _UserContext(text, notes, None if self._zone is None else now.astimezone(self._zone), episodes, count,
                             persona)
 
+    async def _interface_at_acceptance(self, scope: TrustedScope, origin: MessageOrigin | None) -> InterfaceSnapshot:
+        snapshot = (await self._interfaces.read(scope, origin) if self._interfaces is not None
+                    else InterfaceSnapshot(interface_kind(origin)))
+        if snapshot.kind is not interface_kind(origin):
+            raise DataError(DataErrorCode.INVALID_ARGUMENT, "interface source does not match authenticated origin")
+        return snapshot
+
+    async def _capture_interface(self, scope: TrustedScope, message: UserMessage) -> UserMessage:
+        if message.interface is not None and message.interface.kind is not interface_kind(message.origin):
+            raise DataError(DataErrorCode.INVALID_ARGUMENT, "interface does not match authenticated origin")
+        return dataclasses.replace(message, interface=await self._interface_at_acceptance(scope, message.origin))
+
+    @staticmethod
+    def _latest_input(events: Sequence[ConversationEvent], *, pending: bool = True) -> UserMessage | Wake | None:
+        """Read Data's ordered input sequences, including answers hidden inside Prompt ToolGroups."""
+        for event in reversed(events):
+            if pending and isinstance(event.payload, AssistantFinal):
+                break
+            if isinstance(event.payload, (UserMessage, Wake)):
+                return event.payload
+        return None
+
+    def _restore_input(self, scope: TrustedScope, events: Sequence[ConversationEvent]) -> None:
+        found = self._latest_input(events)
+        if found is not None:
+            self._turn_inputs[scope.conversation_id] = found
+
     async def _situated(self, scope: TrustedScope, inputs: PromptInputs, *, turn: bool = True) -> PromptInputs:
         """``inputs`` with where the user is (V3-P83 §6.2) and the time in the
         zone of the device the message came from (§6.4) — read once per turn
         (``turn``), or now for the next turn's context."""
+        if turn:
+            source_input = self._turn_inputs.get(scope.conversation_id)
+            if source_input is None:
+                source_input = self._latest_input(await self._log.read_events(scope), pending=False)
+                if source_input is not None:
+                    self._turn_inputs[scope.conversation_id] = source_input
+        else:
+            source_input = self._latest_input(await self._log.read_events(scope), pending=False)
+        origin = source_input.origin if isinstance(source_input, UserMessage) else None
+        interface_origin = (MessageOrigin(OriginKind.DEVICE, source_input.device_id)
+                            if isinstance(source_input, Wake) else origin)
+        interface = (source_input.interface if source_input is not None else None) or InterfaceSnapshot(
+            interface_kind(interface_origin))
+        inputs = dataclasses.replace(inputs, interface=interface)
         if turn and scope.conversation_id not in self._turn_sources:
             # V3-P91 §3.4: the device the turn's message came from (a wake's was set already)
-            origin = sent_from(inputs.events)
             self._turn_sources[scope.conversation_id] = TurnSource(
+                source_input.device_id if isinstance(source_input, Wake) else
                 origin.device_id if origin is not None and origin.kind is OriginKind.DEVICE else None)
         if self._presence is None:
             return inputs
         found = self._turn_presences.get(scope.conversation_id) if turn else None
         if found is None:
-            found = await self._presence.read(scope.principal_id, sent_from(inputs.events))
+            found = await self._presence.read(scope.principal_id, origin)
             if turn:
                 self._turn_presences[scope.conversation_id] = found
         now = inputs.now
@@ -666,6 +717,7 @@ class Driver:
         recovery, stop = await self._prepare(scope)
         triggers: tuple[TriggerRef, ...]
         waiting = await self._log.find_waiting_call(scope)
+        message = await self._capture_interface(scope, message)
         if waiting is not None:
             await self._log.answer_pending_call(scope, waiting, message)  # T7a
             triggers = (CompletedGroupRef(waiting.run_id),)
@@ -675,6 +727,7 @@ class Driver:
             if group is not None and group.state is GroupState.BLOCKED_UNKNOWN:
                 return DriveResult(DriveState.RECOVERY_REQUIRED, unknown_calls=group.unknown_calls, recovery=recovery)
             triggers = (EventRef(event.event_id),)
+        self._turn_inputs[scope.conversation_id] = message
         if stop is not None:
             return stop
         return await self._run_loop(scope, triggers, recovery)
@@ -772,6 +825,7 @@ class Driver:
         an unfinished group completed still triggers the Run. Empty if the
         last assistant output is a FINAL with nothing after it."""
         events = await self._log.read_events(scope)
+        self._restore_input(scope, events)
         if self._companion and scope.conversation_id not in self._turn_sources:
             # A resumed tool round still belongs to the last input, even when compaction
             # folded that input out of Prompt's tail. Reuse this complete persisted read.
