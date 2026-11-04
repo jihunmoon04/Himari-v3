@@ -1,12 +1,12 @@
 # 인터페이스 능력과 반려 파일 수신 (V3-P93 설계 초안 v0.1)
 
-> 2026-11-04 · **설계 병합 / 1단계 구현**, rev. 3 · 설계 기준 `18e945a`(#179 병합).
+> 2026-11-04 · **구현 (1·2단계 완료)**, rev. 4 · 설계 기준 `18e945a`(#179 병합), 1단계 `ab22651`(#180 병합).
 >
 > 소유자 요청: 반려 대화에서 파일을 받을 수 없는 현재 제한을 모델에게 알리고,
 > 이후 Windows 파일 수신을 지원한다. 시스템 프롬프트에는 해석 규칙을 고정하고
 > 현재 상태는 runtime state로 전달해 인터페이스 전환에 따른 접두부 변경을 줄인다.
-> Workspace 탐색은 후속 범위로 둔다. 1단계는 턴 스냅샷과 프롬프트를 구현한다.
-> Windows 파일 API·연결 세대 협상·저장 UI는 2단계 예정이며 아직 없다.
+> Workspace 탐색은 후속 범위로 둔다. 1단계는 턴 스냅샷과 프롬프트를 구현했고,
+> 2단계는 연결 세대 협상·기기 전용 제공 파일 API·Windows 파일 카드와 저장을 구현한다.
 
 관련: [반려 앱 V3-P83](companion-v0.1.md), [파일 V3-P66](file-upload-download-v0.1.md),
 [프롬프트 정비 V3-P89](prompt-cleanup-v0.1.md), [Current State](current-state-contract-v0.1.md),
@@ -288,7 +288,7 @@ X-Himari-Connection-Generation: <이 SSE hello에서 받은 값>
 
 ### 6.2 기기 토큰의 작은 허용 경로
 
-아래 두 경로만 새로 허용한다. 이름과 응답 꼴은 이 설계의 제안이며 아직 구현되지 않았다.
+아래 두 경로만 새로 허용한다.
 
 | 메서드·경로 | 역할 |
 | --- | --- |
@@ -359,9 +359,9 @@ Control은 원본 전체 로그에서 최신 입력(질문 답변 포함)을 읽
 - 같은 모델/설정을 고정한 인터페이스 전환에서 시스템/도구 직렬화 동일, state_key 변경,
   상태 토큰 추정·캐시 표시 위치 유지. persona의 기존 전 대화 범위도 확인.
 
-### 구현 PR 2 — 제공 파일 읽기 권한 + Windows 저장
+### 구현 PR 2 — 제공 파일 읽기 권한 + Windows 저장 (구현)
 
-대상: 제한된 파일 API/조회, 기능 협상, 카드·저장·복구. `present_file` 파이프라인을 재사용한다.
+대상: 제한된 파일 API/조회(`FileCatalog.read_presented_files`/`read_presented_file`, `/api/device/conversations/{id}/presented-files`), 연결 세대(`connection_generation`) 기능 협상, Windows 카드·저장·복구. `present_file` 파이프라인을 재사용한다.
 Presence의 Subscription/subscribe/signal 경계와 Windows의 SSE별 HTTP 귀속도 이 PR에 포함한다.
 
 필수 검증:

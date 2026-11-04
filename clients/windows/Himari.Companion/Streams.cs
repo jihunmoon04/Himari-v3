@@ -22,6 +22,7 @@ public partial class MainWindow
                         delay = 1; SetConnected(true, "연결됨");
                         deviceId = Str(Prop(data, "device"), "device_id") ?? deviceId;
                         ServerFeatures(data);
+                        if (generationState.OnHello(Str(data, "connection_generation"))) signalSchedule.Urgent();
                         bool returned = UpdateCurrent(Str(data, "current_device"));
                         await HelloReconciliation.ApplyAsync(
                             async () => { if (currentConversation is null || (returned && string.IsNullOrWhiteSpace(Input.Text))) await RefreshConversations(Str(Prop(data, "recent_conversation"), "id"), ct); },
@@ -69,24 +70,28 @@ public partial class MainWindow
                     else if (type == "screen_request") _ = AnswerScreenRequest(local, data, ct);  // V3-P91 §4.1: not waited on here
                     else if (type == "revoked")
                     {
+                        generationState.ClearGeneration();
                         DeleteActiveIfCurrent(local); StopConnection(); PairPanel.Visibility = Visibility.Visible;
                         SetConnected(false, "기기 연결이 해제되었습니다. 다시 짝짓기해 주세요."); return;
                     }
-                    else if (type == "replaced") { Status.Text = "다른 히마리 앱이 연결되어 이 앱을 종료합니다."; Close(); return; }
+                    else if (type == "replaced") { generationState.ClearGeneration(); Status.Text = "다른 히마리 앱이 연결되어 이 앱을 종료합니다."; Close(); return; }
                 }
+                generationState.ClearGeneration();
                 if (!ct.IsCancellationRequested) { CancelLive(); SetConnected(false, "다시 연결 중…"); }
                 // A normal five-minute stream end reconnects immediately.
             }
-            catch (OperationCanceledException) when (ct.IsCancellationRequested) { return; }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { generationState.ClearGeneration(); return; }
             catch (ApiException ex) when (ex.Status == HttpStatusCode.Unauthorized)
             {
                 if (ct.IsCancellationRequested || !ReferenceEquals(local, client)) return;
+                generationState.ClearGeneration();
                 DeleteActiveIfCurrent(local); StopConnection(); PairPanel.Visibility = Visibility.Visible;
                 SetConnected(false, "인증이 만료되었습니다. 다시 짝짓기해 주세요."); return;
             }
             catch (Exception ex)
             {
                 if (ct.IsCancellationRequested || !ReferenceEquals(local, client)) return;
+                generationState.ClearGeneration();
                 CancelLive();
                 if (ex is ApiException { Code: "device_scope" }) System.Diagnostics.Trace.TraceWarning("HIMARI device_scope: event stream denied.");
                 SetConnected(false, ex is ApiException { Code: "companion_off" } ? "서버에서 반려 기능이 꺼져 있습니다." : "연결이 끊겼습니다. 다시 연결 중…");

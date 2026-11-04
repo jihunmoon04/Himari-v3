@@ -125,7 +125,8 @@ public partial class MainWindow : Window
     {
         WakeFromUser();  // V3-P90 §2.3: clicking HIMARI wakes it at once
         int version = ++chatFocusVersion;
-        if (awaitingAnswer && !string.IsNullOrWhiteSpace(Message.Text)) ShowAssistantBubble(assistantBubbleKey);
+        dismissedFileCards.Clear();
+        if ((awaitingAnswer && !string.IsNullOrWhiteSpace(Message.Text)) || currentFileCards.Count > 0) ShowAssistantBubble(assistantBubbleKey);
         OpenComposer();
         if (dialogueHost is not null && IsVisible) dialogueHost.Activate();
         // The first time the composer appears its editor is not laid out yet and refuses focus.
@@ -151,6 +152,7 @@ public partial class MainWindow : Window
     private void CloseBubbleClick(object sender, RoutedEventArgs e)
     {
         if (ReplyPreparing) dismissedReplyProgress = $"{replyProgressConversation}:{replyProgressJob}";
+        DismissCurrentFileCards();
         ClearStack(keepUnsent: true); CloseBubble(); HideUserBubble();
     }
     private void FlipClick(object sender, RoutedEventArgs e) => settings.FacingLeft.IsChecked = FlipMenu.IsChecked;

@@ -366,7 +366,7 @@ class Driver:
                     or await self._unfinished_group(scope) is not None
                     or (triggers and not await self._left_by_ended_wakes(scope, triggers))):
                 raise ControlError(ControlErrorCode.NOT_SETTLED, scope.conversation_id)
-            interface = await self._interface_at_acceptance(scope, MessageOrigin(OriginKind.DEVICE, device_id))
+            interface = await self._interface_at_acceptance(scope, MessageOrigin(OriginKind.WAKE, device_id))
             return await self._wakes.begin_wake(scope, reasons, device_id, keys=keys, reminders=reminders,
                                                 interface=interface)
 

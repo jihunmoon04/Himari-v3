@@ -1,4 +1,4 @@
-﻿using System.Net;
+using System.Net;
 using System.Text;
 using System.Text.Json;
 using Himari.Companion;
@@ -896,6 +896,104 @@ Check(JsonSerializer.Deserialize<WindowPreferences>(JsonSerializer.Serialize(wit
     && JsonSerializer.Deserialize<WindowPreferences>("{\"Left\":1,\"Top\":2,\"CharacterHeight\":330,\"Signals\":{\"Media\":true}}") is { Signals: { Media: true, FreeWakeScreen: false } },
     "the screen setting persists; saved signals without it are off (V3-P90 §9)");
 
+// V3-P93 §6.1: per-SSE connection generation and file_download negotiation
+var genState = new ConnectionGenerationState();
+Check(genState.ActiveGeneration is null, "starts with no active generation");
+genState.UpdateServerFeatures(fileDownload: true, connectionGeneration: false);
+Check(!genState.OnHello("gen-1") && genState.ActiveGeneration is null, "requires both server features");
+genState.UpdateServerFeatures(fileDownload: true, connectionGeneration: true);
+Check(genState.OnHello("gen-1") && genState.ActiveGeneration == "gen-1", "hello sets active generation when server supports both");
+Check(JsonSerializer.Serialize(ConnectionGenerationState.BuildMessageBody("안녕", null, genState.ActiveGeneration)).Contains("\"client_features\":{\"file_download\":true}"),
+    "negotiated message body carries client_features.file_download");
+Check(!JsonSerializer.Serialize(ConnectionGenerationState.BuildMessageBody("안녕", null, null)).Contains("client_features"),
+    "unnegotiated message body omits client_features");
+var activePresence = PresenceBody.Build(3, "z", true, false, null, coding, true, null, true, null, plain,
+    serverTakesFeatures: true, serverTakesScreenLook: true, serverTakesFileDownload: true);
+Check(JsonSerializer.Serialize(activePresence, JsonSerializerOptions.Web).Contains("\"file_download\":true"),
+    "active presence carries features.file_download=true");
+var lockedWithDownload = PresenceBody.Build(3, "z", true, true, null, null, true, null, true, null, plain,
+    serverTakesFeatures: true, serverTakesFileDownload: true);
+Check(JsonSerializer.Serialize(lockedWithDownload, JsonSerializerOptions.Web).Contains("\"features\":{\"file_download\":true}"),
+    "locked presence preserves file_download on the active subscription");
+genState.OnHello("gen-2");
+Check(!genState.OnStaleFailure("gen-1") && genState.ActiveGeneration == "gen-2",
+    "late 409 from an older generation does not clear a newer hello's generation");
+Check(genState.OnStaleFailure("gen-2") && genState.ActiveGeneration is null,
+    "409 for the current generation clears it until the next hello");
+Check(MessageFailures.Classify(new ApiException(HttpStatusCode.Conflict, "stale_connection_generation")) == MessageFailure.Rejected
+    && MessageFailures.Classify(new ApiException(HttpStatusCode.Conflict, "connection_generation_required")) == MessageFailure.Rejected
+    && MessageFailures.ReuseScreen(new ApiException(HttpStatusCode.Conflict, "stale_connection_generation")),
+    "generation 409s are classified as rejected before recording and preserve staged screens");
+
+// V3-P93 §6.3: Windows filename sanitization and presented file streaming/verification
+Check(PresentedFileNames.SanitizeSaveFileName("../../secret/report.pdf") == "report.pdf", "strips relative path traversal");
+Check(PresentedFileNames.SanitizeSaveFileName(@"C:\Windows\System32\cmd.exe") == "cmd.exe", "strips Windows drive path");
+Check(PresentedFileNames.SanitizeSaveFileName("a:b*c?.txt . ") == "a_b_c_.txt", "replaces invalid chars and trims trailing dots/spaces");
+Check(PresentedFileNames.SanitizeSaveFileName("CON.txt") == "_CON.txt" && PresentedFileNames.SanitizeSaveFileName("lpt1") == "_lpt1",
+    "prefixes reserved Windows device names");
+Check(PresentedFileNames.SanitizeSaveFileName("...") == "download" && PresentedFileNames.SanitizeSaveFileName("") == "download",
+    "falls back to download for empty or dot-only names");
+Check(PresentedFileNames.FormatSize(512) == "512 B" && PresentedFileNames.FormatSize(2048) == "2 KB" && PresentedFileNames.VersionLabel(2) == "v2",
+    "formats size and version labels");
+
+string tempSaveDir = Path.Combine(Path.GetTempPath(), "himari-contract-save-" + Guid.NewGuid().ToString("N"));
+Directory.CreateDirectory(tempSaveDir);
+try
+{
+    byte[] validBytes = Encoding.UTF8.GetBytes("verified-file-contents");
+    string validSha = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(validBytes)).ToLowerInvariant();
+    var fileHandler = new PresentedFileHandler(validBytes, validSha);
+    using var fileClient = new ServerClient("https://example.com/", "token-1", fileHandler);
+    await fileClient.SendAsync(HttpMethod.Post, "/api/device/presence", new { idle_seconds = 1 }, CancellationToken.None, "gen-abc");
+    Check(fileHandler.LastGenerationHeader == "gen-abc", "SendAsync attaches X-Himari-Connection-Generation when provided");
+    var listedFiles = await fileClient.ReadAllPresentedFilesAsync("c1", CancellationToken.None);
+    Check(listedFiles.Count == 2 && listedFiles[0].Version == 2 && listedFiles[1].Version == 1,
+        "ReadAllPresentedFilesAsync pages through all presented file versions");
+
+    string targetPath = Path.Combine(tempSaveDir, "saved.txt");
+    await fileClient.DownloadPresentedFileAsync("c1", "f1", 2, targetPath, validBytes.Length, validSha, CancellationToken.None);
+    Check(File.Exists(targetPath) && File.ReadAllBytes(targetPath).SequenceEqual(validBytes)
+        && Directory.GetFiles(tempSaveDir, "*.part").Length == 0,
+        "DownloadPresentedFileAsync verifies size and SHA-256 before moving into place");
+
+    // Hash mismatch leaves existing file untouched and cleans up .part temporary file.
+    File.WriteAllText(targetPath, "keep-existing");
+    bool hashFailed = false;
+    try
+    {
+        await fileClient.DownloadPresentedFileAsync("c1", "f1", 2, targetPath, validBytes.Length, new string('0', 64), CancellationToken.None);
+    }
+    catch (InvalidDataException) { hashFailed = true; }
+    Check(hashFailed && File.ReadAllText(targetPath) == "keep-existing" && Directory.GetFiles(tempSaveDir, "*.part").Length == 0,
+        "SHA-256 mismatch aborts before move and cleans up temporary file");
+
+    // Size mismatch (truncated or oversized) aborts and cleans up temporary file.
+    string badSizePath = Path.Combine(tempSaveDir, "bad-size.txt");
+    bool sizeFailed = false;
+    try
+    {
+        await fileClient.DownloadPresentedFileAsync("c1", "f1", 2, badSizePath, validBytes.Length + 5, validSha, CancellationToken.None);
+    }
+    catch (InvalidDataException) { sizeFailed = true; }
+    Check(sizeFailed && !File.Exists(badSizePath) && Directory.GetFiles(tempSaveDir, "*.part").Length == 0,
+        "size mismatch aborts and leaves no destination or temporary file");
+
+    // 410 file_expired surfaces ApiException and leaves no file.
+    string expiredPath = Path.Combine(tempSaveDir, "expired.txt");
+    bool expiredFailed = false;
+    try
+    {
+        await fileClient.DownloadPresentedFileAsync("c1", "f_expired", 1, expiredPath, validBytes.Length, validSha, CancellationToken.None);
+    }
+    catch (ApiException ex) when (ex.Status == HttpStatusCode.Gone && ex.Code == "file_expired") { expiredFailed = true; }
+    Check(expiredFailed && !File.Exists(expiredPath) && Directory.GetFiles(tempSaveDir, "*.part").Length == 0,
+        "410 file_expired surfaces ApiException and cleans up temporary file");
+}
+finally
+{
+    try { Directory.Delete(tempSaveDir, recursive: true); } catch (IOException) { }
+}
+
 Console.WriteLine("Contract transport checks passed.");
 
 using (var screenClient = new ServerClient("https://example.com/", "test", new ScreenProtocolHandler()))
@@ -1092,5 +1190,40 @@ sealed class ScreenAnswerHandler : HttpMessageHandler
         string type = request.Content.Headers.ContentType!.MediaType!;
         Seen.Add($"{request.Method} {request.RequestUri.AbsolutePath} {type} " + (type == "application/json" ? Encoding.UTF8.GetString(bytes) : bytes.Length.ToString()));
         return new(HttpStatusCode.NoContent);
+    }
+}
+
+sealed class PresentedFileHandler(byte[] bytes, string sha256) : HttpMessageHandler
+{
+    public string? LastGenerationHeader;
+    protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+    {
+        LastGenerationHeader = request.Headers.TryGetValues(ServerClient.GenerationHeader, out var values) ? values.SingleOrDefault() : null;
+        string path = request.RequestUri!.AbsolutePath;
+        if (path == "/api/device/presence") return Task.FromResult(new HttpResponseMessage(HttpStatusCode.NoContent));
+        if (path == "/api/device/conversations/c1/presented-files")
+        {
+            bool firstPage = request.RequestUri.Query.Contains("offset=0");
+            string json = firstPage
+                ? JsonSerializer.Serialize(new
+                {
+                    items = new[] { new { file_id = "f1", version = 2, name = "report.txt", media_type = "text/plain", size = bytes.Length, sha256, created_at = "2026-11-04T12:00:00Z", expired = false } },
+                    next_offset = (int?)1
+                })
+                : JsonSerializer.Serialize(new
+                {
+                    items = new[] { new { file_id = "f1", version = 1, name = "report.txt", media_type = "text/plain", size = bytes.Length, sha256, created_at = "2026-11-04T11:00:00Z", expired = false } },
+                    next_offset = (int?)null
+                });
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(json, Encoding.UTF8, "application/json") });
+        }
+        if (path.EndsWith("/f_expired/1"))
+        {
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.Gone)
+            {
+                Content = new StringContent("{\"error\":{\"code\":\"file_expired\"}}", Encoding.UTF8, "application/json")
+            });
+        }
+        return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(bytes) });
     }
 }

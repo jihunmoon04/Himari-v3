@@ -72,6 +72,7 @@ from himari.bootstrap.application import (
     Application,
     AppViewRefused,
     AppViewState,
+    ConnectionGenerationRequired,
     ConversationStillStopping,
     DeleteNotice,
     FileNameRefused,
@@ -86,6 +87,7 @@ from himari.bootstrap.application import (
     PromptRefused,
     SCREEN_MAX_BYTES,
     ScreenRefused,
+    StaleConnectionGeneration,
     PromptView,
     ToolSourceView,
     UnknownToolSource,
@@ -329,6 +331,7 @@ class PresenceFeaturesBody(_Body):
 
     free_wake_screen: StrictBool = False
     screen_look: StrictBool = False  # V3-P91 §7.1
+    file_download: StrictBool = False  # V3-P93 §6.1.2
 
 
 class PresenceBody(_Body):
@@ -461,11 +464,18 @@ class ReferenceBody(_Body):
     sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 
 
+class ClientFeaturesBody(_Body):
+    """V3-P93 §3.2, §6.1.2: capabilities the sending app declares for this input."""
+
+    file_download: StrictBool = False
+
+
 class MessageBody(_Body):
     text: str
     attachments: list[str] = Field(default_factory=list)  # staged uploads' file ids (V3-P66)
     references: list[ReferenceBody] = Field(default_factory=list, max_length=MAX_REFERENCES)  # V3-P76
     screen: str | None = Field(default=None, max_length=200)  # a device's staged screen (V3-P84 §4.2)
+    client_features: ClientFeaturesBody | None = None
 
 
 class ModelBody(_Body):
@@ -684,6 +694,13 @@ def file_view(record: FileRecord) -> dict[str, Any]:
             "name": record.name, "media_type": record.media_type, "size": record.size,
             "created_at": _time(record.created_at), "workspace_path": record.workspace_path,
             "expired": record.expired, "image": image_view(record)}
+
+
+def presented_file_view(record: FileRecord) -> dict[str, Any]:
+    """V3-P93 §6.2: a publicly presented file as shown to a paired device."""
+    return {"file_id": record.file_id, "version": record.version, "name": record.name,
+            "media_type": record.media_type, "size": record.size, "sha256": record.blob.sha256,
+            "created_at": _time(record.created_at), "expired": record.expired}
 
 
 def _attachment(ref: AttachmentRef, files: Files) -> dict[str, Any]:
@@ -1186,6 +1203,7 @@ PDF_APPEND_PATH = "/api/machine/pdf/append"
 PDF_TRUNCATE_PATH = "/api/machine/pdf/truncate"
 EXPECTED_HEADER = "X-Himari-Expected"  # a PDF's identity as the browser read it: four decimal numbers (V3-P77 §5.3)
 IDENTITY_HEADER = "X-Himari-Identity"  # a download's identity, as the bytes sent (§5.3)
+GENERATION_HEADER = "X-Himari-Connection-Generation"  # V3-P93 §6.1.2: a device SSE stream's generation id
 
 def workspace_view(workspace: RegisteredWorkspace) -> dict[str, Any]:
     """V3-P74 §10.3: a registered folder."""
@@ -1455,6 +1473,18 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
     async def not_a_screen(request: Request, error: ScreenRefused) -> JSONResponse:
         return JSONResponse({"error": {"code": "not_a_screen", "message": "A screen is a PNG or JPEG image."}},
                             status_code=400)
+
+    @app.exception_handler(StaleConnectionGeneration)
+    async def stale_generation(request: Request, error: StaleConnectionGeneration) -> JSONResponse:
+        return JSONResponse({"error": {"code": "stale_connection_generation",
+                                       "message": "The device stream generation is no longer active."}},
+                            status_code=409)
+
+    @app.exception_handler(ConnectionGenerationRequired)
+    async def generation_required(request: Request, error: ConnectionGenerationRequired) -> JSONResponse:
+        return JSONResponse({"error": {"code": "connection_generation_required",
+                                       "message": "X-Himari-Connection-Generation is required."}},
+                            status_code=409)
 
     @app.exception_handler(FileNameRefused)
     async def bad_name(request: Request, error: FileNameRefused) -> JSONResponse:
@@ -2380,16 +2410,32 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
             raise ApiError(403, "device_scope", "A device sends text and a screen only.")
         if body.screen is not None and by.device is None:
             raise ApiError(400, "invalid_argument", "Only a device sends a screen.")
+        application, scope = himari(request), scope_of(conversation_id, who)
+        connection_generation: str | None = None
+        client_file_download: bool | None = None
+        if by.device is not None:
+            has_gen = GENERATION_HEADER.lower() in request.headers
+            declares_client_features = "client_features" in body.model_fields_set
+            if not has_gen and declares_client_features:
+                raise ApiError(409, "connection_generation_required",
+                               "X-Himari-Connection-Generation is required.")
+            if has_gen:
+                connection_generation = request.headers.get(GENERATION_HEADER, "")
+                if not application.hub.valid_generation(by.principal, by.device.device_id, connection_generation):
+                    raise ApiError(409, "stale_connection_generation",
+                                   "The device stream generation is no longer active.")
+                client_file_download = bool(body.client_features is not None and body.client_features.file_download)
         text = body.text.strip()
         if len(body.attachments) > MAX_ATTACHMENTS:
             raise ApiError(400, "too_many_attachments", f"A message carries at most {MAX_ATTACHMENTS} files.")
         if ((not text and not body.attachments and not body.references and body.screen is None)
                 or len(text) > MAX_MESSAGE_CHARS):
             raise ApiError(400, "invalid_argument", f"A message is 1..{MAX_MESSAGE_CHARS} characters, or files.")
-        application, scope = himari(request), scope_of(conversation_id, who)
         if body.screen is not None:
             try:
-                return job_view(await application.send(scope, text, origin=by.origin, screen=FileId(body.screen)))
+                return job_view(await application.send(
+                    scope, text, origin=by.origin, screen=FileId(body.screen),
+                    connection_generation=connection_generation, client_file_download=client_file_download))
             except DataError as error:
                 if error.code is DataErrorCode.ATTACHMENT_REFUSED and error.reason == ALREADY_SENT:
                     # §7.8: the earlier send of this screen was recorded; this one is not.
@@ -2397,8 +2443,9 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
                 raise
         references = [ReferenceRequest(r.path, tuple(int(v) for v in r.identity), r.start, r.end, r.sha256)
                       for r in body.references]
-        return job_view(await application.send(scope, text, [FileId(f) for f in body.attachments], references,
-                                               origin=by.origin))
+        return job_view(await application.send(
+            scope, text, [FileId(f) for f in body.attachments], references, origin=by.origin,
+            connection_generation=connection_generation, client_file_download=client_file_download))
 
     # -- files (V3-P66 §9) ---------------------------------------------------------------------
 
@@ -2614,7 +2661,7 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
                                                                     "title": recent.title},
                 # V3-P88 §14, V3-P90 §3.1: an app sends the new fields only then
                 "features": {"presence_signals": 1, "sleep_signals": 1, "task_signals": 1, "free_wake_screen": 1,
-                             "screen_look": 1},
+                             "screen_look": 1, "file_download": 1, "connection_generation": 1},
                 "quiet_until": _time(quiet)}
 
     @app.post("/api/device/presence", status_code=204)
@@ -2622,8 +2669,43 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
         """A device's input activity (§5)."""
         if by.device is None:
             raise ApiError(403, "not_a_device", "Only a device sends its activity.")
-        himari(request).hub.signal(by.principal, by.device.device_id, body.idle_seconds, body.time_zone,
-                                   presence_signals(body))
+        has_gen = GENERATION_HEADER.lower() in request.headers
+        declares_file_download = body.features is not None and "file_download" in body.features.model_fields_set
+        if not has_gen and declares_file_download:
+            raise ApiError(409, "connection_generation_required", "X-Himari-Connection-Generation is required.")
+        gen = request.headers.get(GENERATION_HEADER, "") if has_gen else None
+        file_download = (body.features.file_download if body.features is not None else False) if has_gen else None
+        if not himari(request).hub.signal(by.principal, by.device.device_id, body.idle_seconds, body.time_zone,
+                                          presence_signals(body), connection_generation=gen,
+                                          file_download=file_download):
+            raise ApiError(409, "stale_connection_generation", "The device stream generation is no longer active.")
+
+    @app.get("/api/device/conversations/{conversation_id}/presented-files")
+    async def list_device_presented_files(conversation_id: str, request: Request, by: Caller = Depends(caller),
+                                          limit: int = 50, offset: int = 0) -> dict[str, Any]:
+        """V3-P93 §6.2: a Conversation's publicly presented files, for a paired device."""
+        if by.device is None:
+            raise ApiError(403, "not_a_device", "Only a device reads presented files here.")
+        if not 1 <= limit <= MAX_LIST_LIMIT or offset < 0:
+            raise ApiError(400, "invalid_argument", f"limit must be 1..{MAX_LIST_LIMIT}, offset >= 0")
+        page = await himari(request).presented_files(scope_of(conversation_id, by.principal), limit=limit, offset=offset)
+        return {"items": [presented_file_view(f) for f in page],
+                "next_offset": offset + limit if len(page) == limit else None}
+
+    @app.get("/api/device/conversations/{conversation_id}/presented-files/{file_id}/{version}")
+    async def download_device_presented_file(conversation_id: str, file_id: str, request: Request,
+                                             version: int = Path(ge=1, le=2**31),
+                                             by: Caller = Depends(caller)) -> Response:
+        """V3-P93 §6.2: a publicly presented file's bytes, for a paired device."""
+        if by.device is None:
+            raise ApiError(403, "not_a_device", "Only a device downloads presented files here.")
+        record, handle = await himari(request).download_presented_file(
+            scope_of(conversation_id, by.principal), FileId(file_id), version)
+        return _FileStream(handle, media_type="application/octet-stream", headers={
+            "Content-Disposition": content_disposition(record.name),
+            "Content-Length": str(record.size),
+            "Content-Security-Policy": "sandbox",
+        })
 
     def screen_answer(answer: Answer) -> None:
         if answer is not Answer.TAKEN:
@@ -2678,6 +2760,8 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
             if by.device is None:  # V3-P88 §8.1: the Web compares, and rereads the devices when it differs
                 hello["signals"] = {"epoch": application.hub.signals_epoch,
                                     "revision": application.hub.signals_revision(by.principal)}
+            elif subscription.connection_generation is not None:  # V3-P93 §6.1.1: this device stream's generation only
+                hello["connection_generation"] = subscription.connection_generation
         except BaseException:
             application.hub.unsubscribe(subscription)
             raise

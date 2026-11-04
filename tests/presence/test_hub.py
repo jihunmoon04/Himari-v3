@@ -166,3 +166,67 @@ def test_a_replaced_stream_still_gets_what_was_waiting(hub: PresenceHub) -> None
     hub.publish(ME, "conversation", {"conversation": "c1"})
     hub.subscribe(ME, "d1")
     assert [e.name for e in drained(first)] == ["conversation", "replaced"]
+
+
+def test_connection_generation_and_file_download_per_subscription(hub: PresenceHub, clock: Clock) -> None:
+    web = hub.subscribe(ME)
+    assert web.connection_generation is None
+
+    first = hub.subscribe(ME, "d1")
+    other = hub.subscribe(ME, "d2")
+    assert first.connection_generation is not None and len(first.connection_generation) >= 32
+    assert other.connection_generation is not None and other.connection_generation != first.connection_generation
+    assert not hub.device_file_download(ME, "d1")
+
+    assert not hub.valid_generation(ME, "d1", "wrong-gen")
+    assert not hub.valid_generation(ME, "d1", other.connection_generation)
+    assert hub.valid_generation(ME, "d1", first.connection_generation)
+
+    assert hub.signal(
+        ME, "d1", 0, None,
+        connection_generation=first.connection_generation,
+        file_download=True,
+    )
+    assert hub.device_file_download(ME, "d1")
+
+    # Legacy signal without generation or file_download leaves the active subscription's state untouched.
+    assert hub.signal(ME, "d1", 2, None)
+    assert hub.device_file_download(ME, "d1")
+
+    # Active generation signal omitting file_download resets it to False.
+    assert hub.signal(ME, "d1", 3, None, connection_generation=first.connection_generation, file_download=None)
+    assert not hub.device_file_download(ME, "d1")
+    assert hub.signal(ME, "d1", 3, None, connection_generation=first.connection_generation, file_download=True)
+    assert hub.device_file_download(ME, "d1")
+
+    # Replacing the stream atomically resets file_download to False and invalidates the old generation.
+    second = hub.subscribe(ME, "d1")
+    assert second.connection_generation != first.connection_generation
+    assert not hub.device_file_download(ME, "d1")
+    assert not hub.valid_generation(ME, "d1", first.connection_generation)
+    assert not hub.signal(ME, "d1", 0, None, connection_generation=first.connection_generation, file_download=True)
+    assert not hub.device_file_download(ME, "d1")
+
+    # Confirm on second, then verify late unsubscribe or stale false from first cannot alter second.
+    assert hub.signal(ME, "d1", 0, None, connection_generation=second.connection_generation, file_download=True)
+    assert hub.device_file_download(ME, "d1")
+    hub.unsubscribe(first)
+    assert hub.device_file_download(ME, "d1")
+    assert not hub.signal(ME, "d1", 0, None, connection_generation=first.connection_generation, file_download=False)
+    assert hub.device_file_download(ME, "d1")
+
+    # Replacing with a legacy client (no generation signal) immediately resets to False.
+    third = hub.subscribe(ME, "d1")
+    assert not hub.device_file_download(ME, "d1")
+    assert hub.signal(ME, "d1", 0, None)
+    assert not hub.device_file_download(ME, "d1")
+    assert not hub.signal(ME, "d1", 0, None, connection_generation=second.connection_generation, file_download=True)
+    assert not hub.device_file_download(ME, "d1")
+
+    # Unsubscribe / stream end drops file_download immediately without REOPEN_SECONDS grace.
+    assert hub.signal(ME, "d1", 0, None, connection_generation=third.connection_generation, file_download=True)
+    assert hub.device_file_download(ME, "d1")
+    hub.unsubscribe(third)
+    clock.now += 1
+    assert hub.states(ME)["d1"].connected  # general presence still within reopen grace
+    assert not hub.device_file_download(ME, "d1")  # wake file_download is immediately False

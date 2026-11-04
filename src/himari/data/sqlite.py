@@ -2523,6 +2523,60 @@ class SqliteData:
                     found[call] = [_file(r) for r in rows]
             return {call: tuple(files) for call, files in found.items()}
 
+    def _public_presented_call(self, tx: _Tx, scope: TrustedScope, call: CallRef,
+                               cache: dict[CallRef, bool]) -> bool:
+        if call in cache:
+            return cache[call]
+        wake = self._wake_of_run_tx(tx, scope, call.run_id)
+        if wake is not None and wake.status in (WakeStatus.OPENED, WakeStatus.PASSED, WakeStatus.DROPPED):
+            cache[call] = False
+            return False
+        events = tx.all("SELECT payload FROM events WHERE conversation_id=? AND origin_run_id=? AND kind=?",
+                        scope.conversation_id, call.run_id, EventKind.TOOL_RESULT.value)
+        visible = any(isinstance(p := codec.payload_from(EventKind.TOOL_RESULT, r["payload"]), ToolResultRecord)
+                      and p.call == call for r in events)
+        cache[call] = visible
+        return visible
+
+    async def read_presented_files(self, scope: TrustedScope, *, limit: int = 50,
+                                   offset: int = 0) -> Sequence[FileRecord]:
+        rules.check_page(limit, offset)
+        with self._tx() as tx:
+            tx.authorized(scope)
+            rows = tx.all(
+                f"SELECT {_FILE_COLUMNS} {_FILE_FROM} WHERE f.conversation_id=? AND f.origin=?"
+                " AND f.run_id IS NOT NULL AND f.call_id IS NOT NULL"
+                " AND EXISTS (SELECT 1 FROM tool_executions t WHERE t.conversation_id=f.conversation_id"
+                " AND t.run_id=f.run_id AND t.call_id=f.call_id AND t.status=?)"
+                " AND NOT EXISTS (SELECT 1 FROM wakes w WHERE w.conversation_id=f.conversation_id"
+                " AND w.held_run_id=f.run_id AND w.status IN ('opened', 'passed', 'dropped'))"
+                " ORDER BY f.created_at DESC, f.file_id DESC, f.version DESC",
+                scope.conversation_id, FileOrigin.PRESENTED.value, ToolExecutionStatus.SUCCEEDED.value)
+            cache: dict[CallRef, bool] = {}
+            records = [_file(r) for r in rows if self._public_presented_call(
+                tx, scope, CallRef(RunId(r["run_id"]), CallId(r["call_id"])), cache)]
+            return tuple(records[offset: offset + limit])
+
+    async def read_presented_file(self, scope: TrustedScope, file_id: FileId,
+                                  version: int) -> FileRecord | None:
+        with self._tx() as tx:
+            tx.authorized(scope)
+            row = tx.one(
+                f"SELECT {_FILE_COLUMNS} {_FILE_FROM} WHERE f.conversation_id=? AND f.file_id=? AND f.version=?"
+                " AND f.origin=? AND f.run_id IS NOT NULL AND f.call_id IS NOT NULL"
+                " AND EXISTS (SELECT 1 FROM tool_executions t WHERE t.conversation_id=f.conversation_id"
+                " AND t.run_id=f.run_id AND t.call_id=f.call_id AND t.status=?)"
+                " AND NOT EXISTS (SELECT 1 FROM wakes w WHERE w.conversation_id=f.conversation_id"
+                " AND w.held_run_id=f.run_id AND w.status IN ('opened', 'passed', 'dropped'))",
+                scope.conversation_id, file_id, version, FileOrigin.PRESENTED.value,
+                ToolExecutionStatus.SUCCEEDED.value)
+            if row is None:
+                return None
+            call = CallRef(RunId(row["run_id"]), CallId(row["call_id"]))
+            if not self._public_presented_call(tx, scope, call, {}):
+                return None
+            return _file(row)
+
     async def presented_bytes_since(self, scope: TrustedScope, since: datetime) -> int:
         with self._tx() as tx:
             tx.authorized(scope)
@@ -2988,38 +3042,41 @@ class SqliteData:
                          " AND status='opened'", scope.principal_id, wake_id, scope.conversation_id)
             return row is not None and row["held_run_id"] == run_id
 
+    def _wake_of_run_tx(self, tx: _Tx, scope: TrustedScope, run_id: RunId) -> WakeRecord | None:
+        # PR #167 review P1-2: a Run that only goes on after a tool round is triggered by that
+        # round: follow it back. Re-review P1-7, P1-8: a Run that names any Event is decided
+        # there — its latest Event is a free wake's, or the Run is no free wake's (a user's
+        # message answered beside an older wake's group never becomes that wake's).
+        level: list[RunId] = [run_id]
+        seen: set[RunId] = set()
+        while level and len(seen) < 32:
+            ids: list[str] = []
+            below: list[RunId] = []
+            for current in level:
+                if current in seen:
+                    continue
+                seen.add(current)
+                for ref in codec.trigger_refs_from(self._run_row(tx, scope, current)["trigger_refs"]):
+                    if isinstance(ref, EventRef):
+                        ids.append(ref.event_id)
+                    elif isinstance(ref, CompletedGroupRef):
+                        below.append(ref.run_id)
+            if ids:
+                last = tx.one(f"SELECT sequence FROM events WHERE conversation_id=? AND event_id IN"
+                              f" ({', '.join('?' * len(ids))}) ORDER BY sequence DESC LIMIT 1",
+                              scope.conversation_id, *ids)
+                row = None if last is None else tx.one(
+                    "SELECT * FROM wakes WHERE conversation_id=? AND event_sequence=?",
+                    scope.conversation_id, last["sequence"])
+                wake = None if row is None else _wake(row)
+                return wake if wake is not None and free_wake(wake.reasons) else None
+            level = below
+        return None
+
     async def wake_of_run(self, scope: TrustedScope, run_id: RunId) -> WakeRecord | None:
         with self._tx() as tx:
             tx.authorized(scope)
-            # PR #167 review P1-2: a Run that only goes on after a tool round is triggered by that
-            # round: follow it back. Re-review P1-7, P1-8: a Run that names any Event is decided
-            # there — its latest Event is a free wake's, or the Run is no free wake's (a user's
-            # message answered beside an older wake's group never becomes that wake's).
-            level: list[RunId] = [run_id]
-            seen: set[RunId] = set()
-            while level and len(seen) < 32:
-                ids: list[str] = []
-                below: list[RunId] = []
-                for current in level:
-                    if current in seen:
-                        continue
-                    seen.add(current)
-                    for ref in codec.trigger_refs_from(self._run_row(tx, scope, current)["trigger_refs"]):
-                        if isinstance(ref, EventRef):
-                            ids.append(ref.event_id)
-                        elif isinstance(ref, CompletedGroupRef):
-                            below.append(ref.run_id)
-                if ids:
-                    last = tx.one(f"SELECT sequence FROM events WHERE conversation_id=? AND event_id IN"
-                                  f" ({', '.join('?' * len(ids))}) ORDER BY sequence DESC LIMIT 1",
-                                  scope.conversation_id, *ids)
-                    row = None if last is None else tx.one(
-                        "SELECT * FROM wakes WHERE conversation_id=? AND event_sequence=?",
-                        scope.conversation_id, last["sequence"])
-                    wake = None if row is None else _wake(row)
-                    return wake if wake is not None and free_wake(wake.reasons) else None
-                level = below
-            return None
+            return self._wake_of_run_tx(tx, scope, run_id)
 
     async def unshown_wakes(self, scope: TrustedScope) -> frozenset[int]:
         with self._tx() as tx:

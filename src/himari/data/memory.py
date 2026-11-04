@@ -1331,6 +1331,47 @@ class InMemoryData:
                 found[call] = tuple(files)
         return found
 
+    async def _public_presented_calls(self, scope: TrustedScope, conv: _Conversation) -> set[CallRef]:
+        unshown = await self.unshown_wakes(scope)
+        hidden_held = {w.held_run_id for w in self._store.wakes.values()
+                       if w.conversation_id == scope.conversation_id and w.held_run_id is not None
+                       and w.status in (WakeStatus.OPENED, WakeStatus.PASSED, WakeStatus.DROPPED)}
+        result_calls = {e.payload.call for e in conv.events
+                        if e.sequence not in unshown and isinstance(e.payload, ToolResultRecord)}
+        public_calls: set[CallRef] = set()
+        for call in result_calls:
+            if call.run_id in hidden_held:
+                continue
+            record = conv.executions.get(call)
+            if record is None or record.status is not ToolExecutionStatus.SUCCEEDED:
+                continue
+            wake = await self.wake_of_run(scope, call.run_id)
+            if wake is not None and wake.status in (WakeStatus.OPENED, WakeStatus.PASSED, WakeStatus.DROPPED):
+                continue
+            public_calls.add(call)
+        return public_calls
+
+    async def read_presented_files(self, scope: TrustedScope, *, limit: int = 50,
+                                   offset: int = 0) -> Sequence[FileRecord]:
+        rules.check_page(limit, offset)
+        conv = self._conv(scope)
+        public_calls = await self._public_presented_calls(scope, conv)
+        presented = sorted(
+            (f for f in conv.files if f.origin is FileOrigin.PRESENTED and f.call in public_calls),
+            key=lambda f: (f.created_at, f.file_id, f.version),
+            reverse=True,
+        )
+        return tuple(self._record(f) for f in presented[offset: offset + limit])
+
+    async def read_presented_file(self, scope: TrustedScope, file_id: FileId,
+                                  version: int) -> FileRecord | None:
+        conv = self._conv(scope)
+        file = next((f for f in conv.files
+                     if f.file_id == file_id and f.version == version and f.origin is FileOrigin.PRESENTED), None)
+        if file is None or file.call is None or file.call not in await self._public_presented_calls(scope, conv):
+            return None
+        return self._record(file)
+
     async def presented_bytes_since(self, scope: TrustedScope, since: datetime) -> int:
         return self._presented_since(self._conv(scope), since)
 

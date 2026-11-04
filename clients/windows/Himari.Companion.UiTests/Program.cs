@@ -1,4 +1,4 @@
-﻿using System.Windows;
+using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Interop;
@@ -57,6 +57,11 @@ internal static class Program
         {
             ReplyProgressChecks.Run((ok, message) => { if (!ok) throw new Exception(message); }, args.Length == 3 && args[1] == "--screenshots" ? args[2] : null);
             Console.WriteLine("Reply preparation UI checks passed."); app.Shutdown(); return;
+        }
+        if (args.Contains("--presented-files-only"))
+        {
+            RunPresentedFileChecks((ok, message) => { if (!ok) throw new Exception(message); });
+            Console.WriteLine("Presented file UI checks passed."); app.Shutdown(); return;
         }
         using var source = new HwndSource(new HwndSourceParameters("HIMARI keyboard regression") { Width = 1, Height = 1, WindowStyle = unchecked((int)0x80000000) });
         var root = new Grid(); var input = new TextBox { AcceptsReturn = true }; root.Children.Add(input); source.RootVisual = root;
@@ -677,6 +682,8 @@ internal static class Program
             }
             follow.Close();
         }
+        // V3-P93 §6.1, §6.3: connection generation 409 preserves draft, and presented file cards support save/cancel/verification.
+        RunPresentedFileChecks(Check);
         app.Shutdown();
         // V3-P90 §2.4: a reminder told while asleep wakes it for its words only, and its bubble stays until the user wakes it
         {
@@ -721,6 +728,109 @@ internal static class Program
             napping.Close();
         }
         Console.WriteLine("WPF keyboard, IME, bubble colors/order/expiry, layout, reply reconnect and wake follow checks passed.");
+    }
+
+    private static void RunPresentedFileChecks(Action<bool, string> Check)
+    {
+        var fileWindow = ChatWindow();
+        const BindingFlags inside = BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Public;
+        object? Call(string method, params object?[] arguments) => typeof(MainWindow).GetMethod(method, inside)!.Invoke(fileWindow, arguments);
+        void Field(string field, object? value) => typeof(MainWindow).GetField(field, inside)!.SetValue(fileWindow, value);
+        object? Value(string field) => typeof(MainWindow).GetField(field, inside)!.GetValue(fileWindow);
+        void Until(Func<bool> ready)
+        {
+            var untilFrame = new DispatcherFrame(); var poll = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(10) };
+            var deadline = DateTime.UtcNow.AddSeconds(5);
+            poll.Tick += (_, _) => { if (ready() || DateTime.UtcNow >= deadline) untilFrame.Continue = false; };
+            if (!ready()) { poll.Start(); Dispatcher.PushFrame(untilFrame); poll.Stop(); }
+            Check(ready(), "presented file UI operation completed within test deadline");
+        }
+
+        string saveDir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "himari-ui-save-" + Guid.NewGuid().ToString("N"));
+        System.IO.Directory.CreateDirectory(saveDir);
+        try
+        {
+            byte[] payload = Encoding.UTF8.GetBytes("himari-presented-file-v1");
+            string sha = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(payload)).ToLowerInvariant();
+            var handler = new PresentedFileUiHandler(payload, sha);
+            var server = new ServerClient("https://example.com/", "device-one", handler);
+            var cts = new CancellationTokenSource();
+            Field("client", server); Field("recoveryOwner", server); Field("connection", cts);
+            Field("currentConversation", "c"); Field("deviceId", "d");
+            ((CheckBox)((Window)Value("settings")!).FindName("ScreenSharing")).IsChecked = false;
+            var genState = Value("generationState")!;
+            genState.GetType().GetMethod("UpdateServerFeatures", inside)!.Invoke(genState, [true, true]);
+            genState.GetType().GetMethod("OnHello", inside)!.Invoke(genState, ["gen-stale"]);
+            Call("SetConnected", true, "연결됨");
+
+            // 1. Stale generation 409 rejects before recording: draft returns to editor without unknownText.
+            var editor = (TextBox)fileWindow.FindName("Input");
+            handler.RejectStaleGeneration = true;
+            editor.Text = "세대 교체 중 보낸 초안";
+            Call("SendMessage");
+            Until(() => !(bool)Value("sending")!);
+            Check(editor.Text == "세대 교체 중 보낸 초안" && Value("unknownText") is null
+                && genState.GetType().GetProperty("ActiveGeneration", inside)!.GetValue(genState) is null,
+                "409 stale_connection_generation preserves draft without entering unknownText recovery and clears stale generation");
+            editor.Clear();
+            handler.RejectStaleGeneration = false;
+
+            // 2. Reading conversation with presented files opens bubble and renders deduplicated card with sanitized name.
+            var readTask = (Task)Call("ReadConversation", "c", cts.Token)!;
+            Until(() => readTask.IsCompleted); readTask.GetAwaiter().GetResult();
+            var bubble = (FrameworkElement)fileWindow.FindName("BubblePanel");
+            var filesScroll = (FrameworkElement)fileWindow.FindName("PresentedFilesScroll");
+            var filesPanel = (StackPanel)fileWindow.FindName("PresentedFilesPanel");
+            var cards = (System.Collections.IDictionary)Value("currentFileCards")!;
+            Check(bubble.Visibility == Visibility.Visible && filesScroll.Visibility == Visibility.Visible && filesPanel.Children.Count == 1 && cards.Count == 1,
+                "presented file card is shown in the conversation bubble");
+
+            // Repeated refresh does not duplicate the card.
+            readTask = (Task)Call("ReadConversation", "c", cts.Token)!;
+            Until(() => readTask.IsCompleted); readTask.GetAwaiter().GetResult();
+            Check(filesPanel.Children.Count == 1 && cards.Count == 1, "repeated ReadConversation refreshes do not duplicate file cards");
+
+            object card = cards.Values.Cast<object>().Single();
+            var nameText = (TextBlock)card.GetType().GetProperty("NameText", inside)!.GetValue(card)!;
+            var stateText = (TextBlock)card.GetType().GetProperty("StateText", inside)!.GetValue(card)!;
+            var saveButton = (Button)card.GetType().GetProperty("SaveButton", inside)!.GetValue(card)!;
+            var saveButtonText = (TextBlock)card.GetType().GetProperty("SaveButtonText", inside)!.GetValue(card)!;
+            Check(nameText.Text == "summary.md" && saveButtonText.Text == "저장" && stateText.Visibility == Visibility.Collapsed,
+                "card sanitizes path-prefixed server filename and starts in unsaved state");
+
+            // 3. Save dialog cancellation makes no download request and keeps draft/state intact.
+            Call("OpenComposer"); editor.Text = "저장 취소 중 유지할 초안";
+            string? suggestedSeen = null;
+            Field("chooseSavePath", new Func<string, string?>(suggested => { suggestedSeen = suggested; return null; }));
+            saveButton.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Check(suggestedSeen == "summary.md" && handler.Downloads == 0 && !(bool)card.GetType().GetProperty("Saved", inside)!.GetValue(card)!
+                && stateText.Visibility == Visibility.Collapsed && editor.Text == "저장 취소 중 유지할 초안",
+                "cancelling save dialog performs no download, does not mark saved, and preserves user draft");
+
+            // 4. Corrupted download fails verification, cleans up temp file, and shows error without marking saved.
+            string targetFile = System.IO.Path.Combine(saveDir, "summary.md");
+            handler.CorruptBytes = true;
+            Field("chooseSavePath", new Func<string, string?>(_ => targetFile));
+            saveButton.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Until(() => !(bool)card.GetType().GetProperty("Saving", inside)!.GetValue(card)! && handler.Downloads == 1);
+            Check(!System.IO.File.Exists(targetFile) && !(bool)card.GetType().GetProperty("Saved", inside)!.GetValue(card)!
+                && stateText.Visibility == Visibility.Visible && stateText.Text.Contains("검증"),
+                "corrupted download fails SHA-256 verification, leaves no file, and does not show saved");
+
+            // 5. Valid download writes verified file and marks card as 저장됨 / 다시 저장.
+            handler.CorruptBytes = false;
+            saveButton.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Until(() => !(bool)card.GetType().GetProperty("Saving", inside)!.GetValue(card)! && handler.Downloads == 2);
+            Check(System.IO.File.Exists(targetFile) && System.IO.File.ReadAllBytes(targetFile).SequenceEqual(payload)
+                && (bool)card.GetType().GetProperty("Saved", inside)!.GetValue(card)!
+                && stateText.Text == "저장됨" && saveButtonText.Text == "다시 저장",
+                "successful verified save writes destination file and updates card to 저장됨");
+        }
+        finally
+        {
+            fileWindow.Close();
+            try { System.IO.Directory.Delete(saveDir, recursive: true); } catch (System.IO.IOException) { }
+        }
     }
 }
 
@@ -795,5 +905,68 @@ internal sealed class SlowListHandler : HttpMessageHandler
         else if (path.EndsWith("/events")) body = JsonSerializer.Serialize(new { items = Array.Empty<object>() });
         else body = JsonSerializer.Serialize(new { conversation = new { last_sequence = 1 }, job = new { running = false, job_id = "w" } });
         return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(body, Encoding.UTF8, "application/json") };
+    }
+}
+
+internal sealed class PresentedFileUiHandler(byte[] payload, string sha256) : HttpMessageHandler
+{
+    internal bool RejectStaleGeneration;
+    internal bool CorruptBytes;
+    internal int Downloads;
+    protected override void Dispose(bool disposing) { }
+    protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+    {
+        string path = request.RequestUri!.AbsolutePath;
+        if (request.Method == HttpMethod.Post && path.EndsWith("/messages"))
+        {
+            if (RejectStaleGeneration)
+            {
+                return Task.FromResult(new HttpResponseMessage(HttpStatusCode.Conflict)
+                {
+                    Content = new StringContent("{\"error\":{\"code\":\"stale_connection_generation\"}}", Encoding.UTF8, "application/json")
+                });
+            }
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.Accepted)
+            {
+                Content = new StringContent("{\"job_id\":\"j1\"}", Encoding.UTF8, "application/json")
+            });
+        }
+        if (path == "/api/device/conversations/c/presented-files")
+        {
+            string json = JsonSerializer.Serialize(new
+            {
+                items = new[]
+                {
+                    new
+                    {
+                        file_id = "f1",
+                        version = 1,
+                        name = "../nested/summary.md",
+                        media_type = "text/markdown",
+                        size = payload.Length,
+                        sha256,
+                        created_at = "2026-11-04T12:00:00Z",
+                        expired = false
+                    }
+                },
+                next_offset = (int?)null
+            });
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(json, Encoding.UTF8, "application/json")
+            });
+        }
+        if (path == "/api/device/conversations/c/presented-files/f1/1")
+        {
+            Downloads++;
+            byte[] data = CorruptBytes ? Encoding.UTF8.GetBytes(new string('x', payload.Length)) : payload;
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(data) });
+        }
+        if (path.EndsWith("/events"))
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("{\"items\":[]}", Encoding.UTF8, "application/json") });
+        return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent("{\"conversation\":{\"last_sequence\":1},\"job\":{\"running\":false,\"job_id\":\"j1\"}}", Encoding.UTF8, "application/json")
+        });
     }
 }

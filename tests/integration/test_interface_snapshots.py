@@ -250,3 +250,61 @@ def test_phase_one_capabilities_follow_server_and_authenticated_interface(
 def test_workspace_browser_is_false_without_the_principals_machine_permission() -> None:
     source = ConfiguredInterfaces(True, True, frozenset({PrincipalId("someone_else")}))
     assert asyncio.run(source.read(SCOPE, WEB)) == InterfaceSnapshot(InterfaceKind.WEB, InterfaceCapabilities(True, False))
+
+
+def test_device_input_and_wake_snapshots_follow_connection_generation_negotiation() -> None:
+    from himari.bootstrap.interfaces import (
+        ConnectionGenerationRequired, StaleConnectionGeneration, device_input_negotiation,
+    )
+    from himari.presence.hub import PresenceHub
+
+    async def scenario() -> None:
+        hub = PresenceHub()
+        source = ConfiguredInterfaces(True, True, frozenset({SCOPE.principal_id}), hub=hub, companion_enabled=True)
+
+        # Without an active stream or negotiation, device input and wake default to file_download=False.
+        assert await source.read(SCOPE, DESK) == InterfaceSnapshot(InterfaceKind.WINDOWS_COMPANION)
+        assert await source.read(SCOPE, MessageOrigin(OriginKind.WAKE, "d1")) == InterfaceSnapshot(
+            InterfaceKind.WINDOWS_COMPANION
+        )
+
+        sub = hub.subscribe(SCOPE.principal_id, "d1")
+        assert sub.connection_generation is not None
+
+        # Client declares file_download=True without a generation header -> ConnectionGenerationRequired.
+        with pytest.raises(ConnectionGenerationRequired):
+            with device_input_negotiation(None, True):
+                await source.read(SCOPE, DESK)
+
+        # Client sends a stale generation -> StaleConnectionGeneration.
+        with pytest.raises(StaleConnectionGeneration):
+            with device_input_negotiation("stale-gen", True):
+                await source.read(SCOPE, DESK)
+
+        # Matching active generation + client_file_download=True -> file_download=True, workspace_browser=False.
+        with device_input_negotiation(sub.connection_generation, True):
+            assert await source.read(SCOPE, DESK) == InterfaceSnapshot(
+                InterfaceKind.WINDOWS_COMPANION, InterfaceCapabilities(True, False)
+            )
+
+        # Legacy message without client_features does not borrow presence's file_download=True.
+        hub.signal(SCOPE.principal_id, "d1", 0, None, connection_generation=sub.connection_generation, file_download=True)
+        assert await source.read(SCOPE, DESK) == InterfaceSnapshot(
+            InterfaceKind.WINDOWS_COMPANION, InterfaceCapabilities(False, False)
+        )
+        # Wake uses the active subscription's confirmed file_download state.
+        assert await source.read(SCOPE, MessageOrigin(OriginKind.WAKE, "d1")) == InterfaceSnapshot(
+            InterfaceKind.WINDOWS_COMPANION, InterfaceCapabilities(True, False)
+        )
+
+        # Stream replacement before wake or input immediately invalidates the old generation and resets wake to False.
+        sub2 = hub.subscribe(SCOPE.principal_id, "d1")
+        assert await source.read(SCOPE, MessageOrigin(OriginKind.WAKE, "d1")) == InterfaceSnapshot(
+            InterfaceKind.WINDOWS_COMPANION, InterfaceCapabilities(False, False)
+        )
+        with pytest.raises(StaleConnectionGeneration):
+            with device_input_negotiation(sub.connection_generation, True):
+                await source.read(SCOPE, DESK)
+        hub.unsubscribe(sub2)
+
+    asyncio.run(scenario())

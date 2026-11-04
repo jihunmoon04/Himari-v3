@@ -4,10 +4,78 @@ using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Runtime.CompilerServices;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 
 namespace Himari.Companion;
+
+internal sealed record PresentedFileItem(
+    string FileId,
+    int Version,
+    string Name,
+    string MediaType,
+    long Size,
+    string Sha256,
+    string? CreatedAt,
+    bool Expired);
+
+internal sealed record PresentedFileCardKey(
+    string Server,
+    string Token,
+    string ConversationId,
+    string FileId,
+    int Version);
+
+internal static class PresentedFileNames
+{
+    private static readonly HashSet<string> ReservedDeviceNames = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "CON", "PRN", "AUX", "NUL",
+        "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9", "COM\u00B9", "COM\u00B2", "COM\u00B3",
+        "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9", "LPT\u00B9", "LPT\u00B2", "LPT\u00B3",
+    };
+
+    private static readonly HashSet<char> InvalidChars =
+        Path.GetInvalidFileNameChars().Concat(['<', '>', ':', '"', '/', '\\', '|', '?', '*']).ToHashSet();
+
+    /// <summary>V3-P93 §6.3: sanitize a server-supplied filename for Windows local save dialogs.</summary>
+    internal static string SanitizeSaveFileName(string? rawName)
+    {
+        if (string.IsNullOrWhiteSpace(rawName)) return "download";
+        string segment = rawName.Split(['/', '\\'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .LastOrDefault(part => part is not ("." or "..")) ?? "";
+        var builder = new StringBuilder(segment.Length);
+        foreach (char ch in segment)
+        {
+            if (char.IsControl(ch)) continue;
+            builder.Append(InvalidChars.Contains(ch) ? '_' : ch);
+        }
+        string cleaned = builder.ToString().Trim().TrimEnd('.', ' ');
+        if (cleaned.Length == 0 || cleaned is "." or "..") return "download";
+        int dot = cleaned.IndexOf('.');
+        string stem = (dot >= 0 ? cleaned[..dot] : cleaned).TrimEnd(' ');
+        if (ReservedDeviceNames.Contains(stem)) cleaned = "_" + cleaned;
+        if (cleaned.Length > 180)
+        {
+            string ext = Path.GetExtension(cleaned);
+            if (ext.Length > 0 && ext.Length <= 32)
+                cleaned = cleaned[..(180 - ext.Length)].TrimEnd('.', ' ') + ext;
+            else
+                cleaned = cleaned[..180].TrimEnd('.', ' ');
+        }
+        return cleaned.Length == 0 ? "download" : cleaned;
+    }
+
+    internal static string FormatSize(long bytes)
+    {
+        if (bytes < 1024) return $"{Math.Max(0, bytes)} B";
+        if (bytes < 1024 * 1024) return $"{bytes / 1024.0:0.#} KB";
+        return $"{bytes / (1024.0 * 1024.0):0.#} MB";
+    }
+
+    internal static string VersionLabel(int version) => $"v{Math.Max(1, version)}";
+}
 
 internal sealed class ApiException(HttpStatusCode status, string code) : Exception(code)
 {
@@ -16,11 +84,16 @@ internal sealed class ApiException(HttpStatusCode status, string code) : Excepti
 }
 internal sealed class ServerClient : IDisposable
 {
+    internal const string GenerationHeader = "X-Himari-Connection-Generation";
+    internal const long MaxPresentedFileBytes = 20 * 1024 * 1024;
     private readonly HttpClient http;
     private readonly string token;
     internal Uri BaseUri { get; }
     internal bool SameDevice(ServerClient other) => BaseUri == other.BaseUri && token == other.token;
     internal bool Matches(DeviceCredential credential) => credential.Server == BaseUri.ToString() && credential.Token == token;
+    internal PresentedFileCardKey CardKey(string conversationId, string fileId, int version) =>
+        new(BaseUri.ToString(), token, conversationId, fileId, version);
+    internal bool MatchesCard(PresentedFileCardKey key) => key.Server == BaseUri.ToString() && key.Token == token;
     internal ServerClient(string address, string token) : this(address, token, new HttpClientHandler { UseCookies = false, AllowAutoRedirect = false }) { }
     internal ServerClient(string address, string token, HttpMessageHandler handler)
     {
@@ -37,18 +110,121 @@ internal sealed class ServerClient : IDisposable
         using var response = await http.SendAsync(request, ct);
         return await ReadAsync(response, ct);
     }
-    private HttpRequestMessage Request(HttpMethod method, string path, object? body = null)
+    private HttpRequestMessage Request(HttpMethod method, string path, object? body = null, string? connectionGeneration = null)
     {
         var request = new HttpRequestMessage(method, path);
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        if (!string.IsNullOrEmpty(connectionGeneration))
+            request.Headers.TryAddWithoutValidation(GenerationHeader, connectionGeneration);
         if (body != null) request.Content = JsonContent.Create(body);
         return request;
     }
-    internal async Task<JsonElement> SendAsync(HttpMethod method, string path, object? body, CancellationToken ct)
+    internal async Task<JsonElement> SendAsync(HttpMethod method, string path, object? body, CancellationToken ct, string? connectionGeneration = null)
     {
-        using var request = Request(method, path, body);
+        using var request = Request(method, path, body, connectionGeneration);
         using var response = await http.SendAsync(request, ct);
         return await ReadAsync(response, ct);
+    }
+    internal Task<JsonElement> GetPresentedFilesAsync(string conversationId, int limit, int offset, CancellationToken ct) =>
+        SendAsync(HttpMethod.Get, "/api/device/conversations/" + Uri.EscapeDataString(conversationId) + $"/presented-files?limit={limit}&offset={offset}", null, ct);
+
+    internal async Task<List<PresentedFileItem>> ReadAllPresentedFilesAsync(string conversationId, CancellationToken ct)
+    {
+        var items = new List<PresentedFileItem>();
+        int offset = 0;
+        while (true)
+        {
+            var page = await GetPresentedFilesAsync(conversationId, 50, offset, ct);
+            if (page.ValueKind == JsonValueKind.Object && page.TryGetProperty("items", out var array) && array.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var entry in array.EnumerateArray())
+                {
+                    if (entry.ValueKind != JsonValueKind.Object) continue;
+                    string? fileId = entry.TryGetProperty("file_id", out var fid) && fid.ValueKind == JsonValueKind.String ? fid.GetString() : null;
+                    int version = entry.TryGetProperty("version", out var ver) && ver.ValueKind == JsonValueKind.Number && ver.TryGetInt32(out int v) ? v : 0;
+                    if (string.IsNullOrEmpty(fileId) || version < 1) continue;
+                    string name = entry.TryGetProperty("name", out var n) && n.ValueKind == JsonValueKind.String ? n.GetString() ?? "download" : "download";
+                    string mediaType = entry.TryGetProperty("media_type", out var mt) && mt.ValueKind == JsonValueKind.String ? mt.GetString() ?? "application/octet-stream" : "application/octet-stream";
+                    long size = entry.TryGetProperty("size", out var sz) && sz.ValueKind == JsonValueKind.Number && sz.TryGetInt64(out long s) ? s : 0;
+                    string sha256 = entry.TryGetProperty("sha256", out var sh) && sh.ValueKind == JsonValueKind.String ? sh.GetString() ?? "" : "";
+                    string? createdAt = entry.TryGetProperty("created_at", out var ca) && ca.ValueKind == JsonValueKind.String ? ca.GetString() : null;
+                    bool expired = entry.TryGetProperty("expired", out var ex) && ex.ValueKind is JsonValueKind.True or JsonValueKind.False && ex.GetBoolean();
+                    items.Add(new PresentedFileItem(fileId, version, name, mediaType, size, sha256, createdAt, expired));
+                }
+            }
+            if (!page.TryGetProperty("next_offset", out var nextProp) || nextProp.ValueKind != JsonValueKind.Number || !nextProp.TryGetInt32(out int next) || next <= offset)
+                break;
+            offset = next;
+        }
+        return items;
+    }
+
+    internal async Task DownloadPresentedFileAsync(
+        string conversationId,
+        string fileId,
+        int version,
+        string destinationPath,
+        long expectedSize,
+        string expectedSha256,
+        CancellationToken ct)
+    {
+        if (expectedSize < 0 || expectedSize > MaxPresentedFileBytes)
+            throw new InvalidDataException("파일 크기가 허용 범위를 벗어났습니다.");
+        if (string.IsNullOrWhiteSpace(expectedSha256) || expectedSha256.Trim().Length != 64)
+            throw new InvalidDataException("파일 해시 정보가 올바르지 않습니다.");
+        string fullDestination = Path.GetFullPath(destinationPath);
+        string directory = Path.GetDirectoryName(fullDestination)
+            ?? throw new ArgumentException("저장 경로가 올바르지 않습니다.", nameof(destinationPath));
+        Directory.CreateDirectory(directory);
+        string tempPath = Path.Combine(directory, $".himari-download-{Guid.NewGuid():N}.part");
+        try
+        {
+            string url = "/api/device/conversations/" + Uri.EscapeDataString(conversationId)
+                + "/presented-files/" + Uri.EscapeDataString(fileId) + "/" + version;
+            using var request = Request(HttpMethod.Get, url);
+            using var response = await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
+            if (!response.IsSuccessStatusCode)
+            {
+                await ReadAsync(response, ct);
+                return;
+            }
+            long totalBytes = 0;
+            string actualSha256;
+            using (var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256))
+            {
+                await using var source = await response.Content.ReadAsStreamAsync(ct);
+                await using (var target = new FileStream(tempPath, FileMode.CreateNew, FileAccess.Write, FileShare.None, 81920, useAsync: true))
+                {
+                    byte[] buffer = new byte[81920];
+                    while (true)
+                    {
+                        int read = await source.ReadAsync(buffer.AsMemory(), ct);
+                        if (read <= 0) break;
+                        totalBytes += read;
+                        if (totalBytes > expectedSize || totalBytes > MaxPresentedFileBytes)
+                            throw new InvalidDataException("파일 크기가 예상과 다릅니다.");
+                        hash.AppendData(buffer, 0, read);
+                        await target.WriteAsync(buffer.AsMemory(0, read), ct);
+                    }
+                    await target.FlushAsync(ct);
+                }
+                actualSha256 = Convert.ToHexString(hash.GetHashAndReset()).ToLowerInvariant();
+            }
+            if (totalBytes != expectedSize)
+                throw new InvalidDataException("파일 크기가 예상과 다릅니다.");
+            if (!string.Equals(actualSha256, expectedSha256.Trim(), StringComparison.OrdinalIgnoreCase))
+                throw new InvalidDataException("파일 무결성(SHA-256) 검증에 실패했습니다.");
+            ct.ThrowIfCancellationRequested();
+            File.Move(tempPath, fullDestination, overwrite: true);
+        }
+        finally
+        {
+            if (File.Exists(tempPath))
+            {
+                try { File.Delete(tempPath); }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+            }
+        }
     }
     internal async Task<JsonElement> UploadScreenAsync(string conversationId, byte[] bytes, string contentType, CancellationToken ct)
     {

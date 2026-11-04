@@ -127,7 +127,7 @@ internal sealed class ShellFullscreen : IDisposable
             var type = Type.GetTypeFromCLSID(new Guid("56FDF344-FD6D-11D0-958A-006097C9A090"));
             taskbar = (ITaskbarList2)Activator.CreateInstance(type!)!; taskbar.HrInit();
         }
-        catch (COMException) { taskbar = null; }
+        catch (Exception ex) when (ex is COMException or NotImplementedException) { taskbar = null; }
     }
     internal void Mark(IntPtr window, bool fullscreen)
     {

@@ -24,6 +24,7 @@ public partial class MainWindow
     private bool serverTakesTask;  // and features.task_signals = 1 (V3-P90 §3.1)
     private bool serverTakesFeatures;  // and features.free_wake_screen = 1 (V3-P90 §9)
     private bool serverTakesScreenLook;  // and features.screen_look = 1 (V3-P91 §7.1): it may ask for the screen
+    private readonly ConnectionGenerationState generationState = new();  // V3-P93 §6.1: file_download & connection_generation
     private readonly TaskTracker taskTracker = new();
     private uint lastGamePid;  // V3-P90 §5.3: the last game in front, whose program's end is the game's end
     private bool sessionLocked;
@@ -163,11 +164,11 @@ public partial class MainWindow
         else signalSchedule.SeeMicCamera(null);
     }
 
-    private Dictionary<string, object?> PresenceSignal(int idle, string zone, DateTime now, string? after) => PresenceBody.Build(
+    private Dictionary<string, object?> PresenceSignal(int idle, string zone, DateTime now, string? after, bool includeFileDownload = false) => PresenceBody.Build(
         idle, zone, serverTakesSignals, sessionLocked, after, activityTracker.Current(now),
         activityTracker.Known, latestMedia, latestMediaKnown, latestMicCamera, signalSettings, titleExclusions,
         serverTakesSleep, sleepPolicy.Reason, serverTakesTask, taskTracker.Current(now), taskTracker.Ended(now), serverTakesFeatures,
-        serverTakesScreenLook);
+        serverTakesScreenLook, includeFileDownload);
 
     /// <summary>What is in front; null when it is HIMARI's own window (what was there is kept, §4.1).</summary>
     private ActivityObservation? ReadForeground()

@@ -5,13 +5,16 @@
       <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
       <StackPanel x:Name="History" HorizontalAlignment="Center" Visibility="Collapsed"/>
       <local:PixelBubble x:Name="BubblePanel" Grid.Row="1" Width="280" MaxHeight="320" HorizontalAlignment="Center" TailRight="False" Visibility="Collapsed">
-        <Grid><Grid.RowDefinitions><RowDefinition Height="*"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+        <Grid><Grid.RowDefinitions><RowDefinition Height="*"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
           <Grid x:Name="ReplyContent"><local:MarkdownView x:Name="Message" FontSize="14" Foreground="{StaticResource BubbleInk}"/>
             <ContentControl x:Name="ExpandedReply" Visibility="Collapsed"/>
             <local:ReplyProgressView x:Name="ReplyProgress" Visibility="Collapsed" TextElement.Foreground="{StaticResource BubbleMuted}"/>
           </Grid>
-          <TextBlock x:Name="ReplyStatus" Grid.Row="1" Style="{StaticResource BubbleStatusText}" Margin="0,8,0,0" Visibility="Collapsed"/>
-          <Border x:Name="ReplyToolbar" Grid.Row="2" Margin="-8,8,-8,-4" Padding="6,4" BorderBrush="{StaticResource BubbleSeparator}" BorderThickness="0,1,0,0">
+          <ScrollViewer x:Name="PresentedFilesScroll" Grid.Row="1" MaxHeight="140" Margin="0,6,0,0" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Visibility="Collapsed">
+            <StackPanel x:Name="PresentedFilesPanel"/>
+          </ScrollViewer>
+          <TextBlock x:Name="ReplyStatus" Grid.Row="2" Style="{StaticResource BubbleStatusText}" Margin="0,8,0,0" Visibility="Collapsed"/>
+          <Border x:Name="ReplyToolbar" Grid.Row="3" Margin="-8,8,-8,-4" Padding="6,4" BorderBrush="{StaticResource BubbleSeparator}" BorderThickness="0,1,0,0">
             <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
               <Button x:Name="CopyReplyButton" Style="{StaticResource BubbleIconButton}" ToolTip="답변 복사" AutomationProperties.Name="답변 복사" Click="CopyReplyClick"><local:BubbleGlyph x:Name="CopyReplyGlyph" Kind="Copy" Width="14" Height="14"/></Button>
               <Button x:Name="StopButton" Style="{StaticResource BubbleIconButton}" ToolTip="답변 멈추기" AutomationProperties.Name="답변 멈춤" Click="CancelClick" Visibility="Collapsed"><local:BubbleGlyph Kind="Stop" Width="14" Height="14"/></Button>

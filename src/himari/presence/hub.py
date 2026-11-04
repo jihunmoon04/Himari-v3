@@ -70,6 +70,8 @@ class _Subscription:
     def __init__(self, principal: PrincipalId, device_id: str | None) -> None:
         self.principal = principal
         self._device_id = device_id
+        self._connection_generation: str | None = secrets.token_urlsafe(24) if device_id is not None else None
+        self.file_download = False
         self._events: deque[StreamEvent] = deque()
         self._wake = asyncio.Event()
         self.ended = False
@@ -77,6 +79,10 @@ class _Subscription:
     @property
     def device_id(self) -> str | None:
         return self._device_id
+
+    @property
+    def connection_generation(self) -> str | None:
+        return self._connection_generation
 
     @property
     def finished(self) -> bool:
@@ -100,6 +106,7 @@ class _Subscription:
             self._events.clear()
         if last is not None:
             self._events.append(last)  # the one event past the limit: why it ends
+        self.file_download = False
         self.ended = True
         self._wake.set()
 
@@ -237,8 +244,27 @@ class PresenceHub:
 
     # --- Presence ------------------------------------------------------------------------
 
+    def _active_subscription(self, principal: PrincipalId, device_id: str) -> _Subscription | None:
+        return next((s for s in self._subscriptions.get(principal, ()) if s.device_id == device_id and not s.ended), None)
+
+    def valid_generation(self, principal: PrincipalId, device_id: str, generation: str) -> bool:
+        sub = self._active_subscription(principal, device_id)
+        return bool(generation) and sub is not None and sub.connection_generation == generation
+
+    def device_file_download(self, principal: PrincipalId, device_id: str) -> bool:
+        sub = self._active_subscription(principal, device_id)
+        return sub is not None and sub.file_download
+
     def signal(self, principal: PrincipalId, device_id: str, idle_seconds: float, time_zone: str | None,
-               signals: Signals | None = None) -> None:
+               signals: Signals | None = None, *, connection_generation: str | None = None,
+               file_download: bool | None = None) -> bool:
+        if connection_generation is None and file_download is not None:
+            return False
+        if connection_generation is not None:
+            sub = self._active_subscription(principal, device_id)
+            if not connection_generation or sub is None or sub.connection_generation != connection_generation:
+                return False
+            sub.file_download = bool(file_download)
         now = self._clock()
         snapshot = signals or Signals()
         device = self._device(principal, device_id)
@@ -280,6 +306,7 @@ class PresenceHub:
             # after the return (if any) was told: its away ends before this input
             self.on_input(principal, device_id, self._wall() - timedelta(seconds=now - device.input_at),
                           device.locked or asleep)  # written at once: the input before the rest
+        return True
 
     def _take(self, device: _Device, snapshot: Signals, now: float) -> None:
         """§2.1: the snapshot replaces what was kept; §4.4: an ended activity is kept as the one before."""
