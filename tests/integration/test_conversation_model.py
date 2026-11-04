@@ -154,7 +154,9 @@ class FakeOpenRouter:
     def handle(self, request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content)
         self.bodies.append(body)
-        last = body["messages"][-1]["content"]
+        # The trailing runtime state is system data, not the user's question.
+        last = next(m["content"] for m in reversed(body["messages"])
+                    if m["role"] == "user" and not str(m["content"]).startswith("<runtime_state>"))
         if "tools" not in body:  # a summarizing call
             message: dict[str, Any] = {"role": "assistant", "content": "SUMMARY"}
         else:

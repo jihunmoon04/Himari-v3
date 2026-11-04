@@ -10,13 +10,14 @@ CANCELLED result. A new message redirects: it closes never-started calls.
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from typing import Any
 
 from testkit import FAKE, SCOPE, RecordingTool, calls, final, runtime, text_result, user
 
 from himari.common import WorkspaceId
 from himari.control.api import DriveState, StopSignal
-from himari.data.api import RunStatus, ToolExecutionStatus
+from himari.data.api import InterfaceKind, InterfaceSnapshot, RunStatus, ToolExecutionStatus
 from himari.prompt.api import ContextBudget, ToolGroupTurn, UserTurn
 from himari.prompt.compaction import COMPACTION_INSTRUCTIONS
 from himari.provider.api import NativeInvocationOutcome, NativePreparedRequest, NativeReceived, OutputSink, RawCapture
@@ -235,7 +236,8 @@ def test_cancel_when_idle_closes_a_paused_group_or_a_question() -> None:
         answered = await asking.driver.drive(SCOPE, user("something else"))
         assert answered.state is DriveState.COMPLETED
         last = (await asking.data.read_events(SCOPE))[-2]
-        assert last.payload == user("something else")  # a new turn (T1), not an answer to the question
+        # A new turn (T1), not an answer to the question.
+        assert last.payload == replace(user("something else"), interface=InterfaceSnapshot(InterfaceKind.UNKNOWN))
 
     asyncio.run(scenario())
 

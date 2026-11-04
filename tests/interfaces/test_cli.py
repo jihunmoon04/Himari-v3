@@ -424,11 +424,11 @@ def test_show_reports_the_context_size(harness: Harness) -> None:
 def test_a_compacted_conversation_shows_where_the_summary_takes_over(tmp_path: Path,
                                                                       monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(cli, "POLL_SECONDS", 0.01)
-    # The budget is sized for a prompt without the memory Tools and note (V3-P71).
-    harness = Harness(tmp_path, context_tokens=3300, turn={"memory": False, "conversation_search": False})  # sized without the memory and search Tools
+    # Measured usage triggers compaction independently of the fixed system text length.
+    harness = Harness(tmp_path, context_tokens=10000, turn={"memory": False, "conversation_search": False})
     with harness.test_client:
         cid = harness.run("new")[1].strip()
-        harness.queue(*[final("SUMMARY of the start")] * 12)  # every answer and every summary alike
+        harness.queue(*[Measured(final("SUMMARY of the start"), 9000)] * 12)  # every answer and every summary alike
         for text in ("가" * 550, "가" * 550, "가" * 550, "next"):
             assert harness.run("send", cid, text)[0] == 0
         code, out, err = harness.run("show", cid)
@@ -454,10 +454,10 @@ def test_a_compacted_conversation_shows_where_the_summary_takes_over(tmp_path: P
 def test_a_compacted_conversation_on_an_ascii_terminal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # PR #16 review B1: the divider is the CLI's own mark too; it never raises.
     monkeypatch.setattr(cli, "POLL_SECONDS", 0.01)
-    harness = Harness(tmp_path, context_tokens=3300, turn={"memory": False, "conversation_search": False})  # sized without the memory and search Tools
+    harness = Harness(tmp_path, context_tokens=10000, turn={"memory": False, "conversation_search": False})
     with harness.test_client:
         cid = harness.run("new")[1].strip()
-        harness.queue(*[final("SUMMARY 요약 ─ done")] * 12)
+        harness.queue(*[Measured(final("SUMMARY 요약 ─ done"), 9000)] * 12)
         for text in ("가" * 550, "가" * 550, "가" * 550, "next"):
             assert harness.run("send", cid, text)[0] == 0
         for verbose in ([], ["--verbose"]):

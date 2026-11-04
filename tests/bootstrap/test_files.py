@@ -21,7 +21,7 @@ from himari.bootstrap.application import (
 )
 from himari.common import AttachmentRef, PrincipalId, TextBlock, TrustedScope
 from himari.control.api import ControlError, ControlErrorCode, JobStatus
-from himari.data.api import MAX_STAGED_UPLOADS, DataError, DataErrorCode, UserMessage
+from himari.data.api import MAX_STAGED_UPLOADS, DataError, DataErrorCode, InterfaceKind, InterfaceSnapshot, UserMessage
 from himari.environment.inside import WorkspaceBusy
 from himari.prompt.api import ATTACHMENT_NOTE, PROGRESS_NOTE, TOOL_IMAGES_NOTE
 from himari.provider.scripted import ScriptedAdapter
@@ -64,7 +64,8 @@ def test_a_sent_attachment_is_placed_and_the_model_is_told_where(tmp_path: Path)
             info = first.attachments[f"{record.file_id}#1"]
             assert info.path == f"/workspace/conversations/{scope.conversation_id}/uploads/notes.txt"
             events = await app.data.read_events(scope)
-            assert events[0].payload == UserMessage((TextBlock("please read"), AttachmentRef(record.file_id, 1)))
+            assert events[0].payload == UserMessage((TextBlock("please read"), AttachmentRef(record.file_id, 1)),
+                                                   interface=InterfaceSnapshot(InterfaceKind.UNKNOWN))
             result = (await app.data.read_tool_executions(scope, events[1].origin_run_id))[0]  # type: ignore[arg-type]
             assert "hello there" in result.model_result.blocks[0].text  # type: ignore[union-attr]
             # the model's later edit does not change the attachment
@@ -137,7 +138,8 @@ def test_a_retry_after_busy_places_the_file_once(tmp_path: Path) -> None:
             await app.send(scope, "", [record.file_id])
             await app.runner.wait(scope)
             assert sorted(p.name for p in (folder / "uploads").iterdir()) == ["r.pdf"]
-            assert (await app.data.read_events(scope))[0].payload == UserMessage((AttachmentRef(record.file_id, 1),))
+            assert (await app.data.read_events(scope))[0].payload == UserMessage(
+                (AttachmentRef(record.file_id, 1),), interface=InterfaceSnapshot(InterfaceKind.UNKNOWN))
         finally:
             await app.close()
 
