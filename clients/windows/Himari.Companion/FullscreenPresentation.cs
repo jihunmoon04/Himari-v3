@@ -78,8 +78,32 @@ public partial class MainWindow
             Dispatcher.BeginInvoke(new Action(UpdateSceneBounds));
         shellFullscreen.Mark(new WindowInteropHelper(this).Handle, preserve && IsVisible);
         if (dialogueHost is not null) shellFullscreen.Mark(new WindowInteropHelper(dialogueHost).Handle, preserve && dialogueHost.IsVisible);
+        if (preserve) KeepOverlayAboveFullscreenWorkWindow();
         // Entering fullscreen (a video's button) changes no foreground window, so keep polling.
         if (IsVisible) fullscreenTimer.Start(); else fullscreenTimer.Stop();
+    }
+
+    private void KeepOverlayAboveFullscreenWorkWindow()
+    {
+        var work = lastWorkWindow;
+        if (!IsVisible || work == IntPtr.Zero || CurrentForegroundWindow != work || CoverScreen() is null) return;
+        var character = new WindowInteropHelper(this).Handle;
+        var host = dialogueHost is { IsVisible: true } ? new WindowInteropHelper(dialogueHost).Handle : IntPtr.Zero;
+        bool workSeen = false, characterBehind = false, hostBehind = false;
+        // Topmost games can move ahead of other topmost windows when activated.
+        // Inspect first: an already visible overlay must not keep changing the Z order.
+        EnumWindows((window, _) =>
+        {
+            if (window == work) workSeen = true;
+            if (window == character) characterBehind = workSeen;
+            if (window == host) hostBehind = workSeen;
+            return true;
+        }, IntPtr.Zero);
+        if (CurrentForegroundWindow != work) return;
+        const uint keepGeometryAndFocus = 0x0001 | 0x0002 | 0x0010 | 0x0200; // NOSIZE | NOMOVE | NOACTIVATE | NOOWNERZORDER
+        var topmost = new IntPtr(-1);
+        if (characterBehind) SetWindowPos(character, topmost, 0, 0, 0, 0, keepGeometryAndFocus);
+        if (hostBehind) SetWindowPos(host, topmost, 0, 0, 0, 0, keepGeometryAndFocus);
     }
 
     // Chrome shrinks a fullscreen window by one pixel while it is in the background, so allow two.
