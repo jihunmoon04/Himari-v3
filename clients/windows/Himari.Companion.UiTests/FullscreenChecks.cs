@@ -12,6 +12,16 @@ internal static class FullscreenChecks
     private const BindingFlags Private = BindingFlags.NonPublic | BindingFlags.Instance;
     [DllImport("user32.dll")] private static extern IntPtr GetForegroundWindow();
     [DllImport("user32.dll")] private static extern IntPtr WindowFromPoint(System.Drawing.Point point);
+    [DllImport("user32.dll")] private static extern bool SetWindowPos(IntPtr window, IntPtr after, int x, int y, int width, int height, uint flags);
+    private delegate bool EnumWindowsProc(IntPtr window, IntPtr data);
+    [DllImport("user32.dll")] private static extern bool EnumWindows(EnumWindowsProc callback, IntPtr data);
+
+    private static bool Above(IntPtr first, IntPtr second)
+    {
+        var order = new List<IntPtr>();
+        EnumWindows((window, _) => { order.Add(window); return true; }, IntPtr.Zero);
+        return order.Contains(first) && order.Contains(second) && order.IndexOf(first) < order.IndexOf(second);
+    }
     internal static void Fixture()
     {
         var app = new System.Windows.Application();
@@ -55,6 +65,40 @@ internal static class FullscreenChecks
             var restore = typeof(MainWindow).GetMethod("RestoreWindow", BindingFlags.Static | BindingFlags.NonPublic)!;
             shell.Mark(hwnd, true); check(marks.GetValueOrDefault(hwnd), "native Shell accepts fullscreen marking for companion window");
             shell.Mark(hwnd, false); check(!marks.GetValueOrDefault(hwnd), "native Shell marking can be cleared");
+            // Reproduce the overlay being covered using native Z order. Lower our own
+            // windows because Windows may refuse to raise a background fullscreen fixture.
+            // Only foreground observation is substituted; ordering and activation stay native.
+            var foregroundProbe = typeof(MainWindow).GetField("foregroundWindowProbe", Private)!;
+            IntPtr observed = fullscreen;
+            foregroundProbe.SetValue(w, new Func<IntPtr>(() => observed));
+            history.Remember(fullscreen, _ => true);
+            Call("OpenComposer"); Call("UpdateSceneBounds");
+            var overlay = (Window)typeof(MainWindow).GetField("dialogueHost", Private)!.GetValue(w)!;
+            var overlayHandle = new WindowInteropHelper(overlay).Handle;
+            void CoverOverlay()
+            {
+                // Prevent the periodic repair until the test has observed the regression.
+                observed = hwnd;
+                SetWindowPos(hwnd, new IntPtr(1), 0, 0, 0, 0, 0x0013);
+                SetWindowPos(overlayHandle, new IntPtr(1), 0, 0, 0, 0, 0x0013);
+                check(Above(fullscreen, hwnd) && Above(fullscreen, overlayHandle), "native fixture covers both companion windows before ordering repair");
+            }
+            CoverOverlay();
+            Call("UpdateFullscreenPresentation");
+            check(Above(fullscreen, hwnd), "chat foreground does not trigger background game ordering repair");
+            var foregroundBeforeRepair = GetForegroundWindow();
+            observed = fullscreen;
+            Call("UpdateFullscreenPresentation");
+            check(Above(hwnd, fullscreen) && Above(overlayHandle, fullscreen), "fullscreen game ordering repair raises both character and dialogue host");
+            check(GetForegroundWindow() == foregroundBeforeRepair, "ordering repair does not activate the companion or change input focus");
+            CoverOverlay(); observed = fullscreen;
+            Until(() => Above(hwnd, fullscreen) && Above(overlayHandle, fullscreen));
+            check(GetForegroundWindow() == foregroundBeforeRepair, "periodic repair catches a delayed game raise without changing focus");
+            w.Hide(); CoverOverlay(); observed = fullscreen; Call("UpdateFullscreenPresentation");
+            check(!w.IsVisible && !overlay.IsVisible, "ordering repair never shows a hidden companion");
+            foregroundProbe.SetValue(w, null);
+            w.Show();
+            Console.WriteLine("Native overlay ordering and focus-preservation checks passed.");
             if (!(bool)restore.Invoke(null, new object[] { fullscreen })!)
             {
                 Console.WriteLine("Native Shell fullscreen mark/reset passed. Foreground round-trip skipped: Windows denied foreground activation from this background test process.");

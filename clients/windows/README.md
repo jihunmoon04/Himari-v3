@@ -64,6 +64,8 @@ Web의 Devices에서 기기를 만들고 설정의 연결 탭에 HTTPS 주소와
 
 Alt+Q와 일반 Alt+Tab 진입을 모두 관찰한다. 직전 작업 창이 살아 있는 전체화면 창이면 히마리가 활성화된 동안 Shell의 `MarkFullscreenWindow`로 전체화면 작업 표시줄 순서를 유지한다. 다른 앱·설정으로 전환하거나 영상의 전체화면이 끝나거나 창이 닫히면 해제한다. Explorer 창을 숨기거나 시스템 작업 표시줄 설정을 바꾸지 않는다. 크롬 유튜브의 실제 재생 전환은 별도 실기 확인이 필요하다.
 
+같은 모니터의 전체화면 작업 창으로 돌아갔을 때 캐릭터·대화 창이 그 창보다 뒤에 있으면 `SetWindowPos(HWND_TOPMOST, SWP_NOACTIVATE)`로 표시 순서만 복구한다. 게임의 입력 포커스를 유지하며, 기존 300ms 전체화면 검사에서도 뒤늦은 순서 변경을 확인한다. 이미 앞에 있거나 히마리가 숨겨져 있거나 다른 창이 활성화돼 있으면 순서를 바꾸지 않는다. 실제 게임의 화면 모드·렌더링 방식에 따른 표시 여부는 실기 확인이 필요하다.
+
 ## 서버 계약과 복구
 
 화면 전송과 이동은 서버 PR #126의 계약을 기준으로 구현했다. 글 전용 후속 메시지는 대화의 최근 화면이 이 앱에서 올린 화면인지와 같은 작업이 실행 중인지 확인할 수 있을 때만 이동한다. 다중 모니터·DPI 환경과 캡처 제외 동작은 실제 환경에서 검증이 필요하다.
@@ -102,8 +104,9 @@ dotnet run --project clients/windows/Himari.Companion.ContractTests/Himari.Compa
 dotnet run --project clients/windows/Himari.Companion.UiTests/Himari.Companion.UiTests.csproj
 dotnet run --project clients/windows/Himari.Companion.UiTests/Himari.Companion.UiTests.csproj -- --screenshots build/bubble-order-preview
 dotnet run --project clients/windows/Himari.Companion.UiTests/Himari.Companion.UiTests.csproj -- --native-presentation
+dotnet run --project clients/windows/Himari.Companion.UiTests/Himari.Companion.UiTests.csproj -- --fullscreen-only
 ```
 
 계약 테스트는 가짜 HTTP로 전송·이동·설정 마이그레이션·단축키 등록 복구·이전 창 선택 정책을 검증한다. UI 테스트는 실제 라우팅 이벤트와 앱 컨트롤로 Enter·합성 IME 조합, 기본 숨김·양방향 배치·긴 답변 중지 버튼, 말풍선 색·표시 순서·오래된 말풍선부터 숨김·늦은 접수 응답·재연결 시 새 초안의 순서 보존을 검증한다. 복귀 대상 테스트(`--hotkey-return-only`)는 별도 프로세스의 실제 `NonRudeHWND` 창으로 일반 앱 분류·직전 창 기록·지연 이벤트·다음 앱으로의 갱신·데스크톱 초기화와 초안 보존을 검증한다. 전경 읽기와 복구 요청은 대체해 사용자의 앱을 전환하지 않는다. 포커스 전환 테스트(`--focus-loss-only`)는 초안·선택 보존, 창 사이 전환과 포커스 복귀 경합, 중복 알림, 말풍선 순서, 전송 불명 UI 보호, POST 완료 후 재검사, 질문 조회 중 포커스 이탈/복귀, 외부 앱에서 반복 질문 조회와 복귀 후 초안 재개를 확인한다. 오프라인으로 띄운 분리 창에서는 화면 네 모서리의 캐릭터 좌표 보존, 위·아래 배치와 역방향 만료 순서, 첫 글자 보존, 전환 후 포커스 해제, 선택 영역·IME 조합 유지를 검증한다. WebView2 Runtime이 설치돼 있으면 실제 확장 보기에서 표·KaTeX·긴 코드와 외부 이미지/스크립트 차단도 검증한다(테스트용 임시 프로필 사용).
 
-`--screenshots`는 연결·자격 증명·설정 저장·화면 캡처 없이 실제 WPF 컨트롤을 PNG로 렌더링한다. `--native-presentation`은 Shell 전체화면 표시·해제 호출과 별도 프로세스 전체화면 창을 검사한다. Windows가 백그라운드 테스트의 전경 창 전환을 거부하면 전환 검사는 건너뛰었다고 출력한다. 크롬 유튜브 실제 재생과 Alt+Tab/Alt+Q 왕복, OS 단축키 충돌, 실제 한국어 IME 키보드 조작과 다중 모니터 DPI 전환은 실기 확인이 필요하다.
+`--screenshots`는 연결·자격 증명·설정 저장·화면 캡처 없이 실제 WPF 컨트롤을 PNG로 렌더링한다. `--native-presentation`은 Shell 전체화면 표시·해제 호출과 별도 프로세스 전체화면 창을 검사하며, `--fullscreen-only`로 이 검사만 실행할 수 있다. 표시 순서 복구 검사는 히마리 창을 실제 네이티브 순서에서 내려 가려진 상태를 만든 뒤 즉시·주기적 복구, 입력 포커스 유지, 대화 중·숨김 상태의 복구 제외를 확인한다. 이 검사에서는 전경 관찰만 대체한다. Windows가 백그라운드 테스트의 전경 창 전환을 거부하면 실제 전환 검사는 건너뛰었다고 출력한다. 크롬 유튜브 실제 재생과 Alt+Tab/Alt+Q 왕복, OS 단축키 충돌, 실제 한국어 IME 키보드 조작과 다중 모니터 DPI 전환은 실기 확인이 필요하다.

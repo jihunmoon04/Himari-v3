@@ -38,6 +38,11 @@ internal static class Program
         if (args.Contains("--fullscreen-fixture")) { FullscreenChecks.Fixture(); return; }
         if (args.Contains("--work-window-fixture")) { HotkeyReturnChecks.Fixture(); return; }
         var app = new App(); app.InitializeComponent(); app.ShutdownMode = ShutdownMode.OnExplicitShutdown;
+        if (args.Contains("--fullscreen-only"))
+        {
+            FullscreenChecks.Run((ok, message) => { if (!ok) throw new Exception(message); });
+            Console.WriteLine("Native fullscreen UI checks passed."); app.Shutdown(); return;
+        }
         if (args.Contains("--hotkey-return-only"))
         {
             HotkeyReturnChecks.Run((ok, message) => { if (!ok) throw new Exception(message); });
