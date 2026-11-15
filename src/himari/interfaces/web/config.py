@@ -59,7 +59,9 @@ Machine Workspace (V3-P74 §4.4): ``HIMARI_MACHINE_SOCKET`` names the
 runner's socket (``/run/himari-runner/runner.sock``); then new Conversations
 of the principals in ``HIMARI_MACHINE_PRINCIPALS`` (comma-separated, default
 ``operator``) work on this server as the user. Unset: every Conversation
-uses the Inside Workspace, as before.
+uses the Inside Workspace, as before. ``HIMARI_MACHINE_ATTACHED_WRITE=0``
+(V3-P94) lets HIMARI's own Tools write a Conversation's own folder only:
+attached Workspaces are read, and changed by the hub's coding agents.
 """
 
 from __future__ import annotations
@@ -105,6 +107,7 @@ COMPANION_MODELS_ONLY_VAR = "HIMARI_COMPANION_MODELS_ONLY"  # 1: only companion-
 TIME_ZONE_VAR = "HIMARI_TIME_ZONE"  # V3-P83: the zone the model is told the time in
 MACHINE_SOCKET_VAR = "HIMARI_MACHINE_SOCKET"  # V3-P74: the runner's socket; unset: no machine Environment
 MACHINE_PRINCIPALS_VAR = "HIMARI_MACHINE_PRINCIPALS"  # V3-P74: whose new Conversations use it
+MACHINE_ATTACHED_WRITE_VAR = "HIMARI_MACHINE_ATTACHED_WRITE"  # V3-P94: 0 — attached Workspaces are read-only
 # V3-P87 §11: speaking first, and its throttling
 PROACTIVE_VAR = "HIMARI_PROACTIVE"
 PROACTIVE_QUIET_VAR = "HIMARI_PROACTIVE_QUIET"
@@ -176,6 +179,7 @@ class WebConfig:
     time_zone: str = DEFAULT_TIME_ZONE  # V3-P83 §6.4
     machine_socket: str | None = None  # V3-P74
     machine_principals: tuple[str, ...] = ("operator",)
+    machine_attached_write: bool = True  # V3-P94
     proactive: ProactiveSettings = ProactiveSettings()  # V3-P87 §11
 
     @property
@@ -292,6 +296,8 @@ class WebConfig:
             time_zone=_time_zone(source.get(TIME_ZONE_VAR)),
             machine_socket=machine_socket,
             machine_principals=machine_principals,
+            machine_attached_write=_flag(source.get(MACHINE_ATTACHED_WRITE_VAR), MACHINE_ATTACHED_WRITE_VAR,
+                                         default=True),
             proactive=_proactive(source),
         )
 

@@ -358,7 +358,8 @@ def test_a_cancelled_command_keeps_the_folder_until_it_is_reaped(env: MachineEnv
 # --- attached Workspaces (V3-P74 §10) ------------------------------------------------------------
 
 
-def attached_setup(kit: RunnerKit) -> tuple[MachineEnvironment, InMemoryData, TrustedScope, str]:
+def attached_setup(kit: RunnerKit, *, attached_writable: bool = True,
+                   ) -> tuple[MachineEnvironment, InMemoryData, TrustedScope, str]:
     """A Conversation with ~/projects/a attached (the working directory)."""
     data = InMemoryData(InMemoryStore())
     scope = TrustedScope(PrincipalId("operator"), asyncio.run(data.create_conversation(
@@ -366,7 +367,7 @@ def attached_setup(kit: RunnerKit) -> tuple[MachineEnvironment, InMemoryData, Tr
     project = str(kit.home / "projects/a")
     registered = asyncio.run(data.register_workspace(scope.principal_id, MACHINE, project, "a", "the C project"))
     asyncio.run(data.attach_workspace(scope, registered.workspace_id))
-    return MachineEnvironment(kit.socket, registry=data), data, scope, project
+    return MachineEnvironment(kit.socket, registry=data, attached_writable=attached_writable), data, scope, project
 
 
 def call_in(env: MachineEnvironment, data: InMemoryData, scope: TrustedScope, tool: str, **args: Any) -> ToolOutcome:
@@ -399,6 +400,42 @@ def test_attached_folders_are_written_and_the_working_one_is_the_cwd(kit: Runner
     assert (own / "here.txt").read_text() == "h"
     asyncio.run(data.detach_workspace(scope, found.attached[1].binding.binding_id))
     assert call_in(env, data, scope, "write_file", path=f"{project}/late.c", content="x").status is ToolStatus.DENIED
+
+
+def test_attached_folders_are_only_read_when_writing_them_is_off(kit: RunnerKit) -> None:
+    """V3-P94: the Tools write the Conversation's own folder only; the attached one is read, and is still
+    the working directory."""
+    env, data, scope, project = attached_setup(kit, attached_writable=False)
+    own = kit.himari_home / "conversations" / scope.conversation_id
+    (Path(project) / "main.c").write_text("int main;")
+    assert "int main;" in text(call_in(env, data, scope, "read_file", path="main.c"))
+    for tool, args in (("write_file", {"path": "new.c", "content": "x"}),
+                       ("edit_file", {"path": "main.c", "old_text": "int", "new_text": "long"}),
+                       ("delete_file", {"path": "main.c"})):
+        refused = call_in(env, data, scope, tool, **args)
+        assert refused.status is ToolStatus.DENIED and "read-only" in text(refused), tool
+        assert "attach the folder" not in text(refused), tool  # it is attached: that advice would mislead
+    assert (Path(project) / "main.c").read_text() == "int main;" and not (Path(project) / "new.c").exists()
+    assert call_in(env, data, scope, "write_file", path=f"{own}/notes.md", content="n").status is ToolStatus.SUCCEEDED
+    assert (own / "notes.md").read_text() == "n"
+    assert call_in(env, data, scope, "run_command", argv=["make"]).status is ToolStatus.SUCCEEDED
+    _, layout, _ = kit.sandbox.calls[-1]
+    assert layout.cwd == project and [p for p, _ in layout.writable] == [str(own)]
+
+
+def test_the_state_and_the_tools_say_attached_folders_are_only_read(kit: RunnerKit) -> None:
+    env, data, scope, project = attached_setup(kit, attached_writable=False)
+    bindings = asyncio.run(data.read_current_state_basis(scope)).bindings
+    view = asyncio.run(env.observe(scope, bindings))[0]
+    own = str(kit.himari_home / "conversations" / scope.conversation_id)
+    assert view.working_directory == project and view.writable == (own,)
+    notices = {w.path: w.notice for w in view.workspaces}
+    assert notices[own] is None and "Read-only" in (notices[project] or "")
+    described = {t.definition.tool_id: t.definition.description for t in env.tools()}
+    for tool in ("write_file", "edit_file", "delete_file", "run_command"):
+        assert "own folder" in described[ToolId(f"machine/{tool}")], tool
+    writable = {t.definition.tool_id: t.definition.description for t in attached_setup(kit)[0].tools()}
+    assert all("own folder" not in d for d in writable.values())
 
 
 def test_the_state_names_the_folders_and_what_may_be_read(kit: RunnerKit) -> None:

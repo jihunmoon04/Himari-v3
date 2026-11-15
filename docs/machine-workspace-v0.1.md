@@ -929,3 +929,39 @@ pids_max = 1024
   - 수정 전 코드에서는 이 시험이 실패한다.
 - 전체 pytest 2503 passed, 117 skipped. mypy --strict 통과. 호스트 게이트 55 passed, 4 skipped.
 
+## 24. 붙인 Workspace를 읽기만 하기 (V3-P94, 2026-11-16)
+
+### 24.1 왜
+
+- 프로젝트 코드를 고치는 일은 hub(HIMARI v4)가 돌리는 코딩 에이전트(Claude Code, Codex)에게 맡긴다. HIMARI는 무엇을 누구에게 맡길지 정하고 결과를 읽어 전한다.
+- hub는 한 폴더에서 한 번에 한 에이전트만 돌린다. HIMARI의 `machine` Tool은 같은 `coder` 계정으로 같은 폴더를 그 직렬화 밖에서 고칠 수 있었다.
+- HIMARI 자신의 산출물(사용자에게 건넬 문서·이미지, 업로드 정리, 계산용 명령)은 대화 폴더에 쓰는 일이라 남긴다.
+
+### 24.2 무엇이 바뀌나
+
+설정 `HIMARI_MACHINE_ATTACHED_WRITE=0`(web.env)일 때만 바뀐다. 없거나 `1`이면 §3.2 그대로다.
+
+| | 기본 (`1`) | `0` |
+| --- | --- | --- |
+| runner에 주는 `write_roots` | 대화 폴더 + 붙인 Workspace | **대화 폴더만** |
+| `write_file`·`edit_file`·`delete_file` | 붙인 곳에 씀 | 붙인 곳은 DENIED(`outside_workspaces`) |
+| `run_command` | 붙인 곳에 쓸 수 있음 | 붙인 곳은 읽기만(Sandbox의 쓰기 묶음이 대화 폴더뿐) |
+| `git_push` | 붙인 저장소를 push | 대화 폴더 안의 저장소만 |
+| 작업 위치(§10.4) | 붙인 Workspace | 같음(읽는 자리로 남음) |
+| 읽기(§3.1) | 같음 | 같음 |
+
+- 경계는 runner가 지킨다: HIMARI가 `write_roots`에 대화 폴더만 넣어 보내고, runner는 그 밖의 쓰기를 거부한다(§5.3). runner와 Sandbox의 코드는 바뀌지 않는다.
+- 모델에게 알리는 것: Current State의 붙인 Workspace마다 `notice`에 "Read-only for you …"를 넣고, 쓰기 Tool의 설명을 "this conversation's own folder"로 바꾼다. 붙인 곳에 쓰려던 호출의 거부 글은 "attach the folder" 대신 읽기 전용임과 코딩 에이전트에게 맡기라는 말을 적는다.
+- lock(§9.1)은 그대로 대화의 모든 폴더를 잡는다.
+- 바뀌지 않는 것: 사용자가 Web에서 직접 하는 쓰기(탐색기, PDF 필기, 업로드), 변경 검토 기록(V3-P76), `inside` Environment.
+
+### 24.3 남긴 것
+
+- `git_push`가 붙인 저장소를 거부할 때의 글은 runner의 것("ask the user to attach the folder")이 아니라 위의 읽기 전용 글로 나간다. Current State의 `git_push` 줄("a repository in the workspaces")은 그대로다.
+- 설정은 서버 전체에 하나다. Workspace마다 정하는 것은 만들지 않았다.
+- `machine` 쓰기 구현과 `git_push`의 삭제는 운영에서 hub만으로 충분함을 본 뒤에 따로 정한다.
+
+### 24.4 확인
+
+- pytest(WSL Ubuntu, Python 3.12.3): `tests/environment/test_machine.py`에 두 시험을 더했다. 붙인 폴더의 쓰기·고치기·지우기가 DENIED이고 파일이 그대로인 것, 대화 폴더에는 써지는 것, 명령의 쓰기 묶음이 대화 폴더뿐이고 작업 위치는 붙인 폴더인 것, Current State와 Tool 설명이 읽기 전용을 알리는 것, 기본값에서는 설명이 바뀌지 않는 것.
+- 실제 runner·Sandbox(bubblewrap + Landlock)에서 붙인 폴더에 쓰는 명령이 막히는 것은 이 변경에서 다시 돌리지 않았다. 운영 서버에 설정을 넣을 때 확인한다.
