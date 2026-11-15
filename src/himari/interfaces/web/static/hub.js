@@ -7,12 +7,14 @@
  * Hostile content: every text here was written by an agent. It is set with textContent on elements made by
  * createElement; nothing is parsed as HTML.
  *
- * The list is read every few seconds while the page shows. A server without a hub says so once and is not
- * asked again until the next sign-in.
+ * The list is read every few seconds while the page shows, and more slowly while it is hidden: a request
+ * that arrives then is counted in the tab's title and, where the user allowed it, told by a notification.
+ * A server without a hub says so once and is not asked again until the next sign-in.
  */
 
 const QUIET_MS = 4000; // between reads while nothing waits
 const BUSY_MS = 2000; // … while something does (an answered request leaves, the next one arrives)
+const HIDDEN_MS = 10000; // … while the page is hidden (the browser may slow this further)
 
 function el(tag, className, text) {
   const node = document.createElement(tag);
@@ -22,9 +24,13 @@ function el(tag, className, text) {
 }
 
 export class HubTray {
-  /* ``api(method, path, body)``: the page's request function (it shows the sign-in on a 401). */
-  constructor(api) {
+  /* ``api(method, path, body)``: the page's request function (it shows the sign-in on a 401).
+   * ``changed()``: called when ``count`` changes (the tab's title shows it). */
+  constructor(api, changed = () => {}) {
     this.api = api;
+    this.changed = changed;
+    this.count = 0; // requests waiting now
+    this.known = new Set(); // request ids seen: only a new one is told by a notification
     this.timer = null;
     this.ticket = 0; // a read answered after a stop, or after a newer read, is dropped
     this.running = false;
@@ -54,6 +60,7 @@ export class HubTray {
     this.sending.clear();
     this.drafts.clear();
     this.problem.clear();
+    this.known.clear();
     this.draw([], true);
   }
 
@@ -63,7 +70,6 @@ export class HubTray {
   }
 
   async read() {
-    if (document.hidden) return; // read again when the page shows
     const ticket = (this.ticket += 1);
     let answer;
     try {
@@ -80,22 +86,55 @@ export class HubTray {
     }
     const pending = Array.isArray(answer.pending) ? answer.pending : [];
     const waiting = new Set(pending.map((item) => item.id));
+    for (const item of pending) if (!this.known.has(item.id) && document.hidden) this.notify(item);
+    this.known = waiting;
     for (const id of [...this.drafts.keys()]) if (!waiting.has(id)) this.drafts.delete(id);
     for (const id of [...this.problem.keys()]) if (!waiting.has(id)) this.problem.delete(id);
     this.draw(pending, answer.reachable);
-    this.schedule(pending.length ? BUSY_MS : QUIET_MS);
+    this.schedule(document.hidden ? HIDDEN_MS : pending.length ? BUSY_MS : QUIET_MS);
+  }
+
+  /* May notifications be asked for, are they allowed, or neither (refused, or not in this browser)? */
+  permission() {
+    return typeof Notification === "undefined" ? "unsupported" : Notification.permission;
+  }
+
+  notify(item) {
+    if (this.permission() !== "granted") return;
+    const task = item.task || {};
+    const where = [task.project, task.agent].filter(Boolean).join(" · ");
+    try {
+      const note = new Notification("HIMARI: an agent is waiting for you",
+        { body: [where, item.asks].filter(Boolean).join(" — "), tag: `himari-hub-${item.id}` });
+      note.onclick = () => { window.focus(); note.close(); };
+    } catch (error) { /* a browser that only lets a service worker notify: the title still counts */ }
   }
 
   draw(pending, reachable) {
-    const shown = JSON.stringify([pending, reachable, [...this.sending], [...this.problem]]);
+    const shown = JSON.stringify([pending, reachable, [...this.sending], [...this.problem], this.permission()]);
     if (shown === this.shown) return;
     this.shown = shown;
+    if (this.count !== pending.length) {
+      this.count = pending.length;
+      this.changed();
+    }
     this.root.replaceChildren();
     this.root.hidden = pending.length === 0;
     if (!pending.length) return;
     const head = el("div", "hub-tray-head");
     head.append(el("span", "hub-tray-dot"), el("span", "hub-tray-title",
       pending.length === 1 ? "An agent is waiting for you" : `${pending.length} agent requests are waiting`));
+    if (this.permission() === "default") { // asked only by the user's own click
+      const ask = el("button", "hub-button hub-button-quiet hub-tray-notify", "Notify me");
+      ask.type = "button";
+      ask.title = "Show a notification when an agent starts waiting while this tab is in the background";
+      ask.addEventListener("click", async () => {
+        try { await Notification.requestPermission(); } catch (error) { /* refused: the button leaves */ }
+        this.shown = "";
+        this.schedule(0);
+      });
+      head.append(ask);
+    }
     this.root.append(head);
     for (const item of pending) this.root.append(this.card(item));
   }

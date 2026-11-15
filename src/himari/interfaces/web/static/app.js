@@ -282,7 +282,7 @@ const app = {
 };
 
 const views = new AppViews(api, el, () => app.conversationId);
-const hubTray = new HubTray(api); // V3-P95: what the hub's coding agents wait on the user for
+const hubTray = new HubTray(api, () => followTitle()); // V3-P95: what the hub's coding agents wait on the user for
 
 /* The server's files (V3-P75 §3): one pane on the Files surface, one beside a conversation.
  * On the surface a folder opens its conversation (§6); beside one, it is attached to it. */
@@ -846,7 +846,8 @@ function addressPopped() {
 function followTitle() {
   const shown = $("topbar-title").textContent.trim();
   const title = !shown || shown === "HIMARI" ? "HIMARI" : `${shown} · HIMARI`;
-  const waiting = app.activity.waiting.size; // V3-P80 §3.4: conversations waiting for an answer, this one too
+  // V3-P80 §3.4: conversations waiting for an answer, this one too; V3-P95: and the hub's agents
+  const waiting = app.activity.waiting.size + hubTray.count;
   document.title = waiting ? `(${waiting}) ${title}` : title;
 }
 
