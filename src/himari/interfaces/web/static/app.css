@@ -4365,6 +4365,12 @@ button.files-crumb:hover { background: var(--surface-hover); color: var(--text);
   font-weight: 600;
 }
 
+.hub-tray-notify {
+  margin-left: auto;
+  padding: 2px 8px;
+  font-weight: 400;
+}
+
 .hub-tray-dot {
   width: 8px;
   height: 8px;
