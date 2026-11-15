@@ -63,6 +63,13 @@ _DENIED = {runner.OUTSIDE_WORKSPACES, runner.ACCESS, runner.UNAVAILABLE, runner.
 _PATHS = ("Paths are absolute, relative to the working directory, or start with ~ (the user's home). ")
 _WRITE_SCOPE = ("You can write only inside this conversation's workspaces (listed in the runtime state); "
                 "writing elsewhere is refused. ")
+# V3-P94: with ``attached_writable=False`` the attached folders are only read.
+_OWN_SCOPE = ("You can write only inside this conversation's own folder (the first workspace in the runtime "
+              "state); attached workspaces are read-only for you, and writing elsewhere is refused. ")
+_COMMAND_SCOPE = "write only inside this conversation's workspaces and /tmp"
+_OWN_COMMAND_SCOPE = "write only inside this conversation's own folder and /tmp (attached workspaces are read-only)"
+_READ_ONLY = ("outside this conversation's own folder: attached workspaces are read-only for you, nothing was "
+              "changed; to change files there, hand the work to a coding agent")
 _UNREACHABLE = "the machine runner is not reachable; nothing was done"
 
 
@@ -95,9 +102,12 @@ class _MachineTool:
 
     def __init__(self, env: MachineEnvironment) -> None:
         self._env = env
+        description = self.description
+        if not env.attached_writable:
+            description = description.replace(_WRITE_SCOPE, _OWN_SCOPE).replace(_COMMAND_SCOPE, _OWN_COMMAND_SCOPE)
         self.definition = ToolDefinition(
             tool_id=ToolId(f"machine/{self.name}"),
-            description=self.description,
+            description=description,
             input_schema=_schema(self.properties, self.required, binding=False),
             workspace_requirement=WorkspaceRequirement.DEFAULT,
             effect_profile=self.effect,
@@ -116,7 +126,7 @@ class _MachineTool:
         except DataError as error:
             return _no_places(error)
         args = invocation.arguments
-        roots = list(places.roots)
+        roots = list(places.writable)
         try:
             if self.effect is EffectProfile.READ:
                 return await self.act(args, places.cwd, roots, ctx, invocation.call_id)
@@ -127,6 +137,8 @@ class _MachineTool:
         except runner.NotSent:
             return _unreachable()
         except runner.RunnerError as error:
+            if error.category == runner.OUTSIDE_WORKSPACES and not self._env.attached_writable:
+                error = runner.RunnerError(runner.OUTSIDE_WORKSPACES, _READ_ONLY)
             return _refused(_shown(args.get(self.target, ".")), error)
 
     async def act(self, args: Mapping[str, Any], cwd: str, roots: list[str], ctx: ToolContext,
@@ -367,7 +379,7 @@ class RunCommand(_MachineTool):
     name = "run_command"
     description = (
         "Run one command as the user in a Linux sandbox on this server. It can read what the user can read, "
-        "except hidden locations, and write only inside this conversation's workspaces and /tmp (each command "
+        f"except hidden locations, and {_COMMAND_SCOPE} (each command "
         "gets its own /tmp). Network: HTTPS only, to the hosts the current state lists (others get 403 from "
         "the proxy); no SSH, so use https:// git remotes; to push, use git_push (commands have no credentials). argv is a list of strings; use [\"sh\", \"-c\", \"...\"] for shell "
         "syntax. Unix domain sockets cannot be created: use TCP on 127.0.0.1, and the 'fork' start method for "

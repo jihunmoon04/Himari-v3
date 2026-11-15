@@ -954,6 +954,8 @@ class Application:
         time_zone: str = DEFAULT_TIME_ZONE,  # V3-P83 §6.4: HIMARI_TIME_ZONE, the zone the model is told the time in
         machine_socket: str | None = None,  # V3-P74: HIMARI_MACHINE_SOCKET; None: no machine Environment
         machine_principals: Iterable[str] = ("operator",),  # whose new Conversations use it (Q1)
+        machine_attached_write: bool = True,  # V3-P94: HIMARI_MACHINE_ATTACHED_WRITE=0 — the Tools write the
+        # Conversation's own folder only
         proactive: ProactiveSettings | None = None,  # V3-P87 §11: HIMARI_PROACTIVE…; None: off
     ) -> Application:
         speaking_first = proactive if proactive is not None else ProactiveSettings()
@@ -1070,7 +1072,8 @@ class Application:
                     log.warning("%d file change(s) were cut short by a stop; they are shown as unknown", cut_short)
                 machine = MachineEnvironment(machine_socket,
                                              files=InsideFiles(store.blobs, SqliteData(store), file_max_bytes),
-                                             documents=reader, registry=SqliteData(store), changes=changes)
+                                             documents=reader, registry=SqliteData(store), changes=changes,
+                                             attached_writable=machine_attached_write)
                 try:
                     hello = await machine.hello()
                     log.info("machine runner: sandbox %s, HIMARI home %s", hello.get("state"), hello.get("himari_home"))

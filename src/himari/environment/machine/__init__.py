@@ -4,7 +4,10 @@ HIMARI runs as its service user; commands and file operations are done by
 ``himari-runner``, which runs as the user (``coder``), through
 :mod:`himari.runner.api` (§4, §5). Paths are the user's real paths.
 Reading reaches what the user can read except the runner's hidden list;
-writing reaches only the Conversation's Workspaces (§3).
+writing reaches only the Conversation's Workspaces (§3) — or, with
+``attached_writable=False`` (V3-P94), only the Conversation's own folder:
+the attached folders are then only read, and their files are changed by
+the coding agents the hub runs, not by HIMARI.
 
 A Conversation's own folder, ``<HIMARI home>/conversations/<conversation_id>``,
 is its first Workspace — the T0 Binding's ``cwd_relative`` under the
@@ -56,6 +59,9 @@ PUSH = "to the 'origin' remote of a repository in the workspaces, if it is one o
 NO_PUSH = "not set up on this server"
 # §14: what the model is told of a cloud-synced folder, apart from the user's note.
 CLOUD_FILESYSTEMS = frozenset({"fuse.rclone"})
+# V3-P94: what the model is told of an attached folder it may not write.
+READ_ONLY_NOTE = ("Read-only for you: your file tools and commands cannot change anything in it. To change its "
+                  "files, hand the work to a coding agent.")
 DRIVE_NOTE = ("Cloud-synced folder: files have no execute bit, changes from other devices can take up to 15 minutes "
               "to appear, keep git repositories and build output on local disk.")
 
@@ -63,11 +69,13 @@ DRIVE_NOTE = ("Cloud-synced folder: files have no execute bit, changes from othe
 @dataclass(frozen=True)
 class Places:
     """A Conversation's folders as real paths (§3.2): its working directory,
-    where it may write (its own folder first), and each with its label."""
+    its folders (its own first), each with its label, and the ones it may
+    write (all of them, or its own only: V3-P94)."""
 
     cwd: str
     roots: tuple[str, ...]
     shown: tuple[ObservedWorkspace, ...]
+    writable: tuple[str, ...]
 
 
 def machine_workspace_for(principal: PrincipalId) -> WorkspaceId:
@@ -83,7 +91,7 @@ class MachineUnavailable(Exception):
 class MachineEnvironment:
     def __init__(self, socket_path: str, *, files: InsideFiles | None = None,
                  documents: DocumentReading | None = None, registry: WorkspaceRegistry | None = None,
-                 changes: ChangeLog | None = None) -> None:
+                 changes: ChangeLog | None = None, attached_writable: bool = True) -> None:
         from himari.environment.machine.tools import machine_tools
 
         self.client = RunnerClient(socket_path)
@@ -93,6 +101,8 @@ class MachineEnvironment:
         self.registry = registry
         # The review record of the file Tools' changes (V3-P76 §8); None: written without one.
         self.changes = changes
+        # V3-P94: False — the Tools write the Conversation's own folder only; attached folders are only read.
+        self.attached_writable = attached_writable
         self._protocol = 0  # the runner's, once it is new enough (it is asked again until then)
         self.locks = PathLocks()
         self._tools: tuple[ToolHandler, ...] = tuple(machine_tools(self))
@@ -198,11 +208,13 @@ class MachineEnvironment:
             path = item.workspace.location
             if path not in roots:
                 roots.append(path)
-                notice = DRIVE_NOTE if item.workspace.filesystem in CLOUD_FILESYSTEMS else None
+                notes = ([] if self.attached_writable else [READ_ONLY_NOTE]) + (
+                    [DRIVE_NOTE] if item.workspace.filesystem in CLOUD_FILESYSTEMS else [])
+                notice = " ".join(notes) or None
                 shown.append(ObservedWorkspace(path, item.workspace.label, item.workspace.note, notice))
             if item.binding.binding_id == working:
                 cwd = path
-        return Places(cwd, tuple(roots), tuple(shown))
+        return Places(cwd, tuple(roots), tuple(shown), tuple(roots) if self.attached_writable else (own,))
 
     async def observe(self, scope: TrustedScope, bindings: Sequence[BindingAuthority]) -> Sequence[BindingObservation]:
         """Every Binding is told online or offline; the working one (the
@@ -227,7 +239,7 @@ class MachineEnvironment:
         repos = about.get("push")
         push = PUSH.format(repos=", ".join(map(str, repos))) if isinstance(repos, list) and repos else NO_PUSH
         return [BindingObservation(b.binding_id, ConnectionStatus.ONLINE, now, working_directory=places.cwd,
-                                   writable=places.roots, workspaces=places.shown, readable=readable,
+                                   writable=places.writable, workspaces=places.shown, readable=readable,
                                    network=network, push=push)
                 for b in bindings]
 
