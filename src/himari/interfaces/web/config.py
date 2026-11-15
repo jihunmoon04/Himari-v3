@@ -62,6 +62,11 @@ of the principals in ``HIMARI_MACHINE_PRINCIPALS`` (comma-separated, default
 uses the Inside Workspace, as before. ``HIMARI_MACHINE_ATTACHED_WRITE=0``
 (V3-P94) lets HIMARI's own Tools write a Conversation's own folder only:
 attached Workspaces are read, and changed by the hub's coding agents.
+
+Hub (V3-P95): ``HIMARI_HUB_URL`` (``http://127.0.0.1:8791``) and
+``HIMARI_HUB_USER_TOKEN_FILE`` (the hub's ``user.token``, readable by this
+service only) let the signed-in operator answer the approvals and
+questions of the hub's coding agents on the Web. Both or neither.
 """
 
 from __future__ import annotations
@@ -107,6 +112,8 @@ COMPANION_MODELS_ONLY_VAR = "HIMARI_COMPANION_MODELS_ONLY"  # 1: only companion-
 TIME_ZONE_VAR = "HIMARI_TIME_ZONE"  # V3-P83: the zone the model is told the time in
 MACHINE_SOCKET_VAR = "HIMARI_MACHINE_SOCKET"  # V3-P74: the runner's socket; unset: no machine Environment
 MACHINE_PRINCIPALS_VAR = "HIMARI_MACHINE_PRINCIPALS"  # V3-P74: whose new Conversations use it
+HUB_URL_VAR = "HIMARI_HUB_URL"  # V3-P95: the hub server; unset: its requests are not shown here
+HUB_USER_TOKEN_FILE_VAR = "HIMARI_HUB_USER_TOKEN_FILE"  # V3-P95: the hub's user.token
 MACHINE_ATTACHED_WRITE_VAR = "HIMARI_MACHINE_ATTACHED_WRITE"  # V3-P94: 0 — attached Workspaces are read-only
 # V3-P87 §11: speaking first, and its throttling
 PROACTIVE_VAR = "HIMARI_PROACTIVE"
@@ -180,6 +187,8 @@ class WebConfig:
     machine_socket: str | None = None  # V3-P74
     machine_principals: tuple[str, ...] = ("operator",)
     machine_attached_write: bool = True  # V3-P94
+    hub_url: str | None = None  # V3-P95
+    hub_user_token_file: str | None = None
     proactive: ProactiveSettings = ProactiveSettings()  # V3-P87 §11
 
     @property
@@ -262,6 +271,14 @@ class WebConfig:
         principals = source.get(MACHINE_PRINCIPALS_VAR)
         machine_principals = (("operator",) if principals is None
                               else tuple(p.strip() for p in principals.split(",") if p.strip()))
+        hub_url = source.get(HUB_URL_VAR, "").strip() or None
+        hub_user_token_file = source.get(HUB_USER_TOKEN_FILE_VAR, "").strip() or None
+        if (hub_url is None) != (hub_user_token_file is None):
+            raise WebConfigError(f"{HUB_URL_VAR} and {HUB_USER_TOKEN_FILE_VAR} are set together")
+        if hub_url is not None and not hub_url.startswith(("http://", "https://")):
+            raise WebConfigError(f"{HUB_URL_VAR} must be an http(s) URL")
+        if hub_user_token_file is not None and not os.path.isabs(hub_user_token_file):
+            raise WebConfigError(f"{HUB_USER_TOKEN_FILE_VAR} must be an absolute path")
         return cls(
             host=host,
             port=port,
@@ -296,6 +313,8 @@ class WebConfig:
             time_zone=_time_zone(source.get(TIME_ZONE_VAR)),
             machine_socket=machine_socket,
             machine_principals=machine_principals,
+            hub_url=hub_url,
+            hub_user_token_file=hub_user_token_file,
             machine_attached_write=_flag(source.get(MACHINE_ATTACHED_WRITE_VAR), MACHINE_ATTACHED_WRITE_VAR,
                                          default=True),
             proactive=_proactive(source),

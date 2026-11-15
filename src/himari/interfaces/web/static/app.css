@@ -4332,3 +4332,149 @@ button.files-crumb:hover { background: var(--surface-hover); color: var(--text);
   font-size: 0.85rem;
   text-align: center;
 }
+
+/* V3-P95: the hub's waiting requests — a tray at the corner, there only while an agent waits. Under the top
+   bar, not at the bottom: there it would lie over the composer and its send button. */
+.hub-tray {
+  position: fixed;
+  right: var(--chrome-gutter, 16px);
+  top: calc(var(--chrome-height, 56px) + var(--space-2, 8px));
+  z-index: 45;
+  width: min(380px, calc(100vw - 2 * var(--chrome-gutter, 16px)));
+  max-height: min(70vh, 640px);
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2, 8px);
+  padding: var(--space-3, 12px);
+  background: var(--surface-raised);
+  border: 1px solid var(--warn-edge);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-lg);
+  font-size: 0.9rem;
+}
+
+.hub-tray[hidden] {
+  display: none;
+}
+
+.hub-tray-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2, 8px);
+  font-weight: 600;
+}
+
+.hub-tray-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: var(--radius-pill);
+  background: var(--warn-edge);
+  flex: none;
+}
+
+.hub-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1, 4px);
+  padding: var(--space-3, 12px);
+  background: var(--surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+}
+
+.hub-card-where,
+.hub-card-prompt,
+.hub-field-note {
+  color: var(--text-muted);
+  font-size: 0.8rem;
+}
+
+.hub-card-prompt {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+
+.hub-card-asks {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.hub-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2, 8px);
+  margin-top: var(--space-2, 8px);
+}
+
+.hub-button {
+  padding: 6px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface-raised);
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
+
+.hub-button.primary-button {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-contrast);
+}
+
+.hub-button:hover:not(:disabled) {
+  background: var(--surface-hover);
+}
+
+.hub-button.primary-button:hover:not(:disabled) {
+  background: var(--accent);
+  filter: brightness(0.93);
+}
+
+.hub-button:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.hub-button-quiet {
+  border-color: transparent;
+  background: transparent;
+  color: var(--text-muted);
+}
+
+.hub-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2, 8px);
+  margin-top: var(--space-1, 4px);
+}
+
+.hub-field {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.hub-field-title {
+  font-weight: 600;
+}
+
+.hub-input {
+  padding: 6px 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface-raised);
+  color: var(--text);
+  font: inherit;
+}
+
+.hub-card-problem {
+  color: var(--danger);
+  font-size: 0.8rem;
+  overflow-wrap: anywhere;
+}

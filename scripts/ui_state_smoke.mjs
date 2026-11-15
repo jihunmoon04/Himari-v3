@@ -41,7 +41,7 @@ function page() {
     window: { matchMedia: () => ({ matches: false }) },
     AppViews: class { reset() {} }, FilesPane: class { refresh() {} openFolder() {} }, console, setTimeout, clearTimeout,
     LiveAnswer: class { reset() {} shown() {} keepLast() {} settle() {} open() {} restyle() {} },
-    localStore, rememberLab() {}, location: { search: "" },
+    localStore, rememberLab() {}, location: { search: "" }, HubTray: class { start() {} stop() {} },
   });
   const run = (code) => vm.runInContext(code, context);
   run(draftsSource);
