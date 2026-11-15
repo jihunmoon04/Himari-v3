@@ -186,6 +186,7 @@ from himari.data.api import (
 )
 from himari.interfaces.web import event_stream, live
 from himari.interfaces.web.config import WebConfig
+from himari.interfaces.web.hub import HubClient, HubRefused, HubUnavailable
 from himari.sandbox.api import SandboxState
 from himari.interfaces.web.sandbox import SandboxGrant, SandboxSigner
 from himari.interfaces.web.security import (
@@ -204,6 +205,7 @@ MAX_EVENTS_PAGE = 500
 SESSION_SECONDS = 7 * 24 * 3600
 FAILED_LOGIN_DELAY_SECONDS = 1.0
 STATIC_FILES = {"app.css": "text/css", "app.js": "text/javascript", "app_view.js": "text/javascript",
+                "hub.js": "text/javascript",  # the hub's waiting requests (V3-P95)
                 "rich_text.js": "text/javascript", "appearance.js": "text/javascript", "live.js": "text/javascript",
                 "files.js": "text/javascript",  # the file explorer's parts (V3-P75 §3)
                 "local_store.js": "text/javascript", "drafts.js": "text/javascript",  # kept in the browser (V3-P78 §5)
@@ -524,6 +526,14 @@ class MemoryEditBody(MemoryBody):
 
 class ToolSourceBody(_Body):
     enabled: bool | None  # null: follow the source's default
+
+
+class HubAnswerBody(_Body):
+    """V3-P95: exactly one of them, as the hub takes it."""
+
+    option_id: str | None = Field(default=None, min_length=1, max_length=200)  # a permission's choice
+    content: dict[str, Any] | None = None  # a question's answer, by field name
+    refuse: StrictBool = False
 
 
 class McpDefaultBody(_Body):
@@ -2768,6 +2778,53 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
         return _LiveResponse(event_stream.stream(subscription, hello, closing),
                              lambda: application.hub.unsubscribe(subscription),
                              media_type="text/event-stream", headers={"X-Accel-Buffering": "no"})
+
+    # -- the hub's waiting requests (V3-P95) ---------------------------------------------------
+
+    hub = (HubClient(config.hub_url, config.hub_user_token_file)
+           if config.hub_url is not None and config.hub_user_token_file is not None else None)
+
+    def hub_for(who: PrincipalId) -> HubClient:
+        if who != OPERATOR:
+            raise ApiError(403, "not_authorized", "Only the operator can answer the hub's requests.")
+        if hub is None:
+            raise ApiError(404, "not_found", "The hub is not set up on this server.")
+        return hub
+
+    async def hub_call(work: Awaitable[None]) -> None:
+        try:
+            await work
+        except HubRefused as refused:
+            raise ApiError(409, "hub_refused", str(refused)[:500]) from None
+        except HubUnavailable:
+            raise ApiError(503, "hub_unavailable", "The hub could not be reached; nothing was sent.") from None
+
+    @app.get("/api/hub/pending")
+    async def hub_pending(who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+        """What the hub's coding agents wait on the user for. ``enabled`` false: not set up, never asked
+        again; ``reachable`` false: the hub did not answer this time."""
+        if who != OPERATOR or hub is None:
+            return {"enabled": False, "reachable": False, "pending": []}
+        try:
+            return {"enabled": True, "reachable": True, "pending": await hub.pending()}
+        except (HubUnavailable, HubRefused):
+            return {"enabled": True, "reachable": False, "pending": []}
+
+    @app.post("/api/hub/pending/{request_id}/answer", status_code=204)
+    async def hub_answer(body: HubAnswerBody, request_id: int = Path(ge=1, le=2**53),
+                         who: PrincipalId = Depends(principal)) -> None:
+        client = hub_for(who)
+        given = [name for name, value in (("option_id", body.option_id is not None),
+                                         ("content", body.content is not None), ("refuse", body.refuse)) if value]
+        if len(given) != 1:
+            raise ApiError(400, "invalid_request", "Give exactly one of option_id, content, refuse.")
+        answer: dict[str, Any] = ({"refuse": True} if body.refuse else {"option_id": body.option_id}
+                                  if body.option_id is not None else {"content": body.content})
+        await hub_call(client.answer(request_id, answer))
+
+    @app.post("/api/hub/tasks/{task_id}/cancel", status_code=204)
+    async def hub_cancel(task_id: int = Path(ge=1, le=2**53), who: PrincipalId = Depends(principal)) -> None:
+        await hub_call(hub_for(who).cancel(task_id))
 
     # -- static UI ----------------------------------------------------------------------------
 

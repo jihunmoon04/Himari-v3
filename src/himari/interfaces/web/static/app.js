@@ -26,6 +26,7 @@ import { FilesPane } from "/assets/files.js";
 import * as localStore from "/assets/local_store.js";
 import { DraftBook, mergeDrafts, referenceKey, withoutExpired } from "/assets/drafts.js";
 import { rememberLab } from "/assets/inklab.js";
+import { HubTray } from "/assets/hub.js";
 
 rememberLab(location.search); // ?ink-lab, before the address is rewritten (V3-P77 §4.6)
 
@@ -281,6 +282,7 @@ const app = {
 };
 
 const views = new AppViews(api, el, () => app.conversationId);
+const hubTray = new HubTray(api); // V3-P95: what the hub's coding agents wait on the user for
 
 /* The server's files (V3-P75 §3): one pane on the Files surface, one beside a conversation.
  * On the surface a folder opens its conversation (§6); beside one, it is attached to it. */
@@ -389,6 +391,7 @@ function showLogin({ signingOut = false } = {}) {
   stopPolling();
   clearTimeout(app.activityTimer); // V3-P80: read again after the sign-in
   closeEvents(); // V3-P83: and the event stream opened again
+  hubTray.stop(); // V3-P95: nothing of the hub's is shown signed out
   app.activityTicket += 1; // a read answered before this never paints the sign-in screen (review N2)
   app.activity = { working: new Set(), waiting: new Set() };
   views.reset();
@@ -4698,6 +4701,7 @@ async function enter() {
   app.activityAsked.clear();
   scheduleActivity(0); // V3-P80 §3.3
   openEvents(); // V3-P83 §8.1
+  hubTray.start(); // V3-P95
   loadServerInfo();
   syncFoldersLink();
   // A save that met a signed-out session goes back to its draft (PR #68 review C2).
