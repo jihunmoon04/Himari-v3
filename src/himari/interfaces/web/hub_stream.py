@@ -186,11 +186,12 @@ async def _next(source: asyncio.Queue[Any] | asyncio.Event, closing: asyncio.Eve
     stop = asyncio.ensure_future(closing.wait())
     try:
         await asyncio.wait((waiting, stop), timeout=max(0.0, timeout), return_when=asyncio.FIRST_COMPLETED)
-    finally:
+    finally:  # also when the caller is cancelled (the browser left): neither helper outlives this call
         stop.cancel()
-    if waiting.done():
+        if not waiting.done():
+            waiting.cancel()  # a queue's get gives its item back when cancelled
+    if waiting.done() and not waiting.cancelled():
         return True, waiting.result()
-    waiting.cancel()
     return False, None
 
 
@@ -208,12 +209,13 @@ class ListReader:
     def offer(self, text: str) -> None:
         if self.behind:
             return
-        if len(self.frames) >= QUEUE_FRAMES or self.size + len(text) > QUEUE_BYTES:
+        size = len(text.encode("utf-8"))  # what it costs on the wire, not its characters
+        if len(self.frames) >= QUEUE_FRAMES or self.size + size > QUEUE_BYTES:
             self.behind = True  # this browser fell behind: it is closed, and comes back to the whole list
             self.frames.clear()
         else:
             self.frames.append(text)
-            self.size += len(text)
+            self.size += size
         self.ready.set()
 
     def take(self) -> list[str]:
@@ -369,6 +371,10 @@ async def list_frames(relay: ListRelay, reader: ListReader, signed_in: Callable[
                 return
             got, _ = await _next(reader.ready, closing, next_check - time.monotonic())
             if got:
+                if time.monotonic() >= next_check:  # changes that never stop do not put the check off
+                    if not signed_in():
+                        return
+                    next_check = time.monotonic() + check
                 for text in reader.take():
                     yield text
                 if reader.behind:
@@ -421,8 +427,7 @@ async def session_frames(stack: AsyncExitStack, stream: AsyncIterator[Message], 
                 await queue.put(message)
         except (httpx.HTTPError, HubUnavailable):
             pass
-        finally:
-            await queue.put(None)
+        await queue.put(None)  # the hub ended it; not when cancelled (the browser left, nobody reads the queue)
 
     reading = asyncio.ensure_future(pump())
     try:
@@ -448,6 +453,7 @@ async def session_frames(stack: AsyncExitStack, stream: AsyncIterator[Message], 
                 yield text
     finally:
         reading.cancel()
+        await asyncio.gather(reading, return_exceptions=True)  # gone before the upstream closes under it
         await stack.aclose()
 
 

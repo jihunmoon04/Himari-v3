@@ -2530,11 +2530,13 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
             raise hub_error(error) from None
 
     def signed_in_check(request: Request) -> Callable[[], bool]:
-        """Whether the caller of a long stream still may (V3-P102 §6): the Web session it opened with, still
-        valid; the CLI's operator bearer holds for the server's life."""
-        cookie = request.cookies.get(SESSION_COOKIE)
-        if sessions.principal(cookie) is None:
+        """Whether the caller of a long stream still may (V3-P102 §6). Called first in the route, before anything
+        is awaited. The CLI's operator bearer holds for the server's life; anything else is the Web session it
+        came with, which must stay valid (a session that ended meanwhile never turns into "always")."""
+        scheme, _, token = request.headers.get("authorization", "").partition(" ")
+        if scheme.lower() == "bearer" and verify_operator_token(token.strip(), request.app.state.bearer):
             return lambda: True
+        cookie = request.cookies.get(SESSION_COOKIE)
         return lambda: sessions.principal(cookie) == OPERATOR
 
     @app.get("/api/hub/pending")
@@ -2620,10 +2622,11 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
     async def hub_list_stream(request: Request, who: PrincipalId = Depends(principal)) -> StreamingResponse:
         """The hub's open sessions, live (V3-P102 §6): ``sessions`` replaces the list, ``changed`` merges by id,
         ``hub`` says whether the hub is reachable. One upstream for every browser of this server."""
+        still = signed_in_check(request)
         hub_for(who)
         assert hub_list is not None
         reader = hub_list.join()
-        return _LiveResponse(hub_stream.list_frames(hub_list, reader, signed_in_check(request), closing),
+        return _LiveResponse(hub_stream.list_frames(hub_list, reader, still, closing),
                              lambda: hub_list.leave(reader),
                              media_type="text/event-stream", headers={"X-Accel-Buffering": "no"})
 
@@ -2632,6 +2635,7 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
                                  after: int = Query(default=0, ge=0, le=2**53),
                                  who: PrincipalId = Depends(principal)) -> StreamingResponse:
         """One session's events, live, from ``after`` or the ``Last-Event-ID`` the browser reconnects with."""
+        still = signed_in_check(request)  # before the upstream is awaited (the session may end meanwhile)
         hub_for(who)
         assert hub_session_streams is not None
         given = request.headers.get("last-event-id", "")
@@ -2646,7 +2650,7 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
             streams.release()
             asyncio.ensure_future(stack.aclose())
 
-        return _LiveResponse(hub_stream.session_frames(stack, stream, signed_in_check(request), closing), ended,
+        return _LiveResponse(hub_stream.session_frames(stack, stream, still, closing), ended,
                              media_type="text/event-stream", headers={"X-Accel-Buffering": "no"})
 
     # -- static UI ----------------------------------------------------------------------------

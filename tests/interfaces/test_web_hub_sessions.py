@@ -8,10 +8,10 @@ import json
 from contextlib import AsyncExitStack
 import queue
 import threading
-from collections.abc import Callable, Iterator
+from collections.abc import AsyncGenerator, Callable, Iterator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
@@ -72,6 +72,7 @@ class Hub:
         self.list_frames: queue.Queue[str | None] = queue.Queue()
         self.busy = False
         self.token_file: Path | None = None
+        self.ended = 0  # list streams whose reader went away (a write to it failed)
         hub = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -116,7 +117,7 @@ class Hub:
                         self.wfile.write(item.encode())
                         self.wfile.flush()
                 except OSError:
-                    pass
+                    hub.ended += 1
 
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self.server.daemon_threads = True
@@ -461,6 +462,12 @@ def test_the_list_upstream_closes_when_no_browser_is_left(listed: Hub, monkeypat
                 break
             await asyncio.sleep(0.05)
         assert not relay.running
+        for _ in range(100):  # and the hub sees its stream closed: its next writes fail
+            if listed.ended:
+                break
+            listed.list_frames.put(": ping\n\n")
+            await asyncio.sleep(0.05)
+        assert listed.ended == 1
 
     run_list(listed, act)
 
@@ -479,3 +486,74 @@ def test_a_signed_out_browser_loses_its_list() -> None:
 def test_a_busy_hub_is_told_apart() -> None:
     assert isinstance(hub_stream._refusal(503, b'{"error": "streams"}'), HubBusy)
     assert not isinstance(hub_stream._refusal(503, b'{"error": "stopping"}'), HubBusy)
+
+
+def test_a_body_the_hub_cut_says_so() -> None:
+    shown = event_view({"seq": 8, "kind": "tool", "truncated": True,
+                        "body": {"id": "t2", "status": "completed", "output": "…", "truncated": True}})
+    assert shown is not None and shown["truncated"] is True and shown["body"]["truncated"] is True
+    unknown = event_view({"seq": 9, "kind": "future", "body": {"truncated": True}})
+    assert unknown is not None and unknown["body"] == {}
+
+
+def test_the_list_queue_counts_bytes_not_characters(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(hub_stream, "QUEUE_BYTES", 10)
+    reader = hub_stream.ListReader()
+    reader.offer("가가가가")  # 4 characters, 12 bytes
+    assert reader.behind
+
+
+def test_a_signed_out_browser_loses_its_list_even_while_changes_flow() -> None:
+    async def scenario() -> tuple[int, bool]:
+        relay = hub_stream.ListRelay(HubClient("http://127.0.0.1:1", "none"),
+                                     hub_stream.Upstream(HubClient("http://127.0.0.1:1", "none")))
+        reader = hub_stream.ListReader()
+        checks = []
+
+        def signed_in() -> bool:
+            checks.append(1)
+            return False
+
+        async def changes() -> None:
+            while True:
+                reader.take()  # never falls behind: the stream must end for the sign-in alone
+                reader.offer("event: changed\ndata: {}\n\n")
+                await asyncio.sleep(0.002)
+
+        feeding = asyncio.ensure_future(changes())
+        try:
+            sent = [text async for text in hub_stream.list_frames(relay, reader, signed_in, asyncio.Event(),
+                                                                  check=0.05)]
+        finally:
+            feeding.cancel()
+        return len(sent), bool(checks)
+
+    count, checked = asyncio.run(asyncio.wait_for(scenario(), 5))
+    assert checked and count >= 1
+
+
+def test_a_browser_that_leaves_leaves_no_task_behind() -> None:
+    async def scenario() -> set[asyncio.Task[Any]]:
+        async def endless() -> Any:
+            seq = 0
+            while True:
+                seq += 1
+                yield hub_stream.Message("event", json.dumps({"seq": seq, "kind": "text", "body": {"text": "x"}}),
+                                         str(seq))
+
+        before = asyncio.all_tasks()
+        frames_of = cast(AsyncGenerator[str, None],
+                         hub_stream.session_frames(AsyncExitStack(), endless(), lambda: True, asyncio.Event()))
+        await anext(frames_of)  # retry
+        await anext(frames_of)  # the first event; the pump has filled its queue behind it
+        await asyncio.sleep(0.05)
+        await frames_of.aclose()  # the browser left
+        reader = hub_stream.ListReader()
+        waiting = asyncio.ensure_future(hub_stream._next(reader.ready, asyncio.Event(), 10))
+        await asyncio.sleep(0.01)
+        waiting.cancel()  # a list browser that leaves while waiting
+        await asyncio.gather(waiting, return_exceptions=True)
+        await asyncio.sleep(0.01)
+        return asyncio.all_tasks() - before - {asyncio.current_task()}
+
+    assert asyncio.run(asyncio.wait_for(scenario(), 5)) == set()

@@ -254,7 +254,10 @@ def event_view(raw: object) -> dict[str, Any] | None:
         return None
     convert = BODIES.get(head["kind"])
     body = raw.get("body") if isinstance(raw, dict) else None
-    head["body"] = (_view(convert, body) or {}) if convert is not None else {}
+    shown = (_view(convert, body) or {}) if convert is not None else {}
+    if convert is not None and isinstance(body, dict) and body.get("truncated") is True:
+        shown["truncated"] = True  # the hub cut a text of this event to fit (its events.py, ledger.py)
+    head["body"] = shown
     return head
 
 
