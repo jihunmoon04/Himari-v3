@@ -11,6 +11,8 @@ import {
   readServer,
   readSession,
 } from "@/api/himari";
+import { readHubPending, readHubProjects, readHubSession } from "@/api/hub";
+import { onListSignal } from "@/features/hub/list";
 import { openStream } from "@/lib/sse";
 
 export const queryClient: QueryClient = new QueryClient({
@@ -79,3 +81,38 @@ export function usePrincipalEvents(enabled: boolean) {
     });
   }, [client, enabled]);
 }
+
+// -- the hub (V3-P102 W2) ---------------------------------------------------------------------------------------
+
+export const hubKeys = {
+  projects: ["hub", "projects"] as const,
+  pending: ["hub", "pending"] as const,
+  session: (id: number) => ["hub", "session", id] as const,
+};
+
+/** Whether this server has the hub set up: "off" (404, nothing of it is shown), "down" (it did not answer), "on". */
+export function useHubProjects() {
+  const notSetUp = (error: unknown) => error instanceof ApiError && error.status === 404;
+  const query = useQuery({
+    queryKey: hubKeys.projects,
+    queryFn: readHubProjects,
+    staleTime: 60_000,
+    // a hub that did not answer is asked again (with backoff, then every 30 s) until it does; "not set up" is final
+    retry: (count, error) => !notSetUp(error) && count < 3,
+    retryDelay: (count) => Math.min(30_000, 2_000 * 2 ** count),
+    refetchInterval: (q) => (q.state.error && !notSetUp(q.state.error) ? 30_000 : false),
+  });
+  const status = query.isLoading ? "loading"
+    : query.error instanceof ApiError && query.error.status === 404 ? "off"
+    : query.error ? "down" : "on";
+  return { ...query, status } as const;
+}
+
+export const useHubSessionDetail = (id: number) =>
+  useQuery({ queryKey: hubKeys.session(id), queryFn: () => readHubSession(id), retry: false });
+
+// what waits for the user may have changed (a session's activity or task, the list read whole): read it again
+onListSignal(() => void queryClient.invalidateQueries({ queryKey: hubKeys.pending }));
+
+export const useHubPending = (enabled: boolean) =>
+  useQuery({ queryKey: hubKeys.pending, queryFn: readHubPending, enabled, refetchInterval: 30_000 });

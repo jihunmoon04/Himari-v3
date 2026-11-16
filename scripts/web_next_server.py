@@ -4,7 +4,8 @@ Runs the built page (``src/himari/interfaces/web/dist``, from ``npm run build`` 
 private data root with a scripted model, and writes the operator token to ``--token-out`` so the browser checks
 can sign in. The script, in order: a tool call (an unknown tool: its result is an error), a question
 (``ask_user``), an answer with Markdown, hostile markup and a formula, then plain answers ("Answer 1." …). Every
-step is streamed a few characters at a time after a moment of thinking (V3-P73).
+step is streamed a few characters at a time after a moment of thinking (V3-P73). The hub is a scripted stand-in
+(``scripts/web_next_hub.py``).
 
     python -I scripts/web_next_server.py --port 8798 --token-out web/.e2e-token
 
@@ -33,6 +34,9 @@ from himari.interfaces.web.config import WebConfig  # noqa: E402
 from himari.provider.api import NormalizedFinal, NormalizedToolCalls  # noqa: E402
 from himari.provider.scripted import ScriptedAdapter  # noqa: E402
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from web_next_hub import TOKEN, FakeHub  # noqa: E402
+
 ANSWER = ("# Plan\n\n**Day 1**: walk <script>window.__pwned = 1</script> [bad](javascript:window.__pwned=2) and "
           "[good](https://example.com)\n\n- palace\n- market\n\nArea $\\pi r^2$ and\n$$\n\\frac{a}{b}\n$$\n")
 
@@ -43,7 +47,7 @@ def scripted() -> ScriptedAdapter:
         NormalizedToolCalls((ToolCall(CallId("c1"), 0, ASK_USER_TOOL_ID, {"question": "Which **city**?"}),)),
         NormalizedFinal((TextBlock(ANSWER),)),
         *[NormalizedFinal((TextBlock(f"Answer {n}. " + "More words as they stream in. " * 12),)) for n in range(1, 20)],
-    ], streaming=True, piece_delay=0.01, first_delay=0.8)  # streamed, after a moment of "thinking"
+    ], streaming=True, piece_delay=0.01, first_delay=2.5)  # streamed, after a moment of "thinking"
 
 
 def main() -> None:
@@ -55,8 +59,11 @@ def main() -> None:
     root = Path(tempfile.mkdtemp(prefix="himari-next-"))
     data = root / "data"
     origin = f"http://127.0.0.1:{args.port}"
+    hub = FakeHub()  # V3-P102 W2: the hub's user path, scripted (scripts/web_next_hub.py)
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "user.token").write_text(TOKEN, encoding="ascii")
     config = WebConfig("127.0.0.1", args.port, frozenset({"127.0.0.1"}), frozenset({origin}), False, str(data),
-                       "scripted-model", None, False)
+                       "scripted-model", None, False, hub_url=hub.url, hub_user_token_file=str(root / "user.token"))
 
     async def opener() -> Application:
         application = await Application.open(data, scripted(), model_id="scripted-model", sandbox=False,

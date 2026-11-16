@@ -7,8 +7,10 @@ import { createBrowserRouter, Navigate, RouterProvider } from "react-router";
 import { queryClient, useSession } from "@/app/queries";
 import { Shell } from "@/components/Shell";
 import { applyAppearance, watchAppearance } from "@/lib/appearance";
+import { Agents } from "@/routes/Agents";
 import { Conversation } from "@/routes/Conversation";
 import { Home } from "@/routes/Home";
+import { HubSession } from "@/routes/HubSession";
 import { Login } from "@/routes/Login";
 
 // V3-P102 §7.2: the server gave this page a style nonce (its CSP allows <style> elements carrying it). Radix's
@@ -34,6 +36,8 @@ const router = createBrowserRouter(
       children: [
         { index: true, element: <Home /> },
         { path: "c/:id", element: <Conversation /> },
+        { path: "s/:id", element: <HubSession /> },
+        { path: "agents", element: <Agents /> },
         { path: "*", element: <Navigate to="/" replace /> },
       ],
     },

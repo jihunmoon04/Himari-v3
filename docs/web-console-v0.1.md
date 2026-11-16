@@ -1,6 +1,6 @@
 # Web 다시 디자인: hub 작업 콘솔 (V3-P102 설계 초안 v0.1)
 
-> 2026-11-16 · **설계 초안**, rev. 3(Codex 설계 검수 1·2차 반영) · **W0 구현**(`interfaces/web/hub.py`·`hub_stream.py`) · **W1 구현**(`web/`, `/next/`; §7.6) · 설계 기준 v3 `3ada276`(#189 병합), hub `0730c33`(himari-hub #25 병합,
+> 2026-11-16 · **설계 초안**, rev. 3(Codex 설계 검수 1·2차 반영) · **W0 구현**(`interfaces/web/hub.py`·`hub_stream.py`) · **W1 구현**(`web/`, `/next/`; §7.6) · **W2 구현**(§7.7) · 설계 기준 v3 `3ada276`(#189 병합), hub `0730c33`(himari-hub #25 병합,
 > [사용자 경로 계약 v1](https://github.com/jihunmoon04/himari-hub/blob/main/docs/user-api-v1.md)).
 >
 > 소유자 요청(2026-11-16): HIMARI v3를 HIMARI hub에 맞게 바꾼다. ① hub를 움직이는 두 경로(MCP 경로와
@@ -342,6 +342,23 @@ HIMARI 이벤트(`user_message`, `assistant_tool_calls`, `tool_result`, `assista
   `web/e2e`(실제 서버 `scripts/web_next_server.py`와 대본 모델: 로그인, 작업·질문·답, 안전한 서식, 메뉴를 연 채
   Radix `<style>`의 nonce, CSP 위반 0, 좁은 화면), `scripts/check_web_build.py`(wheel이 화면을 담는지), CI `web.yml`.
 - **아직:** 모델·강도 고르기, 첨부, 이름 바꾸기·휴지통 등 옛 화면의 나머지(W6), hub 세션(W2~).
+
+### 7.7 W2에서 만든 것 (2026-11-17)
+
+- **목록:** `features/hub/list.ts`가 페이지 전체에서 `/api/hub/stream` 하나를 쓴다(`sessions`는 바꾸고 `changed`는
+  id로 합침, `hub`로 연결 상태). 열리지 않으면 10초마다 `sessions`를 읽고 30초 뒤 다시 연다. hub가 설정되지 않은
+  서버(`/api/hub/projects` 404)에서는 아무것도 열지 않고 사이드바에도 보이지 않는다.
+- **사이드바:** 작업 현황 링크, 프로젝트(세션이 없는 것도 `projects`로) → 열린 세션(상태 점, 기다리는 승인 수).
+- **세션 화면(`/s/{id}`, 읽기 전용):** 상세의 `last_seq`로 최근 200개를 읽고(`next`로 이어 읽기) 받은 마지막 `seq`부터
+  스트림. "Earlier"가 그 앞 구간을 읽는다. `reset`이면 처음부터 다시 읽는다. 스트림이 거절되면 5초마다 `events`.
+  항목 변환은 `features/hub/items.ts`(턴 시작은 사용자 글과 모델·모드, 이어지는 `text`·`thought`는 하나로, 도구는 id로
+  갱신하며 작업 블록으로, 계획은 최신으로, 요청과 그 결과, 턴 끝과 걸린 시간, 끝날 때 열린 채인 호출은 "응답 없음").
+  diff는 jsdiff로 줄 단위(`+n −m`). 진행 중이면 최신 계획을 입력 자리 위에 고정. 오른쪽 자세히: 기기 연결, 모델,
+  컨텍스트 막대, 대기 글, 최근 시도.
+- **작업 현황(`/agents`):** 열린 세션 카드(기다림 → 작업 중 → 쉼 순), 기다리는 승인 수, 대기 글, 컨텍스트.
+- **검사:** Vitest(hub 항목 변환, 병합), Playwright가 `scripts/web_next_hub.py`(실제 HTTP·SSE로 대본을 돌리는 가짜 hub)로
+  사이드바, 세션(접힌 생각, diff, 계획, 요청, 위험한 마크업, 실시간 한 줄), 작업 현황의 실시간 변화, 긴 세션의 앞 구간.
+- **아직:** 보내기·새 대화·닫기·승인(W3), 마지막 활동 시각(H7), 닫힌 세션 목록.
 
 ## 8. hub에 필요한 것
 
