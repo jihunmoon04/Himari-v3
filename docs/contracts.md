@@ -182,7 +182,7 @@ EnvironmentPlugin ── tools() 제공 · execute 시 Data.WorkspaceState 재�
 | **CTRL-07** | ContextInspector / **Control** | Control → Web/CLI(Application 경유) | Prompt loader·composer·planner, ContextBudget | 다음 요청의 예상 토큰(측정/추정), 예산·압축 시작점·거부 한도, 최신 요약과 그 범위. 표시 전용, lock 없음 | P0 코드 구현 (V3-P50) |
 | **CTRL-08** | ManualCompaction / **Control** | Control → Web/CLI(Runner 경유) | Prompt planner `plan_now`, Data T9c/T9d | 크기와 상관없이 지금 압축(요약 + 최근 tail). Run을 시작하지 않음. 백그라운드 작업이며 BUSY 규칙은 다른 작업과 같음 | P0 코드 구현 (V3-P51) |
 | **UI-01** | WebInterface / **Interface** | Web 서버 → 브라우저·CLI | Application(DATA-12, CTRL-06, ConversationLog 읽기) | 운영자 인증, 대화 목록·생성·이름 변경, 메시지·재개 제출, Pause·Stop·Dismiss(V3-P55), Event·작업 상태(이유 `detail` 포함) 폴링, 서버 정보 `GET /api/server`(V3-P56) | P0 코드 구현 (V3-P46) |
-| **UI-02** | TerminalInterface / **Interface** | CLI → 로컬 Web 서버(UI-01) | UI-01 JSON API + 운영자 비밀값 파생 bearer | 대화형·명령형 대화, 질문 답변, 이어서 실행, 목록·조회 | P0 코드 구현 (V3-P47) |
+| **UI-02** | TerminalInterface / **Interface** | CLI → 로컬 Web 서버(UI-01) | UI-01 JSON API + 운영자 비밀값 파생 bearer | Web에 없는 명령만: 먼저 말 걸기 상태·시험, 기억 정리 목록·소급 실행·재시도(V3-P98) | P0 코드 구현 (V3-P47), 축소 (V3-P98) |
 
 **Contract Location (PR #1~#12 반영):** Control·Data·Tool·Environment·Prompt·Provider 공개 계약은 각각 `api.py`로 선언됐다. Control 실행은 `control/driver.py`·`control/runner.py`, Bootstrap 조립은 `bootstrap/`(`Application`), 공용 DTO는 `src/himari/common.py`에 있다. Inside 파일 Tool·`run_command`는 `environment/inside/`(PR #8~#9), 격리 장치(Sandbox)는 최상위 모듈 `sandbox/`(V3-P59 1단계; Inside는 `sandbox.api`만 사용), SQLite Data는 `data/sqlite.py`(PR #10), Web은 `interfaces/web/`(PR #12)에 있다. `scripts/check_imports.py`가 모듈 경계를 검사한다.
 

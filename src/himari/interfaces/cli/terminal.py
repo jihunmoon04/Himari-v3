@@ -9,52 +9,16 @@ control, Unicode format control and lone surrogate is therefore escaped
 to a visible backslash form — by Unicode category, not by matching one
 syntax. A character the stream's codec cannot carry becomes the same
 visible escape instead of an encoding error.
-
-Multi-line message bodies keep their line breaks but every line is
-indented under its speaker header, so model text can never start a line
-that looks like the CLI's own ``You:`` / ``HIMARI:`` labels.
 """
 
 from __future__ import annotations
 
 import codecs
 import unicodedata
-from dataclasses import dataclass
 from typing import Any
 
 _UNSAFE_CATEGORIES = frozenset({"Cc", "Cf", "Cs"})
 _ESCAPES = {"\\": "\\\\", "\r": "\\r"}
-INDENT = "  │ "
-ASCII_INDENT = "  | "
-
-
-@dataclass(frozen=True)
-class Symbols:
-    indent: str
-    call: str
-    result: str
-    ok: str
-    failed: str
-    more: str
-    rule: str
-    times: str  # an image's size, 800×600 (V3-P67 §8)
-    progress: str  # the model's progress line (V3-P68 §6)
-    memory: str  # a note saved or forgotten (V3-P71 §8)
-
-
-UNICODE_SYMBOLS = Symbols(INDENT, "⚙", "↳", "✓", "✗ failed", "…", "──", "×", "»", "◆")
-ASCII_SYMBOLS = Symbols(ASCII_INDENT, "*", "->", "ok", "x failed", "...", "--", "x", ">", "#")
-
-
-def symbols_for(encoding: str | None) -> Symbols:
-    """The CLI's own marks, or ASCII ones where the stream cannot carry them."""
-    if encoding is None:
-        return UNICODE_SYMBOLS
-    try:
-        "".join(vars(UNICODE_SYMBOLS).values()).encode(encoding)
-    except UnicodeEncodeError:
-        return ASCII_SYMBOLS
-    return UNICODE_SYMBOLS
 
 
 def stream_encoding(stream: Any) -> str | None:
@@ -95,15 +59,3 @@ def safe_line(value: str, *, encoding: str | None = None) -> str:
         else:
             out.append(character)
     return "".join(out)
-
-
-def safe_block(value: str, *, encoding: str | None = None, max_lines: int | None = None) -> str:
-    """A multi-line body: each line made safe and indented; tabs become
-    spaces; at most ``max_lines`` lines, then a visible marker."""
-    marks = symbols_for(encoding)
-    lines = value.replace("\t", "    ").split("\n")
-    shown = lines if max_lines is None else lines[:max_lines]
-    rendered = [marks.indent + safe_line(line, encoding=encoding) for line in shown]
-    if max_lines is not None and len(lines) > max_lines:
-        rendered.append(f"{marks.indent}{marks.more} ({len(lines) - max_lines} more lines)")
-    return "\n".join(rendered)
