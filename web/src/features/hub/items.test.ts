@@ -56,6 +56,23 @@ describe("toHubItems", () => {
   });
 });
 
+describe("toHubItems across attempts", () => {
+  it("keeps a call id of another attempt apart, and closes a call left open with some output", () => {
+    const at = (seq: number, attempt: number, kind: string, body: Record<string, unknown>): HubEvent =>
+      ({ seq, kind, attempt, at: "2026-11-17T10:00:00Z", body });
+    const { items } = toHubItems([
+      at(1, 1, "tool", { id: "0", title: "Run tests", status: "in_progress", output: "partial…" }),
+      at(2, 1, "turn_end", { outcome: "lost" }),
+      at(3, 2, "turn_start", { prompt: "again" }),
+      at(4, 2, "tool", { id: "0", title: "Read a.py", status: "in_progress" }),
+    ]);
+    const blocks = items.filter((item) => item.kind === "work");
+    expect(blocks).toHaveLength(2); // the second attempt's call is a card of its own
+    expect(blocks[0]).toMatchObject({ steps: [{ title: "Run tests", status: "unknown" }] });
+    expect(blocks[1]).toMatchObject({ steps: [{ title: "Read a.py", status: "in_progress" }] });
+  });
+});
+
 describe("mergeEvents", () => {
   it("keeps one event per seq, oldest first", () => {
     expect(mergeEvents([ev(3, "text"), ev(1, "text")], [ev(2, "text"), ev(3, "plan")]).map((e) => [e.seq, e.kind]))

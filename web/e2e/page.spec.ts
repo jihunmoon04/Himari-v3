@@ -203,7 +203,11 @@ test("the overview shows every open session and follows the list as it changes",
   const cards = page.getByRole("list", { name: "Open sessions" }).getByRole("listitem");
   await expect(cards).toHaveCount(3);
   await expect(cards.first()).toContainText("1 waiting for you"); // what waits comes first
-  await expect(cards.filter({ hasText: "codex@laptop" })).toContainText("Working", { timeout: 10_000 });
+  // the scripted hub flips codex@laptop between idle and working every 3 s: the card follows the next flip
+  const codex = cards.filter({ hasText: "codex@laptop" });
+  await expect(codex).toContainText(/Idle|Working/);
+  const was = (await codex.textContent())?.includes("Working") ? "Working" : "Idle";
+  await expect(codex).toContainText(was === "Working" ? "Idle" : "Working", { timeout: 8_000 });
   await done();
 });
 

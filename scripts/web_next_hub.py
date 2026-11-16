@@ -3,7 +3,7 @@ hub's contract (user-api-v1) has them, over real HTTP and SSE, with scripted pro
 
 - ``demo``: session 5 (claude@linux, working, a permission waiting) with a thought, an edit with its diff, a plan,
   the request and some text; its stream sends one more line ``LIVE_LINE`` 1.5 s after it opens. Session 6
-  (codex@laptop, idle) turns working on the list stream 2 s after it opens.
+  (codex@laptop) flips between idle and working every 3 s on the list stream.
 - ``archive``: session 7 with ``LONG`` events (turns), to read the earlier ones.
 - ``empty``: a project with no session.
 
@@ -160,16 +160,18 @@ class FakeHub:
         out.flush()
 
     def stream_list(self, out: Any) -> None:
+        """The whole list, then session 6 flips between idle and working every 3 s (a ``changed`` each time).
+        HIMARI's server shares one list stream among its browsers and keeps the list, so a browser that joins
+        late sees whatever the last flip left: a check waits for the next flip, whichever way it goes."""
         with self.lock:
             self._send(out, "sessions", {"sessions": sorted(self.sessions.values(), key=lambda s: -s["id"])})
-        time.sleep(2)
-        with self.lock:
-            self.sessions[6] = {**self.sessions[6], "activity": "running", "task": 11}
-            self._send(out, "changed", {"sessions": [self.sessions[6]]})
         while True:
-            time.sleep(5)
-            out.write(b": ping\n\n")
-            out.flush()
+            time.sleep(3)
+            with self.lock:
+                working = self.sessions[6]["activity"] == "running"
+                self.sessions[6] = {**self.sessions[6], "activity": "idle" if working else "running",
+                                    "task": None if working else 11}
+                self._send(out, "changed", {"sessions": [self.sessions[6]]})
 
     def stream_session(self, out: Any, sid: int, after: int) -> None:
         with self.lock:

@@ -12,6 +12,7 @@ import {
   readSession,
 } from "@/api/himari";
 import { readHubPending, readHubProjects, readHubSession } from "@/api/hub";
+import { onListSignal } from "@/features/hub/list";
 import { openStream } from "@/lib/sse";
 
 export const queryClient: QueryClient = new QueryClient({
@@ -100,6 +101,9 @@ export function useHubProjects() {
 
 export const useHubSessionDetail = (id: number) =>
   useQuery({ queryKey: hubKeys.session(id), queryFn: () => readHubSession(id), retry: false });
+
+// what waits for the user may have changed (a session's activity or task, the list read whole): read it again
+onListSignal(() => void queryClient.invalidateQueries({ queryKey: hubKeys.pending }));
 
 export const useHubPending = (enabled: boolean) =>
   useQuery({ queryKey: hubKeys.pending, queryFn: readHubPending, enabled, refetchInterval: 30_000 });

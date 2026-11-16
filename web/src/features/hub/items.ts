@@ -3,7 +3,7 @@
 //
 // - turn_start: the prompt as the user's item, with its model, effort and mode.
 // - text / thought: consecutive pieces join into one answer / one thought (the hub sends them in 0.5 s batches).
-// - tool: one step per call id; later events of the same id update it (only the fields they carry). Consecutive
+// - tool: one step per call id of an attempt; later events of the same id update it (only the fields they carry). Consecutive
 //   calls fold into one work block.
 // - plan: the latest plan; consecutive plans replace each other.
 // - request / answer: a request, and later its outcome. Whether it can still be answered is the pending list's call.
@@ -69,7 +69,8 @@ export function toHubItems(events: readonly HubEvent[]): { items: Item[]; stats:
         break;
       }
       case "tool": {
-        const id = str(body.id) || String(body.id ?? key);
+        // a call id is the agent's, kept by one attempt: another attempt (another process) may use it again
+        const id = `${event.attempt ?? ""}/${str(body.id) || String(body.id ?? key)}`;
         const update: Partial<ToolStep> = {};
         if ("title" in body) update.title = str(body.title);
         if ("kind" in body) update.toolId = str(body.kind) || "tool";
@@ -126,9 +127,11 @@ export function toHubItems(events: readonly HubEvent[]): { items: Item[]; stats:
           ? Math.max(0, Math.round((ended - started) / 1000)) : null;
         items.push({ kind: "turn", key, turn: { outcome: str(body.outcome) || "done", why: str(body.why), seconds } });
         started = null;
-        // a call still open when its turn ended never reported back: it is not "running" any more
+        // a call still open when its turn ended never reported back (even with some output): it is not running
         for (const step of steps.values()) {
-          if (step.result === null && step.status !== "completed" && step.status !== "failed") step.status = "unknown";
+          if (step.status !== "completed" && step.status !== "failed" && !(step.result && !step.status)) {
+            step.status = "unknown";
+          }
         }
         break;
       }

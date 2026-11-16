@@ -16,6 +16,13 @@ export interface HubList {
 
 let state: HubList = { ready: false, reachable: true, sessions: [] };
 const listeners = new Set<() => void>();
+let signal: (() => void) | null = null;
+
+/** Called when what waits for the user may have changed: the list came whole (a (re)connect, a poll), or a
+ *  session's activity or task changed (§7.3). */
+export function onListSignal(handler: () => void) {
+  signal = handler;
+}
 let users = 0;
 let stop: (() => void) | null = null;
 
@@ -29,13 +36,20 @@ const byNewest = (sessions: Iterable<HubSession>) => [...sessions].sort((a, b) =
 function replace(sessions: unknown) {
   if (!Array.isArray(sessions)) return;
   set({ ready: true, reachable: true, sessions: byNewest(sessions as HubSession[]) });
+  signal?.();
 }
 
 function merge(changed: unknown) {
   if (!Array.isArray(changed)) return;
   const byId = new Map(state.sessions.map((s) => [s.id, s]));
-  for (const session of changed as HubSession[]) byId.set(session.id, session);
+  let moved = false;
+  for (const session of changed as HubSession[]) {
+    const before = byId.get(session.id);
+    moved ||= !before || before.activity !== session.activity || before.task !== session.task;
+    byId.set(session.id, session);
+  }
   set({ sessions: byNewest(byId.values()) });
+  if (moved) signal?.();
 }
 
 function open() {
@@ -43,17 +57,21 @@ function open() {
   let poll: number | undefined;
   let retry: number | undefined;
   let ended = false;
+  let epoch = 0; // bumped when the stream is tried again: a poll answered after that is stale
 
   const read = async () => {
+    const asked = epoch;
     try {
-      replace((await listHubSessions()).sessions);
+      const sessions = (await listHubSessions()).sessions;
+      if (!ended && asked === epoch) replace(sessions);
     } catch {
-      set({ reachable: false });
+      if (!ended && asked === epoch) set({ reachable: false });
     }
   };
 
   const connect = () => {
     if (ended) return;
+    epoch += 1;
     window.clearInterval(poll);
     poll = undefined;
     source = new EventSource(hubStreamUrl(), { withCredentials: true });

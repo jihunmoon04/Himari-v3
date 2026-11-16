@@ -97,17 +97,21 @@ export function HubSession() {
         <div ref={box} onScroll={onScroll} className="min-h-0 flex-1 overflow-y-auto">
           <div className="mx-auto w-full max-w-3xl px-4 py-6">
             {stream.earlier && (
-              <div className="mb-6 flex justify-center">
+              <div className="mb-6 flex flex-col items-center gap-1">
                 <Button variant="ghost" onClick={stream.loadEarlier} disabled={stream.loadingEarlier}>
                   <ChevronUp className="size-4" /> {stream.loadingEarlier ? "Loading…" : "Earlier"}
                 </Button>
+                {stream.earlierError && <p role="alert" className="text-xs text-danger">{stream.earlierError}</p>}
               </div>
+            )}
+            {stream.error && (
+              <p role="alert" className="mb-4 text-sm text-danger">
+                {stream.error}{stream.error !== "No such session." && " Trying again…"}
+              </p>
             )}
             {stream.loading ? (
               <p className="text-sm text-faint">Loading…</p>
-            ) : stream.error ? (
-              <p role="alert" className="text-sm text-danger">{stream.error}</p>
-            ) : items.length === 0 ? (
+            ) : stream.error && items.length === 0 ? null : items.length === 0 ? (
               <p className="text-sm text-faint">Nothing in this session yet.</p>
             ) : (
               <Timeline items={items} running={running && !lastIsTurnEnd} working="The agent is working…" />
