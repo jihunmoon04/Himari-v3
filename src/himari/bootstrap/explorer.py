@@ -10,12 +10,7 @@ Text is returned as text, to be shown as text; images are shown only as
 the copy the image sandbox made (V3-P67), never their own bytes; anything
 else is a download (an attachment, never rendered on this origin).
 
-The editor's writes (§7) are the owner's own: anywhere the runner lets the
-user write, hidden paths and ``writable_under`` aside, whatever the
-conversations' Workspaces are. Each goes to the runner with the target's
-folder as its write root. A save or a delete keeps what the file held as a
-previous version (``versions.py``), from the copy the runner took right
-before; a save is refused when no version could be kept.
+The explorer only reads (V3-P99): nothing here writes, makes or deletes a file.
 """
 
 from __future__ import annotations
@@ -27,7 +22,6 @@ import logging
 import os
 import posixpath
 import re
-import tempfile
 from collections import OrderedDict
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -42,7 +36,6 @@ from himari.data.api import (
     ViewMaker,
     sniff_image,
 )
-from himari.bootstrap.versions import Version, VersionStore
 from himari.common import FileReference
 from himari.environment.machine import MachineEnvironment
 from himari.runner import api as runner
@@ -50,14 +43,13 @@ from himari.runner import api as runner
 log = logging.getLogger("himari.explorer")
 
 BROWSE_PAGE = 500
-EDIT_MAX_BYTES = 1024 * 1024  # V3-P75 Q3: what the editor takes whole
-PREVIEW_BYTES = 256 * 1024  # the start of a larger text file, shown read-only
+EDIT_MAX_BYTES = 1024 * 1024  # a text file shown whole, and the largest a selection is pointed at in (V3-P76 Q1)
+PREVIEW_BYTES = 256 * 1024  # the start of a larger text file
 MAX_PATH_CHARS = 4096
 _CACHE_BYTES = 24 * 1024 * 1024  # image copies kept for the explorer
 READ_SECONDS = 15.0  # reading an opened file; the runner bounds its own reads alike (PR #92 review B1)
 CALL_SECONDS = 20.0  # a runner answer, its own 15 s included
 MAX_READS = 4  # file reads under way here, given-up ones included
-DELETED_SHOWN = 50  # files deleted from a folder listed at once
 EXCERPT_BYTES = 20 * 1024  # a reference's excerpt, as UTF-8 (V3-P76 Q1)
 
 T = TypeVar("T")
@@ -82,13 +74,6 @@ class Listing:
 
 
 @dataclass(frozen=True)
-class Saved:
-    path: str
-    identity: tuple[int, ...]
-    previous_kept: bool  # False: saved, but its previous version could not be kept (§7.4, a rare failure)
-
-
-@dataclass(frozen=True)
 class ShownFile:
     path: str
     size: int
@@ -97,17 +82,12 @@ class ShownFile:
     kind: str  # "text" | "image" | "binary"
     text: str | None = None
     truncated: bool = False  # the text is the file's start only
-    editable: bool = False  # whole, text, at most EDIT_MAX_BYTES (part 3 edits it)
 
 
 class Explorer:
-    def __init__(self, machine: MachineEnvironment, views: ViewMaker | None,
-                 versions: VersionStore | None = None, agent_versions: VersionStore | None = None) -> None:
+    def __init__(self, machine: MachineEnvironment, views: ViewMaker | None) -> None:
         self._machine = machine
         self._views = views
-        self.versions = versions  # None: the editor cannot save (no place for previous versions)
-        # V3-P76 §4.2: what files held before the agent changed them; shown among the previous versions.
-        self.agent_versions = agent_versions
         self._copies: OrderedDict[tuple[str, tuple[int, ...]], PreparedView] = OrderedDict()
         self._pool = concurrent.futures.ThreadPoolExecutor(MAX_READS, thread_name_prefix="himari-explorer")
         self._reads = 0
@@ -198,194 +178,7 @@ class Explorer:
         text = _text(head if whole else head[:PREVIEW_BYTES], whole)
         if text is None:
             return ShownFile(real, size, identity, modified, "binary")
-        return ShownFile(real, size, identity, modified, "text", text, truncated=not whole, editable=whole)
-
-    # --- the editor's writes (§7) ---------------------------------------------------------
-
-    async def _place(self, path: object) -> tuple[str, str]:
-        """The target's folder as the runner resolves it, and its name."""
-        given = self._path(path)
-        folder, name = posixpath.split(given.rstrip("/"))
-        if name in ("", ".", "..", "~") or "/" in name:
-            raise ExplorerRefused("invalid", "Give a file or folder name.")
-        found = await self.stat(folder or "/")
-        if found.get("kind") != "directory":
-            raise ExplorerRefused("not_directory", f"{found.get('path', folder)} is not a folder.")
-        return str(found["path"]), name
-
-    async def _write(self, op: str, path: object, args: dict[str, Any],
-                     fds: Sequence[int] = ()) -> tuple[str, dict[str, Any], list[int]]:
-        folder, name = await self._place(path)
-        target = posixpath.join(folder, name)
-        result, received = await self._call(op, {"path": target, "cwd": "/", "write_roots": [folder], **args}, fds,
-                                            None)  # a write is never given up on: it waits for its outcome
-        log.info("web %s %s", op if op != runner.WRITE else "save", target)
-        return target, result, received
-
-    def _stores(self) -> tuple[VersionStore, ...]:
-        return tuple(store for store in (self.versions, self.agent_versions) if store is not None)
-
-    def _keep(self, path: str, received: list[int], reason: str) -> bool:
-        store = self.versions
-        if not received or store is None:
-            for fd in received:
-                os.close(fd)
-            return False
-        try:
-            store.keep(path, received[0], reason)
-        except OSError:
-            log.exception("a previous version of %s could not be kept", path)
-            return False
-        return True
-
-    async def save(self, path: object, content: bytes, expected: Sequence[int], reason: str = "save") -> Saved:
-        """§7.4: replace the file read with identity ``expected``; its
-        previous version kept. CHANGED (nothing written) if it changed since."""
-        if self.versions is None:
-            raise ExplorerRefused("unavailable", "Files cannot be saved on this server.")
-        if len(content) > EDIT_MAX_BYTES:
-            raise ExplorerRefused("too_large", "Too large to save from here (at most 1 MiB).")
-        if len(expected) == 4 and int(expected[2]) > EDIT_MAX_BYTES:  # no previous version of it (review B1)
-            raise ExplorerRefused("too_large", "This file is over 1 MiB: it is read-only here, since its previous "
-                                               "version could not be kept.")
-        if len(expected) != 4 or not self.versions.ready_for(int(expected[2])):
-            raise ExplorerRefused("versions_unavailable", "The previous version could not be kept (the data folder "
-                                  "is full or not writable); nothing was saved.")
-        with tempfile.TemporaryFile() as body:
-            body.write(content)
-            body.flush()
-            body.seek(0)
-            target, result, received = await self._write(
-                runner.WRITE, path, {"mode": "replace", "expected": [int(v) for v in expected]}, [body.fileno()])
-        kept = await asyncio.to_thread(self._keep, str(result.get("path", target)), received, reason)
-        return Saved(str(result.get("path", target)), tuple(int(v) for v in result["identity"]), kept)
-
-    async def install(self, path: object, content: bytes) -> str:
-        """V3-P76 §4.1: a file put back where its name is free, in one step:
-        CHANGED if the name is taken, ``unsupported`` where the file system
-        cannot (nothing is written then)."""
-        return (await self._install_bytes(path, content, "put back"))[0]
-
-    async def recreate(self, path: object, content: bytes) -> tuple[str, tuple[int, ...] | None]:
-        """V3-P78 §4.2: the editor's text as a new file where the one it was
-        editing is gone; as ``install`` (only while the name is free). Its
-        identity as the runner saw it right after (None: placed, but not
-        seen) — never read again, where a later write could pass for this one."""
-        if self.versions is None:
-            raise ExplorerRefused("unavailable", "Files cannot be saved on this server.")
-        return await self._install_bytes(path, content, "save")
-
-    async def _install_bytes(self, path: object, content: bytes, what: str) -> tuple[str, tuple[int, ...] | None]:
-        if len(content) > EDIT_MAX_BYTES:
-            raise ExplorerRefused("too_large", f"Too large to {what} from here (at most 1 MiB).")
-        with tempfile.TemporaryFile() as body:
-            body.write(content)
-            body.flush()
-            body.seek(0)
-            return await self._install_placed(path, body.fileno())
-
-    async def _install_placed(self, path: object, fd: int) -> tuple[str, tuple[int, ...] | None]:
-        """``install`` of what ``fd`` holds (the caller closes it), with the identity the runner saw (None if it
-        did not see it)."""
-        try:
-            keeps = await self._machine.keeps()
-        except (runner.RunnerUnavailable, runner.RunnerError):
-            raise ExplorerRefused("unavailable", "The machine runner does not answer; try again later.") from None
-        if not keeps:  # an older runner would write it plainly, over a file made meanwhile
-            raise ExplorerRefused(runner.UNSUPPORTED, "The machine runner is older than HIMARI (restart "
-                                                      "himari-runner); nothing was put back.")
-        try:
-            target, result, _ = await self._write(runner.WRITE, path, {"mode": "install"}, [fd])
-        except ExplorerRefused as refused:
-            if refused.category == runner.UNSUPPORTED:
-                raise ExplorerRefused(runner.UNSUPPORTED, "This folder's file system cannot put a file back in "
-                                                          "one step; copy its previous version by hand.") from None
-            raise
-        seen = result.get("identity")
-        return str(result.get("path", target)), tuple(int(v) for v in seen) if isinstance(seen, list) else None
-
-    async def create_file(self, path: object) -> tuple[str, tuple[int, ...]]:
-        """§7.7: a new, empty file (EXISTS if the name is taken)."""
-        target, result, _ = await self._write(runner.CREATE_FILE, path, {})
-        return str(result.get("path", target)), tuple(int(v) for v in result["identity"])
-
-    async def make_folder(self, path: object) -> str:
-        """§7.5: one new folder (EXISTS if the name is taken)."""
-        target, result, _ = await self._write(runner.MKDIR, path, {})
-        return str(result.get("path", target))
-
-    async def delete(self, path: object, expected: Sequence[int]) -> tuple[str, bool]:
-        """§7.4: delete the file read with identity ``expected``; whether its
-        content was kept as a previous version (not over 1 MiB)."""
-        if len(expected) != 4:
-            raise ExplorerRefused("invalid", "The file's identity, as it was read, is required.")
-        # Up to 1 MiB its content is kept, so a store that cannot keep it refuses the delete (review B2); a
-        # larger file goes without, after the editor's own warning (§7.4).
-        if int(expected[2]) <= EDIT_MAX_BYTES and (self.versions is None
-                                                   or not self.versions.ready_for(int(expected[2]))):
-            raise ExplorerRefused("versions_unavailable", "The file's content could not be kept (the data folder is "
-                                                          "full or not writable); nothing was deleted.")
-        target, result, received = await self._write(runner.DELETE, path,
-                                                      {"expected": [int(v) for v in expected]})
-        real = str(result.get("path", target))
-        return real, await asyncio.to_thread(self._keep, real, received, "delete")
-
-    async def visible(self, path: object) -> str:
-        """The path as the versions know it, if the runner shows it now: its
-        folder resolved, its name not hidden (review B3: a path hidden since
-        it was saved shows no versions)."""
-        result, _ = await self._call(runner.VISIBLE, {"path": self._path(path), "cwd": "/"})
-        return str(result["path"])
-
-    async def previous(self, path: object) -> tuple[Version, ...]:
-        real = await self.visible(path)
-        found = [version for store in self._stores() for version in store.of(real)]
-        return tuple(sorted(found, key=lambda v: v.saved_at, reverse=True))
-
-    async def deleted(self, folder: object) -> tuple[tuple[str, Version], ...]:
-        """Files deleted from this folder whose content is kept (PR #95 review B3): the folder as the runner
-        resolves it, and only paths it shows now."""
-        found = await self.stat(folder)
-        if found.get("kind") != "directory":
-            raise ExplorerRefused("not_directory", f"{found.get('path', folder)} is not a folder.")
-        # The stores are read on a thread; each path is checked with the runner one at a time (its reads are
-        # bounded to a few at once), for at most DELETED_SHOWN of them (PR #95 re-review N1).
-        latest: dict[str, Version] = {}
-        for store in self._stores():
-            for deleted, version in await asyncio.to_thread(store.deleted_in, str(found["path"]), DELETED_SHOWN):
-                if deleted not in latest or latest[deleted].saved_at < version.saved_at:
-                    latest[deleted] = version
-        candidates = sorted(latest.items(), key=lambda item: item[1].saved_at, reverse=True)[:DELETED_SHOWN]
-        shown: list[tuple[str, Version]] = []
-        for path, version in candidates:
-            try:
-                if await self.visible(path) == path:
-                    shown.append((path, version))
-            except ExplorerRefused:
-                continue  # hidden now
-        return tuple(shown)
-
-    async def restore(self, path: object, version_id: str) -> str:
-        """A deleted file put back from one of its versions, in one step
-        (V3-P76 §4.1): CHANGED if the name is taken again; ``unsupported``
-        where the file system cannot (the editor then restores as before)."""
-        real = await self.visible(path)
-        data = next((d for store in (self.versions, self.agent_versions) if store is not None
-                     and (d := store.read(real, version_id)) is not None), None)
-        if data is None:
-            raise ExplorerRefused("not_found", "No such previous version.")
-        return await self.install(real, data)
-
-    async def previous_text(self, path: object, version_id: str) -> str:
-        real = await self.visible(path)
-        data = next((d for store in (self.versions, self.agent_versions) if store is not None
-                     and (d := store.read(real, version_id)) is not None), None)
-        if data is None:
-            raise ExplorerRefused("not_found", "No such previous version.")
-        text = text_of(data)
-        if text is None:
-            raise ExplorerRefused("not_regular", "This previous version is not text.")
-        return text
+        return ShownFile(real, size, identity, modified, "text", text, truncated=not whole)
 
     # --- references (V3-P76 §3) ----------------------------------------------------------
 
@@ -393,7 +186,7 @@ class Explorer:
                         sha256: str | None) -> FileReference:
         """A reference the server builds from the file itself (§3.2): the file
         must still have the identity it had when the user selected, and the
-        text at ``start``–``end`` (UTF-16, the editor's positions, each line
+        text at ``start``–``end`` (UTF-16, the page's positions, each line
         break one "\\n") must hash to ``sha256``; otherwise ``reference_stale``. The whole file (no
         range) is named only: no excerpt, nothing read beyond its identity."""
         result, fds = await self._call(runner.OPEN, {"path": self._path(path), "cwd": "/"})
@@ -414,7 +207,7 @@ class Explorer:
             raise ExplorerRefused("too_large", f"{name} is over 1 MiB: point at the whole file instead.")
         data = await self._read(fd, size + 1)  # takes the fd
         try:
-            # The editor's text: CodeMirror counts every line break (\r\n, \r, \n) as one "\n".
+            # The text as the page shows it: every line break (\r\n, \r, \n) is one "\n".
             units = re.sub(r"\r\n?", "\n", data.decode("utf-8")).encode("utf-16-le")
             selected = units[2 * start:2 * end].decode("utf-16-le")
             before = units[:2 * start].decode("utf-16-le")

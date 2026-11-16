@@ -48,7 +48,7 @@ def main() -> None:
                                         {"name": "nested", "kind": "directory", "size": None, "modified": 0},
                                         {"name": "note.txt", "kind": "file", "size": 12, "modified": 0}]}
                         elif url.path.endswith("/file"):
-                            data = {"path": path, "kind": "text", "text": "touch note\n", "editable": True,
+                            data = {"path": path, "kind": "text", "text": "touch note\n",
                                     "size": 11, "identity": [1, 2, 3, 4], "modified": 0, "truncated": False}
                         elif url.path.endswith("/conversations"):
                             data = {"path": path, "own": False, "refused": None, "above": [], "conversations": []}
@@ -110,21 +110,15 @@ def main() -> None:
                         "e => getComputedStyle(e).borderBottomColor === 'rgba(0, 0, 0, 0)'")
                     body.get_by_title("/home/demo/nested", exact=True).click()
                     body.get_by_title("/home/demo/nested/note.txt", exact=True).click()
-                    expect(panel.locator(".cm-content")).to_contain_text("touch note")
+                    expect(panel.locator(".files-text")).to_contain_text("touch note")
                     file_control("Go back in files").click()
                     expect(body.get_by_title("/home/demo/nested/nested", exact=True)).to_be_visible()
                     file_control("Go to parent folder").click()
                     expect(body.get_by_title("/home/demo/note.txt", exact=True)).to_be_visible()
                     page.keyboard.press("Escape")
                     body.get_by_title("/home/demo/note.txt", exact=True).click()
-                    editor = panel.locator(".cm-content")
-                    editor.click()
-                    editor.press("ControlOrMeta+End")
-                    page.keyboard.type("unsaved")
-                    file_control("Go back in files").click()
-                    expect(page.locator("#confirm-dialog")).to_be_visible()
-                    page.locator("#confirm-dialog").get_by_role("button", name="Cancel", exact=True).click()
-                    expect(editor).to_contain_text("unsaved")
+                    editor = panel.locator(".files-text")  # the file shown: it stays through every layout below
+                    expect(editor).to_contain_text("touch note")
                     page.keyboard.press("Escape")
                     next_mode(modes[1])
                     expect(page.locator("#main")).to_be_hidden()
@@ -132,7 +126,7 @@ def main() -> None:
                     next_mode(modes[2])
                     expect(page.locator("#main")).to_be_visible()
                     expect(page.locator("#composer-text")).to_have_value("draft to keep")
-                    expect(editor).to_contain_text("unsaved")
+                    expect(editor).to_contain_text("touch note")
                     page.wait_for_timeout(250)
                     chat_box = page.locator("#main").bounding_box()
                     file_box = panel.bounding_box()
@@ -143,11 +137,11 @@ def main() -> None:
                     expect(page.locator("#chat-menu-model-select")).to_be_visible()
                     expect(page.locator("#composer-text")).to_have_value("draft to keep")
                     next_mode(modes[0])
-                    expect(editor).to_contain_text("unsaved")
+                    expect(editor).to_contain_text("touch note")
                     # Rapid clicks skip an in-flight snapshot and commit each cycle once.
                     page.evaluate("for (let i = 0; i < 4; i++) document.getElementById('chat-files-toggle').click()")
                     expect(page.locator("#workspace-panes")).to_have_attribute("data-mode", modes[0])
-                    expect(editor).to_contain_text("unsaved")
+                    expect(editor).to_contain_text("touch note")
                     expect(page.locator("#composer-text")).to_have_value("draft to keep")
                     page.wait_for_timeout(250)
                     grip = page.locator("#file-panel-grip")
@@ -161,7 +155,7 @@ def main() -> None:
                     page.emulate_media(reduced_motion="reduce")
                     for mode in modes[1:] + modes[:1]:
                         next_mode(mode)
-                    expect(editor).to_contain_text("unsaved")
+                    expect(editor).to_contain_text("touch note")
                     page.emulate_media(reduced_motion="no-preference")
                     assert page.locator("#confirm-dialog").is_visible() is False
                     assert page.locator("#file-panel-expand, #file-panel-close").count() == 0
@@ -209,7 +203,7 @@ def main() -> None:
                             page.screenshot(path=str(args.screenshots / f"workspace-short-{width}.png"))
                         page.set_viewport_size({"width": 820, "height": 900})
                         expect(page.locator("#composer-text")).to_have_value("multiline draft\n" * 30)
-                    checks.append({"width": width, "file_back_and_up": True, "cancel_keeps_editor": True,
+                    checks.append({"width": width, "file_back_and_up": True, "file_stays_shown": True,
                                    "cycle": list(modes), "header_height_preserved": height,
                                    "draft_and_editor_survive_view_switch": True, "root_scroll": 0})
                     context.close()

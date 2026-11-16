@@ -278,39 +278,20 @@ const app = {
 
 const hubTray = new HubTray(api, () => followTitle()); // V3-P95: what the hub's coding agents wait on the user for
 
-/* The server's files (V3-P75 §3): one pane on the Files surface, one beside a conversation.
- * On the surface a folder opens its conversation (§6); beside one, it is attached to it. */
-const askFiles = (title, lines, action) => confirmAction(title, lines, action);
-// V3-P78 §4.1: a file open with unsaved text in the other pane: what was kept for it is not offered.
-const openUnsaved = (pane, path) => pane.doc !== null && pane.doc.path === path && pane.doc.dirty;
+/* The server's files (V3-P75 §3), shown only (V3-P99): one pane on the Files surface, one beside a
+ * conversation. On the surface a folder opens its conversation (§6); beside one, it is attached to it. */
 const filesSurface = new FilesPane({
-  api, el, confirm: askFiles,
-  keep: localStore, writer: `${localStore.WRITER}:files`, // unsaved text kept in this browser (V3-P78 §4.1)
-  openElsewhere: (path) => openUnsaved(filesPanel, path),
+  api, el,
   onAsk: (reference) => askFromFiles(reference),
   folderActions: (listing) => [openHereControl(listing.path)],
   folderRowActions: (path) => [["Open conversation", () => openFolderConversation(path, false)],
                                ["New conversation here", () => openFolderConversation(path, true)]],
 });
 const filesPanel = new FilesPane({
-  api, el, confirm: askFiles,
-  keep: localStore, writer: `${localStore.WRITER}:panel`,
-  openElsewhere: (path) => openUnsaved(filesSurface, path),
-  working: () => app.running, // HIMARI at work in this conversation (§7.3)
+  api, el,
   onAsk: (reference) => { // the conversation shown again, where its chip goes
     workspaceChat();
     addReference(reference);
-  },
-  actions: [$("file-panel-changes")],
-  changes: { // V3-P76 §5: each call names its conversation, fixed when it starts (PR #99 review C2)
-    of: () => app.conversationId,
-    list: async (of) => ({ ...(await api("GET", conversationChanges(of))), id: of }),
-    diff: (of, path) => api("GET", conversationChanges(of, `/diff?path=${encodeURIComponent(path)}`)),
-    accept: (of, paths) => api("POST", conversationChanges(of, "/accept"), paths ? { paths } : { all: true }),
-    revert: (of, path, seen) => api("POST", conversationChanges(of, "/revert"),
-                                    seen ? { path, seen: { exists: seen.exists, identity: seen.identity } } : { path }),
-    revertAll: (of) => api("POST", conversationChanges(of, "/revert-all"), {}),
-    seen: (list) => showChanges(list),
   },
   folderActions: (listing) => (attachable(listing.path) ? [attachHereButton(listing.path)] : []),
   folderRowActions: (path) => (attachable(path) ? [["Attach to this conversation", () => attachHere(path)]] : []),
@@ -390,9 +371,7 @@ function showLogin({ signingOut = false } = {}) {
   app.generation += 1;
   live.reset();
   leavePlace({ keep: !signingOut });
-  filesPanel.closeForSignIn({ keepText: !signingOut });
   filesPanel.file = null; // its conversation is opened again from Home
-  filesSurface.closeForSignIn({ keepText: !signingOut });
   showSurface("login");
   $("topbar-title").textContent = "HIMARI";
   $("server-info").hidden = true;
@@ -2416,12 +2395,9 @@ function applyDetail(detail) {
   $("composer-cancel").hidden = !detail.job.running;
   $("composer-cancel").disabled = stopping === "cancel";
   if (app.running !== detail.job.running) {
-    if (app.running && !detail.job.running) { // the turn's changes: listed, then shown in the panel
-      const panelShown = app.filesOpen && !$("file-panel").hidden;
-      loadChanges(app.generation).then(() => { if (panelShown) filesPanel.refresh(); });
-    }
+    // The turn may have changed files: what the panel shows is read again.
+    if (app.running && !detail.job.running && app.filesOpen && !$("file-panel").hidden) filesPanel.refresh();
     app.running = detail.job.running;
-    filesPanel.workingChanged();
     app.changedWhileRunning = false; // a new turn, or the end of the one it was changed in
     renderModel(); // "applies from the next message" only while that turn runs
   }
@@ -2528,7 +2504,6 @@ async function openConversation(id, { created = false, via = "push" } = {}) {
   filesPanel.folder = null;
   filesPanel.file = null; // the next opening starts at this conversation's working folder
   filesPanel.reset(); // nothing of the last conversation's still on its way is shown
-  showChanges(null);
   loadToolSources(generation);
   loadModel(generation);
   loadFolders(generation);
@@ -3140,13 +3115,6 @@ async function mayLeave() {
     if (!(await confirmAction("A file is still uploading", ["Leave and cancel it? Files that finished stay in "
                                                           + "your message."], "Leave"))) return false;
     cancelUploads();
-  }
-  // The panel's file goes with its conversation; unsaved text there is dropped only if the user says so
-  // (V3-P75 §7). The Files surface keeps its own file across surfaces: nothing to ask for it here.
-  if (filesPanel.dirty) {
-    if (!(await filesPanel.mayLeave())) return false;
-    filesPanel.closeDoc();
-    filesPanel.file = null;
   }
   const instructions = !$("surface-instructions").hidden;
   if (instructions && app.instructionsSave) await app.instructionsSave; // a save under way ends first (N1)
@@ -3778,7 +3746,6 @@ function renderFolders(items) {
   app.conversationFolderPaths = items.map((item) => item.path).filter(Boolean);
   syncFilesPanel(!$("surface-chat").hidden);
   if (app.filesOpen && app.workingFolder && app.workingFolder !== before) openPanelStart();
-  if (app.workingFolder !== null && before === null) loadChanges(app.generation);
   const list = $("chat-menu-folders-list");
   list.replaceChildren();
   $("chat-menu-folders").hidden = items.length === 0;
@@ -4077,40 +4044,6 @@ function attachHereButton(path) {
   button.title = "HIMARI may then write here, and works in this folder";
   button.addEventListener("click", () => attachHere(path));
   return button;
-}
-
-/* -------------------------------------------- HIMARI's changes (V3-P76 §5) */
-
-function conversationChanges(of, tail = "") {
-  return `/api/conversations/${encodeURIComponent(of)}/changes${tail}`;
-}
-
-/* The count in the panel's head (and a dot on its toggle while it is closed), and the rows' dots. */
-function showChanges(list) {
-  if (list !== null && list.id !== app.conversationId) return;
-  const count = list === null ? 0 : list.items.length + list.hidden;
-  const button = $("file-panel-changes");
-  button.hidden = count === 0;
-  button.textContent = `Changes ${count}`;
-  const stuck = list !== null && list.items.some((item) => !item.revertible);
-  button.classList.toggle("is-warn", stuck);
-  button.title = stuck ? "Files HIMARI changed, to review: some cannot be reverted" : "Files HIMARI changed, to review";
-  $("chat-files-toggle").classList.toggle("has-changes", count > 0);
-  filesPanel.markChanged(list);
-}
-
-/* Read again at a conversation's opening and at the end of each turn (display only). */
-async function loadChanges(generation) {
-  if (app.workingFolder === null) {
-    showChanges(null);
-    return;
-  }
-  try {
-    const list = await filesPanel.changes.list(app.conversationId);
-    if (generation === app.generation) showChanges(list);
-  } catch (ignored) {
-    /* the conversation works without it */
-  }
 }
 
 /* The panel beside a conversation that works on this server's folders. */
@@ -4700,7 +4633,6 @@ async function boot() {
   // V3-P78 §3.3: what waits to be kept goes now (Safari may not finish it; the short delay is the guarantee).
   const keepNow = () => {
     if (app.placeTouched && typeof app.place === "string") drafts.set(app.place, composerDraft());
-    for (const pane of [filesPanel, filesSurface]) pane.keepNow();
   };
   window.addEventListener("pagehide", keepNow);
   document.addEventListener("visibilitychange", () => {
@@ -4715,13 +4647,12 @@ async function boot() {
   // §5.3: another tab signed out — nothing of this one is kept or written either.
   localStore.onWiped(() => { // signed out like that tab: to sign in again, where writes open again (PR #106 review B3)
     drafts.clear();
-    filesSurface.closeForSignIn({ keepText: false }); // also when the sign-in screen shows already (re-review N3)
     showLogin({ signingOut: true });
   });
   window.addEventListener("beforeunload", (event) => {
     const unsaved = app.instructionsDraft !== null
       || (!$("surface-instructions").hidden && (instructionsDirty() || personaDirty()))
-      || memoryDirty() || filesSurface.dirty || filesPanel.dirty;
+      || memoryDirty();
     if (!unsaved) return;
     event.preventDefault(); // unsaved: the browser asks
     event.returnValue = ""; // older Chrome and some webviews ask only with this
@@ -4755,7 +4686,6 @@ async function boot() {
   restorePanelWidth();
   $("nav-files").addEventListener("click", () => showFiles().catch((e) => status(e.message, "error")));
   $("chat-files-toggle").addEventListener("click", toggleFilesPanel);
-  $("file-panel-changes").addEventListener("click", () => filesPanel.openChanges());
   $("file-panel-grip").addEventListener("pointerdown", dragPanel);
   $("file-panel-grip").addEventListener("keydown", nudgePanel);
   new ResizeObserver(() => syncModelChrome()).observe($("topbar"));

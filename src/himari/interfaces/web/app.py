@@ -91,7 +91,6 @@ from himari.bootstrap.application import (
     FolderConversations,
     ReferenceRequest,
 )
-from himari.bootstrap.changes import ChangeConflict, ChangeDiff, ChangesView
 from himari.bootstrap.companion import origin_view
 from himari.bootstrap.screens import Answer
 from himari.bootstrap.proactive import ProactiveRefused, loop_moment
@@ -201,7 +200,6 @@ STATIC_FILES = {"app.css": "text/css", "app.js": "text/javascript",
                 "rich_text.js": "text/javascript", "appearance.js": "text/javascript", "live.js": "text/javascript",
                 "files.js": "text/javascript",  # the file explorer's parts (V3-P75 §3)
                 "local_store.js": "text/javascript", "drafts.js": "text/javascript",  # kept in the browser (V3-P78 §5)
-                "codemirror/codemirror.js": "text/javascript",  # the web editor (V3-P75 §7.6), loaded on first use
                 # KaTeX for the formulas in assistant text, loaded by rich_text.js on the first one.
                 "katex/katex.min.js": "text/javascript", "katex/katex.min.css": "text/css"}
 KATEX_FONTS = ("AMS-Regular", "Caligraphic-Bold", "Caligraphic-Regular", "Fraktur-Bold", "Fraktur-Regular",
@@ -527,53 +525,6 @@ IdentityIn = Annotated[list[Annotated[str, Field(pattern=r"^[0-9]{1,20}$")] | in
 
 def identity_out(identity: Iterable[object]) -> list[str]:
     return [str(v) for v in identity]
-
-
-class SaveFileBody(_Body):
-    """A file saved from the web editor (V3-P75 §7.7): its whole text, and its identity as it was read."""
-
-    path: str = Field(min_length=1, max_length=4096)
-    content: str  # at most 1 MiB as UTF-8 (the explorer checks)
-    expected: IdentityIn
-
-
-class RecreateFileBody(_Body):
-    """V3-P78 §4.2: the editor's text as a new file where the file it was editing is gone."""
-
-    path: str = Field(min_length=1, max_length=4096)
-    content: str  # at most 1 MiB as UTF-8 (the explorer checks)
-
-
-class NewPathBody(_Body):
-    """A new empty file or folder (V3-P75 §7.5, §7.7)."""
-
-    path: str = Field(min_length=1, max_length=4096)
-
-
-class DeleteFileBody(_Body):
-    path: str = Field(min_length=1, max_length=4096)
-    expected: IdentityIn
-
-
-class FileStateIn(_Body):
-    """A file as the owner saw it (V3-P76 §6): there, with this identity, or not there."""
-
-    exists: bool
-    identity: IdentityIn | None = None
-
-
-class AcceptChangesBody(_Body):
-    """Accept the agent's changes of ``paths``, or ``all`` of them (the hidden ones too)."""
-
-    paths: list[Annotated[str, Field(min_length=1, max_length=4096)]] = Field(default_factory=list, max_length=1000)
-    all: bool = False
-
-
-class RevertChangeBody(_Body):
-    """Revert one file; ``seen``: after a conflict, the state shown, to revert anyway if it is still so."""
-
-    path: str = Field(min_length=1, max_length=4096)
-    seen: FileStateIn | None = None
 
 
 class FolderConversationBody(_Body):
@@ -1130,11 +1081,9 @@ FILE_REFUSALS: dict[DataErrorCode, tuple[int, str, str]] = {
 }
 UPLOAD_PATH = re.compile(r"^/api/conversations/[^/]+/uploads$")
 SCREEN_PATH = re.compile(r"^/api/device/screens/[^/]+$")  # V3-P91 §4.2: a screen of at most SCREEN_MAX_BYTES
-SAVE_BODY_BYTES = 3 * 1024 * 1024  # a saved file of 1 MiB as JSON, escapes included (V3-P75 §7.7)
 SURFACE_PATHS = ("/files", "/trash", "/settings/instructions", "/settings/memory", "/settings/folders",
                  "/settings/devices")  # V3-P79 §3.1, V3-P83
 PAGE_ID = re.compile(r"[A-Za-z0-9_-]{1,128}")  # a conversation's id in /c/<id>
-SAVE_ROUTES = {("PUT", "/api/machine/file"), ("POST", "/api/machine/file/install")}  # V3-P78 §4.2: the same text
 GENERATION_HEADER = "X-Himari-Connection-Generation"  # V3-P93 §6.1.2: a device SSE stream's generation id
 
 def workspace_view(workspace: RegisteredWorkspace) -> dict[str, Any]:
@@ -1167,35 +1116,16 @@ def folder_conversations_view(folder: FolderConversations) -> dict[str, Any]:
 def shown_file_view(shown: ShownFile) -> dict[str, Any]:
     """V3-P75 §5.2: text as text; an image or other file by its kind only."""
     return {"path": shown.path, "size": shown.size, "identity": identity_out(shown.identity), "modified": shown.modified,
-            "kind": shown.kind, "text": shown.text, "truncated": shown.truncated, "editable": shown.editable}
-
-
-def changes_view(changes: ChangesView, running: bool) -> dict[str, Any]:
-    """V3-P76 §5: the agent's changes not yet reviewed; the hidden ones counted only (§10)."""
-    return {"items": [{"path": c.path, "name": posixpath.basename(c.path), "kind": c.kind, "state": c.state,
-                       "interleaved": c.interleaved, "count": c.count, "revertible": c.revertible,
-                       "changed_at": _time(c.changed_at)} for c in changes.items],
-            "hidden": changes.hidden, "commands_ran": _time(changes.commands_ran), "running": running}
-
-
-def file_state_out(identity: tuple[int, ...] | None) -> dict[str, Any]:
-    return {"exists": bool(identity), "identity": identity_out(identity) if identity else None}
-
-
-def change_diff_view(diff: ChangeDiff) -> dict[str, Any]:
-    return {"path": diff.path, "name": posixpath.basename(diff.path), "kind": diff.kind, "state": diff.state,
-            "revertible": diff.state == "ok", "changed": diff.changed,
-            "interleaved": diff.interleaved, "before": {"state": diff.before.state, "text": diff.before.text},
-            "now": {**file_state_out(diff.now.identity), "text": diff.now.text}}
+            "kind": shown.kind, "text": shown.text, "truncated": shown.truncated}
 
 
 # How a refused explorer request answers (V3-P75 §5): the runner's category → HTTP status. too_large is
 # 422, not 413: the body limit middleware turns every 413 into "request_too_large".
 EXPLORER_STATUS = {"not_found": 404, "access": 403, "outside_workspaces": 403, "too_large": 422,
-                   "changed": 409, "exists": 409, "versions_unavailable": 507, "reference_stale": 409,
+                   "changed": 409, "exists": 409, "reference_stale": 409,
                    "unavailable": 503, "setup_failed": 503, "timed_out": 504, "invalid": 400, "is_directory": 400,
                    "not_directory": 400, "not_regular": 415, "links": 400, "other": 500,
-                   "unsupported": 422, "busy": 409, "not_revertible": 409, "outdated": 409}
+                   "unsupported": 422}
 
 
 def attached_view(folder: AttachedFolder) -> dict[str, Any]:
@@ -1450,12 +1380,6 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
         return JSONResponse({"error": {"code": error.category, "message": str(error)}},
                             status_code=EXPLORER_STATUS.get(error.category, 400))
 
-    @app.exception_handler(ChangeConflict)
-    async def change_conflict(request: Request, error: ChangeConflict) -> JSONResponse:
-        """V3-P76 §6: not reverted; ``now`` is what the file is, to revert anyway with as ``seen``."""
-        return JSONResponse({"error": {"code": "changed", "message": str(error), "now": file_state_out(error.now),
-                                       "interleaved": error.interleaved}}, status_code=409)
-
     @app.exception_handler(UnknownToolSource)
     async def unknown_source(request: Request, error: UnknownToolSource) -> JSONResponse:
         return JSONResponse({"error": {"code": "not_found", "message": "No such tool source."}}, status_code=404)
@@ -1667,60 +1591,6 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
                 "created": created}
 
     # -- the editor (V3-P75 §7): the owner's own writes, anywhere but hidden paths ------------
-
-    @app.put("/api/machine/file")
-    async def save_file(body: SaveFileBody, request: Request, who: PrincipalId = Depends(principal)) -> dict[str, Any]:
-        saved = await himari(request).explorer(who).save(body.path, body.content.encode("utf-8", "surrogatepass"),
-                                                          [int(v) for v in body.expected])
-        return {"path": saved.path, "identity": identity_out(saved.identity), "previous_kept": saved.previous_kept}
-
-    @app.post("/api/machine/file", status_code=201)
-    async def create_file(body: NewPathBody, request: Request, who: PrincipalId = Depends(principal)) -> dict[str, Any]:
-        path, identity = await himari(request).explorer(who).create_file(body.path)
-        return {"path": path, "identity": identity_out(identity)}
-
-    @app.post("/api/machine/file/install", status_code=201)
-    async def recreate_file(body: RecreateFileBody, request: Request,
-                            who: PrincipalId = Depends(principal)) -> dict[str, Any]:
-        path, identity = await himari(request).explorer(who).recreate(
-            body.path, body.content.encode("utf-8", "surrogatepass"))
-        return {"path": path, "identity": identity_out(identity) if identity is not None else None}
-
-    @app.post("/api/machine/folder", status_code=201)
-    async def make_folder(body: NewPathBody, request: Request, who: PrincipalId = Depends(principal)) -> dict[str, Any]:
-        return {"path": await himari(request).explorer(who).make_folder(body.path)}
-
-    @app.post("/api/machine/file/delete")
-    async def delete_machine_file(body: DeleteFileBody, request: Request,
-                                  who: PrincipalId = Depends(principal)) -> dict[str, Any]:
-        path, kept = await himari(request).explorer(who).delete(body.path, [int(v) for v in body.expected])
-        return {"path": path, "previous_kept": kept}
-
-    @app.get("/api/machine/versions")
-    async def list_versions(request: Request, path: str, who: PrincipalId = Depends(principal)) -> dict[str, Any]:
-        """A file's previous versions (§7.4), newest first. ``path``: its real path, as saved."""
-        versions = await himari(request).explorer(who).previous(path)
-        return {"items": [{"id": v.version_id, "saved_at": _time(v.saved_at), "size": v.size, "reason": v.reason}
-                          for v in versions]}
-
-    @app.get("/api/machine/versions/deleted")
-    async def deleted_files(request: Request, path: str, who: PrincipalId = Depends(principal)) -> dict[str, Any]:
-        """Files deleted from the folder ``path`` whose content is kept (PR #95 review B3), latest first."""
-        found = await himari(request).explorer(who).deleted(path)
-        return {"items": [{"path": p, "name": posixpath.basename(p), "id": v.version_id, "saved_at": _time(v.saved_at),
-                           "size": v.size} for p, v in found]}
-
-    @app.get("/api/machine/versions/{version_id}")
-    async def read_version(version_id: str, request: Request, path: str,
-                           who: PrincipalId = Depends(principal)) -> dict[str, Any]:
-        return {"text": await himari(request).explorer(who).previous_text(path, version_id)}
-
-    @app.post("/api/machine/versions/{version_id}/restore", status_code=201)
-    async def restore_version(version_id: str, body: NewPathBody, request: Request,
-                              who: PrincipalId = Depends(principal)) -> dict[str, Any]:
-        """A deleted file put back in one step (V3-P76 §4.1): 409 changed if the name is taken, 422 unsupported
-        where the file system cannot."""
-        return {"path": await himari(request).explorer(who).restore(body.path, version_id)}
 
     @app.get("/api/machine/stat")
     async def stat_path(request: Request, path: str, who: PrincipalId = Depends(principal)) -> dict[str, Any]:
@@ -2222,49 +2092,6 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
                                                    body.arguments)
         return {"text": text}
 
-    # -- the review of the agent's file changes (V3-P76 §5, §6) ------------------------------
-
-    @app.get("/api/conversations/{conversation_id}/changes")
-    async def file_changes(conversation_id: str, request: Request,
-                           who: PrincipalId = Depends(principal)) -> dict[str, Any]:
-        application, scope = himari(request), scope_of(conversation_id, who)
-        changes = await application.file_changes(scope)
-        return changes_view(changes, application.runner.shown_status(scope).running)
-
-    @app.get("/api/conversations/{conversation_id}/changes/diff")
-    async def file_change_diff(conversation_id: str, path: str, request: Request,
-                               who: PrincipalId = Depends(principal)) -> dict[str, Any]:
-        return change_diff_view(await himari(request).file_change_diff(scope_of(conversation_id, who), path))
-
-    @app.post("/api/conversations/{conversation_id}/changes/accept")
-    async def accept_file_changes(conversation_id: str, body: AcceptChangesBody, request: Request,
-                                  who: PrincipalId = Depends(principal)) -> dict[str, Any]:
-        if body.all == bool(body.paths):
-            raise ApiError(400, "invalid_argument", "Give the paths to accept, or all.")
-        await himari(request).accept_file_changes(scope_of(conversation_id, who), None if body.all else body.paths)
-        return {"accepted": True}
-
-    @app.post("/api/conversations/{conversation_id}/changes/revert")
-    async def revert_file_change(conversation_id: str, body: RevertChangeBody, request: Request,
-                                 who: PrincipalId = Depends(principal)) -> dict[str, Any]:
-        seen = None
-        if body.seen is not None:
-            if body.seen.exists != (body.seen.identity is not None):
-                raise ApiError(400, "invalid_argument", "A file seen is there with its identity, or not there.")
-            seen = tuple(int(v) for v in body.seen.identity) if body.seen.identity is not None else ()
-        await himari(request).revert_file_change(scope_of(conversation_id, who), body.path, seen)
-        return {"reverted": True}
-
-    @app.post("/api/conversations/{conversation_id}/changes/revert-all")
-    async def revert_all_file_changes(conversation_id: str, request: Request,
-                                      who: PrincipalId = Depends(principal)) -> dict[str, Any]:
-        """Each shown file in turn; the ones left (changed since, refused, or
-        not revertible) and why, and how many hidden ones were left."""
-        done = await himari(request).revert_all_file_changes(scope_of(conversation_id, who))
-        return {"left": [{"path": path, "code": why.category if isinstance(why, ExplorerRefused) else "changed",
-                          "message": str(why)} for path, why in done.left],
-                "hidden": done.hidden}
-
     @app.post("/api/conversations/{conversation_id}/messages", status_code=202)
     async def send_message(conversation_id: str, body: MessageBody, request: Request,
                            by: Caller = Depends(caller)) -> dict[str, Any]:
@@ -2707,8 +2534,7 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
 
     # Outer → inner: headers, Host, Origin, body size, routes.
     app.add_middleware(BodyLimitMiddleware, exempt=lambda method, path: method == "POST" and bool(UPLOAD_PATH.match(path)),
-                       larger=lambda method, path: SAVE_BODY_BYTES if (method, path) in SAVE_ROUTES
-                       else PAIR_BODY_BYTES if method == "POST" and path == PAIR_PATH
+                       larger=lambda method, path: PAIR_BODY_BYTES if method == "POST" and path == PAIR_PATH
                        else SCREEN_MAX_BYTES if method == "POST" and SCREEN_PATH.match(path) else None)
     app.add_middleware(OriginGuardMiddleware, allowed_origins=config.allowed_origins)
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=sorted(config.allowed_hosts))

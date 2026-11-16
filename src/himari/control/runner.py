@@ -9,10 +9,7 @@ is refused with CLOSED — then waits for those inputs to be accepted and for
 a running job, cancelled, to end. The runner checks no permission: it is
 told to close only a Conversation whose owner was checked.
 
-Holding (V3-P76 §6): ``hold`` keeps a Conversation from starting work
-while the owner accepts or reverts its file changes — refused with BUSY
-when a job runs or an input is being accepted, and every submit and start
-meanwhile is refused with BUSY; nothing is cancelled. With
+With
 ``unattended_runs``, a drive that has run that many Runs while no client
 read the Conversation (``seen`` within ``seen_seconds``) is asked to pause,
 with the reason (§5). Seen means a connected client, not a person watching.
@@ -36,8 +33,7 @@ import asyncio
 import bisect
 import logging
 import time
-from collections.abc import Awaitable, Callable, Iterator, Sequence
-from contextlib import contextmanager
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime
 
@@ -160,7 +156,6 @@ class BackgroundRunner:
         self._closed: set[ConversationId] = set()  # V3-P65: taking no work
         self._wake_jobs: dict[_Key, str] = {}  # V3-P87: the running (or last) job's wake, by Conversation
         self._origins: dict[_Key, MessageOrigin | None] = {}  # the running job's origin, for a later reveal
-        self._held: set[ConversationId] = set()  # V3-P76: starting no work for now
         self._admitting: dict[ConversationId, int] = {}  # inputs inside driver.accept
         self._admitted: dict[ConversationId, asyncio.Event] = {}  # set when the last one is done
         self._live: dict[_Key, _Live] = {}  # V3-P73 §5.2: the latest streamed Run of the job
@@ -249,23 +244,6 @@ class BackgroundRunner:
     def _check_open(self, scope: TrustedScope) -> None:
         if scope.conversation_id in self._closed:
             raise ControlError(ControlErrorCode.CLOSED, scope.conversation_id)
-        if scope.conversation_id in self._held:
-            raise ControlError(ControlErrorCode.BUSY, scope.conversation_id)
-
-    @contextmanager
-    def hold(self, scope: TrustedScope) -> Iterator[None]:
-        """V3-P76 §6: no work starts in this Conversation inside. BUSY if a
-        job runs, an input is being accepted, or it is held already; CLOSED
-        if it is closed. Synchronous: no job starts between the check and the hold."""
-        conversation_id = scope.conversation_id
-        self._check_open(scope)
-        if self._running_in(conversation_id) or self._admitting.get(conversation_id):
-            raise ControlError(ControlErrorCode.BUSY, conversation_id)
-        self._held.add(conversation_id)
-        try:
-            yield
-        finally:
-            self._held.discard(conversation_id)
 
     def _admit(self, conversation_id: ConversationId, change: int = 1) -> None:
         count = self._admitting.get(conversation_id, 0) + change

@@ -1,117 +1,22 @@
 /* The file explorer's parts (V3-P75 §3): a folder list and a file view in
  * one pane, placed by the caller — the main area (Files in the sidebar) or
- * the panel beside a conversation.
+ * the panel beside a conversation. It only shows (V3-P99): nothing here
+ * writes, makes or deletes a file.
  *
- * Every name, path and file text goes in with textContent (or into the
- * editor as its text). A file's bytes are never shown as they are: text as
- * text, an image as the copy the server's image sandbox made, anything else
- * as a download (an attachment).
- *
- * The editor (§7): a text file of at most 1 MiB opens in CodeMirror, loaded
- * on first use. A save sends the identity the text was read with; one made
- * on disk since is never overwritten without the user choosing to (compare,
- * load the disk's, or save theirs over it). Every save and delete keeps the
- * previous version on the server; the ⋯ menu lists them to compare and to
- * put back. Unsaved text is not dropped without asking.
+ * Every name, path and file text goes in with textContent. A file's bytes
+ * are never shown as they are: text as text, an image as the copy the
+ * server's image sandbox made, anything else as a download (an attachment).
  *
  * Ask HIMARI (V3-P76 §3): a selection, or the whole file, handed to the
  * place as a reference — the file's path and identity, and for a selection
- * its positions and the SHA-256 of its text, never the text. Saved text only.
- *
- * Changes (V3-P76 §5, §6), beside a conversation: the files HIMARI changed
- * there and the user has not reviewed — each with a diff of what it was
- * before and what it is now, to accept or revert; a dot on their rows.
+ * its positions and the SHA-256 of its text, never the text.
  */
 
 const KIND_ICON = { directory: "#side-folder", file: "#side-note" };
-const EDIT_MAX_BYTES = 1024 * 1024; // the server's limit for the editor (§7.7, Q3)
-const POLL_MS = 5000; // how often an open file is checked on disk (§5.3)
-const KEEP_MS = 1000; // unsaved text kept in this browser once typing settles (V3-P78 §4.1)
-const NOTE_MS = 6000; // how long a note beside the file's name stays before "Unsaved"/"Saved" again
-const KEPT_MAX = 20; // V3-P78 Q3: files with unsaved text kept, for at most 30 days
-const KEPT_AGE_MS = 30 * 24 * 3600 * 1000;
-const CHANGE_KINDS = { created: "made by HIMARI", changed: "changed by HIMARI", deleted: "deleted by HIMARI",
-                       none: "made and deleted by HIMARI", unknown: "HIMARI may have changed it" };
-const CHANGE_STATES = { no_version: "its previous version could not be kept",
-                        uncertain: "whether or how HIMARI changed it is unknown",
-                        expired: "its previous version has expired" };
-// What a previous version was kept before (V3-P75 §7.4; V3-P76 §4.2: the agent's, and a revert).
-const VERSION_REASONS = { save: "before a save", delete: "before a delete", revert: "before a revert",
-                          agent: "before HIMARI changed it", agent_delete: "before HIMARI deleted it" };
 
-/* Line breaks: CodeMirror reads \r\n, \r and \n each as one "\n" (V3-P76 §12.2), so the editor's text is
- * compared in that form, and a save writes the file's own break back — the one most of its lines end with. */
-function editorText(text) {
+/* A file's text as its positions count it (V3-P76 §12.2): \r\n, \r and \n each one "\n". */
+function shownText(text) {
   return text.replace(/\r\n?/g, "\n");
-}
-
-function lineBreakOf(text) {
-  const crlf = (text.match(/\r\n/g) || []).length;
-  const cr = (text.match(/\r(?!\n)/g) || []).length;
-  const lf = (text.match(/\n/g) || []).length - crlf;
-  if (crlf > lf && crlf >= cr) return "\r\n";
-  return cr > lf ? "\r" : "\n";
-}
-
-function fileText(text, lineBreak) {
-  return lineBreak === "\n" ? text : text.replace(/\n/g, lineBreak);
-}
-
-/* What a revert of all left (PR #98 review C3): each file and why, and the hidden ones counted. */
-function revertedAll({ left, hidden }) {
-  if (!left.length && !hidden) return "Reverted.";
-  const why = (item) => ({ changed: "changed since", not_revertible: "cannot be reverted" })[item.code] || item.message;
-  const parts = left.map((item) => `${item.path.slice(item.path.lastIndexOf("/") + 1)} (${why(item)})`);
-  if (hidden) parts.push(`${hidden} in ${hidden === 1 ? "a file" : "files"} hidden now`);
-  return `Reverted all but ${parts.join(", ")}.`;
-}
-
-function defaultConfirm(title, lines) { // the browser's own: no action label
-  return Promise.resolve(window.confirm([title, ...lines].join("\n\n")));
-}
-
-function clock(ms) {
-  return new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-}
-
-/* ``text`` saved by the browser as a file called ``name`` (V3-P78 §4.2): nothing goes to the server. */
-function downloadText(text, name) {
-  if (typeof document === "undefined" || typeof URL === "undefined" || !URL.createObjectURL) return;
-  const link = document.createElement("a");
-  link.href = URL.createObjectURL(new Blob([text], { type: "application/octet-stream" }));
-  link.download = name;
-  document.body.append(link);
-  link.click();
-  link.remove();
-  setTimeout(() => URL.revokeObjectURL(link.href), 60000);
-}
-
-/* ``change()`` replaces the editor's whole text (HIMARI changed the file): the cursor, the selection and the
- * scroll stay where they were (cut to the new text), and the focus is not taken. */
-function keepingPlace(editor, change) {
-  const view = editor.view;
-  if (!view || !view.state) {
-    change();
-    return;
-  }
-  const { anchor, head } = view.state.selection.main;
-  // CodeMirror's own snapshot (the line at the top and its offset) where it has one: pixels measured on the old
-  // heights may land elsewhere once the text changed (review N2).
-  const snapshot = typeof view.scrollSnapshot === "function" ? view.scrollSnapshot() : null;
-  const scroll = view.scrollDOM ? view.scrollDOM.scrollTop : 0;
-  change();
-  const length = view.state.doc.length;
-  const selection = { anchor: Math.min(anchor, length), head: Math.min(head, length) };
-  if (snapshot) {
-    view.dispatch({ selection, effects: snapshot });
-  } else {
-    view.dispatch({ selection });
-    if (view.scrollDOM) view.scrollDOM.scrollTop = scroll;
-  }
-}
-
-function sameIdentity(a, b) {
-  return Array.isArray(a) && Array.isArray(b) && a.length === b.length && a.every((v, i) => v === b[i]);
 }
 
 /* The SHA-256 of ``text``'s UTF-8, as hex (the browser's SubtleCrypto: a secure page only). */
@@ -157,41 +62,51 @@ function query(path) {
   return `path=${encodeURIComponent(path)}`;
 }
 
+/* [line, column] of a position in ``text``, both from 1. */
+function lineAt(text, position) {
+  const before = text.slice(0, position);
+  const line = before.split("\n").length;
+  return [line, position - (before.lastIndexOf("\n") + 1) + 1];
+}
+
+/* What of ``text`` (shown in ``pre``, one span a line) the user selected: {from, to, text}, or null. */
+export function selectionIn(pre, text, selection) {
+  if (!selection || selection.rangeCount === 0 || selection.isCollapsed) return null;
+  const range = selection.getRangeAt(0);
+  if (!pre.contains(range.startContainer) || !pre.contains(range.endContainer)) return null;
+  const upTo = document.createRange();
+  upTo.selectNodeContents(pre);
+  upTo.setEnd(range.startContainer, range.startOffset);
+  const from = Math.min(upTo.toString().length, text.length);
+  const to = Math.min(from + range.toString().length, text.length); // never the break shown after a last line without one
+  return from < to ? { from, to, text: text.slice(from, to) } : null;
+}
+
+/* The DOM place of a position in the text ``pre`` shows. */
+function placeIn(pre, position) {
+  let left = position;
+  for (const line of pre.children) {
+    const node = line.firstChild;
+    const length = node ? node.length : 0;
+    if (node && left <= length) return [node, left];
+    left -= length;
+  }
+  const last = pre.lastElementChild && pre.lastElementChild.firstChild;
+  return last ? [last, last.length] : [pre, 0];
+}
+
 export class FilesPane {
   /* api(method, path) → JSON or throws {message, status, code}; el(tag, class, text). */
   /* folderActions(listing): the shown folder's own controls (V3-P75 §3.3, e.g.
    * "Open conversation"); folderRowActions(path): [label, action] pairs for a
    * folder row's ⋯ menu. Both from the place the pane is in. */
-  /* loadEditor(): the CodeMirror module (createEditor, createDiff); confirm(title, lines, action) → Promise<bool>;
-   * working(): HIMARI is at work in this place now (told beside the editor, §7.3).
-   * onAsk(reference): Ask HIMARI (V3-P76 §3.1) — {path, name, identity, whole} and, for a selection,
-   * {start, end, sha256, lines: [fromLine, fromColumn, toLine, toColumn]}; none: not offered here.
-   * changes: the review of HIMARI's changes (V3-P76 §5) — {of(), list(of), diff(of, path), accept(of, paths | null),
-   * revert(of, path, seen), revertAll(of), seen(list)}: of() the conversation shown now, and each call the API
-   * call of the conversation ``of`` it names (seen: told every list read); none: not offered here. */
-  /* keep: the browser's store of unsaved text (local_store.js: get, put, remove, prune; V3-P78 §4.1), none:
-   * nothing kept; writer: this pane in this tab, on what it keeps; openElsewhere(path): the file is open with
-   * unsaved text in this tab's other pane (its kept text is not offered here). */
+  /* onAsk(reference): Ask HIMARI (V3-P76 §3.1) — {path, name, identity, whole} and, for a selection,
+   * {start, end, sha256, lines: [fromLine, fromColumn, toLine, toColumn]}; none: not offered here. */
   constructor({ api, el, onOpenFolder = null, onOpenFile = null, actions = [], folderActions = null,
-                folderRowActions = null, loadEditor = () => import("/assets/codemirror/codemirror.js"),
-                confirm = defaultConfirm, working = () => false, onAsk = null, changes = null, keep = null,
-                writer = "", openElsewhere = () => false }) {
+                folderRowActions = null, onAsk = null }) {
     this.api = api;
     this.el = el;
-    this.loadEditor = loadEditor;
-    this.confirm = confirm;
-    this.working = working;
     this.onAsk = onAsk;
-    this.changes = changes;
-    this.keep = keep;
-    this.writer = writer;
-    this.openElsewhere = openElsewhere;
-    this.changed = new Set(); // the paths HIMARI changed, as the last list said: a dot on their rows
-    this.page = null; // "changes", or {path} of one change's diff, while one of them is shown
-    this.pageOf = null; // the conversation that page is of
-    this.reviewControls = []; // that page's accept and revert controls
-    this.pageDiff = null; // that diff's CodeMirror view
-    this.doc = null; // the file in the editor: {path, name, identity, saved, lineBreak, editor, dirty, saving, pollTimer, bar, revision}
     this.onOpenFolder = onOpenFolder;
     this.onOpenFile = onOpenFile;
     this.folderActions = folderActions;
@@ -228,20 +143,16 @@ export class FilesPane {
     this.home = null; // the user's home as the server resolves ~
     this.folder = null; // the folder shown, or the file's folder
     this.file = null; // the file shown
+    this.shown = null; // that file's text, when it is shown whole: {path, name, identity, text, pre}
     this.ticket = 0; // the latest request: an older answer is not applied
   }
 
-  /* The folder the pane shows (reloaded), or the file's, or the Changes shown. */
+  /* The folder the pane shows (reloaded), or the file. */
   get place() {
-    return this.page || this.file || this.folder;
+    return this.file || this.folder;
   }
 
-  /* Text typed in the editor and not saved. */
-  get dirty() {
-    return this.doc !== null && this.doc.dirty;
-  }
-
-  // A successful read commits a move. Cancelled, failed and stale reads never
+  // A successful read commits a move. Failed and stale reads never
   // consume the previous location; refreshes do not add duplicate entries.
   rememberLocation(path, kind, index = null) {
     const current = this.locations[this.locationIndex];
@@ -258,20 +169,18 @@ export class FilesPane {
 
   saveLocationScroll() {
     const here = this.locations[this.locationIndex];
-    if (here && here.kind === "folder" && !this.page && !this.locationFailed) {
-      this.folderScrolls.set(here.path, this.body.scrollTop);
-    }
+    if (here && here.kind === "folder" && !this.locationFailed) this.folderScrolls.set(here.path, this.body.scrollTop);
   }
 
   syncNavigation() {
-    this.backButton.disabled = this.backPending || this.locationIndex < (this.locationFailed || this.page ? 0 : 1);
+    this.backButton.disabled = this.backPending || this.locationIndex < (this.locationFailed ? 0 : 1);
     const here = this.locations[this.locationIndex];
     this.upButton.disabled = !here || (here.kind === "folder" && here.path === "/");
   }
 
   async back() {
     if (this.backButton.disabled) return;
-    const index = this.locationFailed || this.page ? this.locationIndex : this.locationIndex - 1;
+    const index = this.locationFailed ? this.locationIndex : this.locationIndex - 1;
     const target = this.locations[index];
     this.backPending = true;
     this.syncNavigation();
@@ -290,175 +199,15 @@ export class FilesPane {
     return this.openFolder(parent);
   }
 
-  /* Before anything replaces the editor: unsaved text is dropped only if the user says so. */
-  async mayLeave() {
-    if (!this.dirty) return true;
-    const doc = this.doc;
-    const discard = await this.confirm(`Discard your changes to ${doc.name}?`,
-                                       ["They are not saved. The file on the server stays as it was."], "Discard");
-    if (discard) this.dropKept(doc); // the user's own answer: what this pane kept goes too (V3-P78 §4.1, C4)
-    return discard;
-  }
-
-  closeDoc() {
-    if (this.pageDiff) this.pageDiff.destroy();
-    this.pageDiff = null;
-    this.page = null;
-    this.pageOf = null;
-    this.reviewControls = [];
-    if (this.doc === null) return;
-    clearTimeout(this.doc.pollTimer);
-    clearTimeout(this.doc.keepTimer);
-    clearTimeout(this.doc.noteTimer);
-    if (this.doc.editor) this.doc.editor.destroy();
-    this.doc = null;
-  }
-
-  /* The session ended (V3-P78 §6): unsaved text is kept in the browser now, and the editor closes without
-   * asking; reopening the file offers it back. */
-  closeForSignIn({ keepText = true } = {}) {
-    const doc = this.doc;
-    if (doc !== null && doc.dirty && keepText) this.keepNow(doc);
-    const open = this.doc !== null;
-    this.closeDoc();
-    if (open) this.body.replaceChildren();
-  }
-
-  /* ------------------------------------------------- unsaved text kept in the browser (V3-P78 §4.1) */
-
-  /* The editor's text changed: kept once typing settles while it differs from the saved text; this pane's
-   * record goes once it is the saved text again (N8). */
-  keepLater(doc) {
-    if (this.keep === null || doc.offer) return; // while Restore is offered, the only copy stays (C2)
-    clearTimeout(doc.keepTimer);
-    doc.keepTimer = setTimeout(() => {
-      if (this.doc !== doc) return;
-      if (doc.dirty) this.keepNow(doc);
-      else this.dropKept(doc);
-    }, KEEP_MS);
-  }
-
-  keepNow(doc = this.doc) {
-    if (this.keep === null || doc === null || doc.offer || !doc.dirty) return;
-    clearTimeout(doc.keepTimer);
-    this.keep.put("unsaved", doc.path, { kind: "text", path: doc.path, base: doc.identity, text: doc.editor.text(),
-                                         lineBreak: doc.lineBreak, at: Date.now(), writer: this.writer });
-    this.keep.prune("unsaved", KEPT_MAX, KEPT_AGE_MS);
-  }
-
-  /* What this pane kept for ``doc``'s file goes (saved, the server's version loaded, discarded). */
-  dropKept(doc) {
-    if (this.keep === null || doc === null) return;
-    clearTimeout(doc.keepTimer);
-    this.keep.remove("unsaved", doc.path, this.writer);
-  }
-
-  /* Text kept for ``path`` and not open unsaved in the other pane here, or null. */
-  async keptFor(path) {
-    if (this.keep === null || this.openElsewhere(path)) return null;
-    const kept = await this.keep.get("unsaved", path);
-    if (!kept || kept.kind !== "text" || typeof kept.text !== "string" || typeof kept.at !== "number"
-        || Date.now() - kept.at > KEPT_AGE_MS) return null;
-    return kept;
-  }
-
-  /* §4.1: "Unsaved changes … were kept" — Restore or Discard; the editor is read-only until one is picked. */
-  offerKept(doc, kept) {
-    doc.offer = kept;
-    doc.editor.setReadOnly(true);
-    const bar = doc.bar;
-    bar.replaceChildren(this.el("p", null, `Unsaved changes from ${clock(kept.at)} were kept in this browser.`));
-    bar.append(this.button("Restore", () => this.restoreKept(doc)),
-               this.button("Discard", () => this.discardKept(doc)));
-    bar.hidden = false;
-    this.paintState();
-  }
-
-  restoreKept(doc) {
-    const kept = doc.offer;
-    if (this.doc !== doc || !kept) return;
-    doc.offer = null;
-    doc.editor.setReadOnly(false);
-    this.hideBar();
-    doc.lineBreak = kept.lineBreak || doc.lineBreak;
-    const changed = Array.isArray(kept.base) && !sameIdentity(kept.base, doc.identity);
-    if (changed) doc.identity = kept.base; // a save meets the conflict bar: never over the newer version
-    doc.editor.setText(kept.text);
-    this.setDirty(doc.editor.text() !== doc.saved);
-    this.keepNow(doc); // this pane's from now on
-    if (changed) this.showChanged(false);
-  }
-
-  discardKept(doc) {
-    if (this.doc !== doc || !doc.offer) return;
-    doc.offer = null;
-    doc.editor.setReadOnly(false);
-    this.hideBar();
-    this.keep.remove("unsaved", doc.path); // the user's answer, whoever kept it
-    this.paintState();
-  }
-
-  /* §4.1: a file whose kept text cannot go back in the editor (gone, or no longer text it edits): the text
-   * can be saved as the file again (gone) or downloaded, or discarded. */
-  async offerKeptAside(path, ticket, gone) {
-    const kept = await this.keptFor(path);
-    if (kept === null || ticket !== this.ticket) return;
-    const name = path.slice(path.lastIndexOf("/") + 1);
-    const box = this.el("div", "files-bar");
-    box.append(this.el("p", null, gone
-      ? `This file is no longer on the server. Unsaved changes from ${clock(kept.at)} were kept in this browser.`
-      : `Unsaved text from ${clock(kept.at)} can't be put back here: this file is no longer text the editor opens.`));
-    const content = fileText(kept.text, kept.lineBreak || "\n");
-    if (gone) {
-      const again = this.button("Save it here again", async () => {
-        again.disabled = true; // one request (PR #106 review N2)
-        try {
-          await this.api("POST", "/api/machine/file/install", { path, content });
-          await this.keep.remove("unsaved", path);
-          if (ticket === this.ticket) await this.openFile(path);
-        } catch (error) {
-          if (ticket !== this.ticket) return;
-          if (error.code === "changed") { // a file of that name now: opened, with the kept text offered on it
-            await this.openFile(path);
-            return;
-          }
-          const lasting = ["not_found", "not_directory", "unsupported"].includes(error.code);
-          if (lasting) again.remove();
-          else again.disabled = false;
-          box.append(this.el("p", "files-note is-error", error.code === "unsupported"
-            ? "This folder can't take a new file safely from here; download your text."
-            : lasting ? "The folder is gone too; download your text." : error.message));
-        }
-      });
-      box.append(again);
-    }
-    box.append(this.button("Download my text", () => downloadText(content, name)),
-               this.button("Discard", () => { this.keep.remove("unsaved", path); box.remove(); }));
-    this.body.prepend(box);
-  }
-
-  /* Another conversation is shown (PR #99 review C2): no answer still on its way is applied, and a page of the
-   * last one's changes goes with its controls. */
+  /* Another conversation is shown (PR #99 review C2): no answer still on its way is applied. */
   reset() {
     this.ticket += 1;
     this.locations = [];
     this.locationIndex = -1;
     this.locationFailed = false;
     this.folderScrolls.clear();
+    this.shown = null;
     this.syncNavigation();
-    const page = this.page;
-    this.closeDoc();
-    if (!page) return;
-    this.tools.replaceChildren();
-    this.crumbs.replaceChildren();
-    this.body.replaceChildren();
-  }
-
-  /* HIMARI started or stopped: told beside the editor; a review page's controls wait while it works (§6). */
-  workingChanged() {
-    if (this.doc) this.paintState();
-    if (!this.page || !this.working()) return;
-    for (const control of this.reviewControls) control.disabled = true;
   }
 
   /* ~ as the server resolves it, so paths under it are shown from ~. */
@@ -470,14 +219,12 @@ export class FilesPane {
     } catch (ignored) { /* shown from / */ }
   }
 
-  /* Every move asks before unsaved text goes (mayLeave): none skips it (PR #95 re-review C1). */
   async openFolder(path, { keepScroll = false, historyIndex = null } = {}) {
-    if (!(await this.mayLeave())) return;
     this.saveLocationScroll();
     const scrolled = keepScroll && path === this.folder ? this.body.scrollTop : 0;
     const ticket = ++this.ticket;
-    this.closeDoc();
     this.file = null;
+    this.shown = null;
     this.busy(path);
     try {
       await this.learnHome();
@@ -528,20 +275,14 @@ export class FilesPane {
     const button = this.el("button", "files-open");
     button.type = "button";
     const kind = entry.kind === "directory" ? "directory" : "file";
-    const name = this.el("span", "files-name", entry.name);
-    button.append(icon(KIND_ICON[kind]), name);
-    if (this.changedUnder(path, kind === "directory")) {
-      const dot = this.el("span", "files-changed-dot");
-      dot.title = kind === "directory" ? "HIMARI changed files in here: see Changes" : "Changed by HIMARI: see Changes";
-      name.append(dot);
-    }
+    button.append(icon(KIND_ICON[kind]), this.el("span", "files-name", entry.name));
     const meta = [entry.kind === "file" ? humanSize(entry.size) : "", shortDate(entry.modified)].filter(Boolean);
     button.append(this.el("span", "files-meta", meta.join(" · ")));
     button.title = path;
     button.addEventListener("click", () => this.follow(path, entry.kind));
     li.append(button);
     const given = entry.kind === "directory" && this.folderRowActions ? this.folderRowActions(path) : [];
-    if (entry.kind === "file") li.append(this.menu(path, entry.name, [["Delete…", () => this.deleteFile(path)]], true));
+    if (entry.kind === "file") li.append(this.menu(path, entry.name, [], true));
     else if (given.length) li.append(this.menu(path, entry.name, given, false));
     else li.append(this.el("span", "files-actions-space")); // nothing to do with it here: no menu (PR #93 review N1)
     return li;
@@ -553,7 +294,6 @@ export class FilesPane {
   async follow(path, kind) {
     if (kind === "directory") return this.openFolder(path);
     if (kind !== "symlink") return this.openFile(path);
-    if (!(await this.mayLeave())) return null;
     const ticket = ++this.ticket;
     this.busy(path);
     try {
@@ -566,28 +306,30 @@ export class FilesPane {
     }
   }
 
-  /* A row's ⋯: the given actions, then (a file only) Download, and Copy path. */
-  menu(path, name, given, isFile) {
-    const actions = this.el("details", "conversation-actions files-actions");
+  /* A ⋯ menu: the given controls. */
+  actionMenu(label, className, controls) {
+    const actions = this.el("details", `conversation-actions files-actions${className ? ` ${className}` : ""}`);
     const toggle = this.el("summary");
     toggle.append(icon("#side-more"));
-    toggle.setAttribute("aria-label", `Actions for ${name}`);
-    toggle.title = `Actions for ${name}`;
+    toggle.setAttribute("aria-label", label);
+    toggle.title = label;
     const list = this.el("div", "conversation-action-list");
-    for (const [label, action] of given) {
-      const control = this.el("button", "link-button", label);
-      control.type = "button";
-      control.addEventListener("click", () => { actions.open = false; action(); });
-      list.append(control);
-    }
-    if (isFile) list.append(this.download(path, "Download"));
-    list.append(this.copyPath(path, () => { actions.open = false; }));
+    list.append(...controls(() => { actions.open = false; }));
     actions.append(toggle, list);
     actions.addEventListener("toggle", () => {
       if (!actions.open) return;
       for (const other of this.body.querySelectorAll("details[open]")) if (other !== actions) other.open = false;
     });
     return actions;
+  }
+
+  /* A row's ⋯: the given actions, then (a file only) Download, and Copy path. */
+  menu(path, name, given, isFile) {
+    return this.actionMenu(`Actions for ${name}`, "", (close) => [
+      ...given.map(([label, action]) => this.button(label, () => { close(); action(); })),
+      ...(isFile ? [this.download(path, "Download")] : []),
+      this.copyPath(path, close),
+    ]);
   }
 
   download(path, label) {
@@ -613,10 +355,8 @@ export class FilesPane {
   }
 
   async openFile(path, historyIndex = null) {
-    if (!(await this.mayLeave())) return;
     this.saveLocationScroll();
     const ticket = ++this.ticket;
-    this.closeDoc();
     this.busy(path);
     try {
       await this.learnHome();
@@ -624,78 +364,27 @@ export class FilesPane {
       if (ticket !== this.ticket) return;
       this.file = shown.path;
       this.folder = shown.path.slice(0, shown.path.lastIndexOf("/")) || "/";
+      this.shown = null;
       this.body.removeAttribute("aria-busy");
       this.paintCrumbs(shown.path, true);
+      this.body.replaceChildren(this.view(shown));
       this.paintTools(shown);
-      if (shown.kind === "text" && shown.editable) await this.edit(shown, ticket);
-      else this.body.replaceChildren(this.view(shown));
-      if (ticket !== this.ticket) return;
       this.rememberLocation(shown.path, "file", historyIndex);
-      if (!(shown.kind === "text" && shown.editable)) this.offerKeptAside(shown.path, ticket, false);
       if (this.onOpenFile) this.onOpenFile(shown);
       return true;
     } catch (error) {
-      if (ticket !== this.ticket) return;
-      this.failed(path, error);
-      if (error.code === "not_found") this.offerKeptAside(path, ticket, true);
+      if (ticket === this.ticket) this.failed(path, error);
     }
-  }
-
-  /* ----------------------------------------------------------- the editor (§7) */
-
-  async edit(shown, ticket) {
-    const name = shown.path.slice(shown.path.lastIndexOf("/") + 1);
-    let module;
-    try {
-      module = await this.loadEditor();
-    } catch (error) {
-      if (ticket !== this.ticket) return;
-      const box = this.view(shown); // read only, as before the editor
-      box.prepend(this.el("p", "files-note is-error", "The editor could not be loaded; the file is shown read-only."));
-      this.body.replaceChildren(box);
-      return;
-    }
-    const kept = await this.keptFor(shown.path); // read before the editor: nothing typed meets the offer (C2)
-    if (ticket !== this.ticket) return;
-    const bar = this.el("div", "files-bar");
-    bar.hidden = true;
-    const area = this.el("div", "files-editor");
-    this.body.replaceChildren(bar, area);
-    // ``revision`` counts every change of the text: a read of the server's version started before one is
-    // never applied over it (PR #95 review B1).
-    // ``saved``: the saved text as the editor has it; ``lineBreak``: the file's, written back by a save.
-    const doc = { path: shown.path, name, identity: shown.identity, saved: editorText(shown.text),
-                  lineBreak: lineBreakOf(shown.text), editor: null, dirty: false, saving: false, pollTimer: null, bar,
-                  module, revision: 0, keepTimer: null, offer: null };
-    this.doc = doc;
-    doc.editor = module.createEditor(area, {
-      text: shown.text, name,
-      onChange: () => {
-        if (this.doc !== doc) return;
-        doc.revision += 1;
-        this.setDirty(doc.editor.text() !== doc.saved);
-        this.keepLater(doc);
-      },
-      onSave: () => { if (this.doc === doc) this.save(); },
-      onAsk: this.onAsk ? () => (this.doc === doc ? this.ask() : null) : null,
-    });
-    this.paintState();
-    if (kept !== null) this.offerKept(doc, kept);
-    this.schedulePoll(doc);
   }
 
   /* V3-P76 §3.1: the selection, or with none the whole file, as a reference. The server checks it
-   * against the file, so only saved text is pointed at (Q1). */
+   * against the file. A selection is offered only in a file shown whole. */
   async ask() {
-    const doc = this.doc;
-    if (doc === null || !this.onAsk) return;
-    if (doc.dirty || doc.saving) {
-      this.paintState("Save first: HIMARI reads the saved file");
-      return;
-    }
-    const picked = doc.editor.selection();
-    const reference = { path: doc.path, name: doc.name, identity: doc.identity, whole: picked.from === picked.to };
-    if (reference.whole) {
+    const shown = this.shown;
+    if (shown === null || !this.onAsk) return;
+    const picked = typeof window === "undefined" ? null : selectionIn(shown.pre, shown.text, window.getSelection());
+    const reference = { path: shown.path, name: shown.name, identity: shown.identity, whole: picked === null };
+    if (picked === null) {
       this.onAsk(reference);
       return;
     }
@@ -703,420 +392,33 @@ export class FilesPane {
     try {
       sha256 = await sha256Hex(picked.text);
     } catch (ignored) {
-      this.paintState("Ask HIMARI needs the page over HTTPS");
+      this.note("Asking about a selection needs the page over HTTPS.");
       return;
     }
-    if (this.doc !== doc || doc.dirty) return; // typed in meanwhile: that selection is gone
+    if (this.shown !== shown) return; // another file meanwhile
     this.onAsk({ ...reference, start: picked.from, end: picked.to, sha256,
-                 lines: [picked.fromLine, picked.fromColumn, picked.toLine, picked.toColumn] });
+                 lines: [...lineAt(shown.text, picked.from), ...lineAt(shown.text, picked.to)] });
   }
 
-  /* The whole file from its ⋯ menu: any file, editable or not. */
-  async askWhole(shown) {
-    if (this.doc !== null && this.doc.path === shown.path) {
-      if (this.doc.dirty || this.doc.saving) {
-        this.paintState("Save first: HIMARI reads the saved file");
-        return;
-      }
-      this.onAsk({ path: shown.path, name: this.doc.name, identity: this.doc.identity, whole: true });
-      return;
-    }
+  /* The whole file from its ⋯ menu: any file, shown or not. */
+  askWhole(shown) {
     this.onAsk({ path: shown.path, name: shown.path.slice(shown.path.lastIndexOf("/") + 1),
                  identity: shown.identity, whole: true });
   }
 
   /* A reference's place: its file, with ``start``–``end`` selected when given (§3.1). */
   async reveal(path, start = null, end = null) {
-    if (this.file !== path || this.doc === null || this.doc.path !== path) await this.openFile(path);
-    if (start !== null && this.doc !== null && this.doc.path === path) this.doc.editor.select(start, end);
-  }
-
-  setDirty(dirty) {
-    if (this.doc === null) return;
-    this.doc.dirty = dirty;
-    this.paintState();
-  }
-
-  /* The save state beside the file's name: a dot and a word; Save is on only with something to save. */
-  paintState(note = null) {
-    const doc = this.doc;
-    if (doc === null || !this.stateLabel) return;
-    const text = doc.saving ? "Saving…" : doc.dirty ? "Unsaved" : "Saved";
-    this.stateDot.className = `files-state-dot${doc.dirty ? " is-dirty" : ""}`;
-    // A note (an error, "Saved, but…") stays at least 6 s: the next keystroke does not wipe it unread.
-    const now = Date.now();
-    if (note) {
-      doc.note = { text: note, until: now + NOTE_MS };
-      clearTimeout(doc.noteTimer); // back to "Saved"/"Unsaved" when its time is up, without waiting for a key (N4)
-      doc.noteTimer = setTimeout(() => { if (this.doc === doc) this.paintState(); }, NOTE_MS + 50);
-    }
-    const shown = note || (doc.note && doc.note.until > now && !doc.saving ? doc.note.text : null);
-    this.stateLabel.textContent = shown || text;
-    this.stateLabel.title = shown || "";
-    this.stateLabel.classList.toggle("is-note", Boolean(shown));
-    this.saveButton.disabled = doc.saving || !doc.dirty;
-    this.workingNote.hidden = !this.working();
-  }
-
-  async save({ over = null } = {}) {
-    const doc = this.doc;
-    if (doc === null || doc.saving || doc.offer) return; // while Restore is offered, nothing replaces it (B1)
-    const text = doc.editor.text();
-    const content = fileText(text, doc.lineBreak);
-    if (new TextEncoder().encode(content).length > EDIT_MAX_BYTES) {
-      this.paintState("Too large to save from here (at most 1 MiB)");
-      return;
-    }
-    doc.saving = true;
-    doc.note = null; // a note about the text before this save never outlives it (review B1)
-    this.paintState();
-    try {
-      const answer = await this.api("PUT", "/api/machine/file",
-                                    { path: doc.path, content, expected: over || doc.identity });
-      if (this.doc !== doc) return;
-      doc.identity = answer.identity;
-      doc.saved = text;
-      doc.saving = false;
-      doc.dirty = doc.editor.text() !== text; // typed on while it was saving
-      if (doc.dirty) this.keepNow(doc);
-      else this.dropKept(doc);
-      this.hideBar();
-      this.paintState(answer.previous_kept ? null : "Saved, but its previous version could not be kept");
-    } catch (error) {
-      if (this.doc !== doc) return;
-      doc.saving = false;
-      if (error.code === "changed") await this.changedOrGone(doc, true);
-      else this.paintState(error.message || "Not saved");
-    }
-  }
-
-  /* V3-P78 §4.2: a save refused as changed — or the file is gone, which the runner also answers as changed. */
-  async changedOrGone(doc, refused) {
-    try {
-      await this.api("GET", `/api/machine/stat?${query(doc.path)}`);
-    } catch (error) {
-      if (this.doc === doc && error.code === "not_found" && doc.dirty) {
-        this.showGone();
-        return;
-      }
-    }
-    if (this.doc === doc) this.showChanged(refused);
-  }
-
-  /* A ``not_found`` from a read of the open file: the gone bar while there is unsaved text (§4.2, C5, N7). */
-  goneOr(doc, error) {
-    if (this.doc !== doc) return;
-    if (error.code === "not_found" && doc.dirty) this.showGone();
-    else if (error.code === "not_found") this.paintState("This file is no longer on the server");
-    else this.paintState(error.message);
-  }
-
-  /* §4.2: the file is gone (deleted or moved) and the text is still here: make it again, or download it. */
-  showGone(note = null) {
-    const doc = this.doc;
-    if (doc === null) return;
-    const bar = doc.bar;
-    bar.replaceChildren(this.el("p", null, note || "This file is no longer on the server (deleted or moved). Your "
-                                + "text is still here. Saving it here again makes it as a new file."));
-    if (note === null) bar.append(this.button("Save it here again", () => this.recreate()));
-    bar.append(this.button("Download my text", () => downloadText(fileText(doc.editor.text(), doc.lineBreak), doc.name)));
-    bar.hidden = false;
-    this.paintState();
-  }
-
-  async recreate() {
-    const doc = this.doc;
-    if (doc === null || doc.saving) return;
-    const text = doc.editor.text();
-    const content = fileText(text, doc.lineBreak);
-    if (new TextEncoder().encode(content).length > EDIT_MAX_BYTES) {
-      this.paintState("Too large to save from here (at most 1 MiB)");
-      return;
-    }
-    doc.saving = true;
-    doc.note = null; // a note about the text before this save never outlives it (review B1)
-    this.paintState();
-    try {
-      const made = await this.api("POST", "/api/machine/file/install", { path: doc.path, content });
-      if (this.doc !== doc) return;
-      doc.saving = false;
-      if (made.identity === null) { // placed, but not seen after: open it as it is now
-        this.dropKept(doc);
-        doc.dirty = false;
-        await this.openFile(doc.path);
-        return;
-      }
-      doc.identity = made.identity;
-      doc.saved = text;
-      doc.dirty = doc.editor.text() !== text;
-      if (doc.dirty) this.keepNow(doc);
-      else this.dropKept(doc);
-      this.hideBar();
-      this.paintState("Saved as a new file");
-    } catch (error) {
-      if (this.doc !== doc) return;
-      doc.saving = false;
-      if (error.code === "changed") this.showChanged(true); // a file of that name was made meanwhile
-      else if (error.code === "not_found" || error.code === "not_directory") {
-        this.showGone("The folder is gone too; download your text.");
-      } else if (error.code === "unsupported") {
-        this.showGone("This folder can't take a new file safely from here; download your text.");
-      } else this.paintState(error.message || "Not saved");
-    }
-  }
-
-  hideBar() {
-    if (this.doc) this.doc.bar.hidden = true;
-  }
-
-  /* The file changed on disk since it was read: the user picks (§7.2). ``refused``: a save was refused for it. */
-  showChanged(refused) {
-    const doc = this.doc;
-    if (doc === null) return;
-    const bar = doc.bar;
-    bar.replaceChildren(this.el("p", null, refused
-      ? "Not saved: this file was changed on the server since you opened it. Your text is still here."
-      : "This file was changed on the server since you opened it. Your text is still here."));
-    const actions = [["Compare", () => this.compareWithDisk()],
-                     ["Load the server's version", () => this.loadDisk()],
-                     ["Save mine over it", () => this.saveOver()]];
-    for (const [label, action] of actions) {
-      const button = this.el("button", "link-button", label);
-      button.type = "button";
-      button.addEventListener("click", action);
-      bar.append(button);
-    }
-    bar.hidden = false;
-    this.paintState();
-  }
-
-  async disk() {
-    return this.api("GET", `/api/machine/file?${query(this.doc.path)}`);
-  }
-
-  /* The server's version into the editor. ``since``: the text's revision when an automatic read began; if
-   * it was typed in since, the text stays and the user is told instead (PR #95 review B1). */
-  async loadDisk({ since = null } = {}) {
-    const doc = this.doc;
-    if (doc === null || doc.offer) return;
-    try {
-      const shown = await this.disk();
-      if (this.doc !== doc) return;
-      if (since !== null && (doc.revision !== since || doc.dirty)) {
-        this.showChanged(false);
-        return;
-      }
-      if (shown.kind !== "text" || !shown.editable) {
-        this.paintState("The server's version can no longer be edited here");
-        return;
-      }
-      doc.saved = editorText(shown.text);
-      doc.lineBreak = lineBreakOf(shown.text);
-      doc.identity = shown.identity;
-      keepingPlace(doc.editor, () => doc.editor.setText(shown.text));
-      doc.dirty = doc.editor.text() !== doc.saved;
-      if (!doc.dirty) this.dropKept(doc);
-      this.hideBar();
-      this.paintState();
-    } catch (error) {
-      this.goneOr(doc, error);
-    }
-  }
-
-  async saveOver() {
-    const doc = this.doc;
-    if (doc === null) return;
-    try {
-      const now = await this.api("GET", `/api/machine/stat?${query(doc.path)}`);
-      if (this.doc !== doc) return;
-      await this.save({ over: now.identity }); // the server's version is kept as a previous version
-    } catch (error) {
-      this.goneOr(doc, error);
-    }
-  }
-
-  async compareWithDisk() {
-    const doc = this.doc;
-    if (doc === null) return;
-    try {
-      const shown = await this.disk();
-      if (this.doc !== doc) return;
-      this.diffDialog(`${doc.name}: the server's version (left) and yours (right)`,
-                      shown.kind === "text" ? shown.text : "", doc.editor.text());
-    } catch (error) {
-      this.goneOr(doc, error);
-    }
-  }
-
-  diffDialog(title, left, right, extra = []) {
-    const dialog = this.el("dialog", "files-dialog");
-    const head = this.el("div", "files-dialog-head");
-    head.append(this.el("h2", null, title));
-    const close = this.el("button", "icon-button", "×");
-    close.type = "button";
-    close.setAttribute("aria-label", "Close");
-    head.append(close);
-    const area = this.el("div", "files-diff");
-    const foot = this.el("div", "files-dialog-foot");
-    for (const button of extra) foot.append(button);
-    dialog.append(head, area, foot);
-    this.root.append(dialog);
-    const diff = this.doc.module.createDiff(area, { left, right, name: this.doc.name });
-    const done = () => { diff.destroy(); dialog.remove(); };
-    close.addEventListener("click", () => { if (dialog.close) dialog.close(); done(); });
-    dialog.addEventListener("cancel", done);
-    for (const button of extra) button.addEventListener("click", () => { if (dialog.close) dialog.close(); done(); });
-    if (dialog.showModal) dialog.showModal();
-    return dialog;
-  }
-
-  /* Previous versions (§7.4): compare one with the editor's text, or put it in the editor to save. */
-  async showVersions() {
-    const doc = this.doc;
-    if (doc === null || doc.offer) return; // Restore or Discard first (re-review N1)
-    let items;
-    try {
-      items = (await this.api("GET", `/api/machine/versions?${query(doc.path)}`)).items;
-    } catch (error) {
-      if (this.doc === doc) this.paintState(error.message);
-      return;
-    }
-    if (this.doc !== doc) return;
-    const dialog = this.el("dialog", "files-dialog");
-    const head = this.el("div", "files-dialog-head");
-    head.append(this.el("h2", null, `Previous versions of ${doc.name}`));
-    const close = this.el("button", "icon-button", "×");
-    close.type = "button";
-    close.setAttribute("aria-label", "Close");
-    head.append(close);
-    const list = this.el("ul", "files-list files-versions");
-    if (!items.length) list.append(this.el("li", "files-note", "None yet: a version is kept each time the file is saved from here."));
-    for (const item of items) {
-      const li = this.el("li", "files-row files-version");
-      li.append(this.el("span", "files-name", new Date(item.saved_at).toLocaleString()),
-                this.el("span", "files-meta", `${VERSION_REASONS[item.reason] || "before a save"} · ${humanSize(item.size)}`));
-      const compare = this.el("button", "link-button", "Compare");
-      compare.type = "button";
-      compare.addEventListener("click", async () => {
-        const version = await this.versionText(item.id);
-        if (version === null || this.doc !== doc) return;
-        if (dialog.close) dialog.close();
-        dialog.remove();
-        const restore = this.el("button", "primary-button", "Put this version in the editor");
-        restore.type = "button";
-        restore.addEventListener("click", () => this.restore(version, { seen: true })); // compared: no question
-        this.diffDialog(`${doc.name}: this version (left) and the editor's text (right)`, version, doc.editor.text(), [restore]);
-      });
-      const restore = this.el("button", "link-button", "Put in the editor");
-      restore.type = "button";
-      restore.addEventListener("click", async () => {
-        const version = await this.versionText(item.id);
-        if (version === null || this.doc !== doc) return;
-        if (dialog.close) dialog.close();
-        dialog.remove();
-        this.restore(version);
-      });
-      li.append(compare, restore);
-      list.append(li);
-    }
-    dialog.append(head, list);
-    this.root.append(dialog);
-    close.addEventListener("click", () => { if (dialog.close) dialog.close(); dialog.remove(); });
-    dialog.addEventListener("cancel", () => dialog.remove());
-    if (dialog.showModal) dialog.showModal();
-  }
-
-  async versionText(id) {
-    try {
-      return (await this.api("GET", `/api/machine/versions/${encodeURIComponent(id)}?${query(this.doc.path)}`)).text;
-    } catch (error) {
-      this.paintState(error.message);
-      return null;
-    }
-  }
-
-  /* Back into the editor, unsaved: Save keeps it (and keeps what it replaces). Over unsaved text only if the
-   * user says so (``seen``: they compared it with the editor's text just now). */
-  async restore(text, { seen = false } = {}) {
-    if (this.doc === null || this.doc.offer) return;
-    const doc = this.doc;
-    if (doc.dirty && !seen && !(await this.confirm(`Replace your unsaved changes to ${doc.name}?`,
-      ["This version takes their place in the editor (Undo there brings them back). The file on the server " +
-       "stays as it was until you save."], "Replace"))) return;
-    if (this.doc !== doc) return;
-    this.doc.editor.setText(text);
-    this.setDirty(editorText(text) !== this.doc.saved);
-    this.paintState("Put in the editor — Save to keep it");
-  }
-
-  /* The open file, or ``row`` (a path in the folder shown, from its ⋯ menu; what is open stays). */
-  async deleteFile(row = null) {
-    const doc = row === null ? this.doc : null;
-    const path = row !== null ? row : doc ? doc.path : this.file;
-    if (path === null) return;
-    const told = (text) => (row === null ? this.paintState(text) : this.notice(text)); // a folder has no state line
-    let now;
-    try {
-      now = await this.api("GET", `/api/machine/stat?${query(path)}`);
-    } catch (error) {
-      told(error.message);
-      return;
-    }
-    const name = path.slice(path.lastIndexOf("/") + 1);
-    const big = now.size > EDIT_MAX_BYTES;
-    const lines = big ? ["This file is over 1 MiB: no previous version of it is kept, so it cannot be put back."]
-      : ["Its content is kept as a previous version on the server for 30 days."];
-    if (doc && doc.dirty) lines.push("Your unsaved changes are dropped too.");
-    if (row !== null && this.openElsewhere(path)) lines.push("It is open with unsaved changes in the other panel.");
-    const offered = doc !== null && doc.offer !== null; // as asked: a Restore meanwhile is not dropped (N-b)
-    if (!(await this.confirm(`Delete ${name}?`, lines, "Delete"))) return;
-    if (big && !(await this.confirm(`Delete ${name} for good?`, ["It cannot be put back."], "Delete for good"))) return;
-    const ticket = this.ticket; // anything opened meanwhile stays (PR #95 re-review C1)
-    try {
-      const gone = await this.api("POST", "/api/machine/file/delete", { path, expected: now.identity });
-      // Its unsaved text was dropped with it (told above); text only offered stays, offered again there (re-review C1).
-      if (doc && !offered) this.dropKept(doc);
-      if (row === null && this.doc === doc) this.closeDoc(); // a row's: whatever was opened meanwhile stays (B1)
-      if (this.ticket === ticket) await this.openFolder(path.slice(0, path.lastIndexOf("/")) || "/");
-      else if (row !== null) return; // moved on meanwhile: nothing to show here
-      if (!big && !gone.previous_kept) { // told it would be kept: say it was not, where it stays in sight (review B2)
-        this.body.prepend(this.el("p", "files-note is-error files-lasting",
-          `${name} was deleted, but its content could not be kept as a previous version: it cannot be put back.`));
-      }
-    } catch (error) {
-      if (error.code === "changed") told("Not deleted: it changed on the server since; look again");
-      else told(error.message);
-    }
-  }
-
-  /* §5.3: the open file checked on disk while it shows. Unchanged text follows the disk;
-   * text being edited is never replaced: the user is told and picks. */
-  schedulePoll(doc) {
-    clearTimeout(doc.pollTimer);
-    doc.pollTimer = setTimeout(() => this.poll(doc), POLL_MS);
-  }
-
-  async poll(doc) {
-    if (this.doc !== doc) return;
-    const shown = typeof document === "undefined" || document.visibilityState !== "hidden";
-    if (shown && !doc.saving && doc.bar.hidden) await this.checkDisk(doc);
-    if (this.doc === doc) this.schedulePoll(doc);
-  }
-
-  async checkDisk(doc = this.doc) {
-    if (doc === null || doc.offer) return; // after Restore or Discard (B1)
-    const since = doc.revision;
-    try {
-      const now = await this.api("GET", `/api/machine/stat?${query(doc.path)}`);
-      if (this.doc !== doc || doc.saving || sameIdentity(now.identity, doc.identity)) {
-        this.paintState();
-        return;
-      }
-      if (doc.dirty || doc.revision !== since) this.showChanged(false);
-      else await this.loadDisk({ since });
-    } catch (error) {
-      if (error.code === "not_found") this.goneOr(doc, error);
-    }
+    if (this.file !== path) await this.openFile(path);
+    const shown = this.shown;
+    if (start === null || shown === null || shown.path !== path || typeof window === "undefined") return;
+    const range = document.createRange();
+    range.setStart(...placeIn(shown.pre, Math.min(start, shown.text.length)));
+    range.setEnd(...placeIn(shown.pre, Math.min(end === null ? start : end, shown.text.length)));
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+    const line = range.startContainer.parentElement;
+    if (line && line.scrollIntoView) line.scrollIntoView({ block: "center" });
   }
 
   view(shown) {
@@ -1125,11 +427,16 @@ export class FilesPane {
       if (shown.truncated) {
         box.append(this.el("p", "files-note", `Showing the start of this file (${humanSize(shown.size)}); it is too large to show whole.`));
       }
+      const text = shownText(shown.text);
       const pre = this.el("pre", "files-text");
-      const lines = shown.text.split("\n");
+      const lines = text.split("\n");
       if (lines.length > 1 && lines[lines.length - 1] === "") lines.pop();
       for (const line of lines) pre.append(this.el("span", "files-line", `${line}\n`));
       box.append(pre);
+      if (!shown.truncated) {
+        this.shown = { path: shown.path, name: shown.path.slice(shown.path.lastIndexOf("/") + 1),
+                       identity: shown.identity, text, pre };
+      }
       return box;
     }
     if (shown.kind === "image") {
@@ -1180,28 +487,11 @@ export class FilesPane {
 
   paintTools(shown, listing = null) {
     this.tools.replaceChildren();
-    this.stateLabel = null;
     if (shown) {
-      if (shown.kind === "text" && shown.editable) {
-        this.workingNote = this.el("span", "files-working", "HIMARI is working");
-        this.workingNote.title = "HIMARI may change files here while it works; a save never overwrites its changes unasked";
-        this.workingNote.hidden = true;
-        this.stateDot = this.el("span", "files-state-dot");
-        this.stateLabel = this.el("span", "files-state", "Saved");
-        this.saveButton = this.el("button", "primary-button files-save", "Save");
-        this.saveButton.type = "button";
-        this.saveButton.disabled = true;
-        this.saveButton.addEventListener("click", () => this.save());
-        this.tools.append(this.workingNote, this.stateDot, this.stateLabel, this.saveButton);
-      }
-      if (this.changes && this.changed.has(shown.path)) { // a dot after its name, to its change
-        const review = this.el("button", "files-crumb files-changed-link");
-        review.type = "button";
-        review.append(this.el("span", "files-changed-dot"));
-        review.title = "Changed by HIMARI: what it was before and what it is now, to accept or revert";
-        review.setAttribute("aria-label", review.title);
-        review.addEventListener("click", () => this.openChange(shown.path));
-        this.crumbs.children[this.crumbs.children.length - 1].append(review); // the name's: they wrap as one
+      if (this.onAsk && this.shown !== null) { // a file shown whole: what is selected in it, or all of it
+        const ask = this.button("Ask HIMARI", () => this.ask(), "link-button files-ask");
+        ask.title = "Ask HIMARI about what you selected in this file, or about the whole file";
+        this.tools.append(ask);
       }
       this.tools.append(this.fileMenu(shown));
       return;
@@ -1212,235 +502,22 @@ export class FilesPane {
     reload.setAttribute("aria-label", "Refresh");
     reload.type = "button";
     reload.addEventListener("click", () => this.refresh());
-    this.tools.append(reload, this.newMenu(listing), this.folderMenu(listing));
+    this.tools.append(reload);
     if (listing && this.folderActions) this.tools.append(...this.folderActions(listing));
   }
 
-  /* The open file's ⋯: previous versions, download, copy path, delete. */
+  /* The open file's ⋯: ask about it, download, copy path. */
   fileMenu(shown) {
-    const actions = this.el("details", "conversation-actions files-actions files-file-menu");
-    const toggle = this.el("summary");
-    toggle.append(icon("#side-more"));
-    toggle.setAttribute("aria-label", "File actions");
-    toggle.title = "File actions";
-    const list = this.el("div", "conversation-action-list");
-    const item = (label, action, destructive = false) => {
-      const control = this.el("button", destructive ? "link-button danger-link" : "link-button", label);
-      control.type = "button";
-      control.addEventListener("click", () => { actions.open = false; action(); });
-      return control;
-    };
-    if (this.onAsk) list.append(item("Ask HIMARI about this file", () => this.askWhole(shown)));
-    if (shown.kind === "text" && shown.editable) list.append(item("Previous versions", () => this.showVersions()));
-    list.append(this.download(shown.path, "Download"), this.copyPath(shown.path, () => { actions.open = false; }),
-                item("Delete", () => this.deleteFile(), true));
-    actions.append(toggle, list);
-    return actions;
+    return this.actionMenu("File actions", "files-file-menu", (close) => [
+      ...(this.onAsk ? [this.button("Ask HIMARI about this file", () => { close(); this.askWhole(shown); })] : []),
+      this.download(shown.path, "Download"),
+      this.copyPath(shown.path, close),
+    ]);
   }
 
-  /* A folder's ⋯: files deleted from it whose content is kept, to put back (PR #95 review B3). */
-  folderMenu(listing) {
-    const actions = this.el("details", "conversation-actions files-actions files-folder-menu");
-    const toggle = this.el("summary");
-    toggle.append(icon("#side-more"));
-    toggle.setAttribute("aria-label", "Folder actions");
-    toggle.title = "Folder actions";
-    const list = this.el("div", "conversation-action-list");
-    const deleted = this.el("button", "link-button", "Deleted files");
-    deleted.type = "button";
-    deleted.addEventListener("click", () => { actions.open = false; this.showDeleted(listing ? listing.path : this.folder); });
-    list.append(deleted);
-    actions.append(toggle, list);
-    return actions;
-  }
-
-  async showDeleted(folder) {
-    let items;
-    try {
-      items = (await this.api("GET", `/api/machine/versions/deleted?${query(folder)}`)).items;
-    } catch (error) {
-      this.body.prepend(this.el("p", "files-note is-error", error.message));
-      return;
-    }
-    const dialog = this.el("dialog", "files-dialog");
-    const head = this.el("div", "files-dialog-head");
-    head.append(this.el("h2", null, "Deleted files in this folder"));
-    const close = this.el("button", "icon-button", "×");
-    close.type = "button";
-    close.setAttribute("aria-label", "Close");
-    head.append(close);
-    const list = this.el("ul", "files-list files-versions");
-    if (!items.length) list.append(this.el("li", "files-note", "None: a file deleted from here is kept for 30 days."));
-    const note = this.el("p", "files-note is-error");
-    for (const item of items) {
-      const li = this.el("li", "files-row files-version");
-      li.append(this.el("span", "files-name", item.name),
-                this.el("span", "files-meta", `deleted ${new Date(item.saved_at).toLocaleString()} · ${humanSize(item.size)}`));
-      const restore = this.el("button", "link-button", "Restore");
-      restore.type = "button";
-      restore.addEventListener("click", async () => {
-        restore.disabled = true;
-        const error = await this.restoreDeleted(item);
-        if (error === null) { if (dialog.close) dialog.close(); dialog.remove(); return; }
-        restore.disabled = false;
-        note.textContent = error;
-      });
-      li.append(restore);
-      list.append(li);
-    }
-    dialog.append(head, list, note);
-    this.root.append(dialog);
-    close.addEventListener("click", () => { if (dialog.close) dialog.close(); dialog.remove(); });
-    dialog.addEventListener("cancel", () => dialog.remove());
-    if (dialog.showModal) dialog.showModal();
-  }
-
-  /* A deleted file back where it was, never over a file now there: in one step (V3-P76 §4.1); where the file
-   * system cannot, made new and its kept content saved in it. Two writes: if the save fails after the empty file was made, ``item.made`` keeps that file's identity and
-   * Restore again fills that same file, while it is still that empty file (PR #95 re-review C2). Opened
-   * afterwards only if nothing else was opened meanwhile; otherwise the user is told (re-review C1). An
-   * error's text, or null. */
-  async restoreDeleted(item) {
-    const ticket = this.ticket;
-    let made = null;
-    try {
-      // V3-P76 §4.1: in one step, where its name is free — the two writes below only where the folder's file
-      // system cannot (``unsupported``).
-      if (!item.made) {
-        const placed = await this.api("POST", `/api/machine/versions/${encodeURIComponent(item.id)}/restore`,
-                                      { path: item.path })
-          .catch((error) => { if (error.code === "unsupported") return null; throw error; });
-        if (placed !== null) {
-          if (this.ticket === ticket && !this.dirty) await this.openFile(placed.path);
-          else this.notice(`${item.name} is restored.`, placed.path);
-          return null;
-        }
-      }
-      const text = (await this.api("GET", `/api/machine/versions/${encodeURIComponent(item.id)}?${query(item.path)}`)).text;
-      if (item.made) {
-        const now = await this.api("GET", `/api/machine/stat?${query(item.made.path)}`).catch(() => null);
-        if (now && sameIdentity(now.identity, item.made.identity)) made = item.made;
-      }
-      made = made || await this.api("POST", "/api/machine/file", { path: item.path });
-      await this.api("PUT", "/api/machine/file", { path: made.path, content: text, expected: made.identity });
-      item.made = null;
-    } catch (error) {
-      if (error.code === "exists" || (error.code === "changed" && !made)) {
-        return `${item.name} exists again. Its kept content is among its previous versions: open it, then ⋯ › Previous versions.`;
-      }
-      if (made) {
-        item.made = made;
-        return `${item.name} was made, but its content could not be saved in it (${error.message}). Restore again to fill it.`;
-      }
-      return error.message;
-    }
-    if (this.ticket === ticket && !this.dirty) await this.openFile(made.path);
-    else this.notice(`${item.name} is restored.`, made.path);
-    return null;
-  }
-
-  /* A note at the top of the pane, with a link to open ``path``; it stays until the next navigation. */
-  notice(text, path = null) {
-    const note = this.el("p", "files-note files-lasting", text);
-    if (path) {
-      const open = this.el("button", "link-button", "Open it");
-      open.type = "button";
-      open.addEventListener("click", () => this.openFile(path));
-      note.append(open);
-    }
-    this.body.prepend(note);
-  }
-
-  /* A folder's "New": a file (opened in the editor) or a folder, named in a row at the top. */
-  newMenu(listing) {
-    const actions = this.el("details", "conversation-actions files-actions files-new-menu");
-    const toggle = this.el("summary", "files-new-toggle");
-    toggle.append(icon("#side-plus"));
-    toggle.title = "New file or folder here";
-    toggle.setAttribute("aria-label", "New file or folder here");
-    const list = this.el("div", "conversation-action-list");
-    for (const [label, kind] of [["New file", "file"], ["New folder", "folder"]]) {
-      const control = this.el("button", "link-button", label);
-      control.type = "button";
-      control.addEventListener("click", () => { actions.open = false; this.askName(listing ? listing.path : this.folder, kind); });
-      list.append(control);
-    }
-    actions.append(toggle, list);
-    return actions;
-  }
-
-  askName(folder, kind) {
-    if (!folder) return;
-    const form = this.el("form", "files-name-form");
-    const input = this.el("input", "files-name-input");
-    input.type = "text";
-    input.placeholder = kind === "file" ? "File name, e.g. notes.md" : "Folder name";
-    input.setAttribute("aria-label", input.placeholder);
-    input.spellcheck = false;
-    const create = this.el("button", "primary-button", "Create");
-    create.type = "submit";
-    const cancel = this.el("button", "link-button", "Cancel");
-    cancel.type = "button";
-    const note = this.el("span", "files-note is-error");
-    form.append(input, create, cancel, note);
-    cancel.addEventListener("click", () => form.remove());
-    form.addEventListener("submit", async (event) => {
-      if (event && event.preventDefault) event.preventDefault();
-      const name = input.value.trim();
-      if (!name || name.includes("/") || name === "." || name === "..") {
-        note.textContent = "Give a name without /.";
-        return;
-      }
-      create.disabled = true;
-      const path = join(folder, name);
-      const ticket = this.ticket; // anything opened meanwhile stays (PR #95 re-review C1)
-      try {
-        if (kind === "file") {
-          const made = await this.api("POST", "/api/machine/file", { path });
-          form.remove();
-          if (this.ticket === ticket) await this.openFile(made.path);
-          else this.notice(`${name} is made.`, made.path);
-        } else {
-          await this.api("POST", "/api/machine/folder", { path });
-          form.remove();
-          if (this.ticket === ticket) await this.openFolder(folder);
-        }
-      } catch (error) {
-        create.disabled = false;
-        note.textContent = error.code === "exists" ? `${name} exists already.` : error.message;
-      }
-    });
-    this.body.prepend(form);
-    if (input.focus) input.focus();
-  }
-
-  /* ------------------------------------------------ HIMARI's changes (V3-P76 §5, §6) */
-
-  /* The last list read: its paths get a dot (a folder's, when one is under it). */
-  markChanged(list) {
-    this.changed = new Set(list ? list.items.map((item) => item.path) : []);
-  }
-
-  changedUnder(path, folder) {
-    if (!folder) return this.changed.has(path);
-    for (const changed of this.changed) if (changed.startsWith(`${path}/`)) return true;
-    return false;
-  }
-
-  /* Files › Changes [› name]: the way back to the folder last shown. */
-  paintPageCrumbs(name = null) {
-    this.syncNavigation();
-    this.crumbs.replaceChildren();
-    const back = this.el("button", "files-crumb", "Files");
-    back.type = "button";
-    back.addEventListener("click", () => this.openFolder(this.folder || "~"));
-    const list = this.el(name ? "button" : "span", name ? "files-crumb" : "files-crumb is-current", "Changes");
-    if (name) {
-      list.type = "button";
-      list.addEventListener("click", () => this.openChanges());
-    }
-    this.crumbs.append(back, this.el("span", "files-crumb-sep", "›"), list);
-    if (name) this.crumbs.append(this.el("span", "files-crumb-sep", "›"), this.el("span", "files-crumb is-current", name));
+  /* A line above what is shown, until the next thing is opened. */
+  note(text) {
+    this.body.prepend(this.el("p", "files-note is-error files-lasting", text));
   }
 
   button(label, action, className = "link-button") {
@@ -1450,219 +527,6 @@ export class FilesPane {
     return control;
   }
 
-  /* An accept or revert control: off while HIMARI works (§6). */
-  reviewButton(label, action, off = false) {
-    const control = this.button(label, action);
-    this.reviewControls.push(control);
-    control.disabled = off || this.working();
-    return control;
-  }
-
-  /* Just before an accept or a revert: still the page's conversation, and HIMARI not at work (§6). */
-  mayReview(of) {
-    if (of !== this.pageOf || of !== this.changes.of()) return false;
-    if (!this.working()) return true;
-    this.body.prepend(this.el("p", "files-note is-error files-lasting", "HIMARI is working: accepting and reverting wait until it has finished."));
-    return false;
-  }
-
-  /* An accept or a revert refused: in sight; the list again when it changed meanwhile (PR #98 re-review). */
-  async refused(error) {
-    if (error.code === "outdated") await this.openChanges(error.message);
-    else this.body.prepend(this.el("p", "files-note is-error files-lasting", error.message));
-  }
-
-  /* The answer is still for what is shown: no newer request, and the same conversation. */
-  current(ticket, of) {
-    return ticket === this.ticket && of === this.changes.of();
-  }
-
-  /* The list (§5): what can no longer be reverted first. ``note``: what the last action did. */
-  async openChanges(note = null) {
-    if (!this.changes || !(await this.mayLeave())) return;
-    const of = this.changes.of();
-    this.closeDoc();
-    const ticket = ++this.ticket;
-    this.busy("Changes");
-    let list;
-    try {
-      list = await this.changes.list(of);
-    } catch (error) {
-      if (this.current(ticket, of)) this.failedPage(null, error);
-      return;
-    }
-    if (!this.current(ticket, of)) return;
-    this.page = "changes";
-    this.pageOf = of;
-    this.file = null;
-    this.markChanged(list);
-    this.changes.seen(list);
-    this.body.removeAttribute("aria-busy");
-    this.paintPageCrumbs();
-    const waiting = list.running || this.working();
-    const acceptAll = this.reviewButton("Accept all", () => this.review(of, () => this.changes.accept(of, null), "Accepted."),
-                                        waiting || !(list.items.length || list.hidden));
-    acceptAll.title = "Keep the files as they are, and clear this list";
-    const revertAll = this.reviewButton("Revert all", () => this.revertAll(of, list),
-                                        waiting || !list.items.some((item) => item.revertible));
-    revertAll.title = "Put each file back as it was before HIMARI changed it";
-    this.tools.replaceChildren(acceptAll, revertAll);
-    const parts = [];
-    if (note) parts.push(this.el("p", "files-note files-lasting", note));
-    if (waiting) parts.push(this.el("p", "files-note", "HIMARI is working: accepting and reverting wait until it has finished."));
-    if (list.commands_ran && (list.items.length || list.hidden)) {
-      parts.push(this.el("p", "files-note is-warn", "HIMARI also ran commands since: they may have changed other files, which are not listed here."));
-    }
-    const rows = this.el("ul", "files-list files-changes");
-    for (const item of list.items) rows.append(this.changeRow(of, item, waiting));
-    if (list.items.length) parts.push(rows);
-    else if (!list.hidden) parts.push(this.el("p", "files-note", "Nothing to review: HIMARI has changed no files here since you last reviewed."));
-    if (list.hidden) {
-      parts.push(this.el("p", "files-note", `${list.hidden} ${list.hidden === 1 ? "change is" : "changes are"} in files hidden now; Accept all clears ${list.hidden === 1 ? "it" : "them"}.`));
-    }
-    this.body.replaceChildren(...parts);
-  }
-
-  changeRow(of, item, waiting) {
-    const li = this.el("li", `files-row files-change${item.revertible ? "" : " is-warn"}`);
-    const open = this.el("button", "files-open");
-    open.type = "button";
-    open.title = item.path;
-    const meta = [CHANGE_KINDS[item.kind] || item.kind];
-    if (item.count > 1) meta.push(`${item.count} times`);
-    if (item.interleaved) meta.push("also changed by something else");
-    if (CHANGE_STATES[item.state]) meta.push(CHANGE_STATES[item.state]);
-    open.append(icon(KIND_ICON.file), this.el("span", "files-name", item.name), this.el("span", "files-meta", meta.join(" · ")));
-    open.addEventListener("click", () => this.openChange(item.path));
-    const revert = this.reviewButton("Revert", () => this.revertOne(of, item.path, item.name), waiting || !item.revertible);
-    const accept = this.reviewButton("Accept", () => this.review(of, () => this.changes.accept(of, [item.path]), `${item.name}: accepted.`),
-                                     waiting);
-    li.append(open, revert, accept);
-    return li;
-  }
-
-  /* One change (§5): what it was before HIMARI's first change (left) and what it is now (right). */
-  async openChange(path) {
-    if (!this.changes || !(await this.mayLeave())) return;
-    const of = this.changes.of();
-    this.closeDoc();
-    const ticket = ++this.ticket;
-    this.busy(path);
-    let diff;
-    let module;
-    try {
-      [diff, module] = await Promise.all([this.changes.diff(of, path), this.loadEditor()]);
-    } catch (error) {
-      if (this.current(ticket, of)) this.failedPage(path.slice(path.lastIndexOf("/") + 1), error);
-      return;
-    }
-    if (!this.current(ticket, of)) return;
-    this.page = { path };
-    this.pageOf = of;
-    this.file = null;
-    this.body.removeAttribute("aria-busy");
-    this.paintPageCrumbs(diff.name);
-    const revert = this.reviewButton("Revert", () => this.revertOne(of, path, diff.name),
-                                     !diff.revertible || diff.changed || diff.interleaved);
-    revert.title = "Put it back as it was before HIMARI changed it";
-    const accept = this.reviewButton("Accept", () => this.review(of, () => this.changes.accept(of, [path]), `${diff.name}: accepted.`));
-    this.tools.replaceChildren(revert, accept);
-    if (diff.now.exists) this.tools.append(this.button("Open", () => this.openFile(path)));
-    const parts = [];
-    if (this.working()) parts.push(this.el("p", "files-note", "HIMARI is working: accepting and reverting wait until it has finished."));
-    if (diff.changed || diff.interleaved) {
-      const bar = this.el("div", "files-bar");
-      bar.append(this.el("p", null, diff.interleaved
-        ? "Something other than this conversation's HIMARI also changed it, between HIMARI's changes. Reverting undoes that too."
-        : "It was changed by something other than this conversation's HIMARI since (on the right as it is now). Reverting undoes that too."));
-      if (diff.revertible) bar.append(this.reviewButton("Revert anyway", () => this.revertAnyway(of, diff)));
-      parts.push(bar);
-    }
-    if (CHANGE_STATES[diff.state]) parts.push(this.el("p", "files-note is-warn", `It cannot be reverted: ${CHANGE_STATES[diff.state]}. Accept clears it; earlier versions are under ⋯ › Previous versions.`));
-    const sides = [];
-    if (diff.before.state === "absent") sides.push("Before: there was no such file (HIMARI made it).");
-    else if (diff.before.text === null && diff.before.state === "present") sides.push("Before: not text, so it is not shown.");
-    if (!diff.now.exists) sides.push("Now: there is no such file.");
-    else if (diff.now.text === null) sides.push("Now: not text, or over 1 MiB, so it is not shown.");
-    for (const side of sides) parts.push(this.el("p", "files-note", side));
-    const area = this.el("div", "files-diff files-change-diff");
-    parts.push(area);
-    this.body.replaceChildren(...parts);
-    this.pageDiff = module.createDiff(area, { left: diff.before.text ?? "", right: diff.now.text ?? "", name: diff.name });
-  }
-
-  /* An accept or a revert, then the list again, told what happened; a refusal stays in sight. */
-  async review(of, act, done) {
-    if (!this.mayReview(of)) return false;
-    const ticket = this.ticket;
-    try {
-      await act();
-    } catch (error) {
-      if (this.current(ticket, of)) await this.refused(error);
-      return false;
-    }
-    if (this.current(ticket, of)) await this.openChanges(done);
-    return true;
-  }
-
-  /* §6: only as HIMARI left it; changed since, its diff is shown with the choice to revert anyway. */
-  async revertOne(of, path, name) {
-    if (!this.mayReview(of)) return;
-    const ticket = this.ticket;
-    try {
-      await this.changes.revert(of, path, null);
-    } catch (error) {
-      if (!this.current(ticket, of)) return;
-      if (error.code === "changed") await this.openChange(path);
-      else await this.refused(error);
-      return;
-    }
-    if (this.current(ticket, of)) await this.openChanges(`${name} is back as it was before HIMARI changed it.`);
-  }
-
-  /* With the state shown (``diff.now``): reverted only if the file is still so. */
-  async revertAnyway(of, diff) {
-    const ticket = this.ticket;
-    const sure = await this.confirm(`Revert ${diff.name} anyway?`, [
-      "It was changed by something other than this conversation's HIMARI; reverting undoes that too.",
-      "What it holds now is kept as a previous version."], "Revert anyway");
-    if (!sure || !this.current(ticket, of) || !this.mayReview(of)) return;
-    try {
-      await this.changes.revert(of, diff.path, diff.now);
-    } catch (error) {
-      if (!this.current(ticket, of)) return;
-      if (error.code === "changed") await this.openChange(diff.path); // changed again since it was shown
-      else await this.refused(error);
-      return;
-    }
-    if (this.current(ticket, of)) await this.openChanges(`${diff.name} is back as it was before HIMARI changed it.`);
-  }
-
-  async revertAll(of, list) {
-    const ticket = this.ticket;
-    const count = list.items.filter((item) => item.revertible).length;
-    const sure = await this.confirm(`Revert ${count} ${count === 1 ? "file" : "files"}?`, [
-      "Each goes back to what it was before HIMARI changed it. What it holds now is kept as a previous version.",
-      "A file changed by something else since, or one that cannot be reverted, is left as it is."], "Revert all");
-    if (!sure || !this.current(ticket, of) || !this.mayReview(of)) return;
-    let done;
-    try {
-      done = await this.changes.revertAll(of);
-    } catch (error) {
-      if (this.current(ticket, of)) await this.refused(error);
-      return;
-    }
-    if (!this.current(ticket, of)) return;
-    await this.openChanges(revertedAll(done));
-  }
-
-  failedPage(name, error) {
-    this.body.removeAttribute("aria-busy");
-    this.paintPageCrumbs(name);
-    this.tools.replaceChildren();
-    this.body.replaceChildren(this.el("p", "files-note is-error", error.message || "This could not be opened."));
-  }
-
   busy(path) {
     this.body.setAttribute("aria-busy", "true");
     this.crumbs.title = path;
@@ -1670,18 +534,15 @@ export class FilesPane {
 
   failed(path, error) {
     this.locationFailed = true;
+    this.shown = null;
     this.syncNavigation();
     this.body.removeAttribute("aria-busy");
     this.paintCrumbs(path.startsWith("~") && this.home ? this.home + path.slice(1) : path, false);
     this.body.replaceChildren(this.el("p", "files-note is-error", error.message || "This could not be opened."));
   }
 
-  /* After the agent's turn: the folder again; a file in the editor is checked on disk (never reloaded
-   * over unsaved text); another file is read again; Changes, or a change, read again. */
+  /* After the agent's turn: the folder, or the file, read again. */
   refresh() {
-    if (this.page === "changes") return this.openChanges();
-    if (this.page) return this.openChange(this.page.path);
-    if (this.doc) return this.checkDisk();
     if (this.file) return this.openFile(this.file);
     if (this.folder) return this.openFolder(this.folder, { keepScroll: true });
     return null;

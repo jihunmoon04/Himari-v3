@@ -6,9 +6,6 @@ One data root, private to the server user::
         himari.db (+ .lock)      SQLite Data (V3-P42), 0600
         workspaces/<ws>/         Inside Workspaces, one per principal (0700)
         control/operator.secret  the local operator's credential (0600)
-        file-versions/           previous versions of files the web editor saved or deleted (V3-P75)
-        file-versions-agent/     files as they were before the agent changed them (V3-P76)
-        file-changes/            the agent's file changes, per Conversation, for review (V3-P76)
         mcp.json                 optional: MCP servers to connect (0600, V3-P53)
 
 ``Application.open`` checks the layout, opens the store (single writer),
@@ -46,7 +43,7 @@ import posixpath
 import re
 import os
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping, Sequence
-from contextlib import ExitStack, asynccontextmanager
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -155,9 +152,7 @@ from himari.proactive import ProactiveSettings
 from himari.documents import TMP_BYTES, DocumentReader, Toolkit, ToolkitRefused, open_toolkit, worker_roots
 from himari.environment.inside import INSIDE, InsideEnvironment, InsideFiles
 from himari.imaging import ImageViews, runtime_roots
-from himari.bootstrap.changes import ChangeDiff, ChangeReview, ChangesView, ChangeStore, RevertedAll
 from himari.bootstrap.explorer import Explorer, ExplorerRefused
-from himari.bootstrap.versions import VersionStore
 # For the interfaces (V3-P66 §9): how placing an upload can be refused.
 from himari.environment.inside import UploadsFolderUnusable as UploadsFolderUnusable
 from himari.environment.inside import WorkspaceBusy as WorkspaceBusy
@@ -823,7 +818,6 @@ class Application:
     # the principals whose new Conversations use it instead of Inside (Q1).
     machine: MachineEnvironment | None = None
     machine_principals: frozenset[PrincipalId] = frozenset()
-    changes: ChangeStore | None = None  # V3-P76: the review record of the machine file Tools' changes
     # One registration at a time (§10.1): the runner's same-folder check and
     # Data's insert together, so two paths to one folder cannot both pass.
     _registering: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
@@ -1004,22 +998,15 @@ class Application:
                 log.warning("commands cannot run (sandbox %s): the model can read attached text files%s, "
                             "but cannot run scripts on other files", state.value,
                             " and PDF, Office and HWPX documents" if reader is not None else "")
-            machine = changes = None
+            machine = None
             if machine_socket is not None:
-                # V3-P76 §4.2, §5: the agent's file changes, recorded for review, with versions of their own.
-                changes = ChangeStore(root / "file-changes", VersionStore(root / "file-versions-agent"))
-                if cut_short := await asyncio.to_thread(changes.recover):
-                    log.warning("%d file change(s) were cut short by a stop; they are shown as unknown", cut_short)
                 machine = MachineEnvironment(machine_socket,
                                              files=InsideFiles(store.blobs, SqliteData(store), file_max_bytes),
-                                             documents=reader, registry=SqliteData(store), changes=changes,
+                                             documents=reader, registry=SqliteData(store),
                                              attached_writable=machine_attached_write)
                 try:
                     hello = await machine.hello()
                     log.info("machine runner: sandbox %s, HIMARI home %s", hello.get("state"), hello.get("himari_home"))
-                    if not await machine.keeps():
-                        log.warning("the machine runner is older than HIMARI (protocol %s): the agent's file changes "
-                                    "are not recorded for review until it is restarted", hello.get("version"))
                 except Exception as error:  # noqa: BLE001 — the Tools say so until it answers
                     log.warning("the machine runner does not answer yet (%s)", type(error).__name__)
             views = await _image_views(root, sandbox)
@@ -1073,7 +1060,6 @@ class Application:
                           tuple(companion_models), resolved_companion_default, companion_models_only, reader, toolkit,
                           memory_enabled=memory, conversation_search_enabled=conversation_search,
                           streaming_enabled=streaming, companion_enabled=companion, machine=machine,
-                          changes=changes,
                           machine_principals=machine_allowed,
                           hub=hub, events=events)
         application.time_zone = time_zone
@@ -1197,58 +1183,8 @@ class Application:
         except WorkspaceRefused:
             raise ExplorerRefused("not_found", "Not available.") from None
         if self._explorer is None:
-            self._explorer = Explorer(machine, self.views, VersionStore(self.data_root / "file-versions"),
-                                      None if self.changes is None else self.changes.versions)
+            self._explorer = Explorer(machine, self.views)
         return self._explorer
-
-    # --- the review of the agent's file changes (V3-P76 §5, §6) -----------------------------
-
-    async def _review(self, scope: TrustedScope) -> ChangeReview:
-        """For a Conversation of the caller's (404 otherwise), when folders
-        are offered to them."""
-        await self.data.read_conversation(scope)
-        explorer = self.explorer(scope.principal_id)
-        if self.changes is None:
-            raise ExplorerRefused("not_found", "Not available.")
-        return ChangeReview(self.changes, explorer)
-
-    @asynccontextmanager
-    async def _reviewing(self, scope: TrustedScope) -> AsyncIterator[ChangeReview]:
-        """Accepting or reverting (§6): under the Conversation's lifecycle
-        lock (no trash meanwhile), refused while a turn runs or an input is
-        being accepted, and no turn starts until it is done."""
-        async with self._exclusive(scope.conversation_id):
-            review = await self._review(scope)
-            with ExitStack() as held:
-                try:
-                    held.enter_context(self.runner.hold(scope))
-                except ControlError as error:
-                    if error.code is not ControlErrorCode.BUSY:
-                        raise
-                    raise ExplorerRefused("busy", "HIMARI is working in this conversation: wait until it has "
-                                                  "finished.") from None
-                yield review
-
-    async def file_changes(self, scope: TrustedScope) -> ChangesView:
-        return await (await self._review(scope)).view(scope.conversation_id)
-
-    async def file_change_diff(self, scope: TrustedScope, path: str) -> ChangeDiff:
-        return await (await self._review(scope)).diff(scope.conversation_id, path)
-
-    async def accept_file_changes(self, scope: TrustedScope, paths: Sequence[str] | None) -> None:
-        """``paths``: None accepts all (the hidden ones too, §10)."""
-        async with self._reviewing(scope) as review:
-            await review.accept(scope.conversation_id, paths)
-
-    async def revert_file_change(self, scope: TrustedScope, path: str, seen: tuple[int, ...] | None) -> None:
-        """ChangeConflict: changed by something else since; ``seen`` (what
-        the owner saw: ``()`` no file) reverts anyway if it is still so."""
-        async with self._reviewing(scope) as review:
-            await review.revert(scope.conversation_id, path, seen)
-
-    async def revert_all_file_changes(self, scope: TrustedScope) -> RevertedAll:
-        async with self._reviewing(scope) as review:
-            return await review.revert_all(scope.conversation_id)
 
     # --- conversations in a folder (V3-P75 §6) ----------------------------------------
 
@@ -2084,8 +2020,6 @@ class Application:
             elif workspace is not None:
                 await self.inside.remove_conversation_folder(workspace.workspace_id, scope, workspace.cwd_relative)
             await self.data.purge_conversation(scope)
-            if self.changes is not None:
-                await asyncio.to_thread(self.changes.forget, scope.conversation_id)
             self.runner.forget(scope)
             self.runner.reopen(scope)
             self._activity_changed(scope)

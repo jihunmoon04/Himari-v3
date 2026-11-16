@@ -3877,37 +3877,12 @@ button.files-crumb:hover { background: var(--surface-hover); color: var(--text);
 .files-open-chat-item { color: var(--text) !important; }
 
 /* The editor (V3-P75 §7): the file's text fills the view; its state, Save and ⋯ sit in the head. */
-.files-body:has(.files-editor) { display: flex; flex-direction: column; padding: 0; overflow: hidden; }
-.files-editor { flex: 1 1 auto; min-height: 0; overflow: hidden; }
-.files-editor .cm-editor { height: 100%; }
-.files-state-dot { width: 7px; height: 7px; flex: 0 0 7px; border-radius: 50%; background: var(--ok); }
-.files-state-dot.is-dirty { background: var(--warn-edge); }
-.files-state { color: var(--text-muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 260px; }
 /* A note (often an error) reads whole: it wraps, a little larger, in the warning colour. */
-.files-state.is-note { white-space: normal; max-width: 420px; font-size: 13px; color: var(--warn); }
 #conversation-list > .conversation-group { list-style: none; padding: var(--space-3) var(--space-3) var(--space-1); font-size: 11px; font-weight: 600; letter-spacing: .02em; color: var(--text-muted); }
 .question-dismiss { display: inline; padding: 0; min-height: 0; font-size: inherit; text-decoration: underline; }
 @media (pointer: coarse) { .question-dismiss { display: inline-block; min-height: 40px; padding: 0 4px; } } /* a finger's size (N3) */
-.files-save { min-height: 32px; padding: 4px 14px; font-size: 13px; }
-.files-save:disabled { opacity: .45; cursor: default; }
-.files-working { font-size: 12px; color: var(--warn); background: var(--warn-soft); border: 1px solid var(--warn-edge); border-radius: var(--radius-pill); padding: 2px 8px; white-space: nowrap; }
-.files-working[hidden] { display: none; }
-.files-bar { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); margin: var(--space-2) var(--space-3); padding: var(--space-2) var(--space-3); border: 1px solid var(--warn-edge); border-radius: var(--radius-md); background: var(--warn-soft); color: var(--warn); font-size: 13px; }
-.files-bar[hidden] { display: none; }
-.files-bar p { flex: 1 1 100%; margin: 0; }
-.files-new-menu > summary.files-new-toggle { display: inline-flex; align-items: center; justify-content: center; width: var(--tool-size); height: var(--tool-size); min-height: var(--tool-size); padding: 0; color: var(--text-muted); }
 .files-tools > .files-icon-button { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 var(--tool-size); width: var(--tool-size); height: var(--tool-size); padding: 0; color: var(--text-muted); }
-.files-new-menu .conversation-action-list, .files-file-menu .conversation-action-list, .files-folder-menu .conversation-action-list { left: auto; right: 0; width: 200px; }
-.files-name-form { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); margin: var(--space-2); }
-.files-name-input { flex: 1 1 200px; min-height: 34px; padding: 6px 10px; border: 1px solid var(--border-strong); border-radius: var(--radius-md); background: var(--surface-raised); color: var(--text); font: 13px var(--mono); }
-.files-dialog { width: min(1100px, calc(100% - 32px)); max-height: calc(100dvh - 32px); padding: 16px 20px; border: 1px solid var(--border-strong); border-radius: 16px; background: var(--bg); color: var(--text); overflow: auto; }
-.files-dialog::backdrop { background: rgba(16,24,40,.55); }
-.files-dialog-head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); }
-.files-dialog-head h2 { font-size: 15px; margin: 0; overflow-wrap: anywhere; }
-.files-dialog-foot { display: flex; justify-content: flex-end; gap: var(--space-2); margin-top: var(--space-3); }
-.files-diff { margin-top: var(--space-3); max-height: 70dvh; overflow: auto; border: 1px solid var(--border-subtle); border-radius: var(--radius-md); }
-.files-version { gap: var(--space-2); padding: 6px 4px; }
-.files-version .files-meta { margin-left: auto; }
+.files-file-menu .conversation-action-list{ left: auto; right: 0; width: 200px; }
 /* The row ⋯ shows on hover as in the conversation list; the head's New and ⋯ always show. */
 @media (hover: hover) and (pointer: fine) {
   .files-row:hover .conversation-actions, .files-row:focus-within .conversation-actions { opacity: 1; }
@@ -3920,23 +3895,9 @@ button.files-crumb:hover { background: var(--surface-hover); color: var(--text);
 }
 
 /* HIMARI's changes (V3-P76 §5): the head's count, a dot on changed rows, the list and one change's diff. */
-.file-panel-changes { flex: 0 0 auto; min-height: 30px; padding: 4px 10px; border: 1px solid var(--border-strong); border-radius: var(--radius-pill); background: var(--surface-raised); color: var(--text); font-size: 12px; white-space: nowrap; }
-.file-panel-changes:hover { background: var(--surface-hover); }
-.file-panel-changes[hidden] { display: none; }
-.file-panel-changes.is-warn { border-color: var(--warn-edge); background: var(--warn-soft); color: var(--warn); }
 #chat-files-toggle { position: relative; }
-#chat-files-toggle.has-changes[aria-expanded="false"]::after { content: ""; position: absolute; top: 6px; right: 6px; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); }
-.files-changed-dot { display: inline-block; width: 7px; height: 7px; margin-left: 8px; vertical-align: middle; border-radius: 50%; background: var(--accent); }
-.files-changed-link { display: inline-grid; place-items: center; min-width: 24px; min-height: 24px; padding: 0; vertical-align: middle; }
-.files-changed-link .files-changed-dot { margin-left: 0; }
 .files-note.is-warn { color: var(--warn); }
-.files-tools > .link-button:disabled, .files-change .link-button:disabled { opacity: .45; cursor: default; }
-.files-change .files-open { flex-wrap: wrap; row-gap: 2px; }
-.files-change .files-meta { flex: 1 1 100%; padding-left: 30px; white-space: normal; }
-.files-change.is-warn .files-meta { color: var(--warn); }
-.files-change .link-button { flex: 0 0 auto; min-height: 32px; padding: 4px 8px; font-size: 13px; }
-.files-body:has(.files-change-diff) { display: flex; flex-direction: column; }
-.files-change-diff { flex: 1 1 auto; min-height: 240px; max-height: none; margin: var(--space-2) 0 0; }
+.files-tools > .link-button:disabled{ opacity: .45; cursor: default; }
 
 /* Quiet interaction feedback. Layout motion is only started by shell controls;
  * file-panel dragging and model output remain immediate. */
@@ -3955,10 +3916,10 @@ button.files-crumb:hover { background: var(--surface-hover); color: var(--text);
     transform-origin: top right;
     animation: menu-enter 140ms var(--motion-ease) both;
   }
-  .appearance-dialog[open], .files-dialog[open] {
+  .appearance-dialog[open]{
     animation: dialog-enter 180ms var(--motion-ease) both;
   }
-  .appearance-dialog[open]::backdrop, .files-dialog[open]::backdrop {
+  .appearance-dialog[open]::backdrop{
     animation: backdrop-enter 160ms ease-out both;
   }
 }

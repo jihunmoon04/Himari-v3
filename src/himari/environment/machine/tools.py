@@ -6,14 +6,10 @@ boundary (outside the Workspaces, permission, hidden) is DENIED; other
 problems are FAILED. A request the runner never received is DENIED (nothing
 happened); one whose answer was lost raises, and the Dispatcher records the
 call's outcome as unknown (V3-047).
-
-With a review record (V3-P76, ``changes.py``), writes and deletes go to the
-runner with ``keep`` and are recorded for the user's review: ``change``.
 """
 
 from __future__ import annotations
 
-import asyncio
 import base64
 import logging
 import os
@@ -145,45 +141,11 @@ class _MachineTool:
                   call: CallId) -> ToolOutcome:
         raise NotImplementedError
 
-    async def landing(self, path: object, cwd: str, *, follow: bool) -> object:
-        """Where a write lands (V3-P76 §8): the real path its change is
-        recorded under; without a review record, the model's own path."""
-        if await self._env.change_log() is None:
-            return path
-        result, _ = await self._env.call(runner.VISIBLE, {"path": path, "cwd": cwd, "follow": follow})
-        return str(result["path"])
-
-    async def change(self, ctx: ToolContext, call: CallId, path: object, op: str,
-                     args: dict[str, Any]) -> dict[str, Any] | ToolOutcome:
-        """The runner's write or delete of ``path`` (from ``landing``),
-        recorded for review when there is a record (V3-P76 §7): the intent
-        first, then the runner with ``keep``, then its outcome. A refusal
-        raises RunnerError as without a record."""
-        changes = await self._env.change_log()
-        if changes is None:
-            result, fds = await self._env.call(op, {**args, "path": path})
-            for fd in fds:
-                os.close(fd)
-            return result
-        assert isinstance(path, str)
-        try:
-            token = await changes.begin(ctx.scope, call, path)
-        except Exception:  # noqa: BLE001 — whatever the record's failure, nothing is written
-            log.exception("the change of %s could not be recorded", path)
-            return ToolOutcome(ToolStatus.FAILED, _text(f"{path}: this change could not be recorded for the user's "
-                                                        "review; nothing was written", error=True))
-        try:
-            result, fds = await self._env.call(op, {**args, "path": path, "keep": True})
-        except (runner.RunnerError, runner.NotSent):
-            await changes.dropped(token)
-            raise
-        except BaseException:
-            await asyncio.shield(changes.unknown(token))
-            raise
-        after = result.get("after_identity")
-        await asyncio.shield(changes.kept(token, str(result["path"]), fds[0] if fds else None,
-                                          tuple(result.get("prior_identity") or ()),
-                                          None if after is None else tuple(after), bool(result.get("complete"))))
+    async def change(self, path: object, op: str, args: dict[str, Any]) -> dict[str, Any]:
+        """The runner's write or delete of ``path``. A refusal raises RunnerError."""
+        result, fds = await self._env.call(op, {**args, "path": path})
+        for fd in fds:
+            os.close(fd)
         return result
 
 
@@ -255,11 +217,9 @@ class WriteFile(_MachineTool):
         data = str(args["content"]).encode("utf-8")
         if len(data) > MAX_WRITE_BYTES:
             return _refused(_shown(args.get("path")), runner.RunnerError(runner.TOO_LARGE))
-        result = await self.change(ctx, call, await self.landing(args.get("path"), cwd, follow=True), runner.WRITE, {
+        result = await self.change(args.get("path"), runner.WRITE, {
             "cwd": cwd, "write_roots": roots, "content": str(args["content"]),
             "create_parents": bool(args.get("create_parents", True))})
-        if isinstance(result, ToolOutcome):
-            return result
         path = str(result["path"])
         if result.get("partial"):  # V3-P76 §4.1: a new file taken in place, whose writing did not finish
             return ToolOutcome(ToolStatus.SUCCEEDED, _text(
@@ -312,11 +272,8 @@ class EditFile(_MachineTool):
         if len(updated.encode("utf-8")) > MAX_WRITE_BYTES:
             return _refused(shown, runner.RunnerError(runner.TOO_LARGE))
         # The path the runner opened, with the identity it read: changed since → CHANGED, nothing written.
-        written = await self.change(ctx, call, shown, runner.WRITE, {"cwd": cwd, "write_roots": roots,
-                                                                     "content": updated,
-                                                                     "expected": result["identity"]})
-        if isinstance(written, ToolOutcome):
-            return written
+        await self.change(shown, runner.WRITE, {"cwd": cwd, "write_roots": roots, "content": updated,
+                                                "expected": result["identity"]})
         return ToolOutcome(ToolStatus.SUCCEEDED, _text(f"edited {shown}: replaced {found} occurrence(s)"),
                            raw_result={"path": shown, "replacements": found, "bytes": len(updated.encode("utf-8"))})
 
@@ -330,10 +287,7 @@ class DeleteFile(_MachineTool):
 
     async def act(self, args: Mapping[str, Any], cwd: str, roots: list[str], ctx: ToolContext,
                   call: CallId) -> ToolOutcome:
-        result = await self.change(ctx, call, await self.landing(args.get("path"), cwd, follow=False), runner.DELETE,
-                                   {"cwd": cwd, "write_roots": roots})
-        if isinstance(result, ToolOutcome):
-            return result
+        result = await self.change(args.get("path"), runner.DELETE, {"cwd": cwd, "write_roots": roots})
         path = str(result["path"])
         return ToolOutcome(ToolStatus.SUCCEEDED, _text(f"deleted {path}"), raw_result={"path": path})
 
@@ -404,7 +358,6 @@ class RunCommand(_MachineTool):
         if not isinstance(timeout, int) or not 1 <= timeout <= MAX_TIMEOUT_SECONDS:
             return ToolOutcome(ToolStatus.DENIED, _text(f"timeout_seconds must be 1..{MAX_TIMEOUT_SECONDS}",
                                                         error=True))
-        changes = self._env.changes
         try:
             result, _ = await self._env.call(runner.RUN, {"argv": argv, "cwd": cwd, "write_roots": roots,
                                                           "timeout": timeout})
@@ -413,14 +366,6 @@ class RunCommand(_MachineTool):
                 return ToolOutcome(ToolStatus.DENIED, _text(f"command execution is unavailable: {error}", error=True),
                                    raw_result={"category": error.category})
             raise
-        except runner.NotSent:
-            raise
-        except BaseException:  # sent: it may have run
-            if changes is not None:
-                await asyncio.shield(changes.commands_ran(ctx.scope))
-            raise
-        if changes is not None:  # V3-P76 §9: it may have changed files the review does not know of
-            await changes.commands_ran(ctx.scope)
         outcome = _command_outcome(argv, timeout, CommandResult(
             exit_code=result["exit_code"], timed_out=bool(result["timed_out"]),
             stdout=base64.b64decode(result["stdout"]), stderr=base64.b64decode(result["stderr"]),
