@@ -36,8 +36,8 @@ async def current_device(app: Application) -> str:
     made = await app.devices.create(ME, "데스크톱")
     token = "hd_" + base64.urlsafe_b64encode(secrets.token_bytes(32)).decode().rstrip("=")
     device = (await app.devices.pair(made.code, token)).device.device_id
-    app.hub.subscribe(ME, device)
-    app.hub.signal(ME, device, 0, "Asia/Seoul")
+    app.presence.subscribe(ME, device)
+    app.presence.signal(ME, device, 0, "Asia/Seoul")
     return device
 
 

@@ -963,8 +963,8 @@ def run_wake(base: str, token: str, shots: str | None, root: str) -> list[str]:
         made = await app.devices.create(PrincipalId("operator"), "Desk")
         device_token = "hd_" + base64.urlsafe_b64encode(secrets.token_bytes(32)).decode().rstrip("=")
         device = (await app.devices.pair(made.code, device_token)).device.device_id
-        app.hub.subscribe(PrincipalId("operator"), device)
-        app.hub.signal(PrincipalId("operator"), device, 0, "Asia/Seoul")
+        app.presence.subscribe(PrincipalId("operator"), device)
+        app.presence.signal(PrincipalId("operator"), device, 0, "Asia/Seoul")
 
     errors: list[str] = []
     with sync_playwright() as p:

@@ -193,8 +193,8 @@ def test_a_device_message_looks_at_that_devices_screen(tmp_path: Path) -> None:
             made = await app.devices.create(ME, "데스크톱")
             token = "hd_" + base64.urlsafe_b64encode(secrets.token_bytes(32)).decode().rstrip("=")
             device = (await app.devices.pair(made.code, token)).device.device_id
-            stream, web = app.hub.subscribe(ME, device), app.hub.subscribe(ME)
-            app.hub.signal(ME, device, 0, "Asia/Seoul", Signals(session=Session.ACTIVE, screen_look=True))
+            stream, web = app.presence.subscribe(ME, device), app.presence.subscribe(ME)
+            app.presence.signal(ME, device, 0, "Asia/Seoul", Signals(session=Session.ACTIVE, screen_look=True))
             scope = TrustedScope(ME, await app.create_conversation(ME))
             await app.send(scope, "이 에러 뭐야?", origin=MessageOrigin(OriginKind.DEVICE, device))
             asked = await screen_request(stream)

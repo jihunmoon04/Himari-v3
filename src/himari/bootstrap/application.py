@@ -821,7 +821,7 @@ class Application:
     _mcp_defaults_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
     # V3-P83 §5, §8.1: who is connected, the current device and the event stream (one per
     # server), and the Runner's listener that publishes on it.
-    hub: PresenceHub = field(default_factory=PresenceHub, repr=False)
+    presence: PresenceHub = field(default_factory=PresenceHub, repr=False)
     events: CompanionEvents | None = field(default=None, repr=False)
     screens: ScreenRequests | None = field(default=None, repr=False)  # V3-P91 §4: None with the companion off
     _ticking: asyncio.Task[None] | None = field(default=None, repr=False)
@@ -1029,7 +1029,7 @@ class Application:
                           memory_enabled=memory, conversation_search_enabled=conversation_search,
                           streaming_enabled=streaming, companion_enabled=companion, machine=machine,
                           machine_principals=machine_allowed,
-                          hub=hub, events=events)
+                          presence=hub, events=events)
         application.time_zone = time_zone
         application.proactive = speaking_first
         if screens is not None:
@@ -1791,7 +1791,7 @@ class Application:
         if origin is not None and origin.kind is OriginKind.DEVICE:
             if connection_generation is None and client_file_download is not None:
                 raise ConnectionGenerationRequired
-            if connection_generation is not None and not self.hub.valid_generation(
+            if connection_generation is not None and not self.presence.valid_generation(
                     scope.principal_id, origin.device_id or "", connection_generation):
                 raise StaleConnectionGeneration
         await self.data.read_conversation(scope)  # 404 before a job is started (or a file read) for a foreign id
@@ -2073,7 +2073,7 @@ class Application:
         in a conversation that is not settled. ProactiveRefused."""
         if not (self.proactive.enabled and self.companion_enabled):
             raise ProactiveRefused("proactive_off")
-        device = self.hub.current(principal)
+        device = self.presence.current(principal)
         if device is None:
             raise ProactiveRefused("no_device")
         recent = await self.recent_companion_conversation(principal)
@@ -2092,7 +2092,7 @@ class Application:
         """§11: the switch, where HIMARI would speak now, today's count, the next loop and the last look."""
         quiet = self.proactive
         status: dict[str, object] = {"enabled": self.proactive.enabled and self.companion_enabled,
-                                     "told": self.proactive.describe(), "current_device": self.hub.current(principal),
+                                     "told": self.proactive.describe(), "current_device": self.presence.current(principal),
                                      "quiet_hours": None if quiet.quiet_start is None or quiet.quiet_end is None
                                      else f"{quiet.quiet_start:%H:%M}-{quiet.quiet_end:%H:%M}"}
         if self.scheduler is not None:

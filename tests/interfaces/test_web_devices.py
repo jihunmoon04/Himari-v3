@@ -392,7 +392,7 @@ def frames_of(body: str) -> list[tuple[str, Any]]:
 def test_a_devices_signal_makes_it_current(server: Server) -> None:
     """§5, §6.1: with its event stream open and a signal, it is connected and current."""
     me = server.as_device(server.paired())
-    server.client.portal.call(lambda: server.app.hub.subscribe(OPERATOR, "d1"))  # type: ignore[union-attr]
+    server.client.portal.call(lambda: server.app.presence.subscribe(OPERATOR, "d1"))  # type: ignore[union-attr]
     assert server.device.get("/api/device", headers=me).json()["current_device"] is None
     response = server.device.post("/api/device/presence", json={"idle_seconds": 3, "time_zone": "Asia/Seoul"},
                                   headers=me)
@@ -427,14 +427,14 @@ def test_the_event_stream_starts_with_hello(server: Server) -> None:
     web_hello = frames_of(server.client.get("/api/events").text)[0][1]
     assert web_hello["device"] is None and web_hello["recent_conversation"]["id"] == cid
     assert "connection_generation" not in web_hello
-    assert web_hello["signals"] == {"epoch": server.app.hub.signals_epoch, "revision": 0}
-    assert server.client.portal.call(server.app.hub.open_streams, OPERATOR) == 0  # type: ignore[union-attr]
+    assert web_hello["signals"] == {"epoch": server.app.presence.signals_epoch, "revision": 0}
+    assert server.client.portal.call(server.app.presence.open_streams, OPERATOR) == 0  # type: ignore[union-attr]
 
 
 def test_a_principal_has_at_most_sixteen_event_streams(server: Server) -> None:
     def fill() -> None:
         for _ in range(16):
-            server.app.hub.subscribe(OPERATOR)
+            server.app.presence.subscribe(OPERATOR)
 
     server.client.portal.call(fill)  # type: ignore[union-attr]
     response = server.client.get("/api/events")
@@ -443,7 +443,7 @@ def test_a_principal_has_at_most_sixteen_event_streams(server: Server) -> None:
 
 def test_revoking_ends_the_devices_event_stream(server: Server) -> None:
     server.paired()
-    stream = server.client.portal.call(lambda: server.app.hub.subscribe(OPERATOR, "d1"))  # type: ignore[union-attr]
+    stream = server.client.portal.call(lambda: server.app.presence.subscribe(OPERATOR, "d1"))  # type: ignore[union-attr]
     assert server.client.delete("/api/devices/d1", headers=SEND).status_code == 204
 
     async def drain() -> list[str]:
@@ -532,14 +532,14 @@ SIGNAL = {"idle_seconds": 2, "time_zone": "Asia/Seoul", "session": "active",
 def test_signals_are_kept_whole_and_shown_to_the_web_only(server: Server) -> None:
     """V3-P88 §2.1, §8.1: the body replaces the device's snapshot; GET /api/devices shows it, to the Web only."""
     me = server.as_device(server.paired())
-    server.client.portal.call(lambda: server.app.hub.subscribe(OPERATOR, "d1"))  # type: ignore[union-attr]
+    server.client.portal.call(lambda: server.app.presence.subscribe(OPERATOR, "d1"))  # type: ignore[union-attr]
     assert server.device.post("/api/device/presence", json=SIGNAL, headers=me).status_code == 204
     listing = server.client.get("/api/devices").json()
     (item,) = listing["items"]
     assert item["signals"]["session"] == "active" and item["signals"]["media"]["title"] == "밤양갱"
     assert item["signals"]["activity"]["category"] == "video" and item["signals"]["activity"]["fullscreen"] is True
     assert item["signals"]["mic_or_camera"] is False
-    assert listing["signals_epoch"] == server.app.hub.signals_epoch and listing["signals_revision"] >= 1
+    assert listing["signals_epoch"] == server.app.presence.signals_epoch and listing["signals_revision"] >= 1
     # media turned off in the app: absent, so the song is gone; a game that closed is the one before
     body = {k: v for k, v in SIGNAL.items() if k != "media"} | {"activity": None}
     assert server.device.post("/api/device/presence", json=body, headers=me).status_code == 204
@@ -552,7 +552,7 @@ def test_signals_are_kept_whole_and_shown_to_the_web_only(server: Server) -> Non
 
 def test_signal_text_is_cleaned_and_unknown_categories_are_other(server: Server) -> None:
     me = server.as_device(server.paired())
-    server.client.portal.call(lambda: server.app.hub.subscribe(OPERATOR, "d1"))  # type: ignore[union-attr]
+    server.client.portal.call(lambda: server.app.presence.subscribe(OPERATOR, "d1"))  # type: ignore[union-attr]
     body = {"idle_seconds": 0, "activity": {"category": "knitting", "app": "A\u0000pp\n" + "x" * 100,
                                             "title": "t" * 300},
             "media": {"title": "​  "}}
@@ -573,21 +573,21 @@ def test_an_unlock_mark_makes_the_device_current_past_the_switch_delay(server: S
     a = server.as_device(server.paired("데스크톱"))
     b = server.as_device(server.paired("노트북"))
     for device_id in ("d1", "d2"):
-        server.app.hub.subscribe(OPERATOR, device_id)  # the hub is plain: no loop needed
+        server.app.presence.subscribe(OPERATOR, device_id)  # the hub is plain: no loop needed
     server.device.post("/api/device/presence", json={"idle_seconds": 0, "session": "locked"}, headers=a)
     server.device.post("/api/device/presence", json={"idle_seconds": 0, "session": "active"}, headers=b)
     assert server.client.get("/api/device").json()["current_device"] == "d2"
     server.device.post("/api/device/presence", json={"idle_seconds": 0, "session": "active", "after": "unlock"},
                        headers=a)
     assert server.client.get("/api/device").json()["current_device"] == "d1"
-    returned = server.app.hub.returned(OPERATOR)
+    returned = server.app.presence.returned(OPERATOR)
     assert returned is not None and (returned.device_id, returned.via) == ("d1", "unlock")
 
 
 def test_quiet_is_the_users_for_every_device(server: Server) -> None:
     """V3-P88 §6.2: a device or the Web sets it; every stream hears; past clears; seven days at most."""
     me = server.as_device(server.paired())
-    device_stream = server.client.portal.call(lambda: server.app.hub.subscribe(OPERATOR, "d1"))  # type: ignore[union-attr]
+    device_stream = server.client.portal.call(lambda: server.app.presence.subscribe(OPERATOR, "d1"))  # type: ignore[union-attr]
     until = (datetime.now(UTC) + timedelta(hours=1)).astimezone(timezone(timedelta(hours=9)))
     response = server.device.request("PUT", "/api/presence/quiet", json={"until": until.isoformat()}, headers=me)
     assert response.status_code == 200 and datetime.fromisoformat(response.json()["until"]) == until
@@ -686,23 +686,23 @@ def test_a_screen_answer_comes_from_a_device_for_a_request_it_was_asked(server: 
 def test_the_screen_look_setting_comes_in_features(server: Server) -> None:
     """V3-P91 §7.1: like the free wake's setting — unsent is off, kept through a lock."""
     me = server.as_device(server.paired())
-    server.client.portal.call(lambda: server.app.hub.subscribe(OPERATOR, "d1"))  # type: ignore[union-attr]
+    server.client.portal.call(lambda: server.app.presence.subscribe(OPERATOR, "d1"))  # type: ignore[union-attr]
     body = {**SIGNAL, "features": {"free_wake_screen": False, "screen_look": True}}
     assert server.device.post("/api/device/presence", json=body, headers=me).status_code == 204
-    assert server.app.hub.states(OPERATOR)["d1"].screen_look
+    assert server.app.presence.states(OPERATOR)["d1"].screen_look
     (item,) = server.client.get("/api/devices").json()["items"]
     assert item["signals"]["screen_look"] is True
     assert server.device.post("/api/device/presence", json=SIGNAL, headers=me).status_code == 204
-    assert not server.app.hub.states(OPERATOR)["d1"].screen_look
+    assert not server.app.presence.states(OPERATOR)["d1"].screen_look
 
 
 def test_the_free_wake_screen_setting_is_kept_through_a_lock(server: Server) -> None:
     """V3-P90 §9: the app's setting comes in ``features``; unsent is off; a locked body keeps it; kept only."""
     me = server.as_device(server.paired())
-    server.client.portal.call(lambda: server.app.hub.subscribe(OPERATOR, "d1"))  # type: ignore[union-attr]
+    server.client.portal.call(lambda: server.app.presence.subscribe(OPERATOR, "d1"))  # type: ignore[union-attr]
 
     def kept() -> bool:
-        return server.app.hub.states(OPERATOR)["d1"].free_wake_screen
+        return server.app.presence.states(OPERATOR)["d1"].free_wake_screen
 
     assert server.device.post("/api/device/presence", json={**SIGNAL, "features": {"free_wake_screen": True}},
                               headers=me).status_code == 204
@@ -722,18 +722,18 @@ def test_the_free_wake_screen_setting_is_kept_through_a_lock(server: Server) -> 
 def test_the_task_and_its_end_are_kept_and_shown(server: Server) -> None:
     """V3-P90 §3.1: ``task`` and ``task_ended`` from the app; the Web sees them; a lock drops both."""
     me = server.as_device(server.paired())
-    server.client.portal.call(lambda: server.app.hub.subscribe(OPERATOR, "d1"))  # type: ignore[union-attr]
+    server.client.portal.call(lambda: server.app.presence.subscribe(OPERATOR, "d1"))  # type: ignore[union-attr]
     body = {**SIGNAL, "task": {"group": "work", "for_seconds": 1500},
             "task_ended": {"group": "game", "lasted_seconds": 5700, "ended_seconds_ago": 30}}
     assert server.device.post("/api/device/presence", json=body, headers=me).status_code == 204
     (item,) = server.client.get("/api/devices").json()["items"]
     assert item["signals"]["task"]["group"] == "work" and item["signals"]["task"]["for_seconds"] >= 1500
     assert item["signals"]["task_ended"]["group"] == "game" and item["signals"]["task_ended"]["lasted_seconds"] == 5700
-    state = server.app.hub.states(OPERATOR)["d1"]
+    state = server.app.presence.states(OPERATOR)["d1"]
     assert state.task is not None and state.task_ended is not None and 30 <= state.task_ended.ended_seconds_ago < 40
     locked = {"idle_seconds": 0, "session": "locked"}
     assert server.device.post("/api/device/presence", json=locked, headers=me).status_code == 204
-    state = server.app.hub.states(OPERATOR)["d1"]
+    state = server.app.presence.states(OPERATOR)["d1"]
     assert state.task is None and state.task_ended is None
     for bad in ({"idle_seconds": 0, "task": {"group": "browsing", "for_seconds": 1}},
                 {"idle_seconds": 0, "task": {"group": "work", "for_seconds": -1}},
@@ -891,8 +891,8 @@ def test_connection_generation_negotiation_for_presence_messages_and_wakes(serve
     assert server.device.get(f"/api/conversations/{cid}/events", headers=me).json()["items"] == []
 
     # Open active stream for d1 and d2.
-    sub1 = server.client.portal.call(lambda: server.app.hub.subscribe(OPERATOR, "d1"))  # type: ignore[union-attr]
-    sub2 = server.client.portal.call(lambda: server.app.hub.subscribe(OPERATOR, "d2"))  # type: ignore[union-attr]
+    sub1 = server.client.portal.call(lambda: server.app.presence.subscribe(OPERATOR, "d1"))  # type: ignore[union-attr]
+    sub2 = server.client.portal.call(lambda: server.app.presence.subscribe(OPERATOR, "d2"))  # type: ignore[union-attr]
     assert sub1.connection_generation is not None and sub2.connection_generation is not None
 
     # d1 cannot use d2's generation header.
@@ -909,12 +909,12 @@ def test_connection_generation_negotiation_for_presence_messages_and_wakes(serve
         json={"idle_seconds": 0, "session": "active", "features": {"file_download": True}},
         headers=me_gen,
     ).status_code == 204
-    assert server.app.hub.device_file_download(OPERATOR, "d1") is True
-    assert server.app.hub.device_file_download(OPERATOR, "d2") is False
+    assert server.app.presence.device_file_download(OPERATOR, "d1") is True
+    assert server.app.presence.device_file_download(OPERATOR, "d2") is False
 
     # Legacy presence signal without generation header does not clear sub1's file_download=True.
     assert server.device.post("/api/device/presence", json={"idle_seconds": 1}, headers=me).status_code == 204
-    assert server.app.hub.device_file_download(OPERATOR, "d1") is True
+    assert server.app.presence.device_file_download(OPERATOR, "d1") is True
 
     # Legacy message without client_features does not borrow presence's file_download=True.
     server.provider.extend([final("legacy reply"), final("negotiated reply")])
@@ -936,8 +936,8 @@ def test_connection_generation_negotiation_for_presence_messages_and_wakes(serve
     assert snap.capabilities.file_download is True and snap.capabilities.workspace_browser is False
 
     # Replacing sub1 immediately resets wake capability to False and rejects me_gen.
-    sub1_next = server.client.portal.call(lambda: server.app.hub.subscribe(OPERATOR, "d1"))  # type: ignore[union-attr]
-    assert server.app.hub.device_file_download(OPERATOR, "d1") is False
+    sub1_next = server.client.portal.call(lambda: server.app.presence.subscribe(OPERATOR, "d1"))  # type: ignore[union-attr]
+    assert server.app.presence.device_file_download(OPERATOR, "d1") is False
     resp = server.device.post(
         f"/api/conversations/{cid}/messages",
         json={"text": "stale", "client_features": {"file_download": True}},
@@ -946,8 +946,8 @@ def test_connection_generation_negotiation_for_presence_messages_and_wakes(serve
     assert (resp.status_code, error_code(resp)) == (409, "stale_connection_generation")
     items = server.device.get(f"/api/conversations/{cid}/events", headers=me).json()["items"]
     assert [i["text"] for i in items if i["kind"] == "user_message"] == ["legacy", "modern"]
-    server.client.portal.call(lambda: server.app.hub.unsubscribe(sub1_next))  # type: ignore[union-attr]
-    server.client.portal.call(lambda: server.app.hub.unsubscribe(sub2))  # type: ignore[union-attr]
+    server.client.portal.call(lambda: server.app.presence.unsubscribe(sub1_next))  # type: ignore[union-attr]
+    server.client.portal.call(lambda: server.app.presence.unsubscribe(sub2))  # type: ignore[union-attr]
 
 
 def test_device_presented_files_list_and_download_scope(server: Server) -> None:

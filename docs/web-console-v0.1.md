@@ -1,6 +1,6 @@
 # Web 다시 디자인: hub 작업 콘솔 (V3-P102 설계 초안 v0.1)
 
-> 2026-11-16 · **설계 초안**, rev. 3(Codex 설계 검수 1·2차 반영) · 설계 기준 v3 `3ada276`(#189 병합), hub `0730c33`(himari-hub #25 병합,
+> 2026-11-16 · **설계 초안**, rev. 3(Codex 설계 검수 1·2차 반영) · **W0 구현**(`interfaces/web/hub.py`·`hub_stream.py`) · 설계 기준 v3 `3ada276`(#189 병합), hub `0730c33`(himari-hub #25 병합,
 > [사용자 경로 계약 v1](https://github.com/jihunmoon04/himari-hub/blob/main/docs/user-api-v1.md)).
 >
 > 소유자 요청(2026-11-16): HIMARI v3를 HIMARI hub에 맞게 바꾼다. ① hub를 움직이는 두 경로(MCP 경로와
@@ -212,7 +212,7 @@ H1은 W3 전에 필요하다. 사용자가 직접 보낸 글도 hub 원장에
 | `POST /api/hub/sessions/{id}/messages` | `send` | `prompt`, `model`?, `effort`?, `mode`? |
 | `POST /api/hub/sessions` | `new` | `project`, `prompt`, 선택 인자 |
 | `POST /api/hub/sessions/{id}/close` | `close` | |
-| `GET /api/hub/tasks/{id}` | `task`(H1) | MCP 경로 카드 |
+| `GET /api/hub/tasks/{id}` | `task`(H1) | MCP 경로 카드. H1이 hub에 생기면 더함(W0에는 없음) |
 | `PUT /api/hub/projects/{name}/preset` | `preset` | |
 | `GET /api/hub/pending`, `POST …/answer`, `POST /api/hub/tasks/{id}/cancel` | 그대로 | V3-P95 |
 
@@ -239,8 +239,9 @@ H1은 W3 전에 필요하다. 사용자가 직접 보낸 글도 hub 원장에
   세션이 끝나면 늦어도 15초 안에 닫는다. 지금의 `/api/events`는 열 때만 확인하므로 이 규칙은 새로 만든다.
 - **끊김:** httpx 읽기 시간 제한은 30초(hub ping 15초의 두 배)다. 그동안 아무것도 없거나 hub가 끊으면 브라우저
   스트림에 `hub_unavailable`을 보내고 닫는다. 목록 upstream은 서버가 지수 백오프로 다시 붙는다.
-- **오류:** hub 400 → 409 `hub_refused`(사람용 문구 그대로, 500자), 연결 실패 → 503 `hub_unavailable`,
-  401·403 → 503 `hub_misconfigured`(로그에 원인). 계약대로 판단은 상태 코드로만 한다.
+- **오류:** hub 400 → 409 `hub_refused`(사람용 문구 그대로, 500자; `bad_cursor`면 409 `hub_bad_cursor`), 404 → 404,
+  연결 실패 → 503 `hub_unavailable`, 401·403 → 503 `hub_misconfigured`(로그에 원인; V3-P95의 승인 경로도 같음),
+  남은 스트림 없음 → 503 `hub_stream_limit`. 계약대로 판단은 상태 코드로만 한다.
 - **설정:** 이미 있는 `HIMARI_HUB_URL`·`HIMARI_HUB_USER_TOKEN_FILE`에 `HIMARI_HUB_MCP_SOURCE`만 더한다.
 
 ## 7. 프론트엔드 구조

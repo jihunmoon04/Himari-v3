@@ -55,7 +55,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError, available_timezones
 from importlib import resources
 from typing import Annotated, Any, BinaryIO, Literal
 
-from fastapi import Depends, FastAPI, Path, Request, Response
+from fastapi import Depends, FastAPI, Path, Query, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, StrictBool
@@ -177,7 +177,16 @@ from himari.data.api import (
 )
 from himari.interfaces.web import event_stream, live
 from himari.interfaces.web.config import WebConfig
-from himari.interfaces.web.hub import HubClient, HubRefused, HubUnavailable
+from himari.interfaces.web import hub_stream
+from himari.interfaces.web.hub import (
+    MAX_PROMPT as HUB_MAX_PROMPT,
+    HubBusy,
+    HubClient,
+    HubMisconfigured,
+    HubNotFound,
+    HubRefused,
+    HubUnavailable,
+)
 from himari.sandbox.api import SandboxState
 from himari.interfaces.web.security import (
     SESSION_COOKIE,
@@ -510,6 +519,28 @@ class HubAnswerBody(_Body):
     option_id: str | None = Field(default=None, min_length=1, max_length=200)  # a permission's choice
     content: dict[str, Any] | None = None  # a question's answer, by field name
     refuse: StrictBool = False
+
+
+class HubSendBody(_Body):
+    """V3-P102 §6: a prompt for one of the hub's sessions; the model, effort and mode for it alone."""
+
+    prompt: str = Field(min_length=1, max_length=HUB_MAX_PROMPT)
+    model: str | None = Field(default=None, min_length=1, max_length=200)
+    effort: str | None = Field(default=None, min_length=1, max_length=200)
+    mode: str | None = Field(default=None, min_length=1, max_length=200)
+
+
+class HubNewBody(HubSendBody):
+    """V3-P102 §6: another session of a project's lane; the hub picks what is left out."""
+
+    project: str = Field(min_length=1, max_length=200)
+    agent: str | None = Field(default=None, min_length=1, max_length=200)
+    runner: str | None = Field(default=None, min_length=1, max_length=200)
+    profile: str | None = Field(default=None, min_length=1, max_length=200)
+
+
+class HubPresetBody(_Body):
+    preset: str = Field(max_length=200)  # empty: none
 
 
 class McpDefaultBody(_Body):
@@ -1240,7 +1271,10 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
             yield
         finally:
             closing.set()
-            await application.close()
+            try:
+                await app.state.hub_close()  # V3-P102 §6: the hub's shared list stream
+            finally:
+                await application.close()
 
     app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     app.state.closing = closing
@@ -2104,7 +2138,7 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
                                "X-Himari-Connection-Generation is required.")
             if has_gen:
                 connection_generation = request.headers.get(GENERATION_HEADER, "")
-                if not application.hub.valid_generation(by.principal, by.device.device_id, connection_generation):
+                if not application.presence.valid_generation(by.principal, by.device.device_id, connection_generation):
                     raise ApiError(409, "stale_connection_generation",
                                    "The device stream generation is no longer active.")
                 client_file_download = bool(body.client_features is not None and body.client_features.file_download)
@@ -2249,7 +2283,7 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
     async def list_devices(request: Request, who: PrincipalId = Depends(principal)) -> dict[str, Any]:
         """The Web only (a device is refused): each device with what the server knows of it now (V3-P88 §8.1)."""
         application = himari(request)
-        hub = application.hub
+        hub = application.presence
         epoch, revision = hub.signals_epoch, hub.signals_revision(who)  # before the states: a later notice rereads
         states, current = hub.states(who), hub.current(who)
         quiet = await application.devices.quiet(who)
@@ -2275,7 +2309,7 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
             kept = await application.devices.set_quiet(by.principal, until)
         except QuietTooLong:
             raise ApiError(400, "quiet_too_long", "Quiet lasts at most seven days.") from None
-        application.hub.publish(by.principal, "quiet", {"until": _time(kept)})
+        application.presence.publish(by.principal, "quiet", {"until": _time(kept)})
         return {"until": _time(kept)}
 
     @app.post("/api/devices", status_code=201)
@@ -2304,7 +2338,7 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
             await application.devices.revoke(who, device_id)
         except DataError as error:
             raise device_refused(error) from None
-        application.hub.revoked(who, device_id)  # its event streams end with "revoked" (§8.1)
+        application.presence.revoked(who, device_id)  # its event streams end with "revoked" (§8.1)
         for ended in device_lives.get((who, device_id), ()):
             ended.set()  # and its live streams end
 
@@ -2339,7 +2373,7 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
                   else await application.recent_companion_conversation(by.principal))
         quiet = await application.devices.quiet(by.principal)
         return {"device": None if by.device is None else {"device_id": by.device.device_id, "name": by.device.name},
-                "moods": list(MOODS), "current_device": application.hub.current(by.principal),
+                "moods": list(MOODS), "current_device": application.presence.current(by.principal),
                 "recent_conversation": None if recent is None else {"id": recent.conversation_id,
                                                                     "title": recent.title},
                 # V3-P88 §14, V3-P90 §3.1: an app sends the new fields only then
@@ -2358,7 +2392,7 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
             raise ApiError(409, "connection_generation_required", "X-Himari-Connection-Generation is required.")
         gen = request.headers.get(GENERATION_HEADER, "") if has_gen else None
         file_download = (body.features.file_download if body.features is not None else False) if has_gen else None
-        if not himari(request).hub.signal(by.principal, by.device.device_id, body.idle_seconds, body.time_zone,
+        if not himari(request).presence.signal(by.principal, by.device.device_id, body.idle_seconds, body.time_zone,
                                           presence_signals(body), connection_generation=gen,
                                           file_download=file_download):
             raise ApiError(409, "stale_connection_generation", "The device stream generation is no longer active.")
@@ -2433,7 +2467,7 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
         """The principal's event stream (§8.1, appendix A.3), for the devices and the Web."""
         application = himari(request)
         try:
-            subscription = application.hub.subscribe(by.principal, None if by.device is None else by.device.device_id)
+            subscription = application.presence.subscribe(by.principal, None if by.device is None else by.device.device_id)
         except TooManyStreams:
             raise ApiError(429, "too_many_streams", "Too many event streams are open; close one and try again.") \
                 from None
@@ -2441,36 +2475,67 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
             assert application.events is not None
             hello = {**await device_state(application, by), "activity": await application.events.activity(by.principal)}
             if by.device is None:  # V3-P88 §8.1: the Web compares, and rereads the devices when it differs
-                hello["signals"] = {"epoch": application.hub.signals_epoch,
-                                    "revision": application.hub.signals_revision(by.principal)}
+                hello["signals"] = {"epoch": application.presence.signals_epoch,
+                                    "revision": application.presence.signals_revision(by.principal)}
             elif subscription.connection_generation is not None:  # V3-P93 §6.1.1: this device stream's generation only
                 hello["connection_generation"] = subscription.connection_generation
         except BaseException:
-            application.hub.unsubscribe(subscription)
+            application.presence.unsubscribe(subscription)
             raise
         return _LiveResponse(event_stream.stream(subscription, hello, closing),
-                             lambda: application.hub.unsubscribe(subscription),
+                             lambda: application.presence.unsubscribe(subscription),
                              media_type="text/event-stream", headers={"X-Accel-Buffering": "no"})
 
-    # -- the hub's waiting requests (V3-P95) ---------------------------------------------------
+    # -- the hub (V3-P95 waiting requests, V3-P102 §6 the whole user path) ----------------------
 
     hub = (HubClient(config.hub_url, config.hub_user_token_file)
            if config.hub_url is not None and config.hub_user_token_file is not None else None)
+    hub_upstream = hub_stream.Upstream(hub) if hub is not None else None
+    hub_list = hub_stream.ListRelay(hub, hub_upstream) if hub is not None and hub_upstream is not None else None
+    hub_session_streams = hub_stream.SessionStreams(hub_upstream) if hub_upstream is not None else None
+
+    async def hub_close() -> None:
+        if hub_list is not None:
+            await hub_list.stop()
+        if hub_upstream is not None:
+            await hub_upstream.aclose()
+
+    app.state.hub_close = hub_close
 
     def hub_for(who: PrincipalId) -> HubClient:
         if who != OPERATOR:
-            raise ApiError(403, "not_authorized", "Only the operator can answer the hub's requests.")
+            raise ApiError(403, "not_authorized", "Only the operator can use the hub.")
         if hub is None:
             raise ApiError(404, "not_found", "The hub is not set up on this server.")
         return hub
 
-    async def hub_call(work: Awaitable[None]) -> None:
+    def hub_error(error: Exception) -> ApiError:
+        if isinstance(error, HubRefused):
+            if error.bad_cursor:
+                return ApiError(409, "hub_bad_cursor", "That cursor is past the session's end; read from 0.")
+            return ApiError(409, "hub_refused", str(error)[:500])
+        if isinstance(error, HubNotFound):
+            return ApiError(404, "not_found", "No such session on the hub.")
+        if isinstance(error, (hub_stream.HubStreamLimit, HubBusy)):
+            return ApiError(503, "hub_stream_limit", "Too many live views of hub sessions; read the events instead.")
+        if isinstance(error, HubMisconfigured):
+            log.warning("the hub refused this server: %s (check HIMARI_HUB_URL and the user token)", error)
+            return ApiError(503, "hub_misconfigured", "The hub refused this server's token or address.")
+        return ApiError(503, "hub_unavailable", "The hub could not be reached; nothing was sent.")
+
+    async def hub_call[T](work: Awaitable[T]) -> T:
         try:
-            await work
-        except HubRefused as refused:
-            raise ApiError(409, "hub_refused", str(refused)[:500]) from None
-        except HubUnavailable:
-            raise ApiError(503, "hub_unavailable", "The hub could not be reached; nothing was sent.") from None
+            return await work
+        except (HubRefused, HubNotFound, HubUnavailable) as error:
+            raise hub_error(error) from None
+
+    def signed_in_check(request: Request) -> Callable[[], bool]:
+        """Whether the caller of a long stream still may (V3-P102 §6): the Web session it opened with, still
+        valid; the CLI's operator bearer holds for the server's life."""
+        cookie = request.cookies.get(SESSION_COOKIE)
+        if sessions.principal(cookie) is None:
+            return lambda: True
+        return lambda: sessions.principal(cookie) == OPERATOR
 
     @app.get("/api/hub/pending")
     async def hub_pending(who: PrincipalId = Depends(principal)) -> dict[str, Any]:
@@ -2498,6 +2563,91 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
     @app.post("/api/hub/tasks/{task_id}/cancel", status_code=204)
     async def hub_cancel(task_id: int = Path(ge=1, le=2**53), who: PrincipalId = Depends(principal)) -> None:
         await hub_call(hub_for(who).cancel(task_id))
+
+    @app.get("/api/hub/projects")
+    async def hub_projects(who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+        """Projects, profiles, agents and their modes, the models and efforts allowed, the hub's devices."""
+        return await hub_call(hub_for(who).projects())
+
+    @app.get("/api/hub/sessions")
+    async def hub_sessions(project: str | None = Query(default=None, min_length=1, max_length=200),
+                           runner: str | None = Query(default=None, min_length=1, max_length=200),
+                           closed: bool = False, limit: int = Query(default=100, ge=1, le=500),
+                           who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+        sessions_now = await hub_call(hub_for(who).sessions(project=project, runner=runner, closed=closed,
+                                                            limit=limit))
+        return {"sessions": sessions_now}
+
+    @app.get("/api/hub/sessions/{session_id}")
+    async def hub_session(session_id: int = Path(ge=1, le=2**53), who: PrincipalId = Depends(principal)
+                          ) -> dict[str, Any]:
+        return await hub_call(hub_for(who).session(session_id))
+
+    @app.get("/api/hub/sessions/{session_id}/events")
+    async def hub_events(session_id: int = Path(ge=1, le=2**53), after: int = Query(default=0, ge=0, le=2**53),
+                         limit: int = Query(default=200, ge=1, le=1000), who: PrincipalId = Depends(principal)
+                         ) -> dict[str, Any]:
+        """The events after ``after``, oldest first; ``next`` is the cursor to read on (never ``last_seq``)."""
+        return await hub_call(hub_for(who).events(session_id, after, limit))
+
+    @app.post("/api/hub/sessions/{session_id}/messages")
+    async def hub_send(body: HubSendBody, session_id: int = Path(ge=1, le=2**53),
+                       who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+        """The task it became; follow that task, not the session (the agent may go on in a new one)."""
+        task = await hub_call(hub_for(who).send(session_id, body.prompt, model=body.model, effort=body.effort,
+                                                mode=body.mode))
+        return {"task": task}
+
+    @app.post("/api/hub/sessions")
+    async def hub_new(body: HubNewBody, who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+        """Another session of the project's lane; the task (no session id until it runs)."""
+        task = await hub_call(hub_for(who).new(body.project, body.prompt, agent=body.agent, runner=body.runner,
+                                               profile=body.profile, model=body.model, effort=body.effort,
+                                               mode=body.mode))
+        return {"task": task}
+
+    @app.post("/api/hub/sessions/{session_id}/close")
+    async def hub_session_close(session_id: int = Path(ge=1, le=2**53), who: PrincipalId = Depends(principal)
+                                ) -> dict[str, Any]:
+        return await hub_call(hub_for(who).close(session_id))
+
+    @app.put("/api/hub/projects/{project}/preset")
+    async def hub_preset(body: HubPresetBody, project: str = Path(min_length=1, max_length=200),
+                         who: PrincipalId = Depends(principal)) -> dict[str, Any]:
+        return await hub_call(hub_for(who).preset(project, body.preset))
+
+    @app.get("/api/hub/stream")
+    async def hub_list_stream(request: Request, who: PrincipalId = Depends(principal)) -> StreamingResponse:
+        """The hub's open sessions, live (V3-P102 §6): ``sessions`` replaces the list, ``changed`` merges by id,
+        ``hub`` says whether the hub is reachable. One upstream for every browser of this server."""
+        hub_for(who)
+        assert hub_list is not None
+        reader = hub_list.join()
+        return _LiveResponse(hub_stream.list_frames(hub_list, reader, signed_in_check(request), closing),
+                             lambda: hub_list.leave(reader),
+                             media_type="text/event-stream", headers={"X-Accel-Buffering": "no"})
+
+    @app.get("/api/hub/sessions/{session_id}/stream")
+    async def hub_session_stream(request: Request, session_id: int = Path(ge=1, le=2**53),
+                                 after: int = Query(default=0, ge=0, le=2**53),
+                                 who: PrincipalId = Depends(principal)) -> StreamingResponse:
+        """One session's events, live, from ``after`` or the ``Last-Event-ID`` the browser reconnects with."""
+        hub_for(who)
+        assert hub_session_streams is not None
+        given = request.headers.get("last-event-id", "")
+        last_event_id = int(given) if given.isdigit() and len(given) <= 16 else None
+        try:
+            stack, stream = await hub_session_streams.open(session_id, after, last_event_id)
+        except (HubRefused, HubNotFound, HubUnavailable, hub_stream.HubStreamLimit) as error:
+            raise hub_error(error) from None
+        streams = hub_session_streams
+
+        def ended() -> None:  # however it ends, even when its body never started: the slot and the upstream
+            streams.release()
+            asyncio.ensure_future(stack.aclose())
+
+        return _LiveResponse(hub_stream.session_frames(stack, stream, signed_in_check(request), closing), ended,
+                             media_type="text/event-stream", headers={"X-Accel-Buffering": "no"})
 
     # -- static UI ----------------------------------------------------------------------------
 

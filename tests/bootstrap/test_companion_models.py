@@ -233,8 +233,8 @@ def test_wakes_select_the_latest_compatible_user_conversation(
             made = await app.devices.create(ALICE, "desktop")
             token = "hd_" + base64.urlsafe_b64encode(secrets.token_bytes(32)).decode().rstrip("=")
             device = (await app.devices.pair(made.code, token)).device.device_id
-            app.hub.subscribe(ALICE, device)
-            app.hub.signal(ALICE, device, 0, "Asia/Seoul")
+            app.presence.subscribe(ALICE, device)
+            app.presence.signal(ALICE, device, 0, "Asia/Seoul")
             older = None
             if compatible:
                 older = TrustedScope(ALICE, await app.create_conversation(ALICE, initial_model="companion-model"))
