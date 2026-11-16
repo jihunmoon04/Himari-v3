@@ -177,7 +177,7 @@ from himari.data.api import (
 )
 from himari.interfaces.web import event_stream, live
 from himari.interfaces.web.config import WebConfig
-from himari.interfaces.web import hub_stream
+from himari.interfaces.web import hub_stream, next_page
 from himari.interfaces.web.hub import (
     MAX_PROMPT as HUB_MAX_PROMPT,
     HubBusy,
@@ -191,6 +191,7 @@ from himari.interfaces.web.hub import (
 from himari.sandbox.api import SandboxState
 from himari.interfaces.web.security import (
     SESSION_COOKIE,
+    STYLE_NONCE_STATE,
     BodyLimitMiddleware,
     OriginGuardMiddleware,
     SecurityHeadersMiddleware,
@@ -2660,6 +2661,36 @@ def create_app(config: WebConfig, opener: Opener) -> FastAPI:
 
         return _LiveResponse(hub_stream.session_frames(stack, stream, still, closing), ended,
                              media_type="text/event-stream", headers={"X-Accel-Buffering": "no"})
+
+    # -- the new page beside the old one (V3-P102 §7.2, W1) -------------------------------------
+
+    built = next_page.load()
+
+    def next_built() -> next_page.Built:
+        if built is None:
+            raise ApiError(404, "not_found", "Not available.")
+        return built
+
+    @app.get("/next", include_in_schema=False)
+    async def next_root() -> Response:
+        return Response(status_code=308, headers={"Location": next_page.BASE})
+
+    @app.get("/next/assets/{name:path}", include_in_schema=False)
+    async def next_asset(name: str) -> Response:
+        found = next_built().assets.get(name)  # only the names that were built: never a path into the package
+        if found is None:
+            raise ApiError(404, "not_found", "Not available.")
+        item, media = found
+        charset = "; charset=utf-8" if media.startswith("text/") else ""
+        return Response(item.read_bytes(), media_type=f"{media}{charset}",
+                        headers={"Cache-Control": next_page.ASSET_CACHE})
+
+    @app.get("/next/{rest:path}", include_in_schema=False)
+    async def next_index(request: Request, rest: str) -> Response:
+        """The page for any address under /next/: it reads the address itself (SPA fallback)."""
+        html, nonce = next_built().page()
+        setattr(request.state, STYLE_NONCE_STATE, nonce)  # the security middleware writes the CSP with it
+        return Response(html, media_type="text/html; charset=utf-8", headers={"Cache-Control": "no-store"})
 
     # -- static UI ----------------------------------------------------------------------------
 

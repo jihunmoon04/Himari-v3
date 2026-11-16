@@ -1,0 +1,65 @@
+# The new Web page (V3-P102 §7.5): type check, unit tests, the build, the wheel carrying it, and browser checks
+# against a real HIMARI server with a scripted model. On changes to the page, the server parts it relies on, or
+# this gate.
+name: web
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "web/**"
+      - "src/himari/interfaces/web/**"
+      - "scripts/web_next_server.py"
+      - "scripts/check_web_build.py"
+      - "pyproject.toml"
+      - ".github/workflows/web.yml"
+  pull_request:
+    paths:
+      - "web/**"
+      - "src/himari/interfaces/web/**"
+      - "scripts/web_next_server.py"
+      - "scripts/check_web_build.py"
+      - "pyproject.toml"
+      - ".github/workflows/web.yml"
+
+jobs:
+  page:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install the page's dependencies
+        run: npm ci
+      - name: Type check
+        run: npm run typecheck
+      - name: Unit tests
+        run: npm test
+      - name: Build
+        run: npm run build
+      - name: Install HIMARI
+        working-directory: .
+        run: pip install -e ".[web]"
+      - name: The wheel carries the page
+        working-directory: .
+        run: python -I scripts/check_web_build.py
+      - name: Browser
+        run: npx playwright install --with-deps chromium
+      - name: Browser checks
+        run: npx playwright test
+      - name: Keep the traces
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-traces
+          path: web/test-results
