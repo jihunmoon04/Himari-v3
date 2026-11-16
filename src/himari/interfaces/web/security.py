@@ -13,7 +13,7 @@ automatically.
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Iterable
+from collections.abc import Callable
 from typing import Any
 
 from starlette.datastructures import Headers
@@ -35,11 +35,9 @@ SECURITY_HEADERS: tuple[tuple[bytes, bytes], ...] = (
 )
 
 
-def page_csp(frame_origins: Iterable[str] = ()) -> str:
-    """The page's CSP; ``frame_origins``: where Tool views are framed from
-    (the sandbox origins, V3-P58). Nothing else may be framed."""
-    origins = " ".join(sorted(frame_origins))
-    return f"{_CSP}; frame-src {origins}" if origins else _CSP
+def page_csp() -> str:
+    """The page's CSP: nothing may be framed."""
+    return _CSP
 
 
 def error_body(code: str, message: str) -> bytes:

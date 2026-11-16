@@ -42,7 +42,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from himari.common import JsonValue, ModelToolResult, TextBlock, ToolId, tool_id_problem
-from himari.mcp.client import UI_MIME_TYPE, McpClient, McpRefused, McpSessionChanged, McpUncertain
+from himari.mcp.client import McpClient, McpRefused, McpSessionChanged, McpUncertain
 from himari.mcp.config import McpResourcePolicy
 from himari.mcp.stdio import RESTART_NOTICE
 from himari.mcp.uritemplate import UriTemplate
@@ -73,6 +73,9 @@ METHOD_NOT_FOUND = -32601
 
 def _clock() -> float:
     return asyncio.get_running_loop().time()
+
+
+UI_MIME_TYPE = "text/html;profile=mcp-app"  # an MCP Apps view
 
 
 def is_view(uri: object, mime_type: object) -> bool:

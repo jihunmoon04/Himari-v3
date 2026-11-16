@@ -15,11 +15,9 @@
  * delete for good. A trashed conversation is a missing one (404) elsewhere.
  *
  * Progress is read by polling the conversation (job + waiting question)
- * and its events after the last sequence shown. Tool views (MCP Apps) are
- * app_view.js's: this file only tells it about rows, results and sources.
+ * and its events after the last sequence shown.
  */
 
-import { AppViews } from "/assets/app_view.js";
 import { assistantTextLine, renderAssistantText } from "/assets/rich_text.js";
 import { LiveAnswer } from "/assets/live.js";
 import { FilesPane } from "/assets/files.js";
@@ -278,7 +276,6 @@ const app = {
   folderTicket: 0, // the latest "conversations in this folder" read: older answers are dropped
 };
 
-const views = new AppViews(api, el, () => app.conversationId);
 const hubTray = new HubTray(api, () => followTitle()); // V3-P95: what the hub's coding agents wait on the user for
 
 /* The server's files (V3-P75 §3): one pane on the Files surface, one beside a conversation.
@@ -388,7 +385,6 @@ function showLogin({ signingOut = false } = {}) {
   hubTray.stop(); // V3-P95: nothing of the hub's is shown signed out
   app.activityTicket += 1; // a read answered before this never paints the sign-in screen (review N2)
   app.activity = { working: new Set(), waiting: new Set() };
-  views.reset();
   app.conversationId = null;
   app.filesReturnId = null;
   app.generation += 1;
@@ -824,7 +820,7 @@ async function goTo(path, via) {
   return app.address === path;
 }
 
-/* Back or Forward (§3.2). The same address — an app view's full-screen entry (V3-P63) — is app_view.js's. */
+/* Back or Forward (§3.2). */
 function addressPopped() {
   if (!$("surface-login").hidden) return; // signed out: the address waits for the sign-in
   const wanted = location.pathname;
@@ -1584,7 +1580,6 @@ function coveredThrough() {
 function newWorkBlock() {
   const block = el("details", "item item-work");
   block.append(el("summary", "work-summary"), el("div", "work-body"));
-  block.outsideRows = []; // its calls' rows shown outside (they have an app view), each with data-call
   return block;
 }
 
@@ -1594,14 +1589,12 @@ function workBody(block) {
 
 function lastSequence(block) {
   const last = workBody(block).lastElementChild;
-  return Math.max(Number((last || block).dataset.sequence), ...block.outsideRows.map((row) => Number(row.dataset.call)));
+  return Number((last || block).dataset.sequence);
 }
 
-/* The block a row outside belongs to, or the block a row is in. */
+/* The block a row is in. */
 function workOf(row) {
-  return row.closest(".item-work")
-    || [...$("timeline").querySelectorAll(":scope > .item-work")].find((block) => block.outsideRows.includes(row))
-    || null;
+  return row.closest(".item-work");
 }
 
 /* Its latest progress line, or the one of the block it went on from (§5.6). */
@@ -1637,7 +1630,7 @@ function closeWork() {
 
 function paintWork(block) {
   const body = workBody(block);
-  const rows = [...body.querySelectorAll(".item-tool-row"), ...block.outsideRows];
+  const rows = [...body.querySelectorAll(".item-tool-row")];
   const calls = rows.length === 1 ? "1 step" : `${rows.length} steps`;
   // The latest model change in it goes on its summary, so a fold never hides one (§5.5).
   const changes = body.querySelectorAll(":scope > .work-model");
@@ -1660,27 +1653,22 @@ function paintWork(block) {
   }
 }
 
-/* §5.6: the part of a block after the compaction boundary (its steps and
-   their rows outside) becomes a block of its own, placed before the first
+/* §5.6: the part of a block after the compaction boundary becomes a block of its own, placed before the first
    node after the boundary; it goes on with the progress line. */
 function splitWork(block, covered) {
   if (Number(block.dataset.sequence) > covered) return;
   const first = [...workBody(block).children].find((node) => Number(node.dataset.sequence) > covered);
-  const outside = block.outsideRows.filter((row) => Number(row.dataset.call) > covered);
-  if (!first && !outside.length) return;
+  if (!first) return;
   const rest = newWorkBlock();
   const moved = [];
   for (let node = first; node; node = node.nextElementSibling) moved.push(node);
-  rest.dataset.sequence = String(Math.min(...moved.map((node) => Number(node.dataset.sequence)),
-                                          ...outside.map((row) => Number(row.dataset.call))));
+  rest.dataset.sequence = String(Math.min(...moved.map((node) => Number(node.dataset.sequence))));
   if (moved.length && moved[0].matches(".work-model")) { // the change is named on its summary, as when live
     const label = moved.shift();
     rest.dataset.model = label.textContent;
     label.remove();
   }
   workBody(rest).append(...moved);
-  rest.outsideRows = outside;
-  block.outsideRows = block.outsideRows.filter((row) => !outside.includes(row));
   const line = progressLine(block);
   if (line) rest.dataset.line = line;
   let next = block.nextElementSibling;
@@ -1742,7 +1730,7 @@ function renderEvent(event) {
     const block = workBlock(event.sequence);
     const inside = tagging(workBody(block), event.sequence);
     if (model) {
-      if (!workBody(block).childElementCount && !block.outsideRows.length) block.dataset.model = model; // on its summary
+      if (!workBody(block).childElementCount) block.dataset.model = model; // on its summary
       else inside.append(el("div", "work-model", model)); // before this step, inside (§5.5)
     }
     if (event.text && event.text.trim()) {
@@ -1761,14 +1749,7 @@ function renderEvent(event) {
       const entry = { node, details, toolId: call.tool_id, args: call.arguments, result: null };
       app.toolRows.set(key, entry);
       paintToolRow(entry);
-      if (call.app_view) { // shown while it runs: the row stays outside the block (§5.3)
-        views.attach(entry, key, event.run_id, call.call_id, true);
-        node.dataset.call = String(event.sequence);
-        block.outsideRows.push(node);
-        timeline.append(node);
-      } else {
-        inside.append(node);
-      }
+      inside.append(node);
     }
     paintWork(block);
     return;
@@ -1792,20 +1773,11 @@ function renderEvent(event) {
       return;
     }
     const block = workOf(entry.node);
-    if (event.app_view && !entry.view) {
-      if (block && entry.node.closest(".item-work")) { // its view is known from its result: the row moves out (§5.3)
-        entry.node.dataset.call = entry.node.dataset.sequence;
-        block.outsideRows.push(entry.node);
-        timeline.append(entry.node); // tagged with the result's sequence: where it now stands
-      }
-      views.attach(entry, `${event.run_id}/${event.call_id}`, event.run_id, event.call_id, false);
-    }
     for (const file of event.presented_files || []) timeline.append(presentedCard(file)); // V3-P66 §9
     if (event.memory && MEMORY_ACTIONS[event.memory.action]) timeline.append(memoryLine(event)); // V3-P71 §7.1
     if (event.images && event.images.length) timeline.append(toolImages(event.images)); // V3-P67 §8
     entry.result = event;
     paintToolRow(entry);
-    if (entry.view) views.result(entry, Boolean(event.app_view));
     if (block) paintWork(block);
   }
 }
@@ -2022,10 +1994,7 @@ function renderToolSources(sources) {
 async function loadToolSources(generation) {
   try {
     const answer = await api("GET", `/api/conversations/${encodeURIComponent(app.conversationId)}/tools`);
-    if (generation === app.generation) {
-      renderToolSources(answer.sources);
-      views.sources(answer.sources); // a source off here closes its views
-    }
+    if (generation === app.generation) renderToolSources(answer.sources);
   } catch (ignored) {
     /* display only: the conversation works without it */
   }
@@ -2323,7 +2292,6 @@ async function setToolSource(source, enabled) {
       { enabled });
     if (generation === app.generation) {
       renderToolSources(answer.sources);
-      views.sources(answer.sources, true); // close its views here and in this browser's other tabs (V3-P58 §3.7)
       loadPrompts(generation); // the servers on here changed
     }
   } catch (error) {
@@ -2346,10 +2314,7 @@ async function pullEvents(generation) {
     app.lastSequence = page.last_sequence;
     if (app.announceAfter === Infinity && page.items.length < 200) app.announceAfter = app.lastSequence;
     if (page.items.length && atBottom) timeline.scrollTop = timeline.scrollHeight;
-    if (page.items.length < 200) {
-      views.autoOpen();
-      return true;
-    }
+    if (page.items.length < 200) return true;
   }
 }
 
@@ -2488,7 +2453,7 @@ function poll(generation) {
         loadContext(generation);
         loadPassLines(generation); // a pass may have read it meanwhile
         loadServerInfo(); // a command may have found the sandbox broken
-        loadToolSources(generation); // and close the views of a source turned off elsewhere
+        loadToolSources(generation); // a source may have been turned off elsewhere
         loadModel(generation); // a stored choice may have been changed elsewhere
         loadFolders(generation); // and folders attached elsewhere
       }
@@ -2525,7 +2490,6 @@ async function openConversation(id, { created = false, via = "push" } = {}) {
   if (moving === null) leavePlace();
   app.jobRunning = false;
   const generation = app.generation;
-  views.reset();
   app.conversationId = id;
   app.lastSequence = 0;
   loadServerInfo();
@@ -2908,7 +2872,6 @@ async function loadTrash(reset) {
 async function showTrash({ via = "push" } = {}) {
   if (!(await mayLeave())) return;
   stopPolling();
-  views.reset();
   app.conversationId = null;
   app.generation += 1;
   live.reset();
@@ -3079,7 +3042,6 @@ async function showInstructions({ via = "push" } = {}) {
   if ($("surface-instructions").hidden) {
     if (!(await mayLeave())) return;
     stopPolling();
-    views.reset();
     app.conversationId = null;
     app.generation += 1;
     live.reset();
@@ -3781,7 +3743,6 @@ async function loadTimeline(cursor) {
 async function showMemory({ via = "push" } = {}) {
   if (!(await mayLeave())) return;
   stopPolling();
-  views.reset();
   app.conversationId = null;
   app.generation += 1;
   live.reset();
@@ -4007,7 +3968,6 @@ async function showFiles({ via = "push" } = {}) {
   if (!(await mayLeave())) return;
   if (app.conversationId) app.filesReturnId = app.conversationId;
   stopPolling();
-  views.reset();
   app.conversationId = null;
   app.generation += 1;
   live.reset();
@@ -4307,7 +4267,6 @@ function nudgePanel(event) {
 async function showFolders({ via = "push" } = {}) {
   if (!(await mayLeave())) return;
   stopPolling();
-  views.reset();
   app.conversationId = null;
   app.generation += 1;
   live.reset();
@@ -4518,7 +4477,6 @@ async function reachingLine(enabled) {
 async function showDevices({ via = "push" } = {}) {
   if (!(await mayLeave())) return;
   stopPolling();
-  views.reset();
   app.conversationId = null;
   app.generation += 1;
   live.reset();

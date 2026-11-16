@@ -23,7 +23,6 @@ from himari.common import (
     WorkspaceId,
 )
 from himari.data.api import (
-    AppView,
     AssistantToolCalls,
     DataError,
     DataErrorCode,
@@ -34,14 +33,11 @@ from himari.data.api import (
     RunPreparation,
     ToolCompletion,
     ToolExecutionStatus,
-    UiCsp,
-    UiResource,
 )
 from himari.data.memory import InMemoryData
 from himari.data.sqlite import SqliteData
 
 ALICE, BOB = PrincipalId("alice"), PrincipalId("bob")
-VIEW = UiResource.create("calliope", "ui://calliope/board", "<!DOCTYPE html><p>board</p>", UiCsp())
 
 Data = InMemoryData | SqliteData
 
@@ -51,8 +47,8 @@ async def conversation(data: Data, owner: PrincipalId = ALICE) -> TrustedScope:
     return TrustedScope(owner, cid)
 
 
-async def called(data: Data, scope: TrustedScope, *tool_ids: str, view: UiResource | None = None) -> CallRef:
-    """A Run whose Tool calls are recorded; the first one done (with ``view``)."""
+async def called(data: Data, scope: TrustedScope, *tool_ids: str) -> CallRef:
+    """A Run whose Tool calls are recorded; the first one done."""
     run_id = await data.prepare_run(
         scope, RunPreparation(b"{}", "application/json", RawRepresentation.ADAPTER_SERIALIZED, (),
                               PromptBasis(0, 0), "p", "m"))
@@ -62,7 +58,7 @@ async def called(data: Data, scope: TrustedScope, *tool_ids: str, view: UiResour
     await data.project_model_output(scope, run_id, AssistantToolCalls(group))
     call = CallRef(run_id, CallId("c0"))
     await data.commit_tool_outcome(scope, call, ToolCompletion(
-        ToolExecutionStatus.SUCCEEDED, text_result("ok"), app_view=None if view is None else AppView(view, {"v": 1})))
+        ToolExecutionStatus.SUCCEEDED, text_result("ok")))
     return call
 
 
@@ -193,35 +189,6 @@ def test_only_the_owner_may_move_restore_or_purge() -> None:
         assert (await data.read_conversation(scope)).trashed_at is None
         await data.trash_conversation(scope)
         assert await data.list_conversations(BOB, trashed=True) == ()
-
-    asyncio.run(scenario())
-
-
-def test_purge_removes_the_conversation_and_only_the_views_nobody_else_names() -> None:
-    async def scenario() -> None:
-        data = data_for(new_store())
-        shared, own = await conversation(data), await conversation(data)
-        other = await conversation(data, BOB)
-        alone = UiResource.create("calliope", "ui://calliope/alone", "<!DOCTYPE html><p>alone</p>", UiCsp())
-        mine = await called(data, own, "calliope/board", view=VIEW)
-        await called(data, own, "calliope/alone", view=alone)
-        theirs = await called(data, other, "calliope/board", view=VIEW)
-        await data.append_event(shared, user("kept"))
-
-        await data.trash_conversation(own)
-        await data.begin_purge(own)
-        await data.purge_conversation(own)
-
-        stored = await data.read_app_view(other, theirs)  # the shared view stays for the call that names it
-        assert stored is not None and stored.view.resource == VIEW
-        assert [e.payload for e in await data.read_events(shared)] == [user("kept")]
-        if isinstance(data, InMemoryData):
-            assert set(data._store.ui_resources) == {VIEW.digest}
-        else:
-            digests = [r[0] for r in data._store.connection.execute("SELECT digest FROM ui_resources")]
-            assert digests == [VIEW.digest]
-        with pytest.raises(DataError):
-            await data.read_app_view(own, mine)
 
     asyncio.run(scenario())
 

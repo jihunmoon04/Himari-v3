@@ -39,7 +39,7 @@ function page() {
   const context = vm.createContext({
     document: { getElementById: node, addEventListener() {}, createElement: (tag) => new FakeElement(tag) },
     window: { matchMedia: () => ({ matches: false }) },
-    AppViews: class { reset() {} }, FilesPane: class { refresh() {} openFolder() {} }, console, setTimeout, clearTimeout,
+    FilesPane: class { refresh() {} openFolder() {} }, console, setTimeout, clearTimeout,
     LiveAnswer: class { reset() {} shown() {} keepLast() {} settle() {} open() {} restyle() {} },
     localStore, location: { search: "" }, HubTray: class { count = 0; start() {} stop() {} },
   });

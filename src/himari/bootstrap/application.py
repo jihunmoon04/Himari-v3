@@ -72,7 +72,6 @@ from himari.common import (
     CallRef,
     ConversationId,
     FileId,
-    JsonValue,
     PrincipalId,
     RunId,
     TextBlock,
@@ -129,8 +128,6 @@ from himari.data.api import (
     ModelSetting,
     ToolExecutionRecord,
     ToolExecutionStatus,
-    UiCsp,
-    UiResource,
     UserMessage,
     clean_file_name,
     clean_media_type,
@@ -179,7 +176,7 @@ from himari.sandbox import identity
 from himari.sandbox.api import SandboxAdmissionError, SandboxState, ServerProfile
 from himari.sandbox.backend import SandboxBackend, discover_capability, supports_tmp_size
 from himari.sandbox.server import ServerSandbox
-from himari.mcp.config import CONFIG_NAME, McpConfig, McpStdioConfig, McpUiPolicy, load_config
+from himari.mcp.config import CONFIG_NAME, McpConfig, McpStdioConfig, load_config
 from himari.mcp.jsonrpc import McpError
 from himari.mcp.prompts import PromptContentError, prompt_text
 from himari.mcp.stdio import ProcessLauncher
@@ -271,13 +268,6 @@ def check_tool_sources(data_root: str | os.PathLike[str], environ: Mapping[str, 
     """Fails (ValueError) on an ``mcp.json`` that ``Application.open`` would
     refuse, so a server can report it before starting."""
     load_config(os.path.join(os.path.abspath(data_root), CONFIG_NAME), environ)
-
-
-def tool_views_configured(data_root: str | os.PathLike[str], environ: Mapping[str, str]) -> bool:
-    """Whether ``mcp.json`` shows some server's views (V3-P58): the Web
-    server starts its sandbox origin only then. Fails like check_tool_sources."""
-    config = load_config(os.path.join(os.path.abspath(data_root), CONFIG_NAME), environ)
-    return any(server.ui is not None for server in config.servers)
 
 
 class UnknownToolSource(LookupError):
@@ -587,54 +577,6 @@ class PromptView:
     title: str
     description: str
     arguments: tuple[PromptArgument, ...]
-
-
-class AppViewRefused(LookupError):
-    """A call has no view to show here (V3-P58). ``code``: ``no_app_view``
-    (none stored and none to show), ``source_disabled`` (this Conversation
-    turned the source off), ``app_view_disabled`` (the operator does not show
-    this server's views, or the server is no longer configured)."""
-
-    def __init__(self, code: str) -> None:
-        super().__init__(code)
-        self.code = code
-
-
-# How a view whose call ended without one is closed (V3-P58 §3.5): only a
-# call that did not run is "cancelled"; one that ran, or may have, is not.
-_ENDED_OUTCOME = {
-    ToolExecutionStatus.CANCELLED: "not_run",
-    ToolExecutionStatus.DENIED: "not_run",
-    ToolExecutionStatus.SUCCEEDED: "view_unavailable",
-    ToolExecutionStatus.FAILED: "view_unavailable",
-    ToolExecutionStatus.UNKNOWN: "unknown",
-}
-_RUNNING = frozenset({ToolExecutionStatus.PENDING, ToolExecutionStatus.EXECUTION_CLAIMED})
-MAX_REASON_CHARS = 300
-
-
-@dataclass(frozen=True)
-class AppViewState:
-    """What a call's view shows now (V3-P58 §6.1).
-
-    ``state``: ``running`` (the call has not ended; the view read at connect),
-    ``done`` (the view stored with the result) or ``ended`` (it ended without
-    one: ``outcome`` says how the view is closed, ``reason`` why; no resource).
-    ``csp`` is what the view may reach now: what its server declared that the
-    operator also allows."""
-
-    state: str
-    call: CallRef
-    source: str
-    tool_id: str
-    tool: Mapping[str, object] | None  # as the server listed it, while it is registered
-    arguments: Mapping[str, JsonValue]
-    status: ToolExecutionStatus
-    resource: UiResource | None = None
-    result: JsonValue = None
-    csp: UiCsp = field(default_factory=UiCsp)
-    outcome: str | None = None
-    reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1659,62 +1601,6 @@ class Application:
         except PromptContentError as error:
             raise PromptRefused("unsupported_content", f"This prompt cannot be used: {error}.") from None
 
-    # --- Tool views (MCP Apps, V3-P58) ---------------------------------------------------
-
-    @property
-    def views_configured(self) -> bool:
-        """Some configured server's views are shown (its ``ui`` is set)."""
-        return any(policy is not None for policy in self.mcp.ui_policies.values())
-
-    def _view_source(self, tool_id: str) -> str | None:
-        """The configured MCP server whose Tool this is, if any."""
-        source, slash, _ = tool_id.partition("/")
-        return source if slash and source in self.mcp.ui_policies else None
-
-    async def view_flags(self, scope: TrustedScope, run_ids: Iterable[RunId]) -> dict[CallRef, tuple[bool, bool]]:
-        """For each call of these Runs with a view that may be shown here:
-        (it has a view to show while it runs, its result was stored with a
-        view). A call is left out when its source is off in this Conversation
-        or the operator does not show its server's views (§3.7)."""
-        enabled = await self.runtime.access.enabled_sources(scope)
-        flags: dict[CallRef, tuple[bool, bool]] = {}
-        for run_id in dict.fromkeys(run_ids):
-            for record in await self.data.read_tool_executions(scope, run_id):
-                source = self._view_source(record.tool_id)
-                if source is None or source not in enabled or self.mcp.ui_policy(source) is None:
-                    continue
-                current = self.mcp.ui_for(record.tool_id) is not None
-                if current or record.ui_digest is not None:
-                    flags[record.call] = (current, record.ui_digest is not None)
-        return flags
-
-    async def app_view(self, scope: TrustedScope, call: CallRef) -> AppViewState:
-        """A call's view as it should be shown now; AppViewRefused when there
-        is none to show here. Checks, in this order: the source is on in this
-        Conversation, the operator shows its views, there is a view."""
-        record = next((r for r in await self.data.read_tool_executions(scope, call.run_id) if r.call == call), None)
-        source = None if record is None else self._view_source(record.tool_id)
-        if record is None or source is None:
-            raise AppViewRefused("no_app_view")
-        if source not in await self.runtime.access.enabled_sources(scope):
-            raise AppViewRefused("source_disabled")
-        policy = self.mcp.ui_policy(source)
-        if policy is None:
-            raise AppViewRefused("app_view_disabled")
-        ended = AppViewState("ended", call, source, record.tool_id, self.mcp.tool_info(record.tool_id),
-                             record.arguments, record.status)
-        stored = await self.data.read_app_view(scope, call) if record.ui_digest is not None else None
-        if stored is not None:
-            resource = stored.view.resource
-            return replace(ended, state="done", resource=resource, result=stored.view.payload,
-                           csp=_allowed(resource.csp, policy))
-        current = self.mcp.ui_for(record.tool_id)
-        if current is None:
-            raise AppViewRefused("no_app_view")
-        if record.status in _RUNNING:
-            return replace(ended, state="running", resource=current, csp=_allowed(current.csp, policy))
-        return replace(ended, outcome=_ENDED_OUTCOME[record.status], reason=_ended_reason(record))
-
     # --- the user's instructions (V3-P69) ----------------------------------------------
 
     async def instructions(self, principal: PrincipalId,
@@ -2355,26 +2241,3 @@ def _machine_placer(machine: MachineEnvironment, conversation_id: str, cwd: str)
         commit_copy=lambda temp, path: machine.commit_copy(conversation_id, cwd, temp, path),
         discard_copy=lambda temp: machine.discard_copy(conversation_id, cwd, temp),
     )
-
-
-def _allowed(declared: UiCsp, policy: McpUiPolicy) -> UiCsp:
-    """V3-P58 §3.3: what the server declares that the operator also allows,
-    as the operator wrote it. Nested frames and other base URIs: never."""
-    def both(values: tuple[str, ...], allowed: frozenset[str]) -> tuple[str, ...]:
-        return tuple(sorted({v.lower() for v in values} & allowed))
-    return UiCsp(both(declared.connect_domains, policy.connect_domains),
-                 both(declared.resource_domains, policy.resource_domains))
-
-
-def _ended_reason(record: ToolExecutionRecord) -> str:
-    """Why a call's view closes, from what the call already told the model
-    (and the connector's own note when the result was too large to show)."""
-    raw = record.raw_result
-    problem = raw.get("ui_problem") if isinstance(raw, Mapping) else None
-    if isinstance(problem, str):
-        return problem[:MAX_REASON_CHARS]
-    blocks = () if record.model_result is None else record.model_result.blocks
-    text = " ".join(b.text for b in blocks if isinstance(b, TextBlock)).strip()
-    if not text:
-        text = record.status.value
-    return text if len(text) <= MAX_REASON_CHARS else text[: MAX_REASON_CHARS - 1] + "…"

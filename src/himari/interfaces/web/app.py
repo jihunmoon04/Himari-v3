@@ -31,11 +31,6 @@ the files a call presented. An image's model copy (V3-P67 §8) is shown
 inline from ``GET …/files/{id}/{version}/view``: a JPEG or PNG HIMARI made,
 never the uploaded bytes; file views say whether there is one (``image``)
 and tool results list the images the call returned (``images``).
-
-Tool views (MCP Apps, V3-P58): events say which calls have one
-(``app_view``); ``GET …/calls/{run}/{call}/app`` gives a view as JSON with a
-signed URL of the sandbox origin's proxy (``sandbox.py``). The view's HTML
-is never served from this origin.
 """
 
 from __future__ import annotations
@@ -70,8 +65,6 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from himari.bootstrap.application import (
     CLOUD_FILESYSTEMS,
     Application,
-    AppViewRefused,
-    AppViewState,
     ConnectionGenerationRequired,
     ConversationStillStopping,
     DeleteNotice,
@@ -188,7 +181,6 @@ from himari.interfaces.web import event_stream, live
 from himari.interfaces.web.config import WebConfig
 from himari.interfaces.web.hub import HubClient, HubRefused, HubUnavailable
 from himari.sandbox.api import SandboxState
-from himari.interfaces.web.sandbox import SandboxGrant, SandboxSigner
 from himari.interfaces.web.security import (
     SESSION_COOKIE,
     BodyLimitMiddleware,
@@ -204,7 +196,7 @@ MAX_MESSAGE_CHARS = 32_000
 MAX_EVENTS_PAGE = 500
 SESSION_SECONDS = 7 * 24 * 3600
 FAILED_LOGIN_DELAY_SECONDS = 1.0
-STATIC_FILES = {"app.css": "text/css", "app.js": "text/javascript", "app_view.js": "text/javascript",
+STATIC_FILES = {"app.css": "text/css", "app.js": "text/javascript",
                 "hub.js": "text/javascript",  # the hub's waiting requests (V3-P95)
                 "rich_text.js": "text/javascript", "appearance.js": "text/javascript", "live.js": "text/javascript",
                 "files.js": "text/javascript",  # the file explorer's parts (V3-P75 §3)
@@ -767,17 +759,14 @@ def wake_summary(reasons: Sequence[WakeReason]) -> str:
     return "HIMARI reached out · " + " · ".join(parts)
 
 
-def event_view(event: ConversationEvent, views: dict[CallRef, tuple[bool, bool]] | None = None,
+def event_view(event: ConversationEvent,
                models: dict[RunId, str] | None = None, files: Files | None = None,
                presented: dict[CallRef, list[FileRecord]] | None = None,
                memory: dict[CallRef, MemoryLine] | None = None) -> dict[str, Any]:
-    """``views``: Application.view_flags for the page — (shown while it
-    runs, stored with its result) per call with a view that may be shown.
-    ``models``: the model of each Run that wrote an assistant event (V3-P64 §7).
+    """``models``: the model of each Run that wrote an assistant event (V3-P64 §7).
     ``files``: the page's attachments by (id, version); ``presented``: the
     files each call gave the user (V3-P66 §7.3); ``memory``: what each
     memory call changed (V3-P71 §7.1)."""
-    views = {} if views is None else views
     models = {} if models is None else models
     files = {} if files is None else files
     presented = {} if presented is None else presented
@@ -803,9 +792,7 @@ def event_view(event: ConversationEvent, views: dict[CallRef, tuple[bool, bool]]
         view["display"] = display_view(view["text"])
         view["model"] = models.get(event.origin_run_id) if event.origin_run_id else None
         view["run_id"] = event.origin_run_id
-        run = event.origin_run_id
         view["calls"] = [{"call_id": c.call_id, "tool_id": c.tool_id, "arguments": thaw(c.arguments),
-                          "app_view": run is not None and views.get(CallRef(run, c.call_id), (False, False))[0],
                           **({"display": display_view(_question(c.arguments))} if c.tool_id == ASK_USER_TOOL_ID
                              else {})}
                          for c in sorted(payload.calls, key=lambda c: c.ordinal)]
@@ -818,7 +805,6 @@ def event_view(event: ConversationEvent, views: dict[CallRef, tuple[bool, bool]]
         view["call_id"] = payload.call.call_id
         view["is_error"] = payload.model_result.is_error
         view["text"] = _text(payload.model_result.blocks)
-        view["app_view"] = views.get(payload.call, (False, False))[1]
         view["presented_files"] = [file_view(f) for f in presented.get(payload.call, [])]
         line = memory.get(payload.call)
         view["memory"] = None if line is None else {"action": line.action, "id": line.memory_id, "text": line.text,
@@ -828,30 +814,6 @@ def event_view(event: ConversationEvent, views: dict[CallRef, tuple[bool, bool]]
         view["images"] = [file_view(found) for b in payload.model_result.blocks if isinstance(b, AttachmentRef)
                           if (found := files.get((b.file_id, b.version))) is not None
                           and found.origin is FileOrigin.TOOL]
-    return view
-
-
-def app_view_view(state: AppViewState, sandbox_url: str | None) -> dict[str, Any]:
-    view: dict[str, Any] = {
-        "state": state.state, "source": state.source, "tool_id": state.tool_id,
-        "tool": None if state.tool is None else thaw(state.tool),
-        "arguments": thaw(state.arguments), "status": state.status.value,
-    }
-    if state.resource is None:  # ended without a view: how to close it, and why
-        view["outcome"], view["reason"] = state.outcome, state.reason
-        return view
-    declared = state.resource.csp
-    view.update({
-        "digest": state.resource.digest, "html": state.resource.html, "prefers_border": state.resource.prefers_border,
-        "csp": {"connect_domains": list(state.csp.connect_domains),
-                "resource_domains": list(state.csp.resource_domains)},
-        "declared_csp": {"connect_domains": list(declared.connect_domains),
-                         "resource_domains": list(declared.resource_domains),
-                         "frame_domains": list(declared.frame_domains),
-                         "base_uri_domains": list(declared.base_uri_domains)},
-        "sandbox_url": sandbox_url,
-        "result": None if state.state != "done" else thaw(state.result),
-    })
     return view
 
 
@@ -1332,11 +1294,8 @@ def begin_shutdown(app: FastAPI) -> None:
         loop.call_soon_threadsafe(app.state.closing.set)
 
 
-def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None = None) -> FastAPI:
-    """``signer``: shared with the sandbox server (``sandbox.py``); made here
-    when not given (one per process, so a restart voids old view URLs)."""
+def create_app(config: WebConfig, opener: Opener) -> FastAPI:
     sessions = Sessions()
-    signer = SandboxSigner() if signer is None else signer
     closing = asyncio.Event()  # set as the server begins to shut down: the live streams end
     live_slots = live.Slots()  # open live streams of each principal
     # V3-P83 §8.1: the live streams each device opened, ended when it is revoked.
@@ -1470,11 +1429,6 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
         return JSONResponse({"error": {"code": "uploads_folder_unusable",
                                        "message": "The conversation's uploads is not a folder. Ask the model to tidy "
                                                   "it up, or remove it yourself."}}, status_code=409)
-
-    @app.exception_handler(AppViewRefused)
-    async def no_view(request: Request, error: AppViewRefused) -> JSONResponse:
-        return JSONResponse({"error": {"code": error.code, "message": "No view to show for this call."}},
-                            status_code=404)
 
     @app.exception_handler(PromptRefused)
     async def prompt_refused(request: Request, error: PromptRefused) -> JSONResponse:
@@ -1912,9 +1866,6 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
         if unshown := await application.data.unshown_wakes(scope):  # V3-P90 §7.3: a free wake not shown yet
             events = tuple(e for e in events if e.sequence not in unshown)
         application.seen(scope)  # a client is reading (V3-P62 §5): only after the read was authorized
-        runs = [e.origin_run_id for e in events if isinstance(e.payload, AssistantToolCalls) and e.origin_run_id]
-        runs += [e.payload.call.run_id for e in events if isinstance(e.payload, ToolResultRecord)]
-        views = await application.view_flags(scope, runs) if runs and application.views_configured else {}
         writers = [e.origin_run_id for e in events
                    if isinstance(e.payload, (AssistantFinal, AssistantToolCalls)) and e.origin_run_id]
         models = await application.run_models(scope, writers) if writers else {}
@@ -1929,7 +1880,7 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
         presented = {call: list(records) for call, records in given.items()}
         results = [e.payload.call.run_id for e in events if isinstance(e.payload, ToolResultRecord)]
         memory = await application.memory_lines(scope, results) if results else {}
-        return {"items": [event_view(e, views, models, files, presented, memory) for e in events],
+        return {"items": [event_view(e, models, files, presented, memory) for e in events],
                 "last_sequence": events[-1].sequence if events else after}
 
     @app.get("/api/conversations/{conversation_id}/live")
@@ -1960,20 +1911,6 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
         return _LiveResponse(live.stream(application.runner, scope, closing, ended=ended,
                                          awake=lambda: application.seen(scope)), done,
                              media_type="text/event-stream", headers={"X-Accel-Buffering": "no"})
-
-    @app.get("/api/conversations/{conversation_id}/calls/{run_id}/{call_id}/app")
-    async def read_app_view(conversation_id: str, run_id: str, call_id: str, request: Request, origin: str,
-                            who: PrincipalId = Depends(principal)) -> dict[str, Any]:
-        """A call's view (V3-P58 §6.1). ``origin``: the page's own origin,
-        one of the allowed ones; the view is framed only by it."""
-        if origin not in config.allowed_origins:
-            raise ApiError(400, "invalid_argument", "origin must be this page's origin.")
-        state = await himari(request).app_view(scope_of(conversation_id, who), CallRef(RunId(run_id), CallId(call_id)))
-        url = None
-        if state.resource is not None:
-            grant = SandboxGrant(origin, state.csp.connect_domains, state.csp.resource_domains)
-            url = f"{config.sandbox_origin(origin)}/sandbox?{signer.query(grant)}"
-        return app_view_view(state, url)
 
     @app.get("/api/conversations/{conversation_id}/context")
     async def read_context(conversation_id: str, request: Request,
@@ -2775,5 +2712,5 @@ def create_app(config: WebConfig, opener: Opener, signer: SandboxSigner | None =
                        else SCREEN_MAX_BYTES if method == "POST" and SCREEN_PATH.match(path) else None)
     app.add_middleware(OriginGuardMiddleware, allowed_origins=config.allowed_origins)
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=sorted(config.allowed_hosts))
-    app.add_middleware(SecurityHeadersMiddleware, csp=page_csp(config.sandbox_origins))
+    app.add_middleware(SecurityHeadersMiddleware, csp=page_csp())
     return app
