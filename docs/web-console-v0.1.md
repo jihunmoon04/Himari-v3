@@ -1,6 +1,6 @@
 # Web 다시 디자인: hub 작업 콘솔 (V3-P102 설계 초안 v0.1)
 
-> 2026-11-16 · **설계 초안**, rev. 3(Codex 설계 검수 1·2차 반영) · **W0 구현**(`interfaces/web/hub.py`·`hub_stream.py`) · **W1 구현**(`web/`, `/next/`; §7.6) · **W2 구현**(§7.7) · 설계 기준 v3 `3ada276`(#189 병합), hub `0730c33`(himari-hub #25 병합,
+> 2026-11-16 · **설계 초안**, rev. 3(Codex 설계 검수 1·2차 반영) · **W0 구현**(`interfaces/web/hub.py`·`hub_stream.py`) · **W1 구현**(`web/`, `/next/`; §7.6) · **W2 구현**(§7.7) · **W0~W2 운영 배포**(2026-11-17, v3 `b78a108`, [기록](https://github.com/jihunmoon04/himari-hub/blob/main/docs/deployments/2026-11-17-v3-web-console.md)) · 설계 기준 v3 `3ada276`(#189 병합), hub `0730c33`(himari-hub #25 병합,
 > [사용자 경로 계약 v1](https://github.com/jihunmoon04/himari-hub/blob/main/docs/user-api-v1.md)).
 >
 > 소유자 요청(2026-11-16): HIMARI v3를 HIMARI hub에 맞게 바꾼다. ① hub를 움직이는 두 경로(MCP 경로와
@@ -364,8 +364,8 @@ HIMARI 이벤트(`user_message`, `assistant_tool_calls`, `tool_result`, `assista
 
 | id | 무엇 | 크기 | 언제 |
 | --- | --- | --- | --- |
-| H1 | `/user/task {id}`: §3.1 작업에 `session`, 결과 글 앞부분 | 작음, v1 더하기 | **W3 전** |
-| H7 | 세션에 `updated_at`(마지막 이벤트나 상태 변화 시각) | 작음, v1 더하기 | W2와 함께, 없으면 표시 생략 |
+| H1 | `/user/task {id}`: §3.1 작업에 `session`, 결과 글 앞부분 | 작음, v1 더하기 | **W3 전** — hub #27로 만듦, 운영 `e79bb0f`(2026-11-17) |
+| H7 | 세션에 `updated_at`(마지막 이벤트나 상태 변화 시각) | 작음, v1 더하기 | W2와 함께, 없으면 표시 생략 — hub #27로 만듦, 운영 `e79bb0f` |
 | H2 | 세션 이름(`rename`), 닫힌 세션 다시 열기 | 작음~중간 | 나중 |
 | H3 | 슬래시 명령 목록과 실행 | 중간 | 나중 |
 | H4 | 에이전트에 이미지·파일 첨부(ACP 리소스) | 중간 | 나중 |
@@ -373,7 +373,7 @@ HIMARI 이벤트(`user_message`, `assistant_tool_calls`, `tool_result`, `assista
 | H6 | 에이전트 로그인 중계 | 큼 | 나중 |
 
 H2~H6이 생기면 화면 자리는 이미 있다(세션 메뉴, 입력창 `/`, 첨부 단추, 오른쪽 패널의 파일 탭).
-hub PR #25(diff·모드·`projects`)는 아직 운영에 없다. W2 전에 서버와 실행기를 함께 올린다.
+hub PR #25(diff·모드·`projects`)는 2026-11-17 운영에 올렸다(`0730c33`). H1·H7(hub #27)도 `e79bb0f`로 운영에 있다.
 
 ## 9. 단계 (PR마다 운영에서 확인)
 
