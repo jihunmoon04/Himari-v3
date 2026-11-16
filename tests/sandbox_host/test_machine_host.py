@@ -115,20 +115,20 @@ def test_timeouts(kit: RunnerKit) -> None:
     assert result["timed_out"] is True and result["exit_code"] is None
 
 
-def test_an_attached_folder_is_writable_and_others_are_not(kit: RunnerKit) -> None:
-    """V3-P74 §10: a second Workspace outside the HIMARI home (part 2)."""
+def test_an_attached_folder_is_only_read(kit: RunnerKit) -> None:
+    """V3-P74 §10, V3-P100: a command works in an attached folder outside the HIMARI home, reads it,
+    and writes only the Conversation's own folder (the only write root the machine Environment sends)."""
     folder = call(kit, api.CONVERSATION_FOLDER, {"conversation": "hosttest"})["path"]
-    base = kit.himari_home.parent
-    project, other = base / "project", base / "other"
+    project = kit.himari_home.parent / "project"
     project.mkdir(exist_ok=True)
-    other.mkdir(exist_ok=True)
+    (project / "seen.txt").write_text("seen\n")
     checked = call(kit, api.CHECK_WORKSPACE, {"path": str(project), "others": []})
     assert checked["path"] == str(project)
-    result = call(kit, api.RUN, {"argv": ["sh", "-c", f"echo in > {project}/made.txt; echo out > {other}/no.txt; "
-                                                      "pwd"],
-                                 "cwd": str(project), "write_roots": [folder, str(project)], "timeout": 60})
-    assert base64.b64decode(result["stdout"]).decode().strip() == str(project)
-    assert (project / "made.txt").read_text() == "in\n" and not (other / "no.txt").exists()
+    result = call(kit, api.RUN, {"argv": ["sh", "-c", f"pwd; cat seen.txt; echo in > made.txt; "
+                                                      f"echo own > {folder}/own.txt"],
+                                 "cwd": str(project), "write_roots": [folder], "timeout": 60})
+    assert base64.b64decode(result["stdout"]).decode().split() == [str(project), "seen"]
+    assert not (project / "made.txt").exists() and (Path(folder) / "own.txt").read_text() == "own\n"
 
 
 CLOUD = Path("/home/ubuntu/cloud_storage/02_구글_일반")

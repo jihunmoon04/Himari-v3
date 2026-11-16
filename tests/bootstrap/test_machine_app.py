@@ -14,10 +14,10 @@ from runnerkit import RunnerKit, start_runner
 from testkit import calls, final
 
 from himari.bootstrap.application import Application, FilesUnavailable, WorkspaceRefused
-from himari.common import PrincipalId, TrustedScope
+from himari.common import PrincipalId, TextBlock, TrustedScope
 from himari.data.api import MAX_WORKSPACE_NOTE_CHARS
 from himari.environment.machine import DRIVE_NOTE, READ_ONLY_NOTE, MachineEnvironment
-from himari.prompt.api import state_block
+from himari.prompt.api import ToolGroupTurn, state_block
 from himari.provider.scripted import ScriptedAdapter
 
 OPERATOR, ALICE = PrincipalId("operator"), PrincipalId("alice")
@@ -155,6 +155,10 @@ def test_folders_are_registered_attached_and_shown_to_the_model(tmp_path: Path, 
             await app.send(scope, "write it")
             await app.runner.wait(scope)
             assert not (Path(project) / "made.c").exists()  # V3-P100: an attached folder is only read
+            results = [str(b.text) for part in adapter.prepared_inputs[-1].conversation
+                       if isinstance(part, ToolGroupTurn)
+                       for r in part.results.values() for b in r.blocks if isinstance(b, TextBlock)]
+            assert any("read-only" in t for t in results), results  # refused as read-only, not for another reason
             block = state_block(adapter.prepared_inputs[0].current_state) or ""
             assert f'"working_directory": "{project}"' in block and '"label": "a"' in block
             with pytest.raises(WorkspaceRefused) as refused:

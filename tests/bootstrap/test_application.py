@@ -78,6 +78,7 @@ def test_a_data_root_others_can_access_is_refused(tmp_path: Path) -> None:
 
 def test_conversation_flow_survives_a_restart(tmp_path: Path) -> None:
     root = tmp_path / "data"
+    # A call to an old Inside Tool (V3-P101): with no Environment it is refused, and the refusal is kept.
     script: list[ScriptStep] = [calls(("inside/write_file", {"path": "notes.txt", "content": "remember me"})), final("saved")]
 
     async def first() -> str:
@@ -96,7 +97,7 @@ def test_conversation_flow_survives_a_restart(tmp_path: Path) -> None:
         app, _ = await open_app(root)
         (summary,) = await app.data.list_conversations(ALICE)
         assert summary.conversation_id == cid and summary.title == "Notes" and summary.preview == "save a note"
-        assert summary.last_sequence == 4  # user, tool calls, tool result, final
+        assert summary.last_sequence == 4  # user, tool calls, the refused tool result, final
         assert await app.data.list_conversations(BOB) == ()
         bob = await app.create_conversation(BOB)
         with pytest.raises(DataError):  # it only talks: no Workspace

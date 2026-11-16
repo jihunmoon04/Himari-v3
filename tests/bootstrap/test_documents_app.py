@@ -120,6 +120,34 @@ def test_the_scripts_sentence_follows_the_runners_toolkit(tmp_path: Path, monkey
         asyncio.run(app.close())
 
 
+def test_a_working_toolkit_without_the_runner_tells_the_model_nothing(tmp_path: Path,
+                                                                    monkeypatch: pytest.MonkeyPatch) -> None:
+    # V3-P101: read_document is the machine Environment's; without the runner there is no Tool to tell of.
+    from himari.bootstrap import application as boot
+
+    class Kit:
+        fd = 99
+        manifest: dict[str, Any] = {}
+
+        def close(self) -> None:
+            self.fd = -1
+
+    class Reading:
+        versions = {"python-docx": "1"}
+        scripts = False
+
+    async def documents(*_: Any) -> tuple[Any, Any, str]:
+        return Kit(), Reading(), "on"
+
+    monkeypatch.setattr(boot, "_documents", documents)
+    app = open_app(tmp_path)
+    try:
+        assert app.documents is not None and app.machine is None
+        assert not any("read_document" in n for n in instructions(app))
+    finally:
+        asyncio.run(app.close())
+
+
 def test_any_startup_failure_closes_the_toolkit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # Re-review N1 (P8): whatever stops the documents startup, the descriptor is closed.
     from himari.bootstrap import application as boot

@@ -990,7 +990,8 @@ class Application:
                                     system=SystemSpec(companion=companion, attachments=uploads_work,
                                                       file_references=machine is not None,
                                                       proactive=companion and speaking_first.enabled,
-                                                      documents=_documents_notes(reader, toolkit, scripts == "on")),
+                                                      documents=_documents_notes(reader, toolkit, scripts == "on")
+                                                      if machine is not None else ()),  # read_document is the machine's (V3-P101)
                                     external_defaults=mcp.defaults,
                                     source_notes=[SourceNote(source, note.placement, note.text)
                                                   for source, note in mcp.notes.items()],
