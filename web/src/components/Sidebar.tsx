@@ -18,9 +18,12 @@ function Section({ title, children }: { title: string; children: React.ReactNode
 }
 
 function ConversationList() {
-  const { data, isLoading, error, hasNextPage, fetchNextPage, isFetchingNextPage } = useConversations();
+  const { data, isLoading, error, hasNextPage, fetchNextPage, isFetching, isFetchingNextPage } = useConversations();
   const activity = useActivity().data;
-  const items = data?.pages.flatMap((page) => page.items) ?? [];
+  // Offset pages can shift while new conversations arrive: one row per conversation, and the next page is read
+  // only while no other read of the list runs (so it never lands on a list that changed under it).
+  const seen = new Set<string>();
+  const items = (data?.pages.flatMap((page) => page.items) ?? []).filter((item) => !seen.has(item.id) && seen.add(item.id));
   if (isLoading) return <p className="px-3 py-1 text-sm text-faint">Loading…</p>;
   if (error) return <p className="px-3 py-1 text-sm text-danger">Could not load the conversations.</p>;
   if (!items.length) return <p className="px-3 py-1 text-sm text-faint">No conversations yet.</p>;
@@ -52,8 +55,8 @@ function ConversationList() {
     {hasNextPage && (
       <button
         type="button"
-        disabled={isFetchingNextPage}
-        onClick={() => void fetchNextPage()}
+        disabled={isFetching}
+        onClick={() => void fetchNextPage({ cancelRefetch: false })}
         className="mt-1 w-full rounded-lg px-3 py-1.5 text-left text-sm text-faint hover:bg-raised hover:text-ink"
       >
         {isFetchingNextPage ? "Loading…" : "Show more"}

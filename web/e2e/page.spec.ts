@@ -73,6 +73,8 @@ test("a task: tool steps, a question, its answer, and safe rich text", async ({ 
   await page.reload();
   await expect(page.getByRole("heading", { name: "Plan", exact: true })).toBeVisible();
   await expect(page.getByRole("navigation", { name: "Sidebar" }).getByRole("link").first()).toBeVisible();
+  await page.getByRole("button", { name: "New task" }).click(); // the sent task is not offered again
+  await expect(page.getByLabel("Message", { exact: true })).toHaveValue("");
   await done();
 });
 

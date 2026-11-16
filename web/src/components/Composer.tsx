@@ -55,7 +55,14 @@ export function Composer({
     const sent = text;
     try {
       await onSend(message);
-      setText((now) => (now === sent ? "" : now)); // what was typed while it was sending stays
+      // The page may have moved on (the home composer is gone once its conversation opens): the stored draft is
+      // cleared here, not by a render that may never come. What was typed while it was sending stays.
+      try {
+        if (window.sessionStorage.getItem(storageKey) === sent) window.sessionStorage.removeItem(storageKey);
+      } catch {
+        // storage is off: nothing was kept
+      }
+      setText((now) => (now === sent ? "" : now));
     } catch {
       // the caller shows why; the draft stays
     } finally {
